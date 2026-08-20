@@ -627,15 +627,6 @@ static std::vector<uint64_t> read_configured_player_transforms() {
     return transforms;
 }
 
-static bool local_player_dead() {
-    uint64_t local = resolve_local_player();
-    if (!local) return false;
-    uint32_t flags = rd<uint32_t>(local + PLAYER_FLAGS);
-    if (flags & PLAYER_FLAG_SPECTATING) return true;
-    if (rd<uint8_t>(local + PLAYER_RESPAWNING) != 0) return true;
-    return false;
-}
-
 bool esp_init(pid_t pid) {
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
@@ -684,11 +675,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
     }
     if (s_transforms.empty()) return result;
-
-    // While dead/spectating the game renders from a different camera, so boxes
-    // projected from the FPS camera slide off the models — hide ESP until the
-    // player is alive again.
-    if (local_player_dead()) return result;
 
     if (!g_player_position_validated) {
         if (!discover_player_position_offset(s_transforms)) return result;
@@ -840,8 +826,58 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
 
-        Vec3 body_bottom = {feet.x, feet_y, feet.z};
-        Vec3 body_top = {feet.x, feet_y + head_height, feet.z};
+        // --- velocity + position extrapolation (computed BEFORE projecting) ---
+        // Positions update on discrete network ticks; the client renders the
+        // model smoothly between them. We extrapolate the last-tick position
+        // forward with the smoothed velocity so the box sticks to the rendered
+        // model instead of lagging behind it.
+        Vec3 vel{};
+        float render_x = feet.x, render_z = feet.z;
+        {
+            struct Track { Vec3 pos; double t; Vec3 vel; };
+            static std::unordered_map<uint64_t, Track> s_track;
+            double now = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+
+            auto it = s_track.find(s_transforms[i]);
+            if (it != s_track.end()) {
+                double dt = now - it->second.t;
+                float ddx = feet.x - it->second.pos.x;
+                float ddz = feet.z - it->second.pos.z;
+                float moved = fabsf(ddx) + fabsf(ddz);
+                vel = it->second.vel; // default: hold last estimate
+
+                if (moved > 0.005f && dt > 0.03 && dt < 3.0) {
+                    float ivx = ddx / (float)dt;
+                    float ivz = ddz / (float)dt;
+                    float sp = sqrtf(ivx * ivx + ivz * ivz);
+                    if (sp < 15.f) {
+                        vel.x += (ivx - vel.x) * 0.5f;
+                        vel.z += (ivz - vel.z) * 0.5f;
+                    }
+                    it->second.pos = feet;   // reference advances only on a tick
+                    it->second.t = now;
+                } else if (dt > 0.5) {
+                    // standing still for a while: decay to zero
+                    vel.x *= 0.8f; vel.z *= 0.8f;
+                    if (fabsf(vel.x) < 0.05f && fabsf(vel.z) < 0.05f) { vel.x = 0.f; vel.z = 0.f; }
+                    it->second.pos = feet;
+                    it->second.t = now;
+                }
+                it->second.vel = vel;
+
+                float age = (float)(now - it->second.t); // time since last tick
+                if (age > 0.f && age < 0.12f) {
+                    render_x = it->second.pos.x + vel.x * age;
+                    render_z = it->second.pos.z + vel.z * age;
+                }
+            } else {
+                s_track[s_transforms[i]] = {feet, now, vel};
+            }
+        }
+
+        Vec3 body_bottom = {render_x, feet_y, render_z};
+        Vec3 body_top = {render_x, feet_y + head_height, render_z};
         if (transform_camera_mode) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
 
         Vec2 sf{}, sh2{};
@@ -863,70 +899,24 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
         constexpr float box_half_width = 0.35F, box_half_depth = 0.35F;
         const Vec3 world_corners[8] = {
-            {feet.x - box_half_width, body_bottom.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_bottom.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_bottom.y, feet.z + box_half_depth},
-            {feet.x - box_half_width, body_bottom.y, feet.z + box_half_depth},
-            {feet.x - box_half_width, body_top.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_top.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_top.y, feet.z + box_half_depth},
-            {feet.x - box_half_width, body_top.y, feet.z + box_half_depth}
+            {render_x - box_half_width, body_bottom.y, render_z - box_half_depth},
+            {render_x + box_half_width, body_bottom.y, render_z - box_half_depth},
+            {render_x + box_half_width, body_bottom.y, render_z + box_half_depth},
+            {render_x - box_half_width, body_bottom.y, render_z + box_half_depth},
+            {render_x - box_half_width, body_top.y, render_z - box_half_depth},
+            {render_x + box_half_width, body_top.y, render_z - box_half_depth},
+            {render_x + box_half_width, body_top.y, render_z + box_half_depth},
+            {render_x - box_half_width, body_top.y, render_z + box_half_depth}
         };
         EspBox box{};
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;
         box.distance = distance;
         box.source = s_transforms[i];
-
-        // Per-player WORLD velocity from a position history. Positions update in
-        // discrete network ticks: we only advance the reference time when the
-        // player actually moved (a tick), so `dt` spans tick-to-tick and the
-        // velocity is a real estimate (not zeroed every frame). Between ticks
-        // the velocity is held, so the aim lead and skeleton stay continuous.
-        {
-            struct Track { Vec3 pos; double t; Vec3 vel; };
-            static std::unordered_map<uint64_t, Track> s_track;
-            double now = std::chrono::duration<double>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-
-            Vec3 vel{};
-            auto it = s_track.find(s_transforms[i]);
-            if (it != s_track.end()) {
-                double dt = now - it->second.t;
-                float ddx = feet.x - it->second.pos.x;
-                float ddz = feet.z - it->second.pos.z;
-                float moved = fabsf(ddx) + fabsf(ddz);
-                vel = it->second.vel; // default: hold last estimate
-
-                if (moved > 0.005f && dt > 0.03 && dt < 3.0) {
-                    float ivx = ddx / (float)dt;
-                    float ivz = ddz / (float)dt;
-                    float sp = sqrtf(ivx * ivx + ivz * ivz);
-                    if (sp < 15.f) {
-                        vel.x += (ivx - vel.x) * 0.5f;
-                        vel.z += (ivz - vel.z) * 0.5f;
-                    }
-                    // advance the reference only on a real movement (tick)
-                    it->second.pos = feet;
-                    it->second.t = now;
-                } else if (dt > 0.5) {
-                    // standing still for a while: decay to zero
-                    vel.x *= 0.8f;
-                    vel.z *= 0.8f;
-                    if (fabsf(vel.x) < 0.05f && fabsf(vel.z) < 0.05f) { vel.x = 0.f; vel.z = 0.f; }
-                    it->second.pos = feet;
-                    it->second.t = now;
-                }
-                it->second.vel = vel;
-            } else {
-                s_track[s_transforms[i]] = {feet, now, vel};
-            }
-
-            box.feet  = {feet.x, feet_y, feet.z};
-            box.head  = {feet.x, feet_y + head_height, feet.z};
-            box.vel   = vel;
-            box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
-        }
+        box.feet  = {render_x, feet_y, render_z};
+        box.head  = {render_x, feet_y + head_height, render_z};
+        box.vel   = vel;
+        box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
             bool projected = transform_camera_mode
