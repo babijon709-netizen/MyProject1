@@ -15,6 +15,7 @@
 #include <random>
 #include <sys/inotify.h>
 #include <cstdint>
+#include <cstddef>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -553,8 +554,8 @@ struct AppState {
     bool  aim_touch = false, aim_pos = false, aim_special = false;
     bool  aim_ads_only = false;
     int   aim_bone = 0;
-    bool  esp_box = false, esp_name = false, esp_hp = false, esp_wall = false, esp_chams = false;
-    bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = false, esp_skeleton = false;
+    bool  esp_box = true, esp_name = false, esp_hp = false, esp_wall = true, esp_chams = false;
+    bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = true, esp_skeleton = true;
     bool  esp_master = true;
     float esp_thick = 1.5f;
     float gun_str = 0.35f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
@@ -748,6 +749,28 @@ static void CfgWatchTick() {
     if (n > 0) CfgScanDir();
 }
 
+// Config blob layout without the aim_ads_only / aim_sens / aim_fov_threshold
+// fields (the format users saved before those were added). Used to load older
+// config files without resetting every toggle.
+struct CfgBlobV5 {
+    uint32_t magic;
+    uint32_t version;
+    bool  aim_touch, aim_pos, aim_special;
+    int   aim_bone;
+    bool  aim_vis_check, aim_draw_fov;
+    float aim_fov, aim_smoothness;
+    bool  esp_box, esp_name, esp_hp, esp_wall, esp_chams;
+    bool  esp_weapon, esp_weapon_icon, esp_tracer, esp_skeleton;
+    bool  esp_master, esp_vis_check, esp_fill;
+    float esp_thick, esp_stroke, esp_rounding, esp_fill_pct;
+    float gun_str, gun_fov, gun_trigger_delay;
+    bool  ui_fps, ui_dark_mode, ui_show_sep;
+    ImVec4 esp_box_col, esp_box_col_invis, esp_name_col, esp_health_col, esp_distance_col;
+    ImVec4 esp_weapon_col, esp_weapon_icon_col, esp_tracer_col, esp_skeleton_col;
+    int   esp_box_type;
+    float esp_box_rounding;
+};
+
 struct CfgBlob {
     uint32_t magic;
     uint32_t version;
@@ -849,15 +872,36 @@ static void ConfigLoad(int idx) {
     if (!f) { ShowToast(XS("Файл не найден")); return; }
 
     CfgBlob s;
+    memset(&s, 0, sizeof(s));
 
-    uint8_t buf[sizeof(s)];
+    uint8_t buf[sizeof(CfgBlob)];
     f.read((char*)buf, sizeof(buf));
     size_t got = (size_t)f.gcount();
     f.close();
-    if (got != sizeof(buf)) { ShowToast(XS("Несовместимый конфиг")); return; }
-    XorBuf(buf, sizeof(s));
-    memcpy(&s, buf, sizeof(s));
-    if (s.magic != 0x58564345U || s.version != 6) { ShowToast(XS("Старый конфиг — пересохрани")); return; }
+    if (got < 8) { ShowToast(XS("Несовместимый конфиг")); return; }
+    XorBuf(buf, got);
+
+    uint32_t magic = 0, version = 0;
+    memcpy(&magic, buf, 4);
+    memcpy(&version, buf + 4, 4);
+    if (magic != 0x58564345U) { ShowToast(XS("Несовместимый конфиг")); return; }
+
+    if (version == 6 && got == sizeof(CfgBlob)) {
+        memcpy(&s, buf, sizeof(CfgBlob));
+    } else if (version == 5 && got == sizeof(CfgBlobV5)) {
+        // Old layout: aim_ads_only filled the padding byte after aim_special,
+        // and aim_sens/aim_fov_threshold did not exist. Map it onto the current
+        // blob so existing configs keep their ESP/aim settings.
+        size_t head = offsetof(CfgBlobV5, esp_box);
+        size_t tail = sizeof(CfgBlobV5) - head;
+        memcpy(&s, buf, head); // magic..aim_smoothness (same offsets)
+        s.aim_ads_only = false;
+        s.aim_sens = 1.0f;
+        s.aim_fov_threshold = 50.f;
+        memcpy((uint8_t*)&s + offsetof(CfgBlob, esp_box), buf + head, tail);
+    } else {
+        ShowToast(XS("Старый конфиг — пересохрани")); return;
+    }
 
     g_state.aim_touch   = s.aim_touch;   g_state.aim_pos     = s.aim_pos;
     g_state.aim_special = s.aim_special;
