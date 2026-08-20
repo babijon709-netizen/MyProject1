@@ -633,7 +633,6 @@ static bool local_player_dead() {
     uint32_t flags = rd<uint32_t>(local + PLAYER_FLAGS);
     if (flags & PLAYER_FLAG_SPECTATING) return true;
     if (rd<uint8_t>(local + PLAYER_RESPAWNING) != 0) return true;
-    if (rd_ptr(local + PLAYER_OBSERVED) != 0) return true;
     return false;
 }
 
@@ -787,7 +786,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // down"), so it ends up well below the normal eye height relative to the
     // local player's feet. While that happens the game renders from a different
     // camera and ESP projected from this one slides off the models — hide it.
-    if (!transform_camera_mode && have_world_camera && has_local_position) {
+    // Only trust this when the camera position was validated to be near the
+    // players (g_camera_matrix_physical_match), so a bad view matrix can't hide
+    // the ESP permanently.
+    if (!transform_camera_mode && g_camera_matrix_physical_match && have_world_camera && has_local_position) {
         float rel = world_camera_position.y - local.y;
         if (std::isfinite(rel) && rel < 0.55f) {
             g_matrix_configuration_validated = false;
@@ -876,38 +878,49 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.distance = distance;
         box.source = s_transforms[i];
 
-        // Per-player WORLD velocity from a position history window. Network
-        // positions update in discrete ticks, so we hold the last velocity
-        // between ticks and smooth only when a fresh estimate arrives — this is
-        // what makes both the aim lead and the skeleton animation continuous.
+        // Per-player WORLD velocity from a position history. Positions update in
+        // discrete network ticks: we only advance the reference time when the
+        // player actually moved (a tick), so `dt` spans tick-to-tick and the
+        // velocity is a real estimate (not zeroed every frame). Between ticks
+        // the velocity is held, so the aim lead and skeleton stay continuous.
         {
-            struct Track { Vec3 pos; double t; Vec3 vel; bool has; };
+            struct Track { Vec3 pos; double t; Vec3 vel; };
             static std::unordered_map<uint64_t, Track> s_track;
             double now = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
 
             Vec3 vel{};
             auto it = s_track.find(s_transforms[i]);
-            if (it != s_track.end() && it->second.has) {
+            if (it != s_track.end()) {
                 double dt = now - it->second.t;
                 float ddx = feet.x - it->second.pos.x;
                 float ddz = feet.z - it->second.pos.z;
                 float moved = fabsf(ddx) + fabsf(ddz);
-                if (dt > 0.02 && dt < 2.0 && moved > 0.002f) {
+                vel = it->second.vel; // default: hold last estimate
+
+                if (moved > 0.005f && dt > 0.03 && dt < 3.0) {
                     float ivx = ddx / (float)dt;
                     float ivz = ddz / (float)dt;
                     float sp = sqrtf(ivx * ivx + ivz * ivz);
                     if (sp < 15.f) {
-                        vel.x = it->second.vel.x + (ivx - it->second.vel.x) * 0.6f;
-                        vel.z = it->second.vel.z + (ivz - it->second.vel.z) * 0.6f;
-                    } else {
-                        vel = it->second.vel; // teleport/respawn: keep last
+                        vel.x += (ivx - vel.x) * 0.5f;
+                        vel.z += (ivz - vel.z) * 0.5f;
                     }
-                } else if (dt < 2.0) {
-                    vel = it->second.vel; // hold between ticks
+                    // advance the reference only on a real movement (tick)
+                    it->second.pos = feet;
+                    it->second.t = now;
+                } else if (dt > 0.5) {
+                    // standing still for a while: decay to zero
+                    vel.x *= 0.8f;
+                    vel.z *= 0.8f;
+                    if (fabsf(vel.x) < 0.05f && fabsf(vel.z) < 0.05f) { vel.x = 0.f; vel.z = 0.f; }
+                    it->second.pos = feet;
+                    it->second.t = now;
                 }
+                it->second.vel = vel;
+            } else {
+                s_track[s_transforms[i]] = {feet, now, vel};
             }
-            s_track[s_transforms[i]] = {feet, now, vel, true};
 
             box.feet  = {feet.x, feet_y, feet.z};
             box.head  = {feet.x, feet_y + head_height, feet.z};

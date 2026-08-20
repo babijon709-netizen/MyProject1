@@ -2999,16 +2999,24 @@ static void RunAim() {
     // Predict where the target's head will be shortly, in WORLD space, then
     // project that single point to screen with the live camera. This leads a
     // running enemy and follows a crouching one automatically (head is
-    // bounds-aware), and it cannot blow up on ADS zoom because the prediction
-    // is world-space, not screen-space.
+    // bounds-aware). If world projection is unavailable, fall back to the box's
+    // own screen position so the aim never fully stops.
     const float lead_time = 0.15f;
     Vec3 pred = { tb->head.x + tb->vel.x * lead_time,
                   tb->head.y,
                   tb->head.z + tb->vel.z * lead_time };
     float sx = 0.f, sy = 0.f;
-    if (!esp_world_to_screen(pred, (int)sw, (int)sh, sx, sy)) { AimRelease(); return; }
-    if (!std::isfinite(sx) || !std::isfinite(sy) || sx < -sw * 0.5f || sx > sw * 1.5f ||
-        sy < -sh * 0.5f || sy > sh * 1.5f) { AimRelease(); return; }
+    bool have_screen = esp_world_to_screen(pred, (int)sw, (int)sh, sx, sy);
+    if (!have_screen || !std::isfinite(sx) || !std::isfinite(sy) ||
+        sx < -sw * 0.5f || sx > sw * 1.5f || sy < -sh * 0.5f || sy > sh * 1.5f) {
+        // fallback: box's screen-space aim point
+        float bw = tb->x2 - tb->x1;
+        float bh = tb->y2 - tb->y1;
+        if (bw < 1.f || bh < 1.f) { AimRelease(); return; }
+        sx = (tb->x1 + tb->x2) * 0.5f;
+        sy = tb->y1 + bh * bone_v;
+        if (!std::isfinite(sx) || !std::isfinite(sy)) { AimRelease(); return; }
+    }
 
     // Lightly smooth the screen aim point (removes network jitter, near-zero lag).
     float ts = 1.0f - expf(-30.f * dt);
