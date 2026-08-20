@@ -657,9 +657,20 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (!std::isfinite(sw) || sw < 100.0F || sw > 10000.0F) sw = 1080.0F;
     if (!std::isfinite(sh) || sh < 100.0F || sh > 10000.0F) sh = 2400.0F;
 
+    // The player list walk (string validation etc.) is the expensive part, so
+    // refresh it at ~3 Hz. Positions and camera matrices are read fresh on
+    // every call, so boxes never lag behind the model or slide when the camera
+    // moves.
     static std::vector<uint64_t> s_transforms;
-    std::vector<uint64_t> refreshed = read_configured_player_transforms();
-    if (!refreshed.empty()) s_transforms = std::move(refreshed);
+    static std::chrono::steady_clock::time_point s_transforms_stamp{};
+    {
+        auto tnow = std::chrono::steady_clock::now();
+        int tms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(tnow - s_transforms_stamp).count();
+        if (s_transforms.empty() || tms < 0 || tms >= 300) {
+            std::vector<uint64_t> refreshed = read_configured_player_transforms();
+            if (!refreshed.empty()) { s_transforms = std::move(refreshed); s_transforms_stamp = tnow; }
+        }
+    }
     if (s_transforms.empty()) return result;
 
     if (!g_player_position_validated) {

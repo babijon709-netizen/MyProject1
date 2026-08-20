@@ -558,7 +558,7 @@ struct AppState {
     bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = true, esp_skeleton = true;
     bool  esp_master = true;
     float esp_thick = 1.5f;
-    float gun_str = 0.35f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
+    float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
     float aim_fov_threshold = 50.f;
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
 
@@ -581,15 +581,17 @@ static ImU32 ColU32(const ImVec4& c) {
 
 // esp_get_boxes() reads a lot of game memory; refresh it at ~30 Hz and reuse the
 // same result for both the ESP overlay and the aimbot (big FPS win when ESP is on).
+// Per-frame cache: ESP overlay and aimbot both need the boxes in the same frame,
+// so read the game once and reuse it. This keeps the camera + positions fresh
+// every frame (no lag/slide) without doubling the memory reads.
+static int g_frame_id = 0;
+static int g_boxes_frame = -1;
 static std::vector<EspBox> g_cached_boxes;
-static std::chrono::steady_clock::time_point g_boxes_stamp{};
 
 static const std::vector<EspBox>& GetEspBoxes(int sw, int sh) {
-    auto now = std::chrono::steady_clock::now();
-    int ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - g_boxes_stamp).count();
-    if (g_cached_boxes.empty() || ms < 0 || ms >= 33) {
+    if (g_boxes_frame != g_frame_id) {
         g_cached_boxes = esp_get_boxes(sw, sh);
-        g_boxes_stamp = now;
+        g_boxes_frame = g_frame_id;
     }
     return g_cached_boxes;
 }
@@ -1006,6 +1008,7 @@ static void ConfigLoad(int idx) {
     g_state.esp_master      = s.esp_master;
     g_state.esp_thick   = s.esp_thick;
     g_state.gun_str     = s.gun_str;
+    if (g_state.gun_str <= 1.0001f) g_state.gun_str = roundf(1.f + g_state.gun_str * 9.f); // old 0..1 -> new 1..10
     g_state.gun_fov     = s.gun_fov;
     g_state.gun_trigger_delay     = s.gun_trigger_delay;
     g_state.ui_fps      = s.ui_fps;      g_state.ui_dark_mode= s.ui_dark_mode;
@@ -2374,7 +2377,8 @@ float TabContent(int tab, float dt, float cW) {
 
         SHdr(XS("Плавность"));
         CardBg(Layout::SliderH);
-        SliderRow("##asmt", XS("Плавность"), &g_state.gun_str, 0.f, 1.f, "%.2f", true, true, g_state.sl_gun_str, dt);
+        SliderRow("##asmt", XS("Плавность"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, true, g_state.sl_gun_str, dt);
+        g_state.gun_str = roundf(g_state.gun_str);
 
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
@@ -2868,29 +2872,40 @@ static void RunAim() {
     float offx = best_tx - cx;
     float offy = best_ty - cy;
     float dist = sqrtf(offx * offx + offy * offy);
-    if (dist < 7.f) { AimRelease(); return; } // already on target
+    if (dist < 8.f) { AimRelease(); return; } // already on target
 
-    // Small per-frame step toward the target. "Плавность" 0..1, higher =
-    // smoother/slower.
-    float smooth = 0.03f + 0.13f * (1.0f - g_state.gun_str);
-    if (smooth < 0.02f) smooth = 0.02f;
-    if (smooth > 0.16f) smooth = 0.16f;
+    // Frame time, so movement is frame-rate independent (smooth at any FPS).
+    static auto s_last = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    float dt = (float)std::chrono::duration<double>(now - s_last).count();
+    s_last = now;
+    if (dt <= 0.0005f) dt = 0.0005f;
+    if (dt > 0.05f) dt = 0.05f;
 
-    float ddx = offx * smooth;
-    float ddy = offy * smooth;
+    // Плавность 1..10 (integer). Higher = smoother/slower approach.
+    int sm = (int)lroundf(g_state.gun_str);
+    if (sm < 1) sm = 1;
+    if (sm > 10) sm = 10;
+    float rate = 3.4f - 0.30f * (float)(sm - 1); // 1 -> 3.4/s, 10 -> 0.7/s
+    if (rate < 0.5f) rate = 0.5f;
 
-    // Low-pass (EMA) the injected delta so the camera eases in and out instead
-    // of jumping every frame — this is what removes the "jerk".
-    g_aim_vx += (ddx - g_aim_vx) * 0.40f;
-    g_aim_vy += (ddy - g_aim_vy) * 0.40f;
+    // Exponential approach to the target: move a fraction of the remaining
+    // offset each frame, scaled by real elapsed time.
+    float step = 1.0f - expf(-rate * dt);
+    float ddx = offx * step;
+    float ddy = offy * step;
+
+    // Heavy EMA on the injected delta: the camera eases in/out and never snaps.
+    g_aim_vx += (ddx - g_aim_vx) * 0.25f;
+    g_aim_vy += (ddy - g_aim_vy) * 0.25f;
     ddx = g_aim_vx;
     ddy = g_aim_vy;
 
-    const float max_drag = 36.f; // cap a single frame's drag
+    const float max_drag = 18.f; // hard cap per frame (very gentle)
     float dl = sqrtf(ddx * ddx + ddy * ddy);
     if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
 
-    if (fabsf(ddx) < 0.4f && fabsf(ddy) < 0.4f) { AimRelease(); return; }
+    if (fabsf(ddx) < 0.3f && fabsf(ddy) < 0.3f) { AimRelease(); return; }
 
     // The game rotates the camera by RELATIVE finger movement in the RIGHT
     // (look) half of the screen; the left half is the movement joystick. The
@@ -3361,6 +3376,7 @@ int main(int argc, char* argv[]) {
     while (main_thread_flag) {
         g_frame_done.store(false);
         drawBegin();
+        ++g_frame_id;
 
         ui::bar::set_game_alpha(0.f);
         DrawEspOverlay();
