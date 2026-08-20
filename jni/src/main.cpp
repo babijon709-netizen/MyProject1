@@ -2145,87 +2145,98 @@ float TabContent(int tab, float dt, float cW) {
         const float inset = Layout::Inset, padX = Layout::PadX;
         const float fs = ImGui::GetFontSize();
 
-        SHdr(XS("\xd0\xa0\xd0\xb0\xd0\xb7\xd1\x80\xd0\xb0\xd0\xb1\xd0\xbe\xd1\x82\xd1\x87\xd0\xb8\xd0\xba"));
+        SHdr(XS("Разработчики"));
         {
-            const float avatarR = 44.f;
-            const float cardH   = 152.f;
+            auto DrawDevCard = [&](const char* id, const char* name, const char* tag,
+                                   const char* avLetter, const char* openCmd) {
+                const float avatarR = 44.f;
+                const float cardH   = 152.f;
 
-            auto pos  = ImGui::GetCursorScreenPos();
-            float cx0 = pos.x + inset;
-            float cx1 = pos.x + avW - inset;
-            float cardW = cx1 - cx0;
+                auto pos  = ImGui::GetCursorScreenPos();
+                float cx0 = pos.x + inset;
+                float cx1 = pos.x + avW - inset;
+                float cardW = cx1 - cx0;
 
-            dl->AddRectFilled({cx0, pos.y}, {cx1, pos.y + cardH}, C::U(C::Card()), R::Card);
-            if (g_state.ui_show_sep)
-                dl->AddRect({cx0, pos.y}, {cx1, pos.y + cardH}, C::U(C::Sep()), R::Card, 0, 1.2f);
+                dl->AddRectFilled({cx0, pos.y}, {cx1, pos.y + cardH}, C::U(C::Card()), R::Card);
+                if (g_state.ui_show_sep)
+                    dl->AddRect({cx0, pos.y}, {cx1, pos.y + cardH}, C::U(C::Sep()), R::Card, 0, 1.2f);
 
-            float avCX = cx0 + padX + avatarR + 2.f;
-            float avCY = pos.y + cardH * 0.5f;
+                float avCX = cx0 + padX + avatarR + 2.f;
+                float avCY = pos.y + cardH * 0.5f;
 
-            dl->AddCircleFilled({avCX, avCY}, avatarR + 6.f, C::UA(C::Acc(), 0.12f), 64);
-            dl->AddCircleFilled({avCX, avCY}, avatarR + 2.5f, C::U(C::Card()), 64);
+                dl->AddCircleFilled({avCX, avCY}, avatarR + 6.f, C::UA(C::Acc(), 0.12f), 64);
+                dl->AddCircleFilled({avCX, avCY}, avatarR + 2.5f, C::U(C::Card()), 64);
 
-            {
-                const int segs = 60;
-                ImVec4 ac = C::Acc();
-                ImVec4 ac2 = {Lerpf(ac.x,0.3f,0.55f), Lerpf(ac.y,0.05f,0.55f), Lerpf(ac.z,0.9f,0.42f), 1.f};
-                for (int si = 0; si < segs; si++) {
-                    float a0 = (float)si/segs*IM_PI*2.f, a1 = (float)(si+1)/segs*IM_PI*2.f;
-                    float tt = (float)si/segs;
-                    ImVec4 ca = {Lerpf(ac2.x,ac.x,tt), Lerpf(ac2.y,ac.y,tt), Lerpf(ac2.z,ac.z,tt), 1.f};
-                    dl->AddTriangleFilled({avCX,avCY},
-                        {avCX+avatarR*cosf(a0),avCY+avatarR*sinf(a0)},
-                        {avCX+avatarR*cosf(a1),avCY+avatarR*sinf(a1)},
-                        IM_COL32(int(ca.x*255),int(ca.y*255),int(ca.z*255),255));
+                {
+                    const int segs = 60;
+                    ImVec4 ac = C::Acc();
+                    ImVec4 ac2 = {Lerpf(ac.x,0.3f,0.55f), Lerpf(ac.y,0.05f,0.55f), Lerpf(ac.z,0.9f,0.42f), 1.f};
+                    for (int si = 0; si < segs; si++) {
+                        float a0 = (float)si/segs*IM_PI*2.f, a1 = (float)(si+1)/segs*IM_PI*2.f;
+                        float tt = (float)si/segs;
+                        ImVec4 ca = {Lerpf(ac2.x,ac.x,tt), Lerpf(ac2.y,ac.y,tt), Lerpf(ac2.z,ac.z,tt), 1.f};
+                        dl->AddTriangleFilled({avCX,avCY},
+                            {avCX+avatarR*cosf(a0),avCY+avatarR*sinf(a0)},
+                            {avCX+avatarR*cosf(a1),avCY+avatarR*sinf(a1)},
+                            IM_COL32(int(ca.x*255),int(ca.y*255),int(ca.z*255),255));
+                    }
+                    float lfs = avatarR * 1.05f;
+                    auto lsz = fn->CalcTextSizeA(lfs, FLT_MAX, 0, avLetter);
+                    dl->AddText(fn, lfs, {avCX-lsz.x*0.5f, avCY-lsz.y*0.5f}, IM_COL32(255,255,255,245), avLetter);
                 }
-                float lfs = avatarR * 1.05f;
-                auto lsz = fn->CalcTextSizeA(lfs, FLT_MAX, 0, XS("\xd0\xa1"));
-                dl->AddText(fn, lfs, {avCX-lsz.x*0.5f, avCY-lsz.y*0.5f}, IM_COL32(255,255,255,245), XS("\xd0\xa1"));
-            }
 
-            dl->AddCircle({avCX,avCY}, avatarR+2.5f, C::UA(C::Acc(),0.9f), 64, 2.5f);
+                dl->AddCircle({avCX,avCY}, avatarR+2.5f, C::UA(C::Acc(),0.9f), 64, 2.5f);
 
-            {
-                float dx = avCX+avatarR*0.72f, dy = avCY+avatarR*0.72f;
-                dl->AddCircleFilled({dx,dy}, 9.f, C::U(C::Card()), 24);
-                dl->AddCircleFilled({dx,dy}, 6.5f, IM_COL32(52,199,89,255), 24);
-            }
-
-            float nameFS = fs * 1.75f;
-            float tagFS  = fs * 1.1f;
-            auto nameSz = fn->CalcTextSizeA(nameFS, FLT_MAX, 0, XS("\xd0\xa1\xd0\xb0\xd0\xbd\xd1\x8f"));
-            float textX = avCX + avatarR + padX + 8.f;
-            float nameY = avCY - nameSz.y - 3.f;
-            float tagY  = avCY + 3.f;
-            dl->AddText(fn, nameFS, {textX, nameY}, C::U(C::Txt()), XS("\xd0\xa1\xd0\xb0\xd0\xbd\xd1\x8f"));
-            dl->AddText(fn, tagFS,  {textX, tagY},  C::U(C::Dim()), XS("@xvcey"));
-
-            const float btnH = 42.f;
-            const float btnW = 132.f;
-            float btnX = cx1 - btnW - padX;
-            float btnY = pos.y + cardH - btnH - 14.f;
-
-            dl->AddRectFilled({btnX,btnY},{btnX+btnW,btnY+btnH}, C::U(C::Acc()), btnH*0.5f);
-
-            auto btsz = fn->CalcTextSizeA(fs*1.05f, FLT_MAX, 0, XS("\xd0\x9d\xd0\xb0\xd0\xbf\xd0\xb8\xd1\x81\xd0\xb0\xd1\x82\xd1\x8c"));
-            dl->AddText(fn, fs*1.05f,
-                {btnX+btnW*0.5f-btsz.x*0.5f, btnY+(btnH-btsz.y)*0.5f},
-                IM_COL32(255,255,255,255),
-                XS("\xd0\x9d\xd0\xb0\xd0\xbf\xd0\xb8\xd1\x81\xd0\xb0\xd1\x82\xd1\x8c"));
-
-            ImGui::SetCursorScreenPos({cx0, pos.y});
-            ImGui::InvisibleButton("##devcard", {cardW, cardH});
-            bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-            if (!popBlk && !IsScrollDragging() && !g_input.touchConsumed && ImGui::GetIO().MouseReleased[0]) {
-                auto mp = ImGui::GetIO().MousePos, cp = ImGui::GetIO().MouseClickedPos[0];
-                if (mp.x>=btnX&&mp.x<=btnX+btnW&&mp.y>=btnY&&mp.y<=btnY+btnH
-                 &&cp.x>=btnX&&cp.x<=btnX+btnW&&cp.y>=btnY&&cp.y<=btnY+btnH) {
-                    system(XS("am start -a android.intent.action.VIEW -d \"https://t.me/xvcey\""));
-                    PlaySound(SND_CLICK);
+                {
+                    float dx = avCX+avatarR*0.72f, dy = avCY+avatarR*0.72f;
+                    dl->AddCircleFilled({dx,dy}, 9.f, C::U(C::Card()), 24);
+                    dl->AddCircleFilled({dx,dy}, 6.5f, IM_COL32(52,199,89,255), 24);
                 }
-            }
-            ImGui::SetCursorScreenPos({pos.x, pos.y + cardH});
-            ImGui::Dummy({avW, 0.f});
+
+                float nameFS = fs * 1.75f;
+                float tagFS  = fs * 1.1f;
+                auto nameSz = fn->CalcTextSizeA(nameFS, FLT_MAX, 0, name);
+                float textX = avCX + avatarR + padX + 8.f;
+                float nameY = avCY - nameSz.y - 3.f;
+                float tagY  = avCY + 3.f;
+                dl->AddText(fn, nameFS, {textX, nameY}, C::U(C::Txt()), name);
+                dl->AddText(fn, tagFS,  {textX, tagY},  C::U(C::Dim()), tag);
+
+                const float btnH = 42.f;
+                const float btnW = 132.f;
+                float btnX = cx1 - btnW - padX;
+                float btnY = pos.y + cardH - btnH - 14.f;
+
+                dl->AddRectFilled({btnX,btnY},{btnX+btnW,btnY+btnH}, C::U(C::Acc()), btnH*0.5f);
+
+                auto btsz = fn->CalcTextSizeA(fs*1.05f, FLT_MAX, 0, XS("Написать"));
+                dl->AddText(fn, fs*1.05f,
+                    {btnX+btnW*0.5f-btsz.x*0.5f, btnY+(btnH-btsz.y)*0.5f},
+                    IM_COL32(255,255,255,255),
+                    XS("Написать"));
+
+                ImGui::SetCursorScreenPos({cx0, pos.y});
+                ImGui::InvisibleButton(id, {cardW, cardH});
+                bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+                if (!popBlk && !IsScrollDragging() && !g_input.touchConsumed && ImGui::GetIO().MouseReleased[0]) {
+                    auto mp = ImGui::GetIO().MousePos, cp = ImGui::GetIO().MouseClickedPos[0];
+                    if (mp.x>=btnX&&mp.x<=btnX+btnW&&mp.y>=btnY&&mp.y<=btnY+btnH
+                     &&cp.x>=btnX&&cp.x<=btnX+btnW&&cp.y>=btnY&&cp.y<=btnY+btnH) {
+                        system(openCmd);
+                        PlaySound(SND_CLICK);
+                    }
+                }
+                ImGui::SetCursorScreenPos({pos.x, pos.y + cardH});
+                ImGui::Dummy({avW, 0.f});
+            };
+
+            DrawDevCard("##devcard", XS("xvcey"), XS("@xvcey"), XS("X"),
+                        XS("am start -a android.intent.action.VIEW -d \"https://t.me/xvcey\""));
+
+            ImGui::Dummy({1.f, 10.f});
+
+            DrawDevCard("##devcard2", XS("JohnnyCutter"), XS("@recoveryev"), XS("J"),
+                        XS("am start -a android.intent.action.VIEW -d \"https://t.me/recoveryev\""));
         }
 
     } else if (tab == 1) {
