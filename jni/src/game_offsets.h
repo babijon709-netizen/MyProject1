@@ -23,7 +23,6 @@ inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20;
 
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68;
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0;
-inline constexpr std::uint64_t PLAYER_ANIMATOR  = 0x198; // PlayerManager.animator (managed Animator)
 
 // Death / spectate detection (local PlayerManager).
 inline constexpr std::uint64_t PLAYER_FLAGS          = 0x258; // PlayerManager.PlayerFlags
