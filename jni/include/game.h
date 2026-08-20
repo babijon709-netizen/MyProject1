@@ -12,3 +12,4 @@ struct EspBox {
 bool        esp_init(pid_t pid);
 void        esp_reset();
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
+float       esp_get_camera_fov(); // vertical FOV in degrees, -1 if unknown

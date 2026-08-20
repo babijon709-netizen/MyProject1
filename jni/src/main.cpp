@@ -551,6 +551,7 @@ struct AppState {
 
     int   cur_tab = 0;
     bool  aim_touch = false, aim_pos = false, aim_special = false;
+    bool  aim_ads_only = false;
     int   aim_bone = 0;
     bool  esp_box = false, esp_name = false, esp_hp = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = false, esp_skeleton = false;
@@ -558,10 +559,11 @@ struct AppState {
     float esp_thick = 1.5f;
     float gun_str = 0.35f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
     float aim_sens = 1.0f;
+    float aim_fov_threshold = 50.f;
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
-    float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0;
+    float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_ads = 0;
     float a_aim_head  = 1, a_aim_chest = 0, a_aim_pelvis = 0;
     RadioAnim ra_aim_head, ra_aim_chest, ra_aim_pelvis;
     float a_esp_box = 0, a_esp_name = 0, a_esp_hp = 0, a_esp_wall = 0, a_esp_chams = 0;
@@ -569,7 +571,7 @@ struct AppState {
     float a_esp_master = 1;
     float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_aim_sens;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_aim_sens, sl_aim_fov;
 };
 static AppState g_state;
 
@@ -750,9 +752,10 @@ struct CfgBlob {
     uint32_t magic;
     uint32_t version;
     bool  aim_touch, aim_pos, aim_special;
+    bool  aim_ads_only;
     int   aim_bone;
     bool  aim_vis_check, aim_draw_fov;
-    float aim_fov, aim_smoothness;
+    float aim_fov, aim_smoothness, aim_sens, aim_fov_threshold;
     bool  esp_box, esp_name, esp_hp, esp_wall, esp_chams;
     bool  esp_weapon, esp_weapon_icon, esp_tracer, esp_skeleton;
     bool  esp_master, esp_vis_check, esp_fill;
@@ -768,14 +771,17 @@ struct CfgBlob {
 static void ConfigSaveToPath(const std::string& path) {
     CfgBlob s;
     s.magic   = 0x58564345U;
-    s.version = 5;
+    s.version = 6;
     s.aim_touch   = g_state.aim_touch;   s.aim_pos     = g_state.aim_pos;
     s.aim_special = g_state.aim_special;
+    s.aim_ads_only = g_state.aim_ads_only;
     s.aim_bone    = g_state.aim_bone;
     s.aim_vis_check  = cfg::aim::vis_check;
     s.aim_draw_fov   = cfg::aim::draw_fov;
     s.aim_fov        = cfg::aim::fov;
     s.aim_smoothness = cfg::aim::smoothness;
+    s.aim_sens       = g_state.aim_sens;
+    s.aim_fov_threshold = g_state.aim_fov_threshold;
     s.esp_box     = g_state.esp_box;     s.esp_name    = g_state.esp_name;
     s.esp_hp      = g_state.esp_hp;      s.esp_wall    = g_state.esp_wall;
     s.esp_chams   = g_state.esp_chams;
@@ -851,15 +857,18 @@ static void ConfigLoad(int idx) {
     if (got != sizeof(buf)) { ShowToast(XS("Несовместимый конфиг")); return; }
     XorBuf(buf, sizeof(s));
     memcpy(&s, buf, sizeof(s));
-    if (s.magic != 0x58564345U || s.version != 5) { ShowToast(XS("Старый конфиг — пересохрани")); return; }
+    if (s.magic != 0x58564345U || s.version != 6) { ShowToast(XS("Старый конфиг — пересохрани")); return; }
 
     g_state.aim_touch   = s.aim_touch;   g_state.aim_pos     = s.aim_pos;
     g_state.aim_special = s.aim_special;
+    g_state.aim_ads_only = s.aim_ads_only;
     g_state.aim_bone    = s.aim_bone;
     cfg::aim::vis_check  = s.aim_vis_check;
     cfg::aim::draw_fov   = s.aim_draw_fov;
     cfg::aim::fov        = s.aim_fov;
     cfg::aim::smoothness = s.aim_smoothness;
+    g_state.aim_sens     = s.aim_sens;
+    g_state.aim_fov_threshold = s.aim_fov_threshold;
     g_state.esp_box     = s.esp_box;     g_state.esp_name    = s.esp_name;
     g_state.esp_hp      = s.esp_hp;      g_state.esp_wall    = s.esp_wall;
     g_state.esp_chams   = s.esp_chams;
@@ -2267,10 +2276,11 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
 
         SHdr(XS("Аимбот"));
-        CardBg(Layout::RowH * 3);
+        CardBg(Layout::RowH * 4);
         ToggleRow("##ta1", XS("Включить аимбот"),    &g_state.aim_touch,   g_state.a_aim_touch, false, true);
         ToggleRow("##ta2", XS("Проверка видимости"),  &g_state.aim_pos,     g_state.a_aim_pos,   false);
-        ToggleRow("##ta3", XS("Показывать FOV круг"), &g_state.aim_special, g_state.a_aim_spec,  true);
+        ToggleRow("##ta3", XS("Показывать FOV круг"), &g_state.aim_special, g_state.a_aim_spec,  false);
+        ToggleRow("##ta6", XS("Только при прицеливании"), &g_state.aim_ads_only, g_state.a_aim_ads, true);
 
         SHdr(XS("FOV аимбота"));
         CardBg(Layout::SliderH);
@@ -2283,6 +2293,10 @@ float TabContent(int tab, float dt, float cW) {
         SHdr(XS("Чувствительность"));
         CardBg(Layout::SliderH);
         SliderRow("##asens", XS("Чувствительность аима"), &g_state.aim_sens, 0.05f, 5.f, "%.2f", true, true, g_state.sl_aim_sens, dt);
+
+        SHdr(XS("Прицеливание"));
+        CardBg(Layout::SliderH);
+        SliderRow("##adsfov", XS("Порог FOV (прицел)"), &g_state.aim_fov_threshold, 20.f, 90.f, XS("%.0f°"), true, true, g_state.sl_aim_fov, dt);
 
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
@@ -2683,12 +2697,15 @@ static void CenterMenuOnDisplay() {
 // ===========================================================================
 static bool  g_aim_active = false;
 static float g_aim_cx = 0.f, g_aim_cy = 0.f;
+static float g_aim_vx = 0.f, g_aim_vy = 0.f;
 
 static void AimRelease() {
     if (g_aim_active) {
         Touch_AimUp();
         g_aim_active = false;
     }
+    g_aim_vx = 0.f;
+    g_aim_vy = 0.f;
 }
 
 static void RunAim() {
@@ -2730,6 +2747,14 @@ static void RunAim() {
     bool aim_on = g_esp_attached && !menu_open && g_state.aim_touch;
     if (!aim_on) { AimRelease(); return; }
 
+    // "Только при прицеливании": require an ADS-scoped camera. Aiming down
+    // sights narrows the FOV, so we compare the current camera FOV against a
+    // threshold. FOV < 0 means it is not known yet — stay idle.
+    if (g_state.aim_ads_only) {
+        float fov = esp_get_camera_fov();
+        if (fov < 0.f || fov > g_state.aim_fov_threshold) { AimRelease(); return; }
+    }
+
     std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
     if (boxes.empty()) { AimRelease(); return; }
 
@@ -2751,12 +2776,11 @@ static void RunAim() {
         float tx = (box.x1 + box.x2) * 0.5f;
         float ty = box.y1 + bh * bone_v;
 
-        // Visibility check: when enabled, only aim at players fully on screen.
+        // Visibility check: when enabled, only aim at enemies that are fully in
+        // front of the camera and inside the view (frustum visibility) — the
+        // whole box must be on screen, not clipped by the edges or behind cam.
         if (g_state.aim_pos) {
-            bool fully_visible = true;
-            for (int c = 0; c < 8; ++c)
-                if (!box.corner_visible[c]) { fully_visible = false; break; }
-            if (!fully_visible) continue;
+            if (box.x1 < 0.f || box.x2 > sw || box.y1 < 0.f || box.y2 > sh) continue;
         }
 
         if (tx < 0.f || tx > sw || ty < 0.f || ty > sh) continue;
@@ -2777,13 +2801,13 @@ static void RunAim() {
     float offx = best_tx - cx;
     float offy = best_ty - cy;
     float dist = sqrtf(offx * offx + offy * offy);
-    if (dist < 4.f) { AimRelease(); return; } // already on target
+    if (dist < 7.f) { AimRelease(); return; } // already on target
 
-    // Per-frame fraction of the remaining offset. "Плавность" 0..1, higher =
+    // Small per-frame step toward the target. "Плавность" 0..1, higher =
     // smoother/slower.
-    float smooth = 0.04f + 0.36f * (1.0f - g_state.gun_str);
+    float smooth = 0.03f + 0.13f * (1.0f - g_state.gun_str);
     if (smooth < 0.02f) smooth = 0.02f;
-    if (smooth > 0.40f) smooth = 0.40f;
+    if (smooth > 0.16f) smooth = 0.16f;
 
     float sens = g_state.aim_sens;
     if (sens < 0.05f) sens = 0.05f;
@@ -2791,11 +2815,18 @@ static void RunAim() {
     float ddx = offx * smooth * sens;
     float ddy = offy * smooth * sens;
 
-    const float max_drag = 90.f; // cap a single frame's drag
+    // Low-pass (EMA) the injected delta so the camera eases in and out instead
+    // of jumping every frame — this is what removes the "jerk".
+    g_aim_vx += (ddx - g_aim_vx) * 0.40f;
+    g_aim_vy += (ddy - g_aim_vy) * 0.40f;
+    ddx = g_aim_vx;
+    ddy = g_aim_vy;
+
+    const float max_drag = 36.f; // cap a single frame's drag
     float dl = sqrtf(ddx * ddx + ddy * ddy);
     if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
 
-    if (fabsf(ddx) < 0.5f && fabsf(ddy) < 0.5f) { AimRelease(); return; }
+    if (fabsf(ddx) < 0.4f && fabsf(ddy) < 0.4f) { AimRelease(); return; }
 
     // The game rotates the camera by RELATIVE finger movement in the RIGHT
     // (look) half of the screen; the left half is the movement joystick. The
@@ -2852,6 +2883,7 @@ void RenderMenu() {
     Tick(g_state.a_aim_chest,  g_state.aim_bone == 1,      dt);
     Tick(g_state.a_aim_pelvis, g_state.aim_bone == 2,      dt);
     Tick(g_state.a_aim_spec,   g_state.aim_special,        dt);
+    Tick(g_state.a_aim_ads,    g_state.aim_ads_only,       dt);
     Tick(g_state.a_esp_box,    g_state.esp_box,            dt);
     Tick(g_state.a_esp_name,   g_state.esp_name,           dt);
     Tick(g_state.a_esp_hp,     g_state.esp_hp,             dt);

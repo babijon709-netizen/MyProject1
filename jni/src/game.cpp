@@ -28,6 +28,7 @@ static uint64_t  g_local_player = 0;
 static bool      g_matrix_configuration_validated = false;
 static bool      g_camera_matrix_physical_match = false;
 static uint64_t  g_player_position_offset = PLAYER_POSITION;
+static float     g_last_camera_fov_deg = -1.f;
 
 struct TransformHierarchyLayout {
     uint64_t data_offset = 0x38;
@@ -634,6 +635,7 @@ void esp_reset() {
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
+    g_last_camera_fov_deg = -1.f;
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
@@ -684,6 +686,18 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
         }
         vp = mat_mul(projection, view);
+
+        // Vertical field-of-view from the projection matrix: m[1][1] = cot(fov/2).
+        // Aiming down sights narrows the FOV, so this is used to detect ADS.
+        {
+            float cot_half = mat_get(projection, 1, 1);
+            if (std::isfinite(cot_half) && cot_half > 1e-6f) {
+                g_last_camera_fov_deg = 2.0f * atanf(1.0f / cot_half) * (180.0f / 3.14159265358979f);
+                if (g_last_camera_fov_deg > 179.f) g_last_camera_fov_deg = 60.f;
+            } else {
+                g_last_camera_fov_deg = -1.f;
+            }
+        }
     }
 
     bool has_local_position = false;
@@ -789,4 +803,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     return result;
+}
+
+float esp_get_camera_fov() {
+    return g_last_camera_fov_deg;
 }
