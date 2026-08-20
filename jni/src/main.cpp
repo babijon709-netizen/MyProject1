@@ -600,6 +600,111 @@ static const std::vector<EspBox>& GetEspBoxes(int sw, int sh) {
     return g_cached_boxes;
 }
 
+// Procedural humanoid skeleton drawn over a player box. Uses a 2-bone IK walk
+// cycle so the limbs actually bend and swing with the player's real speed, and
+// the torso bobs/leans. Crouch is handled by the box height (bounds-aware).
+static void DrawSkeleton(ImDrawList* dl, const EspBox& box, ImU32 col, float thick, float t) {
+    float bw = box.x2 - box.x1;
+    float bh = box.y2 - box.y1;
+    if (bw < 1.f || bh < 1.f) return;
+
+    float cx = (box.x1 + box.x2) * 0.5f;
+    float top = box.y1;
+    auto P = [&](float u, float v) { return ImVec2(cx + (u - 0.5f) * bw, top + v * bh); };
+
+    float speed = box.speed; if (speed < 0.f) speed = 0.f;
+    float off = (float)(box.source & 0xFF) * 0.37f;
+    float amp = speed > 6.f ? 1.f : speed / 6.f;
+    bool moving = speed > 0.5f;
+    float ph = t * (2.6f + speed * 0.85f) + off;
+
+    // core anchors (u = 0..1 across, v = 0..1 down the box)
+    ImVec2 head  = P(0.5f, 0.07f);
+    ImVec2 neck  = P(0.5f, 0.15f);
+    ImVec2 shL   = P(0.41f, 0.19f);
+    ImVec2 shR   = P(0.59f, 0.19f);
+    ImVec2 chest = P(0.5f, 0.26f);
+    ImVec2 hips  = P(0.5f, 0.45f);
+    ImVec2 hipL  = P(0.47f, 0.45f);
+    ImVec2 hipR  = P(0.53f, 0.45f);
+
+    // whole-body bob + slight forward lean while running
+    float bob  = -fabsf(cosf(ph)) * amp * bh * 0.018f;
+    float lean = moving ? amp * bw * 0.06f : 0.f;
+    ImVec2 sh = ImVec2(lean, bob);
+    head.x += sh.x; head.y += sh.y;
+    neck.x += sh.x; neck.y += sh.y;
+    chest.x += sh.x; chest.y += sh.y;
+    hips.x += sh.x; hips.y += sh.y;
+    shL.x += sh.x; shL.y += sh.y;
+    shR.x += sh.x; shR.y += sh.y;
+    hipL.x += sh.x; hipL.y += sh.y;
+    hipR.x += sh.x; hipR.y += sh.y;
+
+    // 2-bone IK: given root A and effector F with segment lengths l1,l2,
+    // return the joint position (bend sign controls which side it bends).
+    auto IK = [&](ImVec2 A, ImVec2 F, float l1, float l2, float bend) -> ImVec2 {
+        float dx = F.x - A.x, dy = F.y - A.y;
+        float d = sqrtf(dx * dx + dy * dy);
+        if (d < 0.001f) d = 0.001f;
+        float maxd = l1 + l2 - 0.01f; if (d > maxd) d = maxd;
+        float mind = fabsf(l1 - l2) + 0.01f; if (d < mind) d = mind;
+        float a = (l1 * l1 - l2 * l2 + d * d) / (2.f * d);
+        float h2 = l1 * l1 - a * a;
+        float h = h2 > 0.f ? sqrtf(h2) : 0.f;
+        float ux = dx / d, uy = dy / d;
+        float mx = A.x + ux * a, my = A.y + uy * a;
+        return ImVec2(mx - uy * h * bend, my + ux * h * bend);
+    };
+
+    float legL = bh * 0.26f;
+    float armL = bh * 0.16f;
+
+    ImVec2 footL, footR, handL, handR;
+    if (moving) {
+        float sw = sinf(ph);
+        float stride = amp * bw * 0.20f;
+        float lift   = amp * bh * 0.07f;
+        footL = ImVec2(hipL.x + sw * stride, box.y2 - ImMax(0.f, -cosf(ph)) * lift);
+        footR = ImVec2(hipR.x - sw * stride, box.y2 - ImMax(0.f,  cosf(ph)) * lift);
+        float aamp = amp * bw * 0.16f;
+        handL = ImVec2(shL.x - sw * aamp, shL.y + bh * 0.19f);
+        handR = ImVec2(shR.x + sw * aamp, shR.y + bh * 0.19f);
+    } else {
+        float breathe = sinf(t * 1.5f + off) * bh * 0.008f;
+        footL = ImVec2(hipL.x - bw * 0.03f, box.y2);
+        footR = ImVec2(hipR.x + bw * 0.03f, box.y2);
+        handL = ImVec2(shL.x - bw * 0.03f, shL.y + bh * 0.19f + breathe);
+        handR = ImVec2(shR.x + bw * 0.03f, shR.y + bh * 0.19f + breathe);
+    }
+
+    ImVec2 kneeL = IK(hipL, footL, legL, legL, 1.0f);
+    ImVec2 kneeR = IK(hipR, footR, legL, legL, 1.0f);
+    ImVec2 elbL  = IK(shL, handL, armL, armL, -1.0f);
+    ImVec2 elbR  = IK(shR, handR, armL, armL, -1.0f);
+
+    // legs
+    dl->AddLine(hipL, kneeL, col, thick);
+    dl->AddLine(kneeL, footL, col, thick);
+    dl->AddLine(hipR, kneeR, col, thick);
+    dl->AddLine(kneeR, footR, col, thick);
+    // arms
+    dl->AddLine(shL, elbL, col, thick);
+    dl->AddLine(elbL, handL, col, thick);
+    dl->AddLine(shR, elbR, col, thick);
+    dl->AddLine(elbR, handR, col, thick);
+    // torso
+    dl->AddLine(head, neck, col, thick);
+    dl->AddLine(neck, chest, col, thick);
+    dl->AddLine(chest, hips, col, thick);
+    dl->AddLine(neck, shL, col, thick);
+    dl->AddLine(neck, shR, col, thick);
+    dl->AddLine(hips, hipL, col, thick);
+    dl->AddLine(hips, hipR, col, thick);
+    // head
+    dl->AddCircleFilled(head, bh * 0.05f, col, 16);
+}
+
 static void DrawEspOverlay() {
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;
@@ -676,91 +781,9 @@ static void DrawEspOverlay() {
         }
 
         if (g_state.esp_skeleton) {
-            float bw = box.x2 - box.x1;
-            float bh = box.y2 - box.y1;
-            if (bw > 1.0f && bh > 1.0f) {
-                ImVec2 pts[skeleton::BONE_COUNT];
-                for (int b = 0; b < skeleton::BONE_COUNT; ++b) {
-                    const skeleton::Joint& j = skeleton::k_joints[b];
-                    pts[b] = ImVec2(box.x1 + j.u * bw, box.y1 + j.v * bh);
-                }
-
-                // Dynamic motion. Speed comes from the movement of the same
-                // position source that draws the box (reliable per-player).
-                // Walk/run cycle: legs swing with knee lift, arms counter-swing,
-                // torso/head bob. Standing still = subtle breathing sway.
-                float speed = box.speed;
-                if (speed < 0.f) speed = 0.f;
-                float t = (float)std::chrono::duration<double>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
-                float offset = (float)(box.source & 0xFF) * 0.37f;
-
-                auto shift = [&](int bone, float dx, float dy) {
-                    pts[bone].x += dx;
-                    pts[bone].y += dy; // screen y: negative = up
-                };
-
-                if (speed > 0.6f) {
-                    float amp = speed > 6.f ? 1.f : speed / 6.f;
-                    float freq = 4.0f + speed * 1.1f; // steps per second
-                    float ph = t * freq + offset;
-                    float pl = sinf(ph);           // left leg forward when >0
-                    float pr = sinf(ph + 3.14159265f);
-
-                    // Legs: horizontal swing + knee lift on the forward step.
-                    float lx = pl * amp * bw * 0.12f;
-                    float rx = pr * amp * bw * 0.12f;
-                    float lly = ImMax(0.f, pl) * amp * bh * 0.06f;
-                    float rly = ImMax(0.f, pr) * amp * bh * 0.06f;
-
-                    // Arms counter-swing, with a small bend upward.
-                    float axL = pr * amp * bw * 0.10f;
-                    float axR = pl * amp * bw * 0.10f;
-                    float ay = ImMax(0.f, -pl) * amp * bh * 0.02f;
-
-                    // Whole-body bob (twice per stride).
-                    float bob = -fabsf(cosf(ph)) * amp * bh * 0.025f;
-
-                    shift(skeleton::BONE_LEFT_UPPER_LEG,  lx * 0.55f, 0.f);
-                    shift(skeleton::BONE_LEFT_LOWER_LEG,  lx * 1.15f, -lly * 0.5f);
-                    shift(skeleton::BONE_LEFT_FOOT,       lx * 1.55f, -lly);
-                    shift(skeleton::BONE_RIGHT_UPPER_LEG, rx * 0.55f, 0.f);
-                    shift(skeleton::BONE_RIGHT_LOWER_LEG, rx * 1.15f, -rly * 0.5f);
-                    shift(skeleton::BONE_RIGHT_FOOT,      rx * 1.55f, -rly);
-
-                    shift(skeleton::BONE_LEFT_UPPER_ARM,  axL * 0.55f, ay);
-                    shift(skeleton::BONE_LEFT_LOWER_ARM,  axL * 1.2f,  ay);
-                    shift(skeleton::BONE_LEFT_HAND,       axL * 1.6f,  ay);
-                    shift(skeleton::BONE_RIGHT_UPPER_ARM, axR * 0.55f, ay);
-                    shift(skeleton::BONE_RIGHT_LOWER_ARM, axR * 1.2f,  ay);
-                    shift(skeleton::BONE_RIGHT_HAND,      axR * 1.6f,  ay);
-
-                    shift(skeleton::BONE_HIPS,        0.f, bob);
-                    shift(skeleton::BONE_SPINE,       0.f, bob);
-                    shift(skeleton::BONE_CHEST,       0.f, bob);
-                    shift(skeleton::BONE_UPPER_CHEST, 0.f, bob);
-                    shift(skeleton::BONE_NECK,        0.f, bob);
-                    shift(skeleton::BONE_HEAD,        0.f, bob);
-                } else {
-                    // Idle: slow breathing sway so it never looks frozen.
-                    float breathe = sinf(t * 1.6f + offset) * bh * 0.010f;
-                    float sway = sinf(t * 1.1f + offset) * bw * 0.012f;
-                    shift(skeleton::BONE_HEAD, sway, -breathe);
-                    shift(skeleton::BONE_NECK, sway * 0.7f, -breathe * 0.7f);
-                    shift(skeleton::BONE_UPPER_CHEST, sway * 0.4f, -breathe * 0.4f);
-                    shift(skeleton::BONE_LEFT_UPPER_ARM,  sway, 0.f);
-                    shift(skeleton::BONE_LEFT_LOWER_ARM,  sway * 1.2f, 0.f);
-                    shift(skeleton::BONE_RIGHT_UPPER_ARM, -sway, 0.f);
-                    shift(skeleton::BONE_RIGHT_LOWER_ARM, -sway * 1.2f, 0.f);
-                }
-
-                ImU32 col = ColU32(cfg::esp::skeleton_col);
-                for (int e = 0; e < skeleton::k_edge_count; ++e) {
-                    const skeleton::Edge& edge = skeleton::k_edges[e];
-                    dl->AddLine(pts[edge.a], pts[edge.b], col, thick);
-                }
-                dl->AddCircleFilled(pts[skeleton::BONE_HEAD], thick * 1.5f, col, 16);
-            }
+            float t = (float)std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            DrawSkeleton(dl, box, ColU32(cfg::esp::skeleton_col), thick, t);
         }
     }
 }
@@ -2851,7 +2874,6 @@ static void CenterMenuOnDisplay() {
 static bool  g_aim_active = false;
 static float g_aim_cx = 0.f, g_aim_cy = 0.f;
 static float g_aim_tx = 0.f, g_aim_ty = 0.f; // smoothed aim point
-static float g_aim_pvx = 0.f, g_aim_pvy = 0.f; // previous injected velocity (slew)
 static uint64_t g_aim_target = 0;            // locked enemy source (hysteresis)
 
 static void AimRelease() {
@@ -2860,7 +2882,6 @@ static void AimRelease() {
         g_aim_active = false;
     }
     g_aim_target = 0;
-    g_aim_pvx = 0.f; g_aim_pvy = 0.f;
 }
 
 static void RunAim() {
@@ -2953,23 +2974,12 @@ static void RunAim() {
         g_aim_target = best_src;
     }
 
-    // Locked target's aim point and screen velocity.
-    float target_tx = 0.f, target_ty = 0.f, target_vx = 0.f, target_vy = 0.f;
-    bool have_point = false;
+    // Locked target's world-space data (feet, head, velocity).
+    const EspBox* tb = nullptr;
     for (const EspBox& box : boxes) {
-        if (box.source != g_aim_target) continue;
-        if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
-        float bw = box.x2 - box.x1;
-        float bh = box.y2 - box.y1;
-        if (bw < 1.f || bh < 1.f) continue;
-        target_tx = (box.x1 + box.x2) * 0.5f;
-        target_ty = box.y1 + bh * bone_v;
-        target_vx = box.aim_vx;
-        target_vy = box.aim_vy;
-        have_point = true;
-        break;
+        if (box.source == g_aim_target) { tb = &box; break; }
     }
-    if (!have_point) { g_aim_target = 0; AimRelease(); return; }
+    if (!tb) { g_aim_target = 0; AimRelease(); return; }
 
     // --- movement (frame-time normalized) ------------------------------------
     static auto s_last = std::chrono::steady_clock::now();
@@ -2983,62 +2993,50 @@ static void RunAim() {
     int sm = (int)lroundf(g_state.gun_str);
     if (sm < 1) sm = 1;
     if (sm > 10) sm = 10;
-    float rate = 10.f - 0.9f * (float)(sm - 1); // sm1=10/s ... sm10=1.9/s
-    if (rate < 1.9f) rate = 1.9f;
+    float rate = 12.f - 1.2f * (float)(sm - 1); // sm1=12/s ... sm10=1.2/s
+    if (rate < 1.2f) rate = 1.2f;
 
-    // Lead the running enemy (projectile/network-tick compensation) using the
-    // box's own screen velocity computed from its world velocity.
-    const float lead_time = 0.18f;
-    float px = target_tx + target_vx * lead_time;
-    float py = target_ty + target_vy * lead_time;
+    // Predict where the target's head will be shortly, in WORLD space, then
+    // project that single point to screen with the live camera. This leads a
+    // running enemy and follows a crouching one automatically (head is
+    // bounds-aware), and it cannot blow up on ADS zoom because the prediction
+    // is world-space, not screen-space.
+    const float lead_time = 0.15f;
+    Vec3 pred = { tb->head.x + tb->vel.x * lead_time,
+                  tb->head.y,
+                  tb->head.z + tb->vel.z * lead_time };
+    float sx = 0.f, sy = 0.f;
+    if (!esp_world_to_screen(pred, (int)sw, (int)sh, sx, sy)) { AimRelease(); return; }
+    if (!std::isfinite(sx) || !std::isfinite(sy) || sx < -sw * 0.5f || sx > sw * 1.5f ||
+        sy < -sh * 0.5f || sy > sh * 1.5f) { AimRelease(); return; }
 
-    // Lightly smooth the aim point (removes per-tick jitter, near-zero lag).
-    float ts = 1.0f - expf(-35.f * dt);
-    g_aim_tx += (px - g_aim_tx) * ts;
-    g_aim_ty += (py - g_aim_ty) * ts;
+    // Lightly smooth the screen aim point (removes network jitter, near-zero lag).
+    float ts = 1.0f - expf(-30.f * dt);
+    g_aim_tx += (sx - g_aim_tx) * ts;
+    g_aim_ty += (sy - g_aim_ty) * ts;
 
     float ex = g_aim_tx - cx; // remaining screen error
     float ey = g_aim_ty - cy;
 
-    // Clamp the error feeding the proportional term. Without this, a large
-    // error (e.g. when ADS zooms and the target jumps far on screen) produces a
-    // huge velocity that overshoots and oscillates — the "spinning" bug.
-    const float emax = 240.f;
-    float cex = ex < -emax ? -emax : (ex > emax ? emax : ex);
-    float cey = ey < -emax ? -emax : (ey > emax ? emax : ey);
+    // Clamp the error feeding the controller: a huge error (e.g. ADS zoom made
+    // the target jump far on screen) must not produce a huge velocity.
+    const float emax = 220.f;
+    float cex = fmaxf(-emax, fminf(emax, ex));
+    float cey = fmaxf(-emax, fminf(emax, ey));
 
-    // Feed-forward (track the runner) + proportional (close the gap).
-    float dvx = target_vx + cex * rate;
-    float dvy = target_vy + cey * rate;
-
-    // Slew-limit the velocity change: prevents abrupt velocity jumps when ADS
-    // changes the FOV/sensitivity (the cause of the camera "spinning").
-    {
-        float ndvx = dvx - g_aim_pvx, ndvy = dvy - g_aim_pvy;
-        float ndvl = sqrtf(ndvx * ndvx + ndvy * ndvy);
-        float maxslew = 5000.f * dt;
-        if (ndvl > maxslew) { ndvx *= maxslew / ndvl; ndvy *= maxslew / ndvl; }
-        dvx = g_aim_pvx + ndvx;
-        dvy = g_aim_pvy + ndvy;
-    }
-    g_aim_pvx = dvx;
-    g_aim_pvy = dvy;
-
-    const float vmax = 2200.f; // cap total velocity
-    float vlen = sqrtf(dvx * dvx + dvy * dvy);
-    if (vlen > vmax) { dvx *= vmax / vlen; dvy *= vmax / vlen; }
-
-    float ddx = dvx * dt;
-    float ddy = dvy * dt;
+    // Pure exponential approach toward the predicted point. Exponential control
+    // never overshoots, so the camera cannot oscillate or "spin".
+    float step = 1.0f - expf(-rate * dt);
+    float ddx = cex * step;
+    float ddy = cey * step;
 
     const float max_drag = 120.f; // per-frame cap
     float dl = sqrtf(ddx * ddx + ddy * ddy);
     if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
 
-    // Deadzone: on target and the target is nearly still -> stop (no micro-shake).
+    // Deadzone: on target -> stop dead (no micro-shake).
     float rest = sqrtf(ex * ex + ey * ey);
-    float tvel = sqrtf(target_vx * target_vx + target_vy * target_vy);
-    if (rest < 6.f && tvel < 60.f) { ddx = 0.f; ddy = 0.f; g_aim_pvx = 0.f; g_aim_pvy = 0.f; }
+    if (rest < 6.f) { ddx = 0.f; ddy = 0.f; }
 
     // --- injection -----------------------------------------------------------
     const float anchor_x = sw * 0.72f;

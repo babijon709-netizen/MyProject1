@@ -31,6 +31,8 @@ static bool      g_matrix_configuration_validated = false;
 static bool      g_camera_matrix_physical_match = false;
 static uint64_t  g_player_position_offset = PLAYER_POSITION;
 static float     g_last_camera_fov_deg = -1.f;
+static Mat4      g_last_vp{};
+static bool      g_last_vp_valid = false;
 
 struct TransformHierarchyLayout {
     uint64_t data_offset = 0x38;
@@ -648,6 +650,7 @@ void esp_reset() {
     g_game_controller_class = 0; g_local_player = 0;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_last_camera_fov_deg = -1.f;
+    g_last_vp_valid = false;
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
@@ -731,6 +734,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
         }
         vp = mat_mul(projection, view);
+        g_last_vp = vp;
+        g_last_vp_valid = true;
 
         // Vertical field-of-view from the projection matrix: m[1][1] = cot(fov/2).
         // Aiming down sights narrows the FOV, so this is used to detect ADS.
@@ -871,10 +876,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.distance = distance;
         box.source = s_transforms[i];
 
-        // Per-player velocity from the movement of the same position source
-        // that draws the box. Positions update on network ticks, so we HOLD the
-        // last velocity between ticks (no decay to zero) — this keeps the aim
-        // lead and the skeleton animation continuous instead of sawtoothing.
+        // Per-player WORLD velocity from a position history window. Network
+        // positions update in discrete ticks, so we hold the last velocity
+        // between ticks and smooth only when a fresh estimate arrives — this is
+        // what makes both the aim lead and the skeleton animation continuous.
         {
             struct Track { Vec3 pos; double t; Vec3 vel; bool has; };
             static std::unordered_map<uint64_t, Track> s_track;
@@ -893,11 +898,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     float ivz = ddz / (float)dt;
                     float sp = sqrtf(ivx * ivx + ivz * ivz);
                     if (sp < 15.f) {
-                        // mild EMA toward the fresh estimate
                         vel.x = it->second.vel.x + (ivx - it->second.vel.x) * 0.6f;
                         vel.z = it->second.vel.z + (ivz - it->second.vel.z) * 0.6f;
                     } else {
-                        vel = it->second.vel; // teleport: keep last
+                        vel = it->second.vel; // teleport/respawn: keep last
                     }
                 } else if (dt < 2.0) {
                     vel = it->second.vel; // hold between ticks
@@ -905,25 +909,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
             s_track[s_transforms[i]] = {feet, now, vel, true};
 
+            box.feet  = {feet.x, feet_y, feet.z};
+            box.head  = {feet.x, feet_y + head_height, feet.z};
+            box.vel   = vel;
             box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
-            box.aim_vx = 0.f;
-            box.aim_vy = 0.f;
-
-            // Project horizontal world velocity to screen velocity (px/s) using
-            // the live view-projection matrix — same space as the box itself.
-            if (!transform_camera_mode) {
-                Vec3 p0 = {feet.x, feet_y, feet.z};
-                Vec3 p1 = {feet.x + vel.x * 0.2f, feet_y, feet.z + vel.z * 0.2f};
-                Vec2 s0{}, s1{};
-                if (w2s(vp, p0, sw, sh, s0, false) && w2s(vp, p1, sw, sh, s1, false)) {
-                    box.aim_vx = (s1.x - s0.x) / 0.2f;
-                    box.aim_vy = (s1.y - s0.y) / 0.2f;
-                    if (!std::isfinite(box.aim_vx) || !std::isfinite(box.aim_vy) ||
-                        fabsf(box.aim_vx) > 4000.f || fabsf(box.aim_vy) > 4000.f) {
-                        box.aim_vx = 0.f; box.aim_vy = 0.f;
-                    }
-                }
-            }
         }
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
@@ -942,6 +931,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
 float esp_get_camera_fov() {
     return g_last_camera_fov_deg;
+}
+
+bool esp_world_to_screen(Vec3 world, int screen_w, int screen_h, float& sx, float& sy) {
+    if (!g_last_vp_valid) return false;
+    float sw = screen_w >= 100 ? (float)screen_w : 1080.f;
+    float sh = screen_h >= 100 ? (float)screen_h : 2400.f;
+    Vec2 out{};
+    if (!w2s(g_last_vp, world, sw, sh, out, false)) return false;
+    sx = out.x;
+    sy = out.y;
+    return std::isfinite(sx) && std::isfinite(sy);
 }
 
 // ---------------------------------------------------------------------------
