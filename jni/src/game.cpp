@@ -55,6 +55,11 @@ static bool      g_use_direct_player_position = true;
 static bool      g_player_position_validated = false;
 static std::mutex g_game_mutex;
 
+// The reference client uses a deterministic screen-space IK skeleton. Keep the
+// remote hierarchy reader available for future verified offsets, but do not let
+// an unverified bone-map probe block the primary ESP path.
+static constexpr bool kUseLiveSkeletonHierarchy = false;
+
 static bool vec3_is_finite(const Vec3& value);
 static bool player_crouching(uint64_t player);
 
@@ -432,28 +437,26 @@ static bool resolve_skeleton_layout(uint64_t native_head, const Vec3& feet,
         return true;
     }
 
+    // This is the layout already used by the working world-position reader.
+    // Keep it first: accepting a false compact-layout match here can make the
+    // remote hierarchy walk expensive enough to starve the ESP frame.
+    TransformHierarchyLayout standard_layout{};
+    if (skeleton_head_matches_player(native_head, feet, standard_layout,
+                                     storage, head_position, head_index)) {
+        g_skeleton_layout = standard_layout;
+        g_skeleton_layout_valid = true;
+        return true;
+    }
+
     // The reference client uses the compact native Transform layout:
     // native+0x28 -> TransformData, native+0x30 -> index, then arrays at
-    // +0x18/+0x20. Try it first because it exposes the same live bone matrices
-    // without any animation smoothing.
+    // +0x18/+0x20. Keep it as a fallback for this alternate Unity layout.
     TransformHierarchyLayout compact_layout{};
     compact_layout.data_offset = 0x28;
     compact_layout.index_offset = 0x30;
     if (skeleton_head_matches_player(native_head, feet, compact_layout,
                                      storage, head_position, head_index)) {
         g_skeleton_layout = compact_layout;
-        g_skeleton_layout_valid = true;
-        return true;
-    }
-
-    // This is the layout already used by the working world-position reader.
-    // Try it before the compatibility probe; the latter is deliberately kept as
-    // a fallback because probing remote memory for every player/frame would
-    // make the overlay stutter.
-    TransformHierarchyLayout standard_layout{};
-    if (skeleton_head_matches_player(native_head, feet, standard_layout,
-                                     storage, head_position, head_index)) {
-        g_skeleton_layout = standard_layout;
         g_skeleton_layout_valid = true;
         return true;
     }
@@ -1495,9 +1498,20 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         Vec3 animated_head{};
         Vec3 skeleton_chest{};
         Vec3 skeleton_pelvis{};
-        bool have_skeleton = read_skeleton_segments(s_transforms[i], feet,
-                                                     skeleton_segments, animated_head,
-                                                     skeleton_chest, skeleton_pelvis);
+        bool have_skeleton = false;
+        if (kUseLiveSkeletonHierarchy) {
+            have_skeleton = read_skeleton_segments(s_transforms[i], feet,
+                                                   skeleton_segments, animated_head,
+                                                   skeleton_chest, skeleton_pelvis);
+        }
+        if (!have_skeleton) {
+            // Proven reference-client fallback: it is cheap, follows the same
+            // current feet/head box snapshot, and cannot break ESP when a model
+            // is rebuilding or a remote hierarchy layout is unknown.
+            build_fallback_skeleton(feet, head_height, skeleton_segments,
+                                    animated_head, skeleton_chest, skeleton_pelvis);
+            have_skeleton = !skeleton_segments.empty();
+        }
 
         Vec3 body_bottom = {render_x, feet_y, render_z};
         Vec3 body_top = have_skeleton ? animated_head

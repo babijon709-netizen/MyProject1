@@ -599,6 +599,112 @@ static const std::vector<EspBox>& GetEspBoxes(int sw, int sh) {
     return g_cached_boxes;
 }
 
+
+// Procedural humanoid skeleton drawn over a player box. Uses a 2-bone IK walk
+// cycle so the limbs actually bend and swing with the player's real speed, and
+// the torso bobs/leans. Crouch is handled by the box height (bounds-aware).
+static void DrawSkeleton(ImDrawList* dl, const EspBox& box, ImU32 col, float thick, float t) {
+    float bw = box.x2 - box.x1;
+    float bh = box.y2 - box.y1;
+    if (bw < 1.f || bh < 1.f) return;
+
+    float cx = (box.x1 + box.x2) * 0.5f;
+    float top = box.y1;
+    auto P = [&](float u, float v) { return ImVec2(cx + (u - 0.5f) * bw, top + v * bh); };
+
+    float speed = box.speed; if (speed < 0.f) speed = 0.f;
+    float off = (float)(box.source & 0xFF) * 0.37f;
+    float amp = speed > 6.f ? 1.f : speed / 6.f;
+    bool moving = speed > 0.5f;
+    float ph = t * (2.6f + speed * 0.85f) + off;
+
+    // core anchors (u = 0..1 across, v = 0..1 down the box)
+    ImVec2 head  = P(0.5f, 0.07f);
+    ImVec2 neck  = P(0.5f, 0.15f);
+    ImVec2 shL   = P(0.41f, 0.19f);
+    ImVec2 shR   = P(0.59f, 0.19f);
+    ImVec2 chest = P(0.5f, 0.26f);
+    ImVec2 hips  = P(0.5f, 0.45f);
+    ImVec2 hipL  = P(0.47f, 0.45f);
+    ImVec2 hipR  = P(0.53f, 0.45f);
+
+    // whole-body bob + slight forward lean while running
+    float bob  = -fabsf(cosf(ph)) * amp * bh * 0.018f;
+    float lean = moving ? amp * bw * 0.06f : 0.f;
+    ImVec2 sh = ImVec2(lean, bob);
+    head.x += sh.x; head.y += sh.y;
+    neck.x += sh.x; neck.y += sh.y;
+    chest.x += sh.x; chest.y += sh.y;
+    hips.x += sh.x; hips.y += sh.y;
+    shL.x += sh.x; shL.y += sh.y;
+    shR.x += sh.x; shR.y += sh.y;
+    hipL.x += sh.x; hipL.y += sh.y;
+    hipR.x += sh.x; hipR.y += sh.y;
+
+    // 2-bone IK: given root A and effector F with segment lengths l1,l2,
+    // return the joint position (bend sign controls which side it bends).
+    auto IK = [&](ImVec2 A, ImVec2 F, float l1, float l2, float bend) -> ImVec2 {
+        float dx = F.x - A.x, dy = F.y - A.y;
+        float d = sqrtf(dx * dx + dy * dy);
+        if (d < 0.001f) d = 0.001f;
+        float maxd = l1 + l2 - 0.01f; if (d > maxd) d = maxd;
+        float mind = fabsf(l1 - l2) + 0.01f; if (d < mind) d = mind;
+        float a = (l1 * l1 - l2 * l2 + d * d) / (2.f * d);
+        float h2 = l1 * l1 - a * a;
+        float h = h2 > 0.f ? sqrtf(h2) : 0.f;
+        float ux = dx / d, uy = dy / d;
+        float mx = A.x + ux * a, my = A.y + uy * a;
+        return ImVec2(mx - uy * h * bend, my + ux * h * bend);
+    };
+
+    float legL = bh * 0.26f;
+    float armL = bh * 0.16f;
+
+    ImVec2 footL, footR, handL, handR;
+    if (moving) {
+        float sw = sinf(ph);
+        float stride = amp * bw * 0.20f;
+        float lift   = amp * bh * 0.07f;
+        footL = ImVec2(hipL.x + sw * stride, box.y2 - ImMax(0.f, -cosf(ph)) * lift);
+        footR = ImVec2(hipR.x - sw * stride, box.y2 - ImMax(0.f,  cosf(ph)) * lift);
+        float aamp = amp * bw * 0.16f;
+        handL = ImVec2(shL.x - sw * aamp, shL.y + bh * 0.19f);
+        handR = ImVec2(shR.x + sw * aamp, shR.y + bh * 0.19f);
+    } else {
+        float breathe = sinf(t * 1.5f + off) * bh * 0.008f;
+        footL = ImVec2(hipL.x - bw * 0.03f, box.y2);
+        footR = ImVec2(hipR.x + bw * 0.03f, box.y2);
+        handL = ImVec2(shL.x - bw * 0.03f, shL.y + bh * 0.19f + breathe);
+        handR = ImVec2(shR.x + bw * 0.03f, shR.y + bh * 0.19f + breathe);
+    }
+
+    ImVec2 kneeL = IK(hipL, footL, legL, legL, 1.0f);
+    ImVec2 kneeR = IK(hipR, footR, legL, legL, 1.0f);
+    ImVec2 elbL  = IK(shL, handL, armL, armL, -1.0f);
+    ImVec2 elbR  = IK(shR, handR, armL, armL, -1.0f);
+
+    // legs
+    dl->AddLine(hipL, kneeL, col, thick);
+    dl->AddLine(kneeL, footL, col, thick);
+    dl->AddLine(hipR, kneeR, col, thick);
+    dl->AddLine(kneeR, footR, col, thick);
+    // arms
+    dl->AddLine(shL, elbL, col, thick);
+    dl->AddLine(elbL, handL, col, thick);
+    dl->AddLine(shR, elbR, col, thick);
+    dl->AddLine(elbR, handR, col, thick);
+    // torso
+    dl->AddLine(head, neck, col, thick);
+    dl->AddLine(neck, chest, col, thick);
+    dl->AddLine(chest, hips, col, thick);
+    dl->AddLine(neck, shL, col, thick);
+    dl->AddLine(neck, shR, col, thick);
+    dl->AddLine(hips, hipL, col, thick);
+    dl->AddLine(hips, hipR, col, thick);
+    // head
+    dl->AddCircleFilled(head, bh * 0.05f, col, 16);
+}
+
 static void DrawEspOverlay() {
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;
@@ -674,16 +780,24 @@ static void DrawEspOverlay() {
             );
         }
 
-        if (g_state.esp_skeleton && box.skeleton_valid) {
-            // Lines are already projected from the live Animator hierarchy in
-            // esp_get_boxes(). Drawing the immutable per-frame snapshot avoids
-            // the one-frame pose/camera mismatch caused by re-reading bones here.
-            for (const EspSkeletonLine& line : box.skeleton) {
-                if (!std::isfinite(line.x1) || !std::isfinite(line.y1) ||
-                    !std::isfinite(line.x2) || !std::isfinite(line.y2)) continue;
-                dl->AddLine(ImVec2(line.x1, line.y1),
-                            ImVec2(line.x2, line.y2),
-                            ColU32(cfg::esp::skeleton_col), thick);
+        if (g_state.esp_skeleton) {
+            // Prefer the live hierarchy snapshot. If the model is rebuilding or
+            // the current Unity revision does not expose its bone map, use the
+            // reference client's proven IK fallback so the ESP frame itself is
+            // never lost and the skeleton remains visible.
+            if (box.skeleton_valid && box.skeleton.size() >= 18) {
+                for (const EspSkeletonLine& line : box.skeleton) {
+                    if (!std::isfinite(line.x1) || !std::isfinite(line.y1) ||
+                        !std::isfinite(line.x2) || !std::isfinite(line.y2)) continue;
+                    dl->AddLine(ImVec2(line.x1, line.y1),
+                                ImVec2(line.x2, line.y2),
+                                ColU32(cfg::esp::skeleton_col), thick);
+                }
+            } else {
+                float skeleton_time = (float)std::chrono::duration<double>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                DrawSkeleton(dl, box, ColU32(cfg::esp::skeleton_col), thick,
+                             skeleton_time);
             }
         }
     }
