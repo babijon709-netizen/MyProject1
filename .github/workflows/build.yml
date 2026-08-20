@@ -1,0 +1,55 @@
+name: Build xvcen.sh
+
+on:
+  push:
+    branches: [ "arena/01a01de7-myproject1" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        run: |
+          NDK=""
+          for cand in "$ANDROID_NDK_ROOT" "$ANDROID_NDK_HOME" "$ANDROID_SDK_ROOT"/ndk/*; do
+            if [ -n "$cand" ] && [ -x "$cand/ndk-build" ]; then NDK="$cand"; break; fi
+          done
+          if [ -z "$NDK" ]; then
+            curl -sSL -o /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+            unzip -q /tmp/ndk.zip -d /tmp
+            NDK=/tmp/android-ndk-r26d
+          fi
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          export ANDROID_NDK_HOME="$NDK"
+          export ANDROID_NDK_ROOT="$NDK"
+          "$NDK/ndk-build" -j"$(nproc)"
+          file libs/arm64-v8a/xvcen.sh
+          sha256sum libs/arm64-v8a/xvcen.sh
+
+      - name: Commit binary back to branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf 'obj/\n' > .gitignore
+          git add .gitignore libs/arm64-v8a/xvcen.sh
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "build: xvcen.sh arm64-v8a [CI]"
+            git push
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xvcen-sh-arm64-v8a
+          path: libs/arm64-v8a/xvcen.sh
