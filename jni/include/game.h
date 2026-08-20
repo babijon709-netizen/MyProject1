@@ -11,6 +11,11 @@ struct EspSkeletonLine {
     float x1, y1, x2, y2;
 };
 
+struct EspSkeletonAimPoint {
+    float x, y;
+    bool valid;
+};
+
 struct EspBox {
     float x1, y1, x2, y2;     // screen rect
     float distance;           // world distance to local player (m), -1 if unknown
@@ -25,6 +30,12 @@ struct EspBox {
     float aim_vy;
     bool  crouched;           // player is crouching
     bool  skeleton_valid;     // true only when the live model hierarchy was read
+    bool  skeleton_aim_points_valid;
+    Vec3  skeleton_chest;     // live world-space chest/torso anchor
+    Vec3  skeleton_pelvis;    // live world-space pelvis anchor
+    EspSkeletonAimPoint skeleton_head_point;
+    EspSkeletonAimPoint skeleton_chest_point;
+    EspSkeletonAimPoint skeleton_pelvis_point;
     std::vector<EspSkeletonLine> skeleton;
 };
 

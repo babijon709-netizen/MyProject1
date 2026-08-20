@@ -10,6 +10,7 @@
 #include <string>
 #include <chrono>
 #include <functional>
+#include <iterator>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -531,46 +532,9 @@ static int32_t discover_skeleton_hierarchy_count(uint64_t matrices, uint64_t ind
     return highest + 1;
 }
 
-static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
-                                   std::vector<std::pair<Vec3, Vec3>>& segments,
-                                   Vec3& animated_head) {
-    std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
-    segments.clear();
-    animated_head = {};
-    if (!player) return false;
-
-    // InterfaceReference<T> stores the selected MonoBehaviour component. Some
-    // IL2CPP builds expose the component directly, while others keep the
-    // wrapper object; accept both representations after validating KCC.player.
-    uint64_t reference = rd_ptr(player + PLAYER_KCC_REFERENCE);
-    uint64_t kcc = 0;
-    const uint64_t candidates[] = {
-        reference,
-        reference ? rd_ptr(reference + 0x10) : 0,
-        reference ? rd_ptr(reference + 0x18) : 0,
-        reference ? rd_ptr(reference + 0x20) : 0
-    };
-    for (uint64_t candidate : candidates) {
-        if (!likely_native_pointer(candidate)) continue;
-        if (rd_ptr(candidate + KCC_PLAYER) == player) {
-            kcc = candidate;
-            break;
-        }
-    }
-    if (!kcc) return false;
-
-    uint64_t head_transform = rd_ptr(kcc + KCC_HEAD);
-    if (!likely_native_pointer(head_transform)) {
-        // Fallback for a brief KCC rebuild: CharacterAnimation keeps the same
-        // PlayerModelInfo reference while the controller is being recreated.
-        uint64_t character_animation = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
-        uint64_t model_info = character_animation
-            ? rd_ptr(character_animation + CHARACTER_ANIMATION_MODEL_INFO) : 0;
-        head_transform = model_info ? rd_ptr(model_info + PLAYER_MODEL_HEAD) : 0;
-    }
-    uint64_t native_head = resolve_native_transform(head_transform);
-    if (!likely_native_pointer(native_head)) return false;
-
+static bool build_skeleton_graph(uint64_t native_head, const Vec3& feet,
+                                 std::vector<std::pair<Vec3, Vec3>>& segments,
+                                 Vec3& animated_head) {
     SkeletonHierarchyInfo layout_storage{};
     int32_t head_index = -1;
     if (!resolve_skeleton_layout(native_head, feet, layout_storage,
@@ -704,6 +668,189 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
         if (segments.size() >= 160) break;
     }
     return !segments.empty() && vec3_is_finite(animated_head);
+}
+
+static bool choose_skeleton_anchor(const std::vector<std::pair<Vec3, Vec3>>& segments,
+                                   const Vec3& feet, const Vec3& head,
+                                   float height_factor, Vec3& anchor) {
+    float height = head.y - feet.y;
+    if (!std::isfinite(height) || fabsf(height) < 0.05f) return false;
+    float target_y = feet.y + height * height_factor;
+    float best_score = INFINITY;
+    bool found = false;
+    for (const auto& segment : segments) {
+        const Vec3 points[] = {segment.first, segment.second};
+        for (const Vec3& point : points) {
+            float dx = point.x - feet.x;
+            float dz = point.z - feet.z;
+            float horizontal = sqrtf(dx * dx + dz * dz);
+            if (!vec3_is_finite(point) || !std::isfinite(horizontal) || horizontal > 3.5f)
+                continue;
+            // Prefer central torso points at the requested anatomical height.
+            // This remains pose-aware for crouch, prone and ragdoll states,
+            // unlike a fixed fraction of the ESP rectangle.
+            float score = fabsf(point.y - target_y) + horizontal * 0.35f;
+            if (score < best_score) {
+                best_score = score;
+                anchor = point;
+                found = true;
+            }
+        }
+    }
+    return found && vec3_is_finite(anchor);
+}
+
+static void build_fallback_skeleton(const Vec3& feet, float height,
+                                    std::vector<std::pair<Vec3, Vec3>>& segments,
+                                    Vec3& head, Vec3& chest, Vec3& pelvis) {
+    if (!std::isfinite(height) || height < 0.5f) height = PLAYER_HEIGHT;
+    head = {feet.x, feet.y + height, feet.z};
+    chest = {feet.x, feet.y + height * 0.66f, feet.z};
+    pelvis = {feet.x, feet.y + height * 0.47f, feet.z};
+
+    const Vec3 neck = {feet.x, feet.y + height * 0.80f, feet.z};
+    const Vec3 left_shoulder = {feet.x - height * 0.18f, feet.y + height * 0.70f, feet.z};
+    const Vec3 right_shoulder = {feet.x + height * 0.18f, feet.y + height * 0.70f, feet.z};
+    const Vec3 left_elbow = {feet.x - height * 0.28f, feet.y + height * 0.51f, feet.z};
+    const Vec3 right_elbow = {feet.x + height * 0.28f, feet.y + height * 0.51f, feet.z};
+    const Vec3 left_hand = {feet.x - height * 0.32f, feet.y + height * 0.34f, feet.z};
+    const Vec3 right_hand = {feet.x + height * 0.32f, feet.y + height * 0.34f, feet.z};
+    const Vec3 left_hip = {feet.x - height * 0.12f, feet.y + height * 0.43f, feet.z};
+    const Vec3 right_hip = {feet.x + height * 0.12f, feet.y + height * 0.43f, feet.z};
+    const Vec3 left_knee = {feet.x - height * 0.13f, feet.y + height * 0.23f, feet.z};
+    const Vec3 right_knee = {feet.x + height * 0.13f, feet.y + height * 0.23f, feet.z};
+    const Vec3 left_foot = {feet.x - height * 0.14f, feet.y, feet.z};
+    const Vec3 right_foot = {feet.x + height * 0.14f, feet.y, feet.z};
+
+    const std::pair<Vec3, Vec3> fallback_lines[] = {
+        {head, neck}, {neck, chest}, {chest, pelvis},
+        {neck, left_shoulder}, {left_shoulder, left_elbow}, {left_elbow, left_hand},
+        {neck, right_shoulder}, {right_shoulder, right_elbow}, {right_elbow, right_hand},
+        {pelvis, left_hip}, {left_hip, left_knee}, {left_knee, left_foot},
+        {pelvis, right_hip}, {right_hip, right_knee}, {right_knee, right_foot}
+    };
+    segments.assign(std::begin(fallback_lines), std::end(fallback_lines));
+}
+
+static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
+                                   std::vector<std::pair<Vec3, Vec3>>& segments,
+                                   Vec3& animated_head,
+                                   Vec3& skeleton_chest,
+                                   Vec3& skeleton_pelvis) {
+    std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+    segments.clear();
+    animated_head = {};
+    skeleton_chest = {};
+    skeleton_pelvis = {};
+    if (!player) return false;
+
+    auto use_fallback = [&]() -> bool {
+        float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
+        build_fallback_skeleton(feet, height, segments, animated_head,
+                                skeleton_chest, skeleton_pelvis);
+        return !segments.empty();
+    };
+
+    // InterfaceReference<T> stores the selected MonoBehaviour component. Some
+    // IL2CPP builds expose the component directly, while others keep the
+    // wrapper object; accept both representations after validating KCC.player.
+    uint64_t reference = rd_ptr(player + PLAYER_KCC_REFERENCE);
+    uint64_t kcc = 0;
+    uint64_t kcc_head_offset = KCC_HEAD;
+    uint64_t kcc_character_animation_offset = KCC_CHARACTER_ANIMATION;
+    const uint64_t candidates[] = {
+        reference,
+        reference ? rd_ptr(reference + 0x10) : 0,
+        reference ? rd_ptr(reference + 0x18) : 0,
+        reference ? rd_ptr(reference + 0x20) : 0
+    };
+    for (uint64_t candidate : candidates) {
+        if (!likely_native_pointer(candidate)) continue;
+        if (rd_ptr(candidate + KCC_PLAYER) == player) {
+            kcc = candidate;
+            break;
+        }
+        // Tutorial/legacy player prefabs use the same component with the
+        // inherited fields shifted by 8 bytes. Supporting both layouts keeps
+        // the skeleton alive during model/controller swaps.
+        if (rd_ptr(candidate + 0x80) == player) {
+            kcc = candidate;
+            kcc_head_offset = 0x90;
+            kcc_character_animation_offset = 0xC0;
+            break;
+        }
+    }
+    if (!kcc) return use_fallback();
+
+    uint64_t character_animation = rd_ptr(kcc + kcc_character_animation_offset);
+    uint64_t model_info = character_animation
+        ? rd_ptr(character_animation + CHARACTER_ANIMATION_MODEL_INFO) : 0;
+
+    // The KCC head is the preferred anchor. PlayerModelInfo is also checked:
+    // during skin swaps/reloads the KCC head can temporarily point to a camera
+    // helper while the actual body hierarchy remains alive below modelInfo.
+    const uint64_t managed_transforms[] = {
+        rd_ptr(kcc + kcc_head_offset),
+        model_info ? rd_ptr(model_info + PLAYER_MODEL_HEAD) : 0,
+        model_info ? rd_ptr(model_info + PLAYER_MODEL_BODY) : 0
+    };
+    uint64_t native_head = 0;
+    for (uint64_t managed_transform : managed_transforms) {
+        uint64_t native_transform = resolve_native_transform(managed_transform);
+        if (likely_native_pointer(native_transform)) {
+            native_head = native_transform;
+            break;
+        }
+    }
+    if (!native_head) return use_fallback();
+
+    std::vector<std::pair<Vec3, Vec3>> best_segments;
+    Vec3 best_anchor{};
+    size_t best_count = 0;
+    for (uint64_t managed_transform : managed_transforms) {
+        uint64_t native_transform = resolve_native_transform(managed_transform);
+        if (!likely_native_pointer(native_transform)) continue;
+
+        std::vector<std::pair<Vec3, Vec3>> candidate_segments;
+        Vec3 candidate_anchor{};
+        if (!build_skeleton_graph(native_transform, feet, candidate_segments,
+                                  candidate_anchor)) continue;
+        if (candidate_segments.size() > best_count) {
+            best_count = candidate_segments.size();
+            best_segments = std::move(candidate_segments);
+            best_anchor = candidate_anchor;
+        }
+    }
+    if (best_segments.empty()) return use_fallback();
+
+    // Always use the actual head position for aim/box top, even when the body
+    // graph was obtained from PlayerModelInfo.body rather than KCC.head.
+    SkeletonHierarchyInfo head_storage{};
+    int32_t head_index = -1;
+    Vec3 actual_head{};
+    if (!resolve_skeleton_layout(native_head, feet, head_storage,
+                                 head_index, actual_head)) {
+        actual_head = best_anchor;
+    }
+
+    segments = std::move(best_segments);
+    animated_head = actual_head;
+    bool have_chest = choose_skeleton_anchor(segments, feet, animated_head,
+                                              0.68f, skeleton_chest);
+    bool have_pelvis = choose_skeleton_anchor(segments, feet, animated_head,
+                                               0.48f, skeleton_pelvis);
+    if (!have_chest) skeleton_chest = {
+        feet.x + (animated_head.x - feet.x) * 0.68f,
+        feet.y + (animated_head.y - feet.y) * 0.68f,
+        feet.z + (animated_head.z - feet.z) * 0.68f
+    };
+    if (!have_pelvis) skeleton_pelvis = {
+        feet.x + (animated_head.x - feet.x) * 0.48f,
+        feet.y + (animated_head.y - feet.y) * 0.48f,
+        feet.z + (animated_head.z - feet.z) * 0.48f
+    };
+    return !segments.empty() && vec3_is_finite(animated_head) &&
+           vec3_is_finite(skeleton_chest) && vec3_is_finite(skeleton_pelvis);
 }
 
 static bool evaluate_transform_hierarchy_layout(const std::vector<uint64_t>& native_transforms, const TransformHierarchyLayout& layout, size_t& position_count, double& extent) {
@@ -1329,8 +1476,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // exact same pose sample.
         std::vector<std::pair<Vec3, Vec3>> skeleton_segments;
         Vec3 animated_head{};
+        Vec3 skeleton_chest{};
+        Vec3 skeleton_pelvis{};
         bool have_skeleton = read_skeleton_segments(s_transforms[i], feet,
-                                                     skeleton_segments, animated_head);
+                                                     skeleton_segments, animated_head,
+                                                     skeleton_chest, skeleton_pelvis);
 
         Vec3 body_bottom = {render_x, feet_y, render_z};
         Vec3 body_top = have_skeleton ? animated_head
@@ -1380,6 +1530,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
         box.crouched = crouched;
         box.skeleton_valid = have_skeleton;
+        box.skeleton_aim_points_valid = false;
+        box.skeleton_chest = skeleton_chest;
+        box.skeleton_pelvis = skeleton_pelvis;
+        box.skeleton_head_point = {0.f, 0.f, false};
+        box.skeleton_chest_point = {0.f, 0.f, false};
+        box.skeleton_pelvis_point = {0.f, 0.f, false};
 
         // Project the live bone graph in this same camera snapshot.  No
         // interpolation or previous-frame skeleton is used: if one transform
@@ -1404,6 +1560,37 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 box.skeleton.push_back({a.x, a.y, b.x, b.y});
             }
             box.skeleton_valid = !box.skeleton.empty();
+
+            if (box.skeleton_valid) {
+                // The head screen point is the same live point used for the
+                // box top. Chest and pelvis are projected from the selected
+                // hierarchy anchors, so aim never falls back to rectangle
+                // fractions when a real skeleton is available.
+                box.skeleton_head_point = {sh2.x, sh2.y, true};
+                Vec2 chest_screen{}, pelvis_screen{};
+                bool chest_projected = transform_camera_mode
+                    ? w2s_transform_camera(transform_camera_position,
+                                            transform_camera_rotation,
+                                            skeleton_chest, sw, sh,
+                                            chest_screen, false)
+                    : w2s(vp, skeleton_chest, sw, sh, chest_screen, false);
+                bool pelvis_projected = transform_camera_mode
+                    ? w2s_transform_camera(transform_camera_position,
+                                            transform_camera_rotation,
+                                            skeleton_pelvis, sw, sh,
+                                            pelvis_screen, false)
+                    : w2s(vp, skeleton_pelvis, sw, sh, pelvis_screen, false);
+                if (chest_projected && std::isfinite(chest_screen.x) &&
+                    std::isfinite(chest_screen.y)) {
+                    box.skeleton_chest_point = {chest_screen.x, chest_screen.y, true};
+                }
+                if (pelvis_projected && std::isfinite(pelvis_screen.x) &&
+                    std::isfinite(pelvis_screen.y)) {
+                    box.skeleton_pelvis_point = {pelvis_screen.x, pelvis_screen.y, true};
+                }
+                box.skeleton_aim_points_valid = box.skeleton_head_point.valid &&
+                    box.skeleton_chest_point.valid && box.skeleton_pelvis_point.valid;
+            }
         }
 
         // Screen-space velocity of the head: project head and head + vel*dt.
