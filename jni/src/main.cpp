@@ -2779,15 +2779,13 @@ static void CenterMenuOnDisplay() {
 // ===========================================================================
 static bool  g_aim_active = false;
 static float g_aim_cx = 0.f, g_aim_cy = 0.f;
-static float g_aim_vx = 0.f, g_aim_vy = 0.f;
+static float g_aim_tx = 0.f, g_aim_ty = 0.f; // smoothed target
 
 static void AimRelease() {
     if (g_aim_active) {
         Touch_AimUp();
         g_aim_active = false;
     }
-    g_aim_vx = 0.f;
-    g_aim_vy = 0.f;
 }
 
 static void RunAim() {
@@ -2872,7 +2870,7 @@ static void RunAim() {
     float offx = best_tx - cx;
     float offy = best_ty - cy;
     float dist = sqrtf(offx * offx + offy * offy);
-    if (dist < 8.f) { AimRelease(); return; } // already on target
+    if (dist < 6.f) { return; } // on target: hold still, don't lift (no jitter)
 
     // Frame time, so movement is frame-rate independent (smooth at any FPS).
     static auto s_last = std::chrono::steady_clock::now();
@@ -2882,30 +2880,33 @@ static void RunAim() {
     if (dt <= 0.0005f) dt = 0.0005f;
     if (dt > 0.05f) dt = 0.05f;
 
-    // Плавность 1..10 (integer). Higher = smoother/slower approach.
+    // Плавность 1..10 (integer). Lower = faster/aggressive, higher = slower.
     int sm = (int)lroundf(g_state.gun_str);
     if (sm < 1) sm = 1;
     if (sm > 10) sm = 10;
-    float rate = 3.4f - 0.30f * (float)(sm - 1); // 1 -> 3.4/s, 10 -> 0.7/s
-    if (rate < 0.5f) rate = 0.5f;
+    float rate = 16.f - 1.5f * (float)(sm - 1); // 1 -> 16/s, 10 -> 2.5/s
+    if (rate < 2.5f) rate = 2.5f;
 
-    // Exponential approach to the target: move a fraction of the remaining
-    // offset each frame, scaled by real elapsed time.
+    // Smooth the target (enemy box updates in discrete steps — this removes the
+    // jitter), then approach it exponentially. No overshoot, so it can be fast
+    // AND stay steady.
+    float ts = 1.0f - expf(-20.f * dt);
+    g_aim_tx += (best_tx - g_aim_tx) * ts;
+    g_aim_ty += (best_ty - g_aim_ty) * ts;
+
     float step = 1.0f - expf(-rate * dt);
-    float ddx = offx * step;
-    float ddy = offy * step;
+    float ddx = (g_aim_tx - cx) * step;
+    float ddy = (g_aim_ty - cy) * step;
 
-    // Heavy EMA on the injected delta: the camera eases in/out and never snaps.
-    g_aim_vx += (ddx - g_aim_vx) * 0.25f;
-    g_aim_vy += (ddy - g_aim_vy) * 0.25f;
-    ddx = g_aim_vx;
-    ddy = g_aim_vy;
-
-    const float max_drag = 18.f; // hard cap per frame (very gentle)
+    const float max_drag = 60.f; // per-frame cap
     float dl = sqrtf(ddx * ddx + ddy * ddy);
     if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
 
-    if (fabsf(ddx) < 0.3f && fabsf(ddy) < 0.3f) { AimRelease(); return; }
+    // Deadzone: stop injecting once essentially on target (no micro-shake).
+    float rest = sqrtf((g_aim_tx - cx) * (g_aim_tx - cx) + (g_aim_ty - cy) * (g_aim_ty - cy));
+    if (rest < 5.f) { ddx = 0.f; ddy = 0.f; }
+
+    if (!g_aim_active && ddx == 0.f && ddy == 0.f) return;
 
     // The game rotates the camera by RELATIVE finger movement in the RIGHT
     // (look) half of the screen; the left half is the movement joystick. The
@@ -2920,6 +2921,8 @@ static void RunAim() {
     if (!g_aim_active) {
         g_aim_cx = anchor_x;
         g_aim_cy = anchor_y;
+        g_aim_tx = best_tx; // start from the target: no initial lag
+        g_aim_ty = best_ty;
         Touch_AimDown(g_aim_cx, g_aim_cy);
         g_aim_active = true;
     }
