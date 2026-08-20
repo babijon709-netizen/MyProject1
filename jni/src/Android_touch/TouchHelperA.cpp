@@ -43,6 +43,31 @@ static targ targF[maxE];
 
 static touchObj Finger[maxE][maxF];
 
+static pthread_mutex_t uploadLock = PTHREAD_MUTEX_INITIALIZER;
+
+// Dedicated aimbot finger: lives in the same multitouch stream as real
+// touches, but with its own tracking id, so aim and the user's touches can
+// happen at the same time without interfering.
+struct aimTouchObj {
+    bool down = false;
+    int  x = 0, y = 0;
+    int  id = 250;
+};
+static aimTouchObj aimFinger;
+
+// Converts overlay/screen coordinates (the same space as ImGui io.MousePos)
+// into touch-device coordinates. Mirrors Touch_Down()'s transform.
+static void screenToTouch(float xt, float yt, int &x, int &y) {
+    switch (orientation) {
+        case 1: x = (int)(screenHeight - yt); y = (int)xt; break;
+        case 2: x = (int)(screenWidth - xt);  y = (int)(screenHeight - yt); break;
+        case 3: y = (int)(screenWidth - xt);  x = (int)yt; break;
+        default: x = (int)xt; y = (int)yt; break;
+    }
+    x = (int)(x * ::scale_x);
+    y = (int)(y * ::scale_y);
+}
+
 static int fdNum = 0, origfd[maxE], nowfd;
 
 static float scale_x, scale_y;
@@ -76,10 +101,8 @@ static void genRandomString(char *string, int length) {
 }
 
 static void Upload() {
-    static bool bTouch = false;
     static bool isFirstDown = true;
-    while (bTouch);
-    bTouch = true;
+    pthread_mutex_lock(&uploadLock);
     int tmpCnt = 0, tmpCnt2 = 0, i, j;
     for (i = 0; i < fdNum; i++) {
         for (j = 0; j < maxF; j++) {
@@ -119,6 +142,42 @@ static void Upload() {
             }
         }
     }
+
+    // Aim finger: an extra multitouch slot alongside the real ones.
+    if (aimFinger.down) {
+        if (tmpCnt2++ <= 10) {
+            input.event[tmpCnt].type = EV_ABS;
+            input.event[tmpCnt].code = ABS_X;
+            input.event[tmpCnt].value = aimFinger.x;
+            tmpCnt++;
+
+            input.event[tmpCnt].type = EV_ABS;
+            input.event[tmpCnt].code = ABS_Y;
+            input.event[tmpCnt].value = aimFinger.y;
+            tmpCnt++;
+
+            input.event[tmpCnt].type = EV_ABS;
+            input.event[tmpCnt].code = ABS_MT_POSITION_X;
+            input.event[tmpCnt].value = aimFinger.x;
+            tmpCnt++;
+
+            input.event[tmpCnt].type = EV_ABS;
+            input.event[tmpCnt].code = ABS_MT_POSITION_Y;
+            input.event[tmpCnt].value = aimFinger.y;
+            tmpCnt++;
+
+            input.event[tmpCnt].type = EV_ABS;
+            input.event[tmpCnt].code = ABS_MT_TRACKING_ID;
+            input.event[tmpCnt].value = aimFinger.id;
+            tmpCnt++;
+
+            input.event[tmpCnt].type = EV_SYN;
+            input.event[tmpCnt].code = SYN_MT_REPORT;
+            input.event[tmpCnt].value = 0;
+            tmpCnt++;
+        }
+    }
+
     finish:
     bool is = false;
     if (tmpCnt == 0) {
@@ -152,7 +211,7 @@ static void Upload() {
         write(nowfd, input.event, sizeof(struct input_event) * tmpCnt);
     }
 
-    bTouch = false;
+    pthread_mutex_unlock(&uploadLock);
 }
 
 static void *TypeA(void *arg) {
@@ -467,6 +526,7 @@ void Touch_Close() {
         fdNum = 0;
         memset(Finger, 0, sizeof(Finger));
         memset(input.event, 0, sizeof(input.event));
+        aimFinger.down = false;
         Touch_initialized = false;
     }
 }
@@ -510,5 +570,26 @@ void Touch_Move(float x, float y) {
 void Touch_Up() {
     touchObj &touch = Finger[0][9];
     touch.isDown = false;
+    Upload();
+}
+
+// Aim finger API: independent touch that runs in parallel with the user's
+// fingers (separate tracking id inside the same multitouch stream).
+void Touch_AimDown(float x, float y) {
+    screenToTouch(x, y, aimFinger.x, aimFinger.y);
+    aimFinger.down = true;
+    Upload();
+}
+void Touch_AimMove(float x, float y) {
+    if (!aimFinger.down) {
+        Touch_AimDown(x, y);
+        return;
+    }
+    screenToTouch(x, y, aimFinger.x, aimFinger.y);
+    Upload();
+}
+void Touch_AimUp() {
+    if (!aimFinger.down) return;
+    aimFinger.down = false;
     Upload();
 }

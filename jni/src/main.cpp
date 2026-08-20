@@ -2681,12 +2681,13 @@ static void CenterMenuOnDisplay() {
 // ===========================================================================
 //  Smooth aimbot
 // ===========================================================================
-static bool  g_aim_touch_down = false;
+static bool  g_aim_active = false;
+static float g_aim_cx = 0.f, g_aim_cy = 0.f;
 
 static void AimRelease() {
-    if (g_aim_touch_down) {
-        Touch_Up();
-        g_aim_touch_down = false;
+    if (g_aim_active) {
+        Touch_AimUp();
+        g_aim_active = false;
     }
 }
 
@@ -2797,18 +2798,35 @@ static void RunAim() {
     if (fabsf(ddx) < 0.5f && fabsf(ddy) < 0.5f) { AimRelease(); return; }
 
     // The game rotates the camera by RELATIVE finger movement in the RIGHT
-    // (look) half of the screen. The left half is the movement joystick, so we
-    // keep the injection out of the joystick zone and away from the center.
-    // Each frame we inject one short swipe from a fixed anchor — no drift and
-    // no accidental joystick input.
-    float ax = sw * 0.72f;
-    float ay = sh * 0.50f;
+    // (look) half of the screen; the left half is the movement joystick. The
+    // aim finger is a separate multitouch slot, held continuously and moved by
+    // small deltas, so it works alongside the user's own touches. It re-anchors
+    // only when it would drift out of the right-hand look zone.
+    const float anchor_x = sw * 0.72f;
+    const float anchor_y = sh * 0.50f;
+    const float min_x = sw * 0.55f, max_x = sw * 0.98f;
+    const float min_y = sh * 0.10f, max_y = sh * 0.90f;
 
-    if (g_aim_touch_down) Touch_Up();
-    Touch_Down(ax, ay);
-    Touch_Move(ax + ddx, ay + ddy);
-    Touch_Up();
-    g_aim_touch_down = false;
+    if (!g_aim_active) {
+        g_aim_cx = anchor_x;
+        g_aim_cy = anchor_y;
+        Touch_AimDown(g_aim_cx, g_aim_cy);
+        g_aim_active = true;
+    }
+
+    g_aim_cx += ddx;
+    g_aim_cy += ddy;
+
+    if (g_aim_cx < min_x || g_aim_cx > max_x || g_aim_cy < min_y || g_aim_cy > max_y) {
+        // Finger drifted toward an edge — lift and re-anchor without losing the
+        // target lock.
+        Touch_AimUp();
+        g_aim_cx = anchor_x;
+        g_aim_cy = anchor_y;
+        Touch_AimDown(g_aim_cx, g_aim_cy);
+    } else {
+        Touch_AimMove(g_aim_cx, g_aim_cy);
+    }
 }
 
 void RenderMenu() {
