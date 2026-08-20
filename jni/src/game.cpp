@@ -432,10 +432,24 @@ static bool resolve_skeleton_layout(uint64_t native_head, const Vec3& feet,
         return true;
     }
 
+    // The reference client uses the compact native Transform layout:
+    // native+0x28 -> TransformData, native+0x30 -> index, then arrays at
+    // +0x18/+0x20. Try it first because it exposes the same live bone matrices
+    // without any animation smoothing.
+    TransformHierarchyLayout compact_layout{};
+    compact_layout.data_offset = 0x28;
+    compact_layout.index_offset = 0x30;
+    if (skeleton_head_matches_player(native_head, feet, compact_layout,
+                                     storage, head_position, head_index)) {
+        g_skeleton_layout = compact_layout;
+        g_skeleton_layout_valid = true;
+        return true;
+    }
+
     // This is the layout already used by the working world-position reader.
-    // Try it directly before the compatibility probe; the latter is deliberately
-    // kept as a fallback because probing remote memory for every player/frame
-    // would make the overlay stutter.
+    // Try it before the compatibility probe; the latter is deliberately kept as
+    // a fallback because probing remote memory for every player/frame would
+    // make the overlay stutter.
     TransformHierarchyLayout standard_layout{};
     if (skeleton_head_matches_player(native_head, feet, standard_layout,
                                      storage, head_position, head_index)) {
@@ -451,7 +465,10 @@ static bool resolve_skeleton_layout(uint64_t native_head, const Vec3& feet,
     // arrays, but retain the same TransformData/index pairing. Probe only the
     // known ABI shapes and accept a candidate only if it projects the actual
     // head near the actual player root.
-    const uint64_t data_offsets[] = {0x38, 0x30, 0x40};
+    // The reference client uses the compact native Transform layout
+    // (data=0x28, index=0x30), while this Unity build usually uses
+    // data=0x38/index=0x40. Both point at the same 48-byte matrix records.
+    const uint64_t data_offsets[] = {0x38, 0x28, 0x30, 0x40};
     const int64_t index_deltas[] = {8, 16, -8, 24};
     const uint64_t array_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x20, 0x28}};
     for (uint64_t data_offset : data_offsets) {
