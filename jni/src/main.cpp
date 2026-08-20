@@ -2780,7 +2780,6 @@ static void CenterMenuOnDisplay() {
 static bool  g_aim_active = false;
 static float g_aim_cx = 0.f, g_aim_cy = 0.f;
 static float g_aim_tx = 0.f, g_aim_ty = 0.f; // smoothed target point
-static float g_aim_vx = 0.f, g_aim_vy = 0.f; // aim velocity (px/s)
 static uint64_t g_aim_target = 0;            // locked enemy source (hysteresis)
 
 static void AimRelease() {
@@ -2788,8 +2787,6 @@ static void AimRelease() {
         Touch_AimUp();
         g_aim_active = false;
     }
-    g_aim_vx = 0.f;
-    g_aim_vy = 0.f;
     g_aim_target = 0;
 }
 
@@ -2877,11 +2874,9 @@ static void RunAim() {
         if (best_src == 0) { AimRelease(); return; }
         g_aim_target = best_src;
         g_aim_tx = best_tx; g_aim_ty = best_ty;
-        g_aim_vx = 0.f; g_aim_vy = 0.f;
     } else if (best_src != g_aim_target && best_d2 < cur_d2 * 0.64f) {
         g_aim_target = best_src;
         g_aim_tx = best_tx; g_aim_ty = best_ty;
-        g_aim_vx = 0.f; g_aim_vy = 0.f;
     }
 
     // Current point of the locked target.
@@ -2909,47 +2904,36 @@ static void RunAim() {
     if (dt <= 0.0005f) dt = 0.0005f;
     if (dt > 0.05f) dt = 0.05f;
 
-    // Плавность 1..10. Lower = faster/aggressive, higher = slow & human-like.
+    // Плавность 1..10 (integer). Lower = faster/aggressive, higher = slower.
     int sm = (int)lroundf(g_state.gun_str);
     if (sm < 1) sm = 1;
     if (sm > 10) sm = 10;
-    float gain  = 12.f - 1.1f * (float)(sm - 1);  // sm1=12/s, sm10=2.1/s
-    float vmax  = 1500.f - 145.f * (float)(sm - 1); // sm1=1500, sm10=195 px/s
-    const float accel = 6000.f;                    // px/s^2 rate limit
+    float rate = 12.f - 1.1f * (float)(sm - 1); // sm1=12/s, sm10=2.1/s
+    if (rate < 2.f) rate = 2.f;
 
-    // Strongly smooth the target point: enemy boxes update in discrete network
-    // steps, this low-pass removes the per-tick jumps that cause shaking.
-    float ts = 1.0f - expf(-12.f * dt);
+    // Lightly smooth the target point: enemy boxes update in discrete network
+    // steps, this low-pass removes per-tick jumps without adding lag.
+    float ts = 1.0f - expf(-30.f * dt);
     g_aim_tx += (target_tx - g_aim_tx) * ts;
     g_aim_ty += (target_ty - g_aim_ty) * ts;
 
     float ex = g_aim_tx - cx; // remaining screen error
     float ey = g_aim_ty - cy;
 
-    // Desired velocity: proportional to error, capped at vmax (no overshoot —
-    // velocity naturally falls to 0 as the error shrinks).
-    float tvx = ex * gain, tvy = ey * gain;
-    float tvl = sqrtf(tvx * tvx + tvy * tvy);
-    if (tvl > vmax) { tvx *= vmax / tvl; tvy *= vmax / tvl; }
+    // Pure proportional control: move a fraction of the remaining error each
+    // frame (frame-rate normalized). Velocity naturally falls to 0 near the
+    // target, so there is no overshoot and no oscillation.
+    float step = 1.0f - expf(-rate * dt);
+    float ddx = ex * step;
+    float ddy = ey * step;
 
-    // Rate-limit the velocity change: smooth acceleration and deceleration.
-    float dvx = tvx - g_aim_vx, dvy = tvy - g_aim_vy;
-    float dvl = sqrtf(dvx * dvx + dvy * dvy);
-    float maxdv = accel * dt;
-    if (dvl > maxdv) { dvx *= maxdv / dvl; dvy *= maxdv / dvl; }
-    g_aim_vx += dvx;
-    g_aim_vy += dvy;
+    const float max_drag = 120.f; // per-frame cap
+    float dl = sqrtf(ddx * ddx + ddy * ddy);
+    if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
 
     // Deadzone: once essentially on target, stop dead (no micro-shake).
     float rest = sqrtf(ex * ex + ey * ey);
-    if (rest < 5.f) { g_aim_vx = 0.f; g_aim_vy = 0.f; }
-
-    float ddx = g_aim_vx * dt;
-    float ddy = g_aim_vy * dt;
-
-    const float max_drag = 60.f; // per-frame cap
-    float dl = sqrtf(ddx * ddx + ddy * ddy);
-    if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
+    if (rest < 4.f) { ddx = 0.f; ddy = 0.f; }
 
     // --- injection -----------------------------------------------------------
     const float anchor_x = sw * 0.72f;

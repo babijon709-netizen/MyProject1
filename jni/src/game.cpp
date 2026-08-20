@@ -693,6 +693,21 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
         view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
         if (!matrix_is_finite(projection) || !matrix_is_finite(view)) { return result; }
+
+        // Death animation: the camera rolls/falls until it is lying on the
+        // ground. While that happens the game no longer renders from this FPS
+        // camera (it switches to the death/spectate view), so boxes projected
+        // with it slide off the models. Detect the "lying down" camera by its
+        // up-vector and hide ESP until the camera is upright again.
+        {
+            float up_y = mat_get(view, 1, 1);
+            if (std::isfinite(up_y) && fabsf(up_y) < 0.5f) {
+                g_matrix_configuration_validated = false;
+                g_last_camera_fov_deg = -1.f;
+                return result;
+            }
+        }
+
         if (!g_matrix_configuration_validated) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
             projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
