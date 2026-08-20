@@ -42,7 +42,6 @@ static TransformHierarchyLayout g_transform_hierarchy_layout{};
 static bool g_transform_hierarchy_layout_valid = false;
 
 static bool      g_use_direct_player_position = true;
-static bool      g_use_transform_position = false;
 static bool      g_player_position_validated = false;
 
 static bool vec3_is_finite(const Vec3& value);
@@ -398,19 +397,6 @@ static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& pla
 
 static bool read_entity_position(uint64_t source, Vec3& position) {
     if (!source) return false;
-    // Prefer the real (rendered) Transform position. Replicated fields such as
-    // lastTickPosition update at the server tick rate and freeze/jump after
-    // death, which makes the boxes lag behind or slide off the model.
-    if (g_use_transform_position && g_transform_hierarchy_layout_valid) {
-        uint64_t native = resolve_player_native_transform(source);
-        if (native) {
-            Vec3 p{};
-            if (read_transform_hierarchy_position(native, p)) {
-                position = p;
-                return true;
-            }
-        }
-    }
     if (g_use_direct_player_position && g_player_position_offset != 0) { position = rd_v3(source + g_player_position_offset); return vec3_is_finite(position); }
     uint64_t native = resolve_player_native_transform(source);
     if (!native) return false;
@@ -451,27 +437,6 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
 }
 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    // Prefer the real Transform position (rendered every frame, no network lag,
-    // no death drift). The Unity Camera stays as the projection/view source.
-    size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
-    if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
-        g_use_transform_position = true;
-        g_use_direct_player_position = true; // camera stays matrix-based
-        g_transform_hierarchy_layout_valid = true;
-        g_player_position_validated = true; g_matrix_configuration_validated = false;
-        // Keep a replicated offset around as a runtime fallback for players
-        // whose transform hierarchy walk fails.
-        const uint64_t known_offsets[] = {0x1D0, 0x1DC, 0x1E8, 0x2D8, 0x2E4, 0x338};
-        uint64_t best_offset = 0;
-        double best_score = 0.0;
-        for (uint64_t offset : known_offsets) {
-            double score = 0.0;
-            if (evaluate_player_position_offset(players, offset, score) && score > best_score) { best_offset = offset; best_score = score; }
-        }
-        if (best_offset) g_player_position_offset = best_offset;
-        return true;
-    }
-    // Fallback: replicated position offsets only.
     const uint64_t known_offsets[] = {0x1D0, 0x1DC, 0x1E8, 0x2D8, 0x2E4, 0x338};
     uint64_t best_offset = 0;
     double best_score = 0.0;
@@ -484,6 +449,7 @@ static bool discover_player_position_offset(const std::vector<uint64_t>& players
         g_player_position_validated = true; g_matrix_configuration_validated = false;
         return true;
     }
+    size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
     if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
         g_use_direct_player_position = false;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
@@ -673,7 +639,6 @@ void esp_reset() {
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
-    g_use_transform_position = false;
     g_player_position_validated = false;
 }
 
@@ -791,8 +756,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
         Vec3 body_bottom = {feet.x, feet.y, feet.z};
         Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT, feet.z};
-        // Transform positions are the head/camera-root; shift them down to feet.
-        if (transform_camera_mode || g_use_transform_position) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
+        if (transform_camera_mode) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
 
         Vec2 sf{}, sh2{};
         bool bottom_visible = transform_camera_mode
@@ -826,6 +790,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;
         box.distance = distance;
+        box.source = s_transforms[i];
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
             bool projected = transform_camera_mode
@@ -843,4 +808,51 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
 float esp_get_camera_fov() {
     return g_last_camera_fov_deg;
+}
+
+// ---------------------------------------------------------------------------
+// Local player aim state. The local PlayerManager carries its input state as
+// `playerEventHandler` (huU, base class huc). huc holds:
+//   Aim        (huT)  at 0x268  -> huT.TCz bool at 0x10 (ADS input)
+//   AimRaycast (huW<huz>) at 0x168 -> huz (aim raycast result)
+// huz holds Tun (bool hit) at 0x10 and TuV (PlayerManager hit) at 0x40.
+// ---------------------------------------------------------------------------
+static uint64_t local_player_event_handler() {
+    uint64_t local = resolve_local_player();
+    if (!local) return 0;
+    return rd_ptr(local + PLAYER_EVENT_HANDLER);
+}
+
+bool esp_is_aiming() {
+    uint64_t handler = local_player_event_handler();
+    if (!handler) return false;
+    uint64_t aim = rd_ptr(handler + HUC_AIM);
+    if (!likely_native_pointer(aim)) return false;
+    return rd<uint8_t>(aim + HUT_STATE) != 0;
+}
+
+uint64_t esp_aim_hit_player() {
+    uint64_t handler = local_player_event_handler();
+    if (!handler) return 0;
+    uint64_t wrapped = rd_ptr(handler + HUC_AIM_RAYCAST);
+    if (!likely_native_pointer(wrapped)) return 0;
+
+    // huW<T> stores the current value (TUg) and previous value (TUm) as its
+    // instance fields; for a reference-type T these sit at +0x10/+0x18 (or
+    // +0x18/+0x20 if there is an instance field before them). Probe the likely
+    // slots and pick the one that looks like a real huz (two bools then refs).
+    uint64_t ray = 0;
+    for (int slot = 0; slot < 3; ++slot) {
+        uint64_t cand = rd_ptr(wrapped + 0x10 + (uint64_t)slot * 8);
+        if (!likely_native_pointer(cand)) continue;
+        uint8_t b0 = rd<uint8_t>(cand + HUZ_HIT);     // huz.Tun (hit)
+        uint8_t b1 = rd<uint8_t>(cand + HUZ_HIT + 1); // huz.TuX
+        if (b0 <= 1 && b1 <= 1) { ray = cand; break; }
+    }
+    if (!ray) return 0;
+
+    if (rd<uint8_t>(ray + HUZ_HIT) == 0) return 0; // aim ray hit nothing
+    uint64_t player = rd_ptr(ray + HUZ_PLAYER);
+    if (!likely_native_pointer(player)) return 0;
+    return player;
 }

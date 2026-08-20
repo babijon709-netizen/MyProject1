@@ -2276,8 +2276,10 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
 
         SHdr(XS("Аимбот"));
-        CardBg(Layout::RowH * 1);
-        ToggleRow("##ta1", XS("Включить аимбот"), &g_state.aim_touch, g_state.a_aim_touch, true, true);
+        CardBg(Layout::RowH * 3);
+        ToggleRow("##ta1", XS("Включить аимбот"),       &g_state.aim_touch,    g_state.a_aim_touch, false, true);
+        ToggleRow("##ta2", XS("Проверка видимости"),     &g_state.aim_pos,      g_state.a_aim_pos,   false);
+        ToggleRow("##ta6", XS("Только при прицеливании"), &g_state.aim_ads_only, g_state.a_aim_ads,   true);
 
         SHdr(XS("FOV аимбота"));
         CardBg(Layout::SliderH);
@@ -2728,8 +2730,21 @@ static void RunAim() {
     bool aim_on = g_esp_attached && !menu_open && g_state.aim_touch;
     if (!aim_on) { AimRelease(); return; }
 
+    // "Только при прицеливании": aim only while holding ADS (the game sets the
+    // local player's Aim input flag).
+    if (g_state.aim_ads_only && !esp_is_aiming()) { AimRelease(); return; }
+
     std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
     if (boxes.empty()) { AimRelease(); return; }
+
+    // "Проверка видимости": only allow aiming at the player the game's own aim
+    // raycast currently hits (so we never lock through a wall).
+    uint64_t visible_player = 0;
+    bool have_visible = true;
+    if (g_state.aim_pos) {
+        visible_player = esp_aim_hit_player();
+        have_visible = visible_player != 0;
+    }
 
     // Bone factor along the box height (0 = top/head, 1 = bottom/feet).
     float bone_v = 0.32f;
@@ -2748,6 +2763,9 @@ static void RunAim() {
 
         float tx = (box.x1 + box.x2) * 0.5f;
         float ty = box.y1 + bh * bone_v;
+
+        // Visibility: skip anyone not currently hit by the game's aim ray.
+        if (g_state.aim_pos && (!have_visible || box.source != visible_player)) continue;
 
         if (tx < 0.f || tx > sw || ty < 0.f || ty > sh) continue;
 
