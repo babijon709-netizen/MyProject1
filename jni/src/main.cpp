@@ -679,46 +679,73 @@ static void DrawEspOverlay() {
                     pts[b] = ImVec2(box.x1 + j.u * bw, box.y1 + j.v * bh);
                 }
 
-                // Dynamic motion: swing the limbs and bob the body with the
-                // player's real movement speed so the skeleton doesn't look like
-                // a frozen overlay. (Full per-bone IK would need the game's
-                // Animator bone transforms, which aren't reliably reachable from
-                // an external reader.)
-                float speed = esp_get_player_speed(box.source);
-                if (speed > 0.3f) {
-                    float t = (float)std::chrono::duration<double>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                // Dynamic motion. Speed comes from the movement of the same
+                // position source that draws the box (reliable per-player).
+                // Walk/run cycle: legs swing with knee lift, arms counter-swing,
+                // torso/head bob. Standing still = subtle breathing sway.
+                float speed = box.speed;
+                if (speed < 0.f) speed = 0.f;
+                float t = (float)std::chrono::duration<double>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                float offset = (float)(box.source & 0xFF) * 0.37f;
+
+                auto shift = [&](int bone, float dx, float dy) {
+                    pts[bone].x += dx;
+                    pts[bone].y += dy; // screen y: negative = up
+                };
+
+                if (speed > 0.6f) {
                     float amp = speed > 6.f ? 1.f : speed / 6.f;
-                    float phase = t * 9.0f + (float)(box.source & 0xFF) * 0.71f;
-                    float swing = sinf(phase) * amp * bw * 0.06f;
-                    float bob = fabsf(cosf(phase)) * amp * bh * 0.02f;
+                    float freq = 4.0f + speed * 1.1f; // steps per second
+                    float ph = t * freq + offset;
+                    float pl = sinf(ph);           // left leg forward when >0
+                    float pr = sinf(ph + 3.14159265f);
 
-                    // Arms move with the legs on the opposite side (walk cycle).
-                    float armA = swing, armB = -swing;
-                    float legA = -swing, legB = swing;
+                    // Legs: horizontal swing + knee lift on the forward step.
+                    float lx = pl * amp * bw * 0.12f;
+                    float rx = pr * amp * bw * 0.12f;
+                    float lly = ImMax(0.f, pl) * amp * bh * 0.06f;
+                    float rly = ImMax(0.f, pr) * amp * bh * 0.06f;
 
-                    auto shift = [&](int bone, float dx, float dy) {
-                        pts[bone].x += dx;
-                        pts[bone].y -= dy;
-                    };
+                    // Arms counter-swing, with a small bend upward.
+                    float axL = pr * amp * bw * 0.10f;
+                    float axR = pl * amp * bw * 0.10f;
+                    float ay = ImMax(0.f, -pl) * amp * bh * 0.02f;
 
-                    shift(skeleton::BONE_LEFT_UPPER_ARM,  armA, bob);
-                    shift(skeleton::BONE_LEFT_LOWER_ARM,  armA * 1.3f, bob);
-                    shift(skeleton::BONE_LEFT_HAND,       armA * 1.6f, bob);
-                    shift(skeleton::BONE_RIGHT_UPPER_ARM, armB, bob);
-                    shift(skeleton::BONE_RIGHT_LOWER_ARM, armB * 1.3f, bob);
-                    shift(skeleton::BONE_RIGHT_HAND,      armB * 1.6f, bob);
+                    // Whole-body bob (twice per stride).
+                    float bob = -fabsf(cosf(ph)) * amp * bh * 0.025f;
 
-                    shift(skeleton::BONE_LEFT_UPPER_LEG,  legA, 0.f);
-                    shift(skeleton::BONE_LEFT_LOWER_LEG,  legA * 1.4f, 0.f);
-                    shift(skeleton::BONE_LEFT_FOOT,       legA * 1.7f, 0.f);
-                    shift(skeleton::BONE_RIGHT_UPPER_LEG, legB, 0.f);
-                    shift(skeleton::BONE_RIGHT_LOWER_LEG, legB * 1.4f, 0.f);
-                    shift(skeleton::BONE_RIGHT_FOOT,      legB * 1.7f, 0.f);
+                    shift(skeleton::BONE_LEFT_UPPER_LEG,  lx * 0.55f, 0.f);
+                    shift(skeleton::BONE_LEFT_LOWER_LEG,  lx * 1.15f, -lly * 0.5f);
+                    shift(skeleton::BONE_LEFT_FOOT,       lx * 1.55f, -lly);
+                    shift(skeleton::BONE_RIGHT_UPPER_LEG, rx * 0.55f, 0.f);
+                    shift(skeleton::BONE_RIGHT_LOWER_LEG, rx * 1.15f, -rly * 0.5f);
+                    shift(skeleton::BONE_RIGHT_FOOT,      rx * 1.55f, -rly);
 
-                    shift(skeleton::BONE_HEAD,  0.f, bob);
-                    shift(skeleton::BONE_NECK,  0.f, bob);
+                    shift(skeleton::BONE_LEFT_UPPER_ARM,  axL * 0.55f, ay);
+                    shift(skeleton::BONE_LEFT_LOWER_ARM,  axL * 1.2f,  ay);
+                    shift(skeleton::BONE_LEFT_HAND,       axL * 1.6f,  ay);
+                    shift(skeleton::BONE_RIGHT_UPPER_ARM, axR * 0.55f, ay);
+                    shift(skeleton::BONE_RIGHT_LOWER_ARM, axR * 1.2f,  ay);
+                    shift(skeleton::BONE_RIGHT_HAND,      axR * 1.6f,  ay);
+
+                    shift(skeleton::BONE_HIPS,        0.f, bob);
+                    shift(skeleton::BONE_SPINE,       0.f, bob);
+                    shift(skeleton::BONE_CHEST,       0.f, bob);
                     shift(skeleton::BONE_UPPER_CHEST, 0.f, bob);
+                    shift(skeleton::BONE_NECK,        0.f, bob);
+                    shift(skeleton::BONE_HEAD,        0.f, bob);
+                } else {
+                    // Idle: slow breathing sway so it never looks frozen.
+                    float breathe = sinf(t * 1.6f + offset) * bh * 0.010f;
+                    float sway = sinf(t * 1.1f + offset) * bw * 0.012f;
+                    shift(skeleton::BONE_HEAD, sway, -breathe);
+                    shift(skeleton::BONE_NECK, sway * 0.7f, -breathe * 0.7f);
+                    shift(skeleton::BONE_UPPER_CHEST, sway * 0.4f, -breathe * 0.4f);
+                    shift(skeleton::BONE_LEFT_UPPER_ARM,  sway, 0.f);
+                    shift(skeleton::BONE_LEFT_LOWER_ARM,  sway * 1.2f, 0.f);
+                    shift(skeleton::BONE_RIGHT_UPPER_ARM, -sway, 0.f);
+                    shift(skeleton::BONE_RIGHT_LOWER_ARM, -sway * 1.2f, 0.f);
                 }
 
                 ImU32 col = ColU32(cfg::esp::skeleton_col);

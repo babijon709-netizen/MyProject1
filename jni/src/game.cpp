@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <chrono>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <unistd.h>
@@ -791,6 +793,29 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.x2 = cx + half_w; box.y2 = cy + half_h;
         box.distance = distance;
         box.source = s_transforms[i];
+
+        // Per-player horizontal speed from the movement of the same position
+        // source that draws the box (reliable, unlike replicated Velocity).
+        {
+            static std::unordered_map<uint64_t, std::pair<Vec3, double>> s_prev;
+            double now = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            float spd = -1.f;
+            auto it = s_prev.find(s_transforms[i]);
+            if (it != s_prev.end()) {
+                double dt = now - it->second.second;
+                if (dt > 0.001 && dt < 1.0) {
+                    float dx = feet.x - it->second.first.x;
+                    float dy = feet.y - it->second.first.y;
+                    float dz = feet.z - it->second.first.z;
+                    float v = sqrtf(dx * dx + dy * dy + dz * dz) / (float)dt;
+                    // teleport/respawn shows as a huge jump — ignore it
+                    if (v >= 0.f && v <= 15.f) spd = v;
+                }
+            }
+            s_prev[s_transforms[i]] = {feet, now};
+            box.speed = spd;
+        }
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
             bool projected = transform_camera_mode
@@ -854,13 +879,4 @@ uint64_t esp_aim_hit_player() {
     return 0;
 }
 
-float esp_get_player_speed(uint64_t source) {
-    if (!source) return -1.f;
-    uint64_t handler = rd_ptr(source + PLAYER_EVENT_HANDLER);
-    if (!likely_native_pointer(handler)) return -1.f;
-    uint64_t wrapped = rd_ptr(handler + HUC_VELOCITY);
-    if (!likely_native_pointer(wrapped)) return -1.f;
-    Vec3 v = rd<Vec3>(wrapped + HUW_VALUE);
-    if (!vec3_is_finite(v)) return -1.f;
-    return sqrtf(v.x * v.x + v.z * v.z);
-}
+
