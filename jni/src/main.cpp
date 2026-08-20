@@ -589,6 +589,7 @@ static ImU32 ColU32(const ImVec4& c) {
 // so read the game once and reuse it. This keeps the camera + positions fresh
 // every frame (no lag/slide) without doubling the memory reads.
 static int g_frame_id = 0;
+static int g_bones_debug = -1; // bones read for the last player (calibration aid)
 static int g_boxes_frame = -1;
 static std::vector<EspBox> g_cached_boxes;
 
@@ -598,6 +599,30 @@ static const std::vector<EspBox>& GetEspBoxes(int sw, int sh) {
         g_boxes_frame = g_frame_id;
     }
     return g_cached_boxes;
+}
+
+// Real animated bones: project the game's own bone world positions to screen
+// and connect them the same way the procedural skeleton does.
+static void DrawBoneSkeleton(ImDrawList* dl, const BoneSet& bones, int sw, int sh, ImU32 col, float thick) {
+    ImVec2 pts[skeleton::BONE_COUNT];
+    bool   ok[skeleton::BONE_COUNT] = {};
+    int    good = 0;
+    for (int b = 0; b < skeleton::BONE_COUNT; b++) {
+        if (!bones.v[b]) continue;
+        float sx = 0.f, sy = 0.f;
+        if (!esp_world_to_screen(bones.p[b], sw, sh, sx, sy)) continue;
+        if (!std::isfinite(sx) || !std::isfinite(sy)) continue;
+        pts[b] = ImVec2(sx, sy);
+        ok[b] = true;
+        good++;
+    }
+    if (good < 6) return;
+    for (int e = 0; e < skeleton::k_edge_count; e++) {
+        int a = skeleton::k_edges[e].a;
+        int b = skeleton::k_edges[e].b;
+        if (ok[a] && ok[b]) dl->AddLine(pts[a], pts[b], col, thick);
+    }
+    if (ok[skeleton::BONE_HEAD]) dl->AddCircleFilled(pts[skeleton::BONE_HEAD], thick * 1.5f, col, 16);
 }
 
 // Procedural humanoid skeleton drawn over a player box. Uses a 2-bone IK walk
@@ -785,9 +810,16 @@ static void DrawEspOverlay() {
         }
 
         if (g_state.esp_skeleton) {
-            float t = (float)std::chrono::duration<double>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            DrawSkeleton(dl, box, ColU32(cfg::esp::skeleton_col), thick, t);
+            BoneSet bones;
+            if (esp_read_bones(box.source, bones) && bones.valid >= 6) {
+                DrawBoneSkeleton(dl, bones, (int)sw, (int)sh, ColU32(cfg::esp::skeleton_col), thick);
+                g_bones_debug = bones.valid;
+            } else {
+                float t = (float)std::chrono::duration<double>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                DrawSkeleton(dl, box, ColU32(cfg::esp::skeleton_col), thick, t);
+                g_bones_debug = bones.valid;
+            }
         }
     }
 }
@@ -3092,14 +3124,21 @@ static void DrawPlayerCounter() {
 
     char buf[48];
     snprintf(buf, sizeof(buf), "%s %d", XS("Игроков:"), n);
+    // bones readout (calibration aid): show only when the skeleton is on.
+    char bbuf[48] = {};
+    if (g_state.esp_skeleton && g_bones_debug >= 0)
+        snprintf(bbuf, sizeof(bbuf), "%s %d", XS("Костей:"), g_bones_debug);
 
     auto* fg = ImGui::GetForegroundDrawList();
     auto* fn = ImGui::GetFont();
     float fs = ImGui::GetFontSize() * 1.05f;
     auto tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, buf);
+    auto bsz = bbuf[0] ? fn->CalcTextSizeA(fs * 0.85f, FLT_MAX, 0, bbuf) : ImVec2{0,0};
 
+    float tw = tsz.x > bsz.x ? tsz.x : bsz.x;
     float padX = 20.f, padY = 9.f;
-    float w = tsz.x + padX * 2.f, h = tsz.y + padY * 2.f;
+    float w = tw + padX * 2.f;
+    float h = tsz.y + padY * 2.f + (bbuf[0] ? bsz.y + 4.f : 0.f);
     float x = sw * 0.5f - w * 0.5f;
     float y = 24.f;
 
@@ -3107,7 +3146,9 @@ static void DrawPlayerCounter() {
     fg->AddRectFilled({x + 2.f, y + 3.f}, {x + w + 2.f, y + h + 3.f}, IM_COL32(0, 0, 0, 22), h * 0.5f);
     fg->AddRectFilled({x, y}, {x + w, y + h},
         IM_COL32((int)(card.x * 255), (int)(card.y * 255), (int)(card.z * 255), 235), h * 0.5f);
-    fg->AddText(fn, fs, {x + (w - tsz.x) * 0.5f, y + (h - tsz.y) * 0.5f}, C::U(C::Txt()), buf);
+    fg->AddText(fn, fs, {x + (w - tsz.x) * 0.5f, y + padY}, C::U(C::Txt()), buf);
+    if (bbuf[0])
+        fg->AddText(fn, fs * 0.85f, {x + (w - bsz.x) * 0.5f, y + padY + tsz.y + 4.f}, C::U(C::Dim()), bbuf);
 }
 
 void RenderMenu() {

@@ -1015,3 +1015,164 @@ uint64_t esp_aim_hit_player() {
 }
 
 
+
+// ---------------------------------------------------------------------------
+// Unity 6 (6000.x) real bone reader.
+//
+// The game's Animator skins the character model with a live array of 4x4 skin
+// matrices in WORLD space (SkeletonPose.m_ArrayOfPose). Each matrix's last
+// column is the world position of one skeleton node. The Animator also points
+// to its Avatar, whose humanoid rig maps HumanBodyBones -> skeleton node index.
+//
+// Native engine layouts are not in the il2cpp dump, so instead of hardcoded
+// offsets we DISCOVER, on the live object:
+//   1. a pointer to an array of plausible skin matrices (the pose array),
+//   2. the node count (20..160),
+//   3. the Avatar's 55-entry HumanBodyBones -> node index table.
+// The discovery result is cached; only the 20 matrices are re-read per frame.
+// ---------------------------------------------------------------------------
+
+namespace {
+struct BoneMatrix { float m[16]; };
+
+static bool bone_matrix_ok(const BoneMatrix& M) {
+    for (int i = 0; i < 16; i++) if (!std::isfinite(M.m[i])) return false;
+    // affine skin matrix: last column [0,0,0,1]
+    if (fabsf(M.m[3])  > 0.25f) return false;
+    if (fabsf(M.m[7])  > 0.25f) return false;
+    if (fabsf(M.m[11]) > 0.25f) return false;
+    if (fabsf(M.m[15] - 1.f) > 0.25f) return false;
+    // translation (column 4) finite and in a sane world range
+    if (fabsf(M.m[12]) > 100000.f || fabsf(M.m[13]) > 100000.f || fabsf(M.m[14]) > 100000.f) return false;
+    return true;
+}
+
+// HumanBodyBones enum value for each skeleton::Bone we draw.
+static constexpr int k_bone_to_human[skeleton::BONE_COUNT] = {
+    0,   // HIPS
+    7,   // SPINE
+    8,   // CHEST
+    9,   // UPPER_CHEST
+    10,  // NECK
+    11,  // HEAD
+    12,  // LEFT_SHOULDER
+    14,  // LEFT_UPPER_ARM
+    16,  // LEFT_LOWER_ARM
+    18,  // LEFT_HAND
+    13,  // RIGHT_SHOULDER
+    15,  // RIGHT_UPPER_ARM
+    17,  // RIGHT_LOWER_ARM
+    19,  // RIGHT_HAND
+    1,   // LEFT_UPPER_LEG
+    3,   // LEFT_LOWER_LEG
+    5,   // LEFT_FOOT
+    2,   // RIGHT_UPPER_LEG
+    4,   // RIGHT_LOWER_LEG
+    6    // RIGHT_FOOT
+};
+
+struct BoneDiscover {
+    uint64_t pose = 0;      // pointer to the world-space skin matrix array
+    int      nodes = 0;     // skeleton node count
+    int      map[55];       // HumanBodyBones -> node index
+    bool     ready = false;
+};
+static BoneDiscover g_bones;
+static std::chrono::steady_clock::time_point g_bones_scan{};
+
+static bool bone_discover(uint64_t anim) {
+    // (1) find the pose matrix array pointer
+    for (uint64_t off = 0x20; off <= 0x800; off += 8) {
+        uint64_t p = rd_ptr(anim + off);
+        if (!likely_native_pointer(p)) continue;
+        BoneMatrix a{}, b{}, c{};
+        if (!rd_exact(p, a) || !rd_exact(p + 64, b) || !rd_exact(p + 128, c)) continue;
+        if (!bone_matrix_ok(a) || !bone_matrix_ok(b) || !bone_matrix_ok(c)) continue;
+        // distinct translations (not three copies of the same matrix)
+        float d = fabsf(a.m[12]-b.m[12]) + fabsf(a.m[13]-b.m[13]) + fabsf(a.m[14]-b.m[14]);
+        if (d < 0.001f) continue;
+        g_bones.pose = p;
+        break;
+    }
+    if (!g_bones.pose) return false;
+
+    // (2) node count: an int that matches the plausible array length
+    g_bones.nodes = 0;
+    for (uint64_t off = 0x20; off <= 0x800; off += 4) {
+        int n = rd<int32_t>(anim + off);
+        if (n < 20 || n > 160) continue;
+        BoneMatrix m{};
+        bool ok = true;
+        for (int k : {0, n / 2, n - 1}) {
+            if (!rd_exact(g_bones.pose + (uint64_t)k * 64, m) || !bone_matrix_ok(m)) { ok = false; break; }
+        }
+        if (ok) { g_bones.nodes = n; break; }
+    }
+    if (!g_bones.nodes) {
+        int n = 0;
+        for (int k = 0; k < 160; k++) {
+            BoneMatrix m{};
+            if (!rd_exact(g_bones.pose + (uint64_t)k * 64, m) || !bone_matrix_ok(m)) break;
+            n++;
+        }
+        g_bones.nodes = n;
+    }
+    if (g_bones.nodes < 20 || g_bones.nodes > 160) { g_bones.pose = 0; return false; }
+
+    // (3) HumanBodyBones -> node index table (55 ints, all < node count) inside
+    // the Avatar (some plausible object pointer referenced by the Animator).
+    bool have_map = false;
+    int candidates = 0;
+    for (uint64_t off = 0x20; off <= 0x800 && !have_map && candidates < 16; off += 8) {
+        uint64_t a = rd_ptr(anim + off);
+        if (!likely_native_pointer(a) || a == g_bones.pose) continue;
+        candidates++;
+        for (uint64_t ho = 0x10; ho <= 0x400; ho += 4) {
+            bool ok = true;
+            for (int k = 0; k < 55; k++) {
+                int v = rd<int32_t>(a + ho + (uint64_t)k * 4);
+                if (v < 0 || v >= g_bones.nodes) { ok = false; break; }
+                g_bones.map[k] = v;
+            }
+            if (ok) { have_map = true; break; }
+        }
+    }
+    if (!have_map) { g_bones.pose = 0; g_bones.nodes = 0; return false; }
+
+    g_bones.ready = true;
+    return true;
+}
+} // namespace
+
+bool esp_read_bones(uint64_t player, BoneSet& out) {
+    out.valid = 0;
+    for (int i = 0; i < skeleton::BONE_COUNT; i++) { out.v[i] = false; out.p[i] = {}; }
+    if (!player || g_pid <= 0) return false;
+
+    uint64_t animM = rd_ptr(player + PLAYER_ANIMATOR);
+    if (!likely_native_pointer(animM)) return false;
+    uint64_t anim = rd_ptr(animM + MANAGED_CACHED_PTR);
+    if (!likely_native_pointer(anim)) return false;
+
+    if (!g_bones.ready) {
+        // discovery is a bit expensive — retry at most once per second.
+        auto now = std::chrono::steady_clock::now();
+        int ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - g_bones_scan).count();
+        if (g_bones_scan.time_since_epoch().count() != 0 && ms >= 0 && ms < 1000) return false;
+        g_bones_scan = now;
+        if (!bone_discover(anim)) return false;
+    }
+
+    int good = 0;
+    for (int b = 0; b < skeleton::BONE_COUNT; b++) {
+        int node = g_bones.map[k_bone_to_human[b]];
+        if (node < 0 || node >= g_bones.nodes) continue;
+        BoneMatrix m{};
+        if (!rd_exact(g_bones.pose + (uint64_t)node * 64, m) || !bone_matrix_ok(m)) continue;
+        out.p[b] = {m.m[12], m.m[13], m.m[14]};
+        out.v[b] = true;
+        good++;
+    }
+    out.valid = good;
+    return good >= 6;
+}

@@ -2,6 +2,7 @@
 #include <sys/types.h>
 #include <vector>
 #include "Vector.h"
+#include "bones.h"
 
 struct EspBox {
     float x1, y1, x2, y2;     // screen rect
@@ -27,3 +28,8 @@ uint64_t    esp_aim_hit_player(); // PlayerManager* currently hit by the aim ray
 
 // Project a world-space point to screen using the latest view-projection matrix.
 bool        esp_world_to_screen(Vec3 world, int screen_w, int screen_h, float& sx, float& sy);
+
+// Read the real animated bone world positions for a player (Unity 6 Animator
+// skin matrices). Returns false / valid==0 when unavailable; the caller falls
+// back to the procedural skeleton.
+bool        esp_read_bones(uint64_t player, BoneSet& out);
