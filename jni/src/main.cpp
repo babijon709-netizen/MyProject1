@@ -580,6 +580,21 @@ static ImU32 ColU32(const ImVec4& c) {
     return IM_COL32((int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255), (int)(c.w * 255));
 }
 
+// esp_get_boxes() reads a lot of game memory; refresh it at ~30 Hz and reuse the
+// same result for both the ESP overlay and the aimbot (big FPS win when ESP is on).
+static std::vector<EspBox> g_cached_boxes;
+static std::chrono::steady_clock::time_point g_boxes_stamp{};
+
+static const std::vector<EspBox>& GetEspBoxes(int sw, int sh) {
+    auto now = std::chrono::steady_clock::now();
+    int ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - g_boxes_stamp).count();
+    if (g_cached_boxes.empty() || ms < 0 || ms >= 33) {
+        g_cached_boxes = esp_get_boxes(sw, sh);
+        g_boxes_stamp = now;
+    }
+    return g_cached_boxes;
+}
+
 static void DrawEspOverlay() {
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;
@@ -597,7 +612,7 @@ static void DrawEspOverlay() {
     if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall &&
         !g_state.esp_skeleton && !g_state.esp_tracer) return;
 
-    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
+    const std::vector<EspBox>& boxes = GetEspBoxes((int)sw, (int)sh);
     constexpr int BOX_EDGES[][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},
@@ -664,6 +679,49 @@ static void DrawEspOverlay() {
                     const skeleton::Joint& j = skeleton::k_joints[b];
                     pts[b] = ImVec2(box.x1 + j.u * bw, box.y1 + j.v * bh);
                 }
+
+                // Dynamic motion: swing the limbs and bob the body with the
+                // player's real movement speed so the skeleton doesn't look like
+                // a frozen overlay. (Full per-bone IK would need the game's
+                // Animator bone transforms, which aren't reliably reachable from
+                // an external reader.)
+                float speed = esp_get_player_speed(box.source);
+                if (speed > 0.3f) {
+                    float t = (float)std::chrono::duration<double>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    float amp = speed > 6.f ? 1.f : speed / 6.f;
+                    float phase = t * 9.0f + (float)(box.source & 0xFF) * 0.71f;
+                    float swing = sinf(phase) * amp * bw * 0.06f;
+                    float bob = fabsf(cosf(phase)) * amp * bh * 0.02f;
+
+                    // Arms move with the legs on the opposite side (walk cycle).
+                    float armA = swing, armB = -swing;
+                    float legA = -swing, legB = swing;
+
+                    auto shift = [&](int bone, float dx, float dy) {
+                        pts[bone].x += dx;
+                        pts[bone].y -= dy;
+                    };
+
+                    shift(skeleton::BONE_LEFT_UPPER_ARM,  armA, bob);
+                    shift(skeleton::BONE_LEFT_LOWER_ARM,  armA * 1.3f, bob);
+                    shift(skeleton::BONE_LEFT_HAND,       armA * 1.6f, bob);
+                    shift(skeleton::BONE_RIGHT_UPPER_ARM, armB, bob);
+                    shift(skeleton::BONE_RIGHT_LOWER_ARM, armB * 1.3f, bob);
+                    shift(skeleton::BONE_RIGHT_HAND,      armB * 1.6f, bob);
+
+                    shift(skeleton::BONE_LEFT_UPPER_LEG,  legA, 0.f);
+                    shift(skeleton::BONE_LEFT_LOWER_LEG,  legA * 1.4f, 0.f);
+                    shift(skeleton::BONE_LEFT_FOOT,       legA * 1.7f, 0.f);
+                    shift(skeleton::BONE_RIGHT_UPPER_LEG, legB, 0.f);
+                    shift(skeleton::BONE_RIGHT_LOWER_LEG, legB * 1.4f, 0.f);
+                    shift(skeleton::BONE_RIGHT_FOOT,      legB * 1.7f, 0.f);
+
+                    shift(skeleton::BONE_HEAD,  0.f, bob);
+                    shift(skeleton::BONE_NECK,  0.f, bob);
+                    shift(skeleton::BONE_UPPER_CHEST, 0.f, bob);
+                }
+
                 ImU32 col = ColU32(cfg::esp::skeleton_col);
                 for (int e = 0; e < skeleton::k_edge_count; ++e) {
                     const skeleton::Edge& edge = skeleton::k_edges[e];
@@ -2778,7 +2836,7 @@ static void RunAim() {
     // local player's Aim input flag).
     if (g_state.aim_ads_only && !esp_is_aiming()) { AimRelease(); return; }
 
-    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
+    const std::vector<EspBox>& boxes = GetEspBoxes((int)sw, (int)sh);
     if (boxes.empty()) { AimRelease(); return; }
 
     // "Проверка видимости": only allow aiming at the player the game's own aim

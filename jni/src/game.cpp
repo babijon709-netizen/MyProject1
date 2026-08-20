@@ -834,25 +834,33 @@ bool esp_is_aiming() {
 uint64_t esp_aim_hit_player() {
     uint64_t handler = local_player_event_handler();
     if (!handler) return 0;
-    uint64_t wrapped = rd_ptr(handler + HUC_AIM_RAYCAST);
-    if (!likely_native_pointer(wrapped)) return 0;
-
-    // huW<T> stores the current value (TUg) and previous value (TUm) as its
-    // instance fields; for a reference-type T these sit at +0x10/+0x18 (or
-    // +0x18/+0x20 if there is an instance field before them). Probe the likely
-    // slots and pick the one that looks like a real huz (two bools then refs).
-    uint64_t ray = 0;
-    for (int slot = 0; slot < 3; ++slot) {
-        uint64_t cand = rd_ptr(wrapped + 0x10 + (uint64_t)slot * 8);
-        if (!likely_native_pointer(cand)) continue;
-        uint8_t b0 = rd<uint8_t>(cand + HUZ_HIT);     // huz.Tun (hit)
-        uint8_t b1 = rd<uint8_t>(cand + HUZ_HIT + 1); // huz.TuX
-        if (b0 <= 1 && b1 <= 1) { ray = cand; break; }
+    // Both RaycastData (crosshair) and AimRaycast (aim assist) cache the most
+    // recent raycast result as huW<huz>; the huz instance sits at huW+0x20
+    // (current) / +0x28 (previous). Check both fields and both slots.
+    for (uint64_t field : {HUC_RAYCAST_DATA, HUC_AIM_RAYCAST}) {
+        uint64_t wrapped = rd_ptr(handler + field);
+        if (!likely_native_pointer(wrapped)) continue;
+        for (uint64_t off : {HUW_VALUE, HUW_PREV}) {
+            uint64_t ray = rd_ptr(wrapped + off);
+            if (!likely_native_pointer(ray)) continue;
+            uint8_t hit = rd<uint8_t>(ray + HUZ_HIT);
+            uint8_t hit2 = rd<uint8_t>(ray + HUZ_HIT + 1);
+            if (hit > 1 || hit2 > 1) continue; // not a huz (bool fields)
+            if (hit == 0) continue;            // ray hit nothing
+            uint64_t player = rd_ptr(ray + HUZ_PLAYER);
+            if (player && likely_native_pointer(player)) return player;
+        }
     }
-    if (!ray) return 0;
+    return 0;
+}
 
-    if (rd<uint8_t>(ray + HUZ_HIT) == 0) return 0; // aim ray hit nothing
-    uint64_t player = rd_ptr(ray + HUZ_PLAYER);
-    if (!likely_native_pointer(player)) return 0;
-    return player;
+float esp_get_player_speed(uint64_t source) {
+    if (!source) return -1.f;
+    uint64_t handler = rd_ptr(source + PLAYER_EVENT_HANDLER);
+    if (!likely_native_pointer(handler)) return -1.f;
+    uint64_t wrapped = rd_ptr(handler + HUC_VELOCITY);
+    if (!likely_native_pointer(wrapped)) return -1.f;
+    Vec3 v = rd<Vec3>(wrapped + HUW_VALUE);
+    if (!vec3_is_finite(v)) return -1.f;
+    return sqrtf(v.x * v.x + v.z * v.z);
 }

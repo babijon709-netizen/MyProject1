@@ -16,3 +16,4 @@ std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 float       esp_get_camera_fov(); // vertical FOV in degrees, -1 if unknown
 bool        esp_is_aiming();      // local player is aiming down sights
 uint64_t    esp_aim_hit_player(); // PlayerManager* currently hit by the aim ray, 0 if wall/none
+float       esp_get_player_speed(uint64_t source); // horizontal speed m/s, -1 if unknown
