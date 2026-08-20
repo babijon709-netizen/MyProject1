@@ -33,6 +33,11 @@
 #  define ICONS_AVAILABLE
 #endif
 
+#if __has_include("media/avatars.h")
+#  include "media/avatars.h"
+#  define AVATARS_AVAILABLE
+#endif
+
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
 #include "stb_image/stb_image.h"
@@ -377,6 +382,15 @@ void LoadAnimeImage() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
     stbi_image_free(px);
+#endif
+}
+
+static GLuint g_devAvatar[2] = {};
+
+void LoadDevAvatars() {
+#ifdef AVATARS_AVAILABLE
+    g_devAvatar[0] = LoadTexFromMemory(avatar_xvcey_png, (int)avatar_xvcey_png_len);
+    g_devAvatar[1] = LoadTexFromMemory(avatar_johnny_png, (int)avatar_johnny_png_len);
 #endif
 }
 
@@ -2148,7 +2162,7 @@ float TabContent(int tab, float dt, float cW) {
         SHdr(XS("Разработчики"));
         {
             auto DrawDevCard = [&](const char* id, const char* name, const char* tag,
-                                   const char* avLetter, const char* openCmd) {
+                                   GLuint tex, const char* avLetter, const char* openCmd) {
                 const float avatarR = 44.f;
                 const float cardH   = 152.f;
 
@@ -2168,21 +2182,28 @@ float TabContent(int tab, float dt, float cW) {
                 dl->AddCircleFilled({avCX, avCY}, avatarR + 2.5f, C::U(C::Card()), 64);
 
                 {
-                    const int segs = 60;
-                    ImVec4 ac = C::Acc();
-                    ImVec4 ac2 = {Lerpf(ac.x,0.3f,0.55f), Lerpf(ac.y,0.05f,0.55f), Lerpf(ac.z,0.9f,0.42f), 1.f};
-                    for (int si = 0; si < segs; si++) {
-                        float a0 = (float)si/segs*IM_PI*2.f, a1 = (float)(si+1)/segs*IM_PI*2.f;
-                        float tt = (float)si/segs;
-                        ImVec4 ca = {Lerpf(ac2.x,ac.x,tt), Lerpf(ac2.y,ac.y,tt), Lerpf(ac2.z,ac.z,tt), 1.f};
-                        dl->AddTriangleFilled({avCX,avCY},
-                            {avCX+avatarR*cosf(a0),avCY+avatarR*sinf(a0)},
-                            {avCX+avatarR*cosf(a1),avCY+avatarR*sinf(a1)},
-                            IM_COL32(int(ca.x*255),int(ca.y*255),int(ca.z*255),255));
+                    if (tex) {
+                        dl->AddImageRounded((ImTextureID)(intptr_t)tex,
+                            {avCX - avatarR, avCY - avatarR},
+                            {avCX + avatarR, avCY + avatarR},
+                            {0,0}, {1,1}, IM_COL32(255,255,255,255), avatarR);
+                    } else {
+                        const int segs = 60;
+                        ImVec4 ac = C::Acc();
+                        ImVec4 ac2 = {Lerpf(ac.x,0.3f,0.55f), Lerpf(ac.y,0.05f,0.55f), Lerpf(ac.z,0.9f,0.42f), 1.f};
+                        for (int si = 0; si < segs; si++) {
+                            float a0 = (float)si/segs*IM_PI*2.f, a1 = (float)(si+1)/segs*IM_PI*2.f;
+                            float tt = (float)si/segs;
+                            ImVec4 ca = {Lerpf(ac2.x,ac.x,tt), Lerpf(ac2.y,ac.y,tt), Lerpf(ac2.z,ac.z,tt), 1.f};
+                            dl->AddTriangleFilled({avCX,avCY},
+                                {avCX+avatarR*cosf(a0),avCY+avatarR*sinf(a0)},
+                                {avCX+avatarR*cosf(a1),avCY+avatarR*sinf(a1)},
+                                IM_COL32(int(ca.x*255),int(ca.y*255),int(ca.z*255),255));
+                        }
+                        float lfs = avatarR * 1.05f;
+                        auto lsz = fn->CalcTextSizeA(lfs, FLT_MAX, 0, avLetter);
+                        dl->AddText(fn, lfs, {avCX-lsz.x*0.5f, avCY-lsz.y*0.5f}, IM_COL32(255,255,255,245), avLetter);
                     }
-                    float lfs = avatarR * 1.05f;
-                    auto lsz = fn->CalcTextSizeA(lfs, FLT_MAX, 0, avLetter);
-                    dl->AddText(fn, lfs, {avCX-lsz.x*0.5f, avCY-lsz.y*0.5f}, IM_COL32(255,255,255,245), avLetter);
                 }
 
                 dl->AddCircle({avCX,avCY}, avatarR+2.5f, C::UA(C::Acc(),0.9f), 64, 2.5f);
@@ -2230,12 +2251,12 @@ float TabContent(int tab, float dt, float cW) {
                 ImGui::Dummy({avW, 0.f});
             };
 
-            DrawDevCard("##devcard", XS("xvcey"), XS("@xvcey"), XS("X"),
+            DrawDevCard("##devcard", XS("xvcey"), XS("@xvcey"), g_devAvatar[0], XS("X"),
                         XS("am start -a android.intent.action.VIEW -d \"https://t.me/xvcey\""));
 
             ImGui::Dummy({1.f, 10.f});
 
-            DrawDevCard("##devcard2", XS("JohnnyCutter"), XS("@recoveryev"), XS("J"),
+            DrawDevCard("##devcard2", XS("JohnnyCutter"), XS("@recoveryev"), g_devAvatar[1], XS("J"),
                         XS("am start -a android.intent.action.VIEW -d \"https://t.me/recoveryev\""));
         }
 
@@ -3083,6 +3104,7 @@ int main(int argc, char* argv[]) {
     start_attach_thread();
     LoadAnimeImage();
     LoadTabIcons();
+    LoadDevAvatars();
     ApplyTheme();
     CfgScanDir();
     CenterMenuOnDisplay();
