@@ -1,36 +1,52 @@
-# This is a basic workflow to help you get started with Actions
+name: Build xvcen.sh
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
+    branches: [ "arena/01a01faa-myproject1" ]
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
-jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
+permissions:
+  contents: write
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
+jobs:
+  build:
+    runs-on: ubuntu-latest
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Setup Android NDK
+        id: setup-ndk
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          NDK=""
+          for cand in "$ANDROID_NDK_ROOT" "$ANDROID_NDK_HOME" "$ANDROID_SDK_ROOT"/ndk/*; do
+            if [ -n "$cand" ] && [ -x "$cand/ndk-build" ]; then NDK="$cand"; break; fi
+          done
+          if [ -z "$NDK" ]; then
+            curl -sSL -o /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+            unzip -q /tmp/ndk.zip -d /tmp
+            NDK=/tmp/android-ndk-r26d
+          fi
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          export ANDROID_NDK_HOME="$NDK"
+          export ANDROID_NDK_ROOT="$NDK"
+          "$NDK/ndk-build" -j"$(nproc)"
+          file libs/arm64-v8a/xvcen.sh
+          sha256sum libs/arm64-v8a/xvcen.sh
+      - name: Commit binary back to branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf 'obj/\n' > .gitignore
+          git add .gitignore libs/arm64-v8a/xvcen.sh
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "build: xvcen.sh arm64-v8a [CI]"
+            git push
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xvcen-sh-arm64-v8a
+          path: libs/arm64-v8a/xvcen.sh
