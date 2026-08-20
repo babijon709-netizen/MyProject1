@@ -569,7 +569,7 @@ struct AppState {
     float a_esp_master = 1;
     float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_aim_sens;
 };
 static AppState g_state;
 
