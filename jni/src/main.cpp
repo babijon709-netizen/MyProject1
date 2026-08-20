@@ -559,7 +559,6 @@ struct AppState {
     bool  esp_master = true;
     float esp_thick = 1.5f;
     float gun_str = 0.35f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
-    float aim_sens = 1.0f;
     float aim_fov_threshold = 50.f;
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
 
@@ -572,7 +571,7 @@ struct AppState {
     float a_esp_master = 1;
     float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_aim_sens, sl_aim_fov;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_aim_fov;
 };
 static AppState g_state;
 
@@ -861,7 +860,7 @@ static void ConfigSaveToPath(const std::string& path) {
     s.aim_draw_fov   = cfg::aim::draw_fov;
     s.aim_fov        = cfg::aim::fov;
     s.aim_smoothness = cfg::aim::smoothness;
-    s.aim_sens       = g_state.aim_sens;
+    s.aim_sens       = 1.0f; // unused (sensitivity removed), kept for blob compatibility
     s.aim_fov_threshold = g_state.aim_fov_threshold;
     s.esp_box     = g_state.esp_box;     s.esp_name    = g_state.esp_name;
     s.esp_hp      = g_state.esp_hp;      s.esp_wall    = g_state.esp_wall;
@@ -969,7 +968,6 @@ static void ConfigLoad(int idx) {
     cfg::aim::draw_fov   = s.aim_draw_fov;
     cfg::aim::fov        = s.aim_fov;
     cfg::aim::smoothness = s.aim_smoothness;
-    g_state.aim_sens     = s.aim_sens;
     g_state.aim_fov_threshold = s.aim_fov_threshold;
     g_state.esp_box     = s.esp_box;     g_state.esp_name    = s.esp_name;
     g_state.esp_hp      = s.esp_hp;      g_state.esp_wall    = s.esp_wall;
@@ -2391,10 +2389,6 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::SliderH);
         SliderRow("##asmt", XS("Плавность"), &g_state.gun_str, 0.f, 1.f, "%.2f", true, true, g_state.sl_gun_str, dt);
 
-        SHdr(XS("Чувствительность"));
-        CardBg(Layout::SliderH);
-        SliderRow("##asens", XS("Чувствительность аима"), &g_state.aim_sens, 0.05f, 5.f, "%.2f", true, true, g_state.sl_aim_sens, dt);
-
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
 
@@ -2895,11 +2889,8 @@ static void RunAim() {
     if (smooth < 0.02f) smooth = 0.02f;
     if (smooth > 0.16f) smooth = 0.16f;
 
-    float sens = g_state.aim_sens;
-    if (sens < 0.05f) sens = 0.05f;
-
-    float ddx = offx * smooth * sens;
-    float ddy = offy * smooth * sens;
+    float ddx = offx * smooth;
+    float ddy = offy * smooth;
 
     // Low-pass (EMA) the injected delta so the camera eases in and out instead
     // of jumping every frame — this is what removes the "jerk".
