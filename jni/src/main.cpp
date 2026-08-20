@@ -557,6 +557,7 @@ struct AppState {
     bool  esp_master = true;
     float esp_thick = 1.5f;
     float gun_str = 0.35f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
+    float aim_sens = 1.0f;
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
@@ -2279,6 +2280,10 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::SliderH);
         SliderRow("##asmt", XS("Плавность"), &g_state.gun_str, 0.f, 1.f, "%.2f", true, true, g_state.sl_gun_str, dt);
 
+        SHdr(XS("Чувствительность"));
+        CardBg(Layout::SliderH);
+        SliderRow("##asens", XS("Чувствительность аима"), &g_state.aim_sens, 0.05f, 5.f, "%.2f", true, true, g_state.sl_aim_sens, dt);
+
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
 
@@ -2677,7 +2682,6 @@ static void CenterMenuOnDisplay() {
 //  Smooth aimbot
 // ===========================================================================
 static bool  g_aim_touch_down = false;
-static float g_aim_fx = 0.f, g_aim_fy = 0.f;
 
 static void AimRelease() {
     if (g_aim_touch_down) {
@@ -2769,26 +2773,42 @@ static void RunAim() {
 
     if (best_dist2 < 0.f) { AimRelease(); return; }
 
-    float dx = best_tx - cx;
-    float dy = best_ty - cy;
-    float dist = sqrtf(dx * dx + dy * dy);
-    if (dist < 3.f) { AimRelease(); return; } // already on target
+    float offx = best_tx - cx;
+    float offy = best_ty - cy;
+    float dist = sqrtf(offx * offx + offy * offy);
+    if (dist < 4.f) { AimRelease(); return; } // already on target
 
-    // Smoothness 0..1: 0 = fast, 1 = slow. Clamped so it always moves a bit,
-    // but never snaps the whole distance in one frame (no overshoot/oscillation).
-    float speed = 1.0f - g_state.gun_str;
-    if (speed < 0.05f) speed = 0.05f;
-    if (speed > 0.60f) speed = 0.60f;
+    // Per-frame fraction of the remaining offset. "Плавность" 0..1, higher =
+    // smoother/slower.
+    float smooth = 0.04f + 0.36f * (1.0f - g_state.gun_str);
+    if (smooth < 0.02f) smooth = 0.02f;
+    if (smooth > 0.40f) smooth = 0.40f;
 
-    if (!g_aim_touch_down) {
-        g_aim_fx = cx;
-        g_aim_fy = cy;
-        Touch_Down(g_aim_fx, g_aim_fy);
-        g_aim_touch_down = true;
-    }
-    g_aim_fx = ImClamp(g_aim_fx + dx * speed, 0.f, sw);
-    g_aim_fy = ImClamp(g_aim_fy + dy * speed, 0.f, sh);
-    Touch_Move(g_aim_fx, g_aim_fy);
+    float sens = g_state.aim_sens;
+    if (sens < 0.05f) sens = 0.05f;
+
+    float ddx = offx * smooth * sens;
+    float ddy = offy * smooth * sens;
+
+    const float max_drag = 90.f; // cap a single frame's drag
+    float dl = sqrtf(ddx * ddx + ddy * ddy);
+    if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
+
+    if (fabsf(ddx) < 0.5f && fabsf(ddy) < 0.5f) { AimRelease(); return; }
+
+    // The game rotates the camera by RELATIVE finger movement in the RIGHT
+    // (look) half of the screen. The left half is the movement joystick, so we
+    // keep the injection out of the joystick zone and away from the center.
+    // Each frame we inject one short swipe from a fixed anchor — no drift and
+    // no accidental joystick input.
+    float ax = sw * 0.72f;
+    float ay = sh * 0.50f;
+
+    if (g_aim_touch_down) Touch_Up();
+    Touch_Down(ax, ay);
+    Touch_Move(ax + ddx, ay + ddy);
+    Touch_Up();
+    g_aim_touch_down = false;
 }
 
 void RenderMenu() {
