@@ -19,6 +19,7 @@ bool other_touch;
 
 static uint32_t orientation = 0;
 static float screenHeight = 0, screenWidth = 0;
+static float scale_x = 0.f, scale_y = 0.f;
 
 struct touchObj {
     bool isDown = false;
@@ -69,8 +70,6 @@ static void screenToTouch(float xt, float yt, int &x, int &y) {
 }
 
 static int fdNum = 0, origfd[maxE], nowfd;
-
-static float scale_x, scale_y;
 
 static bool Touch_initialized = false;
 
