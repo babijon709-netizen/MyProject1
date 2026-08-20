@@ -749,9 +749,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     Vec3 local{};
     size_t local_entity_index = s_transforms.size();
 
+    Vec3 world_camera_position{};
+    bool have_world_camera = camera_position_from_view(view, world_camera_position);
     {
-        Vec3 camera_position{};
-        bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
+        Vec3 camera_position = world_camera_position;
+        bool has_camera_position = have_world_camera && g_camera_matrix_physical_match;
         double nearest_distance_squared = INFINITY;
         size_t first_valid_index = s_transforms.size();
         Vec3 first_valid_position{};
@@ -772,6 +774,19 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         has_local_position = local_entity_index != s_transforms.size();
         if (!has_local_position) {
             g_player_position_validated = false;
+            return result;
+        }
+    }
+
+    // Death fall: when you die the camera animates down to the ground ("lying
+    // down"), so it ends up well below the normal eye height relative to the
+    // local player's feet. While that happens the game renders from a different
+    // camera and ESP projected from this one slides off the models — hide it.
+    if (!transform_camera_mode && have_world_camera && has_local_position) {
+        float rel = world_camera_position.y - local.y;
+        if (std::isfinite(rel) && rel < 0.55f) {
+            g_matrix_configuration_validated = false;
+            g_last_camera_fov_deg = -1.f;
             return result;
         }
     }
@@ -837,27 +852,55 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.distance = distance;
         box.source = s_transforms[i];
 
-        // Per-player horizontal speed from the movement of the same position
-        // source that draws the box (reliable, unlike replicated Velocity).
+        // Per-player velocity from the movement of the same position source
+        // that draws the box. World velocity is smoothed (EMA), then projected
+        // into screen space so the aim can lead a running enemy accurately.
         {
-            static std::unordered_map<uint64_t, std::pair<Vec3, double>> s_prev;
+            struct Track { Vec3 pos; double t; Vec3 vel; };
+            static std::unordered_map<uint64_t, Track> s_track;
             double now = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-            float spd = -1.f;
-            auto it = s_prev.find(s_transforms[i]);
-            if (it != s_prev.end()) {
-                double dt = now - it->second.second;
+
+            Vec3 wvel{};
+            Vec3 svel{};
+            auto it = s_track.find(s_transforms[i]);
+            if (it != s_track.end()) {
+                double dt = now - it->second.t;
                 if (dt > 0.001 && dt < 1.0) {
-                    float dx = feet.x - it->second.first.x;
-                    float dy = feet.y - it->second.first.y;
-                    float dz = feet.z - it->second.first.z;
-                    float v = sqrtf(dx * dx + dy * dy + dz * dz) / (float)dt;
-                    // teleport/respawn shows as a huge jump — ignore it
-                    if (v >= 0.f && v <= 15.f) spd = v;
+                    float ivx = (feet.x - it->second.pos.x) / (float)dt;
+                    float ivy = (feet.y - it->second.pos.y) / (float)dt;
+                    float ivz = (feet.z - it->second.pos.z) / (float)dt;
+                    if (fabsf(ivx) < 15.f && fabsf(ivy) < 15.f && fabsf(ivz) < 15.f) {
+                        wvel = {ivx, 0.f, ivz}; // horizontal only
+                    }
+                }
+                svel = it->second.vel;
+            }
+            float ek = 0.5f; // EMA (velocity smooth)
+            svel.x += (wvel.x - svel.x) * ek;
+            svel.y += (wvel.y - svel.y) * ek;
+            svel.z += (wvel.z - svel.z) * ek;
+            s_track[s_transforms[i]] = {feet, now, svel};
+
+            box.speed = sqrtf(svel.x * svel.x + svel.z * svel.z);
+            box.aim_vx = 0.f;
+            box.aim_vy = 0.f;
+
+            // Project horizontal world velocity to screen velocity (px/s) using
+            // the live view-projection matrix — same space as the box itself.
+            if (!transform_camera_mode) {
+                Vec3 p0 = {feet.x, feet.y, feet.z};
+                Vec3 p1 = {feet.x + svel.x * 0.2f, feet.y, feet.z + svel.z * 0.2f};
+                Vec2 s0{}, s1{};
+                if (w2s(vp, p0, sw, sh, s0, false) && w2s(vp, p1, sw, sh, s1, false)) {
+                    box.aim_vx = (s1.x - s0.x) / 0.2f;
+                    box.aim_vy = (s1.y - s0.y) / 0.2f;
+                    if (!std::isfinite(box.aim_vx) || !std::isfinite(box.aim_vy) ||
+                        fabsf(box.aim_vx) > 4000.f || fabsf(box.aim_vy) > 4000.f) {
+                        box.aim_vx = 0.f; box.aim_vy = 0.f;
+                    }
                 }
             }
-            s_prev[s_transforms[i]] = {feet, now};
-            box.speed = spd;
         }
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};

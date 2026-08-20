@@ -9,6 +9,8 @@ struct EspBox {
     bool  corner_visible[8];
     uint64_t source; // PlayerManager* this box belongs to
     float speed;     // horizontal speed m/s (from position delta), -1 if unknown
+    float aim_vx;    // screen velocity of the player (px/s), for aim lead
+    float aim_vy;
 };
 
 bool        esp_init(pid_t pid);

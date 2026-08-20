@@ -554,6 +554,8 @@ struct AppState {
     bool  aim_touch = false, aim_pos = false, aim_special = false;
     bool  aim_ads_only = false;
     int   aim_bone = 0;
+    int   aim_priority = 0; // 0 = closest to crosshair, 1 = closest by distance
+    bool  aim_prio_open = false;
     bool  esp_box = true, esp_name = false, esp_hp = false, esp_wall = true, esp_chams = false;
     bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = true, esp_skeleton = true;
     bool  esp_master = true;
@@ -565,6 +567,7 @@ struct AppState {
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
     float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_ads = 0;
+    float a_aim_prio = 0.f;
     float a_aim_head  = 1, a_aim_chest = 0, a_aim_pelvis = 0;
     RadioAnim ra_aim_head, ra_aim_chest, ra_aim_pelvis;
     float a_esp_box = 0, a_esp_name = 0, a_esp_hp = 0, a_esp_wall = 0, a_esp_chams = 0;
@@ -2381,6 +2384,68 @@ float TabContent(int tab, float dt, float cW) {
         SliderRow("##asmt", XS("Плавность"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, true, g_state.sl_gun_str, dt);
         g_state.gun_str = roundf(g_state.gun_str);
 
+        SHdr(XS("Приоритет"));
+        {
+            auto* dl  = ImGui::GetWindowDrawList();
+            auto* fn  = ImGui::GetFont();
+            float avW = ImGui::GetContentRegionAvail().x;
+            const float rowH = Layout::RowH, inset = Layout::Inset, padX = Layout::PadX;
+            const float fs = ImGui::GetFontSize() * 1.15f;
+            const char* prioNames[2] = { XS("К прицелу"), XS("По расстоянию") };
+
+            // Header: shows current value + chevron, toggles open/close.
+            {
+                auto pos = ImGui::GetCursorScreenPos();
+                dl->AddRectFilled({pos.x + inset, pos.y}, {pos.x + avW - inset, pos.y + rowH}, C::U(C::Card()), R::Card);
+                if (g_state.ui_show_sep)
+                    dl->AddRect({pos.x + inset, pos.y}, {pos.x + avW - inset, pos.y + rowH}, C::U(C::Sep()), R::Card, 0, 1.2f);
+                ImGui::InvisibleButton("##aimprio", {avW, rowH});
+                if (WasTappedHere() && !IsScrollDragging() && !g_input.touchConsumed) {
+                    g_state.aim_prio_open = !g_state.aim_prio_open;
+                    PlaySound(SND_CLICK);
+                }
+                dl->AddText(fn, fs, {pos.x + inset + padX, pos.y + (rowH - fs) * 0.5f}, C::U(C::Txt()), XS("Приоритет"));
+                auto valSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, prioNames[g_state.aim_priority]);
+                dl->AddText(fn, fs, {pos.x + avW - inset - padX - valSz.x - 26.f, pos.y + (rowH - fs) * 0.5f}, C::U(C::Acc()), prioNames[g_state.aim_priority]);
+                // chevron
+                float cxx = pos.x + avW - inset - padX - 12.f;
+                float cyy = pos.y + rowH * 0.5f;
+                float ch = 6.f;
+                if (g_state.a_aim_prio < 0.5f) {
+                    dl->AddLine({cxx - ch, cyy - ch * 0.4f}, {cxx, cyy + ch * 0.6f}, C::U(C::Dim()), 2.f);
+                    dl->AddLine({cxx, cyy + ch * 0.6f}, {cxx + ch, cyy - ch * 0.4f}, C::U(C::Dim()), 2.f);
+                } else {
+                    dl->AddLine({cxx - ch, cyy + ch * 0.4f}, {cxx, cyy - ch * 0.6f}, C::U(C::Dim()), 2.f);
+                    dl->AddLine({cxx, cyy - ch * 0.6f}, {cxx + ch, cyy + ch * 0.4f}, C::U(C::Dim()), 2.f);
+                }
+            }
+
+            // Expanded options (slide out from under the header + fade).
+            float openT = EaseInOut(g_state.a_aim_prio);
+            if (openT > 0.01f) {
+                for (int i = 0; i < 2; i++) {
+                    auto rp = ImGui::GetCursorScreenPos();
+                    char rid[16]; snprintf(rid, sizeof(rid), "##aimprio%d", i);
+                    ImGui::InvisibleButton(rid, {avW, rowH});
+                    float ry = rp.y - (1.f - openT) * rowH; // slides out from under header
+                    dl->PushClipRect({rp.x, rp.y - 1.f}, {rp.x + avW, rp.y + rowH}, true);
+                    dl->AddRectFilled({rp.x + inset, ry}, {rp.x + avW - inset, ry + rowH}, C::UA(C::Card(), openT), R::Card);
+                    float ccx = rp.x + inset + padX + 12.f;
+                    float ccy = ry + rowH * 0.5f;
+                    dl->AddCircle({ccx, ccy}, 11.f, C::UA(C::Acc(), openT), 32, 2.f);
+                    if (g_state.aim_priority == i)
+                        dl->AddCircleFilled({ccx, ccy}, 5.5f, C::UA(C::Acc(), openT), 24);
+                    dl->AddText(fn, fs, {ccx + 20.f, ry + (rowH - fs) * 0.5f}, C::UA(C::Txt(), openT), prioNames[i]);
+                    dl->PopClipRect();
+                    if (WasTappedHere() && !IsScrollDragging() && !g_input.touchConsumed) {
+                        g_state.aim_priority = i;
+                        g_state.aim_prio_open = false;
+                        PlaySound(SND_CLICK);
+                    }
+                }
+            }
+        }
+
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
 
@@ -2787,9 +2852,6 @@ static bool  g_aim_active = false;
 static float g_aim_cx = 0.f, g_aim_cy = 0.f;
 static float g_aim_tx = 0.f, g_aim_ty = 0.f; // smoothed aim point
 static uint64_t g_aim_target = 0;            // locked enemy source (hysteresis)
-static float g_aim_svx = 0.f, g_aim_svy = 0.f; // smoothed target screen velocity
-static float g_aim_rawx = 0.f, g_aim_rawy = 0.f; // last raw target point
-static bool  g_aim_has_raw = false;
 
 static void AimRelease() {
     if (g_aim_active) {
@@ -2797,8 +2859,6 @@ static void AimRelease() {
         g_aim_active = false;
     }
     g_aim_target = 0;
-    g_aim_svx = 0.f; g_aim_svy = 0.f;
-    g_aim_has_raw = false;
 }
 
 static void RunAim() {
@@ -2850,10 +2910,12 @@ static void RunAim() {
     else if (g_state.aim_bone == 1) bone_v = 0.32f; // body/chest
     else if (g_state.aim_bone == 2) bone_v = 0.55f; // pelvis/legs
 
-    // --- candidate scan (2 passes over a tiny vector) ------------------------
-    float best_d2 = -1.f, best_tx = 0.f, best_ty = 0.f;
+    // --- candidate scan with priority ----------------------------------------
+    // Priority 0 = closest to crosshair (screen distance), 1 = closest by world
+    // distance. Both still must be inside the FOV circle.
+    float best_score = 1e30f;
     uint64_t best_src = 0;
-    float cur_d2 = -1.f;
+    float cur_score = 1e30f;
     for (const EspBox& box : boxes) {
         if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
         float bw = box.x2 - box.x1;
@@ -2871,29 +2933,26 @@ static void RunAim() {
         float d2 = dx * dx + dy * dy;
         if (d2 > fov_px * fov_px) continue;
 
-        if (best_d2 < 0.f || d2 < best_d2) {
-            best_d2 = d2; best_tx = tx; best_ty = ty; best_src = box.source;
-        }
-        if (box.source == g_aim_target) cur_d2 = d2;
+        float score;
+        if (g_state.aim_priority == 1 && box.distance >= 0.f) score = box.distance;
+        else score = d2;
+
+        if (score < best_score) { best_score = score; best_src = box.source; }
+        if (box.source == g_aim_target) cur_score = score;
     }
 
-    // Target lock with hysteresis: once locked, keep the same enemy unless it
-    // leaves the FOV or another one is clearly (~20%) closer. This stops the
-    // aim from flip-flopping between two nearby enemies — the main shake source.
-    if (g_aim_target != 0 && cur_d2 < 0.f) g_aim_target = 0; // locked enemy gone
+    // Target lock with hysteresis: keep the same enemy unless it leaves the FOV
+    // or another one is clearly (~20%) better.
+    if (g_aim_target != 0 && cur_score >= 1e30f) g_aim_target = 0;
     if (g_aim_target == 0) {
         if (best_src == 0) { AimRelease(); return; }
         g_aim_target = best_src;
-        g_aim_tx = best_tx; g_aim_ty = best_ty;
-        g_aim_svx = 0.f; g_aim_svy = 0.f; g_aim_has_raw = false;
-    } else if (best_src != g_aim_target && best_d2 < cur_d2 * 0.64f) {
+    } else if (best_src != g_aim_target && best_score < cur_score * 0.64f) {
         g_aim_target = best_src;
-        g_aim_tx = best_tx; g_aim_ty = best_ty;
-        g_aim_svx = 0.f; g_aim_svy = 0.f; g_aim_has_raw = false;
     }
 
-    // Current point of the locked target (and its world speed for the lead).
-    float target_tx = 0.f, target_ty = 0.f, target_speed = 0.f;
+    // Locked target's aim point and screen velocity.
+    float target_tx = 0.f, target_ty = 0.f, target_vx = 0.f, target_vy = 0.f;
     bool have_point = false;
     for (const EspBox& box : boxes) {
         if (box.source != g_aim_target) continue;
@@ -2903,14 +2962,14 @@ static void RunAim() {
         if (bw < 1.f || bh < 1.f) continue;
         target_tx = (box.x1 + box.x2) * 0.5f;
         target_ty = box.y1 + bh * bone_v;
-        target_speed = box.speed;
+        target_vx = box.aim_vx;
+        target_vy = box.aim_vy;
         have_point = true;
         break;
     }
     if (!have_point) { g_aim_target = 0; AimRelease(); return; }
 
-    // --- prediction & movement ----------------------------------------------
-    // Frame time, so movement is frame-rate independent.
+    // --- movement (frame-time normalized) ------------------------------------
     static auto s_last = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     float dt = (float)std::chrono::duration<double>(now - s_last).count();
@@ -2918,64 +2977,50 @@ static void RunAim() {
     if (dt <= 0.0005f) dt = 0.0005f;
     if (dt > 0.05f) dt = 0.05f;
 
-    // Estimate the target's screen velocity from its raw point over time. This
-    // is the "lead" source — without it the aim always trails a running enemy.
-    float ivx = 0.f, ivy = 0.f;
-    if (g_aim_has_raw) {
-        ivx = (target_tx - g_aim_rawx) / dt;
-        ivy = (target_ty - g_aim_rawy) / dt;
-    }
-    g_aim_rawx = target_tx;
-    g_aim_rawy = target_ty;
-    g_aim_has_raw = true;
+    // Плавность 1..10 (integer). Lower = faster/aggressive, higher = slower.
+    int sm = (int)lroundf(g_state.gun_str);
+    if (sm < 1) sm = 1;
+    if (sm > 10) sm = 10;
+    float rate = 14.f - 1.33f * (float)(sm - 1); // sm1=14/s ... sm10=2.0/s
+    if (rate < 2.f) rate = 2.f;
 
-    // Reject teleports / lock switches (huge jumps).
-    if (fabsf(ivx) > 3000.f || fabsf(ivy) > 3000.f) { ivx = 0.f; ivy = 0.f; }
+    // Lead the running enemy (projectile/network-tick compensation) using the
+    // box's own screen velocity computed from its world velocity.
+    const float lead_time = 0.15f;
+    float px = target_tx + target_vx * lead_time;
+    float py = target_ty + target_vy * lead_time;
 
-    // Smooth the velocity; decay it to 0 when the target stands still (world
-    // speed gate) so a stationary enemy isn't "led" off-target.
-    float kv = 1.0f - expf(-15.f * dt);
-    if (target_speed > 0.4f) {
-        g_aim_svx += (ivx - g_aim_svx) * kv;
-        g_aim_svy += (ivy - g_aim_svy) * kv;
-    } else {
-        g_aim_svx *= (1.0f - kv);
-        g_aim_svy *= (1.0f - kv);
-    }
-
-    // Lead the target: aim where it will be shortly.
-    float lead = (target_speed > 0.4f) ? 0.20f : 0.f;
-    float px = target_tx + g_aim_svx * lead;
-    float py = target_ty + g_aim_svy * lead;
-
-    // Smooth the aim point (removes network jitter, near-zero lag).
-    float ts = 1.0f - expf(-30.f * dt);
+    // Lightly smooth the aim point (removes per-tick jitter, near-zero lag).
+    float ts = 1.0f - expf(-35.f * dt);
     g_aim_tx += (px - g_aim_tx) * ts;
     g_aim_ty += (py - g_aim_ty) * ts;
 
     float ex = g_aim_tx - cx; // remaining screen error
     float ey = g_aim_ty - cy;
 
-    // Плавность 1..10 (integer). Lower = faster/aggressive, higher = slower.
-    int sm = (int)lroundf(g_state.gun_str);
-    if (sm < 1) sm = 1;
-    if (sm > 10) sm = 10;
-    float rate = 15.f - 1.44f * (float)(sm - 1); // sm1=15/s, sm10=2.0/s
-    if (rate < 2.f) rate = 2.f;
+    // Feed-forward + proportional:
+    //   crosshair velocity = target screen velocity (track the runner)
+    //                        + rate * error (close the gap).
+    // No overshoot: the proportional term vanishes at error 0, leaving only the
+    // target's own velocity — perfect tracking, no lag.
+    float dvx = target_vx + ex * rate;
+    float dvy = target_vy + ey * rate;
 
-    // Pure proportional control toward the predicted point. Velocity naturally
-    // falls to 0 near the target — no overshoot, no oscillation.
-    float step = 1.0f - expf(-rate * dt);
-    float ddx = ex * step;
-    float ddy = ey * step;
+    const float vmax = 2600.f; // cap total velocity
+    float vlen = sqrtf(dvx * dvx + dvy * dvy);
+    if (vlen > vmax) { dvx *= vmax / vlen; dvy *= vmax / vlen; }
+
+    float ddx = dvx * dt;
+    float ddy = dvy * dt;
 
     const float max_drag = 160.f; // per-frame cap
     float dl = sqrtf(ddx * ddx + ddy * ddy);
     if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
 
-    // Deadzone: once essentially on target, stop dead (no micro-shake).
+    // Deadzone: on target and the target is nearly still -> stop (no micro-shake).
     float rest = sqrtf(ex * ex + ey * ey);
-    if (rest < 4.f) { ddx = 0.f; ddy = 0.f; }
+    float tvel = sqrtf(target_vx * target_vx + target_vy * target_vy);
+    if (rest < 4.f && tvel < 40.f) { ddx = 0.f; ddy = 0.f; }
 
     // --- injection -----------------------------------------------------------
     const float anchor_x = sw * 0.72f;
@@ -3060,6 +3105,7 @@ void RenderMenu() {
     Tick(g_state.a_aim_pelvis, g_state.aim_bone == 2,      dt);
     Tick(g_state.a_aim_spec,   g_state.aim_special,        dt);
     Tick(g_state.a_aim_ads,    g_state.aim_ads_only,       dt);
+    Tick(g_state.a_aim_prio,   g_state.aim_prio_open,      dt, 10.f);
     Tick(g_state.a_esp_box,    g_state.esp_box,            dt);
     Tick(g_state.a_esp_name,   g_state.esp_name,           dt);
     Tick(g_state.a_esp_hp,     g_state.esp_hp,             dt);
