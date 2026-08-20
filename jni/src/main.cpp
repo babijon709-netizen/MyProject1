@@ -1529,7 +1529,7 @@ void DrawWatermark(float dt) {
     ImU32 nmCol  = C::U(C::Txt());
 
     const float fs = 40.f, pad = 22.f, bR = 46.f;
-    const char* name = XS("xvcen");
+    const char* name = XS("MoggerWare");
 
     auto  nSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, name);
     char  fpsBuf[12]; snprintf(fpsBuf, 12, "%.0f", wm_fps_sm);
@@ -2271,10 +2271,8 @@ float TabContent(int tab, float dt, float cW) {
 
         SHdr(XS("Разработчик"));
         {
-            auto DrawDevCard = [&](const char* id, const char* name, const char* tag,
-                                   GLuint tex, const char* avLetter, const char* openCmd) {
-                const float avatarR = 44.f;
-                const float cardH   = 152.f;
+            auto DrawDevCard = [&](const char* id, const char* name, const char* tag, const char* openCmd) {
+                const float cardH = 152.f;
 
                 auto pos  = ImGui::GetCursorScreenPos();
                 float cx0 = pos.x + inset;
@@ -2285,51 +2283,13 @@ float TabContent(int tab, float dt, float cW) {
                 if (g_state.ui_show_sep)
                     dl->AddRect({cx0, pos.y}, {cx1, pos.y + cardH}, C::U(C::Sep()), R::Card, 0, 1.2f);
 
-                float avCX = cx0 + padX + avatarR + 2.f;
-                float avCY = pos.y + cardH * 0.5f;
-
-                dl->AddCircleFilled({avCX, avCY}, avatarR + 6.f, C::UA(C::Acc(), 0.12f), 64);
-                dl->AddCircleFilled({avCX, avCY}, avatarR + 2.5f, C::U(C::Card()), 64);
-
-                {
-                    if (tex) {
-                        dl->AddImageRounded((ImTextureID)(intptr_t)tex,
-                            {avCX - avatarR, avCY - avatarR},
-                            {avCX + avatarR, avCY + avatarR},
-                            {0,0}, {1,1}, IM_COL32(255,255,255,255), avatarR);
-                    } else {
-                        const int segs = 60;
-                        ImVec4 ac = C::Acc();
-                        ImVec4 ac2 = {Lerpf(ac.x,0.3f,0.55f), Lerpf(ac.y,0.05f,0.55f), Lerpf(ac.z,0.9f,0.42f), 1.f};
-                        for (int si = 0; si < segs; si++) {
-                            float a0 = (float)si/segs*IM_PI*2.f, a1 = (float)(si+1)/segs*IM_PI*2.f;
-                            float tt = (float)si/segs;
-                            ImVec4 ca = {Lerpf(ac2.x,ac.x,tt), Lerpf(ac2.y,ac.y,tt), Lerpf(ac2.z,ac.z,tt), 1.f};
-                            dl->AddTriangleFilled({avCX,avCY},
-                                {avCX+avatarR*cosf(a0),avCY+avatarR*sinf(a0)},
-                                {avCX+avatarR*cosf(a1),avCY+avatarR*sinf(a1)},
-                                IM_COL32(int(ca.x*255),int(ca.y*255),int(ca.z*255),255));
-                        }
-                        float lfs = avatarR * 1.05f;
-                        auto lsz = fn->CalcTextSizeA(lfs, FLT_MAX, 0, avLetter);
-                        dl->AddText(fn, lfs, {avCX-lsz.x*0.5f, avCY-lsz.y*0.5f}, IM_COL32(255,255,255,245), avLetter);
-                    }
-                }
-
-                dl->AddCircle({avCX,avCY}, avatarR+2.5f, C::UA(C::Acc(),0.9f), 64, 2.5f);
-
-                {
-                    float dx = avCX+avatarR*0.72f, dy = avCY+avatarR*0.72f;
-                    dl->AddCircleFilled({dx,dy}, 9.f, C::U(C::Card()), 24);
-                    dl->AddCircleFilled({dx,dy}, 6.5f, IM_COL32(52,199,89,255), 24);
-                }
-
                 float nameFS = fs * 1.75f;
                 float tagFS  = fs * 1.1f;
                 auto nameSz = fn->CalcTextSizeA(nameFS, FLT_MAX, 0, name);
-                float textX = avCX + avatarR + padX + 8.f;
-                float nameY = avCY - nameSz.y - 3.f;
-                float tagY  = avCY + 3.f;
+                float cy    = pos.y + cardH * 0.5f;
+                float textX = cx0 + padX + 6.f;
+                float nameY = cy - nameSz.y - 3.f;
+                float tagY  = cy + 3.f;
                 dl->AddText(fn, nameFS, {textX, nameY}, C::U(C::Txt()), name);
                 dl->AddText(fn, tagFS,  {textX, tagY},  C::U(C::Dim()), tag);
 
@@ -2361,8 +2321,8 @@ float TabContent(int tab, float dt, float cW) {
                 ImGui::Dummy({avW, 0.f});
             };
 
-            DrawDevCard("##devcard", XS("Саня"), XS("@xvcey"), g_devAvatar[0], XS("С"),
-                        XS("am start -a android.intent.action.VIEW -d \"https://t.me/xvcey\""));
+            DrawDevCard("##devcard", XS("JohnnyCutter"), XS("@recoveryev"),
+                        XS("am start -a android.intent.action.VIEW -d \"https://t.me/recoveryev\""));
         }
 
     } else if (tab == 1) {
