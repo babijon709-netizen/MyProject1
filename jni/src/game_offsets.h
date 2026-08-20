@@ -32,6 +32,7 @@ inline constexpr std::uint64_t PLAYER_OBSERVED       = 0x320; // PlayerManager o
 
 // Local player aim state (PlayerManager.playerEventHandler = huU : huc).
 inline constexpr std::uint64_t PLAYER_EVENT_HANDLER = 0x78;
+inline constexpr std::uint64_t HUC_BOUNDS           = 0x70;  // huc.bounds (Unity Bounds: center+extents)
 inline constexpr std::uint64_t HUC_AIM              = 0x268; // huc.Aim (huT)
 inline constexpr std::uint64_t HUC_AIM_RAYCAST      = 0x168; // huU.AimRaycast (huW<huz>)
 inline constexpr std::uint64_t HUC_RAYCAST_DATA     = 0x160; // huU.RaycastData (huW<huz>)

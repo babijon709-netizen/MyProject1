@@ -814,8 +814,27 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
 
-        Vec3 body_bottom = {feet.x, feet.y, feet.z};
-        Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT, feet.z};
+        // Real body height from the entity bounds (reflects crouch: the head
+        // drops but the feet stay). Fall back to a fixed height if unavailable
+        // or inconsistent with the replicated feet position.
+        float feet_y = feet.y;
+        float head_height = PLAYER_HEIGHT;
+        {
+            uint64_t handler = rd_ptr(s_transforms[i] + PLAYER_EVENT_HANDLER);
+            if (likely_native_pointer(handler)) {
+                Vec3 bc = rd_v3(handler + HUC_BOUNDS);
+                Vec3 be = rd_v3(handler + HUC_BOUNDS + 12);
+                float bfeet = bc.y - be.y;
+                if (vec3_is_finite(bc) && vec3_is_finite(be) && be.y > 0.15f && be.y < 3.0f &&
+                    fabsf(bfeet - feet.y) < 1.5f) {
+                    feet_y = bfeet;
+                    head_height = be.y * 2.0f;
+                }
+            }
+        }
+
+        Vec3 body_bottom = {feet.x, feet_y, feet.z};
+        Vec3 body_top = {feet.x, feet_y + head_height, feet.z};
         if (transform_camera_mode) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
 
         Vec2 sf{}, sh2{};
@@ -853,44 +872,48 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.source = s_transforms[i];
 
         // Per-player velocity from the movement of the same position source
-        // that draws the box. World velocity is smoothed (EMA), then projected
-        // into screen space so the aim can lead a running enemy accurately.
+        // that draws the box. Positions update on network ticks, so we HOLD the
+        // last velocity between ticks (no decay to zero) — this keeps the aim
+        // lead and the skeleton animation continuous instead of sawtoothing.
         {
-            struct Track { Vec3 pos; double t; Vec3 vel; };
+            struct Track { Vec3 pos; double t; Vec3 vel; bool has; };
             static std::unordered_map<uint64_t, Track> s_track;
             double now = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
 
-            Vec3 wvel{};
-            Vec3 svel{};
+            Vec3 vel{};
             auto it = s_track.find(s_transforms[i]);
-            if (it != s_track.end()) {
+            if (it != s_track.end() && it->second.has) {
                 double dt = now - it->second.t;
-                if (dt > 0.001 && dt < 1.0) {
-                    float ivx = (feet.x - it->second.pos.x) / (float)dt;
-                    float ivy = (feet.y - it->second.pos.y) / (float)dt;
-                    float ivz = (feet.z - it->second.pos.z) / (float)dt;
-                    if (fabsf(ivx) < 15.f && fabsf(ivy) < 15.f && fabsf(ivz) < 15.f) {
-                        wvel = {ivx, 0.f, ivz}; // horizontal only
+                float ddx = feet.x - it->second.pos.x;
+                float ddz = feet.z - it->second.pos.z;
+                float moved = fabsf(ddx) + fabsf(ddz);
+                if (dt > 0.02 && dt < 2.0 && moved > 0.002f) {
+                    float ivx = ddx / (float)dt;
+                    float ivz = ddz / (float)dt;
+                    float sp = sqrtf(ivx * ivx + ivz * ivz);
+                    if (sp < 15.f) {
+                        // mild EMA toward the fresh estimate
+                        vel.x = it->second.vel.x + (ivx - it->second.vel.x) * 0.6f;
+                        vel.z = it->second.vel.z + (ivz - it->second.vel.z) * 0.6f;
+                    } else {
+                        vel = it->second.vel; // teleport: keep last
                     }
+                } else if (dt < 2.0) {
+                    vel = it->second.vel; // hold between ticks
                 }
-                svel = it->second.vel;
             }
-            float ek = 0.5f; // EMA (velocity smooth)
-            svel.x += (wvel.x - svel.x) * ek;
-            svel.y += (wvel.y - svel.y) * ek;
-            svel.z += (wvel.z - svel.z) * ek;
-            s_track[s_transforms[i]] = {feet, now, svel};
+            s_track[s_transforms[i]] = {feet, now, vel, true};
 
-            box.speed = sqrtf(svel.x * svel.x + svel.z * svel.z);
+            box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
             box.aim_vx = 0.f;
             box.aim_vy = 0.f;
 
             // Project horizontal world velocity to screen velocity (px/s) using
             // the live view-projection matrix — same space as the box itself.
             if (!transform_camera_mode) {
-                Vec3 p0 = {feet.x, feet.y, feet.z};
-                Vec3 p1 = {feet.x + svel.x * 0.2f, feet.y, feet.z + svel.z * 0.2f};
+                Vec3 p0 = {feet.x, feet_y, feet.z};
+                Vec3 p1 = {feet.x + vel.x * 0.2f, feet_y, feet.z + vel.z * 0.2f};
                 Vec2 s0{}, s1{};
                 if (w2s(vp, p0, sw, sh, s0, false) && w2s(vp, p1, sw, sh, s1, false)) {
                     box.aim_vx = (s1.x - s0.x) / 0.2f;

@@ -2851,6 +2851,7 @@ static void CenterMenuOnDisplay() {
 static bool  g_aim_active = false;
 static float g_aim_cx = 0.f, g_aim_cy = 0.f;
 static float g_aim_tx = 0.f, g_aim_ty = 0.f; // smoothed aim point
+static float g_aim_pvx = 0.f, g_aim_pvy = 0.f; // previous injected velocity (slew)
 static uint64_t g_aim_target = 0;            // locked enemy source (hysteresis)
 
 static void AimRelease() {
@@ -2859,6 +2860,7 @@ static void AimRelease() {
         g_aim_active = false;
     }
     g_aim_target = 0;
+    g_aim_pvx = 0.f; g_aim_pvy = 0.f;
 }
 
 static void RunAim() {
@@ -2981,12 +2983,12 @@ static void RunAim() {
     int sm = (int)lroundf(g_state.gun_str);
     if (sm < 1) sm = 1;
     if (sm > 10) sm = 10;
-    float rate = 14.f - 1.33f * (float)(sm - 1); // sm1=14/s ... sm10=2.0/s
-    if (rate < 2.f) rate = 2.f;
+    float rate = 10.f - 0.9f * (float)(sm - 1); // sm1=10/s ... sm10=1.9/s
+    if (rate < 1.9f) rate = 1.9f;
 
     // Lead the running enemy (projectile/network-tick compensation) using the
     // box's own screen velocity computed from its world velocity.
-    const float lead_time = 0.15f;
+    const float lead_time = 0.18f;
     float px = target_tx + target_vx * lead_time;
     float py = target_ty + target_vy * lead_time;
 
@@ -2998,29 +3000,45 @@ static void RunAim() {
     float ex = g_aim_tx - cx; // remaining screen error
     float ey = g_aim_ty - cy;
 
-    // Feed-forward + proportional:
-    //   crosshair velocity = target screen velocity (track the runner)
-    //                        + rate * error (close the gap).
-    // No overshoot: the proportional term vanishes at error 0, leaving only the
-    // target's own velocity — perfect tracking, no lag.
-    float dvx = target_vx + ex * rate;
-    float dvy = target_vy + ey * rate;
+    // Clamp the error feeding the proportional term. Without this, a large
+    // error (e.g. when ADS zooms and the target jumps far on screen) produces a
+    // huge velocity that overshoots and oscillates — the "spinning" bug.
+    const float emax = 240.f;
+    float cex = ex < -emax ? -emax : (ex > emax ? emax : ex);
+    float cey = ey < -emax ? -emax : (ey > emax ? emax : ey);
 
-    const float vmax = 2600.f; // cap total velocity
+    // Feed-forward (track the runner) + proportional (close the gap).
+    float dvx = target_vx + cex * rate;
+    float dvy = target_vy + cey * rate;
+
+    // Slew-limit the velocity change: prevents abrupt velocity jumps when ADS
+    // changes the FOV/sensitivity (the cause of the camera "spinning").
+    {
+        float ndvx = dvx - g_aim_pvx, ndvy = dvy - g_aim_pvy;
+        float ndvl = sqrtf(ndvx * ndvx + ndvy * ndvy);
+        float maxslew = 5000.f * dt;
+        if (ndvl > maxslew) { ndvx *= maxslew / ndvl; ndvy *= maxslew / ndvl; }
+        dvx = g_aim_pvx + ndvx;
+        dvy = g_aim_pvy + ndvy;
+    }
+    g_aim_pvx = dvx;
+    g_aim_pvy = dvy;
+
+    const float vmax = 2200.f; // cap total velocity
     float vlen = sqrtf(dvx * dvx + dvy * dvy);
     if (vlen > vmax) { dvx *= vmax / vlen; dvy *= vmax / vlen; }
 
     float ddx = dvx * dt;
     float ddy = dvy * dt;
 
-    const float max_drag = 160.f; // per-frame cap
+    const float max_drag = 120.f; // per-frame cap
     float dl = sqrtf(ddx * ddx + ddy * ddy);
     if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
 
     // Deadzone: on target and the target is nearly still -> stop (no micro-shake).
     float rest = sqrtf(ex * ex + ey * ey);
     float tvel = sqrtf(target_vx * target_vx + target_vy * target_vy);
-    if (rest < 4.f && tvel < 40.f) { ddx = 0.f; ddy = 0.f; }
+    if (rest < 6.f && tvel < 60.f) { ddx = 0.f; ddy = 0.f; g_aim_pvx = 0.f; g_aim_pvy = 0.f; }
 
     // --- injection -----------------------------------------------------------
     const float anchor_x = sw * 0.72f;
