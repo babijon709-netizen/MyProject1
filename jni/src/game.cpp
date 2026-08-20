@@ -10,6 +10,7 @@
 #include <string>
 #include <chrono>
 #include <functional>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -35,6 +36,8 @@ static uint64_t  g_player_position_offset = PLAYER_POSITION;
 static float     g_last_camera_fov_deg = -1.f;
 static Mat4      g_last_vp{};
 static bool      g_last_vp_valid = false;
+static std::vector<uint64_t> g_player_snapshot;
+static std::chrono::steady_clock::time_point g_player_snapshot_stamp{};
 
 struct TransformHierarchyLayout {
     uint64_t data_offset = 0x38;
@@ -49,6 +52,7 @@ static bool g_transform_hierarchy_layout_valid = false;
 
 static bool      g_use_direct_player_position = true;
 static bool      g_player_position_validated = false;
+static std::mutex g_game_mutex;
 
 static bool vec3_is_finite(const Vec3& value);
 static bool player_crouching(uint64_t player);
@@ -353,6 +357,8 @@ struct SkeletonFrameData {
 // memory snapshot per allocation for the duration of esp_get_boxes(), so ten
 // enemies cost one pair of bulk reads instead of ten pairwise bone walks.
 static std::unordered_map<uint64_t, SkeletonFrameData> g_skeleton_frame_cache;
+static std::mutex g_skeleton_mutex;
+static std::chrono::steady_clock::time_point g_skeleton_layout_retry_after{};
 
 static bool read_remote_block(uint64_t address, void* destination, size_t size) {
     if (!address || !destination || size == 0) return false;
@@ -425,6 +431,21 @@ static bool resolve_skeleton_layout(uint64_t native_head, const Vec3& feet,
         return true;
     }
 
+    // This is the layout already used by the working world-position reader.
+    // Try it directly before the compatibility probe; the latter is deliberately
+    // kept as a fallback because probing remote memory for every player/frame
+    // would make the overlay stutter.
+    TransformHierarchyLayout standard_layout{};
+    if (skeleton_head_matches_player(native_head, feet, standard_layout,
+                                     storage, head_position, head_index)) {
+        g_skeleton_layout = standard_layout;
+        g_skeleton_layout_valid = true;
+        return true;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    if (now < g_skeleton_layout_retry_after) return false;
+
     // Unity revisions used by the game have moved the two small hierarchy
     // arrays, but retain the same TransformData/index pairing. Probe only the
     // known ABI shapes and accept a candidate only if it projects the actual
@@ -463,6 +484,7 @@ static bool resolve_skeleton_layout(uint64_t native_head, const Vec3& feet,
             }
         }
     }
+    g_skeleton_layout_retry_after = now + std::chrono::milliseconds(750);
     return false;
 }
 
@@ -512,6 +534,7 @@ static int32_t discover_skeleton_hierarchy_count(uint64_t matrices, uint64_t ind
 static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
                                    std::vector<std::pair<Vec3, Vec3>>& segments,
                                    Vec3& animated_head) {
+    std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
     segments.clear();
     animated_head = {};
     if (!player) return false;
@@ -990,6 +1013,7 @@ static std::vector<uint64_t> read_configured_player_transforms() {
 }
 
 bool esp_init(pid_t pid) {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
     if (!g_il2cpp_base) return false;
@@ -997,25 +1021,39 @@ bool esp_init(pid_t pid) {
 }
 
 void esp_reset() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     g_pid = -1; g_il2cpp_base = 0;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_last_camera_fov_deg = -1.f;
     g_last_vp_valid = false;
+    g_player_snapshot.clear();
+    g_player_snapshot_stamp = {};
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
-    g_skeleton_layout = {}; g_skeleton_layout_valid = false;
-    g_skeleton_hierarchy_cache.clear();
-    g_skeleton_frame_cache.clear();
+    {
+        std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+        g_skeleton_layout = {}; g_skeleton_layout_valid = false;
+        g_skeleton_layout_retry_after = {};
+        g_skeleton_hierarchy_cache.clear();
+        g_skeleton_frame_cache.clear();
+    }
     g_use_direct_player_position = true;
     g_player_position_validated = false;
 }
 
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     std::vector<EspBox> result;
-    g_skeleton_frame_cache.clear();
+    // Never let the aimbot or a later frame consume a projection matrix from a
+    // death/respawn transition or from a failed camera read.
+    g_last_vp_valid = false;
+    {
+        std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+        g_skeleton_frame_cache.clear();
+    }
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
 
@@ -1030,23 +1068,27 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // refresh it at ~3 Hz. Positions and camera matrices are read fresh on
     // every call, so boxes never lag behind the model or slide when the camera
     // moves.
-    static std::vector<uint64_t> s_transforms;
-    static std::chrono::steady_clock::time_point s_transforms_stamp{};
     {
         auto tnow = std::chrono::steady_clock::now();
-        int tms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(tnow - s_transforms_stamp).count();
-        if (s_transforms.empty() || tms < 0 || tms >= 300) {
+        int tms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+            tnow - g_player_snapshot_stamp).count();
+        if (g_player_snapshot.empty() || tms < 0 || tms >= 300) {
             std::vector<uint64_t> refreshed = read_configured_player_transforms();
-            if (!refreshed.empty()) { s_transforms = std::move(refreshed); s_transforms_stamp = tnow; }
+            if (!refreshed.empty()) {
+                g_player_snapshot = std::move(refreshed);
+                g_player_snapshot_stamp = tnow;
+            }
         }
     }
-    if (s_transforms.empty()) return result;
+    if (g_player_snapshot.empty()) return result;
 
+    const std::vector<uint64_t>& s_transforms = g_player_snapshot;
     if (!g_player_position_validated) {
         if (!discover_player_position_offset(s_transforms)) return result;
     }
 
     bool transform_camera_mode = !g_use_direct_player_position && g_transform_hierarchy_layout_valid;
+    bool camera_roll_detected = false;
     if (!transform_camera_mode) {
         uint64_t managed_cam = 0;
         if (g_game_controller_class) {
@@ -1056,33 +1098,47 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
             }
         }
-        if (!managed_cam) { return result; }
+        if (!managed_cam) {
+            g_last_vp_valid = false;
+            return result;
+        }
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-        if (!native_cam) return result;
+        if (!native_cam) {
+            g_last_vp_valid = false;
+            return result;
+        }
         projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
         view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-        if (!matrix_is_finite(projection) || !matrix_is_finite(view)) { return result; }
-
-        // Death fall animation: the FPS camera rolls toward the ground. During
-        // normal play the camera has no roll (up vector stays (0,1,0)); a big
-        // roll means the death/spectate transition is animating and the boxes
-        // would slide off — hide them until the camera is upright again.
-        {
-            float up_y = mat_get(view, 1, 1);
-            float up_x = mat_get(view, 1, 0);
-            float up_z = mat_get(view, 1, 2);
-            float roll = fabsf(up_x) + fabsf(up_z);
-            if (std::isfinite(up_y) && (up_y < 0.85f || roll > 0.35f)) {
-                g_matrix_configuration_validated = false;
-                g_last_camera_fov_deg = -1.f;
-                return result;
-            }
+        if (!matrix_is_finite(projection) || !matrix_is_finite(view)) {
+            g_last_vp_valid = false;
+            return result;
         }
 
+        // Row 0 is the camera right vector. Its Y component measures roll
+        // around the look direction, while the old up_y check also fired during
+        // ordinary vertical looking/pitch. A large right_y is the distinctive
+        // death-camera tilt and is safe to use as a transition signal.
+        float camera_right_y = mat_get(view, 0, 1);
+        camera_roll_detected = std::isfinite(camera_right_y) &&
+                               fabsf(camera_right_y) > 0.35f;
+
+        // Do not reject the camera merely because the player is looking up or
+        // down: view[1][1] changes with pitch during normal play.  Death-camera
+        // handling is performed after the local player is identified below,
+        // where the respawn/spectate state and camera height can be checked
+        // together without hiding ESP during an ordinary look movement.
+
         if (!g_matrix_configuration_validated) {
-            if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
+            if (!optimize_matrix_configuration(native_cam, s_transforms)) {
+                g_last_vp_valid = false;
+                return result;
+            }
             projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
             view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
+            if (!matrix_is_finite(projection) || !matrix_is_finite(view)) {
+                g_last_vp_valid = false;
+                return result;
+            }
         }
         vp = mat_mul(projection, view);
         g_last_vp = vp;
@@ -1107,47 +1163,79 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     Vec3 world_camera_position{};
     bool have_world_camera = camera_position_from_view(view, world_camera_position);
+    uint64_t resolved_local_player = resolve_local_player();
+    bool local_player_transition = false;
     {
         Vec3 camera_position = world_camera_position;
         bool has_camera_position = have_world_camera && g_camera_matrix_physical_match;
         double nearest_distance_squared = INFINITY;
         size_t first_valid_index = s_transforms.size();
+        size_t resolved_local_index = s_transforms.size();
         Vec3 first_valid_position{};
+        Vec3 resolved_local_position{};
         for (size_t index = 0; index < s_transforms.size(); ++index) {
             Vec3 candidate{};
             if (!read_entity_position(s_transforms[index], candidate)) continue;
-            if (first_valid_index == s_transforms.size()) { first_valid_index = index; first_valid_position = candidate; }
+            if (first_valid_index == s_transforms.size()) {
+                first_valid_index = index;
+                first_valid_position = candidate;
+            }
+            if (resolved_local_player && s_transforms[index] == resolved_local_player) {
+                resolved_local_index = index;
+                resolved_local_position = candidate;
+            }
             if (!has_camera_position) continue;
-            double dx = (double)candidate.x - camera_position.x, dy = (double)candidate.y - camera_position.y, dz = (double)candidate.z - camera_position.z;
+            double dx = (double)candidate.x - camera_position.x;
+            double dy = (double)candidate.y - camera_position.y;
+            double dz = (double)candidate.z - camera_position.z;
             double distance_squared = dx * dx + dy * dy + dz * dz;
             if (std::isfinite(distance_squared) && distance_squared < nearest_distance_squared) {
-                nearest_distance_squared = distance_squared; local_entity_index = index; local = candidate;
+                nearest_distance_squared = distance_squared;
+                local_entity_index = index;
+                local = candidate;
             }
         }
-        if (local_entity_index == s_transforms.size() && first_valid_index != s_transforms.size()) {
-            local_entity_index = first_valid_index; local = first_valid_position;
+
+        // Prefer the actual GameController.localPlayer over “nearest to camera”.
+        // During the death camera animation the camera is intentionally moved
+        // away from the player, so nearest-player selection can lock onto an
+        // enemy and poison the ESP state until the next respawn.
+        if (resolved_local_index != s_transforms.size()) {
+            local_entity_index = resolved_local_index;
+            local = resolved_local_position;
+        } else if (local_entity_index == s_transforms.size() &&
+                   first_valid_index != s_transforms.size()) {
+            local_entity_index = first_valid_index;
+            local = first_valid_position;
         }
         has_local_position = local_entity_index != s_transforms.size();
         if (!has_local_position) {
             g_player_position_validated = false;
+            g_last_vp_valid = false;
             return result;
         }
+        local_player_transition = resolved_local_player &&
+            (rd<uint8_t>(resolved_local_player + PLAYER_RESPAWNING) != 0 ||
+             (rd<uint32_t>(resolved_local_player + PLAYER_FLAGS) & PLAYER_FLAG_SPECTATING) != 0);
     }
 
-    // Death fall: when you die the camera animates down to the ground ("lying
-    // down"), so it ends up well below the normal eye height relative to the
-    // local player's feet. While that happens the game renders from a different
-    // camera and ESP projected from this one slides off the models — hide it.
-    // Only trust this when the camera position was validated to be near the
-    // players (g_camera_matrix_physical_match), so a bad view matrix can't hide
-    // the ESP permanently.
-    if (!transform_camera_mode && g_camera_matrix_physical_match && have_world_camera && has_local_position) {
-        float rel = world_camera_position.y - local.y;
-        if (std::isfinite(rel) && rel < 0.55f) {
-            g_matrix_configuration_validated = false;
-            g_last_camera_fov_deg = -1.f;
-            return result;
-        }
+    // During the death/fall animation the game camera is moved down and tilted
+    // before the local player is respawned. Never project a frame from that
+    // camera: keeping the previous VP matrix is what made ESP lines appear to
+    // fly independently from models after respawn.
+    bool camera_transition = local_player_transition || camera_roll_detected;
+    if (!transform_camera_mode && g_camera_matrix_physical_match &&
+        have_world_camera && has_local_position) {
+        float camera_height_over_feet = world_camera_position.y - local.y;
+        camera_transition = camera_transition ||
+            (std::isfinite(camera_height_over_feet) && camera_height_over_feet < 0.55f);
+    }
+    if (camera_transition) {
+        g_matrix_configuration_validated = false;
+        g_camera_matrix_physical_match = false;
+        g_last_camera_fov_deg = -1.f;
+        g_last_vp_valid = false;
+        return result;
     }
 
     Vec3 transform_camera_position{};
@@ -1155,6 +1243,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (transform_camera_mode) {
         if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation)) {
             g_player_position_validated = false;
+            g_last_vp_valid = false;
             return result;
         }
         local = transform_camera_position; has_local_position = true;
@@ -1350,10 +1439,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 }
 
 float esp_get_camera_fov() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     return g_last_camera_fov_deg;
 }
 
 bool esp_world_to_screen(Vec3 world, int screen_w, int screen_h, float& sx, float& sy) {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     if (!g_last_vp_valid) return false;
     float sw = screen_w >= 100 ? (float)screen_w : 1080.f;
     float sh = screen_h >= 100 ? (float)screen_h : 2400.f;
@@ -1389,6 +1480,7 @@ static bool player_crouching(uint64_t player) {
 }
 
 bool esp_is_aiming() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     uint64_t handler = local_player_event_handler();
     if (!handler) return false;
     uint64_t aim = rd_ptr(handler + HUC_AIM);
@@ -1397,6 +1489,7 @@ bool esp_is_aiming() {
 }
 
 uint64_t esp_aim_hit_player() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     uint64_t handler = local_player_event_handler();
     if (!handler) return 0;
     // Both RaycastData (crosshair) and AimRaycast (aim assist) cache the most
