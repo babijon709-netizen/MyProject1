@@ -49,6 +49,7 @@ static bool      g_use_direct_player_position = true;
 static bool      g_player_position_validated = false;
 
 static bool vec3_is_finite(const Vec3& value);
+static bool player_crouching(uint64_t player);
 
 template<typename T>
 static T rd(uint64_t addr) {
