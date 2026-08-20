@@ -2276,11 +2276,8 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
 
         SHdr(XS("Аимбот"));
-        CardBg(Layout::RowH * 4);
-        ToggleRow("##ta1", XS("Включить аимбот"),    &g_state.aim_touch,   g_state.a_aim_touch, false, true);
-        ToggleRow("##ta2", XS("Проверка видимости"),  &g_state.aim_pos,     g_state.a_aim_pos,   false);
-        ToggleRow("##ta3", XS("Показывать FOV круг"), &g_state.aim_special, g_state.a_aim_spec,  false);
-        ToggleRow("##ta6", XS("Только при прицеливании"), &g_state.aim_ads_only, g_state.a_aim_ads, true);
+        CardBg(Layout::RowH * 1);
+        ToggleRow("##ta1", XS("Включить аимбот"), &g_state.aim_touch, g_state.a_aim_touch, true, true);
 
         SHdr(XS("FOV аимбота"));
         CardBg(Layout::SliderH);
@@ -2293,10 +2290,6 @@ float TabContent(int tab, float dt, float cW) {
         SHdr(XS("Чувствительность"));
         CardBg(Layout::SliderH);
         SliderRow("##asens", XS("Чувствительность аима"), &g_state.aim_sens, 0.05f, 5.f, "%.2f", true, true, g_state.sl_aim_sens, dt);
-
-        SHdr(XS("Прицеливание"));
-        CardBg(Layout::SliderH);
-        SliderRow("##adsfov", XS("Порог FOV (прицел)"), &g_state.aim_fov_threshold, 20.f, 90.f, XS("%.0f°"), true, true, g_state.sl_aim_fov, dt);
 
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
@@ -2731,29 +2724,9 @@ static void RunAim() {
     float fov_px = (fov_deg / 90.0f) * (sh * 0.5f);
     if (fov_px < 1.f) fov_px = 1.f;
 
-    // Draw the FOV circle around the crosshair (under the menu).
-    if (g_state.aim_special) {
-        ImDrawList* dl = ImGui::GetBackgroundDrawList();
-        ImU32 col = IM_COL32(
-            (int)(cfg::aim::fov_color[0] * 255),
-            (int)(cfg::aim::fov_color[1] * 255),
-            (int)(cfg::aim::fov_color[2] * 255),
-            (int)(cfg::aim::fov_color[3] * 255));
-        dl->AddCircle(ImVec2(cx, cy), fov_px, col, 96, 1.5f);
-        dl->AddCircleFilled(ImVec2(cx, cy), 3.f, col, 16);
-    }
-
     // Only aim while attached to the game and the menu is hidden.
     bool aim_on = g_esp_attached && !menu_open && g_state.aim_touch;
     if (!aim_on) { AimRelease(); return; }
-
-    // "Только при прицеливании": require an ADS-scoped camera. Aiming down
-    // sights narrows the FOV, so we compare the current camera FOV against a
-    // threshold. FOV < 0 means it is not known yet — stay idle.
-    if (g_state.aim_ads_only) {
-        float fov = esp_get_camera_fov();
-        if (fov < 0.f || fov > g_state.aim_fov_threshold) { AimRelease(); return; }
-    }
 
     std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
     if (boxes.empty()) { AimRelease(); return; }
@@ -2775,13 +2748,6 @@ static void RunAim() {
 
         float tx = (box.x1 + box.x2) * 0.5f;
         float ty = box.y1 + bh * bone_v;
-
-        // Visibility check: when enabled, only aim at enemies that are fully in
-        // front of the camera and inside the view (frustum visibility) — the
-        // whole box must be on screen, not clipped by the edges or behind cam.
-        if (g_state.aim_pos) {
-            if (box.x1 < 0.f || box.x2 > sw || box.y1 < 0.f || box.y2 > sh) continue;
-        }
 
         if (tx < 0.f || tx > sw || ty < 0.f || ty > sh) continue;
 
