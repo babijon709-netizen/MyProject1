@@ -148,8 +148,11 @@ struct _XS {
     constexpr _XS(const char (&s)[N]) noexcept {
         for (size_t i = 0; i < N; ++i) b[i] = static_cast<char>(static_cast<uint8_t>(s[i]) ^ _xk(i));
     }
-    __attribute__((noinline)) const char* d() const noexcept {
-        static char o[N];
+    // Decode into a caller-provided buffer. The buffer must outlive the call:
+    // every XS(...) site keeps its own static buffer, so strings of equal
+    // length no longer alias each other (which previously made "Главная",
+    // "Визуалы" and "Конфиги" all render as "Конфиги", etc).
+    __attribute__((noinline)) const char* d(char (&o)[N]) const noexcept {
         for (size_t i = 0; i < N; ++i) o[i] = static_cast<char>(static_cast<uint8_t>(b[i]) ^ _xk(i));
         return o;
     }
@@ -158,7 +161,11 @@ template<size_t N> constexpr auto _mk(const char (&s)[N]) noexcept { return _XS<
 
 }
 
-#define XS(s) ([]() noexcept -> const char* { static constexpr auto _x = xp::_mk(s); return _x.d(); }())
+#define XS(s) ([]() noexcept -> const char* { \
+    static constexpr auto _x = xp::_mk(s); \
+    static char _o[sizeof(s)] = {}; \
+    return _x.d(_o); \
+}())
 
 namespace prot {
 static void Init() {}
@@ -581,7 +588,7 @@ static void DrawEspOverlay() {
     float thick = g_state.esp_thick;
     if (thick < 0.5f) thick = 0.5f;
 
-    // Tracers go from the top-middle of the screen to each player's feet.
+    // Tracers go from the top-middle of the screen to each player's head.
     const float tracer_origin_x = sw * 0.5f;
     const float tracer_origin_y = 0.0f;
 
@@ -620,7 +627,7 @@ static void DrawEspOverlay() {
 
         if (g_state.esp_tracer) {
             float fx = (box.x1 + box.x2) * 0.5f;
-            float fy = box.y2;
+            float fy = box.y1; // head = top of the box
             float tth = cfg::esp::tracer_thickness;
             if (tth < 0.5f) tth = 0.5f;
             dl->AddLine(
@@ -656,7 +663,8 @@ static constexpr uint8_t kXorKey   = 0xA7;
 
 static const char* kCfgDir_() noexcept {
     static constexpr auto _s = xp::_mk("/storage/emulated/0/xvcen/");
-    return _s.d();
+    static char _o[sizeof("/storage/emulated/0/xvcen/")] = {};
+    return _s.d(_o);
 }
 #define kCfgDir (kCfgDir_())
 
@@ -2345,14 +2353,12 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vb",  XS("Бокс"),           &g_state.esp_box,          &g_state.a_esp_box,          &cfg::esp::box_col},
                 {"##v3",  XS("3D рамка"),       &g_state.esp_chams,        &g_state.a_esp_chams,        &cfg::esp::box_col_invis},
                 {"##vn",  XS("Имена"),          &g_state.esp_name,         &g_state.a_esp_name,         &cfg::esp::name_col},
-                {"##vh",  XS("HP бар"),         &g_state.esp_hp,           &g_state.a_esp_hp,           &cfg::esp::health_col},
                 {"##vd",  XS("Дистанция"),      &g_state.esp_wall,         &g_state.a_esp_wall,         &cfg::esp::distance_col},
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
-                {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
                 {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
             };
-            constexpr int N = 9;
+            constexpr int N = 7;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
