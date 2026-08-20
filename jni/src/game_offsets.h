@@ -35,6 +35,10 @@ inline constexpr std::uint64_t KCC_HEAD             = 0x88;
 inline constexpr std::uint64_t KCC_ANIMATOR          = 0xD8;
 inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION = 0x108;
 inline constexpr std::uint64_t CHARACTER_ANIMATION_MODEL_INFO = 0x30;
+// CharacterAnimation.pvi -> tk caches the live HumanoidBone transforms.
+inline constexpr std::uint64_t CHARACTER_ANIMATION_BONE_CACHE = 0x88;
+inline constexpr std::uint64_t BONE_CACHE_TRANSFORMS = 0x48; // tk.pjh
+inline constexpr std::uint64_t BONE_CACHE_MAPPING    = 0x50; // tk.pjY
 inline constexpr std::uint64_t PLAYER_MODEL_HEAD    = 0x20;
 inline constexpr std::uint64_t PLAYER_MODEL_BODY    = 0x40;
 

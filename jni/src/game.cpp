@@ -549,6 +549,195 @@ static int32_t discover_skeleton_hierarchy_count(uint64_t matrices, uint64_t ind
     return highest + 1;
 }
 
+enum LiveBoneId : int {
+    LIVE_HIPS = 0,
+    LIVE_LEFT_UPPER_LEG = 1,
+    LIVE_RIGHT_UPPER_LEG = 2,
+    LIVE_LEFT_LOWER_LEG = 3,
+    LIVE_RIGHT_LOWER_LEG = 4,
+    LIVE_LEFT_FOOT = 5,
+    LIVE_RIGHT_FOOT = 6,
+    LIVE_SPINE = 7,
+    LIVE_CHEST = 8,
+    LIVE_UPPER_CHEST = 9,
+    LIVE_NECK = 10,
+    LIVE_HEAD = 11,
+    LIVE_LEFT_SHOULDER = 12,
+    LIVE_RIGHT_SHOULDER = 13,
+    LIVE_LEFT_UPPER_ARM = 14,
+    LIVE_RIGHT_UPPER_ARM = 15,
+    LIVE_LEFT_LOWER_ARM = 16,
+    LIVE_RIGHT_LOWER_ARM = 17,
+    LIVE_LEFT_HAND = 18,
+    LIVE_RIGHT_HAND = 19,
+    LIVE_LEFT_TOES = 20,
+    LIVE_RIGHT_TOES = 21,
+    LIVE_BONE_COUNT = 22
+};
+
+struct LiveBoneSet {
+    Vec3 position[LIVE_BONE_COUNT]{};
+    bool valid[LIVE_BONE_COUNT]{};
+    int valid_count = 0;
+};
+
+static int read_live_bone_candidate(uint64_t transform_array,
+                                    uint64_t mapping_array,
+                                    int mapping_mode,
+                                    const Vec3& feet,
+                                    LiveBoneSet& result) {
+    result = {};
+    if (!likely_native_pointer(transform_array)) return -1;
+    int32_t count = rd<int32_t>(transform_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8);
+    if (count <= 0 || count > 96) return -1;
+    int32_t mapping_count = 0;
+    if (mapping_mode != 0) {
+        if (!likely_native_pointer(mapping_array)) return -1;
+        mapping_count = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8);
+        if (mapping_count <= 0 || mapping_count > 96) return -1;
+    }
+
+    int score = 0;
+    int32_t iterations = mapping_mode == 2 ? LIVE_BONE_COUNT : count;
+    for (int32_t i = 0; i < iterations; ++i) {
+        int32_t bone_id = i;
+        int32_t transform_index = i;
+        if (mapping_mode == 1) {
+            if (i >= mapping_count) continue;
+            bone_id = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8 +
+                                  (uint64_t)i * sizeof(int32_t));
+        } else if (mapping_mode == 2) {
+            if (i >= mapping_count) continue;
+            transform_index = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8 +
+                                          (uint64_t)i * sizeof(int32_t));
+            if (transform_index < 0 || transform_index >= count) continue;
+        }
+        if (bone_id < 0 || bone_id >= LIVE_BONE_COUNT || result.valid[bone_id]) continue;
+        uint64_t managed_transform = rd_ptr(transform_array + IL2CPP_ARRAY_FIRST_ELEMENT +
+                                            (uint64_t)transform_index * sizeof(uint64_t));
+        if (!likely_native_pointer(managed_transform)) continue;
+        uint64_t native_transform = resolve_native_transform(managed_transform);
+        Vec3 position{};
+        if (!likely_native_pointer(native_transform) ||
+            !read_transform_hierarchy_position(native_transform, position)) continue;
+
+        float dx = position.x - feet.x;
+        float dy = position.y - feet.y;
+        float dz = position.z - feet.z;
+        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(distance) || distance > 10.f) continue;
+        result.position[bone_id] = position;
+        result.valid[bone_id] = true;
+        ++result.valid_count;
+    }
+
+    // Prefer a complete anatomical mapping over an array that happens to
+    // contain only lower-body transforms. This is what prevents the old
+    // "legs-only" result when pjY is present but interpreted incorrectly.
+    if (result.valid[LIVE_HEAD]) score += 120;
+    if (result.valid[LIVE_NECK]) score += 60;
+    if (result.valid[LIVE_HIPS]) score += 100;
+    if (result.valid[LIVE_CHEST] || result.valid[LIVE_UPPER_CHEST]) score += 80;
+    if (result.valid[LIVE_LEFT_UPPER_ARM] && result.valid[LIVE_RIGHT_UPPER_ARM]) score += 70;
+    if (result.valid[LIVE_LEFT_UPPER_LEG] && result.valid[LIVE_RIGHT_UPPER_LEG]) score += 50;
+    score += result.valid_count;
+    return score;
+}
+
+static bool read_live_bone_skeleton(uint64_t character_animation,
+                                    const Vec3& feet,
+                                    std::vector<std::pair<Vec3, Vec3>>& segments,
+                                    Vec3& animated_head,
+                                    Vec3& skeleton_chest,
+                                    Vec3& skeleton_pelvis) {
+    if (!likely_native_pointer(character_animation)) return false;
+    uint64_t bone_cache = rd_ptr(character_animation + CHARACTER_ANIMATION_BONE_CACHE);
+    if (!likely_native_pointer(bone_cache)) return false;
+    uint64_t transform_array = rd_ptr(bone_cache + BONE_CACHE_TRANSFORMS);
+    uint64_t mapping_array = rd_ptr(bone_cache + BONE_CACHE_MAPPING);
+    if (!likely_native_pointer(transform_array)) return false;
+
+    LiveBoneSet direct_set{}, transform_to_bone_set{}, bone_to_transform_set{};
+    int direct_score = read_live_bone_candidate(transform_array, mapping_array, 0,
+                                                feet, direct_set);
+    int transform_to_bone_score = read_live_bone_candidate(transform_array, mapping_array, 1,
+                                                           feet, transform_to_bone_set);
+    int bone_to_transform_score = read_live_bone_candidate(transform_array, mapping_array, 2,
+                                                           feet, bone_to_transform_set);
+    const LiveBoneSet* bones = &direct_set;
+    int best_score = direct_score;
+    if (transform_to_bone_score > best_score) {
+        best_score = transform_to_bone_score;
+        bones = &transform_to_bone_set;
+    }
+    if (bone_to_transform_score > best_score) {
+        best_score = bone_to_transform_score;
+        bones = &bone_to_transform_set;
+    }
+    if (best_score < 0) return false;
+    if (!bones || !bones->valid[LIVE_HEAD] || !bones->valid[LIVE_HIPS] ||
+        !bones->valid[LIVE_NECK]) return false;
+
+    animated_head = bones->position[LIVE_HEAD];
+    skeleton_pelvis = bones->position[LIVE_HIPS];
+    if (bones->valid[LIVE_UPPER_CHEST]) skeleton_chest = bones->position[LIVE_UPPER_CHEST];
+    else if (bones->valid[LIVE_CHEST]) skeleton_chest = bones->position[LIVE_CHEST];
+    else if (bones->valid[LIVE_SPINE]) skeleton_chest = bones->position[LIVE_SPINE];
+    else return false;
+
+    auto add_segment = [&](int a, int b) {
+        if (!bones->valid[a] || !bones->valid[b]) return;
+        const Vec3& first = bones->position[a];
+        const Vec3& second = bones->position[b];
+        float dx = first.x - second.x;
+        float dy = first.y - second.y;
+        float dz = first.z - second.z;
+        float length = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(length) || length < 0.005f || length > 4.f) return;
+        segments.emplace_back(first, second);
+    };
+
+    // The order mirrors Unity's HumanBodyBones enum from dump.cs. Every point
+    // is read from the live Transform cache, so arm/leg bends follow Animator
+    // and IK instead of being synthesized from movement speed.
+    add_segment(LIVE_HEAD, LIVE_NECK);
+
+    // Do not require UpperChest to exist. Some skins omit it, which was the
+    // reason the earlier implementation could show legs while losing the
+    // entire torso/head chain.
+    int torso_previous = LIVE_NECK;
+    const int torso_chain[] = {LIVE_UPPER_CHEST, LIVE_CHEST, LIVE_SPINE, LIVE_HIPS};
+    for (int torso_bone : torso_chain) {
+        if (!bones->valid[torso_bone]) continue;
+        if (bones->valid[torso_previous]) add_segment(torso_previous, torso_bone);
+        torso_previous = torso_bone;
+    }
+    int shoulder_parent = bones->valid[LIVE_UPPER_CHEST] ? LIVE_UPPER_CHEST
+                        : bones->valid[LIVE_CHEST] ? LIVE_CHEST
+                        : bones->valid[LIVE_SPINE] ? LIVE_SPINE : LIVE_HIPS;
+    if (bones->valid[shoulder_parent]) {
+        add_segment(shoulder_parent, LIVE_LEFT_SHOULDER);
+        add_segment(shoulder_parent, LIVE_RIGHT_SHOULDER);
+    }
+    add_segment(LIVE_LEFT_SHOULDER, LIVE_LEFT_UPPER_ARM);
+    add_segment(LIVE_LEFT_UPPER_ARM, LIVE_LEFT_LOWER_ARM);
+    add_segment(LIVE_LEFT_LOWER_ARM, LIVE_LEFT_HAND);
+    add_segment(LIVE_RIGHT_SHOULDER, LIVE_RIGHT_UPPER_ARM);
+    add_segment(LIVE_RIGHT_UPPER_ARM, LIVE_RIGHT_LOWER_ARM);
+    add_segment(LIVE_RIGHT_LOWER_ARM, LIVE_RIGHT_HAND);
+    add_segment(LIVE_HIPS, LIVE_LEFT_UPPER_LEG);
+    add_segment(LIVE_LEFT_UPPER_LEG, LIVE_LEFT_LOWER_LEG);
+    add_segment(LIVE_LEFT_LOWER_LEG, LIVE_LEFT_FOOT);
+    add_segment(LIVE_LEFT_FOOT, LIVE_LEFT_TOES);
+    add_segment(LIVE_HIPS, LIVE_RIGHT_UPPER_LEG);
+    add_segment(LIVE_RIGHT_UPPER_LEG, LIVE_RIGHT_LOWER_LEG);
+    add_segment(LIVE_RIGHT_LOWER_LEG, LIVE_RIGHT_FOOT);
+    add_segment(LIVE_RIGHT_FOOT, LIVE_RIGHT_TOES);
+
+    return segments.size() >= 8 && vec3_is_finite(animated_head) &&
+           vec3_is_finite(skeleton_chest) && vec3_is_finite(skeleton_pelvis);
+}
+
 static bool build_skeleton_graph(uint64_t native_head, const Vec3& feet,
                                  std::vector<std::pair<Vec3, Vec3>>& segments,
                                  Vec3& animated_head) {
@@ -802,6 +991,14 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
     uint64_t character_animation = rd_ptr(kcc + kcc_character_animation_offset);
     uint64_t model_info = character_animation
         ? rd_ptr(character_animation + CHARACTER_ANIMATION_MODEL_INFO) : 0;
+
+    // CharacterAnimation.tk keeps the exact Transform[] used by the game's
+    // humanoid animation code. Prefer it over an undifferentiated hierarchy:
+    // this preserves named head/chest/hip/limb bones and therefore follows
+    // weapon IK, reload poses and ragdolls without a synthetic walk cycle.
+    if (read_live_bone_skeleton(character_animation, feet, segments,
+                                 animated_head, skeleton_chest, skeleton_pelvis))
+        return true;
 
     // The KCC head is the preferred anchor. PlayerModelInfo is also checked:
     // during skin swaps/reloads the KCC head can temporarily point to a camera
