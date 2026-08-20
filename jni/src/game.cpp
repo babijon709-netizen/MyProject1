@@ -807,24 +807,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
 
-        // Real body height from the entity bounds (reflects crouch: the head
-        // drops but the feet stay). Fall back to a fixed height if unavailable
-        // or inconsistent with the replicated feet position.
+        // Crouch state from the player's input (reliable: huU.Crouch is a huT,
+        // same pattern as the verified Aim flag). Crouching lowers the head by a
+        // fixed ratio — the feet stay.
+        bool crouched = player_crouching(s_transforms[i]);
         float feet_y = feet.y;
-        float head_height = PLAYER_HEIGHT;
-        {
-            uint64_t handler = rd_ptr(s_transforms[i] + PLAYER_EVENT_HANDLER);
-            if (likely_native_pointer(handler)) {
-                Vec3 bc = rd_v3(handler + HUC_BOUNDS);
-                Vec3 be = rd_v3(handler + HUC_BOUNDS + 12);
-                float bfeet = bc.y - be.y;
-                if (vec3_is_finite(bc) && vec3_is_finite(be) && be.y > 0.15f && be.y < 3.0f &&
-                    fabsf(bfeet - feet.y) < 1.5f) {
-                    feet_y = bfeet;
-                    head_height = be.y * 2.0f;
-                }
-            }
-        }
+        float head_height = crouched ? 1.12f : PLAYER_HEIGHT;
 
         // --- velocity + position extrapolation (computed BEFORE projecting) ---
         // Positions update on discrete network ticks; the client renders the
@@ -847,15 +835,19 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 float moved = fabsf(ddx) + fabsf(ddz);
                 vel = it->second.vel; // default: hold last estimate
 
-                if (moved > 0.005f && dt > 0.03 && dt < 3.0) {
-                    float ivx = ddx / (float)dt;
-                    float ivz = ddz / (float)dt;
-                    float sp = sqrtf(ivx * ivx + ivz * ivz);
-                    if (sp < 15.f) {
-                        vel.x += (ivx - vel.x) * 0.5f;
-                        vel.z += (ivz - vel.z) * 0.5f;
+                if (moved > 0.005f) {
+                    if (dt > 0.03) {
+                        double cdt = dt > 0.5 ? 0.5 : dt; // clamp stale gaps
+                        float ivx = ddx / (float)cdt;
+                        float ivz = ddz / (float)cdt;
+                        float sp = sqrtf(ivx * ivx + ivz * ivz);
+                        if (sp < 15.f) {
+                            vel.x += (ivx - vel.x) * 0.6f;
+                            vel.z += (ivz - vel.z) * 0.6f;
+                        }
                     }
-                    it->second.pos = feet;   // reference advances only on a tick
+                    // advance reference on any real movement (tick)
+                    it->second.pos = feet;
                     it->second.t = now;
                 } else if (dt > 0.5) {
                     // standing still for a while: decay to zero
@@ -917,6 +909,25 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.head  = {render_x, feet_y + head_height, render_z};
         box.vel   = vel;
         box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
+        box.crouched = crouched;
+
+        // Screen-space velocity of the head: project head and head + vel*dt.
+        box.aim_vx = 0.f;
+        box.aim_vy = 0.f;
+        if (!transform_camera_mode) {
+            Vec3 h  = box.head;
+            Vec3 h2 = {h.x + vel.x * 0.2f, h.y, h.z + vel.z * 0.2f};
+            Vec2 s0{}, s1{};
+            if (w2s(vp, h, sw, sh, s0, false) && w2s(vp, h2, sw, sh, s1, false)) {
+                box.aim_vx = (s1.x - s0.x) / 0.2f;
+                box.aim_vy = (s1.y - s0.y) / 0.2f;
+                if (!std::isfinite(box.aim_vx) || !std::isfinite(box.aim_vy) ||
+                    fabsf(box.aim_vx) > 4000.f || fabsf(box.aim_vy) > 4000.f) {
+                    box.aim_vx = 0.f; box.aim_vy = 0.f;
+                }
+            }
+        }
+
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
             bool projected = transform_camera_mode
@@ -958,6 +969,17 @@ static uint64_t local_player_event_handler() {
     uint64_t local = resolve_local_player();
     if (!local) return 0;
     return rd_ptr(local + PLAYER_EVENT_HANDLER);
+}
+
+// Any player's crouch state: huU.Crouch is a huT (button state), whose bool
+// TCz lives at +0x10 — same pattern as the Aim flag used for ADS detection.
+static bool player_crouching(uint64_t player) {
+    if (!player) return false;
+    uint64_t handler = rd_ptr(player + PLAYER_EVENT_HANDLER);
+    if (!likely_native_pointer(handler)) return false;
+    uint64_t crouch = rd_ptr(handler + HUC_CROUCH);
+    if (!likely_native_pointer(crouch)) return false;
+    return rd<uint8_t>(crouch + HUT_STATE) != 0;
 }
 
 bool esp_is_aiming() {

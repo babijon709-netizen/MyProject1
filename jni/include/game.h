@@ -11,8 +11,11 @@ struct EspBox {
     uint64_t source;          // PlayerManager* this box belongs to
     float speed;              // smoothed horizontal world speed (m/s)
     Vec3  feet;               // world feet position
-    Vec3  head;               // world head position (bounds-aware, crouch-safe)
+    Vec3  head;               // world head position (crouch-aware)
     Vec3  vel;                // smoothed horizontal world velocity (x,0,z)
+    float aim_vx;             // screen velocity of head (px/s), for aim feed-forward
+    float aim_vy;
+    bool  crouched;           // player is crouching
 };
 
 bool        esp_init(pid_t pid);

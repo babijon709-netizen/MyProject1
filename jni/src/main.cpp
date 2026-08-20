@@ -616,7 +616,7 @@ static void DrawSkeleton(ImDrawList* dl, const EspBox& box, ImU32 col, float thi
     float off = (float)(box.source & 0xFF) * 0.37f;
     float amp = speed > 6.f ? 1.f : speed / 6.f;
     bool moving = speed > 0.5f;
-    float ph = t * (2.6f + speed * 0.85f) + off;
+    float ph = t * (2.8f + speed * 0.9f) + off;
 
     // core anchors (u = 0..1 across, v = 0..1 down the box)
     ImVec2 head  = P(0.5f, 0.07f);
@@ -628,18 +628,22 @@ static void DrawSkeleton(ImDrawList* dl, const EspBox& box, ImU32 col, float thi
     ImVec2 hipL  = P(0.47f, 0.45f);
     ImVec2 hipR  = P(0.53f, 0.45f);
 
-    // whole-body bob + slight forward lean while running
-    float bob  = -fabsf(cosf(ph)) * amp * bh * 0.018f;
-    float lean = moving ? amp * bw * 0.06f : 0.f;
-    ImVec2 sh = ImVec2(lean, bob);
-    head.x += sh.x; head.y += sh.y;
-    neck.x += sh.x; neck.y += sh.y;
-    chest.x += sh.x; chest.y += sh.y;
-    hips.x += sh.x; hips.y += sh.y;
-    shL.x += sh.x; shL.y += sh.y;
-    shR.x += sh.x; shR.y += sh.y;
-    hipL.x += sh.x; hipL.y += sh.y;
-    hipR.x += sh.x; hipR.y += sh.y;
+    // whole-body bob + lean into the actual movement direction (screen space,
+    // from the projected head velocity).
+    float bob = -fabsf(cosf(ph)) * amp * bh * 0.02f;
+    float dirx = 0.f, diry = 0.f;
+    float svl = sqrtf(box.aim_vx * box.aim_vx + box.aim_vy * box.aim_vy);
+    if (svl > 30.f) { dirx = box.aim_vx / svl; diry = box.aim_vy / svl; }
+    float lean = moving ? amp * bw * 0.08f : 0.f;
+    ImVec2 up = ImVec2(dirx * lean, diry * lean * 0.6f + bob);
+    head.x += up.x; head.y += up.y;
+    neck.x += up.x; neck.y += up.y;
+    chest.x += up.x; chest.y += up.y;
+    shL.x += up.x; shL.y += up.y;
+    shR.x += up.x; shR.y += up.y;
+    hips.x += up.x * 0.4f; hips.y += bob;
+    hipL.x += up.x * 0.4f; hipL.y += bob;
+    hipR.x += up.x * 0.4f; hipR.y += bob;
 
     // 2-bone IK: given root A and effector F with segment lengths l1,l2,
     // return the joint position (bend sign controls which side it bends).
@@ -2873,7 +2877,6 @@ static void CenterMenuOnDisplay() {
 // ===========================================================================
 static bool  g_aim_active = false;
 static float g_aim_cx = 0.f, g_aim_cy = 0.f;
-static float g_aim_tx = 0.f, g_aim_ty = 0.f; // smoothed aim point
 static uint64_t g_aim_target = 0;            // locked enemy source (hysteresis)
 
 static void AimRelease() {
@@ -2993,15 +2996,15 @@ static void RunAim() {
     int sm = (int)lroundf(g_state.gun_str);
     if (sm < 1) sm = 1;
     if (sm > 10) sm = 10;
-    float rate = 12.f - 1.2f * (float)(sm - 1); // sm1=12/s ... sm10=1.2/s
-    if (rate < 1.2f) rate = 1.2f;
+    float K = 22.f - 2.0f * (float)(sm - 1); // sm1=22/s ... sm10=4/s
+    if (K < 4.f) K = 4.f;
 
     // Predict where the target's head will be shortly, in WORLD space, then
     // project that single point to screen with the live camera. This leads a
     // running enemy and follows a crouching one automatically (head is
-    // bounds-aware). If world projection is unavailable, fall back to the box's
+    // crouch-aware). If world projection is unavailable, fall back to the box's
     // own screen position so the aim never fully stops.
-    const float lead_time = 0.15f;
+    const float lead_time = 0.18f;
     Vec3 pred = { tb->head.x + tb->vel.x * lead_time,
                   tb->head.y,
                   tb->head.z + tb->vel.z * lead_time };
@@ -3009,7 +3012,6 @@ static void RunAim() {
     bool have_screen = esp_world_to_screen(pred, (int)sw, (int)sh, sx, sy);
     if (!have_screen || !std::isfinite(sx) || !std::isfinite(sy) ||
         sx < -sw * 0.5f || sx > sw * 1.5f || sy < -sh * 0.5f || sy > sh * 1.5f) {
-        // fallback: box's screen-space aim point
         float bw = tb->x2 - tb->x1;
         float bh = tb->y2 - tb->y1;
         if (bw < 1.f || bh < 1.f) { AimRelease(); return; }
@@ -3018,33 +3020,36 @@ static void RunAim() {
         if (!std::isfinite(sx) || !std::isfinite(sy)) { AimRelease(); return; }
     }
 
-    // Lightly smooth the screen aim point (removes network jitter, near-zero lag).
-    float ts = 1.0f - expf(-30.f * dt);
-    g_aim_tx += (sx - g_aim_tx) * ts;
-    g_aim_ty += (sy - g_aim_ty) * ts;
+    float ex = sx - cx; // remaining screen error to the predicted point
+    float ey = sy - cy;
 
-    float ex = g_aim_tx - cx; // remaining screen error
-    float ey = g_aim_ty - cy;
-
-    // Clamp the error feeding the controller: a huge error (e.g. ADS zoom made
-    // the target jump far on screen) must not produce a huge velocity.
-    const float emax = 220.f;
+    // Clamp the error feeding the proportional term (prevents ADS-zoom blowups).
+    const float emax = 260.f;
     float cex = fmaxf(-emax, fminf(emax, ex));
     float cey = fmaxf(-emax, fminf(emax, ey));
 
-    // Pure exponential approach toward the predicted point. Exponential control
-    // never overshoots, so the camera cannot oscillate or "spin".
-    float step = 1.0f - expf(-rate * dt);
-    float ddx = cex * step;
-    float ddy = cey * step;
+    // Feed-forward (track the runner at exactly his screen speed) + proportional
+    // (close the gap). With feed-forward, once on target the crosshair moves at
+    // the target's own velocity — no lag behind a running enemy.
+    float dvx = tb->aim_vx + cex * K;
+    float dvy = tb->aim_vy + cey * K;
 
-    const float max_drag = 120.f; // per-frame cap
+    // Cap total crosshair velocity.
+    const float vmax = 3600.f;
+    float vl = sqrtf(dvx * dvx + dvy * dvy);
+    if (vl > vmax) { dvx *= vmax / vl; dvy *= vmax / vl; }
+
+    float ddx = dvx * dt;
+    float ddy = dvy * dt;
+
+    const float max_drag = 220.f; // per-frame cap
     float dl = sqrtf(ddx * ddx + ddy * ddy);
     if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
 
-    // Deadzone: on target -> stop dead (no micro-shake).
+    // Deadzone: on target and the target is nearly still -> stop dead.
     float rest = sqrtf(ex * ex + ey * ey);
-    if (rest < 6.f) { ddx = 0.f; ddy = 0.f; }
+    float ffs = sqrtf(tb->aim_vx * tb->aim_vx + tb->aim_vy * tb->aim_vy);
+    if (rest < 6.f && ffs < 60.f) { ddx = 0.f; ddy = 0.f; }
 
     // --- injection -----------------------------------------------------------
     const float anchor_x = sw * 0.72f;
