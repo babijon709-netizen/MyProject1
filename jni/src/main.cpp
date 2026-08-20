@@ -2159,7 +2159,7 @@ float TabContent(int tab, float dt, float cW) {
         const float inset = Layout::Inset, padX = Layout::PadX;
         const float fs = ImGui::GetFontSize();
 
-        SHdr(XS("Разработчики"));
+        SHdr(XS("Разработчик"));
         {
             auto DrawDevCard = [&](const char* id, const char* name, const char* tag,
                                    GLuint tex, const char* avLetter, const char* openCmd) {
@@ -2251,13 +2251,8 @@ float TabContent(int tab, float dt, float cW) {
                 ImGui::Dummy({avW, 0.f});
             };
 
-            DrawDevCard("##devcard", XS("xvcey"), XS("@xvcey"), g_devAvatar[0], XS("X"),
+            DrawDevCard("##devcard", XS("Саня"), XS("@xvcey"), g_devAvatar[0], XS("С"),
                         XS("am start -a android.intent.action.VIEW -d \"https://t.me/xvcey\""));
-
-            ImGui::Dummy({1.f, 10.f});
-
-            DrawDevCard("##devcard2", XS("JohnnyCutter"), XS("@recoveryev"), g_devAvatar[1], XS("J"),
-                        XS("am start -a android.intent.action.VIEW -d \"https://t.me/recoveryev\""));
         }
 
     } else if (tab == 1) {
@@ -2676,6 +2671,124 @@ static void CenterMenuOnDisplay() {
     g_win.pos.y = (dh - g_win.h) * 0.5f;
     g_win.dragging = false;
     g_win.resizing = false;
+}
+
+// ===========================================================================
+//  Smooth aimbot
+// ===========================================================================
+static bool  g_aim_touch_down = false;
+static float g_aim_fx = 0.f, g_aim_fy = 0.f;
+
+static void AimRelease() {
+    if (g_aim_touch_down) {
+        Touch_Up();
+        g_aim_touch_down = false;
+    }
+}
+
+static void RunAim() {
+    // Visible screen size (same convention as DrawEspOverlay).
+    float sw = (float)native_window_screen_x;
+    float sh = (float)native_window_screen_y;
+    if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
+        sw = (float)displayInfo.width;
+        sh = (float)displayInfo.height;
+    } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
+        sw = (float)displayInfo.height;
+        sh = (float)displayInfo.width;
+    }
+    if (sw < 100.f) sw = 1080.f;
+    if (sh < 100.f) sh = 2400.f;
+
+    const float cx = sw * 0.5f;
+    const float cy = sh * 0.5f;
+
+    // FOV circle radius: 90 degrees == half of the screen height.
+    float fov_deg = g_state.gun_fov;
+    if (fov_deg < 1.f) fov_deg = 1.f;
+    float fov_px = (fov_deg / 90.0f) * (sh * 0.5f);
+    if (fov_px < 1.f) fov_px = 1.f;
+
+    // Draw the FOV circle around the crosshair (under the menu).
+    if (g_state.aim_special) {
+        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        ImU32 col = IM_COL32(
+            (int)(cfg::aim::fov_color[0] * 255),
+            (int)(cfg::aim::fov_color[1] * 255),
+            (int)(cfg::aim::fov_color[2] * 255),
+            (int)(cfg::aim::fov_color[3] * 255));
+        dl->AddCircle(ImVec2(cx, cy), fov_px, col, 96, 1.5f);
+        dl->AddCircleFilled(ImVec2(cx, cy), 3.f, col, 16);
+    }
+
+    // Only aim while attached to the game and the menu is hidden.
+    bool aim_on = g_esp_attached && !menu_open && g_state.aim_touch;
+    if (!aim_on) { AimRelease(); return; }
+
+    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
+    if (boxes.empty()) { AimRelease(); return; }
+
+    // Bone factor along the box height (0 = top/head, 1 = bottom/feet).
+    float bone_v = 0.32f;
+    if (g_state.aim_bone == 0)      bone_v = 0.10f; // head
+    else if (g_state.aim_bone == 1) bone_v = 0.32f; // body/chest
+    else if (g_state.aim_bone == 2) bone_v = 0.55f; // pelvis/legs
+
+    // Pick the enemy closest to the crosshair, inside the FOV circle.
+    float best_dist2 = -1.f;
+    float best_tx = 0.f, best_ty = 0.f;
+    for (const EspBox& box : boxes) {
+        if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
+        float bw = box.x2 - box.x1;
+        float bh = box.y2 - box.y1;
+        if (bw < 1.f || bh < 1.f) continue;
+
+        float tx = (box.x1 + box.x2) * 0.5f;
+        float ty = box.y1 + bh * bone_v;
+
+        // Visibility check: when enabled, only aim at players fully on screen.
+        if (g_state.aim_pos) {
+            bool fully_visible = true;
+            for (int c = 0; c < 8; ++c)
+                if (!box.corner_visible[c]) { fully_visible = false; break; }
+            if (!fully_visible) continue;
+        }
+
+        if (tx < 0.f || tx > sw || ty < 0.f || ty > sh) continue;
+
+        float dx = tx - cx;
+        float dy = ty - cy;
+        float d2 = dx * dx + dy * dy;
+        if (d2 > fov_px * fov_px) continue;
+        if (best_dist2 < 0.f || d2 < best_dist2) {
+            best_dist2 = d2;
+            best_tx = tx;
+            best_ty = ty;
+        }
+    }
+
+    if (best_dist2 < 0.f) { AimRelease(); return; }
+
+    float dx = best_tx - cx;
+    float dy = best_ty - cy;
+    float dist = sqrtf(dx * dx + dy * dy);
+    if (dist < 3.f) { AimRelease(); return; } // already on target
+
+    // Smoothness 0..1: 0 = fast, 1 = slow. Clamped so it always moves a bit,
+    // but never snaps the whole distance in one frame (no overshoot/oscillation).
+    float speed = 1.0f - g_state.gun_str;
+    if (speed < 0.05f) speed = 0.05f;
+    if (speed > 0.60f) speed = 0.60f;
+
+    if (!g_aim_touch_down) {
+        g_aim_fx = cx;
+        g_aim_fy = cy;
+        Touch_Down(g_aim_fx, g_aim_fy);
+        g_aim_touch_down = true;
+    }
+    g_aim_fx = ImClamp(g_aim_fx + dx * speed, 0.f, sw);
+    g_aim_fy = ImClamp(g_aim_fy + dy * speed, 0.f, sh);
+    Touch_Move(g_aim_fx, g_aim_fy);
 }
 
 void RenderMenu() {
@@ -3100,7 +3213,8 @@ int main(int argc, char* argv[]) {
     Blur::Init();
     CfgWatchInit();
     AudioInit();
-    Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
+    // readOnly=false: grab touch + create uinput so the aimbot can inject swipes.
+    Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false);
     start_attach_thread();
     LoadAnimeImage();
     LoadTabIcons();
@@ -3116,6 +3230,7 @@ int main(int argc, char* argv[]) {
 
         ui::bar::set_game_alpha(0.f);
         DrawEspOverlay();
+        RunAim();
         RenderMenu();
         drawEnd();
         g_frame_done.store(true);
@@ -3127,6 +3242,7 @@ int main(int argc, char* argv[]) {
         esp_reset();
         g_esp_attached = false;
     }
+    AimRelease();
     Blur::Free();
     CfgWatchFree();
     AudioFree();
