@@ -3125,9 +3125,13 @@ static void DrawPlayerCounter() {
     char buf[48];
     snprintf(buf, sizeof(buf), "%s %d", XS("Игроков:"), n);
     // bones readout (calibration aid): show only when the skeleton is on.
-    char bbuf[48] = {};
-    if (g_state.esp_skeleton && g_bones_debug >= 0)
-        snprintf(bbuf, sizeof(bbuf), "%s %d", XS("Костей:"), g_bones_debug);
+    char bbuf[80] = {};
+    if (g_state.esp_skeleton && g_bones_debug >= 0) {
+        int arrs = 0, run = 0, lvl = 0, map = 0;
+        esp_bone_diag(arrs, run, lvl, map);
+        snprintf(bbuf, sizeof(bbuf), "%s %d [a%d r%d l%d m%d]",
+                 XS("Костей:"), g_bones_debug, arrs, run, lvl, map);
+    }
 
     auto* fg = ImGui::GetForegroundDrawList();
     auto* fn = ImGui::GetFont();

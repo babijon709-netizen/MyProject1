@@ -33,3 +33,6 @@ bool        esp_world_to_screen(Vec3 world, int screen_w, int screen_h, float& s
 // skin matrices). Returns false / valid==0 when unavailable; the caller falls
 // back to the procedural skeleton.
 bool        esp_read_bones(uint64_t player, BoneSet& out);
+// Discovery diagnostics: how many matrix arrays were found, the best run length,
+// the depth where it was found, and whether the humanoid map was located.
+void        esp_bone_diag(int& arrs, int& run, int& level, int& map);

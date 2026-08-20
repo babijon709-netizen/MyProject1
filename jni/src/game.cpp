@@ -1072,7 +1072,7 @@ static constexpr int k_bone_to_human[skeleton::BONE_COUNT] = {
 };
 
 struct BoneDiscover {
-    uint64_t pose = 0;      // pointer to the world-space skin matrix array
+    uint64_t pose = 0;      // pointer to the skin matrix array
     int      nodes = 0;     // skeleton node count
     int      map[55];       // HumanBodyBones -> node index
     bool     ready = false;
@@ -1080,64 +1080,105 @@ struct BoneDiscover {
 static BoneDiscover g_bones;
 static std::chrono::steady_clock::time_point g_bones_scan{};
 
-static bool bone_discover(uint64_t anim) {
-    // (1) find the pose matrix array pointer
-    for (uint64_t off = 0x20; off <= 0x800; off += 8) {
-        uint64_t p = rd_ptr(anim + off);
+struct BoneDiag {
+    int arrs = 0;     // matrix arrays found (any level)
+    int best_run = 0; // longest valid-matrix run
+    int level = 0;    // depth where the best array was found
+    int map = 0;      // humanoid map found (1/0)
+};
+static BoneDiag g_diag;
+
+// Count how many consecutive valid matrices sit at `p` (stride 64 bytes).
+static int matrix_run(uint64_t p) {
+    int n = 0;
+    for (int k = 0; k < 160; k++) {
+        BoneMatrix m{};
+        if (!rd_exact(p + (uint64_t)k * 64, m) || !bone_matrix_ok(m)) break;
+        n++;
+    }
+    return n;
+}
+
+// Scan an object's pointer slots for a pointer that starts an array of matrices.
+static void scan_object_for_pose(uint64_t obj, int level, int max_slots) {
+    int slots = 0;
+    for (uint64_t off = 0x18; off <= 0x1000 && slots < max_slots; off += 8) {
+        uint64_t p = rd_ptr(obj + off);
         if (!likely_native_pointer(p)) continue;
+        slots++;
         BoneMatrix a{}, b{}, c{};
         if (!rd_exact(p, a) || !rd_exact(p + 64, b) || !rd_exact(p + 128, c)) continue;
         if (!bone_matrix_ok(a) || !bone_matrix_ok(b) || !bone_matrix_ok(c)) continue;
-        // distinct translations (not three copies of the same matrix)
         float d = fabsf(a.m[12]-b.m[12]) + fabsf(a.m[13]-b.m[13]) + fabsf(a.m[14]-b.m[14]);
-        if (d < 0.001f) continue;
-        g_bones.pose = p;
-        break;
-    }
-    if (!g_bones.pose) return false;
-
-    // (2) node count: an int that matches the plausible array length
-    g_bones.nodes = 0;
-    for (uint64_t off = 0x20; off <= 0x800; off += 4) {
-        int n = rd<int32_t>(anim + off);
-        if (n < 20 || n > 160) continue;
-        BoneMatrix m{};
-        bool ok = true;
-        for (int k : {0, n / 2, n - 1}) {
-            if (!rd_exact(g_bones.pose + (uint64_t)k * 64, m) || !bone_matrix_ok(m)) { ok = false; break; }
+        if (d < 0.001f) continue; // same matrix repeated — not a pose array
+        g_diag.arrs++;
+        int run = matrix_run(p);
+        if (run >= 16 && run > g_diag.best_run) {
+            g_diag.best_run = run;
+            g_bones.pose = p;
+            g_diag.level = level;
         }
-        if (ok) { g_bones.nodes = n; break; }
     }
-    if (!g_bones.nodes) {
-        int n = 0;
-        for (int k = 0; k < 160; k++) {
-            BoneMatrix m{};
-            if (!rd_exact(g_bones.pose + (uint64_t)k * 64, m) || !bone_matrix_ok(m)) break;
-            n++;
-        }
-        g_bones.nodes = n;
-    }
-    if (g_bones.nodes < 20 || g_bones.nodes > 160) { g_bones.pose = 0; return false; }
+}
 
-    // (3) HumanBodyBones -> node index table (55 ints, all < node count) inside
-    // the Avatar (some plausible object pointer referenced by the Animator).
-    bool have_map = false;
-    int candidates = 0;
-    for (uint64_t off = 0x20; off <= 0x800 && !have_map && candidates < 16; off += 8) {
-        uint64_t a = rd_ptr(anim + off);
-        if (!likely_native_pointer(a) || a == g_bones.pose) continue;
-        candidates++;
-        for (uint64_t ho = 0x10; ho <= 0x400; ho += 4) {
+// HumanBodyBones -> node index table lives in the Avatar's Skeleton as an array
+// of HumanBone structs {int boneIndex; int parentIndex; string boneName;
+// string humanName;} — so the 55 indices are at a struct stride (40/48 bytes),
+// NOT back-to-back 4-byte ints.
+static bool find_human_map(uint64_t obj) {
+    for (uint64_t ho = 0x10; ho <= 0x600; ho += 4) {
+        for (int stride : {40, 48, 32, 64}) {
             bool ok = true;
+            int vals[55];
             for (int k = 0; k < 55; k++) {
-                int v = rd<int32_t>(a + ho + (uint64_t)k * 4);
+                int v = rd<int32_t>(obj + ho + (uint64_t)k * stride);
                 if (v < 0 || v >= g_bones.nodes) { ok = false; break; }
-                g_bones.map[k] = v;
+                vals[k] = v;
             }
-            if (ok) { have_map = true; break; }
+            if (ok) {
+                for (int k = 0; k < 55; k++) g_bones.map[k] = vals[k];
+                return true;
+            }
         }
     }
-    if (!have_map) { g_bones.pose = 0; g_bones.nodes = 0; return false; }
+    return false;
+}
+
+static bool bone_discover(uint64_t anim) {
+    memset(&g_diag, 0, sizeof(g_diag));
+    g_bones.pose = 0; g_bones.nodes = 0; g_bones.ready = false;
+
+    // Level 1: the Animator object itself.
+    scan_object_for_pose(anim, 1, 96);
+
+    // Level 2: objects referenced by the Animator (e.g. Avatar), and level 3:
+    // objects referenced by those (e.g. Skeleton). This covers the real
+    // Animator -> Avatar -> Skeleton -> SkeletonPose chain.
+    int hop1 = 0;
+    for (uint64_t o1 = 0x18; o1 <= 0x1000 && hop1 < 32; o1 += 8) {
+        uint64_t obj = rd_ptr(anim + o1);
+        if (!likely_native_pointer(obj)) continue;
+        hop1++;
+        scan_object_for_pose(obj, 2, 48);
+        if (find_human_map(obj)) g_diag.map = 1;
+        int hop2 = 0;
+        for (uint64_t o2 = 0x18; o2 <= 0x800 && hop2 < 12; o2 += 8) {
+            uint64_t sub = rd_ptr(obj + o2);
+            if (!likely_native_pointer(sub)) continue;
+            hop2++;
+            scan_object_for_pose(sub, 3, 40);
+            if (find_human_map(sub)) g_diag.map = 1;
+        }
+    }
+
+    if (!g_bones.pose || g_diag.best_run < 16) return false;
+    g_bones.nodes = g_diag.best_run > 160 ? 160 : g_diag.best_run;
+
+    if (!g_diag.map) {
+        // Still look for the humanoid map in the Animator itself and around the
+        // pose array (some layouts keep the table next to the matrices).
+        if (find_human_map(anim)) g_diag.map = 1;
+    }
 
     g_bones.ready = true;
     return true;
@@ -1175,4 +1216,11 @@ bool esp_read_bones(uint64_t player, BoneSet& out) {
     }
     out.valid = good;
     return good >= 6;
+}
+
+void esp_bone_diag(int& arrs, int& run, int& level, int& map) {
+    arrs = g_diag.arrs;
+    run = g_diag.best_run;
+    level = g_diag.level;
+    map = g_diag.map;
 }
