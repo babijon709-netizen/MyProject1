@@ -2779,13 +2779,18 @@ static void CenterMenuOnDisplay() {
 // ===========================================================================
 static bool  g_aim_active = false;
 static float g_aim_cx = 0.f, g_aim_cy = 0.f;
-static float g_aim_tx = 0.f, g_aim_ty = 0.f; // smoothed target
+static float g_aim_tx = 0.f, g_aim_ty = 0.f; // smoothed target point
+static float g_aim_vx = 0.f, g_aim_vy = 0.f; // aim velocity (px/s)
+static uint64_t g_aim_target = 0;            // locked enemy source (hysteresis)
 
 static void AimRelease() {
     if (g_aim_active) {
         Touch_AimUp();
         g_aim_active = false;
     }
+    g_aim_vx = 0.f;
+    g_aim_vy = 0.f;
+    g_aim_target = 0;
 }
 
 static void RunAim() {
@@ -2837,42 +2842,66 @@ static void RunAim() {
     else if (g_state.aim_bone == 1) bone_v = 0.32f; // body/chest
     else if (g_state.aim_bone == 2) bone_v = 0.55f; // pelvis/legs
 
-    // Pick the enemy closest to the crosshair, inside the FOV circle.
-    float best_dist2 = -1.f;
-    float best_tx = 0.f, best_ty = 0.f;
+    // --- candidate scan (2 passes over a tiny vector) ------------------------
+    float best_d2 = -1.f, best_tx = 0.f, best_ty = 0.f;
+    uint64_t best_src = 0;
+    float cur_d2 = -1.f;
     for (const EspBox& box : boxes) {
         if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
         float bw = box.x2 - box.x1;
         float bh = box.y2 - box.y1;
         if (bw < 1.f || bh < 1.f) continue;
 
-        float tx = (box.x1 + box.x2) * 0.5f;
-        float ty = box.y1 + bh * bone_v;
-
-        // Visibility: skip anyone not currently hit by the game's aim ray.
         if (g_state.aim_pos && (!have_visible || box.source != visible_player)) continue;
 
+        float tx = (box.x1 + box.x2) * 0.5f;
+        float ty = box.y1 + bh * bone_v;
         if (tx < 0.f || tx > sw || ty < 0.f || ty > sh) continue;
 
         float dx = tx - cx;
         float dy = ty - cy;
         float d2 = dx * dx + dy * dy;
         if (d2 > fov_px * fov_px) continue;
-        if (best_dist2 < 0.f || d2 < best_dist2) {
-            best_dist2 = d2;
-            best_tx = tx;
-            best_ty = ty;
+
+        if (best_d2 < 0.f || d2 < best_d2) {
+            best_d2 = d2; best_tx = tx; best_ty = ty; best_src = box.source;
         }
+        if (box.source == g_aim_target) cur_d2 = d2;
     }
 
-    if (best_dist2 < 0.f) { AimRelease(); return; }
+    // Target lock with hysteresis: once locked, keep the same enemy unless it
+    // leaves the FOV or another one is clearly (~20%) closer. This stops the
+    // aim from flip-flopping between two nearby enemies — the main shake source.
+    if (g_aim_target != 0 && cur_d2 < 0.f) g_aim_target = 0; // locked enemy gone
+    if (g_aim_target == 0) {
+        if (best_src == 0) { AimRelease(); return; }
+        g_aim_target = best_src;
+        g_aim_tx = best_tx; g_aim_ty = best_ty;
+        g_aim_vx = 0.f; g_aim_vy = 0.f;
+    } else if (best_src != g_aim_target && best_d2 < cur_d2 * 0.64f) {
+        g_aim_target = best_src;
+        g_aim_tx = best_tx; g_aim_ty = best_ty;
+        g_aim_vx = 0.f; g_aim_vy = 0.f;
+    }
 
-    float offx = best_tx - cx;
-    float offy = best_ty - cy;
-    float dist = sqrtf(offx * offx + offy * offy);
-    if (dist < 6.f) { return; } // on target: hold still, don't lift (no jitter)
+    // Current point of the locked target.
+    float target_tx = 0.f, target_ty = 0.f;
+    bool have_point = false;
+    for (const EspBox& box : boxes) {
+        if (box.source != g_aim_target) continue;
+        if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
+        float bw = box.x2 - box.x1;
+        float bh = box.y2 - box.y1;
+        if (bw < 1.f || bh < 1.f) continue;
+        target_tx = (box.x1 + box.x2) * 0.5f;
+        target_ty = box.y1 + bh * bone_v;
+        have_point = true;
+        break;
+    }
+    if (!have_point) { g_aim_target = 0; AimRelease(); return; }
 
-    // Frame time, so movement is frame-rate independent (smooth at any FPS).
+    // --- movement ------------------------------------------------------------
+    // Frame time, so movement is frame-rate independent.
     static auto s_last = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     float dt = (float)std::chrono::duration<double>(now - s_last).count();
@@ -2880,39 +2909,49 @@ static void RunAim() {
     if (dt <= 0.0005f) dt = 0.0005f;
     if (dt > 0.05f) dt = 0.05f;
 
-    // Плавность 1..10 (integer). Lower = faster/aggressive, higher = slower.
+    // Плавность 1..10. Lower = faster/aggressive, higher = slow & human-like.
     int sm = (int)lroundf(g_state.gun_str);
     if (sm < 1) sm = 1;
     if (sm > 10) sm = 10;
-    float rate = 16.f - 1.5f * (float)(sm - 1); // 1 -> 16/s, 10 -> 2.5/s
-    if (rate < 2.5f) rate = 2.5f;
+    float gain  = 12.f - 1.1f * (float)(sm - 1);  // sm1=12/s, sm10=2.1/s
+    float vmax  = 1500.f - 145.f * (float)(sm - 1); // sm1=1500, sm10=195 px/s
+    const float accel = 6000.f;                    // px/s^2 rate limit
 
-    // Smooth the target (enemy box updates in discrete steps — this removes the
-    // jitter), then approach it exponentially. No overshoot, so it can be fast
-    // AND stay steady.
-    float ts = 1.0f - expf(-20.f * dt);
-    g_aim_tx += (best_tx - g_aim_tx) * ts;
-    g_aim_ty += (best_ty - g_aim_ty) * ts;
+    // Strongly smooth the target point: enemy boxes update in discrete network
+    // steps, this low-pass removes the per-tick jumps that cause shaking.
+    float ts = 1.0f - expf(-12.f * dt);
+    g_aim_tx += (target_tx - g_aim_tx) * ts;
+    g_aim_ty += (target_ty - g_aim_ty) * ts;
 
-    float step = 1.0f - expf(-rate * dt);
-    float ddx = (g_aim_tx - cx) * step;
-    float ddy = (g_aim_ty - cy) * step;
+    float ex = g_aim_tx - cx; // remaining screen error
+    float ey = g_aim_ty - cy;
+
+    // Desired velocity: proportional to error, capped at vmax (no overshoot —
+    // velocity naturally falls to 0 as the error shrinks).
+    float tvx = ex * gain, tvy = ey * gain;
+    float tvl = sqrtf(tvx * tvx + tvy * tvy);
+    if (tvl > vmax) { tvx *= vmax / tvl; tvy *= vmax / tvl; }
+
+    // Rate-limit the velocity change: smooth acceleration and deceleration.
+    float dvx = tvx - g_aim_vx, dvy = tvy - g_aim_vy;
+    float dvl = sqrtf(dvx * dvx + dvy * dvy);
+    float maxdv = accel * dt;
+    if (dvl > maxdv) { dvx *= maxdv / dvl; dvy *= maxdv / dvl; }
+    g_aim_vx += dvx;
+    g_aim_vy += dvy;
+
+    // Deadzone: once essentially on target, stop dead (no micro-shake).
+    float rest = sqrtf(ex * ex + ey * ey);
+    if (rest < 5.f) { g_aim_vx = 0.f; g_aim_vy = 0.f; }
+
+    float ddx = g_aim_vx * dt;
+    float ddy = g_aim_vy * dt;
 
     const float max_drag = 60.f; // per-frame cap
     float dl = sqrtf(ddx * ddx + ddy * ddy);
     if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
 
-    // Deadzone: stop injecting once essentially on target (no micro-shake).
-    float rest = sqrtf((g_aim_tx - cx) * (g_aim_tx - cx) + (g_aim_ty - cy) * (g_aim_ty - cy));
-    if (rest < 5.f) { ddx = 0.f; ddy = 0.f; }
-
-    if (!g_aim_active && ddx == 0.f && ddy == 0.f) return;
-
-    // The game rotates the camera by RELATIVE finger movement in the RIGHT
-    // (look) half of the screen; the left half is the movement joystick. The
-    // aim finger is a separate multitouch slot, held continuously and moved by
-    // small deltas, so it works alongside the user's own touches. It re-anchors
-    // only when it would drift out of the right-hand look zone.
+    // --- injection -----------------------------------------------------------
     const float anchor_x = sw * 0.72f;
     const float anchor_y = sh * 0.50f;
     const float min_x = sw * 0.55f, max_x = sw * 0.98f;
@@ -2921,8 +2960,6 @@ static void RunAim() {
     if (!g_aim_active) {
         g_aim_cx = anchor_x;
         g_aim_cy = anchor_y;
-        g_aim_tx = best_tx; // start from the target: no initial lag
-        g_aim_ty = best_ty;
         Touch_AimDown(g_aim_cx, g_aim_cy);
         g_aim_active = true;
     }
