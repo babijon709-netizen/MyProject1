@@ -674,7 +674,18 @@ static void DrawEspOverlay() {
             );
         }
 
-        // skeleton drawing logic removed (kept the GUI toggle only)
+        if (g_state.esp_skeleton && box.skeleton_valid) {
+            // Lines are already projected from the live Animator hierarchy in
+            // esp_get_boxes(). Drawing the immutable per-frame snapshot avoids
+            // the one-frame pose/camera mismatch caused by re-reading bones here.
+            for (const EspSkeletonLine& line : box.skeleton) {
+                if (!std::isfinite(line.x1) || !std::isfinite(line.y1) ||
+                    !std::isfinite(line.x2) || !std::isfinite(line.y2)) continue;
+                dl->AddLine(ImVec2(line.x1, line.y1),
+                            ImVec2(line.x2, line.y2),
+                            ColU32(cfg::esp::skeleton_col), thick);
+            }
+        }
     }
 }
 
