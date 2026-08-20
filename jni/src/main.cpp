@@ -561,6 +561,7 @@ struct AppState {
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
     float aim_fov_threshold = 50.f;
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
+    bool  ui_player_count = true;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
     float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_ads = 0;
@@ -569,7 +570,7 @@ struct AppState {
     float a_esp_box = 0, a_esp_name = 0, a_esp_hp = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_weapon_icon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_master = 1;
-    float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
+    float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0, a_ui_player_count = 1;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_aim_fov;
 };
@@ -2494,6 +2495,11 @@ float TabContent(int tab, float dt, float cW) {
         }
 
         ImGui::Dummy({1.f, 8.f});
+        SHdr(XS("HUD"));
+        CardBg(Layout::RowH * 1);
+        ToggleRow("##hudpc", XS("Количество игроков"), &g_state.ui_player_count, g_state.a_ui_player_count, true, true);
+
+        ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##veh1", XS("Дополнительные настройки"), 1);
 
         ImGui::Dummy({1.f, 12.f});
@@ -2779,8 +2785,11 @@ static void CenterMenuOnDisplay() {
 // ===========================================================================
 static bool  g_aim_active = false;
 static float g_aim_cx = 0.f, g_aim_cy = 0.f;
-static float g_aim_tx = 0.f, g_aim_ty = 0.f; // smoothed target point
+static float g_aim_tx = 0.f, g_aim_ty = 0.f; // smoothed aim point
 static uint64_t g_aim_target = 0;            // locked enemy source (hysteresis)
+static float g_aim_svx = 0.f, g_aim_svy = 0.f; // smoothed target screen velocity
+static float g_aim_rawx = 0.f, g_aim_rawy = 0.f; // last raw target point
+static bool  g_aim_has_raw = false;
 
 static void AimRelease() {
     if (g_aim_active) {
@@ -2788,6 +2797,8 @@ static void AimRelease() {
         g_aim_active = false;
     }
     g_aim_target = 0;
+    g_aim_svx = 0.f; g_aim_svy = 0.f;
+    g_aim_has_raw = false;
 }
 
 static void RunAim() {
@@ -2874,13 +2885,15 @@ static void RunAim() {
         if (best_src == 0) { AimRelease(); return; }
         g_aim_target = best_src;
         g_aim_tx = best_tx; g_aim_ty = best_ty;
+        g_aim_svx = 0.f; g_aim_svy = 0.f; g_aim_has_raw = false;
     } else if (best_src != g_aim_target && best_d2 < cur_d2 * 0.64f) {
         g_aim_target = best_src;
         g_aim_tx = best_tx; g_aim_ty = best_ty;
+        g_aim_svx = 0.f; g_aim_svy = 0.f; g_aim_has_raw = false;
     }
 
-    // Current point of the locked target.
-    float target_tx = 0.f, target_ty = 0.f;
+    // Current point of the locked target (and its world speed for the lead).
+    float target_tx = 0.f, target_ty = 0.f, target_speed = 0.f;
     bool have_point = false;
     for (const EspBox& box : boxes) {
         if (box.source != g_aim_target) continue;
@@ -2890,12 +2903,13 @@ static void RunAim() {
         if (bw < 1.f || bh < 1.f) continue;
         target_tx = (box.x1 + box.x2) * 0.5f;
         target_ty = box.y1 + bh * bone_v;
+        target_speed = box.speed;
         have_point = true;
         break;
     }
     if (!have_point) { g_aim_target = 0; AimRelease(); return; }
 
-    // --- movement ------------------------------------------------------------
+    // --- prediction & movement ----------------------------------------------
     // Frame time, so movement is frame-rate independent.
     static auto s_last = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
@@ -2904,30 +2918,58 @@ static void RunAim() {
     if (dt <= 0.0005f) dt = 0.0005f;
     if (dt > 0.05f) dt = 0.05f;
 
-    // Плавность 1..10 (integer). Lower = faster/aggressive, higher = slower.
-    int sm = (int)lroundf(g_state.gun_str);
-    if (sm < 1) sm = 1;
-    if (sm > 10) sm = 10;
-    float rate = 12.f - 1.1f * (float)(sm - 1); // sm1=12/s, sm10=2.1/s
-    if (rate < 2.f) rate = 2.f;
+    // Estimate the target's screen velocity from its raw point over time. This
+    // is the "lead" source — without it the aim always trails a running enemy.
+    float ivx = 0.f, ivy = 0.f;
+    if (g_aim_has_raw) {
+        ivx = (target_tx - g_aim_rawx) / dt;
+        ivy = (target_ty - g_aim_rawy) / dt;
+    }
+    g_aim_rawx = target_tx;
+    g_aim_rawy = target_ty;
+    g_aim_has_raw = true;
 
-    // Lightly smooth the target point: enemy boxes update in discrete network
-    // steps, this low-pass removes per-tick jumps without adding lag.
+    // Reject teleports / lock switches (huge jumps).
+    if (fabsf(ivx) > 3000.f || fabsf(ivy) > 3000.f) { ivx = 0.f; ivy = 0.f; }
+
+    // Smooth the velocity; decay it to 0 when the target stands still (world
+    // speed gate) so a stationary enemy isn't "led" off-target.
+    float kv = 1.0f - expf(-15.f * dt);
+    if (target_speed > 0.4f) {
+        g_aim_svx += (ivx - g_aim_svx) * kv;
+        g_aim_svy += (ivy - g_aim_svy) * kv;
+    } else {
+        g_aim_svx *= (1.0f - kv);
+        g_aim_svy *= (1.0f - kv);
+    }
+
+    // Lead the target: aim where it will be shortly.
+    float lead = (target_speed > 0.4f) ? 0.20f : 0.f;
+    float px = target_tx + g_aim_svx * lead;
+    float py = target_ty + g_aim_svy * lead;
+
+    // Smooth the aim point (removes network jitter, near-zero lag).
     float ts = 1.0f - expf(-30.f * dt);
-    g_aim_tx += (target_tx - g_aim_tx) * ts;
-    g_aim_ty += (target_ty - g_aim_ty) * ts;
+    g_aim_tx += (px - g_aim_tx) * ts;
+    g_aim_ty += (py - g_aim_ty) * ts;
 
     float ex = g_aim_tx - cx; // remaining screen error
     float ey = g_aim_ty - cy;
 
-    // Pure proportional control: move a fraction of the remaining error each
-    // frame (frame-rate normalized). Velocity naturally falls to 0 near the
-    // target, so there is no overshoot and no oscillation.
+    // Плавность 1..10 (integer). Lower = faster/aggressive, higher = slower.
+    int sm = (int)lroundf(g_state.gun_str);
+    if (sm < 1) sm = 1;
+    if (sm > 10) sm = 10;
+    float rate = 15.f - 1.44f * (float)(sm - 1); // sm1=15/s, sm10=2.0/s
+    if (rate < 2.f) rate = 2.f;
+
+    // Pure proportional control toward the predicted point. Velocity naturally
+    // falls to 0 near the target — no overshoot, no oscillation.
     float step = 1.0f - expf(-rate * dt);
     float ddx = ex * step;
     float ddy = ey * step;
 
-    const float max_drag = 120.f; // per-frame cap
+    const float max_drag = 160.f; // per-frame cap
     float dl = sqrtf(ddx * ddx + ddy * ddy);
     if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
 
@@ -2961,6 +3003,37 @@ static void RunAim() {
     } else {
         Touch_AimMove(g_aim_cx, g_aim_cy);
     }
+}
+
+static void DrawPlayerCounter() {
+    if (!g_state.ui_player_count) return;
+    if (!g_esp_attached) return;
+
+    float sw = 0.f, sh = 0.f;
+    VisibleScreen(sw, sh);
+    if (sw < 100.f || sh < 100.f) return;
+
+    const std::vector<EspBox>& boxes = GetEspBoxes((int)sw, (int)sh);
+    int n = (int)boxes.size();
+
+    char buf[48];
+    snprintf(buf, sizeof(buf), "%s %d", XS("Игроков:"), n);
+
+    auto* fg = ImGui::GetForegroundDrawList();
+    auto* fn = ImGui::GetFont();
+    float fs = ImGui::GetFontSize() * 1.05f;
+    auto tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, buf);
+
+    float padX = 20.f, padY = 9.f;
+    float w = tsz.x + padX * 2.f, h = tsz.y + padY * 2.f;
+    float x = sw * 0.5f - w * 0.5f;
+    float y = 24.f;
+
+    ImVec4 card = C::Card();
+    fg->AddRectFilled({x + 2.f, y + 3.f}, {x + w + 2.f, y + h + 3.f}, IM_COL32(0, 0, 0, 22), h * 0.5f);
+    fg->AddRectFilled({x, y}, {x + w, y + h},
+        IM_COL32((int)(card.x * 255), (int)(card.y * 255), (int)(card.z * 255), 235), h * 0.5f);
+    fg->AddText(fn, fs, {x + (w - tsz.x) * 0.5f, y + (h - tsz.y) * 0.5f}, C::U(C::Txt()), buf);
 }
 
 void RenderMenu() {
@@ -3000,6 +3073,7 @@ void RenderMenu() {
     Tick(g_state.a_ui_fps,     g_state.ui_fps,             dt);
     Tick(g_state.a_ui_dark,    g_state.ui_dark_mode,       dt);
     Tick(g_state.a_ui_sep,     g_state.ui_show_sep,        dt);
+    Tick(g_state.a_ui_player_count, g_state.ui_player_count, dt);
     ApplyTheme();
 
     if (g_cfgLoadedIdx >= 0 && g_cfgLoadedIdx < kMaxConfigs)
@@ -3406,6 +3480,7 @@ int main(int argc, char* argv[]) {
         DrawEspOverlay();
         RunAim();
         RenderMenu();
+        DrawPlayerCounter();
         drawEnd();
         g_frame_done.store(true);
     }

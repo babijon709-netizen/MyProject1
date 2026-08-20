@@ -625,6 +625,16 @@ static std::vector<uint64_t> read_configured_player_transforms() {
     return transforms;
 }
 
+static bool local_player_dead() {
+    uint64_t local = resolve_local_player();
+    if (!local) return false;
+    uint32_t flags = rd<uint32_t>(local + PLAYER_FLAGS);
+    if (flags & PLAYER_FLAG_SPECTATING) return true;
+    if (rd<uint8_t>(local + PLAYER_RESPAWNING) != 0) return true;
+    if (rd_ptr(local + PLAYER_OBSERVED) != 0) return true;
+    return false;
+}
+
 bool esp_init(pid_t pid) {
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
@@ -673,6 +683,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
     if (s_transforms.empty()) return result;
 
+    // While dead/spectating the game renders from a different camera, so boxes
+    // projected from the FPS camera slide off the models — hide ESP until the
+    // player is alive again.
+    if (local_player_dead()) return result;
+
     if (!g_player_position_validated) {
         if (!discover_player_position_offset(s_transforms)) return result;
     }
@@ -694,14 +709,16 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
         if (!matrix_is_finite(projection) || !matrix_is_finite(view)) { return result; }
 
-        // Death animation: the camera rolls/falls until it is lying on the
-        // ground. While that happens the game no longer renders from this FPS
-        // camera (it switches to the death/spectate view), so boxes projected
-        // with it slide off the models. Detect the "lying down" camera by its
-        // up-vector and hide ESP until the camera is upright again.
+        // Death fall animation: the FPS camera rolls toward the ground. During
+        // normal play the camera has no roll (up vector stays (0,1,0)); a big
+        // roll means the death/spectate transition is animating and the boxes
+        // would slide off — hide them until the camera is upright again.
         {
             float up_y = mat_get(view, 1, 1);
-            if (std::isfinite(up_y) && fabsf(up_y) < 0.5f) {
+            float up_x = mat_get(view, 1, 0);
+            float up_z = mat_get(view, 1, 2);
+            float roll = fabsf(up_x) + fabsf(up_z);
+            if (std::isfinite(up_y) && (up_y < 0.85f || roll > 0.35f)) {
                 g_matrix_configuration_validated = false;
                 g_last_camera_fov_deg = -1.f;
                 return result;

@@ -24,6 +24,12 @@ inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20;
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68;
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0;
 
+// Death / spectate detection (local PlayerManager).
+inline constexpr std::uint64_t PLAYER_FLAGS          = 0x258; // PlayerManager.PlayerFlags
+inline constexpr uint32_t     PLAYER_FLAG_SPECTATING = 1u << 1;
+inline constexpr std::uint64_t PLAYER_RESPAWNING     = 0x210; // bool
+inline constexpr std::uint64_t PLAYER_OBSERVED       = 0x320; // PlayerManager observedPlayer
+
 // Local player aim state (PlayerManager.playerEventHandler = huU : huc).
 inline constexpr std::uint64_t PLAYER_EVENT_HANDLER = 0x78;
 inline constexpr std::uint64_t HUC_AIM              = 0x268; // huc.Aim (huT)
