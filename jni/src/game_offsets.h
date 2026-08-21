@@ -24,6 +24,7 @@ inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20;
 // PlayerManager.worldCameraRoot is a managed Transform and is also a useful
 // entry point into the player's native Transform hierarchy.
 inline constexpr std::uint64_t PLAYER_TRANSFORM       = 0x68;
+inline constexpr std::uint64_t PLAYER_KCC_REFERENCE   = 0xB0;
 inline constexpr std::uint64_t PLAYER_VITALS          = 0xC8;
 inline constexpr std::uint64_t PLAYER_WEAPON_REFERENCE = 0xF0;
 inline constexpr std::uint64_t PLAYER_NICKLABEL       = 0x130;
@@ -46,6 +47,14 @@ inline constexpr std::uint64_t PLAYER_VITALS_MAX_HP = 0x88;
 // PlayerWeapon+0xCA (WeaponPiece starts at +0xC8).
 inline constexpr std::uint64_t INTERFACE_REFERENCE_VALUE = 0x18;
 inline constexpr std::uint64_t PLAYER_WEAPON_NUMBER      = 0xCA;
+
+// The KCC owns CharacterAnimation; CharacterAnimation.pvi (tk) contains the
+// exact Transform[] used for humanoid animation and an optional bone-id map.
+inline constexpr std::uint64_t KCC_PLAYER                     = 0x78;
+inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION        = 0x108;
+inline constexpr std::uint64_t CHARACTER_ANIMATION_BONE_CACHE = 0x88;
+inline constexpr std::uint64_t BONE_CACHE_TRANSFORMS           = 0x48;
+inline constexpr std::uint64_t BONE_CACHE_MAPPING              = 0x50;
 
 // Current Unity native Transform/GameObject layout. The code validates every
 // pointer and also probes nearby layouts before using these values.

@@ -506,9 +506,14 @@ static std::string read_il2cpp_string(uint64_t string_object, size_t max_chars =
 
 static bool native_transform_is_valid(uint64_t native_transform) {
     if (!likely_native_pointer(native_transform)) return false;
-    uint64_t transform_data = rd_ptr(native_transform + 0x38);
-    int32_t transform_index = rd<int32_t>(native_transform + 0x40);
-    return likely_native_pointer(transform_data) && transform_index >= 0 && transform_index <= 100000;
+    for (const auto& offsets : {std::pair<uint64_t, uint64_t>{0x38, 0x40},
+                                std::pair<uint64_t, uint64_t>{0x28, 0x30}}) {
+        uint64_t transform_data = rd_ptr(native_transform + offsets.first);
+        int32_t transform_index = rd<int32_t>(native_transform + offsets.second);
+        if (likely_native_pointer(transform_data) && transform_index >= 0 && transform_index <= 100000)
+            return true;
+    }
+    return false;
 }
 
 // Every native Component points to its GameObject at +0x30. GameObject's first
@@ -545,7 +550,11 @@ static bool read_native_transform_pose(uint64_t native_transform, Vec3& position
         {0x38, 0x40, 0x18, 0x20, false, false},
         {0x38, 0x40, 0x18, 0x20, true,  true},
         {0x38, 0x40, 0x08, 0x10, false, false},
-        {0x38, 0x40, 0x08, 0x10, true,  true}
+        {0x38, 0x40, 0x08, 0x10, true,  true},
+        {0x28, 0x30, 0x18, 0x20, false, false},
+        {0x28, 0x30, 0x18, 0x20, true,  true},
+        {0x28, 0x30, 0x08, 0x10, false, false},
+        {0x28, 0x30, 0x08, 0x10, true,  true}
     };
     for (const auto& layout : common_layouts)
         if (read_transform_hierarchy_layout(native_transform, layout, position, &rotation)) return true;
@@ -896,8 +905,219 @@ static void build_procedural_skeleton(const PlayerBoneCache& cache, const Vec3& 
     bones[ESP_BONE_RIGHT_FOOT] = vec_add_scaled(bones[ESP_BONE_RIGHT_FOOT], forward, 0.08f);
 }
 
+enum DirectHumanBone : int {
+    DIRECT_HIPS = 0,
+    DIRECT_LEFT_UPPER_LEG = 1,
+    DIRECT_RIGHT_UPPER_LEG = 2,
+    DIRECT_LEFT_LOWER_LEG = 3,
+    DIRECT_RIGHT_LOWER_LEG = 4,
+    DIRECT_LEFT_FOOT = 5,
+    DIRECT_RIGHT_FOOT = 6,
+    DIRECT_SPINE = 7,
+    DIRECT_CHEST = 8,
+    DIRECT_UPPER_CHEST = 9,
+    DIRECT_NECK = 10,
+    DIRECT_HEAD = 11,
+    DIRECT_LEFT_SHOULDER = 12,
+    DIRECT_RIGHT_SHOULDER = 13,
+    DIRECT_LEFT_UPPER_ARM = 14,
+    DIRECT_RIGHT_UPPER_ARM = 15,
+    DIRECT_LEFT_LOWER_ARM = 16,
+    DIRECT_RIGHT_LOWER_ARM = 17,
+    DIRECT_LEFT_HAND = 18,
+    DIRECT_RIGHT_HAND = 19,
+    DIRECT_BONE_COUNT = 22
+};
+
+struct DirectBoneSet {
+    std::array<Vec3, DIRECT_BONE_COUNT> position{};
+    std::array<bool, DIRECT_BONE_COUNT> valid{};
+    int score = -1;
+};
+
+static uint64_t resolve_character_animation(uint64_t player) {
+    uint64_t reference = rd_ptr(player + PLAYER_KCC_REFERENCE);
+    const uint64_t candidates[] = {
+        reference,
+        reference ? rd_ptr(reference + 0x10) : 0,
+        reference ? rd_ptr(reference + 0x18) : 0,
+        reference ? rd_ptr(reference + 0x20) : 0
+    };
+    for (uint64_t candidate : candidates) {
+        if (!likely_native_pointer(candidate)) continue;
+        if (rd_ptr(candidate + KCC_PLAYER) == player) {
+            uint64_t animation = rd_ptr(candidate + KCC_CHARACTER_ANIMATION);
+            if (likely_native_pointer(animation)) return animation;
+        }
+        // Tutorial/legacy KCC has inherited fields shifted by eight bytes.
+        if (rd_ptr(candidate + 0x80) == player) {
+            uint64_t animation = rd_ptr(candidate + 0xC0);
+            if (likely_native_pointer(animation)) return animation;
+        }
+    }
+    return 0;
+}
+
+static DirectBoneSet map_direct_bones(const std::vector<Vec3>& positions,
+                                      const std::vector<uint8_t>& position_valid,
+                                      const std::vector<int32_t>& mapping,
+                                      int mapping_mode) {
+    DirectBoneSet result{};
+    result.score = 0;
+    int iterations = mapping_mode == 2 ? DIRECT_BONE_COUNT : (int)positions.size();
+    for (int index = 0; index < iterations; ++index) {
+        int bone_id = index;
+        int transform_index = index;
+        if (mapping_mode == 1) {
+            if (index >= (int)mapping.size()) continue;
+            bone_id = mapping[(size_t)index];
+        } else if (mapping_mode == 2) {
+            if (index >= (int)mapping.size()) continue;
+            transform_index = mapping[(size_t)index];
+        }
+        if (bone_id < 0 || bone_id >= DIRECT_BONE_COUNT ||
+            transform_index < 0 || transform_index >= (int)positions.size() ||
+            !position_valid[(size_t)transform_index] || result.valid[(size_t)bone_id]) continue;
+        result.position[(size_t)bone_id] = positions[(size_t)transform_index];
+        result.valid[(size_t)bone_id] = true;
+        ++result.score;
+    }
+
+    if (result.valid[DIRECT_HIPS]) result.score += 100;
+    if (result.valid[DIRECT_HEAD]) result.score += 120;
+    if (result.valid[DIRECT_NECK]) result.score += 60;
+    if (result.valid[DIRECT_CHEST] || result.valid[DIRECT_UPPER_CHEST] || result.valid[DIRECT_SPINE]) result.score += 80;
+    if (result.valid[DIRECT_LEFT_LOWER_ARM] && result.valid[DIRECT_RIGHT_LOWER_ARM]) result.score += 70;
+    if (result.valid[DIRECT_LEFT_UPPER_LEG] && result.valid[DIRECT_RIGHT_UPPER_LEG]) result.score += 50;
+
+    if (result.valid[DIRECT_HEAD] && result.valid[DIRECT_HIPS]) {
+        float dy = result.position[DIRECT_HEAD].y - result.position[DIRECT_HIPS].y;
+        if (std::isfinite(dy) && dy > 0.25f && dy < 1.8f) result.score += 100;
+        else result.score -= 250;
+    }
+    if (result.valid[DIRECT_LEFT_FOOT] && result.valid[DIRECT_RIGHT_FOOT] && result.valid[DIRECT_HIPS]) {
+        float feet_y = std::min(result.position[DIRECT_LEFT_FOOT].y, result.position[DIRECT_RIGHT_FOOT].y);
+        float dy = result.position[DIRECT_HIPS].y - feet_y;
+        if (std::isfinite(dy) && dy > 0.15f && dy < 1.4f) result.score += 80;
+        else result.score -= 200;
+    }
+    return result;
+}
+
+// CharacterAnimation.tk.pjh is the game's own HumanBodyBones Transform array.
+// Reading it avoids guessing transform names and follows Animator/IK/ragdoll
+// updates exactly. Name-based hierarchy discovery below remains a compatibility
+// fallback for skins that temporarily rebuild this cache.
+static bool read_direct_humanoid_skeleton(uint64_t player, const Vec3& feet,
+                                          std::array<Vec3, ESP_BONE_COUNT>& bones) {
+    uint64_t animation = resolve_character_animation(player);
+    if (!animation) return false;
+    uint64_t bone_cache = rd_ptr(animation + CHARACTER_ANIMATION_BONE_CACHE);
+    if (!likely_native_pointer(bone_cache)) return false;
+    uint64_t transform_array = rd_ptr(bone_cache + BONE_CACHE_TRANSFORMS);
+    uint64_t mapping_array = rd_ptr(bone_cache + BONE_CACHE_MAPPING);
+    if (!likely_native_pointer(transform_array)) return false;
+
+    int32_t count = rd<int32_t>(transform_array + IL2CPP_LIST_SIZE);
+    if (count <= 0 || count > 96) return false;
+    std::vector<Vec3> positions((size_t)count);
+    std::vector<uint8_t> position_valid((size_t)count, 0);
+    for (int32_t index = 0; index < count; ++index) {
+        uint64_t managed_transform = rd_ptr(transform_array + IL2CPP_ARRAY_FIRST_ELEMENT +
+                                            (uint64_t)index * sizeof(uint64_t));
+        uint64_t native_transform = resolve_native_transform(managed_transform);
+        Vec3 position{};
+        Vec4 rotation{};
+        if (!read_native_transform_pose(native_transform, position, rotation)) continue;
+        float dx = position.x - feet.x, dy = position.y - feet.y, dz = position.z - feet.z;
+        if (!vec3_is_finite(position) || dx * dx + dy * dy + dz * dz > 100.f) continue;
+        positions[(size_t)index] = position;
+        position_valid[(size_t)index] = 1;
+    }
+
+    std::vector<int32_t> mapping;
+    if (likely_native_pointer(mapping_array)) {
+        int32_t mapping_count = rd<int32_t>(mapping_array + IL2CPP_LIST_SIZE);
+        if (mapping_count > 0 && mapping_count <= 96) {
+            mapping.resize((size_t)mapping_count);
+            read_remote_bytes(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT,
+                              mapping.data(), mapping.size() * sizeof(int32_t));
+        }
+    }
+
+    DirectBoneSet best{};
+    best.score = -1;
+    for (int mode = 0; mode < 3; ++mode) {
+        if (mode != 0 && mapping.empty()) continue;
+        DirectBoneSet candidate = map_direct_bones(positions, position_valid, mapping, mode);
+        if (candidate.score > best.score) best = candidate;
+    }
+    if (best.score < 250 || !best.valid[DIRECT_HIPS] ||
+        !best.valid[DIRECT_LEFT_LOWER_ARM] || !best.valid[DIRECT_RIGHT_LOWER_ARM] ||
+        !best.valid[DIRECT_LEFT_HAND] || !best.valid[DIRECT_RIGHT_HAND] ||
+        !best.valid[DIRECT_LEFT_UPPER_LEG] || !best.valid[DIRECT_RIGHT_UPPER_LEG] ||
+        !best.valid[DIRECT_LEFT_LOWER_LEG] || !best.valid[DIRECT_RIGHT_LOWER_LEG] ||
+        !best.valid[DIRECT_LEFT_FOOT] || !best.valid[DIRECT_RIGHT_FOOT]) return false;
+
+    Vec3 head{};
+    if (best.valid[DIRECT_HEAD]) head = best.position[DIRECT_HEAD];
+    else if (best.valid[DIRECT_NECK]) {
+        head = best.position[DIRECT_NECK];
+        head.y += 0.18f;
+    } else return false;
+    Vec3 chest = best.valid[DIRECT_UPPER_CHEST] ? best.position[DIRECT_UPPER_CHEST]
+               : best.valid[DIRECT_CHEST] ? best.position[DIRECT_CHEST]
+               : best.valid[DIRECT_SPINE] ? best.position[DIRECT_SPINE] : Vec3{};
+    if (!vec3_is_finite(chest) || (!best.valid[DIRECT_UPPER_CHEST] &&
+        !best.valid[DIRECT_CHEST] && !best.valid[DIRECT_SPINE])) return false;
+    Vec3 neck = best.valid[DIRECT_NECK] ? best.position[DIRECT_NECK]
+                                       : vec_lerp(chest, head, 0.68f);
+
+    bones[ESP_BONE_HEAD] = head;
+    bones[ESP_BONE_NECK] = neck;
+    bones[ESP_BONE_CHEST] = chest;
+    bones[ESP_BONE_PELVIS] = best.position[DIRECT_HIPS];
+    bones[ESP_BONE_LEFT_SHOULDER] = best.valid[DIRECT_LEFT_SHOULDER]
+        ? best.position[DIRECT_LEFT_SHOULDER] : best.position[DIRECT_LEFT_UPPER_ARM];
+    bones[ESP_BONE_RIGHT_SHOULDER] = best.valid[DIRECT_RIGHT_SHOULDER]
+        ? best.position[DIRECT_RIGHT_SHOULDER] : best.position[DIRECT_RIGHT_UPPER_ARM];
+    bones[ESP_BONE_LEFT_ELBOW] = best.position[DIRECT_LEFT_LOWER_ARM];
+    bones[ESP_BONE_RIGHT_ELBOW] = best.position[DIRECT_RIGHT_LOWER_ARM];
+    bones[ESP_BONE_LEFT_HAND] = best.position[DIRECT_LEFT_HAND];
+    bones[ESP_BONE_RIGHT_HAND] = best.position[DIRECT_RIGHT_HAND];
+    bones[ESP_BONE_LEFT_HIP] = best.position[DIRECT_LEFT_UPPER_LEG];
+    bones[ESP_BONE_RIGHT_HIP] = best.position[DIRECT_RIGHT_UPPER_LEG];
+    bones[ESP_BONE_LEFT_KNEE] = best.position[DIRECT_LEFT_LOWER_LEG];
+    bones[ESP_BONE_RIGHT_KNEE] = best.position[DIRECT_RIGHT_LOWER_LEG];
+    bones[ESP_BONE_LEFT_FOOT] = best.position[DIRECT_LEFT_FOOT];
+    bones[ESP_BONE_RIGHT_FOOT] = best.position[DIRECT_RIGHT_FOOT];
+
+    // Shoulder bones are optional in Unity avatars; upper-arm roots occupy the
+    // same anatomical joint and are a correct connector when they are absent.
+    if (!best.valid[DIRECT_LEFT_SHOULDER] && !best.valid[DIRECT_LEFT_UPPER_ARM]) return false;
+    if (!best.valid[DIRECT_RIGHT_SHOULDER] && !best.valid[DIRECT_RIGHT_UPPER_ARM]) return false;
+
+    float raw_feet_y = std::min(bones[ESP_BONE_LEFT_FOOT].y, bones[ESP_BONE_RIGHT_FOOT].y);
+    float height = bones[ESP_BONE_HEAD].y - raw_feet_y;
+    if (!std::isfinite(height) || height < 0.55f || height > 2.7f) return false;
+
+    // Bone roots are ankle pivots. Align their lowest level to the player's
+    // capsule by a small common translation; relative animation stays exact.
+    Vec3 visual_feet = vec_lerp(bones[ESP_BONE_LEFT_FOOT], bones[ESP_BONE_RIGHT_FOOT], 0.5f);
+    Vec3 shift = {feet.x - visual_feet.x, feet.y - raw_feet_y, feet.z - visual_feet.z};
+    float shift_length2 = shift.x * shift.x + shift.y * shift.y + shift.z * shift.z;
+    if (!vec3_is_finite(shift) || shift_length2 > 16.f) return false;
+    for (Vec3& point : bones) {
+        point.x += shift.x; point.y += shift.y; point.z += shift.z;
+        if (!vec3_is_finite(point)) return false;
+    }
+    return true;
+}
+
 static bool read_player_skeleton(uint64_t player, const Vec3& feet, bool crouched,
                                  std::array<Vec3, ESP_BONE_COUNT>& bones) {
+    if (read_direct_humanoid_skeleton(player, feet, bones)) return true;
+
     uint64_t animator = rd_ptr(player + PLAYER_ANIMATOR);
     double now = monotonic_seconds();
     auto iterator = g_player_bones.find(player);
