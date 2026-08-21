@@ -83,8 +83,9 @@ struct RigJoint {
 
 enum RigSource : int {
     RIG_SOURCE_NONE = 0,
-    RIG_SOURCE_HITBOXES = 1,
-    RIG_SOURCE_NAMES = 2
+    RIG_SOURCE_BONE_CACHE = 1,
+    RIG_SOURCE_HITBOXES = 2,
+    RIG_SOURCE_NAMES = 3
 };
 
 struct PlayerRig {
@@ -1119,6 +1120,122 @@ static LimbLinks limb_links_of(const HitboxSample& sample) {
     return links;
 }
 
+// Primary animated rig path. CharacterAnimation.pvi (tk) keeps the exact
+// humanoid Transform[] used by the game's own animation code. When available,
+// these joints are read every ESP frame from Unity's live TransformHierarchy,
+// so hands/legs/body/head follow walking, aiming and crouching animations.
+static bool build_bone_cache_rig(uint64_t player, PlayerRig& rig) {
+    uint64_t animation = resolve_character_animation(player);
+    if (!likely_native_pointer(animation)) return false;
+    uint64_t cache = rd_ptr(animation + CHARACTER_ANIMATION_BONE_CACHE);
+    if (!likely_native_pointer(cache)) return false;
+    uint64_t transforms = rd_ptr(cache + BONE_CACHE_TRANSFORMS);
+    if (!likely_native_pointer(transforms)) return false;
+
+    int32_t count = rd<int32_t>(transforms + IL2CPP_LIST_SIZE);
+    if (count <= 0 || count > 128) return false;
+
+    auto managed_transform_at_slot = [&](int slot) -> uint64_t {
+        if (slot < 0 || slot >= count) return 0;
+        return rd_ptr(transforms + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)slot * sizeof(uint64_t));
+    };
+    auto native_transform_at_slot = [&](int slot) -> uint64_t {
+        uint64_t native = resolve_native_transform(managed_transform_at_slot(slot));
+        return native_transform_is_valid(native) ? native : 0;
+    };
+
+    // UnityEngine.HumanBodyBones numeric values from the dump.
+    enum HumanBoneIndex {
+        HB_HIPS = 0,
+        HB_LEFT_UPPER_LEG = 1, HB_RIGHT_UPPER_LEG = 2,
+        HB_LEFT_LOWER_LEG = 3, HB_RIGHT_LOWER_LEG = 4,
+        HB_LEFT_FOOT = 5, HB_RIGHT_FOOT = 6,
+        HB_SPINE = 7, HB_CHEST = 8, HB_UPPER_CHEST = 9,
+        HB_NECK = 10, HB_HEAD = 11,
+        HB_LEFT_SHOULDER = 12, HB_RIGHT_SHOULDER = 13,
+        HB_LEFT_UPPER_ARM = 14, HB_RIGHT_UPPER_ARM = 15,
+        HB_LEFT_LOWER_ARM = 16, HB_RIGHT_LOWER_ARM = 17,
+        HB_LEFT_HAND = 18, HB_RIGHT_HAND = 19
+    };
+
+    const std::pair<EspBone, int> required[] = {
+        {ESP_BONE_PELVIS, HB_HIPS},
+        {ESP_BONE_NECK, HB_NECK}, {ESP_BONE_HEAD, HB_HEAD},
+        {ESP_BONE_LEFT_ELBOW, HB_LEFT_LOWER_ARM}, {ESP_BONE_RIGHT_ELBOW, HB_RIGHT_LOWER_ARM},
+        {ESP_BONE_LEFT_HAND, HB_LEFT_HAND}, {ESP_BONE_RIGHT_HAND, HB_RIGHT_HAND},
+        {ESP_BONE_LEFT_HIP, HB_LEFT_UPPER_LEG}, {ESP_BONE_RIGHT_HIP, HB_RIGHT_UPPER_LEG},
+        {ESP_BONE_LEFT_KNEE, HB_LEFT_LOWER_LEG}, {ESP_BONE_RIGHT_KNEE, HB_RIGHT_LOWER_LEG},
+        {ESP_BONE_LEFT_FOOT, HB_LEFT_FOOT}, {ESP_BONE_RIGHT_FOOT, HB_RIGHT_FOOT}
+    };
+    const std::pair<EspBone, std::pair<int, int>> alternatives[] = {
+        {ESP_BONE_CHEST, {HB_UPPER_CHEST, HB_CHEST}},
+        {ESP_BONE_LEFT_SHOULDER, {HB_LEFT_SHOULDER, HB_LEFT_UPPER_ARM}},
+        {ESP_BONE_RIGHT_SHOULDER, {HB_RIGHT_SHOULDER, HB_RIGHT_UPPER_ARM}}
+    };
+
+    auto fill_from_slot_resolver = [&](auto&& slot_for_human_bone) -> bool {
+        rig.joints.fill(RigJoint{});
+        auto assign_human = [&](EspBone role, int human_bone) -> bool {
+            RigJoint joint{};
+            uint64_t native = native_transform_at_slot(slot_for_human_bone(human_bone));
+            if (!native || !joint_from_transform(native, joint)) return false;
+            rig.joints[(size_t)role] = joint;
+            return true;
+        };
+
+        for (const auto& entry : required) assign_human(entry.first, entry.second);
+        for (const auto& entry : alternatives) {
+            if (!assign_human(entry.first, entry.second.first))
+                assign_human(entry.first, entry.second.second);
+        }
+        if (!rig.joints[ESP_BONE_CHEST].valid()) assign_human(ESP_BONE_CHEST, HB_SPINE);
+
+        int resolved = 0;
+        for (const RigJoint& joint : rig.joints) if (joint.valid()) ++resolved;
+        bool torso = rig.joints[ESP_BONE_HEAD].valid() &&
+                     (rig.joints[ESP_BONE_CHEST].valid() || rig.joints[ESP_BONE_PELVIS].valid());
+        bool arms = rig.joints[ESP_BONE_LEFT_HAND].valid() && rig.joints[ESP_BONE_RIGHT_HAND].valid();
+        bool legs = rig.joints[ESP_BONE_LEFT_FOOT].valid() && rig.joints[ESP_BONE_RIGHT_FOOT].valid();
+        return resolved >= 10 && torso && arms && legs;
+    };
+
+    // Most builds keep pjh indexed directly by HumanBodyBones.
+    if (fill_from_slot_resolver([&](int human_bone) { return human_bone; })) {
+        rig.source = RIG_SOURCE_BONE_CACHE;
+        return true;
+    }
+
+    // Some builds keep a compact Transform[] and a side int[] map. Support both
+    // common interpretations: humanBone -> transformSlot and transformSlot ->
+    // humanBone. This prevents falling back to the old static procedural rig
+    // just because the asset packed only the bones that are actually animated.
+    uint64_t mapping = rd_ptr(cache + BONE_CACHE_MAPPING);
+    int32_t map_count = likely_native_pointer(mapping) ? rd<int32_t>(mapping + IL2CPP_LIST_SIZE) : 0;
+    if (map_count > 0 && map_count <= 128) {
+        std::vector<int32_t> map((size_t)map_count);
+        if (read_remote_bytes(mapping + IL2CPP_ARRAY_FIRST_ELEMENT, map.data(), map.size() * sizeof(int32_t))) {
+            if (fill_from_slot_resolver([&](int human_bone) {
+                    if (human_bone >= 0 && human_bone < map_count) return map[(size_t)human_bone];
+                    return -1;
+                })) {
+                rig.source = RIG_SOURCE_BONE_CACHE;
+                return true;
+            }
+            if (fill_from_slot_resolver([&](int human_bone) {
+                    for (int32_t slot = 0; slot < map_count && slot < count; ++slot)
+                        if (map[(size_t)slot] == human_bone) return (int)slot;
+                    return -1;
+                })) {
+                rig.source = RIG_SOURCE_BONE_CACHE;
+                return true;
+            }
+        }
+    }
+
+    rig.joints.fill(RigJoint{});
+    return false;
+}
+
 static bool build_hitbox_rig(uint64_t player, const Vec3& feet, PlayerRig& rig) {
     std::vector<HitboxSample> samples;
     if (!collect_player_hitboxes(player, samples)) return false;
@@ -1283,6 +1400,7 @@ static PlayerRig resolve_player_rig(uint64_t player, const Vec3& feet) {
     rig.signature = rd_ptr(player + PLAYER_CHARACTER_MODEL);
     rig.head_transform = resolve_model_head_transform(player);
     rig.orientation_transform = resolve_model_root_transform(player);
+    if (build_bone_cache_rig(player, rig)) return rig;
     if (build_hitbox_rig(player, feet, rig)) return rig;
     if (build_named_rig(player, rig)) return rig;
     rig.source = RIG_SOURCE_NONE;
