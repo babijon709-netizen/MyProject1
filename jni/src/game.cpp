@@ -641,6 +641,232 @@ static bool local_player_dead() {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Skeleton (bone) ESP.
+//
+// Reads the enemy model's humanoid rig each frame so the drawn skeleton tracks
+// the actual bones: running, aiming, reloading, and crouching all move the
+// bones and therefore the skeleton automatically (crouch is just the legs
+// folding — the bone positions come straight from the animated rig, no special
+// casing needed).
+//
+// Chain:  PlayerManager.animator -> native Animator -> Avatar -> AvatarData
+//         -> m_HumanBoneIndex[HumanBodyBones] -> TransformOffsetStructure
+//         -> transform index -> existing Transform hierarchy walk.
+// ---------------------------------------------------------------------------
+
+static bool g_skeleton_enabled = false;
+
+// HumanBodyBones enum values for the 20 bones we draw, in draw order.
+static constexpr int kSkeletonBoneCount = EspBox::SKELETON_BONE_COUNT;
+static constexpr int kSkeletonBoneHuman[kSkeletonBoneCount] = {
+    11 /*Head*/,       10 /*Neck*/,      9 /*UpperChest*/, 8 /*Chest*/, 7 /*Spine*/, 0 /*Hips*/,
+    12 /*LShoulder*/,  14 /*LUpperArm*/, 16 /*LLowerArm*/,  18 /*LHand*/,
+    13 /*RShoulder*/,  15 /*RUpperArm*/, 17 /*RLowerArm*/,  19 /*RHand*/,
+    1  /*LUpperLeg*/,  3  /*LLowerLeg*/, 5  /*LFoot*/,
+    2  /*RUpperLeg*/,  4  /*RLowerLeg*/, 6  /*RFoot*/
+};
+
+// Resolved (and validated) Avatar layout. All engine-internal offsets live here.
+struct BoneLayout {
+    uint64_t animator_avatar_off = ANIMATOR_AVATAR;
+    uint64_t avatar_data_off     = AVATAR_DATA;
+    uint64_t avatar_size_off     = AVATAR_SIZE;
+    uint64_t tos_off             = AVATAR_DATA_TOS;
+    uint64_t hbi_off             = AVATAR_DATA_HUMAN_BONE_INDEX;
+    uint64_t tos_stride          = TOS_STRIDE;
+    uint64_t tos_count_off       = TOS_COUNT_OFF;
+    uint64_t tos_first_index_off = TOS_FIRST_INDEX_OFF;
+    bool     use_tos             = true;
+};
+static BoneLayout g_bone_layout{};
+static bool g_bone_layout_valid = false;
+
+void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled = enabled; }
+
+// Extract the shared Transform-hierarchy matrices/indices arrays from any
+// native Transform (all scene transforms share one hierarchy).
+static bool get_hierarchy_arrays(uint64_t native_transform, uint64_t& matrices, uint64_t& indices) {
+    if (!native_transform) return false;
+    uint64_t transform_data = rd_ptr(native_transform + 0x38);
+    if (!likely_native_pointer(transform_data)) return false;
+
+    if (g_transform_hierarchy_layout_valid) {
+        uint64_t m = rd_ptr(transform_data + g_transform_hierarchy_layout.matrices_offset);
+        uint64_t ix = rd_ptr(transform_data + g_transform_hierarchy_layout.indices_offset);
+        if (g_transform_hierarchy_layout.matrices_indirect) m = rd_ptr(m);
+        if (g_transform_hierarchy_layout.indices_indirect) ix = rd_ptr(ix);
+        if (likely_native_pointer(m) && likely_native_pointer(ix)) { matrices = m; indices = ix; return true; }
+    }
+
+    const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
+    for (const auto& offs : data_offsets) {
+        uint64_t mp = rd_ptr(transform_data + offs[0]);
+        uint64_t ip = rd_ptr(transform_data + offs[1]);
+        if (!likely_native_pointer(mp) || !likely_native_pointer(ip)) continue;
+        const uint64_t mc[2] = {mp, rd_ptr(mp)};
+        const uint64_t ic[2] = {ip, rd_ptr(ip)};
+        for (uint64_t m : mc) for (uint64_t ix : ic)
+            if (likely_native_pointer(m) && likely_native_pointer(ix)) { matrices = m; indices = ix; return true; }
+    }
+    return false;
+}
+
+// Resolve the world positions of all 20 bones given a native Animator.
+static bool read_bone_positions(uint64_t native_animator, uint64_t matrices, uint64_t indices, Vec3* out) {
+    if (!g_bone_layout_valid || !native_animator || !matrices || !indices) return false;
+
+    uint64_t avatar = rd_ptr(native_animator + g_bone_layout.animator_avatar_off);
+    if (!likely_native_pointer(avatar)) return false;
+    uint64_t avatar_data = rd_ptr(avatar + g_bone_layout.avatar_data_off);
+    if (!likely_native_pointer(avatar_data)) return false;
+    uint32_t size = rd<uint32_t>(avatar + g_bone_layout.avatar_size_off);
+    if (size < 20 || size > 5000) return false;
+    uint64_t hbi = rd_ptr(avatar_data + g_bone_layout.hbi_off);
+    if (!likely_native_pointer(hbi)) return false;
+    uint64_t tos = 0;
+    if (g_bone_layout.use_tos) {
+        tos = rd_ptr(avatar_data + g_bone_layout.tos_off);
+        if (!likely_native_pointer(tos)) return false;
+    }
+
+    for (int i = 0; i < kSkeletonBoneCount; ++i) {
+        uint32_t node = rd<uint32_t>(hbi + (uint64_t)kSkeletonBoneHuman[i] * 4u);
+        if (node >= size) return false;
+        int32_t transform_index;
+        if (g_bone_layout.use_tos) {
+            uint64_t entry = tos + (uint64_t)node * g_bone_layout.tos_stride;
+            uint32_t count = rd<uint32_t>(entry + g_bone_layout.tos_count_off);
+            uint32_t first = rd<uint32_t>(entry + g_bone_layout.tos_first_index_off);
+            if (count < 1 || count > 8) return false;
+            transform_index = (int32_t)first;
+        } else {
+            transform_index = (int32_t)node;
+        }
+        Vec3 pos{};
+        if (!read_transform_hierarchy_arrays(matrices, indices, transform_index, pos)) return false;
+        out[i] = pos;
+    }
+    return true;
+}
+
+// Sanity-check a resolved skeleton: head above hips above feet, roughly human
+// proportions. Used to reject bogus Avatar layouts before we draw anything.
+static bool skeleton_positions_plausible(const Vec3* bones) {
+    for (int i = 0; i < kSkeletonBoneCount; ++i)
+        if (!vec3_is_finite(bones[i])) return false;
+
+    const float head_y  = bones[0].y;   // Head
+    const float neck_y  = bones[1].y;   // Neck
+    const float hips_y  = bones[5].y;   // Hips
+    const float foot_y  = std::min(bones[16].y, bones[19].y); // LFoot / RFoot
+
+    float body_height = head_y - foot_y;
+    if (body_height < 0.35f || body_height > 3.0f) return false;
+    if (neck_y > head_y + 0.05f || neck_y < hips_y - 0.05f) return false;
+    if (hips_y < foot_y || hips_y > head_y + 0.1f) return false;
+
+    // Horizontal coherence between head and hips (rejects unrelated transforms).
+    float dx = bones[0].x - bones[5].x;
+    float dz = bones[0].z - bones[5].z;
+    if (dx * dx + dz * dz > 4.0f) return false;
+    return true;
+}
+
+static bool try_bone_layout(const BoneLayout& layout, uint64_t native_animator, uint64_t matrices, uint64_t indices) {
+    BoneLayout saved = g_bone_layout;
+    bool saved_valid = g_bone_layout_valid;
+    g_bone_layout = layout;
+    g_bone_layout_valid = true;
+
+    Vec3 bones[kSkeletonBoneCount]{};
+    bool ok = read_bone_positions(native_animator, matrices, indices, bones) && skeleton_positions_plausible(bones);
+
+    g_bone_layout = saved;
+    g_bone_layout_valid = saved_valid;
+    return ok;
+}
+
+// One-time discovery of the Avatar native offsets (Unity engine internals, not
+// present in the dump). Scans plausible offsets and keeps the first layout that
+// produces a humanoid-shaped skeleton. Cached for the rest of the session.
+static bool discover_bone_layout(uint64_t native_animator, uint64_t matrices, uint64_t indices) {
+    if (!native_animator) return false;
+
+    const uint64_t animator_avatar_offs[] = {0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78,
+                                             0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0};
+    const uint64_t avatar_data_offs[] = {0x20, 0x28, 0x30, 0x38, 0x40, 0x48};
+    const uint64_t avatar_size_offs[] = {0x28, 0x30, 0x38, 0x40};
+    const uint64_t hbi_offs[] = {0x38, 0x40, 0x48, 0x50};
+    const uint64_t tos_offs[] = {0x10, 0x08, 0x18};
+    const uint64_t tos_strides[] = {0x18, 0x10, 0x20};
+
+    for (uint64_t aoff : animator_avatar_offs) {
+        uint64_t avatar = rd_ptr(native_animator + aoff);
+        if (!likely_native_pointer(avatar)) continue;
+
+        for (uint64_t doff : avatar_data_offs) {
+            uint64_t avatar_data = rd_ptr(avatar + doff);
+            if (!likely_native_pointer(avatar_data)) continue;
+
+            for (uint64_t soff : avatar_size_offs) {
+                uint32_t size = rd<uint32_t>(avatar + soff);
+                if (size < 20 || size > 5000) continue;
+
+                for (uint64_t hoff : hbi_offs) {
+                    uint64_t hbi = rd_ptr(avatar_data + hoff);
+                    if (!likely_native_pointer(hbi)) continue;
+
+                    // Cheap pre-check on key bone node indices before doing the
+                    // expensive hierarchy walks.
+                    uint32_t head  = rd<uint32_t>(hbi + 11 * 4);
+                    uint32_t hips  = rd<uint32_t>(hbi + 0 * 4);
+                    uint32_t lfoot = rd<uint32_t>(hbi + 5 * 4);
+                    uint32_t rfoot = rd<uint32_t>(hbi + 6 * 4);
+                    if (head >= size || hips >= size || lfoot >= size || rfoot >= size) continue;
+                    if (head == hips && head == lfoot && head == rfoot) continue;
+
+                    BoneLayout cand{};
+                    cand.animator_avatar_off = aoff;
+                    cand.avatar_data_off = doff;
+                    cand.avatar_size_off = soff;
+                    cand.hbi_off = hoff;
+                    cand.use_tos = false;
+                    if (try_bone_layout(cand, native_animator, matrices, indices)) {
+                        g_bone_layout = cand; g_bone_layout_valid = true; return true;
+                    }
+
+                    for (uint64_t toff : tos_offs) {
+                        uint64_t tos = rd_ptr(avatar_data + toff);
+                        if (!likely_native_pointer(tos)) continue;
+                        for (uint64_t stride : tos_strides) {
+                            cand.use_tos = true;
+                            cand.tos_off = toff;
+                            cand.tos_stride = stride;
+                            cand.tos_count_off = 0x08;
+                            cand.tos_first_index_off = 0x0C;
+                            if (try_bone_layout(cand, native_animator, matrices, indices)) {
+                                g_bone_layout = cand; g_bone_layout_valid = true; return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Resolve a player's native Animator (managed Animator -> m_CachedPtr).
+static uint64_t resolve_native_animator(uint64_t player) {
+    if (!player) return 0;
+    uint64_t animator = rd_ptr(player + PLAYER_ANIMATOR);
+    if (!likely_native_pointer(animator)) return 0;
+    uint64_t native = rd_ptr(animator + MANAGED_CACHED_PTR);
+    if (!likely_native_pointer(native)) return 0;
+    return native;
+}
+
 bool esp_init(pid_t pid) {
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
@@ -659,6 +885,8 @@ void esp_reset() {
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
     g_player_position_validated = false;
+    g_bone_layout = {};
+    g_bone_layout_valid = false;
 }
 
 
@@ -819,6 +1047,30 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         local = transform_camera_position; has_local_position = true;
     }
 
+    // --- skeleton (bone) preparation ----------------------------------------
+    // Extract the shared Transform-hierarchy arrays once, then (once per
+    // session) discover the Avatar layout from the first enemy's Animator.
+    uint64_t skel_matrices = 0, skel_indices = 0;
+    if (g_skeleton_enabled) {
+        for (size_t i = 0; i < s_transforms.size(); ++i) {
+            uint64_t native = resolve_player_native_transform(s_transforms[i]);
+            if (native && get_hierarchy_arrays(native, skel_matrices, skel_indices)) break;
+        }
+        if (!g_bone_layout_valid && skel_matrices) {
+            // Discovery scans many offsets; only retry every couple of seconds
+            // so a layout that never validates can't tank the frame rate.
+            static std::chrono::steady_clock::time_point s_last{};
+            auto now = std::chrono::steady_clock::now();
+            if (now - s_last >= std::chrono::seconds(2)) {
+                s_last = now;
+                for (size_t i = 0; i < s_transforms.size(); ++i) {
+                    uint64_t anim = resolve_native_animator(s_transforms[i]);
+                    if (anim) { discover_bone_layout(anim, skel_matrices, skel_indices); break; }
+                }
+            }
+        }
+    }
+
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) continue;
         if (!s_transforms[i]) continue;
@@ -966,6 +1218,26 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             box.corners[corner][0] = projected ? sc.x : -1.0F;
             box.corners[corner][1] = projected ? sc.y : -1.0F;
         }
+
+        // Skeleton: read the model's actual bones and project them to screen.
+        // These come straight from the animated rig, so they follow every bone
+        // motion (and crouch) of the rendered model — no static overlay.
+        if (g_skeleton_enabled && g_bone_layout_valid && skel_matrices) {
+            uint64_t anim = resolve_native_animator(s_transforms[i]);
+            Vec3 bones[kSkeletonBoneCount]{};
+            if (anim && read_bone_positions(anim, skel_matrices, skel_indices, bones) && skeleton_positions_plausible(bones)) {
+                box.has_bones = true;
+                for (int b = 0; b < kSkeletonBoneCount; ++b) {
+                    Vec2 sc{};
+                    bool projected = transform_camera_mode
+                        ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, bones[b], sw, sh, sc, false)
+                        : w2s(vp, bones[b], sw, sh, sc, false);
+                    box.bone_visible[b] = projected && sc.x >= 0.0F && sc.x <= sw && sc.y >= 0.0F && sc.y <= sh;
+                    box.bones[b] = projected ? sc : Vec2{-1.0F, -1.0F};
+                }
+            }
+        }
+
         result.push_back(box);
     }
 

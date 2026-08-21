@@ -47,4 +47,37 @@ inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18;
 inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 
+// ---------------------------------------------------------------------------
+// Skeleton (bone) ESP.
+//
+// The enemy model is a Unity humanoid: PlayerManager carries its Animator
+// directly (`animator`, confirmed from the dump).  Unity's Animator stores an
+// Avatar, and the Avatar holds the humanoid rig mapping (HumanBodyBones ->
+// transform index).  We read that mapping and resolve each bone's world
+// position through the same Transform hierarchy code the ESP already uses.
+//
+// The chain is:
+//   PlayerManager.animator (managed Animator*)          -> m_CachedPtr -> native Animator
+//   native Animator + ANIMATOR_AVATAR                  -> native Avatar
+//   native Avatar   + AVATAR_DATA                      -> AvatarData (serialized rig)
+//   native Avatar   + AVATAR_SIZE                      -> uint32 bone/node count
+//   AvatarData      + AVATAR_DATA_TOS                  -> TransformOffsetStructure[] (skeleton nodes)
+//   AvatarData      + AVATAR_DATA_HUMAN_BONE_INDEX     -> uint32[HumanBodyBones] (node index per bone)
+//   TransformOffsetStructure[bone].m_Index             -> transform hierarchy index
+//
+// NOTE: the Animator/Avatar/AvatarData native offsets below are engine-internal
+// and are discovered + validated at runtime (see game.cpp discover_bone_layout),
+// so a wrong default simply falls back to scanning instead of drawing garbage.
+// ---------------------------------------------------------------------------
+inline constexpr std::uint64_t PLAYER_ANIMATOR = 0x198; // PlayerManager.animator
+
+inline constexpr std::uint64_t ANIMATOR_AVATAR          = 0x38; // native Animator.m_Avatar
+inline constexpr std::uint64_t AVATAR_DATA              = 0x28; // native Avatar.m_Avatar (AvatarData*)
+inline constexpr std::uint64_t AVATAR_SIZE              = 0x30; // native Avatar.m_AvatarSize
+inline constexpr std::uint64_t AVATAR_DATA_TOS          = 0x10; // AvatarData.m_TOS (TransformOffsetStructure[])
+inline constexpr std::uint64_t AVATAR_DATA_HUMAN_BONE_INDEX = 0x38; // AvatarData.m_HumanBoneIndex (uint32[])
+inline constexpr std::uint64_t TOS_STRIDE              = 0x18; // sizeof(TransformOffsetStructure)
+inline constexpr std::uint64_t TOS_COUNT_OFF           = 0x08; // TransformOffsetStructure.m_Count
+inline constexpr std::uint64_t TOS_FIRST_INDEX_OFF     = 0x0C; // TransformOffsetStructure.m_Index
+
 }
