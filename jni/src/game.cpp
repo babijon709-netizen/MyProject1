@@ -1225,6 +1225,26 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
     }
     if (best_segments.empty()) return use_fallback();
 
+    // A malformed hierarchy can still look plausible when it contains only the
+    // lower-body branch.  Returning that partial graph is what produced the
+    // familiar legs-only overlay (and made its origin appear above the player).
+    // Require an upper-body span before accepting the graph; the stable capsule
+    // fallback draws the complete, correctly anchored skeleton while a model is
+    // loading or when the hierarchy layout is not recognized.
+    float graph_top = -INFINITY;
+    float graph_min_x = INFINITY;
+    float graph_max_x = -INFINITY;
+    for (const auto& segment : best_segments) {
+        graph_top = std::max(graph_top, std::max(segment.first.y, segment.second.y));
+        graph_min_x = std::min(graph_min_x, std::min(segment.first.x, segment.second.x));
+        graph_max_x = std::max(graph_max_x, std::max(segment.first.x, segment.second.x));
+    }
+    if (!std::isfinite(graph_top) || graph_top < feet.y + 0.85f ||
+        !std::isfinite(graph_min_x) || !std::isfinite(graph_max_x) ||
+        graph_max_x - graph_min_x < 0.12f) {
+        return use_fallback();
+    }
+
     // Always use the actual head position for aim/box top, even when the body
     // graph was obtained from PlayerModelInfo.body rather than KCC.head.
     Vec3 actual_head = have_hierarchy_head ? hierarchy_head : best_anchor;
