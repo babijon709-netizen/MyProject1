@@ -1143,8 +1143,19 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
     if (native_head) {
         SkeletonHierarchyInfo head_storage{};
         int32_t head_index = -1;
-        have_hierarchy_head = resolve_skeleton_layout(native_head, feet, head_storage,
-                                                      head_index, hierarchy_head);
+        Vec3 resolved_head{};
+        if (resolve_skeleton_layout(native_head, feet, head_storage,
+                                     head_index, resolved_head)) {
+            // The anchor must actually sit near the box head. A body-root
+            // anchor (or a camera helper above the model) would otherwise be
+            // mistaken for the head and drag the skeleton out of the box.
+            float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
+            float head_dy = resolved_head.y - (feet.y + height);
+            if (std::isfinite(head_dy) && fabsf(head_dy) < 0.6f) {
+                hierarchy_head = resolved_head;
+                have_hierarchy_head = true;
+            }
+        }
     }
 
     // CharacterAnimation.tk keeps the exact Transform[] used by the game's
@@ -1182,24 +1193,43 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
     // graph was obtained from PlayerModelInfo.body rather than KCC.head.
     Vec3 actual_head = have_hierarchy_head ? hierarchy_head : best_anchor;
 
-    // The hierarchy graph lives in the visual model's own frame, which can be
-    // vertically offset from the network feet used by the box. Align the top
-    // of the graph to the box head so the skeleton sits inside the box instead
-    // of running out above it (the "pole through the box" symptom).
+    // The raw hierarchy carries helper transforms above the skull (head-attach
+    // points, hair/hat anchors, camera IK targets). Those render as a stray
+    // "corner" above the head, so drop every segment that reaches above the
+    // real head. The real head height comes from the resolved head when
+    // available, otherwise from the box height.
     {
-        float max_y = -INFINITY;
-        for (const auto& segment : best_segments) {
-            max_y = std::max(max_y, segment.first.y);
-            max_y = std::max(max_y, segment.second.y);
-        }
         float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
-        float dy = (feet.y + height) - max_y;
+        float head_y = have_hierarchy_head ? hierarchy_head.y : (feet.y + height);
+        std::vector<std::pair<Vec3, Vec3>> clipped;
+        clipped.reserve(best_segments.size());
+        for (const auto& segment : best_segments) {
+            if (segment.first.y > head_y + 0.15f ||
+                segment.second.y > head_y + 0.15f)
+                continue;
+            clipped.push_back(segment);
+        }
+        if (clipped.empty()) return use_fallback();
+        best_segments = std::move(clipped);
+    }
+
+    // The hierarchy graph lives in the visual model's own frame, whose vertical
+    // origin does not match the network feet position used by the box. Anchor
+    // the graph's lowest points (the feet — the most reliably present bones)
+    // to the network feet so the skeleton sits on the model instead of floating
+    // above it.
+    {
+        float min_y = INFINITY;
+        for (const auto& segment : best_segments) {
+            min_y = std::min(min_y, segment.first.y);
+            min_y = std::min(min_y, segment.second.y);
+        }
+        float dy = feet.y - min_y;
         if (std::isfinite(dy) && fabsf(dy) < 3.0f) {
             for (auto& segment : best_segments) {
                 segment.first.y += dy;
                 segment.second.y += dy;
             }
-            actual_head.y += dy;
         }
     }
 
