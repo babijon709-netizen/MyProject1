@@ -677,6 +677,19 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
     if (best_score < 0) return false;
     if (!bones || !bones->valid[LIVE_HEAD] || !bones->valid[LIVE_HIPS] ||
         !bones->valid[LIVE_NECK]) return false;
+    bool complete_arms = bones->valid[LIVE_LEFT_SHOULDER] &&
+                         bones->valid[LIVE_LEFT_UPPER_ARM] &&
+                         bones->valid[LIVE_LEFT_LOWER_ARM] &&
+                         bones->valid[LIVE_LEFT_HAND] &&
+                         bones->valid[LIVE_RIGHT_SHOULDER] &&
+                         bones->valid[LIVE_RIGHT_UPPER_ARM] &&
+                         bones->valid[LIVE_RIGHT_LOWER_ARM] &&
+                         bones->valid[LIVE_RIGHT_HAND];
+    bool complete_legs = bones->valid[LIVE_LEFT_UPPER_LEG] &&
+                         bones->valid[LIVE_LEFT_LOWER_LEG] &&
+                         bones->valid[LIVE_RIGHT_UPPER_LEG] &&
+                         bones->valid[LIVE_RIGHT_LOWER_LEG];
+    if (!complete_arms || !complete_legs) return false;
 
     // tk.pjh contains model-space transforms. Depending on the active skin and
     // animation state, the cached hierarchy can be rooted at the visual model
@@ -1248,6 +1261,38 @@ static bool matrix_is_finite(const Mat4& matrix) {
     }
     return has_non_zero;
 }
+
+static bool matrices_are_coherent(const Mat4& first, const Mat4& second,
+                                  float max_delta) {
+    for (int i = 0; i < 16; ++i) {
+        if (!std::isfinite(first.m[i]) || !std::isfinite(second.m[i]) ||
+            fabsf(first.m[i] - second.m[i]) > max_delta) return false;
+    }
+    return true;
+}
+
+static bool read_stable_camera_matrices(uint64_t native_camera,
+                                        Mat4& projection, Mat4& view) {
+    if (!native_camera) return false;
+    // Unity can update the camera transform and projection in separate writes.
+    // Reading both matrices twice and accepting only a coherent pair prevents a
+    // single torn frame from shifting every box, tracer and bone together.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        Mat4 projection_a = rd_m4(native_camera + CAMERA_PROJECTION_MATRIX);
+        Mat4 view_a = rd_m4(native_camera + CAMERA_VIEW_MATRIX);
+        Mat4 projection_b = rd_m4(native_camera + CAMERA_PROJECTION_MATRIX);
+        Mat4 view_b = rd_m4(native_camera + CAMERA_VIEW_MATRIX);
+        if (!matrix_is_finite(projection_a) || !matrix_is_finite(view_a) ||
+            !matrix_is_finite(projection_b) || !matrix_is_finite(view_b)) continue;
+        if (!matrices_are_coherent(projection_a, projection_b, 0.05f) ||
+            !matrices_are_coherent(view_a, view_b, 0.05f)) continue;
+        projection = projection_b;
+        view = view_b;
+        return true;
+    }
+    return false;
+}
+
 static Mat4 mat_mul(const Mat4& a, const Mat4& b) {
     Mat4 result{};
     for (int row = 0; row < 4; ++row)
@@ -1494,9 +1539,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             g_last_vp_valid = false;
             return result;
         }
-        projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-        view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-        if (!matrix_is_finite(projection) || !matrix_is_finite(view)) {
+        if (!read_stable_camera_matrices(native_cam, projection, view)) {
             g_last_vp_valid = false;
             return result;
         }
@@ -1520,9 +1563,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 g_last_vp_valid = false;
                 return result;
             }
-            projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-            view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-            if (!matrix_is_finite(projection) || !matrix_is_finite(view)) {
+            if (!read_stable_camera_matrices(native_cam, projection, view)) {
                 g_last_vp_valid = false;
                 return result;
             }
@@ -1718,11 +1759,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         Vec3 animated_head{};
         Vec3 skeleton_chest{};
         Vec3 skeleton_pelvis{};
-        bool have_skeleton = read_skeleton_segments(s_transforms[i], feet,
+        Vec3 render_feet = {render_x, feet_y, render_z};
+        bool have_skeleton = read_skeleton_segments(s_transforms[i], render_feet,
                                                      skeleton_segments, animated_head,
                                                      skeleton_chest, skeleton_pelvis);
 
-        Vec3 body_bottom = {render_x, feet_y, render_z};
+        Vec3 body_bottom = render_feet;
         Vec3 body_top = have_skeleton ? animated_head
                                       : Vec3{render_x, feet_y + head_height, render_z};
         if (transform_camera_mode && !have_skeleton) {
