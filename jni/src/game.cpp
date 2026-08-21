@@ -678,6 +678,32 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
     if (!bones || !bones->valid[LIVE_HEAD] || !bones->valid[LIVE_HIPS] ||
         !bones->valid[LIVE_NECK]) return false;
 
+    // tk.pjh contains model-space transforms. Depending on the active skin and
+    // animation state, the cached hierarchy can be rooted at the visual model
+    // while PlayerManager.lastTickPosition is rooted at the KCC capsule. Align
+    // the pelvis to that capsule before projecting; otherwise the whole box and
+    // skeleton are translated together above the character.
+    LiveBoneSet calibrated = *bones;
+    float bone_height = fabsf(calibrated.position[LIVE_HEAD].y - feet.y);
+    if (!std::isfinite(bone_height) || bone_height < 0.5f) bone_height = PLAYER_HEIGHT;
+    float target_hip_height = bone_height * 0.50f;
+    if (target_hip_height < 0.35f) target_hip_height = 0.35f;
+    if (target_hip_height > 0.95f) target_hip_height = 0.95f;
+    Vec3 shift = {
+        feet.x - calibrated.position[LIVE_HIPS].x,
+        feet.y + target_hip_height - calibrated.position[LIVE_HIPS].y,
+        feet.z - calibrated.position[LIVE_HIPS].z
+    };
+    if (vec3_is_finite(shift)) {
+        for (int i = 0; i < LIVE_BONE_COUNT; ++i) {
+            if (!calibrated.valid[i]) continue;
+            calibrated.position[i].x += shift.x;
+            calibrated.position[i].y += shift.y;
+            calibrated.position[i].z += shift.z;
+        }
+    }
+    bones = &calibrated;
+
     animated_head = bones->position[LIVE_HEAD];
     skeleton_pelvis = bones->position[LIVE_HIPS];
     if (bones->valid[LIVE_UPPER_CHEST]) skeleton_chest = bones->position[LIVE_UPPER_CHEST];
