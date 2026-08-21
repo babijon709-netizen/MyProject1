@@ -710,7 +710,13 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
     standard_mi.matrices_indirect = true;
     TransformHierarchyLayout compact_mi = compact_layout;
     compact_mi.matrices_indirect = true;
+    // Prefer the layout already resolved for this scene (validated against the
+    // live head transform by the thorough probe), then the shared
+    // transform-hierarchy layout, then the fixed Unity ABI shapes. Using the
+    // resolved layout here is what lets the named cache (tk.pjh) resolve the
+    // torso/arm bones that the hierarchy-graph fallback cannot see.
     const TransformHierarchyLayout* layouts[] = {
+        g_skeleton_layout_valid ? &g_skeleton_layout : nullptr,
         g_transform_hierarchy_layout_valid ? &g_transform_hierarchy_layout : nullptr,
         &standard_layout, &standard_mi, &compact_layout, &compact_mi
     };
@@ -974,6 +980,13 @@ static bool build_skeleton_graph(uint64_t native_head, const Vec3& feet,
         if (!calculate_world(index) || !calculate_world(parent)) continue;
         const Vec3& a = world[(size_t)parent];
         const Vec3& b = world[(size_t)index];
+        // The character/body root sits on the ground between the legs; its edge
+        // up to the hips projects as a straight pole through the middle of the
+        // body and out of the top of the box. Real bones never start at ground
+        // level and run upward, so drop that synthetic link.
+        float py = a.y - feet.y;
+        float cy = b.y - feet.y;
+        if (py < 0.35f && cy > py + 0.5f) continue;
         float ax = a.x - feet.x, ay = a.y - feet.y, az = a.z - feet.z;
         float bx = b.x - feet.x, by = b.y - feet.y, bz = b.z - feet.z;
         float length = sqrtf((a.x - b.x) * (a.x - b.x) +
@@ -1168,6 +1181,27 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
     // Always use the actual head position for aim/box top, even when the body
     // graph was obtained from PlayerModelInfo.body rather than KCC.head.
     Vec3 actual_head = have_hierarchy_head ? hierarchy_head : best_anchor;
+
+    // The hierarchy graph lives in the visual model's own frame, which can be
+    // vertically offset from the network feet used by the box. Align the top
+    // of the graph to the box head so the skeleton sits inside the box instead
+    // of running out above it (the "pole through the box" symptom).
+    {
+        float max_y = -INFINITY;
+        for (const auto& segment : best_segments) {
+            max_y = std::max(max_y, segment.first.y);
+            max_y = std::max(max_y, segment.second.y);
+        }
+        float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
+        float dy = (feet.y + height) - max_y;
+        if (std::isfinite(dy) && fabsf(dy) < 3.0f) {
+            for (auto& segment : best_segments) {
+                segment.first.y += dy;
+                segment.second.y += dy;
+            }
+            actual_head.y += dy;
+        }
+    }
 
     segments = std::move(best_segments);
     animated_head = actual_head;
