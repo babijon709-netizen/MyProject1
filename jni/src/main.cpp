@@ -207,7 +207,6 @@ namespace cfg { namespace esp {
     inline bool weapon       = false;
     inline bool weapon_icon  = false;
     inline bool tracer       = false;
-    inline bool skeleton     = false;
     inline bool  vis_check        = false;
     inline bool  fill             = false;
     inline float stroke           = 2.f;
@@ -614,7 +613,7 @@ static void DrawEspOverlay() {
     if (!g_esp_attached) return;
     if (!g_state.esp_master) return;
     if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall &&
-        !g_state.esp_skeleton && !g_state.esp_tracer) return;
+        !g_state.esp_tracer) return;
 
     const std::vector<EspBox>& boxes = GetEspBoxes((int)sw, (int)sh);
     constexpr int BOX_EDGES[][2] = {
@@ -672,19 +671,6 @@ static void DrawEspOverlay() {
                 ImVec2(fx, fy),
                 ColU32(cfg::esp::tracer_col), tth
             );
-        }
-
-        if (g_state.esp_skeleton && box.skeleton_valid) {
-            // Lines are already projected from the live Animator hierarchy in
-            // esp_get_boxes(). Drawing the immutable per-frame snapshot avoids
-            // the one-frame pose/camera mismatch caused by re-reading bones here.
-            for (const EspSkeletonLine& line : box.skeleton) {
-                if (!std::isfinite(line.x1) || !std::isfinite(line.y1) ||
-                    !std::isfinite(line.x2) || !std::isfinite(line.y2)) continue;
-                dl->AddLine(ImVec2(line.x1, line.y1),
-                            ImVec2(line.x2, line.y2),
-                            ColU32(cfg::esp::skeleton_col), thick);
-            }
         }
     }
 }
@@ -2399,7 +2385,6 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::weapon       = g_state.esp_weapon;
         cfg::esp::weapon_icon  = g_state.esp_weapon_icon;
         cfg::esp::tracer       = g_state.esp_tracer;
-        cfg::esp::skeleton     = g_state.esp_skeleton;
 
 
 
@@ -2474,7 +2459,7 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vd",  XS("Дистанция"),      &g_state.esp_wall,         &g_state.a_esp_wall,         &cfg::esp::distance_col},
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
-                {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
+                {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     nullptr},
             };
             constexpr int N = 7;
             CardBg(rowH * N);
@@ -2849,16 +2834,6 @@ static void RunAim() {
 
         float tx = (box.x1 + box.x2) * 0.5f;
         float ty = box.y1 + bh * bone_v;
-        if (box.skeleton_valid) {
-            const EspSkeletonAimPoint* skeleton_point = nullptr;
-            if (g_state.aim_bone == 0) skeleton_point = &box.skeleton_head_point;
-            else if (g_state.aim_bone == 1) skeleton_point = &box.skeleton_chest_point;
-            else if (g_state.aim_bone == 2) skeleton_point = &box.skeleton_pelvis_point;
-            if (skeleton_point && skeleton_point->valid) {
-                tx = skeleton_point->x;
-                ty = skeleton_point->y;
-            }
-        }
         if (tx < 0.f || tx > sw || ty < 0.f || ty > sh) continue;
 
         float dx = tx - cx;
@@ -2912,12 +2887,6 @@ static void RunAim() {
     // crouch-aware). If world projection is unavailable, fall back to the box's
     // own screen position so the aim never fully stops.
     Vec3 aim_origin = tb->head;
-    if (tb->skeleton_valid) {
-        if (g_state.aim_bone == 1 && tb->skeleton_chest_point.valid)
-            aim_origin = tb->skeleton_chest;
-        else if (g_state.aim_bone == 2 && tb->skeleton_pelvis_point.valid)
-            aim_origin = tb->skeleton_pelvis;
-    }
     const float lead_time = 0.18f;
     Vec3 pred = { aim_origin.x + tb->vel.x * lead_time,
                   aim_origin.y,
