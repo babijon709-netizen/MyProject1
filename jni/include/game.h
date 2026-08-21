@@ -1,20 +1,7 @@
 #pragma once
 #include <sys/types.h>
-#include <cstdint>
 #include <vector>
 #include "Vector.h"
-
-// A projected bone-to-bone segment.  It is stored in the same snapshot as the
-// box, rather than being reconstructed by the renderer, so every line uses the
-// exact camera and pose that produced the box for this frame.
-struct EspSkeletonLine {
-    float x1, y1, x2, y2;
-};
-
-struct EspSkeletonAimPoint {
-    float x, y;
-    bool valid;
-};
 
 struct EspBox {
     float x1, y1, x2, y2;     // screen rect
@@ -24,19 +11,11 @@ struct EspBox {
     uint64_t source;          // PlayerManager* this box belongs to
     float speed;              // smoothed horizontal world speed (m/s)
     Vec3  feet;               // world feet position
-    Vec3  head;               // world head position (actual animated head when available)
+    Vec3  head;               // world head position (crouch-aware)
     Vec3  vel;                // smoothed horizontal world velocity (x,0,z)
     float aim_vx;             // screen velocity of head (px/s), for aim feed-forward
     float aim_vy;
     bool  crouched;           // player is crouching
-    bool  skeleton_valid;     // true only when the live model hierarchy was read
-    bool  skeleton_aim_points_valid;
-    Vec3  skeleton_chest;     // live world-space chest/torso anchor
-    Vec3  skeleton_pelvis;    // live world-space pelvis anchor
-    EspSkeletonAimPoint skeleton_head_point;
-    EspSkeletonAimPoint skeleton_chest_point;
-    EspSkeletonAimPoint skeleton_pelvis_point;
-    std::vector<EspSkeletonLine> skeleton;
 };
 
 bool        esp_init(pid_t pid);

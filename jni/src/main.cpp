@@ -674,18 +674,7 @@ static void DrawEspOverlay() {
             );
         }
 
-        if (g_state.esp_skeleton && box.skeleton_valid) {
-            // Lines are already projected from the live Animator hierarchy in
-            // esp_get_boxes(). Drawing the immutable per-frame snapshot avoids
-            // the one-frame pose/camera mismatch caused by re-reading bones here.
-            for (const EspSkeletonLine& line : box.skeleton) {
-                if (!std::isfinite(line.x1) || !std::isfinite(line.y1) ||
-                    !std::isfinite(line.x2) || !std::isfinite(line.y2)) continue;
-                dl->AddLine(ImVec2(line.x1, line.y1),
-                            ImVec2(line.x2, line.y2),
-                            ColU32(cfg::esp::skeleton_col), thick);
-            }
-        }
+        // skeleton drawing logic removed (kept the GUI toggle only)
     }
 }
 
@@ -2849,16 +2838,6 @@ static void RunAim() {
 
         float tx = (box.x1 + box.x2) * 0.5f;
         float ty = box.y1 + bh * bone_v;
-        if (box.skeleton_valid) {
-            const EspSkeletonAimPoint* skeleton_point = nullptr;
-            if (g_state.aim_bone == 0) skeleton_point = &box.skeleton_head_point;
-            else if (g_state.aim_bone == 1) skeleton_point = &box.skeleton_chest_point;
-            else if (g_state.aim_bone == 2) skeleton_point = &box.skeleton_pelvis_point;
-            if (skeleton_point && skeleton_point->valid) {
-                tx = skeleton_point->x;
-                ty = skeleton_point->y;
-            }
-        }
         if (tx < 0.f || tx > sw || ty < 0.f || ty > sh) continue;
 
         float dx = tx - cx;
@@ -2911,17 +2890,10 @@ static void RunAim() {
     // running enemy and follows a crouching one automatically (head is
     // crouch-aware). If world projection is unavailable, fall back to the box's
     // own screen position so the aim never fully stops.
-    Vec3 aim_origin = tb->head;
-    if (tb->skeleton_valid) {
-        if (g_state.aim_bone == 1 && tb->skeleton_chest_point.valid)
-            aim_origin = tb->skeleton_chest;
-        else if (g_state.aim_bone == 2 && tb->skeleton_pelvis_point.valid)
-            aim_origin = tb->skeleton_pelvis;
-    }
     const float lead_time = 0.18f;
-    Vec3 pred = { aim_origin.x + tb->vel.x * lead_time,
-                  aim_origin.y,
-                  aim_origin.z + tb->vel.z * lead_time };
+    Vec3 pred = { tb->head.x + tb->vel.x * lead_time,
+                  tb->head.y,
+                  tb->head.z + tb->vel.z * lead_time };
     float sx = 0.f, sy = 0.f;
     bool have_screen = esp_world_to_screen(pred, (int)sw, (int)sh, sx, sy);
     if (!have_screen || !std::isfinite(sx) || !std::isfinite(sy) ||

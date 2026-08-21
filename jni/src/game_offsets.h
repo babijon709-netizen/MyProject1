@@ -24,24 +24,6 @@ inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20;
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68;
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0;
 
-// The player owns the live KCC/model graph through an InterfaceReference<ti>.
-// These fields are intentionally kept separate from the network position above:
-// network position is useful for the box, while the KCC hierarchy contains the
-// animated bones rendered by the client.
-inline constexpr std::uint64_t PLAYER_KCC_REFERENCE = 0xB0;
-inline constexpr std::uint64_t KCC_PLAYER           = 0x78;
-inline constexpr std::uint64_t KCC_HITBOX_ROOT      = 0x70;
-inline constexpr std::uint64_t KCC_HEAD             = 0x88;
-inline constexpr std::uint64_t KCC_ANIMATOR          = 0xD8;
-inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION = 0x108;
-inline constexpr std::uint64_t CHARACTER_ANIMATION_MODEL_INFO = 0x30;
-// CharacterAnimation.pvi -> tk caches the live HumanoidBone transforms.
-inline constexpr std::uint64_t CHARACTER_ANIMATION_BONE_CACHE = 0x88;
-inline constexpr std::uint64_t BONE_CACHE_TRANSFORMS = 0x48; // tk.pjh
-inline constexpr std::uint64_t BONE_CACHE_MAPPING    = 0x50; // tk.pjY
-inline constexpr std::uint64_t PLAYER_MODEL_HEAD    = 0x20;
-inline constexpr std::uint64_t PLAYER_MODEL_BODY    = 0x40;
-
 // Death / spectate detection (local PlayerManager).
 inline constexpr std::uint64_t PLAYER_FLAGS          = 0x258; // PlayerManager.PlayerFlags
 inline constexpr uint32_t     PLAYER_FLAG_SPECTATING = 1u << 1;
