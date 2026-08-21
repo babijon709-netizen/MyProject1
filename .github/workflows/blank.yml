@@ -1,36 +1,71 @@
-# This is a basic workflow to help you get started with Actions
+name: Build xvcen.sh
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
+      - arena/01a02648-myproject1
 
-  # Allows you to run this workflow manually from the Actions tab
+  pull_request:
+    branches:
+      - main
+      - arena/01a02648-myproject1
+
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+# Бинарник только собирается и загружается как artifact.
+# Автоматический git push отключён, чтобы избежать non-fast-forward.
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: 26.3.11579264
+
 jobs:
-  # This workflow contains a single job called "build"
   build:
-    # The type of runner that the job will run on
+    name: Android arm64-v8a
     runs-on: ubuntu-latest
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        shell: bash
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "ndk;${NDK_VERSION}"
+
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
+
+      - name: Build
+        shell: bash
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+          file libs/arm64-v8a/xvcen.sh
+          sha256sum libs/arm64-v8a/xvcen.sh
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: xvcen-sh-arm64-v8a
+          path: libs/arm64-v8a/xvcen.sh
+          if-no-files-found: error
