@@ -622,14 +622,6 @@ static void DrawEspOverlay() {
         {4,5},{5,6},{6,7},{7,4},
         {0,4},{1,5},{2,6},{3,7}
     };
-    // Bone pairs (indices into EspBox::bones) forming the humanoid skeleton.
-    constexpr int BONE_LINKS[][2] = {
-        {0,1},  {1,2},  {2,3},  {3,4},  {4,5},   // head -> neck -> chest -> spine -> hips
-        {2,6},  {6,7},  {7,8},  {8,9},           // left  arm
-        {2,10}, {10,11},{11,12},{12,13},         // right arm
-        {5,14}, {14,15},{15,16},                 // left  leg
-        {5,17}, {17,18},{18,19}                  // right leg
-    };
     float thick = g_state.esp_thick;
     if (thick < 0.5f) thick = 0.5f;
 
@@ -682,20 +674,16 @@ static void DrawEspOverlay() {
             );
         }
 
-        // Skeleton: draw lines between the real bone joints of the model. The
-        // bone positions come straight from the animated rig, so the skeleton
-        // tracks every bone motion (and crouch) instead of sitting still.
-        if (g_state.esp_skeleton && box.has_bones) {
-            for (const auto& link : BONE_LINKS) {
-                int a = link[0], b = link[1];
-                if (!box.bone_visible[a] || !box.bone_visible[b]) continue;
-                if (!std::isfinite(box.bones[a].x) || !std::isfinite(box.bones[a].y) ||
-                    !std::isfinite(box.bones[b].x) || !std::isfinite(box.bones[b].y)) continue;
-                dl->AddLine(
-                    ImVec2(box.bones[a].x, box.bones[a].y),
-                    ImVec2(box.bones[b].x, box.bones[b].y),
-                    ColU32(cfg::esp::skeleton_col), thick
-                );
+        if (g_state.esp_skeleton && box.skeleton_valid) {
+            // Lines are already projected from the live Animator hierarchy in
+            // esp_get_boxes(). Drawing the immutable per-frame snapshot avoids
+            // the one-frame pose/camera mismatch caused by re-reading bones here.
+            for (const EspSkeletonLine& line : box.skeleton) {
+                if (!std::isfinite(line.x1) || !std::isfinite(line.y1) ||
+                    !std::isfinite(line.x2) || !std::isfinite(line.y2)) continue;
+                dl->AddLine(ImVec2(line.x1, line.y1),
+                            ImVec2(line.x2, line.y2),
+                            ColU32(cfg::esp::skeleton_col), thick);
             }
         }
     }
@@ -2786,7 +2774,6 @@ static void CenterMenuOnDisplay() {
 // ===========================================================================
 static bool  g_aim_active = false;
 static float g_aim_cx = 0.f, g_aim_cy = 0.f;
-static float g_aim_tx = 0.f, g_aim_ty = 0.f; // smoothed aim point
 static uint64_t g_aim_target = 0;            // locked enemy source (hysteresis)
 
 static void AimRelease() {
@@ -2862,6 +2849,16 @@ static void RunAim() {
 
         float tx = (box.x1 + box.x2) * 0.5f;
         float ty = box.y1 + bh * bone_v;
+        if (box.skeleton_valid) {
+            const EspSkeletonAimPoint* skeleton_point = nullptr;
+            if (g_state.aim_bone == 0) skeleton_point = &box.skeleton_head_point;
+            else if (g_state.aim_bone == 1) skeleton_point = &box.skeleton_chest_point;
+            else if (g_state.aim_bone == 2) skeleton_point = &box.skeleton_pelvis_point;
+            if (skeleton_point && skeleton_point->valid) {
+                tx = skeleton_point->x;
+                ty = skeleton_point->y;
+            }
+        }
         if (tx < 0.f || tx > sw || ty < 0.f || ty > sh) continue;
 
         float dx = tx - cx;
@@ -2906,23 +2903,29 @@ static void RunAim() {
     int sm = (int)lroundf(g_state.gun_str);
     if (sm < 1) sm = 1;
     if (sm > 10) sm = 10;
-    float rate = 12.f - 1.2f * (float)(sm - 1); // sm1=12/s ... sm10=1.2/s
-    if (rate < 1.2f) rate = 1.2f;
+    float K = 22.f - 2.0f * (float)(sm - 1); // sm1=22/s ... sm10=4/s
+    if (K < 4.f) K = 4.f;
 
     // Predict where the target's head will be shortly, in WORLD space, then
     // project that single point to screen with the live camera. This leads a
     // running enemy and follows a crouching one automatically (head is
-    // bounds-aware). If world projection is unavailable, fall back to the box's
+    // crouch-aware). If world projection is unavailable, fall back to the box's
     // own screen position so the aim never fully stops.
-    const float lead_time = 0.15f;
-    Vec3 pred = { tb->head.x + tb->vel.x * lead_time,
-                  tb->head.y,
-                  tb->head.z + tb->vel.z * lead_time };
+    Vec3 aim_origin = tb->head;
+    if (tb->skeleton_valid) {
+        if (g_state.aim_bone == 1 && tb->skeleton_chest_point.valid)
+            aim_origin = tb->skeleton_chest;
+        else if (g_state.aim_bone == 2 && tb->skeleton_pelvis_point.valid)
+            aim_origin = tb->skeleton_pelvis;
+    }
+    const float lead_time = 0.18f;
+    Vec3 pred = { aim_origin.x + tb->vel.x * lead_time,
+                  aim_origin.y,
+                  aim_origin.z + tb->vel.z * lead_time };
     float sx = 0.f, sy = 0.f;
     bool have_screen = esp_world_to_screen(pred, (int)sw, (int)sh, sx, sy);
     if (!have_screen || !std::isfinite(sx) || !std::isfinite(sy) ||
         sx < -sw * 0.5f || sx > sw * 1.5f || sy < -sh * 0.5f || sy > sh * 1.5f) {
-        // fallback: box's screen-space aim point
         float bw = tb->x2 - tb->x1;
         float bh = tb->y2 - tb->y1;
         if (bw < 1.f || bh < 1.f) { AimRelease(); return; }
@@ -2931,33 +2934,36 @@ static void RunAim() {
         if (!std::isfinite(sx) || !std::isfinite(sy)) { AimRelease(); return; }
     }
 
-    // Lightly smooth the screen aim point (removes network jitter, near-zero lag).
-    float ts = 1.0f - expf(-30.f * dt);
-    g_aim_tx += (sx - g_aim_tx) * ts;
-    g_aim_ty += (sy - g_aim_ty) * ts;
+    float ex = sx - cx; // remaining screen error to the predicted point
+    float ey = sy - cy;
 
-    float ex = g_aim_tx - cx; // remaining screen error
-    float ey = g_aim_ty - cy;
-
-    // Clamp the error feeding the controller: a huge error (e.g. ADS zoom made
-    // the target jump far on screen) must not produce a huge velocity.
-    const float emax = 220.f;
+    // Clamp the error feeding the proportional term (prevents ADS-zoom blowups).
+    const float emax = 260.f;
     float cex = fmaxf(-emax, fminf(emax, ex));
     float cey = fmaxf(-emax, fminf(emax, ey));
 
-    // Pure exponential approach toward the predicted point. Exponential control
-    // never overshoots, so the camera cannot oscillate or "spin".
-    float step = 1.0f - expf(-rate * dt);
-    float ddx = cex * step;
-    float ddy = cey * step;
+    // Feed-forward (track the runner at exactly his screen speed) + proportional
+    // (close the gap). With feed-forward, once on target the crosshair moves at
+    // the target's own velocity — no lag behind a running enemy.
+    float dvx = tb->aim_vx + cex * K;
+    float dvy = tb->aim_vy + cey * K;
 
-    const float max_drag = 120.f; // per-frame cap
+    // Cap total crosshair velocity.
+    const float vmax = 3600.f;
+    float vl = sqrtf(dvx * dvx + dvy * dvy);
+    if (vl > vmax) { dvx *= vmax / vl; dvy *= vmax / vl; }
+
+    float ddx = dvx * dt;
+    float ddy = dvy * dt;
+
+    const float max_drag = 220.f; // per-frame cap
     float dl = sqrtf(ddx * ddx + ddy * ddy);
     if (dl > max_drag) { ddx *= max_drag / dl; ddy *= max_drag / dl; }
 
-    // Deadzone: on target -> stop dead (no micro-shake).
+    // Deadzone: on target and the target is nearly still -> stop dead.
     float rest = sqrtf(ex * ex + ey * ey);
-    if (rest < 6.f) { ddx = 0.f; ddy = 0.f; }
+    float ffs = sqrtf(tb->aim_vx * tb->aim_vx + tb->aim_vy * tb->aim_vy);
+    if (rest < 6.f && ffs < 60.f) { ddx = 0.f; ddy = 0.f; }
 
     // --- injection -----------------------------------------------------------
     const float anchor_x = sw * 0.72f;
@@ -3460,7 +3466,6 @@ int main(int argc, char* argv[]) {
         ++g_frame_id;
 
         ui::bar::set_game_alpha(0.f);
-        esp_set_skeleton_enabled(g_state.esp_skeleton);
         DrawEspOverlay();
         RunAim();
         RenderMenu();

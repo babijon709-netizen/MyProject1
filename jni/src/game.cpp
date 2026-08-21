@@ -9,8 +9,12 @@
 #include <cmath>
 #include <string>
 #include <chrono>
+#include <functional>
+#include <iterator>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -33,6 +37,18 @@ static uint64_t  g_player_position_offset = PLAYER_POSITION;
 static float     g_last_camera_fov_deg = -1.f;
 static Mat4      g_last_vp{};
 static bool      g_last_vp_valid = false;
+static std::vector<uint64_t> g_player_snapshot;
+static std::chrono::steady_clock::time_point g_player_snapshot_stamp{};
+
+struct PlayerTrack {
+    Vec3 pos;
+    double t;
+    Vec3 vel;
+};
+// Per-player velocity history used to extrapolate the network tick position to
+// the smoothly rendered model. Cleared on (re)attach and on scene reload so a
+// reused PlayerManager pointer cannot inherit a dead player's velocity.
+static std::unordered_map<uint64_t, PlayerTrack> g_player_track;
 
 struct TransformHierarchyLayout {
     uint64_t data_offset = 0x38;
@@ -47,8 +63,10 @@ static bool g_transform_hierarchy_layout_valid = false;
 
 static bool      g_use_direct_player_position = true;
 static bool      g_player_position_validated = false;
+static std::mutex g_game_mutex;
 
 static bool vec3_is_finite(const Vec3& value);
+static bool player_crouching(uint64_t player);
 
 template<typename T>
 static T rd(uint64_t addr) {
@@ -321,6 +339,509 @@ static bool likely_native_pointer(uint64_t value) {
     return value >= 0x10000 && value < 0x0001000000000000ULL && (value & 0x7) == 0;
 }
 
+// ---------------------------------------------------------------------------
+// Live model skeleton
+// ---------------------------------------------------------------------------
+// Reads the enemy model's humanoid rig each frame so the drawn skeleton tracks
+// the actual bones: running, aiming, reloading and crouching all move the
+// bones and therefore the skeleton automatically.  Bone positions come from
+// the animated rig itself, not from guessed offsets — the same data the game
+// uses to render the model.
+//
+// Chain:  PlayerManager.animator (managed Animator) -> m_CachedPtr
+//         -> native Animator -> Avatar -> AvatarData
+//         -> m_HumanBoneIndex[HumanBodyBones] -> TransformOffsetStructure
+//         -> transform index -> existing Transform hierarchy walk.
+//
+// The Animator/Avatar/AvatarData native offsets are Unity engine internals
+// (not present in the dump); they are discovered and validated at runtime
+// against a humanoid-proportion check, so a wrong guess falls back to
+// scanning instead of drawing garbage.
+//
+// The resulting positions are real world-space rig data.  No calibration or
+// anchoring shift is applied to them: shifting is what previously made the
+// whole skeleton float above the model.
+
+// HumanBodyBones enum values for the 20 bones we draw, in draw order
+// (matches UnityEngine.HumanBodyBones from the dump).
+static constexpr int kSkeletonBoneCount = 20;
+static constexpr int kSkeletonBoneHuman[kSkeletonBoneCount] = {
+    11 /*Head*/,       10 /*Neck*/,      9 /*UpperChest*/, 8 /*Chest*/, 7 /*Spine*/, 0 /*Hips*/,
+    12 /*LShoulder*/,  14 /*LUpperArm*/, 16 /*LLowerArm*/,  18 /*LHand*/,
+    13 /*RShoulder*/,  15 /*RUpperArm*/, 17 /*RLowerArm*/,  19 /*RHand*/,
+    1  /*LUpperLeg*/,  3  /*LLowerLeg*/, 5  /*LFoot*/,
+    2  /*RUpperLeg*/,  4  /*RLowerLeg*/, 6  /*RFoot*/
+};
+
+// Resolved (and validated) Avatar layout. All engine-internal offsets live
+// here; they are discovered once and cached for the session.
+struct BoneLayout {
+    uint64_t animator_avatar_off = ANIMATOR_AVATAR;
+    uint64_t avatar_data_off     = AVATAR_DATA;
+    uint64_t avatar_size_off     = AVATAR_SIZE;
+    uint64_t tos_off             = AVATAR_DATA_TOS;
+    uint64_t hbi_off             = AVATAR_DATA_HUMAN_BONE_INDEX;
+    uint64_t tos_stride          = TOS_STRIDE;
+    uint64_t tos_count_off       = TOS_COUNT_OFF;
+    uint64_t tos_first_index_off = TOS_FIRST_INDEX_OFF;
+    bool     use_tos             = true;
+};
+static BoneLayout g_bone_layout{};
+static bool g_bone_layout_valid = false;
+static std::chrono::steady_clock::time_point g_bone_layout_retry_after{};
+static bool g_bone_layout_extended = false; // tier-1 scan failed: widen the search
+static int g_bone_layout_failures = 0;      // consecutive failed discovery attempts
+
+static std::mutex g_skeleton_mutex;
+// PlayerManager pointer set from the previous scene. A wholesale replacement
+// (server switch / scene reload) invalidates the cached bone layout, because
+// the engine-side Avatar allocation changes with the scene.
+static std::unordered_set<uint64_t> g_skeleton_scene_players;
+
+// Callers must hold g_skeleton_mutex.
+static void skeleton_invalidate_locked() {
+    g_bone_layout = {};
+    g_bone_layout_valid = false;
+    g_bone_layout_retry_after = {};
+    g_bone_layout_extended = false;
+    g_bone_layout_failures = 0;
+}
+
+// Extract the shared Transform-hierarchy matrices/indices arrays from any
+// native Transform (all scene transforms share one hierarchy).  These are the
+// same arrays the world-position reader uses, so a layout validated there is
+// reused here.
+static bool get_hierarchy_arrays(uint64_t native_transform, uint64_t& matrices, uint64_t& indices) {
+    matrices = 0; indices = 0;
+    if (!native_transform) return false;
+
+    if (g_transform_hierarchy_layout_valid) {
+        uint64_t transform_data = rd_ptr(native_transform + g_transform_hierarchy_layout.data_offset);
+        int32_t transform_index = rd<int32_t>(native_transform + g_transform_hierarchy_layout.index_offset);
+        if (likely_native_pointer(transform_data) && transform_index >= 0 && transform_index <= 100000) {
+            uint64_t m = rd_ptr(transform_data + g_transform_hierarchy_layout.matrices_offset);
+            uint64_t ix = rd_ptr(transform_data + g_transform_hierarchy_layout.indices_offset);
+            if (g_transform_hierarchy_layout.matrices_indirect) m = rd_ptr(m);
+            if (g_transform_hierarchy_layout.indices_indirect) ix = rd_ptr(ix);
+            if (likely_native_pointer(m) && likely_native_pointer(ix)) {
+                matrices = m; indices = ix;
+                return true;
+            }
+        }
+    }
+
+    // Standard Unity transform hierarchy layout (data=0x38/index=0x40, arrays
+    // at +0x18/+0x20 or +0x08/+0x10, with or without an extra indirection).
+    uint64_t transform_data = rd_ptr(native_transform + 0x38);
+    if (!likely_native_pointer(transform_data)) return false;
+    const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
+    for (const auto& offsets : data_offsets) {
+        uint64_t matrix_pointer = rd_ptr(transform_data + offsets[0]);
+        uint64_t index_pointer = rd_ptr(transform_data + offsets[1]);
+        if (!likely_native_pointer(matrix_pointer) || !likely_native_pointer(index_pointer)) continue;
+        const uint64_t matrix_candidates[] = {matrix_pointer, rd_ptr(matrix_pointer)};
+        const uint64_t index_candidates[] = {index_pointer, rd_ptr(index_pointer)};
+        for (uint64_t m : matrix_candidates)
+            for (uint64_t ix : index_candidates)
+                if (likely_native_pointer(m) && likely_native_pointer(ix)) {
+                    matrices = m; indices = ix;
+                    return true;
+                }
+    }
+    return false;
+}
+
+// Resolve a player's native Animator (managed Animator -> m_CachedPtr).
+// PlayerManager.animator is dump-confirmed; the KCC fallbacks
+// (m_Animator, CharacterAnimation.animator) are too.
+static uint64_t resolve_native_animator(uint64_t player) {
+    if (!player) return 0;
+
+    auto managed_to_native = [](uint64_t managed) -> uint64_t {
+        if (!likely_native_pointer(managed)) return 0;
+        uint64_t native = rd_ptr(managed + MANAGED_CACHED_PTR);
+        return likely_native_pointer(native) ? native : 0;
+    };
+
+    // Primary: PlayerManager.animator.
+    uint64_t native = managed_to_native(rd_ptr(player + PLAYER_ANIMATOR));
+    if (native) return native;
+
+    // Fallback: the player's KCC (InterfaceReference<ti>) owns the live model:
+    // KCC.m_Animator, then KCC.pjq (CharacterAnimation).animator.
+    uint64_t reference = rd_ptr(player + PLAYER_KCC_REFERENCE);
+    const uint64_t candidates[] = {
+        reference,
+        reference ? rd_ptr(reference + 0x10) : 0,
+        reference ? rd_ptr(reference + 0x18) : 0,
+        reference ? rd_ptr(reference + 0x20) : 0
+    };
+    for (uint64_t candidate : candidates) {
+        if (!likely_native_pointer(candidate)) continue;
+        if (rd_ptr(candidate + KCC_PLAYER) != player) continue;
+        native = managed_to_native(rd_ptr(candidate + KCC_ANIMATOR));
+        if (native) return native;
+        uint64_t character_animation = rd_ptr(candidate + KCC_CHARACTER_ANIMATION);
+        if (likely_native_pointer(character_animation))
+            native = managed_to_native(rd_ptr(character_animation + CHARACTER_ANIMATION_ANIMATOR));
+        return native;
+    }
+    return 0;
+}
+
+// Resolve the world positions of all 20 bones given a native Animator and the
+// shared hierarchy arrays. Returns false when ANY bone fails, so a partial or
+// mis-mapped rig is never drawn.
+static bool read_bone_positions(uint64_t native_animator, uint64_t matrices, uint64_t indices, Vec3* out) {
+    if (!g_bone_layout_valid || !native_animator || !matrices || !indices || !out) return false;
+
+    uint64_t avatar = rd_ptr(native_animator + g_bone_layout.animator_avatar_off);
+    if (!likely_native_pointer(avatar)) return false;
+    uint64_t avatar_data = rd_ptr(avatar + g_bone_layout.avatar_data_off);
+    if (!likely_native_pointer(avatar_data)) return false;
+    uint32_t size = rd<uint32_t>(avatar + g_bone_layout.avatar_size_off);
+    if (size < 20 || size > 5000) return false;
+    uint64_t hbi = rd_ptr(avatar_data + g_bone_layout.hbi_off);
+    if (!likely_native_pointer(hbi)) return false;
+    uint64_t tos = 0;
+    if (g_bone_layout.use_tos) {
+        tos = rd_ptr(avatar_data + g_bone_layout.tos_off);
+        if (!likely_native_pointer(tos)) return false;
+    }
+
+    for (int i = 0; i < kSkeletonBoneCount; ++i) {
+        uint32_t node = rd<uint32_t>(hbi + (uint64_t)kSkeletonBoneHuman[i] * 4u);
+        if (node >= size) return false;
+        int32_t transform_index;
+        if (g_bone_layout.use_tos) {
+            uint64_t entry = tos + (uint64_t)node * g_bone_layout.tos_stride;
+            uint32_t count = rd<uint32_t>(entry + g_bone_layout.tos_count_off);
+            uint32_t first = rd<uint32_t>(entry + g_bone_layout.tos_first_index_off);
+            if (count < 1 || count > 8) return false;
+            transform_index = (int32_t)first;
+        } else {
+            transform_index = (int32_t)node;
+        }
+        Vec3 position{};
+        if (!read_transform_hierarchy_arrays(matrices, indices, transform_index, position)) return false;
+        out[i] = position;
+    }
+    return true;
+}
+
+// Sanity-check a resolved skeleton: head above neck above hips above feet,
+// roughly human proportions, and — crucially — the rig must belong to THIS
+// player (hips near the network position, feet near ground level).  This
+// rejects bogus Avatar layouts and other players' skeletons before anything
+// is drawn.
+static bool skeleton_positions_plausible(const Vec3* bones, const Vec3& feet) {
+    for (int i = 0; i < kSkeletonBoneCount; ++i)
+        if (!vec3_is_finite(bones[i])) return false;
+
+    const float head_y = bones[0].y;   // Head
+    const float neck_y = bones[1].y;   // Neck
+    const float hips_y = bones[5].y;   // Hips
+    const float foot_y = std::min(bones[16].y, bones[19].y); // LFoot / RFoot
+
+    float body_height = head_y - foot_y;
+    if (body_height < 0.35f || body_height > 3.0f) return false;
+    if (neck_y > head_y + 0.05f || neck_y < hips_y - 0.05f) return false;
+    if (hips_y < foot_y || hips_y > head_y + 0.1f) return false;
+
+    // Horizontal coherence between head and hips (rejects unrelated transforms).
+    float dx = bones[0].x - bones[5].x;
+    float dz = bones[0].z - bones[5].z;
+    if (dx * dx + dz * dz > 4.0f) return false;
+
+    // Proximity to the player's network root: hips within ~3 m horizontally
+    // and the feet near ground level.  Prevents drawing another model's rig.
+    float hx = bones[5].x - feet.x;
+    float hy = bones[5].y - feet.y;
+    float hz = bones[5].z - feet.z;
+    if (hx * hx + hz * hz > 9.0f) return false;
+    if (!std::isfinite(hy) || fabsf(hy) > 2.2f) return false;
+    float fy = foot_y - feet.y;
+    if (!std::isfinite(fy) || fabsf(fy) > 1.2f) return false;
+    return true;
+}
+
+static bool try_bone_layout(const BoneLayout& layout, uint64_t native_animator,
+                            uint64_t matrices, uint64_t indices, const Vec3& feet) {
+    BoneLayout saved = g_bone_layout;
+    bool saved_valid = g_bone_layout_valid;
+    g_bone_layout = layout;
+    g_bone_layout_valid = true;
+
+    Vec3 bones[kSkeletonBoneCount]{};
+    bool ok = read_bone_positions(native_animator, matrices, indices, bones) &&
+              skeleton_positions_plausible(bones, feet);
+
+    g_bone_layout = saved;
+    g_bone_layout_valid = saved_valid;
+    return ok;
+}
+
+// One-time discovery of the Avatar native offsets (Unity engine internals, not
+// present in the dump). Scans plausible offsets and keeps the first layout
+// that produces a humanoid-shaped skeleton belonging to the player. Cached
+// for the rest of the session; invalidated on scene switches.
+static bool scan_bone_layout(uint64_t native_animator, uint64_t matrices, uint64_t indices,
+                             const Vec3& feet,
+                             const uint64_t* animator_avatar_offs, size_t animator_avatar_count,
+                             const uint64_t* avatar_data_offs, size_t avatar_data_count,
+                             const uint64_t* avatar_size_offs, size_t avatar_size_count,
+                             const uint64_t* hbi_offs, size_t hbi_count,
+                             const uint64_t* tos_offs, size_t tos_count) {
+    const uint64_t tos_strides[] = {0x18, 0x10, 0x20, 0x08};
+    const uint64_t tos_count_offs[] = {0x08, 0x00};
+
+    for (size_t ai = 0; ai < animator_avatar_count; ++ai) {
+        uint64_t aoff = animator_avatar_offs[ai];
+        uint64_t avatar = rd_ptr(native_animator + aoff);
+        if (!likely_native_pointer(avatar)) continue;
+
+        for (size_t di = 0; di < avatar_data_count; ++di) {
+            uint64_t doff = avatar_data_offs[di];
+            uint64_t avatar_data = rd_ptr(avatar + doff);
+            if (!likely_native_pointer(avatar_data)) continue;
+
+            for (size_t si = 0; si < avatar_size_count; ++si) {
+                uint64_t soff = avatar_size_offs[si];
+                uint32_t size = rd<uint32_t>(avatar + soff);
+                if (size < 20 || size > 5000) continue;
+
+                for (size_t hi = 0; hi < hbi_count; ++hi) {
+                    uint64_t hoff = hbi_offs[hi];
+                    uint64_t hbi = rd_ptr(avatar_data + hoff);
+                    if (!likely_native_pointer(hbi)) continue;
+
+                    // Cheap pre-check on key bone node indices before doing the
+                    // expensive hierarchy walks.
+                    uint32_t head  = rd<uint32_t>(hbi + 11u * 4u);
+                    uint32_t hips  = rd<uint32_t>(hbi + 0u * 4u);
+                    uint32_t lfoot = rd<uint32_t>(hbi + 5u * 4u);
+                    uint32_t rfoot = rd<uint32_t>(hbi + 6u * 4u);
+                    if (head >= size || hips >= size || lfoot >= size || rfoot >= size) continue;
+                    if (head == hips && head == lfoot && head == rfoot) continue;
+
+                    BoneLayout candidate{};
+                    candidate.animator_avatar_off = aoff;
+                    candidate.avatar_data_off = doff;
+                    candidate.avatar_size_off = soff;
+                    candidate.hbi_off = hoff;
+                    candidate.use_tos = false;
+                    if (try_bone_layout(candidate, native_animator, matrices, indices, feet)) {
+                        g_bone_layout = candidate;
+                        g_bone_layout_valid = true;
+                        return true;
+                    }
+
+                    for (size_t ti = 0; ti < tos_count; ++ti) {
+                        uint64_t toff = tos_offs[ti];
+                        uint64_t tos = rd_ptr(avatar_data + toff);
+                        if (!likely_native_pointer(tos)) continue;
+                        for (uint64_t stride : tos_strides) {
+                            for (uint64_t count_off : tos_count_offs) {
+                                candidate.use_tos = true;
+                                candidate.tos_off = toff;
+                                candidate.tos_stride = stride;
+                                candidate.tos_count_off = count_off;
+                                candidate.tos_first_index_off = count_off + 4;
+                                if (try_bone_layout(candidate, native_animator, matrices, indices, feet)) {
+                                    g_bone_layout = candidate;
+                                    g_bone_layout_valid = true;
+                                    return true;
+                                }
+                                std::swap(candidate.tos_count_off, candidate.tos_first_index_off);
+                                if (try_bone_layout(candidate, native_animator, matrices, indices, feet)) {
+                                    g_bone_layout = candidate;
+                                    g_bone_layout_valid = true;
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+static bool discover_bone_layout(uint64_t native_animator, uint64_t matrices,
+                                 uint64_t indices, const Vec3& feet) {
+    if (!likely_native_pointer(native_animator)) return false;
+
+    // Fast path: the known-good defaults for this Unity branch, both with and
+    // without the TransformOffsetStructure indirection.
+    {
+        BoneLayout candidate{};
+        candidate.use_tos = false;
+        if (try_bone_layout(candidate, native_animator, matrices, indices, feet)) {
+            g_bone_layout = candidate;
+            g_bone_layout_valid = true;
+            return true;
+        }
+        candidate = BoneLayout{};
+        candidate.use_tos = true;
+        if (try_bone_layout(candidate, native_animator, matrices, indices, feet)) {
+            g_bone_layout = candidate;
+            g_bone_layout_valid = true;
+            return true;
+        }
+    }
+
+    // Tier 1: the offset space validated against this game (Unity 2021/2022
+    // engine branch).  Kept first because it is the smallest space that is
+    // known to work.
+    if (!g_bone_layout_extended) {
+        const uint64_t animator_avatar_offs[] = {0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78,
+                                                 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0};
+        const uint64_t avatar_data_offs[] = {0x20, 0x28, 0x30, 0x38, 0x40, 0x48};
+        const uint64_t avatar_size_offs[] = {0x28, 0x30, 0x38, 0x40};
+        const uint64_t hbi_offs[] = {0x38, 0x40, 0x48, 0x50};
+        const uint64_t tos_offs[] = {0x10, 0x08, 0x18};
+        if (scan_bone_layout(native_animator, matrices, indices, feet,
+                             animator_avatar_offs, std::size(animator_avatar_offs),
+                             avatar_data_offs, std::size(avatar_data_offs),
+                             avatar_size_offs, std::size(avatar_size_offs),
+                             hbi_offs, std::size(hbi_offs),
+                             tos_offs, std::size(tos_offs)))
+            return true;
+        // Not found this attempt; widen the search on the next retry instead
+        // of burning more time in this frame.
+        g_bone_layout_extended = true;
+        return false;
+    }
+
+    // Tier 2: a superset of tier 1 (plus wider bounds), in case a game update
+    // moved the engine internals (e.g. a newer Unity LTS).  Re-scanning the
+    // tier-1 space also recovers from a transient tier-1 failure (e.g. the
+    // discovery ran while the sample player was mid-ragdoll).
+    {
+        const uint64_t animator_avatar_offs[] = {0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70,
+                                                 0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0,
+                                                 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8, 0x100};
+        const uint64_t avatar_data_offs[] = {0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70};
+        const uint64_t avatar_size_offs[] = {0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60};
+        const uint64_t hbi_offs[] = {0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70};
+        const uint64_t tos_offs[] = {0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48};
+        if (scan_bone_layout(native_animator, matrices, indices, feet,
+                             animator_avatar_offs, std::size(animator_avatar_offs),
+                             avatar_data_offs, std::size(avatar_data_offs),
+                             avatar_size_offs, std::size(avatar_size_offs),
+                             hbi_offs, std::size(hbi_offs),
+                             tos_offs, std::size(tos_offs)))
+            return true;
+    }
+    return false;
+}
+
+static void build_fallback_skeleton(const Vec3& feet, float height,
+                                    std::vector<std::pair<Vec3, Vec3>>& segments,
+                                    Vec3& head, Vec3& chest, Vec3& pelvis) {
+    if (!std::isfinite(height) || height < 0.5f) height = PLAYER_HEIGHT;
+    head = {feet.x, feet.y + height, feet.z};
+    chest = {feet.x, feet.y + height * 0.66f, feet.z};
+    pelvis = {feet.x, feet.y + height * 0.47f, feet.z};
+
+    const Vec3 neck = {feet.x, feet.y + height * 0.80f, feet.z};
+    const Vec3 left_shoulder = {feet.x - height * 0.18f, feet.y + height * 0.70f, feet.z};
+    const Vec3 right_shoulder = {feet.x + height * 0.18f, feet.y + height * 0.70f, feet.z};
+    const Vec3 left_elbow = {feet.x - height * 0.28f, feet.y + height * 0.51f, feet.z};
+    const Vec3 right_elbow = {feet.x + height * 0.28f, feet.y + height * 0.51f, feet.z};
+    const Vec3 left_hand = {feet.x - height * 0.32f, feet.y + height * 0.34f, feet.z};
+    const Vec3 right_hand = {feet.x + height * 0.32f, feet.y + height * 0.34f, feet.z};
+    const Vec3 left_hip = {feet.x - height * 0.12f, feet.y + height * 0.43f, feet.z};
+    const Vec3 right_hip = {feet.x + height * 0.12f, feet.y + height * 0.43f, feet.z};
+    const Vec3 left_knee = {feet.x - height * 0.13f, feet.y + height * 0.23f, feet.z};
+    const Vec3 right_knee = {feet.x + height * 0.13f, feet.y + height * 0.23f, feet.z};
+    const Vec3 left_foot = {feet.x - height * 0.14f, feet.y, feet.z};
+    const Vec3 right_foot = {feet.x + height * 0.14f, feet.y, feet.z};
+
+    const std::pair<Vec3, Vec3> fallback_lines[] = {
+        {head, neck}, {neck, chest}, {chest, pelvis},
+        {neck, left_shoulder}, {left_shoulder, left_elbow}, {left_elbow, left_hand},
+        {neck, right_shoulder}, {right_shoulder, right_elbow}, {right_elbow, right_hand},
+        {pelvis, left_hip}, {left_hip, left_knee}, {left_knee, left_foot},
+        {pelvis, right_hip}, {right_hip, right_knee}, {right_knee, right_foot}
+    };
+    segments.assign(std::begin(fallback_lines), std::end(fallback_lines));
+}
+
+static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
+                                   std::vector<std::pair<Vec3, Vec3>>& segments,
+                                   Vec3& animated_head,
+                                   Vec3& skeleton_chest,
+                                   Vec3& skeleton_pelvis) {
+    std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+    segments.clear();
+    animated_head = {};
+    skeleton_chest = {};
+    skeleton_pelvis = {};
+    if (!player) return false;
+
+    auto use_fallback = [&]() -> bool {
+        float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
+        build_fallback_skeleton(feet, height, segments, animated_head,
+                                skeleton_chest, skeleton_pelvis);
+        return !segments.empty();
+    };
+
+    uint64_t native_animator = resolve_native_animator(player);
+    if (!likely_native_pointer(native_animator)) return use_fallback();
+
+    uint64_t matrices = 0, indices = 0;
+    if (!get_hierarchy_arrays(resolve_player_native_transform(player), matrices, indices))
+        return use_fallback();
+
+    if (!g_bone_layout_valid) {
+        // Discovery scans many offsets; only retry a few times per second so a
+        // layout that never validates can't tank the frame rate.  After a few
+        // consecutive failures, back off to a slow retry cadence.
+        auto now = std::chrono::steady_clock::now();
+        if (now < g_bone_layout_retry_after) return use_fallback();
+        g_bone_layout_retry_after = now + std::chrono::milliseconds(750);
+        if (++g_bone_layout_failures > 1) {
+            g_bone_layout_retry_after = now + std::chrono::seconds(5);
+            g_bone_layout_failures = 0;
+        }
+        discover_bone_layout(native_animator, matrices, indices, feet);
+    }
+    if (!g_bone_layout_valid) return use_fallback();
+
+    Vec3 bones[kSkeletonBoneCount]{};
+    if (!read_bone_positions(native_animator, matrices, indices, bones) ||
+        !skeleton_positions_plausible(bones, feet))
+        return use_fallback();
+
+    // All 20 bones resolved: build the 19 humanoid segments.  The positions
+    // are real world-space rig data, so the skeleton sits exactly on the
+    // rendered model with no shift applied.
+    const int kSegments[][2] = {
+        {0, 1},  {1, 2},  {2, 3},  {3, 4},  {4, 5},   // head -> neck -> chest -> spine -> hips
+        {2, 6},  {6, 7},  {7, 8},  {8, 9},            // left  arm
+        {2, 10}, {10, 11}, {11, 12}, {12, 13},        // right arm
+        {5, 14}, {14, 15}, {15, 16},                  // left  leg
+        {5, 17}, {17, 18}, {18, 19}                   // right leg
+    };
+    segments.reserve(19);
+    for (const auto& link : kSegments) {
+        const Vec3& a = bones[link[0]];
+        const Vec3& b = bones[link[1]];
+        float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        float length = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(length) || length < 0.005f || length > 4.f) return use_fallback();
+        segments.emplace_back(a, b);
+    }
+
+    animated_head = bones[0];   // Head
+    skeleton_chest = bones[2];  // UpperChest
+    skeleton_pelvis = bones[5]; // Hips
+    return !segments.empty() && vec3_is_finite(animated_head) &&
+           vec3_is_finite(skeleton_chest) && vec3_is_finite(skeleton_pelvis);
+}
+
 static bool evaluate_transform_hierarchy_layout(const std::vector<uint64_t>& native_transforms, const TransformHierarchyLayout& layout, size_t& position_count, double& extent) {
     position_count = 0; extent = 0.0;
     Vec3 minimum{}, maximum{};
@@ -433,15 +954,27 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
             maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
         }
     }
-    if (!initialized || valid < 2 || non_zero < 2) return false;
+    // A single (local) player is enough: the known-good offset list below is
+    // trusted as long as the position itself is plausible. With two or more
+    // players we additionally require them to be spread out, so a stale offset
+    // that reads identical garbage for everyone is rejected.
+    if (!initialized || valid < 1 || non_zero < 1) return false;
     double extent = fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z);
-    if (!std::isfinite(extent) || extent < 0.1 || extent > 1000000.0) return false;
+    if (!std::isfinite(extent) || extent > 1000000.0) return false;
+    if (valid >= 2 && extent < 0.1) return false;
     score = (double)valid * 1000000.0 + std::min(extent, 999999.0);
     return true;
 }
 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    const uint64_t known_offsets[] = {0x1D0, 0x1DC, 0x1E8, 0x2D8, 0x2E4, 0x338};
+    // Only PlayerManager.lastTickPosition (PLAYER_POSITION) and
+    // lastSavedPosition (0x1DC) are live positions. The other previously
+    // probed offsets are stale snapshots (lastDeathPosition 0x1E8,
+    // originalPosition 0x338) or unrelated private Vector3s (0x2D8/0x2E4):
+    // with a single player the spread check is meaningless, so probing them
+    // could latch a position that never tracks the rendered model and make the
+    // whole ESP detach from the enemy.
+    const uint64_t known_offsets[] = {PLAYER_POSITION, 0x1DC};
     uint64_t best_offset = 0;
     double best_score = 0.0;
     for (uint64_t offset : known_offsets) {
@@ -476,6 +1009,50 @@ static bool matrix_is_finite(const Mat4& matrix) {
     }
     return has_non_zero;
 }
+
+static bool matrices_are_coherent(const Mat4& first, const Mat4& second,
+                                  float max_delta) {
+    for (int i = 0; i < 16; ++i) {
+        if (!std::isfinite(first.m[i]) || !std::isfinite(second.m[i]) ||
+            fabsf(first.m[i] - second.m[i]) > max_delta) return false;
+    }
+    return true;
+}
+
+static bool read_stable_camera_matrices(uint64_t native_camera,
+                                        Mat4& projection, Mat4& view) {
+    if (!native_camera) return false;
+    // Unity can update the camera transform and projection in separate writes.
+    // Prefer a coherent pair, but keep the newest finite pair as a fallback:
+    // rejecting every frame while the player is turning would disable ESP
+    // completely after a restart on some devices.
+    Mat4 latest_projection{}, latest_view{};
+    bool have_latest = false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        Mat4 projection_a = rd_m4(native_camera + CAMERA_PROJECTION_MATRIX);
+        Mat4 view_a = rd_m4(native_camera + CAMERA_VIEW_MATRIX);
+        Mat4 projection_b = rd_m4(native_camera + CAMERA_PROJECTION_MATRIX);
+        Mat4 view_b = rd_m4(native_camera + CAMERA_VIEW_MATRIX);
+        if (!matrix_is_finite(projection_a) || !matrix_is_finite(view_a) ||
+            !matrix_is_finite(projection_b) || !matrix_is_finite(view_b)) continue;
+        latest_projection = projection_b;
+        latest_view = view_b;
+        have_latest = true;
+        if (matrices_are_coherent(projection_a, projection_b, 0.05f) &&
+            matrices_are_coherent(view_a, view_b, 0.05f)) {
+            projection = projection_b;
+            view = view_b;
+            return true;
+        }
+    }
+    if (have_latest) {
+        projection = latest_projection;
+        view = latest_view;
+        return true;
+    }
+    return false;
+}
+
 static Mat4 mat_mul(const Mat4& a, const Mat4& b) {
     Mat4 result{};
     for (int row = 0; row < 4; ++row)
@@ -551,7 +1128,7 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
         samples.push_back(position);
         if (samples.size() >= 24) break;
     }
-    if (samples.size() < 2) {
+    if (samples.empty()) {
         g_player_position_validated = false;
         return false;
     }
@@ -561,10 +1138,12 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
         minimum.x = std::min(minimum.x, position.x); minimum.y = std::min(minimum.y, position.y); minimum.z = std::min(minimum.z, position.z);
         maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
     }
-    float extent = fabsf(maximum.x - minimum.x) + fabsf(maximum.y - minimum.y) + fabsf(maximum.z - minimum.z);
-    if (extent < 0.1F) {
-        g_player_position_validated = false;
-        return false;
+    if (samples.size() >= 2) {
+        float extent = fabsf(maximum.x - minimum.x) + fabsf(maximum.y - minimum.y) + fabsf(maximum.z - minimum.z);
+        if (extent < 0.1F) {
+            g_player_position_validated = false;
+            return false;
+        }
     }
 
     Mat4 validated_projection = rd_m4(native_camera + CAMERA_PROJECTION_MATRIX);
@@ -627,273 +1206,72 @@ static std::vector<uint64_t> read_configured_player_transforms() {
     return transforms;
 }
 
-static bool local_player_dead() {
-    uint64_t local = resolve_local_player();
-    if (!local) return false;
-    // While waiting to respawn the game renders from the death/spectate camera.
-    if (rd<uint8_t>(local + PLAYER_RESPAWNING) != 0) return true;
-    // Spectating: while spectating the game points observedPlayer at the
-    // watched player; during normal play it is null. This is a reliable signal
-    // (unlike guessing the PlayerFlags bit values, which vary per build and
-    // could hide the ESP during normal play).
-    uint64_t observed = rd_ptr(local + PLAYER_OBSERVED);
-    if (observed && likely_native_pointer(observed)) return true;
-    return false;
-}
-
-// ---------------------------------------------------------------------------
-// Skeleton (bone) ESP.
-//
-// Reads the enemy model's humanoid rig each frame so the drawn skeleton tracks
-// the actual bones: running, aiming, reloading, and crouching all move the
-// bones and therefore the skeleton automatically (crouch is just the legs
-// folding — the bone positions come straight from the animated rig, no special
-// casing needed).
-//
-// Chain:  PlayerManager.animator -> native Animator -> Avatar -> AvatarData
-//         -> m_HumanBoneIndex[HumanBodyBones] -> TransformOffsetStructure
-//         -> transform index -> existing Transform hierarchy walk.
-// ---------------------------------------------------------------------------
-
-static bool g_skeleton_enabled = false;
-
-// HumanBodyBones enum values for the 20 bones we draw, in draw order.
-static constexpr int kSkeletonBoneCount = EspBox::SKELETON_BONE_COUNT;
-static constexpr int kSkeletonBoneHuman[kSkeletonBoneCount] = {
-    11 /*Head*/,       10 /*Neck*/,      9 /*UpperChest*/, 8 /*Chest*/, 7 /*Spine*/, 0 /*Hips*/,
-    12 /*LShoulder*/,  14 /*LUpperArm*/, 16 /*LLowerArm*/,  18 /*LHand*/,
-    13 /*RShoulder*/,  15 /*RUpperArm*/, 17 /*RLowerArm*/,  19 /*RHand*/,
-    1  /*LUpperLeg*/,  3  /*LLowerLeg*/, 5  /*LFoot*/,
-    2  /*RUpperLeg*/,  4  /*RLowerLeg*/, 6  /*RFoot*/
-};
-
-// Resolved (and validated) Avatar layout. All engine-internal offsets live here.
-struct BoneLayout {
-    uint64_t animator_avatar_off = ANIMATOR_AVATAR;
-    uint64_t avatar_data_off     = AVATAR_DATA;
-    uint64_t avatar_size_off     = AVATAR_SIZE;
-    uint64_t tos_off             = AVATAR_DATA_TOS;
-    uint64_t hbi_off             = AVATAR_DATA_HUMAN_BONE_INDEX;
-    uint64_t tos_stride          = TOS_STRIDE;
-    uint64_t tos_count_off       = TOS_COUNT_OFF;
-    uint64_t tos_first_index_off = TOS_FIRST_INDEX_OFF;
-    bool     use_tos             = true;
-};
-static BoneLayout g_bone_layout{};
-static bool g_bone_layout_valid = false;
-
-void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled = enabled; }
-
-// Extract the shared Transform-hierarchy matrices/indices arrays from any
-// native Transform (all scene transforms share one hierarchy).
-static bool get_hierarchy_arrays(uint64_t native_transform, uint64_t& matrices, uint64_t& indices) {
-    if (!native_transform) return false;
-    uint64_t transform_data = rd_ptr(native_transform + 0x38);
-    if (!likely_native_pointer(transform_data)) return false;
-
-    if (g_transform_hierarchy_layout_valid) {
-        uint64_t m = rd_ptr(transform_data + g_transform_hierarchy_layout.matrices_offset);
-        uint64_t ix = rd_ptr(transform_data + g_transform_hierarchy_layout.indices_offset);
-        if (g_transform_hierarchy_layout.matrices_indirect) m = rd_ptr(m);
-        if (g_transform_hierarchy_layout.indices_indirect) ix = rd_ptr(ix);
-        if (likely_native_pointer(m) && likely_native_pointer(ix)) { matrices = m; indices = ix; return true; }
-    }
-
-    const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
-    for (const auto& offs : data_offsets) {
-        uint64_t mp = rd_ptr(transform_data + offs[0]);
-        uint64_t ip = rd_ptr(transform_data + offs[1]);
-        if (!likely_native_pointer(mp) || !likely_native_pointer(ip)) continue;
-        const uint64_t mc[2] = {mp, rd_ptr(mp)};
-        const uint64_t ic[2] = {ip, rd_ptr(ip)};
-        for (uint64_t m : mc) for (uint64_t ix : ic)
-            if (likely_native_pointer(m) && likely_native_pointer(ix)) { matrices = m; indices = ix; return true; }
-    }
-    return false;
-}
-
-// Resolve the world positions of all 20 bones given a native Animator.
-static bool read_bone_positions(uint64_t native_animator, uint64_t matrices, uint64_t indices, Vec3* out) {
-    if (!g_bone_layout_valid || !native_animator || !matrices || !indices) return false;
-
-    uint64_t avatar = rd_ptr(native_animator + g_bone_layout.animator_avatar_off);
-    if (!likely_native_pointer(avatar)) return false;
-    uint64_t avatar_data = rd_ptr(avatar + g_bone_layout.avatar_data_off);
-    if (!likely_native_pointer(avatar_data)) return false;
-    uint32_t size = rd<uint32_t>(avatar + g_bone_layout.avatar_size_off);
-    if (size < 20 || size > 5000) return false;
-    uint64_t hbi = rd_ptr(avatar_data + g_bone_layout.hbi_off);
-    if (!likely_native_pointer(hbi)) return false;
-    uint64_t tos = 0;
-    if (g_bone_layout.use_tos) {
-        tos = rd_ptr(avatar_data + g_bone_layout.tos_off);
-        if (!likely_native_pointer(tos)) return false;
-    }
-
-    for (int i = 0; i < kSkeletonBoneCount; ++i) {
-        uint32_t node = rd<uint32_t>(hbi + (uint64_t)kSkeletonBoneHuman[i] * 4u);
-        if (node >= size) return false;
-        int32_t transform_index;
-        if (g_bone_layout.use_tos) {
-            uint64_t entry = tos + (uint64_t)node * g_bone_layout.tos_stride;
-            uint32_t count = rd<uint32_t>(entry + g_bone_layout.tos_count_off);
-            uint32_t first = rd<uint32_t>(entry + g_bone_layout.tos_first_index_off);
-            if (count < 1 || count > 8) return false;
-            transform_index = (int32_t)first;
-        } else {
-            transform_index = (int32_t)node;
-        }
-        Vec3 pos{};
-        if (!read_transform_hierarchy_arrays(matrices, indices, transform_index, pos)) return false;
-        out[i] = pos;
-    }
-    return true;
-}
-
-// Sanity-check a resolved skeleton: head above hips above feet, roughly human
-// proportions. Used to reject bogus Avatar layouts before we draw anything.
-static bool skeleton_positions_plausible(const Vec3* bones) {
-    for (int i = 0; i < kSkeletonBoneCount; ++i)
-        if (!vec3_is_finite(bones[i])) return false;
-
-    const float head_y  = bones[0].y;   // Head
-    const float neck_y  = bones[1].y;   // Neck
-    const float hips_y  = bones[5].y;   // Hips
-    const float foot_y  = std::min(bones[16].y, bones[19].y); // LFoot / RFoot
-
-    float body_height = head_y - foot_y;
-    if (body_height < 0.35f || body_height > 3.0f) return false;
-    if (neck_y > head_y + 0.05f || neck_y < hips_y - 0.05f) return false;
-    if (hips_y < foot_y || hips_y > head_y + 0.1f) return false;
-
-    // Horizontal coherence between head and hips (rejects unrelated transforms).
-    float dx = bones[0].x - bones[5].x;
-    float dz = bones[0].z - bones[5].z;
-    if (dx * dx + dz * dz > 4.0f) return false;
-    return true;
-}
-
-static bool try_bone_layout(const BoneLayout& layout, uint64_t native_animator, uint64_t matrices, uint64_t indices) {
-    BoneLayout saved = g_bone_layout;
-    bool saved_valid = g_bone_layout_valid;
-    g_bone_layout = layout;
-    g_bone_layout_valid = true;
-
-    Vec3 bones[kSkeletonBoneCount]{};
-    bool ok = read_bone_positions(native_animator, matrices, indices, bones) && skeleton_positions_plausible(bones);
-
-    g_bone_layout = saved;
-    g_bone_layout_valid = saved_valid;
-    return ok;
-}
-
-// One-time discovery of the Avatar native offsets (Unity engine internals, not
-// present in the dump). Scans plausible offsets and keeps the first layout that
-// produces a humanoid-shaped skeleton. Cached for the rest of the session.
-static bool discover_bone_layout(uint64_t native_animator, uint64_t matrices, uint64_t indices) {
-    if (!native_animator) return false;
-
-    const uint64_t animator_avatar_offs[] = {0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78,
-                                             0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0};
-    const uint64_t avatar_data_offs[] = {0x20, 0x28, 0x30, 0x38, 0x40, 0x48};
-    const uint64_t avatar_size_offs[] = {0x28, 0x30, 0x38, 0x40};
-    const uint64_t hbi_offs[] = {0x38, 0x40, 0x48, 0x50};
-    const uint64_t tos_offs[] = {0x10, 0x08, 0x18};
-    const uint64_t tos_strides[] = {0x18, 0x10, 0x20};
-
-    for (uint64_t aoff : animator_avatar_offs) {
-        uint64_t avatar = rd_ptr(native_animator + aoff);
-        if (!likely_native_pointer(avatar)) continue;
-
-        for (uint64_t doff : avatar_data_offs) {
-            uint64_t avatar_data = rd_ptr(avatar + doff);
-            if (!likely_native_pointer(avatar_data)) continue;
-
-            for (uint64_t soff : avatar_size_offs) {
-                uint32_t size = rd<uint32_t>(avatar + soff);
-                if (size < 20 || size > 5000) continue;
-
-                for (uint64_t hoff : hbi_offs) {
-                    uint64_t hbi = rd_ptr(avatar_data + hoff);
-                    if (!likely_native_pointer(hbi)) continue;
-
-                    // Cheap pre-check on key bone node indices before doing the
-                    // expensive hierarchy walks.
-                    uint32_t head  = rd<uint32_t>(hbi + 11 * 4);
-                    uint32_t hips  = rd<uint32_t>(hbi + 0 * 4);
-                    uint32_t lfoot = rd<uint32_t>(hbi + 5 * 4);
-                    uint32_t rfoot = rd<uint32_t>(hbi + 6 * 4);
-                    if (head >= size || hips >= size || lfoot >= size || rfoot >= size) continue;
-                    if (head == hips && head == lfoot && head == rfoot) continue;
-
-                    BoneLayout cand{};
-                    cand.animator_avatar_off = aoff;
-                    cand.avatar_data_off = doff;
-                    cand.avatar_size_off = soff;
-                    cand.hbi_off = hoff;
-                    cand.use_tos = false;
-                    if (try_bone_layout(cand, native_animator, matrices, indices)) {
-                        g_bone_layout = cand; g_bone_layout_valid = true; return true;
-                    }
-
-                    for (uint64_t toff : tos_offs) {
-                        uint64_t tos = rd_ptr(avatar_data + toff);
-                        if (!likely_native_pointer(tos)) continue;
-                        for (uint64_t stride : tos_strides) {
-                            cand.use_tos = true;
-                            cand.tos_off = toff;
-                            cand.tos_stride = stride;
-                            cand.tos_count_off = 0x08;
-                            cand.tos_first_index_off = 0x0C;
-                            if (try_bone_layout(cand, native_animator, matrices, indices)) {
-                                g_bone_layout = cand; g_bone_layout_valid = true; return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return false;
-}
-
-// Resolve a player's native Animator (managed Animator -> m_CachedPtr).
-static uint64_t resolve_native_animator(uint64_t player) {
-    if (!player) return 0;
-    uint64_t animator = rd_ptr(player + PLAYER_ANIMATOR);
-    if (!likely_native_pointer(animator)) return 0;
-    uint64_t native = rd_ptr(animator + MANAGED_CACHED_PTR);
-    if (!likely_native_pointer(native)) return 0;
-    return native;
-}
-
 bool esp_init(pid_t pid) {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
     if (!g_il2cpp_base) return false;
+
+    // A restarted client can reuse the same pid while libil2cpp and all
+    // managed objects have new addresses. Do not carry validation state or the
+    // previous player snapshot into the new process image.
+    g_player_manager_class = 0;
+    g_player_manager_static_fields = 0;
+    g_game_controller_class = 0;
+    g_local_player = 0;
+    g_matrix_configuration_validated = false;
+    g_camera_matrix_physical_match = false;
+    g_last_camera_fov_deg = -1.f;
+    g_last_vp_valid = false;
+    g_player_snapshot.clear();
+    g_player_snapshot_stamp = {};
+    g_player_track.clear();
+    g_player_position_offset = PLAYER_POSITION;
+    g_transform_hierarchy_layout = {};
+    g_transform_hierarchy_layout_valid = false;
+    {
+        std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+        skeleton_invalidate_locked();
+        g_skeleton_scene_players.clear();
+    }
+    g_use_direct_player_position = true;
+    g_player_position_validated = false;
     return true;
 }
 
 void esp_reset() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     g_pid = -1; g_il2cpp_base = 0;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_last_camera_fov_deg = -1.f;
     g_last_vp_valid = false;
+    g_player_snapshot.clear();
+    g_player_snapshot_stamp = {};
+    g_player_track.clear();
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
+    {
+        std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+        skeleton_invalidate_locked();
+        g_skeleton_scene_players.clear();
+    }
     g_use_direct_player_position = true;
     g_player_position_validated = false;
-    g_bone_layout = {};
-    g_bone_layout_valid = false;
 }
 
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     std::vector<EspBox> result;
+    // Never let the aimbot or a later frame consume a projection matrix from a
+    // death/respawn transition or from a failed camera read.
+    g_last_vp_valid = false;
 
-    if (g_pid <= 0 || !g_il2cpp_base) { return result; }
+    if (g_pid <= 0 || !g_il2cpp_base) {
+        return result;
+    }
 
     uint64_t native_cam = 0;
     Mat4 projection{}, view{}, vp{};
@@ -906,23 +1284,47 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // refresh it at ~3 Hz. Positions and camera matrices are read fresh on
     // every call, so boxes never lag behind the model or slide when the camera
     // moves.
-    static std::vector<uint64_t> s_transforms;
-    static std::chrono::steady_clock::time_point s_transforms_stamp{};
     {
         auto tnow = std::chrono::steady_clock::now();
-        int tms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(tnow - s_transforms_stamp).count();
-        if (s_transforms.empty() || tms < 0 || tms >= 300) {
+        int tms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+            tnow - g_player_snapshot_stamp).count();
+        if (g_player_snapshot.empty() || tms < 0 || tms >= 300) {
             std::vector<uint64_t> refreshed = read_configured_player_transforms();
-            if (!refreshed.empty()) { s_transforms = std::move(refreshed); s_transforms_stamp = tnow; }
+            if (!refreshed.empty()) {
+                g_player_snapshot = std::move(refreshed);
+                g_player_snapshot_stamp = tnow;
+            }
         }
+
+        // A wholesale replacement of the player pointer set means the scene
+        // (and all its TransformData allocations) was rebuilt after a server
+        // switch. Drop the cached skeleton layout for the old scene and re-derive
+        // the position/camera state for the new one.
+        if (!g_player_snapshot.empty() && !g_skeleton_scene_players.empty()) {
+            size_t overlap = 0;
+            for (uint64_t p : g_player_snapshot)
+                if (g_skeleton_scene_players.count(p)) ++overlap;
+            if (overlap == 0) {
+                {
+                    std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+                    skeleton_invalidate_locked();
+                }
+                g_player_track.clear();
+                g_player_position_validated = false;
+                g_use_direct_player_position = true;
+                g_player_position_offset = PLAYER_POSITION;
+                g_matrix_configuration_validated = false;
+                g_camera_matrix_physical_match = false;
+            }
+        }
+        g_skeleton_scene_players.clear();
+        for (uint64_t p : g_player_snapshot) g_skeleton_scene_players.insert(p);
     }
-    if (s_transforms.empty()) return result;
+    if (g_player_snapshot.empty()) {
+        return result;
+    }
 
-    // While dead/spectating the game renders from a different camera, so boxes
-    // projected from the FPS camera slide off the models — hide ESP until the
-    // player is alive again.
-    if (local_player_dead()) return result;
-
+    const std::vector<uint64_t>& s_transforms = g_player_snapshot;
     if (!g_player_position_validated) {
         if (!discover_player_position_offset(s_transforms)) return result;
     }
@@ -937,35 +1339,34 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
             }
         }
-        if (!managed_cam) { return result; }
+        if (!managed_cam) {
+            g_last_vp_valid = false;
+            return result;
+        }
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-        if (!native_cam) return result;
-        projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-        view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-        if (!matrix_is_finite(projection) || !matrix_is_finite(view)) { return result; }
-
-        // Death fall animation: the FPS camera rolls toward the ground. During
-        // normal play the camera has NO roll — its right vector stays
-        // horizontal no matter how far up/down the player looks — so a big roll
-        // means the death/spectate transition is animating and the boxes would
-        // slide off. Hide only then.
-        //
-        // The right vector's world Y is m[1] or m[4] depending on the matrix
-        // storage convention; taking the min of both keeps the check
-        // pitch-proof (looking up/down must never hide the ESP).
-        {
-            float roll = std::min(fabsf(mat_get(view, 0, 1)), fabsf(mat_get(view, 1, 0)));
-            if (std::isfinite(roll) && roll > 0.35f) {
-                g_matrix_configuration_validated = false;
-                g_last_camera_fov_deg = -1.f;
-                return result;
-            }
+        if (!native_cam) {
+            g_last_vp_valid = false;
+            return result;
+        }
+        if (!read_stable_camera_matrices(native_cam, projection, view)) {
+            g_last_vp_valid = false;
+            return result;
         }
 
+        // Do not reject the camera merely because the player is looking up or
+        // down. Camera transition handling below uses the local player's actual
+        // respawn/spectate state and camera height rather than a single view
+        // matrix element that can also change during normal pitch.
+
         if (!g_matrix_configuration_validated) {
-            if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
-            projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-            view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
+            if (!optimize_matrix_configuration(native_cam, s_transforms)) {
+                g_last_vp_valid = false;
+                return result;
+            }
+            if (!read_stable_camera_matrices(native_cam, projection, view)) {
+                g_last_vp_valid = false;
+                return result;
+            }
         }
         vp = mat_mul(projection, view);
         g_last_vp = vp;
@@ -990,51 +1391,83 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     Vec3 world_camera_position{};
     bool have_world_camera = camera_position_from_view(view, world_camera_position);
+    uint64_t resolved_local_player = resolve_local_player();
+    bool local_player_transition = false;
     {
         Vec3 camera_position = world_camera_position;
         bool has_camera_position = have_world_camera && g_camera_matrix_physical_match;
         double nearest_distance_squared = INFINITY;
         size_t first_valid_index = s_transforms.size();
+        size_t resolved_local_index = s_transforms.size();
         Vec3 first_valid_position{};
+        Vec3 resolved_local_position{};
         for (size_t index = 0; index < s_transforms.size(); ++index) {
             Vec3 candidate{};
             if (!read_entity_position(s_transforms[index], candidate)) continue;
-            if (first_valid_index == s_transforms.size()) { first_valid_index = index; first_valid_position = candidate; }
+            if (first_valid_index == s_transforms.size()) {
+                first_valid_index = index;
+                first_valid_position = candidate;
+            }
+            if (resolved_local_player && s_transforms[index] == resolved_local_player) {
+                resolved_local_index = index;
+                resolved_local_position = candidate;
+            }
             if (!has_camera_position) continue;
-            double dx = (double)candidate.x - camera_position.x, dy = (double)candidate.y - camera_position.y, dz = (double)candidate.z - camera_position.z;
+            double dx = (double)candidate.x - camera_position.x;
+            double dy = (double)candidate.y - camera_position.y;
+            double dz = (double)candidate.z - camera_position.z;
             double distance_squared = dx * dx + dy * dy + dz * dz;
             if (std::isfinite(distance_squared) && distance_squared < nearest_distance_squared) {
-                nearest_distance_squared = distance_squared; local_entity_index = index; local = candidate;
+                nearest_distance_squared = distance_squared;
+                local_entity_index = index;
+                local = candidate;
             }
         }
-        if (local_entity_index == s_transforms.size() && first_valid_index != s_transforms.size()) {
-            local_entity_index = first_valid_index; local = first_valid_position;
+
+        // Prefer the actual GameController.localPlayer over “nearest to camera”.
+        // During the death camera animation the camera is intentionally moved
+        // away from the player, so nearest-player selection can lock onto an
+        // enemy and poison the ESP state until the next respawn.
+        if (resolved_local_index != s_transforms.size()) {
+            local_entity_index = resolved_local_index;
+            local = resolved_local_position;
+        } else if (local_entity_index == s_transforms.size() &&
+                   first_valid_index != s_transforms.size()) {
+            local_entity_index = first_valid_index;
+            local = first_valid_position;
         }
         has_local_position = local_entity_index != s_transforms.size();
         if (!has_local_position) {
             g_player_position_validated = false;
+            g_last_vp_valid = false;
             return result;
         }
+        // Spectating is detected via the observed-player back-reference (more
+        // reliable than guessing a PlayerFlags bit value): when set, the local
+        // player is following another player's camera.
+        local_player_transition = resolved_local_player &&
+            (rd<uint8_t>(resolved_local_player + PLAYER_RESPAWNING) != 0 ||
+             rd_ptr(resolved_local_player + PLAYER_OBSERVED) != 0);
     }
 
-    // Death fall: when you die the camera animates down to the ground ("lying
-    // down"), well below eye height relative to the local player's feet. While
-    // that happens the game renders from a different camera and ESP projected
-    // from this one slides off the models — hide it. Only trust this when the
-    // camera position was validated to be near the players, and always measure
-    // against the LOCAL player's own position: an enemy standing on higher
-    // ground must never make the ESP disappear.
-    if (!transform_camera_mode && g_camera_matrix_physical_match && have_world_camera) {
-        uint64_t local_pm = resolve_local_player();
-        Vec3 local_pos{};
-        if (local_pm && read_entity_position(local_pm, local_pos)) {
-            float rel = world_camera_position.y - local_pos.y;
-            if (std::isfinite(rel) && rel < 0.30f) {
-                g_matrix_configuration_validated = false;
-                g_last_camera_fov_deg = -1.f;
-                return result;
-            }
-        }
+    // During the death/fall animation the game camera is moved down and tilted
+    // before the local player is respawned. Never project a frame from that
+    // camera: keeping the previous VP matrix is what made ESP lines appear to
+    // fly independently from models after respawn.
+    bool camera_transition = local_player_transition;
+    if (!transform_camera_mode && g_camera_matrix_physical_match &&
+        have_world_camera && has_local_position) {
+        float camera_height_over_feet = world_camera_position.y - local.y;
+        camera_transition = camera_transition ||
+            (std::isfinite(camera_height_over_feet) && camera_height_over_feet < 0.55f);
+    }
+    if (camera_transition) {
+        // Invalidate calibration for the next frame, but keep this coherent
+        // camera snapshot usable. Returning an empty result here made a false
+        // respawn/flag read disable the entire ESP until another reconnect.
+        g_matrix_configuration_validated = false;
+        g_camera_matrix_physical_match = false;
+        g_last_camera_fov_deg = -1.f;
     }
 
     Vec3 transform_camera_position{};
@@ -1042,33 +1475,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (transform_camera_mode) {
         if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation)) {
             g_player_position_validated = false;
+            g_last_vp_valid = false;
             return result;
         }
         local = transform_camera_position; has_local_position = true;
-    }
-
-    // --- skeleton (bone) preparation ----------------------------------------
-    // Extract the shared Transform-hierarchy arrays once, then (once per
-    // session) discover the Avatar layout from the first enemy's Animator.
-    uint64_t skel_matrices = 0, skel_indices = 0;
-    if (g_skeleton_enabled) {
-        for (size_t i = 0; i < s_transforms.size(); ++i) {
-            uint64_t native = resolve_player_native_transform(s_transforms[i]);
-            if (native && get_hierarchy_arrays(native, skel_matrices, skel_indices)) break;
-        }
-        if (!g_bone_layout_valid && skel_matrices) {
-            // Discovery scans many offsets; only retry every couple of seconds
-            // so a layout that never validates can't tank the frame rate.
-            static std::chrono::steady_clock::time_point s_last{};
-            auto now = std::chrono::steady_clock::now();
-            if (now - s_last >= std::chrono::seconds(2)) {
-                s_last = now;
-                for (size_t i = 0; i < s_transforms.size(); ++i) {
-                    uint64_t anim = resolve_native_animator(s_transforms[i]);
-                    if (anim) { discover_bone_layout(anim, skel_matrices, skel_indices); break; }
-                }
-            }
-        }
     }
 
     for (size_t i = 0; i < s_transforms.size(); ++i) {
@@ -1084,93 +1494,93 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
 
-        // Real body height from the entity bounds (reflects crouch: the head
-        // drops but the feet stay). Fall back to a fixed height if unavailable
-        // or inconsistent with the replicated feet position.
+        // Crouch state from the player's input (reliable: huU.Crouch is a huT,
+        // same pattern as the verified Aim flag). Crouching lowers the head by a
+        // fixed ratio — the feet stay.
+        bool crouched = player_crouching(s_transforms[i]);
         float feet_y = feet.y;
-        float head_height = PLAYER_HEIGHT;
-        {
-            uint64_t handler = rd_ptr(s_transforms[i] + PLAYER_EVENT_HANDLER);
-            if (likely_native_pointer(handler)) {
-                Vec3 bc = rd_v3(handler + HUC_BOUNDS);
-                Vec3 be = rd_v3(handler + HUC_BOUNDS + 12);
-                float bfeet = bc.y - be.y;
-                if (vec3_is_finite(bc) && vec3_is_finite(be) && be.y > 0.15f && be.y < 3.0f &&
-                    fabsf(bfeet - feet.y) < 1.5f) {
-                    feet_y = bfeet;
-                    head_height = be.y * 2.0f;
-                }
-            }
-        }
+        float head_height = crouched ? 1.12f : PLAYER_HEIGHT;
 
-        // Per-player WORLD velocity from a position history. The replicated
-        // position only updates on network ticks, so the reference is advanced
-        // only when the player actually moved (a tick): `dt` then spans
-        // tick-to-tick and the velocity is a real estimate (not zeroed every
-        // frame). Between ticks the velocity is held, so the aim lead and
-        // skeleton stay continuous. The box itself is extrapolated a little
-        // along that velocity so it sits on the model instead of trailing a
-        // tick behind it.
-        Vec3 render_feet = feet;
+        // --- velocity + position extrapolation (computed BEFORE projecting) ---
+        // Positions update on discrete network ticks; the client renders the
+        // model smoothly between them. We extrapolate the last-tick position
+        // forward with the smoothed velocity so the box sticks to the rendered
+        // model instead of lagging behind it.
         Vec3 vel{};
+        float render_x = feet.x, render_z = feet.z;
         {
-            struct Track { Vec3 pos; double t; Vec3 vel; };
-            static std::unordered_map<uint64_t, Track> s_track;
             double now = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
 
-            auto it = s_track.find(s_transforms[i]);
-            if (it != s_track.end()) {
-                double dt = now - it->second.t;       // time since the last tick
+            auto it = g_player_track.find(s_transforms[i]);
+            if (it != g_player_track.end()) {
+                double dt = now - it->second.t;
                 float ddx = feet.x - it->second.pos.x;
                 float ddz = feet.z - it->second.pos.z;
                 float moved = fabsf(ddx) + fabsf(ddz);
-                vel = it->second.vel;                 // default: hold last estimate
+                vel = it->second.vel; // default: hold last estimate
 
                 if (moved > 0.005f) {
-                    // a new network tick arrived: velocity over the elapsed time
-                    it->second.pos = feet;
-                    it->second.t = now;
-                    if (dt >= 0.01 && dt < 3.0) {
-                        float ivx = ddx / (float)dt;
-                        float ivz = ddz / (float)dt;
+                    if (dt > 0.03) {
+                        double cdt = dt > 0.5 ? 0.5 : dt; // clamp stale gaps
+                        float ivx = ddx / (float)cdt;
+                        float ivz = ddz / (float)cdt;
                         float sp = sqrtf(ivx * ivx + ivz * ivz);
                         if (sp < 15.f) {
-                            vel.x += (ivx - vel.x) * 0.5f;
-                            vel.z += (ivz - vel.z) * 0.5f;
+                            vel.x += (ivx - vel.x) * 0.6f;
+                            vel.z += (ivz - vel.z) * 0.6f;
                         }
                     }
-                    it->second.vel = vel;
-                } else if (dt > 0.25) {
-                    // no new tick for a while (the player is standing still):
-                    // decay the velocity so the walk cycle winds down quickly
-                    float k = expf(-dt * 1.5f);
-                    vel.x *= k;
-                    vel.z *= k;
+                    // advance reference on any real movement (tick)
+                    it->second.pos = feet;
+                    it->second.t = now;
+                } else if (dt > 0.5) {
+                    // standing still for a while: decay to zero
+                    vel.x *= 0.8f; vel.z *= 0.8f;
                     if (fabsf(vel.x) < 0.05f && fabsf(vel.z) < 0.05f) { vel.x = 0.f; vel.z = 0.f; }
-                    it->second.vel = vel;
                     it->second.pos = feet;
                     it->second.t = now;
                 }
+                it->second.vel = vel;
 
-                // Extrapolate the latest tick by the smoothed velocity; the
-                // effect fades out as the snapshot ages, so a stopped player
-                // settles exactly on their position instead of drifting.
-                float age = (float)(now - it->second.t);
-                if (age > 0.f && age < 0.35f) {
-                    float fade = 1.f - age / 0.35f;
-                    render_feet.x = feet.x + vel.x * age * fade;
-                    render_feet.z = feet.z + vel.z * age * fade;
-                    render_feet.y = feet.y;
+                float age = (float)(now - it->second.t); // time since last tick
+                if (age > 0.f && age < 0.12f) {
+                    render_x = it->second.pos.x + vel.x * age;
+                    render_z = it->second.pos.z + vel.z * age;
                 }
             } else {
-                s_track[s_transforms[i]] = {feet, now, vel};
+                g_player_track[s_transforms[i]] = {feet, now, vel};
             }
         }
 
-        Vec3 body_bottom = {render_feet.x, feet_y, render_feet.z};
-        Vec3 body_top = {render_feet.x, feet_y + head_height, render_feet.z};
-        if (transform_camera_mode) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
+        // Read the animated hierarchy before building the box.  The box remains
+        // a safe fallback when a model is temporarily being rebuilt, but when
+        // the hierarchy is available its head and skeleton are taken from the
+        // exact same pose sample.
+        std::vector<std::pair<Vec3, Vec3>> skeleton_segments;
+        Vec3 animated_head{};
+        Vec3 skeleton_chest{};
+        Vec3 skeleton_pelvis{};
+        Vec3 render_feet = {render_x, feet_y, render_z};
+        // In transform-camera mode `feet` is the camera/head anchor (the box
+        // bottom is feet.y - 1.60), so give the skeleton reader the real
+        // ground anchor it validates against.
+        Vec3 skeleton_ground = transform_camera_mode
+            ? Vec3{render_x, feet.y - 1.60f, render_z}
+            : render_feet;
+        bool have_skeleton = read_skeleton_segments(s_transforms[i], skeleton_ground,
+                                                     skeleton_segments, animated_head,
+                                                     skeleton_chest, skeleton_pelvis);
+
+        // Keep the ESP rectangle independent from the optional bone reader.
+        // Box geometry is based on the stable player capsule, so a transient
+        // bone/cache read can never collapse or stretch the rectangle.
+        Vec3 body_bottom = render_feet;
+        Vec3 body_top = {render_x, feet_y + head_height, render_z};
+        if (transform_camera_mode) {
+            body_bottom.y = feet.y - 1.60F;
+            body_top.y = feet.y + 0.20F;
+        }
 
         Vec2 sf{}, sh2{};
         bool bottom_visible = transform_camera_mode
@@ -1191,24 +1601,106 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
         constexpr float box_half_width = 0.35F, box_half_depth = 0.35F;
         const Vec3 world_corners[8] = {
-            {render_feet.x - box_half_width, body_bottom.y, render_feet.z - box_half_depth},
-            {render_feet.x + box_half_width, body_bottom.y, render_feet.z - box_half_depth},
-            {render_feet.x + box_half_width, body_bottom.y, render_feet.z + box_half_depth},
-            {render_feet.x - box_half_width, body_bottom.y, render_feet.z + box_half_depth},
-            {render_feet.x - box_half_width, body_top.y, render_feet.z - box_half_depth},
-            {render_feet.x + box_half_width, body_top.y, render_feet.z - box_half_depth},
-            {render_feet.x + box_half_width, body_top.y, render_feet.z + box_half_depth},
-            {render_feet.x - box_half_width, body_top.y, render_feet.z + box_half_depth}
+            {render_x - box_half_width, body_bottom.y, render_z - box_half_depth},
+            {render_x + box_half_width, body_bottom.y, render_z - box_half_depth},
+            {render_x + box_half_width, body_bottom.y, render_z + box_half_depth},
+            {render_x - box_half_width, body_bottom.y, render_z + box_half_depth},
+            {render_x - box_half_width, body_top.y, render_z - box_half_depth},
+            {render_x + box_half_width, body_top.y, render_z - box_half_depth},
+            {render_x + box_half_width, body_top.y, render_z + box_half_depth},
+            {render_x - box_half_width, body_top.y, render_z + box_half_depth}
         };
         EspBox box{};
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;
         box.distance = distance;
         box.source = s_transforms[i];
-        box.feet  = {render_feet.x, feet_y, render_feet.z};
-        box.head  = {render_feet.x, feet_y + head_height, render_feet.z};
+        box.feet  = {render_x, feet_y, render_z};
+        box.head  = {render_x, feet_y + head_height, render_z};
         box.vel   = vel;
         box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
+        box.crouched = crouched;
+        box.skeleton_valid = have_skeleton;
+        box.skeleton_aim_points_valid = false;
+        box.skeleton_chest = skeleton_chest;
+        box.skeleton_pelvis = skeleton_pelvis;
+        box.skeleton_head_point = {0.f, 0.f, false};
+        box.skeleton_chest_point = {0.f, 0.f, false};
+        box.skeleton_pelvis_point = {0.f, 0.f, false};
+
+        // Project the live bone graph in this same camera snapshot.  No
+        // interpolation or previous-frame skeleton is used: if one transform
+        // is unavailable, that segment is omitted rather than drawn detached.
+        if (have_skeleton) {
+            box.skeleton.reserve(skeleton_segments.size());
+            for (const auto& segment : skeleton_segments) {
+                Vec2 a{}, b{};
+                bool a_projected = transform_camera_mode
+                    ? w2s_transform_camera(transform_camera_position,
+                                            transform_camera_rotation,
+                                            segment.first, sw, sh, a, false)
+                    : w2s(vp, segment.first, sw, sh, a, false);
+                bool b_projected = transform_camera_mode
+                    ? w2s_transform_camera(transform_camera_position,
+                                            transform_camera_rotation,
+                                            segment.second, sw, sh, b, false)
+                    : w2s(vp, segment.second, sw, sh, b, false);
+                if (!a_projected || !b_projected ||
+                    !std::isfinite(a.x) || !std::isfinite(a.y) ||
+                    !std::isfinite(b.x) || !std::isfinite(b.y)) continue;
+                box.skeleton.push_back({a.x, a.y, b.x, b.y});
+            }
+            box.skeleton_valid = !box.skeleton.empty();
+
+            if (box.skeleton_valid) {
+                // The head screen point is the same live point used for the
+                // box top. Chest and pelvis are projected from the selected
+                // hierarchy anchors, so aim never falls back to rectangle
+                // fractions when a real skeleton is available.
+                box.skeleton_head_point = {sh2.x, sh2.y, true};
+                Vec2 chest_screen{}, pelvis_screen{};
+                bool chest_projected = transform_camera_mode
+                    ? w2s_transform_camera(transform_camera_position,
+                                            transform_camera_rotation,
+                                            skeleton_chest, sw, sh,
+                                            chest_screen, false)
+                    : w2s(vp, skeleton_chest, sw, sh, chest_screen, false);
+                bool pelvis_projected = transform_camera_mode
+                    ? w2s_transform_camera(transform_camera_position,
+                                            transform_camera_rotation,
+                                            skeleton_pelvis, sw, sh,
+                                            pelvis_screen, false)
+                    : w2s(vp, skeleton_pelvis, sw, sh, pelvis_screen, false);
+                if (chest_projected && std::isfinite(chest_screen.x) &&
+                    std::isfinite(chest_screen.y)) {
+                    box.skeleton_chest_point = {chest_screen.x, chest_screen.y, true};
+                }
+                if (pelvis_projected && std::isfinite(pelvis_screen.x) &&
+                    std::isfinite(pelvis_screen.y)) {
+                    box.skeleton_pelvis_point = {pelvis_screen.x, pelvis_screen.y, true};
+                }
+                box.skeleton_aim_points_valid = box.skeleton_head_point.valid &&
+                    box.skeleton_chest_point.valid && box.skeleton_pelvis_point.valid;
+            }
+        }
+
+        // Screen-space velocity of the head: project head and head + vel*dt.
+        box.aim_vx = 0.f;
+        box.aim_vy = 0.f;
+        if (!transform_camera_mode) {
+            Vec3 h  = box.head;
+            Vec3 h2 = {h.x + vel.x * 0.2f, h.y, h.z + vel.z * 0.2f};
+            Vec2 s0{}, s1{};
+            if (w2s(vp, h, sw, sh, s0, false) && w2s(vp, h2, sw, sh, s1, false)) {
+                box.aim_vx = (s1.x - s0.x) / 0.2f;
+                box.aim_vy = (s1.y - s0.y) / 0.2f;
+                if (!std::isfinite(box.aim_vx) || !std::isfinite(box.aim_vy) ||
+                    fabsf(box.aim_vx) > 4000.f || fabsf(box.aim_vy) > 4000.f) {
+                    box.aim_vx = 0.f; box.aim_vy = 0.f;
+                }
+            }
+        }
+
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
             bool projected = transform_camera_mode
@@ -1218,26 +1710,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             box.corners[corner][0] = projected ? sc.x : -1.0F;
             box.corners[corner][1] = projected ? sc.y : -1.0F;
         }
-
-        // Skeleton: read the model's actual bones and project them to screen.
-        // These come straight from the animated rig, so they follow every bone
-        // motion (and crouch) of the rendered model — no static overlay.
-        if (g_skeleton_enabled && g_bone_layout_valid && skel_matrices) {
-            uint64_t anim = resolve_native_animator(s_transforms[i]);
-            Vec3 bones[kSkeletonBoneCount]{};
-            if (anim && read_bone_positions(anim, skel_matrices, skel_indices, bones) && skeleton_positions_plausible(bones)) {
-                box.has_bones = true;
-                for (int b = 0; b < kSkeletonBoneCount; ++b) {
-                    Vec2 sc{};
-                    bool projected = transform_camera_mode
-                        ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, bones[b], sw, sh, sc, false)
-                        : w2s(vp, bones[b], sw, sh, sc, false);
-                    box.bone_visible[b] = projected && sc.x >= 0.0F && sc.x <= sw && sc.y >= 0.0F && sc.y <= sh;
-                    box.bones[b] = projected ? sc : Vec2{-1.0F, -1.0F};
-                }
-            }
-        }
-
         result.push_back(box);
     }
 
@@ -1245,10 +1717,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 }
 
 float esp_get_camera_fov() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     return g_last_camera_fov_deg;
 }
 
 bool esp_world_to_screen(Vec3 world, int screen_w, int screen_h, float& sx, float& sy) {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     if (!g_last_vp_valid) return false;
     float sw = screen_w >= 100 ? (float)screen_w : 1080.f;
     float sh = screen_h >= 100 ? (float)screen_h : 2400.f;
@@ -1272,7 +1746,19 @@ static uint64_t local_player_event_handler() {
     return rd_ptr(local + PLAYER_EVENT_HANDLER);
 }
 
+// Any player's crouch state: huU.Crouch is a huT (button state), whose bool
+// TCz lives at +0x10 — same pattern as the Aim flag used for ADS detection.
+static bool player_crouching(uint64_t player) {
+    if (!player) return false;
+    uint64_t handler = rd_ptr(player + PLAYER_EVENT_HANDLER);
+    if (!likely_native_pointer(handler)) return false;
+    uint64_t crouch = rd_ptr(handler + HUC_CROUCH);
+    if (!likely_native_pointer(crouch)) return false;
+    return rd<uint8_t>(crouch + HUT_STATE) != 0;
+}
+
 bool esp_is_aiming() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     uint64_t handler = local_player_event_handler();
     if (!handler) return false;
     uint64_t aim = rd_ptr(handler + HUC_AIM);
@@ -1281,6 +1767,7 @@ bool esp_is_aiming() {
 }
 
 uint64_t esp_aim_hit_player() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     uint64_t handler = local_player_event_handler();
     if (!handler) return 0;
     // Both RaycastData (crosshair) and AimRaycast (aim assist) cache the most
