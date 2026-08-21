@@ -42,9 +42,9 @@ inline constexpr std::uint64_t BONE_CACHE_MAPPING    = 0x50; // tk.pjY
 inline constexpr std::uint64_t PLAYER_MODEL_HEAD    = 0x20;
 inline constexpr std::uint64_t PLAYER_MODEL_BODY    = 0x40;
 
-// Death / spectate detection (local PlayerManager).
-inline constexpr std::uint64_t PLAYER_FLAGS          = 0x258; // PlayerManager.PlayerFlags
-inline constexpr uint32_t     PLAYER_FLAG_SPECTATING = 1u << 1;
+// Death / spectate detection (local PlayerManager). Spectating is detected via
+// observedPlayer (the back-reference to the player being followed) instead of a
+// PlayerFlags bit, whose numeric value is not reliable across builds.
 inline constexpr std::uint64_t PLAYER_RESPAWNING     = 0x210; // bool
 inline constexpr std::uint64_t PLAYER_OBSERVED       = 0x320; // PlayerManager observedPlayer
 

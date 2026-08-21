@@ -18,9 +18,59 @@
 #include <vector>
 #include <unistd.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
+#include <stdarg.h>
+#include <android/log.h>
 
 static ssize_t process_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
     return syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics. The overlay has no console, so failures are written to both
+// logcat (tag "xvcen-esp") and a file under the existing config directory.
+// Gate logs are de-duplicated per key so a stuck early-return does not spam.
+// ---------------------------------------------------------------------------
+static const char* kEspLogPath = "/storage/emulated/0/xvcen/esp.log";
+
+static void esp_log_raw(const char* message) {
+    __android_log_print(ANDROID_LOG_INFO, "xvcen-esp", "%s", message);
+    static bool dir_ready = false;
+    if (!dir_ready) { mkdir("/storage/emulated/0/xvcen", 0777); dir_ready = true; }
+    FILE* file = fopen(kEspLogPath, "a");
+    if (file) { fprintf(file, "%s\n", message); fclose(file); }
+}
+
+static void esp_log(const char* fmt, ...) {
+    char buffer[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int length = vsnprintf(buffer, sizeof(buffer), fmt, ap);
+    va_end(ap);
+    if (length <= 0) return;
+    esp_log_raw(buffer);
+}
+
+static std::string       g_gate_last_key;
+static std::chrono::steady_clock::time_point g_gate_last_time{};
+
+static void esp_gate_log(const char* key, const char* fmt, ...) {
+    char buffer[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int length = vsnprintf(buffer, sizeof(buffer), fmt, ap);
+    va_end(ap);
+    if (length <= 0) return;
+    auto now = std::chrono::steady_clock::now();
+    if (key == g_gate_last_key && now - g_gate_last_time < std::chrono::milliseconds(2000)) return;
+    g_gate_last_key = key;
+    g_gate_last_time = now;
+    esp_log_raw(buffer);
+}
+
+static void esp_log_reset() {
+    FILE* file = fopen(kEspLogPath, "w");
+    if (file) fclose(file);
 }
 
 using namespace game_offsets;
@@ -360,6 +410,20 @@ struct SkeletonFrameData {
 static std::unordered_map<uint64_t, SkeletonFrameData> g_skeleton_frame_cache;
 static std::mutex g_skeleton_mutex;
 static std::chrono::steady_clock::time_point g_skeleton_layout_retry_after{};
+static int g_skeleton_layout_failures = 0;
+// PlayerManager pointer set from the previous scene. A wholesale replacement
+// (server switch / scene reload) invalidates every cached skeleton layout.
+static std::unordered_set<uint64_t> g_skeleton_scene_players;
+
+// Callers must hold g_skeleton_mutex.
+static void skeleton_invalidate_locked() {
+    g_skeleton_layout = {};
+    g_skeleton_layout_valid = false;
+    g_skeleton_layout_retry_after = {};
+    g_skeleton_layout_failures = 0;
+    g_skeleton_hierarchy_cache.clear();
+    g_skeleton_frame_cache.clear();
+}
 
 static bool read_remote_block(uint64_t address, void* destination, size_t size) {
     if (!address || !destination || size == 0) return false;
@@ -416,11 +480,21 @@ static bool resolve_skeleton_layout(uint64_t native_head, const Vec3& feet,
                                     int32_t& head_index, Vec3& head_position) {
     if (!native_head) return false;
 
-    if (g_skeleton_layout_valid && skeleton_head_matches_player(native_head, feet,
-                                                                  g_skeleton_layout,
-                                                                  storage, head_position,
-                                                                  head_index))
-        return true;
+    if (g_skeleton_layout_valid) {
+        if (skeleton_head_matches_player(native_head, feet, g_skeleton_layout,
+                                          storage, head_position, head_index)) {
+            g_skeleton_layout_failures = 0;
+            return true;
+        }
+        // The cached layout can stop matching after a scene reload (new
+        // TransformData allocation). Drop it after a few consecutive misses so
+        // the next probe runs immediately instead of waiting out the throttle.
+        if (++g_skeleton_layout_failures >= 5) {
+            g_skeleton_layout = {};
+            g_skeleton_layout_valid = false;
+            g_skeleton_layout_failures = 0;
+        }
+    }
 
     // A valid layout discovered while resolving a player position is shared by
     // Unity's TransformAccess hierarchy, so try it before probing.
@@ -429,6 +503,7 @@ static bool resolve_skeleton_layout(uint64_t native_head, const Vec3& feet,
                                      storage, head_position, head_index)) {
         g_skeleton_layout = g_transform_hierarchy_layout;
         g_skeleton_layout_valid = true;
+        g_skeleton_layout_failures = 0;
         return true;
     }
 
@@ -443,6 +518,7 @@ static bool resolve_skeleton_layout(uint64_t native_head, const Vec3& feet,
                                      storage, head_position, head_index)) {
         g_skeleton_layout = compact_layout;
         g_skeleton_layout_valid = true;
+        g_skeleton_layout_failures = 0;
         return true;
     }
 
@@ -455,6 +531,7 @@ static bool resolve_skeleton_layout(uint64_t native_head, const Vec3& feet,
                                      storage, head_position, head_index)) {
         g_skeleton_layout = standard_layout;
         g_skeleton_layout_valid = true;
+        g_skeleton_layout_failures = 0;
         return true;
     }
 
@@ -649,6 +726,7 @@ static int read_live_bone_candidate(uint64_t transform_array,
 
 static bool read_live_bone_skeleton(uint64_t character_animation,
                                     const Vec3& feet,
+                                    const Vec3* head_override,
                                     std::vector<std::pair<Vec3, Vec3>>& segments,
                                     Vec3& animated_head,
                                     Vec3& skeleton_chest,
@@ -662,7 +740,7 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
 
     // Validate the bone cache against several known Unity Transform layouts.
     // The source client uses the compact 0x28/0x30 form; this title commonly
-    // uses 0x38/0x40. We select the layout and mapping with the strongest full
+    // uses 0x38/0x40. We select the layout and mapping with the strongest
     // anatomical coverage instead of trusting the first plausible coordinates.
     TransformHierarchyLayout standard_layout{};
     TransformHierarchyLayout compact_layout{};
@@ -676,62 +754,68 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
         g_transform_hierarchy_layout_valid ? &g_transform_hierarchy_layout : nullptr,
         &standard_layout, &standard_mi, &compact_layout, &compact_mi
     };
-    auto has_complete_body = [](const LiveBoneSet& candidate) {
-        return candidate.valid[LIVE_HEAD] && candidate.valid[LIVE_HIPS] &&
-            candidate.valid[LIVE_NECK] &&
-            candidate.valid[LIVE_LEFT_SHOULDER] &&
-            candidate.valid[LIVE_LEFT_UPPER_ARM] &&
-            candidate.valid[LIVE_LEFT_LOWER_ARM] &&
-            candidate.valid[LIVE_LEFT_HAND] &&
-            candidate.valid[LIVE_RIGHT_SHOULDER] &&
-            candidate.valid[LIVE_RIGHT_UPPER_ARM] &&
-            candidate.valid[LIVE_RIGHT_LOWER_ARM] &&
-            candidate.valid[LIVE_RIGHT_HAND] &&
-            candidate.valid[LIVE_LEFT_UPPER_LEG] &&
-            candidate.valid[LIVE_LEFT_LOWER_LEG] &&
-            candidate.valid[LIVE_RIGHT_UPPER_LEG] &&
-            candidate.valid[LIVE_RIGHT_LOWER_LEG];
-    };
+    // Pick the best candidate by coverage score only. Requiring a *complete*
+    // body here is what previously made one missing bone throw away the whole
+    // named cache and fall back to the raw (junk) hierarchy graph.
     LiveBoneSet best_set{};
     int best_score = -1;
+    int best_mode = -1;
     for (const TransformHierarchyLayout* layout : layouts) {
         for (int mapping_mode = 0; mapping_mode < 3; ++mapping_mode) {
             LiveBoneSet candidate{};
             int score = read_live_bone_candidate(transform_array, mapping_array,
                                                  mapping_mode, layout, feet, candidate);
-            // Never let a legs-only candidate win just because it has more
-            // numerically valid entries than a complete upper-body mapping.
-            if (score >= 0 && has_complete_body(candidate) && score > best_score) {
+            if (score > best_score) {
                 best_score = score;
                 best_set = candidate;
+                best_mode = mapping_mode;
             }
         }
     }
     if (best_score < 0) return false;
-    const LiveBoneSet* bones = &best_set;
-    if (!bones->valid[LIVE_HEAD] || !bones->valid[LIVE_HIPS] ||
-        !bones->valid[LIVE_NECK]) return false;
-    bool complete_arms = bones->valid[LIVE_LEFT_SHOULDER] &&
-                         bones->valid[LIVE_LEFT_UPPER_ARM] &&
-                         bones->valid[LIVE_LEFT_LOWER_ARM] &&
-                         bones->valid[LIVE_LEFT_HAND] &&
-                         bones->valid[LIVE_RIGHT_SHOULDER] &&
-                         bones->valid[LIVE_RIGHT_UPPER_ARM] &&
-                         bones->valid[LIVE_RIGHT_LOWER_ARM] &&
-                         bones->valid[LIVE_RIGHT_HAND];
-    bool complete_legs = bones->valid[LIVE_LEFT_UPPER_LEG] &&
-                         bones->valid[LIVE_LEFT_LOWER_LEG] &&
-                         bones->valid[LIVE_RIGHT_UPPER_LEG] &&
-                         bones->valid[LIVE_RIGHT_LOWER_LEG];
-    if (!complete_arms || !complete_legs) return false;
+
+    esp_gate_log("skel_bones",
+        "skeleton bones: mode=%d valid=%d head=%d neck=%d hips=%d torso=%d arms=%d/%d/%d legs=%d/%d",
+        best_mode, best_set.valid_count,
+        best_set.valid[LIVE_HEAD] ? 1 : 0, best_set.valid[LIVE_NECK] ? 1 : 0,
+        best_set.valid[LIVE_HIPS] ? 1 : 0,
+        (best_set.valid[LIVE_SPINE] || best_set.valid[LIVE_CHEST] || best_set.valid[LIVE_UPPER_CHEST]) ? 1 : 0,
+        best_set.valid[LIVE_LEFT_UPPER_ARM] ? 1 : 0,
+        best_set.valid[LIVE_LEFT_LOWER_ARM] ? 1 : 0,
+        best_set.valid[LIVE_LEFT_HAND] ? 1 : 0,
+        best_set.valid[LIVE_LEFT_UPPER_LEG] ? 1 : 0,
+        best_set.valid[LIVE_LEFT_LOWER_LEG] ? 1 : 0);
+
+    // Some skins/poses do not expose a Head bone in the cache. Use the head
+    // resolved from the KCC head Transform so the skeleton always shows a head
+    // and the box/aim keep a valid top point.
+    if (head_override && !best_set.valid[LIVE_HEAD] && vec3_is_finite(*head_override)) {
+        best_set.position[LIVE_HEAD] = *head_override;
+        best_set.valid[LIVE_HEAD] = true;
+        ++best_set.valid_count;
+    }
+
+    // A usable named skeleton needs a pelvis and at least a couple of torso
+    // bones. A legs-only result is a symptom of a wrong layout/mapping, so it
+    // is rejected and the (filtered) hierarchy fallback is tried instead.
+    bool has_core = best_set.valid[LIVE_HIPS] &&
+        (best_set.valid[LIVE_NECK] || best_set.valid[LIVE_HEAD]) &&
+        (best_set.valid[LIVE_SPINE] || best_set.valid[LIVE_CHEST] || best_set.valid[LIVE_UPPER_CHEST]);
+    if (!has_core) return false;
 
     // tk.pjh contains model-space transforms. Depending on the active skin and
     // animation state, the cached hierarchy can be rooted at the visual model
     // while PlayerManager.lastTickPosition is rooted at the KCC capsule. Align
     // the pelvis to that capsule before projecting; otherwise the whole box and
     // skeleton are translated together above the character.
-    LiveBoneSet calibrated = *bones;
-    float bone_height = fabsf(calibrated.position[LIVE_HEAD].y - feet.y);
+    LiveBoneSet calibrated = best_set;
+    float top_y = feet.y + PLAYER_HEIGHT;
+    if (best_set.valid[LIVE_HEAD]) top_y = best_set.position[LIVE_HEAD].y;
+    else if (best_set.valid[LIVE_NECK]) top_y = best_set.position[LIVE_NECK].y;
+    else if (best_set.valid[LIVE_UPPER_CHEST]) top_y = best_set.position[LIVE_UPPER_CHEST].y;
+    else if (best_set.valid[LIVE_CHEST]) top_y = best_set.position[LIVE_CHEST].y;
+    else if (best_set.valid[LIVE_SPINE]) top_y = best_set.position[LIVE_SPINE].y;
+    float bone_height = fabsf(top_y - feet.y);
     if (!std::isfinite(bone_height) || bone_height < 0.5f) bone_height = PLAYER_HEIGHT;
     float target_hip_height = bone_height * 0.50f;
     if (target_hip_height < 0.35f) target_hip_height = 0.35f;
@@ -749,14 +833,20 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
             calibrated.position[i].z += shift.z;
         }
     }
-    bones = &calibrated;
+    const LiveBoneSet* bones = &calibrated;
 
-    animated_head = bones->position[LIVE_HEAD];
+    animated_head = bones->valid[LIVE_HEAD] ? bones->position[LIVE_HEAD]
+                 : bones->valid[LIVE_NECK] ? bones->position[LIVE_NECK]
+                 : Vec3{feet.x, top_y, feet.z};
     skeleton_pelvis = bones->position[LIVE_HIPS];
     if (bones->valid[LIVE_UPPER_CHEST]) skeleton_chest = bones->position[LIVE_UPPER_CHEST];
     else if (bones->valid[LIVE_CHEST]) skeleton_chest = bones->position[LIVE_CHEST];
     else if (bones->valid[LIVE_SPINE]) skeleton_chest = bones->position[LIVE_SPINE];
-    else return false;
+    else skeleton_chest = {
+        animated_head.x + (skeleton_pelvis.x - animated_head.x) * 0.4f,
+        animated_head.y + (skeleton_pelvis.y - animated_head.y) * 0.4f,
+        animated_head.z + (skeleton_pelvis.z - animated_head.z) * 0.4f
+    };
 
     auto add_segment = [&](int a, int b) {
         if (!bones->valid[a] || !bones->valid[b]) return;
@@ -807,7 +897,7 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
     add_segment(LIVE_RIGHT_LOWER_LEG, LIVE_RIGHT_FOOT);
     add_segment(LIVE_RIGHT_FOOT, LIVE_RIGHT_TOES);
 
-    return segments.size() >= 8 && vec3_is_finite(animated_head) &&
+    return segments.size() >= 5 && vec3_is_finite(animated_head) &&
            vec3_is_finite(skeleton_chest) && vec3_is_finite(skeleton_pelvis);
 }
 
@@ -931,6 +1021,9 @@ static bool build_skeleton_graph(uint64_t native_head, const Vec3& feet,
         if (index == root || !belongs_to_root(index)) continue;
         int32_t parent = parents[(size_t)index];
         if (parent < 0 || !belongs_to_root(parent)) continue;
+        // The topmost scene/character root sits between the legs; its edge
+        // projects as a stray line that runs up out of the ESP box. Skip it.
+        if (parent == root) continue;
         if (!calculate_world(index) || !calculate_world(parent)) continue;
         const Vec3& a = world[(size_t)parent];
         const Vec3& b = world[(size_t)index];
@@ -939,7 +1032,7 @@ static bool build_skeleton_graph(uint64_t native_head, const Vec3& feet,
         float length = sqrtf((a.x - b.x) * (a.x - b.x) +
                              (a.y - b.y) * (a.y - b.y) +
                              (a.z - b.z) * (a.z - b.z));
-        if (!std::isfinite(length) || length > kMaxBoneSegmentLength ||
+        if (!std::isfinite(length) || length < 0.005f || length > kMaxBoneSegmentLength ||
             !std::isfinite(ax + ay + az + bx + by + bz) ||
             sqrtf(ax * ax + ay * ay + az * az) > kMaxBoneDistanceFromRoot ||
             sqrtf(bx * bx + by * by + bz * bz) > kMaxBoneDistanceFromRoot) continue;
@@ -1027,6 +1120,7 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
         float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
         build_fallback_skeleton(feet, height, segments, animated_head,
                                 skeleton_chest, skeleton_pelvis);
+        esp_gate_log("skel_fallback", "skeleton path: procedural fallback");
         return !segments.empty();
     };
 
@@ -1065,14 +1159,6 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
     uint64_t model_info = character_animation
         ? rd_ptr(character_animation + CHARACTER_ANIMATION_MODEL_INFO) : 0;
 
-    // CharacterAnimation.tk keeps the exact Transform[] used by the game's
-    // humanoid animation code. Prefer it over an undifferentiated hierarchy:
-    // this preserves named head/chest/hip/limb bones and therefore follows
-    // weapon IK, reload poses and ragdolls without a synthetic walk cycle.
-    if (read_live_bone_skeleton(character_animation, feet, segments,
-                                 animated_head, skeleton_chest, skeleton_pelvis))
-        return true;
-
     // The KCC head is the preferred anchor. PlayerModelInfo is also checked:
     // during skin swaps/reloads the KCC head can temporarily point to a camera
     // helper while the actual body hierarchy remains alive below modelInfo.
@@ -1089,6 +1175,31 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
             break;
         }
     }
+
+    // Resolve the true head position from the KCC head Transform once. It is
+    // used as a guaranteed head for the named bone reader and as the box/aim
+    // top when the hierarchy graph is the fallback.
+    Vec3 hierarchy_head{};
+    bool have_hierarchy_head = false;
+    if (native_head) {
+        SkeletonHierarchyInfo head_storage{};
+        int32_t head_index = -1;
+        have_hierarchy_head = resolve_skeleton_layout(native_head, feet, head_storage,
+                                                      head_index, hierarchy_head);
+    }
+
+    // CharacterAnimation.tk keeps the exact Transform[] used by the game's
+    // humanoid animation code. Prefer it over an undifferentiated hierarchy:
+    // this preserves named head/chest/hip/limb bones and therefore follows
+    // weapon IK, reload poses and ragdolls without a synthetic walk cycle.
+    if (read_live_bone_skeleton(character_animation, feet,
+                                 have_hierarchy_head ? &hierarchy_head : nullptr,
+                                 segments, animated_head, skeleton_chest, skeleton_pelvis)) {
+        esp_gate_log("skel_named", "skeleton path: named bones (%d segments)",
+                     (int)segments.size());
+        return true;
+    }
+
     if (!native_head) return use_fallback();
 
     std::vector<std::pair<Vec3, Vec3>> best_segments;
@@ -1112,16 +1223,12 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
 
     // Always use the actual head position for aim/box top, even when the body
     // graph was obtained from PlayerModelInfo.body rather than KCC.head.
-    SkeletonHierarchyInfo head_storage{};
-    int32_t head_index = -1;
-    Vec3 actual_head{};
-    if (!resolve_skeleton_layout(native_head, feet, head_storage,
-                                 head_index, actual_head)) {
-        actual_head = best_anchor;
-    }
+    Vec3 actual_head = have_hierarchy_head ? hierarchy_head : best_anchor;
 
     segments = std::move(best_segments);
     animated_head = actual_head;
+    esp_gate_log("skel_graph", "skeleton path: hierarchy graph (%d segments)",
+                 (int)segments.size());
     bool have_chest = choose_skeleton_anchor(segments, feet, animated_head,
                                               0.68f, skeleton_chest);
     bool have_pelvis = choose_skeleton_anchor(segments, feet, animated_head,
@@ -1252,9 +1359,14 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
             maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
         }
     }
-    if (!initialized || valid < 2 || non_zero < 2) return false;
+    // A single (local) player is enough: the known-good offset list below is
+    // trusted as long as the position itself is plausible. With two or more
+    // players we additionally require them to be spread out, so a stale offset
+    // that reads identical garbage for everyone is rejected.
+    if (!initialized || valid < 1 || non_zero < 1) return false;
     double extent = fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z);
-    if (!std::isfinite(extent) || extent < 0.1 || extent > 1000000.0) return false;
+    if (!std::isfinite(extent) || extent > 1000000.0) return false;
+    if (valid >= 2 && extent < 0.1) return false;
     score = (double)valid * 1000000.0 + std::min(extent, 999999.0);
     return true;
 }
@@ -1270,14 +1382,18 @@ static bool discover_player_position_offset(const std::vector<uint64_t>& players
     if (best_offset) {
         g_use_direct_player_position = true; g_player_position_offset = best_offset;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
+        esp_log("position offset validated: 0x%llx (players=%d)",
+                (unsigned long long)best_offset, (int)players.size());
         return true;
     }
     size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
     if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
         g_use_direct_player_position = false;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
+        esp_log("position via transform hierarchy (players=%d)", (int)players.size());
         return true;
     }
+    esp_gate_log("pos_validate", "position validation FAILED (players=%d)", (int)players.size());
     return false;
 }
 
@@ -1414,7 +1530,7 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
         samples.push_back(position);
         if (samples.size() >= 24) break;
     }
-    if (samples.size() < 2) {
+    if (samples.empty()) {
         g_player_position_validated = false;
         return false;
     }
@@ -1424,10 +1540,12 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
         minimum.x = std::min(minimum.x, position.x); minimum.y = std::min(minimum.y, position.y); minimum.z = std::min(minimum.z, position.z);
         maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
     }
-    float extent = fabsf(maximum.x - minimum.x) + fabsf(maximum.y - minimum.y) + fabsf(maximum.z - minimum.z);
-    if (extent < 0.1F) {
-        g_player_position_validated = false;
-        return false;
+    if (samples.size() >= 2) {
+        float extent = fabsf(maximum.x - minimum.x) + fabsf(maximum.y - minimum.y) + fabsf(maximum.z - minimum.z);
+        if (extent < 0.1F) {
+            g_player_position_validated = false;
+            return false;
+        }
     }
 
     Mat4 validated_projection = rd_m4(native_camera + CAMERA_PROJECTION_MATRIX);
@@ -1494,7 +1612,10 @@ bool esp_init(pid_t pid) {
     std::lock_guard<std::mutex> game_lock(g_game_mutex);
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
-    if (!g_il2cpp_base) return false;
+    esp_log_reset();
+    esp_log("esp_init: pid=%d libil2cpp_base=0x%llx", (int)pid,
+            (unsigned long long)g_il2cpp_base);
+    if (!g_il2cpp_base) { esp_log("esp_init: FAILED - libil2cpp.so not found in maps"); return false; }
 
     // A restarted client can reuse the same pid while libil2cpp and all
     // managed objects have new addresses. Do not carry validation state or the
@@ -1514,11 +1635,8 @@ bool esp_init(pid_t pid) {
     g_transform_hierarchy_layout_valid = false;
     {
         std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
-        g_skeleton_layout = {};
-        g_skeleton_layout_valid = false;
-        g_skeleton_layout_retry_after = {};
-        g_skeleton_hierarchy_cache.clear();
-        g_skeleton_frame_cache.clear();
+        skeleton_invalidate_locked();
+        g_skeleton_scene_players.clear();
     }
     g_use_direct_player_position = true;
     g_player_position_validated = false;
@@ -1527,6 +1645,7 @@ bool esp_init(pid_t pid) {
 
 void esp_reset() {
     std::lock_guard<std::mutex> game_lock(g_game_mutex);
+    esp_log("esp_reset");
     g_pid = -1; g_il2cpp_base = 0;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
@@ -1539,10 +1658,8 @@ void esp_reset() {
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     {
         std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
-        g_skeleton_layout = {}; g_skeleton_layout_valid = false;
-        g_skeleton_layout_retry_after = {};
-        g_skeleton_hierarchy_cache.clear();
-        g_skeleton_frame_cache.clear();
+        skeleton_invalidate_locked();
+        g_skeleton_scene_players.clear();
     }
     g_use_direct_player_position = true;
     g_player_position_validated = false;
@@ -1560,7 +1677,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         g_skeleton_frame_cache.clear();
     }
 
-    if (g_pid <= 0 || !g_il2cpp_base) { return result; }
+    if (g_pid <= 0 || !g_il2cpp_base) {
+        esp_gate_log("gate_detached", "esp_get_boxes: not attached (pid=%d base=0x%llx)",
+                     (int)g_pid, (unsigned long long)g_il2cpp_base);
+        return result;
+    }
 
     uint64_t native_cam = 0;
     Mat4 projection{}, view{}, vp{};
@@ -1584,8 +1705,27 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 g_player_snapshot_stamp = tnow;
             }
         }
+
+        // A wholesale replacement of the player pointer set means the scene
+        // (and all its TransformData allocations) was rebuilt after a server
+        // switch. Drop the cached skeleton layout for the old scene.
+        if (!g_player_snapshot.empty() && !g_skeleton_scene_players.empty()) {
+            size_t overlap = 0;
+            for (uint64_t p : g_player_snapshot)
+                if (g_skeleton_scene_players.count(p)) ++overlap;
+            if (overlap == 0) {
+                std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+                skeleton_invalidate_locked();
+                esp_log("scene reload detected, skeleton caches reset");
+            }
+        }
+        g_skeleton_scene_players.clear();
+        for (uint64_t p : g_player_snapshot) g_skeleton_scene_players.insert(p);
     }
-    if (g_player_snapshot.empty()) return result;
+    if (g_player_snapshot.empty()) {
+        esp_gate_log("gate_noplayers", "esp_get_boxes: no players");
+        return result;
+    }
 
     const std::vector<uint64_t>& s_transforms = g_player_snapshot;
     if (!g_player_position_validated) {
@@ -1604,15 +1744,18 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         if (!managed_cam) {
             g_last_vp_valid = false;
+            esp_gate_log("gate_camera", "esp_get_boxes: camera manager not resolved");
             return result;
         }
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
         if (!native_cam) {
             g_last_vp_valid = false;
+            esp_gate_log("gate_camera", "esp_get_boxes: native camera is null");
             return result;
         }
         if (!read_stable_camera_matrices(native_cam, projection, view)) {
             g_last_vp_valid = false;
+            esp_gate_log("gate_camera", "esp_get_boxes: camera matrices invalid");
             return result;
         }
 
@@ -1624,10 +1767,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!g_matrix_configuration_validated) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) {
                 g_last_vp_valid = false;
+                esp_gate_log("gate_matrix", "esp_get_boxes: matrix configuration failed");
                 return result;
             }
             if (!read_stable_camera_matrices(native_cam, projection, view)) {
                 g_last_vp_valid = false;
+                esp_gate_log("gate_camera", "esp_get_boxes: camera matrices invalid (post-config)");
                 return result;
             }
         }
@@ -1703,11 +1848,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!has_local_position) {
             g_player_position_validated = false;
             g_last_vp_valid = false;
+            esp_gate_log("gate_local", "esp_get_boxes: no local player position");
             return result;
         }
+        // Spectating is detected via the observed-player back-reference (more
+        // reliable than guessing a PlayerFlags bit value): when set, the local
+        // player is following another player's camera.
         local_player_transition = resolved_local_player &&
             (rd<uint8_t>(resolved_local_player + PLAYER_RESPAWNING) != 0 ||
-             (rd<uint32_t>(resolved_local_player + PLAYER_FLAGS) & PLAYER_FLAG_SPECTATING) != 0);
+             rd_ptr(resolved_local_player + PLAYER_OBSERVED) != 0);
     }
 
     // During the death/fall animation the game camera is moved down and tilted
@@ -1736,6 +1885,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation)) {
             g_player_position_validated = false;
             g_last_vp_valid = false;
+            esp_gate_log("gate_pose", "esp_get_boxes: local pose read failed");
             return result;
         }
         local = transform_camera_position; has_local_position = true;
