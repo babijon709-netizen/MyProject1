@@ -738,11 +738,22 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
     if (best_score < 0) return false;
 
 
-    // Some skins/poses do not expose a Head bone in the cache. Synthesize it
-    // from the neck instead of injecting the KCC head transform: that transform
-    // can sit at eye/camera level above the skull, which drew a stray "corner"
-    // above the head and inflated the calibration height below. The head centre
-    // sits ~0.18 m above the neck pivot, in the same frame as the other bones.
+    // The "head" a wrong mapping resolves can actually be a helper transform
+    // (head-attach point, hair/hat anchor, camera-IK target) sitting well above
+    // the skull. That draws the neck->head segment as a stray corner above the
+    // model and, before, inflated the calibration height so the whole skeleton
+    // floated. The real head always sits within a small window just above the
+    // neck, so anything outside it is treated as unresolved and replaced.
+    if (best_set.valid[LIVE_HEAD] && best_set.valid[LIVE_NECK]) {
+        float neck_to_head = best_set.position[LIVE_HEAD].y - best_set.position[LIVE_NECK].y;
+        if (!std::isfinite(neck_to_head) || neck_to_head < -0.10f || neck_to_head > 0.50f) {
+            best_set.valid[LIVE_HEAD] = false;
+            --best_set.valid_count;
+        }
+    }
+    // Some skins/poses do not expose a Head bone in the cache (or it was
+    // rejected above). Synthesize it from the neck, in the same frame as the
+    // other bones, so the head segment never reaches up above the model.
     if (!best_set.valid[LIVE_HEAD] && best_set.valid[LIVE_NECK]) {
         best_set.position[LIVE_HEAD] = {
             best_set.position[LIVE_NECK].x,
@@ -795,6 +806,23 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
             calibrated.position[i].z += shift.z;
         }
     }
+
+    // Reject a scrambled bone mapping before it is drawn: after calibration the
+    // skeleton must be anatomically upright (head above neck above hips above
+    // feet, with a human head height). If pjY/pjh were interpreted wrong, the
+    // "head"/"neck"/"hips" slots point at unrelated transforms and this fails,
+    // so we fall through to the (clipped) hierarchy graph instead of drawing a
+    // skeleton that floats above the model.
+    if (calibrated.valid[LIVE_HEAD] && calibrated.valid[LIVE_NECK] &&
+        calibrated.valid[LIVE_HIPS]) {
+        float head_h = calibrated.position[LIVE_HEAD].y - feet.y;
+        if (!std::isfinite(head_h) || head_h < 0.6f || head_h > 2.6f) return false;
+        if (calibrated.position[LIVE_NECK].y < calibrated.position[LIVE_HIPS].y - 0.10f)
+            return false;
+        if (calibrated.position[LIVE_HIPS].y < feet.y - 0.30f)
+            return false;
+    }
+
     const LiveBoneSet* bones = &calibrated;
 
     animated_head = bones->valid[LIVE_HEAD] ? bones->position[LIVE_HEAD]
@@ -1203,11 +1231,19 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
 
     // The raw hierarchy carries helper transforms above the skull (head-attach
     // points, hair/hat anchors, camera IK targets). Those render as a stray
-    // "corner" above the head: drop fully-above segments and clamp anything
-    // that pokes above the head back to head height so the head bone survives.
+    // "corner" above the head. Clip against the box head: the skull top sits a
+    // small margin below the box top, while the helpers poke above it. Using
+    // the box head (a reliable, model-matched value) instead of the resolved
+    // KCC head — which itself can sit at eye level or on a camera helper above
+    // the skull — is what actually removes the corner.
     {
         float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
-        float head_y = have_hierarchy_head ? hierarchy_head.y : (feet.y + height);
+        float box_head = feet.y + height;
+        // The skull top sits just below the box head; head-attach / hair / hat
+        // / camera-IK helpers poke above it. Clip to a fixed margin below the
+        // box head (a reliable, model-matched value) so the helpers are removed
+        // without cutting the skull bone.
+        float head_y = box_head - 0.10f;
         std::vector<std::pair<Vec3, Vec3>> clipped;
         clipped.reserve(best_segments.size());
         for (const auto& segment : best_segments) {
