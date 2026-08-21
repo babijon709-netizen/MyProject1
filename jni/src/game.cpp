@@ -686,7 +686,6 @@ static int read_live_bone_candidate(uint64_t transform_array,
 
 static bool read_live_bone_skeleton(uint64_t character_animation,
                                     const Vec3& feet,
-                                    const Vec3* head_override,
                                     std::vector<std::pair<Vec3, Vec3>>& segments,
                                     Vec3& animated_head,
                                     Vec3& skeleton_chest,
@@ -739,11 +738,17 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
     if (best_score < 0) return false;
 
 
-    // Some skins/poses do not expose a Head bone in the cache. Use the head
-    // resolved from the KCC head Transform so the skeleton always shows a head
-    // and the box/aim keep a valid top point.
-    if (head_override && !best_set.valid[LIVE_HEAD] && vec3_is_finite(*head_override)) {
-        best_set.position[LIVE_HEAD] = *head_override;
+    // Some skins/poses do not expose a Head bone in the cache. Synthesize it
+    // from the neck instead of injecting the KCC head transform: that transform
+    // can sit at eye/camera level above the skull, which drew a stray "corner"
+    // above the head and inflated the calibration height below. The head centre
+    // sits ~0.18 m above the neck pivot, in the same frame as the other bones.
+    if (!best_set.valid[LIVE_HEAD] && best_set.valid[LIVE_NECK]) {
+        best_set.position[LIVE_HEAD] = {
+            best_set.position[LIVE_NECK].x,
+            best_set.position[LIVE_NECK].y + 0.18f,
+            best_set.position[LIVE_NECK].z
+        };
         best_set.valid[LIVE_HEAD] = true;
         ++best_set.valid_count;
     }
@@ -762,12 +767,16 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
     // the pelvis to that capsule before projecting; otherwise the whole box and
     // skeleton are translated together above the character.
     LiveBoneSet calibrated = best_set;
+    // Estimate the head top from the most reliable upper bone, in the bones'
+    // own frame. Never use an injected/overridden head here: a head transform
+    // that sits above the skull inflates this height and lifts the whole
+    // skeleton off the model.
     float top_y = feet.y + PLAYER_HEIGHT;
-    if (best_set.valid[LIVE_HEAD]) top_y = best_set.position[LIVE_HEAD].y;
-    else if (best_set.valid[LIVE_NECK]) top_y = best_set.position[LIVE_NECK].y;
-    else if (best_set.valid[LIVE_UPPER_CHEST]) top_y = best_set.position[LIVE_UPPER_CHEST].y;
-    else if (best_set.valid[LIVE_CHEST]) top_y = best_set.position[LIVE_CHEST].y;
-    else if (best_set.valid[LIVE_SPINE]) top_y = best_set.position[LIVE_SPINE].y;
+    if (best_set.valid[LIVE_NECK]) top_y = best_set.position[LIVE_NECK].y + 0.20f;
+    else if (best_set.valid[LIVE_UPPER_CHEST]) top_y = best_set.position[LIVE_UPPER_CHEST].y + 0.40f;
+    else if (best_set.valid[LIVE_CHEST]) top_y = best_set.position[LIVE_CHEST].y + 0.50f;
+    else if (best_set.valid[LIVE_SPINE]) top_y = best_set.position[LIVE_SPINE].y + 0.65f;
+    else if (best_set.valid[LIVE_HEAD]) top_y = best_set.position[LIVE_HEAD].y;
     float bone_height = fabsf(top_y - feet.y);
     if (!std::isfinite(bone_height) || bone_height < 0.5f) bone_height = PLAYER_HEIGHT;
     float target_hip_height = bone_height * 0.50f;
@@ -1163,7 +1172,6 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
     // this preserves named head/chest/hip/limb bones and therefore follows
     // weapon IK, reload poses and ragdolls without a synthetic walk cycle.
     if (read_live_bone_skeleton(character_animation, feet,
-                                 have_hierarchy_head ? &hierarchy_head : nullptr,
                                  segments, animated_head, skeleton_chest, skeleton_pelvis)) {
         return true;
     }
@@ -1195,19 +1203,23 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
 
     // The raw hierarchy carries helper transforms above the skull (head-attach
     // points, hair/hat anchors, camera IK targets). Those render as a stray
-    // "corner" above the head, so drop every segment that reaches above the
-    // real head. The real head height comes from the resolved head when
-    // available, otherwise from the box height.
+    // "corner" above the head: drop fully-above segments and clamp anything
+    // that pokes above the head back to head height so the head bone survives.
     {
         float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
         float head_y = have_hierarchy_head ? hierarchy_head.y : (feet.y + height);
         std::vector<std::pair<Vec3, Vec3>> clipped;
         clipped.reserve(best_segments.size());
         for (const auto& segment : best_segments) {
-            if (segment.first.y > head_y + 0.15f ||
-                segment.second.y > head_y + 0.15f)
-                continue;
-            clipped.push_back(segment);
+            std::pair<Vec3, Vec3> s = segment;
+            if (s.first.y > head_y && s.second.y > head_y) continue;
+            if (s.first.y > head_y) s.first.y = head_y;
+            if (s.second.y > head_y) s.second.y = head_y;
+            float len2 = (s.first.x - s.second.x) * (s.first.x - s.second.x) +
+                         (s.first.y - s.second.y) * (s.first.y - s.second.y) +
+                         (s.first.z - s.second.z) * (s.first.z - s.second.z);
+            if (len2 < 0.005f * 0.005f) continue;
+            clipped.push_back(s);
         }
         if (clipped.empty()) return use_fallback();
         best_segments = std::move(clipped);
