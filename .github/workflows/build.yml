@@ -5,17 +5,13 @@ on:
     branches:
       - main
       - arena/01a020ff-myproject1
+      - arena/01a02648-myproject1
 
   pull_request:
     branches:
       - main
       - arena/01a020ff-myproject1
-
-  workflow_dispatch:
-
-  pull_request:
-    branches:
-      - arena/01a020ff-myproject1
+      - arena/01a02648-myproject1
 
   workflow_dispatch:
 
