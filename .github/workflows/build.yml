@@ -4,12 +4,12 @@ on:
   push:
     branches:
       - main
-      - arena/01a02658-myproject1
+      - arena/01a02667-myproject1
 
   pull_request:
     branches:
       - main
-      - arena/01a02658-myproject1
+      - arena/01a02667-myproject1
 
   workflow_dispatch:
 
