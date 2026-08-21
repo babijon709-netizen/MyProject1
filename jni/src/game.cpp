@@ -605,11 +605,11 @@ static int read_live_bone_candidate(uint64_t transform_array,
         int32_t transform_index = i;
         if (mapping_mode == 1) {
             if (i >= mapping_count) continue;
-            bone_id = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8 +
+            bone_id = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT +
                                   (uint64_t)i * sizeof(int32_t));
         } else if (mapping_mode == 2) {
             if (i >= mapping_count) continue;
-            transform_index = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8 +
+            transform_index = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT +
                                           (uint64_t)i * sizeof(int32_t));
             if (transform_index < 0 || transform_index >= count) continue;
         }
