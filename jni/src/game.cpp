@@ -9,8 +9,12 @@
 #include <cmath>
 #include <string>
 #include <chrono>
+#include <functional>
+#include <iterator>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -33,6 +37,8 @@ static uint64_t  g_player_position_offset = PLAYER_POSITION;
 static float     g_last_camera_fov_deg = -1.f;
 static Mat4      g_last_vp{};
 static bool      g_last_vp_valid = false;
+static std::vector<uint64_t> g_player_snapshot;
+static std::chrono::steady_clock::time_point g_player_snapshot_stamp{};
 
 struct TransformHierarchyLayout {
     uint64_t data_offset = 0x38;
@@ -47,6 +53,7 @@ static bool g_transform_hierarchy_layout_valid = false;
 
 static bool      g_use_direct_player_position = true;
 static bool      g_player_position_validated = false;
+static std::mutex g_game_mutex;
 
 static bool vec3_is_finite(const Vec3& value);
 static bool player_crouching(uint64_t player);
@@ -322,6 +329,783 @@ static bool likely_native_pointer(uint64_t value) {
     return value >= 0x10000 && value < 0x0001000000000000ULL && (value & 0x7) == 0;
 }
 
+// ---------------------------------------------------------------------------
+// Live model skeleton
+// ---------------------------------------------------------------------------
+// The network position is deliberately not used for the skeleton.  It only
+// identifies the player and is updated on a different tick from the rendered
+// Animator.  The KCC's head Transform belongs to the same Unity transform
+// hierarchy as every animated body bone.  Reading that hierarchy gives us the
+// exact current pose (including IK, crouch, reload and ragdoll), and not a
+// collection of guessed offsets.
+struct SkeletonHierarchyInfo {
+    uint64_t matrices = 0;
+    uint64_t indices = 0;
+    int32_t count = 0;
+};
+
+static TransformHierarchyLayout g_skeleton_layout{};
+static bool g_skeleton_layout_valid = false;
+static std::unordered_map<uint64_t, SkeletonHierarchyInfo> g_skeleton_hierarchy_cache;
+
+struct SkeletonFrameData {
+    uint64_t matrices = 0;
+    uint64_t indices = 0;
+    std::vector<Matrix34> matrix_values;
+    std::vector<int32_t> parent_values;
+};
+// All players normally share one TransformData allocation. Keep one immutable
+// memory snapshot per allocation for the duration of esp_get_boxes(), so ten
+// enemies cost one pair of bulk reads instead of ten pairwise bone walks.
+static std::unordered_map<uint64_t, SkeletonFrameData> g_skeleton_frame_cache;
+static std::mutex g_skeleton_mutex;
+static std::chrono::steady_clock::time_point g_skeleton_layout_retry_after{};
+
+static bool read_remote_block(uint64_t address, void* destination, size_t size) {
+    if (!address || !destination || size == 0) return false;
+    struct iovec local = {destination, size};
+    struct iovec remote = {(void*)address, size};
+    return process_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)size;
+}
+
+static bool resolve_transform_hierarchy_storage(uint64_t native_transform,
+                                                const TransformHierarchyLayout& layout,
+                                                uint64_t& matrices,
+                                                uint64_t& indices,
+                                                int32_t& transform_index) {
+    matrices = 0; indices = 0; transform_index = -1;
+    if (!native_transform) return false;
+    uint64_t transform_data = rd_ptr(native_transform + layout.data_offset);
+    transform_index = rd<int32_t>(native_transform + layout.index_offset);
+    if (!likely_native_pointer(transform_data) || transform_index < 0 || transform_index > 100000)
+        return false;
+    matrices = rd_ptr(transform_data + layout.matrices_offset);
+    indices = rd_ptr(transform_data + layout.indices_offset);
+    if (layout.matrices_indirect) matrices = rd_ptr(matrices);
+    if (layout.indices_indirect) indices = rd_ptr(indices);
+    return likely_native_pointer(matrices) && likely_native_pointer(indices);
+}
+
+static bool skeleton_head_matches_player(uint64_t native_head, const Vec3& feet,
+                                         const TransformHierarchyLayout& layout,
+                                         SkeletonHierarchyInfo& storage,
+                                         Vec3& head_position,
+                                         int32_t& head_index) {
+    uint64_t matrices = 0, indices = 0;
+    int32_t index = -1;
+    if (!resolve_transform_hierarchy_storage(native_head, layout, matrices, indices, index)) return false;
+    if (!read_transform_hierarchy_arrays(matrices, indices, index, head_position)) return false;
+    float dx = head_position.x - feet.x;
+    float dy = head_position.y - feet.y;
+    float dz = head_position.z - feet.z;
+    float horizontal = sqrtf(dx * dx + dz * dz);
+    // A head may be displaced by a fall animation, but it cannot be tens of
+    // metres from the player's network root.  This rejects false pointer/layout
+    // candidates without rejecting crouching or ragdoll poses.
+    if (!std::isfinite(horizontal) || !std::isfinite(dy) || horizontal > 8.0f || fabsf(dy) > 8.0f)
+        return false;
+    storage.matrices = matrices;
+    storage.indices = indices;
+    storage.count = 0;
+    head_index = index;
+    return true;
+}
+
+static bool resolve_skeleton_layout(uint64_t native_head, const Vec3& feet,
+                                    SkeletonHierarchyInfo& storage,
+                                    int32_t& head_index, Vec3& head_position) {
+    if (!native_head) return false;
+
+    if (g_skeleton_layout_valid && skeleton_head_matches_player(native_head, feet,
+                                                                  g_skeleton_layout,
+                                                                  storage, head_position,
+                                                                  head_index))
+        return true;
+
+    // A valid layout discovered while resolving a player position is shared by
+    // Unity's TransformAccess hierarchy, so try it before probing.
+    if (g_transform_hierarchy_layout_valid &&
+        skeleton_head_matches_player(native_head, feet, g_transform_hierarchy_layout,
+                                     storage, head_position, head_index)) {
+        g_skeleton_layout = g_transform_hierarchy_layout;
+        g_skeleton_layout_valid = true;
+        return true;
+    }
+
+    // The reference client uses the compact native Transform layout:
+    // native+0x28 -> TransformData, native+0x30 -> index, then arrays at
+    // +0x18/+0x20. Try it first because it exposes the same live bone matrices
+    // without any animation smoothing.
+    TransformHierarchyLayout compact_layout{};
+    compact_layout.data_offset = 0x28;
+    compact_layout.index_offset = 0x30;
+    if (skeleton_head_matches_player(native_head, feet, compact_layout,
+                                     storage, head_position, head_index)) {
+        g_skeleton_layout = compact_layout;
+        g_skeleton_layout_valid = true;
+        return true;
+    }
+
+    // This is the layout already used by the working world-position reader.
+    // Try it before the compatibility probe; the latter is deliberately kept as
+    // a fallback because probing remote memory for every player/frame would
+    // make the overlay stutter.
+    TransformHierarchyLayout standard_layout{};
+    if (skeleton_head_matches_player(native_head, feet, standard_layout,
+                                     storage, head_position, head_index)) {
+        g_skeleton_layout = standard_layout;
+        g_skeleton_layout_valid = true;
+        return true;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    if (now < g_skeleton_layout_retry_after) return false;
+
+    // Unity revisions used by the game have moved the two small hierarchy
+    // arrays, but retain the same TransformData/index pairing. Probe only the
+    // known ABI shapes and accept a candidate only if it projects the actual
+    // head near the actual player root.
+    // The reference client uses the compact native Transform layout
+    // (data=0x28, index=0x30), while this Unity build usually uses
+    // data=0x38/index=0x40. Both point at the same 48-byte matrix records.
+    const uint64_t data_offsets[] = {0x38, 0x28, 0x30, 0x40};
+    const int64_t index_deltas[] = {8, 16, -8, 24};
+    const uint64_t array_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x20, 0x28}};
+    for (uint64_t data_offset : data_offsets) {
+        for (int64_t delta : index_deltas) {
+            int64_t index_offset_signed = (int64_t)data_offset + delta;
+            if (index_offset_signed < 0x10 || index_offset_signed > 0x220) continue;
+            for (const auto& offsets : array_offsets) {
+                for (int matrices_indirect = 0; matrices_indirect < 2; ++matrices_indirect) {
+                    for (int indices_indirect = 0; indices_indirect < 2; ++indices_indirect) {
+                        TransformHierarchyLayout candidate{};
+                        candidate.data_offset = data_offset;
+                        candidate.index_offset = (uint64_t)index_offset_signed;
+                        candidate.matrices_offset = offsets[0];
+                        candidate.indices_offset = offsets[1];
+                        candidate.matrices_indirect = matrices_indirect != 0;
+                        candidate.indices_indirect = indices_indirect != 0;
+                        SkeletonHierarchyInfo candidate_storage{};
+                        int32_t candidate_index = -1;
+                        Vec3 candidate_head{};
+                        if (!skeleton_head_matches_player(native_head, feet, candidate,
+                                                           candidate_storage, candidate_head,
+                                                           candidate_index)) continue;
+                        g_skeleton_layout = candidate;
+                        g_skeleton_layout_valid = true;
+                        storage = candidate_storage;
+                        head_index = candidate_index;
+                        head_position = candidate_head;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    g_skeleton_layout_retry_after = now + std::chrono::milliseconds(750);
+    return false;
+}
+
+static int32_t discover_skeleton_hierarchy_count(uint64_t matrices, uint64_t indices,
+                                                 int32_t seed_index) {
+    if (!matrices || !indices || seed_index < 0) return 0;
+
+    // Humanoid models in this title are well below 512 transforms. Reading a
+    // block once is considerably cheaper than issuing one process_vm_readv per
+    // bone on every frame. If a platform maps a shorter block, retry with a
+    // smaller one instead of treating a partial read as a valid pose.
+    constexpr int kProbeCount = 512;
+    std::vector<Matrix34> matrix_probe(kProbeCount);
+    std::vector<int32_t> index_probe(kProbeCount);
+    int probe_count = kProbeCount;
+    while (probe_count >= 32) {
+        matrix_probe.resize((size_t)probe_count);
+        index_probe.resize((size_t)probe_count);
+        if (read_remote_block(matrices, matrix_probe.data(),
+                              (size_t)probe_count * sizeof(Matrix34)) &&
+            read_remote_block(indices, index_probe.data(),
+                              (size_t)probe_count * sizeof(int32_t)))
+            break;
+        probe_count /= 2;
+    }
+    if (probe_count < 32) return 0;
+
+    int32_t highest = -1;
+    int invalid_tail = 0;
+    for (int32_t index = 0; index < probe_count; ++index) {
+        int32_t parent = index_probe[(size_t)index];
+        bool valid = matrix34_is_valid(matrix_probe[(size_t)index]) &&
+                     parent >= -1 && parent < probe_count;
+        if (valid) {
+            highest = index;
+            invalid_tail = 0;
+        } else if (index > seed_index && ++invalid_tail >= 24) {
+            // There normally are no holes in Unity's transform arrays. This
+            // keeps stale allocator data after the live array out of the graph.
+            break;
+        }
+    }
+    if (highest < seed_index) return 0;
+    return highest + 1;
+}
+
+enum LiveBoneId : int {
+    LIVE_HIPS = 0,
+    LIVE_LEFT_UPPER_LEG = 1,
+    LIVE_RIGHT_UPPER_LEG = 2,
+    LIVE_LEFT_LOWER_LEG = 3,
+    LIVE_RIGHT_LOWER_LEG = 4,
+    LIVE_LEFT_FOOT = 5,
+    LIVE_RIGHT_FOOT = 6,
+    LIVE_SPINE = 7,
+    LIVE_CHEST = 8,
+    LIVE_UPPER_CHEST = 9,
+    LIVE_NECK = 10,
+    LIVE_HEAD = 11,
+    LIVE_LEFT_SHOULDER = 12,
+    LIVE_RIGHT_SHOULDER = 13,
+    LIVE_LEFT_UPPER_ARM = 14,
+    LIVE_RIGHT_UPPER_ARM = 15,
+    LIVE_LEFT_LOWER_ARM = 16,
+    LIVE_RIGHT_LOWER_ARM = 17,
+    LIVE_LEFT_HAND = 18,
+    LIVE_RIGHT_HAND = 19,
+    LIVE_LEFT_TOES = 20,
+    LIVE_RIGHT_TOES = 21,
+    LIVE_BONE_COUNT = 22
+};
+
+struct LiveBoneSet {
+    Vec3 position[LIVE_BONE_COUNT]{};
+    bool valid[LIVE_BONE_COUNT]{};
+    int valid_count = 0;
+};
+
+static int read_live_bone_candidate(uint64_t transform_array,
+                                    uint64_t mapping_array,
+                                    int mapping_mode,
+                                    const Vec3& feet,
+                                    LiveBoneSet& result) {
+    result = {};
+    if (!likely_native_pointer(transform_array)) return -1;
+    int32_t count = rd<int32_t>(transform_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8);
+    if (count <= 0 || count > 96) return -1;
+    int32_t mapping_count = 0;
+    if (mapping_mode != 0) {
+        if (!likely_native_pointer(mapping_array)) return -1;
+        mapping_count = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8);
+        if (mapping_count <= 0 || mapping_count > 96) return -1;
+    }
+
+    int score = 0;
+    int32_t iterations = mapping_mode == 2 ? LIVE_BONE_COUNT : count;
+    for (int32_t i = 0; i < iterations; ++i) {
+        int32_t bone_id = i;
+        int32_t transform_index = i;
+        if (mapping_mode == 1) {
+            if (i >= mapping_count) continue;
+            bone_id = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8 +
+                                  (uint64_t)i * sizeof(int32_t));
+        } else if (mapping_mode == 2) {
+            if (i >= mapping_count) continue;
+            transform_index = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8 +
+                                          (uint64_t)i * sizeof(int32_t));
+            if (transform_index < 0 || transform_index >= count) continue;
+        }
+        if (bone_id < 0 || bone_id >= LIVE_BONE_COUNT || result.valid[bone_id]) continue;
+        uint64_t managed_transform = rd_ptr(transform_array + IL2CPP_ARRAY_FIRST_ELEMENT +
+                                            (uint64_t)transform_index * sizeof(uint64_t));
+        if (!likely_native_pointer(managed_transform)) continue;
+        uint64_t native_transform = resolve_native_transform(managed_transform);
+        Vec3 position{};
+        if (!likely_native_pointer(native_transform) ||
+            !read_transform_hierarchy_position(native_transform, position)) continue;
+
+        float dx = position.x - feet.x;
+        float dy = position.y - feet.y;
+        float dz = position.z - feet.z;
+        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(distance) || distance > 10.f) continue;
+        result.position[bone_id] = position;
+        result.valid[bone_id] = true;
+        ++result.valid_count;
+    }
+
+    // Prefer a complete anatomical mapping over an array that happens to
+    // contain only lower-body transforms. This is what prevents the old
+    // "legs-only" result when pjY is present but interpreted incorrectly.
+    if (result.valid[LIVE_HEAD]) score += 120;
+    if (result.valid[LIVE_NECK]) score += 60;
+    if (result.valid[LIVE_HIPS]) score += 100;
+    if (result.valid[LIVE_CHEST] || result.valid[LIVE_UPPER_CHEST]) score += 80;
+    if (result.valid[LIVE_LEFT_UPPER_ARM] && result.valid[LIVE_RIGHT_UPPER_ARM]) score += 70;
+    if (result.valid[LIVE_LEFT_UPPER_LEG] && result.valid[LIVE_RIGHT_UPPER_LEG]) score += 50;
+    score += result.valid_count;
+    return score;
+}
+
+static bool read_live_bone_skeleton(uint64_t character_animation,
+                                    const Vec3& feet,
+                                    std::vector<std::pair<Vec3, Vec3>>& segments,
+                                    Vec3& animated_head,
+                                    Vec3& skeleton_chest,
+                                    Vec3& skeleton_pelvis) {
+    if (!likely_native_pointer(character_animation)) return false;
+    uint64_t bone_cache = rd_ptr(character_animation + CHARACTER_ANIMATION_BONE_CACHE);
+    if (!likely_native_pointer(bone_cache)) return false;
+    uint64_t transform_array = rd_ptr(bone_cache + BONE_CACHE_TRANSFORMS);
+    uint64_t mapping_array = rd_ptr(bone_cache + BONE_CACHE_MAPPING);
+    if (!likely_native_pointer(transform_array)) return false;
+
+    LiveBoneSet direct_set{}, transform_to_bone_set{}, bone_to_transform_set{};
+    int direct_score = read_live_bone_candidate(transform_array, mapping_array, 0,
+                                                feet, direct_set);
+    int transform_to_bone_score = read_live_bone_candidate(transform_array, mapping_array, 1,
+                                                           feet, transform_to_bone_set);
+    int bone_to_transform_score = read_live_bone_candidate(transform_array, mapping_array, 2,
+                                                           feet, bone_to_transform_set);
+    const LiveBoneSet* bones = &direct_set;
+    int best_score = direct_score;
+    if (transform_to_bone_score > best_score) {
+        best_score = transform_to_bone_score;
+        bones = &transform_to_bone_set;
+    }
+    if (bone_to_transform_score > best_score) {
+        best_score = bone_to_transform_score;
+        bones = &bone_to_transform_set;
+    }
+    if (best_score < 0) return false;
+    if (!bones || !bones->valid[LIVE_HEAD] || !bones->valid[LIVE_HIPS] ||
+        !bones->valid[LIVE_NECK]) return false;
+    bool complete_arms = bones->valid[LIVE_LEFT_SHOULDER] &&
+                         bones->valid[LIVE_LEFT_UPPER_ARM] &&
+                         bones->valid[LIVE_LEFT_LOWER_ARM] &&
+                         bones->valid[LIVE_LEFT_HAND] &&
+                         bones->valid[LIVE_RIGHT_SHOULDER] &&
+                         bones->valid[LIVE_RIGHT_UPPER_ARM] &&
+                         bones->valid[LIVE_RIGHT_LOWER_ARM] &&
+                         bones->valid[LIVE_RIGHT_HAND];
+    bool complete_legs = bones->valid[LIVE_LEFT_UPPER_LEG] &&
+                         bones->valid[LIVE_LEFT_LOWER_LEG] &&
+                         bones->valid[LIVE_RIGHT_UPPER_LEG] &&
+                         bones->valid[LIVE_RIGHT_LOWER_LEG];
+    if (!complete_arms || !complete_legs) return false;
+
+    // tk.pjh contains model-space transforms. Depending on the active skin and
+    // animation state, the cached hierarchy can be rooted at the visual model
+    // while PlayerManager.lastTickPosition is rooted at the KCC capsule. Align
+    // the pelvis to that capsule before projecting; otherwise the whole box and
+    // skeleton are translated together above the character.
+    LiveBoneSet calibrated = *bones;
+    float bone_height = fabsf(calibrated.position[LIVE_HEAD].y - feet.y);
+    if (!std::isfinite(bone_height) || bone_height < 0.5f) bone_height = PLAYER_HEIGHT;
+    float target_hip_height = bone_height * 0.50f;
+    if (target_hip_height < 0.35f) target_hip_height = 0.35f;
+    if (target_hip_height > 0.95f) target_hip_height = 0.95f;
+    Vec3 shift = {
+        feet.x - calibrated.position[LIVE_HIPS].x,
+        feet.y + target_hip_height - calibrated.position[LIVE_HIPS].y,
+        feet.z - calibrated.position[LIVE_HIPS].z
+    };
+    if (vec3_is_finite(shift)) {
+        for (int i = 0; i < LIVE_BONE_COUNT; ++i) {
+            if (!calibrated.valid[i]) continue;
+            calibrated.position[i].x += shift.x;
+            calibrated.position[i].y += shift.y;
+            calibrated.position[i].z += shift.z;
+        }
+    }
+    bones = &calibrated;
+
+    animated_head = bones->position[LIVE_HEAD];
+    skeleton_pelvis = bones->position[LIVE_HIPS];
+    if (bones->valid[LIVE_UPPER_CHEST]) skeleton_chest = bones->position[LIVE_UPPER_CHEST];
+    else if (bones->valid[LIVE_CHEST]) skeleton_chest = bones->position[LIVE_CHEST];
+    else if (bones->valid[LIVE_SPINE]) skeleton_chest = bones->position[LIVE_SPINE];
+    else return false;
+
+    auto add_segment = [&](int a, int b) {
+        if (!bones->valid[a] || !bones->valid[b]) return;
+        const Vec3& first = bones->position[a];
+        const Vec3& second = bones->position[b];
+        float dx = first.x - second.x;
+        float dy = first.y - second.y;
+        float dz = first.z - second.z;
+        float length = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(length) || length < 0.005f || length > 4.f) return;
+        segments.emplace_back(first, second);
+    };
+
+    // The order mirrors Unity's HumanBodyBones enum from dump.cs. Every point
+    // is read from the live Transform cache, so arm/leg bends follow Animator
+    // and IK instead of being synthesized from movement speed.
+    add_segment(LIVE_HEAD, LIVE_NECK);
+
+    // Do not require UpperChest to exist. Some skins omit it, which was the
+    // reason the earlier implementation could show legs while losing the
+    // entire torso/head chain.
+    int torso_previous = LIVE_NECK;
+    const int torso_chain[] = {LIVE_UPPER_CHEST, LIVE_CHEST, LIVE_SPINE, LIVE_HIPS};
+    for (int torso_bone : torso_chain) {
+        if (!bones->valid[torso_bone]) continue;
+        if (bones->valid[torso_previous]) add_segment(torso_previous, torso_bone);
+        torso_previous = torso_bone;
+    }
+    int shoulder_parent = bones->valid[LIVE_UPPER_CHEST] ? LIVE_UPPER_CHEST
+                        : bones->valid[LIVE_CHEST] ? LIVE_CHEST
+                        : bones->valid[LIVE_SPINE] ? LIVE_SPINE : LIVE_HIPS;
+    if (bones->valid[shoulder_parent]) {
+        add_segment(shoulder_parent, LIVE_LEFT_SHOULDER);
+        add_segment(shoulder_parent, LIVE_RIGHT_SHOULDER);
+    }
+    add_segment(LIVE_LEFT_SHOULDER, LIVE_LEFT_UPPER_ARM);
+    add_segment(LIVE_LEFT_UPPER_ARM, LIVE_LEFT_LOWER_ARM);
+    add_segment(LIVE_LEFT_LOWER_ARM, LIVE_LEFT_HAND);
+    add_segment(LIVE_RIGHT_SHOULDER, LIVE_RIGHT_UPPER_ARM);
+    add_segment(LIVE_RIGHT_UPPER_ARM, LIVE_RIGHT_LOWER_ARM);
+    add_segment(LIVE_RIGHT_LOWER_ARM, LIVE_RIGHT_HAND);
+    add_segment(LIVE_HIPS, LIVE_LEFT_UPPER_LEG);
+    add_segment(LIVE_LEFT_UPPER_LEG, LIVE_LEFT_LOWER_LEG);
+    add_segment(LIVE_LEFT_LOWER_LEG, LIVE_LEFT_FOOT);
+    add_segment(LIVE_LEFT_FOOT, LIVE_LEFT_TOES);
+    add_segment(LIVE_HIPS, LIVE_RIGHT_UPPER_LEG);
+    add_segment(LIVE_RIGHT_UPPER_LEG, LIVE_RIGHT_LOWER_LEG);
+    add_segment(LIVE_RIGHT_LOWER_LEG, LIVE_RIGHT_FOOT);
+    add_segment(LIVE_RIGHT_FOOT, LIVE_RIGHT_TOES);
+
+    return segments.size() >= 8 && vec3_is_finite(animated_head) &&
+           vec3_is_finite(skeleton_chest) && vec3_is_finite(skeleton_pelvis);
+}
+
+static bool build_skeleton_graph(uint64_t native_head, const Vec3& feet,
+                                 std::vector<std::pair<Vec3, Vec3>>& segments,
+                                 Vec3& animated_head) {
+    SkeletonHierarchyInfo layout_storage{};
+    int32_t head_index = -1;
+    if (!resolve_skeleton_layout(native_head, feet, layout_storage,
+                                 head_index, animated_head)) return false;
+
+    uint64_t cache_key = layout_storage.matrices ^ (layout_storage.indices * 0x9E3779B97F4A7C15ULL);
+    auto cached = g_skeleton_hierarchy_cache.find(cache_key);
+    if (cached != g_skeleton_hierarchy_cache.end() &&
+        cached->second.matrices == layout_storage.matrices &&
+        cached->second.indices == layout_storage.indices) {
+        layout_storage.count = cached->second.count;
+    } else {
+        layout_storage.count = discover_skeleton_hierarchy_count(layout_storage.matrices,
+                                                                  layout_storage.indices,
+                                                                  head_index);
+        if (layout_storage.count <= head_index || layout_storage.count <= 0) return false;
+        g_skeleton_hierarchy_cache[cache_key] = layout_storage;
+    }
+    if (layout_storage.count <= head_index || layout_storage.count > 512) return false;
+
+    auto frame_it = g_skeleton_frame_cache.find(cache_key);
+    if (frame_it == g_skeleton_frame_cache.end()) {
+        SkeletonFrameData frame{};
+        frame.matrices = layout_storage.matrices;
+        frame.indices = layout_storage.indices;
+        frame.matrix_values.resize((size_t)layout_storage.count);
+        frame.parent_values.resize((size_t)layout_storage.count);
+        if (!read_remote_block(frame.matrices, frame.matrix_values.data(),
+                               frame.matrix_values.size() * sizeof(Matrix34)) ||
+            !read_remote_block(frame.indices, frame.parent_values.data(),
+                               frame.parent_values.size() * sizeof(int32_t))) return false;
+        frame_it = g_skeleton_frame_cache.emplace(cache_key, std::move(frame)).first;
+    }
+    const std::vector<Matrix34>& matrices = frame_it->second.matrix_values;
+    const std::vector<int32_t>& parents = frame_it->second.parent_values;
+
+    std::vector<Vec3> world((size_t)layout_storage.count);
+    std::vector<uint8_t> state((size_t)layout_storage.count, 0);
+    std::function<bool(int32_t)> calculate_world = [&](int32_t index) -> bool {
+        if (index < 0 || index >= layout_storage.count) return false;
+        uint8_t& node_state = state[(size_t)index];
+        if (node_state == 2) return true;
+        if (node_state == 1) return false; // malformed/cyclic hierarchy
+        node_state = 1;
+        const Matrix34& local = matrices[(size_t)index];
+        if (!matrix34_is_valid(local)) { node_state = 0; return false; }
+
+        // Apply ancestors in the same order as Unity's Transform hierarchy:
+        // local position -> parent scale/rotation/translation -> grandparent.
+        // This is exact even for non-uniformly scaled ragdoll bones and avoids
+        // any approximation from composing a single Euler/body rotation.
+        Vec3 result = {local.translation.x, local.translation.y, local.translation.z};
+        int32_t parent = parents[(size_t)index];
+        int depth = 0;
+        for (; parent >= 0 && depth < 128; ++depth) {
+            if (parent >= layout_storage.count || !matrix34_is_valid(matrices[(size_t)parent])) {
+                node_state = 0;
+                return false;
+            }
+            const Matrix34& parent_local = matrices[(size_t)parent];
+            Vec3 scaled = {result.x * parent_local.scale.x,
+                           result.y * parent_local.scale.y,
+                           result.z * parent_local.scale.z};
+            Vec3 rotated = rotate_vector(parent_local.rotation, scaled);
+            result = {parent_local.translation.x + rotated.x,
+                      parent_local.translation.y + rotated.y,
+                      parent_local.translation.z + rotated.z};
+            parent = parents[(size_t)parent];
+        }
+        if ((depth >= 128 && parent >= 0) || parent < -1 ||
+            parent >= layout_storage.count || !vec3_is_finite(result)) {
+            node_state = 0;
+            return false;
+        }
+        world[(size_t)index] = result;
+        node_state = 2;
+        return true;
+    };
+
+    // Resolve the root and validate that the head is actually part of it.
+    int32_t root = head_index;
+    for (int depth = 0; depth < 128; ++depth) {
+        if (root < 0 || root >= layout_storage.count) return false;
+        int32_t parent = parents[(size_t)root];
+        if (parent == -1) break;
+        if (parent < 0 || parent >= layout_storage.count) return false;
+        root = parent;
+        if (depth == 127) return false;
+    }
+    if (!calculate_world(head_index)) return false;
+    animated_head = world[(size_t)head_index];
+
+    std::vector<int8_t> relation((size_t)layout_storage.count, -1);
+    std::function<bool(int32_t)> belongs_to_root = [&](int32_t index) -> bool {
+        if (index < 0 || index >= layout_storage.count) return false;
+        int8_t& relation_state = relation[(size_t)index];
+        if (relation_state >= 0) return relation_state != 0;
+        int32_t current = index;
+        for (int depth = 0; depth < 128; ++depth) {
+            if (current == root) {
+                relation_state = 1;
+                return true;
+            }
+            if (current < 0 || current >= layout_storage.count) break;
+            current = parents[(size_t)current];
+            if (current == -1) break;
+        }
+        relation_state = 0;
+        return false;
+    };
+
+    constexpr float kMaxBoneDistanceFromRoot = 10.0f;
+    constexpr float kMaxBoneSegmentLength = 4.0f;
+    for (int32_t index = 0; index < layout_storage.count; ++index) {
+        if (index == root || !belongs_to_root(index)) continue;
+        int32_t parent = parents[(size_t)index];
+        if (parent < 0 || !belongs_to_root(parent)) continue;
+        if (!calculate_world(index) || !calculate_world(parent)) continue;
+        const Vec3& a = world[(size_t)parent];
+        const Vec3& b = world[(size_t)index];
+        float ax = a.x - feet.x, ay = a.y - feet.y, az = a.z - feet.z;
+        float bx = b.x - feet.x, by = b.y - feet.y, bz = b.z - feet.z;
+        float length = sqrtf((a.x - b.x) * (a.x - b.x) +
+                             (a.y - b.y) * (a.y - b.y) +
+                             (a.z - b.z) * (a.z - b.z));
+        if (!std::isfinite(length) || length > kMaxBoneSegmentLength ||
+            !std::isfinite(ax + ay + az + bx + by + bz) ||
+            sqrtf(ax * ax + ay * ay + az * az) > kMaxBoneDistanceFromRoot ||
+            sqrtf(bx * bx + by * by + bz * bz) > kMaxBoneDistanceFromRoot) continue;
+        segments.emplace_back(a, b);
+        if (segments.size() >= 160) break;
+    }
+    return !segments.empty() && vec3_is_finite(animated_head);
+}
+
+static bool choose_skeleton_anchor(const std::vector<std::pair<Vec3, Vec3>>& segments,
+                                   const Vec3& feet, const Vec3& head,
+                                   float height_factor, Vec3& anchor) {
+    float height = head.y - feet.y;
+    if (!std::isfinite(height) || fabsf(height) < 0.05f) return false;
+    float target_y = feet.y + height * height_factor;
+    float best_score = INFINITY;
+    bool found = false;
+    for (const auto& segment : segments) {
+        const Vec3 points[] = {segment.first, segment.second};
+        for (const Vec3& point : points) {
+            float dx = point.x - feet.x;
+            float dz = point.z - feet.z;
+            float horizontal = sqrtf(dx * dx + dz * dz);
+            if (!vec3_is_finite(point) || !std::isfinite(horizontal) || horizontal > 3.5f)
+                continue;
+            // Prefer central torso points at the requested anatomical height.
+            // This remains pose-aware for crouch, prone and ragdoll states,
+            // unlike a fixed fraction of the ESP rectangle.
+            float score = fabsf(point.y - target_y) + horizontal * 0.35f;
+            if (score < best_score) {
+                best_score = score;
+                anchor = point;
+                found = true;
+            }
+        }
+    }
+    return found && vec3_is_finite(anchor);
+}
+
+static void build_fallback_skeleton(const Vec3& feet, float height,
+                                    std::vector<std::pair<Vec3, Vec3>>& segments,
+                                    Vec3& head, Vec3& chest, Vec3& pelvis) {
+    if (!std::isfinite(height) || height < 0.5f) height = PLAYER_HEIGHT;
+    head = {feet.x, feet.y + height, feet.z};
+    chest = {feet.x, feet.y + height * 0.66f, feet.z};
+    pelvis = {feet.x, feet.y + height * 0.47f, feet.z};
+
+    const Vec3 neck = {feet.x, feet.y + height * 0.80f, feet.z};
+    const Vec3 left_shoulder = {feet.x - height * 0.18f, feet.y + height * 0.70f, feet.z};
+    const Vec3 right_shoulder = {feet.x + height * 0.18f, feet.y + height * 0.70f, feet.z};
+    const Vec3 left_elbow = {feet.x - height * 0.28f, feet.y + height * 0.51f, feet.z};
+    const Vec3 right_elbow = {feet.x + height * 0.28f, feet.y + height * 0.51f, feet.z};
+    const Vec3 left_hand = {feet.x - height * 0.32f, feet.y + height * 0.34f, feet.z};
+    const Vec3 right_hand = {feet.x + height * 0.32f, feet.y + height * 0.34f, feet.z};
+    const Vec3 left_hip = {feet.x - height * 0.12f, feet.y + height * 0.43f, feet.z};
+    const Vec3 right_hip = {feet.x + height * 0.12f, feet.y + height * 0.43f, feet.z};
+    const Vec3 left_knee = {feet.x - height * 0.13f, feet.y + height * 0.23f, feet.z};
+    const Vec3 right_knee = {feet.x + height * 0.13f, feet.y + height * 0.23f, feet.z};
+    const Vec3 left_foot = {feet.x - height * 0.14f, feet.y, feet.z};
+    const Vec3 right_foot = {feet.x + height * 0.14f, feet.y, feet.z};
+
+    const std::pair<Vec3, Vec3> fallback_lines[] = {
+        {head, neck}, {neck, chest}, {chest, pelvis},
+        {neck, left_shoulder}, {left_shoulder, left_elbow}, {left_elbow, left_hand},
+        {neck, right_shoulder}, {right_shoulder, right_elbow}, {right_elbow, right_hand},
+        {pelvis, left_hip}, {left_hip, left_knee}, {left_knee, left_foot},
+        {pelvis, right_hip}, {right_hip, right_knee}, {right_knee, right_foot}
+    };
+    segments.assign(std::begin(fallback_lines), std::end(fallback_lines));
+}
+
+static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
+                                   std::vector<std::pair<Vec3, Vec3>>& segments,
+                                   Vec3& animated_head,
+                                   Vec3& skeleton_chest,
+                                   Vec3& skeleton_pelvis) {
+    std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+    segments.clear();
+    animated_head = {};
+    skeleton_chest = {};
+    skeleton_pelvis = {};
+    if (!player) return false;
+
+    auto use_fallback = [&]() -> bool {
+        float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
+        build_fallback_skeleton(feet, height, segments, animated_head,
+                                skeleton_chest, skeleton_pelvis);
+        return !segments.empty();
+    };
+
+    // InterfaceReference<T> stores the selected MonoBehaviour component. Some
+    // IL2CPP builds expose the component directly, while others keep the
+    // wrapper object; accept both representations after validating KCC.player.
+    uint64_t reference = rd_ptr(player + PLAYER_KCC_REFERENCE);
+    uint64_t kcc = 0;
+    uint64_t kcc_head_offset = KCC_HEAD;
+    uint64_t kcc_character_animation_offset = KCC_CHARACTER_ANIMATION;
+    const uint64_t candidates[] = {
+        reference,
+        reference ? rd_ptr(reference + 0x10) : 0,
+        reference ? rd_ptr(reference + 0x18) : 0,
+        reference ? rd_ptr(reference + 0x20) : 0
+    };
+    for (uint64_t candidate : candidates) {
+        if (!likely_native_pointer(candidate)) continue;
+        if (rd_ptr(candidate + KCC_PLAYER) == player) {
+            kcc = candidate;
+            break;
+        }
+        // Tutorial/legacy player prefabs use the same component with the
+        // inherited fields shifted by 8 bytes. Supporting both layouts keeps
+        // the skeleton alive during model/controller swaps.
+        if (rd_ptr(candidate + 0x80) == player) {
+            kcc = candidate;
+            kcc_head_offset = 0x90;
+            kcc_character_animation_offset = 0xC0;
+            break;
+        }
+    }
+    if (!kcc) return use_fallback();
+
+    uint64_t character_animation = rd_ptr(kcc + kcc_character_animation_offset);
+    uint64_t model_info = character_animation
+        ? rd_ptr(character_animation + CHARACTER_ANIMATION_MODEL_INFO) : 0;
+
+    // CharacterAnimation.tk keeps the exact Transform[] used by the game's
+    // humanoid animation code. Prefer it over an undifferentiated hierarchy:
+    // this preserves named head/chest/hip/limb bones and therefore follows
+    // weapon IK, reload poses and ragdolls without a synthetic walk cycle.
+    if (read_live_bone_skeleton(character_animation, feet, segments,
+                                 animated_head, skeleton_chest, skeleton_pelvis))
+        return true;
+
+    // The KCC head is the preferred anchor. PlayerModelInfo is also checked:
+    // during skin swaps/reloads the KCC head can temporarily point to a camera
+    // helper while the actual body hierarchy remains alive below modelInfo.
+    const uint64_t managed_transforms[] = {
+        rd_ptr(kcc + kcc_head_offset),
+        model_info ? rd_ptr(model_info + PLAYER_MODEL_HEAD) : 0,
+        model_info ? rd_ptr(model_info + PLAYER_MODEL_BODY) : 0
+    };
+    uint64_t native_head = 0;
+    for (uint64_t managed_transform : managed_transforms) {
+        uint64_t native_transform = resolve_native_transform(managed_transform);
+        if (likely_native_pointer(native_transform)) {
+            native_head = native_transform;
+            break;
+        }
+    }
+    if (!native_head) return use_fallback();
+
+    std::vector<std::pair<Vec3, Vec3>> best_segments;
+    Vec3 best_anchor{};
+    size_t best_count = 0;
+    for (uint64_t managed_transform : managed_transforms) {
+        uint64_t native_transform = resolve_native_transform(managed_transform);
+        if (!likely_native_pointer(native_transform)) continue;
+
+        std::vector<std::pair<Vec3, Vec3>> candidate_segments;
+        Vec3 candidate_anchor{};
+        if (!build_skeleton_graph(native_transform, feet, candidate_segments,
+                                  candidate_anchor)) continue;
+        if (candidate_segments.size() > best_count) {
+            best_count = candidate_segments.size();
+            best_segments = std::move(candidate_segments);
+            best_anchor = candidate_anchor;
+        }
+    }
+    if (best_segments.empty()) return use_fallback();
+
+    // Always use the actual head position for aim/box top, even when the body
+    // graph was obtained from PlayerModelInfo.body rather than KCC.head.
+    SkeletonHierarchyInfo head_storage{};
+    int32_t head_index = -1;
+    Vec3 actual_head{};
+    if (!resolve_skeleton_layout(native_head, feet, head_storage,
+                                 head_index, actual_head)) {
+        actual_head = best_anchor;
+    }
+
+    segments = std::move(best_segments);
+    animated_head = actual_head;
+    bool have_chest = choose_skeleton_anchor(segments, feet, animated_head,
+                                              0.68f, skeleton_chest);
+    bool have_pelvis = choose_skeleton_anchor(segments, feet, animated_head,
+                                               0.48f, skeleton_pelvis);
+    if (!have_chest) skeleton_chest = {
+        feet.x + (animated_head.x - feet.x) * 0.68f,
+        feet.y + (animated_head.y - feet.y) * 0.68f,
+        feet.z + (animated_head.z - feet.z) * 0.68f
+    };
+    if (!have_pelvis) skeleton_pelvis = {
+        feet.x + (animated_head.x - feet.x) * 0.48f,
+        feet.y + (animated_head.y - feet.y) * 0.48f,
+        feet.z + (animated_head.z - feet.z) * 0.48f
+    };
+    return !segments.empty() && vec3_is_finite(animated_head) &&
+           vec3_is_finite(skeleton_chest) && vec3_is_finite(skeleton_pelvis);
+}
+
 static bool evaluate_transform_hierarchy_layout(const std::vector<uint64_t>& native_transforms, const TransformHierarchyLayout& layout, size_t& position_count, double& extent) {
     position_count = 0; extent = 0.0;
     Vec3 minimum{}, maximum{};
@@ -477,6 +1261,38 @@ static bool matrix_is_finite(const Mat4& matrix) {
     }
     return has_non_zero;
 }
+
+static bool matrices_are_coherent(const Mat4& first, const Mat4& second,
+                                  float max_delta) {
+    for (int i = 0; i < 16; ++i) {
+        if (!std::isfinite(first.m[i]) || !std::isfinite(second.m[i]) ||
+            fabsf(first.m[i] - second.m[i]) > max_delta) return false;
+    }
+    return true;
+}
+
+static bool read_stable_camera_matrices(uint64_t native_camera,
+                                        Mat4& projection, Mat4& view) {
+    if (!native_camera) return false;
+    // Unity can update the camera transform and projection in separate writes.
+    // Reading both matrices twice and accepting only a coherent pair prevents a
+    // single torn frame from shifting every box, tracer and bone together.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        Mat4 projection_a = rd_m4(native_camera + CAMERA_PROJECTION_MATRIX);
+        Mat4 view_a = rd_m4(native_camera + CAMERA_VIEW_MATRIX);
+        Mat4 projection_b = rd_m4(native_camera + CAMERA_PROJECTION_MATRIX);
+        Mat4 view_b = rd_m4(native_camera + CAMERA_VIEW_MATRIX);
+        if (!matrix_is_finite(projection_a) || !matrix_is_finite(view_a) ||
+            !matrix_is_finite(projection_b) || !matrix_is_finite(view_b)) continue;
+        if (!matrices_are_coherent(projection_a, projection_b, 0.05f) ||
+            !matrices_are_coherent(view_a, view_b, 0.05f)) continue;
+        projection = projection_b;
+        view = view_b;
+        return true;
+    }
+    return false;
+}
+
 static Mat4 mat_mul(const Mat4& a, const Mat4& b) {
     Mat4 result{};
     for (int row = 0; row < 4; ++row)
@@ -629,6 +1445,7 @@ static std::vector<uint64_t> read_configured_player_transforms() {
 }
 
 bool esp_init(pid_t pid) {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
     if (!g_il2cpp_base) return false;
@@ -636,21 +1453,39 @@ bool esp_init(pid_t pid) {
 }
 
 void esp_reset() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     g_pid = -1; g_il2cpp_base = 0;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_last_camera_fov_deg = -1.f;
     g_last_vp_valid = false;
+    g_player_snapshot.clear();
+    g_player_snapshot_stamp = {};
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
+    {
+        std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+        g_skeleton_layout = {}; g_skeleton_layout_valid = false;
+        g_skeleton_layout_retry_after = {};
+        g_skeleton_hierarchy_cache.clear();
+        g_skeleton_frame_cache.clear();
+    }
     g_use_direct_player_position = true;
     g_player_position_validated = false;
 }
 
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     std::vector<EspBox> result;
+    // Never let the aimbot or a later frame consume a projection matrix from a
+    // death/respawn transition or from a failed camera read.
+    g_last_vp_valid = false;
+    {
+        std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+        g_skeleton_frame_cache.clear();
+    }
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
 
@@ -665,23 +1500,27 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // refresh it at ~3 Hz. Positions and camera matrices are read fresh on
     // every call, so boxes never lag behind the model or slide when the camera
     // moves.
-    static std::vector<uint64_t> s_transforms;
-    static std::chrono::steady_clock::time_point s_transforms_stamp{};
     {
         auto tnow = std::chrono::steady_clock::now();
-        int tms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(tnow - s_transforms_stamp).count();
-        if (s_transforms.empty() || tms < 0 || tms >= 300) {
+        int tms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+            tnow - g_player_snapshot_stamp).count();
+        if (g_player_snapshot.empty() || tms < 0 || tms >= 300) {
             std::vector<uint64_t> refreshed = read_configured_player_transforms();
-            if (!refreshed.empty()) { s_transforms = std::move(refreshed); s_transforms_stamp = tnow; }
+            if (!refreshed.empty()) {
+                g_player_snapshot = std::move(refreshed);
+                g_player_snapshot_stamp = tnow;
+            }
         }
     }
-    if (s_transforms.empty()) return result;
+    if (g_player_snapshot.empty()) return result;
 
+    const std::vector<uint64_t>& s_transforms = g_player_snapshot;
     if (!g_player_position_validated) {
         if (!discover_player_position_offset(s_transforms)) return result;
     }
 
     bool transform_camera_mode = !g_use_direct_player_position && g_transform_hierarchy_layout_valid;
+    bool camera_roll_detected = false;
     if (!transform_camera_mode) {
         uint64_t managed_cam = 0;
         if (g_game_controller_class) {
@@ -691,33 +1530,43 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
             }
         }
-        if (!managed_cam) { return result; }
+        if (!managed_cam) {
+            g_last_vp_valid = false;
+            return result;
+        }
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-        if (!native_cam) return result;
-        projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-        view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-        if (!matrix_is_finite(projection) || !matrix_is_finite(view)) { return result; }
-
-        // Death fall animation: the FPS camera rolls toward the ground. During
-        // normal play the camera has no roll (up vector stays (0,1,0)); a big
-        // roll means the death/spectate transition is animating and the boxes
-        // would slide off — hide them until the camera is upright again.
-        {
-            float up_y = mat_get(view, 1, 1);
-            float up_x = mat_get(view, 1, 0);
-            float up_z = mat_get(view, 1, 2);
-            float roll = fabsf(up_x) + fabsf(up_z);
-            if (std::isfinite(up_y) && (up_y < 0.85f || roll > 0.35f)) {
-                g_matrix_configuration_validated = false;
-                g_last_camera_fov_deg = -1.f;
-                return result;
-            }
+        if (!native_cam) {
+            g_last_vp_valid = false;
+            return result;
+        }
+        if (!read_stable_camera_matrices(native_cam, projection, view)) {
+            g_last_vp_valid = false;
+            return result;
         }
 
+        // Row 0 is the camera right vector. Its Y component measures roll
+        // around the look direction, while the old up_y check also fired during
+        // ordinary vertical looking/pitch. A large right_y is the distinctive
+        // death-camera tilt and is safe to use as a transition signal.
+        float camera_right_y = mat_get(view, 0, 1);
+        camera_roll_detected = std::isfinite(camera_right_y) &&
+                               fabsf(camera_right_y) > 0.35f;
+
+        // Do not reject the camera merely because the player is looking up or
+        // down: view[1][1] changes with pitch during normal play.  Death-camera
+        // handling is performed after the local player is identified below,
+        // where the respawn/spectate state and camera height can be checked
+        // together without hiding ESP during an ordinary look movement.
+
         if (!g_matrix_configuration_validated) {
-            if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
-            projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-            view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
+            if (!optimize_matrix_configuration(native_cam, s_transforms)) {
+                g_last_vp_valid = false;
+                return result;
+            }
+            if (!read_stable_camera_matrices(native_cam, projection, view)) {
+                g_last_vp_valid = false;
+                return result;
+            }
         }
         vp = mat_mul(projection, view);
         g_last_vp = vp;
@@ -742,47 +1591,79 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     Vec3 world_camera_position{};
     bool have_world_camera = camera_position_from_view(view, world_camera_position);
+    uint64_t resolved_local_player = resolve_local_player();
+    bool local_player_transition = false;
     {
         Vec3 camera_position = world_camera_position;
         bool has_camera_position = have_world_camera && g_camera_matrix_physical_match;
         double nearest_distance_squared = INFINITY;
         size_t first_valid_index = s_transforms.size();
+        size_t resolved_local_index = s_transforms.size();
         Vec3 first_valid_position{};
+        Vec3 resolved_local_position{};
         for (size_t index = 0; index < s_transforms.size(); ++index) {
             Vec3 candidate{};
             if (!read_entity_position(s_transforms[index], candidate)) continue;
-            if (first_valid_index == s_transforms.size()) { first_valid_index = index; first_valid_position = candidate; }
+            if (first_valid_index == s_transforms.size()) {
+                first_valid_index = index;
+                first_valid_position = candidate;
+            }
+            if (resolved_local_player && s_transforms[index] == resolved_local_player) {
+                resolved_local_index = index;
+                resolved_local_position = candidate;
+            }
             if (!has_camera_position) continue;
-            double dx = (double)candidate.x - camera_position.x, dy = (double)candidate.y - camera_position.y, dz = (double)candidate.z - camera_position.z;
+            double dx = (double)candidate.x - camera_position.x;
+            double dy = (double)candidate.y - camera_position.y;
+            double dz = (double)candidate.z - camera_position.z;
             double distance_squared = dx * dx + dy * dy + dz * dz;
             if (std::isfinite(distance_squared) && distance_squared < nearest_distance_squared) {
-                nearest_distance_squared = distance_squared; local_entity_index = index; local = candidate;
+                nearest_distance_squared = distance_squared;
+                local_entity_index = index;
+                local = candidate;
             }
         }
-        if (local_entity_index == s_transforms.size() && first_valid_index != s_transforms.size()) {
-            local_entity_index = first_valid_index; local = first_valid_position;
+
+        // Prefer the actual GameController.localPlayer over “nearest to camera”.
+        // During the death camera animation the camera is intentionally moved
+        // away from the player, so nearest-player selection can lock onto an
+        // enemy and poison the ESP state until the next respawn.
+        if (resolved_local_index != s_transforms.size()) {
+            local_entity_index = resolved_local_index;
+            local = resolved_local_position;
+        } else if (local_entity_index == s_transforms.size() &&
+                   first_valid_index != s_transforms.size()) {
+            local_entity_index = first_valid_index;
+            local = first_valid_position;
         }
         has_local_position = local_entity_index != s_transforms.size();
         if (!has_local_position) {
             g_player_position_validated = false;
+            g_last_vp_valid = false;
             return result;
         }
+        local_player_transition = resolved_local_player &&
+            (rd<uint8_t>(resolved_local_player + PLAYER_RESPAWNING) != 0 ||
+             (rd<uint32_t>(resolved_local_player + PLAYER_FLAGS) & PLAYER_FLAG_SPECTATING) != 0);
     }
 
-    // Death fall: when you die the camera animates down to the ground ("lying
-    // down"), so it ends up well below the normal eye height relative to the
-    // local player's feet. While that happens the game renders from a different
-    // camera and ESP projected from this one slides off the models — hide it.
-    // Only trust this when the camera position was validated to be near the
-    // players (g_camera_matrix_physical_match), so a bad view matrix can't hide
-    // the ESP permanently.
-    if (!transform_camera_mode && g_camera_matrix_physical_match && have_world_camera && has_local_position) {
-        float rel = world_camera_position.y - local.y;
-        if (std::isfinite(rel) && rel < 0.55f) {
-            g_matrix_configuration_validated = false;
-            g_last_camera_fov_deg = -1.f;
-            return result;
-        }
+    // During the death/fall animation the game camera is moved down and tilted
+    // before the local player is respawned. Never project a frame from that
+    // camera: keeping the previous VP matrix is what made ESP lines appear to
+    // fly independently from models after respawn.
+    bool camera_transition = local_player_transition || camera_roll_detected;
+    if (!transform_camera_mode && g_camera_matrix_physical_match &&
+        have_world_camera && has_local_position) {
+        float camera_height_over_feet = world_camera_position.y - local.y;
+        camera_transition = camera_transition ||
+            (std::isfinite(camera_height_over_feet) && camera_height_over_feet < 0.55f);
+    }
+    if (camera_transition) {
+        g_matrix_configuration_validated = false;
+        g_camera_matrix_physical_match = false;
+        g_last_camera_fov_deg = -1.f;
+        g_last_vp_valid = false;
+        return result;
     }
 
     Vec3 transform_camera_position{};
@@ -790,6 +1671,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (transform_camera_mode) {
         if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation)) {
             g_player_position_validated = false;
+            g_last_vp_valid = false;
             return result;
         }
         local = transform_camera_position; has_local_position = true;
@@ -869,9 +1751,26 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
 
-        Vec3 body_bottom = {render_x, feet_y, render_z};
-        Vec3 body_top = {render_x, feet_y + head_height, render_z};
-        if (transform_camera_mode) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
+        // Read the animated hierarchy before building the box.  The box remains
+        // a safe fallback when a model is temporarily being rebuilt, but when
+        // the hierarchy is available its head and skeleton are taken from the
+        // exact same pose sample.
+        std::vector<std::pair<Vec3, Vec3>> skeleton_segments;
+        Vec3 animated_head{};
+        Vec3 skeleton_chest{};
+        Vec3 skeleton_pelvis{};
+        Vec3 render_feet = {render_x, feet_y, render_z};
+        bool have_skeleton = read_skeleton_segments(s_transforms[i], render_feet,
+                                                     skeleton_segments, animated_head,
+                                                     skeleton_chest, skeleton_pelvis);
+
+        Vec3 body_bottom = render_feet;
+        Vec3 body_top = have_skeleton ? animated_head
+                                      : Vec3{render_x, feet_y + head_height, render_z};
+        if (transform_camera_mode && !have_skeleton) {
+            body_bottom.y = feet.y - 1.60F;
+            body_top.y = feet.y + 0.20F;
+        }
 
         Vec2 sf{}, sh2{};
         bool bottom_visible = transform_camera_mode
@@ -907,10 +1806,74 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.distance = distance;
         box.source = s_transforms[i];
         box.feet  = {render_x, feet_y, render_z};
-        box.head  = {render_x, feet_y + head_height, render_z};
+        box.head  = have_skeleton ? animated_head
+                                  : Vec3{render_x, feet_y + head_height, render_z};
         box.vel   = vel;
         box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
         box.crouched = crouched;
+        box.skeleton_valid = have_skeleton;
+        box.skeleton_aim_points_valid = false;
+        box.skeleton_chest = skeleton_chest;
+        box.skeleton_pelvis = skeleton_pelvis;
+        box.skeleton_head_point = {0.f, 0.f, false};
+        box.skeleton_chest_point = {0.f, 0.f, false};
+        box.skeleton_pelvis_point = {0.f, 0.f, false};
+
+        // Project the live bone graph in this same camera snapshot.  No
+        // interpolation or previous-frame skeleton is used: if one transform
+        // is unavailable, that segment is omitted rather than drawn detached.
+        if (have_skeleton) {
+            box.skeleton.reserve(skeleton_segments.size());
+            for (const auto& segment : skeleton_segments) {
+                Vec2 a{}, b{};
+                bool a_projected = transform_camera_mode
+                    ? w2s_transform_camera(transform_camera_position,
+                                            transform_camera_rotation,
+                                            segment.first, sw, sh, a, false)
+                    : w2s(vp, segment.first, sw, sh, a, false);
+                bool b_projected = transform_camera_mode
+                    ? w2s_transform_camera(transform_camera_position,
+                                            transform_camera_rotation,
+                                            segment.second, sw, sh, b, false)
+                    : w2s(vp, segment.second, sw, sh, b, false);
+                if (!a_projected || !b_projected ||
+                    !std::isfinite(a.x) || !std::isfinite(a.y) ||
+                    !std::isfinite(b.x) || !std::isfinite(b.y)) continue;
+                box.skeleton.push_back({a.x, a.y, b.x, b.y});
+            }
+            box.skeleton_valid = !box.skeleton.empty();
+
+            if (box.skeleton_valid) {
+                // The head screen point is the same live point used for the
+                // box top. Chest and pelvis are projected from the selected
+                // hierarchy anchors, so aim never falls back to rectangle
+                // fractions when a real skeleton is available.
+                box.skeleton_head_point = {sh2.x, sh2.y, true};
+                Vec2 chest_screen{}, pelvis_screen{};
+                bool chest_projected = transform_camera_mode
+                    ? w2s_transform_camera(transform_camera_position,
+                                            transform_camera_rotation,
+                                            skeleton_chest, sw, sh,
+                                            chest_screen, false)
+                    : w2s(vp, skeleton_chest, sw, sh, chest_screen, false);
+                bool pelvis_projected = transform_camera_mode
+                    ? w2s_transform_camera(transform_camera_position,
+                                            transform_camera_rotation,
+                                            skeleton_pelvis, sw, sh,
+                                            pelvis_screen, false)
+                    : w2s(vp, skeleton_pelvis, sw, sh, pelvis_screen, false);
+                if (chest_projected && std::isfinite(chest_screen.x) &&
+                    std::isfinite(chest_screen.y)) {
+                    box.skeleton_chest_point = {chest_screen.x, chest_screen.y, true};
+                }
+                if (pelvis_projected && std::isfinite(pelvis_screen.x) &&
+                    std::isfinite(pelvis_screen.y)) {
+                    box.skeleton_pelvis_point = {pelvis_screen.x, pelvis_screen.y, true};
+                }
+                box.skeleton_aim_points_valid = box.skeleton_head_point.valid &&
+                    box.skeleton_chest_point.valid && box.skeleton_pelvis_point.valid;
+            }
+        }
 
         // Screen-space velocity of the head: project head and head + vel*dt.
         box.aim_vx = 0.f;
@@ -945,10 +1908,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 }
 
 float esp_get_camera_fov() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     return g_last_camera_fov_deg;
 }
 
 bool esp_world_to_screen(Vec3 world, int screen_w, int screen_h, float& sx, float& sy) {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     if (!g_last_vp_valid) return false;
     float sw = screen_w >= 100 ? (float)screen_w : 1080.f;
     float sh = screen_h >= 100 ? (float)screen_h : 2400.f;
@@ -984,6 +1949,7 @@ static bool player_crouching(uint64_t player) {
 }
 
 bool esp_is_aiming() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     uint64_t handler = local_player_event_handler();
     if (!handler) return false;
     uint64_t aim = rd_ptr(handler + HUC_AIM);
@@ -992,6 +1958,7 @@ bool esp_is_aiming() {
 }
 
 uint64_t esp_aim_hit_player() {
+    std::lock_guard<std::mutex> game_lock(g_game_mutex);
     uint64_t handler = local_player_event_handler();
     if (!handler) return 0;
     // Both RaycastData (crosshair) and AimRaycast (aim assist) cache the most
