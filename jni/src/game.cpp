@@ -40,6 +40,16 @@ static bool      g_last_vp_valid = false;
 static std::vector<uint64_t> g_player_snapshot;
 static std::chrono::steady_clock::time_point g_player_snapshot_stamp{};
 
+struct PlayerTrack {
+    Vec3 pos;
+    double t;
+    Vec3 vel;
+};
+// Per-player velocity history used to extrapolate the network tick position to
+// the smoothly rendered model. Cleared on (re)attach and on scene reload so a
+// reused PlayerManager pointer cannot inherit a dead player's velocity.
+static std::unordered_map<uint64_t, PlayerTrack> g_player_track;
+
 struct TransformHierarchyLayout {
     uint64_t data_offset = 0x38;
     uint64_t index_offset = 0x40;
@@ -1304,7 +1314,14 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
 }
 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    const uint64_t known_offsets[] = {0x1D0, 0x1DC, 0x1E8, 0x2D8, 0x2E4, 0x338};
+    // Only PlayerManager.lastTickPosition (PLAYER_POSITION) and
+    // lastSavedPosition (0x1DC) are live positions. The other previously
+    // probed offsets are stale snapshots (lastDeathPosition 0x1E8,
+    // originalPosition 0x338) or unrelated private Vector3s (0x2D8/0x2E4):
+    // with a single player the spread check is meaningless, so probing them
+    // could latch a position that never tracks the rendered model and make the
+    // whole ESP detach from the enemy.
+    const uint64_t known_offsets[] = {PLAYER_POSITION, 0x1DC};
     uint64_t best_offset = 0;
     double best_score = 0.0;
     for (uint64_t offset : known_offsets) {
@@ -1555,6 +1572,7 @@ bool esp_init(pid_t pid) {
     g_last_vp_valid = false;
     g_player_snapshot.clear();
     g_player_snapshot_stamp = {};
+    g_player_track.clear();
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {};
     g_transform_hierarchy_layout_valid = false;
@@ -1578,6 +1596,7 @@ void esp_reset() {
     g_last_vp_valid = false;
     g_player_snapshot.clear();
     g_player_snapshot_stamp = {};
+    g_player_track.clear();
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     {
@@ -1630,14 +1649,23 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
         // A wholesale replacement of the player pointer set means the scene
         // (and all its TransformData allocations) was rebuilt after a server
-        // switch. Drop the cached skeleton layout for the old scene.
+        // switch. Drop the cached skeleton layout for the old scene and re-derive
+        // the position/camera state for the new one.
         if (!g_player_snapshot.empty() && !g_skeleton_scene_players.empty()) {
             size_t overlap = 0;
             for (uint64_t p : g_player_snapshot)
                 if (g_skeleton_scene_players.count(p)) ++overlap;
             if (overlap == 0) {
-                std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
-                skeleton_invalidate_locked();
+                {
+                    std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+                    skeleton_invalidate_locked();
+                }
+                g_player_track.clear();
+                g_player_position_validated = false;
+                g_use_direct_player_position = true;
+                g_player_position_offset = PLAYER_POSITION;
+                g_matrix_configuration_validated = false;
+                g_camera_matrix_physical_match = false;
             }
         }
         g_skeleton_scene_players.clear();
@@ -1832,13 +1860,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         Vec3 vel{};
         float render_x = feet.x, render_z = feet.z;
         {
-            struct Track { Vec3 pos; double t; Vec3 vel; };
-            static std::unordered_map<uint64_t, Track> s_track;
             double now = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
 
-            auto it = s_track.find(s_transforms[i]);
-            if (it != s_track.end()) {
+            auto it = g_player_track.find(s_transforms[i]);
+            if (it != g_player_track.end()) {
                 double dt = now - it->second.t;
                 float ddx = feet.x - it->second.pos.x;
                 float ddz = feet.z - it->second.pos.z;
@@ -1874,7 +1900,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     render_z = it->second.pos.z + vel.z * age;
                 }
             } else {
-                s_track[s_transforms[i]] = {feet, now, vel};
+                g_player_track[s_transforms[i]] = {feet, now, vel};
             }
         }
 
