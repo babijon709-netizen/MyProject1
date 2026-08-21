@@ -1,9 +1,12 @@
 #pragma once
 #include <sys/types.h>
+#include <cstdint>
 #include <vector>
 #include "Vector.h"
 
 struct EspBox {
+    static constexpr int SKELETON_BONE_COUNT = 20; // see game.cpp kSkeletonBoneHuman
+
     float x1, y1, x2, y2;     // screen rect
     float distance;           // world distance to local player (m), -1 if unknown
     float corners[8][2];      // projected 3D-box corners (screen)
@@ -13,10 +16,17 @@ struct EspBox {
     Vec3  feet;               // world feet position
     Vec3  head;               // world head position (bounds-aware, crouch-safe)
     Vec3  vel;                // smoothed horizontal world velocity (x,0,z)
+
+    // Skeleton: real bones read from the model's rig each frame and projected
+    // to screen, so the lines track every bone motion (and crouch) of the model.
+    bool  has_bones = false;
+    Vec2  bones[SKELETON_BONE_COUNT];        // projected screen positions
+    bool  bone_visible[SKELETON_BONE_COUNT]; // whether the bone projected on-screen
 };
 
 bool        esp_init(pid_t pid);
 void        esp_reset();
+void        esp_set_skeleton_enabled(bool enabled);
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 float       esp_get_camera_fov(); // vertical FOV in degrees, -1 if unknown
 bool        esp_is_aiming();      // local player is aiming down sights
