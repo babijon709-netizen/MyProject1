@@ -1593,7 +1593,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     bool transform_camera_mode = !g_use_direct_player_position && g_transform_hierarchy_layout_valid;
-    bool camera_roll_detected = false;
     if (!transform_camera_mode) {
         uint64_t managed_cam = 0;
         if (g_game_controller_class) {
@@ -1617,19 +1616,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             return result;
         }
 
-        // Row 0 is the camera right vector. Its Y component measures roll
-        // around the look direction, while the old up_y check also fired during
-        // ordinary vertical looking/pitch. A large right_y is the distinctive
-        // death-camera tilt and is safe to use as a transition signal.
-        float camera_right_y = mat_get(view, 0, 1);
-        camera_roll_detected = std::isfinite(camera_right_y) &&
-                               fabsf(camera_right_y) > 0.35f;
-
         // Do not reject the camera merely because the player is looking up or
-        // down: view[1][1] changes with pitch during normal play.  Death-camera
-        // handling is performed after the local player is identified below,
-        // where the respawn/spectate state and camera height can be checked
-        // together without hiding ESP during an ordinary look movement.
+        // down. Camera transition handling below uses the local player's actual
+        // respawn/spectate state and camera height rather than a single view
+        // matrix element that can also change during normal pitch.
 
         if (!g_matrix_configuration_validated) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) {
@@ -1724,7 +1714,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // before the local player is respawned. Never project a frame from that
     // camera: keeping the previous VP matrix is what made ESP lines appear to
     // fly independently from models after respawn.
-    bool camera_transition = local_player_transition || camera_roll_detected;
+    bool camera_transition = local_player_transition;
     if (!transform_camera_mode && g_camera_matrix_physical_match &&
         have_world_camera && has_local_position) {
         float camera_height_over_feet = world_camera_position.y - local.y;
@@ -1732,11 +1722,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             (std::isfinite(camera_height_over_feet) && camera_height_over_feet < 0.55f);
     }
     if (camera_transition) {
+        // Invalidate calibration for the next frame, but keep this coherent
+        // camera snapshot usable. Returning an empty result here made a false
+        // respawn/flag read disable the entire ESP until another reconnect.
         g_matrix_configuration_validated = false;
         g_camera_matrix_physical_match = false;
         g_last_camera_fov_deg = -1.f;
-        g_last_vp_valid = false;
-        return result;
     }
 
     Vec3 transform_camera_position{};
