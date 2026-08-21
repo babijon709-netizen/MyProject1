@@ -342,731 +342,399 @@ static bool likely_native_pointer(uint64_t value) {
 // ---------------------------------------------------------------------------
 // Live model skeleton
 // ---------------------------------------------------------------------------
-// The network position is deliberately not used for the skeleton.  It only
-// identifies the player and is updated on a different tick from the rendered
-// Animator.  The KCC's head Transform belongs to the same Unity transform
-// hierarchy as every animated body bone.  Reading that hierarchy gives us the
-// exact current pose (including IK, crouch, reload and ragdoll), and not a
-// collection of guessed offsets.
-struct SkeletonHierarchyInfo {
-    uint64_t matrices = 0;
-    uint64_t indices = 0;
-    int32_t count = 0;
+// Reads the enemy model's humanoid rig each frame so the drawn skeleton tracks
+// the actual bones: running, aiming, reloading and crouching all move the
+// bones and therefore the skeleton automatically.  Bone positions come from
+// the animated rig itself, not from guessed offsets — the same data the game
+// uses to render the model.
+//
+// Chain:  PlayerManager.animator (managed Animator) -> m_CachedPtr
+//         -> native Animator -> Avatar -> AvatarData
+//         -> m_HumanBoneIndex[HumanBodyBones] -> TransformOffsetStructure
+//         -> transform index -> existing Transform hierarchy walk.
+//
+// The Animator/Avatar/AvatarData native offsets are Unity engine internals
+// (not present in the dump); they are discovered and validated at runtime
+// against a humanoid-proportion check, so a wrong guess falls back to
+// scanning instead of drawing garbage.
+//
+// The resulting positions are real world-space rig data.  No calibration or
+// anchoring shift is applied to them: shifting is what previously made the
+// whole skeleton float above the model.
+
+// HumanBodyBones enum values for the 20 bones we draw, in draw order
+// (matches UnityEngine.HumanBodyBones from the dump).
+static constexpr int kSkeletonBoneCount = 20;
+static constexpr int kSkeletonBoneHuman[kSkeletonBoneCount] = {
+    11 /*Head*/,       10 /*Neck*/,      9 /*UpperChest*/, 8 /*Chest*/, 7 /*Spine*/, 0 /*Hips*/,
+    12 /*LShoulder*/,  14 /*LUpperArm*/, 16 /*LLowerArm*/,  18 /*LHand*/,
+    13 /*RShoulder*/,  15 /*RUpperArm*/, 17 /*RLowerArm*/,  19 /*RHand*/,
+    1  /*LUpperLeg*/,  3  /*LLowerLeg*/, 5  /*LFoot*/,
+    2  /*RUpperLeg*/,  4  /*RLowerLeg*/, 6  /*RFoot*/
 };
 
-static TransformHierarchyLayout g_skeleton_layout{};
-static bool g_skeleton_layout_valid = false;
-static std::unordered_map<uint64_t, SkeletonHierarchyInfo> g_skeleton_hierarchy_cache;
-
-struct SkeletonFrameData {
-    uint64_t matrices = 0;
-    uint64_t indices = 0;
-    std::vector<Matrix34> matrix_values;
-    std::vector<int32_t> parent_values;
+// Resolved (and validated) Avatar layout. All engine-internal offsets live
+// here; they are discovered once and cached for the session.
+struct BoneLayout {
+    uint64_t animator_avatar_off = ANIMATOR_AVATAR;
+    uint64_t avatar_data_off     = AVATAR_DATA;
+    uint64_t avatar_size_off     = AVATAR_SIZE;
+    uint64_t tos_off             = AVATAR_DATA_TOS;
+    uint64_t hbi_off             = AVATAR_DATA_HUMAN_BONE_INDEX;
+    uint64_t tos_stride          = TOS_STRIDE;
+    uint64_t tos_count_off       = TOS_COUNT_OFF;
+    uint64_t tos_first_index_off = TOS_FIRST_INDEX_OFF;
+    bool     use_tos             = true;
 };
-// All players normally share one TransformData allocation. Keep one immutable
-// memory snapshot per allocation for the duration of esp_get_boxes(), so ten
-// enemies cost one pair of bulk reads instead of ten pairwise bone walks.
-static std::unordered_map<uint64_t, SkeletonFrameData> g_skeleton_frame_cache;
+static BoneLayout g_bone_layout{};
+static bool g_bone_layout_valid = false;
+static std::chrono::steady_clock::time_point g_bone_layout_retry_after{};
+static bool g_bone_layout_extended = false; // tier-1 scan failed: widen the search
+static int g_bone_layout_failures = 0;      // consecutive failed discovery attempts
+
 static std::mutex g_skeleton_mutex;
-static std::chrono::steady_clock::time_point g_skeleton_layout_retry_after{};
-static int g_skeleton_layout_failures = 0;
 // PlayerManager pointer set from the previous scene. A wholesale replacement
-// (server switch / scene reload) invalidates every cached skeleton layout.
+// (server switch / scene reload) invalidates the cached bone layout, because
+// the engine-side Avatar allocation changes with the scene.
 static std::unordered_set<uint64_t> g_skeleton_scene_players;
 
 // Callers must hold g_skeleton_mutex.
 static void skeleton_invalidate_locked() {
-    g_skeleton_layout = {};
-    g_skeleton_layout_valid = false;
-    g_skeleton_layout_retry_after = {};
-    g_skeleton_layout_failures = 0;
-    g_skeleton_hierarchy_cache.clear();
-    g_skeleton_frame_cache.clear();
+    g_bone_layout = {};
+    g_bone_layout_valid = false;
+    g_bone_layout_retry_after = {};
+    g_bone_layout_extended = false;
+    g_bone_layout_failures = 0;
 }
 
-static bool read_remote_block(uint64_t address, void* destination, size_t size) {
-    if (!address || !destination || size == 0) return false;
-    struct iovec local = {destination, size};
-    struct iovec remote = {(void*)address, size};
-    return process_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)size;
-}
-
-static bool resolve_transform_hierarchy_storage(uint64_t native_transform,
-                                                const TransformHierarchyLayout& layout,
-                                                uint64_t& matrices,
-                                                uint64_t& indices,
-                                                int32_t& transform_index) {
-    matrices = 0; indices = 0; transform_index = -1;
+// Extract the shared Transform-hierarchy matrices/indices arrays from any
+// native Transform (all scene transforms share one hierarchy).  These are the
+// same arrays the world-position reader uses, so a layout validated there is
+// reused here.
+static bool get_hierarchy_arrays(uint64_t native_transform, uint64_t& matrices, uint64_t& indices) {
+    matrices = 0; indices = 0;
     if (!native_transform) return false;
-    uint64_t transform_data = rd_ptr(native_transform + layout.data_offset);
-    transform_index = rd<int32_t>(native_transform + layout.index_offset);
-    if (!likely_native_pointer(transform_data) || transform_index < 0 || transform_index > 100000)
-        return false;
-    matrices = rd_ptr(transform_data + layout.matrices_offset);
-    indices = rd_ptr(transform_data + layout.indices_offset);
-    if (layout.matrices_indirect) matrices = rd_ptr(matrices);
-    if (layout.indices_indirect) indices = rd_ptr(indices);
-    return likely_native_pointer(matrices) && likely_native_pointer(indices);
+
+    if (g_transform_hierarchy_layout_valid) {
+        uint64_t transform_data = rd_ptr(native_transform + g_transform_hierarchy_layout.data_offset);
+        int32_t transform_index = rd<int32_t>(native_transform + g_transform_hierarchy_layout.index_offset);
+        if (likely_native_pointer(transform_data) && transform_index >= 0 && transform_index <= 100000) {
+            uint64_t m = rd_ptr(transform_data + g_transform_hierarchy_layout.matrices_offset);
+            uint64_t ix = rd_ptr(transform_data + g_transform_hierarchy_layout.indices_offset);
+            if (g_transform_hierarchy_layout.matrices_indirect) m = rd_ptr(m);
+            if (g_transform_hierarchy_layout.indices_indirect) ix = rd_ptr(ix);
+            if (likely_native_pointer(m) && likely_native_pointer(ix)) {
+                matrices = m; indices = ix;
+                return true;
+            }
+        }
+    }
+
+    // Standard Unity transform hierarchy layout (data=0x38/index=0x40, arrays
+    // at +0x18/+0x20 or +0x08/+0x10, with or without an extra indirection).
+    uint64_t transform_data = rd_ptr(native_transform + 0x38);
+    if (!likely_native_pointer(transform_data)) return false;
+    const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
+    for (const auto& offsets : data_offsets) {
+        uint64_t matrix_pointer = rd_ptr(transform_data + offsets[0]);
+        uint64_t index_pointer = rd_ptr(transform_data + offsets[1]);
+        if (!likely_native_pointer(matrix_pointer) || !likely_native_pointer(index_pointer)) continue;
+        const uint64_t matrix_candidates[] = {matrix_pointer, rd_ptr(matrix_pointer)};
+        const uint64_t index_candidates[] = {index_pointer, rd_ptr(index_pointer)};
+        for (uint64_t m : matrix_candidates)
+            for (uint64_t ix : index_candidates)
+                if (likely_native_pointer(m) && likely_native_pointer(ix)) {
+                    matrices = m; indices = ix;
+                    return true;
+                }
+    }
+    return false;
 }
 
-static bool skeleton_head_matches_player(uint64_t native_head, const Vec3& feet,
-                                         const TransformHierarchyLayout& layout,
-                                         SkeletonHierarchyInfo& storage,
-                                         Vec3& head_position,
-                                         int32_t& head_index) {
-    uint64_t matrices = 0, indices = 0;
-    int32_t index = -1;
-    if (!resolve_transform_hierarchy_storage(native_head, layout, matrices, indices, index)) return false;
-    if (!read_transform_hierarchy_arrays(matrices, indices, index, head_position)) return false;
-    float dx = head_position.x - feet.x;
-    float dy = head_position.y - feet.y;
-    float dz = head_position.z - feet.z;
-    float horizontal = sqrtf(dx * dx + dz * dz);
-    // A head may be displaced by a fall animation, but it cannot be tens of
-    // metres from the player's network root.  This rejects false pointer/layout
-    // candidates without rejecting crouching or ragdoll poses.
-    if (!std::isfinite(horizontal) || !std::isfinite(dy) || horizontal > 8.0f || fabsf(dy) > 8.0f)
-        return false;
-    storage.matrices = matrices;
-    storage.indices = indices;
-    storage.count = 0;
-    head_index = index;
+// Resolve a player's native Animator (managed Animator -> m_CachedPtr).
+// PlayerManager.animator is dump-confirmed; the KCC fallbacks
+// (m_Animator, CharacterAnimation.animator) are too.
+static uint64_t resolve_native_animator(uint64_t player) {
+    if (!player) return 0;
+
+    auto managed_to_native = [](uint64_t managed) -> uint64_t {
+        if (!likely_native_pointer(managed)) return 0;
+        uint64_t native = rd_ptr(managed + MANAGED_CACHED_PTR);
+        return likely_native_pointer(native) ? native : 0;
+    };
+
+    // Primary: PlayerManager.animator.
+    uint64_t native = managed_to_native(rd_ptr(player + PLAYER_ANIMATOR));
+    if (native) return native;
+
+    // Fallback: the player's KCC (InterfaceReference<ti>) owns the live model:
+    // KCC.m_Animator, then KCC.pjq (CharacterAnimation).animator.
+    uint64_t reference = rd_ptr(player + PLAYER_KCC_REFERENCE);
+    const uint64_t candidates[] = {
+        reference,
+        reference ? rd_ptr(reference + 0x10) : 0,
+        reference ? rd_ptr(reference + 0x18) : 0,
+        reference ? rd_ptr(reference + 0x20) : 0
+    };
+    for (uint64_t candidate : candidates) {
+        if (!likely_native_pointer(candidate)) continue;
+        if (rd_ptr(candidate + KCC_PLAYER) != player) continue;
+        native = managed_to_native(rd_ptr(candidate + KCC_ANIMATOR));
+        if (native) return native;
+        uint64_t character_animation = rd_ptr(candidate + KCC_CHARACTER_ANIMATION);
+        if (likely_native_pointer(character_animation))
+            native = managed_to_native(rd_ptr(character_animation + CHARACTER_ANIMATION_ANIMATOR));
+        return native;
+    }
+    return 0;
+}
+
+// Resolve the world positions of all 20 bones given a native Animator and the
+// shared hierarchy arrays. Returns false when ANY bone fails, so a partial or
+// mis-mapped rig is never drawn.
+static bool read_bone_positions(uint64_t native_animator, uint64_t matrices, uint64_t indices, Vec3* out) {
+    if (!g_bone_layout_valid || !native_animator || !matrices || !indices || !out) return false;
+
+    uint64_t avatar = rd_ptr(native_animator + g_bone_layout.animator_avatar_off);
+    if (!likely_native_pointer(avatar)) return false;
+    uint64_t avatar_data = rd_ptr(avatar + g_bone_layout.avatar_data_off);
+    if (!likely_native_pointer(avatar_data)) return false;
+    uint32_t size = rd<uint32_t>(avatar + g_bone_layout.avatar_size_off);
+    if (size < 20 || size > 5000) return false;
+    uint64_t hbi = rd_ptr(avatar_data + g_bone_layout.hbi_off);
+    if (!likely_native_pointer(hbi)) return false;
+    uint64_t tos = 0;
+    if (g_bone_layout.use_tos) {
+        tos = rd_ptr(avatar_data + g_bone_layout.tos_off);
+        if (!likely_native_pointer(tos)) return false;
+    }
+
+    for (int i = 0; i < kSkeletonBoneCount; ++i) {
+        uint32_t node = rd<uint32_t>(hbi + (uint64_t)kSkeletonBoneHuman[i] * 4u);
+        if (node >= size) return false;
+        int32_t transform_index;
+        if (g_bone_layout.use_tos) {
+            uint64_t entry = tos + (uint64_t)node * g_bone_layout.tos_stride;
+            uint32_t count = rd<uint32_t>(entry + g_bone_layout.tos_count_off);
+            uint32_t first = rd<uint32_t>(entry + g_bone_layout.tos_first_index_off);
+            if (count < 1 || count > 8) return false;
+            transform_index = (int32_t)first;
+        } else {
+            transform_index = (int32_t)node;
+        }
+        Vec3 position{};
+        if (!read_transform_hierarchy_arrays(matrices, indices, transform_index, position)) return false;
+        out[i] = position;
+    }
     return true;
 }
 
-static bool resolve_skeleton_layout(uint64_t native_head, const Vec3& feet,
-                                    SkeletonHierarchyInfo& storage,
-                                    int32_t& head_index, Vec3& head_position) {
-    if (!native_head) return false;
+// Sanity-check a resolved skeleton: head above neck above hips above feet,
+// roughly human proportions, and — crucially — the rig must belong to THIS
+// player (hips near the network position, feet near ground level).  This
+// rejects bogus Avatar layouts and other players' skeletons before anything
+// is drawn.
+static bool skeleton_positions_plausible(const Vec3* bones, const Vec3& feet) {
+    for (int i = 0; i < kSkeletonBoneCount; ++i)
+        if (!vec3_is_finite(bones[i])) return false;
 
-    if (g_skeleton_layout_valid) {
-        if (skeleton_head_matches_player(native_head, feet, g_skeleton_layout,
-                                          storage, head_position, head_index)) {
-            g_skeleton_layout_failures = 0;
-            return true;
-        }
-        // The cached layout can stop matching after a scene reload (new
-        // TransformData allocation). Drop it after a few consecutive misses so
-        // the next probe runs immediately instead of waiting out the throttle.
-        if (++g_skeleton_layout_failures >= 5) {
-            g_skeleton_layout = {};
-            g_skeleton_layout_valid = false;
-            g_skeleton_layout_failures = 0;
-        }
-    }
+    const float head_y = bones[0].y;   // Head
+    const float neck_y = bones[1].y;   // Neck
+    const float hips_y = bones[5].y;   // Hips
+    const float foot_y = std::min(bones[16].y, bones[19].y); // LFoot / RFoot
 
-    // A valid layout discovered while resolving a player position is shared by
-    // Unity's TransformAccess hierarchy, so try it before probing.
-    if (g_transform_hierarchy_layout_valid &&
-        skeleton_head_matches_player(native_head, feet, g_transform_hierarchy_layout,
-                                     storage, head_position, head_index)) {
-        g_skeleton_layout = g_transform_hierarchy_layout;
-        g_skeleton_layout_valid = true;
-        g_skeleton_layout_failures = 0;
-        return true;
-    }
+    float body_height = head_y - foot_y;
+    if (body_height < 0.35f || body_height > 3.0f) return false;
+    if (neck_y > head_y + 0.05f || neck_y < hips_y - 0.05f) return false;
+    if (hips_y < foot_y || hips_y > head_y + 0.1f) return false;
 
-    // The reference client uses the compact native Transform layout:
-    // native+0x28 -> TransformData, native+0x30 -> index, then arrays at
-    // +0x18/+0x20. Try it first because it exposes the same live bone matrices
-    // without any animation smoothing.
-    TransformHierarchyLayout compact_layout{};
-    compact_layout.data_offset = 0x28;
-    compact_layout.index_offset = 0x30;
-    if (skeleton_head_matches_player(native_head, feet, compact_layout,
-                                     storage, head_position, head_index)) {
-        g_skeleton_layout = compact_layout;
-        g_skeleton_layout_valid = true;
-        g_skeleton_layout_failures = 0;
-        return true;
-    }
+    // Horizontal coherence between head and hips (rejects unrelated transforms).
+    float dx = bones[0].x - bones[5].x;
+    float dz = bones[0].z - bones[5].z;
+    if (dx * dx + dz * dz > 4.0f) return false;
 
-    // This is the layout already used by the working world-position reader.
-    // Try it before the compatibility probe; the latter is deliberately kept as
-    // a fallback because probing remote memory for every player/frame would
-    // make the overlay stutter.
-    TransformHierarchyLayout standard_layout{};
-    if (skeleton_head_matches_player(native_head, feet, standard_layout,
-                                     storage, head_position, head_index)) {
-        g_skeleton_layout = standard_layout;
-        g_skeleton_layout_valid = true;
-        g_skeleton_layout_failures = 0;
-        return true;
-    }
+    // Proximity to the player's network root: hips within ~3 m horizontally
+    // and the feet near ground level.  Prevents drawing another model's rig.
+    float hx = bones[5].x - feet.x;
+    float hy = bones[5].y - feet.y;
+    float hz = bones[5].z - feet.z;
+    if (hx * hx + hz * hz > 9.0f) return false;
+    if (!std::isfinite(hy) || fabsf(hy) > 2.2f) return false;
+    float fy = foot_y - feet.y;
+    if (!std::isfinite(fy) || fabsf(fy) > 1.2f) return false;
+    return true;
+}
 
-    auto now = std::chrono::steady_clock::now();
-    if (now < g_skeleton_layout_retry_after) return false;
+static bool try_bone_layout(const BoneLayout& layout, uint64_t native_animator,
+                            uint64_t matrices, uint64_t indices, const Vec3& feet) {
+    BoneLayout saved = g_bone_layout;
+    bool saved_valid = g_bone_layout_valid;
+    g_bone_layout = layout;
+    g_bone_layout_valid = true;
 
-    // Unity revisions used by the game have moved the two small hierarchy
-    // arrays, but retain the same TransformData/index pairing. Probe only the
-    // known ABI shapes and accept a candidate only if it projects the actual
-    // head near the actual player root.
-    // The reference client uses the compact native Transform layout
-    // (data=0x28, index=0x30), while this Unity build usually uses
-    // data=0x38/index=0x40. Both point at the same 48-byte matrix records.
-    const uint64_t data_offsets[] = {0x38, 0x28, 0x30, 0x40};
-    const int64_t index_deltas[] = {8, 16, -8, 24};
-    const uint64_t array_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x20, 0x28}};
-    for (uint64_t data_offset : data_offsets) {
-        for (int64_t delta : index_deltas) {
-            int64_t index_offset_signed = (int64_t)data_offset + delta;
-            if (index_offset_signed < 0x10 || index_offset_signed > 0x220) continue;
-            for (const auto& offsets : array_offsets) {
-                for (int matrices_indirect = 0; matrices_indirect < 2; ++matrices_indirect) {
-                    for (int indices_indirect = 0; indices_indirect < 2; ++indices_indirect) {
-                        TransformHierarchyLayout candidate{};
-                        candidate.data_offset = data_offset;
-                        candidate.index_offset = (uint64_t)index_offset_signed;
-                        candidate.matrices_offset = offsets[0];
-                        candidate.indices_offset = offsets[1];
-                        candidate.matrices_indirect = matrices_indirect != 0;
-                        candidate.indices_indirect = indices_indirect != 0;
-                        SkeletonHierarchyInfo candidate_storage{};
-                        int32_t candidate_index = -1;
-                        Vec3 candidate_head{};
-                        if (!skeleton_head_matches_player(native_head, feet, candidate,
-                                                           candidate_storage, candidate_head,
-                                                           candidate_index)) continue;
-                        g_skeleton_layout = candidate;
-                        g_skeleton_layout_valid = true;
-                        storage = candidate_storage;
-                        head_index = candidate_index;
-                        head_position = candidate_head;
+    Vec3 bones[kSkeletonBoneCount]{};
+    bool ok = read_bone_positions(native_animator, matrices, indices, bones) &&
+              skeleton_positions_plausible(bones, feet);
+
+    g_bone_layout = saved;
+    g_bone_layout_valid = saved_valid;
+    return ok;
+}
+
+// One-time discovery of the Avatar native offsets (Unity engine internals, not
+// present in the dump). Scans plausible offsets and keeps the first layout
+// that produces a humanoid-shaped skeleton belonging to the player. Cached
+// for the rest of the session; invalidated on scene switches.
+static bool scan_bone_layout(uint64_t native_animator, uint64_t matrices, uint64_t indices,
+                             const Vec3& feet,
+                             const uint64_t* animator_avatar_offs, size_t animator_avatar_count,
+                             const uint64_t* avatar_data_offs, size_t avatar_data_count,
+                             const uint64_t* avatar_size_offs, size_t avatar_size_count,
+                             const uint64_t* hbi_offs, size_t hbi_count,
+                             const uint64_t* tos_offs, size_t tos_count) {
+    const uint64_t tos_strides[] = {0x18, 0x10, 0x20, 0x08};
+    const uint64_t tos_count_offs[] = {0x08, 0x00};
+
+    for (size_t ai = 0; ai < animator_avatar_count; ++ai) {
+        uint64_t aoff = animator_avatar_offs[ai];
+        uint64_t avatar = rd_ptr(native_animator + aoff);
+        if (!likely_native_pointer(avatar)) continue;
+
+        for (size_t di = 0; di < avatar_data_count; ++di) {
+            uint64_t doff = avatar_data_offs[di];
+            uint64_t avatar_data = rd_ptr(avatar + doff);
+            if (!likely_native_pointer(avatar_data)) continue;
+
+            for (size_t si = 0; si < avatar_size_count; ++si) {
+                uint64_t soff = avatar_size_offs[si];
+                uint32_t size = rd<uint32_t>(avatar + soff);
+                if (size < 20 || size > 5000) continue;
+
+                for (size_t hi = 0; hi < hbi_count; ++hi) {
+                    uint64_t hoff = hbi_offs[hi];
+                    uint64_t hbi = rd_ptr(avatar_data + hoff);
+                    if (!likely_native_pointer(hbi)) continue;
+
+                    // Cheap pre-check on key bone node indices before doing the
+                    // expensive hierarchy walks.
+                    uint32_t head  = rd<uint32_t>(hbi + 11u * 4u);
+                    uint32_t hips  = rd<uint32_t>(hbi + 0u * 4u);
+                    uint32_t lfoot = rd<uint32_t>(hbi + 5u * 4u);
+                    uint32_t rfoot = rd<uint32_t>(hbi + 6u * 4u);
+                    if (head >= size || hips >= size || lfoot >= size || rfoot >= size) continue;
+                    if (head == hips && head == lfoot && head == rfoot) continue;
+
+                    BoneLayout candidate{};
+                    candidate.animator_avatar_off = aoff;
+                    candidate.avatar_data_off = doff;
+                    candidate.avatar_size_off = soff;
+                    candidate.hbi_off = hoff;
+                    candidate.use_tos = false;
+                    if (try_bone_layout(candidate, native_animator, matrices, indices, feet)) {
+                        g_bone_layout = candidate;
+                        g_bone_layout_valid = true;
                         return true;
+                    }
+
+                    for (size_t ti = 0; ti < tos_count; ++ti) {
+                        uint64_t toff = tos_offs[ti];
+                        uint64_t tos = rd_ptr(avatar_data + toff);
+                        if (!likely_native_pointer(tos)) continue;
+                        for (uint64_t stride : tos_strides) {
+                            for (uint64_t count_off : tos_count_offs) {
+                                candidate.use_tos = true;
+                                candidate.tos_off = toff;
+                                candidate.tos_stride = stride;
+                                candidate.tos_count_off = count_off;
+                                candidate.tos_first_index_off = count_off + 4;
+                                if (try_bone_layout(candidate, native_animator, matrices, indices, feet)) {
+                                    g_bone_layout = candidate;
+                                    g_bone_layout_valid = true;
+                                    return true;
+                                }
+                                std::swap(candidate.tos_count_off, candidate.tos_first_index_off);
+                                if (try_bone_layout(candidate, native_animator, matrices, indices, feet)) {
+                                    g_bone_layout = candidate;
+                                    g_bone_layout_valid = true;
+                                    return true;
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    g_skeleton_layout_retry_after = now + std::chrono::milliseconds(750);
     return false;
 }
 
-static int32_t discover_skeleton_hierarchy_count(uint64_t matrices, uint64_t indices,
-                                                 int32_t seed_index) {
-    if (!matrices || !indices || seed_index < 0) return 0;
+static bool discover_bone_layout(uint64_t native_animator, uint64_t matrices,
+                                 uint64_t indices, const Vec3& feet) {
+    if (!likely_native_pointer(native_animator)) return false;
 
-    // Humanoid models in this title are well below 512 transforms. Reading a
-    // block once is considerably cheaper than issuing one process_vm_readv per
-    // bone on every frame. If a platform maps a shorter block, retry with a
-    // smaller one instead of treating a partial read as a valid pose.
-    constexpr int kProbeCount = 512;
-    std::vector<Matrix34> matrix_probe(kProbeCount);
-    std::vector<int32_t> index_probe(kProbeCount);
-    int probe_count = kProbeCount;
-    while (probe_count >= 32) {
-        matrix_probe.resize((size_t)probe_count);
-        index_probe.resize((size_t)probe_count);
-        if (read_remote_block(matrices, matrix_probe.data(),
-                              (size_t)probe_count * sizeof(Matrix34)) &&
-            read_remote_block(indices, index_probe.data(),
-                              (size_t)probe_count * sizeof(int32_t)))
-            break;
-        probe_count /= 2;
-    }
-    if (probe_count < 32) return 0;
-
-    int32_t highest = -1;
-    int invalid_tail = 0;
-    for (int32_t index = 0; index < probe_count; ++index) {
-        int32_t parent = index_probe[(size_t)index];
-        bool valid = matrix34_is_valid(matrix_probe[(size_t)index]) &&
-                     parent >= -1 && parent < probe_count;
-        if (valid) {
-            highest = index;
-            invalid_tail = 0;
-        } else if (index > seed_index && ++invalid_tail >= 24) {
-            // There normally are no holes in Unity's transform arrays. This
-            // keeps stale allocator data after the live array out of the graph.
-            break;
+    // Fast path: the known-good defaults for this Unity branch, both with and
+    // without the TransformOffsetStructure indirection.
+    {
+        BoneLayout candidate{};
+        candidate.use_tos = false;
+        if (try_bone_layout(candidate, native_animator, matrices, indices, feet)) {
+            g_bone_layout = candidate;
+            g_bone_layout_valid = true;
+            return true;
         }
-    }
-    if (highest < seed_index) return 0;
-    return highest + 1;
-}
-
-enum LiveBoneId : int {
-    LIVE_HIPS = 0,
-    LIVE_LEFT_UPPER_LEG = 1,
-    LIVE_RIGHT_UPPER_LEG = 2,
-    LIVE_LEFT_LOWER_LEG = 3,
-    LIVE_RIGHT_LOWER_LEG = 4,
-    LIVE_LEFT_FOOT = 5,
-    LIVE_RIGHT_FOOT = 6,
-    LIVE_SPINE = 7,
-    LIVE_CHEST = 8,
-    LIVE_UPPER_CHEST = 9,
-    LIVE_NECK = 10,
-    LIVE_HEAD = 11,
-    LIVE_LEFT_SHOULDER = 12,
-    LIVE_RIGHT_SHOULDER = 13,
-    LIVE_LEFT_UPPER_ARM = 14,
-    LIVE_RIGHT_UPPER_ARM = 15,
-    LIVE_LEFT_LOWER_ARM = 16,
-    LIVE_RIGHT_LOWER_ARM = 17,
-    LIVE_LEFT_HAND = 18,
-    LIVE_RIGHT_HAND = 19,
-    LIVE_LEFT_TOES = 20,
-    LIVE_RIGHT_TOES = 21,
-    LIVE_BONE_COUNT = 22
-};
-
-struct LiveBoneSet {
-    Vec3 position[LIVE_BONE_COUNT]{};
-    bool valid[LIVE_BONE_COUNT]{};
-    int valid_count = 0;
-};
-
-static int read_live_bone_candidate(uint64_t transform_array,
-                                    uint64_t mapping_array,
-                                    int mapping_mode,
-                                    const TransformHierarchyLayout* layout,
-                                    const Vec3& feet,
-                                    LiveBoneSet& result) {
-    result = {};
-    if (!likely_native_pointer(transform_array)) return -1;
-    int32_t count = rd<int32_t>(transform_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8);
-    if (count <= 0 || count > 96) return -1;
-    int32_t mapping_count = 0;
-    if (mapping_mode != 0) {
-        if (!likely_native_pointer(mapping_array)) return -1;
-        mapping_count = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT - 8);
-        if (mapping_count <= 0 || mapping_count > 96) return -1;
-    }
-
-    int score = 0;
-    int32_t iterations = mapping_mode == 2 ? LIVE_BONE_COUNT : count;
-    for (int32_t i = 0; i < iterations; ++i) {
-        int32_t bone_id = i;
-        int32_t transform_index = i;
-        if (mapping_mode == 1) {
-            if (i >= mapping_count) continue;
-            bone_id = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT +
-                                  (uint64_t)i * sizeof(int32_t));
-        } else if (mapping_mode == 2) {
-            if (i >= mapping_count) continue;
-            transform_index = rd<int32_t>(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT +
-                                          (uint64_t)i * sizeof(int32_t));
-            if (transform_index < 0 || transform_index >= count) continue;
-        }
-        if (bone_id < 0 || bone_id >= LIVE_BONE_COUNT || result.valid[bone_id]) continue;
-        uint64_t managed_transform = rd_ptr(transform_array + IL2CPP_ARRAY_FIRST_ELEMENT +
-                                            (uint64_t)transform_index * sizeof(uint64_t));
-        if (!likely_native_pointer(managed_transform)) continue;
-        uint64_t native_transform = resolve_native_transform(managed_transform);
-        Vec3 position{};
-        bool have_position = layout
-            ? read_transform_hierarchy_layout(native_transform, *layout, position)
-            : read_transform_hierarchy_position(native_transform, position);
-        if (!likely_native_pointer(native_transform) || !have_position) continue;
-
-        float dx = position.x - feet.x;
-        float dy = position.y - feet.y;
-        float dz = position.z - feet.z;
-        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (!std::isfinite(distance) || distance > 10.f) continue;
-        result.position[bone_id] = position;
-        result.valid[bone_id] = true;
-        ++result.valid_count;
-    }
-
-    // Prefer a complete anatomical mapping over an array that happens to
-    // contain only lower-body transforms. This is what prevents the old
-    // "legs-only" result when pjY is present but interpreted incorrectly.
-    if (result.valid[LIVE_HEAD]) score += 120;
-    if (result.valid[LIVE_NECK]) score += 60;
-    if (result.valid[LIVE_HIPS]) score += 100;
-    if (result.valid[LIVE_CHEST] || result.valid[LIVE_UPPER_CHEST]) score += 80;
-    if (result.valid[LIVE_LEFT_UPPER_ARM] && result.valid[LIVE_RIGHT_UPPER_ARM]) score += 70;
-    if (result.valid[LIVE_LEFT_UPPER_LEG] && result.valid[LIVE_RIGHT_UPPER_LEG]) score += 50;
-    score += result.valid_count;
-    return score;
-}
-
-static bool read_live_bone_skeleton(uint64_t character_animation,
-                                    const Vec3& feet,
-                                    std::vector<std::pair<Vec3, Vec3>>& segments,
-                                    Vec3& animated_head,
-                                    Vec3& skeleton_chest,
-                                    Vec3& skeleton_pelvis) {
-    if (!likely_native_pointer(character_animation)) return false;
-    uint64_t bone_cache = rd_ptr(character_animation + CHARACTER_ANIMATION_BONE_CACHE);
-    if (!likely_native_pointer(bone_cache)) return false;
-    uint64_t transform_array = rd_ptr(bone_cache + BONE_CACHE_TRANSFORMS);
-    uint64_t mapping_array = rd_ptr(bone_cache + BONE_CACHE_MAPPING);
-    if (!likely_native_pointer(transform_array)) return false;
-
-    // Validate the bone cache against several known Unity Transform layouts.
-    // The source client uses the compact 0x28/0x30 form; this title commonly
-    // uses 0x38/0x40. We select the layout and mapping with the strongest
-    // anatomical coverage instead of trusting the first plausible coordinates.
-    TransformHierarchyLayout standard_layout{};
-    TransformHierarchyLayout compact_layout{};
-    compact_layout.data_offset = 0x28;
-    compact_layout.index_offset = 0x30;
-    TransformHierarchyLayout standard_mi = standard_layout;
-    standard_mi.matrices_indirect = true;
-    TransformHierarchyLayout compact_mi = compact_layout;
-    compact_mi.matrices_indirect = true;
-    // Prefer the layout already resolved for this scene (validated against the
-    // live head transform by the thorough probe), then the shared
-    // transform-hierarchy layout, then the fixed Unity ABI shapes. Using the
-    // resolved layout here is what lets the named cache (tk.pjh) resolve the
-    // torso/arm bones that the hierarchy-graph fallback cannot see.
-    const TransformHierarchyLayout* layouts[] = {
-        g_skeleton_layout_valid ? &g_skeleton_layout : nullptr,
-        g_transform_hierarchy_layout_valid ? &g_transform_hierarchy_layout : nullptr,
-        &standard_layout, &standard_mi, &compact_layout, &compact_mi
-    };
-    // Pick the best candidate by coverage score only. Requiring a *complete*
-    // body here is what previously made one missing bone throw away the whole
-    // named cache and fall back to the raw (junk) hierarchy graph.
-    LiveBoneSet best_set{};
-    int best_score = -1;
-    for (const TransformHierarchyLayout* layout : layouts) {
-        for (int mapping_mode = 0; mapping_mode < 3; ++mapping_mode) {
-            LiveBoneSet candidate{};
-            int score = read_live_bone_candidate(transform_array, mapping_array,
-                                                 mapping_mode, layout, feet, candidate);
-            if (score > best_score) {
-                best_score = score;
-                best_set = candidate;
-            }
-        }
-    }
-    if (best_score < 0) return false;
-
-
-    // The "head" a wrong mapping resolves can actually be a helper transform
-    // (head-attach point, hair/hat anchor, camera-IK target) sitting well above
-    // the skull. That draws the neck->head segment as a stray corner above the
-    // model and, before, inflated the calibration height so the whole skeleton
-    // floated. The real head always sits within a small window just above the
-    // neck, so anything outside it is treated as unresolved and replaced.
-    if (best_set.valid[LIVE_HEAD] && best_set.valid[LIVE_NECK]) {
-        float neck_to_head = best_set.position[LIVE_HEAD].y - best_set.position[LIVE_NECK].y;
-        if (!std::isfinite(neck_to_head) || neck_to_head < -0.10f || neck_to_head > 0.50f) {
-            best_set.valid[LIVE_HEAD] = false;
-            --best_set.valid_count;
-        }
-    }
-    // Some skins/poses do not expose a Head bone in the cache (or it was
-    // rejected above). Synthesize it from the neck, in the same frame as the
-    // other bones, so the head segment never reaches up above the model.
-    if (!best_set.valid[LIVE_HEAD] && best_set.valid[LIVE_NECK]) {
-        best_set.position[LIVE_HEAD] = {
-            best_set.position[LIVE_NECK].x,
-            best_set.position[LIVE_NECK].y + 0.18f,
-            best_set.position[LIVE_NECK].z
-        };
-        best_set.valid[LIVE_HEAD] = true;
-        ++best_set.valid_count;
-    }
-
-    // A usable named skeleton needs a pelvis and at least a couple of torso
-    // bones. A legs-only result is a symptom of a wrong layout/mapping, so it
-    // is rejected and the (filtered) hierarchy fallback is tried instead.
-    bool has_core = best_set.valid[LIVE_HIPS] &&
-        (best_set.valid[LIVE_NECK] || best_set.valid[LIVE_HEAD]) &&
-        (best_set.valid[LIVE_SPINE] || best_set.valid[LIVE_CHEST] || best_set.valid[LIVE_UPPER_CHEST]);
-    if (!has_core) return false;
-
-    // tk.pjh contains model-space transforms. Depending on the active skin and
-    // animation state, the cached hierarchy can be rooted at the visual model
-    // while PlayerManager.lastTickPosition is rooted at the KCC capsule. Align
-    // the pelvis to that capsule before projecting; otherwise the whole box and
-    // skeleton are translated together above the character.
-    LiveBoneSet calibrated = best_set;
-    // Estimate the head top from the most reliable upper bone, in the bones'
-    // own frame. Never use an injected/overridden head here: a head transform
-    // that sits above the skull inflates this height and lifts the whole
-    // skeleton off the model.
-    float top_y = feet.y + PLAYER_HEIGHT;
-    if (best_set.valid[LIVE_NECK]) top_y = best_set.position[LIVE_NECK].y + 0.20f;
-    else if (best_set.valid[LIVE_UPPER_CHEST]) top_y = best_set.position[LIVE_UPPER_CHEST].y + 0.40f;
-    else if (best_set.valid[LIVE_CHEST]) top_y = best_set.position[LIVE_CHEST].y + 0.50f;
-    else if (best_set.valid[LIVE_SPINE]) top_y = best_set.position[LIVE_SPINE].y + 0.65f;
-    else if (best_set.valid[LIVE_HEAD]) top_y = best_set.position[LIVE_HEAD].y;
-    float bone_height = fabsf(top_y - feet.y);
-    if (!std::isfinite(bone_height) || bone_height < 0.5f) bone_height = PLAYER_HEIGHT;
-    float target_hip_height = bone_height * 0.50f;
-    if (target_hip_height < 0.35f) target_hip_height = 0.35f;
-    if (target_hip_height > 0.95f) target_hip_height = 0.95f;
-    Vec3 shift = {
-        feet.x - calibrated.position[LIVE_HIPS].x,
-        feet.y + target_hip_height - calibrated.position[LIVE_HIPS].y,
-        feet.z - calibrated.position[LIVE_HIPS].z
-    };
-    if (vec3_is_finite(shift)) {
-        for (int i = 0; i < LIVE_BONE_COUNT; ++i) {
-            if (!calibrated.valid[i]) continue;
-            calibrated.position[i].x += shift.x;
-            calibrated.position[i].y += shift.y;
-            calibrated.position[i].z += shift.z;
+        candidate = BoneLayout{};
+        candidate.use_tos = true;
+        if (try_bone_layout(candidate, native_animator, matrices, indices, feet)) {
+            g_bone_layout = candidate;
+            g_bone_layout_valid = true;
+            return true;
         }
     }
 
-    // Reject a scrambled bone mapping before it is drawn: after calibration the
-    // skeleton must be anatomically upright (head above neck above hips above
-    // feet, with a human head height). If pjY/pjh were interpreted wrong, the
-    // "head"/"neck"/"hips" slots point at unrelated transforms and this fails,
-    // so we fall through to the (clipped) hierarchy graph instead of drawing a
-    // skeleton that floats above the model.
-    if (calibrated.valid[LIVE_HEAD] && calibrated.valid[LIVE_NECK] &&
-        calibrated.valid[LIVE_HIPS]) {
-        float head_h = calibrated.position[LIVE_HEAD].y - feet.y;
-        if (!std::isfinite(head_h) || head_h < 0.6f || head_h > 2.6f) return false;
-        if (calibrated.position[LIVE_NECK].y < calibrated.position[LIVE_HIPS].y - 0.10f)
-            return false;
-        if (calibrated.position[LIVE_HIPS].y < feet.y - 0.30f)
-            return false;
-    }
-
-    const LiveBoneSet* bones = &calibrated;
-
-    animated_head = bones->valid[LIVE_HEAD] ? bones->position[LIVE_HEAD]
-                 : bones->valid[LIVE_NECK] ? bones->position[LIVE_NECK]
-                 : Vec3{feet.x, top_y, feet.z};
-    skeleton_pelvis = bones->position[LIVE_HIPS];
-    if (bones->valid[LIVE_UPPER_CHEST]) skeleton_chest = bones->position[LIVE_UPPER_CHEST];
-    else if (bones->valid[LIVE_CHEST]) skeleton_chest = bones->position[LIVE_CHEST];
-    else if (bones->valid[LIVE_SPINE]) skeleton_chest = bones->position[LIVE_SPINE];
-    else skeleton_chest = {
-        animated_head.x + (skeleton_pelvis.x - animated_head.x) * 0.4f,
-        animated_head.y + (skeleton_pelvis.y - animated_head.y) * 0.4f,
-        animated_head.z + (skeleton_pelvis.z - animated_head.z) * 0.4f
-    };
-
-    auto add_segment = [&](int a, int b) {
-        if (!bones->valid[a] || !bones->valid[b]) return;
-        const Vec3& first = bones->position[a];
-        const Vec3& second = bones->position[b];
-        float dx = first.x - second.x;
-        float dy = first.y - second.y;
-        float dz = first.z - second.z;
-        float length = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (!std::isfinite(length) || length < 0.005f || length > 4.f) return;
-        segments.emplace_back(first, second);
-    };
-
-    // The order mirrors Unity's HumanBodyBones enum from dump.cs. Every point
-    // is read from the live Transform cache, so arm/leg bends follow Animator
-    // and IK instead of being synthesized from movement speed.
-    add_segment(LIVE_HEAD, LIVE_NECK);
-
-    // Do not require UpperChest to exist. Some skins omit it, which was the
-    // reason the earlier implementation could show legs while losing the
-    // entire torso/head chain.
-    int torso_previous = LIVE_NECK;
-    const int torso_chain[] = {LIVE_UPPER_CHEST, LIVE_CHEST, LIVE_SPINE, LIVE_HIPS};
-    for (int torso_bone : torso_chain) {
-        if (!bones->valid[torso_bone]) continue;
-        if (bones->valid[torso_previous]) add_segment(torso_previous, torso_bone);
-        torso_previous = torso_bone;
-    }
-    int shoulder_parent = bones->valid[LIVE_UPPER_CHEST] ? LIVE_UPPER_CHEST
-                        : bones->valid[LIVE_CHEST] ? LIVE_CHEST
-                        : bones->valid[LIVE_SPINE] ? LIVE_SPINE : LIVE_HIPS;
-    if (bones->valid[shoulder_parent]) {
-        add_segment(shoulder_parent, LIVE_LEFT_SHOULDER);
-        add_segment(shoulder_parent, LIVE_RIGHT_SHOULDER);
-    }
-    add_segment(LIVE_LEFT_SHOULDER, LIVE_LEFT_UPPER_ARM);
-    add_segment(LIVE_LEFT_UPPER_ARM, LIVE_LEFT_LOWER_ARM);
-    add_segment(LIVE_LEFT_LOWER_ARM, LIVE_LEFT_HAND);
-    add_segment(LIVE_RIGHT_SHOULDER, LIVE_RIGHT_UPPER_ARM);
-    add_segment(LIVE_RIGHT_UPPER_ARM, LIVE_RIGHT_LOWER_ARM);
-    add_segment(LIVE_RIGHT_LOWER_ARM, LIVE_RIGHT_HAND);
-    add_segment(LIVE_HIPS, LIVE_LEFT_UPPER_LEG);
-    add_segment(LIVE_LEFT_UPPER_LEG, LIVE_LEFT_LOWER_LEG);
-    add_segment(LIVE_LEFT_LOWER_LEG, LIVE_LEFT_FOOT);
-    add_segment(LIVE_LEFT_FOOT, LIVE_LEFT_TOES);
-    add_segment(LIVE_HIPS, LIVE_RIGHT_UPPER_LEG);
-    add_segment(LIVE_RIGHT_UPPER_LEG, LIVE_RIGHT_LOWER_LEG);
-    add_segment(LIVE_RIGHT_LOWER_LEG, LIVE_RIGHT_FOOT);
-    add_segment(LIVE_RIGHT_FOOT, LIVE_RIGHT_TOES);
-
-    return segments.size() >= 5 && vec3_is_finite(animated_head) &&
-           vec3_is_finite(skeleton_chest) && vec3_is_finite(skeleton_pelvis);
-}
-
-static bool build_skeleton_graph(uint64_t native_head, const Vec3& feet,
-                                 std::vector<std::pair<Vec3, Vec3>>& segments,
-                                 Vec3& animated_head) {
-    SkeletonHierarchyInfo layout_storage{};
-    int32_t head_index = -1;
-    if (!resolve_skeleton_layout(native_head, feet, layout_storage,
-                                 head_index, animated_head)) return false;
-
-    uint64_t cache_key = layout_storage.matrices ^ (layout_storage.indices * 0x9E3779B97F4A7C15ULL);
-    auto cached = g_skeleton_hierarchy_cache.find(cache_key);
-    if (cached != g_skeleton_hierarchy_cache.end() &&
-        cached->second.matrices == layout_storage.matrices &&
-        cached->second.indices == layout_storage.indices) {
-        layout_storage.count = cached->second.count;
-    } else {
-        layout_storage.count = discover_skeleton_hierarchy_count(layout_storage.matrices,
-                                                                  layout_storage.indices,
-                                                                  head_index);
-        if (layout_storage.count <= head_index || layout_storage.count <= 0) return false;
-        g_skeleton_hierarchy_cache[cache_key] = layout_storage;
-    }
-    if (layout_storage.count <= head_index || layout_storage.count > 512) return false;
-
-    auto frame_it = g_skeleton_frame_cache.find(cache_key);
-    if (frame_it == g_skeleton_frame_cache.end()) {
-        SkeletonFrameData frame{};
-        frame.matrices = layout_storage.matrices;
-        frame.indices = layout_storage.indices;
-        frame.matrix_values.resize((size_t)layout_storage.count);
-        frame.parent_values.resize((size_t)layout_storage.count);
-        if (!read_remote_block(frame.matrices, frame.matrix_values.data(),
-                               frame.matrix_values.size() * sizeof(Matrix34)) ||
-            !read_remote_block(frame.indices, frame.parent_values.data(),
-                               frame.parent_values.size() * sizeof(int32_t))) return false;
-        frame_it = g_skeleton_frame_cache.emplace(cache_key, std::move(frame)).first;
-    }
-    const std::vector<Matrix34>& matrices = frame_it->second.matrix_values;
-    const std::vector<int32_t>& parents = frame_it->second.parent_values;
-
-    std::vector<Vec3> world((size_t)layout_storage.count);
-    std::vector<uint8_t> state((size_t)layout_storage.count, 0);
-    std::function<bool(int32_t)> calculate_world = [&](int32_t index) -> bool {
-        if (index < 0 || index >= layout_storage.count) return false;
-        uint8_t& node_state = state[(size_t)index];
-        if (node_state == 2) return true;
-        if (node_state == 1) return false; // malformed/cyclic hierarchy
-        node_state = 1;
-        const Matrix34& local = matrices[(size_t)index];
-        if (!matrix34_is_valid(local)) { node_state = 0; return false; }
-
-        // Apply ancestors in the same order as Unity's Transform hierarchy:
-        // local position -> parent scale/rotation/translation -> grandparent.
-        // This is exact even for non-uniformly scaled ragdoll bones and avoids
-        // any approximation from composing a single Euler/body rotation.
-        Vec3 result = {local.translation.x, local.translation.y, local.translation.z};
-        int32_t parent = parents[(size_t)index];
-        int depth = 0;
-        for (; parent >= 0 && depth < 128; ++depth) {
-            if (parent >= layout_storage.count || !matrix34_is_valid(matrices[(size_t)parent])) {
-                node_state = 0;
-                return false;
-            }
-            const Matrix34& parent_local = matrices[(size_t)parent];
-            Vec3 scaled = {result.x * parent_local.scale.x,
-                           result.y * parent_local.scale.y,
-                           result.z * parent_local.scale.z};
-            Vec3 rotated = rotate_vector(parent_local.rotation, scaled);
-            result = {parent_local.translation.x + rotated.x,
-                      parent_local.translation.y + rotated.y,
-                      parent_local.translation.z + rotated.z};
-            parent = parents[(size_t)parent];
-        }
-        if ((depth >= 128 && parent >= 0) || parent < -1 ||
-            parent >= layout_storage.count || !vec3_is_finite(result)) {
-            node_state = 0;
-            return false;
-        }
-        world[(size_t)index] = result;
-        node_state = 2;
-        return true;
-    };
-
-    // Resolve the root and validate that the head is actually part of it.
-    int32_t root = head_index;
-    for (int depth = 0; depth < 128; ++depth) {
-        if (root < 0 || root >= layout_storage.count) return false;
-        int32_t parent = parents[(size_t)root];
-        if (parent == -1) break;
-        if (parent < 0 || parent >= layout_storage.count) return false;
-        root = parent;
-        if (depth == 127) return false;
-    }
-    if (!calculate_world(head_index)) return false;
-    animated_head = world[(size_t)head_index];
-
-    std::vector<int8_t> relation((size_t)layout_storage.count, -1);
-    std::function<bool(int32_t)> belongs_to_root = [&](int32_t index) -> bool {
-        if (index < 0 || index >= layout_storage.count) return false;
-        int8_t& relation_state = relation[(size_t)index];
-        if (relation_state >= 0) return relation_state != 0;
-        int32_t current = index;
-        for (int depth = 0; depth < 128; ++depth) {
-            if (current == root) {
-                relation_state = 1;
-                return true;
-            }
-            if (current < 0 || current >= layout_storage.count) break;
-            current = parents[(size_t)current];
-            if (current == -1) break;
-        }
-        relation_state = 0;
+    // Tier 1: the offset space validated against this game (Unity 2021/2022
+    // engine branch).  Kept first because it is the smallest space that is
+    // known to work.
+    if (!g_bone_layout_extended) {
+        const uint64_t animator_avatar_offs[] = {0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78,
+                                                 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0};
+        const uint64_t avatar_data_offs[] = {0x20, 0x28, 0x30, 0x38, 0x40, 0x48};
+        const uint64_t avatar_size_offs[] = {0x28, 0x30, 0x38, 0x40};
+        const uint64_t hbi_offs[] = {0x38, 0x40, 0x48, 0x50};
+        const uint64_t tos_offs[] = {0x10, 0x08, 0x18};
+        if (scan_bone_layout(native_animator, matrices, indices, feet,
+                             animator_avatar_offs, std::size(animator_avatar_offs),
+                             avatar_data_offs, std::size(avatar_data_offs),
+                             avatar_size_offs, std::size(avatar_size_offs),
+                             hbi_offs, std::size(hbi_offs),
+                             tos_offs, std::size(tos_offs)))
+            return true;
+        // Not found this attempt; widen the search on the next retry instead
+        // of burning more time in this frame.
+        g_bone_layout_extended = true;
         return false;
-    };
-
-    constexpr float kMaxBoneDistanceFromRoot = 10.0f;
-    constexpr float kMaxBoneSegmentLength = 4.0f;
-    for (int32_t index = 0; index < layout_storage.count; ++index) {
-        if (index == root || !belongs_to_root(index)) continue;
-        int32_t parent = parents[(size_t)index];
-        if (parent < 0 || !belongs_to_root(parent)) continue;
-        // The topmost scene/character root sits between the legs; its edge
-        // projects as a stray line that runs up out of the ESP box. Skip it.
-        if (parent == root) continue;
-        if (!calculate_world(index) || !calculate_world(parent)) continue;
-        const Vec3& a = world[(size_t)parent];
-        const Vec3& b = world[(size_t)index];
-        // The character/body root sits on the ground between the legs; its edge
-        // up to the hips projects as a straight pole through the middle of the
-        // body and out of the top of the box. Real bones never start at ground
-        // level and run upward, so drop that synthetic link.
-        float py = a.y - feet.y;
-        float cy = b.y - feet.y;
-        if (py < 0.35f && cy > py + 0.5f) continue;
-        float ax = a.x - feet.x, ay = a.y - feet.y, az = a.z - feet.z;
-        float bx = b.x - feet.x, by = b.y - feet.y, bz = b.z - feet.z;
-        float length = sqrtf((a.x - b.x) * (a.x - b.x) +
-                             (a.y - b.y) * (a.y - b.y) +
-                             (a.z - b.z) * (a.z - b.z));
-        if (!std::isfinite(length) || length < 0.005f || length > kMaxBoneSegmentLength ||
-            !std::isfinite(ax + ay + az + bx + by + bz) ||
-            sqrtf(ax * ax + ay * ay + az * az) > kMaxBoneDistanceFromRoot ||
-            sqrtf(bx * bx + by * by + bz * bz) > kMaxBoneDistanceFromRoot) continue;
-        segments.emplace_back(a, b);
-        if (segments.size() >= 160) break;
     }
-    return !segments.empty() && vec3_is_finite(animated_head);
-}
 
-static bool choose_skeleton_anchor(const std::vector<std::pair<Vec3, Vec3>>& segments,
-                                   const Vec3& feet, const Vec3& head,
-                                   float height_factor, Vec3& anchor) {
-    float height = head.y - feet.y;
-    if (!std::isfinite(height) || fabsf(height) < 0.05f) return false;
-    float target_y = feet.y + height * height_factor;
-    float best_score = INFINITY;
-    bool found = false;
-    for (const auto& segment : segments) {
-        const Vec3 points[] = {segment.first, segment.second};
-        for (const Vec3& point : points) {
-            float dx = point.x - feet.x;
-            float dz = point.z - feet.z;
-            float horizontal = sqrtf(dx * dx + dz * dz);
-            if (!vec3_is_finite(point) || !std::isfinite(horizontal) || horizontal > 3.5f)
-                continue;
-            // Prefer central torso points at the requested anatomical height.
-            // This remains pose-aware for crouch, prone and ragdoll states,
-            // unlike a fixed fraction of the ESP rectangle.
-            float score = fabsf(point.y - target_y) + horizontal * 0.35f;
-            if (score < best_score) {
-                best_score = score;
-                anchor = point;
-                found = true;
-            }
-        }
+    // Tier 2: a superset of tier 1 (plus wider bounds), in case a game update
+    // moved the engine internals (e.g. a newer Unity LTS).  Re-scanning the
+    // tier-1 space also recovers from a transient tier-1 failure (e.g. the
+    // discovery ran while the sample player was mid-ragdoll).
+    {
+        const uint64_t animator_avatar_offs[] = {0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70,
+                                                 0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0,
+                                                 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8, 0x100};
+        const uint64_t avatar_data_offs[] = {0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70};
+        const uint64_t avatar_size_offs[] = {0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60};
+        const uint64_t hbi_offs[] = {0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70};
+        const uint64_t tos_offs[] = {0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48};
+        if (scan_bone_layout(native_animator, matrices, indices, feet,
+                             animator_avatar_offs, std::size(animator_avatar_offs),
+                             avatar_data_offs, std::size(avatar_data_offs),
+                             avatar_size_offs, std::size(avatar_size_offs),
+                             hbi_offs, std::size(hbi_offs),
+                             tos_offs, std::size(tos_offs)))
+            return true;
     }
-    return found && vec3_is_finite(anchor);
+    return false;
 }
 
 static void build_fallback_skeleton(const Vec3& feet, float height,
@@ -1120,183 +788,56 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
         return !segments.empty();
     };
 
-    // InterfaceReference<T> stores the selected MonoBehaviour component. Some
-    // IL2CPP builds expose the component directly, while others keep the
-    // wrapper object; accept both representations after validating KCC.player.
-    uint64_t reference = rd_ptr(player + PLAYER_KCC_REFERENCE);
-    uint64_t kcc = 0;
-    uint64_t kcc_head_offset = KCC_HEAD;
-    uint64_t kcc_character_animation_offset = KCC_CHARACTER_ANIMATION;
-    const uint64_t candidates[] = {
-        reference,
-        reference ? rd_ptr(reference + 0x10) : 0,
-        reference ? rd_ptr(reference + 0x18) : 0,
-        reference ? rd_ptr(reference + 0x20) : 0
+    uint64_t native_animator = resolve_native_animator(player);
+    if (!likely_native_pointer(native_animator)) return use_fallback();
+
+    uint64_t matrices = 0, indices = 0;
+    if (!get_hierarchy_arrays(resolve_player_native_transform(player), matrices, indices))
+        return use_fallback();
+
+    if (!g_bone_layout_valid) {
+        // Discovery scans many offsets; only retry a few times per second so a
+        // layout that never validates can't tank the frame rate.  After a few
+        // consecutive failures, back off to a slow retry cadence.
+        auto now = std::chrono::steady_clock::now();
+        if (now < g_bone_layout_retry_after) return use_fallback();
+        g_bone_layout_retry_after = now + std::chrono::milliseconds(750);
+        if (++g_bone_layout_failures > 1) {
+            g_bone_layout_retry_after = now + std::chrono::seconds(5);
+            g_bone_layout_failures = 0;
+        }
+        discover_bone_layout(native_animator, matrices, indices, feet);
+    }
+    if (!g_bone_layout_valid) return use_fallback();
+
+    Vec3 bones[kSkeletonBoneCount]{};
+    if (!read_bone_positions(native_animator, matrices, indices, bones) ||
+        !skeleton_positions_plausible(bones, feet))
+        return use_fallback();
+
+    // All 20 bones resolved: build the 19 humanoid segments.  The positions
+    // are real world-space rig data, so the skeleton sits exactly on the
+    // rendered model with no shift applied.
+    const int kSegments[][2] = {
+        {0, 1},  {1, 2},  {2, 3},  {3, 4},  {4, 5},   // head -> neck -> chest -> spine -> hips
+        {2, 6},  {6, 7},  {7, 8},  {8, 9},            // left  arm
+        {2, 10}, {10, 11}, {11, 12}, {12, 13},        // right arm
+        {5, 14}, {14, 15}, {15, 16},                  // left  leg
+        {5, 17}, {17, 18}, {18, 19}                   // right leg
     };
-    for (uint64_t candidate : candidates) {
-        if (!likely_native_pointer(candidate)) continue;
-        if (rd_ptr(candidate + KCC_PLAYER) == player) {
-            kcc = candidate;
-            break;
-        }
-        // Tutorial/legacy player prefabs use the same component with the
-        // inherited fields shifted by 8 bytes. Supporting both layouts keeps
-        // the skeleton alive during model/controller swaps.
-        if (rd_ptr(candidate + 0x80) == player) {
-            kcc = candidate;
-            kcc_head_offset = 0x90;
-            kcc_character_animation_offset = 0xC0;
-            break;
-        }
-    }
-    if (!kcc) return use_fallback();
-
-    uint64_t character_animation = rd_ptr(kcc + kcc_character_animation_offset);
-    uint64_t model_info = character_animation
-        ? rd_ptr(character_animation + CHARACTER_ANIMATION_MODEL_INFO) : 0;
-
-    // The KCC head is the preferred anchor. PlayerModelInfo is also checked:
-    // during skin swaps/reloads the KCC head can temporarily point to a camera
-    // helper while the actual body hierarchy remains alive below modelInfo.
-    const uint64_t managed_transforms[] = {
-        rd_ptr(kcc + kcc_head_offset),
-        model_info ? rd_ptr(model_info + PLAYER_MODEL_HEAD) : 0,
-        model_info ? rd_ptr(model_info + PLAYER_MODEL_BODY) : 0
-    };
-    uint64_t native_head = 0;
-    for (uint64_t managed_transform : managed_transforms) {
-        uint64_t native_transform = resolve_native_transform(managed_transform);
-        if (likely_native_pointer(native_transform)) {
-            native_head = native_transform;
-            break;
-        }
+    segments.reserve(19);
+    for (const auto& link : kSegments) {
+        const Vec3& a = bones[link[0]];
+        const Vec3& b = bones[link[1]];
+        float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        float length = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(length) || length < 0.005f || length > 4.f) return use_fallback();
+        segments.emplace_back(a, b);
     }
 
-    // Resolve the true head position from the KCC head Transform once. It is
-    // used as a guaranteed head for the named bone reader and as the box/aim
-    // top when the hierarchy graph is the fallback.
-    Vec3 hierarchy_head{};
-    bool have_hierarchy_head = false;
-    if (native_head) {
-        SkeletonHierarchyInfo head_storage{};
-        int32_t head_index = -1;
-        Vec3 resolved_head{};
-        if (resolve_skeleton_layout(native_head, feet, head_storage,
-                                     head_index, resolved_head)) {
-            // The anchor must actually sit near the box head. A body-root
-            // anchor (or a camera helper above the model) would otherwise be
-            // mistaken for the head and drag the skeleton out of the box.
-            float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
-            float head_dy = resolved_head.y - (feet.y + height);
-            if (std::isfinite(head_dy) && fabsf(head_dy) < 0.6f) {
-                hierarchy_head = resolved_head;
-                have_hierarchy_head = true;
-            }
-        }
-    }
-
-    // CharacterAnimation.tk keeps the exact Transform[] used by the game's
-    // humanoid animation code. Prefer it over an undifferentiated hierarchy:
-    // this preserves named head/chest/hip/limb bones and therefore follows
-    // weapon IK, reload poses and ragdolls without a synthetic walk cycle.
-    if (read_live_bone_skeleton(character_animation, feet,
-                                 segments, animated_head, skeleton_chest, skeleton_pelvis)) {
-        return true;
-    }
-
-    if (!native_head) return use_fallback();
-
-    std::vector<std::pair<Vec3, Vec3>> best_segments;
-    Vec3 best_anchor{};
-    size_t best_count = 0;
-    for (uint64_t managed_transform : managed_transforms) {
-        uint64_t native_transform = resolve_native_transform(managed_transform);
-        if (!likely_native_pointer(native_transform)) continue;
-
-        std::vector<std::pair<Vec3, Vec3>> candidate_segments;
-        Vec3 candidate_anchor{};
-        if (!build_skeleton_graph(native_transform, feet, candidate_segments,
-                                  candidate_anchor)) continue;
-        if (candidate_segments.size() > best_count) {
-            best_count = candidate_segments.size();
-            best_segments = std::move(candidate_segments);
-            best_anchor = candidate_anchor;
-        }
-    }
-    if (best_segments.empty()) return use_fallback();
-
-    // Always use the actual head position for aim/box top, even when the body
-    // graph was obtained from PlayerModelInfo.body rather than KCC.head.
-    Vec3 actual_head = have_hierarchy_head ? hierarchy_head : best_anchor;
-
-    // The raw hierarchy carries helper transforms above the skull (head-attach
-    // points, hair/hat anchors, camera IK targets). Those render as a stray
-    // "corner" above the head. Clip against the box head: the skull top sits a
-    // small margin below the box top, while the helpers poke above it. Using
-    // the box head (a reliable, model-matched value) instead of the resolved
-    // KCC head — which itself can sit at eye level or on a camera helper above
-    // the skull — is what actually removes the corner.
-    {
-        float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
-        float box_head = feet.y + height;
-        // The skull top sits just below the box head; head-attach / hair / hat
-        // / camera-IK helpers poke above it. Clip to a fixed margin below the
-        // box head (a reliable, model-matched value) so the helpers are removed
-        // without cutting the skull bone.
-        float head_y = box_head - 0.10f;
-        std::vector<std::pair<Vec3, Vec3>> clipped;
-        clipped.reserve(best_segments.size());
-        for (const auto& segment : best_segments) {
-            std::pair<Vec3, Vec3> s = segment;
-            if (s.first.y > head_y && s.second.y > head_y) continue;
-            if (s.first.y > head_y) s.first.y = head_y;
-            if (s.second.y > head_y) s.second.y = head_y;
-            float len2 = (s.first.x - s.second.x) * (s.first.x - s.second.x) +
-                         (s.first.y - s.second.y) * (s.first.y - s.second.y) +
-                         (s.first.z - s.second.z) * (s.first.z - s.second.z);
-            if (len2 < 0.005f * 0.005f) continue;
-            clipped.push_back(s);
-        }
-        if (clipped.empty()) return use_fallback();
-        best_segments = std::move(clipped);
-    }
-
-    // The hierarchy graph lives in the visual model's own frame, whose vertical
-    // origin does not match the network feet position used by the box. Anchor
-    // the graph's lowest points (the feet — the most reliably present bones)
-    // to the network feet so the skeleton sits on the model instead of floating
-    // above it.
-    {
-        float min_y = INFINITY;
-        for (const auto& segment : best_segments) {
-            min_y = std::min(min_y, segment.first.y);
-            min_y = std::min(min_y, segment.second.y);
-        }
-        float dy = feet.y - min_y;
-        if (std::isfinite(dy) && fabsf(dy) < 3.0f) {
-            for (auto& segment : best_segments) {
-                segment.first.y += dy;
-                segment.second.y += dy;
-            }
-        }
-    }
-
-    segments = std::move(best_segments);
-    animated_head = actual_head;
-    bool have_chest = choose_skeleton_anchor(segments, feet, animated_head,
-                                              0.68f, skeleton_chest);
-    bool have_pelvis = choose_skeleton_anchor(segments, feet, animated_head,
-                                               0.48f, skeleton_pelvis);
-    if (!have_chest) skeleton_chest = {
-        feet.x + (animated_head.x - feet.x) * 0.68f,
-        feet.y + (animated_head.y - feet.y) * 0.68f,
-        feet.z + (animated_head.z - feet.z) * 0.68f
-    };
-    if (!have_pelvis) skeleton_pelvis = {
-        feet.x + (animated_head.x - feet.x) * 0.48f,
-        feet.y + (animated_head.y - feet.y) * 0.48f,
-        feet.z + (animated_head.z - feet.z) * 0.48f
-    };
+    animated_head = bones[0];   // Head
+    skeleton_chest = bones[2];  // UpperChest
+    skeleton_pelvis = bones[5]; // Hips
     return !segments.empty() && vec3_is_finite(animated_head) &&
            vec3_is_finite(skeleton_chest) && vec3_is_finite(skeleton_pelvis);
 }
@@ -1727,10 +1268,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // Never let the aimbot or a later frame consume a projection matrix from a
     // death/respawn transition or from a failed camera read.
     g_last_vp_valid = false;
-    {
-        std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
-        g_skeleton_frame_cache.clear();
-    }
 
     if (g_pid <= 0 || !g_il2cpp_base) {
         return result;
@@ -2025,7 +1562,13 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         Vec3 skeleton_chest{};
         Vec3 skeleton_pelvis{};
         Vec3 render_feet = {render_x, feet_y, render_z};
-        bool have_skeleton = read_skeleton_segments(s_transforms[i], render_feet,
+        // In transform-camera mode `feet` is the camera/head anchor (the box
+        // bottom is feet.y - 1.60), so give the skeleton reader the real
+        // ground anchor it validates against.
+        Vec3 skeleton_ground = transform_camera_mode
+            ? Vec3{render_x, feet.y - 1.60f, render_z}
+            : render_feet;
+        bool have_skeleton = read_skeleton_segments(s_transforms[i], skeleton_ground,
                                                      skeleton_segments, animated_head,
                                                      skeleton_chest, skeleton_pelvis);
 
