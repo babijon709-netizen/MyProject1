@@ -21,8 +21,40 @@ inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD  = 0x10;
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38;
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20;
 
-inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68;
-inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0;
+// PlayerManager.worldCameraRoot is a managed Transform and is also a useful
+// entry point into the player's native Transform hierarchy.
+inline constexpr std::uint64_t PLAYER_TRANSFORM       = 0x68;
+inline constexpr std::uint64_t PLAYER_VITALS          = 0xC8;
+inline constexpr std::uint64_t PLAYER_WEAPON_REFERENCE = 0xF0;
+inline constexpr std::uint64_t PLAYER_NICKLABEL       = 0x130;
+inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150;
+inline constexpr std::uint64_t PLAYER_ANIMATOR        = 0x198;
+inline constexpr std::uint64_t PLAYER_POSITION        = 0x1D0;
+inline constexpr std::uint64_t PLAYER_USER_ID         = 0x280;
+
+// wK (the world-space nickname label) -> UnityEngine.UI.Text -> m_Text.
+inline constexpr std::uint64_t NICKLABEL_TEXT       = 0x38;
+inline constexpr std::uint64_t UI_TEXT_VALUE        = 0xE0;
+
+// huU inherits huC. huC.Health is huo<float, ReasonedValueReasonHealthEvent>;
+// its current value is the first float payload at +0x20.
+inline constexpr std::uint64_t HUC_HEALTH           = 0x98;
+inline constexpr std::uint64_t HUO_CURRENT_FLOAT    = 0x20;
+inline constexpr std::uint64_t PLAYER_VITALS_MAX_HP = 0x88;
+
+// InterfaceReference<HR> and PlayerWeapon. WeaponPiece.Number is a short at
+// PlayerWeapon+0xCA (WeaponPiece starts at +0xC8).
+inline constexpr std::uint64_t INTERFACE_REFERENCE_VALUE = 0x18;
+inline constexpr std::uint64_t PLAYER_WEAPON_NUMBER      = 0xCA;
+
+// Current Unity native Transform/GameObject layout. The code validates every
+// pointer and also probes nearby layouts before using these values.
+inline constexpr std::uint64_t NATIVE_COMPONENT_GAME_OBJECT = 0x30;
+inline constexpr std::uint64_t NATIVE_GAME_OBJECT_COMPONENTS = 0x30;
+inline constexpr std::uint64_t NATIVE_GAME_OBJECT_NAME       = 0x60;
+inline constexpr std::uint64_t NATIVE_TRANSFORM_CHILDREN     = 0x70;
+inline constexpr std::uint64_t NATIVE_TRANSFORM_CHILD_COUNT  = 0x80;
+inline constexpr std::uint64_t NATIVE_TRANSFORM_PARENT       = 0x90;
 
 // Death / spectate detection (local PlayerManager). Spectating is detected via
 // observedPlayer (the back-reference to the player being followed) instead of a

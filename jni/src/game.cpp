@@ -6,6 +6,8 @@
 #include <sys/uio.h>
 #include <stdio.h>
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cmath>
 #include <string>
 #include <chrono>
@@ -62,6 +64,21 @@ struct TransformHierarchyLayout {
 };
 static TransformHierarchyLayout g_transform_hierarchy_layout{};
 static bool g_transform_hierarchy_layout_valid = false;
+
+struct NativeTreeLayout {
+    uint64_t children_offset;
+    uint64_t child_count_offset;
+    uint64_t parent_offset;
+};
+
+struct PlayerBoneCache {
+    uint64_t animator = 0;
+    uint64_t rig_root = 0;
+    std::array<uint64_t, ESP_BONE_COUNT> joints{};
+    double resolved_at = 0.0;
+    bool named_rig = false;
+};
+static std::unordered_map<uint64_t, PlayerBoneCache> g_player_bones;
 
 static bool      g_use_direct_player_position = true;
 static bool      g_player_position_validated = false;
@@ -435,6 +452,501 @@ static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
     return read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, position, &rotation);
 }
 
+static double monotonic_seconds() {
+    return std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static bool read_remote_bytes(uint64_t address, void* output, size_t size) {
+    if (!address || !output || size == 0) return false;
+    struct iovec local = {output, size};
+    struct iovec remote = {(void*)address, size};
+    return process_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)size;
+}
+
+// IL2CPP strings are UTF-16. Convert the small strings used by ESP directly to
+// UTF-8 so player names are safe to pass to ImGui (including Cyrillic names).
+static std::string read_il2cpp_string(uint64_t string_object, size_t max_chars = 63) {
+    if (!likely_native_pointer(string_object)) return {};
+    int32_t length = rd<int32_t>(string_object + 0x10);
+    if (length <= 0 || length > 256) return {};
+    size_t count = std::min<size_t>((size_t)length, max_chars);
+    std::vector<uint16_t> text(count);
+    if (!read_remote_bytes(string_object + 0x14, text.data(), count * sizeof(uint16_t))) return {};
+
+    std::string result;
+    result.reserve(count * 2);
+    for (size_t i = 0; i < count; ++i) {
+        uint32_t code = text[i];
+        if (code >= 0xD800 && code <= 0xDBFF && i + 1 < count) {
+            uint32_t low = text[i + 1];
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                ++i;
+            }
+        }
+        if (code == 0) break;
+        if (code < 0x80) result.push_back((char)code);
+        else if (code < 0x800) {
+            result.push_back((char)(0xC0 | (code >> 6)));
+            result.push_back((char)(0x80 | (code & 0x3F)));
+        } else if (code < 0x10000) {
+            result.push_back((char)(0xE0 | (code >> 12)));
+            result.push_back((char)(0x80 | ((code >> 6) & 0x3F)));
+            result.push_back((char)(0x80 | (code & 0x3F)));
+        } else if (code <= 0x10FFFF) {
+            result.push_back((char)(0xF0 | (code >> 18)));
+            result.push_back((char)(0x80 | ((code >> 12) & 0x3F)));
+            result.push_back((char)(0x80 | ((code >> 6) & 0x3F)));
+            result.push_back((char)(0x80 | (code & 0x3F)));
+        }
+    }
+    return result;
+}
+
+static bool native_transform_is_valid(uint64_t native_transform) {
+    if (!likely_native_pointer(native_transform)) return false;
+    uint64_t transform_data = rd_ptr(native_transform + 0x38);
+    int32_t transform_index = rd<int32_t>(native_transform + 0x40);
+    return likely_native_pointer(transform_data) && transform_index >= 0 && transform_index <= 100000;
+}
+
+// Every native Component points to its GameObject at +0x30. GameObject's first
+// component is always its Transform. Unity has used two component-pair layouts
+// across the relevant releases, so both are validated before use.
+static uint64_t native_transform_from_component(uint64_t managed_component) {
+    if (!likely_native_pointer(managed_component)) return 0;
+    uint64_t native_component = rd_ptr(managed_component + MANAGED_CACHED_PTR);
+    if (!likely_native_pointer(native_component)) return 0;
+    uint64_t game_object = rd_ptr(native_component + NATIVE_COMPONENT_GAME_OBJECT);
+    if (!likely_native_pointer(game_object)) return 0;
+
+    const uint64_t component_vector_offsets[] = {
+        NATIVE_GAME_OBJECT_COMPONENTS, NATIVE_GAME_OBJECT_COMPONENTS + 8
+    };
+    for (uint64_t vector_offset : component_vector_offsets) {
+        uint64_t components = rd_ptr(game_object + vector_offset);
+        if (!likely_native_pointer(components)) continue;
+        for (uint64_t entry_offset : {uint64_t(8), uint64_t(0), uint64_t(0x10)}) {
+            uint64_t candidate = rd_ptr(components + entry_offset);
+            if (native_transform_is_valid(candidate)) return candidate;
+        }
+    }
+    return 0;
+}
+
+static bool read_native_transform_pose(uint64_t native_transform, Vec3& position, Vec4& rotation) {
+    if (!native_transform_is_valid(native_transform)) return false;
+    if (g_transform_hierarchy_layout_valid &&
+        read_transform_hierarchy_layout(native_transform, g_transform_hierarchy_layout, position, &rotation))
+        return true;
+
+    const TransformHierarchyLayout common_layouts[] = {
+        {0x38, 0x40, 0x18, 0x20, false, false},
+        {0x38, 0x40, 0x18, 0x20, true,  true},
+        {0x38, 0x40, 0x08, 0x10, false, false},
+        {0x38, 0x40, 0x08, 0x10, true,  true}
+    };
+    for (const auto& layout : common_layouts)
+        if (read_transform_hierarchy_layout(native_transform, layout, position, &rotation)) return true;
+    return false;
+}
+
+static bool printable_native_name(const char* text, size_t capacity, std::string& output) {
+    size_t length = 0;
+    while (length < capacity && text[length]) ++length;
+    if (length == 0 || length == capacity) return false;
+    size_t printable = 0;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char c = (unsigned char)text[i];
+        if (c >= 0x20 && c < 0x7F) ++printable;
+    }
+    if (printable * 10 < length * 8) return false;
+    output.assign(text, length);
+    return true;
+}
+
+static std::string read_native_transform_name(uint64_t native_transform) {
+    uint64_t game_object = rd_ptr(native_transform + NATIVE_COMPONENT_GAME_OBJECT);
+    if (!likely_native_pointer(game_object)) return {};
+    for (uint64_t name_offset : {NATIVE_GAME_OBJECT_NAME, uint64_t(0x58), uint64_t(0x68)}) {
+        uint64_t name = rd_ptr(game_object + name_offset);
+        if (!likely_native_pointer(name)) continue;
+        for (int indirect = 0; indirect < 2; ++indirect) {
+            uint64_t candidate = indirect ? rd_ptr(name) : name;
+            if (!likely_native_pointer(candidate)) continue;
+            char buffer[96]{};
+            if (!read_remote_bytes(candidate, buffer, sizeof(buffer) - 1)) continue;
+            std::string result;
+            if (printable_native_name(buffer, sizeof(buffer) - 1, result)) return result;
+        }
+    }
+    return {};
+}
+
+static std::string lower_ascii(std::string value) {
+    for (char& c : value) c = (char)std::tolower((unsigned char)c);
+    return value;
+}
+
+static std::string compact_bone_name(const std::string& value) {
+    std::string compact;
+    compact.reserve(value.size());
+    for (unsigned char c : value)
+        if (std::isalnum(c)) compact.push_back((char)std::tolower(c));
+    return compact;
+}
+
+static bool contains_one(const std::string& value, std::initializer_list<const char*> words) {
+    for (const char* word : words)
+        if (value.find(word) != std::string::npos) return true;
+    return false;
+}
+
+enum class BoneSide { None, Left, Right };
+
+static BoneSide bone_side(const std::string& original, const std::string& compact) {
+    if (compact.find("left") != std::string::npos) return BoneSide::Left;
+    if (compact.find("right") != std::string::npos) return BoneSide::Right;
+    std::string padded = " " + lower_ascii(original) + " ";
+    const bool explicit_left = contains_one(padded, {" l ", "_l ", ".l ", "-l ", " l_", " l.", " l-"});
+    const bool explicit_right = contains_one(padded, {" r ", "_r ", ".r ", "-r ", " r_", " r.", " r-"});
+    if (explicit_left && !explicit_right) return BoneSide::Left;
+    if (explicit_right && !explicit_left) return BoneSide::Right;
+
+    // Compact prefixes are only accepted for forms such as LUpperArm. Do not
+    // interpret the first letter of LowerArm/LowerLeg as the left-side marker.
+    if ((!compact.empty() && compact.back() == 'l') ||
+        (compact.size() > 1 && compact.front() == 'l' && compact.rfind("lower", 0) != 0))
+        return BoneSide::Left;
+    if ((!compact.empty() && compact.back() == 'r') ||
+        (compact.size() > 1 && compact.front() == 'r'))
+        return BoneSide::Right;
+    return BoneSide::None;
+}
+
+static int bone_name_score(const std::string& original, EspBone role) {
+    const std::string compact = compact_bone_name(original);
+    if (compact.empty()) return 0;
+    const BoneSide side = bone_side(original, compact);
+    const bool finger = contains_one(compact, {"finger", "thumb", "index", "middle", "pinky", "ring", "weapon", "socket", "ik"});
+
+    switch (role) {
+        case ESP_BONE_HEAD:
+            if (compact == "head" || compact.find("mixamorighead") != std::string::npos) return 180;
+            if (compact.find("head") != std::string::npos && !contains_one(compact, {"hair", "eye", "end", "top"})) return 130;
+            break;
+        case ESP_BONE_NECK:
+            if (compact.find("neck") != std::string::npos && !contains_one(compact, {"lace", "socket"})) return 150;
+            break;
+        case ESP_BONE_CHEST:
+            if (compact.find("upperchest") != std::string::npos) return 180;
+            if (compact.find("chest") != std::string::npos) return 160;
+            if (contains_one(compact, {"spine3", "spine03", "spine2", "spine02"})) return 135;
+            if (compact.find("spine") != std::string::npos) return 80;
+            break;
+        case ESP_BONE_PELVIS:
+            if (compact.find("pelvis") != std::string::npos) return 180;
+            if (compact.find("hips") != std::string::npos) return 170;
+            if (side == BoneSide::None && compact.find("hip") != std::string::npos) return 100;
+            break;
+        default: break;
+    }
+
+    bool left_role = role == ESP_BONE_LEFT_SHOULDER || role == ESP_BONE_LEFT_ELBOW ||
+        role == ESP_BONE_LEFT_HAND || role == ESP_BONE_LEFT_HIP ||
+        role == ESP_BONE_LEFT_KNEE || role == ESP_BONE_LEFT_FOOT;
+    bool right_role = role == ESP_BONE_RIGHT_SHOULDER || role == ESP_BONE_RIGHT_ELBOW ||
+        role == ESP_BONE_RIGHT_HAND || role == ESP_BONE_RIGHT_HIP ||
+        role == ESP_BONE_RIGHT_KNEE || role == ESP_BONE_RIGHT_FOOT;
+    if ((left_role && side != BoneSide::Left) || (right_role && side != BoneSide::Right)) return 0;
+
+    switch (role) {
+        case ESP_BONE_LEFT_SHOULDER: case ESP_BONE_RIGHT_SHOULDER:
+            if (contains_one(compact, {"shoulder", "clavicle", "collar"})) return 170;
+            if (contains_one(compact, {"upperarm", "uparm"})) return 120;
+            if (compact.find("arm") != std::string::npos && !contains_one(compact, {"lower", "fore"})) return 85;
+            break;
+        case ESP_BONE_LEFT_ELBOW: case ESP_BONE_RIGHT_ELBOW:
+            if (contains_one(compact, {"lowerarm", "forearm", "elbow"})) return 170;
+            break;
+        case ESP_BONE_LEFT_HAND: case ESP_BONE_RIGHT_HAND:
+            if (!finger && contains_one(compact, {"hand", "wrist"})) return 170;
+            break;
+        case ESP_BONE_LEFT_HIP: case ESP_BONE_RIGHT_HIP:
+            if (contains_one(compact, {"upperleg", "upleg", "thigh"})) return 170;
+            if (compact.find("hip") != std::string::npos) return 120;
+            break;
+        case ESP_BONE_LEFT_KNEE: case ESP_BONE_RIGHT_KNEE:
+            if (contains_one(compact, {"lowerleg", "lowleg", "calf", "shin", "knee"})) return 170;
+            break;
+        case ESP_BONE_LEFT_FOOT: case ESP_BONE_RIGHT_FOOT:
+            if (!contains_one(compact, {"toe", "end", "ik"}) && contains_one(compact, {"foot", "ankle"})) return 170;
+            break;
+        default: break;
+    }
+    return 0;
+}
+
+static void collect_native_transforms(uint64_t root, const NativeTreeLayout& layout,
+                                      std::vector<uint64_t>& output,
+                                      std::unordered_set<uint64_t>& visited,
+                                      int depth = 0) {
+    if (!native_transform_is_valid(root) || depth > 48 || output.size() >= 384 || !visited.insert(root).second) return;
+    output.push_back(root);
+    int32_t count = rd<int32_t>(root + layout.child_count_offset);
+    uint64_t children = rd_ptr(root + layout.children_offset);
+    if (count <= 0 || count > 512 || !likely_native_pointer(children)) return;
+    for (int32_t index = 0; index < count && output.size() < 384; ++index) {
+        uint64_t child = rd_ptr(children + (uint64_t)index * sizeof(uint64_t));
+        if (!native_transform_is_valid(child)) continue;
+        uint64_t parent = rd_ptr(child + layout.parent_offset);
+        if (likely_native_pointer(parent) && parent != root) continue;
+        collect_native_transforms(child, layout, output, visited, depth + 1);
+    }
+}
+
+static int map_named_bones(const std::vector<uint64_t>& transforms,
+                           std::array<uint64_t, ESP_BONE_COUNT>& joints) {
+    std::array<int, ESP_BONE_COUNT> scores{};
+    joints.fill(0);
+    for (uint64_t transform : transforms) {
+        std::string name = read_native_transform_name(transform);
+        if (name.empty()) continue;
+        for (int role = 0; role < ESP_BONE_COUNT; ++role) {
+            int score = bone_name_score(name, (EspBone)role);
+            if (score > scores[(size_t)role]) {
+                scores[(size_t)role] = score;
+                joints[(size_t)role] = transform;
+            }
+        }
+    }
+    int result = 0;
+    for (int role = 0; role < ESP_BONE_COUNT; ++role)
+        if (joints[(size_t)role]) result += 1000 + scores[(size_t)role];
+    return result;
+}
+
+static PlayerBoneCache resolve_player_bones(uint64_t player) {
+    PlayerBoneCache cache{};
+    cache.animator = rd_ptr(player + PLAYER_ANIMATOR);
+    cache.resolved_at = monotonic_seconds();
+
+    uint64_t animator_transform = native_transform_from_component(cache.animator);
+    uint64_t camera_root = resolve_player_native_transform(player);
+    if (!animator_transform && !camera_root) return cache;
+
+    const NativeTreeLayout layouts[] = {
+        {NATIVE_TRANSFORM_CHILDREN, NATIVE_TRANSFORM_CHILD_COUNT, NATIVE_TRANSFORM_PARENT},
+        {0x68, 0x78, 0x88},
+        {0x78, 0x88, 0x98}
+    };
+
+    int best_score = 0;
+    for (const auto& layout : layouts) {
+        for (uint64_t seed : {animator_transform, camera_root}) {
+            if (!native_transform_is_valid(seed)) continue;
+            std::vector<uint64_t> roots;
+            roots.push_back(seed);
+            uint64_t highest = seed;
+            for (int depth = 0; depth < 12; ++depth) {
+                uint64_t parent = rd_ptr(highest + layout.parent_offset);
+                if (!native_transform_is_valid(parent) || parent == highest) break;
+                highest = parent;
+            }
+            if (highest != seed) roots.push_back(highest);
+
+            for (uint64_t root : roots) {
+                std::vector<uint64_t> transforms;
+                std::unordered_set<uint64_t> visited;
+                collect_native_transforms(root, layout, transforms, visited);
+                std::array<uint64_t, ESP_BONE_COUNT> mapped{};
+                int score = map_named_bones(transforms, mapped);
+                if (score > best_score) {
+                    best_score = score;
+                    cache.rig_root = animator_transform ? animator_transform : root;
+                    cache.joints = mapped;
+                }
+            }
+        }
+    }
+
+    int found = 0;
+    for (uint64_t joint : cache.joints) if (joint) ++found;
+    cache.named_rig = found >= 11 && cache.joints[ESP_BONE_HEAD] &&
+        cache.joints[ESP_BONE_CHEST] && cache.joints[ESP_BONE_PELVIS] &&
+        cache.joints[ESP_BONE_LEFT_ELBOW] && cache.joints[ESP_BONE_RIGHT_ELBOW] &&
+        cache.joints[ESP_BONE_LEFT_KNEE] && cache.joints[ESP_BONE_RIGHT_KNEE] &&
+        cache.joints[ESP_BONE_LEFT_FOOT] && cache.joints[ESP_BONE_RIGHT_FOOT];
+    if (!cache.rig_root) cache.rig_root = animator_transform ? animator_transform : camera_root;
+    return cache;
+}
+
+static Vec3 vec_lerp(const Vec3& from, const Vec3& to, float amount) {
+    return {from.x + (to.x - from.x) * amount,
+            from.y + (to.y - from.y) * amount,
+            from.z + (to.z - from.z) * amount};
+}
+
+static Vec3 vec_add_scaled(const Vec3& base, const Vec3& direction, float amount) {
+    return {base.x + direction.x * amount, base.y + direction.y * amount, base.z + direction.z * amount};
+}
+
+static bool read_animated_skeleton(PlayerBoneCache& cache, const Vec3& reference_feet,
+                                   std::array<Vec3, ESP_BONE_COUNT>& bones) {
+    if (!cache.named_rig) return false;
+    std::array<bool, ESP_BONE_COUNT> valid{};
+    for (int role = 0; role < ESP_BONE_COUNT; ++role) {
+        uint64_t transform = cache.joints[(size_t)role];
+        if (!transform) continue;
+        Vec3 position{};
+        if (read_transform_hierarchy_position(transform, position)) {
+            bones[(size_t)role] = position;
+            valid[(size_t)role] = true;
+        }
+    }
+
+    // Some rigs omit explicit neck/clavicle nodes. Keep all endpoints attached
+    // to real animated joints and derive only the missing connector.
+    if (!valid[ESP_BONE_NECK] && valid[ESP_BONE_HEAD] && valid[ESP_BONE_CHEST]) {
+        bones[ESP_BONE_NECK] = vec_lerp(bones[ESP_BONE_CHEST], bones[ESP_BONE_HEAD], 0.68f);
+        valid[ESP_BONE_NECK] = true;
+    }
+    if (!valid[ESP_BONE_LEFT_SHOULDER] && valid[ESP_BONE_CHEST] && valid[ESP_BONE_LEFT_ELBOW]) {
+        bones[ESP_BONE_LEFT_SHOULDER] = vec_lerp(bones[ESP_BONE_CHEST], bones[ESP_BONE_LEFT_ELBOW], 0.28f);
+        valid[ESP_BONE_LEFT_SHOULDER] = true;
+    }
+    if (!valid[ESP_BONE_RIGHT_SHOULDER] && valid[ESP_BONE_CHEST] && valid[ESP_BONE_RIGHT_ELBOW]) {
+        bones[ESP_BONE_RIGHT_SHOULDER] = vec_lerp(bones[ESP_BONE_CHEST], bones[ESP_BONE_RIGHT_ELBOW], 0.28f);
+        valid[ESP_BONE_RIGHT_SHOULDER] = true;
+    }
+    if (!valid[ESP_BONE_LEFT_HIP] && valid[ESP_BONE_PELVIS] && valid[ESP_BONE_LEFT_KNEE]) {
+        bones[ESP_BONE_LEFT_HIP] = vec_lerp(bones[ESP_BONE_PELVIS], bones[ESP_BONE_LEFT_KNEE], 0.18f);
+        valid[ESP_BONE_LEFT_HIP] = true;
+    }
+    if (!valid[ESP_BONE_RIGHT_HIP] && valid[ESP_BONE_PELVIS] && valid[ESP_BONE_RIGHT_KNEE]) {
+        bones[ESP_BONE_RIGHT_HIP] = vec_lerp(bones[ESP_BONE_PELVIS], bones[ESP_BONE_RIGHT_KNEE], 0.18f);
+        valid[ESP_BONE_RIGHT_HIP] = true;
+    }
+    for (bool value : valid) if (!value) return false;
+
+    float feet_y = std::min(bones[ESP_BONE_LEFT_FOOT].y, bones[ESP_BONE_RIGHT_FOOT].y);
+    float height = bones[ESP_BONE_HEAD].y - feet_y;
+    if (!std::isfinite(height) || height < 0.55f || height > 2.7f) return false;
+    for (const Vec3& point : bones) {
+        float dx = point.x - reference_feet.x;
+        float dy = point.y - reference_feet.y;
+        float dz = point.z - reference_feet.z;
+        if (!vec3_is_finite(point) || dx * dx + dy * dy + dz * dz > 16.0f) return false;
+    }
+    return true;
+}
+
+static void build_procedural_skeleton(const PlayerBoneCache& cache, const Vec3& feet,
+                                      bool crouched, std::array<Vec3, ESP_BONE_COUNT>& bones) {
+    Vec3 right{1.f, 0.f, 0.f}, forward{0.f, 0.f, 1.f};
+    Vec3 pose_position{};
+    Vec4 pose_rotation{};
+    if (read_native_transform_pose(cache.rig_root, pose_position, pose_rotation)) {
+        right = rotate_vector(pose_rotation, {1.f, 0.f, 0.f});
+        forward = rotate_vector(pose_rotation, {0.f, 0.f, 1.f});
+        right.y = 0.f; forward.y = 0.f;
+        float rl = sqrtf(right.x * right.x + right.z * right.z);
+        float fl = sqrtf(forward.x * forward.x + forward.z * forward.z);
+        if (rl > 0.001f) { right.x /= rl; right.z /= rl; } else right = {1.f, 0.f, 0.f};
+        if (fl > 0.001f) { forward.x /= fl; forward.z /= fl; } else forward = {0.f, 0.f, 1.f};
+    }
+
+    const float pelvis_y = crouched ? 0.64f : 0.92f;
+    const float chest_y  = crouched ? 0.94f : 1.34f;
+    const float neck_y   = crouched ? 1.08f : 1.55f;
+    const float head_y   = crouched ? 1.20f : 1.73f;
+    Vec3 pelvis = {feet.x, feet.y + pelvis_y, feet.z};
+    if (crouched) pelvis = vec_add_scaled(pelvis, forward, -0.08f);
+    Vec3 chest = {pelvis.x, feet.y + chest_y, pelvis.z};
+    chest = vec_add_scaled(chest, forward, crouched ? 0.10f : 0.f);
+
+    bones[ESP_BONE_PELVIS] = pelvis;
+    bones[ESP_BONE_CHEST] = chest;
+    bones[ESP_BONE_NECK] = {chest.x, feet.y + neck_y, chest.z};
+    bones[ESP_BONE_HEAD] = {chest.x, feet.y + head_y, chest.z};
+
+    bones[ESP_BONE_LEFT_SHOULDER]  = vec_add_scaled(chest, right, -0.23f);
+    bones[ESP_BONE_RIGHT_SHOULDER] = vec_add_scaled(chest, right,  0.23f);
+    bones[ESP_BONE_LEFT_ELBOW]  = vec_add_scaled(bones[ESP_BONE_LEFT_SHOULDER], right, -0.16f);
+    bones[ESP_BONE_RIGHT_ELBOW] = vec_add_scaled(bones[ESP_BONE_RIGHT_SHOULDER], right, 0.16f);
+    bones[ESP_BONE_LEFT_ELBOW].y  -= crouched ? 0.17f : 0.23f;
+    bones[ESP_BONE_RIGHT_ELBOW].y -= crouched ? 0.17f : 0.23f;
+    bones[ESP_BONE_LEFT_HAND]  = vec_add_scaled(bones[ESP_BONE_LEFT_ELBOW], forward, 0.22f);
+    bones[ESP_BONE_RIGHT_HAND] = vec_add_scaled(bones[ESP_BONE_RIGHT_ELBOW], forward, 0.22f);
+    bones[ESP_BONE_LEFT_HAND].y  -= 0.20f;
+    bones[ESP_BONE_RIGHT_HAND].y -= 0.20f;
+
+    bones[ESP_BONE_LEFT_HIP]  = vec_add_scaled(pelvis, right, -0.12f);
+    bones[ESP_BONE_RIGHT_HIP] = vec_add_scaled(pelvis, right,  0.12f);
+    bones[ESP_BONE_LEFT_KNEE]  = vec_add_scaled({feet.x, feet.y + (crouched ? 0.34f : 0.48f), feet.z}, right, -0.13f);
+    bones[ESP_BONE_RIGHT_KNEE] = vec_add_scaled({feet.x, feet.y + (crouched ? 0.34f : 0.48f), feet.z}, right,  0.13f);
+    if (crouched) {
+        bones[ESP_BONE_LEFT_KNEE]  = vec_add_scaled(bones[ESP_BONE_LEFT_KNEE], forward, 0.28f);
+        bones[ESP_BONE_RIGHT_KNEE] = vec_add_scaled(bones[ESP_BONE_RIGHT_KNEE], forward, 0.28f);
+    }
+    bones[ESP_BONE_LEFT_FOOT]  = vec_add_scaled({feet.x, feet.y + 0.03f, feet.z}, right, -0.14f);
+    bones[ESP_BONE_RIGHT_FOOT] = vec_add_scaled({feet.x, feet.y + 0.03f, feet.z}, right,  0.14f);
+    bones[ESP_BONE_LEFT_FOOT]  = vec_add_scaled(bones[ESP_BONE_LEFT_FOOT], forward, 0.08f);
+    bones[ESP_BONE_RIGHT_FOOT] = vec_add_scaled(bones[ESP_BONE_RIGHT_FOOT], forward, 0.08f);
+}
+
+static bool read_player_skeleton(uint64_t player, const Vec3& feet, bool crouched,
+                                 std::array<Vec3, ESP_BONE_COUNT>& bones) {
+    uint64_t animator = rd_ptr(player + PLAYER_ANIMATOR);
+    double now = monotonic_seconds();
+    auto iterator = g_player_bones.find(player);
+    bool refresh = iterator == g_player_bones.end() || iterator->second.animator != animator ||
+        now - iterator->second.resolved_at > (iterator->second.named_rig ? 5.0 : 1.0);
+    if (refresh) {
+        g_player_bones[player] = resolve_player_bones(player);
+        iterator = g_player_bones.find(player);
+    }
+    if (iterator == g_player_bones.end()) return false;
+
+    if (read_animated_skeleton(iterator->second, feet, bones)) return true;
+    // A temporary LOD swap can replace every bone Transform at once. Force a
+    // quick remap next time rather than holding stale pointers for five seconds.
+    iterator->second.named_rig = false;
+    iterator->second.resolved_at = now - 0.75;
+    build_procedural_skeleton(iterator->second, feet, crouched, bones);
+    return true;
+}
+
+static void read_player_labels(uint64_t player, EspBox& box) {
+    box.name[0] = '\0';
+    box.weapon[0] = '\0';
+    box.health = -1.f;
+    box.max_health = -1.f;
+
+    uint64_t nicklabel = rd_ptr(player + PLAYER_NICKLABEL);
+    uint64_t text = nicklabel ? rd_ptr(nicklabel + NICKLABEL_TEXT) : 0;
+    std::string name = text ? read_il2cpp_string(rd_ptr(text + UI_TEXT_VALUE), 48) : std::string();
+    if (name.empty()) name = read_il2cpp_string(rd_ptr(player + PLAYER_USER_ID), 48);
+    if (!name.empty()) snprintf(box.name, sizeof(box.name), "%s", name.c_str());
+
+    uint64_t handler = rd_ptr(player + PLAYER_EVENT_HANDLER);
+    uint64_t health_value = handler ? rd_ptr(handler + HUC_HEALTH) : 0;
+    uint64_t vitals = rd_ptr(player + PLAYER_VITALS);
+    if (likely_native_pointer(health_value)) box.health = rd<float>(health_value + HUO_CURRENT_FLOAT);
+    if (likely_native_pointer(vitals)) box.max_health = rd<float>(vitals + PLAYER_VITALS_MAX_HP);
+    if (!std::isfinite(box.health) || box.health < 0.f || box.health > 100000.f) box.health = -1.f;
+    if (!std::isfinite(box.max_health) || box.max_health <= 0.f || box.max_health > 100000.f) box.max_health = -1.f;
+
+    uint64_t reference = rd_ptr(player + PLAYER_WEAPON_REFERENCE);
+    uint64_t weapon = reference ? rd_ptr(reference + INTERFACE_REFERENCE_VALUE) : 0;
+    if (likely_native_pointer(weapon)) {
+        int16_t number = rd<int16_t>(weapon + PLAYER_WEAPON_NUMBER);
+        if (number > 0 && number < 10000)
+            snprintf(box.weapon, sizeof(box.weapon), "Weapon #%d", (int)number);
+    }
+}
+
 static bool evaluate_player_position_offset(const std::vector<uint64_t>& players, uint64_t offset, double& score) {
     score = 0.0;
     if (!offset) return false;
@@ -496,10 +1008,13 @@ static bool discover_player_position_offset(const std::vector<uint64_t>& players
 }
 
 static float mat_get(const Mat4& matrix, int row, int column) {
-    return matrix.m[(size_t)row * 4 + column];
+    // UnityEngine.Matrix4x4 is laid out by columns in memory:
+    // m00,m10,m20,m30,m01,m11,...  Treating it as row-major transposed the
+    // camera matrices and made every ESP projection fail.
+    return matrix.m[(size_t)column * 4 + row];
 }
 static void mat_set(Mat4& matrix, int row, int column, float value) {
-    matrix.m[(size_t)row * 4 + column] = value;
+    matrix.m[(size_t)column * 4 + row] = value;
 }
 static bool matrix_is_finite(const Mat4& matrix) {
     bool has_non_zero = false;
@@ -726,6 +1241,7 @@ bool esp_init(pid_t pid) {
     g_player_snapshot.clear();
     g_player_snapshot_stamp = {};
     g_player_track.clear();
+    g_player_bones.clear();
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {};
     g_transform_hierarchy_layout_valid = false;
@@ -746,6 +1262,7 @@ void esp_reset() {
     g_player_snapshot.clear();
     g_player_snapshot_stamp = {};
     g_player_track.clear();
+    g_player_bones.clear();
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_scene_players.clear();
@@ -797,6 +1314,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (g_scene_players.count(p)) ++overlap;
             if (overlap == 0) {
                 g_player_track.clear();
+                g_player_bones.clear();
                 g_player_position_validated = false;
                 g_use_direct_player_position = true;
                 g_player_position_offset = PLAYER_POSITION;
@@ -1041,24 +1559,38 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
 
         Vec3 render_feet = {render_x, feet_y, render_z};
+        Vec3 skeleton_feet = render_feet;
+        if (transform_camera_mode) skeleton_feet.y = feet.y - 1.60F;
 
-        // Box geometry is based on the stable player capsule.
-        Vec3 body_bottom = render_feet;
-        Vec3 body_top = {render_x, feet_y + head_height, render_z};
-        if (transform_camera_mode) {
-            body_bottom.y = feet.y - 1.60F;
+        // Read the enemy Animator hierarchy before constructing the box. The
+        // actual animated head/feet make every ESP element follow crouching,
+        // leaning and weapon animations. A crouch-aware procedural rig is kept
+        // only as a safe fallback for an unexpected asset/LOD bone naming set.
+        std::array<Vec3, ESP_BONE_COUNT> skeleton{};
+        bool have_skeleton = read_player_skeleton(s_transforms[i], skeleton_feet, crouched, skeleton);
+
+        Vec3 body_bottom = skeleton_feet;
+        Vec3 body_top = {render_x, skeleton_feet.y + head_height, render_z};
+        float body_x = render_x, body_z = render_z;
+        if (have_skeleton) {
+            body_bottom = vec_lerp(skeleton[ESP_BONE_LEFT_FOOT], skeleton[ESP_BONE_RIGHT_FOOT], 0.5f);
+            body_bottom.y = std::min(skeleton[ESP_BONE_LEFT_FOOT].y, skeleton[ESP_BONE_RIGHT_FOOT].y) - 0.03f;
+            body_top = skeleton[ESP_BONE_HEAD];
+            body_top.y += 0.12f;
+            body_x = skeleton[ESP_BONE_PELVIS].x;
+            body_z = skeleton[ESP_BONE_PELVIS].z;
+        } else if (transform_camera_mode) {
             body_top.y = feet.y + 0.20F;
         }
 
+        auto project_world = [&](const Vec3& world, Vec2& screen) {
+            return transform_camera_mode
+                ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, world, sw, sh, screen, false)
+                : w2s(vp, world, sw, sh, screen, false);
+        };
+
         Vec2 sf{}, sh2{};
-        bool bottom_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_bottom, sw, sh, sf, false)
-            : w2s(vp, body_bottom, sw, sh, sf, false);
-        if (!bottom_visible) continue;
-        bool top_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_top, sw, sh, sh2, false)
-            : w2s(vp, body_top, sw, sh, sh2, false);
-        if (!top_visible) continue;
+        if (!project_world(body_bottom, sf) || !project_world(body_top, sh2)) continue;
 
         float height = fabsf(sh2.y - sf.y);
         if (!std::isfinite(height) || height < 2.0F) continue;
@@ -1069,31 +1601,65 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
         constexpr float box_half_width = 0.35F, box_half_depth = 0.35F;
         const Vec3 world_corners[8] = {
-            {render_x - box_half_width, body_bottom.y, render_z - box_half_depth},
-            {render_x + box_half_width, body_bottom.y, render_z - box_half_depth},
-            {render_x + box_half_width, body_bottom.y, render_z + box_half_depth},
-            {render_x - box_half_width, body_bottom.y, render_z + box_half_depth},
-            {render_x - box_half_width, body_top.y, render_z - box_half_depth},
-            {render_x + box_half_width, body_top.y, render_z - box_half_depth},
-            {render_x + box_half_width, body_top.y, render_z + box_half_depth},
-            {render_x - box_half_width, body_top.y, render_z + box_half_depth}
+            {body_x - box_half_width, body_bottom.y, body_z - box_half_depth},
+            {body_x + box_half_width, body_bottom.y, body_z - box_half_depth},
+            {body_x + box_half_width, body_bottom.y, body_z + box_half_depth},
+            {body_x - box_half_width, body_bottom.y, body_z + box_half_depth},
+            {body_x - box_half_width, body_top.y, body_z - box_half_depth},
+            {body_x + box_half_width, body_top.y, body_z - box_half_depth},
+            {body_x + box_half_width, body_top.y, body_z + box_half_depth},
+            {body_x - box_half_width, body_top.y, body_z + box_half_depth}
         };
+
         EspBox box{};
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;
         box.distance = distance;
         box.source = s_transforms[i];
-        box.feet  = {render_x, feet_y, render_z};
-        box.head  = {render_x, feet_y + head_height, render_z};
-        box.vel   = vel;
+        box.feet = body_bottom;
+        box.head = have_skeleton ? skeleton[ESP_BONE_HEAD]
+                                 : Vec3{body_x, body_top.y, body_z};
+        box.vel = vel;
         box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
         box.crouched = crouched;
+        box.skeleton_valid = have_skeleton;
 
-        // Screen-space velocity of the head: project head and head + vel*dt.
+        if (have_skeleton) {
+            float min_x = INFINITY, min_y = INFINITY, max_x = -INFINITY, max_y = -INFINITY;
+            int projected_count = 0;
+            for (int role = 0; role < ESP_BONE_COUNT; ++role) {
+                box.bones[role] = skeleton[(size_t)role];
+                Vec2 screen{};
+                bool projected = project_world(skeleton[(size_t)role], screen);
+                box.bone_visible[role] = projected;
+                box.bone_screen[role][0] = projected ? screen.x : -1.f;
+                box.bone_screen[role][1] = projected ? screen.y : -1.f;
+                if (projected) {
+                    min_x = std::min(min_x, screen.x); max_x = std::max(max_x, screen.x);
+                    min_y = std::min(min_y, screen.y); max_y = std::max(max_y, screen.y);
+                    ++projected_count;
+                }
+            }
+            // Make the regular 2D ESP share the animated skeleton bounds. This
+            // removes the old fixed-height box lag and keeps it tight on crouch.
+            if (projected_count >= 8 && std::isfinite(min_x) && std::isfinite(min_y) &&
+                max_x > min_x && max_y > min_y) {
+                float animated_h = max_y - min_y;
+                float margin_x = std::max(2.f, animated_h * 0.055f);
+                float margin_y = std::max(2.f, animated_h * 0.035f);
+                box.x1 = min_x - margin_x; box.x2 = max_x + margin_x;
+                box.y1 = min_y - margin_y; box.y2 = max_y + margin_y;
+            }
+        }
+
+        read_player_labels(s_transforms[i], box);
+
+        // Screen-space velocity of the animated head: project head and
+        // head+velocity so aim feed-forward uses the same target as ESP.
         box.aim_vx = 0.f;
         box.aim_vy = 0.f;
         if (!transform_camera_mode) {
-            Vec3 h  = box.head;
+            Vec3 h = box.head;
             Vec3 h2 = {h.x + vel.x * 0.2f, h.y, h.z + vel.z * 0.2f};
             Vec2 s0{}, s1{};
             if (w2s(vp, h, sw, sh, s0, false) && w2s(vp, h2, sw, sh, s1, false)) {
@@ -1108,9 +1674,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
-            bool projected = transform_camera_mode
-                ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, world_corners[corner], sw, sh, sc, false)
-                : w2s(vp, world_corners[corner], sw, sh, sc, false);
+            bool projected = project_world(world_corners[corner], sc);
             box.corner_visible[corner] = projected && sc.x >= 0.0F && sc.x <= sw && sc.y >= 0.0F && sc.y <= sh;
             box.corners[corner][0] = projected ? sc.x : -1.0F;
             box.corners[corner][1] = projected ? sc.y : -1.0F;

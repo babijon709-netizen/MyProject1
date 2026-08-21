@@ -599,21 +599,15 @@ static const std::vector<EspBox>& GetEspBoxes(int sw, int sh) {
 }
 
 static void DrawEspOverlay() {
-    float sw = (float)native_window_screen_x;
-    float sh = (float)native_window_screen_y;
-    if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
-        sw = (float)displayInfo.width;
-        sh = (float)displayInfo.height;
-    } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
-        sw = (float)displayInfo.height;
-        sh = (float)displayInfo.width;
-    }
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    float sw = 0.f, sh = 0.f;
+    VisibleScreen(sw, sh);
+    if (sw < 100.f || sh < 100.f) return;
 
-    if (!g_esp_attached) return;
-    if (!g_state.esp_master) return;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    if (!g_esp_attached || !g_state.esp_master) return;
     if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall &&
-        !g_state.esp_tracer) return;
+        !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name &&
+        !g_state.esp_hp && !g_state.esp_weapon && !g_state.esp_weapon_icon) return;
 
     const std::vector<EspBox>& boxes = GetEspBoxes((int)sw, (int)sh);
     constexpr int BOX_EDGES[][2] = {
@@ -621,56 +615,142 @@ static void DrawEspOverlay() {
         {4,5},{5,6},{6,7},{7,4},
         {0,4},{1,5},{2,6},{3,7}
     };
-    float thick = g_state.esp_thick;
-    if (thick < 0.5f) thick = 0.5f;
+    constexpr int SKELETON_EDGES[][2] = {
+        {ESP_BONE_HEAD, ESP_BONE_NECK},
+        {ESP_BONE_NECK, ESP_BONE_CHEST},
+        {ESP_BONE_CHEST, ESP_BONE_PELVIS},
+        {ESP_BONE_CHEST, ESP_BONE_LEFT_SHOULDER},
+        {ESP_BONE_LEFT_SHOULDER, ESP_BONE_LEFT_ELBOW},
+        {ESP_BONE_LEFT_ELBOW, ESP_BONE_LEFT_HAND},
+        {ESP_BONE_CHEST, ESP_BONE_RIGHT_SHOULDER},
+        {ESP_BONE_RIGHT_SHOULDER, ESP_BONE_RIGHT_ELBOW},
+        {ESP_BONE_RIGHT_ELBOW, ESP_BONE_RIGHT_HAND},
+        {ESP_BONE_PELVIS, ESP_BONE_LEFT_HIP},
+        {ESP_BONE_LEFT_HIP, ESP_BONE_LEFT_KNEE},
+        {ESP_BONE_LEFT_KNEE, ESP_BONE_LEFT_FOOT},
+        {ESP_BONE_PELVIS, ESP_BONE_RIGHT_HIP},
+        {ESP_BONE_RIGHT_HIP, ESP_BONE_RIGHT_KNEE},
+        {ESP_BONE_RIGHT_KNEE, ESP_BONE_RIGHT_FOOT}
+    };
 
-    // Tracers go from the top-middle of the screen to each player's head.
+    float thick = ImMax(0.5f, g_state.esp_thick);
     const float tracer_origin_x = sw * 0.5f;
     const float tracer_origin_y = 0.0f;
 
+    auto DrawOutlinedText = [&](ImVec2 position, ImU32 color, const char* text) {
+        if (!text || !*text) return;
+        ImU32 outline = IM_COL32(0, 0, 0, 215);
+        dl->AddText({position.x - 1.f, position.y}, outline, text);
+        dl->AddText({position.x + 1.f, position.y}, outline, text);
+        dl->AddText({position.x, position.y - 1.f}, outline, text);
+        dl->AddText({position.x, position.y + 1.f}, outline, text);
+        dl->AddText(position, color, text);
+    };
+    auto DrawCenteredText = [&](float center_x, float y, ImU32 color, const char* text) {
+        if (!text || !*text) return;
+        ImVec2 size = ImGui::CalcTextSize(text);
+        DrawOutlinedText({center_x - size.x * 0.5f, y}, color, text);
+    };
+
     for (const EspBox& box : boxes) {
-        if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
+        if (!std::isfinite(box.x1) || !std::isfinite(box.y1) ||
+            !std::isfinite(box.x2) || !std::isfinite(box.y2) ||
+            box.x2 <= box.x1 || box.y2 <= box.y1) continue;
 
         if (g_state.esp_chams) {
-            bool all_valid = true;
-            for (int c = 0; c < 8; ++c) {
-                if (!box.corner_visible[c] || !std::isfinite(box.corners[c][0]) || !std::isfinite(box.corners[c][1]) || box.corners[c][0] < 0 || box.corners[c][1] < 0) {
-                    all_valid = false;
-                    break;
-                }
-            }
-            if (all_valid) {
-                for (const auto& edge : BOX_EDGES) {
-                    int a = edge[0], b = edge[1];
-                    dl->AddLine(
-                        ImVec2(box.corners[a][0], box.corners[a][1]),
-                        ImVec2(box.corners[b][0], box.corners[b][1]),
-                        ColU32(cfg::esp::box_col_invis), thick
-                    );
-                }
+            for (const auto& edge : BOX_EDGES) {
+                int a = edge[0], b = edge[1];
+                if (!box.corner_visible[a] || !box.corner_visible[b]) continue;
+                ImVec2 from(box.corners[a][0], box.corners[a][1]);
+                ImVec2 to(box.corners[b][0], box.corners[b][1]);
+                if (!std::isfinite(from.x) || !std::isfinite(from.y) ||
+                    !std::isfinite(to.x) || !std::isfinite(to.y)) continue;
+                dl->AddLine(from, to, IM_COL32(0, 0, 0, 190), thick + 2.f);
+                dl->AddLine(from, to, ColU32(cfg::esp::box_col_invis), thick);
             }
         }
 
-        if (g_state.esp_box)
-            dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2), ColU32(cfg::esp::box_col), cfg::esp::box_rounding, 0, thick);
+        if (g_state.esp_skeleton && box.skeleton_valid) {
+            const ImU32 skeleton_color = ColU32(cfg::esp::skeleton_col);
+            for (const auto& edge : SKELETON_EDGES) {
+                int a = edge[0], b = edge[1];
+                if (!box.bone_visible[a] || !box.bone_visible[b]) continue;
+                ImVec2 from(box.bone_screen[a][0], box.bone_screen[a][1]);
+                ImVec2 to(box.bone_screen[b][0], box.bone_screen[b][1]);
+                if (!std::isfinite(from.x) || !std::isfinite(from.y) ||
+                    !std::isfinite(to.x) || !std::isfinite(to.y)) continue;
+                dl->AddLine(from, to, IM_COL32(0, 0, 0, 220), thick + 2.2f);
+                dl->AddLine(from, to, skeleton_color, thick);
+            }
 
+            // A small head ring makes the head joint distinct from the torso.
+            if (box.bone_visible[ESP_BONE_HEAD] && box.bone_visible[ESP_BONE_NECK]) {
+                ImVec2 head(box.bone_screen[ESP_BONE_HEAD][0], box.bone_screen[ESP_BONE_HEAD][1]);
+                ImVec2 neck(box.bone_screen[ESP_BONE_NECK][0], box.bone_screen[ESP_BONE_NECK][1]);
+                float dx = head.x - neck.x, dy = head.y - neck.y;
+                float radius = ImClamp(sqrtf(dx * dx + dy * dy) * 0.48f, 2.5f, 18.f);
+                dl->AddCircle(head, radius, IM_COL32(0, 0, 0, 220), 20, thick + 2.2f);
+                dl->AddCircle(head, radius, skeleton_color, 20, thick);
+            }
+        }
+
+        if (g_state.esp_box) {
+            dl->AddRect({box.x1, box.y1}, {box.x2, box.y2}, IM_COL32(0, 0, 0, 205),
+                        cfg::esp::box_rounding, 0, thick + 2.f);
+            dl->AddRect({box.x1, box.y1}, {box.x2, box.y2}, ColU32(cfg::esp::box_col),
+                        cfg::esp::box_rounding, 0, thick);
+        }
+
+        const float center_x = (box.x1 + box.x2) * 0.5f;
+        float top_text_y = box.y1 - ImGui::GetFontSize() - 3.f;
+        if (g_state.esp_name) {
+            const char* name = box.name[0] ? box.name : "PLAYER";
+            DrawCenteredText(center_x, top_text_y, ColU32(cfg::esp::name_col), name);
+            top_text_y -= ImGui::GetFontSize() + 1.f;
+        }
+
+        float bottom_text_y = box.y2 + 3.f;
         if (g_state.esp_wall) {
             char label[32];
-            if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1fm", box.distance);
-            else snprintf(label, sizeof(label), "PLAYER");
-            dl->AddText(ImVec2(box.x1, box.y1 - 22.0f), ColU32(cfg::esp::distance_col), label);
+            if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1f m", box.distance);
+            else snprintf(label, sizeof(label), "-- m");
+            DrawCenteredText(center_x, bottom_text_y, ColU32(cfg::esp::distance_col), label);
+            bottom_text_y += ImGui::GetFontSize() + 1.f;
+        }
+        if (g_state.esp_weapon) {
+            const char* weapon = box.weapon[0] ? box.weapon : "Weapon";
+            DrawCenteredText(center_x, bottom_text_y, ColU32(cfg::esp::weapon_col), weapon);
+        }
+
+        if (g_state.esp_hp && box.health >= 0.f && box.max_health > 0.f) {
+            float fraction = ImClamp(box.health / box.max_health, 0.f, 1.f);
+            float bar_w = 4.f;
+            float x1 = box.x1 - 8.f;
+            float y1 = box.y1, y2 = box.y2;
+            if (cfg::esp::hp_outline)
+                dl->AddRectFilled({x1 - 1.f, y1 - 1.f}, {x1 + bar_w + 1.f, y2 + 1.f}, IM_COL32(0, 0, 0, 210), 1.f);
+            ImVec4 hp_color = cfg::esp::health_col;
+            if (cfg::esp::hp_gradient) {
+                hp_color.x = cfg::esp::hp_min_col.x + (cfg::esp::hp_max_col.x - cfg::esp::hp_min_col.x) * fraction;
+                hp_color.y = cfg::esp::hp_min_col.y + (cfg::esp::hp_max_col.y - cfg::esp::hp_min_col.y) * fraction;
+                hp_color.z = cfg::esp::hp_min_col.z + (cfg::esp::hp_max_col.z - cfg::esp::hp_min_col.z) * fraction;
+            }
+            float fill_y = y2 - (y2 - y1) * fraction;
+            dl->AddRectFilled({x1, fill_y}, {x1 + bar_w, y2}, ColU32(hp_color), 1.f);
         }
 
         if (g_state.esp_tracer) {
-            float fx = (box.x1 + box.x2) * 0.5f;
-            float fy = box.y1; // head = top of the box
-            float tth = cfg::esp::tracer_thickness;
-            if (tth < 0.5f) tth = 0.5f;
-            dl->AddLine(
-                ImVec2(tracer_origin_x, tracer_origin_y),
-                ImVec2(fx, fy),
-                ColU32(cfg::esp::tracer_col), tth
-            );
+            float fx = center_x;
+            float fy = box.y1;
+            if (box.skeleton_valid && box.bone_visible[ESP_BONE_HEAD]) {
+                fx = box.bone_screen[ESP_BONE_HEAD][0];
+                fy = box.bone_screen[ESP_BONE_HEAD][1];
+            }
+            float tracer_thickness = ImMax(0.5f, cfg::esp::tracer_thickness);
+            dl->AddLine({tracer_origin_x, tracer_origin_y}, {fx, fy},
+                        IM_COL32(0, 0, 0, 190), tracer_thickness + 2.f);
+            dl->AddLine({tracer_origin_x, tracer_origin_y}, {fx, fy},
+                        ColU32(cfg::esp::tracer_col), tracer_thickness);
         }
     }
 }
@@ -2456,12 +2536,13 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vb",  XS("Бокс"),           &g_state.esp_box,          &g_state.a_esp_box,          &cfg::esp::box_col},
                 {"##v3",  XS("3D рамка"),       &g_state.esp_chams,        &g_state.a_esp_chams,        &cfg::esp::box_col_invis},
                 {"##vn",  XS("Имена"),          &g_state.esp_name,         &g_state.a_esp_name,         &cfg::esp::name_col},
+                {"##vhp", XS("Здоровье"),       &g_state.esp_hp,           &g_state.a_esp_hp,           &cfg::esp::health_col},
                 {"##vd",  XS("Дистанция"),      &g_state.esp_wall,         &g_state.a_esp_wall,         &cfg::esp::distance_col},
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
-                {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     nullptr},
+                {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
             };
-            constexpr int N = 7;
+            constexpr int N = 8;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
@@ -2834,6 +2915,13 @@ static void RunAim() {
 
         float tx = (box.x1 + box.x2) * 0.5f;
         float ty = box.y1 + bh * bone_v;
+        int target_bone = g_state.aim_bone == 0 ? ESP_BONE_HEAD
+                        : g_state.aim_bone == 1 ? ESP_BONE_CHEST
+                                                : ESP_BONE_PELVIS;
+        if (box.skeleton_valid && box.bone_visible[target_bone]) {
+            tx = box.bone_screen[target_bone][0];
+            ty = box.bone_screen[target_bone][1];
+        }
         if (tx < 0.f || tx > sw || ty < 0.f || ty > sh) continue;
 
         float dx = tx - cx;
@@ -2887,6 +2975,12 @@ static void RunAim() {
     // crouch-aware). If world projection is unavailable, fall back to the box's
     // own screen position so the aim never fully stops.
     Vec3 aim_origin = tb->head;
+    if (tb->skeleton_valid) {
+        int target_bone = g_state.aim_bone == 0 ? ESP_BONE_HEAD
+                        : g_state.aim_bone == 1 ? ESP_BONE_CHEST
+                                                : ESP_BONE_PELVIS;
+        aim_origin = tb->bones[target_bone];
+    }
     const float lead_time = 0.18f;
     Vec3 pred = { aim_origin.x + tb->vel.x * lead_time,
                   aim_origin.y,
