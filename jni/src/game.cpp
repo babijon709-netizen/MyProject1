@@ -1309,8 +1309,11 @@ static bool read_stable_camera_matrices(uint64_t native_camera,
                                         Mat4& projection, Mat4& view) {
     if (!native_camera) return false;
     // Unity can update the camera transform and projection in separate writes.
-    // Reading both matrices twice and accepting only a coherent pair prevents a
-    // single torn frame from shifting every box, tracer and bone together.
+    // Prefer a coherent pair, but keep the newest finite pair as a fallback:
+    // rejecting every frame while the player is turning would disable ESP
+    // completely after a restart on some devices.
+    Mat4 latest_projection{}, latest_view{};
+    bool have_latest = false;
     for (int attempt = 0; attempt < 3; ++attempt) {
         Mat4 projection_a = rd_m4(native_camera + CAMERA_PROJECTION_MATRIX);
         Mat4 view_a = rd_m4(native_camera + CAMERA_VIEW_MATRIX);
@@ -1318,10 +1321,19 @@ static bool read_stable_camera_matrices(uint64_t native_camera,
         Mat4 view_b = rd_m4(native_camera + CAMERA_VIEW_MATRIX);
         if (!matrix_is_finite(projection_a) || !matrix_is_finite(view_a) ||
             !matrix_is_finite(projection_b) || !matrix_is_finite(view_b)) continue;
-        if (!matrices_are_coherent(projection_a, projection_b, 0.05f) ||
-            !matrices_are_coherent(view_a, view_b, 0.05f)) continue;
-        projection = projection_b;
-        view = view_b;
+        latest_projection = projection_b;
+        latest_view = view_b;
+        have_latest = true;
+        if (matrices_are_coherent(projection_a, projection_b, 0.05f) &&
+            matrices_are_coherent(view_a, view_b, 0.05f)) {
+            projection = projection_b;
+            view = view_b;
+            return true;
+        }
+    }
+    if (have_latest) {
+        projection = latest_projection;
+        view = latest_view;
         return true;
     }
     return false;
@@ -1483,6 +1495,33 @@ bool esp_init(pid_t pid) {
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
     if (!g_il2cpp_base) return false;
+
+    // A restarted client can reuse the same pid while libil2cpp and all
+    // managed objects have new addresses. Do not carry validation state or the
+    // previous player snapshot into the new process image.
+    g_player_manager_class = 0;
+    g_player_manager_static_fields = 0;
+    g_game_controller_class = 0;
+    g_local_player = 0;
+    g_matrix_configuration_validated = false;
+    g_camera_matrix_physical_match = false;
+    g_last_camera_fov_deg = -1.f;
+    g_last_vp_valid = false;
+    g_player_snapshot.clear();
+    g_player_snapshot_stamp = {};
+    g_player_position_offset = PLAYER_POSITION;
+    g_transform_hierarchy_layout = {};
+    g_transform_hierarchy_layout_valid = false;
+    {
+        std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
+        g_skeleton_layout = {};
+        g_skeleton_layout_valid = false;
+        g_skeleton_layout_retry_after = {};
+        g_skeleton_hierarchy_cache.clear();
+        g_skeleton_frame_cache.clear();
+    }
+    g_use_direct_player_position = true;
+    g_player_position_validated = false;
     return true;
 }
 
