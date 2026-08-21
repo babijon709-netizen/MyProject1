@@ -1798,10 +1798,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                                                      skeleton_segments, animated_head,
                                                      skeleton_chest, skeleton_pelvis);
 
+        // Keep the ESP rectangle independent from the optional bone reader.
+        // Box geometry is based on the stable player capsule, so a transient
+        // bone/cache read can never collapse or stretch the rectangle.
         Vec3 body_bottom = render_feet;
-        Vec3 body_top = have_skeleton ? animated_head
-                                      : Vec3{render_x, feet_y + head_height, render_z};
-        if (transform_camera_mode && !have_skeleton) {
+        Vec3 body_top = {render_x, feet_y + head_height, render_z};
+        if (transform_camera_mode) {
             body_bottom.y = feet.y - 1.60F;
             body_top.y = feet.y + 0.20F;
         }
@@ -1840,8 +1842,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.distance = distance;
         box.source = s_transforms[i];
         box.feet  = {render_x, feet_y, render_z};
-        box.head  = have_skeleton ? animated_head
-                                  : Vec3{render_x, feet_y + head_height, render_z};
+        box.head  = {render_x, feet_y + head_height, render_z};
         box.vel   = vel;
         box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
         box.crouched = crouched;
