@@ -48,13 +48,39 @@ inline constexpr std::uint64_t PLAYER_VITALS_MAX_HP = 0x88;
 inline constexpr std::uint64_t INTERFACE_REFERENCE_VALUE = 0x18;
 inline constexpr std::uint64_t PLAYER_WEAPON_NUMBER      = 0xCA;
 
-// The KCC owns CharacterAnimation; CharacterAnimation.pvi (tk) contains the
-// exact Transform[] used for humanoid animation and an optional bone-id map.
+// KCC (the character controller behind PlayerManager.kccReference). Verified
+// against the il2cpp dump: KCC.hitBoxRecorderRoot 0x70, KCC.player 0x78,
+// KCC.head 0x88, KCC.<Pose> 0x274, KCC.<MoveState> 0x278.
 inline constexpr std::uint64_t KCC_PLAYER                     = 0x78;
+inline constexpr std::uint64_t KCC_HITBOX_ROOT                = 0x70;
+inline constexpr std::uint64_t KCC_HEAD_TRANSFORM             = 0x88;
+inline constexpr std::uint64_t KCC_POSE                       = 0x274; // 0 stand, 1 crouch
+inline constexpr std::uint64_t KCC_MOVE_STATE                 = 0x278; // MoveState (byte)
 inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION        = 0x108;
 inline constexpr std::uint64_t CHARACTER_ANIMATION_BONE_CACHE = 0x88;
 inline constexpr std::uint64_t BONE_CACHE_TRANSFORMS           = 0x48;
 inline constexpr std::uint64_t BONE_CACHE_MAPPING              = 0x50;
+
+// CharacterAnimation.playerModelInfo -> PlayerModelInfo.head / .body are the
+// real animated head and rig-root Transforms of the character model.
+inline constexpr std::uint64_t CHARACTER_ANIMATION_MODEL_INFO = 0x30;
+inline constexpr std::uint64_t MODEL_INFO_HEAD                = 0x20;
+inline constexpr std::uint64_t MODEL_INFO_BODY                = 0x40;
+
+// HitBoxRecorderRoot.hitBoxes is a HitBox[]; every HitBox is a MonoBehaviour
+// sitting on (or directly under) a bone of the animated character, and
+// HitBox.m_HitArea tells which body part that bone belongs to.
+inline constexpr std::uint64_t HITBOX_ROOT_BOXES              = 0x68;
+inline constexpr std::uint64_t HITBOX_HIT_AREA                = 0x68;
+// HitArea enum values.
+inline constexpr int HIT_AREA_ALL   = 0;
+inline constexpr int HIT_AREA_HEAD  = 1;
+inline constexpr int HIT_AREA_CHEST = 2;
+inline constexpr int HIT_AREA_LEG   = 3;
+inline constexpr int HIT_AREA_FOOT  = 4;
+inline constexpr int HIT_AREA_HAND  = 5;
+// MoveState.CROUCHING
+inline constexpr int MOVE_STATE_CROUCHING = 3;
 
 // Current Unity native Transform/GameObject layout. The code validates every
 // pointer and also probes nearby layouts before using these values.

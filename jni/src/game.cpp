@@ -71,14 +71,32 @@ struct NativeTreeLayout {
     uint64_t parent_offset;
 };
 
-struct PlayerBoneCache {
-    uint64_t animator = 0;
-    uint64_t rig_root = 0;
-    std::array<uint64_t, ESP_BONE_COUNT> joints{};
-    double resolved_at = 0.0;
-    bool named_rig = false;
+// A single animated bone: the Unity transform hierarchy that owns it plus the
+// index of the bone inside that hierarchy. Positions are recomputed from the
+// hierarchy every frame, which is what makes the drawn skeleton follow the
+// enemy animation (walking, aiming, crouching, ragdoll ...).
+struct RigJoint {
+    uint64_t hierarchy = 0;
+    int32_t  index = -1;
+    bool valid() const { return hierarchy != 0 && index >= 0; }
 };
-static std::unordered_map<uint64_t, PlayerBoneCache> g_player_bones;
+
+enum RigSource : int {
+    RIG_SOURCE_NONE = 0,
+    RIG_SOURCE_HITBOXES = 1,
+    RIG_SOURCE_NAMES = 2
+};
+
+struct PlayerRig {
+    std::array<RigJoint, ESP_BONE_COUNT> joints{};
+    uint64_t head_transform = 0;        // animated head, anchor of the fallback rig
+    uint64_t orientation_transform = 0; // used to orient the fallback rig
+    uint64_t signature = 0;             // model pointer the rig was built from
+    double   resolved_at = 0.0;
+    int      source = RIG_SOURCE_NONE;
+    int      failures = 0;
+};
+static std::unordered_map<uint64_t, PlayerRig> g_player_rigs;
 
 static bool      g_use_direct_player_position = true;
 static bool      g_player_position_validated = false;
@@ -736,60 +754,25 @@ static int map_named_bones(const std::vector<uint64_t>& transforms,
     return result;
 }
 
-static PlayerBoneCache resolve_player_bones(uint64_t player) {
-    PlayerBoneCache cache{};
-    cache.animator = rd_ptr(player + PLAYER_ANIMATOR);
-    cache.resolved_at = monotonic_seconds();
-
-    uint64_t animator_transform = native_transform_from_component(cache.animator);
-    uint64_t camera_root = resolve_player_native_transform(player);
-    if (!animator_transform && !camera_root) return cache;
-
-    const NativeTreeLayout layouts[] = {
-        {NATIVE_TRANSFORM_CHILDREN, NATIVE_TRANSFORM_CHILD_COUNT, NATIVE_TRANSFORM_PARENT},
-        {0x68, 0x78, 0x88},
-        {0x78, 0x88, 0x98}
-    };
-
-    int best_score = 0;
-    for (const auto& layout : layouts) {
-        for (uint64_t seed : {animator_transform, camera_root}) {
-            if (!native_transform_is_valid(seed)) continue;
-            std::vector<uint64_t> roots;
-            roots.push_back(seed);
-            uint64_t highest = seed;
-            for (int depth = 0; depth < 12; ++depth) {
-                uint64_t parent = rd_ptr(highest + layout.parent_offset);
-                if (!native_transform_is_valid(parent) || parent == highest) break;
-                highest = parent;
-            }
-            if (highest != seed) roots.push_back(highest);
-
-            for (uint64_t root : roots) {
-                std::vector<uint64_t> transforms;
-                std::unordered_set<uint64_t> visited;
-                collect_native_transforms(root, layout, transforms, visited);
-                std::array<uint64_t, ESP_BONE_COUNT> mapped{};
-                int score = map_named_bones(transforms, mapped);
-                if (score > best_score) {
-                    best_score = score;
-                    cache.rig_root = animator_transform ? animator_transform : root;
-                    cache.joints = mapped;
-                }
-            }
-        }
-    }
-
-    int found = 0;
-    for (uint64_t joint : cache.joints) if (joint) ++found;
-    cache.named_rig = found >= 11 && cache.joints[ESP_BONE_HEAD] &&
-        cache.joints[ESP_BONE_CHEST] && cache.joints[ESP_BONE_PELVIS] &&
-        cache.joints[ESP_BONE_LEFT_ELBOW] && cache.joints[ESP_BONE_RIGHT_ELBOW] &&
-        cache.joints[ESP_BONE_LEFT_KNEE] && cache.joints[ESP_BONE_RIGHT_KNEE] &&
-        cache.joints[ESP_BONE_LEFT_FOOT] && cache.joints[ESP_BONE_RIGHT_FOOT];
-    if (!cache.rig_root) cache.rig_root = animator_transform ? animator_transform : camera_root;
-    return cache;
-}
+// ---------------------------------------------------------------------------
+// Animated skeleton.
+//
+// Every joint drawn by the overlay is a real Transform of the enemy character
+// model, read from the Unity transform hierarchy once per frame. Because the
+// game animates exactly those transforms, the skeleton walks, aims, leans and
+// crouches together with the model without any extra logic.
+//
+// Rig resolution order (the result is cached per player):
+//   1. Hit boxes. KCC.hitBoxRecorderRoot.hitBoxes is an array of HitBox
+//      components that the game itself attaches to the character bones, and
+//      HitBox.m_HitArea says which body part a box belongs to (Head, Chest,
+//      Leg, Foot, Hand). Walking one or two parents up a hit box gives the
+//      elbow/shoulder or knee/hip bone, so the whole humanoid can be rebuilt
+//      without guessing bone names.
+//   2. Bone names inside the model hierarchy (compatibility fallback).
+//   3. A procedural rig anchored to the real animated head transform, so even
+//      the last resort follows crouching.
+// ---------------------------------------------------------------------------
 
 static Vec3 vec_lerp(const Vec3& from, const Vec3& to, float amount) {
     return {from.x + (to.x - from.x) * amount,
@@ -801,141 +784,219 @@ static Vec3 vec_add_scaled(const Vec3& base, const Vec3& direction, float amount
     return {base.x + direction.x * amount, base.y + direction.y * amount, base.z + direction.z * amount};
 }
 
-static bool read_animated_skeleton(PlayerBoneCache& cache, const Vec3& reference_feet,
-                                   std::array<Vec3, ESP_BONE_COUNT>& bones) {
-    if (!cache.named_rig) return false;
-    std::array<bool, ESP_BONE_COUNT> valid{};
-    for (int role = 0; role < ESP_BONE_COUNT; ++role) {
-        uint64_t transform = cache.joints[(size_t)role];
-        if (!transform) continue;
-        Vec3 position{};
-        if (read_transform_hierarchy_position(transform, position)) {
-            bones[(size_t)role] = position;
-            valid[(size_t)role] = true;
-        }
-    }
+static float vec_distance(const Vec3& first, const Vec3& second) {
+    float dx = first.x - second.x, dy = first.y - second.y, dz = first.z - second.z;
+    return sqrtf(dx * dx + dy * dy + dz * dz);
+}
 
-    // Some rigs omit explicit neck/clavicle nodes. Keep all endpoints attached
-    // to real animated joints and derive only the missing connector.
-    if (!valid[ESP_BONE_NECK] && valid[ESP_BONE_HEAD] && valid[ESP_BONE_CHEST]) {
-        bones[ESP_BONE_NECK] = vec_lerp(bones[ESP_BONE_CHEST], bones[ESP_BONE_HEAD], 0.68f);
-        valid[ESP_BONE_NECK] = true;
-    }
-    if (!valid[ESP_BONE_LEFT_SHOULDER] && valid[ESP_BONE_CHEST] && valid[ESP_BONE_LEFT_ELBOW]) {
-        bones[ESP_BONE_LEFT_SHOULDER] = vec_lerp(bones[ESP_BONE_CHEST], bones[ESP_BONE_LEFT_ELBOW], 0.28f);
-        valid[ESP_BONE_LEFT_SHOULDER] = true;
-    }
-    if (!valid[ESP_BONE_RIGHT_SHOULDER] && valid[ESP_BONE_CHEST] && valid[ESP_BONE_RIGHT_ELBOW]) {
-        bones[ESP_BONE_RIGHT_SHOULDER] = vec_lerp(bones[ESP_BONE_CHEST], bones[ESP_BONE_RIGHT_ELBOW], 0.28f);
-        valid[ESP_BONE_RIGHT_SHOULDER] = true;
-    }
-    if (!valid[ESP_BONE_LEFT_HIP] && valid[ESP_BONE_PELVIS] && valid[ESP_BONE_LEFT_KNEE]) {
-        bones[ESP_BONE_LEFT_HIP] = vec_lerp(bones[ESP_BONE_PELVIS], bones[ESP_BONE_LEFT_KNEE], 0.18f);
-        valid[ESP_BONE_LEFT_HIP] = true;
-    }
-    if (!valid[ESP_BONE_RIGHT_HIP] && valid[ESP_BONE_PELVIS] && valid[ESP_BONE_RIGHT_KNEE]) {
-        bones[ESP_BONE_RIGHT_HIP] = vec_lerp(bones[ESP_BONE_PELVIS], bones[ESP_BONE_RIGHT_KNEE], 0.18f);
-        valid[ESP_BONE_RIGHT_HIP] = true;
-    }
-    for (bool value : valid) if (!value) return false;
+// Known native Transform / TransformHierarchy layouts. The correct one is
+// detected once at runtime by actually reading a position through it.
+static const TransformHierarchyLayout kBoneLayouts[] = {
+    {0x38, 0x40, 0x18, 0x20, false, false},
+    {0x38, 0x40, 0x18, 0x20, true,  true},
+    {0x38, 0x40, 0x08, 0x10, false, false},
+    {0x38, 0x40, 0x08, 0x10, true,  true},
+    {0x28, 0x30, 0x18, 0x20, false, false},
+    {0x28, 0x30, 0x18, 0x20, true,  true},
+    {0x28, 0x30, 0x08, 0x10, false, false},
+    {0x28, 0x30, 0x08, 0x10, true,  true}
+};
 
-    float feet_y = std::min(bones[ESP_BONE_LEFT_FOOT].y, bones[ESP_BONE_RIGHT_FOOT].y);
-    float height = bones[ESP_BONE_HEAD].y - feet_y;
-    if (!std::isfinite(height) || height < 0.55f || height > 2.7f) return false;
-    for (const Vec3& point : bones) {
-        float dx = point.x - reference_feet.x;
-        float dy = point.y - reference_feet.y;
-        float dz = point.z - reference_feet.z;
-        if (!vec3_is_finite(point) || dx * dx + dy * dy + dz * dz > 16.0f) return false;
+static TransformHierarchyLayout g_bone_layout{};
+static bool g_bone_layout_valid = false;
+
+static bool bone_layout_for(uint64_t native_transform, TransformHierarchyLayout& layout) {
+    if (!native_transform_is_valid(native_transform)) return false;
+    Vec3 probe{};
+    if (g_bone_layout_valid && read_transform_hierarchy_layout(native_transform, g_bone_layout, probe)) {
+        layout = g_bone_layout;
+        return true;
     }
+    if (g_transform_hierarchy_layout_valid &&
+        read_transform_hierarchy_layout(native_transform, g_transform_hierarchy_layout, probe)) {
+        layout = g_transform_hierarchy_layout;
+        g_bone_layout = layout;
+        g_bone_layout_valid = true;
+        return true;
+    }
+    for (const auto& candidate : kBoneLayouts) {
+        if (!read_transform_hierarchy_layout(native_transform, candidate, probe)) continue;
+        layout = candidate;
+        g_bone_layout = candidate;
+        g_bone_layout_valid = true;
+        return true;
+    }
+    return false;
+}
+
+static bool joint_from_transform(uint64_t native_transform, RigJoint& joint) {
+    TransformHierarchyLayout layout{};
+    if (!bone_layout_for(native_transform, layout)) return false;
+    uint64_t hierarchy = rd_ptr(native_transform + layout.data_offset);
+    int32_t index = rd<int32_t>(native_transform + layout.index_offset);
+    if (!likely_native_pointer(hierarchy) || index < 0 || index > 100000) return false;
+    joint.hierarchy = hierarchy;
+    joint.index = index;
     return true;
 }
 
-static void build_procedural_skeleton(const PlayerBoneCache& cache, const Vec3& feet,
-                                      bool crouched, std::array<Vec3, ESP_BONE_COUNT>& bones) {
-    Vec3 right{1.f, 0.f, 0.f}, forward{0.f, 0.f, 1.f};
-    Vec3 pose_position{};
-    Vec4 pose_rotation{};
-    if (read_native_transform_pose(cache.rig_root, pose_position, pose_rotation)) {
-        right = rotate_vector(pose_rotation, {1.f, 0.f, 0.f});
-        forward = rotate_vector(pose_rotation, {0.f, 0.f, 1.f});
-        right.y = 0.f; forward.y = 0.f;
-        float rl = sqrtf(right.x * right.x + right.z * right.z);
-        float fl = sqrtf(forward.x * forward.x + forward.z * forward.z);
-        if (rl > 0.001f) { right.x /= rl; right.z /= rl; } else right = {1.f, 0.f, 0.f};
-        if (fl > 0.001f) { forward.x /= fl; forward.z /= fl; } else forward = {0.f, 0.f, 1.f};
-    }
-
-    const float pelvis_y = crouched ? 0.64f : 0.92f;
-    const float chest_y  = crouched ? 0.94f : 1.34f;
-    const float neck_y   = crouched ? 1.08f : 1.55f;
-    const float head_y   = crouched ? 1.20f : 1.73f;
-    Vec3 pelvis = {feet.x, feet.y + pelvis_y, feet.z};
-    if (crouched) pelvis = vec_add_scaled(pelvis, forward, -0.08f);
-    Vec3 chest = {pelvis.x, feet.y + chest_y, pelvis.z};
-    chest = vec_add_scaled(chest, forward, crouched ? 0.10f : 0.f);
-
-    bones[ESP_BONE_PELVIS] = pelvis;
-    bones[ESP_BONE_CHEST] = chest;
-    bones[ESP_BONE_NECK] = {chest.x, feet.y + neck_y, chest.z};
-    bones[ESP_BONE_HEAD] = {chest.x, feet.y + head_y, chest.z};
-
-    bones[ESP_BONE_LEFT_SHOULDER]  = vec_add_scaled(chest, right, -0.23f);
-    bones[ESP_BONE_RIGHT_SHOULDER] = vec_add_scaled(chest, right,  0.23f);
-    bones[ESP_BONE_LEFT_ELBOW]  = vec_add_scaled(bones[ESP_BONE_LEFT_SHOULDER], right, -0.16f);
-    bones[ESP_BONE_RIGHT_ELBOW] = vec_add_scaled(bones[ESP_BONE_RIGHT_SHOULDER], right, 0.16f);
-    bones[ESP_BONE_LEFT_ELBOW].y  -= crouched ? 0.17f : 0.23f;
-    bones[ESP_BONE_RIGHT_ELBOW].y -= crouched ? 0.17f : 0.23f;
-    bones[ESP_BONE_LEFT_HAND]  = vec_add_scaled(bones[ESP_BONE_LEFT_ELBOW], forward, 0.22f);
-    bones[ESP_BONE_RIGHT_HAND] = vec_add_scaled(bones[ESP_BONE_RIGHT_ELBOW], forward, 0.22f);
-    bones[ESP_BONE_LEFT_HAND].y  -= 0.20f;
-    bones[ESP_BONE_RIGHT_HAND].y -= 0.20f;
-
-    bones[ESP_BONE_LEFT_HIP]  = vec_add_scaled(pelvis, right, -0.12f);
-    bones[ESP_BONE_RIGHT_HIP] = vec_add_scaled(pelvis, right,  0.12f);
-    bones[ESP_BONE_LEFT_KNEE]  = vec_add_scaled({feet.x, feet.y + (crouched ? 0.34f : 0.48f), feet.z}, right, -0.13f);
-    bones[ESP_BONE_RIGHT_KNEE] = vec_add_scaled({feet.x, feet.y + (crouched ? 0.34f : 0.48f), feet.z}, right,  0.13f);
-    if (crouched) {
-        bones[ESP_BONE_LEFT_KNEE]  = vec_add_scaled(bones[ESP_BONE_LEFT_KNEE], forward, 0.28f);
-        bones[ESP_BONE_RIGHT_KNEE] = vec_add_scaled(bones[ESP_BONE_RIGHT_KNEE], forward, 0.28f);
-    }
-    bones[ESP_BONE_LEFT_FOOT]  = vec_add_scaled({feet.x, feet.y + 0.03f, feet.z}, right, -0.14f);
-    bones[ESP_BONE_RIGHT_FOOT] = vec_add_scaled({feet.x, feet.y + 0.03f, feet.z}, right,  0.14f);
-    bones[ESP_BONE_LEFT_FOOT]  = vec_add_scaled(bones[ESP_BONE_LEFT_FOOT], forward, 0.08f);
-    bones[ESP_BONE_RIGHT_FOOT] = vec_add_scaled(bones[ESP_BONE_RIGHT_FOOT], forward, 0.08f);
+static bool hierarchy_arrays(uint64_t hierarchy, uint64_t& matrices, uint64_t& indices) {
+    if (!g_bone_layout_valid || !likely_native_pointer(hierarchy)) return false;
+    matrices = rd_ptr(hierarchy + g_bone_layout.matrices_offset);
+    indices = rd_ptr(hierarchy + g_bone_layout.indices_offset);
+    if (g_bone_layout.matrices_indirect) matrices = rd_ptr(matrices);
+    if (g_bone_layout.indices_indirect) indices = rd_ptr(indices);
+    return likely_native_pointer(matrices) && likely_native_pointer(indices);
 }
 
-enum DirectHumanBone : int {
-    DIRECT_HIPS = 0,
-    DIRECT_LEFT_UPPER_LEG = 1,
-    DIRECT_RIGHT_UPPER_LEG = 2,
-    DIRECT_LEFT_LOWER_LEG = 3,
-    DIRECT_RIGHT_LOWER_LEG = 4,
-    DIRECT_LEFT_FOOT = 5,
-    DIRECT_RIGHT_FOOT = 6,
-    DIRECT_SPINE = 7,
-    DIRECT_CHEST = 8,
-    DIRECT_UPPER_CHEST = 9,
-    DIRECT_NECK = 10,
-    DIRECT_HEAD = 11,
-    DIRECT_LEFT_SHOULDER = 12,
-    DIRECT_RIGHT_SHOULDER = 13,
-    DIRECT_LEFT_UPPER_ARM = 14,
-    DIRECT_RIGHT_UPPER_ARM = 15,
-    DIRECT_LEFT_LOWER_ARM = 16,
-    DIRECT_RIGHT_LOWER_ARM = 17,
-    DIRECT_LEFT_HAND = 18,
-    DIRECT_RIGHT_HAND = 19,
-    DIRECT_BONE_COUNT = 22
+// Per-frame snapshot of one transform hierarchy. Walking the parent chain of
+// every bone with individual reads costs hundreds of syscalls per player and
+// frame; Unity keeps parents in front of their children inside the hierarchy
+// arrays, so one bulk read of the local transforms plus the parent indices is
+// enough to resolve every bone of that player locally.
+struct HierarchyWorldTransform {
+    Vec3 position{};
+    Vec4 rotation{};
+    Vec3 scale{1.f, 1.f, 1.f};
 };
 
-struct DirectBoneSet {
-    std::array<Vec3, DIRECT_BONE_COUNT> position{};
-    std::array<bool, DIRECT_BONE_COUNT> valid{};
-    int score = -1;
+struct HierarchySnapshot {
+    std::vector<Matrix34> locals;
+    std::vector<int32_t> parents;
+    std::unordered_map<int32_t, HierarchyWorldTransform> world;
 };
+static std::unordered_map<uint64_t, HierarchySnapshot> g_hierarchy_frame;
 
-static uint64_t resolve_character_animation(uint64_t player) {
+static void clear_hierarchy_frame_cache() { g_hierarchy_frame.clear(); }
+
+static HierarchySnapshot* prepare_hierarchy_snapshot(uint64_t hierarchy, int32_t max_index) {
+    if (!likely_native_pointer(hierarchy) || max_index < 0 || max_index > 4096) return nullptr;
+    auto existing = g_hierarchy_frame.find(hierarchy);
+    if (existing != g_hierarchy_frame.end()) {
+        if ((int32_t)existing->second.parents.size() > max_index) return &existing->second;
+        g_hierarchy_frame.erase(existing); // rebuild with a window that covers the bone
+    }
+
+    uint64_t matrices = 0, indices = 0;
+    if (!hierarchy_arrays(hierarchy, matrices, indices)) return nullptr;
+    size_t count = (size_t)max_index + 1;
+    HierarchySnapshot snapshot;
+    snapshot.locals.resize(count);
+    snapshot.parents.resize(count);
+    if (!read_remote_bytes(matrices, snapshot.locals.data(), count * sizeof(Matrix34)) ||
+        !read_remote_bytes(indices, snapshot.parents.data(), count * sizeof(int32_t)))
+        return nullptr;
+    auto inserted = g_hierarchy_frame.emplace(hierarchy, std::move(snapshot));
+    return &inserted.first->second;
+}
+
+static bool snapshot_world_transform(HierarchySnapshot& snapshot, int32_t index,
+                                     HierarchyWorldTransform& result) {
+    if (index < 0 || index >= (int32_t)snapshot.parents.size()) return false;
+    auto cached = snapshot.world.find(index);
+    if (cached != snapshot.world.end()) { result = cached->second; return true; }
+
+    std::vector<int32_t> chain;
+    int32_t current = index;
+    HierarchyWorldTransform base{};
+    bool have_base = false;
+    for (int guard = 0; guard < 256; ++guard) {
+        if (current < 0 || current >= (int32_t)snapshot.parents.size()) return false;
+        auto found = snapshot.world.find(current);
+        if (found != snapshot.world.end()) { base = found->second; have_base = true; break; }
+        chain.push_back(current);
+        int32_t parent = snapshot.parents[(size_t)current];
+        if (parent == -1) break;
+        if (parent < 0 || parent == current) return false;
+        current = parent;
+    }
+    if (chain.empty()) return have_base ? (result = base, true) : false;
+
+    HierarchyWorldTransform accumulated = base;
+    if (!have_base) {
+        const Matrix34& root = snapshot.locals[(size_t)chain.back()];
+        if (!matrix34_is_valid(root)) return false;
+        accumulated.position = {root.translation.x, root.translation.y, root.translation.z};
+        accumulated.rotation = root.rotation;
+        accumulated.scale = {root.scale.x, root.scale.y, root.scale.z};
+        snapshot.world[chain.back()] = accumulated;
+        chain.pop_back();
+    }
+    for (size_t step = chain.size(); step-- > 0;) {
+        const Matrix34& local = snapshot.locals[(size_t)chain[step]];
+        if (!matrix34_is_valid(local)) return false;
+        Vec3 scaled = {local.translation.x * accumulated.scale.x,
+                       local.translation.y * accumulated.scale.y,
+                       local.translation.z * accumulated.scale.z};
+        Vec3 rotated = rotate_vector(accumulated.rotation, scaled);
+        HierarchyWorldTransform next{};
+        next.position = {accumulated.position.x + rotated.x,
+                         accumulated.position.y + rotated.y,
+                         accumulated.position.z + rotated.z};
+        next.rotation = multiply_quaternion(accumulated.rotation, local.rotation);
+        next.scale = {accumulated.scale.x * local.scale.x,
+                      accumulated.scale.y * local.scale.y,
+                      accumulated.scale.z * local.scale.z};
+        if (!vec3_is_finite(next.position)) return false;
+        accumulated = next;
+        snapshot.world[chain[step]] = accumulated;
+    }
+    result = accumulated;
+    return true;
+}
+
+static bool joint_position(const RigJoint& joint, Vec3& position) {
+    if (!joint.valid()) return false;
+    auto snapshot = g_hierarchy_frame.find(joint.hierarchy);
+    if (snapshot != g_hierarchy_frame.end() &&
+        joint.index < (int32_t)snapshot->second.parents.size()) {
+        HierarchyWorldTransform world{};
+        if (snapshot_world_transform(snapshot->second, joint.index, world)) {
+            position = world.position;
+            return vec3_is_finite(position);
+        }
+    }
+    uint64_t matrices = 0, indices = 0;
+    if (!hierarchy_arrays(joint.hierarchy, matrices, indices)) return false;
+    return read_transform_hierarchy_arrays(matrices, indices, joint.index, position);
+}
+
+static bool joint_parent(const RigJoint& joint, RigJoint& parent) {
+    uint64_t matrices = 0, indices = 0;
+    if (!joint.valid() || !hierarchy_arrays(joint.hierarchy, matrices, indices)) return false;
+    int32_t parent_index = -1;
+    if (!rd_exact(indices + (uint64_t)joint.index * sizeof(int32_t), parent_index)) return false;
+    if (parent_index < 0 || parent_index > 100000) return false;
+    parent.hierarchy = joint.hierarchy;
+    parent.index = parent_index;
+    return true;
+}
+
+// Bone chain above `start`. Helper objects that sit exactly on the bone they
+// belong to (hit box colliders are usually parented to the bone itself) are
+// skipped, so the first returned link is always the next real joint.
+static void joint_chain(const RigJoint& start, const Vec3& start_position,
+                        std::vector<RigJoint>& chain, std::vector<Vec3>& positions,
+                        size_t max_links) {
+    RigJoint current = start;
+    Vec3 previous = start_position;
+    for (int step = 0; step < 12 && chain.size() < max_links; ++step) {
+        RigJoint parent{};
+        if (!joint_parent(current, parent)) break;
+        Vec3 position{};
+        if (!joint_position(parent, position) || !vec3_is_finite(position)) break;
+        current = parent;
+        if (vec_distance(position, previous) < 0.035f) continue;
+        chain.push_back(parent);
+        positions.push_back(position);
+        previous = position;
+    }
+}
+
+// The KCC drives every player (local and remote) on the client, so it is the
+// most reliable entry point into the character model and its state.
+static uint64_t resolve_kcc(uint64_t player) {
+    if (!player) return 0;
     uint64_t reference = rd_ptr(player + PLAYER_KCC_REFERENCE);
     const uint64_t candidates[] = {
         reference,
@@ -945,196 +1006,500 @@ static uint64_t resolve_character_animation(uint64_t player) {
     };
     for (uint64_t candidate : candidates) {
         if (!likely_native_pointer(candidate)) continue;
-        if (rd_ptr(candidate + KCC_PLAYER) == player) {
-            uint64_t animation = rd_ptr(candidate + KCC_CHARACTER_ANIMATION);
-            if (likely_native_pointer(animation)) return animation;
-        }
-        // Tutorial/legacy KCC has inherited fields shifted by eight bytes.
-        if (rd_ptr(candidate + 0x80) == player) {
-            uint64_t animation = rd_ptr(candidate + 0xC0);
-            if (likely_native_pointer(animation)) return animation;
+        if (rd_ptr(candidate + KCC_PLAYER) == player) return candidate;
+    }
+    return 0;
+}
+
+static uint64_t resolve_character_animation(uint64_t player) {
+    uint64_t kcc = resolve_kcc(player);
+    if (!kcc) return 0;
+    uint64_t animation = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
+    return likely_native_pointer(animation) ? animation : 0;
+}
+
+static uint64_t resolve_player_model_info(uint64_t player) {
+    uint64_t animation = resolve_character_animation(player);
+    if (!animation) return 0;
+    uint64_t model_info = rd_ptr(animation + CHARACTER_ANIMATION_MODEL_INFO);
+    return likely_native_pointer(model_info) ? model_info : 0;
+}
+
+static uint64_t native_transform_from_game_object(uint64_t managed_game_object) {
+    if (!likely_native_pointer(managed_game_object)) return 0;
+    uint64_t game_object = rd_ptr(managed_game_object + MANAGED_CACHED_PTR);
+    if (!likely_native_pointer(game_object)) return 0;
+    for (uint64_t vector_offset : {NATIVE_GAME_OBJECT_COMPONENTS, NATIVE_GAME_OBJECT_COMPONENTS + 8}) {
+        uint64_t components = rd_ptr(game_object + vector_offset);
+        if (!likely_native_pointer(components)) continue;
+        for (uint64_t entry_offset : {uint64_t(8), uint64_t(0), uint64_t(0x10)}) {
+            uint64_t candidate = rd_ptr(components + entry_offset);
+            if (native_transform_is_valid(candidate)) return candidate;
         }
     }
     return 0;
 }
 
-static DirectBoneSet map_direct_bones(const std::vector<Vec3>& positions,
-                                      const std::vector<uint8_t>& position_valid,
-                                      const std::vector<int32_t>& mapping,
-                                      int mapping_mode) {
-    DirectBoneSet result{};
-    result.score = 0;
-    int iterations = mapping_mode == 2 ? DIRECT_BONE_COUNT : (int)positions.size();
-    for (int index = 0; index < iterations; ++index) {
-        int bone_id = index;
-        int transform_index = index;
-        if (mapping_mode == 1) {
-            if (index >= (int)mapping.size()) continue;
-            bone_id = mapping[(size_t)index];
-        } else if (mapping_mode == 2) {
-            if (index >= (int)mapping.size()) continue;
-            transform_index = mapping[(size_t)index];
-        }
-        if (bone_id < 0 || bone_id >= DIRECT_BONE_COUNT ||
-            transform_index < 0 || transform_index >= (int)positions.size() ||
-            !position_valid[(size_t)transform_index] || result.valid[(size_t)bone_id]) continue;
-        result.position[(size_t)bone_id] = positions[(size_t)transform_index];
-        result.valid[(size_t)bone_id] = true;
-        ++result.score;
+// PlayerModelInfo.head is the animated head bone of the character model.
+static uint64_t resolve_model_head_transform(uint64_t player) {
+    uint64_t model_info = resolve_player_model_info(player);
+    if (model_info) {
+        uint64_t head = resolve_native_transform(rd_ptr(model_info + MODEL_INFO_HEAD));
+        if (native_transform_is_valid(head)) return head;
     }
-
-    if (result.valid[DIRECT_HIPS]) result.score += 100;
-    if (result.valid[DIRECT_HEAD]) result.score += 120;
-    if (result.valid[DIRECT_NECK]) result.score += 60;
-    if (result.valid[DIRECT_CHEST] || result.valid[DIRECT_UPPER_CHEST] || result.valid[DIRECT_SPINE]) result.score += 80;
-    if (result.valid[DIRECT_LEFT_LOWER_ARM] && result.valid[DIRECT_RIGHT_LOWER_ARM]) result.score += 70;
-    if (result.valid[DIRECT_LEFT_UPPER_LEG] && result.valid[DIRECT_RIGHT_UPPER_LEG]) result.score += 50;
-
-    if (result.valid[DIRECT_HEAD] && result.valid[DIRECT_HIPS]) {
-        float dy = result.position[DIRECT_HEAD].y - result.position[DIRECT_HIPS].y;
-        if (std::isfinite(dy) && dy > 0.25f && dy < 1.8f) result.score += 100;
-        else result.score -= 250;
+    uint64_t kcc = resolve_kcc(player);
+    if (kcc) {
+        uint64_t head = resolve_native_transform(rd_ptr(kcc + KCC_HEAD_TRANSFORM));
+        if (native_transform_is_valid(head)) return head;
     }
-    if (result.valid[DIRECT_LEFT_FOOT] && result.valid[DIRECT_RIGHT_FOOT] && result.valid[DIRECT_HIPS]) {
-        float feet_y = std::min(result.position[DIRECT_LEFT_FOOT].y, result.position[DIRECT_RIGHT_FOOT].y);
-        float dy = result.position[DIRECT_HIPS].y - feet_y;
-        if (std::isfinite(dy) && dy > 0.15f && dy < 1.4f) result.score += 80;
-        else result.score -= 200;
-    }
-    return result;
+    return 0;
 }
 
-// CharacterAnimation.tk.pjh is the game's own HumanBodyBones Transform array.
-// Reading it avoids guessing transform names and follows Animator/IK/ragdoll
-// updates exactly. Name-based hierarchy discovery below remains a compatibility
-// fallback for skins that temporarily rebuild this cache.
-static bool read_direct_humanoid_skeleton(uint64_t player, const Vec3& feet,
-                                          std::array<Vec3, ESP_BONE_COUNT>& bones) {
-    uint64_t animation = resolve_character_animation(player);
-    if (!animation) return false;
-    uint64_t bone_cache = rd_ptr(animation + CHARACTER_ANIMATION_BONE_CACHE);
-    if (!likely_native_pointer(bone_cache)) return false;
-    uint64_t transform_array = rd_ptr(bone_cache + BONE_CACHE_TRANSFORMS);
-    uint64_t mapping_array = rd_ptr(bone_cache + BONE_CACHE_MAPPING);
-    if (!likely_native_pointer(transform_array)) return false;
-
-    int32_t count = rd<int32_t>(transform_array + IL2CPP_LIST_SIZE);
-    if (count <= 0 || count > 96) return false;
-    std::vector<Vec3> positions((size_t)count);
-    std::vector<uint8_t> position_valid((size_t)count, 0);
-    for (int32_t index = 0; index < count; ++index) {
-        uint64_t managed_transform = rd_ptr(transform_array + IL2CPP_ARRAY_FIRST_ELEMENT +
-                                            (uint64_t)index * sizeof(uint64_t));
-        uint64_t native_transform = resolve_native_transform(managed_transform);
-        Vec3 position{};
-        Vec4 rotation{};
-        if (!read_native_transform_pose(native_transform, position, rotation)) continue;
-        float dx = position.x - feet.x, dy = position.y - feet.y, dz = position.z - feet.z;
-        if (!vec3_is_finite(position) || dx * dx + dy * dy + dz * dz > 100.f) continue;
-        positions[(size_t)index] = position;
-        position_valid[(size_t)index] = 1;
+// PlayerModelInfo.body (or the character model GameObject) is the root of the
+// rig and gives the body orientation used by the procedural fallback.
+static uint64_t resolve_model_root_transform(uint64_t player) {
+    uint64_t model_info = resolve_player_model_info(player);
+    if (model_info) {
+        uint64_t body = resolve_native_transform(rd_ptr(model_info + MODEL_INFO_BODY));
+        if (native_transform_is_valid(body)) return body;
     }
+    uint64_t model = native_transform_from_game_object(rd_ptr(player + PLAYER_CHARACTER_MODEL));
+    if (native_transform_is_valid(model)) return model;
+    uint64_t animator = native_transform_from_component(rd_ptr(player + PLAYER_ANIMATOR));
+    if (native_transform_is_valid(animator)) return animator;
+    return resolve_player_native_transform(player);
+}
 
-    std::vector<int32_t> mapping;
-    if (likely_native_pointer(mapping_array)) {
-        int32_t mapping_count = rd<int32_t>(mapping_array + IL2CPP_LIST_SIZE);
-        if (mapping_count > 0 && mapping_count <= 96) {
-            mapping.resize((size_t)mapping_count);
-            read_remote_bytes(mapping_array + IL2CPP_ARRAY_FIRST_ELEMENT,
-                              mapping.data(), mapping.size() * sizeof(int32_t));
+struct HitboxSample {
+    RigJoint joint{};
+    int area = 0;
+    Vec3 position{};
+};
+
+static bool collect_player_hitboxes(uint64_t player, std::vector<HitboxSample>& samples) {
+    uint64_t kcc = resolve_kcc(player);
+    if (!kcc) return false;
+    uint64_t root = rd_ptr(kcc + KCC_HITBOX_ROOT);
+    if (!likely_native_pointer(root)) return false;
+    uint64_t boxes = rd_ptr(root + HITBOX_ROOT_BOXES);
+    if (!likely_native_pointer(boxes)) return false;
+    int32_t count = rd<int32_t>(boxes + IL2CPP_LIST_SIZE);
+    if (count <= 0 || count > 64) return false;
+
+    for (int32_t index = 0; index < count; ++index) {
+        uint64_t hitbox = rd_ptr(boxes + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t));
+        if (!likely_native_pointer(hitbox)) continue;
+        int32_t area = rd<int32_t>(hitbox + HITBOX_HIT_AREA);
+        if (area < HIT_AREA_HEAD || area > HIT_AREA_HAND) continue;
+        HitboxSample sample{};
+        sample.area = (int)area;
+        uint64_t native = native_transform_from_component(hitbox);
+        if (!joint_from_transform(native, sample.joint)) continue;
+        if (!joint_position(sample.joint, sample.position) || !vec3_is_finite(sample.position)) continue;
+        samples.push_back(sample);
+    }
+    return samples.size() >= 3;
+}
+
+struct LimbLinks {
+    RigJoint mid{}, top{}, root{};
+    Vec3 mid_position{}, top_position{}, root_position{};
+    int links = 0;
+};
+
+static LimbLinks limb_links_of(const HitboxSample& sample) {
+    std::vector<RigJoint> chain;
+    std::vector<Vec3> positions;
+    joint_chain(sample.joint, sample.position, chain, positions, 3);
+    LimbLinks links{};
+    links.links = (int)chain.size();
+    if (chain.size() > 0) { links.mid = chain[0];  links.mid_position = positions[0]; }
+    if (chain.size() > 1) { links.top = chain[1];  links.top_position = positions[1]; }
+    if (chain.size() > 2) { links.root = chain[2]; links.root_position = positions[2]; }
+    return links;
+}
+
+static bool build_hitbox_rig(uint64_t player, const Vec3& feet, PlayerRig& rig) {
+    std::vector<HitboxSample> samples;
+    if (!collect_player_hitboxes(player, samples)) return false;
+
+    samples.erase(std::remove_if(samples.begin(), samples.end(), [&](const HitboxSample& sample) {
+        return vec_distance(sample.position, feet) > 3.5f;
+    }), samples.end());
+    if (samples.size() < 3) return false;
+
+    auto samples_of_area = [&](int area) {
+        std::vector<HitboxSample> selected;
+        for (const HitboxSample& sample : samples)
+            if (sample.area == area) selected.push_back(sample);
+        std::sort(selected.begin(), selected.end(), [](const HitboxSample& a, const HitboxSample& b) {
+            return a.position.y > b.position.y;
+        });
+        return selected;
+    };
+
+    std::vector<HitboxSample> heads = samples_of_area(HIT_AREA_HEAD);
+    std::vector<HitboxSample> chests = samples_of_area(HIT_AREA_CHEST);
+    std::vector<HitboxSample> legs = samples_of_area(HIT_AREA_LEG);
+    std::vector<HitboxSample> feet_boxes = samples_of_area(HIT_AREA_FOOT);
+    std::vector<HitboxSample> hands = samples_of_area(HIT_AREA_HAND);
+
+    RigJoint pelvis_joint{};
+    bool pelvis_found = false;
+    RigJoint chest_joint{};
+    bool chest_found = false;
+
+    // Legs: prefer the two foot boxes, otherwise the two lowest leg boxes.
+    bool ends_are_feet = feet_boxes.size() >= 2;
+    std::vector<HitboxSample> leg_ends = ends_are_feet ? feet_boxes : legs;
+    if (leg_ends.size() > 2) leg_ends.erase(leg_ends.begin(), leg_ends.end() - 2);
+    if (leg_ends.size() >= 2) {
+        const EspBone foot_roles[2] = {ESP_BONE_LEFT_FOOT, ESP_BONE_RIGHT_FOOT};
+        const EspBone knee_roles[2] = {ESP_BONE_LEFT_KNEE, ESP_BONE_RIGHT_KNEE};
+        const EspBone hip_roles[2]  = {ESP_BONE_LEFT_HIP,  ESP_BONE_RIGHT_HIP};
+        for (int side = 0; side < 2; ++side) {
+            const HitboxSample& sample = leg_ends[(size_t)side];
+            LimbLinks links = limb_links_of(sample);
+            if (ends_are_feet) {
+                rig.joints[foot_roles[side]] = sample.joint;
+                if (links.links > 0) rig.joints[knee_roles[side]] = links.mid;
+                if (links.links > 1) rig.joints[hip_roles[side]] = links.top;
+                if (links.links > 2 && !pelvis_found) { pelvis_joint = links.root; pelvis_found = true; }
+            } else {
+                rig.joints[knee_roles[side]] = sample.joint;
+                if (links.links > 0) rig.joints[hip_roles[side]] = links.mid;
+                if (links.links > 1 && !pelvis_found) { pelvis_joint = links.top; pelvis_found = true; }
+            }
         }
     }
 
-    DirectBoneSet best{};
-    best.score = -1;
-    for (int mode = 0; mode < 3; ++mode) {
-        if (mode != 0 && mapping.empty()) continue;
-        DirectBoneSet candidate = map_direct_bones(positions, position_valid, mapping, mode);
-        if (candidate.score > best.score) best = candidate;
+    // Arms: hand boxes carry the whole arm chain (hand -> forearm -> upper arm).
+    if (hands.size() > 2) hands.resize(2);
+    if (hands.size() >= 2) {
+        const EspBone hand_roles[2]     = {ESP_BONE_LEFT_HAND, ESP_BONE_RIGHT_HAND};
+        const EspBone elbow_roles[2]    = {ESP_BONE_LEFT_ELBOW, ESP_BONE_RIGHT_ELBOW};
+        const EspBone shoulder_roles[2] = {ESP_BONE_LEFT_SHOULDER, ESP_BONE_RIGHT_SHOULDER};
+        for (int side = 0; side < 2; ++side) {
+            const HitboxSample& sample = hands[(size_t)side];
+            LimbLinks links = limb_links_of(sample);
+            rig.joints[hand_roles[side]] = sample.joint;
+            if (links.links > 0) rig.joints[elbow_roles[side]] = links.mid;
+            if (links.links > 1) rig.joints[shoulder_roles[side]] = links.top;
+            if (links.links > 2 && !chest_found) { chest_joint = links.root; chest_found = true; }
+        }
     }
-    if (best.score < 250 || !best.valid[DIRECT_HIPS] ||
-        !best.valid[DIRECT_LEFT_LOWER_ARM] || !best.valid[DIRECT_RIGHT_LOWER_ARM] ||
-        !best.valid[DIRECT_LEFT_HAND] || !best.valid[DIRECT_RIGHT_HAND] ||
-        !best.valid[DIRECT_LEFT_UPPER_LEG] || !best.valid[DIRECT_RIGHT_UPPER_LEG] ||
-        !best.valid[DIRECT_LEFT_LOWER_LEG] || !best.valid[DIRECT_RIGHT_LOWER_LEG] ||
-        !best.valid[DIRECT_LEFT_FOOT] || !best.valid[DIRECT_RIGHT_FOOT]) return false;
 
-    Vec3 head{};
-    if (best.valid[DIRECT_HEAD]) head = best.position[DIRECT_HEAD];
-    else if (best.valid[DIRECT_NECK]) {
-        head = best.position[DIRECT_NECK];
-        head.y += 0.18f;
-    } else return false;
-    Vec3 chest = best.valid[DIRECT_UPPER_CHEST] ? best.position[DIRECT_UPPER_CHEST]
-               : best.valid[DIRECT_CHEST] ? best.position[DIRECT_CHEST]
-               : best.valid[DIRECT_SPINE] ? best.position[DIRECT_SPINE] : Vec3{};
-    if (!vec3_is_finite(chest) || (!best.valid[DIRECT_UPPER_CHEST] &&
-        !best.valid[DIRECT_CHEST] && !best.valid[DIRECT_SPINE])) return false;
-    Vec3 neck = best.valid[DIRECT_NECK] ? best.position[DIRECT_NECK]
-                                       : vec_lerp(chest, head, 0.68f);
-
-    bones[ESP_BONE_HEAD] = head;
-    bones[ESP_BONE_NECK] = neck;
-    bones[ESP_BONE_CHEST] = chest;
-    bones[ESP_BONE_PELVIS] = best.position[DIRECT_HIPS];
-    bones[ESP_BONE_LEFT_SHOULDER] = best.valid[DIRECT_LEFT_SHOULDER]
-        ? best.position[DIRECT_LEFT_SHOULDER] : best.position[DIRECT_LEFT_UPPER_ARM];
-    bones[ESP_BONE_RIGHT_SHOULDER] = best.valid[DIRECT_RIGHT_SHOULDER]
-        ? best.position[DIRECT_RIGHT_SHOULDER] : best.position[DIRECT_RIGHT_UPPER_ARM];
-    bones[ESP_BONE_LEFT_ELBOW] = best.position[DIRECT_LEFT_LOWER_ARM];
-    bones[ESP_BONE_RIGHT_ELBOW] = best.position[DIRECT_RIGHT_LOWER_ARM];
-    bones[ESP_BONE_LEFT_HAND] = best.position[DIRECT_LEFT_HAND];
-    bones[ESP_BONE_RIGHT_HAND] = best.position[DIRECT_RIGHT_HAND];
-    bones[ESP_BONE_LEFT_HIP] = best.position[DIRECT_LEFT_UPPER_LEG];
-    bones[ESP_BONE_RIGHT_HIP] = best.position[DIRECT_RIGHT_UPPER_LEG];
-    bones[ESP_BONE_LEFT_KNEE] = best.position[DIRECT_LEFT_LOWER_LEG];
-    bones[ESP_BONE_RIGHT_KNEE] = best.position[DIRECT_RIGHT_LOWER_LEG];
-    bones[ESP_BONE_LEFT_FOOT] = best.position[DIRECT_LEFT_FOOT];
-    bones[ESP_BONE_RIGHT_FOOT] = best.position[DIRECT_RIGHT_FOOT];
-
-    // Shoulder bones are optional in Unity avatars; upper-arm roots occupy the
-    // same anatomical joint and are a correct connector when they are absent.
-    if (!best.valid[DIRECT_LEFT_SHOULDER] && !best.valid[DIRECT_LEFT_UPPER_ARM]) return false;
-    if (!best.valid[DIRECT_RIGHT_SHOULDER] && !best.valid[DIRECT_RIGHT_UPPER_ARM]) return false;
-
-    float raw_feet_y = std::min(bones[ESP_BONE_LEFT_FOOT].y, bones[ESP_BONE_RIGHT_FOOT].y);
-    float height = bones[ESP_BONE_HEAD].y - raw_feet_y;
-    if (!std::isfinite(height) || height < 0.55f || height > 2.7f) return false;
-
-    // Bone roots are ankle pivots. Align their lowest level to the player's
-    // capsule by a small common translation; relative animation stays exact.
-    Vec3 visual_feet = vec_lerp(bones[ESP_BONE_LEFT_FOOT], bones[ESP_BONE_RIGHT_FOOT], 0.5f);
-    Vec3 shift = {feet.x - visual_feet.x, feet.y - raw_feet_y, feet.z - visual_feet.z};
-    float shift_length2 = shift.x * shift.x + shift.y * shift.y + shift.z * shift.z;
-    if (!vec3_is_finite(shift) || shift_length2 > 16.f) return false;
-    for (Vec3& point : bones) {
-        point.x += shift.x; point.y += shift.y; point.z += shift.z;
-        if (!vec3_is_finite(point)) return false;
+    // Head and neck.
+    if (!heads.empty()) {
+        const HitboxSample& sample = heads.front();
+        rig.joints[ESP_BONE_HEAD] = sample.joint;
+        LimbLinks links = limb_links_of(sample);
+        if (links.links > 0) rig.joints[ESP_BONE_NECK] = links.mid;
+        if (links.links > 1 && !chest_found) { chest_joint = links.top; chest_found = true; }
     }
+
+    // Torso. Two chest boxes usually mean chest + stomach, which maps nicely to
+    // the chest and pelvis joints.
+    if (!chests.empty()) {
+        rig.joints[ESP_BONE_CHEST] = chests.front().joint;
+        if (!pelvis_found && chests.size() >= 2 &&
+            chests.front().position.y - chests.back().position.y > 0.12f) {
+            pelvis_joint = chests.back().joint;
+            pelvis_found = true;
+        }
+    } else if (chest_found) {
+        rig.joints[ESP_BONE_CHEST] = chest_joint;
+    }
+    if (pelvis_found) rig.joints[ESP_BONE_PELVIS] = pelvis_joint;
+
+    int resolved = 0;
+    for (const RigJoint& joint : rig.joints) if (joint.valid()) ++resolved;
+    bool have_torso = rig.joints[ESP_BONE_CHEST].valid() || rig.joints[ESP_BONE_PELVIS].valid();
+    bool have_limbs = (rig.joints[ESP_BONE_LEFT_KNEE].valid() && rig.joints[ESP_BONE_RIGHT_KNEE].valid()) ||
+                      (rig.joints[ESP_BONE_LEFT_ELBOW].valid() && rig.joints[ESP_BONE_RIGHT_ELBOW].valid());
+    if (!rig.joints[ESP_BONE_HEAD].valid() || !have_torso || !have_limbs || resolved < 6) {
+        rig.joints.fill(RigJoint{});
+        return false;
+    }
+    rig.source = RIG_SOURCE_HITBOXES;
     return true;
 }
 
-static bool read_player_skeleton(uint64_t player, const Vec3& feet, bool crouched,
-                                 std::array<Vec3, ESP_BONE_COUNT>& bones) {
-    if (read_direct_humanoid_skeleton(player, feet, bones)) return true;
+static bool build_named_rig(uint64_t player, PlayerRig& rig) {
+    uint64_t model_root = resolve_model_root_transform(player);
+    uint64_t animator_transform = native_transform_from_component(rd_ptr(player + PLAYER_ANIMATOR));
+    uint64_t camera_root = resolve_player_native_transform(player);
 
-    uint64_t animator = rd_ptr(player + PLAYER_ANIMATOR);
-    double now = monotonic_seconds();
-    auto iterator = g_player_bones.find(player);
-    bool refresh = iterator == g_player_bones.end() || iterator->second.animator != animator ||
-        now - iterator->second.resolved_at > (iterator->second.named_rig ? 5.0 : 1.0);
-    if (refresh) {
-        g_player_bones[player] = resolve_player_bones(player);
-        iterator = g_player_bones.find(player);
+    const NativeTreeLayout layouts[] = {
+        {NATIVE_TRANSFORM_CHILDREN, NATIVE_TRANSFORM_CHILD_COUNT, NATIVE_TRANSFORM_PARENT},
+        {0x68, 0x78, 0x88},
+        {0x78, 0x88, 0x98}
+    };
+
+    int best_score = 0;
+    std::array<uint64_t, ESP_BONE_COUNT> best_joints{};
+    for (const auto& layout : layouts) {
+        for (uint64_t seed : {model_root, animator_transform, camera_root}) {
+            if (!native_transform_is_valid(seed)) continue;
+            uint64_t highest = seed;
+            for (int depth = 0; depth < 12; ++depth) {
+                uint64_t parent = rd_ptr(highest + layout.parent_offset);
+                if (!native_transform_is_valid(parent) || parent == highest) break;
+                highest = parent;
+            }
+            for (uint64_t root : {seed, highest}) {
+                std::vector<uint64_t> transforms;
+                std::unordered_set<uint64_t> visited;
+                collect_native_transforms(root, layout, transforms, visited);
+                if (transforms.size() < 8) continue;
+                std::array<uint64_t, ESP_BONE_COUNT> mapped{};
+                int score = map_named_bones(transforms, mapped);
+                if (score > best_score) { best_score = score; best_joints = mapped; }
+            }
+        }
     }
-    if (iterator == g_player_bones.end()) return false;
+    if (!best_score) return false;
 
-    if (read_animated_skeleton(iterator->second, feet, bones)) return true;
-    // A temporary LOD swap can replace every bone Transform at once. Force a
-    // quick remap next time rather than holding stale pointers for five seconds.
-    iterator->second.named_rig = false;
-    iterator->second.resolved_at = now - 0.75;
-    build_procedural_skeleton(iterator->second, feet, crouched, bones);
+    int resolved = 0;
+    for (int role = 0; role < ESP_BONE_COUNT; ++role) {
+        RigJoint joint{};
+        if (best_joints[(size_t)role] && joint_from_transform(best_joints[(size_t)role], joint)) {
+            rig.joints[(size_t)role] = joint;
+            ++resolved;
+        }
+    }
+    if (resolved < 8 || !rig.joints[ESP_BONE_HEAD].valid() ||
+        !(rig.joints[ESP_BONE_PELVIS].valid() || rig.joints[ESP_BONE_CHEST].valid())) {
+        rig.joints.fill(RigJoint{});
+        return false;
+    }
+    rig.source = RIG_SOURCE_NAMES;
+    return true;
+}
+
+static PlayerRig resolve_player_rig(uint64_t player, const Vec3& feet) {
+    PlayerRig rig{};
+    rig.resolved_at = monotonic_seconds();
+    rig.signature = rd_ptr(player + PLAYER_CHARACTER_MODEL);
+    rig.head_transform = resolve_model_head_transform(player);
+    rig.orientation_transform = resolve_model_root_transform(player);
+    if (build_hitbox_rig(player, feet, rig)) return rig;
+    if (build_named_rig(player, rig)) return rig;
+    rig.source = RIG_SOURCE_NONE;
+    return rig;
+}
+
+// Reads the cached rig and fills the missing connectors. Joints that cannot be
+// read stay invalid so the overlay simply omits those bones instead of drawing
+// a wrong (static) limb.
+static bool read_rig_skeleton(const PlayerRig& rig, const Vec3& feet,
+                              std::array<Vec3, ESP_BONE_COUNT>& bones,
+                              std::array<bool, ESP_BONE_COUNT>& valid) {
+    if (rig.source == RIG_SOURCE_NONE) return false;
+
+    // Load every hierarchy this rig lives in once, so all 16 bones are resolved
+    // from a local copy instead of walking the parent chain in target memory.
+    {
+        std::unordered_map<uint64_t, int32_t> highest;
+        for (const RigJoint& joint : rig.joints) {
+            if (!joint.valid()) continue;
+            int32_t& slot = highest[joint.hierarchy];
+            slot = std::max(slot, joint.index);
+        }
+        for (const auto& entry : highest) prepare_hierarchy_snapshot(entry.first, entry.second);
+    }
+
+    int resolved = 0;
+    for (int role = 0; role < ESP_BONE_COUNT; ++role) {
+        Vec3 position{};
+        if (!rig.joints[(size_t)role].valid()) continue;
+        if (!joint_position(rig.joints[(size_t)role], position)) continue;
+        if (!vec3_is_finite(position) || vec_distance(position, feet) > 4.0f) continue;
+        bones[(size_t)role] = position;
+        valid[(size_t)role] = true;
+        ++resolved;
+    }
+    if (resolved < 5 || !valid[ESP_BONE_HEAD]) return false;
+
+    // Torso.
+    if (!valid[ESP_BONE_PELVIS]) {
+        if (valid[ESP_BONE_LEFT_HIP] && valid[ESP_BONE_RIGHT_HIP]) {
+            bones[ESP_BONE_PELVIS] = vec_lerp(bones[ESP_BONE_LEFT_HIP], bones[ESP_BONE_RIGHT_HIP], 0.5f);
+            valid[ESP_BONE_PELVIS] = true;
+        } else if (valid[ESP_BONE_CHEST]) {
+            bones[ESP_BONE_PELVIS] = vec_lerp(bones[ESP_BONE_CHEST], bones[ESP_BONE_HEAD], -0.55f);
+            valid[ESP_BONE_PELVIS] = true;
+        }
+    }
+    if (!valid[ESP_BONE_CHEST]) {
+        if (valid[ESP_BONE_LEFT_SHOULDER] && valid[ESP_BONE_RIGHT_SHOULDER]) {
+            bones[ESP_BONE_CHEST] = vec_lerp(bones[ESP_BONE_LEFT_SHOULDER], bones[ESP_BONE_RIGHT_SHOULDER], 0.5f);
+            valid[ESP_BONE_CHEST] = true;
+        } else if (valid[ESP_BONE_NECK] && valid[ESP_BONE_PELVIS]) {
+            bones[ESP_BONE_CHEST] = vec_lerp(bones[ESP_BONE_PELVIS], bones[ESP_BONE_NECK], 0.72f);
+            valid[ESP_BONE_CHEST] = true;
+        } else if (valid[ESP_BONE_PELVIS]) {
+            bones[ESP_BONE_CHEST] = vec_lerp(bones[ESP_BONE_PELVIS], bones[ESP_BONE_HEAD], 0.58f);
+            valid[ESP_BONE_CHEST] = true;
+        }
+    }
+    if (!valid[ESP_BONE_PELVIS] && valid[ESP_BONE_CHEST]) {
+        bones[ESP_BONE_PELVIS] = vec_lerp(bones[ESP_BONE_CHEST], bones[ESP_BONE_HEAD], -0.55f);
+        valid[ESP_BONE_PELVIS] = true;
+    }
+    if (!valid[ESP_BONE_CHEST] || !valid[ESP_BONE_PELVIS]) return false;
+    if (!valid[ESP_BONE_NECK]) {
+        bones[ESP_BONE_NECK] = vec_lerp(bones[ESP_BONE_CHEST], bones[ESP_BONE_HEAD], 0.70f);
+        valid[ESP_BONE_NECK] = true;
+    }
+
+    // Arms.
+    const EspBone shoulders[2] = {ESP_BONE_LEFT_SHOULDER, ESP_BONE_RIGHT_SHOULDER};
+    const EspBone elbows[2]    = {ESP_BONE_LEFT_ELBOW, ESP_BONE_RIGHT_ELBOW};
+    const EspBone hands[2]     = {ESP_BONE_LEFT_HAND, ESP_BONE_RIGHT_HAND};
+    for (int side = 0; side < 2; ++side) {
+        if (!valid[shoulders[side]] && valid[elbows[side]]) {
+            bones[shoulders[side]] = vec_lerp(bones[ESP_BONE_CHEST], bones[elbows[side]], 0.30f);
+            valid[shoulders[side]] = true;
+        }
+        if (!valid[elbows[side]] && valid[shoulders[side]] && valid[hands[side]]) {
+            bones[elbows[side]] = vec_lerp(bones[shoulders[side]], bones[hands[side]], 0.5f);
+            valid[elbows[side]] = true;
+        }
+    }
+
+    // Legs.
+    const EspBone hips[2]  = {ESP_BONE_LEFT_HIP, ESP_BONE_RIGHT_HIP};
+    const EspBone knees[2] = {ESP_BONE_LEFT_KNEE, ESP_BONE_RIGHT_KNEE};
+    const EspBone foot[2]  = {ESP_BONE_LEFT_FOOT, ESP_BONE_RIGHT_FOOT};
+    for (int side = 0; side < 2; ++side) {
+        if (!valid[hips[side]] && valid[knees[side]]) {
+            bones[hips[side]] = vec_lerp(bones[ESP_BONE_PELVIS], bones[knees[side]], 0.22f);
+            valid[hips[side]] = true;
+        }
+        if (!valid[knees[side]] && valid[hips[side]] && valid[foot[side]]) {
+            bones[knees[side]] = vec_lerp(bones[hips[side]], bones[foot[side]], 0.5f);
+            valid[knees[side]] = true;
+        }
+        if (!valid[foot[side]] && valid[knees[side]]) {
+            // The ankle is not always a hit box: drop the knee onto the ground
+            // plane of the player capsule, which keeps the leg length sane.
+            bones[foot[side]] = {bones[knees[side]].x, feet.y + 0.04f, bones[knees[side]].z};
+            valid[foot[side]] = true;
+        }
+    }
+
+    float lowest = bones[ESP_BONE_PELVIS].y;
+    for (int side = 0; side < 2; ++side)
+        if (valid[foot[side]]) lowest = std::min(lowest, bones[foot[side]].y);
+    float height = bones[ESP_BONE_HEAD].y - lowest;
+    if (!std::isfinite(height) || height < 0.45f || height > 2.9f) return false;
+    if (bones[ESP_BONE_HEAD].y <= bones[ESP_BONE_PELVIS].y) return false;
+    return true;
+}
+
+// Fallback rig. It is anchored to the real animated head transform whenever it
+// can be read, so it shrinks when the player crouches even though the joints
+// themselves are synthetic.
+static void build_procedural_skeleton(const PlayerRig& rig, const Vec3& feet,
+                                      bool crouched, std::array<Vec3, ESP_BONE_COUNT>& bones) {
+    Vec3 right{1.f, 0.f, 0.f}, forward{0.f, 0.f, 1.f};
+    Vec3 pose_position{};
+    Vec4 pose_rotation{};
+    if (read_native_transform_pose(rig.orientation_transform, pose_position, pose_rotation)) {
+        right = rotate_vector(pose_rotation, {1.f, 0.f, 0.f});
+        forward = rotate_vector(pose_rotation, {0.f, 0.f, 1.f});
+        right.y = 0.f; forward.y = 0.f;
+        float right_length = sqrtf(right.x * right.x + right.z * right.z);
+        float forward_length = sqrtf(forward.x * forward.x + forward.z * forward.z);
+        if (right_length > 0.001f) { right.x /= right_length; right.z /= right_length; } else right = {1.f, 0.f, 0.f};
+        if (forward_length > 0.001f) { forward.x /= forward_length; forward.z /= forward_length; } else forward = {0.f, 0.f, 1.f};
+    }
+
+    float height = crouched ? 1.25f : 1.75f;
+    Vec3 center = feet;
+    Vec3 head_position{};
+    if (rig.head_transform && read_transform_hierarchy_position(rig.head_transform, head_position) &&
+        vec3_is_finite(head_position)) {
+        float measured = head_position.y - feet.y;
+        float offset = fabsf(head_position.x - feet.x) + fabsf(head_position.z - feet.z);
+        if (measured > 0.55f && measured < 2.4f && offset < 1.2f) {
+            height = measured + 0.08f;
+            center.x = (feet.x + head_position.x) * 0.5f;
+            center.z = (feet.z + head_position.z) * 0.5f;
+        }
+    }
+    const float scale = height / 1.75f;
+
+    Vec3 pelvis = {center.x, feet.y + height * 0.53f, center.z};
+    if (crouched) pelvis = vec_add_scaled(pelvis, forward, -0.08f);
+    Vec3 chest = {pelvis.x, feet.y + height * 0.77f, pelvis.z};
+    if (crouched) chest = vec_add_scaled(chest, forward, 0.10f);
+
+    bones[ESP_BONE_PELVIS] = pelvis;
+    bones[ESP_BONE_CHEST] = chest;
+    bones[ESP_BONE_NECK] = {chest.x, feet.y + height * 0.89f, chest.z};
+    bones[ESP_BONE_HEAD] = {chest.x, feet.y + height, chest.z};
+
+    bones[ESP_BONE_LEFT_SHOULDER]  = vec_add_scaled(chest, right, -0.23f * scale);
+    bones[ESP_BONE_RIGHT_SHOULDER] = vec_add_scaled(chest, right,  0.23f * scale);
+    bones[ESP_BONE_LEFT_ELBOW]  = vec_add_scaled(bones[ESP_BONE_LEFT_SHOULDER], right, -0.16f * scale);
+    bones[ESP_BONE_RIGHT_ELBOW] = vec_add_scaled(bones[ESP_BONE_RIGHT_SHOULDER], right, 0.16f * scale);
+    bones[ESP_BONE_LEFT_ELBOW].y  -= (crouched ? 0.17f : 0.23f) * scale;
+    bones[ESP_BONE_RIGHT_ELBOW].y -= (crouched ? 0.17f : 0.23f) * scale;
+    bones[ESP_BONE_LEFT_HAND]  = vec_add_scaled(bones[ESP_BONE_LEFT_ELBOW], forward, 0.22f * scale);
+    bones[ESP_BONE_RIGHT_HAND] = vec_add_scaled(bones[ESP_BONE_RIGHT_ELBOW], forward, 0.22f * scale);
+    bones[ESP_BONE_LEFT_HAND].y  -= 0.20f * scale;
+    bones[ESP_BONE_RIGHT_HAND].y -= 0.20f * scale;
+
+    bones[ESP_BONE_LEFT_HIP]  = vec_add_scaled(pelvis, right, -0.12f * scale);
+    bones[ESP_BONE_RIGHT_HIP] = vec_add_scaled(pelvis, right,  0.12f * scale);
+    Vec3 knee_base = {center.x, feet.y + height * (crouched ? 0.27f : 0.28f), center.z};
+    bones[ESP_BONE_LEFT_KNEE]  = vec_add_scaled(knee_base, right, -0.13f * scale);
+    bones[ESP_BONE_RIGHT_KNEE] = vec_add_scaled(knee_base, right,  0.13f * scale);
+    if (crouched) {
+        bones[ESP_BONE_LEFT_KNEE]  = vec_add_scaled(bones[ESP_BONE_LEFT_KNEE], forward, 0.28f);
+        bones[ESP_BONE_RIGHT_KNEE] = vec_add_scaled(bones[ESP_BONE_RIGHT_KNEE], forward, 0.28f);
+    }
+    bones[ESP_BONE_LEFT_FOOT]  = vec_add_scaled({feet.x, feet.y + 0.03f, feet.z}, right, -0.14f * scale);
+    bones[ESP_BONE_RIGHT_FOOT] = vec_add_scaled({feet.x, feet.y + 0.03f, feet.z}, right,  0.14f * scale);
+    bones[ESP_BONE_LEFT_FOOT]  = vec_add_scaled(bones[ESP_BONE_LEFT_FOOT], forward, 0.08f);
+    bones[ESP_BONE_RIGHT_FOOT] = vec_add_scaled(bones[ESP_BONE_RIGHT_FOOT], forward, 0.08f);
+}
+
+static bool read_player_skeleton(uint64_t player, const Vec3& feet, bool crouched,
+                                 std::array<Vec3, ESP_BONE_COUNT>& bones,
+                                 std::array<bool, ESP_BONE_COUNT>& valid) {
+    valid.fill(false);
+    double now = monotonic_seconds();
+    uint64_t signature = rd_ptr(player + PLAYER_CHARACTER_MODEL);
+
+    auto iterator = g_player_rigs.find(player);
+    bool refresh = iterator == g_player_rigs.end() ||
+        iterator->second.signature != signature ||
+        (iterator->second.source == RIG_SOURCE_NONE
+             ? now - iterator->second.resolved_at > 1.0
+             : now - iterator->second.resolved_at > 10.0);
+    if (refresh) {
+        g_player_rigs[player] = resolve_player_rig(player, feet);
+        iterator = g_player_rigs.find(player);
+    }
+    if (iterator == g_player_rigs.end()) return false;
+    PlayerRig& rig = iterator->second;
+
+    if (read_rig_skeleton(rig, feet, bones, valid)) {
+        rig.failures = 0;
+        return true;
+    }
+
+    // A skin/LOD swap replaces every bone at once: re-resolve quickly instead of
+    // keeping stale joints for the whole cache period.
+    if (rig.source != RIG_SOURCE_NONE && ++rig.failures >= 2) {
+        rig.resolved_at = now - 10.0;
+        rig.failures = 0;
+    }
+    build_procedural_skeleton(rig, feet, crouched, bones);
+    valid.fill(true);
     return true;
 }
 
@@ -1461,10 +1826,12 @@ bool esp_init(pid_t pid) {
     g_player_snapshot.clear();
     g_player_snapshot_stamp = {};
     g_player_track.clear();
-    g_player_bones.clear();
+    g_player_rigs.clear();
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {};
     g_transform_hierarchy_layout_valid = false;
+    g_bone_layout = {};
+    g_bone_layout_valid = false;
     g_scene_players.clear();
     g_use_direct_player_position = true;
     g_player_position_validated = false;
@@ -1482,9 +1849,10 @@ void esp_reset() {
     g_player_snapshot.clear();
     g_player_snapshot_stamp = {};
     g_player_track.clear();
-    g_player_bones.clear();
+    g_player_rigs.clear();
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
+    g_bone_layout = {}; g_bone_layout_valid = false;
     g_scene_players.clear();
     g_use_direct_player_position = true;
     g_player_position_validated = false;
@@ -1494,6 +1862,9 @@ void esp_reset() {
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::lock_guard<std::mutex> game_lock(g_game_mutex);
     std::vector<EspBox> result;
+    // Bone positions are cached per frame only: drop the previous snapshot so
+    // the skeleton always reflects the current animation pose.
+    clear_hierarchy_frame_cache();
     // Never let the aimbot or a later frame consume a projection matrix from a
     // death/respawn transition or from a failed camera read.
     g_last_vp_valid = false;
@@ -1534,7 +1905,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (g_scene_players.count(p)) ++overlap;
             if (overlap == 0) {
                 g_player_track.clear();
-                g_player_bones.clear();
+                g_player_rigs.clear();
                 g_player_position_validated = false;
                 g_use_direct_player_position = true;
                 g_player_position_offset = PLAYER_POSITION;
@@ -1782,19 +2153,28 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         Vec3 skeleton_feet = render_feet;
         if (transform_camera_mode) skeleton_feet.y = feet.y - 1.60F;
 
-        // Read the enemy Animator hierarchy before constructing the box. The
+        // Read the enemy's animated bones before constructing the box. The
         // actual animated head/feet make every ESP element follow crouching,
         // leaning and weapon animations. A crouch-aware procedural rig is kept
         // only as a safe fallback for an unexpected asset/LOD bone naming set.
         std::array<Vec3, ESP_BONE_COUNT> skeleton{};
-        bool have_skeleton = read_player_skeleton(s_transforms[i], skeleton_feet, crouched, skeleton);
+        std::array<bool, ESP_BONE_COUNT> skeleton_valid{};
+        bool have_skeleton = read_player_skeleton(s_transforms[i], skeleton_feet, crouched,
+                                                  skeleton, skeleton_valid);
 
         Vec3 body_bottom = skeleton_feet;
         Vec3 body_top = {render_x, skeleton_feet.y + head_height, render_z};
         float body_x = render_x, body_z = render_z;
         if (have_skeleton) {
-            body_bottom = vec_lerp(skeleton[ESP_BONE_LEFT_FOOT], skeleton[ESP_BONE_RIGHT_FOOT], 0.5f);
-            body_bottom.y = std::min(skeleton[ESP_BONE_LEFT_FOOT].y, skeleton[ESP_BONE_RIGHT_FOOT].y) - 0.03f;
+            bool left_foot = skeleton_valid[ESP_BONE_LEFT_FOOT];
+            bool right_foot = skeleton_valid[ESP_BONE_RIGHT_FOOT];
+            if (left_foot && right_foot) {
+                body_bottom = vec_lerp(skeleton[ESP_BONE_LEFT_FOOT], skeleton[ESP_BONE_RIGHT_FOOT], 0.5f);
+                body_bottom.y = std::min(skeleton[ESP_BONE_LEFT_FOOT].y, skeleton[ESP_BONE_RIGHT_FOOT].y) - 0.03f;
+            } else if (left_foot || right_foot) {
+                body_bottom = skeleton[left_foot ? ESP_BONE_LEFT_FOOT : ESP_BONE_RIGHT_FOOT];
+                body_bottom.y -= 0.03f;
+            }
             body_top = skeleton[ESP_BONE_HEAD];
             body_top.y += 0.12f;
             body_x = skeleton[ESP_BONE_PELVIS].x;
@@ -1850,7 +2230,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             for (int role = 0; role < ESP_BONE_COUNT; ++role) {
                 box.bones[role] = skeleton[(size_t)role];
                 Vec2 screen{};
-                bool projected = project_world(skeleton[(size_t)role], screen);
+                bool projected = skeleton_valid[(size_t)role] &&
+                                 project_world(skeleton[(size_t)role], screen);
                 box.bone_visible[role] = projected;
                 box.bone_screen[role][0] = projected ? screen.x : -1.f;
                 box.bone_screen[role][1] = projected ? screen.y : -1.f;
@@ -1862,7 +2243,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
             // Make the regular 2D ESP share the animated skeleton bounds. This
             // removes the old fixed-height box lag and keeps it tight on crouch.
-            if (projected_count >= 8 && std::isfinite(min_x) && std::isfinite(min_y) &&
+            if (projected_count >= 6 && std::isfinite(min_x) && std::isfinite(min_y) &&
                 max_x > min_x && max_y > min_y) {
                 float animated_h = max_y - min_y;
                 float margin_x = std::max(2.f, animated_h * 0.055f);
@@ -1939,6 +2320,17 @@ static uint64_t local_player_event_handler() {
 // TCz lives at +0x10 — same pattern as the Aim flag used for ADS detection.
 static bool player_crouching(uint64_t player) {
     if (!player) return false;
+    // The KCC simulates every player on the client, so its pose / move state is
+    // available for remote players as well (the huU.Crouch button state below
+    // is only meaningful for the local player).
+    uint64_t kcc = resolve_kcc(player);
+    if (kcc) {
+        int32_t pose = rd<int32_t>(kcc + KCC_POSE);
+        if (pose == 1) return true;
+        uint8_t move_state = rd<uint8_t>(kcc + KCC_MOVE_STATE);
+        if (move_state == (uint8_t)MOVE_STATE_CROUCHING) return true;
+        if (pose == 0 && move_state <= 8) return false;
+    }
     uint64_t handler = rd_ptr(player + PLAYER_EVENT_HANDLER);
     if (!likely_native_pointer(handler)) return false;
     uint64_t crouch = rd_ptr(handler + HUC_CROUCH);
