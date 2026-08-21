@@ -584,6 +584,7 @@ struct LiveBoneSet {
 static int read_live_bone_candidate(uint64_t transform_array,
                                     uint64_t mapping_array,
                                     int mapping_mode,
+                                    const TransformHierarchyLayout* layout,
                                     const Vec3& feet,
                                     LiveBoneSet& result) {
     result = {};
@@ -618,8 +619,10 @@ static int read_live_bone_candidate(uint64_t transform_array,
         if (!likely_native_pointer(managed_transform)) continue;
         uint64_t native_transform = resolve_native_transform(managed_transform);
         Vec3 position{};
-        if (!likely_native_pointer(native_transform) ||
-            !read_transform_hierarchy_position(native_transform, position)) continue;
+        bool have_position = layout
+            ? read_transform_hierarchy_layout(native_transform, *layout, position)
+            : read_transform_hierarchy_position(native_transform, position);
+        if (!likely_native_pointer(native_transform) || !have_position) continue;
 
         float dx = position.x - feet.x;
         float dy = position.y - feet.y;
@@ -657,25 +660,56 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
     uint64_t mapping_array = rd_ptr(bone_cache + BONE_CACHE_MAPPING);
     if (!likely_native_pointer(transform_array)) return false;
 
-    LiveBoneSet direct_set{}, transform_to_bone_set{}, bone_to_transform_set{};
-    int direct_score = read_live_bone_candidate(transform_array, mapping_array, 0,
-                                                feet, direct_set);
-    int transform_to_bone_score = read_live_bone_candidate(transform_array, mapping_array, 1,
-                                                           feet, transform_to_bone_set);
-    int bone_to_transform_score = read_live_bone_candidate(transform_array, mapping_array, 2,
-                                                           feet, bone_to_transform_set);
-    const LiveBoneSet* bones = &direct_set;
-    int best_score = direct_score;
-    if (transform_to_bone_score > best_score) {
-        best_score = transform_to_bone_score;
-        bones = &transform_to_bone_set;
-    }
-    if (bone_to_transform_score > best_score) {
-        best_score = bone_to_transform_score;
-        bones = &bone_to_transform_set;
+    // Validate the bone cache against several known Unity Transform layouts.
+    // The source client uses the compact 0x28/0x30 form; this title commonly
+    // uses 0x38/0x40. We select the layout and mapping with the strongest full
+    // anatomical coverage instead of trusting the first plausible coordinates.
+    TransformHierarchyLayout standard_layout{};
+    TransformHierarchyLayout compact_layout{};
+    compact_layout.data_offset = 0x28;
+    compact_layout.index_offset = 0x30;
+    TransformHierarchyLayout standard_mi = standard_layout;
+    standard_mi.matrices_indirect = true;
+    TransformHierarchyLayout compact_mi = compact_layout;
+    compact_mi.matrices_indirect = true;
+    const TransformHierarchyLayout* layouts[] = {
+        g_transform_hierarchy_layout_valid ? &g_transform_hierarchy_layout : nullptr,
+        &standard_layout, &standard_mi, &compact_layout, &compact_mi
+    };
+    auto has_complete_body = [](const LiveBoneSet& candidate) {
+        return candidate.valid[LIVE_HEAD] && candidate.valid[LIVE_HIPS] &&
+            candidate.valid[LIVE_NECK] &&
+            candidate.valid[LIVE_LEFT_SHOULDER] &&
+            candidate.valid[LIVE_LEFT_UPPER_ARM] &&
+            candidate.valid[LIVE_LEFT_LOWER_ARM] &&
+            candidate.valid[LIVE_LEFT_HAND] &&
+            candidate.valid[LIVE_RIGHT_SHOULDER] &&
+            candidate.valid[LIVE_RIGHT_UPPER_ARM] &&
+            candidate.valid[LIVE_RIGHT_LOWER_ARM] &&
+            candidate.valid[LIVE_RIGHT_HAND] &&
+            candidate.valid[LIVE_LEFT_UPPER_LEG] &&
+            candidate.valid[LIVE_LEFT_LOWER_LEG] &&
+            candidate.valid[LIVE_RIGHT_UPPER_LEG] &&
+            candidate.valid[LIVE_RIGHT_LOWER_LEG];
+    };
+    LiveBoneSet best_set{};
+    int best_score = -1;
+    for (const TransformHierarchyLayout* layout : layouts) {
+        for (int mapping_mode = 0; mapping_mode < 3; ++mapping_mode) {
+            LiveBoneSet candidate{};
+            int score = read_live_bone_candidate(transform_array, mapping_array,
+                                                 mapping_mode, layout, feet, candidate);
+            // Never let a legs-only candidate win just because it has more
+            // numerically valid entries than a complete upper-body mapping.
+            if (score >= 0 && has_complete_body(candidate) && score > best_score) {
+                best_score = score;
+                best_set = candidate;
+            }
+        }
     }
     if (best_score < 0) return false;
-    if (!bones || !bones->valid[LIVE_HEAD] || !bones->valid[LIVE_HIPS] ||
+    const LiveBoneSet* bones = &best_set;
+    if (!bones->valid[LIVE_HEAD] || !bones->valid[LIVE_HIPS] ||
         !bones->valid[LIVE_NECK]) return false;
     bool complete_arms = bones->valid[LIVE_LEFT_SHOULDER] &&
                          bones->valid[LIVE_LEFT_UPPER_ARM] &&
