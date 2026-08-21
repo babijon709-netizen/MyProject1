@@ -18,59 +18,9 @@
 #include <vector>
 #include <unistd.h>
 #include <sys/syscall.h>
-#include <sys/stat.h>
-#include <stdarg.h>
-#include <android/log.h>
 
 static ssize_t process_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
     return syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
-}
-
-// ---------------------------------------------------------------------------
-// Diagnostics. The overlay has no console, so failures are written to both
-// logcat (tag "xvcen-esp") and a file under the existing config directory.
-// Gate logs are de-duplicated per key so a stuck early-return does not spam.
-// ---------------------------------------------------------------------------
-static const char* kEspLogPath = "/storage/emulated/0/xvcen/esp.log";
-
-static void esp_log_raw(const char* message) {
-    __android_log_print(ANDROID_LOG_INFO, "xvcen-esp", "%s", message);
-    static bool dir_ready = false;
-    if (!dir_ready) { mkdir("/storage/emulated/0/xvcen", 0777); dir_ready = true; }
-    FILE* file = fopen(kEspLogPath, "a");
-    if (file) { fprintf(file, "%s\n", message); fclose(file); }
-}
-
-static void esp_log(const char* fmt, ...) {
-    char buffer[1024];
-    va_list ap;
-    va_start(ap, fmt);
-    int length = vsnprintf(buffer, sizeof(buffer), fmt, ap);
-    va_end(ap);
-    if (length <= 0) return;
-    esp_log_raw(buffer);
-}
-
-static std::string       g_gate_last_key;
-static std::chrono::steady_clock::time_point g_gate_last_time{};
-
-static void esp_gate_log(const char* key, const char* fmt, ...) {
-    char buffer[1024];
-    va_list ap;
-    va_start(ap, fmt);
-    int length = vsnprintf(buffer, sizeof(buffer), fmt, ap);
-    va_end(ap);
-    if (length <= 0) return;
-    auto now = std::chrono::steady_clock::now();
-    if (key == g_gate_last_key && now - g_gate_last_time < std::chrono::milliseconds(2000)) return;
-    g_gate_last_key = key;
-    g_gate_last_time = now;
-    esp_log_raw(buffer);
-}
-
-static void esp_log_reset() {
-    FILE* file = fopen(kEspLogPath, "w");
-    if (file) fclose(file);
 }
 
 using namespace game_offsets;
@@ -759,7 +709,6 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
     // named cache and fall back to the raw (junk) hierarchy graph.
     LiveBoneSet best_set{};
     int best_score = -1;
-    int best_mode = -1;
     for (const TransformHierarchyLayout* layout : layouts) {
         for (int mapping_mode = 0; mapping_mode < 3; ++mapping_mode) {
             LiveBoneSet candidate{};
@@ -768,23 +717,11 @@ static bool read_live_bone_skeleton(uint64_t character_animation,
             if (score > best_score) {
                 best_score = score;
                 best_set = candidate;
-                best_mode = mapping_mode;
             }
         }
     }
     if (best_score < 0) return false;
 
-    esp_gate_log("skel_bones",
-        "skeleton bones: mode=%d valid=%d head=%d neck=%d hips=%d torso=%d arms=%d/%d/%d legs=%d/%d",
-        best_mode, best_set.valid_count,
-        best_set.valid[LIVE_HEAD] ? 1 : 0, best_set.valid[LIVE_NECK] ? 1 : 0,
-        best_set.valid[LIVE_HIPS] ? 1 : 0,
-        (best_set.valid[LIVE_SPINE] || best_set.valid[LIVE_CHEST] || best_set.valid[LIVE_UPPER_CHEST]) ? 1 : 0,
-        best_set.valid[LIVE_LEFT_UPPER_ARM] ? 1 : 0,
-        best_set.valid[LIVE_LEFT_LOWER_ARM] ? 1 : 0,
-        best_set.valid[LIVE_LEFT_HAND] ? 1 : 0,
-        best_set.valid[LIVE_LEFT_UPPER_LEG] ? 1 : 0,
-        best_set.valid[LIVE_LEFT_LOWER_LEG] ? 1 : 0);
 
     // Some skins/poses do not expose a Head bone in the cache. Use the head
     // resolved from the KCC head Transform so the skeleton always shows a head
@@ -1120,7 +1057,6 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
         float height = player_crouching(player) ? 1.12f : PLAYER_HEIGHT;
         build_fallback_skeleton(feet, height, segments, animated_head,
                                 skeleton_chest, skeleton_pelvis);
-        esp_gate_log("skel_fallback", "skeleton path: procedural fallback");
         return !segments.empty();
     };
 
@@ -1195,8 +1131,6 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
     if (read_live_bone_skeleton(character_animation, feet,
                                  have_hierarchy_head ? &hierarchy_head : nullptr,
                                  segments, animated_head, skeleton_chest, skeleton_pelvis)) {
-        esp_gate_log("skel_named", "skeleton path: named bones (%d segments)",
-                     (int)segments.size());
         return true;
     }
 
@@ -1227,8 +1161,6 @@ static bool read_skeleton_segments(uint64_t player, const Vec3& feet,
 
     segments = std::move(best_segments);
     animated_head = actual_head;
-    esp_gate_log("skel_graph", "skeleton path: hierarchy graph (%d segments)",
-                 (int)segments.size());
     bool have_chest = choose_skeleton_anchor(segments, feet, animated_head,
                                               0.68f, skeleton_chest);
     bool have_pelvis = choose_skeleton_anchor(segments, feet, animated_head,
@@ -1382,18 +1314,14 @@ static bool discover_player_position_offset(const std::vector<uint64_t>& players
     if (best_offset) {
         g_use_direct_player_position = true; g_player_position_offset = best_offset;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
-        esp_log("position offset validated: 0x%llx (players=%d)",
-                (unsigned long long)best_offset, (int)players.size());
         return true;
     }
     size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
     if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
         g_use_direct_player_position = false;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
-        esp_log("position via transform hierarchy (players=%d)", (int)players.size());
         return true;
     }
-    esp_gate_log("pos_validate", "position validation FAILED (players=%d)", (int)players.size());
     return false;
 }
 
@@ -1612,10 +1540,7 @@ bool esp_init(pid_t pid) {
     std::lock_guard<std::mutex> game_lock(g_game_mutex);
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
-    esp_log_reset();
-    esp_log("esp_init: pid=%d libil2cpp_base=0x%llx", (int)pid,
-            (unsigned long long)g_il2cpp_base);
-    if (!g_il2cpp_base) { esp_log("esp_init: FAILED - libil2cpp.so not found in maps"); return false; }
+    if (!g_il2cpp_base) return false;
 
     // A restarted client can reuse the same pid while libil2cpp and all
     // managed objects have new addresses. Do not carry validation state or the
@@ -1645,7 +1570,6 @@ bool esp_init(pid_t pid) {
 
 void esp_reset() {
     std::lock_guard<std::mutex> game_lock(g_game_mutex);
-    esp_log("esp_reset");
     g_pid = -1; g_il2cpp_base = 0;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
@@ -1678,8 +1602,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     if (g_pid <= 0 || !g_il2cpp_base) {
-        esp_gate_log("gate_detached", "esp_get_boxes: not attached (pid=%d base=0x%llx)",
-                     (int)g_pid, (unsigned long long)g_il2cpp_base);
         return result;
     }
 
@@ -1716,14 +1638,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (overlap == 0) {
                 std::lock_guard<std::mutex> skeleton_lock(g_skeleton_mutex);
                 skeleton_invalidate_locked();
-                esp_log("scene reload detected, skeleton caches reset");
             }
         }
         g_skeleton_scene_players.clear();
         for (uint64_t p : g_player_snapshot) g_skeleton_scene_players.insert(p);
     }
     if (g_player_snapshot.empty()) {
-        esp_gate_log("gate_noplayers", "esp_get_boxes: no players");
         return result;
     }
 
@@ -1744,18 +1664,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         if (!managed_cam) {
             g_last_vp_valid = false;
-            esp_gate_log("gate_camera", "esp_get_boxes: camera manager not resolved");
             return result;
         }
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
         if (!native_cam) {
             g_last_vp_valid = false;
-            esp_gate_log("gate_camera", "esp_get_boxes: native camera is null");
             return result;
         }
         if (!read_stable_camera_matrices(native_cam, projection, view)) {
             g_last_vp_valid = false;
-            esp_gate_log("gate_camera", "esp_get_boxes: camera matrices invalid");
             return result;
         }
 
@@ -1767,12 +1684,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!g_matrix_configuration_validated) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) {
                 g_last_vp_valid = false;
-                esp_gate_log("gate_matrix", "esp_get_boxes: matrix configuration failed");
                 return result;
             }
             if (!read_stable_camera_matrices(native_cam, projection, view)) {
                 g_last_vp_valid = false;
-                esp_gate_log("gate_camera", "esp_get_boxes: camera matrices invalid (post-config)");
                 return result;
             }
         }
@@ -1848,7 +1763,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!has_local_position) {
             g_player_position_validated = false;
             g_last_vp_valid = false;
-            esp_gate_log("gate_local", "esp_get_boxes: no local player position");
             return result;
         }
         // Spectating is detected via the observed-player back-reference (more
@@ -1885,7 +1799,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation)) {
             g_player_position_validated = false;
             g_last_vp_valid = false;
-            esp_gate_log("gate_pose", "esp_get_boxes: local pose read failed");
             return result;
         }
         local = transform_camera_position; has_local_position = true;
