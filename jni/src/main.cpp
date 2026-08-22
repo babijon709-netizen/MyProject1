@@ -17,6 +17,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <csignal>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -214,7 +215,7 @@ namespace cfg { namespace aim {
     inline bool  vis_check         = false;
     inline bool  draw_fov          = false;
     inline float fov               = 80.f;
-    inline float smoothness        = 0.35f;
+    inline float smoothness        = 5.f;
     inline int   bone              = 0;
     inline bool  trigger_bot       = false;
     inline bool  knife_bot         = false;
@@ -533,7 +534,7 @@ struct AppState {
     bool  esp_box = false, esp_name = false, esp_hp = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = false, esp_skeleton = false;
     float esp_thick = 1.5f;
-    float gun_str = 0.35f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
+    float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
@@ -552,6 +553,17 @@ static ImU32 ColU32(const ImVec4& c) {
     return IM_COL32((int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255), (int)(c.w * 255));
 }
 
+// Радиус FOV-круга в пикселях: fov задан в градусах, вертикальный FOV камеры принят 60°
+static float AimFovRadiusPx(float sw, float sh) {
+    float fov = cfg::aim::fov;
+    if (fov <= 0.f) return 0.f;
+    if (fov >= 359.f) return sw + sh;
+    float t = tanf(fov * 0.5f * (float)M_PI / 180.f) / tanf(30.f * (float)M_PI / 180.f);
+    float r = t * (sh * 0.5f);
+    if (r > sw + sh) r = sw + sh;
+    return r;
+}
+
 static void DrawEspOverlay() {
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;
@@ -565,6 +577,17 @@ static void DrawEspOverlay() {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
     if (!g_esp_attached) return;
+
+    if (g_state.aim_touch && g_state.aim_special) {
+        float fovR = AimFovRadiusPx(sw, sh);
+        if (fovR > 1.f) {
+            ImVec4 fc = ImVec4(cfg::aim::fov_color[0], cfg::aim::fov_color[1],
+                               cfg::aim::fov_color[2], cfg::aim::fov_color[3]);
+            dl->AddCircle(ImVec2(sw * 0.5f, sh * 0.5f), fovR,
+                          ImGui::ColorConvertFloat4ToU32(fc), 72, 1.5f);
+        }
+    }
+
     if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer) return;
 
     std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
@@ -807,6 +830,12 @@ static void ConfigLoad(int idx) {
     cfg::aim::draw_fov   = s.aim_draw_fov;
     cfg::aim::fov        = s.aim_fov;
     cfg::aim::smoothness = s.aim_smoothness;
+    // старая шкала плавности была 0..1, новая — 1..10
+    if (cfg::aim::smoothness < 1.f) {
+        cfg::aim::smoothness = (cfg::aim::smoothness <= 0.f) ? 1.f : cfg::aim::smoothness * 10.f;
+        if (cfg::aim::smoothness > 10.f) cfg::aim::smoothness = 10.f;
+    }
+    g_state.gun_str = cfg::aim::smoothness;
     g_state.esp_box     = s.esp_box;     g_state.esp_name    = s.esp_name;
     g_state.esp_hp      = s.esp_hp;      g_state.esp_wall    = s.esp_wall;
     g_state.esp_chams   = s.esp_chams;
@@ -2211,7 +2240,7 @@ float TabContent(int tab, float dt, float cW) {
 
         SHdr(XS("Плавность"));
         CardBg(Layout::SliderH);
-        SliderRow("##asmt", XS("Плавность"), &g_state.gun_str, 0.f, 1.f, "%.2f", true, true, g_state.sl_gun_str, dt);
+        SliderRow("##asmt", XS("Плавность"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, true, g_state.sl_gun_str, dt);
 
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
@@ -2599,6 +2628,110 @@ static void CenterMenuOnDisplay() {
     g_win.dragging = false;
     g_win.resizing = false;
 }
+
+// ============================= ТАЧ АИМ =============================
+// Имитирует нажатие отдельным пальцем в правой части экрана и микро-свайпами
+// доворачивает камеру, пока цель не окажется в прицеле (центр экрана).
+// Палец аима — отдельный контакт с уникальным tracking-id, поэтому
+// собственные нажатия игрока продолжают работать одновременно.
+static void UpdateAim(float dt) {
+    static bool  s_fingerDown = false;
+    static float s_fx = 0.f, s_fy = 0.f;       // текущая позиция пальца аима
+    static float s_lastTx = -1e9f, s_lastTy = -1e9f; // прошлая цель (липкость)
+
+    bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
+    bool active = g_state.aim_touch && g_esp_attached && !menuOpen;
+
+    if (!active) {
+        if (s_fingerDown) { Touch_Up(); s_fingerDown = false; }
+        s_lastTx = -1e9f;
+        return;
+    }
+
+    float sw = (float) native_window_screen_x;
+    float sh = (float) native_window_screen_y;
+    if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
+        sw = (float) displayInfo.width;  sh = (float) displayInfo.height;
+    } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
+        sw = (float) displayInfo.height; sh = (float) displayInfo.width;
+    }
+
+    std::vector<EspBox> boxes = esp_get_boxes((int) sw, (int) sh);
+    if (boxes.empty()) {
+        if (s_fingerDown) { Touch_Up(); s_fingerDown = false; }
+        s_lastTx = -1e9f;
+        return;
+    }
+
+    const float crossX = sw * 0.5f, crossY = sh * 0.5f;
+    const float fovR = AimFovRadiusPx(sw, sh);
+    const float boneFrac = (g_state.aim_bone == 0) ? 0.06f      // голова
+                       : (g_state.aim_bone == 1) ? 0.28f        // тело
+                                                  : 0.47f;      // ноги
+
+    int   best = -1;
+    float bestScore = 1e18f, bestX = 0.f, bestY = 0.f;
+    for (size_t i = 0; i < boxes.size(); ++i) {
+        const EspBox& b = boxes[i];
+        if (!std::isfinite(b.x1) || !std::isfinite(b.y1) ||
+            !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
+        float h = b.y2 - b.y1;
+        if (h < 4.f || h > sh * 4.f) continue;
+        float px = (b.x1 + b.x2) * 0.5f;
+        float py = b.y1 + boneFrac * h;
+        if (px < -60.f || px > sw + 60.f || py < -60.f || py > sh + 60.f) continue;
+        if (g_state.aim_pos && (b.x1 < 0.f || b.y1 < 0.f || b.x2 > sw || b.y2 > sh)) continue;
+        float dx = px - crossX, dy = py - crossY;
+        float d = sqrtf(dx * dx + dy * dy);
+        if (d > fovR) continue;
+        float score = d;
+        if (s_lastTx > -1e8f) { // липкость к текущей цели, чтобы не прыгал между игроками
+            float lx = px - s_lastTx, ly = py - s_lastTy;
+            if (lx * lx + ly * ly < 80.f * 80.f) score *= 0.5f;
+        }
+        if (score < bestScore) { bestScore = score; best = (int) i; bestX = px; bestY = py; }
+    }
+
+    if (best < 0) {
+        s_lastTx = -1e9f;
+        if (s_fingerDown) { Touch_Up(); s_fingerDown = false; }
+        return;
+    }
+    s_lastTx = bestX; s_lastTy = bestY;
+
+    float ex = bestX - crossX, ey = bestY - crossY;
+    if (fabsf(ex) < 2.5f && fabsf(ey) < 2.5f) return; // цель в прицеле — держим палец неподвижно
+
+    if (!s_fingerDown) {
+        s_fx = sw * 0.72f;                       // якорь — правая часть экрана
+        s_fy = sh * 0.48f;
+        Touch_Down(s_fx, s_fy);
+        s_fingerDown = true;
+    }
+
+    float sm = g_state.gun_str;
+    if (sm < 1.f) sm = 1.f;
+    if (sm > 10.f) sm = 10.f;
+    // плавность 1..10 -> скорость доворота 1.5..12 (экспоненциальное приближение, не зависит от fps)
+    float rate = 1.5f + (sm - 1.f) * (10.5f / 9.f);
+    float k = 1.f - expf(-rate * dt);
+    if (k > 0.5f) k = 0.5f;
+
+    float dx = ex * k, dy = ey * k;              // свайп в сторону цели поворачивает камеру к ней
+    if (dx >  90.f) dx =  90.f;
+    if (dx < -90.f) dx = -90.f;
+    if (dy >  90.f) dy =  90.f;
+    if (dy < -90.f) dy = -90.f;
+
+    s_fx += dx;
+    s_fy += dy;
+    if (s_fx < sw * 0.55f) s_fx = sw * 0.55f;    // палец остаётся в правой зоне
+    if (s_fx > sw * 0.95f) s_fx = sw * 0.95f;
+    if (s_fy < sh * 0.20f) s_fy = sh * 0.20f;
+    if (s_fy > sh * 0.80f) s_fy = sh * 0.80f;
+    Touch_Move(s_fx, s_fy);
+}
+// ===================================================================
 
 void RenderMenu() {
     auto& io = ImGui::GetIO();
@@ -3007,6 +3140,11 @@ void RenderMenu() {
 }
 
 int main(int argc, char* argv[]) {
+    // при закрытии терминала/Ctrl+C корректно отпускаем захваченный тачскрин
+    signal(SIGINT,  [](int) { main_thread_flag.store(false); });
+    signal(SIGTERM, [](int) { main_thread_flag.store(false); });
+    signal(SIGHUP,  [](int) { main_thread_flag.store(false); });
+
     prot::Init();
     screen_config();
     int abs_ScreenX = displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width;
@@ -3021,7 +3159,12 @@ int main(int argc, char* argv[]) {
     Blur::Init();
     CfgWatchInit();
     AudioInit();
-    Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
+    // readOnly=false: грабим реальный тачскрин и создаём uinput-устройство,
+    // через которое проксируем нажатия + инжектим палец аима.
+    // Если не получилось (нет root/uinput) — откатываемся в read-only: тач
+    // у игры останется родным, меню продолжит работать, аим будет неактивен.
+    if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
+        Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
     start_attach_thread();
     LoadAnimeImage();
     LoadTabIcons();
@@ -3036,6 +3179,7 @@ int main(int argc, char* argv[]) {
 
         ui::bar::set_game_alpha(0.f);
         DrawEspOverlay();
+        UpdateAim(ImGui::GetIO().DeltaTime);
         RenderMenu();
         drawEnd();
         g_frame_done.store(true);

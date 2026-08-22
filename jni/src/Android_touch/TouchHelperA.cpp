@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <cstdint>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -45,7 +46,20 @@ static touchObj Finger[maxE][maxF];
 
 static int fdNum = 0, origfd[maxE], nowfd;
 
+static int devMaxX = 0, devMaxY = 0; // abs-максимумы зеркалируемого тачскрина
+
 static float scale_x, scale_y;
+
+static void Touch_UpdateScale() {
+    if (devMaxX <= 0 || devMaxY <= 0) return;
+    if (orientation == 1 || orientation == 3) {
+        ::scale_x = (float) devMaxX / (::screenHeight > 0 ? ::screenHeight : 1);
+        ::scale_y = (float) devMaxY / (::screenWidth  > 0 ? ::screenWidth  : 1);
+    } else {
+        ::scale_x = (float) devMaxX / (::screenWidth  > 0 ? ::screenWidth  : 1);
+        ::scale_y = (float) devMaxY / (::screenHeight > 0 ? ::screenHeight : 1);
+    }
+}
 
 static bool Touch_initialized = false;
 
@@ -307,6 +321,9 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
         struct uinput_user_dev ui_dev;
         nowfd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
         if (nowfd <= 0) {
+            // не оставляем граб на реальном тачскрине, иначе тач умрёт до перезагрузки
+            for (int k = 0; k < fdNum; ++k) { ioctl(origfd[k], EVIOCGRAB, UNGRAB); close(origfd[k]); origfd[k] = 0; }
+            fdNum = 0;
             return false;
         }
 
@@ -381,6 +398,9 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
         write(nowfd, &ui_dev, sizeof(ui_dev));
 
         if (ioctl(nowfd, UI_DEV_CREATE)) {
+            close(nowfd); nowfd = 0;
+            for (int k = 0; k < fdNum; ++k) { ioctl(origfd[k], EVIOCGRAB, UNGRAB); close(origfd[k]); origfd[k] = 0; }
+            fdNum = 0;
             return false;
         }
     }
@@ -396,23 +416,20 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
     }
 
     ::screenWidth = w;
-    ::screenHeight = h, 
+    ::screenHeight = h,
     ::orientation = orientation_;
-    if (::orientation == 1 || ::orientation == 3) {
-        ::scale_x = (float) screenX / h;
-        ::scale_y = (float) screenY / w;
-    } else {
-        ::scale_x = (float) screenX / w;
-        ::scale_y = (float) screenY / h;    
-    }
+    devMaxX = screenX;
+    devMaxY = screenY;
+    Touch_UpdateScale();
 
     system("chmod 000 -R /proc/bus/input/*");
     return true;
 }
 void UpdateScreenData(int w, int h, uint32_t orientation_) {
     ::screenWidth = w;
-    ::screenHeight = h, 
+    ::screenHeight = h,
     ::orientation = orientation_;
+    Touch_UpdateScale(); // масштаб зависит от ориентации — пересчитываем при повороте
 }
 
 static bool checkDeviceIsTouch(int fd) {
@@ -472,34 +489,40 @@ void Touch_Close() {
 }
 
 void Touch_Down(float xt, float yt) {
-    static int x, y;
-    x = 0, y = 0;
+    if (!Touch_initialized || Touch_readOnly) return;
+    // xt/yt — координаты оверлея (экран в текущей ориентации).
+    // Инвертируем маппинг из TypeA (other_touch == false), чтобы синтетический
+    // палец попадал ровно туда, куда ожидаем.
+    int x = 0, y = 0;
     switch (orientation) {
         case 1: {
-            x = screenHeight - yt;
-            y = xt;
+            x = (int) ::screenHeight - (int) yt;
+            y = (int) xt;
             break;
-        }                          
+        }
         case 2: {
-            x = screenWidth - xt;
-            y = screenHeight - yt;
+            x = (int) ::screenHeight - (int) xt;
+            y = (int) ::screenWidth - (int) yt;
             break;
         }
         case 3: {
-            y = screenWidth - xt;
-            x = yt;
+            x = (int) yt;
+            y = (int) ::screenWidth - (int) xt;
             break;
         }
         default: {
-            x = xt;
-            y = yt;
+            x = (int) xt;
+            y = (int) yt;
             break;
         }
     }
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
     touchObj &touch = Finger[0][9];
-    touch.id = 19;
+    // 60000 — уникальный id, не пересекается с id реальных пальцев (10..19)
+    touch.id = 60000;
     touch.x = (int) (x * ::scale_x);
-    touch.y = (int) (y * ::scale_y);        
+    touch.y = (int) (y * ::scale_y);
     touch.isDown = true;
     Upload();
 }
@@ -508,6 +531,7 @@ void Touch_Move(float x, float y) {
 }
 
 void Touch_Up() {
+    if (!Touch_initialized || Touch_readOnly) return;
     touchObj &touch = Finger[0][9];
     touch.isDown = false;
     Upload();
