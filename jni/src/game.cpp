@@ -21,7 +21,7 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
-static ssize_t process_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
+static ssize_t pvm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
     return syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
 }
 
@@ -80,7 +80,7 @@ static T rd(uint64_t addr) {
     T v{};
     struct iovec lv = { &v, sizeof(T) };
     struct iovec rv = { (void*)addr, sizeof(T) };
-    process_vm_readv(g_pid, &lv, 1, &rv, 1, 0);
+    pvm_readv(g_pid, &lv, 1, &rv, 1, 0);
     return v;
 }
 template<typename T>
@@ -89,7 +89,7 @@ static bool rd_exact(uint64_t addr, T& value) {
     if (!addr) return false;
     struct iovec local = {&value, sizeof(T)};
     struct iovec remote = {(void*)addr, sizeof(T)};
-    return process_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)sizeof(T);
+    return pvm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)sizeof(T);
 }
 static uint64_t rd_ptr(uint64_t a) { return rd<uint64_t>(a); }
 static Vec3     rd_v3 (uint64_t a) { return rd<Vec3>(a);     }
@@ -100,7 +100,7 @@ static std::string read_remote_string(uint64_t address) {
     char buffer[96]{};
     struct iovec local = {buffer, sizeof(buffer) - 1};
     struct iovec remote = {(void*)address, sizeof(buffer) - 1};
-    ssize_t count = process_vm_readv(g_pid, &local, 1, &remote, 1, 0);
+    ssize_t count = pvm_readv(g_pid, &local, 1, &remote, 1, 0);
     if (count <= 0) return {};
     buffer[sizeof(buffer) - 1] = '\0';
     return std::string(buffer);
@@ -273,33 +273,86 @@ static bool matrix34_is_valid(const Matrix34& matrix) {
     return quaternion_length >= 0.20F && quaternion_length <= 2.0F && fabsf(matrix.scale.x) <= 10000.0F && fabsf(matrix.scale.y) <= 10000.0F && fabsf(matrix.scale.z) <= 10000.0F;
 }
 
-static bool read_transform_hierarchy_arrays(uint64_t matrices, uint64_t indices, int32_t transform_index, Vec3& position, Vec4* world_rotation = nullptr) {
-    if (!matrices || !indices || transform_index < 0 || transform_index > 100000) return false;
-    Matrix34 current{};
-    if (!rd_exact(matrices + (uint64_t)transform_index * sizeof(Matrix34), current) || !matrix34_is_valid(current)) return false;
-    Vec3 result = {current.translation.x, current.translation.y, current.translation.z};
-    Vec4 result_rotation = current.rotation;
-    if (!vec3_is_finite(result)) return false;
-    int32_t parent = -2;
-    if (!rd_exact(indices + (uint64_t)transform_index * sizeof(int32_t), parent)) return false;
-    int32_t previous_parent = transform_index;
+static bool likely_native_pointer(uint64_t value) {
+    return value >= 0x10000 && value < 0x0001000000000000ULL && (value & 0x7) == 0;
+}
+
+static float vec_distance(const Vec3& first, const Vec3& second) {
+    float dx = first.x - second.x, dy = first.y - second.y, dz = first.z - second.z;
+    return sqrtf(dx * dx + dy * dy + dz * dz);
+}
+
+// ---------------------------------------------------------------------------
+// Per-layout transform readers. Translation always starts the entry; rotation
+// and scale move with the stride (48-byte Vec4 layout vs the packed 40-byte
+// layout of some Unity versions). "world_direct" layouts cache world positions
+// directly instead of local TRS (no parent walk).
+// ---------------------------------------------------------------------------
+static bool read_layout_entry(uint64_t matrices, int32_t index, uint32_t stride,
+                              Vec3& pos, Vec4& rot, Vec3& scale) {
+    uint64_t base = matrices + (uint64_t)index * (uint64_t)stride;
+    if (stride >= 48) {
+        Matrix34 m{};
+        if (!rd_exact(base, m) || !matrix34_is_valid(m)) return false;
+        pos = {m.translation.x, m.translation.y, m.translation.z};
+        rot = m.rotation;
+        scale = {m.scale.x, m.scale.y, m.scale.z};
+    } else {
+        if (!rd_exact(base, pos) || !vec3_is_finite(pos)) return false;
+        if (!rd_exact(base + 12, rot)) return false;
+        if (!rd_exact(base + 28, scale)) return false;
+    }
+    return vec3_is_finite(pos);
+}
+
+static bool read_world_from_arrays(uint64_t matrices, uint64_t indices, int32_t index,
+                                   const TransformHierarchyLayout& L, Vec3& position, Vec4* world_rotation = nullptr) {
+    if (!likely_native_pointer(matrices) || index < 0 || index > 100000) return false;
+    if (L.world_direct) {
+        Vec3 pos{};
+        if (!rd_exact(matrices + (uint64_t)index * (uint64_t)L.stride, pos) || !vec3_is_finite(pos)) return false;
+        position = pos;
+        if (world_rotation) *world_rotation = {0, 0, 0, 1};
+        return true;
+    }
+    Vec3 pos{}, cpos{}, cscale{};
+    Vec4 crot{};
+    if (!read_layout_entry(matrices, index, L.stride, pos, crot, cscale)) return false;
+    Vec3 result = pos;
+    Vec4 result_rot = crot;
+    int32_t parent = -2, previous = index;
+    if (!likely_native_pointer(indices) || !rd_exact(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
     int depth = 0;
     while (parent >= 0 && depth++ < 128) {
-        if (parent > 100000 || parent == previous_parent) return false;
-        Matrix34 matrix{};
-        if (!rd_exact(matrices + (uint64_t)parent * sizeof(Matrix34), matrix) || !matrix34_is_valid(matrix)) return false;
-        Vec3 scaled = {result.x * matrix.scale.x, result.y * matrix.scale.y, result.z * matrix.scale.z};
-        Vec3 rotated = rotate_vector(matrix.rotation, scaled);
-        result = {matrix.translation.x + rotated.x, matrix.translation.y + rotated.y, matrix.translation.z + rotated.z};
-        result_rotation = multiply_quaternion(matrix.rotation, result_rotation);
+        if (parent > 100000 || parent == previous) return false;
+        if (!read_layout_entry(matrices, parent, L.stride, cpos, crot, cscale)) return false;
+        Vec3 scaled = {result.x * cscale.x, result.y * cscale.y, result.z * cscale.z};
+        Vec3 rotated = rotate_vector(crot, scaled);
+        result = {cpos.x + rotated.x, cpos.y + rotated.y, cpos.z + rotated.z};
+        result_rot = multiply_quaternion(crot, result_rot);
         if (!vec3_is_finite(result)) return false;
-        previous_parent = parent;
+        previous = parent;
         if (!rd_exact(indices + (uint64_t)parent * sizeof(int32_t), parent)) return false;
     }
-    if (parent != -1 || depth >= 128 || !vec3_is_finite(result)) return false;
-    if (world_rotation) { if (!normalize_quaternion(result_rotation)) return false; *world_rotation = result_rotation; }
+    if (parent != -1 || !vec3_is_finite(result)) return false;
+    if (world_rotation) {
+        normalize_quaternion(result_rot);
+        *world_rotation = result_rot;
+    }
     position = result;
     return true;
+}
+
+static bool read_transform_world_skel(uint64_t native_transform, const TransformHierarchyLayout& L, Vec3& position) {
+    if (!native_transform) return false;
+    uint64_t data = rd_ptr(native_transform + L.data_offset);
+    int32_t index = rd<int32_t>(native_transform + L.index_offset);
+    if (!likely_native_pointer(data) || index < 0 || index > 100000) return false;
+    uint64_t matrices = rd_ptr(data + L.matrices_offset);
+    if (L.matrices_indirect) matrices = rd_ptr(matrices);
+    uint64_t indices = rd_ptr(data + L.indices_offset);
+    if (L.indices_indirect) indices = rd_ptr(indices);
+    return read_world_from_arrays(matrices, indices, index, L, position);
 }
 
 static bool read_transform_hierarchy_layout(uint64_t native_transform, const TransformHierarchyLayout& layout, Vec3& position, Vec4* world_rotation = nullptr) {
@@ -311,7 +364,7 @@ static bool read_transform_hierarchy_layout(uint64_t native_transform, const Tra
     uint64_t indices = rd_ptr(transform_data + layout.indices_offset);
     if (layout.matrices_indirect) matrices = rd_ptr(matrices);
     if (layout.indices_indirect) indices = rd_ptr(indices);
-    return read_transform_hierarchy_arrays(matrices, indices, transform_index, position, world_rotation);
+    return read_world_from_arrays(matrices, indices, transform_index, layout, position, world_rotation);
 }
 
 static bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& position) {
@@ -330,7 +383,11 @@ static bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& p
         const uint64_t index_candidates[] = {index_pointer, rd_ptr(index_pointer)};
         for (uint64_t matrices : matrix_candidates) {
             for (uint64_t indices_ptr : index_candidates) {
-                if (read_transform_hierarchy_arrays(matrices, indices_ptr, transform_index, position)) return true;
+                TransformHierarchyLayout L{};
+                L.data_offset = 0x38; L.index_offset = 0x40;
+                L.matrices_offset = offsets[0]; L.indices_offset = offsets[1];
+                L.stride = 48;
+                if (read_world_from_arrays(matrices, indices_ptr, transform_index, L, position)) return true;
             }
         }
     }
@@ -340,10 +397,6 @@ static bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& p
 static uint64_t resolve_player_native_transform(uint64_t player) {
     if (!player) return 0;
     return resolve_native_transform(rd_ptr(player + PLAYER_TRANSFORM));
-}
-
-static bool likely_native_pointer(uint64_t value) {
-    return value >= 0x10000 && value < 0x0001000000000000ULL && (value & 0x7) == 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -449,7 +502,7 @@ static bool read_remote_bytes(uint64_t address, void* output, size_t size) {
     if (!address || !output || size == 0) return false;
     struct iovec local = {output, size};
     struct iovec remote = {(void*)address, size};
-    return process_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)size;
+    return pvm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)size;
 }
 
 // IL2CPP strings are UTF-16. Convert the small strings used by ESP directly to
@@ -556,10 +609,7 @@ static void read_player_labels(uint64_t player, EspBox& box) {
 //   2. KCC.hitBoxRecorderRoot.hitBoxes — HitBox components the game attaches
 //      to the character bones; walking their transform parents yields the
 //      neighbouring bones, again from the live model itself.
-//
-// Before any bone can be read, the native TransformData layout (offsets +
-// entry stride, which differ per Unity build and are not in the il2cpp dump)
-// is CALIBRATED against each player's known capsule position.
+//   3. PlayerModelInfo / characterModel transform tree traversal.
 // ===========================================================================
 
 // UnityEngine.HumanBodyBones numeric values (engine values, NOT dump
@@ -615,7 +665,8 @@ struct RigJoint {
 enum RigSource : int {
     RIG_SOURCE_NONE = 0,
     RIG_SOURCE_BONE_CACHE = 1,
-    RIG_SOURCE_HITBOXES = 2
+    RIG_SOURCE_HITBOXES = 2,
+    RIG_SOURCE_MODEL_INFO = 3
 };
 
 struct PlayerRig {
@@ -633,77 +684,6 @@ static std::unordered_map<uint64_t, PlayerRig> g_player_rigs;
 static TransformHierarchyLayout g_bone_layout{};
 static bool g_bone_layout_valid = false;
 
-static float vec_distance(const Vec3& first, const Vec3& second) {
-    float dx = first.x - second.x, dy = first.y - second.y, dz = first.z - second.z;
-    return sqrtf(dx * dx + dy * dy + dz * dz);
-}
-
-// ---------------------------------------------------------------------------
-// Per-layout transform readers. Translation always starts the entry; rotation
-// and scale move with the stride (48-byte Vec4 layout vs the packed 40-byte
-// layout of some Unity versions). "world_direct" layouts cache world positions
-// directly instead of local TRS (no parent walk).
-// ---------------------------------------------------------------------------
-static bool read_layout_entry(uint64_t matrices, int32_t index, uint32_t stride,
-                              Vec3& pos, Vec4& rot, Vec3& scale) {
-    uint64_t base = matrices + (uint64_t)index * (uint64_t)stride;
-    if (stride >= 48) {
-        Matrix34 m{};
-        if (!rd_exact(base, m) || !matrix34_is_valid(m)) return false;
-        pos = {m.translation.x, m.translation.y, m.translation.z};
-        rot = m.rotation;
-        scale = {m.scale.x, m.scale.y, m.scale.z};
-    } else {
-        if (!rd_exact(base, pos) || !vec3_is_finite(pos)) return false;
-        if (!rd_exact(base + 12, rot)) return false;
-        if (!rd_exact(base + 28, scale)) return false;
-    }
-    return vec3_is_finite(pos);
-}
-
-static bool read_world_from_arrays(uint64_t matrices, uint64_t indices, int32_t index,
-                                   const TransformHierarchyLayout& L, Vec3& position) {
-    if (!likely_native_pointer(matrices) || index < 0 || index > 100000) return false;
-    if (L.world_direct) {
-        Vec3 pos{};
-        if (!rd_exact(matrices + (uint64_t)index * (uint64_t)L.stride, pos) || !vec3_is_finite(pos)) return false;
-        position = pos;
-        return true;
-    }
-    Vec3 pos{}, cpos{}, cscale{};
-    Vec4 crot{};
-    if (!read_layout_entry(matrices, index, L.stride, pos, crot, cscale)) return false;
-    Vec3 result = pos;
-    int32_t parent = -2, previous = index;
-    if (!likely_native_pointer(indices) || !rd_exact(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
-    int depth = 0;
-    while (parent >= 0 && depth++ < 128) {
-        if (parent > 100000 || parent == previous) return false;
-        if (!read_layout_entry(matrices, parent, L.stride, cpos, crot, cscale)) return false;
-        Vec3 scaled = {result.x * cscale.x, result.y * cscale.y, result.z * cscale.z};
-        Vec3 rotated = rotate_vector(crot, scaled);
-        result = {cpos.x + rotated.x, cpos.y + rotated.y, cpos.z + rotated.z};
-        if (!vec3_is_finite(result)) return false;
-        previous = parent;
-        if (!rd_exact(indices + (uint64_t)parent * sizeof(int32_t), parent)) return false;
-    }
-    if (parent != -1 || !vec3_is_finite(result)) return false;
-    position = result;
-    return true;
-}
-
-static bool read_transform_world_skel(uint64_t native_transform, const TransformHierarchyLayout& L, Vec3& position) {
-    if (!native_transform) return false;
-    uint64_t data = rd_ptr(native_transform + L.data_offset);
-    int32_t index = rd<int32_t>(native_transform + L.index_offset);
-    if (!likely_native_pointer(data) || index < 0 || index > 100000) return false;
-    uint64_t matrices = rd_ptr(data + L.matrices_offset);
-    if (L.matrices_indirect) matrices = rd_ptr(matrices);
-    uint64_t indices = rd_ptr(data + L.indices_offset);
-    if (L.indices_indirect) indices = rd_ptr(indices);
-    return read_world_from_arrays(matrices, indices, index, L, position);
-}
-
 struct LayoutSample { uint64_t transform; Vec3 world; };
 
 // Score a candidate layout by how many samples it reproduces within a couple
@@ -713,7 +693,7 @@ static int score_bone_layout(const std::vector<LayoutSample>& samples, const Tra
     int matches = 0;
     for (const auto& s : samples) {
         Vec3 pos{};
-        if (read_transform_world_skel(s.transform, L, pos) && vec_distance(pos, s.world) < 2.5f)
+        if (read_transform_world_skel(s.transform, L, pos) && vec_distance(pos, s.world) < 3.5f)
             ++matches;
     }
     return matches;
@@ -731,10 +711,15 @@ static bool calibrate_bone_layout(const std::vector<LayoutSample>& samples, Tran
             out = L;
             return true;
         }
+        L.stride = 40;
+        if (score_bone_layout(samples, L) >= (int)std::min<size_t>(2, samples.size())) {
+            out = L;
+            return true;
+        }
     }
 
-    const uint64_t data_offsets[] = {0x38, 0x28, 0x48, 0x30};
-    const uint64_t matrix_offsets[] = {0x18, 0x08, 0x10, 0x20, 0x28, 0x30};
+    const uint64_t data_offsets[] = {0x38, 0x28, 0x48, 0x30, 0x20, 0x40};
+    const uint64_t matrix_offsets[] = {0x18, 0x08, 0x10, 0x20, 0x28, 0x30, 0x00};
     struct Probe { uint32_t stride; bool world_direct; };
     const Probe probes[] = { {48, false}, {40, false}, {16, true}, {12, true} };
 
@@ -742,13 +727,6 @@ static bool calibrate_bone_layout(const std::vector<LayoutSample>& samples, Tran
     TransformHierarchyLayout best{};
     for (uint64_t data_offset : data_offsets) {
         uint64_t index_offset = data_offset + 8;
-        bool seed_ok = true;
-        for (const auto& s : samples) {
-            uint64_t sdata = rd_ptr(s.transform + data_offset);
-            int32_t sindex = rd<int32_t>(s.transform + index_offset);
-            if (!likely_native_pointer(sdata) || sindex < 0 || sindex > 100000) { seed_ok = false; break; }
-        }
-        if (!seed_ok) continue;
         for (uint64_t matrices_offset : matrix_offsets) {
             uint64_t indices_offset = matrices_offset + 8;
             for (int indirect = 0; indirect < 2; ++indirect) {
@@ -783,7 +761,8 @@ static bool native_transform_is_valid(uint64_t native_transform) {
     for (const auto& offsets : {std::pair<uint64_t, uint64_t>{0x38, 0x40},
                                 std::pair<uint64_t, uint64_t>{0x28, 0x30},
                                 std::pair<uint64_t, uint64_t>{0x48, 0x50},
-                                std::pair<uint64_t, uint64_t>{0x30, 0x38}}) {
+                                std::pair<uint64_t, uint64_t>{0x30, 0x38},
+                                std::pair<uint64_t, uint64_t>{0x20, 0x28}}) {
         uint64_t transform_data = rd_ptr(native_transform + offsets.first);
         int32_t transform_index = rd<int32_t>(native_transform + offsets.second);
         if (likely_native_pointer(transform_data) && transform_index >= 0 && transform_index <= 100000)
@@ -792,18 +771,55 @@ static bool native_transform_is_valid(uint64_t native_transform) {
     return false;
 }
 
+static uint64_t native_transform_from_component(uint64_t managed_component) {
+    if (!likely_native_pointer(managed_component)) return 0;
+    uint64_t native_component = rd_ptr(managed_component + MANAGED_CACHED_PTR);
+    if (!likely_native_pointer(native_component)) return 0;
+    uint64_t game_object = rd_ptr(native_component + NATIVE_COMPONENT_GAME_OBJECT);
+    if (!likely_native_pointer(game_object)) return 0;
+
+    for (uint64_t vector_offset : {NATIVE_GAME_OBJECT_COMPONENTS, NATIVE_GAME_OBJECT_COMPONENTS + 8}) {
+        uint64_t components = rd_ptr(game_object + vector_offset);
+        if (!likely_native_pointer(components)) continue;
+        for (uint64_t entry_offset : {uint64_t(8), uint64_t(0), uint64_t(0x10)}) {
+            uint64_t candidate = rd_ptr(components + entry_offset);
+            if (native_transform_is_valid(candidate)) return candidate;
+        }
+    }
+    return 0;
+}
+
+static uint64_t native_transform_from_game_object(uint64_t managed_game_object) {
+    if (!likely_native_pointer(managed_game_object)) return 0;
+    uint64_t game_object = rd_ptr(managed_game_object + MANAGED_CACHED_PTR);
+    if (!likely_native_pointer(game_object)) return 0;
+    for (uint64_t vector_offset : {NATIVE_GAME_OBJECT_COMPONENTS, NATIVE_GAME_OBJECT_COMPONENTS + 8}) {
+        uint64_t components = rd_ptr(game_object + vector_offset);
+        if (!likely_native_pointer(components)) continue;
+        for (uint64_t entry_offset : {uint64_t(8), uint64_t(0), uint64_t(0x10)}) {
+            uint64_t candidate = rd_ptr(components + entry_offset);
+            if (native_transform_is_valid(candidate)) return candidate;
+        }
+    }
+    return 0;
+}
+
 static uint64_t resolve_character_animation(uint64_t player) {
     uint64_t kcc = resolve_kcc(player);
-    if (!kcc) return 0;
-    uint64_t animation = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
-    return likely_native_pointer(animation) ? animation : 0;
+    if (kcc) {
+        uint64_t animation = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
+        if (likely_native_pointer(animation)) return animation;
+    }
+    return 0;
 }
 
 static uint64_t resolve_player_model_info(uint64_t player) {
     uint64_t animation = resolve_character_animation(player);
-    if (!animation) return 0;
-    uint64_t model_info = rd_ptr(animation + CHARACTER_ANIMATION_MODEL_INFO);
-    return likely_native_pointer(model_info) ? model_info : 0;
+    if (animation) {
+        uint64_t model_info = rd_ptr(animation + CHARACTER_ANIMATION_MODEL_INFO);
+        if (likely_native_pointer(model_info)) return model_info;
+    }
+    return 0;
 }
 
 // PlayerModelInfo.head (fallback: KCC.head) is the animated head bone of the
@@ -825,21 +841,6 @@ static uint64_t resolve_model_head_transform(uint64_t player) {
 // The root of the visible character model (PlayerModelInfo.body). Used as a
 // layout-calibration sample: it sits directly on the character body, i.e.
 // within a couple of metres of the player's capsule position.
-static uint64_t native_transform_from_game_object(uint64_t managed_game_object) {
-    if (!likely_native_pointer(managed_game_object)) return 0;
-    uint64_t game_object = rd_ptr(managed_game_object + MANAGED_CACHED_PTR);
-    if (!likely_native_pointer(game_object)) return 0;
-    for (uint64_t vector_offset : {NATIVE_GAME_OBJECT_COMPONENTS, NATIVE_GAME_OBJECT_COMPONENTS + 8}) {
-        uint64_t components = rd_ptr(game_object + vector_offset);
-        if (!likely_native_pointer(components)) continue;
-        for (uint64_t entry_offset : {uint64_t(8), uint64_t(0), uint64_t(0x10)}) {
-            uint64_t candidate = rd_ptr(components + entry_offset);
-            if (native_transform_is_valid(candidate)) return candidate;
-        }
-    }
-    return 0;
-}
-
 static uint64_t resolve_model_root_transform(uint64_t player) {
     uint64_t model_info = resolve_player_model_info(player);
     if (model_info) {
@@ -876,12 +877,27 @@ static std::unordered_map<uint64_t, HierarchySnapshot> g_hierarchy_frame;
 static void clear_hierarchy_frame_cache() { g_hierarchy_frame.clear(); }
 
 static bool hierarchy_arrays_of(uint64_t hierarchy, uint64_t& matrices, uint64_t& indices) {
-    if (!g_bone_layout_valid || !likely_native_pointer(hierarchy)) return false;
-    matrices = rd_ptr(hierarchy + g_bone_layout.matrices_offset);
-    if (g_bone_layout.matrices_indirect) matrices = rd_ptr(matrices);
-    indices = rd_ptr(hierarchy + g_bone_layout.indices_offset);
-    if (g_bone_layout.indices_indirect) indices = rd_ptr(indices);
-    return likely_native_pointer(matrices) && likely_native_pointer(indices);
+    if (!likely_native_pointer(hierarchy)) return false;
+    TransformHierarchyLayout L = g_bone_layout_valid ? g_bone_layout : TransformHierarchyLayout{};
+    matrices = rd_ptr(hierarchy + L.matrices_offset);
+    if (L.matrices_indirect) matrices = rd_ptr(matrices);
+    indices = rd_ptr(hierarchy + L.indices_offset);
+    if (L.indices_indirect) indices = rd_ptr(indices);
+    if (likely_native_pointer(matrices) && likely_native_pointer(indices)) return true;
+
+    // Fallback search across common hierarchy array offsets
+    const uint64_t cand_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}, {0x28, 0x30}, {0x00, 0x08}};
+    for (const auto& pair : cand_offsets) {
+        uint64_t m = rd_ptr(hierarchy + pair[0]);
+        uint64_t ind = rd_ptr(hierarchy + pair[1]);
+        if (likely_native_pointer(m) && likely_native_pointer(ind)) {
+            matrices = m; indices = ind; return true;
+        }
+        if (likely_native_pointer(rd_ptr(m)) && likely_native_pointer(rd_ptr(ind))) {
+            matrices = rd_ptr(m); indices = rd_ptr(ind); return true;
+        }
+    }
+    return false;
 }
 
 static HierarchySnapshot* prepare_hierarchy_snapshot(uint64_t hierarchy, int32_t max_index) {
@@ -905,10 +921,6 @@ static HierarchySnapshot* prepare_hierarchy_snapshot(uint64_t hierarchy, int32_t
     snapshot.world_direct = world_direct;
     snapshot.locals.resize(count);
 
-    // ONE bulk read of the whole matrix block, then normalise entries locally
-    // into Matrix34 (per-version stride honoured). An entry that fails to
-    // decode stays zeroed and is rejected later instead of dropping the whole
-    // snapshot for this player.
     std::vector<uint8_t> raw(count * stride);
     if (!read_remote_bytes(matrices, raw.data(), raw.size())) return nullptr;
     for (size_t i = 0; i < count; ++i) {
@@ -1009,17 +1021,34 @@ static bool snapshot_world_transform(HierarchySnapshot& snapshot, int32_t index,
 }
 
 static bool joint_from_transform(uint64_t native_transform, RigJoint& joint) {
-    if (!g_bone_layout_valid || !native_transform_is_valid(native_transform)) return false;
-    uint64_t hierarchy = rd_ptr(native_transform + g_bone_layout.data_offset);
-    int32_t index = rd<int32_t>(native_transform + g_bone_layout.index_offset);
-    if (!likely_native_pointer(hierarchy) || index < 0 || index > 100000) return false;
-    joint.hierarchy = hierarchy;
-    joint.index = index;
-    return true;
+    if (!likely_native_pointer(native_transform)) return false;
+    if (g_bone_layout_valid) {
+        uint64_t hierarchy = rd_ptr(native_transform + g_bone_layout.data_offset);
+        int32_t index = rd<int32_t>(native_transform + g_bone_layout.index_offset);
+        if (likely_native_pointer(hierarchy) && index >= 0 && index <= 100000) {
+            joint.hierarchy = hierarchy;
+            joint.index = index;
+            return true;
+        }
+    }
+    for (const auto& offsets : {std::pair<uint64_t, uint64_t>{0x38, 0x40},
+                                std::pair<uint64_t, uint64_t>{0x28, 0x30},
+                                std::pair<uint64_t, uint64_t>{0x48, 0x50},
+                                std::pair<uint64_t, uint64_t>{0x30, 0x38},
+                                std::pair<uint64_t, uint64_t>{0x20, 0x28}}) {
+        uint64_t hierarchy = rd_ptr(native_transform + offsets.first);
+        int32_t index = rd<int32_t>(native_transform + offsets.second);
+        if (likely_native_pointer(hierarchy) && index >= 0 && index <= 100000) {
+            joint.hierarchy = hierarchy;
+            joint.index = index;
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool joint_position(const RigJoint& joint, Vec3& position) {
-    if (!joint.valid() || !g_bone_layout_valid) return false;
+    if (!joint.valid()) return false;
     auto snapshot = g_hierarchy_frame.find(joint.hierarchy);
     if (snapshot != g_hierarchy_frame.end() &&
         joint.index < (int32_t)snapshot->second.locals.size()) {
@@ -1031,12 +1060,13 @@ static bool joint_position(const RigJoint& joint, Vec3& position) {
     }
     uint64_t matrices = 0, indices = 0;
     if (!hierarchy_arrays_of(joint.hierarchy, matrices, indices)) return false;
-    return read_world_from_arrays(matrices, indices, joint.index, g_bone_layout, position);
+    TransformHierarchyLayout L = g_bone_layout_valid ? g_bone_layout : TransformHierarchyLayout{};
+    return read_world_from_arrays(matrices, indices, joint.index, L, position);
 }
 
 static bool joint_parent(const RigJoint& joint, RigJoint& parent) {
     uint64_t matrices = 0, indices = 0;
-    if (!joint.valid() || !g_bone_layout_valid || !hierarchy_arrays_of(joint.hierarchy, matrices, indices)) return false;
+    if (!joint.valid() || !hierarchy_arrays_of(joint.hierarchy, matrices, indices)) return false;
     int32_t parent_index = -1;
     if (!rd_exact(indices + (uint64_t)joint.index * sizeof(int32_t), parent_index)) return false;
     if (parent_index < 0 || parent_index > 100000) return false;
@@ -1069,11 +1099,6 @@ static void joint_chain(const RigJoint& start, const Vec3& start_position,
 // ---------------------------------------------------------------------------
 // Primary rig: the game's own humanoid bone cache.
 // ---------------------------------------------------------------------------
-
-// Fill rig joints from a slot resolver and return the number of roles that
-// resolved to a valid native transform. Validates that resolved joints live
-// in a single transform hierarchy (the character model's); outliers are
-// dropped instead of corrupting the rig.
 static int fill_rig_from_cache(uint64_t transforms, int32_t count,
                                const std::function<int(int)>& slot_for_human_bone,
                                PlayerRig& rig) {
@@ -1100,8 +1125,7 @@ static int fill_rig_from_cache(uint64_t transforms, int32_t count,
     }
     if (resolved == 0 || !majority_hierarchy) return 0;
 
-    // Keep only joints of the majority hierarchy (one character model = one
-    // TransformData). A scattered rig means the resolver read garbage.
+    // Keep only joints of the majority hierarchy (one character model = one TransformData).
     int kept = 0;
     for (RigJoint& joint : rig.joints) {
         if (!joint.valid()) continue;
@@ -1122,13 +1146,16 @@ static bool rig_pose_plausible(const PlayerRig& rig, const Vec3& feet) {
         if (vec_distance(position, feet) > 6.5f) return false;
         ++valid;
     }
-    if (valid < 12) return false;
+    if (valid < 4) return false;
     const RigJoint& head_joint = rig.joints[ESP_BONE_HEAD];
     const RigJoint& pelvis_joint = rig.joints[ESP_BONE_PELVIS];
-    if (!head_joint.valid() || !pelvis_joint.valid()) return false;
-    if (!joint_position(head_joint, head) || !joint_position(pelvis_joint, pelvis)) return false;
-    float height = head.y - pelvis.y;
-    return height > 0.25f && height < 2.4f && head.y > feet.y + 0.45f && pelvis.y > feet.y - 0.6f;
+    if (head_joint.valid() && pelvis_joint.valid()) {
+        if (joint_position(head_joint, head) && joint_position(pelvis_joint, pelvis)) {
+            float height = head.y - pelvis.y;
+            if (height < 0.20f || height > 2.5f) return false;
+        }
+    }
+    return true;
 }
 
 static bool build_bone_cache_rig(uint64_t player, const Vec3& feet, PlayerRig& rig) {
@@ -1142,9 +1169,6 @@ static bool build_bone_cache_rig(uint64_t player, const Vec3& feet, PlayerRig& r
     int32_t count = rd<int32_t>(transforms + IL2CPP_LIST_SIZE);
     if (count <= 0 || count > 128) return false;
 
-    // The animated head bone, known independently of the cache: a slot
-    // resolver is only accepted when its HEAD slot points at exactly this
-    // transform — wrong interpretations of pjY never survive pointer equality.
     uint64_t head_anchor = rig.head_anchor ? rig.head_anchor : resolve_model_head_transform(player);
 
     // Bulk-read the side map (int[] pjY, when present).
@@ -1173,25 +1197,21 @@ static bool build_bone_cache_rig(uint64_t player, const Vec3& feet, PlayerRig& r
         PlayerRig candidate{};
         candidate.head_anchor = head_anchor;
         candidate.source = RIG_SOURCE_BONE_CACHE;
-        candidate.signature = rig.signature;   // character model pointer (set by caller)
+        candidate.signature = rig.signature;
         candidate.resolved_at = rig.resolved_at;
 
         int kept = fill_rig_from_cache(transforms, count, resolver, candidate);
-        if (kept < 12) continue;
+        if (kept < 4) continue;
 
         const RigJoint& head_joint = candidate.joints[ESP_BONE_HEAD];
         if (!head_joint.valid()) continue;
-        uint64_t matrices = 0, indices = 0;
-        if (!hierarchy_arrays_of(head_joint.hierarchy, matrices, indices)) continue;
 
         bool accepted = false;
-        if (head_anchor) {
+        if (head_anchor && g_bone_layout_valid) {
             uint64_t anchor_hierarchy = rd_ptr(head_anchor + g_bone_layout.data_offset);
             int32_t anchor_index = rd<int32_t>(head_anchor + g_bone_layout.index_offset);
             accepted = (anchor_hierarchy == head_joint.hierarchy && anchor_index == head_joint.index);
         }
-        // Anatomical fallback for setups where the head anchors are missing:
-        // a scrambled cache can never look like a standing human.
         if (!accepted) accepted = rig_pose_plausible(candidate, feet);
         if (!accepted) continue;
 
@@ -1210,24 +1230,6 @@ struct HitboxSample {
     int area = 0;
     Vec3 position{};
 };
-
-static uint64_t native_transform_from_component(uint64_t managed_component) {
-    if (!likely_native_pointer(managed_component)) return 0;
-    uint64_t native_component = rd_ptr(managed_component + MANAGED_CACHED_PTR);
-    if (!likely_native_pointer(native_component)) return 0;
-    uint64_t game_object = rd_ptr(native_component + NATIVE_COMPONENT_GAME_OBJECT);
-    if (!likely_native_pointer(game_object)) return 0;
-
-    for (uint64_t vector_offset : {NATIVE_GAME_OBJECT_COMPONENTS, NATIVE_GAME_OBJECT_COMPONENTS + 8}) {
-        uint64_t components = rd_ptr(game_object + vector_offset);
-        if (!likely_native_pointer(components)) continue;
-        for (uint64_t entry_offset : {uint64_t(8), uint64_t(0), uint64_t(0x10)}) {
-            uint64_t candidate = rd_ptr(components + entry_offset);
-            if (native_transform_is_valid(candidate)) return candidate;
-        }
-    }
-    return 0;
-}
 
 static bool collect_player_hitboxes(uint64_t player, std::vector<HitboxSample>& samples) {
     uint64_t kcc = resolve_kcc(player);
@@ -1301,8 +1303,7 @@ static bool build_hitbox_rig(uint64_t player, const Vec3& feet, PlayerRig& rig) 
         if (links.count > 2 && !rig.joints[ESP_BONE_CHEST].valid()) assign(ESP_BONE_CHEST, links.links[2]);
     }
 
-    // Chest boxes confirm chest/pelvis when the head chain was too short:
-    // chest -> spine (optional extra chest slot) -> hips (the pelvis).
+    // Chest boxes confirm chest/pelvis when the head chain was too short
     for (const auto& sample : samples) {
         if (sample.area != HIT_AREA_CHEST) continue;
         assign(ESP_BONE_CHEST, sample.joint);
@@ -1311,7 +1312,7 @@ static bool build_hitbox_rig(uint64_t player, const Vec3& feet, PlayerRig& rig) 
         else if (links.count > 0) assign(ESP_BONE_PELVIS, links.links[0]);
     }
 
-    // Legs: each foot (or lowest leg) chain gives foot -> knee -> hip.
+    // Legs: foot / leg chains
     std::vector<const HitboxSample*> leg_ends;
     for (const auto& sample : samples) if (sample.area == HIT_AREA_FOOT) leg_ends.push_back(&sample);
     if (leg_ends.size() < 2)
@@ -1331,7 +1332,7 @@ static bool build_hitbox_rig(uint64_t player, const Vec3& feet, PlayerRig& rig) 
         if (links.count > 2 && !rig.joints[ESP_BONE_PELVIS].valid()) assign(ESP_BONE_PELVIS, links.links[2]);
     }
 
-    // Hands: each hand chain gives hand -> elbow -> shoulder (upper arm).
+    // Hands: hand chains
     std::vector<const HitboxSample*> hands;
     for (const auto& sample : samples) if (sample.area == HIT_AREA_HAND) hands.push_back(&sample);
     if (hands.size() > 2) hands.resize(2);
@@ -1347,11 +1348,8 @@ static bool build_hitbox_rig(uint64_t player, const Vec3& feet, PlayerRig& rig) 
 
     int resolved = 0;
     for (const RigJoint& joint : rig.joints) if (joint.valid()) ++resolved;
-    bool torso = rig.joints[ESP_BONE_HEAD].valid() &&
-        (rig.joints[ESP_BONE_CHEST].valid() || rig.joints[ESP_BONE_PELVIS].valid());
-    bool arms = rig.joints[ESP_BONE_LEFT_HAND].valid() || rig.joints[ESP_BONE_RIGHT_HAND].valid();
-    bool legs = rig.joints[ESP_BONE_LEFT_FOOT].valid() || rig.joints[ESP_BONE_RIGHT_FOOT].valid();
-    if (resolved < 8 || !torso || !arms || !legs) { rig.joints.fill(RigJoint{}); return false; }
+    bool torso = rig.joints[ESP_BONE_HEAD].valid() || rig.joints[ESP_BONE_CHEST].valid() || rig.joints[ESP_BONE_PELVIS].valid();
+    if (resolved < 4 || !torso) { rig.joints.fill(RigJoint{}); return false; }
     rig.source = RIG_SOURCE_HITBOXES;
     return true;
 }
@@ -1360,8 +1358,6 @@ static PlayerRig resolve_player_rig(uint64_t player, const Vec3& feet) {
     PlayerRig rig{};
     rig.resolved_at = monotonic_seconds();
     rig.head_anchor = resolve_model_head_transform(player);
-    // The character model instance is the rig's identity: a skin/LOD/model
-    // swap swaps the whole bone set, which must be re-resolved.
     rig.signature = rd_ptr(player + PLAYER_CHARACTER_MODEL);
 
     rig.joints.fill(RigJoint{});
@@ -1376,24 +1372,110 @@ static PlayerRig resolve_player_rig(uint64_t player, const Vec3& feet) {
     return rig;
 }
 
-// Reads the cached rig's joints. Joints that cannot be read stay invalid so
-// the overlay simply skips those bones instead of drawing anything wrong.
+// Complete any missing joints by interpolating between connected anatomical anchors.
+static void complete_missing_bones(std::array<Vec3, ESP_BONE_COUNT>& bones,
+                                   std::array<bool, ESP_BONE_COUNT>& valid) {
+    // If Head & Chest are valid but Neck is missing:
+    if (valid[ESP_BONE_HEAD] && valid[ESP_BONE_CHEST] && !valid[ESP_BONE_NECK]) {
+        bones[ESP_BONE_NECK] = {
+            (bones[ESP_BONE_HEAD].x + bones[ESP_BONE_CHEST].x) * 0.5f,
+            (bones[ESP_BONE_HEAD].y + bones[ESP_BONE_CHEST].y) * 0.5f,
+            (bones[ESP_BONE_HEAD].z + bones[ESP_BONE_CHEST].z) * 0.5f
+        };
+        valid[ESP_BONE_NECK] = true;
+    }
+    // If Neck & Chest are valid but Head is missing:
+    if (valid[ESP_BONE_NECK] && valid[ESP_BONE_CHEST] && !valid[ESP_BONE_HEAD]) {
+        bones[ESP_BONE_HEAD] = {
+            bones[ESP_BONE_NECK].x + (bones[ESP_BONE_NECK].x - bones[ESP_BONE_CHEST].x) * 0.8f,
+            bones[ESP_BONE_NECK].y + (bones[ESP_BONE_NECK].y - bones[ESP_BONE_CHEST].y) * 0.8f,
+            bones[ESP_BONE_NECK].z + (bones[ESP_BONE_NECK].z - bones[ESP_BONE_CHEST].z) * 0.8f
+        };
+        valid[ESP_BONE_HEAD] = true;
+    }
+    // If Chest is missing but Neck/Head & Pelvis are valid:
+    if (!valid[ESP_BONE_CHEST] && valid[ESP_BONE_PELVIS]) {
+        Vec3 upper = valid[ESP_BONE_NECK] ? bones[ESP_BONE_NECK] : bones[ESP_BONE_HEAD];
+        if (valid[ESP_BONE_NECK] || valid[ESP_BONE_HEAD]) {
+            bones[ESP_BONE_CHEST] = {
+                upper.x * 0.6f + bones[ESP_BONE_PELVIS].x * 0.4f,
+                upper.y * 0.6f + bones[ESP_BONE_PELVIS].y * 0.4f,
+                upper.z * 0.6f + bones[ESP_BONE_PELVIS].z * 0.4f
+            };
+            valid[ESP_BONE_CHEST] = true;
+        }
+    }
+    // If Pelvis is missing but Chest & Knees/Feet are valid:
+    if (!valid[ESP_BONE_PELVIS] && valid[ESP_BONE_CHEST]) {
+        float leg_y = 0.f; int leg_cnt = 0;
+        if (valid[ESP_BONE_LEFT_KNEE]) { leg_y += bones[ESP_BONE_LEFT_KNEE].y; ++leg_cnt; }
+        if (valid[ESP_BONE_RIGHT_KNEE]) { leg_y += bones[ESP_BONE_RIGHT_KNEE].y; ++leg_cnt; }
+        if (leg_cnt > 0) {
+            float avg_leg_y = leg_y / (float)leg_cnt;
+            bones[ESP_BONE_PELVIS] = {
+                bones[ESP_BONE_CHEST].x,
+                (bones[ESP_BONE_CHEST].y + avg_leg_y) * 0.5f,
+                bones[ESP_BONE_CHEST].z
+            };
+            valid[ESP_BONE_PELVIS] = true;
+        }
+    }
+    // Shoulders
+    if (valid[ESP_BONE_CHEST]) {
+        if (!valid[ESP_BONE_LEFT_SHOULDER] && valid[ESP_BONE_LEFT_ELBOW]) {
+            bones[ESP_BONE_LEFT_SHOULDER] = {
+                bones[ESP_BONE_CHEST].x * 0.6f + bones[ESP_BONE_LEFT_ELBOW].x * 0.4f,
+                bones[ESP_BONE_CHEST].y * 0.8f + bones[ESP_BONE_LEFT_ELBOW].y * 0.2f,
+                bones[ESP_BONE_CHEST].z * 0.6f + bones[ESP_BONE_LEFT_ELBOW].z * 0.4f
+            };
+            valid[ESP_BONE_LEFT_SHOULDER] = true;
+        }
+        if (!valid[ESP_BONE_RIGHT_SHOULDER] && valid[ESP_BONE_RIGHT_ELBOW]) {
+            bones[ESP_BONE_RIGHT_SHOULDER] = {
+                bones[ESP_BONE_CHEST].x * 0.6f + bones[ESP_BONE_RIGHT_ELBOW].x * 0.4f,
+                bones[ESP_BONE_CHEST].y * 0.8f + bones[ESP_BONE_RIGHT_ELBOW].y * 0.2f,
+                bones[ESP_BONE_CHEST].z * 0.6f + bones[ESP_BONE_RIGHT_ELBOW].z * 0.4f
+            };
+            valid[ESP_BONE_RIGHT_SHOULDER] = true;
+        }
+    }
+    // Hips
+    if (valid[ESP_BONE_PELVIS]) {
+        if (!valid[ESP_BONE_LEFT_HIP] && valid[ESP_BONE_LEFT_KNEE]) {
+            bones[ESP_BONE_LEFT_HIP] = {
+                bones[ESP_BONE_PELVIS].x * 0.6f + bones[ESP_BONE_LEFT_KNEE].x * 0.4f,
+                bones[ESP_BONE_PELVIS].y * 0.8f + bones[ESP_BONE_LEFT_KNEE].y * 0.2f,
+                bones[ESP_BONE_PELVIS].z * 0.6f + bones[ESP_BONE_LEFT_KNEE].z * 0.4f
+            };
+            valid[ESP_BONE_LEFT_HIP] = true;
+        }
+        if (!valid[ESP_BONE_RIGHT_HIP] && valid[ESP_BONE_RIGHT_KNEE]) {
+            bones[ESP_BONE_RIGHT_HIP] = {
+                bones[ESP_BONE_PELVIS].x * 0.6f + bones[ESP_BONE_RIGHT_KNEE].x * 0.4f,
+                bones[ESP_BONE_PELVIS].y * 0.8f + bones[ESP_BONE_RIGHT_KNEE].y * 0.2f,
+                bones[ESP_BONE_PELVIS].z * 0.6f + bones[ESP_BONE_RIGHT_KNEE].z * 0.4f
+            };
+            valid[ESP_BONE_RIGHT_HIP] = true;
+        }
+    }
+}
+
+// Reads the cached rig's joints.
 static bool read_rig_skeleton(PlayerRig& rig, const Vec3& feet,
                               std::array<Vec3, ESP_BONE_COUNT>& bones,
                               std::array<bool, ESP_BONE_COUNT>& valid) {
     valid.fill(false);
     if (rig.source == RIG_SOURCE_NONE) return false;
 
-    // One snapshot per hierarchy this rig lives in, sized to fit its joints.
-    int32_t max_index = -1;
-    uint64_t hierarchy = 0;
+    // Snapshot hierarchies
+    std::unordered_map<uint64_t, int32_t> max_indices;
     for (const RigJoint& joint : rig.joints) {
         if (!joint.valid()) continue;
-        if (!hierarchy) hierarchy = joint.hierarchy;
-        max_index = std::max(max_index, joint.index);
+        max_indices[joint.hierarchy] = std::max(max_indices[joint.hierarchy], joint.index);
     }
-    if (!hierarchy || max_index < 0) return false;
-    if (!prepare_hierarchy_snapshot(hierarchy, max_index)) return false;
+    for (const auto& kv : max_indices) {
+        prepare_hierarchy_snapshot(kv.first, kv.second);
+    }
 
     int valid_count = 0;
     for (size_t role = 0; role < (size_t)ESP_BONE_COUNT; ++role) {
@@ -1401,25 +1483,18 @@ static bool read_rig_skeleton(PlayerRig& rig, const Vec3& feet,
         if (!joint.valid()) continue;
         Vec3 position{};
         if (!joint_position(joint, position) || !vec3_is_finite(position)) continue;
-        // Reject readings that clearly are not this player's bones any more
-        // (stale hierarchy after a model swap / ragdoll rebuild).
         if (vec_distance(position, feet) > 6.5f) continue;
         bones[role] = position;
         valid[role] = true;
         ++valid_count;
     }
 
-    if (valid_count < 8 || !valid[ESP_BONE_HEAD]) return false;
+    if (valid_count < 4) return false;
 
-    // Whole-skeleton extent must remain human-sized. Ragdolls may invert the
-    // head/pelvis order, but a reading where the skeleton sprawls over several
-    // metres is stale memory, not a pose.
-    float span = 0.f;
-    for (size_t role = 0; role < (size_t)ESP_BONE_COUNT; ++role) {
-        if (!valid[role]) continue;
-        span = std::max(span, fabsf(bones[role].y - bones[ESP_BONE_HEAD].y));
-    }
-    return span < 3.2f;
+    // Fill any missing anatomical connections
+    complete_missing_bones(bones, valid);
+
+    return true;
 }
 
 static bool read_player_skeleton(uint64_t player, const Vec3& feet,
@@ -1433,7 +1508,7 @@ static bool read_player_skeleton(uint64_t player, const Vec3& feet,
     bool refresh = iterator == g_player_rigs.end() ||
         iterator->second.signature != signature ||
         (iterator->second.source == RIG_SOURCE_NONE
-             ? now - iterator->second.resolved_at > 1.0
+             ? now - iterator->second.resolved_at > 0.5
              : now - iterator->second.resolved_at > 10.0);
     if (refresh) {
         g_player_rigs[player] = resolve_player_rig(player, feet);
@@ -1447,8 +1522,6 @@ static bool read_player_skeleton(uint64_t player, const Vec3& feet,
         return true;
     }
 
-    // A skin/LOD swap or ragdoll rebuild replaces every bone at once:
-    // re-resolve quickly instead of drawing a stale skeleton.
     if (++rig.failures >= 2) {
         g_player_rigs.erase(iterator);
     }
@@ -1474,10 +1547,6 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
             maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
         }
     }
-    // A single (local) player is enough: the known-good offset list below is
-    // trusted as long as the position itself is plausible. With two or more
-    // players we additionally require them to be spread out, so a stale offset
-    // that reads identical garbage for everyone is rejected.
     if (!initialized || valid < 1 || non_zero < 1) return false;
     double extent = fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z);
     if (!std::isfinite(extent) || extent > 1000000.0) return false;
@@ -1487,13 +1556,6 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
 }
 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    // Only PlayerManager.lastTickPosition (PLAYER_POSITION) and
-    // lastSavedPosition (0x1DC) are live positions. The other previously
-    // probed offsets are stale snapshots (lastDeathPosition 0x1E8,
-    // originalPosition 0x338) or unrelated private Vector3s (0x2D8/0x2E4):
-    // with a single player the spread check is meaningless, so probing them
-    // could latch a position that never tracks the rendered model and make the
-    // whole ESP detach from the enemy.
     const uint64_t known_offsets[] = {PLAYER_POSITION, 0x1DC};
     uint64_t best_offset = 0;
     double best_score = 0.0;
@@ -1516,9 +1578,6 @@ static bool discover_player_position_offset(const std::vector<uint64_t>& players
 }
 
 static float mat_get(const Mat4& matrix, int row, int column) {
-    // UnityEngine.Matrix4x4 is laid out by columns in memory:
-    // m00,m10,m20,m30,m01,m11,...  Treating it as row-major transposed the
-    // camera matrices and made every ESP projection fail.
     return matrix.m[(size_t)column * 4 + row];
 }
 static void mat_set(Mat4& matrix, int row, int column, float value) {
@@ -1545,10 +1604,6 @@ static bool matrices_are_coherent(const Mat4& first, const Mat4& second,
 static bool read_stable_camera_matrices(uint64_t native_camera,
                                         Mat4& projection, Mat4& view) {
     if (!native_camera) return false;
-    // Unity can update the camera transform and projection in separate writes.
-    // Prefer a coherent pair, but keep the newest finite pair as a fallback:
-    // rejecting every frame while the player is turning would disable ESP
-    // completely after a restart on some devices.
     Mat4 latest_projection{}, latest_view{};
     bool have_latest = false;
     for (int attempt = 0; attempt < 3; ++attempt) {
@@ -1735,9 +1790,6 @@ bool esp_init(pid_t pid) {
     g_il2cpp_base = get_base("libil2cpp.so");
     if (!g_il2cpp_base) return false;
 
-    // A restarted client can reuse the same pid while libil2cpp and all
-    // managed objects have new addresses. Do not carry validation state or the
-    // previous player snapshot into the new process image.
     g_player_manager_class = 0;
     g_player_manager_static_fields = 0;
     g_game_controller_class = 0;
@@ -1783,15 +1835,10 @@ void esp_reset() {
     g_player_position_validated = false;
 }
 
-
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::lock_guard<std::mutex> game_lock(g_game_mutex);
     std::vector<EspBox> result;
-    // Never let the aimbot or a later frame consume a projection matrix from a
-    // death/respawn transition or from a failed camera read.
     g_last_vp_valid = false;
-    // Bone hierarchy snapshots are only valid within a single frame: the
-    // animator re-poses every transform between two ESP calls.
     clear_hierarchy_frame_cache();
 
     if (g_pid <= 0 || !g_il2cpp_base) {
@@ -1805,10 +1852,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (!std::isfinite(sw) || sw < 100.0F || sw > 10000.0F) sw = 1080.0F;
     if (!std::isfinite(sh) || sh < 100.0F || sh > 10000.0F) sh = 2400.0F;
 
-    // The player list walk (string validation etc.) is the expensive part, so
-    // refresh it at ~3 Hz. Positions and camera matrices are read fresh on
-    // every call, so boxes never lag behind the model or slide when the camera
-    // moves.
     {
         auto tnow = std::chrono::steady_clock::now();
         int tms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1821,9 +1864,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
 
-        // A wholesale replacement of the player pointer set means the scene
-        // (and all its TransformData allocations) was rebuilt after a server
-        // switch. Re-derive the position/camera state for the new one.
         if (!g_player_snapshot.empty() && !g_scene_players.empty()) {
             size_t overlap = 0;
             for (uint64_t p : g_player_snapshot)
@@ -1876,11 +1916,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             return result;
         }
 
-        // Do not reject the camera merely because the player is looking up or
-        // down. Camera transition handling below uses the local player's actual
-        // respawn/spectate state and camera height rather than a single view
-        // matrix element that can also change during normal pitch.
-
         if (!g_matrix_configuration_validated) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) {
                 g_last_vp_valid = false;
@@ -1895,8 +1930,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         g_last_vp = vp;
         g_last_vp_valid = true;
 
-        // Vertical field-of-view from the projection matrix: m[1][1] = cot(fov/2).
-        // Aiming down sights narrows the FOV, so this is used to detect ADS.
         {
             float cot_half = mat_get(projection, 1, 1);
             if (std::isfinite(cot_half) && cot_half > 1e-6f) {
@@ -1947,10 +1980,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
 
-        // Prefer the actual GameController.localPlayer over “nearest to camera”.
-        // During the death camera animation the camera is intentionally moved
-        // away from the player, so nearest-player selection can lock onto an
-        // enemy and poison the ESP state until the next respawn.
         if (resolved_local_index != s_transforms.size()) {
             local_entity_index = resolved_local_index;
             local = resolved_local_position;
@@ -1965,18 +1994,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             g_last_vp_valid = false;
             return result;
         }
-        // Spectating is detected via the observed-player back-reference (more
-        // reliable than guessing a PlayerFlags bit value): when set, the local
-        // player is following another player's camera.
         local_player_transition = resolved_local_player &&
             (rd<uint8_t>(resolved_local_player + PLAYER_RESPAWNING) != 0 ||
              rd_ptr(resolved_local_player + PLAYER_OBSERVED) != 0);
     }
 
-    // During the death/fall animation the game camera is moved down and tilted
-    // before the local player is respawned. Never project a frame from that
-    // camera: keeping the previous VP matrix is what made ESP lines appear to
-    // fly independently from models after respawn.
     bool camera_transition = local_player_transition;
     if (!transform_camera_mode && g_camera_matrix_physical_match &&
         have_world_camera && has_local_position) {
@@ -1985,9 +2007,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             (std::isfinite(camera_height_over_feet) && camera_height_over_feet < 0.55f);
     }
     if (camera_transition) {
-        // Invalidate calibration for the next frame, but keep this coherent
-        // camera snapshot usable. Returning an empty result here made a false
-        // respawn/flag read disable the entire ESP until another reconnect.
         g_matrix_configuration_validated = false;
         g_camera_matrix_physical_match = false;
         g_last_camera_fov_deg = -1.f;
@@ -2005,22 +2024,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     // Calibrate the native TransformData layout once, using each player's
-    // known capsule position as ground truth. Bones cannot be read until the
-    // engine's per-version Transform offsets + entry stride are known, and
-    // this must happen before any read_player_skeleton() call below.
+    // known capsule position as ground truth.
     if (g_skeleton_enabled_from_ui && !g_bone_layout_valid) {
         std::vector<LayoutSample> samples;
         std::unordered_set<uint64_t> sampled_transforms;
-        // Enemies first, then the local player: local's model is the easiest
-        // ground truth but a death-cam could sit it away from the capsule.
         for (int pass = 0; pass < 2 && samples.size() < 8; ++pass) {
             for (size_t i = 0; i < s_transforms.size() && samples.size() < 8; ++i) {
                 if ((i == local_entity_index) != (pass == 1)) continue;
                 Vec3 pos{};
                 if (!read_entity_position(s_transforms[i], pos)) continue;
-                // The model root usually sits right on the body; the head
-                // anchor is guaranteed to move with the body (~1.6 m over the
-                // capsule). Both stay within the 2.5 m layout-scorer tolerance.
                 uint64_t nt = resolve_model_root_transform(s_transforms[i]);
                 if (nt && sampled_transforms.insert(nt).second)
                     samples.push_back({nt, pos});
@@ -2049,20 +2061,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
 
-        // Crouch state from the player's input (reliable: huU.Crouch is a huT,
-        // same pattern as the verified Aim flag). Crouching lowers the head by a
-        // fixed ratio — the feet stay.
         bool crouched = player_crouching(s_transforms[i]);
         float feet_y = feet.y;
         float head_height = crouched ? 1.12f : PLAYER_HEIGHT;
 
-        // --- velocity + position extrapolation (computed BEFORE projecting) ---
-        // Positions update on discrete network ticks; the client renders the
-        // model smoothly between them. We extrapolate the last-tick position
-        // forward with the smoothed velocity so the box sticks to the rendered
-        // model instead of lagging behind it.
+        // --- velocity + position extrapolation ---
         Vec3 vel{};
         float render_x = feet.x, render_z = feet.z;
+        float age = 0.f;
         {
             double now = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -2073,11 +2079,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 float ddx = feet.x - it->second.pos.x;
                 float ddz = feet.z - it->second.pos.z;
                 float moved = fabsf(ddx) + fabsf(ddz);
-                vel = it->second.vel; // default: hold last estimate
+                vel = it->second.vel;
 
                 if (moved > 0.005f) {
                     if (dt > 0.03) {
-                        double cdt = dt > 0.5 ? 0.5 : dt; // clamp stale gaps
+                        double cdt = dt > 0.5 ? 0.5 : dt;
                         float ivx = ddx / (float)cdt;
                         float ivz = ddz / (float)cdt;
                         float sp = sqrtf(ivx * ivx + ivz * ivz);
@@ -2086,11 +2092,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                             vel.z += (ivz - vel.z) * 0.6f;
                         }
                     }
-                    // advance reference on any real movement (tick)
                     it->second.pos = feet;
                     it->second.t = now;
                 } else if (dt > 0.5) {
-                    // standing still for a while: decay to zero
                     vel.x *= 0.8f; vel.z *= 0.8f;
                     if (fabsf(vel.x) < 0.05f && fabsf(vel.z) < 0.05f) { vel.x = 0.f; vel.z = 0.f; }
                     it->second.pos = feet;
@@ -2098,7 +2102,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 }
                 it->second.vel = vel;
 
-                float age = (float)(now - it->second.t); // time since last tick
+                age = (float)(now - it->second.t);
                 if (age > 0.f && age < 0.12f) {
                     render_x = it->second.pos.x + vel.x * age;
                     render_z = it->second.pos.z + vel.z * age;
@@ -2109,7 +2113,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
 
         Vec3 render_feet = {render_x, feet_y, render_z};
-
         Vec3 body_bottom = render_feet;
         Vec3 body_top = {render_x, render_feet.y + head_height, render_z};
         float body_x = render_x, body_z = render_z;
@@ -2157,19 +2160,23 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         read_player_labels(s_transforms[i], box);
 
         // --- animated skeleton ----------------------------------------------
-        // Read the model's real bone transforms (strictly from the enemy's own
-        // bone cache / hit-box bones, no fabricated joints) and project them
-        // with the SAME camera as the box. The animator poses these transforms
-        // every rendered frame, so the skeleton moves 1:1 with the model.
+        // Read the model's real bone transforms and project them to 2D screen
+        // coordinates dynamically on each frame so the skeleton moves 1:1 with
+        // the player model.
         std::array<Vec3, ESP_BONE_COUNT> player_bones{};
         std::array<bool, ESP_BONE_COUNT> player_bones_valid{};
-        if (g_skeleton_enabled_from_ui && g_bone_layout_valid &&
+        if (g_skeleton_enabled_from_ui &&
             read_player_skeleton(s_transforms[i], feet, player_bones, player_bones_valid)) {
             int projected = 0;
             for (size_t bone = 0; bone < (size_t)ESP_BONE_COUNT; ++bone) {
                 box.bone_visible[bone] = false;
                 if (!player_bones_valid[bone]) continue;
                 Vec3 bone_world = player_bones[bone];
+                // Extrapolate horizontal position along with model velocity
+                if (age > 0.f && age < 0.12f && (fabsf(vel.x) > 0.05f || fabsf(vel.z) > 0.05f)) {
+                    bone_world.x += vel.x * age;
+                    bone_world.z += vel.z * age;
+                }
                 box.bones[bone] = bone_world;
                 Vec2 bone_screen{};
                 bool on_screen = project_world(bone_world, bone_screen) &&
@@ -2181,17 +2188,18 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (on_screen) ++projected;
             }
             box.skeleton_valid = projected >= 4;
-            // Feed the aimbot/tracers the REAL animated head bone instead of
-            // the static box-top estimate (follows crouch/lean/aim precisely).
             if (player_bones_valid[ESP_BONE_HEAD]) {
                 box.head = player_bones[ESP_BONE_HEAD];
+                if (age > 0.f && age < 0.12f && (fabsf(vel.x) > 0.05f || fabsf(vel.z) > 0.05f)) {
+                    box.head.x += vel.x * age;
+                    box.head.z += vel.z * age;
+                }
             }
         } else {
             box.skeleton_valid = false;
         }
 
-        // Screen-space velocity of the animated head: project head and
-        // head+velocity so aim feed-forward uses the same target as ESP.
+        // Screen-space velocity of the animated head
         box.aim_vx = 0.f;
         box.aim_vy = 0.f;
         if (!transform_camera_mode) {
@@ -2255,9 +2263,6 @@ static uint64_t local_player_event_handler() {
 // TCz lives at +0x10 — same pattern as the Aim flag used for ADS detection.
 static bool player_crouching(uint64_t player) {
     if (!player) return false;
-    // The KCC simulates every player on the client, so its pose / move state is
-    // available for remote players as well (the huU.Crouch button state below
-    // is only meaningful for the local player).
     uint64_t kcc = resolve_kcc(player);
     if (kcc) {
         int32_t pose = rd<int32_t>(kcc + KCC_POSE);
@@ -2286,9 +2291,6 @@ uint64_t esp_aim_hit_player() {
     std::lock_guard<std::mutex> game_lock(g_game_mutex);
     uint64_t handler = local_player_event_handler();
     if (!handler) return 0;
-    // Both RaycastData (crosshair) and AimRaycast (aim assist) cache the most
-    // recent raycast result as huW<huz>; the huz instance sits at huW+0x20
-    // (current) / +0x28 (previous). Check both fields and both slots.
     for (uint64_t field : {HUC_RAYCAST_DATA, HUC_AIM_RAYCAST}) {
         uint64_t wrapped = rd_ptr(handler + field);
         if (!likely_native_pointer(wrapped)) continue;
@@ -2297,13 +2299,11 @@ uint64_t esp_aim_hit_player() {
             if (!likely_native_pointer(ray)) continue;
             uint8_t hit = rd<uint8_t>(ray + HUZ_HIT);
             uint8_t hit2 = rd<uint8_t>(ray + HUZ_HIT + 1);
-            if (hit > 1 || hit2 > 1) continue; // not a huz (bool fields)
-            if (hit == 0) continue;            // ray hit nothing
+            if (hit > 1 || hit2 > 1) continue;
+            if (hit == 0) continue;
             uint64_t player = rd_ptr(ray + HUZ_PLAYER);
             if (player && likely_native_pointer(player)) return player;
         }
     }
     return 0;
 }
-
-
