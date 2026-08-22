@@ -2804,7 +2804,7 @@ void RenderMenu() {
     }
 
     const char* tabNames[5] = {
-        XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Аимбот"), XS("Настройки")
+        XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Конфиги"), XS("Настройки")
     };
     const float tabH = Layout::TabH, tabPad = Layout::TabPad;
 
@@ -2872,7 +2872,7 @@ void RenderMenu() {
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     {
-        const char* titles[5] = {XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Аимбот"), XS("Настройки")};
+        const char* titles[5] = {XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Конфиги"), XS("Настройки")};
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
         const float hH = Layout::HeaderH;
