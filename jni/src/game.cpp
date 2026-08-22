@@ -458,6 +458,9 @@ static std::vector<uint64_t> read_configured_player_transforms() {
     return transforms;
 }
 
+static bool g_skeleton_enabled_from_ui = false;
+void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled_from_ui = enabled; }
+
 bool esp_init(pid_t pid) {
     std::lock_guard<std::mutex> game_lock(g_game_mutex);
     g_pid = pid;
