@@ -793,51 +793,61 @@ static int32_t parent_of(const PlayerVisualCache& cache, int32_t index) {
     return parent;
 }
 
-static bool index_reaches(const PlayerVisualCache& cache, int32_t start, int32_t target, int max_depth = 20) {
-    int32_t walk = start;
-    int depth = 0;
-    while (walk >= 0 && depth++ < max_depth) {
-        if (walk == target) return true;
-        int32_t next = parent_of(cache, walk);
-        if (next == walk) return false;
-        walk = next;
+static bool read_index_pos(const PlayerVisualCache& cache, int32_t index, Vec3& pos) {
+    if (!cache.matrices || !cache.indices || index < 0) return false;
+    return read_transform_hierarchy_arrays(cache.matrices, cache.indices, index, pos);
+}
+
+static bool slot_filled(const PlayerVisualCache& cache, EspBone bone) {
+    const BoneSlot& slot = cache.bones[(int)bone];
+    return slot.index >= 0 || slot.native != 0;
+}
+
+static EspBone human_to_esp(int human) {
+    switch (human) {
+        case (int)HumanBoneId::Hips: return EspBone::Hip;
+        case (int)HumanBoneId::Spine: return EspBone::Spine;
+        case (int)HumanBoneId::Chest:
+        case (int)HumanBoneId::UpperChest: return EspBone::Chest;
+        case (int)HumanBoneId::Neck: return EspBone::Neck;
+        case (int)HumanBoneId::Head: return EspBone::Head;
+        case (int)HumanBoneId::LeftShoulder: return EspBone::LeftShoulder;
+        case (int)HumanBoneId::RightShoulder: return EspBone::RightShoulder;
+        case (int)HumanBoneId::LeftUpperArm: return EspBone::LeftUpperArm;
+        case (int)HumanBoneId::RightUpperArm: return EspBone::RightUpperArm;
+        case (int)HumanBoneId::LeftLowerArm: return EspBone::LeftLowerArm;
+        case (int)HumanBoneId::RightLowerArm: return EspBone::RightLowerArm;
+        case (int)HumanBoneId::LeftHand: return EspBone::LeftHand;
+        case (int)HumanBoneId::RightHand: return EspBone::RightHand;
+        case (int)HumanBoneId::LeftUpperLeg: return EspBone::LeftThigh;
+        case (int)HumanBoneId::RightUpperLeg: return EspBone::RightThigh;
+        case (int)HumanBoneId::LeftLowerLeg: return EspBone::LeftShin;
+        case (int)HumanBoneId::RightLowerLeg: return EspBone::RightShin;
+        case (int)HumanBoneId::LeftFoot: return EspBone::LeftFoot;
+        case (int)HumanBoneId::RightFoot: return EspBone::RightFoot;
+        default: return EspBone::Count;
     }
-    return false;
 }
 
 static void bind_human_id(PlayerVisualCache& cache, int human, uint64_t transform) {
-    EspBone bone = EspBone::Count;
-    switch (human) {
-        case (int)HumanBoneId::Hips: bone = EspBone::Hip; break;
-        case (int)HumanBoneId::Spine: bone = EspBone::Spine; break;
-        case (int)HumanBoneId::Chest:
-        case (int)HumanBoneId::UpperChest: bone = EspBone::Chest; break;
-        case (int)HumanBoneId::Neck: bone = EspBone::Neck; break;
-        case (int)HumanBoneId::Head: bone = EspBone::Head; break;
-        case (int)HumanBoneId::LeftShoulder: bone = EspBone::LeftShoulder; break;
-        case (int)HumanBoneId::RightShoulder: bone = EspBone::RightShoulder; break;
-        case (int)HumanBoneId::LeftUpperArm: bone = EspBone::LeftUpperArm; break;
-        case (int)HumanBoneId::RightUpperArm: bone = EspBone::RightUpperArm; break;
-        case (int)HumanBoneId::LeftLowerArm: bone = EspBone::LeftLowerArm; break;
-        case (int)HumanBoneId::RightLowerArm: bone = EspBone::RightLowerArm; break;
-        case (int)HumanBoneId::LeftHand: bone = EspBone::LeftHand; break;
-        case (int)HumanBoneId::RightHand: bone = EspBone::RightHand; break;
-        case (int)HumanBoneId::LeftUpperLeg: bone = EspBone::LeftThigh; break;
-        case (int)HumanBoneId::RightUpperLeg: bone = EspBone::RightThigh; break;
-        case (int)HumanBoneId::LeftLowerLeg: bone = EspBone::LeftShin; break;
-        case (int)HumanBoneId::RightLowerLeg: bone = EspBone::RightShin; break;
-        case (int)HumanBoneId::LeftFoot: bone = EspBone::LeftFoot; break;
-        case (int)HumanBoneId::RightFoot: bone = EspBone::RightFoot; break;
-        default: return;
-    }
-    if (cache.bones[(int)bone].index >= 0 || cache.bones[(int)bone].native) {
-        if (bone == EspBone::Chest && human == (int)HumanBoneId::Chest) {
-            // prefer Chest over UpperChest already stored
-        } else {
-            return;
-        }
-    }
+    EspBone bone = human_to_esp(human);
+    if (bone == EspBone::Count || !transform) return;
+    if (slot_filled(cache, bone) && !(bone == EspBone::Chest && human == (int)HumanBoneId::Chest))
+        return;
     set_slot_from_transform(cache, bone, transform);
+}
+
+static bool ids_look_like_human_bones(const std::vector<int32_t>& ids) {
+    if (ids.size() < 2 || ids.size() > 40) return false;
+    bool core = false;
+    for (int32_t id : ids) {
+        if (id < 0 || id >= (int)HumanBoneId::LastBone) return false;
+        if (id == (int)HumanBoneId::Hips || id == (int)HumanBoneId::Spine ||
+            id == (int)HumanBoneId::Chest || id == (int)HumanBoneId::UpperChest ||
+            id == (int)HumanBoneId::Neck || id == (int)HumanBoneId::Head)
+            core = true;
+    }
+    return core;
 }
 
 static bool bind_animator_bone_array(PlayerVisualCache& cache, uint64_t character_anim) {
@@ -845,45 +855,29 @@ static bool bind_animator_bone_array(PlayerVisualCache& cache, uint64_t characte
     uint64_t driver = rd_ptr(character_anim + CHAR_ANIM_BONE_DRIVER);
     if (!driver) return false;
     std::vector<uint64_t> transforms;
-    if (!read_il2cpp_ptr_array(rd_ptr(driver + BONE_DRIVER_TRANSFORMS), transforms, 80))
+    if (!read_il2cpp_ptr_array(rd_ptr(driver + BONE_DRIVER_TRANSFORMS), transforms, 40))
         return false;
     std::vector<int32_t> human_ids;
-    read_il2cpp_i32_array(rd_ptr(driver + BONE_DRIVER_HUMAN_IDS), human_ids, 80);
-
-    int bound = 0;
-    if ((int)transforms.size() >= (int)HumanBoneId::LastBone) {
-        for (int human = 0; human < (int)HumanBoneId::LastBone && human < (int)transforms.size(); ++human) {
-            if (!transforms[(size_t)human]) continue;
-            int before = cache.bones[0].index;
-            bind_human_id(cache, human, transforms[(size_t)human]);
-            (void)before;
-            ++bound;
-        }
-    } else if (human_ids.size() == transforms.size()) {
-        for (size_t i = 0; i < transforms.size(); ++i) {
-            if (!transforms[i]) continue;
-            bind_human_id(cache, human_ids[i], transforms[i]);
-            ++bound;
-        }
-    } else {
+    if (!read_il2cpp_i32_array(rd_ptr(driver + BONE_DRIVER_HUMAN_IDS), human_ids, 40))
         return false;
-    }
-    return cache.bones[(int)EspBone::Hip].index >= 0 || cache.bones[(int)EspBone::Head].index >= 0;
+    if (!ids_look_like_human_bones(human_ids) || human_ids.size() != transforms.size())
+        return false;
+    for (size_t i = 0; i < transforms.size(); ++i)
+        bind_human_id(cache, human_ids[i], transforms[i]);
+    return true;
 }
 
-static void collect_related_indices(const PlayerVisualCache& cache, int32_t root, std::vector<int32_t>& out) {
+static void collect_direct_children(const PlayerVisualCache& cache, int32_t parent, std::vector<int32_t>& out) {
     out.clear();
-    if (!cache.matrices || !cache.indices || root < 0) return;
-    const int window = 220;
-    int start = root > window ? root - window : 0;
-    int end = root + window;
-    out.reserve(96);
+    if (parent < 0 || !cache.indices) return;
+    const int window = 400;
+    int start = parent > window ? parent - window : 0;
+    int end = parent + window;
     for (int idx = start; idx <= end; ++idx) {
-        int32_t parent = parent_of(cache, idx);
-        if (parent < -1 || parent > 100000) continue;
-        if (idx != root && !index_reaches(cache, parent, root, 14)) continue;
+        if (idx == parent) continue;
+        if (parent_of(cache, idx) != parent) continue;
         Vec3 pos{};
-        if (!read_transform_hierarchy_arrays(cache.matrices, cache.indices, idx, pos)) continue;
+        if (!read_index_pos(cache, idx, pos)) continue;
         out.push_back(idx);
     }
 }
@@ -892,7 +886,7 @@ static std::vector<int32_t> walk_parents_to(const PlayerVisualCache& cache, int3
     std::vector<int32_t> chain;
     int32_t walk = start;
     int depth = 0;
-    while (walk >= 0 && depth++ < 20) {
+    while (walk >= 0 && depth++ < 16) {
         chain.push_back(walk);
         if (walk == stop) break;
         int32_t next = parent_of(cache, walk);
@@ -902,18 +896,18 @@ static std::vector<int32_t> walk_parents_to(const PlayerVisualCache& cache, int3
     return chain;
 }
 
-static std::vector<int32_t> filter_chain(const PlayerVisualCache& cache, const std::vector<int32_t>& chain) {
+static std::vector<int32_t> slim_chain(const PlayerVisualCache& cache, const std::vector<int32_t>& chain, float min_dist) {
     std::vector<int32_t> out;
     Vec3 prev{};
     bool have = false;
+    const float min2 = min_dist * min_dist;
     for (size_t i = 0; i < chain.size(); ++i) {
         Vec3 pos{};
-        if (!read_transform_hierarchy_arrays(cache.matrices, cache.indices, chain[i], pos)) continue;
+        if (!read_index_pos(cache, chain[i], pos)) continue;
         if (have) {
             Vec3 d = vec_sub(pos, prev);
-            float dist2 = vec_dot(d, d);
             bool last = (i + 1 == chain.size());
-            if (!last && dist2 < 0.004F) continue;
+            if (!last && vec_dot(d, d) < min2) continue;
         }
         out.push_back(chain[i]);
         prev = pos;
@@ -923,161 +917,318 @@ static std::vector<int32_t> filter_chain(const PlayerVisualCache& cache, const s
 }
 
 static void bind_index(PlayerVisualCache& cache, EspBone bone, int32_t index) {
-    if (index < 0) return;
-    BoneSlot& slot = cache.bones[(int)bone];
-    if (slot.index >= 0) return;
-    slot.index = index;
+    if (index < 0 || bone == EspBone::Count) return;
+    if (slot_filled(cache, bone)) return;
+    cache.bones[(int)bone].index = index;
 }
 
-static bool on_spine(const std::vector<int32_t>& spine, int32_t index) {
-    for (int32_t value : spine) if (value == index) return true;
+static bool on_path(const std::vector<int32_t>& path, int32_t index) {
+    for (int32_t value : path) if (value == index) return true;
     return false;
+}
+
+static void assign_spine(PlayerVisualCache& cache, const std::vector<int32_t>& hip_to_head) {
+    if (hip_to_head.size() < 2) return;
+    bind_index(cache, EspBone::Hip, hip_to_head.front());
+    bind_index(cache, EspBone::Head, hip_to_head.back());
+    if (hip_to_head.size() == 2) return;
+    if (hip_to_head.size() == 3) {
+        bind_index(cache, EspBone::Chest, hip_to_head[1]);
+        return;
+    }
+    if (hip_to_head.size() == 4) {
+        bind_index(cache, EspBone::Spine, hip_to_head[1]);
+        bind_index(cache, EspBone::Chest, hip_to_head[2]);
+        return;
+    }
+    bind_index(cache, EspBone::Spine, hip_to_head[1]);
+    bind_index(cache, EspBone::Chest, hip_to_head[hip_to_head.size() / 2]);
+    bind_index(cache, EspBone::Neck, hip_to_head[hip_to_head.size() - 2]);
+}
+
+static void assign_limb(PlayerVisualCache& cache, const std::vector<int32_t>& root_to_leaf,
+                        EspBone a, EspBone b, EspBone c, EspBone d) {
+    if (root_to_leaf.size() < 2) return;
+    EspBone slots[4] = {a, b, c, d};
+    int n = 0;
+    for (int i = 0; i < 4; ++i) if (slots[i] != EspBone::Count) ++n;
+    if (n <= 0) return;
+    bind_index(cache, slots[0], root_to_leaf.front());
+    bind_index(cache, slots[n - 1], root_to_leaf.back());
+    if (root_to_leaf.size() == 2 || n < 3) return;
+    if (root_to_leaf.size() == 3 || n == 3) {
+        bind_index(cache, slots[1], root_to_leaf[root_to_leaf.size() / 2]);
+        return;
+    }
+    bind_index(cache, slots[1], root_to_leaf[1]);
+    bind_index(cache, slots[2], root_to_leaf[root_to_leaf.size() - 2]);
+}
+
+static void assign_samples(PlayerVisualCache& cache, std::vector<int32_t> indices, EspBone a, EspBone b, EspBone c, EspBone d) {
+    if (indices.size() < 2) {
+        if (indices.size() == 1) bind_index(cache, d != EspBone::Count ? d : (c != EspBone::Count ? c : a), indices[0]);
+        return;
+    }
+    assign_limb(cache, indices, a, b, c, d);
+}
+
+struct BoneSample {
+    int32_t index = -1;
+    Vec3 pos{};
+    float along = 0.0F;
+    float side = 0.0F;
+    float radial = 0.0F;
+    bool used = false;
+};
+
+static bool sample_from_transform(PlayerVisualCache& cache, uint64_t transform, BoneSample& sample) {
+    if (!transform) return false;
+    uint64_t native = resolve_native_transform(transform);
+    if (!native) return false;
+    int32_t index = -1;
+    uint64_t matrices = 0, indices = 0;
+    if (native_to_index(native, index, matrices, indices)) {
+        if (!cache.matrices) {
+            cache.matrices = matrices;
+            cache.indices = indices;
+        }
+        sample.index = index;
+        return read_index_pos(cache, index, sample.pos);
+    }
+    return read_transform_hierarchy_position(native, sample.pos) && (sample.index = -1, true);
+}
+
+static void read_ragdoll_body_parts(uint64_t character_anim, std::vector<uint64_t>& transforms) {
+    transforms.clear();
+    if (!character_anim) return;
+    uint64_t ragdoll = rd_ptr(character_anim + CHAR_ANIM_RAGDOLL);
+    if (!ragdoll) return;
+    uint64_t list = rd_ptr(ragdoll + RAGDOLL_BODY_PARTS);
+    if (!list) return;
+    uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
+    int32_t count = 0;
+    if (!rd_exact(list + IL2CPP_LIST_SIZE, count) || !items || count <= 0 || count > 32) return;
+    transforms.reserve((size_t)count);
+    for (int32_t i = 0; i < count; ++i) {
+        uint64_t part = rd_ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * sizeof(uint64_t));
+        if (!part) continue;
+        uint64_t transform = rd_ptr(part + BODYPART_TRANSFORM);
+        if (transform) transforms.push_back(transform);
+    }
+}
+
+static void bind_named_body_parts(PlayerVisualCache& cache, const std::vector<uint64_t>& extra_transforms) {
+    Vec3 hip_pos{}, head_pos{};
+    bool have_hip = read_cached_bone(cache, EspBone::Hip, hip_pos);
+    bool have_head = read_cached_bone(cache, EspBone::Head, head_pos);
+    if (!have_hip) return;
+
+    Vec4 hip_rot{0, 0, 0, 1};
+    int32_t hip_index = cache.bones[(int)EspBone::Hip].index;
+    if (hip_index >= 0 && cache.matrices && cache.indices)
+        read_transform_hierarchy_arrays(cache.matrices, cache.indices, hip_index, hip_pos, &hip_rot);
+
+    Vec3 up = have_head ? vec_norm(vec_sub(head_pos, hip_pos)) : rotate_vector(hip_rot, {0.0F, 1.0F, 0.0F});
+    if (vec_len(up) < 0.2F) up = {0.0F, 1.0F, 0.0F};
+    up = vec_norm(up);
+    Vec3 right = rotate_vector(hip_rot, {1.0F, 0.0F, 0.0F});
+    right = vec_sub(right, vec_mul(up, vec_dot(right, up)));
+    if (vec_len(right) < 0.2F) right = {1.0F, 0.0F, 0.0F};
+    right = vec_norm(right);
+
+    float torso = have_head ? vec_len(vec_sub(head_pos, hip_pos)) : 0.85F;
+    if (torso < 0.35F || torso > 2.4F) torso = 0.85F;
+
+    std::vector<BoneSample> samples;
+    auto add_transform = [&](uint64_t transform) {
+        BoneSample sample{};
+        if (!sample_from_transform(cache, transform, sample)) return;
+        if (sample.index >= 0 && (sample.index == cache.bones[(int)EspBone::Hip].index ||
+                                  sample.index == cache.bones[(int)EspBone::Head].index))
+            return;
+        Vec3 rel = vec_sub(sample.pos, hip_pos);
+        sample.along = vec_dot(rel, up);
+        sample.side = vec_dot(rel, right);
+        Vec3 axial = vec_mul(up, sample.along);
+        sample.radial = vec_len(vec_sub(rel, axial));
+        samples.push_back(sample);
+    };
+    for (uint64_t transform : extra_transforms) add_transform(transform);
+
+    auto take_group = [&](std::vector<BoneSample*>& group, bool sort_along_asc) {
+        std::sort(group.begin(), group.end(), [&](const BoneSample* a, const BoneSample* b) {
+            return sort_along_asc ? a->along < b->along : a->along > b->along;
+        });
+        std::vector<int32_t> indices;
+        for (BoneSample* sample : group) {
+            if (sample->used || sample->index < 0) continue;
+            sample->used = true;
+            indices.push_back(sample->index);
+        }
+        return indices;
+    };
+
+    std::vector<BoneSample*> torso_group;
+    for (BoneSample& sample : samples) {
+        if (sample.along < torso * 0.12F || sample.along > torso * 0.90F) continue;
+        if (sample.radial > 0.20F) continue;
+        torso_group.push_back(&sample);
+    }
+    auto torso_ids = take_group(torso_group, true);
+    if (torso_ids.size() == 1) bind_index(cache, EspBone::Chest, torso_ids[0]);
+    else if (torso_ids.size() == 2) {
+        bind_index(cache, EspBone::Spine, torso_ids[0]);
+        bind_index(cache, EspBone::Chest, torso_ids[1]);
+    } else if (torso_ids.size() >= 3) {
+        bind_index(cache, EspBone::Spine, torso_ids.front());
+        bind_index(cache, EspBone::Chest, torso_ids[torso_ids.size() / 2]);
+        bind_index(cache, EspBone::Neck, torso_ids.back());
+    }
+
+    auto collect_arm = [&](bool left) {
+        std::vector<BoneSample*> group;
+        for (BoneSample& sample : samples) {
+            if (sample.used || sample.index < 0) continue;
+            if (sample.along < torso * 0.18F || sample.along > torso + 0.28F) continue;
+            if (sample.radial < 0.16F) continue;
+            if (left ? sample.side >= -0.03F : sample.side <= 0.03F) continue;
+            group.push_back(&sample);
+        }
+        std::sort(group.begin(), group.end(), [](const BoneSample* a, const BoneSample* b) {
+            return a->radial < b->radial;
+        });
+        std::vector<int32_t> ids;
+        for (BoneSample* sample : group) {
+            if (sample->used) continue;
+            sample->used = true;
+            ids.push_back(sample->index);
+        }
+        if (left) assign_samples(cache, ids, EspBone::LeftShoulder, EspBone::LeftUpperArm, EspBone::LeftLowerArm, EspBone::LeftHand);
+        else assign_samples(cache, ids, EspBone::RightShoulder, EspBone::RightUpperArm, EspBone::RightLowerArm, EspBone::RightHand);
+    };
+    collect_arm(true);
+    collect_arm(false);
+
+    auto collect_leg = [&](bool left) {
+        std::vector<BoneSample*> group;
+        for (BoneSample& sample : samples) {
+            if (sample.used || sample.index < 0) continue;
+            if (sample.along > 0.10F || sample.along < -1.45F) continue;
+            if (sample.radial < 0.04F) continue;
+            if (left ? sample.side >= 0.0F : sample.side <= 0.0F) continue;
+            group.push_back(&sample);
+        }
+        std::sort(group.begin(), group.end(), [](const BoneSample* a, const BoneSample* b) {
+            return a->along > b->along;
+        });
+        std::vector<int32_t> ids;
+        for (BoneSample* sample : group) {
+            if (sample->used) continue;
+            sample->used = true;
+            ids.push_back(sample->index);
+        }
+        if (left) assign_samples(cache, ids, EspBone::LeftThigh, EspBone::LeftShin, EspBone::LeftFoot, EspBone::Count);
+        else assign_samples(cache, ids, EspBone::RightThigh, EspBone::RightShin, EspBone::RightFoot, EspBone::Count);
+    };
+    collect_leg(true);
+    collect_leg(false);
 }
 
 static void bind_from_hierarchy(PlayerVisualCache& cache) {
     int32_t hip = cache.bones[(int)EspBone::Hip].index;
-    if (hip < 0 || !cache.matrices || !cache.indices) return;
-
-    std::vector<int32_t> related;
-    collect_related_indices(cache, hip, related);
-    if (related.size() < 4) return;
-
     int32_t head = cache.bones[(int)EspBone::Head].index;
-    if (head < 0) {
-        Vec3 hip_pos{};
-        if (!read_transform_hierarchy_arrays(cache.matrices, cache.indices, hip, hip_pos)) return;
-        float best = -1.0F;
-        for (int32_t idx : related) {
-            Vec3 pos{};
-            if (!read_transform_hierarchy_arrays(cache.matrices, cache.indices, idx, pos)) continue;
-            float score = pos.y - hip_pos.y;
-            if (score > best) { best = score; head = idx; }
-        }
-        if (head >= 0) cache.bones[(int)EspBone::Head].index = head;
-    }
-    if (head < 0) return;
-
-    std::vector<int32_t> spine_up = walk_parents_to(cache, head, hip);
-    std::vector<int32_t> spine = filter_chain(cache, spine_up);
-    if (spine.size() >= 2) {
-        std::vector<int32_t> down = spine;
-        std::reverse(down.begin(), down.end());
-        bind_index(cache, EspBone::Hip, down.front());
-        bind_index(cache, EspBone::Head, down.back());
-        if (down.size() >= 3) bind_index(cache, EspBone::Neck, down[down.size() - 2]);
-        if (down.size() >= 4) bind_index(cache, EspBone::Chest, down[down.size() / 2]);
-        if (down.size() >= 5) bind_index(cache, EspBone::Spine, down[1]);
-        else if (down.size() >= 3) bind_index(cache, EspBone::Spine, down[1]);
-    }
+    if (hip < 0 || head < 0 || !cache.matrices || !cache.indices) return;
 
     Vec3 hip_pos{}, head_pos{};
-    bool have_hip = read_transform_hierarchy_arrays(cache.matrices, cache.indices, hip, hip_pos);
-    bool have_head = read_transform_hierarchy_arrays(cache.matrices, cache.indices, head, head_pos);
-    Vec3 up = have_hip && have_head ? vec_norm(vec_sub(head_pos, hip_pos)) : Vec3{0.0F, 1.0F, 0.0F};
-    Vec3 right = vec_norm(cross_product(up, {0.0F, 0.0F, 1.0F}));
-    if (vec_len(right) < 0.2F) right = vec_norm(cross_product(up, {1.0F, 0.0F, 0.0F}));
-
-    std::unordered_map<int32_t, std::vector<int32_t>> kids;
-    for (int32_t idx : related) {
-        int32_t p = parent_of(cache, idx);
-        if (p >= 0) kids[p].push_back(idx);
+    Vec4 hip_rot{0, 0, 0, 1};
+    if (!read_transform_hierarchy_arrays(cache.matrices, cache.indices, hip, hip_pos, &hip_rot)) {
+        if (!read_index_pos(cache, hip, hip_pos)) return;
     }
+    if (!read_index_pos(cache, head, head_pos)) return;
 
-    std::function<void(int32_t, std::vector<int32_t>&, std::vector<std::vector<int32_t>>&)> gather =
-        [&](int32_t node, std::vector<int32_t>& path, std::vector<std::vector<int32_t>>& leaves) {
-            path.push_back(node);
-            auto it = kids.find(node);
-            if (it == kids.end() || it->second.empty()) {
-                if (path.size() >= 3) leaves.push_back(path);
-            } else {
-                for (int32_t child : it->second) gather(child, path, leaves);
-            }
-            path.pop_back();
-        };
+    std::vector<int32_t> to_hip = walk_parents_to(cache, head, hip);
+    if (to_hip.empty() || to_hip.back() != hip) return;
+    std::reverse(to_hip.begin(), to_hip.end());
+    std::vector<int32_t> spine = slim_chain(cache, to_hip, 0.12F);
+    assign_spine(cache, spine);
 
-    std::vector<std::vector<int32_t>> hip_chains;
-    {
-        std::vector<int32_t> path;
-        auto it = kids.find(hip);
-        if (it != kids.end()) {
-            for (int32_t child : it->second) {
-                if (on_spine(spine, child)) continue;
-                gather(child, path, hip_chains);
-            }
-        }
-    }
-
-    struct RankedChain {
-        std::vector<int32_t> nodes;
-        float side = 0.0F;
-        float down = 0.0F;
-    };
-    std::vector<RankedChain> legs;
-    for (auto& chain : hip_chains) {
-        if (chain.empty()) continue;
-        Vec3 leaf{};
-        if (!read_transform_hierarchy_arrays(cache.matrices, cache.indices, chain.back(), leaf)) continue;
-        Vec3 delta = vec_sub(leaf, hip_pos);
-        float downward = -vec_dot(delta, up);
-        if (downward < 0.18F) continue;
-        RankedChain ranked;
-        ranked.nodes = chain;
-        ranked.side = vec_dot(delta, right);
-        ranked.down = downward;
-        legs.push_back(std::move(ranked));
-    }
-    std::sort(legs.begin(), legs.end(), [](const RankedChain& a, const RankedChain& b) { return a.down > b.down; });
-    RankedChain* left_leg = nullptr;
-    RankedChain* right_leg = nullptr;
-    for (auto& leg : legs) {
-        if (!left_leg && leg.side < 0.0F) left_leg = &leg;
-        else if (!right_leg && leg.side > 0.0F) right_leg = &leg;
-    }
-    if (!left_leg && !legs.empty()) left_leg = &legs.front();
-    if (!right_leg && legs.size() > 1) right_leg = &legs[1];
-
-    auto bind_leg = [&](const RankedChain* leg, EspBone thigh, EspBone shin, EspBone foot) {
-        if (!leg || leg->nodes.size() < 2) return;
-        std::vector<int32_t> chain;
-        chain.push_back(hip);
-        chain.insert(chain.end(), leg->nodes.begin(), leg->nodes.end());
-        std::vector<int32_t> slim = filter_chain(cache, chain);
-        if (slim.size() < 2) return;
-        bind_index(cache, hip == slim.front() ? EspBone::Hip : EspBone::Hip, slim.front());
-        bind_index(cache, foot, slim.back());
-        if (slim.size() == 2) return;
-        if (slim.size() == 3) {
-            bind_index(cache, thigh, slim[1]);
-            bind_index(cache, shin, slim[1]);
-            return;
-        }
-        bind_index(cache, thigh, slim[1]);
-        bind_index(cache, shin, slim[slim.size() - 2]);
-    };
-    bind_leg(left_leg, EspBone::LeftThigh, EspBone::LeftShin, EspBone::LeftFoot);
-    bind_leg(right_leg, EspBone::RightThigh, EspBone::RightShin, EspBone::RightFoot);
-
-    auto bind_arm = [&](EspBone hand_slot, EspBone shoulder, EspBone upper, EspBone lower, EspBone hand) {
-        int32_t start = cache.bones[(int)hand_slot].index;
+    auto bind_arm_from = [&](int32_t start, bool left) {
         if (start < 0) return;
-        std::vector<int32_t> up_chain = walk_parents_to(cache, start, hip);
+        std::vector<int32_t> up = walk_parents_to(cache, start, hip);
         std::vector<int32_t> clipped;
-        for (int32_t idx : up_chain) {
+        for (int32_t idx : up) {
+            if (on_path(spine, idx)) break;
             clipped.push_back(idx);
-            if (on_spine(spine, idx) || idx == hip) break;
         }
         if (clipped.size() < 2) return;
         std::reverse(clipped.begin(), clipped.end());
-        std::vector<int32_t> slim = filter_chain(cache, clipped);
+        std::vector<int32_t> slim = slim_chain(cache, clipped, 0.12F);
         if (slim.size() < 2) return;
-        bind_index(cache, shoulder, slim.front());
-        bind_index(cache, hand, slim.back());
-        if (slim.size() >= 3) bind_index(cache, upper, slim[1]);
-        if (slim.size() >= 4) bind_index(cache, lower, slim[slim.size() - 2]);
-        else if (slim.size() == 3) bind_index(cache, lower, slim[1]);
+        if (left)
+            assign_limb(cache, slim, EspBone::LeftShoulder, EspBone::LeftUpperArm, EspBone::LeftLowerArm, EspBone::LeftHand);
+        else
+            assign_limb(cache, slim, EspBone::RightShoulder, EspBone::RightUpperArm, EspBone::RightLowerArm, EspBone::RightHand);
     };
-    bind_arm(EspBone::LeftHand, EspBone::LeftShoulder, EspBone::LeftUpperArm, EspBone::LeftLowerArm, EspBone::LeftHand);
-    bind_arm(EspBone::RightHand, EspBone::RightShoulder, EspBone::RightUpperArm, EspBone::RightLowerArm, EspBone::RightHand);
+    bind_arm_from(cache.bones[(int)EspBone::LeftHand].index, true);
+    bind_arm_from(cache.bones[(int)EspBone::RightHand].index, false);
+
+    if (slot_filled(cache, EspBone::LeftThigh) && slot_filled(cache, EspBone::RightThigh))
+        return;
+
+    Vec3 char_up = vec_norm(vec_sub(head_pos, hip_pos));
+    Vec3 char_right = rotate_vector(hip_rot, {1.0F, 0.0F, 0.0F});
+    char_right = vec_sub(char_right, vec_mul(char_up, vec_dot(char_right, char_up)));
+    if (vec_len(char_right) < 0.2F) char_right = {1.0F, 0.0F, 0.0F};
+    char_right = vec_norm(char_right);
+
+    std::vector<int32_t> hip_kids;
+    collect_direct_children(cache, hip, hip_kids);
+    if (hip_kids.size() < 2 || hip_kids.size() > 6) return;
+
+    struct LegCand { std::vector<int32_t> path; float side; float down; };
+    std::vector<LegCand> legs;
+    for (int32_t child : hip_kids) {
+        if (on_path(spine, child)) continue;
+        std::vector<int32_t> down_path;
+        int32_t cur = child;
+        int depth = 0;
+        while (cur >= 0 && depth++ < 4) {
+            down_path.push_back(cur);
+            std::vector<int32_t> kids;
+            collect_direct_children(cache, cur, kids);
+            int32_t next = -1;
+            float best = 1e9F;
+            Vec3 cur_pos{};
+            if (!read_index_pos(cache, cur, cur_pos)) break;
+            for (int32_t kid : kids) {
+                Vec3 pos{};
+                if (!read_index_pos(cache, kid, pos)) continue;
+                float along = vec_dot(vec_sub(pos, cur_pos), char_up);
+                if (along < best) { best = along; next = kid; }
+            }
+            if (next < 0 || best > -0.12F) break;
+            cur = next;
+        }
+        if (down_path.size() < 2) continue;
+        Vec3 tip{};
+        if (!read_index_pos(cache, down_path.back(), tip)) continue;
+        float down = -vec_dot(vec_sub(tip, hip_pos), char_up);
+        if (down < 0.35F || down > 1.45F) continue;
+        LegCand leg;
+        leg.path = slim_chain(cache, down_path, 0.14F);
+        if (leg.path.size() < 2) continue;
+        leg.side = vec_dot(vec_sub(tip, hip_pos), char_right);
+        leg.down = down;
+        legs.push_back(std::move(leg));
+    }
+    const LegCand* left_leg = nullptr;
+    const LegCand* right_leg = nullptr;
+    for (const auto& leg : legs) {
+        if (!left_leg && leg.side < 0.0F) left_leg = &leg;
+        else if (!right_leg && leg.side > 0.0F) right_leg = &leg;
+    }
+    if (left_leg) assign_limb(cache, left_leg->path, EspBone::LeftThigh, EspBone::LeftShin, EspBone::LeftFoot, EspBone::Count);
+    if (right_leg) assign_limb(cache, right_leg->path, EspBone::RightThigh, EspBone::RightShin, EspBone::RightFoot, EspBone::Count);
 }
 
 static bool build_player_visual_cache(uint64_t player, PlayerVisualCache& cache) {
@@ -1085,6 +1236,7 @@ static bool build_player_visual_cache(uint64_t player, PlayerVisualCache& cache)
     cache.player = player;
     cache.model_info = resolve_player_model_info(player);
     if (!cache.model_info) return false;
+
     set_slot_from_transform(cache, EspBone::Hip, rd_ptr(cache.model_info + PMI_BODY));
     set_slot_from_transform(cache, EspBone::Head, rd_ptr(cache.model_info + PMI_HEAD));
     if (!cache.bones[(int)EspBone::Head].native)
@@ -1093,15 +1245,23 @@ static bool build_player_visual_cache(uint64_t player, PlayerVisualCache& cache)
     uint64_t character_anim = rd_ptr(cache.model_info + PMI_CHARACTER_ANIM);
     if (character_anim) bind_animator_bone_array(cache, character_anim);
 
-    if (cache.bones[(int)EspBone::LeftHand].index < 0 && !cache.bones[(int)EspBone::LeftHand].native)
+    if (!slot_filled(cache, EspBone::LeftHand))
         set_slot_from_transform(cache, EspBone::LeftHand, rd_ptr(cache.model_info + PMI_LEFT_WEAPON));
-    if (cache.bones[(int)EspBone::RightHand].index < 0 && !cache.bones[(int)EspBone::RightHand].native)
+    if (!slot_filled(cache, EspBone::RightHand))
         set_slot_from_transform(cache, EspBone::RightHand, rd_ptr(cache.model_info + PMI_RIGHT_WEAPON));
 
-    if (cache.bones[(int)EspBone::Hip].index >= 0)
+    std::vector<uint64_t> ragdoll_bones;
+    read_ragdoll_body_parts(character_anim, ragdoll_bones);
+    if (!ragdoll_bones.empty())
+        bind_named_body_parts(cache, ragdoll_bones);
+
+    if (!slot_filled(cache, EspBone::Chest))
+        set_slot_from_transform(cache, EspBone::Chest, rd_ptr(cache.model_info + PMI_EQUIPMENT));
+
+    if (cache.bones[(int)EspBone::Hip].index >= 0 && cache.bones[(int)EspBone::Head].index >= 0)
         bind_from_hierarchy(cache);
 
-    cache.ready = cache.bones[(int)EspBone::Hip].native || cache.bones[(int)EspBone::Hip].index >= 0;
+    cache.ready = slot_filled(cache, EspBone::Hip);
     return cache.ready;
 }
 

@@ -667,6 +667,16 @@ static void DrawEspOverlay() {
                 line(EspBone::Hip, EspBone::LeftFoot);
             if (vis(EspBone::Hip) && vis(EspBone::RightFoot) && !vis(EspBone::RightThigh) && !vis(EspBone::RightShin))
                 line(EspBone::Hip, EspBone::RightFoot);
+            if (vis(EspBone::LeftUpperArm) && vis(EspBone::LeftHand) && !vis(EspBone::LeftLowerArm))
+                line(EspBone::LeftUpperArm, EspBone::LeftHand);
+            if (vis(EspBone::RightUpperArm) && vis(EspBone::RightHand) && !vis(EspBone::RightLowerArm))
+                line(EspBone::RightUpperArm, EspBone::RightHand);
+            if (vis(EspBone::LeftThigh) && vis(EspBone::LeftFoot) && !vis(EspBone::LeftShin))
+                line(EspBone::LeftThigh, EspBone::LeftFoot);
+            if (vis(EspBone::RightThigh) && vis(EspBone::RightFoot) && !vis(EspBone::RightShin))
+                line(EspBone::RightThigh, EspBone::RightFoot);
+            if (vis(EspBone::Spine) && vis(EspBone::Head) && !vis(EspBone::Chest) && !vis(EspBone::Neck))
+                line(EspBone::Spine, EspBone::Head);
         }
 
         if (g_state.esp_wall) {
