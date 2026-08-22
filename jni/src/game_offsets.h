@@ -39,12 +39,12 @@ inline constexpr std::uint64_t PMI_SKINNED_MESH = 0x50;
 inline constexpr std::uint64_t PMI_CHARACTER_ANIM = 0x60;
 
 inline constexpr std::uint64_t CHAR_ANIM_PLAYER_MODEL = 0x30;
-inline constexpr std::uint64_t CHAR_ANIM_RAGDOLL      = 0x38;
+inline constexpr std::uint64_t CHAR_ANIM_BONE_CONFIGS = 0x40;
 inline constexpr std::uint64_t CHAR_ANIM_BONE_DRIVER  = 0x88;
 inline constexpr std::uint64_t BONE_DRIVER_TRANSFORMS = 0x48;
 inline constexpr std::uint64_t BONE_DRIVER_HUMAN_IDS  = 0x50;
-inline constexpr std::uint64_t RAGDOLL_BODY_PARTS     = 0xA0;
-inline constexpr std::uint64_t BODYPART_TRANSFORM     = 0x10;
+inline constexpr std::uint64_t HUMAN_BONE_CONFIG_BONES = 0x28;
+inline constexpr std::uint64_t HUMAN_BONE_ID          = 0x10;
 
 inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18;
