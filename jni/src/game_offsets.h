@@ -56,6 +56,7 @@ inline constexpr std::uint64_t PMI_HEAD_MODEL   = 0x48;
 inline constexpr std::uint64_t PMI_SKINNED_MESH = 0x50;
 inline constexpr std::uint64_t PMI_CHARACTER_ANIM = 0x60;
 
+inline constexpr std::uint64_t CHAR_ANIM_ANIMATOR      = 0x20;
 inline constexpr std::uint64_t CHAR_ANIM_PLAYER_MODEL = 0x30;
 inline constexpr std::uint64_t CHAR_ANIM_BONE_CONFIGS = 0x40;
 inline constexpr std::uint64_t CHAR_ANIM_BONE_DRIVER  = 0x88;
