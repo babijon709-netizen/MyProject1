@@ -135,7 +135,10 @@ static uint64_t get_base(const char* lib) {
 }
 
 static bool validate_player_list(uint64_t list, uint64_t player_class) {
-    if (!list || !player_class) return false;
+    if (!list) return false;
+    // clientPlayerList is List<PlayerManager> in the current dump. Keep the
+    // structural check tolerant: a stale TypeInfo pointer must not disable
+    // the whole ESP when the list itself is valid.
     uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
     int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
     if (!items || count < 0 || count > 512) return false;
@@ -148,7 +151,7 @@ static bool validate_player_list(uint64_t list, uint64_t player_class) {
     for (int32_t index = 0; index < count && checked < 4; ++index) {
         uint64_t player = rd_ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t));
         if (!player) continue;
-        if (rd_ptr(player) != player_class) return false;
+        if (player_class && rd_ptr(player) != player_class) return false;
         ++checked;
     }
     return checked > 0;
@@ -179,7 +182,7 @@ static uint64_t resolve_runtime_player_list() {
         if (candidate) {
             std::string name = read_remote_string(rd_ptr(candidate + 0x10));
             std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
-            if (name == "PlayerManager" && ns == "Oxide")
+            if (name == "PlayerManager" && (ns == "Oxide" || ns.empty()))
                 g_player_manager_class = candidate;
         }
     }
