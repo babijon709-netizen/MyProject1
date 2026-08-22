@@ -7,7 +7,7 @@ LOCAL_MODULE := xvcen
 _CF := -O3 -ffast-math -march=armv8-a+simd \
        -fomit-frame-pointer -ffunction-sections -fdata-sections \
        -fvisibility=hidden -fvisibility-inlines-hidden \
-       -DUSE_OPENGL -DNDEBUG \
+       -DUSE_OPENGL -DIMGUI_IMPL_OPENGL_ES3 -DNDEBUG \
        -fstack-protector-strong \
        -fPIE \
        -fno-unwind-tables \

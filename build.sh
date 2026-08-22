@@ -33,7 +33,12 @@ set -e
 
 if [[ "${status}" -ne 0 ]]; then
     echo "ndk-build failed with exit ${status}" >&2
-    tail -n 80 "${ROOT}/ndk-build.log" >&2 || true
+    tail -n 120 "${ROOT}/ndk-build.log" >&2 || true
+    if [[ -f "${ROOT}/ndk-build.log" ]]; then
+        grep -E "error:|fatal error:|undefined reference|Error 1|No such file|unknown argument" "${ROOT}/ndk-build.log" | tail -n 40 | while IFS= read -r line; do
+            echo "::error::${line}"
+        done
+    fi
     exit "${status}"
 fi
 
