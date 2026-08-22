@@ -11,7 +11,7 @@ on:
 
   workflow_dispatch:
 
-# Бинарник только собирается и загружается как artifact.
+# Бинарник только собирается и загружается как artifact
 # Автоматический git push отключён, чтобы избежать non-fast-forward.
 permissions:
   contents: read
