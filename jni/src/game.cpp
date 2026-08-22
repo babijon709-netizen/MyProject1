@@ -1394,16 +1394,88 @@ static bool build_named_rig(uint64_t player, PlayerRig& rig) {
     return true;
 }
 
+// Sanity-checks a freshly resolved rig against the actual world positions of
+// its joints. The bone-cache path resolves a full set of joints even when
+// CharacterAnimation.pvi.pjh is a *compact* Transform[] (built via
+// Animator.GetBoneTransform) instead of one indexed directly by HumanBodyBones;
+// in that case every bone is silently scrambled (the rig "builds", but the
+// joints describe no humanoid). Without this check such a scrambled rig is
+// accepted, the per-frame reader rejects it as impossible, and the overlay
+// falls back to the dead procedural stick figure that just sits on the model.
+// Verifying the pose here lets the dump-correct hitbox path take over instead.
+static bool rig_pose_plausible(const PlayerRig& rig, const Vec3& feet) {
+    if (rig.source == RIG_SOURCE_NONE) return false;
+
+    const EspBone probe[] = { ESP_BONE_HEAD, ESP_BONE_PELVIS, ESP_BONE_CHEST,
+                              ESP_BONE_LEFT_FOOT, ESP_BONE_RIGHT_FOOT };
+    std::unordered_map<uint64_t, int32_t> highest;
+    for (EspBone role : probe) {
+        const RigJoint& joint = rig.joints[(size_t)role];
+        if (!joint.valid()) continue;
+        int32_t& slot = highest[joint.hierarchy];
+        slot = std::max(slot, joint.index);
+    }
+    for (const auto& entry : highest)
+        prepare_hierarchy_snapshot(entry.first, entry.second);
+
+    // Distance checks use a generous window: the capsule feet reference can lag
+    // the rendered model (network tick vs. smoothed render), and a player may
+    // be mid-jump or on stairs, so the bones legitimately float above `feet`.
+    Vec3 head{};
+    if (!rig.joints[ESP_BONE_HEAD].valid() ||
+        !joint_position(rig.joints[ESP_BONE_HEAD], head) || !vec3_is_finite(head))
+        return false;
+    if (vec_distance(head, feet) > 6.0f) return false;
+
+    Vec3 torso_ref{};
+    bool have_torso = false;
+    if (rig.joints[ESP_BONE_PELVIS].valid() && joint_position(rig.joints[ESP_BONE_PELVIS], torso_ref) && vec3_is_finite(torso_ref))
+        have_torso = true;
+    else if (rig.joints[ESP_BONE_CHEST].valid() && joint_position(rig.joints[ESP_BONE_CHEST], torso_ref) && vec3_is_finite(torso_ref))
+        have_torso = true;
+    if (!have_torso) return false;
+    if (vec_distance(torso_ref, feet) > 6.0f) return false;
+
+    // Proportions are pose-intrinsic: the head is above the torso by a fixed
+    // humanoid amount regardless of crouch/jump. A scrambled bone-cache rig
+    // (compact pjh read as if it were HumanBodyBones-indexed) breaks this.
+    if (torso_ref.y >= head.y) return false;                 // torso must sit below the head
+    float torso_height = head.y - torso_ref.y;
+    if (torso_height < 0.22f || torso_height > 1.30f) return false;
+
+    // Feet have to be beneath the torso. A scrambled rig lands an upper-body
+    // bone in the foot slot, which fails here immediately.
+    for (EspBone foot_role : { ESP_BONE_LEFT_FOOT, ESP_BONE_RIGHT_FOOT }) {
+        if (!rig.joints[(size_t)foot_role].valid()) continue;
+        Vec3 foot{};
+        if (!joint_position(rig.joints[(size_t)foot_role], foot) || !vec3_is_finite(foot)) continue;
+        if (vec_distance(foot, feet) > 6.0f) return false;
+        if (foot.y > torso_ref.y + 0.10f) return false;      // foot must be below the torso
+    }
+    return true;
+}
+
 static PlayerRig resolve_player_rig(uint64_t player, const Vec3& feet) {
     PlayerRig rig{};
     rig.resolved_at = monotonic_seconds();
     rig.signature = rd_ptr(player + PLAYER_CHARACTER_MODEL);
     rig.head_transform = resolve_model_head_transform(player);
     rig.orientation_transform = resolve_model_root_transform(player);
-    if (build_bone_cache_rig(player, rig)) return rig;
-    if (build_hitbox_rig(player, feet, rig)) return rig;
-    if (build_named_rig(player, rig)) return rig;
-    rig.source = RIG_SOURCE_NONE;
+
+    // Each builder returns true once it can fill a set of joints, but only a rig
+    // whose joints actually form a humanoid is kept: a wrong one is dropped so
+    // the next, more reliable source (hit boxes are attached by the game itself)
+    // gets a chance instead of leaving the overlay on the procedural fallback.
+    rig.joints.fill(RigJoint{});
+    if (build_bone_cache_rig(player, rig) && rig_pose_plausible(rig, feet)) return rig;
+
+    rig.joints.fill(RigJoint{}); rig.source = RIG_SOURCE_NONE;
+    if (build_hitbox_rig(player, feet, rig) && rig_pose_plausible(rig, feet)) return rig;
+
+    rig.joints.fill(RigJoint{}); rig.source = RIG_SOURCE_NONE;
+    if (build_named_rig(player, rig) && rig_pose_plausible(rig, feet)) return rig;
+
+    rig.joints.fill(RigJoint{}); rig.source = RIG_SOURCE_NONE;
     return rig;
 }
 
