@@ -615,25 +615,6 @@ static void DrawEspOverlay() {
         {4,5},{5,6},{6,7},{7,4},
         {0,4},{1,5},{2,6},{3,7}
     };
-    constexpr int SKELETON_EDGES[][2] = {
-        {ESP_BONE_HEAD, ESP_BONE_NECK},
-        {ESP_BONE_NECK, ESP_BONE_CHEST},
-        {ESP_BONE_CHEST, ESP_BONE_PELVIS},
-        {ESP_BONE_LEFT_SHOULDER, ESP_BONE_RIGHT_SHOULDER},
-        {ESP_BONE_CHEST, ESP_BONE_LEFT_SHOULDER},
-        {ESP_BONE_LEFT_SHOULDER, ESP_BONE_LEFT_ELBOW},
-        {ESP_BONE_LEFT_ELBOW, ESP_BONE_LEFT_HAND},
-        {ESP_BONE_CHEST, ESP_BONE_RIGHT_SHOULDER},
-        {ESP_BONE_RIGHT_SHOULDER, ESP_BONE_RIGHT_ELBOW},
-        {ESP_BONE_RIGHT_ELBOW, ESP_BONE_RIGHT_HAND},
-        {ESP_BONE_LEFT_HIP, ESP_BONE_RIGHT_HIP},
-        {ESP_BONE_PELVIS, ESP_BONE_LEFT_HIP},
-        {ESP_BONE_LEFT_HIP, ESP_BONE_LEFT_KNEE},
-        {ESP_BONE_LEFT_KNEE, ESP_BONE_LEFT_FOOT},
-        {ESP_BONE_PELVIS, ESP_BONE_RIGHT_HIP},
-        {ESP_BONE_RIGHT_HIP, ESP_BONE_RIGHT_KNEE},
-        {ESP_BONE_RIGHT_KNEE, ESP_BONE_RIGHT_FOOT}
-    };
 
     float thick = ImMax(0.5f, g_state.esp_thick);
     const float tracer_origin_x = sw * 0.5f;
@@ -669,30 +650,6 @@ static void DrawEspOverlay() {
                     !std::isfinite(to.x) || !std::isfinite(to.y)) continue;
                 dl->AddLine(from, to, IM_COL32(0, 0, 0, 190), thick + 2.f);
                 dl->AddLine(from, to, ColU32(cfg::esp::box_col_invis), thick);
-            }
-        }
-
-        if (g_state.esp_skeleton && box.skeleton_valid) {
-            const ImU32 skeleton_color = ColU32(cfg::esp::skeleton_col);
-            for (const auto& edge : SKELETON_EDGES) {
-                int a = edge[0], b = edge[1];
-                if (!box.bone_visible[a] || !box.bone_visible[b]) continue;
-                ImVec2 from(box.bone_screen[a][0], box.bone_screen[a][1]);
-                ImVec2 to(box.bone_screen[b][0], box.bone_screen[b][1]);
-                if (!std::isfinite(from.x) || !std::isfinite(from.y) ||
-                    !std::isfinite(to.x) || !std::isfinite(to.y)) continue;
-                dl->AddLine(from, to, IM_COL32(0, 0, 0, 220), thick + 2.2f);
-                dl->AddLine(from, to, skeleton_color, thick);
-            }
-
-            // A small head ring makes the head joint distinct from the torso.
-            if (box.bone_visible[ESP_BONE_HEAD] && box.bone_visible[ESP_BONE_NECK]) {
-                ImVec2 head(box.bone_screen[ESP_BONE_HEAD][0], box.bone_screen[ESP_BONE_HEAD][1]);
-                ImVec2 neck(box.bone_screen[ESP_BONE_NECK][0], box.bone_screen[ESP_BONE_NECK][1]);
-                float dx = head.x - neck.x, dy = head.y - neck.y;
-                float radius = ImClamp(sqrtf(dx * dx + dy * dy) * 0.48f, 2.5f, 18.f);
-                dl->AddCircle(head, radius, IM_COL32(0, 0, 0, 220), 20, thick + 2.2f);
-                dl->AddCircle(head, radius, skeleton_color, 20, thick);
             }
         }
 
@@ -744,10 +701,6 @@ static void DrawEspOverlay() {
         if (g_state.esp_tracer) {
             float fx = center_x;
             float fy = box.y1;
-            if (box.skeleton_valid && box.bone_visible[ESP_BONE_HEAD]) {
-                fx = box.bone_screen[ESP_BONE_HEAD][0];
-                fy = box.bone_screen[ESP_BONE_HEAD][1];
-            }
             float tracer_thickness = ImMax(0.5f, cfg::esp::tracer_thickness);
             dl->AddLine({tracer_origin_x, tracer_origin_y}, {fx, fy},
                         IM_COL32(0, 0, 0, 190), tracer_thickness + 2.f);
@@ -2917,13 +2870,6 @@ static void RunAim() {
 
         float tx = (box.x1 + box.x2) * 0.5f;
         float ty = box.y1 + bh * bone_v;
-        int target_bone = g_state.aim_bone == 0 ? ESP_BONE_HEAD
-                        : g_state.aim_bone == 1 ? ESP_BONE_CHEST
-                                                : ESP_BONE_PELVIS;
-        if (box.skeleton_valid && box.bone_visible[target_bone]) {
-            tx = box.bone_screen[target_bone][0];
-            ty = box.bone_screen[target_bone][1];
-        }
         if (tx < 0.f || tx > sw || ty < 0.f || ty > sh) continue;
 
         float dx = tx - cx;
@@ -2977,12 +2923,6 @@ static void RunAim() {
     // crouch-aware). If world projection is unavailable, fall back to the box's
     // own screen position so the aim never fully stops.
     Vec3 aim_origin = tb->head;
-    if (tb->skeleton_valid) {
-        int target_bone = g_state.aim_bone == 0 ? ESP_BONE_HEAD
-                        : g_state.aim_bone == 1 ? ESP_BONE_CHEST
-                                                : ESP_BONE_PELVIS;
-        aim_origin = tb->bones[target_bone];
-    }
     const float lead_time = 0.18f;
     Vec3 pred = { aim_origin.x + tb->vel.x * lead_time,
                   aim_origin.y,
