@@ -571,13 +571,9 @@ static void DrawEspOverlay() {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
     if (!g_esp_attached) return;
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_skeleton && !g_state.esp_tracer) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer) return;
 
-    EspQuery query{};
-    query.box = g_state.esp_box;
-    query.chams = g_state.esp_chams;
-    query.skeleton = g_state.esp_skeleton;
-    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh, query);
+    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
     constexpr int BOX_EDGES[][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},
@@ -615,72 +611,7 @@ static void DrawEspOverlay() {
         if (g_state.esp_tracer) {
             float tx = (box.x1 + box.x2) * 0.5f;
             float ty = box.y2;
-            if (box.has_skeleton && box.bone_visible[(int)EspBone::Hip]) {
-                tx = box.bones[(int)EspBone::Hip][0];
-                ty = box.bones[(int)EspBone::Hip][1];
-            }
             dl->AddLine(ImVec2(sw * 0.5f, sh), ImVec2(tx, ty), ColU32(cfg::esp::tracer_col), thick);
-        }
-
-        if (g_state.esp_skeleton && box.has_skeleton) {
-            static constexpr int kSkeletonEdges[][2] = {
-                {(int)EspBone::Hip, (int)EspBone::Spine},
-                {(int)EspBone::Spine, (int)EspBone::Chest},
-                {(int)EspBone::Chest, (int)EspBone::Neck},
-                {(int)EspBone::Neck, (int)EspBone::Head},
-                {(int)EspBone::Chest, (int)EspBone::LeftShoulder},
-                {(int)EspBone::LeftShoulder, (int)EspBone::LeftUpperArm},
-                {(int)EspBone::LeftUpperArm, (int)EspBone::LeftLowerArm},
-                {(int)EspBone::LeftLowerArm, (int)EspBone::LeftHand},
-                {(int)EspBone::Chest, (int)EspBone::RightShoulder},
-                {(int)EspBone::RightShoulder, (int)EspBone::RightUpperArm},
-                {(int)EspBone::RightUpperArm, (int)EspBone::RightLowerArm},
-                {(int)EspBone::RightLowerArm, (int)EspBone::RightHand},
-                {(int)EspBone::Hip, (int)EspBone::LeftThigh},
-                {(int)EspBone::LeftThigh, (int)EspBone::LeftShin},
-                {(int)EspBone::LeftShin, (int)EspBone::LeftFoot},
-                {(int)EspBone::Hip, (int)EspBone::RightThigh},
-                {(int)EspBone::RightThigh, (int)EspBone::RightShin},
-                {(int)EspBone::RightShin, (int)EspBone::RightFoot},
-            };
-            ImU32 skeleton_col = ColU32(cfg::esp::skeleton_col);
-            auto vis = [&](EspBone bone) { return box.bone_visible[(int)bone]; };
-            auto line = [&](EspBone a, EspBone b) {
-                if (!vis(a) || !vis(b)) return;
-                dl->AddLine(ImVec2(box.bones[(int)a][0], box.bones[(int)a][1]),
-                            ImVec2(box.bones[(int)b][0], box.bones[(int)b][1]),
-                            skeleton_col, thick);
-            };
-            for (const auto& edge : kSkeletonEdges)
-                line((EspBone)edge[0], (EspBone)edge[1]);
-            if (vis(EspBone::Hip) && vis(EspBone::Head) && !vis(EspBone::Spine) && !vis(EspBone::Chest) && !vis(EspBone::Neck))
-                line(EspBone::Hip, EspBone::Head);
-            if (vis(EspBone::Hip) && vis(EspBone::Chest) && !vis(EspBone::Spine))
-                line(EspBone::Hip, EspBone::Chest);
-            if (vis(EspBone::Chest) && vis(EspBone::Head) && !vis(EspBone::Neck))
-                line(EspBone::Chest, EspBone::Head);
-            if (vis(EspBone::Chest) && vis(EspBone::LeftHand) && !vis(EspBone::LeftShoulder) && !vis(EspBone::LeftUpperArm) && !vis(EspBone::LeftLowerArm))
-                line(EspBone::Chest, EspBone::LeftHand);
-            if (vis(EspBone::Chest) && vis(EspBone::RightHand) && !vis(EspBone::RightShoulder) && !vis(EspBone::RightUpperArm) && !vis(EspBone::RightLowerArm))
-                line(EspBone::Chest, EspBone::RightHand);
-            if (vis(EspBone::Hip) && vis(EspBone::LeftFoot) && !vis(EspBone::LeftThigh) && !vis(EspBone::LeftShin))
-                line(EspBone::Hip, EspBone::LeftFoot);
-            if (vis(EspBone::Hip) && vis(EspBone::RightFoot) && !vis(EspBone::RightThigh) && !vis(EspBone::RightShin))
-                line(EspBone::Hip, EspBone::RightFoot);
-            if (vis(EspBone::LeftUpperArm) && vis(EspBone::LeftHand) && !vis(EspBone::LeftLowerArm))
-                line(EspBone::LeftUpperArm, EspBone::LeftHand);
-            if (vis(EspBone::RightUpperArm) && vis(EspBone::RightHand) && !vis(EspBone::RightLowerArm))
-                line(EspBone::RightUpperArm, EspBone::RightHand);
-            if (vis(EspBone::LeftThigh) && vis(EspBone::LeftFoot) && !vis(EspBone::LeftShin))
-                line(EspBone::LeftThigh, EspBone::LeftFoot);
-            if (vis(EspBone::RightThigh) && vis(EspBone::RightFoot) && !vis(EspBone::RightShin))
-                line(EspBone::RightThigh, EspBone::RightFoot);
-            if (vis(EspBone::Spine) && vis(EspBone::Head) && !vis(EspBone::Chest) && !vis(EspBone::Neck))
-                line(EspBone::Spine, EspBone::Head);
-            if (vis(EspBone::Chest) && vis(EspBone::LeftThigh) && !vis(EspBone::Hip))
-                line(EspBone::Chest, EspBone::LeftThigh);
-            if (vis(EspBone::Chest) && vis(EspBone::RightThigh) && !vis(EspBone::Hip))
-                line(EspBone::Chest, EspBone::RightThigh);
         }
 
         if (g_state.esp_wall) {
@@ -2321,7 +2252,8 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::weapon       = g_state.esp_weapon;
         cfg::esp::weapon_icon  = g_state.esp_weapon_icon;
         cfg::esp::tracer       = g_state.esp_tracer;
-        cfg::esp::skeleton     = g_state.esp_skeleton;
+        cfg::esp::money        = g_state.esp_money;
+        cfg::esp::ping_show    = g_state.esp_ping;
 
 
 
@@ -2391,9 +2323,10 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
                 {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
-                {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
+                {"##vm",  XS("Деньги"),         &g_state.esp_money,        &g_state.a_esp_money,        &cfg::esp::money_col},
+                {"##vpi", XS("Пинг"),           &g_state.esp_ping,         &g_state.a_esp_ping,         &cfg::esp::ping_col},
             };
-            constexpr int N = 9;
+            constexpr int N = 10;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
