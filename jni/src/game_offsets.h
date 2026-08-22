@@ -61,8 +61,8 @@ inline constexpr std::uint64_t CHARACTER_ANIMATION_BONE_CACHE = 0x88;
 inline constexpr std::uint64_t BONE_CACHE_TRANSFORMS           = 0x48;
 inline constexpr std::uint64_t BONE_CACHE_MAPPING              = 0x50;
 
-// CharacterAnimation.playerModelInfo -> PlayerModelInfo.head / .body are the
-// real animated head and rig-root Transforms of the character model.
+// CharacterAnimation.playerModelInfo -> PlayerModelInfo.head / .body.
+// Verified in dump3.zip: PlayerModelInfo.head is 0x20 and body is 0x40.
 inline constexpr std::uint64_t CHARACTER_ANIMATION_MODEL_INFO = 0x30;
 inline constexpr std::uint64_t MODEL_INFO_HEAD                = 0x20;
 inline constexpr std::uint64_t MODEL_INFO_BODY                = 0x40;
@@ -82,8 +82,9 @@ inline constexpr int HIT_AREA_HAND  = 5;
 // MoveState.CROUCHING
 inline constexpr int MOVE_STATE_CROUCHING = 3;
 
-// Current Unity native Transform/GameObject layout. The code validates every
-// pointer and also probes nearby layouts before using these values.
+// Managed offsets verified against dump3.zip (dump.cs, 2026-08-18).
+// Native Unity Transform/GameObject offsets below are not present in the
+// managed dump and therefore must not be treated as dump-verified.
 inline constexpr std::uint64_t NATIVE_COMPONENT_GAME_OBJECT = 0x30;
 inline constexpr std::uint64_t NATIVE_GAME_OBJECT_COMPONENTS = 0x30;
 inline constexpr std::uint64_t NATIVE_GAME_OBJECT_NAME       = 0x60;
