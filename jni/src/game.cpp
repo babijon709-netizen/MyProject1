@@ -685,7 +685,54 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.vel = vel;
         box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
         box.crouched = crouched;
-        box.skeleton_valid = false;
+
+        // Keep the skeleton independent from the runtime TransformHierarchy.
+        // The latter is version-sensitive and was the reason skeleton ESP was
+        // always empty: no bone reader ever populated these fields.  These
+        // offsets are model-space landmarks relative to the player's feet;
+        // they are deliberately static and use the same pose information as
+        // the box (standing/crouching).
+        const float h = crouched ? 1.15F : PLAYER_HEIGHT;
+        const float shoulder_y = h * 0.72F;
+        const float hip_y = h * 0.43F;
+        const float knee_y = h * 0.23F;
+        const float shoulder_x = h * 0.19F;
+        const float hip_x = h * 0.12F;
+        const float elbow_x = h * 0.30F;
+        const float hand_x = h * 0.38F;
+        const float foot_x = h * 0.14F;
+        const float foot_z = h * 0.08F;
+        const float limb_z = 0.0F;
+        const Vec3 skeleton[ESP_BONE_COUNT] = {
+            {0.f, h, 0.f},                         // head
+            {0.f, h * 0.91F, 0.f},                 // neck
+            {0.f, h * 0.68F, 0.f},                 // chest
+            {0.f, hip_y, 0.f},                     // pelvis
+            {-shoulder_x, shoulder_y, limb_z},    // left shoulder
+            {-elbow_x, h * 0.55F, limb_z},        // left elbow
+            {-hand_x, h * 0.43F, limb_z},         // left hand
+            { shoulder_x, shoulder_y, limb_z},    // right shoulder
+            { elbow_x, h * 0.55F, limb_z},        // right elbow
+            { hand_x, h * 0.43F, limb_z},         // right hand
+            {-hip_x, hip_y, 0.f},                 // left hip
+            {-hip_x, knee_y, 0.f},                // left knee
+            {-foot_x, 0.f, foot_z},               // left foot
+            { hip_x, hip_y, 0.f},                 // right hip
+            { hip_x, knee_y, 0.f},                // right knee
+            { foot_x, 0.f, foot_z}                // right foot
+        };
+        box.skeleton_valid = true;
+        for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
+            box.bones[bone] = {body_x + skeleton[bone].x,
+                               body_bottom.y + skeleton[bone].y,
+                               body_z + skeleton[bone].z};
+            Vec2 screen{};
+            box.bone_visible[bone] = w2s(vp, box.bones[bone], sw, sh, screen, false) &&
+                                     screen.x >= 0.f && screen.x <= sw &&
+                                     screen.y >= 0.f && screen.y <= sh;
+            box.bone_screen[bone][0] = box.bone_visible[bone] ? screen.x : -1.f;
+            box.bone_screen[bone][1] = box.bone_visible[bone] ? screen.y : -1.f;
+        }
 
         read_player_labels(s_transforms[i], box);
 
