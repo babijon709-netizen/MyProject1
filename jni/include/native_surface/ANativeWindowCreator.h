@@ -6,6 +6,8 @@
 #include <sys/system_properties.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <stdexcept>
 #include <unordered_map>
 #include <string>
 #include <vector>

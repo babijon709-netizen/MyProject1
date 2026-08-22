@@ -14,7 +14,7 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
-static ssize_t process_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
+static ssize_t remote_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
     return syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
 }
 
@@ -51,7 +51,7 @@ static T rd(uint64_t addr) {
     T v{};
     struct iovec lv = { &v, sizeof(T) };
     struct iovec rv = { (void*)addr, sizeof(T) };
-    process_vm_readv(g_pid, &lv, 1, &rv, 1, 0);
+    remote_vm_readv(g_pid, &lv, 1, &rv, 1, 0);
     return v;
 }
 template<typename T>
@@ -60,7 +60,7 @@ static bool rd_exact(uint64_t addr, T& value) {
     if (!addr) return false;
     struct iovec local = {&value, sizeof(T)};
     struct iovec remote = {(void*)addr, sizeof(T)};
-    return process_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)sizeof(T);
+    return remote_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)sizeof(T);
 }
 static uint64_t rd_ptr(uint64_t a) { return rd<uint64_t>(a); }
 static Vec3     rd_v3 (uint64_t a) { return rd<Vec3>(a);     }
@@ -71,7 +71,7 @@ static std::string read_remote_string(uint64_t address) {
     char buffer[96]{};
     struct iovec local = {buffer, sizeof(buffer) - 1};
     struct iovec remote = {(void*)address, sizeof(buffer) - 1};
-    ssize_t count = process_vm_readv(g_pid, &local, 1, &remote, 1, 0);
+    ssize_t count = remote_vm_readv(g_pid, &local, 1, &remote, 1, 0);
     if (count <= 0) return {};
     buffer[sizeof(buffer) - 1] = '\0';
     return std::string(buffer);

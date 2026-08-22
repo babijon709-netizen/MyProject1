@@ -22,7 +22,7 @@ _CF := -O3 -ffast-math -march=armv8-a+simd -mtune=cortex-a76 \
        -fno-builtin-strlen \
        -fno-builtin-strcmp \
 
-LOCAL_CPPFLAGS := $(_CF) -std=c++17 -fexceptions -fno-rtti -fpermissive -Wno-error=format-security -Wno-error=c++11-narrowing
+LOCAL_CPPFLAGS := $(_CF) -std=gnu++17 -fexceptions -fno-rtti -fpermissive -Wno-error=format-security -Wno-error=c++11-narrowing
 LOCAL_CFLAGS   := $(_CF) -std=c99
 
 LOCAL_LDFLAGS := -Wl,--gc-sections,-s,--strip-all -Wl,-x -Wl,--build-id=none -pie -fPIE

@@ -9,5 +9,21 @@ if [[ -z "${NDK}" ]]; then
     exit 1
 fi
 
-"${NDK}/ndk-build" -C "${ROOT}" -j"$(nproc)"
+if [[ ! -x "${NDK}/ndk-build" ]]; then
+    echo "ndk-build not found at ${NDK}/ndk-build" >&2
+    ls -la "${NDK}" >&2 || true
+    exit 1
+fi
+
+export NDK_PROJECT_PATH="${ROOT}"
+export NDK_APPLICATION_MK="${ROOT}/jni/Application.mk"
+
+"${NDK}/ndk-build" \
+    -C "${ROOT}" \
+    NDK_PROJECT_PATH="${ROOT}" \
+    NDK_APPLICATION_MK="${ROOT}/jni/Application.mk" \
+    APP_BUILD_SCRIPT="${ROOT}/jni/Android.mk" \
+    -j"$(nproc)"
+
 test -f "${ROOT}/libs/arm64-v8a/xvcen.sh"
+echo "built ${ROOT}/libs/arm64-v8a/xvcen.sh"

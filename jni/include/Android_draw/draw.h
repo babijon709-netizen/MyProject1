@@ -16,9 +16,7 @@
 #include <android/native_window.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include <GLES/gl.h>
-#include <GLES3/gl3platform.h>
-#include <GLES3/gl3ext.h>
+#include <GLES3/gl3.h>
 #include <GLES3/gl32.h>
 
 #include "native_surface/ANativeWindowCreator.h"
