@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <cstdint>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>

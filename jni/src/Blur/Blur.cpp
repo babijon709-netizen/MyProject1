@@ -1,4 +1,5 @@
 #include "Blur/Blur.h"
+#include <cstdint>
 
 namespace Blur {
 
