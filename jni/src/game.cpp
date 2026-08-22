@@ -650,14 +650,25 @@ static uint64_t resolve_player_model_info(uint64_t player) {
     return 0;
 }
 
+enum class HitAreaId : int {
+    All = 0,
+    Head = 1,
+    Chest = 2,
+    Leg = 3,
+    Foot = 4,
+    Hand = 5
+};
+
 struct BoneSlot {
     uint64_t native = 0;
     int32_t index = -1;
+    uint64_t qa = 0;
+    uint64_t hitbox = 0;
 };
 
 struct PlayerVisualCache {
     uint64_t player = 0;
-    uint64_t model_info = 0;
+    uint64_t hitbox_root = 0;
     BoneSlot bones[kEspBoneCount]{};
     uint64_t matrices = 0;
     uint64_t indices = 0;
@@ -665,75 +676,6 @@ struct PlayerVisualCache {
 };
 
 static std::unordered_map<uint64_t, PlayerVisualCache> g_visual_cache;
-
-static bool native_to_index(uint64_t native, int32_t& index, uint64_t& matrices, uint64_t& parent_indices) {
-    if (!native) return false;
-    const TransformHierarchyLayout& layout = g_transform_hierarchy_layout_valid ? g_transform_hierarchy_layout : TransformHierarchyLayout{};
-    uint64_t transform_data = rd_ptr(native + layout.data_offset);
-    int32_t transform_index = rd<int32_t>(native + layout.index_offset);
-    if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
-    uint64_t local_matrices = rd_ptr(transform_data + layout.matrices_offset);
-    uint64_t local_indices = rd_ptr(transform_data + layout.indices_offset);
-    if (layout.matrices_indirect) local_matrices = rd_ptr(local_matrices);
-    if (layout.indices_indirect) local_indices = rd_ptr(local_indices);
-    Vec3 probe{};
-    if (!read_transform_hierarchy_arrays(local_matrices, local_indices, transform_index, probe)) return false;
-    index = transform_index;
-    matrices = local_matrices;
-    parent_indices = local_indices;
-    return true;
-}
-
-static bool read_cached_bone(const PlayerVisualCache& cache, EspBone bone, Vec3& position) {
-    const BoneSlot& slot = cache.bones[(int)bone];
-    if (slot.index >= 0 && cache.matrices && cache.indices) {
-        if (read_transform_hierarchy_arrays(cache.matrices, cache.indices, slot.index, position))
-            return true;
-    }
-    if (slot.native) return read_transform_hierarchy_position(slot.native, position);
-    return false;
-}
-
-static void set_slot_from_transform(PlayerVisualCache& cache, EspBone bone, uint64_t transform) {
-    if (!transform) return;
-    uint64_t native = resolve_native_transform(transform);
-    if (!native) return;
-    BoneSlot& slot = cache.bones[(int)bone];
-    slot.native = native;
-    int32_t index = -1;
-    uint64_t matrices = 0, indices = 0;
-    if (native_to_index(native, index, matrices, indices)) {
-        slot.index = index;
-        if (!cache.matrices) {
-            cache.matrices = matrices;
-            cache.indices = indices;
-        }
-    }
-}
-
-enum class HumanBoneId : int {
-    Hips = 0,
-    LeftUpperLeg = 1,
-    RightUpperLeg = 2,
-    LeftLowerLeg = 3,
-    RightLowerLeg = 4,
-    LeftFoot = 5,
-    RightFoot = 6,
-    Spine = 7,
-    Chest = 8,
-    Neck = 9,
-    Head = 10,
-    LeftShoulder = 11,
-    RightShoulder = 12,
-    LeftUpperArm = 13,
-    RightUpperArm = 14,
-    LeftLowerArm = 15,
-    RightLowerArm = 16,
-    LeftHand = 17,
-    RightHand = 18,
-    UpperChest = 54,
-    LastBone = 55
-};
 
 static bool read_il2cpp_ptr_array(uint64_t array, std::vector<uint64_t>& out, int max_count) {
     out.clear();
@@ -746,133 +688,190 @@ static bool read_il2cpp_ptr_array(uint64_t array, std::vector<uint64_t>& out, in
     return true;
 }
 
-static bool read_il2cpp_i32_array(uint64_t array, std::vector<int32_t>& out, int max_count) {
-    out.clear();
-    if (!array) return false;
-    int32_t count = 0;
-    if (!rd_exact(array + IL2CPP_LIST_SIZE, count) || count <= 0 || count > max_count) return false;
-    out.resize((size_t)count);
-    for (int32_t i = 0; i < count; ++i) {
-        int32_t value = 0;
-        if (!rd_exact(array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * sizeof(int32_t), value))
-            return false;
-        out[(size_t)i] = value;
+static bool read_qa_position(uint64_t qa, Vec3& position) {
+    if (!qa) return false;
+    Vec3 current = rd_v3(qa + QA_POSITION);
+    if (vec3_is_finite(current) && (fabsf(current.x) + fabsf(current.y) + fabsf(current.z)) > 0.01F) {
+        position = current;
+        return true;
     }
+    uint64_t captures = rd_ptr(qa + QA_CAPTURES);
+    int32_t count = 0;
+    if (!captures || !rd_exact(captures + IL2CPP_LIST_SIZE, count) || count <= 0 || count > 256)
+        return false;
+    int32_t write = 0;
+    rd_exact(qa + QA_WRITE_INDEX, write);
+    int32_t index = write - 1;
+    if (index < 0 || index >= count) index = count - 1;
+    Vec3 captured = rd_v3(captures + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * CAPTURE_STRIDE);
+    if (!vec3_is_finite(captured)) return false;
+    position = captured;
     return true;
 }
 
-static bool slot_filled(const PlayerVisualCache& cache, EspBone bone) {
+static bool read_hitbox_bounds(uint64_t hitbox, Vec3& position) {
+    if (!hitbox) return false;
+    Vec3 center = rd_v3(hitbox + HITBOX_BOUNDS_CENTER);
+    if (!vec3_is_finite(center) || (fabsf(center.x) + fabsf(center.y) + fabsf(center.z)) < 0.01F)
+        return false;
+    position = center;
+    return true;
+}
+
+static bool slot_has_source(const BoneSlot& slot) {
+    return slot.qa || slot.hitbox || slot.native || slot.index >= 0;
+}
+
+static bool read_cached_bone(const PlayerVisualCache& cache, EspBone bone, Vec3& position) {
     const BoneSlot& slot = cache.bones[(int)bone];
-    return slot.index >= 0 || slot.native != 0;
-}
-
-static EspBone human_to_esp(int human) {
-    switch (human) {
-        case (int)HumanBoneId::Hips: return EspBone::Hip;
-        case (int)HumanBoneId::Spine: return EspBone::Spine;
-        case (int)HumanBoneId::Chest:
-        case (int)HumanBoneId::UpperChest: return EspBone::Chest;
-        case (int)HumanBoneId::Neck: return EspBone::Neck;
-        case (int)HumanBoneId::Head: return EspBone::Head;
-        case (int)HumanBoneId::LeftShoulder: return EspBone::LeftShoulder;
-        case (int)HumanBoneId::RightShoulder: return EspBone::RightShoulder;
-        case (int)HumanBoneId::LeftUpperArm: return EspBone::LeftUpperArm;
-        case (int)HumanBoneId::RightUpperArm: return EspBone::RightUpperArm;
-        case (int)HumanBoneId::LeftLowerArm: return EspBone::LeftLowerArm;
-        case (int)HumanBoneId::RightLowerArm: return EspBone::RightLowerArm;
-        case (int)HumanBoneId::LeftHand: return EspBone::LeftHand;
-        case (int)HumanBoneId::RightHand: return EspBone::RightHand;
-        case (int)HumanBoneId::LeftUpperLeg: return EspBone::LeftThigh;
-        case (int)HumanBoneId::RightUpperLeg: return EspBone::RightThigh;
-        case (int)HumanBoneId::LeftLowerLeg: return EspBone::LeftShin;
-        case (int)HumanBoneId::RightLowerLeg: return EspBone::RightShin;
-        case (int)HumanBoneId::LeftFoot: return EspBone::LeftFoot;
-        case (int)HumanBoneId::RightFoot: return EspBone::RightFoot;
-        default: return EspBone::Count;
-    }
-}
-
-static void bind_dump_human(PlayerVisualCache& cache, int human, uint64_t transform) {
-    EspBone bone = human_to_esp(human);
-    if (bone == EspBone::Count || !transform || slot_filled(cache, bone)) return;
-    set_slot_from_transform(cache, bone, transform);
-}
-
-static bool read_human_ids_from_configs(uint64_t character_anim, std::vector<int32_t>& ids) {
-    ids.clear();
-    if (!character_anim) return false;
-    std::vector<uint64_t> configs;
-    if (!read_il2cpp_ptr_array(rd_ptr(character_anim + CHAR_ANIM_BONE_CONFIGS), configs, 16))
-        return false;
-    for (uint64_t config : configs) {
-        if (!config) continue;
-        std::vector<uint64_t> bones;
-        if (!read_il2cpp_ptr_array(rd_ptr(config + HUMAN_BONE_CONFIG_BONES), bones, 32))
-            continue;
-        for (uint64_t bone : bones) {
-            if (!bone) continue;
-            int32_t human = 0;
-            if (!rd_exact(bone + HUMAN_BONE_ID, human)) continue;
-            if (human < 0 || human >= (int)HumanBoneId::LastBone) continue;
-            bool seen = false;
-            for (int32_t existing : ids) {
-                if (existing == human) { seen = true; break; }
-            }
-            if (!seen) ids.push_back(human);
-        }
-    }
-    return !ids.empty();
-}
-
-static bool bind_dump_animator_bones(PlayerVisualCache& cache, uint64_t character_anim) {
-    if (!character_anim) return false;
-    uint64_t driver = rd_ptr(character_anim + CHAR_ANIM_BONE_DRIVER);
-    if (!driver) return false;
-    std::vector<uint64_t> transforms;
-    if (!read_il2cpp_ptr_array(rd_ptr(driver + BONE_DRIVER_TRANSFORMS), transforms, 40))
-        return false;
-
-    std::vector<int32_t> human_ids;
-    if (read_il2cpp_i32_array(rd_ptr(driver + BONE_DRIVER_HUMAN_IDS), human_ids, 40) &&
-        human_ids.size() == transforms.size()) {
-        bool all_human = !human_ids.empty();
-        for (int32_t id : human_ids) {
-            if (id < 0 || id >= (int)HumanBoneId::LastBone) { all_human = false; break; }
-        }
-        if (all_human) {
-            for (size_t i = 0; i < transforms.size(); ++i)
-                bind_dump_human(cache, human_ids[i], transforms[i]);
+    if (read_qa_position(slot.qa, position)) return true;
+    if (read_hitbox_bounds(slot.hitbox, position)) return true;
+    if (slot.index >= 0 && cache.matrices && cache.indices) {
+        if (read_transform_hierarchy_arrays(cache.matrices, cache.indices, slot.index, position))
             return true;
+    }
+    if (slot.native) return read_transform_hierarchy_position(slot.native, position);
+    return false;
+}
+
+static bool looks_like_hitbox_root(uint64_t root) {
+    if (!root) return false;
+    uint64_t boxes = rd_ptr(root + HITBOX_ROOT_BOXES);
+    int32_t count = 0;
+    if (!boxes || !rd_exact(boxes + IL2CPP_LIST_SIZE, count) || count < 1 || count > 32)
+        return false;
+    uint64_t first = rd_ptr(boxes + IL2CPP_ARRAY_FIRST_ELEMENT);
+    if (!first) return false;
+    int32_t area = -1;
+    if (!rd_exact(first + HITBOX_AREA, area)) return false;
+    return area >= (int)HitAreaId::All && area <= (int)HitAreaId::Hand;
+}
+
+static uint64_t hitbox_root_from_kcc(uint64_t object, uint64_t player) {
+    if (!object) return 0;
+    uint64_t root = rd_ptr(object + KCC_HITBOX_ROOT);
+    if (looks_like_hitbox_root(root) && rd_ptr(object + KCC_PLAYER) == player) return root;
+    root = rd_ptr(object + SINGLE_KCC_HITBOX_ROOT);
+    if (looks_like_hitbox_root(root) && rd_ptr(object + SINGLE_KCC_PLAYER) == player) return root;
+    root = rd_ptr(object + KCC_HITBOX_ROOT);
+    if (looks_like_hitbox_root(root)) return root;
+    root = rd_ptr(object + SINGLE_KCC_HITBOX_ROOT);
+    if (looks_like_hitbox_root(root)) return root;
+    return 0;
+}
+
+static uint64_t resolve_hitbox_root(uint64_t player) {
+    if (!player) return 0;
+    uint64_t field = rd_ptr(player + PLAYER_KCC_REFERENCE);
+    if (!field) return 0;
+    if (uint64_t root = hitbox_root_from_kcc(field, player)) return root;
+    const uint64_t nested[] = {INTERFACE_COMPONENT, INTERFACE_VALUE, 0x20};
+    for (uint64_t offset : nested) {
+        uint64_t object = rd_ptr(field + offset);
+        if (uint64_t root = hitbox_root_from_kcc(object, player)) return root;
+    }
+    return 0;
+}
+
+struct HitSample {
+    Vec3 pos{};
+    uint64_t qa = 0;
+    uint64_t hitbox = 0;
+};
+
+static void bind_hit_slot(PlayerVisualCache& cache, EspBone bone, const HitSample& sample) {
+    if (bone == EspBone::Count) return;
+    BoneSlot& slot = cache.bones[(int)bone];
+    slot.qa = sample.qa;
+    slot.hitbox = sample.hitbox;
+}
+
+static void bind_pair(PlayerVisualCache& cache, std::vector<HitSample>& samples, EspBone left, EspBone right, const Vec3& side_axis) {
+    if (samples.empty()) return;
+    if (samples.size() == 1) {
+        bind_hit_slot(cache, left, samples[0]);
+        bind_hit_slot(cache, right, samples[0]);
+        return;
+    }
+    size_t a = 0, b = 1;
+    float best = -1.0F;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        for (size_t j = i + 1; j < samples.size(); ++j) {
+            Vec3 d = vec_sub(samples[j].pos, samples[i].pos);
+            float dist = vec_dot(d, d);
+            if (dist > best) { best = dist; a = i; b = j; }
+        }
+    }
+    float side = vec_dot(vec_sub(samples[b].pos, samples[a].pos), side_axis);
+    if (side >= 0.0F) {
+        bind_hit_slot(cache, left, samples[a]);
+        bind_hit_slot(cache, right, samples[b]);
+    } else {
+        bind_hit_slot(cache, left, samples[b]);
+        bind_hit_slot(cache, right, samples[a]);
+    }
+}
+
+static bool bind_hitbox_skeleton(PlayerVisualCache& cache, uint64_t root) {
+    if (!root) return false;
+    std::vector<uint64_t> boxes;
+    if (!read_il2cpp_ptr_array(rd_ptr(root + HITBOX_ROOT_BOXES), boxes, 32))
+        return false;
+    std::vector<uint64_t> recorders;
+    read_il2cpp_ptr_array(rd_ptr(root + HITBOX_ROOT_RECORDERS), recorders, 32);
+
+    std::vector<HitSample> heads, chests, legs, feet, hands;
+    for (size_t i = 0; i < boxes.size(); ++i) {
+        uint64_t box = boxes[i];
+        if (!box) continue;
+        int32_t area = -1;
+        if (!rd_exact(box + HITBOX_AREA, area)) continue;
+        HitSample sample{};
+        sample.hitbox = box;
+        if (i < recorders.size()) sample.qa = recorders[i];
+        if (!read_qa_position(sample.qa, sample.pos) && !read_hitbox_bounds(box, sample.pos))
+            continue;
+        switch (area) {
+            case (int)HitAreaId::Head: heads.push_back(sample); break;
+            case (int)HitAreaId::Chest: chests.push_back(sample); break;
+            case (int)HitAreaId::Leg: legs.push_back(sample); break;
+            case (int)HitAreaId::Foot: feet.push_back(sample); break;
+            case (int)HitAreaId::Hand: hands.push_back(sample); break;
+            default: break;
         }
     }
 
-    if (read_human_ids_from_configs(character_anim, human_ids) &&
-        human_ids.size() == transforms.size()) {
-        for (size_t i = 0; i < transforms.size(); ++i)
-            bind_dump_human(cache, human_ids[i], transforms[i]);
-        return true;
-    }
-    return false;
+    if (heads.empty() && chests.empty() && legs.empty() && feet.empty() && hands.empty())
+        return false;
+
+    if (!heads.empty()) bind_hit_slot(cache, EspBone::Head, heads[0]);
+    if (!chests.empty()) bind_hit_slot(cache, EspBone::Chest, chests[0]);
+
+    Vec3 origin{};
+    bool have_origin = read_cached_bone(cache, EspBone::Chest, origin) || read_cached_bone(cache, EspBone::Head, origin);
+    Vec3 axis = {1.0F, 0.0F, 0.0F};
+    if (hands.size() >= 2) axis = vec_sub(hands[1].pos, hands[0].pos);
+    else if (feet.size() >= 2) axis = vec_sub(feet[1].pos, feet[0].pos);
+    else if (legs.size() >= 2) axis = vec_sub(legs[1].pos, legs[0].pos);
+    else if (have_origin) axis = {1.0F, 0.0F, 0.0F};
+    if (vec_len(axis) < 0.01F) axis = {1.0F, 0.0F, 0.0F};
+
+    bind_pair(cache, hands, EspBone::LeftHand, EspBone::RightHand, axis);
+    bind_pair(cache, legs, EspBone::LeftThigh, EspBone::RightThigh, axis);
+    bind_pair(cache, feet, EspBone::LeftFoot, EspBone::RightFoot, axis);
+    return true;
 }
 
 static bool build_player_visual_cache(uint64_t player, PlayerVisualCache& cache) {
     cache = {};
     cache.player = player;
-    cache.model_info = resolve_player_model_info(player);
-    if (!cache.model_info) return false;
-
-    set_slot_from_transform(cache, EspBone::Hip, rd_ptr(cache.model_info + PMI_BODY));
-    set_slot_from_transform(cache, EspBone::Head, rd_ptr(cache.model_info + PMI_HEAD));
-    if (!slot_filled(cache, EspBone::Head))
-        set_slot_from_transform(cache, EspBone::Head, rd_ptr(cache.model_info + PMI_HEAD_MODEL));
-    set_slot_from_transform(cache, EspBone::LeftHand, rd_ptr(cache.model_info + PMI_LEFT_WEAPON));
-    set_slot_from_transform(cache, EspBone::RightHand, rd_ptr(cache.model_info + PMI_RIGHT_WEAPON));
-    set_slot_from_transform(cache, EspBone::Chest, rd_ptr(cache.model_info + PMI_EQUIPMENT));
-
-    uint64_t character_anim = rd_ptr(cache.model_info + PMI_CHARACTER_ANIM);
-    if (character_anim) bind_dump_animator_bones(cache, character_anim);
-
-    cache.ready = slot_filled(cache, EspBone::Hip) || slot_filled(cache, EspBone::Head);
+    cache.hitbox_root = resolve_hitbox_root(player);
+    if (!cache.hitbox_root || !bind_hitbox_skeleton(cache, cache.hitbox_root))
+        return false;
+    cache.ready = slot_has_source(cache.bones[(int)EspBone::Head]) ||
+                  slot_has_source(cache.bones[(int)EspBone::Chest]) ||
+                  slot_has_source(cache.bones[(int)EspBone::LeftFoot]) ||
+                  slot_has_source(cache.bones[(int)EspBone::LeftThigh]);
     return cache.ready;
 }
 
@@ -880,7 +879,10 @@ static PlayerVisualCache* visual_cache_for(uint64_t player) {
     auto it = g_visual_cache.find(player);
     if (it != g_visual_cache.end() && it->second.ready) {
         Vec3 probe{};
-        if (read_cached_bone(it->second, EspBone::Hip, probe)) return &it->second;
+        if (read_cached_bone(it->second, EspBone::Head, probe) ||
+            read_cached_bone(it->second, EspBone::Chest, probe) ||
+            read_cached_bone(it->second, EspBone::LeftThigh, probe))
+            return &it->second;
         g_visual_cache.erase(it);
     }
     PlayerVisualCache built{};
@@ -892,14 +894,20 @@ static PlayerVisualCache* visual_cache_for(uint64_t player) {
 static bool read_entity_position(uint64_t source, Vec3& position) {
     if (!source) return false;
     if (PlayerVisualCache* cache = visual_cache_for(source)) {
-        if (read_cached_bone(*cache, EspBone::Hip, position)) return true;
-        if (read_cached_bone(*cache, EspBone::Head, position)) {
-            position.y -= PLAYER_HEIGHT * 0.85F;
-            return vec3_is_finite(position);
+        Vec3 left{}, right{};
+        bool has_left = read_cached_bone(*cache, EspBone::LeftFoot, left);
+        bool has_right = read_cached_bone(*cache, EspBone::RightFoot, right);
+        if (has_left && has_right) {
+            position = vec_mul(vec_add(left, right), 0.5F);
+            return true;
+        }
+        if (has_left) { position = left; return true; }
+        if (has_right) { position = right; return true; }
+        if (read_cached_bone(*cache, EspBone::LeftThigh, left)) {
+            position = left;
+            return true;
         }
     }
-    uint64_t native = resolve_player_native_transform(source);
-    if (native && read_transform_hierarchy_position(native, position)) return true;
     return read_tick_position(source, position);
 }
 
@@ -921,10 +929,16 @@ static int fill_skeleton_world(uint64_t player, const Vec3& hip_fallback, Vec3 o
         out_valid[i] = true;
         ++count;
     }
-    if (!out_valid[(int)EspBone::Hip] && vec3_is_finite(hip_fallback)) {
-        out_bones[(int)EspBone::Hip] = hip_fallback;
-        out_valid[(int)EspBone::Hip] = true;
-        ++count;
+    if (!out_valid[(int)EspBone::Hip]) {
+        if (out_valid[(int)EspBone::LeftThigh] && out_valid[(int)EspBone::RightThigh]) {
+            out_bones[(int)EspBone::Hip] = vec_mul(vec_add(out_bones[(int)EspBone::LeftThigh], out_bones[(int)EspBone::RightThigh]), 0.5F);
+            out_valid[(int)EspBone::Hip] = true;
+            ++count;
+        } else if (vec3_is_finite(hip_fallback)) {
+            out_bones[(int)EspBone::Hip] = hip_fallback;
+            out_valid[(int)EspBone::Hip] = true;
+            ++count;
+        }
     }
     return count;
 }

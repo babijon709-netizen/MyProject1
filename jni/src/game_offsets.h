@@ -25,7 +25,25 @@ inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68;
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0;
 inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150;
 inline constexpr std::uint64_t PLAYER_ANIMATOR        = 0x198;
+inline constexpr std::uint64_t PLAYER_KCC_REFERENCE   = 0xB0;
 inline constexpr std::uint64_t PLAYER_VIEW_QL         = 0x248;
+
+inline constexpr std::uint64_t INTERFACE_COMPONENT = 0x10;
+inline constexpr std::uint64_t INTERFACE_VALUE     = 0x18;
+
+inline constexpr std::uint64_t KCC_HITBOX_ROOT        = 0x70;
+inline constexpr std::uint64_t KCC_PLAYER             = 0x78;
+inline constexpr std::uint64_t SINGLE_KCC_HITBOX_ROOT = 0x78;
+inline constexpr std::uint64_t SINGLE_KCC_PLAYER      = 0x80;
+
+inline constexpr std::uint64_t HITBOX_ROOT_BOXES     = 0x68;
+inline constexpr std::uint64_t HITBOX_ROOT_RECORDERS = 0x80;
+inline constexpr std::uint64_t HITBOX_AREA           = 0x68;
+inline constexpr std::uint64_t HITBOX_BOUNDS_CENTER  = 0x88;
+inline constexpr std::uint64_t QA_CAPTURES           = 0x20;
+inline constexpr std::uint64_t QA_WRITE_INDEX        = 0x28;
+inline constexpr std::uint64_t QA_POSITION           = 0x34;
+inline constexpr std::uint64_t CAPTURE_STRIDE        = 0x28;
 
 inline constexpr std::uint64_t QL_PLAYER_MODEL_INFO = 0x10;
 
