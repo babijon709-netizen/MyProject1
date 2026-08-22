@@ -186,8 +186,6 @@ namespace cfg { namespace esp {
     inline ImVec4 weapon_icon_col = {1.00f, 0.95f, 0.10f, 1.f};
     inline ImVec4 tracer_col      = {1.00f, 0.20f, 0.20f, 1.f};
     inline ImVec4 skeleton_col    = {0.20f, 0.85f, 0.35f, 1.f};
-    inline ImVec4 money_col       = {1.00f, 0.95f, 0.10f, 1.f};
-    inline ImVec4 ping_col        = {0.40f, 0.85f, 1.00f, 1.f};
 
     inline bool box          = false;
     inline bool name_esp     = false;
@@ -197,8 +195,6 @@ namespace cfg { namespace esp {
     inline bool weapon_icon  = false;
     inline bool tracer       = false;
     inline bool skeleton     = false;
-    inline bool money        = false;
-    inline bool  ping_show        = false;
     inline bool  vis_check        = false;
     inline bool  fill             = false;
     inline float stroke           = 2.f;
@@ -536,7 +532,6 @@ struct AppState {
     int   aim_bone = 0;
     bool  esp_box = false, esp_name = false, esp_hp = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = false, esp_skeleton = false;
-    bool  esp_money = false, esp_ping = false;
     float esp_thick = 1.5f;
     float gun_str = 0.35f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
@@ -547,7 +542,6 @@ struct AppState {
     RadioAnim ra_aim_head, ra_aim_chest, ra_aim_pelvis;
     float a_esp_box = 0, a_esp_name = 0, a_esp_hp = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_weapon_icon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
-    float a_esp_money = 0, a_esp_ping = 0;
     float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig;
@@ -705,12 +699,12 @@ struct CfgBlob {
     float aim_fov, aim_smoothness;
     bool  esp_box, esp_name, esp_hp, esp_wall, esp_chams;
     bool  esp_weapon, esp_weapon_icon, esp_tracer, esp_skeleton;
-    bool  esp_money, esp_ping, esp_vis_check, esp_fill;
+    bool  esp_money, esp_ping, esp_vis_check, esp_fill; // esp_money/esp_ping — legacy, пункт удалён (размер структуры менять нельзя)
     float esp_thick, esp_stroke, esp_rounding, esp_fill_pct;
     float gun_str, gun_fov, gun_trigger_delay;
     bool  ui_fps, ui_dark_mode, ui_show_sep;
     ImVec4 esp_box_col, esp_box_col_invis, esp_name_col, esp_health_col, esp_distance_col;
-    ImVec4 esp_weapon_col, esp_weapon_icon_col, esp_tracer_col, esp_skeleton_col, esp_money_col, esp_ping_col;
+    ImVec4 esp_weapon_col, esp_weapon_icon_col, esp_tracer_col, esp_skeleton_col, esp_money_col, esp_ping_col; // money/ping — legacy
     int   esp_box_type;
     float esp_box_rounding;
 };
@@ -733,8 +727,8 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_weapon_icon = g_state.esp_weapon_icon;
     s.esp_tracer      = g_state.esp_tracer;
     s.esp_skeleton    = g_state.esp_skeleton;
-    s.esp_money       = g_state.esp_money;
-    s.esp_ping        = g_state.esp_ping;
+    s.esp_money       = false;
+    s.esp_ping        = false;
     s.esp_vis_check   = cfg::esp::vis_check;
     s.esp_fill        = cfg::esp::fill;
     s.esp_thick       = g_state.esp_thick;
@@ -755,8 +749,8 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_weapon_icon_col  = cfg::esp::weapon_icon_col;
     s.esp_tracer_col       = cfg::esp::tracer_col;
     s.esp_skeleton_col     = cfg::esp::skeleton_col;
-    s.esp_money_col        = cfg::esp::money_col;
-    s.esp_ping_col         = cfg::esp::ping_col;
+    s.esp_money_col        = {1.00f, 0.95f, 0.10f, 1.f};
+    s.esp_ping_col         = {0.40f, 0.85f, 1.00f, 1.f};
     s.esp_box_type         = cfg::esp::box_type;
     s.esp_box_rounding     = cfg::esp::box_rounding;
     uint8_t buf[sizeof(s)];
@@ -820,8 +814,6 @@ static void ConfigLoad(int idx) {
     g_state.esp_weapon_icon = s.esp_weapon_icon;
     g_state.esp_tracer      = s.esp_tracer;
     g_state.esp_skeleton    = s.esp_skeleton;
-    g_state.esp_money       = s.esp_money;
-    g_state.esp_ping        = s.esp_ping;
     g_state.esp_thick   = s.esp_thick;
     g_state.gun_str     = s.gun_str;
     g_state.gun_fov     = s.gun_fov;
@@ -837,8 +829,6 @@ static void ConfigLoad(int idx) {
     cfg::esp::weapon_icon_col  = s.esp_weapon_icon_col;
     cfg::esp::tracer_col       = s.esp_tracer_col;
     cfg::esp::skeleton_col     = s.esp_skeleton_col;
-    cfg::esp::money_col        = s.esp_money_col;
-    cfg::esp::ping_col         = s.esp_ping_col;
     cfg::esp::box_type         = s.esp_box_type;
     cfg::esp::box_rounding     = s.esp_box_rounding;
     g_darkTheme = g_state.ui_dark_mode;
@@ -2252,8 +2242,6 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::weapon       = g_state.esp_weapon;
         cfg::esp::weapon_icon  = g_state.esp_weapon_icon;
         cfg::esp::tracer       = g_state.esp_tracer;
-        cfg::esp::money        = g_state.esp_money;
-        cfg::esp::ping_show    = g_state.esp_ping;
 
 
 
@@ -2323,10 +2311,8 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
                 {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
-                {"##vm",  XS("Деньги"),         &g_state.esp_money,        &g_state.a_esp_money,        &cfg::esp::money_col},
-                {"##vpi", XS("Пинг"),           &g_state.esp_ping,         &g_state.a_esp_ping,         &cfg::esp::ping_col},
             };
-            constexpr int N = 10;
+            constexpr int N = 8;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
@@ -2646,8 +2632,6 @@ void RenderMenu() {
     Tick(g_state.a_esp_weapon_icon, g_state.esp_weapon_icon, dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
-    Tick(g_state.a_esp_money,  g_state.esp_money,          dt);
-    Tick(g_state.a_esp_ping,   g_state.esp_ping,           dt);
     Tick(g_state.a_ui_fps,     g_state.ui_fps,             dt);
     Tick(g_state.a_ui_dark,    g_state.ui_dark_mode,       dt);
     Tick(g_state.a_ui_sep,     g_state.ui_show_sep,        dt);
