@@ -3,11 +3,11 @@ name: Build xvcen.sh
 on:
   push:
     branches:
-      - arena/01a02852-myproject1
+      - arena/01a028ba-myproject1
 
   pull_request:
     branches:
-      - arena/01a02852-myproject1
+      - arena/01a028ba-myproject1
 
   workflow_dispatch:
 
