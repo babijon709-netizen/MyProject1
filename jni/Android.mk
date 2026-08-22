@@ -2,30 +2,22 @@ LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
 
-LOCAL_MODULE := xvcen.sh
+LOCAL_MODULE := xvcen
 
-_CF := -O3 -ffast-math -march=armv8-a+simd -mtune=cortex-a76 \
+_CF := -O3 -ffast-math -march=armv8-a+simd \
        -fomit-frame-pointer -ffunction-sections -fdata-sections \
        -fvisibility=hidden -fvisibility-inlines-hidden \
-       -DUSE_OPENGL -DNDEBUG -w \
+       -DUSE_OPENGL -DNDEBUG \
        -fstack-protector-strong \
        -fPIE \
        -fno-unwind-tables \
        -fno-asynchronous-unwind-tables \
-       -fno-ident \
-       -fno-jump-tables \
-       -fstrict-aliasing \
-       -fno-delete-null-pointer-checks \
-       -fno-strict-overflow \
-       -fno-builtin-memcpy \
-       -fno-builtin-memset \
-       -fno-builtin-strlen \
-       -fno-builtin-strcmp \
+       -fstrict-aliasing
 
-LOCAL_CPPFLAGS := $(_CF) -std=gnu++17 -fexceptions -fno-rtti -fpermissive -Wno-error=format-security -Wno-error=c++11-narrowing
-LOCAL_CFLAGS   := $(_CF) -std=c99
+LOCAL_CPPFLAGS := $(_CF) -std=gnu++17 -fexceptions -fno-rtti
+LOCAL_CFLAGS   := $(_CF) -std=c11
 
-LOCAL_LDFLAGS := -Wl,--gc-sections,-s,--strip-all -Wl,-x -Wl,--build-id=none -pie -fPIE
+LOCAL_LDFLAGS := -Wl,--gc-sections,-s,--strip-all -Wl,-x -Wl,--build-id=none -pie
 
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PATH)/include/ImGui/backends $(LOCAL_PATH)/src
 
