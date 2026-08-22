@@ -600,16 +600,6 @@ static void read_player_labels(uint64_t player, EspBox& box) {
 // The renderer poses exactly those transforms, so the skeleton moves together
 // with the model (walk/aim/crouch/ragdoll) — no procedural stick figures and
 // no guessed bone positions: joints that cannot be resolved are not drawn.
-//
-// Bone sources (cached per player, in order of trust):
-//   1. CharacterAnimation.pvi (tk) — the game's own humanoid bone cache:
-//      a Transform[] (pjh) plus a side int[] map (pjY). The accepted mapping
-//      interpretation is validated by POINTER equality against the known
-//      animated head bone (PlayerModelInfo.head / KCC.head).
-//   2. KCC.hitBoxRecorderRoot.hitBoxes — HitBox components the game attaches
-//      to the character bones; walking their transform parents yields the
-//      neighbouring bones, again from the live model itself.
-//   3. PlayerModelInfo / characterModel transform tree traversal.
 // ===========================================================================
 
 // UnityEngine.HumanBodyBones numeric values (engine values, NOT dump
@@ -2112,11 +2102,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
 
-        Vec3 render_feet = {render_x, feet_y, render_z};
+        // Full player height from ground level to head level
+        float ground_y = feet_y;
+        float top_y = ground_y + head_height;
+
+        Vec3 render_feet = {render_x, ground_y, render_z};
         Vec3 body_bottom = render_feet;
-        Vec3 body_top = {render_x, render_feet.y + head_height, render_z};
+        Vec3 body_top = {render_x, top_y, render_z};
         float body_x = render_x, body_z = render_z;
-        if (transform_camera_mode) body_top.y = feet.y + 0.20F;
 
         auto project_world = [&](const Vec3& world, Vec2& screen) {
             return transform_camera_mode
@@ -2127,47 +2120,38 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         Vec2 sf{}, sh2{};
         if (!project_world(body_bottom, sf) || !project_world(body_top, sh2)) continue;
 
-        float height = fabsf(sh2.y - sf.y);
+        float screen_top_y = std::min(sf.y, sh2.y);
+        float screen_bot_y = std::max(sf.y, sh2.y);
+        float height = screen_bot_y - screen_top_y;
         if (!std::isfinite(height) || height < 2.0F) continue;
-        float cx = (sf.x + sh2.x) * 0.5F;
-        float cy = (sf.y + sh2.y) * 0.5F;
-        float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
-        float half_h = height * 0.5F;
 
-        constexpr float box_half_width = 0.35F, box_half_depth = 0.35F;
-        const Vec3 world_corners[8] = {
-            {body_x - box_half_width, body_bottom.y, body_z - box_half_depth},
-            {body_x + box_half_width, body_bottom.y, body_z - box_half_depth},
-            {body_x + box_half_width, body_bottom.y, body_z + box_half_depth},
-            {body_x - box_half_width, body_bottom.y, body_z + box_half_depth},
-            {body_x - box_half_width, body_top.y, body_z - box_half_depth},
-            {body_x + box_half_width, body_top.y, body_z - box_half_depth},
-            {body_x + box_half_width, body_top.y, body_z + box_half_depth},
-            {body_x - box_half_width, body_top.y, body_z + box_half_depth}
-        };
+        float cx = (sf.x + sh2.x) * 0.5F;
+        float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
 
         EspBox box{};
-        box.x1 = cx - half_w; box.y1 = cy - half_h;
-        box.x2 = cx + half_w; box.y2 = cy + half_h;
+        box.x1 = cx - half_w;
+        box.y1 = screen_top_y;
+        box.x2 = cx + half_w;
+        box.y2 = screen_bot_y;
         box.distance = distance;
         box.source = s_transforms[i];
         box.feet = body_bottom;
-        box.head = {body_x, body_top.y, body_z};
+        box.head = {body_x, top_y, body_z};
         box.vel = vel;
         box.speed = sqrtf(vel.x * vel.x + vel.z * vel.z);
         box.crouched = crouched;
 
         read_player_labels(s_transforms[i], box);
 
-        // --- animated skeleton ----------------------------------------------
-        // Read the model's real bone transforms and project them to 2D screen
-        // coordinates dynamically on each frame so the skeleton moves 1:1 with
-        // the player model.
+        // --- animated skeleton ---
         std::array<Vec3, ESP_BONE_COUNT> player_bones{};
         std::array<bool, ESP_BONE_COUNT> player_bones_valid{};
         if (g_skeleton_enabled_from_ui &&
             read_player_skeleton(s_transforms[i], feet, player_bones, player_bones_valid)) {
             int projected = 0;
+            float bone_min_x = 1e9f, bone_max_x = -1e9f;
+            float bone_min_y = 1e9f, bone_max_y = -1e9f;
+
             for (size_t bone = 0; bone < (size_t)ESP_BONE_COUNT; ++bone) {
                 box.bone_visible[bone] = false;
                 if (!player_bones_valid[bone]) continue;
@@ -2185,14 +2169,46 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 box.bone_screen[bone][0] = on_screen ? bone_screen.x : -1.0F;
                 box.bone_screen[bone][1] = on_screen ? bone_screen.y : -1.0F;
                 box.bone_visible[bone] = on_screen;
-                if (on_screen) ++projected;
+                if (on_screen) {
+                    ++projected;
+                    bone_min_x = std::min(bone_min_x, bone_screen.x);
+                    bone_max_x = std::max(bone_max_x, bone_screen.x);
+                    bone_min_y = std::min(bone_min_y, bone_screen.y);
+                    bone_max_y = std::max(bone_max_y, bone_screen.y);
+                }
             }
             box.skeleton_valid = projected >= 4;
+
             if (player_bones_valid[ESP_BONE_HEAD]) {
                 box.head = player_bones[ESP_BONE_HEAD];
                 if (age > 0.f && age < 0.12f && (fabsf(vel.x) > 0.05f || fabsf(vel.z) > 0.05f)) {
                     box.head.x += vel.x * age;
                     box.head.z += vel.z * age;
+                }
+            }
+
+            // When live skeleton is valid, adjust the 2D bounding box to fit the exact player pose!
+            if (box.skeleton_valid && projected >= 4) {
+                float head_r = 12.f;
+                if (box.bone_visible[ESP_BONE_HEAD] && box.bone_visible[ESP_BONE_NECK]) {
+                    float hdx = box.bone_screen[ESP_BONE_HEAD][0] - box.bone_screen[ESP_BONE_NECK][0];
+                    float hdy = box.bone_screen[ESP_BONE_HEAD][1] - box.bone_screen[ESP_BONE_NECK][1];
+                    head_r = sqrtf(hdx * hdx + hdy * hdy) * 0.9f;
+                } else if (box.bone_visible[ESP_BONE_HEAD]) {
+                    head_r = height * 0.08f;
+                }
+                head_r = std::max(4.f, std::min(head_r, 40.f));
+
+                float skel_top = bone_min_y - head_r;
+                float skel_bot = bone_max_y + head_r * 0.5f;
+                float skel_h = skel_bot - skel_top;
+                if (skel_h > 4.f) {
+                    float skel_cx = (bone_min_x + bone_max_x) * 0.5f;
+                    float skel_w = std::max((bone_max_x - bone_min_x) + head_r * 1.5f, skel_h * PLAYER_BOX_WIDTH_RATIO);
+                    box.y1 = skel_top;
+                    box.y2 = skel_bot;
+                    box.x1 = skel_cx - skel_w * 0.5f;
+                    box.x2 = skel_cx + skel_w * 0.5f;
                 }
             }
         } else {
@@ -2215,6 +2231,18 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 }
             }
         }
+
+        constexpr float box_half_width = 0.35F, box_half_depth = 0.35F;
+        const Vec3 world_corners[8] = {
+            {body_x - box_half_width, body_bottom.y, body_z - box_half_depth},
+            {body_x + box_half_width, body_bottom.y, body_z - box_half_depth},
+            {body_x + box_half_width, body_bottom.y, body_z + box_half_depth},
+            {body_x - box_half_width, body_bottom.y, body_z + box_half_depth},
+            {body_x - box_half_width, body_top.y, body_z - box_half_depth},
+            {body_x + box_half_width, body_top.y, body_z - box_half_depth},
+            {body_x + box_half_width, body_top.y, body_z + box_half_depth},
+            {body_x - box_half_width, body_top.y, body_z + box_half_depth}
+        };
 
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
