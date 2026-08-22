@@ -644,30 +644,29 @@ static void DrawEspOverlay() {
                 {(int)EspBone::RightShin, (int)EspBone::RightFoot},
             };
             ImU32 skeleton_col = ColU32(cfg::esp::skeleton_col);
-            for (const auto& edge : kSkeletonEdges) {
-                int a = edge[0], b = edge[1];
-                if (!box.bone_visible[a] || !box.bone_visible[b]) continue;
-                dl->AddLine(
-                    ImVec2(box.bones[a][0], box.bones[a][1]),
-                    ImVec2(box.bones[b][0], box.bones[b][1]),
-                    skeleton_col, thick);
-            }
-            for (int bone = 0; bone < kEspBoneCount; ++bone) {
-                if (!box.bone_visible[bone]) continue;
-                float radius = 2.7f;
-                if (bone == (int)EspBone::Head) {
-                    radius = 6.5f;
-                    if (box.bone_visible[(int)EspBone::Neck]) {
-                        float dx = box.bones[bone][0] - box.bones[(int)EspBone::Neck][0];
-                        float dy = box.bones[bone][1] - box.bones[(int)EspBone::Neck][1];
-                        float dist = sqrtf(dx * dx + dy * dy);
-                        if (std::isfinite(dist) && dist > 3.f) radius = dist * 0.58f;
-                    }
-                }
-                dl->AddCircle(ImVec2(box.bones[bone][0], box.bones[bone][1]), radius, skeleton_col, 20, thick);
-                if (bone == (int)EspBone::Head)
-                    dl->AddCircleFilled(ImVec2(box.bones[bone][0], box.bones[bone][1]), radius * 0.35f, skeleton_col, 16);
-            }
+            auto vis = [&](EspBone bone) { return box.bone_visible[(int)bone]; };
+            auto line = [&](EspBone a, EspBone b) {
+                if (!vis(a) || !vis(b)) return;
+                dl->AddLine(ImVec2(box.bones[(int)a][0], box.bones[(int)a][1]),
+                            ImVec2(box.bones[(int)b][0], box.bones[(int)b][1]),
+                            skeleton_col, thick);
+            };
+            for (const auto& edge : kSkeletonEdges)
+                line((EspBone)edge[0], (EspBone)edge[1]);
+            if (vis(EspBone::Hip) && vis(EspBone::Head) && !vis(EspBone::Spine) && !vis(EspBone::Chest) && !vis(EspBone::Neck))
+                line(EspBone::Hip, EspBone::Head);
+            if (vis(EspBone::Hip) && vis(EspBone::Chest) && !vis(EspBone::Spine))
+                line(EspBone::Hip, EspBone::Chest);
+            if (vis(EspBone::Chest) && vis(EspBone::Head) && !vis(EspBone::Neck))
+                line(EspBone::Chest, EspBone::Head);
+            if (vis(EspBone::Chest) && vis(EspBone::LeftHand) && !vis(EspBone::LeftShoulder) && !vis(EspBone::LeftUpperArm) && !vis(EspBone::LeftLowerArm))
+                line(EspBone::Chest, EspBone::LeftHand);
+            if (vis(EspBone::Chest) && vis(EspBone::RightHand) && !vis(EspBone::RightShoulder) && !vis(EspBone::RightUpperArm) && !vis(EspBone::RightLowerArm))
+                line(EspBone::Chest, EspBone::RightHand);
+            if (vis(EspBone::Hip) && vis(EspBone::LeftFoot) && !vis(EspBone::LeftThigh) && !vis(EspBone::LeftShin))
+                line(EspBone::Hip, EspBone::LeftFoot);
+            if (vis(EspBone::Hip) && vis(EspBone::RightFoot) && !vis(EspBone::RightThigh) && !vis(EspBone::RightShin))
+                line(EspBone::Hip, EspBone::RightFoot);
         }
 
         if (g_state.esp_wall) {
