@@ -573,7 +573,11 @@ static void DrawEspOverlay() {
     if (!g_esp_attached) return;
     if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_skeleton && !g_state.esp_tracer) return;
 
-    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
+    EspQuery query{};
+    query.box = g_state.esp_box;
+    query.chams = g_state.esp_chams;
+    query.skeleton = g_state.esp_skeleton;
+    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh, query);
     constexpr int BOX_EDGES[][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},
@@ -2305,8 +2309,6 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::weapon_icon  = g_state.esp_weapon_icon;
         cfg::esp::tracer       = g_state.esp_tracer;
         cfg::esp::skeleton     = g_state.esp_skeleton;
-        cfg::esp::money        = g_state.esp_money;
-        cfg::esp::ping_show    = g_state.esp_ping;
 
 
 
@@ -2377,10 +2379,8 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
                 {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
-                {"##vm",  XS("Деньги"),         &g_state.esp_money,        &g_state.a_esp_money,        &cfg::esp::money_col},
-                {"##vpi", XS("Пинг"),           &g_state.esp_ping,         &g_state.a_esp_ping,         &cfg::esp::ping_col},
             };
-            constexpr int N = 11;
+            constexpr int N = 9;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);

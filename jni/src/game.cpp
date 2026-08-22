@@ -395,12 +395,12 @@ static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& pla
     return true;
 }
 
-static bool read_entity_position(uint64_t source, Vec3& position) {
-    if (!source) return false;
-    if (g_use_direct_player_position && g_player_position_offset != 0) { position = rd_v3(source + g_player_position_offset); return vec3_is_finite(position); }
-    uint64_t native = resolve_player_native_transform(source);
-    if (!native) return false;
-    return read_transform_hierarchy_position(native, position);
+static bool read_entity_position(uint64_t source, Vec3& position);
+
+static bool read_tick_position(uint64_t source, Vec3& position) {
+    if (!source || g_player_position_offset == 0) return false;
+    position = rd_v3(source + g_player_position_offset);
+    return vec3_is_finite(position);
 }
 
 static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
@@ -445,7 +445,7 @@ static bool discover_player_position_offset(const std::vector<uint64_t>& players
         if (evaluate_player_position_offset(players, offset, score) && score > best_score) { best_offset = offset; best_score = score; }
     }
     if (best_offset) {
-        g_use_direct_player_position = true; g_player_position_offset = best_offset;
+        g_player_position_offset = best_offset;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
         return true;
     }
@@ -641,62 +641,14 @@ static bool class_named(uint64_t object, const char* name) {
     return remote_string_equals(rd_ptr(rd_ptr(object) + 0x10), name);
 }
 
-static bool read_managed_transform_pose(uint64_t transform, Vec3& position, Vec4* rotation = nullptr) {
-    uint64_t native = resolve_native_transform(transform);
-    if (!native) return false;
-    if (g_transform_hierarchy_layout_valid)
-        return read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, position, rotation);
-    if (rotation)
-        return read_transform_hierarchy_position(native, position) &&
-            read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, position, rotation);
-    return read_transform_hierarchy_position(native, position);
-}
-
 static uint64_t find_named_object(uint64_t root, const char* name, int depth) {
     if (!root || !name || depth < 0) return 0;
     if (class_named(root, name)) return root;
     if (depth == 0) return 0;
-    for (uint64_t offset = 0x10; offset <= 0x280; offset += 8) {
+    for (uint64_t offset = 0x10; offset <= 0x80; offset += 8) {
         uint64_t child = rd_ptr(root + offset);
-        if (!likely_native_pointer(child) && child < 0x10000) continue;
         if (!child) continue;
         if (class_named(child, name)) return child;
-        if (depth > 1) {
-            uint64_t klass = rd_ptr(child);
-            if (!klass || !likely_native_pointer(klass)) continue;
-            std::string child_name = read_remote_string(rd_ptr(klass + 0x10));
-            if (child_name.empty() || child_name.size() > 64) continue;
-            uint64_t found = find_named_object(child, name, depth - 1);
-            if (found) return found;
-        }
-    }
-    return 0;
-}
-
-static uint64_t find_component_on_game_object(uint64_t game_object, const char* name) {
-    if (!game_object || !name) return 0;
-    if (class_named(game_object, name)) return game_object;
-    uint64_t native = rd_ptr(game_object + MANAGED_CACHED_PTR);
-    if (!native) return 0;
-    for (uint64_t offset = 0x10; offset <= 0x180; offset += 8) {
-        uint64_t pointer = rd_ptr(native + offset);
-        if (class_named(pointer, name)) return pointer;
-        int32_t counts[] = {
-            rd<int32_t>(native + offset + 8),
-            rd<int32_t>(native + offset + 16)
-        };
-        if (!likely_native_pointer(pointer)) continue;
-        for (int32_t count : counts) {
-            if (count < 1 || count > 48) continue;
-            for (int stride : {8, 16}) {
-                for (int32_t index = 0; index < count; ++index) {
-                    uint64_t first = rd_ptr(pointer + (uint64_t)index * (uint64_t)stride);
-                    uint64_t second = stride == 16 ? rd_ptr(pointer + (uint64_t)index * 16 + 8) : 0;
-                    if (class_named(first, name)) return first;
-                    if (class_named(second, name)) return second;
-                }
-            }
-        }
     }
     return 0;
 }
@@ -708,328 +660,285 @@ static uint64_t resolve_player_model_info(uint64_t player) {
         if (class_named(cached->second, "PlayerModelInfo")) return cached->second;
         g_player_model_info_cache.erase(cached);
     }
-
-    auto remember = [&](uint64_t model_info) -> uint64_t {
-        if (model_info) g_player_model_info_cache[player] = model_info;
-        return model_info;
-    };
-
     uint64_t from_view = find_named_object(rd_ptr(player + PLAYER_VIEW_QL), "PlayerModelInfo", 1);
-    if (from_view) return remember(from_view);
-
-    uint64_t model = rd_ptr(player + PLAYER_CHARACTER_MODEL);
-    uint64_t from_model = find_component_on_game_object(model, "PlayerModelInfo");
-    if (from_model) return remember(from_model);
-
-    uint64_t animator = rd_ptr(player + PLAYER_ANIMATOR);
-    if (animator) {
-        uint64_t from_animator = find_named_object(animator, "PlayerModelInfo", 1);
-        if (from_animator) return remember(from_animator);
-        uint64_t animation = find_named_object(player, "CharacterAnimation", 1);
-        if (animation) {
-            uint64_t from_animation = rd_ptr(animation + CHAR_ANIM_PLAYER_MODEL);
-            if (class_named(from_animation, "PlayerModelInfo")) return remember(from_animation);
-        }
+    if (from_view) {
+        g_player_model_info_cache[player] = from_view;
+        return from_view;
     }
-
+    uint64_t model = rd_ptr(player + PLAYER_CHARACTER_MODEL);
     if (model) {
-        uint64_t animation = find_component_on_game_object(model, "CharacterAnimation");
-        uint64_t from_animation = animation ? rd_ptr(animation + CHAR_ANIM_PLAYER_MODEL) : 0;
-        if (class_named(from_animation, "PlayerModelInfo")) return remember(from_animation);
+        uint64_t from_model = find_named_object(model, "PlayerModelInfo", 0);
+        if (from_model) {
+            g_player_model_info_cache[player] = from_model;
+            return from_model;
+        }
     }
     return 0;
 }
 
-static void append_unique_vec3(std::vector<Vec3>& bones, const Vec3& position) {
-    for (const Vec3& existing : bones) {
-        Vec3 delta = vec_sub(existing, position);
-        if (vec_dot(delta, delta) < 0.0004F) return;
-    }
-    bones.push_back(position);
+struct BoneSlot {
+    uint64_t native = 0;
+    int32_t index = -1;
+};
+
+struct PlayerVisualCache {
+    uint64_t player = 0;
+    uint64_t model_info = 0;
+    BoneSlot bones[kEspBoneCount]{};
+    uint64_t matrices = 0;
+    uint64_t indices = 0;
+    bool ready = false;
+};
+
+static std::unordered_map<uint64_t, PlayerVisualCache> g_visual_cache;
+
+static bool native_to_index(uint64_t native, int32_t& index, uint64_t& matrices, uint64_t& parent_indices) {
+    if (!native) return false;
+    const TransformHierarchyLayout& layout = g_transform_hierarchy_layout_valid ? g_transform_hierarchy_layout : TransformHierarchyLayout{};
+    uint64_t transform_data = rd_ptr(native + layout.data_offset);
+    int32_t transform_index = rd<int32_t>(native + layout.index_offset);
+    if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
+    uint64_t local_matrices = rd_ptr(transform_data + layout.matrices_offset);
+    uint64_t local_indices = rd_ptr(transform_data + layout.indices_offset);
+    if (layout.matrices_indirect) local_matrices = rd_ptr(local_matrices);
+    if (layout.indices_indirect) local_indices = rd_ptr(local_indices);
+    Vec3 probe{};
+    if (!read_transform_hierarchy_arrays(local_matrices, local_indices, transform_index, probe)) return false;
+    index = transform_index;
+    matrices = local_matrices;
+    parent_indices = local_indices;
+    return true;
 }
 
-static bool native_transform_arrays(uint64_t native, int32_t& index, uint64_t& matrices, uint64_t& indices) {
-    auto try_layout = [&](const TransformHierarchyLayout& layout) -> bool {
-        uint64_t transform_data = rd_ptr(native + layout.data_offset);
-        int32_t transform_index = rd<int32_t>(native + layout.index_offset);
-        if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
-        uint64_t local_matrices = rd_ptr(transform_data + layout.matrices_offset);
-        uint64_t local_indices = rd_ptr(transform_data + layout.indices_offset);
-        if (layout.matrices_indirect) local_matrices = rd_ptr(local_matrices);
-        if (layout.indices_indirect) local_indices = rd_ptr(local_indices);
-        Vec3 probe{};
-        if (!read_transform_hierarchy_arrays(local_matrices, local_indices, transform_index, probe)) return false;
-        index = transform_index;
-        matrices = local_matrices;
-        indices = local_indices;
-        return true;
-    };
-    if (g_transform_hierarchy_layout_valid && try_layout(g_transform_hierarchy_layout)) return true;
-    return try_layout(TransformHierarchyLayout{});
+static bool read_cached_bone(const PlayerVisualCache& cache, EspBone bone, Vec3& position) {
+    const BoneSlot& slot = cache.bones[(int)bone];
+    if (slot.index >= 0 && cache.matrices && cache.indices)
+        return read_transform_hierarchy_arrays(cache.matrices, cache.indices, slot.index, position);
+    if (slot.native) return read_transform_hierarchy_position(slot.native, position);
+    return false;
 }
 
-static void collect_hierarchy_world_bones(uint64_t native_seed, const Vec3& origin, std::vector<Vec3>& bones) {
-    int32_t seed_index = -1;
-    uint64_t matrices = 0, indices = 0;
-    if (!native_seed || !native_transform_arrays(native_seed, seed_index, matrices, indices)) return;
-    constexpr int kWindow = 220;
-    int start = seed_index > kWindow ? seed_index - kWindow : 0;
-    int end = seed_index + kWindow;
-    for (int index = start; index <= end; ++index) {
-        int32_t parent = -2;
-        if (!rd_exact(indices + (uint64_t)index * sizeof(int32_t), parent)) continue;
-        if (parent < -1 || parent > 100000) continue;
-        Vec3 position{};
-        if (!read_transform_hierarchy_arrays(matrices, indices, index, position)) continue;
-        Vec3 delta = vec_sub(position, origin);
-        if (vec_dot(delta, delta) > 7.29F) continue;
-        append_unique_vec3(bones, position);
-    }
-}
-
-static void collect_array_transforms(uint64_t array, const Vec3& origin, std::vector<Vec3>& bones) {
-    if (!array) return;
-    int32_t count = rd<int32_t>(array + 0x18);
-    if (count <= 0 || count > 256) return;
-    for (int32_t index = 0; index < count; ++index) {
-        uint64_t transform = rd_ptr(array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t));
-        Vec3 position{};
-        if (!read_managed_transform_pose(transform, position)) continue;
-        Vec3 delta = vec_sub(position, origin);
-        if (vec_dot(delta, delta) > 7.29F) continue;
-        append_unique_vec3(bones, position);
-    }
-}
-
-static void collect_smr_world_bones(uint64_t renderer, const Vec3& origin, std::vector<Vec3>& bones) {
-    if (!renderer) return;
-    uint64_t native = rd_ptr(renderer + MANAGED_CACHED_PTR);
+static void set_slot_from_transform(PlayerVisualCache& cache, EspBone bone, uint64_t transform) {
+    if (!transform) return;
+    uint64_t native = resolve_native_transform(transform);
     if (!native) return;
-    for (uint64_t offset = 0x40; offset <= 0x780; offset += 8) {
-        uint64_t array = rd_ptr(native + offset);
-        int32_t counts[] = {
-            rd<int32_t>(native + offset + 8),
-            rd<int32_t>(native + offset + 16)
-        };
-        if (!likely_native_pointer(array)) continue;
-        for (int32_t count : counts) {
-            if (count < 10 || count > 220) continue;
-            std::vector<Vec3> cluster;
-            cluster.reserve((size_t)count);
-            for (int32_t index = 0; index < count; ++index) {
-                uint64_t transform = rd_ptr(array + (uint64_t)index * sizeof(uint64_t));
-                Vec3 position{};
-                if (!read_managed_transform_pose(transform, position)) continue;
-                Vec3 delta = vec_sub(position, origin);
-                if (vec_dot(delta, delta) > 7.29F) continue;
-                cluster.push_back(position);
-            }
-            if (cluster.size() < 10) continue;
-            for (const Vec3& position : cluster) append_unique_vec3(bones, position);
-            return;
+    BoneSlot& slot = cache.bones[(int)bone];
+    slot.native = native;
+    int32_t index = -1;
+    uint64_t matrices = 0, indices = 0;
+    if (native_to_index(native, index, matrices, indices)) {
+        slot.index = index;
+        if (!cache.matrices) {
+            cache.matrices = matrices;
+            cache.indices = indices;
         }
     }
 }
 
-static int nearest_bone(const std::vector<Vec3>& bones, const Vec3& target, float max_distance, int ignore = -1) {
+static int nearest_sample(const std::vector<Vec3>& samples, const Vec3& target, float max_distance) {
     int best = -1;
-    float best_distance = max_distance * max_distance;
-    for (int index = 0; index < (int)bones.size(); ++index) {
-        if (index == ignore) continue;
-        Vec3 delta = vec_sub(bones[(size_t)index], target);
-        float distance = vec_dot(delta, delta);
-        if (distance < best_distance) {
-            best_distance = distance;
-            best = index;
-        }
+    float best_d = max_distance * max_distance;
+    for (int i = 0; i < (int)samples.size(); ++i) {
+        Vec3 d = vec_sub(samples[(size_t)i], target);
+        float dd = vec_dot(d, d);
+        if (dd < best_d) { best_d = dd; best = i; }
     }
     return best;
 }
 
-static Vec3 snap_bone(const std::vector<Vec3>& bones, const Vec3& estimate, float radius) {
-    int index = nearest_bone(bones, estimate, radius);
-    return index >= 0 ? bones[(size_t)index] : estimate;
-}
+static bool build_player_visual_cache(uint64_t player, PlayerVisualCache& cache) {
+    cache = {};
+    cache.player = player;
+    cache.model_info = resolve_player_model_info(player);
+    if (!cache.model_info) return false;
+    set_slot_from_transform(cache, EspBone::Hip, rd_ptr(cache.model_info + PMI_BODY));
+    set_slot_from_transform(cache, EspBone::Head, rd_ptr(cache.model_info + PMI_HEAD));
+    if (!cache.bones[(int)EspBone::Head].native)
+        set_slot_from_transform(cache, EspBone::Head, rd_ptr(cache.model_info + PMI_HEAD_MODEL));
+    set_slot_from_transform(cache, EspBone::LeftHand, rd_ptr(cache.model_info + PMI_LEFT_WEAPON));
+    set_slot_from_transform(cache, EspBone::RightHand, rd_ptr(cache.model_info + PMI_RIGHT_WEAPON));
 
-static void collect_player_world_bones(uint64_t player, const Vec3& feet, std::vector<Vec3>& samples,
-                                       Vec3* hip, Vec3* head, Vec3* left_hand, Vec3* right_hand, Vec4* hip_rotation,
-                                       bool* has_hip, bool* has_head, bool* has_left_hand, bool* has_right_hand, bool* has_hip_rotation) {
-    *has_hip = *has_head = *has_left_hand = *has_right_hand = *has_hip_rotation = false;
-    uint64_t model_info = resolve_player_model_info(player);
-    uint64_t seeds[8]{};
-    int seed_count = 0;
-    auto add_seed = [&](uint64_t transform, Vec3* slot, bool* flag, bool want_rotation) {
-        if (!transform) return;
-        Vec3 position{};
-        Vec4 rotation{};
-        bool ok = want_rotation ? read_managed_transform_pose(transform, position, &rotation)
-                                : read_managed_transform_pose(transform, position);
-        if (!ok) return;
-        append_unique_vec3(samples, position);
-        if (slot && flag && !*flag) {
-            *slot = position;
-            *flag = true;
-        }
-        if (want_rotation && hip_rotation && has_hip_rotation && !*has_hip_rotation) {
-            *hip_rotation = rotation;
-            *has_hip_rotation = true;
-        }
-        uint64_t native = resolve_native_transform(transform);
-        if (native && seed_count < 8) seeds[seed_count++] = native;
-    };
+    Vec3 hip{}, head{};
+    bool has_hip = read_cached_bone(cache, EspBone::Hip, hip);
+    bool has_head = read_cached_bone(cache, EspBone::Head, head);
+    if (!has_hip) return false;
 
-    if (model_info) {
-        add_seed(rd_ptr(model_info + PMI_BODY), hip, has_hip, true);
-        add_seed(rd_ptr(model_info + PMI_HEAD), head, has_head, false);
-        add_seed(rd_ptr(model_info + PMI_HEAD_MODEL), head, has_head, false);
-        add_seed(rd_ptr(model_info + PMI_LEFT_WEAPON), left_hand, has_left_hand, false);
-        add_seed(rd_ptr(model_info + PMI_RIGHT_WEAPON), right_hand, has_right_hand, false);
-        collect_smr_world_bones(rd_ptr(model_info + PMI_SKINNED_MESH), *has_hip ? *hip : feet, samples);
-        uint64_t animation = rd_ptr(model_info + PMI_CHARACTER_ANIM);
-        if (class_named(animation, "CharacterAnimation")) {
-            uint64_t driver = rd_ptr(animation + CHAR_ANIM_BONE_DRIVER);
-            if (driver) collect_array_transforms(rd_ptr(driver + BONE_DRIVER_TRANSFORMS), *has_hip ? *hip : feet, samples);
-        }
-    }
-
-    uint64_t animator = rd_ptr(player + PLAYER_ANIMATOR);
-    if (animator) {
-        uint64_t native = resolve_native_transform(rd_ptr(player + PLAYER_TRANSFORM));
-        if (native && seed_count < 8) seeds[seed_count++] = native;
-        uint64_t animator_native = resolve_native_transform(animator);
-        if (animator_native && seed_count < 8) seeds[seed_count++] = animator_native;
-    }
-    uint64_t model = rd_ptr(player + PLAYER_CHARACTER_MODEL);
-    if (model) {
-        uint64_t model_native = rd_ptr(model + MANAGED_CACHED_PTR);
-        if (model_native && seed_count < 8) {
-            for (uint64_t offset = 0x18; offset <= 0x80; offset += 8) {
-                uint64_t candidate = rd_ptr(model_native + offset);
-                Vec3 position{};
-                if (candidate && read_transform_hierarchy_position(candidate, position)) {
-                    seeds[seed_count++] = candidate;
-                    append_unique_vec3(samples, position);
-                    break;
-                }
-                uint64_t managed = candidate;
-                if (class_named(managed, "Transform") || class_named(managed, "RectTransform")) {
-                    add_seed(managed, nullptr, nullptr, false);
-                    uint64_t native = resolve_native_transform(managed);
-                    if (native && seed_count < 8) seeds[seed_count++] = native;
-                    break;
-                }
+    if (cache.matrices && cache.indices && cache.bones[(int)EspBone::Hip].index >= 0) {
+        int32_t hip_index = cache.bones[(int)EspBone::Hip].index;
+        std::vector<Vec3> samples;
+        std::vector<int32_t> sample_index;
+        samples.reserve(48);
+        sample_index.reserve(48);
+        const int window = 96;
+        int start = hip_index > window ? hip_index - window : 0;
+        int end = hip_index + window;
+        for (int idx = start; idx <= end; ++idx) {
+            int32_t parent = -2;
+            if (!rd_exact(cache.indices + (uint64_t)idx * sizeof(int32_t), parent)) continue;
+            if (parent < -1 || parent > 100000) continue;
+            bool related = (idx == hip_index);
+            int walk = parent, depth = 0;
+            while (!related && walk >= 0 && depth++ < 10) {
+                if (walk == hip_index) related = true;
+                else if (!rd_exact(cache.indices + (uint64_t)walk * sizeof(int32_t), walk)) break;
             }
+            if (!related) continue;
+            Vec3 pos{};
+            if (!read_transform_hierarchy_arrays(cache.matrices, cache.indices, idx, pos)) continue;
+            if (vec_dot(vec_sub(pos, hip), vec_sub(pos, hip)) > 4.0F) continue;
+            samples.push_back(pos);
+            sample_index.push_back(idx);
         }
-    }
 
-    Vec3 origin = *has_hip ? *hip : feet;
-    if (samples.size() < 14) {
-        for (int index = 0; index < seed_count; ++index)
-            collect_hierarchy_world_bones(seeds[index], origin, samples);
-    }
+        auto bind = [&](EspBone bone, const Vec3& guess, float radius) {
+            if (cache.bones[(int)bone].index >= 0) return;
+            int hit = nearest_sample(samples, guess, radius);
+            if (hit < 0) return;
+            cache.bones[(int)bone].index = sample_index[(size_t)hit];
+        };
 
-    if (*has_hip && !*has_head && !samples.empty()) {
-        int best = -1;
-        float best_y = hip->y;
-        for (int index = 0; index < (int)samples.size(); ++index) {
-            if (samples[(size_t)index].y > best_y + 0.35F) {
-                best_y = samples[(size_t)index].y;
-                best = index;
-            }
-        }
-        if (best >= 0) {
-            *head = samples[(size_t)best];
-            *has_head = true;
-        }
-    }
-}
-
-static void build_dynamic_skeleton(const Vec3& feet, const std::vector<Vec3>& samples,
-                                   const Vec3* hip, const Vec3* head, const Vec3* left_hand, const Vec3* right_hand,
-                                   const Vec4* hip_rotation, bool has_hip, bool has_head, bool has_left_hand,
-                                   bool has_right_hand, bool has_hip_rotation,
-                                   Vec3 out_bones[kEspBoneCount], bool out_valid[kEspBoneCount]) {
-    for (int index = 0; index < kEspBoneCount; ++index) out_valid[index] = false;
-
-    Vec3 hip_pos = has_hip ? *hip : feet;
-    Vec3 head_pos;
-    if (has_head) head_pos = *head;
-    else head_pos = {hip_pos.x, hip_pos.y + PLAYER_HEIGHT * 0.92F, hip_pos.z};
-
-    Vec3 up = vec_norm(vec_sub(head_pos, hip_pos));
-    if (vec_len(vec_sub(head_pos, hip_pos)) < 0.35F) up = {0.0F, 1.0F, 0.0F};
-
-    Vec3 right = {1.0F, 0.0F, 0.0F};
-    if (has_hip_rotation && hip_rotation) {
-        right = vec_norm(rotate_vector(*hip_rotation, {1.0F, 0.0F, 0.0F}));
-        Vec3 projected = vec_sub(right, vec_mul(up, vec_dot(right, up)));
-        if (vec_len(projected) > 0.05F) right = vec_norm(projected);
-    } else {
-        right = vec_norm(cross_product(up, {0.0F, 0.0F, 1.0F}));
+        Vec3 up = has_head ? vec_norm(vec_sub(head, hip)) : Vec3{0.0F, 1.0F, 0.0F};
+        float height = has_head ? vec_len(vec_sub(head, hip)) : PLAYER_HEIGHT * 0.92F;
+        if (height < 0.45F) height = PLAYER_HEIGHT * 0.92F;
+        Vec3 right = vec_norm(cross_product(up, {0.0F, 0.0F, 1.0F}));
         if (vec_len(right) < 0.2F) right = vec_norm(cross_product(up, {1.0F, 0.0F, 0.0F}));
+
+        bind(EspBone::Spine, vec_add(hip, vec_mul(up, height * 0.22F)), 0.18F);
+        bind(EspBone::Chest, vec_add(hip, vec_mul(up, height * 0.48F)), 0.18F);
+        bind(EspBone::Neck, vec_add(hip, vec_mul(up, height * 0.78F)), 0.16F);
+        Vec3 chest = vec_add(hip, vec_mul(up, height * 0.48F));
+        Vec3 lhand{}, rhand{};
+        bool has_l = read_cached_bone(cache, EspBone::LeftHand, lhand);
+        bool has_r = read_cached_bone(cache, EspBone::RightHand, rhand);
+        Vec3 lsh = vec_add(vec_sub(chest, vec_mul(right, height * 0.17F)), vec_mul(up, height * 0.05F));
+        Vec3 rsh = vec_add(vec_add(chest, vec_mul(right, height * 0.17F)), vec_mul(up, height * 0.05F));
+        bind(EspBone::LeftShoulder, lsh, 0.16F);
+        bind(EspBone::RightShoulder, rsh, 0.16F);
+        if (has_l) {
+            bind(EspBone::LeftUpperArm, vec_add(lsh, vec_mul(vec_sub(lhand, lsh), 0.33F)), 0.14F);
+            bind(EspBone::LeftLowerArm, vec_add(lsh, vec_mul(vec_sub(lhand, lsh), 0.66F)), 0.14F);
+        }
+        if (has_r) {
+            bind(EspBone::RightUpperArm, vec_add(rsh, vec_mul(vec_sub(rhand, rsh), 0.33F)), 0.14F);
+            bind(EspBone::RightLowerArm, vec_add(rsh, vec_mul(vec_sub(rhand, rsh), 0.66F)), 0.14F);
+        }
+        Vec3 down = vec_mul(up, -1.0F);
+        bind(EspBone::LeftThigh, vec_add(vec_sub(hip, vec_mul(right, height * 0.09F)), vec_mul(down, height * 0.32F)), 0.16F);
+        bind(EspBone::LeftShin, vec_add(vec_sub(hip, vec_mul(right, height * 0.09F)), vec_mul(down, height * 0.64F)), 0.16F);
+        bind(EspBone::LeftFoot, vec_add(vec_sub(hip, vec_mul(right, height * 0.09F)), vec_mul(down, height * 0.95F)), 0.18F);
+        bind(EspBone::RightThigh, vec_add(vec_add(hip, vec_mul(right, height * 0.09F)), vec_mul(down, height * 0.32F)), 0.16F);
+        bind(EspBone::RightShin, vec_add(vec_add(hip, vec_mul(right, height * 0.09F)), vec_mul(down, height * 0.64F)), 0.16F);
+        bind(EspBone::RightFoot, vec_add(vec_add(hip, vec_mul(right, height * 0.09F)), vec_mul(down, height * 0.95F)), 0.18F);
     }
 
-    float height = vec_len(vec_sub(head_pos, hip_pos));
-    if (height < 0.6F) height = PLAYER_HEIGHT * 0.92F;
+    cache.ready = cache.bones[(int)EspBone::Hip].native || cache.bones[(int)EspBone::Hip].index >= 0;
+    return cache.ready;
+}
 
-    auto set_bone = [&](EspBone bone, const Vec3& estimate, float snap_radius) {
-        int id = (int)bone;
-        out_bones[id] = snap_bone(samples, estimate, snap_radius);
-        out_valid[id] = true;
+static PlayerVisualCache* visual_cache_for(uint64_t player) {
+    auto it = g_visual_cache.find(player);
+    if (it != g_visual_cache.end() && it->second.ready) {
+        if (it->second.model_info && class_named(it->second.model_info, "PlayerModelInfo"))
+            return &it->second;
+        g_visual_cache.erase(it);
+    }
+    PlayerVisualCache built{};
+    if (!build_player_visual_cache(player, built)) return nullptr;
+    g_visual_cache[player] = built;
+    return &g_visual_cache[player];
+}
+
+static bool read_entity_position(uint64_t source, Vec3& position) {
+    if (!source) return false;
+    if (PlayerVisualCache* cache = visual_cache_for(source)) {
+        if (read_cached_bone(*cache, EspBone::Hip, position)) return true;
+        if (read_cached_bone(*cache, EspBone::Head, position)) {
+            position.y -= PLAYER_HEIGHT * 0.85F;
+            return vec3_is_finite(position);
+        }
+    }
+    uint64_t native = resolve_player_native_transform(source);
+    if (native && read_transform_hierarchy_position(native, position)) return true;
+    return read_tick_position(source, position);
+}
+
+static bool read_visual_head(uint64_t source, Vec3& position) {
+    if (PlayerVisualCache* cache = visual_cache_for(source))
+        return read_cached_bone(*cache, EspBone::Head, position);
+    return false;
+}
+
+static int fill_skeleton_world(uint64_t player, const Vec3& hip_fallback, Vec3 out_bones[kEspBoneCount], bool out_valid[kEspBoneCount]) {
+    for (int i = 0; i < kEspBoneCount; ++i) out_valid[i] = false;
+    PlayerVisualCache* cache = visual_cache_for(player);
+    Vec3 hip = hip_fallback;
+    Vec3 head = {hip.x, hip.y + PLAYER_HEIGHT * 0.92F, hip.z};
+    bool has_hip = cache && read_cached_bone(*cache, EspBone::Hip, hip);
+    bool has_head = cache && read_cached_bone(*cache, EspBone::Head, head);
+    if (!has_hip) hip = hip_fallback;
+    if (!has_head) head = {hip.x, hip.y + PLAYER_HEIGHT * 0.92F, hip.z};
+
+    Vec3 up = vec_norm(vec_sub(head, hip));
+    float height = vec_len(vec_sub(head, hip));
+    if (height < 0.45F) {
+        height = PLAYER_HEIGHT * 0.92F;
+        up = {0.0F, 1.0F, 0.0F};
+    }
+    Vec3 right = vec_norm(cross_product(up, {0.0F, 0.0F, 1.0F}));
+    if (vec_len(right) < 0.2F) right = vec_norm(cross_product(up, {1.0F, 0.0F, 0.0F}));
+
+    auto put = [&](EspBone bone, const Vec3& fallback) {
+        Vec3 pos = fallback;
+        if (cache && read_cached_bone(*cache, bone, pos)) {
+            out_bones[(int)bone] = pos;
+            out_valid[(int)bone] = true;
+            return;
+        }
+        out_bones[(int)bone] = fallback;
+        out_valid[(int)bone] = true;
     };
 
-    set_bone(EspBone::Hip, hip_pos, 0.18F);
-    set_bone(EspBone::Head, head_pos, 0.16F);
-    hip_pos = out_bones[(int)EspBone::Hip];
-    head_pos = out_bones[(int)EspBone::Head];
-    up = vec_norm(vec_sub(head_pos, hip_pos));
-    height = vec_len(vec_sub(head_pos, hip_pos));
+    put(EspBone::Hip, hip);
+    put(EspBone::Head, head);
+    hip = out_bones[(int)EspBone::Hip];
+    head = out_bones[(int)EspBone::Head];
+    up = vec_norm(vec_sub(head, hip));
+    height = vec_len(vec_sub(head, hip));
     if (height < 0.45F) height = PLAYER_HEIGHT * 0.92F;
 
-    set_bone(EspBone::Spine, vec_add(hip_pos, vec_mul(up, height * 0.22F)), 0.16F);
-    set_bone(EspBone::Chest, vec_add(hip_pos, vec_mul(up, height * 0.48F)), 0.16F);
-    set_bone(EspBone::Neck, vec_add(hip_pos, vec_mul(up, height * 0.78F)), 0.14F);
-
+    put(EspBone::Spine, vec_add(hip, vec_mul(up, height * 0.22F)));
+    put(EspBone::Chest, vec_add(hip, vec_mul(up, height * 0.48F)));
+    put(EspBone::Neck, vec_add(hip, vec_mul(up, height * 0.78F)));
     Vec3 chest = out_bones[(int)EspBone::Chest];
-    Vec3 shoulder_offset = vec_mul(right, height * 0.17F);
-    Vec3 left_shoulder = vec_sub(chest, shoulder_offset);
-    Vec3 right_shoulder = vec_add(chest, shoulder_offset);
-    left_shoulder = vec_add(left_shoulder, vec_mul(up, height * 0.06F));
-    right_shoulder = vec_add(right_shoulder, vec_mul(up, height * 0.06F));
-    set_bone(EspBone::LeftShoulder, left_shoulder, 0.16F);
-    set_bone(EspBone::RightShoulder, right_shoulder, 0.16F);
-    left_shoulder = out_bones[(int)EspBone::LeftShoulder];
-    right_shoulder = out_bones[(int)EspBone::RightShoulder];
-
-    Vec3 estimated_left_hand = has_left_hand ? *left_hand :
-        vec_sub(vec_sub(left_shoulder, vec_mul(up, height * 0.46F)), vec_mul(right, height * 0.06F));
-    Vec3 estimated_right_hand = has_right_hand ? *right_hand :
-        vec_add(vec_sub(right_shoulder, vec_mul(up, height * 0.46F)), vec_mul(right, height * 0.06F));
-    set_bone(EspBone::LeftHand, estimated_left_hand, 0.22F);
-    set_bone(EspBone::RightHand, estimated_right_hand, 0.22F);
-    Vec3 left_hand_pos = out_bones[(int)EspBone::LeftHand];
-    Vec3 right_hand_pos = out_bones[(int)EspBone::RightHand];
-
-    set_bone(EspBone::LeftUpperArm, vec_add(left_shoulder, vec_mul(vec_sub(left_hand_pos, left_shoulder), 0.33F)), 0.14F);
-    set_bone(EspBone::LeftLowerArm, vec_add(left_shoulder, vec_mul(vec_sub(left_hand_pos, left_shoulder), 0.66F)), 0.14F);
-    set_bone(EspBone::RightUpperArm, vec_add(right_shoulder, vec_mul(vec_sub(right_hand_pos, right_shoulder), 0.33F)), 0.14F);
-    set_bone(EspBone::RightLowerArm, vec_add(right_shoulder, vec_mul(vec_sub(right_hand_pos, right_shoulder), 0.66F)), 0.14F);
-
-    Vec3 hip_left = vec_sub(hip_pos, vec_mul(right, height * 0.09F));
-    Vec3 hip_right = vec_add(hip_pos, vec_mul(right, height * 0.09F));
+    Vec3 lsh = vec_add(vec_sub(chest, vec_mul(right, height * 0.17F)), vec_mul(up, height * 0.04F));
+    Vec3 rsh = vec_add(vec_add(chest, vec_mul(right, height * 0.17F)), vec_mul(up, height * 0.04F));
+    put(EspBone::LeftShoulder, lsh);
+    put(EspBone::RightShoulder, rsh);
+    lsh = out_bones[(int)EspBone::LeftShoulder];
+    rsh = out_bones[(int)EspBone::RightShoulder];
+    Vec3 lhand = vec_sub(vec_sub(lsh, vec_mul(up, height * 0.46F)), vec_mul(right, height * 0.04F));
+    Vec3 rhand = vec_add(vec_sub(rsh, vec_mul(up, height * 0.46F)), vec_mul(right, height * 0.04F));
+    put(EspBone::LeftHand, lhand);
+    put(EspBone::RightHand, rhand);
+    lhand = out_bones[(int)EspBone::LeftHand];
+    rhand = out_bones[(int)EspBone::RightHand];
+    put(EspBone::LeftUpperArm, vec_add(lsh, vec_mul(vec_sub(lhand, lsh), 0.33F)));
+    put(EspBone::LeftLowerArm, vec_add(lsh, vec_mul(vec_sub(lhand, lsh), 0.66F)));
+    put(EspBone::RightUpperArm, vec_add(rsh, vec_mul(vec_sub(rhand, rsh), 0.33F)));
+    put(EspBone::RightLowerArm, vec_add(rsh, vec_mul(vec_sub(rhand, rsh), 0.66F)));
     Vec3 down = vec_mul(up, -1.0F);
-    Vec3 left_foot = vec_add(hip_left, vec_mul(down, height * 0.92F));
-    Vec3 right_foot = vec_add(hip_right, vec_mul(down, height * 0.92F));
-    left_foot.y = feet.y;
-    right_foot.y = feet.y;
-    set_bone(EspBone::LeftFoot, left_foot, 0.20F);
-    set_bone(EspBone::RightFoot, right_foot, 0.20F);
-    left_foot = out_bones[(int)EspBone::LeftFoot];
-    right_foot = out_bones[(int)EspBone::RightFoot];
-    set_bone(EspBone::LeftThigh, vec_add(hip_left, vec_mul(vec_sub(left_foot, hip_left), 0.38F)), 0.16F);
-    set_bone(EspBone::LeftShin, vec_add(hip_left, vec_mul(vec_sub(left_foot, hip_left), 0.72F)), 0.16F);
-    set_bone(EspBone::RightThigh, vec_add(hip_right, vec_mul(vec_sub(right_foot, hip_right), 0.38F)), 0.16F);
-    set_bone(EspBone::RightShin, vec_add(hip_right, vec_mul(vec_sub(right_foot, hip_right), 0.72F)), 0.16F);
+    Vec3 lhip = vec_sub(hip, vec_mul(right, height * 0.09F));
+    Vec3 rhip = vec_add(hip, vec_mul(right, height * 0.09F));
+    put(EspBone::LeftThigh, vec_add(lhip, vec_mul(down, height * 0.32F)));
+    put(EspBone::LeftShin, vec_add(lhip, vec_mul(down, height * 0.64F)));
+    put(EspBone::LeftFoot, vec_add(lhip, vec_mul(down, height * 0.95F)));
+    put(EspBone::RightThigh, vec_add(rhip, vec_mul(down, height * 0.32F)));
+    put(EspBone::RightShin, vec_add(rhip, vec_mul(down, height * 0.64F)));
+    put(EspBone::RightFoot, vec_add(rhip, vec_mul(down, height * 0.95F)));
+
+    int count = 0;
+    for (int i = 0; i < kEspBoneCount; ++i) if (out_valid[i]) ++count;
+    return count;
 }
 
 bool esp_init(pid_t pid) {
@@ -1049,13 +958,12 @@ void esp_reset() {
     g_use_direct_player_position = true;
     g_player_position_validated = false;
     g_player_model_info_cache.clear();
+    g_visual_cache.clear();
 }
 
-
-std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
+std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height, EspQuery query) {
     std::vector<EspBox> result;
-
-    if (g_pid <= 0 || !g_il2cpp_base) { return result; }
+    if (g_pid <= 0 || !g_il2cpp_base) return result;
 
     uint64_t native_cam = 0;
     Mat4 projection{}, view{}, vp{};
@@ -1087,12 +995,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
             }
         }
-        if (!managed_cam) { return result; }
+        if (!managed_cam) return result;
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
         if (!native_cam) return result;
         projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
         view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-        if (!matrix_is_finite(projection) || !matrix_is_finite(view)) { return result; }
+        if (!matrix_is_finite(projection) || !matrix_is_finite(view)) return result;
         if (!g_matrix_configuration_validated) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
             projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
@@ -1104,7 +1012,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     bool has_local_position = false;
     Vec3 local{};
     size_t local_entity_index = s_transforms.size();
-
     {
         Vec3 camera_position{};
         bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
@@ -1142,33 +1049,36 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         local = transform_camera_position; has_local_position = true;
     }
 
+    auto project = [&](const Vec3& world, Vec2& screen) -> bool {
+        return transform_camera_mode
+            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, world, sw, sh, screen, false)
+            : w2s(vp, world, sw, sh, screen, false);
+    };
+
     for (size_t i = 0; i < s_transforms.size(); ++i) {
-        if (i == local_entity_index) continue;
-        if (!s_transforms[i]) continue;
-        Vec3 feet{};
-        if (!read_entity_position(s_transforms[i], feet)) continue;
+        if (i == local_entity_index || !s_transforms[i]) continue;
+        Vec3 hip{};
+        if (!read_entity_position(s_transforms[i], hip)) continue;
 
         float distance = -1.0F;
         if (has_local_position) {
-            float dx = feet.x - local.x, dy = feet.y - local.y, dz = feet.z - local.z;
+            float dx = hip.x - local.x, dy = hip.y - local.y, dz = hip.z - local.z;
             distance = sqrtf(dx * dx + dy * dy + dz * dz);
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
 
-        Vec3 body_bottom = {feet.x, feet.y, feet.z};
-        Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT, feet.z};
-        if (transform_camera_mode) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
+        Vec3 head{};
+        if (!read_visual_head(s_transforms[i], head))
+            head = {hip.x, hip.y + PLAYER_HEIGHT, hip.z};
+
+        Vec3 body_bottom = hip;
+        Vec3 body_top = head;
+        Vec3 up = vec_norm(vec_sub(head, hip));
+        body_bottom = vec_sub(hip, vec_mul(up, 0.12F));
+        body_top = vec_add(head, vec_mul(up, 0.12F));
 
         Vec2 sf{}, sh2{};
-        bool bottom_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_bottom, sw, sh, sf, false)
-            : w2s(vp, body_bottom, sw, sh, sf, false);
-        if (!bottom_visible) continue;
-        bool top_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_top, sw, sh, sh2, false)
-            : w2s(vp, body_top, sw, sh, sh2, false);
-        if (!top_visible) continue;
-
+        if (!project(body_bottom, sf) || !project(body_top, sh2)) continue;
         float height = fabsf(sh2.y - sf.y);
         if (!std::isfinite(height) || height < 2.0F) continue;
         float cx = (sf.x + sh2.x) * 0.5F;
@@ -1176,50 +1086,42 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
         float half_h = height * 0.5F;
 
-        constexpr float box_half_width = 0.35F, box_half_depth = 0.35F;
-        const Vec3 world_corners[8] = {
-            {feet.x - box_half_width, body_bottom.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_bottom.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_bottom.y, feet.z + box_half_depth},
-            {feet.x - box_half_width, body_bottom.y, feet.z + box_half_depth},
-            {feet.x - box_half_width, body_top.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_top.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_top.y, feet.z + box_half_depth},
-            {feet.x - box_half_width, body_top.y, feet.z + box_half_depth}
-        };
         EspBox box{};
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;
         box.distance = distance;
         box.has_skeleton = false;
-        for (int bone = 0; bone < kEspBoneCount; ++bone) {
-            box.bones[bone][0] = -1.0F;
-            box.bones[bone][1] = -1.0F;
-            box.bone_visible[bone] = false;
+
+        if (query.chams) {
+            constexpr float box_half_width = 0.28F, box_half_depth = 0.28F;
+            const Vec3 world_corners[8] = {
+                {hip.x - box_half_width, body_bottom.y, hip.z - box_half_depth},
+                {hip.x + box_half_width, body_bottom.y, hip.z - box_half_depth},
+                {hip.x + box_half_width, body_bottom.y, hip.z + box_half_depth},
+                {hip.x - box_half_width, body_bottom.y, hip.z + box_half_depth},
+                {hip.x - box_half_width, body_top.y, hip.z - box_half_depth},
+                {hip.x + box_half_width, body_top.y, hip.z - box_half_depth},
+                {hip.x + box_half_width, body_top.y, hip.z + box_half_depth},
+                {hip.x - box_half_width, body_top.y, hip.z + box_half_depth}
+            };
+            for (size_t corner = 0; corner < 8; ++corner) {
+                Vec2 sc{};
+                bool projected = project(world_corners[corner], sc);
+                box.corner_visible[corner] = projected && sc.x >= 0.0F && sc.x <= sw && sc.y >= 0.0F && sc.y <= sh;
+                box.corners[corner][0] = projected ? sc.x : -1.0F;
+                box.corners[corner][1] = projected ? sc.y : -1.0F;
+            }
         }
-        {
-            std::vector<Vec3> samples;
-            samples.reserve(96);
-            Vec3 hip{}, head{}, left_hand{}, right_hand{};
-            Vec4 hip_rotation{};
-            bool has_hip = false, has_head = false, has_left_hand = false, has_right_hand = false, has_hip_rotation = false;
-            collect_player_world_bones(s_transforms[i], feet, samples, &hip, &head, &left_hand, &right_hand, &hip_rotation,
-                                       &has_hip, &has_head, &has_left_hand, &has_right_hand, &has_hip_rotation);
+
+        if (query.skeleton) {
             Vec3 world_bones[kEspBoneCount]{};
             bool world_valid[kEspBoneCount]{};
-            build_dynamic_skeleton(feet, samples, has_hip ? &hip : nullptr, has_head ? &head : nullptr,
-                                   has_left_hand ? &left_hand : nullptr, has_right_hand ? &right_hand : nullptr,
-                                   has_hip_rotation ? &hip_rotation : nullptr,
-                                   has_hip, has_head, has_left_hand, has_right_hand, has_hip_rotation,
-                                   world_bones, world_valid);
             int projected = 0;
+            fill_skeleton_world(s_transforms[i], hip, world_bones, world_valid);
             for (int bone = 0; bone < kEspBoneCount; ++bone) {
                 if (!world_valid[bone]) continue;
                 Vec2 screen{};
-                bool visible = transform_camera_mode
-                    ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, world_bones[bone], sw, sh, screen, false)
-                    : w2s(vp, world_bones[bone], sw, sh, screen, false);
-                if (!visible || !std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
+                if (!project(world_bones[bone], screen) || !std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
                 box.bones[bone][0] = screen.x;
                 box.bones[bone][1] = screen.y;
                 box.bone_visible[bone] = true;
@@ -1227,17 +1129,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
             box.has_skeleton = projected >= 6;
         }
-        for (size_t corner = 0; corner < 8; ++corner) {
-            Vec2 sc{};
-            bool projected = transform_camera_mode
-                ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, world_corners[corner], sw, sh, sc, false)
-                : w2s(vp, world_corners[corner], sw, sh, sc, false);
-            box.corner_visible[corner] = projected && sc.x >= 0.0F && sc.x <= sw && sc.y >= 0.0F && sc.y <= sh;
-            box.corners[corner][0] = projected ? sc.x : -1.0F;
-            box.corners[corner][1] = projected ? sc.y : -1.0F;
-        }
         result.push_back(box);
     }
-
     return result;
 }
