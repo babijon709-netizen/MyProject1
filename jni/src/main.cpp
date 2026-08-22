@@ -571,7 +571,7 @@ static void DrawEspOverlay() {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
     if (!g_esp_attached) return;
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_skeleton && !g_state.esp_tracer) return;
 
     std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
     constexpr int BOX_EDGES[][2] = {
@@ -810,7 +810,86 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_money_col        = cfg::esp::money_col;
     s.esp_ping_col         = cfg::esp::ping_col;
     s.esp_box_type         = cfg::esp::box_type;
-    s.esp_boxs.esp_money_col;
+    s.esp_box_rounding     = cfg::esp::box_rounding;
+    uint8_t buf[sizeof(s)];
+    memcpy(buf, &s, sizeof(s));
+    XorBuf(buf, sizeof(s));
+    std::ofstream f(path, std::ios::binary);
+    if (f) { f.write((char*)buf, sizeof(buf)); f.close(); }
+}
+
+static void ConfigSave() {
+    mkdir(kCfgDir, 0777);
+    int idx = 1;
+    char baseName[64];
+    std::string cfgpath;
+    do {
+        snprintf(baseName, sizeof(baseName), XS("config%d"), idx++);
+        cfgpath = CfgPath(baseName);
+    } while (access(cfgpath.c_str(), F_OK) == 0);
+    ConfigSaveToPath(cfgpath);
+    CfgScanDir();
+    ShowToast(XS("Конфиг создан"));
+    PlaySound(SND_SUCCESS);
+}
+
+static void ConfigUpdate(int idx) {
+    if (idx < 0 || idx >= g_configCount) return;
+    std::string path = CfgPath(g_configs[idx].name);
+    ConfigSaveToPath(path);
+    ShowToast(XS("Конфиг сохранён"));
+    PlaySound(SND_SUCCESS);
+}
+
+static void ConfigLoad(int idx) {
+    if (idx < 0 || idx >= g_configCount) return;
+    std::string path = CfgPath(g_configs[idx].name);
+    std::ifstream f(path, std::ios::binary);
+    if (!f) { ShowToast(XS("Файл не найден")); return; }
+
+    CfgBlob s;
+
+    uint8_t buf[sizeof(s)];
+    f.read((char*)buf, sizeof(buf));
+    size_t got = (size_t)f.gcount();
+    f.close();
+    if (got != sizeof(buf)) { ShowToast(XS("Несовместимый конфиг")); return; }
+    XorBuf(buf, sizeof(s));
+    memcpy(&s, buf, sizeof(s));
+    if (s.magic != 0x58564345U || s.version != 4) { ShowToast(XS("Старый конфиг — пересохрани")); return; }
+
+    g_state.aim_touch   = s.aim_touch;   g_state.aim_pos     = s.aim_pos;
+    g_state.aim_special = s.aim_special;
+    g_state.aim_bone    = s.aim_bone;
+    cfg::aim::vis_check  = s.aim_vis_check;
+    cfg::aim::draw_fov   = s.aim_draw_fov;
+    cfg::aim::fov        = s.aim_fov;
+    cfg::aim::smoothness = s.aim_smoothness;
+    g_state.esp_box     = s.esp_box;     g_state.esp_name    = s.esp_name;
+    g_state.esp_hp      = s.esp_hp;      g_state.esp_wall    = s.esp_wall;
+    g_state.esp_chams   = s.esp_chams;
+    g_state.esp_weapon      = s.esp_weapon;
+    g_state.esp_weapon_icon = s.esp_weapon_icon;
+    g_state.esp_tracer      = s.esp_tracer;
+    g_state.esp_skeleton    = s.esp_skeleton;
+    g_state.esp_money       = s.esp_money;
+    g_state.esp_ping        = s.esp_ping;
+    g_state.esp_thick   = s.esp_thick;
+    g_state.gun_str     = s.gun_str;
+    g_state.gun_fov     = s.gun_fov;
+    g_state.gun_trigger_delay     = s.gun_trigger_delay;
+    g_state.ui_fps      = s.ui_fps;      g_state.ui_dark_mode= s.ui_dark_mode;
+    g_state.ui_show_sep = s.ui_show_sep;
+    cfg::esp::box_col          = s.esp_box_col;
+    cfg::esp::box_col_invis    = s.esp_box_col_invis;
+    cfg::esp::name_col         = s.esp_name_col;
+    cfg::esp::health_col       = s.esp_health_col;
+    cfg::esp::distance_col     = s.esp_distance_col;
+    cfg::esp::weapon_col       = s.esp_weapon_col;
+    cfg::esp::weapon_icon_col  = s.esp_weapon_icon_col;
+    cfg::esp::tracer_col       = s.esp_tracer_col;
+    cfg::esp::skeleton_col     = s.esp_skeleton_col;
+    cfg::esp::money_col        = s.esp_money_col;
     cfg::esp::ping_col         = s.esp_ping_col;
     cfg::esp::box_type         = s.esp_box_type;
     cfg::esp::box_rounding     = s.esp_box_rounding;
@@ -2958,92 +3037,6 @@ void RenderMenu() {
 
         if (g_win.resizing) {
             const float pad = kResizePad, rr = R::Card + pad;
-            float t = EaseInOut(g_themeT);
-            ImVec4 bc = {Lerpf(1.f, C::Dark::Acc.x, t), Lerpf(1.f, C::Dark::Acc.y, t), Lerpf(1.f, C::Dark::Acc.z, t), Lerpf(0.9f, 0.8f, t)};
-            rdl->AddRect({wp.x - pad,       wp.y - pad},
-                         {wp.x + g_win.w + pad, wp.y + g_win.h + pad},
-                         C::U(bc), rr, 0, kResizeStroke);
-            rdl->AddRect({wp.x - pad - 8.f,       wp.y - pad - 8.f},
-                         {wp.x + g_win.w + pad + 8.f, wp.y + g_win.h + pad + 8.f},
-                         C::UA(bc, kResizeGlowAlpha), rr + 8.f, 0, kResizeGlowStroke);
-        }
-
-        float cx = wp.x + g_win.w - R::Card - kCornerOffset;
-        float cy = wp.y + g_win.h - R::Card - kCornerOffset;
-
-        ImU32       col   = g_darkTheme ? IM_COL32(200, 200, 210, 255) : IM_COL32(22, 22, 24, 255);
-        const float r     = R::Card;
-        const float thick = kArcStroke;
-        const float a0    = kArcA0;
-        const float a1    = kArcA1;
-
-        rdl->PathArcTo({cx, cy}, r, a0, a1, 48);
-        rdl->PathStroke(col, 0, thick);
-
-        float capR = thick * 0.5f;
-        rdl->AddCircleFilled({cx + r * cosf(a0), cy + r * sinf(a0)}, capR, col, 24);
-        rdl->AddCircleFilled({cx + r * cosf(a1), cy + r * sinf(a1)}, capR, col, 24);
-    }
-
-    DrawSheet(dt, wp, WW, WH);
-    DrawPopover(dt, wp, WW, WH);
-    ImGui::End();
-    if (g_menuFadeIn < 1.f) {
-        float mA = 1.f - EaseInOut(g_menuFadeIn);
-        auto* ofg = ImGui::GetForegroundDrawList();
-        ImVec4 bgC = C::Bg();
-        ofg->AddRectFilled(g_win.pos, {g_win.pos.x + WW, g_win.pos.y + WH},
-            IM_COL32(int(bgC.x*255), int(bgC.y*255), int(bgC.z*255), int(mA * 255)), R::Card);
-    }
-}
-
-int main(int argc, char* argv[]) {
-    prot::Init();
-    screen_config();
-    int abs_ScreenX = displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width;
-    int abs_ScreenY = displayInfo.height < displayInfo.width ? displayInfo.height : displayInfo.width;
-
-    g_sw = static_cast<float>(abs_ScreenX);
-    g_sh = static_cast<float>(abs_ScreenY);
-
-    native_window_screen_x = abs_ScreenX;
-    native_window_screen_y = abs_ScreenY;
-    if (!initGUI_draw(native_window_screen_x, native_window_screen_x, true)) return -1;
-    Blur::Init();
-    CfgWatchInit();
-    AudioInit();
-    Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
-    start_attach_thread();
-    LoadAnimeImage();
-    LoadTabIcons();
-    ApplyTheme();
-    CfgScanDir();
-    CenterMenuOnDisplay();
-    g_menuFadeIn = 0.f;
-
-    while (main_thread_flag) {
-        g_frame_done.store(false);
-        drawBegin();
-
-        ui::bar::set_game_alpha(0.f);
-        DrawEspOverlay();
-        RenderMenu();
-        drawEnd();
-        g_frame_done.store(true);
-    }
-    while (!g_frame_done.load()) {}
-    if (g_sprite.texture) { glDeleteTextures(1, &g_sprite.texture); g_sprite.texture = 0; }
-    stop_attach_thread();
-    if (g_esp_attached) {
-        esp_reset();
-        g_esp_attached = false;
-    }
-    Blur::Free();
-    CfgWatchFree();
-    AudioFree();
-    shutdown(); Touch_Close(); return 0;
-}
-Card + pad;
             float t = EaseInOut(g_themeT);
             ImVec4 bc = {Lerpf(1.f, C::Dark::Acc.x, t), Lerpf(1.f, C::Dark::Acc.y, t), Lerpf(1.f, C::Dark::Acc.z, t), Lerpf(0.9f, 0.8f, t)};
             rdl->AddRect({wp.x - pad,       wp.y - pad},
