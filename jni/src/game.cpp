@@ -265,7 +265,7 @@ static bool matrix34_is_valid(const Matrix34& matrix) {
     };
     for (float value : values) { if (!std::isfinite(value) || fabsf(value) > 1000000.0F) return false; }
     float quaternion_length = matrix.rotation.x * matrix.rotation.x + matrix.rotation.y * matrix.rotation.y + matrix.rotation.z * matrix.rotation.z + matrix.rotation.w * matrix.rotation.w;
-    return quaternion_length >= 0.20F && quaternion_length <= 2.0F && fabsf(matrix.scale.x) <= 10000.0F && fabsf(matrix.scale.y) <= 10000.0F && fabsf(matrix.scale.z) <= 10000.0F;
+    return quaternion_length >= 0.10F && quaternion_length <= 3.0F && fabsf(matrix.scale.x) <= 10000.0F && fabsf(matrix.scale.y) <= 10000.0F && fabsf(matrix.scale.z) <= 10000.0F;
 }
 
 static bool likely_native_pointer(uint64_t value) {
@@ -278,19 +278,19 @@ static float vec_distance(const Vec3& first, const Vec3& second) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-layout transform readers.
+// Per-layout transform readers. Supports 48-byte, 40-byte, and world-direct.
 // ---------------------------------------------------------------------------
 static bool read_layout_entry(uint64_t matrices, int32_t index, uint32_t stride,
                               Vec3& pos, Vec4& rot, Vec3& scale) {
     uint64_t base = matrices + (uint64_t)index * (uint64_t)stride;
     if (stride >= 48) {
         Matrix34 m{};
-        if (!rd_exact(base, m) || !matrix34_is_valid(m)) return false;
+        if (!rd_exact(base, m)) return false;
         pos = {m.translation.x, m.translation.y, m.translation.z};
         rot = m.rotation;
         scale = {m.scale.x, m.scale.y, m.scale.z};
     } else {
-        if (!rd_exact(base, pos) || !vec3_is_finite(pos)) return false;
+        if (!rd_exact(base, pos)) return false;
         if (!rd_exact(base + 12, rot)) return false;
         if (!rd_exact(base + 28, scale)) return false;
     }
@@ -366,21 +366,17 @@ static bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& p
     uint64_t transform_data = rd_ptr(native_transform + 0x38);
     int32_t transform_index = rd<int32_t>(native_transform + 0x40);
     if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
-    const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
+    const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x20, 0x28}, {0x10, 0x18}};
     for (const auto& offsets : data_offsets) {
         uint64_t matrix_pointer = rd_ptr(transform_data + offsets[0]);
         uint64_t index_pointer = rd_ptr(transform_data + offsets[1]);
         if (!matrix_pointer || !index_pointer) continue;
-        const uint64_t matrix_candidates[] = {matrix_pointer, rd_ptr(matrix_pointer)};
-        const uint64_t index_candidates[] = {index_pointer, rd_ptr(index_pointer)};
-        for (uint64_t matrices : matrix_candidates) {
-            for (uint64_t indices_ptr : index_candidates) {
-                TransformHierarchyLayout L{};
-                L.data_offset = 0x38; L.index_offset = 0x40;
-                L.matrices_offset = offsets[0]; L.indices_offset = offsets[1];
-                L.stride = 48;
-                if (read_world_from_arrays(matrices, indices_ptr, transform_index, L, position)) return true;
-            }
+        for (uint32_t stride : {48u, 40u}) {
+            TransformHierarchyLayout L{};
+            L.data_offset = 0x38; L.index_offset = 0x40;
+            L.matrices_offset = offsets[0]; L.indices_offset = offsets[1];
+            L.stride = stride;
+            if (read_world_from_arrays(matrix_pointer, index_pointer, transform_index, L, position)) return true;
         }
     }
     return false;
@@ -445,19 +441,22 @@ static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& pla
                     if (!likely_native_pointer(matrices) || !likely_native_pointer(indices_ptr)) continue;
                     for (int matrices_indirect = 0; matrices_indirect < 2; ++matrices_indirect) {
                         for (int indices_indirect = 0; indices_indirect < 2; ++indices_indirect) {
-                            TransformHierarchyLayout layout{};
-                            layout.data_offset = data_offset; layout.index_offset = index_offset;
-                            layout.matrices_offset = matrices_offset; layout.indices_offset = indices_offset;
-                            layout.matrices_indirect = matrices_indirect != 0; layout.indices_indirect = indices_indirect != 0;
-                            Vec3 seed_position{};
-                            if (!read_transform_hierarchy_layout(seed, layout, seed_position)) continue;
-                            ++candidate_count;
-                            size_t position_count = 0; double extent = 0.0;
-                            bool valid = evaluate_transform_hierarchy_layout(native_transforms, layout, position_count, extent);
-                            best_position_count = std::max(best_position_count, position_count);
-                            if (!valid) continue;
-                            double score = (double)position_count * 1000000.0 + std::min(extent, 999999.0);
-                            if (score > best_score) { best_score = score; best_layout = layout; }
+                            for (uint32_t stride : {48u, 40u}) {
+                                TransformHierarchyLayout layout{};
+                                layout.data_offset = data_offset; layout.index_offset = index_offset;
+                                layout.matrices_offset = matrices_offset; layout.indices_offset = indices_offset;
+                                layout.matrices_indirect = matrices_indirect != 0; layout.indices_indirect = indices_indirect != 0;
+                                layout.stride = stride;
+                                Vec3 seed_position{};
+                                if (!read_transform_hierarchy_layout(seed, layout, seed_position)) continue;
+                                ++candidate_count;
+                                size_t position_count = 0; double extent = 0.0;
+                                bool valid = evaluate_transform_hierarchy_layout(native_transforms, layout, position_count, extent);
+                                best_position_count = std::max(best_position_count, position_count);
+                                if (!valid) continue;
+                                double score = (double)position_count * 1000000.0 + std::min(extent, 999999.0);
+                                if (score > best_score) { best_score = score; best_layout = layout; }
+                            }
                         }
                     }
                 }
@@ -536,7 +535,7 @@ static std::string read_il2cpp_string(uint64_t string_object, size_t max_chars =
 }
 
 // ---------------------------------------------------------------------------
-// Resolve KCC and related components for a player
+// Component and KCC resolution
 // ---------------------------------------------------------------------------
 static uint64_t resolve_kcc(uint64_t player) {
     if (!player) return 0;
@@ -544,13 +543,12 @@ static uint64_t resolve_kcc(uint64_t player) {
     if (!reference) return 0;
 
     const uint64_t candidates[] = {
-        rd_ptr(reference + 0x10), // InterfaceReference._component
-        rd_ptr(reference + 0x18), // InterfaceReference.Cxa
+        rd_ptr(reference + 0x10),
+        rd_ptr(reference + 0x18),
         reference
     };
     for (uint64_t candidate : candidates) {
         if (!likely_native_pointer(candidate)) continue;
-        // Verify candidate looks like a KCC
         uint64_t anim = rd_ptr(candidate + KCC_CHARACTER_ANIMATION);
         uint64_t hroot = rd_ptr(candidate + KCC_HITBOX_ROOT);
         uint64_t head = rd_ptr(candidate + KCC_HEAD_TRANSFORM);
@@ -831,24 +829,31 @@ static std::unordered_map<uint64_t, HierarchySnapshot> g_hierarchy_frame;
 
 static void clear_hierarchy_frame_cache() { g_hierarchy_frame.clear(); }
 
-static bool hierarchy_arrays_of(uint64_t hierarchy, uint64_t& matrices, uint64_t& indices) {
+static bool hierarchy_arrays_of(uint64_t hierarchy, uint64_t& matrices, uint64_t& indices, uint32_t* detected_stride = nullptr) {
     if (!likely_native_pointer(hierarchy)) return false;
     TransformHierarchyLayout L = g_bone_layout_valid ? g_bone_layout : TransformHierarchyLayout{};
     matrices = rd_ptr(hierarchy + L.matrices_offset);
     if (L.matrices_indirect) matrices = rd_ptr(matrices);
     indices = rd_ptr(hierarchy + L.indices_offset);
     if (L.indices_indirect) indices = rd_ptr(indices);
-    if (likely_native_pointer(matrices) && likely_native_pointer(indices)) return true;
+    if (likely_native_pointer(matrices) && likely_native_pointer(indices)) {
+        if (detected_stride) *detected_stride = L.stride;
+        return true;
+    }
 
     const uint64_t cand_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}, {0x28, 0x30}, {0x00, 0x08}};
     for (const auto& pair : cand_offsets) {
         uint64_t m = rd_ptr(hierarchy + pair[0]);
         uint64_t ind = rd_ptr(hierarchy + pair[1]);
         if (likely_native_pointer(m) && likely_native_pointer(ind)) {
-            matrices = m; indices = ind; return true;
+            matrices = m; indices = ind;
+            if (detected_stride) *detected_stride = 48;
+            return true;
         }
         if (likely_native_pointer(rd_ptr(m)) && likely_native_pointer(rd_ptr(ind))) {
-            matrices = rd_ptr(m); indices = rd_ptr(ind); return true;
+            matrices = rd_ptr(m); indices = rd_ptr(ind);
+            if (detected_stride) *detected_stride = 48;
+            return true;
         }
     }
     return false;
@@ -868,7 +873,7 @@ static HierarchySnapshot* prepare_hierarchy_snapshot(uint64_t hierarchy, int32_t
     if (existing != g_hierarchy_frame.end()) g_hierarchy_frame.erase(existing);
 
     uint64_t matrices = 0, indices = 0;
-    if (!hierarchy_arrays_of(hierarchy, matrices, indices)) return nullptr;
+    if (!hierarchy_arrays_of(hierarchy, matrices, indices, &stride)) return nullptr;
     size_t count = (size_t)max_index + 1;
     HierarchySnapshot snapshot;
     snapshot.stride = stride;
@@ -2043,8 +2048,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
 
-        // In Oxide, lastTickPosition (0x1D0) and worldCameraRoot (0x68) are at head/eye height (~1.65m above ground).
-        // Ground/feet level is at position.y - head_height, and top of head is at position.y + 0.15m.
+        // In Oxide, read_pos (lastTickPosition / worldCameraRoot) is at head/eye height.
+        // Ground/feet level is at read_pos.y - head_height, and top of head is at read_pos.y + 0.15m.
         float ground_y = read_pos.y - head_height;
         float top_y = read_pos.y + 0.15f;
 
@@ -2097,7 +2102,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 box.bone_visible[bone] = false;
                 if (!player_bones_valid[bone]) continue;
                 Vec3 bone_world = player_bones[bone];
-                // Extrapolate horizontal position along with model velocity
                 if (age > 0.f && age < 0.12f && (fabsf(vel.x) > 0.05f || fabsf(vel.z) > 0.05f)) {
                     bone_world.x += vel.x * age;
                     bone_world.z += vel.z * age;
