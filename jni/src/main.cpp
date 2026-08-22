@@ -639,26 +639,14 @@ static void DrawEspOverlay() {
     const float tracer_origin_x = sw * 0.5f;
     const float tracer_origin_y = 0.0f;
 
-    auto DrawOutlinedText = [&](ImVec2 position, ImU32 color, const char* text) {
-        if (!text || !*text) return;
-        ImU32 outline = IM_COL32(0, 0, 0, 215);
-        dl->AddText({position.x - 1.f, position.y}, outline, text);
-        dl->AddText({position.x + 1.f, position.y}, outline, text);
-        dl->AddText({position.x, position.y - 1.f}, outline, text);
-        dl->AddText({position.x, position.y + 1.f}, outline, text);
-        dl->AddText(position, color, text);
-    };
-    auto DrawCenteredText = [&](float center_x, float y, ImU32 color, const char* text) {
-        if (!text || !*text) return;
-        ImVec2 size = ImGui::CalcTextSize(text);
-        DrawOutlinedText({center_x - size.x * 0.5f, y}, color, text);
-    };
-
     for (const EspBox& box : boxes) {
         if (!std::isfinite(box.x1) || !std::isfinite(box.y1) ||
             !std::isfinite(box.x2) || !std::isfinite(box.y2) ||
             box.x2 <= box.x1 || box.y2 <= box.y1) continue;
 
+        const float center_x = (box.x1 + box.x2) * 0.5f;
+
+        // 3D Chams / Wireframe Box
         if (g_state.esp_chams) {
             for (const auto& edge : BOX_EDGES) {
                 int a = edge[0], b = edge[1];
@@ -672,6 +660,7 @@ static void DrawEspOverlay() {
             }
         }
 
+        // Skeleton overlay
         if (g_state.esp_skeleton && box.skeleton_valid) {
             const ImU32 skeleton_color = ColU32(cfg::esp::skeleton_col);
             for (const auto& edge : SKELETON_EDGES) {
@@ -685,7 +674,6 @@ static void DrawEspOverlay() {
                 dl->AddLine(from, to, skeleton_color, thick);
             }
 
-            // A small ring makes the head joint distinct from the torso.
             if (box.bone_visible[ESP_BONE_HEAD] && box.bone_visible[ESP_BONE_NECK]) {
                 ImVec2 head(box.bone_screen[ESP_BONE_HEAD][0], box.bone_screen[ESP_BONE_HEAD][1]);
                 ImVec2 neck(box.bone_screen[ESP_BONE_NECK][0], box.bone_screen[ESP_BONE_NECK][1]);
@@ -696,51 +684,101 @@ static void DrawEspOverlay() {
             }
         }
 
+        // 2D Box (Sleek Apple/iOS card aesthetic with smooth rounding)
         if (g_state.esp_box) {
-            dl->AddRect({box.x1, box.y1}, {box.x2, box.y2}, IM_COL32(0, 0, 0, 205),
-                        cfg::esp::box_rounding, 0, thick + 2.f);
+            float box_r = ImClamp(cfg::esp::box_rounding, 0.f, 16.f);
+            if (box_r < 2.f) box_r = 6.f;
+
+            // Subtle backdrop fill
+            dl->AddRectFilled({box.x1, box.y1}, {box.x2, box.y2}, IM_COL32(0, 0, 0, 35), box_r);
+            // Outer crisp shadow
+            dl->AddRect({box.x1 - 0.8f, box.y1 - 0.8f}, {box.x2 + 0.8f, box.y2 + 0.8f},
+                        IM_COL32(0, 0, 0, 190), box_r + 0.8f, 0, thick + 1.6f);
+            // Inner color border
             dl->AddRect({box.x1, box.y1}, {box.x2, box.y2}, ColU32(cfg::esp::box_col),
-                        cfg::esp::box_rounding, 0, thick);
+                        box_r, 0, thick);
         }
 
-        const float center_x = (box.x1 + box.x2) * 0.5f;
-        float top_text_y = box.y1 - ImGui::GetFontSize() - 3.f;
-        if (g_state.esp_name) {
-            const char* name = box.name[0] ? box.name : "PLAYER";
-            DrawCenteredText(center_x, top_text_y, ColU32(cfg::esp::name_col), name);
-            top_text_y -= ImGui::GetFontSize() + 1.f;
-        }
-
-        float bottom_text_y = box.y2 + 3.f;
-        if (g_state.esp_wall) {
-            char label[32];
-            if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1f m", box.distance);
-            else snprintf(label, sizeof(label), "-- m");
-            DrawCenteredText(center_x, bottom_text_y, ColU32(cfg::esp::distance_col), label);
-            bottom_text_y += ImGui::GetFontSize() + 1.f;
-        }
-        if (g_state.esp_weapon) {
-            const char* weapon = box.weapon[0] ? box.weapon : "Weapon";
-            DrawCenteredText(center_x, bottom_text_y, ColU32(cfg::esp::weapon_col), weapon);
-        }
-
+        // Health Bar (Neomorphic Pill on Left)
         if (g_state.esp_hp && box.health >= 0.f && box.max_health > 0.f) {
             float fraction = ImClamp(box.health / box.max_health, 0.f, 1.f);
-            float bar_w = 4.f;
-            float x1 = box.x1 - 8.f;
+            float bar_w = 4.5f;
+            float x1 = box.x1 - 9.f;
             float y1 = box.y1, y2 = box.y2;
-            if (cfg::esp::hp_outline)
-                dl->AddRectFilled({x1 - 1.f, y1 - 1.f}, {x1 + bar_w + 1.f, y2 + 1.f}, IM_COL32(0, 0, 0, 210), 1.f);
+            float bar_h = y2 - y1;
+            float bar_r = bar_w * 0.5f;
+
+            // Dark pill track
+            dl->AddRectFilled({x1 - 1.f, y1 - 1.f}, {x1 + bar_w + 1.f, y2 + 1.f}, IM_COL32(20, 20, 26, 220), bar_r + 1.f);
+            dl->AddRect({x1 - 1.f, y1 - 1.f}, {x1 + bar_w + 1.f, y2 + 1.f}, C::UA(C::Sep(), 0.55f), bar_r + 1.f, 0, 1.f);
+
+            // Active health fill
             ImVec4 hp_color = cfg::esp::health_col;
             if (cfg::esp::hp_gradient) {
                 hp_color.x = cfg::esp::hp_min_col.x + (cfg::esp::hp_max_col.x - cfg::esp::hp_min_col.x) * fraction;
                 hp_color.y = cfg::esp::hp_min_col.y + (cfg::esp::hp_max_col.y - cfg::esp::hp_min_col.y) * fraction;
                 hp_color.z = cfg::esp::hp_min_col.z + (cfg::esp::hp_max_col.z - cfg::esp::hp_min_col.z) * fraction;
             }
-            float fill_y = y2 - (y2 - y1) * fraction;
-            dl->AddRectFilled({x1, fill_y}, {x1 + bar_w, y2}, ColU32(hp_color), 1.f);
+            float fill_y = y2 - bar_h * fraction;
+            if (fill_y < y2 - 1.f) {
+                dl->AddRectFilled({x1, fill_y}, {x1 + bar_w, y2}, ColU32(hp_color), bar_r);
+            }
         }
 
+        // Name Badge (iOS Pill Tag Top)
+        if (g_state.esp_name) {
+            const char* name = box.name[0] ? box.name : "PLAYER";
+            float text_fs = ImGui::GetFontSize() * 0.95f;
+            ImVec2 text_sz = ImGui::GetFont()->CalcTextSizeA(text_fs, FLT_MAX, 0, name);
+            float pad_x = 8.f, pad_y = 3.f;
+            float badge_w = text_sz.x + pad_x * 2.f;
+            float badge_h = text_sz.y + pad_y * 2.f;
+            float badge_x = center_x - badge_w * 0.5f;
+            float badge_y = box.y1 - badge_h - 4.f;
+
+            dl->AddRectFilled({badge_x, badge_y}, {badge_x + badge_w, badge_y + badge_h},
+                              C::UA(C::Card(), 0.88f), badge_h * 0.5f);
+            dl->AddRect({badge_x, badge_y}, {badge_x + badge_w, badge_y + badge_h},
+                        C::UA(C::Sep(), 0.75f), badge_h * 0.5f, 0, 1.1f);
+            dl->AddText(ImGui::GetFont(), text_fs, {badge_x + pad_x, badge_y + pad_y},
+                        ColU32(cfg::esp::name_col), name);
+        }
+
+        // Distance & Weapon Badge (iOS Pill Tag Bottom)
+        float cur_bottom_y = box.y2 + 4.f;
+        if (g_state.esp_wall || g_state.esp_weapon) {
+            char label[64]{};
+            if (g_state.esp_wall && g_state.esp_weapon) {
+                const char* wname = box.weapon[0] ? box.weapon : "Weapon";
+                if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.0fm • %s", box.distance, wname);
+                else snprintf(label, sizeof(label), "--m • %s", wname);
+            } else if (g_state.esp_wall) {
+                if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1f m", box.distance);
+                else snprintf(label, sizeof(label), "-- m");
+            } else if (g_state.esp_weapon) {
+                const char* wname = box.weapon[0] ? box.weapon : "Weapon";
+                snprintf(label, sizeof(label), "%s", wname);
+            }
+
+            if (label[0]) {
+                float text_fs = ImGui::GetFontSize() * 0.90f;
+                ImVec2 text_sz = ImGui::GetFont()->CalcTextSizeA(text_fs, FLT_MAX, 0, label);
+                float pad_x = 8.f, pad_y = 3.f;
+                float badge_w = text_sz.x + pad_x * 2.f;
+                float badge_h = text_sz.y + pad_y * 2.f;
+                float badge_x = center_x - badge_w * 0.5f;
+                float badge_y = cur_bottom_y;
+
+                dl->AddRectFilled({badge_x, badge_y}, {badge_x + badge_w, badge_y + badge_h},
+                                  C::UA(C::Card(), 0.88f), badge_h * 0.5f);
+                dl->AddRect({badge_x, badge_y}, {badge_x + badge_w, badge_y + badge_h},
+                            C::UA(C::Sep(), 0.75f), badge_h * 0.5f, 0, 1.1f);
+                dl->AddText(ImGui::GetFont(), text_fs, {badge_x + pad_x, badge_y + pad_y},
+                            ColU32(cfg::esp::distance_col), label);
+            }
+        }
+
+        // Tracer line
         if (g_state.esp_tracer) {
             float fx = center_x;
             float fy = box.y1;
