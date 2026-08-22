@@ -61,6 +61,8 @@ struct TransformHierarchyLayout {
     uint64_t indices_offset = 0x20;
     bool matrices_indirect = false;
     bool indices_indirect = false;
+    uint32_t stride = 48; // bytes per transform in the local-matrix array (48 or 40 across Unity versions)
+    bool world_direct = false; // matrices array already caches world positions (read translation directly, no parent walk)
 };
 static TransformHierarchyLayout g_transform_hierarchy_layout{};
 static bool g_transform_hierarchy_layout_valid = false;
@@ -790,51 +792,152 @@ static float vec_distance(const Vec3& first, const Vec3& second) {
     return sqrtf(dx * dx + dy * dy + dz * dz);
 }
 
-// Known native Transform / TransformHierarchy layouts. The correct one is
-// detected once at runtime by actually reading a position through it.
-static const TransformHierarchyLayout kBoneLayouts[] = {
-    {0x38, 0x40, 0x18, 0x20, false, false},
-    {0x38, 0x40, 0x18, 0x20, true,  true},
-    {0x38, 0x40, 0x08, 0x10, false, false},
-    {0x38, 0x40, 0x08, 0x10, true,  true},
-    {0x28, 0x30, 0x18, 0x20, false, false},
-    {0x28, 0x30, 0x18, 0x20, true,  true},
-    {0x28, 0x30, 0x08, 0x10, false, false},
-    {0x28, 0x30, 0x08, 0x10, true,  true}
-};
+// ---------------------------------------------------------------------------
+// Calibrated bone transform reader.
+//
+// Every animated bone is a real Unity Transform. Its world position has to be
+// rebuilt from the engine's per-hierarchy "TransformData" block (a local-matrix
+// array plus a parent-index array). The exact offsets of that block on the
+// native Transform, and the per-entry stride, change between Unity versions and
+// are NOT in the managed il2cpp dump. The previous code guessed a fixed set of
+// 8 layouts and trusted the first one that produced a merely finite number; for
+// this build none of them is correct, so every bone read garbage and the overlay
+// always fell back to the dead procedural stick figure.
+//
+// Instead the layout is now CALIBRATED: we know each enemy's world position
+// (the capsule position), so we pick the (offsets + stride) combination that
+// actually reproduces those known positions when reading the enemy transform.
+// A wrong layout never matches several players at once; the correct one does.
+// The calibration runs once and is reused for every bone of every player.
+// ---------------------------------------------------------------------------
 
 static TransformHierarchyLayout g_bone_layout{};
 static bool g_bone_layout_valid = false;
 
-static bool bone_layout_for(uint64_t native_transform, TransformHierarchyLayout& layout) {
-    if (!native_transform_is_valid(native_transform)) return false;
-    Vec3 probe{};
-    if (g_bone_layout_valid && read_transform_hierarchy_layout(native_transform, g_bone_layout, probe)) {
-        layout = g_bone_layout;
+// Read one transform entry (position/rotation/scale) from the local-matrix
+// array, honouring the per-version stride. Translation always sits at the start
+// of the entry; rotation/scale move with the stride (48-byte Vec4 layout vs a
+// packed 40-byte layout).
+static bool read_layout_entry(uint64_t matrices, int32_t index, uint32_t stride,
+                              Vec3& pos, Vec4& rot, Vec3& scale) {
+    uint64_t base = matrices + (uint64_t)index * (uint64_t)stride;
+    if (stride >= 48) {
+        Matrix34 m{};
+        if (!rd_exact(base, m) || !matrix34_is_valid(m)) return false;
+        pos = {m.translation.x, m.translation.y, m.translation.z};
+        rot = m.rotation;
+        scale = {m.scale.x, m.scale.y, m.scale.z};
+    } else {
+        if (!rd_exact(base, pos) || !vec3_is_finite(pos)) return false;
+        if (!rd_exact(base + 12, rot)) return false;
+        if (!rd_exact(base + 28, scale)) return false;
+    }
+    return vec3_is_finite(pos);
+}
+
+// Rebuild the world position of one transform from its local matrix plus the
+// parent chain, using a calibrated layout.
+static bool read_world_from_arrays(uint64_t matrices, uint64_t indices, int32_t index,
+                                   const TransformHierarchyLayout& L, Vec3& position) {
+    if (!likely_native_pointer(matrices) || index < 0 || index > 100000) return false;
+    if (L.world_direct) {
+        // The array already caches world transforms: the translation of entry
+        // [index] is the world position, no parent chain to walk.
+        Vec3 pos{};
+        if (!rd_exact(matrices + (uint64_t)index * (uint64_t)L.stride, pos) || !vec3_is_finite(pos)) return false;
+        position = pos;
         return true;
     }
-    if (g_transform_hierarchy_layout_valid &&
-        read_transform_hierarchy_layout(native_transform, g_transform_hierarchy_layout, probe)) {
-        layout = g_transform_hierarchy_layout;
-        g_bone_layout = layout;
-        g_bone_layout_valid = true;
-        return true;
+    Vec3 pos{}, cpos{}, cscale{};
+    Vec4 crot{};
+    if (!read_layout_entry(matrices, index, L.stride, pos, crot, cscale)) return false;
+    Vec3 result = pos;
+    int32_t parent = -2, previous = index;
+    if (!likely_native_pointer(indices) || !rd_exact(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
+    int depth = 0;
+    while (parent >= 0 && depth++ < 128) {
+        if (parent > 100000 || parent == previous) return false;
+        if (!read_layout_entry(matrices, parent, L.stride, cpos, crot, cscale)) return false;
+        Vec3 scaled = {result.x * cscale.x, result.y * cscale.y, result.z * cscale.z};
+        Vec3 rotated = rotate_vector(crot, scaled);
+        result = {cpos.x + rotated.x, cpos.y + rotated.y, cpos.z + rotated.z};
+        if (!vec3_is_finite(result)) return false;
+        previous = parent;
+        if (!rd_exact(indices + (uint64_t)parent * sizeof(int32_t), parent)) return false;
     }
-    for (const auto& candidate : kBoneLayouts) {
-        if (!read_transform_hierarchy_layout(native_transform, candidate, probe)) continue;
-        layout = candidate;
-        g_bone_layout = candidate;
-        g_bone_layout_valid = true;
-        return true;
+    if (parent != -1 || !vec3_is_finite(result)) return false;
+    position = result;
+    return true;
+}
+
+static bool read_transform_world(uint64_t native_transform, const TransformHierarchyLayout& L, Vec3& position) {
+    if (!native_transform) return false;
+    uint64_t data = rd_ptr(native_transform + L.data_offset);
+    int32_t index = rd<int32_t>(native_transform + L.index_offset);
+    if (!likely_native_pointer(data) || index < 0 || index > 100000) return false;
+    uint64_t matrices = rd_ptr(data + L.matrices_offset);
+    if (L.matrices_indirect) matrices = rd_ptr(matrices);
+    uint64_t indices = rd_ptr(data + L.indices_offset);
+    if (L.indices_indirect) indices = rd_ptr(indices);
+    return read_world_from_arrays(matrices, indices, index, L, position);
+}
+
+struct LayoutSample { uint64_t transform; Vec3 world; };
+
+// Find the layout that reproduces the known world positions. A candidate is
+// scored by how many samples it reads back to within a couple of metres of the
+// recorded position; the winner must match at least two players, which a wrong
+// (garbage-producing) layout can never do.
+static bool calibrate_bone_layout(const std::vector<LayoutSample>& samples, TransformHierarchyLayout& out) {
+    if (samples.size() < 2) return false;
+    const uint64_t data_offsets[] = {0x28, 0x38, 0x48};
+    const uint64_t matrix_offsets[] = {0x08, 0x10, 0x18, 0x20, 0x28, 0x30};
+    int best_matches = 0;
+    TransformHierarchyLayout best{};
+    for (uint64_t data_offset : data_offsets) {
+        uint64_t index_offset = data_offset + 8;
+        bool seed_ok = true;
+        for (const auto& s : samples) {
+            uint64_t sdata = rd_ptr(s.transform + data_offset);
+            int32_t sindex = rd<int32_t>(s.transform + index_offset);
+            if (!likely_native_pointer(sdata) || sindex < 0 || sindex > 100000) { seed_ok = false; break; }
+        }
+        if (!seed_ok) continue;
+        for (uint64_t matrices_offset : matrix_offsets) {
+            uint64_t indices_offset = matrices_offset + 8;
+            for (int indirect = 0; indirect < 2; ++indirect) {
+                // Two storage models: interleaved local matrices rebuilt via the
+                // parent chain (48- or 40-byte entries), or a direct cache of
+                // world positions (Vector3 / padded entries, no walk).
+                struct Probe { uint32_t stride; bool world_direct; };
+                const Probe probes[] = { {48, false}, {40, false}, {16, true}, {12, true} };
+                for (const Probe& p : probes) {
+                    TransformHierarchyLayout L{};
+                    L.data_offset = data_offset; L.index_offset = index_offset;
+                    L.matrices_offset = matrices_offset; L.indices_offset = indices_offset;
+                    L.matrices_indirect = indirect != 0; L.indices_indirect = indirect != 0;
+                    L.stride = p.stride; L.world_direct = p.world_direct;
+                    int matches = 0;
+                    for (const auto& s : samples) {
+                        Vec3 pos{};
+                        if (read_transform_world(s.transform, L, pos) && vec_distance(pos, s.world) < 2.5f)
+                            ++matches;
+                    }
+                    if (matches > best_matches) { best_matches = matches; best = L; }
+                }
+            }
+        }
     }
-    return false;
+    if (best_matches < 2) return false;
+    best.stride = best.stride ? best.stride : 48;
+    out = best;
+    return true;
 }
 
 static bool joint_from_transform(uint64_t native_transform, RigJoint& joint) {
-    TransformHierarchyLayout layout{};
-    if (!bone_layout_for(native_transform, layout)) return false;
-    uint64_t hierarchy = rd_ptr(native_transform + layout.data_offset);
-    int32_t index = rd<int32_t>(native_transform + layout.index_offset);
+    if (!g_bone_layout_valid || !native_transform_is_valid(native_transform)) return false;
+    uint64_t hierarchy = rd_ptr(native_transform + g_bone_layout.data_offset);
+    int32_t index = rd<int32_t>(native_transform + g_bone_layout.index_offset);
     if (!likely_native_pointer(hierarchy) || index < 0 || index > 100000) return false;
     joint.hierarchy = hierarchy;
     joint.index = index;
@@ -844,8 +947,8 @@ static bool joint_from_transform(uint64_t native_transform, RigJoint& joint) {
 static bool hierarchy_arrays(uint64_t hierarchy, uint64_t& matrices, uint64_t& indices) {
     if (!g_bone_layout_valid || !likely_native_pointer(hierarchy)) return false;
     matrices = rd_ptr(hierarchy + g_bone_layout.matrices_offset);
-    indices = rd_ptr(hierarchy + g_bone_layout.indices_offset);
     if (g_bone_layout.matrices_indirect) matrices = rd_ptr(matrices);
+    indices = rd_ptr(hierarchy + g_bone_layout.indices_offset);
     if (g_bone_layout.indices_indirect) indices = rd_ptr(indices);
     return likely_native_pointer(matrices) && likely_native_pointer(indices);
 }
@@ -853,8 +956,9 @@ static bool hierarchy_arrays(uint64_t hierarchy, uint64_t& matrices, uint64_t& i
 // Per-frame snapshot of one transform hierarchy. Walking the parent chain of
 // every bone with individual reads costs hundreds of syscalls per player and
 // frame; Unity keeps parents in front of their children inside the hierarchy
-// arrays, so one bulk read of the local transforms plus the parent indices is
-// enough to resolve every bone of that player locally.
+// arrays, so one pass over the local transforms plus the parent indices is
+// enough to resolve every bone of that player locally. Entries are normalised
+// into Matrix34 regardless of the calibrated stride.
 struct HierarchyWorldTransform {
     Vec3 position{};
     Vec4 rotation{};
@@ -865,6 +969,8 @@ struct HierarchySnapshot {
     std::vector<Matrix34> locals;
     std::vector<int32_t> parents;
     std::unordered_map<int32_t, HierarchyWorldTransform> world;
+    uint32_t stride = 48;
+    bool world_direct = false;
 };
 static std::unordered_map<uint64_t, HierarchySnapshot> g_hierarchy_frame;
 
@@ -872,20 +978,46 @@ static void clear_hierarchy_frame_cache() { g_hierarchy_frame.clear(); }
 
 static HierarchySnapshot* prepare_hierarchy_snapshot(uint64_t hierarchy, int32_t max_index) {
     if (!likely_native_pointer(hierarchy) || max_index < 0 || max_index > 4096) return nullptr;
+    uint32_t stride = g_bone_layout_valid ? (g_bone_layout.stride ? g_bone_layout.stride : 48) : 48;
+    bool world_direct = g_bone_layout_valid ? g_bone_layout.world_direct : false;
     auto existing = g_hierarchy_frame.find(hierarchy);
-    if (existing != g_hierarchy_frame.end()) {
-        if ((int32_t)existing->second.parents.size() > max_index) return &existing->second;
-        g_hierarchy_frame.erase(existing); // rebuild with a window that covers the bone
+    if (existing != g_hierarchy_frame.end() &&
+        (int32_t)existing->second.locals.size() > max_index &&
+        existing->second.stride == stride &&
+        existing->second.world_direct == world_direct) {
+        return &existing->second;
     }
+    if (existing != g_hierarchy_frame.end()) g_hierarchy_frame.erase(existing);
 
     uint64_t matrices = 0, indices = 0;
     if (!hierarchy_arrays(hierarchy, matrices, indices)) return nullptr;
     size_t count = (size_t)max_index + 1;
     HierarchySnapshot snapshot;
+    snapshot.stride = stride;
+    snapshot.world_direct = world_direct;
     snapshot.locals.resize(count);
+    // Normalise every entry into Matrix34 with the calibrated stride. In
+    // world-direct mode only the translation (world position) is stored. An
+    // entry that fails to read is left zeroed and later rejected, instead of
+    // dropping the whole hierarchy snapshot for that player.
+    for (size_t i = 0; i < count; ++i) {
+        Vec3 pos{};
+        if (world_direct) {
+            if (!rd_exact(matrices + (uint64_t)i * (uint64_t)stride, pos) || !vec3_is_finite(pos)) continue;
+            snapshot.locals[i].translation = {pos.x, pos.y, pos.z, 1.f};
+            snapshot.locals[i].rotation = {0, 0, 0, 1};
+            snapshot.locals[i].scale = {1, 1, 1, 1};
+        } else {
+            Vec3 scale{1, 1, 1}; Vec4 rot{0, 0, 0, 1};
+            if (read_layout_entry(matrices, (int32_t)i, stride, pos, rot, scale)) {
+                snapshot.locals[i].translation = {pos.x, pos.y, pos.z, 1.f};
+                snapshot.locals[i].rotation = rot;
+                snapshot.locals[i].scale = {scale.x, scale.y, scale.z, 1.f};
+            }
+        }
+    }
     snapshot.parents.resize(count);
-    if (!read_remote_bytes(matrices, snapshot.locals.data(), count * sizeof(Matrix34)) ||
-        !read_remote_bytes(indices, snapshot.parents.data(), count * sizeof(int32_t)))
+    if (!read_remote_bytes(indices, snapshot.parents.data(), count * sizeof(int32_t)))
         return nullptr;
     auto inserted = g_hierarchy_frame.emplace(hierarchy, std::move(snapshot));
     return &inserted.first->second;
@@ -893,9 +1025,19 @@ static HierarchySnapshot* prepare_hierarchy_snapshot(uint64_t hierarchy, int32_t
 
 static bool snapshot_world_transform(HierarchySnapshot& snapshot, int32_t index,
                                      HierarchyWorldTransform& result) {
-    if (index < 0 || index >= (int32_t)snapshot.parents.size()) return false;
+    if (index < 0 || index >= (int32_t)snapshot.locals.size()) return false;
     auto cached = snapshot.world.find(index);
     if (cached != snapshot.world.end()) { result = cached->second; return true; }
+
+    // World-direct mode: the stored translation already is the world position.
+    if (snapshot.world_direct) {
+        const Matrix34& m = snapshot.locals[(size_t)index];
+        if (m.translation.w == 0.f) return false; // unread/zeroed entry
+        result.position = {m.translation.x, m.translation.y, m.translation.z};
+        if (!vec3_is_finite(result.position)) return false;
+        snapshot.world[index] = result;
+        return true;
+    }
 
     std::vector<int32_t> chain;
     int32_t current = index;
@@ -947,10 +1089,10 @@ static bool snapshot_world_transform(HierarchySnapshot& snapshot, int32_t index,
 }
 
 static bool joint_position(const RigJoint& joint, Vec3& position) {
-    if (!joint.valid()) return false;
+    if (!joint.valid() || !g_bone_layout_valid) return false;
     auto snapshot = g_hierarchy_frame.find(joint.hierarchy);
     if (snapshot != g_hierarchy_frame.end() &&
-        joint.index < (int32_t)snapshot->second.parents.size()) {
+        joint.index < (int32_t)snapshot->second.locals.size()) {
         HierarchyWorldTransform world{};
         if (snapshot_world_transform(snapshot->second, joint.index, world)) {
             position = world.position;
@@ -959,12 +1101,12 @@ static bool joint_position(const RigJoint& joint, Vec3& position) {
     }
     uint64_t matrices = 0, indices = 0;
     if (!hierarchy_arrays(joint.hierarchy, matrices, indices)) return false;
-    return read_transform_hierarchy_arrays(matrices, indices, joint.index, position);
+    return read_world_from_arrays(matrices, indices, joint.index, g_bone_layout, position);
 }
 
 static bool joint_parent(const RigJoint& joint, RigJoint& parent) {
     uint64_t matrices = 0, indices = 0;
-    if (!joint.valid() || !hierarchy_arrays(joint.hierarchy, matrices, indices)) return false;
+    if (!joint.valid() || !g_bone_layout_valid || !hierarchy_arrays(joint.hierarchy, matrices, indices)) return false;
     int32_t parent_index = -1;
     if (!rd_exact(indices + (uint64_t)joint.index * sizeof(int32_t), parent_index)) return false;
     if (parent_index < 0 || parent_index > 100000) return false;
@@ -2265,6 +2407,29 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             return result;
         }
         local = transform_camera_position; has_local_position = true;
+    }
+
+    // Calibrate the native Transform hierarchy layout once, using the enemies'
+    // known capsule positions as ground truth. Bones cannot be read until the
+    // engine's per-version TransformData offsets + entry stride are known, and
+    // this must happen before any read_player_skeleton() call below. The model
+    // root transform is used (not the camera root) because it always sits on the
+    // character body, i.e. within a couple of metres of the capsule feet.
+    if (!g_bone_layout_valid) {
+        std::vector<LayoutSample> samples;
+        for (size_t i = 0; i < s_transforms.size() && samples.size() < 8; ++i) {
+            if (i == local_entity_index) continue;
+            Vec3 pos{};
+            if (!read_entity_position(s_transforms[i], pos)) continue;
+            uint64_t nt = resolve_model_root_transform(s_transforms[i]);
+            if (!nt) continue;
+            samples.push_back({nt, pos});
+        }
+        TransformHierarchyLayout layout{};
+        if (calibrate_bone_layout(samples, layout)) {
+            g_bone_layout = layout;
+            g_bone_layout_valid = true;
+        }
     }
 
     for (size_t i = 0; i < s_transforms.size(); ++i) {
