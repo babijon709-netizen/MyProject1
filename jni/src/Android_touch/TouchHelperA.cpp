@@ -46,7 +46,7 @@ static touchObj Finger[maxE][maxF];
 
 static int fdNum = 0, origfd[maxE], nowfd;
 
-static int devMaxX = 0, devMaxY = 0; // abs-максимумы зеркалируемого тачскрина
+static int devMaxX = 0, devMaxY = 0;
 
 static float scale_x, scale_y;
 
@@ -216,7 +216,7 @@ static void *TypeA(void *arg) {
                     float x = Finger[i][latest].x, y = Finger[i][latest].y;
                     float xt = x / scale_x;
                     float yt = y / scale_y;
-                    
+
                     if (other_touch) {
                         switch (orientation) {
                             case 1:
@@ -321,7 +321,6 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
         struct uinput_user_dev ui_dev;
         nowfd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
         if (nowfd <= 0) {
-            // не оставляем граб на реальном тачскрине, иначе тач умрёт до перезагрузки
             for (int k = 0; k < fdNum; ++k) { ioctl(origfd[k], EVIOCGRAB, UNGRAB); close(origfd[k]); origfd[k] = 0; }
             fdNum = 0;
             return false;
@@ -429,7 +428,7 @@ void UpdateScreenData(int w, int h, uint32_t orientation_) {
     ::screenWidth = w;
     ::screenHeight = h,
     ::orientation = orientation_;
-    Touch_UpdateScale(); // масштаб зависит от ориентации — пересчитываем при повороте
+    Touch_UpdateScale();
 }
 
 static bool checkDeviceIsTouch(int fd) {
@@ -490,9 +489,6 @@ void Touch_Close() {
 
 void Touch_Down(float xt, float yt) {
     if (!Touch_initialized || Touch_readOnly) return;
-    // xt/yt — координаты оверлея (экран в текущей ориентации).
-    // Инвертируем маппинг из TypeA (other_touch == false), чтобы синтетический
-    // палец попадал ровно туда, куда ожидаем.
     int x = 0, y = 0;
     switch (orientation) {
         case 1: {
@@ -519,7 +515,6 @@ void Touch_Down(float xt, float yt) {
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     touchObj &touch = Finger[0][9];
-    // 60000 — уникальный id, не пересекается с id реальных пальцев (10..19)
     touch.id = 60000;
     touch.x = (int) (x * ::scale_x);
     touch.y = (int) (y * ::scale_y);
