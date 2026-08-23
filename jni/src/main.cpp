@@ -145,7 +145,7 @@ static constexpr uint8_t _xk(size_t i) noexcept {
 template<size_t N>
 struct _XS {
     char b[N]{};
-    mutable char o[N]{}; // буфер декодирования на экземпляр (на вызов XS), а не на длину строки
+    mutable char o[N]{};
     constexpr _XS(const char (&s)[N]) noexcept {
         for (size_t i = 0; i < N; ++i) b[i] = static_cast<char>(static_cast<uint8_t>(s[i]) ^ _xk(i));
     }
@@ -553,7 +553,6 @@ static ImU32 ColU32(const ImVec4& c) {
     return IM_COL32((int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255), (int)(c.w * 255));
 }
 
-// Радиус FOV-круга в пикселях: fov задан в градусах, вертикальный FOV камеры принят 60°
 static float AimFovRadiusPx(float sw, float sh) {
     float fov = cfg::aim::fov;
     if (fov <= 0.f) return 0.f;
@@ -722,12 +721,12 @@ struct CfgBlob {
     float aim_fov, aim_smoothness;
     bool  esp_box, esp_name, esp_hp, esp_wall, esp_chams;
     bool  esp_weapon, esp_weapon_icon, esp_tracer, esp_skeleton;
-    bool  esp_money, esp_ping, esp_vis_check, esp_fill; // esp_money/esp_ping — legacy, пункт удалён (размер структуры менять нельзя)
+    bool  esp_money, esp_ping, esp_vis_check, esp_fill;
     float esp_thick, esp_stroke, esp_rounding, esp_fill_pct;
     float gun_str, gun_fov, gun_trigger_delay;
     bool  ui_fps, ui_dark_mode, ui_show_sep;
     ImVec4 esp_box_col, esp_box_col_invis, esp_name_col, esp_health_col, esp_distance_col;
-    ImVec4 esp_weapon_col, esp_weapon_icon_col, esp_tracer_col, esp_skeleton_col, esp_money_col, esp_ping_col; // money/ping — legacy
+    ImVec4 esp_weapon_col, esp_weapon_icon_col, esp_tracer_col, esp_skeleton_col, esp_money_col, esp_ping_col;
     int   esp_box_type;
     float esp_box_rounding;
 };
@@ -830,7 +829,6 @@ static void ConfigLoad(int idx) {
     cfg::aim::draw_fov   = s.aim_draw_fov;
     cfg::aim::fov        = s.aim_fov;
     cfg::aim::smoothness = s.aim_smoothness;
-    // старая шкала плавности была 0..1, новая — 1..10
     if (cfg::aim::smoothness < 1.f) {
         cfg::aim::smoothness = (cfg::aim::smoothness <= 0.f) ? 1.f : cfg::aim::smoothness * 10.f;
         if (cfg::aim::smoothness > 10.f) cfg::aim::smoothness = 10.f;
@@ -2629,15 +2627,10 @@ static void CenterMenuOnDisplay() {
     g_win.resizing = false;
 }
 
-// ============================= ТАЧ АИМ =============================
-// Имитирует нажатие отдельным пальцем в правой части экрана и микро-свайпами
-// доворачивает камеру, пока цель не окажется в прицеле (центр экрана).
-// Палец аима — отдельный контакт с уникальным tracking-id, поэтому
-// собственные нажатия игрока продолжают работать одновременно.
 static void UpdateAim(float dt) {
     static bool  s_fingerDown = false;
-    static float s_fx = 0.f, s_fy = 0.f;       // текущая позиция пальца аима
-    static float s_lastTx = -1e9f, s_lastTy = -1e9f; // прошлая цель (липкость)
+    static float s_fx = 0.f, s_fy = 0.f;
+    static float s_lastTx = -1e9f, s_lastTy = -1e9f;
 
     bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     bool active = g_state.aim_touch && g_esp_attached && !menuOpen;
@@ -2665,9 +2658,9 @@ static void UpdateAim(float dt) {
 
     const float crossX = sw * 0.5f, crossY = sh * 0.5f;
     const float fovR = AimFovRadiusPx(sw, sh);
-    const float boneFrac = (g_state.aim_bone == 0) ? 0.06f      // голова
-                       : (g_state.aim_bone == 1) ? 0.28f        // тело
-                                                  : 0.47f;      // ноги
+    const float boneFrac = (g_state.aim_bone == 0) ? 0.06f
+                       : (g_state.aim_bone == 1) ? 0.28f
+                                                  : 0.47f;
 
     int   best = -1;
     float bestScore = 1e18f, bestX = 0.f, bestY = 0.f;
@@ -2685,7 +2678,7 @@ static void UpdateAim(float dt) {
         float d = sqrtf(dx * dx + dy * dy);
         if (d > fovR) continue;
         float score = d;
-        if (s_lastTx > -1e8f) { // липкость к текущей цели, чтобы не прыгал между игроками
+        if (s_lastTx > -1e8f) {
             float lx = px - s_lastTx, ly = py - s_lastTy;
             if (lx * lx + ly * ly < 80.f * 80.f) score *= 0.5f;
         }
@@ -2700,10 +2693,10 @@ static void UpdateAim(float dt) {
     s_lastTx = bestX; s_lastTy = bestY;
 
     float ex = bestX - crossX, ey = bestY - crossY;
-    if (fabsf(ex) < 2.5f && fabsf(ey) < 2.5f) return; // цель в прицеле — держим палец неподвижно
+    if (fabsf(ex) < 2.5f && fabsf(ey) < 2.5f) return;
 
     if (!s_fingerDown) {
-        s_fx = sw * 0.72f;                       // якорь — правая часть экрана
+        s_fx = sw * 0.72f;
         s_fy = sh * 0.48f;
         Touch_Down(s_fx, s_fy);
         s_fingerDown = true;
@@ -2712,12 +2705,11 @@ static void UpdateAim(float dt) {
     float sm = g_state.gun_str;
     if (sm < 1.f) sm = 1.f;
     if (sm > 10.f) sm = 10.f;
-    // плавность 1..10 -> скорость доворота 1.5..12 (экспоненциальное приближение, не зависит от fps)
     float rate = 1.5f + (sm - 1.f) * (10.5f / 9.f);
     float k = 1.f - expf(-rate * dt);
     if (k > 0.5f) k = 0.5f;
 
-    float dx = ex * k, dy = ey * k;              // свайп в сторону цели поворачивает камеру к ней
+    float dx = ex * k, dy = ey * k;
     if (dx >  90.f) dx =  90.f;
     if (dx < -90.f) dx = -90.f;
     if (dy >  90.f) dy =  90.f;
@@ -2725,13 +2717,12 @@ static void UpdateAim(float dt) {
 
     s_fx += dx;
     s_fy += dy;
-    if (s_fx < sw * 0.55f) s_fx = sw * 0.55f;    // палец остаётся в правой зоне
+    if (s_fx < sw * 0.55f) s_fx = sw * 0.55f;
     if (s_fx > sw * 0.95f) s_fx = sw * 0.95f;
     if (s_fy < sh * 0.20f) s_fy = sh * 0.20f;
     if (s_fy > sh * 0.80f) s_fy = sh * 0.80f;
     Touch_Move(s_fx, s_fy);
 }
-// ===================================================================
 
 void RenderMenu() {
     auto& io = ImGui::GetIO();
@@ -3140,7 +3131,6 @@ void RenderMenu() {
 }
 
 int main(int argc, char* argv[]) {
-    // при закрытии терминала/Ctrl+C корректно отпускаем захваченный тачскрин
     signal(SIGINT,  [](int) { main_thread_flag.store(false); });
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
     signal(SIGHUP,  [](int) { main_thread_flag.store(false); });
@@ -3159,10 +3149,6 @@ int main(int argc, char* argv[]) {
     Blur::Init();
     CfgWatchInit();
     AudioInit();
-    // readOnly=false: грабим реальный тачскрин и создаём uinput-устройство,
-    // через которое проксируем нажатия + инжектим палец аима.
-    // Если не получилось (нет root/uinput) — откатываемся в read-only: тач
-    // у игры останется родным, меню продолжит работать, аим будет неактивен.
     if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
         Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
     start_attach_thread();
