@@ -26,6 +26,28 @@ inline constexpr float BONE_HEAD_HEIGHT   = 1.58F; // face/neck - reliable head 
 inline constexpr float BONE_CHEST_HEIGHT  = 1.20F; // center of the torso
 inline constexpr float BONE_PELVIS_HEIGHT = 0.85F; // pelvis/upper legs
 
+// Real skeleton bones. PlayerModelInfo holds the third-person model's head/body
+// Transforms; reading their live world positions through the transform hierarchy
+// follows every pose - crouching, leaning, jumping - unlike fixed offsets above
+// the feet. The constant heights above stay as the fallback when the model is
+// not loaded (sleepers, streaming) or the read fails validation.
+// Chain (dump arm64-v8a 1.13.11888):
+//   PlayerManager.inventory (0x98, PlayerInventory)
+//     -> _playerInventoryData (0x20, PlayerInventoryData; .player 0x10 backref)
+//       -> playerModelInfo (0x20, PlayerModelInfo)
+//         -> head (0x20, Transform), body (0x40, Transform)
+inline constexpr std::uint64_t PLAYER_INVENTORY_FIELD       = 0x98; // PlayerManager.inventory
+inline constexpr std::uint64_t PLAYER_INVENTORY_DATA_FIELD  = 0x20; // PlayerInventory._playerInventoryData
+inline constexpr std::uint64_t INVENTORY_DATA_PLAYER_FIELD  = 0x10; // PlayerInventoryData.player (backref)
+inline constexpr std::uint64_t INVENTORY_DATA_MODEL_FIELD   = 0x20; // PlayerInventoryData.playerModelInfo
+inline constexpr std::uint64_t MODEL_INFO_HEAD_FIELD        = 0x20; // PlayerModelInfo.head (Transform)
+inline constexpr std::uint64_t MODEL_INFO_BODY_FIELD        = 0x40; // PlayerModelInfo.body (Transform)
+
+inline constexpr float HEAD_BONE_CENTER_LIFT = 0.07F; // head pivot sits at the neck joint; lift to skull center
+inline constexpr float HEAD_TOP_MARGIN       = 0.18F; // skull top above the head pivot (for box height)
+inline constexpr float CHEST_FRACTION        = 0.70F; // chest at this fraction of feet->head height
+inline constexpr float PELVIS_FRACTION       = 0.45F; // pelvis at this fraction of feet->head height
+
 // Source: dump arm64-v8a 1.13.11888 (Il2CppDumper output: dump.cs / il2cpp.h / script.json)
 // PlayerManager (Oxide)   TypeInfo ptr RVA: script.json TypeInfoPointers -> Oxide.PlayerManager
 // GameControllerBase (Oxide) TypeInfo ptr RVA: script.json TypeInfoPointers -> Oxide.GameControllerBase

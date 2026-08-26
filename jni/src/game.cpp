@@ -408,9 +408,20 @@ static bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& p
         if (!matrix_pointer || !index_pointer) continue;
         const uint64_t matrix_candidates[] = {matrix_pointer, rd_ptr(matrix_pointer)};
         const uint64_t index_candidates[] = {index_pointer, rd_ptr(index_pointer)};
-        for (uint64_t matrices : matrix_candidates) {
-            for (uint64_t indices_ptr : index_candidates) {
-                if (read_transform_hierarchy_arrays(matrices, indices_ptr, transform_index, position)) return true;
+        for (int mi = 0; mi < 2; ++mi) {
+            for (int ii = 0; ii < 2; ++ii) {
+                if (read_transform_hierarchy_arrays(matrix_candidates[mi], index_candidates[ii], transform_index, position)) {
+                    // Cache the working layout so subsequent reads (bones read this
+                    // every frame for every player) skip the probing entirely.
+                    g_transform_hierarchy_layout.data_offset = 0x38;
+                    g_transform_hierarchy_layout.index_offset = 0x40;
+                    g_transform_hierarchy_layout.matrices_offset = offsets[0];
+                    g_transform_hierarchy_layout.indices_offset = offsets[1];
+                    g_transform_hierarchy_layout.matrices_indirect = mi != 0;
+                    g_transform_hierarchy_layout.indices_indirect = ii != 0;
+                    g_transform_hierarchy_layout_valid = true;
+                    return true;
+                }
             }
         }
     }
@@ -420,6 +431,59 @@ static bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& p
 static uint64_t resolve_player_native_transform(uint64_t player) {
     if (!player) return 0;
     return resolve_native_transform(rd_ptr(player + PLAYER_TRANSFORM));
+}
+
+// --- Real skeleton bones ---------------------------------------------------
+// PlayerManager.inventory -> _playerInventoryData -> playerModelInfo holds the
+// third-person model's head/body Transforms. Their live world positions follow
+// the actual animation pose (crouch, lean, jump), unlike constant heights above
+// the feet. The PlayerModelInfo pointer is cached per player and re-validated
+// through the PlayerInventoryData.player backref so a respawned model refreshes.
+struct PlayerBones {
+    Vec3 head{};
+    bool head_ok = false;
+};
+static std::unordered_map<uint64_t, uint64_t> g_model_info_cache;
+
+static uint64_t resolve_player_model_info(uint64_t player) {
+    if (!player) return 0;
+    if (g_model_info_cache.size() > 1024) g_model_info_cache.clear();
+    auto it = g_model_info_cache.find(player);
+    uint64_t inv_data = 0;
+    if (it != g_model_info_cache.end() && it->second) {
+        // Cheap re-validation: the cached value is the PlayerInventoryData; its
+        // .player backref must still point at this player.
+        inv_data = it->second;
+        if (rd_ptr(inv_data + INVENTORY_DATA_PLAYER_FIELD) != player) inv_data = 0;
+    }
+    if (!inv_data) {
+        uint64_t inventory = rd_ptr(player + PLAYER_INVENTORY_FIELD);
+        if (!inventory) { g_model_info_cache.erase(player); return 0; }
+        inv_data = rd_ptr(inventory + PLAYER_INVENTORY_DATA_FIELD);
+        if (!inv_data || rd_ptr(inv_data + INVENTORY_DATA_PLAYER_FIELD) != player) {
+            g_model_info_cache.erase(player);
+            return 0;
+        }
+        g_model_info_cache[player] = inv_data;
+    }
+    return rd_ptr(inv_data + INVENTORY_DATA_MODEL_FIELD);
+}
+
+// Reads the world position of the model's head bone. `anchor` is the entity
+// position used for boxes; a bone that lands unreasonably far from it is
+// rejected (stale model of a respawned player, mid-streaming reads).
+static bool read_player_head_bone(uint64_t player, const Vec3& anchor, Vec3& head_out) {
+    uint64_t model_info = resolve_player_model_info(player);
+    if (!model_info) return false;
+    uint64_t head_native = resolve_native_transform(rd_ptr(model_info + MODEL_INFO_HEAD_FIELD));
+    if (!head_native) return false;
+    Vec3 head{};
+    if (!read_transform_hierarchy_position(head_native, head)) return false;
+    if (!vec3_is_finite(head)) return false;
+    float dx = head.x - anchor.x, dy = head.y - anchor.y, dz = head.z - anchor.z;
+    if (dx * dx + dy * dy + dz * dz > 9.0F) return false; // >3m from the entity position - not this player's model
+    head_out = head;
+    return true;
 }
 
 static bool likely_native_pointer(uint64_t value) {
@@ -758,6 +822,7 @@ void esp_reset() {
     g_tuner_hold = 0;
     g_eye_dy_ema = -1000.0F;
     g_entity_motion.clear();
+    g_model_info_cache.clear();
     g_aim_targets.clear();
 }
 
@@ -927,8 +992,22 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
             feet.y -= EYE_ABOVE_FEET - g_eye_dy_ema;
         }
 
+        // Real skeleton: read the model's head bone. When available, the box top
+        // and the aim bones follow the live animation pose (crouch, lean, jump)
+        // instead of assuming a standing model of constant height.
+        Vec3 head_bone{};
+        bool head_bone_ok = read_player_head_bone(s_transforms[i], feet, head_bone);
+        // The head pivot must sit plausibly above the feet; otherwise treat the
+        // read as garbage and fall back to the constant-height model.
+        if (head_bone_ok) {
+            float head_up = head_bone.y - feet.y;
+            if (!(head_up > 0.2F && head_up < 2.2F)) head_bone_ok = false;
+        }
+
         Vec3 body_bottom = {feet.x, feet.y, feet.z};
-        Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT, feet.z};
+        Vec3 body_top = head_bone_ok
+            ? Vec3{head_bone.x, head_bone.y + HEAD_TOP_MARGIN, head_bone.z}
+            : Vec3{feet.x, feet.y + PLAYER_HEIGHT, feet.z};
 
         Vec2 sf{}, sh2{};
         bool bottom_visible = transform_camera_mode
@@ -980,11 +1059,24 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
         aim.box_x1 = box.x1; aim.box_y1 = box.y1;
         aim.box_x2 = box.x2; aim.box_y2 = box.y2;
         aim.distance = distance;
-        const Vec3 bones[3] = {
-            {feet.x, feet.y + BONE_HEAD_HEIGHT,   feet.z},
-            {feet.x, feet.y + BONE_CHEST_HEIGHT,  feet.z},
-            {feet.x, feet.y + BONE_PELVIS_HEIGHT, feet.z}
-        };
+        Vec3 bones[3];
+        if (head_bone_ok) {
+            // Anchor everything to the real head bone: the head point is the
+            // skull center; chest and pelvis are placed at fixed fractions of
+            // the actual feet->head extent, and slide along the feet->head
+            // lateral offset - so a crouched or leaning pose keeps all three
+            // points inside the body.
+            float span_x = head_bone.x - feet.x;
+            float span_y = head_bone.y - feet.y;
+            float span_z = head_bone.z - feet.z;
+            bones[0] = {head_bone.x, head_bone.y + HEAD_BONE_CENTER_LIFT, head_bone.z};
+            bones[1] = {feet.x + span_x * CHEST_FRACTION,  feet.y + span_y * CHEST_FRACTION,  feet.z + span_z * CHEST_FRACTION};
+            bones[2] = {feet.x + span_x * PELVIS_FRACTION, feet.y + span_y * PELVIS_FRACTION, feet.z + span_z * PELVIS_FRACTION};
+        } else {
+            bones[0] = {feet.x, feet.y + BONE_HEAD_HEIGHT,   feet.z};
+            bones[1] = {feet.x, feet.y + BONE_CHEST_HEIGHT,  feet.z};
+            bones[2] = {feet.x, feet.y + BONE_PELVIS_HEIGHT, feet.z};
+        }
         for (int b = 0; b < 3; ++b) {
             Vec2 sc{};
             bool ok = transform_camera_mode
