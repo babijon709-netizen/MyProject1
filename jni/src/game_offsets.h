@@ -16,12 +16,13 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // Aim points are exact world-space offsets above the feet, projected through the
 // live camera (standing model proportions).
 // Fixed values to aim at actual head height instead of above the head.
-// These values were reduced further after user report that aim still targets
-// above head even with previous adjustments.
-// Using very small values to ensure aim targets at or below chest area.
-inline constexpr float BONE_HEAD_HEIGHT   = 0.30F;  // Very low - chest/upper stomach
-inline constexpr float BONE_CHEST_HEIGHT  = 0.10F; // Very low - rib area
-inline constexpr float BONE_PELVIS_HEIGHT = 0.00F; // At feet level
+// ANALYSIS: Even with 0.30F the aim still targets above head,
+// so we try negative values. This suggests the 'feet' position read from game
+// memory is actually at the head/chest level, not the feet.
+// Negative values will aim below the 'feet' position, potentially at the actual torso.
+inline constexpr float BONE_HEAD_HEIGHT   = -0.50F; // Aim below feet if 'feet' is at head
+inline constexpr float BONE_CHEST_HEIGHT  = -1.00F; // Aim lower
+inline constexpr float BONE_PELVIS_HEIGHT = -1.50F; // Aim even lower
 
 // Source: dump arm64-v8a 1.13.11888 (Il2CppDumper output: dump.cs / il2cpp.h / script.json)
 // PlayerManager (Oxide)   TypeInfo ptr RVA: script.json TypeInfoPointers -> Oxide.PlayerManager
