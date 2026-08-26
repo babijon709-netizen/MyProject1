@@ -2719,25 +2719,41 @@ static void UpdateAim(float dt) {
         s_fingerDown = true;
     }
 
+    // Плавность: 1 = минимум сглаживания (почти мгновенная доводка),
+    // 10 = максимально плавное ведение. Экспоненциальное приближение к цели:
+    // за кадр проходим долю k оставшейся ошибки, k не зависит от FPS.
     float sm = g_state.gun_str;
     if (sm < 1.f) sm = 1.f;
     if (sm > 10.f) sm = 10.f;
-    float rate = 1.5f + (sm - 1.f) * (10.5f / 9.f);
+    float rate = 28.f - (sm - 1.f) * (24.f / 9.f); // 28 (sm=1) .. 4 (sm=10)
     float k = 1.f - expf(-rate * dt);
-    if (k > 0.5f) k = 0.5f;
+    if (k > 0.85f) k = 0.85f;
+
+    // Ограничение скорости пальца в px/сек (а не px/кадр), чтобы быстрый рывок
+    // не зависел от FPS; жёсткий потолок на кадр страхует от скачка после лага.
+    float maxSpeed = 7000.f - (sm - 1.f) * 500.f;  // 7000 .. 2500 px/s
+    float maxStep = maxSpeed * dt;
+    if (maxStep > 150.f) maxStep = 150.f;
 
     float dx = ex * k, dy = ey * k;
-    if (dx >  90.f) dx =  90.f;
-    if (dx < -90.f) dx = -90.f;
-    if (dy >  90.f) dy =  90.f;
-    if (dy < -90.f) dy = -90.f;
+    if (dx >  maxStep) dx =  maxStep;
+    if (dx < -maxStep) dx = -maxStep;
+    if (dy >  maxStep) dy =  maxStep;
+    if (dy < -maxStep) dy = -maxStep;
 
     s_fx += dx;
     s_fy += dy;
-    if (s_fx < sw * 0.55f) s_fx = sw * 0.55f;
-    if (s_fx > sw * 0.95f) s_fx = sw * 0.95f;
-    if (s_fy < sh * 0.20f) s_fy = sh * 0.20f;
-    if (s_fy > sh * 0.80f) s_fy = sh * 0.80f;
+
+    // Палец дошёл до края рабочей зоны — перехват: отпускаем, на следующем
+    // кадре палец заново ставится в базовую точку и доводка продолжается.
+    // Раньше координаты просто клампились и аим замирал у границы.
+    const float xMin = sw * 0.55f, xMax = sw * 0.95f;
+    const float yMin = sh * 0.20f, yMax = sh * 0.80f;
+    if (s_fx < xMin || s_fx > xMax || s_fy < yMin || s_fy > yMax) {
+        Touch_Up();
+        s_fingerDown = false;
+        return;
+    }
     Touch_Move(s_fx, s_fy);
 }
 
