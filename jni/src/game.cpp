@@ -64,6 +64,10 @@ static float vec3_distance_to(const Vec3& a, const Vec3& b) {
     return sqrtf(dx * dx + dy * dy + dz * dz);
 }
 
+// Aim targets computed by esp_get_boxes for the current frame.
+static std::vector<EspAimTarget> g_aim_targets;
+static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_height);
+
 // Dead reckoning: the managed position fields are tick snapshots and can lag running
 // players by meters. Per entity we estimate velocity from consecutive value changes and
 // extrapolate by the time elapsed since the last change. Everything is bounded: the
@@ -740,10 +744,17 @@ void esp_reset() {
     g_tuner_frames = 0;
     g_tuner_hold = 0;
     g_entity_motion.clear();
+    g_aim_targets.clear();
 }
 
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
+    // Cleared here so early returns inside the impl never leave stale targets behind.
+    g_aim_targets.clear();
+    return esp_get_boxes_impl(overlay_width, overlay_height);
+}
+
+static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
@@ -924,7 +935,57 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             box.corners[corner][1] = projected ? sc.y : -1.0F;
         }
         result.push_back(box);
+
+        // Exact world-space bone points projected through the live camera. Unlike
+        // screen-space fractions of the bounding box, this stays anatomically correct
+        // at any distance, pitch and aspect.
+        EspAimTarget aim{};
+        aim.box_x1 = box.x1; aim.box_y1 = box.y1;
+        aim.box_x2 = box.x2; aim.box_y2 = box.y2;
+        aim.distance = distance;
+        const Vec3 bones[3] = {
+            {feet.x, feet.y + BONE_HEAD_HEIGHT,   feet.z},
+            {feet.x, feet.y + BONE_CHEST_HEIGHT,  feet.z},
+            {feet.x, feet.y + BONE_PELVIS_HEIGHT, feet.z}
+        };
+        for (int b = 0; b < 3; ++b) {
+            Vec2 sc{};
+            bool ok = transform_camera_mode
+                ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, bones[b], sw, sh, sc, false)
+                : w2s(vp, bones[b], sw, sh, sc, false);
+            ok = ok && std::isfinite(sc.x) && std::isfinite(sc.y);
+            switch (b) {
+                case 0: aim.head_x = sc.x;   aim.head_y = sc.y;    aim.head_ok = ok;   break;
+                case 1: aim.chest_x = sc.x;  aim.chest_y = sc.y;   aim.chest_ok = ok;  break;
+                default: aim.pelvis_x = sc.x; aim.pelvis_y = sc.y; aim.pelvis_ok = ok; break;
+            }
+        }
+        g_aim_targets.push_back(aim);
     }
 
     return result;
+}
+
+std::vector<EspAimTarget> esp_get_aim_targets() {
+    return g_aim_targets;
+}
+
+bool esp_is_local_aiming() {
+    if (g_pid <= 0 || !g_il2cpp_base) return false;
+    if (!g_game_controller_class && GAME_CONTROLLER_TYPEINFO_RVA != 0) {
+        uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
+        if (candidate) {
+            std::string name = read_remote_string(rd_ptr(candidate + 0x10));
+            std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
+            if (name == "GameControllerBase" && ns == "Oxide")
+                g_game_controller_class = candidate;
+        }
+    }
+    if (!g_game_controller_class) return false;
+    uint64_t sf = get_class_static_fields(g_game_controller_class);
+    if (!sf) return false;
+    uint64_t handler = rd_ptr(sf + GAME_CONTROLLER_INPUT_HANDLER_FIELD);
+    if (!handler) return false;
+    uint8_t aim = rd<uint8_t>(handler + PLAYER_INPUT_STRUCT_OFFSET + PLAYER_INPUT_AIM_OFFSET);
+    return aim != 0;
 }

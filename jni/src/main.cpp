@@ -530,6 +530,7 @@ struct AppState {
 
     int   cur_tab = 0;
     bool  aim_touch = false, aim_pos = false, aim_special = false;
+    bool  aim_ads_only = false;
     int   aim_bone = 0;
     bool  esp_box = false, esp_name = false, esp_hp = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = false, esp_skeleton = false;
@@ -538,7 +539,7 @@ struct AppState {
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
-    float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0;
+    float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_ads = 0;
     float a_aim_head  = 1, a_aim_chest = 0, a_aim_pelvis = 0;
     RadioAnim ra_aim_head, ra_aim_chest, ra_aim_pelvis;
     float a_esp_box = 0, a_esp_name = 0, a_esp_hp = 0, a_esp_wall = 0, a_esp_chams = 0;
@@ -716,6 +717,7 @@ struct CfgBlob {
     uint32_t magic;
     uint32_t version;
     bool  aim_touch, aim_pos, aim_special;
+    bool  aim_ads_only;
     int   aim_bone;
     bool  aim_vis_check, aim_draw_fov;
     float aim_fov, aim_smoothness;
@@ -734,9 +736,10 @@ struct CfgBlob {
 static void ConfigSaveToPath(const std::string& path) {
     CfgBlob s;
     s.magic   = 0x58564345U;
-    s.version = 4;
+    s.version = 5;
     s.aim_touch   = g_state.aim_touch;   s.aim_pos     = g_state.aim_pos;
     s.aim_special = g_state.aim_special;
+    s.aim_ads_only = g_state.aim_ads_only;
     s.aim_bone    = g_state.aim_bone;
     s.aim_vis_check  = cfg::aim::vis_check;
     s.aim_draw_fov   = cfg::aim::draw_fov;
@@ -820,10 +823,11 @@ static void ConfigLoad(int idx) {
     if (got != sizeof(buf)) { ShowToast(XS("Несовместимый конфиг")); return; }
     XorBuf(buf, sizeof(s));
     memcpy(&s, buf, sizeof(s));
-    if (s.magic != 0x58564345U || s.version != 4) { ShowToast(XS("Старый конфиг — пересохрани")); return; }
+    if (s.magic != 0x58564345U || s.version != 5) { ShowToast(XS("Старый конфиг — пересохрани")); return; }
 
     g_state.aim_touch   = s.aim_touch;   g_state.aim_pos     = s.aim_pos;
     g_state.aim_special = s.aim_special;
+    g_state.aim_ads_only = s.aim_ads_only;
     g_state.aim_bone    = s.aim_bone;
     cfg::aim::vis_check  = s.aim_vis_check;
     cfg::aim::draw_fov   = s.aim_draw_fov;
@@ -2227,10 +2231,11 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
 
         SHdr(XS("Аимбот"));
-        CardBg(Layout::RowH * 3);
-        ToggleRow("##ta1", XS("Включить аимбот"),    &g_state.aim_touch,   g_state.a_aim_touch, false, true);
-        ToggleRow("##ta2", XS("Проверка видимости"),  &g_state.aim_pos,     g_state.a_aim_pos,   false);
-        ToggleRow("##ta3", XS("Показывать FOV круг"), &g_state.aim_special, g_state.a_aim_spec,  true);
+        CardBg(Layout::RowH * 4);
+        ToggleRow("##ta1", XS("Включить аимбот"),     &g_state.aim_touch,    g_state.a_aim_touch, false, true);
+        ToggleRow("##ta2", XS("Проверка видимости"),  &g_state.aim_pos,      g_state.a_aim_pos,   false);
+        ToggleRow("##ta3", XS("Только с прицелом"),   &g_state.aim_ads_only, g_state.a_aim_ads,   false);
+        ToggleRow("##ta4", XS("Показывать FOV круг"), &g_state.aim_special,  g_state.a_aim_spec,  true);
 
         SHdr(XS("FOV аимбота"));
         CardBg(Layout::SliderH);
@@ -2641,6 +2646,14 @@ static void UpdateAim(float dt) {
         return;
     }
 
+    // "Только с прицелом": аим активен лишь пока удерживается прицеливание
+    // (PlayerInput.Aim локального игрока).
+    if (g_state.aim_ads_only && !esp_is_local_aiming()) {
+        if (s_fingerDown) { Touch_Up(); s_fingerDown = false; }
+        s_lastTx = -1e9f;
+        return;
+    }
+
     float sw = (float) native_window_screen_x;
     float sh = (float) native_window_screen_y;
     if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
@@ -2656,24 +2669,28 @@ static void UpdateAim(float dt) {
         return;
     }
 
+    // Aim at exact world-space bone points projected through the live camera
+    // (computed during the esp_get_boxes call above) instead of fractions of the
+    // screen-space bounding box.
+    std::vector<EspAimTarget> targets = esp_get_aim_targets();
+    if (targets.size() > boxes.size()) targets.resize(boxes.size());
+
     const float crossX = sw * 0.5f, crossY = sh * 0.5f;
     const float fovR = AimFovRadiusPx(sw, sh);
-    const float boneFrac = (g_state.aim_bone == 0) ? 0.06f
-                       : (g_state.aim_bone == 1) ? 0.28f
-                                                  : 0.47f;
 
     int   best = -1;
     float bestScore = 1e18f, bestX = 0.f, bestY = 0.f;
-    for (size_t i = 0; i < boxes.size(); ++i) {
-        const EspBox& b = boxes[i];
-        if (!std::isfinite(b.x1) || !std::isfinite(b.y1) ||
-            !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
-        float h = b.y2 - b.y1;
-        if (h < 4.f || h > sh * 4.f) continue;
-        float px = (b.x1 + b.x2) * 0.5f;
-        float py = b.y1 + boneFrac * h;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        const EspAimTarget& t = targets[i];
+        float px, py;
+        bool  pok;
+        if (g_state.aim_bone == 0)      { px = t.head_x;   py = t.head_y;   pok = t.head_ok; }
+        else if (g_state.aim_bone == 1) { px = t.chest_x;  py = t.chest_y;  pok = t.chest_ok; }
+        else                            { px = t.pelvis_x; py = t.pelvis_y; pok = t.pelvis_ok; }
+        if (!pok) continue;
+        if (!std::isfinite(px) || !std::isfinite(py)) continue;
         if (px < -60.f || px > sw + 60.f || py < -60.f || py > sh + 60.f) continue;
-        if (g_state.aim_pos && (b.x1 < 0.f || b.y1 < 0.f || b.x2 > sw || b.y2 > sh)) continue;
+        if (g_state.aim_pos && (t.box_x1 < 0.f || t.box_y1 < 0.f || t.box_x2 > sw || t.box_y2 > sh)) continue;
         float dx = px - crossX, dy = py - crossY;
         float d = sqrtf(dx * dx + dy * dy);
         if (d > fovR) continue;
@@ -2742,6 +2759,7 @@ void RenderMenu() {
     CfgWatchTick();
     Tick(g_themeT, g_darkTheme, dt, 6.f);
     Tick(g_state.a_aim_touch,  g_state.aim_touch,          dt);
+    Tick(g_state.a_aim_ads,    g_state.aim_ads_only,       dt);
     Tick(g_state.a_aim_pos,    g_state.aim_pos,            dt);
     Tick(g_state.a_aim_head,   g_state.aim_bone == 0,      dt);
     Tick(g_state.a_aim_chest,  g_state.aim_bone == 1,      dt);
