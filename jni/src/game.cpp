@@ -42,18 +42,25 @@ static bool g_transform_hierarchy_layout_valid = false;
 
 static bool      g_use_direct_player_position = true;
 static bool      g_player_position_validated = false;
-// Positions from the native transform hierarchy are frame-accurate (the exact matrices
-// Unity renders this frame); managed fields like lastTickPosition lag one game tick
-// behind, which shows as ESP boxes trailing moving players.
-static bool      g_fresh_hierarchy_position = false;
-// Hierarchy reads return the camera-root world position (~1.6m above the feet);
-// managed Vector3 fields are feet-level. Applied when building the ESP box.
-static float     g_position_height_above_feet = 0.0F;
-// Circuit breaker: if fresh reads are attempted but never accepted for many frames,
-// the hierarchy layout is useless for this session - stop paying for it.
-static int       g_fresh_reads_frame = 0;
-static int       g_fresh_accepts_frame = 0;
-static int       g_fresh_useless_streak = 0;
+
+// Freshness self-tuner. The managed Vector3 fields include both rarely-updated
+// snapshots (lastTickPosition feeds the anticheat and can lag a full tick or more)
+// and frame-fresh positions. Discovery can only rank them by coordinate spread, so
+// at runtime we compare each candidate against the one live reference we trust -
+// the local camera eye position from the view matrix - and switch to the field
+// that stays closest to it. Only the extent-validated candidates below may win,
+// and switching requires a consistent margin plus a cooldown, so a stale pick
+// degrades to the original behavior rather than to garbage.
+static constexpr int kPositionCandidateCount = 6;
+static const uint64_t kPositionCandidates[kPositionCandidateCount] = {PLAYER_POSITION, 0x1DC, 0x1E8, 0x2D8, 0x2E4, 0x338};
+static float g_candidate_ema[kPositionCandidateCount] = {-1.F, -1.F, -1.F, -1.F, -1.F, -1.F};
+static int   g_tuner_frames = 0;
+static int   g_tuner_hold = 0;
+
+static float vec3_distance_to(const Vec3& a, const Vec3& b) {
+    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+    return sqrtf(dx * dx + dy * dy + dz * dz);
+}
 
 static bool vec3_is_finite(const Vec3& value);
 
@@ -213,11 +220,6 @@ static uint64_t resolve_native_transform(uint64_t transform) {
 static bool vec3_is_finite(const Vec3& value) {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z) &&
         fabsf(value.x) < 1000000.0F && fabsf(value.y) < 1000000.0F && fabsf(value.z) < 1000000.0F;
-}
-
-static float vec3_distance_squared(const Vec3& a, const Vec3& b) {
-    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-    return dx * dx + dy * dy + dz * dz;
 }
 
 static Vec3 cross_product(const Vec3& left, const Vec3& right) {
@@ -411,45 +413,16 @@ static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& pla
     return true;
 }
 
-// Reads an entity position. Fresh hierarchy reads are used only when they agree with the
-// managed snapshot for the SAME entity right now (per-frame guard) - a stale or bogus
-// hierarchy (e.g. idle camera roots on remote rigs) can then never produce garbage boxes;
-// worst-case error is bounded by the guard tolerance. height_above_feet reports which
-// reference the returned position uses (hierarchy reads sit at camera-root height).
-static bool read_entity_position(uint64_t source, Vec3& position, float* height_above_feet = nullptr) {
+static bool read_entity_position(uint64_t source, Vec3& position) {
     if (!source) return false;
-    if (height_above_feet) *height_above_feet = 0.0F;
-
-    Vec3 managed{};
-    bool have_managed = false;
-    if (g_use_direct_player_position && g_player_position_offset != 0) {
-        managed = rd_v3(source + g_player_position_offset);
-        have_managed = vec3_is_finite(managed);
-    }
-
-    if (g_fresh_hierarchy_position && g_transform_hierarchy_layout_valid) {
-        uint64_t native = resolve_player_native_transform(source);
-        Vec3 fresh{};
-        if (native && read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, fresh) && vec3_is_finite(fresh)) {
-            ++g_fresh_reads_frame;
-            constexpr float FRESH_GUARD_TOLERANCE = 3.5F; // eye height + one tick of movement
-            if (have_managed && vec3_distance_squared(fresh, managed) <= FRESH_GUARD_TOLERANCE * FRESH_GUARD_TOLERANCE) {
-                ++g_fresh_accepts_frame;
-                if (height_above_feet) *height_above_feet = g_position_height_above_feet;
-                position = fresh;
-                return true;
-            }
-        }
-    }
-
-    if (have_managed) { position = managed; return true; }
+    if (g_use_direct_player_position && g_player_position_offset != 0) { position = rd_v3(source + g_player_position_offset); return vec3_is_finite(position); }
     uint64_t native = resolve_player_native_transform(source);
     if (!native) return false;
     return read_transform_hierarchy_position(native, position);
 }
 
 static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
-    if (!source || !g_transform_hierarchy_layout_valid) return false;
+    if (!source || g_use_direct_player_position || !g_transform_hierarchy_layout_valid) return false;
     uint64_t native = resolve_player_native_transform(source);
     if (!native) return false;
     return read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, position, &rotation);
@@ -481,62 +454,25 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
     return true;
 }
 
-// The hierarchy read returns the camera-root world position (~1.6m above the feet) while
-// the managed Vector3 fields are feet-level, so the tolerance absorbs the height delta
-// plus one tick of movement. A bogus layout read produces garbage far outside it.
-static bool hierarchy_positions_match_managed(const std::vector<uint64_t>& players, const uint64_t* managed_offsets, size_t offset_count, float tolerance = 4.0F) {
-    size_t compared = 0, matched = 0;
-    for (uint64_t player : players) {
-        if (!player) continue;
-        uint64_t native = resolve_player_native_transform(player);
-        if (!native) continue;
-        Vec3 fresh{};
-        if (!read_transform_hierarchy_position(native, fresh)) continue;
-        bool ok = false;
-        for (size_t index = 0; index < offset_count && !ok; ++index) {
-            Vec3 managed_pos = rd_v3(player + managed_offsets[index]);
-            if (!vec3_is_finite(managed_pos)) continue;
-            float dx = fresh.x - managed_pos.x, dy = fresh.y - managed_pos.y, dz = fresh.z - managed_pos.z;
-            if (dx * dx + dy * dy + dz * dz <= tolerance * tolerance) ok = true;
-        }
-        ++compared;
-        if (ok) ++matched;
-    }
-    return compared >= 2 ? matched * 2 > compared : matched >= 1; // strict majority
-}
-
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    const uint64_t known_offsets[] = {PLAYER_POSITION, 0x1DC, 0x1E8, 0x2D8, 0x2E4, 0x338};
+    const uint64_t known_offsets[] = {0x1D0, 0x1DC, 0x1E8, 0x2D8, 0x2E4, 0x338};
     uint64_t best_offset = 0;
     double best_score = 0.0;
     for (uint64_t offset : known_offsets) {
         double score = 0.0;
         if (evaluate_player_position_offset(players, offset, score) && score > best_score) { best_offset = offset; best_score = score; }
     }
-
-    // Prefer the native transform hierarchy: those matrices are what the engine renders
-    // this exact frame, so boxes no longer trail moving players like the managed
-    // lastTickPosition does. The managed offset stays configured as a per-read fallback.
-    size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
-    bool hierarchy_ok = discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count);
-    if (hierarchy_ok &&
-        (best_offset == 0 || hierarchy_positions_match_managed(players, known_offsets, sizeof(known_offsets) / sizeof(known_offsets[0])))) {
-        g_use_direct_player_position = (best_offset == 0);
-        g_player_position_offset = best_offset;
-        g_fresh_hierarchy_position = true;
-        g_position_height_above_feet = 1.60F;
-        g_player_position_validated = true; g_matrix_configuration_validated = false;
-        return true;
-    }
-
     if (best_offset) {
         g_use_direct_player_position = true; g_player_position_offset = best_offset;
-        g_fresh_hierarchy_position = false;
-        g_position_height_above_feet = 0.0F;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
         return true;
     }
-
+    size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
+    if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
+        g_use_direct_player_position = false;
+        g_player_position_validated = true; g_matrix_configuration_validated = false;
+        return true;
+    }
     return false;
 }
 
@@ -720,9 +656,10 @@ void esp_reset() {
     g_player_position_offset = PLAYER_POSITION;
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
-    g_fresh_hierarchy_position = false;
-    g_position_height_above_feet = 0.0F;
     g_player_position_validated = false;
+    for (int i = 0; i < kPositionCandidateCount; ++i) g_candidate_ema[i] = -1.0F;
+    g_tuner_frames = 0;
+    g_tuner_hold = 0;
 }
 
 
@@ -730,19 +667,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
-
-    // Process the previous frame's fresh-read stats: disable the hierarchy path
-    // entirely when the per-frame guard never accepts anything for ~2 seconds.
-    if (g_fresh_reads_frame > 0 && g_fresh_accepts_frame == 0) {
-        if (++g_fresh_useless_streak > 120) {
-            g_fresh_hierarchy_position = false;
-            g_fresh_useless_streak = 0;
-        }
-    } else {
-        g_fresh_useless_streak = 0;
-    }
-    g_fresh_reads_frame = 0;
-    g_fresh_accepts_frame = 0;
 
     uint64_t native_cam = 0;
     Mat4 projection{}, view{}, vp{};
@@ -787,10 +711,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     bool has_local_position = false;
     Vec3 local{};
     size_t local_entity_index = s_transforms.size();
+    Vec3 camera_position{};
+    bool has_camera_position = false;
 
     {
-        Vec3 camera_position{};
-        bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
+        has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
         double nearest_distance_squared = INFINITY;
         size_t first_valid_index = s_transforms.size();
         Vec3 first_valid_position{};
@@ -815,6 +740,41 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
     }
 
+    // Freshness self-tuner: track how far each candidate position field of the local
+    // player sits from the live camera eye. A frame-fresh field stays ~1.6m away (eye
+    // height); a tick-stale snapshot drifts further whenever the local player moves.
+    if (has_camera_position && local_entity_index < s_transforms.size()) {
+        uint64_t local_source = s_transforms[local_entity_index];
+        for (int i = 0; i < kPositionCandidateCount; ++i) {
+            Vec3 v = rd_v3(local_source + kPositionCandidates[i]);
+            if (!vec3_is_finite(v)) continue;
+            float d = vec3_distance_to(v, camera_position);
+            g_candidate_ema[i] = g_candidate_ema[i] < 0.0F ? d : g_candidate_ema[i] + (d - g_candidate_ema[i]) * 0.05F;
+        }
+        ++g_tuner_frames;
+        if (g_tuner_hold > 0) {
+            --g_tuner_hold;
+        } else if (g_tuner_frames % 300 == 0) {
+            int current = -1;
+            for (int i = 0; i < kPositionCandidateCount; ++i)
+                if (kPositionCandidates[i] == g_player_position_offset) current = i;
+            if (current >= 0 && g_candidate_ema[current] >= 0.0F) {
+                int best = current;
+                for (int i = 0; i < kPositionCandidateCount; ++i) {
+                    if (i == current || g_candidate_ema[i] < 0.0F) continue;
+                    if (g_candidate_ema[i] >= 8.0F) continue;                 // must be a plausible current position
+                    if (g_candidate_ema[i] + 0.3F < g_candidate_ema[best]) best = i; // consistently closer to the eye
+                }
+                if (best != current) {
+                    g_player_position_offset = kPositionCandidates[best];
+                    g_tuner_hold = 600;
+                }
+            }
+        }
+    } else {
+        g_tuner_frames = 0;
+    }
+
     Vec3 transform_camera_position{};
     Vec4 transform_camera_rotation{};
     if (transform_camera_mode) {
@@ -829,8 +789,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (i == local_entity_index) continue;
         if (!s_transforms[i]) continue;
         Vec3 feet{};
-        float feet_height_offset = 0.0F;
-        if (!read_entity_position(s_transforms[i], feet, &feet_height_offset)) continue;
+        if (!read_entity_position(s_transforms[i], feet)) continue;
 
         float distance = -1.0F;
         if (has_local_position) {
@@ -839,8 +798,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
 
-        Vec3 body_bottom = {feet.x, feet.y - feet_height_offset, feet.z};
-        Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT - feet_height_offset, feet.z};
+        Vec3 body_bottom = {feet.x, feet.y, feet.z};
+        Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT, feet.z};
+        if (transform_camera_mode) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
 
         Vec2 sf{}, sh2{};
         bool bottom_visible = transform_camera_mode
