@@ -15,9 +15,10 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 
 // Aim points are exact world-space offsets above the feet, projected through the
 // live camera (standing model proportions).
-inline constexpr float BONE_HEAD_HEIGHT   = 1.64F;
-inline constexpr float BONE_CHEST_HEIGHT  = 1.28F;
-inline constexpr float BONE_PELVIS_HEIGHT = 0.95F;
+// Fixed values to aim at actual head height instead of above the head.
+inline constexpr float BONE_HEAD_HEIGHT   = 1.50F;
+inline constexpr float BONE_CHEST_HEIGHT  = 1.20F;
+inline constexpr float BONE_PELVIS_HEIGHT = 0.85F;
 
 // Source: dump arm64-v8a 1.13.11888 (Il2CppDumper output: dump.cs / il2cpp.h / script.json)
 // PlayerManager (Oxide)   TypeInfo ptr RVA: script.json TypeInfoPointers -> Oxide.PlayerManager
