@@ -7,7 +7,9 @@
 #include <stdio.h>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <unistd.h>
@@ -60,6 +62,78 @@ static int   g_tuner_hold = 0;
 static float vec3_distance_to(const Vec3& a, const Vec3& b) {
     float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
     return sqrtf(dx * dx + dy * dy + dz * dz);
+}
+
+// Dead reckoning: the managed position fields are tick snapshots and can lag running
+// players by meters. Per entity we estimate velocity from consecutive value changes and
+// extrapolate by the time elapsed since the last change. Everything is bounded: the
+// horizon is a fraction of the observed update interval (<=0.4s), speed is capped, and
+// teleports zero the velocity - so the worst case is the raw snapshot, never garbage.
+static bool vec3_is_finite(const Vec3& value);
+
+struct EntityMotion {
+    Vec3   pos{};
+    Vec3   velocity{};
+    double last_change_time = 0;
+    double interval = 0.1; // EMA of seconds between observed value changes
+    bool   has_prev = false;
+};
+static std::unordered_map<uint64_t, EntityMotion> g_entity_motion;
+
+static double monotonic_seconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static void apply_dead_reckoning(uint64_t source, Vec3& position) {
+    constexpr double kChangeEpsilonSq = 0.0001F; // 1cm
+    constexpr float  kMaxSpeed = 25.0F;
+    constexpr float  kTeleportDistSq = 225.0F;   // >15m in one step
+    constexpr float  kMinHorizon = 0.05F;
+    constexpr float  kMaxHorizon = 0.4F;
+
+    double now = monotonic_seconds();
+    if (g_entity_motion.size() > 1024) g_entity_motion.clear();
+    EntityMotion& m = g_entity_motion[source];
+
+    if (!m.has_prev) {
+        m.pos = position;
+        m.last_change_time = now;
+        m.has_prev = true;
+        return;
+    }
+
+    Vec3 delta = {position.x - m.pos.x, position.y - m.pos.y, position.z - m.pos.z};
+    float moved_sq = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
+    if (moved_sq > kChangeEpsilonSq) {
+        double dt = now - m.last_change_time;
+        if (moved_sq >= kTeleportDistSq) {
+            m.velocity = {};
+        } else if (dt > 0.001) {
+            Vec3 vel = {(float)(delta.x / dt), (float)(delta.y / dt), (float)(delta.z / dt)};
+            float speed_sq = vel.x * vel.x + vel.y * vel.y + vel.z * vel.z;
+            if (speed_sq > kMaxSpeed * kMaxSpeed) {
+                float scale = kMaxSpeed / sqrtf(speed_sq);
+                vel = {vel.x * scale, vel.y * scale, vel.z * scale};
+            }
+            m.velocity = vel;
+        }
+        double clamped_dt = dt < 0.02 ? 0.02 : (dt > 2.0 ? 2.0 : dt);
+        m.interval = (float)(m.interval * 0.8 + clamped_dt * 0.2);
+        m.pos = position;
+        m.last_change_time = now;
+    } else {
+        m.pos = position; // same snapshot, keep timing
+    }
+
+    double since_change = now - m.last_change_time;
+    float horizon = m.interval * 0.8F;
+    if (horizon > kMaxHorizon) horizon = kMaxHorizon;
+    if (horizon < kMinHorizon) horizon = kMinHorizon;
+    float t = (float)(since_change < 0.0 ? 0.0 : (since_change > (double)horizon ? (double)horizon : since_change));
+    position.x += m.velocity.x * t;
+    position.y += m.velocity.y * t;
+    position.z += m.velocity.z * t;
+    if (!vec3_is_finite(position)) position = m.pos;
 }
 
 static bool vec3_is_finite(const Vec3& value);
@@ -415,7 +489,12 @@ static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& pla
 
 static bool read_entity_position(uint64_t source, Vec3& position) {
     if (!source) return false;
-    if (g_use_direct_player_position && g_player_position_offset != 0) { position = rd_v3(source + g_player_position_offset); return vec3_is_finite(position); }
+    if (g_use_direct_player_position && g_player_position_offset != 0) {
+        position = rd_v3(source + g_player_position_offset);
+        if (!vec3_is_finite(position)) return false;
+        apply_dead_reckoning(source, position);
+        return true;
+    }
     uint64_t native = resolve_player_native_transform(source);
     if (!native) return false;
     return read_transform_hierarchy_position(native, position);
@@ -660,6 +739,7 @@ void esp_reset() {
     for (int i = 0; i < kPositionCandidateCount; ++i) g_candidate_ema[i] = -1.0F;
     g_tuner_frames = 0;
     g_tuner_hold = 0;
+    g_entity_motion.clear();
 }
 
 
