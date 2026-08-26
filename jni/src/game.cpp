@@ -59,6 +59,19 @@ static float g_candidate_ema[kPositionCandidateCount] = {-1.F, -1.F, -1.F, -1.F,
 static int   g_tuner_frames = 0;
 static int   g_tuner_hold = 0;
 
+// Vertical calibration of the position field. The Vector3 we read is NOT
+// guaranteed to sit at feet level - depending on the field it can be the feet
+// pivot, the chest or the head/camera root. Aiming code used to assume feet and
+// add bone heights on top, which shifts every aim point a full body upward when
+// the field is actually head-level. We measure the truth at runtime: the local
+// player's camera eye (from the view matrix) sits ~EYE_ABOVE_FEET above the feet,
+// and the local player's position comes from the very same field as everyone
+// else's, so (eye.y - local_pos.y) tells how high the field itself is:
+//   field_height_above_feet = EYE_ABOVE_FEET - (eye.y - local_pos.y)
+// EMA-smoothed to ride out jumps/crouches; unset until the first valid sample
+// (then we fall back to the feet-level assumption, the previous behavior).
+static float g_eye_dy_ema = -1000.0F;
+
 static float vec3_distance_to(const Vec3& a, const Vec3& b) {
     float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
     return sqrtf(dx * dx + dy * dy + dz * dz);
@@ -743,6 +756,7 @@ void esp_reset() {
     for (int i = 0; i < kPositionCandidateCount; ++i) g_candidate_ema[i] = -1.0F;
     g_tuner_frames = 0;
     g_tuner_hold = 0;
+    g_eye_dy_ema = -1000.0F;
     g_entity_motion.clear();
     g_aim_targets.clear();
 }
@@ -829,6 +843,16 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
             g_player_position_validated = false;
             return result;
         }
+
+        // Calibrate how high the position field sits above the feet. The camera
+        // eye is ~EYE_ABOVE_FEET over the local player's feet, and `local` is read
+        // from the same field used for every other player, so the vertical gap
+        // between the eye and the field reveals the field's own height.
+        if (has_camera_position) {
+            float dy = camera_position.y - local.y;
+            if (std::isfinite(dy) && fabsf(dy) < 4.0F)
+                g_eye_dy_ema = g_eye_dy_ema < -100.0F ? dy : g_eye_dy_ema + (dy - g_eye_dy_ema) * 0.05F;
+        }
     }
 
     // Freshness self-tuner: track how far each candidate position field of the local
@@ -859,6 +883,9 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
                 if (best != current) {
                     g_player_position_offset = kPositionCandidates[best];
                     g_tuner_hold = 600;
+                    // A different field can sit at a different height above the
+                    // feet - recalibrate the vertical correction from scratch.
+                    g_eye_dy_ema = -1000.0F;
                 }
             }
         }
@@ -889,9 +916,19 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
 
+        // Convert the raw position field to true FEET level before building
+        // geometry, so boxes and aim bones share one anatomically correct base.
+        // - transform camera mode reads worldCameraRoot, which sits at eye level;
+        // - direct mode uses the runtime calibration measured against the local
+        //   camera eye (g_eye_dy_ema); until calibrated, assume feet level as before.
+        if (transform_camera_mode) {
+            feet.y -= EYE_ABOVE_FEET;
+        } else if (g_eye_dy_ema > -100.0F) {
+            feet.y -= EYE_ABOVE_FEET - g_eye_dy_ema;
+        }
+
         Vec3 body_bottom = {feet.x, feet.y, feet.z};
         Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT, feet.z};
-        if (transform_camera_mode) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
 
         Vec2 sf{}, sh2{};
         bool bottom_visible = transform_camera_mode

@@ -13,16 +13,18 @@ inline constexpr float PLAYER_BOX_WIDTH_RATIO = 0.40F;
 inline constexpr float MIN_PLAYER_DISTANCE    = 0.0F;
 inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 
-// Aim points are exact world-space offsets above the feet, projected through the
-// live camera (standing model proportions).
-// Fixed values to aim at actual head height instead of above the head.
-// ANALYSIS: Even with 0.30F the aim still targets above head,
-// so we try negative values. This suggests the 'feet' position read from game
-// memory is actually at the head/chest level, not the feet.
-// Negative values will aim below the 'feet' position, potentially at the actual torso.
-inline constexpr float BONE_HEAD_HEIGHT   = -0.50F; // Aim below feet if 'feet' is at head
-inline constexpr float BONE_CHEST_HEIGHT  = -1.00F; // Aim lower
-inline constexpr float BONE_PELVIS_HEIGHT = -1.50F; // Aim even lower
+// Aim points are exact world-space offsets above the FEET, projected through the
+// live camera (standing model proportions, PLAYER_HEIGHT = 1.8m).
+// The entity position field read from memory is NOT assumed to be at feet level:
+// esp_get_boxes calibrates its real height above the feet at runtime by comparing
+// the local player's position (same field) against the camera eye from the view
+// matrix (eye sits ~EYE_ABOVE_FEET over the feet). The measured offset is
+// subtracted before these bone heights are applied, so aim stays anatomically
+// correct no matter which position field the freshness tuner picks.
+inline constexpr float EYE_ABOVE_FEET     = 1.60F; // camera eye height over the feet
+inline constexpr float BONE_HEAD_HEIGHT   = 1.58F; // face/neck - reliable head hit
+inline constexpr float BONE_CHEST_HEIGHT  = 1.20F; // center of the torso
+inline constexpr float BONE_PELVIS_HEIGHT = 0.85F; // pelvis/upper legs
 
 // Source: dump arm64-v8a 1.13.11888 (Il2CppDumper output: dump.cs / il2cpp.h / script.json)
 // PlayerManager (Oxide)   TypeInfo ptr RVA: script.json TypeInfoPointers -> Oxide.PlayerManager
