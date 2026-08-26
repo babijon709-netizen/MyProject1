@@ -49,6 +49,11 @@ static bool      g_fresh_hierarchy_position = false;
 // Hierarchy reads return the camera-root world position (~1.6m above the feet);
 // managed Vector3 fields are feet-level. Applied when building the ESP box.
 static float     g_position_height_above_feet = 0.0F;
+// Circuit breaker: if fresh reads are attempted but never accepted for many frames,
+// the hierarchy layout is useless for this session - stop paying for it.
+static int       g_fresh_reads_frame = 0;
+static int       g_fresh_accepts_frame = 0;
+static int       g_fresh_useless_streak = 0;
 
 static bool vec3_is_finite(const Vec3& value);
 
@@ -208,6 +213,11 @@ static uint64_t resolve_native_transform(uint64_t transform) {
 static bool vec3_is_finite(const Vec3& value) {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z) &&
         fabsf(value.x) < 1000000.0F && fabsf(value.y) < 1000000.0F && fabsf(value.z) < 1000000.0F;
+}
+
+static float vec3_distance_squared(const Vec3& a, const Vec3& b) {
+    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+    return dx * dx + dy * dy + dz * dz;
 }
 
 static Vec3 cross_product(const Vec3& left, const Vec3& right) {
@@ -401,17 +411,38 @@ static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& pla
     return true;
 }
 
-static bool read_entity_position(uint64_t source, Vec3& position) {
+// Reads an entity position. Fresh hierarchy reads are used only when they agree with the
+// managed snapshot for the SAME entity right now (per-frame guard) - a stale or bogus
+// hierarchy (e.g. idle camera roots on remote rigs) can then never produce garbage boxes;
+// worst-case error is bounded by the guard tolerance. height_above_feet reports which
+// reference the returned position uses (hierarchy reads sit at camera-root height).
+static bool read_entity_position(uint64_t source, Vec3& position, float* height_above_feet = nullptr) {
     if (!source) return false;
+    if (height_above_feet) *height_above_feet = 0.0F;
+
+    Vec3 managed{};
+    bool have_managed = false;
+    if (g_use_direct_player_position && g_player_position_offset != 0) {
+        managed = rd_v3(source + g_player_position_offset);
+        have_managed = vec3_is_finite(managed);
+    }
+
     if (g_fresh_hierarchy_position && g_transform_hierarchy_layout_valid) {
         uint64_t native = resolve_player_native_transform(source);
         Vec3 fresh{};
         if (native && read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, fresh) && vec3_is_finite(fresh)) {
-            position = fresh;
-            return true;
+            ++g_fresh_reads_frame;
+            constexpr float FRESH_GUARD_TOLERANCE = 3.5F; // eye height + one tick of movement
+            if (have_managed && vec3_distance_squared(fresh, managed) <= FRESH_GUARD_TOLERANCE * FRESH_GUARD_TOLERANCE) {
+                ++g_fresh_accepts_frame;
+                if (height_above_feet) *height_above_feet = g_position_height_above_feet;
+                position = fresh;
+                return true;
+            }
         }
     }
-    if (g_use_direct_player_position && g_player_position_offset != 0) { position = rd_v3(source + g_player_position_offset); return vec3_is_finite(position); }
+
+    if (have_managed) { position = managed; return true; }
     uint64_t native = resolve_player_native_transform(source);
     if (!native) return false;
     return read_transform_hierarchy_position(native, position);
@@ -471,7 +502,7 @@ static bool hierarchy_positions_match_managed(const std::vector<uint64_t>& playe
         ++compared;
         if (ok) ++matched;
     }
-    return compared >= 2 ? matched * 2 >= compared : matched >= 1;
+    return compared >= 2 ? matched * 2 > compared : matched >= 1; // strict majority
 }
 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
@@ -700,6 +731,20 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
 
+    // Process the previous frame's fresh-read stats: disable the hierarchy path
+    // entirely when the per-frame guard never accepts anything for ~2 seconds.
+    if (g_fresh_reads_frame > 0 && g_fresh_accepts_frame == 0) {
+        if (++g_fresh_useless_streak > 120) {
+            g_fresh_hierarchy_position = false;
+            g_fresh_useless_streak = 0;
+        }
+    } else {
+        g_fresh_useless_streak = 0;
+    }
+    g_fresh_reads_frame = 0;
+    g_fresh_accepts_frame = 0;
+
+    uint64_t native_cam = 0;
     Mat4 projection{}, view{}, vp{};
     float sw = overlay_width >= 100 ? (float)overlay_width : 1080.0F;
     float sh = overlay_height >= 100 ? (float)overlay_height : 2400.0F;
@@ -715,8 +760,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!discover_player_position_offset(s_transforms)) return result;
     }
 
-    bool camera_valid = false;
-    {
+    bool transform_camera_mode = !g_use_direct_player_position && g_transform_hierarchy_layout_valid;
+    if (!transform_camera_mode) {
         uint64_t managed_cam = 0;
         if (g_game_controller_class) {
             uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
@@ -725,28 +770,18 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
             }
         }
-        if (managed_cam) {
-            uint64_t candidate_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-            if (candidate_cam) {
-                Mat4 candidate_projection = rd_m4(candidate_cam + CAMERA_PROJECTION_MATRIX);
-                Mat4 candidate_view = rd_m4(candidate_cam + CAMERA_VIEW_MATRIX);
-                if (matrix_is_finite(candidate_projection) && matrix_is_finite(candidate_view)) {
-                    if (!g_matrix_configuration_validated && !optimize_matrix_configuration(candidate_cam, s_transforms)) {
-                        // camera validation failed - fall through to the transform camera
-                    } else {
-                        projection = rd_m4(candidate_cam + CAMERA_PROJECTION_MATRIX);
-                        view = rd_m4(candidate_cam + CAMERA_VIEW_MATRIX);
-                        vp = mat_mul(projection, view);
-                        camera_valid = true;
-                    }
-                }
-            }
+        if (!managed_cam) { return result; }
+        native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
+        if (!native_cam) return result;
+        projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
+        view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
+        if (!matrix_is_finite(projection) || !matrix_is_finite(view)) { return result; }
+        if (!g_matrix_configuration_validated) {
+            if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
+            projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
+            view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
         }
-    }
-    bool transform_camera_mode = false;
-    if (!camera_valid) {
-        if (!g_transform_hierarchy_layout_valid) { return result; }
-        transform_camera_mode = true;
+        vp = mat_mul(projection, view);
     }
 
     bool has_local_position = false;
@@ -794,7 +829,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (i == local_entity_index) continue;
         if (!s_transforms[i]) continue;
         Vec3 feet{};
-        if (!read_entity_position(s_transforms[i], feet)) continue;
+        float feet_height_offset = 0.0F;
+        if (!read_entity_position(s_transforms[i], feet, &feet_height_offset)) continue;
 
         float distance = -1.0F;
         if (has_local_position) {
@@ -803,8 +839,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
 
-        Vec3 body_bottom = {feet.x, feet.y - g_position_height_above_feet, feet.z};
-        Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT - g_position_height_above_feet, feet.z};
+        Vec3 body_bottom = {feet.x, feet.y - feet_height_offset, feet.z};
+        Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT - feet_height_offset, feet.z};
 
         Vec2 sf{}, sh2{};
         bool bottom_visible = transform_camera_mode
