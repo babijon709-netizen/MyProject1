@@ -10,7 +10,6 @@
 #include <chrono>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -27,67 +26,17 @@ static uint64_t  g_player_manager_class = 0;
 static uint64_t  g_player_manager_static_fields = 0;
 static uint64_t  g_game_controller_class = 0;
 static uint64_t  g_local_player = 0;
-static bool      g_matrix_configuration_validated = false;
-static bool      g_camera_matrix_physical_match = false;
-static uint64_t  g_player_position_offset = PLAYER_POSITION;
-
-struct TransformHierarchyLayout {
-    uint64_t data_offset = 0x38;
-    uint64_t index_offset = 0x40;
-    uint64_t matrices_offset = 0x18;
-    uint64_t indices_offset = 0x20;
-    bool matrices_indirect = false;
-    bool indices_indirect = false;
-};
-static TransformHierarchyLayout g_transform_hierarchy_layout{};
-static bool g_transform_hierarchy_layout_valid = false;
-
-static bool      g_use_direct_player_position = true;
-static bool      g_player_position_validated = false;
-
-// Freshness self-tuner. The managed Vector3 fields include both rarely-updated
-// snapshots (lastTickPosition feeds the anticheat and can lag a full tick or more)
-// and frame-fresh positions. Discovery can only rank them by coordinate spread, so
-// at runtime we compare each candidate against the one live reference we trust -
-// the local camera eye position from the view matrix - and switch to the field
-// that stays closest to it. Only the extent-validated candidates below may win,
-// and switching requires a consistent margin plus a cooldown, so a stale pick
-// degrades to the original behavior rather than to garbage.
-static constexpr int kPositionCandidateCount = 6;
-static const uint64_t kPositionCandidates[kPositionCandidateCount] = {PLAYER_POSITION, 0x1DC, 0x1E8, 0x2D8, 0x2E4, 0x338};
-static float g_candidate_ema[kPositionCandidateCount] = {-1.F, -1.F, -1.F, -1.F, -1.F, -1.F};
-static int   g_tuner_frames = 0;
-static int   g_tuner_hold = 0;
-
-// Vertical calibration of the position field. The Vector3 we read is NOT
-// guaranteed to sit at feet level - depending on the field it can be the feet
-// pivot, the chest or the head/camera root. Aiming code used to assume feet and
-// add bone heights on top, which shifts every aim point a full body upward when
-// the field is actually head-level. We measure the truth at runtime: the local
-// player's camera eye (from the view matrix) sits ~EYE_ABOVE_FEET above the feet,
-// and the local player's position comes from the very same field as everyone
-// else's, so (eye.y - local_pos.y) tells how high the field itself is:
-//   field_height_above_feet = EYE_ABOVE_FEET - (eye.y - local_pos.y)
-// EMA-smoothed to ride out jumps/crouches; unset until the first valid sample
-// (then we fall back to the feet-level assumption, the previous behavior).
-static float g_eye_dy_ema = -1000.0F;
-
-static float vec3_distance_to(const Vec3& a, const Vec3& b) {
-    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-    return sqrtf(dx * dx + dy * dy + dz * dz);
-}
 
 // Aim targets computed by esp_get_boxes for the current frame.
 static std::vector<EspAimTarget> g_aim_targets;
 static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_height);
 
-// Dead reckoning: the managed position fields are tick snapshots and can lag running
-// players by meters. Per entity we estimate velocity from consecutive value changes and
-// extrapolate by the time elapsed since the last change. Everything is bounded: the
-// horizon is a fraction of the observed update interval (<=0.4s), speed is capped, and
-// teleports zero the velocity - so the worst case is the raw snapshot, never garbage.
-static bool vec3_is_finite(const Vec3& value);
-
+// Dead reckoning: the managed position field (lastTickPosition) is a tick
+// snapshot and can lag running players by meters. Per entity we estimate
+// velocity from consecutive value changes and extrapolate by the time elapsed
+// since the last change. Everything is bounded: the horizon is a fraction of
+// the observed update interval (<=0.4s), speed is capped, and teleports zero
+// the velocity - so the worst case is the raw snapshot, never garbage.
 struct EntityMotion {
     Vec3   pos{};
     Vec3   velocity{};
@@ -150,10 +99,8 @@ static void apply_dead_reckoning(uint64_t source, Vec3& position) {
     position.x += m.velocity.x * t;
     position.y += m.velocity.y * t;
     position.z += m.velocity.z * t;
-    if (!vec3_is_finite(position)) position = m.pos;
+    if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)) position = m.pos;
 }
-
-static bool vec3_is_finite(const Vec3& value);
 
 template<typename T>
 static T rd(uint64_t addr) {
@@ -211,6 +158,8 @@ static uint64_t get_base(const char* lib) {
     return fallback;
 }
 
+// --- il2cpp runtime access --------------------------------------------------
+
 static bool validate_player_list(uint64_t list, uint64_t player_class) {
     if (!list || !player_class) return false;
     uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
@@ -243,6 +192,7 @@ static bool player_list_contains(uint64_t list, uint64_t player) {
     return false;
 }
 
+// Il2CppClass.static_fields (il2cpp v29+ layout, libil2cpp.so 6000.3.18f1).
 static constexpr uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
 
 static uint64_t get_class_static_fields(uint64_t klass) {
@@ -250,19 +200,19 @@ static uint64_t get_class_static_fields(uint64_t klass) {
     return rd_ptr(klass + IL2CPP_CLASS_STATIC_FIELDS);
 }
 
+static bool ensure_player_manager_class() {
+    if (g_player_manager_class || PLAYER_MANAGER_TYPEINFO_RVA == 0) return g_player_manager_class != 0;
+    uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
+    if (!candidate) return false;
+    std::string name = read_remote_string(rd_ptr(candidate + 0x10));
+    std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
+    if (name == "PlayerManager" && ns == "Oxide")
+        g_player_manager_class = candidate;
+    return g_player_manager_class != 0;
+}
+
 static uint64_t resolve_runtime_player_list() {
-    if (!g_player_manager_class && PLAYER_MANAGER_TYPEINFO_RVA != 0) {
-        uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
-        if (candidate) {
-            std::string name = read_remote_string(rd_ptr(candidate + 0x10));
-            std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
-            if (name == "PlayerManager" && ns == "Oxide")
-                g_player_manager_class = candidate;
-        }
-    }
-    if (!g_player_manager_class) {
-        return 0;
-    }
+    if (!ensure_player_manager_class()) return 0;
     if (!g_player_manager_static_fields)
         g_player_manager_static_fields = get_class_static_fields(g_player_manager_class);
     if (!g_player_manager_static_fields) {
@@ -276,22 +226,23 @@ static uint64_t resolve_runtime_player_list() {
     return list;
 }
 
+static bool ensure_game_controller_class() {
+    if (g_game_controller_class || GAME_CONTROLLER_TYPEINFO_RVA == 0) return g_game_controller_class != 0;
+    uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
+    if (!candidate) return false;
+    std::string name = read_remote_string(rd_ptr(candidate + 0x10));
+    std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
+    if (name == "GameControllerBase" && ns == "Oxide")
+        g_game_controller_class = candidate;
+    return g_game_controller_class != 0;
+}
+
 static uint64_t resolve_local_player() {
     if (g_local_player && rd_ptr(g_local_player) == g_player_manager_class)
         return g_local_player;
     g_local_player = 0;
 
-    if (!g_game_controller_class && GAME_CONTROLLER_TYPEINFO_RVA != 0) {
-        uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
-        if (candidate) {
-            std::string name = read_remote_string(rd_ptr(candidate + 0x10));
-            std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
-            if (name == "GameControllerBase" && ns == "Oxide")
-                g_game_controller_class = candidate;
-        }
-    }
-
-    if (!g_game_controller_class || !g_player_manager_class) return 0;
+    if (!ensure_player_manager_class() || !ensure_game_controller_class()) return 0;
 
     uint64_t gcb_static_fields = get_class_static_fields(g_game_controller_class);
     if (!gcb_static_fields) return 0;
@@ -303,6 +254,11 @@ static uint64_t resolve_local_player() {
     return 0;
 }
 
+// --- Native transform hierarchy (fixed layout) -------------------------------
+// Managed UnityEngine.Transform -> m_CachedPtr native transform. Unity 6 arm64
+// native transform layout (validated against libil2cpp.so transform access):
+//   +0x38 TransformData*, +0x40 transform index
+//   TransformData: +0x18 matrices (Matrix34[]), +0x20 parent indices (int[])
 static uint64_t resolve_native_transform(uint64_t transform) {
     if (!transform) return 0;
     return rd_ptr(transform + MANAGED_CACHED_PTR);
@@ -349,8 +305,8 @@ static bool matrix34_is_valid(const Matrix34& matrix) {
         matrix.scale.x, matrix.scale.y, matrix.scale.z, matrix.scale.w
     };
     for (float value : values) { if (!std::isfinite(value) || fabsf(value) > 1000000.0F) return false; }
-    float quaternion_length = matrix.rotation.x * matrix.rotation.x + matrix.rotation.y * matrix.rotation.y + matrix.rotation.z * matrix.rotation.z + matrix.rotation.w * matrix.rotation.w;
-    return quaternion_length >= 0.20F && quaternion_length <= 2.0F && fabsf(matrix.scale.x) <= 10000.0F && fabsf(matrix.scale.y) <= 10000.0F && fabsf(matrix.scale.z) <= 10000.0F;
+    float qlen = matrix.rotation.x * matrix.rotation.x + matrix.rotation.y * matrix.rotation.y + matrix.rotation.z * matrix.rotation.z + matrix.rotation.w * matrix.rotation.w;
+    return qlen >= 0.20F && qlen <= 2.0F && fabsf(matrix.scale.x) <= 10000.0F && fabsf(matrix.scale.y) <= 10000.0F && fabsf(matrix.scale.z) <= 10000.0F;
 }
 
 static bool read_transform_hierarchy_arrays(uint64_t matrices, uint64_t indices, int32_t transform_index, Vec3& position, Vec4* world_rotation = nullptr) {
@@ -382,50 +338,14 @@ static bool read_transform_hierarchy_arrays(uint64_t matrices, uint64_t indices,
     return true;
 }
 
-static bool read_transform_hierarchy_layout(uint64_t native_transform, const TransformHierarchyLayout& layout, Vec3& position, Vec4* world_rotation = nullptr) {
-    if (!native_transform) return false;
-    uint64_t transform_data = rd_ptr(native_transform + layout.data_offset);
-    int32_t transform_index = rd<int32_t>(native_transform + layout.index_offset);
-    if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
-    uint64_t matrices = rd_ptr(transform_data + layout.matrices_offset);
-    uint64_t indices = rd_ptr(transform_data + layout.indices_offset);
-    if (layout.matrices_indirect) matrices = rd_ptr(matrices);
-    if (layout.indices_indirect) indices = rd_ptr(indices);
-    return read_transform_hierarchy_arrays(matrices, indices, transform_index, position, world_rotation);
-}
-
 static bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& position) {
     if (!native_transform) return false;
-    if (g_transform_hierarchy_layout_valid)
-        return read_transform_hierarchy_layout(native_transform, g_transform_hierarchy_layout, position);
     uint64_t transform_data = rd_ptr(native_transform + 0x38);
     int32_t transform_index = rd<int32_t>(native_transform + 0x40);
     if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
-    const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
-    for (const auto& offsets : data_offsets) {
-        uint64_t matrix_pointer = rd_ptr(transform_data + offsets[0]);
-        uint64_t index_pointer = rd_ptr(transform_data + offsets[1]);
-        if (!matrix_pointer || !index_pointer) continue;
-        const uint64_t matrix_candidates[] = {matrix_pointer, rd_ptr(matrix_pointer)};
-        const uint64_t index_candidates[] = {index_pointer, rd_ptr(index_pointer)};
-        for (int mi = 0; mi < 2; ++mi) {
-            for (int ii = 0; ii < 2; ++ii) {
-                if (read_transform_hierarchy_arrays(matrix_candidates[mi], index_candidates[ii], transform_index, position)) {
-                    // Cache the working layout so subsequent reads (bones read this
-                    // every frame for every player) skip the probing entirely.
-                    g_transform_hierarchy_layout.data_offset = 0x38;
-                    g_transform_hierarchy_layout.index_offset = 0x40;
-                    g_transform_hierarchy_layout.matrices_offset = offsets[0];
-                    g_transform_hierarchy_layout.indices_offset = offsets[1];
-                    g_transform_hierarchy_layout.matrices_indirect = mi != 0;
-                    g_transform_hierarchy_layout.indices_indirect = ii != 0;
-                    g_transform_hierarchy_layout_valid = true;
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
+    uint64_t matrices = rd_ptr(transform_data + 0x18);
+    uint64_t indices = rd_ptr(transform_data + 0x20);
+    return read_transform_hierarchy_arrays(matrices, indices, transform_index, position);
 }
 
 static uint64_t resolve_player_native_transform(uint64_t player) {
@@ -433,16 +353,12 @@ static uint64_t resolve_player_native_transform(uint64_t player) {
     return resolve_native_transform(rd_ptr(player + PLAYER_TRANSFORM));
 }
 
-// --- Real skeleton bones ---------------------------------------------------
+// --- Real skeleton bones ------------------------------------------------------
 // PlayerManager.inventory -> _playerInventoryData -> playerModelInfo holds the
 // third-person model's head/body Transforms. Their live world positions follow
 // the actual animation pose (crouch, lean, jump), unlike constant heights above
-// the feet. The PlayerModelInfo pointer is cached per player and re-validated
-// through the PlayerInventoryData.player backref so a respawned model refreshes.
-struct PlayerBones {
-    Vec3 head{};
-    bool head_ok = false;
-};
+// the feet. The PlayerInventoryData pointer is cached per player and
+// re-validated through its .player backref so a respawned model refreshes.
 static std::unordered_map<uint64_t, uint64_t> g_model_info_cache;
 
 static uint64_t resolve_player_model_info(uint64_t player) {
@@ -486,154 +402,21 @@ static bool read_player_head_bone(uint64_t player, const Vec3& anchor, Vec3& hea
     return true;
 }
 
-static bool likely_native_pointer(uint64_t value) {
-    return value >= 0x10000 && value < 0x0001000000000000ULL && (value & 0x7) == 0;
-}
-
-static bool evaluate_transform_hierarchy_layout(const std::vector<uint64_t>& native_transforms, const TransformHierarchyLayout& layout, size_t& position_count, double& extent) {
-    position_count = 0; extent = 0.0;
-    Vec3 minimum{}, maximum{};
-    bool initialized = false;
-    for (uint64_t native_transform : native_transforms) {
-        Vec3 position{};
-        if (!read_transform_hierarchy_layout(native_transform, layout, position)) continue;
-        ++position_count;
-        if (!initialized) { minimum = position; maximum = position; initialized = true; }
-        else {
-            minimum.x = std::min(minimum.x, position.x); minimum.y = std::min(minimum.y, position.y); minimum.z = std::min(minimum.z, position.z);
-            maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
-        }
-    }
-    if (!initialized) return false;
-    extent = fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z);
-    return position_count >= 2 && std::isfinite(extent) && extent >= 0.1 && extent <= 1000000.0;
-}
-
-static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& players, size_t& best_position_count, size_t& candidate_count) {
-    std::vector<uint64_t> native_transforms;
-    std::unordered_set<uint64_t> unique_transforms;
-    for (uint64_t player : players) {
-        uint64_t native_transform = resolve_player_native_transform(player);
-        if (native_transform && unique_transforms.insert(native_transform).second)
-            native_transforms.push_back(native_transform);
-    }
-    if (native_transforms.size() < 2) return false;
-
-    const int64_t index_deltas[] = {-8, 8, 16, 24};
-    TransformHierarchyLayout best_layout{};
-    double best_score = 0.0;
-    best_position_count = 0; candidate_count = 0;
-    size_t seed_count = std::min<size_t>(native_transforms.size(), 3);
-
-    for (size_t seed_index = 0; seed_index < seed_count; ++seed_index) {
-        uint64_t seed = native_transforms[seed_index];
-        for (uint64_t data_offset = 0x10; data_offset <= 0x200; data_offset += 8) {
-            uint64_t transform_data = rd_ptr(seed + data_offset);
-            if (!likely_native_pointer(transform_data)) continue;
-            for (int64_t index_delta : index_deltas) {
-                int64_t signed_index_offset = (int64_t)data_offset + index_delta;
-                if (signed_index_offset < 0x10 || signed_index_offset > 0x220) continue;
-                uint64_t index_offset = (uint64_t)signed_index_offset;
-                int32_t transform_index = rd<int32_t>(seed + index_offset);
-                if (transform_index < 0 || transform_index > 100000) continue;
-                for (uint64_t matrices_offset = 0; matrices_offset <= 0x100; matrices_offset += 8) {
-                    uint64_t indices_offset = matrices_offset + 8;
-                    uint64_t matrices = rd_ptr(transform_data + matrices_offset);
-                    uint64_t indices_ptr = rd_ptr(transform_data + indices_offset);
-                    if (!likely_native_pointer(matrices) || !likely_native_pointer(indices_ptr)) continue;
-                    for (int matrices_indirect = 0; matrices_indirect < 2; ++matrices_indirect) {
-                        for (int indices_indirect = 0; indices_indirect < 2; ++indices_indirect) {
-                            TransformHierarchyLayout layout{};
-                            layout.data_offset = data_offset; layout.index_offset = index_offset;
-                            layout.matrices_offset = matrices_offset; layout.indices_offset = indices_offset;
-                            layout.matrices_indirect = matrices_indirect != 0; layout.indices_indirect = indices_indirect != 0;
-                            Vec3 seed_position{};
-                            if (!read_transform_hierarchy_layout(seed, layout, seed_position)) continue;
-                            ++candidate_count;
-                            size_t position_count = 0; double extent = 0.0;
-                            bool valid = evaluate_transform_hierarchy_layout(native_transforms, layout, position_count, extent);
-                            best_position_count = std::max(best_position_count, position_count);
-                            if (!valid) continue;
-                            double score = (double)position_count * 1000000.0 + std::min(extent, 999999.0);
-                            if (score > best_score) { best_score = score; best_layout = layout; }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if (best_score <= 0.0) return false;
-    g_transform_hierarchy_layout = best_layout;
-    g_transform_hierarchy_layout_valid = true;
-    return true;
-}
-
-static bool read_entity_position(uint64_t source, Vec3& position) {
-    if (!source) return false;
-    if (g_use_direct_player_position && g_player_position_offset != 0) {
-        position = rd_v3(source + g_player_position_offset);
-        if (!vec3_is_finite(position)) return false;
-        apply_dead_reckoning(source, position);
-        return true;
-    }
-    uint64_t native = resolve_player_native_transform(source);
-    if (!native) return false;
-    return read_transform_hierarchy_position(native, position);
-}
-
-static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
-    if (!source || g_use_direct_player_position || !g_transform_hierarchy_layout_valid) return false;
-    uint64_t native = resolve_player_native_transform(source);
-    if (!native) return false;
-    return read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, position, &rotation);
-}
-
-static bool evaluate_player_position_offset(const std::vector<uint64_t>& players, uint64_t offset, double& score) {
-    score = 0.0;
-    if (!offset) return false;
-    size_t valid = 0, non_zero = 0;
-    Vec3 minimum{}, maximum{};
-    bool initialized = false;
-    for (uint64_t player : players) {
-        if (!player) continue;
-        Vec3 position = rd_v3(player + offset);
-        if (!vec3_is_finite(position)) continue;
-        float magnitude = fabsf(position.x) + fabsf(position.y) + fabsf(position.z);
-        if (magnitude < 0.01F) continue;
-        ++valid; ++non_zero;
-        if (!initialized) { minimum = position; maximum = position; initialized = true; }
-        else {
-            minimum.x = std::min(minimum.x, position.x); minimum.y = std::min(minimum.y, position.y); minimum.z = std::min(minimum.z, position.z);
-            maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
-        }
-    }
-    if (!initialized || valid < 2 || non_zero < 2) return false;
-    double extent = fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z);
-    if (!std::isfinite(extent) || extent < 0.1 || extent > 1000000.0) return false;
-    score = (double)valid * 1000000.0 + std::min(extent, 999999.0);
-    return true;
-}
-
-static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    const uint64_t known_offsets[] = {0x1D0, 0x1DC, 0x1E8, 0x2D8, 0x2E4, 0x338};
-    uint64_t best_offset = 0;
-    double best_score = 0.0;
-    for (uint64_t offset : known_offsets) {
-        double score = 0.0;
-        if (evaluate_player_position_offset(players, offset, score) && score > best_score) { best_offset = offset; best_score = score; }
-    }
-    if (best_offset) {
-        g_use_direct_player_position = true; g_player_position_offset = best_offset;
-        g_player_position_validated = true; g_matrix_configuration_validated = false;
-        return true;
-    }
-    size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
-    if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
-        g_use_direct_player_position = false;
-        g_player_position_validated = true; g_matrix_configuration_validated = false;
-        return true;
-    }
-    return false;
+// --- Camera (libunity.so offsets) ---------------------------------------------
+// GameControllerBase.<zOI> -> CameraManager.m_Camera -> managed Camera ->
+// m_CachedPtr native camera. Matrices are read from the native camera object
+// at the offsets proven by the libunity.so icall disassembly (see
+// game_offsets.h). The ORIGINAL projection (+0x130) is preferred: it never
+// carries oblique/jitter modifications, so ESP geometry stays pixel-stable.
+static uint64_t resolve_native_camera() {
+    if (!ensure_game_controller_class()) return 0;
+    uint64_t gcb_static_fields = get_class_static_fields(g_game_controller_class);
+    if (!gcb_static_fields) return 0;
+    uint64_t cam_mgr = rd_ptr(gcb_static_fields + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
+    if (!cam_mgr) return 0;
+    uint64_t managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
+    if (!managed_cam) return 0;
+    return rd_ptr(managed_cam + MANAGED_CACHED_PTR);
 }
 
 static float mat_get(const Mat4& matrix, int row, int column) {
@@ -642,6 +425,7 @@ static float mat_get(const Mat4& matrix, int row, int column) {
 static void mat_set(Mat4& matrix, int row, int column, float value) {
     matrix.m[(size_t)row * 4 + column] = value;
 }
+
 static bool matrix_is_finite(const Mat4& matrix) {
     bool has_non_zero = false;
     for (float value : matrix.m) {
@@ -650,6 +434,47 @@ static bool matrix_is_finite(const Mat4& matrix) {
     }
     return has_non_zero;
 }
+
+// A frustum projection must scale both screen axes. The matrices are stored in
+// Unity's Matrix4x4 memory order, so m[0]/m[5] are the X/Y clip scales.
+// An identity matrix is rejected: m_OriginalProjectionMatrix starts out as
+// identity/zero on cameras that never had SetProjectionMatrix called.
+static bool matrix_is_plausible_projection(const Mat4& matrix) {
+    if (!matrix_is_finite(matrix)) return false;
+    if (fabsf(matrix.m[0]) < 0.0001F || fabsf(matrix.m[5]) < 0.0001F) return false;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            float expected = (i == j) ? 1.0F : 0.0F;
+            if (fabsf(mat_get(matrix, i, j) - expected) > 0.0001F) return true; // some entry deviates
+        }
+    return false; // exact identity - not a real frustum
+}
+
+struct CameraMatrices {
+    Mat4 view{};
+    Mat4 projection{};
+    bool from_original = false;
+};
+
+static bool read_camera_matrices(uint64_t native_cam, CameraMatrices& out) {
+    if (!native_cam) return false;
+    out.view = rd_m4(native_cam + NATIVE_CAMERA_VIEW_MATRIX);
+    if (!matrix_is_finite(out.view)) return false;
+    Mat4 original = rd_m4(native_cam + NATIVE_CAMERA_ORIGINAL_PROJECTION);
+    if (matrix_is_plausible_projection(original)) {
+        out.projection = original;
+        out.from_original = true;
+        return true;
+    }
+    // The original was never set (or was reset): the live projection cache is
+    // the same matrix Unity's WorldToScreenPoint uses.
+    Mat4 live = rd_m4(native_cam + NATIVE_CAMERA_PROJECTION_MATRIX);
+    if (!matrix_is_plausible_projection(live)) return false;
+    out.projection = live;
+    out.from_original = false;
+    return true;
+}
+
 static Mat4 mat_mul(const Mat4& a, const Mat4& b) {
     Mat4 result{};
     for (int row = 0; row < 4; ++row)
@@ -699,65 +524,23 @@ static bool w2s(const Mat4& vp, const Vec3& world, float sw, float sh, Vec2& out
     return true;
 }
 
-static bool w2s_transform_camera(const Vec3& camera_position, const Vec4& camera_rotation, const Vec3& world, float screen_width, float screen_height, Vec2& output, bool clip_to_screen = true) {
-    if (screen_width < 100.0F || screen_height < 100.0F) return false;
-    Vec3 relative = {world.x - camera_position.x, world.y - camera_position.y, world.z - camera_position.z};
-    Vec4 inverse_rotation = {-camera_rotation.x, -camera_rotation.y, -camera_rotation.z, camera_rotation.w};
-    Vec3 camera_space = rotate_vector(inverse_rotation, relative);
-    if (!vec3_is_finite(camera_space) || camera_space.z <= 0.05F) return false;
-    constexpr float vertical_fov_radians = 1.0471975512F;
-    float tangent = tanf(vertical_fov_radians * 0.5F);
-    float aspect = screen_width / screen_height;
-    float normalized_x = camera_space.x / (camera_space.z * tangent * aspect);
-    float normalized_y = camera_space.y / (camera_space.z * tangent);
-    if (!std::isfinite(normalized_x) || !std::isfinite(normalized_y)) return false;
-    if (clip_to_screen && (fabsf(normalized_x) > 1.0F || fabsf(normalized_y) > 1.0F)) return false;
-    output.x = (normalized_x + 1.0F) * 0.5F * screen_width;
-    output.y = (1.0F - normalized_y) * 0.5F * screen_height;
-    return std::isfinite(output.x) && std::isfinite(output.y);
-}
-
-static bool optimize_matrix_configuration(uint64_t native_camera, const std::vector<uint64_t>& transforms) {
-    std::vector<Vec3> samples;
-    for (uint64_t source : transforms) {
-        Vec3 position{};
-        if (!read_entity_position(source, position)) continue;
-        samples.push_back(position);
-        if (samples.size() >= 24) break;
-    }
-    if (samples.size() < 2) {
-        g_player_position_validated = false;
-        return false;
-    }
-
-    Vec3 minimum = samples[0], maximum = samples[0];
-    for (const Vec3& position : samples) {
-        minimum.x = std::min(minimum.x, position.x); minimum.y = std::min(minimum.y, position.y); minimum.z = std::min(minimum.z, position.z);
-        maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
-    }
-    float extent = fabsf(maximum.x - minimum.x) + fabsf(maximum.y - minimum.y) + fabsf(maximum.z - minimum.z);
-    if (extent < 0.1F) {
-        g_player_position_validated = false;
-        return false;
-    }
-
-    Mat4 validated_projection = rd_m4(native_camera + CAMERA_PROJECTION_MATRIX);
-    Mat4 validated_view = rd_m4(native_camera + CAMERA_VIEW_MATRIX);
-    if (matrix_is_finite(validated_projection) && matrix_is_finite(validated_view)) {
-        Vec3 camera_position{};
-        double nearest_camera_distance_squared = INFINITY;
-        if (camera_position_from_view(validated_view, camera_position)) {
-            for (const Vec3& sample : samples) {
-                double dx = (double)sample.x - camera_position.x, dy = (double)sample.y - camera_position.y, dz = (double)sample.z - camera_position.z;
-                double distance_squared = dx * dx + dy * dy + dz * dz;
-                if (std::isfinite(distance_squared)) nearest_camera_distance_squared = std::min(nearest_camera_distance_squared, distance_squared);
-            }
-        }
-        g_camera_matrix_physical_match = std::isfinite(nearest_camera_distance_squared) && nearest_camera_distance_squared <= 100.0;
-        g_matrix_configuration_validated = true;
+// --- Entity positions ----------------------------------------------------------
+static bool read_entity_position(uint64_t source, Vec3& position) {
+    if (!source) return false;
+    // Fixed dump-backed field: PlayerManager.lastTickPosition (feet level).
+    position = rd_v3(source + PLAYER_POSITION);
+    if (vec3_is_finite(position)) {
+        apply_dead_reckoning(source, position);
         return true;
     }
-    return false;
+    // Fallback: world render transform through the fixed hierarchy layout.
+    uint64_t native = resolve_player_native_transform(source);
+    if (!native) return false;
+    Vec3 hierarchy{};
+    if (!read_transform_hierarchy_position(native, hierarchy) || !vec3_is_finite(hierarchy)) return false;
+    position = hierarchy;
+    apply_dead_reckoning(source, position);
+    return true;
 }
 
 static std::vector<uint64_t> read_configured_player_transforms() {
@@ -812,20 +595,10 @@ void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
-    g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
-    g_player_position_offset = PLAYER_POSITION;
-    g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
-    g_use_direct_player_position = true;
-    g_player_position_validated = false;
-    for (int i = 0; i < kPositionCandidateCount; ++i) g_candidate_ema[i] = -1.0F;
-    g_tuner_frames = 0;
-    g_tuner_hold = 0;
-    g_eye_dy_ema = -1000.0F;
     g_entity_motion.clear();
     g_model_info_cache.clear();
     g_aim_targets.clear();
 }
-
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // Cleared here so early returns inside the impl never leave stale targets behind.
@@ -838,8 +611,6 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
 
-    uint64_t native_cam = 0;
-    Mat4 projection{}, view{}, vp{};
     float sw = overlay_width >= 100 ? (float)overlay_width : 1080.0F;
     float sh = overlay_height >= 100 ? (float)overlay_height : 2400.0F;
     if (!std::isfinite(sw) || sw < 100.0F || sw > 10000.0F) sw = 1080.0F;
@@ -850,123 +621,69 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
     if (!refreshed.empty()) s_transforms = std::move(refreshed);
     if (s_transforms.empty()) return result;
 
-    if (!g_player_position_validated) {
-        if (!discover_player_position_offset(s_transforms)) return result;
-    }
+    // Camera straight from the native camera object (libunity.so offsets).
+    uint64_t native_cam = resolve_native_camera();
+    if (!native_cam) return result;
+    CameraMatrices cam{};
+    if (!read_camera_matrices(native_cam, cam)) return result;
+    Mat4 vp = mat_mul(cam.projection, cam.view);
 
-    bool transform_camera_mode = !g_use_direct_player_position && g_transform_hierarchy_layout_valid;
-    if (!transform_camera_mode) {
-        uint64_t managed_cam = 0;
-        if (g_game_controller_class) {
-            uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
-            if (gcb_sf) {
-                uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
-                if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
-            }
-        }
-        if (!managed_cam) { return result; }
-        native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-        if (!native_cam) return result;
-        projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-        view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-        if (!matrix_is_finite(projection) || !matrix_is_finite(view)) { return result; }
-        if (!g_matrix_configuration_validated) {
-            if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
-            projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-            view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-        }
-        vp = mat_mul(projection, view);
-    }
+    Vec3 camera_position{};
+    bool has_camera_position = camera_position_from_view(cam.view, camera_position);
 
+    // Snapshot: the statics-provided local player (when resolved) is [0].
     bool has_local_position = false;
     Vec3 local{};
     size_t local_entity_index = s_transforms.size();
-    Vec3 camera_position{};
-    bool has_camera_position = false;
 
-    {
-        has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
-        double nearest_distance_squared = INFINITY;
-        size_t first_valid_index = s_transforms.size();
-        Vec3 first_valid_position{};
+    Vec3 first_valid_position{};
+    size_t first_valid_index = s_transforms.size();
+    double nearest_eye_distance_squared = INFINITY;
+    size_t nearest_eye_index = s_transforms.size();
+
+    uint64_t local_ptr = resolve_local_player();
+    if (local_ptr) {
         for (size_t index = 0; index < s_transforms.size(); ++index) {
+            if (s_transforms[index] != local_ptr) continue;
             Vec3 candidate{};
-            if (!read_entity_position(s_transforms[index], candidate)) continue;
-            if (first_valid_index == s_transforms.size()) { first_valid_index = index; first_valid_position = candidate; }
-            if (!has_camera_position) continue;
-            double dx = (double)candidate.x - camera_position.x, dy = (double)candidate.y - camera_position.y, dz = (double)candidate.z - camera_position.z;
-            double distance_squared = dx * dx + dy * dy + dz * dz;
-            if (std::isfinite(distance_squared) && distance_squared < nearest_distance_squared) {
-                nearest_distance_squared = distance_squared; local_entity_index = index; local = candidate;
+            if (read_entity_position(s_transforms[index], candidate)) {
+                local_entity_index = index;
+                local = candidate;
             }
-        }
-        if (local_entity_index == s_transforms.size() && first_valid_index != s_transforms.size()) {
-            local_entity_index = first_valid_index; local = first_valid_position;
-        }
-        has_local_position = local_entity_index != s_transforms.size();
-        if (!has_local_position) {
-            g_player_position_validated = false;
-            return result;
-        }
-
-        // Calibrate how high the position field sits above the feet. The camera
-        // eye is ~EYE_ABOVE_FEET over the local player's feet, and `local` is read
-        // from the same field used for every other player, so the vertical gap
-        // between the eye and the field reveals the field's own height.
-        if (has_camera_position) {
-            float dy = camera_position.y - local.y;
-            if (std::isfinite(dy) && fabsf(dy) < 4.0F)
-                g_eye_dy_ema = g_eye_dy_ema < -100.0F ? dy : g_eye_dy_ema + (dy - g_eye_dy_ema) * 0.05F;
+            break;
         }
     }
 
-    // Freshness self-tuner: track how far each candidate position field of the local
-    // player sits from the live camera eye. A frame-fresh field stays ~1.6m away (eye
-    // height); a tick-stale snapshot drifts further whenever the local player moves.
-    if (has_camera_position && local_entity_index < s_transforms.size()) {
-        uint64_t local_source = s_transforms[local_entity_index];
-        for (int i = 0; i < kPositionCandidateCount; ++i) {
-            Vec3 v = rd_v3(local_source + kPositionCandidates[i]);
-            if (!vec3_is_finite(v)) continue;
-            float d = vec3_distance_to(v, camera_position);
-            g_candidate_ema[i] = g_candidate_ema[i] < 0.0F ? d : g_candidate_ema[i] + (d - g_candidate_ema[i]) * 0.05F;
+    for (size_t index = 0; index < s_transforms.size(); ++index) {
+        Vec3 candidate{};
+        if (!read_entity_position(s_transforms[index], candidate)) continue;
+        if (first_valid_index == s_transforms.size()) { first_valid_index = index; first_valid_position = candidate; }
+        if (index == local_entity_index) continue;
+        if (!has_camera_position) continue;
+        double dx = (double)candidate.x - camera_position.x, dy = (double)candidate.y - camera_position.y, dz = (double)candidate.z - camera_position.z;
+        double distance_squared = dx * dx + dy * dy + dz * dz;
+        if (std::isfinite(distance_squared) && distance_squared < nearest_eye_distance_squared) {
+            nearest_eye_distance_squared = distance_squared;
+            nearest_eye_index = index;
         }
-        ++g_tuner_frames;
-        if (g_tuner_hold > 0) {
-            --g_tuner_hold;
-        } else if (g_tuner_frames % 300 == 0) {
-            int current = -1;
-            for (int i = 0; i < kPositionCandidateCount; ++i)
-                if (kPositionCandidates[i] == g_player_position_offset) current = i;
-            if (current >= 0 && g_candidate_ema[current] >= 0.0F) {
-                int best = current;
-                for (int i = 0; i < kPositionCandidateCount; ++i) {
-                    if (i == current || g_candidate_ema[i] < 0.0F) continue;
-                    if (g_candidate_ema[i] >= 8.0F) continue;                 // must be a plausible current position
-                    if (g_candidate_ema[i] + 0.3F < g_candidate_ema[best]) best = i; // consistently closer to the eye
-                }
-                if (best != current) {
-                    g_player_position_offset = kPositionCandidates[best];
-                    g_tuner_hold = 600;
-                    // A different field can sit at a different height above the
-                    // feet - recalibrate the vertical correction from scratch.
-                    g_eye_dy_ema = -1000.0F;
-                }
+    }
+
+    if (local_entity_index == s_transforms.size()) {
+        if (nearest_eye_index != s_transforms.size() &&
+            nearest_eye_distance_squared <= 40000.0) { // within 200m of the eye
+            // Statics unavailable - fall back to the player closest to the eye.
+            Vec3 candidate{};
+            if (read_entity_position(s_transforms[nearest_eye_index], candidate)) {
+                local_entity_index = nearest_eye_index;
+                local = candidate;
             }
+        } else if (first_valid_index != s_transforms.size()) {
+            local_entity_index = first_valid_index;
+            local = first_valid_position;
         }
-    } else {
-        g_tuner_frames = 0;
     }
-
-    Vec3 transform_camera_position{};
-    Vec4 transform_camera_rotation{};
-    if (transform_camera_mode) {
-        if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation)) {
-            g_player_position_validated = false;
-            return result;
-        }
-        local = transform_camera_position; has_local_position = true;
-    }
+    has_local_position = local_entity_index != s_transforms.size();
+    if (!has_local_position) return result;
 
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) continue;
@@ -979,17 +696,6 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
             float dx = feet.x - local.x, dy = feet.y - local.y, dz = feet.z - local.z;
             distance = sqrtf(dx * dx + dy * dy + dz * dz);
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
-        }
-
-        // Convert the raw position field to true FEET level before building
-        // geometry, so boxes and aim bones share one anatomically correct base.
-        // - transform camera mode reads worldCameraRoot, which sits at eye level;
-        // - direct mode uses the runtime calibration measured against the local
-        //   camera eye (g_eye_dy_ema); until calibrated, assume feet level as before.
-        if (transform_camera_mode) {
-            feet.y -= EYE_ABOVE_FEET;
-        } else if (g_eye_dy_ema > -100.0F) {
-            feet.y -= EYE_ABOVE_FEET - g_eye_dy_ema;
         }
 
         // Real skeleton: read the model's head bone. When available, the box top
@@ -1010,14 +716,8 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
             : Vec3{feet.x, feet.y + PLAYER_HEIGHT, feet.z};
 
         Vec2 sf{}, sh2{};
-        bool bottom_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_bottom, sw, sh, sf, false)
-            : w2s(vp, body_bottom, sw, sh, sf, false);
-        if (!bottom_visible) continue;
-        bool top_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_top, sw, sh, sh2, false)
-            : w2s(vp, body_top, sw, sh, sh2, false);
-        if (!top_visible) continue;
+        if (!w2s(vp, body_bottom, sw, sh, sf, false)) continue;
+        if (!w2s(vp, body_top, sw, sh, sh2, false)) continue;
 
         float height = fabsf(sh2.y - sf.y);
         if (!std::isfinite(height) || height < 2.0F) continue;
@@ -1043,9 +743,7 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
         box.distance = distance;
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
-            bool projected = transform_camera_mode
-                ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, world_corners[corner], sw, sh, sc, false)
-                : w2s(vp, world_corners[corner], sw, sh, sc, false);
+            bool projected = w2s(vp, world_corners[corner], sw, sh, sc, false);
             box.corner_visible[corner] = projected && sc.x >= 0.0F && sc.x <= sw && sc.y >= 0.0F && sc.y <= sh;
             box.corners[corner][0] = projected ? sc.x : -1.0F;
             box.corners[corner][1] = projected ? sc.y : -1.0F;
@@ -1079,9 +777,7 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
         }
         for (int b = 0; b < 3; ++b) {
             Vec2 sc{};
-            bool ok = transform_camera_mode
-                ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, bones[b], sw, sh, sc, false)
-                : w2s(vp, bones[b], sw, sh, sc, false);
+            bool ok = w2s(vp, bones[b], sw, sh, sc, false);
             ok = ok && std::isfinite(sc.x) && std::isfinite(sc.y);
             switch (b) {
                 case 0: aim.head_x = sc.x;   aim.head_y = sc.y;    aim.head_ok = ok;   break;
@@ -1099,22 +795,28 @@ std::vector<EspAimTarget> esp_get_aim_targets() {
     return g_aim_targets;
 }
 
+// ADS detection straight from the dump chain:
+// PlayerManager.fpManager (0x90) -> FPManager._currentWeapon (0x50, FPObject)
+// -> normalFOV (0x80) / aimFOV (0x84); the live FOV comes from the native
+// camera (libunity.so, +0x40 - the same field GetProjectionMatrix consumes).
+// Aiming zooms the camera toward aimFOV, so "fov <= midpoint" is a stable,
+// deterministic ADS test with no runtime tuning.
 bool esp_is_local_aiming() {
     if (g_pid <= 0 || !g_il2cpp_base) return false;
-    if (!g_game_controller_class && GAME_CONTROLLER_TYPEINFO_RVA != 0) {
-        uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
-        if (candidate) {
-            std::string name = read_remote_string(rd_ptr(candidate + 0x10));
-            std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
-            if (name == "GameControllerBase" && ns == "Oxide")
-                g_game_controller_class = candidate;
-        }
-    }
-    if (!g_game_controller_class) return false;
-    uint64_t sf = get_class_static_fields(g_game_controller_class);
-    if (!sf) return false;
-    uint64_t handler = rd_ptr(sf + GAME_CONTROLLER_INPUT_HANDLER_FIELD);
-    if (!handler) return false;
-    uint8_t aim = rd<uint8_t>(handler + PLAYER_INPUT_STRUCT_OFFSET + PLAYER_INPUT_AIM_OFFSET);
-    return aim != 0;
+    uint64_t local = resolve_local_player();
+    if (!local) return false;
+    uint64_t fp_manager = rd_ptr(local + PLAYER_FP_MANAGER_FIELD);
+    if (!fp_manager) return false;
+    uint64_t weapon = rd_ptr(fp_manager + FP_MANAGER_CURRENT_WEAPON_FIELD);
+    if (!weapon) return false;
+    int32_t normal_fov = rd<int32_t>(weapon + FP_OBJECT_NORMAL_FOV_FIELD);
+    int32_t aim_fov = rd<int32_t>(weapon + FP_OBJECT_AIM_FOV_FIELD);
+    // Plausibility: a real weapon zooms (aim < normal) within sane FOV bounds.
+    if (normal_fov <= aim_fov || normal_fov > 130 || aim_fov < 5) return false;
+    uint64_t native_cam = resolve_native_camera();
+    if (!native_cam) return false;
+    float fov = rd<float>(native_cam + NATIVE_CAMERA_FOV);
+    if (!std::isfinite(fov) || fov <= 0.0F) return false;
+    float midpoint = (float)(normal_fov + aim_fov) * 0.5F;
+    return fov <= midpoint;
 }

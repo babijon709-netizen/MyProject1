@@ -3,9 +3,27 @@
 
 namespace game_offsets {
 
-inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = 0x140;
-inline constexpr std::uint64_t CAMERA_VIEW_MATRIX       = 0x2F8;
+// --- Native UnityEngine.Camera (libunity.so, Unity 6000.3.18f1, arm64) -------
+// Layout proven by disassembling the native camera icalls in libunity.so:
+//   Camera::GetWorldToCameraMatrix_Injected (0x5ac588) / WorldToScreenPoint
+//   internals (0xe304cc) read the view matrix from            +0x70
+//   Camera::GetProjectionMatrix_Injected  (0x5ac5b0 -> 0xe1fef4)
+//     computes and caches the projection matrix at              +0xB0
+//   Camera::SetProjectionMatrix_Injected  (0x5ac5d4 -> 0xe20868)
+//     writes +0xB0 and, when the matrix is a clean frustum (columns 2 zero),
+//     also the untouched copy - native m_OriginalProjectionMatrix - at +0x130.
+//     Oblique/jittered projections only ever land in +0xB0, so +0x130 keeps
+//     the original matrix. SetNonJitteredProjectionMatrix uses +0x748.
+//   Camera::GetProjectionMatrix uses the float at              +0x40
+//     as the field-of-view input (native m_FieldOfView).
+inline constexpr std::uint64_t NATIVE_CAMERA_VIEW_MATRIX             = 0x70;
+inline constexpr std::uint64_t NATIVE_CAMERA_PROJECTION_MATRIX       = 0xB0;
+inline constexpr std::uint64_t NATIVE_CAMERA_ORIGINAL_PROJECTION     = 0x130;
+inline constexpr std::uint64_t NATIVE_CAMERA_NON_JITTERED_PROJECTION = 0x748;
+inline constexpr std::uint64_t NATIVE_CAMERA_FOV                     = 0x40;
 
+// Managed UnityEngine.Object.m_CachedPtr (dump.cs: UnityEngine.CoreModule,
+// class Object, "private IntPtr m_CachedPtr; // 0x10").
 inline constexpr std::uint64_t MANAGED_CACHED_PTR = 0x10;
 
 inline constexpr float PLAYER_HEIGHT          = 1.8F;
@@ -13,15 +31,9 @@ inline constexpr float PLAYER_BOX_WIDTH_RATIO = 0.40F;
 inline constexpr float MIN_PLAYER_DISTANCE    = 0.0F;
 inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 
-// Aim points are exact world-space offsets above the FEET, projected through the
-// live camera (standing model proportions, PLAYER_HEIGHT = 1.8m).
-// The entity position field read from memory is NOT assumed to be at feet level:
-// esp_get_boxes calibrates its real height above the feet at runtime by comparing
-// the local player's position (same field) against the camera eye from the view
-// matrix (eye sits ~EYE_ABOVE_FEET over the feet). The measured offset is
-// subtracted before these bone heights are applied, so aim stays anatomically
-// correct no matter which position field the freshness tuner picks.
-inline constexpr float EYE_ABOVE_FEET     = 1.60F; // camera eye height over the feet
+// Aim points are exact world-space offsets above the FEET, projected through
+// the live camera (standing model proportions, PLAYER_HEIGHT = 1.8m).
+// The position field read from memory (lastTickPosition) sits at feet level.
 inline constexpr float BONE_HEAD_HEIGHT   = 1.58F; // face/neck - reliable head hit
 inline constexpr float BONE_CHEST_HEIGHT  = 1.20F; // center of the torso
 inline constexpr float BONE_PELVIS_HEIGHT = 0.85F; // pelvis/upper legs
@@ -31,7 +43,7 @@ inline constexpr float BONE_PELVIS_HEIGHT = 0.85F; // pelvis/upper legs
 // follows every pose - crouching, leaning, jumping - unlike fixed offsets above
 // the feet. The constant heights above stay as the fallback when the model is
 // not loaded (sleepers, streaming) or the read fails validation.
-// Chain (dump arm64-v8a 1.13.11888):
+// Chain (dump arm64-v8a 1.13.11888, dump.cs):
 //   PlayerManager.inventory (0x98, PlayerInventory)
 //     -> _playerInventoryData (0x20, PlayerInventoryData; .player 0x10 backref)
 //       -> playerModelInfo (0x20, PlayerModelInfo)
@@ -48,9 +60,10 @@ inline constexpr float HEAD_TOP_MARGIN       = 0.18F; // skull top above the hea
 inline constexpr float CHEST_FRACTION        = 0.70F; // chest at this fraction of feet->head height
 inline constexpr float PELVIS_FRACTION       = 0.45F; // pelvis at this fraction of feet->head height
 
-// Source: dump arm64-v8a 1.13.11888 (Il2CppDumper output: dump.cs / il2cpp.h / script.json)
-// PlayerManager (Oxide)   TypeInfo ptr RVA: script.json TypeInfoPointers -> Oxide.PlayerManager
-// GameControllerBase (Oxide) TypeInfo ptr RVA: script.json TypeInfoPointers -> Oxide.GameControllerBase
+// --- libil2cpp.so offsets (dump arm64-v8a 1.13.11888: dump.cs / script.json) --
+// TypeInfo pointer RVAs (script.json TypeInfoPointers):
+//   0xD2BBAD8 Oxide_PlayerManager_TypeInfo     -> Oxide.PlayerManager
+//   0xD2B6ED8 Oxide_GameControllerBase_TypeInfo -> Oxide.GameControllerBase
 inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD2BBAD8;
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // PlayerManager.clientPlayerList
 
@@ -59,14 +72,18 @@ inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // G
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // GameControllerBase.<zOI>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // CameraManager.m_Camera
 
-// Local input: GameControllerBase.<zOD>k__BackingField -> PlayerInputHandler,
-// embedded PlayerInput struct holds the live button states (Aim = ADS held).
-inline constexpr std::uint64_t GAME_CONTROLLER_INPUT_HANDLER_FIELD = 0x20; // PlayerInputHandler
-inline constexpr std::uint64_t PLAYER_INPUT_STRUCT_OFFSET          = 0x40; // PlayerInputHandler.zkt (embedded)
-inline constexpr std::uint64_t PLAYER_INPUT_AIM_OFFSET             = 0x1B; // PlayerInput.Aim
-
+// Player fields (dump.cs, class PlayerManager):
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68;  // PlayerManager.worldCameraRoot (Transform)
-inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // PlayerManager.lastTickPosition (Vector3)
+inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // PlayerManager.lastTickPosition (Vector3, feet level)
+
+// ADS state (dump.cs): PlayerManager.fpManager (0x90, FPManager) ->
+// _currentWeapon (0x50, FPObject) -> normalFOV (0x80) / aimFOV (0x84).
+// The camera is zoomed toward aimFOV while aiming, so comparing the live
+// native camera FOV against the midpoint of the two values detects ADS.
+inline constexpr std::uint64_t PLAYER_FP_MANAGER_FIELD            = 0x90; // PlayerManager.fpManager
+inline constexpr std::uint64_t FP_MANAGER_CURRENT_WEAPON_FIELD    = 0x50; // FPManager._currentWeapon (FPObject)
+inline constexpr std::uint64_t FP_OBJECT_NORMAL_FOV_FIELD         = 0x80; // FPObject.normalFOV (int)
+inline constexpr std::uint64_t FP_OBJECT_AIM_FOV_FIELD            = 0x84; // FPObject.aimFOV (int)
 
 inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18;
