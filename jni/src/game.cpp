@@ -435,43 +435,135 @@ static bool matrix_is_finite(const Mat4& matrix) {
     return has_non_zero;
 }
 
-// A frustum projection must scale both screen axes. The matrices are stored in
-// Unity's Matrix4x4 memory order, so m[0]/m[5] are the X/Y clip scales.
-// An identity matrix is rejected: m_OriginalProjectionMatrix starts out as
-// identity/zero on cameras that never had SetProjectionMatrix called.
-static bool matrix_is_plausible_projection(const Mat4& matrix) {
+// A frustum projection must scale both screen axes and must not be the
+// identity placeholder that m_OriginalProjectionMatrix starts out as.
+static bool projection_structurally_valid(const Mat4& matrix) {
     if (!matrix_is_finite(matrix)) return false;
     if (fabsf(matrix.m[0]) < 0.0001F || fabsf(matrix.m[5]) < 0.0001F) return false;
     for (int i = 0; i < 4; ++i)
         for (int j = 0; j < 4; ++j) {
             float expected = (i == j) ? 1.0F : 0.0F;
-            if (fabsf(mat_get(matrix, i, j) - expected) > 0.0001F) return true; // some entry deviates
+            if (fabsf(matrix.m[(size_t)i * 4 + j] - expected) > 0.0001F) return true; // deviates from identity
         }
-    return false; // exact identity - not a real frustum
+    return false; // exact identity/zero - not a frustum
+}
+
+static void mat_transpose_inplace(Mat4& matrix) {
+    for (int i = 0; i < 4; ++i)
+        for (int j = i + 1; j < 4; ++j)
+            std::swap(matrix.m[(size_t)i * 4 + j], matrix.m[(size_t)j * 4 + i]);
+}
+
+// Y clip scale of a perspective frustum is cot(fovY / 2); it sits at m[5] in
+// EITHER storage order (the diagonal is layout-invariant), so this scores a
+// projection against the live camera FOV without assuming a memory layout.
+static float projection_fov_mismatch(const Mat4& projection, float fov_deg) {
+    if (!std::isfinite(fov_deg) || fov_deg <= 1.0F || fov_deg >= 179.0F) return 0.0F;
+    float cot = 1.0F / tanf(fov_deg * (3.14159265F / 180.0F) * 0.5F);
+    float y = projection.m[5];
+    if (!std::isfinite(y) || fabsf(y) < 0.001F) return INFINITY;
+    return fabsf(y - cot) / cot;
+}
+
+// GL-style perspective built from the camera FOV. Rows 0/1/3 are exact; row 2
+// (near/far depth mapping) is unused by the world-to-screen math.
+static bool synthesize_projection(float fov_deg, float aspect, Mat4& out) {
+    if (!std::isfinite(fov_deg) || fov_deg <= 1.0F || fov_deg >= 179.0F) return false;
+    if (!std::isfinite(aspect) || aspect < 0.2F || aspect > 8.0F) return false;
+    float cot = 1.0F / tanf(fov_deg * (3.14159265F / 180.0F) * 0.5F);
+    out = Mat4{};
+    out.m[0] = cot / aspect;
+    out.m[5] = cot;
+    out.m[10] = -1.0001F;
+    out.m[11] = -0.02F;
+    out.m[14] = -1.0F;
+    return true;
+}
+
+static bool near_minus_one(float value) {
+    return fabsf(value + 1.0F) <= 0.02F;
+}
+
+// Storage-order votes. il2cpp.h confirms the managed Matrix4x4 field order is
+// m00,m10,m20,m30,... (column-major) and the camera icalls copy those 64 bytes
+// verbatim into the native camera, so column-major is the expected layout -
+// but the order is verified from the data instead of being assumed:
+//  - perspective clipW = -Z coefficient (M32) sits at mem[11] column-major,
+//    at mem[14] row-major;
+//  - a standard view's math row 3 is exactly (0,0,0,1): at mem[3/7/11/15]
+//    column-major, at mem[12..15] row-major.
+static int storage_vote_projection(const Mat4& projection) {
+    bool at11 = near_minus_one(projection.m[11]);
+    bool at14 = near_minus_one(projection.m[14]);
+    if (at11 == at14) return 0;
+    return at11 ? 1 : -1;
+}
+
+static int storage_vote_view(const Mat4& view) {
+    bool col = fabsf(view.m[3]) < 1e-4F && fabsf(view.m[7]) < 1e-4F &&
+               fabsf(view.m[11]) < 1e-4F && fabsf(view.m[15] - 1.0F) < 1e-4F;
+    bool row = fabsf(view.m[12]) < 1e-4F && fabsf(view.m[13]) < 1e-4F &&
+               fabsf(view.m[14]) < 1e-4F && fabsf(view.m[15] - 1.0F) < 1e-4F;
+    if (col == row) return 0;
+    return col ? 1 : -1;
 }
 
 struct CameraMatrices {
     Mat4 view{};
     Mat4 projection{};
-    bool from_original = false;
 };
 
-static bool read_camera_matrices(uint64_t native_cam, CameraMatrices& out) {
+static bool read_camera_matrices(uint64_t native_cam, float screen_width, float screen_height, CameraMatrices& out) {
     if (!native_cam) return false;
-    out.view = rd_m4(native_cam + NATIVE_CAMERA_VIEW_MATRIX);
-    if (!matrix_is_finite(out.view)) return false;
-    Mat4 original = rd_m4(native_cam + NATIVE_CAMERA_ORIGINAL_PROJECTION);
-    if (matrix_is_plausible_projection(original)) {
-        out.projection = original;
-        out.from_original = true;
-        return true;
+    float fov = rd<float>(native_cam + NATIVE_CAMERA_FOV);
+
+    Mat4 view = rd_m4(native_cam + NATIVE_CAMERA_VIEW_MATRIX);
+    if (!matrix_is_finite(view)) return false;
+
+    // Candidate projections, best kept: the live cache (+0xB0) is what Unity's
+    // own WorldToScreenPoint consumes, non-jittered (+0x748) and the original
+    // (+0x130, written only by SetProjectionMatrix) follow as alternates. All
+    // three can go stale when the game zooms, so the one whose Y scale agrees
+    // best with the live FOV (+0x40) wins.
+    static const uint64_t candidate_offsets[3] = {
+        NATIVE_CAMERA_PROJECTION_MATRIX,
+        NATIVE_CAMERA_NON_JITTERED_PROJECTION,
+        NATIVE_CAMERA_ORIGINAL_PROJECTION,
+    };
+    Mat4 candidates[3];
+    int choice = -1;
+    float best_mismatch = INFINITY;
+    int projection_vote = 0;
+    for (int i = 0; i < 3; ++i) {
+        candidates[i] = rd_m4(native_cam + candidate_offsets[i]);
+        if (!projection_structurally_valid(candidates[i])) continue;
+        float mismatch = projection_fov_mismatch(candidates[i], fov);
+        if (mismatch < best_mismatch) {
+            best_mismatch = mismatch;
+            choice = i;
+            projection_vote = storage_vote_projection(candidates[i]);
+        }
     }
-    // The original was never set (or was reset): the live projection cache is
-    // the same matrix Unity's WorldToScreenPoint uses.
-    Mat4 live = rd_m4(native_cam + NATIVE_CAMERA_PROJECTION_MATRIX);
-    if (!matrix_is_plausible_projection(live)) return false;
-    out.projection = live;
-    out.from_original = false;
+
+    bool synthesized = false;
+    if (choice < 0) {
+        // No usable cached projection: rebuild one from the live FOV. The
+        // overlay shares the game's screen, so its w/h ratio is the aspect.
+        float aspect = (std::isfinite(screen_height) && screen_height >= 100.0F) ? screen_width / screen_height : 0.0F;
+        if (!synthesize_projection(fov, aspect, candidates[0])) return false;
+        choice = 0;
+        synthesized = true;
+    }
+
+    int view_vote = storage_vote_view(view);
+    int votes = projection_vote + view_vote;
+    bool column_major = (votes != 0) ? votes > 0 : true; // native unity::math order
+    if (column_major) {
+        mat_transpose_inplace(view);
+        if (!synthesized) mat_transpose_inplace(candidates[choice]);
+    }
+    out.view = view;
+    out.projection = candidates[choice];
     return true;
 }
 
@@ -625,7 +717,7 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
     uint64_t native_cam = resolve_native_camera();
     if (!native_cam) return result;
     CameraMatrices cam{};
-    if (!read_camera_matrices(native_cam, cam)) return result;
+    if (!read_camera_matrices(native_cam, sw, sh, cam)) return result;
     Mat4 vp = mat_mul(cam.projection, cam.view);
 
     Vec3 camera_position{};

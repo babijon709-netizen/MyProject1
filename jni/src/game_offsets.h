@@ -16,6 +16,14 @@ namespace game_offsets {
 //     the original matrix. SetNonJitteredProjectionMatrix uses +0x748.
 //   Camera::GetProjectionMatrix uses the float at              +0x40
 //     as the field-of-view input (native m_FieldOfView).
+// STORAGE ORDER: il2cpp.h (Matrix4x4_Fields = m00,m10,m20,m30,m01,...) proves
+// the managed Matrix4x4 - and therefore these 64-byte buffers - are stored
+// COLUMN-major. The reader verifies the order from the data (-1 position in a
+// perspective frustum + view row 3) and transposes when column-major.
+// SELECTION: +0xB0 is what the engine itself uses for WorldToScreenPoint, so
+// it is primary; +0x748 and +0x130 are alternates picked by best FOV match
+// (they can go stale while the game lerps fieldOfView); if every cached
+// candidate is invalid the projection is rebuilt from +0x40 + screen aspect.
 inline constexpr std::uint64_t NATIVE_CAMERA_VIEW_MATRIX             = 0x70;
 inline constexpr std::uint64_t NATIVE_CAMERA_PROJECTION_MATRIX       = 0xB0;
 inline constexpr std::uint64_t NATIVE_CAMERA_ORIGINAL_PROJECTION     = 0x130;
