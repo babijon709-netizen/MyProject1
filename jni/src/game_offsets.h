@@ -105,4 +105,11 @@ inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18;
 inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 
+// FZ<T> custom collection (dump.cs/il2cpp.h): object header 0x0/0x8, fields
+// 0x10 = Dictionary<P,int> Kgd, 0x18 = Dictionary<int,P> KYP, 0x20 = JD<P> KYU.
+// JD<P> fields: 0x10 = int KJb (count), 0x18 = P[] KJs (items array; data at +0x20).
+inline constexpr std::uint64_t FZ_JD_FIELD     = 0x20;
+inline constexpr std::uint64_t JD_COUNT_FIELD  = 0x10;
+inline constexpr std::uint64_t JD_ITEMS_FIELD  = 0x18;
+
 }

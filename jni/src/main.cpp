@@ -638,6 +638,26 @@ static void DrawEspOverlay() {
             dl->AddText(ImVec2(box.x1, box.y1 - 22.0f), ColU32(cfg::esp::distance_col), label);
         }
     }
+
+    // ESP diagnostics panel (temporary): shows the live resolution chain.
+    {
+        char dbg[1024];
+        if (esp_get_debug_text(dbg, sizeof(dbg))) {
+            float y = 16.0f;
+            ImU32 col = IM_COL32(120, 255, 120, 230);
+            char* line = dbg;
+            while (*line) {
+                char* nl = strchr(line, '\n');
+                if (nl) *nl = '\0';
+                if (*line) {
+                    dl->AddText(ImVec2(14.0f, y), col, line);
+                    y += 26.0f;
+                }
+                if (!nl) break;
+                line = nl + 1;
+            }
+        }
+    }
 }
 
 

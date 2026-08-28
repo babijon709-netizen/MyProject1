@@ -24,3 +24,8 @@ void        esp_reset();
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 std::vector<EspAimTarget> esp_get_aim_targets();
 bool        esp_is_local_aiming();
+
+// Diagnostics: human-readable state of the last esp_get_boxes call
+// (lists, bound position field, camera sources, bone reads).
+// Returns false when no frame has been processed yet.
+bool        esp_get_debug_text(char* out, int cap);

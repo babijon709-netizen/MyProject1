@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/uio.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <algorithm>
 #include <cmath>
 #include <chrono>
@@ -31,6 +32,37 @@ static uint64_t  g_local_player = 0;
 // Aim targets computed by esp_get_boxes for the current frame.
 static std::vector<EspAimTarget> g_aim_targets;
 static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_height);
+
+// --- frame diagnostics ---------------------------------------------------------
+// Filled during every esp_get_boxes call; rendered by the overlay so the live
+// resolution chain (lists -> snapshot -> position field -> camera -> bones)
+// can be seen on screen without any external tools.
+static char g_debug_text[1024];
+static size_t g_debug_len = 0;
+
+static void dbg_clear() { g_debug_len = 0; g_debug_text[0] = '\0'; }
+
+static void dbg_line(const char* fmt, ...) {
+    if (g_debug_len + 160 >= sizeof(g_debug_text)) return;
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(g_debug_text + g_debug_len, sizeof(g_debug_text) - g_debug_len, fmt, args);
+    va_end(args);
+    if (written < 0) return;
+    size_t used = (size_t)written;
+    if (g_debug_len + used + 1 >= sizeof(g_debug_text)) used = sizeof(g_debug_text) - g_debug_len - 1;
+    g_debug_text[g_debug_len + used] = '\n';
+    g_debug_len += used + 1;
+    g_debug_text[g_debug_len] = '\0';
+}
+
+bool esp_get_debug_text(char* out, int cap) {
+    if (!out || cap <= 0 || g_debug_len == 0) return false;
+    int n = (int)g_debug_len < cap - 1 ? (int)g_debug_len : cap - 1;
+    memcpy(out, g_debug_text, (size_t)n);
+    out[n] = '\0';
+    return true;
+}
 
 // Dead reckoning: the managed position field is a tick snapshot and can lag
 // running players by meters. Per entity we estimate velocity from consecutive
@@ -209,25 +241,66 @@ static uint64_t resolve_local_player() {
 }
 
 // --- Player lists -------------------------------------------------------------
-// PlayerManager holds THREE player collections (dump.cs): sleepingPlayerList
-// (static 0x0), activePlayerList (0x8) and clientPlayerList (0x10). Different
-// game builds populate different ones, so all three are read and merged -
-// every candidate is strictly validated before use.
-static bool list_read_header(uint64_t list, uint64_t& items, int32_t& count) {
-    if (!list) return false;
-    items = rd_ptr(list + IL2CPP_LIST_ITEMS);
-    count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-    return items && count > 0 && count <= 512;
+// PlayerManager holds THREE player collections (dump.cs):
+//   sleepingPlayerList (static 0x0) : FZ<PlayerManager>
+//   activePlayerList   (static 0x8) : FZ<PlayerManager>
+//   clientPlayerList   (static 0x10): List<PlayerManager>
+// FZ<T> is a custom collection (wrapper over JD<T>: count 0x10, items 0x18),
+// NOT System.List - the kind is detected by the runtime class name.
+enum class ListKind { None, StdList, Fz };
+
+static ListKind detect_list_kind(uint64_t list) {
+    if (!list) return ListKind::None;
+    uint64_t klass = rd_ptr(list);
+    if (!klass) return ListKind::None;
+    if (remote_string_equals(rd_ptr(klass + 0x10), "List`1")) return ListKind::StdList;
+    if (remote_string_equals(rd_ptr(klass + 0x10), "FZ`1")) return ListKind::Fz;
+    return ListKind::None;
 }
 
-// A List<PlayerManager>-shaped object: pointer array + int count, every checked
-// element is a live PlayerManager instance.
+static const char* list_kind_name(uint64_t list) {
+    switch (detect_list_kind(list)) {
+        case ListKind::StdList: return "L";
+        case ListKind::Fz: return "F";
+        default: return "?";
+    }
+}
+
+// Resolves (data pointer = first element address, count) for any supported kind.
+static bool list_header(uint64_t list, uint64_t& data, int32_t& count) {
+    data = 0; count = 0;
+    switch (detect_list_kind(list)) {
+        case ListKind::StdList: {
+            uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
+            int32_t n = rd<int32_t>(list + IL2CPP_LIST_SIZE);
+            if (!items || n < 0 || n > 512) return false;
+            data = items + IL2CPP_ARRAY_FIRST_ELEMENT;
+            count = n;
+            return true;
+        }
+        case ListKind::Fz: {
+            uint64_t jd = rd_ptr(list + FZ_JD_FIELD);
+            if (!jd) return false;
+            int32_t n = rd<int32_t>(jd + JD_COUNT_FIELD);
+            uint64_t items = rd_ptr(jd + JD_ITEMS_FIELD);
+            if (!items || n < 0 || n > 512) return false;
+            data = items + IL2CPP_ARRAY_FIRST_ELEMENT;
+            count = n;
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+// A collection whose checked elements are all live PlayerManager instances.
 static bool list_valid_with_players(uint64_t list, int32_t max_check) {
-    uint64_t items = 0; int32_t count = 0;
-    if (!list_read_header(list, items, count)) return false;
+    uint64_t data = 0; int32_t count = 0;
+    if (!list_header(list, data, count)) return false;
+    if (count == 0) return false;
     int32_t checked = 0;
     for (int32_t index = 0; index < count && checked < max_check; ++index) {
-        uint64_t player = rd_ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t));
+        uint64_t player = rd_ptr(data + (uint64_t)index * sizeof(uint64_t));
         if (!player) continue;
         if (rd_ptr(player) != g_player_manager_class) return false;
         ++checked;
@@ -236,10 +309,10 @@ static bool list_valid_with_players(uint64_t list, int32_t max_check) {
 }
 
 static void collect_list_players(uint64_t list, std::unordered_set<uint64_t>& unique, std::vector<uint64_t>& out) {
-    uint64_t items = 0; int32_t count = 0;
-    if (!list_read_header(list, items, count)) return;
+    uint64_t data = 0; int32_t count = 0;
+    if (!list_header(list, data, count)) return;
     for (int32_t index = 0; index < count; ++index) {
-        uint64_t player = rd_ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t));
+        uint64_t player = rd_ptr(data + (uint64_t)index * sizeof(uint64_t));
         if (!player) continue;
         if (rd_ptr(player) != g_player_manager_class) continue;
         if (unique.insert(player).second) out.push_back(player);
@@ -253,29 +326,20 @@ static bool resolve_player_snapshot(std::vector<uint64_t>& snapshot) {
     if (!g_player_manager_static_fields) return false;
 
     const uint64_t list_offsets[3] = {
-        PLAYER_MANAGER_STATIC_FIELDS_ACTIVE,   // activePlayerList   (0x8)
-        PLAYER_MANAGER_STATIC_FIELDS_LIST,     // clientPlayerList   (0x10)
-        PLAYER_MANAGER_STATIC_FIELDS_SLEEPING, // sleepingPlayerList (0x0)
+        PLAYER_MANAGER_STATIC_FIELDS_ACTIVE,   // activePlayerList   (0x8, FZ)
+        PLAYER_MANAGER_STATIC_FIELDS_LIST,     // clientPlayerList   (0x10, List)
+        PLAYER_MANAGER_STATIC_FIELDS_SLEEPING, // sleepingPlayerList (0x0, FZ)
     };
-    bool any_valid = false;
+    bool any_resolved = false;
     for (uint64_t off : list_offsets) {
         uint64_t list = rd_ptr(g_player_manager_static_fields + off);
-        if (list && list_valid_with_players(list, 4)) { any_valid = true; break; }
+        if (!list) continue;
+        uint64_t data = 0; int32_t count = 0;
+        if (!list_header(list, data, count)) continue; // unknown kind or garbage
+        any_resolved = true;
+        if (count > 0 && list_valid_with_players(list, 4)) break;
     }
-    if (!any_valid) {
-        // Lists may be momentarily empty; keep a List<PlayerManager> shape check
-        // so an empty clientPlayerList still counts as a resolved statics block.
-        uint64_t list = rd_ptr(g_player_manager_static_fields + PLAYER_MANAGER_STATIC_FIELDS_LIST);
-        if (!list) return false;
-        uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
-        int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-        if (items || count != 0) return false;
-        uint64_t list_class = rd_ptr(list);
-        if (!remote_string_equals(rd_ptr(list_class + 0x10), "List`1") ||
-            !remote_string_equals(rd_ptr(list_class + 0x18), "System.Collections.Generic"))
-            return false;
-        return true; // resolved but empty; caller keeps its previous snapshot
-    }
+    if (!any_resolved) return false;
 
     std::unordered_set<uint64_t> unique;
     snapshot.clear();
@@ -470,10 +534,12 @@ static float vec3_distance(const Vec3& a, const Vec3& b) {
     return sqrtf(dx * dx + dy * dy + dz * dz);
 }
 
-static uint64_t select_position_field(const std::vector<uint64_t>& players, const Vec3& eye, bool has_eye) {
+static uint64_t select_position_field(const std::vector<uint64_t>& players, const Vec3& eye, bool has_eye,
+                                      int* out_agree, int* out_near) {
     int best_index = -1;
     double best_score = 0.0;
     int best_agreements = 0;
+    int best_near = 0;
     for (int i = 0; i < 6; ++i) {
         int agreements = 0, near_eye = 0;
         for (uint64_t player : players) {
@@ -488,8 +554,11 @@ static uint64_t select_position_field(const std::vector<uint64_t>& players, cons
             best_score = score;
             best_index = i;
             best_agreements = agreements;
+            best_near = near_eye;
         }
     }
+    if (out_agree) *out_agree = best_index >= 0 ? best_agreements : -1;
+    if (out_near) *out_near = best_index >= 0 ? best_near : -1;
     if (best_index < 0) return 0;
     if (best_agreements > 0) return kPositionFieldCandidates[best_index];
     // No skeleton evidence at all (models not loaded): accept the field only on
@@ -600,6 +669,8 @@ struct CameraMatrices {
     Mat4 projection{};
     Vec3 eye{};
     bool has_eye = false;
+    char view_src[12] = "-";   // "pose", "cache", "root"
+    char proj_src[12] = "-";   // "live", "nonjit", "orig", "synth"
 };
 
 // View matrix (GL-style, camera looks down -Z view space, row-major) built
@@ -694,6 +765,7 @@ static bool read_camera_matrices(uint64_t native_cam, const Vec3& eye_hint, bool
     bool have_projection = false;
     float best_mismatch = INFINITY;
     int projection_vote = 0;
+    int choice_proj = -1;
     for (int i = 0; i < 3; ++i) {
         Mat4 candidate = rd_m4(native_cam + candidate_offsets[i]);
         if (!projection_structurally_valid(candidate)) continue;
@@ -703,6 +775,7 @@ static bool read_camera_matrices(uint64_t native_cam, const Vec3& eye_hint, bool
             projection = candidate;
             projection_vote = storage_vote_projection(candidate);
             have_projection = true;
+            choice_proj = i;
         }
     }
     bool synthesized = false;
@@ -712,10 +785,15 @@ static bool read_camera_matrices(uint64_t native_cam, const Vec3& eye_hint, bool
         float aspect = (std::isfinite(screen_height) && screen_height >= 100.0F) ? screen_width / screen_height : 0.0F;
         if (!synthesize_projection(fov, aspect, projection)) return false;
         synthesized = true;
-    } else if (projection_vote > 0) {
-        mat_transpose_inplace(projection); // buffer was column-major
+        snprintf(out.proj_src, sizeof(out.proj_src), "synth");
+    } else {
+        snprintf(out.proj_src, sizeof(out.proj_src), "%s",
+                 choice_proj == 0 ? "live" : (choice_proj == 1 ? "nonjit" : "orig"));
+        if (projection_vote > 0) {
+            mat_transpose_inplace(projection); // buffer was column-major
+        }
+        // projection_vote < 0 (or 0): already row-major math, use as-is.
     }
-    // projection_vote < 0 (or 0): already row-major math, use as-is.
 
     // --- view ---
     Vec3 cam_pos{}; Vec4 cam_rot{};
@@ -725,6 +803,8 @@ static bool read_camera_matrices(uint64_t native_cam, const Vec3& eye_hint, bool
         view = view_from_camera_pose(cam_pos, cam_rot);
         out.eye = cam_pos;
         out.has_eye = true;
+        snprintf(out.view_src, sizeof(out.view_src), "pose@%llx",
+                 (unsigned long long)(g_camera_transform_offset ? g_camera_transform_offset : 0));
         view_ok = true;
     }
     if (!view_ok) {
@@ -737,6 +817,7 @@ static bool read_camera_matrices(uint64_t native_cam, const Vec3& eye_hint, bool
             view_ok = true;
             int vote = synthesized ? storage_vote_projection(view) : projection_vote;
             if (vote > 0) mat_transpose_inplace(view); // buffer was column-major
+            snprintf(out.view_src, sizeof(out.view_src), "cache");
         }
     }
     if (!view_ok) {
@@ -750,6 +831,7 @@ static bool read_camera_matrices(uint64_t native_cam, const Vec3& eye_hint, bool
                 view = view_from_camera_pose(pos, rot);
                 out.eye = pos;
                 out.has_eye = true;
+                snprintf(out.view_src, sizeof(out.view_src), "root");
                 view_ok = true;
             }
         }
@@ -864,6 +946,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
 static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
+    dbg_clear();
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
 
@@ -879,7 +962,19 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
         if (resolve_player_snapshot(refreshed) && !refreshed.empty())
             s_transforms = std::move(refreshed);
     }
-    if (s_transforms.empty()) return result;
+    if (s_transforms.empty()) { dbg_line("lists: snapshot EMPTY"); return result; }
+    {
+        uint64_t slp = rd_ptr(g_player_manager_static_fields + PLAYER_MANAGER_STATIC_FIELDS_SLEEPING);
+        uint64_t act = rd_ptr(g_player_manager_static_fields + PLAYER_MANAGER_STATIC_FIELDS_ACTIVE);
+        uint64_t cli = rd_ptr(g_player_manager_static_fields + PLAYER_MANAGER_STATIC_FIELDS_LIST);
+        uint64_t d; int32_t n;
+        int ns = list_header(slp, d, n) ? n : -1;
+        int na = list_header(act, d, n) ? n : -1;
+        int nc = list_header(cli, d, n) ? n : -1;
+        dbg_line("lists: slp[%s]=%d act[%s]=%d cli[%s]=%d snap=%zu",
+                 list_kind_name(slp), ns, list_kind_name(act), na, list_kind_name(cli), nc,
+                 s_transforms.size());
+    }
 
     // Eye hint independent of the (possibly unbound) position field: the local
     // player's worldCameraRoot transform.
@@ -907,21 +1002,30 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
     uint64_t native_cam = resolve_native_camera();
     if (!native_cam) return result;
     CameraMatrices cam{};
-    if (!read_camera_matrices(native_cam, eye_hint, has_eye_hint, sw, sh, cam)) return result;
+    if (!read_camera_matrices(native_cam, eye_hint, has_eye_hint, sw, sh, cam)) {
+        dbg_line("cam: FAILED (native=%llx)", (unsigned long long)native_cam);
+        return result;
+    }
     Mat4 vp = mat_mul(cam.projection, cam.view);
 
     Vec3 camera_position{};
     bool has_camera_position = cam.has_eye || camera_position_from_view(cam.view, camera_position);
     if (cam.has_eye) camera_position = cam.eye;
+    dbg_line("cam: v=%s p=%s fov=%.0f eye=%.0f,%.0f,%.0f",
+             cam.view_src, cam.proj_src, (double)rd<float>(native_cam + NATIVE_CAMERA_FOV),
+             (double)camera_position.x, (double)camera_position.y, (double)camera_position.z);
 
     // Bind the position field once (and re-bind only when evidence is lost).
     if (!g_position_offset || --g_position_rebind_cooldown <= 0) {
-        uint64_t bound = select_position_field(s_transforms, camera_position, has_camera_position);
+        int bind_agree = -1, bind_near = -1;
+        uint64_t bound = select_position_field(s_transforms, camera_position, has_camera_position, &bind_agree, &bind_near);
         if (bound) {
             if (bound != g_position_offset) g_entity_motion.clear();
             g_position_offset = bound;
         }
         g_position_rebind_cooldown = 300; // re-validate the binding every ~5s at 60fps
+        dbg_line("pos: off=0x%llx agree=%d near=%d (cands 1D0/1DC/1E8/2D8/2E4/338)",
+                 (unsigned long long)g_position_offset, bind_agree, bind_near);
     }
 
     // Local entity: snapshot[0] when statics resolved it, else the entity
@@ -957,13 +1061,16 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
         }
     }
     has_local_position = local_entity_index != s_transforms.size();
-    if (!has_local_position) return result;
+    dbg_line("local: idx=%zu of %zu (statics=%d)", local_entity_index, s_transforms.size(), local_ptr ? 1 : 0);
+    if (!has_local_position) { dbg_line("local: NONE -> no boxes"); return result; }
 
+    int dbg_pos_ok = 0, dbg_pos_fail = 0, dbg_bones_ok = 0;
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) continue;
         if (!s_transforms[i]) continue;
         Vec3 feet{};
-        if (!read_entity_position(s_transforms[i], feet)) continue;
+        if (!read_entity_position(s_transforms[i], feet)) { ++dbg_pos_fail; continue; }
+        ++dbg_pos_ok;
 
         float distance = -1.0F;
         if (has_local_position) {
@@ -977,6 +1084,7 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
         // instead of assuming a standing model of constant height.
         Vec3 head_bone{};
         bool head_bone_ok = read_player_head_bone(s_transforms[i], feet, head_bone);
+        if (head_bone_ok) ++dbg_bones_ok;
         // The head pivot must sit plausibly above the feet; otherwise treat the
         // read as garbage and fall back to the constant-height model.
         if (head_bone_ok) {
@@ -1062,6 +1170,16 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
         g_aim_targets.push_back(aim);
     }
 
+    dbg_line("ents: pos ok=%d fail=%d bones=%d boxes=%zu", dbg_pos_ok, dbg_pos_fail, dbg_bones_ok, result.size());
+    // raw field dump for the first non-local entity (position binding evidence)
+    for (size_t i = 0; i < s_transforms.size(); ++i) {
+        if (i == local_entity_index || !s_transforms[i]) continue;
+        Vec3 a = rd_v3(s_transforms[i] + 0x1D0);
+        Vec3 b = rd_v3(s_transforms[i] + 0x338);
+        dbg_line("ent[%zu] 1D0=%.0f,%.0f,%.0f 338=%.0f,%.0f,%.0f", i,
+                 (double)a.x, (double)a.y, (double)a.z, (double)b.x, (double)b.y, (double)b.z);
+        break;
+    }
     return result;
 }
 
