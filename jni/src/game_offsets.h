@@ -79,7 +79,9 @@ inline constexpr float PELVIS_FRACTION       = 0.45F; // pelvis at this fraction
 //   0xD2BBAD8 Oxide_PlayerManager_TypeInfo     -> Oxide.PlayerManager
 //   0xD2B6ED8 Oxide_GameControllerBase_TypeInfo -> Oxide.GameControllerBase
 inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD2BBAD8;
-inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // PlayerManager.clientPlayerList
+inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_SLEEPING = 0x0;  // PlayerManager.sleepingPlayerList
+inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_ACTIVE   = 0x8;  // PlayerManager.activePlayerList
+inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST     = 0x10; // PlayerManager.clientPlayerList
 
 inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD2B6ED8;
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // GameControllerBase.<zOu>k__BackingField (PlayerManager)
