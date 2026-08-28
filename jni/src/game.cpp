@@ -419,42 +419,44 @@ static uint64_t resolve_player_model_info(uint64_t player) {
     return rd_ptr(inv_data + INVENTORY_DATA_MODEL_FIELD);
 }
 
-// Reads the world position of the model's head bone. `anchor` is the entity
-// position used for boxes; a bone that lands unreasonably far from it is
-// rejected (stale model of a respawned player, mid-streaming reads).
-static bool read_player_head_bone(uint64_t player, const Vec3& anchor, Vec3& head_out) {
+// Reads the world position of the model's head bone, with no anchor at all:
+// the skeleton is an INDEPENDENT position source (it never touches the managed
+// position field), so it must be readable before any feet position is known.
+static bool read_head_bone(uint64_t player, Vec3& head_out) {
     uint64_t model_info = resolve_player_model_info(player);
     if (!model_info) return false;
     uint64_t head_native = resolve_native_transform(rd_ptr(model_info + MODEL_INFO_HEAD_FIELD));
     if (!head_native) return false;
-    Vec3 head{}; Vec4 head_rot{};
-    if (!try_read_transform_world(head_native, head, head_rot)) return false;
-    if (!vec3_is_finite(head)) return false;
-    float dx = head.x - anchor.x, dy = head.y - anchor.y, dz = head.z - anchor.z;
-    if (dx * dx + dy * dy + dz * dz > 9.0F) return false; // >3m from the anchor - not this player's model
-    head_out = head;
-    return true;
+    Vec4 head_rot{};
+    if (!try_read_transform_world(head_native, head_out, head_rot)) return false;
+    return vec3_is_finite(head_out);
+}
+
+// Cross-validation used to bind the managed position field: a real feet
+// position has the head bone this far above it and this close laterally.
+static bool head_bone_over_feet(const Vec3& head, const Vec3& feet) {
+    float up = head.y - feet.y;
+    if (!(up > HEAD_ABOVE_FEET_MIN && up < HEAD_ABOVE_FEET_MAX)) return false;
+    float dx = head.x - feet.x, dz = head.z - feet.z;
+    return dx * dx + dz * dz <= HEAD_LATERAL_TOLERANCE * HEAD_LATERAL_TOLERANCE;
 }
 
 // --- Position field binding ----------------------------------------------------
 // The installed game build can be newer than the dump, shifting PlayerManager's
-// Vector3 field offsets. All SIX documented position-like fields (lastTick/
-// lastSaved/lastDeath positions, two private positions, originalPosition) are
-// tried and the live one is bound ONCE by cross-validating against the
-// skeleton: a real feet position must sit under the player's independently-read
-// head bone, and real players must be near the camera eye. Re-bound only when
-// the bound field loses all evidence (respawn of the layout, game update).
-static uint64_t g_position_offset = 0;          // 0 => hierarchy-transform mode
+// Vector3 fields - and some builds simply never fill lastTickPosition in for
+// REMOTE players, which silently kills every box (all players then sit at
+// (0,0,0), fail the distance filter and nothing is drawn).
+//
+// So the field is bound only on EVIDENCE: among the six documented
+// position-like fields, a candidate is accepted when the skeleton - read
+// through the inventory chain and the Unity transform hierarchy, i.e. without
+// touching the field at all - confirms it (head bone plausibly above the feet).
+// When no candidate is confirmed and the skeleton is readable, the binding is
+// REJECTED (offset 0) and positions come from the skeleton/hierarchy instead.
+// Re-checked every ~5s, and per frame a bound field is still distrusted for
+// that frame when it contradicts a live head bone.
+static uint64_t g_position_offset = 0;          // 0 => skeleton / hierarchy mode
 static int      g_position_rebind_cooldown = 0;
-
-static bool read_head_bone_at(uint64_t native_transform, Vec3& position) {
-    uint64_t transform_data = rd_ptr(native_transform + 0x38);
-    int32_t transform_index = rd<int32_t>(native_transform + 0x40);
-    if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
-    uint64_t matrices = rd_ptr(transform_data + 0x18);
-    uint64_t indices = rd_ptr(transform_data + 0x20);
-    return read_transform_hierarchy_arrays(matrices, indices, transform_index, position);
-}
 
 static const uint64_t kPositionFieldCandidates[6] = {
     PLAYER_POSITION,        // 0x1D0 lastTickPosition
@@ -470,32 +472,106 @@ static float vec3_distance(const Vec3& a, const Vec3& b) {
     return sqrtf(dx * dx + dy * dy + dz * dz);
 }
 
-static uint64_t select_position_field(const std::vector<uint64_t>& players, const Vec3& eye, bool has_eye) {
+// One player's independent position evidence, read once per frame and shared by
+// the binding, the feet resolution and the box/aim geometry. The head bone is
+// the precise one; the worldCameraRoot rig is read only when no model is loaded
+// (it is always there, and it sits at eye level).
+struct PlayerSample {
+    uint64_t player = 0;
+    Vec3     head{};
+    Vec3     rig{};
+    bool     head_ok = false;
+    bool     rig_ok = false;
+};
+
+// Reads the world position of the player's worldCameraRoot rig (eye level).
+static bool read_rig_position(uint64_t player, Vec3& rig) {
+    uint64_t native = resolve_player_native_transform(player);
+    if (!native) return false;
+    Vec4 rig_rot{};
+    if (!try_read_transform_world(native, rig, rig_rot)) return false;
+    return vec3_is_finite(rig);
+}
+
+// Second validator, for when no model is loaded: the rig must sit about
+// WORLD_CAMERA_ROOT_EYE_HEIGHT above a real feet position, and directly over it.
+static bool rig_over_feet(const Vec3& rig, const Vec3& feet) {
+    float up = rig.y - feet.y;
+    if (!(up > RIG_ABOVE_FEET_MIN && up < RIG_ABOVE_FEET_MAX)) return false;
+    float dx = rig.x - feet.x, dz = rig.z - feet.z;
+    return dx * dx + dz * dz <= HEAD_LATERAL_TOLERANCE * HEAD_LATERAL_TOLERANCE;
+}
+
+static PlayerSample read_player_sample(uint64_t player) {
+    PlayerSample sample;
+    sample.player = player;
+    if (!player) return sample;
+    sample.head_ok = read_head_bone(player, sample.head);
+    if (!sample.head_ok) sample.rig_ok = read_rig_position(player, sample.rig);
+    return sample;
+}
+
+// Returns 0 when no candidate deserves to be trusted.
+static uint64_t bind_position_field(const std::vector<PlayerSample>& samples, const Vec3& eye, bool has_eye) {
     int best_index = -1;
-    double best_score = 0.0;
     int best_agreements = 0;
+    int best_near_eye = 0;
+    int best_plausible = 0;
+    double best_spread = 0.0;
+    bool any_independent_evidence = false;
+
     for (int i = 0; i < 6; ++i) {
-        int agreements = 0, near_eye = 0;
-        for (uint64_t player : players) {
-            Vec3 p = rd_v3(player + kPositionFieldCandidates[i]);
+        int agreements = 0, near_eye = 0, plausible = 0;
+        Vec3 minimum{}, maximum{};
+        bool have_bounds = false;
+        for (const PlayerSample& sample : samples) {
+            Vec3 p = rd_v3(sample.player + kPositionFieldCandidates[i]);
             if (!vec3_is_finite(p)) continue;
-            Vec3 head{};
-            if (read_player_head_bone(player, p, head)) ++agreements; // head exists within 3m of this field's feet
+            if (sample.head_ok) {
+                any_independent_evidence = true;
+                if (head_bone_over_feet(sample.head, p)) ++agreements;
+            } else if (sample.rig_ok) {
+                any_independent_evidence = true;
+                if (rig_over_feet(sample.rig, p)) ++agreements;
+            }
             if (has_eye && vec3_distance(p, eye) <= MAX_PLAYER_DISTANCE) ++near_eye;
+            if (fabsf(p.x) + fabsf(p.y) + fabsf(p.z) > 0.01F) {
+                ++plausible;
+                if (!have_bounds) { minimum = p; maximum = p; have_bounds = true; }
+                else {
+                    minimum.x = std::min(minimum.x, p.x); minimum.y = std::min(minimum.y, p.y); minimum.z = std::min(minimum.z, p.z);
+                    maximum.x = std::max(maximum.x, p.x); maximum.y = std::max(maximum.y, p.y); maximum.z = std::max(maximum.z, p.z);
+                }
+            }
         }
-        double score = (double)agreements * 10000.0 + (double)near_eye * 10.0 + (i == 0 ? 1.0 : 0.0);
-        if (score > best_score || best_index < 0) {
-            best_score = score;
+        double spread = have_bounds
+            ? fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z)
+            : 0.0;
+        // Confirmed evidence outranks everything; eye proximity only breaks ties
+        // between candidates, and the documented field order breaks the rest.
+        bool better = best_index < 0 ||
+            agreements > best_agreements ||
+            (agreements == best_agreements && near_eye > best_near_eye);
+        if (better) {
             best_index = i;
             best_agreements = agreements;
+            best_near_eye = near_eye;
+            best_plausible = plausible;
+            best_spread = spread;
         }
     }
     if (best_index < 0) return 0;
     if (best_agreements > 0) return kPositionFieldCandidates[best_index];
-    // No skeleton evidence at all (models not loaded): accept the field only on
-    // strong eye-proximity evidence; otherwise fall back to the dump default.
-    bool near_evidence = has_eye && best_score > 10.0;
-    return near_evidence ? kPositionFieldCandidates[best_index] : PLAYER_POSITION;
+    // The skeleton or the rig was readable and contradicted every candidate:
+    // stay unbound and take positions from them instead.
+    if (any_independent_evidence) return 0;
+    // Nothing independent is readable at all (Unity layout moved, models not
+    // loaded). Accept a field only when its raw values look like a set of
+    // distinct players standing somewhere near the camera - never on eye
+    // proximity alone, which is what happily "confirmed" an all-zero field.
+    if (has_eye && best_near_eye > 0 && best_plausible >= 2 && best_spread > 0.1)
+        return kPositionFieldCandidates[best_index];
+    return 0;
 }
 
 // --- Camera (libunity.so offsets) ---------------------------------------------
@@ -631,6 +707,32 @@ static uint64_t g_camera_transform = 0;
 static uint64_t g_camera_transform_offset = 0;
 static int      g_camera_transform_backoff = 0;
 
+// Deterministic path, straight from the engine's own code (see
+// NATIVE_CAMERA_GAMEOBJECT in game_offsets.h): the native camera points at its
+// GameObject, whose component array holds the Transform (class id 4). When the
+// class id cannot be matched, any component that resolves through the transform
+// hierarchy is accepted - a plain MonoBehaviour never does.
+static uint64_t camera_transform_from_gameobject(uint64_t native_cam) {
+    uint64_t game_object = rd_ptr(native_cam + NATIVE_CAMERA_GAMEOBJECT);
+    if (!likely_native_ptr(game_object)) return 0;
+    uint64_t entries = rd_ptr(game_object + GAMEOBJECT_COMPONENT_ARRAY);
+    int32_t count = rd<int32_t>(game_object + GAMEOBJECT_COMPONENT_COUNT);
+    if (!likely_native_ptr(entries) || count <= 0 || count > 64) return 0;
+    uint64_t validated = 0;
+    for (int32_t index = 0; index < count; ++index) {
+        uint64_t entry = entries + (uint64_t)index * GAMEOBJECT_COMPONENT_STRIDE;
+        uint64_t component = rd_ptr(entry + GAMEOBJECT_COMPONENT_PTR);
+        if (!component) continue;
+        if (rd<int32_t>(entry) == TRANSFORM_CLASS_ID) return component;
+        if (!validated) {
+            Vec3 probe{}; Vec4 probe_rot{};
+            if (try_read_transform_world(component, probe, probe_rot) && vec3_is_finite(probe))
+                validated = component;
+        }
+    }
+    return validated;
+}
+
 static uint64_t find_camera_transform(uint64_t native_cam, const Vec3& eye_hint, bool has_hint) {
     uint64_t fallback = 0;
     for (uint64_t off = 0x8; off <= 0x600; off += 8) {
@@ -656,10 +758,19 @@ static uint64_t find_camera_transform(uint64_t native_cam, const Vec3& eye_hint,
     return fallback;
 }
 
-// Resolves the camera transform (cached) and its current world pose.
+// Resolves the camera transform and its current world pose.
 static bool resolve_camera_pose(uint64_t native_cam, const Vec3& eye_hint, bool has_hint, Vec3& pos, Vec4& rot) {
-    if (g_camera_transform_backoff > 0) --g_camera_transform_backoff;
+    // Primary: the engine's own path (camera -> GameObject -> Transform), cheap
+    // enough to redo every frame, so a scene change cannot leave a stale pose.
+    uint64_t direct = camera_transform_from_gameobject(native_cam);
+    if (direct && try_read_transform_world(direct, pos, rot) && vec3_is_finite(pos)) {
+        g_camera_transform = 0;
+        g_camera_transform_offset = 0;
+        return true;
+    }
 
+    // Fallback: a transform pointer found by scanning the camera object.
+    if (g_camera_transform_backoff > 0) --g_camera_transform_backoff;
     if (g_camera_transform) {
         if (g_camera_transform_offset) {
             uint64_t current = rd_ptr(native_cam + g_camera_transform_offset);
@@ -814,28 +925,44 @@ static bool w2s(const Mat4& vp, const Vec3& world, float sw, float sh, Vec2& out
 }
 
 // --- Entity positions ----------------------------------------------------------
-static bool read_hierarchy_position(uint64_t player, Vec3& position) {
-    uint64_t native = resolve_player_native_transform(player);
-    if (!native) return false;
-    Vec3 hierarchy{}; Vec4 hierarchy_rot{};
-    if (!try_read_transform_world(native, hierarchy, hierarchy_rot) || !vec3_is_finite(hierarchy)) return false;
-    position = hierarchy;
-    return true;
-}
-
-static bool read_entity_position(uint64_t source, Vec3& position) {
-    if (!source) return false;
+// Three independent sources, tried in order of how much they can be trusted:
+//   1. the bound managed Vector3 field (cheap, smooth, needs the evidence-based
+//      binding above and is re-checked against the skeleton every frame);
+//   2. the model's head bone through the Unity transform hierarchy - always the
+//      real rendered pose, immune to build drift and to fields the client never
+//      fills in for remote players;
+//   3. the player's worldCameraRoot rig, which sits at eye level.
+// Feet position for one player, from whichever source is trustworthy now.
+static bool resolve_player_feet(const PlayerSample& sample, Vec3& feet) {
+    if (!sample.player) return false;
     if (g_position_offset) {
-        position = rd_v3(source + g_position_offset);
-        if (vec3_is_finite(position)) {
-            apply_dead_reckoning(source, position);
-            return true;
+        Vec3 field = rd_v3(sample.player + g_position_offset);
+        bool usable = vec3_is_finite(field);
+        if (usable && sample.head_ok) {
+            // A bound field that contradicts the live skeleton is a stale or
+            // never-updated value: don't let it move the box this frame.
+            float up = sample.head.y - field.y;
+            float dx = sample.head.x - field.x, dz = sample.head.z - field.z;
+            usable = up > -FIELD_HEAD_MAX_VERTICAL && up < FIELD_HEAD_MAX_VERTICAL &&
+                     dx * dx + dz * dz <= FIELD_HEAD_MAX_LATERAL * FIELD_HEAD_MAX_LATERAL;
+        } else if (usable && sample.rig_ok) {
+            float dx = sample.rig.x - field.x, dz = sample.rig.z - field.z;
+            usable = dx * dx + dz * dz <= FIELD_HEAD_MAX_LATERAL * FIELD_HEAD_MAX_LATERAL;
+        }
+        if (usable) {
+            apply_dead_reckoning(sample.player, field);
+            if (vec3_is_finite(field)) { feet = field; return true; }
         }
     }
-    // Hierarchy-transform mode / fallback: the player's world render transform.
-    if (!read_hierarchy_position(source, position)) return false;
-    apply_dead_reckoning(source, position);
-    return true;
+    if (sample.head_ok) {
+        feet = {sample.head.x, sample.head.y - BONE_HEAD_HEIGHT, sample.head.z};
+        return vec3_is_finite(feet);
+    }
+    if (sample.rig_ok) {
+        feet = {sample.rig.x, sample.rig.y - WORLD_CAMERA_ROOT_EYE_HEIGHT, sample.rig.z};
+        return vec3_is_finite(feet);
+    }
+    return false;
 }
 
 bool esp_init(pid_t pid) {
@@ -894,10 +1021,16 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
                 eye_hint = pos;
                 has_eye_hint = true;
             } else {
-                Vec3 feet = rd_v3(local_hint + PLAYER_POSITION);
-                if (vec3_is_finite(feet)) {
-                    eye_hint = {feet.x, feet.y + 1.6F, feet.z};
+                Vec3 head{};
+                if (read_head_bone(local_hint, head)) {
+                    eye_hint = head; // skull level: close enough to pin the camera
                     has_eye_hint = true;
+                } else {
+                    Vec3 feet = rd_v3(local_hint + PLAYER_POSITION);
+                    if (vec3_is_finite(feet)) {
+                        eye_hint = {feet.x, feet.y + WORLD_CAMERA_ROOT_EYE_HEIGHT, feet.z};
+                        has_eye_hint = true;
+                    }
                 }
             }
         }
@@ -914,71 +1047,73 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
     bool has_camera_position = cam.has_eye || camera_position_from_view(cam.view, camera_position);
     if (cam.has_eye) camera_position = cam.eye;
 
-    // Bind the position field once (and re-bind only when evidence is lost).
+    // Independent evidence first: the skeleton (or the camera rig, when no
+    // model is loaded) is the only position source that needs neither a bound
+    // field nor build-specific offsets, and it is what validates everything
+    // else. Read once per frame and shared by every consumer below.
+    std::vector<PlayerSample> samples;
+    samples.reserve(s_transforms.size());
+    for (uint64_t player : s_transforms) samples.push_back(read_player_sample(player));
+
+    // Bind the managed position field only on evidence, and re-check the
+    // binding every ~5s. Zero is a valid outcome - it means "no field is
+    // trustworthy, take positions from the skeleton / transform hierarchy".
     if (!g_position_offset || --g_position_rebind_cooldown <= 0) {
-        uint64_t bound = select_position_field(s_transforms, camera_position, has_camera_position);
-        if (bound) {
-            if (bound != g_position_offset) g_entity_motion.clear();
-            g_position_offset = bound;
-        }
+        uint64_t bound = bind_position_field(samples, camera_position, has_camera_position);
+        if (bound != g_position_offset) g_entity_motion.clear();
+        g_position_offset = bound;
         g_position_rebind_cooldown = 300; // re-validate the binding every ~5s at 60fps
     }
 
-    // Local entity: snapshot[0] when statics resolved it, else the entity
-    // closest to the camera eye (bounded).
-    bool has_local_position = false;
-    Vec3 local{};
-    size_t local_entity_index = s_transforms.size();
+    // Feet for every player, from whichever source is trustworthy this frame.
+    std::vector<Vec3> player_positions(s_transforms.size());
+    std::vector<char> feet_ok(s_transforms.size(), 0);
+    for (size_t index = 0; index < s_transforms.size(); ++index)
+        feet_ok[index] = resolve_player_feet(samples[index], player_positions[index]) ? 1 : 0;
 
+    // The local player is never boxed. Identified by pointer when the statics
+    // resolved it, otherwise as the entity nearest the camera eye.
+    size_t local_entity_index = s_transforms.size();
     uint64_t local_ptr = resolve_local_player();
     if (local_ptr) {
-        for (size_t index = 0; index < s_transforms.size(); ++index) {
-            if (s_transforms[index] != local_ptr) continue;
-            Vec3 candidate{};
-            if (read_entity_position(s_transforms[index], candidate)) {
-                local_entity_index = index;
-                local = candidate;
-            }
-            break;
-        }
+        for (size_t index = 0; index < s_transforms.size(); ++index)
+            if (s_transforms[index] == local_ptr) { local_entity_index = index; break; }
     }
     if (local_entity_index == s_transforms.size() && has_camera_position) {
         double best = 40000.0; // 200m
         for (size_t index = 0; index < s_transforms.size(); ++index) {
-            Vec3 candidate{};
-            if (!read_entity_position(s_transforms[index], candidate)) continue;
-            double dx = (double)candidate.x - camera_position.x, dy = (double)candidate.y - camera_position.y, dz = (double)candidate.z - camera_position.z;
+            if (!feet_ok[index]) continue;
+            double dx = (double)player_positions[index].x - camera_position.x;
+            double dy = (double)player_positions[index].y - camera_position.y;
+            double dz = (double)player_positions[index].z - camera_position.z;
             double distance_squared = dx * dx + dy * dy + dz * dz;
             if (std::isfinite(distance_squared) && distance_squared < best) {
                 best = distance_squared;
                 local_entity_index = index;
-                local = candidate;
             }
         }
     }
-    has_local_position = local_entity_index != s_transforms.size();
-    if (!has_local_position) return result;
 
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) continue;
-        if (!s_transforms[i]) continue;
-        Vec3 feet{};
-        if (!read_entity_position(s_transforms[i], feet)) continue;
+        if (!s_transforms[i] || !feet_ok[i]) continue;
+        const Vec3& feet = player_positions[i];
 
+        // Distance is measured from the camera, not from the local player's own
+        // (possibly unresolvable) position: a broken local must not be able to
+        // filter every other player out of the frame.
         float distance = -1.0F;
-        if (has_local_position) {
-            float dx = feet.x - local.x, dy = feet.y - local.y, dz = feet.z - local.z;
-            distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (has_camera_position) {
+            distance = vec3_distance(feet, camera_position);
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
 
-        // Real skeleton: read the model's head bone. When available, the box top
-        // and the aim bones follow the live animation pose (crouch, lean, jump)
-        // instead of assuming a standing model of constant height.
-        Vec3 head_bone{};
-        bool head_bone_ok = read_player_head_bone(s_transforms[i], feet, head_bone);
-        // The head pivot must sit plausibly above the feet; otherwise treat the
-        // read as garbage and fall back to the constant-height model.
+        // Real skeleton: when the head bone is available the box top and the aim
+        // bones follow the live animation pose (crouch, lean, jump) instead of
+        // assuming a standing model of constant height. The head pivot must sit
+        // plausibly above the feet, otherwise the read is treated as garbage.
+        Vec3 head_bone = samples[i].head;
+        bool head_bone_ok = samples[i].head_ok;
         if (head_bone_ok) {
             float head_up = head_bone.y - feet.y;
             if (!(head_up > 0.2F && head_up < 2.2F)) head_bone_ok = false;

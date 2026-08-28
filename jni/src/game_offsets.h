@@ -36,6 +36,27 @@ inline constexpr std::uint64_t NATIVE_CAMERA_ORIGINAL_PROJECTION     = 0x130;
 inline constexpr std::uint64_t NATIVE_CAMERA_NON_JITTERED_PROJECTION = 0x748;
 inline constexpr std::uint64_t NATIVE_CAMERA_FOV                     = 0x40;
 
+// Camera -> Transform. Camera::GetWorldToCameraMatrix (libunity.so 0xe1fe90)
+// reaches the camera transform like this:
+//     ldr x0, [camera, #0x20]   ; the camera's GameObject
+//     bl  0x640194              ; GameObject::GetComponentByType -> Transform
+// and that helper walks an array of 16-byte {int32 classID, Component*}
+// entries stored at GameObject + 0x20, element count at GameObject + 0x30
+// (classID is compared against a [base, base+count) type range). Unity's
+// Transform class id is 4, so the camera transform is found deterministically
+// instead of by scanning the camera object for a transform-shaped pointer.
+inline constexpr std::uint64_t NATIVE_CAMERA_GAMEOBJECT       = 0x20;
+inline constexpr std::uint64_t GAMEOBJECT_COMPONENT_ARRAY     = 0x20;
+inline constexpr std::uint64_t GAMEOBJECT_COMPONENT_COUNT     = 0x30;
+inline constexpr std::uint64_t GAMEOBJECT_COMPONENT_STRIDE    = 0x10;
+inline constexpr std::uint64_t GAMEOBJECT_COMPONENT_PTR       = 0x8;
+inline constexpr int32_t       TRANSFORM_CLASS_ID             = 4;
+
+// PlayerManager.worldCameraRoot is the per-player camera rig: its world
+// transform sits at EYE level, so the feet are this far below it. Used when
+// neither the managed position field nor the model skeleton yields a position.
+inline constexpr float WORLD_CAMERA_ROOT_EYE_HEIGHT = 1.60F;
+
 // Managed UnityEngine.Object.m_CachedPtr (dump.cs: UnityEngine.CoreModule,
 // class Object, "private IntPtr m_CachedPtr; // 0x10").
 inline constexpr std::uint64_t MANAGED_CACHED_PTR = 0x10;
@@ -73,6 +94,24 @@ inline constexpr float HEAD_BONE_CENTER_LIFT = 0.07F; // head pivot sits at the 
 inline constexpr float HEAD_TOP_MARGIN       = 0.18F; // skull top above the head pivot (for box height)
 inline constexpr float CHEST_FRACTION        = 0.70F; // chest at this fraction of feet->head height
 inline constexpr float PELVIS_FRACTION       = 0.45F; // pelvis at this fraction of feet->head height
+
+// Position-field validation window. A field really holding the feet must place
+// the independently-read head bone this far ABOVE it and this close laterally.
+// Outside the window the field is rejected and the skeleton/hierarchy is used
+// instead - which is what keeps ESP alive when the installed build moved the
+// field or the build simply does not fill it in for remote players.
+inline constexpr float HEAD_ABOVE_FEET_MIN     = 0.80F;
+inline constexpr float HEAD_ABOVE_FEET_MAX     = 2.40F;
+inline constexpr float HEAD_LATERAL_TOLERANCE  = 1.50F;
+// A bound field that drifts out of this window against a live head bone is
+// distrusted for that frame (the skeleton wins) without unbinding globally.
+inline constexpr float FIELD_HEAD_MAX_VERTICAL = 3.00F;
+inline constexpr float FIELD_HEAD_MAX_LATERAL  = 3.00F;
+// Same idea for the worldCameraRoot rig validator (used while no model is
+// loaded): the rig is ~1.6 m above the feet, and this window is deliberately
+// wide because the rig also carries the crouch/jump animation of the player.
+inline constexpr float RIG_ABOVE_FEET_MIN      = 0.60F;
+inline constexpr float RIG_ABOVE_FEET_MAX      = 2.60F;
 
 // --- libil2cpp.so offsets (dump arm64-v8a 1.13.11888: dump.cs / script.json) --
 // TypeInfo pointer RVAs (script.json TypeInfoPointers):
