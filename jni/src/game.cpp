@@ -448,15 +448,24 @@ static bool projection_structurally_valid(const Mat4& matrix) {
     return false; // exact identity/zero - not a frustum
 }
 
+static bool matrix_is_identity(const Mat4& matrix) {
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            float expected = (i == j) ? 1.0F : 0.0F;
+            if (fabsf(matrix.m[(size_t)i * 4 + j] - expected) > 0.0001F) return false;
+        }
+    return true;
+}
+
 static void mat_transpose_inplace(Mat4& matrix) {
     for (int i = 0; i < 4; ++i)
         for (int j = i + 1; j < 4; ++j)
             std::swap(matrix.m[(size_t)i * 4 + j], matrix.m[(size_t)j * 4 + i]);
 }
 
-// Y clip scale of a perspective frustum is cot(fovY / 2); it sits at m[5] in
-// EITHER storage order (the diagonal is layout-invariant), so this scores a
-// projection against the live camera FOV without assuming a memory layout.
+// Y clip scale of a perspective frustum is cot(fovY / 2); it sits at the (1,1)
+// diagonal entry, which occupies mem[5] in EITHER storage order, so this
+// scores a projection against the live camera FOV without assuming a layout.
 static float projection_fov_mismatch(const Mat4& projection, float fov_deg) {
     if (!std::isfinite(fov_deg) || fov_deg <= 1.0F || fov_deg >= 179.0F) return 0.0F;
     float cot = 1.0F / tanf(fov_deg * (3.14159265F / 180.0F) * 0.5F);
@@ -465,105 +474,210 @@ static float projection_fov_mismatch(const Mat4& projection, float fov_deg) {
     return fabsf(y - cot) / cot;
 }
 
-// GL-style perspective built from the camera FOV. Rows 0/1/3 are exact; row 2
-// (near/far depth mapping) is unused by the world-to-screen math.
+// GL-style perspective built from the camera FOV, stored ROW-major (native
+// unity::math::Matrix4x4f convention). Rows 0/1/3 are exact; row 2 (near/far
+// depth mapping) is unused by the world-to-screen math.
 static bool synthesize_projection(float fov_deg, float aspect, Mat4& out) {
     if (!std::isfinite(fov_deg) || fov_deg <= 1.0F || fov_deg >= 179.0F) return false;
     if (!std::isfinite(aspect) || aspect < 0.2F || aspect > 8.0F) return false;
     float cot = 1.0F / tanf(fov_deg * (3.14159265F / 180.0F) * 0.5F);
+    float near_z = 0.3F, far_z = 1000.0F;
+    float c22 = -(far_z + near_z) / (far_z - near_z);  // math (2,2)
+    float c23 = -2.0F * far_z * near_z / (far_z - near_z); // math (2,3)
     out = Mat4{};
-    out.m[0] = cot / aspect;
-    out.m[5] = cot;
-    out.m[10] = -1.0001F;
-    out.m[11] = -0.02F;
-    out.m[14] = -1.0F;
+    out.m[0] = cot / aspect; // math (0,0)
+    out.m[5] = cot;          // math (1,1)
+    out.m[10] = c22;         // math (2,2)
+    out.m[11] = c23;         // math (2,3)
+    out.m[14] = -1.0F;       // math (3,2): w-row = (0,0,-1,0) -> clip_w = -z_view
     return true;
 }
 
-static bool near_minus_one(float value) {
-    return fabsf(value + 1.0F) <= 0.02F;
-}
-
-// Storage-order votes. il2cpp.h confirms the managed Matrix4x4 field order is
-// m00,m10,m20,m30,... (column-major) and the camera icalls copy those 64 bytes
-// verbatim into the native camera, so column-major is the expected layout -
-// but the order is verified from the data instead of being assumed:
-//  - perspective clipW = -Z coefficient (M32) sits at mem[11] column-major,
-//    at mem[14] row-major;
-//  - a standard view's math row 3 is exactly (0,0,0,1): at mem[3/7/11/15]
-//    column-major, at mem[12..15] row-major.
-static int storage_vote_projection(const Mat4& projection) {
-    bool at11 = near_minus_one(projection.m[11]);
-    bool at14 = near_minus_one(projection.m[14]);
-    if (at11 == at14) return 0;
-    return at11 ? 1 : -1;
-}
-
-static int storage_vote_view(const Mat4& view) {
-    bool col = fabsf(view.m[3]) < 1e-4F && fabsf(view.m[7]) < 1e-4F &&
-               fabsf(view.m[11]) < 1e-4F && fabsf(view.m[15] - 1.0F) < 1e-4F;
-    bool row = fabsf(view.m[12]) < 1e-4F && fabsf(view.m[13]) < 1e-4F &&
-               fabsf(view.m[14]) < 1e-4F && fabsf(view.m[15] - 1.0F) < 1e-4F;
-    if (col == row) return 0;
-    return col ? 1 : -1;
+// Storage-order votes over the 64-byte native camera buffers. The GL-style
+// perspective has its w-row z coefficient (-1) at MATH position (row3,col2):
+// row-major memory puts it at mem[14], column-major at mem[11]. Native
+// unity::math::Matrix4x4f is row-major, which is the expected answer.
+// (+1 variants cover reversed-Z depth matrices.)
+static int storage_vote_projection(const Mat4& p) {
+    auto near_value = [](float v, float target) { return fabsf(v - target) <= 0.02F; };
+    bool row_major = near_value(p.m[14], -1.0F) || near_value(p.m[14], 1.0F);
+    bool col_major = near_value(p.m[11], -1.0F) || near_value(p.m[11], 1.0F);
+    if (row_major == col_major) return 0;
+    return col_major ? 1 : -1;
 }
 
 struct CameraMatrices {
     Mat4 view{};
     Mat4 projection{};
+    Vec3 eye{};
+    bool has_eye = false;
 };
 
-static bool read_camera_matrices(uint64_t native_cam, float screen_width, float screen_height, CameraMatrices& out) {
+// View matrix (GL-style, camera looks down -Z view space, row-major) built
+// from the camera transform's world position + rotation.
+static Mat4 view_from_camera_pose(const Vec3& position, const Vec4& rotation) {
+    Vec3 right = rotate_vector(rotation, {1.0F, 0.0F, 0.0F});
+    Vec3 up    = rotate_vector(rotation, {0.0F, 1.0F, 0.0F});
+    Vec3 fwd   = rotate_vector(rotation, {0.0F, 0.0F, 1.0F});
+    Mat4 view{};
+    view.m[0] =  right.x; view.m[1] =  right.y; view.m[2] =  right.z; view.m[3] = -(right.x * position.x + right.y * position.y + right.z * position.z);
+    view.m[4] =  up.x;    view.m[5] =  up.y;    view.m[6] =  up.z;    view.m[7] = -(up.x * position.x + up.y * position.y + up.z * position.z);
+    view.m[8] = -fwd.x;   view.m[9] = -fwd.y;   view.m[10] = -fwd.z;  view.m[11] = (fwd.x * position.x + fwd.y * position.y + fwd.z * position.z);
+    view.m[12] = 0.0F;    view.m[13] = 0.0F;    view.m[14] = 0.0F;    view.m[15] = 1.0F;
+    return view;
+}
+
+// --- Camera transform discovery ------------------------------------------------
+// The engine computes the view fresh from the camera transform for its own
+// WorldToScreenPoint; the +0x70 managed-facing cache can stay identity when no
+// C# code touches worldToCameraMatrix. So we locate the camera's native
+// Transform* inside the native camera object (validated by resolving its world
+// position through the transform hierarchy and, when the local player is
+// known, by requiring it to sit near the player's eye) and cache the offset.
+static bool likely_native_ptr(uint64_t value) {
+    return value >= 0x10000 && value < 0x0001000000000000ULL && (value & 0x7) == 0;
+}
+
+static bool try_read_transform_world(uint64_t native_transform, Vec3& pos, Vec4& rot) {
+    if (!native_transform) return false;
+    uint64_t transform_data = rd_ptr(native_transform + 0x38);
+    int32_t transform_index = rd<int32_t>(native_transform + 0x40);
+    if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
+    uint64_t matrices = rd_ptr(transform_data + 0x18);
+    uint64_t indices = rd_ptr(transform_data + 0x20);
+    return read_transform_hierarchy_arrays(matrices, indices, transform_index, pos, &rot);
+}
+
+static uint64_t g_camera_transform = 0;
+static uint64_t g_camera_transform_offset = 0;
+static int      g_camera_transform_backoff = 0;
+
+static uint64_t find_camera_transform(uint64_t native_cam, const Vec3& eye_hint, bool has_hint) {
+    uint64_t fallback = 0;
+    for (uint64_t off = 0x8; off <= 0x600; off += 8) {
+        uint64_t candidate = rd_ptr(native_cam + off);
+        if (!likely_native_ptr(candidate) || candidate == native_cam) continue;
+        Vec3 pos{}; Vec4 rot{};
+        if (!try_read_transform_world(candidate, pos, rot)) continue;
+        if (has_hint) {
+            float dx = pos.x - eye_hint.x, dy = pos.y - eye_hint.y, dz = pos.z - eye_hint.z;
+            if (dx * dx + dy * dy + dz * dz > 64.0F) continue; // >8m from the player's eye - not the view camera
+            g_camera_transform = candidate;
+            g_camera_transform_offset = off;
+            return candidate;
+        }
+        if (!fallback) fallback = candidate; // keep first hierarchy-valid candidate as a weaker option
+    }
+    if (fallback) {
+        // Remember only the offset-resolved pair is safe to reuse; an
+        // unhinted fallback must be re-validated every frame by the caller.
+        g_camera_transform = fallback;
+        g_camera_transform_offset = 0; // mark as unanchored: re-resolve via scan
+    }
+    return fallback;
+}
+
+// Resolves the camera transform (cached) and its current world pose.
+static bool resolve_camera_pose(uint64_t native_cam, const Vec3& eye_hint, bool has_hint, Vec3& pos, Vec4& rot) {
+    if (g_camera_transform_backoff > 0) --g_camera_transform_backoff;
+
+    if (g_camera_transform) {
+        if (g_camera_transform_offset) {
+            uint64_t current = rd_ptr(native_cam + g_camera_transform_offset);
+            if (current != g_camera_transform) g_camera_transform = 0;
+        }
+        if (g_camera_transform && !try_read_transform_world(g_camera_transform, pos, rot)) {
+            g_camera_transform = 0;
+        }
+    }
+    if (!g_camera_transform && g_camera_transform_backoff <= 0) {
+        g_camera_transform_backoff = 300; // ~5s at 60fps between scans
+        find_camera_transform(native_cam, eye_hint, has_hint);
+        if (g_camera_transform) {
+            if (!try_read_transform_world(g_camera_transform, pos, rot)) g_camera_transform = 0;
+        }
+    }
+    return g_camera_transform != 0;
+}
+
+static bool read_camera_matrices(uint64_t native_cam, const Vec3& eye_hint, bool has_hint,
+                                 float screen_width, float screen_height, CameraMatrices& out) {
     if (!native_cam) return false;
     float fov = rd<float>(native_cam + NATIVE_CAMERA_FOV);
 
-    Mat4 view = rd_m4(native_cam + NATIVE_CAMERA_VIEW_MATRIX);
-    if (!matrix_is_finite(view)) return false;
-
-    // Candidate projections, best kept: the live cache (+0xB0) is what Unity's
-    // own WorldToScreenPoint consumes, non-jittered (+0x748) and the original
-    // (+0x130, written only by SetProjectionMatrix) follow as alternates. All
-    // three can go stale when the game zooms, so the one whose Y scale agrees
-    // best with the live FOV (+0x40) wins.
+    // --- projection: best FOV-matching candidate, live cache first ---
     static const uint64_t candidate_offsets[3] = {
         NATIVE_CAMERA_PROJECTION_MATRIX,
         NATIVE_CAMERA_NON_JITTERED_PROJECTION,
         NATIVE_CAMERA_ORIGINAL_PROJECTION,
     };
-    Mat4 candidates[3];
-    int choice = -1;
+    Mat4 projection{};
+    bool have_projection = false;
     float best_mismatch = INFINITY;
     int projection_vote = 0;
     for (int i = 0; i < 3; ++i) {
-        candidates[i] = rd_m4(native_cam + candidate_offsets[i]);
-        if (!projection_structurally_valid(candidates[i])) continue;
-        float mismatch = projection_fov_mismatch(candidates[i], fov);
+        Mat4 candidate = rd_m4(native_cam + candidate_offsets[i]);
+        if (!projection_structurally_valid(candidate)) continue;
+        float mismatch = projection_fov_mismatch(candidate, fov);
         if (mismatch < best_mismatch) {
             best_mismatch = mismatch;
-            choice = i;
-            projection_vote = storage_vote_projection(candidates[i]);
+            projection = candidate;
+            projection_vote = storage_vote_projection(candidate);
+            have_projection = true;
         }
     }
-
     bool synthesized = false;
-    if (choice < 0) {
-        // No usable cached projection: rebuild one from the live FOV. The
-        // overlay shares the game's screen, so its w/h ratio is the aspect.
+    if (!have_projection) {
+        // Every cached projection is unusable: rebuild one from the live FOV.
+        // The overlay shares the game's screen, so its w/h ratio is the aspect.
         float aspect = (std::isfinite(screen_height) && screen_height >= 100.0F) ? screen_width / screen_height : 0.0F;
-        if (!synthesize_projection(fov, aspect, candidates[0])) return false;
-        choice = 0;
+        if (!synthesize_projection(fov, aspect, projection)) return false;
         synthesized = true;
+    } else if (projection_vote > 0) {
+        mat_transpose_inplace(projection); // buffer was column-major
     }
+    // projection_vote < 0 (or 0): already row-major math, use as-is.
 
-    int view_vote = storage_vote_view(view);
-    int votes = projection_vote + view_vote;
-    bool column_major = (votes != 0) ? votes > 0 : true; // native unity::math order
-    if (column_major) {
-        mat_transpose_inplace(view);
-        if (!synthesized) mat_transpose_inplace(candidates[choice]);
+    // --- view ---
+    Vec3 cam_pos{}; Vec4 cam_rot{};
+    Mat4 view{};
+    bool view_ok = false;
+    if (resolve_camera_pose(native_cam, eye_hint, has_hint, cam_pos, cam_rot)) {
+        view = view_from_camera_pose(cam_pos, cam_rot);
+        out.eye = cam_pos;
+        out.has_eye = true;
+        view_ok = true;
     }
+    if (!view_ok) {
+        // Managed-facing worldToCameraMatrix cache. Only trusted when it is
+        // neither identity (never refreshed) nor zero.
+        Mat4 cached = rd_m4(native_cam + NATIVE_CAMERA_VIEW_MATRIX);
+        if (matrix_is_finite(cached) && !matrix_is_identity(cached)) {
+            view = cached;
+            view_ok = true;
+            int vote = synthesized ? storage_vote_projection(view) : projection_vote;
+            if (vote > 0) mat_transpose_inplace(view); // buffer was column-major
+        }
+    }
+    if (!view_ok) {
+        // Last resort: the local player's worldCameraRoot (the third-person
+        // camera rig) - the pre-offsets approach that rendered correctly.
+        uint64_t local = resolve_local_player();
+        if (local) {
+            uint64_t root = resolve_player_native_transform(local);
+            Vec3 pos{}; Vec4 rot{};
+            if (root && try_read_transform_world(root, pos, rot)) {
+                view = view_from_camera_pose(pos, rot);
+                out.eye = pos;
+                out.has_eye = true;
+                view_ok = true;
+            }
+        }
+    }
+    if (!view_ok) return false;
+
     out.view = view;
-    out.projection = candidates[choice];
+    out.projection = projection;
     return true;
 }
 
@@ -687,6 +801,7 @@ void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
+    g_camera_transform = 0; g_camera_transform_offset = 0; g_camera_transform_backoff = 0;
     g_entity_motion.clear();
     g_model_info_cache.clear();
     g_aim_targets.clear();
@@ -716,12 +831,29 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
     // Camera straight from the native camera object (libunity.so offsets).
     uint64_t native_cam = resolve_native_camera();
     if (!native_cam) return result;
+
+    // Eye hint for pinning the camera's native transform: the local player's
+    // feet (lastTickPosition) plus standing eye height.
+    Vec3 eye_hint{};
+    bool has_eye_hint = false;
+    {
+        uint64_t local_hint = resolve_local_player();
+        if (local_hint) {
+            Vec3 feet = rd_v3(local_hint + PLAYER_POSITION);
+            if (vec3_is_finite(feet)) {
+                eye_hint = {feet.x, feet.y + 1.6F, feet.z};
+                has_eye_hint = true;
+            }
+        }
+    }
+
     CameraMatrices cam{};
-    if (!read_camera_matrices(native_cam, sw, sh, cam)) return result;
+    if (!read_camera_matrices(native_cam, eye_hint, has_eye_hint, sw, sh, cam)) return result;
     Mat4 vp = mat_mul(cam.projection, cam.view);
 
     Vec3 camera_position{};
-    bool has_camera_position = camera_position_from_view(cam.view, camera_position);
+    bool has_camera_position = cam.has_eye || camera_position_from_view(cam.view, camera_position);
+    if (cam.has_eye) camera_position = cam.eye;
 
     // Snapshot: the statics-provided local player (when resolved) is [0].
     bool has_local_position = false;
