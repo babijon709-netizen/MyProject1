@@ -41,7 +41,7 @@ inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m
 // Oxide.PlayerManager instance fields (dump.cs)
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
 // Prefer lastSavedPosition; lastTickPosition is adjacent at 0x1C8
-inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D4; // lastSavedPosition
+inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // lastSavedPosition
 
 inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18;
