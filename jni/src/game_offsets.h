@@ -11,15 +11,15 @@ namespace game_offsets {
 // Native Unity Camera (via Camera::m_CachedPtr) — from libunity.so
 // get_worldToCameraMatrix_Injected @ 0x5ac514 → helper 0xe1fe08 returns cam+0x70
 // get_projectionMatrix_Injected    @ 0x5ac53c → helper 0xe1fe6c returns cam+0xB0
-// +0x70 / +0xB0 are Unity's property caches (dirty flags @ +0x502/+0x500).
-// The render path keeps its frame-synchronised view-projection at +0x608 and
-// rolls it to +0x5C8 at the frame boundary (libunity helpers 0xE2B9F4/0xE2B990).
-// Helper 0xE2B90C separately writes the calculated property matrix to +0xF0.
-inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = 0xB0;  // native projectionMatrix property
-inline constexpr std::uint64_t CAMERA_VIEW_MATRIX       = 0x70;  // native worldToCameraMatrix property
-inline constexpr std::uint64_t CAMERA_WORLD_TO_CLIP     = 0xF0;  // calculated projection * worldToCamera
-inline constexpr std::uint64_t CAMERA_PREV_VIEW_PROJ    = 0x5C8; // previous rendered frame
-inline constexpr std::uint64_t CAMERA_RENDER_VIEW_PROJ  = 0x608; // current render view-projection
+// Exact Camera fields recovered from the libunity.so injected getters.
+// get_cullingMatrix -> 0xE22740 returns Camera+0x2FC. This is Unity's complete
+// render/culling VP matrix and is the equivalent of the old build's +0x2F8.
+inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = 0xB0;  // projectionMatrix
+inline constexpr std::uint64_t CAMERA_VIEW_MATRIX       = 0x70;  // worldToCameraMatrix
+inline constexpr std::uint64_t CAMERA_WORLD_TO_CLIP     = 0xF0;  // projection * worldToCamera
+inline constexpr std::uint64_t CAMERA_CULLING_MATRIX    = 0x2FC; // cullingMatrix (complete VP)
+inline constexpr std::uint64_t CAMERA_PREV_VIEW_PROJ    = 0x5C8; // previousViewProjectionMatrix
+inline constexpr std::uint64_t CAMERA_CULLING_DIRTY     = 0x511;
 inline constexpr std::uint64_t CAMERA_GAME_OBJECT       = 0x20;  // GameObject*, not Transform*
 inline constexpr std::uint64_t UNITY_TRANSFORM_TYPE_RVA = 0x17B6480; // native Transform type descriptor
 inline constexpr std::uint64_t GAME_OBJECT_COMPONENTS   = 0x20;

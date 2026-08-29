@@ -789,15 +789,16 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
             if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
         }
-        // The live Transform includes the scripted roll/fall animation immediately.
-        // Stored render matrices remain fallbacks for cameras with no readable pose.
-        vp = mat_mul(projection, view);
+        // Use Unity's complete culling matrix. In this binary get_cullingMatrix
+        // (0x5AC0FC -> 0xE22740) returns Camera+0x2FC. Unlike guessed internal
+        // frame fields, this matrix includes the exact animated camera pose.
+        vp = rd_m4(native_cam + CAMERA_CULLING_MATRIX);
         if (!matrix_is_finite(vp))
-            vp = rd_m4(native_cam + CAMERA_RENDER_VIEW_PROJ);
+            vp = rd_m4(native_cam + CAMERA_WORLD_TO_CLIP);
         if (!matrix_is_finite(vp))
             vp = rd_m4(native_cam + CAMERA_PREV_VIEW_PROJ);
         if (!matrix_is_finite(vp))
-            vp = rd_m4(native_cam + CAMERA_WORLD_TO_CLIP);
+            vp = mat_mul(projection, view);
     }
 
     bool has_local_position = false;
