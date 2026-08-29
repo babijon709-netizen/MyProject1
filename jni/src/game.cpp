@@ -771,7 +771,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!discover_player_position_offset(s_transforms)) return result;
     }
 
-    bool transform_camera_mode = !g_use_direct_player_position && g_transform_hierarchy_layout_valid;
+    bool transform_camera_mode = false; // light fix: always use native cam matrices, avoid dead-body-as-camera on death
     if (!transform_camera_mode) {
         uint64_t managed_cam = 0;
         if (g_game_controller_class) {
