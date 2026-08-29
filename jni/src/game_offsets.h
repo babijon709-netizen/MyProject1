@@ -15,9 +15,13 @@ namespace game_offsets {
 // External process_vm_readv does NOT run the getters, so +0x70 goes stale when the
 // camera moves — that is the ESP "drifts with camera" bug. Prefer rebuilding view
 // from the live Transform at cam+0x20 (same pointer the dirty path uses).
-inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = 0xB0;  // Matrix4x4 projection (cached)
-inline constexpr std::uint64_t CAMERA_VIEW_MATRIX       = 0x70;  // Matrix4x4 worldToCamera (cached, stale!)
-inline constexpr std::uint64_t CAMERA_WORLD_TO_CLIP     = 0xF0;  // projection * worldToCamera product
+// PRIMARY = ORIGINAL engine matrix (written by Unity itself every rendered frame):
+// CAMERA_WORLD_TO_CLIP @ 0xF0 — dst of Camera::CalculateWorldToClipMatrix
+// (0xe2b90c: x0=proj(0xB0), x1=view(0x70), x2=cam+0xF0 → NEON mul 0x64f5c4).
+// game.cpp reads it first and only falls back to rebuilding proj * view.
+inline constexpr std::uint64_t CAMERA_WORLD_TO_CLIP     = 0xF0;  // ORIGINAL proj*view, refreshed by the render pipeline
+inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = 0xB0;  // Matrix4x4 projection (lazy cache — fallback)
+inline constexpr std::uint64_t CAMERA_VIEW_MATRIX       = 0x70;  // Matrix4x4 worldToCamera (lazy cache, stale — fallback)
 inline constexpr std::uint64_t CAMERA_PREV_VIEW_PROJ    = 0x5C8; // previousViewProjection (frame-written)
 inline constexpr std::uint64_t CAMERA_NATIVE_TRANSFORM  = 0x20;  // Transform* used by w2c dirty rebuild
 inline constexpr std::uint64_t CAMERA_FOV_DEGREES       = 0x170; // get_fieldOfView storage

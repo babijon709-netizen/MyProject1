@@ -472,6 +472,29 @@ static bool matrix_is_finite(const Mat4& matrix) {
     }
     return has_non_zero;
 }
+
+// The engine's ORIGINAL worldToClip matrix (cam+0xF0). Unity writes it inside
+// Camera::CalculateWorldToClipMatrix (libunity 0xe2b90c: dst = proj * view via
+// NEON mul 0x64f5c4) on every rendered frame, so for any camera that is actually
+// drawing it is exactly the matrix the frame was rendered with — fresher than
+// anything we can rebuild externally. Sanity-gated: a never-written or stale slot
+// (zeros / garbage / non-perspective layout) is rejected and the caller falls
+// back to rebuilding projection * view.
+static bool read_native_world_to_clip(uint64_t native_cam, Mat4& vp) {
+    if (!native_cam) return false;
+    Mat4 matrix = rd_m4(native_cam + CAMERA_WORLD_TO_CLIP);
+    if (!matrix_is_finite(matrix)) return false;
+    // Perspective VP: the clip.w row is the view forward direction — ~unit length.
+    float wx = mat_get(matrix, 3, 0), wy = mat_get(matrix, 3, 1), wz = mat_get(matrix, 3, 2);
+    float wnorm = sqrtf(wx * wx + wy * wy + wz * wz);
+    if (!(wnorm > 0.2F && wnorm < 5.0F)) return false;
+    // 3x3 block must carry scale (rejects degenerate/garbage layouts).
+    float diagonal_energy =
+        fabsf(mat_get(matrix, 0, 0)) + fabsf(mat_get(matrix, 1, 1)) + fabsf(mat_get(matrix, 2, 2));
+    if (!(diagonal_energy > 0.0001F)) return false;
+    vp = matrix;
+    return true;
+}
 static Mat4 mat_mul(const Mat4& a, const Mat4& b) {
     // result = a * b (column-major, same as Unity Matrix4x4 operator*)
     Mat4 result{};
@@ -770,8 +793,16 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
             if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
         }
-        // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
-        vp = mat_mul(projection, view);
+        // PRIMARY: the engine's original worldToClip (cam+0xF0) — the exact matrix
+        // the last rendered frame was drawn with (see read_native_world_to_clip).
+        Mat4 original_vp{};
+        if (read_native_world_to_clip(native_cam, original_vp)) {
+            vp = original_vp;
+        } else {
+            // Fallback: rebuild projection * worldToCamera in the same order the
+            // engine uses inside CalculateWorldToClipMatrix (0xe2b90c).
+            vp = mat_mul(projection, view);
+        }
     }
 
     bool has_local_position = false;
