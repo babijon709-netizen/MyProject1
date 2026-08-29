@@ -6,6 +6,8 @@ namespace game_offsets {
 // ─── Verified against the 2026-08 game build ────────────────────────────────
 // dump.cs / script.json: custom il2cpp_dump.py, metadata v39 (XOR 0xa5c3f19d
 // + triple permutation). libunity.so is Unity 6000.3.18f1 (see .note.unity).
+// Every constant below re-checked against dump.cs, script.json method names
+// and disassembly of the new libil2cpp.so / libunity.so (see per-line notes).
 //
 // Native Unity Camera (via Camera::m_CachedPtr) — from libunity.so
 // get_worldToCameraMatrix_Injected @ 0x5ac514 → helper 0xe1fe08 returns cam+0x70
@@ -35,7 +37,7 @@ inline constexpr std::uint64_t CAMERA_PROJ_DIRTY        = 0x500; // byte, set wh
 // matrix cam+0x70); proj helper 0xe1fe6c (ldrb [cam+0x500], fov 0x170, aspect 0x4E0,
 // near 0x454, far 0x458); native worldToClip helper @ 0xe2b90c.
 
-inline constexpr std::uint64_t MANAGED_CACHED_PTR = 0x10;
+inline constexpr std::uint64_t MANAGED_CACHED_PTR = 0x10; // dump.cs: UnityEngine.Object.m_CachedPtr // 0x10 (inherited by Camera/MonoBehaviour)
 
 inline constexpr float PLAYER_HEIGHT          = 1.8F;
 inline constexpr float PLAYER_BOX_WIDTH_RATIO = 0.40F;
@@ -45,16 +47,17 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // Il2CppClass* TypeInfo globals in libil2cpp.so .got (new dump, metadata v39).
 // Found via codegen slots: slot load → ldr [klass+0xB8] (static_fields) → static
 // offsets that match the dump.cs static layout for each class.
-// Oxide.PlayerManager: slot read then [sf+0x00/0x08/0x10] (sleeping/active/client lists)
+// Oxide.PlayerManager: slot read then [sf+0x00/0x08/0x10] (sleeping/active/client lists);
+// script.json names the readers (Oxide.PlayerManager$$Kns/cfH/KRR).
 inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD181268;
-inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
+inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // dump.cs: clientPlayerList // 0x10; disasm: Kns reads sf+0x10 → List`1<PlayerManager>
 
 // Oxide.GameControllerBase: dense static range 0x08..0x78 matches dump.cs
 // (<LZO>@8, <LZp>@0x10, <LZT>@0x18, <LZR>@0x20, <LZE>@0x28, <LZn>@0x30, <LZD>@0x38, …)
 inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD1690C8; // GameControllerBase
-inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <LZp>k__BackingField
-inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <LZD>k__BackingField
-inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
+inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <LZp>k__BackingField (disasm: GameControllerBase$$Weaved writes sf+0x10)
+inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <LZD>k__BackingField (dump.cs statics)
+inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // dump.cs: Oxide.CameraManager.m_Camera // 0x20
 
 // Oxide.PlayerManager instance fields (dump.cs — offsets unchanged in the new build:
 // worldCameraRoot 0x68, lastTickPosition 0x1C8, lastSavedPosition 0x1D4)
@@ -62,8 +65,8 @@ inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
 // Prefer lastSavedPosition; lastTickPosition is adjacent at 0x1C8
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D4; // lastSavedPosition
 
-inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
-inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18;
-inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
+inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10; // il2cpp.h List_1_Fields: _items; disasm: inlined List`1.Add in PlayerManager$$Kns
+inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18; // _size (also _version @ 0x1C in the same disasm)
+inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20; // disasm: str x, [items+idx*8, #0x20]! ; array length @ 0x18
 
 }
