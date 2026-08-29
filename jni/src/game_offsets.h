@@ -40,9 +40,25 @@ inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m
 
 // Oxide.PlayerManager instance fields (dump.cs)
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
-inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (GameObject с ригом)
 // Prefer lastSavedPosition; lastTickPosition is adjacent at 0x1C8
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // lastSavedPosition
+
+// --- Skeleton ESP: точные ссылки на кости (dump.cs, managed-поля) ---
+// PlayerManager -> SingleKcc (kccReference)
+inline constexpr std::uint64_t PLAYER_KCC_REFERENCE = 0xB0;
+// SingleKcc.player (Oxide.PlayerManager) — обратная ссылка для точной
+// проверки, что объект в kccReference действительно SingleKcc
+inline constexpr std::uint64_t KCC_PLAYER_BACKREF = 0x80;
+// SingleKcc -> head-кость и CharacterAnimation (FVv)
+inline constexpr std::uint64_t KCC_HEAD_TRANSFORM          = 0x90;
+inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION     = 0xC0;
+// CharacterAnimation -> PlayerModelInfo
+inline constexpr std::uint64_t CHAR_ANIM_PLAYER_MODEL_INFO = 0x30;
+// PlayerModelInfo -> Transform-якоря рига
+inline constexpr std::uint64_t MODEL_INFO_HEAD      = 0x20;
+inline constexpr std::uint64_t MODEL_INFO_RIGHT_HAND = 0x28; // rightWeaponHolder
+inline constexpr std::uint64_t MODEL_INFO_LEFT_HAND  = 0x30; // leftWeaponHolder
+inline constexpr std::uint64_t MODEL_INFO_BODY       = 0x40; // body
 
 inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18;

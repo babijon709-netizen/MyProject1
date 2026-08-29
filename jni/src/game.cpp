@@ -654,66 +654,43 @@ static bool w2s_transform_camera(const Vec3& camera_position, const Vec4& camera
 }
 
 // ============================ Skeleton ESP ============================
-// Внешняя адаптация внутреннего скелетона: внутренний вариант звал
-// Transform::GetChild / Object::GetName и обходил иерархию костей по именам
-// ("Hips", "Arm.L", ...). Снаружи вызывать icall нельзя, а эта сборка игры
-// прячет таблицу icall, поэтому оффсеты (first-child / next-sibling /
-// GameObject / имя) находятся один раз за сессию рантайм-дискавери и
-// валидируются по набору имён гуманоидного рига. Мировые позиции костей
-// каждый кадр берутся из уже проверенных массивов TransformData, поэтому
-// скелет полностью динамичный и двигается вместе с конечностями.
+// Внешняя адаптация внутреннего скелетона. Внутренний вариант обходил
+// кости через Transform::GetChild + Object::GetName по именам ("Hips",
+// "Arm.L", ...). Снаружи icall вызвать нельзя, а эта сборка игры прячет
+// таблицу icall в рантайме протектора, поэтому кости берутся напрямую из
+// управляемых полей игры (dump.cs, точные оффсеты):
+//   PlayerManager + 0xB0 -> SingleKcc (kccReference)
+//   SingleKcc     + 0x90 -> head (Transform), + 0xC0 -> CharacterAnimation
+//   CharAnim      + 0x30 -> PlayerModelInfo
+//   ModelInfo     + 0x20 head, +0x28 rightWeaponHolder, +0x30 leftWeaponHolder,
+//                  +0x40 body  (все UnityEngine.Transform)
+// Managed Transform -> +0x10 (m_CachedPtr) -> нативный Transform -> индекс
+// батча (0x40) и TransformData (0x38) — те же массивы, что уже использует
+// позиционный ESP. От якорей (голова/корпус/руки) весь остальной риг
+// размечается по дереву родительских индексов батча: позвоночник — путь
+// между якорями, ноги — нисходящие цепочки от таза, руки — цепочки от
+// держателей оружия. Никакого перебора оффсетов и чтения имён GameObject.
+// Мировые позиции каждый кадр считаются из локальных матриц, поэтому
+// скелет полностью динамичный и двигается с конечностями.
 
-struct SkeletonLayout {
-    bool     valid = false;
-    uint64_t data_off = 0x38;   // native Transform -> TransformData*
-    uint64_t idx_off  = 0x40;   // native Transform -> индекс в батче
-    uint64_t head_off = 0;      // native Transform -> первый ребёнок
-    uint64_t next_off = 0;      // ребёнок -> следующий сиблинг
-    uint64_t go_off   = 0;      // native Transform -> GameObject*
-    uint64_t name_off = 0;      // GameObject -> хранилище имени
-    bool     name_indirect = false; // имя лежит по char*, а не инлайном
+struct SkelRig {
+    uint64_t player = 0;
+    uint64_t transform_data = 0;
+    int32_t  anchor[4] = {-1, -1, -1, -1}; // HEAD, BODY, RHAND, LHAND (индексы батча)
+    int32_t  slice_lo = 0, slice_hi = 0;   // окно среза батча
+    int32_t  bone[ESP_BONE_COUNT];
+    bool     labeled = false;
+    uint64_t next_try_ms = 0;
+    uint64_t last_ok_ms = 0;
+    // буферы кадра (срез батча)
+    std::vector<Matrix34> mats;
+    std::vector<int32_t>  idxs;
+    std::vector<Matrix34> anc_mat;
+    std::vector<int32_t>  anc_idx, anc_par;
 };
-static SkeletonLayout g_skel_layout;
-static uint64_t g_skel_last_try_ms = 0;
-// сид иерархии: 0 = worldCameraRoot игрока, 1 = transform модели персонажа
-static int       g_skel_seed_mode = 0;
-static uint64_t  g_skel_seed_go_off = 0;
+static std::vector<SkelRig> g_skel_rigs;
 
-struct BoneAlias { int bone; const char* names[4]; };
-static const BoneAlias kSkelBoneAliases[] = {
-    {BONE_HIPS,       {"Hips", "hips", "Pelvis"}},
-    {BONE_SPINE,      {"Spine", "spine"}},
-    {BONE_SPINE1,     {"Spine1", "Spine_1"}},
-    {BONE_SPINE2,     {"Spine2", "Spine_2", "Chest"}},
-    {BONE_NECK,       {"Neck", "neck"}},
-    {BONE_HEAD,       {"Head", "head"}},
-    {BONE_SHOULDER_L, {"Shoulder.L", "LeftShoulder"}},
-    {BONE_ARM_L,      {"Arm.L", "UpperArm.L"}},
-    {BONE_FOREARM_L,  {"ForeArm.L", "LowerArm.L"}},
-    {BONE_HAND_L,     {"Hand.L", "LeftHand"}},
-    {BONE_SHOULDER_R, {"Shoulder.R", "RightShoulder"}},
-    {BONE_ARM_R,      {"Arm.R", "UpperArm.R"}},
-    {BONE_FOREARM_R,  {"ForeArm.R", "LowerArm.R"}},
-    {BONE_HAND_R,     {"Hand.R", "RightHand"}},
-    {BONE_UPLEG_L,    {"UpLeg.L", "LeftUpLeg"}},
-    {BONE_LEG_L,      {"Leg.L", "LeftLeg"}},
-    {BONE_FOOT_L,     {"Foot.L", "LeftFoot"}},
-    {BONE_TOEBASE_L,  {"ToeBase.L", "LeftToeBase"}},
-    {BONE_UPLEG_R,    {"UpLeg.R", "RightUpLeg"}},
-    {BONE_LEG_R,      {"Leg.R", "RightLeg"}},
-    {BONE_FOOT_R,     {"Foot.R", "RightFoot"}},
-    {BONE_TOEBASE_R,  {"ToeBase.R", "RightToeBase"}},
-};
-
-static int skel_bone_from_name(const std::string& name) {
-    if (name.empty() || name.size() > 32) return -1;
-    for (const BoneAlias& alias : kSkelBoneAliases)
-        for (const char* candidate : alias.names) {
-            if (!candidate) break;
-            if (name == candidate) return alias.bone;
-        }
-    return -1;
-}
+enum { SK_HEAD = 0, SK_BODY = 1, SK_RHAND = 2, SK_LHAND = 3 };
 
 static uint64_t skel_now_ms() {
     struct timespec ts{};
@@ -732,269 +709,26 @@ static bool skel_read_buf(uint64_t addr, void* dst, size_t len) {
     return remote_vm_readv(g_pid, &lv, 1, &rv, 1, 0) == (ssize_t)len;
 }
 
-// Кандидат имени: 24 байта на go+off — либо инлайн-символы, либо char* в первом qword.
-static bool skel_read_name(uint64_t go, uint64_t off, bool indirect, std::string& out) {
-    if (!go || off > 0x400) return false;
-    uint8_t buf[24]{};
-    if (!skel_read_buf(go + off, buf, sizeof(buf))) return false;
-    const uint8_t* p = buf;
-    if (indirect) {
-        uint64_t ptr = 0;
-        memcpy(&ptr, buf, sizeof(ptr));
-        if (!skel_plausible_ptr(ptr)) return false;
-        if (!skel_read_buf(ptr, buf, sizeof(buf))) return false;
-    }
-    int len = 0;
-    while (len < (int)sizeof(buf) && p[len] != 0) ++len;
-    if (len < 2 || len >= (int)sizeof(buf)) return false;
-    for (int i = 0; i < len; ++i)
-        if (p[i] < 0x20 || p[i] > 0x7E) return false;
-    out.assign((const char*)p, (size_t)len);
-    return true;
-}
-
-struct SkelNode { uint64_t transform; int32_t index; };
-
-// Дети трансформа через связный список (head у родителя, next у ребёнка).
-// Оракул корректности: все трансформы поддерева живут в одном TransformData,
-// и индекс ребёнка всегда больше индекса родителя (инвариант Unity).
-static int skel_collect_children(uint64_t parent, uint64_t head_off, uint64_t next_off,
-                                 uint64_t data_off, uint64_t idx_off, uint64_t expect_data,
-                                 int32_t parent_index, SkelNode* out, int max_out) {
-    uint64_t child = rd_ptr(parent + head_off);
-    const uint64_t sentinel_lo = parent + head_off;
-    const uint64_t sentinel_hi = sentinel_lo + 16;
-    int count = 0, guard = 0;
-    while (skel_plausible_ptr(child) && child != parent &&
-           !(child >= sentinel_lo && child < sentinel_hi) && guard++ < 256) {
-        if (expect_data) {
-            uint64_t data = rd_ptr(child + data_off);
-            if (data != expect_data) return -1;
-            int32_t ci = rd<int32_t>(child + idx_off);
-            if (ci < 0 || ci > 100000 || ci <= parent_index) return -1;
-            if (count < max_out) { out[count].transform = child; out[count].index = ci; }
-        } else if (count < max_out) {
-            out[count].transform = child;
-            out[count].index = rd<int32_t>(child + idx_off);
-        }
-        ++count;
-        if (count > 96) return -1;
-        uint64_t next = rd_ptr(child + next_off);
-        if (next == child) return -1;
-        child = next;
-    }
-    return count;
-}
-
-static bool skel_collect_subtree(uint64_t root, uint64_t head_off, uint64_t next_off,
-                                 uint64_t data_off, uint64_t idx_off, uint64_t expect_data,
-                                 std::vector<SkelNode>& out, int max_nodes) {
-    out.clear();
-    if (!skel_plausible_ptr(root)) return false;
-    int32_t root_index = rd<int32_t>(root + idx_off);
-    if (root_index < 0 || root_index > 100000) return false;
-    std::vector<SkelNode> stack;
-    std::unordered_set<uint64_t> visited;
-    stack.push_back({root, root_index});
-    visited.insert(root);
-    SkelNode buffer[96];
-    while (!stack.empty() && (int)out.size() < max_nodes) {
-        SkelNode node = stack.back();
-        stack.pop_back();
-        out.push_back(node);
-        int children = skel_collect_children(node.transform, head_off, next_off, data_off, idx_off,
-                                             expect_data, node.index, buffer, 96);
-        if (children < 0) return false;
-        for (int i = 0; i < children; ++i) {
-            if (!visited.insert(buffer[i].transform).second) return false; // цикл — неверные оффсеты
-            if (visited.size() > 1024) return false;
-            stack.push_back(buffer[i]);
-        }
-    }
-    return !stack.empty() || (int)out.size() >= 2;
-}
-
-static int skel_score_names(const std::vector<SkelNode>& nodes, uint64_t go_off, uint64_t name_off,
-                            bool indirect, int max_check, int& bone_hits) {
-    int ascii_ok = 0;
-    bone_hits = 0;
-    int checked = 0;
-    for (const SkelNode& node : nodes) {
-        if (checked >= max_check) break;
-        ++checked;
-        uint64_t go = rd_ptr(node.transform + go_off);
-        if (!skel_plausible_ptr(go)) continue;
-        std::string name;
-        if (!skel_read_name(go, name_off, indirect, name)) continue;
-        ++ascii_ok;
-        if (skel_bone_from_name(name) >= 0) ++bone_hits;
-    }
-    return ascii_ok;
-}
-
-// Одноразовый рантайм-дискавери оффсетов скелета (стиль discover_transform_hierarchy_layout).
-static bool skel_discover_layout(uint64_t root_native) {
-    if (!skel_plausible_ptr(root_native)) return false;
-    const uint64_t data_idx_pairs[2][2] = {{0x38, 0x40}, {0x18, 0x20}};
-    uint64_t data_off = 0, idx_off = 0, data0 = 0;
-    for (const auto& pair : data_idx_pairs) {
-        uint64_t d = rd_ptr(root_native + pair[0]);
-        int32_t ix = rd<int32_t>(root_native + pair[1]);
+// managed Transform -> индекс батча; заодно возвращает TransformData
+static bool skel_managed_to_index(uint64_t managed, uint64_t& data, int32_t& index) {
+    if (!skel_plausible_ptr(managed)) return false;
+    uint64_t native = rd_ptr(managed + MANAGED_CACHED_PTR);
+    if (!skel_plausible_ptr(native)) return false;
+    const uint64_t pairs[2][2] = {{0x38, 0x40}, {0x18, 0x20}};
+    for (const auto& pair : pairs) {
+        uint64_t d = rd_ptr(native + pair[0]);
+        int32_t ix = rd<int32_t>(native + pair[1]);
         if (skel_plausible_ptr(d) && ix >= 0 && ix <= 100000) {
-            data_off = pair[0]; idx_off = pair[1]; data0 = d;
-            break;
-        }
-    }
-    if (!data0 || !idx_off) return false;
-
-    struct TravCandidate { uint64_t head, next; };
-    TravCandidate candidates[8];
-    int candidate_count = 0;
-    static std::vector<SkelNode> nodes;
-    for (uint64_t head = 0x28; head <= 0x98 && candidate_count < 8; head += 8) {
-        for (uint64_t next = 0x28; next <= 0xA0 && candidate_count < 8; next += 8) {
-            if (next == head) continue;
-            if (!skel_collect_subtree(root_native, head, next, data_off, idx_off, data0, nodes, 384)) continue;
-            if (nodes.size() < 16 || nodes.size() > 320) continue;
-            candidates[candidate_count++] = {head, next};
-            break;
-        }
-    }
-    if (!candidate_count) return false;
-
-    for (int ci = 0; ci < candidate_count; ++ci) {
-        if (!skel_collect_subtree(root_native, candidates[ci].head, candidates[ci].next,
-                                  data_off, idx_off, data0, nodes, 384)) continue;
-        for (uint64_t go_off = 0x18; go_off <= 0x38; go_off += 8) {
-            // быстрый префильтр: GameObject-указатель должен быть валиден у большинства узлов
-            int plausible = 0, sampled = 0;
-            for (const SkelNode& node : nodes) {
-                if (sampled >= 16) break;
-                ++sampled;
-                if (skel_plausible_ptr(rd_ptr(node.transform + go_off))) ++plausible;
-            }
-            if (sampled > 0 && plausible < sampled * 3 / 4) continue;
-            for (uint64_t name_off = 0x08; name_off <= 0x78; name_off += 8) {
-                for (int indirect = 0; indirect < 2; ++indirect) {
-                    int bone_hits = 0;
-                    int ascii_ok = skel_score_names(nodes, go_off, name_off, indirect != 0, 32, bone_hits);
-                    if (bone_hits >= 8 && ascii_ok >= 10) {
-                        g_skel_layout.data_off = data_off;
-                        g_skel_layout.idx_off = idx_off;
-                        g_skel_layout.head_off = candidates[ci].head;
-                        g_skel_layout.next_off = candidates[ci].next;
-                        g_skel_layout.go_off = go_off;
-                        g_skel_layout.name_off = name_off;
-                        g_skel_layout.name_indirect = indirect != 0;
-                        g_skel_layout.valid = true;
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    return false;
-}
-
-struct PlayerSkel {
-    uint64_t player = 0;
-    uint64_t root_native = 0;
-    uint64_t transform_data = 0;
-    int32_t  root_index = -1;
-    int32_t  bone_index[ESP_BONE_COUNT];
-    int      found = 0;
-    int32_t  span = 0;
-    uint64_t next_build_ms = 0;
-    uint64_t last_ok_ms = 0;
-    // буферы кадра
-    std::vector<Matrix34> mats;
-    std::vector<int32_t>  idxs;
-    std::vector<int32_t>  anc_index, anc_parent;
-    std::vector<Matrix34> anc_mat;
-};
-static std::vector<PlayerSkel> g_skel_players;
-
-// Корень иерархии костей конкретного игрока (по найденному при дискавери сиду).
-static uint64_t skel_root_for_player(uint64_t player) {
-    uint64_t t = resolve_player_native_transform(player);
-    if (!t || g_skel_seed_mode != 1) return t;
-    uint64_t managed_go = rd_ptr(player + PLAYER_CHARACTER_MODEL);
-    if (!skel_plausible_ptr(managed_go)) return t;
-    uint64_t native_go = rd_ptr(managed_go + MANAGED_CACHED_PTR);
-    if (!skel_plausible_ptr(native_go)) return t;
-    uint64_t alt = rd_ptr(native_go + g_skel_seed_go_off);
-    return skel_plausible_ptr(alt) ? alt : t;
-}
-
-// Дискавери: сначала worldCameraRoot игрока, затем transform модели персонажа
-// (GameObject -> Transform через перебор оффсетов, validated по именам костей).
-static bool skel_try_discover(uint64_t player) {
-    if (skel_discover_layout(resolve_player_native_transform(player))) {
-        g_skel_seed_mode = 0;
-        return true;
-    }
-    uint64_t managed_go = rd_ptr(player + PLAYER_CHARACTER_MODEL);
-    if (!skel_plausible_ptr(managed_go)) return false;
-    uint64_t native_go = rd_ptr(managed_go + MANAGED_CACHED_PTR);
-    if (!skel_plausible_ptr(native_go)) return false;
-    static const uint64_t kGoToTransformOffsets[] = {0x28, 0x30, 0x38, 0x40, 0x48};
-    for (uint64_t off : kGoToTransformOffsets) {
-        uint64_t seed = rd_ptr(native_go + off);
-        if (!skel_plausible_ptr(seed)) continue;
-        if (skel_discover_layout(seed)) {
-            g_skel_seed_mode = 1;
-            g_skel_seed_go_off = off;
+            data = d;
+            index = ix;
             return true;
         }
     }
     return false;
 }
 
-static bool skel_build_player(PlayerSkel& s, uint64_t player) {
-    uint64_t root = skel_root_for_player(player);
-    if (!skel_plausible_ptr(root)) return false;
-    uint64_t data = rd_ptr(root + g_skel_layout.data_off);
-    int32_t ridx = rd<int32_t>(root + g_skel_layout.idx_off);
-    if (!skel_plausible_ptr(data) || ridx < 0 || ridx > 100000) return false;
-
-    static std::vector<SkelNode> nodes;
-    if (!skel_collect_subtree(root, g_skel_layout.head_off, g_skel_layout.next_off,
-                              g_skel_layout.data_off, g_skel_layout.idx_off, data, nodes, 384))
-        return false;
-
-    for (int b = 0; b < ESP_BONE_COUNT; ++b) s.bone_index[b] = -1;
-    int found = 0;
-    int32_t max_idx = ridx;
-    for (const SkelNode& node : nodes) {
-        uint64_t go = rd_ptr(node.transform + g_skel_layout.go_off);
-        if (!skel_plausible_ptr(go)) continue;
-        std::string name;
-        if (!skel_read_name(go, g_skel_layout.name_off, g_skel_layout.name_indirect, name)) continue;
-        int bone = skel_bone_from_name(name);
-        if (bone < 0 || s.bone_index[bone] >= 0) continue;
-        if (node.index > ridx + 2048) continue;
-        s.bone_index[bone] = node.index;
-        ++found;
-        if (node.index > max_idx) max_idx = node.index;
-    }
-    // обязательные кости: таз/спина и голова/шея, иначе это не риг персонажа
-    bool core = (s.bone_index[BONE_HIPS] >= 0 || s.bone_index[BONE_SPINE] >= 0) &&
-                (s.bone_index[BONE_HEAD] >= 0 || s.bone_index[BONE_NECK] >= 0);
-    if (!core || found < 10) return false;
-
-    s.player = player;
-    s.root_native = root;
-    s.transform_data = data;
-    s.root_index = ridx;
-    s.span = max_idx - ridx;
-    if (s.span < 1) s.span = 1;
-    if (s.span > 2048) s.span = 2048;
-    s.found = found;
-    s.last_ok_ms = skel_now_ms();
-    return true;
-}
-
 static bool skel_resolve_arrays(uint64_t data, uint64_t& matrices, uint64_t& indices) {
+    if (!skel_plausible_ptr(data)) return false;
     if (g_transform_hierarchy_layout_valid) {
         const TransformHierarchyLayout& layout = g_transform_hierarchy_layout;
         matrices = rd_ptr(data + layout.matrices_offset);
@@ -1016,81 +750,451 @@ static bool skel_resolve_arrays(uint64_t data, uint64_t& matrices, uint64_t& ind
     return false;
 }
 
-static void skel_fill_box(PlayerSkel& s, const Mat4& vp, float sw, float sh, EspBox& box) {
-    box.skel_valid = false;
-    if (s.found < 10 || !s.root_native) return;
+// Чтение среза батча [lo, hi] + цепочка предков от start (якорь головы):
+// все кости рига сходятся к общему корню, поэтому предков любой кости,
+// выходящих за срез, достаточно брать из цепочки головы.
+static bool skel_read_slice(SkelRig& s, uint64_t matrices, uint64_t indices,
+                            int32_t lo, int32_t hi, int32_t start) {
+    if (lo < 0 || hi < lo || hi - lo > 2048) return false;
+    s.idxs.resize((size_t)(hi - lo + 1));
+    s.mats.resize((size_t)(hi - lo + 1));
+    if (!skel_read_buf(indices + (uint64_t)lo * 4, s.idxs.data(), s.idxs.size() * 4)) return false;
+    if (!skel_read_buf(matrices + (uint64_t)lo * sizeof(Matrix34), s.mats.data(), s.mats.size() * sizeof(Matrix34))) return false;
 
-    uint64_t data = rd_ptr(s.root_native + g_skel_layout.data_off);
-    int32_t ridx = rd<int32_t>(s.root_native + g_skel_layout.idx_off);
-    if (data != s.transform_data || ridx != s.root_index) { s.found = 0; s.next_build_ms = skel_now_ms(); return; }
-
-    uint64_t matrices = 0, indices = 0;
-    if (!skel_resolve_arrays(data, matrices, indices)) return;
-
-    const int32_t span = s.span;
-    s.idxs.resize((size_t)span + 1);
-    s.mats.resize((size_t)span + 1);
-    if (!skel_read_buf(indices + (uint64_t)s.root_index * 4, s.idxs.data(), (size_t)(span + 1) * 4)) return;
-    if (!skel_read_buf(matrices + (uint64_t)s.root_index * sizeof(Matrix34), s.mats.data(), (size_t)(span + 1) * sizeof(Matrix34))) return;
-
-    // предки рута (над слайсом): цепочка родителей до -1
-    s.anc_index.clear(); s.anc_parent.clear(); s.anc_mat.clear();
-    int32_t parent = s.idxs[0];
+    s.anc_idx.clear(); s.anc_par.clear(); s.anc_mat.clear();
+    if (start < lo || start > hi) return false;
+    int32_t parent = s.idxs[(size_t)(start - lo)];
     int guard = 0;
-    while (parent >= 0 && parent < s.root_index && guard++ < 128) {
+    while (parent >= 0 && parent < lo && guard++ < 128) {
         Matrix34 m{};
         if (!rd_exact(matrices + (uint64_t)parent * sizeof(Matrix34), m) || !matrix34_is_valid(m)) break;
         int32_t pp = rd<int32_t>(indices + (uint64_t)parent * 4);
         if (pp < -1 || pp > 100000) break;
-        s.anc_index.push_back(parent);
+        s.anc_idx.push_back(parent);
         s.anc_mat.push_back(m);
-        s.anc_parent.push_back(pp);
+        s.anc_par.push_back(pp);
         parent = pp;
     }
-    const int32_t anc_count = (int32_t)s.anc_index.size();
-    auto anc_parent_of = [&](int32_t index) -> int32_t {
-        for (int32_t k = 0; k < anc_count; ++k)
-            if (s.anc_index[k] == index) return s.anc_parent[k];
-        return -1;
-    };
+    return true;
+}
 
-    // мировая позиция по локальным матрицам (та же математика, что и в иерархии выше)
-    auto world_at = [&](int32_t index, Vec3& out) -> bool {
-        if (index < s.root_index || index > s.root_index + span) return false;
-        Matrix34 current = s.mats[index - s.root_index];
+struct SkelSliceView {
+    const std::vector<Matrix34>* mats;
+    const std::vector<int32_t>* idxs;
+    const std::vector<Matrix34>* anc_mat;
+    const std::vector<int32_t>* anc_idx;
+    const std::vector<int32_t>* anc_par;
+    int32_t lo, hi;
+
+    bool inside(int32_t i) const { return i >= lo && i <= hi; }
+    bool known(int32_t i) const {
+        if (inside(i)) return true;
+        for (size_t k = 0; k < anc_idx->size(); ++k)
+            if ((*anc_idx)[k] == i) return true;
+        return false;
+    }
+    int32_t parent_of(int32_t i) const {
+        if (inside(i)) return (*idxs)[(size_t)(i - lo)];
+        for (size_t k = 0; k < anc_idx->size(); ++k)
+            if ((*anc_idx)[k] == i) return (*anc_par)[k];
+        return -2; // неизвестный узел
+    }
+    bool world_at(int32_t index, Vec3& out) const {
+        if (!inside(index)) return false;
+        Matrix34 current = (*mats)[(size_t)(index - lo)];
         if (!matrix34_is_valid(current)) return false;
         Vec3 result = {current.translation.x, current.translation.y, current.translation.z};
         if (!vec3_is_finite(result)) return false;
-        int32_t par = s.idxs[index - s.root_index];
         int32_t cur = index;
+        int32_t par = parent_of(index);
         int depth = 0;
         while (par != -1) {
-            if (par < 0 || par >= cur || ++depth > 128) return false;
+            if (par < 0 || par >= cur || ++depth > 160) return false;
+            if (!inside(par) && !known(par)) return false;
             const Matrix34* m = nullptr;
-            if (par >= s.root_index) m = &s.mats[par - s.root_index];
+            if (inside(par)) m = &(*mats)[(size_t)(par - lo)];
             else
-                for (int32_t k = 0; k < anc_count; ++k)
-                    if (s.anc_index[k] == par) { m = &s.anc_mat[k]; break; }
+                for (size_t k = 0; k < anc_idx->size(); ++k)
+                    if ((*anc_idx)[k] == par) { m = &(*anc_mat)[k]; break; }
             if (!m || !matrix34_is_valid(*m)) return false;
             Vec3 scaled = {result.x * m->scale.x, result.y * m->scale.y, result.z * m->scale.z};
             Vec3 rotated = rotate_vector(m->rotation, scaled);
             result = {m->translation.x + rotated.x, m->translation.y + rotated.y, m->translation.z + rotated.z};
             if (!vec3_is_finite(result)) return false;
             cur = par;
-            par = (par >= s.root_index) ? s.idxs[par - s.root_index] : anc_parent_of(par);
+            par = parent_of(par);
         }
         out = result;
         return true;
+    }
+};
+
+// Цепочка индексов от x вверх до корня (включая x).
+static bool skel_chain_up(const SkelSliceView& v, int32_t x, std::vector<int32_t>& chain) {
+    chain.clear();
+    if (!v.known(x)) return false;
+    int32_t cur = x;
+    int guard = 0;
+    while (cur >= 0 && guard++ < 160) {
+        chain.push_back(cur);
+        int32_t p = v.parent_of(cur);
+        if (p == -2) break; // дальше цепочка не отслеживается
+        cur = p;
+    }
+    return true;
+}
+
+static bool skel_chain_contains(const std::vector<int32_t>& chain, int32_t x) {
+    for (int32_t c : chain) if (c == x) return true;
+    return false;
+}
+
+// Самый длинный нисходящий путь от node (по детям внутри среза).
+static void skel_deepest_path(const SkelSliceView& v, std::vector<std::vector<int32_t>>& children,
+                              int32_t node, std::vector<int32_t>& best) {
+    (void)v;
+    best.clear();
+    best.push_back(node);
+    // итеративный DFS с текущим путём
+    std::vector<std::pair<int32_t, size_t>> work;
+    work.push_back({node, 0});
+    std::vector<int32_t> path;
+    path.push_back(node);
+    while (!work.empty()) {
+        auto& [cur, ci] = work.back();
+        const std::vector<int32_t>& kids = children[(size_t)cur];
+        if (ci < kids.size()) {
+            int32_t kid = kids[ci++];
+            work.push_back({kid, 0});
+            path.push_back(kid);
+        } else {
+            if (path.size() > best.size()) best = path;
+            work.pop_back();
+            path.pop_back();
+        }
+    }
+}
+
+// Разметка костей по якорям. Возвращает true, если размечено ядро
+// (позвоночник + голова); руки/ноги размечаются по мере возможности.
+static bool skel_label(SkelRig& s, const SkelSliceView& v) {
+    for (int b = 0; b < ESP_BONE_COUNT; ++b) s.bone[b] = -1;
+    const int32_t head = s.anchor[SK_HEAD];
+    const int32_t body = s.anchor[SK_BODY];
+    const int32_t rhand = s.anchor[SK_RHAND];
+    const int32_t lhand = s.anchor[SK_LHAND];
+    if (head < 0) return false;
+
+    std::vector<int32_t> chain_head, chain_body, chain_r, chain_l;
+    skel_chain_up(v, head, chain_head);
+    if (body >= 0) skel_chain_up(v, body, chain_body);
+
+    // плечи: поднимаемся от держателей оружия до пересечения с цепочкой головы
+    auto arm_chain = [&](int32_t hand, std::vector<int32_t>& out_chain, int32_t& attach) {
+        out_chain.clear();
+        attach = -1;
+        if (hand < 0) return false;
+        std::vector<int32_t> up;
+        if (!skel_chain_up(v, hand, up)) return false;
+        if (up.size() > 12) return false;
+        for (size_t k = 0; k < up.size(); ++k) {
+            if (skel_chain_contains(chain_head, up[k]) || (body >= 0 && skel_chain_contains(chain_body, up[k]))) {
+                attach = up[k];
+                // цепочка от точки крепления вниз до кисти (сам узел крепления не входит)
+                for (size_t j = k; j > 0; --j) out_chain.push_back(up[j - 1]);
+                return out_chain.size() >= 3;
+            }
+        }
+        return false;
     };
+    std::vector<int32_t> arm_r, arm_l;
+    int32_t attach_r = -1, attach_l = -1;
+    bool have_arm_r = arm_chain(rhand, arm_r, attach_r);
+    bool have_arm_l = arm_chain(lhand, arm_l, attach_l);
+    (void)have_arm_r; (void)have_arm_l;
+
+    // точка крепления рук = верх позвоночника (Spine2/Chest)
+    int32_t spine_top = -1;
+    if (attach_r >= 0) spine_top = attach_r;
+    else if (attach_l >= 0) spine_top = attach_l;
+    else if (body >= 0 && chain_body.size() > 1) spine_top = chain_body[0]; // body сам верх, если плеч нет
+
+    s.bone[BONE_HEAD] = head;
+    {
+        int32_t neck = v.parent_of(head);
+        if (neck >= 0 && neck != head) s.bone[BONE_NECK] = neck;
+    }
+
+    // hips: идём вверх от spine_top/body, пока не встретим узел с >=3 детьми,
+    // из которых хотя бы два не на пути головы и ведут вниз (ноги)
+    auto build_children = [&](std::vector<std::vector<int32_t>>& children) {
+        children.assign((size_t)(v.hi - v.lo + 1), {});
+        for (int32_t i = v.lo; i <= v.hi; ++i) {
+            int32_t p = v.parent_of(i);
+            if (p >= v.lo && p <= v.hi) children[(size_t)p].push_back(i);
+        }
+    };
+    std::vector<std::vector<int32_t>> children;
+    build_children(children);
+
+    Vec3 head_world{};
+    bool have_head_world = v.world_at(head, head_world);
+
+    // полная разметка (ноги/таз) требует якоря корпуса или кистей —
+    // без них рисуем только якоря, чтобы не угадывать
+    if (body < 0 && rhand < 0 && lhand < 0) return false;
+
+    int32_t hips = -1;
+    int32_t scan_from = spine_top >= 0 ? spine_top : (body >= 0 ? body : head);
+    {
+        std::vector<int32_t> up;
+        skel_chain_up(v, scan_from, up);
+        for (int32_t candidate : up) {
+            if (candidate < v.lo || candidate > v.hi) continue;
+            const std::vector<int32_t>& kids = children[(size_t)candidate];
+            if ((int)kids.size() < 3) continue;
+            // дети не на пути головы/плеч и с глубиной >= 3 = ноги
+            int legs = 0;
+            std::vector<int32_t> leg_roots;
+            for (int32_t kid : kids) {
+                if (skel_chain_contains(chain_head, kid)) continue;
+                bool on_arm = skel_chain_contains(arm_r, kid) || skel_chain_contains(arm_l, kid);
+                if (on_arm) continue;
+                std::vector<int32_t> deep;
+                skel_deepest_path(v, children, kid, deep);
+                if ((int)deep.size() >= 4) { ++legs; leg_roots.push_back(kid); }
+            }
+            if (legs >= 2) { hips = candidate; break; }
+        }
+    }
+    if (hips < 0) {
+        // без ног: рисуем то, что есть
+        return s.bone[BONE_HEAD] >= 0;
+    }
+    s.bone[BONE_HIPS] = hips;
+
+    // позвоночник: сегмент пути головы от hips вверх до spine_top.
+    // chain_head = [head, neck, spine2, ..., spine, hips, ...root] —
+    // разворачиваем часть до hips и берём низ сегмента
+    {
+        std::vector<int32_t> rev; // [hips, spine, ..., neck, head] снизу вверх
+        for (int32_t c : chain_head) {
+            rev.push_back(c);
+            if (c == hips) break;
+        }
+        std::reverse(rev.begin(), rev.end());
+        std::vector<int32_t> spine_seg; // [hips, spine, spine1, spine2]
+        for (int32_t c : rev) {
+            spine_seg.push_back(c);
+            if (spine_seg.size() >= 4) break;
+            if (spine_top >= 0 && c == spine_top) break;
+            if (spine_top < 0 && c == body) break;
+        }
+        if (spine_seg.size() >= 1) s.bone[BONE_HIPS]  = spine_seg[0];
+        if (spine_seg.size() >= 2) s.bone[BONE_SPINE] = spine_seg[1];
+        if (spine_seg.size() >= 3) s.bone[BONE_SPINE1] = spine_seg[2];
+        if (spine_seg.size() >= 4) s.bone[BONE_SPINE2] = spine_seg[3];
+    }
+
+    // руки: цепочка от держателя = [holder .. shoulder] (снизу вверх)
+    auto label_arm = [&](std::vector<int32_t>& chain, int sh, int ar, int fa, int ha) {
+        // цепочка сверху вниз [shoulder, arm, forearm, hand, (holder...)] —
+        // лишние узлы снизу (держатель оружия) просто не размечаем
+        if (chain.size() >= 4) {
+            s.bone[sh] = chain[0];
+            s.bone[ar] = chain[1];
+            s.bone[fa] = chain[2];
+            s.bone[ha] = chain[3];
+        } else if (chain.size() == 3) {
+            s.bone[sh] = -1;
+            s.bone[ar] = chain[0];
+            s.bone[fa] = chain[1];
+            s.bone[ha] = chain[2];
+        } else if (chain.size() == 2) {
+            s.bone[ar] = chain[0];
+            s.bone[fa] = chain[1];
+        }
+    };
+    label_arm(arm_r, BONE_SHOULDER_R, BONE_ARM_R, BONE_FOREARM_R, BONE_HAND_R);
+    label_arm(arm_l, BONE_SHOULDER_L, BONE_ARM_L, BONE_FOREARM_L, BONE_HAND_L);
+
+    // ноги: дети hips, не позвоночник и не руки
+    Vec3 hips_world{};
+    bool have_hips_world = v.world_at(hips, hips_world);
+    std::vector<int32_t> leg_roots;
+    for (int32_t kid : children[(size_t)hips]) {
+        if (kid == s.bone[BONE_SPINE]) continue;
+        if (skel_chain_contains(chain_head, kid)) continue;
+        if (skel_chain_contains(arm_r, kid) || skel_chain_contains(arm_l, kid)) continue;
+        std::vector<int32_t> deep;
+        skel_deepest_path(v, children, kid, deep);
+        if ((int)deep.size() >= 4) leg_roots.push_back(kid);
+    }
+    if ((int)leg_roots.size() >= 2) {
+        // определить лево/право по мировой X относительно направления "вперёд"
+        Vec3 w0{}, w1{};
+        bool ok0 = v.world_at(leg_roots[0], w0);
+        bool ok1 = v.world_at(leg_roots[1], w1);
+        int right_first = 0;
+        Vec3 fwd = {0.0F, 0.0F, 0.0F};
+        bool have_fwd = false;
+        if (have_hips_world && v.inside(hips)) {
+            // вперёд из поворота таза — работает и когда игрок стоит
+            const Matrix34& hm = (*v.mats)[(size_t)(hips - v.lo)];
+            Vec3 f = rotate_vector(hm.rotation, Vec3{0.0F, 0.0F, 1.0F});
+            fwd = {f.x, 0.0F, f.z};
+            float fl = sqrtf(fwd.x * fwd.x + fwd.z * fwd.z);
+            if (fl > 0.3F) { fwd.x /= fl; fwd.z /= fl; have_fwd = true; }
+        }
+        if (!have_fwd && have_head_world && have_hips_world) {
+            Vec3 f = {head_world.x - hips_world.x, 0.0F, head_world.z - hips_world.z};
+            float fl = sqrtf(f.x * f.x + f.z * f.z);
+            if (fl > 0.3F) { fwd = {f.x / fl, 0.0F, f.z / fl}; have_fwd = true; }
+        }
+        if (ok0 && ok1 && have_fwd) {
+            Vec3 right = {fwd.z, 0.0F, -fwd.x};
+            float side0 = (w0.x - hips_world.x) * right.x + (w0.z - hips_world.z) * right.z;
+            float side1 = (w1.x - hips_world.x) * right.x + (w1.z - hips_world.z) * right.z;
+            right_first = side0 >= side1 ? 0 : 1;
+        }
+        int32_t root_r = leg_roots[(size_t)right_first];
+        int32_t root_l = leg_roots[(size_t)(right_first == 0 ? 1 : 0)];
+        auto label_leg = [&](int32_t root, int up, int lo2, int ft, int toe) {
+            std::vector<int32_t> deep;
+            skel_deepest_path(v, children, root, deep);
+            // deep[0]=root(UpLeg), далее Leg, Foot, ToeBase...
+            s.bone[up] = deep.size() > 0 ? deep[0] : -1;
+            s.bone[lo2] = deep.size() > 1 ? deep[1] : -1;
+            s.bone[ft] = deep.size() > 2 ? deep[2] : -1;
+            s.bone[toe] = deep.size() > 3 ? deep[3] : -1;
+        };
+        label_leg(root_r, BONE_UPLEG_R, BONE_LEG_R, BONE_FOOT_R, BONE_TOEBASE_R);
+        label_leg(root_l, BONE_UPLEG_L, BONE_LEG_L, BONE_FOOT_L, BONE_TOEBASE_L);
+    }
+
+    int total = 0;
+    for (int b = 0; b < ESP_BONE_COUNT; ++b)
+        if (s.bone[b] >= 0) ++total;
+    return total >= 6;
+}
+
+static bool skel_build(SkelRig& s, uint64_t player) {
+    SkelRig tmp;
+    tmp.player = player;
+    uint64_t kcc = rd_ptr(player + PLAYER_KCC_REFERENCE);
+    if (!skel_plausible_ptr(kcc)) return false;
+    // SingleKcc.player @0x80 — точная обратная ссылка: объект в kccReference
+    // обязан ссылаться назад на этого же PlayerManager
+    if (rd_ptr(kcc + KCC_PLAYER_BACKREF) != player) return false;
+
+    uint64_t managed[4] = {0, 0, 0, 0};
+    managed[SK_HEAD] = rd_ptr(kcc + KCC_HEAD_TRANSFORM);
+    if (!skel_plausible_ptr(managed[SK_HEAD])) return false;
+
+    uint64_t char_anim = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
+    if (skel_plausible_ptr(char_anim)) {
+        uint64_t model_info = rd_ptr(char_anim + CHAR_ANIM_PLAYER_MODEL_INFO);
+        if (skel_plausible_ptr(model_info)) {
+            managed[SK_BODY]  = rd_ptr(model_info + MODEL_INFO_BODY);
+            managed[SK_RHAND] = rd_ptr(model_info + MODEL_INFO_RIGHT_HAND);
+            managed[SK_LHAND] = rd_ptr(model_info + MODEL_INFO_LEFT_HAND);
+        }
+    }
+
+    uint64_t data = 0;
+    for (int a = 0; a < 4; ++a) {
+        if (!skel_plausible_ptr(managed[a])) continue;
+        uint64_t d = 0;
+        int32_t ix = -1;
+        if (!skel_managed_to_index(managed[a], d, ix)) continue;
+        if (data && d != data) continue; // якорь из чужого батча (устаревшая модель)
+        data = d;
+        tmp.anchor[a] = ix;
+    }
+    if (tmp.anchor[SK_HEAD] < 0 || !skel_plausible_ptr(data)) return false;
+
+    uint64_t matrices = 0, indices = 0;
+    if (!skel_resolve_arrays(data, matrices, indices)) return false;
+
+    // окно среза: от минимального якоря (таз/корпус) вниз с запасом на ноги,
+    // вверх добираем предков через skel_read_slice
+    int32_t lo = tmp.anchor[SK_HEAD];
+    for (int a = 0; a < 4; ++a)
+        if (tmp.anchor[a] >= 0 && tmp.anchor[a] < lo) lo = tmp.anchor[a];
+    int32_t hi = tmp.anchor[SK_HEAD];
+    for (int a = 0; a < 4; ++a)
+        if (tmp.anchor[a] > hi) hi = tmp.anchor[a];
+    lo -= 96;  // запас вниз по дереву родителей (до таза и выше)
+    hi += 160; // запас вверх по индексам: ноги/стопы создаются позже родителей
+    if (lo < 0) lo = 0;
+    if (hi - lo > 1024) hi = lo + 1024;
+
+    if (!skel_read_slice(tmp, matrices, indices, lo, hi, tmp.anchor[SK_HEAD])) return false;
+    tmp.slice_lo = lo;
+    tmp.slice_hi = hi;
+
+    SkelSliceView view{&tmp.mats, &tmp.idxs, &tmp.anc_mat, &tmp.anc_idx, &tmp.anc_par, lo, hi};
+    // валидация массивов: родитель почти всегда меньше ребёнка (порядок
+    // создания Unity); сильные нарушения означают не те массивы
+    {
+        int violations = 0;
+        for (int32_t i = lo; i <= hi; ++i) {
+            int32_t p = view.parent_of(i);
+            if (p >= i) ++violations;
+        }
+        if (violations * 4 > (hi - lo + 1)) return false;
+    }
+
+    tmp.transform_data = data;
+    tmp.labeled = skel_label(tmp, view);
+    tmp.last_ok_ms = skel_now_ms();
+    s = std::move(tmp); // фиксируем только успешную сборку целиком
+    return true;
+}
+
+static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox& box) {
+    box.skel_valid = false;
+    if (s.anchor[SK_HEAD] < 0 || !s.transform_data) return;
+
+    // модель пересоздали (переключение оружия/скина)? — якорь уходит в другой батч
+    {
+        uint64_t kcc = rd_ptr(s.player + PLAYER_KCC_REFERENCE);
+        if (!skel_plausible_ptr(kcc)) { s.last_ok_ms = 0; return; }
+        uint64_t head_managed = rd_ptr(kcc + KCC_HEAD_TRANSFORM);
+        uint64_t d = 0;
+        int32_t ix = -1;
+        if (!skel_plausible_ptr(head_managed) || !skel_managed_to_index(head_managed, d, ix) || d != s.transform_data) {
+            s.last_ok_ms = 0; // заставит skel_update перестроить риг
+            return;
+        }
+        if (ix != s.anchor[SK_HEAD]) { s.last_ok_ms = 0; return; }
+    }
+
+    uint64_t matrices = 0, indices = 0;
+    if (!skel_resolve_arrays(s.transform_data, matrices, indices)) return;
+    if (!skel_read_slice(s, matrices, indices, s.slice_lo, s.slice_hi, s.anchor[SK_HEAD])) return;
+
+    SkelSliceView view{&s.mats, &s.idxs, &s.anc_mat, &s.anc_idx, &s.anc_par, s.slice_lo, s.slice_hi};
 
     int projected = 0;
     for (int b = 0; b < ESP_BONE_COUNT; ++b) {
         box.skel_visible[b] = false;
         box.skel_x[b] = -1.0F;
         box.skel_y[b] = -1.0F;
-        if (s.bone_index[b] < 0) continue;
+        int32_t index = s.bone[b];
+        if (!s.labeled) {
+            // без полной разметки рисуем якоря: голова, корпус, кисти
+            if (b == BONE_HEAD) index = s.anchor[SK_HEAD];
+            else if (b == BONE_SPINE1 && s.anchor[SK_BODY] >= 0) index = s.anchor[SK_BODY];
+            else if (b == BONE_HAND_R && s.anchor[SK_RHAND] >= 0) index = s.anchor[SK_RHAND];
+            else if (b == BONE_HAND_L && s.anchor[SK_LHAND] >= 0) index = s.anchor[SK_LHAND];
+            else continue;
+        } else if (index < 0) {
+            continue;
+        }
+        if (index < view.lo || index > view.hi) continue;
         Vec3 world{};
-        if (!world_at(s.bone_index[b], world)) continue;
+        if (!view.world_at(index, world)) continue;
         Vec2 screen{};
         if (!w2s(vp, world, sw, sh, screen, false)) continue;
         box.skel_x[b] = screen.x;
@@ -1098,37 +1202,36 @@ static void skel_fill_box(PlayerSkel& s, const Mat4& vp, float sw, float sh, Esp
         box.skel_visible[b] = true;
         ++projected;
     }
-    box.skel_valid = projected >= 6;
+    box.skel_valid = projected >= 2;
     if (box.skel_valid) s.last_ok_ms = skel_now_ms();
 }
 
 static void skel_update_player(uint64_t player, const Mat4& vp, float sw, float sh, EspBox& box) {
     box.skel_valid = false;
-    if (!g_skel_layout.valid) return;
-    PlayerSkel* s = nullptr;
-    for (PlayerSkel& entry : g_skel_players)
+    SkelRig* s = nullptr;
+    for (SkelRig& entry : g_skel_rigs)
         if (entry.player == player) { s = &entry; break; }
     if (!s) {
-        g_skel_players.push_back(PlayerSkel{});
-        s = &g_skel_players.back();
+        g_skel_rigs.push_back(SkelRig{});
+        s = &g_skel_rigs.back();
         s->player = player;
     }
     const uint64_t now = skel_now_ms();
-    if (s->found <= 0) {
-        if (now < s->next_build_ms) return;
-        s->next_build_ms = now + 1500;
-        if (!skel_build_player(*s, player)) return;
-    } else if (s->last_ok_ms && now - s->last_ok_ms > 30000) {
-        // периодический ребилд (модель могли пересоздать)
-        if (now < s->next_build_ms) return;
-        s->next_build_ms = now + 1500;
-        s->found = 0;
-        if (!skel_build_player(*s, player)) return;
+    if (s->last_ok_ms == 0) {
+        if (now < s->next_try_ms) return;
+        s->next_try_ms = now + (s->transform_data ? 300 : 1500);
+        if (!skel_build(*s, player)) return;
+    } else if (now - s->last_ok_ms > 15000) {
+        // периодический ребилд на случай пересоздания модели
+        if (now < s->next_try_ms) return;
+        s->next_try_ms = now + 1500;
+        s->last_ok_ms = 0;
+        if (!skel_build(*s, player)) return;
     }
     skel_fill_box(*s, vp, sw, sh, box);
-    if (!box.skel_valid && s->last_ok_ms && now - s->last_ok_ms > 5000) {
-        s->found = 0;
-        s->next_build_ms = now + 1500;
+    if (!box.skel_valid && s->last_ok_ms && now - s->last_ok_ms > 4000) {
+        s->last_ok_ms = 0;
+        s->next_try_ms = now + 1500;
     }
 }
 
@@ -1230,11 +1333,7 @@ void esp_reset() {
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
     g_player_position_validated = false;
-    g_skel_layout = SkeletonLayout{};
-    g_skel_players.clear();
-    g_skel_last_try_ms = 0;
-    g_skel_seed_mode = 0;
-    g_skel_seed_go_off = 0;
+    g_skel_rigs.clear();
 }
 
 
@@ -1322,15 +1421,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height, bool wi
         local = transform_camera_position; has_local_position = true;
     }
 
-    // Skeleton ESP: одноразовый рантайм-дискавери оффсетов (не чаще раза в 2с).
-    if (with_skeleton && !g_skel_layout.valid && s_transforms.size() > 0) {
-        uint64_t now = skel_now_ms();
-        if (now - g_skel_last_try_ms > 2000) {
-            g_skel_last_try_ms = now;
-            skel_try_discover(s_transforms[local_entity_index < s_transforms.size() ? local_entity_index : 0]);
-        }
-    }
-
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) continue;
         if (!s_transforms[i]) continue;
@@ -1395,15 +1485,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height, bool wi
     }
 
     // подчистка кэша скелетов умерших/ушедших игроков
-    if (with_skeleton && !g_skel_players.empty()) {
+    if (with_skeleton && !g_skel_rigs.empty()) {
         size_t write = 0;
-        for (size_t read = 0; read < g_skel_players.size(); ++read) {
+        for (size_t read = 0; read < g_skel_rigs.size(); ++read) {
             bool alive = false;
             for (uint64_t t : s_transforms)
-                if (t == g_skel_players[read].player) { alive = true; break; }
-            if (alive) g_skel_players[write++] = g_skel_players[read];
+                if (t == g_skel_rigs[read].player) { alive = true; break; }
+            if (alive) g_skel_rigs[write++] = g_skel_rigs[read];
         }
-        g_skel_players.resize(write);
+        g_skel_rigs.resize(write);
     }
 
     return result;
