@@ -436,6 +436,8 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
 }
 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
+    bool saved_use_direct = g_use_direct_player_position;
+    g_use_direct_player_position = true;
     const uint64_t known_offsets[] = {0x1D4, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D0, 0x1DC, 0x1E8};
     uint64_t best_offset = 0;
     double best_score = 0.0;
@@ -454,6 +456,7 @@ static bool discover_player_position_offset(const std::vector<uint64_t>& players
         g_player_position_validated = true; g_matrix_configuration_validated = false;
         return true;
     }
+    g_use_direct_player_position = saved_use_direct;
     return false;
 }
 
