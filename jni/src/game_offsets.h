@@ -5,17 +5,20 @@ namespace game_offsets {
 
 // --- Native UnityEngine.Camera (libunity.so, Unity 6000.3.18f1, arm64) -------
 // Layout proven by disassembling the native camera icalls in libunity.so:
-//   Camera::GetWorldToCameraMatrix_Injected (0x5ac588) / WorldToScreenPoint
-//   internals (0xe304cc) read the view matrix from            +0x70
-//   Camera::GetProjectionMatrix_Injected  (0x5ac5b0 -> 0xe1fef4)
-//     computes and caches the projection matrix at              +0xB0
-//   Camera::SetProjectionMatrix_Injected  (0x5ac5d4 -> 0xe20868)
+//   Camera::GetWorldToCameraMatrix_Injected (0x5ac514 -> 0xe1fe08) / WorldToScreenPoint
+//     internals (0x5ac5fc -> 0xe2a4fc) read the view matrix from  +0x70
+//   Camera::GetProjectionMatrix_Injected   (0x5ac53c -> 0xe1fe6c)
+//     computes and caches the projection matrix at                 +0xB0
+//   Camera::SetProjectionMatrix_Injected   (0x5ac560 -> 0xe207e0)
 //     writes +0xB0 and, when the matrix is a clean frustum (columns 2 zero),
 //     also the untouched copy - native m_OriginalProjectionMatrix - at +0x130.
 //     Oblique/jittered projections only ever land in +0xB0, so +0x130 keeps
-//     the original matrix. SetNonJitteredProjectionMatrix uses +0x748.
-//   Camera::GetProjectionMatrix uses the float at              +0x40
-//     as the field-of-view input (native m_FieldOfView).
+//     the original matrix.
+//   Camera::GetNonJitteredProjectionMatrix (0x5ac564 -> 0xe2ba2c)
+//     reads non-jittered projection matrix from                    +0x748.
+//   Camera::GetFieldOfView_Injected        (0x5abd50 -> 0xe2b86c)
+//     reads the field-of-view float from                           +0x170
+//     (SetFieldOfView at 0x5abd54 -> 0xe2c228 writes +0x170).
 // STORAGE ORDER: the native buffers are unity::math::Matrix4x4f (row-major
 // math). The GL-style frustum's w-row z coefficient (-1 at math (3,2)) lands
 // at mem[14] row-major / mem[11] column-major, and the reader verifies the
@@ -29,16 +32,23 @@ namespace game_offsets {
 // SELECTION: +0xB0 is what the engine itself uses for WorldToScreenPoint, so
 // it is primary; +0x748 and +0x130 are alternates picked by best FOV match
 // (they can go stale while the game lerps fieldOfView); if every cached
-// candidate is invalid the projection is rebuilt from +0x40 + screen aspect.
+// candidate is invalid the projection is rebuilt from +0x170 + screen aspect.
 inline constexpr std::uint64_t NATIVE_CAMERA_VIEW_MATRIX             = 0x70;
 inline constexpr std::uint64_t NATIVE_CAMERA_PROJECTION_MATRIX       = 0xB0;
 inline constexpr std::uint64_t NATIVE_CAMERA_ORIGINAL_PROJECTION     = 0x130;
 inline constexpr std::uint64_t NATIVE_CAMERA_NON_JITTERED_PROJECTION = 0x748;
-inline constexpr std::uint64_t NATIVE_CAMERA_FOV                     = 0x40;
+inline constexpr std::uint64_t NATIVE_CAMERA_FOV                     = 0x170;
 
 // Managed UnityEngine.Object.m_CachedPtr (dump.cs: UnityEngine.CoreModule,
 // class Object, "private IntPtr m_CachedPtr; // 0x10").
 inline constexpr std::uint64_t MANAGED_CACHED_PTR = 0x10;
+
+// Native UnityEngine.Transform hierarchy (libunity.so, Unity 6000.3.18f1, arm64)
+// Transform::GetPosition (0x5c0fc8 -> 0x7edb3c -> 0x7f1ee8):
+//   native Transform: +0x38 TransformData*, +0x40 transform index (int32)
+//   TransformData:    +0x18 matrices (Matrix34[]), +0x20 parent indices (int32[])
+inline constexpr std::uint64_t NATIVE_TRANSFORM_DATA  = 0x38;
+inline constexpr std::uint64_t NATIVE_TRANSFORM_INDEX = 0x40;
 
 inline constexpr float PLAYER_HEIGHT          = 1.8F;
 inline constexpr float PLAYER_BOX_WIDTH_RATIO = 0.40F;
@@ -74,23 +84,25 @@ inline constexpr float HEAD_TOP_MARGIN       = 0.18F; // skull top above the hea
 inline constexpr float CHEST_FRACTION        = 0.70F; // chest at this fraction of feet->head height
 inline constexpr float PELVIS_FRACTION       = 0.45F; // pelvis at this fraction of feet->head height
 
-// --- libil2cpp.so offsets (dump arm64-v8a 1.13.11888: dump.cs / script.json) --
-// TypeInfo pointer RVAs (script.json TypeInfoPointers):
-//   0xD2BBAD8 Oxide_PlayerManager_TypeInfo     -> Oxide.PlayerManager
-//   0xD2B6ED8 Oxide_GameControllerBase_TypeInfo -> Oxide.GameControllerBase
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD2BBAD8;
+// --- libil2cpp.so offsets (dump arm64-v8a: dump.cs / libil2cpp.so) -------------
+// TypeInfo pointer RVAs (.bss TypeInfo and .data.rel.ro pointer references):
+//   Oxide.PlayerManager:        TypeInfo at 0xD48CFB0, ptr at 0xD17B928
+//   Oxide.GameControllerBase:   TypeInfo at 0xD4884E8, ptr at 0xD1690C8
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD48CFB0;
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_PTR_RVA   = 0xD17B928;
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_SLEEPING = 0x0;  // PlayerManager.sleepingPlayerList
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_ACTIVE   = 0x8;  // PlayerManager.activePlayerList
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST     = 0x10; // PlayerManager.clientPlayerList
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD2B6ED8;
-inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // GameControllerBase.<zOu>k__BackingField (PlayerManager)
-inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // GameControllerBase.<zOI>k__BackingField (CameraManager)
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD4884E8;
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_PTR_RVA     = 0xD1690C8;
+inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // GameControllerBase.<LZp>k__BackingField (PlayerManager)
+inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // GameControllerBase.<LZD>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // CameraManager.m_Camera
 
 // Player fields (dump.cs, class PlayerManager):
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68;  // PlayerManager.worldCameraRoot (Transform)
-inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // PlayerManager.lastTickPosition (Vector3, feet level)
+inline constexpr std::uint64_t PLAYER_POSITION  = 0x1C8; // PlayerManager.lastTickPosition (Vector3, feet level)
 
 // ADS state (dump.cs): PlayerManager.fpManager (0x90, FPManager) ->
 // _currentWeapon (0x50, FPObject) -> normalFOV (0x80) / aimFOV (0x84).

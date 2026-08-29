@@ -201,25 +201,44 @@ static uint64_t get_class_static_fields(uint64_t klass) {
     return rd_ptr(klass + IL2CPP_CLASS_STATIC_FIELDS);
 }
 
-static bool ensure_player_manager_class() {
-    if (g_player_manager_class || PLAYER_MANAGER_TYPEINFO_RVA == 0) return g_player_manager_class != 0;
-    uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
-    if (!candidate) return false;
+static uint64_t validate_class_candidate(uint64_t candidate, const char* expected_name, const char* expected_ns) {
+    if (!candidate) return 0;
     std::string name = read_remote_string(rd_ptr(candidate + 0x10));
     std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
-    if (name == "PlayerManager" && ns == "Oxide")
-        g_player_manager_class = candidate;
+    if (name == expected_name && ns == expected_ns) return candidate;
+    // Check if candidate is a pointer to the class pointer
+    uint64_t deref = rd_ptr(candidate);
+    if (deref && deref != candidate) {
+        std::string dname = read_remote_string(rd_ptr(deref + 0x10));
+        std::string dns   = read_remote_string(rd_ptr(deref + 0x18));
+        if (dname == expected_name && dns == expected_ns) return deref;
+    }
+    return 0;
+}
+
+static bool ensure_player_manager_class() {
+    if (g_player_manager_class) return true;
+    if (PLAYER_MANAGER_TYPEINFO_RVA) {
+        uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
+        g_player_manager_class = validate_class_candidate(candidate, "PlayerManager", "Oxide");
+    }
+    if (!g_player_manager_class && PLAYER_MANAGER_TYPEINFO_PTR_RVA) {
+        uint64_t ptr_val = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_PTR_RVA);
+        g_player_manager_class = validate_class_candidate(ptr_val, "PlayerManager", "Oxide");
+    }
     return g_player_manager_class != 0;
 }
 
 static bool ensure_game_controller_class() {
-    if (g_game_controller_class || GAME_CONTROLLER_TYPEINFO_RVA == 0) return g_game_controller_class != 0;
-    uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
-    if (!candidate) return false;
-    std::string name = read_remote_string(rd_ptr(candidate + 0x10));
-    std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
-    if (name == "GameControllerBase" && ns == "Oxide")
-        g_game_controller_class = candidate;
+    if (g_game_controller_class) return true;
+    if (GAME_CONTROLLER_TYPEINFO_RVA) {
+        uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
+        g_game_controller_class = validate_class_candidate(candidate, "GameControllerBase", "Oxide");
+    }
+    if (!g_game_controller_class && GAME_CONTROLLER_TYPEINFO_PTR_RVA) {
+        uint64_t ptr_val = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_PTR_RVA);
+        g_game_controller_class = validate_class_candidate(ptr_val, "GameControllerBase", "Oxide");
+    }
     return g_game_controller_class != 0;
 }
 
@@ -439,8 +458,8 @@ static bool read_transform_hierarchy_arrays(uint64_t matrices, uint64_t indices,
 
 static bool try_read_transform_world(uint64_t native_transform, Vec3& pos, Vec4& rot) {
     if (!native_transform) return false;
-    uint64_t transform_data = rd_ptr(native_transform + 0x38);
-    int32_t transform_index = rd<int32_t>(native_transform + 0x40);
+    uint64_t transform_data = rd_ptr(native_transform + NATIVE_TRANSFORM_DATA);
+    int32_t transform_index = rd<int32_t>(native_transform + NATIVE_TRANSFORM_INDEX);
     if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
     uint64_t matrices = rd_ptr(transform_data + 0x18);
     uint64_t indices = rd_ptr(transform_data + 0x20);
@@ -512,8 +531,8 @@ static uint64_t g_position_offset = 0;          // 0 => hierarchy-transform mode
 static int      g_position_rebind_cooldown = 0;
 
 static bool read_head_bone_at(uint64_t native_transform, Vec3& position) {
-    uint64_t transform_data = rd_ptr(native_transform + 0x38);
-    int32_t transform_index = rd<int32_t>(native_transform + 0x40);
+    uint64_t transform_data = rd_ptr(native_transform + NATIVE_TRANSFORM_DATA);
+    int32_t transform_index = rd<int32_t>(native_transform + NATIVE_TRANSFORM_INDEX);
     if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
     uint64_t matrices = rd_ptr(transform_data + 0x18);
     uint64_t indices = rd_ptr(transform_data + 0x20);
@@ -521,12 +540,12 @@ static bool read_head_bone_at(uint64_t native_transform, Vec3& position) {
 }
 
 static const uint64_t kPositionFieldCandidates[6] = {
-    PLAYER_POSITION,        // 0x1D0 lastTickPosition
-    PLAYER_POSITION + 0xC,  // 0x1DC lastSavedPosition
-    PLAYER_POSITION + 0x18, // 0x1E8 lastDeathPosition
-    0x2D8,                  // qEY
-    0x2E4,                  // qEX
-    0x338,                  // originalPosition
+    PLAYER_POSITION,        // 0x1C8 lastTickPosition
+    PLAYER_POSITION + 0xC,  // 0x1D4 lastSavedPosition
+    PLAYER_POSITION + 0x18, // 0x1E0 lastDeathPosition
+    0x2D0,                  // LLO
+    0x2DC,                  // LLp
+    0x330,                  // originalPosition
 };
 
 static float vec3_distance(const Vec3& a, const Vec3& b) {
@@ -1174,9 +1193,9 @@ static std::vector<EspBox> esp_get_boxes_impl(int overlay_width, int overlay_hei
     // raw field dump for the first non-local entity (position binding evidence)
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index || !s_transforms[i]) continue;
-        Vec3 a = rd_v3(s_transforms[i] + 0x1D0);
-        Vec3 b = rd_v3(s_transforms[i] + 0x338);
-        dbg_line("ent[%zu] 1D0=%.0f,%.0f,%.0f 338=%.0f,%.0f,%.0f", i,
+        Vec3 a = rd_v3(s_transforms[i] + PLAYER_POSITION);
+        Vec3 b = rd_v3(s_transforms[i] + 0x330);
+        dbg_line("ent[%zu] 1C8=%.0f,%.0f,%.0f 330=%.0f,%.0f,%.0f", i,
                  (double)a.x, (double)a.y, (double)a.z, (double)b.x, (double)b.y, (double)b.z);
         break;
     }
@@ -1190,7 +1209,7 @@ std::vector<EspAimTarget> esp_get_aim_targets() {
 // ADS detection straight from the dump chain:
 // PlayerManager.fpManager (0x90) -> FPManager._currentWeapon (0x50, FPObject)
 // -> normalFOV (0x80) / aimFOV (0x84); the live FOV comes from the native
-// camera (libunity.so, +0x40 - the same field GetProjectionMatrix consumes).
+// camera (libunity.so, +0x170 - the same field GetProjectionMatrix consumes).
 // Aiming zooms the camera toward aimFOV, so "fov <= midpoint" is a stable,
 // deterministic ADS test with no runtime tuning.
 bool esp_is_local_aiming() {
