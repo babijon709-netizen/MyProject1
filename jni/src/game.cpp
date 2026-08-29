@@ -436,7 +436,7 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
 }
 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    const uint64_t known_offsets[] = {0x1D0, 0x1DC, 0x1E8, 0x2D8, 0x2E4, 0x338};
+    const uint64_t known_offsets[] = {0x1D4, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D0, 0x1DC, 0x1E8};
     uint64_t best_offset = 0;
     double best_score = 0.0;
     for (uint64_t offset : known_offsets) {
@@ -457,11 +457,12 @@ static bool discover_player_position_offset(const std::vector<uint64_t>& players
     return false;
 }
 
+// Unity Matrix4x4 is column-major in memory: m[col*4 + row].
 static float mat_get(const Mat4& matrix, int row, int column) {
-    return matrix.m[(size_t)row * 4 + column];
+    return matrix.m[(size_t)column * 4 + row];
 }
 static void mat_set(Mat4& matrix, int row, int column, float value) {
-    matrix.m[(size_t)row * 4 + column] = value;
+    matrix.m[(size_t)column * 4 + row] = value;
 }
 static bool matrix_is_finite(const Mat4& matrix) {
     bool has_non_zero = false;
@@ -472,9 +473,10 @@ static bool matrix_is_finite(const Mat4& matrix) {
     return has_non_zero;
 }
 static Mat4 mat_mul(const Mat4& a, const Mat4& b) {
+    // result = a * b (column-major, same as Unity Matrix4x4 operator*)
     Mat4 result{};
-    for (int row = 0; row < 4; ++row)
-        for (int column = 0; column < 4; ++column) {
+    for (int column = 0; column < 4; ++column)
+        for (int row = 0; row < 4; ++row) {
             float value = 0.0F;
             for (int k = 0; k < 4; ++k) value += mat_get(a, row, k) * mat_get(b, k, column);
             mat_set(result, row, column, value);
@@ -482,33 +484,53 @@ static Mat4 mat_mul(const Mat4& a, const Mat4& b) {
     return result;
 }
 
+static Mat4 mat_perspective(float fov_degrees, float aspect, float z_near, float z_far) {
+    Mat4 result{};
+    if (!(fov_degrees > 0.1F && fov_degrees < 179.0F) || !(aspect > 0.05F) || !(z_near > 0.0F) || !(z_far > z_near))
+        return result;
+    float fov_rad = fov_degrees * 0.01745329251F;
+    float cotangent = 1.0F / tanf(fov_rad * 0.5F);
+    mat_set(result, 0, 0, cotangent / aspect);
+    mat_set(result, 1, 1, cotangent);
+    mat_set(result, 2, 2, -(z_far + z_near) / (z_far - z_near));
+    mat_set(result, 2, 3, -(2.0F * z_far * z_near) / (z_far - z_near));
+    mat_set(result, 3, 2, -1.0F);
+    return result;
+}
+
+// worldToCamera from camera world pose (Unity camera looks down -Z).
+static Mat4 mat_world_to_camera(const Vec3& position, const Vec4& rotation) {
+    Vec3 right = rotate_vector(rotation, {1.0F, 0.0F, 0.0F});
+    Vec3 up = rotate_vector(rotation, {0.0F, 1.0F, 0.0F});
+    Vec3 forward = rotate_vector(rotation, {0.0F, 0.0F, 1.0F});
+    // View basis: rows = right, up, -forward (camera space).
+    Mat4 view{};
+    mat_set(view, 0, 0, right.x);   mat_set(view, 0, 1, right.y);   mat_set(view, 0, 2, right.z);
+    mat_set(view, 1, 0, up.x);      mat_set(view, 1, 1, up.y);      mat_set(view, 1, 2, up.z);
+    mat_set(view, 2, 0, -forward.x); mat_set(view, 2, 1, -forward.y); mat_set(view, 2, 2, -forward.z);
+    mat_set(view, 0, 3, -(right.x * position.x + right.y * position.y + right.z * position.z));
+    mat_set(view, 1, 3, -(up.x * position.x + up.y * position.y + up.z * position.z));
+    mat_set(view, 2, 3, -(-forward.x * position.x + -forward.y * position.y + -forward.z * position.z));
+    mat_set(view, 3, 3, 1.0F);
+    return view;
+}
+
 static bool camera_position_from_view(const Mat4& view, Vec3& position) {
-    double augmented[4][8]{};
-    for (int row = 0; row < 4; ++row) {
-        for (int column = 0; column < 4; ++column) augmented[row][column] = mat_get(view, row, column);
-        augmented[row][row + 4] = 1.0;
-    }
-    for (int column = 0; column < 4; ++column) {
-        int pivot = column;
-        for (int row = column + 1; row < 4; ++row)
-            if (fabs(augmented[row][column]) > fabs(augmented[pivot][column])) pivot = row;
-        if (!std::isfinite(augmented[pivot][column]) || fabs(augmented[pivot][column]) < 0.0000001) return false;
-        if (pivot != column) for (int i = 0; i < 8; ++i) std::swap(augmented[pivot][i], augmented[column][i]);
-        double divisor = augmented[column][column];
-        for (int i = 0; i < 8; ++i) augmented[column][i] /= divisor;
-        for (int row = 0; row < 4; ++row) {
-            if (row == column) continue;
-            double factor = augmented[row][column];
-            for (int i = 0; i < 8; ++i) augmented[row][i] -= factor * augmented[column][i];
-        }
-    }
-    double w = augmented[3][7];
-    if (!std::isfinite(w) || fabs(w) < 0.0000001) return false;
-    position = {(float)(augmented[0][7] / w), (float)(augmented[1][7] / w), (float)(augmented[2][7] / w)};
+    // For orthonormal worldToCamera: cam_pos = -R^T * t
+    float r00 = mat_get(view, 0, 0), r01 = mat_get(view, 0, 1), r02 = mat_get(view, 0, 2);
+    float r10 = mat_get(view, 1, 0), r11 = mat_get(view, 1, 1), r12 = mat_get(view, 1, 2);
+    float r20 = mat_get(view, 2, 0), r21 = mat_get(view, 2, 1), r22 = mat_get(view, 2, 2);
+    float tx = mat_get(view, 0, 3), ty = mat_get(view, 1, 3), tz = mat_get(view, 2, 3);
+    position = {
+        -(r00 * tx + r10 * ty + r20 * tz),
+        -(r01 * tx + r11 * ty + r21 * tz),
+        -(r02 * tx + r12 * ty + r22 * tz)
+    };
     return vec3_is_finite(position);
 }
 
 static bool w2s(const Mat4& vp, const Vec3& world, float sw, float sh, Vec2& out, bool clip_to_screen = true) {
+    // clip = VP * float4(world, 1) with column-major VP
     float clip_x = mat_get(vp, 0, 0) * world.x + mat_get(vp, 0, 1) * world.y + mat_get(vp, 0, 2) * world.z + mat_get(vp, 0, 3);
     float clip_y = mat_get(vp, 1, 0) * world.x + mat_get(vp, 1, 1) * world.y + mat_get(vp, 1, 2) * world.z + mat_get(vp, 1, 3);
     float clip_w = mat_get(vp, 3, 0) * world.x + mat_get(vp, 3, 1) * world.y + mat_get(vp, 3, 2) * world.z + mat_get(vp, 3, 3);
@@ -517,6 +539,76 @@ static bool w2s(const Mat4& vp, const Vec3& world, float sw, float sh, Vec2& out
     out.y = ((-clip_y / clip_w) + 1.0F) * 0.5F * sh;
     if (!std::isfinite(out.x) || !std::isfinite(out.y)) return false;
     if (clip_to_screen && (out.x < 0.0F || out.x > sw || out.y < 0.0F || out.y > sh)) return false;
+    return true;
+}
+
+static bool read_camera_transform_pose(uint64_t native_transform, Vec3& position, Vec4& rotation) {
+    if (!native_transform) return false;
+    if (g_transform_hierarchy_layout_valid) {
+        if (read_transform_hierarchy_layout(native_transform, g_transform_hierarchy_layout, position, &rotation))
+            return true;
+    }
+    // Probe the common TransformAccess layouts used elsewhere in this file.
+    uint64_t transform_data = rd_ptr(native_transform + 0x38);
+    int32_t transform_index = rd<int32_t>(native_transform + 0x40);
+    if (!transform_data || transform_index < 0 || transform_index > 100000) {
+        transform_data = rd_ptr(native_transform + 0x18);
+        transform_index = rd<int32_t>(native_transform + 0x20);
+    }
+    if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
+    const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
+    for (const auto& offsets : data_offsets) {
+        uint64_t matrix_pointer = rd_ptr(transform_data + offsets[0]);
+        uint64_t index_pointer = rd_ptr(transform_data + offsets[1]);
+        if (!matrix_pointer || !index_pointer) continue;
+        const uint64_t matrix_candidates[] = {matrix_pointer, rd_ptr(matrix_pointer)};
+        const uint64_t index_candidates[] = {index_pointer, rd_ptr(index_pointer)};
+        for (uint64_t matrices : matrix_candidates) {
+            for (uint64_t indices_ptr : index_candidates) {
+                if (read_transform_hierarchy_arrays(matrices, indices_ptr, transform_index, position, &rotation))
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view) {
+    if (!native_cam) return false;
+
+    // Fresh view from the Camera's live Transform (cam+0x20). The +0x70 cache is
+    // only rebuilt inside Unity getters when dirty-flag +0x502 is set — we never
+    // run those getters, so raw +0x70 drifts while the camera moves.
+    bool have_live_view = false;
+    uint64_t native_transform = rd_ptr(native_cam + CAMERA_NATIVE_TRANSFORM);
+    if (native_transform) {
+        Vec3 cam_pos{};
+        Vec4 cam_rot{};
+        if (read_camera_transform_pose(native_transform, cam_pos, cam_rot) &&
+            vec3_is_finite(cam_pos) && normalize_quaternion(cam_rot)) {
+            view = mat_world_to_camera(cam_pos, cam_rot);
+            have_live_view = matrix_is_finite(view);
+        }
+    }
+    if (!have_live_view) {
+        view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
+        if (!matrix_is_finite(view)) return false;
+    }
+
+    // Projection params (FOV/aspect/clip) are stored as plain floats and stay hot.
+    float fov = rd<float>(native_cam + CAMERA_FOV_DEGREES);
+    float aspect = rd<float>(native_cam + CAMERA_ASPECT);
+    float z_near = rd<float>(native_cam + CAMERA_NEAR_CLIP);
+    float z_far = rd<float>(native_cam + CAMERA_FAR_CLIP);
+    if (!(aspect > 0.1F && aspect < 10.0F))
+        aspect = (screen_aspect > 0.1F && screen_aspect < 10.0F) ? screen_aspect : (9.0F / 16.0F);
+    if (!(z_near > 0.001F && z_near < 100.0F)) z_near = 0.1F;
+    if (!(z_far > z_near && z_far < 100000.0F)) z_far = 1000.0F;
+    projection = mat_perspective(fov, aspect, z_near, z_far);
+    if (!matrix_is_finite(projection)) {
+        projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
+        if (!matrix_is_finite(projection)) return false;
+    }
     return true;
 }
 
@@ -562,23 +654,21 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
         return false;
     }
 
-    Mat4 validated_projection = rd_m4(native_camera + CAMERA_PROJECTION_MATRIX);
-    Mat4 validated_view = rd_m4(native_camera + CAMERA_VIEW_MATRIX);
-    if (matrix_is_finite(validated_projection) && matrix_is_finite(validated_view)) {
-        Vec3 camera_position{};
-        double nearest_camera_distance_squared = INFINITY;
-        if (camera_position_from_view(validated_view, camera_position)) {
-            for (const Vec3& sample : samples) {
-                double dx = (double)sample.x - camera_position.x, dy = (double)sample.y - camera_position.y, dz = (double)sample.z - camera_position.z;
-                double distance_squared = dx * dx + dy * dy + dz * dz;
-                if (std::isfinite(distance_squared)) nearest_camera_distance_squared = std::min(nearest_camera_distance_squared, distance_squared);
-            }
+    Mat4 validated_projection{}, validated_view{};
+    if (!read_native_camera_matrices(native_camera, 0.0F, validated_projection, validated_view))
+        return false;
+    Vec3 camera_position{};
+    double nearest_camera_distance_squared = INFINITY;
+    if (camera_position_from_view(validated_view, camera_position)) {
+        for (const Vec3& sample : samples) {
+            double dx = (double)sample.x - camera_position.x, dy = (double)sample.y - camera_position.y, dz = (double)sample.z - camera_position.z;
+            double distance_squared = dx * dx + dy * dy + dz * dz;
+            if (std::isfinite(distance_squared)) nearest_camera_distance_squared = std::min(nearest_camera_distance_squared, distance_squared);
         }
-        g_camera_matrix_physical_match = std::isfinite(nearest_camera_distance_squared) && nearest_camera_distance_squared <= 100.0;
-        g_matrix_configuration_validated = true;
-        return true;
     }
-    return false;
+    g_camera_matrix_physical_match = std::isfinite(nearest_camera_distance_squared) && nearest_camera_distance_squared <= 100.0;
+    g_matrix_configuration_validated = true;
+    return true;
 }
 
 static std::vector<uint64_t> read_configured_player_transforms() {
@@ -675,14 +765,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!managed_cam) { return result; }
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
         if (!native_cam) return result;
-        projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-        view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-        if (!matrix_is_finite(projection) || !matrix_is_finite(view)) { return result; }
+        if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
         if (!g_matrix_configuration_validated) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
-            projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-            view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
+            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
         }
+        // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
         vp = mat_mul(projection, view);
     }
 
