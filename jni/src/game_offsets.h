@@ -11,13 +11,15 @@ namespace game_offsets {
 // Native Unity Camera (via Camera::m_CachedPtr) — from libunity.so
 // get_worldToCameraMatrix_Injected @ 0x5ac514 → helper 0xe1fe08 returns cam+0x70
 // get_projectionMatrix_Injected    @ 0x5ac53c → helper 0xe1fe6c returns cam+0xB0
-// +0x70 / +0xB0 are Unity's native cached matrices (dirty flags @ +0x502/+0x500).
-// Helper 0xE2B90C multiplies them and writes the engine's original world-to-clip
-// matrix to +0xF0; the ESP reads that matrix directly before using any fallback.
-inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = 0xB0;  // native projectionMatrix
-inline constexpr std::uint64_t CAMERA_VIEW_MATRIX       = 0x70;  // native worldToCameraMatrix
-inline constexpr std::uint64_t CAMERA_WORLD_TO_CLIP     = 0xF0;  // native projection * worldToCamera
-inline constexpr std::uint64_t CAMERA_PREV_VIEW_PROJ    = 0x5C8; // previousViewProjection (frame-written)
+// +0x70 / +0xB0 are Unity's property caches (dirty flags @ +0x502/+0x500).
+// The render path keeps its frame-synchronised view-projection at +0x608 and
+// rolls it to +0x5C8 at the frame boundary (libunity helpers 0xE2B9F4/0xE2B990).
+// Helper 0xE2B90C separately writes the calculated property matrix to +0xF0.
+inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = 0xB0;  // native projectionMatrix property
+inline constexpr std::uint64_t CAMERA_VIEW_MATRIX       = 0x70;  // native worldToCameraMatrix property
+inline constexpr std::uint64_t CAMERA_WORLD_TO_CLIP     = 0xF0;  // calculated projection * worldToCamera
+inline constexpr std::uint64_t CAMERA_PREV_VIEW_PROJ    = 0x5C8; // previous rendered frame
+inline constexpr std::uint64_t CAMERA_RENDER_VIEW_PROJ  = 0x608; // current render view-projection
 inline constexpr std::uint64_t CAMERA_NATIVE_TRANSFORM  = 0x20;  // Transform* used by w2c dirty rebuild
 inline constexpr std::uint64_t CAMERA_FOV_DEGREES       = 0x170; // get_fieldOfView storage
 inline constexpr std::uint64_t CAMERA_ASPECT            = 0x4E0;

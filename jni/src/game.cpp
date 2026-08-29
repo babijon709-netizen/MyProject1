@@ -772,9 +772,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
             if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
         }
-        // Prefer Unity's original world-to-clip matrix. libunity.so helper
-        // 0xE2B90C writes projection * worldToCamera directly to Camera+0xF0.
-        vp = rd_m4(native_cam + CAMERA_WORLD_TO_CLIP);
+        // Use the matrix consumed by Unity's render path, not the lazy Camera
+        // property cache. This keeps ESP attached to the rendered death/spectator
+        // camera. The previous-frame and calculated matrices are safe fallbacks.
+        vp = rd_m4(native_cam + CAMERA_RENDER_VIEW_PROJ);
+        if (!matrix_is_finite(vp))
+            vp = rd_m4(native_cam + CAMERA_PREV_VIEW_PROJ);
+        if (!matrix_is_finite(vp))
+            vp = rd_m4(native_cam + CAMERA_WORLD_TO_CLIP);
         if (!matrix_is_finite(vp))
             vp = mat_mul(projection, view);
     }
