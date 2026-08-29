@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/uio.h>
 #include <stdio.h>
+#include <time.h>
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -652,6 +653,485 @@ static bool w2s_transform_camera(const Vec3& camera_position, const Vec4& camera
     return std::isfinite(output.x) && std::isfinite(output.y);
 }
 
+// ============================ Skeleton ESP ============================
+// Внешняя адаптация внутреннего скелетона: внутренний вариант звал
+// Transform::GetChild / Object::GetName и обходил иерархию костей по именам
+// ("Hips", "Arm.L", ...). Снаружи вызывать icall нельзя, а эта сборка игры
+// прячет таблицу icall, поэтому оффсеты (first-child / next-sibling /
+// GameObject / имя) находятся один раз за сессию рантайм-дискавери и
+// валидируются по набору имён гуманоидного рига. Мировые позиции костей
+// каждый кадр берутся из уже проверенных массивов TransformData, поэтому
+// скелет полностью динамичный и двигается вместе с конечностями.
+
+struct SkeletonLayout {
+    bool     valid = false;
+    uint64_t data_off = 0x38;   // native Transform -> TransformData*
+    uint64_t idx_off  = 0x40;   // native Transform -> индекс в батче
+    uint64_t head_off = 0;      // native Transform -> первый ребёнок
+    uint64_t next_off = 0;      // ребёнок -> следующий сиблинг
+    uint64_t go_off   = 0;      // native Transform -> GameObject*
+    uint64_t name_off = 0;      // GameObject -> хранилище имени
+    bool     name_indirect = false; // имя лежит по char*, а не инлайном
+};
+static SkeletonLayout g_skel_layout;
+static uint64_t g_skel_last_try_ms = 0;
+// сид иерархии: 0 = worldCameraRoot игрока, 1 = transform модели персонажа
+static int       g_skel_seed_mode = 0;
+static uint64_t  g_skel_seed_go_off = 0;
+
+struct BoneAlias { int bone; const char* names[4]; };
+static const BoneAlias kSkelBoneAliases[] = {
+    {BONE_HIPS,       {"Hips", "hips", "Pelvis"}},
+    {BONE_SPINE,      {"Spine", "spine"}},
+    {BONE_SPINE1,     {"Spine1", "Spine_1"}},
+    {BONE_SPINE2,     {"Spine2", "Spine_2", "Chest"}},
+    {BONE_NECK,       {"Neck", "neck"}},
+    {BONE_HEAD,       {"Head", "head"}},
+    {BONE_SHOULDER_L, {"Shoulder.L", "LeftShoulder"}},
+    {BONE_ARM_L,      {"Arm.L", "UpperArm.L"}},
+    {BONE_FOREARM_L,  {"ForeArm.L", "LowerArm.L"}},
+    {BONE_HAND_L,     {"Hand.L", "LeftHand"}},
+    {BONE_SHOULDER_R, {"Shoulder.R", "RightShoulder"}},
+    {BONE_ARM_R,      {"Arm.R", "UpperArm.R"}},
+    {BONE_FOREARM_R,  {"ForeArm.R", "LowerArm.R"}},
+    {BONE_HAND_R,     {"Hand.R", "RightHand"}},
+    {BONE_UPLEG_L,    {"UpLeg.L", "LeftUpLeg"}},
+    {BONE_LEG_L,      {"Leg.L", "LeftLeg"}},
+    {BONE_FOOT_L,     {"Foot.L", "LeftFoot"}},
+    {BONE_TOEBASE_L,  {"ToeBase.L", "LeftToeBase"}},
+    {BONE_UPLEG_R,    {"UpLeg.R", "RightUpLeg"}},
+    {BONE_LEG_R,      {"Leg.R", "RightLeg"}},
+    {BONE_FOOT_R,     {"Foot.R", "RightFoot"}},
+    {BONE_TOEBASE_R,  {"ToeBase.R", "RightToeBase"}},
+};
+
+static int skel_bone_from_name(const std::string& name) {
+    if (name.empty() || name.size() > 32) return -1;
+    for (const BoneAlias& alias : kSkelBoneAliases)
+        for (const char* candidate : alias.names) {
+            if (!candidate) break;
+            if (name == candidate) return alias.bone;
+        }
+    return -1;
+}
+
+static uint64_t skel_now_ms() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
+
+static bool skel_plausible_ptr(uint64_t v) {
+    return v >= 0x10000 && v < 0x0001000000000000ULL && (v & 7) == 0;
+}
+
+static bool skel_read_buf(uint64_t addr, void* dst, size_t len) {
+    if (!addr || !dst || !len) return false;
+    struct iovec lv = { dst, len };
+    struct iovec rv = { (void*)addr, len };
+    return remote_vm_readv(g_pid, &lv, 1, &rv, 1, 0) == (ssize_t)len;
+}
+
+// Кандидат имени: 24 байта на go+off — либо инлайн-символы, либо char* в первом qword.
+static bool skel_read_name(uint64_t go, uint64_t off, bool indirect, std::string& out) {
+    if (!go || off > 0x400) return false;
+    uint8_t buf[24]{};
+    if (!skel_read_buf(go + off, buf, sizeof(buf))) return false;
+    const uint8_t* p = buf;
+    if (indirect) {
+        uint64_t ptr = 0;
+        memcpy(&ptr, buf, sizeof(ptr));
+        if (!skel_plausible_ptr(ptr)) return false;
+        if (!skel_read_buf(ptr, buf, sizeof(buf))) return false;
+    }
+    int len = 0;
+    while (len < (int)sizeof(buf) && p[len] != 0) ++len;
+    if (len < 2 || len >= (int)sizeof(buf)) return false;
+    for (int i = 0; i < len; ++i)
+        if (p[i] < 0x20 || p[i] > 0x7E) return false;
+    out.assign((const char*)p, (size_t)len);
+    return true;
+}
+
+struct SkelNode { uint64_t transform; int32_t index; };
+
+// Дети трансформа через связный список (head у родителя, next у ребёнка).
+// Оракул корректности: все трансформы поддерева живут в одном TransformData,
+// и индекс ребёнка всегда больше индекса родителя (инвариант Unity).
+static int skel_collect_children(uint64_t parent, uint64_t head_off, uint64_t next_off,
+                                 uint64_t data_off, uint64_t idx_off, uint64_t expect_data,
+                                 int32_t parent_index, SkelNode* out, int max_out) {
+    uint64_t child = rd_ptr(parent + head_off);
+    const uint64_t sentinel_lo = parent + head_off;
+    const uint64_t sentinel_hi = sentinel_lo + 16;
+    int count = 0, guard = 0;
+    while (skel_plausible_ptr(child) && child != parent &&
+           !(child >= sentinel_lo && child < sentinel_hi) && guard++ < 256) {
+        if (expect_data) {
+            uint64_t data = rd_ptr(child + data_off);
+            if (data != expect_data) return -1;
+            int32_t ci = rd<int32_t>(child + idx_off);
+            if (ci < 0 || ci > 100000 || ci <= parent_index) return -1;
+            if (count < max_out) { out[count].transform = child; out[count].index = ci; }
+        } else if (count < max_out) {
+            out[count].transform = child;
+            out[count].index = rd<int32_t>(child + idx_off);
+        }
+        ++count;
+        if (count > 96) return -1;
+        uint64_t next = rd_ptr(child + next_off);
+        if (next == child) return -1;
+        child = next;
+    }
+    return count;
+}
+
+static bool skel_collect_subtree(uint64_t root, uint64_t head_off, uint64_t next_off,
+                                 uint64_t data_off, uint64_t idx_off, uint64_t expect_data,
+                                 std::vector<SkelNode>& out, int max_nodes) {
+    out.clear();
+    if (!skel_plausible_ptr(root)) return false;
+    int32_t root_index = rd<int32_t>(root + idx_off);
+    if (root_index < 0 || root_index > 100000) return false;
+    std::vector<SkelNode> stack;
+    std::unordered_set<uint64_t> visited;
+    stack.push_back({root, root_index});
+    visited.insert(root);
+    SkelNode buffer[96];
+    while (!stack.empty() && (int)out.size() < max_nodes) {
+        SkelNode node = stack.back();
+        stack.pop_back();
+        out.push_back(node);
+        int children = skel_collect_children(node.transform, head_off, next_off, data_off, idx_off,
+                                             expect_data, node.index, buffer, 96);
+        if (children < 0) return false;
+        for (int i = 0; i < children; ++i) {
+            if (!visited.insert(buffer[i].transform).second) return false; // цикл — неверные оффсеты
+            if (visited.size() > 1024) return false;
+            stack.push_back(buffer[i]);
+        }
+    }
+    return !stack.empty() || (int)out.size() >= 2;
+}
+
+static int skel_score_names(const std::vector<SkelNode>& nodes, uint64_t go_off, uint64_t name_off,
+                            bool indirect, int max_check, int& bone_hits) {
+    int ascii_ok = 0;
+    bone_hits = 0;
+    int checked = 0;
+    for (const SkelNode& node : nodes) {
+        if (checked >= max_check) break;
+        ++checked;
+        uint64_t go = rd_ptr(node.transform + go_off);
+        if (!skel_plausible_ptr(go)) continue;
+        std::string name;
+        if (!skel_read_name(go, name_off, indirect, name)) continue;
+        ++ascii_ok;
+        if (skel_bone_from_name(name) >= 0) ++bone_hits;
+    }
+    return ascii_ok;
+}
+
+// Одноразовый рантайм-дискавери оффсетов скелета (стиль discover_transform_hierarchy_layout).
+static bool skel_discover_layout(uint64_t root_native) {
+    if (!skel_plausible_ptr(root_native)) return false;
+    const uint64_t data_idx_pairs[2][2] = {{0x38, 0x40}, {0x18, 0x20}};
+    uint64_t data_off = 0, idx_off = 0, data0 = 0;
+    for (const auto& pair : data_idx_pairs) {
+        uint64_t d = rd_ptr(root_native + pair[0]);
+        int32_t ix = rd<int32_t>(root_native + pair[1]);
+        if (skel_plausible_ptr(d) && ix >= 0 && ix <= 100000) {
+            data_off = pair[0]; idx_off = pair[1]; data0 = d;
+            break;
+        }
+    }
+    if (!data0 || !idx_off) return false;
+
+    struct TravCandidate { uint64_t head, next; };
+    TravCandidate candidates[8];
+    int candidate_count = 0;
+    static std::vector<SkelNode> nodes;
+    for (uint64_t head = 0x28; head <= 0x98 && candidate_count < 8; head += 8) {
+        for (uint64_t next = 0x28; next <= 0xA0 && candidate_count < 8; next += 8) {
+            if (next == head) continue;
+            if (!skel_collect_subtree(root_native, head, next, data_off, idx_off, data0, nodes, 384)) continue;
+            if (nodes.size() < 16 || nodes.size() > 320) continue;
+            candidates[candidate_count++] = {head, next};
+            break;
+        }
+    }
+    if (!candidate_count) return false;
+
+    for (int ci = 0; ci < candidate_count; ++ci) {
+        if (!skel_collect_subtree(root_native, candidates[ci].head, candidates[ci].next,
+                                  data_off, idx_off, data0, nodes, 384)) continue;
+        for (uint64_t go_off = 0x18; go_off <= 0x38; go_off += 8) {
+            // быстрый префильтр: GameObject-указатель должен быть валиден у большинства узлов
+            int plausible = 0, sampled = 0;
+            for (const SkelNode& node : nodes) {
+                if (sampled >= 16) break;
+                ++sampled;
+                if (skel_plausible_ptr(rd_ptr(node.transform + go_off))) ++plausible;
+            }
+            if (sampled > 0 && plausible < sampled * 3 / 4) continue;
+            for (uint64_t name_off = 0x08; name_off <= 0x78; name_off += 8) {
+                for (int indirect = 0; indirect < 2; ++indirect) {
+                    int bone_hits = 0;
+                    int ascii_ok = skel_score_names(nodes, go_off, name_off, indirect != 0, 32, bone_hits);
+                    if (bone_hits >= 8 && ascii_ok >= 10) {
+                        g_skel_layout.data_off = data_off;
+                        g_skel_layout.idx_off = idx_off;
+                        g_skel_layout.head_off = candidates[ci].head;
+                        g_skel_layout.next_off = candidates[ci].next;
+                        g_skel_layout.go_off = go_off;
+                        g_skel_layout.name_off = name_off;
+                        g_skel_layout.name_indirect = indirect != 0;
+                        g_skel_layout.valid = true;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+struct PlayerSkel {
+    uint64_t player = 0;
+    uint64_t root_native = 0;
+    uint64_t transform_data = 0;
+    int32_t  root_index = -1;
+    int32_t  bone_index[ESP_BONE_COUNT];
+    int      found = 0;
+    int32_t  span = 0;
+    uint64_t next_build_ms = 0;
+    uint64_t last_ok_ms = 0;
+    // буферы кадра
+    std::vector<Matrix34> mats;
+    std::vector<int32_t>  idxs;
+    std::vector<int32_t>  anc_index, anc_parent;
+    std::vector<Matrix34> anc_mat;
+};
+static std::vector<PlayerSkel> g_skel_players;
+
+// Корень иерархии костей конкретного игрока (по найденному при дискавери сиду).
+static uint64_t skel_root_for_player(uint64_t player) {
+    uint64_t t = resolve_player_native_transform(player);
+    if (!t || g_skel_seed_mode != 1) return t;
+    uint64_t managed_go = rd_ptr(player + PLAYER_CHARACTER_MODEL);
+    if (!skel_plausible_ptr(managed_go)) return t;
+    uint64_t native_go = rd_ptr(managed_go + MANAGED_CACHED_PTR);
+    if (!skel_plausible_ptr(native_go)) return t;
+    uint64_t alt = rd_ptr(native_go + g_skel_seed_go_off);
+    return skel_plausible_ptr(alt) ? alt : t;
+}
+
+// Дискавери: сначала worldCameraRoot игрока, затем transform модели персонажа
+// (GameObject -> Transform через перебор оффсетов, validated по именам костей).
+static bool skel_try_discover(uint64_t player) {
+    if (skel_discover_layout(resolve_player_native_transform(player))) {
+        g_skel_seed_mode = 0;
+        return true;
+    }
+    uint64_t managed_go = rd_ptr(player + PLAYER_CHARACTER_MODEL);
+    if (!skel_plausible_ptr(managed_go)) return false;
+    uint64_t native_go = rd_ptr(managed_go + MANAGED_CACHED_PTR);
+    if (!skel_plausible_ptr(native_go)) return false;
+    static const uint64_t kGoToTransformOffsets[] = {0x28, 0x30, 0x38, 0x40, 0x48};
+    for (uint64_t off : kGoToTransformOffsets) {
+        uint64_t seed = rd_ptr(native_go + off);
+        if (!skel_plausible_ptr(seed)) continue;
+        if (skel_discover_layout(seed)) {
+            g_skel_seed_mode = 1;
+            g_skel_seed_go_off = off;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool skel_build_player(PlayerSkel& s, uint64_t player) {
+    uint64_t root = skel_root_for_player(player);
+    if (!skel_plausible_ptr(root)) return false;
+    uint64_t data = rd_ptr(root + g_skel_layout.data_off);
+    int32_t ridx = rd<int32_t>(root + g_skel_layout.idx_off);
+    if (!skel_plausible_ptr(data) || ridx < 0 || ridx > 100000) return false;
+
+    static std::vector<SkelNode> nodes;
+    if (!skel_collect_subtree(root, g_skel_layout.head_off, g_skel_layout.next_off,
+                              g_skel_layout.data_off, g_skel_layout.idx_off, data, nodes, 384))
+        return false;
+
+    for (int b = 0; b < ESP_BONE_COUNT; ++b) s.bone_index[b] = -1;
+    int found = 0;
+    int32_t max_idx = ridx;
+    for (const SkelNode& node : nodes) {
+        uint64_t go = rd_ptr(node.transform + g_skel_layout.go_off);
+        if (!skel_plausible_ptr(go)) continue;
+        std::string name;
+        if (!skel_read_name(go, g_skel_layout.name_off, g_skel_layout.name_indirect, name)) continue;
+        int bone = skel_bone_from_name(name);
+        if (bone < 0 || s.bone_index[bone] >= 0) continue;
+        if (node.index > ridx + 2048) continue;
+        s.bone_index[bone] = node.index;
+        ++found;
+        if (node.index > max_idx) max_idx = node.index;
+    }
+    // обязательные кости: таз/спина и голова/шея, иначе это не риг персонажа
+    bool core = (s.bone_index[BONE_HIPS] >= 0 || s.bone_index[BONE_SPINE] >= 0) &&
+                (s.bone_index[BONE_HEAD] >= 0 || s.bone_index[BONE_NECK] >= 0);
+    if (!core || found < 10) return false;
+
+    s.player = player;
+    s.root_native = root;
+    s.transform_data = data;
+    s.root_index = ridx;
+    s.span = max_idx - ridx;
+    if (s.span < 1) s.span = 1;
+    if (s.span > 2048) s.span = 2048;
+    s.found = found;
+    s.last_ok_ms = skel_now_ms();
+    return true;
+}
+
+static bool skel_resolve_arrays(uint64_t data, uint64_t& matrices, uint64_t& indices) {
+    if (g_transform_hierarchy_layout_valid) {
+        const TransformHierarchyLayout& layout = g_transform_hierarchy_layout;
+        matrices = rd_ptr(data + layout.matrices_offset);
+        indices  = rd_ptr(data + layout.indices_offset);
+        if (layout.matrices_indirect) matrices = rd_ptr(matrices);
+        if (layout.indices_indirect) indices = rd_ptr(indices);
+        if (skel_plausible_ptr(matrices) && skel_plausible_ptr(indices)) return true;
+    }
+    const uint64_t pairs[2][2] = {{0x18, 0x20}, {0x08, 0x10}};
+    for (const auto& pair : pairs) {
+        uint64_t m = rd_ptr(data + pair[0]);
+        uint64_t i = rd_ptr(data + pair[1]);
+        if (!skel_plausible_ptr(m) || !skel_plausible_ptr(i)) continue;
+        uint64_t m2 = rd_ptr(m), i2 = rd_ptr(i);
+        if (skel_plausible_ptr(m2) && skel_plausible_ptr(i2)) { matrices = m2; indices = i2; return true; }
+        matrices = m; indices = i;
+        return true;
+    }
+    return false;
+}
+
+static void skel_fill_box(PlayerSkel& s, const Mat4& vp, float sw, float sh, EspBox& box) {
+    box.skel_valid = false;
+    if (s.found < 10 || !s.root_native) return;
+
+    uint64_t data = rd_ptr(s.root_native + g_skel_layout.data_off);
+    int32_t ridx = rd<int32_t>(s.root_native + g_skel_layout.idx_off);
+    if (data != s.transform_data || ridx != s.root_index) { s.found = 0; s.next_build_ms = skel_now_ms(); return; }
+
+    uint64_t matrices = 0, indices = 0;
+    if (!skel_resolve_arrays(data, matrices, indices)) return;
+
+    const int32_t span = s.span;
+    s.idxs.resize((size_t)span + 1);
+    s.mats.resize((size_t)span + 1);
+    if (!skel_read_buf(indices + (uint64_t)s.root_index * 4, s.idxs.data(), (size_t)(span + 1) * 4)) return;
+    if (!skel_read_buf(matrices + (uint64_t)s.root_index * sizeof(Matrix34), s.mats.data(), (size_t)(span + 1) * sizeof(Matrix34))) return;
+
+    // предки рута (над слайсом): цепочка родителей до -1
+    s.anc_index.clear(); s.anc_parent.clear(); s.anc_mat.clear();
+    int32_t parent = s.idxs[0];
+    int guard = 0;
+    while (parent >= 0 && parent < s.root_index && guard++ < 128) {
+        Matrix34 m{};
+        if (!rd_exact(matrices + (uint64_t)parent * sizeof(Matrix34), m) || !matrix34_is_valid(m)) break;
+        int32_t pp = rd<int32_t>(indices + (uint64_t)parent * 4);
+        if (pp < -1 || pp > 100000) break;
+        s.anc_index.push_back(parent);
+        s.anc_mat.push_back(m);
+        s.anc_parent.push_back(pp);
+        parent = pp;
+    }
+    const int32_t anc_count = (int32_t)s.anc_index.size();
+    auto anc_parent_of = [&](int32_t index) -> int32_t {
+        for (int32_t k = 0; k < anc_count; ++k)
+            if (s.anc_index[k] == index) return s.anc_parent[k];
+        return -1;
+    };
+
+    // мировая позиция по локальным матрицам (та же математика, что и в иерархии выше)
+    auto world_at = [&](int32_t index, Vec3& out) -> bool {
+        if (index < s.root_index || index > s.root_index + span) return false;
+        Matrix34 current = s.mats[index - s.root_index];
+        if (!matrix34_is_valid(current)) return false;
+        Vec3 result = {current.translation.x, current.translation.y, current.translation.z};
+        if (!vec3_is_finite(result)) return false;
+        int32_t par = s.idxs[index - s.root_index];
+        int32_t cur = index;
+        int depth = 0;
+        while (par != -1) {
+            if (par < 0 || par >= cur || ++depth > 128) return false;
+            const Matrix34* m = nullptr;
+            if (par >= s.root_index) m = &s.mats[par - s.root_index];
+            else
+                for (int32_t k = 0; k < anc_count; ++k)
+                    if (s.anc_index[k] == par) { m = &s.anc_mat[k]; break; }
+            if (!m || !matrix34_is_valid(*m)) return false;
+            Vec3 scaled = {result.x * m->scale.x, result.y * m->scale.y, result.z * m->scale.z};
+            Vec3 rotated = rotate_vector(m->rotation, scaled);
+            result = {m->translation.x + rotated.x, m->translation.y + rotated.y, m->translation.z + rotated.z};
+            if (!vec3_is_finite(result)) return false;
+            cur = par;
+            par = (par >= s.root_index) ? s.idxs[par - s.root_index] : anc_parent_of(par);
+        }
+        out = result;
+        return true;
+    };
+
+    int projected = 0;
+    for (int b = 0; b < ESP_BONE_COUNT; ++b) {
+        box.skel_visible[b] = false;
+        box.skel_x[b] = -1.0F;
+        box.skel_y[b] = -1.0F;
+        if (s.bone_index[b] < 0) continue;
+        Vec3 world{};
+        if (!world_at(s.bone_index[b], world)) continue;
+        Vec2 screen{};
+        if (!w2s(vp, world, sw, sh, screen, false)) continue;
+        box.skel_x[b] = screen.x;
+        box.skel_y[b] = screen.y;
+        box.skel_visible[b] = true;
+        ++projected;
+    }
+    box.skel_valid = projected >= 6;
+    if (box.skel_valid) s.last_ok_ms = skel_now_ms();
+}
+
+static void skel_update_player(uint64_t player, const Mat4& vp, float sw, float sh, EspBox& box) {
+    box.skel_valid = false;
+    if (!g_skel_layout.valid) return;
+    PlayerSkel* s = nullptr;
+    for (PlayerSkel& entry : g_skel_players)
+        if (entry.player == player) { s = &entry; break; }
+    if (!s) {
+        g_skel_players.push_back(PlayerSkel{});
+        s = &g_skel_players.back();
+        s->player = player;
+    }
+    const uint64_t now = skel_now_ms();
+    if (s->found <= 0) {
+        if (now < s->next_build_ms) return;
+        s->next_build_ms = now + 1500;
+        if (!skel_build_player(*s, player)) return;
+    } else if (s->last_ok_ms && now - s->last_ok_ms > 30000) {
+        // периодический ребилд (модель могли пересоздать)
+        if (now < s->next_build_ms) return;
+        s->next_build_ms = now + 1500;
+        s->found = 0;
+        if (!skel_build_player(*s, player)) return;
+    }
+    skel_fill_box(*s, vp, sw, sh, box);
+    if (!box.skel_valid && s->last_ok_ms && now - s->last_ok_ms > 5000) {
+        s->found = 0;
+        s->next_build_ms = now + 1500;
+    }
+}
+
 static bool optimize_matrix_configuration(uint64_t native_camera, const std::vector<uint64_t>& transforms) {
     std::vector<Vec3> samples;
     for (uint64_t source : transforms) {
@@ -750,10 +1230,15 @@ void esp_reset() {
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
     g_player_position_validated = false;
+    g_skel_layout = SkeletonLayout{};
+    g_skel_players.clear();
+    g_skel_last_try_ms = 0;
+    g_skel_seed_mode = 0;
+    g_skel_seed_go_off = 0;
 }
 
 
-std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
+std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height, bool with_skeleton) {
     std::vector<EspBox> result;
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
@@ -837,6 +1322,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         local = transform_camera_position; has_local_position = true;
     }
 
+    // Skeleton ESP: одноразовый рантайм-дискавери оффсетов (не чаще раза в 2с).
+    if (with_skeleton && !g_skel_layout.valid && s_transforms.size() > 0) {
+        uint64_t now = skel_now_ms();
+        if (now - g_skel_last_try_ms > 2000) {
+            g_skel_last_try_ms = now;
+            skel_try_discover(s_transforms[local_entity_index < s_transforms.size() ? local_entity_index : 0]);
+        }
+    }
+
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) continue;
         if (!s_transforms[i]) continue;
@@ -895,7 +1389,21 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             box.corners[corner][0] = projected ? sc.x : -1.0F;
             box.corners[corner][1] = projected ? sc.y : -1.0F;
         }
+        if (with_skeleton)
+            skel_update_player(s_transforms[i], vp, sw, sh, box);
         result.push_back(box);
+    }
+
+    // подчистка кэша скелетов умерших/ушедших игроков
+    if (with_skeleton && !g_skel_players.empty()) {
+        size_t write = 0;
+        for (size_t read = 0; read < g_skel_players.size(); ++read) {
+            bool alive = false;
+            for (uint64_t t : s_transforms)
+                if (t == g_skel_players[read].player) { alive = true; break; }
+            if (alive) g_skel_players[write++] = g_skel_players[read];
+        }
+        g_skel_players.resize(write);
     }
 
     return result;

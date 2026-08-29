@@ -587,9 +587,22 @@ static void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton) return;
 
-    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
+    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh, g_state.esp_skeleton);
+    // кости скелета: пары индексов (как в DrawSkeleton внутреннего чита)
+    constexpr int SKEL_EDGES[][2] = {
+        {BONE_HIPS, BONE_SPINE}, {BONE_SPINE, BONE_SPINE1}, {BONE_SPINE1, BONE_SPINE2},
+        {BONE_SPINE2, BONE_NECK}, {BONE_NECK, BONE_HEAD},
+        {BONE_SPINE2, BONE_SHOULDER_L}, {BONE_SHOULDER_L, BONE_ARM_L},
+        {BONE_ARM_L, BONE_FOREARM_L}, {BONE_FOREARM_L, BONE_HAND_L},
+        {BONE_SPINE2, BONE_SHOULDER_R}, {BONE_SHOULDER_R, BONE_ARM_R},
+        {BONE_ARM_R, BONE_FOREARM_R}, {BONE_FOREARM_R, BONE_HAND_R},
+        {BONE_HIPS, BONE_UPLEG_L}, {BONE_UPLEG_L, BONE_LEG_L},
+        {BONE_LEG_L, BONE_FOOT_L}, {BONE_FOOT_L, BONE_TOEBASE_L},
+        {BONE_HIPS, BONE_UPLEG_R}, {BONE_UPLEG_R, BONE_LEG_R},
+        {BONE_LEG_R, BONE_FOOT_R}, {BONE_FOOT_R, BONE_TOEBASE_R}
+    };
     constexpr int BOX_EDGES[][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},
@@ -623,6 +636,16 @@ static void DrawEspOverlay() {
 
         if (g_state.esp_box)
             dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2), ColU32(cfg::esp::box_col), cfg::esp::box_rounding, 0, thick);
+
+        if (g_state.esp_skeleton && box.skel_valid) {
+            for (const auto& edge : SKEL_EDGES) {
+                int a = edge[0], b = edge[1];
+                if (!box.skel_visible[a] || !box.skel_visible[b]) continue;
+                dl->AddLine(ImVec2(box.skel_x[a], box.skel_y[a]),
+                            ImVec2(box.skel_x[b], box.skel_y[b]),
+                            ColU32(cfg::esp::skeleton_col), thick);
+            }
+        }
 
         if (g_state.esp_tracer) {
             float tx = (box.x1 + box.x2) * 0.5f;
@@ -2269,6 +2292,7 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::weapon       = g_state.esp_weapon;
         cfg::esp::weapon_icon  = g_state.esp_weapon_icon;
         cfg::esp::tracer       = g_state.esp_tracer;
+        cfg::esp::skeleton     = g_state.esp_skeleton;
 
 
 
@@ -2332,6 +2356,7 @@ float TabContent(int tab, float dt, float cW) {
             ERow rows[] = {
                 {"##vb",  XS("Бокс"),           &g_state.esp_box,          &g_state.a_esp_box,          &cfg::esp::box_col},
                 {"##v3",  XS("3D рамка"),       &g_state.esp_chams,        &g_state.a_esp_chams,        &cfg::esp::box_col_invis},
+                {"##vsk", XS("Скелетон"),       &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
                 {"##vn",  XS("Имена"),          &g_state.esp_name,         &g_state.a_esp_name,         &cfg::esp::name_col},
                 {"##vh",  XS("HP бар"),         &g_state.esp_hp,           &g_state.a_esp_hp,           &cfg::esp::health_col},
                 {"##vd",  XS("Дистанция"),      &g_state.esp_wall,         &g_state.a_esp_wall,         &cfg::esp::distance_col},
@@ -2339,7 +2364,7 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
             };
-            constexpr int N = 8;
+            constexpr int N = 9;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
