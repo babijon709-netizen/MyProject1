@@ -17,13 +17,12 @@ inline constexpr float MIN_PLAYER_DISTANCE    = 0.0F;
 inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 
 // Oxide.PlayerManager class info (from libil2cpp.so)
-// Note: TYPEINFO_RVA values need to be found at runtime or through binary analysis
-// The code validates class names at runtime, so these can be 0 if unknown
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD126870;  // Needs update for new binary
-inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10;       // clientPlayerList at 0x10 (not activePlayerList at 0x8!)
+// TYPEINFO RVA addresses are in .bss section and filled at runtime
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD17B000;  // From .cctor analysis
+inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10;       // clientPlayerList at 0x10
 
 // Oxide.GameControllerBase class info (from libil2cpp.so)
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA        = 0xD121CF8;  // Needs update for new binary
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA        = 0xD17C000;  // From .cctor analysis
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD  = 0x10;       // <LZp>k__BackingField
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38;      // <LZD>k__BackingField
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20;      // m_Camera in Oxide.CameraManager

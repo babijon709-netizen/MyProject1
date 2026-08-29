@@ -133,11 +133,19 @@ static bool player_list_contains(uint64_t list, uint64_t player) {
     return false;
 }
 
-static constexpr uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
+static constexpr uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xC0;  // Updated for newer il2cpp versions
 
 static uint64_t get_class_static_fields(uint64_t klass) {
     if (!klass) return 0;
-    return rd_ptr(klass + IL2CPP_CLASS_STATIC_FIELDS);
+    // Try multiple offsets for different il2cpp versions
+    const uint64_t offsets[] = {0xC0, 0xB8, 0xB0, 0xA8};
+    for (uint64_t offset : offsets) {
+        uint64_t result = rd_ptr(klass + offset);
+        if (result && result > 0x10000 && result < 0x1000000000000ULL) {
+            return result;
+        }
+    }
+    return rd_ptr(klass + 0xC0);  // Default
 }
 
 static uint64_t resolve_runtime_player_list() {
