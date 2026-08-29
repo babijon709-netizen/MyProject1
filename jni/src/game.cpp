@@ -9,6 +9,7 @@
 #include <cmath>
 #include <string>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -719,6 +720,52 @@ bool esp_init(pid_t pid) {
     return true;
 }
 
+struct PlayerSkeleton {
+    uint64_t player = 0;
+    std::string player_name = "";
+
+    uint64_t root = 0;
+    uint64_t armature = 0;
+
+    uint64_t hips = 0;
+    uint64_t spine = 0;
+    uint64_t spine1 = 0;
+    uint64_t spine2 = 0;
+    uint64_t neck = 0;
+    uint64_t head = 0;
+
+    uint64_t head_hitbox = 0;
+    uint64_t hips_hitbox = 0;
+    uint64_t spine_hitbox = 0;
+    uint64_t spine1_hitbox = 0;
+    uint64_t spine2_hitbox = 0;
+
+    uint64_t shoulder_l = 0;
+    uint64_t arm_l = 0;
+    uint64_t forearm_l = 0;
+    uint64_t hand_l = 0;
+
+    uint64_t shoulder_r = 0;
+    uint64_t arm_r = 0;
+    uint64_t forearm_r = 0;
+    uint64_t hand_r = 0;
+
+    uint64_t upleg_l = 0;
+    uint64_t leg_l = 0;
+    uint64_t foot_l = 0;
+    uint64_t toebase_l = 0;
+
+    uint64_t upleg_r = 0;
+    uint64_t leg_r = 0;
+    uint64_t foot_r = 0;
+    uint64_t toebase_r = 0;
+
+    bool cached = false;
+    int  cache_age = 0;
+};
+
+static std::unordered_map<uint64_t, PlayerSkeleton> g_skeleton_cache;
+
 void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
@@ -728,6 +775,207 @@ void esp_reset() {
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
     g_player_position_validated = false;
+    g_skeleton_cache.clear();
+}
+
+static std::string get_native_transform_name(uint64_t native_transform) {
+    if (!native_transform) return {};
+    const uint64_t go_offsets[] = {0x20, 0x18, 0x30};
+    for (uint64_t go_off : go_offsets) {
+        uint64_t go = rd_ptr(native_transform + go_off);
+        if (!go || !likely_native_pointer(go)) continue;
+
+        uint64_t p1 = rd_ptr(go + 0x18);
+        if (p1 && likely_native_pointer(p1)) {
+            if ((p1 & 1) == 0) {
+                uint64_t p2 = rd_ptr(p1);
+                if (p2 && likely_native_pointer(p2)) {
+                    std::string s = read_remote_string(p2);
+                    if (!s.empty()) return s;
+                }
+            }
+            std::string s = read_remote_string(p1);
+            if (!s.empty()) return s;
+        }
+
+        const uint64_t str_offsets[] = {0x60, 0x58, 0x50, 0x30, 0x38};
+        for (uint64_t off : str_offsets) {
+            uint64_t p = rd_ptr(go + off);
+            if (p && likely_native_pointer(p)) {
+                std::string s = read_remote_string(p);
+                if (!s.empty()) return s;
+            }
+            std::string direct = read_remote_string(go + off);
+            if (!direct.empty()) return direct;
+        }
+    }
+    return {};
+}
+
+static std::vector<uint64_t> get_native_transform_children(uint64_t native_transform) {
+    std::vector<uint64_t> children;
+    if (!native_transform) return children;
+
+    const uint64_t layouts[][2] = {
+        {0x48, 0x58},
+        {0x70, 0x80},
+        {0x60, 0x70},
+        {0x50, 0x58}
+    };
+
+    for (const auto& layout : layouts) {
+        uint64_t children_ptr = rd_ptr(native_transform + layout[0]);
+        int32_t count = rd<int32_t>(native_transform + layout[1]);
+
+        if (children_ptr && likely_native_pointer(children_ptr) && count > 0 && count <= 256) {
+            children.reserve((size_t)count);
+            for (int32_t i = 0; i < count; ++i) {
+                uint64_t child = rd_ptr(children_ptr + (uint64_t)i * sizeof(uint64_t));
+                if (child && likely_native_pointer(child)) {
+                    children.push_back(child);
+                }
+            }
+            if (!children.empty()) return children;
+        }
+    }
+    return children;
+}
+
+static void cache_skeleton_recursive(uint64_t native_transform, PlayerSkeleton& skel, int depth = 0) {
+    if (!native_transform || depth > 40) return;
+
+    std::string name = get_native_transform_name(native_transform);
+    if (!name.empty()) {
+        if (name == "Hips" || name == "hips" || name == "Pelvis" || name == "pelvis" || name == "Bip01 Pelvis")
+            skel.hips = native_transform;
+        else if (name == "Spine" || name == "spine" || name == "Spine0" || name == "Bip01 Spine")
+            skel.spine = native_transform;
+        else if (name == "Spine1" || name == "spine1" || name == "Bip01 Spine1")
+            skel.spine1 = native_transform;
+        else if (name == "Spine2" || name == "spine2" || name == "Chest" || name == "chest" || name == "Bip01 Spine2")
+            skel.spine2 = native_transform;
+        else if (name == "Neck" || name == "neck" || name == "Bip01 Neck")
+            skel.neck = native_transform;
+        else if (name == "Head" || name == "head" || name == "Bip01 Head")
+            skel.head = native_transform;
+        else if (name == "Head_HitBox")
+            skel.head_hitbox = native_transform;
+        else if (name == "Hips_HitBox")
+            skel.hips_hitbox = native_transform;
+        else if (name == "Spine_HitBox")
+            skel.spine_hitbox = native_transform;
+        else if (name == "Spine1_HitBox")
+            skel.spine1_hitbox = native_transform;
+        else if (name == "Spine2_HitBox")
+            skel.spine2_hitbox = native_transform;
+        else if (name == "Shoulder.L" || name == "Shoulder_L" || name == "ShoulderL" || name == "shoulder.l" || name == "clavicle_l" || name == "Clavicle.L" || name == "LeftShoulder")
+            skel.shoulder_l = native_transform;
+        else if (name == "Arm.L" || name == "Arm_L" || name == "ArmL" || name == "arm.l" || name == "upperarm_l" || name == "UpperArm_L" || name == "UpperArm.L" || name == "LeftArm")
+            skel.arm_l = native_transform;
+        else if (name == "ForeArm.L" || name == "ForeArm_L" || name == "ForeArmL" || name == "forearm.l" || name == "lowerarm_l" || name == "LowerArm_L" || name == "LowerArm.L" || name == "LeftForeArm")
+            skel.forearm_l = native_transform;
+        else if (name == "Hand.L" || name == "Hand_L" || name == "HandL" || name == "hand.l" || name == "hand_l" || name == "LeftHand")
+            skel.hand_l = native_transform;
+        else if (name == "Shoulder.R" || name == "Shoulder_R" || name == "ShoulderR" || name == "shoulder.r" || name == "clavicle_r" || name == "Clavicle.R" || name == "RightShoulder")
+            skel.shoulder_r = native_transform;
+        else if (name == "Arm.R" || name == "Arm_R" || name == "ArmR" || name == "arm.r" || name == "upperarm_r" || name == "UpperArm_R" || name == "UpperArm.R" || name == "RightArm")
+            skel.arm_r = native_transform;
+        else if (name == "ForeArm.R" || name == "ForeArm_R" || name == "ForeArmR" || name == "forearm.r" || name == "lowerarm_r" || name == "LowerArm_R" || name == "LowerArm.R" || name == "RightForeArm")
+            skel.forearm_r = native_transform;
+        else if (name == "Hand.R" || name == "Hand_R" || name == "HandR" || name == "hand.r" || name == "hand_r" || name == "RightHand")
+            skel.hand_r = native_transform;
+        else if (name == "UpLeg.L" || name == "UpLeg_L" || name == "UpLegL" || name == "upleg.l" || name == "thigh_l" || name == "Thigh_L" || name == "Thigh.L" || name == "LeftUpLeg")
+            skel.upleg_l = native_transform;
+        else if (name == "Leg.L" || name == "Leg_L" || name == "LegL" || name == "leg.l" || name == "calf_l" || name == "Calf_L" || name == "Calf.L" || name == "LeftLeg")
+            skel.leg_l = native_transform;
+        else if (name == "Foot.L" || name == "Foot_L" || name == "FootL" || name == "foot.l" || name == "foot_l" || name == "LeftFoot")
+            skel.foot_l = native_transform;
+        else if (name == "ToeBase.L" || name == "ToeBase_L" || name == "ToeBaseL" || name == "toebase.l" || name == "toe_l" || name == "Toe_L")
+            skel.toebase_l = native_transform;
+        else if (name == "UpLeg.R" || name == "UpLeg_R" || name == "UpLegR" || name == "upleg.r" || name == "thigh_r" || name == "Thigh_R" || name == "Thigh.R" || name == "RightUpLeg")
+            skel.upleg_r = native_transform;
+        else if (name == "Leg.R" || name == "Leg_R" || name == "LegR" || name == "leg.r" || name == "calf_r" || name == "Calf_R" || name == "Calf.R" || name == "RightLeg")
+            skel.leg_r = native_transform;
+        else if (name == "Foot.R" || name == "Foot_R" || name == "FootR" || name == "foot.r" || name == "foot_r" || name == "RightFoot")
+            skel.foot_r = native_transform;
+        else if (name == "ToeBase.R" || name == "ToeBase_R" || name == "ToeBaseR" || name == "toebase.r" || name == "toe_r" || name == "Toe_R")
+            skel.toebase_r = native_transform;
+        else if (name == "Root" || name == "root")
+            skel.root = native_transform;
+        else if (name == "Armature" || name == "armature")
+            skel.armature = native_transform;
+    }
+
+    std::vector<uint64_t> children = get_native_transform_children(native_transform);
+    for (uint64_t child : children) {
+        cache_skeleton_recursive(child, skel, depth + 1);
+    }
+}
+
+static bool populate_player_skeleton(uint64_t player, PlayerSkeleton& skel) {
+    skel = PlayerSkeleton{};
+    skel.player = player;
+
+    std::vector<uint64_t> candidates;
+
+    uint64_t m_cm = rd_ptr(player + 0x150);
+    uint64_t cm_go = resolve_native_transform(m_cm);
+    if (cm_go) {
+        uint64_t t = rd_ptr(cm_go + 0x20);
+        if (!t || !likely_native_pointer(t)) t = rd_ptr(cm_go + 0x18);
+        if (!t || !likely_native_pointer(t)) t = rd_ptr(cm_go + 0x30);
+        if (t && likely_native_pointer(t)) candidates.push_back(t);
+    }
+
+    uint64_t m_wcr = rd_ptr(player + PLAYER_TRANSFORM);
+    uint64_t native_wcr = resolve_native_transform(m_wcr);
+    if (native_wcr && likely_native_pointer(native_wcr)) candidates.push_back(native_wcr);
+
+    uint64_t native_comp = rd_ptr(player + MANAGED_CACHED_PTR);
+    if (native_comp) {
+        uint64_t p_go = rd_ptr(native_comp + 0x20);
+        if (p_go) {
+            uint64_t t = rd_ptr(p_go + 0x20);
+            if (!t || !likely_native_pointer(t)) t = rd_ptr(p_go + 0x18);
+            if (!t || !likely_native_pointer(t)) t = rd_ptr(p_go + 0x30);
+            if (t && likely_native_pointer(t)) candidates.push_back(t);
+        }
+    }
+
+    uint64_t m_anim = rd_ptr(player + 0x190);
+    uint64_t native_anim = resolve_native_transform(m_anim);
+    if (native_anim) {
+        uint64_t anim_go = rd_ptr(native_anim + 0x20);
+        if (anim_go) {
+            uint64_t t = rd_ptr(anim_go + 0x20);
+            if (!t || !likely_native_pointer(t)) t = rd_ptr(anim_go + 0x18);
+            if (t && likely_native_pointer(t)) candidates.push_back(t);
+        }
+    }
+
+    for (uint64_t cand : candidates) {
+        uint64_t cur = cand;
+        for (int step = 0; step < 10; ++step) {
+            uint64_t parent = rd_ptr(cur + 0x68);
+            if (!parent || !likely_native_pointer(parent) || parent == cur) break;
+            cur = parent;
+        }
+        cache_skeleton_recursive(cur, skel, 0);
+        if (skel.hips || skel.spine || skel.head || skel.shoulder_l || skel.upleg_l) {
+            break;
+        }
+    }
+
+    if (!skel.hips && !skel.head && !skel.spine) {
+        for (uint64_t cand : candidates) {
+            cache_skeleton_recursive(cand, skel, 0);
+            if (skel.hips || skel.spine || skel.head) break;
+        }
+    }
+
+    skel.cached = (skel.hips != 0 || skel.head != 0 || skel.spine != 0 || skel.spine2 != 0 || skel.shoulder_l != 0 || skel.upleg_l != 0);
+    skel.cache_age = 0;
+    return skel.cached;
 }
 
 
@@ -874,6 +1122,245 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             box.corners[corner][1] = projected ? sc.y : -1.0F;
         }
         result.push_back(box);
+    }
+
+    return result;
+}
+
+std::vector<EspSkeleton> esp_get_skeletons(int overlay_width, int overlay_height) {
+    std::vector<EspSkeleton> result;
+
+    if (g_pid <= 0 || !g_il2cpp_base) { return result; }
+
+    uint64_t native_cam = 0;
+    Mat4 projection{}, view{}, vp{};
+    float sw = overlay_width >= 100 ? (float)overlay_width : 1080.0F;
+    float sh = overlay_height >= 100 ? (float)overlay_height : 2400.0F;
+    if (!std::isfinite(sw) || sw < 100.0F || sw > 10000.0F) sw = 1080.0F;
+    if (!std::isfinite(sh) || sh < 100.0F || sh > 10000.0F) sh = 2400.0F;
+
+    static std::vector<uint64_t> s_transforms;
+    std::vector<uint64_t> refreshed = read_configured_player_transforms();
+    if (!refreshed.empty()) s_transforms = std::move(refreshed);
+    if (s_transforms.empty()) return result;
+
+    if (!g_player_position_validated) {
+        if (!discover_player_position_offset(s_transforms)) return result;
+    }
+
+    if (!g_transform_hierarchy_layout_valid) {
+        size_t discovered_pcount = 0, discovered_ccount = 0;
+        discover_transform_hierarchy_layout(s_transforms, discovered_pcount, discovered_ccount);
+    }
+
+    bool transform_camera_mode = !g_use_direct_player_position && g_transform_hierarchy_layout_valid;
+    if (!transform_camera_mode) {
+        uint64_t managed_cam = 0;
+        if (g_game_controller_class) {
+            uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
+            if (gcb_sf) {
+                uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
+                if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
+            }
+        }
+        if (!managed_cam) { return result; }
+        native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
+        if (!native_cam) return result;
+        if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
+        if (!g_matrix_configuration_validated) {
+            if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
+            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
+        }
+        vp = mat_mul(projection, view);
+    }
+
+    bool has_local_position = false;
+    Vec3 local{};
+    size_t local_entity_index = s_transforms.size();
+
+    {
+        Vec3 camera_position{};
+        bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
+        double nearest_distance_squared = INFINITY;
+        size_t first_valid_index = s_transforms.size();
+        Vec3 first_valid_position{};
+        for (size_t index = 0; index < s_transforms.size(); ++index) {
+            Vec3 candidate{};
+            if (!read_entity_position(s_transforms[index], candidate)) continue;
+            if (first_valid_index == s_transforms.size()) { first_valid_index = index; first_valid_position = candidate; }
+            if (!has_camera_position) continue;
+            double dx = (double)candidate.x - camera_position.x, dy = (double)candidate.y - camera_position.y, dz = (double)candidate.z - camera_position.z;
+            double distance_squared = dx * dx + dy * dy + dz * dz;
+            if (std::isfinite(distance_squared) && distance_squared < nearest_distance_squared) {
+                nearest_distance_squared = distance_squared; local_entity_index = index; local = candidate;
+            }
+        }
+        if (local_entity_index == s_transforms.size() && first_valid_index != s_transforms.size()) {
+            local_entity_index = first_valid_index; local = first_valid_position;
+        }
+        has_local_position = local_entity_index != s_transforms.size();
+        if (!has_local_position) {
+            g_player_position_validated = false;
+            return result;
+        }
+    }
+
+    Vec3 transform_camera_position{};
+    Vec4 transform_camera_rotation{};
+    if (transform_camera_mode) {
+        if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation)) {
+            g_player_position_validated = false;
+            return result;
+        }
+        local = transform_camera_position; has_local_position = true;
+    }
+
+    std::unordered_set<uint64_t> active_players(s_transforms.begin(), s_transforms.end());
+    for (auto it = g_skeleton_cache.begin(); it != g_skeleton_cache.end(); ) {
+        if (active_players.find(it->first) == active_players.end()) {
+            it = g_skeleton_cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (size_t i = 0; i < s_transforms.size(); ++i) {
+        if (i == local_entity_index) continue;
+        uint64_t player = s_transforms[i];
+        if (!player) continue;
+
+        Vec3 feet{};
+        if (!read_entity_position(player, feet)) continue;
+
+        float distance = -1.0F;
+        if (has_local_position) {
+            float dx = feet.x - local.x, dy = feet.y - local.y, dz = feet.z - local.z;
+            distance = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
+        }
+
+        auto it = g_skeleton_cache.find(player);
+        if (it == g_skeleton_cache.end() || !it->second.cached || ++it->second.cache_age > 300) {
+            populate_player_skeleton(player, g_skeleton_cache[player]);
+            it = g_skeleton_cache.find(player);
+        }
+
+        if (it == g_skeleton_cache.end() || !it->second.cached) continue;
+        const PlayerSkeleton& s = it->second;
+
+        std::vector<std::pair<uint64_t, uint64_t>> bone_pairs;
+        bone_pairs.reserve(24);
+
+        auto add_chain = [&](uint64_t a, uint64_t b) {
+            if (a && b && a != b) bone_pairs.push_back({a, b});
+        };
+
+        // Torso / Spine
+        uint64_t spine_root = s.hips ? s.hips : s.hips_hitbox;
+        uint64_t sp = s.spine ? s.spine : s.spine_hitbox;
+        uint64_t sp1 = s.spine1 ? s.spine1 : s.spine1_hitbox;
+        uint64_t sp2 = s.spine2 ? s.spine2 : s.spine2_hitbox;
+        uint64_t nk = s.neck;
+        uint64_t hd = s.head ? s.head : s.head_hitbox;
+
+        if (spine_root && sp) add_chain(spine_root, sp);
+        else if (spine_root && sp1) add_chain(spine_root, sp1);
+        else if (spine_root && sp2) add_chain(spine_root, sp2);
+
+        if (sp && sp1) add_chain(sp, sp1);
+        else if (sp && sp2) add_chain(sp, sp2);
+        else if (sp && nk) add_chain(sp, nk);
+        else if (sp && hd) add_chain(sp, hd);
+
+        if (sp1 && sp2) add_chain(sp1, sp2);
+        else if (sp1 && nk) add_chain(sp1, nk);
+        else if (sp1 && hd) add_chain(sp1, hd);
+
+        if (sp2 && nk) add_chain(sp2, nk);
+        else if (sp2 && hd) add_chain(sp2, hd);
+
+        if (nk && hd) add_chain(nk, hd);
+
+        // Upper spine anchor for arms
+        uint64_t upper_anchor = sp2 ? sp2 : (sp1 ? sp1 : (sp ? sp : (nk ? nk : spine_root)));
+
+        // Left arm
+        if (s.shoulder_l && upper_anchor) add_chain(upper_anchor, s.shoulder_l);
+        if (s.shoulder_l && s.arm_l) add_chain(s.shoulder_l, s.arm_l);
+        else if (upper_anchor && s.arm_l) add_chain(upper_anchor, s.arm_l);
+
+        if (s.arm_l && s.forearm_l) add_chain(s.arm_l, s.forearm_l);
+        if (s.forearm_l && s.hand_l) add_chain(s.forearm_l, s.hand_l);
+
+        // Right arm
+        if (s.shoulder_r && upper_anchor) add_chain(upper_anchor, s.shoulder_r);
+        if (s.shoulder_r && s.arm_r) add_chain(s.shoulder_r, s.arm_r);
+        else if (upper_anchor && s.arm_r) add_chain(upper_anchor, s.arm_r);
+
+        if (s.arm_r && s.forearm_r) add_chain(s.arm_r, s.forearm_r);
+        if (s.forearm_r && s.hand_r) add_chain(s.forearm_r, s.hand_r);
+
+        // Lower body anchor for legs
+        uint64_t pelvis = spine_root ? spine_root : (sp ? sp : upper_anchor);
+
+        // Left leg
+        if (pelvis && s.upleg_l) add_chain(pelvis, s.upleg_l);
+        if (s.upleg_l && s.leg_l) add_chain(s.upleg_l, s.leg_l);
+        if (s.leg_l && s.foot_l) add_chain(s.leg_l, s.foot_l);
+        if (s.foot_l && s.toebase_l) add_chain(s.foot_l, s.toebase_l);
+
+        // Right leg
+        if (pelvis && s.upleg_r) add_chain(pelvis, s.upleg_r);
+        if (s.upleg_r && s.leg_r) add_chain(s.upleg_r, s.leg_r);
+        if (s.leg_r && s.foot_r) add_chain(s.leg_r, s.foot_r);
+        if (s.foot_r && s.toebase_r) add_chain(s.foot_r, s.toebase_r);
+
+        EspSkeleton skel_data{};
+        skel_data.distance = distance;
+
+        for (const auto& pair : bone_pairs) {
+            Vec3 posA{}, posB{};
+            if (!read_transform_hierarchy_position(pair.first, posA)) continue;
+            if (!read_transform_hierarchy_position(pair.second, posB)) continue;
+
+            Vec2 sA{}, sB{};
+            bool visA = transform_camera_mode
+                ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, posA, sw, sh, sA, false)
+                : w2s(vp, posA, sw, sh, sA, false);
+            bool visB = transform_camera_mode
+                ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, posB, sw, sh, sB, false)
+                : w2s(vp, posB, sw, sh, sB, false);
+
+            if (!visA || !visB) continue;
+
+            if ((sA.x < -300.f && sB.x < -300.f) || (sA.x > sw + 300.f && sB.x > sw + 300.f) ||
+                (sA.y < -300.f && sB.y < -300.f) || (sA.y > sh + 300.f && sB.y > sh + 300.f))
+                continue;
+
+            skel_data.bones.push_back({sA.x, sA.y, sB.x, sB.y});
+        }
+
+        uint64_t head_node = hd ? hd : nk;
+        if (head_node) {
+            Vec3 head_pos{};
+            if (read_transform_hierarchy_position(head_node, head_pos)) {
+                Vec2 sHead{};
+                bool visHead = transform_camera_mode
+                    ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, head_pos, sw, sh, sHead, false)
+                    : w2s(vp, head_pos, sw, sh, sHead, false);
+                if (visHead && sHead.x >= -100.f && sHead.x <= sw + 100.f && sHead.y >= -100.f && sHead.y <= sh + 100.f) {
+                    skel_data.has_head = true;
+                    skel_data.head_x = sHead.x;
+                    skel_data.head_y = sHead.y;
+                    float base_dist = distance > 0.5f ? distance : 1.0f;
+                    skel_data.head_radius = std::clamp(280.0f / base_dist, 3.0f, 40.0f);
+                }
+            }
+        }
+
+        if (!skel_data.bones.empty() || skel_data.has_head) {
+            result.push_back(std::move(skel_data));
+        }
     }
 
     return result;

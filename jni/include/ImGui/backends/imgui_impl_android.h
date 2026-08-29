@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h>
 #include "imgui.h"
 #ifndef IMGUI_DISABLE
 

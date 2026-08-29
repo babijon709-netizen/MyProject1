@@ -587,54 +587,81 @@ static void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton) return;
 
-    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
-    constexpr int BOX_EDGES[][2] = {
-        {0,1},{1,2},{2,3},{3,0},
-        {4,5},{5,6},{6,7},{7,4},
-        {0,4},{1,5},{2,6},{3,7}
-    };
     float thick = g_state.esp_thick;
     if (thick < 0.5f) thick = 0.5f;
 
-    for (const EspBox& box : boxes) {
-        if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
-
-        if (g_state.esp_chams) {
-            bool all_valid = true;
-            for (int c = 0; c < 8; ++c) {
-                if (!box.corner_visible[c] || !std::isfinite(box.corners[c][0]) || !std::isfinite(box.corners[c][1]) || box.corners[c][0] < 0 || box.corners[c][1] < 0) {
-                    all_valid = false;
-                    break;
-                }
+    if (g_state.esp_skeleton) {
+        std::vector<EspSkeleton> skeletons = esp_get_skeletons((int)sw, (int)sh);
+        ImU32 skel_col = ColU32(cfg::esp::skeleton_col);
+        for (const EspSkeleton& skel : skeletons) {
+            for (const EspBoneLine& bone : skel.bones) {
+                dl->AddLine(
+                    ImVec2(bone.x1, bone.y1),
+                    ImVec2(bone.x2, bone.y2),
+                    skel_col,
+                    thick
+                );
             }
-            if (all_valid) {
-                for (const auto& edge : BOX_EDGES) {
-                    int a = edge[0], b = edge[1];
-                    dl->AddLine(
-                        ImVec2(box.corners[a][0], box.corners[a][1]),
-                        ImVec2(box.corners[b][0], box.corners[b][1]),
-                        ColU32(cfg::esp::box_col_invis), thick
-                    );
-                }
+            if (skel.has_head && skel.head_radius > 1.0f) {
+                dl->AddCircle(
+                    ImVec2(skel.head_x, skel.head_y),
+                    skel.head_radius,
+                    skel_col,
+                    32,
+                    thick
+                );
             }
         }
+    }
 
-        if (g_state.esp_box)
-            dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2), ColU32(cfg::esp::box_col), cfg::esp::box_rounding, 0, thick);
+    if (g_state.esp_box || g_state.esp_chams || g_state.esp_wall || g_state.esp_tracer) {
+        std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
+        constexpr int BOX_EDGES[][2] = {
+            {0,1},{1,2},{2,3},{3,0},
+            {4,5},{5,6},{6,7},{7,4},
+            {0,4},{1,5},{2,6},{3,7}
+        };
 
-        if (g_state.esp_tracer) {
-            float tx = (box.x1 + box.x2) * 0.5f;
-            float ty = box.y2;
-            dl->AddLine(ImVec2(sw * 0.5f, sh), ImVec2(tx, ty), ColU32(cfg::esp::tracer_col), thick);
-        }
+        for (const EspBox& box : boxes) {
+            if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
 
-        if (g_state.esp_wall) {
-            char label[32];
-            if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1fm", box.distance);
-            else snprintf(label, sizeof(label), "PLAYER");
-            dl->AddText(ImVec2(box.x1, box.y1 - 22.0f), ColU32(cfg::esp::distance_col), label);
+            if (g_state.esp_chams) {
+                bool all_valid = true;
+                for (int c = 0; c < 8; ++c) {
+                    if (!box.corner_visible[c] || !std::isfinite(box.corners[c][0]) || !std::isfinite(box.corners[c][1]) || box.corners[c][0] < 0 || box.corners[c][1] < 0) {
+                        all_valid = false;
+                        break;
+                    }
+                }
+                if (all_valid) {
+                    for (const auto& edge : BOX_EDGES) {
+                        int a = edge[0], b = edge[1];
+                        dl->AddLine(
+                            ImVec2(box.corners[a][0], box.corners[a][1]),
+                            ImVec2(box.corners[b][0], box.corners[b][1]),
+                            ColU32(cfg::esp::box_col_invis), thick
+                        );
+                    }
+                }
+            }
+
+            if (g_state.esp_box)
+                dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2), ColU32(cfg::esp::box_col), cfg::esp::box_rounding, 0, thick);
+
+            if (g_state.esp_tracer) {
+                float tx = (box.x1 + box.x2) * 0.5f;
+                float ty = box.y2;
+                dl->AddLine(ImVec2(sw * 0.5f, sh), ImVec2(tx, ty), ColU32(cfg::esp::tracer_col), thick);
+            }
+
+            if (g_state.esp_wall) {
+                char label[32];
+                if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1fm", box.distance);
+                else snprintf(label, sizeof(label), "PLAYER");
+                dl->AddText(ImVec2(box.x1, box.y1 - 22.0f), ColU32(cfg::esp::distance_col), label);
+            }
         }
     }
 }
@@ -2263,6 +2290,7 @@ float TabContent(int tab, float dt, float cW) {
 
 } else if (tab == 2) {
         cfg::esp::box          = g_state.esp_box;
+        cfg::esp::skeleton     = g_state.esp_skeleton;
         cfg::esp::name_esp     = g_state.esp_name;
         cfg::esp::health       = g_state.esp_hp;
         cfg::esp::distance     = g_state.esp_wall;
@@ -2331,6 +2359,7 @@ float TabContent(int tab, float dt, float cW) {
             struct ERow { const char* id; const char* lbl; bool* v; float* a; ImVec4* col; };
             ERow rows[] = {
                 {"##vb",  XS("Бокс"),           &g_state.esp_box,          &g_state.a_esp_box,          &cfg::esp::box_col},
+                {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
                 {"##v3",  XS("3D рамка"),       &g_state.esp_chams,        &g_state.a_esp_chams,        &cfg::esp::box_col_invis},
                 {"##vn",  XS("Имена"),          &g_state.esp_name,         &g_state.a_esp_name,         &cfg::esp::name_col},
                 {"##vh",  XS("HP бар"),         &g_state.esp_hp,           &g_state.a_esp_hp,           &cfg::esp::health_col},
@@ -2339,7 +2368,7 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
             };
-            constexpr int N = 8;
+            constexpr int N = 9;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
