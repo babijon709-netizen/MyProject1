@@ -404,18 +404,11 @@ static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& pla
 
 static bool read_entity_position(uint64_t source, Vec3& position) {
     if (!source) return false;
-    if (g_use_direct_player_position && g_player_position_offset != 0) { position = rd_v3(source + g_player_position_offset); return vec3_is_finite(position); }
-    uint64_t native = resolve_player_native_transform(source);
-    if (!native) return false;
-    return read_transform_hierarchy_position(native, position);
+    position = rd_v3(source + PLAYER_POSITION);
+    return vec3_is_finite(position);
 }
 
-static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
-    if (!source || g_use_direct_player_position || !g_transform_hierarchy_layout_valid) return false;
-    uint64_t native = resolve_player_native_transform(source);
-    if (!native) return false;
-    return read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, position, &rotation);
-}
+// read_entity_pose removed - using direct offsets only
 
 static bool evaluate_player_position_offset(const std::vector<uint64_t>& players, uint64_t offset, double& score) {
     score = 0.0;
@@ -443,26 +436,18 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
     return true;
 }
 
-static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    const uint64_t known_offsets[] = {0x1C8, 0x1D0, 0x1D4, 0x1DC, 0x1E0, 0x1E8, 0x2D0, 0x2D8, 0x2DC, 0x2E4, 0x330, 0x338};
-    uint64_t best_offset = 0;
-    double best_score = 0.0;
-    for (uint64_t offset : known_offsets) {
-        double score = 0.0;
-        if (evaluate_player_position_offset(players, offset, score) && score > best_score) { best_offset = offset; best_score = score; }
+static bool validate_player_positions(const std::vector<uint64_t>& players) {
+    // Simple validation - just check if we can read positions
+    size_t valid_count = 0;
+    for (uint64_t player : players) {
+        if (!player) continue;
+        Vec3 position = rd_v3(player + PLAYER_POSITION);
+        if (vec3_is_finite(position)) {
+            valid_count++;
+            if (valid_count >= 2) return true;
+        }
     }
-    if (best_offset) {
-        g_use_direct_player_position = true; g_player_position_offset = best_offset;
-        g_player_position_validated = true; g_matrix_configuration_validated = false;
-        return true;
-    }
-    size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
-    if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
-        g_use_direct_player_position = false;
-        g_player_position_validated = true; g_matrix_configuration_validated = false;
-        return true;
-    }
-    return false;
+    return valid_count > 0;
 }
 
 static float mat_get(const Mat4& matrix, int row, int column) {
@@ -667,11 +652,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (s_transforms.empty()) return result;
 
     if (!g_player_position_validated) {
-        if (!discover_player_position_offset(s_transforms)) return result;
+        if (!validate_player_positions(s_transforms)) return result;
+        g_player_position_validated = true;
     }
 
-    bool transform_camera_mode = !g_use_direct_player_position && g_transform_hierarchy_layout_valid;
-    if (!transform_camera_mode) {
+    if (true) {  // Always use direct camera mode
         uint64_t managed_cam = 0;
         if (g_game_controller_class) {
             uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
@@ -727,13 +712,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     Vec3 transform_camera_position{};
     Vec4 transform_camera_rotation{};
-    if (transform_camera_mode) {
-        if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation)) {
-            g_player_position_validated = false;
-            return result;
-        }
-        local = transform_camera_position; has_local_position = true;
-    }
 
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) continue;
@@ -750,16 +728,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
         Vec3 body_bottom = {feet.x, feet.y, feet.z};
         Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT, feet.z};
-        if (transform_camera_mode) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
 
         Vec2 sf{}, sh2{};
-        bool bottom_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_bottom, sw, sh, sf, false)
-            : w2s(vp, body_bottom, sw, sh, sf, false);
+        bool bottom_visible = w2s(vp, body_bottom, sw, sh, sf, false);
         if (!bottom_visible) continue;
-        bool top_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_top, sw, sh, sh2, false)
-            : w2s(vp, body_top, sw, sh, sh2, false);
+        bool top_visible = w2s(vp, body_top, sw, sh, sh2, false);
         if (!top_visible) continue;
 
         float height = fabsf(sh2.y - sf.y);
@@ -786,9 +759,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.distance = distance;
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
-            bool projected = transform_camera_mode
-                ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, world_corners[corner], sw, sh, sc, false)
-                : w2s(vp, world_corners[corner], sw, sh, sc, false);
+            bool projected = w2s(vp, world_corners[corner], sw, sh, sc, false);
             box.corner_visible[corner] = projected && sc.x >= 0.0F && sc.x <= sw && sc.y >= 0.0F && sc.y <= sh;
             box.corners[corner][0] = projected ? sc.x : -1.0F;
             box.corners[corner][1] = projected ? sc.y : -1.0F;

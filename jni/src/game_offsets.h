@@ -27,9 +27,9 @@ inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD  = 0x10;      
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38;      // <LZD>k__BackingField
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20;      // m_Camera in Oxide.CameraManager
 
-// Oxide.PlayerManager instance field offsets
+// Oxide.PlayerManager instance field offsets (from dump.cs)
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68;  // worldCameraRoot (UnityEngine.Transform)
-inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // Position offset (auto-discovered at runtime)
+inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D4; // lastSavedPosition (UnityEngine.Vector3)
 
 // IL2CPP collections offsets
 inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
