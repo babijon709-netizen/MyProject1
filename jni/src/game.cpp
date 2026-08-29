@@ -576,6 +576,10 @@ static bool read_camera_transform_pose(uint64_t native_transform, Vec3& position
 static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view) {
     if (!native_cam) return false;
 
+    static Mat4 s_last_view{};
+    static Mat4 s_last_proj{};
+    static bool s_last_ok = false;
+
     // Fresh view from the Camera's live Transform (cam+0x20). The +0x70 cache is
     // only rebuilt inside Unity getters when dirty-flag +0x502 is set — we never
     // run those getters, so raw +0x70 drifts while the camera moves.
@@ -591,8 +595,14 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         }
     }
     if (!have_live_view) {
-        view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-        if (!matrix_is_finite(view)) return false;
+        if (s_last_ok && matrix_is_finite(s_last_view)) {
+            view = s_last_view;
+        } else {
+            view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
+            if (!matrix_is_finite(view)) return false;
+        }
+    } else {
+        s_last_view = view;
     }
 
     // Projection params (FOV/aspect/clip) are stored as plain floats and stay hot.
@@ -606,8 +616,17 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     if (!(z_far > z_near && z_far < 100000.0F)) z_far = 1000.0F;
     projection = mat_perspective(fov, aspect, z_near, z_far);
     if (!matrix_is_finite(projection)) {
-        projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-        if (!matrix_is_finite(projection)) return false;
+        if (s_last_ok && matrix_is_finite(s_last_proj)) {
+            projection = s_last_proj;
+        } else {
+            projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
+            if (!matrix_is_finite(projection)) return false;
+        }
+    }
+    if (matrix_is_finite(projection)) s_last_proj = projection;
+    if (have_live_view && matrix_is_finite(view)) {
+        s_last_view = view;
+        s_last_ok = true;
     }
     return true;
 }
