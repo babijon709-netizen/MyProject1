@@ -436,7 +436,7 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
 }
 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    const uint64_t known_offsets[] = {0x1D0, 0x1DC, 0x1E8, 0x2D8, 0x2E4, 0x338};
+    const uint64_t known_offsets[] = {0x1C8, 0x1D0, 0x1D4, 0x1DC, 0x1E0, 0x1E8, 0x2D0, 0x2D8, 0x2DC, 0x2E4, 0x330, 0x338};
     uint64_t best_offset = 0;
     double best_score = 0.0;
     for (uint64_t offset : known_offsets) {
