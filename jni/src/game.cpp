@@ -574,9 +574,13 @@ static bool read_camera_transform_pose(uint64_t native_transform, Vec3& position
 static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view) {
     if (!native_cam) return false;
 
-    // Fresh view from the Camera's live Transform (cam+0x20). The +0x70 cache is
-    // only rebuilt inside Unity getters when dirty-flag +0x502 is set — we never
-    // run those getters, so raw +0x70 drifts while the camera moves.
+    // Use Unity's original native Camera matrices first. These are the exact
+    // values returned by the libunity.so injected getters.
+    view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
+    projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
+    if (matrix_is_finite(view) && matrix_is_finite(projection)) return true;
+
+    // Keep reconstruction only as a fallback when the native cache is unreadable.
     bool have_live_view = false;
     uint64_t native_transform = rd_ptr(native_cam + CAMERA_NATIVE_TRANSFORM);
     if (native_transform) {
@@ -768,8 +772,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
             if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
         }
-        // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
-        vp = mat_mul(projection, view);
+        // Prefer Unity's original world-to-clip matrix. libunity.so helper
+        // 0xE2B90C writes projection * worldToCamera directly to Camera+0xF0.
+        vp = rd_m4(native_cam + CAMERA_WORLD_TO_CLIP);
+        if (!matrix_is_finite(vp))
+            vp = mat_mul(projection, view);
     }
 
     bool has_local_position = false;
