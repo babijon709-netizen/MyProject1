@@ -133,8 +133,6 @@ static bool player_list_contains(uint64_t list, uint64_t player) {
     return false;
 }
 
-static constexpr uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
-
 static uint64_t get_class_static_fields(uint64_t klass) {
     if (!klass) return 0;
     return rd_ptr(klass + IL2CPP_CLASS_STATIC_FIELDS);
