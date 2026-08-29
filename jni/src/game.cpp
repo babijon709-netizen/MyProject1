@@ -849,7 +849,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
         Vec3 body_bottom = {feet.x, feet.y, feet.z};
         Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT, feet.z};
-        if (transform_camera_mode || g_transform_hierarchy_layout_valid) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
+        if (transform_camera_mode || !g_use_direct_player_position) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
 
         Vec2 sf{}, sh2{};
         bool bottom_visible = transform_camera_mode
