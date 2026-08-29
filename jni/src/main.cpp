@@ -587,7 +587,7 @@ static void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton) return;
 
     std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
     constexpr int BOX_EDGES[][2] = {
@@ -635,6 +635,139 @@ static void DrawEspOverlay() {
             if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1fm", box.distance);
             else snprintf(label, sizeof(label), "PLAYER");
             dl->AddText(ImVec2(box.x1, box.y1 - 22.0f), ColU32(cfg::esp::distance_col), label);
+        }
+    }
+
+    // Skeleton ESP
+    if (g_state.esp_skeleton) {
+        float thick = g_state.esp_thick;
+        if (thick < 0.5f) thick = 0.5f;
+        ImU32 skel_col = ColU32(cfg::esp::skeleton_col);
+
+        // Try real skeleton first
+        std::vector<EspSkeleton> skeletons = esp_get_skeletons((int)sw, (int)sh);
+
+        if (!skeletons.empty()) {
+            for (const EspSkeleton& skel : skeletons) {
+                if (!skel.valid) continue;
+
+                auto draw_bone = [&](int a, int b) {
+                    if (!skel.bones[a].valid || !skel.bones[b].valid) return;
+                    dl->AddLine(
+                        ImVec2(skel.bones[a].x, skel.bones[a].y),
+                        ImVec2(skel.bones[b].x, skel.bones[b].y),
+                        skel_col, thick
+                    );
+                };
+
+                // Spine
+                draw_bone(EspSkeleton::B_HIPS, EspSkeleton::B_SPINE);
+                draw_bone(EspSkeleton::B_SPINE, EspSkeleton::B_SPINE1);
+                draw_bone(EspSkeleton::B_SPINE1, EspSkeleton::B_SPINE2);
+                draw_bone(EspSkeleton::B_SPINE2, EspSkeleton::B_NECK);
+                draw_bone(EspSkeleton::B_NECK, EspSkeleton::B_HEAD);
+
+                // Left arm
+                draw_bone(EspSkeleton::B_SPINE2, EspSkeleton::B_SHOULDER_L);
+                draw_bone(EspSkeleton::B_SHOULDER_L, EspSkeleton::B_ARM_L);
+                draw_bone(EspSkeleton::B_ARM_L, EspSkeleton::B_FOREARM_L);
+                draw_bone(EspSkeleton::B_FOREARM_L, EspSkeleton::B_HAND_L);
+
+                // Right arm
+                draw_bone(EspSkeleton::B_SPINE2, EspSkeleton::B_SHOULDER_R);
+                draw_bone(EspSkeleton::B_SHOULDER_R, EspSkeleton::B_ARM_R);
+                draw_bone(EspSkeleton::B_ARM_R, EspSkeleton::B_FOREARM_R);
+                draw_bone(EspSkeleton::B_FOREARM_R, EspSkeleton::B_HAND_R);
+
+                // Left leg
+                draw_bone(EspSkeleton::B_HIPS, EspSkeleton::B_UPLEG_L);
+                draw_bone(EspSkeleton::B_UPLEG_L, EspSkeleton::B_LEG_L);
+                draw_bone(EspSkeleton::B_LEG_L, EspSkeleton::B_FOOT_L);
+                draw_bone(EspSkeleton::B_FOOT_L, EspSkeleton::B_TOEBASE_L);
+
+                // Right leg
+                draw_bone(EspSkeleton::B_HIPS, EspSkeleton::B_UPLEG_R);
+                draw_bone(EspSkeleton::B_UPLEG_R, EspSkeleton::B_LEG_R);
+                draw_bone(EspSkeleton::B_LEG_R, EspSkeleton::B_FOOT_R);
+                draw_bone(EspSkeleton::B_FOOT_R, EspSkeleton::B_TOEBASE_R);
+            }
+        } else {
+            // Fallback: estimated skeleton from box coordinates
+            for (const EspBox& box : boxes) {
+                if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
+
+                float w = box.x2 - box.x1;
+                float h = box.y2 - box.y1;
+                if (h < 10.f) continue;
+
+                float cx = (box.x1 + box.x2) * 0.5f;
+
+                auto bone = [&](float fx, float fy) -> ImVec2 {
+                    return {cx + fx * w, box.y1 + fy * h};
+                };
+
+                ImVec2 head      = bone(0, 0.05f);
+                ImVec2 neck      = bone(0, 0.15f);
+                ImVec2 spine2    = bone(0, 0.25f);
+                ImVec2 spine1    = bone(0, 0.35f);
+                ImVec2 spine     = bone(0, 0.42f);
+                ImVec2 hips      = bone(0, 0.50f);
+
+                ImVec2 shoulderL = bone(-0.20f, 0.22f);
+                ImVec2 armL      = bone(-0.28f, 0.32f);
+                ImVec2 forearmL  = bone(-0.32f, 0.44f);
+                ImVec2 handL     = bone(-0.34f, 0.55f);
+
+                ImVec2 shoulderR = bone(0.20f, 0.22f);
+                ImVec2 armR      = bone(0.28f, 0.32f);
+                ImVec2 forearmR  = bone(0.32f, 0.44f);
+                ImVec2 handR     = bone(0.34f, 0.55f);
+
+                ImVec2 uplegL    = bone(-0.10f, 0.55f);
+                ImVec2 legL      = bone(-0.10f, 0.72f);
+                ImVec2 footL     = bone(-0.10f, 0.90f);
+                ImVec2 toeL      = bone(-0.10f, 0.97f);
+
+                ImVec2 uplegR    = bone(0.10f, 0.55f);
+                ImVec2 legR      = bone(0.10f, 0.72f);
+                ImVec2 footR     = bone(0.10f, 0.90f);
+                ImVec2 toeR      = bone(0.10f, 0.97f);
+
+                auto draw_bone = [&](ImVec2 a, ImVec2 b) {
+                    dl->AddLine(a, b, skel_col, thick);
+                };
+
+                // Spine
+                draw_bone(hips, spine);
+                draw_bone(spine, spine1);
+                draw_bone(spine1, spine2);
+                draw_bone(spine2, neck);
+                draw_bone(neck, head);
+
+                // Left arm
+                draw_bone(spine2, shoulderL);
+                draw_bone(shoulderL, armL);
+                draw_bone(armL, forearmL);
+                draw_bone(forearmL, handL);
+
+                // Right arm
+                draw_bone(spine2, shoulderR);
+                draw_bone(shoulderR, armR);
+                draw_bone(armR, forearmR);
+                draw_bone(forearmR, handR);
+
+                // Left leg
+                draw_bone(hips, uplegL);
+                draw_bone(uplegL, legL);
+                draw_bone(legL, footL);
+                draw_bone(footL, toeL);
+
+                // Right leg
+                draw_bone(hips, uplegR);
+                draw_bone(uplegR, legR);
+                draw_bone(legR, footR);
+                draw_bone(footR, toeR);
+            }
         }
     }
 }
@@ -2269,6 +2402,7 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::weapon       = g_state.esp_weapon;
         cfg::esp::weapon_icon  = g_state.esp_weapon_icon;
         cfg::esp::tracer       = g_state.esp_tracer;
+        cfg::esp::skeleton     = g_state.esp_skeleton;
 
 
 
@@ -2338,8 +2472,9 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
                 {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
+                {"##vsk", XS("Скелетон"),       &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
             };
-            constexpr int N = 8;
+            constexpr int N = 9;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <string>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -712,6 +713,380 @@ static std::vector<uint64_t> read_configured_player_transforms() {
     return transforms;
 }
 
+// ============================================================
+//  Skeleton ESP — external bone reading via Transform hierarchy
+// ============================================================
+
+struct PlayerSkeletonInternal {
+    uint64_t Hips = 0, Spine = 0, Spine1 = 0, Spine2 = 0, Neck = 0, Head = 0;
+    uint64_t ShoulderL = 0, ArmL = 0, ForeArmL = 0, HandL = 0;
+    uint64_t ShoulderR = 0, ArmR = 0, ForeArmR = 0, HandR = 0;
+    uint64_t UpLegL = 0, LegL = 0, FootL = 0, ToeBaseL = 0;
+    uint64_t UpLegR = 0, LegR = 0, FootR = 0, ToeBaseR = 0;
+    bool     Cached = false;
+};
+
+static std::unordered_map<uint64_t, PlayerSkeletonInternal> g_skeleton_cache;
+
+// Children layout in native Transform (dynamic_array<Transform*,0>)
+//   { array_pointer_offset, count_offset }
+struct NativeChildrenLayout { uint64_t array_off; uint64_t count_off; };
+static const NativeChildrenLayout kChildrenLayouts[] = {
+    {0x70, 0x78}, {0x78, 0x80}, {0x80, 0x88}, {0x88, 0x90},
+    {0x60, 0x68}, {0x68, 0x70}, {0x90, 0x98}, {0x98, 0xA0},
+    {0x48, 0x50}, {0x50, 0x58}, {0x58, 0x60}, {0xA0, 0xA8},
+    {0xA8, 0xB0}, {0xB0, 0xB8}, {0xB8, 0xC0}, {0xC0, 0xC8},
+};
+static NativeChildrenLayout g_valid_children_layout = {};
+static bool g_children_layout_found = false;
+
+static int read_native_child_count(uint64_t native_transform) {
+    if (!native_transform) return 0;
+    if (g_children_layout_found) {
+        int32_t c = rd<int32_t>(native_transform + g_valid_children_layout.count_off);
+        return (c > 0 && c < 200) ? c : 0;
+    }
+    for (const auto& layout : kChildrenLayouts) {
+        int32_t count = rd<int32_t>(native_transform + layout.count_off);
+        if (count <= 0 || count > 200) continue;
+        uint64_t array = rd_ptr(native_transform + layout.array_off);
+        if (!array || !likely_native_pointer(array)) continue;
+        uint64_t child = rd_ptr(array);
+        if (!child || !likely_native_pointer(child)) continue;
+        // validate child has valid transform hierarchy data
+        if (g_transform_hierarchy_layout_valid) {
+            uint64_t cd = rd_ptr(child + g_transform_hierarchy_layout.data_offset);
+            if (!cd || !likely_native_pointer(cd)) continue;
+            int32_t ci = rd<int32_t>(child + g_transform_hierarchy_layout.index_offset);
+            if (ci < 0 || ci > 100000) continue;
+        }
+        g_valid_children_layout = layout;
+        g_children_layout_found = true;
+        return count;
+    }
+    return 0;
+}
+
+static uint64_t read_native_child(uint64_t native_transform, int index) {
+    if (!native_transform || !g_children_layout_found) return 0;
+    int32_t count = rd<int32_t>(native_transform + g_valid_children_layout.count_off);
+    if (count <= 0 || count > 200 || index >= count) return 0;
+    uint64_t array = rd_ptr(native_transform + g_valid_children_layout.array_off);
+    if (!array || !likely_native_pointer(array)) return 0;
+    uint64_t child = rd_ptr(array + (uint64_t)index * sizeof(uint64_t));
+    if (!child || !likely_native_pointer(child)) return 0;
+    return child;
+}
+
+// Read name from native Object/GameObject (core::basic_string)
+static std::string read_native_object_name(uint64_t native_obj) {
+    if (!native_obj) return {};
+    const uint64_t name_field_offsets[] = {
+        0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68
+    };
+    for (uint64_t off : name_field_offsets) {
+        uint8_t raw[16];
+        struct iovec lv = {raw, 16};
+        struct iovec rv = {(void*)(native_obj + off), 16};
+        if (remote_vm_readv(g_pid, &lv, 1, &rv, 1, 0) != 16) continue;
+        uint64_t data_ptr = *(uint64_t*)raw;
+        uint32_t str_size = *(uint32_t*)(raw + 8);
+        uint32_t str_cap  = *(uint32_t*)(raw + 12);
+        if (str_size == 0 || str_size > 48 || str_cap < str_size) continue;
+        char buffer[49] = {};
+        bool read_ok = false;
+        if (str_cap <= 15) {
+            memcpy(buffer, raw, str_size < 8 ? str_size : 8);
+            read_ok = true;
+        } else if (likely_native_pointer(data_ptr)) {
+            struct iovec sl = {buffer, str_size};
+            struct iovec sr = {(void*)data_ptr, str_size};
+            read_ok = (remote_vm_readv(g_pid, &sl, 1, &sr, 1, 0) == (ssize_t)str_size);
+        }
+        if (!read_ok) continue;
+        buffer[str_size] = '\0';
+        bool valid = true;
+        for (uint32_t i = 0; i < str_size; i++) {
+            unsigned char c = (unsigned char)buffer[i];
+            if (c < 0x20 || c > 0x7E) { valid = false; break; }
+        }
+        if (valid && str_size > 0) return std::string(buffer, str_size);
+    }
+    return {};
+}
+
+static std::string read_transform_name(uint64_t native_transform) {
+    if (!native_transform) return {};
+    const uint64_t go_offsets[] = {0x08, 0x28, 0x30, 0x18, 0x38, 0x48, 0x50, 0x20};
+    for (uint64_t go_off : go_offsets) {
+        uint64_t gameobject = rd_ptr(native_transform + go_off);
+        if (!gameobject || !likely_native_pointer(gameobject)) continue;
+        std::string name = read_native_object_name(gameobject);
+        if (!name.empty()) return name;
+    }
+    return {};
+}
+
+static void cache_skeleton_bones(uint64_t native_transform, PlayerSkeletonInternal& skel, int depth = 0) {
+    if (!native_transform || depth > 40) return;
+    std::string name = read_transform_name(native_transform);
+    if      (name == "Hips")       skel.Hips       = native_transform;
+    else if (name == "Spine")      skel.Spine      = native_transform;
+    else if (name == "Spine1")     skel.Spine1     = native_transform;
+    else if (name == "Spine2")     skel.Spine2     = native_transform;
+    else if (name == "Neck")       skel.Neck       = native_transform;
+    else if (name == "Head")       skel.Head       = native_transform;
+    else if (name == "Shoulder.L") skel.ShoulderL  = native_transform;
+    else if (name == "Arm.L")      skel.ArmL       = native_transform;
+    else if (name == "ForeArm.L")  skel.ForeArmL   = native_transform;
+    else if (name == "Hand.L")     skel.HandL      = native_transform;
+    else if (name == "Shoulder.R") skel.ShoulderR  = native_transform;
+    else if (name == "Arm.R")      skel.ArmR       = native_transform;
+    else if (name == "ForeArm.R")  skel.ForeArmR   = native_transform;
+    else if (name == "Hand.R")     skel.HandR      = native_transform;
+    else if (name == "UpLeg.L")    skel.UpLegL     = native_transform;
+    else if (name == "Leg.L")      skel.LegL       = native_transform;
+    else if (name == "Foot.L")     skel.FootL      = native_transform;
+    else if (name == "ToeBase.L")  skel.ToeBaseL   = native_transform;
+    else if (name == "UpLeg.R")    skel.UpLegR     = native_transform;
+    else if (name == "Leg.R")      skel.LegR       = native_transform;
+    else if (name == "Foot.R")     skel.FootR      = native_transform;
+    else if (name == "ToeBase.R")  skel.ToeBaseR   = native_transform;
+    int count = read_native_child_count(native_transform);
+    if (count <= 0) return;
+    for (int i = 0; i < count; i++) {
+        uint64_t child = read_native_child(native_transform, i);
+        if (child) cache_skeleton_bones(child, skel, depth + 1);
+    }
+}
+
+static bool read_bone_world_position(uint64_t native_bone, Vec3& position) {
+    if (!native_bone) return false;
+    if (g_transform_hierarchy_layout_valid)
+        return read_transform_hierarchy_layout(native_bone, g_transform_hierarchy_layout, position);
+    return read_transform_hierarchy_position(native_bone, position);
+}
+
+static bool project_bone_to_screen(const Vec3& world, const Mat4& vp, float sw, float sh,
+                                    const Vec3& cam_pos, const Vec4& cam_rot, bool transform_mode,
+                                    BoneScreen& out) {
+    out.valid = false;
+    Vec2 sc{};
+    bool ok = transform_mode
+        ? w2s_transform_camera(cam_pos, cam_rot, world, sw, sh, sc, false)
+        : w2s(vp, world, sw, sh, sc, false);
+    if (!ok) return false;
+    out.x = sc.x; out.y = sc.y;
+    out.valid = true;
+    return true;
+}
+
+static bool skeleton_has_min_bones(const PlayerSkeletonInternal& s) {
+    int count = 0;
+    if (s.Hips) count++;
+    if (s.Spine) count++;
+    if (s.Spine1) count++;
+    if (s.Spine2) count++;
+    if (s.Neck) count++;
+    if (s.Head) count++;
+    if (s.ShoulderL) count++;
+    if (s.ArmL) count++;
+    if (s.ForeArmL) count++;
+    if (s.HandL) count++;
+    if (s.ShoulderR) count++;
+    if (s.ArmR) count++;
+    if (s.ForeArmR) count++;
+    if (s.HandR) count++;
+    if (s.UpLegL) count++;
+    if (s.LegL) count++;
+    if (s.FootL) count++;
+    if (s.UpLegR) count++;
+    if (s.LegR) count++;
+    if (s.FootR) count++;
+    return count >= 8;
+}
+
+std::vector<EspSkeleton> esp_get_skeletons(int overlay_width, int overlay_height) {
+    std::vector<EspSkeleton> result;
+    if (g_pid <= 0 || !g_il2cpp_base) return result;
+
+    float sw = overlay_width >= 100 ? (float)overlay_width : 1080.0F;
+    float sh = overlay_height >= 100 ? (float)overlay_height : 2400.0F;
+    if (!std::isfinite(sw) || sw < 100.0F || sw > 10000.0F) sw = 1080.0F;
+    if (!std::isfinite(sh) || sh < 100.0F || sh > 10000.0F) sh = 2400.0F;
+
+    static std::vector<uint64_t> s_transforms;
+    std::vector<uint64_t> refreshed = read_configured_player_transforms();
+    if (!refreshed.empty()) s_transforms = std::move(refreshed);
+    if (s_transforms.empty()) return result;
+
+    if (!g_player_position_validated) {
+        if (!discover_player_position_offset(s_transforms)) return result;
+    }
+
+    bool transform_camera_mode = !g_use_direct_player_position && g_transform_hierarchy_layout_valid;
+
+    uint64_t native_cam = 0;
+    Mat4 projection{}, view{}, vp{};
+
+    if (!transform_camera_mode) {
+        uint64_t managed_cam = 0;
+        if (g_game_controller_class) {
+            uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
+            if (gcb_sf) {
+                uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
+                if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
+            }
+        }
+        if (!managed_cam) return result;
+        native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
+        if (!native_cam) return result;
+        if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
+        if (!g_matrix_configuration_validated) {
+            if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
+            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
+        }
+        vp = mat_mul(projection, view);
+    }
+
+    bool has_local_position = false;
+    Vec3 local{};
+    size_t local_entity_index = s_transforms.size();
+
+    {
+        Vec3 camera_position{};
+        bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
+        double nearest_distance_squared = INFINITY;
+        size_t first_valid_index = s_transforms.size();
+        Vec3 first_valid_position{};
+        for (size_t index = 0; index < s_transforms.size(); ++index) {
+            Vec3 candidate{};
+            if (!read_entity_position(s_transforms[index], candidate)) continue;
+            if (first_valid_index == s_transforms.size()) { first_valid_index = index; first_valid_position = candidate; }
+            if (!has_camera_position) continue;
+            double dx = (double)candidate.x - camera_position.x, dy = (double)candidate.y - camera_position.y, dz = (double)candidate.z - camera_position.z;
+            double distance_squared = dx * dx + dy * dy + dz * dz;
+            if (std::isfinite(distance_squared) && distance_squared < nearest_distance_squared) {
+                nearest_distance_squared = distance_squared; local_entity_index = index; local = candidate;
+            }
+        }
+        if (local_entity_index == s_transforms.size() && first_valid_index != s_transforms.size()) {
+            local_entity_index = first_valid_index; local = first_valid_position;
+        }
+        has_local_position = local_entity_index != s_transforms.size();
+        if (!has_local_position) return result;
+    }
+
+    Vec3 transform_camera_position{};
+    Vec4 transform_camera_rotation{};
+    if (transform_camera_mode) {
+        if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation))
+            return result;
+        local = transform_camera_position; has_local_position = true;
+    }
+
+    // Clean up skeleton cache for players no longer present
+    {
+        std::unordered_set<uint64_t> active_transforms;
+        for (uint64_t t : s_transforms) active_transforms.insert(t);
+        for (auto it = g_skeleton_cache.begin(); it != g_skeleton_cache.end(); ) {
+            if (active_transforms.find(it->first) == active_transforms.end())
+                it = g_skeleton_cache.erase(it);
+            else ++it;
+        }
+    }
+
+    for (size_t i = 0; i < s_transforms.size(); ++i) {
+        if (i == local_entity_index) continue;
+        if (!s_transforms[i]) continue;
+
+        Vec3 feet{};
+        if (!read_entity_position(s_transforms[i], feet)) continue;
+
+        float distance = -1.0F;
+        if (has_local_position) {
+            float dx = feet.x - local.x, dy = feet.y - local.y, dz = feet.z - local.z;
+            distance = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
+        }
+
+        // Get or build skeleton cache for this player
+        uint64_t player_native = resolve_player_native_transform(s_transforms[i]);
+        if (!player_native) continue;
+
+        auto& skel = g_skeleton_cache[s_transforms[i]];
+        if (!skel.Cached) {
+            // Try to find the model root by traversing up or using children of the player transform
+            // First, try the player's own transform children
+            int child_count = read_native_child_count(player_native);
+            if (child_count > 0) {
+                for (int c = 0; c < child_count && !skel.Cached; c++) {
+                    uint64_t child = read_native_child(player_native, c);
+                    if (child) cache_skeleton_bones(child, skel, 0);
+                }
+            }
+            // If no bones found from children, try the player transform itself
+            if (!skeleton_has_min_bones(skel)) {
+                cache_skeleton_bones(player_native, skel, 0);
+            }
+            skel.Cached = true;
+        }
+
+        if (!skeleton_has_min_bones(skel)) continue;
+
+        EspSkeleton esp_skel{};
+        esp_skel.distance = distance;
+
+        // Read bone positions and project to screen
+        auto read_and_project = [&](uint64_t native_bone, int bone_idx) {
+            if (!native_bone) { esp_skel.bones[bone_idx].valid = false; return; }
+            Vec3 world_pos{};
+            if (!read_bone_world_position(native_bone, world_pos)) {
+                esp_skel.bones[bone_idx].valid = false;
+                return;
+            }
+            project_bone_to_screen(world_pos, vp, sw, sh,
+                                   transform_camera_position, transform_camera_rotation,
+                                   transform_camera_mode,
+                                   esp_skel.bones[bone_idx]);
+        };
+
+        read_and_project(skel.Hips,      EspSkeleton::B_HIPS);
+        read_and_project(skel.Spine,     EspSkeleton::B_SPINE);
+        read_and_project(skel.Spine1,    EspSkeleton::B_SPINE1);
+        read_and_project(skel.Spine2,    EspSkeleton::B_SPINE2);
+        read_and_project(skel.Neck,      EspSkeleton::B_NECK);
+        read_and_project(skel.Head,      EspSkeleton::B_HEAD);
+        read_and_project(skel.ShoulderL, EspSkeleton::B_SHOULDER_L);
+        read_and_project(skel.ArmL,      EspSkeleton::B_ARM_L);
+        read_and_project(skel.ForeArmL,  EspSkeleton::B_FOREARM_L);
+        read_and_project(skel.HandL,     EspSkeleton::B_HAND_L);
+        read_and_project(skel.ShoulderR, EspSkeleton::B_SHOULDER_R);
+        read_and_project(skel.ArmR,      EspSkeleton::B_ARM_R);
+        read_and_project(skel.ForeArmR,  EspSkeleton::B_FOREARM_R);
+        read_and_project(skel.HandR,     EspSkeleton::B_HAND_R);
+        read_and_project(skel.UpLegL,    EspSkeleton::B_UPLEG_L);
+        read_and_project(skel.LegL,      EspSkeleton::B_LEG_L);
+        read_and_project(skel.FootL,     EspSkeleton::B_FOOT_L);
+        read_and_project(skel.ToeBaseL,  EspSkeleton::B_TOEBASE_L);
+        read_and_project(skel.UpLegR,    EspSkeleton::B_UPLEG_R);
+        read_and_project(skel.LegR,      EspSkeleton::B_LEG_R);
+        read_and_project(skel.FootR,     EspSkeleton::B_FOOT_R);
+        read_and_project(skel.ToeBaseR,  EspSkeleton::B_TOEBASE_R);
+
+        // Check if we have enough visible bones
+        int visible_count = 0;
+        for (int b = 0; b < EspSkeleton::BONE_COUNT; b++)
+            if (esp_skel.bones[b].valid) visible_count++;
+        if (visible_count < 6) continue;
+
+        esp_skel.valid = true;
+        result.push_back(esp_skel);
+    }
+
+    return result;
+}
+
 bool esp_init(pid_t pid) {
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
@@ -728,6 +1103,9 @@ void esp_reset() {
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
     g_player_position_validated = false;
+    g_skeleton_cache.clear();
+    g_children_layout_found = false;
+    g_valid_children_layout = {};
 }
 
 
