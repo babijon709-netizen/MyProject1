@@ -21,6 +21,7 @@ using namespace game_offsets;
 
 static pid_t     g_pid         = -1;
 static uint64_t  g_il2cpp_base = 0;
+static uint64_t  g_unity_base  = 0;
 static uint64_t  g_player_manager_class = 0;
 static uint64_t  g_player_manager_static_fields = 0;
 static uint64_t  g_game_controller_class = 0;
@@ -194,6 +195,24 @@ static uint64_t resolve_local_player() {
 static uint64_t resolve_native_transform(uint64_t transform) {
     if (!transform) return 0;
     return rd_ptr(transform + MANAGED_CACHED_PTR);
+}
+
+// Native GameObject::GetComponentFastPath layout used by libunity.so at 0x64010C.
+static uint64_t resolve_native_component(uint64_t game_object, uint64_t type_descriptor) {
+    if (!game_object || !type_descriptor) return 0;
+    uint64_t components = rd_ptr(game_object + GAME_OBJECT_COMPONENTS);
+    uint64_t count = rd<uint64_t>(game_object + GAME_OBJECT_COMPONENT_COUNT);
+    if (!components || count == 0 || count > 256) return 0;
+    uint32_t first_type_id = rd<uint32_t>(type_descriptor + NATIVE_TYPE_ID);
+    uint32_t type_id_range = rd<uint32_t>(type_descriptor + NATIVE_TYPE_ID_RANGE);
+    if (type_id_range == 0 || type_id_range > 0x100000) return 0;
+    for (uint64_t index = 0; index < count; ++index) {
+        uint64_t entry = components + index * 0x10;
+        uint32_t component_type_id = rd<uint32_t>(entry);
+        if ((uint32_t)(component_type_id - first_type_id) < type_id_range)
+            return rd_ptr(entry + 0x08);
+    }
+    return 0;
 }
 
 static bool vec3_is_finite(const Vec3& value) {
@@ -574,15 +593,13 @@ static bool read_camera_transform_pose(uint64_t native_transform, Vec3& position
 static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view) {
     if (!native_cam) return false;
 
-    // Use Unity's original native Camera matrices first. These are the exact
-    // values returned by the libunity.so injected getters.
-    view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-    projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-    if (matrix_is_finite(view) && matrix_is_finite(projection)) return true;
-
-    // Keep reconstruction only as a fallback when the native cache is unreadable.
+    // Camera+0x20 is the owning GameObject. libunity's getter first resolves its
+    // Transform component and only then builds worldToCamera. Treating +0x20 as
+    // Transform directly loses the animated death-camera pose.
     bool have_live_view = false;
-    uint64_t native_transform = rd_ptr(native_cam + CAMERA_NATIVE_TRANSFORM);
+    uint64_t game_object = rd_ptr(native_cam + CAMERA_GAME_OBJECT);
+    uint64_t transform_type = g_unity_base ? g_unity_base + UNITY_TRANSFORM_TYPE_RVA : 0;
+    uint64_t native_transform = resolve_native_component(game_object, transform_type);
     if (native_transform) {
         Vec3 cam_pos{};
         Vec4 cam_rot{};
@@ -597,7 +614,10 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         if (!matrix_is_finite(view)) return false;
     }
 
-    // Projection params (FOV/aspect/clip) are stored as plain floats and stay hot.
+    // Keep Unity's native projection; unlike the view it does not lag camera pose.
+    projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
+    if (matrix_is_finite(projection)) return true;
+
     float fov = rd<float>(native_cam + CAMERA_FOV_DEGREES);
     float aspect = rd<float>(native_cam + CAMERA_ASPECT);
     float z_near = rd<float>(native_cam + CAMERA_NEAR_CLIP);
@@ -607,11 +627,7 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     if (!(z_near > 0.001F && z_near < 100.0F)) z_near = 0.1F;
     if (!(z_far > z_near && z_far < 100000.0F)) z_far = 1000.0F;
     projection = mat_perspective(fov, aspect, z_near, z_far);
-    if (!matrix_is_finite(projection)) {
-        projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-        if (!matrix_is_finite(projection)) return false;
-    }
-    return true;
+    return matrix_is_finite(projection);
 }
 
 static bool w2s_transform_camera(const Vec3& camera_position, const Vec4& camera_rotation, const Vec3& world, float screen_width, float screen_height, Vec2& output, bool clip_to_screen = true) {
@@ -717,12 +733,13 @@ static std::vector<uint64_t> read_configured_player_transforms() {
 bool esp_init(pid_t pid) {
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
-    if (!g_il2cpp_base) return false;
+    g_unity_base = get_base("libunity.so");
+    if (!g_il2cpp_base || !g_unity_base) return false;
     return true;
 }
 
 void esp_reset() {
-    g_pid = -1; g_il2cpp_base = 0;
+    g_pid = -1; g_il2cpp_base = 0; g_unity_base = 0;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
@@ -772,16 +789,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
             if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
         }
-        // Use the matrix consumed by Unity's render path, not the lazy Camera
-        // property cache. This keeps ESP attached to the rendered death/spectator
-        // camera. The previous-frame and calculated matrices are safe fallbacks.
-        vp = rd_m4(native_cam + CAMERA_RENDER_VIEW_PROJ);
+        // The live Transform includes the scripted roll/fall animation immediately.
+        // Stored render matrices remain fallbacks for cameras with no readable pose.
+        vp = mat_mul(projection, view);
+        if (!matrix_is_finite(vp))
+            vp = rd_m4(native_cam + CAMERA_RENDER_VIEW_PROJ);
         if (!matrix_is_finite(vp))
             vp = rd_m4(native_cam + CAMERA_PREV_VIEW_PROJ);
         if (!matrix_is_finite(vp))
             vp = rd_m4(native_cam + CAMERA_WORLD_TO_CLIP);
-        if (!matrix_is_finite(vp))
-            vp = mat_mul(projection, view);
     }
 
     bool has_local_position = false;
