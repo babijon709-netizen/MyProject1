@@ -692,6 +692,7 @@ struct SkelRig {
     std::vector<int32_t>  anc_idx, anc_par;
 };
 static std::vector<SkelRig> g_skel_rigs;
+static bool g_skel_world_shift = false; // мир пересоздан: риги массово устарели
 
 enum { SK_HEAD = 0, SK_BODY = 1, SK_RHAND = 2, SK_LHAND = 3 };
 
@@ -1482,24 +1483,46 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
         {
             struct Arm { int32_t nodes[4]; float side; };
             std::vector<Arm> arms;
-            for (int32_t host : arm_hosts) {
-            for (int32_t kid : children[(size_t)(host - v.lo)]) {
-                int32_t abs_kid = v.lo + kid;
-                if (abs_kid == neck_abs) continue;
-                if (cand.on_chain && in_chain(abs_kid)) continue;
-                if (height[(size_t)kid] < 3) continue;
-                Arm a;
-                deepest4(kid, a.nodes);
-                a.side = side_of(abs_kid);
-                arms.push_back(a);
-            }
-            }
+            auto sweep = [&](int min_height) {
+                arms.clear();
+                for (int32_t host : arm_hosts) {
+                for (int32_t kid : children[(size_t)(host - v.lo)]) {
+                    int32_t abs_kid = v.lo + kid;
+                    if (abs_kid == neck_abs) continue;
+                    if (cand.on_chain && in_chain(abs_kid)) continue;
+                    if (height[(size_t)kid] < min_height) continue;
+                    Arm a;
+                    deepest4(kid, a.nodes);
+                    // средняя латеральность цепочки: у руки кисть сильно вбок,
+                    // у колчана/ремня все узлы висят у позвоночника
+                    float acc = 0.0F; int got = 0;
+                    for (int i = 0; i < 4; ++i) {
+                        if (a.nodes[i] < 0) continue;
+                        acc += side_of(a.nodes[i]);
+                        ++got;
+                    }
+                    a.side = got ? acc / got : side_of(abs_kid);
+                    arms.push_back(a);
+                }
+                }
+            };
+            sweep(3);
+            if (arms.size() < 2) sweep(2); // короткая культя руки тоже рука
             if (arms.size() >= 2) {
-                std::sort(arms.begin(), arms.end(), [](const Arm& a, const Arm& b) { return a.side > b.side; });
-                s.bone[BONE_SHOULDER_R] = arms[0].nodes[0]; s.bone[BONE_ARM_R] = arms[0].nodes[1];
-                s.bone[BONE_FOREARM_R] = arms[0].nodes[2]; s.bone[BONE_HAND_R] = arms[0].nodes[3];
-                s.bone[BONE_SHOULDER_L] = arms[1].nodes[0]; s.bone[BONE_ARM_L] = arms[1].nodes[1];
-                s.bone[BONE_FOREARM_L] = arms[1].nodes[2]; s.bone[BONE_HAND_L] = arms[1].nodes[3];
+                // R = самый правый кандидат, L = самый ЛЕВЫЙ (по знаку стороны):
+                // колчан/ремень на правой стороне груди не должен занимать
+                // слот левой руки (раньше брались просто [0] и [1] сортировки)
+                size_t ri = 0, li = 0;
+                for (size_t i = 1; i < arms.size(); ++i) {
+                    if (arms[i].side > arms[ri].side) ri = i;
+                    if (arms[i].side < arms[li].side) li = i;
+                }
+                if (ri != li) {
+                    s.bone[BONE_SHOULDER_R] = arms[ri].nodes[0]; s.bone[BONE_ARM_R] = arms[ri].nodes[1];
+                    s.bone[BONE_FOREARM_R] = arms[ri].nodes[2]; s.bone[BONE_HAND_R] = arms[ri].nodes[3];
+                    s.bone[BONE_SHOULDER_L] = arms[li].nodes[0]; s.bone[BONE_ARM_L] = arms[li].nodes[1];
+                    s.bone[BONE_FOREARM_L] = arms[li].nodes[2]; s.bone[BONE_HAND_L] = arms[li].nodes[3];
+                }
             }
         }
 
@@ -1693,18 +1716,29 @@ static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox
     box.skel_valid = false;
     if (!s.transform_data || s.slice_hi < s.slice_lo) return;
 
-    // модель пересоздали (переключение оружия/скина)? — якорь уходит в другой батч
-    if (s.kcc_anchored) {
-        uint64_t kcc = rd_ptr(s.player + PLAYER_KCC_REFERENCE);
-        if (!skel_plausible_ptr(kcc)) { s.last_ok_ms = 0; return; }
-        uint64_t head_managed = rd_ptr(kcc + KCC_HEAD_TRANSFORM);
+    // модель пересоздали (переключение оружия/скина)? — якорь уходит в другой батч.
+    // После смерти/возрождения мир пересоздаётся целиком: батч трансформов
+    // аллоцируется заново, закешированные данные рига устаревают. Точка входа
+    // перепроверяется каждый кадр в обоих режимах; расхождение у нескольких
+    // ригов = признак перезагрузки мира (сбрасывает валидацию позиций/батча).
+    {
+        uint64_t entry_managed = 0;
+        if (s.kcc_anchored) {
+            uint64_t kcc = rd_ptr(s.player + PLAYER_KCC_REFERENCE);
+            if (!skel_plausible_ptr(kcc)) { s.last_ok_ms = 0; g_skel_world_shift = true; return; }
+            entry_managed = rd_ptr(kcc + KCC_HEAD_TRANSFORM);
+        } else {
+            entry_managed = rd_ptr(s.player + PLAYER_TRANSFORM); // worldCameraRoot
+        }
         uint64_t d = 0;
         int32_t ix = -1;
-        if (!skel_plausible_ptr(head_managed) || !skel_managed_to_index(head_managed, d, ix) || d != s.transform_data) {
+        int32_t want = s.kcc_anchored ? s.anchor[SK_HEAD] : s.entry;
+        if (!skel_plausible_ptr(entry_managed) || !skel_managed_to_index(entry_managed, d, ix) ||
+            d != s.transform_data || ix != want) {
             s.last_ok_ms = 0; // заставит skel_update перестроить риг
+            g_skel_world_shift = true;
             return;
         }
-        if (ix != s.anchor[SK_HEAD]) { s.last_ok_ms = 0; return; }
     }
 
     uint64_t matrices = 0, indices = 0;
@@ -2024,6 +2058,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height, bool wi
         if (with_skeleton)
             skel_update_player(s_transforms[i], vp, sw, sh, box);
         result.push_back(box);
+    }
+
+    // мир пересоздан (смерть/возрождение): позиции и layout батча могли
+    // измениться — сбрасываем валидацию, существующие механизмы перепроверят
+    if (g_skel_world_shift) {
+        g_skel_world_shift = false;
+        g_player_position_validated = false;
+        g_transform_hierarchy_layout_valid = false;
     }
 
     // подчистка кэша скелетов умерших/ушедших игроков
