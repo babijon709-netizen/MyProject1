@@ -1111,21 +1111,20 @@ static bool skel_label(SkelRig& s, const SkelSliceView& v) {
     return total >= 6;
 }
 
-// Структурная разметка рига по топологии дерева с физической валидацией.
-// Никаких априорных ограничений на число ветвей (у таза бывает пояс с
-// снаряжением): кандидат таза = узел на цепочке предков опорного узла, у
-// которого ровно две боковые ветви физически "падают вниз" (мировой Y ниже
-// самого узла на >= 0.35 м — это ноги, пальцы/оружие/камеры на это не
-// влияют). Позвоночник = сегмент той же цепочки (worldCameraRoot висит у
-// шеи — его предки уже содержат весь позвоночник). Грудь = ближайшая к
-// якорю развилка выше таза. Валидация Y-монотонностью; последний рубеж —
-// ноги без спины/головы, чтобы пусто не бывало никогда.
+// Структурная разметка рига: слои с независимыми предположениями.
+// Слой 1 (цепочка): таз на цепочке предков опорного узла (голова якорем или
+// worldCameraRoot у шеи) — даёт точный позвоночник сегментом цепочки.
+// Слой 2 (глобальный скан): таз = ЛЮБОЙ узел среза с двумя ветвями,
+// физически падающими вниз на >= 0.35 м (device-проверенный путь v4:
+// не требует, чтобы таз был предком точки входа). Позвоночник — подъём
+// от таза по максимальному Y.
+// Частичный проход не отклоняет кандидатов: пустой скелет невозможен,
+// если риг читается. Никаких полей игры — только дерево и мировые Y.
 static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t entry, int32_t head_hint) {
     for (int b = 0; b < ESP_BONE_COUNT; ++b) s.bone[b] = -1;
     const int32_t count = v.hi - v.lo + 1;
     if (!v.inside(entry) || count <= 0 || count > 2048) return false;
 
-    // дети (относительные индексы) + высоты поддеревьев
     std::vector<std::vector<int32_t>> children((size_t)count);
     for (int32_t i = v.lo; i <= v.hi; ++i) {
         int32_t p = v.parent_of(i);
@@ -1155,16 +1154,24 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
             for (int32_t kid : children[(size_t)cur])
                 if (height[(size_t)kid] > best) best = height[(size_t)kid];
             height[(size_t)cur] = best + 1;
-            if (height[(size_t)cur] > 400) return false; // цикл/мусор
+            if (height[(size_t)cur] > 400) return false;
         }
     }
 
-    // опорная цепочка предков: [anchor(голова/камера), ..., корень]
     int32_t anchor_node = (head_hint >= v.lo && head_hint <= v.hi && v.known(head_hint)) ? head_hint : entry;
     std::vector<int32_t> chain;
-    if (!skel_chain_up(v, anchor_node, chain)) return false;
+    if (!skel_chain_up(v, anchor_node, chain)) chain.assign(1, anchor_node);
+    auto in_chain = [&](int32_t abs_node) {
+        for (int32_t c : chain) if (c == abs_node) return true;
+        return false;
+    };
 
-    // минимальный мировой Y ветви
+    auto node_y = [&](int32_t abs_node, float& out_y) {
+        Vec3 w{};
+        if (!v.world_at(abs_node, w)) return false;
+        out_y = w.y;
+        return true;
+    };
     auto branch_lowest_y = [&](int32_t rel_root, float& out_y) {
         bool any = false;
         float lowest = 0.0F;
@@ -1183,60 +1190,98 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
         out_y = lowest;
         return true;
     };
-    auto node_y = [&](int32_t abs_node, float& out_y) {
-        Vec3 w{};
-        if (!v.world_at(abs_node, w)) return false;
-        out_y = w.y;
-        return true;
-    };
 
-    // кандидаты таза: узлы цепочки (cp >= 1) с >= 2 боковыми ветвями (h >= 2),
-    // из которых ровно две "падают вниз" ниже узла на >= 0.35 м
-    struct HipsCand {
-        int32_t chain_pos;
-        std::vector<int32_t> branches; // все боковые ветви (относительные)
-        int32_t leg_r, leg_l;          // относительные корни ног
+    struct Cand {
+        int32_t rel_hips;
+        int32_t leg_r, leg_l; // относительные корни ног
+        bool on_chain;
+        float drop;           // насколько ноги падают ниже кандидата
     };
-    std::vector<HipsCand> cands;
-    auto collect = [&](float min_drop) {
-        cands.clear();
+    std::vector<Cand> cands;
+    std::vector<uint8_t> used((size_t)count, 0);
+    auto try_add = [&](int32_t rel_node, bool chain_only_context) {
+        if (used[(size_t)rel_node]) return;
+        int32_t abs_node = v.lo + rel_node;
+        float nodey = 0.0F;
+        if (!node_y(abs_node, nodey)) return;
+        std::vector<std::pair<float, int32_t>> falling;
+        int deep_branches = 0;
+        for (int32_t kid : children[(size_t)rel_node]) {
+            if (height[(size_t)kid] < 2) continue;
+            ++deep_branches;
+            float y;
+            if (branch_lowest_y(kid, y) && (nodey - y) >= 0.35F)
+                falling.push_back({y, kid});
+        }
+        if (deep_branches < 2 || falling.size() < 2) return;
+        std::sort(falling.begin(), falling.end());
+        used[(size_t)rel_node] = 1;
+        Cand c;
+        c.rel_hips = rel_node;
+        c.leg_r = falling[0].second;
+        c.leg_l = falling[1].second;
+        c.on_chain = chain_only_context;
+        c.drop = nodey - falling[0].first;
+        cands.push_back(c);
+    };
+    auto collect = [&](float min_drop_unused) {
+        (void)min_drop_unused;
+        for (size_t cp = 1; cp + 1 < chain.size(); ++cp) try_add(chain[cp] - v.lo, true);
+    };
+    collect(0.35F);
+    // глобальный скан: любой узел среза с двумя падающими ветвями
+    for (int32_t i = 0; i < count; ++i) try_add(i, false);
+    if (cands.empty()) {
+        // аварийный допуск по падению — только цепочка, затем глобально
+        std::fill(used.begin(), used.end(), 0);
         for (size_t cp = 1; cp + 1 < chain.size(); ++cp) {
-            int32_t node = chain[cp];
-            int32_t trunk_next = chain[cp + 1];
+            int32_t rel = chain[cp] - v.lo;
+            if (used[(size_t)rel]) continue;
+            int32_t abs_node = v.lo + rel;
             float nodey = 0.0F;
-            bool have_nodey = node_y(node, nodey);
-            std::vector<std::pair<float, int32_t>> falling; // (lowest_y, rel)
-            std::vector<int32_t> branches;
-            for (int32_t kid : children[(size_t)(node - v.lo)]) {
-                if (v.lo + kid == trunk_next) continue;
+            if (!node_y(abs_node, nodey)) continue;
+            std::vector<std::pair<float, int32_t>> falling;
+            for (int32_t kid : children[(size_t)rel]) {
                 if (height[(size_t)kid] < 2) continue;
-                branches.push_back(kid);
                 float y;
-                if (branch_lowest_y(kid, y) && have_nodey && (nodey - y) >= min_drop)
+                if (branch_lowest_y(kid, y) && (nodey - y) >= 0.15F)
                     falling.push_back({y, kid});
             }
-            if (branches.size() < 2 || branches.size() > 32) continue;
             if (falling.size() < 2) continue;
             std::sort(falling.begin(), falling.end());
-            HipsCand c;
-            c.chain_pos = (int32_t)cp;
-            c.branches = branches;
-            c.leg_r = falling[0].second;
-            c.leg_l = falling[1].second;
+            used[(size_t)rel] = 1;
+            Cand c; c.rel_hips = rel; c.leg_r = falling[0].second; c.leg_l = falling[1].second; c.on_chain = true;
+            c.drop = nodey - falling[0].first;
             cands.push_back(c);
         }
-    };
-    collect(0.35F);              // стоя/бежит: ноги падают к земле
-    if (cands.empty()) collect(0.15F); // сидит/припал: аварийный допуск
+        for (int32_t i = 0; i < count; ++i) {
+            if (used[(size_t)i]) continue;
+            int32_t abs_node = v.lo + i;
+            float nodey = 0.0F;
+            if (!node_y(abs_node, nodey)) continue;
+            std::vector<std::pair<float, int32_t>> falling;
+            for (int32_t kid : children[(size_t)i]) {
+                if (height[(size_t)kid] < 2) continue;
+                float y;
+                if (branch_lowest_y(kid, y) && (nodey - y) >= 0.15F)
+                    falling.push_back({y, kid});
+            }
+            if (falling.size() < 2) continue;
+            std::sort(falling.begin(), falling.end());
+            used[(size_t)i] = 1;
+            Cand c; c.rel_hips = i; c.leg_r = falling[0].second; c.leg_l = falling[1].second; c.on_chain = false;
+            c.drop = nodey - falling[0].first;
+            cands.push_back(c);
+        }
+    }
     if (cands.empty()) return false;
-    // самый нижний по телу кандидат = максимальный cp (таз ниже груди)
-    std::sort(cands.begin(), cands.end(), [](const HipsCand& a, const HipsCand& b) { return a.chain_pos > b.chain_pos; });
 
-    // направление "вправо" от таза
     Vec3 right_dir = {1.0F, 0.0F, 0.0F};
+    Vec3 hw{};
+    bool have_hw = false;
     auto setup_right = [&](int32_t hips_abs) {
-        Vec3 hw{};
-        if (!v.world_at(hips_abs, hw)) return;
+        have_hw = v.world_at(hips_abs, hw);
+        if (!have_hw) return;
         Vec3 f = {0.0F, 0.0F, 1.0F};
         if (v.inside(hips_abs)) {
             const Matrix34& hm = (*v.mats)[(size_t)(hips_abs - v.lo)];
@@ -1246,74 +1291,106 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
         }
         right_dir = {f.z, 0.0F, -f.x};
     };
-    auto side_of = [&](int32_t abs_node, const Vec3& hw) {
+    auto side_of = [&](int32_t abs_node) {
         Vec3 w{};
-        if (!v.world_at(abs_node, w)) return 0.0F;
+        if (!have_hw || !v.world_at(abs_node, w)) return 0.0F;
         return (w.x - hw.x) * right_dir.x + (w.z - hw.z) * right_dir.z;
     };
+    auto deepest4 = [&](int32_t rel_root, int32_t out[4]) {
+        std::vector<int32_t> best{rel_root};
+        std::vector<std::pair<int32_t, size_t>> work{{rel_root, 0}};
+        std::vector<int32_t> path{rel_root};
+        while (!work.empty()) {
+            auto& [cur, ci] = work.back();
+            const std::vector<int32_t>& kids = children[(size_t)cur];
+            if (ci < kids.size()) {
+                int32_t kid = kids[ci++];
+                work.push_back({kid, 0});
+                path.push_back(kid);
+            } else {
+                if (path.size() > best.size()) best = path;
+                work.pop_back();
+                path.pop_back();
+            }
+        }
+        for (int i = 0; i < 4; ++i) out[i] = (i < (int)best.size()) ? v.lo + best[(size_t)i] : -1;
+    };
 
-    // попытка разметки для кандидата таза; успех = физически валидный риг
-    auto try_candidate = [&](HipsCand& cand, bool allow_partial) {
+    auto try_candidate = [&](Cand& cand, bool allow_partial) {
         for (int b = 0; b < ESP_BONE_COUNT; ++b) s.bone[b] = -1;
-        const size_t hips_pos = (size_t)cand.chain_pos;
+        const int32_t hips_abs = v.lo + cand.rel_hips;
 
-        // позвоночник: сегмент цепочки от таза к якорю (cp убывает к 0)
-        s.bone[BONE_HIPS]  = chain[hips_pos];
-        if (hips_pos >= 1) s.bone[BONE_SPINE]  = chain[hips_pos - 1];
-        if (hips_pos >= 2) s.bone[BONE_SPINE1] = chain[hips_pos - 2];
-        if (hips_pos >= 3) s.bone[BONE_SPINE2] = chain[hips_pos - 3];
+        // позвоночник
+        int32_t neck_abs = -1;
+        if (cand.on_chain) {
+            int hips_cp = -1;
+            for (size_t cp = 0; cp < chain.size(); ++cp)
+                if (chain[cp] == hips_abs) { hips_cp = (int)cp; break; }
+            if (hips_cp >= 0) {
+                s.bone[BONE_HIPS]  = chain[(size_t)hips_cp];
+                if (hips_cp >= 1) s.bone[BONE_SPINE]  = chain[(size_t)hips_cp - 1];
+                if (hips_cp >= 2) s.bone[BONE_SPINE1] = chain[(size_t)hips_cp - 2];
+                if (hips_cp >= 3) s.bone[BONE_SPINE2] = chain[(size_t)hips_cp - 3];
+                neck_abs = chain.size() >= 2 ? chain[1] : hips_abs;
+            }
+        }
+        if (s.bone[BONE_HIPS] < 0) {
+            // глобальный кандидат: подъём от таза по максимальному Y
+            s.bone[BONE_HIPS] = hips_abs;
+            int32_t cur = cand.rel_hips;
+            float cur_y = 0.0F;
+            node_y(hips_abs, cur_y);
+            const int spine_bones[3] = {BONE_SPINE, BONE_SPINE1, BONE_SPINE2};
+            for (int si = 0; si < 3; ++si) {
+                int32_t best = -1;
+                float best_y = cur_y;
+                for (int32_t kid : children[(size_t)cur]) {
+                    float ky = 0.0F;
+                    if (!node_y(v.lo + kid, ky)) continue;
+                    if (ky > best_y + 0.01F) { best_y = ky; best = kid; }
+                }
+                if (best < 0) break;
+                s.bone[spine_bones[si]] = v.lo + best;
+                cur = best;
+                cur_y = best_y;
+            }
+            // шея = самый высокий ребёнок верхнего узла (анатомически выше плеч)
+            int32_t top = cur;
+            float top_y = cur_y;
+            int32_t neck_rel = -1;
+            float neck_y = top_y;
+            for (int32_t kid : children[(size_t)top]) {
+                float ky = 0.0F;
+                if (!node_y(v.lo + kid, ky)) continue;
+                if (ky > neck_y + 0.01F) { neck_y = ky; neck_rel = kid; }
+            }
+            neck_abs = neck_rel >= 0 ? v.lo + neck_rel : (s.bone[BONE_SPINE2] >= 0 ? s.bone[BONE_SPINE2] : hips_abs);
+        }
+        s.bone[BONE_NECK] = neck_abs;
 
-        // шея/голова
-        int32_t neck = chain.size() >= 2 ? chain[1] : s.bone[BONE_HIPS];
-        s.bone[BONE_NECK] = neck;
+        // голова
         if (anchor_node == head_hint) {
             s.bone[BONE_HEAD] = head_hint;
-        } else {
+        } else if (neck_abs >= v.lo) {
             int32_t head = -1;
             float best_y = -1.0e9F;
-            Vec3 nw{};
-            bool have_nw = v.world_at(neck, nw);
-            for (int32_t kid : children[(size_t)(neck - v.lo)]) {
+            float nw_y = 0.0F;
+            bool have_nw = node_y(neck_abs, nw_y);
+            for (int32_t kid : children[(size_t)(neck_abs - v.lo)]) {
                 int32_t abs_kid = v.lo + kid;
                 if (abs_kid == anchor_node) continue;
-                Vec3 kw{};
-                if (have_nw && v.world_at(abs_kid, kw) && kw.y > nw.y - 0.05F && kw.y > best_y) {
-                    best_y = kw.y;
-                    head = abs_kid;
-                }
+                float ky = 0.0F;
+                if (!have_nw || !node_y(abs_kid, ky)) continue;
+                if (ky > nw_y - 0.05F && ky > best_y) { best_y = ky; head = abs_kid; }
             }
             s.bone[BONE_HEAD] = head;
         }
 
-        // ноги: deepest-пути от корней ног
-        setup_right(s.bone[BONE_HIPS]);
-        Vec3 hw{};
-        bool have_hw = v.world_at(s.bone[BONE_HIPS], hw);
-        auto deepest4 = [&](int32_t rel_root, int32_t out[4]) {
-            std::vector<int32_t> best{rel_root};
-            std::vector<std::pair<int32_t, size_t>> work{{rel_root, 0}};
-            std::vector<int32_t> path{rel_root};
-            while (!work.empty()) {
-                auto& [cur, ci] = work.back();
-                const std::vector<int32_t>& kids = children[(size_t)cur];
-                if (ci < kids.size()) {
-                    int32_t kid = kids[ci++];
-                    work.push_back({kid, 0});
-                    path.push_back(kid);
-                } else {
-                    if (path.size() > best.size()) best = path;
-                    work.pop_back();
-                    path.pop_back();
-                }
-            }
-            for (int i = 0; i < 4; ++i) out[i] = (i < (int)best.size()) ? v.lo + best[(size_t)i] : -1;
-        };
+        // ноги
+        setup_right(hips_abs);
         int32_t leg_r = cand.leg_r, leg_l = cand.leg_l;
-        if (have_hw) {
-            float sr = side_of(v.lo + leg_r, hw);
-            float sl = side_of(v.lo + leg_l, hw);
-            if (sr < sl) std::swap(leg_r, leg_l);
-        }
+        float sr = side_of(v.lo + leg_r), sl = side_of(v.lo + leg_l);
+        if (sr < sl) std::swap(leg_r, leg_l);
         {
             int out[4];
             deepest4(leg_r, out);
@@ -1322,22 +1399,21 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
             s.bone[BONE_UPLEG_L] = out[0]; s.bone[BONE_LEG_L] = out[1]; s.bone[BONE_FOOT_L] = out[2]; s.bone[BONE_TOEBASE_L] = out[3];
         }
 
-        // руки: развилка между тазом и якорем (плечи), ближе к якорю
-        for (size_t cp = 1; cp < hips_pos; ++cp) {
-            int32_t node = chain[cp];
-            int32_t trunk_next = chain[cp + 1];
+        // руки: дети груди (spine2/верх подъёма), кроме шеи и нисходящего ствола
+        int32_t chest = s.bone[BONE_SPINE2];
+        if (chest < 0) chest = s.bone[BONE_SPINE1];
+        if (chest < 0) chest = s.bone[BONE_SPINE];
+        if (chest >= 0) {
             struct Arm { int32_t nodes[4]; float side; };
             std::vector<Arm> arms;
-            for (int32_t kid : children[(size_t)(node - v.lo)]) {
-                if (v.lo + kid == trunk_next) continue;
-                bool on_trunk = false;
-                for (int32_t tp = 0; tp < (int)cp; ++tp)
-                    if (chain[(size_t)tp] == v.lo + kid) { on_trunk = true; break; }
-                if (on_trunk) continue;
+            for (int32_t kid : children[(size_t)(chest - v.lo)]) {
+                int32_t abs_kid = v.lo + kid;
+                if (abs_kid == neck_abs) continue;
+                if (cand.on_chain && in_chain(abs_kid)) continue;
                 if (height[(size_t)kid] < 3) continue;
                 Arm a;
                 deepest4(kid, a.nodes);
-                a.side = have_hw ? side_of(v.lo + kid, hw) : 0.0F;
+                a.side = side_of(abs_kid);
                 arms.push_back(a);
             }
             if (arms.size() >= 2) {
@@ -1346,23 +1422,23 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
                 s.bone[BONE_FOREARM_R] = arms[0].nodes[2]; s.bone[BONE_HAND_R] = arms[0].nodes[3];
                 s.bone[BONE_SHOULDER_L] = arms[1].nodes[0]; s.bone[BONE_ARM_L] = arms[1].nodes[1];
                 s.bone[BONE_FOREARM_L] = arms[1].nodes[2]; s.bone[BONE_HAND_L] = arms[1].nodes[3];
-                break; // первая развилка от якоря = грудь
             }
         }
 
-        // физическая валидация: Y-монотонность позвоночника и ноги вниз
+        // частичный проход ничего не отклоняет: лучше ноги, чем пусто
+        int total = 0;
+        for (int b = 0; b < ESP_BONE_COUNT; ++b)
+            if (s.bone[b] >= 0) ++total;
+        if (allow_partial) return total >= 4;
+
+        // полный: физическая валидация Y
         auto bone_y = [&](int b, float& y) { return s.bone[b] >= 0 && node_y(s.bone[b], y); };
-        float y_hips = 0, y_sp2 = 0, y_neck = 0, y_head = 0, y_foot_r = 0;
+        float y_hips = 0, y_top = 0, y_foot = 0;
         bool ok_hips = bone_y(BONE_HIPS, y_hips);
-        bool ok_sp2 = bone_y(BONE_SPINE2, y_sp2) || bone_y(BONE_SPINE1, y_sp2) || bone_y(BONE_SPINE, y_sp2);
-        bool ok_neck = bone_y(BONE_NECK, y_neck);
-        bool ok_head = bone_y(BONE_HEAD, y_head);
-        bool ok_foot = bone_y(BONE_FOOT_R, y_foot_r) || bone_y(BONE_FOOT_L, y_foot_r);
-        if (ok_hips && ok_foot && y_foot_r > y_hips - 0.25F) return false; // ноги не вниз — не таз
-        if (ok_hips && ok_sp2 && y_sp2 < y_hips - 0.15F) return false;     // позвоночник вниз — не риг
-        if (ok_hips && ok_neck && y_neck < y_hips - 0.15F) return false;
-        if (ok_hips && ok_head && y_head < y_hips) return false;
-        // все кости в разумном радиусе от таза (скелет < 3 м)
+        bool ok_top = bone_y(BONE_NECK, y_top) || bone_y(BONE_SPINE2, y_top) || bone_y(BONE_SPINE, y_top);
+        bool ok_foot = bone_y(BONE_FOOT_R, y_foot) || bone_y(BONE_FOOT_L, y_foot);
+        if (ok_hips && ok_foot && y_hips - y_foot < 0.45F) return false; // руки-под-ноги отбраковка
+        if (ok_hips && ok_top && y_top < y_hips) return false;
         if (have_hw) {
             for (int b = 0; b < ESP_BONE_COUNT; ++b) {
                 if (s.bone[b] < 0) continue;
@@ -1372,13 +1448,16 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
                 if (fabsf(dx) > 3.0F || fabsf(dy) > 3.0F || fabsf(dz) > 3.0F) return false;
             }
         }
-        int total = 0;
-        for (int b = 0; b < ESP_BONE_COUNT; ++b)
-            if (s.bone[b] >= 0) ++total;
-        return allow_partial ? total >= 5 : total >= 8;
+        return total >= 8;
     };
 
-    // полный риг от самого нижнего кандидата; последний рубеж — частичный
+    // порядок: цепочечные (точный позвоночник), затем глобальные (device-путь v4);
+    // внутри группы — по величине падения: ноги (0.9м) всегда падают сильнее
+    // рук с пальцами (0.45-0.7м), поэтому настоящий таз пробуется первым
+    std::stable_sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+        if (a.on_chain != b.on_chain) return a.on_chain > b.on_chain;
+        return a.drop > b.drop;
+    });
     for (auto& cand : cands)
         if (try_candidate(cand, false)) return true;
     for (auto& cand : cands)
@@ -1522,8 +1601,10 @@ static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox
             else if (b == BONE_SPINE1 && s.anchor[SK_BODY] >= 0) index = s.anchor[SK_BODY];
             else if (b == BONE_HAND_R && s.anchor[SK_RHAND] >= 0) index = s.anchor[SK_RHAND];
             else if (b == BONE_HAND_L && s.anchor[SK_LHAND] >= 0) index = s.anchor[SK_LHAND];
-            else if (b == BONE_NECK && s.anchor[SK_HEAD] >= 0) index = view.parent_of(s.anchor[SK_HEAD]);
-            else continue;
+            else if (b == BONE_NECK) {
+                int32_t from = s.anchor[SK_HEAD] >= 0 ? s.anchor[SK_HEAD] : s.entry;
+                index = from >= 0 ? view.parent_of(from) : -1;
+            } else continue;
             if (index < view.lo || index > view.hi) continue;
         } else if (index < 0) {
             continue;
