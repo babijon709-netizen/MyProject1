@@ -714,7 +714,12 @@ static bool skel_managed_to_index(uint64_t managed, uint64_t& data, int32_t& ind
     if (!skel_plausible_ptr(managed)) return false;
     uint64_t native = rd_ptr(managed + MANAGED_CACHED_PTR);
     if (!skel_plausible_ptr(native)) return false;
-    const uint64_t pairs[2][2] = {{0x38, 0x40}, {0x18, 0x20}};
+    // приоритет — уже валидированный рантайм-дискавери layout
+    uint64_t pairs[3][2] = {{0x38, 0x40}, {0x38, 0x40}, {0x18, 0x20}};
+    if (g_transform_hierarchy_layout_valid) {
+        pairs[0][0] = g_transform_hierarchy_layout.data_offset;
+        pairs[0][1] = g_transform_hierarchy_layout.index_offset;
+    }
     for (const auto& pair : pairs) {
         uint64_t d = rd_ptr(native + pair[0]);
         int32_t ix = rd<int32_t>(native + pair[1]);
@@ -754,12 +759,29 @@ static bool skel_resolve_arrays(uint64_t data, uint64_t& matrices, uint64_t& ind
 // все кости рига сходятся к общему корню, поэтому предков любой кости,
 // выходящих за срез, достаточно брать из цепочки головы.
 static bool skel_read_slice(SkelRig& s, uint64_t matrices, uint64_t indices,
-                            int32_t lo, int32_t hi, int32_t start) {
+                            int32_t lo, int32_t& hi, int32_t start) {
     if (lo < 0 || hi < lo || hi - lo > 2048) return false;
-    s.idxs.resize((size_t)(hi - lo + 1));
-    s.mats.resize((size_t)(hi - lo + 1));
-    if (!skel_read_buf(indices + (uint64_t)lo * 4, s.idxs.data(), s.idxs.size() * 4)) return false;
-    if (!skel_read_buf(matrices + (uint64_t)lo * sizeof(Matrix34), s.mats.data(), s.mats.size() * sizeof(Matrix34))) return false;
+    // чтение чанками: за концом массива батча память может быть не замаплена —
+    // тогда усекаем hi до последнего успешного чанка, а не падаем целиком
+    constexpr int32_t CHUNK = 64;
+    s.idxs.clear();
+    s.mats.clear();
+    s.idxs.reserve((size_t)(hi - lo + 1));
+    s.mats.reserve((size_t)(hi - lo + 1));
+    int32_t got = lo - 1;
+    for (int32_t c = lo; c <= hi; c += CHUNK) {
+        int32_t c1 = std::min(c + CHUNK - 1, hi);
+        int32_t cnt = c1 - c + 1;
+        std::vector<int32_t> idx_chunk((size_t)cnt);
+        std::vector<Matrix34> mat_chunk((size_t)cnt);
+        if (!skel_read_buf(indices + (uint64_t)c * 4, idx_chunk.data(), (size_t)cnt * 4)) break;
+        if (!skel_read_buf(matrices + (uint64_t)c * sizeof(Matrix34), mat_chunk.data(), (size_t)cnt * sizeof(Matrix34))) break;
+        s.idxs.insert(s.idxs.end(), idx_chunk.begin(), idx_chunk.end());
+        s.mats.insert(s.mats.end(), mat_chunk.begin(), mat_chunk.end());
+        got = c1;
+    }
+    hi = got;
+    if (hi < lo) return false;
 
     s.anc_idx.clear(); s.anc_par.clear(); s.anc_mat.clear();
     if (start < lo || start > hi) return false;
@@ -1083,22 +1105,32 @@ static bool skel_build(SkelRig& s, uint64_t player) {
     tmp.player = player;
     uint64_t kcc = rd_ptr(player + PLAYER_KCC_REFERENCE);
     if (!skel_plausible_ptr(kcc)) return false;
-    // SingleKcc.player @0x80 — точная обратная ссылка: объект в kccReference
-    // обязан ссылаться назад на этого же PlayerManager
-    if (rd_ptr(kcc + KCC_PLAYER_BACKREF) != player) return false;
 
     uint64_t managed[4] = {0, 0, 0, 0};
     managed[SK_HEAD] = rd_ptr(kcc + KCC_HEAD_TRANSFORM);
     if (!skel_plausible_ptr(managed[SK_HEAD])) return false;
 
+    // валидация семантики цепочки, двумя независимыми способами:
+    //  a) SingleKcc.player @0x80 ссылается назад на этого же игрока
+    //  b) CharacterAnimation(+0xC0) -> PlayerModelInfo(+0x30) -> head(+0x20)
+    //     даёт тот же самый Transform головы, что и SingleKcc.head(+0x90)
+    bool backref_ok = rd_ptr(kcc + KCC_PLAYER_BACKREF) == player;
+    uint64_t model_info = 0;
+    bool cross_ok = false;
     uint64_t char_anim = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
     if (skel_plausible_ptr(char_anim)) {
-        uint64_t model_info = rd_ptr(char_anim + CHAR_ANIM_PLAYER_MODEL_INFO);
+        model_info = rd_ptr(char_anim + CHAR_ANIM_PLAYER_MODEL_INFO);
         if (skel_plausible_ptr(model_info)) {
-            managed[SK_BODY]  = rd_ptr(model_info + MODEL_INFO_BODY);
-            managed[SK_RHAND] = rd_ptr(model_info + MODEL_INFO_RIGHT_HAND);
-            managed[SK_LHAND] = rd_ptr(model_info + MODEL_INFO_LEFT_HAND);
+            uint64_t head_via_model = rd_ptr(model_info + MODEL_INFO_HEAD);
+            cross_ok = head_via_model == managed[SK_HEAD];
         }
+    }
+    if (!backref_ok && !cross_ok) return false;
+
+    if (skel_plausible_ptr(model_info)) {
+        managed[SK_BODY]  = rd_ptr(model_info + MODEL_INFO_BODY);
+        managed[SK_RHAND] = rd_ptr(model_info + MODEL_INFO_RIGHT_HAND);
+        managed[SK_LHAND] = rd_ptr(model_info + MODEL_INFO_LEFT_HAND);
     }
 
     uint64_t data = 0;
@@ -1130,6 +1162,10 @@ static bool skel_build(SkelRig& s, uint64_t player) {
     if (hi - lo > 1024) hi = lo + 1024;
 
     if (!skel_read_slice(tmp, matrices, indices, lo, hi, tmp.anchor[SK_HEAD])) return false;
+    // якоря, не попавшие в реально прочитанный срез, отбрасываем
+    for (int a = 0; a < 4; ++a)
+        if (tmp.anchor[a] > hi) tmp.anchor[a] = -1;
+    if (tmp.anchor[SK_HEAD] < 0) return false;
     tmp.slice_lo = lo;
     tmp.slice_hi = hi;
 
@@ -1173,6 +1209,7 @@ static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox
     uint64_t matrices = 0, indices = 0;
     if (!skel_resolve_arrays(s.transform_data, matrices, indices)) return;
     if (!skel_read_slice(s, matrices, indices, s.slice_lo, s.slice_hi, s.anchor[SK_HEAD])) return;
+    if (s.anchor[SK_HEAD] > s.slice_hi) { s.last_ok_ms = 0; return; }
 
     SkelSliceView view{&s.mats, &s.idxs, &s.anc_mat, &s.anc_idx, &s.anc_par, s.slice_lo, s.slice_hi};
 
@@ -1183,12 +1220,14 @@ static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox
         box.skel_y[b] = -1.0F;
         int32_t index = s.bone[b];
         if (!s.labeled) {
-            // без полной разметки рисуем якоря: голова, корпус, кисти
+            // без полной разметки рисуем якоря и шею: видно минимум голову/корпус/кисти
             if (b == BONE_HEAD) index = s.anchor[SK_HEAD];
             else if (b == BONE_SPINE1 && s.anchor[SK_BODY] >= 0) index = s.anchor[SK_BODY];
             else if (b == BONE_HAND_R && s.anchor[SK_RHAND] >= 0) index = s.anchor[SK_RHAND];
             else if (b == BONE_HAND_L && s.anchor[SK_LHAND] >= 0) index = s.anchor[SK_LHAND];
+            else if (b == BONE_NECK) index = view.parent_of(s.anchor[SK_HEAD]);
             else continue;
+            if (index < view.lo || index > view.hi) continue;
         } else if (index < 0) {
             continue;
         }
