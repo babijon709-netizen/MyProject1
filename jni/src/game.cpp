@@ -678,8 +678,10 @@ struct SkelRig {
     uint64_t transform_data = 0;
     int32_t  anchor[4] = {-1, -1, -1, -1}; // HEAD, BODY, RHAND, LHAND (индексы батча)
     int32_t  slice_lo = 0, slice_hi = 0;   // окно среза батча
-    int32_t  bone[ESP_BONE_COUNT];
+    int32_t  entry = -1;                   // точка входа в риг (голова или корень)
+    int32_t  bone[ESP_BONE_COUNT] {};
     bool     labeled = false;
+    bool     kcc_anchored = false; // якоря из SingleKcc; false = структурная разметка
     uint64_t next_try_ms = 0;
     uint64_t last_ok_ms = 0;
     // буферы кадра (срез батча)
@@ -761,24 +763,34 @@ static bool skel_resolve_arrays(uint64_t data, uint64_t& matrices, uint64_t& ind
 static bool skel_read_slice(SkelRig& s, uint64_t matrices, uint64_t indices,
                             int32_t lo, int32_t& hi, int32_t start) {
     if (lo < 0 || hi < lo || hi - lo > 2048) return false;
-    // чтение чанками: за концом массива батча память может быть не замаплена —
-    // тогда усекаем hi до последнего успешного чанка, а не падаем целиком
+    // чтение чанками: за концом массива батча память может быть не замаплена.
+    // размер чанка деградирует 64->16->4->1, чтобы конец массива, не лежащий
+    // на границе чанка, не выбрасывал до 63 валидных элементов (включая риг)
     constexpr int32_t CHUNK = 64;
     s.idxs.clear();
     s.mats.clear();
     s.idxs.reserve((size_t)(hi - lo + 1));
     s.mats.reserve((size_t)(hi - lo + 1));
     int32_t got = lo - 1;
-    for (int32_t c = lo; c <= hi; c += CHUNK) {
-        int32_t c1 = std::min(c + CHUNK - 1, hi);
-        int32_t cnt = c1 - c + 1;
-        std::vector<int32_t> idx_chunk((size_t)cnt);
-        std::vector<Matrix34> mat_chunk((size_t)cnt);
-        if (!skel_read_buf(indices + (uint64_t)c * 4, idx_chunk.data(), (size_t)cnt * 4)) break;
-        if (!skel_read_buf(matrices + (uint64_t)c * sizeof(Matrix34), mat_chunk.data(), (size_t)cnt * sizeof(Matrix34))) break;
-        s.idxs.insert(s.idxs.end(), idx_chunk.begin(), idx_chunk.end());
-        s.mats.insert(s.mats.end(), mat_chunk.begin(), mat_chunk.end());
-        got = c1;
+    int32_t c = lo;
+    bool unmapped = false;
+    while (c <= hi && !unmapped) {
+        int32_t step = std::min(CHUNK, hi - c + 1);
+        while (step > 0) {
+            std::vector<int32_t> idx_chunk((size_t)step);
+            std::vector<Matrix34> mat_chunk((size_t)step);
+            bool ok = skel_read_buf(indices + (uint64_t)c * 4, idx_chunk.data(), (size_t)step * 4)
+                   && skel_read_buf(matrices + (uint64_t)c * sizeof(Matrix34), mat_chunk.data(), (size_t)step * sizeof(Matrix34));
+            if (ok) {
+                s.idxs.insert(s.idxs.end(), idx_chunk.begin(), idx_chunk.end());
+                s.mats.insert(s.mats.end(), mat_chunk.begin(), mat_chunk.end());
+                got = c + step - 1;
+                c += step;
+                break;
+            }
+            step /= 4; // 64 -> 16 -> 4 -> 1 -> стоп
+        }
+        if (step <= 0) unmapped = true; // не читается даже 1 элемент — дальше памяти нет
     }
     hi = got;
     if (hi < lo) return false;
@@ -827,11 +839,12 @@ struct SkelSliceView {
         if (!matrix34_is_valid(current)) return false;
         Vec3 result = {current.translation.x, current.translation.y, current.translation.z};
         if (!vec3_is_finite(result)) return false;
-        int32_t cur = index;
         int32_t par = parent_of(index);
         int depth = 0;
         while (par != -1) {
-            if (par < 0 || par >= cur || ++depth > 160) return false;
+            // порядок индексов в батче не гарантирует parent < child
+            // (аллокация при загрузке модели); от циклов защищает лимит глубины
+            if (par < 0 || ++depth > 160) return false;
             if (!inside(par) && !known(par)) return false;
             const Matrix34* m = nullptr;
             if (inside(par)) m = &(*mats)[(size_t)(par - lo)];
@@ -843,7 +856,6 @@ struct SkelSliceView {
             Vec3 rotated = rotate_vector(m->rotation, scaled);
             result = {m->translation.x + rotated.x, m->translation.y + rotated.y, m->translation.z + rotated.z};
             if (!vec3_is_finite(result)) return false;
-            cur = par;
             par = parent_of(par);
         }
         out = result;
@@ -874,17 +886,16 @@ static bool skel_chain_contains(const std::vector<int32_t>& chain, int32_t x) {
 // Самый длинный нисходящий путь от node (по детям внутри среза).
 static void skel_deepest_path(const SkelSliceView& v, std::vector<std::vector<int32_t>>& children,
                               int32_t node, std::vector<int32_t>& best) {
-    (void)v;
     best.clear();
     best.push_back(node);
-    // итеративный DFS с текущим путём
+    // итеративный DFS с текущим путём (children индексируется относительно v.lo)
     std::vector<std::pair<int32_t, size_t>> work;
     work.push_back({node, 0});
     std::vector<int32_t> path;
     path.push_back(node);
     while (!work.empty()) {
         auto& [cur, ci] = work.back();
-        const std::vector<int32_t>& kids = children[(size_t)cur];
+        const std::vector<int32_t>& kids = children[(size_t)(cur - v.lo)];
         if (ci < kids.size()) {
             int32_t kid = kids[ci++];
             work.push_back({kid, 0});
@@ -953,7 +964,7 @@ static bool skel_label(SkelRig& s, const SkelSliceView& v) {
         children.assign((size_t)(v.hi - v.lo + 1), {});
         for (int32_t i = v.lo; i <= v.hi; ++i) {
             int32_t p = v.parent_of(i);
-            if (p >= v.lo && p <= v.hi) children[(size_t)p].push_back(i);
+            if (p >= v.lo && p <= v.hi) children[(size_t)(p - v.lo)].push_back(i);
         }
     };
     std::vector<std::vector<int32_t>> children;
@@ -973,7 +984,7 @@ static bool skel_label(SkelRig& s, const SkelSliceView& v) {
         skel_chain_up(v, scan_from, up);
         for (int32_t candidate : up) {
             if (candidate < v.lo || candidate > v.hi) continue;
-            const std::vector<int32_t>& kids = children[(size_t)candidate];
+            const std::vector<int32_t>& kids = children[(size_t)(candidate - v.lo)];
             if ((int)kids.size() < 3) continue;
             // дети не на пути головы/плеч и с глубиной >= 3 = ноги
             int legs = 0;
@@ -1044,7 +1055,7 @@ static bool skel_label(SkelRig& s, const SkelSliceView& v) {
     Vec3 hips_world{};
     bool have_hips_world = v.world_at(hips, hips_world);
     std::vector<int32_t> leg_roots;
-    for (int32_t kid : children[(size_t)hips]) {
+    for (int32_t kid : children[(size_t)(hips - v.lo)]) {
         if (kid == s.bone[BONE_SPINE]) continue;
         if (skel_chain_contains(chain_head, kid)) continue;
         if (skel_chain_contains(arm_r, kid) || skel_chain_contains(arm_l, kid)) continue;
@@ -1100,89 +1111,339 @@ static bool skel_label(SkelRig& s, const SkelSliceView& v) {
     return total >= 6;
 }
 
+// Структурная разметка рига по топологии дерева: от точки входа поднимаемся
+// к корню префаба игрока, ищем таз (2 длинные нисходящие ветви-ноги +
+// продолжение ствола вверх), ствол вверх до шеи/головы, руки — ветви груди.
+// Работает без единого managed-поля — только дерево индексов батча.
+// head_hint (если известен точный Transform головы) делает ствол точным.
+static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t entry, int32_t head_hint) {
+    for (int b = 0; b < ESP_BONE_COUNT; ++b) s.bone[b] = -1;
+    const int32_t count = v.hi - v.lo + 1;
+    if (!v.inside(entry) || count <= 0 || count > 2048) return false;
+
+    // дети хранятся ОТНОСИТЕЛЬНЫМИ индексами (0..count-1)
+    std::vector<std::vector<int32_t>> children((size_t)count);
+    for (int32_t i = v.lo; i <= v.hi; ++i) {
+        int32_t p = v.parent_of(i);
+        if (p != i && p >= v.lo && p <= v.hi) children[(size_t)(p - v.lo)].push_back(i - v.lo);
+    }
+    // самый глубокий нисходящий путь (в относительных индексах)
+    auto deepest = [&](int32_t rel, std::vector<int32_t>& out) {
+        out.clear();
+        out.push_back(rel);
+        std::vector<std::pair<int32_t, size_t>> work;
+        work.push_back({rel, 0});
+        std::vector<int32_t> path;
+        path.push_back(rel);
+        while (!work.empty()) {
+            auto& [cur, ci] = work.back();
+            const std::vector<int32_t>& kids = children[(size_t)cur];
+            if (ci < kids.size()) {
+                int32_t kid = kids[ci++];
+                work.push_back({kid, 0});
+                path.push_back(kid);
+            } else {
+                if (path.size() > out.size()) out = path;
+                work.pop_back();
+                path.pop_back();
+            }
+        }
+    };
+
+    // высоты/размеры поддеревьев: обратный порядок BFS от локальных корней
+    std::vector<int32_t> height((size_t)count, 1), size((size_t)count, 1), depth((size_t)count, -1);
+    {
+        std::vector<int32_t> order;
+        order.reserve((size_t)count);
+        std::vector<int32_t> queue;
+        std::vector<uint8_t> seen((size_t)count, 0);
+        for (int32_t i = 0; i < count; ++i) {
+            int32_t p = v.parent_of(v.lo + i);
+            if (p < v.lo || p > v.hi) queue.push_back(i);
+        }
+        for (size_t qi = 0; qi < queue.size(); ++qi) {
+            int32_t cur = queue[qi];
+            if (seen[(size_t)cur]) continue;
+            seen[(size_t)cur] = 1;
+            order.push_back(cur);
+            for (int32_t kid : children[(size_t)cur])
+                if (!seen[(size_t)kid]) queue.push_back(kid);
+        }
+        for (size_t qi = order.size(); qi-- > 0;) {
+            int32_t cur = order[qi];
+            int32_t best = 0, total = 1;
+            for (int32_t kid : children[(size_t)cur]) {
+                if (height[(size_t)kid] > best) best = height[(size_t)kid];
+                total += size[(size_t)kid];
+            }
+            height[(size_t)cur] = best + 1;
+            size[(size_t)cur] = total;
+            if (height[(size_t)cur] > 400) return false; // цикл/мусор
+        }
+    }
+
+    // корень префаба: вверх от entry, пока поддерево родителя осталось "игроком"
+    int32_t root = entry - v.lo;
+    int guard = 0;
+    while (guard++ < 64) {
+        int32_t p = v.parent_of(v.lo + root);
+        if (p < v.lo || p > v.hi || p == v.lo + root) break;
+        int32_t pi = p - v.lo;
+        if (size[(size_t)pi] > 400 || size[(size_t)pi] <= size[(size_t)root]) break;
+        root = pi;
+    }
+    {
+        std::vector<int32_t> queue{(int32_t)root};
+        depth[(size_t)root] = 0;
+        for (size_t qi = 0; qi < queue.size(); ++qi) {
+            int32_t cur = queue[qi];
+            for (int32_t kid : children[(size_t)cur])
+                if (depth[(size_t)kid] < 0) { depth[(size_t)kid] = depth[(size_t)cur] + 1; queue.push_back(kid); }
+        }
+    }
+
+    // таз: узел с ребёнком-стволом (высота >= 5) и ровно двумя другими
+    // ветвями высотой >= 4 (ноги); берём самый глубокий от корня префаба
+    int32_t hips_i = -1, hips_best_depth = -1, spine_kid = -1;
+    std::vector<int32_t> leg_roots;
+    for (int32_t i = 0; i < count; ++i) {
+        if (depth[(size_t)i] < 1) continue;
+        const std::vector<int32_t>& kids = children[(size_t)i];
+        if (kids.size() < 3) continue;
+        int32_t trunk = -1, trunk_h = -1;
+        for (int32_t kid : kids)
+            if (height[(size_t)kid] > trunk_h) { trunk_h = height[(size_t)kid]; trunk = kid; }
+        if (trunk_h < 5) continue;
+        std::vector<int32_t> legs;
+        for (int32_t kid : kids)
+            if (kid != trunk && height[(size_t)kid] >= 4) legs.push_back(kid);
+        if (legs.size() != 2) continue;
+        if (depth[(size_t)i] > hips_best_depth) {
+            hips_best_depth = depth[(size_t)i];
+            hips_i = i; spine_kid = trunk; leg_roots = legs;
+        }
+    }
+    if (hips_i < 0) return false;
+    const int32_t hips = v.lo + hips_i;
+
+    // ствол: hips -> head_hint (точно) либо подъём по самым верхним детям
+    std::vector<int32_t> spine; // [hips, ..., top] снизу вверх
+    if (head_hint >= v.lo && head_hint <= v.hi) {
+        std::vector<int32_t> up;
+        skel_chain_up(v, head_hint, up);
+        std::vector<int32_t> rev;
+        for (int32_t c : up) { rev.push_back(c); if (c == hips) break; }
+        if (rev.back() != hips) return false; // голова не в поддереве таза
+        std::reverse(rev.begin(), rev.end());
+        spine = rev;
+    } else {
+        int32_t cur = spine_kid;
+        spine.push_back(hips);
+        Vec3 cur_world{};
+        bool have_world = v.world_at(v.lo + cur, cur_world);
+        while ((int)spine.size() < 10) {
+            spine.push_back(v.lo + cur);
+            int32_t next = -1;
+            float best_score = -1.0e9F;
+            for (int32_t kid : children[(size_t)cur]) {
+                if (height[(size_t)kid] < 2) continue;
+                float score;
+                Vec3 kw{};
+                if (have_world && v.world_at(v.lo + kid, kw)) score = kw.y - cur_world.y;
+                else score = (float)height[(size_t)kid];
+                if (score > best_score) { best_score = score; next = kid; }
+            }
+            if (next < 0) break;
+            cur = next;
+            have_world = v.world_at(v.lo + cur, cur_world);
+        }
+    }
+    if ((int)spine.size() < 3) return false;
+
+    s.bone[BONE_HIPS] = spine[0];
+    if (spine.size() >= 2) s.bone[BONE_SPINE] = spine[1];
+    if (spine.size() >= 3) s.bone[BONE_SPINE1] = spine[2];
+    if (spine.size() >= 4) s.bone[BONE_SPINE2] = spine[3];
+    if (spine.size() >= 5) s.bone[BONE_NECK] = spine[spine.size() - 2];
+    if (spine.size() >= 6) s.bone[BONE_HEAD] = spine[spine.size() - 1];
+
+    // опорное "вперёд" для левых/правых: поворот таза, иначе голова-таз
+    Vec3 hips_world{}, fwd = {0.0F, 0.0F, 1.0F};
+    bool have_hips = v.world_at(hips, hips_world);
+    if (v.inside(hips)) {
+        const Matrix34& hm = (*v.mats)[(size_t)(hips - v.lo)];
+        Vec3 f = rotate_vector(hm.rotation, Vec3{0.0F, 0.0F, 1.0F});
+        float fl = sqrtf(f.x * f.x + f.z * f.z);
+        if (fl > 0.3F) fwd = {f.x / fl, 0.0F, f.z / fl};
+        else if (s.bone[BONE_HEAD] >= 0 && have_hips) {
+            Vec3 hw{};
+            if (v.world_at(s.bone[BONE_HEAD], hw)) {
+                Vec3 d = {hw.x - hips_world.x, 0.0F, hw.z - hips_world.z};
+                float dl = sqrtf(d.x * d.x + d.z * d.z);
+                if (dl > 0.3F) fwd = {d.x / dl, 0.0F, d.z / dl};
+            }
+        }
+    }
+    Vec3 right_dir = {fwd.z, 0.0F, -fwd.x};
+    auto side_of = [&](int32_t node) {
+        Vec3 w{};
+        if (!have_hips || !v.world_at(node, w)) return 0.0F;
+        return (w.x - hips_world.x) * right_dir.x + (w.z - hips_world.z) * right_dir.z;
+    };
+
+    // руки: дети spine2 (или самого верхнего узла ствола ниже шеи),
+    // кроме продолжения ствола, с цепочкой >= 3
+    int32_t chest = s.bone[BONE_SPINE2];
+    if (chest < 0) chest = s.bone[BONE_SPINE1];
+    if (chest < 0) chest = s.bone[BONE_SPINE];
+    if (chest >= 0) {
+        int32_t trunk_next = -1;
+        for (size_t i = 0; i + 1 < spine.size(); ++i)
+            if (spine[i] == chest) { trunk_next = spine[i + 1]; break; }
+        struct ArmChain { std::vector<int32_t> nodes; float side; };
+        std::vector<ArmChain> arms;
+        for (int32_t kid : children[(size_t)(chest - v.lo)]) {
+            if (kid == trunk_next - v.lo) continue;
+            std::vector<int32_t> deep;
+            deepest(kid, deep);
+            if ((int)deep.size() < 3) continue;
+            ArmChain ac;
+            for (int d = 0; d < 4 && d < (int)deep.size(); ++d) ac.nodes.push_back(v.lo + deep[d]);
+            ac.side = side_of(v.lo + deep[0]);
+            arms.push_back(ac);
+        }
+        if (arms.size() == 2) {
+            ArmChain& first = arms[0];
+            ArmChain& second = arms[1];
+            ArmChain* right = first.side >= second.side ? &first : &second;
+            ArmChain* left = right == &first ? &second : &first;
+            auto set_arm = [&](ArmChain& a, int sh, int ar, int fa, int ha) {
+                if (a.nodes.size() >= 4) { s.bone[sh] = a.nodes[0]; s.bone[ar] = a.nodes[1]; s.bone[fa] = a.nodes[2]; s.bone[ha] = a.nodes[3]; }
+                else if (a.nodes.size() == 3) { s.bone[ar] = a.nodes[0]; s.bone[fa] = a.nodes[1]; s.bone[ha] = a.nodes[2]; }
+            };
+            set_arm(*right, BONE_SHOULDER_R, BONE_ARM_R, BONE_FOREARM_R, BONE_HAND_R);
+            set_arm(*left, BONE_SHOULDER_L, BONE_ARM_L, BONE_FOREARM_L, BONE_HAND_L);
+        }
+    }
+
+    // ноги: самые глубокие пути от найденных корней
+    if (leg_roots.size() == 2) {
+        float s0 = side_of(v.lo + leg_roots[0]);
+        float s1 = side_of(v.lo + leg_roots[1]);
+        int32_t root_r = leg_roots[0], root_l = leg_roots[1];
+        if (s0 < s1) { root_r = leg_roots[1]; root_l = leg_roots[0]; }
+        auto set_leg = [&](int32_t root, int up, int lo2, int ft, int toe) {
+            std::vector<int32_t> deep;
+            deepest(root, deep);
+            s.bone[up] = deep.size() > 0 ? v.lo + deep[0] : -1;
+            s.bone[lo2] = deep.size() > 1 ? v.lo + deep[1] : -1;
+            s.bone[ft] = deep.size() > 2 ? v.lo + deep[2] : -1;
+            s.bone[toe] = deep.size() > 3 ? v.lo + deep[3] : -1;
+        };
+        set_leg(root_r, BONE_UPLEG_R, BONE_LEG_R, BONE_FOOT_R, BONE_TOEBASE_R);
+        set_leg(root_l, BONE_UPLEG_L, BONE_LEG_L, BONE_FOOT_L, BONE_TOEBASE_L);
+    }
+
+    int total = 0;
+    for (int b = 0; b < ESP_BONE_COUNT; ++b)
+        if (s.bone[b] >= 0) ++total;
+    return total >= 8;
+}
+
 static bool skel_build(SkelRig& s, uint64_t player) {
     SkelRig tmp;
     tmp.player = player;
+
+    // --- вход в риг, два независимых пути ---
+    // основной: SingleKcc (dump.cs), валидируется backref-ом или кросс-проверкой
+    // головы через CharacterAnimation -> PlayerModelInfo
+    uint64_t data = 0;
+    int32_t entry = -1;
+    bool kcc_ok = false;
     uint64_t kcc = rd_ptr(player + PLAYER_KCC_REFERENCE);
-    if (!skel_plausible_ptr(kcc)) return false;
-
-    uint64_t managed[4] = {0, 0, 0, 0};
-    managed[SK_HEAD] = rd_ptr(kcc + KCC_HEAD_TRANSFORM);
-    if (!skel_plausible_ptr(managed[SK_HEAD])) return false;
-
-    // валидация семантики цепочки, двумя независимыми способами:
-    //  a) SingleKcc.player @0x80 ссылается назад на этого же игрока
-    //  b) CharacterAnimation(+0xC0) -> PlayerModelInfo(+0x30) -> head(+0x20)
-    //     даёт тот же самый Transform головы, что и SingleKcc.head(+0x90)
-    bool backref_ok = rd_ptr(kcc + KCC_PLAYER_BACKREF) == player;
-    uint64_t model_info = 0;
-    bool cross_ok = false;
-    uint64_t char_anim = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
-    if (skel_plausible_ptr(char_anim)) {
-        model_info = rd_ptr(char_anim + CHAR_ANIM_PLAYER_MODEL_INFO);
-        if (skel_plausible_ptr(model_info)) {
-            uint64_t head_via_model = rd_ptr(model_info + MODEL_INFO_HEAD);
-            cross_ok = head_via_model == managed[SK_HEAD];
+    if (skel_plausible_ptr(kcc)) {
+        uint64_t head = rd_ptr(kcc + KCC_HEAD_TRANSFORM);
+        if (skel_plausible_ptr(head)) {
+            bool backref_ok = rd_ptr(kcc + KCC_PLAYER_BACKREF) == player;
+            bool cross_ok = false;
+            uint64_t model_info = 0;
+            uint64_t char_anim = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
+            if (skel_plausible_ptr(char_anim)) {
+                model_info = rd_ptr(char_anim + CHAR_ANIM_PLAYER_MODEL_INFO);
+                if (skel_plausible_ptr(model_info))
+                    cross_ok = rd_ptr(model_info + MODEL_INFO_HEAD) == head;
+            }
+            if (backref_ok || cross_ok) {
+                uint64_t managed[4] = {head, 0, 0, 0};
+                if (skel_plausible_ptr(model_info)) {
+                    managed[SK_BODY]  = rd_ptr(model_info + MODEL_INFO_BODY);
+                    managed[SK_RHAND] = rd_ptr(model_info + MODEL_INFO_RIGHT_HAND);
+                    managed[SK_LHAND] = rd_ptr(model_info + MODEL_INFO_LEFT_HAND);
+                }
+                for (int a = 0; a < 4; ++a) {
+                    if (!skel_plausible_ptr(managed[a])) continue;
+                    uint64_t d = 0;
+                    int32_t ix = -1;
+                    if (!skel_managed_to_index(managed[a], d, ix)) continue;
+                    if (data && d != data) continue; // якорь из чужого батча
+                    data = d;
+                    tmp.anchor[a] = ix;
+                }
+                if (tmp.anchor[SK_HEAD] >= 0 && skel_plausible_ptr(data)) {
+                    entry = tmp.anchor[SK_HEAD];
+                    kcc_ok = true;
+                }
+            }
         }
     }
-    if (!backref_ok && !cross_ok) return false;
-
-    if (skel_plausible_ptr(model_info)) {
-        managed[SK_BODY]  = rd_ptr(model_info + MODEL_INFO_BODY);
-        managed[SK_RHAND] = rd_ptr(model_info + MODEL_INFO_RIGHT_HAND);
-        managed[SK_LHAND] = rd_ptr(model_info + MODEL_INFO_LEFT_HAND);
-    }
-
-    uint64_t data = 0;
-    for (int a = 0; a < 4; ++a) {
-        if (!skel_plausible_ptr(managed[a])) continue;
+    if (entry < 0) {
+        // запасной вход: worldCameraRoot (+0x68) — ровно тот transform, по
+        // которому уже работает позиционный ESP; дальше только топология дерева
+        uint64_t root_managed = rd_ptr(player + PLAYER_TRANSFORM);
         uint64_t d = 0;
         int32_t ix = -1;
-        if (!skel_managed_to_index(managed[a], d, ix)) continue;
-        if (data && d != data) continue; // якорь из чужого батча (устаревшая модель)
+        if (!skel_plausible_ptr(root_managed) || !skel_managed_to_index(root_managed, d, ix))
+            return false;
         data = d;
-        tmp.anchor[a] = ix;
+        entry = ix;
+        tmp.anchor[SK_BODY] = ix;
     }
-    if (tmp.anchor[SK_HEAD] < 0 || !skel_plausible_ptr(data)) return false;
 
     uint64_t matrices = 0, indices = 0;
     if (!skel_resolve_arrays(data, matrices, indices)) return false;
 
-    // окно среза: от минимального якоря (таз/корпус) вниз с запасом на ноги,
-    // вверх добираем предков через skel_read_slice
-    int32_t lo = tmp.anchor[SK_HEAD];
-    for (int a = 0; a < 4; ++a)
-        if (tmp.anchor[a] >= 0 && tmp.anchor[a] < lo) lo = tmp.anchor[a];
-    int32_t hi = tmp.anchor[SK_HEAD];
-    for (int a = 0; a < 4; ++a)
-        if (tmp.anchor[a] > hi) hi = tmp.anchor[a];
-    lo -= 96;  // запас вниз по дереву родителей (до таза и выше)
-    hi += 160; // запас вверх по индексам: ноги/стопы создаются позже родителей
+    int32_t lo, hi;
+    if (kcc_ok) {
+        lo = entry; hi = entry;
+        for (int a = 0; a < 4; ++a) {
+            if (tmp.anchor[a] >= 0 && tmp.anchor[a] < lo) lo = tmp.anchor[a];
+            if (tmp.anchor[a] > hi) hi = tmp.anchor[a];
+        }
+        lo -= 96;
+        hi += 160;
+    } else {
+        lo = entry - 128; // индексы батча не обязаны быть упорядочены по дереву
+        hi = entry + 288;
+    }
     if (lo < 0) lo = 0;
     if (hi - lo > 1024) hi = lo + 1024;
 
-    if (!skel_read_slice(tmp, matrices, indices, lo, hi, tmp.anchor[SK_HEAD])) return false;
-    // якоря, не попавшие в реально прочитанный срез, отбрасываем
+    if (!skel_read_slice(tmp, matrices, indices, lo, hi, entry)) return false;
     for (int a = 0; a < 4; ++a)
         if (tmp.anchor[a] > hi) tmp.anchor[a] = -1;
-    if (tmp.anchor[SK_HEAD] < 0) return false;
+    if (entry > hi) return false;
     tmp.slice_lo = lo;
     tmp.slice_hi = hi;
+    tmp.entry = entry;
 
     SkelSliceView view{&tmp.mats, &tmp.idxs, &tmp.anc_mat, &tmp.anc_idx, &tmp.anc_par, lo, hi};
-    // валидация массивов: родитель почти всегда меньше ребёнка (порядок
-    // создания Unity); сильные нарушения означают не те массивы
-    {
-        int violations = 0;
-        for (int32_t i = lo; i <= hi; ++i) {
-            int32_t p = view.parent_of(i);
-            if (p >= i) ++violations;
-        }
-        if (violations * 4 > (hi - lo + 1)) return false;
-    }
 
     tmp.transform_data = data;
-    tmp.labeled = skel_label(tmp, view);
+    tmp.kcc_anchored = kcc_ok;
+    tmp.labeled = false;
+    if (kcc_ok) tmp.labeled = skel_label(tmp, view);
+    if (!tmp.labeled)
+        tmp.labeled = skel_label_structural(tmp, view, entry, kcc_ok ? tmp.anchor[SK_HEAD] : -1);
     tmp.last_ok_ms = skel_now_ms();
     s = std::move(tmp); // фиксируем только успешную сборку целиком
     return true;
@@ -1190,10 +1451,10 @@ static bool skel_build(SkelRig& s, uint64_t player) {
 
 static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox& box) {
     box.skel_valid = false;
-    if (s.anchor[SK_HEAD] < 0 || !s.transform_data) return;
+    if (!s.transform_data || s.slice_hi < s.slice_lo) return;
 
     // модель пересоздали (переключение оружия/скина)? — якорь уходит в другой батч
-    {
+    if (s.kcc_anchored) {
         uint64_t kcc = rd_ptr(s.player + PLAYER_KCC_REFERENCE);
         if (!skel_plausible_ptr(kcc)) { s.last_ok_ms = 0; return; }
         uint64_t head_managed = rd_ptr(kcc + KCC_HEAD_TRANSFORM);
@@ -1208,8 +1469,8 @@ static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox
 
     uint64_t matrices = 0, indices = 0;
     if (!skel_resolve_arrays(s.transform_data, matrices, indices)) return;
-    if (!skel_read_slice(s, matrices, indices, s.slice_lo, s.slice_hi, s.anchor[SK_HEAD])) return;
-    if (s.anchor[SK_HEAD] > s.slice_hi) { s.last_ok_ms = 0; return; }
+    if (s.entry < s.slice_lo || s.entry > s.slice_hi) { s.last_ok_ms = 0; return; }
+    if (!skel_read_slice(s, matrices, indices, s.slice_lo, s.slice_hi, s.entry)) return;
 
     SkelSliceView view{&s.mats, &s.idxs, &s.anc_mat, &s.anc_idx, &s.anc_par, s.slice_lo, s.slice_hi};
 
@@ -1225,7 +1486,7 @@ static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox
             else if (b == BONE_SPINE1 && s.anchor[SK_BODY] >= 0) index = s.anchor[SK_BODY];
             else if (b == BONE_HAND_R && s.anchor[SK_RHAND] >= 0) index = s.anchor[SK_RHAND];
             else if (b == BONE_HAND_L && s.anchor[SK_LHAND] >= 0) index = s.anchor[SK_LHAND];
-            else if (b == BONE_NECK) index = view.parent_of(s.anchor[SK_HEAD]);
+            else if (b == BONE_NECK && s.anchor[SK_HEAD] >= 0) index = view.parent_of(s.anchor[SK_HEAD]);
             else continue;
             if (index < view.lo || index > view.hi) continue;
         } else if (index < 0) {
