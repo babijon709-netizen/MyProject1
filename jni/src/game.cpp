@@ -1508,6 +1508,22 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
             };
             sweep(3);
             if (arms.size() < 2) sweep(2); // короткая культя руки тоже рука
+            if (arms.size() == 1) {
+                // вторая попытка: короткая ветка (например, оружие в руке
+                // сократило цепочку) — берём и двухзвенные кандидаты
+                for (int32_t host2 : arm_hosts) {
+                    for (int32_t kid : children[(size_t)(host2 - v.lo)]) {
+                        int32_t abs_kid = v.lo + kid;
+                        if (abs_kid == neck_abs) continue;
+                        if (cand.on_chain && in_chain(abs_kid)) continue;
+                        if (height[(size_t)kid] != 2) continue;
+                        Arm a;
+                        deepest4(kid, a.nodes);
+                        a.side = side_of(abs_kid);
+                        arms.push_back(a);
+                    }
+                }
+            }
             if (arms.size() >= 2) {
                 // R = самый правый кандидат, L = самый ЛЕВЫЙ (по знаку стороны):
                 // колчан/ремень на правой стороне груди не должен занимать
@@ -1657,9 +1673,27 @@ static bool skel_build(SkelRig& s, uint64_t player) {
     tmp.transform_data = data;
     tmp.kcc_anchored = kcc_ok;
     tmp.labeled = false;
-    if (kcc_ok) tmp.labeled = skel_label(tmp, view);
-    if (!tmp.labeled)
+    bool anchor_labeled = false;
+    if (kcc_ok) anchor_labeled = skel_label(tmp, view);
+    if (anchor_labeled) {
+        tmp.labeled = true;
+        // у якорной разметки бывают пробелы (левая рука без держателя
+        // оружия и т.п.) — дозаполняем ТОЛЬКО пустые слоты структурной
+        // разметкой; существующие кости не трогаем
+        int missing = 0;
+        for (int b = 0; b < ESP_BONE_COUNT; ++b)
+            if (tmp.bone[b] < 0) ++missing;
+        if (missing > 0) {
+            SkelRig extra;
+            extra.player = player;
+            if (skel_label_structural(extra, view, entry, tmp.anchor[SK_HEAD])) {
+                for (int b = 0; b < ESP_BONE_COUNT; ++b)
+                    if (tmp.bone[b] < 0 && extra.bone[b] >= 0) tmp.bone[b] = extra.bone[b];
+            }
+        }
+    } else {
         tmp.labeled = skel_label_structural(tmp, view, entry, kcc_ok ? tmp.anchor[SK_HEAD] : -1);
+    }
     {
         // риг может выходить за окно среза (индексы батча не упорядочены по
         // дереву). Всегда пробуем широкое окно и берём лучшую попытку:
@@ -1712,7 +1746,7 @@ static bool skel_build(SkelRig& s, uint64_t player) {
     return true;
 }
 
-static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox& box) {
+static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox& box, const Vec3* player_pos = nullptr) {
     box.skel_valid = false;
     if (!s.transform_data || s.slice_hi < s.slice_lo) return;
 
@@ -1748,6 +1782,21 @@ static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox
 
     SkelSliceView view{&s.mats, &s.idxs, &s.anc_mat, &s.anc_idx, &s.anc_par, s.slice_lo, s.slice_hi};
 
+    // риг обязан висеть на самом игроке: если таз оказался далеко от позиции
+    // игрока (мир пересоздан, батч перетасован) — риг устарел, пересобираем
+    if (player_pos && s.labeled && s.bone[BONE_HIPS] >= view.lo && s.bone[BONE_HIPS] <= view.hi) {
+        Vec3 hips_world{};
+        if (view.world_at(s.bone[BONE_HIPS], hips_world)) {
+            float dx = hips_world.x - player_pos->x;
+            float dy = hips_world.y - player_pos->y;
+            float dz = hips_world.z - player_pos->z;
+            if (fabsf(dx) > 3.0F || fabsf(dy) > 3.0F || fabsf(dz) > 3.0F) {
+                s.last_ok_ms = 0;
+                return;
+            }
+        }
+    }
+
     int projected = 0;
     for (int b = 0; b < ESP_BONE_COUNT; ++b) {
         box.skel_visible[b] = false;
@@ -1782,7 +1831,7 @@ static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox
     if (box.skel_valid) s.last_ok_ms = skel_now_ms();
 }
 
-static void skel_update_player(uint64_t player, const Mat4& vp, float sw, float sh, EspBox& box) {
+static void skel_update_player(uint64_t player, const Mat4& vp, float sw, float sh, EspBox& box, const Vec3* player_pos = nullptr) {
     box.skel_valid = false;
     SkelRig* s = nullptr;
     for (SkelRig& entry : g_skel_rigs)
@@ -1804,7 +1853,7 @@ static void skel_update_player(uint64_t player, const Mat4& vp, float sw, float 
         s->last_ok_ms = 0;
         if (!skel_build(*s, player)) return;
     }
-    skel_fill_box(*s, vp, sw, sh, box);
+    skel_fill_box(*s, vp, sw, sh, box, player_pos);
     if (!box.skel_valid && s->last_ok_ms && now - s->last_ok_ms > 4000) {
         s->last_ok_ms = 0;
         s->next_try_ms = now + 1500;
@@ -1927,7 +1976,22 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height, bool wi
 
     static std::vector<uint64_t> s_transforms;
     std::vector<uint64_t> refreshed = read_configured_player_transforms();
-    if (!refreshed.empty()) s_transforms = std::move(refreshed);
+    if (!refreshed.empty()) {
+        // мир пересоздан (смерть/респаун): все PlayerManager заменились —
+        // рантайм-валидации и кэши скелетов от старого мира недействительны
+        if (!s_transforms.empty()) {
+            bool overlap = false;
+            for (uint64_t t : refreshed)
+                if (std::find(s_transforms.begin(), s_transforms.end(), t) != s_transforms.end()) { overlap = true; break; }
+            if (!overlap) {
+                g_player_position_validated = false;
+                g_use_direct_player_position = true;
+                g_matrix_configuration_validated = false;
+                g_skel_rigs.clear();
+            }
+        }
+        s_transforms = std::move(refreshed);
+    }
     if (s_transforms.empty()) return result;
 
     if (!g_player_position_validated) {
@@ -2056,7 +2120,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height, bool wi
             box.corners[corner][1] = projected ? sc.y : -1.0F;
         }
         if (with_skeleton)
-            skel_update_player(s_transforms[i], vp, sw, sh, box);
+            skel_update_player(s_transforms[i], vp, sw, sh, box, &feet);
         result.push_back(box);
     }
 
