@@ -692,7 +692,6 @@ struct SkelRig {
     std::vector<int32_t>  anc_idx, anc_par;
 };
 static std::vector<SkelRig> g_skel_rigs;
-static bool g_skel_world_shift = false; // мир пересоздан: риги массово устарели
 
 enum { SK_HEAD = 0, SK_BODY = 1, SK_RHAND = 2, SK_LHAND = 3 };
 
@@ -1461,7 +1460,7 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
                     if (!node_y(v.lo + kid, ky)) continue;
                     if (best < 0 || ky < best_y) { best_y = ky; best = kid; }
                 }
-                if (best < 0 && first_kid >= 0 && height[(size_t)first_kid] >= 4 - i)
+                if (best < 0 && first_kid >= 0)
                     best = first_kid; // Y недоступен — продолжаем топологически
                 if (best < 0) { s.bone[slots[i]] = -1; break; }
                 s.bone[slots[i]] = v.lo + best;
@@ -1487,34 +1486,20 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
         {
             struct Arm { int32_t nodes[4]; float side; };
             std::vector<Arm> arms;
-            auto sweep = [&](int min_height) {
-                arms.clear();
-                for (int32_t host : arm_hosts) {
+            for (int32_t host : arm_hosts) {
                 for (int32_t kid : children[(size_t)(host - v.lo)]) {
                     int32_t abs_kid = v.lo + kid;
                     if (abs_kid == neck_abs) continue;
                     if (cand.on_chain && in_chain(abs_kid)) continue;
-                    if (height[(size_t)kid] < min_height) continue;
+                    if (height[(size_t)kid] < 3) continue;
                     Arm a;
                     deepest4(kid, a.nodes);
-                    // средняя латеральность цепочки: у руки кисть сильно вбок,
-                    // у колчана/ремня все узлы висят у позвоночника
-                    float acc = 0.0F; int got = 0;
-                    for (int i = 0; i < 4; ++i) {
-                        if (a.nodes[i] < 0) continue;
-                        acc += side_of(a.nodes[i]);
-                        ++got;
-                    }
-                    a.side = got ? acc / got : side_of(abs_kid);
+                    a.side = side_of(abs_kid);
                     arms.push_back(a);
                 }
-                }
-            };
-            sweep(3);
-            if (arms.size() < 2) sweep(2); // короткая культя руки тоже рука
+            }
             if (arms.size() == 1) {
-                // вторая попытка: короткая ветка (например, оружие в руке
-                // сократило цепочку) — берём и двухзвенные кандидаты
+                // вторая попытка: короткая ветка (оружие в руке съело цепочку)
                 for (int32_t host2 : arm_hosts) {
                     for (int32_t kid : children[(size_t)(host2 - v.lo)]) {
                         int32_t abs_kid = v.lo + kid;
@@ -1580,43 +1565,9 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
     });
     for (auto& cand : cands)
         if (try_candidate(cand, false)) return true;
-    // частичный проход: пробуем ВСЕ кандидаты и оставляем лучший результат
-    // (первый попавшийся может быть «только ноги», хотя соседний кандидат
-    // даёт ноги+позвоночник+руки)
-    {
-        SkelRig best;
-        int best_bones = -1;
-        bool have_best = false;
-        for (auto& cand : cands) {
-            SkelRig attempt;
-            attempt.player = s.player;
-            // попытка в отдельном риге: try_candidate пишет в s.bone
-            SkelRig probe = s;
-            bool ok = false;
-            {
-                SkelRig& target = attempt;
-                target = s; // копия для восстановления после попытки
-                s = probe;
-                ok = try_candidate(cand, true);
-                probe = s;   // результат попытки
-                s = target;  // восстановление
-            }
-            if (!ok) continue;
-            int bones = 0;
-            for (int b = 0; b < ESP_BONE_COUNT; ++b)
-                if (probe.bone[b] >= 0) ++bones;
-            if (bones > best_bones) {
-                best_bones = bones;
-                best = probe;
-                have_best = true;
-            }
-        }
-        if (have_best) {
-            // сохранить результат лучшей частичной попытки
-            for (int b = 0; b < ESP_BONE_COUNT; ++b) s.bone[b] = best.bone[b];
-            return true;
-        }
-    }
+    // частичный проход: первый валидный кандидат (device-проверенный путь)
+    for (auto& cand : cands)
+        if (try_candidate(cand, true)) return true;
     return false;
 }
 
@@ -1797,7 +1748,7 @@ static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox
         uint64_t entry_managed = 0;
         if (s.kcc_anchored) {
             uint64_t kcc = rd_ptr(s.player + PLAYER_KCC_REFERENCE);
-            if (!skel_plausible_ptr(kcc)) { s.last_ok_ms = 0; g_skel_world_shift = true; return; }
+            if (!skel_plausible_ptr(kcc)) { s.last_ok_ms = 0; return; }
             entry_managed = rd_ptr(kcc + KCC_HEAD_TRANSFORM);
         } else {
             entry_managed = rd_ptr(s.player + PLAYER_TRANSFORM); // worldCameraRoot
@@ -1808,7 +1759,6 @@ static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox
         if (!skel_plausible_ptr(entry_managed) || !skel_managed_to_index(entry_managed, d, ix) ||
             d != s.transform_data || ix != want) {
             s.last_ok_ms = 0; // заставит skel_update перестроить риг
-            g_skel_world_shift = true;
             return;
         }
     }
@@ -2160,14 +2110,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height, bool wi
         if (with_skeleton)
             skel_update_player(s_transforms[i], vp, sw, sh, box, &feet);
         result.push_back(box);
-    }
-
-    // мир пересоздан (смерть/возрождение): позиции и layout батча могли
-    // измениться — сбрасываем валидацию, существующие механизмы перепроверят
-    if (g_skel_world_shift) {
-        g_skel_world_shift = false;
-        g_player_position_validated = false;
-        g_transform_hierarchy_layout_valid = false;
     }
 
     // подчистка кэша скелетов умерших/ушедших игроков
