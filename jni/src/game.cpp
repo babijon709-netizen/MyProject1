@@ -679,6 +679,7 @@ struct SkelRig {
     int32_t  anchor[4] = {-1, -1, -1, -1}; // HEAD, BODY, RHAND, LHAND (индексы батча)
     int32_t  slice_lo = 0, slice_hi = 0;   // окно среза батча
     int32_t  entry = -1;                   // точка входа в риг (голова или корень)
+    bool     slice_wide = false;            // срез расширен повторной попыткой
     int32_t  bone[ESP_BONE_COUNT] {};
     bool     labeled = false;
     bool     kcc_anchored = false; // якоря из SingleKcc; false = структурная разметка
@@ -1335,42 +1336,94 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
             }
         }
         if (s.bone[BONE_HIPS] < 0) {
-            // глобальный кандидат: подъём от таза по максимальному Y
+            // глобальный кандидат. Hips — корень скелета (Mixamo): спина это
+            // ДЕТИ таза, поднимаемся по max-Y, ИСКЛЮЧАЯ поддеревья ног.
+            // Если подъём остановился — достраиваем родителями таза.
             s.bone[BONE_HIPS] = hips_abs;
-            int32_t cur = cand.rel_hips;
+            std::vector<uint8_t> legset((size_t)count, 0);
+            auto mark = [&](int32_t rel_root) {
+                std::vector<int32_t> st{rel_root};
+                int guard = 0;
+                while (!st.empty() && guard++ < 300) {
+                    int32_t c = st.back(); st.pop_back();
+                    legset[(size_t)c] = 1;
+                    for (int32_t kid : children[(size_t)c]) st.push_back(kid);
+                }
+            };
+            mark(cand.leg_r);
+            mark(cand.leg_l);
+            int32_t cur_rel = cand.rel_hips;
             float cur_y = 0.0F;
             node_y(hips_abs, cur_y);
             const int spine_bones[3] = {BONE_SPINE, BONE_SPINE1, BONE_SPINE2};
             for (int si = 0; si < 3; ++si) {
                 int32_t best = -1;
                 float best_y = cur_y;
-                for (int32_t kid : children[(size_t)cur]) {
+                for (int32_t kid : children[(size_t)cur_rel]) {
+                    if (legset[(size_t)kid]) continue;
                     float ky = 0.0F;
                     if (!node_y(v.lo + kid, ky)) continue;
                     if (ky > best_y + 0.01F) { best_y = ky; best = kid; }
                 }
                 if (best < 0) break;
                 s.bone[spine_bones[si]] = v.lo + best;
-                cur = best;
+                cur_rel = best;
                 cur_y = best_y;
             }
-            // шея = самый высокий ребёнок верхнего узла (анатомически выше плеч)
-            int32_t top = cur;
-            float top_y = cur_y;
-            int32_t neck_rel = -1;
-            float neck_y = top_y;
-            for (int32_t kid : children[(size_t)top]) {
-                float ky = 0.0F;
-                if (!node_y(v.lo + kid, ky)) continue;
-                if (ky > neck_y + 0.01F) { neck_y = ky; neck_rel = kid; }
+            // шея: самый высокий ребёнок верха спины
+            {
+                int32_t neck_rel = -1;
+                float ny = cur_y;
+                for (int32_t kid : children[(size_t)cur_rel]) {
+                    if (legset[(size_t)kid]) continue;
+                    float ky = 0.0F;
+                    if (!node_y(v.lo + kid, ky)) continue;
+                    if (ky > ny + 0.01F) { ny = ky; neck_rel = kid; }
+                }
+                if (neck_rel >= 0) neck_abs = v.lo + neck_rel;
             }
-            neck_abs = neck_rel >= 0 ? v.lo + neck_rel : (s.bone[BONE_SPINE2] >= 0 ? s.bone[BONE_SPINE2] : hips_abs);
+            if (neck_abs < 0) {
+                // подъём не удался: шея/спина из родителей таза (лучше, чем пусто)
+                int32_t up[4] = {-1, -1, -1, -1};
+                int32_t cur = hips_abs;
+                for (int k = 0; k < 4; ++k) {
+                    int32_t p = v.parent_of(cur);
+                    if (p < v.lo || p > v.hi) break;
+                    up[k] = p;
+                    cur = p;
+                }
+                if (s.bone[BONE_SPINE] < 0 && up[0] >= 0) s.bone[BONE_SPINE] = up[0];
+                if (s.bone[BONE_SPINE1] < 0 && up[1] >= 0) s.bone[BONE_SPINE1] = up[1];
+                if (s.bone[BONE_SPINE2] < 0 && up[2] >= 0) s.bone[BONE_SPINE2] = up[2];
+                neck_abs = up[3] >= 0 ? up[3] : (up[0] >= 0 ? up[0] : hips_abs);
+            }
+            // голова: Y-вершина поддерева таза (исключая ветви ног);
+            // голова анатомически выше всего, кроме поднятых рук
+            {
+                // камера точки входа висит выше головы — исключаем её поддерево
+                if (v.inside(anchor_node)) mark(anchor_node - v.lo);
+                int32_t head = -1;
+                float best_y = -1.0e9F;
+                std::vector<int32_t> st{cand.rel_hips};
+                int guard = 0;
+                while (!st.empty() && guard++ < 600) {
+                    int32_t c = st.back(); st.pop_back();
+                    if (!legset[(size_t)c]) {
+                        float y = 0.0F;
+                        if (node_y(v.lo + c, y) && y > best_y) { best_y = y; head = v.lo + c; }
+                    }
+                    for (int32_t kid : children[(size_t)c]) st.push_back(kid);
+                }
+                if (head >= 0) s.bone[BONE_HEAD] = head;
+            }
         }
         s.bone[BONE_NECK] = neck_abs;
 
-        // голова
+        // голова (для глобальных кандидатов уже найдена вершиной поддерева)
         if (anchor_node == head_hint) {
             s.bone[BONE_HEAD] = head_hint;
+        } else if (s.bone[BONE_HEAD] >= 0) {
+            // оставляем вершину поддерева
         } else if (neck_abs >= v.lo) {
             int32_t head = -1;
             float best_y = -1.0e9F;
@@ -1391,22 +1444,46 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
         int32_t leg_r = cand.leg_r, leg_l = cand.leg_l;
         float sr = side_of(v.lo + leg_r), sl = side_of(v.lo + leg_l);
         if (sr < sl) std::swap(leg_r, leg_l);
-        {
-            int out[4];
-            deepest4(leg_r, out);
-            s.bone[BONE_UPLEG_R] = out[0]; s.bone[BONE_LEG_R] = out[1]; s.bone[BONE_FOOT_R] = out[2]; s.bone[BONE_TOEBASE_R] = out[3];
-            deepest4(leg_l, out);
-            s.bone[BONE_UPLEG_L] = out[0]; s.bone[BONE_LEG_L] = out[1]; s.bone[BONE_FOOT_L] = out[2]; s.bone[BONE_TOEBASE_L] = out[3];
-        }
+        // спуск по минимальному Y: бедро->колено->стопа->носок анатомически
+        // монотонно вниз; юбки/ножны/пальцы сбить не могут
+        auto descend_leg = [&](int32_t rel_root, int up, int lo2, int ft, int toe) {
+            const int slots[4] = {up, lo2, ft, toe};
+            int32_t cur = rel_root;
+            s.bone[up] = v.lo + rel_root;
+            for (int i = 1; i < 4; ++i) {
+                int32_t best = -1;
+                float best_y = 0.0F;
+                for (int32_t kid : children[(size_t)cur]) {
+                    float ky = 0.0F;
+                    if (!node_y(v.lo + kid, ky)) continue;
+                    if (best < 0 || ky < best_y) { best_y = ky; best = kid; }
+                }
+                if (best < 0) { s.bone[slots[i]] = -1; break; }
+                s.bone[slots[i]] = v.lo + best;
+                cur = best;
+            }
+        };
+        descend_leg(leg_r, BONE_UPLEG_R, BONE_LEG_R, BONE_FOOT_R, BONE_TOEBASE_R);
+        descend_leg(leg_l, BONE_UPLEG_L, BONE_LEG_L, BONE_FOOT_L, BONE_TOEBASE_L);
 
         // руки: дети груди (spine2/верх подъёма), кроме шеи и нисходящего ствола
         int32_t chest = s.bone[BONE_SPINE2];
         if (chest < 0) chest = s.bone[BONE_SPINE1];
         if (chest < 0) chest = s.bone[BONE_SPINE];
-        if (chest >= 0) {
+        // дополнительно: плечи могут висеть на любом узле спины — собираем
+        // кандидатов-рук со всех трёх spine-узлов сразу
+        std::vector<int32_t> spine_nodes;
+        if (s.bone[BONE_SPINE]  >= 0) spine_nodes.push_back(s.bone[BONE_SPINE]);
+        if (s.bone[BONE_SPINE1] >= 0) spine_nodes.push_back(s.bone[BONE_SPINE1]);
+        if (s.bone[BONE_SPINE2] >= 0) spine_nodes.push_back(s.bone[BONE_SPINE2]);
+        std::vector<int32_t> arm_hosts = spine_nodes;
+        if (chest >= 0 && std::find(arm_hosts.begin(), arm_hosts.end(), chest) == arm_hosts.end())
+            arm_hosts.push_back(chest);
+        {
             struct Arm { int32_t nodes[4]; float side; };
             std::vector<Arm> arms;
-            for (int32_t kid : children[(size_t)(chest - v.lo)]) {
+            for (int32_t host : arm_hosts) {
+            for (int32_t kid : children[(size_t)(host - v.lo)]) {
                 int32_t abs_kid = v.lo + kid;
                 if (abs_kid == neck_abs) continue;
                 if (cand.on_chain && in_chain(abs_kid)) continue;
@@ -1415,6 +1492,7 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
                 deepest4(kid, a.nodes);
                 a.side = side_of(abs_kid);
                 arms.push_back(a);
+            }
             }
             if (arms.size() >= 2) {
                 std::sort(arms.begin(), arms.end(), [](const Arm& a, const Arm& b) { return a.side > b.side; });
@@ -1438,7 +1516,7 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
         bool ok_top = bone_y(BONE_NECK, y_top) || bone_y(BONE_SPINE2, y_top) || bone_y(BONE_SPINE, y_top);
         bool ok_foot = bone_y(BONE_FOOT_R, y_foot) || bone_y(BONE_FOOT_L, y_foot);
         if (ok_hips && ok_foot && y_hips - y_foot < 0.45F) return false; // руки-под-ноги отбраковка
-        if (ok_hips && ok_top && y_top < y_hips) return false;
+        if (ok_hips && ok_top && y_top < y_hips - 0.2F) return false;
         if (have_hw) {
             for (int b = 0; b < ESP_BONE_COUNT; ++b) {
                 if (s.bone[b] < 0) continue;
@@ -1537,8 +1615,8 @@ static bool skel_build(SkelRig& s, uint64_t player) {
         lo -= 96;
         hi += 160;
     } else {
-        lo = entry - 128; // индексы батча не обязаны быть упорядочены по дереву
-        hi = entry + 288;
+        lo = entry - 256; // индексы батча не обязаны быть упорядочены по дереву
+        hi = entry + 384;
     }
     if (lo < 0) lo = 0;
     if (hi - lo > 1024) hi = lo + 1024;
@@ -1559,6 +1637,53 @@ static bool skel_build(SkelRig& s, uint64_t player) {
     if (kcc_ok) tmp.labeled = skel_label(tmp, view);
     if (!tmp.labeled)
         tmp.labeled = skel_label_structural(tmp, view, entry, kcc_ok ? tmp.anchor[SK_HEAD] : -1);
+    {
+        // риг может выходить за окно среза (индексы батча не упорядочены по
+        // дереву). Всегда пробуем широкое окно и берём лучшую попытку:
+        // +100 за стопы, реально падающие ниже таза (руки-самозванцы
+        // не проходят), остальное — число костей
+        auto score = [&](SkelRig& r, const SkelSliceView& rv) {
+            float sc = 0.0F;
+            for (int b = 0; b < ESP_BONE_COUNT; ++b) if (r.bone[b] >= 0) sc += 1.0F;
+            Vec3 hw{};
+            if (r.bone[BONE_HIPS] >= 0 && rv.world_at(r.bone[BONE_HIPS], hw)) {
+                int deep = 0;
+                for (int b : {BONE_FOOT_R, BONE_FOOT_L}) {
+                    Vec3 f{};
+                    if (r.bone[b] >= 0 && rv.world_at(r.bone[b], f) && hw.y - f.y >= 0.5F) ++deep;
+                }
+                if (deep == 2) sc += 100.0F;
+                else if (deep == 1) sc += 40.0F;
+            }
+            return sc;
+        };
+        float base_score = tmp.labeled ? score(tmp, view) : -1.0F;
+        int32_t wlo = lo, whi = hi;
+        if (!kcc_ok) { wlo = entry - 512; whi = entry + 768; }
+        else { wlo = lo - 160; whi = hi + 160; }
+        if (wlo < 0) wlo = 0;
+        if (whi - wlo > 1600) whi = wlo + 1600;
+        if (whi > hi) {
+            SkelRig probe;
+            probe.player = player;
+            if (skel_read_slice(probe, matrices, indices, wlo, whi, entry)) {
+                SkelSliceView wview{&probe.mats, &probe.idxs, &probe.anc_mat, &probe.anc_idx, &probe.anc_par, wlo, whi};
+                SkelRig attempt;
+                attempt.player = player;
+                attempt.kcc_anchored = kcc_ok;
+                if (skel_label_structural(attempt, wview, entry, kcc_ok ? tmp.anchor[SK_HEAD] : -1)) {
+                    float wide_score = score(attempt, wview);
+                    if (wide_score > base_score) {
+                        attempt.labeled = true;
+                        attempt.slice_lo = wlo; attempt.slice_hi = whi; attempt.entry = entry;
+                        attempt.transform_data = data; attempt.slice_wide = true;
+                        for (int a = 0; a < 4; ++a) attempt.anchor[a] = tmp.anchor[a];
+                        tmp = std::move(attempt);
+                    }
+                }
+            }
+        }
+    }
     tmp.last_ok_ms = skel_now_ms();
     s = std::move(tmp); // фиксируем только успешную сборку целиком
     return true;
