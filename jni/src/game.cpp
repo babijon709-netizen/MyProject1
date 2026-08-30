@@ -1454,11 +1454,15 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
             for (int i = 1; i < 4; ++i) {
                 int32_t best = -1;
                 float best_y = 0.0F;
+                int32_t first_kid = -1;
                 for (int32_t kid : children[(size_t)cur]) {
+                    if (first_kid < 0) first_kid = kid;
                     float ky = 0.0F;
                     if (!node_y(v.lo + kid, ky)) continue;
                     if (best < 0 || ky < best_y) { best_y = ky; best = kid; }
                 }
+                if (best < 0 && first_kid >= 0 && height[(size_t)first_kid] >= 4 - i)
+                    best = first_kid; // Y недоступен — продолжаем топологически
                 if (best < 0) { s.bone[slots[i]] = -1; break; }
                 s.bone[slots[i]] = v.lo + best;
                 cur = best;
@@ -1568,17 +1572,51 @@ static bool skel_label_structural(SkelRig& s, const SkelSliceView& v, int32_t en
         return total >= 8;
     };
 
-    // порядок: цепочечные (точный позвоночник), затем глобальные (device-путь v4);
-    // внутри группы — по величине падения: ноги (0.9м) всегда падают сильнее
-    // рук с пальцами (0.45-0.7м), поэтому настоящий таз пробуется первым
+    // порядок: цепочечные (точный позвоночник), затем глобальные (device-путь);
+    // внутри группы — по величине падения (ноги падают сильнее рук)
     std::stable_sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
         if (a.on_chain != b.on_chain) return a.on_chain > b.on_chain;
         return a.drop > b.drop;
     });
     for (auto& cand : cands)
         if (try_candidate(cand, false)) return true;
-    for (auto& cand : cands)
-        if (try_candidate(cand, true)) return true;
+    // частичный проход: пробуем ВСЕ кандидаты и оставляем лучший результат
+    // (первый попавшийся может быть «только ноги», хотя соседний кандидат
+    // даёт ноги+позвоночник+руки)
+    {
+        SkelRig best;
+        int best_bones = -1;
+        bool have_best = false;
+        for (auto& cand : cands) {
+            SkelRig attempt;
+            attempt.player = s.player;
+            // попытка в отдельном риге: try_candidate пишет в s.bone
+            SkelRig probe = s;
+            bool ok = false;
+            {
+                SkelRig& target = attempt;
+                target = s; // копия для восстановления после попытки
+                s = probe;
+                ok = try_candidate(cand, true);
+                probe = s;   // результат попытки
+                s = target;  // восстановление
+            }
+            if (!ok) continue;
+            int bones = 0;
+            for (int b = 0; b < ESP_BONE_COUNT; ++b)
+                if (probe.bone[b] >= 0) ++bones;
+            if (bones > best_bones) {
+                best_bones = bones;
+                best = probe;
+                have_best = true;
+            }
+        }
+        if (have_best) {
+            // сохранить результат лучшей частичной попытки
+            for (int b = 0; b < ESP_BONE_COUNT; ++b) s.bone[b] = best.bone[b];
+            return true;
+        }
+    }
     return false;
 }
 
@@ -1790,7 +1828,7 @@ static void skel_fill_box(SkelRig& s, const Mat4& vp, float sw, float sh, EspBox
             float dx = hips_world.x - player_pos->x;
             float dy = hips_world.y - player_pos->y;
             float dz = hips_world.z - player_pos->z;
-            if (fabsf(dx) > 3.0F || fabsf(dy) > 3.0F || fabsf(dz) > 3.0F) {
+            if (dx * dx + dy * dy + dz * dz > 100.0F) { // >10м — точно чужой/устаревший риг
                 s.last_ok_ms = 0;
                 return;
             }
