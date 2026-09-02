@@ -44,6 +44,23 @@ inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // lastSavedPosition
 inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (UnityEngine.GameObject)
 
+// Ragdoll bone list route (dump.cs) — game-maintained list of rig bone
+// transforms, no name matching needed:
+//   PlayerManager.kccReference (0xB0, possibly a wrapper) -> KCC
+//   KCC.ZMl = CharacterAnimation (0x108); KCC.player back-ref (0x78) validates
+//   CharacterAnimation.ragdoll (0x38); CharacterAnimation.ZCu back-ref (0x78)
+//   Ragdoll.m_Pelvis Rigidbody (0x20), Ragdoll.m_Bones BodyPart[] (0x88)
+//   Ragdoll.BodyPart.transform (0x10)
+inline constexpr std::uint64_t PLAYER_KCC_REFERENCE        = 0xB0;
+inline constexpr std::uint64_t KCC_PLAYER_BACKREF          = 0x78;
+inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION     = 0x108;
+inline constexpr std::uint64_t CHAR_ANIM_PLAYER_BACKREF    = 0x78;
+inline constexpr std::uint64_t CHAR_ANIM_RAGDOLL           = 0x38;
+inline constexpr std::uint64_t RAGDOLL_PELVIS_RIGIDBODY    = 0x20;
+inline constexpr std::uint64_t RAGDOLL_BONES_ARRAY         = 0x88;
+inline constexpr std::uint64_t RAGDOLL_BODYPART_TRANSFORM  = 0x10;
+inline constexpr std::uint64_t IL2CPP_ARRAY_LENGTH         = 0x18;
+
 // Native Unity object layout — reversed from libunity.so in this repo:
 //   Transform::get_childCount_Injected -> ldr w0, [x0, #0x58]
 //   Transform::GetChild helper         -> ldr x8, [x0, #0x48]; ldr x0, [x8, w1, uxtw #3]

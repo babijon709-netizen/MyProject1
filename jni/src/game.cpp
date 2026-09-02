@@ -804,6 +804,8 @@ static const SkeletonBoneName kSkeletonBoneNames[] = {
 
 struct CachedSkeleton {
     uint64_t bone_transform[ESP_BONE_COUNT] = {};
+    Vec3     bone_world[ESP_BONE_COUNT] = {};
+    uint8_t  bone_world_age[ESP_BONE_COUNT] = {}; // 0 = none, 1 = fresh, grows on reuse
     uint64_t hierarchy_data = 0;
     uint64_t model_root = 0;
     int      bone_count = 0;
@@ -1022,7 +1024,365 @@ static bool resolve_skeleton_layout(uint64_t sample_transform) {
     return false;
 }
 
+// ===================== Ragdoll bone list (no name matching) =====================
+//
+// The game itself keeps the rig bone transforms in Ragdoll.m_Bones (BodyPart[])
+// plus m_Pelvis. Resolving bones from there is immune to rig naming, duplicate
+// meshes and BFS depth issues. Intermediate bones (spine chain, neck, shoulders,
+// hands, feet) are recovered structurally from the transform hierarchy.
+
+static uint64_t managed_object_native(uint64_t managed) {
+    if (!managed) return 0;
+    uint64_t native = rd_ptr(managed + MANAGED_CACHED_PTR);
+    if (native < 0x10000 || native >= 0x0001000000000000ULL) return 0;
+    return native;
+}
+
+static bool skeleton_transform_ptr_valid(uint64_t transform) {
+    if (!transform) return false;
+    uint64_t go = rd_ptr(transform + COMPONENT_GAMEOBJECT);
+    if (!go) return false;
+    uint64_t pairs = rd_ptr(go + GAMEOBJECT_COMPONENT_ARRAY);
+    return pairs && rd_ptr(pairs + COMPONENT_PAIR_PTR) == transform;
+}
+
+// Any native Component -> the Transform of its GameObject.
+static uint64_t native_component_transform(uint64_t native_component) {
+    if (!native_component) return 0;
+    uint64_t go = rd_ptr(native_component + COMPONENT_GAMEOBJECT);
+    if (!go) return 0;
+    uint64_t pairs = rd_ptr(go + GAMEOBJECT_COMPONENT_ARRAY);
+    if (!pairs) return 0;
+    uint64_t transform = rd_ptr(pairs + COMPONENT_PAIR_PTR);
+    if (!transform || rd_ptr(transform + COMPONENT_GAMEOBJECT) != go) return 0;
+    return transform;
+}
+
+// player -> KCC (kccReference may be a wrapper; KCC.player back-ref validates)
+// -> CharacterAnimation (0x108, back-ref at 0x78) -> Ragdoll (0x38).
+static uint64_t resolve_player_ragdoll(uint64_t player) {
+    uint64_t reference = rd_ptr(player + PLAYER_KCC_REFERENCE);
+    if (!reference) return 0;
+    uint64_t kcc = 0;
+    if (rd_ptr(reference + KCC_PLAYER_BACKREF) == player) {
+        kcc = reference;
+    } else {
+        static const uint64_t kWrapperOffsets[] = {0x10, 0x18, 0x20, 0x28, 0x30, 0x38};
+        for (uint64_t offset : kWrapperOffsets) {
+            uint64_t candidate = rd_ptr(reference + offset);
+            if (candidate && rd_ptr(candidate + KCC_PLAYER_BACKREF) == player) { kcc = candidate; break; }
+        }
+    }
+    if (!kcc) return 0;
+    uint64_t anim = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
+    if (!anim) return 0;
+    uint64_t back = rd_ptr(anim + CHAR_ANIM_PLAYER_BACKREF);
+    if (back && back != player) return 0;
+    return rd_ptr(anim + CHAR_ANIM_RAGDOLL);
+}
+
+// Ancestor index chain (excluding the start index) via remote reads.
+static int read_parent_chain_remote(uint64_t indices, int32_t index, int32_t* chain, int cap) {
+    int length = 0;
+    int32_t current = index;
+    while (length < cap) {
+        int32_t parent = rd<int32_t>(indices + (uint64_t)current * 4);
+        if (parent < 0 || parent > 100000 || parent == current) break;
+        chain[length++] = parent;
+        current = parent;
+    }
+    return length;
+}
+
+// Child of `parent_transform` whose hierarchy index lies on `chain`.
+static uint64_t skeleton_child_on_chain(uint64_t parent_transform, uint64_t data,
+                                        const int32_t* chain, int chain_length) {
+    if (!parent_transform) return 0;
+    uint64_t children[64];
+    int count = read_transform_children(parent_transform, children, 64);
+    for (int i = 0; i < count; ++i) {
+        if (rd_ptr(children[i] + g_skeleton_layout.data_offset) != data) continue;
+        int32_t child_index = rd<int32_t>(children[i] + g_skeleton_layout.index_offset);
+        for (int j = 0; j < chain_length; ++j)
+            if (chain[j] == child_index) return children[i];
+    }
+    return 0;
+}
+
+static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleton) {
+    uint64_t ragdoll = resolve_player_ragdoll(player);
+    if (!ragdoll) return false;
+
+    uint64_t bones_array = rd_ptr(ragdoll + RAGDOLL_BONES_ARRAY);
+    if (!bones_array) return false;
+    int32_t element_count = rd<int32_t>(bones_array + IL2CPP_ARRAY_LENGTH);
+    if (element_count < 4 || element_count > 64) return false;
+
+    uint64_t pelvis = native_component_transform(
+        managed_object_native(rd_ptr(ragdoll + RAGDOLL_PELVIS_RIGIDBODY)));
+    if (pelvis && !skeleton_transform_ptr_valid(pelvis)) pelvis = 0;
+
+    // Collect the ragdoll bone transforms. Elements are BodyPart objects
+    // (transform at +0x10) but tolerate a plain Component[] as well.
+    constexpr int kMaxSet = 24;
+    uint64_t set_transform[kMaxSet];
+    int set_count = 0;
+    for (int32_t i = 0; i < element_count && set_count < kMaxSet; ++i) {
+        uint64_t element = rd_ptr(bones_array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
+        if (!element) continue;
+        uint64_t transform = managed_object_native(rd_ptr(element + RAGDOLL_BODYPART_TRANSFORM));
+        if (!skeleton_transform_ptr_valid(transform))
+            transform = native_component_transform(managed_object_native(element));
+        if (!skeleton_transform_ptr_valid(transform)) continue;
+        bool duplicate = false;
+        for (int j = 0; j < set_count; ++j)
+            if (set_transform[j] == transform) { duplicate = true; break; }
+        if (!duplicate) set_transform[set_count++] = transform;
+    }
+    if (pelvis) {
+        bool present = false;
+        for (int j = 0; j < set_count; ++j)
+            if (set_transform[j] == pelvis) { present = true; break; }
+        if (!present && set_count < kMaxSet) set_transform[set_count++] = pelvis;
+    }
+    if (set_count < 5) return false;
+
+    if (!resolve_skeleton_layout(pelvis ? pelvis : set_transform[0])) return false;
+    uint64_t data = rd_ptr((pelvis ? pelvis : set_transform[0]) + g_skeleton_layout.data_offset);
+    if (!data) return false;
+    uint64_t matrices = rd_ptr(data + g_skeleton_layout.matrices_offset);
+    uint64_t indices = rd_ptr(data + g_skeleton_layout.indices_offset);
+    if (g_skeleton_layout.matrices_indirect) matrices = rd_ptr(matrices);
+    if (g_skeleton_layout.indices_indirect) indices = rd_ptr(indices);
+    if (!matrices || !indices) return false;
+
+    // Hierarchy index, ancestor chain and world position per ragdoll bone.
+    int32_t set_index[kMaxSet];
+    int32_t chains[kMaxSet][48];
+    int     chain_length[kMaxSet];
+    Vec3    world[kMaxSet];
+    {
+        int write = 0;
+        for (int i = 0; i < set_count; ++i) {
+            if (rd_ptr(set_transform[i] + g_skeleton_layout.data_offset) != data) continue;
+            int32_t index = rd<int32_t>(set_transform[i] + g_skeleton_layout.index_offset);
+            if (index < 0 || index > 100000) continue;
+            Vec3 position{};
+            if (!read_transform_hierarchy_arrays(matrices, indices, index, position)) continue;
+            set_transform[write] = set_transform[i];
+            set_index[write] = index;
+            world[write] = position;
+            ++write;
+        }
+        set_count = write;
+    }
+    if (set_count < 5) return false;
+    for (int i = 0; i < set_count; ++i)
+        chain_length[i] = read_parent_chain_remote(indices, set_index[i], chains[i], 48);
+
+    auto set_slot_of_index = [&](int32_t index) -> int {
+        for (int i = 0; i < set_count; ++i)
+            if (set_index[i] == index) return i;
+        return -1;
+    };
+
+    // Nearest set ancestor + number of set descendants for every bone.
+    int nearest[kMaxSet];
+    int descendants[kMaxSet];
+    for (int i = 0; i < set_count; ++i) { nearest[i] = -1; descendants[i] = 0; }
+    for (int i = 0; i < set_count; ++i) {
+        for (int step = 0; step < chain_length[i]; ++step) {
+            int ancestor = set_slot_of_index(chains[i][step]);
+            if (ancestor < 0) continue;
+            if (nearest[i] < 0) nearest[i] = ancestor;
+            ++descendants[ancestor];
+        }
+    }
+
+    // Pelvis: prefer the game's own m_Pelvis, else the widest ancestor.
+    int pelvis_slot = -1;
+    if (pelvis) {
+        for (int i = 0; i < set_count; ++i)
+            if (set_transform[i] == pelvis) { pelvis_slot = i; break; }
+    }
+    if (pelvis_slot < 0) {
+        for (int i = 0; i < set_count; ++i)
+            if (pelvis_slot < 0 || descendants[i] > descendants[pelvis_slot]) pelvis_slot = i;
+    }
+    if (pelvis_slot < 0 || descendants[pelvis_slot] < 3) return false;
+
+    // Chest: pelvis branch with the most descendants; walk down while the
+    // branch still splits (handles an intermediate spine rigidbody).
+    int chest_slot = -1;
+    for (int i = 0; i < set_count; ++i) {
+        if (i == pelvis_slot || nearest[i] != pelvis_slot) continue;
+        if (descendants[i] >= 2 && (chest_slot < 0 || descendants[i] > descendants[chest_slot]))
+            chest_slot = i;
+    }
+    while (chest_slot >= 0) {
+        int next = -1;
+        for (int i = 0; i < set_count; ++i)
+            if (nearest[i] == chest_slot && descendants[i] >= 2) { next = i; break; }
+        if (next < 0) break;
+        chest_slot = next;
+    }
+    if (chest_slot < 0) return false;
+
+    bool on_spine[kMaxSet] = {};
+    on_spine[chest_slot] = true;
+    for (int step = 0; step < chain_length[chest_slot]; ++step) {
+        int slot = set_slot_of_index(chains[chest_slot][step]);
+        if (slot >= 0) on_spine[slot] = true;
+    }
+
+    // Legs: pelvis branches outside the spine, starting at/below the pelvis.
+    int thigh_slot[2] = {-1, -1};
+    for (int i = 0; i < set_count; ++i) {
+        if (i == pelvis_slot || on_spine[i] || nearest[i] != pelvis_slot) continue;
+        if (world[i].y > world[pelvis_slot].y + 0.2F) continue;
+        if (thigh_slot[0] < 0) thigh_slot[0] = i;
+        else if (thigh_slot[1] < 0) thigh_slot[1] = i;
+    }
+
+    // Head: leaf hanging off the chest (highest one); arms: chest branches
+    // that continue (forearm below them).
+    int head_slot = -1;
+    int upperarm_slot[2] = {-1, -1};
+    for (int i = 0; i < set_count; ++i) {
+        if (i == pelvis_slot || on_spine[i] || nearest[i] != chest_slot) continue;
+        if (descendants[i] == 0) {
+            if (head_slot < 0 || world[i].y > world[head_slot].y) head_slot = i;
+        } else if (upperarm_slot[0] < 0) {
+            upperarm_slot[0] = i;
+        } else if (upperarm_slot[1] < 0) {
+            upperarm_slot[1] = i;
+        }
+    }
+    int forearm_slot[2] = {-1, -1};
+    for (int side = 0; side < 2; ++side) {
+        if (upperarm_slot[side] < 0) continue;
+        for (int i = 0; i < set_count; ++i)
+            if (nearest[i] == upperarm_slot[side]) { forearm_slot[side] = i; break; }
+    }
+
+    // Consistent left/right split by local-space X (siblings share a parent).
+    auto local_x = [&](int slot) -> float {
+        return rd<float>(matrices + (uint64_t)set_index[slot] * sizeof(Matrix34));
+    };
+    if (thigh_slot[0] >= 0 && thigh_slot[1] >= 0 && local_x(thigh_slot[0]) < local_x(thigh_slot[1])) {
+        int swap = thigh_slot[0]; thigh_slot[0] = thigh_slot[1]; thigh_slot[1] = swap;
+    }
+    if (upperarm_slot[0] >= 0 && upperarm_slot[1] >= 0 && local_x(upperarm_slot[0]) < local_x(upperarm_slot[1])) {
+        int swap = upperarm_slot[0]; upperarm_slot[0] = upperarm_slot[1]; upperarm_slot[1] = swap;
+        swap = forearm_slot[0]; forearm_slot[0] = forearm_slot[1]; forearm_slot[1] = swap;
+    }
+
+    auto assign = [&](int bone, uint64_t transform) {
+        if (bone >= 0 && bone < ESP_BONE_COUNT && transform && !skeleton.bone_transform[bone])
+            skeleton.bone_transform[bone] = transform;
+    };
+    // Child pick for chain ends (hand/foot/toe): prefer a name match when the
+    // name offset is known, otherwise the first child in the same hierarchy.
+    auto pick_child = [&](uint64_t parent, int bone_hint) -> uint64_t {
+        if (!parent) return 0;
+        uint64_t children[16];
+        int count = read_transform_children(parent, children, 16);
+        uint64_t fallback = 0;
+        for (int i = 0; i < count; ++i) {
+            if (rd_ptr(children[i] + g_skeleton_layout.data_offset) != data) continue;
+            if (!fallback) fallback = children[i];
+            if (g_go_name_offset_valid) {
+                char name[48];
+                if (read_transform_name(children[i], name, sizeof(name)) &&
+                    match_bone_name(name) == bone_hint) return children[i];
+            }
+        }
+        return fallback;
+    };
+
+    assign(BONE_HIPS, set_transform[pelvis_slot]);
+    assign(BONE_SPINE2, set_transform[chest_slot]);
+
+    // Spine chain: pelvis -> ... -> chest along the chest's ancestor chain.
+    {
+        uint64_t cursor = set_transform[pelvis_slot];
+        const int spine_bones[2] = {BONE_SPINE, BONE_SPINE1};
+        for (int step = 0; step < 2 && cursor; ++step) {
+            uint64_t next = skeleton_child_on_chain(cursor, data, chains[chest_slot], chain_length[chest_slot]);
+            if (!next || next == set_transform[chest_slot]) break;
+            assign(spine_bones[step], next);
+            cursor = next;
+        }
+    }
+
+    if (head_slot >= 0) {
+        assign(BONE_HEAD, set_transform[head_slot]);
+        uint64_t neck = skeleton_child_on_chain(set_transform[chest_slot], data,
+                                                chains[head_slot], chain_length[head_slot]);
+        if (neck && neck != set_transform[head_slot]) assign(BONE_NECK, neck);
+    }
+
+    const int arm_bones[2][4] = {
+        {BONE_SHOULDER_L, BONE_ARM_L, BONE_FOREARM_L, BONE_HAND_L},
+        {BONE_SHOULDER_R, BONE_ARM_R, BONE_FOREARM_R, BONE_HAND_R}
+    };
+    for (int side = 0; side < 2; ++side) {
+        int arm = upperarm_slot[side];
+        if (arm < 0) continue;
+        uint64_t shoulder = skeleton_child_on_chain(set_transform[chest_slot], data,
+                                                    chains[arm], chain_length[arm]);
+        if (shoulder && shoulder != set_transform[arm]) assign(arm_bones[side][0], shoulder);
+        assign(arm_bones[side][1], set_transform[arm]);
+        if (forearm_slot[side] >= 0) {
+            assign(arm_bones[side][2], set_transform[forearm_slot[side]]);
+            assign(arm_bones[side][3], pick_child(set_transform[forearm_slot[side]], arm_bones[side][3]));
+        }
+    }
+
+    const int leg_bones[2][4] = {
+        {BONE_UPLEG_L, BONE_LEG_L, BONE_FOOT_L, BONE_TOE_L},
+        {BONE_UPLEG_R, BONE_LEG_R, BONE_FOOT_R, BONE_TOE_R}
+    };
+    for (int side = 0; side < 2; ++side) {
+        if (thigh_slot[side] < 0) continue;
+        assign(leg_bones[side][0], set_transform[thigh_slot[side]]);
+        int calf = -1;
+        for (int i = 0; i < set_count; ++i)
+            if (nearest[i] == thigh_slot[side]) { calf = i; break; }
+        if (calf < 0) continue;
+        assign(leg_bones[side][1], set_transform[calf]);
+        uint64_t foot = pick_child(set_transform[calf], leg_bones[side][2]);
+        assign(leg_bones[side][2], foot);
+        assign(leg_bones[side][3], pick_child(foot, leg_bones[side][3]));
+    }
+
+    // Final filter: everything must live in the pelvis hierarchy.
+    int valid_bones = 0;
+    for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
+        uint64_t transform = skeleton.bone_transform[bone];
+        if (!transform) continue;
+        uint64_t bone_data = rd_ptr(transform + g_skeleton_layout.data_offset);
+        int32_t index = rd<int32_t>(transform + g_skeleton_layout.index_offset);
+        if (bone_data != data || index < 0 || index > 100000) {
+            skeleton.bone_transform[bone] = 0;
+            continue;
+        }
+        ++valid_bones;
+    }
+    if (valid_bones < 6 || !skeleton.bone_transform[BONE_HIPS]) return false;
+
+    skeleton.hierarchy_data = data;
+    skeleton.model_root = skeleton_model_root(player); // may be 0; revalidation compares equal
+    skeleton.bone_count = valid_bones;
+    skeleton.valid = true;
+    return true;
+}
+
 static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
+    skeleton = CachedSkeleton{};
+
+    // Primary: the game's own ragdoll bone list (name-independent).
+    if (build_skeleton_from_ragdoll(player, skeleton)) return true;
     skeleton = CachedSkeleton{};
 
     uint64_t root = skeleton_model_root(player);
@@ -1219,16 +1579,30 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     int projected = 0;
     int remote_fallbacks = 0;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
-        if (bone_index[bone] < 0) continue;
         Vec3 world{};
-        int walked = skeleton_local_walk(local_matrices.data(), local_parents.data(),
-                                         needed, bone_index[bone], world);
-        if (walked < 0 && remote_fallbacks < 8) {
-            // Parent chain leaves the buffered range (rare): slow remote walk.
-            ++remote_fallbacks;
-            walked = read_transform_hierarchy_arrays(matrices, indices, bone_index[bone], world) ? 1 : 0;
+        bool have_world = false;
+        if (bone_index[bone] >= 0) {
+            int walked = skeleton_local_walk(local_matrices.data(), local_parents.data(),
+                                             needed, bone_index[bone], world);
+            if (walked < 0 && remote_fallbacks < 8) {
+                // Parent chain leaves the buffered range (rare): slow remote walk.
+                ++remote_fallbacks;
+                walked = read_transform_hierarchy_arrays(matrices, indices, bone_index[bone], world) ? 1 : 0;
+            }
+            if (walked == 1) {
+                have_world = true;
+                skeleton.bone_world[bone] = world;
+                skeleton.bone_world_age[bone] = 1;
+            }
         }
-        if (walked != 1) continue;
+        // Transient read glitch (game mid-update): briefly reuse the last known
+        // world position instead of letting the bone flicker off.
+        if (!have_world && skeleton.bone_world_age[bone] >= 1 && skeleton.bone_world_age[bone] <= 8) {
+            world = skeleton.bone_world[bone];
+            ++skeleton.bone_world_age[bone];
+            have_world = true;
+        }
+        if (!have_world) continue;
         Vec2 screen{};
         if (!w2s(view_projection, world, sw, sh, screen, false)) continue;
         if (fabsf(screen.x) > sw * 4.0F || fabsf(screen.y) > sh * 4.0F) continue;
