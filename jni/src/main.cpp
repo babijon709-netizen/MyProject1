@@ -635,24 +635,29 @@ static void DrawEspOverlay() {
             dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2), ColU32(cfg::esp::box_col), cfg::esp::box_rounding, 0, thick);
 
         if (g_state.esp_skeleton && box.has_skeleton) {
-            ImU32 skelCol = ColU32(cfg::esp::skeleton_col);
+            // DEBUG palette: torso RED, arms YELLOW, legs = configured color,
+            // white dots on every valid bone (to split "not drawn" from
+            // "drawn in the wrong place").
+            ImU32 skelCol   = ColU32(cfg::esp::skeleton_col);
+            ImU32 torsoCol  = IM_COL32(255, 64, 64, 255);
+            ImU32 armsCol   = IM_COL32(255, 220, 40, 255);
             auto validPt = [&](int b) {
                 return b >= 0 && box.bone_valid[b] &&
                        std::isfinite(box.bones[b][0]) && std::isfinite(box.bones[b][1]);
             };
-            auto lineTo = [&](int a, int b) {
+            auto lineTo = [&](int a, int b, ImU32 col) {
                 dl->AddLine(ImVec2(box.bones[a][0], box.bones[a][1]),
                             ImVec2(box.bones[b][0], box.bones[b][1]),
-                            skelCol, thick);
+                            col, thick);
             };
             // Draw each chain connecting consecutive valid bones, skipping
             // missing ones (0..5 torso, 6..9/10..13 arms, 14..17/18..21 legs).
-            auto drawChain = [&](const int* chain, int n, int anchor) {
+            auto drawChain = [&](const int* chain, int n, int anchor, ImU32 col) {
                 int prev = validPt(anchor) ? anchor : -1;
                 for (int i = 0; i < n; ++i) {
                     int b = chain[i];
                     if (!validPt(b)) continue;
-                    if (prev >= 0) lineTo(prev, b);
+                    if (prev >= 0) lineTo(prev, b, col);
                     prev = b;
                 }
             };
@@ -665,12 +670,17 @@ static void DrawEspOverlay() {
             static const int armR[]  = {10, 11, 12, 13};
             static const int legL[]  = {14, 15, 16, 17};
             static const int legR[]  = {18, 19, 20, 21};
-            drawChain(torso, 5, 0);
-            drawChain(armL, 4, chest);
-            drawChain(armR, 4, chest);
-            drawChain(legL, 4, 0);
-            drawChain(legR, 4, 0);
+            drawChain(torso, 5, 0, torsoCol);
+            drawChain(armL, 4, chest, armsCol);
+            drawChain(armR, 4, chest, armsCol);
+            drawChain(legL, 4, 0, skelCol);
+            drawChain(legR, 4, 0, skelCol);
+            for (int b = 0; b < 22; ++b)
+                if (validPt(b))
+                    dl->AddCircleFilled(ImVec2(box.bones[b][0], box.bones[b][1]),
+                                        3.0f, IM_COL32(255, 255, 255, 255));
         }
+
 
         if (g_state.esp_tracer) {
             float tx = (box.x1 + box.x2) * 0.5f;

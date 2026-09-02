@@ -832,6 +832,7 @@ struct SkeletonDebugState {
     uint32_t last_mask = 0;   // bone_valid bits of the last drawn skeleton
     float px[4][2] = {};      // screen coords: hips, spine2, head, hand R
     float head_dy = 0.0F;     // world head.y - hips.y of the last skeleton
+    float near_dist = -1.0F;  // distance of the box the mask belongs to
 };
 static SkeletonDebugState g_skel_debug;
 
@@ -1800,14 +1801,8 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     uint32_t mask = 0;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone)
         if (box.bone_valid[bone]) mask |= 1u << bone;
-    g_skel_debug.last_mask = mask;
+    (void)mask;
     g_skel_debug.fill_fail = 0;
-    const int probe_bones[4] = {BONE_HIPS, BONE_SPINE2, BONE_HEAD, BONE_HAND_R};
-    for (int i = 0; i < 4; ++i) {
-        int bone = probe_bones[i];
-        g_skel_debug.px[i][0] = box.bone_valid[bone] ? box.bones[bone][0] : -1.0F;
-        g_skel_debug.px[i][1] = box.bone_valid[bone] ? box.bones[bone][1] : -1.0F;
-    }
     g_skel_debug.head_dy = (box.bone_valid[BONE_HEAD] && box.bone_valid[BONE_HIPS])
         ? (skeleton.bone_world[BONE_HEAD].y - skeleton.bone_world[BONE_HIPS].y) : 0.0F;
     return true;
@@ -1983,11 +1978,12 @@ void esp_skeleton_debug(char* out, int cap) {
         if (entry.second.valid) ++cached;
     snprintf(out, (size_t)cap,
              "SKL R:%d H:%d N:%d P:%d B:%d F:%d C:%d D:%d %s\n"
-             "HIP %.0f,%.0f SP2 %.0f,%.0f HD %.0f,%.0f HR %.0f,%.0f dY %.2f",
+             "d %.0fm HIP %.0f,%.0f SP2 %.0f,%.0f HD %.0f,%.0f HR %.0f,%.0f dY %.2f",
              g_skel_debug.ragdoll_stage, g_skel_debug.hips_candidates,
              g_skel_debug.name_best, g_skel_debug.built_path,
              g_skel_debug.bone_count, g_skel_debug.fill_fail, cached,
              g_skel_debug.groups, mask,
+             g_skel_debug.near_dist,
              g_skel_debug.px[0][0], g_skel_debug.px[0][1],
              g_skel_debug.px[1][0], g_skel_debug.px[1][1],
              g_skel_debug.px[2][0], g_skel_debug.px[2][1],
@@ -2111,6 +2107,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         local = transform_camera_position; has_local_position = true;
     }
 
+    float skeleton_nearest_distance = 1e9F;
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) continue;
         if (!s_transforms[i]) continue;
@@ -2170,7 +2167,25 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             box.corners[corner][1] = projected ? sc.y : -1.0F;
         }
         if (g_skeleton_enabled && !transform_camera_mode)
+        {
             fill_skeleton_box(s_transforms[i], vp, sw, sh, box);
+            // Diagnostics follow the NEAREST skeleton box - the one the user
+            // is actually looking at - instead of whichever came last.
+            if (box.has_skeleton && distance >= 0.0F && distance < skeleton_nearest_distance) {
+                skeleton_nearest_distance = distance;
+                uint32_t mask = 0;
+                for (int bone = 0; bone < ESP_BONE_COUNT; ++bone)
+                    if (box.bone_valid[bone]) mask |= 1u << bone;
+                g_skel_debug.last_mask = mask;
+                g_skel_debug.near_dist = distance;
+                const int probe_bones[4] = {BONE_HIPS, BONE_SPINE2, BONE_HEAD, BONE_HAND_R};
+                for (int probe = 0; probe < 4; ++probe) {
+                    int bone = probe_bones[probe];
+                    g_skel_debug.px[probe][0] = box.bone_valid[bone] ? box.bones[bone][0] : -1.0F;
+                    g_skel_debug.px[probe][1] = box.bone_valid[bone] ? box.bones[bone][1] : -1.0F;
+                }
+            }
+        }
         result.push_back(box);
     }
 
