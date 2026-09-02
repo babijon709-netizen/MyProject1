@@ -4,7 +4,6 @@
 
 #include <string.h>
 #include <sys/uio.h>
-#include <sys/stat.h>
 #include <stdio.h>
 #include <algorithm>
 #include <cmath>
@@ -765,18 +764,6 @@ enum SkeletonBone {
     BONE_UPLEG_R, BONE_LEG_R, BONE_FOOT_R, BONE_TOE_R
 };
 
-const int ESP_BONE_LINKS[ESP_BONE_LINK_COUNT][2] = {
-    {BONE_HIPS, BONE_SPINE}, {BONE_SPINE, BONE_SPINE1}, {BONE_SPINE1, BONE_SPINE2},
-    {BONE_SPINE2, BONE_NECK}, {BONE_NECK, BONE_HEAD},
-    {BONE_SPINE2, BONE_SHOULDER_L}, {BONE_SHOULDER_L, BONE_ARM_L},
-    {BONE_ARM_L, BONE_FOREARM_L}, {BONE_FOREARM_L, BONE_HAND_L},
-    {BONE_SPINE2, BONE_SHOULDER_R}, {BONE_SHOULDER_R, BONE_ARM_R},
-    {BONE_ARM_R, BONE_FOREARM_R}, {BONE_FOREARM_R, BONE_HAND_R},
-    {BONE_HIPS, BONE_UPLEG_L}, {BONE_UPLEG_L, BONE_LEG_L},
-    {BONE_LEG_L, BONE_FOOT_L}, {BONE_FOOT_L, BONE_TOE_L},
-    {BONE_HIPS, BONE_UPLEG_R}, {BONE_UPLEG_R, BONE_LEG_R},
-    {BONE_LEG_R, BONE_FOOT_R}, {BONE_FOOT_R, BONE_TOE_R}
-};
 
 struct SkeletonBoneName { const char* name; int bone; };
 // Names are matched after normalization: lowercase, prefix up to the last ':'
@@ -811,7 +798,6 @@ struct CachedSkeleton {
     uint64_t bone_transform[ESP_BONE_COUNT] = {};
     Vec3     bone_world[ESP_BONE_COUNT] = {};
     uint8_t  bone_world_age[ESP_BONE_COUNT] = {}; // 0 = none, 1 = fresh, grows on reuse
-    uint64_t hierarchy_data = 0;
     uint64_t model_root = 0;
     int      bone_count = 0;
     bool     valid = false;
@@ -822,23 +808,6 @@ struct CachedSkeleton {
 
 static std::unordered_map<uint64_t, CachedSkeleton> g_skeletons;
 static bool g_skeleton_enabled = false;
-
-// On-screen diagnostics: records where the skeleton pipeline stops so the
-// failure point is visible in-game instead of guessed at.
-struct SkeletonDebugState {
-    int ragdoll_stage = -1;   // last ragdoll build: 0 = ok, >0 = failure stage
-    int hips_candidates = 0;  // name path: hips candidates found
-    int name_best = 0;        // name path: best bone count
-    int built_path = 0;       // 0 = none, 1 = ragdoll, 2 = names
-    int bone_count = 0;       // bones cached by the last successful build
-    int fill_fail = 0;        // last fill_skeleton_box failure reason
-    int groups = 0;           // distinct transform hierarchies among bones
-    uint32_t last_mask = 0;   // bone_valid bits of the last drawn skeleton
-    float px[4][2] = {};      // screen coords: hips, spine2, head, hand R
-    float head_dy = 0.0F;     // world head.y - hips.y of the last skeleton
-    float near_dist = -1.0F;  // distance of the box the mask belongs to
-};
-static SkeletonDebugState g_skel_debug;
 
 static TransformHierarchyLayout g_skeleton_layout{};
 static bool g_skeleton_layout_valid = false;
@@ -1119,15 +1088,13 @@ static uint64_t resolve_player_kcc(uint64_t player) {
 static uint64_t resolve_player_ragdoll(uint64_t player, uint64_t& kcc_out) {
     kcc_out = 0;
     uint64_t kcc = resolve_player_kcc(player);
-    if (!kcc) { g_skel_debug.ragdoll_stage = 2; return 0; }
+    if (!kcc) return 0;
     kcc_out = kcc;
     uint64_t anim = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
-    if (!anim) { g_skel_debug.ragdoll_stage = 3; return 0; }
+    if (!anim) return 0;
     uint64_t back = rd_ptr(anim + CHAR_ANIM_PLAYER_BACKREF);
-    if (back && back != player) { g_skel_debug.ragdoll_stage = 4; return 0; }
-    uint64_t ragdoll = rd_ptr(anim + CHAR_ANIM_RAGDOLL);
-    if (!ragdoll) g_skel_debug.ragdoll_stage = 5;
-    return ragdoll;
+    if (back && back != player) return 0;
+    return rd_ptr(anim + CHAR_ANIM_RAGDOLL);
 }
 
 // Ancestor index chain (excluding the start index) via remote reads.
@@ -1164,9 +1131,9 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
     if (!ragdoll) return false;
 
     uint64_t bones_array = rd_ptr(ragdoll + RAGDOLL_BONES_ARRAY);
-    if (!bones_array) { g_skel_debug.ragdoll_stage = 6; return false; }
+    if (!bones_array) return false;
     int32_t element_count = rd<int32_t>(bones_array + IL2CPP_ARRAY_LENGTH);
-    if (element_count < 4 || element_count > 64) { g_skel_debug.ragdoll_stage = 7; return false; }
+    if (element_count < 4 || element_count > 64) return false;
 
     uint64_t pelvis = native_component_transform(
         managed_object_native(rd_ptr(ragdoll + RAGDOLL_PELVIS_RIGIDBODY)));
@@ -1195,9 +1162,9 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
             if (set_transform[j] == pelvis) { present = true; break; }
         if (!present && set_count < kMaxSet) set_transform[set_count++] = pelvis;
     }
-    if (set_count < 5) { g_skel_debug.ragdoll_stage = 8; return false; }
+    if (set_count < 5) return false;
 
-    if (!resolve_skeleton_layout(pelvis ? pelvis : set_transform[0])) { g_skel_debug.ragdoll_stage = 9; return false; }
+    if (!resolve_skeleton_layout(pelvis ? pelvis : set_transform[0])) return false;
 
     // Bones may live in different TransformHierarchies (the game re-parents
     // parts of the rig at runtime), so resolve arrays per hierarchy.
@@ -1234,7 +1201,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         }
         set_count = write;
     }
-    if (set_count < 5) { g_skel_debug.ragdoll_stage = 11; return false; }
+    if (set_count < 5) return false;
     for (int i = 0; i < set_count; ++i) {
         uint64_t matrices = 0, indices = 0;
         chain_length[i] = hierarchy_arrays(set_data[i], matrices, indices)
@@ -1272,7 +1239,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         for (int i = 0; i < set_count; ++i)
             if (pelvis_slot < 0 || descendants[i] > descendants[pelvis_slot]) pelvis_slot = i;
     }
-    if (pelvis_slot < 0 || descendants[pelvis_slot] < 2) { g_skel_debug.ragdoll_stage = 12; return false; }
+    if (pelvis_slot < 0 || descendants[pelvis_slot] < 2) return false;
 
     // Chest: pelvis branch with the most descendants; walk down while the
     // branch still splits (handles an intermediate spine rigidbody).
@@ -1298,7 +1265,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         if (next < 0) break;
         chest_slot = next;
     }
-    if (chest_slot < 0) { g_skel_debug.ragdoll_stage = 13; return false; }
+    if (chest_slot < 0) return false;
 
     bool on_spine[kMaxSet] = {};
     on_spine[chest_slot] = true;
@@ -1450,11 +1417,8 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         }
         ++valid_bones;
     }
-    if (valid_bones < 6 || !skeleton.bone_transform[BONE_HIPS]) { g_skel_debug.ragdoll_stage = 14; return false; }
+    if (valid_bones < 6 || !skeleton.bone_transform[BONE_HIPS]) return false;
 
-    g_skel_debug.ragdoll_stage = 0;
-
-    skeleton.hierarchy_data = set_data[pelvis_slot];
     skeleton.model_root = skeleton_model_root(player); // may be 0; revalidation compares equal
     skeleton.bone_count = valid_bones;
     skeleton.valid = true;
@@ -1485,7 +1449,6 @@ static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton)
         hips_candidates[hips_candidate_count++] = node;
         if (hips_candidate_count >= 4) break;
     }
-    g_skel_debug.hips_candidates = hips_candidate_count;
     if (!hips_candidate_count) return false;
 
     // Targeted parent->child descent along the known rig structure. Unlike a
@@ -1564,7 +1527,6 @@ static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton)
             if (found >= ESP_BONE_COUNT) break;
         }
     }
-    g_skel_debug.name_best = best_count;
     if (best_count < 6 || !best_bones[BONE_HIPS]) return false;
     if (!resolve_skeleton_layout(best_bones[BONE_HIPS])) return false;
 
@@ -1584,7 +1546,6 @@ static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton)
     }
     if (valid_bones < 6 || !skeleton.bone_transform[BONE_HIPS]) return false;
 
-    skeleton.hierarchy_data = data;
     skeleton.model_root = root;
     skeleton.bone_count = valid_bones;
     skeleton.valid = true;
@@ -1597,7 +1558,6 @@ static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton)
 // positions do not follow the animated model.
 static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
     skeleton = CachedSkeleton{};
-    g_skel_debug.built_path = 0;
 
     CachedSkeleton from_ragdoll{};
     bool ragdoll_ok = build_skeleton_from_ragdoll(player, from_ragdoll);
@@ -1607,14 +1567,11 @@ static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
 
     if (names_ok && (!ragdoll_ok || from_names.bone_count >= from_ragdoll.bone_count)) {
         skeleton = from_names;
-        g_skel_debug.built_path = 2;
     } else if (ragdoll_ok) {
         skeleton = from_ragdoll;
-        g_skel_debug.built_path = 1;
     } else {
         return false;
     }
-    g_skel_debug.bone_count = skeleton.bone_count;
     return true;
 }
 
@@ -1664,15 +1621,14 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
 
     CachedSkeleton& skeleton = g_skeletons[player];
     if (!skeleton.valid) {
-        if (skeleton.retry_cooldown > 0) { --skeleton.retry_cooldown; g_skel_debug.fill_fail = 1; return false; }
+        if (skeleton.retry_cooldown > 0) { --skeleton.retry_cooldown; return false; }
         // Building walks the whole model; allow at most one rebuild per frame
         // so multiple new players never stall the overlay.
-        if (g_skeleton_builds_this_frame >= 1) { g_skel_debug.fill_fail = 1; return false; }
+        if (g_skeleton_builds_this_frame >= 1) return false;
         ++g_skeleton_builds_this_frame;
         if (!build_skeleton(player, skeleton)) {
             skeleton.valid = false;
             skeleton.retry_cooldown = 90;
-            g_skel_debug.fill_fail = 2;
             return false;
         }
     }
@@ -1683,7 +1639,6 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         if (skeleton_model_root(player) != skeleton.model_root) {
             skeleton = CachedSkeleton{};
             skeleton.retry_cooldown = 2;
-            g_skel_debug.fill_fail = 3;
             return false;
         }
     }
@@ -1720,11 +1675,9 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         bone_group[bone] = group;
         if (index > group_max[group]) group_max[group] = index;
     }
-    g_skel_debug.groups = group_count;
     // Liveness: the hips transform no longer resolves => model despawned.
     if (group_count == 0 || bone_index[BONE_HIPS] < 0) {
         if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
-        g_skel_debug.fill_fail = 4;
         return false;
     }
 
@@ -1797,18 +1750,10 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     }
     if (projected < 4) {
         if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
-        g_skel_debug.fill_fail = 7;
         return false;
     }
     skeleton.fail_streak = 0;
     box.has_skeleton = true;
-    uint32_t mask = 0;
-    for (int bone = 0; bone < ESP_BONE_COUNT; ++bone)
-        if (box.bone_valid[bone]) mask |= 1u << bone;
-    (void)mask;
-    g_skel_debug.fill_fail = 0;
-    g_skel_debug.head_dy = (box.bone_valid[BONE_HEAD] && box.bone_valid[BONE_HIPS])
-        ? (skeleton.bone_world[BONE_HEAD].y - skeleton.bone_world[BONE_HIPS].y) : 0.0F;
     return true;
 }
 
@@ -1824,177 +1769,6 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
 //   C  = players with a valid cached skeleton
 //   D  = distinct transform hierarchies used by the bones (re-parenting),
 //        then the per-bone mask torso|armL|armR|legL|legR.
-// ===================== Skeleton dump logging =====================
-// Writes a full diagnostic snapshot to Downloads so it can be shared without
-// retyping: our per-bone table, the ragdoll bone list, and the character
-// model transform tree with names, hierarchy indices and world positions.
-
-static const char* kSkeletonSlotNames[ESP_BONE_COUNT] = {
-    "Hips", "Spine", "Spine1", "Spine2", "Neck", "Head",
-    "Shoulder.L", "Arm.L", "ForeArm.L", "Hand.L",
-    "Shoulder.R", "Arm.R", "ForeArm.R", "Hand.R",
-    "UpLeg.L", "Leg.L", "Foot.L", "Toe.L",
-    "UpLeg.R", "Leg.R", "Foot.R", "Toe.R"
-};
-
-static void skeleton_dump_transform_line(FILE* f, uint64_t transform, int depth) {
-    char name[48] = "?";
-    read_transform_name(transform, name, sizeof(name));
-    uint64_t data = rd_ptr(transform + g_skeleton_layout.data_offset);
-    int32_t index = rd<int32_t>(transform + g_skeleton_layout.index_offset);
-    Vec3 world{};
-    bool has_world = read_transform_hierarchy_layout(transform, g_skeleton_layout, world);
-    int32_t child_count = rd<int32_t>(transform + TRANSFORM_CHILD_COUNT);
-    fprintf(f, "%*s%-24s t=%llx data=%llx idx=%d ch=%d w=(%.2f, %.2f, %.2f)%s\n",
-            depth * 2, "", name,
-            (unsigned long long)transform, (unsigned long long)data, index, child_count,
-            world.x, world.y, world.z, has_world ? "" : " [no-world]");
-}
-
-static void skeleton_dump_subtree(FILE* f, uint64_t root, int max_nodes) {
-    struct Entry { uint64_t node; int depth; };
-    static std::vector<Entry> stack;
-    stack.clear();
-    stack.push_back({root, 0});
-    int emitted = 0;
-    uint64_t children[64];
-    while (!stack.empty() && emitted < max_nodes) {
-        Entry entry = stack.back();
-        stack.pop_back();
-        skeleton_dump_transform_line(f, entry.node, entry.depth);
-        ++emitted;
-        if (entry.depth >= 14) continue;
-        int count = read_transform_children(entry.node, children, 64);
-        for (int i = count - 1; i >= 0; --i)
-            if (children[i]) stack.push_back({children[i], entry.depth + 1});
-    }
-    if (!stack.empty()) fprintf(f, "  ... truncated at %d nodes\n", max_nodes);
-}
-
-static void skeleton_write_dump() {
-    static const char* kPaths[] = {
-        "/sdcard/Download/xvcen_skel.txt",
-        "/storage/emulated/0/Download/xvcen_skel.txt",
-        "/data/local/tmp/xvcen_skel.txt"
-    };
-    FILE* f = nullptr;
-    const char* used_path = nullptr;
-    for (const char* path : kPaths) {
-        f = fopen(path, "w");
-        if (f) { used_path = path; break; }
-    }
-    if (!f) return;
-
-    char status[224];
-    esp_skeleton_debug(status, sizeof(status));
-    fprintf(f, "=== xvcen skeleton dump ===\n%s\n\n", status);
-    fprintf(f, "layout: data=+0x%llx idx=+0x%llx mat=+0x%llx ind=+0x%llx mi=%d ii=%d valid=%d\n",
-            (unsigned long long)g_skeleton_layout.data_offset,
-            (unsigned long long)g_skeleton_layout.index_offset,
-            (unsigned long long)g_skeleton_layout.matrices_offset,
-            (unsigned long long)g_skeleton_layout.indices_offset,
-            g_skeleton_layout.matrices_indirect ? 1 : 0,
-            g_skeleton_layout.indices_indirect ? 1 : 0,
-            g_skeleton_layout_valid ? 1 : 0);
-    fprintf(f, "name offset: +0x%llx plain=%d valid=%d\n\n",
-            (unsigned long long)g_go_name_offset, g_go_name_plain_pointer ? 1 : 0,
-            g_go_name_offset_valid ? 1 : 0);
-
-    int dumped_players = 0;
-    for (const auto& entry : g_skeletons) {
-        if (!entry.second.valid) continue;
-        if (++dumped_players > 2) break;
-        uint64_t player = entry.first;
-        const CachedSkeleton& skeleton = entry.second;
-
-        fprintf(f, "--- player %llx: cached bones=%d model_root=%llx ---\n",
-                (unsigned long long)player, skeleton.bone_count,
-                (unsigned long long)skeleton.model_root);
-        for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
-            uint64_t transform = skeleton.bone_transform[bone];
-            if (!transform) { fprintf(f, "%-10s <none>\n", kSkeletonSlotNames[bone]); continue; }
-            char name[48] = "?";
-            read_transform_name(transform, name, sizeof(name));
-            uint64_t data = rd_ptr(transform + g_skeleton_layout.data_offset);
-            int32_t index = rd<int32_t>(transform + g_skeleton_layout.index_offset);
-            Vec3 world{};
-            bool has_world = read_transform_hierarchy_layout(transform, g_skeleton_layout, world);
-            fprintf(f, "%-10s t=%llx name='%s' data=%llx idx=%d w=(%.2f, %.2f, %.2f)%s\n",
-                    kSkeletonSlotNames[bone], (unsigned long long)transform, name,
-                    (unsigned long long)data, index, world.x, world.y, world.z,
-                    has_world ? "" : " [no-world]");
-        }
-
-        // The ragdoll bone list as the game exposes it.
-        uint64_t kcc = resolve_player_kcc(player);
-        fprintf(f, "kcc=%llx", (unsigned long long)kcc);
-        if (kcc) {
-            uint64_t head = managed_object_native(rd_ptr(kcc + KCC_HEAD_TRANSFORM));
-            fprintf(f, " kcc.head=%llx", (unsigned long long)head);
-            uint64_t anim = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
-            uint64_t ragdoll = anim ? rd_ptr(anim + CHAR_ANIM_RAGDOLL) : 0;
-            fprintf(f, " anim=%llx ragdoll=%llx", (unsigned long long)anim, (unsigned long long)ragdoll);
-            if (ragdoll) {
-                uint64_t bones_array = rd_ptr(ragdoll + RAGDOLL_BONES_ARRAY);
-                int32_t count = bones_array ? rd<int32_t>(bones_array + IL2CPP_ARRAY_LENGTH) : 0;
-                fprintf(f, " m_Bones[%d]\n", count);
-                for (int32_t i = 0; i < count && i < 32; ++i) {
-                    uint64_t element = rd_ptr(bones_array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
-                    if (!element) continue;
-                    uint64_t transform = managed_object_native(rd_ptr(element + RAGDOLL_BODYPART_TRANSFORM));
-                    if (!skeleton_transform_ptr_valid(transform))
-                        transform = native_component_transform(managed_object_native(element));
-                    if (!skeleton_transform_ptr_valid(transform)) continue;
-                    fprintf(f, "  ragdoll[%d] ", i);
-                    skeleton_dump_transform_line(f, transform, 0);
-                }
-            } else {
-                fprintf(f, "\n");
-            }
-        } else {
-            fprintf(f, "\n");
-        }
-
-        // Full character model tree: names + world positions per node.
-        uint64_t root = skeleton_model_root(player);
-        fprintf(f, "model tree (root=%llx):\n", (unsigned long long)root);
-        if (root) skeleton_dump_subtree(f, root, 400);
-        fprintf(f, "\n");
-    }
-    if (!dumped_players) fprintf(f, "no valid skeletons cached\n");
-    fclose(f);
-    chmod(used_path, 0666);
-}
-
-void esp_skeleton_debug(char* out, int cap) {
-    if (!out || cap <= 0) return;
-    char mask[32];
-    int pos = 0, bone = 0;
-    const int groups[5] = {6, 4, 4, 4, 4};
-    for (int group = 0; group < 5; ++group) {
-        if (group) mask[pos++] = '|';
-        for (int i = 0; i < groups[group]; ++i, ++bone)
-            mask[pos++] = ((g_skel_debug.last_mask >> bone) & 1u) ? '1' : '0';
-    }
-    mask[pos] = '\0';
-    int cached = 0;
-    for (const auto& entry : g_skeletons)
-        if (entry.second.valid) ++cached;
-    snprintf(out, (size_t)cap,
-             "SKL R:%d H:%d N:%d P:%d B:%d F:%d C:%d D:%d %s\n"
-             "d %.0fm HIP %.0f,%.0f SP2 %.0f,%.0f HD %.0f,%.0f HR %.0f,%.0f dY %.2f",
-             g_skel_debug.ragdoll_stage, g_skel_debug.hips_candidates,
-             g_skel_debug.name_best, g_skel_debug.built_path,
-             g_skel_debug.bone_count, g_skel_debug.fill_fail, cached,
-             g_skel_debug.groups, mask,
-             g_skel_debug.near_dist,
-             g_skel_debug.px[0][0], g_skel_debug.px[0][1],
-             g_skel_debug.px[1][0], g_skel_debug.px[1][1],
-             g_skel_debug.px[2][0], g_skel_debug.px[2][1],
-             g_skel_debug.px[3][0], g_skel_debug.px[3][1],
-             g_skel_debug.head_dy);
-}
-
 bool esp_init(pid_t pid) {
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
@@ -2038,11 +1812,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (g_skeleton_enabled) prune_skeleton_cache(s_transforms);
     else if (!g_skeletons.empty()) g_skeletons.clear();
     g_skeleton_builds_this_frame = 0;
-    if (g_skeleton_enabled) {
-        static int dump_timer = 0;
-        ++dump_timer;
-        if (dump_timer == 300 || dump_timer % 900 == 0) skeleton_write_dump();
-    }
 
     if (!g_player_position_validated) {
         if (!discover_player_position_offset(s_transforms)) return result;
@@ -2111,7 +1880,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         local = transform_camera_position; has_local_position = true;
     }
 
-    float skeleton_nearest_distance = 1e9F;
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) continue;
         if (!s_transforms[i]) continue;
@@ -2171,25 +1939,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             box.corners[corner][1] = projected ? sc.y : -1.0F;
         }
         if (g_skeleton_enabled && !transform_camera_mode)
-        {
             fill_skeleton_box(s_transforms[i], vp, sw, sh, box);
-            // Diagnostics follow the NEAREST skeleton box - the one the user
-            // is actually looking at - instead of whichever came last.
-            if (box.has_skeleton && distance >= 0.0F && distance < skeleton_nearest_distance) {
-                skeleton_nearest_distance = distance;
-                uint32_t mask = 0;
-                for (int bone = 0; bone < ESP_BONE_COUNT; ++bone)
-                    if (box.bone_valid[bone]) mask |= 1u << bone;
-                g_skel_debug.last_mask = mask;
-                g_skel_debug.near_dist = distance;
-                const int probe_bones[4] = {BONE_HIPS, BONE_SPINE2, BONE_HEAD, BONE_HAND_R};
-                for (int probe = 0; probe < 4; ++probe) {
-                    int bone = probe_bones[probe];
-                    g_skel_debug.px[probe][0] = box.bone_valid[bone] ? box.bones[bone][0] : -1.0F;
-                    g_skel_debug.px[probe][1] = box.bone_valid[bone] ? box.bones[bone][1] : -1.0F;
-                }
-            }
-        }
         result.push_back(box);
     }
 
