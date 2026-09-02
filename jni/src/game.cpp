@@ -827,6 +827,7 @@ struct SkeletonDebugState {
     int built_path = 0;       // 0 = none, 1 = ragdoll, 2 = names
     int bone_count = 0;       // bones cached by the last successful build
     int fill_fail = 0;        // last fill_skeleton_box failure reason
+    int groups = 0;           // distinct transform hierarchies among bones
     uint32_t last_mask = 0;   // bone_valid bits of the last drawn skeleton
 };
 static SkeletonDebugState g_skel_debug;
@@ -1189,15 +1190,19 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
     if (set_count < 5) { g_skel_debug.ragdoll_stage = 8; return false; }
 
     if (!resolve_skeleton_layout(pelvis ? pelvis : set_transform[0])) { g_skel_debug.ragdoll_stage = 9; return false; }
-    uint64_t data = rd_ptr((pelvis ? pelvis : set_transform[0]) + g_skeleton_layout.data_offset);
-    if (!data) { g_skel_debug.ragdoll_stage = 10; return false; }
-    uint64_t matrices = rd_ptr(data + g_skeleton_layout.matrices_offset);
-    uint64_t indices = rd_ptr(data + g_skeleton_layout.indices_offset);
-    if (g_skeleton_layout.matrices_indirect) matrices = rd_ptr(matrices);
-    if (g_skeleton_layout.indices_indirect) indices = rd_ptr(indices);
-    if (!matrices || !indices) { g_skel_debug.ragdoll_stage = 10; return false; }
 
-    // Hierarchy index, ancestor chain and world position per ragdoll bone.
+    // Bones may live in different TransformHierarchies (the game re-parents
+    // parts of the rig at runtime), so resolve arrays per hierarchy.
+    auto hierarchy_arrays = [&](uint64_t hierarchy, uint64_t& matrices, uint64_t& indices) -> bool {
+        matrices = rd_ptr(hierarchy + g_skeleton_layout.matrices_offset);
+        indices = rd_ptr(hierarchy + g_skeleton_layout.indices_offset);
+        if (g_skeleton_layout.matrices_indirect) matrices = rd_ptr(matrices);
+        if (g_skeleton_layout.indices_indirect) indices = rd_ptr(indices);
+        return matrices && indices;
+    };
+
+    // Hierarchy, index, ancestor chain and world position per ragdoll bone.
+    uint64_t set_data[kMaxSet];
     int32_t set_index[kMaxSet];
     int32_t chains[kMaxSet][48];
     int     chain_length[kMaxSet];
@@ -1205,12 +1210,16 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
     {
         int write = 0;
         for (int i = 0; i < set_count; ++i) {
-            if (rd_ptr(set_transform[i] + g_skeleton_layout.data_offset) != data) continue;
+            uint64_t bone_data = rd_ptr(set_transform[i] + g_skeleton_layout.data_offset);
+            if (!bone_data) continue;
             int32_t index = rd<int32_t>(set_transform[i] + g_skeleton_layout.index_offset);
             if (index < 0 || index > 100000) continue;
+            uint64_t matrices = 0, indices = 0;
+            if (!hierarchy_arrays(bone_data, matrices, indices)) continue;
             Vec3 position{};
             if (!read_transform_hierarchy_arrays(matrices, indices, index, position)) continue;
             set_transform[write] = set_transform[i];
+            set_data[write] = bone_data;
             set_index[write] = index;
             world[write] = position;
             ++write;
@@ -1218,12 +1227,17 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         set_count = write;
     }
     if (set_count < 5) { g_skel_debug.ragdoll_stage = 11; return false; }
-    for (int i = 0; i < set_count; ++i)
-        chain_length[i] = read_parent_chain_remote(indices, set_index[i], chains[i], 48);
+    for (int i = 0; i < set_count; ++i) {
+        uint64_t matrices = 0, indices = 0;
+        chain_length[i] = hierarchy_arrays(set_data[i], matrices, indices)
+            ? read_parent_chain_remote(indices, set_index[i], chains[i], 48) : 0;
+    }
 
-    auto set_slot_of_index = [&](int32_t index) -> int {
+    // Ancestor relations only make sense inside one hierarchy, so slot lookup
+    // matches both the index and the hierarchy the chain belongs to.
+    auto set_slot_of_index = [&](int32_t index, uint64_t hierarchy) -> int {
         for (int i = 0; i < set_count; ++i)
-            if (set_index[i] == index) return i;
+            if (set_index[i] == index && set_data[i] == hierarchy) return i;
         return -1;
     };
 
@@ -1233,7 +1247,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
     for (int i = 0; i < set_count; ++i) { nearest[i] = -1; descendants[i] = 0; }
     for (int i = 0; i < set_count; ++i) {
         for (int step = 0; step < chain_length[i]; ++step) {
-            int ancestor = set_slot_of_index(chains[i][step]);
+            int ancestor = set_slot_of_index(chains[i][step], set_data[i]);
             if (ancestor < 0) continue;
             if (nearest[i] < 0) nearest[i] = ancestor;
             ++descendants[ancestor];
@@ -1250,7 +1264,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         for (int i = 0; i < set_count; ++i)
             if (pelvis_slot < 0 || descendants[i] > descendants[pelvis_slot]) pelvis_slot = i;
     }
-    if (pelvis_slot < 0 || descendants[pelvis_slot] < 3) { g_skel_debug.ragdoll_stage = 12; return false; }
+    if (pelvis_slot < 0 || descendants[pelvis_slot] < 2) { g_skel_debug.ragdoll_stage = 12; return false; }
 
     // Chest: pelvis branch with the most descendants; walk down while the
     // branch still splits (handles an intermediate spine rigidbody).
@@ -1259,6 +1273,15 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         if (i == pelvis_slot || nearest[i] != pelvis_slot) continue;
         if (descendants[i] >= 2 && (chest_slot < 0 || descendants[i] > descendants[chest_slot]))
             chest_slot = i;
+    }
+    if (chest_slot < 0) {
+        // Upper body re-parented into another hierarchy: its subtree root has
+        // no set ancestor. Pick the rootless bone with the widest subtree.
+        for (int i = 0; i < set_count; ++i) {
+            if (i == pelvis_slot || nearest[i] >= 0) continue;
+            if (descendants[i] >= 2 && (chest_slot < 0 || descendants[i] > descendants[chest_slot]))
+                chest_slot = i;
+        }
     }
     while (chest_slot >= 0) {
         int next = -1;
@@ -1272,7 +1295,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
     bool on_spine[kMaxSet] = {};
     on_spine[chest_slot] = true;
     for (int step = 0; step < chain_length[chest_slot]; ++step) {
-        int slot = set_slot_of_index(chains[chest_slot][step]);
+        int slot = set_slot_of_index(chains[chest_slot][step], set_data[chest_slot]);
         if (slot >= 0) on_spine[slot] = true;
     }
 
@@ -1308,6 +1331,8 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
 
     // Consistent left/right split by local-space X (siblings share a parent).
     auto local_x = [&](int slot) -> float {
+        uint64_t matrices = 0, indices = 0;
+        if (!hierarchy_arrays(set_data[slot], matrices, indices)) return 0.0F;
         return rd<float>(matrices + (uint64_t)set_index[slot] * sizeof(Matrix34));
     };
     if (thigh_slot[0] >= 0 && thigh_slot[1] >= 0 && local_x(thigh_slot[0]) < local_x(thigh_slot[1])) {
@@ -1326,11 +1351,12 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
     // name offset is known, otherwise the first child in the same hierarchy.
     auto pick_child = [&](uint64_t parent, int bone_hint) -> uint64_t {
         if (!parent) return 0;
+        uint64_t parent_data = rd_ptr(parent + g_skeleton_layout.data_offset);
         uint64_t children[16];
         int count = read_transform_children(parent, children, 16);
         uint64_t fallback = 0;
         for (int i = 0; i < count; ++i) {
-            if (rd_ptr(children[i] + g_skeleton_layout.data_offset) != data) continue;
+            if (rd_ptr(children[i] + g_skeleton_layout.data_offset) != parent_data) continue;
             if (!fallback) fallback = children[i];
             if (g_go_name_offset_valid) {
                 char name[48];
@@ -1349,7 +1375,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         uint64_t cursor = set_transform[pelvis_slot];
         const int spine_bones[2] = {BONE_SPINE, BONE_SPINE1};
         for (int step = 0; step < 2 && cursor; ++step) {
-            uint64_t next = skeleton_child_on_chain(cursor, data, chains[chest_slot], chain_length[chest_slot]);
+            uint64_t next = skeleton_child_on_chain(cursor, set_data[chest_slot], chains[chest_slot], chain_length[chest_slot]);
             if (!next || next == set_transform[chest_slot]) break;
             assign(spine_bones[step], next);
             cursor = next;
@@ -1358,7 +1384,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
 
     if (head_slot >= 0) {
         assign(BONE_HEAD, set_transform[head_slot]);
-        uint64_t neck = skeleton_child_on_chain(set_transform[chest_slot], data,
+        uint64_t neck = skeleton_child_on_chain(set_transform[chest_slot], set_data[head_slot],
                                                 chains[head_slot], chain_length[head_slot]);
         if (neck && neck != set_transform[head_slot]) assign(BONE_NECK, neck);
     }
@@ -1370,7 +1396,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
     for (int side = 0; side < 2; ++side) {
         int arm = upperarm_slot[side];
         if (arm < 0) continue;
-        uint64_t shoulder = skeleton_child_on_chain(set_transform[chest_slot], data,
+        uint64_t shoulder = skeleton_child_on_chain(set_transform[chest_slot], set_data[arm],
                                                     chains[arm], chain_length[arm]);
         if (shoulder && shoulder != set_transform[arm]) assign(arm_bones[side][0], shoulder);
         assign(arm_bones[side][1], set_transform[arm]);
@@ -1403,14 +1429,14 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         if (skeleton_transform_ptr_valid(head)) assign(BONE_HEAD, head);
     }
 
-    // Final filter: everything must live in the pelvis hierarchy.
+    // Final filter: keep bones with a resolvable hierarchy (any hierarchy).
     int valid_bones = 0;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
         uint64_t transform = skeleton.bone_transform[bone];
         if (!transform) continue;
         uint64_t bone_data = rd_ptr(transform + g_skeleton_layout.data_offset);
         int32_t index = rd<int32_t>(transform + g_skeleton_layout.index_offset);
-        if (bone_data != data || index < 0 || index > 100000) {
+        if (!bone_data || index < 0 || index > 100000) {
             skeleton.bone_transform[bone] = 0;
             continue;
         }
@@ -1420,7 +1446,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
 
     g_skel_debug.ragdoll_stage = 0;
 
-    skeleton.hierarchy_data = data;
+    skeleton.hierarchy_data = set_data[pelvis_slot];
     skeleton.model_root = skeleton_model_root(player); // may be 0; revalidation compares equal
     skeleton.bone_count = valid_bones;
     skeleton.valid = true;
@@ -1546,14 +1572,14 @@ static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
     uint64_t data = rd_ptr(best_bones[BONE_HIPS] + g_skeleton_layout.data_offset);
     if (!data) return false;
 
-    // Keep only bones living in the same hierarchy as the hips.
+    // Keep bones with a resolvable hierarchy (re-parented bones included).
     int valid_bones = 0;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
         uint64_t transform = best_bones[bone];
         if (!transform) continue;
         uint64_t bone_data = rd_ptr(transform + g_skeleton_layout.data_offset);
         int32_t index = rd<int32_t>(transform + g_skeleton_layout.index_offset);
-        if (bone_data != data || index < 0 || index > 100000) continue;
+        if (!bone_data || index < 0 || index > 100000) continue;
         skeleton.bone_transform[bone] = transform;
         ++valid_bones;
     }
@@ -1638,55 +1664,67 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         }
     }
 
-    // Liveness: hips must still live in the cached hierarchy (model swaps and
-    // respawns replace it).
-    uint64_t data = rd_ptr(skeleton.bone_transform[BONE_HIPS] + g_skeleton_layout.data_offset);
-    if (data != skeleton.hierarchy_data) {
-        skeleton = CachedSkeleton{};
-        skeleton.retry_cooldown = 2;
+    // Bones may legitimately live in SEVERAL TransformHierarchies: the game
+    // re-parents bones at runtime (Ragdoll.m_BonesToReparent, aim rigs, foot
+    // IK), which moves them into a different hierarchy. Never drop a bone for
+    // that — group bones by hierarchy data and bulk-read every group.
+    constexpr int kMaxGroups = 4;
+    uint64_t group_data[kMaxGroups] = {};
+    int32_t  group_max[kMaxGroups] = {};
+    int      group_count = 0;
+    int32_t  bone_index[ESP_BONE_COUNT];
+    int      bone_group[ESP_BONE_COUNT];
+    for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
+        bone_index[bone] = -1;
+        bone_group[bone] = -1;
+        uint64_t transform = skeleton.bone_transform[bone];
+        if (!transform) continue;
+        uint64_t bone_data = rd_ptr(transform + g_skeleton_layout.data_offset);
+        if (!bone_data) continue;
+        int32_t index = rd<int32_t>(transform + g_skeleton_layout.index_offset);
+        if (index < 0 || index > 100000) continue;
+        int group = -1;
+        for (int g = 0; g < group_count; ++g)
+            if (group_data[g] == bone_data) { group = g; break; }
+        if (group < 0) {
+            if (group_count >= kMaxGroups) continue;
+            group = group_count++;
+            group_data[group] = bone_data;
+            group_max[group] = -1;
+        }
+        bone_index[bone] = index;
+        bone_group[bone] = group;
+        if (index > group_max[group]) group_max[group] = index;
+    }
+    g_skel_debug.groups = group_count;
+    // Liveness: the hips transform no longer resolves => model despawned.
+    if (group_count == 0 || bone_index[BONE_HIPS] < 0) {
+        if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
         g_skel_debug.fill_fail = 4;
         return false;
     }
 
-    // Re-read every bone's hierarchy index each frame: attaching weapons or
-    // clothes re-indexes the TransformHierarchy, which would silently break
-    // cached indices (classic "only some bones draw" bug).
-    int32_t bone_index[ESP_BONE_COUNT];
-    int32_t max_index = -1;
-    for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
-        bone_index[bone] = -1;
-        uint64_t transform = skeleton.bone_transform[bone];
-        if (!transform) continue;
-        uint64_t bone_data = rd_ptr(transform + g_skeleton_layout.data_offset);
-        if (bone_data != data) continue;
-        int32_t index = rd<int32_t>(transform + g_skeleton_layout.index_offset);
-        if (index < 0 || index > 100000) continue;
-        bone_index[bone] = index;
-        if (index > max_index) max_index = index;
-    }
-    if (max_index < 0 || max_index > 8192) {
-        if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
-        g_skel_debug.fill_fail = 5;
-        return false;
-    }
-
-    uint64_t matrices = rd_ptr(data + g_skeleton_layout.matrices_offset);
-    uint64_t indices = rd_ptr(data + g_skeleton_layout.indices_offset);
-    if (g_skeleton_layout.matrices_indirect) matrices = rd_ptr(matrices);
-    if (g_skeleton_layout.indices_indirect) indices = rd_ptr(indices);
-    if (!matrices || !indices) return false;
-
-    // Two bulk reads cover every bone (shared TRS + parent-index arrays).
-    const int32_t needed = max_index + 1;
-    static std::vector<Matrix34> local_matrices;
-    static std::vector<int32_t> local_parents;
-    local_matrices.resize((size_t)needed);
-    local_parents.resize((size_t)needed);
-    if (!rd_buf(matrices, local_matrices.data(), local_matrices.size() * sizeof(Matrix34)) ||
-        !rd_buf(indices, local_parents.data(), local_parents.size() * sizeof(int32_t))) {
-        if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
-        g_skel_debug.fill_fail = 6;
-        return false;
+    // Bulk read the TRS + parent-index arrays of every hierarchy in use.
+    static std::vector<Matrix34> local_matrices[kMaxGroups];
+    static std::vector<int32_t>  local_parents[kMaxGroups];
+    uint64_t group_matrices[kMaxGroups] = {};
+    uint64_t group_indices[kMaxGroups] = {};
+    bool     group_ok[kMaxGroups] = {};
+    for (int g = 0; g < group_count; ++g) {
+        int32_t needed = group_max[g] + 1;
+        if (needed <= 0 || needed > 8192) continue;
+        uint64_t matrices = rd_ptr(group_data[g] + g_skeleton_layout.matrices_offset);
+        uint64_t indices = rd_ptr(group_data[g] + g_skeleton_layout.indices_offset);
+        if (g_skeleton_layout.matrices_indirect) matrices = rd_ptr(matrices);
+        if (g_skeleton_layout.indices_indirect) indices = rd_ptr(indices);
+        if (!matrices || !indices) continue;
+        local_matrices[g].resize((size_t)needed);
+        local_parents[g].resize((size_t)needed);
+        if (!rd_buf(matrices, local_matrices[g].data(), (size_t)needed * sizeof(Matrix34)) ||
+            !rd_buf(indices, local_parents[g].data(), (size_t)needed * sizeof(int32_t))) continue;
+        group_matrices[g] = matrices;
+        group_indices[g] = indices;
+        group_ok[g] = true;
     }
 
     int projected = 0;
@@ -1694,13 +1732,22 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
         Vec3 world{};
         bool have_world = false;
-        if (bone_index[bone] >= 0) {
-            int walked = skeleton_local_walk(local_matrices.data(), local_parents.data(),
-                                             needed, bone_index[bone], world);
-            if (walked < 0 && remote_fallbacks < 8) {
-                // Parent chain leaves the buffered range (rare): slow remote walk.
+        if (bone_index[bone] >= 0 && bone_group[bone] >= 0) {
+            int g = bone_group[bone];
+            int walked = 0;
+            if (group_ok[g]) {
+                walked = skeleton_local_walk(local_matrices[g].data(), local_parents[g].data(),
+                                             (int32_t)local_matrices[g].size(), bone_index[bone], world);
+                if (walked < 0 && remote_fallbacks < 8) {
+                    // Parent chain leaves the buffered range (rare): remote walk.
+                    ++remote_fallbacks;
+                    walked = read_transform_hierarchy_arrays(group_matrices[g], group_indices[g],
+                                                             bone_index[bone], world) ? 1 : 0;
+                }
+            } else if (remote_fallbacks < 8) {
                 ++remote_fallbacks;
-                walked = read_transform_hierarchy_arrays(matrices, indices, bone_index[bone], world) ? 1 : 0;
+                walked = read_transform_hierarchy_layout(skeleton.bone_transform[bone],
+                                                         g_skeleton_layout, world) ? 1 : 0;
             }
             if (walked == 1) {
                 have_world = true;
@@ -1746,10 +1793,11 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
 //        10 arrays, 12 pelvis, 13 chest, 14 final; -1 never ran)
 //   H  = hips candidates (name path), N = best name-path bone count
 //   P  = build path used (1 ragdoll, 2 names), B = cached bones
-//   F  = fill failure (0 ok, 1 cooldown, 2 build, 3 root, 4 hips data,
-//        5 indices, 6 bulk read, 7 projected<4)
-//   C  = players with a valid cached skeleton, then the per-bone mask
-//        torso|armL|armR|legL|legR.
+//   F  = fill failure (0 ok, 1 cooldown, 2 build, 3 root, 4 hips gone,
+//        7 projected<4)
+//   C  = players with a valid cached skeleton
+//   D  = distinct transform hierarchies used by the bones (re-parenting),
+//        then the per-bone mask torso|armL|armR|legL|legR.
 void esp_skeleton_debug(char* out, int cap) {
     if (!out || cap <= 0) return;
     char mask[32];
@@ -1764,10 +1812,11 @@ void esp_skeleton_debug(char* out, int cap) {
     int cached = 0;
     for (const auto& entry : g_skeletons)
         if (entry.second.valid) ++cached;
-    snprintf(out, (size_t)cap, "SKL R:%d H:%d N:%d P:%d B:%d F:%d C:%d %s",
+    snprintf(out, (size_t)cap, "SKL R:%d H:%d N:%d P:%d B:%d F:%d C:%d D:%d %s",
              g_skel_debug.ragdoll_stage, g_skel_debug.hips_candidates,
              g_skel_debug.name_best, g_skel_debug.built_path,
-             g_skel_debug.bone_count, g_skel_debug.fill_fail, cached, mask);
+             g_skel_debug.bone_count, g_skel_debug.fill_fail, cached,
+             g_skel_debug.groups, mask);
 }
 
 bool esp_init(pid_t pid) {
