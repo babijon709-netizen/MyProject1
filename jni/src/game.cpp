@@ -838,6 +838,19 @@ struct LocalAimState {
 };
 static LocalAimState g_aim_state{};
 
+// Per-player auxiliary data resolved through the KCC (character controller):
+// the game-maintained head transform and the current pose. Used for
+// crouch-aware boxes and as the aim target when rig bones are unavailable.
+struct PlayerAux {
+    uint64_t kcc = 0;
+    uint64_t head_native = 0;   // native Transform of KCC.head
+    float    normal_height = 1.8F;
+    float    crouch_height = 1.1F;
+    int      retry_cooldown = 0;
+    int      revalidate = 0;
+};
+static std::unordered_map<uint64_t, PlayerAux> g_player_aux;
+
 static TransformHierarchyLayout g_skeleton_layout{};
 static bool g_skeleton_layout_valid = false;
 
@@ -1645,17 +1658,95 @@ static void prune_skeleton_cache(const std::vector<uint64_t>& players) {
     }
 }
 
-static bool bone_aim_angles(const Vec3& world, float& yaw_deg, float& pitch_deg) {
-    if (!g_cam_pose_valid) return false;
-    Vec3 d = {world.x - g_cam_pos.x, world.y - g_cam_pos.y, world.z - g_cam_pos.z};
-    float fx = d.x * g_cam_forward.x + d.y * g_cam_forward.y + d.z * g_cam_forward.z;
-    float rx = d.x * g_cam_right.x + d.y * g_cam_right.y + d.z * g_cam_right.z;
-    float ux = d.x * g_cam_up.x + d.y * g_cam_up.y + d.z * g_cam_up.z;
-    if (!std::isfinite(fx) || !std::isfinite(rx) || !std::isfinite(ux) || fx <= 0.05F) return false;
+static uint64_t resolve_player_kcc(uint64_t player);
+
+static PlayerAux& player_aux(uint64_t player) {
+    PlayerAux& aux = g_player_aux[player];
+    if (aux.kcc) {
+        // Cheap liveness check every frame; full re-resolve occasionally.
+        if (rd_ptr(aux.kcc + KCC_PLAYER_BACKREF) != player || ++aux.revalidate >= 300) {
+            aux = PlayerAux{};
+        }
+    }
+    if (!aux.kcc) {
+        if (aux.retry_cooldown > 0) { --aux.retry_cooldown; return aux; }
+        uint64_t kcc = resolve_player_kcc(player);
+        if (!kcc) { aux.retry_cooldown = 30; return aux; }
+        aux.kcc = kcc;
+        aux.revalidate = 0;
+        float nh = rd<float>(kcc + KCC_NORMAL_HEIGHT);
+        float ch = rd<float>(kcc + KCC_CROUCH_HEIGHT);
+        if (std::isfinite(nh) && nh > 1.2F && nh < 2.6F) aux.normal_height = nh;
+        if (std::isfinite(ch) && ch > 0.6F && ch < aux.normal_height) aux.crouch_height = ch;
+        uint64_t head = rd_ptr(kcc + KCC_HEAD_TRANSFORM);
+        aux.head_native = head ? rd_ptr(head + MANAGED_CACHED_PTR) : 0;
+        if (aux.head_native && (aux.head_native < 0x10000 || aux.head_native >= 0x0001000000000000ULL))
+            aux.head_native = 0;
+    }
+    return aux;
+}
+
+// Pose from KCC.Move: true when crouched (Pose == Crouch or State == CROUCHING).
+static bool player_is_crouched(const PlayerAux& aux) {
+    if (!aux.kcc) return false;
+    int32_t state = rd<int32_t>(aux.kcc + KCC_MOVE + 0x00);
+    int32_t pose  = rd<int32_t>(aux.kcc + KCC_MOVE + 0x04);
+    return pose == 1 || state == 3;
+}
+
+static bool player_head_world(const PlayerAux& aux, Vec3& out) {
+    if (!aux.head_native) return false;
+    if (g_skeleton_layout_valid &&
+        read_transform_hierarchy_layout(aux.head_native, g_skeleton_layout, out)) return vec3_is_finite(out);
+    return read_transform_hierarchy_position(aux.head_native, out) && vec3_is_finite(out);
+}
+
+static void prune_player_aux(const std::vector<uint64_t>& players) {
+    for (auto it = g_player_aux.begin(); it != g_player_aux.end();) {
+        bool present = false;
+        for (uint64_t player : players) if (player == it->first) { present = true; break; }
+        if (!present) it = g_player_aux.erase(it); else ++it;
+    }
+}
+
+// Angular offset of a world point from the camera axis. Prefers the live
+// camera pose; falls back to inverting the projection from the screen point,
+// so aim angles never depend on the transform-pose path succeeding.
+static bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, float sh, float& yaw_deg, float& pitch_deg) {
     constexpr float rad2deg = 57.29577951F;
-    yaw_deg = atan2f(rx, fx) * rad2deg;
-    pitch_deg = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
+    if (g_cam_pose_valid) {
+        Vec3 d = {world.x - g_cam_pos.x, world.y - g_cam_pos.y, world.z - g_cam_pos.z};
+        float fx = d.x * g_cam_forward.x + d.y * g_cam_forward.y + d.z * g_cam_forward.z;
+        float rx = d.x * g_cam_right.x + d.y * g_cam_right.y + d.z * g_cam_right.z;
+        float ux = d.x * g_cam_up.x + d.y * g_cam_up.y + d.z * g_cam_up.z;
+        if (std::isfinite(fx) && std::isfinite(rx) && std::isfinite(ux) && fx > 0.05F) {
+            yaw_deg = atan2f(rx, fx) * rad2deg;
+            pitch_deg = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
+            if (std::isfinite(yaw_deg) && std::isfinite(pitch_deg)) return true;
+        }
+    }
+    float fov = (g_cam_fov_deg > 1.0F && g_cam_fov_deg < 179.0F) ? g_cam_fov_deg : 60.0F;
+    float tan_half_v = tanf(fov * 0.5F / rad2deg);
+    float aspect = sw / sh;
+    float ndc_x = (screen.x / sw) * 2.0F - 1.0F;
+    float ndc_y = 1.0F - (screen.y / sh) * 2.0F;
+    yaw_deg = atanf(ndc_x * tan_half_v * aspect) * rad2deg;
+    pitch_deg = atanf(ndc_y * tan_half_v) * rad2deg;
     return std::isfinite(yaw_deg) && std::isfinite(pitch_deg);
+}
+
+static bool set_aim_point(EspBox& box, int slot, const Vec3& world, const Mat4& vp, float sw, float sh) {
+    Vec2 screen{};
+    if (!w2s(vp, world, sw, sh, screen, false)) return false;
+    if (fabsf(screen.x) > sw * 4.0F || fabsf(screen.y) > sh * 4.0F) return false;
+    float yaw = 0.0F, pitch = 0.0F;
+    if (!aim_angles_for(world, screen, sw, sh, yaw, pitch)) return false;
+    box.aim_pts[slot][0] = screen.x;
+    box.aim_pts[slot][1] = screen.y;
+    box.aim_yaw[slot] = yaw;
+    box.aim_pitch[slot] = pitch;
+    box.aim_valid[slot] = true;
+    return true;
 }
 
 static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, float sw, float sh, EspBox& box) {
@@ -1672,7 +1763,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         ++g_skeleton_builds_this_frame;
         if (!build_skeleton(player, skeleton)) {
             skeleton.valid = false;
-            skeleton.retry_cooldown = 90;
+            skeleton.retry_cooldown = 20;
             return false;
         }
     }
@@ -1826,16 +1917,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
 
         for (int i = 0; i < 3; ++i) {
             if (!have[i]) continue;
-            Vec2 screen{};
-            if (!w2s(view_projection, target[i], sw, sh, screen, false)) continue;
-            if (fabsf(screen.x) > sw * 4.0F || fabsf(screen.y) > sh * 4.0F) continue;
-            float yaw = 0.0F, pitch = 0.0F;
-            if (!bone_aim_angles(target[i], yaw, pitch)) continue;
-            box.aim_pts[i][0] = screen.x;
-            box.aim_pts[i][1] = screen.y;
-            box.aim_yaw[i] = yaw;
-            box.aim_pitch[i] = pitch;
-            box.aim_valid[i] = true;
+            if (set_aim_point(box, i, target[i], view_projection, sw, sh)) box.aim_source = 1;
         }
     }
 
@@ -1971,6 +2053,7 @@ void esp_reset() {
     g_player_position_validated = false;
     g_cam_fov_deg = 0.0F; g_cam_pose_valid = false;
     g_aim_state = {};
+    g_player_aux.clear();
     g_skeletons.clear();
     g_skeleton_layout = {}; g_skeleton_layout_valid = false;
     g_go_name_offset = 0; g_go_name_plain_pointer = false;
@@ -1996,6 +2079,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (s_transforms.empty()) return result;
 
     const bool want_bones = g_skeleton_enabled || g_aim_bones_requested;
+    prune_player_aux(s_transforms);
     if (want_bones) prune_skeleton_cache(s_transforms);
     else if (!g_skeletons.empty()) g_skeletons.clear();
     g_skeleton_builds_this_frame = 0;
@@ -2080,8 +2164,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
 
+        // Crouch-aware body height from the character controller.
+        PlayerAux& aux = player_aux(s_transforms[i]);
+        const bool crouched = player_is_crouched(aux);
+        float body_height = crouched ? aux.crouch_height : aux.normal_height;
+        if (!(body_height > 0.6F && body_height < 2.6F)) body_height = PLAYER_HEIGHT;
+
         Vec3 body_bottom = {feet.x, feet.y, feet.z};
-        Vec3 body_top = {feet.x, feet.y + PLAYER_HEIGHT, feet.z};
+        Vec3 body_top = {feet.x, feet.y + body_height, feet.z};
         if (transform_camera_mode || !g_use_direct_player_position) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
 
         Vec2 sf{}, sh2{};
@@ -2114,6 +2204,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         };
         EspBox box{};
         box.id = s_transforms[i];
+        box.crouched = crouched;
+        box.aim_source = 0;
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;
         box.distance = distance;
@@ -2128,6 +2220,30 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         if (want_bones && !transform_camera_mode)
             fill_skeleton_box(s_transforms[i], vp, sw, sh, box);
+
+        // Aim fallbacks when rig bones are not (yet) available, so the aimbot
+        // always has a crouch-aware target instead of a fixed-height guess.
+        if (g_aim_bones_requested && !transform_camera_mode &&
+            !(box.aim_valid[0] && box.aim_valid[1] && box.aim_valid[2])) {
+            Vec3 head{};
+            bool have_head = false;
+            // (2) game-maintained head transform (moves with crouch/animation)
+            if (player_head_world(aux, head)) {
+                float dy = head.y - feet.y;
+                have_head = dy > 0.4F && dy < 2.4F;
+            }
+            const float h_up = crouched ? 0.24F : 0.32F;   // head -> chest
+            const float p_up = crouched ? 0.45F : 0.62F;   // head -> pelvis
+            if (have_head) {
+                if (!box.aim_valid[0]) { Vec3 t = head; t.y += 0.03F; if (set_aim_point(box, 0, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
+                if (!box.aim_valid[1]) { Vec3 t = head; t.y -= h_up; if (set_aim_point(box, 1, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
+                if (!box.aim_valid[2]) { Vec3 t = head; t.y -= p_up; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
+            }
+            // (3) feet + pose height estimate
+            if (!box.aim_valid[0]) { Vec3 t = feet; t.y += body_height - 0.12F; if (set_aim_point(box, 0, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
+            if (!box.aim_valid[1]) { Vec3 t = feet; t.y += body_height * 0.72F; if (set_aim_point(box, 1, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
+            if (!box.aim_valid[2]) { Vec3 t = feet; t.y += body_height * 0.52F; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
+        }
         result.push_back(box);
     }
 

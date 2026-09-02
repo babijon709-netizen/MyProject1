@@ -23,6 +23,10 @@ struct EspBox {
     // aim_valid[i] == false means the corresponding bone could not be read and
     // the caller should fall back to the box estimate.
     bool  aim_valid[3];
+    // Where the aim points came from: 0 none, 1 rig bones (exact),
+    // 2 KCC head transform (crouch-aware), 3 feet + pose height (estimate).
+    int   aim_source;
+    bool  crouched;
     float aim_pts[3][2];
     // Angular offset of each aim point from the camera forward axis, in
     // degrees (yaw = +right, pitch = +up). Only meaningful when aim_valid[i].

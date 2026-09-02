@@ -554,18 +554,14 @@ static ImU32 ColU32(const ImVec4& c) {
     return IM_COL32((int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255), (int)(c.w * 255));
 }
 
-// Radius (px) of the aim FOV circle. cfg::aim::fov is in degrees measured
-// against the game's vertical FOV, so the circle shrinks when the player is
-// scoped in and the camera FOV drops.
+// Radius (px) of the aim FOV circle. Original logic: cfg::aim::fov is an
+// angle against a fixed 60° reference (not the live camera FOV), so the circle
+// stays put on screen when the player zooms in. 180° = whole screen.
 static float AimFovRadiusPx(float sw, float sh) {
     float fov = cfg::aim::fov;
     if (fov <= 0.f) return 0.f;
-    if (fov >= 359.f) return sw + sh;
-    float camFov = esp_camera_fov_deg();
-    if (!(camFov > 1.f && camFov < 179.f)) camFov = 60.f;
-    float half = fov * 0.5f;
-    if (half > 89.f) half = 89.f;
-    float t = tanf(half * (float)M_PI / 180.f) / tanf(camFov * 0.5f * (float)M_PI / 180.f);
+    if (fov >= 180.f) return sw + sh;
+    float t = tanf(fov * 0.5f * (float)M_PI / 180.f) / tanf(30.f * (float)M_PI / 180.f);
     float r = t * (sh * 0.5f);
     if (!std::isfinite(r) || r > sw + sh) r = sw + sh;
     return r;
@@ -908,6 +904,8 @@ static void ConfigLoad(int idx) {
     g_state.esp_thick   = s.esp_thick;
     g_state.gun_str     = s.gun_str;
     g_state.gun_fov     = s.gun_fov;
+    if (!(g_state.gun_fov >= 5.f)) g_state.gun_fov = 5.f;
+    if (g_state.gun_fov > 180.f) g_state.gun_fov = 180.f;
     g_state.gun_trigger_delay     = s.gun_trigger_delay;
     g_state.ui_fps      = s.ui_fps;      g_state.ui_dark_mode= s.ui_dark_mode;
     g_state.ui_show_sep = s.ui_show_sep;
@@ -2300,7 +2298,7 @@ float TabContent(int tab, float dt, float cW) {
 
         SHdr(XS("FOV аимбота"));
         CardBg(Layout::SliderH);
-        SliderRow("##afov", XS("Радиус FOV"), &g_state.gun_fov, 5.f, 360.f, XS("%.0f°"), true, true, g_state.sl_gun_fov, dt);
+        SliderRow("##afov", XS("Радиус FOV"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), true, true, g_state.sl_gun_fov, dt);
 
         SHdr(XS("Скорость наводки"));
         CardBg(Layout::SliderH);
@@ -2783,7 +2781,8 @@ static void UpdateAim(float dt) {
             t.valid = std::isfinite(t.yaw) && std::isfinite(t.pitch) &&
                       std::isfinite(t.sx) && std::isfinite(t.sy);
         } else {
-            // Box estimate (no bones yet): derive angles from pixels.
+            // Box estimate (nothing else resolved): derive angles from pixels.
+            // The box itself is already crouch-aware (KCC pose height).
             if (!std::isfinite(b.x1) || !std::isfinite(b.y1) || !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
             float h = b.y2 - b.y1;
             if (h < 4.f || h > sh * 4.f) continue;
@@ -2824,6 +2823,37 @@ static void UpdateAim(float dt) {
     }
     s_lostFrames = 0;
     if (best.id != s_lastId) s_haveLast = false; // do not learn gain across a target switch
+
+    // Lead a moving target: the game applies our finger delta next frame, by
+    // which time the target has moved on. Use the target's angular velocity
+    // relative to the camera (with the camera's own rotation removed) and
+    // aim one frame ahead. Reset on target switch.
+    static float s_prevTgtYaw = 0.f, s_prevTgtPitch = 0.f, s_prevCamYawT = 0.f, s_prevCamPitchT = 0.f;
+    static bool  s_havePrevTgt = false;
+    {
+        float cy = 0.f, cp = 0.f;
+        bool haveC = esp_camera_angles(cy, cp);
+        if (best.id == s_lastId && s_havePrevTgt && haveC) {
+            float dCamYaw = cy - s_prevCamYawT;
+            while (dCamYaw > 180.f) dCamYaw -= 360.f;
+            while (dCamYaw < -180.f) dCamYaw += 360.f;
+            float dCamPitch = cp - s_prevCamPitchT;
+            // world-space angular motion of the target = change in offset + camera rotation
+            float vYaw = (best.yaw - s_prevTgtYaw) + dCamYaw;
+            float vPitch = (best.pitch - s_prevTgtPitch) + dCamPitch;
+            if (std::isfinite(vYaw) && std::isfinite(vPitch) && fabsf(vYaw) < 8.f && fabsf(vPitch) < 8.f) {
+                s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
+                best.yaw += vYaw;
+                best.pitch += vPitch;
+            } else {
+                s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
+            }
+        } else {
+            s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
+        }
+        if (haveC) { s_prevCamYawT = cy; s_prevCamPitchT = cp; s_havePrevTgt = true; }
+        else s_havePrevTgt = false;
+    }
     s_lastId = best.id;
 
     // ---- learn finger gain (deg per px) from the previous frame ----

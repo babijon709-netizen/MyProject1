@@ -73,6 +73,13 @@ inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;
 inline constexpr std::uint64_t PLAYER_KCC_REFERENCE        = 0xB0;
 inline constexpr std::uint64_t KCC_PLAYER_BACKREF          = 0x78;
 inline constexpr std::uint64_t KCC_HEAD_TRANSFORM          = 0x88; // KCC.head (managed UnityEngine.Transform)
+inline constexpr std::uint64_t KCC_NORMAL_HEIGHT          = 0xA0; // float, capsule height standing
+inline constexpr std::uint64_t KCC_CROUCH_HEIGHT          = 0xA4; // float, capsule height crouched
+// KCC.ZYW : HyperHug.Games.Oxide.Features.Player.Move (value struct @0x16C)
+//   +0x00 MoveState State (0 idle,1 walk,2 run,3 crouching,4 air,5 climb,6 swim,7 dead)
+//   +0x04 Pose (0 Stand, 1 Crouch)   +0x08 bool Aim  +0x0C Vector3 Position
+//   +0x18 Vector3 RealVelocity
+inline constexpr std::uint64_t KCC_MOVE                   = 0x16C;
 inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION     = 0x108;
 inline constexpr std::uint64_t CHAR_ANIM_PLAYER_BACKREF    = 0x78;
 inline constexpr std::uint64_t CHAR_ANIM_RAGDOLL           = 0x38;
