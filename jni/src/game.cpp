@@ -829,6 +829,8 @@ struct SkeletonDebugState {
     int fill_fail = 0;        // last fill_skeleton_box failure reason
     int groups = 0;           // distinct transform hierarchies among bones
     uint32_t last_mask = 0;   // bone_valid bits of the last drawn skeleton
+    float px[4][2] = {};      // screen coords: hips, spine2, head, hand R
+    float head_dy = 0.0F;     // world head.y - hips.y of the last skeleton
 };
 static SkeletonDebugState g_skel_debug;
 
@@ -1453,16 +1455,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
     return true;
 }
 
-static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
-    skeleton = CachedSkeleton{};
-
-    // Primary: the game's own ragdoll bone list (name-independent).
-    g_skel_debug.built_path = 0;
-    if (build_skeleton_from_ragdoll(player, skeleton)) {
-        g_skel_debug.built_path = 1;
-        g_skel_debug.bone_count = skeleton.bone_count;
-        return true;
-    }
+static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton) {
     skeleton = CachedSkeleton{};
 
     uint64_t root = skeleton_model_root(player);
@@ -1589,8 +1582,33 @@ static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
     skeleton.model_root = root;
     skeleton.bone_count = valid_bones;
     skeleton.valid = true;
-    g_skel_debug.built_path = 2;
-    g_skel_debug.bone_count = valid_bones;
+    return true;
+}
+
+// Build with both strategies and keep the richer skeleton. The name path
+// identifies bones on the render rig directly, so it wins ties: the ragdoll
+// list can reference physics/hitbox proxy transforms whose upper-body
+// positions do not follow the animated model.
+static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
+    skeleton = CachedSkeleton{};
+    g_skel_debug.built_path = 0;
+
+    CachedSkeleton from_ragdoll{};
+    bool ragdoll_ok = build_skeleton_from_ragdoll(player, from_ragdoll);
+
+    CachedSkeleton from_names{};
+    bool names_ok = build_skeleton_from_names(player, from_names);
+
+    if (names_ok && (!ragdoll_ok || from_names.bone_count >= from_ragdoll.bone_count)) {
+        skeleton = from_names;
+        g_skel_debug.built_path = 2;
+    } else if (ragdoll_ok) {
+        skeleton = from_ragdoll;
+        g_skel_debug.built_path = 1;
+    } else {
+        return false;
+    }
+    g_skel_debug.bone_count = skeleton.bone_count;
     return true;
 }
 
@@ -1783,6 +1801,14 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         if (box.bone_valid[bone]) mask |= 1u << bone;
     g_skel_debug.last_mask = mask;
     g_skel_debug.fill_fail = 0;
+    const int probe_bones[4] = {BONE_HIPS, BONE_SPINE2, BONE_HEAD, BONE_HAND_R};
+    for (int i = 0; i < 4; ++i) {
+        int bone = probe_bones[i];
+        g_skel_debug.px[i][0] = box.bone_valid[bone] ? box.bones[bone][0] : -1.0F;
+        g_skel_debug.px[i][1] = box.bone_valid[bone] ? box.bones[bone][1] : -1.0F;
+    }
+    g_skel_debug.head_dy = (box.bone_valid[BONE_HEAD] && box.bone_valid[BONE_HIPS])
+        ? (skeleton.bone_world[BONE_HEAD].y - skeleton.bone_world[BONE_HIPS].y) : 0.0F;
     return true;
 }
 
@@ -1812,11 +1838,18 @@ void esp_skeleton_debug(char* out, int cap) {
     int cached = 0;
     for (const auto& entry : g_skeletons)
         if (entry.second.valid) ++cached;
-    snprintf(out, (size_t)cap, "SKL R:%d H:%d N:%d P:%d B:%d F:%d C:%d D:%d %s",
+    snprintf(out, (size_t)cap,
+             "SKL R:%d H:%d N:%d P:%d B:%d F:%d C:%d D:%d %s\n"
+             "HIP %.0f,%.0f SP2 %.0f,%.0f HD %.0f,%.0f HR %.0f,%.0f dY %.2f",
              g_skel_debug.ragdoll_stage, g_skel_debug.hips_candidates,
              g_skel_debug.name_best, g_skel_debug.built_path,
              g_skel_debug.bone_count, g_skel_debug.fill_fail, cached,
-             g_skel_debug.groups, mask);
+             g_skel_debug.groups, mask,
+             g_skel_debug.px[0][0], g_skel_debug.px[0][1],
+             g_skel_debug.px[1][0], g_skel_debug.px[1][1],
+             g_skel_debug.px[2][0], g_skel_debug.px[2][1],
+             g_skel_debug.px[3][0], g_skel_debug.px[3][1],
+             g_skel_debug.head_dy);
 }
 
 bool esp_init(pid_t pid) {

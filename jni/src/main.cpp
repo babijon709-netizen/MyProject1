@@ -595,7 +595,7 @@ static void DrawEspOverlay() {
 
     // Skeleton pipeline status (temporary diagnostics, shown with the toggle).
     if (g_state.esp_skeleton) {
-        char skel_dbg[128];
+        char skel_dbg[224];
         esp_skeleton_debug(skel_dbg, sizeof(skel_dbg));
         dl->AddText(ImVec2(12.0f, sh * 0.28f), IM_COL32(80, 255, 140, 230), skel_dbg);
     }
