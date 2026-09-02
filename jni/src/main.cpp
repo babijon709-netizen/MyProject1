@@ -592,6 +592,14 @@ static void DrawEspOverlay() {
     if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton) return;
 
     std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
+
+    // Skeleton pipeline status (temporary diagnostics, shown with the toggle).
+    if (g_state.esp_skeleton) {
+        char skel_dbg[128];
+        esp_skeleton_debug(skel_dbg, sizeof(skel_dbg));
+        dl->AddText(ImVec2(12.0f, sh * 0.28f), IM_COL32(80, 255, 140, 230), skel_dbg);
+    }
+
     constexpr int BOX_EDGES[][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},

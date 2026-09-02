@@ -53,6 +53,7 @@ inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel
 //   Ragdoll.BodyPart.transform (0x10)
 inline constexpr std::uint64_t PLAYER_KCC_REFERENCE        = 0xB0;
 inline constexpr std::uint64_t KCC_PLAYER_BACKREF          = 0x78;
+inline constexpr std::uint64_t KCC_HEAD_TRANSFORM          = 0x88; // KCC.head (managed UnityEngine.Transform)
 inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION     = 0x108;
 inline constexpr std::uint64_t CHAR_ANIM_PLAYER_BACKREF    = 0x78;
 inline constexpr std::uint64_t CHAR_ANIM_RAGDOLL           = 0x38;

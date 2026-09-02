@@ -818,6 +818,19 @@ struct CachedSkeleton {
 static std::unordered_map<uint64_t, CachedSkeleton> g_skeletons;
 static bool g_skeleton_enabled = false;
 
+// On-screen diagnostics: records where the skeleton pipeline stops so the
+// failure point is visible in-game instead of guessed at.
+struct SkeletonDebugState {
+    int ragdoll_stage = -1;   // last ragdoll build: 0 = ok, >0 = failure stage
+    int hips_candidates = 0;  // name path: hips candidates found
+    int name_best = 0;        // name path: best bone count
+    int built_path = 0;       // 0 = none, 1 = ragdoll, 2 = names
+    int bone_count = 0;       // bones cached by the last successful build
+    int fill_fail = 0;        // last fill_skeleton_box failure reason
+    uint32_t last_mask = 0;   // bone_valid bits of the last drawn skeleton
+};
+static SkeletonDebugState g_skel_debug;
+
 static TransformHierarchyLayout g_skeleton_layout{};
 static bool g_skeleton_layout_valid = false;
 
@@ -1058,27 +1071,54 @@ static uint64_t native_component_transform(uint64_t native_component) {
     return transform;
 }
 
-// player -> KCC (kccReference may be a wrapper; KCC.player back-ref validates)
-// -> CharacterAnimation (0x108, back-ref at 0x78) -> Ragdoll (0x38).
-static uint64_t resolve_player_ragdoll(uint64_t player) {
+// player -> KCC. kccReference (0xB0) may be an obfuscated wrapper, and its
+// internal layout is unknown, so probe it and — as a last resort — scan the
+// PlayerManager fields. A real KCC is recognized by its back-reference
+// (KCC.player @0x78 == player); KCC.head (@0x88, managed Transform) and the
+// CharacterAnimation slot (@0x108) strengthen the match.
+static bool kcc_head_transform_valid(uint64_t kcc) {
+    uint64_t head = managed_object_native(rd_ptr(kcc + KCC_HEAD_TRANSFORM));
+    return skeleton_transform_ptr_valid(head);
+}
+
+static bool looks_like_kcc(uint64_t candidate, uint64_t player) {
+    if (candidate < 0x10000 || candidate >= 0x0001000000000000ULL) return false;
+    return rd_ptr(candidate + KCC_PLAYER_BACKREF) == player;
+}
+
+static uint64_t resolve_player_kcc(uint64_t player) {
     uint64_t reference = rd_ptr(player + PLAYER_KCC_REFERENCE);
-    if (!reference) return 0;
-    uint64_t kcc = 0;
-    if (rd_ptr(reference + KCC_PLAYER_BACKREF) == player) {
-        kcc = reference;
-    } else {
-        static const uint64_t kWrapperOffsets[] = {0x10, 0x18, 0x20, 0x28, 0x30, 0x38};
-        for (uint64_t offset : kWrapperOffsets) {
+    if (reference) {
+        if (looks_like_kcc(reference, player)) return reference;
+        for (uint64_t offset = 0x08; offset <= 0x60; offset += 8) {
             uint64_t candidate = rd_ptr(reference + offset);
-            if (candidate && rd_ptr(candidate + KCC_PLAYER_BACKREF) == player) { kcc = candidate; break; }
+            if (looks_like_kcc(candidate, player)) return candidate;
         }
     }
-    if (!kcc) return 0;
+    // Field scan: prefer candidates whose head transform checks out, then
+    // any with a plausible CharacterAnimation pointer.
+    uint64_t weak = 0;
+    for (uint64_t offset = 0x68; offset <= 0x2C8; offset += 8) {
+        uint64_t candidate = rd_ptr(player + offset);
+        if (!looks_like_kcc(candidate, player)) continue;
+        if (kcc_head_transform_valid(candidate)) return candidate;
+        if (!weak && rd_ptr(candidate + KCC_CHARACTER_ANIMATION)) weak = candidate;
+    }
+    return weak;
+}
+
+static uint64_t resolve_player_ragdoll(uint64_t player, uint64_t& kcc_out) {
+    kcc_out = 0;
+    uint64_t kcc = resolve_player_kcc(player);
+    if (!kcc) { g_skel_debug.ragdoll_stage = 2; return 0; }
+    kcc_out = kcc;
     uint64_t anim = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
-    if (!anim) return 0;
+    if (!anim) { g_skel_debug.ragdoll_stage = 3; return 0; }
     uint64_t back = rd_ptr(anim + CHAR_ANIM_PLAYER_BACKREF);
-    if (back && back != player) return 0;
-    return rd_ptr(anim + CHAR_ANIM_RAGDOLL);
+    if (back && back != player) { g_skel_debug.ragdoll_stage = 4; return 0; }
+    uint64_t ragdoll = rd_ptr(anim + CHAR_ANIM_RAGDOLL);
+    if (!ragdoll) g_skel_debug.ragdoll_stage = 5;
+    return ragdoll;
 }
 
 // Ancestor index chain (excluding the start index) via remote reads.
@@ -1110,13 +1150,14 @@ static uint64_t skeleton_child_on_chain(uint64_t parent_transform, uint64_t data
 }
 
 static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleton) {
-    uint64_t ragdoll = resolve_player_ragdoll(player);
+    uint64_t kcc = 0;
+    uint64_t ragdoll = resolve_player_ragdoll(player, kcc);
     if (!ragdoll) return false;
 
     uint64_t bones_array = rd_ptr(ragdoll + RAGDOLL_BONES_ARRAY);
-    if (!bones_array) return false;
+    if (!bones_array) { g_skel_debug.ragdoll_stage = 6; return false; }
     int32_t element_count = rd<int32_t>(bones_array + IL2CPP_ARRAY_LENGTH);
-    if (element_count < 4 || element_count > 64) return false;
+    if (element_count < 4 || element_count > 64) { g_skel_debug.ragdoll_stage = 7; return false; }
 
     uint64_t pelvis = native_component_transform(
         managed_object_native(rd_ptr(ragdoll + RAGDOLL_PELVIS_RIGIDBODY)));
@@ -1145,16 +1186,16 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
             if (set_transform[j] == pelvis) { present = true; break; }
         if (!present && set_count < kMaxSet) set_transform[set_count++] = pelvis;
     }
-    if (set_count < 5) return false;
+    if (set_count < 5) { g_skel_debug.ragdoll_stage = 8; return false; }
 
-    if (!resolve_skeleton_layout(pelvis ? pelvis : set_transform[0])) return false;
+    if (!resolve_skeleton_layout(pelvis ? pelvis : set_transform[0])) { g_skel_debug.ragdoll_stage = 9; return false; }
     uint64_t data = rd_ptr((pelvis ? pelvis : set_transform[0]) + g_skeleton_layout.data_offset);
-    if (!data) return false;
+    if (!data) { g_skel_debug.ragdoll_stage = 10; return false; }
     uint64_t matrices = rd_ptr(data + g_skeleton_layout.matrices_offset);
     uint64_t indices = rd_ptr(data + g_skeleton_layout.indices_offset);
     if (g_skeleton_layout.matrices_indirect) matrices = rd_ptr(matrices);
     if (g_skeleton_layout.indices_indirect) indices = rd_ptr(indices);
-    if (!matrices || !indices) return false;
+    if (!matrices || !indices) { g_skel_debug.ragdoll_stage = 10; return false; }
 
     // Hierarchy index, ancestor chain and world position per ragdoll bone.
     int32_t set_index[kMaxSet];
@@ -1176,7 +1217,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         }
         set_count = write;
     }
-    if (set_count < 5) return false;
+    if (set_count < 5) { g_skel_debug.ragdoll_stage = 11; return false; }
     for (int i = 0; i < set_count; ++i)
         chain_length[i] = read_parent_chain_remote(indices, set_index[i], chains[i], 48);
 
@@ -1209,7 +1250,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         for (int i = 0; i < set_count; ++i)
             if (pelvis_slot < 0 || descendants[i] > descendants[pelvis_slot]) pelvis_slot = i;
     }
-    if (pelvis_slot < 0 || descendants[pelvis_slot] < 3) return false;
+    if (pelvis_slot < 0 || descendants[pelvis_slot] < 3) { g_skel_debug.ragdoll_stage = 12; return false; }
 
     // Chest: pelvis branch with the most descendants; walk down while the
     // branch still splits (handles an intermediate spine rigidbody).
@@ -1226,7 +1267,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         if (next < 0) break;
         chest_slot = next;
     }
-    if (chest_slot < 0) return false;
+    if (chest_slot < 0) { g_skel_debug.ragdoll_stage = 13; return false; }
 
     bool on_spine[kMaxSet] = {};
     on_spine[chest_slot] = true;
@@ -1356,6 +1397,12 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         assign(leg_bones[side][3], pick_child(foot, leg_bones[side][3]));
     }
 
+    // Bonus: the game exposes the head transform directly on the KCC.
+    if (kcc && !skeleton.bone_transform[BONE_HEAD]) {
+        uint64_t head = managed_object_native(rd_ptr(kcc + KCC_HEAD_TRANSFORM));
+        if (skeleton_transform_ptr_valid(head)) assign(BONE_HEAD, head);
+    }
+
     // Final filter: everything must live in the pelvis hierarchy.
     int valid_bones = 0;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
@@ -1369,7 +1416,9 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         }
         ++valid_bones;
     }
-    if (valid_bones < 6 || !skeleton.bone_transform[BONE_HIPS]) return false;
+    if (valid_bones < 6 || !skeleton.bone_transform[BONE_HIPS]) { g_skel_debug.ragdoll_stage = 14; return false; }
+
+    g_skel_debug.ragdoll_stage = 0;
 
     skeleton.hierarchy_data = data;
     skeleton.model_root = skeleton_model_root(player); // may be 0; revalidation compares equal
@@ -1382,7 +1431,12 @@ static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
     skeleton = CachedSkeleton{};
 
     // Primary: the game's own ragdoll bone list (name-independent).
-    if (build_skeleton_from_ragdoll(player, skeleton)) return true;
+    g_skel_debug.built_path = 0;
+    if (build_skeleton_from_ragdoll(player, skeleton)) {
+        g_skel_debug.built_path = 1;
+        g_skel_debug.bone_count = skeleton.bone_count;
+        return true;
+    }
     skeleton = CachedSkeleton{};
 
     uint64_t root = skeleton_model_root(player);
@@ -1406,34 +1460,86 @@ static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
         hips_candidates[hips_candidate_count++] = node;
         if (hips_candidate_count >= 4) break;
     }
+    g_skel_debug.hips_candidates = hips_candidate_count;
     if (!hips_candidate_count) return false;
 
-    // Anchor the skeleton to the Hips subtree that yields the most bones —
-    // this keeps every bone on one rig and ignores stray meshes named "Head".
+    // Targeted parent->child descent along the known rig structure. Unlike a
+    // breadth-first subtree scan this cannot starve on wide hierarchies (bone
+    // attachments, hitboxes, gear), because it only ever looks at the children
+    // of already-identified bones. A missing middle bone is tolerated: the
+    // search for the next slot simply continues from the last found bone.
+    auto find_child_bone = [&](uint64_t parent, int bone_id) -> uint64_t {
+        if (!parent) return 0;
+        uint64_t children[64];
+        int count = read_transform_children(parent, children, 64);
+        for (int i = 0; i < count; ++i) {
+            char name[48];
+            if (!read_transform_name(children[i], name, sizeof(name))) continue;
+            if (match_bone_name(name) == bone_id) return children[i];
+        }
+        return 0;
+    };
+
     uint64_t best_bones[ESP_BONE_COUNT] = {};
     int best_count = 0;
-    static std::vector<uint64_t> rig_nodes;
     for (int candidate = 0; candidate < hips_candidate_count; ++candidate) {
         uint64_t hips = hips_candidates[candidate];
-        collect_transform_subtree(hips, rig_nodes, 512);
         uint64_t bones[ESP_BONE_COUNT] = {};
         bones[BONE_HIPS] = hips;
         int found = 1;
-        for (uint64_t node : rig_nodes) {
-            if (node == hips) continue;
-            char name[48];
-            if (!read_transform_name(node, name, sizeof(name))) continue;
-            int bone = match_bone_name(name);
-            if (bone < 0 || bone == BONE_HIPS) continue;
-            if (!bones[bone]) { bones[bone] = node; ++found; }
-            if (found >= ESP_BONE_COUNT) break;
+
+        // Spine chain (cursor only advances on hits, so gaps are skipped).
+        uint64_t cursor = hips;
+        for (int slot = BONE_SPINE; slot <= BONE_SPINE2; ++slot) {
+            uint64_t next = find_child_bone(cursor, slot);
+            if (next) { bones[slot] = next; ++found; cursor = next; }
         }
+        uint64_t chest = cursor; // deepest spine bone found (or hips)
+        uint64_t neck = find_child_bone(chest, BONE_NECK);
+        if (neck) { bones[BONE_NECK] = neck; ++found; }
+        uint64_t head = find_child_bone(neck ? neck : chest, BONE_HEAD);
+        if (head) { bones[BONE_HEAD] = head; ++found; }
+
+        const int arm_chain[2][4] = {
+            {BONE_SHOULDER_L, BONE_ARM_L, BONE_FOREARM_L, BONE_HAND_L},
+            {BONE_SHOULDER_R, BONE_ARM_R, BONE_FOREARM_R, BONE_HAND_R}
+        };
+        for (int side = 0; side < 2; ++side) {
+            // Shoulders may hang off any spine bone.
+            uint64_t link = 0;
+            const uint64_t roots[4] = {chest, bones[BONE_SPINE1], bones[BONE_SPINE], hips};
+            for (uint64_t r : roots) {
+                if (!r) continue;
+                link = find_child_bone(r, arm_chain[side][0]);
+                if (link) break;
+            }
+            if (link) { bones[arm_chain[side][0]] = link; ++found; }
+            else link = chest;
+            for (int i = 1; i < 4; ++i) {
+                uint64_t next = find_child_bone(link, arm_chain[side][i]);
+                if (next) { bones[arm_chain[side][i]] = next; ++found; link = next; }
+            }
+        }
+
+        const int leg_chain[2][4] = {
+            {BONE_UPLEG_L, BONE_LEG_L, BONE_FOOT_L, BONE_TOE_L},
+            {BONE_UPLEG_R, BONE_LEG_R, BONE_FOOT_R, BONE_TOE_R}
+        };
+        for (int side = 0; side < 2; ++side) {
+            uint64_t link = hips;
+            for (int i = 0; i < 4; ++i) {
+                uint64_t next = find_child_bone(link, leg_chain[side][i]);
+                if (next) { bones[leg_chain[side][i]] = next; ++found; link = next; }
+            }
+        }
+
         if (found > best_count) {
             best_count = found;
             memcpy(best_bones, bones, sizeof(bones));
             if (found >= ESP_BONE_COUNT) break;
         }
     }
+    g_skel_debug.name_best = best_count;
     if (best_count < 6 || !best_bones[BONE_HIPS]) return false;
     if (!resolve_skeleton_layout(best_bones[BONE_HIPS])) return false;
 
@@ -1457,6 +1563,8 @@ static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
     skeleton.model_root = root;
     skeleton.bone_count = valid_bones;
     skeleton.valid = true;
+    g_skel_debug.built_path = 2;
+    g_skel_debug.bone_count = valid_bones;
     return true;
 }
 
@@ -1506,14 +1614,15 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
 
     CachedSkeleton& skeleton = g_skeletons[player];
     if (!skeleton.valid) {
-        if (skeleton.retry_cooldown > 0) { --skeleton.retry_cooldown; return false; }
+        if (skeleton.retry_cooldown > 0) { --skeleton.retry_cooldown; g_skel_debug.fill_fail = 1; return false; }
         // Building walks the whole model; allow at most one rebuild per frame
         // so multiple new players never stall the overlay.
-        if (g_skeleton_builds_this_frame >= 1) return false;
+        if (g_skeleton_builds_this_frame >= 1) { g_skel_debug.fill_fail = 1; return false; }
         ++g_skeleton_builds_this_frame;
         if (!build_skeleton(player, skeleton)) {
             skeleton.valid = false;
             skeleton.retry_cooldown = 90;
+            g_skel_debug.fill_fail = 2;
             return false;
         }
     }
@@ -1524,6 +1633,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         if (skeleton_model_root(player) != skeleton.model_root) {
             skeleton = CachedSkeleton{};
             skeleton.retry_cooldown = 2;
+            g_skel_debug.fill_fail = 3;
             return false;
         }
     }
@@ -1534,6 +1644,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     if (data != skeleton.hierarchy_data) {
         skeleton = CachedSkeleton{};
         skeleton.retry_cooldown = 2;
+        g_skel_debug.fill_fail = 4;
         return false;
     }
 
@@ -1555,6 +1666,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     }
     if (max_index < 0 || max_index > 8192) {
         if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
+        g_skel_debug.fill_fail = 5;
         return false;
     }
 
@@ -1573,6 +1685,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     if (!rd_buf(matrices, local_matrices.data(), local_matrices.size() * sizeof(Matrix34)) ||
         !rd_buf(indices, local_parents.data(), local_parents.size() * sizeof(int32_t))) {
         if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
+        g_skel_debug.fill_fail = 6;
         return false;
     }
 
@@ -1613,13 +1726,49 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     }
     if (projected < 4) {
         if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
+        g_skel_debug.fill_fail = 7;
         return false;
     }
     skeleton.fail_streak = 0;
     box.has_skeleton = true;
+    uint32_t mask = 0;
+    for (int bone = 0; bone < ESP_BONE_COUNT; ++bone)
+        if (box.bone_valid[bone]) mask |= 1u << bone;
+    g_skel_debug.last_mask = mask;
+    g_skel_debug.fill_fail = 0;
     return true;
 }
 
+
+// Pipeline status for the on-screen debug line:
+//   R  = ragdoll build stage (0 ok; 2 no KCC, 3 no anim, 4 anim backref,
+//        5 no ragdoll, 6 no array, 7 bad count, 8/11 few bones, 9 layout,
+//        10 arrays, 12 pelvis, 13 chest, 14 final; -1 never ran)
+//   H  = hips candidates (name path), N = best name-path bone count
+//   P  = build path used (1 ragdoll, 2 names), B = cached bones
+//   F  = fill failure (0 ok, 1 cooldown, 2 build, 3 root, 4 hips data,
+//        5 indices, 6 bulk read, 7 projected<4)
+//   C  = players with a valid cached skeleton, then the per-bone mask
+//        torso|armL|armR|legL|legR.
+void esp_skeleton_debug(char* out, int cap) {
+    if (!out || cap <= 0) return;
+    char mask[32];
+    int pos = 0, bone = 0;
+    const int groups[5] = {6, 4, 4, 4, 4};
+    for (int group = 0; group < 5; ++group) {
+        if (group) mask[pos++] = '|';
+        for (int i = 0; i < groups[group]; ++i, ++bone)
+            mask[pos++] = ((g_skel_debug.last_mask >> bone) & 1u) ? '1' : '0';
+    }
+    mask[pos] = '\0';
+    int cached = 0;
+    for (const auto& entry : g_skeletons)
+        if (entry.second.valid) ++cached;
+    snprintf(out, (size_t)cap, "SKL R:%d H:%d N:%d P:%d B:%d F:%d C:%d %s",
+             g_skel_debug.ragdoll_stage, g_skel_debug.hips_candidates,
+             g_skel_debug.name_best, g_skel_debug.built_path,
+             g_skel_debug.bone_count, g_skel_debug.fill_fail, cached, mask);
+}
 
 bool esp_init(pid_t pid) {
     g_pid = pid;

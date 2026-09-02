@@ -22,4 +22,5 @@ struct EspBox {
 bool        esp_init(pid_t pid);
 void        esp_reset();
 void        esp_set_skeleton_enabled(bool enabled);
+void        esp_skeleton_debug(char* out, int cap); // one-line pipeline status
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
