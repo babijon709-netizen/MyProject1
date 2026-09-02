@@ -1863,8 +1863,8 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgSHdr(XS("Кость прицела"));
         FgCardBg(rH * 3);
         FgRadioRow(0, &g_state.aim_bone, g_state.ra_aim_head,   &g_state.a_aim_head,   XS("Голова"), false);
-        FgRadioRow(1, &g_state.aim_bone, g_state.ra_aim_chest,  &g_state.a_aim_chest,  XS("Тело"), false);
-        FgRadioRow(2, &g_state.aim_bone, g_state.ra_aim_pelvis, &g_state.a_aim_pelvis, XS("Ноги"), true);
+        FgRadioRow(1, &g_state.aim_bone, g_state.ra_aim_chest,  &g_state.a_aim_chest,  XS("Шея"), false);
+        FgRadioRow(2, &g_state.aim_bone, g_state.ra_aim_pelvis, &g_state.a_aim_pelvis, XS("Тело"), true);
 
     } else if (secId == 1) {
         FgSHdr(XS("Внешний вид"));
@@ -2769,6 +2769,7 @@ static void UpdateAim(float dt) {
     for (const EspBox& b : boxes) {
         AimTarget t;
         // Exact bone, with graceful fallback to the next-best bone.
+        // Slots: 0 head, 1 neck, 2 chest. Never fall back below the chest.
         static const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 1, 0}};
         int usedBone = -1;
         for (int k = 0; k < 3; ++k) {
@@ -2786,7 +2787,7 @@ static void UpdateAim(float dt) {
             if (!std::isfinite(b.x1) || !std::isfinite(b.y1) || !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
             float h = b.y2 - b.y1;
             if (h < 4.f || h > sh * 4.f) continue;
-            const float frac = (wantBone == 0) ? 0.08f : (wantBone == 1) ? 0.30f : 0.48f;
+            const float frac = (wantBone == 0) ? 0.07f : (wantBone == 1) ? 0.15f : 0.30f;
             t.sx = (b.x1 + b.x2) * 0.5f;
             t.sy = b.y1 + frac * h;
             float ex = t.sx - crossX, ey = t.sy - crossY;
@@ -2806,9 +2807,13 @@ static void UpdateAim(float dt) {
         // circle (overshoot while the gain is still being learned) — keep it.
         if (t.dist > (sticky ? fovR * 2.f : fovR)) continue;
 
-        // Score: angular distance, with a strong preference for the current
-        // target so we do not flip between two nearby players mid-pull.
-        float score = sticky ? t.dist * 0.35f : t.dist;
+        // Priority: closest to the crosshair AND closest to us. Both terms are
+        // normalised (FOV radius, 120 m) and summed; the current target gets a
+        // strong preference so we do not flip between two nearby players.
+        float score = t.dist / (fovR > 1.f ? fovR : 1.f);
+        if (t.world_dist >= 0.f && std::isfinite(t.world_dist))
+            score += (t.world_dist / 120.f) * 0.8f;
+        if (sticky) score *= 0.35f;
         if (score < bestScore) { bestScore = score; best = t; }
     }
 
@@ -2843,8 +2848,17 @@ static void UpdateAim(float dt) {
             float vPitch = (best.pitch - s_prevTgtPitch) + dCamPitch;
             if (std::isfinite(vYaw) && std::isfinite(vPitch) && fabsf(vYaw) < 8.f && fabsf(vPitch) < 8.f) {
                 s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
-                best.yaw += vYaw;
-                best.pitch += vPitch;
+                // Below this the "motion" is bone animation jitter (breathing,
+                // sway), which at long range is larger than the head itself.
+                // Extrapolating it would double the error, so only lead real
+                // movement, and lead it partially.
+                const float leadMin = degPerPx * 2.f;
+                float vMag = sqrtf(vYaw * vYaw + vPitch * vPitch);
+                if (vMag > leadMin) {
+                    float k = 0.7f * (1.f - leadMin / vMag);
+                    best.yaw += vYaw * k;
+                    best.pitch += vPitch * k;
+                }
             } else {
                 s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
             }
@@ -2885,8 +2899,16 @@ static void UpdateAim(float dt) {
     if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
     else s_haveLast = false;
 
-    // ---- dead zone (in degrees, so it stays tight when scoped) ----
-    const float deadDeg = degPerPx * 1.5f;
+    // ---- dead zone ----
+    // Angular size of ~3 cm at the target's range, bounded by the pixel grid
+    // (never below half a screen pixel, never above the old 1.5 px) so that at
+    // long range the controller keeps pulling until it is inside the head.
+    float deadDeg = degPerPx * 1.5f;
+    if (best.world_dist > 1.f && std::isfinite(best.world_dist)) {
+        float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
+        if (d < deadDeg) deadDeg = d;
+        if (deadDeg < degPerPx * 0.5f) deadDeg = degPerPx * 0.5f;
+    }
     if (fabsf(best.yaw) < deadDeg && fabsf(best.pitch) < deadDeg) {
         s_lastDx = s_lastDy = 0.f;
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive

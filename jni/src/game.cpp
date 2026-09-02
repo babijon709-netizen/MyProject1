@@ -1901,8 +1901,13 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         ++projected;
     }
     // Aim points: exact bone world positions -> screen + angular offsets.
-    // Head: aim a little above the Head joint (the joint sits at the neck base),
-    // toward the centre of the skull. Chest: upper spine. Pelvis: hips.
+    //   [0] head  : skull centre. The Head joint sits at the base of the skull,
+    //               the head hitbox extends ~20 cm above it. Aim ~11 cm up the
+    //               neck axis, plus a small distance-dependent lift so that at
+    //               long range the shot lands inside the skull rather than at
+    //               its lower edge (steering/animation error grows with range).
+    //   [1] neck  : between the Neck and Head joints.
+    //   [2] chest : upper spine.
     {
         auto bone_world_ok = [&](int bone, Vec3& out) -> bool {
             if (!box.bone_valid[bone]) return false;
@@ -1914,23 +1919,37 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         bool have[3] = {false, false, false};
 
         Vec3 head{}, neck{};
-        if (bone_world_ok(BONE_HEAD, head)) {
+        const bool have_head_bone = bone_world_ok(BONE_HEAD, head);
+        const bool have_neck_bone = bone_world_ok(BONE_NECK, neck);
+        if (have_head_bone) {
             Vec3 dir = {0.0F, 1.0F, 0.0F};
-            if (bone_world_ok(BONE_NECK, neck)) {
+            if (have_neck_bone) {
                 Vec3 d = {head.x - neck.x, head.y - neck.y, head.z - neck.z};
                 float len = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
                 if (len > 0.02F && len < 0.6F) dir = {d.x / len, d.y / len, d.z / len};
             }
-            // Head joint -> skull centre is roughly 9 cm along the neck axis.
-            target[0] = {head.x + dir.x * 0.09F, head.y + dir.y * 0.09F, head.z + dir.z * 0.09F};
+            float range = 0.0F;
+            if (g_cam_pose_valid) {
+                float dx = head.x - g_cam_pos.x, dy = head.y - g_cam_pos.y, dz = head.z - g_cam_pos.z;
+                range = sqrtf(dx * dx + dy * dy + dz * dz);
+            }
+            float lift = range * 0.0010F;          // +10 cm per 100 m
+            if (lift > 0.08F) lift = 0.08F;
+            target[0] = {head.x + dir.x * 0.11F, head.y + dir.y * 0.11F + lift, head.z + dir.z * 0.11F};
             have[0] = true;
+        }
+        if (have_neck_bone && have_head_bone) {
+            target[1] = {(neck.x + head.x) * 0.5F, (neck.y + head.y) * 0.5F, (neck.z + head.z) * 0.5F};
+            have[1] = true;
+        } else if (have_neck_bone) {
+            target[1] = {neck.x, neck.y + 0.05F, neck.z}; have[1] = true;
+        } else if (have_head_bone) {
+            target[1] = {head.x, head.y - 0.06F, head.z}; have[1] = true;
         }
         Vec3 chest{};
         if (bone_world_ok(BONE_SPINE2, chest) || bone_world_ok(BONE_SPINE1, chest) || bone_world_ok(BONE_SPINE, chest)) {
-            target[1] = chest; have[1] = true;
+            target[2] = chest; have[2] = true;
         }
-        Vec3 hips{};
-        if (bone_world_ok(BONE_HIPS, hips)) { target[2] = hips; have[2] = true; }
 
         for (int i = 0; i < 3; ++i) {
             if (!have[i]) continue;
@@ -2361,17 +2380,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 float dy = head.y - feet.y;
                 have_head = dy > 0.4F && dy < 2.4F;
             }
-            const float h_up = crouched ? 0.24F : 0.32F;   // head -> chest
-            const float p_up = crouched ? 0.45F : 0.62F;   // head -> pelvis
+            const float n_down = 0.12F;                    // head -> neck
+            const float c_down = crouched ? 0.26F : 0.34F; // head -> chest
             if (have_head) {
                 if (!box.aim_valid[0]) { Vec3 t = head; t.y += 0.03F; if (set_aim_point(box, 0, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
-                if (!box.aim_valid[1]) { Vec3 t = head; t.y -= h_up; if (set_aim_point(box, 1, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
-                if (!box.aim_valid[2]) { Vec3 t = head; t.y -= p_up; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
+                if (!box.aim_valid[1]) { Vec3 t = head; t.y -= n_down; if (set_aim_point(box, 1, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
+                if (!box.aim_valid[2]) { Vec3 t = head; t.y -= c_down; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
             }
             // (3) feet + pose height estimate
             if (!box.aim_valid[0]) { Vec3 t = feet; t.y += body_height - 0.12F; if (set_aim_point(box, 0, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
-            if (!box.aim_valid[1]) { Vec3 t = feet; t.y += body_height * 0.72F; if (set_aim_point(box, 1, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
-            if (!box.aim_valid[2]) { Vec3 t = feet; t.y += body_height * 0.52F; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
+            if (!box.aim_valid[1]) { Vec3 t = feet; t.y += body_height - 0.26F; if (set_aim_point(box, 1, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
+            if (!box.aim_valid[2]) { Vec3 t = feet; t.y += body_height * 0.72F; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
         }
         result.push_back(box);
     }

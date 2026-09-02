@@ -19,7 +19,7 @@ struct EspBox {
 
     // Aim targets (screen-space), always filled when the bone transforms are
     // resolvable — independent of whether skeleton ESP drawing is enabled.
-    //   aim_pts[0] = head, [1] = chest (spine2/spine1), [2] = pelvis (hips).
+    //   aim_pts[0] = head (skull centre), [1] = neck, [2] = chest (upper spine).
     // aim_valid[i] == false means the corresponding bone could not be read and
     // the caller should fall back to the box estimate.
     bool  aim_valid[3];
