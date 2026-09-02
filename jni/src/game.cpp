@@ -60,11 +60,6 @@ static bool      g_aim_ref_valid = false;
 static Vec3      g_aim_ref_origin{};
 static Vec3      g_aim_ref_forward{}, g_aim_ref_right{}, g_aim_ref_up{};
 
-// Player position offset discovery can latch onto a stale field (e.g. the last
-// death position) that merely looks plausible. Offsets that disagree with the
-// live KCC/head data get blacklisted and discovery is re-run.
-static uint64_t  g_position_offset_blacklist = 0;   // bitmask over known offsets
-static int       g_position_offset_mismatch_frames = 0;
 
 static bool vec3_is_finite(const Vec3& value);
 
@@ -469,29 +464,15 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
     return true;
 }
 
-static const uint64_t kKnownPositionOffsets[] = {0x1D4, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D0, 0x1DC, 0x1E8};
-
-static void blacklist_player_position_offset(uint64_t offset) {
-    for (size_t i = 0; i < sizeof(kKnownPositionOffsets) / sizeof(kKnownPositionOffsets[0]); ++i)
-        if (kKnownPositionOffsets[i] == offset) g_position_offset_blacklist |= (1ULL << i);
-}
-
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
     bool saved_use_direct = g_use_direct_player_position;
     g_use_direct_player_position = true;
+    const uint64_t known_offsets[] = {0x1D4, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D0, 0x1DC, 0x1E8};
     uint64_t best_offset = 0;
     double best_score = 0.0;
-    for (int pass = 0; pass < 2 && !best_offset; ++pass) {
-        if (pass == 1) {
-            if (!g_position_offset_blacklist) break;
-            g_position_offset_blacklist = 0; // everything rejected: start over
-        }
-        for (size_t i = 0; i < sizeof(kKnownPositionOffsets) / sizeof(kKnownPositionOffsets[0]); ++i) {
-            if (g_position_offset_blacklist & (1ULL << i)) continue;
-            uint64_t offset = kKnownPositionOffsets[i];
-            double score = 0.0;
-            if (evaluate_player_position_offset(players, offset, score) && score > best_score) { best_offset = offset; best_score = score; }
-        }
+    for (uint64_t offset : known_offsets) {
+        double score = 0.0;
+        if (evaluate_player_position_offset(players, offset, score) && score > best_score) { best_offset = offset; best_score = score; }
     }
     if (best_offset) {
         g_use_direct_player_position = true; g_player_position_offset = best_offset;
@@ -848,7 +829,6 @@ struct CachedSkeleton {
     int      retry_cooldown = 0;
     int      fail_streak = 0;
     int      revalidate_timer = 0;
-    int      mismatch_streak = 0;   // frames the rig disagreed with the KCC body
 };
 
 static std::unordered_map<uint64_t, CachedSkeleton> g_skeletons;
@@ -1786,7 +1766,7 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world, const Mat4& 
     return true;
 }
 
-static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, float sw, float sh, EspBox& box, Vec3* hips_world = nullptr) {
+static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, float sw, float sh, EspBox& box) {
     box.has_skeleton = false;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) box.bone_valid[bone] = false;
     for (int i = 0; i < 3; ++i) box.aim_valid[i] = false;
@@ -1950,10 +1930,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
             target[1] = chest; have[1] = true;
         }
         Vec3 hips{};
-        if (bone_world_ok(BONE_HIPS, hips)) {
-            target[2] = hips; have[2] = true;
-            if (hips_world) *hips_world = hips;
-        }
+        if (bone_world_ok(BONE_HIPS, hips)) { target[2] = hips; have[2] = true; }
 
         for (int i = 0; i < 3; ++i) {
             if (!have[i]) continue;
@@ -2142,33 +2119,29 @@ static void read_local_aim_reference(uint64_t local_player, const PlayerAux* loc
     g_aim_ref_valid = true;
 }
 
-// Per-frame player list + camera identity, kept across frames so a transient
-// empty read does not blank the overlay, but dropped on a real world change.
+// Per-frame player list, kept across frames so a transient empty read does
+// not blank the overlay, but dropped on a real world change.
 static std::vector<uint64_t> g_frame_transforms;
 static int      g_frame_transforms_empty_streak = 0;
-static uint64_t g_last_native_camera = 0;
-static int      g_matrix_revalidate_timer = 0;
 
-// Everything derived from a particular world/session. Called when the camera
-// object changes (scene reload, respawn into a new session) or the player list
-// disappears for a while, so no stale pointers survive into the next world.
+// Everything derived from a particular world/session. Called when the whole
+// player population is replaced (scene reload / new session) or the player
+// list disappears for a while, so no stale pointers survive into the next
+// world. Deliberately NOT tied to the camera object: the game swaps cameras
+// while aiming, which must not disturb boxes or skeletons.
 static void reset_world_caches() {
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_validated = false;
-    g_position_offset_blacklist = 0; g_position_offset_mismatch_frames = 0;
     g_local_player = 0;
     g_aim_state = {};
     g_aim_ref_valid = false;
     g_player_aux.clear();
     g_skeletons.clear();
-    g_matrix_revalidate_timer = 0;
 }
 
 void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
-    g_last_native_camera = 0; g_matrix_revalidate_timer = 0;
-    g_position_offset_blacklist = 0; g_position_offset_mismatch_frames = 0;
     g_aim_ref_valid = false;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
@@ -2202,6 +2175,16 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<uint64_t>& s_transforms = g_frame_transforms;
     std::vector<uint64_t> refreshed = read_configured_player_transforms();
     if (!refreshed.empty()) {
+        // World reload: every PlayerManager object is new (no overlap with
+        // the previous population, which was more than just ourselves).
+        if (s_transforms.size() >= 2) {
+            bool overlap = false;
+            for (uint64_t previous : s_transforms) {
+                for (uint64_t current : refreshed) if (previous == current) { overlap = true; break; }
+                if (overlap) break;
+            }
+            if (!overlap) reset_world_caches();
+        }
         s_transforms = std::move(refreshed);
         g_frame_transforms_empty_streak = 0;
     } else if (++g_frame_transforms_empty_streak > 10) {
@@ -2234,17 +2217,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!managed_cam) { return result; }
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
         if (!native_cam) return result;
-        if (native_cam != g_last_native_camera) {
-            // A new camera object == a new scene/session: drop per-world state.
-            if (g_last_native_camera) reset_world_caches();
-            g_last_native_camera = native_cam;
-        }
-        // Re-check the camera/position pairing now and then: it was validated
-        // once, possibly during a loading screen when nothing was in place.
-        if (++g_matrix_revalidate_timer >= 600) {
-            g_matrix_revalidate_timer = 0;
-            g_matrix_configuration_validated = false;
-        }
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
         if (!g_matrix_configuration_validated) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
@@ -2308,110 +2280,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         read_local_aim_reference(local_player, local_aux, local_crouched);
     }
 
-    // Anchor agreement helpers: a live reference point (KCC head transform or
-    // rig hips) must sit above the candidate feet position within a body.
-    auto above_within = [](const Vec3& feet, const Vec3& ref, float min_dy, float max_dy) -> bool {
-        float dx = ref.x - feet.x, dz = ref.z - feet.z, dy = ref.y - feet.y;
-        return (dx * dx + dz * dz) < 1.2F * 1.2F && dy > min_dy && dy < max_dy;
-    };
-    int offset_agree = 0, offset_disagree = 0;
-
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) continue;
         if (!s_transforms[i]) continue;
-        Vec3 offset_pos{};
-        const bool have_offset_pos = read_entity_position(s_transforms[i], offset_pos);
-
-        // Crouch-aware body height from the character controller.
-        PlayerAux& aux = player_aux(s_transforms[i]);
-        const bool crouched = player_is_crouched(aux);
-        float body_height = crouched ? aux.crouch_height : aux.normal_height;
-        if (!(body_height > 0.6F && body_height < 2.6F)) body_height = PLAYER_HEIGHT;
-
-        // Live references, independent of the discovered position field.
-        Vec3 kcc_pos{};
-        const bool have_kcc_pos = player_kcc_position(aux, kcc_pos);
-        Vec3 head{};
-        bool have_head = player_head_world(aux, head);
-        if (have_head && have_kcc_pos && !above_within(kcc_pos, head, 0.3F, 2.6F)) {
-            // Head and KCC disagree: one of the cached pointers is stale.
-            // Re-resolve the KCC chain and trust neither this frame.
-            aux = PlayerAux{};
-            aux.retry_cooldown = 2;
-            have_head = false;
-        }
-
-        EspBox box{};
-        box.id = s_transforms[i];
-        box.crouched = crouched;
-        box.aim_source = 0;
-
-        // Bones first: the hips double as a body anchor for the box.
-        Vec3 hips{};
-        bool have_hips = false;
-        if (want_bones && !transform_camera_mode) {
-            Vec3 hips_out = {NAN, NAN, NAN};
-            fill_skeleton_box(s_transforms[i], vp, sw, sh, box, &hips_out);
-            have_hips = vec3_is_finite(hips_out);
-            if (have_hips) hips = hips_out;
-            // Skeleton liveness: the rig must sit on the same body as the
-            // KCC (head/position). A skeleton that drifts away belongs to a
-            // despawned/reused model -> drop it and rebuild.
-            bool skeleton_conflict = false;
-            if (have_hips && have_head) {
-                float dx = head.x - hips.x, dy = head.y - hips.y, dz = head.z - hips.z;
-                skeleton_conflict = (dx * dx + dy * dy + dz * dz) > 1.6F * 1.6F;
-            } else if (have_hips && have_kcc_pos) {
-                skeleton_conflict = !above_within(kcc_pos, hips, 0.15F, 1.8F);
-            }
-            auto skel_it = g_skeletons.find(s_transforms[i]);
-            if (skel_it != g_skeletons.end()) {
-                if (skeleton_conflict) {
-                    if (++skel_it->second.mismatch_streak > 4) {
-                        skel_it->second = CachedSkeleton{};
-                        skel_it->second.retry_cooldown = 5;
-                    }
-                } else {
-                    skel_it->second.mismatch_streak = 0;
-                }
-            }
-            if (skeleton_conflict) {
-                box.has_skeleton = false;
-                for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) box.bone_valid[bone] = false;
-                for (int k = 0; k < 3; ++k) box.aim_valid[k] = false;
-                box.aim_source = 0;
-                have_hips = false;
-            }
-        }
-
-        // Choose the feet anchor. The discovered PlayerManager field is used
-        // while it agrees with the live references; otherwise fall back to the
-        // KCC position, then to head/hips minus a body height.
         Vec3 feet{};
-        bool have_feet = false;
-        bool offset_ok = false;
-        if (have_offset_pos) {
-            if (have_head)      offset_ok = above_within(offset_pos, head, 0.4F, 2.6F);
-            else if (have_hips) offset_ok = above_within(offset_pos, hips, 0.15F, 1.8F);
-            else if (have_kcc_pos) {
-                float dx = kcc_pos.x - offset_pos.x, dy = kcc_pos.y - offset_pos.y, dz = kcc_pos.z - offset_pos.z;
-                offset_ok = (dx * dx + dy * dy + dz * dz) < 3.0F * 3.0F;
-            } else offset_ok = true; // nothing to check against
-            if (have_head || have_hips || have_kcc_pos) { if (offset_ok) ++offset_agree; else ++offset_disagree; }
-        }
-        if (have_offset_pos && offset_ok) {
-            feet = offset_pos; have_feet = true;
-        } else if (have_kcc_pos && (!have_head || above_within(kcc_pos, head, 0.3F, 2.6F)) &&
-                   (!have_hips || above_within(kcc_pos, hips, 0.15F, 1.8F))) {
-            feet = kcc_pos; have_feet = true;
-        } else if (have_head) {
-            feet = {head.x, head.y - (body_height - 0.12F), head.z}; have_feet = true;
-        } else if (have_hips) {
-            feet = {hips.x, hips.y - body_height * 0.52F, hips.z}; have_feet = true;
-        } else if (have_offset_pos) {
-            feet = offset_pos; have_feet = true;
-        }
-        if (!have_feet) continue;
+        if (!read_entity_position(s_transforms[i], feet)) continue;
 
         float distance = -1.0F;
         if (has_local_position) {
@@ -2419,6 +2292,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             distance = sqrtf(dx * dx + dy * dy + dz * dz);
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
+
+        // Crouch-aware body height from the character controller.
+        PlayerAux& aux = player_aux(s_transforms[i]);
+        const bool crouched = player_is_crouched(aux);
+        float body_height = crouched ? aux.crouch_height : aux.normal_height;
+        if (!(body_height > 0.6F && body_height < 2.6F)) body_height = PLAYER_HEIGHT;
 
         Vec3 body_bottom = {feet.x, feet.y, feet.z};
         Vec3 body_top = {feet.x, feet.y + body_height, feet.z};
@@ -2452,6 +2331,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             {feet.x + box_half_width, body_top.y, feet.z + box_half_depth},
             {feet.x - box_half_width, body_top.y, feet.z + box_half_depth}
         };
+        EspBox box{};
+        box.id = s_transforms[i];
+        box.crouched = crouched;
+        box.aim_source = 0;
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;
         box.distance = distance;
@@ -2464,16 +2347,23 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             box.corners[corner][0] = projected ? sc.x : -1.0F;
             box.corners[corner][1] = projected ? sc.y : -1.0F;
         }
+        if (want_bones && !transform_camera_mode)
+            fill_skeleton_box(s_transforms[i], vp, sw, sh, box);
 
         // Aim fallbacks when rig bones are not (yet) available, so the aimbot
         // always has a crouch-aware target instead of a fixed-height guess.
         if (g_aim_bones_requested && !transform_camera_mode &&
             !(box.aim_valid[0] && box.aim_valid[1] && box.aim_valid[2])) {
+            Vec3 head{};
+            bool have_head = false;
             // (2) game-maintained head transform (moves with crouch/animation)
-            bool use_head = have_head && above_within(feet, head, 0.4F, 2.6F);
+            if (player_head_world(aux, head)) {
+                float dy = head.y - feet.y;
+                have_head = dy > 0.4F && dy < 2.4F;
+            }
             const float h_up = crouched ? 0.24F : 0.32F;   // head -> chest
             const float p_up = crouched ? 0.45F : 0.62F;   // head -> pelvis
-            if (use_head) {
+            if (have_head) {
                 if (!box.aim_valid[0]) { Vec3 t = head; t.y += 0.03F; if (set_aim_point(box, 0, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
                 if (!box.aim_valid[1]) { Vec3 t = head; t.y -= h_up; if (set_aim_point(box, 1, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
                 if (!box.aim_valid[2]) { Vec3 t = head; t.y -= p_up; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
@@ -2484,21 +2374,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!box.aim_valid[2]) { Vec3 t = feet; t.y += body_height * 0.52F; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
         }
         result.push_back(box);
-    }
-
-    // The discovered position field consistently contradicts the live body
-    // data (e.g. it is a last-death/last-saved position): blacklist it and
-    // rediscover. Requires sustained disagreement with no agreeing player.
-    if (g_use_direct_player_position) {
-        if (offset_disagree > 0 && offset_agree == 0) {
-            if (++g_position_offset_mismatch_frames > 45) {
-                blacklist_player_position_offset(g_player_position_offset);
-                g_player_position_validated = false;
-                g_position_offset_mismatch_frames = 0;
-            }
-        } else if (offset_agree > 0) {
-            g_position_offset_mismatch_frames = 0;
-        }
     }
 
     return result;
