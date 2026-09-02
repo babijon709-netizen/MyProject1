@@ -1,5 +1,6 @@
 #include "main.h"
 #include "game.h"
+#include "skeleton.h"
 #include <cmath>
 #include <atomic>
 #include <chrono>
@@ -585,6 +586,13 @@ static void DrawEspOverlay() {
             dl->AddCircle(ImVec2(sw * 0.5f, sh * 0.5f), fovR,
                           ImGui::ColorConvertFloat4ToU32(fc), 72, 1.5f);
         }
+    }
+
+    if (g_state.esp_skeleton) {
+        ESP_Skeleton = true;
+        esp_draw_skeletons((int)sw, (int)sh, cfg::esp::skeleton_col.x, cfg::esp::skeleton_col.y, cfg::esp::skeleton_col.z, cfg::esp::skeleton_col.w);
+    } else {
+        ESP_Skeleton = false;
     }
 
     if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer) return;
@@ -2338,8 +2346,9 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
                 {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
+                {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
             };
-            constexpr int N = 8;
+            constexpr int N = 9;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);

@@ -753,6 +753,105 @@ void esp_reset() {
 }
 
 
+#include "skeleton.h"
+
+// Globals for skeleton callback
+static Mat4 g_skeleton_vp{};
+static float g_skeleton_sw = 1080.0f;
+static float g_skeleton_sh = 2400.0f;
+static bool g_skeleton_transform_camera = false;
+static Vec3 g_skeleton_camera_position{};
+static Vec4 g_skeleton_camera_rotation{};
+
+static bool Skeleton_W2S_Callback(const Vec3& world, Vec2& screen) {
+    if (g_skeleton_transform_camera) {
+        return w2s_transform_camera(g_skeleton_camera_position, g_skeleton_camera_rotation, world, g_skeleton_sw, g_skeleton_sh, screen, false);
+    } else {
+        return w2s(g_skeleton_vp, world, g_skeleton_sw, g_skeleton_sh, screen, false);
+    }
+}
+
+static bool Skeleton_GetTransformPos_Callback(uint64_t transform, Vec3& outPos) {
+    uint64_t native = rd_ptr(transform + 0x10);
+    if (!native) return false;
+    return read_transform_hierarchy_position(native, outPos);
+}
+
+void esp_draw_skeletons(int overlay_width, int overlay_height, float r, float g, float b, float a) {
+    if (g_pid <= 0 || !g_il2cpp_base) return;
+
+    Skeleton_SetPID(g_pid);
+
+    float sw = overlay_width >= 100 ? (float)overlay_width : 1080.0F;
+    float sh = overlay_height >= 100 ? (float)overlay_height : 2400.0F;
+    if (!std::isfinite(sw) || sw < 100.0F || sw > 10000.0F) sw = 1080.0F;
+    if (!std::isfinite(sh) || sh < 100.0F || sh > 10000.0F) sh = 2400.0F;
+
+    g_skeleton_sw = sw;
+    g_skeleton_sh = sh;
+
+    static std::vector<uint64_t> s_transforms;
+    std::vector<uint64_t> refreshed = read_configured_player_transforms();
+    if (!refreshed.empty()) s_transforms = std::move(refreshed);
+    if (s_transforms.empty()) return;
+
+    uint64_t native_cam = 0;
+    Mat4 projection{}, view{}, vp{};
+
+    bool transform_camera_mode = false; 
+    if (!transform_camera_mode) {
+        uint64_t managed_cam = 0;
+        if (g_game_controller_class) {
+            uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
+            if (gcb_sf) {
+                uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
+                if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
+            }
+        }
+        if (!managed_cam) return;
+        native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
+        if (!native_cam) return;
+        if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return;
+        if (!g_matrix_configuration_validated) {
+            if (!optimize_matrix_configuration(native_cam, s_transforms)) return;
+            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return;
+        }
+        vp = mat_mul(projection, view);
+    }
+    g_skeleton_vp = vp;
+
+    g_skeleton_transform_camera = transform_camera_mode;
+    if (transform_camera_mode) {
+        // Needs local entity pose, simple fallback or skip for now if transform_camera_mode is false anyway
+    }
+
+    static std::unordered_map<uint64_t, PlayerSkeleton> skeletonCache;
+    
+    // Cleanup cache from stale pointers
+    for (auto it = skeletonCache.begin(); it != skeletonCache.end();) {
+        if (std::find(s_transforms.begin(), s_transforms.end(), it->first) == s_transforms.end()) {
+            it = skeletonCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    
+    for (uint64_t player_transform : s_transforms) {
+        if (!player_transform) continue;
+        uint64_t native = resolve_player_native_transform(player_transform);
+        if (!native) continue;
+        
+        if (!skeletonCache[player_transform].Cached) {
+            PlayerSkeleton skel;
+            CacheSkeleton(player_transform, skel, 0);
+            skel.Cached = true;
+            skeletonCache[player_transform] = skel;
+        }
+    }
+
+    DrawSkeletonESP(skeletonCache, s_transforms, Skeleton_W2S_Callback, Skeleton_GetTransformPos_Callback, sh, ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, a)));
+}
+
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
 
