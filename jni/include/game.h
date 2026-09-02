@@ -1,6 +1,7 @@
 #pragma once
 #include <sys/types.h>
 #include <vector>
+#include <cstdint>
 
 // Forward declare PlayerSkeleton
 struct PlayerSkeleton;
