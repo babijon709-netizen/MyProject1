@@ -242,10 +242,14 @@ static bool normalize_quaternion(Vec4& quaternion) {
 }
 
 static bool matrix34_is_valid(const Matrix34& matrix) {
+    // NOTE: translation.w and scale.w are SIMD padding lanes. The game's
+    // animation/IK code leaves garbage (NaN/huge values) there for bones it
+    // actively writes every frame (arms while aiming, legs while walking), so
+    // those lanes must NOT be validated - only the meaningful components.
     const float values[] = {
-        matrix.translation.x, matrix.translation.y, matrix.translation.z, matrix.translation.w,
+        matrix.translation.x, matrix.translation.y, matrix.translation.z,
         matrix.rotation.x, matrix.rotation.y, matrix.rotation.z, matrix.rotation.w,
-        matrix.scale.x, matrix.scale.y, matrix.scale.z, matrix.scale.w
+        matrix.scale.x, matrix.scale.y, matrix.scale.z
     };
     for (float value : values) { if (!std::isfinite(value) || fabsf(value) > 1000000.0F) return false; }
     float quaternion_length = matrix.rotation.x * matrix.rotation.x + matrix.rotation.y * matrix.rotation.y + matrix.rotation.z * matrix.rotation.z + matrix.rotation.w * matrix.rotation.w;
