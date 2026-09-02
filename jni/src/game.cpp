@@ -854,6 +854,9 @@ static LocalAimState g_aim_state{};
 struct PlayerAux {
     uint64_t kcc = 0;
     uint64_t head_native = 0;   // native Transform of KCC.head
+    uint64_t head_hitbox_transform = 0; // native Transform of the Head HitBox
+    Vec3     head_hitbox_center{};      // HitBox.center (local to that transform)
+    bool     head_hitbox_valid = false;
     float    normal_height = 1.8F;
     float    crouch_height = 1.1F;
     int      retry_cooldown = 0;
@@ -1692,6 +1695,28 @@ static PlayerAux& player_aux(uint64_t player) {
         aux.head_native = head ? rd_ptr(head + MANAGED_CACHED_PTR) : 0;
         if (aux.head_native && (aux.head_native < 0x10000 || aux.head_native >= 0x0001000000000000ULL))
             aux.head_native = 0;
+        // Head hit volume (what the server actually tests shots against).
+        aux.head_hitbox_valid = false;
+        uint64_t hb_root = rd_ptr(kcc + KCC_HITBOX_ROOT);
+        uint64_t hb_array = hb_root ? rd_ptr(hb_root + HITBOX_ROOT_ARRAY) : 0;
+        int32_t hb_count = hb_array ? rd<int32_t>(hb_array + IL2CPP_ARRAY_LENGTH) : 0;
+        if (hb_count > 0 && hb_count <= 64) {
+            for (int32_t i = 0; i < hb_count; ++i) {
+                uint64_t hb = rd_ptr(hb_array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
+                if (!hb || rd<int32_t>(hb + HITBOX_AREA) != 0) continue;
+                Vec3 center = rd_v3(hb + HITBOX_CENTER);
+                Vec3 size = rd_v3(hb + HITBOX_SIZE);
+                if (!vec3_is_finite(center) || !vec3_is_finite(size)) continue;
+                if (fabsf(center.x) > 1.0F || fabsf(center.y) > 1.0F || fabsf(center.z) > 1.0F) continue;
+                if (!(size.x > 0.02F && size.x < 1.0F && size.y > 0.02F && size.y < 1.0F)) continue;
+                uint64_t transform = native_component_transform(managed_object_native(hb));
+                if (!skeleton_transform_ptr_valid(transform)) continue;
+                aux.head_hitbox_transform = transform;
+                aux.head_hitbox_center = center;
+                aux.head_hitbox_valid = true;
+                break;
+            }
+        }
     }
     return aux;
 }
@@ -1709,6 +1734,20 @@ static bool player_head_world(const PlayerAux& aux, Vec3& out) {
     if (g_skeleton_layout_valid &&
         read_transform_hierarchy_layout(aux.head_native, g_skeleton_layout, out)) return vec3_is_finite(out);
     return read_transform_hierarchy_position(aux.head_native, out) && vec3_is_finite(out);
+}
+
+// World-space centre of the Head hit volume: transform TRS applied to the
+// local centre (HitBox.transform.TransformPoint(center)).
+static bool player_head_hitbox_world(const PlayerAux& aux, Vec3& out) {
+    if (!aux.head_hitbox_valid || !aux.head_hitbox_transform) return false;
+    Vec3 pos{}; Vec4 rot{};
+    const TransformHierarchyLayout& layout = g_skeleton_layout_valid ? g_skeleton_layout : g_transform_hierarchy_layout;
+    if (!(g_skeleton_layout_valid || g_transform_hierarchy_layout_valid)) return false;
+    if (!read_transform_hierarchy_layout(aux.head_hitbox_transform, layout, pos, &rot)) return false;
+    // Lossy scale is ~1 on character rigs; rotate the local centre and offset.
+    Vec3 offset = rotate_vector(rot, aux.head_hitbox_center);
+    out = {pos.x + offset.x, pos.y + offset.y, pos.z + offset.z};
+    return vec3_is_finite(out);
 }
 
 static void prune_player_aux(const std::vector<uint64_t>& players) {
@@ -2368,6 +2407,33 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         if (want_bones && !transform_camera_mode)
             fill_skeleton_box(s_transforms[i], vp, sw, sh, box);
+
+        // Head slot: prefer the centre of the server-side Head hit volume over
+        // the rig-derived estimate. This is the exact volume the shot is tested
+        // against, so it removes the constant model/hitbox offset that makes
+        // long-range head shots land low. Only accepted when it lies within
+        // the body (plausibility vs feet) so a stale transform cannot hijack it.
+        if (g_aim_bones_requested && !transform_camera_mode) {
+            Vec3 hb{};
+            if (player_head_hitbox_world(aux, hb)) {
+                float dy = hb.y - feet.y;
+                float dx = hb.x - feet.x, dz = hb.z - feet.z;
+                if (dy > 0.5F && dy < 2.4F && (dx * dx + dz * dz) < 1.0F) {
+                    bool agree = true;
+                    if (box.aim_valid[0]) {
+                        // Compare against the rig head point in screen space:
+                        // reject if wildly different (different body).
+                        Vec2 hs{};
+                        if (w2s(vp, hb, sw, sh, hs, false)) {
+                            float ex = hs.x - box.aim_pts[0][0], ey = hs.y - box.aim_pts[0][1];
+                            float bh = fabsf(box.y2 - box.y1);
+                            agree = (ex * ex + ey * ey) < (bh * 0.25F) * (bh * 0.25F) + 4.0F;
+                        }
+                    }
+                    if (agree && set_aim_point(box, 0, hb, vp, sw, sh) && box.aim_source == 0) box.aim_source = 1;
+                }
+            }
+        }
 
         // Aim fallbacks when rig bones are not (yet) available, so the aimbot
         // always has a crouch-aware target instead of a fixed-height guess.

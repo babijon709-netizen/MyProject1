@@ -80,6 +80,15 @@ inline constexpr std::uint64_t KCC_PLAYER_BACKREF          = 0x78;
 inline constexpr std::uint64_t KCC_HEAD_TRANSFORM          = 0x88; // KCC.head (managed UnityEngine.Transform)
 inline constexpr std::uint64_t KCC_NORMAL_HEIGHT          = 0xA0; // float, capsule height standing
 inline constexpr std::uint64_t KCC_CROUCH_HEIGHT          = 0xA4; // float, capsule height crouched
+// Server-side hit volumes: KCC.hitBoxRecorderRoot (0x70) -> HitBoxRecorderRoot
+//   .hitBoxes (0x68, Oxide.HitBox[]) ; HitBox.size 0x24 / center 0x30 (local
+//   Vector3), m_HitArea 0x68 (0 Head, 1 Chest, 2 Leg, 3 Foot, 4 Hand).
+//   World centre == HitBox.transform.TransformPoint(center) (HitBox.Kbr).
+inline constexpr std::uint64_t KCC_HITBOX_ROOT            = 0x70;
+inline constexpr std::uint64_t HITBOX_ROOT_ARRAY          = 0x68;
+inline constexpr std::uint64_t HITBOX_SIZE                = 0x24;
+inline constexpr std::uint64_t HITBOX_CENTER              = 0x30;
+inline constexpr std::uint64_t HITBOX_AREA                = 0x68;
 inline constexpr std::uint64_t KCC_LOOK_HEIGHT_OFFSET     = 0x90; // float, eye = pos + (capsule height + this) * up
 // KCC.ZYW : HyperHug.Games.Oxide.Features.Player.Move (value struct @0x16C)
 //   +0x00 MoveState State (0 idle,1 walk,2 run,3 crouching,4 air,5 climb,6 swim,7 dead)
