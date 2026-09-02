@@ -587,7 +587,7 @@ static void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton) return;
 
     std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
     constexpr int BOX_EDGES[][2] = {
@@ -628,6 +628,40 @@ static void DrawEspOverlay() {
             float tx = (box.x1 + box.x2) * 0.5f;
             float ty = box.y2;
             dl->AddLine(ImVec2(sw * 0.5f, sh), ImVec2(tx, ty), ColU32(cfg::esp::tracer_col), thick);
+        }
+
+        if (g_state.esp_skeleton) {
+            // Draw skeleton bones - simplified version
+            // In a full implementation, we would use the cached skeleton data
+            // For now, we'll draw a basic spine and limb structure
+            Vec3 feet = {box.x1, box.y1, 0}; // Approximate feet position
+            Vec3 head = {box.x1, box.y1 - 0.6f, 0}; // Approximate head position
+            
+            // Spine
+            dl->AddLine(ImVec2(box.x1 + 0.1f, box.y1 + 0.2f), 
+                        ImVec2(box.x1 + 0.1f, box.y1 - 0.2f), 
+                        ColU32(cfg::esp::skeleton_col), thick * 2.0f);
+            
+            // Head connection
+            dl->AddLine(ImVec2(box.x1 + 0.1f, box.y1 - 0.2f), 
+                        ImVec2(box.x1 + 0.1f, box.y1 - 0.5f), 
+                        ColU32(cfg::esp::skeleton_col), thick * 2.0f);
+            
+            // Simple arm lines
+            dl->AddLine(ImVec2(box.x1 + 0.1f, box.y1 - 0.1f), 
+                        ImVec2(box.x1 + 0.3f, box.y1 - 0.4f), 
+                        ColU32(cfg::esp::skeleton_col), thick * 2.0f);
+            dl->AddLine(ImVec2(box.x1 - 0.1f, box.y1 - 0.1f), 
+                        ImVec2(box.x1 - 0.3f, box.y1 - 0.4f), 
+                        ColU32(cfg::esp::skeleton_col), thick * 2.0f);
+            
+            // Leg lines
+            dl->AddLine(ImVec2(box.x1 + 0.05f, box.y1), 
+                        ImVec2(box.x1 + 0.15f, box.y1 + 0.4f), 
+                        ColU32(cfg::esp::skeleton_col), thick * 2.0f);
+            dl->AddLine(ImVec2(box.x1 - 0.05f, box.y1), 
+                        ImVec2(box.x1 - 0.15f, box.y1 + 0.4f), 
+                        ColU32(cfg::esp::skeleton_col), thick * 2.0f);
         }
 
         if (g_state.esp_wall) {
@@ -2338,7 +2372,8 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
                 {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
-            };
+                {"##vs",  XS("Скелет"),          &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
+            };\s*
             constexpr int N = 8;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
@@ -3130,6 +3165,274 @@ void RenderMenu() {
     }
 }
 
+// Skeleton system - adapted for external use
+// Original source provided by user, adapted to work with external memory reading
+
+// Player skeleton structure - stores all bone transform pointers
+struct PlayerSkeleton
+{
+    void* Player = nullptr;
+    std::string PlayerName = "";
+
+    void* Root = nullptr;
+    void* Armature = nullptr;
+
+    void* Hips = nullptr;
+    void* Spine = nullptr;
+    void* Spine1 = nullptr;
+    void* Spine2 = nullptr;
+    void* Neck = nullptr;
+    void* Head = nullptr;
+
+    void* Head_HitBox = nullptr;
+    void* Hips_HitBox = nullptr;
+    void* Spine_HitBox = nullptr;
+    void* Spine1_HitBox = nullptr;
+    void* Spine2_HitBox = nullptr;
+
+    void* ShoulderL = nullptr;
+    void* ArmL = nullptr;
+    void* ForeArmL = nullptr;
+    void* HandL = nullptr;
+
+    void* HandIndex1L = nullptr;
+    void* HandIndex2L = nullptr;
+    void* HandIndex3L = nullptr;
+
+    void* HandMiddle1L = nullptr;
+    void* HandMiddle2L = nullptr;
+    void* HandMiddle3L = nullptr;
+
+    void* HandPinky1L = nullptr;
+    void* HandPinky2L = nullptr;
+    void* HandPinky3L = nullptr;
+
+    void* HandRing1L = nullptr;
+    void* HandRing2L = nullptr;
+    void* HandRing3L = nullptr;
+
+    void* HandThumb1L = nullptr;
+    void* HandThumb2L = nullptr;
+    void* HandThumb3L = nullptr;
+
+    void* ShoulderR = nullptr;
+    void* ArmR = nullptr;
+    void* ForeArmR = nullptr;
+    void* HandR = nullptr;
+
+    void* HandIndex1R = nullptr;
+    void* HandIndex2R = nullptr;
+    void* HandIndex3R = nullptr;
+
+    void* HandMiddle1R = nullptr;
+    void* HandMiddle2R = nullptr;
+    void* HandMiddle3R = nullptr;
+
+    void* HandPinky1R = nullptr;
+    void* HandPinky2R = nullptr;
+    void* HandPinky3R = nullptr;
+
+    void* HandRing1R = nullptr;
+    void* HandRing2R = nullptr;
+    void* HandRing3R = nullptr;
+
+    void* HandThumb1R = nullptr;
+    void* HandThumb2R = nullptr;
+    void* HandThumb3R = nullptr;
+
+    void* UpLegL = nullptr;
+    void* LegL = nullptr;
+    void* FootL = nullptr;
+    void* ToeBaseL = nullptr;
+
+    void* UpLegR = nullptr;
+    void* LegR = nullptr;
+    void* FootR = nullptr;
+    void* ToeBaseR = nullptr;
+
+    bool Cached = false;
+};
+
+// Convert Il2Cpp string to std::string (external adaptation)
+std::string Utf16ToUtf8(Il2CppString* il2cppString)
+{
+    if (!il2cppString) return "";
+    const char* chars = il2cppString->chars;
+    return chars ? std::string(chars) : "";
+}
+
+// Get object name from transform (external adaptation)
+Il2CppString* Object_get_name(void* transform)
+{
+    if (!transform) return nullptr;
+    // Read the name field from the Transform object
+    // Offset depends on Unity/IL2CPP version
+    return nullptr; // Placeholder - will be implemented via memory reading
+}
+
+// Cache skeleton bones by walking the transform hierarchy
+void CacheSkeleton(void* transform, PlayerSkeleton& skel, int depth = 0)
+{
+    if (!transform) return;
+
+    if (depth > 60) return;
+
+    // Get the name of this transform node
+    Il2CppString* ilName = Object_get_name(transform);
+    if (!ilName) return;
+
+    std::string name = Utf16ToUtf8(ilName);
+
+    // Map bone names to skeleton struct fields
+    if (name == "Hips") skel.Hips = transform;
+    else if (name == "Spine") skel.Spine = transform;
+    else if (name == "Spine1") skel.Spine1 = transform;
+    else if (name == "Spine2") skel.Spine2 = transform;
+    else if (name == "Neck") skel.Neck = transform;
+    else if (name == "Head") skel.Head = transform;
+
+    else if (name == "Head_HitBox") skel.Head_HitBox = transform;
+    else if (name == "Hips_HitBox") skel.Hips_HitBox = transform;
+    else if (name == "Spine_HitBox") skel.Spine_HitBox = transform;
+    else if (name == "Spine1_HitBox") skel.Spine1_HitBox = transform;
+    else if (name == "Spine2_HitBox") skel.Spine2_HitBox = transform;
+
+    else if (name == "Shoulder.L") skel.ShoulderL = transform;
+    else if (name == "Arm.L") skel.ArmL = transform;
+    else if (name == "ForeArm.L") skel.ForeArmL = transform;
+    else if (name == "Hand.L") skel.HandL = transform;
+
+    else if (name == "Shoulder.R") skel.ShoulderR = transform;
+    else if (name == "Arm.R") skel.ArmR = transform;
+    else if (name == "ForeArm.R") skel.ForeArmR = transform;
+    else if (name == "Hand.R") skel.HandR = transform;
+
+    else if (name == "UpLeg.L") skel.UpLegL = transform;
+    else if (name == "Leg.L") skel.LegL = transform;
+    else if (name == "Foot.L") skel.FootL = transform;
+    else if (name == "ToeBase.L") skel.ToeBaseL = transform;
+
+    else if (name == "UpLeg.R") skel.UpLegR = transform;
+    else if (name == "Leg.R") skel.LegR = transform;
+    else if (name == "Foot.R") skel.FootR = transform;
+    else if (name == "ToeBase.R") skel.ToeBaseR = transform;
+
+    // Read child count from transform
+    int count = 0; // Would read from transform struct in real implementation
+    if (count <= 0 || count > 200) return;
+
+    // Recursively cache children
+    for (int i = 0; i < count; i++)
+    {
+        void* child = nullptr; // Would get i-th child from transform
+        if (!child) continue;
+
+        CacheSkeleton(child, skel, depth + 1);
+    }
+}
+
+// Draw a bone line between two transforms
+void DrawBone(void* camera, void* a, void* b)
+{
+    if (!a || !b) return;
+
+    Vector3 posA = {0, 0, 0};
+    Vector3 posB = {0, 0, 0};
+
+    // Read positions from transform memory using codebase functions
+    // posA = ReadTransformPosition(a);
+    // posB = ReadTransformPosition(b);
+
+    Vector3 screenA = WorldToScreenPoint(camera, posA);
+    Vector3 screenB = WorldToScreenPoint(camera, posB);
+
+    if (screenA.z <= 0.1f || screenB.z <= 0.1f)
+        return;
+
+    screenA.y = screenHeight - screenA.y;
+    screenB.y = screenHeight - screenB.y;
+
+    ImGui::GetBackgroundDrawList()->AddLine(
+        ImVec2(screenA.x, screenA.y),
+        ImVec2(screenB.x, screenB.y),
+        IM_COL32(0, 255, 0, 255),
+        2.0f
+    );
+}
+
+// World to screen point conversion (adapted from codebase)
+Vector3 WorldToScreenPoint(void* camera, Vector3 worldPos)
+{
+    // Use the codebase's w2s functionality with camera matrices
+    return worldPos; // Placeholder - actual implementation uses projection/view matrices
+}
+
+// Draw the complete skeleton
+void DrawSkeleton(PlayerSkeleton& s, void* camera, int screenWidth, int screenHeight)
+{
+    DrawBone(camera, s.Hips, s.Spine);
+    DrawBone(camera, s.Spine, s.Spine1);
+    DrawBone(camera, s.Spine1, s.Spine2);
+    DrawBone(camera, s.Spine2, s.Neck);
+    DrawBone(camera, s.Neck, s.Head);
+
+    DrawBone(camera, s.Spine2, s.ShoulderL);
+    DrawBone(camera, s.ShoulderL, s.ArmL);
+    DrawBone(camera, s.ArmL, s.ForeArmL);
+    DrawBone(camera, s.ForeArmL, s.HandL);
+
+    DrawBone(camera, s.Spine2, s.ShoulderR);
+    DrawBone(camera, s.ShoulderR, s.ArmR);
+    DrawBone(camera, s.ArmR, s.ForeArmR);
+    DrawBone(camera, s.ForeArmR, s.HandR);
+
+    DrawBone(camera, s.Hips, s.UpLegL);
+    DrawBone(camera, s.UpLegL, s.LegL);
+    DrawBone(camera, s.LegL, s.FootL);
+    DrawBone(camera, s.FootL, s.ToeBaseL);
+
+    DrawBone(camera, s.Hips, s.UpLegR);
+    DrawBone(camera, s.UpLegR, s.LegR);
+    DrawBone(camera, s.LegR, s.FootR);
+    DrawBone(camera, s.FootR, s.ToeBaseR);
+}
+
+// Global skeleton cache and ESP flag
+std::unordered_map<uint64_t, PlayerSkeleton> skeletonCache;
+bool ESP_Skeleton = false;
+
+// Draw skeleton ESP for all cached skeletons
+void DrawSkeletonESP(void* camera, int screenWidth, int screenHeight)
+{
+    if (!ESP_Skeleton) return;
+
+    if (!camera) return;
+
+    for (auto& it : skeletonCache)
+    {
+        DrawSkeleton(it.second, camera, screenWidth, screenHeight);
+    }
+}
+
+// Cache skeleton for a player - called from ESP code
+void CachePlayerSkeleton(uint64_t player, void* camera)
+{
+    PlayerSkeleton skel;
+    skel.Cached = false;
+
+    // Get the player's native transform
+    // uint64_t nativeTransform = ResolvePlayerNativeTransform(player);
+
+    if (!nativeTransform) return;
+
+    // Walk the transform hierarchy and cache bones
+    // CacheSkeleton(nativeTransform, skel);
+
+    if (skel.Cached)
+    {
+        skeletonCache[player] = skel;
+    }
+}
 int main(int argc, char* argv[]) {
     signal(SIGINT,  [](int) { main_thread_flag.store(false); });
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
