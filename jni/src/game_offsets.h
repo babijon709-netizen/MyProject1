@@ -44,6 +44,25 @@ inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // lastSavedPosition
 inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (UnityEngine.GameObject)
 
+// Local player "is aiming" (ADS) state (dump.cs + libil2cpp disasm):
+//   PlayerManager.playerEventHandler (0x78) -> fvp (player event handler)
+//   fvp.manager (0xD0) back-ref == PlayerManager (validation)
+//   fvp.Aim (0x268) -> fvT (toggle activity), fvT.<LxG>k__BackingField (0x10) == Active
+//   This exact byte is what FPManager.LateUpdate reads to blend the camera to aimFOV.
+// Fallback: PlayerManager.fpManager (0x90) -> FPManager.LtZ (0x58, current FPWeaponBase)
+//   FPObject.Player (0xC0) back-ref == PlayerManager (validation)
+//   FPWeaponBase.<LKk>k__BackingField (0x120) == isAiming (set in weapon StartAim)
+//   FPManager.<LtX>k__BackingField (0xA8) == aim blend 0..1 (secondary hint)
+inline constexpr std::uint64_t PLAYER_EVENT_HANDLER          = 0x78;
+inline constexpr std::uint64_t EVENT_HANDLER_MANAGER_BACKREF = 0xD0;
+inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x268;
+inline constexpr std::uint64_t ACTIVITY_ACTIVE_FLAG          = 0x10;
+inline constexpr std::uint64_t PLAYER_FP_MANAGER             = 0x90;
+inline constexpr std::uint64_t FPMANAGER_CURRENT_WEAPON      = 0x58;
+inline constexpr std::uint64_t FPMANAGER_AIM_BLEND           = 0xA8;
+inline constexpr std::uint64_t FPOBJECT_PLAYER_BACKREF       = 0xC0;
+inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;
+
 // Ragdoll bone list route (dump.cs) — game-maintained list of rig bone
 // transforms, no name matching needed:
 //   PlayerManager.kccReference (0xB0, possibly a wrapper) -> KCC

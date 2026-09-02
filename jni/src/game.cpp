@@ -44,6 +44,13 @@ static bool g_transform_hierarchy_layout_valid = false;
 static bool      g_use_direct_player_position = true;
 static bool      g_player_position_validated = false;
 
+// Camera state captured by the last esp_get_boxes() call (used by the aimbot
+// to convert bone positions into yaw/pitch offsets from the crosshair).
+static float     g_cam_fov_deg = 0.0F;
+static bool      g_cam_pose_valid = false;
+static Vec3      g_cam_pos{};
+static Vec3      g_cam_right{}, g_cam_up{}, g_cam_forward{};
+
 static bool vec3_is_finite(const Vec3& value);
 
 template<typename T>
@@ -607,6 +614,13 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
             vec3_is_finite(cam_pos) && normalize_quaternion(cam_rot)) {
             view = mat_world_to_camera(cam_pos, cam_rot);
             have_live_view = matrix_is_finite(view);
+            if (have_live_view) {
+                g_cam_pos = cam_pos;
+                g_cam_right = rotate_vector(cam_rot, {1.0F, 0.0F, 0.0F});
+                g_cam_up = rotate_vector(cam_rot, {0.0F, 1.0F, 0.0F});
+                g_cam_forward = rotate_vector(cam_rot, {0.0F, 0.0F, 1.0F});
+                g_cam_pose_valid = true;
+            }
         }
     }
     if (!have_live_view) {
@@ -629,6 +643,7 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         aspect = (screen_aspect > 0.1F && screen_aspect < 10.0F) ? screen_aspect : (9.0F / 16.0F);
     if (!(z_near > 0.001F && z_near < 100.0F)) z_near = 0.1F;
     if (!(z_far > z_near && z_far < 100000.0F)) z_far = 1000.0F;
+    if (std::isfinite(fov) && fov > 1.0F && fov < 179.0F) g_cam_fov_deg = fov;
     projection = mat_perspective(fov, aspect, z_near, z_far);
     if (!matrix_is_finite(projection)) {
         if (s_last_ok && matrix_is_finite(s_last_proj)) {
@@ -808,6 +823,20 @@ struct CachedSkeleton {
 
 static std::unordered_map<uint64_t, CachedSkeleton> g_skeletons;
 static bool g_skeleton_enabled = false;
+// The aimbot needs bone positions regardless of the skeleton ESP toggle. Bone
+// resolution is therefore driven by (skeleton ESP || aim requested).
+static bool g_aim_bones_requested = false;
+
+struct LocalAimState {
+    bool     aiming = false;
+    int      source = 0;          // 1 = event handler Aim activity, 2 = weapon isAiming
+    uint64_t event_handler = 0;
+    uint64_t aim_activity = 0;
+    uint64_t fp_manager = 0;
+    uint64_t weapon = 0;
+    int      revalidate = 0;
+};
+static LocalAimState g_aim_state{};
 
 static TransformHierarchyLayout g_skeleton_layout{};
 static bool g_skeleton_layout_valid = false;
@@ -819,6 +848,7 @@ static int      g_go_name_retry_cooldown = 0;
 static int      g_skeleton_builds_this_frame = 0; // heavy rescans: max 1 per frame
 
 void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled = enabled; }
+void esp_set_aim_bones_enabled(bool enabled) { g_aim_bones_requested = enabled; }
 
 // characterModel (managed GameObject) -> native GameObject -> its Transform.
 static uint64_t skeleton_model_root(uint64_t player) {
@@ -1615,9 +1645,23 @@ static void prune_skeleton_cache(const std::vector<uint64_t>& players) {
     }
 }
 
+static bool bone_aim_angles(const Vec3& world, float& yaw_deg, float& pitch_deg) {
+    if (!g_cam_pose_valid) return false;
+    Vec3 d = {world.x - g_cam_pos.x, world.y - g_cam_pos.y, world.z - g_cam_pos.z};
+    float fx = d.x * g_cam_forward.x + d.y * g_cam_forward.y + d.z * g_cam_forward.z;
+    float rx = d.x * g_cam_right.x + d.y * g_cam_right.y + d.z * g_cam_right.z;
+    float ux = d.x * g_cam_up.x + d.y * g_cam_up.y + d.z * g_cam_up.z;
+    if (!std::isfinite(fx) || !std::isfinite(rx) || !std::isfinite(ux) || fx <= 0.05F) return false;
+    constexpr float rad2deg = 57.29577951F;
+    yaw_deg = atan2f(rx, fx) * rad2deg;
+    pitch_deg = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
+    return std::isfinite(yaw_deg) && std::isfinite(pitch_deg);
+}
+
 static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, float sw, float sh, EspBox& box) {
     box.has_skeleton = false;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) box.bone_valid[bone] = false;
+    for (int i = 0; i < 3; ++i) box.aim_valid[i] = false;
 
     CachedSkeleton& skeleton = g_skeletons[player];
     if (!skeleton.valid) {
@@ -1748,12 +1792,152 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         box.bone_valid[bone] = true;
         ++projected;
     }
+    // Aim points: exact bone world positions -> screen + angular offsets.
+    // Head: aim a little above the Head joint (the joint sits at the neck base),
+    // toward the centre of the skull. Chest: upper spine. Pelvis: hips.
+    {
+        auto bone_world_ok = [&](int bone, Vec3& out) -> bool {
+            if (!box.bone_valid[bone]) return false;
+            if (skeleton.bone_world_age[bone] < 1 || skeleton.bone_world_age[bone] > 9) return false;
+            out = skeleton.bone_world[bone];
+            return vec3_is_finite(out);
+        };
+        Vec3 target[3]{};
+        bool have[3] = {false, false, false};
+
+        Vec3 head{}, neck{};
+        if (bone_world_ok(BONE_HEAD, head)) {
+            Vec3 dir = {0.0F, 1.0F, 0.0F};
+            if (bone_world_ok(BONE_NECK, neck)) {
+                Vec3 d = {head.x - neck.x, head.y - neck.y, head.z - neck.z};
+                float len = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
+                if (len > 0.02F && len < 0.6F) dir = {d.x / len, d.y / len, d.z / len};
+            }
+            // Head joint -> skull centre is roughly 9 cm along the neck axis.
+            target[0] = {head.x + dir.x * 0.09F, head.y + dir.y * 0.09F, head.z + dir.z * 0.09F};
+            have[0] = true;
+        }
+        Vec3 chest{};
+        if (bone_world_ok(BONE_SPINE2, chest) || bone_world_ok(BONE_SPINE1, chest) || bone_world_ok(BONE_SPINE, chest)) {
+            target[1] = chest; have[1] = true;
+        }
+        Vec3 hips{};
+        if (bone_world_ok(BONE_HIPS, hips)) { target[2] = hips; have[2] = true; }
+
+        for (int i = 0; i < 3; ++i) {
+            if (!have[i]) continue;
+            Vec2 screen{};
+            if (!w2s(view_projection, target[i], sw, sh, screen, false)) continue;
+            if (fabsf(screen.x) > sw * 4.0F || fabsf(screen.y) > sh * 4.0F) continue;
+            float yaw = 0.0F, pitch = 0.0F;
+            if (!bone_aim_angles(target[i], yaw, pitch)) continue;
+            box.aim_pts[i][0] = screen.x;
+            box.aim_pts[i][1] = screen.y;
+            box.aim_yaw[i] = yaw;
+            box.aim_pitch[i] = pitch;
+            box.aim_valid[i] = true;
+        }
+    }
+
     if (projected < 4) {
         if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
         return false;
     }
     skeleton.fail_streak = 0;
     box.has_skeleton = true;
+    return true;
+}
+
+// ===================== Local player aim (ADS) state =====================
+
+static bool read_local_aim_state() {
+    uint64_t local = resolve_local_player();
+    if (!local) { g_aim_state = {}; return false; }
+
+    // Cheap fast path on cached pointers; re-validate the chain periodically.
+    if (g_aim_state.aim_activity && --g_aim_state.revalidate > 0) {
+        uint8_t active = 0;
+        if (rd_exact(g_aim_state.aim_activity + ACTIVITY_ACTIVE_FLAG, active)) {
+            g_aim_state.aiming = (active != 0);
+            g_aim_state.source = 1;
+            return true;
+        }
+    }
+    if (!g_aim_state.aim_activity && g_aim_state.weapon && --g_aim_state.revalidate > 0) {
+        uint8_t is_aiming = 0;
+        if (rd_ptr(g_aim_state.weapon + FPOBJECT_PLAYER_BACKREF) == local &&
+            rd_exact(g_aim_state.weapon + FPWEAPON_IS_AIMING, is_aiming)) {
+            g_aim_state.aiming = (is_aiming != 0);
+            g_aim_state.source = 2;
+            return true;
+        }
+    }
+
+    LocalAimState fresh{};
+    fresh.revalidate = 60;
+
+    // Primary: PlayerManager.playerEventHandler.Aim.Active
+    uint64_t handler = rd_ptr(local + PLAYER_EVENT_HANDLER);
+    if (handler && rd_ptr(handler + EVENT_HANDLER_MANAGER_BACKREF) == local) {
+        uint64_t activity = rd_ptr(handler + EVENT_HANDLER_AIM_ACTIVITY);
+        uint8_t active = 0;
+        if (activity && rd_exact(activity + ACTIVITY_ACTIVE_FLAG, active) && active <= 1) {
+            fresh.event_handler = handler;
+            fresh.aim_activity = activity;
+            fresh.aiming = (active != 0);
+            fresh.source = 1;
+            g_aim_state = fresh;
+            return true;
+        }
+    }
+
+    // Fallback: current first-person weapon isAiming flag.
+    uint64_t fp_manager = rd_ptr(local + PLAYER_FP_MANAGER);
+    if (fp_manager) {
+        uint64_t weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_WEAPON);
+        if (weapon && rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) == local) {
+            uint8_t is_aiming = 0;
+            if (rd_exact(weapon + FPWEAPON_IS_AIMING, is_aiming) && is_aiming <= 1) {
+                fresh.fp_manager = fp_manager;
+                fresh.weapon = weapon;
+                fresh.aiming = (is_aiming != 0);
+                fresh.source = 2;
+                g_aim_state = fresh;
+                return true;
+            }
+        }
+        // Last resort: the FOV blend factor FPManager drives toward aimFOV.
+        float blend = 0.0F;
+        if (rd_exact(fp_manager + FPMANAGER_AIM_BLEND, blend) && std::isfinite(blend) && blend >= 0.0F && blend <= 1.0F) {
+            fresh.fp_manager = fp_manager;
+            fresh.aiming = blend > 0.5F;
+            fresh.source = 3;
+            g_aim_state = fresh;
+            return true;
+        }
+    }
+
+    g_aim_state = {};
+    return false;
+}
+
+bool esp_local_player_is_aiming() {
+    if (g_pid <= 0 || !g_il2cpp_base) return false;
+    if (!read_local_aim_state()) return false;
+    return g_aim_state.aiming;
+}
+
+float esp_camera_fov_deg() { return g_cam_fov_deg; }
+
+bool esp_camera_angles(float& yaw_deg, float& pitch_deg) {
+    if (!g_cam_pose_valid) return false;
+    const Vec3& f = g_cam_forward;
+    constexpr float rad2deg = 57.29577951F;
+    float yaw = atan2f(f.x, f.z) * rad2deg;
+    float horiz = sqrtf(f.x * f.x + f.z * f.z);
+    float pitch = atan2f(f.y, horiz) * rad2deg;
+    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return false;
+    yaw_deg = yaw; pitch_deg = pitch;
     return true;
 }
 
@@ -1785,6 +1969,8 @@ void esp_reset() {
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
     g_player_position_validated = false;
+    g_cam_fov_deg = 0.0F; g_cam_pose_valid = false;
+    g_aim_state = {};
     g_skeletons.clear();
     g_skeleton_layout = {}; g_skeleton_layout_valid = false;
     g_go_name_offset = 0; g_go_name_plain_pointer = false;
@@ -1809,7 +1995,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (!refreshed.empty()) s_transforms = std::move(refreshed);
     if (s_transforms.empty()) return result;
 
-    if (g_skeleton_enabled) prune_skeleton_cache(s_transforms);
+    const bool want_bones = g_skeleton_enabled || g_aim_bones_requested;
+    if (want_bones) prune_skeleton_cache(s_transforms);
     else if (!g_skeletons.empty()) g_skeletons.clear();
     g_skeleton_builds_this_frame = 0;
 
@@ -1926,6 +2113,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             {feet.x - box_half_width, body_top.y, feet.z + box_half_depth}
         };
         EspBox box{};
+        box.id = s_transforms[i];
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;
         box.distance = distance;
@@ -1938,7 +2126,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             box.corners[corner][0] = projected ? sc.x : -1.0F;
             box.corners[corner][1] = projected ? sc.y : -1.0F;
         }
-        if (g_skeleton_enabled && !transform_camera_mode)
+        if (want_bones && !transform_camera_mode)
             fill_skeleton_box(s_transforms[i], vp, sw, sh, box);
         result.push_back(box);
     }

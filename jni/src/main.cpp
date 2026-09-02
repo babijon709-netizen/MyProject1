@@ -214,6 +214,7 @@ namespace cfg { namespace aim {
     inline bool  enabled           = false;
     inline bool  vis_check         = false;
     inline bool  draw_fov          = false;
+    inline bool  scope_only        = false;   // aim only while ADS (прицел)
     inline float fov               = 80.f;
     inline float smoothness        = 5.f;
     inline int   bone              = 0;
@@ -529,7 +530,7 @@ struct AppState {
     struct RadioAnim  { float scale = 1.f, scaleVel = 0.f, ring = 0.f, ringVel = 0.f; };
 
     int   cur_tab = 0;
-    bool  aim_touch = false, aim_pos = false, aim_special = false;
+    bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
     int   aim_bone = 0;
     bool  esp_box = false, esp_name = false, esp_hp = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = false, esp_skeleton = false;
@@ -538,7 +539,7 @@ struct AppState {
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
-    float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0;
+    float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_scope = 0;
     float a_aim_head  = 1, a_aim_chest = 0, a_aim_pelvis = 0;
     RadioAnim ra_aim_head, ra_aim_chest, ra_aim_pelvis;
     float a_esp_box = 0, a_esp_name = 0, a_esp_hp = 0, a_esp_wall = 0, a_esp_chams = 0;
@@ -553,14 +554,35 @@ static ImU32 ColU32(const ImVec4& c) {
     return IM_COL32((int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255), (int)(c.w * 255));
 }
 
+// Radius (px) of the aim FOV circle. cfg::aim::fov is in degrees measured
+// against the game's vertical FOV, so the circle shrinks when the player is
+// scoped in and the camera FOV drops.
 static float AimFovRadiusPx(float sw, float sh) {
     float fov = cfg::aim::fov;
     if (fov <= 0.f) return 0.f;
     if (fov >= 359.f) return sw + sh;
-    float t = tanf(fov * 0.5f * (float)M_PI / 180.f) / tanf(30.f * (float)M_PI / 180.f);
+    float camFov = esp_camera_fov_deg();
+    if (!(camFov > 1.f && camFov < 179.f)) camFov = 60.f;
+    float half = fov * 0.5f;
+    if (half > 89.f) half = 89.f;
+    float t = tanf(half * (float)M_PI / 180.f) / tanf(camFov * 0.5f * (float)M_PI / 180.f);
     float r = t * (sh * 0.5f);
-    if (r > sw + sh) r = sw + sh;
+    if (!std::isfinite(r) || r > sw + sh) r = sw + sh;
     return r;
+}
+
+// One remote snapshot per frame, shared by the ESP overlay and the aimbot.
+static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
+    static std::vector<EspBox> s_boxes;
+    static int s_frame = -1;
+    int frame = ImGui::GetFrameCount();
+    if (frame != s_frame) {
+        s_frame = frame;
+        esp_set_skeleton_enabled(g_state.esp_skeleton);
+        esp_set_aim_bones_enabled(g_state.aim_touch);
+        s_boxes = esp_get_boxes((int)sw, (int)sh);
+    }
+    return s_boxes;
 }
 
 static void DrawEspOverlay() {
@@ -587,11 +609,9 @@ static void DrawEspOverlay() {
         }
     }
 
-    esp_set_skeleton_enabled(g_state.esp_skeleton);
-
     if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton) return;
 
-    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
+    const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},
@@ -763,7 +783,7 @@ struct CfgBlob {
     float aim_fov, aim_smoothness;
     bool  esp_box, esp_name, esp_hp, esp_wall, esp_chams;
     bool  esp_weapon, esp_weapon_icon, esp_tracer, esp_skeleton;
-    bool  esp_money, esp_ping, esp_vis_check, esp_fill;
+    bool  aim_scope_only, esp_ping, esp_vis_check, esp_fill;
     float esp_thick, esp_stroke, esp_rounding, esp_fill_pct;
     float gun_str, gun_fov, gun_trigger_delay;
     bool  ui_fps, ui_dark_mode, ui_show_sep;
@@ -791,7 +811,7 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_weapon_icon = g_state.esp_weapon_icon;
     s.esp_tracer      = g_state.esp_tracer;
     s.esp_skeleton    = g_state.esp_skeleton;
-    s.esp_money       = false;
+    s.aim_scope_only  = g_state.aim_scope_only;
     s.esp_ping        = false;
     s.esp_vis_check   = cfg::esp::vis_check;
     s.esp_fill        = cfg::esp::fill;
@@ -866,6 +886,8 @@ static void ConfigLoad(int idx) {
 
     g_state.aim_touch   = s.aim_touch;   g_state.aim_pos     = s.aim_pos;
     g_state.aim_special = s.aim_special;
+    g_state.aim_scope_only = s.aim_scope_only;
+    cfg::aim::scope_only   = s.aim_scope_only;
     g_state.aim_bone    = s.aim_bone;
     cfg::aim::vis_check  = s.aim_vis_check;
     cfg::aim::draw_fov   = s.aim_draw_fov;
@@ -2263,14 +2285,16 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::enabled    = g_state.aim_touch;
         cfg::aim::vis_check  = g_state.aim_pos;
         cfg::aim::draw_fov   = g_state.aim_special;
+        cfg::aim::scope_only = g_state.aim_scope_only;
         cfg::aim::fov        = g_state.gun_fov;
         cfg::aim::smoothness = g_state.gun_str;
         cfg::aim::bone       = g_state.aim_bone;
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
 
         SHdr(XS("Аимбот"));
-        CardBg(Layout::RowH * 3);
+        CardBg(Layout::RowH * 4);
         ToggleRow("##ta1", XS("Включить аимбот"),    &g_state.aim_touch,   g_state.a_aim_touch, false, true);
+        ToggleRow("##ta6", XS("Только с прицелом"),   &g_state.aim_scope_only, g_state.a_aim_scope, false);
         ToggleRow("##ta2", XS("Проверка видимости"),  &g_state.aim_pos,     g_state.a_aim_pos,   false);
         ToggleRow("##ta3", XS("Показывать FOV круг"), &g_state.aim_special, g_state.a_aim_spec,  true);
 
@@ -2278,9 +2302,9 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::SliderH);
         SliderRow("##afov", XS("Радиус FOV"), &g_state.gun_fov, 5.f, 360.f, XS("%.0f°"), true, true, g_state.sl_gun_fov, dt);
 
-        SHdr(XS("Плавность"));
+        SHdr(XS("Скорость наводки"));
         CardBg(Layout::SliderH);
-        SliderRow("##asmt", XS("Плавность"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, true, g_state.sl_gun_str, dt);
+        SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, true, g_state.sl_gun_str, dt);
 
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
@@ -2671,17 +2695,53 @@ static void CenterMenuOnDisplay() {
     g_win.resizing = false;
 }
 
+// ============================ Aimbot ============================
+//
+// Drives the game camera with a synthetic "look" finger on the right half of
+// the screen. The target is the exact bone world position (head / chest /
+// pelvis) projected through the live camera matrices, expressed as a yaw/pitch
+// offset from the camera forward axis. The controller is closed-loop: every
+// frame it measures how many degrees the crosshair actually moved per pixel
+// of finger travel and adapts its gain, so it converges in a handful of
+// frames regardless of the in-game sensitivity setting.
+
+struct AimTarget {
+    bool  valid = false;
+    unsigned long long id = 0;
+    float yaw = 0.f, pitch = 0.f;   // degrees from crosshair (+right, +up)
+    float sx = 0.f, sy = 0.f;       // screen position (px)
+    float dist = 0.f;               // pixel distance from crosshair
+    float world_dist = 0.f;
+};
+
+static void AimReleaseFinger(bool& fingerDown) {
+    if (fingerDown) { Touch_Up(); fingerDown = false; }
+}
+
 static void UpdateAim(float dt) {
     static bool  s_fingerDown = false;
-    static float s_fx = 0.f, s_fy = 0.f;
-    static float s_lastTx = -1e9f, s_lastTy = -1e9f;
+    static float s_fx = 0.f, s_fy = 0.f;         // finger position (px)
+    static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f; // absolute camera angles
+    static bool  s_haveLast = false;
+    static float s_lastDx = 0.f, s_lastDy = 0.f; // finger delta applied last frame
+    static float s_gainYaw = 0.f, s_gainPitch = 0.f; // deg per px, learned
+    static unsigned long long s_lastId = 0;        // sticky target
+    static int   s_lostFrames = 0;
+    static int   s_holdFrames = 0;
 
-    bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
+    const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     bool active = g_state.aim_touch && g_esp_attached && !menuOpen;
 
+    // "Только с прицелом": only steer while the local player is ADS.
+    if (active && g_state.aim_scope_only && !esp_local_player_is_aiming())
+        active = false;
+
+    if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
+    if (dt > 0.1f) dt = 0.1f;
+
     if (!active) {
-        if (s_fingerDown) { Touch_Up(); s_fingerDown = false; }
-        s_lastTx = -1e9f;
+        AimReleaseFinger(s_fingerDown);
+        s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
         return;
     }
 
@@ -2692,79 +2752,172 @@ static void UpdateAim(float dt) {
     } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
         sw = (float) displayInfo.height; sh = (float) displayInfo.width;
     }
+    if (sw < 100.f || sh < 100.f) { AimReleaseFinger(s_fingerDown); return; }
 
-    std::vector<EspBox> boxes = esp_get_boxes((int) sw, (int) sh);
-    if (boxes.empty()) {
-        if (s_fingerDown) { Touch_Up(); s_fingerDown = false; }
-        s_lastTx = -1e9f;
-        return;
-    }
+    const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
 
     const float crossX = sw * 0.5f, crossY = sh * 0.5f;
     const float fovR = AimFovRadiusPx(sw, sh);
-    const float boneFrac = (g_state.aim_bone == 0) ? 0.06f
-                       : (g_state.aim_bone == 1) ? 0.28f
-                                                  : 0.47f;
+    float camFov = esp_camera_fov_deg();
+    if (!(camFov > 1.f && camFov < 179.f)) camFov = 60.f;
+    // degrees per pixel at the screen centre (vertical axis)
+    const float degPerPx = camFov / sh;
 
-    int   best = -1;
-    float bestScore = 1e18f, bestX = 0.f, bestY = 0.f;
-    for (size_t i = 0; i < boxes.size(); ++i) {
-        const EspBox& b = boxes[i];
-        if (!std::isfinite(b.x1) || !std::isfinite(b.y1) ||
-            !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
-        float h = b.y2 - b.y1;
-        if (h < 4.f || h > sh * 4.f) continue;
-        float px = (b.x1 + b.x2) * 0.5f;
-        float py = b.y1 + boneFrac * h;
-        if (px < -60.f || px > sw + 60.f || py < -60.f || py > sh + 60.f) continue;
-        if (g_state.aim_pos && (b.x1 < 0.f || b.y1 < 0.f || b.x2 > sw || b.y2 > sh)) continue;
-        float dx = px - crossX, dy = py - crossY;
-        float d = sqrtf(dx * dx + dy * dy);
-        if (d > fovR) continue;
-        float score = d;
-        if (s_lastTx > -1e8f) {
-            float lx = px - s_lastTx, ly = py - s_lastTy;
-            if (lx * lx + ly * ly < 80.f * 80.f) score *= 0.5f;
+    const int wantBone = (g_state.aim_bone < 0 || g_state.aim_bone > 2) ? 0 : g_state.aim_bone;
+
+    // ---- choose target ----
+    AimTarget best;
+    float bestScore = 1e18f;
+    for (const EspBox& b : boxes) {
+        AimTarget t;
+        // Exact bone, with graceful fallback to the next-best bone.
+        static const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 1, 0}};
+        int usedBone = -1;
+        for (int k = 0; k < 3; ++k) {
+            int bi = order[wantBone][k];
+            if (b.aim_valid[bi]) { usedBone = bi; break; }
         }
-        if (score < bestScore) { bestScore = score; best = (int) i; bestX = px; bestY = py; }
+        if (usedBone >= 0) {
+            t.yaw = b.aim_yaw[usedBone];  t.pitch = b.aim_pitch[usedBone];
+            t.sx  = b.aim_pts[usedBone][0]; t.sy = b.aim_pts[usedBone][1];
+            t.valid = std::isfinite(t.yaw) && std::isfinite(t.pitch) &&
+                      std::isfinite(t.sx) && std::isfinite(t.sy);
+        } else {
+            // Box estimate (no bones yet): derive angles from pixels.
+            if (!std::isfinite(b.x1) || !std::isfinite(b.y1) || !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
+            float h = b.y2 - b.y1;
+            if (h < 4.f || h > sh * 4.f) continue;
+            const float frac = (wantBone == 0) ? 0.08f : (wantBone == 1) ? 0.30f : 0.48f;
+            t.sx = (b.x1 + b.x2) * 0.5f;
+            t.sy = b.y1 + frac * h;
+            float ex = t.sx - crossX, ey = t.sy - crossY;
+            t.yaw = atanf(ex / (sh * 0.5f) * tanf(camFov * 0.5f * (float)M_PI / 180.f)) * 180.f / (float)M_PI;
+            t.pitch = -atanf(ey / (sh * 0.5f) * tanf(camFov * 0.5f * (float)M_PI / 180.f)) * 180.f / (float)M_PI;
+            t.valid = true;
+        }
+        if (!t.valid) continue;
+        t.id = b.id;
+        const bool sticky = (s_lastId != 0 && b.id == s_lastId);
+        if (t.sx < -sw || t.sx > sw * 2.f || t.sy < -sh || t.sy > sh * 2.f) continue;
+        if (g_state.aim_pos && !sticky && (t.sx < 0.f || t.sy < 0.f || t.sx > sw || t.sy > sh)) continue;
+        float dx = t.sx - crossX, dy = t.sy - crossY;
+        t.dist = sqrtf(dx * dx + dy * dy);
+        t.world_dist = b.distance;
+        // The target we are already pulling to may briefly leave the FOV
+        // circle (overshoot while the gain is still being learned) — keep it.
+        if (t.dist > (sticky ? fovR * 2.f : fovR)) continue;
+
+        // Score: angular distance, with a strong preference for the current
+        // target so we do not flip between two nearby players mid-pull.
+        float score = sticky ? t.dist * 0.35f : t.dist;
+        if (score < bestScore) { bestScore = score; best = t; }
     }
 
-    if (best < 0) {
-        s_lastTx = -1e9f;
-        if (s_fingerDown) { Touch_Up(); s_fingerDown = false; }
+    if (!best.valid) {
+        // Keep the finger down briefly so a momentary read failure does not
+        // register as a tap (tap-to-shoot in some layouts) or reset momentum.
+        if (++s_lostFrames > 6) {
+            AimReleaseFinger(s_fingerDown);
+            s_haveLast = false; s_lastId = 0;
+        }
         return;
     }
-    s_lastTx = bestX; s_lastTy = bestY;
+    s_lostFrames = 0;
+    if (best.id != s_lastId) s_haveLast = false; // do not learn gain across a target switch
+    s_lastId = best.id;
 
-    float ex = bestX - crossX, ey = bestY - crossY;
-    if (fabsf(ex) < 2.5f && fabsf(ey) < 2.5f) return;
+    // ---- learn finger gain (deg per px) from the previous frame ----
+    // Measured from the camera's own rotation, so a moving target does not
+    // pollute the estimate.
+    float camYaw = 0.f, camPitch = 0.f;
+    const bool haveCam = esp_camera_angles(camYaw, camPitch);
+    if (haveCam && s_haveLast && s_fingerDown) {
+        float camYawDelta = camYaw - s_lastCamYaw;
+        while (camYawDelta > 180.f) camYawDelta -= 360.f;
+        while (camYawDelta < -180.f) camYawDelta += 360.f;
+        float camPitchDelta = camPitch - s_lastCamPitch;
+        // Signed gains: a negative value simply means the game inverts that
+        // axis (e.g. "invert Y" enabled) and the controller follows suit.
+        // Adopt the measurement outright when it disagrees strongly with the
+        // current estimate (sensitivity changed / first sample), else smooth.
+        auto learn = [](float& gain, float measured) {
+            float m = fabsf(measured);
+            if (!std::isfinite(measured) || m < 0.005f || m > 2.0f) return;
+            if (gain == 0.f || (measured > 0.f) != (gain > 0.f) ||
+                m > fabsf(gain) * 1.3f || m < fabsf(gain) * 0.7f) gain = measured;
+            else gain = gain * 0.7f + measured * 0.3f;
+        };
+        // Finger right (dx > 0) turns right => yaw increases.
+        if (fabsf(s_lastDx) >= 2.f) learn(s_gainYaw, camYawDelta / s_lastDx);
+        // Finger down (dy > 0) looks down => pitch decreases.
+        if (fabsf(s_lastDy) >= 2.f) learn(s_gainPitch, -camPitchDelta / s_lastDy);
+    }
+    if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
+    else s_haveLast = false;
 
-    if (!s_fingerDown) {
-        s_fx = sw * 0.72f;
-        s_fy = sh * 0.48f;
-        Touch_Down(s_fx, s_fy);
-        s_fingerDown = true;
+    // ---- dead zone (in degrees, so it stays tight when scoped) ----
+    const float deadDeg = degPerPx * 1.5f;
+    if (fabsf(best.yaw) < deadDeg && fabsf(best.pitch) < deadDeg) {
+        s_lastDx = s_lastDy = 0.f;
+        if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
+        return;
     }
 
+    if (!s_fingerDown) {
+        s_fx = sw * 0.74f;
+        s_fy = sh * 0.50f;
+        Touch_Down(s_fx, s_fy);
+        s_fingerDown = true;
+        s_lastDx = s_lastDy = 0.f;
+        s_holdFrames = 0;
+        return; // let the game register the touch before moving it
+    }
+    if (s_holdFrames < 1) { ++s_holdFrames; Touch_Move(s_fx, s_fy); return; }
+
+    // ---- controller ----
+    // Speed slider keeps the old direction (higher = faster):
+    //   1 = gentle (~25% of the remaining error per frame), 10 = snap.
     float sm = g_state.gun_str;
-    if (sm < 1.f) sm = 1.f;
+    if (!(sm >= 1.f)) sm = 1.f;
     if (sm > 10.f) sm = 10.f;
-    float rate = 1.5f + (sm - 1.f) * (10.5f / 9.f);
-    float k = 1.f - expf(-rate * dt);
-    if (k > 0.5f) k = 0.5f;
+    float frac = 0.25f + (sm - 1.f) / 9.f * 0.75f;   // 0.25 .. 1.00 per frame @60fps
+    // Frame-rate independent: convert per-frame fraction to a rate.
+    float k = 1.f - powf(1.f - frac, dt * 60.f);
+    if (k > 1.f) k = 1.f;
+    if (k < 0.05f) k = 0.05f;
 
-    float dx = ex * k, dy = ey * k;
-    if (dx >  90.f) dx =  90.f;
-    if (dx < -90.f) dx = -90.f;
-    if (dy >  90.f) dy =  90.f;
-    if (dy < -90.f) dy = -90.f;
+    // Gain (deg per px). Until it has been measured, assume a HIGH in-game
+    // sensitivity so the first probe move can only under-shoot; the true gain
+    // is learned from that move and the next frame snaps the rest of the way.
+    const float probeGain = 0.35f;
+    const bool  learned = (s_gainYaw != 0.f);
+    float gy = learned ? s_gainYaw : probeGain;
+    float gp = (s_gainPitch != 0.f) ? s_gainPitch : (learned ? fabsf(s_gainYaw) : probeGain);
 
-    s_fx += dx;
-    s_fy += dy;
-    if (s_fx < sw * 0.55f) s_fx = sw * 0.55f;
-    if (s_fx > sw * 0.95f) s_fx = sw * 0.95f;
-    if (s_fy < sh * 0.20f) s_fy = sh * 0.20f;
-    if (s_fy > sh * 0.80f) s_fy = sh * 0.80f;
+    float dx =  best.yaw   * k / gy;
+    float dy = -best.pitch * k / gp;
+
+    // Clamp per-frame travel so a bad gain estimate never slingshots.
+    const float maxStep = learned ? sh * 0.15f : sh * 0.05f;
+    if (dx >  maxStep) dx =  maxStep;
+    if (dx < -maxStep) dx = -maxStep;
+    if (dy >  maxStep) dy =  maxStep;
+    if (dy < -maxStep) dy = -maxStep;
+
+    // Keep the finger in the look area. If it drifts to an edge, lift and
+    // re-place it in the centre of the area instead of getting stuck.
+    float nx = s_fx + dx, ny = s_fy + dy;
+    const float minX = sw * 0.56f, maxX = sw * 0.97f, minY = sh * 0.12f, maxY = sh * 0.88f;
+    if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
+        Touch_Up();
+        s_fingerDown = false;
+        s_fx = sw * 0.74f; s_fy = sh * 0.50f;
+        s_lastDx = s_lastDy = 0.f;
+        s_haveLast = false;
+        return;
+    }
+    s_fx = nx; s_fy = ny;
+    s_lastDx = dx; s_lastDy = dy;
     Touch_Move(s_fx, s_fy);
 }
 
@@ -2791,6 +2944,7 @@ void RenderMenu() {
     Tick(g_state.a_aim_chest,  g_state.aim_bone == 1,      dt);
     Tick(g_state.a_aim_pelvis, g_state.aim_bone == 2,      dt);
     Tick(g_state.a_aim_spec,   g_state.aim_special,        dt);
+    Tick(g_state.a_aim_scope,  g_state.aim_scope_only,     dt);
     Tick(g_state.a_esp_box,    g_state.esp_box,            dt);
     Tick(g_state.a_esp_name,   g_state.esp_name,           dt);
     Tick(g_state.a_esp_hp,     g_state.esp_hp,             dt);
