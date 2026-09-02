@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <sys/uio.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <algorithm>
 #include <cmath>
@@ -1824,6 +1825,148 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
 //   C  = players with a valid cached skeleton
 //   D  = distinct transform hierarchies used by the bones (re-parenting),
 //        then the per-bone mask torso|armL|armR|legL|legR.
+// ===================== Skeleton dump logging =====================
+// Writes a full diagnostic snapshot to Downloads so it can be shared without
+// retyping: our per-bone table, the ragdoll bone list, and the character
+// model transform tree with names, hierarchy indices and world positions.
+
+static const char* kSkeletonSlotNames[ESP_BONE_COUNT] = {
+    "Hips", "Spine", "Spine1", "Spine2", "Neck", "Head",
+    "Shoulder.L", "Arm.L", "ForeArm.L", "Hand.L",
+    "Shoulder.R", "Arm.R", "ForeArm.R", "Hand.R",
+    "UpLeg.L", "Leg.L", "Foot.L", "Toe.L",
+    "UpLeg.R", "Leg.R", "Foot.R", "Toe.R"
+};
+
+static void skeleton_dump_transform_line(FILE* f, uint64_t transform, int depth) {
+    char name[48] = "?";
+    read_transform_name(transform, name, sizeof(name));
+    uint64_t data = rd_ptr(transform + g_skeleton_layout.data_offset);
+    int32_t index = rd<int32_t>(transform + g_skeleton_layout.index_offset);
+    Vec3 world{};
+    bool has_world = read_transform_hierarchy_layout(transform, g_skeleton_layout, world);
+    int32_t child_count = rd<int32_t>(transform + TRANSFORM_CHILD_COUNT);
+    fprintf(f, "%*s%-24s t=%llx data=%llx idx=%d ch=%d w=(%.2f, %.2f, %.2f)%s\n",
+            depth * 2, "", name,
+            (unsigned long long)transform, (unsigned long long)data, index, child_count,
+            world.x, world.y, world.z, has_world ? "" : " [no-world]");
+}
+
+static void skeleton_dump_subtree(FILE* f, uint64_t root, int max_nodes) {
+    struct Entry { uint64_t node; int depth; };
+    static std::vector<Entry> stack;
+    stack.clear();
+    stack.push_back({root, 0});
+    int emitted = 0;
+    uint64_t children[64];
+    while (!stack.empty() && emitted < max_nodes) {
+        Entry entry = stack.back();
+        stack.pop_back();
+        skeleton_dump_transform_line(f, entry.node, entry.depth);
+        ++emitted;
+        if (entry.depth >= 14) continue;
+        int count = read_transform_children(entry.node, children, 64);
+        for (int i = count - 1; i >= 0; --i)
+            if (children[i]) stack.push_back({children[i], entry.depth + 1});
+    }
+    if (!stack.empty()) fprintf(f, "  ... truncated at %d nodes\n", max_nodes);
+}
+
+static void skeleton_write_dump() {
+    static const char* kPaths[] = {
+        "/sdcard/Download/xvcen_skel.txt",
+        "/storage/emulated/0/Download/xvcen_skel.txt",
+        "/data/local/tmp/xvcen_skel.txt"
+    };
+    FILE* f = nullptr;
+    const char* used_path = nullptr;
+    for (const char* path : kPaths) {
+        f = fopen(path, "w");
+        if (f) { used_path = path; break; }
+    }
+    if (!f) return;
+
+    char status[224];
+    esp_skeleton_debug(status, sizeof(status));
+    fprintf(f, "=== xvcen skeleton dump ===\n%s\n\n", status);
+    fprintf(f, "layout: data=+0x%llx idx=+0x%llx mat=+0x%llx ind=+0x%llx mi=%d ii=%d valid=%d\n",
+            (unsigned long long)g_skeleton_layout.data_offset,
+            (unsigned long long)g_skeleton_layout.index_offset,
+            (unsigned long long)g_skeleton_layout.matrices_offset,
+            (unsigned long long)g_skeleton_layout.indices_offset,
+            g_skeleton_layout.matrices_indirect ? 1 : 0,
+            g_skeleton_layout.indices_indirect ? 1 : 0,
+            g_skeleton_layout_valid ? 1 : 0);
+    fprintf(f, "name offset: +0x%llx plain=%d valid=%d\n\n",
+            (unsigned long long)g_go_name_offset, g_go_name_plain_pointer ? 1 : 0,
+            g_go_name_offset_valid ? 1 : 0);
+
+    int dumped_players = 0;
+    for (const auto& entry : g_skeletons) {
+        if (!entry.second.valid) continue;
+        if (++dumped_players > 2) break;
+        uint64_t player = entry.first;
+        const CachedSkeleton& skeleton = entry.second;
+
+        fprintf(f, "--- player %llx: cached bones=%d model_root=%llx ---\n",
+                (unsigned long long)player, skeleton.bone_count,
+                (unsigned long long)skeleton.model_root);
+        for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
+            uint64_t transform = skeleton.bone_transform[bone];
+            if (!transform) { fprintf(f, "%-10s <none>\n", kSkeletonSlotNames[bone]); continue; }
+            char name[48] = "?";
+            read_transform_name(transform, name, sizeof(name));
+            uint64_t data = rd_ptr(transform + g_skeleton_layout.data_offset);
+            int32_t index = rd<int32_t>(transform + g_skeleton_layout.index_offset);
+            Vec3 world{};
+            bool has_world = read_transform_hierarchy_layout(transform, g_skeleton_layout, world);
+            fprintf(f, "%-10s t=%llx name='%s' data=%llx idx=%d w=(%.2f, %.2f, %.2f)%s\n",
+                    kSkeletonSlotNames[bone], (unsigned long long)transform, name,
+                    (unsigned long long)data, index, world.x, world.y, world.z,
+                    has_world ? "" : " [no-world]");
+        }
+
+        // The ragdoll bone list as the game exposes it.
+        uint64_t kcc = resolve_player_kcc(player);
+        fprintf(f, "kcc=%llx", (unsigned long long)kcc);
+        if (kcc) {
+            uint64_t head = managed_object_native(rd_ptr(kcc + KCC_HEAD_TRANSFORM));
+            fprintf(f, " kcc.head=%llx", (unsigned long long)head);
+            uint64_t anim = rd_ptr(kcc + KCC_CHARACTER_ANIMATION);
+            uint64_t ragdoll = anim ? rd_ptr(anim + CHAR_ANIM_RAGDOLL) : 0;
+            fprintf(f, " anim=%llx ragdoll=%llx", (unsigned long long)anim, (unsigned long long)ragdoll);
+            if (ragdoll) {
+                uint64_t bones_array = rd_ptr(ragdoll + RAGDOLL_BONES_ARRAY);
+                int32_t count = bones_array ? rd<int32_t>(bones_array + IL2CPP_ARRAY_LENGTH) : 0;
+                fprintf(f, " m_Bones[%d]\n", count);
+                for (int32_t i = 0; i < count && i < 32; ++i) {
+                    uint64_t element = rd_ptr(bones_array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
+                    if (!element) continue;
+                    uint64_t transform = managed_object_native(rd_ptr(element + RAGDOLL_BODYPART_TRANSFORM));
+                    if (!skeleton_transform_ptr_valid(transform))
+                        transform = native_component_transform(managed_object_native(element));
+                    if (!skeleton_transform_ptr_valid(transform)) continue;
+                    fprintf(f, "  ragdoll[%d] ", i);
+                    skeleton_dump_transform_line(f, transform, 0);
+                }
+            } else {
+                fprintf(f, "\n");
+            }
+        } else {
+            fprintf(f, "\n");
+        }
+
+        // Full character model tree: names + world positions per node.
+        uint64_t root = skeleton_model_root(player);
+        fprintf(f, "model tree (root=%llx):\n", (unsigned long long)root);
+        if (root) skeleton_dump_subtree(f, root, 400);
+        fprintf(f, "\n");
+    }
+    if (!dumped_players) fprintf(f, "no valid skeletons cached\n");
+    fclose(f);
+    chmod(used_path, 0666);
+}
+
 void esp_skeleton_debug(char* out, int cap) {
     if (!out || cap <= 0) return;
     char mask[32];
@@ -1895,6 +2038,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (g_skeleton_enabled) prune_skeleton_cache(s_transforms);
     else if (!g_skeletons.empty()) g_skeletons.clear();
     g_skeleton_builds_this_frame = 0;
+    if (g_skeleton_enabled) {
+        static int dump_timer = 0;
+        ++dump_timer;
+        if (dump_timer == 300 || dump_timer % 900 == 0) skeleton_write_dump();
+    }
 
     if (!g_player_position_validated) {
         if (!discover_player_position_offset(s_transforms)) return result;
