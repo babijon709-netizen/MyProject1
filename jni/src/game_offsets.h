@@ -42,6 +42,23 @@ inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
 // Prefer lastSavedPosition; lastTickPosition is adjacent at 0x1C8
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // lastSavedPosition
+inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (UnityEngine.GameObject)
+
+// Native Unity object layout — reversed from libunity.so in this repo:
+//   Transform::get_childCount_Injected -> ldr w0, [x0, #0x58]
+//   Transform::GetChild helper         -> ldr x8, [x0, #0x48]; ldr x0, [x8, w1, uxtw #3]
+//   Component::get_gameObject_Injected -> ldr x0, [x0, #0x20]
+//   GameObject::get_transform_Injected -> ldr x8, [x0, #0x20]; ldr x19, [x8, #8]
+inline constexpr std::uint64_t TRANSFORM_CHILDREN_ARRAY   = 0x48; // Transform** (direct pointers)
+inline constexpr std::uint64_t TRANSFORM_CHILD_COUNT      = 0x58; // int32
+inline constexpr std::uint64_t COMPONENT_GAMEOBJECT       = 0x20; // native Component -> native GameObject*
+inline constexpr std::uint64_t GAMEOBJECT_COMPONENT_ARRAY = 0x20; // native GameObject -> ComponentPair*
+inline constexpr std::uint64_t COMPONENT_PAIR_PTR         = 0x08; // pair[0] + 8 == Transform* (first component)
+// GameObject name is a 32-byte core::string (SSO): flags byte at +0x1F,
+// heap pointer at +0x0 when (flags >= 0x40), inline chars otherwise.
+// The exact field offset inside GameObject is discovered at runtime
+// (validated against known bone names); 0x48 is the expected value.
+inline constexpr std::uint64_t GAMEOBJECT_NAME_GUESS      = 0x48;
 
 inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18;

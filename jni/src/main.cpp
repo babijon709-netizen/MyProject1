@@ -587,7 +587,9 @@ static void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer) return;
+    esp_set_skeleton_enabled(g_state.esp_skeleton);
+
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton) return;
 
     std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
     constexpr int BOX_EDGES[][2] = {
@@ -623,6 +625,19 @@ static void DrawEspOverlay() {
 
         if (g_state.esp_box)
             dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2), ColU32(cfg::esp::box_col), cfg::esp::box_rounding, 0, thick);
+
+        if (g_state.esp_skeleton && box.has_skeleton) {
+            ImU32 skelCol = ColU32(cfg::esp::skeleton_col);
+            for (const auto& link : ESP_BONE_LINKS) {
+                int a = link[0], b = link[1];
+                if (!box.bone_valid[a] || !box.bone_valid[b]) continue;
+                if (!std::isfinite(box.bones[a][0]) || !std::isfinite(box.bones[a][1]) ||
+                    !std::isfinite(box.bones[b][0]) || !std::isfinite(box.bones[b][1])) continue;
+                dl->AddLine(ImVec2(box.bones[a][0], box.bones[a][1]),
+                            ImVec2(box.bones[b][0], box.bones[b][1]),
+                            skelCol, thick);
+            }
+        }
 
         if (g_state.esp_tracer) {
             float tx = (box.x1 + box.x2) * 0.5f;
@@ -2269,6 +2284,7 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::weapon       = g_state.esp_weapon;
         cfg::esp::weapon_icon  = g_state.esp_weapon_icon;
         cfg::esp::tracer       = g_state.esp_tracer;
+        cfg::esp::skeleton     = g_state.esp_skeleton;
 
 
 
@@ -2338,8 +2354,9 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
                 {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
+                {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
             };
-            constexpr int N = 8;
+            constexpr int N = 9;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
