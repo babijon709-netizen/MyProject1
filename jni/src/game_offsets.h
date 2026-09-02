@@ -56,6 +56,11 @@ inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel
 inline constexpr std::uint64_t PLAYER_EVENT_HANDLER          = 0x78;
 inline constexpr std::uint64_t EVENT_HANDLER_MANAGER_BACKREF = 0xD0;
 inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x268;
+// fvp.LookDirection (0x140): synced Vector3 wrapper, current value at +0x20.
+// MouseLook.Update writes m_LookRoot.forward into it every frame and
+// FPHitscan casts its hit ray along it (not along the camera transform).
+inline constexpr std::uint64_t EVENT_HANDLER_LOOK_DIRECTION  = 0x140;
+inline constexpr std::uint64_t SYNC_VALUE_OFFSET             = 0x20;
 inline constexpr std::uint64_t ACTIVITY_ACTIVE_FLAG          = 0x10;
 inline constexpr std::uint64_t PLAYER_FP_MANAGER             = 0x90;
 inline constexpr std::uint64_t FPMANAGER_CURRENT_WEAPON      = 0x58;
@@ -75,6 +80,7 @@ inline constexpr std::uint64_t KCC_PLAYER_BACKREF          = 0x78;
 inline constexpr std::uint64_t KCC_HEAD_TRANSFORM          = 0x88; // KCC.head (managed UnityEngine.Transform)
 inline constexpr std::uint64_t KCC_NORMAL_HEIGHT          = 0xA0; // float, capsule height standing
 inline constexpr std::uint64_t KCC_CROUCH_HEIGHT          = 0xA4; // float, capsule height crouched
+inline constexpr std::uint64_t KCC_LOOK_HEIGHT_OFFSET     = 0x90; // float, eye = pos + (capsule height + this) * up
 // KCC.ZYW : HyperHug.Games.Oxide.Features.Player.Move (value struct @0x16C)
 //   +0x00 MoveState State (0 idle,1 walk,2 run,3 crouching,4 air,5 climb,6 swim,7 dead)
 //   +0x04 Pose (0 Stand, 1 Crouch)   +0x08 bool Aim  +0x0C Vector3 Position
