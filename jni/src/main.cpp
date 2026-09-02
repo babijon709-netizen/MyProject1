@@ -628,15 +628,40 @@ static void DrawEspOverlay() {
 
         if (g_state.esp_skeleton && box.has_skeleton) {
             ImU32 skelCol = ColU32(cfg::esp::skeleton_col);
-            for (const auto& link : ESP_BONE_LINKS) {
-                int a = link[0], b = link[1];
-                if (!box.bone_valid[a] || !box.bone_valid[b]) continue;
-                if (!std::isfinite(box.bones[a][0]) || !std::isfinite(box.bones[a][1]) ||
-                    !std::isfinite(box.bones[b][0]) || !std::isfinite(box.bones[b][1])) continue;
+            auto validPt = [&](int b) {
+                return b >= 0 && box.bone_valid[b] &&
+                       std::isfinite(box.bones[b][0]) && std::isfinite(box.bones[b][1]);
+            };
+            auto lineTo = [&](int a, int b) {
                 dl->AddLine(ImVec2(box.bones[a][0], box.bones[a][1]),
                             ImVec2(box.bones[b][0], box.bones[b][1]),
                             skelCol, thick);
-            }
+            };
+            // Draw each chain connecting consecutive valid bones, skipping
+            // missing ones (0..5 torso, 6..9/10..13 arms, 14..17/18..21 legs).
+            auto drawChain = [&](const int* chain, int n, int anchor) {
+                int prev = validPt(anchor) ? anchor : -1;
+                for (int i = 0; i < n; ++i) {
+                    int b = chain[i];
+                    if (!validPt(b)) continue;
+                    if (prev >= 0) lineTo(prev, b);
+                    prev = b;
+                }
+            };
+            // Arms hang off the highest available spine bone.
+            int chest = -1;
+            for (int c : {3, 2, 1, 0}) { if (validPt(c)) { chest = c; break; } }
+
+            static const int torso[] = {1, 2, 3, 4, 5};
+            static const int armL[]  = {6, 7, 8, 9};
+            static const int armR[]  = {10, 11, 12, 13};
+            static const int legL[]  = {14, 15, 16, 17};
+            static const int legR[]  = {18, 19, 20, 21};
+            drawChain(torso, 5, 0);
+            drawChain(armL, 4, chest);
+            drawChain(armR, 4, chest);
+            drawChain(legL, 4, 0);
+            drawChain(legR, 4, 0);
         }
 
         if (g_state.esp_tracer) {

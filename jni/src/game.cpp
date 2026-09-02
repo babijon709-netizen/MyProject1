@@ -774,29 +774,43 @@ const int ESP_BONE_LINKS[ESP_BONE_LINK_COUNT][2] = {
 };
 
 struct SkeletonBoneName { const char* name; int bone; };
+// Names are matched after normalization: lowercase, prefix up to the last ':'
+// stripped, spaces removed, '_' turned into '.'. Aliases cover the Blender-style
+// rig from the game plus common Unity/Mixamo/UE naming, just in case.
 static const SkeletonBoneName kSkeletonBoneNames[] = {
-    {"Hips", BONE_HIPS}, {"Spine", BONE_SPINE}, {"Spine1", BONE_SPINE1},
-    {"Spine2", BONE_SPINE2}, {"Neck", BONE_NECK}, {"Head", BONE_HEAD},
-    {"Shoulder.L", BONE_SHOULDER_L}, {"Arm.L", BONE_ARM_L},
-    {"ForeArm.L", BONE_FOREARM_L}, {"Hand.L", BONE_HAND_L},
-    {"Shoulder.R", BONE_SHOULDER_R}, {"Arm.R", BONE_ARM_R},
-    {"ForeArm.R", BONE_FOREARM_R}, {"Hand.R", BONE_HAND_R},
-    {"UpLeg.L", BONE_UPLEG_L}, {"Leg.L", BONE_LEG_L},
-    {"Foot.L", BONE_FOOT_L}, {"ToeBase.L", BONE_TOE_L},
-    {"UpLeg.R", BONE_UPLEG_R}, {"Leg.R", BONE_LEG_R},
-    {"Foot.R", BONE_FOOT_R}, {"ToeBase.R", BONE_TOE_R}
+    {"hips", BONE_HIPS}, {"pelvis", BONE_HIPS},
+    {"spine", BONE_SPINE}, {"spine.01", BONE_SPINE},
+    {"spine1", BONE_SPINE1}, {"chest", BONE_SPINE1}, {"spine.02", BONE_SPINE1},
+    {"spine2", BONE_SPINE2}, {"upperchest", BONE_SPINE2}, {"spine.03", BONE_SPINE2},
+    {"neck", BONE_NECK}, {"neck.01", BONE_NECK},
+    {"head", BONE_HEAD},
+    {"shoulder.l", BONE_SHOULDER_L}, {"leftshoulder", BONE_SHOULDER_L}, {"clavicle.l", BONE_SHOULDER_L},
+    {"arm.l", BONE_ARM_L}, {"leftarm", BONE_ARM_L}, {"upperarm.l", BONE_ARM_L},
+    {"forearm.l", BONE_FOREARM_L}, {"leftforearm", BONE_FOREARM_L}, {"lowerarm.l", BONE_FOREARM_L},
+    {"hand.l", BONE_HAND_L}, {"lefthand", BONE_HAND_L},
+    {"shoulder.r", BONE_SHOULDER_R}, {"rightshoulder", BONE_SHOULDER_R}, {"clavicle.r", BONE_SHOULDER_R},
+    {"arm.r", BONE_ARM_R}, {"rightarm", BONE_ARM_R}, {"upperarm.r", BONE_ARM_R},
+    {"forearm.r", BONE_FOREARM_R}, {"rightforearm", BONE_FOREARM_R}, {"lowerarm.r", BONE_FOREARM_R},
+    {"hand.r", BONE_HAND_R}, {"righthand", BONE_HAND_R},
+    {"upleg.l", BONE_UPLEG_L}, {"leftupleg", BONE_UPLEG_L}, {"thigh.l", BONE_UPLEG_L},
+    {"leg.l", BONE_LEG_L}, {"leftleg", BONE_LEG_L}, {"calf.l", BONE_LEG_L},
+    {"foot.l", BONE_FOOT_L}, {"leftfoot", BONE_FOOT_L},
+    {"toebase.l", BONE_TOE_L}, {"lefttoebase", BONE_TOE_L}, {"toe.l", BONE_TOE_L}, {"ball.l", BONE_TOE_L},
+    {"upleg.r", BONE_UPLEG_R}, {"rightupleg", BONE_UPLEG_R}, {"thigh.r", BONE_UPLEG_R},
+    {"leg.r", BONE_LEG_R}, {"rightleg", BONE_LEG_R}, {"calf.r", BONE_LEG_R},
+    {"foot.r", BONE_FOOT_R}, {"rightfoot", BONE_FOOT_R},
+    {"toebase.r", BONE_TOE_R}, {"righttoebase", BONE_TOE_R}, {"toe.r", BONE_TOE_R}, {"ball.r", BONE_TOE_R}
 };
 
 struct CachedSkeleton {
     uint64_t bone_transform[ESP_BONE_COUNT] = {};
-    int32_t  bone_index[ESP_BONE_COUNT] = {};
     uint64_t hierarchy_data = 0;
-    int32_t  hips_index = -1;
-    int32_t  needed_count = 0;   // highest hierarchy index we must read + 1
+    uint64_t model_root = 0;
     int      bone_count = 0;
     bool     valid = false;
     int      retry_cooldown = 0;
     int      fail_streak = 0;
+    int      revalidate_timer = 0;
 };
 
 static std::unordered_map<uint64_t, CachedSkeleton> g_skeletons;
@@ -809,6 +823,7 @@ static uint64_t g_go_name_offset = 0;
 static bool     g_go_name_plain_pointer = false; // fallback: name stored as raw char*
 static bool     g_go_name_offset_valid = false;
 static int      g_go_name_retry_cooldown = 0;
+static int      g_skeleton_builds_this_frame = 0; // heavy rescans: max 1 per frame
 
 void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled = enabled; }
 
@@ -864,6 +879,34 @@ static bool string_is_reasonable_name(const char* value) {
     return true;
 }
 
+// Lowercase, strip "prefix:" namespaces, drop spaces, unify '_' -> '.'.
+static void normalize_bone_name(const char* in, char* out, size_t cap) {
+    const char* start = in;
+    for (const char* p = in; *p; ++p) {
+        if (*p == ':') start = p + 1;
+    }
+    size_t n = 0;
+    for (const char* p = start; *p && n + 1 < cap; ++p) {
+        char c = *p;
+        if (c == ' ') continue;
+        if (c == '_') c = '.';
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        out[n++] = c;
+    }
+    out[n] = '\0';
+}
+
+static int match_bone_name(const char* raw_name) {
+    char normalized[48];
+    normalize_bone_name(raw_name, normalized, sizeof(normalized));
+    if (!normalized[0]) return -1;
+    for (const SkeletonBoneName& entry : kSkeletonBoneNames) {
+        if (strcmp(normalized, entry.name) == 0) return entry.bone;
+    }
+    return -1;
+}
+
+
 // Read a GameObject name. Unity stores it as a 32-byte core::string with SSO:
 // flags byte at +0x1F; when (flags >= 0x40) the first 8 bytes are a heap char*,
 // otherwise the characters live inline at +0x0.
@@ -907,7 +950,7 @@ static bool read_transform_name(uint64_t transform, char* out, size_t cap) {
 // character model subtree until known bone names show up.
 static bool discover_gameobject_name_offset(const std::vector<uint64_t>& nodes) {
     static const uint64_t kCandidates[] = {GAMEOBJECT_NAME_GUESS, 0x40, 0x50, 0x38, 0x30, 0x28, 0x58, 0x20, 0x60};
-    static const char* kProbeNames[] = {"Hips", "Spine", "Spine1", "Spine2", "Neck", "Head", "Armature", "Root"};
+    static const char* kProbeNames[] = {"hips", "spine", "spine1", "spine2", "neck", "head", "armature", "root", "pelvis"};
 
     std::vector<uint64_t> gameobjects;
     gameobjects.reserve(nodes.size());
@@ -924,8 +967,10 @@ static bool discover_gameobject_name_offset(const std::vector<uint64_t>& nodes) 
             for (uint64_t go : gameobjects) {
                 char name[48];
                 if (!read_gameobject_name_at(go, offset, plain_pointer != 0, name, sizeof(name))) continue;
+                char normalized[48];
+                normalize_bone_name(name, normalized, sizeof(normalized));
                 for (const char* probe : kProbeNames) {
-                    if (strcmp(name, probe) == 0) { ++matches; break; }
+                    if (strcmp(normalized, probe) == 0) { ++matches; break; }
                 }
                 if (matches >= 3) break;
             }
@@ -979,105 +1024,109 @@ static bool resolve_skeleton_layout(uint64_t sample_transform) {
 
 static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
     skeleton = CachedSkeleton{};
-    for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) skeleton.bone_index[bone] = -1;
 
     uint64_t root = skeleton_model_root(player);
     if (!root) return false;
 
+    // Wide scan of the whole model to locate "Hips" candidates. Deep bones
+    // (arms/head) may be far down, so the cap here is generous.
     static std::vector<uint64_t> nodes;
-    collect_transform_subtree(root, nodes, 384);
-    if (nodes.size() < 16) return false;
+    collect_transform_subtree(root, nodes, 1024);
+    if (nodes.size() < 8) return false;
 
     if (!g_go_name_offset_valid && !discover_gameobject_name_offset(nodes)) return false;
 
-    int found = 0;
+    // Collect up to a few Hips candidates (render rig, ragdoll copies, ...).
+    uint64_t hips_candidates[4] = {};
+    int hips_candidate_count = 0;
     for (uint64_t node : nodes) {
         char name[48];
         if (!read_transform_name(node, name, sizeof(name))) continue;
-        for (const SkeletonBoneName& entry : kSkeletonBoneNames) {
-            if (strcmp(name, entry.name) != 0) continue;
-            if (!skeleton.bone_transform[entry.bone]) {
-                skeleton.bone_transform[entry.bone] = node;
-                ++found;
-            }
-            break;
-        }
-        if (found >= ESP_BONE_COUNT) break;
+        if (match_bone_name(name) != BONE_HIPS) continue;
+        hips_candidates[hips_candidate_count++] = node;
+        if (hips_candidate_count >= 4) break;
     }
-    if (!skeleton.bone_transform[BONE_HIPS] || !skeleton.bone_transform[BONE_HEAD] || found < 10) return false;
-    if (!resolve_skeleton_layout(skeleton.bone_transform[BONE_HIPS])) return false;
+    if (!hips_candidate_count) return false;
 
-    uint64_t data = rd_ptr(skeleton.bone_transform[BONE_HIPS] + g_skeleton_layout.data_offset);
+    // Anchor the skeleton to the Hips subtree that yields the most bones —
+    // this keeps every bone on one rig and ignores stray meshes named "Head".
+    uint64_t best_bones[ESP_BONE_COUNT] = {};
+    int best_count = 0;
+    static std::vector<uint64_t> rig_nodes;
+    for (int candidate = 0; candidate < hips_candidate_count; ++candidate) {
+        uint64_t hips = hips_candidates[candidate];
+        collect_transform_subtree(hips, rig_nodes, 512);
+        uint64_t bones[ESP_BONE_COUNT] = {};
+        bones[BONE_HIPS] = hips;
+        int found = 1;
+        for (uint64_t node : rig_nodes) {
+            if (node == hips) continue;
+            char name[48];
+            if (!read_transform_name(node, name, sizeof(name))) continue;
+            int bone = match_bone_name(name);
+            if (bone < 0 || bone == BONE_HIPS) continue;
+            if (!bones[bone]) { bones[bone] = node; ++found; }
+            if (found >= ESP_BONE_COUNT) break;
+        }
+        if (found > best_count) {
+            best_count = found;
+            memcpy(best_bones, bones, sizeof(bones));
+            if (found >= ESP_BONE_COUNT) break;
+        }
+    }
+    if (best_count < 6 || !best_bones[BONE_HIPS]) return false;
+    if (!resolve_skeleton_layout(best_bones[BONE_HIPS])) return false;
+
+    uint64_t data = rd_ptr(best_bones[BONE_HIPS] + g_skeleton_layout.data_offset);
     if (!data) return false;
-    uint64_t indices = rd_ptr(data + g_skeleton_layout.indices_offset);
-    if (g_skeleton_layout.indices_indirect) indices = rd_ptr(indices);
-    if (!indices) return false;
 
-    int32_t max_needed = -1;
+    // Keep only bones living in the same hierarchy as the hips.
     int valid_bones = 0;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
-        uint64_t transform = skeleton.bone_transform[bone];
+        uint64_t transform = best_bones[bone];
         if (!transform) continue;
         uint64_t bone_data = rd_ptr(transform + g_skeleton_layout.data_offset);
         int32_t index = rd<int32_t>(transform + g_skeleton_layout.index_offset);
-        if (bone_data != data || index < 0 || index > 100000) {
-            skeleton.bone_transform[bone] = 0;
-            continue;
-        }
-        // Walk the parent chain once to learn how much of the arrays we need.
-        int32_t walker = index, local_max = index;
-        int depth = 0;
-        bool chain_ok = false;
-        while (depth++ < 128) {
-            int32_t parent = -2;
-            if (!rd_exact(indices + (uint64_t)walker * sizeof(int32_t), parent)) break;
-            if (parent < 0) { chain_ok = parent == -1; break; }
-            if (parent > 100000 || parent == walker) break;
-            if (parent > local_max) local_max = parent;
-            walker = parent;
-        }
-        if (!chain_ok) {
-            skeleton.bone_transform[bone] = 0;
-            continue;
-        }
-        skeleton.bone_index[bone] = index;
-        if (local_max > max_needed) max_needed = local_max;
+        if (bone_data != data || index < 0 || index > 100000) continue;
+        skeleton.bone_transform[bone] = transform;
         ++valid_bones;
     }
-    if (valid_bones < 8 || max_needed < 0 || max_needed > 8192) return false;
+    if (valid_bones < 6 || !skeleton.bone_transform[BONE_HIPS]) return false;
 
     skeleton.hierarchy_data = data;
-    skeleton.hips_index = skeleton.bone_index[BONE_HIPS];
-    skeleton.needed_count = max_needed + 1;
+    skeleton.model_root = root;
     skeleton.bone_count = valid_bones;
     skeleton.valid = true;
     return true;
 }
 
 // Same math as read_transform_hierarchy_arrays, but on locally buffered arrays.
-static bool skeleton_local_walk(const Matrix34* matrices, const int32_t* parents, int32_t count, int32_t index, Vec3& out) {
-    if (index < 0 || index >= count) return false;
+// Returns 1 on success, 0 on failure, -1 when the parent chain leaves the
+// buffered range (caller may retry with a remote walk).
+static int skeleton_local_walk(const Matrix34* matrices, const int32_t* parents, int32_t count, int32_t index, Vec3& out) {
+    if (index < 0 || index >= count) return -1;
     const Matrix34& current = matrices[index];
-    if (!matrix34_is_valid(current)) return false;
+    if (!matrix34_is_valid(current)) return 0;
     Vec3 result = {current.translation.x, current.translation.y, current.translation.z};
-    if (!vec3_is_finite(result)) return false;
+    if (!vec3_is_finite(result)) return 0;
     int32_t parent = parents[index];
     int32_t previous = index;
     int depth = 0;
     while (parent >= 0 && depth++ < 128) {
-        if (parent >= count || parent == previous) return false;
+        if (parent >= count) return -1;
+        if (parent == previous) return 0;
         const Matrix34& matrix = matrices[parent];
-        if (!matrix34_is_valid(matrix)) return false;
+        if (!matrix34_is_valid(matrix)) return 0;
         Vec3 scaled = {result.x * matrix.scale.x, result.y * matrix.scale.y, result.z * matrix.scale.z};
         Vec3 rotated = rotate_vector(matrix.rotation, scaled);
         result = {matrix.translation.x + rotated.x, matrix.translation.y + rotated.y, matrix.translation.z + rotated.z};
-        if (!vec3_is_finite(result)) return false;
+        if (!vec3_is_finite(result)) return 0;
         previous = parent;
         parent = parents[parent];
     }
-    if (parent != -1 || depth >= 128) return false;
+    if (parent != -1 || depth >= 128) return 0;
     out = result;
-    return true;
+    return 1;
 }
 
 static void prune_skeleton_cache(const std::vector<uint64_t>& players) {
@@ -1098,6 +1147,10 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     CachedSkeleton& skeleton = g_skeletons[player];
     if (!skeleton.valid) {
         if (skeleton.retry_cooldown > 0) { --skeleton.retry_cooldown; return false; }
+        // Building walks the whole model; allow at most one rebuild per frame
+        // so multiple new players never stall the overlay.
+        if (g_skeleton_builds_this_frame >= 1) return false;
+        ++g_skeleton_builds_this_frame;
         if (!build_skeleton(player, skeleton)) {
             skeleton.valid = false;
             skeleton.retry_cooldown = 90;
@@ -1105,13 +1158,43 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         }
     }
 
-    // Cheap liveness check: the hips transform must still live in the same
-    // hierarchy at the same index (model swaps / respawns move it).
+    // Periodically make sure the player still uses the same character model.
+    if (++skeleton.revalidate_timer >= 120) {
+        skeleton.revalidate_timer = 0;
+        if (skeleton_model_root(player) != skeleton.model_root) {
+            skeleton = CachedSkeleton{};
+            skeleton.retry_cooldown = 2;
+            return false;
+        }
+    }
+
+    // Liveness: hips must still live in the cached hierarchy (model swaps and
+    // respawns replace it).
     uint64_t data = rd_ptr(skeleton.bone_transform[BONE_HIPS] + g_skeleton_layout.data_offset);
-    int32_t hips_index = rd<int32_t>(skeleton.bone_transform[BONE_HIPS] + g_skeleton_layout.index_offset);
-    if (data != skeleton.hierarchy_data || hips_index != skeleton.hips_index) {
+    if (data != skeleton.hierarchy_data) {
         skeleton = CachedSkeleton{};
         skeleton.retry_cooldown = 2;
+        return false;
+    }
+
+    // Re-read every bone's hierarchy index each frame: attaching weapons or
+    // clothes re-indexes the TransformHierarchy, which would silently break
+    // cached indices (classic "only some bones draw" bug).
+    int32_t bone_index[ESP_BONE_COUNT];
+    int32_t max_index = -1;
+    for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
+        bone_index[bone] = -1;
+        uint64_t transform = skeleton.bone_transform[bone];
+        if (!transform) continue;
+        uint64_t bone_data = rd_ptr(transform + g_skeleton_layout.data_offset);
+        if (bone_data != data) continue;
+        int32_t index = rd<int32_t>(transform + g_skeleton_layout.index_offset);
+        if (index < 0 || index > 100000) continue;
+        bone_index[bone] = index;
+        if (index > max_index) max_index = index;
+    }
+    if (max_index < 0 || max_index > 8192) {
+        if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
         return false;
     }
 
@@ -1122,10 +1205,11 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     if (!matrices || !indices) return false;
 
     // Two bulk reads cover every bone (shared TRS + parent-index arrays).
+    const int32_t needed = max_index + 1;
     static std::vector<Matrix34> local_matrices;
     static std::vector<int32_t> local_parents;
-    local_matrices.resize((size_t)skeleton.needed_count);
-    local_parents.resize((size_t)skeleton.needed_count);
+    local_matrices.resize((size_t)needed);
+    local_parents.resize((size_t)needed);
     if (!rd_buf(matrices, local_matrices.data(), local_matrices.size() * sizeof(Matrix34)) ||
         !rd_buf(indices, local_parents.data(), local_parents.size() * sizeof(int32_t))) {
         if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
@@ -1133,12 +1217,18 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     }
 
     int projected = 0;
+    int remote_fallbacks = 0;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
-        if (!skeleton.bone_transform[bone] || skeleton.bone_index[bone] < 0) continue;
+        if (bone_index[bone] < 0) continue;
         Vec3 world{};
-        if (!skeleton_local_walk(local_matrices.data(), local_parents.data(),
-                                 skeleton.needed_count, skeleton.bone_index[bone], world))
-            continue;
+        int walked = skeleton_local_walk(local_matrices.data(), local_parents.data(),
+                                         needed, bone_index[bone], world);
+        if (walked < 0 && remote_fallbacks < 8) {
+            // Parent chain leaves the buffered range (rare): slow remote walk.
+            ++remote_fallbacks;
+            walked = read_transform_hierarchy_arrays(matrices, indices, bone_index[bone], world) ? 1 : 0;
+        }
+        if (walked != 1) continue;
         Vec2 screen{};
         if (!w2s(view_projection, world, sw, sh, screen, false)) continue;
         if (fabsf(screen.x) > sw * 4.0F || fabsf(screen.y) > sh * 4.0F) continue;
@@ -1199,6 +1289,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     if (g_skeleton_enabled) prune_skeleton_cache(s_transforms);
     else if (!g_skeletons.empty()) g_skeletons.clear();
+    g_skeleton_builds_this_frame = 0;
 
     if (!g_player_position_validated) {
         if (!discover_player_position_offset(s_transforms)) return result;
