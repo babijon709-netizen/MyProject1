@@ -617,8 +617,11 @@ static void DrawEspOverlay() {
     // Thin dark-gray outline used across all visuals (no bold black strokes).
     const ImU32 kVisOutline = IM_COL32(45, 45, 52, 220);
 
-    // ESP labels in the GUI style: compact dark rounded pill + colored text,
-    // same language as the menu cards/pills.
+    // ESP labels in the GUI style: compact rounded pill (light translucent fill
+    // + thin gray outline) + colored text. The text is drawn with the same font
+    // and size it is measured at (espFont/espFs) so it never spills out of the
+    // pill — the old call drew at the full-size font while sizing at 0.8×, which
+    // made the distance/weapon text overflow the pill.
     ImFont* espFont = ImGui::GetFont();
     float espFs = ImGui::GetFontSize() * 0.8f;
     auto PillH = [&](const char* text) {
@@ -633,9 +636,11 @@ static void DrawEspOverlay() {
         float x0 = cx - tsz.x * 0.5f - padX;
         float x1 = cx + tsz.x * 0.5f + padX;
         float y1 = y + tsz.y + padY * 2.f;
-        dl->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y1), IM_COL32(0, 0, 0, 130), 5.f);
+        // Light translucent fill (not a dense black block), same for the name,
+        // weapon and distance pills so they read consistently over any scene.
+        dl->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y1), IM_COL32(30, 30, 36, 40), 5.f);
         dl->AddRect(ImVec2(x0, y), ImVec2(x1, y1), kVisOutline, 5.f, 0, 1.0f);
-        dl->AddText(ImVec2(cx - tsz.x * 0.5f, y + padY), textCol, text);
+        dl->AddText(espFont, espFs, ImVec2(cx - tsz.x * 0.5f, y + padY), textCol, text);
     };
     // Corner box: the middle of every edge is cut out, only corners remain.
     auto CornerBox = [&](float x1, float y1, float x2, float y2, ImU32 col) {

@@ -190,6 +190,26 @@ static bool looks_like_long_id(const char* s) {
     return len >= 8;
 }
 
+// A machine-generated session/auth code (e.g. "F7GDJ6472D"): letters+digits
+// only, no lowercase, no separators, 6..20 chars, and a mix of letters and
+// digits. Such strings are identifiers, not display names, so a real nickname
+// from any other source must win over them.
+static bool looks_like_generated_id(const char* s) {
+    if (!s || !s[0]) return true;
+    size_t len = 0;
+    bool has_lower = false, has_upper = false, has_digit = false, has_other = false;
+    for (; s[len]; ++len) {
+        unsigned char c = (unsigned char)s[len];
+        if (c >= 'a' && c <= 'z') has_lower = true;
+        else if (c >= 'A' && c <= 'Z') has_upper = true;
+        else if (c >= '0' && c <= '9') has_digit = true;
+        else has_other = true;
+    }
+    if (has_other || has_lower) return false;
+    if (len < 6 || len > 20) return false;
+    return has_upper && has_digit;
+}
+
 static bool accept_display_name(const char* s) {
     if (!s || !s[0]) return false;
     if (is_placeholder_name(s)) return false;
@@ -201,44 +221,59 @@ static bool valid_obj(uint64_t p) {
     return p >= 0x10000 && p < 0x0001000000000000ULL && (p & 0x7) == 0;
 }
 
-// Visible nickname, best source first. Returns true only for a real name.
-static bool player_display_name(uint64_t player, char* out, size_t cap) {
+// Read one raw nickname candidate for a player. `src` selects the source:
+//   0 Dissonance VoicePlayerState.<Name>
+//   1 Voice tracker (fuI) display string
+//   2 Legacy nicklabel widget nickname text
+static bool read_name_source(uint64_t player, int src, char* out, size_t cap) {
     if (!player || !out || cap < 2) return false;
     char tmp[32] = {};
-    // 1) Dissonance VoicePlayerState.<Name>.
-    uint64_t state = rd_ptr(player + PLAYER_VOICE_STATE);
-    if (valid_obj(state)) {
+    if (src == 0) {
+        uint64_t state = rd_ptr(player + PLAYER_VOICE_STATE);
+        if (!valid_obj(state)) return false;
         uint64_t str = rd_ptr(state + VOICE_STATE_NAME);
-        if (str && read_managed_string(str, tmp, sizeof(tmp)) && accept_display_name(tmp)) {
-            memcpy(out, tmp, cap);
-            out[cap - 1] = '\0';
-            return true;
-        }
-    }
-    // 2) Voice tracker (fuI) display string.
-    uint64_t tracker = rd_ptr(player + PLAYER_VOICE_PLAYER);
-    if (valid_obj(tracker)) {
+        if (!str || !read_managed_string(str, tmp, sizeof(tmp))) return false;
+    } else if (src == 1) {
+        uint64_t tracker = rd_ptr(player + PLAYER_VOICE_PLAYER);
+        if (!valid_obj(tracker)) return false;
         uint64_t str = rd_ptr(tracker + VOICE_PLAYER_TAG);
-        if (str && read_managed_string(str, tmp, sizeof(tmp)) && accept_display_name(tmp)) {
-            memcpy(out, tmp, cap);
-            out[cap - 1] = '\0';
-            return true;
-        }
-    }
-    // 3) Legacy nicklabel widget (often a stale "USERNAME" placeholder).
-    uint64_t label = rd_ptr(player + PLAYER_NICKLABEL);
-    if (valid_obj(label) && rd_ptr(label + NICKLABEL_PLAYER_BACKREF) == player) {
+        if (!str || !read_managed_string(str, tmp, sizeof(tmp))) return false;
+    } else {
+        uint64_t label = rd_ptr(player + PLAYER_NICKLABEL);
+        if (!valid_obj(label) || rd_ptr(label + NICKLABEL_PLAYER_BACKREF) != player) return false;
         uint64_t text = rd_ptr(label + NICKLABEL_NICKNAME_TEXT);
-        if (valid_obj(text)) {
-            uint64_t str = rd_ptr(text + UI_TEXT_MTEXT);
-            if (str && read_managed_string(str, tmp, sizeof(tmp)) && accept_display_name(tmp)) {
-                memcpy(out, tmp, cap);
-                out[cap - 1] = '\0';
-                return true;
-            }
-        }
+        if (!valid_obj(text)) return false;
+        uint64_t str = rd_ptr(text + UI_TEXT_MTEXT);
+        if (!str || !read_managed_string(str, tmp, sizeof(tmp))) return false;
     }
-    return false;
+    if (!tmp[0]) return false;
+    memcpy(out, tmp, cap);
+    out[cap - 1] = '\0';
+    return true;
+}
+
+// Visible nickname, best source first. Sources are ranked so a real,
+// human-readable name always wins over a machine-generated id ("F7GDJ6472D");
+// such an id is only used as a last resort when no real name is available.
+static bool player_display_name(uint64_t player, char* out, size_t cap) {
+    if (!player || !out || cap < 2) return false;
+    char human[32] = {};
+    bool have_human = false;
+    char fallback[32] = {};
+    bool have_fallback = false;
+    for (int src = 0; src < 3; ++src) {
+        char tmp[32] = {};
+        if (!read_name_source(player, src, tmp, sizeof(tmp))) continue;
+        if (!accept_display_name(tmp)) continue;   // placeholder / pure-digit ids
+        if (!have_fallback) { memcpy(fallback, tmp, sizeof(fallback)); have_fallback = true; }
+        if (looks_like_generated_id(tmp)) continue; // machine code: fallback only
+        if (!have_human) { memcpy(human, tmp, sizeof(human)); have_human = true; }
+    }
+    if (!have_human && !have_fallback) return false;
+    const char* pick = have_human ? human : fallback;
+    memcpy(out, pick, cap);
+    out[cap - 1] = '\0';
+    return true;
 }
 
 // Held weapon display name. FP state is local-only (MonoBehaviour, never synced),
