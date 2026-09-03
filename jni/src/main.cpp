@@ -2700,7 +2700,11 @@ float TabContent(int tab, float dt, float cW) {
         }
     } else if (tab == 5) {
         // Мемори: пустая вкладка-заготовка под будущие функции.
-        avW = ImGui::GetContentRegionAvail().x;
+        auto* dl  = ImGui::GetWindowDrawList();
+        auto* fn  = ImGui::GetFont();
+        float avW = ImGui::GetContentRegionAvail().x;
+        const float inset = Layout::Inset;
+        const float fs = ImGui::GetFontSize();
 
         SHdr(XS("Мемори"));
         {
