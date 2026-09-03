@@ -1831,14 +1831,8 @@ static bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, floa
 }
 
 // Extra vertical offset applied to every head aim point (metres, world up).
-// User-tunable from the menu; positive = higher.
-static float g_aim_head_lift = 0.14F;
-void esp_set_aim_head_lift(float metres) {
-    if (!std::isfinite(metres)) return;
-    if (metres < -0.15F) metres = -0.15F;
-    if (metres >  0.25F) metres =  0.25F;
-    g_aim_head_lift = metres;
-}
+// Tuned in-game: +14 cm lands centre-head at all ranges.
+static constexpr float g_aim_head_lift = 0.14F;
 
 static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat4& vp, float sw, float sh) {
     Vec3 world = world_in;

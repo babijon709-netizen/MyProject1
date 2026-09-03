@@ -536,7 +536,6 @@ struct AppState {
     bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = false, esp_skeleton = false;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
-    float aim_head_lift_cm = 14.f;  // head aim point offset, cm (positive = higher)
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
@@ -547,7 +546,7 @@ struct AppState {
     float a_esp_weapon = 0, a_esp_weapon_icon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_head_lift;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig;
 };
 static AppState g_state;
 
@@ -577,7 +576,6 @@ static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         s_frame = frame;
         esp_set_skeleton_enabled(g_state.esp_skeleton);
         esp_set_aim_bones_enabled(g_state.aim_touch);
-        esp_set_aim_head_lift(g_state.aim_head_lift_cm * 0.01f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
     }
     return s_boxes;
@@ -831,7 +829,7 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_weapon_icon_col  = cfg::esp::weapon_icon_col;
     s.esp_tracer_col       = cfg::esp::tracer_col;
     s.esp_skeleton_col     = cfg::esp::skeleton_col;
-    s.esp_money_col        = {g_state.aim_head_lift_cm, 0.95f, 0.10f, 1.f}; // .x reused: head lift (cm)
+    s.esp_money_col        = {1.00f, 0.95f, 0.10f, 1.f};
     s.esp_ping_col         = {0.40f, 0.85f, 1.00f, 1.f};
     s.esp_box_type         = cfg::esp::box_type;
     s.esp_box_rounding     = cfg::esp::box_rounding;
@@ -905,8 +903,6 @@ static void ConfigLoad(int idx) {
     g_state.esp_skeleton    = s.esp_skeleton;
     g_state.esp_thick   = s.esp_thick;
     g_state.gun_str     = s.gun_str;
-    if (std::isfinite(s.esp_money_col.x) && s.esp_money_col.x >= -15.f && s.esp_money_col.x <= 25.f)
-        g_state.aim_head_lift_cm = s.esp_money_col.x;
     g_state.gun_fov     = s.gun_fov;
     if (!(g_state.gun_fov >= 5.f)) g_state.gun_fov = 5.f;
     if (g_state.gun_fov > 180.f) g_state.gun_fov = 180.f;
@@ -2307,10 +2303,6 @@ float TabContent(int tab, float dt, float cW) {
         SHdr(XS("Скорость наводки"));
         CardBg(Layout::SliderH);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, true, g_state.sl_gun_str, dt);
-
-        SHdr(XS("Высота точки головы"));
-        CardBg(Layout::SliderH);
-        SliderRow("##ahl", XS("Выше / ниже"), &g_state.aim_head_lift_cm, -10.f, 20.f, XS("%+.0f см"), true, true, g_state.sl_head_lift, dt);
 
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
