@@ -350,9 +350,10 @@ void LoadTabIcons() {
     g_tabIcons[0] = LoadTexFromMemory(main_tab_png, (int)main_tab_png_len);
     g_tabIcons[1] = LoadTexFromMemory(aimbot_png,   (int)aimbot_png_len);
     g_tabIcons[2] = LoadTexFromMemory(visuals_png,  (int)visuals_png_len);
+    // Index mapping follows the tab order: 3=Мемори, 4=Конфиги, 5=Настройки.
     g_tabIcons[3] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
-    g_tabIcons[4] = LoadTexFromMemory(settings_png, (int)settings_png_len);
-    g_tabIcons[5] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
+    g_tabIcons[4] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
+    g_tabIcons[5] = LoadTexFromMemory(settings_png, (int)settings_png_len);
 #endif
 }
 
@@ -646,6 +647,21 @@ static void DrawEspOverlay() {
     auto CornerBox = [&](float x1, float y1, float x2, float y2, ImU32 col) {
         float w = x2 - x1, h = y2 - y1;
         if (w <= 2.f || h <= 2.f) return;
+        // At long range the projected box can be only a few pixels tall, which
+        // (with thick strokes) merged the top and bottom horizontal corner rows
+        // into a single flat line. Give the corners a stroke-aware minimum
+        // vertical span, kept centered on the real box, so the top and bottom
+        // rows always stay visually separated no matter how far away the target is.
+        {
+            float hMin = (thick + 1.f) + 3.f;   // leave a clear gap under the widest stroke
+            if (hMin < 6.f) hMin = 6.f;
+            if (h < hMin) {
+                float cy = (y1 + y2) * 0.5f;
+                y1 = cy - hMin * 0.5f;
+                y2 = cy + hMin * 0.5f;
+                h  = hMin;
+            }
+        }
         float len = (w < h ? w : h) * 0.28f;
         if (len < 10.f) len = 10.f;
         if (len > 42.f) len = 42.f;
@@ -2475,7 +2491,9 @@ float TabContent(int tab, float dt, float cW) {
 
         ImGui::Dummy({1.f, 12.f});
 
-    } else if (tab == 3) {
+    } else if (tab == 4) {
+        // Конфиги (saved profiles). Kept at index 4 so the Мемори tab sits
+        // directly above it in the tab bar.
 
         auto* dl  = ImGui::GetWindowDrawList();
         auto* fn  = ImGui::GetFont();
@@ -2580,8 +2598,8 @@ float TabContent(int tab, float dt, float cW) {
                 float icY  = rowCY - icSz * 0.5f;
                 float icCX = icX + icSz * 0.5f;
 
-                if (g_tabIcons[3]) {
-                    dl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[3],
+                if (g_tabIcons[4]) {
+                    dl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[4],
                         {icX, icY}, {icX + icSz, icY + icSz},
                         {0,0}, {1,1}, IM_COL32(255,255,255,255), 12.f);
                 } else {
@@ -2687,7 +2705,8 @@ float TabContent(int tab, float dt, float cW) {
             }
         }
 
-    } else if (tab == 4) {
+    } else if (tab == 5) {
+        // Настройки (interface + system) — now the bottom-most tab.
         SHdr(XS("Интерфейс"));
         CardBg(Layout::RowH * 3);
         ToggleRow("##uf2", XS("Показать фпс"),  &g_state.ui_fps,       g_state.a_ui_fps,  false, true);
@@ -2714,7 +2733,7 @@ float TabContent(int tab, float dt, float cW) {
             float ty  = pos.y + (rowH - exitFS) * 0.5f;
             dl->AddText(ImGui::GetFont(), exitFS, {tx, ty}, C::U(C::Red()), exitTxt);
         }
-    } else if (tab == 5) {
+    } else if (tab == 3) {
         // Мемори: пустая вкладка-заготовка под будущие функции.
         auto* dl  = ImGui::GetWindowDrawList();
         auto* fn  = ImGui::GetFont();
@@ -3300,8 +3319,10 @@ void RenderMenu() {
         ImGui::Dummy({1.f, 2.f});
     }
 
+    // Tab order: ... Визуалы, Мемори, Конфиги, Настройки — the Мемори tab is
+    // placed directly above the Конфиги (Config) tab.
     const char* tabNames[kTabCount] = {
-        XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Конфиги"), XS("Настройки"), XS("Мемори")
+        XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Мемори"), XS("Конфиги"), XS("Настройки")
     };
     const float tabH = Layout::TabH, tabPad = Layout::TabPad;
 
@@ -3369,7 +3390,7 @@ void RenderMenu() {
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     {
-        const char* titles[kTabCount] = {XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Конфиги"), XS("Настройки"), XS("Мемори")};
+        const char* titles[kTabCount] = {XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Мемори"), XS("Конфиги"), XS("Настройки")};
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
         const float hH = Layout::HeaderH;
