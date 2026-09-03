@@ -163,38 +163,130 @@ static bool read_managed_string(uint64_t str_obj, char* out, size_t cap) {
     return pos > 0;
 }
 
-// Visible nickname: PlayerManager.nicklabel (wK) -> nickname (UI.Text) -> m_Text.
-static bool player_display_name(uint64_t player, char* out, size_t cap) {
-    if (!player || !out || cap < 2) return false;
-    uint64_t label = rd_ptr(player + PLAYER_NICKLABEL);
-    if (label < 0x10000 || label >= 0x0001000000000000ULL || (label & 0x7) != 0)
-        return false;
-    if (rd_ptr(label + NICKLABEL_PLAYER_BACKREF) != player) return false;
-    uint64_t text = rd_ptr(label + NICKLABEL_NICKNAME_TEXT);
-    if (text < 0x10000 || text >= 0x0001000000000000ULL || (text & 0x7) != 0)
-        return false;
-    uint64_t str = rd_ptr(text + UI_TEXT_MTEXT);
-    if (!str) return false;
-    return read_managed_string(str, out, cap);
+// The legacy nicklabel widget keeps the "USERNAME" placeholder, so it is only
+// a last resort. Primary source: Dissonance voice identity
+// (PlayerManager.LLT -> VoicePlayerState.<Name>), secondary: the voice tracker
+// string (PlayerManager.voicePlayer -> HvI).
+static bool is_placeholder_name(const char* s) {
+    if (!s) return true;
+    const char* want = "USERNAME";
+    size_t i = 0;
+    for (; want[i]; ++i) {
+        char c = s[i];
+        if (!c) return true;
+        if (c >= 'a' && c <= 'z') c -= (char)('a' - 'A');
+        if (c != want[i]) return false;
+    }
+    return s[i] == '\0';
 }
 
-// Held weapon display name: PlayerManager.fpManager -> current FPWeaponBase ->
-// FPObject.m_ObjectName. Validated by the FPObject -> player back-reference.
+// Reject long pure-digit strings (SteamID-like), they are identifiers, not names.
+static bool looks_like_long_id(const char* s) {
+    if (!s || !s[0]) return true;
+    size_t len = 0;
+    for (; s[len]; ++len) {
+        if (s[len] < '0' || s[len] > '9') return false;
+    }
+    return len >= 8;
+}
+
+static bool accept_display_name(const char* s) {
+    if (!s || !s[0]) return false;
+    if (is_placeholder_name(s)) return false;
+    if (looks_like_long_id(s)) return false;
+    return true;
+}
+
+static bool valid_obj(uint64_t p) {
+    return p >= 0x10000 && p < 0x0001000000000000ULL && (p & 0x7) == 0;
+}
+
+// Visible nickname, best source first. Returns true only for a real name.
+static bool player_display_name(uint64_t player, char* out, size_t cap) {
+    if (!player || !out || cap < 2) return false;
+    char tmp[32] = {};
+    // 1) Dissonance VoicePlayerState.<Name>.
+    uint64_t state = rd_ptr(player + PLAYER_VOICE_STATE);
+    if (valid_obj(state)) {
+        uint64_t str = rd_ptr(state + VOICE_STATE_NAME);
+        if (str && read_managed_string(str, tmp, sizeof(tmp)) && accept_display_name(tmp)) {
+            memcpy(out, tmp, cap);
+            out[cap - 1] = '\0';
+            return true;
+        }
+    }
+    // 2) Voice tracker (fuI) display string.
+    uint64_t tracker = rd_ptr(player + PLAYER_VOICE_PLAYER);
+    if (valid_obj(tracker)) {
+        uint64_t str = rd_ptr(tracker + VOICE_PLAYER_TAG);
+        if (str && read_managed_string(str, tmp, sizeof(tmp)) && accept_display_name(tmp)) {
+            memcpy(out, tmp, cap);
+            out[cap - 1] = '\0';
+            return true;
+        }
+    }
+    // 3) Legacy nicklabel widget (often a stale "USERNAME" placeholder).
+    uint64_t label = rd_ptr(player + PLAYER_NICKLABEL);
+    if (valid_obj(label) && rd_ptr(label + NICKLABEL_PLAYER_BACKREF) == player) {
+        uint64_t text = rd_ptr(label + NICKLABEL_NICKNAME_TEXT);
+        if (valid_obj(text)) {
+            uint64_t str = rd_ptr(text + UI_TEXT_MTEXT);
+            if (str && read_managed_string(str, tmp, sizeof(tmp)) && accept_display_name(tmp)) {
+                memcpy(out, tmp, cap);
+                out[cap - 1] = '\0';
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Held weapon display name. FP state is local-only (MonoBehaviour, never synced),
+// so for remote players the FP objects may be missing: after the strict pass
+// (FPObject -> player back-reference) a relaxed pass accepts the objects as-is.
+static bool fp_object_display_name(uint64_t weapon, uint64_t player, bool strict,
+                                   char* out, size_t cap) {
+    if (!valid_obj(weapon)) return false;
+    if (strict && rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) != player) return false;
+    char tmp[32] = {};
+    uint64_t str = rd_ptr(weapon + FPOBJECT_OBJECT_NAME);
+    if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
+        memcpy(out, tmp, cap);
+        out[cap - 1] = '\0';
+        return true;
+    }
+    // Fall back to the held item definition (Item -> ItemData m_Name/m_ShortName).
+    uint64_t item = rd_ptr(weapon + FPOBJECT_ITEM);
+    if (valid_obj(item)) {
+        uint64_t data = rd_ptr(item + ITEM_DATA);
+        if (valid_obj(data)) {
+            str = rd_ptr(data + ITEMDATA_NAME);
+            if (!str) str = rd_ptr(data + ITEMDATA_SHORTNAME);
+            if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
+                memcpy(out, tmp, cap);
+                out[cap - 1] = '\0';
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static bool player_weapon_name(uint64_t player, char* out, size_t cap) {
     if (!player || !out || cap < 2) return false;
     uint64_t fp = rd_ptr(player + PLAYER_FP_MANAGER);
-    if (fp < 0x10000 || fp >= 0x0001000000000000ULL || (fp & 0x7) != 0)
-        return false;
-    uint64_t weapon = rd_ptr(fp + FPMANAGER_CURRENT_WEAPON);
-    if (weapon < 0x10000 || weapon >= 0x0001000000000000ULL || (weapon & 0x7) != 0) {
-        weapon = rd_ptr(fp + FPMANAGER_CURRENT_OBJECT);
-        if (weapon < 0x10000 || weapon >= 0x0001000000000000ULL || (weapon & 0x7) != 0)
-            return false;
+    if (!valid_obj(fp)) return false;
+    uint64_t candidates[2] = {
+        rd_ptr(fp + FPMANAGER_CURRENT_WEAPON),
+        rd_ptr(fp + FPMANAGER_CURRENT_OBJECT),
+    };
+    for (int strict = 1; strict >= 0; --strict) {
+        for (int i = 0; i < 2; ++i) {
+            if (fp_object_display_name(candidates[i], player, strict != 0, out, cap))
+                return true;
+        }
     }
-    if (rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) != player) return false;
-    uint64_t str = rd_ptr(weapon + FPOBJECT_OBJECT_NAME);
-    if (!str) return false;
-    return read_managed_string(str, out, cap);
+    return false;
 }
 
 // Cached display strings per player (updated on success only, so a transient

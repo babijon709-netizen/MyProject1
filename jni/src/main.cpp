@@ -614,20 +614,48 @@ static void DrawEspOverlay() {
     float thick = g_state.esp_thick;
     if (thick < 0.5f) thick = 0.5f;
 
-    // ESP labels in the GUI style: dark rounded pill + colored text,
+    // Thin dark-gray outline used across all visuals (no bold black strokes).
+    const ImU32 kVisOutline = IM_COL32(45, 45, 52, 220);
+
+    // ESP labels in the GUI style: compact dark rounded pill + colored text,
     // same language as the menu cards/pills.
     ImFont* espFont = ImGui::GetFont();
-    float espFs = ImGui::GetFontSize();
+    float espFs = ImGui::GetFontSize() * 0.8f;
+    auto PillH = [&](const char* text) {
+        if (!text || !text[0]) return 0.f;
+        ImVec2 tsz = espFont->CalcTextSizeA(espFs, FLT_MAX, 0, text);
+        return tsz.y + 4.f;
+    };
     auto EspPill = [&](float cx, float y, const char* text, ImU32 textCol) {
         if (!text || !text[0]) return;
         ImVec2 tsz = espFont->CalcTextSizeA(espFs, FLT_MAX, 0, text);
-        const float padX = 8.f, padY = 3.f;
+        const float padX = 5.f, padY = 2.f;
         float x0 = cx - tsz.x * 0.5f - padX;
         float x1 = cx + tsz.x * 0.5f + padX;
         float y1 = y + tsz.y + padY * 2.f;
-        dl->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y1), IM_COL32(0, 0, 0, 130), 7.f);
-        dl->AddRect(ImVec2(x0, y), ImVec2(x1, y1), IM_COL32(255, 255, 255, 40), 7.f, 0, 1.0f);
+        dl->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y1), IM_COL32(0, 0, 0, 130), 5.f);
+        dl->AddRect(ImVec2(x0, y), ImVec2(x1, y1), kVisOutline, 5.f, 0, 1.0f);
         dl->AddText(ImVec2(cx - tsz.x * 0.5f, y + padY), textCol, text);
+    };
+    // Corner box: the middle of every edge is cut out, only corners remain.
+    auto CornerBox = [&](float x1, float y1, float x2, float y2, ImU32 col) {
+        float w = x2 - x1, h = y2 - y1;
+        if (w <= 2.f || h <= 2.f) return;
+        float len = (w < h ? w : h) * 0.28f;
+        if (len < 10.f) len = 10.f;
+        if (len > 42.f) len = 42.f;
+        if (len * 2.f > w) len = w * 0.5f;
+        if (len * 2.f > h) len = h * 0.5f;
+        const ImVec2 pts[8][2] = {
+            {{x1, y1}, {x1 + len, y1}}, {{x1, y1}, {x1, y1 + len}},
+            {{x2 - len, y1}, {x2, y1}}, {{x2, y1}, {x2, y1 + len}},
+            {{x1, y2 - len}, {x1, y2}}, {{x1, y2}, {x1 + len, y2}},
+            {{x2 - len, y2}, {x2, y2}}, {{x2, y2 - len}, {x2, y2}},
+        };
+        for (int i = 0; i < 8; ++i)
+            dl->AddLine(pts[i][0], pts[i][1], kVisOutline, thick + 1.0f);
+        for (int i = 0; i < 8; ++i)
+            dl->AddLine(pts[i][0], pts[i][1], col, thick);
     };
 
     for (const EspBox& box : boxes) {
@@ -654,22 +682,7 @@ static void DrawEspOverlay() {
         }
 
         if (g_state.esp_box) {
-            // GUI-card style frame: subtle dark fill, dark outline, colored border.
-            float rounding = cfg::esp::box_rounding;
-            if (rounding < 0.f) rounding = 0.f;
-            if (rounding > 24.f) rounding = 24.f;
-            dl->AddRectFilled(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2),
-                              IM_COL32(0, 0, 0, 60), rounding);
-            if (cfg::esp::fill) {
-                ImVec4 fc = cfg::esp::box_col;
-                fc.w *= cfg::esp::fill_pct / 100.f;
-                dl->AddRectFilled(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2),
-                                  ColU32(fc), rounding);
-            }
-            dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2),
-                        IM_COL32(0, 0, 0, 200), rounding, 0, thick + 2.0f);
-            dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2),
-                        ColU32(cfg::esp::box_col), rounding, 0, thick);
+            CornerBox(box.x1, box.y1, box.x2, box.y2, ColU32(cfg::esp::box_col));
         }
 
         if (g_state.esp_skeleton && box.has_skeleton) {
@@ -716,31 +729,29 @@ static void DrawEspOverlay() {
             // From the middle of the top edge of the screen to the head area.
             float tx = (box.x1 + box.x2) * 0.5f;
             dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, box.y1),
-                        IM_COL32(0, 0, 0, 200), thick + 2.0f);
+                        kVisOutline, thick + 1.0f);
             dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, box.y1),
                         ColU32(cfg::esp::tracer_col), thick);
         }
 
-        // Labels above the box stack upward (name on top), weapon sits below.
+        // Name above the box; weapon and distance stack below it.
         {
             float cx = (box.x1 + box.x2) * 0.5f;
-            float topY = box.y1;
-            const float gap = 6.f;
+            const float gap = 5.f;
+            if (g_state.esp_name && box.has_name && box.name[0]) {
+                float h = PillH(box.name);
+                EspPill(cx, box.y1 - h - gap, box.name, ColU32(cfg::esp::name_col));
+            }
+            float belowY = box.y2 + gap;
+            if (g_state.esp_weapon && box.has_weapon && box.weapon[0]) {
+                EspPill(cx, belowY, box.weapon, ColU32(cfg::esp::weapon_col));
+                belowY += PillH(box.weapon) + 4.f;
+            }
             if (g_state.esp_wall) {
                 char label[32];
                 if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1fm", box.distance);
                 else snprintf(label, sizeof(label), "PLAYER");
-                ImVec2 tsz = espFont->CalcTextSizeA(espFs, FLT_MAX, 0, label);
-                topY -= (tsz.y + 6.f + gap);
-                EspPill(cx, topY, label, ColU32(cfg::esp::distance_col));
-            }
-            if (g_state.esp_name && box.has_name && box.name[0]) {
-                ImVec2 tsz = espFont->CalcTextSizeA(espFs, FLT_MAX, 0, box.name);
-                topY -= (tsz.y + 6.f + gap);
-                EspPill(cx, topY, box.name, ColU32(cfg::esp::name_col));
-            }
-            if (g_state.esp_weapon && box.has_weapon && box.weapon[0]) {
-                EspPill(cx, box.y2 + gap, box.weapon, ColU32(cfg::esp::weapon_col));
+                EspPill(cx, belowY, label, ColU32(cfg::esp::distance_col));
             }
         }
     }

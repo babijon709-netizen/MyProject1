@@ -52,6 +52,18 @@ inline constexpr std::uint64_t NICKLABEL_NICKNAME_TEXT  = 0x38;
 inline constexpr std::uint64_t UI_TEXT_MTEXT = 0xE0;
 // FPObject (base of FPWeaponBase): display name of the held weapon.
 inline constexpr std::uint64_t FPOBJECT_OBJECT_NAME = 0x78;
+// Dissonance voice identity: reliable synced display-name source.
+// PlayerManager.LLT (VoicePlayerState) -> <Name>k__BackingField.
+inline constexpr std::uint64_t PLAYER_VOICE_STATE  = 0x2E8;
+inline constexpr std::uint64_t VOICE_STATE_NAME     = 0x38;
+// PlayerManager.voicePlayer (fuI tracker) -> HvI display string.
+inline constexpr std::uint64_t PLAYER_VOICE_PLAYER = 0x140;
+inline constexpr std::uint64_t VOICE_PLAYER_TAG     = 0x78;
+// FPObject -> Oxide.Item -> Oxide.ItemData display strings.
+inline constexpr std::uint64_t FPOBJECT_ITEM        = 0x40; // <Ltl>k__BackingField
+inline constexpr std::uint64_t ITEM_DATA            = 0x20; // <LIN>k__BackingField
+inline constexpr std::uint64_t ITEMDATA_NAME        = 0x18; // m_Name
+inline constexpr std::uint64_t ITEMDATA_SHORTNAME   = 0x20; // m_ShortName
 // Il2Cpp System.String layout: int32 length @0x10, UTF-16 chars @0x14.
 inline constexpr std::uint64_t IL2CPP_STRING_LENGTH = 0x10;
 inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
