@@ -701,13 +701,37 @@ static void DrawEspOverlay() {
                 }
             }
             if (all_valid) {
-                for (const auto& edge : BOX_EDGES) {
-                    int a = edge[0], b = edge[1];
-                    dl->AddLine(
-                        ImVec2(box.corners[a][0], box.corners[a][1]),
-                        ImVec2(box.corners[b][0], box.corners[b][1]),
-                        ColU32(cfg::esp::box_col_invis), thick
-                    );
+                ImU32 col = ColU32(cfg::esp::box_col_invis);
+                // 3D box edges collapse to a single line at long range because the
+                // projected top/bottom (and left/right) faces sit within a pixel or
+                // two. Measure the on-screen extent and, when it is below a stroke
+                // aware minimum, draw a flat, centred box with that minimum span so
+                // the horizontal rows stay visibly separated (same guarantee as the
+                // corner box) instead of fusing into one line.
+                float mnX = FLT_MAX, mnY = FLT_MAX, mxX = -FLT_MAX, mxY = -FLT_MAX;
+                for (int c = 0; c < 8; ++c) {
+                    float x = box.corners[c][0], y = box.corners[c][1];
+                    if (x < mnX) mnX = x; if (x > mxX) mxX = x;
+                    if (y < mnY) mnY = y; if (y > mxY) mxY = y;
+                }
+                float dMin = (thick + 1.0f) + thick + 2.0f;
+                if (dMin < 10.f) dMin = 10.f;
+                if ((mxX - mnX) >= dMin && (mxY - mnY) >= dMin) {
+                    for (const auto& edge : BOX_EDGES) {
+                        int a = edge[0], b = edge[1];
+                        dl->AddLine(
+                            ImVec2(box.corners[a][0], box.corners[a][1]),
+                            ImVec2(box.corners[b][0], box.corners[b][1]),
+                            col, thick
+                        );
+                    }
+                } else {
+                    float cx = (box.x1 + box.x2) * 0.5f;
+                    float cy = (box.y1 + box.y2) * 0.5f;
+                    float X1 = cx - dMin * 0.5f, Y1 = cy - dMin * 0.5f;
+                    float X2 = cx + dMin * 0.5f, Y2 = cy + dMin * 0.5f;
+                    dl->AddRect(ImVec2(X1, Y1), ImVec2(X2, Y2), kVisOutline, 0.f, 0, thick + 1.0f);
+                    dl->AddRect(ImVec2(X1, Y1), ImVec2(X2, Y2), col, 0.f, 0, thick);
                 }
             }
         }

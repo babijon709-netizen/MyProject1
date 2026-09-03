@@ -84,6 +84,18 @@ inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
 inline constexpr std::uint64_t PLAYER_EVENT_HANDLER          = 0x78;
 inline constexpr std::uint64_t EVENT_HANDLER_MANAGER_BACKREF = 0xD0;
 inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x268;
+// Remote-player held-weapon candidates (dump.cs Oxide.PlayerManager). The FP
+// manager (0x90) is a local MonoBehaviour and is often empty for other players,
+// so these are the synced/inventory-backed fallbacks to probe:
+//   0x98  inventory            (Oxide.PlayerInventory)
+//   0xF0  weaponReference      (private; likely the current remote weapon)
+//   0x198 weapons              (private array of weapon objects)
+inline constexpr std::uint64_t PLAYER_INVENTORY         = 0x98;
+inline constexpr std::uint64_t PLAYER_WEAPON_REFERENCE  = 0xF0;
+inline constexpr std::uint64_t PLAYER_WEAPONS_ARRAY     = 0x198;
+// Oxide.PlayerInventory instance fields (dump.cs).
+inline constexpr std::uint64_t INV_PLAYER_INVENTORY_DATA = 0x20; // _playerInventoryData
+inline constexpr std::uint64_t INV_PLAYER_INVENTORY_CLIENT = 0x28; // _playerInventoryClient (fmh)
 // fvp.LookDirection (0x140): synced Vector3 wrapper, current value at +0x20.
 // MouseLook.Update writes m_LookRoot.forward into it every frame and
 // FPHitscan casts its hit ray along it (not along the camera transform).

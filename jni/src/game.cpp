@@ -337,6 +337,7 @@ struct PlayerTextCache {
     char weapon[32] = {};
     bool has_weapon = false;
     int  revalidate = 30; // first sighting resolves immediately
+    bool weapon_probed = false; // TEMP: once-per-player weapon-chain probe
 };
 static std::unordered_map<uint64_t, PlayerTextCache> g_player_text;
 
@@ -346,6 +347,90 @@ static void prune_player_text(const std::vector<uint64_t>& players) {
         for (uint64_t player : players) if (player == it->first) { present = true; break; }
         if (!present) it = g_player_text.erase(it); else ++it;
     }
+}
+
+// ===================== TEMP: remote-weapon probe =====================
+// The FP-manager route only resolves the held weapon for players whose local
+// FP MonoBehaviour exists (rare for enemies). To pin down a reliable synced
+// source, log once per player what the inventory / weapons-array /
+// weapon-reference candidates actually contain. Remove once the read chain is
+// finalised.
+static bool probe_weapon_label(uint64_t obj, char* out, size_t cap) {
+    if (!out || cap < 2) return false;
+    out[0] = '\0';
+    if (!valid_obj(obj)) return false;
+    char tmp[40] = {};
+    // Direct display name on the object (FPObject-style).
+    uint64_t str = rd_ptr(obj + FPOBJECT_OBJECT_NAME);
+    if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
+        memcpy(out, tmp, cap); out[cap - 1] = '\0'; return true;
+    }
+    // Item -> ItemData m_Name / m_ShortName.
+    uint64_t item = rd_ptr(obj + FPOBJECT_ITEM);
+    if (valid_obj(item)) {
+        uint64_t data = rd_ptr(item + ITEM_DATA);
+        if (valid_obj(data)) {
+            str = rd_ptr(data + ITEMDATA_NAME);
+            if (!str) str = rd_ptr(data + ITEMDATA_SHORTNAME);
+            if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
+                memcpy(out, tmp, cap); out[cap - 1] = '\0'; return true;
+            }
+        }
+    }
+    return false;
+}
+static void dump_weapon_probe(uint64_t player, float distance) {
+    static int s_count = 0;
+    if (s_count >= 6 || !player) return;
+    ++s_count;
+
+    char line[900]; size_t n = 0;
+    n += (size_t)snprintf(line + n, sizeof(line) - n, "player=0x%llX dist=%.1f",
+        (unsigned long long)player, (double)distance);
+    char tmp[48] = {}, nm[32] = {};
+    if (player_display_name(player, nm, sizeof(nm))) n += (size_t)snprintf(line + n, sizeof(line) - n, " name=[%s]", nm);
+
+    // (a) FP manager (current code path).
+    uint64_t fp = rd_ptr(player + PLAYER_FP_MANAGER);
+    n += (size_t)snprintf(line + n, sizeof(line) - n, " | fp=0x%llX", (unsigned long long)fp);
+    if (valid_obj(fp)) {
+        for (int off = 0; off < 2; ++off) {
+            uint64_t c = rd_ptr(fp + (off ? FPMANAGER_CURRENT_OBJECT : FPMANAGER_CURRENT_WEAPON));
+            tmp[0] = 0;
+            bool ok = probe_weapon_label(c, tmp, sizeof(tmp));
+            n += (size_t)snprintf(line + n, sizeof(line) - n, " fp@%02X=%s[%s]",
+                off ? 0x50 : 0x58, ok ? "obj" : "null", tmp[0] ? tmp : "-");
+        }
+    }
+    // (b) weapons array @0x198.
+    uint64_t arr = rd_ptr(player + PLAYER_WEAPONS_ARRAY);
+    n += (size_t)snprintf(line + n, sizeof(line) - n, " | wpnArr=0x%llX", (unsigned long long)arr);
+    if (valid_obj(arr)) {
+        uint32_t len = 0;
+        if (!rd_buf(arr + IL2CPP_ARRAY_LENGTH, &len, sizeof(len))) len = 0;
+        if (len > 8) len = 8;
+        n += (size_t)snprintf(line + n, sizeof(line) - n, "[%u]", len);
+        for (uint32_t i = 0; i < len; ++i) {
+            uint64_t el = rd_ptr(arr + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
+            tmp[0] = 0;
+            bool ok = probe_weapon_label(el, tmp, sizeof(tmp));
+            n += (size_t)snprintf(line + n, sizeof(line) - n, " e%u=%s[%s]", i, ok ? "obj" : "null", tmp[0] ? tmp : "-");
+        }
+    }
+    // (c) weaponReference @0xF0.
+    uint64_t wr = rd_ptr(player + PLAYER_WEAPON_REFERENCE);
+    tmp[0] = 0;
+    probe_weapon_label(wr, tmp, sizeof(tmp));
+    n += (size_t)snprintf(line + n, sizeof(line) - n, " | wRef=0x%llX[%s]", (unsigned long long)wr, tmp[0] ? tmp : "-");
+    // (d) inventory @0x98 presence.
+    uint64_t inv = rd_ptr(player + PLAYER_INVENTORY);
+    n += (size_t)snprintf(line + n, sizeof(line) - n, " | inv=0x%llX", (unsigned long long)inv);
+
+    static bool s_trunc = false;
+    const char* path = "/storage/emulated/0/Download/xvcen_weapon_debug.log";
+    FILE* f = fopen(path, s_trunc ? "a" : "w");
+    if (f) { fprintf(f, "%s\n", line); fclose(f); }
+    s_trunc = true;
 }
 
 
@@ -2707,6 +2792,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     memcpy(tc.weapon, tmp, sizeof(tc.weapon));
                     tc.has_weapon = true;
                 }
+            }
+            // TEMP: probe remote weapon chain once per player (see dump_weapon_probe).
+            if (!tc.weapon_probed) {
+                tc.weapon_probed = true;
+                dump_weapon_probe(s_transforms[i], distance);
             }
             box.has_name = tc.has_name;
             if (tc.has_name) memcpy(box.name, tc.name, sizeof(box.name));
