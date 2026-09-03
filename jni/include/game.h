@@ -39,6 +39,8 @@ void        esp_reset();
 void        esp_set_skeleton_enabled(bool enabled);
 // Resolve bones (for aim points) even when skeleton ESP drawing is off.
 void        esp_set_aim_bones_enabled(bool enabled);
+// Vertical offset (metres) added to the head aim point; positive = higher.
+void        esp_set_aim_head_lift(float metres);
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 
 // True while the local player is aiming down sights (ADS) with the current

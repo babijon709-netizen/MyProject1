@@ -1791,7 +1791,19 @@ static bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, floa
     return std::isfinite(yaw_deg) && std::isfinite(pitch_deg);
 }
 
-static bool set_aim_point(EspBox& box, int slot, const Vec3& world, const Mat4& vp, float sw, float sh) {
+// Extra vertical offset applied to every head aim point (metres, world up).
+// User-tunable from the menu; positive = higher.
+static float g_aim_head_lift = 0.06F;
+void esp_set_aim_head_lift(float metres) {
+    if (!std::isfinite(metres)) return;
+    if (metres < -0.15F) metres = -0.15F;
+    if (metres >  0.25F) metres =  0.25F;
+    g_aim_head_lift = metres;
+}
+
+static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat4& vp, float sw, float sh) {
+    Vec3 world = world_in;
+    if (slot == 0) world.y += g_aim_head_lift;
     Vec2 screen{};
     if (!w2s(vp, world, sw, sh, screen, false)) return false;
     if (fabsf(screen.x) > sw * 4.0F || fabsf(screen.y) > sh * 4.0F) return false;
