@@ -788,6 +788,40 @@ static void DrawEspOverlay() {
     }
 }
 
+// Small always-on status readout (top-left) so the attach / process state is
+// visible without guessing: whether we are attached to the game, the pid, and
+// how many ESP boxes were found this frame. Helps quickly tell a broken-attach
+// (menu OK, no ESP) from an offsets problem (attached but 0 players).
+static void DrawAttachStatus() {
+    float sw = (float)native_window_screen_x;
+    float sh = (float)native_window_screen_y;
+    if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
+        sw = (float)displayInfo.width;
+        sh = (float)displayInfo.height;
+    } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
+        sw = (float)displayInfo.height;
+        sh = (float)displayInfo.width;
+    }
+    if (sw < 100.f || sh < 100.f) return;
+
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    ImFont* fn = ImGui::GetFont();
+    float fs = ImGui::GetFontSize() * 0.6f;
+
+    char b[96];
+    if (g_esp_attached) {
+        const std::vector<EspBox>& bx = FrameBoxes(sw, sh);   // cached this frame
+        snprintf(b, sizeof(b), "ESP attach=%d pid=%d boxes=%zu", 1, g_target_pid, bx.size());
+    } else {
+        snprintf(b, sizeof(b), "ESP attach=%d pid=%d", 0, g_target_pid);
+    }
+    ImVec2 s = fn->CalcTextSizeA(fs, FLT_MAX, 0, b);
+    float pad = 5.f;
+    ImVec2 p0(6.f, 6.f), p1(p0.x + s.x + pad * 2.f, p0.y + s.y + pad * 2.f);
+    dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 120), 4.f);
+    ImU32 col = g_esp_attached ? IM_COL32(120, 255, 120, 235) : IM_COL32(255, 120, 90, 235);
+    dl->AddText(fn, fs, ImVec2(p0.x + pad, p0.y + pad), col, b);
+}
 
 static constexpr int  kMaxConfigs  = 12;
 static constexpr uint8_t kXorKey   = 0xA7;
@@ -3568,6 +3602,7 @@ int main(int argc, char* argv[]) {
         drawBegin();
 
         ui::bar::set_game_alpha(0.f);
+        DrawAttachStatus();
         DrawEspOverlay();
         UpdateAim(ImGui::GetIO().DeltaTime);
         RenderMenu();
