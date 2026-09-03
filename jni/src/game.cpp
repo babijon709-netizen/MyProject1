@@ -464,29 +464,68 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
     return true;
 }
 
-static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
+// Direct (PlayerManager field) position offsets, most trusted first. The
+// canonical field is lastSavedPosition (0x1D0); lastTickPosition (0x1C8) is
+// equivalent. The rest are legacy guesses kept as a last resort only.
+static const uint64_t k_known_position_offsets[] = {0x1D0, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D4, 0x1DC, 0x1E8};
+
+static uint64_t find_direct_player_position_offset(const std::vector<uint64_t>& players) {
     bool saved_use_direct = g_use_direct_player_position;
     g_use_direct_player_position = true;
-    const uint64_t known_offsets[] = {0x1D4, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D0, 0x1DC, 0x1E8};
     uint64_t best_offset = 0;
     double best_score = 0.0;
-    for (uint64_t offset : known_offsets) {
+    for (uint64_t offset : k_known_position_offsets) {
         double score = 0.0;
-        if (evaluate_player_position_offset(players, offset, score) && score > best_score) { best_offset = offset; best_score = score; }
+        if (!evaluate_player_position_offset(players, offset, score)) continue;
+        // Prefer the offset that validates for the most players; on a tie the
+        // earlier (more trusted) entry wins regardless of spatial extent.
+        double count = floor(score / 1000000.0), best_count = floor(best_score / 1000000.0);
+        if (count > best_count) { best_offset = offset; best_score = score; }
     }
+    g_use_direct_player_position = saved_use_direct;
+    return best_offset;
+}
+
+// Frames in a row the direct offsets failed to validate. Right after a world
+// reload the position fields are still zero for a few frames; falling back to
+// the transform-hierarchy path on the very first failure used to lock the ESP
+// into that mode (boxes hanging 1.6 m below the player) until restart.
+static int g_direct_position_fail_streak = 0;
+static int g_direct_position_recheck = 0;
+static bool g_body_caches_dirty = false; // clear per-player caches on the next frame
+
+static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
+    uint64_t best_offset = find_direct_player_position_offset(players);
     if (best_offset) {
+        g_direct_position_fail_streak = 0;
         g_use_direct_player_position = true; g_player_position_offset = best_offset;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
         return true;
     }
+    // Give the direct fields a full second to settle before trying anything else.
+    if (++g_direct_position_fail_streak < 60) return false;
     size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
     if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
         g_use_direct_player_position = false;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
+        g_direct_position_recheck = 0;
         return true;
     }
-    g_use_direct_player_position = saved_use_direct;
     return false;
+}
+
+// While on the hierarchy fallback, keep probing the direct fields and switch
+// back as soon as they validate again.
+static void recheck_direct_player_position(const std::vector<uint64_t>& players) {
+    if (g_use_direct_player_position || !g_player_position_validated) return;
+    if (++g_direct_position_recheck < 15) return;
+    g_direct_position_recheck = 0;
+    uint64_t best_offset = find_direct_player_position_offset(players);
+    if (!best_offset) return;
+    g_direct_position_fail_streak = 0;
+    g_use_direct_player_position = true; g_player_position_offset = best_offset;
+    g_matrix_configuration_validated = false;
+    g_body_caches_dirty = true;
 }
 
 // Unity Matrix4x4 is column-major in memory: m[col*4 + row].
@@ -1793,7 +1832,7 @@ static bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, floa
 
 // Extra vertical offset applied to every head aim point (metres, world up).
 // User-tunable from the menu; positive = higher.
-static float g_aim_head_lift = 0.06F;
+static float g_aim_head_lift = 0.14F;
 void esp_set_aim_head_lift(float metres) {
     if (!std::isfinite(metres)) return;
     if (metres < -0.15F) metres = -0.15F;
@@ -2202,6 +2241,8 @@ static int      g_frame_transforms_empty_streak = 0;
 static void reset_world_caches() {
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_validated = false;
+    g_use_direct_player_position = true; g_player_position_offset = PLAYER_POSITION;
+    g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
     g_local_player = 0;
     g_aim_state = {};
     g_aim_ref_valid = false;
@@ -2220,6 +2261,7 @@ void esp_reset() {
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
     g_player_position_validated = false;
+    g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
     g_cam_fov_deg = 0.0F; g_cam_pose_valid = false;
     g_aim_state = {};
     g_player_aux.clear();
@@ -2264,6 +2306,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
     if (s_transforms.empty()) return result;
 
+    if (g_body_caches_dirty) { g_body_caches_dirty = false; g_player_aux.clear(); g_skeletons.clear(); }
     const bool want_bones = g_skeleton_enabled || g_aim_bones_requested;
     prune_player_aux(s_transforms);
     if (want_bones) prune_skeleton_cache(s_transforms);
@@ -2272,6 +2315,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     if (!g_player_position_validated) {
         if (!discover_player_position_offset(s_transforms)) return result;
+    } else {
+        recheck_direct_player_position(s_transforms);
     }
 
     bool transform_camera_mode = false; // light fix: always use native cam matrices, avoid dead-body-as-camera on death

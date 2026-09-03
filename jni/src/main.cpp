@@ -536,7 +536,7 @@ struct AppState {
     bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = false, esp_skeleton = false;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
-    float aim_head_lift_cm = 6.f;   // head aim point offset, cm (positive = higher)
+    float aim_head_lift_cm = 14.f;  // head aim point offset, cm (positive = higher)
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
