@@ -43,6 +43,18 @@ inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
 // Prefer lastSavedPosition; lastTickPosition is adjacent at 0x1C8
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // lastSavedPosition
 inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (UnityEngine.GameObject)
+inline constexpr std::uint64_t PLAYER_NICKLABEL = 0x130; // nicklabel (wK MonoBehaviour)
+
+// wK (nicklabel): player back-ref + nickname UI.Text.
+inline constexpr std::uint64_t NICKLABEL_PLAYER_BACKREF = 0x20;
+inline constexpr std::uint64_t NICKLABEL_NICKNAME_TEXT  = 0x38;
+// UnityEngine.UI.Text: managed string with the visible nickname.
+inline constexpr std::uint64_t UI_TEXT_MTEXT = 0xE0;
+// FPObject (base of FPWeaponBase): display name of the held weapon.
+inline constexpr std::uint64_t FPOBJECT_OBJECT_NAME = 0x78;
+// Il2Cpp System.String layout: int32 length @0x10, UTF-16 chars @0x14.
+inline constexpr std::uint64_t IL2CPP_STRING_LENGTH = 0x10;
+inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
 
 // Local player "is aiming" (ADS) state (dump.cs + libil2cpp disasm):
 //   PlayerManager.playerEventHandler (0x78) -> fvp (player event handler)
@@ -64,6 +76,7 @@ inline constexpr std::uint64_t SYNC_VALUE_OFFSET             = 0x20;
 inline constexpr std::uint64_t ACTIVITY_ACTIVE_FLAG          = 0x10;
 inline constexpr std::uint64_t PLAYER_FP_MANAGER             = 0x90;
 inline constexpr std::uint64_t FPMANAGER_CURRENT_WEAPON      = 0x58;
+inline constexpr std::uint64_t FPMANAGER_CURRENT_OBJECT      = 0x50; // _currentWeapon (FPObject fallback)
 inline constexpr std::uint64_t FPMANAGER_AIM_BLEND           = 0xA8;
 inline constexpr std::uint64_t FPOBJECT_PLAYER_BACKREF       = 0xC0;
 inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;

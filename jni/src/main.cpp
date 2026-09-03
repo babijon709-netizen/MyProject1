@@ -181,19 +181,15 @@ namespace cfg { namespace esp {
     inline ImVec4 box_col         = {0.20f, 0.85f, 0.35f, 1.f};
     inline ImVec4 box_col_invis   = {1.00f, 0.20f, 0.20f, 1.f};
     inline ImVec4 name_col        = {1.00f, 1.00f, 1.00f, 1.f};
-    inline ImVec4 health_col      = {0.20f, 0.85f, 0.35f, 1.f};
     inline ImVec4 distance_col    = {0.70f, 0.70f, 0.70f, 1.f};
     inline ImVec4 weapon_col      = {1.00f, 0.95f, 0.10f, 1.f};
-    inline ImVec4 weapon_icon_col = {1.00f, 0.95f, 0.10f, 1.f};
     inline ImVec4 tracer_col      = {1.00f, 0.20f, 0.20f, 1.f};
     inline ImVec4 skeleton_col    = {0.20f, 0.85f, 0.35f, 1.f};
 
     inline bool box          = false;
     inline bool name_esp     = false;
-    inline bool health       = false;
     inline bool distance     = false;
     inline bool weapon       = false;
-    inline bool weapon_icon  = false;
     inline bool tracer       = false;
     inline bool skeleton     = false;
     inline bool  vis_check        = false;
@@ -330,7 +326,8 @@ struct SpriteState {
     int   frame = 0;
 };
 static SpriteState g_sprite;
-static GLuint g_tabIcons[5] = {};
+static constexpr int kTabCount = 6;
+static GLuint g_tabIcons[kTabCount] = {};
 
 static GLuint LoadTexFromMemory(const unsigned char* data, int len) {
     int w, h, ch;
@@ -355,6 +352,7 @@ void LoadTabIcons() {
     g_tabIcons[2] = LoadTexFromMemory(visuals_png,  (int)visuals_png_len);
     g_tabIcons[3] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
     g_tabIcons[4] = LoadTexFromMemory(settings_png, (int)settings_png_len);
+    g_tabIcons[5] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
 #endif
 }
 
@@ -532,8 +530,8 @@ struct AppState {
     int   cur_tab = 0;
     bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
     int   aim_bone = 0;
-    bool  esp_box = false, esp_name = false, esp_hp = false, esp_wall = false, esp_chams = false;
-    bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = false, esp_skeleton = false;
+    bool  esp_box = false, esp_name = false, esp_wall = false, esp_chams = false;
+    bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
@@ -542,8 +540,8 @@ struct AppState {
     float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_scope = 0;
     float a_aim_head  = 1, a_aim_chest = 0, a_aim_pelvis = 0;
     RadioAnim ra_aim_head, ra_aim_chest, ra_aim_pelvis;
-    float a_esp_box = 0, a_esp_name = 0, a_esp_hp = 0, a_esp_wall = 0, a_esp_chams = 0;
-    float a_esp_weapon = 0, a_esp_weapon_icon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
+    float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
+    float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig;
@@ -605,7 +603,7 @@ static void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon) return;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
@@ -615,6 +613,22 @@ static void DrawEspOverlay() {
     };
     float thick = g_state.esp_thick;
     if (thick < 0.5f) thick = 0.5f;
+
+    // ESP labels in the GUI style: dark rounded pill + colored text,
+    // same language as the menu cards/pills.
+    ImFont* espFont = ImGui::GetFont();
+    float espFs = ImGui::GetFontSize();
+    auto EspPill = [&](float cx, float y, const char* text, ImU32 textCol) {
+        if (!text || !text[0]) return;
+        ImVec2 tsz = espFont->CalcTextSizeA(espFs, FLT_MAX, 0, text);
+        const float padX = 8.f, padY = 3.f;
+        float x0 = cx - tsz.x * 0.5f - padX;
+        float x1 = cx + tsz.x * 0.5f + padX;
+        float y1 = y + tsz.y + padY * 2.f;
+        dl->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y1), IM_COL32(0, 0, 0, 130), 7.f);
+        dl->AddRect(ImVec2(x0, y), ImVec2(x1, y1), IM_COL32(255, 255, 255, 40), 7.f, 0, 1.0f);
+        dl->AddText(ImVec2(cx - tsz.x * 0.5f, y + padY), textCol, text);
+    };
 
     for (const EspBox& box : boxes) {
         if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
@@ -639,8 +653,24 @@ static void DrawEspOverlay() {
             }
         }
 
-        if (g_state.esp_box)
-            dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2), ColU32(cfg::esp::box_col), cfg::esp::box_rounding, 0, thick);
+        if (g_state.esp_box) {
+            // GUI-card style frame: subtle dark fill, dark outline, colored border.
+            float rounding = cfg::esp::box_rounding;
+            if (rounding < 0.f) rounding = 0.f;
+            if (rounding > 24.f) rounding = 24.f;
+            dl->AddRectFilled(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2),
+                              IM_COL32(0, 0, 0, 60), rounding);
+            if (cfg::esp::fill) {
+                ImVec4 fc = cfg::esp::box_col;
+                fc.w *= cfg::esp::fill_pct / 100.f;
+                dl->AddRectFilled(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2),
+                                  ColU32(fc), rounding);
+            }
+            dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2),
+                        IM_COL32(0, 0, 0, 200), rounding, 0, thick + 2.0f);
+            dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2),
+                        ColU32(cfg::esp::box_col), rounding, 0, thick);
+        }
 
         if (g_state.esp_skeleton && box.has_skeleton) {
             ImU32 skelCol = ColU32(cfg::esp::skeleton_col);
@@ -683,16 +713,35 @@ static void DrawEspOverlay() {
 
 
         if (g_state.esp_tracer) {
+            // From the middle of the top edge of the screen to the head area.
             float tx = (box.x1 + box.x2) * 0.5f;
-            float ty = box.y2;
-            dl->AddLine(ImVec2(sw * 0.5f, sh), ImVec2(tx, ty), ColU32(cfg::esp::tracer_col), thick);
+            dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, box.y1),
+                        IM_COL32(0, 0, 0, 200), thick + 2.0f);
+            dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, box.y1),
+                        ColU32(cfg::esp::tracer_col), thick);
         }
 
-        if (g_state.esp_wall) {
-            char label[32];
-            if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1fm", box.distance);
-            else snprintf(label, sizeof(label), "PLAYER");
-            dl->AddText(ImVec2(box.x1, box.y1 - 22.0f), ColU32(cfg::esp::distance_col), label);
+        // Labels above the box stack upward (name on top), weapon sits below.
+        {
+            float cx = (box.x1 + box.x2) * 0.5f;
+            float topY = box.y1;
+            const float gap = 6.f;
+            if (g_state.esp_wall) {
+                char label[32];
+                if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1fm", box.distance);
+                else snprintf(label, sizeof(label), "PLAYER");
+                ImVec2 tsz = espFont->CalcTextSizeA(espFs, FLT_MAX, 0, label);
+                topY -= (tsz.y + 6.f + gap);
+                EspPill(cx, topY, label, ColU32(cfg::esp::distance_col));
+            }
+            if (g_state.esp_name && box.has_name && box.name[0]) {
+                ImVec2 tsz = espFont->CalcTextSizeA(espFs, FLT_MAX, 0, box.name);
+                topY -= (tsz.y + 6.f + gap);
+                EspPill(cx, topY, box.name, ColU32(cfg::esp::name_col));
+            }
+            if (g_state.esp_weapon && box.has_weapon && box.weapon[0]) {
+                EspPill(cx, box.y2 + gap, box.weapon, ColU32(cfg::esp::weapon_col));
+            }
         }
     }
 }
@@ -801,10 +850,10 @@ static void ConfigSaveToPath(const std::string& path) {
     s.aim_fov        = cfg::aim::fov;
     s.aim_smoothness = cfg::aim::smoothness;
     s.esp_box     = g_state.esp_box;     s.esp_name    = g_state.esp_name;
-    s.esp_hp      = g_state.esp_hp;      s.esp_wall    = g_state.esp_wall;
+    s.esp_hp      = false;               s.esp_wall    = g_state.esp_wall;
     s.esp_chams   = g_state.esp_chams;
     s.esp_weapon      = g_state.esp_weapon;
-    s.esp_weapon_icon = g_state.esp_weapon_icon;
+    s.esp_weapon_icon = false;
     s.esp_tracer      = g_state.esp_tracer;
     s.esp_skeleton    = g_state.esp_skeleton;
     s.aim_scope_only  = g_state.aim_scope_only;
@@ -823,10 +872,10 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_box_col          = cfg::esp::box_col;
     s.esp_box_col_invis    = cfg::esp::box_col_invis;
     s.esp_name_col         = cfg::esp::name_col;
-    s.esp_health_col       = cfg::esp::health_col;
+    s.esp_health_col       = {0.20f, 0.85f, 0.35f, 1.f};
     s.esp_distance_col     = cfg::esp::distance_col;
     s.esp_weapon_col       = cfg::esp::weapon_col;
-    s.esp_weapon_icon_col  = cfg::esp::weapon_icon_col;
+    s.esp_weapon_icon_col  = {1.00f, 0.95f, 0.10f, 1.f};
     s.esp_tracer_col       = cfg::esp::tracer_col;
     s.esp_skeleton_col     = cfg::esp::skeleton_col;
     s.esp_money_col        = {1.00f, 0.95f, 0.10f, 1.f};
@@ -895,10 +944,9 @@ static void ConfigLoad(int idx) {
     }
     g_state.gun_str = cfg::aim::smoothness;
     g_state.esp_box     = s.esp_box;     g_state.esp_name    = s.esp_name;
-    g_state.esp_hp      = s.esp_hp;      g_state.esp_wall    = s.esp_wall;
+    g_state.esp_wall    = s.esp_wall;
     g_state.esp_chams   = s.esp_chams;
     g_state.esp_weapon      = s.esp_weapon;
-    g_state.esp_weapon_icon = s.esp_weapon_icon;
     g_state.esp_tracer      = s.esp_tracer;
     g_state.esp_skeleton    = s.esp_skeleton;
     g_state.esp_thick   = s.esp_thick;
@@ -912,10 +960,8 @@ static void ConfigLoad(int idx) {
     cfg::esp::box_col          = s.esp_box_col;
     cfg::esp::box_col_invis    = s.esp_box_col_invis;
     cfg::esp::name_col         = s.esp_name_col;
-    cfg::esp::health_col       = s.esp_health_col;
     cfg::esp::distance_col     = s.esp_distance_col;
     cfg::esp::weapon_col       = s.esp_weapon_col;
-    cfg::esp::weapon_icon_col  = s.esp_weapon_icon_col;
     cfg::esp::tracer_col       = s.esp_tracer_col;
     cfg::esp::skeleton_col     = s.esp_skeleton_col;
     cfg::esp::box_type         = s.esp_box_type;
@@ -961,7 +1007,7 @@ static float pill_y   = -1.f;
 static float pill_vel =  0.f;
 
 struct TabRect { float sy; };
-static TabRect tab_rects[5];
+static TabRect tab_rects[kTabCount];
 
 static void ScrollTick(ScrollState& s, bool mIn, bool blocked, float& maxScroll, float dt) {
     auto& io = ImGui::GetIO();
@@ -2328,10 +2374,8 @@ float TabContent(int tab, float dt, float cW) {
 } else if (tab == 2) {
         cfg::esp::box          = g_state.esp_box;
         cfg::esp::name_esp     = g_state.esp_name;
-        cfg::esp::health       = g_state.esp_hp;
         cfg::esp::distance     = g_state.esp_wall;
         cfg::esp::weapon       = g_state.esp_weapon;
-        cfg::esp::weapon_icon  = g_state.esp_weapon_icon;
         cfg::esp::tracer       = g_state.esp_tracer;
         cfg::esp::skeleton     = g_state.esp_skeleton;
 
@@ -2398,14 +2442,12 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vb",  XS("Бокс"),           &g_state.esp_box,          &g_state.a_esp_box,          &cfg::esp::box_col},
                 {"##v3",  XS("3D рамка"),       &g_state.esp_chams,        &g_state.a_esp_chams,        &cfg::esp::box_col_invis},
                 {"##vn",  XS("Имена"),          &g_state.esp_name,         &g_state.a_esp_name,         &cfg::esp::name_col},
-                {"##vh",  XS("HP бар"),         &g_state.esp_hp,           &g_state.a_esp_hp,           &cfg::esp::health_col},
                 {"##vd",  XS("Дистанция"),      &g_state.esp_wall,         &g_state.a_esp_wall,         &cfg::esp::distance_col},
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
-                {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
                 {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
             };
-            constexpr int N = 9;
+            constexpr int N = 7;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
@@ -2629,7 +2671,7 @@ float TabContent(int tab, float dt, float cW) {
             }
         }
 
-    } else {
+    } else if (tab == 4) {
         SHdr(XS("Интерфейс"));
         CardBg(Layout::RowH * 3);
         ToggleRow("##uf2", XS("Показать фпс"),  &g_state.ui_fps,       g_state.a_ui_fps,  false, true);
@@ -2656,6 +2698,31 @@ float TabContent(int tab, float dt, float cW) {
             float ty  = pos.y + (rowH - exitFS) * 0.5f;
             dl->AddText(ImGui::GetFont(), exitFS, {tx, ty}, C::U(C::Red()), exitTxt);
         }
+    } else if (tab == 5) {
+        // Мемори: пустая вкладка-заготовка под будущие функции.
+        avW = ImGui::GetContentRegionAvail().x;
+
+        SHdr(XS("Мемори"));
+        {
+            const float emptyH = 150.f;
+            auto ep = ImGui::GetCursorScreenPos();
+            dl->AddRectFilled({ep.x + inset, ep.y}, {ep.x + avW - inset, ep.y + emptyH},
+                C::U(C::Card()), R::Card);
+            ImGui::Dummy({avW, emptyH});
+            const char* t1 = XS("Пока пусто");
+            const char* t2 = XS("Заготовка под будущие функции");
+            auto s1 = fn->CalcTextSizeA(fs * 1.25f, FLT_MAX, 0, t1);
+            auto s2 = fn->CalcTextSizeA(fs * 1.00f, FLT_MAX, 0, t2);
+            float cy = ep.y + (emptyH - s1.y - 8.f - s2.y) * 0.5f;
+            dl->AddText(fn, fs * 1.25f,
+                {ep.x + (avW - s1.x) * 0.5f, cy},
+                C::U(C::Txt()), t1);
+            dl->AddText(fn, fs * 1.00f,
+                {ep.x + (avW - s2.x) * 0.5f, cy + s1.y + 8.f},
+                C::U(C::Dim()), t2);
+        }
+
+        ImGui::Dummy({1.f, 12.f});
     }
 
     ImGui::Dummy({1.f, 12.f});
@@ -3037,11 +3104,9 @@ void RenderMenu() {
     Tick(g_state.a_aim_scope,  g_state.aim_scope_only,     dt);
     Tick(g_state.a_esp_box,    g_state.esp_box,            dt);
     Tick(g_state.a_esp_name,   g_state.esp_name,           dt);
-    Tick(g_state.a_esp_hp,     g_state.esp_hp,             dt);
     Tick(g_state.a_esp_wall,   g_state.esp_wall,           dt);
     Tick(g_state.a_esp_chams,  g_state.esp_chams,          dt);
     Tick(g_state.a_esp_weapon, g_state.esp_weapon,         dt);
-    Tick(g_state.a_esp_weapon_icon, g_state.esp_weapon_icon, dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
     Tick(g_state.a_ui_fps,     g_state.ui_fps,             dt);
@@ -3215,13 +3280,13 @@ void RenderMenu() {
         ImGui::Dummy({1.f, 2.f});
     }
 
-    const char* tabNames[5] = {
-        XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Конфиги"), XS("Настройки")
+    const char* tabNames[kTabCount] = {
+        XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Конфиги"), XS("Настройки"), XS("Мемори")
     };
     const float tabH = Layout::TabH, tabPad = Layout::TabPad;
 
     ImGui::Dummy({1.f, 6.f});
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < kTabCount; i++) {
         auto pos2 = ImGui::GetCursorScreenPos();
         tab_rects[i] = {pos2.y};
         char tabId[16];
@@ -3259,7 +3324,7 @@ void RenderMenu() {
         const float gap      = 16.f;
         const float leftPad  = 18.f;
         const float startX   = wp.x + leftPad;
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < kTabCount; i++) {
             float    py  = tab_rects[i].sy;
             ImVec4   col = (i == g_state.cur_tab) ? C::Acc() : C::Dim();
             const float tfs = ImGui::GetFontSize() * 1.15f;
@@ -3284,7 +3349,7 @@ void RenderMenu() {
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     {
-        const char* titles[5] = {XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Конфиги"), XS("Настройки")};
+        const char* titles[kTabCount] = {XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Конфиги"), XS("Настройки"), XS("Мемори")};
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
         const float hH = Layout::HeaderH;

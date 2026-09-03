@@ -106,6 +106,117 @@ static bool remote_string_equals(uint64_t address, const char* expected) {
     return read_remote_string(address) == expected;
 }
 
+// Managed Il2Cpp System.String (UTF-16) -> UTF-8, truncated to fit.
+// Layout: klass @0x0, monitor @0x8, int32 length @0x10, chars @0x14.
+static bool read_managed_string(uint64_t str_obj, char* out, size_t cap) {
+    if (!str_obj || !out || cap < 2) return false;
+    if ((str_obj & 0x1) != 0) return false;
+    uint64_t klass = rd_ptr(str_obj);
+    if (klass < 0x10000 || klass >= 0x0001000000000000ULL) return false;
+    int32_t length = 0;
+    if (!rd_exact(str_obj + IL2CPP_STRING_LENGTH, length)) return false;
+    if (length <= 0 || length > 31) return false;
+    uint16_t chars[32] = {};
+    if (!rd_buf(str_obj + IL2CPP_STRING_CHARS, chars, (size_t)length * sizeof(uint16_t)))
+        return false;
+    size_t pos = 0;
+    for (int32_t i = 0; i < length && pos + 1 < cap; ++i) {
+        uint32_t cp = chars[i];
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < length) {
+            uint32_t lo = chars[i + 1];
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                ++i;
+            } else {
+                cp = '?';
+            }
+        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+            cp = '?';
+        }
+        char encoded[4];
+        int encoded_len = 0;
+        if (cp < 0x80) {
+            if (cp < 0x20 || cp == 0x7F) cp = '?';
+            encoded[0] = (char)cp; encoded_len = 1;
+        } else if (cp < 0x800) {
+            encoded[0] = (char)(0xC0 | (cp >> 6));
+            encoded[1] = (char)(0x80 | (cp & 0x3F));
+            encoded_len = 2;
+        } else if (cp < 0x10000) {
+            encoded[0] = (char)(0xE0 | (cp >> 12));
+            encoded[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            encoded[2] = (char)(0x80 | (cp & 0x3F));
+            encoded_len = 3;
+        } else if (cp <= 0x10FFFF) {
+            encoded[0] = (char)(0xF0 | (cp >> 18));
+            encoded[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+            encoded[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            encoded[3] = (char)(0x80 | (cp & 0x3F));
+            encoded_len = 4;
+        } else {
+            encoded[0] = '?'; encoded_len = 1;
+        }
+        if (pos + (size_t)encoded_len >= cap) break;
+        for (int k = 0; k < encoded_len; ++k) out[pos++] = encoded[k];
+    }
+    out[pos] = '\0';
+    return pos > 0;
+}
+
+// Visible nickname: PlayerManager.nicklabel (wK) -> nickname (UI.Text) -> m_Text.
+static bool player_display_name(uint64_t player, char* out, size_t cap) {
+    if (!player || !out || cap < 2) return false;
+    uint64_t label = rd_ptr(player + PLAYER_NICKLABEL);
+    if (label < 0x10000 || label >= 0x0001000000000000ULL || (label & 0x7) != 0)
+        return false;
+    if (rd_ptr(label + NICKLABEL_PLAYER_BACKREF) != player) return false;
+    uint64_t text = rd_ptr(label + NICKLABEL_NICKNAME_TEXT);
+    if (text < 0x10000 || text >= 0x0001000000000000ULL || (text & 0x7) != 0)
+        return false;
+    uint64_t str = rd_ptr(text + UI_TEXT_MTEXT);
+    if (!str) return false;
+    return read_managed_string(str, out, cap);
+}
+
+// Held weapon display name: PlayerManager.fpManager -> current FPWeaponBase ->
+// FPObject.m_ObjectName. Validated by the FPObject -> player back-reference.
+static bool player_weapon_name(uint64_t player, char* out, size_t cap) {
+    if (!player || !out || cap < 2) return false;
+    uint64_t fp = rd_ptr(player + PLAYER_FP_MANAGER);
+    if (fp < 0x10000 || fp >= 0x0001000000000000ULL || (fp & 0x7) != 0)
+        return false;
+    uint64_t weapon = rd_ptr(fp + FPMANAGER_CURRENT_WEAPON);
+    if (weapon < 0x10000 || weapon >= 0x0001000000000000ULL || (weapon & 0x7) != 0) {
+        weapon = rd_ptr(fp + FPMANAGER_CURRENT_OBJECT);
+        if (weapon < 0x10000 || weapon >= 0x0001000000000000ULL || (weapon & 0x7) != 0)
+            return false;
+    }
+    if (rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) != player) return false;
+    uint64_t str = rd_ptr(weapon + FPOBJECT_OBJECT_NAME);
+    if (!str) return false;
+    return read_managed_string(str, out, cap);
+}
+
+// Cached display strings per player (updated on success only, so a transient
+// failed read never makes labels flicker). Refreshed periodically to pick up
+// nickname/weapon changes.
+struct PlayerTextCache {
+    char name[32] = {};
+    bool has_name = false;
+    char weapon[32] = {};
+    bool has_weapon = false;
+    int  revalidate = 30; // first sighting resolves immediately
+};
+static std::unordered_map<uint64_t, PlayerTextCache> g_player_text;
+
+static void prune_player_text(const std::vector<uint64_t>& players) {
+    for (auto it = g_player_text.begin(); it != g_player_text.end();) {
+        bool present = false;
+        for (uint64_t player : players) if (player == it->first) { present = true; break; }
+        if (!present) it = g_player_text.erase(it); else ++it;
+    }
+}
+
 static uint64_t get_base(const char* lib) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", g_pid);
@@ -2241,6 +2352,7 @@ static void reset_world_caches() {
     g_aim_state = {};
     g_aim_ref_valid = false;
     g_player_aux.clear();
+    g_player_text.clear();
     g_skeletons.clear();
 }
 
@@ -2259,6 +2371,7 @@ void esp_reset() {
     g_cam_fov_deg = 0.0F; g_cam_pose_valid = false;
     g_aim_state = {};
     g_player_aux.clear();
+    g_player_text.clear();
     g_skeletons.clear();
     g_skeleton_layout = {}; g_skeleton_layout_valid = false;
     g_go_name_offset = 0; g_go_name_plain_pointer = false;
@@ -2303,6 +2416,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (g_body_caches_dirty) { g_body_caches_dirty = false; g_player_aux.clear(); g_skeletons.clear(); }
     const bool want_bones = g_skeleton_enabled || g_aim_bones_requested;
     prune_player_aux(s_transforms);
+    prune_player_text(s_transforms);
     if (want_bones) prune_skeleton_cache(s_transforms);
     else if (!g_skeletons.empty()) g_skeletons.clear();
     g_skeleton_builds_this_frame = 0;
@@ -2447,6 +2561,26 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;
         box.distance = distance;
+        // Display strings (cached, update-on-success so labels never flicker).
+        {
+            PlayerTextCache& tc = g_player_text[s_transforms[i]];
+            if (++tc.revalidate >= 30) {
+                tc.revalidate = 0;
+                char tmp[32] = {};
+                if (player_display_name(s_transforms[i], tmp, sizeof(tmp))) {
+                    memcpy(tc.name, tmp, sizeof(tc.name));
+                    tc.has_name = true;
+                }
+                if (player_weapon_name(s_transforms[i], tmp, sizeof(tmp))) {
+                    memcpy(tc.weapon, tmp, sizeof(tc.weapon));
+                    tc.has_weapon = true;
+                }
+            }
+            box.has_name = tc.has_name;
+            if (tc.has_name) memcpy(box.name, tc.name, sizeof(box.name));
+            box.has_weapon = tc.has_weapon;
+            if (tc.has_weapon) memcpy(box.weapon, tc.weapon, sizeof(box.weapon));
+        }
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
             bool projected = transform_camera_mode

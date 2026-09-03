@@ -12,6 +12,13 @@ struct EspBox {
     float corners[8][2];
     bool  corner_visible[8];
 
+    // Player name / held weapon (UTF-8, may be empty). Filled from the
+    // nicklabel (UI.Text) and FPManager current-weapon chains.
+    bool  has_name = false;
+    char  name[32] = {};
+    bool  has_weapon = false;
+    char  weapon[32] = {};
+
     // Skeleton (screen-space bone positions), filled when skeleton ESP is enabled.
     bool  has_skeleton;
     bool  bone_valid[ESP_BONE_COUNT];
