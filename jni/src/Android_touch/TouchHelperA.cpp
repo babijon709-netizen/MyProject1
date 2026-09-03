@@ -487,37 +487,49 @@ void Touch_Close() {
     }
 }
 
+float Touch_DeviceUnitsPerPixel() {
+    if (!Touch_initialized || devMaxX <= 0 || devMaxY <= 0) return 1.0f;
+    float s = ::scale_x < ::scale_y ? ::scale_x : ::scale_y;
+    return (s > 0.01f && s < 100.0f) ? s : 1.0f;
+}
+
 void Touch_Down(float xt, float yt) {
     if (!Touch_initialized || Touch_readOnly) return;
-    int x = 0, y = 0;
+    // Keep sub-pixel precision all the way to the device grid: the touch
+    // controller usually has finer resolution than the display, and the game
+    // receives float coordinates. Truncating to whole screen pixels here would
+    // make the smallest possible camera step larger than a head at range.
+    float x = 0.0f, y = 0.0f;
     switch (orientation) {
         case 1: {
-            x = (int) ::screenHeight - (int) yt;
-            y = (int) xt;
+            x = ::screenHeight - yt;
+            y = xt;
             break;
         }
         case 2: {
-            x = (int) ::screenHeight - (int) xt;
-            y = (int) ::screenWidth - (int) yt;
+            x = ::screenHeight - xt;
+            y = ::screenWidth - yt;
             break;
         }
         case 3: {
-            x = (int) yt;
-            y = (int) ::screenWidth - (int) xt;
+            x = yt;
+            y = ::screenWidth - xt;
             break;
         }
         default: {
-            x = (int) xt;
-            y = (int) yt;
+            x = xt;
+            y = yt;
             break;
         }
     }
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
+    if (x < 0.0f) x = 0.0f;
+    if (y < 0.0f) y = 0.0f;
     touchObj &touch = Finger[0][9];
     touch.id = 60000;
-    touch.x = (int) (x * ::scale_x);
-    touch.y = (int) (y * ::scale_y);
+    touch.x = (int) lroundf(x * ::scale_x);
+    touch.y = (int) lroundf(y * ::scale_y);
+    if (devMaxX > 0 && touch.x > devMaxX) touch.x = devMaxX;
+    if (devMaxY > 0 && touch.y > devMaxY) touch.y = devMaxY;
     touch.isDown = true;
     Upload();
 }

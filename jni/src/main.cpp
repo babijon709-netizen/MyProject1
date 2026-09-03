@@ -2892,32 +2892,51 @@ static void UpdateAim(float dt) {
             else gain = gain * 0.7f + measured * 0.3f;
         };
         // Finger right (dx > 0) turns right => yaw increases.
-        if (fabsf(s_lastDx) >= 2.f) learn(s_gainYaw, camYawDelta / s_lastDx);
+        // Moves are exact device-grid steps now, so even 1-2 px moves give a
+        // clean measurement; keep a floor so noise never dominates.
+        if (fabsf(s_lastDx) >= 1.f) learn(s_gainYaw, camYawDelta / s_lastDx);
         // Finger down (dy > 0) looks down => pitch decreases.
-        if (fabsf(s_lastDy) >= 2.f) learn(s_gainPitch, -camPitchDelta / s_lastDy);
+        if (fabsf(s_lastDy) >= 1.f) learn(s_gainPitch, -camPitchDelta / s_lastDy);
     }
     if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
     else s_haveLast = false;
 
+    // ---- input quantum ----
+    // The finger can only rest on the digitizer grid, so the camera can only
+    // be steered in steps of (gain / units-per-pixel) degrees. At long range
+    // one such step can exceed the size of a head; the controller therefore
+    // has to settle on the NEAREST reachable position and hold still there,
+    // never hunt back and forth across the target.
+    float unitsPerPx = Touch_DeviceUnitsPerPixel();
+    if (!(unitsPerPx >= 0.25f && unitsPerPx <= 16.f)) unitsPerPx = 1.f;
+    const float gridPx = 1.f / unitsPerPx;               // screen px per device unit
+    const bool  gainKnownYaw = (s_gainYaw != 0.f), gainKnownPitch = (s_gainPitch != 0.f);
+    const float qYaw   = gainKnownYaw   ? fabsf(s_gainYaw)   * gridPx : 0.f; // deg per device unit
+    const float qPitch = gainKnownPitch ? fabsf(s_gainPitch) * gridPx : 0.f;
+
     // ---- dead zone ----
-    // Angular size of ~3 cm at the target's range, bounded by the pixel grid
-    // (never below half a screen pixel, never above the old 1.5 px) so that at
-    // long range the controller keeps pulling until it is inside the head.
-    float deadDeg = degPerPx * 1.5f;
+    // Target: ~3 cm at the target's range (well inside a head), but never
+    // tighter than what the input grid can actually reach (0.55 step), and
+    // never wider than 1.5 screen px.
+    float deadBase = degPerPx * 1.5f;
     if (best.world_dist > 1.f && std::isfinite(best.world_dist)) {
         float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
-        if (d < deadDeg) deadDeg = d;
-        if (deadDeg < degPerPx * 0.5f) deadDeg = degPerPx * 0.5f;
+        if (d < deadBase) deadBase = d;
     }
-    if (fabsf(best.yaw) < deadDeg && fabsf(best.pitch) < deadDeg) {
+    float deadYaw = deadBase, deadPitch = deadBase;
+    if (gainKnownYaw   && deadYaw   < qYaw   * 0.55f) deadYaw   = qYaw   * 0.55f;
+    if (gainKnownPitch && deadPitch < qPitch * 0.55f) deadPitch = qPitch * 0.55f;
+    if (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch) {
         s_lastDx = s_lastDy = 0.f;
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
         return;
     }
 
+    auto snapGrid = [&](float v) { return roundf(v * unitsPerPx) / unitsPerPx; };
+
     if (!s_fingerDown) {
-        s_fx = sw * 0.74f;
-        s_fy = sh * 0.50f;
+        s_fx = snapGrid(sw * 0.74f);
+        s_fy = snapGrid(sh * 0.50f);
         Touch_Down(s_fx, s_fy);
         s_fingerDown = true;
         s_lastDx = s_lastDy = 0.f;
@@ -2949,6 +2968,15 @@ static void UpdateAim(float dt) {
     float dx =  best.yaw   * k / gy;
     float dy = -best.pitch * k / gp;
 
+    // Final approach: within a few input steps of the target, stop smoothing
+    // and jump straight to the nearest reachable grid position. Smoothing
+    // here would either creep for many frames or, once rounded, overshoot
+    // and oscillate by a full step around the head.
+    if (gainKnownYaw && fabsf(best.yaw) < qYaw * 3.f)
+        dx = roundf((best.yaw / gy) * unitsPerPx) / unitsPerPx;
+    if (gainKnownPitch && fabsf(best.pitch) < qPitch * 3.f)
+        dy = roundf((-best.pitch / gp) * unitsPerPx) / unitsPerPx;
+
     // Clamp per-frame travel so a bad gain estimate never slingshots.
     const float maxStep = learned ? sh * 0.15f : sh * 0.05f;
     if (dx >  maxStep) dx =  maxStep;
@@ -2956,14 +2984,24 @@ static void UpdateAim(float dt) {
     if (dy >  maxStep) dy =  maxStep;
     if (dy < -maxStep) dy = -maxStep;
 
+    // Move in whole device units so the applied delta is exactly what we
+    // measure next frame (gain learning) and the finger never accumulates a
+    // hidden sub-unit remainder that later pops out as an unplanned step.
+    float nx = snapGrid(s_fx + dx), ny = snapGrid(s_fy + dy);
+    dx = nx - s_fx; dy = ny - s_fy;
+    if (dx == 0.f && dy == 0.f) {
+        s_lastDx = s_lastDy = 0.f;
+        Touch_Move(s_fx, s_fy);
+        return;
+    }
+
     // Keep the finger in the look area. If it drifts to an edge, lift and
     // re-place it in the centre of the area instead of getting stuck.
-    float nx = s_fx + dx, ny = s_fy + dy;
     const float minX = sw * 0.56f, maxX = sw * 0.97f, minY = sh * 0.12f, maxY = sh * 0.88f;
     if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
         Touch_Up();
         s_fingerDown = false;
-        s_fx = sw * 0.74f; s_fy = sh * 0.50f;
+        s_fx = snapGrid(sw * 0.74f); s_fy = snapGrid(sh * 0.50f);
         s_lastDx = s_lastDy = 0.f;
         s_haveLast = false;
         return;
