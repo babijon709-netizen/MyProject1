@@ -646,20 +646,30 @@ static void DrawEspOverlay() {
     // Corner box: the middle of every edge is cut out, only corners remain.
     auto CornerBox = [&](float x1, float y1, float x2, float y2, ImU32 col) {
         float w = x2 - x1, h = y2 - y1;
-        if (w <= 2.f || h <= 2.f) return;
-        // At long range the projected box can be only a few pixels tall, which
-        // (with thick strokes) merged the top and bottom horizontal corner rows
-        // into a single flat line. Give the corners a stroke-aware minimum
-        // vertical span, kept centered on the real box, so the top and bottom
-        // rows always stay visually separated no matter how far away the target is.
+        if (w <= 0.5f || h <= 0.5f) return;
+        // At long range the projected box is only a handful of pixels tall, so
+        // (with thick strokes) the top and bottom horizontal corner rows overlap
+        // and read as one flat line. Enforce a stroke-aware minimum on BOTH axes,
+        // expanding outward from the real box's centre, so the top and bottom
+        // corner rows (and the left/right ones) stay visually separated at any
+        // distance. The floor is scaled to the outline+fill stroke widths so the
+        // gap between the two horizontal rows is never swallowed by the strokes.
         {
-            float hMin = (thick + 1.f) + 3.f;   // leave a clear gap under the widest stroke
-            if (hMin < 6.f) hMin = 6.f;
-            if (h < hMin) {
+            float topAndBot = (thick + 1.0f) + thick;          // outline + fill strokes on both rows
+            float sideGap   = 2.0f;                             // clear visual separation between rows
+            float dMin = topAndBot + sideGap;
+            if (dMin < 10.f) dMin = 10.f;
+            if (h < dMin) {
                 float cy = (y1 + y2) * 0.5f;
-                y1 = cy - hMin * 0.5f;
-                y2 = cy + hMin * 0.5f;
-                h  = hMin;
+                y1 = cy - dMin * 0.5f;
+                y2 = cy + dMin * 0.5f;
+                h  = dMin;
+            }
+            if (w < dMin) {
+                float cx = (x1 + x2) * 0.5f;
+                x1 = cx - dMin * 0.5f;
+                x2 = cx + dMin * 0.5f;
+                w  = dMin;
             }
         }
         float len = (w < h ? w : h) * 0.28f;

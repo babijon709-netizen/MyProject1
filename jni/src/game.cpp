@@ -222,18 +222,22 @@ static bool valid_obj(uint64_t p) {
 }
 
 // Read one raw nickname candidate for a player. `src` selects the source:
-//   0 Dissonance VoicePlayerState.<Name>
-//   1 Voice tracker (fuI) display string
-//   2 Legacy nicklabel widget nickname text
+//   0 PlayerManager.LLI (0x220) — the real human-readable display name
+//   1 Dissonance VoicePlayerState.<Name>
+//   2 Voice tracker (fuI) display string
+//   3 Legacy nicklabel widget nickname text
 static bool read_name_source(uint64_t player, int src, char* out, size_t cap) {
     if (!player || !out || cap < 2) return false;
     char tmp[32] = {};
     if (src == 0) {
+        uint64_t str = rd_ptr(player + PLAYER_DISPLAY_NAME);
+        if (!str || !read_managed_string(str, tmp, sizeof(tmp))) return false;
+    } else if (src == 1) {
         uint64_t state = rd_ptr(player + PLAYER_VOICE_STATE);
         if (!valid_obj(state)) return false;
         uint64_t str = rd_ptr(state + VOICE_STATE_NAME);
         if (!str || !read_managed_string(str, tmp, sizeof(tmp))) return false;
-    } else if (src == 1) {
+    } else if (src == 2) {
         uint64_t tracker = rd_ptr(player + PLAYER_VOICE_PLAYER);
         if (!valid_obj(tracker)) return false;
         uint64_t str = rd_ptr(tracker + VOICE_PLAYER_TAG);
@@ -261,7 +265,7 @@ static bool player_display_name(uint64_t player, char* out, size_t cap) {
     bool have_human = false;
     char fallback[32] = {};
     bool have_fallback = false;
-    for (int src = 0; src < 3; ++src) {
+    for (int src = 0; src < 4; ++src) {
         char tmp[32] = {};
         if (!read_name_source(player, src, tmp, sizeof(tmp))) continue;
         if (!accept_display_name(tmp)) continue;   // placeholder / pure-digit ids
@@ -333,7 +337,6 @@ struct PlayerTextCache {
     char weapon[32] = {};
     bool has_weapon = false;
     int  revalidate = 30; // first sighting resolves immediately
-    bool diag_done = false; // TEMP diagnostics: logged once per player
 };
 static std::unordered_map<uint64_t, PlayerTextCache> g_player_text;
 
@@ -343,124 +346,6 @@ static void prune_player_text(const std::vector<uint64_t>& players) {
         for (uint64_t player : players) if (player == it->first) { present = true; break; }
         if (!present) it = g_player_text.erase(it); else ++it;
     }
-}
-
-// ===================== Temporary field diagnostics =====================
-// Appends, to the Downloads folder, every candidate string field we read while
-// trying to show a remote player's nickname and held weapon, so the real source
-// can be pinned down on-device. Writes once per player (first 8) and is meant
-// to be removed once the nickname/weapon reads are finalised.
-static bool read_mstr(uint64_t string_object_field, char* out, size_t cap) {
-    if (!string_object_field || !out || cap < 2) return false;
-    uint64_t str = rd_ptr(string_object_field);
-    return str && read_managed_string(str, out, cap);
-}
-static bool read_member_mstr(uint64_t object, uint64_t member_off, char* out, size_t cap) {
-    if (!valid_obj(object) || !out || cap < 2) return false;
-    uint64_t str = rd_ptr(object + member_off);
-    return str && read_managed_string(str, out, cap);
-}
-static void diag_tag(char* line, size_t cap, size_t& n, const char* tag, const char* val) {
-    if (!val || !val[0]) val = "(empty)";
-    int add = snprintf(line + n, cap - n, "%s=[%s] ", tag, val);
-    if (add > 0) n += (size_t)add;
-    if (n > cap) n = cap ? cap - 1 : 0;
-}
-
-static void dump_player_diagnostics(uint64_t player, float distance) {
-    static int s_diag_count = 0;
-    if (s_diag_count >= 8 || !player) return; // keep the log small
-    ++s_diag_count;
-
-    char line[1500]; size_t n = 0;
-    n += (size_t)snprintf(line + n, sizeof(line) - n,
-        "player=0x%llX dist=%.1f ", (unsigned long long)player, (double)distance);
-
-    // What the overlay currently shows (i.e. the code being diagnosed).
-    char shown_name[32] = {}, shown_wpn[32] = {};
-    if (player_display_name(player, shown_name, sizeof(shown_name))) diag_tag(line, sizeof(line), n, "DISPLAYED.name", shown_name);
-    else diag_tag(line, sizeof(line), n, "DISPLAYED.name", "(none)");
-    if (player_weapon_name(player, shown_wpn, sizeof(shown_wpn))) diag_tag(line, sizeof(line), n, "DISPLAYED.weapon", shown_wpn);
-    else diag_tag(line, sizeof(line), n, "DISPLAYED.weapon", "(none)");
-
-    // nicklabel widget (wK) fields.
-    uint64_t label = rd_ptr(player + PLAYER_NICKLABEL);
-    if (valid_obj(label) && rd_ptr(label + NICKLABEL_PLAYER_BACKREF) == player) {
-        // nickname (UI.Text @0x38) and playerId (UI.Text @0x40), content = mText.
-        uint64_t tn = rd_ptr(label + 0x38);
-        char s[40] = {};
-        if (valid_obj(tn) && read_mstr(tn + UI_TEXT_MTEXT, s, sizeof(s))) diag_tag(line, sizeof(line), n, "wK.nickname.text", s);
-        s[0] = 0;
-        uint64_t tp = rd_ptr(label + 0x40);
-        if (valid_obj(tp) && read_mstr(tp + UI_TEXT_MTEXT, s, sizeof(s))) diag_tag(line, sizeof(line), n, "wK.playerId.text", s);
-        // private strings on the widget itself.
-        static const char* tags[3] = {"wK.zvf@A8", "wK.zvy@B0", "wK.zvc@B8"};
-        for (int i = 0; i < 3; ++i) {
-            s[0] = 0;
-            if (read_mstr(label + 0xA8 + (uint64_t)i * 8, s, sizeof(s))) diag_tag(line, sizeof(line), n, tags[i], s);
-        }
-    } else {
-        diag_tag(line, sizeof(line), n, "wK.label", "(unlinked)");
-    }
-
-    // PlayerManager string fields (dump.cs offsets).
-    {
-        static const struct { const char* t; uint64_t o; } fs[] = {
-            {"pm.userID@278", 0x278}, {"pm.teamName@280", 0x280},
-            {"pm.clanId@290", 0x290}, {"pm.clanTag@298", 0x298},
-            {"pm.LLI@220", 0x220},   {"pm.observedId@320", 0x320},
-        };
-        for (auto& x : fs) {
-            char s[40] = {};
-            if (read_mstr(player + x.o, s, sizeof(s)) && s[0]) diag_tag(line, sizeof(line), n, x.t, s);
-        }
-    }
-
-    // Voice identity sources.
-    {
-        char s[40] = {};
-        if (read_member_mstr(rd_ptr(player + PLAYER_VOICE_STATE), VOICE_STATE_NAME, s, sizeof(s)) && s[0])
-            diag_tag(line, sizeof(line), n, "voiceState.Name", s);
-        s[0] = 0;
-        if (read_member_mstr(rd_ptr(player + PLAYER_VOICE_PLAYER), VOICE_PLAYER_TAG, s, sizeof(s)) && s[0])
-            diag_tag(line, sizeof(line), n, "voicePlayer.tag", s);
-    }
-
-    // Held-weapon candidates (FP route) and their item-definition names.
-    {
-        uint64_t fp = rd_ptr(player + PLAYER_FP_MANAGER);
-        if (!valid_obj(fp)) {
-            diag_tag(line, sizeof(line), n, "weapon.fp", "(absent)");
-        } else {
-            uint64_t cand[2] = { rd_ptr(fp + FPMANAGER_CURRENT_WEAPON), rd_ptr(fp + FPMANAGER_CURRENT_OBJECT) };
-            static const char* ctags[2] = {"weapon.FPobj@58", "weapon.FPobj@50"};
-            for (int i = 0; i < 2; ++i) {
-                uint64_t o = cand[i];
-                if (!valid_obj(o)) { diag_tag(line, sizeof(line), n, ctags[i], "(null)"); continue; }
-                char s[40] = {};
-                if (read_member_mstr(o, FPOBJECT_OBJECT_NAME, s, sizeof(s)) && s[0])
-                    diag_tag(line, sizeof(line), n, ctags[i], s);
-                else {
-                    char ph[64];
-                    snprintf(ph, sizeof(ph), "(obj0x%llX/no-name)", (unsigned long long)o);
-                    diag_tag(line, sizeof(line), n, ctags[i], ph);
-                }
-                uint64_t item = rd_ptr(o + FPOBJECT_ITEM);
-                uint64_t data = valid_obj(item) ? rd_ptr(item + ITEM_DATA) : 0;
-                if (valid_obj(data)) {
-                    s[0] = 0;
-                    if (read_member_mstr(data, ITEMDATA_NAME, s, sizeof(s)) && s[0]) { char t[40]; snprintf(t, sizeof(t), "%s.itemName", ctags[i]); diag_tag(line, sizeof(line), n, t, s); }
-                    s[0] = 0;
-                    if (read_member_mstr(data, ITEMDATA_SHORTNAME, s, sizeof(s)) && s[0]) { char t[40]; snprintf(t, sizeof(t), "%s.shortName", ctags[i]); diag_tag(line, sizeof(line), n, t, s); }
-                }
-            }
-        }
-    }
-
-    // Write once, append.
-    const char* path = "/storage/emulated/0/Download/xvcen_esp_debug.log";
-    FILE* f = fopen(path, "a");
-    if (f) { fprintf(f, "%s\n", line); fclose(f); }
 }
 
 
@@ -2822,12 +2707,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     memcpy(tc.weapon, tmp, sizeof(tc.weapon));
                     tc.has_weapon = true;
                 }
-            }
-            // TEMP diagnostics: dump candidate name/weapon fields once per player
-            // to the Downloads folder (see dump_player_diagnostics).
-            if (!tc.diag_done) {
-                tc.diag_done = true;
-                dump_player_diagnostics(s_transforms[i], distance);
             }
             box.has_name = tc.has_name;
             if (tc.has_name) memcpy(box.name, tc.name, sizeof(box.name));

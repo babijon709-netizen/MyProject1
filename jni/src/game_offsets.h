@@ -44,6 +44,10 @@ inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // lastSavedPosition
 inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (UnityEngine.GameObject)
 inline constexpr std::uint64_t PLAYER_NICKLABEL = 0x130; // nicklabel (wK MonoBehaviour)
+// PlayerManager "LLI" (0x220): the real human-readable display name (confirmed
+// on-device — equals the nicklabel widget's private name string, e.g.
+// "пахановский" / "#Фришка"), whereas userID/voice names carry the machine id.
+inline constexpr std::uint64_t PLAYER_DISPLAY_NAME = 0x220;
 
 // wK (nicklabel): player back-ref + nickname UI.Text.
 inline constexpr std::uint64_t NICKLABEL_PLAYER_BACKREF = 0x20;
