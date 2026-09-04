@@ -249,6 +249,22 @@ enum class MineableEntityType : std::int32_t {
     Deployable = 18, Human = 19, Player = 20, Vehicle = 21, Hare = 22,
 };
 
+// ---- Team / clan membership (Oxide.PlayerManager, dump.cs) ------------------
+// All three are Mirror SyncVars (they have _Mirror_SyncVarHookDelegate_* twins
+// at 0x378/0x390/0x398), so every client sees them for every player.
+inline constexpr std::uint64_t PLAYER_TEAM_NAME = 0x280; // string teamName
+inline constexpr std::uint64_t PLAYER_CLAN_ID   = 0x290; // string clanId
+inline constexpr std::uint64_t PLAYER_CLAN_TAG  = 0x298; // string clanTag
+
+// ---- World loot containers (Oxide.LootObject : fNZ : Mirror.NetworkBehaviour)
+// Everything openable in the world is a LootObject: road crates, barrels,
+// airdrops — and the storage boxes players deploy. The deployed ones are
+// building pieces, so m_Piece is the discriminator that keeps them off screen.
+inline constexpr std::uint64_t LOOTOBJECT_INVENTORY      = 0xA0; // Oxide.Inventory
+inline constexpr std::uint64_t LOOTOBJECT_IS_LOOTABLE    = 0xA8; // bool
+inline constexpr std::uint64_t LOOTOBJECT_PANEL_NAME     = 0xE0; // string panelName
+inline constexpr std::uint64_t LOOTOBJECT_BUILDING_PIECE = 0xF0; // Building.BuildingPiece m_Piece
+
 // Oxide.GameControllerBase static fields: a known-good NetworkIdentity used to
 // learn the NetworkIdentity class pointer (validates dictionary entries).
 inline constexpr std::uint64_t GAME_CONTROLLER_NET_IDENTITY_FIELD = 0x8;

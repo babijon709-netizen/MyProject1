@@ -187,6 +187,8 @@ namespace cfg { namespace esp {
     inline ImVec4 tracer_col      = {1.00f, 0.20f, 0.20f, 1.f};
     inline ImVec4 skeleton_col    = {0.20f, 0.85f, 0.35f, 1.f};
     inline ImVec4 animal_col      = {1.00f, 0.60f, 0.25f, 1.f};
+    inline ImVec4 loot_col        = {0.55f, 0.80f, 1.00f, 1.f};
+    inline ImVec4 ally_col        = {0.25f, 0.55f, 1.00f, 1.f};
 
     inline bool box          = false;
     inline bool name_esp     = false;
@@ -196,6 +198,8 @@ namespace cfg { namespace esp {
     inline bool skeleton     = false;
     inline bool ore          = false;
     inline bool animal       = false;
+    inline bool loot         = false;
+    inline bool team         = false;
     inline bool  vis_check        = false;
     inline bool  fill             = false;
     inline float stroke           = 2.f;
@@ -535,9 +539,13 @@ struct AppState {
     int   cur_tab = 0;
     bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
     int   aim_bone = 0;
+    // 0 = balanced (crosshair + range), 1 = nearest to the crosshair,
+    // 2 = nearest in the world.
+    int   aim_priority = 0;
     bool  esp_box = false, esp_name = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;
-    bool  esp_ore = false, esp_animal = false;
+    bool  esp_ore = false, esp_animal = false, esp_loot = false, esp_team = false;
+    float marker_dist = 150.f;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
@@ -546,12 +554,14 @@ struct AppState {
     float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_scope = 0;
     float a_aim_head  = 1, a_aim_chest = 0, a_aim_pelvis = 0;
     RadioAnim ra_aim_head, ra_aim_chest, ra_aim_pelvis;
+    float a_aim_pr0 = 1, a_aim_pr1 = 0, a_aim_pr2 = 0;
+    RadioAnim ra_aim_pr0, ra_aim_pr1, ra_aim_pr2;
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
-    float a_esp_ore = 0, a_esp_animal = 0;
+    float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0;
     float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist;
 };
 static AppState g_state;
 
@@ -581,7 +591,8 @@ static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         s_frame = frame;
         esp_set_skeleton_enabled(g_state.esp_skeleton);
         esp_set_aim_bones_enabled(g_state.aim_touch);
-        esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal);
+        esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal, g_state.esp_loot);
+        esp_set_marker_max_distance(g_state.marker_dist);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
     }
     return s_boxes;
@@ -715,6 +726,10 @@ static void DrawEspOverlay() {
         float bx1 = box.x1, by1 = box.y1, bx2 = box.x2, by2 = box.y2;
         NormRect(bx1, by1, bx2, by2);
 
+        // Team mates / clan mates get their own colour so they read as
+        // friendly at a glance (and the aimbot leaves them alone).
+        const bool ally = g_state.esp_team && box.ally;
+
         if (g_state.esp_chams) {
             bool all_valid = true;
             for (int c = 0; c < 8; ++c) {
@@ -755,7 +770,7 @@ static void DrawEspOverlay() {
         }
 
         if (g_state.esp_box) {
-            CornerBox(bx1, by1, bx2, by2, ColU32(cfg::esp::box_col));
+            CornerBox(bx1, by1, bx2, by2, ColU32(ally ? cfg::esp::ally_col : cfg::esp::box_col));
         }
 
         if (g_state.esp_skeleton && box.has_skeleton) {
@@ -813,8 +828,15 @@ static void DrawEspOverlay() {
             float cx = (bx1 + bx2) * 0.5f;
             const float gap = 5.f;
             if (g_state.esp_name && box.has_name && box.name[0]) {
-                float h = PillH(box.name);
-                EspPill(cx, by1 - h - gap, box.name, ColU32(cfg::esp::name_col));
+                // Clan tag in front of the nick, the way the game shows it.
+                char label[56];
+                if (box.has_tag && box.tag[0])
+                    snprintf(label, sizeof(label), "[%s] %s", box.tag, box.name);
+                else
+                    snprintf(label, sizeof(label), "%s", box.name);
+                float h = PillH(label);
+                EspPill(cx, by1 - h - gap, label,
+                        ColU32(ally ? cfg::esp::ally_col : cfg::esp::name_col));
             }
             float belowY = by2 + gap;
             if (g_state.esp_wall) {
@@ -834,7 +856,7 @@ static void DrawEspOverlay() {
     // ---- World markers: ore nodes and animals ----------------------------
     // One pill with the resource / animal name at the object's position; the
     // scan itself is done by the game layer and reuses this frame's camera.
-    if (g_state.esp_ore || g_state.esp_animal) {
+    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot) {
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;
@@ -843,7 +865,8 @@ static void DrawEspOverlay() {
             if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
             ImU32 col = marker.has_color
                 ? IM_COL32(marker.color_rgb[0], marker.color_rgb[1], marker.color_rgb[2], 255)
-                : ColU32(cfg::esp::animal_col);
+                : ColU32(marker.kind == ESP_MARKER_LOOT ? cfg::esp::loot_col
+                                                        : cfg::esp::animal_col);
             EspPill(marker.x, marker.y, marker.name, col, kMarkerScale);
             char label[24];
             snprintf(label, sizeof(label), "%.0fm", marker.distance);
@@ -967,17 +990,27 @@ struct CfgBlob {
     int   aim_bone;
     bool  aim_vis_check, aim_draw_fov;
     float aim_fov, aim_smoothness;
-    // esp_ore / esp_animal reuse the dead esp_hp / esp_ping slots, and the ore /
-    // animal colours reuse esp_health_col / esp_money_col, so the blob layout
-    // (and therefore version 4) stays compatible with existing configs.
+    // Every field that a feature outgrew is renamed in place rather than
+    // appended, so the byte layout — and with it version 4 and every config
+    // already saved on a device — stays valid. Current renames:
+    //   esp_hp        -> esp_ore          esp_ping        -> esp_animal
+    //   esp_weapon_icon -> esp_team
+    //   esp_health_col  -> esp_ally_col   esp_money_col   -> esp_animal_col
+    //   esp_weapon_icon_col -> esp_loot_col
+    //   esp_ping_col    -> esp_extra (packed scalars, see below)
     bool  esp_box, esp_name, esp_ore, esp_wall, esp_chams;
-    bool  esp_weapon, esp_weapon_icon, esp_tracer, esp_skeleton;
+    bool  esp_weapon, esp_team, esp_tracer, esp_skeleton;
     bool  aim_scope_only, esp_animal, esp_vis_check, esp_fill;
     float esp_thick, esp_stroke, esp_rounding, esp_fill_pct;
     float gun_str, gun_fov, gun_trigger_delay;
     bool  ui_fps, ui_dark_mode, ui_show_sep;
-    ImVec4 esp_box_col, esp_box_col_invis, esp_name_col, esp_ore_col, esp_distance_col;
-    ImVec4 esp_weapon_col, esp_weapon_icon_col, esp_tracer_col, esp_skeleton_col, esp_animal_col, esp_ping_col;
+    ImVec4 esp_box_col, esp_box_col_invis, esp_name_col, esp_ally_col, esp_distance_col;
+    ImVec4 esp_weapon_col, esp_loot_col, esp_tracer_col, esp_skeleton_col, esp_animal_col;
+    // Four scalars that had no slot of their own:
+    //   x = loot ESP on/off, y = marker draw distance (m),
+    //   z = aim priority + 1 (so an old config's 1.0 still means "default"),
+    //   w = reserved.
+    ImVec4 esp_extra;
     int   esp_box_type;
     float esp_box_rounding;
 };
@@ -997,7 +1030,7 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_ore     = g_state.esp_ore;     s.esp_wall    = g_state.esp_wall;
     s.esp_chams   = g_state.esp_chams;
     s.esp_weapon      = g_state.esp_weapon;
-    s.esp_weapon_icon = false;
+    s.esp_team        = g_state.esp_team;
     s.esp_tracer      = g_state.esp_tracer;
     s.esp_skeleton    = g_state.esp_skeleton;
     s.aim_scope_only  = g_state.aim_scope_only;
@@ -1016,14 +1049,15 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_box_col          = cfg::esp::box_col;
     s.esp_box_col_invis    = cfg::esp::box_col_invis;
     s.esp_name_col         = cfg::esp::name_col;
-    s.esp_ore_col          = {0.f, 0.f, 0.f, 1.f}; // unused: ore colours are fixed per resource
+    s.esp_ally_col         = cfg::esp::ally_col;
     s.esp_distance_col     = cfg::esp::distance_col;
     s.esp_weapon_col       = cfg::esp::weapon_col;
-    s.esp_weapon_icon_col  = {1.00f, 0.95f, 0.10f, 1.f};
+    s.esp_loot_col         = cfg::esp::loot_col;
     s.esp_tracer_col       = cfg::esp::tracer_col;
     s.esp_skeleton_col     = cfg::esp::skeleton_col;
     s.esp_animal_col       = cfg::esp::animal_col;
-    s.esp_ping_col         = {0.40f, 0.85f, 1.00f, 1.f};
+    s.esp_extra            = {g_state.esp_loot ? 1.f : 0.f, g_state.marker_dist,
+                              (float)(g_state.aim_priority + 1), 0.f};
     s.esp_box_type         = cfg::esp::box_type;
     s.esp_box_rounding     = cfg::esp::box_rounding;
     uint8_t buf[sizeof(s)];
@@ -1095,6 +1129,15 @@ static void ConfigLoad(int idx) {
     g_state.esp_skeleton    = s.esp_skeleton;
     g_state.esp_ore         = s.esp_ore;
     g_state.esp_animal      = s.esp_animal;
+    g_state.esp_team        = s.esp_team;
+    // Packed scalars. A config written before these existed holds the old ping
+    // colour here, so each value is range-checked and falls back to its default.
+    g_state.esp_loot    = s.esp_extra.x > 0.5f;
+    g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
+    {
+        int pr = (int)(s.esp_extra.z + 0.5f) - 1;
+        g_state.aim_priority = (pr >= 0 && pr <= 2) ? pr : 0;
+    }
     g_state.esp_thick   = s.esp_thick;
     g_state.gun_str     = s.gun_str;
     g_state.gun_fov     = s.gun_fov;
@@ -1111,6 +1154,10 @@ static void ConfigLoad(int idx) {
     cfg::esp::tracer_col       = s.esp_tracer_col;
     cfg::esp::skeleton_col     = s.esp_skeleton_col;
     cfg::esp::animal_col       = s.esp_animal_col;
+    cfg::esp::loot_col         = s.esp_loot_col;
+    // The ally colour reuses a slot that older configs left pure black.
+    if (s.esp_ally_col.x + s.esp_ally_col.y + s.esp_ally_col.z > 0.05f)
+        cfg::esp::ally_col     = s.esp_ally_col;
     cfg::esp::box_type         = s.esp_box_type;
     cfg::esp::box_rounding     = s.esp_box_rounding;
     g_darkTheme = g_state.ui_dark_mode;
@@ -2059,6 +2106,12 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgRadioRow(1, &g_state.aim_bone, g_state.ra_aim_chest,  &g_state.a_aim_chest,  XS("Шея"), false);
         FgRadioRow(2, &g_state.aim_bone, g_state.ra_aim_pelvis, &g_state.a_aim_pelvis, XS("Тело"), true);
 
+        FgSHdr(XS("Приоритет цели"));
+        FgCardBg(rH * 3);
+        FgRadioRow(0, &g_state.aim_priority, g_state.ra_aim_pr0, &g_state.a_aim_pr0, XS("Сбалансированный"), false);
+        FgRadioRow(1, &g_state.aim_priority, g_state.ra_aim_pr1, &g_state.a_aim_pr1, XS("Ближе к прицелу"), false);
+        FgRadioRow(2, &g_state.aim_priority, g_state.ra_aim_pr2, &g_state.a_aim_pr2, XS("Ближайший по дистанции"), true);
+
     } else if (secId == 1) {
         FgSHdr(XS("Внешний вид"));
         FgCardBg(Layout::SliderH);
@@ -2527,6 +2580,8 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::skeleton     = g_state.esp_skeleton;
         cfg::esp::ore          = g_state.esp_ore;
         cfg::esp::animal       = g_state.esp_animal;
+        cfg::esp::loot         = g_state.esp_loot;
+        cfg::esp::team         = g_state.esp_team;
 
 
 
@@ -2599,13 +2654,20 @@ float TabContent(int tab, float dt, float cW) {
                 // metal orange, sulfur yellow).
                 {"##vor", XS("Руды"),           &g_state.esp_ore,          &g_state.a_esp_ore,          nullptr},
                 {"##van", XS("Животные"),       &g_state.esp_animal,       &g_state.a_esp_animal,       &cfg::esp::animal_col},
+                {"##vlt", XS("Ящики"),          &g_state.esp_loot,         &g_state.a_esp_loot,         &cfg::esp::loot_col},
+                {"##vtm", XS("Тиммейты"),       &g_state.esp_team,         &g_state.a_esp_team,         &cfg::esp::ally_col},
             };
-            constexpr int N = 9;
+            constexpr int N = 11;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
             }
         }
+
+        SHdr(XS("Дальность маркеров"));
+        CardBg(Layout::SliderH);
+        SliderRow("##vmd", XS("Руды/животные/ящики"), &g_state.marker_dist,
+                  25.f, 300.f, XS("%.0f м"), true, true, g_state.sl_marker_dist, dt);
 
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##veh1", XS("Дополнительные настройки"), 1);
@@ -2994,6 +3056,8 @@ static void UpdateAim(float dt) {
     AimTarget best;
     float bestScore = 1e18f;
     for (const EspBox& b : boxes) {
+        // Never pull onto a team mate / clan mate while that ESP category is on.
+        if (g_state.esp_team && b.ally) continue;
         AimTarget t;
         // Exact bone, with graceful fallback to the next-best bone.
         // Slots: 0 head, 1 neck, 2 chest. Never fall back below the chest.
@@ -3034,12 +3098,22 @@ static void UpdateAim(float dt) {
         // circle (overshoot while the gain is still being learned) — keep it.
         if (t.dist > (sticky ? fovR * 2.f : fovR)) continue;
 
-        // Priority: closest to the crosshair AND closest to us. Both terms are
-        // normalised (FOV radius, 120 m) and summed; the current target gets a
-        // strong preference so we do not flip between two nearby players.
-        float score = t.dist / (fovR > 1.f ? fovR : 1.f);
-        if (t.world_dist >= 0.f && std::isfinite(t.world_dist))
-            score += (t.world_dist / 120.f) * 0.8f;
+        // Target priority (see "Приоритет цели"):
+        //   0 balanced  — crosshair distance and range, both normalised
+        //                 (FOV radius, 120 m) and summed;
+        //   1 crosshair — purely the pixel distance from the crosshair;
+        //   2 range     — purely the world distance, crosshair only breaks ties.
+        // Whatever the mode, the current target gets a strong preference so the
+        // aim does not flip between two players standing next to each other.
+        const float pixelTerm = t.dist / (fovR > 1.f ? fovR : 1.f);
+        const bool  haveRange = (t.world_dist >= 0.f) && std::isfinite(t.world_dist);
+        const float rangeTerm = haveRange ? (t.world_dist / 120.f) : 1.f;
+        float score;
+        switch (g_state.aim_priority) {
+            case 1:  score = pixelTerm; break;
+            case 2:  score = rangeTerm * 4.f + pixelTerm * 0.05f; break;
+            default: score = pixelTerm + rangeTerm * 0.8f; break;
+        }
         if (sticky) score *= 0.35f;
         if (score < bestScore) { bestScore = score; best = t; }
     }
@@ -3272,6 +3346,11 @@ void RenderMenu() {
     Tick(g_state.a_esp_weapon, g_state.esp_weapon,         dt);
     Tick(g_state.a_esp_ore,    g_state.esp_ore,            dt);
     Tick(g_state.a_esp_animal, g_state.esp_animal,         dt);
+    Tick(g_state.a_esp_loot,   g_state.esp_loot,           dt);
+    Tick(g_state.a_esp_team,   g_state.esp_team,           dt);
+    Tick(g_state.a_aim_pr0,    g_state.aim_priority == 0,  dt);
+    Tick(g_state.a_aim_pr1,    g_state.aim_priority == 1,  dt);
+    Tick(g_state.a_aim_pr2,    g_state.aim_priority == 2,  dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
     Tick(g_state.a_ui_fps,     g_state.ui_fps,             dt);

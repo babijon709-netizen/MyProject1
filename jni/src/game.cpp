@@ -109,15 +109,18 @@ static bool remote_string_equals(uint64_t address, const char* expected) {
 
 // Managed Il2Cpp System.String (UTF-16) -> UTF-8, truncated to fit.
 // Layout: klass @0x0, monitor @0x8, int32 length @0x10, chars @0x14.
-static bool read_managed_string(uint64_t str_obj, char* out, size_t cap) {
+// `max_chars` is a sanity bound on the managed length, not on the output: 31 is
+// right for names and item ids, clan ids are GUID-shaped and need more.
+static bool read_managed_string_ex(uint64_t str_obj, char* out, size_t cap, int32_t max_chars) {
     if (!str_obj || !out || cap < 2) return false;
     if ((str_obj & 0x1) != 0) return false;
     uint64_t klass = rd_ptr(str_obj);
     if (klass < 0x10000 || klass >= 0x0001000000000000ULL) return false;
     int32_t length = 0;
     if (!rd_exact(str_obj + IL2CPP_STRING_LENGTH, length)) return false;
-    if (length <= 0 || length > 31) return false;
-    uint16_t chars[32] = {};
+    if (max_chars > 63) max_chars = 63;
+    if (length <= 0 || length > max_chars) return false;
+    uint16_t chars[64] = {};
     if (!rd_buf(str_obj + IL2CPP_STRING_CHARS, chars, (size_t)length * sizeof(uint16_t)))
         return false;
     size_t pos = 0;
@@ -162,6 +165,10 @@ static bool read_managed_string(uint64_t str_obj, char* out, size_t cap) {
     }
     out[pos] = '\0';
     return pos > 0;
+}
+
+static bool read_managed_string(uint64_t str_obj, char* out, size_t cap) {
+    return read_managed_string_ex(str_obj, out, cap, 31);
 }
 
 // The legacy nicklabel widget keeps the "USERNAME" placeholder, so it is only
@@ -260,6 +267,31 @@ static bool read_name_source(uint64_t player, int src, char* out, size_t cap) {
 // Visible nickname, best source first. Sources are ranked so a real,
 // human-readable name always wins over a machine-generated id ("F7GDJ6472D");
 // such an id is only used as a last resort when no real name is available.
+// ---- Team / clan membership -------------------------------------------------
+// PlayerManager syncs teamName / clanId / clanTag to every client, so two
+// players can be compared directly. Team names are per-session and clan ids are
+// stable, and either one matching makes the two players allies.
+struct PlayerGroup {
+    char team[40] = {};
+    char clan[48] = {};
+    char tag[16]  = {};
+    bool any() const { return team[0] || clan[0] || tag[0]; }
+};
+
+static void read_player_group(uint64_t player, PlayerGroup& out) {
+    out = PlayerGroup{};
+    if (!valid_obj(player)) return;
+    read_managed_string_ex(rd_ptr(player + PLAYER_TEAM_NAME), out.team, sizeof(out.team), 39);
+    read_managed_string_ex(rd_ptr(player + PLAYER_CLAN_ID),   out.clan, sizeof(out.clan), 47);
+    read_managed_string_ex(rd_ptr(player + PLAYER_CLAN_TAG),  out.tag,  sizeof(out.tag),  15);
+}
+
+static bool groups_are_allied(const PlayerGroup& local, const PlayerGroup& other) {
+    if (local.team[0] && strcmp(local.team, other.team) == 0) return true;
+    if (local.clan[0] && strcmp(local.clan, other.clan) == 0) return true;
+    return false;
+}
+
 static bool player_display_name(uint64_t player, char* out, size_t cap) {
     if (!player || !out || cap < 2) return false;
     char human[32] = {};
@@ -544,6 +576,9 @@ struct PlayerTextCache {
     bool has_name = false;
     char weapon[48] = {}; // localized UTF-8, matches EspBox::weapon
     bool has_weapon = false;
+    bool ally = false;    // shares the local player's team or clan
+    char tag[16] = {};    // clan tag
+    bool has_tag = false;
     int  revalidate = 30; // first sighting resolves immediately
 };
 static std::unordered_map<uint64_t, PlayerTextCache> g_player_text;
@@ -3130,6 +3165,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         local = transform_camera_position; has_local_position = true;
     }
 
+    // Our own team / clan, read once per frame and compared against every
+    // player below. Without it nobody can be an ally.
+    PlayerGroup local_group;
+    bool local_group_valid = false;
+    if (local_entity_index < s_transforms.size()) {
+        read_player_group(s_transforms[local_entity_index], local_group);
+        local_group_valid = local_group.any();
+    }
+
     // Firing reference for the aimbot (local look direction + eye point).
     {
         uint64_t local_player = (local_entity_index < s_transforms.size()) ? s_transforms[local_entity_index] : 0;
@@ -3222,11 +3266,19 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     tc.weapon[0] = '\0';
                     tc.has_weapon = false;
                 }
+                PlayerGroup group;
+                read_player_group(s_transforms[i], group);
+                tc.ally = local_group_valid && groups_are_allied(local_group, group);
+                snprintf(tc.tag, sizeof(tc.tag), "%s", group.tag);
+                tc.has_tag = tc.tag[0] != '\0';
             }
             box.has_name = tc.has_name;
             if (tc.has_name) memcpy(box.name, tc.name, sizeof(box.name));
             box.has_weapon = tc.has_weapon;
             if (tc.has_weapon) memcpy(box.weapon, tc.weapon, sizeof(box.weapon));
+            box.ally = tc.ally;
+            box.has_tag = tc.has_tag;
+            if (tc.has_tag) memcpy(box.tag, tc.tag, sizeof(box.tag));
         }
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
@@ -3316,12 +3368,26 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
 static bool g_markers_ore_enabled = false;
 static bool g_markers_animal_enabled = false;
+static bool g_markers_loot_enabled = false;
+static float g_marker_max_distance = 150.0F;
+static int g_marker_rescan_countdown = 0;
 static uint64_t g_network_client_class = 0;
 static uint64_t g_network_identity_class = 0;
 
-void esp_set_markers_enabled(bool ore, bool animals) {
+void esp_set_markers_enabled(bool ore, bool animals, bool loot) {
+    // Loot containers are filtered out during the registry walk, so switching
+    // that category on has to invalidate the cached entity list.
+    if (loot != g_markers_loot_enabled) g_marker_rescan_countdown = 0;
     g_markers_ore_enabled = ore;
     g_markers_animal_enabled = animals;
+    g_markers_loot_enabled = loot;
+}
+
+void esp_set_marker_max_distance(float metres) {
+    if (!std::isfinite(metres)) return;
+    if (metres < 10.0F) metres = 10.0F;
+    if (metres > MAX_PLAYER_DISTANCE) metres = MAX_PLAYER_DISTANCE;
+    g_marker_max_distance = metres;
 }
 
 struct MarkerEntity {
@@ -3335,8 +3401,7 @@ struct MarkerEntity {
     unsigned char color_rgb[3] = {255, 255, 255};
 };
 static std::vector<MarkerEntity> g_marker_entities;
-static int g_marker_rescan_countdown = 0;
-static std::unordered_map<uint64_t, uint8_t> g_class_is_mineable;
+static std::unordered_map<uint64_t, uint8_t> g_marker_class_kind;
 
 // What a single marker looks like: kind picks the toggle it belongs to, and ore
 // markers carry a fixed colour per resource (stone grey, metal orange, sulfur
@@ -3381,22 +3446,13 @@ static bool marker_for_entity_type(int32_t type, MarkerLook& look) {
     }
 }
 
-// Wolves and rats have no EntityType of their own (the enum stops at the
-// analytics animals), so they are recognised by the prefab name of their
-// GameObject. Matching is per word — the name is split on separators, digits
-// and camelCase humps — so "NPC_Wolf 02(Clone)" hits "wolf" while "Crate"
-// cannot be mistaken for a rat.
-static bool animal_look_from_object_name(const char* raw, MarkerLook& look) {
-    static const struct { const char* word; const char* ru; } kAnimals[] = {
-        {"wolf", "Волк"},      {"wolfs", "Волк"},     {"wolves", "Волк"},
-        {"rat", "Крыса"},      {"rats", "Крыса"},     {"mouse", "Крыса"},
-        {"bear", "Медведь"},   {"boar", "Кабан"},     {"pig", "Кабан"},
-        {"deer", "Олень"},     {"stag", "Олень"},     {"rabbit", "Кролик"},
-        {"hare", "Заяц"},      {"chicken", "Курица"}, {"hen", "Курица"},
-        {"fish", "Рыба"},      {"shark", "Акула"},    {"cannibal", "Каннибал"},
-        {"horse", "Лошадь"},   {"goat", "Коза"},      {"sheep", "Овца"},
-        {"cow", "Корова"},     {"fox", "Лиса"},       {"snake", "Змея"},
-    };
+// Split a prefab name into lower-case words and hand each one to `visit`.
+// Separators, digits and camelCase humps end a word, so "NPC_Wolf 02(Clone)"
+// yields npc / wolf / clone. Matching whole words (never substrings) is what
+// keeps "Crate" from looking like a rat and "Ratchet" from looking like loot.
+// `visit` returning true stops the walk; that result is returned.
+template <typename Visit>
+static bool for_each_name_token(const char* raw, Visit&& visit) {
     if (!raw || !raw[0]) return false;
     char word[24];
     size_t n = 0;
@@ -3413,15 +3469,124 @@ static bool animal_look_from_object_name(const char* raw, MarkerLook& look) {
         }
         if (n > 0) {
             word[n] = '\0';
-            for (const auto& animal : kAnimals) {
-                if (strcmp(word, animal.word) == 0) { look = animal_look(animal.ru); return true; }
-            }
+            if (visit((const char*)word)) return true;
             n = 0;
         }
         if (!c) break;
         if (hump) { word[n++] = (char)(c - 'A' + 'a'); }
     }
     return false;
+}
+
+// Wolves and rats have no EntityType of their own (the enum stops at the
+// analytics animals), so they are recognised by the prefab name of their
+// GameObject.
+static bool animal_look_from_object_name(const char* raw, MarkerLook& look) {
+    static const struct { const char* word; const char* ru; } kAnimals[] = {
+        {"wolf", "Волк"},      {"wolfs", "Волк"},     {"wolves", "Волк"},
+        {"rat", "Крыса"},      {"rats", "Крыса"},     {"mouse", "Крыса"},
+        {"bear", "Медведь"},   {"boar", "Кабан"},     {"pig", "Кабан"},
+        {"deer", "Олень"},     {"stag", "Олень"},     {"rabbit", "Кролик"},
+        {"hare", "Заяц"},      {"chicken", "Курица"}, {"hen", "Курица"},
+        {"fish", "Рыба"},      {"shark", "Акула"},    {"cannibal", "Каннибал"},
+        {"horse", "Лошадь"},   {"goat", "Коза"},      {"sheep", "Овца"},
+        {"cow", "Корова"},     {"fox", "Лиса"},       {"snake", "Змея"},
+    };
+    return for_each_name_token(raw, [&](const char* word) {
+        for (const auto& animal : kAnimals) {
+            if (strcmp(word, animal.word) == 0) { look = animal_look(animal.ru); return true; }
+        }
+        return false;
+    });
+}
+
+// ---- World loot containers --------------------------------------------------
+// Oxide.LootObject is used both for the loot scattered around the map (crates,
+// barrels, airdrops) and for the storage boxes players deploy. Deployed boxes
+// are what we must not draw, and they give themselves away twice: they own a
+// Building.BuildingPiece component, and their prefab is named after the size
+// ("WoodenBoxLarge", "Small Box"). Both signals are used.
+struct LootNameInfo {
+    const char* label = nullptr;
+    int  rank = 0;
+    bool player_box = false;
+};
+
+static void scan_loot_name(const char* raw, LootNameInfo& info) {
+    // Containers a player deploys — never interesting, always hidden.
+    static const char* const kDeployed[] = {
+        "storage", "stash", "cupboard", "furnace", "campfire", "locker", "bed",
+        "sleeping", "sleepingbag", "bedroll", "shelf", "planter", "composter",
+        "fridge", "mailbox", "workbench", "quarry", "turret", "smelter",
+        "barbecue", "oven", "wardrobe", "rack",
+    };
+    // A "box" that also says how big it is, is a player box ("Large Box").
+    static const char* const kSizeWords[] = {"small", "large", "big", "wood", "wooden", "medium", "mini"};
+    // label table; a higher rank wins so "MilitaryCrate" beats plain "crate".
+    static const struct { const char* word; const char* ru; int rank; } kLabels[] = {
+        {"military",   "Военный ящик",       3},
+        {"elite",      "Элитный ящик",       3},
+        {"airdrop",    "Аирдроп",            3},
+        {"supply",     "Аирдроп",            3},
+        {"medical",    "Мед. ящик",          3},
+        {"medkit",     "Мед. ящик",          3},
+        {"ammo",       "Ящик патронов",      3},
+        {"toolbox",    "Ящик инструментов",  3},
+        {"food",       "Ящик с едой",        3},
+        {"heli",       "Ящик с вертолёта",   3},
+        {"helicopter", "Ящик с вертолёта",   3},
+        {"bradley",    "Ящик с танка",       3},
+        {"oilrig",     "Ящик с вышки",       3},
+        {"hackable",   "Взломной ящик",      3},
+        {"safe",       "Сейф",               3},
+        {"cash",       "Касса",              3},
+        {"register",   "Касса",              3},
+        {"vending",    "Автомат",            3},
+        {"barrel",     "Бочка",              2},
+        {"crate",      "Ящик",               2},
+        {"lootbox",    "Ящик",               2},
+        {"loot",       "Ящик",               2},
+        {"container",  "Контейнер",          2},
+        {"chest",      "Сундук",             2},
+        {"case",       "Кейс",               2},
+        {"cache",      "Тайник",             2},
+        {"trash",      "Мусорка",            2},
+        {"garbage",    "Мусорка",            2},
+        {"sack",       "Мешок",              2},
+        {"bag",        "Мешок",              2},
+    };
+    bool saw_box = false, saw_size = false;
+    for_each_name_token(raw, [&](const char* word) {
+        for (const char* bad : kDeployed)
+            if (strcmp(word, bad) == 0) { info.player_box = true; return true; }
+        if (strcmp(word, "box") == 0) saw_box = true;
+        for (const char* size : kSizeWords)
+            if (strcmp(word, size) == 0) { saw_size = true; break; }
+        for (const auto& entry : kLabels) {
+            if (strcmp(word, entry.word) == 0 && entry.rank > info.rank) {
+                info.rank = entry.rank;
+                info.label = entry.ru;
+            }
+        }
+        return false;
+    });
+    if (saw_box && saw_size) info.player_box = true;
+}
+
+static bool loot_marker(uint64_t component, const char* object_name, const char* root_name,
+                        MarkerLook& look) {
+    // A container that is part of a building is player-placed by definition.
+    if (valid_obj(rd_ptr(component + LOOTOBJECT_BUILDING_PIECE))) return false;
+
+    LootNameInfo info;
+    scan_loot_name(object_name, info);
+    if (!info.player_box) scan_loot_name(root_name, info);
+    if (info.player_box) return false;
+
+    look.kind = ESP_MARKER_LOOT;
+    look.label = info.label ? info.label : "Ящик"; // unknown world container
+    look.has_color = false;
+    return true;
 }
 
 // Elements of a managed List<T> or T[] (the dump types these fields as `?`, so
@@ -3485,16 +3650,20 @@ static bool marker_from_loot(uint64_t mineable, MarkerLook& look) {
     return best > 0;
 }
 
-// Il2CppClass -> "is this one of the Mineable* components?" (cached: the same
-// handful of classes come back for every entity).
-static bool class_is_mineable(uint64_t klass) {
-    if (!valid_obj(klass)) return false;
-    auto found = g_class_is_mineable.find(klass);
-    if (found != g_class_is_mineable.end()) return found->second != 0;
+// Il2CppClass -> which of the two component families this is (cached: the same
+// handful of classes come back for every entity in the registry).
+enum MarkerClass : uint8_t { MARKER_CLASS_NONE = 0, MARKER_CLASS_MINEABLE = 1, MARKER_CLASS_LOOT = 2 };
+
+static uint8_t marker_class_of(uint64_t klass) {
+    if (!valid_obj(klass)) return MARKER_CLASS_NONE;
+    auto found = g_marker_class_kind.find(klass);
+    if (found != g_marker_class_kind.end()) return found->second;
     std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME));
-    bool mineable = name.rfind("Mineable", 0) == 0;
-    if (g_class_is_mineable.size() < 512) g_class_is_mineable[klass] = mineable ? 1 : 0;
-    return mineable;
+    uint8_t kind = MARKER_CLASS_NONE;
+    if (name.rfind("Mineable", 0) == 0)                       kind = MARKER_CLASS_MINEABLE;
+    else if (name == "LootObject" || name == "PumpkinTrick")  kind = MARKER_CLASS_LOOT;
+    if (g_marker_class_kind.size() < 512) g_marker_class_kind[klass] = kind;
+    return kind;
 }
 
 static uint64_t resolve_network_client_spawned() {
@@ -3577,22 +3746,28 @@ static void rebuild_marker_entities() {
         // becomes its own marker, positioned by its own GameObject.
         for (int32_t b = 0; b < behaviour_count; ++b) {
             uint64_t component = behaviours[b];
-            if (!valid_obj(component) || !class_is_mineable(rd_ptr(component))) continue;
-            int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
+            if (!valid_obj(component)) continue;
+            const uint8_t component_class = marker_class_of(rd_ptr(component));
+            if (component_class == MARKER_CLASS_NONE) continue;
+
             MarkerLook look;
             char object_name[48] = {}, root_name[48] = {};
             managed_component_gameobject_name(component, object_name, sizeof(object_name));
-            bool known = marker_for_entity_type(entity_type, look);
-            // Wolves / rats carry no EntityType, ore nodes leave it empty too.
-            // The component may sit on a sub-object ("Body"), so the network
-            // object's own GameObject is tried as well.
-            if (!known && object_name[0]) known = animal_look_from_object_name(object_name, look);
-            if (!known) {
-                managed_component_gameobject_name(identity, root_name, sizeof(root_name));
-                if (root_name[0]) known = animal_look_from_object_name(root_name, look);
+            managed_component_gameobject_name(identity, root_name, sizeof(root_name));
+            bool known = false;
+            if (component_class == MARKER_CLASS_LOOT) {
+                if (!g_markers_loot_enabled) continue;
+                known = loot_marker(component, object_name, root_name, look);
+            } else {
+                int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
+                known = marker_for_entity_type(entity_type, look);
+                // Wolves / rats carry no EntityType, ore nodes leave it empty
+                // too. The component may sit on a sub-object ("Body"), so the
+                // network object's own GameObject is tried as well.
+                if (!known && object_name[0]) known = animal_look_from_object_name(object_name, look);
+                if (!known && root_name[0])   known = animal_look_from_object_name(root_name, look);
+                if (!known) known = marker_from_loot(component, look);
             }
-            if (!known) known = marker_from_loot(component, look);
-
             if (!known) continue;
 
             MarkerEntity entity;
@@ -3617,14 +3792,14 @@ static void rebuild_marker_entities() {
 static void reset_marker_caches() {
     g_marker_entities.clear();
     g_marker_rescan_countdown = 0;
-    g_class_is_mineable.clear();
+    g_marker_class_kind.clear();
     g_network_client_class = 0;
     g_network_identity_class = 0;
 }
 
 std::vector<EspMarker> esp_get_markers() {
     std::vector<EspMarker> result;
-    if (!g_markers_ore_enabled && !g_markers_animal_enabled) {
+    if (!g_markers_ore_enabled && !g_markers_animal_enabled && !g_markers_loot_enabled) {
         if (!g_marker_entities.empty()) g_marker_entities.clear();
         g_marker_rescan_countdown = 0;
         return result;
@@ -3636,10 +3811,11 @@ std::vector<EspMarker> esp_get_markers() {
         rebuild_marker_entities();
     }
 
-    const float max_distance = 300.0F;
+    const float max_distance = g_marker_max_distance;
     for (MarkerEntity& entity : g_marker_entities) {
         if (entity.kind == ESP_MARKER_ORE && !g_markers_ore_enabled) continue;
         if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
+        if (entity.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) continue;
         // Ore nodes never move, so their position is only read on a rescan.
         if (entity.kind == ESP_MARKER_ANIMAL || !entity.position_valid)
             entity.position_valid = marker_world_position(entity.transform, entity.position);
@@ -3653,7 +3829,9 @@ std::vector<EspMarker> esp_get_markers() {
 
         Vec2 screen{};
         Vec3 anchor = entity.position;
-        anchor.y += (entity.kind == ESP_MARKER_ANIMAL) ? 1.2F : 0.9F; // above the model
+        // above the model: animals are tall, crates sit low on the ground
+        anchor.y += (entity.kind == ESP_MARKER_ANIMAL) ? 1.2F
+                  : (entity.kind == ESP_MARKER_LOOT)   ? 0.6F : 0.9F;
         if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) continue;
         if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
         if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F) continue;

@@ -19,6 +19,12 @@ struct EspBox {
     bool  has_weapon = false;
     char  weapon[48] = {}; // localized, UTF-8 (Russian names are wider)
 
+    // Team / clan. `ally` is true when this player shares the local player's
+    // team name or clan id; `tag` is the clan tag, shown next to the name.
+    bool  ally = false;
+    bool  has_tag = false;
+    char  tag[16] = {};
+
     // Skeleton (screen-space bone positions), filled when skeleton ESP is enabled.
     bool  has_skeleton;
     bool  bone_valid[ESP_BONE_COUNT];
@@ -44,7 +50,7 @@ struct EspBox {
 // World markers: ore nodes and animals, drawn as a small labelled pill at the
 // object's screen position. Both come from the same networked source
 // (Oxide.MineableObject in Mirror's client registry), so one struct covers them.
-enum EspMarkerKind { ESP_MARKER_ORE = 0, ESP_MARKER_ANIMAL = 1 };
+enum EspMarkerKind { ESP_MARKER_ORE = 0, ESP_MARKER_ANIMAL = 1, ESP_MARKER_LOOT = 2 };
 struct EspMarker {
     float x = 0.0F, y = 0.0F;   // screen position (top-centre of the pill)
     float distance = 0.0F;      // metres from the local player
@@ -59,8 +65,11 @@ struct EspMarker {
 bool        esp_init(pid_t pid);
 void        esp_reset();
 void        esp_set_skeleton_enabled(bool enabled);
-// Enable the ore / animal marker scan (both off = no work is done at all).
-void        esp_set_markers_enabled(bool ore, bool animals);
+// Enable the ore / animal / loot marker scan (all off = no work is done).
+void        esp_set_markers_enabled(bool ore, bool animals, bool loot);
+// Markers further away than this (metres) are dropped. Keeps the screen clean
+// on open terrain, where the registry easily holds hundreds of nodes.
+void        esp_set_marker_max_distance(float metres);
 // Markers for the current frame, nearest first. Call after esp_get_boxes():
 // it reuses the camera/projection state that call established.
 std::vector<EspMarker> esp_get_markers();
