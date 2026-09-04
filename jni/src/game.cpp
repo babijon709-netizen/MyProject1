@@ -2309,6 +2309,86 @@ static void prune_player_aux(const std::vector<uint64_t>& players) {
     }
 }
 
+// ---- Vehicles and ghost copies ----------------------------------------------
+// Two things go wrong once a player sits in a car:
+//   * lastSavedPosition (the field every box is built from) stops being
+//     updated and keeps pointing at the spot where he got in;
+//   * the old PlayerManager object often stays in the player list next to the
+//     one that drives away, so the same player is in there twice.
+// Both are handled here: mounted players are positioned from their rendered
+// transform (it is parented to the seat, so it follows the car), and objects
+// that share a userID are reduced to the one that is actually moving.
+
+struct PlayerTrack {
+    char uid[40] = {};      // userID, empty when it could not be read
+    int  uid_recheck = 0;   // objects are pooled and reused for other players
+    Vec3 last{};
+    bool has_last = false;
+    int  still_frames = 0;  // consecutive frames without movement
+};
+static std::unordered_map<uint64_t, PlayerTrack> g_player_track;
+// uid -> the object we drew last time, so a tie does not flip between copies.
+static std::unordered_map<std::string, uint64_t> g_player_track_pick;
+
+static void prune_player_track(const std::vector<uint64_t>& players) {
+    for (auto it = g_player_track.begin(); it != g_player_track.end();) {
+        bool present = false;
+        for (uint64_t player : players) if (player == it->first) { present = true; break; }
+        if (!present) it = g_player_track.erase(it); else ++it;
+    }
+    if (g_player_track_pick.size() > 256) g_player_track_pick.clear();
+}
+
+static bool player_is_mounted(uint64_t player) {
+    if (!player) return false;
+    uint32_t vehicle = rd<uint32_t>(player + PLAYER_VEHICLE_ID);
+    return vehicle != 0 && vehicle != 0xFFFFFFFFu;
+}
+
+// World position of the player's own transform (worldCameraRoot). While he is
+// mounted this is the only source that moves with the vehicle.
+static bool player_rendered_position(uint64_t player, Vec3& out) {
+    uint64_t native = resolve_player_native_transform(player);
+    if (!native) return false;
+    if (g_skeleton_layout_valid && read_transform_hierarchy_layout(native, g_skeleton_layout, out)
+        && vec3_is_finite(out))
+        return true;
+    return read_transform_hierarchy_position(native, out) && vec3_is_finite(out);
+}
+
+// worldCameraRoot sits at eye level, the box is built from the feet.
+static constexpr float kCameraRootHeight = 1.60F;
+
+static void apply_mounted_position(uint64_t player, Vec3& feet) {
+    if (!g_use_direct_player_position) return; // already using the transform
+    if (!player_is_mounted(player)) return;
+    Vec3 rendered{};
+    if (!player_rendered_position(player, rendered)) return;
+    rendered.y -= kCameraRootHeight;
+    if (!position_looks_like_world_space(rendered)) return;
+    feet = rendered;
+}
+
+static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
+    PlayerTrack& track = g_player_track[player];
+    if (--track.uid_recheck <= 0) {
+        track.uid_recheck = 120; // ~2 s: pooled objects change owner
+        char uid[40] = {};
+        read_managed_string_ex(rd_ptr(player + PLAYER_USER_ID), uid, sizeof(uid), 39);
+        memcpy(track.uid, uid, sizeof(track.uid));
+    }
+    if (track.has_last) {
+        float dx = position.x - track.last.x;
+        float dy = position.y - track.last.y;
+        float dz = position.z - track.last.z;
+        if (dx * dx + dy * dy + dz * dz > 0.0025F) track.still_frames = 0;      // > 5 cm
+        else if (track.still_frames < 100000) ++track.still_frames;
+    }
+    track.last = position;
+    track.has_last = true;
+    return track;
+}
+
 // ===================== Remote (third-person) held weapon =====================
 //
 // FPManager/FPObject only exist for the local player, which is why enemies
@@ -3040,6 +3120,8 @@ static void reset_world_caches() {
     g_aim_ref_valid = false;
     g_player_aux.clear();
     g_player_text.clear();
+    g_player_track.clear();
+    g_player_track_pick.clear();
     g_skeletons.clear();
     reset_marker_caches();
 }
@@ -3061,6 +3143,8 @@ void esp_reset() {
     g_aim_state = {};
     g_player_aux.clear();
     g_player_text.clear();
+    g_player_track.clear();
+    g_player_track_pick.clear();
     g_skeletons.clear();
     g_skeleton_layout = {}; g_skeleton_layout_valid = false;
     g_go_name_offset = 0; g_go_name_plain_pointer = false;
@@ -3126,6 +3210,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     const bool want_bones = g_skeleton_enabled || g_aim_bones_requested;
     prune_player_aux(s_transforms);
     prune_player_text(s_transforms);
+    prune_player_track(s_transforms);
     if (want_bones) prune_skeleton_cache(s_transforms);
     else if (!g_skeletons.empty()) g_skeletons.clear();
     g_skeleton_builds_this_frame = 0;
@@ -3161,6 +3246,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     bool has_local_position = false;
     Vec3 local{};
     size_t local_entity_index = s_transforms.size();
+    // Positions are read once per frame here and reused below: the box loop
+    // must see exactly the same values the local player was picked with.
+    std::vector<Vec3> positions(s_transforms.size());
+    std::vector<char> position_ok(s_transforms.size(), 0);
 
     {
         Vec3 camera_position{};
@@ -3171,6 +3260,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         for (size_t index = 0; index < s_transforms.size(); ++index) {
             Vec3 candidate{};
             if (!read_entity_position(s_transforms[index], candidate)) continue;
+            apply_mounted_position(s_transforms[index], candidate);
+            positions[index] = candidate;
+            position_ok[index] = 1;
+            track_player(s_transforms[index], candidate);
             if (first_valid_index == s_transforms.size()) { first_valid_index = index; first_valid_position = candidate; }
             if (!has_camera_position) continue;
             double dx = (double)candidate.x - camera_position.x, dy = (double)candidate.y - camera_position.y, dz = (double)candidate.z - camera_position.z;
@@ -3228,11 +3321,43 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         read_local_aim_reference(local_player, local_aux, local_crouched);
     }
 
+    // One box per player: of several objects carrying the same userID (the
+    // copy left behind when he mounted a vehicle, or a respawn leftover) only
+    // the one that moved most recently is drawn. The previous winner keeps the
+    // spot on a tie, otherwise a parked car would make the box flip about.
+    std::vector<char> suppressed(s_transforms.size(), 0);
+    {
+        std::unordered_map<std::string, size_t> chosen;
+        for (size_t index = 0; index < s_transforms.size(); ++index) {
+            if (!position_ok[index]) continue;
+            auto tracked = g_player_track.find(s_transforms[index]);
+            if (tracked == g_player_track.end() || !tracked->second.uid[0]) continue;
+            std::string uid(tracked->second.uid);
+            auto found = chosen.find(uid);
+            if (found == chosen.end()) { chosen.emplace(uid, index); continue; }
+            size_t rival = found->second;
+            int mine = tracked->second.still_frames;
+            int theirs = g_player_track[s_transforms[rival]].still_frames;
+            bool take_mine;
+            if (index == local_entity_index)      take_mine = true;
+            else if (rival == local_entity_index) take_mine = false;
+            else if (mine != theirs)              take_mine = mine < theirs;
+            else {
+                auto sticky = g_player_track_pick.find(uid);
+                take_mine = sticky != g_player_track_pick.end() && sticky->second == s_transforms[index];
+            }
+            suppressed[take_mine ? rival : index] = 1;
+            if (take_mine) found->second = index;
+        }
+        for (const auto& entry : chosen) g_player_track_pick[entry.first] = s_transforms[entry.second];
+    }
+
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) continue;
         if (!s_transforms[i]) continue;
-        Vec3 feet{};
-        if (!read_entity_position(s_transforms[i], feet)) continue;
+        if (suppressed[i]) continue;
+        if (!position_ok[i]) continue;
+        Vec3 feet = positions[i];
 
         float distance = -1.0F;
         if (has_local_position) {
@@ -3570,7 +3695,7 @@ static void scan_loot_name(const char* raw, LootNameInfo& info) {
         "storage", "stash", "cupboard", "furnace", "campfire", "locker", "bed",
         "sleeping", "sleepingbag", "bedroll", "shelf", "planter", "composter",
         "fridge", "mailbox", "workbench", "quarry", "turret", "smelter",
-        "barbecue", "oven", "wardrobe", "rack", "generic", "deployable",
+        "barbecue", "oven", "wardrobe", "rack",
         "woodbox", "woodenbox", "largewoodbox", "smallwoodbox", "largebox",
         "smallbox", "bigbox", "storagebox", "toolcupboard", "toolbox2",
         // Sleeping players and the bag a killed player leaves behind are
@@ -3578,7 +3703,10 @@ static void scan_loot_name(const char* raw, LootNameInfo& info) {
         "corpse", "corpses", "ragdoll", "sleeper", "sleepers", "player",
         "players", "human", "survivor", "backpack", "deathbag", "death",
         "died", "grave", "skeleton", "playercorpse", "playerloot",
-        "lootbag", "dropbag", "deathloot", "inventory", "belt",
+        "lootbag", "dropbag", "deathloot",
+        // NOTE: never put a word here that a world container can also use.
+        // "generic" was in this list for one build and it hid every barrel:
+        // barrels open the plain "generic" loot panel.
     };
     // A "box" that also says how big it is, is a player box ("Large Box").
     static const char* const kSizeWords[] = {"small", "large", "big", "wood", "wooden", "medium", "mini"};

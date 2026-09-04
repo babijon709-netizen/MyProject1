@@ -252,9 +252,16 @@ enum class MineableEntityType : std::int32_t {
 // ---- Team / clan membership (Oxide.PlayerManager, dump.cs) ------------------
 // All three are Mirror SyncVars (they have _Mirror_SyncVarHookDelegate_* twins
 // at 0x378/0x390/0x398), so every client sees them for every player.
+inline constexpr std::uint64_t PLAYER_USER_ID   = 0x278; // string userID (unique per account)
 inline constexpr std::uint64_t PLAYER_TEAM_NAME = 0x280; // string teamName
 inline constexpr std::uint64_t PLAYER_CLAN_ID   = 0x290; // string clanId
 inline constexpr std::uint64_t PLAYER_CLAN_TAG  = 0x298; // string clanTag
+
+// Vehicles: both are SyncVars (uint netId of the vehicle / index of the seat),
+// zero while the player is on foot. A mounted player stops updating
+// lastSavedPosition, so his box has to come from the rendered transform.
+inline constexpr std::uint64_t PLAYER_VEHICLE_ID = 0x288; // uint vehicleID
+inline constexpr std::uint64_t PLAYER_SEAT_ID    = 0x28C; // uint seatID
 
 // ---- World loot containers (Oxide.LootObject : fNZ : Mirror.NetworkBehaviour)
 // Everything openable in the world is a LootObject: road crates, barrels,
