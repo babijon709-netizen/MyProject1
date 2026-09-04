@@ -1,6 +1,6 @@
-player=0x6D0772DA80 dist=70.1 name=[eliseixz] | fp=0x6D07741D80 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FED809810[0] | wRef=0x6FC72D6510[-] | inv=0x6D07729980
-player=0x6D0772D000 dist=77.8 name=[Kiss..Me] | fp=0x6D07741C00 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FED8097B0[0] | wRef=0x6FC72DB8A0[-] {str:40='av_1' } | inv=0x6D07729900
-player=0x6D0772E540 dist=154.1 name=[рипро] | fp=0x6D07741A80 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FED809750[0] | wRef=0x6FC72E2300[-] {str:A0='av_19' } | inv=0x6D07729880
-player=0x6F54084540 dist=74.0 name=[haven't] | fp=0x6F54074180 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEDFFC360[0] | wRef=0x6FE6BAC510[-] | inv=0x6F5408E940
-player=0x6F568A4A80 dist=34.6 name=[w8odi] | fp=0x6F567EB3C0 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FC589B4B0[0] | wRef=0x6F568BFBA0[-] | inv=0x6F568ABF00
-player=0x6D0772E000 dist=31.5 name=[dada.30] | fp=0x6D077419C0 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FED809720[0] | wRef=0x6FC72F4900[-] | inv=0x6D07729840
+player=0x6E920B7540 dist=52.5 name=[djnxnx] | fp=0x6E920EA300 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEEC9EE70[0] | wRef=0x6CF3755E70[-] | inv=0x6E920999C0
+player=0x6E920B7000 dist=41.0 name=[GandonJajaja] | fp=0x6E920EA240 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEEC9EE40[0] | wRef=0x6CF375DA80[-] | inv=0x6E92099980
+player=0x6E9204B000 dist=52.6 name=[qortick] | fp=0x6E920EA480 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEEC9EED0[0] | wRef=0x6CF3738F60[-] | inv=0x6E92099A40
+player=0x6E92210000 dist=54.8 name=[pantera_love] | fp=0x6CF159C000 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEED84D50[0] | wRef=0x6CF3114CC0[-] | inv=0x6CF3173BC0
+player=0x6CF3174000 dist=58.5 name=[Мр_яйцехруст] | fp=0x6CEA6FCD80 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEED84CC0[0] | wRef=0x6CF3117FC0[-] {str:50='cdn-01.oxidesurvival.ru' } | inv=0x6CF3173B00
+player=0x6E9204B540 dist=45.4 name=[dusterhuffer] | fp=0x6E920EA540 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEEC9EF30[0] | wRef=0x6CF3732A20[-] | inv=0x6E92099A80
