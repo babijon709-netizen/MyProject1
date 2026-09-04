@@ -3017,6 +3017,15 @@ static void UpdateAim(float dt) {
     static unsigned long long s_lastId = 0;        // sticky target
     static int   s_lostFrames = 0;
     static int   s_holdFrames = 0;
+    // Target motion, measured in degrees per second and smoothed over a few
+    // frames. Everything that makes the aim keep up with a running player is
+    // built on this: the lead below and the feed-forward in the controller.
+    static float s_prevWorldYaw = 0.f, s_prevWorldPitch = 0.f;
+    static bool  s_havePrevTgt = false;
+    static float s_velYaw = 0.f, s_velPitch = 0.f;   // deg/s
+    static int   s_velSamples = 0;
+    static int   s_sinceUpdate = 0;   // frames since the position last changed
+    static float s_updateGap = 1.f;   // typical frames between two updates
 
     const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     bool active = g_state.aim_touch && g_esp_attached && !menuOpen;
@@ -3031,6 +3040,8 @@ static void UpdateAim(float dt) {
     if (!active) {
         AimReleaseFinger(s_fingerDown);
         s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
+        s_havePrevTgt = false; s_velYaw = s_velPitch = 0.f; s_velSamples = 0;
+        s_sinceUpdate = 0; s_updateGap = 1.f;
         return;
     }
 
@@ -3132,48 +3143,93 @@ static void UpdateAim(float dt) {
     s_lostFrames = 0;
     if (best.id != s_lastId) s_haveLast = false; // do not learn gain across a target switch
 
-    // Lead a moving target: the game applies our finger delta next frame, by
-    // which time the target has moved on. Use the target's angular velocity
-    // relative to the camera (with the camera's own rotation removed) and
-    // aim one frame ahead. Reset on target switch.
-    static float s_prevTgtYaw = 0.f, s_prevTgtPitch = 0.f, s_prevCamYawT = 0.f, s_prevCamPitchT = 0.f;
-    static bool  s_havePrevTgt = false;
+    // ---- how fast is the target moving, and how old is what we see -------
+    // Remote players are not updated every frame: their position arrives with
+    // the network tick, so between two updates the box stands still and then
+    // jumps. Measuring the velocity per frame would therefore read zero most
+    // of the time. Instead the velocity is measured between two *updates*, and
+    // the age of the last update is tracked as well -- that age is most of the
+    // lag the crosshair shows behind a running player.
     {
         float cy = 0.f, cp = 0.f;
-        bool haveC = esp_camera_angles(cy, cp);
-        if (best.id == s_lastId && s_havePrevTgt && haveC) {
-            float dCamYaw = cy - s_prevCamYawT;
-            while (dCamYaw > 180.f) dCamYaw -= 360.f;
-            while (dCamYaw < -180.f) dCamYaw += 360.f;
-            float dCamPitch = cp - s_prevCamPitchT;
-            // world-space angular motion of the target = change in offset + camera rotation
-            float vYaw = (best.yaw - s_prevTgtYaw) + dCamYaw;
-            float vPitch = (best.pitch - s_prevTgtPitch) + dCamPitch;
-            if (std::isfinite(vYaw) && std::isfinite(vPitch) && fabsf(vYaw) < 10.f && fabsf(vPitch) < 10.f) {
-                s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
-                // Below this the "motion" is bone animation jitter (breathing,
-                // sway), which at long range is larger than the head itself.
-                // Extrapolating it would double the error, so only lead real
-                // movement. Aim more than a frame ahead for fast movers so the
-                // crosshair stays on a laterally running target (the controller
-                // smoothing otherwise makes it trail behind).
-                const float leadMin = degPerPx * 2.f;
-                float vMag = sqrtf(vYaw * vYaw + vPitch * vPitch);
-                if (vMag > leadMin) {
-                    float k = 1.1f * (1.f - leadMin / vMag);
-                    if (k > 1.5f) k = 1.5f;
-                    best.yaw += vYaw * k;
-                    best.pitch += vPitch * k;
+        const bool haveC = esp_camera_angles(cy, cp);
+        if (best.id != s_lastId || !haveC) {
+            s_velYaw = s_velPitch = 0.f;
+            s_velSamples = 0;
+            s_sinceUpdate = 0;
+            s_updateGap = 1.f;
+            s_havePrevTgt = false;
+        }
+        if (haveC) {
+            // Where the target is in the world, i.e. with our own turning
+            // taken out, so only the target's own motion is left.
+            float worldYaw = best.yaw + cy;
+            float worldPitch = best.pitch + cp;
+            if (s_havePrevTgt) {
+                float dYaw = worldYaw - s_prevWorldYaw;
+                while (dYaw > 180.f) dYaw -= 360.f;
+                while (dYaw < -180.f) dYaw += 360.f;
+                float dPitch = worldPitch - s_prevWorldPitch;
+                ++s_sinceUpdate;
+                // Anything below this is float noise / breathing, not a new
+                // network position.
+                const float moved = 0.02f;
+                if (fabsf(dYaw) > moved || fabsf(dPitch) > moved) {
+                    float span = (float)s_sinceUpdate * dt;
+                    if (span > 0.0005f) {
+                        float vYaw = dYaw / span, vPitch = dPitch / span;
+                        const float kMaxVel = 400.f; // deg/s, above this it is a teleport
+                        if (std::isfinite(vYaw) && std::isfinite(vPitch) &&
+                            fabsf(vYaw) < kMaxVel && fabsf(vPitch) < kMaxVel) {
+                            const float a = (s_velSamples < 2) ? 1.f : 0.5f;
+                            s_velYaw   = s_velYaw   * (1.f - a) + vYaw   * a;
+                            s_velPitch = s_velPitch * (1.f - a) + vPitch * a;
+                            if (s_velSamples < 1000) ++s_velSamples;
+                        }
+                    }
+                    s_updateGap = s_updateGap * 0.7f + (float)s_sinceUpdate * 0.3f;
+                    s_sinceUpdate = 0;
+                    s_prevWorldYaw = worldYaw; s_prevWorldPitch = worldPitch;
+                } else if ((float)s_sinceUpdate > s_updateGap * 2.f + 2.f) {
+                    // Nothing arrived for twice the usual gap: he stopped.
+                    // Bleed the speed off instead of leading into nowhere.
+                    s_velYaw *= 0.7f; s_velPitch *= 0.7f;
                 }
             } else {
-                s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
+                s_prevWorldYaw = worldYaw; s_prevWorldPitch = worldPitch;
+                s_sinceUpdate = 0;
             }
-        } else {
-            s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
+            s_havePrevTgt = true;
         }
-        if (haveC) { s_prevCamYawT = cy; s_prevCamPitchT = cp; s_havePrevTgt = true; }
-        else s_havePrevTgt = false;
     }
+
+    // Ignore movement smaller than ~1 px per frame: that is animation sway,
+    // and extrapolating it would only add error.
+    float velYaw = s_velYaw, velPitch = s_velPitch;
+    {
+        const float jitter = degPerPx / (dt > 0.0005f ? dt : 0.0167f); // 1 px/frame
+        float vMag = sqrtf(velYaw * velYaw + velPitch * velPitch);
+        if (s_velSamples < 1 || vMag < jitter) { velYaw = velPitch = 0.f; }
+        else {
+            float scale = 1.f - jitter / vMag; // fade the lead in smoothly
+            velYaw *= scale; velPitch *= scale;
+        }
+    }
+
+    // Aim where the target is now and where it will be when the move lands:
+    // the age of the last update plus one frame of input pipeline.
+    {
+        int stale = s_sinceUpdate;
+        if (stale > 8) stale = 8; // never extrapolate more than ~130 ms
+        // Only the age of the data has to be made up for: the delay between
+        // our move and the camera answering is already covered by the
+        // feed-forward term, which keeps the camera turning at the target's
+        // own speed instead of always reacting to an old error.
+        float leadTime = dt * (float)stale;
+        best.yaw   += velYaw   * leadTime;
+        best.pitch += velPitch * leadTime;
+    }
+
     s_lastId = best.id;
 
     // ---- learn finger gain (deg per px) from the previous frame ----
@@ -3232,7 +3288,11 @@ static void UpdateAim(float dt) {
     float deadYaw = deadBase, deadPitch = deadBase;
     if (gainKnownYaw   && deadYaw   < qYaw   * 0.55f) deadYaw   = qYaw   * 0.55f;
     if (gainKnownPitch && deadPitch < qPitch * 0.55f) deadPitch = qPitch * 0.55f;
-    if (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch) {
+    // Sitting still is only allowed when the target is not running away from
+    // under the crosshair: if its own motion is worth an input step this
+    // frame, the controller keeps working instead of parking.
+    const bool targetHoldsStill = fabsf(velYaw * dt) < deadYaw && fabsf(velPitch * dt) < deadPitch;
+    if (targetHoldsStill && fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch) {
         s_lastDx = s_lastDy = 0.f;
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
         return;
@@ -3241,7 +3301,12 @@ static void UpdateAim(float dt) {
     auto snapGrid = [&](float v) { return roundf(v * unitsPerPx) / unitsPerPx; };
 
     if (!s_fingerDown) {
-        s_fx = snapGrid(sw * 0.74f);
+        // Start off-centre against the direction of travel: a target running
+        // sideways then needs far longer before the finger hits the edge of
+        // the look area and has to be lifted and re-placed (three lost frames).
+        float bias = 0.f;
+        if (velYaw > 0.f) bias = -0.09f; else if (velYaw < 0.f) bias = 0.09f;
+        s_fx = snapGrid(sw * (0.74f + bias));
         s_fy = snapGrid(sh * 0.50f);
         Touch_Down(s_fx, s_fy);
         s_fingerDown = true;
@@ -3271,17 +3336,27 @@ static void UpdateAim(float dt) {
     float gy = learned ? s_gainYaw : probeGain;
     float gp = (s_gainPitch != 0.f) ? s_gainPitch : (learned ? fabsf(s_gainYaw) : probeGain);
 
-    float dx =  best.yaw   * k / gy;
-    float dy = -best.pitch * k / gp;
+    // Two terms: the usual smoothed correction of the remaining error, plus a
+    // feed-forward that covers the ground the target itself will cover during
+    // this frame. Without the second term the crosshair settles a fixed step
+    // behind anyone who keeps running -- exactly the "aim can not keep up".
+    const float ffYaw   = velYaw   * dt;
+    const float ffPitch = velPitch * dt;
+    float cmdYaw   = best.yaw   * k + ffYaw;
+    float cmdPitch = best.pitch * k + ffPitch;
+
+    float dx =  cmdYaw   / gy;
+    float dy = -cmdPitch / gp;
 
     // Final approach: within a few input steps of the target, stop smoothing
     // and jump straight to the nearest reachable grid position. Smoothing
     // here would either creep for many frames or, once rounded, overshoot
-    // and oscillate by a full step around the head.
+    // and oscillate by a full step around the head. The feed-forward stays in
+    // so a running target does not slip away again on the last step.
     if (gainKnownYaw && fabsf(best.yaw) < qYaw * 3.f)
-        dx = roundf((best.yaw / gy) * unitsPerPx) / unitsPerPx;
+        dx = roundf(((best.yaw + ffYaw) / gy) * unitsPerPx) / unitsPerPx;
     if (gainKnownPitch && fabsf(best.pitch) < qPitch * 3.f)
-        dy = roundf((-best.pitch / gp) * unitsPerPx) / unitsPerPx;
+        dy = roundf(((-best.pitch - ffPitch) / gp) * unitsPerPx) / unitsPerPx;
 
     // Clamp per-frame travel so a bad gain estimate never slingshots.
     const float maxStep = learned ? sh * 0.15f : sh * 0.05f;
@@ -3307,7 +3382,9 @@ static void UpdateAim(float dt) {
     if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
         Touch_Up();
         s_fingerDown = false;
-        s_fx = snapGrid(sw * 0.74f); s_fy = snapGrid(sh * 0.50f);
+        float bias = 0.f;
+        if (velYaw > 0.f) bias = -0.09f; else if (velYaw < 0.f) bias = 0.09f;
+        s_fx = snapGrid(sw * (0.74f + bias)); s_fy = snapGrid(sh * 0.50f);
         s_lastDx = s_lastDy = 0.f;
         s_haveLast = false;
         return;
