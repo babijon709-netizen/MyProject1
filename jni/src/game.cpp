@@ -545,7 +545,6 @@ struct PlayerTextCache {
     char weapon[48] = {}; // localized UTF-8, matches EspBox::weapon
     bool has_weapon = false;
     int  revalidate = 30; // first sighting resolves immediately
-    bool weapon_probed = false; // TEMP: once-per-player weapon-chain probe
 };
 static std::unordered_map<uint64_t, PlayerTextCache> g_player_text;
 
@@ -2524,90 +2523,6 @@ static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, b
     return false;
 }
 
-// One-shot diagnostics for the weapon chain: logs, per player, which links
-// resolved and what each route produced. Written to Download/ so it can be
-// pulled off the device when a weapon still shows up empty.
-static void dump_weapon_probe(uint64_t player, float distance) {
-    static int s_count = 0;
-    if (s_count >= 8 || !player) return;
-    ++s_count;
-
-    char line[900];
-    size_t n = 0;
-    n += (size_t)snprintf(line + n, sizeof(line) - n, "player=0x%llX dist=%.1f",
-                          (unsigned long long)player, (double)distance);
-    char name[32] = {};
-    if (player_display_name(player, name, sizeof(name)))
-        n += (size_t)snprintf(line + n, sizeof(line) - n, " name=[%s]", name);
-    n += (size_t)snprintf(line + n, sizeof(line) - n, " goNameOff=%s(0x%llX,plain=%d)",
-                          g_go_name_offset_valid ? "ok" : "NO",
-                          (unsigned long long)g_go_name_offset, g_go_name_plain_pointer ? 1 : 0);
-
-    uint64_t reference = rd_ptr(player + PLAYER_WEAPON_REFERENCE);
-    uint64_t component = resolve_player_weapon_component(player);
-    n += (size_t)snprintf(line + n, sizeof(line) - n, " | wRef=0x%llX pw=0x%llX",
-                          (unsigned long long)reference, (unsigned long long)component);
-    if (component) {
-        uint64_t piece = component + PLAYERWEAPON_PIECE;
-        n += (size_t)snprintf(line + n, sizeof(line) - n, " piece(en=%u num=%d state=%d)",
-                              (unsigned)rd<uint8_t>(piece + WEAPONPIECE_ENABLED),
-                              (int)rd<int16_t>(piece + WEAPONPIECE_NUMBER),
-                              (int)rd<int32_t>(component + PLAYERWEAPON_STATE));
-        uint64_t view = rd_ptr(component + PLAYERWEAPON_VIEW);
-        n += (size_t)snprintf(line + n, sizeof(line) - n, " view=0x%llX", (unsigned long long)view);
-        char raw[48] = {};
-        uint64_t weapon_base = valid_obj(view) ? rd_ptr(view + WEAPONVIEW_WEAPON_BASE) : 0;
-        n += (size_t)snprintf(line + n, sizeof(line) - n, " wBase=0x%llX", (unsigned long long)weapon_base);
-        if (managed_component_gameobject_name(weapon_base, raw, sizeof(raw)))
-            n += (size_t)snprintf(line + n, sizeof(line) - n, " wBase.go=[%s]", raw);
-        uint64_t root = valid_obj(view) ? managed_object_native(rd_ptr(view + WEAPONVIEW_ROOT_TRANSFORM)) : 0;
-        if (root && read_transform_name(root, raw, sizeof(raw)))
-            n += (size_t)snprintf(line + n, sizeof(line) - n, " view.root=[%s]", raw);
-    } else {
-        // No component: dump the wrapper slots so the layout can be spotted.
-        for (uint64_t offset = 0x00; offset <= 0x30 && valid_obj(reference); offset += 8) {
-            uint64_t candidate = rd_ptr(reference + offset);
-            if (!valid_obj(candidate)) continue;
-            uint64_t klass = rd_ptr(candidate);
-            std::string cls = valid_obj(klass) ? read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME)) : std::string();
-            n += (size_t)snprintf(line + n, sizeof(line) - n, " ref@%llX=%s",
-                                  (unsigned long long)offset, cls.empty() ? "?" : cls.c_str());
-        }
-    }
-
-    PlayerAux& aux = player_aux(player);
-    uint64_t model_info = resolve_player_model_info(player, aux);
-    n += (size_t)snprintf(line + n, sizeof(line) - n, " | modelInfo=0x%llX", (unsigned long long)model_info);
-    if (model_info) {
-        const uint64_t holders[2] = {MODELINFO_RIGHT_WEAPON_HOLDER, MODELINFO_LEFT_WEAPON_HOLDER};
-        for (int h = 0; h < 2; ++h) {
-            uint64_t holder = managed_object_native(rd_ptr(model_info + holders[h]));
-            char raw[48] = {};
-            n += (size_t)snprintf(line + n, sizeof(line) - n, " %s=0x%llX",
-                                  h ? "leftHold" : "rightHold", (unsigned long long)holder);
-            if (holder && read_transform_name(holder, raw, sizeof(raw)))
-                n += (size_t)snprintf(line + n, sizeof(line) - n, "[%s]", raw);
-            uint64_t children[4];
-            int count = read_transform_children(holder, children, 4);
-            for (int i = 0; i < count && n + 32 < sizeof(line); ++i) {
-                if (read_transform_name(children[i], raw, sizeof(raw)))
-                    n += (size_t)snprintf(line + n, sizeof(line) - n, " c%d=[%s]", i, raw);
-            }
-        }
-    }
-
-    char label[48] = {};
-    bool definite = false;
-    bool ok = player_weapon_name(player, label, sizeof(label), definite);
-    snprintf(line + n, sizeof(line) - n, " | LABEL=%s[%s] definite=%d",
-             ok ? "ok" : "none", label[0] ? label : "-", definite ? 1 : 0);
-
-    static bool s_appending = false;
-    FILE* f = fopen("/storage/emulated/0/Download/xvcen_weapon_debug.log", s_appending ? "a" : "w");
-    if (f) { fprintf(f, "%s\n", line); fclose(f); }
-    s_appending = true;
-}
-
 // Angular offset of a world point from the camera axis. Prefers the live
 // camera pose; falls back to inverting the projection from the screen point,
 // so aim angles never depend on the transform-pose path succeeding.
@@ -3308,11 +3223,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     tc.has_weapon = false;
                 }
             }
-            // TEMP: probe remote weapon chain once per player (see dump_weapon_probe).
-            if (!tc.weapon_probed) {
-                tc.weapon_probed = true;
-                dump_weapon_probe(s_transforms[i], distance);
-            }
             box.has_name = tc.has_name;
             if (tc.has_name) memcpy(box.name, tc.name, sizeof(box.name));
             box.has_weapon = tc.has_weapon;
@@ -3628,23 +3538,6 @@ static bool marker_world_position(uint64_t transform, Vec3& out) {
     return read_transform_hierarchy_position(transform, out) && vec3_is_finite(out);
 }
 
-// One-shot diagnostics: what the Mirror registry walk actually saw. Written to
-// Download/ so it can be pulled off the device if no markers show up.
-static void dump_marker_probe(uint64_t dictionary, uint64_t identity_class,
-                              int32_t entry_count, int identities, int mineables,
-                              const std::string& samples) {
-    static bool s_done = false;
-    if (s_done) return;
-    s_done = true;
-    FILE* f = fopen("/storage/emulated/0/Download/xvcen_marker_debug.log", "w");
-    if (!f) return;
-    fprintf(f, "nc_class=0x%llX id_class=0x%llX spawned=0x%llX entries=%d identities=%d mineables=%d\n",
-            (unsigned long long)g_network_client_class, (unsigned long long)identity_class,
-            (unsigned long long)dictionary, (int)entry_count, identities, mineables);
-    fprintf(f, "samples: %s\n", samples.c_str());
-    fclose(f);
-}
-
 // Walk Mirror's client registry and cache every ore node / animal in it.
 static void rebuild_marker_entities() {
     g_marker_entities.clear();
@@ -3665,17 +3558,12 @@ static void rebuild_marker_entities() {
     std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
     if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
 
-    int probe_identities = 0, probe_mineables = 0;
-    std::string probe_samples;
-
     uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
         uint64_t identity = 0;
         memcpy(&identity, buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE, sizeof(identity));
         if (!valid_obj(identity)) continue;
         if (identity_class && rd_ptr(identity) != identity_class) continue;
-        ++probe_identities;
-
         uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
         if (!valid_obj(array)) continue;
         int32_t behaviour_count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
@@ -3690,8 +3578,6 @@ static void rebuild_marker_entities() {
         for (int32_t b = 0; b < behaviour_count; ++b) {
             uint64_t component = behaviours[b];
             if (!valid_obj(component) || !class_is_mineable(rd_ptr(component))) continue;
-            ++probe_mineables;
-
             int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
             MarkerLook look;
             char object_name[48] = {}, root_name[48] = {};
@@ -3707,19 +3593,6 @@ static void rebuild_marker_entities() {
             }
             if (!known) known = marker_from_loot(component, look);
 
-            if (probe_samples.size() < 400) {
-                char loot[32] = {};
-                uint64_t first_loot[1];
-                if (read_managed_collection(rd_ptr(component + MINEABLE_LOOT), first_loot, 1) == 1)
-                    read_managed_string(rd_ptr(first_loot[0] + LOOTITEM_ITEM_NAME), loot, sizeof(loot));
-                char sample[160];
-                snprintf(sample, sizeof(sample), "%s:t%d:go=%s/%s:%s%s ",
-                         read_remote_string(rd_ptr(rd_ptr(component) + IL2CPP_CLASS_NAME)).c_str(),
-                         (int)entity_type, object_name[0] ? object_name : "-",
-                         root_name[0] ? root_name : "-",
-                         loot[0] ? loot : "-", known ? "" : ":skip");
-                probe_samples += sample;
-            }
             if (!known) continue;
 
             MarkerEntity entity;
@@ -3739,7 +3612,6 @@ static void rebuild_marker_entities() {
         }
         if (g_marker_entities.size() >= 512) break;
     }
-    dump_marker_probe(dictionary, identity_class, count, probe_identities, probe_mineables, probe_samples);
 }
 
 static void reset_marker_caches() {
