@@ -643,43 +643,51 @@ static void DrawEspOverlay() {
         dl->AddRect(ImVec2(x0, y), ImVec2(x1, y1), kVisOutline, 5.f, 0, 1.0f);
         dl->AddText(espFont, espFs, ImVec2(cx - tsz.x * 0.5f, y + padY), textCol, text);
     };
-    // Corner box: the middle of every edge is cut out, only corners remain.
-    auto CornerBox = [&](float x1, float y1, float x2, float y2, ImU32 col) {
-        float w = x2 - x1, h = y2 - y1;
-        if (w <= 0.5f || h <= 0.5f) return;
-        // At long range the projected box collapses to a couple of pixels, so
-        // its top and bottom edges sit on (nearly) the same scanline and read as
-        // a single horizontal line. When the box is that small, redraw just the
-        // top and bottom horizontal edges, vertically offset around the real
-        // box centre by a fixed gap that is always larger than the stroke, so
-        // the two lines are guaranteed to stay visibly separated at any range.
-        {
-            float row = (thick + 1.0f) + thick + 2.0f;      // two stroke rows + clear gap
-            if (row < 14.f) row = 14.f;
-            if (h < row || w < row) {
-                float cx = (x1 + x2) * 0.5f;
-                float cy = (y1 + y2) * 0.5f;
-                float span = w < row ? row : w;             // keep a readable width too
-                float X1 = cx - span * 0.5f, X2 = cx + span * 0.5f;
-                float Y1 = cy - row * 0.5f;
-                float Y2 = cy + row * 0.5f;
-                dl->AddLine(ImVec2(X1, Y1), ImVec2(X2, Y1), kVisOutline, thick + 1.0f);
-                dl->AddLine(ImVec2(X1, Y2), ImVec2(X2, Y2), kVisOutline, thick + 1.0f);
-                dl->AddLine(ImVec2(X1, Y1), ImVec2(X2, Y1), col, thick);
-                dl->AddLine(ImVec2(X1, Y2), ImVec2(X2, Y2), col, thick);
-                return;
-            }
+    // A far away player projects to a couple of pixels, which used to make the
+    // box degenerate (corners gone, top/bottom strokes fused into one line).
+    // Every visual therefore works on a rect that is grown around its own
+    // centre up to a stroke-aware minimum: enough room for two strokes plus a
+    // clear cut-out on each axis.
+    const float kMinBoxSide = 3.0f * (thick + 1.0f) + 8.0f;
+    auto NormRect = [&](float& x1, float& y1, float& x2, float& y2) {
+        if (x2 < x1) { float t = x1; x1 = x2; x2 = t; }
+        if (y2 < y1) { float t = y1; y1 = y2; y2 = t; }
+        if (x2 - x1 < kMinBoxSide) {
+            float cx = (x1 + x2) * 0.5f;
+            x1 = cx - kMinBoxSide * 0.5f; x2 = cx + kMinBoxSide * 0.5f;
         }
+        if (y2 - y1 < kMinBoxSide) {
+            float cy = (y1 + y2) * 0.5f;
+            y1 = cy - kMinBoxSide * 0.5f; y2 = cy + kMinBoxSide * 0.5f;
+        }
+    };
+    // Corner box: the middle of every edge is cut out, only corners remain.
+    // The corner length is capped per axis so the two segments of one edge can
+    // never meet — at any distance a visible gap stays in the middle of the
+    // top/bottom (and left/right) edges, which is what makes it read as a
+    // corner box instead of a plain rectangle or a single fused line.
+    auto CornerBox = [&](float x1, float y1, float x2, float y2, ImU32 col) {
+        if (!std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(x2) || !std::isfinite(y2)) return;
+        NormRect(x1, y1, x2, y2);
+        float w = x2 - x1, h = y2 - y1;
+
         float len = (w < h ? w : h) * 0.28f;
-        if (len < 10.f) len = 10.f;
         if (len > 42.f) len = 42.f;
-        if (len * 2.f > w) len = w * 0.5f;
-        if (len * 2.f > h) len = h * 0.5f;
+
+        // Keep at least ~30% of every edge (and never less than one stroke
+        // plus a pixel) empty in its middle.
+        float gapX = w * 0.30f; if (gapX < thick + 1.5f) gapX = thick + 1.5f;
+        float gapY = h * 0.30f; if (gapY < thick + 1.5f) gapY = thick + 1.5f;
+        float lx = (w - gapX) * 0.5f; if (lx > len) lx = len;
+        float ly = (h - gapY) * 0.5f; if (ly > len) ly = len;
+        if (lx < 1.5f) lx = 1.5f;
+        if (ly < 1.5f) ly = 1.5f;
+
         const ImVec2 pts[8][2] = {
-            {{x1, y1}, {x1 + len, y1}}, {{x1, y1}, {x1, y1 + len}},
-            {{x2 - len, y1}, {x2, y1}}, {{x2, y1}, {x2, y1 + len}},
-            {{x1, y2 - len}, {x1, y2}}, {{x1, y2}, {x1 + len, y2}},
-            {{x2 - len, y2}, {x2, y2}}, {{x2, y2 - len}, {x2, y2}},
+            {{x1, y1}, {x1 + lx, y1}}, {{x1, y1}, {x1, y1 + ly}},
+            {{x2 - lx, y1}, {x2, y1}}, {{x2, y1}, {x2, y1 + ly}},
+            {{x1, y2 - ly}, {x1, y2}}, {{x1, y2}, {x1 + lx, y2}},
+            {{x2 - lx, y2}, {x2, y2}}, {{x2, y2 - ly}, {x2, y2}},
         };
         for (int i = 0; i < 8; ++i)
             dl->AddLine(pts[i][0], pts[i][1], kVisOutline, thick + 1.0f);
@@ -689,6 +697,11 @@ static void DrawEspOverlay() {
 
     for (const EspBox& box : boxes) {
         if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
+
+        // Rect every visual (box, tracer, labels) is anchored to: never smaller
+        // than the stroke-aware minimum, so nothing collapses at long range.
+        float bx1 = box.x1, by1 = box.y1, bx2 = box.x2, by2 = box.y2;
+        NormRect(bx1, by1, bx2, by2);
 
         if (g_state.esp_chams) {
             bool all_valid = true;
@@ -712,8 +725,7 @@ static void DrawEspOverlay() {
                     if (x < mnX) mnX = x; if (x > mxX) mxX = x;
                     if (y < mnY) mnY = y; if (y > mxY) mxY = y;
                 }
-                float dMin = (thick + 1.0f) + thick + 2.0f;
-                if (dMin < 10.f) dMin = 10.f;
+                float dMin = kMinBoxSide;
                 if ((mxX - mnX) >= dMin && (mxY - mnY) >= dMin) {
                     for (const auto& edge : BOX_EDGES) {
                         int a = edge[0], b = edge[1];
@@ -724,18 +736,14 @@ static void DrawEspOverlay() {
                         );
                     }
                 } else {
-                    float cx = (box.x1 + box.x2) * 0.5f;
-                    float cy = (box.y1 + box.y2) * 0.5f;
-                    float X1 = cx - dMin * 0.5f, Y1 = cy - dMin * 0.5f;
-                    float X2 = cx + dMin * 0.5f, Y2 = cy + dMin * 0.5f;
-                    dl->AddRect(ImVec2(X1, Y1), ImVec2(X2, Y2), kVisOutline, 0.f, 0, thick + 1.0f);
-                    dl->AddRect(ImVec2(X1, Y1), ImVec2(X2, Y2), col, 0.f, 0, thick);
+                    dl->AddRect(ImVec2(bx1, by1), ImVec2(bx2, by2), kVisOutline, 0.f, 0, thick + 1.0f);
+                    dl->AddRect(ImVec2(bx1, by1), ImVec2(bx2, by2), col, 0.f, 0, thick);
                 }
             }
         }
 
         if (g_state.esp_box) {
-            CornerBox(box.x1, box.y1, box.x2, box.y2, ColU32(cfg::esp::box_col));
+            CornerBox(bx1, by1, bx2, by2, ColU32(cfg::esp::box_col));
         }
 
         if (g_state.esp_skeleton && box.has_skeleton) {
@@ -780,31 +788,33 @@ static void DrawEspOverlay() {
 
         if (g_state.esp_tracer) {
             // From the middle of the top edge of the screen to the head area.
-            float tx = (box.x1 + box.x2) * 0.5f;
-            dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, box.y1),
+            float tx = (bx1 + bx2) * 0.5f;
+            dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, by1),
                         kVisOutline, thick + 1.0f);
-            dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, box.y1),
+            dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, by1),
                         ColU32(cfg::esp::tracer_col), thick);
         }
 
-        // Name above the box; weapon and distance stack below it.
+        // Name above the box; distance right under the box, weapon under the
+        // distance.
         {
-            float cx = (box.x1 + box.x2) * 0.5f;
+            float cx = (bx1 + bx2) * 0.5f;
             const float gap = 5.f;
             if (g_state.esp_name && box.has_name && box.name[0]) {
                 float h = PillH(box.name);
-                EspPill(cx, box.y1 - h - gap, box.name, ColU32(cfg::esp::name_col));
+                EspPill(cx, by1 - h - gap, box.name, ColU32(cfg::esp::name_col));
             }
-            float belowY = box.y2 + gap;
-            if (g_state.esp_weapon && box.has_weapon && box.weapon[0]) {
-                EspPill(cx, belowY, box.weapon, ColU32(cfg::esp::weapon_col));
-                belowY += PillH(box.weapon) + 4.f;
-            }
+            float belowY = by2 + gap;
             if (g_state.esp_wall) {
                 char label[32];
                 if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1fm", box.distance);
                 else snprintf(label, sizeof(label), "PLAYER");
                 EspPill(cx, belowY, label, ColU32(cfg::esp::distance_col));
+                belowY += PillH(label) + 4.f;
+            }
+            if (g_state.esp_weapon && box.has_weapon && box.weapon[0]) {
+                EspPill(cx, belowY, box.weapon, ColU32(cfg::esp::weapon_col));
+                belowY += PillH(box.weapon) + 4.f;
             }
         }
     }
