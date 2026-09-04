@@ -2989,10 +2989,21 @@ static void CenterMenuOnDisplay() {
 // Drives the game camera with a synthetic "look" finger on the right half of
 // the screen. The target is the exact bone world position (head / chest /
 // pelvis) projected through the live camera matrices, expressed as a yaw/pitch
-// offset from the camera forward axis. The controller is closed-loop: every
-// frame it measures how many degrees the crosshair actually moved per pixel
-// of finger travel and adapts its gain, so it converges in a handful of
-// frames regardless of the in-game sensitivity setting.
+// offset from the camera forward axis. The controller is closed-loop: it
+// measures how many degrees the camera actually turns per pixel of finger
+// travel and adapts, so it works at any in-game sensitivity without being
+// told what it is. Three things decide whether it can hold a running player:
+// the sensitivity estimate (below, fitted over a window and shared by both
+// axes), the lead that covers the input pipeline (kAimLeadSec), and the
+// in-flight accumulator that stops it from re-sending a correction that is
+// already on its way.
+
+// How far ahead of a moving target the aim points, in seconds. It covers the
+// whole loop -- the finger move queued this frame, the phone's input pipeline,
+// and the frame it takes to see the result. Swept on the bench across 30..120
+// fps and pipeline delays of one to four frames: 0.022 s is the flat bottom of
+// that curve, and either side of it costs accuracy on a sprinting target.
+static constexpr float kAimLeadSec = 0.022f;
 
 struct AimTarget {
     bool  valid = false;
@@ -3022,11 +3033,15 @@ static void UpdateAim(float dt) {
     // that keeps correcting an error it has already sent the fix for winds
     // itself up and hunts around the target instead of settling on it.
     static float s_flightYaw = 0.f, s_flightPitch = 0.f;
-    // Slow averages of what we asked for and what the camera did, used to
-    // measure the sensitivity. Comparing single frames only works if the
-    // phone answers within exactly one frame, which it does not have to.
-    static float s_avgCmdX = 0.f, s_avgCamY = 0.f;
-    static float s_avgCmdY = 0.f, s_avgCamP = 0.f;
+    // Sensitivity measurement. Accumulated over a window of frames: the
+    // phone answers a finger move a couple of frames late, so a frame-against
+    // -frame ratio measures the delay rather than the sensitivity.
+    static float s_winCmdX = 0.f, s_winCamY = 0.f;
+    static float s_winCmdY = 0.f, s_winCamP = 0.f;
+    static int   s_winN = 0;
+    static float s_prevMeas = 0.f;   // previous window, for confirmation
+    static int   s_measSeen = 0;     // windows measured while still uncalibrated
+    static int   s_invX = 0, s_invY = 0;  // votes for an inverted axis
     // Target motion, measured in degrees per second and smoothed over a few
     // frames. Everything that makes the aim keep up with a running player is
     // built on this: the lead below and the feed-forward in the controller.
@@ -3061,7 +3076,8 @@ static void UpdateAim(float dt) {
         s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
         s_havePrevTgt = false; s_hN = 0;
         s_flightYaw = s_flightPitch = 0.f;
-        s_avgCmdX = s_avgCamY = s_avgCmdY = s_avgCamP = 0.f;
+        s_winCmdX = s_winCamY = s_winCmdY = s_winCamP = 0.f;
+        s_winN = 0; s_prevMeas = 0.f; s_measSeen = 0;
         return;
     }
 
@@ -3304,7 +3320,18 @@ static void UpdateAim(float dt) {
                 const float cap = 2.0f;   // degrees, never trust the fit further
                 if (dy > cap) dy = cap; else if (dy < -cap) dy = -cap;
                 if (dp > cap) dp = cap; else if (dp < -cap) dp = -cap;
-                if (std::isfinite(dy) && std::isfinite(dp)) { best.yaw += dy; best.pitch += dp; }
+                // Aim where the target will be by the time the finger move we
+                // are about to send actually reaches the camera. The phone's
+                // input pipeline answers a couple of frames late and a running
+                // man covers real ground in that time; without this the
+                // crosshair sits a fixed step behind anyone who keeps running,
+                // proportional to how fast they run. It shifts the TARGET, not
+                // the command, so the gentle end of the speed slider does not
+                // inherit a permanent overshoot of one lead over its own gain.
+                float ly = velYaw * kAimLeadSec, lp = velPitch * kAimLeadSec;
+                if (std::isfinite(dy) && std::isfinite(dp)) {
+                    best.yaw += dy + ly; best.pitch += dp + lp;
+                }
             }
         }
     }
@@ -3321,35 +3348,78 @@ static void UpdateAim(float dt) {
         while (camYawDelta > 180.f) camYawDelta -= 360.f;
         while (camYawDelta < -180.f) camYawDelta += 360.f;
         float camPitchDelta = camPitch - s_lastCamPitch;
-        // Signed gains: a negative value simply means the game inverts that
-        // axis (e.g. "invert Y" enabled) and the controller follows suit.
-        // Adopt the measurement outright when it disagrees strongly with the
-        // current estimate (sensitivity changed / first sample), else smooth.
-        auto learn = [](float& gain, float measured) {
-            float m = fabsf(measured);
-            if (!std::isfinite(measured) || m < 0.005f || m > 2.0f) return;
-            // Only jump to a new value when the axis has clearly changed
-            // (first measurement, inverted axis, sensitivity changed in the
-            // game's settings); otherwise ease towards it.
-            if (gain == 0.f || (measured > 0.f) != (gain > 0.f) ||
-                m > fabsf(gain) * 2.5f || m < fabsf(gain) * 0.4f) gain = measured;
-            else gain = gain * 0.75f + measured * 0.25f;
-        };
-        // Sensitivity is measured from averages over roughly ten frames, not
-        // from one frame against the one before it. A phone can take two or
-        // three frames to answer a finger move, and matching this frame's
-        // rotation to last frame's move then measures nothing but the delay,
-        // which is how the estimate used to end up wildly wrong -- and a
-        // wrong sensitivity is a controller that either crawls or hunts.
-        const float aG = 0.12f;
-        s_avgCmdX = s_avgCmdX * (1.f - aG) + s_lastDx * aG;
-        s_avgCamY = s_avgCamY * (1.f - aG) + camYawDelta * aG;
-        s_avgCmdY = s_avgCmdY * (1.f - aG) + s_lastDy * aG;
-        s_avgCamP = s_avgCamP * (1.f - aG) + camPitchDelta * aG;
-        // Finger right (dx > 0) turns right => yaw increases.
-        if (fabsf(s_avgCmdX) >= 0.7f) learn(s_gainYaw, s_avgCamY / s_avgCmdX);
-        // Finger down (dy > 0) looks down => pitch decreases.
-        if (fabsf(s_avgCmdY) >= 0.7f) learn(s_gainPitch, -s_avgCamP / s_avgCmdY);
+        // ---- sensitivity: ONE number, fitted to both axes ---------------
+        // The vertical axis cannot be measured on its own. Targets sit near
+        // the horizon, so while the finger travels tens of pixels sideways it
+        // travels one or two up and down -- and dividing one small noisy
+        // number by another produced a vertical sensitivity that was off by a
+        // third on a good day, never learned at all on a bad one, and under
+        // sustained recoil came out NEGATIVE, at which point the controller
+        // drove the camera up and away from the target and the aim simply did
+        // not work while shooting. A phone drives both axes from one look
+        // sensitivity, so one scalar is least-squares fitted to both, each
+        // axis weighted by how far the finger actually travelled along it.
+        //
+        // Measured over a window rather than frame against frame: the input
+        // pipeline answers late, which only misplaces the window edges, and
+        // rotation we did not cause (recoil, the player's own thumb) averages
+        // down instead of being mistaken for a sensitivity change.
+        s_winCmdX += s_lastDx;  s_winCamY += camYawDelta;
+        s_winCmdY += s_lastDy;  s_winCamP += camPitchDelta;
+        ++s_winN;
+        if (s_winN >= 10 && fabsf(s_winCmdX) + fabsf(s_winCmdY) >= 6.f) {
+            // Finger right (dx > 0) raises yaw, finger down (dy > 0) lowers
+            // pitch. Magnitude and direction are taken apart on purpose: an
+            // axis the game inverts still measures the same sensitivity, and
+            // folding the two together would let "invert Y" corrupt the
+            // number for both axes instead of just flipping one sign.
+            const bool haveX = fabsf(s_winCmdX) >= 4.f;
+            const bool haveY = fabsf(s_winCmdY) >= 4.f;
+            const float gX = haveX ? (s_winCamY / s_winCmdX) : 0.f;
+            const float gY = haveY ? (-s_winCamP / s_winCmdY) : 0.f;
+            const float wX = haveX ? fabsf(s_winCmdX) : 0.f;
+            const float wY = haveY ? fabsf(s_winCmdY) : 0.f;
+            float meas = (wX + wY > 0.f)
+                       ? (fabsf(gX) * wX + fabsf(gY) * wY) / (wX + wY) : 0.f;
+            if (std::isfinite(meas) && fabsf(meas) > 0.004f && fabsf(meas) < 2.0f) {
+                // Adopt only what a second window confirms: one burst of
+                // recoil, or one shove from the player's own thumb, would
+                // otherwise capture the estimate for good -- and a wrong
+                // sensitivity is a controller that either crawls or hunts.
+                const bool agrees = (s_prevMeas != 0.f) &&
+                                    fabsf(meas) < fabsf(s_prevMeas) * 1.45f &&
+                                    fabsf(meas) > fabsf(s_prevMeas) * 0.69f;
+                ++s_measSeen;
+                if (agrees || (s_gainYaw == 0.f && s_measSeen >= 4)) {
+                    float g = fabsf(meas);
+                    s_gainYaw = (s_gainYaw == 0.f) ? g : (fabsf(s_gainYaw) * 0.6f + g * 0.4f);
+                    s_measSeen = 0;
+                }
+                s_prevMeas = meas;
+            }
+            // An inverted axis is a real setting, but it has to be proven on a
+            // window that actually moved along that axis -- never inferred
+            // from the pixel of jitter a drag along the other one leaves.
+            // A window that moved a long way along the axis counts double, so
+            // a genuinely inverted axis is recognised within a couple of
+            // windows instead of steering the wrong way for half a second.
+            auto vote = [](int& votes, bool inverted, bool strong) {
+                const int step = strong ? 2 : 1;
+                votes = inverted ? (votes + step > 3 ? 3 : votes + step)
+                                 : (votes - step < -3 ? -3 : votes - step);
+            };
+            if (fabsf(s_winCmdX) > 12.f && fabsf(s_winCamY) > 0.5f)
+                vote(s_invX, gX < 0.f, fabsf(s_winCmdX) > 25.f);
+            if (fabsf(s_winCmdY) > 12.f && fabsf(s_winCamP) > 0.5f)
+                vote(s_invY, gY < 0.f, fabsf(s_winCmdY) > 25.f);
+            s_winCmdX = s_winCamY = s_winCmdY = s_winCamP = 0.f;
+            s_winN = 0;
+        }
+        if (s_gainYaw != 0.f) {
+            const float g = fabsf(s_gainYaw);
+            s_gainYaw   = (s_invX >= 2) ? -g : g;
+            s_gainPitch = (s_invY >= 2) ? -g : g;
+        }
         // Whatever the camera just did is no longer in flight.
         s_flightYaw -= camYawDelta;
         s_flightPitch -= camPitchDelta;
