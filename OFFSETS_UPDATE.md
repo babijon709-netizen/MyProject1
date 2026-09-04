@@ -498,6 +498,7 @@ Fragments», «Stone Hatchet»), поэтому в таблице есть и н
 | Поля игрока (ники, кости) | `dump_player_diagnostics()` + `diag_done` в `PlayerTextCache` | `xvcen_esp_debug.log` | `git show 08b5b6f` (удалена в `e1eb40c`) |
 | Цепочка оружия удалённых игроков | `dump_weapon_probe()` + `weapon_probed` в `PlayerTextCache` | `xvcen_weapon_debug.log` | `git show eee29a6` |
 | Обход реестра Mirror (руды/животные) | `dump_marker_probe()` + счётчики `probe_*` в `rebuild_marker_entities()` | `xvcen_marker_debug.log` | `git show 0aa7a3c` |
+| Плашка `ESP attach=… pid=… boxes=…` слева сверху | `DrawAttachStatus()` + вызов перед `DrawEspOverlay()` в главном цикле | на экране | `git show 0f1f869` |
 
 Все три — одноразовые (пишут при первом скане/первых 8 игроках), вызов ставится
 рядом с местом, где значение уже посчитано.
