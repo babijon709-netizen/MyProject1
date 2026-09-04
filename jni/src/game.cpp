@@ -280,6 +280,20 @@ static bool player_display_name(uint64_t player, char* out, size_t cap) {
     return true;
 }
 
+// Read a display name from an Oxide.ItemData: m_Name (0x18) else m_ShortName (0x20).
+static bool read_item_data_display_name(uint64_t item_data, char* out, size_t cap) {
+    if (!out || cap < 2) return false;
+    out[0] = '\0';
+    if (!valid_obj(item_data)) return false;
+    char tmp[32] = {};
+    uint64_t str = rd_ptr(item_data + ITEMDATA_NAME);
+    if (!str || !read_managed_string(str, tmp, sizeof(tmp))) str = rd_ptr(item_data + ITEMDATA_SHORTNAME);
+    if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
+        memcpy(out, tmp, cap); out[cap - 1] = '\0'; return true;
+    }
+    return false;
+}
+
 // Held weapon display name. FP state is local-only (MonoBehaviour, never synced),
 // so for remote players the FP objects may be missing: after the strict pass
 // (FPObject -> player back-reference) a relaxed pass accepts the objects as-is.
@@ -296,33 +310,49 @@ static bool fp_object_display_name(uint64_t weapon, uint64_t player, bool strict
     }
     // Fall back to the held item definition (Item -> ItemData m_Name/m_ShortName).
     uint64_t item = rd_ptr(weapon + FPOBJECT_ITEM);
-    if (valid_obj(item)) {
-        uint64_t data = rd_ptr(item + ITEM_DATA);
-        if (valid_obj(data)) {
-            str = rd_ptr(data + ITEMDATA_NAME);
-            if (!str) str = rd_ptr(data + ITEMDATA_SHORTNAME);
-            if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
-                memcpy(out, tmp, cap);
-                out[cap - 1] = '\0';
-                return true;
-            }
-        }
-    }
+    if (read_item_data_display_name(rd_ptr(item + ITEM_DATA), out, cap))
+        return true;
     return false;
 }
 
 static bool player_weapon_name(uint64_t player, char* out, size_t cap) {
     if (!player || !out || cap < 2) return false;
+    // (1) FP manager route — works for the local player (and rarely for a
+    // remote player whose FP MonoBehaviour happens to be instantiated).
     uint64_t fp = rd_ptr(player + PLAYER_FP_MANAGER);
-    if (!valid_obj(fp)) return false;
-    uint64_t candidates[2] = {
-        rd_ptr(fp + FPMANAGER_CURRENT_WEAPON),
-        rd_ptr(fp + FPMANAGER_CURRENT_OBJECT),
-    };
-    for (int strict = 1; strict >= 0; --strict) {
-        for (int i = 0; i < 2; ++i) {
-            if (fp_object_display_name(candidates[i], player, strict != 0, out, cap))
-                return true;
+    if (valid_obj(fp)) {
+        uint64_t candidates[2] = {
+            rd_ptr(fp + FPMANAGER_CURRENT_WEAPON),
+            rd_ptr(fp + FPMANAGER_CURRENT_OBJECT),
+        };
+        for (int strict = 1; strict >= 0; --strict) {
+            for (int i = 0; i < 2; ++i) {
+                if (fp_object_display_name(candidates[i], player, strict != 0, out, cap))
+                    return true;
+            }
+        }
+    }
+    // (2) weaponReference @0xF0 — server-authoritative held weapon, present for
+    // every remote player. Most likely an Oxide.Item (ItemData at +0x20); fall
+    // back to the FPObject layout (name at +0x78 / Item at +0x40).
+    uint64_t wr = rd_ptr(player + PLAYER_WEAPON_REFERENCE);
+    if (valid_obj(wr)) {
+        if (read_item_data_display_name(rd_ptr(wr + ITEM_DATA), out, cap))
+            return true;
+        if (fp_object_display_name(wr, player, false, out, cap))
+            return true;
+    }
+    // (3) weapons[] @0x198 — inventory/belt weapon objects; try each as an Item.
+    uint64_t arr = rd_ptr(player + PLAYER_WEAPONS_ARRAY);
+    if (valid_obj(arr)) {
+        int32_t len = rd<int32_t>(arr + IL2CPP_ARRAY_LENGTH);
+        if (len > 0 && len <= 32) {
+            for (int32_t i = 0; i < len; ++i) {
+                uint64_t el = rd_ptr(arr + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
+                if (!valid_obj(el)) continue;
+                if (read_item_data_display_name(rd_ptr(el + ITEM_DATA), out, cap))
+                    return true;
+            }
         }
     }
     return false;
@@ -355,29 +385,57 @@ static void prune_player_text(const std::vector<uint64_t>& players) {
 // source, log once per player what the inventory / weapons-array /
 // weapon-reference candidates actually contain. Remove once the read chain is
 // finalised.
-static bool probe_weapon_label(uint64_t obj, char* out, size_t cap) {
-    if (!out || cap < 2) return false;
-    out[0] = '\0';
-    if (!valid_obj(obj)) return false;
+// Best-effort readable label for a candidate weapon/held-object pointer.
+// Handles both layouts from dump.cs:
+//   - obj is an Oxide.Item:    ItemData at obj+0x20 (ITEM_DATA), ItemData has
+//                              m_Name@0x18 / m_ShortName@0x20.
+//   - obj is an FPObject:      display-name string at obj+0x78 (FPOBJECT_OBJECT_NAME),
+//                              and/or Item at obj+0x40 (FPOBJECT_ITEM)-> ItemData.
+static bool item_name_from_data(uint64_t data, char* out, size_t cap) {
+    if (!out || cap < 2 || !valid_obj(data)) { if (out) out[0] = 0; return false; }
     char tmp[40] = {};
-    // Direct display name on the object (FPObject-style).
+    uint64_t str = rd_ptr(data + ITEMDATA_NAME);
+    if (!str || !read_managed_string(str, tmp, sizeof(tmp))) str = rd_ptr(data + ITEMDATA_SHORTNAME);
+    if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
+        memcpy(out, tmp, cap); out[cap - 1] = '\0'; return true;
+    }
+    out[0] = '\0'; return false;
+}
+static bool probe_weapon_label(uint64_t obj, char* out, size_t cap) {
+    if (out && cap) out[0] = '\0';
+    if (!out || cap < 2) return false;
+    if (!valid_obj(obj)) return false;
+    // (1) obj is an Oxide.Item -> ItemData at obj+0x20.
+    if (item_name_from_data(rd_ptr(obj + ITEM_DATA), out, cap)) return true;
+    // (2) obj is an FPObject -> Item at obj+0x40, its ItemData at +0x20.
+    uint64_t item = rd_ptr(obj + FPOBJECT_ITEM);
+    if (item_name_from_data(rd_ptr(item + ITEM_DATA), out, cap)) return true;
+    // (3) obj is an FPObject with a direct display-name string at +0x78.
+    char tmp[40] = {};
     uint64_t str = rd_ptr(obj + FPOBJECT_OBJECT_NAME);
     if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
         memcpy(out, tmp, cap); out[cap - 1] = '\0'; return true;
     }
-    // Item -> ItemData m_Name / m_ShortName.
-    uint64_t item = rd_ptr(obj + FPOBJECT_ITEM);
-    if (valid_obj(item)) {
-        uint64_t data = rd_ptr(item + ITEM_DATA);
-        if (valid_obj(data)) {
-            str = rd_ptr(data + ITEMDATA_NAME);
-            if (!str) str = rd_ptr(data + ITEMDATA_SHORTNAME);
-            if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
-                memcpy(out, tmp, cap); out[cap - 1] = '\0'; return true;
-            }
+    return false;
+}
+// Fingerprint an unknown managed object: print the first few fields that look
+// like managed strings, with their object-relative offset, to learn the layout.
+static void scan_obj_strings(uint64_t obj, char* out, size_t cap, int max_fields) {
+    if (!out || cap < 2) return;
+    out[0] = '\0';
+    if (!valid_obj(obj)) return;
+    size_t n = 0;
+    for (int off = 0x10; off <= 0x180 && max_fields > 0; off += 8) {
+        uint64_t p = rd_ptr(obj + (uint64_t)off);
+        if (!valid_obj(p)) continue;
+        char s[40] = {};
+        if (read_managed_string(p, s, sizeof(s)) && s[0]) {
+            int add = snprintf(out + n, cap - n, "%X='%s' ", off, s);
+            if (add > 0) n += (size_t)add;
+            --max_fields;
+            if (n + 2 >= cap) break;
         }
     }
-    return false;
 }
 static void dump_weapon_probe(uint64_t player, float distance) {
     static int s_count = 0;
@@ -417,11 +475,18 @@ static void dump_weapon_probe(uint64_t player, float distance) {
             n += (size_t)snprintf(line + n, sizeof(line) - n, " e%u=%s[%s]", i, ok ? "obj" : "null", tmp[0] ? tmp : "-");
         }
     }
-    // (c) weaponReference @0xF0.
+    // (c) weaponReference @0xF0 (probably the server-authoritative held Oxide.Item).
     uint64_t wr = rd_ptr(player + PLAYER_WEAPON_REFERENCE);
     tmp[0] = 0;
     probe_weapon_label(wr, tmp, sizeof(tmp));
     n += (size_t)snprintf(line + n, sizeof(line) - n, " | wRef=0x%llX[%s]", (unsigned long long)wr, tmp[0] ? tmp : "-");
+    // Fingerprint wRef's string fields so we can locate the real layout if the
+    // Item/FPObject routes above miss.
+    {
+        char fs[400] = {};
+        scan_obj_strings(wr, fs, sizeof(fs), 12);
+        if (fs[0]) n += (size_t)snprintf(line + n, sizeof(line) - n, " {str:%s}", fs);
+    }
     // (d) inventory @0x98 presence.
     uint64_t inv = rd_ptr(player + PLAYER_INVENTORY);
     n += (size_t)snprintf(line + n, sizeof(line) - n, " | inv=0x%llX", (unsigned long long)inv);
