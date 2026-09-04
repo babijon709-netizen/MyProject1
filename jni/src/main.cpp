@@ -3266,12 +3266,20 @@ static void UpdateAim(float dt) {
 
             // Noise floor: a pixel of bone jitter spread over the window is
             // worth only a fraction of a degree per second, so real running is
-            // no longer thrown away with it. Fade in rather than switch on.
+            // no longer thrown away with it.
+            //
+            // The gate fades in over the band between the floor and twice the
+            // floor, and above that leaves the speed alone. Subtracting the
+            // floor from every speed instead -- the obvious way to write this
+            // -- takes a fixed bite out of the lead no matter how fast the
+            // target is, and a fixed bite out of the lead is a fixed distance
+            // the crosshair trails by, at every range. That is the artefact
+            // this whole path exists to remove.
             float floorVel = degPerPx * 1.2f / usedSpan;
             float vMag = sqrtf(velYaw * velYaw + velPitch * velPitch);
             if (vMag <= floorVel) { velYaw = velPitch = 0.f; }
-            else {
-                float scale = 1.f - floorVel / vMag;
+            else if (vMag < floorVel * 2.f) {
+                float scale = (vMag - floorVel) / floorVel;
                 velYaw *= scale; velPitch *= scale;
             }
 
