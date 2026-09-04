@@ -3017,6 +3017,16 @@ static void UpdateAim(float dt) {
     static unsigned long long s_lastId = 0;        // sticky target
     static int   s_lostFrames = 0;
     static int   s_holdFrames = 0;
+    // Rotation we have already asked for but have not seen arrive yet. The
+    // phone does not answer a finger move on the same frame, and a controller
+    // that keeps correcting an error it has already sent the fix for winds
+    // itself up and hunts around the target instead of settling on it.
+    static float s_flightYaw = 0.f, s_flightPitch = 0.f;
+    // Slow averages of what we asked for and what the camera did, used to
+    // measure the sensitivity. Comparing single frames only works if the
+    // phone answers within exactly one frame, which it does not have to.
+    static float s_avgCmdX = 0.f, s_avgCamY = 0.f;
+    static float s_avgCmdY = 0.f, s_avgCamP = 0.f;
     // Target motion, measured in degrees per second and smoothed over a few
     // frames. Everything that makes the aim keep up with a running player is
     // built on this: the lead below and the feed-forward in the controller.
@@ -3050,6 +3060,8 @@ static void UpdateAim(float dt) {
         AimReleaseFinger(s_fingerDown);
         s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
         s_havePrevTgt = false; s_hN = 0;
+        s_flightYaw = s_flightPitch = 0.f;
+        s_avgCmdX = s_avgCamY = s_avgCmdY = s_avgCamP = 0.f;
         return;
     }
 
@@ -3316,17 +3328,38 @@ static void UpdateAim(float dt) {
         auto learn = [](float& gain, float measured) {
             float m = fabsf(measured);
             if (!std::isfinite(measured) || m < 0.005f || m > 2.0f) return;
+            // Only jump to a new value when the axis has clearly changed
+            // (first measurement, inverted axis, sensitivity changed in the
+            // game's settings); otherwise ease towards it.
             if (gain == 0.f || (measured > 0.f) != (gain > 0.f) ||
-                m > fabsf(gain) * 1.3f || m < fabsf(gain) * 0.7f) gain = measured;
-            else gain = gain * 0.7f + measured * 0.3f;
+                m > fabsf(gain) * 2.5f || m < fabsf(gain) * 0.4f) gain = measured;
+            else gain = gain * 0.75f + measured * 0.25f;
         };
+        // Sensitivity is measured from averages over roughly ten frames, not
+        // from one frame against the one before it. A phone can take two or
+        // three frames to answer a finger move, and matching this frame's
+        // rotation to last frame's move then measures nothing but the delay,
+        // which is how the estimate used to end up wildly wrong -- and a
+        // wrong sensitivity is a controller that either crawls or hunts.
+        const float aG = 0.12f;
+        s_avgCmdX = s_avgCmdX * (1.f - aG) + s_lastDx * aG;
+        s_avgCamY = s_avgCamY * (1.f - aG) + camYawDelta * aG;
+        s_avgCmdY = s_avgCmdY * (1.f - aG) + s_lastDy * aG;
+        s_avgCamP = s_avgCamP * (1.f - aG) + camPitchDelta * aG;
         // Finger right (dx > 0) turns right => yaw increases.
-        // Moves are exact device-grid steps now, so even 1-2 px moves give a
-        // clean measurement; keep a floor so noise never dominates.
-        if (fabsf(s_lastDx) >= 1.f) learn(s_gainYaw, camYawDelta / s_lastDx);
+        if (fabsf(s_avgCmdX) >= 0.7f) learn(s_gainYaw, s_avgCamY / s_avgCmdX);
         // Finger down (dy > 0) looks down => pitch decreases.
-        if (fabsf(s_lastDy) >= 1.f) learn(s_gainPitch, -camPitchDelta / s_lastDy);
+        if (fabsf(s_avgCmdY) >= 0.7f) learn(s_gainPitch, -s_avgCamP / s_avgCmdY);
+        // Whatever the camera just did is no longer in flight.
+        s_flightYaw -= camYawDelta;
+        s_flightPitch -= camPitchDelta;
     }
+    // Leak, so that rotation we did not cause -- recoil, the player's own
+    // thumb -- is forgotten within a few frames instead of being chased.
+    s_flightYaw *= 0.80f; s_flightPitch *= 0.80f;
+    if (!std::isfinite(s_flightYaw) || fabsf(s_flightYaw) > 30.f) s_flightYaw = 0.f;
+    if (!std::isfinite(s_flightPitch) || fabsf(s_flightPitch) > 30.f) s_flightPitch = 0.f;
+    if (!s_fingerDown) { s_flightYaw = s_flightPitch = 0.f; }
     if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
     else s_haveLast = false;
 
@@ -3409,8 +3442,14 @@ static void UpdateAim(float dt) {
     // behind anyone who keeps running -- exactly the "aim can not keep up".
     const float ffYaw   = velYaw   * dt;
     const float ffPitch = velPitch * dt;
-    float cmdYaw   = best.yaw   * k + ffYaw;
-    float cmdPitch = best.pitch * k + ffPitch;
+    // Correct only what is still missing after the moves already on their way
+    // have landed. Without this the loop asks for the same correction several
+    // frames running and then has to undo it -- which at the fast end of the
+    // slider is not a settle at all but a permanent hunt around the target.
+    const float missYaw   = best.yaw   - s_flightYaw;
+    const float missPitch = best.pitch - s_flightPitch;
+    float cmdYaw   = missYaw   * k + ffYaw;
+    float cmdPitch = missPitch * k + ffPitch;
 
     float dx =  cmdYaw   / gy;
     float dy = -cmdPitch / gp;
@@ -3420,10 +3459,10 @@ static void UpdateAim(float dt) {
     // here would either creep for many frames or, once rounded, overshoot
     // and oscillate by a full step around the head. The feed-forward stays in
     // so a running target does not slip away again on the last step.
-    if (gainKnownYaw && fabsf(best.yaw) < qYaw * 3.f)
-        dx = roundf(((best.yaw + ffYaw) / gy) * unitsPerPx) / unitsPerPx;
-    if (gainKnownPitch && fabsf(best.pitch) < qPitch * 3.f)
-        dy = roundf(((-best.pitch - ffPitch) / gp) * unitsPerPx) / unitsPerPx;
+    if (gainKnownYaw && fabsf(missYaw) < qYaw * 3.f)
+        dx = roundf(((missYaw + ffYaw) / gy) * unitsPerPx) / unitsPerPx;
+    if (gainKnownPitch && fabsf(missPitch) < qPitch * 3.f)
+        dy = roundf(((-missPitch - ffPitch) / gp) * unitsPerPx) / unitsPerPx;
 
     // Clamp per-frame travel so a bad gain estimate never slingshots.
     const float maxStep = learned ? sh * 0.15f : sh * 0.05f;
@@ -3454,10 +3493,14 @@ static void UpdateAim(float dt) {
         s_fx = snapGrid(sw * (0.74f + bias)); s_fy = snapGrid(sh * 0.50f);
         s_lastDx = s_lastDy = 0.f;
         s_haveLast = false;
+        s_flightYaw = s_flightPitch = 0.f;  // the move never happened
         return;
     }
     s_fx = nx; s_fy = ny;
     s_lastDx = dx; s_lastDy = dy;
+    // On its way, but not visible yet.
+    s_flightYaw   += dx * gy;
+    s_flightPitch += -dy * gp;
     Touch_Move(s_fx, s_fy);
 }
 

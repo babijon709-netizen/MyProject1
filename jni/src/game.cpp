@@ -2695,12 +2695,27 @@ static bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, floa
 }
 
 // Extra vertical offset applied to every head aim point (metres, world up).
-// Tuned in-game: +14 cm lands centre-head at all ranges.
+// Tuned in-game at fighting range: +14 cm lands centre-head.
 static constexpr float g_aim_head_lift = 0.14F;
+// Up close the same 14 cm is a completely different shot: at five metres it
+// is well over a degree, which puts the round over the top of the head, while
+// at fifty it is a tenth of that and still inside the skull. The offset is
+// therefore ramped in with range instead of being a constant.
+static constexpr float g_aim_head_lift_near = 0.04F;
+
+static float head_lift_for_range(const Vec3& world) {
+    if (!g_cam_pose_valid) return g_aim_head_lift;
+    float dx = world.x - g_cam_pos.x, dy = world.y - g_cam_pos.y, dz = world.z - g_cam_pos.z;
+    float range = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (!std::isfinite(range)) return g_aim_head_lift;
+    float t = (range - 8.0F) / 30.0F;          // full offset from ~38 m out
+    if (t < 0.0F) t = 0.0F; else if (t > 1.0F) t = 1.0F;
+    return g_aim_head_lift_near + (g_aim_head_lift - g_aim_head_lift_near) * t;
+}
 
 static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat4& vp, float sw, float sh) {
     Vec3 world = world_in;
-    if (slot == 0) world.y += g_aim_head_lift;
+    if (slot == 0) world.y += head_lift_for_range(world_in);
     Vec2 screen{};
     if (!w2s(vp, world, sw, sh, screen, false)) return false;
     if (fabsf(screen.x) > sw * 4.0F || fabsf(screen.y) > sh * 4.0F) return false;
