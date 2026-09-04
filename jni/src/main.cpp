@@ -186,7 +186,6 @@ namespace cfg { namespace esp {
     inline ImVec4 weapon_col      = {1.00f, 0.95f, 0.10f, 1.f};
     inline ImVec4 tracer_col      = {1.00f, 0.20f, 0.20f, 1.f};
     inline ImVec4 skeleton_col    = {0.20f, 0.85f, 0.35f, 1.f};
-    inline ImVec4 ore_col         = {0.55f, 0.80f, 1.00f, 1.f};
     inline ImVec4 animal_col      = {1.00f, 0.60f, 0.25f, 1.f};
 
     inline bool box          = false;
@@ -838,8 +837,10 @@ static void DrawEspOverlay() {
         for (const EspMarker& marker : esp_get_markers()) {
             if (!marker.name[0]) continue;
             if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
-            EspPill(marker.x, marker.y, marker.name,
-                    ColU32(marker.kind == ESP_MARKER_ANIMAL ? cfg::esp::animal_col : cfg::esp::ore_col));
+            ImU32 col = marker.has_color
+                ? IM_COL32(marker.color_rgb[0], marker.color_rgb[1], marker.color_rgb[2], 255)
+                : ColU32(cfg::esp::animal_col);
+            EspPill(marker.x, marker.y, marker.name, col);
         }
     }
 }
@@ -1007,7 +1008,7 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_box_col          = cfg::esp::box_col;
     s.esp_box_col_invis    = cfg::esp::box_col_invis;
     s.esp_name_col         = cfg::esp::name_col;
-    s.esp_ore_col          = cfg::esp::ore_col;
+    s.esp_ore_col          = {0.f, 0.f, 0.f, 1.f}; // unused: ore colours are fixed per resource
     s.esp_distance_col     = cfg::esp::distance_col;
     s.esp_weapon_col       = cfg::esp::weapon_col;
     s.esp_weapon_icon_col  = {1.00f, 0.95f, 0.10f, 1.f};
@@ -1101,7 +1102,6 @@ static void ConfigLoad(int idx) {
     cfg::esp::weapon_col       = s.esp_weapon_col;
     cfg::esp::tracer_col       = s.esp_tracer_col;
     cfg::esp::skeleton_col     = s.esp_skeleton_col;
-    cfg::esp::ore_col          = s.esp_ore_col;
     cfg::esp::animal_col       = s.esp_animal_col;
     cfg::esp::box_type         = s.esp_box_type;
     cfg::esp::box_rounding     = s.esp_box_rounding;
@@ -2587,7 +2587,9 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
                 {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
-                {"##vor", XS("Руды"),           &g_state.esp_ore,          &g_state.a_esp_ore,          &cfg::esp::ore_col},
+                // No colour dot: every resource paints itself (stone grey,
+                // metal orange, sulfur yellow).
+                {"##vor", XS("Руды"),           &g_state.esp_ore,          &g_state.a_esp_ore,          nullptr},
                 {"##van", XS("Животные"),       &g_state.esp_animal,       &g_state.a_esp_animal,       &cfg::esp::animal_col},
             };
             constexpr int N = 9;

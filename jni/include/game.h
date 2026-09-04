@@ -49,6 +49,10 @@ struct EspMarker {
     float x = 0.0F, y = 0.0F;   // screen position (top-centre of the pill)
     float distance = 0.0F;      // metres from the local player
     int   kind = ESP_MARKER_ORE;
+    // Ore markers carry their own colour (one per resource); when has_color is
+    // false the caller picks the colour for that kind.
+    bool  has_color = false;
+    unsigned char color_rgb[3] = {255, 255, 255};
     char  name[32] = {};        // localized label (UTF-8)
 };
 

@@ -3421,29 +3421,108 @@ struct MarkerEntity {
     bool     position_valid = false;
     int      kind = ESP_MARKER_ORE;
     const char* label = nullptr;
+    bool     has_color = false;
+    unsigned char color_rgb[3] = {255, 255, 255};
 };
 static std::vector<MarkerEntity> g_marker_entities;
 static int g_marker_rescan_countdown = 0;
 static std::unordered_map<uint64_t, uint8_t> g_class_is_mineable;
 
+// What a single marker looks like: kind picks the toggle it belongs to, and ore
+// markers carry a fixed colour per resource (stone grey, metal orange, sulfur
+// yellow) instead of one configurable colour for all of them.
+struct MarkerLook {
+    int kind = ESP_MARKER_ORE;
+    const char* label = nullptr;
+    bool has_color = false;
+    unsigned char rgb[3] = {255, 255, 255};
+};
+
+static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, {190, 190, 190}};
+static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, {255, 140,  40}};
+static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, {255, 225,  50}};
+static const MarkerLook kOreIce    {ESP_MARKER_ORE, "Лёд",    true, {150, 225, 255}};
+
 // EntityType -> what to draw. Trees, barrels, buildings and players are left
 // out on purpose: the request was ore nodes and animals only.
-static bool marker_for_entity_type(int32_t type, int& kind, const char*& label) {
+static bool marker_for_entity_type(int32_t type, MarkerLook& look) {
     switch ((MineableEntityType)type) {
-        case MineableEntityType::Stone:    kind = ESP_MARKER_ORE;    label = "Камень";   return true;
-        case MineableEntityType::Iron:     kind = ESP_MARKER_ORE;    label = "Металл";   return true;
-        case MineableEntityType::Sulfur:   kind = ESP_MARKER_ORE;    label = "Сера";     return true;
-        case MineableEntityType::Ice:      kind = ESP_MARKER_ORE;    label = "Лёд";      return true;
-        case MineableEntityType::Bear:     kind = ESP_MARKER_ANIMAL; label = "Медведь";  return true;
-        case MineableEntityType::Boar:     kind = ESP_MARKER_ANIMAL; label = "Кабан";    return true;
-        case MineableEntityType::Deer:     kind = ESP_MARKER_ANIMAL; label = "Олень";    return true;
-        case MineableEntityType::Rabbit:   kind = ESP_MARKER_ANIMAL; label = "Кролик";   return true;
-        case MineableEntityType::Hare:     kind = ESP_MARKER_ANIMAL; label = "Заяц";     return true;
-        case MineableEntityType::Chicken:  kind = ESP_MARKER_ANIMAL; label = "Курица";   return true;
-        case MineableEntityType::Fish:     kind = ESP_MARKER_ANIMAL; label = "Рыба";     return true;
-        case MineableEntityType::Cannibal: kind = ESP_MARKER_ANIMAL; label = "Каннибал"; return true;
+        case MineableEntityType::Stone:    look = kOreStone;  return true;
+        case MineableEntityType::Iron:     look = kOreMetal;  return true;
+        case MineableEntityType::Sulfur:   look = kOreSulfur; return true;
+        case MineableEntityType::Ice:      look = kOreIce;    return true;
+        case MineableEntityType::Bear:     look = {ESP_MARKER_ANIMAL, "Медведь",  false, {}}; return true;
+        case MineableEntityType::Boar:     look = {ESP_MARKER_ANIMAL, "Кабан",    false, {}}; return true;
+        case MineableEntityType::Deer:     look = {ESP_MARKER_ANIMAL, "Олень",    false, {}}; return true;
+        case MineableEntityType::Rabbit:   look = {ESP_MARKER_ANIMAL, "Кролик",   false, {}}; return true;
+        case MineableEntityType::Hare:     look = {ESP_MARKER_ANIMAL, "Заяц",     false, {}}; return true;
+        case MineableEntityType::Chicken:  look = {ESP_MARKER_ANIMAL, "Курица",   false, {}}; return true;
+        case MineableEntityType::Fish:     look = {ESP_MARKER_ANIMAL, "Рыба",     false, {}}; return true;
+        case MineableEntityType::Cannibal: look = {ESP_MARKER_ANIMAL, "Каннибал", false, {}}; return true;
         default: return false;
     }
+}
+
+// Elements of a managed List<T> or T[] (the dump types these fields as `?`, so
+// the shape is decided at runtime from the class name).
+static int read_managed_collection(uint64_t object, uint64_t* out, int max_items) {
+    if (!valid_obj(object) || !out || max_items <= 0) return 0;
+    uint64_t klass = rd_ptr(object);
+    if (!valid_obj(klass)) return 0;
+    uint64_t array = object;
+    int32_t count = 0;
+    if (read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME)).rfind("List`1", 0) == 0) {
+        array = rd_ptr(object + IL2CPP_LIST_ITEMS);
+        count = rd<int32_t>(object + IL2CPP_LIST_SIZE);
+    } else {
+        count = rd<int32_t>(object + IL2CPP_ARRAY_LENGTH);
+    }
+    if (!valid_obj(array) || count <= 0) return 0;
+    if (count > max_items) count = max_items;
+    if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, out, (size_t)count * sizeof(uint64_t))) return 0;
+    return count;
+}
+
+// One loot item short name -> the resource it identifies. Rank breaks ties:
+// sulfur and metal nodes drop stones as well, so the richer resource wins, and
+// wood/cloth/meat (trees, animals, bushes) rank 0 and are ignored here.
+static int ore_look_for_item_name(const char* item_name, MarkerLook& look) {
+    if (!item_name || !item_name[0]) return 0;
+    char key[40];
+    size_t n = 0;
+    for (const char* p = item_name; *p && n + 1 < sizeof(key); ++p) {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        key[n++] = c;
+    }
+    key[n] = '\0';
+    if (strstr(key, "sulfur")) { look = kOreSulfur; return 3; }
+    if (strstr(key, "metal"))  { look = kOreMetal;  return 2; } // metal.ore, hq.metal.ore
+    if (strstr(key, "ice"))    { look = kOreIce;    return 1; }
+    if (strstr(key, "stone"))  { look = kOreStone;  return 1; }
+    return 0;
+}
+
+// Ore nodes do not always fill in entityType, but they always know what they
+// drop: MineableObject.m_Loot is a list of Oxide.LootItem and LootItem.ItemName
+// is the item short name ("stone", "metal.ore", "sulfur.ore", "wood", ...).
+static bool marker_from_loot(uint64_t mineable, MarkerLook& look) {
+    const uint64_t sources[2] = {MINEABLE_LOOT, MINEABLE_FINISH_BONUS};
+    int best = 0;
+    for (uint64_t source : sources) {
+        uint64_t items[12];
+        int count = read_managed_collection(rd_ptr(mineable + source), items, 12);
+        for (int i = 0; i < count; ++i) {
+            if (!valid_obj(items[i])) continue;
+            char name[32] = {};
+            if (!read_managed_string(rd_ptr(items[i] + LOOTITEM_ITEM_NAME), name, sizeof(name))) continue;
+            MarkerLook candidate;
+            int rank = ore_look_for_item_name(name, candidate);
+            if (rank > best) { best = rank; look = candidate; }
+            if (best == 3) return true;
+        }
+    }
+    return best > 0;
 }
 
 // Il2CppClass -> "is this one of the Mineable* components?" (cached: the same
@@ -3536,7 +3615,7 @@ static void rebuild_marker_entities() {
     int probe_identities = 0, probe_mineables = 0;
     std::string probe_samples;
 
-    uint64_t behaviours[8];
+    uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
         uint64_t identity = 0;
         memcpy(&identity, buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE, sizeof(identity));
@@ -3548,36 +3627,50 @@ static void rebuild_marker_entities() {
         if (!valid_obj(array)) continue;
         int32_t behaviour_count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
         if (behaviour_count <= 0) continue;
-        if (behaviour_count > 8) behaviour_count = 8;
+        if (behaviour_count > 32) behaviour_count = 32;
         if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)behaviour_count * sizeof(uint64_t)))
             continue;
 
+        // Mirror collects behaviours with GetComponentsInChildren, so one
+        // identity can carry a whole rock cluster: every Mineable* component
+        // becomes its own marker, positioned by its own GameObject.
         for (int32_t b = 0; b < behaviour_count; ++b) {
             uint64_t component = behaviours[b];
             if (!valid_obj(component) || !class_is_mineable(rd_ptr(component))) continue;
             ++probe_mineables;
 
             int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
-            if (probe_samples.size() < 300) {
-                char sample[64];
-                snprintf(sample, sizeof(sample), "%s:%d ",
+            MarkerLook look;
+            bool known = marker_for_entity_type(entity_type, look);
+            if (!known) known = marker_from_loot(component, look); // ore nodes leave entityType empty
+
+            if (probe_samples.size() < 400) {
+                char loot[32] = {};
+                uint64_t first_loot[1];
+                if (read_managed_collection(rd_ptr(component + MINEABLE_LOOT), first_loot, 1) == 1)
+                    read_managed_string(rd_ptr(first_loot[0] + LOOTITEM_ITEM_NAME), loot, sizeof(loot));
+                char sample[96];
+                snprintf(sample, sizeof(sample), "%s:t%d:%s%s ",
                          read_remote_string(rd_ptr(rd_ptr(component) + IL2CPP_CLASS_NAME)).c_str(),
-                         (int)entity_type);
+                         (int)entity_type, loot[0] ? loot : "-", known ? "" : ":skip");
                 probe_samples += sample;
             }
-
-            int kind = ESP_MARKER_ORE;
-            const char* label = nullptr;
-            if (!marker_for_entity_type(entity_type, kind, label)) break;
+            if (!known) continue;
 
             MarkerEntity entity;
             entity.identity = identity;
-            entity.kind = kind;
-            entity.label = label;
-            entity.transform = native_component_transform(managed_object_native(identity));
+            entity.kind = look.kind;
+            entity.label = look.label;
+            entity.has_color = look.has_color;
+            entity.color_rgb[0] = look.rgb[0];
+            entity.color_rgb[1] = look.rgb[1];
+            entity.color_rgb[2] = look.rgb[2];
+            entity.transform = native_component_transform(managed_object_native(component));
+            if (!entity.transform) // component without its own renderer: use the identity
+                entity.transform = native_component_transform(managed_object_native(identity));
             entity.position_valid = marker_world_position(entity.transform, entity.position);
             if (entity.transform) g_marker_entities.push_back(entity);
-            break;
+            if (g_marker_entities.size() >= 512) break;
         }
         if (g_marker_entities.size() >= 512) break;
     }
@@ -3634,6 +3727,10 @@ std::vector<EspMarker> esp_get_markers() {
         marker.y = screen.y;
         marker.distance = distance;
         marker.kind = entity.kind;
+        marker.has_color = entity.has_color;
+        marker.color_rgb[0] = entity.color_rgb[0];
+        marker.color_rgb[1] = entity.color_rgb[1];
+        marker.color_rgb[2] = entity.color_rgb[2];
         snprintf(marker.name, sizeof(marker.name), "%s", entity.label ? entity.label : "");
         result.push_back(marker);
     }
@@ -3641,6 +3738,22 @@ std::vector<EspMarker> esp_get_markers() {
     std::sort(result.begin(), result.end(), [](const EspMarker& a, const EspMarker& b) {
         return a.distance < b.distance;
     });
-    if (result.size() > 64) result.resize(64); // keep the screen readable
-    return result;
+
+    // Rock clusters put several nodes within a couple of metres, which would
+    // stack their pills on top of each other: keep the nearest one of each
+    // label per screen neighbourhood.
+    std::vector<EspMarker> thinned;
+    thinned.reserve(result.size());
+    for (const EspMarker& marker : result) {
+        bool covered = false;
+        for (const EspMarker& kept : thinned) {
+            if (kept.kind != marker.kind || strcmp(kept.name, marker.name) != 0) continue;
+            float dx = kept.x - marker.x, dy = kept.y - marker.y;
+            if (dx * dx + dy * dy < 30.0F * 30.0F) { covered = true; break; }
+        }
+        if (covered) continue;
+        thinned.push_back(marker);
+        if (thinned.size() >= 64) break; // keep the screen readable
+    }
+    return thinned;
 }

@@ -232,7 +232,11 @@ inline constexpr std::uint64_t NETID_NET_ID     = 0x58; // uint netId
 inline constexpr std::uint64_t NETID_BEHAVIOURS = 0x80; // NetworkBehaviour[]
 
 // Oxide.MineableObject — the shared base of ore nodes, trees and animals.
+inline constexpr std::uint64_t MINEABLE_LOOT           = 0xA0; // List<Oxide.LootItem>
+inline constexpr std::uint64_t MINEABLE_FINISH_BONUS   = 0xA8;
 inline constexpr std::uint64_t MINEABLE_CURRENT_HEALTH = 0x78;
+// Oxide.LootItem: the item short name the node drops ("stone", "metal.ore", ...)
+inline constexpr std::uint64_t LOOTITEM_ITEM_NAME      = 0x10;
 inline constexpr std::uint64_t MINEABLE_MAX_HEALTH     = 0xC0;
 inline constexpr std::uint64_t MINEABLE_FRACTION       = 0xD0; // fractionRemaining
 inline constexpr std::uint64_t MINEABLE_ENTITY_TYPE    = 0xD8; // ServerPlayersAnalytics.EntityType
