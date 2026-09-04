@@ -1,5 +1,6 @@
 #include "main.h"
 #include "game.h"
+#include "game_offsets.h"   // PLAYER_BOX_WIDTH_RATIO (box proportions)
 #include <cmath>
 #include <atomic>
 #include <chrono>
@@ -646,20 +647,24 @@ static void DrawEspOverlay() {
     // A far away player projects to a couple of pixels, which used to make the
     // box degenerate (corners gone, top/bottom strokes fused into one line).
     // Every visual therefore works on a rect that is grown around its own
-    // centre up to a stroke-aware minimum: enough room for two strokes plus a
-    // clear cut-out on each axis.
-    const float kMinBoxSide = 3.0f * (thick + 1.0f) + 8.0f;
+    // centre up to a stroke-aware minimum.
+    //
+    // The growth is a single uniform scale, not a per-axis clamp: clamping the
+    // axes separately pushed the width of a distant player up to the same
+    // minimum as the height and the box turned into a square. Scaling keeps the
+    // player's proportions, so a far away box stays a small tall rectangle.
+    const float kMinBoxSide = 3.0f * (thick + 1.0f) + 8.0f;      // vertical floor
+    const float kMinBoxWidth = 2.0f * 1.5f + (thick + 1.5f);     // 2 stubs + a gap
     auto NormRect = [&](float& x1, float& y1, float& x2, float& y2) {
         if (x2 < x1) { float t = x1; x1 = x2; x2 = t; }
         if (y2 < y1) { float t = y1; y1 = y2; y2 = t; }
-        if (x2 - x1 < kMinBoxSide) {
-            float cx = (x1 + x2) * 0.5f;
-            x1 = cx - kMinBoxSide * 0.5f; x2 = cx + kMinBoxSide * 0.5f;
-        }
-        if (y2 - y1 < kMinBoxSide) {
-            float cy = (y1 + y2) * 0.5f;
-            y1 = cy - kMinBoxSide * 0.5f; y2 = cy + kMinBoxSide * 0.5f;
-        }
+        float cx = (x1 + x2) * 0.5f, cy = (y1 + y2) * 0.5f;
+        float w = x2 - x1, h = y2 - y1;
+        if (!(h > 0.01f)) { h = kMinBoxSide; w = kMinBoxSide * game_offsets::PLAYER_BOX_WIDTH_RATIO; }
+        if (h < kMinBoxSide) { float s = kMinBoxSide / h; h *= s; w *= s; }
+        if (w < kMinBoxWidth) w = kMinBoxWidth; // only for absurdly narrow rects
+        x1 = cx - w * 0.5f; x2 = cx + w * 0.5f;
+        y1 = cy - h * 0.5f; y2 = cy + h * 0.5f;
     };
     // Corner box: the middle of every edge is cut out, only corners remain.
     // The corner length is capped per axis so the two segments of one edge can

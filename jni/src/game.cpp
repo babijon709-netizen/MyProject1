@@ -435,8 +435,8 @@ static const WeaponName kWeaponNames[] = {
 // whatever decoration its skin prefab carried. Weapons missing from the table
 // keep their cleaned name, so nothing ever disappears from the box.
 //
-// Set to true to print the Russian names from the table instead.
-static constexpr bool kWeaponLabelRussian = false;
+// Russian labels are on; set to false to print the game's own English names.
+static constexpr bool kWeaponLabelRussian = true;
 
 static bool canonical_weapon_label(char* label, size_t cap) {
     if (!label || !label[0] || cap < 2) return false;
