@@ -335,107 +335,125 @@ static void weapon_key_normalize(const char* in, char* out, size_t cap) {
     out[n] = '\0';
 }
 
-// Keys are normalized; several aliases may map to the same name. Matching is
-// exact first, then longest-substring, so "pickaxehammer" wins over "pickaxe"
-// and "crossbow" over "bow" regardless of the order here.
-struct WeaponNameRu { const char* key; const char* ru; };
-static const WeaponNameRu kWeaponNamesRu[] = {
-    // Firearms
-    {"assaultriffle",         "Автомат"},
-    {"assaultrifle",          "Автомат"},
-    {"fnfal",                 "Автомат FAL"},
-    {"thompson",              "Томпсон"},
-    {"krissvector",           "Вектор"},
-    {"vector",                "Вектор"},
-    {"submachinegun",         "Пистолет-пулемёт"},
-    {"smg",                   "Пистолет-пулемёт"},
-    {"steelballgun",          "Шаровое ружьё"},
-    {"shotgun",               "Дробовик"},
-    {"huntingriffle",         "Охотничья винтовка"},
-    {"huntingrifle",          "Охотничья винтовка"},
-    {"winchester",            "Винчестер"},
-    {"dmr",                   "Винтовка DMR"},
-    {"dvl",                   "Снайперская винтовка"},
-    {"sniperriffle",          "Снайперская винтовка"},
-    {"sniperrifle",           "Снайперская винтовка"},
-    {"hmlmg",                 "Пулемёт"},
-    {"lmg",                   "Пулемёт"},
-    {"revolver",              "Револьвер"},
-    {"deserteagle",           "Дезерт Игл"},
-    {"handmadepistol",        "Самодельный пистолет"},
-    {"pistol",                "Пистолет"},
-    {"flaregun",              "Ракетница"},
-    {"rocketlauncher",        "РПГ"},
-    {"crossbow",              "Арбалет"},
-    {"woodenbow",             "Лук"},
-    {"bow",                   "Лук"},
-    // Melee
-    {"machete",               "Мачете"},
-    {"mace",                  "Булава"},
-    {"boneclub",              "Костяная дубина"},
-    {"woodenspikedclub",      "Шипованная дубина"},
-    {"spikedclub",            "Шипованная дубина"},
-    {"woodenspear",           "Деревянное копьё"},
-    {"ironspear",             "Железное копьё"},
-    {"icespear",              "Ледяное копьё"},
-    {"spear",                 "Копьё"},
-    {"stonehatchet",          "Каменный топор"},
-    {"hatchet",               "Топор"},
-    {"axe",                   "Топор"},
-    {"pickaxehammer",         "Кирка-молот"},
-    {"pickaxe",               "Кирка"},
-    {"buildinghammer",        "Молоток"},
-    {"hammer",                "Молоток"},
-    {"sawripper",             "Пила"},
-    {"chainsaw",              "Бензопила"},
-    {"jackhammer",            "Отбойный молоток"},
-    {"torch",                 "Факел"},
-    {"rock",                  "Камень"},
-    {"fists",                 "Кулаки"},
-    {"unarmed",               "Кулаки"},
-    // Throwables / utility
-    {"explosivecharge",       "С4"},
-    {"c4",                    "С4"},
-    {"eventgrenadesmoke",     "Дымовая граната"},
-    {"smokegrenade",          "Дымовая граната"},
-    {"eventgrenademakeshift", "Самодельная граната"},
-    {"grenadecupcake",        "Граната-кекс"},
-    {"grenademilitary",       "Граната"},
-    {"grenade",               "Граната"},
-    {"tacticalairmarker",     "Авиамаркер"},
-    {"snowball",              "Снежок"},
-    {"buildingplan",          "План постройки"},
-    {"medkit",                "Аптечка"},
-    {"bandage",               "Бинт"},
-    {"waterbottle",           "Бутылка воды"},
-    {"fireworks",             "Фейерверк"},
-    {"cctvcamera",            "Камера"},
-    {"binoculars",            "Бинокль"},
-    {"fishingrod",            "Удочка"},
+// Every weapon / tool / throwable the game ships (item list from class `rs`
+// in dump.cs). `key` is the normalized form, `en` the name the game itself
+// uses in its UI (ItemData.m_Name) and `ru` the Russian variant.
+//
+// The table is a canonicaliser, not a whitelist: a weapon that is missing here
+// still shows up, just with the cleaned prefab name. Its job is to make the
+// label identical no matter which source it came from (prefab name, item name
+// or short name) and to survive any extra decoration a skin prefab may carry.
+//
+// Matching is exact first, then longest-substring, so "pickaxehammer" wins
+// over "pickaxe" and "crossbow" over "bow" regardless of the order here.
+struct WeaponName { const char* key; const char* en; const char* ru; };
+static const WeaponName kWeaponNames[] = {
+    // ---- Firearms ----
+    {"assaultriffle",         "Assault Rifle",   "Автомат"},
+    {"assaultrifle",          "Assault Rifle",   "Автомат"},
+    {"fnfal",                 "FN FAL",          "Автомат FAL"},
+    {"thompson",              "Thompson",        "Томпсон"},
+    {"krissvector",           "Kriss Vector",    "Вектор"},
+    {"vector",                "Kriss Vector",    "Вектор"},
+    {"submachinegun",         "Submachine Gun",  "Пистолет-пулемёт"},
+    {"smg",                   "Submachine Gun",  "Пистолет-пулемёт"},
+    {"steelballgun",          "Steel Ball Gun",  "Шаровое ружьё"},
+    {"shotgun",               "Shotgun",         "Дробовик"},
+    {"huntingriffle",         "Hunting Rifle",   "Охотничья винтовка"},
+    {"huntingrifle",          "Hunting Rifle",   "Охотничья винтовка"},
+    {"winchester",            "Winchester",      "Винчестер"},
+    {"dmr",                   "DMR",             "Винтовка DMR"},
+    {"dvl",                   "DVL",             "Снайперская винтовка"},
+    {"sniperriffle",          "Sniper Rifle",    "Снайперская винтовка"},
+    {"sniperrifle",           "Sniper Rifle",    "Снайперская винтовка"},
+    {"hmlmg",                 "HMLMG",           "Пулемёт"},
+    {"lmg",                   "LMG",             "Пулемёт"},
+    {"machinegun",            "Machine Gun",     "Пулемёт"},
+    {"revolver",              "Revolver",        "Револьвер"},
+    {"deserteagle",           "Desert Eagle",    "Дезерт Игл"},
+    {"handmadepistol",        "Handmade Pistol", "Самодельный пистолет"},
+    {"pistol",                "Pistol",          "Пистолет"},
+    {"flaregun",              "Flare Gun",       "Ракетница"},
+    {"rocketlauncher",        "Rocket Launcher", "РПГ"},
+    // ---- Bows ----
+    {"crossbow",              "Crossbow",        "Арбалет"},
+    {"woodenbow",             "Wooden Bow",      "Лук"},
+    {"bowarrow",              "Wooden Bow",      "Лук"},
+    {"bow",                   "Wooden Bow",      "Лук"},
+    // ---- Melee ----
+    {"machete",               "Machete",             "Мачете"},
+    {"mace",                  "Mace",                "Булава"},
+    {"boneclub",              "Bone Club",           "Костяная дубина"},
+    {"woodenspikedclub",      "Wooden Spiked Club",  "Шипованная дубина"},
+    {"spikedclub",            "Wooden Spiked Club",  "Шипованная дубина"},
+    {"woodenspear",           "Wooden Spear",        "Деревянное копьё"},
+    {"ironspear",             "Iron Spear",          "Железное копьё"},
+    {"icespear",              "Ice Spear",           "Ледяное копьё"},
+    {"spear",                 "Spear",               "Копьё"},
+    {"fists",                 "Fists",               "Кулаки"},
+    {"unarmed",               "Fists",               "Кулаки"},
+    // ---- Tools ----
+    {"stonehatchet",          "Stone Hatchet",   "Каменный топор"},
+    {"hatchet",               "Hatchet",         "Топор"},
+    {"axe",                   "Axe",             "Топор"},
+    {"pickaxehammer",         "Pickaxe Hammer",  "Кирка-молот"},
+    {"pickaxe",               "Pickaxe",         "Кирка"},
+    {"buildinghammer",        "Building Hammer", "Молоток"},
+    {"hammer",                "Hammer",          "Молоток"},
+    {"sawripper",             "Saw Ripper",      "Пила"},
+    {"chainsaw",              "Chainsaw",        "Бензопила"},
+    {"jackhammer",            "Jackhammer",      "Отбойный молоток"},
+    {"torch",                 "Torch",           "Факел"},
+    {"buildingplan",          "Building Plan",   "План постройки"},
+    {"rock",                  "Rock",            "Камень"},
+    // ---- Throwables / explosives ----
+    {"explosivecharge",       "Explosive Charge",   "С4"},
+    {"c4",                    "Explosive Charge",   "С4"},
+    {"eventgrenadesmoke",     "Smoke Grenade",      "Дымовая граната"},
+    {"smokegrenade",          "Smoke Grenade",      "Дымовая граната"},
+    {"eventgrenademakeshift", "Makeshift Grenade",  "Самодельная граната"},
+    {"makeshiftgrenade",      "Makeshift Grenade",  "Самодельная граната"},
+    {"grenadecupcake",        "Cupcake Grenade",    "Граната-кекс"},
+    {"grenademilitary",       "Grenade",            "Граната"},
+    {"grenade",               "Grenade",            "Граната"},
+    {"tacticalairmarker",     "Air Marker",         "Авиамаркер"},
+    {"snowball",              "Snowball",           "Снежок"},
+    // ---- Other things that can be in hands ----
+    {"medkit",                "Medkit",         "Аптечка"},
+    {"bandage",               "Bandage",        "Бинт"},
+    {"waterbottle",           "Water Bottle",   "Бутылка воды"},
+    {"fireworks",             "Fireworks",      "Фейерверк"},
+    {"cctvcamera",            "CCTV Camera",    "Камера"},
+    {"binoculars",            "Binoculars",     "Бинокль"},
+    {"fishingrod",            "Fishing Rod",    "Удочка"},
+    {"flaslight",             "Flashlight",     "Фонарик"},
+    {"flashlight",            "Flashlight",     "Фонарик"},
 };
 
-// Replace `label` with its Russian name. Returns false when the weapon is not
-// in the table (the caller then keeps the cleaned original).
+// Canonicalise the label: replace it with the game's own name for that weapon
+// so the same gun always reads the same, whichever source it came from and
+// whatever decoration its skin prefab carried. Weapons missing from the table
+// keep their cleaned name, so nothing ever disappears from the box.
 //
-// Off by default: the label shows the game's own weapon name. Flip this flag
-// to true to display the Russian names from the table above instead.
+// Set to true to print the Russian names from the table instead.
 static constexpr bool kWeaponLabelRussian = false;
 
-static bool localize_weapon_label(char* label, size_t cap) {
-    if (!kWeaponLabelRussian) return false;
+static bool canonical_weapon_label(char* label, size_t cap) {
     if (!label || !label[0] || cap < 2) return false;
     char key[80];
     weapon_key_normalize(label, key, sizeof(key));
     if (!key[0]) return false;
-    const char* best = nullptr;
+    const WeaponName* best = nullptr;
     size_t best_len = 0;
-    for (const WeaponNameRu& entry : kWeaponNamesRu) {
-        if (strcmp(key, entry.key) == 0) { best = entry.ru; break; }
+    for (const WeaponName& entry : kWeaponNames) {
+        if (strcmp(key, entry.key) == 0) { best = &entry; break; }
         size_t len = strlen(entry.key);
-        if (len > best_len && strstr(key, entry.key)) { best = entry.ru; best_len = len; }
+        if (len > best_len && strstr(key, entry.key)) { best = &entry; best_len = len; }
     }
     if (!best) return false;
-    strncpy(label, best, cap - 1);
+    const char* pick = (kWeaponLabelRussian && best->ru) ? best->ru : best->en;
+    if (!pick || !pick[0]) return false;
+    strncpy(label, pick, cap - 1);
     label[cap - 1] = '\0';
     return true;
 }
@@ -514,7 +532,7 @@ static void fix_weapon_label_spelling(char* label) {
 static bool player_weapon_name(uint64_t player, char* out, size_t cap, bool& definite) {
     if (!player_weapon_name_raw(player, out, cap, definite)) return false;
     fix_weapon_label_spelling(out);
-    localize_weapon_label(out, cap);
+    canonical_weapon_label(out, cap);
     return out[0] != '\0';
 }
 

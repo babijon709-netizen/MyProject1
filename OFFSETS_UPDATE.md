@@ -153,13 +153,20 @@ FP-цепочка выше живёт только у локального иг�
    чтобы у своего игрока (имя из `ItemData.m_Name`) и у чужих (имя префаба)
    одно и то же оружие подписывалось одинаково.
 7. По умолчанию показывается **обычное название игры** (`Assault Rifle`).
-   Перевод на русский лежит рядом (`kWeaponNamesRu` + `localize_weapon_label`)
-   и включается одним флагом `kWeaponLabelRussian = true` в `game.cpp`.
+   Таблица `kWeaponNames` (`key` / `en` / `ru`) — не белый список, а
+   канонизатор: она приводит подпись к одному виду независимо от источника
+   (имя префаба, `ItemData.m_Name`, shortname) и от лишних слов, которые может
+   принести префаб скина (`07_SkinCamoAssault Riffle` → `Assault Rifle`).
+   Оружие, которого в таблице нет, **всё равно отображается** — очищенным
+   именем префаба, так что новые стволы после апдейта игры не пропадут.
    Ключи нормализуются (только буквы и цифры, нижний регистр), сравнение
    сначала точное, потом по самой длинной подстроке — поэтому `pickaxehammer`
    не путается с `pickaxe`, а `crossbow` с `bow`.
+   Русские названия включаются флагом `kWeaponLabelRussian = true`.
    Список предметов игры для сверки таблицы — класс `rs` в `dump.cs`
-   (все shortname'ы: `assault.rifle`, `thompson`, `dvl`, `kriss.vector`, …).
+   (все shortname'ы: `assault.rifle`, `thompson`, `dvl`, `kriss.vector`, …),
+   типы оружия — enum `WeaponType` (Pistol, SMG, Shotgun, AR, DMR, Sniper,
+   LMG, Launcher, Bow, Crossbow, Grenade, Explosive, Melee, Spear, Tool).
    Буферы подписи — 48 байт (`EspBox::weapon`), т.к. кириллица в UTF-8 шире.
 
 Оффсет имени GameObject подбирается в рантайме (`ensure_gameobject_name_offset`),
