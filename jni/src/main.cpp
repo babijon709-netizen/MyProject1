@@ -2989,21 +2989,22 @@ static void CenterMenuOnDisplay() {
 // Drives the game camera with a synthetic "look" finger on the right half of
 // the screen. The target is the exact bone world position (head / chest /
 // pelvis) projected through the live camera matrices, expressed as a yaw/pitch
-// offset from the camera forward axis. The controller is closed-loop: it
-// measures how many degrees the camera actually turns per pixel of finger
-// travel and adapts, so it works at any in-game sensitivity without being
-// told what it is. Three things decide whether it can hold a running player:
-// the sensitivity estimate (below, fitted over a window and shared by both
-// axes), the lead that covers the input pipeline (kAimLeadSec), and the
-// in-flight accumulator that stops it from re-sending a correction that is
-// already on its way.
+// offset from the camera forward axis. The controller is closed-loop: every
+// frame it measures how many degrees the crosshair actually moved per pixel
+// of finger travel and adapts its gain, so it converges in a handful of
+// frames regardless of the in-game sensitivity setting.
+//
+// A running target is led: the aim points where the man will be, not where he
+// was last read. See the velocity fit below -- it is the one thing standing
+// between this and a crosshair that permanently trails anyone who moves.
 
-// How far ahead of a moving target the aim points, in seconds. It covers the
-// whole loop -- the finger move queued this frame, the phone's input pipeline,
-// and the frame it takes to see the result. Swept on the bench across 30..120
-// fps and pipeline delays of one to four frames: 0.022 s is the flat bottom of
-// that curve, and either side of it costs accuracy on a sprinting target.
-static constexpr float kAimLeadSec = 0.022f;
+// How far ahead of a moving target the aim points, in seconds. It has to
+// cover the whole loop: the finger move queued this frame, the phone's input
+// pipeline (which answers a frame or two late), and the frame it takes to see
+// the result. Swept on the bench across 30..120 fps and pipeline delays of one
+// to four frames -- 0.022 s is the flat bottom of that curve, and either side
+// of it costs accuracy on a sprinting target.
+static constexpr float kAimLeadSec = 0.042f;
 
 struct AimTarget {
     bool  valid = false;
@@ -3028,38 +3029,6 @@ static void UpdateAim(float dt) {
     static unsigned long long s_lastId = 0;        // sticky target
     static int   s_lostFrames = 0;
     static int   s_holdFrames = 0;
-    // Rotation we have already asked for but have not seen arrive yet. The
-    // phone does not answer a finger move on the same frame, and a controller
-    // that keeps correcting an error it has already sent the fix for winds
-    // itself up and hunts around the target instead of settling on it.
-    static float s_flightYaw = 0.f, s_flightPitch = 0.f;
-    // Sensitivity measurement. Accumulated over a window of frames: the
-    // phone answers a finger move a couple of frames late, so a frame-against
-    // -frame ratio measures the delay rather than the sensitivity.
-    static float s_winCmdX = 0.f, s_winCamY = 0.f;
-    static float s_winCmdY = 0.f, s_winCamP = 0.f;
-    static int   s_winN = 0;
-    static float s_prevMeas = 0.f;   // previous window, for confirmation
-    static int   s_measSeen = 0;     // windows measured while still uncalibrated
-    static int   s_invX = 0, s_invY = 0;  // votes for an inverted axis
-    // Target motion, measured in degrees per second and smoothed over a few
-    // frames. Everything that makes the aim keep up with a running player is
-    // built on this: the lead below and the feed-forward in the controller.
-    static float s_prevWorldYaw = 0.f, s_prevWorldPitch = 0.f;
-    static bool  s_havePrevTgt = false;
-    // Short history of where the target has been, in world angles, used to
-    // fit its speed. A single frame difference is buried in bone animation
-    // noise; a fit over ~0.2 s is not.
-    static constexpr int kHist = 16;
-    static float s_hYaw[kHist] = {}, s_hPitch[kHist] = {}, s_hAge[kHist] = {};
-    static int   s_hN = 0;
-    // Both window lengths are scored by how well they predicted the sample
-    // that actually arrived, so the controller can pick the one that fits how
-    // this particular target is behaving right now.
-    static float s_predL = 0.f, s_predS = 0.f;
-    static bool  s_havePred = false;
-    static float s_errL = 0.f, s_errS = 0.f;
-    auto histClear = [&]() { s_hN = 0; s_havePred = false; s_errL = s_errS = 0.f; };
 
     const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     bool active = g_state.aim_touch && g_esp_attached && !menuOpen;
@@ -3074,10 +3043,6 @@ static void UpdateAim(float dt) {
     if (!active) {
         AimReleaseFinger(s_fingerDown);
         s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
-        s_havePrevTgt = false; s_hN = 0;
-        s_flightYaw = s_flightPitch = 0.f;
-        s_winCmdX = s_winCamY = s_winCmdY = s_winCamP = 0.f;
-        s_winN = 0; s_prevMeas = 0.f; s_measSeen = 0;
         return;
     }
 
@@ -3179,23 +3144,33 @@ static void UpdateAim(float dt) {
     s_lostFrames = 0;
     if (best.id != s_lastId) s_haveLast = false; // do not learn gain across a target switch
 
-    // ---- how fast is the target moving, and how old is what we see -------
-    // Two separate problems are solved here.
-    //  * The bones jitter (breathing, animation, read noise) by about a pixel
-    //    every frame, while a man sprinting at 40 m only crosses eight pixels
-    //    a second. A frame-to-frame difference is therefore mostly noise, so
-    //    the speed is fitted over a fifth of a second of history instead.
-    //  * Remote positions arrive with the network tick, so between updates the
-    //    box stands still and then jumps; the age of the last real change is
-    //    tracked and made up for.
-    float velYaw = 0.f, velPitch = 0.f;
+    // ---- where the target is going ------------------------------------
+    // The reason a crosshair trails a running man is not the controller, it
+    // is the data: a remote player's position only changes on the network
+    // tick, so the newest read is already a few frames old, and on top of
+    // that sits bone animation noise which at range is bigger than the head.
+    // Differencing two frames measures mostly that noise. Instead the last
+    // ~0.15 s of the target's WORLD angles (our own turning taken out) is
+    // kept and a straight line is fitted through it. The line gives two
+    // things: the speed, and where the target is at this instant -- which is
+    // ahead of the last sample that actually arrived.
+    static float s_prevWorldYaw = 0.f, s_prevWorldPitch = 0.f;
+    static bool  s_havePrevTgt = false;
+    static constexpr int kHist = 16;
+    static float s_hYaw[kHist] = {}, s_hPitch[kHist] = {}, s_hAge[kHist] = {};
+    static int   s_hN = 0;
+    // Two window lengths, each scored by how well it predicted the sample
+    // that actually arrived, so the aim can pick the one that fits how this
+    // particular target is behaving right now.
+    static float s_predL = 0.f, s_predS = 0.f;
+    static bool  s_havePred = false;
+    static float s_errL = 0.f, s_errS = 0.f;
+    auto histClear = [&]() { s_hN = 0; s_havePred = false; s_errL = s_errS = 0.f; };
+
     {
         float cy = 0.f, cp = 0.f;
         const bool haveC = esp_camera_angles(cy, cp);
-        if (best.id != s_lastId || !haveC) {
-            histClear();
-            s_havePrevTgt = false;
-        }
+        if (best.id != s_lastId || !haveC) { histClear(); s_havePrevTgt = false; }
         if (haveC) {
             // Where the target is in the world, i.e. with our own turning
             // taken out, so only the target's own motion is left.
@@ -3218,30 +3193,25 @@ static void UpdateAim(float dt) {
             s_havePrevTgt = true;
 
             // Push the sample, age the rest, drop everything older than the
-            // window (but always keep a couple of samples to work with).
+            // window (but always keep a few samples to work with).
             for (int i = 0; i < s_hN; ++i) s_hAge[i] += dt;
             if (s_hN < kHist) ++s_hN;
             for (int i = s_hN - 1; i > 0; --i) {
                 s_hYaw[i] = s_hYaw[i - 1]; s_hPitch[i] = s_hPitch[i - 1]; s_hAge[i] = s_hAge[i - 1];
             }
             s_hYaw[0] = worldYaw; s_hPitch[0] = worldPitch; s_hAge[0] = 0.f;
-            const float window = 0.15f;
-            while (s_hN > 3 && s_hAge[s_hN - 1] > window) --s_hN;
+            while (s_hN > 3 && s_hAge[s_hN - 1] > 0.15f) --s_hN;
 
             // Least squares slope over the history: bone noise averages out,
-            // a steady run does not. The fit also says where the target is
-            // *now*, which is not what we just read -- a remote position only
-            // changes on the network tick, so the newest sample is already a
-            // few frames old and carries a frame of animation noise on top.
+            // a steady run does not.
             auto fit = [&](float maxAge, float& vy, float& vp, float& py, float& pp) -> bool {
                 int n = 0;
                 while (n < s_hN && (n < 3 || s_hAge[n] <= maxAge)) ++n;
                 if (n < 3) return false;
-                float span = s_hAge[n - 1];
-                if (span < 0.03f) return false;
+                if (s_hAge[n - 1] < 0.03f) return false;
                 float mt = 0.f, my = 0.f, mp = 0.f;
                 for (int i = 0; i < n; ++i) { mt += -s_hAge[i]; my += s_hYaw[i]; mp += s_hPitch[i]; }
-                const float inv = 1.f / (float)n;
+                const float inv = 1.f / (float) n;
                 mt *= inv; my *= inv; mp *= inv;
                 float sxx = 0.f, sxy = 0.f, sxp = 0.f;
                 for (int i = 0; i < n; ++i) {
@@ -3262,27 +3232,24 @@ static void UpdateAim(float dt) {
 
             // Score last frame's predictions against what just arrived.
             if (s_havePred) {
-                float eL = fabsf(worldYaw - s_predL), eS = fabsf(worldYaw - s_predS);
-                s_errL = s_errL * 0.85f + eL * 0.15f;
-                s_errS = s_errS * 0.85f + eS * 0.15f;
+                s_errL = s_errL * 0.85f + fabsf(worldYaw - s_predL) * 0.15f;
+                s_errS = s_errS * 0.85f + fabsf(worldYaw - s_predS) * 0.15f;
             }
 
             const float longWin = 0.15f, shortWin = 0.07f;
             float vyL = 0.f, vpL = 0.f, pyL = 0.f, ppL = 0.f;
             float vyS = 0.f, vpS = 0.f, pyS = 0.f, ppS = 0.f;
-            bool haveL = fit(longWin, vyL, vpL, pyL, ppL);
-            bool haveS = fit(shortWin, vyS, vpS, pyS, ppS);
+            const bool haveL = fit(longWin, vyL, vpL, pyL, ppL);
+            const bool haveS = fit(shortWin, vyS, vpS, pyS, ppS);
+            float velYaw = 0.f, velPitch = 0.f, fitY = 0.f, fitP = 0.f;
             float usedSpan = longWin;
-            float fitY = 0.f, fitP = 0.f;
             if (haveL) {
                 velYaw = vyL; velPitch = vpL; fitY = pyL; fitP = ppL;
                 // A man who reverses direction, or stops dead, makes the long
-                // window lie. When the recent samples disagree with it, trust
-                // them instead: noisier, but it does not keep leading the
-                // wrong way through a juke.
-                // The short window is only better when it has actually been
-                // predicting better: it wins on a man who jukes, it loses on
-                // positions that arrive in steps, where its slope is noise.
+                // window lie. The short one is trusted only when it has
+                // actually been predicting better: it wins on a man who jukes,
+                // it loses on positions that arrive in network-tick steps,
+                // where its slope is mostly noise.
                 if (haveS && s_errS < s_errL * 0.9f) {
                     velYaw = vyS; velPitch = vpS; fitY = pyS; fitP = ppS;
                     usedSpan = shortWin;
@@ -3292,45 +3259,39 @@ static void UpdateAim(float dt) {
                 usedSpan = shortWin;
             }
 
-            // Noise floor: a pixel of bone jitter spread over the window is
-            // worth only a fraction of a degree per second, so real running is
-            // no longer thrown away with it.
-            //
-            // The gate fades in over the band between the floor and twice the
-            // floor, and above that leaves the speed alone. Subtracting the
-            // floor from every speed instead -- the obvious way to write this
-            // -- takes a fixed bite out of the lead no matter how fast the
-            // target is, and a fixed bite out of the lead is a fixed distance
-            // the crosshair trails by, at every range. That is the artefact
-            // this whole path exists to remove.
-            float floorVel = degPerPx * 1.2f / usedSpan;
-            float vMag = sqrtf(velYaw * velYaw + velPitch * velPitch);
+            // Noise floor. A pixel of bone jitter spread over the window is
+            // worth only a fraction of a degree per second, so real running
+            // survives it. The gate fades in over the band between the floor
+            // and twice the floor and then leaves the speed alone -- simply
+            // subtracting the floor instead would take a fixed bite out of
+            // the lead however fast the target runs, and a fixed bite out of
+            // the lead is a fixed distance the crosshair trails by.
+            const float floorVel = degPerPx * 1.2f / usedSpan;
+            const float vMag = sqrtf(velYaw * velYaw + velPitch * velPitch);
             if (vMag <= floorVel) { velYaw = velPitch = 0.f; }
             else if (vMag < floorVel * 2.f) {
-                float scale = (vMag - floorVel) / floorVel;
+                const float scale = (vMag - floorVel) / floorVel;
                 velYaw *= scale; velPitch *= scale;
             }
 
-            if (haveL) { s_predL = pyL + vyL * dt; } else { s_predL = worldYaw; }
-            if (haveS) { s_predS = pyS + vyS * dt; } else { s_predS = worldYaw; }
+            s_predL = haveL ? (pyL + vyL * dt) : worldYaw;
+            s_predS = haveS ? (pyS + vyS * dt) : worldYaw;
             s_havePred = haveL || haveS;
 
             if (haveL || haveS) {
+                // Two corrections, both of them a shift of the TARGET:
+                //   fit - newest sample : undo the staleness of a position
+                //                         that only updates on the tick;
+                //   speed * lead        : point where the man will be when
+                //                         this finger move reaches the camera.
                 float dy = fitY - s_hYaw[0], dp = fitP - s_hPitch[0];
                 const float cap = 2.0f;   // degrees, never trust the fit further
                 if (dy > cap) dy = cap; else if (dy < -cap) dy = -cap;
                 if (dp > cap) dp = cap; else if (dp < -cap) dp = -cap;
-                // Aim where the target will be by the time the finger move we
-                // are about to send actually reaches the camera. The phone's
-                // input pipeline answers a couple of frames late and a running
-                // man covers real ground in that time; without this the
-                // crosshair sits a fixed step behind anyone who keeps running,
-                // proportional to how fast they run. It shifts the TARGET, not
-                // the command, so the gentle end of the speed slider does not
-                // inherit a permanent overshoot of one lead over its own gain.
-                float ly = velYaw * kAimLeadSec, lp = velPitch * kAimLeadSec;
+                dy += velYaw * kAimLeadSec;
+                dp += velPitch * kAimLeadSec;
                 if (std::isfinite(dy) && std::isfinite(dp)) {
-                    best.yaw += dy + ly; best.pitch += dp + lp;
+                    best.yaw += dy; best.pitch += dp;
                 }
             }
         }
@@ -3348,88 +3309,24 @@ static void UpdateAim(float dt) {
         while (camYawDelta > 180.f) camYawDelta -= 360.f;
         while (camYawDelta < -180.f) camYawDelta += 360.f;
         float camPitchDelta = camPitch - s_lastCamPitch;
-        // ---- sensitivity: ONE number, fitted to both axes ---------------
-        // The vertical axis cannot be measured on its own. Targets sit near
-        // the horizon, so while the finger travels tens of pixels sideways it
-        // travels one or two up and down -- and dividing one small noisy
-        // number by another produced a vertical sensitivity that was off by a
-        // third on a good day, never learned at all on a bad one, and under
-        // sustained recoil came out NEGATIVE, at which point the controller
-        // drove the camera up and away from the target and the aim simply did
-        // not work while shooting. A phone drives both axes from one look
-        // sensitivity, so one scalar is least-squares fitted to both, each
-        // axis weighted by how far the finger actually travelled along it.
-        //
-        // Measured over a window rather than frame against frame: the input
-        // pipeline answers late, which only misplaces the window edges, and
-        // rotation we did not cause (recoil, the player's own thumb) averages
-        // down instead of being mistaken for a sensitivity change.
-        s_winCmdX += s_lastDx;  s_winCamY += camYawDelta;
-        s_winCmdY += s_lastDy;  s_winCamP += camPitchDelta;
-        ++s_winN;
-        if (s_winN >= 10 && fabsf(s_winCmdX) + fabsf(s_winCmdY) >= 6.f) {
-            // Finger right (dx > 0) raises yaw, finger down (dy > 0) lowers
-            // pitch. Magnitude and direction are taken apart on purpose: an
-            // axis the game inverts still measures the same sensitivity, and
-            // folding the two together would let "invert Y" corrupt the
-            // number for both axes instead of just flipping one sign.
-            const bool haveX = fabsf(s_winCmdX) >= 4.f;
-            const bool haveY = fabsf(s_winCmdY) >= 4.f;
-            const float gX = haveX ? (s_winCamY / s_winCmdX) : 0.f;
-            const float gY = haveY ? (-s_winCamP / s_winCmdY) : 0.f;
-            const float wX = haveX ? fabsf(s_winCmdX) : 0.f;
-            const float wY = haveY ? fabsf(s_winCmdY) : 0.f;
-            float meas = (wX + wY > 0.f)
-                       ? (fabsf(gX) * wX + fabsf(gY) * wY) / (wX + wY) : 0.f;
-            if (std::isfinite(meas) && fabsf(meas) > 0.004f && fabsf(meas) < 2.0f) {
-                // Adopt only what a second window confirms: one burst of
-                // recoil, or one shove from the player's own thumb, would
-                // otherwise capture the estimate for good -- and a wrong
-                // sensitivity is a controller that either crawls or hunts.
-                const bool agrees = (s_prevMeas != 0.f) &&
-                                    fabsf(meas) < fabsf(s_prevMeas) * 1.45f &&
-                                    fabsf(meas) > fabsf(s_prevMeas) * 0.69f;
-                ++s_measSeen;
-                if (agrees || (s_gainYaw == 0.f && s_measSeen >= 4)) {
-                    float g = fabsf(meas);
-                    s_gainYaw = (s_gainYaw == 0.f) ? g : (fabsf(s_gainYaw) * 0.6f + g * 0.4f);
-                    s_measSeen = 0;
-                }
-                s_prevMeas = meas;
-            }
-            // An inverted axis is a real setting, but it has to be proven on a
-            // window that actually moved along that axis -- never inferred
-            // from the pixel of jitter a drag along the other one leaves.
-            // A window that moved a long way along the axis counts double, so
-            // a genuinely inverted axis is recognised within a couple of
-            // windows instead of steering the wrong way for half a second.
-            auto vote = [](int& votes, bool inverted, bool strong) {
-                const int step = strong ? 2 : 1;
-                votes = inverted ? (votes + step > 3 ? 3 : votes + step)
-                                 : (votes - step < -3 ? -3 : votes - step);
-            };
-            if (fabsf(s_winCmdX) > 12.f && fabsf(s_winCamY) > 0.5f)
-                vote(s_invX, gX < 0.f, fabsf(s_winCmdX) > 25.f);
-            if (fabsf(s_winCmdY) > 12.f && fabsf(s_winCamP) > 0.5f)
-                vote(s_invY, gY < 0.f, fabsf(s_winCmdY) > 25.f);
-            s_winCmdX = s_winCamY = s_winCmdY = s_winCamP = 0.f;
-            s_winN = 0;
-        }
-        if (s_gainYaw != 0.f) {
-            const float g = fabsf(s_gainYaw);
-            s_gainYaw   = (s_invX >= 2) ? -g : g;
-            s_gainPitch = (s_invY >= 2) ? -g : g;
-        }
-        // Whatever the camera just did is no longer in flight.
-        s_flightYaw -= camYawDelta;
-        s_flightPitch -= camPitchDelta;
+        // Signed gains: a negative value simply means the game inverts that
+        // axis (e.g. "invert Y" enabled) and the controller follows suit.
+        // Adopt the measurement outright when it disagrees strongly with the
+        // current estimate (sensitivity changed / first sample), else smooth.
+        auto learn = [](float& gain, float measured) {
+            float m = fabsf(measured);
+            if (!std::isfinite(measured) || m < 0.005f || m > 2.0f) return;
+            if (gain == 0.f || (measured > 0.f) != (gain > 0.f) ||
+                m > fabsf(gain) * 1.3f || m < fabsf(gain) * 0.7f) gain = measured;
+            else gain = gain * 0.7f + measured * 0.3f;
+        };
+        // Finger right (dx > 0) turns right => yaw increases.
+        // Moves are exact device-grid steps now, so even 1-2 px moves give a
+        // clean measurement; keep a floor so noise never dominates.
+        if (fabsf(s_lastDx) >= 1.f) learn(s_gainYaw, camYawDelta / s_lastDx);
+        // Finger down (dy > 0) looks down => pitch decreases.
+        if (fabsf(s_lastDy) >= 1.f) learn(s_gainPitch, -camPitchDelta / s_lastDy);
     }
-    // Leak, so that rotation we did not cause -- recoil, the player's own
-    // thumb -- is forgotten within a few frames instead of being chased.
-    s_flightYaw *= 0.80f; s_flightPitch *= 0.80f;
-    if (!std::isfinite(s_flightYaw) || fabsf(s_flightYaw) > 30.f) s_flightYaw = 0.f;
-    if (!std::isfinite(s_flightPitch) || fabsf(s_flightPitch) > 30.f) s_flightPitch = 0.f;
-    if (!s_fingerDown) { s_flightYaw = s_flightPitch = 0.f; }
     if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
     else s_haveLast = false;
 
@@ -3458,11 +3355,7 @@ static void UpdateAim(float dt) {
     float deadYaw = deadBase, deadPitch = deadBase;
     if (gainKnownYaw   && deadYaw   < qYaw   * 0.55f) deadYaw   = qYaw   * 0.55f;
     if (gainKnownPitch && deadPitch < qPitch * 0.55f) deadPitch = qPitch * 0.55f;
-    // Sitting still is only allowed when the target is not running away from
-    // under the crosshair: if its own motion is worth an input step this
-    // frame, the controller keeps working instead of parking.
-    const bool targetHoldsStill = fabsf(velYaw * dt) < deadYaw && fabsf(velPitch * dt) < deadPitch;
-    if (targetHoldsStill && fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch) {
+    if (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch) {
         s_lastDx = s_lastDy = 0.f;
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
         return;
@@ -3471,12 +3364,7 @@ static void UpdateAim(float dt) {
     auto snapGrid = [&](float v) { return roundf(v * unitsPerPx) / unitsPerPx; };
 
     if (!s_fingerDown) {
-        // Start off-centre against the direction of travel: a target running
-        // sideways then needs far longer before the finger hits the edge of
-        // the look area and has to be lifted and re-placed (three lost frames).
-        float bias = 0.f;
-        if (velYaw > 0.f) bias = -0.14f; else if (velYaw < 0.f) bias = 0.14f;
-        s_fx = snapGrid(sw * (0.74f + bias));
+        s_fx = snapGrid(sw * 0.74f);
         s_fy = snapGrid(sh * 0.50f);
         Touch_Down(s_fx, s_fy);
         s_fingerDown = true;
@@ -3506,33 +3394,17 @@ static void UpdateAim(float dt) {
     float gy = learned ? s_gainYaw : probeGain;
     float gp = (s_gainPitch != 0.f) ? s_gainPitch : (learned ? fabsf(s_gainYaw) : probeGain);
 
-    // Two terms: the usual smoothed correction of the remaining error, plus a
-    // feed-forward that covers the ground the target itself will cover during
-    // this frame. Without the second term the crosshair settles a fixed step
-    // behind anyone who keeps running -- exactly the "aim can not keep up".
-    const float ffYaw   = velYaw   * dt;
-    const float ffPitch = velPitch * dt;
-    // Correct only what is still missing after the moves already on their way
-    // have landed. Without this the loop asks for the same correction several
-    // frames running and then has to undo it -- which at the fast end of the
-    // slider is not a settle at all but a permanent hunt around the target.
-    const float missYaw   = best.yaw   - s_flightYaw;
-    const float missPitch = best.pitch - s_flightPitch;
-    float cmdYaw   = missYaw   * k + ffYaw;
-    float cmdPitch = missPitch * k + ffPitch;
-
-    float dx =  cmdYaw   / gy;
-    float dy = -cmdPitch / gp;
+    float dx =  best.yaw   * k / gy;
+    float dy = -best.pitch * k / gp;
 
     // Final approach: within a few input steps of the target, stop smoothing
     // and jump straight to the nearest reachable grid position. Smoothing
     // here would either creep for many frames or, once rounded, overshoot
-    // and oscillate by a full step around the head. The feed-forward stays in
-    // so a running target does not slip away again on the last step.
-    if (gainKnownYaw && fabsf(missYaw) < qYaw * 3.f)
-        dx = roundf(((missYaw + ffYaw) / gy) * unitsPerPx) / unitsPerPx;
-    if (gainKnownPitch && fabsf(missPitch) < qPitch * 3.f)
-        dy = roundf(((-missPitch - ffPitch) / gp) * unitsPerPx) / unitsPerPx;
+    // and oscillate by a full step around the head.
+    if (gainKnownYaw && fabsf(best.yaw) < qYaw * 3.f)
+        dx = roundf((best.yaw / gy) * unitsPerPx) / unitsPerPx;
+    if (gainKnownPitch && fabsf(best.pitch) < qPitch * 3.f)
+        dy = roundf((-best.pitch / gp) * unitsPerPx) / unitsPerPx;
 
     // Clamp per-frame travel so a bad gain estimate never slingshots.
     const float maxStep = learned ? sh * 0.15f : sh * 0.05f;
@@ -3558,21 +3430,16 @@ static void UpdateAim(float dt) {
     if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
         Touch_Up();
         s_fingerDown = false;
-        float bias = 0.f;
-        if (velYaw > 0.f) bias = -0.14f; else if (velYaw < 0.f) bias = 0.14f;
-        s_fx = snapGrid(sw * (0.74f + bias)); s_fy = snapGrid(sh * 0.50f);
+        s_fx = snapGrid(sw * 0.74f); s_fy = snapGrid(sh * 0.50f);
         s_lastDx = s_lastDy = 0.f;
         s_haveLast = false;
-        s_flightYaw = s_flightPitch = 0.f;  // the move never happened
         return;
     }
     s_fx = nx; s_fy = ny;
     s_lastDx = dx; s_lastDy = dy;
-    // On its way, but not visible yet.
-    s_flightYaw   += dx * gy;
-    s_flightPitch += -dy * gp;
     Touch_Move(s_fx, s_fy);
 }
+
 
 void RenderMenu() {
     auto& io = ImGui::GetIO();
