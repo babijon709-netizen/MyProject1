@@ -416,7 +416,13 @@ static const WeaponNameRu kWeaponNamesRu[] = {
 
 // Replace `label` with its Russian name. Returns false when the weapon is not
 // in the table (the caller then keeps the cleaned original).
+//
+// Off by default: the label shows the game's own weapon name. Flip this flag
+// to true to display the Russian names from the table above instead.
+static constexpr bool kWeaponLabelRussian = false;
+
 static bool localize_weapon_label(char* label, size_t cap) {
+    if (!kWeaponLabelRussian) return false;
     if (!label || !label[0] || cap < 2) return false;
     char key[80];
     weapon_key_normalize(label, key, sizeof(key));
@@ -491,10 +497,23 @@ static bool player_weapon_name_raw(uint64_t player, char* out, size_t cap, bool&
     return false;
 }
 
+// The prefab names carry the game's own misspelling ("Assault Riffle") while
+// the item definitions spell it correctly ("Assault Rifle"), so normalise it —
+// otherwise the same gun reads differently for the local and remote players.
+static void fix_weapon_label_spelling(char* label) {
+    if (!label) return;
+    for (char* p = label; *p; ++p) {
+        if (strncasecmp(p, "riffle", 6) != 0) continue;
+        memmove(p + 3, p + 4, strlen(p + 4) + 1); // "riffle" -> "rifle"
+        break;
+    }
+}
+
 // Public entry point: resolve the held weapon and localise the label.
 // Unknown weapons keep their cleaned original name rather than disappearing.
 static bool player_weapon_name(uint64_t player, char* out, size_t cap, bool& definite) {
     if (!player_weapon_name_raw(player, out, cap, definite)) return false;
+    fix_weapon_label_spelling(out);
     localize_weapon_label(out, cap);
     return out[0] != '\0';
 }
