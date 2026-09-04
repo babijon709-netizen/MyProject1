@@ -1,6 +1,6 @@
-player=0x6CEEBFF000 dist=56.3 name=[gogorik] | fp=0x6CEEC05240 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEEEC8690[0] | wRef=0x6CF32EAAB0[-] | inv=0x6CEEBF80C0
-player=0x6CEE576A80 dist=53.8 name=[Swer4] | fp=0x6CEE587B40 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEEEDC750[0] | wRef=0x6CEFC5C4B0[-] | inv=0x6CEE572500
-player=0x6D44CADA80 dist=43.2 name=[Swer4] | fp=0x6D44C5B900 fp@58=null[-] fp@50=null[-] | wpnArr=0x6D44C2FAB0[0] | wRef=0x6D44CB8BA0[-] | inv=0x6D44CA3180
-player=0x6CEEBFF540 dist=44.6 name=[[ТЦК]_БУСIК] | fp=0x6CEEC05300 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEEEC86C0[0] | wRef=0x6CF32EAFC0[-] | inv=0x6CEEBF8100
-player=0x6CEE576540 dist=63.1 name=[Мятка] | fp=0x6CEE587A80 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEEEDC720[0] | wRef=0x6CEFC60E40[-] | inv=0x6CEE5724C0
-player=0x6D44CF8A80 dist=61.0 name=[рипро] | fp=0x6D44C5B300 fp@58=null[-] fp@50=null[-] | wpnArr=0x6D44CD2150[0] | wRef=0x6D44D02C90[-] | inv=0x6D44CF0400
+player=0x6D0772DA80 dist=70.1 name=[eliseixz] | fp=0x6D07741D80 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FED809810[0] | wRef=0x6FC72D6510[-] | inv=0x6D07729980
+player=0x6D0772D000 dist=77.8 name=[Kiss..Me] | fp=0x6D07741C00 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FED8097B0[0] | wRef=0x6FC72DB8A0[-] {str:40='av_1' } | inv=0x6D07729900
+player=0x6D0772E540 dist=154.1 name=[рипро] | fp=0x6D07741A80 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FED809750[0] | wRef=0x6FC72E2300[-] {str:A0='av_19' } | inv=0x6D07729880
+player=0x6F54084540 dist=74.0 name=[haven't] | fp=0x6F54074180 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FEDFFC360[0] | wRef=0x6FE6BAC510[-] | inv=0x6F5408E940
+player=0x6F568A4A80 dist=34.6 name=[w8odi] | fp=0x6F567EB3C0 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FC589B4B0[0] | wRef=0x6F568BFBA0[-] | inv=0x6F568ABF00
+player=0x6D0772E000 dist=31.5 name=[dada.30] | fp=0x6D077419C0 fp@58=null[-] fp@50=null[-] | wpnArr=0x6FED809720[0] | wRef=0x6FC72F4900[-] | inv=0x6D07729840
