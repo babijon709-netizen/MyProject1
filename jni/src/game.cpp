@@ -2582,7 +2582,7 @@ static bool weapon_name_from_view(uint64_t weapon_component, char* out, size_t c
         uint64_t root = managed_object_native(rd_ptr(view + WEAPONVIEW_ROOT_TRANSFORM));
         if (root && read_transform_name(root, raw, sizeof(raw)) &&
             weapon_label_from_object_name(raw, out, cap)) return true;
-        view = rd_ptr(view + WEAPONVIEW_INNER); // fSN decorates another Ms
+        view = rd_ptr(view + WEAPONVIEW_INNER); // decorator wraps another view
     }
     return false;
 }
@@ -3640,6 +3640,9 @@ static bool marker_for_entity_type(int32_t type, MarkerLook& look) {
         case MineableEntityType::Sulfur:   look = kOreSulfur; return true;
         case MineableEntityType::Barrel:   look = kBarrel;    return true;
         case MineableEntityType::Lootbox:  look = kSmashBox;  return true;
+        // Air-drop balloon crates, new in this game build.
+        case MineableEntityType::LootboxBaloon:
+        case MineableEntityType::LootboxBaloonBig: look = kSmashBox; return true;
         case MineableEntityType::Bear:     look = animal_look("Медведь");  return true;
         case MineableEntityType::Boar:     look = animal_look("Кабан");    return true;
         case MineableEntityType::Deer:     look = animal_look("Олень");    return true;

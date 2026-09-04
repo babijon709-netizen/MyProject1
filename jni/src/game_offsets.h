@@ -3,6 +3,12 @@
 
 namespace game_offsets {
 
+// NOTE: every obfuscated class/field name quoted in the comments below is
+// valid only for the dump it was read from - the obfuscator re-rolls them on
+// each game build (fvp->pmi, wK->ij, Mo->sR, ...). Names are kept purely as
+// breadcrumbs; when re-checking after an update, match structs and fields
+// POSITIONALLY (offset + type) with tools/offsets/il2cpp_layout.py.
+
 // Native Unity Camera (via Camera::m_CachedPtr) — from libunity.so (dump2)
 // get_worldToCameraMatrix_Injected @ 0x5ac514 → helper 0xe1fe08 returns cam+0x70
 // get_projectionMatrix_Injected    @ 0x5ac53c → helper 0xe1fe6c returns cam+0xB0
@@ -29,13 +35,18 @@ inline constexpr float PLAYER_BOX_WIDTH_RATIO = 0.40F;
 inline constexpr float MIN_PLAYER_DISTANCE    = 0.0F;
 inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 
-// Il2CppClass* TypeInfo globals in libil2cpp.so (from dump.cs / libil2cpp GOT)
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD48CFB0;
+// Il2CppClass* TypeInfo globals in libil2cpp.so (from dump.cs / libil2cpp GOT).
+// These are .data slots of the IL2CPP metadata-usage table and MOVE on every
+// game update. Re-derived for this build by disassembling the owning class's
+// own methods and following  adrp/ldr -> R_AARCH64_RELATIVE addend -> slot,
+// keeping only slots that are then dereferenced as  ldr x8,[klass,#0xB8]
+// (Il2CppClass::static_fields) - i.e. exactly the access our reader performs.
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD7E4310;
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD4884E8; // GameControllerBase
-inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <LZp>k__BackingField
-inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <LZD>k__BackingField
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD7DF6C8; // GameControllerBase
+inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
+inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
 
 // Oxide.PlayerManager instance fields (dump.cs)
@@ -43,13 +54,13 @@ inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
 // Prefer lastSavedPosition; lastTickPosition is adjacent at 0x1C8
 inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // lastSavedPosition
 inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (UnityEngine.GameObject)
-inline constexpr std::uint64_t PLAYER_NICKLABEL = 0x130; // nicklabel (wK MonoBehaviour)
-// PlayerManager "LLI" (0x220): the real human-readable display name (confirmed
+inline constexpr std::uint64_t PLAYER_NICKLABEL = 0x130; // nicklabel (class ij, was wK)
+// PlayerManager "uWc" (0x220, was LLI): the real human-readable display name (confirmed
 // on-device — equals the nicklabel widget's private name string, e.g.
 // "пахановский" / "#Фришка"), whereas userID/voice names carry the machine id.
 inline constexpr std::uint64_t PLAYER_DISPLAY_NAME = 0x220;
 
-// wK (nicklabel): player back-ref + nickname UI.Text.
+// nicklabel (class ij, was wK): player back-ref + nickname UI.Text.
 inline constexpr std::uint64_t NICKLABEL_PLAYER_BACKREF = 0x20;
 inline constexpr std::uint64_t NICKLABEL_NICKNAME_TEXT  = 0x38;
 // UnityEngine.UI.Text: managed string with the visible nickname.
@@ -57,10 +68,10 @@ inline constexpr std::uint64_t UI_TEXT_MTEXT = 0xE0;
 // FPObject (base of FPWeaponBase): display name of the held weapon.
 inline constexpr std::uint64_t FPOBJECT_OBJECT_NAME = 0x78;
 // Dissonance voice identity: reliable synced display-name source.
-// PlayerManager.LLT (VoicePlayerState) -> <Name>k__BackingField.
+// PlayerManager.uWr (0x2E8, was LLT) : VoicePlayerState -> <Name>k__BackingField.
 inline constexpr std::uint64_t PLAYER_VOICE_STATE  = 0x2E8;
 inline constexpr std::uint64_t VOICE_STATE_NAME     = 0x38;
-// PlayerManager.voicePlayer (fuI tracker) -> HvI display string.
+// PlayerManager.voicePlayer (class pJk, was fuI) -> display string at 0x78.
 inline constexpr std::uint64_t PLAYER_VOICE_PLAYER = 0x140;
 inline constexpr std::uint64_t VOICE_PLAYER_TAG     = 0x78;
 // FPObject -> Oxide.Item -> Oxide.ItemData display strings.
@@ -73,9 +84,10 @@ inline constexpr std::uint64_t IL2CPP_STRING_LENGTH = 0x10;
 inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
 
 // Local player "is aiming" (ADS) state (dump.cs + libil2cpp disasm):
-//   PlayerManager.playerEventHandler (0x78) -> fvp (player event handler)
-//   fvp.manager (0xD0) back-ref == PlayerManager (validation)
-//   fvp.Aim (0x268) -> fvT (toggle activity), fvT.<LxG>k__BackingField (0x10) == Active
+//   PlayerManager.playerEventHandler (0x78) -> class pmi (was fvp)
+//   handler.manager (0xD0) back-ref == PlayerManager (validation)
+//   handler.Aim (0x268) -> toggle activity (class pmh, was fvT), its
+//   <...>k__BackingField (0x10) == Active
 //   This exact byte is what FPManager.LateUpdate reads to blend the camera to aimFOV.
 // Fallback: PlayerManager.fpManager (0x90) -> FPManager.LtZ (0x58, current FPWeaponBase)
 //   FPObject.Player (0xC0) back-ref == PlayerManager (validation)
@@ -95,31 +107,40 @@ inline constexpr std::uint64_t PLAYER_WEAPON_REFERENCE  = 0xF0;
 inline constexpr std::uint64_t PLAYER_WEAPONS_ARRAY     = 0x198;
 // Oxide.PlayerInventory instance fields (dump.cs).
 inline constexpr std::uint64_t INV_PLAYER_INVENTORY_DATA = 0x20; // _playerInventoryData
-inline constexpr std::uint64_t INV_PLAYER_INVENTORY_CLIENT = 0x28; // _playerInventoryClient (fmh)
+inline constexpr std::uint64_t INV_PLAYER_INVENTORY_CLIENT = 0x28; // _playerInventoryClient
 
 // ---- Remote (third-person) held weapon, from dump.cs ------------------------
 // The FP objects above are local-only MonoBehaviours, so enemies never resolve
 // through them. What every client *does* get is the networked weapon component:
 //   HyperHug.Games.Oxide.Features.Weapons.PlayerWeapon : Mirror.NetworkBehaviour
-//     playerWeaponViewReference  0x90  (Ms -> Mo, third-person weapon view)
-//     FdW = Oxide.WeaponPiece    0xD8  (SyncVar "weaponPiece", 0x10 bytes)
-//     Fdt = WeaponState          0xE8
-//     <player>k__BackingField    0x100 (back-ref to PlayerManager, validation)
+//     playerWeaponViewReference  0xD0  (-> class sR, third-person weapon view)
+//     Oxide.WeaponPiece          0x100 (SyncVar "weaponPiece", 0x10 bytes)
+//     WeaponState                0x110
+//     <player>k__BackingField    0x128 (back-ref to PlayerManager, validation)
 // It hangs off PlayerManager.weaponReference (0xF0), which is an obfuscated
 // lazy-reference wrapper just like kccReference, so it needs the same probing.
-inline constexpr std::uint64_t PLAYERWEAPON_VIEW           = 0x90;
-inline constexpr std::uint64_t PLAYERWEAPON_PIECE          = 0xD8;
-inline constexpr std::uint64_t PLAYERWEAPON_STATE          = 0xE8;
-inline constexpr std::uint64_t PLAYERWEAPON_PLAYER_BACKREF = 0x100;
+// This build inserted 0x40 bytes of new fields before `animator`, so every
+// field from there on moved (old 0x90/0xD8/0xE8/0x100). The SyncVar trio was
+// re-identified positionally against the _Mirror_SyncVarHookDelegate__loaded /
+// _weaponPiece / _weaponState tail, not by name (names are re-obfuscated).
+// NB: the new layout also has a second WeaponPiece at 0xA8 - that one is NOT
+// the SyncVar and must not be used.
+inline constexpr std::uint64_t PLAYERWEAPON_VIEW           = 0xD0;
+inline constexpr std::uint64_t PLAYERWEAPON_PIECE          = 0x100;
+inline constexpr std::uint64_t PLAYERWEAPON_STATE          = 0x110;
+inline constexpr std::uint64_t PLAYERWEAPON_PLAYER_BACKREF = 0x128;
 // Oxide.WeaponPiece (value type): Enabled 0x0, Number 0x2, Skin 0x4,
 // SkinLevel 0x6, Loaded 0x7, Mods 0x8. Number is the item id of the weapon.
 inline constexpr std::uint64_t WEAPONPIECE_ENABLED = 0x00;
 inline constexpr std::uint64_t WEAPONPIECE_NUMBER  = 0x02;
-// Mo (the third-person weapon view implementing Ms):
-//   WeaponBase Zjj  0x48  -> MonoBehaviour on the spawned weapon GameObject
-//   WeaponPiece Zjk 0x50
-//   Transform Zjo   0x60  -> root transform of the spawned weapon
-// fSN decorates another Ms at +0x10, so unwrap one level when needed.
+// The third-person weapon view (class sR, was Mo; interface sY, was Ms).
+// Found after the rename by field shape, not by name - see tools/offsets:
+//   il2cpp_layout.py find "WeaponBase_o*" "Oxide_WeaponPiece_o" "UnityEngine_Transform_o*"
+//   WeaponBase  0x48  -> MonoBehaviour on the spawned weapon GameObject
+//   WeaponPiece 0x50
+//   Transform   0x60  -> root transform of the spawned weapon
+// A decorator (class pGW, was fSN) wraps another view at +0x10, so unwrap
+// one level when needed. All four offsets survived the update unchanged.
 inline constexpr std::uint64_t WEAPONVIEW_WEAPON_BASE    = 0x48;
 inline constexpr std::uint64_t WEAPONVIEW_PIECE          = 0x50;
 inline constexpr std::uint64_t WEAPONVIEW_ROOT_TRANSFORM = 0x60;
@@ -138,7 +159,7 @@ inline constexpr std::uint64_t INVDATA_PLAYER_MODEL_INFO  = 0x20;
 // Il2CppClass: name at 0x10, namespace at 0x18 (used to identify PlayerWeapon).
 inline constexpr std::uint64_t IL2CPP_CLASS_NAME      = 0x10;
 inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = 0x18;
-// fvp.LookDirection (0x140): synced Vector3 wrapper, current value at +0x20.
+// eventHandler.LookDirection (0x140): synced Vector3 wrapper, value at +0x20.
 // MouseLook.Update writes m_LookRoot.forward into it every frame and
 // FPHitscan casts its hit ray along it (not along the camera transform).
 inline constexpr std::uint64_t EVENT_HANDLER_LOOK_DIRECTION  = 0x140;
@@ -212,11 +233,11 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // so the client-side Mirror registry lists all of them:
 //   Mirror.NetworkClient.spawned : Dictionary<uint, NetworkIdentity>
 // The NetworkClient TypeInfo slot was taken from libil2cpp.so: the code does
-//   adrp x19,#0xd165000 ; ldr x19,[x19,#0x530]   (GOT entry)
+//   adrp x19,#<page> ; ldr x19,[x19,#<off>]   (GOT entry)
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
-// Verified in NetworkClient::DestroyAllClientObjects:
+// Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD48C270;
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD7E35B8;
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x28;
 
 // System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
@@ -247,6 +268,7 @@ enum class MineableEntityType : std::int32_t {
     Cannibal = 7, Tree = 8, Stone = 9, Iron = 10, Sulfur = 11, Ice = 12,
     Barrel = 13, Lootbox = 14, RoadSign = 15, StackOfWood = 16, Construction = 17,
     Deployable = 18, Human = 19, Player = 20, Vehicle = 21, Hare = 22,
+    LootboxBaloon = 23, LootboxBaloonBig = 24, // added by this game update
 };
 
 // ---- Team / clan membership (Oxide.PlayerManager, dump.cs) ------------------
@@ -270,7 +292,10 @@ inline constexpr std::uint64_t PLAYER_SEAT_ID    = 0x28C; // uint seatID
 inline constexpr std::uint64_t LOOTOBJECT_INVENTORY      = 0xA0; // Oxide.Inventory
 inline constexpr std::uint64_t LOOTOBJECT_IS_LOOTABLE    = 0xA8; // bool
 inline constexpr std::uint64_t LOOTOBJECT_PANEL_NAME     = 0xE0; // string panelName
-inline constexpr std::uint64_t LOOTOBJECT_BUILDING_PIECE = 0xF0; // Building.BuildingPiece m_Piece
+// 0xF0 in the previous build: a new  System.String m_ContainerSoundKey  field
+// was inserted at 0xE8, pushing m_Piece and everything after it up by 8.
+// (panelName @0xE0 sits before the insert and is unchanged.)
+inline constexpr std::uint64_t LOOTOBJECT_BUILDING_PIECE = 0xF8; // Building.BuildingPiece m_Piece
 
 // ---- Ground pickups (Oxide.ItemPickup : fNZ : Mirror.NetworkBehaviour) ------
 // Everything lying on the ground that can be picked up: mushrooms, berries,

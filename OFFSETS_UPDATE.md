@@ -19,7 +19,11 @@
 
 ## 2. Исходники для переопределения (после апдейта нужны свежие)
 
-1. **`dump.cs`** — декомпилированные управляемые классы (поля с именами и порядком). Именно по нему ищем поля классов `Oxide.PlayerManager`, `FPManager`, `FPObject`, `Item`, `ItemData`, `KCC`, `Ragdoll` и т.д.
+0. **`il2cpp.h`** (внутри `dump.7z`) — **главный источник смещений**: у каждого
+   поля стоит комментарий `/* 0xNN */`. Именно по нему сверяются `Oxide.PlayerManager`,
+   `FPManager`, `FPObject`, `Item`, `ItemData`, `KCC`, `Ragdoll` и остальные.
+1. **`dump.cs`** — управляемые классы без смещений; полезен значениями enum'ов
+   (`MineableEntityType`) и сигнатурами.
 2. **`libil2cpp.so`** — глобальные `Il2CppClass*` (RVA TypeInfo) для статических полей вроде списка игроков.
 3. **`libunity.so`** — нативные смещения Unity (Camera/Transform/GameObject).
 
@@ -61,11 +65,11 @@
 ### 3.3. Глобальные TypeInfo RVA (libil2cpp.so)
 | Константа | RVA | Класс |
 |---|---|---|
-| `PLAYER_MANAGER_TYPEINFO_RVA` | 0xD48CFB0 | Oxide.PlayerManager |
-| `GAME_CONTROLLER_TYPEINFO_RVA` | 0xD4884E8 | GameControllerBase |
+| `PLAYER_MANAGER_TYPEINFO_RVA` | 0xD7E4310 | Oxide.PlayerManager |
+| `GAME_CONTROLLER_TYPEINFO_RVA` | 0xD7DF6C8 | GameControllerBase |
 | `PLAYER_MANAGER_STATIC_FIELDS_LIST` | 0x10 | clientPlayerList (поле статики) |
-| `GAME_CONTROLLER_LOCAL_PLAYER_FIELD` | 0x10 | `<LZp>k__BackingField` (локальный игрок) |
-| `GAME_CONTROLLER_CAMERA_MANAGER_FIELD` | 0x38 | `<LZD>k__BackingField` |
+| `GAME_CONTROLLER_LOCAL_PLAYER_FIELD` | 0x10 | `<ukT>k__BackingField` (локальный игрок) |
+| `GAME_CONTROLLER_CAMERA_MANAGER_FIELD` | 0x38 | `<ukA>k__BackingField` |
 | `CAMERA_MANAGER_CAMERA_FIELD` | 0x20 | m_Camera |
 
 ### 3.4. Oxide.PlayerManager — поля инстанса (по dump.cs)
@@ -74,22 +78,22 @@
 | `PLAYER_TRANSFORM` | 0x68 | worldCameraRoot |
 | `PLAYER_POSITION` | 0x1D0 | lastSavedPosition (0x1C8 = lastTickPosition) |
 | `PLAYER_CHARACTER_MODEL` | 0x150 | characterModel (GameObject) |
-| `PLAYER_NICKLABEL` | 0x130 | nicklabel (wK) |
-| `PLAYER_DISPLAY_NAME` | 0x220 | **LLI — реальное человеческое имя** (см. §4) |
-| `PLAYER_EVENT_HANDLER` | 0x78 | playerEventHandler (fvp) |
+| `PLAYER_NICKLABEL` | 0x130 | nicklabel (класс `ij`, ранее `wK`) |
+| `PLAYER_DISPLAY_NAME` | 0x220 | **реальное человеческое имя** (поле `uWc`, ранее `LLI`; см. §4) |
+| `PLAYER_EVENT_HANDLER` | 0x78 | playerEventHandler (класс `pmi`, ранее `fvp`) |
 | `PLAYER_FP_MANAGER` | 0x90 | fpManager |
 | `PLAYER_KCC_REFERENCE` | 0xB0 | kccReference |
-| `PLAYER_VOICE_PLAYER` | 0x140 | voicePlayer (fuI tracker) |
-| `PLAYER_VOICE_STATE` | 0x2E8 | LLT (VoicePlayerState) |
+| `PLAYER_VOICE_PLAYER` | 0x140 | voicePlayer (класс `pJk`, ранее `fuI`) |
+| `PLAYER_VOICE_STATE` | 0x2E8 | VoicePlayerState (поле `uWr`, ранее `LLT`) |
 | `PLAYER_USER_ID` | 0x278 | `string userID` (уникален на аккаунт) |
 | `PLAYER_VEHICLE_ID` | 0x288 | `uint vehicleID` (SyncVar, 0 = не в транспорте) |
 | `PLAYER_SEAT_ID` | 0x28C | `uint seatID` (SyncVar) |
 
 Полезные строковые поля PlayerManager (сверялись дампом):
 userID≈0x278, teamName≈0x280, clanId≈0x290, clanTag≈0x298, observedId≈0x320.
-**userID/voice — это машинные коды, НЕ имя.** Имя — только `LLI@0x220`.
+**userID/voice — это машинные коды, НЕ имя.** Имя — только поле по `0x220`.
 
-### 3.5. Nicklabel wK + UI.Text
+### 3.5. Nicklabel (`ij`, ранее `wK`) + UI.Text
 | Константа | Смещение |
 |---|---|
 | `NICKLABEL_PLAYER_BACKREF` | 0x20 |
@@ -120,16 +124,20 @@ FP-цепочка выше живёт только у локального иг�
 
 | Константа | Смещение | Поле/тип |
 |---|---|---|
-| `PLAYERWEAPON_VIEW` | 0x90 | `playerWeaponViewReference` (`Ms` → класс `Mo`) |
-| `PLAYERWEAPON_PIECE` | 0xD8 | `Oxide.WeaponPiece` (SyncVar weaponPiece, 0x10 байт) |
-| `PLAYERWEAPON_STATE` | 0xE8 | `WeaponState` |
-| `PLAYERWEAPON_PLAYER_BACKREF` | 0x100 | `<player>k__BackingField` — валидация кандидата |
+| `PLAYERWEAPON_VIEW` | 0xD0 | `playerWeaponViewReference` (класс `sR`, ранее `Mo`) |
+| `PLAYERWEAPON_PIECE` | 0x100 | `Oxide.WeaponPiece` (SyncVar weaponPiece, 0x10 байт) |
+| `PLAYERWEAPON_STATE` | 0x110 | `WeaponState` |
+| `PLAYERWEAPON_PLAYER_BACKREF` | 0x128 | `<player>k__BackingField` — валидация кандидата |
+
+> ⚠️ Апдейт игры вставил **0x40 байт новых полей перед `animator`**, поэтому
+> вся четвёрка уехала (было 0x90 / 0xD8 / 0xE8 / 0x100). В новой раскладке
+> появился **второй** `WeaponPiece` по 0xA8 — это НЕ SyncVar, брать нельзя.
 | `WEAPONPIECE_ENABLED` | +0x00 | bool Enabled |
 | `WEAPONPIECE_NUMBER` | +0x02 | short Number (id предмета) |
-| `WEAPONVIEW_WEAPON_BASE` | 0x48 | `Mo.Zjj` → `WeaponBase` (MonoBehaviour на префабе оружия) |
-| `WEAPONVIEW_PIECE` | 0x50 | `Mo.Zjk` → WeaponPiece |
-| `WEAPONVIEW_ROOT_TRANSFORM` | 0x60 | `Mo.Zjo` → Transform префаба |
-| `WEAPONVIEW_INNER` | 0x10 | `fSN.IDA` — декоратор поверх другого `Ms` |
+| `WEAPONVIEW_WEAPON_BASE` | 0x48 | `sR` → `WeaponBase` (MonoBehaviour на префабе оружия) |
+| `WEAPONVIEW_PIECE` | 0x50 | `sR` → WeaponPiece |
+| `WEAPONVIEW_ROOT_TRANSFORM` | 0x60 | `sR` → Transform префаба |
+| `WEAPONVIEW_INNER` | 0x10 | декоратор (класс `pGW`, ранее `fSN`) поверх другого view |
 | `MODELINFO_RIGHT_WEAPON_HOLDER` | 0x28 | `PlayerModelInfo.rightWeaponHolder` |
 | `MODELINFO_LEFT_WEAPON_HOLDER` | 0x30 | `PlayerModelInfo.leftWeaponHolder` |
 | `CHARANIM_PLAYER_MODEL_INFO` | 0x30 | `CharacterAnimation.playerModelInfo` |
@@ -189,7 +197,7 @@ NetworkClient.spawned (Dictionary<uint, NetworkIdentity>)
 
 | Константа | Значение | Что это |
 |---|---|---|
-| `NETWORK_CLIENT_TYPEINFO_RVA` | 0xD48C270 | слот `Il2CppClass*` для `Mirror.NetworkClient` в `.data` |
+| `NETWORK_CLIENT_TYPEINFO_RVA` | 0xD7E35B8 | слот `Il2CppClass*` для `Mirror.NetworkClient` в `.data` |
 | `NETWORK_CLIENT_SPAWNED` | 0x28 | `spawned` в статике класса (`klass+0xB8`) |
 | `DICT_ENTRIES` / `DICT_COUNT` | 0x18 / 0x20 | поля `Dictionary` |
 | `DICT_ENTRY_STRIDE` / `DICT_ENTRY_VALUE` | 0x18 / 0x10 | `Entry {int hash; int next; uint key; obj value}` |
@@ -284,7 +292,7 @@ NetworkClient.spawned (Dictionary<uint, NetworkIdentity>)
 | `LOOTOBJECT_INVENTORY` | 0xA0 | `Oxide.Inventory inventory` |
 | `LOOTOBJECT_IS_LOOTABLE` | 0xA8 | `bool isLootable` |
 | `LOOTOBJECT_PANEL_NAME` | 0xE0 | `string panelName` |
-| `LOOTOBJECT_BUILDING_PIECE` | 0xF0 | `Building.BuildingPiece m_Piece` |
+| `LOOTOBJECT_BUILDING_PIECE` | 0xF8 | `Building.BuildingPiece m_Piece` (было 0xF0) |
 
 **Как отсеиваются ящики игроков — два независимых признака:**
 
@@ -511,8 +519,8 @@ Fragments», «Stone Hatchet»), поэтому в таблице есть и н
 
 ## 4. Ключевые правила (не забудь после апдейта)
 
-1. **Имя игрока (ник) читается ТОЛЬКО из `PlayerManager + 0x220` (`LLI`).**
-   Это подтверждено в рантайме: `LLI@0x220` == приватная строка никлейбла
+1. **Имя игрока (ник) читается ТОЛЬКО из `PlayerManager + 0x220`.**
+   Это подтверждено в рантайме: строка по `0x220` == приватная строка никлейбла
    (`пахановский`, `#Фришка`, `dusterhuffer`, ...). Голосовые поля
    (`PLAYER_VOICE_STATE.NAME`, `voicePlayer.tag`) и `userID` дают только
    машинный код `932D3ABF57D64819` — **не используй их как имя**, максимум фолбэк.
@@ -521,24 +529,54 @@ Fragments», «Stone Hatchet»), поэтому в таблице есть и н
    `Transform@0x20`.
 3. Пути к объектам старайся **валидировать back-ref** (равенство указателей
    обратно на игрока), чтобы не читать чужие/мёртвые объекты.
+4. **Никогда не ищи структуру или поле по старому обфусцированному имени** —
+   они перегенерируются каждым билдом. Сверяй позиционно (смещение + тип),
+   а переименованный класс ищи по форме полей: `tools/offsets/il2cpp_layout.py`.
+5. **`..._TYPEINFO_RVA` пересчитывай при каждом апдейте.** Если хоть один
+   неверен, соответствующая ветка ридера тихо отключается: имя класса по
+   кандидату не совпадёт, `g_*_class` останется 0 и ESP будет пустым.
 
 ---
 
 ## 5. Процедура обновления после патча игры
 
-1. Достань свежие `dump.cs`, `libil2cpp.so`, `libunity.so`, `global-metadata.dat`.
-2. Открой `dump.cs` и для каждого класса, который мы читаем, сверь **порядок и
-   смещения полей** (в dump.cs смещение поля = сумма размеров предыдущих +
-   смещение базового класса, обычно видно в шестнадцатеричном комменте или
-   высчитывается порядком следования). Помни: у инстанс-полей есть
-   `Object header`/`klass/monitor` и поля базового класса.
-3. Сверь константы из §3 по списку. Если поле "уехало", обнови **и**
-   `game_offsets.h`, и эту таблицу.
-4. RVA `TypeInfo` (`..._TYPEINFO_RVA`) — это адреса глобальных в libil2cpp;
-   ищи по имени класса (символы вида `_ZN...Il2CppClass...`/по таблице GOT)
-   или через `il2cppdumper` (там бывает `[RVA] Token`).
+Скрипты лежат в `tools/offsets/` (там же README с деталями). Вся процедура —
+минут на десять.
+
+```bash
+tools/offsets/extract_dumps.sh /tmp/new              # свежие дампы из рабочего дерева
+tools/offsets/extract_dumps.sh /tmp/old <старый-коммит>   # дампы до аплоада
+python3 tools/offsets/il2cpp_layout.py --old /tmp/old/il2cpp.h --new /tmp/new/il2cpp.h diff
+python3 tools/offsets/typeinfo_rva.py --so /tmp/new/libil2cpp.so --script /tmp/new/script.json \
+        Oxide.PlayerManager Oxide.GameControllerBase Mirror.NetworkClient
+```
+
+1. **Раскладка структур.** `il2cpp_layout.py diff` проходит по всем структурам,
+   на которых держится `game_offsets.h`, и печатает либо «раскладка не
+   изменилась», либо конкретные разъехавшиеся смещения. По каждой изменившейся
+   — `show <структура>` и ручное сопоставление полей.
+2. **Сравнивай ПОЗИЦИОННО, а не по именам.** Имена классов и полей
+   переобфусцируются каждый билд (`fvp`→`pmi`, `wK`→`ij`, `Mo`→`sR`), diff по
+   именам врёт: он покажет «moved=0», молча пропустив переименованные поля.
+   Переименованный класс ищется по форме: `il2cpp_layout.py find "WeaponBase_o*"
+   "Oxide_WeaponPiece_o" "UnityEngine_Transform_o*"`.
+3. **Смещения полей — только в `il2cpp.h`** (комментарии `/* 0xNN */`).
+   В `dump.cs` этого дампера смещений нет, там полезны лишь значения enum'ов —
+   их тоже надо сверять (`MineableEntityType`: значения могут не сдвинуться, но
+   новые появляются).
+4. **RVA `TypeInfo` уезжают ВСЕГДА** — без них ридер не стартует вообще
+   (`resolve_runtime_player_list()` вернёт 0, ESP будет пустой). `ScriptMetadata`
+   в `script.json` пустой, поэтому `typeinfo_rva.py` дизассемблирует методы
+   самого класса: `adrp/ldr` → addend релокации `R_AARCH64_RELATIVE` → слот в
+   `.data`, и оставляет только те слоты, которые потом разыменовываются как
+   `ldr x8,[klass,#0xB8]` (`static_fields`) — ровно наш паттерн доступа.
+   **Обязательно прогоняй тот же скрипт на старом дампе:** он должен
+   воспроизвести значения, которые сейчас в git. Верхний кандидат обычно
+   правильный, но у `GameControllerBase` его стабильно обгоняет чужой класс —
+   верный слот тот, у которого в колонке статик-полей прочерк.
 5. Нативные Unity-смещения не меняются между версиями Unity-рантайма — только
-   если игра обновила сам Unity.
+   если игра обновила сам Unity (`libunity.7z` в репозитории тот же блоб →
+   раздел 3.1 не трогаем).
 6. Пересобери: пушишь в `arena/01a068cd-myproject1` → GitHub Actions соберёт
    `xvcen-sh-arm64-v8a` → забираешь артефакт из CI.
 7. Проверка на устройстве: ESP показывает **реальные ники**, корректное оружие,
@@ -558,3 +596,49 @@ Fragments», «Stone Hatchet»), поэтому в таблице есть и н
 
 Все три — одноразовые (пишут при первом скане/первых 8 игроках), вызов ставится
 рядом с местом, где значение уже посчитано.
+
+## 7. Журнал апдейтов игры
+
+### Апдейт от сентября 2026 (дампы `dump.7z` / `libil2cpp.7z` в коммите `c0f5c80`)
+
+Типов стало 31035 (было 30872), методов 274178 (было 269315). Из 28 структур,
+на которых держится ридер, раскладку поменяли **четыре**, из них значимы две.
+
+| Константа | Было | Стало | Причина |
+|---|---|---|---|
+| `PLAYER_MANAGER_TYPEINFO_RVA` | 0xD48CFB0 | **0xD7E4310** | новый билд libil2cpp.so |
+| `GAME_CONTROLLER_TYPEINFO_RVA` | 0xD4884E8 | **0xD7DF6C8** | то же |
+| `NETWORK_CLIENT_TYPEINFO_RVA` | 0xD48C270 | **0xD7E35B8** | то же |
+| `LOOTOBJECT_BUILDING_PIECE` | 0xF0 | **0xF8** | в `LootObject` вставлено `System.String m_ContainerSoundKey` @0xE8 |
+| `PLAYERWEAPON_VIEW` | 0x90 | **0xD0** | в `PlayerWeapon` вставлено 0x40 байт новых полей перед `animator` |
+| `PLAYERWEAPON_PIECE` | 0xD8 | **0x100** | тот же сдвиг (SyncVar `weaponPiece`) |
+| `PLAYERWEAPON_STATE` | 0xE8 | **0x110** | тот же сдвиг |
+| `PLAYERWEAPON_PLAYER_BACKREF` | 0x100 | **0x128** | тот же сдвиг |
+
+Что важно помнить по этому апдейту:
+
+* `LOOTOBJECT_BUILDING_PIECE` был **живым багом в отгруженной сборке**: по
+  старому 0xF0 теперь лежит `bool onlyGive`, то есть признак «деплой vs мировой
+  контейнер» читался мусором. `panelName` (0xE0) стоит до вставки и не поехал.
+* В новой раскладке `PlayerWeapon` есть **второй** `WeaponPiece` по 0xA8 — это
+  не SyncVar, брать нельзя. Троица SyncVar'ов опознана позиционно по хвосту
+  `_Mirror_SyncVarHookDelegate__loaded/_weaponPiece/_weaponState` (0x140/0x148/0x150).
+* Класс view оружия переименован `Mo` → `sR` (найден по форме полей), но
+  смещения внутри те же: 0x48 / 0x50 / 0x60.
+* Обфусцированные классы вокруг игрока тоже переименованы —
+  `fvp`→`pmi` (event handler), `wK`→`ij` (nicklabel), `fuI`→`pJk` (voice),
+  — но раскладка у всех трёх идентична, константы не тронуты.
+* Без изменений подтверждены: `PLAYER_POSITION 0x1D0` (в дампе по-прежнему
+  `lastSavedPosition 0x1D4`, у боевой сборки блок сдвинут на −4 — **не менять**),
+  весь блок `PLAYER_*` (userID 0x278, vehicleID 0x288, seatID 0x28C, клан
+  0x290/0x298), `MINEABLE_*`, `ITEMDATA_NAME/SHORTNAME`, `ItemPickup`, `KCC`,
+  `HitBox`, `Ragdoll`, `FP*`, `NetworkIdentity`, статик-поля (0x10 / 0x10 / 0x28)
+  и цепочка камеры (`GameControllerBase.<ukA>` 0x38 → `CameraManager.m_Camera` 0x20).
+* Мелочи без последствий: в `ItemData` добавлено `backpackConfig` @0xC0 (наши
+  0x18/0x20 до вставки), у `MineableObject` поле 0xE0 сменило тип на
+  `MineableRewardCalculator` — смещения те же.
+* `MineableEntityType`: значения 0..22 не сдвинулись, добавились
+  **`LootboxBaloon = 23` и `LootboxBaloonBig = 24`** (воздушные ящики) — оба
+  заведены в enum и рисуются маркером ящика.
+* `libunity.7z` и `moggerware.7z` — те же блобы, нативные Unity-смещения (§3.1,
+  §3.9) не пересматривались.
