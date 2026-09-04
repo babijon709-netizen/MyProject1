@@ -3022,10 +3022,19 @@ static void UpdateAim(float dt) {
     // built on this: the lead below and the feed-forward in the controller.
     static float s_prevWorldYaw = 0.f, s_prevWorldPitch = 0.f;
     static bool  s_havePrevTgt = false;
-    static float s_velYaw = 0.f, s_velPitch = 0.f;   // deg/s
-    static int   s_velSamples = 0;
-    static int   s_sinceUpdate = 0;   // frames since the position last changed
-    static float s_updateGap = 1.f;   // typical frames between two updates
+    // Short history of where the target has been, in world angles, used to
+    // fit its speed. A single frame difference is buried in bone animation
+    // noise; a fit over ~0.2 s is not.
+    static constexpr int kHist = 16;
+    static float s_hYaw[kHist] = {}, s_hPitch[kHist] = {}, s_hAge[kHist] = {};
+    static int   s_hN = 0;
+    // Both window lengths are scored by how well they predicted the sample
+    // that actually arrived, so the controller can pick the one that fits how
+    // this particular target is behaving right now.
+    static float s_predL = 0.f, s_predS = 0.f;
+    static bool  s_havePred = false;
+    static float s_errL = 0.f, s_errS = 0.f;
+    auto histClear = [&]() { s_hN = 0; s_havePred = false; s_errL = s_errS = 0.f; };
 
     const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     bool active = g_state.aim_touch && g_esp_attached && !menuOpen;
@@ -3040,8 +3049,7 @@ static void UpdateAim(float dt) {
     if (!active) {
         AimReleaseFinger(s_fingerDown);
         s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
-        s_havePrevTgt = false; s_velYaw = s_velPitch = 0.f; s_velSamples = 0;
-        s_sinceUpdate = 0; s_updateGap = 1.f;
+        s_havePrevTgt = false; s_hN = 0;
         return;
     }
 
@@ -3144,20 +3152,20 @@ static void UpdateAim(float dt) {
     if (best.id != s_lastId) s_haveLast = false; // do not learn gain across a target switch
 
     // ---- how fast is the target moving, and how old is what we see -------
-    // Remote players are not updated every frame: their position arrives with
-    // the network tick, so between two updates the box stands still and then
-    // jumps. Measuring the velocity per frame would therefore read zero most
-    // of the time. Instead the velocity is measured between two *updates*, and
-    // the age of the last update is tracked as well -- that age is most of the
-    // lag the crosshair shows behind a running player.
+    // Two separate problems are solved here.
+    //  * The bones jitter (breathing, animation, read noise) by about a pixel
+    //    every frame, while a man sprinting at 40 m only crosses eight pixels
+    //    a second. A frame-to-frame difference is therefore mostly noise, so
+    //    the speed is fitted over a fifth of a second of history instead.
+    //  * Remote positions arrive with the network tick, so between updates the
+    //    box stands still and then jumps; the age of the last real change is
+    //    tracked and made up for.
+    float velYaw = 0.f, velPitch = 0.f;
     {
         float cy = 0.f, cp = 0.f;
         const bool haveC = esp_camera_angles(cy, cp);
         if (best.id != s_lastId || !haveC) {
-            s_velYaw = s_velPitch = 0.f;
-            s_velSamples = 0;
-            s_sinceUpdate = 0;
-            s_updateGap = 1.f;
+            histClear();
             s_havePrevTgt = false;
         }
         if (haveC) {
@@ -3170,64 +3178,115 @@ static void UpdateAim(float dt) {
                 while (dYaw > 180.f) dYaw -= 360.f;
                 while (dYaw < -180.f) dYaw += 360.f;
                 float dPitch = worldPitch - s_prevWorldPitch;
-                ++s_sinceUpdate;
-                // Anything below this is float noise / breathing, not a new
-                // network position.
-                const float moved = 0.02f;
-                if (fabsf(dYaw) > moved || fabsf(dPitch) > moved) {
-                    float span = (float)s_sinceUpdate * dt;
-                    if (span > 0.0005f) {
-                        float vYaw = dYaw / span, vPitch = dPitch / span;
-                        const float kMaxVel = 400.f; // deg/s, above this it is a teleport
-                        if (std::isfinite(vYaw) && std::isfinite(vPitch) &&
-                            fabsf(vYaw) < kMaxVel && fabsf(vPitch) < kMaxVel) {
-                            const float a = (s_velSamples < 2) ? 1.f : 0.5f;
-                            s_velYaw   = s_velYaw   * (1.f - a) + vYaw   * a;
-                            s_velPitch = s_velPitch * (1.f - a) + vPitch * a;
-                            if (s_velSamples < 1000) ++s_velSamples;
-                        }
-                    }
-                    s_updateGap = s_updateGap * 0.7f + (float)s_sinceUpdate * 0.3f;
-                    s_sinceUpdate = 0;
-                    s_prevWorldYaw = worldYaw; s_prevWorldPitch = worldPitch;
-                } else if ((float)s_sinceUpdate > s_updateGap * 2.f + 2.f) {
-                    // Nothing arrived for twice the usual gap: he stopped.
-                    // Bleed the speed off instead of leading into nowhere.
-                    s_velYaw *= 0.7f; s_velPitch *= 0.7f;
-                }
+                // A jump this large is a bone switch or a teleport, not
+                // running: the history would be poisoned for a whole window.
+                if (fabsf(dYaw) > 12.f || fabsf(dPitch) > 12.f) histClear();
+                worldYaw = s_prevWorldYaw + dYaw;          // unwrapped
+                worldPitch = s_prevWorldPitch + dPitch;
             } else {
-                s_prevWorldYaw = worldYaw; s_prevWorldPitch = worldPitch;
-                s_sinceUpdate = 0;
+                histClear();
             }
+            s_prevWorldYaw = worldYaw; s_prevWorldPitch = worldPitch;
             s_havePrevTgt = true;
-        }
-    }
 
-    // Ignore movement smaller than ~1 px per frame: that is animation sway,
-    // and extrapolating it would only add error.
-    float velYaw = s_velYaw, velPitch = s_velPitch;
-    {
-        const float jitter = degPerPx / (dt > 0.0005f ? dt : 0.0167f); // 1 px/frame
-        float vMag = sqrtf(velYaw * velYaw + velPitch * velPitch);
-        if (s_velSamples < 1 || vMag < jitter) { velYaw = velPitch = 0.f; }
-        else {
-            float scale = 1.f - jitter / vMag; // fade the lead in smoothly
-            velYaw *= scale; velPitch *= scale;
-        }
-    }
+            // Push the sample, age the rest, drop everything older than the
+            // window (but always keep a couple of samples to work with).
+            for (int i = 0; i < s_hN; ++i) s_hAge[i] += dt;
+            if (s_hN < kHist) ++s_hN;
+            for (int i = s_hN - 1; i > 0; --i) {
+                s_hYaw[i] = s_hYaw[i - 1]; s_hPitch[i] = s_hPitch[i - 1]; s_hAge[i] = s_hAge[i - 1];
+            }
+            s_hYaw[0] = worldYaw; s_hPitch[0] = worldPitch; s_hAge[0] = 0.f;
+            const float window = 0.15f;
+            while (s_hN > 3 && s_hAge[s_hN - 1] > window) --s_hN;
 
-    // Aim where the target is now and where it will be when the move lands:
-    // the age of the last update plus one frame of input pipeline.
-    {
-        int stale = s_sinceUpdate;
-        if (stale > 8) stale = 8; // never extrapolate more than ~130 ms
-        // Only the age of the data has to be made up for: the delay between
-        // our move and the camera answering is already covered by the
-        // feed-forward term, which keeps the camera turning at the target's
-        // own speed instead of always reacting to an old error.
-        float leadTime = dt * (float)stale;
-        best.yaw   += velYaw   * leadTime;
-        best.pitch += velPitch * leadTime;
+            // Least squares slope over the history: bone noise averages out,
+            // a steady run does not. The fit also says where the target is
+            // *now*, which is not what we just read -- a remote position only
+            // changes on the network tick, so the newest sample is already a
+            // few frames old and carries a frame of animation noise on top.
+            auto fit = [&](float maxAge, float& vy, float& vp, float& py, float& pp) -> bool {
+                int n = 0;
+                while (n < s_hN && (n < 3 || s_hAge[n] <= maxAge)) ++n;
+                if (n < 3) return false;
+                float span = s_hAge[n - 1];
+                if (span < 0.03f) return false;
+                float mt = 0.f, my = 0.f, mp = 0.f;
+                for (int i = 0; i < n; ++i) { mt += -s_hAge[i]; my += s_hYaw[i]; mp += s_hPitch[i]; }
+                const float inv = 1.f / (float)n;
+                mt *= inv; my *= inv; mp *= inv;
+                float sxx = 0.f, sxy = 0.f, sxp = 0.f;
+                for (int i = 0; i < n; ++i) {
+                    float x = -s_hAge[i] - mt;
+                    sxx += x * x;
+                    sxy += x * (s_hYaw[i] - my);
+                    sxp += x * (s_hPitch[i] - mp);
+                }
+                if (sxx < 1e-6f) return false;
+                vy = sxy / sxx; vp = sxp / sxx;
+                const float kMaxVel = 400.f;   // deg/s, above this it is a teleport
+                if (!std::isfinite(vy) || !std::isfinite(vp) ||
+                    fabsf(vy) > kMaxVel || fabsf(vp) > kMaxVel) return false;
+                py = my + vy * (-mt);          // fitted position at this instant
+                pp = mp + vp * (-mt);
+                return true;
+            };
+
+            // Score last frame's predictions against what just arrived.
+            if (s_havePred) {
+                float eL = fabsf(worldYaw - s_predL), eS = fabsf(worldYaw - s_predS);
+                s_errL = s_errL * 0.85f + eL * 0.15f;
+                s_errS = s_errS * 0.85f + eS * 0.15f;
+            }
+
+            const float longWin = 0.15f, shortWin = 0.07f;
+            float vyL = 0.f, vpL = 0.f, pyL = 0.f, ppL = 0.f;
+            float vyS = 0.f, vpS = 0.f, pyS = 0.f, ppS = 0.f;
+            bool haveL = fit(longWin, vyL, vpL, pyL, ppL);
+            bool haveS = fit(shortWin, vyS, vpS, pyS, ppS);
+            float usedSpan = longWin;
+            float fitY = 0.f, fitP = 0.f;
+            if (haveL) {
+                velYaw = vyL; velPitch = vpL; fitY = pyL; fitP = ppL;
+                // A man who reverses direction, or stops dead, makes the long
+                // window lie. When the recent samples disagree with it, trust
+                // them instead: noisier, but it does not keep leading the
+                // wrong way through a juke.
+                // The short window is only better when it has actually been
+                // predicting better: it wins on a man who jukes, it loses on
+                // positions that arrive in steps, where its slope is noise.
+                if (haveS && s_errS < s_errL * 0.9f) {
+                    velYaw = vyS; velPitch = vpS; fitY = pyS; fitP = ppS;
+                    usedSpan = shortWin;
+                }
+            } else if (haveS) {
+                velYaw = vyS; velPitch = vpS; fitY = pyS; fitP = ppS;
+                usedSpan = shortWin;
+            }
+
+            // Noise floor: a pixel of bone jitter spread over the window is
+            // worth only a fraction of a degree per second, so real running is
+            // no longer thrown away with it. Fade in rather than switch on.
+            float floorVel = degPerPx * 1.2f / usedSpan;
+            float vMag = sqrtf(velYaw * velYaw + velPitch * velPitch);
+            if (vMag <= floorVel) { velYaw = velPitch = 0.f; }
+            else {
+                float scale = 1.f - floorVel / vMag;
+                velYaw *= scale; velPitch *= scale;
+            }
+
+            if (haveL) { s_predL = pyL + vyL * dt; } else { s_predL = worldYaw; }
+            if (haveS) { s_predS = pyS + vyS * dt; } else { s_predS = worldYaw; }
+            s_havePred = haveL || haveS;
+
+            if (haveL || haveS) {
+                float dy = fitY - s_hYaw[0], dp = fitP - s_hPitch[0];
+                const float cap = 2.0f;   // degrees, never trust the fit further
+                if (dy > cap) dy = cap; else if (dy < -cap) dy = -cap;
+                if (dp > cap) dp = cap; else if (dp < -cap) dp = -cap;
+                if (std::isfinite(dy) && std::isfinite(dp)) { best.yaw += dy; best.pitch += dp; }
+            }
+        }
     }
 
     s_lastId = best.id;
@@ -3305,7 +3364,7 @@ static void UpdateAim(float dt) {
         // sideways then needs far longer before the finger hits the edge of
         // the look area and has to be lifted and re-placed (three lost frames).
         float bias = 0.f;
-        if (velYaw > 0.f) bias = -0.09f; else if (velYaw < 0.f) bias = 0.09f;
+        if (velYaw > 0.f) bias = -0.14f; else if (velYaw < 0.f) bias = 0.14f;
         s_fx = snapGrid(sw * (0.74f + bias));
         s_fy = snapGrid(sh * 0.50f);
         Touch_Down(s_fx, s_fy);
@@ -3383,7 +3442,7 @@ static void UpdateAim(float dt) {
         Touch_Up();
         s_fingerDown = false;
         float bias = 0.f;
-        if (velYaw > 0.f) bias = -0.09f; else if (velYaw < 0.f) bias = 0.09f;
+        if (velYaw > 0.f) bias = -0.14f; else if (velYaw < 0.f) bias = 0.14f;
         s_fx = snapGrid(sw * (0.74f + bias)); s_fy = snapGrid(sh * 0.50f);
         s_lastDx = s_lastDy = 0.f;
         s_haveLast = false;
