@@ -647,23 +647,24 @@ static void DrawEspOverlay() {
     auto CornerBox = [&](float x1, float y1, float x2, float y2, ImU32 col) {
         float w = x2 - x1, h = y2 - y1;
         if (w <= 0.5f || h <= 0.5f) return;
-        // At long range the projected box is only a handful of pixels tall, so
-        // (with thick strokes) the top and bottom horizontal corner rows overlap
-        // and read as one flat line. Enforce a stroke-aware minimum on BOTH axes,
-        // expanding outward from the real box's centre, so the top and bottom
-        // corner rows (and the left/right ones) stay visually separated at any
-        // distance. The floor is scaled to the outline+fill stroke widths so the
-        // gap between the two horizontal rows is never swallowed by the strokes.
+        // At long range the projected box collapses to a few pixels, so the
+        // corner ticks overlap and the box reads as a single flat line. Whenever
+        // the real box is below a stroke-aware minimum we render it as a clean
+        // full rectangle of a guaranteed size (centred on the real box): a
+        // rectangle always shows clearly separated top and bottom edges, no
+        // matter how far away the target is.
+        bool tiny = false;
         {
             float topAndBot = (thick + 1.0f) + thick;          // outline + fill strokes on both rows
-            float sideGap   = 2.0f;                             // clear visual separation between rows
+            float sideGap   = 3.0f;                             // clear visual separation between rows
             float dMin = topAndBot + sideGap;
-            if (dMin < 10.f) dMin = 10.f;
+            if (dMin < 12.f) dMin = 12.f;
             if (h < dMin) {
                 float cy = (y1 + y2) * 0.5f;
                 y1 = cy - dMin * 0.5f;
                 y2 = cy + dMin * 0.5f;
                 h  = dMin;
+                tiny = true;
             }
             if (w < dMin) {
                 float cx = (x1 + x2) * 0.5f;
@@ -671,6 +672,11 @@ static void DrawEspOverlay() {
                 x2 = cx + dMin * 0.5f;
                 w  = dMin;
             }
+        }
+        if (tiny) {
+            dl->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), kVisOutline, 0.f, 0, thick + 1.0f);
+            dl->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), col, 0.f, 0, thick);
+            return;
         }
         float len = (w < h ? w : h) * 0.28f;
         if (len < 10.f) len = 10.f;
@@ -3020,16 +3026,19 @@ static void UpdateAim(float dt) {
             // world-space angular motion of the target = change in offset + camera rotation
             float vYaw = (best.yaw - s_prevTgtYaw) + dCamYaw;
             float vPitch = (best.pitch - s_prevTgtPitch) + dCamPitch;
-            if (std::isfinite(vYaw) && std::isfinite(vPitch) && fabsf(vYaw) < 8.f && fabsf(vPitch) < 8.f) {
+            if (std::isfinite(vYaw) && std::isfinite(vPitch) && fabsf(vYaw) < 10.f && fabsf(vPitch) < 10.f) {
                 s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
                 // Below this the "motion" is bone animation jitter (breathing,
                 // sway), which at long range is larger than the head itself.
                 // Extrapolating it would double the error, so only lead real
-                // movement, and lead it partially.
+                // movement. Aim more than a frame ahead for fast movers so the
+                // crosshair stays on a laterally running target (the controller
+                // smoothing otherwise makes it trail behind).
                 const float leadMin = degPerPx * 2.f;
                 float vMag = sqrtf(vYaw * vYaw + vPitch * vPitch);
                 if (vMag > leadMin) {
-                    float k = 0.7f * (1.f - leadMin / vMag);
+                    float k = 1.1f * (1.f - leadMin / vMag);
+                    if (k > 1.5f) k = 1.5f;
                     best.yaw += vYaw * k;
                     best.pitch += vPitch * k;
                 }
