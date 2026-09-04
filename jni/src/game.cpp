@@ -3331,8 +3331,16 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         for (size_t index = 0; index < s_transforms.size(); ++index) {
             if (!position_ok[index]) continue;
             auto tracked = g_player_track.find(s_transforms[index]);
-            if (tracked == g_player_track.end() || !tracked->second.uid[0]) continue;
+            if (tracked == g_player_track.end()) continue;
             std::string uid(tracked->second.uid);
+            if (uid.empty()) {
+                // No userID on this object: the display name identifies the
+                // account just as well, and it is already cached.
+                auto text = g_player_text.find(s_transforms[index]);
+                if (text != g_player_text.end() && text->second.has_name && text->second.name[0])
+                    uid.assign(text->second.name, strnlen(text->second.name, sizeof(text->second.name)));
+            }
+            if (uid.empty()) continue;
             auto found = chosen.find(uid);
             if (found == chosen.end()) { chosen.emplace(uid, index); continue; }
             size_t rival = found->second;
@@ -3591,6 +3599,12 @@ static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, false,
 static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, false, {255, 140,  40}};
 static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {255, 225,  50}};
 
+// Barrels are smashed, not opened, so they are MineableObjects and never pass
+// through the LootObject code at all -- the entityType below is the only place
+// they can be recognised. They belong to the loot toggle all the same.
+static const MarkerLook kBarrel    {ESP_MARKER_LOOT, "Скрап",  false, false, {255, 255, 255}};
+static const MarkerLook kSmashBox  {ESP_MARKER_LOOT, "Ящик",   false, false, {255, 255, 255}};
+
 // Animals: the game's own EntityType only covers some of them, the rest (wolf,
 // rat, ...) are recognised by the prefab name below.
 static MarkerLook animal_look(const char* label) {
@@ -3601,13 +3615,16 @@ static MarkerLook animal_look(const char* label) {
     return look;
 }
 
-// EntityType -> what to draw. Trees, barrels, buildings and players are left
-// out on purpose: the request was ore nodes and animals only.
+// EntityType -> what to draw. Trees, road signs, buildings and players are
+// left out on purpose; barrels and smashable loot boxes are in, they are the
+// scrap source and the game files them under the same enum.
 static bool marker_for_entity_type(int32_t type, MarkerLook& look) {
     switch ((MineableEntityType)type) {
         case MineableEntityType::Stone:    look = kOreStone;  return true;
         case MineableEntityType::Iron:     look = kOreMetal;  return true;
         case MineableEntityType::Sulfur:   look = kOreSulfur; return true;
+        case MineableEntityType::Barrel:   look = kBarrel;    return true;
+        case MineableEntityType::Lootbox:  look = kSmashBox;  return true;
         case MineableEntityType::Bear:     look = animal_look("Медведь");  return true;
         case MineableEntityType::Boar:     look = animal_look("Кабан");    return true;
         case MineableEntityType::Deer:     look = animal_look("Олень");    return true;
@@ -3669,6 +3686,18 @@ static bool animal_look_from_object_name(const char* raw, MarkerLook& look) {
     return for_each_name_token(raw, [&](const char* word) {
         for (const auto& animal : kAnimals) {
             if (strcmp(word, animal.word) == 0) { look = animal_look(animal.ru); return true; }
+        }
+        return false;
+    });
+}
+
+// Same safety net as the animals: some barrels come with an empty entityType,
+// and their prefab is the only thing that still says "barrel".
+static bool barrel_look_from_object_name(const char* raw, MarkerLook& look) {
+    return for_each_name_token(raw, [&](const char* word) {
+        if (strcmp(word, "barrel") == 0 || strcmp(word, "barrels") == 0) {
+            look = kBarrel;
+            return true;
         }
         return false;
     });
@@ -3836,6 +3865,11 @@ static int ore_look_for_item_name(const char* item_name, MarkerLook& look) {
         key[n++] = c;
     }
     key[n] = '\0';
+    // Processed items (barrels are stuffed with them) are not ore: without
+    // this "metal.fragments" turned every barrel into an iron node.
+    if (strstr(key, "frag") || strstr(key, "pipe") || strstr(key, "sheet") ||
+        strstr(key, "scrap") || strstr(key, "spring") || strstr(key, "gear"))
+        return 0;
     if (strstr(key, "sulfur")) { look = kOreSulfur; return 3; }
     if (strstr(key, "metal"))  { look = kOreMetal;  return 2; } // metal.ore, hq.metal.ore
     if (strstr(key, "stone"))  { look = kOreStone;  return 1; }
@@ -4164,6 +4198,8 @@ static void rebuild_marker_entities() {
                     int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
                     known = marker_for_entity_type(entity_type, look);
                 }
+                if (!known && object_name[0]) known = barrel_look_from_object_name(object_name, look);
+                if (!known && root_name[0])   known = barrel_look_from_object_name(root_name, look);
                 if (!known) known = marker_from_loot(component, look);
                 // Cloth bushes, mushroom and berry clusters: harvestable, so
                 // they are Mineables, but they belong to the pickup category.
