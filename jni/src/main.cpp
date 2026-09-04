@@ -537,6 +537,16 @@ struct InputState {
 };
 static InputState g_input;
 
+// ---- aim lead -------------------------------------------------------------
+// How far ahead of a moving target the aim points. A running man keeps moving
+// while the finger move we are sending this frame travels through the phone's
+// touch pipeline and back out as camera rotation, so the crosshair has to be
+// placed where he will be, not where he was last read. Swept on the bench:
+// 42 ms is the flat bottom of the curve there, but the true figure depends on
+// this phone's pipeline, so it is exposed as a slider ("Упреждение").
+static constexpr float kAimLeadDefaultMs = 42.f;
+static constexpr float kAimLeadMaxMs     = 120.f;
+
 struct AppState {
     struct SliderAnim { float pos = -1.f; float vel = 0.f; };
     struct RadioAnim  { float scale = 1.f, scaleVel = 0.f, ring = 0.f, ringVel = 0.f; };
@@ -554,6 +564,9 @@ struct AppState {
     float marker_dist = 150.f;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
+    // Aim lead, milliseconds. How far ahead of a running target the aim
+    // points; see kAimLeadDefaultMs and the velocity fit in UpdateAim.
+    float aim_lead_ms = kAimLeadDefaultMs;
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
@@ -568,8 +581,18 @@ struct AppState {
     float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist;
+    SliderAnim sl_aim_lead;
 };
 static AppState g_state;
+
+// Lead in seconds, range-checked: a corrupt config must not be able to make
+// the aim point a second ahead of the target.
+static float AimLeadSec() {
+    float ms = g_state.aim_lead_ms;
+    if (!(ms >= 0.f)) ms = 0.f;
+    if (ms > kAimLeadMaxMs) ms = kAimLeadMaxMs;
+    return ms * 0.001f;
+}
 
 static ImU32 ColU32(const ImVec4& c) {
     return IM_COL32((int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255), (int)(c.w * 255));
@@ -970,7 +993,9 @@ struct CfgBlob {
     bool  aim_touch, aim_pos, aim_special;
     int   aim_bone;
     bool  aim_vis_check, aim_draw_fov;
-    float aim_fov, aim_smoothness;
+    //   aim_smoothness -> aim_lead   (smoothing has its own gun_str slot,
+    //                                 and this one was only ever a mirror)
+    float aim_fov, aim_lead;
     // Every field that a feature outgrew is renamed in place rather than
     // appended, so the byte layout — and with it version 4 and every config
     // already saved on a device — stays valid. Current renames:
@@ -979,6 +1004,7 @@ struct CfgBlob {
     //   esp_health_col  -> esp_ally_col   esp_money_col   -> esp_animal_col
     //   esp_weapon_icon_col -> esp_loot_col
     //   esp_ping_col    -> esp_extra (packed scalars, see below)
+    //   aim_smoothness  -> aim_lead
     bool  esp_box, esp_name, esp_ore, esp_wall, esp_chams;
     bool  esp_weapon, esp_team, esp_tracer, esp_skeleton;
     bool  aim_scope_only, esp_animal, esp_vis_check, esp_fill;
@@ -1008,7 +1034,9 @@ static void ConfigSaveToPath(const std::string& path) {
     s.aim_vis_check  = cfg::aim::vis_check;
     s.aim_draw_fov   = cfg::aim::draw_fov;
     s.aim_fov        = cfg::aim::fov;
-    s.aim_smoothness = cfg::aim::smoothness;
+    // Offset by 1000 so a config written while this slot still held the
+    // smoothing factor (0..10) is recognised as old and ignored on load.
+    s.aim_lead       = 1000.f + g_state.aim_lead_ms;
     s.esp_box     = g_state.esp_box;     s.esp_name    = g_state.esp_name;
     s.esp_ore     = g_state.esp_ore;     s.esp_wall    = g_state.esp_wall;
     s.esp_chams   = g_state.esp_chams;
@@ -1105,12 +1133,8 @@ static void ConfigLoad(int idx) {
     cfg::aim::vis_check  = s.aim_vis_check;
     cfg::aim::draw_fov   = s.aim_draw_fov;
     cfg::aim::fov        = s.aim_fov;
-    cfg::aim::smoothness = s.aim_smoothness;
-    if (cfg::aim::smoothness < 1.f) {
-        cfg::aim::smoothness = (cfg::aim::smoothness <= 0.f) ? 1.f : cfg::aim::smoothness * 10.f;
-        if (cfg::aim::smoothness > 10.f) cfg::aim::smoothness = 10.f;
-    }
-    g_state.gun_str = cfg::aim::smoothness;
+    g_state.aim_lead_ms = (s.aim_lead >= 1000.f && s.aim_lead <= 1000.f + kAimLeadMaxMs)
+                        ? (s.aim_lead - 1000.f) : kAimLeadDefaultMs;
     g_state.esp_box     = s.esp_box;     g_state.esp_name    = s.esp_name;
     g_state.esp_wall    = s.esp_wall;
     g_state.esp_chams   = s.esp_chams;
@@ -2550,6 +2574,15 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::SliderH);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, true, g_state.sl_gun_str, dt);
 
+        // How far ahead of a running target the crosshair is placed. Too low
+        // and it trails behind anyone who moves; too high and it sits in front
+        // of him. The bench optimum is 42 ms, but the right number depends on
+        // this phone's touch pipeline, so it is a slider.
+        SHdr(XS("Упреждение"));
+        CardBg(Layout::SliderH);
+        SliderRow("##alead", XS("Упреждение"), &g_state.aim_lead_ms,
+                  0.f, kAimLeadMaxMs, XS("%.0f мс"), true, true, g_state.sl_aim_lead, dt);
+
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
 
@@ -2998,14 +3031,6 @@ static void CenterMenuOnDisplay() {
 // was last read. See the velocity fit below -- it is the one thing standing
 // between this and a crosshair that permanently trails anyone who moves.
 
-// How far ahead of a moving target the aim points, in seconds. It has to
-// cover the whole loop: the finger move queued this frame, the phone's input
-// pipeline (which answers a frame or two late), and the frame it takes to see
-// the result. Swept on the bench across 30..120 fps and pipeline delays of one
-// to four frames -- 0.022 s is the flat bottom of that curve, and either side
-// of it costs accuracy on a sprinting target.
-static constexpr float kAimLeadSec = 0.042f;
-
 struct AimTarget {
     bool  valid = false;
     unsigned long long id = 0;
@@ -3288,8 +3313,9 @@ static void UpdateAim(float dt) {
                 const float cap = 2.0f;   // degrees, never trust the fit further
                 if (dy > cap) dy = cap; else if (dy < -cap) dy = -cap;
                 if (dp > cap) dp = cap; else if (dp < -cap) dp = -cap;
-                dy += velYaw * kAimLeadSec;
-                dp += velPitch * kAimLeadSec;
+                const float lead = AimLeadSec();
+                dy += velYaw * lead;
+                dp += velPitch * lead;
                 if (std::isfinite(dy) && std::isfinite(dp)) {
                     best.yaw += dy; best.pitch += dp;
                 }

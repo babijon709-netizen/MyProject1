@@ -2695,8 +2695,9 @@ static bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, floa
 }
 
 // Extra vertical offset applied to every head aim point (metres, world up).
-// Tuned in-game at fighting range: +14 cm lands centre-head.
-static constexpr float g_aim_head_lift = 0.14F;
+// Tuned in-game at fighting range: +12 cm lands centre-head. This is the
+// far-range figure; head_lift_for_range() fades down to the near one below.
+static constexpr float g_aim_head_lift = 0.12F;
 // Up close the same 14 cm is a completely different shot: at five metres it
 // is well over a degree, which puts the round over the top of the head, while
 // at fifty it is a tenth of that and still inside the skull. The offset is
