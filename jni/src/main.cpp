@@ -542,10 +542,15 @@ static InputState g_input;
 // while the finger move we are sending this frame travels through the phone's
 // touch pipeline and back out as camera rotation, so the crosshair has to be
 // placed where he will be, not where he was last read. Swept on the bench:
-// 42 ms is the flat bottom of the curve there, but the true figure depends on
-// this phone's pipeline, so it is exposed as a slider ("Упреждение").
+// 42 ms is the flat bottom of the curve there, but that bench assumes the
+// camera answers a finger move within a frame at 60 fps. On a phone where the
+// overlay redraws slowly the whole loop -- read the world, decide, send the
+// finger, wait for the camera, see the result -- can be several times longer,
+// and the lead has to cover all of it, so the slider reaches far past the
+// bench figure. Above ~150 ms the aim is predicting a good part of a second
+// ahead: it will hold a steady runner, but it overshoots hard when he turns.
 static constexpr float kAimLeadDefaultMs = 42.f;
-static constexpr float kAimLeadMaxMs     = 120.f;
+static constexpr float kAimLeadMaxMs     = 400.f;
 
 struct AppState {
     struct SliderAnim { float pos = -1.f; float vel = 0.f; };
