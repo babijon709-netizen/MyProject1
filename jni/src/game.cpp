@@ -3441,7 +3441,16 @@ struct MarkerLook {
 static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, {190, 190, 190}};
 static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, {255, 140,  40}};
 static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, {255, 225,  50}};
-static const MarkerLook kOreIce    {ESP_MARKER_ORE, "Лёд",    true, {150, 225, 255}};
+
+// Animals: the game's own EntityType only covers some of them, the rest (wolf,
+// rat, ...) are recognised by the prefab name below.
+static MarkerLook animal_look(const char* label) {
+    MarkerLook look;
+    look.kind = ESP_MARKER_ANIMAL;
+    look.label = label;
+    look.has_color = false;
+    return look;
+}
 
 // EntityType -> what to draw. Trees, barrels, buildings and players are left
 // out on purpose: the request was ore nodes and animals only.
@@ -3450,17 +3459,59 @@ static bool marker_for_entity_type(int32_t type, MarkerLook& look) {
         case MineableEntityType::Stone:    look = kOreStone;  return true;
         case MineableEntityType::Iron:     look = kOreMetal;  return true;
         case MineableEntityType::Sulfur:   look = kOreSulfur; return true;
-        case MineableEntityType::Ice:      look = kOreIce;    return true;
-        case MineableEntityType::Bear:     look = {ESP_MARKER_ANIMAL, "Медведь",  false, {}}; return true;
-        case MineableEntityType::Boar:     look = {ESP_MARKER_ANIMAL, "Кабан",    false, {}}; return true;
-        case MineableEntityType::Deer:     look = {ESP_MARKER_ANIMAL, "Олень",    false, {}}; return true;
-        case MineableEntityType::Rabbit:   look = {ESP_MARKER_ANIMAL, "Кролик",   false, {}}; return true;
-        case MineableEntityType::Hare:     look = {ESP_MARKER_ANIMAL, "Заяц",     false, {}}; return true;
-        case MineableEntityType::Chicken:  look = {ESP_MARKER_ANIMAL, "Курица",   false, {}}; return true;
-        case MineableEntityType::Fish:     look = {ESP_MARKER_ANIMAL, "Рыба",     false, {}}; return true;
-        case MineableEntityType::Cannibal: look = {ESP_MARKER_ANIMAL, "Каннибал", false, {}}; return true;
-        default: return false;
+        case MineableEntityType::Bear:     look = animal_look("Медведь");  return true;
+        case MineableEntityType::Boar:     look = animal_look("Кабан");    return true;
+        case MineableEntityType::Deer:     look = animal_look("Олень");    return true;
+        case MineableEntityType::Rabbit:   look = animal_look("Кролик");   return true;
+        case MineableEntityType::Hare:     look = animal_look("Заяц");     return true;
+        case MineableEntityType::Chicken:  look = animal_look("Курица");   return true;
+        case MineableEntityType::Fish:     look = animal_look("Рыба");     return true;
+        case MineableEntityType::Cannibal: look = animal_look("Каннибал"); return true;
+        default: return false; // Ice is deliberately not drawn
     }
+}
+
+// Wolves and rats have no EntityType of their own (the enum stops at the
+// analytics animals), so they are recognised by the prefab name of their
+// GameObject. Matching is per word — the name is split on separators, digits
+// and camelCase humps — so "NPC_Wolf 02(Clone)" hits "wolf" while "Crate"
+// cannot be mistaken for a rat.
+static bool animal_look_from_object_name(const char* raw, MarkerLook& look) {
+    static const struct { const char* word; const char* ru; } kAnimals[] = {
+        {"wolf", "Волк"},      {"wolfs", "Волк"},     {"wolves", "Волк"},
+        {"rat", "Крыса"},      {"rats", "Крыса"},     {"mouse", "Крыса"},
+        {"bear", "Медведь"},   {"boar", "Кабан"},     {"pig", "Кабан"},
+        {"deer", "Олень"},     {"stag", "Олень"},     {"rabbit", "Кролик"},
+        {"hare", "Заяц"},      {"chicken", "Курица"}, {"hen", "Курица"},
+        {"fish", "Рыба"},      {"shark", "Акула"},    {"cannibal", "Каннибал"},
+        {"horse", "Лошадь"},   {"goat", "Коза"},      {"sheep", "Овца"},
+        {"cow", "Корова"},     {"fox", "Лиса"},       {"snake", "Змея"},
+    };
+    if (!raw || !raw[0]) return false;
+    char word[24];
+    size_t n = 0;
+    char prev = 0; // previous raw character, to spot camelCase humps
+    for (const char* p = raw;; prev = *p, ++p) {
+        char c = *p;
+        bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        // A capital after a lower-case letter starts a new word ("BigWolf"),
+        // while an all-caps run ("WOLF") stays a single word.
+        bool hump = letter && c >= 'A' && c <= 'Z' && n > 0 && prev >= 'a' && prev <= 'z';
+        if (letter && !hump && n + 1 < sizeof(word)) {
+            word[n++] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+            continue;
+        }
+        if (n > 0) {
+            word[n] = '\0';
+            for (const auto& animal : kAnimals) {
+                if (strcmp(word, animal.word) == 0) { look = animal_look(animal.ru); return true; }
+            }
+            n = 0;
+        }
+        if (!c) break;
+        if (hump) { word[n++] = (char)(c - 'A' + 'a'); }
+    }
+    return false;
 }
 
 // Elements of a managed List<T> or T[] (the dump types these fields as `?`, so
@@ -3498,7 +3549,6 @@ static int ore_look_for_item_name(const char* item_name, MarkerLook& look) {
     key[n] = '\0';
     if (strstr(key, "sulfur")) { look = kOreSulfur; return 3; }
     if (strstr(key, "metal"))  { look = kOreMetal;  return 2; } // metal.ore, hq.metal.ore
-    if (strstr(key, "ice"))    { look = kOreIce;    return 1; }
     if (strstr(key, "stone"))  { look = kOreStone;  return 1; }
     return 0;
 }
@@ -3601,6 +3651,9 @@ static void rebuild_marker_entities() {
 
     uint64_t dictionary = resolve_network_client_spawned();
     if (!dictionary) return;
+    // Needed to read prefab names (wolves / rats); harmless if it fails, the
+    // loot and entityType paths still work.
+    if (!g_go_name_offset_valid && g_local_player) ensure_gameobject_name_offset(g_local_player);
     uint64_t identity_class = resolve_network_identity_class();
 
     uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
@@ -3641,18 +3694,30 @@ static void rebuild_marker_entities() {
 
             int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
             MarkerLook look;
+            char object_name[48] = {}, root_name[48] = {};
+            managed_component_gameobject_name(component, object_name, sizeof(object_name));
             bool known = marker_for_entity_type(entity_type, look);
-            if (!known) known = marker_from_loot(component, look); // ore nodes leave entityType empty
+            // Wolves / rats carry no EntityType, ore nodes leave it empty too.
+            // The component may sit on a sub-object ("Body"), so the network
+            // object's own GameObject is tried as well.
+            if (!known && object_name[0]) known = animal_look_from_object_name(object_name, look);
+            if (!known) {
+                managed_component_gameobject_name(identity, root_name, sizeof(root_name));
+                if (root_name[0]) known = animal_look_from_object_name(root_name, look);
+            }
+            if (!known) known = marker_from_loot(component, look);
 
             if (probe_samples.size() < 400) {
                 char loot[32] = {};
                 uint64_t first_loot[1];
                 if (read_managed_collection(rd_ptr(component + MINEABLE_LOOT), first_loot, 1) == 1)
                     read_managed_string(rd_ptr(first_loot[0] + LOOTITEM_ITEM_NAME), loot, sizeof(loot));
-                char sample[96];
-                snprintf(sample, sizeof(sample), "%s:t%d:%s%s ",
+                char sample[160];
+                snprintf(sample, sizeof(sample), "%s:t%d:go=%s/%s:%s%s ",
                          read_remote_string(rd_ptr(rd_ptr(component) + IL2CPP_CLASS_NAME)).c_str(),
-                         (int)entity_type, loot[0] ? loot : "-", known ? "" : ":skip");
+                         (int)entity_type, object_name[0] ? object_name : "-",
+                         root_name[0] ? root_name : "-",
+                         loot[0] ? loot : "-", known ? "" : ":skip");
                 probe_samples += sample;
             }
             if (!known) continue;

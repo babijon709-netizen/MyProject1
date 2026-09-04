@@ -632,23 +632,24 @@ static void DrawEspOverlay() {
     // made the distance/weapon text overflow the pill.
     ImFont* espFont = ImGui::GetFont();
     float espFs = ImGui::GetFontSize() * 0.8f;
-    auto PillH = [&](const char* text) {
+    auto PillH = [&](const char* text, float scale = 1.f) {
         if (!text || !text[0]) return 0.f;
-        ImVec2 tsz = espFont->CalcTextSizeA(espFs, FLT_MAX, 0, text);
-        return tsz.y + 4.f;
+        ImVec2 tsz = espFont->CalcTextSizeA(espFs * scale, FLT_MAX, 0, text);
+        return tsz.y + 4.f * scale;
     };
-    auto EspPill = [&](float cx, float y, const char* text, ImU32 textCol) {
+    auto EspPill = [&](float cx, float y, const char* text, ImU32 textCol, float scale = 1.f) {
         if (!text || !text[0]) return;
-        ImVec2 tsz = espFont->CalcTextSizeA(espFs, FLT_MAX, 0, text);
-        const float padX = 5.f, padY = 2.f;
+        float fsz = espFs * scale;
+        ImVec2 tsz = espFont->CalcTextSizeA(fsz, FLT_MAX, 0, text);
+        const float padX = 5.f * scale, padY = 2.f * scale;
         float x0 = cx - tsz.x * 0.5f - padX;
         float x1 = cx + tsz.x * 0.5f + padX;
         float y1 = y + tsz.y + padY * 2.f;
         // Light translucent fill (not a dense black block), same for the name,
         // weapon and distance pills so they read consistently over any scene.
-        dl->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y1), IM_COL32(30, 30, 36, 40), 5.f);
-        dl->AddRect(ImVec2(x0, y), ImVec2(x1, y1), kVisOutline, 5.f, 0, 1.0f);
-        dl->AddText(espFont, espFs, ImVec2(cx - tsz.x * 0.5f, y + padY), textCol, text);
+        dl->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y1), IM_COL32(30, 30, 36, 40), 5.f * scale);
+        dl->AddRect(ImVec2(x0, y), ImVec2(x1, y1), kVisOutline, 5.f * scale, 0, 1.0f);
+        dl->AddText(espFont, fsz, ImVec2(cx - tsz.x * 0.5f, y + padY), textCol, text);
     };
     // A far away player projects to a couple of pixels, which used to make the
     // box degenerate (corners gone, top/bottom strokes fused into one line).
@@ -834,13 +835,20 @@ static void DrawEspOverlay() {
     // One pill with the resource / animal name at the object's position; the
     // scan itself is done by the game layer and reuses this frame's camera.
     if (g_state.esp_ore || g_state.esp_animal) {
+        // Smaller than the player labels (there are many more of them), with the
+        // distance on a second line underneath.
+        constexpr float kMarkerScale = 0.78f;
         for (const EspMarker& marker : esp_get_markers()) {
             if (!marker.name[0]) continue;
             if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
             ImU32 col = marker.has_color
                 ? IM_COL32(marker.color_rgb[0], marker.color_rgb[1], marker.color_rgb[2], 255)
                 : ColU32(cfg::esp::animal_col);
-            EspPill(marker.x, marker.y, marker.name, col);
+            EspPill(marker.x, marker.y, marker.name, col, kMarkerScale);
+            char label[24];
+            snprintf(label, sizeof(label), "%.0fm", marker.distance);
+            EspPill(marker.x, marker.y + PillH(marker.name, kMarkerScale) + 2.f, label,
+                    ColU32(cfg::esp::distance_col), kMarkerScale);
         }
     }
 }
