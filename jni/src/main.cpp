@@ -647,36 +647,28 @@ static void DrawEspOverlay() {
     auto CornerBox = [&](float x1, float y1, float x2, float y2, ImU32 col) {
         float w = x2 - x1, h = y2 - y1;
         if (w <= 0.5f || h <= 0.5f) return;
-        // At long range the projected box collapses to a few pixels, so the
-        // corner ticks overlap and the box reads as a single flat line. Whenever
-        // the real box is below a stroke-aware minimum we render it as a clean
-        // full rectangle of a guaranteed size (centred on the real box): a
-        // rectangle always shows clearly separated top and bottom edges, no
-        // matter how far away the target is.
-        bool tiny = false;
+        // At long range the projected box collapses to a couple of pixels, so
+        // its top and bottom edges sit on (nearly) the same scanline and read as
+        // a single horizontal line. When the box is that small, redraw just the
+        // top and bottom horizontal edges, vertically offset around the real
+        // box centre by a fixed gap that is always larger than the stroke, so
+        // the two lines are guaranteed to stay visibly separated at any range.
         {
-            float topAndBot = (thick + 1.0f) + thick;          // outline + fill strokes on both rows
-            float sideGap   = 3.0f;                             // clear visual separation between rows
-            float dMin = topAndBot + sideGap;
-            if (dMin < 12.f) dMin = 12.f;
-            if (h < dMin) {
-                float cy = (y1 + y2) * 0.5f;
-                y1 = cy - dMin * 0.5f;
-                y2 = cy + dMin * 0.5f;
-                h  = dMin;
-                tiny = true;
-            }
-            if (w < dMin) {
+            float row = (thick + 1.0f) + thick + 2.0f;      // two stroke rows + clear gap
+            if (row < 14.f) row = 14.f;
+            if (h < row || w < row) {
                 float cx = (x1 + x2) * 0.5f;
-                x1 = cx - dMin * 0.5f;
-                x2 = cx + dMin * 0.5f;
-                w  = dMin;
+                float cy = (y1 + y2) * 0.5f;
+                float span = w < row ? row : w;             // keep a readable width too
+                float X1 = cx - span * 0.5f, X2 = cx + span * 0.5f;
+                float Y1 = cy - row * 0.5f;
+                float Y2 = cy + row * 0.5f;
+                dl->AddLine(ImVec2(X1, Y1), ImVec2(X2, Y1), kVisOutline, thick + 1.0f);
+                dl->AddLine(ImVec2(X1, Y2), ImVec2(X2, Y2), kVisOutline, thick + 1.0f);
+                dl->AddLine(ImVec2(X1, Y1), ImVec2(X2, Y1), col, thick);
+                dl->AddLine(ImVec2(X1, Y2), ImVec2(X2, Y2), col, thick);
+                return;
             }
-        }
-        if (tiny) {
-            dl->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), kVisOutline, 0.f, 0, thick + 1.0f);
-            dl->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), col, 0.f, 0, thick);
-            return;
         }
         float len = (w < h ? w : h) * 0.28f;
         if (len < 10.f) len = 10.f;
