@@ -868,10 +868,17 @@ static void DrawEspOverlay() {
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;
+        // Elite crates pulse through the spectrum: one hue for all of them per
+        // frame (a full turn every two seconds) so they cannot be missed.
+        const float rainbow_hue = fmodf((float)ImGui::GetTime() * 0.5f, 1.0f);
+        float rr = 1.f, rg = 1.f, rb = 1.f;
+        ImGui::ColorConvertHSVtoRGB(rainbow_hue, 0.85f, 1.0f, rr, rg, rb);
+        const ImU32 rainbow_col = IM_COL32((int)(rr * 255.f), (int)(rg * 255.f), (int)(rb * 255.f), 255);
         for (const EspMarker& marker : esp_get_markers()) {
             if (!marker.name[0]) continue;
             if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
-            ImU32 col = marker.has_color
+            ImU32 col = marker.rainbow ? rainbow_col
+                : marker.has_color
                 ? IM_COL32(marker.color_rgb[0], marker.color_rgb[1], marker.color_rgb[2], 255)
                 : ColU32(marker.kind == ESP_MARKER_LOOT   ? cfg::esp::loot_col
                        : marker.kind == ESP_MARKER_PICKUP ? cfg::esp::pickup_col

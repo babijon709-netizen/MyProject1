@@ -923,6 +923,16 @@ static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
     return read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, position, &rotation);
 }
 
+// A world position we would believe from a single sample: inside the map
+// bounds and not a pile of denormals. Used when we are the only player on the
+// server, where the "several players spread out" test below cannot run.
+static bool position_looks_like_world_space(const Vec3& position) {
+    if (!vec3_is_finite(position)) return false;
+    if (fabsf(position.x) > 20000.0F || fabsf(position.z) > 20000.0F) return false;
+    if (fabsf(position.y) > 10000.0F) return false;
+    return fabsf(position.x) + fabsf(position.y) + fabsf(position.z) > 0.01F;
+}
+
 static bool evaluate_player_position_offset(const std::vector<uint64_t>& players, uint64_t offset, double& score) {
     score = 0.0;
     if (!offset) return false;
@@ -942,9 +952,18 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
             maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
         }
     }
-    if (!initialized || valid < 2 || non_zero < 2) return false;
+    if (!initialized || valid < 1 || non_zero < 1) return false;
     double extent = fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z);
-    if (!std::isfinite(extent) || extent < 0.1 || extent > 1000000.0) return false;
+    if (!std::isfinite(extent) || extent > 1000000.0) return false;
+    // Alone on the server (or everybody standing on the same spot) there is no
+    // spread to measure, so a single plausible world position has to do. Not
+    // accepting it used to kill the whole ESP after a solo respawn: the offset
+    // never re-validated and every frame bailed out early until app restart.
+    if (valid < 2 || extent < 0.1) {
+        if (!position_looks_like_world_space(minimum)) return false;
+        score = (double)valid * 1000000.0;
+        return true;
+    }
     score = (double)valid * 1000000.0 + std::min(extent, 999999.0);
     return true;
 }
@@ -1221,8 +1240,8 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
         samples.push_back(position);
         if (samples.size() >= 24) break;
     }
-    if (samples.size() < 2) {
-        g_player_position_validated = false;
+    if (samples.empty()) {
+        // Nothing readable this frame; keep the validated offset and retry.
         return false;
     }
 
@@ -1232,10 +1251,14 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
         maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
     }
     float extent = fabsf(maximum.x - minimum.x) + fabsf(maximum.y - minimum.y) + fabsf(maximum.z - minimum.z);
-    if (extent < 0.1F) {
+    // Several players that never move apart mean the offset is not a position
+    // at all -- but only when there are several of them. Alone on the server a
+    // zero extent is normal and must not invalidate anything.
+    if (samples.size() >= 2 && extent < 0.1F) {
         g_player_position_validated = false;
         return false;
     }
+    if (samples.size() < 2 && !position_looks_like_world_space(samples[0])) return false;
 
     Mat4 validated_projection{}, validated_view{};
     if (!read_native_camera_matrices(native_camera, 0.0F, validated_projection, validated_view))
@@ -2995,6 +3018,9 @@ static float g_frame_sw = 0.0F, g_frame_sh = 0.0F;
 static Vec3 g_frame_local_pos{};
 static bool g_frame_local_valid = false;
 static int      g_frame_transforms_empty_streak = 0;
+// Frames in a row esp_get_boxes() gave up before publishing this frame's
+// camera / local position (see the watchdog at the top of it).
+static int      g_frame_publish_fail_streak = 0;
 
 // Everything derived from a particular world/session. Called when the whole
 // player population is replaced (scene reload / new session) or the player
@@ -3021,6 +3047,7 @@ static void reset_world_caches() {
 void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
+    g_frame_publish_fail_streak = 0;
     g_aim_ref_valid = false;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
@@ -3046,6 +3073,17 @@ void esp_reset() {
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
 
+    // Watchdog: every frame that fails to publish a camera + local position
+    // counts up, and a few seconds of that means some cached offset or class
+    // pointer did not survive the last world reload. Rebuilding everything is
+    // cheap and rare, and it is what keeps a death / respawn from killing the
+    // whole ESP until the app is restarted.
+    if (++g_frame_publish_fail_streak > 240) {
+        g_frame_publish_fail_streak = 0;
+        g_frame_transforms.clear();
+        reset_world_caches();
+    }
+
     // Markers reuse this frame's camera; invalidate it until it is rebuilt so
     // an early return here can never leave them projecting through a stale one.
     g_frame_vp_valid = false;
@@ -3064,8 +3102,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<uint64_t> refreshed = read_configured_player_transforms();
     if (!refreshed.empty()) {
         // World reload: every PlayerManager object is new (no overlap with
-        // the previous population, which was more than just ourselves).
-        if (s_transforms.size() >= 2) {
+        // the previous population). This also has to fire when we are alone on
+        // the server -- respawning solo replaces our single PlayerManager and
+        // used to leave every cache pointing at the dead one.
+        if (!s_transforms.empty()) {
             bool overlap = false;
             for (uint64_t previous : s_transforms) {
                 for (uint64_t current : refreshed) if (previous == current) { overlap = true; break; }
@@ -3154,6 +3194,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_sw = sw; g_frame_sh = sh;
     g_frame_local_pos = local;
     g_frame_local_valid = has_local_position;
+    g_frame_publish_fail_streak = 0; // this frame is healthy
 
     Vec3 transform_camera_position{};
     Vec4 transform_camera_rotation{};
@@ -3404,6 +3445,7 @@ struct MarkerEntity {
     const char* label = nullptr;
     char     text[40] = {};
     bool     has_color = false;
+    bool     rainbow = false;
     unsigned char color_rgb[3] = {255, 255, 255};
 };
 static std::vector<MarkerEntity> g_marker_entities;
@@ -3416,12 +3458,13 @@ struct MarkerLook {
     int kind = ESP_MARKER_ORE;
     const char* label = nullptr;
     bool has_color = false;
+    bool rainbow = false; // drawn in a cycling rainbow colour (elite crates)
     unsigned char rgb[3] = {255, 255, 255};
 };
 
-static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, {190, 190, 190}};
-static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, {255, 140,  40}};
-static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, {255, 225,  50}};
+static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, false, {190, 190, 190}};
+static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, false, {255, 140,  40}};
+static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {255, 225,  50}};
 
 // Animals: the game's own EntityType only covers some of them, the rest (wolf,
 // rat, ...) are recognised by the prefab name below.
@@ -3515,6 +3558,7 @@ static bool animal_look_from_object_name(const char* raw, MarkerLook& look) {
 struct LootNameInfo {
     const char* label = nullptr;
     int  rank = 0;
+    bool rainbow = false;
     bool player_box = false;
 };
 
@@ -3526,57 +3570,62 @@ static void scan_loot_name(const char* raw, LootNameInfo& info) {
         "storage", "stash", "cupboard", "furnace", "campfire", "locker", "bed",
         "sleeping", "sleepingbag", "bedroll", "shelf", "planter", "composter",
         "fridge", "mailbox", "workbench", "quarry", "turret", "smelter",
-        "barbecue", "oven", "wardrobe", "rack",
+        "barbecue", "oven", "wardrobe", "rack", "generic", "deployable",
         "woodbox", "woodenbox", "largewoodbox", "smallwoodbox", "largebox",
         "smallbox", "bigbox", "storagebox", "toolcupboard", "toolbox2",
+        // Sleeping players and the bag a killed player leaves behind are
+        // lootable too, and they used to show up as an anonymous "Ящик".
+        "corpse", "corpses", "ragdoll", "sleeper", "sleepers", "player",
+        "players", "human", "survivor", "backpack", "deathbag", "death",
+        "died", "grave", "skeleton", "playercorpse", "playerloot",
+        "lootbag", "dropbag", "deathloot", "inventory", "belt",
     };
     // A "box" that also says how big it is, is a player box ("Large Box").
     static const char* const kSizeWords[] = {"small", "large", "big", "wood", "wooden", "medium", "mini"};
     // label table; a higher rank wins so "MilitaryCrate" beats plain "crate".
-    static const struct { const char* word; const char* ru; int rank; } kLabels[] = {
+    static const struct { const char* word; const char* ru; int rank; bool rainbow; } kLabels[] = {
         // Elite / military crates first: they are the ones worth crossing the
         // map for, so every spelling the prefab or the loot panel might use is
-        // listed and outranks the plain "crate" match below.
-        {"military",     "Военный ящик",     4},
-        {"militarycrate","Военный ящик",     4},
-        {"milcrate",     "Военный ящик",     4},
-        {"mil",          "Военный ящик",     4},
-        {"army",         "Военный ящик",     4},
-        {"soldier",      "Военный ящик",     4},
-        {"elite",        "Элитный ящик",     4},
-        {"elitecrate",   "Элитный ящик",     4},
-        {"eliteloot",    "Элитный ящик",     4},
-        {"epic",         "Элитный ящик",     4},
-        {"legendary",    "Элитный ящик",     4},
-        {"rare",         "Редкий ящик",      4},
-        {"airdrop",    "Аирдроп",            3},
-        {"supply",     "Аирдроп",            3},
-        {"medical",    "Мед. ящик",          3},
-        {"medkit",     "Мед. ящик",          3},
-        {"ammo",       "Ящик патронов",      3},
-        {"toolbox",    "Ящик инструментов",  3},
-        {"food",       "Ящик с едой",        3},
-        {"heli",       "Ящик с вертолёта",   3},
-        {"helicopter", "Ящик с вертолёта",   3},
-        {"bradley",    "Ящик с танка",       3},
-        {"oilrig",     "Ящик с вышки",       3},
-        {"hackable",   "Взломной ящик",      3},
-        {"safe",       "Сейф",               3},
-        {"cash",       "Касса",              3},
-        {"register",   "Касса",              3},
-        {"vending",    "Автомат",            3},
-        {"barrel",     "Скрап",              2}, // barrels are the scrap source
-        {"crate",      "Ящик",               2},
-        {"lootbox",    "Ящик",               2},
-        {"loot",       "Ящик",               2},
-        {"container",  "Контейнер",          2},
-        {"chest",      "Сундук",             2},
-        {"case",       "Кейс",               2},
-        {"cache",      "Тайник",             2},
-        {"trash",      "Мусорка",            2},
-        {"garbage",    "Мусорка",            2},
-        {"sack",       "Мешок",              2},
-        {"bag",        "Мешок",              2},
+        // listed and outranks the plain "crate" match below. The elite ones
+        // are flagged rainbow: the overlay cycles their colour.
+        {"military",     "Военный ящик",     4, false},
+        {"militarycrate","Военный ящик",     4, false},
+        {"milcrate",     "Военный ящик",     4, false},
+        {"mil",          "Военный ящик",     4, false},
+        {"army",         "Военный ящик",     4, false},
+        {"soldier",      "Военный ящик",     4, false},
+        {"elite",        "Элитный ящик",     4, true},
+        {"elitecrate",   "Элитный ящик",     4, true},
+        {"eliteloot",    "Элитный ящик",     4, true},
+        {"epic",         "Элитный ящик",     4, true},
+        {"legendary",    "Элитный ящик",     4, true},
+        {"rare",         "Редкий ящик",      4, false},
+        {"airdrop",    "Аирдроп",            3, false},
+        {"supply",     "Аирдроп",            3, false},
+        {"medical",    "Мед. ящик",          3, false},
+        {"medkit",     "Мед. ящик",          3, false},
+        {"ammo",       "Ящик патронов",      3, false},
+        {"toolbox",    "Ящик инструментов",  3, false},
+        {"food",       "Ящик с едой",        3, false},
+        {"heli",       "Ящик с вертолёта",   3, false},
+        {"helicopter", "Ящик с вертолёта",   3, false},
+        {"bradley",    "Ящик с танка",       3, false},
+        {"oilrig",     "Ящик с вышки",       3, false},
+        {"hackable",   "Взломной ящик",      3, false},
+        {"safe",       "Сейф",               3, false},
+        {"cash",       "Касса",              3, false},
+        {"register",   "Касса",              3, false},
+        {"vending",    "Автомат",            3, false},
+        {"barrel",     "Скрап",              2, false}, // barrels are the scrap source
+        {"crate",      "Ящик",               2, false},
+        {"lootbox",    "Ящик",               2, false},
+        {"loot",       "Ящик",               2, false},
+        {"container",  "Контейнер",          2, false},
+        {"chest",      "Сундук",             2, false},
+        {"case",       "Кейс",               2, false},
+        {"cache",      "Тайник",             2, false},
+        {"trash",      "Мусорка",            2, false},
+        {"garbage",    "Мусорка",            2, false},
     };
     bool saw_box = false, saw_size = false;
     for_each_name_token(raw, [&](const char* word) {
@@ -3589,6 +3638,7 @@ static void scan_loot_name(const char* raw, LootNameInfo& info) {
             if (strcmp(word, entry.word) == 0 && entry.rank > info.rank) {
                 info.rank = entry.rank;
                 info.label = entry.ru;
+                info.rainbow = entry.rainbow;
             }
         }
         return false;
@@ -3612,9 +3662,15 @@ static bool loot_marker(uint64_t component, const char* object_name, const char*
     if (!info.player_box) scan_loot_name(root_name, info);
     if (!info.player_box) scan_loot_name(panel, info);
     if (info.player_box) return false;
+    // No name we recognise -> not drawn. Everything anonymous down here is
+    // something a player owns (a box in a house, a sleeping player, the bag a
+    // corpse leaves), and labelling all of it "Ящик" is exactly the noise the
+    // loot ESP must not produce. World containers always name themselves.
+    if (info.rank <= 0 || !info.label) return false;
 
     look.kind = ESP_MARKER_LOOT;
-    look.label = info.label ? info.label : "Ящик"; // unknown world container
+    look.label = info.label;
+    look.rainbow = info.rainbow;
     look.has_color = false;
     return true;
 }
@@ -3688,33 +3744,70 @@ static bool marker_from_loot(uint64_t mineable, MarkerLook& look) {
 // ones. Labels stay short on purpose: they share a 40 byte pill with the count.
 static const char* pickup_label_for_item(const char* short_name) {
     static const struct { const char* key; const char* ru; } kItems[] = {
-        {"mushroom",       "Грибы"},        {"berry",          "Ягоды"},
-        {"blueberr",       "Ягоды"},        {"raspberr",       "Ягоды"},
-        {"hemp",           "Конопля"},      {"cloth",          "Ткань"},
+        // -- food and gatherables -------------------------------------------
+        {"mushroom",       "Грибы"},        {"blueberr",       "Ягоды"},
+        {"raspberr",       "Ягоды"},        {"berry",          "Ягоды"},
         {"pumpkin",        "Тыква"},        {"corn",           "Кукуруза"},
-        {"potato",         "Картофель"},    {"seed",           "Семена"},
-        {"scrap",          "Скрап"},        {"sulfur",         "Сера"},
-        {"hq.metal",       "Металл HQ"},    {"metal.refined",  "Металл HQ"},
-        {"metal.frag",     "Фрагменты"},    {"metal",          "Металл"},
-        {"stone",          "Камень"},       {"wood",           "Дерево"},
-        {"charcoal",       "Уголь"},        {"gunpowder",      "Порох"},
-        {"low.grade",      "Низкосорт"},    {"lowgrade",       "Низкосорт"},
-        {"crude",          "Нефть"},        {"fuel",           "Топливо"},
-        {"leather",        "Кожа"},         {"fat",            "Жир"},
-        {"bone",           "Кости"},        {"meat",           "Мясо"},
-        {"fish",           "Рыба"},         {"chicken",        "Курятина"},
-        {"water",          "Вода"},         {"can.",           "Консервы"},
-        {"medkit",         "Аптечка"},      {"syringe",        "Шприц"},
-        {"bandage",        "Бинт"},         {"antirad",        "Антирад"},
-        {"rope",           "Верёвка"},      {"tarp",           "Брезент"},
-        {"gear",           "Шестерни"},     {"spring",         "Пружина"},
-        {"pipe",           "Труба"},        {"sheetmetal",     "Листы"},
-        {"sheet",          "Листы"},        {"blade",          "Лезвие"},
-        {"propane",        "Пропан"},       {"sewing",         "Швейный"},
-        {"tech.trash",     "Электроника"},  {"techtrash",      "Электроника"},
-        {"battery",        "Батарея"},      {"explosive",      "Взрывчатка"},
+        {"potato",         "Картофель"},    {"cactus",         "Кактус"},
+        {"seed",           "Семена"},       {"hemp",           "Конопля"},
+        {"granola",        "Батончик"},     {"chocolate",      "Шоколад"},
+        {"candy",          "Конфета"},      {"apple",          "Яблоко"},
+        {"bread",          "Хлеб"},         {"honey",          "Мёд"},
+        {"egg",            "Яйцо"},         {"beans",          "Фасоль"},
+        {"tuna",           "Тунец"},        {"soda",           "Газировка"},
+        {"cola",           "Газировка"},    {"canned",         "Консервы"},
+        {"can.",           "Консервы"},     {"chicken",        "Курятина"},
+        {"meat",           "Мясо"},         {"fish",           "Рыба"},
+        {"water",          "Вода"},         {"bottle",         "Бутылка"},
+        // -- tools and weapons (before the resources: "Stone Hatchet" is a
+        //    hatchet, not a stone) -------------------------------------------
+        {"pickaxe",        "Кирка"},        {"pick axe",       "Кирка"},
+        {"hatchet",        "Топор"},        {"axe",            "Топор"},
+        {"hammer",         "Молоток"},      {"torch",          "Факел"},
+        {"bucket",         "Ведро"},        {"jerry",          "Канистра"},
+        {"explosive",      "Взрывчатка"},   {"grenade",        "Граната"},
+        {"rocket",         "Ракета"},       {"c4",             "С4"},
         {"ammo",           "Патроны"},      {"arrow",          "Стрелы"},
-        {"door",           "Дверь"},        {"key",            "Ключ"},
+        {"shell",          "Патроны"},      {"rifle",          "Винтовка"},
+        {"pistol",         "Пистолет"},     {"revolver",       "Револьвер"},
+        {"shotgun",        "Дробовик"},     {"crossbow",       "Арбалет"},
+        {"bow",            "Лук"},          {"spear",          "Копьё"},
+        {"machete",        "Мачете"},       {"knife",          "Нож"},
+        {"helmet",         "Шлем"},         {"kevlar",         "Броня"},
+        {"armor",          "Броня"},        {"armour",         "Броня"},
+        {"hoodie",         "Одежда"},       {"jacket",         "Одежда"},
+        {"shirt",          "Одежда"},       {"pants",          "Одежда"},
+        {"boots",          "Одежда"},       {"gloves",         "Одежда"},
+        {"mask",           "Одежда"},
+        // -- resources -------------------------------------------------------
+        {"cloth",          "Ткань"},        {"leather",        "Кожа"},
+        {"fat",            "Жир"},          {"bone",           "Кости"},
+        {"scrap",          "Скрап"},        {"sulfur",         "Сера"},
+        {"high quality",   "Металл HQ"},    {"hq.metal",       "Металл HQ"},
+        {"metal.refined",  "Металл HQ"},    {"metal frag",     "Фрагменты"},
+        {"metal.frag",     "Фрагменты"},    {"fragment",       "Фрагменты"},
+        {"sheet metal",    "Листы"},        {"sheetmetal",     "Листы"},
+        {"sheet",          "Листы"},        {"metal",          "Металл"},
+        {"stone",          "Камень"},       {"wood",           "Дерево"},
+        {"charcoal",       "Уголь"},        {"coal",           "Уголь"},
+        {"gunpowder",      "Порох"},        {"gun powder",     "Порох"},
+        {"low.grade",      "Низкосорт"},    {"lowgrade",       "Низкосорт"},
+        {"low grade",      "Низкосорт"},    {"crude",          "Нефть"},
+        {"diesel",         "Солярка"},      {"fuel",           "Топливо"},
+        {"tech.trash",     "Электроника"},  {"techtrash",      "Электроника"},
+        {"tech trash",     "Электроника"},  {"battery",        "Батарея"},
+        {"gear",           "Шестерни"},     {"spring",         "Пружина"},
+        {"pipe",           "Труба"},        {"blade",          "Лезвие"},
+        {"rope",           "Верёвка"},      {"tarp",           "Брезент"},
+        {"propane",        "Пропан"},       {"sewing",         "Швейный"},
+        {"glue",           "Клей"},         {"tape",           "Скотч"},
+        // -- medical and the rest --------------------------------------------
+        {"medkit",         "Аптечка"},      {"medical",        "Аптечка"},
+        {"syringe",        "Шприц"},        {"bandage",        "Бинт"},
+        {"antirad",        "Антирад"},      {"radiation",      "Антирад"},
+        {"pills",          "Таблетки"},     {"blueprint",      "Чертёж"},
+        {"wrench",         "Гаечный ключ"}, {"door",           "Дверь"},
+        {"key",            "Ключ"},
     };
     if (!short_name || !short_name[0]) return nullptr;
     char key[48];
@@ -3787,13 +3880,19 @@ static bool pickup_marker(uint64_t component, char* label, size_t label_cap) {
                                 sizeof(short_name), 47))
         return false;
     const char* translated = pickup_label_for_item(short_name);
-    // Unknown item: fall back to the game's own display name, then to the raw
-    // short name, so nothing on the ground is ever silently dropped.
+    // Unknown short name: the game's own display name ("Blue Berry", "Mushroom")
+    // goes through the same table -- most of the items that stayed English did
+    // so because their short name is spelled differently from their name. Only
+    // if that misses too is the English name shown as-is, so nothing on the
+    // ground is ever silently dropped.
     char fallback[40] = {};
     if (!translated) {
         uint64_t item = rd_ptr(component + ITEMPICKUP_ITEM_OBJECT);
         uint64_t data = valid_obj(item) ? rd_ptr(item + ITEM_DATA) : 0;
         if (valid_obj(data)) read_managed_string(rd_ptr(data + ITEMDATA_NAME), fallback, sizeof(fallback));
+        translated = pickup_label_for_item(fallback);
+    }
+    if (!translated) {
         if (!fallback[0]) snprintf(fallback, sizeof(fallback), "%.30s", short_name);
         translated = fallback;
     }
@@ -3927,13 +4026,16 @@ static void rebuild_marker_entities() {
                 if (!g_markers_loot_enabled) continue;
                 known = loot_marker(component, object_name, root_name, look);
             } else {
-                int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
-                known = marker_for_entity_type(entity_type, look);
-                // Wolves / rats carry no EntityType, ore nodes leave it empty
-                // too. The component may sit on a sub-object ("Body"), so the
-                // network object's own GameObject is tried as well.
-                if (!known && object_name[0]) known = animal_look_from_object_name(object_name, look);
-                if (!known && root_name[0])   known = animal_look_from_object_name(root_name, look);
+                // The prefab name is asked first on purpose: animals that the
+                // EntityType enum does not know (wolf, rat, ...) are shipped
+                // with a borrowed entityType -- the wolf prefab says "Boar" --
+                // so trusting the enum first labelled every wolf as a boar.
+                if (object_name[0]) known = animal_look_from_object_name(object_name, look);
+                if (!known && root_name[0]) known = animal_look_from_object_name(root_name, look);
+                if (!known) {
+                    int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
+                    known = marker_for_entity_type(entity_type, look);
+                }
                 if (!known) known = marker_from_loot(component, look);
                 // Cloth bushes, mushroom and berry clusters: harvestable, so
                 // they are Mineables, but they belong to the pickup category.
@@ -3947,6 +4049,7 @@ static void rebuild_marker_entities() {
             entity.label = look.label;
             if (!look.label) memcpy(entity.text, pickup_text, sizeof(entity.text));
             entity.has_color = look.has_color;
+            entity.rainbow = look.rainbow;
             entity.color_rgb[0] = look.rgb[0];
             entity.color_rgb[1] = look.rgb[1];
             entity.color_rgb[2] = look.rgb[2];
@@ -3980,8 +4083,11 @@ std::vector<EspMarker> esp_get_markers() {
     if (g_pid <= 0 || !g_il2cpp_base || !g_frame_vp_valid || !g_frame_local_valid) return result;
 
     if (--g_marker_rescan_countdown <= 0) {
-        g_marker_rescan_countdown = 180; // ~3 s: entities spawn/despawn slowly
         rebuild_marker_entities();
+        // ~3 s between scans: entities spawn and despawn slowly. An empty
+        // result means the registry was not readable (world still loading in
+        // after a respawn), so retry in half a second instead.
+        g_marker_rescan_countdown = g_marker_entities.empty() ? 30 : 180;
     }
 
     const float max_distance = g_marker_max_distance;
@@ -4018,6 +4124,7 @@ std::vector<EspMarker> esp_get_markers() {
         marker.distance = distance;
         marker.kind = entity.kind;
         marker.has_color = entity.has_color;
+        marker.rainbow = entity.rainbow;
         marker.color_rgb[0] = entity.color_rgb[0];
         marker.color_rgb[1] = entity.color_rgb[1];
         marker.color_rgb[2] = entity.color_rgb[2];

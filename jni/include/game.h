@@ -58,6 +58,8 @@ struct EspMarker {
     // Ore markers carry their own colour (one per resource); when has_color is
     // false the caller picks the colour for that kind.
     bool  has_color = false;
+    // Elite crates: the overlay cycles the label colour through the spectrum.
+    bool  rainbow = false;
     unsigned char color_rgb[3] = {255, 255, 255};
     char  name[40] = {};        // localized label (UTF-8), may carry a stack size
 };
