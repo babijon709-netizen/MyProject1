@@ -3369,18 +3369,21 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 static bool g_markers_ore_enabled = false;
 static bool g_markers_animal_enabled = false;
 static bool g_markers_loot_enabled = false;
+static bool g_markers_pickup_enabled = false;
 static float g_marker_max_distance = 150.0F;
 static int g_marker_rescan_countdown = 0;
 static uint64_t g_network_client_class = 0;
 static uint64_t g_network_identity_class = 0;
 
-void esp_set_markers_enabled(bool ore, bool animals, bool loot) {
-    // Loot containers are filtered out during the registry walk, so switching
-    // that category on has to invalidate the cached entity list.
-    if (loot != g_markers_loot_enabled) g_marker_rescan_countdown = 0;
+void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups) {
+    // Loot containers and ground pickups are filtered out during the registry
+    // walk, so switching a category on has to invalidate the cached list.
+    if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled)
+        g_marker_rescan_countdown = 0;
     g_markers_ore_enabled = ore;
     g_markers_animal_enabled = animals;
     g_markers_loot_enabled = loot;
+    g_markers_pickup_enabled = pickups;
 }
 
 void esp_set_marker_max_distance(float metres) {
@@ -3396,7 +3399,10 @@ struct MarkerEntity {
     Vec3     position{};
     bool     position_valid = false;
     int      kind = ESP_MARKER_ORE;
+    // Fixed labels point into static strings; ground pickups build their own
+    // ("Ягоды x12"), in which case `text` holds it and `label` is null.
     const char* label = nullptr;
+    char     text[40] = {};
     bool     has_color = false;
     unsigned char color_rgb[3] = {255, 255, 255};
 };
@@ -3513,19 +3519,36 @@ struct LootNameInfo {
 };
 
 static void scan_loot_name(const char* raw, LootNameInfo& info) {
-    // Containers a player deploys — never interesting, always hidden.
+    // Containers a player deploys — never interesting, always hidden. The
+    // concatenated spellings matter because `panelName` is one lower-case word
+    // ("largewoodbox") and never splits into tokens.
     static const char* const kDeployed[] = {
         "storage", "stash", "cupboard", "furnace", "campfire", "locker", "bed",
         "sleeping", "sleepingbag", "bedroll", "shelf", "planter", "composter",
         "fridge", "mailbox", "workbench", "quarry", "turret", "smelter",
         "barbecue", "oven", "wardrobe", "rack",
+        "woodbox", "woodenbox", "largewoodbox", "smallwoodbox", "largebox",
+        "smallbox", "bigbox", "storagebox", "toolcupboard", "toolbox2",
     };
     // A "box" that also says how big it is, is a player box ("Large Box").
     static const char* const kSizeWords[] = {"small", "large", "big", "wood", "wooden", "medium", "mini"};
     // label table; a higher rank wins so "MilitaryCrate" beats plain "crate".
     static const struct { const char* word; const char* ru; int rank; } kLabels[] = {
-        {"military",   "Военный ящик",       3},
-        {"elite",      "Элитный ящик",       3},
+        // Elite / military crates first: they are the ones worth crossing the
+        // map for, so every spelling the prefab or the loot panel might use is
+        // listed and outranks the plain "crate" match below.
+        {"military",     "Военный ящик",     4},
+        {"militarycrate","Военный ящик",     4},
+        {"milcrate",     "Военный ящик",     4},
+        {"mil",          "Военный ящик",     4},
+        {"army",         "Военный ящик",     4},
+        {"soldier",      "Военный ящик",     4},
+        {"elite",        "Элитный ящик",     4},
+        {"elitecrate",   "Элитный ящик",     4},
+        {"eliteloot",    "Элитный ящик",     4},
+        {"epic",         "Элитный ящик",     4},
+        {"legendary",    "Элитный ящик",     4},
+        {"rare",         "Редкий ящик",      4},
         {"airdrop",    "Аирдроп",            3},
         {"supply",     "Аирдроп",            3},
         {"medical",    "Мед. ящик",          3},
@@ -3542,7 +3565,7 @@ static void scan_loot_name(const char* raw, LootNameInfo& info) {
         {"cash",       "Касса",              3},
         {"register",   "Касса",              3},
         {"vending",    "Автомат",            3},
-        {"barrel",     "Бочка",              2},
+        {"barrel",     "Скрап",              2}, // barrels are the scrap source
         {"crate",      "Ящик",               2},
         {"lootbox",    "Ящик",               2},
         {"loot",       "Ящик",               2},
@@ -3578,9 +3601,16 @@ static bool loot_marker(uint64_t component, const char* object_name, const char*
     // A container that is part of a building is player-placed by definition.
     if (valid_obj(rd_ptr(component + LOOTOBJECT_BUILDING_PIECE))) return false;
 
+    // Three name sources: the component's GameObject, the network object's
+    // root GameObject, and the loot panel id the UI opens with. The panel is
+    // often the only one that says "militarycrate" out loud.
+    char panel[32] = {};
+    read_managed_string(rd_ptr(component + LOOTOBJECT_PANEL_NAME), panel, sizeof(panel));
+
     LootNameInfo info;
     scan_loot_name(object_name, info);
     if (!info.player_box) scan_loot_name(root_name, info);
+    if (!info.player_box) scan_loot_name(panel, info);
     if (info.player_box) return false;
 
     look.kind = ESP_MARKER_LOOT;
@@ -3650,9 +3680,137 @@ static bool marker_from_loot(uint64_t mineable, MarkerLook& look) {
     return best > 0;
 }
 
+// ---- Ground pickups ---------------------------------------------------------
+// Oxide.ItemPickup carries the item short name ("cloth", "mushroom", ...) and
+// the stack size, so the label needs nothing but a translation table. Matching
+// is by substring because short names are dotted ("metal.fragments",
+// "low.grade.fuel") and the specific entries are listed before the generic
+// ones. Labels stay short on purpose: they share a 40 byte pill with the count.
+static const char* pickup_label_for_item(const char* short_name) {
+    static const struct { const char* key; const char* ru; } kItems[] = {
+        {"mushroom",       "Грибы"},        {"berry",          "Ягоды"},
+        {"blueberr",       "Ягоды"},        {"raspberr",       "Ягоды"},
+        {"hemp",           "Конопля"},      {"cloth",          "Ткань"},
+        {"pumpkin",        "Тыква"},        {"corn",           "Кукуруза"},
+        {"potato",         "Картофель"},    {"seed",           "Семена"},
+        {"scrap",          "Скрап"},        {"sulfur",         "Сера"},
+        {"hq.metal",       "Металл HQ"},    {"metal.refined",  "Металл HQ"},
+        {"metal.frag",     "Фрагменты"},    {"metal",          "Металл"},
+        {"stone",          "Камень"},       {"wood",           "Дерево"},
+        {"charcoal",       "Уголь"},        {"gunpowder",      "Порох"},
+        {"low.grade",      "Низкосорт"},    {"lowgrade",       "Низкосорт"},
+        {"crude",          "Нефть"},        {"fuel",           "Топливо"},
+        {"leather",        "Кожа"},         {"fat",            "Жир"},
+        {"bone",           "Кости"},        {"meat",           "Мясо"},
+        {"fish",           "Рыба"},         {"chicken",        "Курятина"},
+        {"water",          "Вода"},         {"can.",           "Консервы"},
+        {"medkit",         "Аптечка"},      {"syringe",        "Шприц"},
+        {"bandage",        "Бинт"},         {"antirad",        "Антирад"},
+        {"rope",           "Верёвка"},      {"tarp",           "Брезент"},
+        {"gear",           "Шестерни"},     {"spring",         "Пружина"},
+        {"pipe",           "Труба"},        {"sheetmetal",     "Листы"},
+        {"sheet",          "Листы"},        {"blade",          "Лезвие"},
+        {"propane",        "Пропан"},       {"sewing",         "Швейный"},
+        {"tech.trash",     "Электроника"},  {"techtrash",      "Электроника"},
+        {"battery",        "Батарея"},      {"explosive",      "Взрывчатка"},
+        {"ammo",           "Патроны"},      {"arrow",          "Стрелы"},
+        {"door",           "Дверь"},        {"key",            "Ключ"},
+    };
+    if (!short_name || !short_name[0]) return nullptr;
+    char key[48];
+    size_t n = 0;
+    for (const char* p = short_name; *p && n + 1 < sizeof(key); ++p) {
+        char c = *p;
+        key[n++] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    key[n] = '\0';
+    for (const auto& item : kItems)
+        if (strstr(key, item.key)) return item.ru;
+    return nullptr;
+}
+
+// Bushes, mushroom and berry clusters are harvested rather than picked up, so
+// they arrive as MineableObjects whose loot says what they give. Trees (wood)
+// stay out — they would bury the screen.
+static int gather_look_for_item_name(const char* item_name, MarkerLook& look) {
+    if (!item_name || !item_name[0]) return 0;
+    char key[40];
+    size_t n = 0;
+    for (const char* p = item_name; *p && n + 1 < sizeof(key); ++p) {
+        char c = *p;
+        key[n++] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    key[n] = '\0';
+    static const struct { const char* key; const char* ru; int rank; } kGathers[] = {
+        {"mushroom", "Грибы",      3},
+        {"berry",    "Ягоды",      3},
+        {"pumpkin",  "Тыква",      3},
+        {"corn",     "Кукуруза",   3},
+        {"potato",   "Картофель",  3},
+        {"hemp",     "Куст ткани", 2}, // seed.hemp comes from the cloth bush
+        {"cloth",    "Куст ткани", 2},
+    };
+    for (const auto& gather : kGathers) {
+        if (strstr(key, gather.key)) {
+            look.kind = ESP_MARKER_PICKUP;
+            look.label = gather.ru;
+            look.has_color = false;
+            return gather.rank;
+        }
+    }
+    return 0;
+}
+
+// Same walk as marker_from_loot(), but for the gatherables table.
+static bool gather_marker_from_loot(uint64_t mineable, MarkerLook& look) {
+    const uint64_t sources[2] = {MINEABLE_LOOT, MINEABLE_FINISH_BONUS};
+    int best = 0;
+    for (uint64_t source : sources) {
+        uint64_t items[12];
+        int count = read_managed_collection(rd_ptr(mineable + source), items, 12);
+        for (int i = 0; i < count; ++i) {
+            if (!valid_obj(items[i])) continue;
+            char name[32] = {};
+            if (!read_managed_string(rd_ptr(items[i] + LOOTITEM_ITEM_NAME), name, sizeof(name))) continue;
+            MarkerLook candidate;
+            int rank = gather_look_for_item_name(name, candidate);
+            if (rank > best) { best = rank; look = candidate; }
+        }
+    }
+    return best > 0;
+}
+
+// One dropped / spawned item on the ground.
+static bool pickup_marker(uint64_t component, char* label, size_t label_cap) {
+    char short_name[48] = {};
+    if (!read_managed_string_ex(rd_ptr(component + ITEMPICKUP_SHORTNAME), short_name,
+                                sizeof(short_name), 47))
+        return false;
+    const char* translated = pickup_label_for_item(short_name);
+    // Unknown item: fall back to the game's own display name, then to the raw
+    // short name, so nothing on the ground is ever silently dropped.
+    char fallback[40] = {};
+    if (!translated) {
+        uint64_t item = rd_ptr(component + ITEMPICKUP_ITEM_OBJECT);
+        uint64_t data = valid_obj(item) ? rd_ptr(item + ITEM_DATA) : 0;
+        if (valid_obj(data)) read_managed_string(rd_ptr(data + ITEMDATA_NAME), fallback, sizeof(fallback));
+        if (!fallback[0]) snprintf(fallback, sizeof(fallback), "%.30s", short_name);
+        translated = fallback;
+    }
+    int32_t amount = rd<int32_t>(component + ITEMPICKUP_AMOUNT);
+    if (amount > 1 && amount < 1000000)
+        snprintf(label, label_cap, "%s x%d", translated, (int)amount);
+    else
+        snprintf(label, label_cap, "%s", translated);
+    return label[0] != '\0';
+}
+
 // Il2CppClass -> which of the two component families this is (cached: the same
 // handful of classes come back for every entity in the registry).
-enum MarkerClass : uint8_t { MARKER_CLASS_NONE = 0, MARKER_CLASS_MINEABLE = 1, MARKER_CLASS_LOOT = 2 };
+enum MarkerClass : uint8_t {
+    MARKER_CLASS_NONE = 0, MARKER_CLASS_MINEABLE = 1,
+    MARKER_CLASS_LOOT = 2, MARKER_CLASS_PICKUP = 3,
+};
 
 static uint8_t marker_class_of(uint64_t klass) {
     if (!valid_obj(klass)) return MARKER_CLASS_NONE;
@@ -3662,6 +3820,7 @@ static uint8_t marker_class_of(uint64_t klass) {
     uint8_t kind = MARKER_CLASS_NONE;
     if (name.rfind("Mineable", 0) == 0)                       kind = MARKER_CLASS_MINEABLE;
     else if (name == "LootObject" || name == "PumpkinTrick")  kind = MARKER_CLASS_LOOT;
+    else if (name == "ItemPickup")                            kind = MARKER_CLASS_PICKUP;
     if (g_marker_class_kind.size() < 512) g_marker_class_kind[klass] = kind;
     return kind;
 }
@@ -3751,11 +3910,20 @@ static void rebuild_marker_entities() {
             if (component_class == MARKER_CLASS_NONE) continue;
 
             MarkerLook look;
+            char pickup_text[40] = {};
             char object_name[48] = {}, root_name[48] = {};
             managed_component_gameobject_name(component, object_name, sizeof(object_name));
             managed_component_gameobject_name(identity, root_name, sizeof(root_name));
             bool known = false;
-            if (component_class == MARKER_CLASS_LOOT) {
+            if (component_class == MARKER_CLASS_PICKUP) {
+                if (!g_markers_pickup_enabled) continue;
+                known = pickup_marker(component, pickup_text, sizeof(pickup_text));
+                if (known) {
+                    look.kind = ESP_MARKER_PICKUP;
+                    look.label = nullptr;
+                    look.has_color = false;
+                }
+            } else if (component_class == MARKER_CLASS_LOOT) {
                 if (!g_markers_loot_enabled) continue;
                 known = loot_marker(component, object_name, root_name, look);
             } else {
@@ -3767,6 +3935,9 @@ static void rebuild_marker_entities() {
                 if (!known && object_name[0]) known = animal_look_from_object_name(object_name, look);
                 if (!known && root_name[0])   known = animal_look_from_object_name(root_name, look);
                 if (!known) known = marker_from_loot(component, look);
+                // Cloth bushes, mushroom and berry clusters: harvestable, so
+                // they are Mineables, but they belong to the pickup category.
+                if (!known && g_markers_pickup_enabled) known = gather_marker_from_loot(component, look);
             }
             if (!known) continue;
 
@@ -3774,6 +3945,7 @@ static void rebuild_marker_entities() {
             entity.identity = identity;
             entity.kind = look.kind;
             entity.label = look.label;
+            if (!look.label) memcpy(entity.text, pickup_text, sizeof(entity.text));
             entity.has_color = look.has_color;
             entity.color_rgb[0] = look.rgb[0];
             entity.color_rgb[1] = look.rgb[1];
@@ -3799,7 +3971,8 @@ static void reset_marker_caches() {
 
 std::vector<EspMarker> esp_get_markers() {
     std::vector<EspMarker> result;
-    if (!g_markers_ore_enabled && !g_markers_animal_enabled && !g_markers_loot_enabled) {
+    if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
+        !g_markers_loot_enabled && !g_markers_pickup_enabled) {
         if (!g_marker_entities.empty()) g_marker_entities.clear();
         g_marker_rescan_countdown = 0;
         return result;
@@ -3816,6 +3989,7 @@ std::vector<EspMarker> esp_get_markers() {
         if (entity.kind == ESP_MARKER_ORE && !g_markers_ore_enabled) continue;
         if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
         if (entity.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) continue;
+        if (entity.kind == ESP_MARKER_PICKUP && !g_markers_pickup_enabled) continue;
         // Ore nodes never move, so their position is only read on a rescan.
         if (entity.kind == ESP_MARKER_ANIMAL || !entity.position_valid)
             entity.position_valid = marker_world_position(entity.transform, entity.position);
@@ -3831,7 +4005,8 @@ std::vector<EspMarker> esp_get_markers() {
         Vec3 anchor = entity.position;
         // above the model: animals are tall, crates sit low on the ground
         anchor.y += (entity.kind == ESP_MARKER_ANIMAL) ? 1.2F
-                  : (entity.kind == ESP_MARKER_LOOT)   ? 0.6F : 0.9F;
+                  : (entity.kind == ESP_MARKER_LOOT)   ? 0.6F
+                  : (entity.kind == ESP_MARKER_PICKUP) ? 0.4F : 0.9F;
         if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) continue;
         if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
         if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F) continue;
@@ -3846,7 +4021,8 @@ std::vector<EspMarker> esp_get_markers() {
         marker.color_rgb[0] = entity.color_rgb[0];
         marker.color_rgb[1] = entity.color_rgb[1];
         marker.color_rgb[2] = entity.color_rgb[2];
-        snprintf(marker.name, sizeof(marker.name), "%s", entity.label ? entity.label : "");
+        snprintf(marker.name, sizeof(marker.name), "%s",
+                 entity.label ? entity.label : entity.text);
         result.push_back(marker);
     }
 
@@ -3862,7 +4038,10 @@ std::vector<EspMarker> esp_get_markers() {
     for (const EspMarker& marker : result) {
         bool covered = false;
         for (const EspMarker& kept : thinned) {
-            if (kept.kind != marker.kind || strcmp(kept.name, marker.name) != 0) continue;
+            if (kept.kind != marker.kind) continue;
+            // Pickup labels carry a stack size, so two piles of berries never
+            // compare equal — for that category position alone decides.
+            if (marker.kind != ESP_MARKER_PICKUP && strcmp(kept.name, marker.name) != 0) continue;
             float dx = kept.x - marker.x, dy = kept.y - marker.y;
             if (dx * dx + dy * dy < 30.0F * 30.0F) { covered = true; break; }
         }

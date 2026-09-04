@@ -50,7 +50,7 @@ struct EspBox {
 // World markers: ore nodes and animals, drawn as a small labelled pill at the
 // object's screen position. Both come from the same networked source
 // (Oxide.MineableObject in Mirror's client registry), so one struct covers them.
-enum EspMarkerKind { ESP_MARKER_ORE = 0, ESP_MARKER_ANIMAL = 1, ESP_MARKER_LOOT = 2 };
+enum EspMarkerKind { ESP_MARKER_ORE = 0, ESP_MARKER_ANIMAL = 1, ESP_MARKER_LOOT = 2, ESP_MARKER_PICKUP = 3 };
 struct EspMarker {
     float x = 0.0F, y = 0.0F;   // screen position (top-centre of the pill)
     float distance = 0.0F;      // metres from the local player
@@ -59,14 +59,14 @@ struct EspMarker {
     // false the caller picks the colour for that kind.
     bool  has_color = false;
     unsigned char color_rgb[3] = {255, 255, 255};
-    char  name[32] = {};        // localized label (UTF-8)
+    char  name[40] = {};        // localized label (UTF-8), may carry a stack size
 };
 
 bool        esp_init(pid_t pid);
 void        esp_reset();
 void        esp_set_skeleton_enabled(bool enabled);
-// Enable the ore / animal / loot marker scan (all off = no work is done).
-void        esp_set_markers_enabled(bool ore, bool animals, bool loot);
+// Enable the ore / animal / loot / pickup marker scan (all off = no work).
+void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups);
 // Markers further away than this (metres) are dropped. Keeps the screen clean
 // on open terrain, where the registry easily holds hundreds of nodes.
 void        esp_set_marker_max_distance(float metres);

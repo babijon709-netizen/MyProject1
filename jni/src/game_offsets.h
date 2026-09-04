@@ -265,6 +265,14 @@ inline constexpr std::uint64_t LOOTOBJECT_IS_LOOTABLE    = 0xA8; // bool
 inline constexpr std::uint64_t LOOTOBJECT_PANEL_NAME     = 0xE0; // string panelName
 inline constexpr std::uint64_t LOOTOBJECT_BUILDING_PIECE = 0xF0; // Building.BuildingPiece m_Piece
 
+// ---- Ground pickups (Oxide.ItemPickup : fNZ : Mirror.NetworkBehaviour) ------
+// Everything lying on the ground that can be picked up: mushrooms, berries,
+// dropped items, harvested resources. It carries the item short name and the
+// stack size directly, so no inventory walk is needed.
+inline constexpr std::uint64_t ITEMPICKUP_ITEM_OBJECT = 0xA8; // Oxide.Item
+inline constexpr std::uint64_t ITEMPICKUP_SHORTNAME   = 0xD8; // string item
+inline constexpr std::uint64_t ITEMPICKUP_AMOUNT      = 0xE0; // int amount
+
 // Oxide.GameControllerBase static fields: a known-good NetworkIdentity used to
 // learn the NetworkIdentity class pointer (validates dictionary entries).
 inline constexpr std::uint64_t GAME_CONTROLLER_NET_IDENTITY_FIELD = 0x8;

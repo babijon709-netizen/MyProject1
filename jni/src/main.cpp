@@ -189,6 +189,10 @@ namespace cfg { namespace esp {
     inline ImVec4 animal_col      = {1.00f, 0.60f, 0.25f, 1.f};
     inline ImVec4 loot_col        = {0.55f, 0.80f, 1.00f, 1.f};
     inline ImVec4 ally_col        = {0.25f, 0.55f, 1.00f, 1.f};
+    inline ImVec4 pickup_col      = {0.60f, 1.00f, 0.60f, 1.f};
+    // Tracers drawn to a team mate are always green, no matter what colour the
+    // enemy tracers use — that is the whole point of telling them apart.
+    inline ImVec4 ally_tracer_col = {0.20f, 0.90f, 0.35f, 1.f};
 
     inline bool box          = false;
     inline bool name_esp     = false;
@@ -200,6 +204,7 @@ namespace cfg { namespace esp {
     inline bool animal       = false;
     inline bool loot         = false;
     inline bool team         = false;
+    inline bool pickup       = false;
     inline bool  vis_check        = false;
     inline bool  fill             = false;
     inline float stroke           = 2.f;
@@ -545,6 +550,7 @@ struct AppState {
     bool  esp_box = false, esp_name = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;
     bool  esp_ore = false, esp_animal = false, esp_loot = false, esp_team = false;
+    bool  esp_pickup = false;
     float marker_dist = 150.f;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
@@ -558,7 +564,7 @@ struct AppState {
     RadioAnim ra_aim_pr0, ra_aim_pr1, ra_aim_pr2;
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
-    float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0;
+    float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
     float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist;
@@ -591,7 +597,8 @@ static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         s_frame = frame;
         esp_set_skeleton_enabled(g_state.esp_skeleton);
         esp_set_aim_bones_enabled(g_state.aim_touch);
-        esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal, g_state.esp_loot);
+        esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
+                                g_state.esp_loot, g_state.esp_pickup);
         esp_set_marker_max_distance(g_state.marker_dist);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
     }
@@ -815,11 +822,12 @@ static void DrawEspOverlay() {
 
         if (g_state.esp_tracer) {
             // From the middle of the top edge of the screen to the head area.
+            // Team mates get a green line so a glance at the tracer is enough.
             float tx = (bx1 + bx2) * 0.5f;
+            ImU32 tracerCol = ColU32(ally ? cfg::esp::ally_tracer_col : cfg::esp::tracer_col);
             dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, by1),
                         kVisOutline, thick + 1.0f);
-            dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, by1),
-                        ColU32(cfg::esp::tracer_col), thick);
+            dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, by1), tracerCol, thick);
         }
 
         // Name above the box; distance right under the box, weapon under the
@@ -856,7 +864,7 @@ static void DrawEspOverlay() {
     // ---- World markers: ore nodes and animals ----------------------------
     // One pill with the resource / animal name at the object's position; the
     // scan itself is done by the game layer and reuses this frame's camera.
-    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot) {
+    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup) {
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;
@@ -865,8 +873,9 @@ static void DrawEspOverlay() {
             if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
             ImU32 col = marker.has_color
                 ? IM_COL32(marker.color_rgb[0], marker.color_rgb[1], marker.color_rgb[2], 255)
-                : ColU32(marker.kind == ESP_MARKER_LOOT ? cfg::esp::loot_col
-                                                        : cfg::esp::animal_col);
+                : ColU32(marker.kind == ESP_MARKER_LOOT   ? cfg::esp::loot_col
+                       : marker.kind == ESP_MARKER_PICKUP ? cfg::esp::pickup_col
+                                                          : cfg::esp::animal_col);
             EspPill(marker.x, marker.y, marker.name, col, kMarkerScale);
             char label[24];
             snprintf(label, sizeof(label), "%.0fm", marker.distance);
@@ -1007,9 +1016,11 @@ struct CfgBlob {
     ImVec4 esp_box_col, esp_box_col_invis, esp_name_col, esp_ally_col, esp_distance_col;
     ImVec4 esp_weapon_col, esp_loot_col, esp_tracer_col, esp_skeleton_col, esp_animal_col;
     // Four scalars that had no slot of their own:
-    //   x = loot ESP on/off, y = marker draw distance (m),
+    //   x = bit 0 loot ESP, bit 1 pickup ESP,
+    //   y = marker draw distance (m),
     //   z = aim priority + 1 (so an old config's 1.0 still means "default"),
-    //   w = reserved.
+    //   w = pickup colour packed as r*65536 + g*256 + b (exact in a float,
+    //       since 0xFFFFFF < 2^24); <= 1 means "never written, use default".
     ImVec4 esp_extra;
     int   esp_box_type;
     float esp_box_rounding;
@@ -1056,8 +1067,15 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_tracer_col       = cfg::esp::tracer_col;
     s.esp_skeleton_col     = cfg::esp::skeleton_col;
     s.esp_animal_col       = cfg::esp::animal_col;
-    s.esp_extra            = {g_state.esp_loot ? 1.f : 0.f, g_state.marker_dist,
-                              (float)(g_state.aim_priority + 1), 0.f};
+    {
+        const int flags = (g_state.esp_loot ? 1 : 0) | (g_state.esp_pickup ? 2 : 0);
+        auto ch = [](float v) { int i = (int)(v * 255.f + 0.5f); return i < 0 ? 0 : (i > 255 ? 255 : i); };
+        const float packed = (float)(ch(cfg::esp::pickup_col.x) * 65536
+                                   + ch(cfg::esp::pickup_col.y) * 256
+                                   + ch(cfg::esp::pickup_col.z));
+        s.esp_extra = {(float)flags, g_state.marker_dist,
+                       (float)(g_state.aim_priority + 1), packed};
+    }
     s.esp_box_type         = cfg::esp::box_type;
     s.esp_box_rounding     = cfg::esp::box_rounding;
     uint8_t buf[sizeof(s)];
@@ -1132,11 +1150,21 @@ static void ConfigLoad(int idx) {
     g_state.esp_team        = s.esp_team;
     // Packed scalars. A config written before these existed holds the old ping
     // colour here, so each value is range-checked and falls back to its default.
-    g_state.esp_loot    = s.esp_extra.x > 0.5f;
-    g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
     {
+        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 4.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
+        g_state.esp_loot   = (flags & 1) != 0;
+        g_state.esp_pickup = (flags & 2) != 0;
+        g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
         int pr = (int)(s.esp_extra.z + 0.5f) - 1;
         g_state.aim_priority = (pr >= 0 && pr <= 2) ? pr : 0;
+        // Packed pickup colour. Configs written before it existed hold the old
+        // ping alpha (exactly 1.0) here, which is why the check is "> 1".
+        if (s.esp_extra.w > 1.f && s.esp_extra.w <= 16777215.f) {
+            int rgb = (int)(s.esp_extra.w + 0.5f);
+            cfg::esp::pickup_col = ImVec4(((rgb >> 16) & 0xFF) / 255.f,
+                                          ((rgb >> 8) & 0xFF) / 255.f,
+                                          (rgb & 0xFF) / 255.f, 1.f);
+        }
     }
     g_state.esp_thick   = s.esp_thick;
     g_state.gun_str     = s.gun_str;
@@ -2582,6 +2610,7 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::animal       = g_state.esp_animal;
         cfg::esp::loot         = g_state.esp_loot;
         cfg::esp::team         = g_state.esp_team;
+        cfg::esp::pickup       = g_state.esp_pickup;
 
 
 
@@ -2655,9 +2684,10 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vor", XS("Руды"),           &g_state.esp_ore,          &g_state.a_esp_ore,          nullptr},
                 {"##van", XS("Животные"),       &g_state.esp_animal,       &g_state.a_esp_animal,       &cfg::esp::animal_col},
                 {"##vlt", XS("Ящики"),          &g_state.esp_loot,         &g_state.a_esp_loot,         &cfg::esp::loot_col},
+                {"##vpk", XS("Подбираемое"),    &g_state.esp_pickup,       &g_state.a_esp_pickup,       &cfg::esp::pickup_col},
                 {"##vtm", XS("Тиммейты"),       &g_state.esp_team,         &g_state.a_esp_team,         &cfg::esp::ally_col},
             };
-            constexpr int N = 11;
+            constexpr int N = 12;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
@@ -2666,7 +2696,7 @@ float TabContent(int tab, float dt, float cW) {
 
         SHdr(XS("Дальность маркеров"));
         CardBg(Layout::SliderH);
-        SliderRow("##vmd", XS("Руды/животные/ящики"), &g_state.marker_dist,
+        SliderRow("##vmd", XS("Руды/лут/животные"), &g_state.marker_dist,
                   25.f, 300.f, XS("%.0f м"), true, true, g_state.sl_marker_dist, dt);
 
         ImGui::Dummy({1.f, 8.f});
@@ -3347,6 +3377,7 @@ void RenderMenu() {
     Tick(g_state.a_esp_ore,    g_state.esp_ore,            dt);
     Tick(g_state.a_esp_animal, g_state.esp_animal,         dt);
     Tick(g_state.a_esp_loot,   g_state.esp_loot,           dt);
+    Tick(g_state.a_esp_pickup, g_state.esp_pickup,         dt);
     Tick(g_state.a_esp_team,   g_state.esp_team,           dt);
     Tick(g_state.a_aim_pr0,    g_state.aim_priority == 0,  dt);
     Tick(g_state.a_aim_pr1,    g_state.aim_priority == 1,  dt);
