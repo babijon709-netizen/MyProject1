@@ -206,4 +206,47 @@ inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18;
 inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 
+// ---- World markers: ore nodes and animals (dump.cs + libil2cpp) -------------
+// Both are Oxide.MineableObject subclasses (MineableStone / MineableAnimal /
+// MineableTree / MineableObjectWithRandomSpawn), each a Mirror.NetworkBehaviour,
+// so the client-side Mirror registry lists all of them:
+//   Mirror.NetworkClient.spawned : Dictionary<uint, NetworkIdentity>
+// The NetworkClient TypeInfo slot was taken from libil2cpp.so: the code does
+//   adrp x19,#0xd165000 ; ldr x19,[x19,#0x530]   (GOT entry)
+// and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
+// Verified in NetworkClient::DestroyAllClientObjects:
+//   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD48C270;
+inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x28;
+
+// System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
+// _fastModMultiplier): _buckets 0x10, _entries 0x18, _count 0x20, _freeList 0x24.
+// Entry { int hashCode; int next; uint key; object value; } -> 24 bytes.
+inline constexpr std::uint64_t DICT_ENTRIES      = 0x18;
+inline constexpr std::uint64_t DICT_COUNT        = 0x20;
+inline constexpr std::uint64_t DICT_ENTRY_STRIDE = 0x18;
+inline constexpr std::uint64_t DICT_ENTRY_VALUE  = 0x10;
+
+// Mirror.NetworkIdentity
+inline constexpr std::uint64_t NETID_NET_ID     = 0x58; // uint netId
+inline constexpr std::uint64_t NETID_BEHAVIOURS = 0x80; // NetworkBehaviour[]
+
+// Oxide.MineableObject — the shared base of ore nodes, trees and animals.
+inline constexpr std::uint64_t MINEABLE_CURRENT_HEALTH = 0x78;
+inline constexpr std::uint64_t MINEABLE_MAX_HEALTH     = 0xC0;
+inline constexpr std::uint64_t MINEABLE_FRACTION       = 0xD0; // fractionRemaining
+inline constexpr std::uint64_t MINEABLE_ENTITY_TYPE    = 0xD8; // ServerPlayersAnalytics.EntityType
+
+// ServerPlayersAnalytics.EntityType values used for the labels.
+enum class MineableEntityType : std::int32_t {
+    None = 0, Bear = 1, Boar = 2, Deer = 3, Rabbit = 4, Chicken = 5, Fish = 6,
+    Cannibal = 7, Tree = 8, Stone = 9, Iron = 10, Sulfur = 11, Ice = 12,
+    Barrel = 13, Lootbox = 14, RoadSign = 15, StackOfWood = 16, Construction = 17,
+    Deployable = 18, Human = 19, Player = 20, Vehicle = 21, Hare = 22,
+};
+
+// Oxide.GameControllerBase static fields: a known-good NetworkIdentity used to
+// learn the NetworkIdentity class pointer (validates dictionary entries).
+inline constexpr std::uint64_t GAME_CONTROLLER_NET_IDENTITY_FIELD = 0x8;
+
 }

@@ -3036,6 +3036,14 @@ static void read_local_aim_reference(uint64_t local_player, const PlayerAux* loc
 // Per-frame player list, kept across frames so a transient empty read does
 // not blank the overlay, but dropped on a real world change.
 static std::vector<uint64_t> g_frame_transforms;
+
+// Frame projection state, published by esp_get_boxes() so that world markers
+// (ore / animals) project through exactly the same camera as the player boxes.
+static Mat4 g_frame_vp{};
+static bool g_frame_vp_valid = false;
+static float g_frame_sw = 0.0F, g_frame_sh = 0.0F;
+static Vec3 g_frame_local_pos{};
+static bool g_frame_local_valid = false;
 static int      g_frame_transforms_empty_streak = 0;
 
 // Everything derived from a particular world/session. Called when the whole
@@ -3043,6 +3051,9 @@ static int      g_frame_transforms_empty_streak = 0;
 // list disappears for a while, so no stale pointers survive into the next
 // world. Deliberately NOT tied to the camera object: the game swaps cameras
 // while aiming, which must not disturb boxes or skeletons.
+// Defined with the marker code further down (needs its caches).
+static void reset_marker_caches();
+
 static void reset_world_caches() {
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_validated = false;
@@ -3054,6 +3065,7 @@ static void reset_world_caches() {
     g_player_aux.clear();
     g_player_text.clear();
     g_skeletons.clear();
+    reset_marker_caches();
 }
 
 void esp_reset() {
@@ -3076,11 +3088,18 @@ void esp_reset() {
     g_skeleton_layout = {}; g_skeleton_layout_valid = false;
     g_go_name_offset = 0; g_go_name_plain_pointer = false;
     g_go_name_offset_valid = false; g_go_name_retry_cooldown = 0;
+    g_frame_vp_valid = false; g_frame_local_valid = false;
+    reset_marker_caches();
 }
 
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
+
+    // Markers reuse this frame's camera; invalidate it until it is rebuilt so
+    // an early return here can never leave them projecting through a stale one.
+    g_frame_vp_valid = false;
+    g_frame_local_valid = false;
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
 
@@ -3179,6 +3198,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             return result;
         }
     }
+
+    g_frame_vp = vp;
+    g_frame_vp_valid = !transform_camera_mode;
+    g_frame_sw = sw; g_frame_sh = sh;
+    g_frame_local_pos = local;
+    g_frame_local_valid = has_local_position;
 
     Vec3 transform_camera_position{};
     Vec4 transform_camera_rotation{};
@@ -3358,5 +3383,264 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         result.push_back(box);
     }
 
+    return result;
+}
+
+
+// ===================== World markers: ore nodes and animals =====================
+//
+// Ore nodes, trees and animals are all Oxide.MineableObject subclasses
+// (MineableStone / MineableTree / MineableAnimal / ...), and each one is a
+// Mirror.NetworkBehaviour. The client therefore already keeps a complete list
+// of the ones around the player:
+//
+//   Mirror.NetworkClient.spawned  (Dictionary<uint, NetworkIdentity>)
+//     -> NetworkIdentity.NetworkBehaviours[]
+//        -> the Mineable* component  -> entityType tells us what it is
+//     -> the identity's GameObject transform -> world position
+//
+// The class of each behaviour is only inspected once (cached per Il2CppClass),
+// and the whole registry is re-scanned every few seconds rather than per frame;
+// each frame only re-reads the positions, and only for animals, since ore nodes
+// never move.
+
+static bool g_markers_ore_enabled = false;
+static bool g_markers_animal_enabled = false;
+static uint64_t g_network_client_class = 0;
+static uint64_t g_network_identity_class = 0;
+
+void esp_set_markers_enabled(bool ore, bool animals) {
+    g_markers_ore_enabled = ore;
+    g_markers_animal_enabled = animals;
+}
+
+struct MarkerEntity {
+    uint64_t identity = 0;
+    uint64_t transform = 0;     // native Transform of the GameObject
+    Vec3     position{};
+    bool     position_valid = false;
+    int      kind = ESP_MARKER_ORE;
+    const char* label = nullptr;
+};
+static std::vector<MarkerEntity> g_marker_entities;
+static int g_marker_rescan_countdown = 0;
+static std::unordered_map<uint64_t, uint8_t> g_class_is_mineable;
+
+// EntityType -> what to draw. Trees, barrels, buildings and players are left
+// out on purpose: the request was ore nodes and animals only.
+static bool marker_for_entity_type(int32_t type, int& kind, const char*& label) {
+    switch ((MineableEntityType)type) {
+        case MineableEntityType::Stone:    kind = ESP_MARKER_ORE;    label = "Камень";   return true;
+        case MineableEntityType::Iron:     kind = ESP_MARKER_ORE;    label = "Металл";   return true;
+        case MineableEntityType::Sulfur:   kind = ESP_MARKER_ORE;    label = "Сера";     return true;
+        case MineableEntityType::Ice:      kind = ESP_MARKER_ORE;    label = "Лёд";      return true;
+        case MineableEntityType::Bear:     kind = ESP_MARKER_ANIMAL; label = "Медведь";  return true;
+        case MineableEntityType::Boar:     kind = ESP_MARKER_ANIMAL; label = "Кабан";    return true;
+        case MineableEntityType::Deer:     kind = ESP_MARKER_ANIMAL; label = "Олень";    return true;
+        case MineableEntityType::Rabbit:   kind = ESP_MARKER_ANIMAL; label = "Кролик";   return true;
+        case MineableEntityType::Hare:     kind = ESP_MARKER_ANIMAL; label = "Заяц";     return true;
+        case MineableEntityType::Chicken:  kind = ESP_MARKER_ANIMAL; label = "Курица";   return true;
+        case MineableEntityType::Fish:     kind = ESP_MARKER_ANIMAL; label = "Рыба";     return true;
+        case MineableEntityType::Cannibal: kind = ESP_MARKER_ANIMAL; label = "Каннибал"; return true;
+        default: return false;
+    }
+}
+
+// Il2CppClass -> "is this one of the Mineable* components?" (cached: the same
+// handful of classes come back for every entity).
+static bool class_is_mineable(uint64_t klass) {
+    if (!valid_obj(klass)) return false;
+    auto found = g_class_is_mineable.find(klass);
+    if (found != g_class_is_mineable.end()) return found->second != 0;
+    std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME));
+    bool mineable = name.rfind("Mineable", 0) == 0;
+    if (g_class_is_mineable.size() < 512) g_class_is_mineable[klass] = mineable ? 1 : 0;
+    return mineable;
+}
+
+static uint64_t resolve_network_client_spawned() {
+    if (!g_network_client_class && NETWORK_CLIENT_TYPEINFO_RVA != 0) {
+        uint64_t candidate = rd_ptr(g_il2cpp_base + NETWORK_CLIENT_TYPEINFO_RVA);
+        if (valid_obj(candidate)) {
+            std::string name = read_remote_string(rd_ptr(candidate + IL2CPP_CLASS_NAME));
+            std::string ns   = read_remote_string(rd_ptr(candidate + IL2CPP_CLASS_NAMESPACE));
+            if (name == "NetworkClient" && ns == "Mirror") g_network_client_class = candidate;
+        }
+    }
+    if (!g_network_client_class) return 0;
+    uint64_t statics = get_class_static_fields(g_network_client_class);
+    if (!statics) return 0;
+    uint64_t spawned = rd_ptr(statics + NETWORK_CLIENT_SPAWNED);
+    return valid_obj(spawned) ? spawned : 0;
+}
+
+// A known-good NetworkIdentity (the game controller's own) gives us the class
+// pointer every dictionary entry must match — a cheap, exact sanity check that
+// also protects against a wrong entry stride.
+static uint64_t resolve_network_identity_class() {
+    if (g_network_identity_class) return g_network_identity_class;
+    if (!g_game_controller_class) return 0;
+    uint64_t statics = get_class_static_fields(g_game_controller_class);
+    if (!statics) return 0;
+    uint64_t identity = rd_ptr(statics + GAME_CONTROLLER_NET_IDENTITY_FIELD);
+    if (!valid_obj(identity)) return 0;
+    uint64_t klass = rd_ptr(identity);
+    if (!valid_obj(klass)) return 0;
+    std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME));
+    if (name != "NetworkIdentity") return 0;
+    g_network_identity_class = klass;
+    return klass;
+}
+
+static bool marker_world_position(uint64_t transform, Vec3& out) {
+    if (!transform) return false;
+    if (g_skeleton_layout_valid && read_transform_hierarchy_layout(transform, g_skeleton_layout, out))
+        return vec3_is_finite(out);
+    return read_transform_hierarchy_position(transform, out) && vec3_is_finite(out);
+}
+
+// One-shot diagnostics: what the Mirror registry walk actually saw. Written to
+// Download/ so it can be pulled off the device if no markers show up.
+static void dump_marker_probe(uint64_t dictionary, uint64_t identity_class,
+                              int32_t entry_count, int identities, int mineables,
+                              const std::string& samples) {
+    static bool s_done = false;
+    if (s_done) return;
+    s_done = true;
+    FILE* f = fopen("/storage/emulated/0/Download/xvcen_marker_debug.log", "w");
+    if (!f) return;
+    fprintf(f, "nc_class=0x%llX id_class=0x%llX spawned=0x%llX entries=%d identities=%d mineables=%d\n",
+            (unsigned long long)g_network_client_class, (unsigned long long)identity_class,
+            (unsigned long long)dictionary, (int)entry_count, identities, mineables);
+    fprintf(f, "samples: %s\n", samples.c_str());
+    fclose(f);
+}
+
+// Walk Mirror's client registry and cache every ore node / animal in it.
+static void rebuild_marker_entities() {
+    g_marker_entities.clear();
+
+    uint64_t dictionary = resolve_network_client_spawned();
+    if (!dictionary) return;
+    uint64_t identity_class = resolve_network_identity_class();
+
+    uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
+    int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
+    if (!valid_obj(entries) || count <= 0) return;
+    if (count > 4096) count = 4096;
+
+    // One bulk read for the whole entry array instead of one read per entry.
+    std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
+    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
+
+    int probe_identities = 0, probe_mineables = 0;
+    std::string probe_samples;
+
+    uint64_t behaviours[8];
+    for (int32_t i = 0; i < count; ++i) {
+        uint64_t identity = 0;
+        memcpy(&identity, buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE, sizeof(identity));
+        if (!valid_obj(identity)) continue;
+        if (identity_class && rd_ptr(identity) != identity_class) continue;
+        ++probe_identities;
+
+        uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
+        if (!valid_obj(array)) continue;
+        int32_t behaviour_count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
+        if (behaviour_count <= 0) continue;
+        if (behaviour_count > 8) behaviour_count = 8;
+        if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)behaviour_count * sizeof(uint64_t)))
+            continue;
+
+        for (int32_t b = 0; b < behaviour_count; ++b) {
+            uint64_t component = behaviours[b];
+            if (!valid_obj(component) || !class_is_mineable(rd_ptr(component))) continue;
+            ++probe_mineables;
+
+            int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
+            if (probe_samples.size() < 300) {
+                char sample[64];
+                snprintf(sample, sizeof(sample), "%s:%d ",
+                         read_remote_string(rd_ptr(rd_ptr(component) + IL2CPP_CLASS_NAME)).c_str(),
+                         (int)entity_type);
+                probe_samples += sample;
+            }
+
+            int kind = ESP_MARKER_ORE;
+            const char* label = nullptr;
+            if (!marker_for_entity_type(entity_type, kind, label)) break;
+
+            MarkerEntity entity;
+            entity.identity = identity;
+            entity.kind = kind;
+            entity.label = label;
+            entity.transform = native_component_transform(managed_object_native(identity));
+            entity.position_valid = marker_world_position(entity.transform, entity.position);
+            if (entity.transform) g_marker_entities.push_back(entity);
+            break;
+        }
+        if (g_marker_entities.size() >= 512) break;
+    }
+    dump_marker_probe(dictionary, identity_class, count, probe_identities, probe_mineables, probe_samples);
+}
+
+static void reset_marker_caches() {
+    g_marker_entities.clear();
+    g_marker_rescan_countdown = 0;
+    g_class_is_mineable.clear();
+    g_network_client_class = 0;
+    g_network_identity_class = 0;
+}
+
+std::vector<EspMarker> esp_get_markers() {
+    std::vector<EspMarker> result;
+    if (!g_markers_ore_enabled && !g_markers_animal_enabled) {
+        if (!g_marker_entities.empty()) g_marker_entities.clear();
+        g_marker_rescan_countdown = 0;
+        return result;
+    }
+    if (g_pid <= 0 || !g_il2cpp_base || !g_frame_vp_valid || !g_frame_local_valid) return result;
+
+    if (--g_marker_rescan_countdown <= 0) {
+        g_marker_rescan_countdown = 180; // ~3 s: entities spawn/despawn slowly
+        rebuild_marker_entities();
+    }
+
+    const float max_distance = 300.0F;
+    for (MarkerEntity& entity : g_marker_entities) {
+        if (entity.kind == ESP_MARKER_ORE && !g_markers_ore_enabled) continue;
+        if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
+        // Ore nodes never move, so their position is only read on a rescan.
+        if (entity.kind == ESP_MARKER_ANIMAL || !entity.position_valid)
+            entity.position_valid = marker_world_position(entity.transform, entity.position);
+        if (!entity.position_valid) continue;
+
+        float dx = entity.position.x - g_frame_local_pos.x;
+        float dy = entity.position.y - g_frame_local_pos.y;
+        float dz = entity.position.z - g_frame_local_pos.z;
+        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(distance) || distance > max_distance) continue;
+
+        Vec2 screen{};
+        Vec3 anchor = entity.position;
+        anchor.y += (entity.kind == ESP_MARKER_ANIMAL) ? 1.2F : 0.9F; // above the model
+        if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) continue;
+        if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
+        if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F) continue;
+        if (screen.y < -64.0F || screen.y > g_frame_sh + 64.0F) continue;
+
+        EspMarker marker;
+        marker.x = screen.x;
+        marker.y = screen.y;
+        marker.distance = distance;
+        marker.kind = entity.kind;
+        snprintf(marker.name, sizeof(marker.name), "%s", entity.label ? entity.label : "");
+        result.push_back(marker);
+    }
+
+    std::sort(result.begin(), result.end(), [](const EspMarker& a, const EspMarker& b) {
+        return a.distance < b.distance;
+    });
+    if (result.size() > 64) result.resize(64); // keep the screen readable
     return result;
 }

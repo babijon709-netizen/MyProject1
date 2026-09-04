@@ -41,9 +41,25 @@ struct EspBox {
     float aim_pitch[3];
 };
 
+// World markers: ore nodes and animals, drawn as a small labelled pill at the
+// object's screen position. Both come from the same networked source
+// (Oxide.MineableObject in Mirror's client registry), so one struct covers them.
+enum EspMarkerKind { ESP_MARKER_ORE = 0, ESP_MARKER_ANIMAL = 1 };
+struct EspMarker {
+    float x = 0.0F, y = 0.0F;   // screen position (top-centre of the pill)
+    float distance = 0.0F;      // metres from the local player
+    int   kind = ESP_MARKER_ORE;
+    char  name[32] = {};        // localized label (UTF-8)
+};
+
 bool        esp_init(pid_t pid);
 void        esp_reset();
 void        esp_set_skeleton_enabled(bool enabled);
+// Enable the ore / animal marker scan (both off = no work is done at all).
+void        esp_set_markers_enabled(bool ore, bool animals);
+// Markers for the current frame, nearest first. Call after esp_get_boxes():
+// it reuses the camera/projection state that call established.
+std::vector<EspMarker> esp_get_markers();
 // Resolve bones (for aim points) even when skeleton ESP drawing is off.
 void        esp_set_aim_bones_enabled(bool enabled);
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);

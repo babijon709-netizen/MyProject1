@@ -186,6 +186,8 @@ namespace cfg { namespace esp {
     inline ImVec4 weapon_col      = {1.00f, 0.95f, 0.10f, 1.f};
     inline ImVec4 tracer_col      = {1.00f, 0.20f, 0.20f, 1.f};
     inline ImVec4 skeleton_col    = {0.20f, 0.85f, 0.35f, 1.f};
+    inline ImVec4 ore_col         = {0.55f, 0.80f, 1.00f, 1.f};
+    inline ImVec4 animal_col      = {1.00f, 0.60f, 0.25f, 1.f};
 
     inline bool box          = false;
     inline bool name_esp     = false;
@@ -193,6 +195,8 @@ namespace cfg { namespace esp {
     inline bool weapon       = false;
     inline bool tracer       = false;
     inline bool skeleton     = false;
+    inline bool ore          = false;
+    inline bool animal       = false;
     inline bool  vis_check        = false;
     inline bool  fill             = false;
     inline float stroke           = 2.f;
@@ -534,6 +538,7 @@ struct AppState {
     int   aim_bone = 0;
     bool  esp_box = false, esp_name = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;
+    bool  esp_ore = false, esp_animal = false;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
     bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
@@ -544,6 +549,7 @@ struct AppState {
     RadioAnim ra_aim_head, ra_aim_chest, ra_aim_pelvis;
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
+    float a_esp_ore = 0, a_esp_animal = 0;
     float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig;
@@ -576,6 +582,7 @@ static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         s_frame = frame;
         esp_set_skeleton_enabled(g_state.esp_skeleton);
         esp_set_aim_bones_enabled(g_state.aim_touch);
+        esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
     }
     return s_boxes;
@@ -605,7 +612,7 @@ static void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal) return;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
@@ -823,6 +830,18 @@ static void DrawEspOverlay() {
             }
         }
     }
+
+    // ---- World markers: ore nodes and animals ----------------------------
+    // One pill with the resource / animal name at the object's position; the
+    // scan itself is done by the game layer and reuses this frame's camera.
+    if (g_state.esp_ore || g_state.esp_animal) {
+        for (const EspMarker& marker : esp_get_markers()) {
+            if (!marker.name[0]) continue;
+            if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
+            EspPill(marker.x, marker.y, marker.name,
+                    ColU32(marker.kind == ESP_MARKER_ANIMAL ? cfg::esp::animal_col : cfg::esp::ore_col));
+        }
+    }
 }
 
 // Small always-on status readout (top-left) so the attach / process state is
@@ -939,14 +958,17 @@ struct CfgBlob {
     int   aim_bone;
     bool  aim_vis_check, aim_draw_fov;
     float aim_fov, aim_smoothness;
-    bool  esp_box, esp_name, esp_hp, esp_wall, esp_chams;
+    // esp_ore / esp_animal reuse the dead esp_hp / esp_ping slots, and the ore /
+    // animal colours reuse esp_health_col / esp_money_col, so the blob layout
+    // (and therefore version 4) stays compatible with existing configs.
+    bool  esp_box, esp_name, esp_ore, esp_wall, esp_chams;
     bool  esp_weapon, esp_weapon_icon, esp_tracer, esp_skeleton;
-    bool  aim_scope_only, esp_ping, esp_vis_check, esp_fill;
+    bool  aim_scope_only, esp_animal, esp_vis_check, esp_fill;
     float esp_thick, esp_stroke, esp_rounding, esp_fill_pct;
     float gun_str, gun_fov, gun_trigger_delay;
     bool  ui_fps, ui_dark_mode, ui_show_sep;
-    ImVec4 esp_box_col, esp_box_col_invis, esp_name_col, esp_health_col, esp_distance_col;
-    ImVec4 esp_weapon_col, esp_weapon_icon_col, esp_tracer_col, esp_skeleton_col, esp_money_col, esp_ping_col;
+    ImVec4 esp_box_col, esp_box_col_invis, esp_name_col, esp_ore_col, esp_distance_col;
+    ImVec4 esp_weapon_col, esp_weapon_icon_col, esp_tracer_col, esp_skeleton_col, esp_animal_col, esp_ping_col;
     int   esp_box_type;
     float esp_box_rounding;
 };
@@ -963,14 +985,14 @@ static void ConfigSaveToPath(const std::string& path) {
     s.aim_fov        = cfg::aim::fov;
     s.aim_smoothness = cfg::aim::smoothness;
     s.esp_box     = g_state.esp_box;     s.esp_name    = g_state.esp_name;
-    s.esp_hp      = false;               s.esp_wall    = g_state.esp_wall;
+    s.esp_ore     = g_state.esp_ore;     s.esp_wall    = g_state.esp_wall;
     s.esp_chams   = g_state.esp_chams;
     s.esp_weapon      = g_state.esp_weapon;
     s.esp_weapon_icon = false;
     s.esp_tracer      = g_state.esp_tracer;
     s.esp_skeleton    = g_state.esp_skeleton;
     s.aim_scope_only  = g_state.aim_scope_only;
-    s.esp_ping        = false;
+    s.esp_animal      = g_state.esp_animal;
     s.esp_vis_check   = cfg::esp::vis_check;
     s.esp_fill        = cfg::esp::fill;
     s.esp_thick       = g_state.esp_thick;
@@ -985,13 +1007,13 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_box_col          = cfg::esp::box_col;
     s.esp_box_col_invis    = cfg::esp::box_col_invis;
     s.esp_name_col         = cfg::esp::name_col;
-    s.esp_health_col       = {0.20f, 0.85f, 0.35f, 1.f};
+    s.esp_ore_col          = cfg::esp::ore_col;
     s.esp_distance_col     = cfg::esp::distance_col;
     s.esp_weapon_col       = cfg::esp::weapon_col;
     s.esp_weapon_icon_col  = {1.00f, 0.95f, 0.10f, 1.f};
     s.esp_tracer_col       = cfg::esp::tracer_col;
     s.esp_skeleton_col     = cfg::esp::skeleton_col;
-    s.esp_money_col        = {1.00f, 0.95f, 0.10f, 1.f};
+    s.esp_animal_col       = cfg::esp::animal_col;
     s.esp_ping_col         = {0.40f, 0.85f, 1.00f, 1.f};
     s.esp_box_type         = cfg::esp::box_type;
     s.esp_box_rounding     = cfg::esp::box_rounding;
@@ -1062,6 +1084,8 @@ static void ConfigLoad(int idx) {
     g_state.esp_weapon      = s.esp_weapon;
     g_state.esp_tracer      = s.esp_tracer;
     g_state.esp_skeleton    = s.esp_skeleton;
+    g_state.esp_ore         = s.esp_ore;
+    g_state.esp_animal      = s.esp_animal;
     g_state.esp_thick   = s.esp_thick;
     g_state.gun_str     = s.gun_str;
     g_state.gun_fov     = s.gun_fov;
@@ -1077,6 +1101,8 @@ static void ConfigLoad(int idx) {
     cfg::esp::weapon_col       = s.esp_weapon_col;
     cfg::esp::tracer_col       = s.esp_tracer_col;
     cfg::esp::skeleton_col     = s.esp_skeleton_col;
+    cfg::esp::ore_col          = s.esp_ore_col;
+    cfg::esp::animal_col       = s.esp_animal_col;
     cfg::esp::box_type         = s.esp_box_type;
     cfg::esp::box_rounding     = s.esp_box_rounding;
     g_darkTheme = g_state.ui_dark_mode;
@@ -2491,6 +2517,8 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::weapon       = g_state.esp_weapon;
         cfg::esp::tracer       = g_state.esp_tracer;
         cfg::esp::skeleton     = g_state.esp_skeleton;
+        cfg::esp::ore          = g_state.esp_ore;
+        cfg::esp::animal       = g_state.esp_animal;
 
 
 
@@ -2559,8 +2587,10 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
                 {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
                 {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
+                {"##vor", XS("Руды"),           &g_state.esp_ore,          &g_state.a_esp_ore,          &cfg::esp::ore_col},
+                {"##van", XS("Животные"),       &g_state.esp_animal,       &g_state.a_esp_animal,       &cfg::esp::animal_col},
             };
-            constexpr int N = 7;
+            constexpr int N = 9;
             CardBg(rowH * N);
             for (int i = 0; i < N; i++) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
@@ -3230,6 +3260,8 @@ void RenderMenu() {
     Tick(g_state.a_esp_wall,   g_state.esp_wall,           dt);
     Tick(g_state.a_esp_chams,  g_state.esp_chams,          dt);
     Tick(g_state.a_esp_weapon, g_state.esp_weapon,         dt);
+    Tick(g_state.a_esp_ore,    g_state.esp_ore,            dt);
+    Tick(g_state.a_esp_animal, g_state.esp_animal,         dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
     Tick(g_state.a_ui_fps,     g_state.ui_fps,             dt);

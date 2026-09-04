@@ -172,6 +172,52 @@ FP-цепочка выше живёт только у локального иг�
 Оффсет имени GameObject подбирается в рантайме (`ensure_gameobject_name_offset`),
 поэтому подписи оружия работают и при выключенном скелете.
 
+### 3.6.2. ESP руд и животных (Mirror-реестр)
+
+Руды, деревья и животные — всё это наследники `Oxide.MineableObject`
+(`MineableStone` / `MineableTree` / `MineableAnimal` / `MineableObjectWithRandomSpawn`),
+и каждый — `Mirror.NetworkBehaviour`. Поэтому список берётся прямо из клиента Mirror:
+
+```
+NetworkClient.spawned (Dictionary<uint, NetworkIdentity>)
+  -> NetworkIdentity.NetworkBehaviours[]  -> компонент Mineable* -> entityType
+  -> GameObject этого identity           -> нативный Transform -> позиция в мире
+```
+
+| Константа | Значение | Что это |
+|---|---|---|
+| `NETWORK_CLIENT_TYPEINFO_RVA` | 0xD48C270 | слот `Il2CppClass*` для `Mirror.NetworkClient` в `.data` |
+| `NETWORK_CLIENT_SPAWNED` | 0x28 | `spawned` в статике класса (`klass+0xB8`) |
+| `DICT_ENTRIES` / `DICT_COUNT` | 0x18 / 0x20 | поля `Dictionary` |
+| `DICT_ENTRY_STRIDE` / `DICT_ENTRY_VALUE` | 0x18 / 0x10 | `Entry {int hash; int next; uint key; obj value}` |
+| `NETID_BEHAVIOURS` | 0x80 | `NetworkIdentity.NetworkBehaviours[]` |
+| `MINEABLE_ENTITY_TYPE` | 0xD8 | `EntityType` (см. enum `MineableEntityType`) |
+| `MINEABLE_FRACTION` / `MINEABLE_MAX_HEALTH` | 0xD0 / 0xC0 | остаток / максимум прочности |
+| `GAME_CONTROLLER_NET_IDENTITY_FIELD` | 0x8 | эталонный `NetworkIdentity` для проверки класса |
+
+**Как заново найти `NETWORK_CLIENT_TYPEINFO_RVA` после апдейта.** В `dump.cs` у
+класса `Mirror.NetworkClient` нет TypeInfo-RVA, его берут из `libil2cpp.so`:
+
+1. Распаковать `libil2cpp.7z` (в архиве фильтр ARM64, `py7zr` его не умеет):
+   `xz -d --format=raw --arm64 --lzma2=dict=32MiB -c packed.bin > libil2cpp.so`
+   (сырой поток — это файл 7z с 32-го байта, размер = `packsizes[0]`).
+2. Взять адрес любого метода `Mirror.NetworkClient$$...` из `script.json` и
+   дизассемблировать (capstone, `offset = RVA - 0x4000`). Виден шаблон:
+   `adrp x19,#0xd165000 ; ldr x19,[x19,#0x530]` → это запись GOT.
+3. В `.rela.dyn` найти запись с `r_offset == 0xd165530`; её addend
+   (`R_AARCH64_RELATIVE`, 0x403) и есть искомый RVA слота.
+4. Проверка там же в коде: `ldr x0,[x19]` → `ldr x8,[x0,#0xb8]` (static_fields)
+   → `ldr x0,[x8,#0x28]` (`spawned`).
+
+Классы компонентов не хардкодятся: у каждого `NetworkBehaviour` в рантайме
+читается имя класса (`Il2CppClass.name`), и всё, что начинается на `Mineable`,
+считается добываемым объектом (результат кешируется по указателю класса).
+Тип объекта берётся из `entityType`; на экран выводятся только руды
+(Stone/Iron/Sulfur/Ice) и животные (Bear/Boar/Deer/Rabbit/Hare/Chicken/Fish/Cannibal),
+деревья и бочки намеренно отфильтрованы. Реестр пересканируется раз в ~3 с,
+позиции руд — только при пересканировании (они статичны), у животных — каждый кадр.
+Диагностика первого скана: `/storage/emulated/0/Download/xvcen_marker_debug.log`.
+
 ### 3.7. Aим / события игрока (ADS)
 | Константа | Смещение |
 |---|---|
