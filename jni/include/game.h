@@ -17,7 +17,7 @@ struct EspBox {
     bool  has_name = false;
     char  name[32] = {};
     bool  has_weapon = false;
-    char  weapon[32] = {};
+    char  weapon[48] = {}; // localized, UTF-8 (Russian names are wider)
 
     // Skeleton (screen-space bone positions), filled when skeleton ESP is enabled.
     bool  has_skeleton;

@@ -316,13 +316,131 @@ static bool fp_object_display_name(uint64_t weapon, uint64_t player, bool strict
     return false;
 }
 
+// ===================== Weapon label localisation =====================
+//
+// Weapon labels arrive in three flavours: the item definition name for the
+// local player ("Assault Rifle"), the item short name ("assault.rifle") and —
+// for remote players — the prefab name of the model in their hands, which the
+// game builds as "<NN>_Default<Name>" / "<NN>_Skin<Name>" (e.g.
+// "07_DefaultAssault Riffle"). All three are reduced to a normalized key
+// (lowercase letters and digits only) and mapped to one Russian name, so the
+// skin/prefab decorations never reach the screen.
+static void weapon_key_normalize(const char* in, char* out, size_t cap) {
+    size_t n = 0;
+    for (const char* p = in; *p && n + 1 < cap; ++p) {
+        unsigned char c = (unsigned char)*p;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) out[n++] = (char)c;
+    }
+    out[n] = '\0';
+}
+
+// Keys are normalized; several aliases may map to the same name. Matching is
+// exact first, then longest-substring, so "pickaxehammer" wins over "pickaxe"
+// and "crossbow" over "bow" regardless of the order here.
+struct WeaponNameRu { const char* key; const char* ru; };
+static const WeaponNameRu kWeaponNamesRu[] = {
+    // Firearms
+    {"assaultriffle",         "Автомат"},
+    {"assaultrifle",          "Автомат"},
+    {"fnfal",                 "Автомат FAL"},
+    {"thompson",              "Томпсон"},
+    {"krissvector",           "Вектор"},
+    {"vector",                "Вектор"},
+    {"submachinegun",         "Пистолет-пулемёт"},
+    {"smg",                   "Пистолет-пулемёт"},
+    {"steelballgun",          "Шаровое ружьё"},
+    {"shotgun",               "Дробовик"},
+    {"huntingriffle",         "Охотничья винтовка"},
+    {"huntingrifle",          "Охотничья винтовка"},
+    {"winchester",            "Винчестер"},
+    {"dmr",                   "Винтовка DMR"},
+    {"dvl",                   "Снайперская винтовка"},
+    {"sniperriffle",          "Снайперская винтовка"},
+    {"sniperrifle",           "Снайперская винтовка"},
+    {"hmlmg",                 "Пулемёт"},
+    {"lmg",                   "Пулемёт"},
+    {"revolver",              "Револьвер"},
+    {"deserteagle",           "Дезерт Игл"},
+    {"handmadepistol",        "Самодельный пистолет"},
+    {"pistol",                "Пистолет"},
+    {"flaregun",              "Ракетница"},
+    {"rocketlauncher",        "РПГ"},
+    {"crossbow",              "Арбалет"},
+    {"woodenbow",             "Лук"},
+    {"bow",                   "Лук"},
+    // Melee
+    {"machete",               "Мачете"},
+    {"mace",                  "Булава"},
+    {"boneclub",              "Костяная дубина"},
+    {"woodenspikedclub",      "Шипованная дубина"},
+    {"spikedclub",            "Шипованная дубина"},
+    {"woodenspear",           "Деревянное копьё"},
+    {"ironspear",             "Железное копьё"},
+    {"icespear",              "Ледяное копьё"},
+    {"spear",                 "Копьё"},
+    {"stonehatchet",          "Каменный топор"},
+    {"hatchet",               "Топор"},
+    {"axe",                   "Топор"},
+    {"pickaxehammer",         "Кирка-молот"},
+    {"pickaxe",               "Кирка"},
+    {"buildinghammer",        "Молоток"},
+    {"hammer",                "Молоток"},
+    {"sawripper",             "Пила"},
+    {"chainsaw",              "Бензопила"},
+    {"jackhammer",            "Отбойный молоток"},
+    {"torch",                 "Факел"},
+    {"rock",                  "Камень"},
+    {"fists",                 "Кулаки"},
+    {"unarmed",               "Кулаки"},
+    // Throwables / utility
+    {"explosivecharge",       "С4"},
+    {"c4",                    "С4"},
+    {"eventgrenadesmoke",     "Дымовая граната"},
+    {"smokegrenade",          "Дымовая граната"},
+    {"eventgrenademakeshift", "Самодельная граната"},
+    {"grenadecupcake",        "Граната-кекс"},
+    {"grenademilitary",       "Граната"},
+    {"grenade",               "Граната"},
+    {"tacticalairmarker",     "Авиамаркер"},
+    {"snowball",              "Снежок"},
+    {"buildingplan",          "План постройки"},
+    {"medkit",                "Аптечка"},
+    {"bandage",               "Бинт"},
+    {"waterbottle",           "Бутылка воды"},
+    {"fireworks",             "Фейерверк"},
+    {"cctvcamera",            "Камера"},
+    {"binoculars",            "Бинокль"},
+    {"fishingrod",            "Удочка"},
+};
+
+// Replace `label` with its Russian name. Returns false when the weapon is not
+// in the table (the caller then keeps the cleaned original).
+static bool localize_weapon_label(char* label, size_t cap) {
+    if (!label || !label[0] || cap < 2) return false;
+    char key[80];
+    weapon_key_normalize(label, key, sizeof(key));
+    if (!key[0]) return false;
+    const char* best = nullptr;
+    size_t best_len = 0;
+    for (const WeaponNameRu& entry : kWeaponNamesRu) {
+        if (strcmp(key, entry.key) == 0) { best = entry.ru; break; }
+        size_t len = strlen(entry.key);
+        if (len > best_len && strstr(key, entry.key)) { best = entry.ru; best_len = len; }
+    }
+    if (!best) return false;
+    strncpy(label, best, cap - 1);
+    label[cap - 1] = '\0';
+    return true;
+}
+
 // Third-person (networked) held weapon. Defined further down, next to the
 // GameObject-name helpers it needs; `definite` reports whether the weapon slot
 // could be evaluated at all, so the caller can tell "nothing in hands" from
 // "could not read".
 static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, bool& definite);
 
-static bool player_weapon_name(uint64_t player, char* out, size_t cap, bool& definite) {
+static bool player_weapon_name_raw(uint64_t player, char* out, size_t cap, bool& definite) {
     definite = false;
     if (!player || !out || cap < 2) return false;
     out[0] = '\0';
@@ -373,13 +491,21 @@ static bool player_weapon_name(uint64_t player, char* out, size_t cap, bool& def
     return false;
 }
 
+// Public entry point: resolve the held weapon and localise the label.
+// Unknown weapons keep their cleaned original name rather than disappearing.
+static bool player_weapon_name(uint64_t player, char* out, size_t cap, bool& definite) {
+    if (!player_weapon_name_raw(player, out, cap, definite)) return false;
+    localize_weapon_label(out, cap);
+    return out[0] != '\0';
+}
+
 // Cached display strings per player (updated on success only, so a transient
 // failed read never makes labels flicker). Refreshed periodically to pick up
 // nickname/weapon changes.
 struct PlayerTextCache {
     char name[32] = {};
     bool has_name = false;
-    char weapon[32] = {};
+    char weapon[48] = {}; // localized UTF-8, matches EspBox::weapon
     bool has_weapon = false;
     int  revalidate = 30; // first sighting resolves immediately
     bool weapon_probed = false; // TEMP: once-per-player weapon-chain probe
@@ -2148,6 +2274,7 @@ static bool weapon_name_is_junk(const char* normalized) {
         "attachpoint", "socket", "pivot", "muzzle", "muzzlepoint", "container",
         "root", "armature", "bone", "empty", "gameobject", "model", "mesh",
         "righthand", "lefthand", "hand", "handr", "handl", "item", "view",
+        "default", "skin", "defaultskin", "none", "empty1",
     };
     if (!normalized[0]) return true;
     for (const char* junk : kJunk) if (strcmp(normalized, junk) == 0) return true;
@@ -2170,6 +2297,24 @@ static bool weapon_label_from_object_name(const char* raw, char* out, size_t cap
     size_t end = strlen(buf + start);
     char* s = buf + start;
     while (end > 0 && (s[end - 1] == ' ' || s[end - 1] == '_' || s[end - 1] == '-')) s[--end] = '\0';
+    if (end < 2) return false;
+    // Prefab names come as "<NN>_Default<Name>" / "<NN>_Skin<Name>" (and the
+    // skin variant may carry its own index), so drop the leading index and the
+    // Default/Skin marker glued in front of the real name.
+    while (*s >= '0' && *s <= '9') { ++s; --end; }
+    while (*s == '_' || *s == '-' || *s == ' ') { ++s; --end; }
+    for (int pass = 0; pass < 2; ++pass) {
+        static const char* kMarkers[] = {"default", "skin"};
+        for (const char* marker : kMarkers) {
+            size_t len = strlen(marker);
+            if (end > len && strncasecmp(s, marker, len) == 0) {
+                s += len; end -= len;
+                while (*s >= '0' && *s <= '9') { ++s; --end; }
+                while (*s == '_' || *s == '-' || *s == ' ') { ++s; --end; }
+                break;
+            }
+        }
+    }
     if (end < 2) return false;
     // Strip decorative prefixes/suffixes the prefabs carry.
     static const char* kPrefixes[] = {"tp_", "fp_", "w_", "wep_", "weapon_", "view_", "prefab_", "pref_"};
@@ -2414,7 +2559,7 @@ static void dump_weapon_probe(uint64_t player, float distance) {
         }
     }
 
-    char label[32] = {};
+    char label[48] = {};
     bool definite = false;
     bool ok = player_weapon_name(player, label, sizeof(label), definite);
     snprintf(line + n, sizeof(line) - n, " | LABEL=%s[%s] definite=%d",
@@ -3089,9 +3234,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     memcpy(tc.name, tmp, sizeof(tc.name));
                     tc.has_name = true;
                 }
+                char weapon_tmp[48] = {};
                 bool weapon_definite = false;
-                if (player_weapon_name(s_transforms[i], tmp, sizeof(tmp), weapon_definite)) {
-                    memcpy(tc.weapon, tmp, sizeof(tc.weapon));
+                if (player_weapon_name(s_transforms[i], weapon_tmp, sizeof(weapon_tmp), weapon_definite)) {
+                    memcpy(tc.weapon, weapon_tmp, sizeof(tc.weapon));
                     tc.has_weapon = true;
                 } else if (weapon_definite) {
                     // The synced weapon slot says the hands are empty — drop the
