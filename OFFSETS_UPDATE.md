@@ -110,6 +110,48 @@ userID≈0x278, teamName≈0x280, clanId≈0x290, clanTag≈0x298, observedId≈
 > Внимание: FP-объекты у удалённых игроков часто **null** (не синхронизированы).
 > `player_weapon_name()` проходит строгий (back-ref==player) и ослабленный проход.
 
+### 3.6.1. Оружие удалённых игроков (третье лицо, синхронизируется)
+FP-цепочка выше живёт только у локального игрока, поэтому имя оружия врагов
+берётся из сетевого компонента `HyperHug.Games.Oxide.Features.Weapons.PlayerWeapon`
+(`Mirror.NetworkBehaviour`, dump.cs) — он есть у каждого игрока.
+
+| Константа | Смещение | Поле/тип |
+|---|---|---|
+| `PLAYERWEAPON_VIEW` | 0x90 | `playerWeaponViewReference` (`Ms` → класс `Mo`) |
+| `PLAYERWEAPON_PIECE` | 0xD8 | `Oxide.WeaponPiece` (SyncVar weaponPiece, 0x10 байт) |
+| `PLAYERWEAPON_STATE` | 0xE8 | `WeaponState` |
+| `PLAYERWEAPON_PLAYER_BACKREF` | 0x100 | `<player>k__BackingField` — валидация кандидата |
+| `WEAPONPIECE_ENABLED` | +0x00 | bool Enabled |
+| `WEAPONPIECE_NUMBER` | +0x02 | short Number (id предмета) |
+| `WEAPONVIEW_WEAPON_BASE` | 0x48 | `Mo.Zjj` → `WeaponBase` (MonoBehaviour на префабе оружия) |
+| `WEAPONVIEW_PIECE` | 0x50 | `Mo.Zjk` → WeaponPiece |
+| `WEAPONVIEW_ROOT_TRANSFORM` | 0x60 | `Mo.Zjo` → Transform префаба |
+| `WEAPONVIEW_INNER` | 0x10 | `fSN.IDA` — декоратор поверх другого `Ms` |
+| `MODELINFO_RIGHT_WEAPON_HOLDER` | 0x28 | `PlayerModelInfo.rightWeaponHolder` |
+| `MODELINFO_LEFT_WEAPON_HOLDER` | 0x30 | `PlayerModelInfo.leftWeaponHolder` |
+| `CHARANIM_PLAYER_MODEL_INFO` | 0x30 | `CharacterAnimation.playerModelInfo` |
+| `INVDATA_PLAYER_MODEL_INFO` | 0x20 | `PlayerInventoryData.playerModelInfo` |
+| `IL2CPP_CLASS_NAME` | 0x10 | `Il2CppClass.name` (проверка класса `PlayerWeapon`) |
+
+Как это читается (`remote_weapon_display_name()` в game.cpp):
+1. `PlayerManager.weaponReference (0xF0)` — обфусцированная обёртка (как
+   `kccReference`): проверяем сам указатель, затем поля 0x08..0x60, затем
+   сканируем поля `PlayerManager` 0x68..0x350. Кандидат принимается только
+   если `+0x100 == player` **и** имя класса == `PlayerWeapon`.
+2. Маршрут A: `PlayerWeapon → view(0x90) → WeaponBase(0x48)` → нативный
+   GameObject → его имя = имя префаба оружия.
+3. Маршрут B (независимый): `PlayerModelInfo.rightWeaponHolder/left` → первый
+   ребёнок (или внук) → имя GameObject. `PlayerModelInfo` берётся из
+   `inventory(0x98) → data(0x20) → 0x20` либо `KCC → CharacterAnimation(0x108) → 0x30`.
+4. Если ничего не разрешилось, но SyncVar говорит, что оружие в руках —
+   показывается `WPN <Number>` (значит, сломался только шаг с именем префаба).
+5. Имя чистится (`weapon_label_from_object_name`): срезается `(Clone)`,
+   префиксы `tp_/fp_/w_/...`, суффиксы `_tp/_view/_model/...`, отбрасываются
+   служебные узлы (`WeaponHolder`, `Root`, ...).
+
+Оффсет имени GameObject подбирается в рантайме (`ensure_gameobject_name_offset`),
+поэтому подписи оружия работают и при выключенном скелете.
+
 ### 3.7. Aим / события игрока (ADS)
 | Константа | Смещение |
 |---|---|

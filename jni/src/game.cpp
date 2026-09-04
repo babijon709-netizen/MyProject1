@@ -3,6 +3,7 @@
 #include "Vector.h"
 
 #include <string.h>
+#include <strings.h>   // strncasecmp (weapon prefab label cleanup)
 #include <sys/uio.h>
 #include <stdio.h>
 #include <algorithm>
@@ -315,8 +316,16 @@ static bool fp_object_display_name(uint64_t weapon, uint64_t player, bool strict
     return false;
 }
 
-static bool player_weapon_name(uint64_t player, char* out, size_t cap) {
+// Third-person (networked) held weapon. Defined further down, next to the
+// GameObject-name helpers it needs; `definite` reports whether the weapon slot
+// could be evaluated at all, so the caller can tell "nothing in hands" from
+// "could not read".
+static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, bool& definite);
+
+static bool player_weapon_name(uint64_t player, char* out, size_t cap, bool& definite) {
+    definite = false;
     if (!player || !out || cap < 2) return false;
+    out[0] = '\0';
     // (1) FP manager route — works for the local player (and rarely for a
     // remote player whose FP MonoBehaviour happens to be instantiated).
     uint64_t fp = rd_ptr(player + PLAYER_FP_MANAGER);
@@ -327,14 +336,19 @@ static bool player_weapon_name(uint64_t player, char* out, size_t cap) {
         };
         for (int strict = 1; strict >= 0; --strict) {
             for (int i = 0; i < 2; ++i) {
-                if (fp_object_display_name(candidates[i], player, strict != 0, out, cap))
+                if (fp_object_display_name(candidates[i], player, strict != 0, out, cap)) {
+                    definite = true;
                     return true;
+                }
             }
         }
     }
-    // (2) weaponReference @0xF0 — server-authoritative held weapon, present for
-    // every remote player. Most likely an Oxide.Item (ItemData at +0x20); fall
-    // back to the FPObject layout (name at +0x78 / Item at +0x40).
+    // (2) PlayerWeapon (synced) -> weapon view / model holders. This is the
+    // only route that works for other players; see remote_weapon_display_name.
+    if (remote_weapon_display_name(player, out, cap, definite)) return true;
+    if (definite) return false;   // synced slot says the hands are empty
+    // (3) weaponReference @0xF0 read as a plain Oxide.Item / FPObject — kept as
+    // a cheap last resort for layouts where it is not the wrapper we expect.
     uint64_t wr = rd_ptr(player + PLAYER_WEAPON_REFERENCE);
     if (valid_obj(wr)) {
         if (read_item_data_display_name(rd_ptr(wr + ITEM_DATA), out, cap))
@@ -342,7 +356,7 @@ static bool player_weapon_name(uint64_t player, char* out, size_t cap) {
         if (fp_object_display_name(wr, player, false, out, cap))
             return true;
     }
-    // (3) weapons[] @0x198 — inventory/belt weapon objects; try each as an Item.
+    // (4) weapons[] @0x198 — inventory/belt weapon objects; try each as an Item.
     uint64_t arr = rd_ptr(player + PLAYER_WEAPONS_ARRAY);
     if (valid_obj(arr)) {
         int32_t len = rd<int32_t>(arr + IL2CPP_ARRAY_LENGTH);
@@ -355,6 +369,7 @@ static bool player_weapon_name(uint64_t player, char* out, size_t cap) {
             }
         }
     }
+    out[0] = '\0';
     return false;
 }
 
@@ -378,126 +393,6 @@ static void prune_player_text(const std::vector<uint64_t>& players) {
         if (!present) it = g_player_text.erase(it); else ++it;
     }
 }
-
-// ===================== TEMP: remote-weapon probe =====================
-// The FP-manager route only resolves the held weapon for players whose local
-// FP MonoBehaviour exists (rare for enemies). To pin down a reliable synced
-// source, log once per player what the inventory / weapons-array /
-// weapon-reference candidates actually contain. Remove once the read chain is
-// finalised.
-// Best-effort readable label for a candidate weapon/held-object pointer.
-// Handles both layouts from dump.cs:
-//   - obj is an Oxide.Item:    ItemData at obj+0x20 (ITEM_DATA), ItemData has
-//                              m_Name@0x18 / m_ShortName@0x20.
-//   - obj is an FPObject:      display-name string at obj+0x78 (FPOBJECT_OBJECT_NAME),
-//                              and/or Item at obj+0x40 (FPOBJECT_ITEM)-> ItemData.
-static bool item_name_from_data(uint64_t data, char* out, size_t cap) {
-    if (!out || cap < 2 || !valid_obj(data)) { if (out) out[0] = 0; return false; }
-    char tmp[40] = {};
-    uint64_t str = rd_ptr(data + ITEMDATA_NAME);
-    if (!str || !read_managed_string(str, tmp, sizeof(tmp))) str = rd_ptr(data + ITEMDATA_SHORTNAME);
-    if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
-        memcpy(out, tmp, cap); out[cap - 1] = '\0'; return true;
-    }
-    out[0] = '\0'; return false;
-}
-static bool probe_weapon_label(uint64_t obj, char* out, size_t cap) {
-    if (out && cap) out[0] = '\0';
-    if (!out || cap < 2) return false;
-    if (!valid_obj(obj)) return false;
-    // (1) obj is an Oxide.Item -> ItemData at obj+0x20.
-    if (item_name_from_data(rd_ptr(obj + ITEM_DATA), out, cap)) return true;
-    // (2) obj is an FPObject -> Item at obj+0x40, its ItemData at +0x20.
-    uint64_t item = rd_ptr(obj + FPOBJECT_ITEM);
-    if (item_name_from_data(rd_ptr(item + ITEM_DATA), out, cap)) return true;
-    // (3) obj is an FPObject with a direct display-name string at +0x78.
-    char tmp[40] = {};
-    uint64_t str = rd_ptr(obj + FPOBJECT_OBJECT_NAME);
-    if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
-        memcpy(out, tmp, cap); out[cap - 1] = '\0'; return true;
-    }
-    return false;
-}
-// Fingerprint an unknown managed object: print the first few fields that look
-// like managed strings, with their object-relative offset, to learn the layout.
-static void scan_obj_strings(uint64_t obj, char* out, size_t cap, int max_fields) {
-    if (!out || cap < 2) return;
-    out[0] = '\0';
-    if (!valid_obj(obj)) return;
-    size_t n = 0;
-    for (int off = 0x10; off <= 0x180 && max_fields > 0; off += 8) {
-        uint64_t p = rd_ptr(obj + (uint64_t)off);
-        if (!valid_obj(p)) continue;
-        char s[40] = {};
-        if (read_managed_string(p, s, sizeof(s)) && s[0]) {
-            int add = snprintf(out + n, cap - n, "%X='%s' ", off, s);
-            if (add > 0) n += (size_t)add;
-            --max_fields;
-            if (n + 2 >= cap) break;
-        }
-    }
-}
-static void dump_weapon_probe(uint64_t player, float distance) {
-    static int s_count = 0;
-    if (s_count >= 6 || !player) return;
-    ++s_count;
-
-    char line[900]; size_t n = 0;
-    n += (size_t)snprintf(line + n, sizeof(line) - n, "player=0x%llX dist=%.1f",
-        (unsigned long long)player, (double)distance);
-    char tmp[48] = {}, nm[32] = {};
-    if (player_display_name(player, nm, sizeof(nm))) n += (size_t)snprintf(line + n, sizeof(line) - n, " name=[%s]", nm);
-
-    // (a) FP manager (current code path).
-    uint64_t fp = rd_ptr(player + PLAYER_FP_MANAGER);
-    n += (size_t)snprintf(line + n, sizeof(line) - n, " | fp=0x%llX", (unsigned long long)fp);
-    if (valid_obj(fp)) {
-        for (int off = 0; off < 2; ++off) {
-            uint64_t c = rd_ptr(fp + (off ? FPMANAGER_CURRENT_OBJECT : FPMANAGER_CURRENT_WEAPON));
-            tmp[0] = 0;
-            bool ok = probe_weapon_label(c, tmp, sizeof(tmp));
-            n += (size_t)snprintf(line + n, sizeof(line) - n, " fp@%02X=%s[%s]",
-                off ? 0x50 : 0x58, ok ? "obj" : "null", tmp[0] ? tmp : "-");
-        }
-    }
-    // (b) weapons array @0x198.
-    uint64_t arr = rd_ptr(player + PLAYER_WEAPONS_ARRAY);
-    n += (size_t)snprintf(line + n, sizeof(line) - n, " | wpnArr=0x%llX", (unsigned long long)arr);
-    if (valid_obj(arr)) {
-        uint32_t len = 0;
-        if (!rd_buf(arr + IL2CPP_ARRAY_LENGTH, &len, sizeof(len))) len = 0;
-        if (len > 8) len = 8;
-        n += (size_t)snprintf(line + n, sizeof(line) - n, "[%u]", len);
-        for (uint32_t i = 0; i < len; ++i) {
-            uint64_t el = rd_ptr(arr + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
-            tmp[0] = 0;
-            bool ok = probe_weapon_label(el, tmp, sizeof(tmp));
-            n += (size_t)snprintf(line + n, sizeof(line) - n, " e%u=%s[%s]", i, ok ? "obj" : "null", tmp[0] ? tmp : "-");
-        }
-    }
-    // (c) weaponReference @0xF0 (probably the server-authoritative held Oxide.Item).
-    uint64_t wr = rd_ptr(player + PLAYER_WEAPON_REFERENCE);
-    tmp[0] = 0;
-    probe_weapon_label(wr, tmp, sizeof(tmp));
-    n += (size_t)snprintf(line + n, sizeof(line) - n, " | wRef=0x%llX[%s]", (unsigned long long)wr, tmp[0] ? tmp : "-");
-    // Fingerprint wRef's string fields so we can locate the real layout if the
-    // Item/FPObject routes above miss.
-    {
-        char fs[400] = {};
-        scan_obj_strings(wr, fs, sizeof(fs), 12);
-        if (fs[0]) n += (size_t)snprintf(line + n, sizeof(line) - n, " {str:%s}", fs);
-    }
-    // (d) inventory @0x98 presence.
-    uint64_t inv = rd_ptr(player + PLAYER_INVENTORY);
-    n += (size_t)snprintf(line + n, sizeof(line) - n, " | inv=0x%llX", (unsigned long long)inv);
-
-    static bool s_trunc = false;
-    const char* path = "/storage/emulated/0/Download/xvcen_weapon_debug.log";
-    FILE* f = fopen(path, s_trunc ? "a" : "w");
-    if (f) { fprintf(f, "%s\n", line); fclose(f); }
-    s_trunc = true;
-}
-
 
 static uint64_t get_base(const char* lib) {
     char path[64];
@@ -1293,6 +1188,10 @@ struct PlayerAux {
     float    crouch_height = 1.1F;
     int      retry_cooldown = 0;
     int      revalidate = 0;
+    // Held-weapon chain (resolved lazily, revalidated by their back-references).
+    uint64_t weapon_component = 0; // PlayerWeapon (NetworkBehaviour)
+    uint64_t model_info = 0;       // PlayerModelInfo (weapon holders)
+    int      weapon_retry = 0;
 };
 static std::unordered_map<uint64_t, PlayerAux> g_player_aux;
 
@@ -2190,6 +2089,343 @@ static void prune_player_aux(const std::vector<uint64_t>& players) {
     }
 }
 
+// ===================== Remote (third-person) held weapon =====================
+//
+// FPManager/FPObject only exist for the local player, which is why enemies
+// never got a weapon label. The networked source is PlayerWeapon (see
+// game_offsets.h): PlayerManager.weaponReference -> PlayerWeapon, whose weapon
+// view spawns the weapon prefab as a GameObject under the character rig. Two
+// independent ways to name it, both ending at a GameObject name:
+//   A) PlayerWeapon.playerWeaponViewReference -> Mo.WeaponBase / Mo.rootTransform
+//   B) PlayerModelInfo.rightWeaponHolder (or left) -> first child transform
+// Route B does not depend on the view's internal layout, so it runs as the
+// fallback whenever A comes up empty.
+
+// Il2CppClass name check (klass @0x0, name @0x10) — identifies PlayerWeapon
+// without relying on the obfuscated wrapper layout.
+static bool object_class_name_is(uint64_t obj, const char* expected) {
+    if (!valid_obj(obj)) return false;
+    uint64_t klass = rd_ptr(obj);
+    if (!valid_obj(klass)) return false;
+    return remote_string_equals(rd_ptr(klass + IL2CPP_CLASS_NAME), expected);
+}
+
+// The GameObject-name offset is normally discovered while building a skeleton.
+// Weapon labels must work with skeleton ESP off, so discover it on demand from
+// the character model subtree (cheap: one BFS, then cached process-wide).
+static bool ensure_gameobject_name_offset(uint64_t player) {
+    if (g_go_name_offset_valid) return true;
+    if (g_go_name_retry_cooldown > 0) { --g_go_name_retry_cooldown; return false; }
+    uint64_t root = skeleton_model_root(player);
+    if (!root) { g_go_name_retry_cooldown = 60; return false; }
+    static std::vector<uint64_t> nodes;
+    collect_transform_subtree(root, nodes, 256);
+    if (nodes.size() < 8 || !discover_gameobject_name_offset(nodes)) {
+        g_go_name_retry_cooldown = 60;
+        return false;
+    }
+    return true;
+}
+
+// Lowercase, strip separators — used to recognise container/rig objects that
+// are not the weapon itself.
+static void normalize_weapon_token(const char* in, char* out, size_t cap) {
+    size_t n = 0;
+    for (const char* p = in; *p && n + 1 < cap; ++p) {
+        char c = *p;
+        if (c == ' ' || c == '_' || c == '-' || c == '.') continue;
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        out[n++] = c;
+    }
+    out[n] = '\0';
+}
+
+// Reject holders/rig nodes so route B never labels a player with "WeaponHolder".
+static bool weapon_name_is_junk(const char* normalized) {
+    static const char* kJunk[] = {
+        "weaponholder", "rightweaponholder", "leftweaponholder", "equipmentholder",
+        "holder", "weapon", "weapons", "weaponroot", "weaponpivot", "attach",
+        "attachpoint", "socket", "pivot", "muzzle", "muzzlepoint", "container",
+        "root", "armature", "bone", "empty", "gameobject", "model", "mesh",
+        "righthand", "lefthand", "hand", "handr", "handl", "item", "view",
+    };
+    if (!normalized[0]) return true;
+    for (const char* junk : kJunk) if (strcmp(normalized, junk) == 0) return true;
+    return false;
+}
+
+// "AssaultRifle_TP (Clone)" -> "AssaultRifle". Returns false for junk.
+static bool weapon_label_from_object_name(const char* raw, char* out, size_t cap) {
+    if (!raw || !out || cap < 2) return false;
+    char buf[64];
+    size_t n = 0;
+    for (const char* p = raw; *p && n + 1 < sizeof(buf); ++p) {
+        if (*p == '(') break;               // "(Clone)" and friends
+        buf[n++] = *p;
+    }
+    buf[n] = '\0';
+    // Trim separators on both ends.
+    size_t start = 0;
+    while (buf[start] == ' ' || buf[start] == '_' || buf[start] == '-') ++start;
+    size_t end = strlen(buf + start);
+    char* s = buf + start;
+    while (end > 0 && (s[end - 1] == ' ' || s[end - 1] == '_' || s[end - 1] == '-')) s[--end] = '\0';
+    if (end < 2) return false;
+    // Strip decorative prefixes/suffixes the prefabs carry.
+    static const char* kPrefixes[] = {"tp_", "fp_", "w_", "wep_", "weapon_", "view_", "prefab_", "pref_"};
+    for (const char* pre : kPrefixes) {
+        size_t len = strlen(pre);
+        if (end > len + 1 && strncasecmp(s, pre, len) == 0) { s += len; end -= len; break; }
+    }
+    static const char* kSuffixes[] = {"_tp", "_fp", "_view", "_model", "_mesh", "_prefab", "_weapon", "_lod0", "_lod"};
+    for (const char* suf : kSuffixes) {
+        size_t len = strlen(suf);
+        if (end > len + 1 && strncasecmp(s + end - len, suf, len) == 0) { end -= len; s[end] = '\0'; break; }
+    }
+    if (end < 2) return false;
+    char normalized[64];
+    normalize_weapon_token(s, normalized, sizeof(normalized));
+    if (weapon_name_is_junk(normalized)) return false;
+    bool has_alpha = false;
+    for (const char* p = s; *p; ++p) if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')) { has_alpha = true; break; }
+    if (!has_alpha) return false;
+    strncpy(out, s, cap - 1);
+    out[cap - 1] = '\0';
+    return true;
+}
+
+// Managed MonoBehaviour/Component -> name of the GameObject it sits on.
+static bool managed_component_gameobject_name(uint64_t managed_component, char* out, size_t cap) {
+    if (!g_go_name_offset_valid) return false;
+    uint64_t native = managed_object_native(managed_component);
+    if (!native) return false;
+    uint64_t go = rd_ptr(native + COMPONENT_GAMEOBJECT);
+    if (!go) return false;
+    return read_gameobject_name_at(go, g_go_name_offset, g_go_name_plain_pointer, out, cap);
+}
+
+// PlayerManager -> PlayerWeapon. weaponReference is an obfuscated lazy wrapper
+// (same shape as kccReference), so probe it, then fall back to a field scan.
+// A candidate is accepted on its back-reference plus its class name.
+static uint64_t resolve_player_weapon_component(uint64_t player) {
+    auto is_player_weapon = [&](uint64_t candidate) {
+        return valid_obj(candidate) &&
+               rd_ptr(candidate + PLAYERWEAPON_PLAYER_BACKREF) == player &&
+               object_class_name_is(candidate, "PlayerWeapon");
+    };
+    uint64_t reference = rd_ptr(player + PLAYER_WEAPON_REFERENCE);
+    if (is_player_weapon(reference)) return reference;
+    if (valid_obj(reference)) {
+        for (uint64_t offset = 0x08; offset <= 0x60; offset += 8) {
+            uint64_t candidate = rd_ptr(reference + offset);
+            if (is_player_weapon(candidate)) return candidate;
+        }
+    }
+    for (uint64_t offset = 0x68; offset <= 0x350; offset += 8) {
+        uint64_t candidate = rd_ptr(player + offset);
+        if (is_player_weapon(candidate)) return candidate;
+    }
+    return 0;
+}
+
+// PlayerManager -> PlayerModelInfo, via the inventory data or the KCC's
+// CharacterAnimation (whichever resolves first).
+static uint64_t resolve_player_model_info(uint64_t player, const PlayerAux& aux) {
+    auto usable = [&](uint64_t candidate) {
+        return valid_obj(candidate) && managed_object_native(candidate) != 0;
+    };
+    uint64_t inventory = rd_ptr(player + PLAYER_INVENTORY);
+    if (valid_obj(inventory)) {
+        uint64_t data = rd_ptr(inventory + INV_PLAYER_INVENTORY_DATA);
+        if (valid_obj(data)) {
+            uint64_t info = rd_ptr(data + INVDATA_PLAYER_MODEL_INFO);
+            if (usable(info)) return info;
+        }
+    }
+    if (aux.kcc) {
+        uint64_t animation = rd_ptr(aux.kcc + KCC_CHARACTER_ANIMATION);
+        if (valid_obj(animation)) {
+            uint64_t info = rd_ptr(animation + CHARANIM_PLAYER_MODEL_INFO);
+            if (usable(info)) return info;
+        }
+    }
+    return 0;
+}
+
+// Route A: PlayerWeapon -> weapon view -> spawned weapon GameObject.
+static bool weapon_name_from_view(uint64_t weapon_component, char* out, size_t cap) {
+    uint64_t view = rd_ptr(weapon_component + PLAYERWEAPON_VIEW);
+    char raw[48];
+    for (int depth = 0; depth < 2 && valid_obj(view); ++depth) {
+        uint64_t weapon_base = rd_ptr(view + WEAPONVIEW_WEAPON_BASE);
+        if (managed_component_gameobject_name(weapon_base, raw, sizeof(raw)) &&
+            weapon_label_from_object_name(raw, out, cap)) return true;
+        uint64_t root = managed_object_native(rd_ptr(view + WEAPONVIEW_ROOT_TRANSFORM));
+        if (root && read_transform_name(root, raw, sizeof(raw)) &&
+            weapon_label_from_object_name(raw, out, cap)) return true;
+        view = rd_ptr(view + WEAPONVIEW_INNER); // fSN decorates another Ms
+    }
+    return false;
+}
+
+// Route B: the weapon prefab is parented under the model's weapon holders.
+static bool weapon_name_from_model_holders(uint64_t model_info, char* out, size_t cap) {
+    const uint64_t holders[2] = {MODELINFO_RIGHT_WEAPON_HOLDER, MODELINFO_LEFT_WEAPON_HOLDER};
+    char raw[48];
+    for (uint64_t holder_offset : holders) {
+        uint64_t holder = managed_object_native(rd_ptr(model_info + holder_offset));
+        if (!holder) continue;
+        uint64_t children[8];
+        int count = read_transform_children(holder, children, 8);
+        for (int i = 0; i < count; ++i) {
+            if (!read_transform_name(children[i], raw, sizeof(raw))) continue;
+            if (weapon_label_from_object_name(raw, out, cap)) return true;
+            // The holder may add one wrapper node; look one level deeper.
+            uint64_t grandchildren[4];
+            int sub = read_transform_children(children[i], grandchildren, 4);
+            for (int k = 0; k < sub; ++k) {
+                if (read_transform_name(grandchildren[k], raw, sizeof(raw)) &&
+                    weapon_label_from_object_name(raw, out, cap)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, bool& definite) {
+    definite = false;
+    if (!player || !out || cap < 2) return false;
+    out[0] = '\0';
+    if (!ensure_gameobject_name_offset(player)) return false;
+
+    PlayerAux& aux = player_aux(player);
+    // Revalidate the cached component by its back-reference; re-resolve rarely.
+    if (aux.weapon_component &&
+        rd_ptr(aux.weapon_component + PLAYERWEAPON_PLAYER_BACKREF) != player)
+        aux.weapon_component = 0;
+    if (!aux.weapon_component) {
+        if (aux.weapon_retry > 0) --aux.weapon_retry;
+        else {
+            aux.weapon_component = resolve_player_weapon_component(player);
+            if (!aux.weapon_component) aux.weapon_retry = 4;
+        }
+    }
+
+    bool holds_weapon = false, knows_slot = false;
+    int16_t piece_number = 0;
+    if (aux.weapon_component) {
+        uint64_t piece = aux.weapon_component + PLAYERWEAPON_PIECE;
+        uint8_t enabled = rd<uint8_t>(piece + WEAPONPIECE_ENABLED);
+        piece_number = rd<int16_t>(piece + WEAPONPIECE_NUMBER);
+        knows_slot = true;
+        holds_weapon = (enabled != 0) || piece_number != 0;
+        if (weapon_name_from_view(aux.weapon_component, out, cap)) { definite = true; return true; }
+    }
+
+    if (!aux.model_info || !managed_object_native(aux.model_info))
+        aux.model_info = resolve_player_model_info(player, aux);
+    if (aux.model_info && weapon_name_from_model_holders(aux.model_info, out, cap)) {
+        definite = true;
+        return true;
+    }
+
+    // Nothing found. If the synced slot says a weapon *is* equipped, fall back
+    // to its item number so the label still identifies the weapon (and tells us
+    // the component resolved but the prefab name did not).
+    out[0] = '\0';
+    if (knows_slot && holds_weapon && piece_number != 0) {
+        snprintf(out, cap, "WPN %d", (int)piece_number);
+        definite = true;
+        return true;
+    }
+    definite = knows_slot && !holds_weapon;
+    return false;
+}
+
+// One-shot diagnostics for the weapon chain: logs, per player, which links
+// resolved and what each route produced. Written to Download/ so it can be
+// pulled off the device when a weapon still shows up empty.
+static void dump_weapon_probe(uint64_t player, float distance) {
+    static int s_count = 0;
+    if (s_count >= 8 || !player) return;
+    ++s_count;
+
+    char line[900];
+    size_t n = 0;
+    n += (size_t)snprintf(line + n, sizeof(line) - n, "player=0x%llX dist=%.1f",
+                          (unsigned long long)player, (double)distance);
+    char name[32] = {};
+    if (player_display_name(player, name, sizeof(name)))
+        n += (size_t)snprintf(line + n, sizeof(line) - n, " name=[%s]", name);
+    n += (size_t)snprintf(line + n, sizeof(line) - n, " goNameOff=%s(0x%llX,plain=%d)",
+                          g_go_name_offset_valid ? "ok" : "NO",
+                          (unsigned long long)g_go_name_offset, g_go_name_plain_pointer ? 1 : 0);
+
+    uint64_t reference = rd_ptr(player + PLAYER_WEAPON_REFERENCE);
+    uint64_t component = resolve_player_weapon_component(player);
+    n += (size_t)snprintf(line + n, sizeof(line) - n, " | wRef=0x%llX pw=0x%llX",
+                          (unsigned long long)reference, (unsigned long long)component);
+    if (component) {
+        uint64_t piece = component + PLAYERWEAPON_PIECE;
+        n += (size_t)snprintf(line + n, sizeof(line) - n, " piece(en=%u num=%d state=%d)",
+                              (unsigned)rd<uint8_t>(piece + WEAPONPIECE_ENABLED),
+                              (int)rd<int16_t>(piece + WEAPONPIECE_NUMBER),
+                              (int)rd<int32_t>(component + PLAYERWEAPON_STATE));
+        uint64_t view = rd_ptr(component + PLAYERWEAPON_VIEW);
+        n += (size_t)snprintf(line + n, sizeof(line) - n, " view=0x%llX", (unsigned long long)view);
+        char raw[48] = {};
+        uint64_t weapon_base = valid_obj(view) ? rd_ptr(view + WEAPONVIEW_WEAPON_BASE) : 0;
+        n += (size_t)snprintf(line + n, sizeof(line) - n, " wBase=0x%llX", (unsigned long long)weapon_base);
+        if (managed_component_gameobject_name(weapon_base, raw, sizeof(raw)))
+            n += (size_t)snprintf(line + n, sizeof(line) - n, " wBase.go=[%s]", raw);
+        uint64_t root = valid_obj(view) ? managed_object_native(rd_ptr(view + WEAPONVIEW_ROOT_TRANSFORM)) : 0;
+        if (root && read_transform_name(root, raw, sizeof(raw)))
+            n += (size_t)snprintf(line + n, sizeof(line) - n, " view.root=[%s]", raw);
+    } else {
+        // No component: dump the wrapper slots so the layout can be spotted.
+        for (uint64_t offset = 0x00; offset <= 0x30 && valid_obj(reference); offset += 8) {
+            uint64_t candidate = rd_ptr(reference + offset);
+            if (!valid_obj(candidate)) continue;
+            uint64_t klass = rd_ptr(candidate);
+            std::string cls = valid_obj(klass) ? read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME)) : std::string();
+            n += (size_t)snprintf(line + n, sizeof(line) - n, " ref@%llX=%s",
+                                  (unsigned long long)offset, cls.empty() ? "?" : cls.c_str());
+        }
+    }
+
+    PlayerAux& aux = player_aux(player);
+    uint64_t model_info = resolve_player_model_info(player, aux);
+    n += (size_t)snprintf(line + n, sizeof(line) - n, " | modelInfo=0x%llX", (unsigned long long)model_info);
+    if (model_info) {
+        const uint64_t holders[2] = {MODELINFO_RIGHT_WEAPON_HOLDER, MODELINFO_LEFT_WEAPON_HOLDER};
+        for (int h = 0; h < 2; ++h) {
+            uint64_t holder = managed_object_native(rd_ptr(model_info + holders[h]));
+            char raw[48] = {};
+            n += (size_t)snprintf(line + n, sizeof(line) - n, " %s=0x%llX",
+                                  h ? "leftHold" : "rightHold", (unsigned long long)holder);
+            if (holder && read_transform_name(holder, raw, sizeof(raw)))
+                n += (size_t)snprintf(line + n, sizeof(line) - n, "[%s]", raw);
+            uint64_t children[4];
+            int count = read_transform_children(holder, children, 4);
+            for (int i = 0; i < count && n + 32 < sizeof(line); ++i) {
+                if (read_transform_name(children[i], raw, sizeof(raw)))
+                    n += (size_t)snprintf(line + n, sizeof(line) - n, " c%d=[%s]", i, raw);
+            }
+        }
+    }
+
+    char label[32] = {};
+    bool definite = false;
+    bool ok = player_weapon_name(player, label, sizeof(label), definite);
+    snprintf(line + n, sizeof(line) - n, " | LABEL=%s[%s] definite=%d",
+             ok ? "ok" : "none", label[0] ? label : "-", definite ? 1 : 0);
+
+    static bool s_appending = false;
+    FILE* f = fopen("/storage/emulated/0/Download/xvcen_weapon_debug.log", s_appending ? "a" : "w");
+    if (f) { fprintf(f, "%s\n", line); fclose(f); }
+    s_appending = true;
+}
+
 // Angular offset of a world point from the camera axis. Prefers the live
 // camera pose; falls back to inverting the projection from the screen point,
 // so aim angles never depend on the transform-pose path succeeding.
@@ -2853,9 +3089,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     memcpy(tc.name, tmp, sizeof(tc.name));
                     tc.has_name = true;
                 }
-                if (player_weapon_name(s_transforms[i], tmp, sizeof(tmp))) {
+                bool weapon_definite = false;
+                if (player_weapon_name(s_transforms[i], tmp, sizeof(tmp), weapon_definite)) {
                     memcpy(tc.weapon, tmp, sizeof(tc.weapon));
                     tc.has_weapon = true;
+                } else if (weapon_definite) {
+                    // The synced weapon slot says the hands are empty — drop the
+                    // stale label instead of showing the previous weapon forever.
+                    tc.weapon[0] = '\0';
+                    tc.has_weapon = false;
                 }
             }
             // TEMP: probe remote weapon chain once per player (see dump_weapon_probe).

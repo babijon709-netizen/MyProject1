@@ -96,6 +96,48 @@ inline constexpr std::uint64_t PLAYER_WEAPONS_ARRAY     = 0x198;
 // Oxide.PlayerInventory instance fields (dump.cs).
 inline constexpr std::uint64_t INV_PLAYER_INVENTORY_DATA = 0x20; // _playerInventoryData
 inline constexpr std::uint64_t INV_PLAYER_INVENTORY_CLIENT = 0x28; // _playerInventoryClient (fmh)
+
+// ---- Remote (third-person) held weapon, from dump.cs ------------------------
+// The FP objects above are local-only MonoBehaviours, so enemies never resolve
+// through them. What every client *does* get is the networked weapon component:
+//   HyperHug.Games.Oxide.Features.Weapons.PlayerWeapon : Mirror.NetworkBehaviour
+//     playerWeaponViewReference  0x90  (Ms -> Mo, third-person weapon view)
+//     FdW = Oxide.WeaponPiece    0xD8  (SyncVar "weaponPiece", 0x10 bytes)
+//     Fdt = WeaponState          0xE8
+//     <player>k__BackingField    0x100 (back-ref to PlayerManager, validation)
+// It hangs off PlayerManager.weaponReference (0xF0), which is an obfuscated
+// lazy-reference wrapper just like kccReference, so it needs the same probing.
+inline constexpr std::uint64_t PLAYERWEAPON_VIEW           = 0x90;
+inline constexpr std::uint64_t PLAYERWEAPON_PIECE          = 0xD8;
+inline constexpr std::uint64_t PLAYERWEAPON_STATE          = 0xE8;
+inline constexpr std::uint64_t PLAYERWEAPON_PLAYER_BACKREF = 0x100;
+// Oxide.WeaponPiece (value type): Enabled 0x0, Number 0x2, Skin 0x4,
+// SkinLevel 0x6, Loaded 0x7, Mods 0x8. Number is the item id of the weapon.
+inline constexpr std::uint64_t WEAPONPIECE_ENABLED = 0x00;
+inline constexpr std::uint64_t WEAPONPIECE_NUMBER  = 0x02;
+// Mo (the third-person weapon view implementing Ms):
+//   WeaponBase Zjj  0x48  -> MonoBehaviour on the spawned weapon GameObject
+//   WeaponPiece Zjk 0x50
+//   Transform Zjo   0x60  -> root transform of the spawned weapon
+// fSN decorates another Ms at +0x10, so unwrap one level when needed.
+inline constexpr std::uint64_t WEAPONVIEW_WEAPON_BASE    = 0x48;
+inline constexpr std::uint64_t WEAPONVIEW_PIECE          = 0x50;
+inline constexpr std::uint64_t WEAPONVIEW_ROOT_TRANSFORM = 0x60;
+inline constexpr std::uint64_t WEAPONVIEW_INNER          = 0x10;
+// HyperHug...Player.PlayerModelInfo — the character model rig. The equipment
+// view parents the weapon prefab under these holders, so their first child is
+// the weapon GameObject (name = prefab name).
+//   head 0x20, rightWeaponHolder 0x28, leftWeaponHolder 0x30,
+//   equipmentHolder 0x38, characterAnimation 0x60
+inline constexpr std::uint64_t MODELINFO_RIGHT_WEAPON_HOLDER = 0x28;
+inline constexpr std::uint64_t MODELINFO_LEFT_WEAPON_HOLDER  = 0x30;
+// CharacterAnimation.playerModelInfo (0x30) and PlayerInventoryData
+// .playerModelInfo (0x20) are the two ways to reach PlayerModelInfo.
+inline constexpr std::uint64_t CHARANIM_PLAYER_MODEL_INFO = 0x30;
+inline constexpr std::uint64_t INVDATA_PLAYER_MODEL_INFO  = 0x20;
+// Il2CppClass: name at 0x10, namespace at 0x18 (used to identify PlayerWeapon).
+inline constexpr std::uint64_t IL2CPP_CLASS_NAME      = 0x10;
+inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = 0x18;
 // fvp.LookDirection (0x140): synced Vector3 wrapper, current value at +0x20.
 // MouseLook.Update writes m_LookRoot.forward into it every frame and
 // FPHitscan casts its hit ray along it (not along the camera transform).
