@@ -52,7 +52,7 @@ inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m
 // Oxide.PlayerManager instance fields (dump.cs)
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
 // Prefer lastSavedPosition; lastTickPosition is adjacent at 0x1C8
-inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D0; // lastSavedPosition
+inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D4; // lastSavedPosition
 inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (UnityEngine.GameObject)
 inline constexpr std::uint64_t PLAYER_NICKLABEL = 0x130; // nicklabel (class ij, was wK)
 // PlayerManager "uWc" (0x220, was LLI): the real human-readable display name (confirmed

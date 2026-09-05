@@ -15,15 +15,22 @@ REF="${2:-}"
 ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 mkdir -p "$OUT"
 
+# Возвращает 1, если файла в этой ревизии нет: дампы заливались разными
+# коммитами, и в ревизии со старым dump.7z может не быть libil2cpp.7z.
 fetch() { # <файл-в-репо> <куда>
-    if [ -n "$REF" ]; then git -C "$ROOT" cat-file blob "$REF:$1" > "$2"
-    else cp "$ROOT/$1" "$2"; fi
+    if [ -n "$REF" ]; then
+        git -C "$ROOT" cat-file -e "$REF:$1" 2>/dev/null || return 1
+        git -C "$ROOT" cat-file blob "$REF:$1" > "$2"
+    else
+        [ -f "$ROOT/$1" ] || return 1
+        cp "$ROOT/$1" "$2"
+    fi
 }
 
 python3 -c 'import py7zr' 2>/dev/null || pip install py7zr --break-system-packages -q
 
 echo "== dump.7z -> $OUT (dump.cs / il2cpp.h / script.json)"
-fetch dump.7z "$OUT/dump.7z"
+fetch dump.7z "$OUT/dump.7z" || { echo "   нет dump.7z в ${REF:-рабочем дереве}"; exit 2; }
 python3 - "$OUT" <<'PY'
 import sys, py7zr
 out = sys.argv[1]
@@ -32,7 +39,13 @@ with py7zr.SevenZipFile(f'{out}/dump.7z', 'r') as z:
 PY
 
 echo "== libil2cpp.7z -> $OUT/libil2cpp.so (LZMA2 + ARM64 BCJ, через xz)"
-fetch libil2cpp.7z "$OUT/libil2cpp.7z"
+if ! fetch libil2cpp.7z "$OUT/libil2cpp.7z"; then
+    # Не фатально: .so нужен только для RVA, раскладка структур живёт в il2cpp.h.
+    echo "   нет libil2cpp.7z в ${REF:-рабочем дереве} — пропускаю, RVA по нему не посчитать"
+    rm -f "$OUT/dump.7z"
+    ls -la "$OUT"
+    exit 0
+fi
 read -r OFF SZ DICT < <(python3 - "$OUT" <<'PY'
 import sys, py7zr
 a = py7zr.SevenZipFile(f'{sys.argv[1]}/libil2cpp.7z')
