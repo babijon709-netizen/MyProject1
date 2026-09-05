@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -2330,7 +2331,20 @@ struct PlayerTrack {
     Vec3 last{};
     bool has_last = false;
     int  still_frames = 0;  // consecutive frames without movement
+    // How fast this player is actually moving through the world, in metres
+    // per second. World space on purpose: it does not care where the camera
+    // is pointing or how fast it is turning, so it stays correct even when
+    // the camera angles cannot be read at all.
+    Vec3   vel{};
+    Vec3   vel_ref{};       // position the current estimate was measured from
+    double vel_ref_t = 0.0; // and when
+    bool   have_vel_ref = false;
 };
+
+static double mono_seconds() {
+    using namespace std::chrono;
+    return duration_cast<duration<double>>(steady_clock::now().time_since_epoch()).count();
+}
 static std::unordered_map<uint64_t, PlayerTrack> g_player_track;
 // uid -> the object we drew last time, so a tie does not flip between copies.
 static std::unordered_map<std::string, uint64_t> g_player_track_pick;
@@ -2381,6 +2395,36 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
         char uid[40] = {};
         read_managed_string_ex(rd_ptr(player + PLAYER_USER_ID), uid, sizeof(uid), 39);
         memcpy(track.uid, uid, sizeof(track.uid));
+    }
+    // Velocity, measured between the moments the position actually changed.
+    // A remote player's position only arrives on the network tick, so most
+    // frames repeat the previous one; differencing those would read zero.
+    {
+        const double now = mono_seconds();
+        if (!track.have_vel_ref) {
+            track.vel_ref = position; track.vel_ref_t = now; track.have_vel_ref = true;
+        } else {
+            const float mx = position.x - track.vel_ref.x;
+            const float my = position.y - track.vel_ref.y;
+            const float mz = position.z - track.vel_ref.z;
+            const float moved = mx * mx + my * my + mz * mz;
+            const double span = now - track.vel_ref_t;
+            if (moved > 0.0004F) {                     // moved more than 2 cm
+                if (span > 0.02 && span < 0.5) {
+                    const Vec3 v = { (float)(mx / span), (float)(my / span), (float)(mz / span) };
+                    const float speed = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+                    if (std::isfinite(speed) && speed < 12.0F) {   // faster than a man can run: a teleport
+                        track.vel.x = track.vel.x * 0.5F + v.x * 0.5F;
+                        track.vel.y = track.vel.y * 0.5F + v.y * 0.5F;
+                        track.vel.z = track.vel.z * 0.5F + v.z * 0.5F;
+                    }
+                }
+                track.vel_ref = position; track.vel_ref_t = now;
+            } else if (span > 0.3) {                   // stood still: stop leading
+                track.vel = {};
+                track.vel_ref = position; track.vel_ref_t = now;
+            }
+        }
     }
     if (track.has_last) {
         float dx = position.x - track.last.x;
@@ -2719,8 +2763,23 @@ static float head_lift_for_range(const Vec3& world) {
     return g_aim_head_lift_near + (g_aim_head_lift - g_aim_head_lift_near) * t;
 }
 
+// Where the target will be by the time the finger move we are about to send
+// has travelled through the phone and come back out as camera rotation. A man
+// running past keeps running during that hundredth-of-a-second or two, and
+// without this the crosshair sits permanently behind him, by a distance
+// proportional to how fast he runs.
+//
+// It is his own speed through the world, so nothing here depends on knowing
+// the look sensitivity, on reading the camera angles, or on separating our
+// turning from his -- the three things that have no reliable answer on this
+// build. Set per player just below, applied here, and it only shifts the
+// point the aim steers to: the ESP box still draws where the man actually is.
+static constexpr float kAimLeadSeconds = 0.08F;
+static Vec3 g_aim_lead{};
+
 static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat4& vp, float sw, float sh) {
     Vec3 world = world_in;
+    world.x += g_aim_lead.x; world.y += g_aim_lead.y; world.z += g_aim_lead.z;
     if (slot == 0) world.y += head_lift_for_range(world_in);
     Vec2 screen{};
     if (!w2s(vp, world, sw, sh, screen, false)) return false;
@@ -3441,6 +3500,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             {feet.x - box_half_width, body_top.y, feet.z + box_half_depth}
         };
         EspBox box{};
+        // Lead for this player, used by every set_aim_point call below.
+        {
+            auto vt = g_player_track.find(s_transforms[i]);
+            if (vt != g_player_track.end()) {
+                g_aim_lead.x = vt->second.vel.x * kAimLeadSeconds;
+                g_aim_lead.y = vt->second.vel.y * kAimLeadSeconds;
+                g_aim_lead.z = vt->second.vel.z * kAimLeadSeconds;
+            } else {
+                g_aim_lead = {};
+            }
+        }
         box.id = s_transforms[i];
         box.crouched = crouched;
         box.aim_source = 0;

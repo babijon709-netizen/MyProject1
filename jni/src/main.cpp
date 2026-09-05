@@ -543,9 +543,6 @@ struct AppState {
 
     int   cur_tab = 0;
     bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
-    // Temporary: prints what the aim controller is actually doing, so the
-    // numbers can be read off a phone instead of guessed at. Not saved.
-    bool  aim_debug = false;
     int   aim_bone = 0;
     // 0 = balanced (crosshair + range), 1 = nearest to the crosshair,
     // 2 = nearest in the world.
@@ -2553,11 +2550,6 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::SliderH);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, true, g_state.sl_gun_str, dt);
 
-        SHdr(XS("Отладка аима"));
-        CardBg(Layout::RowH * 1);
-        { static float _a_dbg = 0.f; Tick(_a_dbg, g_state.aim_debug, dt);
-          ToggleRow("##tadbg", XS("Писать лог в Загрузки"), &g_state.aim_debug, _a_dbg, true); }
-
         SHdr(XS("Триггер бот"));
         CardBg(Layout::RowH * 1);
         { static float _a_tbot = 0.f; Tick(_a_tbot, cfg::aim::trigger_bot, dt);
@@ -3008,23 +3000,6 @@ struct AimTarget {
     float world_dist = 0.f;
 };
 
-// Snapshot of what the controller did on its last pass. Written here, read by
-// AimDebugLog below. Nothing in this struct is ever read back by the aim: it
-// exists so the numbers can be pulled off a phone instead of guessed at.
-struct AimDebug {
-    float dt = 0.f;
-    float gain = 0.f, gainPitch = 0.f;
-    float lastDx = 0.f, camDelta = 0.f, expected = 0.f;
-    float errYaw = 0.f, errPitch = 0.f;
-    float vel = 0.f, leadDeg = 0.f;
-    float cmdDx = 0.f, fx = 0.f;
-    bool  finger = false, haveTarget = false, haveCam = false;
-    int   replaces = 0, camState = 0;
-    bool  deadZone = false;
-    float unitsPerPx = 0.f, sw = 0.f, sh = 0.f, fov = 0.f, slider = 0.f;
-};
-static AimDebug g_aimDbg;
-
 static void AimReleaseFinger(bool& fingerDown) {
     if (fingerDown) { Touch_Up(); fingerDown = false; }
 }
@@ -3050,11 +3025,9 @@ static void UpdateAim(float dt) {
     if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
     if (dt > 0.1f) dt = 0.1f;
 
-    g_aimDbg.dt = dt;
     if (!active) {
         AimReleaseFinger(s_fingerDown);
         s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
-        g_aimDbg.haveTarget = false; g_aimDbg.finger = false;
         return;
     }
 
@@ -3144,8 +3117,6 @@ static void UpdateAim(float dt) {
         if (score < bestScore) { bestScore = score; best = t; }
     }
 
-    g_aimDbg.haveTarget = best.valid;
-    if (best.valid) { g_aimDbg.errYaw = best.yaw; g_aimDbg.errPitch = best.pitch; }
     if (!best.valid) {
         // Keep the finger down briefly so a momentary read failure does not
         // register as a tap (tap-to-shoot in some layouts) or reset momentum.
@@ -3226,9 +3197,6 @@ static void UpdateAim(float dt) {
         // Finger right (dx > 0) turns right => yaw increases.
         // Moves are exact device-grid steps now, so even 1-2 px moves give a
         // clean measurement; keep a floor so noise never dominates.
-        g_aimDbg.camDelta = camYawDelta;
-        g_aimDbg.lastDx = s_lastDx;
-        g_aimDbg.expected = s_lastDx * s_gainYaw;
         if (fabsf(s_lastDx) >= 1.f) learn(s_gainYaw, camYawDelta / s_lastDx);
         // Finger down (dy > 0) looks down => pitch decreases.
         if (fabsf(s_lastDy) >= 1.f) learn(s_gainPitch, -camPitchDelta / s_lastDy);
@@ -3261,7 +3229,6 @@ static void UpdateAim(float dt) {
     float deadYaw = deadBase, deadPitch = deadBase;
     if (gainKnownYaw   && deadYaw   < qYaw   * 0.55f) deadYaw   = qYaw   * 0.55f;
     if (gainKnownPitch && deadPitch < qPitch * 0.55f) deadPitch = qPitch * 0.55f;
-    g_aimDbg.deadZone = (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch);
     if (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch) {
         s_lastDx = s_lastDy = 0.f;
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
@@ -3335,7 +3302,6 @@ static void UpdateAim(float dt) {
     // re-place it in the centre of the area instead of getting stuck.
     const float minX = sw * 0.56f, maxX = sw * 0.97f, minY = sh * 0.12f, maxY = sh * 0.88f;
     if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
-        ++g_aimDbg.replaces;
         Touch_Up();
         s_fingerDown = false;
         s_fx = snapGrid(sw * 0.74f); s_fy = snapGrid(sh * 0.50f);
@@ -3345,79 +3311,8 @@ static void UpdateAim(float dt) {
     }
     s_fx = nx; s_fy = ny;
     s_lastDx = dx; s_lastDy = dy;
-    g_aimDbg.gain = s_gainYaw;      g_aimDbg.gainPitch = s_gainPitch;
-    g_aimDbg.cmdDx = dx;            g_aimDbg.fx = s_fx;
-    g_aimDbg.finger = s_fingerDown; g_aimDbg.haveCam = haveCam;
-    g_aimDbg.camState = esp_camera_state();
-    g_aimDbg.unitsPerPx = unitsPerPx;
-    g_aimDbg.sw = sw; g_aimDbg.sh = sh; g_aimDbg.fov = camFov;
-    g_aimDbg.slider = g_state.gun_str;
     Touch_Move(s_fx, s_fy);
 }
-
-// Diagnostic log, written to the Downloads folder so it can be pulled off the
-// phone. Everything here is a number the bench cannot produce, because it
-// depends on how this phone answers a synthetic finger:
-//
-//   sent -> cam vs exp   we moved the finger this many pixels and the camera
-//                        turned this many degrees, against what the learned
-//                        sensitivity said it should. A camera that turns less
-//                        than expected means the game is not honouring our
-//                        finger, and then no amount of lead can keep up.
-//   vel                  the target's measured speed. Zero next to a running
-//                        man means there is nothing to lead, which is exactly
-//                        what a lead slider that does nothing looks like.
-//   errY / errP          what is left over: the trail, in degrees.
-//
-// One line per frame while a target is held, capped so it cannot fill the
-// card. The file is rewritten from scratch every time the switch is turned on.
-static void AimDebugLog() {
-    static FILE* s_f = nullptr;
-    static int   s_lines = 0;
-    static double s_t = 0.0;
-    static float s_fps = 0.f;
-    const int kMaxLines = 20000;          // ~7 minutes at 50 fps
-
-    if (!g_state.aim_debug) {             // switched off: close and reset
-        if (s_f) { fclose(s_f); s_f = nullptr; }
-        s_lines = 0; s_t = 0.0; s_fps = 0.f;
-        return;
-    }
-    const AimDebug& d = g_aimDbg;
-    if (d.dt > 0.0001f) {
-        const float f = 1.f / d.dt;
-        s_fps = (s_fps <= 0.f) ? f : (s_fps * 0.9f + f * 0.1f);
-        s_t += d.dt;
-    }
-    if (!s_f) {
-        s_f = fopen("/storage/emulated/0/Download/xvcen_aim_debug.log", "w");
-        if (!s_f) { g_state.aim_debug = false; ShowToast(XS("Нет доступа к папке Загрузки")); return; }
-        fprintf(s_f, "# аимбот: одна строка на кадр, пока цель захвачена\n");
-        fprintf(s_f, "# экран %.0fx%.0f  fov %.1f  ед/пиксель %.3f\n",
-                d.sw, d.sh, d.fov, d.unitsPerPx);
-        fprintf(s_f, "# sent -> cam против exp: сколько послали пальцем и на сколько\n"
-                     "#   повернулась камера против ожидаемого по усвоенной чувствительности\n");
-        fprintf(s_f, "# vel: измеренная скорость цели; lead: на сколько градусов её упреждаем\n");
-        fprintf(s_f, "# errY/errP: что осталось до цели — это и есть хвост\n");
-        fprintf(s_f, "# cam: 1 углы камеры читаются, 0 нет. cam_st: бит0 поза известна,\n"
-                     "#   бит1 поза выведена из матрицы вида, бит2 используется линия огня\n");
-        // ASCII column names: printf pads by bytes, and Cyrillic headings
-        // would knock every column out of line in the file.
-        fprintf(s_f, "%8s %6s %6s %8s %8s %8s %8s %8s %8s %8s %8s %8s %6s %8s %5s %4s %5s %4s %7s\n",
-                "t_s", "fps", "dt_ms", "gain", "gainP", "sent_px", "cam_deg", "exp_deg",
-                "errY", "errP", "vel_dps", "lead_deg", "step", "finger_x", "dead", "tgt", "repl", "cam", "cam_st");
-        fflush(s_f);
-    }
-    if (s_lines >= kMaxLines) return;
-    if (!d.haveTarget) return;            // nothing to describe
-    fprintf(s_f, "%8.2f %6.1f %6.1f %8.4f %8.4f %8.1f %8.3f %8.3f %8.3f %8.3f %8.1f %8.3f %6.0f %8.0f %5d %4d %5d %4d %7d\n",
-            s_t, s_fps, d.dt * 1000.f, d.gain, d.gainPitch, d.lastDx, d.camDelta, d.expected,
-            d.errYaw, d.errPitch, d.vel, d.leadDeg, d.cmdDx, d.fx,
-            d.deadZone ? 1 : 0, d.haveTarget ? 1 : 0, d.replaces,
-            d.haveCam ? 1 : 0, d.camState);
-    if ((++s_lines & 15) == 0) fflush(s_f);
-}
-
 
 void RenderMenu() {
     auto& io = ImGui::GetIO();
@@ -3870,7 +3765,6 @@ int main(int argc, char* argv[]) {
         ui::bar::set_game_alpha(0.f);
         DrawEspOverlay();
         UpdateAim(ImGui::GetIO().DeltaTime);
-        AimDebugLog();
         RenderMenu();
         drawEnd();
         g_frame_done.store(true);
