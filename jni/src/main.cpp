@@ -3077,6 +3077,8 @@ struct AimDebug {
     float sw = 0.f, sh = 0.f, fov = 0.f;
     float slider = 0.f;
     bool  deadZone = false;  // inside the dead zone, holding still on purpose
+    int   camState = 0;      // esp_camera_state(): pose / derived / firing ref
+    bool  haveCam = false;   // camera angles readable at all
 };
 static AimDebug g_aimDbg;
 
@@ -3376,6 +3378,8 @@ static void UpdateAim(float dt) {
     // pollute the estimate.
     float camYaw = 0.f, camPitch = 0.f;
     const bool haveCam = esp_camera_angles(camYaw, camPitch);
+    g_aimDbg.haveCam = haveCam;
+    g_aimDbg.camState = esp_camera_state();
     if (haveCam && s_haveLast && s_fingerDown) {
         float camYawDelta = camYaw - s_lastCamYaw;
         while (camYawDelta > 180.f) camYawDelta -= 360.f;
@@ -3569,19 +3573,22 @@ static void AimDebugLog() {
                      "#   повернулась камера против ожидаемого по усвоенной чувствительности\n");
         fprintf(s_f, "# vel: измеренная скорость цели; lead: на сколько градусов её упреждаем\n");
         fprintf(s_f, "# errY/errP: что осталось до цели — это и есть хвост\n");
+        fprintf(s_f, "# cam: 1 углы камеры читаются, 0 нет. cam_st: бит0 поза известна,\n"
+                     "#   бит1 поза выведена из матрицы вида, бит2 используется линия огня\n");
         // ASCII column names: printf pads by bytes, and Cyrillic headings
         // would knock every column out of line in the file.
-        fprintf(s_f, "%8s %6s %6s %8s %8s %8s %8s %8s %8s %8s %8s %8s %6s %8s %5s %4s %5s\n",
+        fprintf(s_f, "%8s %6s %6s %8s %8s %8s %8s %8s %8s %8s %8s %8s %6s %8s %5s %4s %5s %4s %7s\n",
                 "t_s", "fps", "dt_ms", "gain", "gainP", "sent_px", "cam_deg", "exp_deg",
-                "errY", "errP", "vel_dps", "lead_deg", "step", "finger_x", "dead", "tgt", "repl");
+                "errY", "errP", "vel_dps", "lead_deg", "step", "finger_x", "dead", "tgt", "repl", "cam", "cam_st");
         fflush(s_f);
     }
     if (s_lines >= kMaxLines) return;
     if (!d.haveTarget) return;            // nothing to describe
-    fprintf(s_f, "%8.2f %6.1f %6.1f %8.4f %8.4f %8.1f %8.3f %8.3f %8.3f %8.3f %8.1f %8.3f %6.0f %8.0f %5d %4d %5d\n",
+    fprintf(s_f, "%8.2f %6.1f %6.1f %8.4f %8.4f %8.1f %8.3f %8.3f %8.3f %8.3f %8.1f %8.3f %6.0f %8.0f %5d %4d %5d %4d %7d\n",
             s_t, s_fps, d.dt * 1000.f, d.gain, d.gainPitch, d.lastDx, d.camDelta, d.expected,
             d.errYaw, d.errPitch, d.vel, d.leadDeg, d.cmdDx, d.fx,
-            d.deadZone ? 1 : 0, d.haveTarget ? 1 : 0, d.replaces);
+            d.deadZone ? 1 : 0, d.haveTarget ? 1 : 0, d.replaces,
+            d.haveCam ? 1 : 0, d.camState);
     if ((++s_lines & 15) == 0) fflush(s_f);
 }
 

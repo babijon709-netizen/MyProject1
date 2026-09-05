@@ -49,6 +49,10 @@ static bool      g_player_position_validated = false;
 // to convert bone positions into yaw/pitch offsets from the crosshair).
 static float     g_cam_fov_deg = 0.0F;
 static bool      g_cam_pose_valid = false;
+// True when the pose above was recovered from the view matrix instead of read
+// from the camera's Transform. Reported by esp_camera_state() so a diagnostic
+// log can tell the two apart.
+static bool      g_cam_pose_derived = false;
 static Vec3      g_cam_pos{};
 static Vec3      g_cam_right{}, g_cam_up{}, g_cam_forward{};
 
@@ -1183,8 +1187,39 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
             view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
             if (!matrix_is_finite(view)) return false;
         }
+        // The live Transform read above can fail outright -- the game moves
+        // that data between builds -- and when it does, everything that needs
+        // the camera POSE rather than the projection quietly stops working,
+        // while the ESP carries on because it only ever needed the matrix.
+        // The aimbot is the casualty: with no pose it cannot measure how far
+        // the camera actually turned per pixel of finger travel (so it runs
+        // on a guessed sensitivity, which on a real phone was ten times too
+        // small and made the aim crawl), and it cannot subtract its own
+        // turning from the target's, so a sprinting player reads as standing
+        // still and the lead never fires.
+        //
+        // But the pose is right here: this matrix IS the camera basis. Its
+        // rows are right, up and the negated forward, and the translation
+        // column inverts to the position. Recovering it costs nothing and
+        // keeps the aim consistent with the very matrix the boxes are drawn
+        // with, which is exactly the consistency the controller needs.
+        Vec3 derived_pos{};
+        if (camera_position_from_view(view, derived_pos) && vec3_is_finite(derived_pos)) {
+            Vec3 right   = {  mat_get(view, 0, 0),  mat_get(view, 0, 1),  mat_get(view, 0, 2) };
+            Vec3 up      = {  mat_get(view, 1, 0),  mat_get(view, 1, 1),  mat_get(view, 1, 2) };
+            Vec3 forward = { -mat_get(view, 2, 0), -mat_get(view, 2, 1), -mat_get(view, 2, 2) };
+            const float fl = sqrtf(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+            if (vec3_is_finite(right) && vec3_is_finite(up) && vec3_is_finite(forward) &&
+                fl > 0.9F && fl < 1.1F) {
+                g_cam_pos = derived_pos;
+                g_cam_right = right; g_cam_up = up; g_cam_forward = forward;
+                g_cam_pose_valid = true;
+                g_cam_pose_derived = true;
+            }
+        }
     } else {
         s_last_view = view;
+        g_cam_pose_derived = false;
     }
 
     // Projection params (FOV/aspect/clip) are stored as plain floats and stay hot.
@@ -3011,6 +3046,13 @@ bool esp_local_player_is_aiming() {
 
 float esp_camera_fov_deg() { return g_cam_fov_deg; }
 
+// Bit 0: camera pose known. Bit 1: pose was derived from the view matrix
+// rather than read from the Transform. Bit 2: the firing reference (look
+// direction from the eye point) is in use instead of the camera axis.
+int esp_camera_state() {
+    return (g_cam_pose_valid ? 1 : 0) | (g_cam_pose_derived ? 2 : 0) | (g_aim_ref_valid ? 4 : 0);
+}
+
 bool esp_camera_angles(float& yaw_deg, float& pitch_deg) {
     if (!g_cam_pose_valid && !g_aim_ref_valid) return false;
     // Same reference the aim angles are measured against (firing direction
@@ -3155,7 +3197,7 @@ void esp_reset() {
     g_use_direct_player_position = true;
     g_player_position_validated = false;
     g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
-    g_cam_fov_deg = 0.0F; g_cam_pose_valid = false;
+    g_cam_fov_deg = 0.0F; g_cam_pose_valid = false; g_cam_pose_derived = false;
     g_aim_state = {};
     g_player_aux.clear();
     g_player_text.clear();

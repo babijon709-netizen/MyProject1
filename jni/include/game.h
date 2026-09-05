@@ -91,3 +91,6 @@ float       esp_camera_fov_deg();
 // Absolute camera orientation (degrees; yaw around world up, pitch +up) as of
 // the last esp_get_boxes(). Returns false if the camera pose is unknown.
 bool        esp_camera_angles(float& yaw_deg, float& pitch_deg);
+// Diagnostic: bit 0 camera pose known, bit 1 pose derived from the view
+// matrix, bit 2 firing reference in use. See esp_camera_state() in game.cpp.
+int         esp_camera_state();
