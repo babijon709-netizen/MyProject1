@@ -168,6 +168,11 @@ static float g_sh = 1080.f;
 
 static void VisibleScreen(float& w, float& h);
 
+// Автофарм: статус для строки во вкладке «Разное» (определены рядом с
+// UpdateFarm ниже).
+extern bool g_farmActive;
+extern int  g_farmPhase;
+
 namespace ui { namespace bar {
     inline float g_game_alpha = 1.f;
     inline void  set_game_alpha(float a){ g_game_alpha=a; }
@@ -559,6 +564,9 @@ struct AppState {
     float marker_dist = 150.f;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
+    // Автофарм: главный выключатель + какие ресурсы добывать.
+    bool  farm_on = false;
+    bool  farm_wood = true, farm_stone = false, farm_metal = false, farm_sulfur = false;
     // ui_fps выключен навсегда (счётчик убран), рамки карточек — всегда вкл.
     bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = true;
     // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
@@ -574,6 +582,7 @@ struct AppState {
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
     float a_ui_dark = 1;
+    float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist;
 };
@@ -2919,31 +2928,72 @@ float TabContent(int tab, float dt, float cW) {
             dl->AddText(ImGui::GetFont(), exitFS, {tx, ty}, C::U(C::Red()), exitTxt);
         }
     } else if (tab == 3) {
-        // Разное: пустая вкладка-заготовка под будущие функции.
+        // Разное: автофарм ресурсов.
         auto* dl  = ImGui::GetWindowDrawList();
         auto* fn  = ImGui::GetFont();
         float avW = ImGui::GetContentRegionAvail().x;
         const float inset = Layout::Inset;
         const float fs = ImGui::GetFontSize();
 
-        SHdr(XS("Разное"));
+        SHdr(XS("Автофарм"));
+        CardBg(Layout::RowH * 1);
+        ToggleRow("##fm0", XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, true, true);
+
+        SHdr(XS("Что добывать"));
+        CardBg(Layout::RowH * 4);
+        ToggleRow("##fm1", XS("Дерево"), &g_state.farm_wood,   g_state.a_farm_wood,   false, true);
+        ToggleRow("##fm2", XS("Камень"), &g_state.farm_stone,  g_state.a_farm_stone,  false);
+        ToggleRow("##fm3", XS("Металл"), &g_state.farm_metal,  g_state.a_farm_metal,  false);
+        ToggleRow("##fm4", XS("Сера"),   &g_state.farm_sulfur, g_state.a_farm_sulfur, true);
+
+        // Статус: что фарм делает прямо сейчас.
+        SHdr(XS("Статус"));
         {
-            const float emptyH = 150.f;
-            auto ep = ImGui::GetCursorScreenPos();
-            dl->AddRectFilled({ep.x + inset, ep.y}, {ep.x + avW - inset, ep.y + emptyH},
+            const float stH = Layout::RowH;
+            auto sp = ImGui::GetCursorScreenPos();
+            dl->AddRectFilled({sp.x + inset, sp.y}, {sp.x + avW - inset, sp.y + stH},
                 C::U(C::Card()), R::Card);
-            ImGui::Dummy({avW, emptyH});
-            const char* t1 = XS("Пока пусто");
-            const char* t2 = XS("Заготовка под будущие функции");
-            auto s1 = fn->CalcTextSizeA(fs * 1.25f, FLT_MAX, 0, t1);
-            auto s2 = fn->CalcTextSizeA(fs * 1.00f, FLT_MAX, 0, t2);
-            float cy = ep.y + (emptyH - s1.y - 8.f - s2.y) * 0.5f;
-            dl->AddText(fn, fs * 1.25f,
-                {ep.x + (avW - s1.x) * 0.5f, cy},
-                C::U(C::Txt()), t1);
-            dl->AddText(fn, fs * 1.00f,
-                {ep.x + (avW - s2.x) * 0.5f, cy + s1.y + 8.f},
-                C::U(C::Dim()), t2);
+            if (g_state.ui_show_sep)
+                dl->AddRect({sp.x + inset, sp.y}, {sp.x + avW - inset, sp.y + stH},
+                    C::U(C::Sep()), R::Card, 0, 1.2f);
+
+            const char* st;
+            ImVec4 stCol = C::Dim();
+            if (!g_state.farm_on) {
+                st = XS("Выключен");
+            } else if (!g_esp_attached) {
+                st = XS("Жду игру...");
+            } else if (!g_farmActive) {
+                st = XS("Ищу ресурс рядом...");
+            } else if (g_farmPhase == 3) {
+                st = XS("Добываю");   stCol = C::Acc();
+            } else if (g_farmPhase == 2) {
+                st = XS("Иду к ресурсу"); stCol = C::Acc();
+            } else {
+                st = XS("Поворачиваюсь"); stCol = C::Acc();
+            }
+            // Пульсирующая точка-индикатор слева от текста.
+            float cy2 = sp.y + stH * 0.5f;
+            float pulse = g_state.farm_on && g_farmActive
+                ? 0.55f + 0.45f * sinf((float)ImGui::GetTime() * 5.f) : 1.f;
+            dl->AddCircleFilled({sp.x + inset + Layout::PadX, cy2}, 8.f,
+                C::UA(stCol, pulse), 20);
+            auto ssz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, st);
+            dl->AddText(fn, fs * 1.05f,
+                {sp.x + inset + Layout::PadX + 24.f, cy2 - ssz.y * 0.5f},
+                C::U(stCol), st);
+            ImGui::Dummy({avW, stH});
+        }
+
+        // Подсказка, как этим пользоваться.
+        {
+            ImGui::Dummy({1.f, 10.f});
+            const char* h1 = XS("Возьми в руки инструмент и включи автофарм.");
+            const char* h2 = XS("Бот сам идёт к ближайшему ресурсу и бьёт по крестикам.");
+            auto p = ImGui::GetCursorScreenPos();
+            dl->AddText(fn, fs * 0.92f, {p.x + inset + 4.f, p.y}, C::U(C::Dim()), h1);
+            dl->AddText(fn, fs * 0.92f, {p.x + inset + 4.f, p.y + fs}, C::U(C::Dim()), h2);
+            ImGui::Dummy({1.f, fs * 2.f + 6.f});
         }
 
         ImGui::Dummy({1.f, 12.f});
@@ -3007,8 +3057,11 @@ static void AimReleaseFinger(bool& fingerDown) {
     if (fingerDown) { Touch_Up(); fingerDown = false; }
 }
 
+// File-scope so the auto-farm can yield the camera while the aimbot is
+// actively pulling onto a player.
+static bool s_fingerDown = false;
+
 static void UpdateAim(float dt) {
-    static bool  s_fingerDown = false;
     static float s_fx = 0.f, s_fy = 0.f;         // finger position (px)
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f; // absolute camera angles
     static bool  s_haveLast = false;
@@ -3317,6 +3370,253 @@ static void UpdateAim(float dt) {
     Touch_Move(s_fx, s_fy);
 }
 
+// ============================ Auto-farm =============================
+//
+// Fully touch-driven: three synthetic fingers (move joystick, camera swipe,
+// attack tap) — the game layer only tells us where the nearest selected
+// resource node is (yaw/pitch/distance). The camera finger reuses the same
+// gain the aimbot learned, or probes carefully with a fixed one.
+//
+// State machine per frame:
+//   TURN  — swipe the camera towards the node until it is roughly centred;
+//   WALK  — hold the move joystick forward (steering with the camera) until
+//           the node is within reach;
+//   MINE  — stand still, keep the crosshair on the node (glowing X when the
+//           game shows one) and tap-attack repeatedly;
+//   node depleted / lost -> pick the next one automatically.
+
+bool g_farmActive = false;   // for the status line in the menu
+int  g_farmPhase = 0;        // 0 idle, 1 turn, 2 walk, 3 mine
+
+static void UpdateFarm(float dt) {
+    static bool  s_moveDown = false;  // finger 0: move joystick
+    static bool  s_lookDown = false;  // finger 1: camera swipe
+    static bool  s_tapDown  = false;  // finger 2: attack taps
+    static float s_lookX = 0.f, s_lookY = 0.f;
+    static int   s_lookHold = 0;
+    static int   s_tapTimer = 0;
+    static float s_gainYaw = 0.f;     // deg per px, learned from our own swipes
+    static float s_lastCamYaw = 0.f;
+    static float s_lastDx = 0.f;
+    static bool  s_haveLast = false;
+    static unsigned long long s_nodeId = 0;
+    static float s_stuckTime = 0.f;   // seconds without closing distance
+    static float s_lastDist = 1e9f;
+    static float s_mineTime = 0.f;    // seconds spent mining this node
+    static float s_fracStart = -1.f;
+
+    auto releaseAll = [&]() {
+        if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
+        if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; }
+        if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }
+        s_haveLast = false;
+        s_lookHold = 0;
+    };
+
+    if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
+    if (dt > 0.1f) dt = 0.1f;
+
+    unsigned mask = 0;
+    if (g_state.farm_on) {
+        if (g_state.farm_wood)   mask |= 1u;
+        if (g_state.farm_stone)  mask |= 2u;
+        if (g_state.farm_metal)  mask |= 4u;
+        if (g_state.farm_sulfur) mask |= 8u;
+    }
+    esp_farm_set_resources(mask);
+
+    const bool menuBlocked = g_sheet.visible || (g_pop.visible && !g_pop.closing);
+    // The aimbot owns the camera while it is on a player — farm yields fully.
+    bool active = mask != 0 && g_esp_attached && !menuBlocked && !s_fingerDown;
+    if (!active) {
+        releaseAll();
+        g_farmActive = false; g_farmPhase = 0;
+        s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
+        return;
+    }
+
+    float sw = (float)native_window_screen_x;
+    float sh = (float)native_window_screen_y;
+    if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
+        sw = (float)displayInfo.width;  sh = (float)displayInfo.height;
+    } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
+        sw = (float)displayInfo.height; sh = (float)displayInfo.width;
+    }
+    if (sw < 100.f || sh < 100.f) { releaseAll(); g_farmActive = false; return; }
+
+    // The farm target is measured against the camera state published by
+    // esp_get_boxes(); make sure this frame's snapshot exists even when the
+    // ESP overlay and the aimbot did not request one.
+    FrameBoxes(sw, sh);
+
+    FarmTarget tgt;
+    if (!esp_farm_get_target(tgt) || !tgt.valid) {
+        releaseAll();
+        g_farmActive = false; g_farmPhase = 0;
+        s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
+        return;
+    }
+    g_farmActive = true;
+
+    if (tgt.id != s_nodeId) {
+        s_nodeId = tgt.id;
+        s_stuckTime = 0.f; s_lastDist = tgt.dist;
+        s_mineTime = 0.f;  s_fracStart = tgt.fraction;
+    }
+
+    // ---- camera gain: learn from our own swipe, fall back to the aimbot's ----
+    float camYaw = 0.f, camPitch = 0.f;
+    bool haveCam = esp_camera_angles(camYaw, camPitch);
+    if (haveCam && s_haveLast && fabsf(s_lastDx) >= 1.f) {
+        float dyaw = camYaw - s_lastCamYaw;
+        while (dyaw > 180.f) dyaw -= 360.f;
+        while (dyaw < -180.f) dyaw += 360.f;
+        float measured = dyaw / s_lastDx;
+        float m = fabsf(measured);
+        if (std::isfinite(measured) && m > 0.005f && m < 2.f) {
+            if (s_gainYaw == 0.f || m > fabsf(s_gainYaw) * 1.5f || m < fabsf(s_gainYaw) * 0.5f)
+                s_gainYaw = measured;
+            else
+                s_gainYaw = s_gainYaw * 0.8f + measured * 0.2f;
+        }
+    }
+    if (haveCam) s_lastCamYaw = camYaw;
+    s_haveLast = haveCam;
+    s_lastDx = 0.f;
+
+    float gain = (s_gainYaw != 0.f) ? s_gainYaw : 0.25f; // deg per px, safe probe
+
+    // ---- decide the phase ----
+    const float reachDist = 3.2f;             // close enough to swing
+    const float aimedYaw  = (g_farmPhase == 3) ? 8.f : 14.f; // deg tolerance
+    bool inReach = tgt.dist <= reachDist;
+    bool aimed   = fabsf(tgt.yaw) <= aimedYaw;
+
+    int phase = inReach ? 3 : (aimed ? 2 : 1);
+    g_farmPhase = phase;
+
+    // ---- finger 1: camera swipe (yaw always; pitch only while mining) ----
+    {
+        float wantYawPx = tgt.yaw / gain;
+        // While mining also pull the crosshair down/up onto the node/spot.
+        float wantPitchPx = 0.f;
+        if (phase == 3) {
+            float gp = fabsf(gain);
+            wantPitchPx = -tgt.pitch / gp;
+        }
+        float dead = (phase == 3) ? 2.f : 6.f; // px
+        bool needTurn = fabsf(wantYawPx) > dead || fabsf(wantPitchPx) > dead;
+
+        if (needTurn) {
+            if (!s_lookDown) {
+                s_lookX = sw * 0.74f; s_lookY = sh * 0.42f;
+                Touch_Down_N(1, s_lookX, s_lookY);
+                s_lookDown = true;
+                s_lookHold = 0;
+            } else if (s_lookHold < 1) {
+                ++s_lookHold; // let the game register the touch first
+                Touch_Down_N(1, s_lookX, s_lookY);
+            } else {
+                // Per-frame step: fast when far off, gentle near the centre.
+                float step = fabsf(tgt.yaw) > 60.f ? sh * 0.10f
+                           : fabsf(tgt.yaw) > 20.f ? sh * 0.05f : sh * 0.02f;
+                float dx = wantYawPx;
+                if (dx >  step) dx =  step;
+                if (dx < -step) dx = -step;
+                float dy = wantPitchPx;
+                if (dy >  step * 0.5f) dy =  step * 0.5f;
+                if (dy < -step * 0.5f) dy = -step * 0.5f;
+                float nx = s_lookX + dx, ny = s_lookY + dy;
+                // Edge: lift and re-centre rather than dragging off-screen.
+                if (nx < sw * 0.56f || nx > sw * 0.97f || ny < sh * 0.12f || ny > sh * 0.88f) {
+                    Touch_Up_N(1); s_lookDown = false; s_haveLast = false;
+                } else {
+                    s_lookX = nx; s_lookY = ny;
+                    Touch_Down_N(1, s_lookX, s_lookY);
+                    s_lastDx = dx;
+                }
+            }
+        } else if (s_lookDown) {
+            Touch_Up_N(1); s_lookDown = false;
+        }
+    }
+
+    // ---- finger 0: move joystick (bottom-left), held while walking ----
+    {
+        bool wantWalk = (phase == 2) || (phase == 1 && fabsf(tgt.yaw) < 70.f && tgt.dist > reachDist * 2.f);
+        if (wantWalk) {
+            // Virtual stick centre and a forward push, slightly steered
+            // towards the node so small yaw errors do not need camera swipes.
+            float cx = sw * 0.165f, cy = sh * 0.70f, r = sh * 0.16f;
+            float steer = tgt.yaw / 70.f;
+            if (steer >  0.6f) steer =  0.6f;
+            if (steer < -0.6f) steer = -0.6f;
+            float px = cx + r * steer;
+            float py = cy - r * sqrtf(1.f - steer * steer);
+            if (!s_moveDown) {
+                Touch_Down_N(0, cx, cy);      // land on the stick centre first
+                s_moveDown = true;
+            } else {
+                Touch_Down_N(0, px, py);
+            }
+        } else if (s_moveDown) {
+            Touch_Up_N(0); s_moveDown = false;
+        }
+    }
+
+    // ---- finger 2: attack taps while in reach ----
+    {
+        if (phase == 3) {
+            s_mineTime += dt;
+            // Tap rhythm: ~85 ms down, ~230 ms up — a believable fast tapper
+            // that also matches melee swing cadence (extra taps are ignored
+            // by the game, they just queue the next swing).
+            s_tapTimer -= (int)roundf(dt * 1000.f);
+            if (s_tapTimer <= 0) {
+                if (!s_tapDown) {
+                    // Attack tap on the right half, clear of the look finger.
+                    Touch_Down_N(2, sw * 0.88f, sh * 0.66f);
+                    s_tapDown = true;
+                    s_tapTimer = 85;
+                } else {
+                    Touch_Up_N(2);
+                    s_tapDown = false;
+                    s_tapTimer = 230;
+                }
+            }
+        } else {
+            if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; }
+            s_tapTimer = 0;
+            s_mineTime = 0.f;
+        }
+    }
+
+    // ---- watchdogs ----
+    if (phase == 2 || phase == 1) {
+        // No progress towards the node for a while -> obstacle. Blacklist it
+        // for half a minute and let the picker fall through to the next one.
+        if (tgt.dist < s_lastDist - 0.25f) {
+            s_lastDist = tgt.dist;
+            s_stuckTime = 0.f;
+        } else {
+            s_stuckTime += dt;
+            if (s_stuckTime > 6.f) {
+                esp_farm_blacklist(tgt.id, 30.f);
+                s_stuckTime = 0.f; s_lastDist = 1e9f; s_nodeId = 0;
+            }
+        }
+    } else if (phase == 3) {
+        // Swinging but the node is not draining -> wrong tool / not actually
+        // hitting it. Move on instead of standing there forever.
+        bool draining = (tgt.fraction >= 0.f && s_fracStart >= 0.f && tgt.fraction < s_fracStart - 0.01f);
+        if (draining) { s_fracStart = tgt.fraction; s_mineTime = 0.f; }
+        else if (s_mineTime > 25.f) {
+            esp_farm_blacklist(tgt.id, 60.f);
+            s_mineTime = 0.f; s_nodeId = 0;
+        }
+    }
+}
+
 void RenderMenu() {
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
@@ -3357,6 +3657,11 @@ void RenderMenu() {
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
     Tick(g_state.a_ui_dark,    g_state.ui_dark_mode,       dt);
+    Tick(g_state.a_farm_on,     g_state.farm_on,     dt);
+    Tick(g_state.a_farm_wood,   g_state.farm_wood,   dt);
+    Tick(g_state.a_farm_stone,  g_state.farm_stone,  dt);
+    Tick(g_state.a_farm_metal,  g_state.farm_metal,  dt);
+    Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
     ApplyTheme();
 
     if (g_cfgLoadedIdx >= 0 && g_cfgLoadedIdx < kMaxConfigs)
@@ -3826,6 +4131,7 @@ int main(int argc, char* argv[]) {
         ui::bar::set_game_alpha(0.f);
         DrawEspOverlay();
         UpdateAim(ImGui::GetIO().DeltaTime);
+        UpdateFarm(ImGui::GetIO().DeltaTime);
         RenderMenu();
         drawEnd();
         g_frame_done.store(true);

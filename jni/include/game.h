@@ -89,6 +89,26 @@ int         esp_nearby_player_count();
 // weapon, menus, etc.), so "aim only while scoped" fails closed.
 bool        esp_local_player_is_aiming();
 
+// ---- Auto-farm ---------------------------------------------------------------
+// The touch controller in main.cpp walks to the nearest selected resource node
+// and swings at it; this side only finds the node and tells where to look.
+struct FarmTarget {
+    bool  valid = false;
+    unsigned long long id = 0;
+    int   kind = 0;                 // 0 wood, 1 stone, 2 metal, 3 sulfur
+    float yaw = 0.f, pitch = 0.f;   // degrees from camera forward (+right, +up)
+    float dist = 0.f;               // metres from the local player
+    float fraction = -1.f;          // resource remaining 0..1, -1 unknown
+    bool  has_spot = false;         // true when aiming at the glowing weak spot
+};
+// Which resources to farm: bit0 wood, bit1 stone, bit2 metal, bit3 sulfur.
+// 0 disables the scan entirely (no extra work per frame).
+void        esp_farm_set_resources(unsigned mask);
+// Nearest matching node as of the last esp_get_boxes() (needs its camera).
+bool        esp_farm_get_target(FarmTarget& out);
+// Give up on a node (unreachable / stuck) for `seconds`.
+void        esp_farm_blacklist(unsigned long long id, float seconds);
+
 // Vertical field of view (degrees) of the game camera as last read by
 // esp_get_boxes(). 0 if unknown.
 float       esp_camera_fov_deg();

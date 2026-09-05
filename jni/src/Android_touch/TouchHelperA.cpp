@@ -543,3 +543,36 @@ void Touch_Up() {
     touch.isDown = false;
     Upload();
 }
+
+// ---- Extra synthetic fingers (auto-farm) ------------------------------------
+// Same coordinate pipeline as Touch_Down(), but in their own slots (6..8) so
+// they coexist with the aimbot finger in slot 9 and with real fingers.
+void Touch_Down_N(int finger, float xt, float yt) {
+    if (!Touch_initialized || Touch_readOnly) return;
+    if (finger < 0 || finger > 2) return;
+    float x = 0.0f, y = 0.0f;
+    switch (orientation) {
+        case 1: { x = ::screenHeight - yt; y = xt; break; }
+        case 2: { x = ::screenHeight - xt; y = ::screenWidth - yt; break; }
+        case 3: { x = yt; y = ::screenWidth - xt; break; }
+        default: { x = xt; y = yt; break; }
+    }
+    if (x < 0.0f) x = 0.0f;
+    if (y < 0.0f) y = 0.0f;
+    touchObj &touch = Finger[0][6 + finger];
+    touch.id = 61000 + finger;
+    touch.x = (int) lroundf(x * ::scale_x);
+    touch.y = (int) lroundf(y * ::scale_y);
+    if (devMaxX > 0 && touch.x > devMaxX) touch.x = devMaxX;
+    if (devMaxY > 0 && touch.y > devMaxY) touch.y = devMaxY;
+    touch.isDown = true;
+    Upload();
+}
+
+void Touch_Up_N(int finger) {
+    if (!Touch_initialized || Touch_readOnly) return;
+    if (finger < 0 || finger > 2) return;
+    touchObj &touch = Finger[0][6 + finger];
+    touch.isDown = false;
+    Upload();
+}

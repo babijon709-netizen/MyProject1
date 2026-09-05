@@ -3692,6 +3692,24 @@ struct MarkerEntity {
 static std::vector<MarkerEntity> g_marker_entities;
 static std::unordered_map<uint64_t, uint8_t> g_marker_class_kind;
 
+// ---- Auto-farm state ---------------------------------------------------------
+// The farm has its own entity cache (it wants trees, which the ore markers
+// deliberately skip) and its own rescan cadence. Positions and loot are read
+// the same way the markers read them; the walking/hitting itself is done with
+// synthetic touches in main.cpp.
+struct FarmEntity {
+    uint64_t identity = 0;      // NetworkIdentity (stable id for the blacklist)
+    uint64_t component = 0;     // the Mineable* component (fraction reads)
+    uint64_t transform = 0;     // native Transform (position)
+    Vec3     pos{};
+    bool     pos_valid = false;
+    int      kind = 0;          // 0 wood, 1 stone, 2 metal, 3 sulfur
+};
+static unsigned g_farm_mask = 0;
+static std::vector<FarmEntity> g_farm_entities;
+static std::unordered_map<uint64_t, int> g_farm_blacklist; // identity -> frames left
+static int g_farm_rescan = 0;
+
 // What a single marker looks like: kind picks the toggle it belongs to, and ore
 // markers carry a fixed colour per resource (stone grey, metal orange, sulfur
 // yellow) instead of one configurable colour for all of them.
@@ -4345,6 +4363,11 @@ static void reset_marker_caches() {
     g_marker_class_kind.clear();
     g_network_client_class = 0;
     g_network_identity_class = 0;
+    // Farm entities come from the same registry: stale pointers must not
+    // survive a world reload either.
+    g_farm_entities.clear();
+    g_farm_blacklist.clear();
+    g_farm_rescan = 0;
 }
 
 std::vector<EspMarker> esp_get_markers() {
@@ -4432,4 +4455,267 @@ std::vector<EspMarker> esp_get_markers() {
         if (thinned.size() >= 64) break; // keep the screen readable
     }
     return thinned;
+}
+
+
+// ============================== Auto-farm ====================================
+//
+// Finds the nearest tree / stone / iron / sulfur node in Mirror's registry and
+// reports where it is relative to the camera. Walking to it and swinging the
+// tool is done with synthetic touches in main.cpp; nothing here writes to the
+// game. The glowing "X" bonus spot is looked up as a child GameObject of the
+// node, so the swings land on it when the game shows one.
+
+// Farm kind from a loot item short name. Rank: richer resource wins (metal and
+// sulfur nodes drop stones too). Processed items are filtered like the ore
+// markers, so barrels never register.
+static int farm_kind_for_item_name(const char* item_name, int& kind) {
+    if (!item_name || !item_name[0]) return 0;
+    char key[40];
+    size_t n = 0;
+    for (const char* p = item_name; *p && n + 1 < sizeof(key); ++p) {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        key[n++] = c;
+    }
+    key[n] = '\0';
+    if (strstr(key, "frag") || strstr(key, "pipe") || strstr(key, "sheet") ||
+        strstr(key, "scrap") || strstr(key, "spring") || strstr(key, "gear"))
+        return 0;
+    if (strstr(key, "sulfur")) { kind = 3; return 4; }
+    if (strstr(key, "metal"))  { kind = 2; return 3; }
+    if (strstr(key, "stone"))  { kind = 1; return 2; }
+    if (strstr(key, "wood"))   { kind = 0; return 1; }
+    return 0;
+}
+
+// Same two loot lists the markers read, but wood ranks too (trees are the
+// whole point here, while the markers skip them to keep the screen clean).
+static bool farm_kind_from_loot(uint64_t mineable, int& kind) {
+    const uint64_t sources[2] = {MINEABLE_LOOT, MINEABLE_FINISH_BONUS};
+    int best = 0;
+    for (uint64_t source : sources) {
+        uint64_t items[12];
+        int count = read_managed_collection(rd_ptr(mineable + source), items, 12);
+        for (int i = 0; i < count; ++i) {
+            if (!valid_obj(items[i])) continue;
+            char name[32] = {};
+            if (!read_managed_string(rd_ptr(items[i] + LOOTITEM_ITEM_NAME), name, sizeof(name))) continue;
+            int candidate = 0;
+            int rank = farm_kind_for_item_name(name, candidate);
+            if (rank > best) { best = rank; kind = candidate; }
+            if (best == 4) return true;
+        }
+    }
+    return best > 0;
+}
+
+static void rebuild_farm_entities() {
+    g_farm_entities.clear();
+
+    uint64_t dictionary = resolve_network_client_spawned();
+    if (!dictionary) return;
+    if (!g_go_name_offset_valid && g_local_player) ensure_gameobject_name_offset(g_local_player);
+    uint64_t identity_class = resolve_network_identity_class();
+
+    uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
+    int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
+    if (!valid_obj(entries) || count <= 0) return;
+    if (count > 4096) count = 4096;
+
+    std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
+    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
+
+    uint64_t behaviours[32];
+    for (int32_t i = 0; i < count; ++i) {
+        uint64_t identity = 0;
+        memcpy(&identity, buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE, sizeof(identity));
+        if (!valid_obj(identity)) continue;
+        if (identity_class && rd_ptr(identity) != identity_class) continue;
+        uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
+        if (!valid_obj(array)) continue;
+        int32_t behaviour_count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
+        if (behaviour_count <= 0) continue;
+        if (behaviour_count > 32) behaviour_count = 32;
+        if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)behaviour_count * sizeof(uint64_t)))
+            continue;
+
+        for (int32_t b = 0; b < behaviour_count; ++b) {
+            uint64_t component = behaviours[b];
+            if (!valid_obj(component)) continue;
+            if (marker_class_of(rd_ptr(component)) != MARKER_CLASS_MINEABLE) continue;
+
+            // Kind: the entityType enum first (cheap and exact), loot second.
+            int kind = -1;
+            switch ((MineableEntityType)rd<int32_t>(component + MINEABLE_ENTITY_TYPE)) {
+                case MineableEntityType::Tree:   kind = 0; break;
+                case MineableEntityType::Stone:  kind = 1; break;
+                case MineableEntityType::Iron:   kind = 2; break;
+                case MineableEntityType::Sulfur: kind = 3; break;
+                default: break;
+            }
+            if (kind < 0 && !farm_kind_from_loot(component, kind)) continue;
+            if (!(g_farm_mask & (1u << kind))) continue;
+
+            FarmEntity entity;
+            entity.identity = identity;
+            entity.component = component;
+            entity.kind = kind;
+            entity.transform = native_component_transform(managed_object_native(component));
+            if (!entity.transform)
+                entity.transform = native_component_transform(managed_object_native(identity));
+            if (!entity.transform) continue;
+            entity.pos_valid = marker_world_position(entity.transform, entity.pos);
+            g_farm_entities.push_back(entity);
+            if (g_farm_entities.size() >= 512) break;
+        }
+        if (g_farm_entities.size() >= 512) break;
+    }
+}
+
+void esp_farm_set_resources(unsigned mask) {
+    if (g_farm_mask != mask) {
+        g_farm_mask = mask;
+        g_farm_entities.clear();
+        g_farm_rescan = 0;
+    }
+    if (!mask) g_farm_blacklist.clear();
+}
+
+void esp_farm_blacklist(unsigned long long id, float seconds) {
+    if (!id) return;
+    int frames = (int)(seconds * 60.0F);
+    if (frames < 60) frames = 60;
+    g_farm_blacklist[(uint64_t)id] = frames;
+}
+
+// The glowing bonus "X" is a child GameObject of the node. Search the subtree
+// for a name that looks like it; the result is cached per component and
+// re-checked every couple of seconds because the spot only spawns after the
+// first hit and jumps around between hits.
+static uint64_t farm_find_spot(uint64_t node_transform) {
+    if (!node_transform || !g_go_name_offset_valid) return 0;
+    std::vector<uint64_t> nodes;
+    collect_transform_subtree(node_transform, nodes, 48);
+    char name[48];
+    for (uint64_t node : nodes) {
+        if (node == node_transform) continue;
+        if (!read_transform_name(node, name, sizeof(name))) continue;
+        for (char* p = name; *p; ++p) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+        if (strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
+            strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit"))
+            return node;
+    }
+    return 0;
+}
+
+bool esp_farm_get_target(FarmTarget& out) {
+    out = FarmTarget{};
+    if (!g_farm_mask) return false;
+    if (g_pid <= 0 || !g_il2cpp_base || !g_frame_local_valid) return false;
+
+    // Blacklist bookkeeping (called once per frame from the controller).
+    for (auto it = g_farm_blacklist.begin(); it != g_farm_blacklist.end();) {
+        if (--(it->second) <= 0) it = g_farm_blacklist.erase(it);
+        else ++it;
+    }
+
+    if (--g_farm_rescan <= 0) {
+        rebuild_farm_entities();
+        g_farm_rescan = g_farm_entities.empty() ? 30 : 120; // ~0.5 s / ~2 s
+    }
+
+    // Sticky target: keep working the node we already picked while it is
+    // alive, otherwise the controller would flip between equidistant nodes.
+    static uint64_t s_last_identity = 0;
+
+    constexpr float kMaxFarmDistance = 100.0F;
+    const FarmEntity* best = nullptr;
+    float best_score = 1e18F;
+    float best_dist = 0.0F;
+    for (const FarmEntity& entity : g_farm_entities) {
+        if (!(g_farm_mask & (1u << entity.kind))) continue;
+        if (!entity.pos_valid) continue;
+        if (g_farm_blacklist.count(entity.identity)) continue;
+
+        // Depleted nodes are skipped: fractionRemaining goes 1 -> 0 as the
+        // node is mined out. Unreadable values (NaN / garbage) keep the node.
+        float fraction = rd<float>(entity.component + MINEABLE_FRACTION);
+        if (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F && fraction < 0.03F)
+            continue;
+
+        float dx = entity.pos.x - g_frame_local_pos.x;
+        float dy = entity.pos.y - g_frame_local_pos.y;
+        float dz = entity.pos.z - g_frame_local_pos.z;
+        float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(dist) || dist > kMaxFarmDistance) continue;
+
+        float score = dist;
+        if (entity.identity == s_last_identity) score *= 0.6F; // stickiness
+        if (score < best_score) { best_score = score; best = &entity; best_dist = dist; }
+    }
+    if (!best) { s_last_identity = 0; return false; }
+    s_last_identity = best->identity;
+
+    // Where to look: the glowing spot when the node shows one, otherwise the
+    // body of the node (trees are hit at chest height, rocks a bit lower).
+    static uint64_t s_spot_component = 0;   // whose spot the cache belongs to
+    static uint64_t s_spot_transform = 0;
+    static int      s_spot_recheck = 0;
+    if (s_spot_component != best->component) {
+        s_spot_component = best->component;
+        s_spot_transform = 0;
+        s_spot_recheck = 0;
+    }
+    if (--s_spot_recheck <= 0) {
+        s_spot_recheck = 90; // every ~1.5 s: the spot spawns after the first hit
+        s_spot_transform = farm_find_spot(best->transform);
+    }
+
+    Vec3 aim{};
+    bool spot_ok = false;
+    if (s_spot_transform) {
+        Vec3 spot{};
+        if (marker_world_position(s_spot_transform, spot) && vec3_is_finite(spot)) {
+            // Sanity: the spot must be near its node, else the cached
+            // transform went stale (respawned node reuses memory).
+            float sx = spot.x - best->pos.x, sy = spot.y - best->pos.y, sz = spot.z - best->pos.z;
+            if (sx * sx + sy * sy + sz * sz < 6.0F * 6.0F) { aim = spot; spot_ok = true; }
+            else s_spot_transform = 0;
+        }
+    }
+    if (!spot_ok) {
+        aim = best->pos;
+        aim.y += (best->kind == 0) ? 1.15F : 0.55F;
+    }
+
+    // Full-circle angles from the camera (or firing) axis: unlike
+    // aim_angles_for() this must work for nodes behind us, so the forward
+    // component may be negative and yaw spans +-180.
+    if (!g_cam_pose_valid && !g_aim_ref_valid) return false;
+    const bool use_ref = g_aim_ref_valid;
+    const Vec3& origin = use_ref ? g_aim_ref_origin : g_cam_pos;
+    const Vec3& fwd = use_ref ? g_aim_ref_forward : g_cam_forward;
+    const Vec3& right = use_ref ? g_aim_ref_right : g_cam_right;
+    const Vec3& up = use_ref ? g_aim_ref_up : g_cam_up;
+    Vec3 d = {aim.x - origin.x, aim.y - origin.y, aim.z - origin.z};
+    float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
+    float rx = d.x * right.x + d.y * right.y + d.z * right.z;
+    float ux = d.x * up.x + d.y * up.y + d.z * up.z;
+    if (!std::isfinite(fx) || !std::isfinite(rx) || !std::isfinite(ux)) return false;
+    constexpr float rad2deg = 57.29577951F;
+    float yaw = atan2f(rx, fx) * rad2deg;
+    float pitch = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
+    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return false;
+
+    out.valid = true;
+    out.id = best->identity;
+    out.kind = best->kind;
+    out.yaw = yaw;
+    out.pitch = pitch;
+    out.dist = best_dist;
+    out.has_spot = spot_ok;
+    float fraction = rd<float>(best->component + MINEABLE_FRACTION);
+    out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F) ? fraction : -1.0F;
+    return true;
 }
