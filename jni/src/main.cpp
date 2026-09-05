@@ -534,6 +534,9 @@ namespace Layout {
     // Кнопки крупные: панель выше и ячейки шире (~2x от первоначальных).
     static constexpr float BottomH   = 150.f;
     static constexpr float TabW      = 136.f;
+    // Левая панель вкладок: вертикальный столбец по центру.
+    static constexpr float RailW     = 128.f;
+    static constexpr float TabHV     = 108.f;
 }
 
 struct InputState {
@@ -545,7 +548,7 @@ struct AppState {
     struct SliderAnim { float pos = -1.f; float vel = 0.f; };
     struct RadioAnim  { float scale = 1.f, scaleVel = 0.f, ring = 0.f, ringVel = 0.f; };
 
-    int   cur_tab = 0;
+    int   cur_tab = 1;   // при запуске открыта вкладка «Аим»
     bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
     int   aim_bone = 0;
     // 0 = balanced (crosshair + range), 1 = nearest to the crosshair,
@@ -559,6 +562,8 @@ struct AppState {
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
     bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = false;
+    // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
+    bool  ui_panel_left = true;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
     float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_scope = 0;
@@ -2447,92 +2452,70 @@ float TabContent(int tab, float dt, float cW) {
         auto* dl  = ImGui::GetWindowDrawList();
         auto* fn  = ImGui::GetFont();
         float avW = ImGui::GetContentRegionAvail().x;
-        const float inset = Layout::Inset, padX = Layout::PadX;
+        const float inset = Layout::Inset;
         const float fs = ImGui::GetFontSize();
 
-        SHdr(XS("\xd0\xa0\xd0\xb0\xd0\xb7\xd1\x80\xd0\xb0\xd0\xb1\xd0\xbe\xd1\x82\xd1\x87\xd0\xb8\xd0\xba"));
+        // ---- Положение панели вкладок: слева или снизу -----------------
+        SHdr(XS("Панель вкладок"));
         {
-            const float avatarR = 44.f;
-            const float cardH   = 152.f;
+            const float cardH = 120.f;
+            const float gap   = 10.f;
+            auto  pos   = ImGui::GetCursorScreenPos();
+            float x0    = pos.x + inset;
+            float cardW = (avW - inset * 2.f - gap) * 0.5f;
+            bool  popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
 
-            auto pos  = ImGui::GetCursorScreenPos();
-            float cx0 = pos.x + inset;
-            float cx1 = pos.x + avW - inset;
-            float cardW = cx1 - cx0;
+            struct POpt { const char* lbl; bool left; };
+            const POpt opts[2] = { { XS("Слева"), true }, { XS("Снизу"), false } };
 
-            dl->AddRectFilled({cx0, pos.y}, {cx1, pos.y + cardH}, C::U(C::Card()), R::Card);
-            if (g_state.ui_show_sep)
-                dl->AddRect({cx0, pos.y}, {cx1, pos.y + cardH}, C::U(C::Sep()), R::Card, 0, 1.2f);
+            for (int oi = 0; oi < 2; oi++) {
+                float ox0 = x0 + oi * (cardW + gap);
+                float ox1 = ox0 + cardW;
+                bool  sel = (g_state.ui_panel_left == opts[oi].left);
 
-            float avCX = cx0 + padX + avatarR + 2.f;
-            float avCY = pos.y + cardH * 0.5f;
-
-            dl->AddCircleFilled({avCX, avCY}, avatarR + 6.f, C::UA(C::Acc(), 0.12f), 64);
-            dl->AddCircleFilled({avCX, avCY}, avatarR + 2.5f, C::U(C::Card()), 64);
-
-            {
-                const int segs = 60;
-                ImVec4 ac = C::Acc();
-                ImVec4 ac2 = {Lerpf(ac.x,0.3f,0.55f), Lerpf(ac.y,0.05f,0.55f), Lerpf(ac.z,0.9f,0.42f), 1.f};
-                for (int si = 0; si < segs; si++) {
-                    float a0 = (float)si/segs*IM_PI*2.f, a1 = (float)(si+1)/segs*IM_PI*2.f;
-                    float tt = (float)si/segs;
-                    ImVec4 ca = {Lerpf(ac2.x,ac.x,tt), Lerpf(ac2.y,ac.y,tt), Lerpf(ac2.z,ac.z,tt), 1.f};
-                    dl->AddTriangleFilled({avCX,avCY},
-                        {avCX+avatarR*cosf(a0),avCY+avatarR*sinf(a0)},
-                        {avCX+avatarR*cosf(a1),avCY+avatarR*sinf(a1)},
-                        IM_COL32(int(ca.x*255),int(ca.y*255),int(ca.z*255),255));
+                dl->AddRectFilled({ox0, pos.y}, {ox1, pos.y + cardH}, C::U(C::Card()), R::Card);
+                if (sel) {
+                    dl->AddRectFilled({ox0, pos.y}, {ox1, pos.y + cardH},
+                        C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), R::Card);
+                    dl->AddRect({ox0, pos.y}, {ox1, pos.y + cardH}, C::UA(C::Acc(), 0.8f), R::Card, 0, 2.f);
+                } else if (g_state.ui_show_sep) {
+                    dl->AddRect({ox0, pos.y}, {ox1, pos.y + cardH}, C::U(C::Sep()), R::Card, 0, 1.2f);
                 }
-                float lfs = avatarR * 1.05f;
-                auto lsz = fn->CalcTextSizeA(lfs, FLT_MAX, 0, XS("\xd0\xa1"));
-                dl->AddText(fn, lfs, {avCX-lsz.x*0.5f, avCY-lsz.y*0.5f}, IM_COL32(255,255,255,245), XS("\xd0\xa1"));
-            }
 
-            dl->AddCircle({avCX,avCY}, avatarR+2.5f, C::UA(C::Acc(),0.9f), 64, 2.5f);
+                // Мини-схема окна: прямоугольник с панелью слева или снизу.
+                float mw = 74.f, mh = 52.f;
+                float mx = ox0 + (cardW - mw) * 0.5f;
+                float my = pos.y + 14.f;
+                ImU32 frameCol = C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.95f : 0.6f);
+                dl->AddRect({mx, my}, {mx + mw, my + mh}, frameCol, 6.f, 0, 2.f);
+                if (opts[oi].left)
+                    dl->AddRectFilled({mx + 3.f, my + 3.f}, {mx + 3.f + 16.f, my + mh - 3.f},
+                                      C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.85f : 0.4f), 4.f);
+                else
+                    dl->AddRectFilled({mx + 3.f, my + mh - 3.f - 12.f}, {mx + mw - 3.f, my + mh - 3.f},
+                                      C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.85f : 0.4f), 4.f);
 
-            {
-                float dx = avCX+avatarR*0.72f, dy = avCY+avatarR*0.72f;
-                dl->AddCircleFilled({dx,dy}, 9.f, C::U(C::Card()), 24);
-                dl->AddCircleFilled({dx,dy}, 6.5f, IM_COL32(52,199,89,255), 24);
-            }
+                auto lsz = fn->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0, opts[oi].lbl);
+                dl->AddText(fn, fs * 1.0f,
+                    {ox0 + (cardW - lsz.x) * 0.5f, pos.y + cardH - 16.f - lsz.y},
+                    C::U(sel ? C::Acc() : C::Txt()), opts[oi].lbl);
 
-            float nameFS = fs * 1.75f;
-            float tagFS  = fs * 1.1f;
-            auto nameSz = fn->CalcTextSizeA(nameFS, FLT_MAX, 0, XS("\xd0\xa1\xd0\xb0\xd0\xbd\xd1\x8f"));
-            float textX = avCX + avatarR + padX + 8.f;
-            float nameY = avCY - nameSz.y - 3.f;
-            float tagY  = avCY + 3.f;
-            dl->AddText(fn, nameFS, {textX, nameY}, C::U(C::Txt()), XS("\xd0\xa1\xd0\xb0\xd0\xbd\xd1\x8f"));
-            dl->AddText(fn, tagFS,  {textX, tagY},  C::U(C::Dim()), XS("@xvcey"));
-
-            const float btnH = 42.f;
-            const float btnW = 132.f;
-            float btnX = cx1 - btnW - padX;
-            float btnY = pos.y + cardH - btnH - 14.f;
-
-            dl->AddRectFilled({btnX,btnY},{btnX+btnW,btnY+btnH}, C::U(C::Acc()), btnH*0.5f);
-
-            auto btsz = fn->CalcTextSizeA(fs*1.05f, FLT_MAX, 0, XS("\xd0\x9d\xd0\xb0\xd0\xbf\xd0\xb8\xd1\x81\xd0\xb0\xd1\x82\xd1\x8c"));
-            dl->AddText(fn, fs*1.05f,
-                {btnX+btnW*0.5f-btsz.x*0.5f, btnY+(btnH-btsz.y)*0.5f},
-                IM_COL32(255,255,255,255),
-                XS("\xd0\x9d\xd0\xb0\xd0\xbf\xd0\xb8\xd1\x81\xd0\xb0\xd1\x82\xd1\x8c"));
-
-            ImGui::SetCursorScreenPos({cx0, pos.y});
-            ImGui::InvisibleButton("##devcard", {cardW, cardH});
-            bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-            if (!popBlk && !IsScrollDragging() && !g_input.touchConsumed && ImGui::GetIO().MouseReleased[0]) {
-                auto mp = ImGui::GetIO().MousePos, cp = ImGui::GetIO().MouseClickedPos[0];
-                if (PtInClip(cp)
-                 &&mp.x>=btnX&&mp.x<=btnX+btnW&&mp.y>=btnY&&mp.y<=btnY+btnH
-                 &&cp.x>=btnX&&cp.x<=btnX+btnW&&cp.y>=btnY&&cp.y<=btnY+btnH) {
-                    system(XS("am start -a android.intent.action.VIEW -d \"https://t.me/xvcey\""));
+                char oid[16]; snprintf(oid, sizeof(oid), "##pstyle%d", oi);
+                ImGui::SetCursorScreenPos({ox0, pos.y});
+                ImGui::InvisibleButton(oid, {cardW, cardH});
+                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed
+                    && g_state.ui_panel_left != opts[oi].left) {
+                    g_state.ui_panel_left = opts[oi].left;
+                    pill_y = -1.f; pill_vel = 0.f;   // «пилюля» меняет ось — сброс пружины
+                    ShowToast(opts[oi].left ? XS("Панель слева") : XS("Панель снизу"));
                     PlaySound(SND_CLICK);
                 }
             }
             ImGui::SetCursorScreenPos({pos.x, pos.y + cardH});
             ImGui::Dummy({avW, 0.f});
         }
+
+        ImGui::Dummy({1.f, 12.f});
 
     } else if (tab == 1) {
 
@@ -3460,9 +3443,14 @@ void RenderMenu() {
     }
 
     ImVec2 wp = g_win.pos;
-    // Вкладки — нижняя панель (строка по центру), контент занимает всю ширину.
+    // Панель вкладок: слева (вертикальный столбец) или снизу (строка по
+    // центру) — выбирается в «Меню». Контент занимает остальную площадь.
+    const bool  panelLeft = g_state.ui_panel_left;
     const float botH = Layout::BottomH;
-    const float cH = g_win.h - botH, cW = g_win.w;
+    const float railW = Layout::RailW;
+    const float cH = panelLeft ? g_win.h : g_win.h - botH;
+    const float cW = panelLeft ? g_win.w - railW : g_win.w;
+    const float cX0 = panelLeft ? railW : 0.f;
 
     g_state.tab_alpha += (1.f - g_state.tab_alpha) * 5.f * dt;
     if (g_state.tab_alpha > .999f) g_state.tab_alpha = 1.f;
@@ -3476,8 +3464,122 @@ void RenderMenu() {
     // id контента вкладок не меняются — конфиги и логика остаются как были.
     static constexpr int kTabOrder[kTabCount] = {1, 2, 3, 0, 4, 5};
 
-    // ---- Нижняя панель вкладок -----------------------------------------
-    {
+    // Иконка вкладки + подпись, по центру ячейки (общая для обеих панелей).
+    auto DrawTabCell = [&](ImDrawList* fdl, int i, float cellX, float cellY,
+                           float cellW, float cellH, float iconSize, float lblFS) {
+        bool   active = (i == g_state.cur_tab);
+        ImVec4 col    = active ? C::Acc() : C::Dim();
+        auto   tsz    = ImGui::GetFont()->CalcTextSizeA(lblFS, FLT_MAX, 0, tabNames[i]);
+        float  blockH = iconSize + 6.f + tsz.y;
+        float  iconY  = cellY + (cellH - blockH) * 0.5f;
+        float  cxr    = cellX + cellW * 0.5f;
+        if (i == 3) {
+            // У «Разное» своя векторная иконка (сетка 2x2), чтобы не
+            // совпадала с иконкой «Конфиги» из общего атласа.
+            float half = iconSize * 0.5f;
+            float gx0 = cxr - half, gy0 = iconY;
+            float cell = iconSize * 0.44f, gap2 = iconSize - cell * 2.f;
+            ImU32 gcol = C::UA(C::Acc(), active ? 1.f : 0.55f);
+            float rr = cell * 0.3f;
+            fdl->AddRectFilled({gx0, gy0}, {gx0 + cell, gy0 + cell}, gcol, rr);
+            fdl->AddRectFilled({gx0 + cell + gap2, gy0}, {gx0 + iconSize, gy0 + cell}, gcol, rr);
+            fdl->AddRectFilled({gx0, gy0 + cell + gap2}, {gx0 + cell, gy0 + iconSize}, gcol, rr);
+            // Четвёртый квадрат — контурный, чтобы иконка читалась как «прочее».
+            fdl->AddRect({gx0 + cell + gap2, gy0 + cell + gap2}, {gx0 + iconSize, gy0 + iconSize}, gcol, rr, 0, 2.f);
+        } else if (g_tabIcons[i]) {
+            ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
+            ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
+            fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax,
+                {0,0}, {1,1}, IM_COL32(255, 255, 255, active ? 255 : 165), 9.f);
+        } else {
+            // Заглушка: скруглённый квадрат с первой буквой вкладки.
+            ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
+            ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
+            fdl->AddRectFilled(iMin, iMax, C::UA(C::Acc(), active ? 0.9f : 0.35f), 9.f);
+            char letter[8] = {};
+            int gl = 0;
+            letter[gl++] = tabNames[i][0];
+            if ((unsigned char)tabNames[i][0] >= 0xC0) letter[gl++] = tabNames[i][1];
+            float gfs = iconSize * 0.55f;
+            auto gsz = ImGui::GetFont()->CalcTextSizeA(gfs, FLT_MAX, 0, letter);
+            fdl->AddText(ImGui::GetFont(), gfs,
+                {cxr - gsz.x * 0.5f, iconY + (iconSize - gsz.y) * 0.5f},
+                IM_COL32(255, 255, 255, active ? 255 : 200), letter);
+        }
+        fdl->AddText(ImGui::GetFont(), lblFS,
+            {cxr - tsz.x * 0.5f, iconY + iconSize + 6.f}, C::U(col), tabNames[i]);
+    };
+
+    auto TabTap = [&](int i) {
+        if (WasTappedHere() && !IsScrollDragging() && !g_input.touchConsumed && g_state.cur_tab != i) {
+            g_state.cur_tab       = i;
+            g_state.tab_alpha     = 0.f;
+            g_state.tab_slide     = 50.f;
+            g_state.tab_slide_vel = 0.f;
+            g_scrollMain          = {};
+            PlaySound(SND_CLICK);
+        }
+    };
+
+    if (panelLeft) {
+        // ---- Левая панель вкладок (вертикальный столбец по центру) ------
+        ImGui::SetCursorPos({0, 0});
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+        ImGui::BeginChild("##lp", {railW, WH}, false, ImGuiWindowFlags_NoScrollbar);
+        auto  lpPos = ImGui::GetWindowPos();
+        auto* ldl   = ImGui::GetWindowDrawList();
+        ldl->AddRectFilled(lpPos, {lpPos.x + railW, lpPos.y + WH}, C::U(C::LeftBg()), R::Card,
+                           ImDrawFlags_RoundCornersLeft);
+        ldl->AddLine({lpPos.x + railW, lpPos.y + 12.f}, {lpPos.x + railW, lpPos.y + WH - 12.f},
+                     C::UA(C::Sep(), 0.8f), 1.f);
+
+        const float tabH   = Layout::TabHV;
+        const float colH   = tabH * kTabCount;
+        const float startY = ImMax(0.f, (WH - colH) * 0.5f);
+
+        for (int s = 0; s < kTabCount; s++) {
+            const int i = kTabOrder[s];
+            ImGui::SetCursorPos({0, startY + s * tabH});
+            auto pos2 = ImGui::GetCursorScreenPos();
+            tab_rects[i] = {pos2.y};
+            char tabId[16];
+            snprintf(tabId, sizeof(tabId), "##tab%d", i);
+            ImGui::InvisibleButton(tabId, {railW, tabH});
+            TabTap(i);
+        }
+
+        // Пружинная «пилюля» активной вкладки скользит по вертикали.
+        {
+            float targetRel = tab_rects[g_state.cur_tab].sx - wp.y;
+            if (pill_y < 0.f) { pill_y = targetRel; pill_vel = 0.f; }
+            SpringTick(pill_y, pill_vel, targetRel, dt);
+        }
+        float pillY = wp.y + pill_y;
+
+        {
+            auto*       fdl = ImGui::GetForegroundDrawList();
+            const float pR  = R::Pill;
+            float px0 = lpPos.x + 9.f,  px1 = lpPos.x + railW - 9.f;
+            float py0 = pillY + 7.f,    py1 = pillY + tabH - 7.f;
+            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::U(C::Card()), pR);
+            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), pR);
+            fdl->AddRect({px0, py0}, {px1, py1}, C::UA(C::Acc(), 0.5f), pR, 0, 1.5f);
+            // Короткая акцентная полоска на левом краю окна.
+            float icy = (py0 + py1) * 0.5f;
+            fdl->AddRectFilled({lpPos.x - 1.f, icy - 16.f}, {lpPos.x + 3.f, icy + 16.f}, C::U(C::Acc()), 2.f);
+        }
+
+        {
+            auto* fdl = ImGui::GetForegroundDrawList();
+            for (int i = 0; i < kTabCount; i++)
+                DrawTabCell(fdl, i, lpPos.x, tab_rects[i].sx, railW, tabH, 56.f,
+                            ImGui::GetFontSize() * 0.88f);
+        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    } else {
+        // ---- Нижняя панель вкладок (строка по центру) --------------------
         ImGui::SetCursorPos({0, cH});
         ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
         ImGui::BeginChild("##lp", {WW, botH}, false, ImGuiWindowFlags_NoScrollbar);
@@ -3501,14 +3603,7 @@ void RenderMenu() {
             char tabId[16];
             snprintf(tabId, sizeof(tabId), "##tab%d", i);
             ImGui::InvisibleButton(tabId, {tabW, botH});
-            if (WasTappedHere() && !IsScrollDragging() && !g_input.touchConsumed && g_state.cur_tab != i) {
-                g_state.cur_tab       = i;
-                g_state.tab_alpha     = 0.f;
-                g_state.tab_slide     = 50.f;
-                g_state.tab_slide_vel = 0.f;
-                g_scrollMain          = {};
-                PlaySound(SND_CLICK);
-            }
+            TabTap(i);
         }
 
         // Пружинная «пилюля» активной вкладки скользит по горизонтали.
@@ -3533,62 +3628,18 @@ void RenderMenu() {
             fdl->AddRectFilled({icx - 16.f, barY - 1.f}, {icx + 16.f, barY + 3.f}, C::U(C::Acc()), 2.f);
         }
 
-        // Вкладка = иконка сверху + подпись под ней, всё по центру ячейки.
         {
             auto* fdl = ImGui::GetForegroundDrawList();
-            const float iconSize = 62.f;
-            const float lblFS    = ImGui::GetFontSize() * 0.95f;
-            for (int i = 0; i < kTabCount; i++) {
-                float  px     = tab_rects[i].sx;
-                bool   active = (i == g_state.cur_tab);
-                ImVec4 col    = active ? C::Acc() : C::Dim();
-                auto   tsz    = ImGui::GetFont()->CalcTextSizeA(lblFS, FLT_MAX, 0, tabNames[i]);
-                float  blockH = iconSize + 6.f + tsz.y;
-                float  iconY  = barY + (botH - blockH) * 0.5f;
-                float  cxr    = px + tabW * 0.5f;
-                if (i == 3) {
-                    // У «Разное» своя векторная иконка (сетка 2x2), чтобы не
-                    // совпадала с иконкой «Конфиги» из общего атласа.
-                    float half = iconSize * 0.5f;
-                    float gx0 = cxr - half, gy0 = iconY;
-                    float cell = iconSize * 0.44f, gap2 = iconSize - cell * 2.f;
-                    ImU32 gcol = C::UA(C::Acc(), active ? 1.f : 0.55f);
-                    float rr = cell * 0.3f;
-                    fdl->AddRectFilled({gx0, gy0}, {gx0 + cell, gy0 + cell}, gcol, rr);
-                    fdl->AddRectFilled({gx0 + cell + gap2, gy0}, {gx0 + iconSize, gy0 + cell}, gcol, rr);
-                    fdl->AddRectFilled({gx0, gy0 + cell + gap2}, {gx0 + cell, gy0 + iconSize}, gcol, rr);
-                    // Четвёртый квадрат — контурный, чтобы иконка читалась как «прочее».
-                    fdl->AddRect({gx0 + cell + gap2, gy0 + cell + gap2}, {gx0 + iconSize, gy0 + iconSize}, gcol, rr, 0, 2.f);
-                } else if (g_tabIcons[i]) {
-                    ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
-                    ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
-                    fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax,
-                        {0,0}, {1,1}, IM_COL32(255, 255, 255, active ? 255 : 165), 9.f);
-                } else {
-                    // Заглушка: скруглённый квадрат с первой буквой вкладки.
-                    ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
-                    ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
-                    fdl->AddRectFilled(iMin, iMax, C::UA(C::Acc(), active ? 0.9f : 0.35f), 9.f);
-                    char letter[8] = {};
-                    int gl = 0;
-                    letter[gl++] = tabNames[i][0];
-                    if ((unsigned char)tabNames[i][0] >= 0xC0) letter[gl++] = tabNames[i][1];
-                    float gfs = iconSize * 0.55f;
-                    auto gsz = ImGui::GetFont()->CalcTextSizeA(gfs, FLT_MAX, 0, letter);
-                    fdl->AddText(ImGui::GetFont(), gfs,
-                        {cxr - gsz.x * 0.5f, iconY + (iconSize - gsz.y) * 0.5f},
-                        IM_COL32(255, 255, 255, active ? 255 : 200), letter);
-                }
-                fdl->AddText(ImGui::GetFont(), lblFS,
-                    {cxr - tsz.x * 0.5f, iconY + iconSize + 6.f}, C::U(col), tabNames[i]);
-            }
+            for (int i = 0; i < kTabCount; i++)
+                DrawTabCell(fdl, i, tab_rects[i].sx, barY, tabW, botH, 62.f,
+                            ImGui::GetFontSize() * 0.95f);
         }
 
         ImGui::EndChild();
         ImGui::PopStyleColor();
     }
 
-    ImGui::SetCursorPos({0, 0});
+    ImGui::SetCursorPos({cX0, 0});
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
     ImGui::BeginChild("##cp", {cW, cH}, false,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
