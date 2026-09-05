@@ -558,6 +558,9 @@ struct AppState {
 
     int   cur_tab = 0;
     bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
+    // Temporary: prints what the aim controller is actually doing, so the
+    // numbers can be read off a phone instead of guessed at. Not saved.
+    bool  aim_debug = false;
     int   aim_bone = 0;
     // 0 = balanced (crosshair + range), 1 = nearest to the crosshair,
     // 2 = nearest in the world.
@@ -2591,6 +2594,11 @@ float TabContent(int tab, float dt, float cW) {
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
 
+        SHdr(XS("Отладка аима"));
+        CardBg(Layout::RowH * 1);
+        { static float _a_dbg = 0.f; Tick(_a_dbg, g_state.aim_debug, dt);
+          ToggleRow("##tadbg", XS("Показать цифры аима"), &g_state.aim_debug, _a_dbg, true); }
+
         SHdr(XS("Триггер бот"));
         CardBg(Layout::RowH * 1);
         { static float _a_tbot = 0.f; Tick(_a_tbot, cfg::aim::trigger_bot, dt);
@@ -3045,6 +3053,28 @@ struct AimTarget {
     float world_dist = 0.f;
 };
 
+// What the controller did on its last pass. Filled by UpdateAim, printed by
+// DrawAimDebug. Every field answers one question that cannot be answered from
+// here: is the sensitivity estimate sane, is the finger move actually reaching
+// the camera, is the target's speed being measured, how much does the lead
+// really shift the aim, and how big is what is left over.
+struct AimDebug {
+    float dt = 0.f;
+    float gain = 0.f;        // learned degrees per pixel
+    float lastDx = 0.f;      // finger move sent last frame, px
+    float camDelta = 0.f;    // degrees the camera actually turned since then
+    float expected = 0.f;    // degrees that move should have produced
+    float errRaw = 0.f;      // degrees to the target before the lead
+    float vel = 0.f;         // measured target speed, deg/s
+    float leadDeg = 0.f;     // degrees the lead shifts the aim point
+    float cmdDx = 0.f;       // finger move sent this frame, px
+    float fx = 0.f;
+    bool  finger = false;
+    bool  haveTarget = false;
+    int   replaces = 0;      // how often the finger ran out of look area
+};
+static AimDebug g_aimDbg;
+
 static void AimReleaseFinger(bool& fingerDown) {
     if (fingerDown) { Touch_Up(); fingerDown = false; }
 }
@@ -3070,9 +3100,11 @@ static void UpdateAim(float dt) {
     if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
     if (dt > 0.1f) dt = 0.1f;
 
+    g_aimDbg.dt = dt;
     if (!active) {
         AimReleaseFinger(s_fingerDown);
         s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
+        g_aimDbg.haveTarget = false; g_aimDbg.finger = false;
         return;
     }
 
@@ -3162,6 +3194,8 @@ static void UpdateAim(float dt) {
         if (score < bestScore) { bestScore = score; best = t; }
     }
 
+    g_aimDbg.haveTarget = best.valid;
+    if (best.valid) g_aimDbg.errRaw = sqrtf(best.yaw * best.yaw + best.pitch * best.pitch);
     if (!best.valid) {
         // Keep the finger down briefly so a momentary read failure does not
         // register as a tap (tap-to-shoot in some layouts) or reset momentum.
@@ -3319,6 +3353,8 @@ static void UpdateAim(float dt) {
                 if (dy > cap) dy = cap; else if (dy < -cap) dy = -cap;
                 if (dp > cap) dp = cap; else if (dp < -cap) dp = -cap;
                 const float lead = AimLeadSec();
+                g_aimDbg.vel = sqrtf(velYaw * velYaw + velPitch * velPitch);
+                g_aimDbg.leadDeg = g_aimDbg.vel * lead;
                 dy += velYaw * lead;
                 dp += velPitch * lead;
                 if (std::isfinite(dy) && std::isfinite(dp)) {
@@ -3354,6 +3390,9 @@ static void UpdateAim(float dt) {
         // Finger right (dx > 0) turns right => yaw increases.
         // Moves are exact device-grid steps now, so even 1-2 px moves give a
         // clean measurement; keep a floor so noise never dominates.
+        g_aimDbg.camDelta = camYawDelta;
+        g_aimDbg.lastDx = s_lastDx;
+        g_aimDbg.expected = s_lastDx * s_gainYaw;
         if (fabsf(s_lastDx) >= 1.f) learn(s_gainYaw, camYawDelta / s_lastDx);
         // Finger down (dy > 0) looks down => pitch decreases.
         if (fabsf(s_lastDy) >= 1.f) learn(s_gainPitch, -camPitchDelta / s_lastDy);
@@ -3459,6 +3498,7 @@ static void UpdateAim(float dt) {
     // re-place it in the centre of the area instead of getting stuck.
     const float minX = sw * 0.56f, maxX = sw * 0.97f, minY = sh * 0.12f, maxY = sh * 0.88f;
     if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
+        ++g_aimDbg.replaces;
         Touch_Up();
         s_fingerDown = false;
         s_fx = snapGrid(sw * 0.74f); s_fy = snapGrid(sh * 0.50f);
@@ -3468,7 +3508,48 @@ static void UpdateAim(float dt) {
     }
     s_fx = nx; s_fy = ny;
     s_lastDx = dx; s_lastDy = dy;
+    g_aimDbg.gain = s_gainYaw;
+    g_aimDbg.cmdDx = dx;
+    g_aimDbg.fx = s_fx;
+    g_aimDbg.finger = s_fingerDown;
     Touch_Move(s_fx, s_fy);
+}
+
+// Three lines at the top of the screen, on for as long as the aim is being
+// tuned. Read them off the phone: every number here is one the bench cannot
+// produce, because it depends on how this phone answers a synthetic finger.
+static void DrawAimDebug() {
+    if (!g_state.aim_debug || !g_state.aim_touch) return;
+    const AimDebug& d = g_aimDbg;
+    static float s_fps = 0.f;
+    if (d.dt > 0.0001f) {
+        const float f = 1.f / d.dt;
+        s_fps = (s_fps <= 0.f) ? f : (s_fps * 0.9f + f * 0.1f);
+    }
+    char l1[160], l2[160], l3[160];
+    snprintf(l1, sizeof(l1), "AIM  fps %.0f  gain %.4f  step %.0fpx  target %d",
+             s_fps, d.gain, d.cmdDx, d.haveTarget ? 1 : 0);
+    snprintf(l2, sizeof(l2), "sent %.0fpx -> cam %.2f deg  (expected %.2f)",
+             d.lastDx, d.camDelta, d.expected);
+    snprintf(l3, sizeof(l3), "err %.2f  vel %.1f deg/s  lead %.2f deg  finger %d x%.0f  repl %d",
+             d.errRaw, d.vel, d.leadDeg, d.finger ? 1 : 0, d.fx, d.replaces);
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    float sw = (float) native_window_screen_x;
+    if (displayInfo.width > displayInfo.height && displayInfo.width >= 100)
+        sw = (float) displayInfo.width;
+    else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100)
+        sw = (float) displayInfo.height;
+    const char* lines[3] = {l1, l2, l3};
+    float y = 6.f;
+    for (int i = 0; i < 3; ++i) {
+        const ImVec2 sz = ImGui::CalcTextSize(lines[i]);
+        const ImVec2 at(sw * 0.5f - sz.x * 0.5f, y);
+        dl->AddRectFilled(ImVec2(at.x - 6.f, at.y - 2.f),
+                          ImVec2(at.x + sz.x + 6.f, at.y + sz.y + 2.f),
+                          IM_COL32(0, 0, 0, 170), 3.f);
+        dl->AddText(at, IM_COL32(0, 255, 120, 255), lines[i]);
+        y += sz.y + 3.f;
+    }
 }
 
 
@@ -3923,6 +4004,7 @@ int main(int argc, char* argv[]) {
         ui::bar::set_game_alpha(0.f);
         DrawEspOverlay();
         UpdateAim(ImGui::GetIO().DeltaTime);
+        DrawAimDebug();
         RenderMenu();
         drawEnd();
         g_frame_done.store(true);
