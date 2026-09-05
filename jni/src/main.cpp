@@ -2597,7 +2597,7 @@ float TabContent(int tab, float dt, float cW) {
         SHdr(XS("Отладка аима"));
         CardBg(Layout::RowH * 1);
         { static float _a_dbg = 0.f; Tick(_a_dbg, g_state.aim_debug, dt);
-          ToggleRow("##tadbg", XS("Показать цифры аима"), &g_state.aim_debug, _a_dbg, true); }
+          ToggleRow("##tadbg", XS("Писать лог в Загрузки"), &g_state.aim_debug, _a_dbg, true); }
 
         SHdr(XS("Триггер бот"));
         CardBg(Layout::RowH * 1);
@@ -3064,7 +3064,7 @@ struct AimDebug {
     float lastDx = 0.f;      // finger move sent last frame, px
     float camDelta = 0.f;    // degrees the camera actually turned since then
     float expected = 0.f;    // degrees that move should have produced
-    float errRaw = 0.f;      // degrees to the target before the lead
+    float errYaw = 0.f, errPitch = 0.f;   // degrees to the target, before the lead
     float vel = 0.f;         // measured target speed, deg/s
     float leadDeg = 0.f;     // degrees the lead shifts the aim point
     float cmdDx = 0.f;       // finger move sent this frame, px
@@ -3072,6 +3072,11 @@ struct AimDebug {
     bool  finger = false;
     bool  haveTarget = false;
     int   replaces = 0;      // how often the finger ran out of look area
+    float gainPitch = 0.f;
+    float unitsPerPx = 0.f;
+    float sw = 0.f, sh = 0.f, fov = 0.f;
+    float slider = 0.f;
+    bool  deadZone = false;  // inside the dead zone, holding still on purpose
 };
 static AimDebug g_aimDbg;
 
@@ -3195,7 +3200,7 @@ static void UpdateAim(float dt) {
     }
 
     g_aimDbg.haveTarget = best.valid;
-    if (best.valid) g_aimDbg.errRaw = sqrtf(best.yaw * best.yaw + best.pitch * best.pitch);
+    if (best.valid) { g_aimDbg.errYaw = best.yaw; g_aimDbg.errPitch = best.pitch; }
     if (!best.valid) {
         // Keep the finger down briefly so a momentary read failure does not
         // register as a tap (tap-to-shoot in some layouts) or reset momentum.
@@ -3425,6 +3430,7 @@ static void UpdateAim(float dt) {
     float deadYaw = deadBase, deadPitch = deadBase;
     if (gainKnownYaw   && deadYaw   < qYaw   * 0.55f) deadYaw   = qYaw   * 0.55f;
     if (gainKnownPitch && deadPitch < qPitch * 0.55f) deadPitch = qPitch * 0.55f;
+    g_aimDbg.deadZone = (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch);
     if (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch) {
         s_lastDx = s_lastDy = 0.f;
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
@@ -3509,47 +3515,74 @@ static void UpdateAim(float dt) {
     s_fx = nx; s_fy = ny;
     s_lastDx = dx; s_lastDy = dy;
     g_aimDbg.gain = s_gainYaw;
+    g_aimDbg.gainPitch = s_gainPitch;
+    g_aimDbg.unitsPerPx = unitsPerPx;
+    g_aimDbg.sw = sw; g_aimDbg.sh = sh; g_aimDbg.fov = camFov;
+    g_aimDbg.slider = g_state.gun_str;
     g_aimDbg.cmdDx = dx;
     g_aimDbg.fx = s_fx;
     g_aimDbg.finger = s_fingerDown;
     Touch_Move(s_fx, s_fy);
 }
 
-// Three lines at the top of the screen, on for as long as the aim is being
-// tuned. Read them off the phone: every number here is one the bench cannot
-// produce, because it depends on how this phone answers a synthetic finger.
-static void DrawAimDebug() {
-    if (!g_state.aim_debug || !g_state.aim_touch) return;
-    const AimDebug& d = g_aimDbg;
+// Diagnostic log, written to the Downloads folder so it can be pulled off the
+// phone. Everything here is a number the bench cannot produce, because it
+// depends on how this phone answers a synthetic finger:
+//
+//   sent -> cam vs exp   we moved the finger this many pixels and the camera
+//                        turned this many degrees, against what the learned
+//                        sensitivity said it should. A camera that turns less
+//                        than expected means the game is not honouring our
+//                        finger, and then no amount of lead can keep up.
+//   vel                  the target's measured speed. Zero next to a running
+//                        man means there is nothing to lead, which is exactly
+//                        what a lead slider that does nothing looks like.
+//   errY / errP          what is left over: the trail, in degrees.
+//
+// One line per frame while a target is held, capped so it cannot fill the
+// card. The file is rewritten from scratch every time the switch is turned on.
+static void AimDebugLog() {
+    static FILE* s_f = nullptr;
+    static int   s_lines = 0;
+    static double s_t = 0.0;
     static float s_fps = 0.f;
+    const int kMaxLines = 20000;          // ~7 minutes at 50 fps
+
+    if (!g_state.aim_debug) {             // switched off: close and reset
+        if (s_f) { fclose(s_f); s_f = nullptr; }
+        s_lines = 0; s_t = 0.0; s_fps = 0.f;
+        return;
+    }
+    const AimDebug& d = g_aimDbg;
     if (d.dt > 0.0001f) {
         const float f = 1.f / d.dt;
         s_fps = (s_fps <= 0.f) ? f : (s_fps * 0.9f + f * 0.1f);
+        s_t += d.dt;
     }
-    char l1[160], l2[160], l3[160];
-    snprintf(l1, sizeof(l1), "AIM  fps %.0f  gain %.4f  step %.0fpx  target %d",
-             s_fps, d.gain, d.cmdDx, d.haveTarget ? 1 : 0);
-    snprintf(l2, sizeof(l2), "sent %.0fpx -> cam %.2f deg  (expected %.2f)",
-             d.lastDx, d.camDelta, d.expected);
-    snprintf(l3, sizeof(l3), "err %.2f  vel %.1f deg/s  lead %.2f deg  finger %d x%.0f  repl %d",
-             d.errRaw, d.vel, d.leadDeg, d.finger ? 1 : 0, d.fx, d.replaces);
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    float sw = (float) native_window_screen_x;
-    if (displayInfo.width > displayInfo.height && displayInfo.width >= 100)
-        sw = (float) displayInfo.width;
-    else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100)
-        sw = (float) displayInfo.height;
-    const char* lines[3] = {l1, l2, l3};
-    float y = 6.f;
-    for (int i = 0; i < 3; ++i) {
-        const ImVec2 sz = ImGui::CalcTextSize(lines[i]);
-        const ImVec2 at(sw * 0.5f - sz.x * 0.5f, y);
-        dl->AddRectFilled(ImVec2(at.x - 6.f, at.y - 2.f),
-                          ImVec2(at.x + sz.x + 6.f, at.y + sz.y + 2.f),
-                          IM_COL32(0, 0, 0, 170), 3.f);
-        dl->AddText(at, IM_COL32(0, 255, 120, 255), lines[i]);
-        y += sz.y + 3.f;
+    if (!s_f) {
+        s_f = fopen("/storage/emulated/0/Download/xvcen_aim_debug.log", "w");
+        if (!s_f) { g_state.aim_debug = false; ShowToast(XS("Нет доступа к папке Загрузки")); return; }
+        fprintf(s_f, "# аимбот: одна строка на кадр, пока цель захвачена\n");
+        fprintf(s_f, "# экран %.0fx%.0f  fov %.1f  ед/пиксель %.3f\n",
+                d.sw, d.sh, d.fov, d.unitsPerPx);
+        fprintf(s_f, "# sent -> cam против exp: сколько послали пальцем и на сколько\n"
+                     "#   повернулась камера против ожидаемого по усвоенной чувствительности\n");
+        fprintf(s_f, "# vel: измеренная скорость цели; lead: на сколько градусов её упреждаем\n");
+        fprintf(s_f, "# errY/errP: что осталось до цели — это и есть хвост\n");
+        // ASCII column names: printf pads by bytes, and Cyrillic headings
+        // would knock every column out of line in the file.
+        fprintf(s_f, "%8s %6s %6s %8s %8s %8s %8s %8s %8s %8s %8s %8s %6s %8s %5s %4s %5s\n",
+                "t_s", "fps", "dt_ms", "gain", "gainP", "sent_px", "cam_deg", "exp_deg",
+                "errY", "errP", "vel_dps", "lead_deg", "step", "finger_x", "dead", "tgt", "repl");
+        fflush(s_f);
     }
+    if (s_lines >= kMaxLines) return;
+    if (!d.haveTarget) return;            // nothing to describe
+    fprintf(s_f, "%8.2f %6.1f %6.1f %8.4f %8.4f %8.1f %8.3f %8.3f %8.3f %8.3f %8.1f %8.3f %6.0f %8.0f %5d %4d %5d\n",
+            s_t, s_fps, d.dt * 1000.f, d.gain, d.gainPitch, d.lastDx, d.camDelta, d.expected,
+            d.errYaw, d.errPitch, d.vel, d.leadDeg, d.cmdDx, d.fx,
+            d.deadZone ? 1 : 0, d.haveTarget ? 1 : 0, d.replaces);
+    if ((++s_lines & 15) == 0) fflush(s_f);
 }
 
 
@@ -4004,7 +4037,7 @@ int main(int argc, char* argv[]) {
         ui::bar::set_game_alpha(0.f);
         DrawEspOverlay();
         UpdateAim(ImGui::GetIO().DeltaTime);
-        DrawAimDebug();
+        AimDebugLog();
         RenderMenu();
         drawEnd();
         g_frame_done.store(true);

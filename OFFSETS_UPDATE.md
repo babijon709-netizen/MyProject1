@@ -593,6 +593,7 @@ python3 tools/offsets/typeinfo_rva.py --so /tmp/new/libil2cpp.so --script /tmp/n
 | Цепочка оружия удалённых игроков | `dump_weapon_probe()` + `weapon_probed` в `PlayerTextCache` | `xvcen_weapon_debug.log` | `git show eee29a6` |
 | Обход реестра Mirror (руды/животные) | `dump_marker_probe()` + счётчики `probe_*` в `rebuild_marker_entities()` | `xvcen_marker_debug.log` | `git show 0aa7a3c` |
 | Плашка `ESP attach=… pid=… boxes=…` слева сверху | `DrawAttachStatus()` + вызов перед `DrawEspOverlay()` в главном цикле | на экране | `git show 0f1f869` |
+| Работа аимбота покадрово (чувствительность, ответ камеры на палец, скорость цели, остаток ошибки) | `AimDebugLog()` + `AimDebug`/`g_aimDbg` в `main.cpp`, выключатель «Отладка аима» | `xvcen_aim_debug.log` | в дереве (убрать, когда аим настроен) |
 
 Все три — одноразовые (пишут при первом скане/первых 8 игроках), вызов ставится
 рядом с местом, где значение уже посчитано.
