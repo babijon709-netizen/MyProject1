@@ -24,10 +24,8 @@
 #include <condition_variable>
 #include <time.h>
 
-#if __has_include("media/anime.h")
-#  include "media/anime.h"
-#  define ANIME_IMAGE_AVAILABLE
-#endif
+// media/anime.h (танцующий спрайт) больше не подключается — аватар-гифка
+// убрана из интерфейса, и её данные не должны раздувать бинарник.
 
 #if __has_include("media/icons.h")
 #  include "media/icons.h"
@@ -329,16 +327,6 @@ static void ShowToast(const char* msg) {
     }
 }
 
-struct SpriteState {
-    GLuint texture = 0;
-    static constexpr int   Cols  = 8;
-    static constexpr int   Rows  = 10;
-    static constexpr int   Total = 74;
-    static constexpr float FPS   = 30.f;
-    float timer = 0.f;
-    int   frame = 0;
-};
-static SpriteState g_sprite;
 static constexpr int kTabCount = 6;
 static GLuint g_tabIcons[kTabCount] = {};
 
@@ -372,21 +360,8 @@ void LoadTabIcons() {
 #endif
 }
 
-void LoadAnimeImage() {
-#ifdef ANIME_IMAGE_AVAILABLE
-    int w, h, ch;
-    unsigned char* px = stbi_load_from_memory(anime_png, (int)anime_png_len, &w, &h, &ch, 4);
-    if (!px) return;
-    glGenTextures(1, &g_sprite.texture);
-    glBindTexture(GL_TEXTURE_2D, g_sprite.texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
-    stbi_image_free(px);
-#endif
-}
+// Танцующий спрайт-аватар убран из интерфейса; текстура больше не грузится.
+void LoadAnimeImage() {}
 
 static inline float Lerpf(float a, float b, float t)   { return a + (b - a) * t; }
 static inline float Clamp01(float t)                    { return t < 0.f ? 0.f : t > 1.f ? 1.f : t; }
@@ -400,12 +375,32 @@ static inline bool WasTappedHere() {
     if (!io.MouseReleased[0]) return false;
     auto min = ImGui::GetItemRectMin();
     auto max = ImGui::GetItemRectMax();
+    // Строки контента существуют и за пределами видимой области (скролл),
+    // поэтому нажатие засчитывается только по видимой (не обрезанной клипом)
+    // части строки. Без этого тап по нижней панели вкладок «проваливается»
+    // в невидимую строку под ней и включает её функцию.
+    {
+        ImVec2 clMin = ImGui::GetWindowDrawList()->GetClipRectMin();
+        ImVec2 clMax = ImGui::GetWindowDrawList()->GetClipRectMax();
+        min.x = ImMax(min.x, clMin.x); min.y = ImMax(min.y, clMin.y);
+        max.x = ImMin(max.x, clMax.x); max.y = ImMin(max.y, clMax.y);
+        if (min.x >= max.x || min.y >= max.y) return false;
+    }
     auto cp  = io.MouseClickedPos[0];
     auto mp  = io.MousePos;
     bool started = cp.x >= min.x && cp.x <= max.x && cp.y >= min.y && cp.y <= max.y;
     bool ended   = mp.x >= min.x - 12.f && mp.x <= max.x + 12.f && mp.y >= min.y - 12.f && mp.y <= max.y + 12.f;
     float dx = mp.x - cp.x, dy = mp.y - cp.y;
     return started && ended && (dx * dx + dy * dy) <= 30.f * 30.f;
+}
+
+// Точка внутри текущего клип-прямоугольника окна? Ручные обработчики кликов
+// (карточки конфигов, цветные точки и т.п.) обязаны проверять это, иначе тап
+// по нижней панели вкладок «проваливается» в прокрученную за неё строку.
+static inline bool PtInClip(ImVec2 p) {
+    auto* dl = ImGui::GetWindowDrawList();
+    ImVec2 mn = dl->GetClipRectMin(), mx = dl->GetClipRectMax();
+    return p.x >= mn.x && p.x <= mx.x && p.y >= mn.y && p.y <= mx.y;
 }
 
 static void SpringTick(float& pos, float& vel, float target, float dt) {
@@ -2528,7 +2523,8 @@ float TabContent(int tab, float dt, float cW) {
             bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
             if (!popBlk && !IsScrollDragging() && !g_input.touchConsumed && ImGui::GetIO().MouseReleased[0]) {
                 auto mp = ImGui::GetIO().MousePos, cp = ImGui::GetIO().MouseClickedPos[0];
-                if (mp.x>=btnX&&mp.x<=btnX+btnW&&mp.y>=btnY&&mp.y<=btnY+btnH
+                if (PtInClip(cp)
+                 &&mp.x>=btnX&&mp.x<=btnX+btnW&&mp.y>=btnY&&mp.y<=btnY+btnH
                  &&cp.x>=btnX&&cp.x<=btnX+btnW&&cp.y>=btnY&&cp.y<=btnY+btnH) {
                     system(XS("am start -a android.intent.action.VIEW -d \"https://t.me/xvcey\""));
                     PlaySound(SND_CLICK);
@@ -2618,7 +2614,7 @@ float TabContent(int tab, float dt, float cW) {
                 float dx = io2.MousePos.x - cx0, dy = io2.MousePos.y - cy0;
                 float moved = dx*dx + dy*dy;
                 bool onDot = (cx0 - dotX)*(cx0 - dotX) + (cy0 - cy)*(cy0 - cy) <= (dotR + 18.f)*(dotR + 18.f);
-                if (io2.MouseReleased[0] && onDot && moved < 28.f*28.f && s_colorHoldId != id) {
+                if (io2.MouseReleased[0] && onDot && PtInClip({dotX, cy}) && moved < 28.f*28.f && s_colorHoldId != id) {
                     s_colorHoldId = id;
                     PopoverOpenColor(lbl, col);
                     PlaySound(SND_CLICK);
@@ -2882,7 +2878,8 @@ float TabContent(int tab, float dt, float cW) {
 
                 ImGui::InvisibleButton(("##cfg_" + std::to_string(ci)).c_str(), {avW, cardH});
 
-                if (!popBlocking2 && !IsScrollDragging() && !g_input.touchConsumed && io2.MouseReleased[0]) {
+                if (!popBlocking2 && !IsScrollDragging() && !g_input.touchConsumed && io2.MouseReleased[0]
+                    && PtInClip(io2.MouseClickedPos[0])) {
                     auto mp  = io2.MousePos;
                     auto cp2 = io2.MouseClickedPos[0];
                     if (mp.x  >= b1X && mp.x  <= b1X+bw3 && mp.y  >= bY && mp.y  <= bY+btnH2
@@ -3377,14 +3374,6 @@ void RenderMenu() {
     if (g_cfgLoadedIdx >= 0 && g_cfgLoadedIdx < kMaxConfigs)
         g_cfgLoadAnim[g_cfgLoadedIdx] += (1.f - g_cfgLoadAnim[g_cfgLoadedIdx]) * 10.f * dt;
 
-    if (g_sprite.texture && SpriteState::Total > 1) {
-        g_sprite.timer += dt;
-        if (g_sprite.timer >= 1.f / SpriteState::FPS) {
-            g_sprite.timer -= 1.f / SpriteState::FPS;
-            g_sprite.frame = (g_sprite.frame + 1) % SpriteState::Total;
-        }
-    }
-
     bool anyOverlayOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
 
     if (io.MouseClicked[0] && anyOverlayOpen) g_input.touchConsumed = true;
@@ -3495,34 +3484,6 @@ void RenderMenu() {
                            ImDrawFlags_RoundCornersBottom);
         ldl->AddLine({lpPos.x + 14.f, lpPos.y}, {lpPos.x + WW - 14.f, lpPos.y},
                      C::UA(C::Sep(), 0.8f), 1.f);
-
-        // Аватар-спрайт — слева на панели, только когда он не наезжает на
-        // центрированный ряд крупных вкладок (на узком окне прячется).
-        const float avatarRoom = 22.f + 28.f * 2.f + 14.f;
-        if ((WW - Layout::TabW * kTabCount) * 0.5f >= avatarRoom) {
-            const float Rad = 28.f;
-            float cx = lpPos.x + 22.f + Rad, cy = lpPos.y + botH * 0.5f;
-            ldl->AddCircleFilled({cx + 1.5f, cy + 2.f}, Rad, IM_COL32(0, 0, 0, 25), 48);
-            ldl->AddCircleFilled({cx, cy}, Rad, C::U(C::Card()), 48);
-            if (g_sprite.texture) {
-                int col = g_sprite.frame % SpriteState::Cols;
-                int row = g_sprite.frame / SpriteState::Cols;
-                float u0 = col       / (float)SpriteState::Cols;
-                float u1 = (col + 1) / (float)SpriteState::Cols;
-                float v0 = row       / (float)SpriteState::Rows;
-                float v1 = (row + 1) / (float)SpriteState::Rows;
-                ldl->AddImageRounded((ImTextureID)(intptr_t)g_sprite.texture,
-                    {cx - Rad, cy - Rad}, {cx + Rad, cy + Rad}, {u0, v0}, {u1, v1}, IM_COL32(255, 255, 255, 255), Rad);
-            } else {
-                ImU32 avatarBg   = g_darkTheme ? IM_COL32(52, 48, 96, 255)    : IM_COL32(219, 214, 247, 255);
-                ImU32 avatarFig  = g_darkTheme ? IM_COL32(100, 92, 170, 255)  : IM_COL32(146, 136, 205, 255);
-                ldl->AddCircleFilled({cx, cy}, Rad, avatarBg, 48);
-                float hR = Rad * 0.30f;
-                ldl->AddCircleFilled({cx, cy - Rad * 0.22f}, hR, avatarFig, 32);
-                ldl->AddRectFilled({cx - Rad * 0.42f, cy + Rad * 0.08f}, {cx + Rad * 0.42f, cy + Rad * 0.82f}, avatarFig, Rad * 0.22f);
-            }
-            ldl->AddCircle({cx, cy}, Rad + 2.f, C::UA(C::Acc(), 0.85f), 48, 2.f);
-        }
 
         // Ряд вкладок строго по центру панели.
         const float tabW   = Layout::TabW;
@@ -3805,7 +3766,6 @@ int main(int argc, char* argv[]) {
         g_frame_done.store(true);
     }
     while (!g_frame_done.load()) {}
-    if (g_sprite.texture) { glDeleteTextures(1, &g_sprite.texture); g_sprite.texture = 0; }
     stop_attach_thread();
     if (g_esp_attached) {
         esp_reset();
