@@ -168,8 +168,6 @@ static float g_sh = 1080.f;
 
 static void VisibleScreen(float& w, float& h);
 
-static bool g_noRecoilEnabled = false;
-
 namespace ui { namespace bar {
     inline float g_game_alpha = 1.f;
     inline void  set_game_alpha(float a){ g_game_alpha=a; }
@@ -561,7 +559,8 @@ struct AppState {
     float marker_dist = 150.f;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
-    bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = false;
+    // ui_fps выключен навсегда (счётчик убран), рамки карточек — всегда вкл.
+    bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = true;
     // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
     bool  ui_panel_left = true;
 
@@ -574,7 +573,7 @@ struct AppState {
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
-    float a_ui_fps = 0, a_ui_dark = 1, a_ui_sep = 0;
+    float a_ui_dark = 1;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist;
 };
@@ -906,7 +905,7 @@ static constexpr int  kMaxConfigs  = 12;
 static constexpr uint8_t kXorKey   = 0xA7;
 
 static const char* kCfgDir_() noexcept {
-    static constexpr auto _s = xp::_mk("/storage/emulated/0/xvcen/");
+    static constexpr auto _s = xp::_mk("/storage/emulated/0/benzhack/");
     return _s.d();
 }
 #define kCfgDir (kCfgDir_())
@@ -1112,12 +1111,14 @@ static void ConfigLoad(int idx) {
     memcpy(&s, buf, sizeof(s));
     if (s.magic != 0x58564345U || s.version != 4) { ShowToast(XS("Старый конфиг — пересохрани")); return; }
 
-    g_state.aim_touch   = s.aim_touch;   g_state.aim_pos     = s.aim_pos;
+    g_state.aim_touch   = s.aim_touch;
+    // «Только видимых» убран из меню — значение из конфига игнорируется.
+    g_state.aim_pos     = false;
     g_state.aim_special = s.aim_special;
     g_state.aim_scope_only = s.aim_scope_only;
     cfg::aim::scope_only   = s.aim_scope_only;
     g_state.aim_bone    = s.aim_bone;
-    cfg::aim::vis_check  = s.aim_vis_check;
+    cfg::aim::vis_check  = false;
     cfg::aim::draw_fov   = s.aim_draw_fov;
     cfg::aim::fov        = s.aim_fov;
     g_state.esp_box     = s.esp_box;     g_state.esp_name    = s.esp_name;
@@ -1153,8 +1154,11 @@ static void ConfigLoad(int idx) {
     if (!(g_state.gun_fov >= 5.f)) g_state.gun_fov = 5.f;
     if (g_state.gun_fov > 180.f) g_state.gun_fov = 180.f;
     g_state.gun_trigger_delay     = s.gun_trigger_delay;
-    g_state.ui_fps      = s.ui_fps;      g_state.ui_dark_mode= s.ui_dark_mode;
-    g_state.ui_show_sep = s.ui_show_sep;
+    g_state.ui_dark_mode= s.ui_dark_mode;
+    // ui_fps и ui_show_sep из конфига игнорируются: счётчик FPS убран,
+    // рамки карточек всегда включены.
+    g_state.ui_fps      = false;
+    g_state.ui_show_sep = true;
     cfg::esp::box_col          = s.esp_box_col;
     cfg::esp::box_col_invis    = s.esp_box_col_invis;
     cfg::esp::name_col         = s.esp_name_col;
@@ -1679,9 +1683,6 @@ static void DrawToast(float dt) {
 }
 
 static float wm_ring   = 2.f;
-static float wm_fps_sm = 0.f;
-static float wm_w      = 0.f;
-static float wm_wvel   = 0.f;
 static bool  menu_open = true;
 
 void DrawWatermark(float dt) {
@@ -1689,61 +1690,74 @@ void DrawWatermark(float dt) {
     auto* fn  = ImGui::GetFont();
     auto* fg  = ImGui::GetForegroundDrawList();
 
-    float rawFps = overlay_fps();
-    if (rawFps < 1.f) rawFps = io.Framerate;
-    const float rates[] = {60.f, 90.f, 120.f, 144.f, 165.f, 180.f, 240.f};
-    float nearest = rawFps, nd = 1e9f;
-    for (float r : rates) {
-        float d = fabsf(rawFps - r);
-        if (d < nd) { nd = d; nearest = r; }
-    }
-    if (nd <= 8.f) rawFps = nearest;
-    wm_fps_sm += (rawFps - wm_fps_sm) * 8.f * dt;
-    if (wm_fps_sm < 1.f) wm_fps_sm = rawFps;
-    wm_ring   += dt * 3.5f;
+    wm_ring += dt * 3.5f;
 
     ImVec4 acc   = C::Acc();
-    ImVec4 cardV = C::Card();
-    ImU32 bgCol  = C::U(cardV);
+    ImU32 bgCol  = C::U(C::Card());
     ImU32 brdCol = C::UA(acc, 0.6f);
-    ImU32 nmCol  = C::U(C::Txt());
 
-    const float fs = 40.f, pad = 22.f, bR = 46.f;
-    const char* name = XS("xvcen");
+    float scrW = 0.f, scrH = 0.f;
+    VisibleScreen(scrW, scrH);
 
-    auto  nSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, name);
-    char  fpsBuf[12]; snprintf(fpsBuf, 12, "%.0f", wm_fps_sm);
-    auto  fSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, fpsBuf);
-
-    TickSlideAnim(wm_w, wm_wvel, !g_state.ui_fps, dt);
-    float fpsA = EaseInOut(wm_w);
-    float fpsSection = fpsA * (pad * 0.7f + 1.5f + pad * 0.7f + fSz.x);
-    float bW = pad + nSz.x + pad + fpsSection;
-    float bH = nSz.y + pad;
-    const float bX = 16.f, bY = 16.f;
-
-    bool in = (io.MousePos.x >= bX && io.MousePos.x <= bX + bW &&
-               io.MousePos.y >= bY && io.MousePos.y <= bY + bH);
-    if (in && io.MouseClicked[0]) { menu_open = !menu_open; wm_ring = 0.f; }
-
-    if (wm_ring < 1.f) {
-        float r = EaseOut3(wm_ring), ex = r * 22.f;
-        fg->AddRectFilled({bX - ex, bY - ex}, {bX + bW + ex, bY + bH + ex},
-            C::UA(acc, 0.18f * (1.f - r)), bR + ex);
+    // ---- Некликабельная мини-пилюля с названием чита (слева сверху) ----
+    // Тапы по ней не обрабатываются вовсе, так что она «прозрачна» для
+    // кликов и ничему не мешает.
+    {
+        const float fs = 26.f, padX = 14.f, padY = 8.f;
+        const char* name = XS("benzhack");
+        auto nSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, name);
+        float bW = padX * 2.f + nSz.x;
+        float bH = padY * 2.f + nSz.y;
+        const float bX = 12.f, bY = 12.f;
+        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Card(), 0.75f), bH * 0.5f);
+        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, C::UA(acc, 0.4f), bH * 0.5f, 0, 1.2f);
+        fg->AddText(fn, fs, {bX + padX, bY + padY}, C::UA(C::Txt(), 0.9f), name);
     }
 
-    fg->AddRectFilled({bX + 2.f, bY + 3.f}, {bX + bW + 2.f, bY + bH + 3.f},
-        IM_COL32(0, 0, 0, 20), bR);
-    fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, bgCol, bR);
-    fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, brdCol, bR, 0, 1.5f);
+    // ---- Пилюля-счётчик противников (по центру верха экрана) -----------
+    // Показывает, сколько игроков видит ESP; тап по ней открывает/закрывает
+    // меню.
+    {
+        int enemies = 0;
+        if (g_esp_attached)
+            enemies = (int)FrameBoxes(scrW, scrH).size();
 
-    float textY = bY + (bH - nSz.y) * 0.5f;
-    fg->AddText(fn, fs, {bX + pad, textY}, nmCol, name);
+        const float fs = 40.f, pad = 22.f, bR = 46.f;
+        char cntBuf[16]; snprintf(cntBuf, sizeof(cntBuf), "%d", enemies);
+        auto cSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, cntBuf);
 
-    if (fpsA > 0.01f) {
-        float sx = bX + pad + nSz.x + pad * 0.7f;
-        fg->AddLine({sx, bY + bH * 0.18f}, {sx, bY + bH * 0.82f}, C::UA(C::Acc(), fpsA * 0.35f), 1.5f);
-        fg->AddText(fn, fs, {sx + pad * 0.7f, textY}, C::UA(C::Acc(), fpsA), fpsBuf);
+        // Точка-индикатор + число.
+        const float dotR = 7.f;
+        float bW = pad + dotR * 2.f + 12.f + cSz.x + pad;
+        float bH = cSz.y + pad;
+        float bX = (scrW - bW) * 0.5f;
+        const float bY = 12.f;
+
+        bool in = (io.MousePos.x >= bX && io.MousePos.x <= bX + bW &&
+                   io.MousePos.y >= bY && io.MousePos.y <= bY + bH);
+        if (in && io.MouseClicked[0]) { menu_open = !menu_open; wm_ring = 0.f; }
+
+        if (wm_ring < 1.f) {
+            float r = EaseOut3(wm_ring), ex = r * 22.f;
+            fg->AddRectFilled({bX - ex, bY - ex}, {bX + bW + ex, bY + bH + ex},
+                C::UA(acc, 0.18f * (1.f - r)), bR + ex);
+        }
+
+        fg->AddRectFilled({bX + 2.f, bY + 3.f}, {bX + bW + 2.f, bY + bH + 3.f},
+            IM_COL32(0, 0, 0, 20), bR);
+        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, bgCol, bR);
+        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, brdCol, bR, 0, 1.5f);
+
+        // Зелёная точка, когда противники рядом есть; серая — когда никого.
+        ImVec4 dotCol = enemies > 0 ? ImVec4{0.24f, 0.78f, 0.42f, 1.f} : C::Dim();
+        float dcy = bY + bH * 0.5f;
+        fg->AddCircleFilled({bX + pad + dotR, dcy}, dotR, C::U(dotCol), 24);
+        if (enemies > 0)
+            fg->AddCircle({bX + pad + dotR, dcy}, dotR + 3.f,
+                C::UA(dotCol, 0.5f + 0.3f * sinf((float)ImGui::GetTime() * 5.f)), 24, 1.8f);
+
+        fg->AddText(fn, fs, {bX + pad + dotR * 2.f + 12.f, bY + (bH - cSz.y) * 0.5f},
+            C::U(C::Txt()), cntBuf);
     }
 }
 
@@ -2529,27 +2543,15 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
 
         SHdr(XS("Аим"));
-        CardBg(Layout::RowH * 4);
+        CardBg(Layout::RowH * 3);
         ToggleRow("##ta1", XS("Аим"),          &g_state.aim_touch,   g_state.a_aim_touch, false, true);
         ToggleRow("##ta6", XS("Только в прицеле"), &g_state.aim_scope_only, g_state.a_aim_scope, false);
-        ToggleRow("##ta2", XS("Только видимых"),   &g_state.aim_pos,     g_state.a_aim_pos,   false);
         ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true);
 
         SHdr(XS("Наводка"));
         CardBg(Layout::SliderH * 2);
         SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, false, g_state.sl_gun_str, dt);
-
-        SHdr(XS("Триггер"));
-        CardBg(Layout::RowH + Layout::SliderH);
-        { static float _a_tbot = 0.f; Tick(_a_tbot, cfg::aim::trigger_bot, dt);
-          ToggleRow("##ta5", XS("Автовыстрел"), &cfg::aim::trigger_bot, _a_tbot, false, true); }
-        SliderRow("##atrig", XS("Задержка"), &g_state.gun_trigger_delay, 0.0f, 1.0f, XS("%.1f с"), true, false, g_state.sl_gun_trig, dt);
-
-        SHdr(XS("Оружие"));
-        CardBg(Layout::RowH * 1);
-        { static float _a_nr = 0.f; Tick(_a_nr, g_noRecoilEnabled, dt);
-          ToggleRow("##nr1", XS("Без отдачи"), &g_noRecoilEnabled, _a_nr, true); }
 
         ImGui::Dummy({1.f, 12.f});
 
@@ -2885,12 +2887,11 @@ float TabContent(int tab, float dt, float cW) {
 
     } else if (tab == 5) {
         // Опции (interface + system) — now the bottom-most tab.
+        // Счётчик FPS и «Рамки карточек» убраны: рамки включены принудительно.
         SHdr(XS("Интерфейс"));
-        CardBg(Layout::RowH * 3);
-        ToggleRow("##uf2", XS("Счётчик FPS"),  &g_state.ui_fps,       g_state.a_ui_fps,  false, true);
-        if (ToggleRow("##ud2", XS("Тёмная тема"), &g_state.ui_dark_mode, g_state.a_ui_dark, false))
+        CardBg(Layout::RowH * 1);
+        if (ToggleRow("##ud2", XS("Тёмная тема"), &g_state.ui_dark_mode, g_state.a_ui_dark, true, true))
             g_darkTheme = g_state.ui_dark_mode;
-        ToggleRow("##usep", XS("Рамки карточек"), &g_state.ui_show_sep, g_state.a_ui_sep, true);
 
         SHdr(XS("Система"));
         {
@@ -3349,9 +3350,7 @@ void RenderMenu() {
     Tick(g_state.a_aim_pr2,    g_state.aim_priority == 2,  dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
-    Tick(g_state.a_ui_fps,     g_state.ui_fps,             dt);
     Tick(g_state.a_ui_dark,    g_state.ui_dark_mode,       dt);
-    Tick(g_state.a_ui_sep,     g_state.ui_show_sep,        dt);
     ApplyTheme();
 
     if (g_cfgLoadedIdx >= 0 && g_cfgLoadedIdx < kMaxConfigs)
