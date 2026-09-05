@@ -3092,7 +3092,13 @@ static void UpdateAim(float dt) {
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f; // absolute camera angles
     static bool  s_haveLast = false;
     static float s_lastDx = 0.f, s_lastDy = 0.f; // finger delta applied last frame
-    static float s_gainYaw = 0.f, s_gainPitch = 0.f; // deg per px, learned
+    // Pixels per degree = base * scale, with the scale found from whether our
+    // own commands land, never from the camera. See the step sizing below.
+    static float s_scale = 0.5f;
+    static float s_prevErrYaw = 0.f, s_prevK = 0.f;
+    static bool  s_havePrevErr = false;
+    const float kBasePxPerDeg = 20.f;   // scale 1 assumes 0.05 deg per pixel
+    const float kScaleMin = 0.05f, kScaleMax = 40.f;
     static unsigned long long s_lastId = 0;        // sticky target
     static int   s_lostFrames = 0;
     static int   s_holdFrames = 0;
@@ -3111,6 +3117,7 @@ static void UpdateAim(float dt) {
     if (!active) {
         AimReleaseFinger(s_fingerDown);
         s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
+        s_havePrevErr = false;
         g_aimDbg.haveTarget = false; g_aimDbg.finger = false;
         return;
     }
@@ -3213,7 +3220,7 @@ static void UpdateAim(float dt) {
         return;
     }
     s_lostFrames = 0;
-    if (best.id != s_lastId) s_haveLast = false; // do not learn gain across a target switch
+    if (best.id != s_lastId) { s_haveLast = false; s_havePrevErr = false; }
 
     // ---- where the target is going ------------------------------------
     // The reason a crosshair trails a running man is not the controller, it
@@ -3225,7 +3232,11 @@ static void UpdateAim(float dt) {
     // kept and a straight line is fitted through it. The line gives two
     // things: the speed, and where the target is at this instant -- which is
     // ahead of the last sample that actually arrived.
+    // Target speed, published out of the fit below so the controller can tell
+    // "the target moved" apart from "my command did nothing".
+    float velYawNow = 0.f;
     static float s_prevWorldYaw = 0.f, s_prevWorldPitch = 0.f;
+    static float s_prevCamSeenYaw = 0.f, s_prevCamSeenPitch = 0.f;
     static bool  s_havePrevTgt = false;
     static constexpr int kHist = 16;
     static float s_hYaw[kHist] = {}, s_hPitch[kHist] = {}, s_hAge[kHist] = {};
@@ -3238,9 +3249,33 @@ static void UpdateAim(float dt) {
     static float s_errL = 0.f, s_errS = 0.f;
     auto histClear = [&]() { s_hN = 0; s_havePred = false; s_errL = s_errS = 0.f; };
 
+    // The overlay can redraw faster than the game does. When it does, the
+    // camera pose -- and with it every angle measured against it -- is the
+    // same snapshot we already acted on. Sending a second correction for an
+    // error that has already been answered is how a controller talks itself
+    // into overshooting, so a repeated snapshot is simply sat out. Bounded,
+    // so a camera that genuinely never moves cannot freeze the aim.
+    static int s_stale = 0;
+    bool freshCam = true;
     {
         float cy = 0.f, cp = 0.f;
         const bool haveC = esp_camera_angles(cy, cp);
+        if (haveC && s_havePrevTgt && cy == s_prevCamSeenYaw && cp == s_prevCamSeenPitch)
+            freshCam = false;
+        if (haveC) { s_prevCamSeenYaw = cy; s_prevCamSeenPitch = cp; }
+        // One repeat is normal and worth answering anyway -- the phone
+        // redraws the overlay about twice per game frame, and skipping every
+        // other correction costs more than the occasional double push. But a
+        // snapshot that repeats two, three, four times means the game is far
+        // behind us, and then a second correction for an error already
+        // answered is exactly how a controller talks itself into overshoot.
+        if (!freshCam) ++s_stale;
+        if (s_stale >= 2 && s_stale <= 5) {
+            s_lastId = best.id;
+            if (s_fingerDown) Touch_Move(s_fx, s_fy);
+            return;
+        }
+        if (freshCam) s_stale = 0;
         if (best.id != s_lastId || !haveC) { histClear(); s_havePrevTgt = false; }
         if (haveC) {
             // Where the target is in the world, i.e. with our own turning
@@ -3359,6 +3394,7 @@ static void UpdateAim(float dt) {
                 const float cap = 2.0f;   // degrees, never trust the fit further
                 if (dy > cap) dy = cap; else if (dy < -cap) dy = -cap;
                 if (dp > cap) dp = cap; else if (dp < -cap) dp = -cap;
+                velYawNow = velYaw;
                 const float lead = AimLeadSec();
                 g_aimDbg.vel = sqrtf(velYaw * velYaw + velPitch * velPitch);
                 g_aimDbg.leadDeg = g_aimDbg.vel * lead;
@@ -3373,71 +3409,41 @@ static void UpdateAim(float dt) {
 
     s_lastId = best.id;
 
-    // ---- learn finger gain (deg per px) from the previous frame ----
-    // Measured from the camera's own rotation, so a moving target does not
-    // pollute the estimate.
+    // Camera angles are still read -- the speed fit above needs them to take
+    // our own turning out of the target's motion -- but nothing here tries to
+    // measure the game's look sensitivity from them any more. See the step
+    // sizing below for why.
     float camYaw = 0.f, camPitch = 0.f;
     const bool haveCam = esp_camera_angles(camYaw, camPitch);
     g_aimDbg.haveCam = haveCam;
     g_aimDbg.camState = esp_camera_state();
-    if (haveCam && s_haveLast && s_fingerDown) {
+    if (haveCam && s_haveLast) {
         float camYawDelta = camYaw - s_lastCamYaw;
         while (camYawDelta > 180.f) camYawDelta -= 360.f;
         while (camYawDelta < -180.f) camYawDelta += 360.f;
-        float camPitchDelta = camPitch - s_lastCamPitch;
-        // Signed gains: a negative value simply means the game inverts that
-        // axis (e.g. "invert Y" enabled) and the controller follows suit.
-        // Adopt the measurement outright when it disagrees strongly with the
-        // current estimate (sensitivity changed / first sample), else smooth.
-        auto learn = [](float& gain, float measured) {
-            float m = fabsf(measured);
-            if (!std::isfinite(measured) || m < 0.005f || m > 2.0f) return;
-            if (gain == 0.f || (measured > 0.f) != (gain > 0.f) ||
-                m > fabsf(gain) * 1.3f || m < fabsf(gain) * 0.7f) gain = measured;
-            else gain = gain * 0.7f + measured * 0.3f;
-        };
-        // Finger right (dx > 0) turns right => yaw increases.
-        // Moves are exact device-grid steps now, so even 1-2 px moves give a
-        // clean measurement; keep a floor so noise never dominates.
         g_aimDbg.camDelta = camYawDelta;
-        g_aimDbg.lastDx = s_lastDx;
-        g_aimDbg.expected = s_lastDx * s_gainYaw;
-        if (fabsf(s_lastDx) >= 1.f) learn(s_gainYaw, camYawDelta / s_lastDx);
-        // Finger down (dy > 0) looks down => pitch decreases.
-        if (fabsf(s_lastDy) >= 1.f) learn(s_gainPitch, -camPitchDelta / s_lastDy);
     }
     if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
     else s_haveLast = false;
 
     // ---- input quantum ----
     // The finger can only rest on the digitizer grid, so the camera can only
-    // be steered in steps of (gain / units-per-pixel) degrees. At long range
-    // one such step can exceed the size of a head; the controller therefore
-    // has to settle on the NEAREST reachable position and hold still there,
-    // never hunt back and forth across the target.
+    // be steered in whole steps of it.
     float unitsPerPx = Touch_DeviceUnitsPerPixel();
     if (!(unitsPerPx >= 0.25f && unitsPerPx <= 16.f)) unitsPerPx = 1.f;
-    const float gridPx = 1.f / unitsPerPx;               // screen px per device unit
-    const bool  gainKnownYaw = (s_gainYaw != 0.f), gainKnownPitch = (s_gainPitch != 0.f);
-    const float qYaw   = gainKnownYaw   ? fabsf(s_gainYaw)   * gridPx : 0.f; // deg per device unit
-    const float qPitch = gainKnownPitch ? fabsf(s_gainPitch) * gridPx : 0.f;
 
     // ---- dead zone ----
-    // Target: ~3 cm at the target's range (well inside a head), but never
-    // tighter than what the input grid can actually reach (0.55 step), and
-    // never wider than 1.5 screen px.
+    // About 3 cm at the target's range, well inside a head, but never tighter
+    // than a screen pixel and a half.
     float deadBase = degPerPx * 1.5f;
     if (best.world_dist > 1.f && std::isfinite(best.world_dist)) {
-        float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
+        const float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
         if (d < deadBase) deadBase = d;
     }
-    float deadYaw = deadBase, deadPitch = deadBase;
-    if (gainKnownYaw   && deadYaw   < qYaw   * 0.55f) deadYaw   = qYaw   * 0.55f;
-    if (gainKnownPitch && deadPitch < qPitch * 0.55f) deadPitch = qPitch * 0.55f;
-    g_aimDbg.deadZone = (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch);
-    if (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch) {
+    if (fabsf(best.yaw) < deadBase && fabsf(best.pitch) < deadBase) {
         s_lastDx = s_lastDy = 0.f;
-        if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
+        s_havePrevErr = false;
+        if (s_fingerDown) Touch_Move(s_fx, s_fy);
         return;
     }
 
@@ -3466,28 +3472,51 @@ static void UpdateAim(float dt) {
     if (k > 1.f) k = 1.f;
     if (k < 0.05f) k = 0.05f;
 
-    // Gain (deg per px). Until it has been measured, assume a HIGH in-game
-    // sensitivity so the first probe move can only under-shoot; the true gain
-    // is learned from that move and the next frame snaps the rest of the way.
-    const float probeGain = 0.35f;
-    const bool  learned = (s_gainYaw != 0.f);
-    float gy = learned ? s_gainYaw : probeGain;
-    float gp = (s_gainPitch != 0.f) ? s_gainPitch : (learned ? fabsf(s_gainYaw) : probeGain);
+    // ---- how big a finger move to send --------------------------------
+    // The obvious way to size it is to measure how many degrees the camera
+    // turned per pixel we sent. On a real phone that measurement is
+    // worthless. A log from an actual fight has the camera swinging tens of
+    // degrees while our finger moves one or two pixels, because the player is
+    // turning it himself; divide one by the other and you have measured his
+    // thumb. It came out NEGATIVE in more than half the frames -- a crosshair
+    // driven away from the target -- and the vertical figure came out six
+    // times smaller than the horizontal one, which threw the finger at the
+    // top of the look area over and over.
+    //
+    // So nothing here looks at the camera. The only question asked is whether
+    // OUR OWN last command did what it was asked to do: the error was meant
+    // to shrink by a known fraction and it either did or it did not. Too
+    // little, push harder; shot past, back off -- and back off faster than we
+    // advance, which is what keeps this out of oscillation. The player's own
+    // turning moves the error too, but that is honest: the aim really does
+    // have to answer for it.
+    if (s_havePrevErr && s_fingerDown && fabsf(s_lastDx) >= 2.f && fabsf(s_prevErrYaw) > 0.5f) {
+        const float expected = s_prevErrYaw * (1.f - s_prevK) + velYawNow * dt;
+        const float actual = best.yaw;
+        if (std::isfinite(expected) && std::isfinite(actual)) {
+            if (actual * s_prevErrYaw < 0.f && fabsf(actual) > fabsf(s_prevErrYaw) * 0.35f)
+                s_scale *= 0.6f;                                   // shot past it
+            else if (actual * s_prevErrYaw > 0.f && fabsf(actual) > fabsf(expected) * 1.6f)
+                s_scale *= 1.15f;                                  // barely moved
+            else if (actual * s_prevErrYaw > 0.f && fabsf(actual) > fabsf(expected) * 1.15f)
+                s_scale *= 1.05f;
+            if (s_scale < kScaleMin) s_scale = kScaleMin;
+            if (s_scale > kScaleMax) s_scale = kScaleMax;
+        }
+    }
+    const float pxPerDeg = kBasePxPerDeg * s_scale;
 
-    float dx =  best.yaw   * k / gy;
-    float dy = -best.pitch * k / gp;
+    float dx =  best.yaw   * k * pxPerDeg;
+    float dy = -best.pitch * k * pxPerDeg;
 
-    // Final approach: within a few input steps of the target, stop smoothing
-    // and jump straight to the nearest reachable grid position. Smoothing
-    // here would either creep for many frames or, once rounded, overshoot
-    // and oscillate by a full step around the head.
-    if (gainKnownYaw && fabsf(best.yaw) < qYaw * 3.f)
-        dx = roundf((best.yaw / gy) * unitsPerPx) / unitsPerPx;
-    if (gainKnownPitch && fabsf(best.pitch) < qPitch * 3.f)
-        dy = roundf((-best.pitch / gp) * unitsPerPx) / unitsPerPx;
+    s_prevErrYaw = best.yaw;
+    s_prevK = k;
+    s_havePrevErr = true;
 
-    // Clamp per-frame travel so a bad gain estimate never slingshots.
-    const float maxStep = learned ? sh * 0.15f : sh * 0.05f;
+    // Clamp per-frame travel. A step that eats a large part of the look area
+    // only forces the finger to be lifted and put back, and the camera does
+    // not move at all while that happens.
+    const float maxStep = sw * 0.10f;
     if (dx >  maxStep) dx =  maxStep;
     if (dx < -maxStep) dx = -maxStep;
     if (dy >  maxStep) dy =  maxStep;
@@ -3518,8 +3547,10 @@ static void UpdateAim(float dt) {
     }
     s_fx = nx; s_fy = ny;
     s_lastDx = dx; s_lastDy = dy;
-    g_aimDbg.gain = s_gainYaw;
-    g_aimDbg.gainPitch = s_gainPitch;
+    g_aimDbg.gain = (pxPerDeg > 0.001f) ? (1.f / pxPerDeg) : 0.f;   // deg per px in use
+    g_aimDbg.gainPitch = s_scale;
+    g_aimDbg.lastDx = s_lastDx;
+    g_aimDbg.expected = (pxPerDeg > 0.001f) ? (dx / pxPerDeg) : 0.f;   // degrees asked for
     g_aimDbg.unitsPerPx = unitsPerPx;
     g_aimDbg.sw = sw; g_aimDbg.sh = sh; g_aimDbg.fov = camFov;
     g_aimDbg.slider = g_state.gun_str;
