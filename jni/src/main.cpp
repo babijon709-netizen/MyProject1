@@ -431,34 +431,39 @@ namespace R {
     static constexpr float Btn   = 18.f;
 }
 
-static bool  g_darkTheme = false;
-static float g_themeT    = 0.f;
+// Тёмная тема по умолчанию — лучше сочетается с фиолетовым акцентом
+// и не слепит поверх игры; светлая включается в Настройках как раньше.
+static bool  g_darkTheme = true;
+static float g_themeT    = 1.f;
 static float g_menuFadeIn = 0.f;
 
 namespace C {
+    // "Graphite & Violet": спокойный графитовый фон + фиолетовый акцент.
+    // Light — мягкий светло-серый с лёгким лавандовым оттенком,
+    // Dark  — глубокий сине-графитовый (почти чёрный), карточки чуть светлее.
     namespace Light {
-        static constexpr ImVec4 Bg     = {0.949f, 0.949f, 0.969f, 1};
-        static constexpr ImVec4 LeftBg = {0.969f, 0.969f, 0.980f, 1};
+        static constexpr ImVec4 Bg     = {0.929f, 0.933f, 0.953f, 1};
+        static constexpr ImVec4 LeftBg = {0.957f, 0.957f, 0.973f, 1};
         static constexpr ImVec4 Card   = {1.000f, 1.000f, 1.000f, 1};
-        static constexpr ImVec4 Acc    = {0.000f, 0.478f, 1.000f, 1};
-        static constexpr ImVec4 AccDk  = {0.000f, 0.380f, 0.850f, 1};
-        static constexpr ImVec4 Red    = {1.000f, 0.231f, 0.188f, 1};
-        static constexpr ImVec4 Txt    = {0.000f, 0.000f, 0.000f, 1};
-        static constexpr ImVec4 Dim    = {0.557f, 0.557f, 0.576f, 1};
-        static constexpr ImVec4 TrkOff = {0.776f, 0.776f, 0.800f, 1};
-        static constexpr ImVec4 Sep    = {0.820f, 0.820f, 0.840f, 1};
+        static constexpr ImVec4 Acc    = {0.424f, 0.361f, 0.906f, 1};
+        static constexpr ImVec4 AccDk  = {0.333f, 0.275f, 0.784f, 1};
+        static constexpr ImVec4 Red    = {1.000f, 0.271f, 0.227f, 1};
+        static constexpr ImVec4 Txt    = {0.078f, 0.082f, 0.102f, 1};
+        static constexpr ImVec4 Dim    = {0.541f, 0.553f, 0.596f, 1};
+        static constexpr ImVec4 TrkOff = {0.788f, 0.796f, 0.839f, 1};
+        static constexpr ImVec4 Sep    = {0.851f, 0.859f, 0.898f, 1};
     }
     namespace Dark {
-        static constexpr ImVec4 Bg     = {0.15f, 0.15f, 0.16f, 1};
-        static constexpr ImVec4 LeftBg = {0.137f, 0.137f, 0.145f, 1};
-        static constexpr ImVec4 Card   = {0.173f, 0.173f, 0.180f, 1};
-        static constexpr ImVec4 Acc    = {0.039f, 0.518f, 1.000f, 1};
-        static constexpr ImVec4 AccDk  = {0.000f, 0.400f, 0.870f, 1};
-        static constexpr ImVec4 Red    = {1.000f, 0.271f, 0.227f, 1};
-        static constexpr ImVec4 Txt    = {1.000f, 1.000f, 1.000f, 1};
-        static constexpr ImVec4 Dim    = {0.557f, 0.557f, 0.576f, 1};
-        static constexpr ImVec4 TrkOff = {0.231f, 0.231f, 0.251f, 1};
-        static constexpr ImVec4 Sep    = {0.260f, 0.260f, 0.290f, 1};
+        static constexpr ImVec4 Bg     = {0.063f, 0.071f, 0.094f, 1};
+        static constexpr ImVec4 LeftBg = {0.047f, 0.055f, 0.075f, 1};
+        static constexpr ImVec4 Card   = {0.106f, 0.118f, 0.153f, 1};
+        static constexpr ImVec4 Acc    = {0.545f, 0.486f, 1.000f, 1};
+        static constexpr ImVec4 AccDk  = {0.424f, 0.361f, 0.906f, 1};
+        static constexpr ImVec4 Red    = {1.000f, 0.361f, 0.322f, 1};
+        static constexpr ImVec4 Txt    = {0.949f, 0.953f, 0.969f, 1};
+        static constexpr ImVec4 Dim    = {0.604f, 0.616f, 0.663f, 1};
+        static constexpr ImVec4 TrkOff = {0.180f, 0.196f, 0.251f, 1};
+        static constexpr ImVec4 Sep    = {0.196f, 0.212f, 0.271f, 1};
     }
 
     static inline ImVec4 Lerp4(ImVec4 a, ImVec4 b) {
@@ -554,7 +559,7 @@ struct AppState {
     float marker_dist = 150.f;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
-    bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
+    bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = false;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
     float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_scope = 0;
@@ -565,7 +570,7 @@ struct AppState {
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
-    float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
+    float a_ui_fps = 0, a_ui_dark = 1, a_ui_sep = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist;
 };
@@ -1757,9 +1762,9 @@ bool CollapsibleHeader(const char* id, const char* lbl, int secId = 0) {
     {
         float t = EaseInOut(g_themeT);
         ImU32 ringCol = IM_COL32(
-            int(Lerpf(0,   255, t)),
-            int(Lerpf(50,  255, t)),
-            int(Lerpf(170, 255, t)),
+            int(Lerpf(85,  255, t)),
+            int(Lerpf(70,  255, t)),
+            int(Lerpf(200, 255, t)),
             int(Lerpf(130,  60, t))
         );
         dl->AddCircle({cx2, cy2}, cBtnR + 2.5f, ringCol, 48, 1.5f);
@@ -2787,8 +2792,8 @@ float TabContent(int tab, float dt, float cW) {
                 } else {
                     float icR = 14.f;
                     ImU32 icBg = g_darkTheme
-                        ? IM_COL32(55, 120, 220, 255)
-                        : IM_COL32(10, 122, 255, 255);
+                        ? IM_COL32(120, 105, 240, 255)
+                        : IM_COL32(108, 92, 231, 255);
                     dl->AddRectFilled({icX, icY}, {icX + icSz, icY + icSz}, icBg, icR);
                     float lh = icSz * 0.20f;
                     float lx = icCX - lh * 0.45f, ly = rowCY + lh * 0.42f;
@@ -2847,9 +2852,9 @@ float TabContent(int tab, float dt, float cW) {
                 };
 
                 DrawBtn(b1X, bw3,
-                    IM_COL32(235, 242, 255, 255),
-                    IM_COL32(30,  80,  180, 255),
-                    g_darkTheme ? IM_COL32(120, 175, 255, 255) : IM_COL32(10, 100, 220, 255),
+                    IM_COL32(238, 235, 255, 255),
+                    IM_COL32(58,  48,  140, 255),
+                    g_darkTheme ? IM_COL32(170, 158, 255, 255) : IM_COL32(96, 80, 220, 255),
                     XS("Загрузить"));
 
                 DrawBtn(b2X, bw3,
@@ -3503,8 +3508,8 @@ void RenderMenu() {
             ldl->AddImageRounded((ImTextureID)(intptr_t)g_sprite.texture,
                 {cx - Rad, cy - Rad}, {cx + Rad, cy + Rad}, {u0, v0}, {u1, v1}, IM_COL32(255, 255, 255, 255), Rad);
         } else {
-            ImU32 avatarBg   = g_darkTheme ? IM_COL32(40, 60, 90, 255)   : IM_COL32(200, 218, 240, 255);
-            ImU32 avatarFig  = g_darkTheme ? IM_COL32(70, 100, 145, 255)  : IM_COL32(120, 148, 185, 255);
+            ImU32 avatarBg   = g_darkTheme ? IM_COL32(52, 48, 96, 255)    : IM_COL32(219, 214, 247, 255);
+            ImU32 avatarFig  = g_darkTheme ? IM_COL32(100, 92, 170, 255)  : IM_COL32(146, 136, 205, 255);
             ldl->AddCircleFilled({cx, cy}, Rad, avatarBg, 64);
             float hR = Rad * 0.30f;
             ldl->AddCircleFilled({cx, cy - Rad * 0.22f}, hR, avatarFig, 32);
@@ -3560,8 +3565,13 @@ void RenderMenu() {
         float px0 = wp.x + pad, px1 = wp.x + lW - pad;
         float py   = pill_screen_y, ph = tabH;
         float py0  = py + tabPad - 4.f, py1 = py + ph - tabPad + 4.f;
+        // Активная вкладка: карточка + лёгкая акцентная подложка, тонкая
+        // обводка и короткая «капсула»-индикатор слева вместо толстой рамки.
         fdl->AddRectFilled({px0, py0}, {px1, py1}, C::U(C::Card()), pR);
-        fdl->AddRect({px0, py0}, {px1, py1}, C::U(C::Acc()), pR, 0, 4.f);
+        fdl->AddRectFilled({px0, py0}, {px1, py1}, C::UA(C::Acc(), g_darkTheme ? 0.14f : 0.08f), pR);
+        fdl->AddRect({px0, py0}, {px1, py1}, C::UA(C::Acc(), 0.55f), pR, 0, 1.5f);
+        float iy0 = (py0 + py1) * 0.5f - 14.f, iy1 = (py0 + py1) * 0.5f + 14.f;
+        fdl->AddRectFilled({px0 - 2.f, iy0}, {px0 + 4.f, iy1}, C::U(C::Acc()), 3.f);
     }
 
     {
