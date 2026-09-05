@@ -536,8 +536,9 @@ namespace Layout {
     static constexpr float PadX      = 20.f;
     static constexpr float BtnH      = 62.f;
     // Нижняя панель вкладок: строка по центру, иконка + подпись.
-    static constexpr float BottomH   = 92.f;
-    static constexpr float TabW      = 110.f;
+    // Кнопки крупные: панель выше и ячейки шире (~2x от первоначальных).
+    static constexpr float BottomH   = 150.f;
+    static constexpr float TabW      = 136.f;
 }
 
 struct InputState {
@@ -2922,8 +2923,8 @@ float TabContent(int tab, float dt, float cW) {
                 dl->AddRect({pos.x + inset, pos.y}, {pos.x + avW - inset, pos.y + rowH}, C::U(C::Sep()), R::Card, 0, 1.2f);
             ImGui::InvisibleButton("##exit", {avW, rowH});
             if (WasTappedHere() && !IsScrollDragging())
-                PopoverOpen(XS("Закрыть чит?"), 2);
-            const char* exitTxt = XS("Закрыть чит");
+                PopoverOpen(XS("Выйти?"), 2);
+            const char* exitTxt = XS("Выйти");
             float exitFS = ImGui::GetFontSize() * 1.15f;
             auto  tsz = ImGui::GetFont()->CalcTextSizeA(exitFS, FLT_MAX, 0, exitTxt);
             float tx  = pos.x + (avW - tsz.x) * 0.5f;
@@ -3495,8 +3496,10 @@ void RenderMenu() {
         ldl->AddLine({lpPos.x + 14.f, lpPos.y}, {lpPos.x + WW - 14.f, lpPos.y},
                      C::UA(C::Sep(), 0.8f), 1.f);
 
-        // Аватар-спрайт — слева на панели, не мешает вкладкам по центру.
-        {
+        // Аватар-спрайт — слева на панели, только когда он не наезжает на
+        // центрированный ряд крупных вкладок (на узком окне прячется).
+        const float avatarRoom = 22.f + 28.f * 2.f + 14.f;
+        if ((WW - Layout::TabW * kTabCount) * 0.5f >= avatarRoom) {
             const float Rad = 28.f;
             float cx = lpPos.x + 22.f + Rad, cy = lpPos.y + botH * 0.5f;
             ldl->AddCircleFilled({cx + 1.5f, cy + 2.f}, Rad, IM_COL32(0, 0, 0, 25), 48);
@@ -3555,27 +3558,27 @@ void RenderMenu() {
         {
             auto*       fdl = ImGui::GetForegroundDrawList();
             const float pR  = R::Pill;
-            float px0 = pillX + 7.f,        px1 = pillX + tabW - 7.f;
-            float py0 = barY + 9.f,         py1 = barY + botH - 11.f;
+            float px0 = pillX + 8.f,        px1 = pillX + tabW - 8.f;
+            float py0 = barY + 12.f,        py1 = barY + botH - 14.f;
             fdl->AddRectFilled({px0, py0}, {px1, py1}, C::U(C::Card()), pR);
             fdl->AddRectFilled({px0, py0}, {px1, py1}, C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), pR);
             fdl->AddRect({px0, py0}, {px1, py1}, C::UA(C::Acc(), 0.5f), pR, 0, 1.5f);
             // Короткая акцентная полоска сверху — указывает на активную вкладку.
             float icx = (px0 + px1) * 0.5f;
-            fdl->AddRectFilled({icx - 13.f, barY - 1.f}, {icx + 13.f, barY + 3.f}, C::U(C::Acc()), 2.f);
+            fdl->AddRectFilled({icx - 16.f, barY - 1.f}, {icx + 16.f, barY + 3.f}, C::U(C::Acc()), 2.f);
         }
 
         // Вкладка = иконка сверху + подпись под ней, всё по центру ячейки.
         {
             auto* fdl = ImGui::GetForegroundDrawList();
-            const float iconSize = 36.f;
-            const float lblFS    = ImGui::GetFontSize() * 0.72f;
+            const float iconSize = 62.f;
+            const float lblFS    = ImGui::GetFontSize() * 0.95f;
             for (int i = 0; i < kTabCount; i++) {
                 float  px     = tab_rects[i].sx;
                 bool   active = (i == g_state.cur_tab);
                 ImVec4 col    = active ? C::Acc() : C::Dim();
                 auto   tsz    = ImGui::GetFont()->CalcTextSizeA(lblFS, FLT_MAX, 0, tabNames[i]);
-                float  blockH = iconSize + 4.f + tsz.y;
+                float  blockH = iconSize + 6.f + tsz.y;
                 float  iconY  = barY + (botH - blockH) * 0.5f;
                 float  cxr    = px + tabW * 0.5f;
                 if (i == 3) {
@@ -3612,7 +3615,7 @@ void RenderMenu() {
                         IM_COL32(255, 255, 255, active ? 255 : 200), letter);
                 }
                 fdl->AddText(ImGui::GetFont(), lblFS,
-                    {cxr - tsz.x * 0.5f, iconY + iconSize + 4.f}, C::U(col), tabNames[i]);
+                    {cxr - tsz.x * 0.5f, iconY + iconSize + 6.f}, C::U(col), tabNames[i]);
             }
         }
 
