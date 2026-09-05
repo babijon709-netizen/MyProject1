@@ -3468,10 +3468,13 @@ void RenderMenu() {
     if (g_state.tab_alpha > .999f) g_state.tab_alpha = 1.f;
     SpringTick(g_state.tab_slide, g_state.tab_slide_vel, 0.f, dt);
 
-    // Короткие и понятные названия вкладок.
+    // Короткие и понятные названия вкладок (индекс = id вкладки).
     const char* tabNames[kTabCount] = {
-        XS("Инфо"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")
+        XS("Меню"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")
     };
+    // Порядок кнопок на панели: «Меню» (бывш. Инфо) идёт после «Разное».
+    // id контента вкладок не меняются — конфиги и логика остаются как были.
+    static constexpr int kTabOrder[kTabCount] = {1, 2, 3, 0, 4, 5};
 
     // ---- Нижняя панель вкладок -----------------------------------------
     {
@@ -3490,8 +3493,9 @@ void RenderMenu() {
         const float rowW   = tabW * kTabCount;
         const float startX = (WW - rowW) * 0.5f;
 
-        for (int i = 0; i < kTabCount; i++) {
-            ImGui::SetCursorPos({startX + i * tabW, 0});
+        for (int s = 0; s < kTabCount; s++) {
+            const int i = kTabOrder[s];   // id вкладки в этой позиции панели
+            ImGui::SetCursorPos({startX + s * tabW, 0});
             auto pos2 = ImGui::GetCursorScreenPos();
             tab_rects[i] = {pos2.x};
             char tabId[16];
@@ -3591,7 +3595,7 @@ void RenderMenu() {
 
     {
         // Шапка: заголовок вкладки по центру.
-        const char* titles[kTabCount] = {XS("Инфо"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")};
+        const char* titles[kTabCount] = {XS("Меню"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")};
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
         const float hH = Layout::HeaderH;

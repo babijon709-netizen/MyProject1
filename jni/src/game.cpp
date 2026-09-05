@@ -2774,7 +2774,7 @@ static float head_lift_for_range(const Vec3& world) {
 // turning from his -- the three things that have no reliable answer on this
 // build. Set per player just below, applied here, and it only shifts the
 // point the aim steers to: the ESP box still draws where the man actually is.
-static constexpr float kAimLeadSeconds = 0.055F;
+static constexpr float kAimLeadSeconds = 0.060F;
 static Vec3 g_aim_lead{};
 
 static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat4& vp, float sw, float sh) {
