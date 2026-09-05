@@ -1719,8 +1719,12 @@ void DrawWatermark(float dt) {
     // меню.
     {
         int enemies = 0;
-        if (g_esp_attached)
-            enemies = (int)FrameBoxes(scrW, scrH).size();
+        if (g_esp_attached) {
+            // Обновляем снимок кадра (кэшируется на кадр) и берём число
+            // игроков вокруг на все 360° — не только тех, кто попал на экран.
+            FrameBoxes(scrW, scrH);
+            enemies = esp_nearby_player_count();
+        }
 
         const float fs = 40.f, pad = 22.f, bR = 46.f;
         const char* lbl = XS("Противники");

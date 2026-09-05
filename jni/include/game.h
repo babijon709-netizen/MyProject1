@@ -79,6 +79,11 @@ std::vector<EspMarker> esp_get_markers();
 void        esp_set_aim_bones_enabled(bool enabled);
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 
+// Players near the local player as of the last esp_get_boxes() call, in all
+// directions (360 degrees) — NOT limited to the ones visible on screen.
+// Feeds the enemy-counter pill in the overlay.
+int         esp_nearby_player_count();
+
 // True while the local player is aiming down sights (ADS) with the current
 // weapon. Returns false when the state cannot be read (not attached, no
 // weapon, menus, etc.), so "aim only while scoped" fails closed.

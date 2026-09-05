@@ -3184,6 +3184,9 @@ static bool g_frame_vp_valid = false;
 static float g_frame_sw = 0.0F, g_frame_sh = 0.0F;
 static Vec3 g_frame_local_pos{};
 static bool g_frame_local_valid = false;
+// Players near us this frame (all 360 degrees, not only the ones projected
+// on screen). Feeds the enemy-counter pill in the overlay.
+static int  g_frame_player_count = 0;
 static int      g_frame_transforms_empty_streak = 0;
 // Frames in a row esp_get_boxes() gave up before publishing this frame's
 // camera / local position (see the watchdog at the top of it).
@@ -3259,6 +3262,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // an early return here can never leave them projecting through a stale one.
     g_frame_vp_valid = false;
     g_frame_local_valid = false;
+    g_frame_player_count = 0;
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
 
@@ -3461,6 +3465,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
         }
 
+        // Counted before any screen-space checks: the pill counter must see
+        // players behind us too (360 degrees), not only the ones on screen.
+        ++g_frame_player_count;
+
         // Crouch-aware body height from the character controller.
         PlayerAux& aux = player_aux(s_transforms[i]);
         const bool crouched = player_is_crouched(aux);
@@ -3619,6 +3627,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     return result;
 }
+
+int esp_nearby_player_count() { return g_frame_player_count; }
 
 
 // ===================== World markers: ore nodes and animals =====================
