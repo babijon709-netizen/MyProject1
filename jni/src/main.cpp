@@ -3092,13 +3092,13 @@ static void UpdateAim(float dt) {
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f; // absolute camera angles
     static bool  s_haveLast = false;
     static float s_lastDx = 0.f, s_lastDy = 0.f; // finger delta applied last frame
-    // Pixels per degree = base * scale, with the scale found from whether our
-    // own commands land, never from the camera. See the step sizing below.
-    static float s_scale = 0.5f;
-    static float s_prevErrYaw = 0.f, s_prevK = 0.f;
+    // Previous screen-space error, for the damping term. No gain, no scale,
+    // no estimate of any kind is carried between frames.
+    static float s_prevEx = 0.f, s_prevEy = 0.f;
     static bool  s_havePrevErr = false;
-    const float kBasePxPerDeg = 20.f;   // scale 1 assumes 0.05 deg per pixel
-    const float kScaleMin = 0.05f, kScaleMax = 40.f;
+    // Largest finger step allowed this frame, in pixels. Starts small on a
+    // fresh target and grows only while it is the thing holding the aim back.
+    static float s_cap = 3.f;
     static unsigned long long s_lastId = 0;        // sticky target
     static int   s_lostFrames = 0;
     static int   s_holdFrames = 0;
@@ -3220,7 +3220,7 @@ static void UpdateAim(float dt) {
         return;
     }
     s_lostFrames = 0;
-    if (best.id != s_lastId) { s_haveLast = false; s_havePrevErr = false; }
+    if (best.id != s_lastId) { s_haveLast = false; s_havePrevErr = false; s_cap = 3.f; }
 
     // ---- where the target is going ------------------------------------
     // The reason a crosshair trails a running man is not the controller, it
@@ -3473,54 +3473,83 @@ static void UpdateAim(float dt) {
     if (k < 0.05f) k = 0.05f;
 
     // ---- how big a finger move to send --------------------------------
-    // The obvious way to size it is to measure how many degrees the camera
-    // turned per pixel we sent. On a real phone that measurement is
-    // worthless. A log from an actual fight has the camera swinging tens of
-    // degrees while our finger moves one or two pixels, because the player is
-    // turning it himself; divide one by the other and you have measured his
-    // thumb. It came out NEGATIVE in more than half the frames -- a crosshair
-    // driven away from the target -- and the vertical figure came out six
-    // times smaller than the horizontal one, which threw the finger at the
-    // top of the look area over and over.
+    // Nothing here measures anything about this phone or this game. The whole
+    // controller lives in screen pixels, and that is the point.
     //
-    // So nothing here looks at the camera. The only question asked is whether
-    // OUR OWN last command did what it was asked to do: the error was meant
-    // to shrink by a known fraction and it either did or it did not. Too
-    // little, push harder; shot past, back off -- and back off faster than we
-    // advance, which is what keeps this out of oscillation. The player's own
-    // turning moves the error too, but that is honest: the aim really does
-    // have to answer for it.
-    if (s_havePrevErr && s_fingerDown && fabsf(s_lastDx) >= 2.f && fabsf(s_prevErrYaw) > 0.5f) {
-        const float expected = s_prevErrYaw * (1.f - s_prevK) + velYawNow * dt;
-        const float actual = best.yaw;
-        if (std::isfinite(expected) && std::isfinite(actual)) {
-            if (actual * s_prevErrYaw < 0.f && fabsf(actual) > fabsf(s_prevErrYaw) * 0.35f)
-                s_scale *= 0.6f;                                   // shot past it
-            else if (actual * s_prevErrYaw > 0.f && fabsf(actual) > fabsf(expected) * 1.6f)
-                s_scale *= 1.15f;                                  // barely moved
-            else if (actual * s_prevErrYaw > 0.f && fabsf(actual) > fabsf(expected) * 1.15f)
-                s_scale *= 1.05f;
-            if (s_scale < kScaleMin) s_scale = kScaleMin;
-            if (s_scale > kScaleMax) s_scale = kScaleMax;
-        }
-    }
-    const float pxPerDeg = kBasePxPerDeg * s_scale;
+    // Working in degrees means needing degrees-per-pixel-of-finger, which is
+    // the in-game look sensitivity -- unknowable without measuring, and every
+    // attempt to measure it on a live phone failed for the same reason: the
+    // camera is turned mostly by the player himself, so anything divided by
+    // our own finger travel measures his thumb. Adapting a multiplier from
+    // how well our commands land fails the same way, just more slowly: the
+    // player's own turning walks the multiplier upwards until the aim throws
+    // itself across the screen.
+    //
+    // In screen pixels the unknown almost disappears. A finger drag of one
+    // pixel slides the view by (sensitivity * pixels-per-degree) pixels, and
+    // in a phone shooter that product sits near a half: dragging across the
+    // screen turns you most of the way round, on every handset, because that
+    // is what makes a touch look control usable in the first place. So one
+    // fixed fraction works everywhere, and the same fraction on any device.
+    // It is deliberately below the value that would land the crosshair in a
+    // single frame: undershooting converges smoothly from any sensitivity,
+    // while overshooting is what flings the aim from side to side.
+    const float kPull = 1.4f;   // finger pixels per screen pixel of error
+    const float kDamp = 0.35f;   // brake on error already closing fast
 
-    float dx =  best.yaw   * k * pxPerDeg;
-    float dy = -best.pitch * k * pxPerDeg;
+    // Error in screen pixels, including the lead already folded into best.
+    const float pxPerDeg = (degPerPx > 1e-6f) ? (1.f / degPerPx) : 20.f;
+    float ex = best.yaw * pxPerDeg;
+    float ey = -best.pitch * pxPerDeg;
 
-    s_prevErrYaw = best.yaw;
-    s_prevK = k;
+    // Damping: subtract part of how fast the error is already closing, so a
+    // phone whose sensitivity is at the high end settles instead of ringing.
+    const bool havePrev = s_havePrevErr;
+    const float prevEx = s_prevEx;
+    float dex = 0.f, dey = 0.f;
+    if (havePrev) { dex = ex - s_prevEx; dey = ey - s_prevEy; }
+    s_prevEx = ex; s_prevEy = ey;
     s_havePrevErr = true;
 
-    // Clamp per-frame travel. A step that eats a large part of the look area
-    // only forces the finger to be lifted and put back, and the camera does
-    // not move at all while that happens.
-    const float maxStep = sw * 0.10f;
-    if (dx >  maxStep) dx =  maxStep;
-    if (dx < -maxStep) dx = -maxStep;
-    if (dy >  maxStep) dy =  maxStep;
-    if (dy < -maxStep) dy = -maxStep;
+    // The speed slider scales the pull: 1 gentle, 10 full.
+    float dx = (ex * kPull + dex * kDamp) * k;
+    float dy = (ey * kPull + dey * kDamp) * k;
+
+    // ---- the step limit is what makes this safe on any phone -------------
+    // The fraction above assumes a typical look sensitivity. On a handset set
+    // several times higher it would ask for far too much and the crosshair
+    // would be flung past the target -- which is exactly what a measured
+    // sensitivity was supposed to prevent, and exactly what it failed at.
+    //
+    // So the size of the step is bounded instead, and the bound starts small
+    // and grows only while it is the thing holding the aim back. On a phone
+    // that turns a lot per pixel the aim arrives while the bound is still
+    // tiny and it never grows; on one that turns very little the bound climbs
+    // over a few hundredths of a second until it does. Overshooting collapses
+    // it again. The aim can therefore miss by at most one step -- a step that
+    // has already proven itself safe -- no matter what the game's settings
+    // are, and nothing about the phone is ever measured or remembered.
+    const float mag = fabsf(dx) > fabsf(dy) ? fabsf(dx) : fabsf(dy);
+    if (mag > s_cap && mag > 0.001f) { const float f = s_cap / mag; dx *= f; dy *= f; }
+
+    const bool flipped = havePrev && ex * prevEx < 0.f &&
+                         fabsf(ex) > fabsf(prevEx) * 0.6f;
+    const bool grew = havePrev && fabsf(prevEx) > 20.f &&
+                      fabsf(ex) > fabsf(prevEx) * 1.8f;
+    const float capMax = sw * 0.06f;
+    if (flipped || grew) {
+        s_cap *= 0.4f;
+        if (s_cap < 3.f) s_cap = 3.f;
+    } else if (mag >= s_cap * 0.99f && havePrev &&
+               fabsf(ex) > fabsf(prevEx) * 0.85f) {
+        // Only grow when the step is both maxed out AND failing to make a
+        // dent. On a phone that turns a lot per pixel, six pixels already
+        // clears most of the miss, so this never fires and the aim stays
+        // gentle. On one that turns very little, it fires every frame and
+        // the step climbs until it does the job.
+        s_cap *= 1.3f;
+        if (s_cap > capMax) s_cap = capMax;
+    }
 
     // Move in whole device units so the applied delta is exactly what we
     // measure next frame (gain learning) and the finger never accumulates a
@@ -3547,10 +3576,10 @@ static void UpdateAim(float dt) {
     }
     s_fx = nx; s_fy = ny;
     s_lastDx = dx; s_lastDy = dy;
-    g_aimDbg.gain = (pxPerDeg > 0.001f) ? (1.f / pxPerDeg) : 0.f;   // deg per px in use
-    g_aimDbg.gainPitch = s_scale;
+    g_aimDbg.gain = kPull;
+    g_aimDbg.gainPitch = s_cap;
     g_aimDbg.lastDx = s_lastDx;
-    g_aimDbg.expected = (pxPerDeg > 0.001f) ? (dx / pxPerDeg) : 0.f;   // degrees asked for
+    g_aimDbg.expected = dx * degPerPx;   // degrees asked for
     g_aimDbg.unitsPerPx = unitsPerPx;
     g_aimDbg.sw = sw; g_aimDbg.sh = sh; g_aimDbg.fov = camFov;
     g_aimDbg.slider = g_state.gun_str;
