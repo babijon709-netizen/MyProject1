@@ -363,8 +363,10 @@ void LoadTabIcons() {
     g_tabIcons[0] = LoadTexFromMemory(main_tab_png, (int)main_tab_png_len);
     g_tabIcons[1] = LoadTexFromMemory(aimbot_png,   (int)aimbot_png_len);
     g_tabIcons[2] = LoadTexFromMemory(visuals_png,  (int)visuals_png_len);
-    // Index mapping follows the tab order: 3=Мемори, 4=Конфиги, 5=Настройки.
-    g_tabIcons[3] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
+    // Tab order: 3=Разное, 4=Конфиги, 5=Опции. У «Разное» своя векторная
+    // иконка (рисуется кодом), поэтому текстура ему не нужна — иначе она
+    // дублировала бы иконку «Конфиги» (misc_png).
+    g_tabIcons[3] = 0;
     g_tabIcons[4] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
     g_tabIcons[5] = LoadTexFromMemory(settings_png, (int)settings_png_len);
 #endif
@@ -529,18 +531,13 @@ void ApplyTheme() {
 namespace Layout {
     static constexpr float RowH      = 78.f;
     static constexpr float SliderH   = 108.f;
-    static constexpr float HeaderH   = 72.f;
+    static constexpr float HeaderH   = 66.f;
     static constexpr float Inset     = 16.f;
     static constexpr float PadX      = 20.f;
-    // Рейл вкладок: иконка сверху + подпись снизу, поэтому ячейка выше,
-    // чем в старом горизонтальном списке.
-    static constexpr float TabH      = 82.f;
-    static constexpr float TabPad    = 5.f;
     static constexpr float BtnH      = 62.f;
-    // Ширина вертикального рейла вкладок (бывший сайдбар 265px).
-    static constexpr float RailW     = 96.f;
-    // Y, с которого в рейле начинаются вкладки (после аватара и разделителя).
-    static constexpr float RailTabsY = 118.f;
+    // Нижняя панель вкладок: строка по центру, иконка + подпись.
+    static constexpr float BottomH   = 92.f;
+    static constexpr float TabW      = 110.f;
 }
 
 struct InputState {
@@ -1208,10 +1205,11 @@ struct ScrollState {
     bool  sb_hot   = false;
 };
 
+// Позиция «пилюли» активной вкладки на нижней панели (экранный X) + пружина.
 static float pill_y   = -1.f;
 static float pill_vel =  0.f;
 
-struct TabRect { float sy; };
+struct TabRect { float sx; };
 static TabRect tab_rects[kTabCount];
 
 static void ScrollTick(ScrollState& s, bool mIn, bool blocked, float& maxScroll, float dt) {
@@ -1287,10 +1285,8 @@ static inline bool IsScrollDragging() { return g_scrollMain.dragging || g_scroll
 
 static ImVec2 g_popOpenClickPos = {-9999.f, -9999.f};
 
-// Минимальный размер окна. Узкий рейл вкладок (вместо широкого сайдбара)
-// позволяет ужимать окно сильнее — удобнее на небольших экранах.
-static const float WW_MIN = 760.f;
-static const float WH_MIN = 620.f;
+static const float WW_MIN = 840.f;
+static const float WH_MIN = 720.f;
 
 struct WindowState {
     ImVec2 pos              = {-1.f, -1.f};
@@ -2117,20 +2113,20 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
     };
 
     if (secId == 0) {
-        FgSHdr(XS("Кость прицела"));
+        FgSHdr(XS("Куда целиться"));
         FgCardBg(rH * 3);
         FgRadioRow(0, &g_state.aim_bone, g_state.ra_aim_head,   &g_state.a_aim_head,   XS("Голова"), false);
         FgRadioRow(1, &g_state.aim_bone, g_state.ra_aim_chest,  &g_state.a_aim_chest,  XS("Шея"), false);
         FgRadioRow(2, &g_state.aim_bone, g_state.ra_aim_pelvis, &g_state.a_aim_pelvis, XS("Тело"), true);
 
-        FgSHdr(XS("Приоритет цели"));
+        FgSHdr(XS("Выбор цели"));
         FgCardBg(rH * 3);
-        FgRadioRow(0, &g_state.aim_priority, g_state.ra_aim_pr0, &g_state.a_aim_pr0, XS("Сбалансированный"), false);
+        FgRadioRow(0, &g_state.aim_priority, g_state.ra_aim_pr0, &g_state.a_aim_pr0, XS("Умный"), false);
         FgRadioRow(1, &g_state.aim_priority, g_state.ra_aim_pr1, &g_state.a_aim_pr1, XS("Ближе к прицелу"), false);
-        FgRadioRow(2, &g_state.aim_priority, g_state.ra_aim_pr2, &g_state.a_aim_pr2, XS("Ближайший по дистанции"), true);
+        FgRadioRow(2, &g_state.aim_priority, g_state.ra_aim_pr2, &g_state.a_aim_pr2, XS("Ближе ко мне"), true);
 
     } else if (secId == 1) {
-        FgSHdr(XS("Внешний вид"));
+        FgSHdr(XS("Линии и боксы"));
         FgCardBg(Layout::SliderH);
         FgSliderRow(XS("Толщина"),   &g_state.esp_thick, 0.5f, 5.f,   "%.1f",     true, g_state.sl_esp_thick);
 
@@ -2458,80 +2454,6 @@ float TabContent(int tab, float dt, float cW) {
         const float inset = Layout::Inset, padX = Layout::PadX;
         const float fs = ImGui::GetFontSize();
 
-        // ---- Быстрый доступ: плитки 2x2 с главными функциями ----------
-        // Дашборд вместо пустой главной: самое нужное включается в один тап,
-        // без похода по вкладкам.
-        SHdr(XS("Быстрый доступ"));
-        {
-            struct QTile { const char* lbl; bool* v; float* a; };
-            QTile tiles[4] = {
-                { XS("Аимбот"),    &g_state.aim_touch,  &g_state.a_aim_touch  },
-                { XS("Бокс ESP"),  &g_state.esp_box,    &g_state.a_esp_box    },
-                { XS("Трейсеры"),  &g_state.esp_tracer, &g_state.a_esp_tracer },
-                { XS("Нет отдачи"), &g_noRecoilEnabled,  nullptr               },
-            };
-            static float s_nrA = 0.f;
-            Tick(s_nrA, g_noRecoilEnabled, dt);
-            tiles[3].a = &s_nrA;
-
-            const float gap   = 10.f;
-            const float tileH = 96.f;
-            auto  gp    = ImGui::GetCursorScreenPos();
-            float gx0   = gp.x + inset;
-            float tileW = (avW - inset * 2.f - gap) * 0.5f;
-            bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-            auto& io2 = ImGui::GetIO();
-
-            for (int ti = 0; ti < 4; ti++) {
-                int   r  = ti / 2, c2 = ti % 2;
-                float x0 = gx0 + c2 * (tileW + gap);
-                float y0 = gp.y + r * (tileH + gap);
-                float x1 = x0 + tileW, y1 = y0 + tileH;
-                float a  = EaseInOut(*tiles[ti].a);
-
-                // Фон: карточка, при включении подсвечивается акцентом.
-                ImVec4 sepV = C::Sep(); sepV.w = g_state.ui_show_sep ? 0.9f : 0.35f;
-                ImVec4 accB = C::Acc(); accB.w = 0.75f;
-                ImVec4 dimD = C::Dim(); dimD.w = 0.55f;
-                ImVec4 accF = C::Acc();
-                dl->AddRectFilled({x0, y0}, {x1, y1}, C::U(C::Card()), R::Card);
-                if (a > 0.01f)
-                    dl->AddRectFilled({x0, y0}, {x1, y1},
-                        C::UA(C::Acc(), (g_darkTheme ? 0.22f : 0.13f) * a), R::Card);
-                dl->AddRect({x0, y0}, {x1, y1}, C::Mix(sepV, accB, a), R::Card, 0, 1.4f);
-
-                // Индикатор-точка + подпись состояния.
-                float dcx = x0 + 18.f + 6.f, dcy = y0 + 24.f;
-                dl->AddCircleFilled({dcx, dcy}, 6.f, C::Mix(dimD, accF, a), 20);
-                if (a > 0.3f)
-                    dl->AddCircle({dcx, dcy}, 9.f, C::UA(C::Acc(), (a - 0.3f) * 0.6f), 20, 1.5f);
-
-                const char* stLbl = *tiles[ti].v ? XS("Вкл") : XS("Выкл");
-                float sfs = fs * 0.78f;
-                auto  ssz = fn->CalcTextSizeA(sfs, FLT_MAX, 0, stLbl);
-                ImVec4 dimS = C::Dim(); dimS.w = 0.85f;
-                dl->AddText(fn, sfs, {x1 - 16.f - ssz.x, y0 + 16.f}, C::Mix(dimS, accF, a), stLbl);
-
-                float lfs2 = fs * 1.08f;
-                dl->PushClipRect({x0 + 4.f, y0}, {x1 - 4.f, y1}, true);
-                dl->AddText(fn, lfs2, {x0 + 18.f, y1 - 18.f - lfs2}, C::U(C::Txt()), tiles[ti].lbl);
-                dl->PopClipRect();
-
-                char tid[16]; snprintf(tid, sizeof(tid), "##qt%d", ti);
-                ImGui::SetCursorScreenPos({x0, y0});
-                ImGui::InvisibleButton(tid, {tileW, tileH});
-                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
-                    *tiles[ti].v = !*tiles[ti].v;
-                    char b[160];
-                    snprintf(b, sizeof(b), XS("%s|%s"), tiles[ti].lbl, *tiles[ti].v ? XS("ON") : XS("OFF"));
-                    ShowToast(b); PlaySound(SND_CLICK);
-                }
-                (void)io2;
-            }
-            ImGui::SetCursorScreenPos({gp.x, gp.y + tileH * 2.f + gap});
-            ImGui::Dummy({avW, 0.f});
-        }
-
         SHdr(XS("\xd0\xa0\xd0\xb0\xd0\xb7\xd1\x80\xd0\xb0\xd0\xb1\xd0\xbe\xd1\x82\xd1\x87\xd0\xb8\xd0\xba"));
         {
             const float avatarR = 44.f;
@@ -2626,36 +2548,28 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::bone       = g_state.aim_bone;
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
 
-        SHdr(XS("Аимбот"));
+        SHdr(XS("Аим"));
         CardBg(Layout::RowH * 4);
-        ToggleRow("##ta1", XS("Включить аимбот"),    &g_state.aim_touch,   g_state.a_aim_touch, false, true);
-        ToggleRow("##ta6", XS("Только с прицелом"),   &g_state.aim_scope_only, g_state.a_aim_scope, false);
-        ToggleRow("##ta2", XS("Проверка видимости"),  &g_state.aim_pos,     g_state.a_aim_pos,   false);
-        ToggleRow("##ta3", XS("Показывать FOV круг"), &g_state.aim_special, g_state.a_aim_spec,  true);
+        ToggleRow("##ta1", XS("Аим"),          &g_state.aim_touch,   g_state.a_aim_touch, false, true);
+        ToggleRow("##ta6", XS("Только в прицеле"), &g_state.aim_scope_only, g_state.a_aim_scope, false);
+        ToggleRow("##ta2", XS("Только видимых"),   &g_state.aim_pos,     g_state.a_aim_pos,   false);
+        ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true);
 
-        SHdr(XS("FOV аимбота"));
-        CardBg(Layout::SliderH);
-        SliderRow("##afov", XS("Радиус FOV"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), true, true, g_state.sl_gun_fov, dt);
+        SHdr(XS("Наводка"));
+        CardBg(Layout::SliderH * 2);
+        SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
+        SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, false, g_state.sl_gun_str, dt);
 
-        SHdr(XS("Скорость наводки"));
-        CardBg(Layout::SliderH);
-        SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, true, g_state.sl_gun_str, dt);
-
-        SHdr(XS("Триггер бот"));
-        CardBg(Layout::RowH * 1);
+        SHdr(XS("Триггер"));
+        CardBg(Layout::RowH + Layout::SliderH);
         { static float _a_tbot = 0.f; Tick(_a_tbot, cfg::aim::trigger_bot, dt);
-          ToggleRow("##ta5", XS("Триггер бот"), &cfg::aim::trigger_bot, _a_tbot, true); }
+          ToggleRow("##ta5", XS("Автовыстрел"), &cfg::aim::trigger_bot, _a_tbot, false, true); }
+        SliderRow("##atrig", XS("Задержка"), &g_state.gun_trigger_delay, 0.0f, 1.0f, XS("%.1f с"), true, false, g_state.sl_gun_trig, dt);
 
-        SHdr(XS("Задержка триггера"));
-        CardBg(Layout::SliderH);
-        SliderRow("##atrig", XS("Задержка"), &g_state.gun_trigger_delay, 0.0f, 1.0f, "%.1f", true, true, g_state.sl_gun_trig, dt);
-
-        ImGui::Dummy({1.f, 16.f});
-
-        SHdr(XS("Нет отдачи"));
+        SHdr(XS("Оружие"));
         CardBg(Layout::RowH * 1);
         { static float _a_nr = 0.f; Tick(_a_nr, g_noRecoilEnabled, dt);
-          ToggleRow("##nr1", XS("Нет отдачи"), &g_noRecoilEnabled, _a_nr, true); }
+          ToggleRow("##nr1", XS("Без отдачи"), &g_noRecoilEnabled, _a_nr, true); }
 
         ImGui::Dummy({1.f, 12.f});
 
@@ -2728,39 +2642,49 @@ float TabContent(int tab, float dt, float cW) {
                 dl->AddLine({cX+padX, pos.y+rowH-0.5f},{cX+cW2-padX, pos.y+rowH-0.5f}, C::UA(C::Sep(),0.35f), 0.8f);
         };
 
-        SHdr(XS("ESP"));
+        SHdr(XS("Игроки"));
         {
             struct ERow { const char* id; const char* lbl; bool* v; float* a; ImVec4* col; };
             ERow rows[] = {
-                {"##vb",  XS("Бокс"),           &g_state.esp_box,          &g_state.a_esp_box,          &cfg::esp::box_col},
-                {"##v3",  XS("3D рамка"),       &g_state.esp_chams,        &g_state.a_esp_chams,        &cfg::esp::box_col_invis},
-                {"##vn",  XS("Имена"),          &g_state.esp_name,         &g_state.a_esp_name,         &cfg::esp::name_col},
-                {"##vd",  XS("Дистанция"),      &g_state.esp_wall,         &g_state.a_esp_wall,         &cfg::esp::distance_col},
-                {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
-                {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
-                {"##vsk", XS("Скелет"),         &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
-                // No colour dot: every resource paints itself (stone grey,
-                // metal orange, sulfur yellow).
-                {"##vor", XS("Руды"),           &g_state.esp_ore,          &g_state.a_esp_ore,          nullptr},
-                {"##van", XS("Животные"),       &g_state.esp_animal,       &g_state.a_esp_animal,       &cfg::esp::animal_col},
-                {"##vlt", XS("Ящики"),          &g_state.esp_loot,         &g_state.a_esp_loot,         &cfg::esp::loot_col},
-                {"##vpk", XS("Подбираемое"),    &g_state.esp_pickup,       &g_state.a_esp_pickup,       &cfg::esp::pickup_col},
-                {"##vtm", XS("Тиммейты"),       &g_state.esp_team,         &g_state.a_esp_team,         &cfg::esp::ally_col},
+                {"##vb",  XS("Боксы"),      &g_state.esp_box,          &g_state.a_esp_box,          &cfg::esp::box_col},
+                {"##v3",  XS("3D боксы"),   &g_state.esp_chams,        &g_state.a_esp_chams,        &cfg::esp::box_col_invis},
+                {"##vn",  XS("Ники"),       &g_state.esp_name,         &g_state.a_esp_name,         &cfg::esp::name_col},
+                {"##vd",  XS("Дистанция"),  &g_state.esp_wall,         &g_state.a_esp_wall,         &cfg::esp::distance_col},
+                {"##vw",  XS("Оружие"),     &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
+                {"##vtr", XS("Линии"),      &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
+                {"##vsk", XS("Скелеты"),    &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
+                {"##vtm", XS("Свои"),       &g_state.esp_team,         &g_state.a_esp_team,         &cfg::esp::ally_col},
             };
-            constexpr int N = 12;
-            CardBg(rowH * N);
-            for (int i = 0; i < N; i++) {
-                EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
-            }
+            constexpr int NP = 8;
+            CardBg(rowH * NP);
+            for (int i = 0; i < NP; i++)
+                EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NP-1);
         }
 
-        SHdr(XS("Дальность маркеров"));
+        SHdr(XS("Мир"));
+        {
+            struct ERow { const char* id; const char* lbl; bool* v; float* a; ImVec4* col; };
+            ERow rows[] = {
+                // No colour dot: every resource paints itself (stone grey,
+                // metal orange, sulfur yellow).
+                {"##vor", XS("Руда"),      &g_state.esp_ore,          &g_state.a_esp_ore,          nullptr},
+                {"##van", XS("Животные"), &g_state.esp_animal,       &g_state.a_esp_animal,       &cfg::esp::animal_col},
+                {"##vlt", XS("Ящики"),    &g_state.esp_loot,         &g_state.a_esp_loot,         &cfg::esp::loot_col},
+                {"##vpk", XS("Предметы"), &g_state.esp_pickup,       &g_state.a_esp_pickup,       &cfg::esp::pickup_col},
+            };
+            constexpr int NW = 4;
+            CardBg(rowH * NW);
+            for (int i = 0; i < NW; i++)
+                EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NW-1);
+        }
+
+        SHdr(XS("Дальность"));
         CardBg(Layout::SliderH);
-        SliderRow("##vmd", XS("Руды/лут/животные"), &g_state.marker_dist,
+        SliderRow("##vmd", XS("Показывать до"), &g_state.marker_dist,
                   25.f, 300.f, XS("%.0f м"), true, true, g_state.sl_marker_dist, dt);
 
         ImGui::Dummy({1.f, 8.f});
-        CollapsibleHeader("##veh1", XS("Дополнительные настройки"), 1);
+        CollapsibleHeader("##veh1", XS("Ещё настройки"), 1);
 
         ImGui::Dummy({1.f, 12.f});
 
@@ -2774,7 +2698,7 @@ float TabContent(int tab, float dt, float cW) {
         const float inset = Layout::Inset, padX = Layout::PadX;
         const float fs = ImGui::GetFontSize();
 
-        SHdr(XS("Управление"));
+        SHdr(XS("Новый конфиг"));
         {
             const float btnH = 72.f;
             auto pos = ImGui::GetCursorScreenPos();
@@ -2804,7 +2728,7 @@ float TabContent(int tab, float dt, float cW) {
             dl->AddText(fn, fs * 1.25f, {icX + 32.f, textY}, C::U(C::Acc()), createTxt);
         }
 
-        SHdr(XS("Конфиги"));
+        SHdr(XS("Сохранённые"));
 
         if (g_configCount == 0) {
             const float emptyH = 120.f;
@@ -2979,13 +2903,13 @@ float TabContent(int tab, float dt, float cW) {
         }
 
     } else if (tab == 5) {
-        // Настройки (interface + system) — now the bottom-most tab.
+        // Опции (interface + system) — now the bottom-most tab.
         SHdr(XS("Интерфейс"));
         CardBg(Layout::RowH * 3);
-        ToggleRow("##uf2", XS("Показать фпс"),  &g_state.ui_fps,       g_state.a_ui_fps,  false, true);
+        ToggleRow("##uf2", XS("Счётчик FPS"),  &g_state.ui_fps,       g_state.a_ui_fps,  false, true);
         if (ToggleRow("##ud2", XS("Тёмная тема"), &g_state.ui_dark_mode, g_state.a_ui_dark, false))
             g_darkTheme = g_state.ui_dark_mode;
-        ToggleRow("##usep", XS("Разделители строк"), &g_state.ui_show_sep, g_state.a_ui_sep, true);
+        ToggleRow("##usep", XS("Рамки карточек"), &g_state.ui_show_sep, g_state.a_ui_sep, true);
 
         SHdr(XS("Система"));
         {
@@ -2998,8 +2922,8 @@ float TabContent(int tab, float dt, float cW) {
                 dl->AddRect({pos.x + inset, pos.y}, {pos.x + avW - inset, pos.y + rowH}, C::U(C::Sep()), R::Card, 0, 1.2f);
             ImGui::InvisibleButton("##exit", {avW, rowH});
             if (WasTappedHere() && !IsScrollDragging())
-                PopoverOpen(XS("Выйти из приложения?"), 2);
-            const char* exitTxt = XS("Выйти из приложения");
+                PopoverOpen(XS("Закрыть чит?"), 2);
+            const char* exitTxt = XS("Закрыть чит");
             float exitFS = ImGui::GetFontSize() * 1.15f;
             auto  tsz = ImGui::GetFont()->CalcTextSizeA(exitFS, FLT_MAX, 0, exitTxt);
             float tx  = pos.x + (avW - tsz.x) * 0.5f;
@@ -3007,14 +2931,14 @@ float TabContent(int tab, float dt, float cW) {
             dl->AddText(ImGui::GetFont(), exitFS, {tx, ty}, C::U(C::Red()), exitTxt);
         }
     } else if (tab == 3) {
-        // Мемори: пустая вкладка-заготовка под будущие функции.
+        // Разное: пустая вкладка-заготовка под будущие функции.
         auto* dl  = ImGui::GetWindowDrawList();
         auto* fn  = ImGui::GetFont();
         float avW = ImGui::GetContentRegionAvail().x;
         const float inset = Layout::Inset;
         const float fs = ImGui::GetFontSize();
 
-        SHdr(XS("Мемори"));
+        SHdr(XS("Разное"));
         {
             const float emptyH = 150.f;
             auto ep = ImGui::GetCursorScreenPos();
@@ -3472,7 +3396,7 @@ void RenderMenu() {
     if (!menu_open) return;
 
     const float WW = g_win.w, WH = g_win.h;
-    const float lW_ = Layout::RailW, hH_ = Layout::HeaderH;
+    const float hH_ = Layout::HeaderH;
 
     {
         bool inResize = io.MousePos.x >= g_win.pos.x + g_win.w - R::Card - 14.f
@@ -3500,15 +3424,12 @@ void RenderMenu() {
     {
         if (!io.MouseDown[0]) g_win.dragging = false;
 
-        const float tabsStartY = g_win.pos.y + Layout::RailTabsY;
-
         if (!g_win.dragging && io.MouseDown[0] && !(g_sheet.visible || (g_pop.visible && !g_pop.closing)) && !g_win.resizing) {
             float tx = io.MouseClickedPos[0].x, ty = io.MouseClickedPos[0].y;
-            bool inLeftHeader = tx >= g_win.pos.x      && tx < g_win.pos.x + lW_
-                             && ty >= g_win.pos.y       && ty < tabsStartY;
-            bool inRHdr       = tx >= g_win.pos.x + lW_ && tx < g_win.pos.x + g_win.w
-                             && ty >= g_win.pos.y        && ty < g_win.pos.y + hH_;
-            if (inLeftHeader || inRHdr) {
+            // Тащим окно за верхнюю шапку (по всей ширине).
+            bool inHdr = tx >= g_win.pos.x && tx < g_win.pos.x + g_win.w
+                      && ty >= g_win.pos.y && ty < g_win.pos.y + hH_;
+            if (inHdr) {
                 float dx = io.MousePos.x - io.MouseClickedPos[0].x;
                 float dy = io.MousePos.y - io.MouseClickedPos[0].y;
                 if (fabsf(dx) + fabsf(dy) > 8.f) {
@@ -3549,180 +3470,171 @@ void RenderMenu() {
     }
 
     ImVec2 wp = g_win.pos;
-    auto*  dl = ImGui::GetWindowDrawList();
-    // Компактный вертикальный рейл с иконками вместо широкого сайдбара:
-    // почти вся ширина окна отдана контенту.
-    const float lW = Layout::RailW, cH = g_win.h, cW = g_win.w - lW;
+    // Вкладки — нижняя панель (строка по центру), контент занимает всю ширину.
+    const float botH = Layout::BottomH;
+    const float cH = g_win.h - botH, cW = g_win.w;
 
     g_state.tab_alpha += (1.f - g_state.tab_alpha) * 5.f * dt;
     if (g_state.tab_alpha > .999f) g_state.tab_alpha = 1.f;
     SpringTick(g_state.tab_slide, g_state.tab_slide_vel, 0.f, dt);
 
-    ImGui::SetCursorPos({0, 0});
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
-    ImGui::BeginChild("##lp", {lW, cH}, false, ImGuiWindowFlags_NoScrollbar);
-    auto  lpPos = ImGui::GetWindowPos();
-    auto* ldl   = ImGui::GetWindowDrawList();
-    ldl->AddRectFilled(lpPos, {lpPos.x + lW, lpPos.y + cH}, C::U(C::LeftBg()), R::Card,
-                       ImDrawFlags_RoundCornersLeft);
-    ldl->AddLine({lpPos.x + lW, lpPos.y + 12.f}, {lpPos.x + lW, lpPos.y + cH - 12.f},
-                 C::UA(C::Sep(), 0.7f), 1.f);
-
-    {
-        // Аватар (анимированный спрайт) — компактный, в шапке рейла.
-        const float Rad = 30.f;
-        float cx = lpPos.x + lW * 0.5f, cy = lpPos.y + 18.f + Rad;
-        ldl->AddCircleFilled({cx + 1.5f, cy + 2.f}, Rad, IM_COL32(0, 0, 0, 25), 48);
-        ldl->AddCircleFilled({cx, cy}, Rad, C::U(C::Card()), 48);
-        if (g_sprite.texture) {
-            int col = g_sprite.frame % SpriteState::Cols;
-            int row = g_sprite.frame / SpriteState::Cols;
-            float u0 = col       / (float)SpriteState::Cols;
-            float u1 = (col + 1) / (float)SpriteState::Cols;
-            float v0 = row       / (float)SpriteState::Rows;
-            float v1 = (row + 1) / (float)SpriteState::Rows;
-            ldl->AddImageRounded((ImTextureID)(intptr_t)g_sprite.texture,
-                {cx - Rad, cy - Rad}, {cx + Rad, cy + Rad}, {u0, v0}, {u1, v1}, IM_COL32(255, 255, 255, 255), Rad);
-        } else {
-            ImU32 avatarBg   = g_darkTheme ? IM_COL32(52, 48, 96, 255)    : IM_COL32(219, 214, 247, 255);
-            ImU32 avatarFig  = g_darkTheme ? IM_COL32(100, 92, 170, 255)  : IM_COL32(146, 136, 205, 255);
-            ldl->AddCircleFilled({cx, cy}, Rad, avatarBg, 48);
-            float hR = Rad * 0.30f;
-            ldl->AddCircleFilled({cx, cy - Rad * 0.22f}, hR, avatarFig, 32);
-            ldl->AddRectFilled({cx - Rad * 0.42f, cy + Rad * 0.08f}, {cx + Rad * 0.42f, cy + Rad * 0.82f}, avatarFig, Rad * 0.22f);
-        }
-        ldl->AddCircle({cx, cy}, Rad + 2.f, C::UA(C::Acc(), 0.85f), 48, 2.f);
-
-        float sepY = lpPos.y + Layout::RailTabsY - 10.f;
-        ldl->AddLine({lpPos.x + 18.f, sepY}, {lpPos.x + lW - 18.f, sepY}, C::U(C::Sep()), 0.8f);
-    }
-
-    // Tab order: ... Визуалы, Мемори, Конфиги, Настройки — the Мемори tab is
-    // placed directly above the Конфиги (Config) tab.
+    // Короткие и понятные названия вкладок.
     const char* tabNames[kTabCount] = {
-        XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Мемори"), XS("Конфиги"), XS("Настройки")
+        XS("Инфо"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")
     };
-    const float tabH = Layout::TabH, tabPad = Layout::TabPad;
 
-    ImGui::SetCursorPosY(Layout::RailTabsY);
-    for (int i = 0; i < kTabCount; i++) {
-        auto pos2 = ImGui::GetCursorScreenPos();
-        tab_rects[i] = {pos2.y};
-        char tabId[16];
-        snprintf(tabId, sizeof(tabId), "##tab%d", i);
-        ImGui::InvisibleButton(tabId, {lW, tabH});
-        if (WasTappedHere() && !IsScrollDragging() && !g_input.touchConsumed && g_state.cur_tab != i) {
-            g_state.cur_tab       = i;
-            g_state.tab_alpha     = 0.f;
-            g_state.tab_slide     = 50.f;
-            g_state.tab_slide_vel = 0.f;
-            g_scrollMain          = {};
-            PlaySound(SND_CLICK);
-        }
-    }
-
+    // ---- Нижняя панель вкладок -----------------------------------------
     {
-        float targetRelY = tab_rects[g_state.cur_tab].sy - wp.y;
-        if (pill_y < 0.f) { pill_y = targetRelY; pill_vel = 0.f; }
-        SpringTick(pill_y, pill_vel, targetRelY, dt);
-    }
-    float pill_screen_y = wp.y + pill_y;
+        ImGui::SetCursorPos({0, cH});
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+        ImGui::BeginChild("##lp", {WW, botH}, false, ImGuiWindowFlags_NoScrollbar);
+        auto  lpPos = ImGui::GetWindowPos();
+        auto* ldl   = ImGui::GetWindowDrawList();
+        ldl->AddRectFilled(lpPos, {lpPos.x + WW, lpPos.y + botH}, C::U(C::LeftBg()), R::Card,
+                           ImDrawFlags_RoundCornersBottom);
+        ldl->AddLine({lpPos.x + 14.f, lpPos.y}, {lpPos.x + WW - 14.f, lpPos.y},
+                     C::UA(C::Sep(), 0.8f), 1.f);
 
-    {
-        // Плавающая подложка активной вкладки: скруглённый квадрат с лёгкой
-        // акцентной заливкой + «капсула»-индикатор на левом краю рейла.
-        auto*       fdl = ImGui::GetForegroundDrawList();
-        const float pad = 9.f, pR = R::Pill;
-        float px0 = wp.x + pad, px1 = wp.x + lW - pad;
-        float py0 = pill_screen_y + tabPad, py1 = pill_screen_y + tabH - tabPad;
-        fdl->AddRectFilled({px0, py0}, {px1, py1}, C::U(C::Card()), pR);
-        fdl->AddRectFilled({px0, py0}, {px1, py1}, C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), pR);
-        fdl->AddRect({px0, py0}, {px1, py1}, C::UA(C::Acc(), 0.5f), pR, 0, 1.5f);
-        float icy = (py0 + py1) * 0.5f;
-        fdl->AddRectFilled({wp.x - 2.f, icy - 13.f}, {wp.x + 4.f, icy + 13.f}, C::U(C::Acc()), 3.f);
-    }
-
-    {
-        // Вкладка = иконка сверху + короткая подпись под ней, всё по центру.
-        auto* fdl = ImGui::GetForegroundDrawList();
-        const float iconSize = 38.f;
-        const float lblFS    = ImGui::GetFontSize() * 0.66f;
-        for (int i = 0; i < kTabCount; i++) {
-            float  py     = tab_rects[i].sy;
-            bool   active = (i == g_state.cur_tab);
-            ImVec4 col    = active ? C::Acc() : C::Dim();
-            auto   tsz    = ImGui::GetFont()->CalcTextSizeA(lblFS, FLT_MAX, 0, tabNames[i]);
-            float  blockH = iconSize + 5.f + tsz.y;
-            float  iconY  = py + (tabH - blockH) * 0.5f;
-            float  cxr    = wp.x + lW * 0.5f;
-            if (g_tabIcons[i]) {
-                ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
-                ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
-                fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax,
-                    {0,0}, {1,1}, IM_COL32(255, 255, 255, active ? 255 : 165), 9.f);
+        // Аватар-спрайт — слева на панели, не мешает вкладкам по центру.
+        {
+            const float Rad = 28.f;
+            float cx = lpPos.x + 22.f + Rad, cy = lpPos.y + botH * 0.5f;
+            ldl->AddCircleFilled({cx + 1.5f, cy + 2.f}, Rad, IM_COL32(0, 0, 0, 25), 48);
+            ldl->AddCircleFilled({cx, cy}, Rad, C::U(C::Card()), 48);
+            if (g_sprite.texture) {
+                int col = g_sprite.frame % SpriteState::Cols;
+                int row = g_sprite.frame / SpriteState::Cols;
+                float u0 = col       / (float)SpriteState::Cols;
+                float u1 = (col + 1) / (float)SpriteState::Cols;
+                float v0 = row       / (float)SpriteState::Rows;
+                float v1 = (row + 1) / (float)SpriteState::Rows;
+                ldl->AddImageRounded((ImTextureID)(intptr_t)g_sprite.texture,
+                    {cx - Rad, cy - Rad}, {cx + Rad, cy + Rad}, {u0, v0}, {u1, v1}, IM_COL32(255, 255, 255, 255), Rad);
             } else {
-                // Заглушка: скруглённый квадрат с первой буквой вкладки.
-                ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
-                ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
-                fdl->AddRectFilled(iMin, iMax, C::UA(C::Acc(), active ? 0.9f : 0.35f), 9.f);
-                char letter[8] = {};
-                int gl = 0;
-                letter[gl++] = tabNames[i][0];
-                if ((unsigned char)tabNames[i][0] >= 0xC0) letter[gl++] = tabNames[i][1];
-                float gfs = iconSize * 0.55f;
-                auto gsz = ImGui::GetFont()->CalcTextSizeA(gfs, FLT_MAX, 0, letter);
-                fdl->AddText(ImGui::GetFont(), gfs,
-                    {cxr - gsz.x * 0.5f, iconY + (iconSize - gsz.y) * 0.5f},
-                    IM_COL32(255, 255, 255, active ? 255 : 200), letter);
+                ImU32 avatarBg   = g_darkTheme ? IM_COL32(52, 48, 96, 255)    : IM_COL32(219, 214, 247, 255);
+                ImU32 avatarFig  = g_darkTheme ? IM_COL32(100, 92, 170, 255)  : IM_COL32(146, 136, 205, 255);
+                ldl->AddCircleFilled({cx, cy}, Rad, avatarBg, 48);
+                float hR = Rad * 0.30f;
+                ldl->AddCircleFilled({cx, cy - Rad * 0.22f}, hR, avatarFig, 32);
+                ldl->AddRectFilled({cx - Rad * 0.42f, cy + Rad * 0.08f}, {cx + Rad * 0.42f, cy + Rad * 0.82f}, avatarFig, Rad * 0.22f);
             }
-            fdl->AddText(ImGui::GetFont(), lblFS,
-                {cxr - tsz.x * 0.5f, iconY + iconSize + 5.f}, C::U(col), tabNames[i]);
+            ldl->AddCircle({cx, cy}, Rad + 2.f, C::UA(C::Acc(), 0.85f), 48, 2.f);
         }
+
+        // Ряд вкладок строго по центру панели.
+        const float tabW   = Layout::TabW;
+        const float rowW   = tabW * kTabCount;
+        const float startX = (WW - rowW) * 0.5f;
+
+        for (int i = 0; i < kTabCount; i++) {
+            ImGui::SetCursorPos({startX + i * tabW, 0});
+            auto pos2 = ImGui::GetCursorScreenPos();
+            tab_rects[i] = {pos2.x};
+            char tabId[16];
+            snprintf(tabId, sizeof(tabId), "##tab%d", i);
+            ImGui::InvisibleButton(tabId, {tabW, botH});
+            if (WasTappedHere() && !IsScrollDragging() && !g_input.touchConsumed && g_state.cur_tab != i) {
+                g_state.cur_tab       = i;
+                g_state.tab_alpha     = 0.f;
+                g_state.tab_slide     = 50.f;
+                g_state.tab_slide_vel = 0.f;
+                g_scrollMain          = {};
+                PlaySound(SND_CLICK);
+            }
+        }
+
+        // Пружинная «пилюля» активной вкладки скользит по горизонтали.
+        {
+            float targetRelX = tab_rects[g_state.cur_tab].sx - wp.x;
+            if (pill_y < 0.f) { pill_y = targetRelX; pill_vel = 0.f; }
+            SpringTick(pill_y, pill_vel, targetRelX, dt);
+        }
+        float pillX = wp.x + pill_y;
+        float barY  = lpPos.y;
+
+        {
+            auto*       fdl = ImGui::GetForegroundDrawList();
+            const float pR  = R::Pill;
+            float px0 = pillX + 7.f,        px1 = pillX + tabW - 7.f;
+            float py0 = barY + 9.f,         py1 = barY + botH - 11.f;
+            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::U(C::Card()), pR);
+            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), pR);
+            fdl->AddRect({px0, py0}, {px1, py1}, C::UA(C::Acc(), 0.5f), pR, 0, 1.5f);
+            // Короткая акцентная полоска сверху — указывает на активную вкладку.
+            float icx = (px0 + px1) * 0.5f;
+            fdl->AddRectFilled({icx - 13.f, barY - 1.f}, {icx + 13.f, barY + 3.f}, C::U(C::Acc()), 2.f);
+        }
+
+        // Вкладка = иконка сверху + подпись под ней, всё по центру ячейки.
+        {
+            auto* fdl = ImGui::GetForegroundDrawList();
+            const float iconSize = 36.f;
+            const float lblFS    = ImGui::GetFontSize() * 0.72f;
+            for (int i = 0; i < kTabCount; i++) {
+                float  px     = tab_rects[i].sx;
+                bool   active = (i == g_state.cur_tab);
+                ImVec4 col    = active ? C::Acc() : C::Dim();
+                auto   tsz    = ImGui::GetFont()->CalcTextSizeA(lblFS, FLT_MAX, 0, tabNames[i]);
+                float  blockH = iconSize + 4.f + tsz.y;
+                float  iconY  = barY + (botH - blockH) * 0.5f;
+                float  cxr    = px + tabW * 0.5f;
+                if (i == 3) {
+                    // У «Разное» своя векторная иконка (сетка 2x2), чтобы не
+                    // совпадала с иконкой «Конфиги» из общего атласа.
+                    float half = iconSize * 0.5f;
+                    float gx0 = cxr - half, gy0 = iconY;
+                    float cell = iconSize * 0.44f, gap2 = iconSize - cell * 2.f;
+                    ImU32 gcol = C::UA(C::Acc(), active ? 1.f : 0.55f);
+                    float rr = cell * 0.3f;
+                    fdl->AddRectFilled({gx0, gy0}, {gx0 + cell, gy0 + cell}, gcol, rr);
+                    fdl->AddRectFilled({gx0 + cell + gap2, gy0}, {gx0 + iconSize, gy0 + cell}, gcol, rr);
+                    fdl->AddRectFilled({gx0, gy0 + cell + gap2}, {gx0 + cell, gy0 + iconSize}, gcol, rr);
+                    // Четвёртый квадрат — контурный, чтобы иконка читалась как «прочее».
+                    fdl->AddRect({gx0 + cell + gap2, gy0 + cell + gap2}, {gx0 + iconSize, gy0 + iconSize}, gcol, rr, 0, 2.f);
+                } else if (g_tabIcons[i]) {
+                    ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
+                    ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
+                    fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax,
+                        {0,0}, {1,1}, IM_COL32(255, 255, 255, active ? 255 : 165), 9.f);
+                } else {
+                    // Заглушка: скруглённый квадрат с первой буквой вкладки.
+                    ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
+                    ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
+                    fdl->AddRectFilled(iMin, iMax, C::UA(C::Acc(), active ? 0.9f : 0.35f), 9.f);
+                    char letter[8] = {};
+                    int gl = 0;
+                    letter[gl++] = tabNames[i][0];
+                    if ((unsigned char)tabNames[i][0] >= 0xC0) letter[gl++] = tabNames[i][1];
+                    float gfs = iconSize * 0.55f;
+                    auto gsz = ImGui::GetFont()->CalcTextSizeA(gfs, FLT_MAX, 0, letter);
+                    fdl->AddText(ImGui::GetFont(), gfs,
+                        {cxr - gsz.x * 0.5f, iconY + (iconSize - gsz.y) * 0.5f},
+                        IM_COL32(255, 255, 255, active ? 255 : 200), letter);
+                }
+                fdl->AddText(ImGui::GetFont(), lblFS,
+                    {cxr - tsz.x * 0.5f, iconY + iconSize + 4.f}, C::U(col), tabNames[i]);
+            }
+        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
     }
 
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-
-    ImGui::SetCursorPos({lW, 0});
+    ImGui::SetCursorPos({0, 0});
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
     ImGui::BeginChild("##cp", {cW, cH}, false,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     {
-        // Шапка: крупный заголовок слева (не по центру) + статус-чип
-        // подключения к игре справа — видно сразу, работает ли инжект.
-        const char* titles[kTabCount] = {XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Мемори"), XS("Конфиги"), XS("Настройки")};
+        // Шапка: заголовок вкладки по центру.
+        const char* titles[kTabCount] = {XS("Инфо"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")};
         auto*  cdl = ImGui::GetWindowDrawList();
-        auto*  fn  = ImGui::GetFont();
         auto   hp  = ImGui::GetWindowPos();
         const float hH = Layout::HeaderH;
-        const float fs = ImGui::GetFontSize();
-        const float titleFS = fs * 1.55f;
-        auto tsz = fn->CalcTextSizeA(titleFS, FLT_MAX, 0, titles[g_state.cur_tab]);
-        float tY = hp.y + (hH - tsz.y) * 0.5f + 4.f;
-        cdl->AddText(fn, titleFS, {hp.x + Layout::Inset + 10.f, tY},
-                     C::U(C::Txt()), titles[g_state.cur_tab]);
-
-        {
-            bool ok = g_esp_attached;
-            const char* stTxt = ok ? XS("В игре") : XS("Поиск игры");
-            float stFS = fs * 0.82f;
-            auto  ssz  = fn->CalcTextSizeA(stFS, FLT_MAX, 0, stTxt);
-            float dotR = 4.5f, padX2 = 12.f, chipH = ssz.y + 14.f;
-            float chipW = padX2 + dotR * 2.f + 7.f + ssz.x + padX2;
-            float cx1 = hp.x + cW - Layout::Inset - 10.f;
-            float cy0 = hp.y + (hH - chipH) * 0.5f + 4.f;
-            ImVec4 stCol = ok ? ImVec4{0.24f, 0.78f, 0.42f, 1.f} : ImVec4{1.00f, 0.62f, 0.18f, 1.f};
-            cdl->AddRectFilled({cx1 - chipW, cy0}, {cx1, cy0 + chipH},
-                               C::UA(stCol, g_darkTheme ? 0.16f : 0.12f), chipH * 0.5f);
-            cdl->AddRect({cx1 - chipW, cy0}, {cx1, cy0 + chipH},
-                         C::UA(stCol, 0.45f), chipH * 0.5f, 0, 1.2f);
-            // «Дыхание» точки, пока идёт поиск процесса игры.
-            float pulse = ok ? 1.f : (0.55f + 0.45f * sinf((float)ImGui::GetTime() * 4.f));
-            cdl->AddCircleFilled({cx1 - chipW + padX2 + dotR, cy0 + chipH * 0.5f},
-                                 dotR, C::UA(stCol, pulse), 20);
-            cdl->AddText(fn, stFS, {cx1 - padX2 - ssz.x, cy0 + 7.f}, C::UA(stCol, 0.95f), stTxt);
-        }
+        const float titleFS = ImGui::GetFontSize() * 1.45f;
+        auto tsz = ImGui::GetFont()->CalcTextSizeA(titleFS, FLT_MAX, 0, titles[g_state.cur_tab]);
+        cdl->AddText(ImGui::GetFont(), titleFS,
+            {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles[g_state.cur_tab]);
         ImGui::Dummy({cW, hH});
     }
 
@@ -3756,7 +3668,7 @@ void RenderMenu() {
         if (g_state.tab_alpha < 0.999f) {
             float fadeA = 1.f - g_state.tab_alpha;
             cdl->AddRectFilled(cpPos, {cpRight, cpPos.y + areaH},
-                C::UA(C::Bg(), fadeA), R::Card, ImDrawFlags_RoundCornersBottomRight);
+                C::UA(C::Bg(), fadeA), R::Card, ImDrawFlags_RoundCornersTop);
         }
 
         s_maxScroll = ImMax(0.f, contentH - (areaH - 4.f));
