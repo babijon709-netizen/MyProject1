@@ -5082,36 +5082,22 @@ bool esp_farm_get_target(FarmTarget& out) {
         }
     }
     if (spot_ok) {
-        // The X child floats a little OFF the node surface (billboard offset).
-        // Head-on that is fine — the crosshair ray still clips the node right
-        // at the X. From the side, though, the point hangs in the air next to
-        // the trunk and the swing hits nothing. Only in THAT case pull the
-        // aim point toward the node axis (just inside the surface, at the
-        // X's own bearing); aiming straight at a visible X stays untouched —
-        // always aiming at the axis made every swing land on the body.
-        float ox = aim.x - g_frame_local_pos.x;
-        float oz = aim.z - g_frame_local_pos.z;
-        float ol = sqrtf(ox * ox + oz * oz);
-        const float keep = (best->kind == 0) ? 0.22F : 0.55F; // ~surface radius
-        if (std::isfinite(ol) && ol > 0.5F) {
-            // Perpendicular distance from the node axis to the eye->X ray (2D).
-            float nx = ox / ol, nz = oz / ol;
-            float cx2 = best->pos.x - g_frame_local_pos.x;
-            float cz2 = best->pos.z - g_frame_local_pos.z;
-            float t = cx2 * nx + cz2 * nz;
-            float ex = cx2 - t * nx, ez = cz2 - t * nz;
-            float miss = sqrtf(ex * ex + ez * ez);
-            if (!(t > 0.0F) || miss > keep) {
-                // Ray misses the node: re-anchor the aim just inside the
-                // surface, keeping the X's bearing and height.
-                float hx = aim.x - best->pos.x, hz = aim.z - best->pos.z;
-                float hl = sqrtf(hx * hx + hz * hz);
-                if (std::isfinite(hl) && hl > keep) {
-                    float s = keep / hl;
-                    aim.x = best->pos.x + hx * s;
-                    aim.z = best->pos.z + hz * s;
-                }
-            }
+        // The X decal sits ON the node surface, and its child transform
+        // floats a little off it (billboard offset). Aim at the X but pull
+        // the point a hand's width INTO the node (toward its axis, keeping
+        // the X's bearing and height): the point ends up just under the
+        // surface right at the X, so the crosshair ray clips the node there
+        // from ANY angle — head-on, sideways, doesn't matter. No ray tests,
+        // no special cases; visually the marker stays on the X.
+        float hx = aim.x - best->pos.x, hz = aim.z - best->pos.z;
+        float hl = sqrtf(hx * hx + hz * hz);
+        if (std::isfinite(hl) && hl > 0.001F) {
+            float want = hl - 0.30F;                    // 30 cm inward
+            float floor_off = (best->kind == 0) ? 0.08F : 0.30F; // never past the axis
+            if (want < floor_off) want = (hl < floor_off) ? hl : floor_off;
+            float s = want / hl;
+            aim.x = best->pos.x + hx * s;
+            aim.z = best->pos.z + hz * s;
         }
     }
     if (!spot_ok) {

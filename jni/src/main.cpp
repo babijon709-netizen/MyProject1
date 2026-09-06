@@ -3656,11 +3656,13 @@ static void UpdateFarm(float dt) {
     const float reachDist = isTree ? 2.6f : 3.4f; // close enough to swing
     const float walkUntil = isTree ? 1.6f : 2.6f; // keep stepping in until this
     const float aimedYaw  = (g_farmPhase == 3) ? 8.f : 14.f; // deg tolerance
-    // The melee check must measure the point the pick actually hits: a spot
-    // on the far side of a boulder is metres beyond the node centre, and
-    // swinging at it from here connects with nothing. aim_dist covers that.
-    const float spotReach = 3.0f;
-    bool spotFar  = tgt.has_spot && tgt.aim_dist > spotReach;
+    // A spot on the FAR side of a big boulder is out of melee even when the
+    // node centre is in reach — walk in some more. RELATIVE check only (spot
+    // clearly beyond the centre): both distances are measured from the
+    // camera, which rides metres behind the player, so comparing aim_dist
+    // against an absolute reach here deadlocked the bot (phase 3 became
+    // unreachable with any spot visible — it walked forever and never swung).
+    bool spotFar  = tgt.has_spot && (tgt.aim_dist - tgt.dist) > 1.0f;
     bool inReach  = tgt.dist <= reachDist && !spotFar;
     bool aimed    = fabsf(tgt.yaw) <= aimedYaw;
 
