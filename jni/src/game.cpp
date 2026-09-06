@@ -4434,6 +4434,7 @@ static bool pickup_marker(uint64_t component, char* label, size_t label_cap) {
 enum MarkerClass : uint8_t {
     MARKER_CLASS_NONE = 0, MARKER_CLASS_MINEABLE = 1,
     MARKER_CLASS_LOOT = 2, MARKER_CLASS_PICKUP = 3,
+    MARKER_CLASS_BARREL = 4,
 };
 
 static uint8_t marker_class_of(uint64_t klass) {
@@ -4445,6 +4446,10 @@ static uint8_t marker_class_of(uint64_t klass) {
     if (name.rfind("Mineable", 0) == 0)                       kind = MARKER_CLASS_MINEABLE;
     else if (name == "LootObject" || name == "PumpkinTrick")  kind = MARKER_CLASS_LOOT;
     else if (name == "ItemPickup")                            kind = MARKER_CLASS_PICKUP;
+    // Smashable scrap barrels: some builds give them their own component
+    // class instead of filing them under Mineable/LootObject — any class
+    // that says "Barrel" out loud is one.
+    else if (name.find("Barrel") != std::string::npos)        kind = MARKER_CLASS_BARREL;
     if (g_marker_class_kind.size() < 512) g_marker_class_kind[klass] = kind;
     return kind;
 }
@@ -4547,6 +4552,10 @@ static void rebuild_marker_entities() {
                     look.label = nullptr;
                     look.has_color = false;
                 }
+            } else if (component_class == MARKER_CLASS_BARREL) {
+                if (!g_markers_loot_enabled) continue;
+                look = kBarrel;
+                known = true;
             } else if (component_class == MARKER_CLASS_LOOT) {
                 if (!g_markers_loot_enabled) continue;
                 known = loot_marker(component, object_name, root_name, look);
@@ -4753,8 +4762,10 @@ static bool farm_kind_from_loot(uint64_t mineable, int& kind) {
 }
 
 static void rebuild_farm_entities() {
-    g_farm_entities.clear();
-
+    // A transient read failure (the game rewrites the dictionary mid-scan)
+    // must NOT wipe the working cache: that was the "marker disappears, bot
+    // stops, marker comes back" stutter. The old list stays until a scan
+    // actually succeeds — nodes barely change between two seconds anyway.
     uint64_t dictionary = resolve_network_client_spawned();
     if (!dictionary) return;
     if (!g_go_name_offset_valid && g_local_player) ensure_gameobject_name_offset(g_local_player);
@@ -4767,6 +4778,7 @@ static void rebuild_farm_entities() {
 
     std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
     if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
+    g_farm_entities.clear(); // scan is readable from here on — rebuild for real
 
     uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
@@ -5067,6 +5079,23 @@ bool esp_farm_get_target(FarmTarget& out) {
             // tree" bug. Such a spot is ignored until it moves.
             if (d2 < 6.0F * 6.0F && d2 > 0.35F * 0.35F) { aim = spot; spot_ok = true; }
             else if (d2 >= 6.0F * 6.0F) s_spot_transform = 0;
+        }
+    }
+    if (spot_ok) {
+        // The X child floats a little OFF the node surface (billboard offset).
+        // Aiming at it straight on works, but from the side the point hangs
+        // in the air next to the trunk and the melee swing hits nothing. Pull
+        // the aim point horizontally toward the node axis: the crosshair ray
+        // then always intersects the node right at the X.
+        float hx = aim.x - best->pos.x, hz = aim.z - best->pos.z;
+        float hl = sqrtf(hx * hx + hz * hz);
+        // Trees: almost onto the trunk axis (trunk radius ~0.2 m). Ore: just
+        // inside the boulder surface so the ray still clips the X zone.
+        const float keep = (best->kind == 0) ? 0.10F : 0.40F;
+        if (std::isfinite(hl) && hl > keep) {
+            float s = keep / hl;
+            aim.x = best->pos.x + hx * s;
+            aim.z = best->pos.z + hz * s;
         }
     }
     if (!spot_ok) {

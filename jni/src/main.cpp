@@ -3584,13 +3584,22 @@ static void UpdateFarm(float dt) {
     // A node that is already mined out gets blacklisted on the spot instead
     // of being circled: the picker would only fall back to it when nothing
     // else is in range, and dancing around an empty stump helps nobody.
+    // Debounced: fraction is a raw memory read and a single garbage frame
+    // (mid-update value, failed read) used to abandon a half-chopped tree —
+    // only a solidly repeated "empty" counts.
+    static int s_depletedFrames = 0;
     if (tgt.fraction >= 0.f && tgt.fraction < 0.03f) {
-        esp_farm_blacklist(tgt.id, 120.f);
-        releaseAll();
-        s_settle = 0.7f;
-        s_nodeId = 0;
-        g_farmPhase = 0;
-        return;
+        if (++s_depletedFrames >= 10) {
+            s_depletedFrames = 0;
+            esp_farm_blacklist(tgt.id, 120.f);
+            releaseAll();
+            s_settle = 0.7f;
+            s_nodeId = 0;
+            g_farmPhase = 0;
+            return;
+        }
+    } else {
+        s_depletedFrames = 0;
     }
 
     // Settle pause between targets: fingers stay up, the camera stops, and
