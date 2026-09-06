@@ -895,8 +895,17 @@ static bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& p
     if (!native_transform) return false;
     if (g_transform_hierarchy_layout_valid)
         return read_transform_hierarchy_layout(native_transform, g_transform_hierarchy_layout, position);
+    // Same probing as read_camera_transform_pose: TransformAccess lives at
+    // +0x38/+0x40 on older builds and at +0x18/+0x20 on this one. Markers ran
+    // only the first probe, which is why they worked ONLY once a nearby
+    // player's skeleton had taught us the layout — the camera (with both
+    // probes) worked solo all along.
     uint64_t transform_data = rd_ptr(native_transform + 0x38);
     int32_t transform_index = rd<int32_t>(native_transform + 0x40);
+    if (!transform_data || transform_index < 0 || transform_index > 100000) {
+        transform_data = rd_ptr(native_transform + 0x18);
+        transform_index = rd<int32_t>(native_transform + 0x20);
+    }
     if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
     const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
     for (const auto& offsets : data_offsets) {
@@ -4599,6 +4608,16 @@ static void rebuild_marker_entities() {
                 if (!known) {
                     int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
                     known = marker_for_entity_type(entity_type, look);
+                    // ВРЕМЕННО: имя префаба зверя, который распознался только
+                    // по entityType — здесь прячется волк, притворяющийся
+                    // кабаном. Убрать вместе с логом.
+                    static int s_af_lines = 0;
+                    if (known && look.kind == ESP_MARKER_ANIMAL && s_af_lines < 200) {
+                        ++s_af_lines;
+                        mlog("animal-fallback: obj='%s' root='%s' et=%d -> %s (name_off_valid=%d)",
+                             object_name, root_name, (int)entity_type,
+                             look.label ? look.label : "?", (int)g_go_name_offset_valid);
+                    }
                 }
                 if (!known && object_name[0]) known = barrel_look_from_object_name(object_name, look);
                 if (!known && root_name[0])   known = barrel_look_from_object_name(root_name, look);
