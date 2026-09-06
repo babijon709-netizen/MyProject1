@@ -107,6 +107,8 @@ struct FarmTarget {
 // Which resources to farm: bit0 wood, bit1 stone, bit2 metal, bit3 sulfur.
 // 0 disables the scan entirely (no extra work per frame).
 void        esp_farm_set_resources(unsigned mask);
+// Search radius for farm nodes in metres (clamped to 10..300).
+void        esp_farm_set_range(float meters);
 // Nearest matching node as of the last esp_get_boxes() (needs its camera).
 bool        esp_farm_get_target(FarmTarget& out);
 // Give up on a node (unreachable / stuck) for `seconds`.
@@ -117,9 +119,6 @@ void        esp_farm_blacklist(unsigned long long id, float seconds);
 // nodes, 4 nodes exist but none in range / all blacklisted, 5 camera pose
 // unreadable (cannot compute angles).
 void        esp_farm_debug(int& nodes_cached, int& idle_reason);
-// ВРЕМЕННО (тест-сборка): строка в /storage/emulated/0/Download/
-// benzhack_debug.log. printf-формат. Убрать после отладки автофарма.
-void        esp_farm_log(const char* fmt, ...);
 
 // Vertical field of view (degrees) of the game camera as last read by
 // esp_get_boxes(). 0 if unknown.

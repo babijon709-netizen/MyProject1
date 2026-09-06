@@ -67,58 +67,8 @@ static bool      g_aim_ref_valid = false;
 static Vec3      g_aim_ref_origin{};
 static Vec3      g_aim_ref_forward{}, g_aim_ref_right{}, g_aim_ref_up{};
 
-// Маска ресурсов автофарма (bit0 дерево..bit3 сера); объявлена здесь, потому
-// что временное логгирование ниже включается только при активном фарме.
+// Маска ресурсов автофарма (bit0 дерево..bit3 сера).
 static unsigned g_farm_mask = 0;
-
-// ========== ВРЕМЕННОЕ логгирование автофарма/камеры (тест-сборка) ==========
-// Пишет в /storage/emulated/0/Download/benzhack_debug.log (fallback — папка
-// конфигов). Включается только пока выбран хоть один ресурс фарма. Убрать
-// целиком после решения проблемы «нет позиции камеры».
-#define FARM_DEBUG_LOG 1
-#if FARM_DEBUG_LOG
-#include <stdarg.h>
-#include <time.h>
-static bool g_farm_log_sample = false;      // на этом кадре пишем подробности
-static void farm_vlogf(const char* fmt, va_list args) {
-    static FILE* file = nullptr;
-    static int retry = 0;
-    if (!file) {
-        if (retry > 0) { --retry; return; }
-        file = fopen("/storage/emulated/0/Download/benzhack_debug.log", "w");
-        if (!file) file = fopen("/sdcard/Download/benzhack_debug.log", "w");
-        if (!file) file = fopen("/storage/emulated/0/benzhack/debug.log", "w");
-        if (!file) { retry = 600; return; } // повторить через ~10 с кадров
-        fprintf(file, "=== benzhack farm/camera debug log ===\n");
-    }
-    timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    fprintf(file, "[%9.2f] ", (double)ts.tv_sec + (double)ts.tv_nsec / 1e9);
-    vfprintf(file, fmt, args);
-    fputc('\n', file);
-    fflush(file);
-}
-static void farm_logf(const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    farm_vlogf(fmt, args);
-    va_end(args);
-}
-#else
-static const bool g_farm_log_sample = false;
-static void farm_logf(const char*, ...) {}
-#endif
-
-void esp_farm_log(const char* fmt, ...) {
-#if FARM_DEBUG_LOG
-    va_list args;
-    va_start(args, fmt);
-    farm_vlogf(fmt, args);
-    va_end(args);
-#else
-    (void)fmt;
-#endif
-}
 
 
 static bool vec3_is_finite(const Vec3& value);
@@ -1236,18 +1186,7 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
                 g_cam_pose_valid = true;
             }
         }
-#if FARM_DEBUG_LOG
-        if (g_farm_log_sample)
-            farm_logf("cam_matrices: transform=%llx pose_ok=%d fin=%d quat=%d live_view=%d layout_valid=%d",
-                      (unsigned long long)native_transform, (int)pose_ok, (int)fin_ok,
-                      (int)quat_ok, (int)have_live_view, (int)g_transform_hierarchy_layout_valid);
-#endif
     } else {
-#if FARM_DEBUG_LOG
-        if (g_farm_log_sample)
-            farm_logf("cam_matrices: native_cam=%llx has NO transform (+0x%llx)",
-                      (unsigned long long)native_cam, (unsigned long long)CAMERA_NATIVE_TRANSFORM);
-#endif
     }
     if (!have_live_view) {
         if (s_last_ok && matrix_is_finite(s_last_view)) {
@@ -3320,14 +3259,6 @@ void esp_reset() {
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
 
-#if FARM_DEBUG_LOG
-    // Раз в ~2 секунды один кадр логгируется подробно (иначе лог зальёт).
-    {
-        static int s_sample_countdown = 0;
-        g_farm_log_sample = g_farm_mask != 0 && --s_sample_countdown <= 0;
-        if (g_farm_log_sample) s_sample_countdown = 120;
-    }
-#endif
 
     // Watchdog: every frame that fails to publish a camera + local position
     // counts up, and a few seconds of that means some cached offset or class
@@ -3376,11 +3307,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     } else if (++g_frame_transforms_empty_streak > 10) {
         // List gone for a while: the world is being torn down / reloaded.
         if (!s_transforms.empty()) { s_transforms.clear(); reset_world_caches(); }
-        if (g_farm_log_sample) farm_logf("boxes: player transforms empty for %d frames", g_frame_transforms_empty_streak);
         return result;
     }
     if (s_transforms.empty()) {
-        if (g_farm_log_sample) farm_logf("boxes: no player transforms yet");
         return result;
     }
 
@@ -3410,21 +3339,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
         if (!managed_cam) {
-            if (g_farm_log_sample) farm_logf("boxes: no managed camera (gc_class=%d)", (int)(g_game_controller_class != 0));
             return result;
         }
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
         if (!native_cam) {
-            if (g_farm_log_sample) farm_logf("boxes: managed cam %llx has no native ptr", (unsigned long long)managed_cam);
             return result;
         }
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
-            if (g_farm_log_sample) farm_logf("boxes: read_native_camera_matrices FAILED");
             return result;
         }
         if (!g_matrix_configuration_validated) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) {
-                if (g_farm_log_sample) farm_logf("boxes: optimize_matrix_configuration FAILED");
                 return result;
             }
             if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
@@ -3468,7 +3393,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         has_local_position = local_entity_index != s_transforms.size();
         if (!has_local_position) {
             g_player_position_validated = false;
-            if (g_farm_log_sample) farm_logf("boxes: no local player position (%d transforms)", (int)s_transforms.size());
             return result;
         }
     }
@@ -3502,12 +3426,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
     }
 
-#if FARM_DEBUG_LOG
-    if (g_farm_log_sample)
-        farm_logf("boxes: frame OK; cam_pose=%d aim_ref=%d local=(%.1f %.1f %.1f) players=%d",
-                  (int)g_cam_pose_valid, (int)g_aim_ref_valid,
-                  local.x, local.y, local.z, (int)s_transforms.size());
-#endif
 
     Vec3 transform_camera_position{};
     Vec4 transform_camera_rotation{};
@@ -4714,6 +4632,16 @@ void esp_farm_set_resources(unsigned mask) {
     if (!mask) g_farm_blacklist.clear();
 }
 
+// Search radius for farm nodes, metres. Set from the menu slider.
+static float g_farm_max_distance = 100.0F;
+
+void esp_farm_set_range(float meters) {
+    if (!std::isfinite(meters)) return;
+    if (meters < 10.0F) meters = 10.0F;
+    if (meters > 300.0F) meters = 300.0F;
+    g_farm_max_distance = meters;
+}
+
 void esp_farm_blacklist(unsigned long long id, float seconds) {
     if (!id) return;
     int frames = (int)(seconds * 60.0F);
@@ -4728,14 +4656,22 @@ void esp_farm_blacklist(unsigned long long id, float seconds) {
 static uint64_t farm_find_spot(uint64_t node_transform) {
     if (!node_transform || !g_go_name_offset_valid) return 0;
     std::vector<uint64_t> nodes;
-    collect_transform_subtree(node_transform, nodes, 48);
+    collect_transform_subtree(node_transform, nodes, 64);
     char name[48];
     for (uint64_t node : nodes) {
         if (node == node_transform) continue;
         if (!read_transform_name(node, name, sizeof(name))) continue;
-        for (char* p = name; *p; ++p) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+        size_t len = 0;
+        for (char* p = name; *p; ++p, ++len) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
         if (strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
-            strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit"))
+            strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
+            strstr(name, "marker") || strstr(name, "gather") || strstr(name, "target") ||
+            strstr(name, "hitpoint") || strstr(name, "plus") ||
+            // A bare "x"/"x (1)" child is exactly the glowing cross on some
+            // node prefabs; a substring match would catch half the tree, so
+            // only a leading standalone "x" counts.
+            (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
+                                (name[1] >= '0' && name[1] <= '9'))))
             return node;
     }
     return 0;
@@ -4760,28 +4696,13 @@ bool esp_farm_get_target(FarmTarget& out) {
     if (--g_farm_rescan <= 0) {
         rebuild_farm_entities();
         g_farm_rescan = g_farm_entities.empty() ? 30 : 120; // ~0.5 s / ~2 s
-#if FARM_DEBUG_LOG
-        {
-            static int s_scan_log = 0;
-            if (--s_scan_log <= 0) {
-                s_scan_log = 5; // не чаще каждого 5-го скана
-                int per_kind[4] = {0, 0, 0, 0};
-                for (const FarmEntity& e : g_farm_entities)
-                    if (e.kind >= 0 && e.kind < 4) ++per_kind[e.kind];
-                farm_logf("farm scan: mask=%x nodes=%d (wood=%d stone=%d metal=%d sulfur=%d) blacklist=%d",
-                          g_farm_mask, (int)g_farm_entities.size(),
-                          per_kind[0], per_kind[1], per_kind[2], per_kind[3],
-                          (int)g_farm_blacklist.size());
-            }
-        }
-#endif
     }
 
     // Sticky target: keep working the node we already picked while it is
     // alive, otherwise the controller would flip between equidistant nodes.
     static uint64_t s_last_identity = 0;
 
-    constexpr float kMaxFarmDistance = 100.0F;
+    const float kMaxFarmDistance = g_farm_max_distance;
     const FarmEntity* best = nullptr;
     float best_score = 1e18F;
     float best_dist = 0.0F;
@@ -4826,7 +4747,11 @@ bool esp_farm_get_target(FarmTarget& out) {
         s_spot_recheck = 0;
     }
     if (--s_spot_recheck <= 0) {
-        s_spot_recheck = 90; // every ~1.5 s: the spot spawns after the first hit
+        // The spot only spawns after the first hit and jumps around between
+        // hits, so keep the search hot: ~0.4 s while no spot is known, ~0.7 s
+        // to re-validate a known one (its transform stays the same object
+        // while the node is alive, only its local position moves).
+        s_spot_recheck = s_spot_transform ? 40 : 25;
         s_spot_transform = farm_find_spot(best->transform);
     }
 
@@ -4855,16 +4780,6 @@ bool esp_farm_get_target(FarmTarget& out) {
     // the farm used to sit in "нет позиции камеры").
     if (!g_cam_pose_valid && !g_aim_ref_valid && !g_frame_cam_basis_valid) {
         g_farm_idle_reason = 5;
-#if FARM_DEBUG_LOG
-        {
-            static int s_r5_log = 0;
-            if (--s_r5_log <= 0) {
-                s_r5_log = 120; // раз в ~2 с
-                farm_logf("farm: reason5 — node found (kind=%d dist=%.1f) but cam_pose=0 aim_ref=0 view_basis=0 vp_valid=%d local_valid=%d",
-                          best->kind, best_dist, (int)g_frame_vp_valid, (int)g_frame_local_valid);
-            }
-        }
-#endif
         return false;
     }
     const bool use_ref = g_aim_ref_valid;
@@ -4873,16 +4788,6 @@ bool esp_farm_get_target(FarmTarget& out) {
     const Vec3& fwd    = use_ref ? g_aim_ref_forward : use_pose ? g_cam_forward : g_frame_cam_fwd;
     const Vec3& right  = use_ref ? g_aim_ref_right   : use_pose ? g_cam_right   : g_frame_cam_right;
     const Vec3& up     = use_ref ? g_aim_ref_up      : use_pose ? g_cam_up      : g_frame_cam_up;
-#if FARM_DEBUG_LOG
-    {
-        static int s_src_log = 0;
-        if (--s_src_log <= 0) {
-            s_src_log = 300; // раз в ~5 с
-            farm_logf("farm: target kind=%d dist=%.1f basis=%s", best->kind, best_dist,
-                      use_ref ? "aim_ref" : use_pose ? "cam_pose" : "view_matrix");
-        }
-    }
-#endif
     Vec3 d = {aim.x - origin.x, aim.y - origin.y, aim.z - origin.z};
     float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
     float rx = d.x * right.x + d.y * right.y + d.z * right.z;

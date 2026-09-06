@@ -575,6 +575,8 @@ struct AppState {
     // Джойстик движения и кнопка огня/атаки — у всех раскладки разные.
     float farm_joy_x = -1.f, farm_joy_y = -1.f;
     float farm_fire_x = -1.f, farm_fire_y = -1.f;
+    // Дальность поиска ресурсов, метры.
+    float farm_range = 100.f;
     // ui_fps выключен навсегда (счётчик убран), рамки карточек — всегда вкл.
     bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = true;
     // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
@@ -592,7 +594,7 @@ struct AppState {
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range;
 };
 static AppState g_state;
 
@@ -998,8 +1000,8 @@ struct CfgBlob {
     bool  aim_vis_check, aim_draw_fov;
     //   aim_smoothness -> aim_lead   (smoothing has its own gun_str slot,
     //                                 and this one was only ever a mirror).
-    //                                 Unused again; kept so the byte layout
-    //                                 of version 4 never has to move.
+    //                                 Reused: farm search range in metres
+    //                                 (0 in old configs = use the default).
     float aim_fov, aim_lead;
     // Every field that a feature outgrew is renamed in place rather than
     // appended, so the byte layout — and with it version 4 and every config
@@ -1039,7 +1041,9 @@ static void ConfigSaveToPath(const std::string& path) {
     s.aim_vis_check  = cfg::aim::vis_check;
     s.aim_draw_fov   = cfg::aim::draw_fov;
     s.aim_fov        = cfg::aim::fov;
-    s.aim_lead       = 0.f;          // unused slot, see CfgBlob
+    // Слот aim_lead давно свободен (см. CfgBlob) — теперь в нём живёт
+    // дальность автофарма. Старые конфиги держат тут 0 и дадут дефолт.
+    s.aim_lead       = g_state.farm_range;
     s.esp_box     = g_state.esp_box;     s.esp_name    = g_state.esp_name;
     s.esp_ore     = g_state.esp_ore;     s.esp_wall    = g_state.esp_wall;
     s.esp_chams   = g_state.esp_chams;
@@ -1138,6 +1142,9 @@ static void ConfigLoad(int idx) {
     cfg::aim::vis_check  = false;
     cfg::aim::draw_fov   = s.aim_draw_fov;
     cfg::aim::fov        = s.aim_fov;
+    // Дальность автофарма переехала в бывший слот aim_lead; в старых
+    // конфигах там 0 — тогда остаётся дефолт 100 м.
+    g_state.farm_range   = (s.aim_lead >= 10.f && s.aim_lead <= 300.f) ? s.aim_lead : 100.f;
     g_state.esp_box     = s.esp_box;     g_state.esp_name    = s.esp_name;
     g_state.esp_wall    = s.esp_wall;
     g_state.esp_chams   = s.esp_chams;
@@ -2954,6 +2961,12 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##fm3", XS("Металл"), &g_state.farm_metal,  g_state.a_farm_metal,  false);
         ToggleRow("##fm4", XS("Сера"),   &g_state.farm_sulfur, g_state.a_farm_sulfur, true);
 
+        // Дальность поиска: насколько далеко бот согласен идти за ресурсом.
+        SHdr(XS("Дальность"));
+        CardBg(Layout::SliderH);
+        SliderRow("##fmr", XS("Искать до"), &g_state.farm_range,
+                  10.f, 300.f, XS("%.0f м"), true, true, g_state.sl_farm_range, dt);
+
         // Зоны бота: куда жать джойстик движения и кнопку огня. Раскладка
         // управления у всех разная — без калибровки бот может мимо попадать.
         extern int g_farmCalib; // определён ниже, рядом с UpdateFarm
@@ -3520,6 +3533,10 @@ static void UpdateFarm(float dt) {
     static float s_lastDist = 1e9f;
     static float s_mineTime = 0.f;    // seconds spent mining this node
     static float s_fracStart = -1.f;
+    static float s_sinceDrain = 0.f;  // seconds since the node last lost HP
+    static float s_evadeTime = 0.f;   // >0: sidestep manoeuvre in progress
+    static float s_evadeDir = 1.f;    // +1 right, -1 left
+    static int   s_evadeCount = 0;    // manoeuvres tried on this node
 
     auto releaseAll = [&]() {
         if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
@@ -3540,30 +3557,18 @@ static void UpdateFarm(float dt) {
         if (g_state.farm_sulfur) mask |= 8u;
     }
     esp_farm_set_resources(mask);
+    esp_farm_set_range(g_state.farm_range);
 
     const bool menuBlocked = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     // The aimbot owns the camera while it is on a player — farm yields fully.
     // g_farmCalib: пока пользователь тапает зоны, бот молчит.
     bool active = mask != 0 && g_esp_attached && !menuBlocked && !s_fingerDown && g_farmCalib == 0;
 
-    // ВРЕМЕННОЕ логгирование (тест-сборка): включение/выключение фарма.
-    {
-        static unsigned s_prevMask = 0;
-        if (mask != s_prevMask) {
-            s_prevMask = mask;
-            if (mask)
-                esp_farm_log("ctrl: farm ON mask=%x attached=%d canInject=%d menuBlocked=%d aimBusy=%d",
-                             mask, (int)g_esp_attached, (int)Touch_CanInject(),
-                             (int)menuBlocked, (int)s_fingerDown);
-            else
-                esp_farm_log("ctrl: farm OFF");
-        }
-    }
-
     if (!active) {
         releaseAll();
         g_farmActive = false; g_farmPhase = 0;
         s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
+        s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f;
         return;
     }
 
@@ -3588,6 +3593,7 @@ static void UpdateFarm(float dt) {
         releaseAll();
         g_farmActive = false; g_farmPhase = 0;
         s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
+        s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f;
         return;
     }
     g_farmActive = true;
@@ -3598,6 +3604,7 @@ static void UpdateFarm(float dt) {
         s_nodeId = tgt.id;
         s_stuckTime = 0.f; s_lastDist = tgt.dist;
         s_mineTime = 0.f;  s_fracStart = tgt.fraction;
+        s_sinceDrain = 0.f; s_evadeTime = 0.f; s_evadeCount = 0;
     }
 
     // On-screen mark on the exact point the farm is working: the glowing spot
@@ -3637,31 +3644,20 @@ static void UpdateFarm(float dt) {
     float gain = (s_gainYaw != 0.f) ? s_gainYaw : 0.25f; // deg per px, safe probe
 
     // ---- decide the phase ----
-    const float reachDist = 3.2f;             // close enough to swing
+    // reachDist is deliberately tight for trees (a thin trunk holds its node
+    // position dead centre, and stopping 3+ m away leaves melee short); rocks
+    // are physically bigger, so their centre sits further from where the
+    // player can stand. While mining the move finger keeps nudging forward
+    // until walkUntil, closing the last step on its own.
+    const bool  isTree    = (tgt.kind == 0);
+    const float reachDist = isTree ? 2.6f : 3.4f; // close enough to swing
+    const float walkUntil = isTree ? 1.6f : 2.6f; // keep stepping in until this
     const float aimedYaw  = (g_farmPhase == 3) ? 8.f : 14.f; // deg tolerance
     bool inReach = tgt.dist <= reachDist;
     bool aimed   = fabsf(tgt.yaw) <= aimedYaw;
 
     int phase = inReach ? 3 : (aimed ? 2 : 1);
     g_farmPhase = phase;
-
-    // ВРЕМЕННОЕ логгирование (тест-сборка): смена фазы и периодический пульс.
-    {
-        static int s_prevPhase = -1;
-        static float s_pulse = 0.f;
-        s_pulse += dt;
-        if (phase != s_prevPhase) {
-            s_prevPhase = phase;
-            esp_farm_log("ctrl: phase=%d (1 turn/2 walk/3 mine) yaw=%.1f pitch=%.1f dist=%.1f spot=%d",
-                         phase, tgt.yaw, tgt.pitch, tgt.dist, (int)tgt.has_spot);
-            s_pulse = 0.f;
-        } else if (s_pulse >= 3.f) {
-            s_pulse = 0.f;
-            esp_farm_log("ctrl: pulse phase=%d yaw=%.1f dist=%.1f gain=%.3f fingers m=%d l=%d t=%d",
-                         phase, tgt.yaw, tgt.dist, s_gainYaw,
-                         (int)s_moveDown, (int)s_lookDown, (int)s_tapDown);
-        }
-    }
 
     // ---- finger 1: camera swipe (yaw always; pitch only while mining) ----
     {
@@ -3711,7 +3707,15 @@ static void UpdateFarm(float dt) {
 
     // ---- finger 0: move joystick (bottom-left), held while walking ----
     {
-        bool wantWalk = (phase == 2) || (phase == 1 && fabsf(tgt.yaw) < 70.f && tgt.dist > reachDist * 2.f);
+        // Keep pressing in while mining until we are right at the node, so
+        // thin trees (node centre inside the trunk) end up in melee range.
+        bool wantWalk = (phase == 2) ||
+                        (phase == 1 && fabsf(tgt.yaw) < 70.f && tgt.dist > reachDist * 2.f) ||
+                        (phase == 3 && tgt.dist > walkUntil) ||
+                        // Swinging for a while with zero drain = just out of
+                        // melee reach (thin tree) — press in regardless.
+                        (phase == 3 && s_sinceDrain > 3.f);
+        if (s_evadeTime > 0.f) wantWalk = true; // manoeuvre drives the stick itself
         if (wantWalk) {
             // Virtual stick centre and a forward push, slightly steered
             // towards the node so small yaw errors do not need camera swipes.
@@ -3719,11 +3723,32 @@ static void UpdateFarm(float dt) {
             float cx = (g_state.farm_joy_x >= 0.f) ? sw * g_state.farm_joy_x : sw * 0.165f;
             float cy = (g_state.farm_joy_y >= 0.f) ? sh * g_state.farm_joy_y : sh * 0.70f;
             float r = sh * 0.16f;
-            float steer = tgt.yaw / 70.f;
-            if (steer >  0.6f) steer =  0.6f;
-            if (steer < -0.6f) steer = -0.6f;
-            float px = cx + r * steer;
-            float py = cy - r * sqrtf(1.f - steer * steer);
+            float px, py;
+            if (s_evadeTime > 0.f) {
+                // Obstacle manoeuvre: back off briefly, then strafe hard to
+                // one side while still angled a bit forward, to slide around
+                // walls/rocks the straight-line walk keeps bumping into.
+                s_evadeTime -= dt;
+                if (s_evadeTime > 1.1f) {          // first ~0.6 s: step back
+                    px = cx;
+                    py = cy + r * 0.9f;
+                } else {                            // then: diagonal sidestep
+                    px = cx + r * 0.95f * s_evadeDir;
+                    py = cy - r * 0.35f;
+                }
+                if (s_evadeTime <= 0.f) { s_evadeTime = 0.f; s_stuckTime = 0.f; s_lastDist = 1e9f; }
+            } else {
+                float steer = tgt.yaw / 70.f;
+                if (steer >  0.6f) steer =  0.6f;
+                if (steer < -0.6f) steer = -0.6f;
+                px = cx + r * steer;
+                py = cy - r * sqrtf(1.f - steer * steer);
+                if (phase == 3) {
+                    // Final approach: gentle forward nudge straight at the node.
+                    px = cx + r * 0.35f * ((tgt.yaw > 0.f) ? 1.f : -1.f) * fminf(fabsf(tgt.yaw) / 45.f, 1.f);
+                    py = cy - r * 0.75f;
+                }
+            }
             if (!s_moveDown) {
                 Touch_Down_N(0, cx, cy);      // land on the stick centre first
                 s_moveDown = true;
@@ -3767,26 +3792,40 @@ static void UpdateFarm(float dt) {
 
     // ---- watchdogs ----
     if (phase == 2 || phase == 1) {
-        // No progress towards the node for a while -> obstacle. Blacklist it
-        // for half a minute and let the picker fall through to the next one.
+        // No progress towards the node -> ran into an obstacle. First try to
+        // walk around it (back off + sidestep, alternating sides); only when
+        // the manoeuvres keep failing does the node get blacklisted.
         if (tgt.dist < s_lastDist - 0.25f) {
             s_lastDist = tgt.dist;
             s_stuckTime = 0.f;
-        } else {
+        } else if (s_evadeTime <= 0.f) {
             s_stuckTime += dt;
-            if (s_stuckTime > 6.f) {
-                esp_farm_blacklist(tgt.id, 30.f);
-                s_stuckTime = 0.f; s_lastDist = 1e9f; s_nodeId = 0;
+            if (s_stuckTime > 3.f) {
+                if (s_evadeCount < 4) {
+                    s_evadeTime = 1.7f;                       // ~0.6 s back + ~1.1 s strafe
+                    s_evadeDir = (s_evadeCount % 2 == 0) ? 1.f : -1.f;
+                    ++s_evadeCount;
+                    s_stuckTime = 0.f;
+                } else {
+                    esp_farm_blacklist(tgt.id, 30.f);
+                    s_stuckTime = 0.f; s_lastDist = 1e9f; s_nodeId = 0;
+                    s_evadeCount = 0; s_evadeTime = 0.f;
+                }
             }
         }
     } else if (phase == 3) {
-        // Swinging but the node is not draining -> wrong tool / not actually
-        // hitting it. Move on instead of standing there forever.
+        s_evadeCount = 0; s_evadeTime = 0.f; // reached the node — obstacles cleared
+        // Swinging but the node is not draining -> standing a hair too far
+        // (thin trees) or wrong tool. The walk-in nudge handles the former;
+        // if HP still will not move, give up sooner rather than later.
         bool draining = (tgt.fraction >= 0.f && s_fracStart >= 0.f && tgt.fraction < s_fracStart - 0.01f);
-        if (draining) { s_fracStart = tgt.fraction; s_mineTime = 0.f; }
-        else if (s_mineTime > 25.f) {
-            esp_farm_blacklist(tgt.id, 60.f);
-            s_mineTime = 0.f; s_nodeId = 0;
+        if (draining) { s_fracStart = tgt.fraction; s_mineTime = 0.f; s_sinceDrain = 0.f; }
+        else {
+            s_sinceDrain += dt;
+            if (s_mineTime > 14.f) {
+                esp_farm_blacklist(tgt.id, 60.f);
+                s_mineTime = 0.f; s_sinceDrain = 0.f; s_nodeId = 0;
+            }
         }
     }
 }
