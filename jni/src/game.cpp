@@ -4714,10 +4714,12 @@ void esp_farm_blacklist(unsigned long long id, float seconds) {
 }
 
 // The glowing bonus "X" is a child GameObject of the node. Search the subtree
-// for a name that looks like it; the result is cached per component and
-// re-checked every couple of seconds because the spot only spawns after the
-// first hit and jumps around between hits.
-static uint64_t farm_find_spot(uint64_t node_transform) {
+// for a name that looks like it AND that sits visibly away from the node
+// pivot: every prefab also carries a dormant template child parked exactly at
+// the pivot (tree base) until the real X activates, and returning that one
+// made the bot chop the bottom of the trunk. The result is cached per
+// component and re-checked because the spot jumps around between hits.
+static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos) {
     if (!node_transform || !g_go_name_offset_valid) return 0;
     std::vector<uint64_t> nodes;
     collect_transform_subtree(node_transform, nodes, 64);
@@ -4727,16 +4729,21 @@ static uint64_t farm_find_spot(uint64_t node_transform) {
         if (!read_transform_name(node, name, sizeof(name))) continue;
         size_t len = 0;
         for (char* p = name; *p; ++p, ++len) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
-        if (strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
-            strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
-            strstr(name, "marker") || strstr(name, "gather") || strstr(name, "target") ||
-            strstr(name, "hitpoint") || strstr(name, "plus") ||
-            // A bare "x"/"x (1)" child is exactly the glowing cross on some
-            // node prefabs; a substring match would catch half the tree, so
-            // only a leading standalone "x" counts.
-            (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
-                                (name[1] >= '0' && name[1] <= '9'))))
-            return node;
+        bool looks = strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
+                     strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
+                     strstr(name, "marker") || strstr(name, "gather") || strstr(name, "target") ||
+                     strstr(name, "hitpoint") || strstr(name, "plus") ||
+                     (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
+                                         (name[1] >= '0' && name[1] <= '9')));
+        if (!looks) continue;
+        // Live check: a real X is displaced from the pivot but still on the
+        // node. Keep scanning past dormant/stale candidates instead of
+        // giving up on the first bad one.
+        Vec3 p{};
+        if (!marker_world_position(node, p) || !vec3_is_finite(p)) continue;
+        float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
+        float d2 = sx * sx + sy * sy + sz * sz;
+        if (d2 > 0.35F * 0.35F && d2 < 6.0F * 6.0F) return node;
     }
     return 0;
 }
@@ -4819,11 +4826,10 @@ bool esp_farm_get_target(FarmTarget& out) {
     }
     if (--s_spot_recheck <= 0) {
         // The spot only spawns after the first hit and jumps around between
-        // hits, so keep the search hot: ~0.4 s while no spot is known, ~0.7 s
-        // to re-validate a known one (its transform stays the same object
-        // while the node is alive, only its local position moves).
-        s_spot_recheck = s_spot_transform ? 40 : 25;
-        s_spot_transform = farm_find_spot(best->transform);
+        // hits, so keep the search hot: ~0.3 s while no live spot is known,
+        // ~0.7 s to re-validate a known one.
+        s_spot_recheck = s_spot_transform ? 40 : 18;
+        s_spot_transform = farm_find_spot(best->transform, best->pos);
     }
 
     Vec3 aim{};
@@ -4916,6 +4922,15 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.pitch = pitch;
     out.dist = best_dist;
     out.has_spot = spot_ok;
+    {
+        // Horizontal distance to the aim point itself: the melee-reach check
+        // must measure what the pick actually has to hit — a spot on the far
+        // side of a boulder is metres further than the node centre.
+        float ax = aim.x - g_frame_local_pos.x;
+        float az = aim.z - g_frame_local_pos.z;
+        float ad = sqrtf(ax * ax + az * az);
+        out.aim_dist = std::isfinite(ad) ? ad : best_dist;
+    }
     float fraction = rd<float>(best->component + MINEABLE_FRACTION);
     out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F) ? fraction : -1.0F;
     return true;

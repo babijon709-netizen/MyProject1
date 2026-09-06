@@ -3531,13 +3531,26 @@ static void UpdateFarm(float dt) {
     FarmTarget tgt;
     bool haveTgt = esp_farm_get_target(tgt) && tgt.valid;
     esp_farm_debug(g_farmNodes, g_farmReason);
+    static float s_lostTime = 0.f; // target dropout tolerance
     if (!haveTgt) {
+        // A working target can vanish for a few frames (registry rescan, a
+        // failed read mid-update) and come right back. Dropping everything
+        // instantly caused the stop-start-stop shuffle: freeze inputs briefly
+        // and only reset for real when the target stays gone.
+        if (s_nodeId != 0 && s_lostTime < 0.8f) {
+            s_lostTime += dt;
+            if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; } // no blind swings
+            if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; s_haveLast = false; }
+            return; // keep the move finger where it was
+        }
         releaseAll();
         g_farmActive = false; g_farmPhase = 0;
         s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
         s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f; s_settle = 0.f;
+        s_lostTime = 0.f;
         return;
     }
+    s_lostTime = 0.f;
     g_farmActive = true;
     g_farmTgtDist = tgt.dist;
     g_farmTgtKind = tgt.kind;
@@ -3621,8 +3634,13 @@ static void UpdateFarm(float dt) {
     const float reachDist = isTree ? 2.6f : 3.4f; // close enough to swing
     const float walkUntil = isTree ? 1.6f : 2.6f; // keep stepping in until this
     const float aimedYaw  = (g_farmPhase == 3) ? 8.f : 14.f; // deg tolerance
-    bool inReach = tgt.dist <= reachDist;
-    bool aimed   = fabsf(tgt.yaw) <= aimedYaw;
+    // The melee check must measure the point the pick actually hits: a spot
+    // on the far side of a boulder is metres beyond the node centre, and
+    // swinging at it from here connects with nothing. aim_dist covers that.
+    const float spotReach = 3.0f;
+    bool spotFar  = tgt.has_spot && tgt.aim_dist > spotReach;
+    bool inReach  = tgt.dist <= reachDist && !spotFar;
+    bool aimed    = fabsf(tgt.yaw) <= aimedYaw;
 
     int phase = inReach ? 3 : (aimed ? 2 : 1);
     g_farmPhase = phase;
@@ -3630,9 +3648,13 @@ static void UpdateFarm(float dt) {
     // ---- finger 1: camera swipe (yaw always; pitch only while mining) ----
     {
         float wantYawPx = tgt.yaw / gain;
-        // While mining also pull the crosshair down/up onto the node/spot.
+        // Pitch: while mining, pull the crosshair exactly onto the node/spot.
+        // While walking, only fix a BADLY tilted camera (left looking at the
+        // ground after mining ore) — a generous dead zone, or the two axes
+        // fight each other and the camera wanders.
         float wantPitchPx = 0.f;
-        if (phase == 3) {
+        float pitchDead = (phase == 3) ? 0.f : 18.f;
+        if (fabsf(tgt.pitch) > pitchDead) {
             float gp = fabsf(gain);
             wantPitchPx = -tgt.pitch / gp;
         }
@@ -3641,7 +3663,9 @@ static void UpdateFarm(float dt) {
         // the camera from twitching left-right around the centre.
         float startDeg = (phase == 3) ? 4.0f : 10.f;
         float stopDeg  = (phase == 3) ? 1.5f : 4.f;
-        float errDeg = fmaxf(fabsf(tgt.yaw), (phase == 3) ? fabsf(tgt.pitch) : 0.f);
+        float pitchErr = (phase == 3) ? fabsf(tgt.pitch)
+                       : fmaxf(fabsf(tgt.pitch) - pitchDead, 0.f);
+        float errDeg = fmaxf(fabsf(tgt.yaw), pitchErr);
         bool needTurn = s_lookDown ? (errDeg > stopDeg) : (errDeg > startDeg);
 
         if (needTurn) {
