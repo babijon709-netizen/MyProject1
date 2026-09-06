@@ -1414,6 +1414,7 @@ void PopoverOpenColor(const char* title, ImVec4* cp) {
 void PopoverOpen(const char* title, int sid) {
     if (g_pop.visible) return;
     snprintf(g_pop.title, sizeof(g_pop.title), "%s", title);
+    g_colP = nullptr; // обычное окно, не палитра
     g_pop.sectionId  = sid;
     g_pop.visible    = true;
     g_pop.closing    = false;
@@ -2177,8 +2178,9 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgCardBg(Layout::SliderH);
         FgSliderRow(XS("Толщина"),   &g_state.esp_thick, 0.5f, 5.f,   "%.1f",     true, g_state.sl_esp_thick);
 
-    } else if (secId == 4) {
+    } else if (secId == 5) {
         // Автофарм: всё управление ботом в одном окне.
+        // (secId 4 занят палитрой цветов — там скролл выключен.)
         extern int g_farmCalib; // определён рядом с UpdateFarm
 
         FgSHdr(XS("Автофарм"));
@@ -2434,7 +2436,7 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
     bool mIn = inPop && clickInPop;
 
     static float s_popMaxScroll = 0.f;
-    bool colorPop = (g_pop.sectionId == 4);
+    bool colorPop = (g_pop.sectionId == 4) && g_colP != nullptr;
     if (!colorPop) ScrollTick(g_scrollPop, mIn, g_pop.closing, s_popMaxScroll, dt);
     else { g_scrollPop.off = 0.f; g_scrollPop.vel = 0.f; s_popMaxScroll = 0.f; }
 
@@ -3049,7 +3051,7 @@ float TabContent(int tab, float dt, float cW) {
         // Разное: каждая крупная функция — своя карточка-«вкладка»,
         // открывающая отдельное окно (как «Ещё настройки» в ESP).
         SHdr(XS("Функции"));
-        CollapsibleHeader("##fnfarm", XS("Автофарм"), 4);
+        CollapsibleHeader("##fnfarm", XS("Автофарм"), 5);
 
         ImGui::Dummy({1.f, 12.f});
     }
