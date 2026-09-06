@@ -2558,12 +2558,15 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
         fg->PushClipRect({sX, contentY}, {sX + sW, sY + sH - 4.f}, true);
 
         float drawY = contentY - g_scrollPop.off;
+        // mIn: и нажатие, и отпускание внутри области контента (ниже шапки).
+        // Без этого строки, уехавшие при прокрутке под шапку, ловили тапы
+        // «сквозь» крестик закрытия — рисование клипается, хит-тест нет.
         float endY  = DrawPopoverContentFG(fg, fn, fs, g_pop.sectionId, dt,
                                             sX, sW, drawY, easeT,
                                             g_pop.closing,
                                             io.MousePos, io.MouseClickedPos[0],
-                                            io.MouseReleased[0] && !g_scrollPop.dragging,
-                                            io.MouseDown[0]);
+                                            io.MouseReleased[0] && !g_scrollPop.dragging && mIn,
+                                            io.MouseDown[0] && mIn);
 
         float contentTotalH = endY - drawY;
         s_popMaxScroll = ImMax(0.f, contentTotalH - (areaH - 4.f));
