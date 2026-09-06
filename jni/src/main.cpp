@@ -571,6 +571,10 @@ struct AppState {
     // Автофарм: главный выключатель + какие ресурсы добывать.
     bool  farm_on = false;
     bool  farm_wood = true, farm_stone = false, farm_metal = false, farm_sulfur = false;
+    // Калибровка зон бота (доли экрана 0..1; -1 = не задано, берём дефолт).
+    // Джойстик движения и кнопка огня/атаки — у всех раскладки разные.
+    float farm_joy_x = -1.f, farm_joy_y = -1.f;
+    float farm_fire_x = -1.f, farm_fire_y = -1.f;
     // ui_fps выключен навсегда (счётчик убран), рамки карточек — всегда вкл.
     bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = true;
     // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
@@ -2950,6 +2954,78 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##fm3", XS("Металл"), &g_state.farm_metal,  g_state.a_farm_metal,  false);
         ToggleRow("##fm4", XS("Сера"),   &g_state.farm_sulfur, g_state.a_farm_sulfur, true);
 
+        // Зоны бота: куда жать джойстик движения и кнопку огня. Раскладка
+        // управления у всех разная — без калибровки бот может мимо попадать.
+        SHdr(XS("Зоны бота"));
+        {
+            bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+            const float rowH = Layout::RowH;
+
+            struct ZoneRow {
+                const char* id;
+                const char* lbl;
+                int   calib;         // g_farmCalib для этой зоны
+                float zx, zy;        // сохранённые доли экрана (-1 = нет)
+            };
+            const ZoneRow rows[2] = {
+                {"##fz1", XS("Зона джойстика"), 1, g_state.farm_joy_x,  g_state.farm_joy_y},
+                {"##fz2", XS("Зона огня"),      2, g_state.farm_fire_x, g_state.farm_fire_y},
+            };
+
+            CardBg(rowH * 2);
+            for (int zi = 0; zi < 2; ++zi) {
+                const ZoneRow& z = rows[zi];
+                auto pos = ImGui::GetCursorScreenPos();
+                ImGui::InvisibleButton(z.id, {avW, rowH});
+                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
+                    g_farmCalib = z.calib;
+                    PlaySound(SND_CLICK);
+                }
+
+                // Название слева.
+                float cy2 = pos.y + rowH * 0.5f;
+                dl->AddText(fn, fs * 1.15f,
+                    {pos.x + inset + Layout::PadX, cy2 - fs * 1.15f * 0.5f},
+                    C::U(C::Txt()), z.lbl);
+
+                // Справа — статус зоны: «Задать» или процент экрана + точка.
+                char st[32];
+                bool set = z.zx >= 0.f;
+                if (set) snprintf(st, sizeof(st), "%d%% %d%%", (int)(z.zx * 100.f), (int)(z.zy * 100.f));
+                else     snprintf(st, sizeof(st), "%s", XS("Задать"));
+                auto stsz = fn->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0, st);
+                float stx = pos.x + avW - inset - Layout::PadX - stsz.x;
+                dl->AddText(fn, fs * 1.0f, {stx, cy2 - stsz.y * 0.5f},
+                    set ? C::U(C::Acc()) : C::U(C::Dim()), st);
+                if (set)
+                    dl->AddCircleFilled({stx - 16.f, cy2}, 5.f, C::U(C::Acc()), 16);
+
+                if (zi == 0)
+                    dl->AddLine({pos.x + inset + 12.f, pos.y + rowH},
+                                {pos.x + avW - inset - 12.f, pos.y + rowH},
+                                C::UA(C::Sep(), 0.7f), 1.f);
+            }
+
+            // Сброс зон к дефолту (если наставил мимо).
+            if (g_state.farm_joy_x >= 0.f || g_state.farm_fire_x >= 0.f) {
+                ImGui::Dummy({1.f, 8.f});
+                CardBg(rowH * 1);
+                auto rp = ImGui::GetCursorScreenPos();
+                ImGui::InvisibleButton("##fz0", {avW, rowH});
+                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
+                    g_state.farm_joy_x = g_state.farm_joy_y = -1.f;
+                    g_state.farm_fire_x = g_state.farm_fire_y = -1.f;
+                    ShowToast(XS("Зоны сброшены"));
+                    PlaySound(SND_CLICK);
+                }
+                const char* rt = XS("Сбросить зоны");
+                auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
+                dl->AddText(fn, fs * 1.05f,
+                    {rp.x + (avW - rsz.x) * 0.5f, rp.y + (rowH - rsz.y) * 0.5f},
+                    C::U(C::Dim()), rt);
+            }
+        }
+
         // Статус: что фарм делает прямо сейчас + детали для диагностики.
         SHdr(XS("Статус"));
         {
@@ -3422,6 +3498,11 @@ int  g_farmReason = 1;       // idle reason from esp_farm_debug()
 float g_farmTgtDist = 0.f;   // distance to the current target (m)
 int  g_farmTgtKind = 0;      // current target resource kind
 
+// Калибровка зон бота: 0 — нет, 1 — ждём тап по джойстику, 2 — по кнопке
+// огня. Пока калибровка активна, меню скрыто и первый тап по экрану
+// записывает позицию (в долях экрана) в g_state.
+int  g_farmCalib = 0;
+
 static void UpdateFarm(float dt) {
     static bool  s_moveDown = false;  // finger 0: move joystick
     static bool  s_lookDown = false;  // finger 1: camera swipe
@@ -3461,7 +3542,8 @@ static void UpdateFarm(float dt) {
 
     const bool menuBlocked = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     // The aimbot owns the camera while it is on a player — farm yields fully.
-    bool active = mask != 0 && g_esp_attached && !menuBlocked && !s_fingerDown;
+    // g_farmCalib: пока пользователь тапает зоны, бот молчит.
+    bool active = mask != 0 && g_esp_attached && !menuBlocked && !s_fingerDown && g_farmCalib == 0;
 
     // ВРЕМЕННОЕ логгирование (тест-сборка): включение/выключение фарма.
     {
@@ -3632,7 +3714,10 @@ static void UpdateFarm(float dt) {
         if (wantWalk) {
             // Virtual stick centre and a forward push, slightly steered
             // towards the node so small yaw errors do not need camera swipes.
-            float cx = sw * 0.165f, cy = sh * 0.70f, r = sh * 0.16f;
+            // Centre: calibrated position when set, sensible default otherwise.
+            float cx = (g_state.farm_joy_x >= 0.f) ? sw * g_state.farm_joy_x : sw * 0.165f;
+            float cy = (g_state.farm_joy_y >= 0.f) ? sh * g_state.farm_joy_y : sh * 0.70f;
+            float r = sh * 0.16f;
             float steer = tgt.yaw / 70.f;
             if (steer >  0.6f) steer =  0.6f;
             if (steer < -0.6f) steer = -0.6f;
@@ -3659,8 +3744,11 @@ static void UpdateFarm(float dt) {
             s_tapTimer -= (int)roundf(dt * 1000.f);
             if (s_tapTimer <= 0) {
                 if (!s_tapDown) {
-                    // Attack tap on the right half, clear of the look finger.
-                    Touch_Down_N(2, sw * 0.88f, sh * 0.66f);
+                    // Attack tap: calibrated fire button when set, otherwise
+                    // the right half of the screen clear of the look finger.
+                    float fx = (g_state.farm_fire_x >= 0.f) ? sw * g_state.farm_fire_x : sw * 0.88f;
+                    float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
+                    Touch_Down_N(2, fx, fy);
                     s_tapDown = true;
                     s_tapTimer = 85;
                 } else {
@@ -3761,6 +3849,69 @@ void RenderMenu() {
 
     DrawWatermark(dt);
     DrawToast(dt);
+
+    // ---- Режим калибровки зон автофарма ------------------------------------
+    // Меню спрятано; первый тап по экрану записывает позицию зоны (в долях
+    // экрана). Затем — следующая зона или выход из режима.
+    if (g_farmCalib != 0) {
+        float dw = 0.f, dh = 0.f;
+        VisibleScreen(dw, dh);
+        if (dw < 100.f || dh < 100.f) { g_farmCalib = 0; return; }
+        auto* fg = ImGui::GetForegroundDrawList();
+
+        // Затемнение + рамка-акцент.
+        fg->AddRectFilled({0, 0}, {dw, dh}, IM_COL32(0, 0, 0, 90));
+        fg->AddRect({4.f, 4.f}, {dw - 4.f, dh - 4.f}, C::UA(C::Acc(), 0.9f), 10.f, 0, 3.f);
+
+        // Подпись, что тапать.
+        auto* fn = ImGui::GetFont();
+        const char* title = (g_farmCalib == 1)
+            ? XS("Тапни по центру джойстика движения")
+            : XS("Тапни по кнопке огня / атаки");
+        const char* sub = XS("Тап записывает зону. Меню откроется само.");
+        float tfs = ImGui::GetFontSize() * 1.5f;
+        auto tsz = fn->CalcTextSizeA(tfs, FLT_MAX, 0, title);
+        auto ssz = fn->CalcTextSizeA(tfs * 0.62f, FLT_MAX, 0, sub);
+        float ty = dh * 0.16f;
+        // Плашка под текстом, чтобы читалось на любом фоне.
+        float px0 = (dw - ImMax(tsz.x, ssz.x)) * 0.5f - 26.f;
+        float px1 = (dw + ImMax(tsz.x, ssz.x)) * 0.5f + 26.f;
+        fg->AddRectFilled({px0, ty - 18.f}, {px1, ty + tsz.y + 10.f + ssz.y + 18.f},
+                          C::UA(C::Card(), 0.92f), 18.f);
+        fg->AddText(fn, tfs, {(dw - tsz.x) * 0.5f, ty}, C::U(C::Txt()), title);
+        fg->AddText(fn, tfs * 0.62f, {(dw - ssz.x) * 0.5f, ty + tsz.y + 10.f}, C::U(C::Dim()), sub);
+
+        // Пульсирующий маркер текущей сохранённой зоны (если есть).
+        {
+            float zx = -1.f, zy = -1.f;
+            if (g_farmCalib == 1 && g_state.farm_joy_x >= 0.f) { zx = g_state.farm_joy_x * dw; zy = g_state.farm_joy_y * dh; }
+            if (g_farmCalib == 2 && g_state.farm_fire_x >= 0.f) { zx = g_state.farm_fire_x * dw; zy = g_state.farm_fire_y * dh; }
+            if (zx >= 0.f) {
+                float pr = 34.f + 6.f * sinf((float)ImGui::GetTime() * 4.f);
+                fg->AddCircle({zx, zy}, pr, C::UA(C::Acc(), 0.85f), 40, 3.f);
+                fg->AddCircleFilled({zx, zy}, 7.f, C::U(C::Acc()), 20);
+            }
+        }
+
+        // Тап (отпускание пальца) — записываем зону.
+        if (io.MouseReleased[0]) {
+            float rx = io.MousePos.x / dw, ry = io.MousePos.y / dh;
+            if (rx > 0.f && rx < 1.f && ry > 0.f && ry < 1.f) {
+                if (g_farmCalib == 1) {
+                    g_state.farm_joy_x = rx; g_state.farm_joy_y = ry;
+                    ShowToast(XS("Зона джойстика сохранена"));
+                } else {
+                    g_state.farm_fire_x = rx; g_state.farm_fire_y = ry;
+                    ShowToast(XS("Зона огня сохранена"));
+                }
+                PlaySound(SND_CLICK);
+                g_farmCalib = 0;
+                menu_open = true;
+            }
+        }
+        return; // пока калибруемся, меню не рисуем
+    }
+
     if (!menu_open) return;
 
     const float WW = g_win.w, WH = g_win.h;
