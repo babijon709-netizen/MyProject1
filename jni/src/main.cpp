@@ -2177,6 +2177,109 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgCardBg(Layout::SliderH);
         FgSliderRow(XS("Толщина"),   &g_state.esp_thick, 0.5f, 5.f,   "%.1f",     true, g_state.sl_esp_thick);
 
+    } else if (secId == 4) {
+        // Автофарм: всё управление ботом в одном окне.
+        extern int g_farmCalib; // определён рядом с UpdateFarm
+
+        FgSHdr(XS("Автофарм"));
+        FgCardBg(rH * 1);
+        FgToggleRow(XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, true);
+
+        FgSHdr(XS("Что добывать"));
+        FgCardBg(rH * 4);
+        FgToggleRow(XS("Дерево"), &g_state.farm_wood,   g_state.a_farm_wood,   false);
+        FgToggleRow(XS("Камень"), &g_state.farm_stone,  g_state.a_farm_stone,  false);
+        FgToggleRow(XS("Металл"), &g_state.farm_metal,  g_state.a_farm_metal,  false);
+        FgToggleRow(XS("Сера"),   &g_state.farm_sulfur, g_state.a_farm_sulfur, true);
+
+        FgSHdr(XS("Дальность"));
+        FgCardBg(Layout::SliderH);
+        FgSliderRow(XS("Искать до"), &g_state.farm_range, 10.f, 300.f,
+                    XS("%.0f м"), true, g_state.sl_farm_range);
+
+        // Зоны бота: куда жать джойстик движения и кнопку огня.
+        FgSHdr(XS("Зоны бота"));
+        {
+            struct ZoneRow {
+                const char* lbl;
+                int   calib;         // g_farmCalib для этой зоны
+                float zx, zy;        // сохранённые доли экрана (-1 = нет)
+            };
+            const ZoneRow zrows[2] = {
+                {XS("Зона джойстика"), 1, g_state.farm_joy_x,  g_state.farm_joy_y},
+                {XS("Зона огня"),      2, g_state.farm_fire_x, g_state.farm_fire_y},
+            };
+
+            FgCardBg(rH * 2);
+            for (int zi = 0; zi < 2; ++zi) {
+                const ZoneRow& z = zrows[zi];
+
+                if (!blocked && !g_scrollPop.dragging && mouseReleased
+                    && mousePos.x >= cX + inset && mousePos.x <= cX + cW - inset
+                    && mousePos.y >= curY && mousePos.y <= curY + rH
+                    && clickedPos.x >= cX + inset && clickedPos.x <= cX + cW - inset
+                    && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
+                    g_farmCalib = z.calib;
+                    PopoverClose();
+                    PlaySound(SND_CLICK);
+                }
+
+                float cy2 = curY + rH * 0.5f;
+                fg->AddText(fn, fs * 1.15f,
+                    {cX + inset + padX, cy2 - fs * 1.15f * 0.5f},
+                    C::UA(C::Txt(), alpha), z.lbl);
+
+                char st[32];
+                bool set = z.zx >= 0.f;
+                if (set) snprintf(st, sizeof(st), "%d%% %d%%", (int)(z.zx * 100.f), (int)(z.zy * 100.f));
+                else     snprintf(st, sizeof(st), "%s", XS("Задать"));
+                auto stsz = fn->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0, st);
+                float stx = cX + cW - inset - padX - stsz.x;
+                fg->AddText(fn, fs * 1.0f, {stx, cy2 - stsz.y * 0.5f},
+                    set ? C::UA(C::Acc(), alpha) : C::UA(C::Dim(), alpha), st);
+                if (set)
+                    fg->AddCircleFilled({stx - 16.f, cy2}, 5.f, C::UA(C::Acc(), alpha), 16);
+
+                if (zi == 0 && g_state.ui_show_sep)
+                    fg->AddLine({cX + inset + padX, curY + rH - 0.5f},
+                                {cX + cW - inset - padX, curY + rH - 0.5f},
+                                C::UA(C::Sep(), alpha), 0.8f);
+                curY += rH;
+            }
+
+            // Сброс зон к дефолту (если наставил мимо).
+            if (g_state.farm_joy_x >= 0.f || g_state.farm_fire_x >= 0.f) {
+                curY += 8.f;
+                FgCardBg(rH * 1);
+                if (!blocked && !g_scrollPop.dragging && mouseReleased
+                    && mousePos.x >= cX + inset && mousePos.x <= cX + cW - inset
+                    && mousePos.y >= curY && mousePos.y <= curY + rH
+                    && clickedPos.x >= cX + inset && clickedPos.x <= cX + cW - inset
+                    && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
+                    g_state.farm_joy_x = g_state.farm_joy_y = -1.f;
+                    g_state.farm_fire_x = g_state.farm_fire_y = -1.f;
+                    ShowToast(XS("Зоны сброшены"));
+                    PlaySound(SND_CLICK);
+                }
+                const char* rt = XS("Сбросить зоны");
+                auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
+                fg->AddText(fn, fs * 1.05f,
+                    {cX + (cW - rsz.x) * 0.5f, curY + (rH - rsz.y) * 0.5f},
+                    C::UA(C::Dim(), alpha), rt);
+                curY += rH;
+            }
+        }
+
+        // Подсказка, как этим пользоваться.
+        {
+            curY += 14.f;
+            const char* h1 = XS("Возьми в руки инструмент и включи автофарм.");
+            const char* h2 = XS("Бот сам идёт к ближайшему ресурсу и бьёт по крестикам.");
+            fg->AddText(fn, fs * 0.92f, {cX + inset + 4.f, curY}, C::UA(C::Dim(), alpha), h1);
+            fg->AddText(fn, fs * 0.92f, {cX + inset + 4.f, curY + fs}, C::UA(C::Dim(), alpha), h2);
+            curY += fs * 2.f + 6.f;
+        }
+
     } else if (secId == 2) {
         FgSHdr(nullptr, 12.f);
         auto dSz = fn->CalcTextSizeA(fs * 1.15f, FLT_MAX, 0, XS("Приложение будет закрыто."));
@@ -2943,178 +3046,10 @@ float TabContent(int tab, float dt, float cW) {
             dl->AddText(ImGui::GetFont(), exitFS, {tx, ty}, C::U(C::Red()), exitTxt);
         }
     } else if (tab == 3) {
-        // Разное: автофарм ресурсов.
-        auto* dl  = ImGui::GetWindowDrawList();
-        auto* fn  = ImGui::GetFont();
-        float avW = ImGui::GetContentRegionAvail().x;
-        const float inset = Layout::Inset;
-        const float fs = ImGui::GetFontSize();
-
-        SHdr(XS("Автофарм"));
-        CardBg(Layout::RowH * 1);
-        ToggleRow("##fm0", XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, true, true);
-
-        SHdr(XS("Что добывать"));
-        CardBg(Layout::RowH * 4);
-        ToggleRow("##fm1", XS("Дерево"), &g_state.farm_wood,   g_state.a_farm_wood,   false, true);
-        ToggleRow("##fm2", XS("Камень"), &g_state.farm_stone,  g_state.a_farm_stone,  false);
-        ToggleRow("##fm3", XS("Металл"), &g_state.farm_metal,  g_state.a_farm_metal,  false);
-        ToggleRow("##fm4", XS("Сера"),   &g_state.farm_sulfur, g_state.a_farm_sulfur, true);
-
-        // Дальность поиска: насколько далеко бот согласен идти за ресурсом.
-        SHdr(XS("Дальность"));
-        CardBg(Layout::SliderH);
-        SliderRow("##fmr", XS("Искать до"), &g_state.farm_range,
-                  10.f, 300.f, XS("%.0f м"), true, true, g_state.sl_farm_range, dt);
-
-        // Зоны бота: куда жать джойстик движения и кнопку огня. Раскладка
-        // управления у всех разная — без калибровки бот может мимо попадать.
-        extern int g_farmCalib; // определён ниже, рядом с UpdateFarm
-        SHdr(XS("Зоны бота"));
-        {
-            bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-            const float rowH = Layout::RowH;
-
-            struct ZoneRow {
-                const char* id;
-                const char* lbl;
-                int   calib;         // g_farmCalib для этой зоны
-                float zx, zy;        // сохранённые доли экрана (-1 = нет)
-            };
-            const ZoneRow rows[2] = {
-                {"##fz1", XS("Зона джойстика"), 1, g_state.farm_joy_x,  g_state.farm_joy_y},
-                {"##fz2", XS("Зона огня"),      2, g_state.farm_fire_x, g_state.farm_fire_y},
-            };
-
-            CardBg(rowH * 2);
-            for (int zi = 0; zi < 2; ++zi) {
-                const ZoneRow& z = rows[zi];
-                auto pos = ImGui::GetCursorScreenPos();
-                ImGui::InvisibleButton(z.id, {avW, rowH});
-                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
-                    g_farmCalib = z.calib;
-                    PlaySound(SND_CLICK);
-                }
-
-                // Название слева.
-                float cy2 = pos.y + rowH * 0.5f;
-                dl->AddText(fn, fs * 1.15f,
-                    {pos.x + inset + Layout::PadX, cy2 - fs * 1.15f * 0.5f},
-                    C::U(C::Txt()), z.lbl);
-
-                // Справа — статус зоны: «Задать» или процент экрана + точка.
-                char st[32];
-                bool set = z.zx >= 0.f;
-                if (set) snprintf(st, sizeof(st), "%d%% %d%%", (int)(z.zx * 100.f), (int)(z.zy * 100.f));
-                else     snprintf(st, sizeof(st), "%s", XS("Задать"));
-                auto stsz = fn->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0, st);
-                float stx = pos.x + avW - inset - Layout::PadX - stsz.x;
-                dl->AddText(fn, fs * 1.0f, {stx, cy2 - stsz.y * 0.5f},
-                    set ? C::U(C::Acc()) : C::U(C::Dim()), st);
-                if (set)
-                    dl->AddCircleFilled({stx - 16.f, cy2}, 5.f, C::U(C::Acc()), 16);
-
-                if (zi == 0)
-                    dl->AddLine({pos.x + inset + 12.f, pos.y + rowH},
-                                {pos.x + avW - inset - 12.f, pos.y + rowH},
-                                C::UA(C::Sep(), 0.7f), 1.f);
-            }
-
-            // Сброс зон к дефолту (если наставил мимо).
-            if (g_state.farm_joy_x >= 0.f || g_state.farm_fire_x >= 0.f) {
-                ImGui::Dummy({1.f, 8.f});
-                CardBg(rowH * 1);
-                auto rp = ImGui::GetCursorScreenPos();
-                ImGui::InvisibleButton("##fz0", {avW, rowH});
-                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
-                    g_state.farm_joy_x = g_state.farm_joy_y = -1.f;
-                    g_state.farm_fire_x = g_state.farm_fire_y = -1.f;
-                    ShowToast(XS("Зоны сброшены"));
-                    PlaySound(SND_CLICK);
-                }
-                const char* rt = XS("Сбросить зоны");
-                auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
-                dl->AddText(fn, fs * 1.05f,
-                    {rp.x + (avW - rsz.x) * 0.5f, rp.y + (rowH - rsz.y) * 0.5f},
-                    C::U(C::Dim()), rt);
-            }
-        }
-
-        // Статус: что фарм делает прямо сейчас + детали для диагностики.
-        SHdr(XS("Статус"));
-        {
-            const float stH = Layout::RowH * 1.35f;
-            auto sp = ImGui::GetCursorScreenPos();
-            dl->AddRectFilled({sp.x + inset, sp.y}, {sp.x + avW - inset, sp.y + stH},
-                C::U(C::Card()), R::Card);
-            if (g_state.ui_show_sep)
-                dl->AddRect({sp.x + inset, sp.y}, {sp.x + avW - inset, sp.y + stH},
-                    C::U(C::Sep()), R::Card, 0, 1.2f);
-
-            const char* st;
-            ImVec4 stCol = C::Dim();
-            char detail[96] = {};
-            if (!g_state.farm_on) {
-                st = XS("Выключен");
-            } else if (!Touch_CanInject()) {
-                st = XS("Нет доступа к тачу");
-                snprintf(detail, sizeof(detail), "%s", XS("тач в режиме чтения — перезапусти чит от root"));
-            } else if (!g_esp_attached) {
-                st = XS("Жду игру...");
-            } else if (!g_farmActive) {
-                // Почему цели нет — иначе «ничего не происходит» не отладить.
-                switch (g_farmReason) {
-                    case 2:  st = XS("Жду камеру игры...");
-                             snprintf(detail, sizeof(detail), "%s", XS("зайди в мир, открой обзор")); break;
-                    case 3:  st = XS("Ресурсы не найдены");
-                             snprintf(detail, sizeof(detail), "%s", XS("рядом нет выбранных ресурсов")); break;
-                    case 4:  st = XS("Всё далеко или выбито");
-                             snprintf(detail, sizeof(detail), XS("в кэше узлов: %d"), g_farmNodes); break;
-                    case 5:  st = XS("Нет позиции камеры");
-                             snprintf(detail, sizeof(detail), "%s", XS("двинь камеру пальцем")); break;
-                    default: st = XS("Ищу ресурс рядом...");
-                             snprintf(detail, sizeof(detail), XS("в кэше узлов: %d"), g_farmNodes); break;
-                }
-            } else {
-                const char* kindName = g_farmTgtKind == 0 ? XS("дерево")
-                                     : g_farmTgtKind == 1 ? XS("камень")
-                                     : g_farmTgtKind == 2 ? XS("металл") : XS("сера");
-                if (g_farmPhase == 3)      st = XS("Добываю");
-                else if (g_farmPhase == 2) st = XS("Иду к ресурсу");
-                else                       st = XS("Поворачиваюсь");
-                stCol = C::Acc();
-                snprintf(detail, sizeof(detail), XS("%s, %.0f м"), kindName, g_farmTgtDist);
-            }
-            // Пульсирующая точка-индикатор слева от текста.
-            float cy2 = sp.y + stH * 0.5f;
-            float pulse = g_state.farm_on && g_farmActive
-                ? 0.55f + 0.45f * sinf((float)ImGui::GetTime() * 5.f) : 1.f;
-            dl->AddCircleFilled({sp.x + inset + Layout::PadX, cy2}, 8.f,
-                C::UA(stCol, pulse), 20);
-            float tx0 = sp.x + inset + Layout::PadX + 24.f;
-            if (detail[0]) {
-                auto ssz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, st);
-                float totalH = ssz.y + 4.f + fs * 0.9f;
-                float ty0 = sp.y + (stH - totalH) * 0.5f;
-                dl->AddText(fn, fs * 1.05f, {tx0, ty0}, C::U(stCol), st);
-                dl->AddText(fn, fs * 0.90f, {tx0, ty0 + ssz.y + 4.f}, C::U(C::Dim()), detail);
-            } else {
-                auto ssz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, st);
-                dl->AddText(fn, fs * 1.05f, {tx0, cy2 - ssz.y * 0.5f}, C::U(stCol), st);
-            }
-            ImGui::Dummy({avW, stH});
-        }
-
-        // Подсказка, как этим пользоваться.
-        {
-            ImGui::Dummy({1.f, 10.f});
-            const char* h1 = XS("Возьми в руки инструмент и включи автофарм.");
-            const char* h2 = XS("Бот сам идёт к ближайшему ресурсу и бьёт по крестикам.");
-            auto p = ImGui::GetCursorScreenPos();
-            dl->AddText(fn, fs * 0.92f, {p.x + inset + 4.f, p.y}, C::U(C::Dim()), h1);
-            dl->AddText(fn, fs * 0.92f, {p.x + inset + 4.f, p.y + fs}, C::U(C::Dim()), h2);
-            ImGui::Dummy({1.f, fs * 2.f + 6.f});
-        }
+        // Разное: каждая крупная функция — своя карточка-«вкладка»,
+        // открывающая отдельное окно (как «Ещё настройки» в ESP).
+        SHdr(XS("Функции"));
+        CollapsibleHeader("##fnfarm", XS("Автофарм"), 4);
 
         ImGui::Dummy({1.f, 12.f});
     }

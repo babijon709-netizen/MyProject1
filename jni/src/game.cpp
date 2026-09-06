@@ -4799,14 +4799,22 @@ bool esp_farm_get_target(FarmTarget& out) {
     }
     if (!spot_ok) {
         aim = best->pos;
-        aim.y += (best->kind == 0) ? 1.15F : 0.55F;
-        // The pivot of a tall tree sits metres up the trunk; aiming there
-        // tilts the camera into the sky and the swings whiff. Clamp the aim
-        // height to a swingable band around the player's own chest.
-        float lo = g_frame_local_pos.y + 0.4F;
-        float hi = g_frame_local_pos.y + 1.9F;
-        if (aim.y < lo) aim.y = lo;
-        if (aim.y > hi) aim.y = hi;
+        // Trees are hit at chest height; ore nodes are squat — their pivot
+        // already sits near the top of the rock, so aim LOW on them or the
+        // swings sail over the stone.
+        if (best->kind == 0) {
+            aim.y += 1.15F;
+            float lo = g_frame_local_pos.y + 0.4F;
+            float hi = g_frame_local_pos.y + 1.9F;
+            if (aim.y < lo) aim.y = lo;
+            if (aim.y > hi) aim.y = hi;
+        } else {
+            aim.y += 0.15F;
+            float lo = g_frame_local_pos.y + 0.15F;
+            float hi = g_frame_local_pos.y + 0.9F;
+            if (aim.y < lo) aim.y = lo;
+            if (aim.y > hi) aim.y = hi;
+        }
     }
 
     // Full-circle angles from the camera (or firing) axis: unlike
