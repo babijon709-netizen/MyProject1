@@ -577,6 +577,9 @@ struct AppState {
     float farm_fire_x = -1.f, farm_fire_y = -1.f;
     // Дальность поиска ресурсов, метры.
     float farm_range = 100.f;
+    // Иксрей: визуально срезает мир вокруг игрока (0 = выкл), метры.
+    bool  xray_on = false;
+    float xray_range = 5.f;
     // ui_fps выключен навсегда (счётчик убран), рамки карточек — всегда вкл.
     bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = true;
     // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
@@ -593,8 +596,9 @@ struct AppState {
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
+    float a_xray_on = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray;
 };
 static AppState g_state;
 
@@ -628,6 +632,7 @@ static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
                                 g_state.esp_loot, g_state.esp_pickup);
         esp_set_marker_max_distance(g_state.marker_dist);
+        esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
     }
     return s_boxes;
@@ -896,17 +901,6 @@ static void DrawEspOverlay() {
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;
-        // ВРЕМЕННАЯ диагностика меток (жёлтая строка): шаг обрыва цепочки,
-        // размер последнего скана, счётчик словаря сущностей. Убрать после
-        // починки. step: 0 ok, 1 нет процесса, 2 скан пуст, 10..17 — камерный
-        // кадр (11 нет контроллера, 14 нет камеры, 16 матрицы, 17 позиция).
-        {
-            char dbg[96];
-            snprintf(dbg, sizeof(dbg), "mk step=%d scan=%d dict=%d",
-                     esp_marker_trace_step(), esp_marker_trace_scan(), esp_marker_trace_dict());
-            dl->AddText(espFont, espFs * 1.05f, ImVec2(12.f, sh * 0.35f),
-                        IM_COL32(255, 220, 40, 255), dbg);
-        }
         // Elite crates pulse through the spectrum: one hue for all of them per
         // frame (a full turn every two seconds) so they cannot be missed.
         const float rainbow_hue = fmodf((float)ImGui::GetTime() * 0.5f, 1.0f);
@@ -3067,6 +3061,14 @@ float TabContent(int tab, float dt, float cW) {
         SHdr(XS("Функции"));
         CollapsibleHeader("##fnfarm", XS("Автофарм"), 5);
 
+        // Иксрей: рендер отсекает всё ближе выбранной дистанции — стены и
+        // текстуры вокруг игрока пропадают, видно что за ними.
+        SHdr(XS("Иксрей"));
+        CardBg(Layout::RowH + Layout::SliderH);
+        ToggleRow("##xr0", XS("Иксрей"), &g_state.xray_on, g_state.a_xray_on, false, true);
+        SliderRow("##xr1", XS("Дальность"), &g_state.xray_range,
+                  1.f, 30.f, XS("%.0f м"), true, false, g_state.sl_xray, dt);
+
         ImGui::Dummy({1.f, 12.f});
     }
 
@@ -3910,6 +3912,7 @@ void RenderMenu() {
     Tick(g_state.a_farm_stone,  g_state.farm_stone,  dt);
     Tick(g_state.a_farm_metal,  g_state.farm_metal,  dt);
     Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
+    Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
     ApplyTheme();
 
     if (g_cfgLoadedIdx >= 0 && g_cfgLoadedIdx < kMaxConfigs)

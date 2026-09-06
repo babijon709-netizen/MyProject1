@@ -20,6 +20,10 @@ static ssize_t remote_vm_readv(pid_t pid, const struct iovec* local_iov, unsigne
     return syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
 }
 
+static ssize_t remote_vm_writev(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
+    return syscall(__NR_process_vm_writev, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+}
+
 using namespace game_offsets;
 
 static pid_t     g_pid         = -1;
@@ -98,6 +102,50 @@ static bool rd_buf(uint64_t addr, void* out, size_t size) {
     struct iovec local = {out, size};
     struct iovec remote = {(void*)addr, size};
     return remote_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)size;
+}
+
+static bool wr_buf(uint64_t addr, const void* in, size_t size) {
+    if (!addr || !size) return false;
+    struct iovec local = {(void*)in, size};
+    struct iovec remote = {(void*)addr, size};
+    return remote_vm_writev(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)size;
+}
+
+// ==== X-ray: камера отсекает всё ближе N метров (near clip plane) ==========
+// Пишется прямо в native Camera каждый кадр, пока включено; при выключении
+// восстанавливается исходное значение. Смена камеры игрой обрабатывается —
+// старой камере возвращается её клип, новой сохраняется свой.
+static float    g_xray_meters = 0.0F;      // 0 = выключено
+static uint64_t g_xray_cam = 0;
+static float    g_xray_saved_near = 0.1F;
+static bool     g_xray_saved_valid = false;
+
+void esp_set_xray(float meters) {
+    if (!std::isfinite(meters) || meters < 0.0F) meters = 0.0F;
+    if (meters > 50.0F) meters = 50.0F;
+    g_xray_meters = meters;
+}
+
+static void xray_apply(uint64_t native_cam) {
+    if (!native_cam) return;
+    if (g_xray_meters > 0.05F) {
+        if (g_xray_cam != native_cam || !g_xray_saved_valid) {
+            // Другая камера: вернуть клип прежней, запомнить клип новой.
+            if (g_xray_saved_valid && g_xray_cam)
+                wr_buf(g_xray_cam + CAMERA_NEAR_CLIP, &g_xray_saved_near, sizeof(float));
+            float current = rd<float>(native_cam + CAMERA_NEAR_CLIP);
+            g_xray_saved_near = (std::isfinite(current) && current > 0.0001F && current < 5.0F)
+                              ? current : 0.1F;
+            g_xray_saved_valid = true;
+            g_xray_cam = native_cam;
+        }
+        wr_buf(native_cam + CAMERA_NEAR_CLIP, &g_xray_meters, sizeof(float));
+    } else if (g_xray_saved_valid) {
+        if (g_xray_cam)
+            wr_buf(g_xray_cam + CAMERA_NEAR_CLIP, &g_xray_saved_near, sizeof(float));
+        g_xray_saved_valid = false;
+        g_xray_cam = 0;
+    }
 }
 
 static std::string read_remote_string(uint64_t address) {
@@ -390,8 +438,8 @@ static void weapon_key_normalize(const char* in, char* out, size_t cap) {
 struct WeaponName { const char* key; const char* en; const char* ru; };
 static const WeaponName kWeaponNames[] = {
     // ---- Firearms ----
-    {"assaultriffle",         "Assault Rifle",   "Автомат"},
-    {"assaultrifle",          "Assault Rifle",   "Автомат"},
+    {"assaultriffle",         "AK-47",           "АК-47"},
+    {"assaultrifle",          "AK-47",           "АК-47"},
     {"fnfal",                 "FN FAL",          "Автомат FAL"},
     {"thompson",              "Thompson",        "Томпсон"},
     {"krissvector",           "Kriss Vector",    "Вектор"},
@@ -3267,6 +3315,7 @@ static void reset_world_caches() {
 
 void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
+    g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_frame_publish_fail_streak = 0;
     g_aim_ref_valid = false;
@@ -3303,34 +3352,27 @@ static float g_last_overlay_sh = 2400.0F;
 // camera, with no players involved at all. This is what keeps markers and
 // the autofarm alive when the player list is empty or the box pipeline
 // failed: the camera IS where the local player is.
-// ВРЕМЕННАЯ диагностика меток: где именно умирает цепочка. Показывается
-// жёлтой строкой на экране, убрать после починки.
-int g_marker_trace_step = 0;      // шаг, на котором цепочка оборвалась
-int g_marker_trace_scan = -1;     // сколько сущностей нашёл последний скан
-int g_marker_trace_dict = -1;     // счётчик entries словаря Mirror
-int esp_marker_trace_step() { return g_marker_trace_step; }
-int esp_marker_trace_scan() { return g_marker_trace_scan; }
-int esp_marker_trace_dict() { return g_marker_trace_dict; }
 
 static bool publish_camera_only_frame(float sw, float sh) {
-    if (g_pid <= 0 || !g_il2cpp_base) { g_marker_trace_step = 10; return false; }
+    if (g_pid <= 0 || !g_il2cpp_base) return false;
     // Resolves g_game_controller_class as a side effect — without it the
     // camera lookup below has no class to read statics from.
     resolve_local_player();
-    if (!g_game_controller_class) { g_marker_trace_step = 11; return false; }
+    if (!g_game_controller_class) return false;
     uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
-    if (!gcb_sf) { g_marker_trace_step = 12; return false; }
+    if (!gcb_sf) return false;
     uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
-    if (!cam_mgr) { g_marker_trace_step = 13; return false; }
+    if (!cam_mgr) return false;
     uint64_t managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
-    if (!managed_cam) { g_marker_trace_step = 14; return false; }
+    if (!managed_cam) return false;
     uint64_t cam_native = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-    if (!cam_native) { g_marker_trace_step = 15; return false; }
+    if (!cam_native) return false;
     if (!(sw >= 100.0F) || !(sh >= 100.0F)) { sw = 1080.0F; sh = 2400.0F; }
     Mat4 solo_proj{}, solo_view{};
-    if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) { g_marker_trace_step = 16; return false; }
+    xray_apply(cam_native);
+    if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) return false;
     Vec3 cam_pos{};
-    if (!camera_position_from_view(solo_view, cam_pos)) { g_marker_trace_step = 17; return false; }
+    if (!camera_position_from_view(solo_view, cam_pos)) return false;
     g_frame_vp = mat_mul(solo_proj, solo_view);
     g_frame_vp_valid = true;
     g_frame_sw = sw; g_frame_sh = sh;
@@ -3450,6 +3492,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!native_cam) {
             return result;
         }
+        xray_apply(native_cam);
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
             return result;
         }
@@ -3883,7 +3926,7 @@ static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {
 // Barrels are smashed, not opened, so they are MineableObjects and never pass
 // through the LootObject code at all -- the entityType below is the only place
 // they can be recognised. They belong to the loot toggle all the same.
-static const MarkerLook kBarrel    {ESP_MARKER_LOOT, "Скрап",  false, false, {255, 255, 255}};
+static const MarkerLook kBarrel    {ESP_MARKER_LOOT, "Бочка",  true,  false, {80, 200, 255}};
 static const MarkerLook kSmashBox  {ESP_MARKER_LOOT, "Ящик",   false, false, {255, 255, 255}};
 
 // Animals: the game's own EntityType only covers some of them, the rest (wolf,
@@ -3959,6 +4002,7 @@ static bool for_each_name_token(const char* raw, Visit&& visit) {
 static bool animal_look_from_object_name(const char* raw, MarkerLook& look) {
     static const struct { const char* word; const char* ru; } kAnimals[] = {
         {"wolf", "Волк"},      {"wolfs", "Волк"},     {"wolves", "Волк"},
+        {"volk", "Волк"},      {"husky", "Волк"},
         {"rat", "Крыса"},      {"rats", "Крыса"},     {"mouse", "Крыса"},
         {"bear", "Медведь"},   {"boar", "Кабан"},     {"pig", "Кабан"},
         {"deer", "Олень"},     {"stag", "Олень"},     {"rabbit", "Кролик"},
@@ -3968,8 +4012,17 @@ static bool animal_look_from_object_name(const char* raw, MarkerLook& look) {
         {"cow", "Корова"},     {"fox", "Лиса"},       {"snake", "Змея"},
     };
     return for_each_name_token(raw, [&](const char* word) {
+        size_t wlen = strlen(word);
         for (const auto& animal : kAnimals) {
             if (strcmp(word, animal.word) == 0) { look = animal_look(animal.ru); return true; }
+            // Prefix match for glued prefab words ("wolfmale", "bearbig"):
+            // only for 4+ letter animal tokens, so "rat" never claims
+            // "ratchet" and other short-token accidents stay impossible.
+            size_t alen = strlen(animal.word);
+            if (alen >= 4 && wlen > alen && strncmp(word, animal.word, alen) == 0) {
+                look = animal_look(animal.ru);
+                return true;
+            }
         }
         return false;
     });
@@ -3979,7 +4032,12 @@ static bool animal_look_from_object_name(const char* raw, MarkerLook& look) {
 // and their prefab is the only thing that still says "barrel".
 static bool barrel_look_from_object_name(const char* raw, MarkerLook& look) {
     return for_each_name_token(raw, [&](const char* word) {
-        if (strcmp(word, "barrel") == 0 || strcmp(word, "barrels") == 0) {
+        // Prefix match: covers "barrel", "barrels", "barrel02", glued names
+        // like "barrelblue", plus the misspelled and localised variants some
+        // prefabs ship with ("barel", "bochka").
+        if (strncmp(word, "barrel", 6) == 0 || strncmp(word, "barel", 5) == 0 ||
+            strncmp(word, "bochka", 6) == 0 ||
+            strcmp(word, "keg") == 0 || strcmp(word, "drum") == 0) {
             look = kBarrel;
             return true;
         }
@@ -4414,10 +4472,9 @@ static bool marker_world_position(uint64_t transform, Vec3& out) {
 // Walk Mirror's client registry and cache every ore node / animal in it.
 static void rebuild_marker_entities() {
     g_marker_entities.clear();
-    g_marker_trace_dict = -1;
 
     uint64_t dictionary = resolve_network_client_spawned();
-    if (!dictionary) { g_marker_trace_dict = -2; return; }
+    if (!dictionary) return;
     // Needed to read prefab names (wolves / rats); harmless if it fails, the
     // loot and entityType paths still work.
     if (!g_go_name_offset_valid && g_local_player) ensure_gameobject_name_offset(g_local_player);
@@ -4425,13 +4482,12 @@ static void rebuild_marker_entities() {
 
     uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
     int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
-    if (!valid_obj(entries) || count <= 0) { g_marker_trace_dict = -3; return; }
+    if (!valid_obj(entries) || count <= 0) return;
     if (count > 4096) count = 4096;
-    g_marker_trace_dict = count;
 
     // One bulk read for the whole entry array instead of one read per entry.
     std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
-    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) { g_marker_trace_dict = -4; return; }
+    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
 
     uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
@@ -4535,14 +4591,14 @@ std::vector<EspMarker> esp_get_markers() {
         g_marker_rescan_countdown = 0;
         return result;
     }
-    if (g_pid <= 0 || !g_il2cpp_base) { g_marker_trace_step = 1; return result; }
+    if (g_pid <= 0 || !g_il2cpp_base) return result;
     // The box pipeline publishes the frame while players are visible; when it
     // bailed out for ANY reason (empty player list, failed position read,
     // world reload), build a camera-only frame right here. Markers must never
     // depend on other players being around.
     if (!g_frame_vp_valid || !g_frame_local_valid) {
         if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh))
-            return result; // trace step выставлен внутри
+            return result;
     }
 
     if (--g_marker_rescan_countdown <= 0) {
@@ -4551,9 +4607,7 @@ std::vector<EspMarker> esp_get_markers() {
         // result means the registry was not readable (world still loading in
         // after a respawn), so retry in half a second instead.
         g_marker_rescan_countdown = g_marker_entities.empty() ? 30 : 180;
-        g_marker_trace_scan = (int)g_marker_entities.size();
     }
-    g_marker_trace_step = g_marker_entities.empty() ? 2 : 0; // 2 = скан пуст
 
     const float max_distance = g_marker_max_distance;
     for (MarkerEntity& entity : g_marker_entities) {
