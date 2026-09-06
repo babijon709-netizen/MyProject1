@@ -67,6 +67,59 @@ static bool      g_aim_ref_valid = false;
 static Vec3      g_aim_ref_origin{};
 static Vec3      g_aim_ref_forward{}, g_aim_ref_right{}, g_aim_ref_up{};
 
+// Маска ресурсов автофарма (bit0 дерево..bit3 сера); объявлена здесь, потому
+// что временное логгирование ниже включается только при активном фарме.
+static unsigned g_farm_mask = 0;
+
+// ========== ВРЕМЕННОЕ логгирование автофарма/камеры (тест-сборка) ==========
+// Пишет в /storage/emulated/0/Download/benzhack_debug.log (fallback — папка
+// конфигов). Включается только пока выбран хоть один ресурс фарма. Убрать
+// целиком после решения проблемы «нет позиции камеры».
+#define FARM_DEBUG_LOG 1
+#if FARM_DEBUG_LOG
+#include <stdarg.h>
+#include <time.h>
+static bool g_farm_log_sample = false;      // на этом кадре пишем подробности
+static void farm_vlogf(const char* fmt, va_list args) {
+    static FILE* file = nullptr;
+    static int retry = 0;
+    if (!file) {
+        if (retry > 0) { --retry; return; }
+        file = fopen("/storage/emulated/0/Download/benzhack_debug.log", "w");
+        if (!file) file = fopen("/sdcard/Download/benzhack_debug.log", "w");
+        if (!file) file = fopen("/storage/emulated/0/benzhack/debug.log", "w");
+        if (!file) { retry = 600; return; } // повторить через ~10 с кадров
+        fprintf(file, "=== benzhack farm/camera debug log ===\n");
+    }
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    fprintf(file, "[%9.2f] ", (double)ts.tv_sec + (double)ts.tv_nsec / 1e9);
+    vfprintf(file, fmt, args);
+    fputc('\n', file);
+    fflush(file);
+}
+static void farm_logf(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    farm_vlogf(fmt, args);
+    va_end(args);
+}
+#else
+static const bool g_farm_log_sample = false;
+static void farm_logf(const char*, ...) {}
+#endif
+
+void esp_farm_log(const char* fmt, ...) {
+#if FARM_DEBUG_LOG
+    va_list args;
+    va_start(args, fmt);
+    farm_vlogf(fmt, args);
+    va_end(args);
+#else
+    (void)fmt;
+#endif
+}
+
 
 static bool vec3_is_finite(const Vec3& value);
 
@@ -1169,8 +1222,10 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     if (native_transform) {
         Vec3 cam_pos{};
         Vec4 cam_rot{};
-        if (read_camera_transform_pose(native_transform, cam_pos, cam_rot) &&
-            vec3_is_finite(cam_pos) && normalize_quaternion(cam_rot)) {
+        bool pose_ok = read_camera_transform_pose(native_transform, cam_pos, cam_rot);
+        bool fin_ok = pose_ok && vec3_is_finite(cam_pos);
+        bool quat_ok = fin_ok && normalize_quaternion(cam_rot);
+        if (quat_ok) {
             view = mat_world_to_camera(cam_pos, cam_rot);
             have_live_view = matrix_is_finite(view);
             if (have_live_view) {
@@ -1181,6 +1236,18 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
                 g_cam_pose_valid = true;
             }
         }
+#if FARM_DEBUG_LOG
+        if (g_farm_log_sample)
+            farm_logf("cam_matrices: transform=%llx pose_ok=%d fin=%d quat=%d live_view=%d layout_valid=%d",
+                      (unsigned long long)native_transform, (int)pose_ok, (int)fin_ok,
+                      (int)quat_ok, (int)have_live_view, (int)g_transform_hierarchy_layout_valid);
+#endif
+    } else {
+#if FARM_DEBUG_LOG
+        if (g_farm_log_sample)
+            farm_logf("cam_matrices: native_cam=%llx has NO transform (+0x%llx)",
+                      (unsigned long long)native_cam, (unsigned long long)CAMERA_NATIVE_TRANSFORM);
+#endif
     }
     if (!have_live_view) {
         if (s_last_ok && matrix_is_finite(s_last_view)) {
@@ -3184,6 +3251,12 @@ static bool g_frame_vp_valid = false;
 static float g_frame_sw = 0.0F, g_frame_sh = 0.0F;
 static Vec3 g_frame_local_pos{};
 static bool g_frame_local_valid = false;
+// Camera basis recovered from this frame's VIEW MATRIX (not the transform
+// pose). On devices where the transform pose read fails, this is the only
+// camera orientation available — good enough for the farm's slow turns,
+// though not for the aimbot (the fallback matrix lags a frame).
+static bool g_frame_cam_basis_valid = false;
+static Vec3 g_frame_cam_pos{}, g_frame_cam_fwd{}, g_frame_cam_right{}, g_frame_cam_up{};
 // Players near us this frame (all 360 degrees, not only the ones projected
 // on screen). Feeds the enemy-counter pill in the overlay.
 static int  g_frame_player_count = 0;
@@ -3247,6 +3320,15 @@ void esp_reset() {
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
 
+#if FARM_DEBUG_LOG
+    // Раз в ~2 секунды один кадр логгируется подробно (иначе лог зальёт).
+    {
+        static int s_sample_countdown = 0;
+        g_farm_log_sample = g_farm_mask != 0 && --s_sample_countdown <= 0;
+        if (g_farm_log_sample) s_sample_countdown = 120;
+    }
+#endif
+
     // Watchdog: every frame that fails to publish a camera + local position
     // counts up, and a few seconds of that means some cached offset or class
     // pointer did not survive the last world reload. Rebuilding everything is
@@ -3262,6 +3344,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // an early return here can never leave them projecting through a stale one.
     g_frame_vp_valid = false;
     g_frame_local_valid = false;
+    g_frame_cam_basis_valid = false;
     g_frame_player_count = 0;
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
@@ -3293,9 +3376,13 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     } else if (++g_frame_transforms_empty_streak > 10) {
         // List gone for a while: the world is being torn down / reloaded.
         if (!s_transforms.empty()) { s_transforms.clear(); reset_world_caches(); }
+        if (g_farm_log_sample) farm_logf("boxes: player transforms empty for %d frames", g_frame_transforms_empty_streak);
         return result;
     }
-    if (s_transforms.empty()) return result;
+    if (s_transforms.empty()) {
+        if (g_farm_log_sample) farm_logf("boxes: no player transforms yet");
+        return result;
+    }
 
     if (g_body_caches_dirty) { g_body_caches_dirty = false; g_player_aux.clear(); g_skeletons.clear(); }
     const bool want_bones = g_skeleton_enabled || g_aim_bones_requested;
@@ -3322,12 +3409,24 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
             }
         }
-        if (!managed_cam) { return result; }
+        if (!managed_cam) {
+            if (g_farm_log_sample) farm_logf("boxes: no managed camera (gc_class=%d)", (int)(g_game_controller_class != 0));
+            return result;
+        }
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-        if (!native_cam) return result;
-        if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
+        if (!native_cam) {
+            if (g_farm_log_sample) farm_logf("boxes: managed cam %llx has no native ptr", (unsigned long long)managed_cam);
+            return result;
+        }
+        if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
+            if (g_farm_log_sample) farm_logf("boxes: read_native_camera_matrices FAILED");
+            return result;
+        }
         if (!g_matrix_configuration_validated) {
-            if (!optimize_matrix_configuration(native_cam, s_transforms)) return result;
+            if (!optimize_matrix_configuration(native_cam, s_transforms)) {
+                if (g_farm_log_sample) farm_logf("boxes: optimize_matrix_configuration FAILED");
+                return result;
+            }
             if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
         }
         // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
@@ -3369,6 +3468,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         has_local_position = local_entity_index != s_transforms.size();
         if (!has_local_position) {
             g_player_position_validated = false;
+            if (g_farm_log_sample) farm_logf("boxes: no local player position (%d transforms)", (int)s_transforms.size());
             return result;
         }
     }
@@ -3379,6 +3479,35 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_local_pos = local;
     g_frame_local_valid = has_local_position;
     g_frame_publish_fail_streak = 0; // this frame is healthy
+
+    // Fallback camera basis straight from the view matrix (rows: right, up,
+    // -forward). Kept separate from g_cam_* — the pose path stays authoritative
+    // for the aimbot; this one only feeds the farm when the pose read fails.
+    g_frame_cam_basis_valid = false;
+    if (!transform_camera_mode) {
+        Vec3 vr = {mat_get(view, 0, 0), mat_get(view, 0, 1), mat_get(view, 0, 2)};
+        Vec3 vu = {mat_get(view, 1, 0), mat_get(view, 1, 1), mat_get(view, 1, 2)};
+        Vec3 vf = {-mat_get(view, 2, 0), -mat_get(view, 2, 1), -mat_get(view, 2, 2)};
+        Vec3 vpos{};
+        if (vec3_is_finite(vr) && vec3_is_finite(vu) && vec3_is_finite(vf) &&
+            camera_position_from_view(view, vpos)) {
+            float fl = sqrtf(vf.x * vf.x + vf.y * vf.y + vf.z * vf.z);
+            if (fl > 0.5F && fl < 2.0F) {
+                g_frame_cam_pos = vpos;
+                g_frame_cam_fwd = {vf.x / fl, vf.y / fl, vf.z / fl};
+                g_frame_cam_right = vr;
+                g_frame_cam_up = vu;
+                g_frame_cam_basis_valid = true;
+            }
+        }
+    }
+
+#if FARM_DEBUG_LOG
+    if (g_farm_log_sample)
+        farm_logf("boxes: frame OK; cam_pose=%d aim_ref=%d local=(%.1f %.1f %.1f) players=%d",
+                  (int)g_cam_pose_valid, (int)g_aim_ref_valid,
+                  local.x, local.y, local.z, (int)s_transforms.size());
+#endif
 
     Vec3 transform_camera_position{};
     Vec4 transform_camera_rotation{};
@@ -3705,7 +3834,6 @@ struct FarmEntity {
     bool     pos_valid = false;
     int      kind = 0;          // 0 wood, 1 stone, 2 metal, 3 sulfur
 };
-static unsigned g_farm_mask = 0;
 static std::vector<FarmEntity> g_farm_entities;
 static std::unordered_map<uint64_t, int> g_farm_blacklist; // identity -> frames left
 static int g_farm_rescan = 0;
@@ -4632,6 +4760,21 @@ bool esp_farm_get_target(FarmTarget& out) {
     if (--g_farm_rescan <= 0) {
         rebuild_farm_entities();
         g_farm_rescan = g_farm_entities.empty() ? 30 : 120; // ~0.5 s / ~2 s
+#if FARM_DEBUG_LOG
+        {
+            static int s_scan_log = 0;
+            if (--s_scan_log <= 0) {
+                s_scan_log = 5; // не чаще каждого 5-го скана
+                int per_kind[4] = {0, 0, 0, 0};
+                for (const FarmEntity& e : g_farm_entities)
+                    if (e.kind >= 0 && e.kind < 4) ++per_kind[e.kind];
+                farm_logf("farm scan: mask=%x nodes=%d (wood=%d stone=%d metal=%d sulfur=%d) blacklist=%d",
+                          g_farm_mask, (int)g_farm_entities.size(),
+                          per_kind[0], per_kind[1], per_kind[2], per_kind[3],
+                          (int)g_farm_blacklist.size());
+            }
+        }
+#endif
     }
 
     // Sticky target: keep working the node we already picked while it is
@@ -4706,13 +4849,40 @@ bool esp_farm_get_target(FarmTarget& out) {
 
     // Full-circle angles from the camera (or firing) axis: unlike
     // aim_angles_for() this must work for nodes behind us, so the forward
-    // component may be negative and yaw spans +-180.
-    if (!g_cam_pose_valid && !g_aim_ref_valid) { g_farm_idle_reason = 5; return false; }
+    // component may be negative and yaw spans +-180. Order of preference:
+    // firing reference > transform pose > basis from this frame's view matrix
+    // (the last one exists on devices where the pose read fails — the reason
+    // the farm used to sit in "нет позиции камеры").
+    if (!g_cam_pose_valid && !g_aim_ref_valid && !g_frame_cam_basis_valid) {
+        g_farm_idle_reason = 5;
+#if FARM_DEBUG_LOG
+        {
+            static int s_r5_log = 0;
+            if (--s_r5_log <= 0) {
+                s_r5_log = 120; // раз в ~2 с
+                farm_logf("farm: reason5 — node found (kind=%d dist=%.1f) but cam_pose=0 aim_ref=0 view_basis=0 vp_valid=%d local_valid=%d",
+                          best->kind, best_dist, (int)g_frame_vp_valid, (int)g_frame_local_valid);
+            }
+        }
+#endif
+        return false;
+    }
     const bool use_ref = g_aim_ref_valid;
-    const Vec3& origin = use_ref ? g_aim_ref_origin : g_cam_pos;
-    const Vec3& fwd = use_ref ? g_aim_ref_forward : g_cam_forward;
-    const Vec3& right = use_ref ? g_aim_ref_right : g_cam_right;
-    const Vec3& up = use_ref ? g_aim_ref_up : g_cam_up;
+    const bool use_pose = !use_ref && g_cam_pose_valid;
+    const Vec3& origin = use_ref ? g_aim_ref_origin  : use_pose ? g_cam_pos     : g_frame_cam_pos;
+    const Vec3& fwd    = use_ref ? g_aim_ref_forward : use_pose ? g_cam_forward : g_frame_cam_fwd;
+    const Vec3& right  = use_ref ? g_aim_ref_right   : use_pose ? g_cam_right   : g_frame_cam_right;
+    const Vec3& up     = use_ref ? g_aim_ref_up      : use_pose ? g_cam_up      : g_frame_cam_up;
+#if FARM_DEBUG_LOG
+    {
+        static int s_src_log = 0;
+        if (--s_src_log <= 0) {
+            s_src_log = 300; // раз в ~5 с
+            farm_logf("farm: target kind=%d dist=%.1f basis=%s", best->kind, best_dist,
+                      use_ref ? "aim_ref" : use_pose ? "cam_pose" : "view_matrix");
+        }
+    }
+#endif
     Vec3 d = {aim.x - origin.x, aim.y - origin.y, aim.z - origin.z};
     float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
     float rx = d.x * right.x + d.y * right.y + d.z * right.z;

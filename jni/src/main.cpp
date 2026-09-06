@@ -3462,6 +3462,21 @@ static void UpdateFarm(float dt) {
     const bool menuBlocked = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     // The aimbot owns the camera while it is on a player — farm yields fully.
     bool active = mask != 0 && g_esp_attached && !menuBlocked && !s_fingerDown;
+
+    // ВРЕМЕННОЕ логгирование (тест-сборка): включение/выключение фарма.
+    {
+        static unsigned s_prevMask = 0;
+        if (mask != s_prevMask) {
+            s_prevMask = mask;
+            if (mask)
+                esp_farm_log("ctrl: farm ON mask=%x attached=%d canInject=%d menuBlocked=%d aimBusy=%d",
+                             mask, (int)g_esp_attached, (int)Touch_CanInject(),
+                             (int)menuBlocked, (int)s_fingerDown);
+            else
+                esp_farm_log("ctrl: farm OFF");
+        }
+    }
+
     if (!active) {
         releaseAll();
         g_farmActive = false; g_farmPhase = 0;
@@ -3546,6 +3561,24 @@ static void UpdateFarm(float dt) {
 
     int phase = inReach ? 3 : (aimed ? 2 : 1);
     g_farmPhase = phase;
+
+    // ВРЕМЕННОЕ логгирование (тест-сборка): смена фазы и периодический пульс.
+    {
+        static int s_prevPhase = -1;
+        static float s_pulse = 0.f;
+        s_pulse += dt;
+        if (phase != s_prevPhase) {
+            s_prevPhase = phase;
+            esp_farm_log("ctrl: phase=%d (1 turn/2 walk/3 mine) yaw=%.1f pitch=%.1f dist=%.1f spot=%d",
+                         phase, tgt.yaw, tgt.pitch, tgt.dist, (int)tgt.has_spot);
+            s_pulse = 0.f;
+        } else if (s_pulse >= 3.f) {
+            s_pulse = 0.f;
+            esp_farm_log("ctrl: pulse phase=%d yaw=%.1f dist=%.1f gain=%.3f fingers m=%d l=%d t=%d",
+                         phase, tgt.yaw, tgt.dist, s_gainYaw,
+                         (int)s_moveDown, (int)s_lookDown, (int)s_tapDown);
+        }
+    }
 
     // ---- finger 1: camera swipe (yaw always; pitch only while mining) ----
     {
