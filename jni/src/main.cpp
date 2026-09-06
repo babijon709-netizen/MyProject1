@@ -2956,6 +2956,7 @@ float TabContent(int tab, float dt, float cW) {
 
         // Зоны бота: куда жать джойстик движения и кнопку огня. Раскладка
         // управления у всех разная — без калибровки бот может мимо попадать.
+        extern int g_farmCalib; // определён ниже, рядом с UpdateFarm
         SHdr(XS("Зоны бота"));
         {
             bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
