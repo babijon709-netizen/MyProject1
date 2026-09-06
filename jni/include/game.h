@@ -120,6 +120,11 @@ void        esp_farm_blacklist(unsigned long long id, float seconds);
 // nodes, 4 nodes exist but none in range / all blacklisted, 5 camera pose
 // unreadable (cannot compute angles).
 void        esp_farm_debug(int& nodes_cached, int& idle_reason);
+// ВРЕМЕННО: трейс меток (шаг обрыва цепочки / размер скана / счётчик словаря).
+// Убрать вместе с жёлтой строкой диагностики после починки меток.
+int         esp_marker_trace_step();
+int         esp_marker_trace_scan();
+int         esp_marker_trace_dict();
 
 // Vertical field of view (degrees) of the game camera as last read by
 // esp_get_boxes(). 0 if unknown.

@@ -3303,25 +3303,34 @@ static float g_last_overlay_sh = 2400.0F;
 // camera, with no players involved at all. This is what keeps markers and
 // the autofarm alive when the player list is empty or the box pipeline
 // failed: the camera IS where the local player is.
+// ВРЕМЕННАЯ диагностика меток: где именно умирает цепочка. Показывается
+// жёлтой строкой на экране, убрать после починки.
+int g_marker_trace_step = 0;      // шаг, на котором цепочка оборвалась
+int g_marker_trace_scan = -1;     // сколько сущностей нашёл последний скан
+int g_marker_trace_dict = -1;     // счётчик entries словаря Mirror
+int esp_marker_trace_step() { return g_marker_trace_step; }
+int esp_marker_trace_scan() { return g_marker_trace_scan; }
+int esp_marker_trace_dict() { return g_marker_trace_dict; }
+
 static bool publish_camera_only_frame(float sw, float sh) {
-    if (g_pid <= 0 || !g_il2cpp_base) return false;
+    if (g_pid <= 0 || !g_il2cpp_base) { g_marker_trace_step = 10; return false; }
     // Resolves g_game_controller_class as a side effect — without it the
     // camera lookup below has no class to read statics from.
     resolve_local_player();
-    if (!g_game_controller_class) return false;
+    if (!g_game_controller_class) { g_marker_trace_step = 11; return false; }
     uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
-    if (!gcb_sf) return false;
+    if (!gcb_sf) { g_marker_trace_step = 12; return false; }
     uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
-    if (!cam_mgr) return false;
+    if (!cam_mgr) { g_marker_trace_step = 13; return false; }
     uint64_t managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
-    if (!managed_cam) return false;
+    if (!managed_cam) { g_marker_trace_step = 14; return false; }
     uint64_t cam_native = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-    if (!cam_native) return false;
+    if (!cam_native) { g_marker_trace_step = 15; return false; }
     if (!(sw >= 100.0F) || !(sh >= 100.0F)) { sw = 1080.0F; sh = 2400.0F; }
     Mat4 solo_proj{}, solo_view{};
-    if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) return false;
+    if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) { g_marker_trace_step = 16; return false; }
     Vec3 cam_pos{};
-    if (!camera_position_from_view(solo_view, cam_pos)) return false;
+    if (!camera_position_from_view(solo_view, cam_pos)) { g_marker_trace_step = 17; return false; }
     g_frame_vp = mat_mul(solo_proj, solo_view);
     g_frame_vp_valid = true;
     g_frame_sw = sw; g_frame_sh = sh;
@@ -4405,9 +4414,10 @@ static bool marker_world_position(uint64_t transform, Vec3& out) {
 // Walk Mirror's client registry and cache every ore node / animal in it.
 static void rebuild_marker_entities() {
     g_marker_entities.clear();
+    g_marker_trace_dict = -1;
 
     uint64_t dictionary = resolve_network_client_spawned();
-    if (!dictionary) return;
+    if (!dictionary) { g_marker_trace_dict = -2; return; }
     // Needed to read prefab names (wolves / rats); harmless if it fails, the
     // loot and entityType paths still work.
     if (!g_go_name_offset_valid && g_local_player) ensure_gameobject_name_offset(g_local_player);
@@ -4415,12 +4425,13 @@ static void rebuild_marker_entities() {
 
     uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
     int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
-    if (!valid_obj(entries) || count <= 0) return;
+    if (!valid_obj(entries) || count <= 0) { g_marker_trace_dict = -3; return; }
     if (count > 4096) count = 4096;
+    g_marker_trace_dict = count;
 
     // One bulk read for the whole entry array instead of one read per entry.
     std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
-    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
+    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) { g_marker_trace_dict = -4; return; }
 
     uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
@@ -4524,14 +4535,14 @@ std::vector<EspMarker> esp_get_markers() {
         g_marker_rescan_countdown = 0;
         return result;
     }
-    if (g_pid <= 0 || !g_il2cpp_base) return result;
+    if (g_pid <= 0 || !g_il2cpp_base) { g_marker_trace_step = 1; return result; }
     // The box pipeline publishes the frame while players are visible; when it
     // bailed out for ANY reason (empty player list, failed position read,
     // world reload), build a camera-only frame right here. Markers must never
     // depend on other players being around.
     if (!g_frame_vp_valid || !g_frame_local_valid) {
         if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh))
-            return result;
+            return result; // trace step выставлен внутри
     }
 
     if (--g_marker_rescan_countdown <= 0) {
@@ -4540,7 +4551,9 @@ std::vector<EspMarker> esp_get_markers() {
         // result means the registry was not readable (world still loading in
         // after a respawn), so retry in half a second instead.
         g_marker_rescan_countdown = g_marker_entities.empty() ? 30 : 180;
+        g_marker_trace_scan = (int)g_marker_entities.size();
     }
+    g_marker_trace_step = g_marker_entities.empty() ? 2 : 0; // 2 = скан пуст
 
     const float max_distance = g_marker_max_distance;
     for (MarkerEntity& entity : g_marker_entities) {

@@ -896,6 +896,17 @@ static void DrawEspOverlay() {
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;
+        // ВРЕМЕННАЯ диагностика меток (жёлтая строка): шаг обрыва цепочки,
+        // размер последнего скана, счётчик словаря сущностей. Убрать после
+        // починки. step: 0 ok, 1 нет процесса, 2 скан пуст, 10..17 — камерный
+        // кадр (11 нет контроллера, 14 нет камеры, 16 матрицы, 17 позиция).
+        {
+            char dbg[96];
+            snprintf(dbg, sizeof(dbg), "mk step=%d scan=%d dict=%d",
+                     esp_marker_trace_step(), esp_marker_trace_scan(), esp_marker_trace_dict());
+            dl->AddText(espFont, espFs * 1.05f, ImVec2(12.f, sh * 0.35f),
+                        IM_COL32(255, 220, 40, 255), dbg);
+        }
         // Elite crates pulse through the spectrum: one hue for all of them per
         // frame (a full turn every two seconds) so they cannot be missed.
         const float rainbow_hue = fmodf((float)ImGui::GetTime() * 0.5f, 1.0f);
