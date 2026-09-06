@@ -1318,8 +1318,17 @@ static std::vector<uint64_t> read_configured_player_transforms() {
 
     uint64_t local_player = resolve_local_player();
     if (local_player && !player_list_contains(list, local_player)) {
-        if (local_player == g_local_player) g_local_player = 0;
-        local_player = 0;
+        // Alone on the server the runtime list is empty — the local player
+        // is only registered there while networked players are around. He is
+        // still perfectly valid (his class just re-checked in the resolver),
+        // and dropping him here was what killed markers/farm solo: the frame
+        // below never got a local position. Only treat him as stale when the
+        // list actually has entries that he is missing from.
+        int32_t list_count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
+        if (list_count > 0) {
+            if (local_player == g_local_player) g_local_player = 0;
+            local_player = 0;
+        }
     }
     uint64_t local_source = local_player;
 
@@ -1330,7 +1339,13 @@ static std::vector<uint64_t> read_configured_player_transforms() {
         }
         uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
         int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-        if (!items || count <= 0 || count > 512) continue;
+        if (!items || count <= 0 || count > 512) {
+            // Empty list, but the local player himself is known: he alone is
+            // enough for the whole pipeline (camera, matrix validation and
+            // the local position all work from one sample).
+            if (local_source && count == 0) return {local_source};
+            continue;
+        }
 
         std::vector<uint64_t> snapshot;
         snapshot.reserve((size_t)count + 1);
@@ -4910,9 +4925,15 @@ bool esp_farm_get_target(FarmTarget& out) {
     if (--s_spot_recheck <= 0) {
         // The spot only spawns after the first hit and jumps around between
         // hits, so keep the search hot: ~0.3 s while no live spot is known,
-        // ~0.7 s to re-validate a known one.
+        // ~0.7 s to re-validate a known one. IMPORTANT: a scan that finds
+        // nothing must NOT clear a known spot — the movement detector only
+        // sees the X while it is jumping, and overwriting the cache with 0
+        // between jumps was why the bot noticed the cross for half a second
+        // and went back to chopping the trunk. The position sanity check
+        // below is what retires a spot that actually went bad.
         s_spot_recheck = s_spot_transform ? 40 : 18;
-        s_spot_transform = farm_find_spot(best->transform, best->pos);
+        uint64_t found = farm_find_spot(best->transform, best->pos);
+        if (found) s_spot_transform = found;
     }
 
     Vec3 aim{};
