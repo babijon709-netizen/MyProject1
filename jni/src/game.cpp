@@ -3305,9 +3305,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         s_transforms = std::move(refreshed);
         g_frame_transforms_empty_streak = 0;
     } else if (++g_frame_transforms_empty_streak > 10) {
-        // List gone for a while: the world is being torn down / reloaded.
+        // List gone for a while: the world is being torn down / reloaded —
+        // or we are simply alone on the server. Clear the player caches, but
+        // FALL THROUGH to the empty-list branch below: it publishes the
+        // camera-only frame that keeps markers and the farm alive solo.
         if (!s_transforms.empty()) { s_transforms.clear(); reset_world_caches(); }
-        return result;
     }
     if (s_transforms.empty()) {
         // Alone on the server: no player boxes to build, but the markers
@@ -4722,8 +4724,13 @@ void esp_farm_blacklist(unsigned long long id, float seconds) {
 static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos) {
     if (!node_transform || !g_go_name_offset_valid) return 0;
     std::vector<uint64_t> nodes;
-    collect_transform_subtree(node_transform, nodes, 64);
+    // Trees carry a LOT of children (LODs, foliage, colliders) — a small cap
+    // used to cut the walk off before it ever reached the X child.
+    collect_transform_subtree(node_transform, nodes, 160);
     char name[48];
+    uint64_t best_node = 0;
+    int      best_score = -1;
+    float    best_d2 = 0.0F;
     for (uint64_t node : nodes) {
         if (node == node_transform) continue;
         if (!read_transform_name(node, name, sizeof(name))) continue;
@@ -4737,15 +4744,24 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos) {
                                          (name[1] >= '0' && name[1] <= '9')));
         if (!looks) continue;
         // Live check: a real X is displaced from the pivot but still on the
-        // node. Keep scanning past dormant/stale candidates instead of
-        // giving up on the first bad one.
+        // node (a dormant template rests exactly at the pivot). Score every
+        // candidate and keep the most plausible one instead of returning the
+        // first — prefabs carry several matching children.
         Vec3 p{};
         if (!marker_world_position(node, p) || !vec3_is_finite(p)) continue;
         float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
         float d2 = sx * sx + sy * sy + sz * sz;
-        if (d2 > 0.35F * 0.35F && d2 < 6.0F * 6.0F) return node;
+        if (d2 <= 0.35F * 0.35F || d2 >= 6.0F * 6.0F) continue; // dormant / stale
+        int score = 0;
+        if (sy > 0.25F && sy < 2.6F) score += 2;               // swingable height
+        if (sx * sx + sz * sz > 0.04F) score += 1;             // off the trunk axis
+        if (score > best_score || (score == best_score && d2 > best_d2)) {
+            best_score = score;
+            best_d2 = d2;
+            best_node = node;
+        }
     }
-    return 0;
+    return best_node;
 }
 
 void esp_farm_debug(int& nodes_cached, int& idle_reason) {
