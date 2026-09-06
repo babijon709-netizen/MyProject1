@@ -3947,6 +3947,9 @@ void RenderMenu() {
                 PlaySound(SND_CLICK);
                 g_farmCalib = 0;
                 menu_open = true;
+                // Вернуться прямо в окно автофарма, откуда калибровку запускали.
+                PopoverOpen(XS("Автофарм"), 5);
+                g_input.touchConsumed = true; // этот тап уже отработал
             }
         }
         return; // пока калибруемся, меню не рисуем

@@ -4793,28 +4793,20 @@ bool esp_farm_get_target(FarmTarget& out) {
             // Sanity: the spot must be near its node, else the cached
             // transform went stale (respawned node reuses memory).
             float sx = spot.x - best->pos.x, sy = spot.y - best->pos.y, sz = spot.z - best->pos.z;
-            if (sx * sx + sy * sy + sz * sz < 6.0F * 6.0F) { aim = spot; spot_ok = true; }
-            else s_spot_transform = 0;
+            float d2 = sx * sx + sy * sy + sz * sz;
+            // ...and it must sit visibly AWAY from the node pivot. A dormant
+            // template child rests exactly at the pivot (tree base) until the
+            // real X activates — aiming there is the "hits the bottom of the
+            // tree" bug. Such a spot is ignored until it moves.
+            if (d2 < 6.0F * 6.0F && d2 > 0.35F * 0.35F) { aim = spot; spot_ok = true; }
+            else if (d2 >= 6.0F * 6.0F) s_spot_transform = 0;
         }
     }
     if (!spot_ok) {
         aim = best->pos;
-        // Trees are hit at chest height; ore nodes are squat — their pivot
-        // already sits near the top of the rock, so aim LOW on them or the
-        // swings sail over the stone.
-        if (best->kind == 0) {
-            aim.y += 1.15F;
-            float lo = g_frame_local_pos.y + 0.4F;
-            float hi = g_frame_local_pos.y + 1.9F;
-            if (aim.y < lo) aim.y = lo;
-            if (aim.y > hi) aim.y = hi;
-        } else {
-            aim.y += 0.15F;
-            float lo = g_frame_local_pos.y + 0.15F;
-            float hi = g_frame_local_pos.y + 0.9F;
-            if (aim.y < lo) aim.y = lo;
-            if (aim.y > hi) aim.y = hi;
-        }
+        aim.y += (best->kind == 0) ? 1.15F : 0.15F;
+        // Height is clamped against the camera eye below, once the camera
+        // origin is known — node and player pivots are both unreliable.
     }
 
     // Full-circle angles from the camera (or firing) axis: unlike
@@ -4833,6 +4825,25 @@ bool esp_farm_get_target(FarmTarget& out) {
     const Vec3& fwd    = use_ref ? g_aim_ref_forward : use_pose ? g_cam_forward : g_frame_cam_fwd;
     const Vec3& right  = use_ref ? g_aim_ref_right   : use_pose ? g_cam_right   : g_frame_cam_right;
     const Vec3& up     = use_ref ? g_aim_ref_up      : use_pose ? g_cam_up      : g_frame_cam_up;
+
+    // Body aim (no glowing spot): clamp the aim height against the CAMERA
+    // EYE, the only height reference that is reliable on every prefab. Node
+    // pivots lie (a rock's pivot rides near its top — that was "hits above
+    // the ore"; a tall tree's sits metres up the trunk).
+    if (!spot_ok) {
+        if (best->kind == 0) {
+            // Trees: chest band — slightly below the eye up to eye level.
+            float lo = origin.y - 0.9F, hi = origin.y + 0.1F;
+            if (aim.y < lo) aim.y = lo;
+            if (aim.y > hi) aim.y = hi;
+        } else {
+            // Ore: knee-to-waist band, clearly below the eye.
+            float lo = origin.y - 1.3F, hi = origin.y - 0.55F;
+            if (aim.y < lo) aim.y = lo;
+            if (aim.y > hi) aim.y = hi;
+        }
+    }
+
     Vec3 d = {aim.x - origin.x, aim.y - origin.y, aim.z - origin.z};
     float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
     float rx = d.x * right.x + d.y * right.y + d.z * right.z;
