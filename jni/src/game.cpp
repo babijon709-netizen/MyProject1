@@ -3293,6 +3293,58 @@ void esp_reset() {
 }
 
 
+// Last overlay size esp_get_boxes() was called with — the camera-only frame
+// fallback below needs plausible screen dimensions even when the box pipeline
+// bailed out before publishing anything.
+static float g_last_overlay_sw = 1080.0F;
+static float g_last_overlay_sh = 2400.0F;
+
+// Publish a frame (VP matrix + "local position") straight from the game
+// camera, with no players involved at all. This is what keeps markers and
+// the autofarm alive when the player list is empty or the box pipeline
+// failed: the camera IS where the local player is.
+static bool publish_camera_only_frame(float sw, float sh) {
+    if (g_pid <= 0 || !g_il2cpp_base) return false;
+    // Resolves g_game_controller_class as a side effect — without it the
+    // camera lookup below has no class to read statics from.
+    resolve_local_player();
+    if (!g_game_controller_class) return false;
+    uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
+    if (!gcb_sf) return false;
+    uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
+    if (!cam_mgr) return false;
+    uint64_t managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
+    if (!managed_cam) return false;
+    uint64_t cam_native = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
+    if (!cam_native) return false;
+    if (!(sw >= 100.0F) || !(sh >= 100.0F)) { sw = 1080.0F; sh = 2400.0F; }
+    Mat4 solo_proj{}, solo_view{};
+    if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) return false;
+    Vec3 cam_pos{};
+    if (!camera_position_from_view(solo_view, cam_pos)) return false;
+    g_frame_vp = mat_mul(solo_proj, solo_view);
+    g_frame_vp_valid = true;
+    g_frame_sw = sw; g_frame_sh = sh;
+    g_frame_local_pos = cam_pos;
+    g_frame_local_valid = true;
+    g_frame_publish_fail_streak = 0;
+    // Camera basis for the farm, same shape as the main path builds.
+    Vec3 vr = {mat_get(solo_view, 0, 0), mat_get(solo_view, 0, 1), mat_get(solo_view, 0, 2)};
+    Vec3 vu = {mat_get(solo_view, 1, 0), mat_get(solo_view, 1, 1), mat_get(solo_view, 1, 2)};
+    Vec3 vf = {-mat_get(solo_view, 2, 0), -mat_get(solo_view, 2, 1), -mat_get(solo_view, 2, 2)};
+    if (vec3_is_finite(vr) && vec3_is_finite(vu) && vec3_is_finite(vf)) {
+        float fl = sqrtf(vf.x * vf.x + vf.y * vf.y + vf.z * vf.z);
+        if (fl > 0.5F && fl < 2.0F) {
+            g_frame_cam_pos = cam_pos;
+            g_frame_cam_fwd = {vf.x / fl, vf.y / fl, vf.z / fl};
+            g_frame_cam_right = vr;
+            g_frame_cam_up = vu;
+            g_frame_cam_basis_valid = true;
+        }
+    }
+    return true;
+}
+
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
 
@@ -3323,6 +3375,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     float sh = overlay_height >= 100 ? (float)overlay_height : 2400.0F;
     if (!std::isfinite(sw) || sw < 100.0F || sw > 10000.0F) sw = 1080.0F;
     if (!std::isfinite(sh) || sh < 100.0F || sh > 10000.0F) sh = 2400.0F;
+    g_last_overlay_sw = sw;
+    g_last_overlay_sh = sh;
 
     std::vector<uint64_t>& s_transforms = g_frame_transforms;
     std::vector<uint64_t> refreshed = read_configured_player_transforms();
@@ -3349,51 +3403,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!s_transforms.empty()) { s_transforms.clear(); reset_world_caches(); }
     }
     if (s_transforms.empty()) {
-        // Alone on the server: no player boxes to build, but the markers
-        // (ore / loot / animals) and the farm live off this frame's camera
-        // and local position. Publish both straight from the camera instead
-        // of dropping the frame — the camera IS where the local player is.
-        do {
-            // Resolves g_game_controller_class as a side effect — without it
-            // the camera lookup below has no class to read statics from and
-            // this whole branch silently failed on a solo server.
-            resolve_local_player();
-            uint64_t managed_cam = 0;
-            if (g_game_controller_class) {
-                uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
-                if (gcb_sf) {
-                    uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
-                    if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
-                }
-            }
-            if (!managed_cam) break;
-            uint64_t cam_native = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-            if (!cam_native) break;
-            Mat4 solo_proj{}, solo_view{};
-            if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) break;
-            Vec3 cam_pos{};
-            if (!camera_position_from_view(solo_view, cam_pos)) break;
-            g_frame_vp = mat_mul(solo_proj, solo_view);
-            g_frame_vp_valid = true;
-            g_frame_sw = sw; g_frame_sh = sh;
-            g_frame_local_pos = cam_pos;
-            g_frame_local_valid = true;
-            g_frame_publish_fail_streak = 0;
-            // Camera basis for the farm, same as the main path below.
-            Vec3 vr = {mat_get(solo_view, 0, 0), mat_get(solo_view, 0, 1), mat_get(solo_view, 0, 2)};
-            Vec3 vu = {mat_get(solo_view, 1, 0), mat_get(solo_view, 1, 1), mat_get(solo_view, 1, 2)};
-            Vec3 vf = {-mat_get(solo_view, 2, 0), -mat_get(solo_view, 2, 1), -mat_get(solo_view, 2, 2)};
-            if (vec3_is_finite(vr) && vec3_is_finite(vu) && vec3_is_finite(vf)) {
-                float fl = sqrtf(vf.x * vf.x + vf.y * vf.y + vf.z * vf.z);
-                if (fl > 0.5F && fl < 2.0F) {
-                    g_frame_cam_pos = cam_pos;
-                    g_frame_cam_fwd = {vf.x / fl, vf.y / fl, vf.z / fl};
-                    g_frame_cam_right = vr;
-                    g_frame_cam_up = vu;
-                    g_frame_cam_basis_valid = true;
-                }
-            }
-        } while (false);
+        // Alone on the server: no player boxes, but markers and the farm
+        // still need this frame's camera + local position.
+        publish_camera_only_frame(sw, sh);
         return result;
     }
 
@@ -4512,7 +4524,15 @@ std::vector<EspMarker> esp_get_markers() {
         g_marker_rescan_countdown = 0;
         return result;
     }
-    if (g_pid <= 0 || !g_il2cpp_base || !g_frame_vp_valid || !g_frame_local_valid) return result;
+    if (g_pid <= 0 || !g_il2cpp_base) return result;
+    // The box pipeline publishes the frame while players are visible; when it
+    // bailed out for ANY reason (empty player list, failed position read,
+    // world reload), build a camera-only frame right here. Markers must never
+    // depend on other players being around.
+    if (!g_frame_vp_valid || !g_frame_local_valid) {
+        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh))
+            return result;
+    }
 
     if (--g_marker_rescan_countdown <= 0) {
         rebuild_marker_entities();
@@ -4854,7 +4874,15 @@ void esp_farm_debug(int& nodes_cached, int& idle_reason) {
 bool esp_farm_get_target(FarmTarget& out) {
     out = FarmTarget{};
     if (!g_farm_mask) { g_farm_idle_reason = 1; return false; }
-    if (g_pid <= 0 || !g_il2cpp_base || !g_frame_local_valid) { g_farm_idle_reason = 2; return false; }
+    if (g_pid <= 0 || !g_il2cpp_base) { g_farm_idle_reason = 2; return false; }
+    // Same self-repair as the markers: if the box pipeline did not publish a
+    // frame (empty player list etc.), build one straight from the camera.
+    if (!g_frame_local_valid || !g_frame_vp_valid) {
+        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh)) {
+            g_farm_idle_reason = 2;
+            return false;
+        }
+    }
 
     // Blacklist bookkeeping (called once per frame from the controller).
     for (auto it = g_farm_blacklist.begin(); it != g_farm_blacklist.end();) {
