@@ -3067,7 +3067,7 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::RowH + Layout::SliderH);
         ToggleRow("##xr0", XS("Иксрей"), &g_state.xray_on, g_state.a_xray_on, false, true);
         SliderRow("##xr1", XS("Дальность"), &g_state.xray_range,
-                  1.f, 30.f, XS("%.0f м"), true, false, g_state.sl_xray, dt);
+                  1.f, 100.f, XS("%.0f м"), true, false, g_state.sl_xray, dt);
 
         ImGui::Dummy({1.f, 12.f});
     }

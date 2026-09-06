@@ -121,7 +121,7 @@ void        esp_farm_blacklist(unsigned long long id, float seconds);
 // unreadable (cannot compute angles).
 void        esp_farm_debug(int& nodes_cached, int& idle_reason);
 // X-ray: камера не рисует всё ближе `meters` (запись near clip plane).
-// 0 выключает и восстанавливает исходное значение. Диапазон 0..50 м.
+// 0 выключает и восстанавливает исходное значение. Диапазон 0..100 м.
 void        esp_set_xray(float meters);
 
 // Vertical field of view (degrees) of the game camera as last read by
