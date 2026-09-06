@@ -3310,6 +3310,47 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         return result;
     }
     if (s_transforms.empty()) {
+        // Alone on the server: no player boxes to build, but the markers
+        // (ore / loot / animals) and the farm live off this frame's camera
+        // and local position. Publish both straight from the camera instead
+        // of dropping the frame — the camera IS where the local player is.
+        do {
+            uint64_t managed_cam = 0;
+            if (g_game_controller_class) {
+                uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
+                if (gcb_sf) {
+                    uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
+                    if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
+                }
+            }
+            if (!managed_cam) break;
+            uint64_t cam_native = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
+            if (!cam_native) break;
+            Mat4 solo_proj{}, solo_view{};
+            if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) break;
+            Vec3 cam_pos{};
+            if (!camera_position_from_view(solo_view, cam_pos)) break;
+            g_frame_vp = mat_mul(solo_proj, solo_view);
+            g_frame_vp_valid = true;
+            g_frame_sw = sw; g_frame_sh = sh;
+            g_frame_local_pos = cam_pos;
+            g_frame_local_valid = true;
+            g_frame_publish_fail_streak = 0;
+            // Camera basis for the farm, same as the main path below.
+            Vec3 vr = {mat_get(solo_view, 0, 0), mat_get(solo_view, 0, 1), mat_get(solo_view, 0, 2)};
+            Vec3 vu = {mat_get(solo_view, 1, 0), mat_get(solo_view, 1, 1), mat_get(solo_view, 1, 2)};
+            Vec3 vf = {-mat_get(solo_view, 2, 0), -mat_get(solo_view, 2, 1), -mat_get(solo_view, 2, 2)};
+            if (vec3_is_finite(vr) && vec3_is_finite(vu) && vec3_is_finite(vf)) {
+                float fl = sqrtf(vf.x * vf.x + vf.y * vf.y + vf.z * vf.z);
+                if (fl > 0.5F && fl < 2.0F) {
+                    g_frame_cam_pos = cam_pos;
+                    g_frame_cam_fwd = {vf.x / fl, vf.y / fl, vf.z / fl};
+                    g_frame_cam_right = vr;
+                    g_frame_cam_up = vu;
+                    g_frame_cam_basis_valid = true;
+                }
+            }
+        } while (false);
         return result;
     }
 
