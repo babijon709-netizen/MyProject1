@@ -3766,14 +3766,23 @@ static void UpdateFarm(float dt) {
                 }
                 if (s_evadeTime <= 0.f) { s_evadeTime = 0.f; s_stuckTime = 0.f; s_lastDist = 1e9f; }
             } else {
-                float steer = tgt.yaw / 70.f;
+                // Dead zone: a couple of degrees of yaw jitter must not steer
+                // the stick at all — the sign of a near-zero error flips every
+                // frame, and steering off it was the left-right stick flapping.
+                float yawSteer = tgt.yaw;
+                if (fabsf(yawSteer) < 4.f) yawSteer = 0.f;
+                float steer = yawSteer / 70.f;
                 if (steer >  0.6f) steer =  0.6f;
                 if (steer < -0.6f) steer = -0.6f;
                 px = cx + r * steer;
                 py = cy - r * sqrtf(1.f - steer * steer);
                 if (phase == 3) {
-                    // Final approach: gentle forward nudge straight at the node.
-                    px = cx + r * 0.35f * ((tgt.yaw > 0.f) ? 1.f : -1.f) * fminf(fabsf(tgt.yaw) / 45.f, 1.f);
+                    // Final approach: gentle forward nudge, steering smoothly
+                    // proportional to the error (no sign() jumps).
+                    float s3 = yawSteer / 45.f;
+                    if (s3 >  1.f) s3 =  1.f;
+                    if (s3 < -1.f) s3 = -1.f;
+                    px = cx + r * 0.35f * s3;
                     py = cy - r * 0.75f;
                 }
             }
