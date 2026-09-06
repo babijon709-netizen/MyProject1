@@ -1175,6 +1175,27 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         bool pose_ok = read_camera_transform_pose(native_transform, cam_pos, cam_rot);
         bool fin_ok = pose_ok && vec3_is_finite(cam_pos);
         bool quat_ok = fin_ok && normalize_quaternion(cam_rot);
+        // Teleport rejection: a read that lands mid-update inside the game
+        // can return a garbage-but-finite pose. One such frame throws every
+        // box/marker across the screen (the flicker artifacts). A camera
+        // cannot move 30 m in one frame — reject the sample and reuse the
+        // last view; a REAL teleport (respawn) sticks, so after a few
+        // consecutive "jumps" the new position is accepted.
+        static Vec3 s_last_cam_pos{};
+        static bool s_last_cam_pos_ok = false;
+        static int  s_pose_jump_streak = 0;
+        if (quat_ok && s_last_cam_pos_ok && s_last_ok) {
+            float jx = cam_pos.x - s_last_cam_pos.x;
+            float jy = cam_pos.y - s_last_cam_pos.y;
+            float jz = cam_pos.z - s_last_cam_pos.z;
+            float j2 = jx * jx + jy * jy + jz * jz;
+            if (j2 > 30.0F * 30.0F && s_pose_jump_streak < 4) {
+                ++s_pose_jump_streak;
+                quat_ok = false; // fall through to the cached view below
+            } else {
+                s_pose_jump_streak = 0;
+            }
+        }
         if (quat_ok) {
             view = mat_world_to_camera(cam_pos, cam_rot);
             have_live_view = matrix_is_finite(view);
@@ -1184,9 +1205,10 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
                 g_cam_up = rotate_vector(cam_rot, {0.0F, 1.0F, 0.0F});
                 g_cam_forward = rotate_vector(cam_rot, {0.0F, 0.0F, 1.0F});
                 g_cam_pose_valid = true;
+                s_last_cam_pos = cam_pos;
+                s_last_cam_pos_ok = true;
             }
         }
-    } else {
     }
     if (!have_live_view) {
         if (s_last_ok && matrix_is_finite(s_last_view)) {
@@ -3317,6 +3339,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // and local position. Publish both straight from the camera instead
         // of dropping the frame — the camera IS where the local player is.
         do {
+            // Resolves g_game_controller_class as a side effect — without it
+            // the camera lookup below has no class to read statics from and
+            // this whole branch silently failed on a solo server.
+            resolve_local_player();
             uint64_t managed_cam = 0;
             if (g_game_controller_class) {
                 uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
@@ -4722,45 +4748,86 @@ void esp_farm_blacklist(unsigned long long id, float seconds) {
 // made the bot chop the bottom of the trunk. The result is cached per
 // component and re-checked because the spot jumps around between hits.
 static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos) {
-    if (!node_transform || !g_go_name_offset_valid) return 0;
+    if (!node_transform) return 0;
     std::vector<uint64_t> nodes;
     // Trees carry a LOT of children (LODs, foliage, colliders) — a small cap
     // used to cut the walk off before it ever reached the X child.
-    collect_transform_subtree(node_transform, nodes, 160);
-    char name[48];
-    uint64_t best_node = 0;
-    int      best_score = -1;
-    float    best_d2 = 0.0F;
+    collect_transform_subtree(node_transform, nodes, 256);
+
+    // Positions of the whole subtree, read once: the name pass scores with
+    // them and the movement pass compares them against the previous scan.
+    struct SpotCand { uint64_t node; Vec3 pos; };
+    std::vector<SpotCand> live;
+    live.reserve(nodes.size());
     for (uint64_t node : nodes) {
         if (node == node_transform) continue;
-        if (!read_transform_name(node, name, sizeof(name))) continue;
-        size_t len = 0;
-        for (char* p = name; *p; ++p, ++len) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
-        bool looks = strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
-                     strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
-                     strstr(name, "marker") || strstr(name, "gather") || strstr(name, "target") ||
-                     strstr(name, "hitpoint") || strstr(name, "plus") ||
-                     (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
-                                         (name[1] >= '0' && name[1] <= '9')));
-        if (!looks) continue;
-        // Live check: a real X is displaced from the pivot but still on the
-        // node (a dormant template rests exactly at the pivot). Score every
-        // candidate and keep the most plausible one instead of returning the
-        // first — prefabs carry several matching children.
         Vec3 p{};
         if (!marker_world_position(node, p) || !vec3_is_finite(p)) continue;
+        live.push_back({node, p});
+    }
+
+    auto plausible = [&](const Vec3& p) -> bool {
         float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
         float d2 = sx * sx + sy * sy + sz * sz;
-        if (d2 <= 0.35F * 0.35F || d2 >= 6.0F * 6.0F) continue; // dormant / stale
-        int score = 0;
-        if (sy > 0.25F && sy < 2.6F) score += 2;               // swingable height
-        if (sx * sx + sz * sz > 0.04F) score += 1;             // off the trunk axis
-        if (score > best_score || (score == best_score && d2 > best_d2)) {
-            best_score = score;
-            best_d2 = d2;
-            best_node = node;
+        if (d2 <= 0.35F * 0.35F || d2 >= 6.0F * 6.0F) return false; // at pivot / off the node
+        return sy > 0.2F && sy < 2.8F;                              // swingable height
+    };
+
+    // Pass 1: by name (rock prefabs name their X clearly).
+    uint64_t best_node = 0;
+    if (g_go_name_offset_valid) {
+        char name[48];
+        int best_score = -1;
+        float best_d2 = 0.0F;
+        for (const SpotCand& cand : live) {
+            if (!read_transform_name(cand.node, name, sizeof(name))) continue;
+            size_t len = 0;
+            for (char* p = name; *p; ++p, ++len) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+            bool looks = strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
+                         strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
+                         strstr(name, "marker") || strstr(name, "gather") || strstr(name, "target") ||
+                         strstr(name, "hitpoint") || strstr(name, "plus") ||
+                         (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
+                                             (name[1] >= '0' && name[1] <= '9')));
+            if (!looks) continue;
+            if (!plausible(cand.pos)) continue; // dormant template at the pivot etc.
+            float sx = cand.pos.x - node_pos.x, sy = cand.pos.y - node_pos.y, sz = cand.pos.z - node_pos.z;
+            float d2 = sx * sx + sy * sy + sz * sz;
+            int score = 2;
+            if (sx * sx + sz * sz > 0.04F) score += 1; // off the trunk axis
+            if (score > best_score || (score == best_score && d2 > best_d2)) {
+                best_score = score;
+                best_d2 = d2;
+                best_node = cand.node;
+            }
         }
     }
+
+    // Pass 2: by movement. Tree prefabs do not name their X anything
+    // recognisable, but the X is the only child that JUMPS between hits —
+    // LODs, colliders and foliage transforms never move. Compare against the
+    // previous scan of the same node and take the biggest plausible jump.
+    static uint64_t s_move_root = 0;
+    static std::vector<SpotCand> s_move_prev;
+    if (!best_node && s_move_root == node_transform) {
+        float best_m2 = 0.15F * 0.15F; // ignore sub-15 cm jitter
+        for (const SpotCand& cand : live) {
+            for (const SpotCand& prev : s_move_prev) {
+                if (prev.node != cand.node) continue;
+                float mx = cand.pos.x - prev.pos.x;
+                float my = cand.pos.y - prev.pos.y;
+                float mz = cand.pos.z - prev.pos.z;
+                float m2 = mx * mx + my * my + mz * mz;
+                if (m2 > best_m2 && m2 < 5.0F * 5.0F && plausible(cand.pos)) {
+                    best_m2 = m2;
+                    best_node = cand.node;
+                }
+                break;
+            }
+        }
+    }
+    s_move_root = node_transform;
+    s_move_prev = std::move(live);
     return best_node;
 }
 
