@@ -4663,6 +4663,13 @@ void esp_farm_blacklist(unsigned long long id, float seconds) {
     int frames = (int)(seconds * 60.0F);
     if (frames < 60) frames = 60;
     g_farm_blacklist[(uint64_t)id] = frames;
+    // Drop it from the cache right away and rescan soon: keeping a dead
+    // node around until the next 2 s rescan is what made the bot jerk the
+    // camera at garbage coordinates after finishing a tree.
+    for (auto it = g_farm_entities.begin(); it != g_farm_entities.end(); ++it) {
+        if (it->identity == (uint64_t)id) { g_farm_entities.erase(it); break; }
+    }
+    if (g_farm_rescan > 15) g_farm_rescan = 15;
 }
 
 // The glowing bonus "X" is a child GameObject of the node. Search the subtree
@@ -4727,11 +4734,18 @@ bool esp_farm_get_target(FarmTarget& out) {
         if (!entity.pos_valid) continue;
         if (g_farm_blacklist.count(entity.identity)) continue;
 
+        // Horizontal distance (Unity: Y up). The controller compares this
+        // against melee reach, and a tall tree's pivot sits metres up the
+        // trunk — 3D distance never drops below the threshold there, which
+        // had the bot circling thin trees forever and walking face-first
+        // into nodes it was already standing at.
         float dx = entity.pos.x - g_frame_local_pos.x;
         float dy = entity.pos.y - g_frame_local_pos.y;
         float dz = entity.pos.z - g_frame_local_pos.z;
-        float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+        float dist = sqrtf(dx * dx + dz * dz);
+        // Still reject nodes on a different vertical level (cliff above/below).
         if (!std::isfinite(dist) || dist > kMaxFarmDistance) continue;
+        if (!std::isfinite(dy) || fabsf(dy) > 30.0F) continue;
 
         float score = dist;
         // Nodes that look mined out go to the back of the queue instead of
@@ -4786,6 +4800,13 @@ bool esp_farm_get_target(FarmTarget& out) {
     if (!spot_ok) {
         aim = best->pos;
         aim.y += (best->kind == 0) ? 1.15F : 0.55F;
+        // The pivot of a tall tree sits metres up the trunk; aiming there
+        // tilts the camera into the sky and the swings whiff. Clamp the aim
+        // height to a swingable band around the player's own chest.
+        float lo = g_frame_local_pos.y + 0.4F;
+        float hi = g_frame_local_pos.y + 1.9F;
+        if (aim.y < lo) aim.y = lo;
+        if (aim.y > hi) aim.y = hi;
     }
 
     // Full-circle angles from the camera (or firing) axis: unlike

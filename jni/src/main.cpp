@@ -3752,8 +3752,11 @@ static void UpdateFarm(float dt) {
                         (phase == 1 && fabsf(tgt.yaw) < 70.f && tgt.dist > reachDist * 2.f) ||
                         (phase == 3 && tgt.dist > pressAt) ||
                         // Swinging for a while with zero drain = just out of
-                        // melee reach (thin tree) — press in regardless.
-                        (phase == 3 && s_sinceDrain > 3.f);
+                        // melee reach (thin tree). Nudge forward in short
+                        // pulses (0.5 s press / 1 s check) instead of leaning
+                        // on the stick forever — that endless push was the
+                        // bot grinding face-first into nodes.
+                        (phase == 3 && s_sinceDrain > 3.f && fmodf(s_sinceDrain, 1.5f) < 0.5f);
         if (s_evadeTime > 0.f) wantWalk = true; // manoeuvre drives the stick itself
         if (wantWalk) {
             // Virtual stick centre and a forward push, slightly steered
@@ -3810,11 +3813,22 @@ static void UpdateFarm(float dt) {
     {
         if (phase == 3) {
             s_mineTime += dt;
+            // Hold fire while the crosshair is still swinging onto a glowing
+            // spot: a tap mid-swipe lands where the camera used to be, which
+            // is exactly the "missed the X" complaint. Body hits are lenient
+            // (the node is huge), spot hits want the reticle settled.
+            bool aimSettled = tgt.has_spot
+                ? (fabsf(tgt.yaw) <= 3.5f && fabsf(tgt.pitch) <= 5.f)
+                : (fabsf(tgt.yaw) <= 8.f);
             // Tap rhythm: ~85 ms down, ~230 ms up — a believable fast tapper
             // that also matches melee swing cadence (extra taps are ignored
             // by the game, they just queue the next swing).
             s_tapTimer -= (int)roundf(dt * 1000.f);
-            if (s_tapTimer <= 0) {
+            if (s_tapTimer <= 0 && !aimSettled && !s_tapDown) {
+                // wait for the camera; keep the timer pinned so the next
+                // tap fires the moment the reticle settles
+                s_tapTimer = 0;
+            } else if (s_tapTimer <= 0) {
                 if (!s_tapDown) {
                     // Attack tap: calibrated fire button when set, otherwise
                     // the right half of the screen clear of the look finger.
