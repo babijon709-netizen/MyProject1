@@ -3537,6 +3537,8 @@ static void UpdateFarm(float dt) {
     static float s_evadeTime = 0.f;   // >0: sidestep manoeuvre in progress
     static float s_evadeDir = 1.f;    // +1 right, -1 left
     static int   s_evadeCount = 0;    // manoeuvres tried on this node
+    static float s_settle = 0.f;      // pause between targets (fingers up)
+    static float s_stickPx = 0.f, s_stickPy = 0.f; // smoothed stick position
 
     auto releaseAll = [&]() {
         if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
@@ -3568,7 +3570,7 @@ static void UpdateFarm(float dt) {
         releaseAll();
         g_farmActive = false; g_farmPhase = 0;
         s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
-        s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f;
+        s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f; s_settle = 0.f;
         return;
     }
 
@@ -3593,7 +3595,7 @@ static void UpdateFarm(float dt) {
         releaseAll();
         g_farmActive = false; g_farmPhase = 0;
         s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
-        s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f;
+        s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f; s_settle = 0.f;
         return;
     }
     g_farmActive = true;
@@ -3601,10 +3603,36 @@ static void UpdateFarm(float dt) {
     g_farmTgtKind = tgt.kind;
 
     if (tgt.id != s_nodeId) {
+        // Switching nodes: lift every finger and stand still for a moment.
+        // Without this the old walk/look inputs keep replaying against the
+        // new target for a few frames — the frantic stomping-and-shaking
+        // right after a node is finished.
+        bool hadNode = s_nodeId != 0;
         s_nodeId = tgt.id;
         s_stuckTime = 0.f; s_lastDist = tgt.dist;
         s_mineTime = 0.f;  s_fracStart = tgt.fraction;
         s_sinceDrain = 0.f; s_evadeTime = 0.f; s_evadeCount = 0;
+        if (hadNode) { releaseAll(); s_settle = 0.7f; }
+    }
+
+    // A node that is already mined out gets blacklisted on the spot instead
+    // of being circled: the picker would only fall back to it when nothing
+    // else is in range, and dancing around an empty stump helps nobody.
+    if (tgt.fraction >= 0.f && tgt.fraction < 0.03f) {
+        esp_farm_blacklist(tgt.id, 120.f);
+        releaseAll();
+        s_settle = 0.7f;
+        s_nodeId = 0;
+        g_farmPhase = 0;
+        return;
+    }
+
+    // Settle pause between targets: fingers stay up, the camera stops, and
+    // the next target starts from a clean slate.
+    if (s_settle > 0.f) {
+        s_settle -= dt;
+        releaseAll();
+        return;
     }
 
     // On-screen mark on the exact point the farm is working: the glowing spot
@@ -3668,8 +3696,13 @@ static void UpdateFarm(float dt) {
             float gp = fabsf(gain);
             wantPitchPx = -tgt.pitch / gp;
         }
-        float dead = (phase == 3) ? 2.f : 6.f; // px
-        bool needTurn = fabsf(wantYawPx) > dead || fabsf(wantPitchPx) > dead;
+        // Dead zones in degrees with hysteresis: a swipe only starts when the
+        // error is clearly outside, and stops well inside. This is what keeps
+        // the camera from twitching left-right around the centre.
+        float startDeg = (phase == 3) ? 4.0f : 10.f;
+        float stopDeg  = (phase == 3) ? 1.5f : 4.f;
+        float errDeg = fmaxf(fabsf(tgt.yaw), (phase == 3) ? fabsf(tgt.pitch) : 0.f);
+        bool needTurn = s_lookDown ? (errDeg > stopDeg) : (errDeg > startDeg);
 
         if (needTurn) {
             if (!s_lookDown) {
@@ -3681,15 +3714,17 @@ static void UpdateFarm(float dt) {
                 ++s_lookHold; // let the game register the touch first
                 Touch_Down_N(1, s_lookX, s_lookY);
             } else {
-                // Per-frame step: fast when far off, gentle near the centre.
-                float step = fabsf(tgt.yaw) > 60.f ? sh * 0.10f
-                           : fabsf(tgt.yaw) > 20.f ? sh * 0.05f : sh * 0.02f;
-                float dx = wantYawPx;
-                if (dx >  step) dx =  step;
-                if (dx < -step) dx = -step;
-                float dy = wantPitchPx;
-                if (dy >  step * 0.5f) dy =  step * 0.5f;
-                if (dy < -step * 0.5f) dy = -step * 0.5f;
+                // Proportional step: cover ~28% of the remaining error per
+                // frame, capped. Fast on big errors, glides into the centre
+                // without the stair-step jerks of fixed-size increments.
+                float maxStep = sh * 0.075f;
+                float dx = wantYawPx * 0.28f;
+                if (dx >  maxStep) dx =  maxStep;
+                if (dx < -maxStep) dx = -maxStep;
+                float dy = wantPitchPx * 0.28f;
+                float maxStepY = maxStep * 0.5f;
+                if (dy >  maxStepY) dy =  maxStepY;
+                if (dy < -maxStepY) dy = -maxStepY;
                 float nx = s_lookX + dx, ny = s_lookY + dy;
                 // Edge: lift and re-centre rather than dragging off-screen.
                 if (nx < sw * 0.56f || nx > sw * 0.97f || ny < sh * 0.12f || ny > sh * 0.88f) {
@@ -3709,9 +3744,13 @@ static void UpdateFarm(float dt) {
     {
         // Keep pressing in while mining until we are right at the node, so
         // thin trees (node centre inside the trunk) end up in melee range.
+        // walkUntil gets hysteresis: press while further than +0.5 m, release
+        // only once actually inside — no down/up flapping at the boundary
+        // (the "stomping in place" bug).
+        float pressAt = s_moveDown ? walkUntil : walkUntil + 0.5f;
         bool wantWalk = (phase == 2) ||
                         (phase == 1 && fabsf(tgt.yaw) < 70.f && tgt.dist > reachDist * 2.f) ||
-                        (phase == 3 && tgt.dist > walkUntil) ||
+                        (phase == 3 && tgt.dist > pressAt) ||
                         // Swinging for a while with zero drain = just out of
                         // melee reach (thin tree) — press in regardless.
                         (phase == 3 && s_sinceDrain > 3.f);
@@ -3752,8 +3791,15 @@ static void UpdateFarm(float dt) {
             if (!s_moveDown) {
                 Touch_Down_N(0, cx, cy);      // land on the stick centre first
                 s_moveDown = true;
+                s_stickPx = cx; s_stickPy = cy;
             } else {
-                Touch_Down_N(0, px, py);
+                // Glide the stick towards the wanted deflection instead of
+                // teleporting it: some devices/game builds latch a huge jump
+                // as a sideways flick, which sent the bot strafing off-line.
+                float k = 1.f - expf(-14.f * dt);   // ~90% of the way in 0.16 s
+                s_stickPx += (px - s_stickPx) * k;
+                s_stickPy += (py - s_stickPy) * k;
+                Touch_Down_N(0, s_stickPx, s_stickPy);
             }
         } else if (s_moveDown) {
             Touch_Up_N(0); s_moveDown = false;

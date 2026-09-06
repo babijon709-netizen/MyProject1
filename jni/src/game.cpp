@@ -4615,6 +4615,22 @@ static void rebuild_farm_entities() {
             if (!entity.transform)
                 entity.transform = native_component_transform(managed_object_native(identity));
             if (!entity.transform) continue;
+
+            // Fallen logs register as "Tree" but cannot be chopped the same
+            // way — the bot just circles them. Filter them out by prefab
+            // name (log / fallen / dead / driftwood variants).
+            if (kind == 0 && g_go_name_offset_valid) {
+                char go_name[48];
+                if (read_transform_name(entity.transform, go_name, sizeof(go_name))) {
+                    for (char* p = go_name; *p; ++p)
+                        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+                    if (strstr(go_name, "log") || strstr(go_name, "fallen") ||
+                        strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
+                        strstr(go_name, "stump"))
+                        continue;
+                }
+            }
+
             entity.pos_valid = marker_world_position(entity.transform, entity.pos);
             g_farm_entities.push_back(entity);
             if (g_farm_entities.size() >= 512) break;
