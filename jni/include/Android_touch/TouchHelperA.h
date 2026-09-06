@@ -16,3 +16,7 @@ float Touch_DeviceUnitsPerPixel();
 // aimbot finger driven by Touch_Down/Touch_Move/Touch_Up.
 void Touch_Down_N(int finger, float x, float y);
 void Touch_Up_N(int finger);
+// True when synthetic touches actually reach the game (uinput device was
+// created). False in read-only fallback mode — everything that injects
+// touches (aimbot, auto-farm) silently does nothing then.
+bool Touch_CanInject();

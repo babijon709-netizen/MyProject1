@@ -172,6 +172,10 @@ static void VisibleScreen(float& w, float& h);
 // UpdateFarm ниже).
 extern bool g_farmActive;
 extern int  g_farmPhase;
+extern int  g_farmNodes;      // сколько узлов нашёл последний скан реестра
+extern int  g_farmReason;     // причина простоя (см. esp_farm_debug)
+extern float g_farmTgtDist;   // дистанция до текущей цели, м
+extern int  g_farmTgtKind;    // 0 дерево, 1 камень, 2 металл, 3 сера
 
 namespace ui { namespace bar {
     inline float g_game_alpha = 1.f;
@@ -2946,10 +2950,10 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##fm3", XS("Металл"), &g_state.farm_metal,  g_state.a_farm_metal,  false);
         ToggleRow("##fm4", XS("Сера"),   &g_state.farm_sulfur, g_state.a_farm_sulfur, true);
 
-        // Статус: что фарм делает прямо сейчас.
+        // Статус: что фарм делает прямо сейчас + детали для диагностики.
         SHdr(XS("Статус"));
         {
-            const float stH = Layout::RowH;
+            const float stH = Layout::RowH * 1.35f;
             auto sp = ImGui::GetCursorScreenPos();
             dl->AddRectFilled({sp.x + inset, sp.y}, {sp.x + avW - inset, sp.y + stH},
                 C::U(C::Card()), R::Card);
@@ -2959,18 +2963,37 @@ float TabContent(int tab, float dt, float cW) {
 
             const char* st;
             ImVec4 stCol = C::Dim();
+            char detail[96] = {};
             if (!g_state.farm_on) {
                 st = XS("Выключен");
+            } else if (!Touch_CanInject()) {
+                st = XS("Нет доступа к тачу");
+                snprintf(detail, sizeof(detail), "%s", XS("тач в режиме чтения — перезапусти чит от root"));
             } else if (!g_esp_attached) {
                 st = XS("Жду игру...");
             } else if (!g_farmActive) {
-                st = XS("Ищу ресурс рядом...");
-            } else if (g_farmPhase == 3) {
-                st = XS("Добываю");   stCol = C::Acc();
-            } else if (g_farmPhase == 2) {
-                st = XS("Иду к ресурсу"); stCol = C::Acc();
+                // Почему цели нет — иначе «ничего не происходит» не отладить.
+                switch (g_farmReason) {
+                    case 2:  st = XS("Жду камеру игры...");
+                             snprintf(detail, sizeof(detail), "%s", XS("зайди в мир, открой обзор")); break;
+                    case 3:  st = XS("Ресурсы не найдены");
+                             snprintf(detail, sizeof(detail), "%s", XS("рядом нет выбранных ресурсов")); break;
+                    case 4:  st = XS("Всё далеко или выбито");
+                             snprintf(detail, sizeof(detail), XS("в кэше узлов: %d"), g_farmNodes); break;
+                    case 5:  st = XS("Нет позиции камеры");
+                             snprintf(detail, sizeof(detail), "%s", XS("двинь камеру пальцем")); break;
+                    default: st = XS("Ищу ресурс рядом...");
+                             snprintf(detail, sizeof(detail), XS("в кэше узлов: %d"), g_farmNodes); break;
+                }
             } else {
-                st = XS("Поворачиваюсь"); stCol = C::Acc();
+                const char* kindName = g_farmTgtKind == 0 ? XS("дерево")
+                                     : g_farmTgtKind == 1 ? XS("камень")
+                                     : g_farmTgtKind == 2 ? XS("металл") : XS("сера");
+                if (g_farmPhase == 3)      st = XS("Добываю");
+                else if (g_farmPhase == 2) st = XS("Иду к ресурсу");
+                else                       st = XS("Поворачиваюсь");
+                stCol = C::Acc();
+                snprintf(detail, sizeof(detail), XS("%s, %.0f м"), kindName, g_farmTgtDist);
             }
             // Пульсирующая точка-индикатор слева от текста.
             float cy2 = sp.y + stH * 0.5f;
@@ -2978,10 +3001,17 @@ float TabContent(int tab, float dt, float cW) {
                 ? 0.55f + 0.45f * sinf((float)ImGui::GetTime() * 5.f) : 1.f;
             dl->AddCircleFilled({sp.x + inset + Layout::PadX, cy2}, 8.f,
                 C::UA(stCol, pulse), 20);
-            auto ssz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, st);
-            dl->AddText(fn, fs * 1.05f,
-                {sp.x + inset + Layout::PadX + 24.f, cy2 - ssz.y * 0.5f},
-                C::U(stCol), st);
+            float tx0 = sp.x + inset + Layout::PadX + 24.f;
+            if (detail[0]) {
+                auto ssz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, st);
+                float totalH = ssz.y + 4.f + fs * 0.9f;
+                float ty0 = sp.y + (stH - totalH) * 0.5f;
+                dl->AddText(fn, fs * 1.05f, {tx0, ty0}, C::U(stCol), st);
+                dl->AddText(fn, fs * 0.90f, {tx0, ty0 + ssz.y + 4.f}, C::U(C::Dim()), detail);
+            } else {
+                auto ssz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, st);
+                dl->AddText(fn, fs * 1.05f, {tx0, cy2 - ssz.y * 0.5f}, C::U(stCol), st);
+            }
             ImGui::Dummy({avW, stH});
         }
 
@@ -3387,6 +3417,10 @@ static void UpdateAim(float dt) {
 
 bool g_farmActive = false;   // for the status line in the menu
 int  g_farmPhase = 0;        // 0 idle, 1 turn, 2 walk, 3 mine
+int  g_farmNodes = 0;        // nodes found by the last registry scan
+int  g_farmReason = 1;       // idle reason from esp_farm_debug()
+float g_farmTgtDist = 0.f;   // distance to the current target (m)
+int  g_farmTgtKind = 0;      // current target resource kind
 
 static void UpdateFarm(float dt) {
     static bool  s_moveDown = false;  // finger 0: move joystick
@@ -3450,18 +3484,36 @@ static void UpdateFarm(float dt) {
     FrameBoxes(sw, sh);
 
     FarmTarget tgt;
-    if (!esp_farm_get_target(tgt) || !tgt.valid) {
+    bool haveTgt = esp_farm_get_target(tgt) && tgt.valid;
+    esp_farm_debug(g_farmNodes, g_farmReason);
+    if (!haveTgt) {
         releaseAll();
         g_farmActive = false; g_farmPhase = 0;
         s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
         return;
     }
     g_farmActive = true;
+    g_farmTgtDist = tgt.dist;
+    g_farmTgtKind = tgt.kind;
 
     if (tgt.id != s_nodeId) {
         s_nodeId = tgt.id;
         s_stuckTime = 0.f; s_lastDist = tgt.dist;
         s_mineTime = 0.f;  s_fracStart = tgt.fraction;
+    }
+
+    // On-screen mark on the exact point the farm is working: the glowing spot
+    // when one is found, otherwise the node body. Doubles as debug output —
+    // if the mark is on the wrong object, the target picker is what to fix.
+    if (tgt.on_screen) {
+        auto* fg = ImGui::GetForegroundDrawList();
+        ImU32 mc = tgt.has_spot ? IM_COL32(80, 255, 120, 230) : IM_COL32(255, 200, 60, 230);
+        float r = 14.f;
+        fg->AddCircle({tgt.sx, tgt.sy}, r, mc, 24, 3.f);
+        fg->AddLine({tgt.sx - r * 1.6f, tgt.sy}, {tgt.sx - r * 0.5f, tgt.sy}, mc, 3.f);
+        fg->AddLine({tgt.sx + r * 0.5f, tgt.sy}, {tgt.sx + r * 1.6f, tgt.sy}, mc, 3.f);
+        fg->AddLine({tgt.sx, tgt.sy - r * 1.6f}, {tgt.sx, tgt.sy - r * 0.5f}, mc, 3.f);
+        fg->AddLine({tgt.sx, tgt.sy + r * 0.5f}, {tgt.sx, tgt.sy + r * 1.6f}, mc, 3.f);
     }
 
     // ---- camera gain: learn from our own swipe, fall back to the aimbot's ----

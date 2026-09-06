@@ -576,3 +576,7 @@ void Touch_Up_N(int finger) {
     touch.isDown = false;
     Upload();
 }
+
+bool Touch_CanInject() {
+    return Touch_initialized && !Touch_readOnly;
+}

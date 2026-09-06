@@ -3709,6 +3709,10 @@ static unsigned g_farm_mask = 0;
 static std::vector<FarmEntity> g_farm_entities;
 static std::unordered_map<uint64_t, int> g_farm_blacklist; // identity -> frames left
 static int g_farm_rescan = 0;
+// Why the picker returned nothing (surfaced in the menu status line):
+// 0 ok, 1 off, 2 frame not published, 3 no nodes in registry, 4 none in
+// range, 5 camera pose unreadable.
+static int g_farm_idle_reason = 1;
 
 // What a single marker looks like: kind picks the toggle it belongs to, and ore
 // markers carry a fixed colour per resource (stone grey, metal orange, sulfur
@@ -4609,10 +4613,15 @@ static uint64_t farm_find_spot(uint64_t node_transform) {
     return 0;
 }
 
+void esp_farm_debug(int& nodes_cached, int& idle_reason) {
+    nodes_cached = (int)g_farm_entities.size();
+    idle_reason = g_farm_idle_reason;
+}
+
 bool esp_farm_get_target(FarmTarget& out) {
     out = FarmTarget{};
-    if (!g_farm_mask) return false;
-    if (g_pid <= 0 || !g_il2cpp_base || !g_frame_local_valid) return false;
+    if (!g_farm_mask) { g_farm_idle_reason = 1; return false; }
+    if (g_pid <= 0 || !g_il2cpp_base || !g_frame_local_valid) { g_farm_idle_reason = 2; return false; }
 
     // Blacklist bookkeeping (called once per frame from the controller).
     for (auto it = g_farm_blacklist.begin(); it != g_farm_blacklist.end();) {
@@ -4638,12 +4647,6 @@ bool esp_farm_get_target(FarmTarget& out) {
         if (!entity.pos_valid) continue;
         if (g_farm_blacklist.count(entity.identity)) continue;
 
-        // Depleted nodes are skipped: fractionRemaining goes 1 -> 0 as the
-        // node is mined out. Unreadable values (NaN / garbage) keep the node.
-        float fraction = rd<float>(entity.component + MINEABLE_FRACTION);
-        if (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F && fraction < 0.03F)
-            continue;
-
         float dx = entity.pos.x - g_frame_local_pos.x;
         float dy = entity.pos.y - g_frame_local_pos.y;
         float dz = entity.pos.z - g_frame_local_pos.z;
@@ -4651,10 +4654,22 @@ bool esp_farm_get_target(FarmTarget& out) {
         if (!std::isfinite(dist) || dist > kMaxFarmDistance) continue;
 
         float score = dist;
+        // Nodes that look mined out go to the back of the queue instead of
+        // being skipped outright: the exact meaning of fractionRemaining is
+        // not certain on every build, and a wrong guess here would make the
+        // farm ignore every node ("nothing happens"). If the pick is wrong
+        // the mining watchdog blacklists it within seconds anyway.
+        float fraction = rd<float>(entity.component + MINEABLE_FRACTION);
+        if (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F && fraction < 0.03F)
+            score += 1000.0F;
         if (entity.identity == s_last_identity) score *= 0.6F; // stickiness
         if (score < best_score) { best_score = score; best = &entity; best_dist = dist; }
     }
-    if (!best) { s_last_identity = 0; return false; }
+    if (!best) {
+        s_last_identity = 0;
+        g_farm_idle_reason = g_farm_entities.empty() ? 3 : 4;
+        return false;
+    }
     s_last_identity = best->identity;
 
     // Where to look: the glowing spot when the node shows one, otherwise the
@@ -4692,7 +4707,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     // Full-circle angles from the camera (or firing) axis: unlike
     // aim_angles_for() this must work for nodes behind us, so the forward
     // component may be negative and yaw spans +-180.
-    if (!g_cam_pose_valid && !g_aim_ref_valid) return false;
+    if (!g_cam_pose_valid && !g_aim_ref_valid) { g_farm_idle_reason = 5; return false; }
     const bool use_ref = g_aim_ref_valid;
     const Vec3& origin = use_ref ? g_aim_ref_origin : g_cam_pos;
     const Vec3& fwd = use_ref ? g_aim_ref_forward : g_cam_forward;
@@ -4702,12 +4717,26 @@ bool esp_farm_get_target(FarmTarget& out) {
     float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
     float rx = d.x * right.x + d.y * right.y + d.z * right.z;
     float ux = d.x * up.x + d.y * up.y + d.z * up.z;
-    if (!std::isfinite(fx) || !std::isfinite(rx) || !std::isfinite(ux)) return false;
+    if (!std::isfinite(fx) || !std::isfinite(rx) || !std::isfinite(ux)) { g_farm_idle_reason = 5; return false; }
     constexpr float rad2deg = 57.29577951F;
     float yaw = atan2f(rx, fx) * rad2deg;
     float pitch = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
-    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return false;
+    if (!std::isfinite(yaw) || !std::isfinite(pitch)) { g_farm_idle_reason = 5; return false; }
 
+    // Screen position of the aim point, for the on-screen target mark.
+    if (g_frame_vp_valid) {
+        Vec2 screen{};
+        if (w2s(g_frame_vp, aim, g_frame_sw, g_frame_sh, screen, false) &&
+            std::isfinite(screen.x) && std::isfinite(screen.y) &&
+            screen.x >= -64.0F && screen.x <= g_frame_sw + 64.0F &&
+            screen.y >= -64.0F && screen.y <= g_frame_sh + 64.0F) {
+            out.on_screen = true;
+            out.sx = screen.x;
+            out.sy = screen.y;
+        }
+    }
+
+    g_farm_idle_reason = 0;
     out.valid = true;
     out.id = best->identity;
     out.kind = best->kind;

@@ -100,6 +100,9 @@ struct FarmTarget {
     float dist = 0.f;               // metres from the local player
     float fraction = -1.f;          // resource remaining 0..1, -1 unknown
     bool  has_spot = false;         // true when aiming at the glowing weak spot
+    // Screen-space position of the aim point (for the on-screen target mark).
+    bool  on_screen = false;
+    float sx = 0.f, sy = 0.f;
 };
 // Which resources to farm: bit0 wood, bit1 stone, bit2 metal, bit3 sulfur.
 // 0 disables the scan entirely (no extra work per frame).
@@ -108,6 +111,12 @@ void        esp_farm_set_resources(unsigned mask);
 bool        esp_farm_get_target(FarmTarget& out);
 // Give up on a node (unreachable / stuck) for `seconds`.
 void        esp_farm_blacklist(unsigned long long id, float seconds);
+// Why the last esp_farm_get_target() returned nothing + how many nodes the
+// last registry scan cached. Reasons: 0 ok, 1 farm off, 2 frame not published
+// (no camera/local position this frame), 3 registry scan found no matching
+// nodes, 4 nodes exist but none in range / all blacklisted, 5 camera pose
+// unreadable (cannot compute angles).
+void        esp_farm_debug(int& nodes_cached, int& idle_reason);
 
 // Vertical field of view (degrees) of the game camera as last read by
 // esp_get_boxes(). 0 if unknown.
