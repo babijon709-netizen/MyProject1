@@ -580,9 +580,6 @@ struct AppState {
     // Иксрей: визуально срезает мир вокруг игрока (0 = выкл), метры.
     bool  xray_on = false;
     float xray_range = 5.f;
-    // Длинная рука: дальность взаимодействия с объектами (сундуки, двери).
-    bool  reach_on = false;
-    float reach_range = 10.f;
     // ui_fps выключен навсегда (счётчик убран), рамки карточек — всегда вкл.
     bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = true;
     // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
@@ -599,9 +596,9 @@ struct AppState {
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
-    float a_xray_on = 0, a_reach_on = 0;
+    float a_xray_on = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_reach;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray;
 };
 static AppState g_state;
 
@@ -636,7 +633,6 @@ static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
                                 g_state.esp_loot, g_state.esp_pickup);
         esp_set_marker_max_distance(g_state.marker_dist);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
-        esp_set_reach(g_state.reach_on ? g_state.reach_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
     }
     return s_boxes;
@@ -3073,14 +3069,6 @@ float TabContent(int tab, float dt, float cW) {
         SliderRow("##xr1", XS("Дальность"), &g_state.xray_range,
                   1.f, 50.f, XS("%.0f м"), true, false, g_state.sl_xray, dt);
 
-        // Длинная рука: луч, которым игра ищет объект под прицелом (сундук,
-        // дверь, поднимаемый предмет), удлиняется до выбранной дистанции.
-        SHdr(XS("Длинная рука"));
-        CardBg(Layout::RowH + Layout::SliderH);
-        ToggleRow("##rh0", XS("Длинная рука"), &g_state.reach_on, g_state.a_reach_on, false, true);
-        SliderRow("##rh1", XS("Дальность"), &g_state.reach_range,
-                  3.f, 50.f, XS("%.0f м"), true, false, g_state.sl_reach, dt);
-
         ImGui::Dummy({1.f, 12.f});
     }
 
@@ -3958,7 +3946,6 @@ void RenderMenu() {
     Tick(g_state.a_farm_metal,  g_state.farm_metal,  dt);
     Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
-    Tick(g_state.a_reach_on,    g_state.reach_on,    dt);
     ApplyTheme();
 
     if (g_cfgLoadedIdx >= 0 && g_cfgLoadedIdx < kMaxConfigs)

@@ -123,9 +123,6 @@ void        esp_farm_debug(int& nodes_cached, int& idle_reason);
 // X-ray: камера не рисует всё ближе `meters` (запись near clip plane).
 // 0 выключает и восстанавливает исходное значение. Диапазон 0..50 м.
 void        esp_set_xray(float meters);
-// Длинная рука: дальность луча взаимодействия (открыть сундук/дверь издали).
-// 0 выключает и восстанавливает исходную дальность. Диапазон 0..50 м.
-void        esp_set_reach(float meters);
 
 // Vertical field of view (degrees) of the game camera as last read by
 // esp_get_boxes(). 0 if unknown.

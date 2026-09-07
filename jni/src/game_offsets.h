@@ -252,39 +252,6 @@ inline constexpr std::uint64_t DICT_ENTRY_VALUE  = 0x10;
 inline constexpr std::uint64_t NETID_NET_ID     = 0x58; // uint netId
 inline constexpr std::uint64_t NETID_BEHAVIOURS = 0x80; // NetworkBehaviour[]
 
-// Oxide.RaycastManager — the ray the game casts from the camera to find the
-// interactable object under the crosshair (chests, doors, pickups). Hangs off
-// PlayerManager.raycastManager; m_RayLength is that ray's reach in metres.
-inline constexpr std::uint64_t PLAYER_RAYCAST_MANAGER   = 0x88; // Oxide.RaycastManager raycastManager
-inline constexpr std::uint64_t RAYCAST_RAY_LENGTH       = 0x38; // float m_RayLength
-
-// pmT (obfuscated interactable-object base, NetworkBehaviour) and its
-// InteractionComponents (StorageContainer, Door, FuelTank, ...). Each
-// component carries its own interact radius (~3 m) — the second check that
-// limits interaction distance after the raycast. The back-reference
-// component->interactableObject == behaviour is the identification signature
-// (class names are obfuscated and change every build).
-inline constexpr std::uint64_t INTERACTABLE_COMPONENTS  = 0x98; // pmT: InteractionComponent[] components
-inline constexpr std::uint64_t INTERACTION_BACKREF      = 0x30; // InteractionComponent: pmT interactableObject
-inline constexpr std::uint64_t INTERACTION_RADIUS       = 0x40; // InteractionComponent: float m_InteractRadius
-
-// Mirror.NetworkBehaviour.netIdentity backing field — any behaviour (incl.
-// PlayerManager) points to its NetworkIdentity here.
-inline constexpr std::uint64_t BEHAVIOUR_NET_IDENTITY   = 0x40;
-
-// Oxide.PlayerInteraction (local player's interaction brain). Identified in
-// the identity's behaviours array by the player backref at 0x68 == the
-// PlayerManager itself. The two floats after m_LayerMask are its distance
-// limits (obfuscated names uoe/uoX) — the check that kept interactions at
-// ~3 m even with the raycast and per-object radii patched.
-inline constexpr std::uint64_t PINTERACT_PLAYER_BACKREF = 0x68; // Oxide.PlayerManager player
-inline constexpr std::uint64_t PINTERACT_LAYERMASK      = 0x80; // LayerMask (sanity marker)
-inline constexpr std::uint64_t PINTERACT_DIST_A         = 0x84; // float uoe
-inline constexpr std::uint64_t PINTERACT_DIST_B         = 0x88; // float uoX
-
-// RaycastManager's second length (obfuscated ueZ) right after m_AimRayLength.
-inline constexpr std::uint64_t RAYCAST_AUX_LENGTH       = 0x40; // float ueZ
-
 // Oxide.MineableObject — the shared base of ore nodes, trees and animals.
 inline constexpr std::uint64_t MINEABLE_LOOT           = 0xA0; // List<Oxide.LootItem>
 inline constexpr std::uint64_t MINEABLE_FINISH_BONUS   = 0xA8;

@@ -151,132 +151,6 @@ static void xray_apply(uint64_t native_cam) {
     }
 }
 
-// Вторая дистанционная проверка: у каждого интерактивного объекта есть свой
-// радиус (InteractionComponent.m_InteractRadius, ~3 м). Луч мы уже удлинили,
-// но объект дальше своего радиуса взаимодействовать не даёт — поэтому радиусы
-// ближайших объектов патчатся, оригиналы запоминаются и восстанавливаются.
-static std::unordered_map<uint64_t, float> g_reach_patched; // comp -> исходный радиус
-static int g_reach_patch_cd = 0;
-static void reach_patch_tick();   // определена ниже (нужен скан словаря сущностей)
-static void reach_restore_all() {
-    for (const auto& entry : g_reach_patched)
-        wr_buf(entry.first + INTERACTION_RADIUS, &entry.second, sizeof(float));
-    g_reach_patched.clear();
-    g_reach_patch_cd = 0;
-}
-
-
-// ==== Длинная рука: дальность луча взаимодействия ==========================
-// RaycastManager.m_RayLength — длина луча, которым игра ищет объект под
-// прицелом (сундук, дверь, предмет). Пишем каждый кадр, пока включено; при
-// выключении возвращаем исходное значение, запомненное при первом включении.
-static float    g_reach_meters = 0.0F;     // 0 = выключено
-static uint64_t g_reach_mgr = 0;
-static float    g_reach_saved = 0.0F;
-static bool     g_reach_saved_valid = false;
-
-void esp_set_reach(float meters) {
-    if (!std::isfinite(meters) || meters < 0.0F) meters = 0.0F;
-    if (meters > 50.0F) meters = 50.0F;
-    g_reach_meters = meters;
-}
-
-static bool valid_obj(uint64_t p); // определена ниже
-
-// Третья проверка: Oxide.PlayerInteraction держит собственные лимиты
-// дистанции (два float сразу после LayerMask). Патчим и восстанавливаем.
-static uint64_t g_reach_pi = 0;
-static float    g_reach_pi_saved_a = 0.0F, g_reach_pi_saved_b = 0.0F;
-static bool     g_reach_pi_saved_valid = false;
-static float    g_reach_rm_aux_saved = 0.0F;
-static bool     g_reach_rm_aux_valid = false;
-
-// PlayerInteraction локального игрока: идём через netIdentity игрока и ищем
-// в behaviours компонент, чей player-backref (0x68) указывает на него.
-static uint64_t find_player_interaction(uint64_t local_player) {
-    if (!local_player) return 0;
-    uint64_t identity = rd_ptr(local_player + BEHAVIOUR_NET_IDENTITY);
-    if (!valid_obj(identity)) return 0;
-    uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
-    if (!valid_obj(array)) return 0;
-    int32_t count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
-    if (count <= 0 || count > 64) return 0;
-    uint64_t behaviours[64];
-    if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)count * sizeof(uint64_t)))
-        return 0;
-    for (int32_t i = 0; i < count; ++i) {
-        uint64_t behaviour = behaviours[i];
-        if (!valid_obj(behaviour) || behaviour == local_player) continue;
-        if (rd_ptr(behaviour + PINTERACT_PLAYER_BACKREF) != local_player) continue;
-        // Оба лимита должны выглядеть как небольшие дистанции — это и
-        // отличает PlayerInteraction от других behaviours с тем же backref.
-        float a = rd<float>(behaviour + PINTERACT_DIST_A);
-        float b = rd<float>(behaviour + PINTERACT_DIST_B);
-        if (std::isfinite(a) && std::isfinite(b) &&
-            a > 0.05F && a < 30.0F && b > 0.05F && b < 30.0F)
-            return behaviour;
-    }
-    return 0;
-}
-
-// Вызывается из кадра, когда известен локальный игрок (managed PlayerManager).
-static void reach_apply(uint64_t local_player) {
-    if (g_reach_meters > 0.05F) {
-        if (!local_player) return;
-        uint64_t mgr = rd_ptr(local_player + PLAYER_RAYCAST_MANAGER);
-        if (!mgr) return;
-        // MonoBehaviour: поля лежат в managed-объекте, пишем прямо туда.
-        if (g_reach_mgr != mgr || !g_reach_saved_valid) {
-            if (g_reach_saved_valid && g_reach_mgr)
-                wr_buf(g_reach_mgr + RAYCAST_RAY_LENGTH, &g_reach_saved, sizeof(float));
-            float current = rd<float>(mgr + RAYCAST_RAY_LENGTH);
-            g_reach_saved = (std::isfinite(current) && current > 0.1F && current < 50.0F)
-                          ? current : 3.0F;
-            float aux = rd<float>(mgr + RAYCAST_AUX_LENGTH);
-            g_reach_rm_aux_valid = std::isfinite(aux) && aux > 0.1F && aux < 50.0F;
-            if (g_reach_rm_aux_valid) g_reach_rm_aux_saved = aux;
-            g_reach_saved_valid = true;
-            g_reach_mgr = mgr;
-        }
-        wr_buf(mgr + RAYCAST_RAY_LENGTH, &g_reach_meters, sizeof(float));
-        if (g_reach_rm_aux_valid)
-            wr_buf(mgr + RAYCAST_AUX_LENGTH, &g_reach_meters, sizeof(float));
-        // Лимиты PlayerInteraction (третья проверка дистанции).
-        uint64_t pi = find_player_interaction(local_player);
-        if (pi) {
-            if (g_reach_pi != pi || !g_reach_pi_saved_valid) {
-                if (g_reach_pi_saved_valid && g_reach_pi) {
-                    wr_buf(g_reach_pi + PINTERACT_DIST_A, &g_reach_pi_saved_a, sizeof(float));
-                    wr_buf(g_reach_pi + PINTERACT_DIST_B, &g_reach_pi_saved_b, sizeof(float));
-                }
-                g_reach_pi_saved_a = rd<float>(pi + PINTERACT_DIST_A);
-                g_reach_pi_saved_b = rd<float>(pi + PINTERACT_DIST_B);
-                g_reach_pi_saved_valid = true;
-                g_reach_pi = pi;
-            }
-            wr_buf(pi + PINTERACT_DIST_A, &g_reach_meters, sizeof(float));
-            wr_buf(pi + PINTERACT_DIST_B, &g_reach_meters, sizeof(float));
-        }
-        reach_patch_tick(); // и радиусы объектов вокруг (вторая проверка)
-    } else if (g_reach_saved_valid) {
-        if (g_reach_mgr) {
-            wr_buf(g_reach_mgr + RAYCAST_RAY_LENGTH, &g_reach_saved, sizeof(float));
-            if (g_reach_rm_aux_valid)
-                wr_buf(g_reach_mgr + RAYCAST_AUX_LENGTH, &g_reach_rm_aux_saved, sizeof(float));
-        }
-        if (g_reach_pi_saved_valid && g_reach_pi) {
-            wr_buf(g_reach_pi + PINTERACT_DIST_A, &g_reach_pi_saved_a, sizeof(float));
-            wr_buf(g_reach_pi + PINTERACT_DIST_B, &g_reach_pi_saved_b, sizeof(float));
-        }
-        g_reach_saved_valid = false;
-        g_reach_mgr = 0;
-        g_reach_rm_aux_valid = false;
-        g_reach_pi = 0;
-        g_reach_pi_saved_valid = false;
-        reach_restore_all();
-    }
-}
-
 static std::string read_remote_string(uint64_t address) {
     if (!address) return {};
     char buffer[96]{};
@@ -3508,10 +3382,6 @@ static void reset_world_caches() {
 void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
-    g_reach_mgr = 0; g_reach_saved_valid = false;
-    g_reach_rm_aux_valid = false;
-    g_reach_pi = 0; g_reach_pi_saved_valid = false;
-    g_reach_patched.clear(); g_reach_patch_cd = 0;
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_frame_publish_fail_streak = 0;
     g_aim_ref_valid = false;
@@ -3567,7 +3437,6 @@ static bool publish_camera_only_frame(float sw, float sh) {
     if (!(sw >= 100.0F) || !(sh >= 100.0F)) { sw = 1080.0F; sh = 2400.0F; }
     Mat4 solo_proj{}, solo_view{};
     xray_apply(cam_native);
-    reach_apply(g_local_player);
     if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) return false;
     Vec3 cam_pos{};
     if (!camera_position_from_view(solo_view, cam_pos)) return false;
@@ -3691,7 +3560,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             return result;
         }
         xray_apply(native_cam);
-        reach_apply(resolve_local_player());
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
             return result;
         }
@@ -4677,69 +4545,6 @@ static uint64_t resolve_network_identity_class() {
     if (name != "NetworkIdentity") return 0;
     g_network_identity_class = klass;
     return klass;
-}
-
-// «Длинная рука», часть 2: обход по словарю сетевых объектов, у каждого
-// интерактивного (pmT-наследник в behaviours) патчится m_InteractRadius всех
-// его InteractionComponents. Компонент опознаётся по обратной ссылке
-// interactableObject == behaviour — имена классов обфусцированы и меняются
-// каждый билд, а сигнатура ссылки стабильна. Оригиналы копятся в
-// g_reach_patched и восстанавливаются при выключении.
-static void reach_patch_tick() {
-    if (--g_reach_patch_cd > 0) return;
-    g_reach_patch_cd = 90; // ~1.5 c: объекты статичны, чаще незачем
-    if (g_reach_patched.size() > 3000) return; // страховка от разрастания
-
-    uint64_t dictionary = resolve_network_client_spawned();
-    if (!dictionary) return;
-    uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
-    int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
-    if (!valid_obj(entries) || count <= 0) return;
-    if (count > 4096) count = 4096;
-    std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
-    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
-
-    uint64_t identity_class = resolve_network_identity_class();
-    uint64_t behaviours[32];
-    uint64_t comps[16];
-    for (int32_t i = 0; i < count; ++i) {
-        uint64_t identity = 0;
-        memcpy(&identity, buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE, sizeof(identity));
-        if (!valid_obj(identity)) continue;
-        if (identity_class && rd_ptr(identity) != identity_class) continue;
-        uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
-        if (!valid_obj(array)) continue;
-        int32_t behaviour_count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
-        if (behaviour_count <= 0) continue;
-        if (behaviour_count > 32) behaviour_count = 32;
-        if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)behaviour_count * sizeof(uint64_t)))
-            continue;
-        for (int32_t b = 0; b < behaviour_count; ++b) {
-            uint64_t behaviour = behaviours[b];
-            if (!valid_obj(behaviour)) continue;
-            uint64_t comp_array = rd_ptr(behaviour + INTERACTABLE_COMPONENTS);
-            if (!valid_obj(comp_array)) continue;
-            int32_t comp_count = rd<int32_t>(comp_array + IL2CPP_ARRAY_LENGTH);
-            if (comp_count <= 0 || comp_count > 16) continue;
-            if (!rd_buf(comp_array + IL2CPP_ARRAY_FIRST_ELEMENT, comps, (size_t)comp_count * sizeof(uint64_t)))
-                continue;
-            for (int32_t c = 0; c < comp_count; ++c) {
-                uint64_t comp = comps[c];
-                if (!valid_obj(comp)) continue;
-                // Сигнатура: компонент указывает обратно на свой объект.
-                if (rd_ptr(comp + INTERACTION_BACKREF) != behaviour) continue;
-                if (g_reach_patched.count(comp)) {
-                    wr_buf(comp + INTERACTION_RADIUS, &g_reach_meters, sizeof(float));
-                    continue;
-                }
-                float radius = rd<float>(comp + INTERACTION_RADIUS);
-                // Радиус взаимодействия — небольшое положительное число.
-                if (!std::isfinite(radius) || radius <= 0.05F || radius > 20.0F) continue;
-                g_reach_patched[comp] = radius;
-                wr_buf(comp + INTERACTION_RADIUS, &g_reach_meters, sizeof(float));
-            }
-        }
-    }
 }
 
 static bool marker_world_position(uint64_t transform, Vec3& out) {
