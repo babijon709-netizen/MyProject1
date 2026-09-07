@@ -1734,7 +1734,7 @@ void DrawWatermark(float dt) {
     // кликов и ничему не мешает.
     {
         const float fs = 38.f, padX = 24.f, padY = 14.f;
-        const char* name = XS("benzhack");
+        const char* name = XS("t.me/benzware");
         auto nSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, name);
         float bW = padX * 2.f + nSz.x;
         float bH = padY * 2.f + nSz.y;
