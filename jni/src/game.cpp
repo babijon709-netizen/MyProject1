@@ -181,6 +181,8 @@ void esp_set_reach(float meters) {
     g_reach_meters = meters;
 }
 
+static bool valid_obj(uint64_t p); // определена ниже
+
 // Третья проверка: Oxide.PlayerInteraction держит собственные лимиты
 // дистанции (два float сразу после LayerMask). Патчим и восстанавливаем.
 static uint64_t g_reach_pi = 0;
