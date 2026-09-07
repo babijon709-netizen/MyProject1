@@ -47,6 +47,11 @@ inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clie
 inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD7A5E10; // GameControllerBase
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
+// ВРЕМЕННО (дамп ID предметов): Oxide.ItemDatabase из статики контроллера.
+inline constexpr std::uint64_t GAME_CONTROLLER_ITEM_DATABASE_FIELD  = 0x48; // <QCt>k__BackingField (ItemDatabase)
+inline constexpr std::uint64_t ITEMDB_BY_ID                         = 0x28; // Dictionary<int, ItemData> m_ById
+inline constexpr std::uint64_t ITEMDATA_ID                          = 0x58; // int m_Id
+inline constexpr std::uint64_t DICT_ENTRY_KEY                       = 0x08; // int key в Entry
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
 
 // Oxide.PlayerManager instance fields (dump.cs)
