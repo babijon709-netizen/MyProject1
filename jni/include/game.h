@@ -123,7 +123,7 @@ void        esp_farm_debug(int& nodes_cached, int& idle_reason);
 // ВРЕМЕННО: запись строки в marker_log.txt со стороны UI (убрать после починки).
 void        esp_debug_note(const char* text);
 // X-ray: камера не рисует всё ближе `meters` (запись near clip plane).
-// 0 выключает и восстанавливает исходное значение. Диапазон 0..100 м.
+// 0 выключает и восстанавливает исходное значение. Диапазон 0..50 м.
 void        esp_set_xray(float meters);
 
 // Vertical field of view (degrees) of the game camera as last read by

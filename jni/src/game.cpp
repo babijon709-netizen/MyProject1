@@ -159,7 +159,7 @@ static bool     g_xray_saved_valid = false;
 
 void esp_set_xray(float meters) {
     if (!std::isfinite(meters) || meters < 0.0F) meters = 0.0F;
-    if (meters > 100.0F) meters = 100.0F;
+    if (meters > 50.0F) meters = 50.0F;
     g_xray_meters = meters;
 }
 
@@ -4707,6 +4707,10 @@ std::vector<EspMarker> esp_get_markers() {
     }
 
     const float max_distance = g_marker_max_distance;
+    // ВРЕМЕННО: раз в секунду — судьба первых 4 сущностей кэша (позиция,
+    // дистанция, экран) чтобы увидеть, какой фильтр их убивает.
+    bool dump_now = mlog_gate(12);
+    int dumped = 0;
     for (MarkerEntity& entity : g_marker_entities) {
         if (entity.kind == ESP_MARKER_ORE && !g_markers_ore_enabled) continue;
         if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
@@ -4715,13 +4719,19 @@ std::vector<EspMarker> esp_get_markers() {
         // Ore nodes never move, so their position is only read on a rescan.
         if (entity.kind == ESP_MARKER_ANIMAL || !entity.position_valid)
             entity.position_valid = marker_world_position(entity.transform, entity.position);
-        if (!entity.position_valid) continue;
+        if (!entity.position_valid) {
+            if (dump_now && dumped < 4) { ++dumped; mlog("ent[%s]: POS_INVALID tr=%llx", entity.label ? entity.label : "?", (unsigned long long)entity.transform); }
+            continue;
+        }
 
         float dx = entity.position.x - g_frame_local_pos.x;
         float dy = entity.position.y - g_frame_local_pos.y;
         float dz = entity.position.z - g_frame_local_pos.z;
         float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (!std::isfinite(distance) || distance > max_distance) continue;
+        if (!std::isfinite(distance) || distance > max_distance) {
+            if (dump_now && dumped < 4) { ++dumped; mlog("ent[%s]: FAR d=%.0f pos=(%.1f %.1f %.1f)", entity.label ? entity.label : "?", distance, entity.position.x, entity.position.y, entity.position.z); }
+            continue;
+        }
 
         Vec2 screen{};
         Vec3 anchor = entity.position;
@@ -4729,10 +4739,14 @@ std::vector<EspMarker> esp_get_markers() {
         anchor.y += (entity.kind == ESP_MARKER_ANIMAL) ? 1.2F
                   : (entity.kind == ESP_MARKER_LOOT)   ? 0.6F
                   : (entity.kind == ESP_MARKER_PICKUP) ? 0.4F : 0.9F;
-        if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) continue;
+        if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) {
+            if (dump_now && dumped < 4) { ++dumped; mlog("ent[%s]: W2S_FAIL d=%.0f pos=(%.1f %.1f %.1f)", entity.label ? entity.label : "?", distance, entity.position.x, entity.position.y, entity.position.z); }
+            continue;
+        }
         if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
         if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F) continue;
         if (screen.y < -64.0F || screen.y > g_frame_sh + 64.0F) continue;
+        if (dump_now && dumped < 4) { ++dumped; mlog("ent[%s]: OK d=%.0f scr=(%.0f %.0f)", entity.label ? entity.label : "?", distance, screen.x, screen.y); }
 
         EspMarker marker;
         marker.x = screen.x;
