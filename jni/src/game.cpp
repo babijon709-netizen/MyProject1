@@ -3942,6 +3942,7 @@ struct MarkerEntity {
     uint64_t transform = 0;     // native Transform of the GameObject
     Vec3     position{};
     bool     position_valid = false;
+    int      pos_cooldown = 0;  // frames until the next position re-read (far animals)
     int      kind = ESP_MARKER_ORE;
     // Fixed labels point into static strings; ground pickups build their own
     // ("Ягоды x12"), in which case `text` holds it and `label` is null.
@@ -3966,6 +3967,12 @@ struct FarmEntity {
     Vec3     pos{};
     bool     pos_valid = false;
     int      kind = 0;          // 0 wood, 1 stone, 2 metal, 3 sulfur
+    // Cached fractionRemaining: reading it live for EVERY node on EVERY
+    // frame was a syscall storm (hundreds of process_vm_readv per frame
+    // with a full cache). The value only matters for de-prioritising
+    // mined-out nodes, so a second of staleness changes nothing.
+    float    fraction = -1.0F;
+    int      frac_age = 0;
 };
 static std::vector<FarmEntity> g_farm_entities;
 static std::unordered_map<uint64_t, int> g_farm_blacklist; // identity -> frames left
@@ -4751,7 +4758,22 @@ std::vector<EspMarker> esp_get_markers() {
         if (entity.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) continue;
         if (entity.kind == ESP_MARKER_PICKUP && !g_markers_pickup_enabled) continue;
         // Ore nodes never move, so their position is only read on a rescan.
-        if (entity.kind == ESP_MARKER_ANIMAL || !entity.position_valid)
+        // Animals DO move, but re-reading a transform chain (4+ syscalls)
+        // for every animal every frame is the single hottest path here —
+        // throttle far ones: within 60 m track every frame, beyond that a
+        // few times a second is indistinguishable on screen.
+        bool want_read = !entity.position_valid;
+        if (entity.kind == ESP_MARKER_ANIMAL) {
+            if (--entity.pos_cooldown <= 0) {
+                want_read = true;
+                float ddx = entity.position.x - g_frame_local_pos.x;
+                float ddz = entity.position.z - g_frame_local_pos.z;
+                float d2 = ddx * ddx + ddz * ddz;
+                entity.pos_cooldown = (!entity.position_valid || d2 < 60.0F * 60.0F) ? 1
+                                    : (d2 < 150.0F * 150.0F) ? 6 : 15;
+            }
+        }
+        if (want_read)
             entity.position_valid = marker_world_position(entity.transform, entity.position);
         if (!entity.position_valid) continue;
 
@@ -5138,8 +5160,15 @@ bool esp_farm_get_target(FarmTarget& out) {
         // one was still half full. The controller's own debounced depleted
         // check is what retires the current node.
         if (entity.identity != s_last_identity) {
-            float fraction = rd<float>(entity.component + MINEABLE_FRACTION);
-            if (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F && fraction < 0.03F)
+            // Refresh the cached fraction at most once a second per node —
+            // one nearby node used to cost one syscall per node per frame.
+            FarmEntity& mut = const_cast<FarmEntity&>(entity);
+            if (--mut.frac_age <= 0) {
+                mut.frac_age = 60;
+                mut.fraction = rd<float>(entity.component + MINEABLE_FRACTION);
+            }
+            if (std::isfinite(mut.fraction) && mut.fraction >= 0.0F &&
+                mut.fraction <= 1.001F && mut.fraction < 0.03F)
                 score += 1000.0F;
         } else {
             score *= 0.6F; // stickiness

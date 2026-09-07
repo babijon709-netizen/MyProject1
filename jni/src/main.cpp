@@ -145,11 +145,17 @@ template<size_t N>
 struct _XS {
     char b[N]{};
     mutable char o[N]{};
+    mutable bool done = false;
     constexpr _XS(const char (&s)[N]) noexcept {
         for (size_t i = 0; i < N; ++i) b[i] = static_cast<char>(static_cast<uint8_t>(s[i]) ^ _xk(i));
     }
     __attribute__((noinline)) const char* d() const noexcept {
-        for (size_t i = 0; i < N; ++i) o[i] = static_cast<char>(static_cast<uint8_t>(b[i]) ^ _xk(i));
+        // Decode once and reuse: every UI label goes through here every
+        // frame, and re-XORing ~125 strings each frame was pure waste.
+        if (!done) {
+            for (size_t i = 0; i < N; ++i) o[i] = static_cast<char>(static_cast<uint8_t>(b[i]) ^ _xk(i));
+            done = true;
+        }
         return o;
     }
 };
