@@ -15,7 +15,6 @@
 #include <vector>
 #include <unistd.h>
 #include <sys/syscall.h>
-#include <sys/stat.h>   // ВРЕМЕННО: mkdir для items.txt
 
 static ssize_t remote_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
     return syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
@@ -163,61 +162,6 @@ static std::string read_remote_string(uint64_t address) {
     return std::string(buffer);
 }
 
-// ==== ВРЕМЕННО (один билд): дамп всех ID предметов из Oxide.ItemDatabase ====
-// Идём в статику GameControllerBase -> ItemDatabase -> словарь m_ById
-// (Dictionary<int, ItemData>) и пишем каждую пару в
-// /storage/emulated/0/benzhack/items.txt: id, shortName, displayName.
-// Файл пишется один раз за сессию, как только база инициализирована.
-static bool read_managed_string_ex(uint64_t str_obj, char* out, size_t cap, int32_t max_chars); // ниже
-static bool valid_obj(uint64_t p); // ниже
-static void items_dump_tick(uint64_t gcb_static_fields) {
-    static bool s_done = false;
-    if (s_done || !gcb_static_fields) return;
-    uint64_t db = rd_ptr(gcb_static_fields + GAME_CONTROLLER_ITEM_DATABASE_FIELD);
-    if (!db) return;
-    uint64_t dict = rd_ptr(db + ITEMDB_BY_ID);
-    if (!dict) return;
-    uint64_t entries = rd_ptr(dict + DICT_ENTRIES);
-    int32_t count = rd<int32_t>(dict + DICT_COUNT);
-    if (!entries || count <= 0 || count > 100000) return;
-    if (count > 8192) count = 8192;
-
-    std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
-    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
-
-    mkdir("/storage/emulated/0/benzhack", 0777);
-    FILE* f = fopen("/storage/emulated/0/benzhack/items.txt", "w");
-    if (!f) return;
-    s_done = true; // даже при частичном чтении второй раз не пишем
-    fprintf(f, "# id\tshortName\tdisplayName  (всего в словаре: %d)\n", (int)count);
-    int written = 0;
-    for (int32_t i = 0; i < count; ++i) {
-        const uint8_t* e = buffer.data() + (size_t)i * DICT_ENTRY_STRIDE;
-        int32_t key = 0; uint64_t item = 0;
-        memcpy(&key, e + DICT_ENTRY_KEY, sizeof(key));
-        memcpy(&item, e + DICT_ENTRY_VALUE, sizeof(item));
-        if (!valid_obj(item)) continue;
-        int32_t id = rd<int32_t>(item + ITEMDATA_ID);
-        char short_name[48] = {}, disp_name[64] = {};
-        read_managed_string_ex(rd_ptr(item + ITEMDATA_SHORTNAME), short_name, sizeof(short_name), 47);
-        read_managed_string_ex(rd_ptr(item + ITEMDATA_NAME), disp_name, sizeof(disp_name), 63);
-        fprintf(f, "%d\t%s\t%s\n", (int)((id != 0) ? id : key),
-                short_name[0] ? short_name : "?", disp_name[0] ? disp_name : "?");
-        ++written;
-    }
-    fprintf(f, "# записано: %d\n", written);
-    fclose(f);
-}
-
-static bool remote_string_equals(uint64_t address, const char* expected) {
-    if (!address || !expected) return false;
-    return read_remote_string(address) == expected;
-}
-
-// Managed Il2Cpp System.String (UTF-16) -> UTF-8, truncated to fit.
-// Layout: klass @0x0, monitor @0x8, int32 length @0x10, chars @0x14.
-// `max_chars` is a sanity bound on the managed length, not on the output: 31 is
-// right for names and item ids, clan ids are GUID-shaped and need more.
 static bool read_managed_string_ex(uint64_t str_obj, char* out, size_t cap, int32_t max_chars) {
     if (!str_obj || !out || cap < 2) return false;
     if ((str_obj & 0x1) != 0) return false;
@@ -2819,6 +2763,61 @@ static uint64_t resolve_player_model_info(uint64_t player, const PlayerAux& aux)
 }
 
 // Route A: PlayerWeapon -> weapon view -> spawned weapon GameObject.
+// Item id -> label, dumped straight from this build's Oxide.ItemDatabase
+// (items.txt, /storage/emulated/0/benzhack). The id comes from the synced
+// WeaponPiece.Number, so this is the FIRST choice for the weapon label:
+// exact, cheap (no prefab-name reads), and survives prefab renames. The
+// prefab-name path below stays as the fallback for ids not listed here.
+static const char* weapon_label_for_item_id(int id) {
+    switch (id) {
+        // -- melee / tools --------------------------------------------------
+        case 17:  return "Кам. топорик";     // stone.hatchet
+        case 18:  return "Молоток";          // building.hammer
+        case 19:  return "Топор";            // axe
+        case 20:  return "Кирка";            // pickaxe
+        case 21:  return "Факел";            // torch
+        case 22:  return "Кирка";            // pickaxehammer
+        case 23:  return "Пила";             // saw.ripper
+        case 24:  return "Бензопила";        // chainsaw
+        case 25:  return "Отбойник";         // jackhammer
+        case 95:  return "Дер. копьё";       // wooden.spear
+        case 96:  return "Жел. копьё";       // iron.spear
+        case 97:  return "Дубина";           // bone.club
+        case 98:  return "Мачете";           // machete
+        case 99:  return "Булава";           // mace
+        case 100: return "Шип. дубина";      // wooden.spiked.club
+        case 112: return "Лед. копьё";       // ice.spear
+        // -- firearms ---------------------------------------------------------
+        case 102: return "АК-47";            // assault.rifle
+        case 103: return "Револьвер";        // revolver
+        case 104: return "Дигл";             // desert.eagle
+        case 105: return "Дробовик";         // shotgun
+        case 106: return "Охот. винтовка";   // hunting.rifle
+        case 107: return "ПП";               // submachine.gun
+        case 108: return "Ракетница";        // flare.gun
+        case 113: return "Томпсон";          // thompson
+        case 114: return "DMR";              // dmr
+        case 115: return "Винчестер";        // winchester
+        case 116: return "DVL";              // dvl
+        case 117: return "Пулемёт";          // hmlmg
+        case 118: return "Самопал";          // handmade.pistol
+        case 119: return "Вектор";           // kriss.vector
+        case 120: return "Шаромёт";          // steel.ball.gun
+        case 225: return "FN FAL";           // fn.fal
+        // -- bows / launchers ------------------------------------------------
+        case 101: return "Лук";              // wooden.bow
+        case 109: return "Арбалет";          // crossbow
+        case 110: return "РПГ";              // rocket.launcher
+        case 111: return "С4";               // explosive.charge
+        // -- throwables -------------------------------------------------------
+        case 128: case 130: return "Дымовуха"; // event.grenade.*
+        case 132: return "Граната";          // grenade.military
+        case 131: return "Возд. маркер";     // tactical.air.marker
+        case 127: return "Снежок";           // snowball
+        default: return nullptr;
+    }
+}
+
 static bool weapon_name_from_view(uint64_t weapon_component, char* out, size_t cap) {
     uint64_t view = rd_ptr(weapon_component + PLAYERWEAPON_VIEW);
     char raw[48];
@@ -2885,6 +2884,12 @@ static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, b
         piece_number = rd<int16_t>(piece + WEAPONPIECE_NUMBER);
         knows_slot = true;
         holds_weapon = (enabled != 0) || piece_number != 0;
+        // Exact match first: the synced item id resolves the label with zero
+        // extra reads and never suffers from renamed/obfuscated prefabs.
+        if (holds_weapon && piece_number != 0) {
+            const char* byId = weapon_label_for_item_id((int)piece_number);
+            if (byId) { snprintf(out, cap, "%s", byId); definite = true; return true; }
+        }
         if (weapon_name_from_view(aux.weapon_component, out, cap)) { definite = true; return true; }
     }
 
@@ -3475,7 +3480,6 @@ static bool publish_camera_only_frame(float sw, float sh) {
     if (!g_game_controller_class) return false;
     uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
     if (!gcb_sf) return false;
-    items_dump_tick(gcb_sf); // ВРЕМЕННО: дамп ID предметов (один раз)
     uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
     if (!cam_mgr) return false;
     uint64_t managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
@@ -3596,8 +3600,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (g_game_controller_class) {
             uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
             if (gcb_sf) {
-                items_dump_tick(gcb_sf); // ВРЕМЕННО: дамп ID предметов (один раз)
-                uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
+                            uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
                 if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
             }
         }
