@@ -650,16 +650,7 @@ static void DrawEspOverlay() {
     }
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
-    // ВРЕМЕННО: диагностика ранних выходов отрисовки (раз в ~2 с).
-    static float s_dbgT = 0.f;
-    s_dbgT += ImGui::GetIO().DeltaTime;
-    bool dbgNow = s_dbgT > 2.f;
-    if (dbgNow) s_dbgT = 0.f;
-
-    if (!g_esp_attached) {
-        if (dbgNow) esp_debug_note("draw-ui: НЕ ПРИЦЕПЛЕН к игре");
-        return;
-    }
+    if (!g_esp_attached) return;
 
     if (g_state.aim_touch && g_state.aim_special) {
         float fovR = AimFovRadiusPx(sw, sh);
@@ -671,10 +662,7 @@ static void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup) {
-        if (dbgNow) esp_debug_note("draw-ui: все переключатели ESP выключены");
-        return;
-    }
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup) return;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
@@ -913,13 +901,6 @@ static void DrawEspOverlay() {
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;
-        if (dbgNow) {
-            char note[96];
-            snprintf(note, sizeof(note), "draw-ui: рисую метки, got=%d (ore=%d ani=%d loot=%d pick=%d)",
-                     (int)esp_get_markers().size(), (int)g_state.esp_ore, (int)g_state.esp_animal,
-                     (int)g_state.esp_loot, (int)g_state.esp_pickup);
-            esp_debug_note(note);
-        }
         // Elite crates pulse through the spectrum: one hue for all of them per
         // frame (a full turn every two seconds) so they cannot be missed.
         const float rainbow_hue = fmodf((float)ImGui::GetTime() * 0.5f, 1.0f);
@@ -941,8 +922,6 @@ static void DrawEspOverlay() {
             EspPill(marker.x, marker.y + PillH(marker.name, kMarkerScale) + 2.f, label,
                     ColU32(cfg::esp::distance_col), kMarkerScale);
         }
-    } else if (dbgNow) {
-        esp_debug_note("draw-ui: переключатели МЕТОК выключены (боксы вкл)");
     }
 }
 
@@ -3683,7 +3662,13 @@ static void UpdateFarm(float dt) {
     // camera, which rides metres behind the player, so comparing aim_dist
     // against an absolute reach here deadlocked the bot (phase 3 became
     // unreachable with any spot visible — it walked forever and never swung).
-    bool spotFar  = tgt.has_spot && (tgt.aim_dist - tgt.dist) > 1.0f;
+    // ...but ONLY while there is still room to close in. Once the bot is at
+    // point-blank range it cannot get any closer, and holding phase 3 hostage
+    // deadlocked it: stuck watchdog -> evade dance -> 30 s blacklist, seen as
+    // "marker fell off a half-mined node". At the node, swing no matter where
+    // the X sits — hits through the node still connect.
+    bool spotFar  = tgt.has_spot && (tgt.aim_dist - tgt.dist) > 0.6f &&
+                    tgt.dist > walkUntil + 0.3f;
     bool inReach  = tgt.dist <= reachDist && !spotFar;
     bool aimed    = fabsf(tgt.yaw) <= aimedYaw;
 
@@ -3897,10 +3882,17 @@ static void UpdateFarm(float dt) {
         // (thin trees) or wrong tool. The walk-in nudge handles the former;
         // if HP still will not move, give up sooner rather than later.
         bool draining = (tgt.fraction >= 0.f && s_fracStart >= 0.f && tgt.fraction < s_fracStart - 0.01f);
+        if (tgt.fraction >= 0.f && s_fracStart < 0.f) s_fracStart = tgt.fraction; // first good read
         if (draining) { s_fracStart = tgt.fraction; s_mineTime = 0.f; s_sinceDrain = 0.f; }
         else {
             s_sinceDrain += dt;
-            if (s_mineTime > 14.f) {
+            // Give up only when the fraction is READABLE and provably not
+            // moving for a long stretch. With an unreadable fraction (-1)
+            // the old 14 s timer abandoned perfectly fine nodes halfway —
+            // the "stops mining before the node is empty" bug; without HP
+            // info the depleted/stuck watchdogs are the ones that decide.
+            float giveUpAfter = (tgt.fraction >= 0.f) ? 20.f : 45.f;
+            if (s_mineTime > giveUpAfter) {
                 esp_farm_blacklist(tgt.id, 60.f);
                 s_mineTime = 0.f; s_sinceDrain = 0.f; s_nodeId = 0;
             }

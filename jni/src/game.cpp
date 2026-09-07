@@ -26,40 +26,6 @@ static ssize_t remote_vm_writev(pid_t pid, const struct iovec* local_iov, unsign
 
 using namespace game_offsets;
 
-// ==== ВРЕМЕННЫЙ файловый лог (соло-метки после захода/смерти) ==============
-// /storage/emulated/0/benzhack/marker_log.txt — перезаписывается при старте.
-// Убрать после починки.
-#include <stdarg.h>
-#include <time.h>
-#include <sys/stat.h>
-static FILE* g_mlog_file = nullptr;
-static double mlog_now() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
-static void mlog(const char* fmt, ...) {
-    if (!g_mlog_file) {
-        mkdir("/storage/emulated/0/benzhack", 0777);
-        g_mlog_file = fopen("/storage/emulated/0/benzhack/marker_log.txt", "w");
-        if (!g_mlog_file) return;
-        setvbuf(g_mlog_file, nullptr, _IONBF, 0);
-    }
-    fprintf(g_mlog_file, "[%9.2f] ", mlog_now());
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(g_mlog_file, fmt, ap);
-    va_end(ap);
-    fputc('\n', g_mlog_file);
-}
-static bool mlog_gate(int slot) {
-    static double s_last[16] = {};
-    double now = mlog_now();
-    if (slot < 0 || slot >= 16) return false;
-    if (now - s_last[slot] < 1.0) return false;
-    s_last[slot] = now;
-    return true;
-}
 
 
 
@@ -4682,34 +4648,22 @@ static void reset_marker_caches() {
     g_farm_rescan = 0;
 }
 
-// ВРЕМЕННО: заметки со стороны отрисовки (main.cpp) пишутся в тот же файл.
-void esp_debug_note(const char* text) {
-    if (text && text[0]) mlog("%s", text);
-}
-
 std::vector<EspMarker> esp_get_markers() {
     std::vector<EspMarker> result;
     if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
         !g_markers_loot_enabled && !g_markers_pickup_enabled) {
         if (!g_marker_entities.empty()) g_marker_entities.clear();
         g_marker_rescan_countdown = 0;
-        if (mlog_gate(11)) mlog("markers: все переключатели меток ВЫКЛ");
         return result;
     }
-    if (g_pid <= 0 || !g_il2cpp_base) {
-        if (mlog_gate(0)) mlog("markers: нет процесса");
-        return result;
-    }
+    if (g_pid <= 0 || !g_il2cpp_base) return result;
     // The box pipeline publishes the frame while players are visible; when it
     // bailed out for ANY reason (empty player list, failed position read,
     // world reload), build a camera-only frame right here. Markers must never
     // depend on other players being around.
     if (!g_frame_vp_valid || !g_frame_local_valid) {
-        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh)) {
-            if (mlog_gate(1)) mlog("markers: соло-кадр НЕ построился (vp=%d local=%d)",
-                                   (int)g_frame_vp_valid, (int)g_frame_local_valid);
+        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh))
             return result;
-        }
     }
 
     if (--g_marker_rescan_countdown <= 0) {
@@ -4755,10 +4709,6 @@ std::vector<EspMarker> esp_get_markers() {
     }
 
     const float max_distance = g_marker_max_distance;
-    // ВРЕМЕННО: раз в секунду — судьба первых 4 сущностей кэша (позиция,
-    // дистанция, экран) чтобы увидеть, какой фильтр их убивает.
-    bool dump_now = mlog_gate(12);
-    int dumped = 0;
     for (MarkerEntity& entity : g_marker_entities) {
         if (entity.kind == ESP_MARKER_ORE && !g_markers_ore_enabled) continue;
         if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
@@ -4767,19 +4717,13 @@ std::vector<EspMarker> esp_get_markers() {
         // Ore nodes never move, so their position is only read on a rescan.
         if (entity.kind == ESP_MARKER_ANIMAL || !entity.position_valid)
             entity.position_valid = marker_world_position(entity.transform, entity.position);
-        if (!entity.position_valid) {
-            if (dump_now && dumped < 4) { ++dumped; mlog("ent[%s]: POS_INVALID tr=%llx", entity.label ? entity.label : "?", (unsigned long long)entity.transform); }
-            continue;
-        }
+        if (!entity.position_valid) continue;
 
         float dx = entity.position.x - g_frame_local_pos.x;
         float dy = entity.position.y - g_frame_local_pos.y;
         float dz = entity.position.z - g_frame_local_pos.z;
         float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (!std::isfinite(distance) || distance > max_distance) {
-            if (dump_now && dumped < 4) { ++dumped; mlog("ent[%s]: FAR d=%.0f pos=(%.1f %.1f %.1f)", entity.label ? entity.label : "?", distance, entity.position.x, entity.position.y, entity.position.z); }
-            continue;
-        }
+        if (!std::isfinite(distance) || distance > max_distance) continue;
 
         Vec2 screen{};
         Vec3 anchor = entity.position;
@@ -4787,14 +4731,10 @@ std::vector<EspMarker> esp_get_markers() {
         anchor.y += (entity.kind == ESP_MARKER_ANIMAL) ? 1.2F
                   : (entity.kind == ESP_MARKER_LOOT)   ? 0.6F
                   : (entity.kind == ESP_MARKER_PICKUP) ? 0.4F : 0.9F;
-        if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) {
-            if (dump_now && dumped < 4) { ++dumped; mlog("ent[%s]: W2S_FAIL d=%.0f pos=(%.1f %.1f %.1f)", entity.label ? entity.label : "?", distance, entity.position.x, entity.position.y, entity.position.z); }
-            continue;
-        }
+        if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) continue;
         if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
         if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F) continue;
         if (screen.y < -64.0F || screen.y > g_frame_sh + 64.0F) continue;
-        if (dump_now && dumped < 4) { ++dumped; mlog("ent[%s]: OK d=%.0f scr=(%.0f %.0f)", entity.label ? entity.label : "?", distance, screen.x, screen.y); }
 
         EspMarker marker;
         marker.x = screen.x;
@@ -4834,10 +4774,6 @@ std::vector<EspMarker> esp_get_markers() {
         thinned.push_back(marker);
         if (thinned.size() >= 64) break; // keep the screen readable
     }
-    if (mlog_gate(15)) mlog("draw: кэш=%d на_экран=%d pos=(%.1f %.1f %.1f) vp=%d",
-                            (int)g_marker_entities.size(), (int)thinned.size(),
-                            g_frame_local_pos.x, g_frame_local_pos.y, g_frame_local_pos.z,
-                            (int)g_frame_vp_valid);
     return thinned;
 }
 
@@ -5160,10 +5096,18 @@ bool esp_farm_get_target(FarmTarget& out) {
         // not certain on every build, and a wrong guess here would make the
         // farm ignore every node ("nothing happens"). If the pick is wrong
         // the mining watchdog blacklists it within seconds anyway.
-        float fraction = rd<float>(entity.component + MINEABLE_FRACTION);
-        if (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F && fraction < 0.03F)
-            score += 1000.0F;
-        if (entity.identity == s_last_identity) score *= 0.6F; // stickiness
+        // NEVER for the node we are currently working though: one garbage
+        // fraction read mid-mine used to shove the current target to the
+        // back of the queue — the marker jumped to another node while this
+        // one was still half full. The controller's own debounced depleted
+        // check is what retires the current node.
+        if (entity.identity != s_last_identity) {
+            float fraction = rd<float>(entity.component + MINEABLE_FRACTION);
+            if (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F && fraction < 0.03F)
+                score += 1000.0F;
+        } else {
+            score *= 0.6F; // stickiness
+        }
         if (score < best_score) { best_score = score; best = &entity; best_dist = dist; }
     }
     if (!best) {
