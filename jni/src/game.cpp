@@ -2495,14 +2495,48 @@ static bool player_rendered_position(uint64_t player, Vec3& out) {
 // worldCameraRoot sits at eye level, the box is built from the feet.
 static constexpr float kCameraRootHeight = 1.60F;
 
+// Mounted-state latch. Two raw reads flicker frame to frame while a player
+// rides a vehicle: the vehicleID SyncVar (rewritten by the net tick mid-read,
+// occasionally reads 0) and the rendered transform (fails sporadically).
+// Trusting them directly bounced the box between the live vehicle position
+// and the stale mount point every few frames. The latch engages on the first
+// mounted read, disengages only after ~a quarter second of consistent
+// unmounted reads, and holds the last good rendered position across read
+// hiccups.
+struct MountLatch {
+    int  unmounted_streak = 0;
+    bool engaged = false;
+    Vec3 last{};
+    bool last_ok = false;
+};
+static std::unordered_map<uint64_t, MountLatch> g_mount_latch;
+
 static void apply_mounted_position(uint64_t player, Vec3& feet) {
     if (!g_use_direct_player_position) return; // already using the transform
-    if (!player_is_mounted(player)) return;
+    bool mounted_now = player_is_mounted(player);
+    auto found = g_mount_latch.find(player);
+    if (!mounted_now && found == g_mount_latch.end()) return; // common case: on foot
+    if (g_mount_latch.size() > 256) g_mount_latch.clear();
+    MountLatch& latch = g_mount_latch[player];
+    if (mounted_now) {
+        latch.engaged = true;
+        latch.unmounted_streak = 0;
+    } else if (latch.engaged && ++latch.unmounted_streak >= 15) {
+        g_mount_latch.erase(player); // truly dismounted (~1/4 s of clean reads)
+        return;
+    }
+    if (!latch.engaged) return;
     Vec3 rendered{};
-    if (!player_rendered_position(player, rendered)) return;
-    rendered.y -= kCameraRootHeight;
-    if (!position_looks_like_world_space(rendered)) return;
-    feet = rendered;
+    if (player_rendered_position(player, rendered)) {
+        rendered.y -= kCameraRootHeight;
+        if (position_looks_like_world_space(rendered)) {
+            latch.last = rendered;
+            latch.last_ok = true;
+        }
+    }
+    // On a failed read keep the previous vehicle position — never fall back
+    // to the stale mount point mid-ride.
+    if (latch.last_ok) feet = latch.last;
 }
 
 static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
@@ -3340,6 +3374,7 @@ static void reset_world_caches() {
     g_player_text.clear();
     g_player_track.clear();
     g_player_track_pick.clear();
+    g_mount_latch.clear();
     g_skeletons.clear();
     reset_marker_caches();
 }
@@ -3364,6 +3399,7 @@ void esp_reset() {
     g_player_text.clear();
     g_player_track.clear();
     g_player_track_pick.clear();
+    g_mount_latch.clear();
     g_skeletons.clear();
     g_skeleton_layout = {}; g_skeleton_layout_valid = false;
     g_go_name_offset = 0; g_go_name_plain_pointer = false;
