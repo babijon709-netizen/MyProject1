@@ -3346,6 +3346,11 @@ static void reset_marker_caches();
 static void reset_world_caches() {
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_validated = false;
+    // The bone-learned transform layout dies with the old world: after a
+    // reload it reads garbage from recycled memory (finite numbers, wrong
+    // places). It is relearned from the first nearby skeleton; markers use
+    // the self-probing path meanwhile.
+    g_skeleton_layout = {}; g_skeleton_layout_valid = false;
     g_use_direct_player_position = true; g_player_position_offset = PLAYER_POSITION;
     g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
     g_local_player = 0;
@@ -4528,9 +4533,17 @@ static uint64_t resolve_network_identity_class() {
 
 static bool marker_world_position(uint64_t transform, Vec3& out) {
     if (!transform) return false;
-    if (g_skeleton_layout_valid && read_transform_hierarchy_layout(transform, g_skeleton_layout, out))
-        return vec3_is_finite(out);
-    return read_transform_hierarchy_position(transform, out) && vec3_is_finite(out);
+    // The learned layouts (skeleton / hierarchy) come from PLAYER bones and
+    // can go stale after a world reload or simply not match non-bone
+    // transforms — they then return finite-but-garbage positions, which is
+    // how markers died solo after a respawn (cache full, every distance
+    // absurd, zero on screen). Any implausible read falls through to the
+    // slow probing path instead of being trusted.
+    if (g_skeleton_layout_valid && read_transform_hierarchy_layout(transform, g_skeleton_layout, out) &&
+        vec3_is_finite(out) && position_looks_like_world_space(out))
+        return true;
+    return read_transform_hierarchy_position(transform, out) && vec3_is_finite(out) &&
+           position_looks_like_world_space(out);
 }
 
 // Walk Mirror's client registry and cache every ore node / animal in it.
