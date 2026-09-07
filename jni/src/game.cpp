@@ -26,6 +26,41 @@ static ssize_t remote_vm_writev(pid_t pid, const struct iovec* local_iov, unsign
 
 using namespace game_offsets;
 
+// ==== ВРЕМЕННЫЙ файловый лог (соло-метки после захода/смерти) ==============
+// /storage/emulated/0/benzhack/marker_log.txt — перезаписывается при старте.
+// Убрать после починки.
+#include <stdarg.h>
+#include <time.h>
+#include <sys/stat.h>
+static FILE* g_mlog_file = nullptr;
+static double mlog_now() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+static void mlog(const char* fmt, ...) {
+    if (!g_mlog_file) {
+        mkdir("/storage/emulated/0/benzhack", 0777);
+        g_mlog_file = fopen("/storage/emulated/0/benzhack/marker_log.txt", "w");
+        if (!g_mlog_file) return;
+        setvbuf(g_mlog_file, nullptr, _IONBF, 0);
+    }
+    fprintf(g_mlog_file, "[%9.2f] ", mlog_now());
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_mlog_file, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_mlog_file);
+}
+static bool mlog_gate(int slot) {
+    static double s_last[16] = {};
+    double now = mlog_now();
+    if (slot < 0 || slot >= 16) return false;
+    if (now - s_last[slot] < 1.0) return false;
+    s_last[slot] = now;
+    return true;
+}
+
 
 
 static pid_t     g_pid         = -1;
@@ -4620,22 +4655,34 @@ static void reset_marker_caches() {
     g_farm_rescan = 0;
 }
 
+// ВРЕМЕННО: заметки со стороны отрисовки (main.cpp) пишутся в тот же файл.
+void esp_debug_note(const char* text) {
+    if (text && text[0]) mlog("%s", text);
+}
+
 std::vector<EspMarker> esp_get_markers() {
     std::vector<EspMarker> result;
     if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
         !g_markers_loot_enabled && !g_markers_pickup_enabled) {
         if (!g_marker_entities.empty()) g_marker_entities.clear();
         g_marker_rescan_countdown = 0;
+        if (mlog_gate(11)) mlog("markers: все переключатели меток ВЫКЛ");
         return result;
     }
-    if (g_pid <= 0 || !g_il2cpp_base) return result;
+    if (g_pid <= 0 || !g_il2cpp_base) {
+        if (mlog_gate(0)) mlog("markers: нет процесса");
+        return result;
+    }
     // The box pipeline publishes the frame while players are visible; when it
     // bailed out for ANY reason (empty player list, failed position read,
     // world reload), build a camera-only frame right here. Markers must never
     // depend on other players being around.
     if (!g_frame_vp_valid || !g_frame_local_valid) {
-        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh))
+        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh)) {
+            if (mlog_gate(1)) mlog("markers: соло-кадр НЕ построился (vp=%d local=%d)",
+                                   (int)g_frame_vp_valid, (int)g_frame_local_valid);
             return result;
+        }
     }
 
     if (--g_marker_rescan_countdown <= 0) {
@@ -4712,6 +4759,10 @@ std::vector<EspMarker> esp_get_markers() {
         thinned.push_back(marker);
         if (thinned.size() >= 64) break; // keep the screen readable
     }
+    if (mlog_gate(15)) mlog("draw: кэш=%d на_экран=%d pos=(%.1f %.1f %.1f) vp=%d",
+                            (int)g_marker_entities.size(), (int)thinned.size(),
+                            g_frame_local_pos.x, g_frame_local_pos.y, g_frame_local_pos.z,
+                            (int)g_frame_vp_valid);
     return thinned;
 }
 

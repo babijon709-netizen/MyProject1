@@ -650,7 +650,16 @@ static void DrawEspOverlay() {
     }
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
-    if (!g_esp_attached) return;
+    // ВРЕМЕННО: диагностика ранних выходов отрисовки (раз в ~2 с).
+    static float s_dbgT = 0.f;
+    s_dbgT += ImGui::GetIO().DeltaTime;
+    bool dbgNow = s_dbgT > 2.f;
+    if (dbgNow) s_dbgT = 0.f;
+
+    if (!g_esp_attached) {
+        if (dbgNow) esp_debug_note("draw-ui: НЕ ПРИЦЕПЛЕН к игре");
+        return;
+    }
 
     if (g_state.aim_touch && g_state.aim_special) {
         float fovR = AimFovRadiusPx(sw, sh);
@@ -662,7 +671,10 @@ static void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup) {
+        if (dbgNow) esp_debug_note("draw-ui: все переключатели ESP выключены");
+        return;
+    }
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
@@ -901,6 +913,13 @@ static void DrawEspOverlay() {
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;
+        if (dbgNow) {
+            char note[96];
+            snprintf(note, sizeof(note), "draw-ui: рисую метки, got=%d (ore=%d ani=%d loot=%d pick=%d)",
+                     (int)esp_get_markers().size(), (int)g_state.esp_ore, (int)g_state.esp_animal,
+                     (int)g_state.esp_loot, (int)g_state.esp_pickup);
+            esp_debug_note(note);
+        }
         // Elite crates pulse through the spectrum: one hue for all of them per
         // frame (a full turn every two seconds) so they cannot be missed.
         const float rainbow_hue = fmodf((float)ImGui::GetTime() * 0.5f, 1.0f);
@@ -922,6 +941,8 @@ static void DrawEspOverlay() {
             EspPill(marker.x, marker.y + PillH(marker.name, kMarkerScale) + 2.f, label,
                     ColU32(cfg::esp::distance_col), kMarkerScale);
         }
+    } else if (dbgNow) {
+        esp_debug_note("draw-ui: переключатели МЕТОК выключены (боксы вкл)");
     }
 }
 
