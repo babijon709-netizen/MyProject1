@@ -44,7 +44,7 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD7AAAF8;
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD7B4390; // GameControllerBase
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD7A5E10; // GameControllerBase
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera

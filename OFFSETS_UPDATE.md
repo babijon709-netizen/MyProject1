@@ -701,3 +701,31 @@ python3 tools/offsets/typeinfo_rva.py --so /tmp/new/libil2cpp.so --script /tmp/n
   namespace `HyperHug...Features.Weapons` — раскладка не тронута.
 * `PLAYER_POSITION 0x1D0` не менять: в dump.cs по-прежнему `lastSavedPosition
   0x1D4`, у боевой сборки блок сдвинут на −4 (см. правило в §4).
+
+### Исправление после жалобы «ESP не работает»: GAME_CONTROLLER_TYPEINFO_RVA
+
+Скрипт выбрал НЕ ТОТ кандидат для GameControllerBase (0xD7B4390 — чужой класс
+с похожим профилем доступов). Ручной дизасм статических геттеров дал точный
+ответ; сигнатура сверена со старым дампом:
+
+* старый `get_localPlayer` (ygL @0x6575be0): слот 0xd4af648 → реллок
+  **0xD7DF6C8** — совпадает со старым значением заголовка, метод верен;
+* новый `get_localPlayer`/`get_cameraManager`/`get_netIdentity`
+  (cKs/cKq/cKc): все трое читают слот 0xd477308 → реллок **0xD7A5E10** и
+  затем `[static_fields+0x10/0x38/0x8]` — ровно наши поля.
+
+`GAME_CONTROLLER_TYPEINFO_RVA`: 0xD7B4390 → **0xD7A5E10** (записано).
+
+Два других RVA подтверждены адресно (доступ к нужному статик-полю):
+* PlayerManager: слот 0xd48ed30 → 0xD7AAAF8, 10 доступов к `[sf+0x10]`
+  (clientPlayerList) — верно;
+* NetworkClient: слот 0xd4772b0 → 0xD7A9DC8, 3 доступа к `[sf+0x28]`
+  (spawned) — верно.
+
+Дифф раскладок старый↔новый (`il2cpp_layout.py diff`): 27 из 28 структур без
+изменений; единственный «дифф» в ItemData — переименование типа фраз
+(hQ_Phrase→Iv_Phrase), смещения те же. Наши константы полей корректны.
+
+Урок в копилку §4: у GameControllerBase верный слот — тот, из которого читают
+геттеры cK*/yg* (три подряд, 0x8/0x10/0x38); голосование по количеству
+обращений выбирает чужой класс.
