@@ -657,3 +657,17 @@ python3 tools/offsets/typeinfo_rva.py --so /tmp/new/libil2cpp.so --script /tmp/n
   заведены в enum и рисуются маркером ящика.
 * `libunity.7z` и `moggerware.7z` — те же блобы, нативные Unity-смещения (§3.1,
   §3.9) не пересматривались.
+
+### Апдейт от 7 сентября 2026 (новые `dump.7z` / `libil2cpp.7z`, коммиты `2d1e09c`/`00279ed`)
+
+Прогон `update_offsets.py` по свежим дампам:
+
+* **Все 87 проверяемых полей структур — без изменений** (раскладка классов не
+  поехала, обфусцированные имена не пересматривались).
+* Переехали только три TypeInfo-RVA (новый билд `libil2cpp.so`), пересчитаны
+  дизасм-скриптом `typeinfo_rva.py` и записаны `--apply`:
+  * `PLAYER_MANAGER_TYPEINFO_RVA` 0xD7E4310 → **0xD7AAAF8**
+  * `GAME_CONTROLLER_TYPEINFO_RVA` 0xD7DF6C8 → **0xD7B4390**
+  * `NETWORK_CLIENT_TYPEINFO_RVA` 0xD7E35B8 → **0xD7A9DC8**
+* Рантайм-константы (`kind: runtime`, Unity/IL2CPP и камера из libunity) по
+  обыкновению не проверялись; `libunity.7z`/`moggerware.7z` без изменений.
