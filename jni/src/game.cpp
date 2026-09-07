@@ -162,6 +162,11 @@ static std::string read_remote_string(uint64_t address) {
     return std::string(buffer);
 }
 
+static bool remote_string_equals(uint64_t address, const char* expected) {
+    if (!address || !expected) return false;
+    return read_remote_string(address) == expected;
+}
+
 static bool read_managed_string_ex(uint64_t str_obj, char* out, size_t cap, int32_t max_chars) {
     if (!str_obj || !out || cap < 2) return false;
     if ((str_obj & 0x1) != 0) return false;
