@@ -1,0 +1,291 @@
+[103019.10] camframe: нет контроллера
+[103020.11] camframe: нет контроллера
+[103021.11] camframe: нет контроллера
+[103022.11] camframe: нет контроллера
+[103023.11] camframe: нет контроллера
+[103024.11] camframe: нет контроллера
+[103025.12] camframe: нет контроллера
+[103026.12] camframe: нет контроллера
+[103027.13] camframe: нет контроллера
+[103028.13] camframe: нет контроллера
+[103029.13] camframe: нет контроллера
+[103029.97] camframe: cam_mgr=0
+[103030.98] camframe: cam_mgr=0
+[103031.98] camframe: cam_mgr=0
+[103032.99] camframe: cam_mgr=0
+[103033.99] camframe: cam_mgr=0
+[103035.00] camframe: cam_mgr=0
+[103036.00] camframe: cam_mgr=0
+[103037.01] camframe: cam_mgr=0
+[103038.02] camframe: cam_mgr=0
+[103039.02] camframe: cam_mgr=0
+[103040.03] camframe: cam_mgr=0
+[103041.04] camframe: cam_mgr=0
+[103042.04] camframe: cam_mgr=0
+[103043.05] camframe: cam_mgr=0
+[103044.05] camframe: cam_mgr=0
+[103045.06] camframe: cam_mgr=0
+[103046.06] camframe: cam_mgr=0
+[103047.07] camframe: cam_mgr=0
+[103048.07] camframe: cam_mgr=0
+[103049.07] camframe: cam_mgr=0
+[103050.08] camframe: cam_mgr=0
+[103051.09] camframe: cam_mgr=0
+[103052.09] camframe: cam_mgr=0
+[103053.09] camframe: cam_mgr=0
+[103054.10] camframe: cam_mgr=0
+[103055.11] camframe: cam_mgr=0
+[103056.11] camframe: cam_mgr=0
+[103057.12] camframe: cam_mgr=0
+[103058.13] camframe: cam_mgr=0
+[103059.13] camframe: cam_mgr=0
+[103060.14] camframe: cam_mgr=0
+[103061.14] camframe: cam_mgr=0
+[103062.14] camframe: cam_mgr=0
+[103063.15] camframe: cam_mgr=0
+[103064.15] camframe: cam_mgr=0
+[103065.16] camframe: cam_mgr=0
+[103066.16] camframe: cam_mgr=0
+[103067.17] camframe: cam_mgr=0
+[103077.61] markers: соло-кадр ок, pos=(-941.6 9.3 -1259.9)
+[103077.63] skip-class: 'GameController' go='GameController'
+[103077.63] skip-class: 'PauseManager' go='GameController'
+[103077.63] skip-class: 'pFb' go='GameController'
+[103077.63] skip-class: 'ha' go='GameController'
+[103077.63] skip-class: 'hM' go='GameController'
+[103077.63] skip-class: 'dJ' go='GameController'
+[103077.63] skip-class: 'cz' go='GameController'
+[103077.63] skip-class: 'If' go='GameController'
+[103077.63] skip-class: 'AirdropProxy' go='GameController'
+[103077.63] skip-class: 'ResourcesVaultNetworkObject' go='GameController'
+[103077.63] skip-class: 'GameModes' go='GameController'
+[103077.63] skip-class: 'RemoteUIBehaviour' go='RemoteUI'
+[103077.63] mineable-et: et=0 go='OreFerum (Clone)'
+[103077.63] mineable-et: et=0 go='OreFerum (Clone)'
+[103077.63] mineable-et: et=0 go='OreFerum (Clone)'
+[103077.63] mineable-et: et=0 go='OreSurfur (Clone)'
+[103077.63] mineable-et: et=0 go='OreSurfur (Clone)'
+[103077.63] mineable-et: et=0 go='OreSurfur (Clone)'
+[103077.63] mineable-et: et=0 go='OreSurfur (Clone)'
+[103077.63] mineable-et: et=0 go='OreStone (Clone)'
+[103077.63] mineable-et: et=0 go='OreStone (Clone)'
+[103077.63] mineable-et: et=0 go='OreStone (Clone)'
+[103077.63] mineable-et: et=0 go='OreStone (Clone)'
+[103077.63] mineable-et: et=0 go='OreStone (Clone)'
+[103077.64] mineable-et: et=0 go='OreStone (Clone)'
+[103077.64] mineable-et: et=0 go='OreStone (Clone)'
+[103077.64] skip-class: 'pmK' go='door_double_wood (Clone)'
+[103077.64] skip-class: 'BuildingPiece' go='door_double_wood (Clone)'
+[103077.64] skip-class: 'EntityDeathHandler' go='door_double_wood (Clone)'
+[103077.64] skip-class: 'PieceVitals' go='door_double_wood (Clone)'
+[103077.64] skip-class: 'Door' go='door_double_wood (Clone)'
+[103077.64] skip-class: 'Lock' go='door_double_wood (Clone)'
+[103077.65] skip-class: 'FrameDoorScaler' go='door_double_wood (Clone)'
+[103077.65] skip-class: 'pmi' go='dusterhuffer'
+[103077.65] skip-class: 'PlayerDeathHandler' go='dusterhuffer'
+[103077.65] skip-class: 'KCC' go='dusterhuffer'
+[103077.65] skip-class: 'FootstepPlayer' go='dusterhuffer'
+[103077.65] skip-class: 'PlayerManager' go='dusterhuffer'
+[103077.65] skip-class: 'PlayerVitals' go='dusterhuffer'
+[103077.65] skip-class: 'PlayerCrafter' go='dusterhuffer'
+[103077.65] skip-class: 'PlayerLoot' go='dusterhuffer'
+[103077.65] skip-class: 'PlayerInteraction' go='dusterhuffer'
+[103077.65] skip-class: 'PlayerBuilder' go='dusterhuffer'
+[103077.65] skip-class: 'pFG' go='dusterhuffer'
+[103077.65] skip-class: 'PlayerWeapon' go='dusterhuffer'
+[103077.65] skip-class: 'iE' go='dusterhuffer'
+[103077.65] skip-class: 'pJk' go='dusterhuffer'
+[103077.65] skip-class: 'pFP' go='dusterhuffer'
+[103077.65] skip-class: 'iP' go='dusterhuffer'
+[103077.65] skip-class: 'pFf' go='dusterhuffer'
+[103077.65] skip-class: 'HitBoxRecorderRoot' go='dusterhuffer'
+[103077.65] skip-class: 'FT' go='dusterhuffer'
+[103077.65] skip-class: 'pzo' go='dusterhuffer'
+[103077.65] skip-class: 'PlayerInventoryServer' go='dusterhuffer'
+[103077.65] skip-class: 'PlayerDisconnectHandler' go='dusterhuffer'
+[103077.65] skip-class: 'PlayerMap' go='dusterhuffer'
+[103077.65] skip-class: 'qn' go='dusterhuffer'
+[103077.66] skip-class: 'PlayerSurfaceWaterAudio' go='dusterhuffer'
+[103077.66] skip-class: 'PowerlineSupportZipline' go='PowerlineSupportZipline (Clone)'
+[103077.66] skip-class: 'pmj' go='NPCDeerMale_03 (Clone)'
+[103077.66] skip-class: 'AnimalVitals' go='NPCDeerMale_03 (Clone)'
+[103077.66] skip-class: 'NPCBrainAnimal' go='NPCDeerMale_03 (Clone)'
+[103077.66] skip-class: 'pVS' go='NPCDeerMale_03 (Clone)'
+[103077.66] skip-class: 'PowerlineSupport' go='PowerLinePlatform_Proxy (Clone)'
+[103077.66] skip-class: 'LootBoxCar' go='LootSpawnPoint_03 (Clone)'
+[103077.66] skip-class: 'LootDestroyable' go='Barrel_v2 (Clone)'
+[103077.66] skip-class: 'PowerlineSupportZiplineCarriage' go='PowerlineSupportZiplineCarriage '
+[103077.66] skip-class: 'MountTransformRecorder' go='PowerlineSupportZiplineCarriage '
+[103077.66] mineable-et: et=0 go='StackOfWood (Clone)'
+[103077.66] mineable-et: et=0 go='StackOfWood (Clone)'
+[103077.66] mineable-et: et=0 go='StackOfWood (Clone)'
+[103077.66] mineable-et: et=0 go='StackOfWood (Clone)'
+[103077.66] mineable-et: et=0 go='StackOfWood (Clone)'
+[103077.66] markers: скан=18 (ore=14 animal=4 loot=0 pickup=0)
+[103078.62] markers: соло-кадр ок, pos=(-941.6 9.3 -1259.9)
+[103079.20] markers: скан=18 (ore=14 animal=4 loot=0 pickup=0)
+[103079.62] markers: соло-кадр ок, pos=(-941.6 9.3 -1259.9)
+[103080.63] markers: соло-кадр ок, pos=(-941.6 9.3 -1259.9)
+[103080.96] markers: скан=43 (ore=14 animal=4 loot=12 pickup=13)
+[103081.64] markers: соло-кадр ок, pos=(-940.4 9.3 -1259.7)
+[103082.49] markers: скан=43 (ore=14 animal=4 loot=12 pickup=13)
+[103082.64] markers: соло-кадр ок, pos=(-938.9 9.0 -1257.7)
+[103083.64] markers: соло-кадр ок, pos=(-939.8 8.4 -1252.6)
+[103084.02] mineable-et: et=0 go='OreSurfur (Clone)'
+[103084.02] mineable-et: et=0 go='StackOfWood (Clone)'
+[103084.02] skip-class: 'Cupboard' go='cupboard (Clone)'
+[103084.02] markers: скан=48 (ore=15 animal=4 loot=13 pickup=16)
+[103084.64] markers: соло-кадр ок, pos=(-942.2 8.0 -1248.7)
+[103085.56] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103085.65] markers: соло-кадр ок, pos=(-942.2 8.0 -1248.7)
+[103086.65] markers: соло-кадр ок, pos=(-939.2 8.9 -1257.0)
+[103087.13] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103087.66] markers: соло-кадр ок, pos=(-939.2 8.9 -1257.0)
+[103088.66] markers: соло-кадр ок, pos=(-939.2 8.9 -1257.0)
+[103088.68] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103089.67] markers: соло-кадр ок, pos=(-939.2 8.9 -1257.0)
+[103090.22] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103090.67] markers: соло-кадр ок, pos=(-939.2 8.9 -1257.0)
+[103091.68] markers: соло-кадр ок, pos=(-939.2 8.9 -1257.0)
+[103091.76] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103092.69] markers: соло-кадр ок, pos=(-939.2 8.9 -1257.0)
+[103093.31] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103093.69] markers: соло-кадр ок, pos=(-939.2 8.9 -1257.0)
+[103094.70] markers: соло-кадр ок, pos=(-938.8 8.5 -1251.9)
+[103094.85] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103095.70] markers: соло-кадр ок, pos=(-939.2 9.7 -1245.5)
+[103096.38] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103096.70] markers: соло-кадр ок, pos=(-938.2 8.6 -1239.5)
+[103097.71] markers: соло-кадр ок, pos=(-934.0 9.3 -1235.2)
+[103097.91] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103098.72] markers: соло-кадр ок, pos=(-938.5 9.0 -1230.6)
+[103099.44] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103099.72] markers: соло-кадр ок, pos=(-940.6 9.0 -1225.9)
+[103100.72] markers: соло-кадр ок, pos=(-935.6 9.6 -1224.7)
+[103100.98] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103101.73] markers: соло-кадр ок, pos=(-930.5 10.6 -1224.0)
+[103102.51] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103102.74] markers: соло-кадр ок, pos=(-924.3 11.6 -1223.3)
+[103103.74] markers: соло-кадр ок, pos=(-918.1 12.5 -1220.8)
+[103104.05] markers: скан=47 (ore=15 animal=3 loot=13 pickup=16)
+[103104.74] markers: соло-кадр ок, pos=(-911.9 14.3 -1218.5)
+[103105.58] mineable-et: et=0 go='OreStone (Clone)'
+[103105.58] mineable-et: et=0 go='OreStone (Clone)'
+[103105.58] mineable-et: et=0 go='OreStone (Clone)'
+[103105.58] markers: скан=58 (ore=18 animal=5 loot=16 pickup=19)
+[103105.75] markers: соло-кадр ок, pos=(-906.2 14.6 -1216.5)
+[103106.75] markers: соло-кадр ок, pos=(-900.3 16.1 -1214.4)
+[103107.12] markers: скан=58 (ore=18 animal=5 loot=16 pickup=19)
+[103107.76] markers: соло-кадр ок, pos=(-894.3 17.0 -1212.1)
+[103108.64] mineable-et: et=0 go='OreFerum (Clone)'
+[103108.65] mineable-et: et=0 go='OreStone (Clone)'
+[103108.65] markers: скан=58 (ore=19 animal=5 loot=14 pickup=20)
+[103108.76] markers: соло-кадр ок, pos=(-888.1 17.0 -1209.6)
+[103109.76] markers: соло-кадр ок, pos=(-881.9 17.1 -1207.2)
+[103110.19] markers: скан=58 (ore=19 animal=5 loot=14 pickup=20)
+[103110.76] markers: соло-кадр ок, pos=(-875.9 16.9 -1204.5)
+[103111.72] markers: скан=58 (ore=19 animal=5 loot=14 pickup=20)
+[103111.77] markers: соло-кадр ок, pos=(-869.8 17.0 -1201.9)
+[103112.77] markers: соло-кадр ок, pos=(-863.7 16.5 -1199.4)
+[103113.26] markers: скан=58 (ore=19 animal=5 loot=14 pickup=20)
+[103113.77] markers: соло-кадр ок, pos=(-857.7 17.5 -1196.8)
+[103114.78] mineable-et: et=0 go='OreStone (Clone)'
+[103114.79] mineable-et: et=0 go='OreFerum (Clone)'
+[103114.79] markers: скан=57 (ore=20 animal=5 loot=14 pickup=18)
+[103114.80] markers: соло-кадр ок, pos=(-851.6 15.4 -1194.2)
+[103115.80] markers: соло-кадр ок, pos=(-845.6 15.3 -1191.6)
+[103116.33] markers: скан=57 (ore=20 animal=5 loot=14 pickup=18)
+[103116.80] markers: соло-кадр ок, pos=(-839.5 15.8 -1189.0)
+[103117.81] markers: соло-кадр ок, pos=(-833.5 16.8 -1186.4)
+[103117.87] markers: скан=57 (ore=20 animal=5 loot=14 pickup=18)
+[103118.81] markers: соло-кадр ок, pos=(-827.4 17.6 -1183.9)
+[103119.41] markers: скан=57 (ore=20 animal=5 loot=14 pickup=18)
+[103119.81] markers: соло-кадр ок, pos=(-821.6 18.7 -1181.2)
+[103120.82] markers: соло-кадр ок, pos=(-815.7 19.3 -1178.5)
+[103120.93] mineable-et: et=0 go='OreStone (Clone)'
+[103120.94] mineable-et: et=0 go='OreStone (Clone)'
+[103120.94] mineable-et: et=0 go='OreStone (Clone)'
+[103120.95] mineable-et: et=0 go='OreFerum (Clone)'
+[103120.95] mineable-et: et=0 go='OreStone (Clone)'
+[103120.95] mineable-et: et=0 go='OreStone (Clone)'
+[103120.95] markers: скан=55 (ore=26 animal=5 loot=12 pickup=12)
+[103121.82] markers: соло-кадр ок, pos=(-810.4 20.4 -1176.1)
+[103122.50] markers: скан=55 (ore=26 animal=5 loot=12 pickup=12)
+[103122.82] markers: соло-кадр ок, pos=(-804.5 20.8 -1173.6)
+[103123.82] markers: соло-кадр ок, pos=(-798.9 21.1 -1170.2)
+[103124.04] markers: скан=55 (ore=26 animal=5 loot=12 pickup=12)
+[103124.83] markers: соло-кадр ок, pos=(-793.5 20.8 -1166.3)
+[103125.60] markers: скан=55 (ore=26 animal=5 loot=12 pickup=12)
+[103125.83] markers: соло-кадр ок, pos=(-789.4 21.4 -1161.3)
+[103126.84] markers: соло-кадр ок, pos=(-783.7 21.6 -1160.0)
+[103127.15] markers: скан=55 (ore=26 animal=5 loot=12 pickup=12)
+[103127.84] markers: соло-кадр ок, pos=(-784.8 21.5 -1161.4)
+[103128.69] markers: скан=55 (ore=26 animal=5 loot=12 pickup=12)
+[103128.84] markers: соло-кадр ок, pos=(-787.1 21.5 -1159.2)
+[103129.85] markers: соло-кадр ок, pos=(-786.2 22.5 -1159.3)
+[103130.25] markers: скан=55 (ore=26 animal=5 loot=12 pickup=12)
+[103130.85] markers: соло-кадр ок, pos=(-785.4 22.6 -1159.2)
+[103131.86] markers: соло-кадр ок, pos=(-784.1 24.0 -1159.3)
+[103131.96] markers: скан=55 (ore=26 animal=5 loot=12 pickup=12)
+[103132.86] markers: соло-кадр ок, pos=(-778.1 24.7 -1159.6)
+[103133.52] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103133.86] markers: соло-кадр ок, pos=(-773.6 24.8 -1160.5)
+[103134.87] markers: соло-кадр ок, pos=(-775.3 28.1 -1165.2)
+[103135.06] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103135.88] markers: соло-кадр ок, pos=(-780.2 31.2 -1163.9)
+[103136.60] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103136.88] markers: соло-кадр ок, pos=(-777.4 31.3 -1162.1)
+[103137.88] markers: соло-кадр ок, pos=(-771.7 31.2 -1162.9)
+[103138.14] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103138.89] markers: соло-кадр ок, pos=(-771.5 31.1 -1166.0)
+[103139.69] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103139.89] markers: соло-кадр ок, pos=(-771.8 32.0 -1165.6)
+[103140.90] markers: соло-кадр ок, pos=(-771.8 33.5 -1165.5)
+[103141.23] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103141.90] markers: соло-кадр ок, pos=(-771.8 35.7 -1165.5)
+[103142.77] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103142.90] markers: соло-кадр ок, pos=(-771.8 38.2 -1164.7)
+[103143.91] markers: соло-кадр ок, pos=(-776.4 38.2 -1163.9)
+[103144.31] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103144.91] markers: соло-кадр ок, pos=(-781.1 38.2 -1161.0)
+[103145.85] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103145.92] markers: соло-кадр ок, pos=(-780.8 39.0 -1159.5)
+[103146.92] markers: соло-кадр ок, pos=(-780.8 41.7 -1159.5)
+[103147.40] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103147.93] markers: соло-кадр ок, pos=(-777.5 43.1 -1159.8)
+[103148.94] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103148.94] markers: соло-кадр ок, pos=(-777.2 43.1 -1159.8)
+[103149.95] markers: соло-кадр ок, pos=(-776.5 43.1 -1159.1)
+[103150.48] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103150.95] markers: соло-кадр ок, pos=(-777.6 43.1 -1161.3)
+[103151.95] markers: соло-кадр ок, pos=(-779.3 43.1 -1160.7)
+[103152.02] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103152.96] markers: соло-кадр ок, pos=(-779.9 38.2 -1160.6)
+[103153.56] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103153.96] markers: соло-кадр ок, pos=(-779.9 38.2 -1156.5)
+[103154.97] markers: соло-кадр ок, pos=(-776.8 37.7 -1156.2)
+[103155.10] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103155.97] markers: соло-кадр ок, pos=(-772.9 34.2 -1156.6)
+[103156.65] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103156.97] markers: соло-кадр ок, pos=(-770.8 31.2 -1157.6)
+[103157.98] markers: соло-кадр ок, pos=(-772.1 31.3 -1163.2)
+[103158.19] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103158.98] markers: соло-кадр ок, pos=(-774.6 31.3 -1162.5)
+[103159.73] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103159.99] markers: соло-кадр ок, pos=(-778.2 29.9 -1165.2)
+[103160.99] markers: соло-кадр ок, pos=(-778.5 30.2 -1164.1)
+[103161.28] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103162.00] markers: соло-кадр ок, pos=(-776.8 29.0 -1165.2)
+[103162.82] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103163.00] markers: соло-кадр ок, pos=(-774.8 24.7 -1161.5)
+[103164.00] markers: соло-кадр ок, pos=(-773.2 24.7 -1156.3)
+[103164.36] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103165.01] markers: соло-кадр ок, pos=(-773.2 24.7 -1156.3)
+[103165.94] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103166.02] markers: соло-кадр ок, pos=(-773.2 24.7 -1156.3)
+[103167.02] markers: соло-кадр ок, pos=(-773.2 24.7 -1156.3)
+[103167.50] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103168.03] markers: соло-кадр ок, pos=(-773.2 24.7 -1156.3)
+[103169.06] markers: скан=52 (ore=26 animal=5 loot=12 pickup=9)
+[103169.06] markers: соло-кадр ок, pos=(-773.2 24.7 -1156.3)
+[103170.07] markers: соло-кадр ок, pos=(-773.2 24.7 -1156.3)
