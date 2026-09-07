@@ -671,3 +671,33 @@ python3 tools/offsets/typeinfo_rva.py --so /tmp/new/libil2cpp.so --script /tmp/n
   * `NETWORK_CLIENT_TYPEINFO_RVA` 0xD7E35B8 → **0xD7A9DC8**
 * Рантайм-константы (`kind: runtime`, Unity/IL2CPP и камера из libunity) по
   обыкновению не проверялись; `libunity.7z`/`moggerware.7z` без изменений.
+
+### Ручная сверка того же апдейта (без скрипта)
+
+По требованию — полная ручная проверка по свежераспакованным `dump.cs`/`il2cpp.h`/`script.json`:
+
+* **Поля, сверенные вручную по dump.cs — все на своих местах:**
+  `PlayerManager` (worldCameraRoot 0x68, inventory 0x98, vitals 0xC8, weapons
+  0x198, QHo 0x220, voice 0x2E8, SyncVar-блок 0x278–0x298, статики 0x8/0x10),
+  статики `GameControllerBase` (0x8/0x10/0x38), `CameraManager.m_Camera` 0x20,
+  `NetworkClient.spawned` 0x28, `NetworkIdentity` (netId 0x58, behaviours 0x80),
+  `MineableObject` (0x78/0xA0/0xA8/0xC0/0xD0/0xD8), enum EntityType 0..24,
+  `LootObject` (0xA0/0xA8/0xE0/0xF8), `ItemPickup` (0xA8/0xD8/0xE0),
+  `ItemData` (0x18/0x20), `KCC` (0x70/0x78/0x88/0xA0/0xA4),
+  `HitBoxRecorderRoot.hitBoxes` 0x68, `PlayerWeapon` (0xD0/0x100/0x110/0x128,
+  хвост SyncVar-хуков 0x140/0x148/0x150), `FPManager` (0x50/0x58/0xA8),
+  `PlayerModelInfo` (0x20/0x28/0x30/0x38).
+* **Три TypeInfo-RVA подтверждены независимым дизасмом**: собственные методы
+  каждого класса дизассемблированы capstone'ом, собраны GOT-слоты по паттерну
+  `adrp+ldr → ldr [klass,#0xB8]` (доступ к static_fields), затем эти слоты
+  разnamed через `R_AARCH64_RELATIVE` (addend = слот класса):
+  * PlayerManager: GOT 0xd48ed30 → **0xD7AAAF8** (19 голосов, единственный кандидат)
+  * GameControllerBase: GOT 0xd493b68 → **0xD7B4390** (42 голоса, топ)
+  * NetworkClient: GOT 0xd4772b0 → **0xD7A9DC8** (48 голосов, топ)
+* Переобфускация имён классов без смены раскладки: `pmi`→`DqO` (event handler,
+  manager 0xD0 / Aim 0x268), `ij`→`OS` (nicklabel, 0x20/0x38), `pJk`→`DEY`
+  (voice, 0x78), `pFG`→`DoI` (equipment), view оружия `sR`→`ey` (0x48/0x50/0x60
+  на месте, проверено `il2cpp_layout.py find`), `PlayerWeapon` переехал в
+  namespace `HyperHug...Features.Weapons` — раскладка не тронута.
+* `PLAYER_POSITION 0x1D0` не менять: в dump.cs по-прежнему `lastSavedPosition
+  0x1D4`, у боевой сборки блок сдвинут на −4 (см. правило в §4).
