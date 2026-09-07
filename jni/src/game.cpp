@@ -2895,9 +2895,9 @@ static bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, floa
 }
 
 // Extra vertical offset applied to every head aim point (metres, world up).
-// Tuned in-game at fighting range: +12 cm lands centre-head. This is the
+// Tuned in-game at fighting range: +10 cm lands centre-head. This is the
 // far-range figure; head_lift_for_range() fades down to the near one below.
-static constexpr float g_aim_head_lift = 0.12F;
+static constexpr float g_aim_head_lift = 0.10F;
 // Up close the same 14 cm is a completely different shot: at five metres it
 // is well over a degree, which puts the round over the top of the head, while
 // at fifty it is a tenth of that and still inside the skull. The offset is
@@ -2925,7 +2925,7 @@ static float head_lift_for_range(const Vec3& world) {
 // turning from his -- the three things that have no reliable answer on this
 // build. Set per player just below, applied here, and it only shifts the
 // point the aim steers to: the ESP box still draws where the man actually is.
-static constexpr float kAimLeadSeconds = 0.060F;
+static constexpr float kAimLeadSeconds = 0.055F;
 static Vec3 g_aim_lead{};
 
 static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat4& vp, float sw, float sh) {
