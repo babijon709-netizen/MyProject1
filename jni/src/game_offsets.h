@@ -252,6 +252,12 @@ inline constexpr std::uint64_t DICT_ENTRY_VALUE  = 0x10;
 inline constexpr std::uint64_t NETID_NET_ID     = 0x58; // uint netId
 inline constexpr std::uint64_t NETID_BEHAVIOURS = 0x80; // NetworkBehaviour[]
 
+// Oxide.RaycastManager — the ray the game casts from the camera to find the
+// interactable object under the crosshair (chests, doors, pickups). Hangs off
+// PlayerManager.raycastManager; m_RayLength is that ray's reach in metres.
+inline constexpr std::uint64_t PLAYER_RAYCAST_MANAGER   = 0x88; // Oxide.RaycastManager raycastManager
+inline constexpr std::uint64_t RAYCAST_RAY_LENGTH       = 0x38; // float m_RayLength
+
 // Oxide.MineableObject — the shared base of ore nodes, trees and animals.
 inline constexpr std::uint64_t MINEABLE_LOOT           = 0xA0; // List<Oxide.LootItem>
 inline constexpr std::uint64_t MINEABLE_FINISH_BONUS   = 0xA8;

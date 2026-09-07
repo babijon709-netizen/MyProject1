@@ -151,6 +151,46 @@ static void xray_apply(uint64_t native_cam) {
     }
 }
 
+// ==== Длинная рука: дальность луча взаимодействия ==========================
+// RaycastManager.m_RayLength — длина луча, которым игра ищет объект под
+// прицелом (сундук, дверь, предмет). Пишем каждый кадр, пока включено; при
+// выключении возвращаем исходное значение, запомненное при первом включении.
+static float    g_reach_meters = 0.0F;     // 0 = выключено
+static uint64_t g_reach_mgr = 0;
+static float    g_reach_saved = 0.0F;
+static bool     g_reach_saved_valid = false;
+
+void esp_set_reach(float meters) {
+    if (!std::isfinite(meters) || meters < 0.0F) meters = 0.0F;
+    if (meters > 50.0F) meters = 50.0F;
+    g_reach_meters = meters;
+}
+
+// Вызывается из кадра, когда известен локальный игрок (managed PlayerManager).
+static void reach_apply(uint64_t local_player) {
+    if (g_reach_meters > 0.05F) {
+        if (!local_player) return;
+        uint64_t mgr = rd_ptr(local_player + PLAYER_RAYCAST_MANAGER);
+        if (!mgr) return;
+        // MonoBehaviour: поля лежат в managed-объекте, пишем прямо туда.
+        if (g_reach_mgr != mgr || !g_reach_saved_valid) {
+            if (g_reach_saved_valid && g_reach_mgr)
+                wr_buf(g_reach_mgr + RAYCAST_RAY_LENGTH, &g_reach_saved, sizeof(float));
+            float current = rd<float>(mgr + RAYCAST_RAY_LENGTH);
+            g_reach_saved = (std::isfinite(current) && current > 0.1F && current < 50.0F)
+                          ? current : 3.0F;
+            g_reach_saved_valid = true;
+            g_reach_mgr = mgr;
+        }
+        wr_buf(mgr + RAYCAST_RAY_LENGTH, &g_reach_meters, sizeof(float));
+    } else if (g_reach_saved_valid) {
+        if (g_reach_mgr)
+            wr_buf(g_reach_mgr + RAYCAST_RAY_LENGTH, &g_reach_saved, sizeof(float));
+        g_reach_saved_valid = false;
+        g_reach_mgr = 0;
+    }
+}
+
 static std::string read_remote_string(uint64_t address) {
     if (!address) return {};
     char buffer[96]{};
@@ -3382,6 +3422,7 @@ static void reset_world_caches() {
 void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
+    g_reach_mgr = 0; g_reach_saved_valid = false;
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_frame_publish_fail_streak = 0;
     g_aim_ref_valid = false;
@@ -3437,6 +3478,7 @@ static bool publish_camera_only_frame(float sw, float sh) {
     if (!(sw >= 100.0F) || !(sh >= 100.0F)) { sw = 1080.0F; sh = 2400.0F; }
     Mat4 solo_proj{}, solo_view{};
     xray_apply(cam_native);
+    reach_apply(g_local_player);
     if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) return false;
     Vec3 cam_pos{};
     if (!camera_position_from_view(solo_view, cam_pos)) return false;
@@ -3560,6 +3602,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             return result;
         }
         xray_apply(native_cam);
+        reach_apply(resolve_local_player());
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
             return result;
         }
