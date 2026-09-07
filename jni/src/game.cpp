@@ -181,6 +181,42 @@ void esp_set_reach(float meters) {
     g_reach_meters = meters;
 }
 
+// Третья проверка: Oxide.PlayerInteraction держит собственные лимиты
+// дистанции (два float сразу после LayerMask). Патчим и восстанавливаем.
+static uint64_t g_reach_pi = 0;
+static float    g_reach_pi_saved_a = 0.0F, g_reach_pi_saved_b = 0.0F;
+static bool     g_reach_pi_saved_valid = false;
+static float    g_reach_rm_aux_saved = 0.0F;
+static bool     g_reach_rm_aux_valid = false;
+
+// PlayerInteraction локального игрока: идём через netIdentity игрока и ищем
+// в behaviours компонент, чей player-backref (0x68) указывает на него.
+static uint64_t find_player_interaction(uint64_t local_player) {
+    if (!local_player) return 0;
+    uint64_t identity = rd_ptr(local_player + BEHAVIOUR_NET_IDENTITY);
+    if (!valid_obj(identity)) return 0;
+    uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
+    if (!valid_obj(array)) return 0;
+    int32_t count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
+    if (count <= 0 || count > 64) return 0;
+    uint64_t behaviours[64];
+    if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)count * sizeof(uint64_t)))
+        return 0;
+    for (int32_t i = 0; i < count; ++i) {
+        uint64_t behaviour = behaviours[i];
+        if (!valid_obj(behaviour) || behaviour == local_player) continue;
+        if (rd_ptr(behaviour + PINTERACT_PLAYER_BACKREF) != local_player) continue;
+        // Оба лимита должны выглядеть как небольшие дистанции — это и
+        // отличает PlayerInteraction от других behaviours с тем же backref.
+        float a = rd<float>(behaviour + PINTERACT_DIST_A);
+        float b = rd<float>(behaviour + PINTERACT_DIST_B);
+        if (std::isfinite(a) && std::isfinite(b) &&
+            a > 0.05F && a < 30.0F && b > 0.05F && b < 30.0F)
+            return behaviour;
+    }
+    return 0;
+}
+
 // Вызывается из кадра, когда известен локальный игрок (managed PlayerManager).
 static void reach_apply(uint64_t local_player) {
     if (g_reach_meters > 0.05F) {
@@ -194,16 +230,47 @@ static void reach_apply(uint64_t local_player) {
             float current = rd<float>(mgr + RAYCAST_RAY_LENGTH);
             g_reach_saved = (std::isfinite(current) && current > 0.1F && current < 50.0F)
                           ? current : 3.0F;
+            float aux = rd<float>(mgr + RAYCAST_AUX_LENGTH);
+            g_reach_rm_aux_valid = std::isfinite(aux) && aux > 0.1F && aux < 50.0F;
+            if (g_reach_rm_aux_valid) g_reach_rm_aux_saved = aux;
             g_reach_saved_valid = true;
             g_reach_mgr = mgr;
         }
         wr_buf(mgr + RAYCAST_RAY_LENGTH, &g_reach_meters, sizeof(float));
+        if (g_reach_rm_aux_valid)
+            wr_buf(mgr + RAYCAST_AUX_LENGTH, &g_reach_meters, sizeof(float));
+        // Лимиты PlayerInteraction (третья проверка дистанции).
+        uint64_t pi = find_player_interaction(local_player);
+        if (pi) {
+            if (g_reach_pi != pi || !g_reach_pi_saved_valid) {
+                if (g_reach_pi_saved_valid && g_reach_pi) {
+                    wr_buf(g_reach_pi + PINTERACT_DIST_A, &g_reach_pi_saved_a, sizeof(float));
+                    wr_buf(g_reach_pi + PINTERACT_DIST_B, &g_reach_pi_saved_b, sizeof(float));
+                }
+                g_reach_pi_saved_a = rd<float>(pi + PINTERACT_DIST_A);
+                g_reach_pi_saved_b = rd<float>(pi + PINTERACT_DIST_B);
+                g_reach_pi_saved_valid = true;
+                g_reach_pi = pi;
+            }
+            wr_buf(pi + PINTERACT_DIST_A, &g_reach_meters, sizeof(float));
+            wr_buf(pi + PINTERACT_DIST_B, &g_reach_meters, sizeof(float));
+        }
         reach_patch_tick(); // и радиусы объектов вокруг (вторая проверка)
     } else if (g_reach_saved_valid) {
-        if (g_reach_mgr)
+        if (g_reach_mgr) {
             wr_buf(g_reach_mgr + RAYCAST_RAY_LENGTH, &g_reach_saved, sizeof(float));
+            if (g_reach_rm_aux_valid)
+                wr_buf(g_reach_mgr + RAYCAST_AUX_LENGTH, &g_reach_rm_aux_saved, sizeof(float));
+        }
+        if (g_reach_pi_saved_valid && g_reach_pi) {
+            wr_buf(g_reach_pi + PINTERACT_DIST_A, &g_reach_pi_saved_a, sizeof(float));
+            wr_buf(g_reach_pi + PINTERACT_DIST_B, &g_reach_pi_saved_b, sizeof(float));
+        }
         g_reach_saved_valid = false;
         g_reach_mgr = 0;
+        g_reach_rm_aux_valid = false;
+        g_reach_pi = 0;
+        g_reach_pi_saved_valid = false;
         reach_restore_all();
     }
 }
@@ -3440,6 +3507,8 @@ void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_reach_mgr = 0; g_reach_saved_valid = false;
+    g_reach_rm_aux_valid = false;
+    g_reach_pi = 0; g_reach_pi_saved_valid = false;
     g_reach_patched.clear(); g_reach_patch_cd = 0;
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_frame_publish_fail_streak = 0;
