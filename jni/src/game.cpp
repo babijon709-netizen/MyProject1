@@ -892,10 +892,19 @@ static bool read_transform_hierarchy_layout(uint64_t native_transform, const Tra
     return read_transform_hierarchy_arrays(matrices, indices, transform_index, position, world_rotation);
 }
 
+static bool position_looks_like_world_space(const Vec3& position); // defined below
+
 static bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& position) {
     if (!native_transform) return false;
-    if (g_transform_hierarchy_layout_valid)
-        return read_transform_hierarchy_layout(native_transform, g_transform_hierarchy_layout, position);
+    // The learned layout is only a fast path. It is learned from PLAYER
+    // transforms and dies with a world reload — after a respawn it fails (or
+    // reads garbage) for every entity. Returning its result directly here
+    // was the solo-markers-after-respawn bug: the self-probing fallback
+    // below (which needs no players and no learning) was never reached.
+    if (g_transform_hierarchy_layout_valid &&
+        read_transform_hierarchy_layout(native_transform, g_transform_hierarchy_layout, position) &&
+        vec3_is_finite(position) && position_looks_like_world_space(position))
+        return true;
     // Same probing as read_camera_transform_pose: TransformAccess lives at
     // +0x38/+0x40 on older builds and at +0x18/+0x20 on this one. Markers ran
     // only the first probe, which is why they worked ONLY once a nearby
