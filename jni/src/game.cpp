@@ -961,14 +961,8 @@ static bool evaluate_transform_hierarchy_layout(const std::vector<uint64_t>& nat
     return position_count >= 2 && std::isfinite(extent) && extent >= 0.1 && extent <= 1000000.0;
 }
 
-static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& players, size_t& best_position_count, size_t& candidate_count) {
-    std::vector<uint64_t> native_transforms;
-    std::unordered_set<uint64_t> unique_transforms;
-    for (uint64_t player : players) {
-        uint64_t native_transform = resolve_player_native_transform(player);
-        if (native_transform && unique_transforms.insert(native_transform).second)
-            native_transforms.push_back(native_transform);
-    }
+static bool discover_layout_from_native_transforms(const std::vector<uint64_t>& native_transforms,
+                                                   size_t& best_position_count, size_t& candidate_count) {
     if (native_transforms.size() < 2) return false;
 
     const int64_t index_deltas[] = {-8, 8, 16, 24};
@@ -1018,6 +1012,17 @@ static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& pla
     g_transform_hierarchy_layout = best_layout;
     g_transform_hierarchy_layout_valid = true;
     return true;
+}
+
+static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& players, size_t& best_position_count, size_t& candidate_count) {
+    std::vector<uint64_t> native_transforms;
+    std::unordered_set<uint64_t> unique_transforms;
+    for (uint64_t player : players) {
+        uint64_t native_transform = resolve_player_native_transform(player);
+        if (native_transform && unique_transforms.insert(native_transform).second)
+            native_transforms.push_back(native_transform);
+    }
+    return discover_layout_from_native_transforms(native_transforms, best_position_count, candidate_count);
 }
 
 static bool read_entity_position(uint64_t source, Vec3& position) {
@@ -4713,6 +4718,40 @@ std::vector<EspMarker> esp_get_markers() {
         // result means the registry was not readable (world still loading in
         // after a respawn), so retry in half a second instead.
         g_marker_rescan_countdown = g_marker_entities.empty() ? 30 : 180;
+    }
+
+    // No usable layout (fresh join / respawn, nobody around): learn it from
+    // the ENTITY transforms themselves. The layout discovery only needs a
+    // couple of native transforms scattered across the map — ore nodes are
+    // exactly that. This is what makes markers self-sufficient: previously
+    // the layout could only be learned from other players' skeletons, and
+    // solo after a world reload every position read failed (POS_INVALID).
+    {
+        static int s_solo_learn_cooldown = 0;
+        bool positions_dead = false;
+        if (!g_marker_entities.empty()) {
+            size_t checked = 0, dead = 0;
+            for (MarkerEntity& probe : g_marker_entities) {
+                if (++checked > 6) break;
+                Vec3 test{};
+                if (!marker_world_position(probe.transform, test)) ++dead;
+            }
+            positions_dead = checked > 0 && dead >= checked - (checked > 4 ? 1 : 0);
+        }
+        if (positions_dead && --s_solo_learn_cooldown <= 0) {
+            s_solo_learn_cooldown = 60; // ~1 s between attempts
+            std::vector<uint64_t> seeds;
+            for (const MarkerEntity& e : g_marker_entities) {
+                if (e.transform) seeds.push_back(e.transform);
+                if (seeds.size() >= 8) break;
+            }
+            size_t pos_count = 0, cand_count = 0;
+            if (discover_layout_from_native_transforms(seeds, pos_count, cand_count)) {
+                // Re-read every cached position with the fresh layout.
+                for (MarkerEntity& e : g_marker_entities)
+                    e.position_valid = marker_world_position(e.transform, e.position);
+            }
+        }
     }
 
     const float max_distance = g_marker_max_distance;
