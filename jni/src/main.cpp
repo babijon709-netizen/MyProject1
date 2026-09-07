@@ -1423,7 +1423,15 @@ void PopoverOpenColor(const char* title, ImVec4* cp) {
 }
 
 void PopoverOpen(const char* title, int sid) {
-    if (g_pop.visible) return;
+    // Переоткрытие поверх ЗАКРЫВАЮЩЕГОСЯ окна должно работать: калибровка
+    // зон запускается тапом из окна (оно уходит в closing), рисование меню
+    // замирает на время калибровки, и к её завершению окно всё ещё
+    // "visible+closing". Старый ранний выход здесь молча съедал реоткрытие —
+    // пользователя выкидывало на голую вкладку «Разное».
+    if (g_pop.visible) {
+        if (!g_pop.closing) return;
+        g_pop.visible = false; // прервать закрытие и открыть заново
+    }
     snprintf(g_pop.title, sizeof(g_pop.title), "%s", title);
     g_colP = nullptr; // обычное окно, не палитра
     g_pop.sectionId  = sid;
@@ -3748,16 +3756,33 @@ static void UpdateFarm(float dt) {
         // only once actually inside — no down/up flapping at the boundary
         // (the "stomping in place" bug).
         float pressAt = s_moveDown ? walkUntil : walkUntil + 0.5f;
+        // No-drain walk-in (thin tree, standing a hair short): a smooth
+        // WINDOW instead of the old 0.5 s/1.5 s pulse train — the pulses
+        // read as "the bot is jerking the stick". One continuous gentle
+        // push for 2 s, then a 2 s pause to let the swings land, repeat.
+        bool nudgeIn = phase == 3 && s_sinceDrain > 3.f &&
+                       fmodf(s_sinceDrain - 3.f, 4.f) < 2.f;
         bool wantWalk = (phase == 2) ||
                         (phase == 1 && fabsf(tgt.yaw) < 70.f && tgt.dist > reachDist * 2.f) ||
                         (phase == 3 && tgt.dist > pressAt) ||
-                        // Swinging for a while with zero drain = just out of
-                        // melee reach (thin tree). Nudge forward in short
-                        // pulses (0.5 s press / 1 s check) instead of leaning
-                        // on the stick forever — that endless push was the
-                        // bot grinding face-first into nodes.
-                        (phase == 3 && s_sinceDrain > 3.f && fmodf(s_sinceDrain, 1.5f) < 0.5f);
+                        nudgeIn;
         if (s_evadeTime > 0.f) wantWalk = true; // manoeuvre drives the stick itself
+        // Release hysteresis: phases flicker for a frame or two around their
+        // thresholds (dist/yaw noise), and every flicker used to lift and
+        // re-plant the move finger — the visible "joystick jerking" while
+        // walking to a node. The finger now lifts only after the walk has
+        // been unwanted for a quarter of a second straight; mining taps are
+        // unaffected (finger 2 is independent).
+        static float s_walkOffTime = 0.f;
+        if (wantWalk) {
+            s_walkOffTime = 0.f;
+        } else if (s_moveDown) {
+            s_walkOffTime += dt;
+            if (s_walkOffTime < 0.25f) {
+                wantWalk = true;               // держим палец, гасим дёрганье
+                // но к центру стика — чтобы не толкало вперёд лишний метр
+            }
+        }
         if (wantWalk) {
             // Virtual stick centre and a forward push, slightly steered
             // towards the node so small yaw errors do not need camera swipes.
@@ -3798,6 +3823,12 @@ static void UpdateFarm(float dt) {
                     if (s3 < -1.f) s3 = -1.f;
                     px = cx + r * 0.35f * s3;
                     py = cy - r * 0.75f;
+                }
+                if (s_walkOffTime > 0.f) {
+                    // Hysteresis hold: walk not wanted any more — glide the
+                    // stick back to centre instead of lifting the finger.
+                    px = cx;
+                    py = cy;
                 }
             }
             if (!s_moveDown) {
@@ -4472,6 +4503,21 @@ int main(int argc, char* argv[]) {
     AudioInit();
     if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
         Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
+    // Если полноценный тач не поднялся с первого раза (гонка за /dev/uinput
+    // или grab на старте — обычное дело сразу после запуска игры), чит раньше
+    // навсегда оставался в read-only: автофарм «просто не идёт», пока не
+    // перезапустишь. Теперь фоновый поток раз в 3 секунды пробует поднять
+    // инъекцию заново, пока не получится.
+    static std::atomic<bool> s_touchRetryRun{true};
+    std::thread([]() {
+        while (s_touchRetryRun.load() && main_thread_flag.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            if (Touch_CanInject()) continue;
+            Touch_Close();
+            if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
+                Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
+        }
+    }).detach();
     start_attach_thread();
     LoadAnimeImage();
     LoadTabIcons();
