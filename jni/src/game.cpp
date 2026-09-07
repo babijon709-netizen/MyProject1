@@ -26,6 +26,41 @@ static ssize_t remote_vm_writev(pid_t pid, const struct iovec* local_iov, unsign
 
 using namespace game_offsets;
 
+// ==== ВРЕМЕННЫЙ файловый лог (метки/бочки) =================================
+// /storage/emulated/0/benzhack/marker_log.txt — перезаписывается при старте.
+// Убрать после починки.
+#include <stdarg.h>
+#include <time.h>
+#include <sys/stat.h>
+static FILE* g_mlog_file = nullptr;
+static double mlog_now() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+static void mlog(const char* fmt, ...) {
+    if (!g_mlog_file) {
+        mkdir("/storage/emulated/0/benzhack", 0777);
+        g_mlog_file = fopen("/storage/emulated/0/benzhack/marker_log.txt", "w");
+        if (!g_mlog_file) return;
+        setvbuf(g_mlog_file, nullptr, _IONBF, 0);
+    }
+    fprintf(g_mlog_file, "[%9.2f] ", mlog_now());
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_mlog_file, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_mlog_file);
+}
+static bool mlog_gate(int slot) {
+    static double s_last[16] = {};
+    double now = mlog_now();
+    if (slot < 0 || slot >= 16) return false;
+    if (now - s_last[slot] < 1.0) return false;
+    s_last[slot] = now;
+    return true;
+}
+
 
 static pid_t     g_pid         = -1;
 static uint64_t  g_il2cpp_base = 0;
@@ -3368,21 +3403,27 @@ static bool publish_camera_only_frame(float sw, float sh) {
     // Resolves g_game_controller_class as a side effect — without it the
     // camera lookup below has no class to read statics from.
     resolve_local_player();
-    if (!g_game_controller_class) return false;
+    if (!g_game_controller_class) { if (mlog_gate(4)) mlog("camframe: нет контроллера"); return false; }
     uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
-    if (!gcb_sf) return false;
+    if (!gcb_sf) { if (mlog_gate(5)) mlog("camframe: нет статик-полей"); return false; }
     uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
-    if (!cam_mgr) return false;
+    if (!cam_mgr) { if (mlog_gate(6)) mlog("camframe: cam_mgr=0"); return false; }
     uint64_t managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
-    if (!managed_cam) return false;
+    if (!managed_cam) { if (mlog_gate(7)) mlog("camframe: camera=0"); return false; }
     uint64_t cam_native = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-    if (!cam_native) return false;
+    if (!cam_native) { if (mlog_gate(8)) mlog("camframe: native=0"); return false; }
     if (!(sw >= 100.0F) || !(sh >= 100.0F)) { sw = 1080.0F; sh = 2400.0F; }
     Mat4 solo_proj{}, solo_view{};
     xray_apply(cam_native);
-    if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) return false;
+    if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) {
+        if (mlog_gate(9)) mlog("camframe: матрицы не читаются");
+        return false;
+    }
     Vec3 cam_pos{};
-    if (!camera_position_from_view(solo_view, cam_pos)) return false;
+    if (!camera_position_from_view(solo_view, cam_pos)) {
+        if (mlog_gate(10)) mlog("camframe: позиция не извлеклась");
+        return false;
+    }
     g_frame_vp = mat_mul(solo_proj, solo_view);
     g_frame_vp_valid = true;
     g_frame_sw = sw; g_frame_sh = sh;
@@ -4536,7 +4577,31 @@ static void rebuild_marker_entities() {
             uint64_t component = behaviours[b];
             if (!valid_obj(component)) continue;
             const uint8_t component_class = marker_class_of(rd_ptr(component));
-            if (component_class == MARKER_CLASS_NONE) continue;
+            if (component_class == MARKER_CLASS_NONE) {
+                // ВРЕМЕННО: дамп классов, которые мы игнорируем — среди них
+                // прячется класс бочек. Каждое уникальное имя пишется один раз.
+                static std::unordered_set<uint64_t> s_dumped;
+                uint64_t klass = rd_ptr(component);
+                if (valid_obj(klass) && s_dumped.insert(klass).second && s_dumped.size() <= 128) {
+                    std::string cname = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME));
+                    char oname[48] = {};
+                    managed_component_gameobject_name(component, oname, sizeof(oname));
+                    mlog("skip-class: '%s' go='%s'", cname.c_str(), oname);
+                }
+                continue;
+            }
+            if (component_class == MARKER_CLASS_MINEABLE) {
+                // ВРЕМЕННО: Mineable с типом, который мы не рисуем (Barrel
+                // может сидеть под нераспознанным номером enum).
+                static std::unordered_set<uint64_t> s_dumped_mine;
+                int32_t et = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
+                bool known_et = (et >= 1 && et <= 14) || et == 22 || et == 23 || et == 24;
+                if (!known_et && s_dumped_mine.insert(component).second && s_dumped_mine.size() <= 64) {
+                    char oname[48] = {};
+                    managed_component_gameobject_name(component, oname, sizeof(oname));
+                    mlog("mineable-et: et=%d go='%s'", (int)et, oname);
+                }
+            }
 
             MarkerLook look;
             char pickup_text[40] = {};
@@ -4621,14 +4686,23 @@ std::vector<EspMarker> esp_get_markers() {
         g_marker_rescan_countdown = 0;
         return result;
     }
-    if (g_pid <= 0 || !g_il2cpp_base) return result;
+    if (g_pid <= 0 || !g_il2cpp_base) {
+        if (mlog_gate(0)) mlog("markers: нет процесса");
+        return result;
+    }
     // The box pipeline publishes the frame while players are visible; when it
     // bailed out for ANY reason (empty player list, failed position read,
     // world reload), build a camera-only frame right here. Markers must never
     // depend on other players being around.
     if (!g_frame_vp_valid || !g_frame_local_valid) {
-        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh))
+        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh)) {
+            if (mlog_gate(1)) mlog("markers: SOLO-ПУТЬ УМЕР: vp=%d local=%d ctrl=%llx",
+                                   (int)g_frame_vp_valid, (int)g_frame_local_valid,
+                                   (unsigned long long)g_game_controller_class);
             return result;
+        }
+        if (mlog_gate(2)) mlog("markers: соло-кадр ок, pos=(%.1f %.1f %.1f)",
+                               g_frame_local_pos.x, g_frame_local_pos.y, g_frame_local_pos.z);
     }
 
     if (--g_marker_rescan_countdown <= 0) {
@@ -4637,6 +4711,17 @@ std::vector<EspMarker> esp_get_markers() {
         // result means the registry was not readable (world still loading in
         // after a respawn), so retry in half a second instead.
         g_marker_rescan_countdown = g_marker_entities.empty() ? 30 : 180;
+        if (mlog_gate(3)) {
+            int n_ore = 0, n_ani = 0, n_loot = 0, n_pick = 0;
+            for (const MarkerEntity& e : g_marker_entities) {
+                if (e.kind == ESP_MARKER_ORE) ++n_ore;
+                else if (e.kind == ESP_MARKER_ANIMAL) ++n_ani;
+                else if (e.kind == ESP_MARKER_LOOT) ++n_loot;
+                else if (e.kind == ESP_MARKER_PICKUP) ++n_pick;
+            }
+            mlog("markers: скан=%d (ore=%d animal=%d loot=%d pickup=%d)",
+                 (int)g_marker_entities.size(), n_ore, n_ani, n_loot, n_pick);
+        }
     }
 
     const float max_distance = g_marker_max_distance;
@@ -5082,23 +5167,10 @@ bool esp_farm_get_target(FarmTarget& out) {
         }
     }
     if (spot_ok) {
-        // The X decal sits ON the node surface, and its child transform
-        // floats a little off it (billboard offset). Aim at the X but pull
-        // the point a hand's width INTO the node (toward its axis, keeping
-        // the X's bearing and height): the point ends up just under the
-        // surface right at the X, so the crosshair ray clips the node there
-        // from ANY angle — head-on, sideways, doesn't matter. No ray tests,
-        // no special cases; visually the marker stays on the X.
-        float hx = aim.x - best->pos.x, hz = aim.z - best->pos.z;
-        float hl = sqrtf(hx * hx + hz * hz);
-        if (std::isfinite(hl) && hl > 0.001F) {
-            float want = hl - 0.30F;                    // 30 cm inward
-            float floor_off = (best->kind == 0) ? 0.08F : 0.30F; // never past the axis
-            if (want < floor_off) want = (hl < floor_off) ? hl : floor_off;
-            float s = want / hl;
-            aim.x = best->pos.x + hx * s;
-            aim.z = best->pos.z + hz * s;
-        }
+        // Aim EXACTLY at the X child. Earlier builds pulled the point inward
+        // "to help side swings", but that put the marker (and the crosshair)
+        // inside the trunk next to the decal — the game then registered body
+        // hits instead of X hits. The decal is what the hit test wants.
     }
     if (!spot_ok) {
         aim = best->pos;
