@@ -3154,6 +3154,10 @@ static void UpdateAim(float dt) {
     static bool  s_haveLast = false;
     static float s_lastDx = 0.f, s_lastDy = 0.f; // finger delta applied last frame
     static float s_gainYaw = 0.f, s_gainPitch = 0.f; // deg per px, learned
+    // Ввод, который камера ещё не отработала (низкий FPS игры): накопленный
+    // сдвиг пальца с момента последнего НАБЛЮДАЕМОГО поворота камеры.
+    static float s_pendDx = 0.f, s_pendDy = 0.f;
+    static float s_pendTime = 0.f;
     static unsigned long long s_lastId = 0;        // sticky target
     static int   s_lostFrames = 0;
     static int   s_holdFrames = 0;
@@ -3321,11 +3325,16 @@ static void UpdateAim(float dt) {
     // pollute the estimate.
     float camYaw = 0.f, camPitch = 0.f;
     const bool haveCam = esp_camera_angles(camYaw, camPitch);
-    if (haveCam && s_haveLast && s_fingerDown) {
-        float camYawDelta = camYaw - s_lastCamYaw;
+    float camYawDelta = 0.f, camPitchDelta = 0.f;
+    bool camMoved = false;
+    if (haveCam && s_haveLast) {
+        camYawDelta = camYaw - s_lastCamYaw;
         while (camYawDelta > 180.f) camYawDelta -= 360.f;
         while (camYawDelta < -180.f) camYawDelta += 360.f;
-        float camPitchDelta = camPitch - s_lastCamPitch;
+        camPitchDelta = camPitch - s_lastCamPitch;
+        camMoved = fabsf(camYawDelta) > 0.02f || fabsf(camPitchDelta) > 0.02f;
+    }
+    if (haveCam && s_haveLast && s_fingerDown && camMoved) {
         // Signed gains: a negative value simply means the game inverts that
         // axis (e.g. "invert Y" enabled) and the controller follows suit.
         // Adopt the measurement outright when it disagrees strongly with the
@@ -3337,15 +3346,33 @@ static void UpdateAim(float dt) {
                 m > fabsf(gain) * 1.3f || m < fabsf(gain) * 0.7f) gain = measured;
             else gain = gain * 0.7f + measured * 0.3f;
         };
-        // Finger right (dx > 0) turns right => yaw increases.
-        // Moves are exact device-grid steps now, so even 1-2 px moves give a
-        // clean measurement; keep a floor so noise never dominates.
-        if (fabsf(s_lastDx) >= 1.f) learn(s_gainYaw, camYawDelta / s_lastDx);
-        // Finger down (dy > 0) looks down => pitch decreases.
-        if (fabsf(s_lastDy) >= 1.f) learn(s_gainPitch, -camPitchDelta / s_lastDy);
+        // Учимся на НАКОПЛЕННОМ сдвиге пальца с прошлого поворота камеры:
+        // при низком FPS игра проглатывает несколько наших движений и
+        // поворачивается на их сумму — деление на один последний сдвиг
+        // завышало гейн и раскачивало прицел.
+        if (fabsf(s_pendDx) >= 1.f) learn(s_gainYaw, camYawDelta / s_pendDx);
+        if (fabsf(s_pendDy) >= 1.f) learn(s_gainPitch, -camPitchDelta / s_pendDy);
+        s_pendDx = s_pendDy = 0.f;
+        s_pendTime = 0.f;
     }
     if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
-    else s_haveLast = false;
+    else { s_haveLast = false; s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f; }
+
+    // Такт с подтверждением: если наш прошлый сдвиг ещё не отразился в
+    // камере (игра не отрендерила кадр — низкий FPS), НЕ шлём новую
+    // коррекцию: ошибка на экране устаревшая, и вторая поправка по ней —
+    // это двойная коррекция, тот самый перелёт-раскачка. Держим палец на
+    // месте и ждём реакции камеры (таймаут на случай проглоченного ввода).
+    if (s_fingerDown && !camMoved &&
+        (fabsf(s_pendDx) >= 1.f || fabsf(s_pendDy) >= 1.f)) {
+        s_pendTime += dt;
+        if (s_pendTime < 0.25f) {
+            Touch_Move(s_fx, s_fy);   // держим тач живым, ничего не двигаем
+            return;
+        }
+        s_pendDx = s_pendDy = 0.f;    // ввод потерялся — продолжаем
+        s_pendTime = 0.f;
+    }
 
     // ---- input quantum ----
     // The finger can only rest on the digitizer grid, so the camera can only
@@ -3374,6 +3401,7 @@ static void UpdateAim(float dt) {
     if (gainKnownPitch && deadPitch < qPitch * 0.55f) deadPitch = qPitch * 0.55f;
     if (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch) {
         s_lastDx = s_lastDy = 0.f;
+        s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
         return;
     }
@@ -3386,6 +3414,7 @@ static void UpdateAim(float dt) {
         Touch_Down(s_fx, s_fy);
         s_fingerDown = true;
         s_lastDx = s_lastDy = 0.f;
+        s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         s_holdFrames = 0;
         return; // let the game register the touch before moving it
     }
@@ -3437,6 +3466,7 @@ static void UpdateAim(float dt) {
     dx = nx - s_fx; dy = ny - s_fy;
     if (dx == 0.f && dy == 0.f) {
         s_lastDx = s_lastDy = 0.f;
+        s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         Touch_Move(s_fx, s_fy);
         return;
     }
@@ -3449,11 +3479,13 @@ static void UpdateAim(float dt) {
         s_fingerDown = false;
         s_fx = snapGrid(sw * 0.74f); s_fy = snapGrid(sh * 0.50f);
         s_lastDx = s_lastDy = 0.f;
+        s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         s_haveLast = false;
         return;
     }
     s_fx = nx; s_fy = ny;
     s_lastDx = dx; s_lastDy = dy;
+    s_pendDx += dx; s_pendDy += dy;   // ждёт отработки камерой (ack-такт)
     Touch_Move(s_fx, s_fy);
 }
 
