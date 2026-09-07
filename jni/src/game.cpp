@@ -151,6 +151,21 @@ static void xray_apply(uint64_t native_cam) {
     }
 }
 
+// Вторая дистанционная проверка: у каждого интерактивного объекта есть свой
+// радиус (InteractionComponent.m_InteractRadius, ~3 м). Луч мы уже удлинили,
+// но объект дальше своего радиуса взаимодействовать не даёт — поэтому радиусы
+// ближайших объектов патчатся, оригиналы запоминаются и восстанавливаются.
+static std::unordered_map<uint64_t, float> g_reach_patched; // comp -> исходный радиус
+static int g_reach_patch_cd = 0;
+static void reach_patch_tick();   // определена ниже (нужен скан словаря сущностей)
+static void reach_restore_all() {
+    for (const auto& entry : g_reach_patched)
+        wr_buf(entry.first + INTERACTION_RADIUS, &entry.second, sizeof(float));
+    g_reach_patched.clear();
+    g_reach_patch_cd = 0;
+}
+
+
 // ==== Длинная рука: дальность луча взаимодействия ==========================
 // RaycastManager.m_RayLength — длина луча, которым игра ищет объект под
 // прицелом (сундук, дверь, предмет). Пишем каждый кадр, пока включено; при
@@ -183,11 +198,13 @@ static void reach_apply(uint64_t local_player) {
             g_reach_mgr = mgr;
         }
         wr_buf(mgr + RAYCAST_RAY_LENGTH, &g_reach_meters, sizeof(float));
+        reach_patch_tick(); // и радиусы объектов вокруг (вторая проверка)
     } else if (g_reach_saved_valid) {
         if (g_reach_mgr)
             wr_buf(g_reach_mgr + RAYCAST_RAY_LENGTH, &g_reach_saved, sizeof(float));
         g_reach_saved_valid = false;
         g_reach_mgr = 0;
+        reach_restore_all();
     }
 }
 
@@ -3423,6 +3440,7 @@ void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_reach_mgr = 0; g_reach_saved_valid = false;
+    g_reach_patched.clear(); g_reach_patch_cd = 0;
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_frame_publish_fail_streak = 0;
     g_aim_ref_valid = false;
@@ -4588,6 +4606,69 @@ static uint64_t resolve_network_identity_class() {
     if (name != "NetworkIdentity") return 0;
     g_network_identity_class = klass;
     return klass;
+}
+
+// «Длинная рука», часть 2: обход по словарю сетевых объектов, у каждого
+// интерактивного (pmT-наследник в behaviours) патчится m_InteractRadius всех
+// его InteractionComponents. Компонент опознаётся по обратной ссылке
+// interactableObject == behaviour — имена классов обфусцированы и меняются
+// каждый билд, а сигнатура ссылки стабильна. Оригиналы копятся в
+// g_reach_patched и восстанавливаются при выключении.
+static void reach_patch_tick() {
+    if (--g_reach_patch_cd > 0) return;
+    g_reach_patch_cd = 90; // ~1.5 c: объекты статичны, чаще незачем
+    if (g_reach_patched.size() > 3000) return; // страховка от разрастания
+
+    uint64_t dictionary = resolve_network_client_spawned();
+    if (!dictionary) return;
+    uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
+    int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
+    if (!valid_obj(entries) || count <= 0) return;
+    if (count > 4096) count = 4096;
+    std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
+    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
+
+    uint64_t identity_class = resolve_network_identity_class();
+    uint64_t behaviours[32];
+    uint64_t comps[16];
+    for (int32_t i = 0; i < count; ++i) {
+        uint64_t identity = 0;
+        memcpy(&identity, buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE, sizeof(identity));
+        if (!valid_obj(identity)) continue;
+        if (identity_class && rd_ptr(identity) != identity_class) continue;
+        uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
+        if (!valid_obj(array)) continue;
+        int32_t behaviour_count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
+        if (behaviour_count <= 0) continue;
+        if (behaviour_count > 32) behaviour_count = 32;
+        if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)behaviour_count * sizeof(uint64_t)))
+            continue;
+        for (int32_t b = 0; b < behaviour_count; ++b) {
+            uint64_t behaviour = behaviours[b];
+            if (!valid_obj(behaviour)) continue;
+            uint64_t comp_array = rd_ptr(behaviour + INTERACTABLE_COMPONENTS);
+            if (!valid_obj(comp_array)) continue;
+            int32_t comp_count = rd<int32_t>(comp_array + IL2CPP_ARRAY_LENGTH);
+            if (comp_count <= 0 || comp_count > 16) continue;
+            if (!rd_buf(comp_array + IL2CPP_ARRAY_FIRST_ELEMENT, comps, (size_t)comp_count * sizeof(uint64_t)))
+                continue;
+            for (int32_t c = 0; c < comp_count; ++c) {
+                uint64_t comp = comps[c];
+                if (!valid_obj(comp)) continue;
+                // Сигнатура: компонент указывает обратно на свой объект.
+                if (rd_ptr(comp + INTERACTION_BACKREF) != behaviour) continue;
+                if (g_reach_patched.count(comp)) {
+                    wr_buf(comp + INTERACTION_RADIUS, &g_reach_meters, sizeof(float));
+                    continue;
+                }
+                float radius = rd<float>(comp + INTERACTION_RADIUS);
+                // Радиус взаимодействия — небольшое положительное число.
+                if (!std::isfinite(radius) || radius <= 0.05F || radius > 20.0F) continue;
+                g_reach_patched[comp] = radius;
+                wr_buf(comp + INTERACTION_RADIUS, &g_reach_meters, sizeof(float));
+            }
+        }
+    }
 }
 
 static bool marker_world_position(uint64_t transform, Vec3& out) {

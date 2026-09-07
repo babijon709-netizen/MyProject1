@@ -258,6 +258,16 @@ inline constexpr std::uint64_t NETID_BEHAVIOURS = 0x80; // NetworkBehaviour[]
 inline constexpr std::uint64_t PLAYER_RAYCAST_MANAGER   = 0x88; // Oxide.RaycastManager raycastManager
 inline constexpr std::uint64_t RAYCAST_RAY_LENGTH       = 0x38; // float m_RayLength
 
+// pmT (obfuscated interactable-object base, NetworkBehaviour) and its
+// InteractionComponents (StorageContainer, Door, FuelTank, ...). Each
+// component carries its own interact radius (~3 m) — the second check that
+// limits interaction distance after the raycast. The back-reference
+// component->interactableObject == behaviour is the identification signature
+// (class names are obfuscated and change every build).
+inline constexpr std::uint64_t INTERACTABLE_COMPONENTS  = 0x98; // pmT: InteractionComponent[] components
+inline constexpr std::uint64_t INTERACTION_BACKREF      = 0x30; // InteractionComponent: pmT interactableObject
+inline constexpr std::uint64_t INTERACTION_RADIUS       = 0x40; // InteractionComponent: float m_InteractRadius
+
 // Oxide.MineableObject — the shared base of ore nodes, trees and animals.
 inline constexpr std::uint64_t MINEABLE_LOOT           = 0xA0; // List<Oxide.LootItem>
 inline constexpr std::uint64_t MINEABLE_FINISH_BONUS   = 0xA8;
