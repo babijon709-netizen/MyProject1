@@ -5371,6 +5371,9 @@ bool esp_farm_get_target(FarmTarget& out) {
 
     Vec3 aim{};
     bool spot_ok = false;
+    bool spot_facing = true;
+    Vec3 stand{};
+    bool stand_ok = false;
     if (s_spot_transform) {
         Vec3 spot{};
         if (marker_world_position(s_spot_transform, spot) && vec3_is_finite(spot)) {
@@ -5392,12 +5395,26 @@ bool esp_farm_get_target(FarmTarget& out) {
                 float pncz = best->pos.z - g_frame_local_pos.z;
                 float pnl = sqrtf(pncx * pncx + pncz * pncz);
                 float psl = sqrtf(sx * sx + sz * sz);
-                bool facing = true;
+                spot_facing = true;
                 if (pnl > 0.05F && psl > 0.05F) {
                     float c = ((-pncx) * sx + (-pncz) * sz) / (pnl * psl);
-                    facing = c > 0.5F; // cos(60°)
+                    // Гистерезис: «не лицом» с 65°, обратно «лицом» с 55° —
+                    // на границе бот не дёргается ходить/бить попеременно.
+                    static bool s_face_state = true;
+                    if (s_face_state) { if (c < 0.42F) s_face_state = false; } // >65°
+                    else              { if (c > 0.57F) s_face_state = true;  } // <55°
+                    spot_facing = s_face_state;
                 }
-                if (facing) { aim = spot; spot_ok = true; }
+                aim = spot;
+                spot_ok = true;
+                // Точка стоянки перед крестом: метр наружу от узла по
+                // нормали креста. Ноги бота идут туда, когда крест не лицом.
+                if (psl > 0.05F) {
+                    stand.x = spot.x + (sx / psl) * 1.0F;
+                    stand.z = spot.z + (sz / psl) * 1.0F;
+                    stand.y = spot.y;
+                    stand_ok = true;
+                }
             }
             else if (d2 >= 6.0F * 6.0F) s_spot_transform = 0;
             // d2 <= 0.35^2: крест в даный кадр «прижался» к пивоту (анимация
@@ -5483,6 +5500,20 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.pitch = pitch;
     out.dist = best_dist;
     out.has_spot = spot_ok;
+    out.spot_facing = !spot_ok || spot_facing;
+    if (spot_ok && stand_ok) {
+        float sdx = stand.x - g_frame_local_pos.x;
+        float sdz = stand.z - g_frame_local_pos.z;
+        float sd = sqrtf(sdx * sdx + sdz * sdz);
+        if (std::isfinite(sd)) {
+            out.stand_dist = sd;
+            Vec3 dd = {stand.x - origin.x, 0.0F, stand.z - origin.z};
+            float sfx = dd.x * fwd.x + dd.z * fwd.z;
+            float srx = dd.x * right.x + dd.z * right.z;
+            float syaw = atan2f(srx, sfx) * 57.29577951F;
+            if (std::isfinite(syaw)) { out.stand_yaw = syaw; out.stand_ok = true; }
+        }
+    }
     {
         // Horizontal distance to the aim point itself: the melee-reach check
         // must measure what the pick actually has to hit — a spot on the far

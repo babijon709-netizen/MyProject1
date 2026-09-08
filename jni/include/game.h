@@ -103,6 +103,10 @@ struct FarmTarget {
     float fraction = -1.f;          // resource remaining 0..1, -1 unknown
     bool  has_spot = false;         // true when aiming at the glowing weak spot
     float aim_dist = 0.f;           // horizontal metres to the aim point itself
+    bool  spot_facing = true;       // крест повёрнут к игроку (можно бить)
+    bool  stand_ok = false;         // есть точка стоянки перед крестом
+    float stand_yaw = 0.f;          // куда идти к стоянке (градусы)
+    float stand_dist = 0.f;         // метры до стоянки
     // Screen-space position of the aim point (for the on-screen target mark).
     bool  on_screen = false;
     float sx = 0.f, sy = 0.f;

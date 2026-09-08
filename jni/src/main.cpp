@@ -3726,12 +3726,27 @@ static void UpdateFarm(float dt) {
     bool inReach  = tgt.dist <= reachDist && !spotFar;
     bool aimed    = fabsf(tgt.yaw) <= aimedYaw;
 
-    int phase = inReach ? 3 : (aimed ? 2 : 1);
+    // Крест не «лоб в лоб» или не достаём: цель ног — точка СТОЯНКИ перед
+    // крестом (метр наружу по его нормали, отдаёт game.cpp). Идём обычной
+    // ходьбой с поворотом камеры на стоянку — как человек обходит дерево:
+    // ногами по дуге, а не слепым стрейфом. Пришли (<0.7 м) — цель снова
+    // крест, фаза добычи.
+    bool goStand = tgt.has_spot && tgt.stand_ok &&
+                   (!tgt.spot_facing || spotFar) &&
+                   tgt.stand_dist > 0.7f;
+    float goalYaw  = goStand ? tgt.stand_yaw  : tgt.yaw;
+    float goalDist = goStand ? tgt.stand_dist : tgt.dist;
+
+    int phase;
+    if (goStand)      phase = (fabsf(goalYaw) <= 14.f) ? 2 : 1;
+    else if (inReach) phase = 3;
+    else              phase = (aimed ? 2 : 1);
     g_farmPhase = phase;
 
     // ---- finger 1: camera swipe (yaw always; pitch only while mining) ----
     {
-        float wantYawPx = tgt.yaw / gain;
+        float steerYaw = (phase == 3) ? tgt.yaw : goalYaw;
+        float wantYawPx = steerYaw / gain;
         // Pitch: while mining, pull the crosshair exactly onto the node/spot.
         // While walking, only fix a BADLY tilted camera (left looking at the
         // ground after mining ore) — a generous dead zone, or the two axes
@@ -3749,7 +3764,7 @@ static void UpdateFarm(float dt) {
         float stopDeg  = (phase == 3) ? 1.5f : 4.f;
         float pitchErr = (phase == 3) ? fabsf(tgt.pitch)
                        : fmaxf(fabsf(tgt.pitch) - pitchDead, 0.f);
-        float errDeg = fmaxf(fabsf(tgt.yaw), pitchErr);
+        float errDeg = fmaxf(fabsf(steerYaw), pitchErr);
         bool needTurn = s_lookDown ? (errDeg > stopDeg) : (errDeg > startDeg);
 
         if (needTurn) {
@@ -3796,15 +3811,15 @@ static void UpdateFarm(float dt) {
         // only once actually inside — no down/up flapping at the boundary
         // (the "stomping in place" bug).
         float pressAt = s_moveDown ? walkUntil : walkUntil + 0.5f;
+        float standStop = s_moveDown ? 0.5f : 0.7f; // гистерезис прихода на стоянку
         // Никаких стрейфов вокруг узла: крест, повёрнутый боком/назад,
         // игра больше не отдаёт как цель (фильтр в game.cpp) — бот просто
         // бьёт тело, ХП капает, декаль перепрыгивает и рано или поздно
         // оказывается лицом. Тогда прицел сам переключается на неё.
-        bool nudgeIn = false;
         bool wantWalk = (phase == 2) ||
-                        (phase == 1 && fabsf(tgt.yaw) < 70.f && tgt.dist > reachDist * 2.f) ||
-                        (phase == 3 && tgt.dist > pressAt) ||
-                        nudgeIn;
+                        (phase == 1 && fabsf(goalYaw) < 70.f && goalDist > reachDist * 2.f) ||
+                        (goStand && goalDist > standStop) ||
+                        (phase == 3 && tgt.dist > pressAt);
         if (s_evadeTime > 0.f) wantWalk = true; // manoeuvre drives the stick itself
         // Release hysteresis: phases flicker for a frame or two around their
         // thresholds (dist/yaw noise), and every flicker used to lift and
@@ -3847,7 +3862,7 @@ static void UpdateFarm(float dt) {
                 // Dead zone: a couple of degrees of yaw jitter must not steer
                 // the stick at all — the sign of a near-zero error flips every
                 // frame, and steering off it was the left-right stick flapping.
-                float yawSteer = tgt.yaw;
+                float yawSteer = (phase == 3 && !goStand) ? tgt.yaw : goalYaw;
                 if (fabsf(yawSteer) < 4.f) yawSteer = 0.f;
                 float steer = yawSteer / 70.f;
                 if (steer >  0.6f) steer =  0.6f;
@@ -3899,6 +3914,7 @@ static void UpdateFarm(float dt) {
             bool aimSettled = tgt.has_spot
                 ? (fabsf(tgt.yaw) <= 3.5f && fabsf(tgt.pitch) <= 5.f)
                 : (fabsf(tgt.yaw) <= 8.f);
+            if (goStand) aimSettled = false; // идём на стоянку — в воздух не машем
             // Tap rhythm: ~85 ms down, ~230 ms up — a believable fast tapper
             // that also matches melee swing cadence (extra taps are ignored
             // by the game, they just queue the next swing).
@@ -3934,8 +3950,11 @@ static void UpdateFarm(float dt) {
         // No progress towards the node -> ran into an obstacle. First try to
         // walk around it (back off + sidestep, alternating sides); only when
         // the manoeuvres keep failing does the node get blacklisted.
-        if (tgt.dist < s_lastDist - 0.25f) {
-            s_lastDist = tgt.dist;
+        // Прогресс меряем к ТЕКУЩЕЙ цели ног: при заходе на стоянку перед
+        // крестом дистанция до узла почти не меняется — по ней watchdog
+        // ложно срабатывал и утаскивал бота в evade-танец.
+        if (goalDist < s_lastDist - 0.25f) {
+            s_lastDist = goalDist;
             s_stuckTime = 0.f;
         } else if (s_evadeTime <= 0.f) {
             s_stuckTime += dt;
