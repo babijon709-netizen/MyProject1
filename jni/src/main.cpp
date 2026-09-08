@@ -3756,8 +3756,8 @@ static void UpdateFarm(float dt) {
     // While mining the move finger keeps nudging forward until walkUntil.
     const bool  isTree    = (tgt.kind == 0);
     const float reachDist = isTree ? 2.6f : 2.4f; // body: close enough to swing
-    const float meleeX    = isTree ? 1.45f : 1.55f; // must actually REACH the X
-    const float meleeHold = isTree ? 1.70f : 1.80f; // hysteresis while mining
+    const float meleeX    = isTree ? 1.20f : 1.55f; // thin trunk: 1.45 never reached the X
+    const float meleeHold = isTree ? 1.45f : 1.80f; // hysteresis while mining
     const float aimedYaw  = tgt.has_spot
         ? ((g_farmPhase == 3) ? 3.f : 8.f)
         : ((g_farmPhase == 3) ? 8.f : 14.f);

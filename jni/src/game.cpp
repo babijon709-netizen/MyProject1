@@ -5211,7 +5211,7 @@ static bool farm_spot_plausible(int kind, const Vec3& node_pos, const Vec3& p, f
         // X is on the bark, never on the trunk axis. The old |sy|>0.25
         // alternative accepted the mesh origin after a hit-sway — that is
         // "the mark is there, we still chop the trunk".
-        return horiz2 > 0.10F * 0.10F && horiz2 < 1.6F * 1.6F;
+        return horiz2 > 0.15F * 0.15F && horiz2 < 1.6F * 1.6F;
     }
     if (d2 <= 0.08F * 0.08F || d2 >= 3.5F * 3.5F) return false;
     return sy > -1.6F && sy < 1.8F;
@@ -5376,6 +5376,8 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         float best_err = 1e9F;
         for (const SpotCand& cand : live) {
             if (!on_bark(cand.pos)) continue;
+            float sx = cand.pos.x - node_pos.x, sz = cand.pos.z - node_pos.z;
+            if (sx * sx + sz * sz < 0.18F * 0.18F) continue;
             float err = farm_spot_chest_err(node_pos, cand.pos);
             if (err < best_err) { best_err = err; isolate = cand.node; }
         }
