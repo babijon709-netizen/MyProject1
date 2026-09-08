@@ -5166,18 +5166,24 @@ void esp_farm_blacklist(unsigned long long id, float seconds) {
     if (g_farm_rescan > 15) g_farm_rescan = 15;
 }
 
-// Kind-aware "is this child the glowing X". Tree pivots sit at the BASE, so
-// the mark is above them and away from the trunk. Ore pivots sit near the
-// TOP of a small boulder, so the mark is often BELOW the pivot and closer
-// than 35 cm — the tree filter was rejecting every ore X (no green mark,
-// swings at the body).
+// Kind-aware "is this child the glowing X". Both trees and ore park a dormant
+// template on the node pivot; the live mark sits on the surface, often closer
+// than 35 cm and not strictly above the pivot (tree pivot is mid-trunk, ore
+// pivot is the top of the boulder). Reject only the exact pivot.
 static bool farm_spot_plausible(int kind, const Vec3& node_pos, const Vec3& p, float* d2_out = nullptr) {
     float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
     float d2 = sx * sx + sy * sy + sz * sz;
     if (d2_out) *d2_out = d2;
+    float horiz2 = sx * sx + sz * sz;
     if (kind == 0) {
-        if (d2 <= 0.35F * 0.35F || d2 >= 6.0F * 6.0F) return false;
-        return sy > 0.2F && sy < 2.8F;
+        // Skip only the dormant template parked ON the pivot. A thin trunk's
+        // glowing X sits 15–30 cm off-centre (pivot is mid-mesh, not the
+        // soil), so the old 35 cm / sy>0.2 floor treated every such mark as
+        // the template — no green overlay, swings at the body. Same bug ore
+        // had with a top-mounted pivot.
+        if (d2 <= 0.10F * 0.10F || d2 >= 6.0F * 6.0F) return false;
+        if (sy < -1.2F || sy > 3.5F) return false;
+        return horiz2 > 0.08F * 0.08F || fabsf(sy) > 0.25F;
     }
     if (d2 <= 0.08F * 0.08F || d2 >= 3.5F * 3.5F) return false;
     return sy > -1.6F && sy < 1.8F;
