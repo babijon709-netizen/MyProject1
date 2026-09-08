@@ -3545,6 +3545,8 @@ static void UpdateFarm(float dt) {
     static float s_evadeDir = 1.f;    // +1 right, -1 left
     static int   s_evadeCount = 0;    // manoeuvres tried on this node
     static float s_settle = 0.f;      // pause between targets (fingers up)
+    static float s_orbitTimer = 0.f;  // >0: обход вокруг узла к кресту
+    static float s_orbitDir   = 1.f;
     static float s_stickPx = 0.f, s_stickPy = 0.f; // smoothed stick position
 
     auto releaseAll = [&]() {
@@ -3803,16 +3805,18 @@ static void UpdateFarm(float dt) {
         // СТРЕЙФ вокруг узла в сторону креста (spot_side), пока крест не
         // окажется лицом. Идём короткими шагами по 0.4 с с паузой 0.6 с
         // (камера доворачивается, крест «переезжает» на нашу сторону).
-        static float s_orbitTimer = 0.f;   // >0: шаг обхода идёт
-        static float s_orbitCd    = 0.f;
-        static float s_orbitDir   = 1.f;
         if (s_orbitTimer > 0.f) s_orbitTimer -= dt;
-        if (s_orbitCd > 0.f)    s_orbitCd    -= dt;
-        if (phase == 3 && tgt.has_spot && tgt.spot_behind &&
-            s_orbitTimer <= 0.f && s_orbitCd <= 0.f) {
-            s_orbitTimer = 0.4f;
-            s_orbitCd    = 1.0f;
-            s_orbitDir   = (tgt.spot_side >= 0) ? 1.f : -1.f;
+        // Обход НЕПРЕРЫВНЫЙ, пока крест не встанет «лоб в лоб»: старт при
+        // угле > 55° (spot_behind), стоп при < 30° — гистерезис, чтобы у
+        // границы не дёргаться. Пульсы «шаг-пауза» сюда не годились: за 0.4 с
+        // бот проходил пару градусов дуги и вечно топтался.
+        if (phase == 3 && tgt.has_spot) {
+            if (tgt.spot_behind) {
+                s_orbitTimer = 0.15f;              // продлеваем, пока условие живо
+                s_orbitDir   = (tgt.spot_side >= 0) ? 1.f : -1.f;
+            } else if (tgt.spot_face_deg < 30.f) {
+                s_orbitTimer = 0.f;                // встали лицом — стоп
+            }
         }
         bool nudgeIn = phase == 3 && s_orbitTimer > 0.f;
         bool wantWalk = (phase == 2) ||
@@ -3919,6 +3923,7 @@ static void UpdateFarm(float dt) {
             bool aimSettled = tgt.has_spot
                 ? (fabsf(tgt.yaw) <= 3.5f && fabsf(tgt.pitch) <= 5.f)
                 : (fabsf(tgt.yaw) <= 8.f);
+            if (s_orbitTimer > 0.f) aimSettled = false; // обходим — не машем
             // Tap rhythm: ~85 ms down, ~230 ms up — a believable fast tapper
             // that also matches melee swing cadence (extra taps are ignored
             // by the game, they just queue the next swing).

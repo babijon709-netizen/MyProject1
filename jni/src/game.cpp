@@ -160,14 +160,19 @@ static void xray_apply(uint64_t native_cam) {
 static std::string read_remote_string(uint64_t address); // определена ниже
 static bool     g_day_enabled = false;
 static uint64_t g_day_tod = 0;          // подтверждённый инстанс TimeOfDay
+static uint64_t g_day_gl_sf = 0;        // статики драйвера времени (GL)
 static int      g_day_retry = 0;
 
 void esp_set_always_day(bool enabled) { g_day_enabled = enabled; }
 
 static void always_day_tick() {
     if (!g_day_enabled) {
-        // Выключили: ничего восстанавливать не нужно — часы идут сами, а
-        // Cycle.Hour мы больше не перезаписываем.
+        // Выключили: вернуть игре ход времени (снять статик-оверрайд GL).
+        if (g_day_gl_sf) {
+            uint16_t run = 0x0000;
+            wr_buf(g_day_gl_sf + 0x10, &run, sizeof(run));
+            g_day_gl_sf = 0;
+        }
         g_day_tod = 0;
         return;
     }
@@ -221,13 +226,25 @@ static void always_day_tick() {
         if (s_scan_rva >= kScanEnd) s_scan_rva = 0xD7A0000;
         if (!g_day_tod) return;
     }
-    // Полдень: пишем Cycle.Hour = 12 каждый кадр — TOD_Sky пересчитывает
-    // солнце/небо из этого значения в своём Update.
+    // Полдень: пишем Cycle.Hour = 12 + глушим игровой драйвер времени.
+    // Драйвер (GL.FixedUpdate) сам писал Hour 50 раз/с — наша запись и его
+    // чередовались, отсюда миллисекундные мерцания старого времени. Статики
+    // GL (klass @ RVA 0xD7F0B58): halfword +0x10, низкий байт = «оверрайд
+    // включён», высокий = «время идёт». 0x0001 = стоп-время.
     {
         uint64_t cyc = rd_ptr(g_day_tod + 0x40);
         if (cyc >= 0x10000) {
             float noon = 12.0F;
             wr_buf(cyc + 0x10, &noon, sizeof(float));
+            uint64_t gl_klass = rd_ptr(g_il2cpp_base + 0xD7F0B58);
+            if (gl_klass >= 0x10000) {
+                uint64_t gl_sf = rd_ptr(gl_klass + 0xB8);
+                if (gl_sf >= 0x10000) {
+                    uint16_t halt = 0x0001;
+                    wr_buf(gl_sf + 0x10, &halt, sizeof(halt));
+                    g_day_gl_sf = gl_sf; // для восстановления при выключении
+                }
+            }
         } else {
             g_day_tod = 0; // объект умер (смена сцены) — переискать
         }
@@ -3522,7 +3539,7 @@ static void reset_world_caches() {
 void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
-    g_day_tod = 0; g_day_retry = 0;
+    g_day_tod = 0; g_day_retry = 0; g_day_gl_sf = 0;
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_frame_publish_fail_streak = 0;
     g_aim_ref_valid = false;
@@ -5365,6 +5382,10 @@ bool esp_farm_get_target(FarmTarget& out) {
             // tree" bug. Such a spot is ignored until it moves.
             if (d2 < 6.0F * 6.0F && d2 > 0.35F * 0.35F) { aim = spot; spot_ok = true; }
             else if (d2 >= 6.0F * 6.0F) s_spot_transform = 0;
+            // d2 <= 0.35^2: крест в даный кадр «прижался» к пивоту (анимация
+            // прыжка/переспавн декали). НЕ сбрасываем транс форм — на
+            // следующем кадре он снова отскочит; сбрасывание здесь и было
+            // «крестики пропадают, бот бьёт в ствол».
         }
     }
     // Дистанция до сырой точки прицела: запоминается ДО подтяжки к
@@ -5463,10 +5484,25 @@ bool esp_farm_get_target(FarmTarget& out) {
         // стороны от линии «глаз -> узел» он висит. Контроллер стрейфит в
         // эту сторону, пока крест не окажется лицом.
         if (spot_ok) {
-            out.spot_behind = (ad - best_dist) > 0.35F;
+            // Угол «крест-узел-игрок» в горизонтали: 0° = крест смотрит
+            // ровно на нас (лоб в лоб), 180° = на дальней стороне. Обход
+            // ведём, пока угол не упадёт ниже порога — а не только когда
+            // крест «за узлом» по дистанции (боковые кресты, из-за которых
+            // «не подходит к крестику», старая проверка не ловила).
             float ncx = best->pos.x - g_frame_local_pos.x;
             float ncz = best->pos.z - g_frame_local_pos.z;
-            float cross = ncx * (aim.z - best->pos.z) - ncz * (aim.x - best->pos.x);
+            float nl = sqrtf(ncx * ncx + ncz * ncz);
+            float sxo = aim.x - best->pos.x;
+            float szo = aim.z - best->pos.z;
+            float sl = sqrtf(sxo * sxo + szo * szo);
+            if (nl > 0.05F && sl > 0.05F) {
+                // cos угла между «узел->игрок» и «узел->крест»
+                float c = ((-ncx) * sxo + (-ncz) * szo) / (nl * sl);
+                if (c > 1.0F) c = 1.0F; else if (c < -1.0F) c = -1.0F;
+                out.spot_face_deg = acosf(c) * 57.29577951F;
+            }
+            out.spot_behind = out.spot_face_deg > 55.0F; // не «лоб в лоб»
+            float cross = ncx * szo - ncz * sxo;
             out.spot_side = (cross >= 0.0F) ? 1 : -1;
         }
     }
