@@ -3811,12 +3811,21 @@ static void UpdateFarm(float dt) {
         if (s_nudgeTimer > 0.f) s_nudgeTimer -= dt;
         if (s_nudgeCd > 0.f)    s_nudgeCd    -= dt;
         if (s_sinceDrain < 1.f) s_nudgeTries = 0;   // ХП идёт — счёт заново
-        bool aimCalm = fabsf(tgt.yaw) <= 4.f && fabsf(tgt.pitch) <= 6.f;
-        if (phase == 3 && s_sinceDrain > 3.f && s_nudgeTimer <= 0.f &&
-            s_nudgeCd <= 0.f && aimCalm && s_nudgeTries < 4 &&
-            tgt.dist > walkUntil * 0.75f) {
+        // «Не достаю до крестика»: крест на дальней стороне узла — точка
+        // прицела заметно дальше тела узла (обе дистанции от камеры, разница
+        // гасит её смещение). В этом случае рывок нужен ДАЖЕ когда бот уже
+        // у самого ствола — старая проверка dist > 0.75*walkUntil это
+        // блокировала, и бот вечно махал в недосягаемый крест.
+        bool spotOut = tgt.has_spot && (tgt.aim_dist - tgt.dist) > 0.4f;
+        // Прицел «на месте»: по горизонтали строго, по вертикали мягко —
+        // у высокого/низкого креста pitch-ошибка держится дольше, из-за неё
+        // рывки вообще не запускались.
+        bool aimCalm = fabsf(tgt.yaw) <= 6.f;
+        if (phase == 3 && s_sinceDrain > 2.f && s_nudgeTimer <= 0.f &&
+            s_nudgeCd <= 0.f && aimCalm && s_nudgeTries < 6 &&
+            (spotOut || tgt.dist > walkUntil * 0.75f)) {
             s_nudgeTimer = 0.35f;
-            s_nudgeCd    = 2.5f;
+            s_nudgeCd    = 2.0f;
             ++s_nudgeTries;
         }
         bool nudgeIn = phase == 3 && s_nudgeTimer > 0.f;
