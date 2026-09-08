@@ -3545,12 +3545,6 @@ static void UpdateFarm(float dt) {
     static float s_evadeDir = 1.f;    // +1 right, -1 left
     static int   s_evadeCount = 0;    // manoeuvres tried on this node
     static float s_settle = 0.f;      // pause between targets (fingers up)
-    static float s_orbitTimer = 0.f;  // >0: обход вокруг узла к кресту
-    static float s_orbitDir   = 1.f;
-    static float s_reposTimer = 0.f;  // >0: перестановка «бью в воздух»
-    static float s_reposPause = 0.f;  // пауза-проверка после перестановки
-    static float s_reposDir   = 1.f;
-    static int   s_reposCount = 0;
     static float s_stickPx = 0.f, s_stickPy = 0.f; // smoothed stick position
 
     auto releaseAll = [&]() {
@@ -3802,44 +3796,11 @@ static void UpdateFarm(float dt) {
         // only once actually inside — no down/up flapping at the boundary
         // (the "stomping in place" bug).
         float pressAt = s_moveDown ? walkUntil : walkUntil + 0.5f;
-        // Крест недосягаем НЕ из-за дистанции, а из-за геометрии: он висит
-        // на дальней/боковой грани узла (spot_behind от игры). Удары по телу
-        // при этом ВСЁ РАВНО снимают ХП, поэтому прежний триггер «нет
-        // снятия N секунд» не срабатывал никогда. Решение как у человека:
-        // СТРЕЙФ вокруг узла в сторону креста (spot_side), пока крест не
-        // окажется лицом. Идём короткими шагами по 0.4 с с паузой 0.6 с
-        // (камера доворачивается, крест «переезжает» на нашу сторону).
-        if (s_orbitTimer > 0.f) s_orbitTimer -= dt;
-        // Обход НЕПРЕРЫВНЫЙ, пока крест не встанет «лоб в лоб»: старт при
-        // угле > 55° (spot_behind), стоп при < 30° — гистерезис, чтобы у
-        // границы не дёргаться. Пульсы «шаг-пауза» сюда не годились: за 0.4 с
-        // бот проходил пару градусов дуги и вечно топтался.
-        if (phase == 3 && tgt.has_spot) {
-            if (tgt.spot_behind) {
-                s_orbitTimer = 0.15f;              // продлеваем, пока условие живо
-                s_orbitDir   = (tgt.spot_side >= 0) ? 1.f : -1.f;
-            } else if (tgt.spot_face_deg < 30.f) {
-                s_orbitTimer = 0.f;                // встали лицом — стоп
-            }
-        }
-        // Простое правило-страховка: МАШЕМ, А ХП НЕ ИДЁТ -> удары уходят в
-        // воздух (крест чуть сбоку, недолёт, любой не предусмотренный
-        // случай). Перестановка: 0.8 с стрейфа в сторону креста (при
-        // повторных неудачах — чередуем сторону), затем 1.2 с снова бьём и
-        // смотрим на ХП. Пошло — счёт обнуляется. 4 неудачи подряд — узел
-        // добьёт/сменит сторожевой таймер.
-        if (s_reposTimer > 0.f) s_reposTimer -= dt;
-        if (s_reposPause > 0.f) s_reposPause -= dt;
-        if (s_sinceDrain < 0.5f) s_reposCount = 0;
-        if (phase == 3 && s_sinceDrain > 2.f &&
-            s_reposTimer <= 0.f && s_reposPause <= 0.f && s_reposCount < 4) {
-            float base = tgt.has_spot ? ((tgt.spot_side >= 0) ? 1.f : -1.f) : 1.f;
-            s_reposDir = (s_reposCount % 2 == 0) ? base : -base;
-            s_reposTimer = 0.8f;
-            s_reposPause = 2.0f; // включает сами 0.8 c + 1.2 c проверки
-            ++s_reposCount;
-        }
-        bool nudgeIn = phase == 3 && (s_orbitTimer > 0.f || s_reposTimer > 0.f);
+        // Никаких стрейфов вокруг узла: крест, повёрнутый боком/назад,
+        // игра больше не отдаёт как цель (фильтр в game.cpp) — бот просто
+        // бьёт тело, ХП капает, декаль перепрыгивает и рано или поздно
+        // оказывается лицом. Тогда прицел сам переключается на неё.
+        bool nudgeIn = false;
         bool wantWalk = (phase == 2) ||
                         (phase == 1 && fabsf(tgt.yaw) < 70.f && tgt.dist > reachDist * 2.f) ||
                         (phase == 3 && tgt.dist > pressAt) ||
@@ -3901,13 +3862,6 @@ static void UpdateFarm(float dt) {
                     if (s3 < -1.f) s3 = -1.f;
                     px = cx + r * 0.35f * s3;
                     py = cy - r * 0.75f;
-                    if (s_orbitTimer > 0.f || s_reposTimer > 0.f) {
-                        // Шаг обхода/перестановки: боковой стрейф вокруг
-                        // узла, чуть вперёд, чтобы не отдаляться.
-                        float dir = (s_orbitTimer > 0.f) ? s_orbitDir : s_reposDir;
-                        px = cx + r * 0.85f * dir;
-                        py = cy - r * 0.30f;
-                    }
                 }
                 if (s_walkOffTime > 0.f) {
                     // Hysteresis hold: walk not wanted any more — glide the
@@ -3945,7 +3899,6 @@ static void UpdateFarm(float dt) {
             bool aimSettled = tgt.has_spot
                 ? (fabsf(tgt.yaw) <= 3.5f && fabsf(tgt.pitch) <= 5.f)
                 : (fabsf(tgt.yaw) <= 8.f);
-            if (s_orbitTimer > 0.f || s_reposTimer > 0.f) aimSettled = false; // стрейфим — не машем
             // Tap rhythm: ~85 ms down, ~230 ms up — a believable fast tapper
             // that also matches melee swing cadence (extra taps are ignored
             // by the game, they just queue the next swing).

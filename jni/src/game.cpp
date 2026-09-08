@@ -5382,7 +5382,23 @@ bool esp_farm_get_target(FarmTarget& out) {
             // template child rests exactly at the pivot (tree base) until the
             // real X activates — aiming there is the "hits the bottom of the
             // tree" bug. Such a spot is ignored until it moves.
-            if (d2 < 6.0F * 6.0F && d2 > 0.35F * 0.35F) { aim = spot; spot_ok = true; }
+            if (d2 < 6.0F * 6.0F && d2 > 0.35F * 0.35F) {
+                // Крест берём в работу ТОЛЬКО когда он повёрнут к нам
+                // (угол крест-узел-игрок <= 60°). Боковые/задние кресты не
+                // атакуем и не обходим: бьём тело (ХП снимается всегда),
+                // после ударов декаль перепрыгивает — рано или поздно
+                // окажется лицом, тогда и переключимся на неё.
+                float pncx = best->pos.x - g_frame_local_pos.x;
+                float pncz = best->pos.z - g_frame_local_pos.z;
+                float pnl = sqrtf(pncx * pncx + pncz * pncz);
+                float psl = sqrtf(sx * sx + sz * sz);
+                bool facing = true;
+                if (pnl > 0.05F && psl > 0.05F) {
+                    float c = ((-pncx) * sx + (-pncz) * sz) / (pnl * psl);
+                    facing = c > 0.5F; // cos(60°)
+                }
+                if (facing) { aim = spot; spot_ok = true; }
+            }
             else if (d2 >= 6.0F * 6.0F) s_spot_transform = 0;
             // d2 <= 0.35^2: крест в даный кадр «прижался» к пивоту (анимация
             // прыжка/переспавн декали). НЕ сбрасываем транс форм — на
@@ -5393,14 +5409,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     // Дистанция до сырой точки прицела: запоминается ДО подтяжки к
     // поверхности, иначе aim_dist схлопывается к dist и контроллер never
     // узнаёт, что крест на дальней стороне (рывки не запускались).
-    if (spot_ok) {
-        // Целимся РОВНО в крест. Ударная механика игры — рейкаст от камеры:
-        // если луч проходит сквозь декаль, попадание засчитывается по кресту.
-        // Прежняя «подтяжка к поверхности» уводила точку в тело узла — бот
-        // бил рядом с крестом (жалоба «метка не на крестике»). Если крест
-        // повёрнут ребром/на дальней стороне — это решает ОБХОД в
-        // контроллере (spot_side/spot_behind ниже), а не смещение прицела.
-    }
+    // spot_ok => целимся ровно в крест (он уже отфильтрован: повёрнут к нам).
     if (!spot_ok) {
         aim = best->pos;
         aim.y += (best->kind == 0) ? 1.15F : 0.15F;
@@ -5482,31 +5491,6 @@ bool esp_farm_get_target(FarmTarget& out) {
         float az = aim.z - g_frame_local_pos.z;
         float ad = sqrtf(ax * ax + az * az);
         out.aim_dist = std::isfinite(ad) ? ad : best_dist;
-        // Геометрия для обхода: крест за узлом (дальше тела) и с какой
-        // стороны от линии «глаз -> узел» он висит. Контроллер стрейфит в
-        // эту сторону, пока крест не окажется лицом.
-        if (spot_ok) {
-            // Угол «крест-узел-игрок» в горизонтали: 0° = крест смотрит
-            // ровно на нас (лоб в лоб), 180° = на дальней стороне. Обход
-            // ведём, пока угол не упадёт ниже порога — а не только когда
-            // крест «за узлом» по дистанции (боковые кресты, из-за которых
-            // «не подходит к крестику», старая проверка не ловила).
-            float ncx = best->pos.x - g_frame_local_pos.x;
-            float ncz = best->pos.z - g_frame_local_pos.z;
-            float nl = sqrtf(ncx * ncx + ncz * ncz);
-            float sxo = aim.x - best->pos.x;
-            float szo = aim.z - best->pos.z;
-            float sl = sqrtf(sxo * sxo + szo * szo);
-            if (nl > 0.05F && sl > 0.05F) {
-                // cos угла между «узел->игрок» и «узел->крест»
-                float c = ((-ncx) * sxo + (-ncz) * szo) / (nl * sl);
-                if (c > 1.0F) c = 1.0F; else if (c < -1.0F) c = -1.0F;
-                out.spot_face_deg = acosf(c) * 57.29577951F;
-            }
-            out.spot_behind = out.spot_face_deg > 55.0F; // не «лоб в лоб»
-            float cross = ncx * szo - ncz * sxo;
-            out.spot_side = (cross >= 0.0F) ? 1 : -1;
-        }
     }
     float fraction = rd<float>(best->component + MINEABLE_FRACTION);
     out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F) ? fraction : -1.0F;
