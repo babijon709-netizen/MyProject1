@@ -5180,14 +5180,16 @@ static bool farm_spot_above_dirt(const Vec3& p) {
     return p.y > farm_eye_y() - 1.15F;
 }
 
-// Lower is better. Chest height AND out on the bark (larger horiz) — the
-// previous "+ horiz" term preferred the LOD on the pith, which is why the
-// green mark sat on the trunk instead of the X.
+// Lower is better. Chest height, then INNER on the bark. The X decal sits
+// on the mesh; a particle/light is often 10–30 cm in front — scoring
+// "- horiz" locked that FX, so the green mark stuck out and melee
+// (measured to it) never reached the tree. Pith is already rejected by
+// on_bark (horiz >= 16 cm).
 static float farm_spot_chest_err(const Vec3& node_pos, const Vec3& p) {
     float want_y = farm_eye_y() - 0.40F;
     float sx = p.x - node_pos.x, sz = p.z - node_pos.z;
     float horiz = sqrtf(sx * sx + sz * sz);
-    return fabsf(p.y - want_y) - horiz;
+    return fabsf(p.y - want_y) + horiz * 0.45F;
 }
 
 // Kind-aware "is this child the glowing X". Both trees and ore park a dormant
@@ -5299,7 +5301,12 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
             float d2 = sx * sx + sy * sy + sz * sz;
             int score = 2;
             if (sx * sx + sz * sz > 0.04F) score += 1;
-            if (score > best_score || (score == best_score && d2 > best_d2)) {
+            // Trees: the inner child of a named pair is the decal on the
+            // bark; the outer one is the particle that sticks out.
+            bool better = score > best_score;
+            if (!better && score == best_score)
+                better = (kind == 0) ? (d2 < best_d2) : (d2 > best_d2);
+            if (better) {
                 best_score = score;
                 best_d2 = d2;
                 named = cand.node;
@@ -5384,14 +5391,36 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
     }
 
     s_move_root = node_transform;
-    s_move_prev = std::move(live);
+    s_move_prev = live;
 
     if (kind == 0) {
-        if (unique_jumper) return jumper;
-        if (appear) return appear;
-        if (keep_ok) return keep;
-        if (named) return named;
-        if (isolate) return isolate;
+        // X prefab = decal on the bark + particle a bit in front. Whatever
+        // pass won, snap to the INNER neighbour of that cluster so the green
+        // mark sits on the bark, not in the air.
+        auto innermost = [&](uint64_t pick) -> uint64_t {
+            if (!pick) return 0;
+            const SpotCand* pp = nullptr;
+            for (const SpotCand& c : live) if (c.node == pick) { pp = &c; break; }
+            if (!pp) return pick;
+            uint64_t best = pick;
+            float bh2 = (pp->pos.x - node_pos.x) * (pp->pos.x - node_pos.x)
+                      + (pp->pos.z - node_pos.z) * (pp->pos.z - node_pos.z);
+            for (const SpotCand& c : live) {
+                if (!on_bark(c.pos)) continue;
+                float dx = c.pos.x - pp->pos.x, dy = c.pos.y - pp->pos.y, dz = c.pos.z - pp->pos.z;
+                if (dx * dx + dy * dy + dz * dz > 0.22F * 0.22F) continue;
+                float h2 = (c.pos.x - node_pos.x) * (c.pos.x - node_pos.x)
+                         + (c.pos.z - node_pos.z) * (c.pos.z - node_pos.z);
+                if (h2 < 0.16F * 0.16F) continue;
+                if (h2 < bh2) { bh2 = h2; best = c.node; }
+            }
+            return best;
+        };
+        if (unique_jumper) return innermost(jumper);
+        if (appear) return innermost(appear);
+        if (keep_ok) return innermost(keep);
+        if (named) return innermost(named);
+        if (isolate) return innermost(isolate);
         return 0;
     }
     const float hop = 0.55F * 0.55F;
@@ -5599,8 +5628,8 @@ bool esp_farm_get_target(FarmTarget& out) {
         if (psl > 0.05F) {
             float inv = 1.0F / psl;
             float dirx = sx * inv, dirz = sz * inv;
-            float from_node = (best->kind == 0) ? 1.15F : 1.55F;
-            float from_spot = (best->kind == 0) ? 0.50F : 0.70F;
+            float from_node = (best->kind == 0) ? 0.70F : 1.55F;
+            float from_spot = (best->kind == 0) ? 0.18F : 0.70F;
             float stand_r = psl + from_spot;
             if (stand_r < from_node) stand_r = from_node;
             stand.x = best->pos.x + dirx * stand_r;

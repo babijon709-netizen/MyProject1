@@ -3756,12 +3756,14 @@ static void UpdateFarm(float dt) {
     // While mining the move finger keeps nudging forward until walkUntil.
     const bool  isTree    = (tgt.kind == 0);
     const float reachDist = isTree ? 2.6f : 2.4f; // body: close enough to swing
-    const float meleeX    = isTree ? 1.20f : 1.55f; // thin trunk: 1.45 never reached the X
-    const float meleeHold = isTree ? 1.45f : 1.80f; // hysteresis while mining
+    const float meleeX    = isTree ? 0.80f : 1.55f; // hatchet reach is ~0.8 m to the bark
+    const float meleeHold = isTree ? 1.00f : 1.80f; // hysteresis while mining
     const float aimedYaw  = tgt.has_spot
         ? ((g_farmPhase == 3) ? 3.f : 8.f)
         : ((g_farmPhase == 3) ? 8.f : 14.f);
-    const float standArrive = s_moveDown ? 0.45f : 0.65f;
+    const float standArrive = isTree
+        ? (s_moveDown ? 0.18f : 0.28f)  // don't stop half a metre short of the X
+        : (s_moveDown ? 0.45f : 0.65f);
     bool goStand = tgt.has_spot && tgt.stand_ok && tgt.stand_dist > standArrive;
     float meleeNow = (g_farmPhase == 3) ? meleeHold : meleeX;
     bool xInMelee  = tgt.has_spot && tgt.aim_dist <= meleeNow;
@@ -3853,14 +3855,14 @@ static void UpdateFarm(float dt) {
         // walkUntil gets hysteresis: press while further than +0.5 m, release
         // only once actually inside — no down/up flapping at the boundary
         // (the "stomping in place" bug).
-        float pressAt = s_moveDown ? meleeX : meleeX + 0.25f;
+        float pressAt = s_moveDown ? meleeX : meleeX + (isTree ? 0.08f : 0.25f);
         // Не идём, пока камера не смотрит примерно на цель ног: при yaw 90–180°
         // стик «вперёд» уводит от креста. Сначала доворот, потом шаг.
         bool alignedForWalk = fabsf(goalYaw) < 72.f;
         // Только если уже внутри меша (линза в стволе). Иначе 2 м держали
         // бота слишком далеко от тонких деревьев — удары не долетали, X не
         // спавнился.
-        bool tooCloseNoX = isTree && !tgt.has_spot && tgt.dist < 1.15f && phase == 3;
+        bool tooCloseNoX = isTree && !tgt.has_spot && tgt.dist < 0.55f && phase == 3;
         bool wantWalk = (phase == 2) ||
                         (phase == 1 && alignedForWalk && goalDist > reachDist * 2.f) ||
                         (goStand && alignedForWalk && goalDist > standArrive) ||
