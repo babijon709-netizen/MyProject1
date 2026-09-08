@@ -5183,7 +5183,10 @@ static bool farm_spot_plausible(int kind, const Vec3& node_pos, const Vec3& p, f
         // had with a top-mounted pivot.
         if (d2 <= 0.10F * 0.10F || d2 >= 6.0F * 6.0F) return false;
         if (sy < -1.2F || sy > 3.5F) return false;
-        return horiz2 > 0.08F * 0.08F || fabsf(sy) > 0.25F;
+        // X is on the bark, never on the trunk axis. The old |sy|>0.25
+        // alternative accepted the mesh origin after a hit-sway — that is
+        // "the mark is there, we still chop the trunk".
+        return horiz2 > 0.10F * 0.10F && horiz2 < 1.6F * 1.6F;
     }
     if (d2 <= 0.08F * 0.08F || d2 >= 3.5F * 3.5F) return false;
     return sy > -1.6F && sy < 1.8F;
@@ -5195,12 +5198,24 @@ static bool farm_spot_plausible(int kind, const Vec3& node_pos, const Vec3& p, f
 // the pivot (tree base) until the real X activates, and returning that one
 // made the bot chop the bottom of the trunk. The result is cached per
 // component and re-checked because the spot jumps around between hits.
+// Tight bark cylinder used to DISCOVER a tree X. Holding a live lock still
+// uses the looser farm_spot_plausible so a hop that swings wide is not dropped.
+static bool farm_spot_on_bark(int kind, const Vec3& node_pos, const Vec3& p) {
+    if (!farm_spot_plausible(kind, node_pos, p)) return false;
+    if (kind != 0) return true;
+    float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
+    float horiz2 = sx * sx + sz * sz;
+    if (horiz2 < 0.12F * 0.12F || horiz2 > 1.05F * 1.05F) return false;
+    if (sy < -0.8F || sy > 2.6F) return false;
+    return true;
+}
+
 static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, int kind, uint64_t keep, uint64_t node_id) {
     if (!node_transform) return 0;
     std::vector<uint64_t> nodes;
     // Trees carry a LOT of children (LODs, foliage, colliders) — a small cap
     // used to cut the walk off before it ever reached the X child.
-    collect_transform_subtree(node_transform, nodes, 256);
+    collect_transform_subtree(node_transform, nodes, kind == 0 ? 400 : 256);
 
     struct SpotCand { uint64_t node; Vec3 pos; };
     std::vector<SpotCand> live;
@@ -5215,12 +5230,15 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
     auto plausible = [&](const Vec3& p) -> bool {
         return farm_spot_plausible(kind, node_pos, p);
     };
+    auto on_bark = [&](const Vec3& p) -> bool {
+        return farm_spot_on_bark(kind, node_pos, p);
+    };
 
-    // Pass 1: by name. Rocks name their X; trees do NOT — matching LOD /
-    // foliage ("spot", "cross", …) glues the lock onto the trunk, which is
-    // why tree #1 could hit the mark and every tree after it chopped bark.
+    // Pass 1: by name. Rocks name their X clearly. Trees only accept TIGHT
+    // names — "spot"/"cross"/"marker" match LOD children and glue the lock
+    // onto the trunk.
     uint64_t named = 0;
-    if (kind != 0 && g_go_name_offset_valid) {
+    if (g_go_name_offset_valid) {
         char name[48];
         int best_score = -1;
         float best_d2 = 0.0F;
@@ -5228,16 +5246,27 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
             if (!read_transform_name(cand.node, name, sizeof(name))) continue;
             size_t len = 0;
             for (char* p = name; *p; ++p, ++len) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
-            bool looks = strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
-                         strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
-                         strstr(name, "hitpoint") ||
-                         (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
-                                             (name[1] >= '0' && name[1] <= '9')));
-            if (!looks)
-                looks = strstr(name, "marker") || strstr(name, "gather") ||
-                        strstr(name, "target") || strstr(name, "plus");
+            bool looks = false;
+            if (kind == 0) {
+                looks = strstr(name, "bonus") || strstr(name, "hitpoint") ||
+                        strstr(name, "weakspot") || strstr(name, "sweetspot") ||
+                        strstr(name, "hitmark") || strstr(name, "xmark") ||
+                        strstr(name, "weakpoint") ||
+                        (name[0] == 'x' && (len == 1 || name[1] == '_' || name[1] == ' ' ||
+                                            (name[1] >= '0' && name[1] <= '9')));
+            } else {
+                looks = strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
+                        strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
+                        strstr(name, "hitpoint") ||
+                        (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
+                                            (name[1] >= '0' && name[1] <= '9')));
+                if (!looks)
+                    looks = strstr(name, "marker") || strstr(name, "gather") ||
+                            strstr(name, "target") || strstr(name, "plus");
+            }
             if (!looks) continue;
-            if (!plausible(cand.pos)) continue;
+            if (kind == 0) { if (!on_bark(cand.pos)) continue; }
+            else           { if (!plausible(cand.pos)) continue; }
             float sx = cand.pos.x - node_pos.x, sy = cand.pos.y - node_pos.y, sz = cand.pos.z - node_pos.z;
             float d2 = sx * sx + sy * sy + sz * sz;
             int score = 2;
@@ -5250,14 +5279,13 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         }
     }
 
-    // Pass 2: movement. Tree X is unnamed — the only child that JUMPS between
-    // hits. Threshold is high so foliage sway cannot steal a live lock.
+    // Pass 2: movement + appear. Same-transform hops, OR a new child that
+    // spawned on the bark (the X is often a NEW GameObject, so pointer-match
+    // jumper never sees it). Unique-mover so a whole-tree hit-sway cannot
+    // lock the mesh origin.
     static uint64_t s_move_root = 0;
     static uint64_t s_move_id = 0;
     static std::vector<SpotCand> s_move_prev;
-    // New NetworkIdentity (or pooled transform reused on another tree):
-    // previous child positions are a TELEPORT, not an X hop — that made
-    // the next tree lock a random LOD and never leave the trunk.
     if (node_id && s_move_id != node_id) {
         s_move_id = node_id;
         s_move_root = 0;
@@ -5265,50 +5293,113 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
     }
     uint64_t jumper = 0;
     float jumper_m2 = 0.0F;
+    float second_m2 = 0.0F;
+    int jumper_n = 0;
     float keep_m2 = 0.0F;
     bool keep_ok = false;
-    if (s_move_root == node_transform) {
+    uint64_t appear = 0;
+    int appear_n = 0;
+    const bool have_prev = (s_move_root == node_transform && !s_move_prev.empty());
+    if (have_prev) {
         for (const SpotCand& cand : live) {
+            bool seen = false;
             for (const SpotCand& prev : s_move_prev) {
                 if (prev.node != cand.node) continue;
+                seen = true;
                 float mx = cand.pos.x - prev.pos.x;
                 float my = cand.pos.y - prev.pos.y;
                 float mz = cand.pos.z - prev.pos.z;
                 float m2 = mx * mx + my * my + mz * mz;
                 if (cand.node == keep) keep_m2 = m2;
-                if (m2 > jumper_m2 && m2 < 5.0F * 5.0F && plausible(cand.pos)) {
-                    jumper_m2 = m2;
-                    jumper = cand.node;
+                if (m2 > 0.12F * 0.12F && m2 < 5.0F * 5.0F && on_bark(cand.pos)) {
+                    ++jumper_n;
+                    if (m2 > jumper_m2) {
+                        second_m2 = jumper_m2;
+                        jumper_m2 = m2;
+                        jumper = cand.node;
+                    } else if (m2 > second_m2) {
+                        second_m2 = m2;
+                    }
                 }
                 break;
             }
+            if (!seen && on_bark(cand.pos)) {
+                ++appear_n;
+                appear = cand.node;
+            }
         }
     }
+    if (appear_n != 1) appear = 0;
+    const bool unique_jumper = jumper && jumper_m2 > 0.16F * 0.16F &&
+        (jumper_n == 1 || jumper_m2 > second_m2 * 2.25F || second_m2 < 0.10F * 0.10F);
     if (keep) {
         for (const SpotCand& cand : live) {
             if (cand.node == keep && plausible(cand.pos)) { keep_ok = true; break; }
         }
     }
+
+    // Pass 3 (trees): still X already sitting on the bark — jumper never
+    // fires until it hops, and many trees show the mark before the first hit.
+    uint64_t isolate = 0;
+    if (kind == 0) {
+        const float cluster_r2 = 0.10F * 0.10F;
+        int isolated_n = 0;
+        uint64_t isolated[8];
+        Vec3 isolated_pos[8];
+        for (const SpotCand& cand : live) {
+            if (!on_bark(cand.pos)) continue;
+            bool clustered = false;
+            for (const SpotCand& other : live) {
+                if (other.node == cand.node) continue;
+                float dx = cand.pos.x - other.pos.x;
+                float dy = cand.pos.y - other.pos.y;
+                float dz = cand.pos.z - other.pos.z;
+                if (dx * dx + dy * dy + dz * dz < cluster_r2) { clustered = true; break; }
+            }
+            if (clustered) continue;
+            if (isolated_n < 8) {
+                isolated[isolated_n] = cand.node;
+                isolated_pos[isolated_n] = cand.pos;
+                ++isolated_n;
+            }
+        }
+        if (isolated_n >= 1 && isolated_n <= 4) {
+            int best_i = 0;
+            float best_dot = -1e9F;
+            float pncx = node_pos.x - g_frame_local_pos.x;
+            float pncz = node_pos.z - g_frame_local_pos.z;
+            float pnl = sqrtf(pncx * pncx + pncz * pncz);
+            for (int i = 0; i < isolated_n; ++i) {
+                float sx = isolated_pos[i].x - node_pos.x;
+                float sz = isolated_pos[i].z - node_pos.z;
+                float psl = sqrtf(sx * sx + sz * sz);
+                float dot = 0.0F;
+                if (pnl > 0.05F && psl > 0.05F)
+                    dot = ((-pncx) * sx + (-pncz) * sz) / (pnl * psl);
+                if (dot > best_dot) { best_dot = dot; best_i = i; }
+            }
+            isolate = isolated[best_i];
+        }
+    }
+
     s_move_root = node_transform;
     s_move_prev = std::move(live);
 
-    // Живой крест не отдаём: рескан по имени/LOD «marker» срывал метку на ствол.
-    // Меняем трансформ только если ДРУГОЙ чайлд реально прыгнул (крест переехал),
-    // а текущий стоит на месте / у пивота.
-    // Trees: the glowing X is the child that JUMPS. Follow it even if we
-    // already latched something — a still LOD on the trunk must not win.
-    const float hop = (kind == 0) ? (0.35F * 0.35F) : (0.55F * 0.55F);
     if (kind == 0) {
-        if (jumper && jumper_m2 > 0.35F * 0.35F) return jumper;
+        if (unique_jumper) return jumper;
+        if (appear) return appear;
         if (keep_ok) return keep;
+        if (named) return named;
+        if (isolate) return isolate;
         return 0;
     }
+    const float hop = 0.55F * 0.55F;
     if (keep_ok) {
         if (jumper && jumper != keep && jumper_m2 > hop && keep_m2 < 0.12F * 0.12F)
             return jumper;
         return keep;
     }
-    if (jumper && jumper_m2 > 0.35F * 0.35F) return jumper;
+    if (unique_jumper) return jumper;
     if (named) return named;
     return keep;
 }
@@ -5425,7 +5516,7 @@ bool esp_farm_get_target(FarmTarget& out) {
         // Без живого креста ищем часто (~0.2 с), с живым — реже. Скан НИКОГДА
         // не затирает известный трансформ нулём и не меняет его на LOD/имя,
         // пока текущий ещё на коре — иначе метка слетает на ствол.
-        s_spot_recheck = s_spot_transform ? 24 : (best->kind == 0 ? 8 : 12);
+        s_spot_recheck = s_spot_transform ? 24 : (best->kind == 0 ? 2 : 12);
         uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform, best->identity);
         if (found && found != s_spot_transform) {
             s_spot_transform = found;
