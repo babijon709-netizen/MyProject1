@@ -3594,6 +3594,7 @@ static void UpdateFarm(float dt) {
     static int   s_evadeCount = 0;    // manoeuvres tried on this node
     static float s_settle = 0.f;      // pause between targets (fingers up)
     static float s_stickPx = 0.f, s_stickPy = 0.f; // smoothed stick position
+    static bool  s_goStandLatched = false; // don't flip stand/body mid-approach
 
     auto releaseAll = [&]() {
         if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
@@ -3626,6 +3627,7 @@ static void UpdateFarm(float dt) {
         g_farmActive = false; g_farmPhase = 0;
         s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
         s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f; s_settle = 0.f;
+        s_goStandLatched = false;
         return;
     }
 
@@ -3663,6 +3665,7 @@ static void UpdateFarm(float dt) {
         s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
         s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f; s_settle = 0.f;
         s_lostTime = 0.f;
+        s_goStandLatched = false;
         return;
     }
     s_lostTime = 0.f;
@@ -3680,6 +3683,7 @@ static void UpdateFarm(float dt) {
         s_stuckTime = 0.f; s_lastDist = tgt.dist;
         s_mineTime = 0.f;  s_fracStart = tgt.fraction;
         s_sinceDrain = 0.f; s_evadeTime = 0.f; s_evadeCount = 0;
+        s_goStandLatched = false;
         if (hadNode) { releaseAll(); s_settle = 0.7f; }
     }
 
@@ -3764,10 +3768,17 @@ static void UpdateFarm(float dt) {
     const float standArrive = isTree
         ? (s_moveDown ? 0.18f : 0.28f)  // don't stop half a metre short of the X
         : (s_moveDown ? 0.45f : 0.65f);
-    bool goStand = tgt.has_spot && tgt.stand_ok && tgt.stand_dist > standArrive;
+    // Stand / X-aim only when already at the tree. From far away a bark
+    // child (or a hopping X) sits LEFT then RIGHT of the trunk — walking
+    // toward that yaw the whole way was the left-right jerk on every tree.
+    float closeGate = s_goStandLatched ? 3.6f : 2.6f;
+    bool closeForX  = tgt.dist < closeGate;
+    if (tgt.dist > 3.8f) s_goStandLatched = false;
+    else if (closeForX)  s_goStandLatched = true;
+    bool goStand = tgt.has_spot && tgt.stand_ok && tgt.stand_dist > standArrive && closeForX;
     float meleeNow = (g_farmPhase == 3) ? meleeHold : meleeX;
     bool xInMelee  = tgt.has_spot && tgt.aim_dist <= meleeNow;
-    bool needCloser = tgt.has_spot && !xInMelee;
+    bool needCloser = tgt.has_spot && !xInMelee && closeForX;
 
     float goalYaw, goalDist;
     if (goStand) {
@@ -3863,8 +3874,11 @@ static void UpdateFarm(float dt) {
         // бота слишком далеко от тонких деревьев — удары не долетали, X не
         // спавнился.
         bool tooCloseNoX = isTree && !tgt.has_spot && tgt.dist < 0.55f && phase == 3;
+        // Phase 1 is TURN: only creep forward when already almost facing the
+        // node and still far. Walking at yaw 30–70° with a steered stick
+        // weaved left-right all the way in.
         bool wantWalk = (phase == 2) ||
-                        (phase == 1 && alignedForWalk && goalDist > reachDist * 2.f) ||
+                        (phase == 1 && fabsf(goalYaw) < 18.f && goalDist > 8.f) ||
                         (goStand && alignedForWalk && goalDist > standArrive) ||
                         (needCloser && alignedForWalk) ||
                         (phase == 3 && (tgt.has_spot ? tgt.aim_dist : tgt.dist) > pressAt) ||
@@ -3911,11 +3925,18 @@ static void UpdateFarm(float dt) {
                 // Dead zone: a couple of degrees of yaw jitter must not steer
                 // the stick at all — the sign of a near-zero error flips every
                 // frame, and steering off it was the left-right stick flapping.
-                float yawSteer = (phase == 3 && !goStand) ? tgt.yaw : goalYaw;
-                if (fabsf(yawSteer) < 4.f) yawSteer = 0.f;
-                // Крест сбоку/сзади и мы уже у ствола: обходим, а не прём
-                // сквозь дерево к стоянке «через» пивот.
-                bool orbit = tgt.has_spot && !tgt.spot_facing && tgt.dist < 5.0f &&
+                // Far approach: camera does the turning, stick is forward.
+                // Lateral stick on a noisy yaw (X hopping around the bark)
+                // was the left-right shuffle toward every tree.
+                float yawSteer = 0.f;
+                if (tgt.dist < 3.5f || phase == 3) {
+                    yawSteer = (phase == 3 && !goStand) ? tgt.yaw : goalYaw;
+                    float yawDead = (tgt.dist > 2.8f) ? 10.f : 4.f;
+                    if (fabsf(yawSteer) < yawDead) yawSteer = 0.f;
+                }
+                // Крест сзади и мы УЖЕ у ствола: короткий обход, не 360° и
+                // не с пяти метров.
+                bool orbit = tgt.has_spot && !tgt.spot_facing && tgt.dist < 2.2f &&
                              (goStand || needCloser);
                 if (orbit) {
                     float side = (fabsf(goalYaw) > 8.f)
