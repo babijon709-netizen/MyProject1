@@ -1,0 +1,15 @@
+rva=d7ddd28 klass=c00ba805 '' statics=0 tod=0 '' hour=-99 norm=-99.000
+rva=d7e39b8 klass=c00bb883 '' statics=0 tod=0 '' hour=-99 norm=-99.000
+rva=d7ea168 klass=c00bc483 '' statics=0 tod=0 '' hour=-99 norm=-99.000
+rva=d82a8b0 klass=8000007f '' statics=0 tod=0 '' hour=-99 norm=-99.000
+-> найден: 0
+rva=d7ddd28 klass=c00ba805 '' statics=0 tod=0 '' hour=-99 norm=-99.000
+rva=d7e39b8 klass=c00bb883 '' statics=0 tod=0 '' hour=-99 norm=-99.000
+rva=d7ea168 klass=c00bc483 '' statics=0 tod=0 '' hour=-99 norm=-99.000
+rva=d82a8b0 klass=8000007f '' statics=0 tod=0 '' hour=-99 norm=-99.000
+-> найден: 0
+rva=d7ddd28 klass=c00ba805 '' statics=0 tod=0 '' hour=-99 norm=-99.000
+rva=d7e39b8 klass=c00bb883 '' statics=0 tod=0 '' hour=-99 norm=-99.000
+rva=d7ea168 klass=c00bc483 '' statics=0 tod=0 '' hour=-99 norm=-99.000
+rva=d82a8b0 klass=8000007f '' statics=0 tod=0 '' hour=-99 norm=-99.000
+-> найден: 0
