@@ -5950,7 +5950,12 @@ bool esp_farm_get_target(FarmTarget& out) {
             float pl = sqrtf(px * px + pz * pz);
             if (sl > 0.05F && pl > 0.3F) {
                 float dot = (sx * px + sz * pz) / (sl * pl);
-                if (!(dot > -0.35F)) {
+                // Swing only when the X is roughly player-FACING (within
+                // ~65 degrees). The swing volume does not originate at the
+                // crosshair — from the side the reticle sits on the trunk's
+                // silhouette edge and the swing lands in the air next to the
+                // bark. A human walks around to the mark first; so do we.
+                if (!(dot > 0.42F)) {
                     spot_front = false;
                     // Which way to circle: rotate the (player - node) vector
                     // towards the (spot - node) one. theta = atan2(x, z); the
@@ -6015,19 +6020,19 @@ bool esp_farm_get_target(FarmTarget& out) {
         if (rl > 0.05F && rl < 50.0F) {
             ray.x /= rl; ray.y /= rl; ray.z /= rl;
             if (best->kind == 0) {
-                // Trunk = vertical cylinder at the node axis. Radius: the
-                // mark's radius minus the (few cm) protrusion — the estimate
-                // lands a couple of cm INSIDE the real bark, so the swing
-                // ray always crosses the bark right at the X (aiming exactly
-                // at the mark's line instead misses at a shallow angle, and
-                // aiming at the estimated surface instead can sit outside a
-                // thin trunk).
+                // Trunk = vertical cylinder at the node axis. The mark rides
+                // a few cm off the bark, and the swing does not originate
+                // exactly at the crosshair — so the aim goes IN towards the
+                // trunk body (no farther out than 55% of the mark's radius):
+                // from any swingable angle the impact then lands inside the
+                // trunk at the X's height, on its radial line.
                 float hx = marker_pt.x - best->pos.x, hz = marker_pt.z - best->pos.z;
-                float r_est = fmaxf(0.05F, sqrtf(hx * hx + hz * hz) - 0.08F);
+                float h = sqrtf(hx * hx + hz * hz);
+                float r_aim = fmaxf(0.05F, fminf(h - 0.08F, 0.55F * h));
                 float wx = origin.x - best->pos.x, wz = origin.z - best->pos.z;
                 float a = ray.x * ray.x + ray.z * ray.z;
                 float b = 2.0F * (wx * ray.x + wz * ray.z);
-                float c = wx * wx + wz * wz - r_est * r_est;
+                float c = wx * wx + wz * wz - r_aim * r_aim;
                 float t = -1.0F;
                 if (a > 1e-6F) {
                     float disc = b * b - 4.0F * a * c;
@@ -6039,15 +6044,13 @@ bool esp_farm_get_target(FarmTarget& out) {
                     }
                 }
                 if (t > 0.0F) {
-                    // Entry point on the bark along the eye->mark ray.
+                    // Point on the ray, inside the trunk.
                     aim = {origin.x + ray.x * t, origin.y + ray.y * t, origin.z + ray.z * t};
                 } else {
-                    // The ray clips the cylinder at a grazing angle: aim a
-                    // little inside along the X's own radial line — sure
-                    // hit, the impact still lands at the X.
-                    float h = sqrtf(hx * hx + hz * hz);
+                    // Fallback: inside the trunk on the X's own radial line,
+                    // at the X's height.
                     if (h > 0.02F) {
-                        float k = r_est / h;
+                        float k = r_aim / h;
                         if (k < 1.0F) {
                             aim.x = best->pos.x + hx * k;
                             aim.z = best->pos.z + hz * k;
@@ -6058,9 +6061,10 @@ bool esp_farm_get_target(FarmTarget& out) {
             } else {
                 // Boulder ~ sphere at the pivot (the pivot rides near the
                 // top; the mark's distance is the local surface radius).
+                // Same "aim into the body" rule as the trees.
                 float vx = marker_pt.x - best->pos.x, vy = marker_pt.y - best->pos.y, vz = marker_pt.z - best->pos.z;
                 float dv = sqrtf(vx * vx + vy * vy + vz * vz);
-                float r_est = fmaxf(0.25F, dv - 0.08F);
+                float r_est = fmaxf(0.25F, fminf(dv - 0.08F, 0.55F * dv));
                 float ox = origin.x - best->pos.x, oy = origin.y - best->pos.y, oz = origin.z - best->pos.z;
                 float b2 = 2.0F * (ox * ray.x + oy * ray.y + oz * ray.z);
                 float c2 = ox * ox + oy * oy + oz * oz - r_est * r_est;
@@ -6126,12 +6130,14 @@ bool esp_farm_get_target(FarmTarget& out) {
         return false;
     }
 
-    // Screen position of the target mark: the glowing X itself when live
-    // (on the bark), the body point otherwise — NOT the slightly pulled
-    // swing aim, which would draw the mark inside the trunk.
+    // Screen position of the target mark: the swing aim itself — on the
+    // trunk at the X's height and radial line (inside the bark by a couple
+    // of cm, which reads as "on the bark" from any angle — the raw mark
+    // projects into the air next to the silhouette when viewed from the
+    // side). The body point when no X is live.
     if (g_frame_vp_valid) {
         Vec2 screen{};
-        if (w2s(g_frame_vp, marker_pt, g_frame_sw, g_frame_sh, screen, false) &&
+        if (w2s(g_frame_vp, aim, g_frame_sw, g_frame_sh, screen, false) &&
             std::isfinite(screen.x) && std::isfinite(screen.y) &&
             screen.x >= -64.0F && screen.x <= g_frame_sw + 64.0F &&
             screen.y >= -64.0F && screen.y <= g_frame_sh + 64.0F) {

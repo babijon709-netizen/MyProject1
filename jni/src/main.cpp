@@ -3764,8 +3764,8 @@ static void UpdateFarm(float dt) {
     // through the trunk/boulder, so first circle until it faces us (orbit).
     const bool  isTree = (tgt.kind == 0);
     const bool  orbit  = tgt.has_spot && !tgt.spot_front;
-    const float meleeX = isTree ? 0.80f : 1.55f; // how far the tool actually reaches
-    const float reachX = isTree ? 2.6f  : 2.4f;  // close enough to start (body aim)
+    const float meleeX = isTree ? 0.70f : 1.30f; // stand-off distance when mining (close!)
+    const float reachX = isTree ? 1.40f : 1.30f; // close enough to start (body aim, no X yet)
     const bool  inMelee = orbit ? false
                  : (tgt.has_spot ? (tgt.aim_dist <= meleeX)
                                  : (tgt.dist <= reachX));
@@ -3883,10 +3883,15 @@ static void UpdateFarm(float dt) {
                 py = cy - r * 0.99f * sqrtf(1.f - steer * steer);
             }
         } else {
-            // Mining: nudge forward only while the tool still does not
-            // reach (thin trees: the node centre sits inside the trunk).
+            // Mining: keep pressing IN to the node until it is at arm's
+            // length — the swing has real reach and a short arm from the
+            // crosshair, and standing 20-30 cm back is what made the
+            // side-angle swings land in the air. The KCC stops the push at
+            // the trunk (the condition simply goes false there); the
+            // nudge watchdog still retires a node that truly cannot be
+            // reached.
             float toHit = tgt.has_spot ? tgt.aim_dist : tgt.dist;
-            if (toHit > meleeX + 0.15f) {
+            if (toHit > meleeX - 0.15f) {
                 wantWalk = true;
                 float steer = tgt.walk_yaw / 60.f;
                 if (steer >  1.f) steer =  1.f;
