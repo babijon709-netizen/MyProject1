@@ -5180,6 +5180,14 @@ static bool farm_spot_above_dirt(const Vec3& p) {
     return p.y > farm_eye_y() - 1.15F;
 }
 
+// Lower is better. Prefers chest height on the trunk, any yaw — the mark
+// behind the tree must win over a facing child on the dirt/near bark.
+static float farm_spot_chest_err(const Vec3& node_pos, const Vec3& p) {
+    float want_y = farm_eye_y() - 0.40F;
+    float sx = p.x - node_pos.x, sz = p.z - node_pos.z;
+    return fabsf(p.y - want_y) + sqrtf(sx * sx + sz * sz) * 0.35F;
+}
+
 // Kind-aware "is this child the glowing X". Both trees and ore park a dormant
 // template on the node pivot; the live mark sits on the surface, often closer
 // than 35 cm and not strictly above the pivot (tree pivot is mid-trunk, ore
@@ -5316,7 +5324,7 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
     float keep_m2 = 0.0F;
     bool keep_ok = false;
     uint64_t appear = 0;
-    int appear_n = 0;
+    float appear_err = 1e9F;
     const bool have_prev = (s_move_root == node_transform && !s_move_prev.empty());
     if (have_prev) {
         for (const SpotCand& cand : live) {
@@ -5341,15 +5349,16 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
                 }
                 break;
             }
+            // Decal + particle + light often spawn together — don't require
+            // a unique new child. Pick the one at chest height on the bark.
             if (!seen && on_bark(cand.pos)) {
-                ++appear_n;
-                appear = cand.node;
+                float err = farm_spot_chest_err(node_pos, cand.pos);
+                if (err < appear_err) { appear_err = err; appear = cand.node; }
             }
         }
     }
-    if (appear_n != 1) appear = 0;
     const bool unique_jumper = jumper && jumper_m2 > 0.16F * 0.16F &&
-        (jumper_n == 1 || jumper_m2 > second_m2 * 2.25F || second_m2 < 0.10F * 0.10F);
+        (jumper_n == 1 || jumper_m2 > second_m2 * 1.8F || second_m2 < 0.10F * 0.10F);
     if (keep) {
         for (const SpotCand& cand : live) {
             if (cand.node == keep && plausible(cand.pos)) { keep_ok = true; break; }
@@ -5362,8 +5371,8 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
     if (kind == 0) {
         const float cluster_r2 = 0.10F * 0.10F;
         int isolated_n = 0;
-        uint64_t isolated[8];
-        Vec3 isolated_pos[8];
+        uint64_t isolated[16];
+        Vec3 isolated_pos[16];
         for (const SpotCand& cand : live) {
             if (!on_bark(cand.pos)) continue;
             bool clustered = false;
@@ -5375,28 +5384,23 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
                 if (dx * dx + dy * dy + dz * dz < cluster_r2) { clustered = true; break; }
             }
             if (clustered) continue;
-            if (isolated_n < 8) {
+            if (isolated_n < 16) {
                 isolated[isolated_n] = cand.node;
                 isolated_pos[isolated_n] = cand.pos;
                 ++isolated_n;
             }
         }
-        if (isolated_n >= 1 && isolated_n <= 4) {
-            int best_i = 0;
-            float best_dot = -1e9F;
-            float pncx = node_pos.x - g_frame_local_pos.x;
-            float pncz = node_pos.z - g_frame_local_pos.z;
-            float pnl = sqrtf(pncx * pncx + pncz * pncz);
+        // World-space, any yaw. Flush against the trunk the camera may not
+        // see the mark (near-clip), but the child is still on the bark.
+        if (isolated_n >= 1) {
+            int best_i = -1;
+            float best_err = 1e9F;
             for (int i = 0; i < isolated_n; ++i) {
-                float sx = isolated_pos[i].x - node_pos.x;
-                float sz = isolated_pos[i].z - node_pos.z;
-                float psl = sqrtf(sx * sx + sz * sz);
-                float dot = 0.0F;
-                if (pnl > 0.05F && psl > 0.05F)
-                    dot = ((-pncx) * sx + (-pncz) * sz) / (pnl * psl);
-                if (dot > best_dot) { best_dot = dot; best_i = i; }
+                if (!farm_spot_above_dirt(isolated_pos[i])) continue;
+                float err = farm_spot_chest_err(node_pos, isolated_pos[i]);
+                if (err < best_err) { best_err = err; best_i = i; }
             }
-            isolate = isolated[best_i];
+            if (best_i >= 0) isolate = isolated[best_i];
         }
     }
 
@@ -5534,7 +5538,7 @@ bool esp_farm_get_target(FarmTarget& out) {
         // Без живого креста ищем часто (~0.2 с), с живым — реже. Скан НИКОГДА
         // не затирает известный трансформ нулём и не меняет его на LOD/имя,
         // пока текущий ещё на коре — иначе метка слетает на ствол.
-        s_spot_recheck = s_spot_transform ? 24 : (best->kind == 0 ? 2 : 12);
+        s_spot_recheck = s_spot_transform ? 24 : (best->kind == 0 ? 1 : 12);
         uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform, best->identity);
         if (found && found != s_spot_transform) {
             s_spot_transform = found;

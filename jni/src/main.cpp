@@ -3857,11 +3857,15 @@ static void UpdateFarm(float dt) {
         // Не идём, пока камера не смотрит примерно на цель ног: при yaw 90–180°
         // стик «вперёд» уводит от креста. Сначала доворот, потом шаг.
         bool alignedForWalk = fabsf(goalYaw) < 72.f;
+        // Вплотную к коре камера смотрит внутрь ствола — крест перед лицом,
+        // но за near-clip / вне кадра. Отойти, пока метка не попадёт в FOV.
+        bool tooCloseNoX = isTree && !tgt.has_spot && tgt.dist < 1.85f && phase == 3;
         bool wantWalk = (phase == 2) ||
                         (phase == 1 && alignedForWalk && goalDist > reachDist * 2.f) ||
                         (goStand && alignedForWalk && goalDist > standArrive) ||
                         (needCloser && alignedForWalk) ||
-                        (phase == 3 && (tgt.has_spot ? tgt.aim_dist : tgt.dist) > pressAt);
+                        (phase == 3 && (tgt.has_spot ? tgt.aim_dist : tgt.dist) > pressAt) ||
+                        tooCloseNoX;
         if (s_evadeTime > 0.f) wantWalk = true; // manoeuvre drives the stick itself
         // Release hysteresis: phases flicker for a frame or two around their
         // thresholds (dist/yaw noise), and every flicker used to lift and
