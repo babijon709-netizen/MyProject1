@@ -1,0 +1,895 @@
+{
+ "CAMERA_PROJECTION_MATRIX": {
+  "kind": "runtime",
+  "offset": 176,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "CAMERA_VIEW_MATRIX": {
+  "kind": "runtime",
+  "offset": 112,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "CAMERA_WORLD_TO_CLIP": {
+  "kind": "runtime",
+  "offset": 240,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "CAMERA_PREV_VIEW_PROJ": {
+  "kind": "runtime",
+  "offset": 1480,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "CAMERA_NATIVE_TRANSFORM": {
+  "kind": "runtime",
+  "offset": 32,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "CAMERA_FOV_DEGREES": {
+  "kind": "runtime",
+  "offset": 368,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "CAMERA_ASPECT": {
+  "kind": "runtime",
+  "offset": 1248,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "CAMERA_NEAR_CLIP": {
+  "kind": "runtime",
+  "offset": 1108,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "CAMERA_FAR_CLIP": {
+  "kind": "runtime",
+  "offset": 1112,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "CAMERA_VIEW_DIRTY": {
+  "kind": "runtime",
+  "offset": 1282,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "CAMERA_PROJ_DIRTY": {
+  "kind": "runtime",
+  "offset": 1280,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "MANAGED_CACHED_PTR": {
+  "kind": "runtime",
+  "offset": 16,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "PLAYER_MANAGER_TYPEINFO_RVA": {
+  "kind": "typeinfo_rva",
+  "class": "Oxide.PlayerManager"
+ },
+ "PLAYER_MANAGER_STATIC_FIELDS_LIST": {
+  "kind": "field",
+  "class": "PlayerManager.static",
+  "struct": "Oxide_PlayerManager_StaticFields",
+  "field": "clientPlayerList",
+  "type": "Il2CppObject*",
+  "offset": 16
+ },
+ "GAME_CONTROLLER_TYPEINFO_RVA": {
+  "kind": "typeinfo_rva",
+  "class": "Oxide.GameControllerBase"
+ },
+ "GAME_CONTROLLER_LOCAL_PLAYER_FIELD": {
+  "kind": "field",
+  "class": "GameControllerBase.static",
+  "struct": "Oxide_GameControllerBase_StaticFields",
+  "field": "_ukT_k__BackingField",
+  "type": "Oxide_PlayerManager_o*",
+  "offset": 16
+ },
+ "GAME_CONTROLLER_CAMERA_MANAGER_FIELD": {
+  "kind": "field",
+  "class": "GameControllerBase.static",
+  "struct": "Oxide_GameControllerBase_StaticFields",
+  "field": "_ukA_k__BackingField",
+  "type": "Oxide_CameraManager_o*",
+  "offset": 56
+ },
+ "CAMERA_MANAGER_CAMERA_FIELD": {
+  "kind": "field",
+  "class": "CameraManager",
+  "struct": "Oxide_CameraManager_Fields",
+  "field": "m_Camera",
+  "type": "UnityEngine_Camera_o*",
+  "offset": 32
+ },
+ "PLAYER_TRANSFORM": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "worldCameraRoot",
+  "type": "UnityEngine_Transform_o*",
+  "offset": 104
+ },
+ "PLAYER_POSITION": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "lastSavedPosition",
+  "type": "UnityEngine_Vector3_o",
+  "offset": 468
+ },
+ "PLAYER_CHARACTER_MODEL": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "characterModel",
+  "type": "UnityEngine_GameObject_o*",
+  "offset": 336
+ },
+ "PLAYER_NICKLABEL": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "nicklabel",
+  "type": "ij_o*",
+  "offset": 304
+ },
+ "PLAYER_DISPLAY_NAME": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "uWc",
+  "type": "System_String_o*",
+  "offset": 544
+ },
+ "NICKLABEL_PLAYER_BACKREF": {
+  "kind": "runtime",
+  "offset": 32,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "NICKLABEL_NICKNAME_TEXT": {
+  "kind": "runtime",
+  "offset": 56,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "UI_TEXT_MTEXT": {
+  "kind": "field",
+  "class": "UI.Text",
+  "struct": "UnityEngine_UI_Text_Fields",
+  "field": "m_Text",
+  "type": "System_String_o*",
+  "offset": 224
+ },
+ "FPOBJECT_OBJECT_NAME": {
+  "kind": "field",
+  "class": "FPObject",
+  "struct": "Oxide_FPObject_Fields",
+  "field": "m_ObjectName",
+  "type": "System_String_o*",
+  "offset": 120
+ },
+ "PLAYER_VOICE_STATE": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "uWr",
+  "type": "Dissonance_VoicePlayerState_o*",
+  "offset": 744
+ },
+ "VOICE_STATE_NAME": {
+  "kind": "field",
+  "class": "VoicePlayerState",
+  "struct": "Dissonance_VoicePlayerState_Fields",
+  "field": "_Name_k__BackingField",
+  "type": "System_String_o*",
+  "offset": 56
+ },
+ "PLAYER_VOICE_PLAYER": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "voicePlayer",
+  "type": "pJk_o*",
+  "offset": 320
+ },
+ "VOICE_PLAYER_TAG": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "playerEventHandler",
+  "type": "pmi_o*",
+  "offset": 120
+ },
+ "FPOBJECT_ITEM": {
+  "kind": "field",
+  "class": "FPObject",
+  "struct": "Oxide_FPObject_Fields",
+  "field": "_uOC_k__BackingField",
+  "type": "Oxide_Item_o*",
+  "offset": 64
+ },
+ "ITEM_DATA": {
+  "kind": "field",
+  "class": "Item",
+  "struct": "Oxide_Item_Fields",
+  "field": "_uvd_k__BackingField",
+  "type": "Oxide_ItemData_o*",
+  "offset": 32
+ },
+ "ITEMDATA_NAME": {
+  "kind": "field",
+  "class": "ItemData",
+  "struct": "Oxide_ItemData_Fields",
+  "field": "m_Name",
+  "type": "System_String_o*",
+  "offset": 24
+ },
+ "ITEMDATA_SHORTNAME": {
+  "kind": "field",
+  "class": "ItemData",
+  "struct": "Oxide_ItemData_Fields",
+  "field": "m_ShortName",
+  "type": "System_String_o*",
+  "offset": 32
+ },
+ "IL2CPP_STRING_LENGTH": {
+  "kind": "runtime",
+  "offset": 16,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "IL2CPP_STRING_CHARS": {
+  "kind": "runtime",
+  "offset": 20,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "PLAYER_EVENT_HANDLER": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "playerEventHandler",
+  "type": "pmi_o*",
+  "offset": 120
+ },
+ "EVENT_HANDLER_MANAGER_BACKREF": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "stats",
+  "type": "pzp_o*",
+  "offset": 208
+ },
+ "EVENT_HANDLER_AIM_ACTIVITY": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "foreignCupboardZoneIntrusion",
+  "type": "HyperHug_Games_Oxide_Features_GameModes_ForeignCupboardZone_ForeignCupboardZoneIntrusion_o*",
+  "offset": 616
+ },
+ "PLAYER_INVENTORY": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "inventory",
+  "type": "Oxide_PlayerInventory_o*",
+  "offset": 152
+ },
+ "PLAYER_WEAPON_REFERENCE": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "weaponReference",
+  "type": "Il2CppObject*",
+  "offset": 240
+ },
+ "PLAYER_WEAPONS_ARRAY": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "weapons",
+  "type": "Il2CppObject*",
+  "offset": 408
+ },
+ "INV_PLAYER_INVENTORY_DATA": {
+  "kind": "field",
+  "class": "PlayerInventory",
+  "struct": "Oxide_PlayerInventory_Fields",
+  "field": "_playerInventoryData",
+  "type": "Oxide_PlayerInventoryData_o*",
+  "offset": 32
+ },
+ "INV_PLAYER_INVENTORY_CLIENT": {
+  "kind": "field",
+  "class": "PlayerInventory",
+  "struct": "Oxide_PlayerInventory_Fields",
+  "field": "_playerInventoryClient",
+  "type": "pzo_o*",
+  "offset": 40
+ },
+ "PLAYERWEAPON_VIEW": {
+  "kind": "field",
+  "class": "PlayerWeapon",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_PlayerWeapon_Fields",
+  "field": "playerWeaponViewReference",
+  "type": "sY_o*",
+  "offset": 208
+ },
+ "PLAYERWEAPON_PIECE": {
+  "kind": "field",
+  "class": "PlayerWeapon",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_PlayerWeapon_Fields",
+  "field": "dNb",
+  "type": "Oxide_WeaponPiece_o",
+  "offset": 256
+ },
+ "PLAYERWEAPON_STATE": {
+  "kind": "field",
+  "class": "PlayerWeapon",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_PlayerWeapon_Fields",
+  "field": "dNu",
+  "type": "int32_t",
+  "offset": 272
+ },
+ "PLAYERWEAPON_PLAYER_BACKREF": {
+  "kind": "field",
+  "class": "PlayerWeapon",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_PlayerWeapon_Fields",
+  "field": "_player_k__BackingField",
+  "type": "Oxide_PlayerManager_o*",
+  "offset": 296
+ },
+ "WEAPONPIECE_ENABLED": {
+  "kind": "field",
+  "class": "WeaponPiece",
+  "struct": "Oxide_WeaponPiece_Fields",
+  "field": "Enabled",
+  "type": "bool",
+  "offset": 0
+ },
+ "WEAPONPIECE_NUMBER": {
+  "kind": "field",
+  "class": "WeaponPiece",
+  "struct": "Oxide_WeaponPiece_Fields",
+  "field": "Number",
+  "type": "int16_t",
+  "offset": 2
+ },
+ "WEAPONVIEW_WEAPON_BASE": {
+  "kind": "runtime",
+  "offset": 72,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "WEAPONVIEW_PIECE": {
+  "kind": "runtime",
+  "offset": 80,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "WEAPONVIEW_ROOT_TRANSFORM": {
+  "kind": "runtime",
+  "offset": 96,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "WEAPONVIEW_INNER": {
+  "kind": "runtime",
+  "offset": 16,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "MODELINFO_RIGHT_WEAPON_HOLDER": {
+  "kind": "field",
+  "class": "PlayerModelInfo",
+  "struct": "HyperHug_Games_Oxide_Features_Player_PlayerModelInfo_Fields",
+  "field": "rightWeaponHolder",
+  "type": "UnityEngine_Transform_o*",
+  "offset": 40
+ },
+ "MODELINFO_LEFT_WEAPON_HOLDER": {
+  "kind": "field",
+  "class": "PlayerModelInfo",
+  "struct": "HyperHug_Games_Oxide_Features_Player_PlayerModelInfo_Fields",
+  "field": "leftWeaponHolder",
+  "type": "UnityEngine_Transform_o*",
+  "offset": 48
+ },
+ "CHARANIM_PLAYER_MODEL_INFO": {
+  "kind": "field",
+  "class": "PlayerModelInfo",
+  "struct": "HyperHug_Games_Oxide_Features_Player_PlayerModelInfo_Fields",
+  "field": "leftWeaponHolder",
+  "type": "UnityEngine_Transform_o*",
+  "offset": 48
+ },
+ "INVDATA_PLAYER_MODEL_INFO": {
+  "kind": "field",
+  "class": "PlayerModelInfo",
+  "struct": "HyperHug_Games_Oxide_Features_Player_PlayerModelInfo_Fields",
+  "field": "head",
+  "type": "UnityEngine_Transform_o*",
+  "offset": 32
+ },
+ "IL2CPP_CLASS_NAME": {
+  "kind": "runtime",
+  "offset": 16,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "IL2CPP_CLASS_NAMESPACE": {
+  "kind": "runtime",
+  "offset": 24,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "EVENT_HANDLER_LOOK_DIRECTION": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "voicePlayer",
+  "type": "pJk_o*",
+  "offset": 320
+ },
+ "SYNC_VALUE_OFFSET": {
+  "kind": "runtime",
+  "offset": 32,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "ACTIVITY_ACTIVE_FLAG": {
+  "kind": "runtime",
+  "offset": 16,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "PLAYER_FP_MANAGER": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "fpManager",
+  "type": "Oxide_FPManager_o*",
+  "offset": 144
+ },
+ "FPMANAGER_CURRENT_WEAPON": {
+  "kind": "field",
+  "class": "FPManager",
+  "struct": "Oxide_FPManager_Fields",
+  "field": "urg",
+  "type": "Oxide_FPWeaponBase_o*",
+  "offset": 88
+ },
+ "FPMANAGER_CURRENT_OBJECT": {
+  "kind": "field",
+  "class": "FPManager",
+  "struct": "Oxide_FPManager_Fields",
+  "field": "_currentWeapon",
+  "type": "Oxide_FPObject_o*",
+  "offset": 80
+ },
+ "FPMANAGER_AIM_BLEND": {
+  "kind": "field",
+  "class": "FPManager",
+  "struct": "Oxide_FPManager_Fields",
+  "field": "_uOj_k__BackingField",
+  "type": "float",
+  "offset": 168
+ },
+ "FPOBJECT_PLAYER_BACKREF": {
+  "kind": "field",
+  "class": "FPObject",
+  "struct": "Oxide_FPObject_Fields",
+  "field": "Player",
+  "type": "Oxide_PlayerManager_o*",
+  "offset": 192
+ },
+ "FPWEAPON_IS_AIMING": {
+  "kind": "field",
+  "class": "FPWeaponBase",
+  "struct": "Oxide_FPWeaponBase_Fields",
+  "field": "_ued_k__BackingField",
+  "type": "bool",
+  "offset": 288
+ },
+ "PLAYER_KCC_REFERENCE": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "kccReference",
+  "type": "Il2CppObject*",
+  "offset": 176
+ },
+ "KCC_PLAYER_BACKREF": {
+  "kind": "field",
+  "class": "KCC",
+  "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
+  "field": "player",
+  "type": "Oxide_PlayerManager_o*",
+  "offset": 120
+ },
+ "KCC_HEAD_TRANSFORM": {
+  "kind": "field",
+  "class": "KCC",
+  "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
+  "field": "head",
+  "type": "UnityEngine_Transform_o*",
+  "offset": 136
+ },
+ "KCC_NORMAL_HEIGHT": {
+  "kind": "field",
+  "class": "KCC",
+  "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
+  "field": "normalHeight",
+  "type": "float",
+  "offset": 160
+ },
+ "KCC_CROUCH_HEIGHT": {
+  "kind": "field",
+  "class": "KCC",
+  "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
+  "field": "m_CrouchHeight",
+  "type": "float",
+  "offset": 164
+ },
+ "KCC_HITBOX_ROOT": {
+  "kind": "field",
+  "class": "KCC",
+  "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
+  "field": "hitBoxRecorderRoot",
+  "type": "HyperHug_Games_Oxide_Features_Network_HitBoxRecorderRoot_o*",
+  "offset": 112
+ },
+ "HITBOX_ROOT_ARRAY": {
+  "kind": "field",
+  "class": "HitBox",
+  "struct": "Oxide_HitBox_Fields",
+  "field": "m_HitArea",
+  "type": "int32_t",
+  "offset": 104
+ },
+ "HITBOX_SIZE": {
+  "kind": "field",
+  "class": "HitBox",
+  "struct": "Oxide_HitBox_Fields",
+  "field": "size",
+  "type": "UnityEngine_Vector3_o",
+  "offset": 36
+ },
+ "HITBOX_CENTER": {
+  "kind": "field",
+  "class": "HitBox",
+  "struct": "Oxide_HitBox_Fields",
+  "field": "center",
+  "type": "UnityEngine_Vector3_o",
+  "offset": 48
+ },
+ "HITBOX_AREA": {
+  "kind": "field",
+  "class": "HitBox",
+  "struct": "Oxide_HitBox_Fields",
+  "field": "m_HitArea",
+  "type": "int32_t",
+  "offset": 104
+ },
+ "KCC_LOOK_HEIGHT_OFFSET": {
+  "kind": "field",
+  "class": "KCC",
+  "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
+  "field": "lookHeightOffset",
+  "type": "float",
+  "offset": 144
+ },
+ "KCC_MOVE": {
+  "kind": "field",
+  "class": "KCC",
+  "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
+  "field": "PYK",
+  "type": "HyperHug_Games_Oxide_Features_Player_Move_o",
+  "offset": 364
+ },
+ "KCC_CHARACTER_ANIMATION": {
+  "kind": "field",
+  "class": "KCC",
+  "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
+  "field": "Ptk",
+  "type": "HyperHug_Games_Oxide_Features_Player_CharacterAnimation_o*",
+  "offset": 264
+ },
+ "CHAR_ANIM_PLAYER_BACKREF": {
+  "kind": "field",
+  "class": "CharacterAnimation",
+  "struct": "HyperHug_Games_Oxide_Features_Player_CharacterAnimation_Fields",
+  "field": "PGH",
+  "type": "Oxide_PlayerManager_o*",
+  "offset": 120
+ },
+ "CHAR_ANIM_RAGDOLL": {
+  "kind": "field",
+  "class": "CharacterAnimation",
+  "struct": "HyperHug_Games_Oxide_Features_Player_CharacterAnimation_Fields",
+  "field": "ragdoll",
+  "type": "HyperHug_Games_Oxide_By_Namespace_Oxide_Damage_System_Ragdoll_o*",
+  "offset": 56
+ },
+ "RAGDOLL_PELVIS_RIGIDBODY": {
+  "kind": "field",
+  "class": "Ragdoll",
+  "struct": "HyperHug_Games_Oxide_By_Namespace_Oxide_Damage_System_Ragdoll_Fields",
+  "field": "m_Pelvis",
+  "type": "UnityEngine_Rigidbody_o*",
+  "offset": 32
+ },
+ "RAGDOLL_BONES_ARRAY": {
+  "kind": "field",
+  "class": "Ragdoll",
+  "struct": "HyperHug_Games_Oxide_By_Namespace_Oxide_Damage_System_Ragdoll_Fields",
+  "field": "m_Bones",
+  "type": "Il2CppObject*",
+  "offset": 136
+ },
+ "RAGDOLL_BODYPART_TRANSFORM": {
+  "kind": "field",
+  "class": "Ragdoll.BodyPart",
+  "struct": "HyperHug_Games_Oxide_By_Namespace_Oxide_Damage_System_Ragdoll_BodyPart_Fields",
+  "field": "transform",
+  "type": "UnityEngine_Transform_o*",
+  "offset": 16
+ },
+ "IL2CPP_ARRAY_LENGTH": {
+  "kind": "runtime",
+  "offset": 24,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "TRANSFORM_CHILDREN_ARRAY": {
+  "kind": "runtime",
+  "offset": 72,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "TRANSFORM_CHILD_COUNT": {
+  "kind": "runtime",
+  "offset": 88,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "COMPONENT_GAMEOBJECT": {
+  "kind": "runtime",
+  "offset": 32,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "GAMEOBJECT_COMPONENT_ARRAY": {
+  "kind": "runtime",
+  "offset": 32,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "COMPONENT_PAIR_PTR": {
+  "kind": "runtime",
+  "offset": 8,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "GAMEOBJECT_NAME_GUESS": {
+  "kind": "runtime",
+  "offset": 72,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "IL2CPP_LIST_ITEMS": {
+  "kind": "runtime",
+  "offset": 16,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "IL2CPP_LIST_SIZE": {
+  "kind": "runtime",
+  "offset": 24,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "IL2CPP_ARRAY_FIRST_ELEMENT": {
+  "kind": "runtime",
+  "offset": 32,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "NETWORK_CLIENT_TYPEINFO_RVA": {
+  "kind": "typeinfo_rva",
+  "class": "Mirror.NetworkClient"
+ },
+ "NETWORK_CLIENT_SPAWNED": {
+  "kind": "field",
+  "class": "NetworkClient.static",
+  "struct": "Mirror_NetworkClient_StaticFields",
+  "field": "spawned",
+  "type": "Il2CppObject*",
+  "offset": 40
+ },
+ "DICT_ENTRIES": {
+  "kind": "runtime",
+  "offset": 24,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "DICT_COUNT": {
+  "kind": "field",
+  "class": "NetworkIdentity",
+  "struct": "Mirror_NetworkIdentity_Fields",
+  "field": "canFrequencyBeChanged",
+  "type": "bool",
+  "offset": 32
+ },
+ "DICT_ENTRY_STRIDE": {
+  "kind": "runtime",
+  "offset": 24,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "DICT_ENTRY_VALUE": {
+  "kind": "runtime",
+  "offset": 16,
+  "note": "раскладка Unity/IL2CPP или libunity — из dump.cs не выводится"
+ },
+ "NETID_NET_ID": {
+  "kind": "field",
+  "class": "NetworkIdentity",
+  "struct": "Mirror_NetworkIdentity_Fields",
+  "field": "_netId_k__BackingField",
+  "type": "uint32_t",
+  "offset": 88
+ },
+ "NETID_BEHAVIOURS": {
+  "kind": "field",
+  "class": "NetworkIdentity",
+  "struct": "Mirror_NetworkIdentity_Fields",
+  "field": "_NetworkBehaviours_k__BackingField",
+  "type": "Il2CppObject*",
+  "offset": 128
+ },
+ "MINEABLE_LOOT": {
+  "kind": "field",
+  "class": "MineableObject",
+  "struct": "Oxide_MineableObject_Fields",
+  "field": "m_Loot",
+  "type": "Il2CppObject*",
+  "offset": 160
+ },
+ "MINEABLE_FINISH_BONUS": {
+  "kind": "field",
+  "class": "MineableObject",
+  "struct": "Oxide_MineableObject_Fields",
+  "field": "m_FinishBonus",
+  "type": "Il2CppObject*",
+  "offset": 168
+ },
+ "MINEABLE_CURRENT_HEALTH": {
+  "kind": "field",
+  "class": "MineableObject",
+  "struct": "Oxide_MineableObject_Fields",
+  "field": "m_CurrentHealth",
+  "type": "float",
+  "offset": 120
+ },
+ "LOOTITEM_ITEM_NAME": {
+  "kind": "field",
+  "class": "LootItem",
+  "struct": "Oxide_LootItem_Fields",
+  "field": "ItemName",
+  "type": "System_String_o*",
+  "offset": 16
+ },
+ "MINEABLE_MAX_HEALTH": {
+  "kind": "field",
+  "class": "MineableObject",
+  "struct": "Oxide_MineableObject_Fields",
+  "field": "m_MaxHealth",
+  "type": "float",
+  "offset": 192
+ },
+ "MINEABLE_FRACTION": {
+  "kind": "field",
+  "class": "MineableObject",
+  "struct": "Oxide_MineableObject_Fields",
+  "field": "fractionRemaining",
+  "type": "float",
+  "offset": 208
+ },
+ "MINEABLE_ENTITY_TYPE": {
+  "kind": "field",
+  "class": "MineableObject",
+  "struct": "Oxide_MineableObject_Fields",
+  "field": "entityType",
+  "type": "int32_t",
+  "offset": 216
+ },
+ "PLAYER_USER_ID": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "userID",
+  "type": "System_String_o*",
+  "offset": 632
+ },
+ "PLAYER_TEAM_NAME": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "teamName",
+  "type": "System_String_o*",
+  "offset": 640
+ },
+ "PLAYER_CLAN_ID": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "clanId",
+  "type": "System_String_o*",
+  "offset": 656
+ },
+ "PLAYER_CLAN_TAG": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "clanTag",
+  "type": "System_String_o*",
+  "offset": 664
+ },
+ "PLAYER_VEHICLE_ID": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "vehicleID",
+  "type": "uint32_t",
+  "offset": 648
+ },
+ "PLAYER_SEAT_ID": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "seatID",
+  "type": "uint32_t",
+  "offset": 652
+ },
+ "LOOTOBJECT_INVENTORY": {
+  "kind": "field",
+  "class": "LootObject",
+  "struct": "Oxide_LootObject_Fields",
+  "field": "inventory",
+  "type": "Oxide_Inventory_o*",
+  "offset": 160
+ },
+ "LOOTOBJECT_IS_LOOTABLE": {
+  "kind": "field",
+  "class": "LootObject",
+  "struct": "Oxide_LootObject_Fields",
+  "field": "isLootable",
+  "type": "bool",
+  "offset": 168
+ },
+ "LOOTOBJECT_PANEL_NAME": {
+  "kind": "field",
+  "class": "LootObject",
+  "struct": "Oxide_LootObject_Fields",
+  "field": "panelName",
+  "type": "System_String_o*",
+  "offset": 224
+ },
+ "LOOTOBJECT_BUILDING_PIECE": {
+  "kind": "field",
+  "class": "LootObject",
+  "struct": "Oxide_LootObject_Fields",
+  "field": "m_Piece",
+  "type": "Oxide_Building_BuildingPiece_o*",
+  "offset": 248
+ },
+ "ITEMPICKUP_ITEM_OBJECT": {
+  "kind": "field",
+  "class": "ItemPickup",
+  "struct": "Oxide_ItemPickup_Fields",
+  "field": "_uXP_k__BackingField",
+  "type": "Oxide_Item_o*",
+  "offset": 168
+ },
+ "ITEMPICKUP_SHORTNAME": {
+  "kind": "field",
+  "class": "ItemPickup",
+  "struct": "Oxide_ItemPickup_Fields",
+  "field": "item",
+  "type": "System_String_o*",
+  "offset": 216
+ },
+ "ITEMPICKUP_AMOUNT": {
+  "kind": "field",
+  "class": "ItemPickup",
+  "struct": "Oxide_ItemPickup_Fields",
+  "field": "amount",
+  "type": "int32_t",
+  "offset": 224
+ },
+ "GAME_CONTROLLER_NET_IDENTITY_FIELD": {
+  "kind": "field",
+  "class": "GameControllerBase.static",
+  "struct": "Oxide_GameControllerBase_StaticFields",
+  "field": "_ukx_k__BackingField",
+  "type": "Mirror_NetworkIdentity_o*",
+  "offset": 8
+ }
+}
