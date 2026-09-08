@@ -5632,6 +5632,42 @@ bool esp_farm_get_target(FarmTarget& out) {
         aim.y += (best->kind == 0) ? 1.15F : 0.15F;
     }
 
+    // The live X floats a few cm OFF the bark. Aiming exactly at that
+    // floating point sends the swing ray PAST the trunk up close at a
+    // shallow angle (the mark is outside the trunk's silhouette), so the
+    // bot whiffed on every tree. Pull the aim point IN to the node's
+    // volume: the eye-to-aim ray then always enters the node, and the
+    // impact lands on the near bark right next to the mark (a few cm off
+    // it, which stays on the mark's screen sprite at farming distance).
+    if (spot_ok) {
+        if (best->kind == 0) {
+            // Tree: in towards the trunk axis, keeping the mark's height —
+            // that height is where the bonus applies. Half-way is far enough
+            // inside the bark that the ray always enters the trunk (the
+            // protrusion is a fraction of the trunk radius), yet close enough
+            // to the mark that the impact stays next to it.
+            float ax = aim.x - best->pos.x, az = aim.z - best->pos.z;
+            float h = sqrtf(ax * ax + az * az);
+            float r_aim = fmaxf(0.08F, 0.5F * h);
+            if (r_aim < h) {
+                float k = r_aim / h;
+                aim.x = best->pos.x + ax * k;
+                aim.z = best->pos.z + az * k;
+            }
+        } else {
+            // Ore: in towards the pivot (it rides inside the boulder).
+            float vx = aim.x - best->pos.x, vy = aim.y - best->pos.y, vz = aim.z - best->pos.z;
+            float d = sqrtf(vx * vx + vy * vy + vz * vz);
+            float r_aim = fmaxf(0.30F, 0.5F * d);
+            if (r_aim < d) {
+                float k = r_aim / d;
+                aim.x = best->pos.x + vx * k;
+                aim.y = best->pos.y + vy * k;
+                aim.z = best->pos.z + vz * k;
+            }
+        }
+    }
+
     // Camera basis, in order of preference: transform pose > basis from this
     // frame's view matrix (the last one exists on devices where the pose
     // read fails — the reason the farm used to sit in "no camera pose").
