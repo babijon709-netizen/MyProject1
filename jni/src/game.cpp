@@ -98,6 +98,30 @@ static bool rd_exact(uint64_t addr, T& value) {
     struct iovec remote = {(void*)addr, sizeof(T)};
     return remote_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)sizeof(T);
 }
+
+// ---- Batched remote reads ("x-ray style") -----------------------------------
+// One process_vm_readv carries many remote segments at once (UIO_MAXIOV).
+// The X-ray marker pipeline has always used this: one read for the whole
+// registry entry array, one for a player's bone matrices, ... The farm used
+// to do the opposite (one syscall per value: a single spot check was
+// thousands of reads). These helpers collapse a whole subtree scan into a
+// handful of calls, so the farm's traffic looks like the rest of the ESP
+// traffic — small, periodic, indistinguishable — instead of a constant
+// storm.
+//
+// Semantics on a mid-batch fault (a pointer went stale mid-update): the
+// transfer stops and the tail stays as the caller pre-filled it (zero),
+// which every consumer already treats as "unread" — the same as a failed
+// rd<T>. Nothing here ever writes to the target process.
+static void bulk_read_v(int n, struct iovec* local, struct iovec* remote) {
+    while (n > 0) {
+        const int chunk = n > 512 ? 512 : n; // stay far below UIO_MAXIOV
+        (void)remote_vm_readv(g_pid, local, chunk, remote, chunk, 0);
+        local += chunk;
+        remote += chunk;
+        n -= chunk;
+    }
+}
 static uint64_t rd_ptr(uint64_t a) { return rd<uint64_t>(a); }
 static Vec3     rd_v3 (uint64_t a) { return rd<Vec3>(a);     }
 static Mat4     rd_m4 (uint64_t a) { return rd<Mat4>(a);     }
@@ -4281,6 +4305,13 @@ struct FarmEntity {
 static std::vector<FarmEntity> g_farm_entities;
 static std::unordered_map<uint64_t, int> g_farm_blacklist; // identity -> frames left
 static int g_farm_rescan = 0;
+// The X-ray overlay's registry walk visits every Mineable anyway (trees
+// included — the overlay just doesn't draw them). When that walk ran
+// recently, the farm adopts its cache instead of walking the registry a
+// second time: one read pass feeds both, and the farm adds no traffic of
+// its own while the overlay is on.
+static std::vector<FarmEntity> g_farm_shared;
+static int g_farm_shared_age = 999999; // frames since the shared walk ran
 // Why the picker returned nothing (surfaced in the menu status line):
 // 0 ok, 1 off, 2 frame not published, 3 no nodes in registry, 4 none in
 // range, 5 camera pose unreadable.
@@ -4893,6 +4924,12 @@ static void rebuild_marker_entities() {
     std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
     if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
 
+    // The registry is readable from here on: the farm's shared cache is
+    // rebuilt for real (a partially read walk is fine — the same staleness
+    // the marker list already tolerates).
+    g_farm_shared.clear();
+    g_farm_shared_age = 0;
+
     uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
         uint64_t identity = 0;
@@ -4915,6 +4952,48 @@ static void rebuild_marker_entities() {
             if (!valid_obj(component)) continue;
             const uint8_t component_class = marker_class_of(rd_ptr(component));
             if (component_class == MARKER_CLASS_NONE) continue;
+
+            // Feed the farm from this same walk (see g_farm_shared): the
+            // overlay skips trees, the farm lives on them. One extra
+            // entityType read per Mineable — negligible at the 3 s cadence.
+            if (component_class == MARKER_CLASS_MINEABLE && g_farm_shared.size() < 512) {
+                int farm_kind = -1;
+                switch ((MineableEntityType)rd<int32_t>(component + MINEABLE_ENTITY_TYPE)) {
+                    case MineableEntityType::Tree:   farm_kind = 0; break;
+                    case MineableEntityType::Stone:  farm_kind = 1; break;
+                    case MineableEntityType::Iron:   farm_kind = 2; break;
+                    case MineableEntityType::Sulfur: farm_kind = 3; break;
+                    default: break;
+                }
+                if (farm_kind >= 0) {
+                    FarmEntity fe;
+                    fe.identity = identity;
+                    fe.component = component;
+                    fe.kind = farm_kind;
+                    fe.transform = native_component_transform(managed_object_native(component));
+                    if (!fe.transform)
+                        fe.transform = native_component_transform(managed_object_native(identity));
+                    if (fe.transform) {
+                        // Fallen logs register as "Tree" but cannot be chopped
+                        // — same name filter the farm's own walk uses.
+                        if (farm_kind == 0 && g_go_name_offset_valid) {
+                            char go_name[48];
+                            if (read_transform_name(fe.transform, go_name, sizeof(go_name))) {
+                                for (char* p = go_name; *p; ++p)
+                                    if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+                                if (strstr(go_name, "log") || strstr(go_name, "fallen") ||
+                                    strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
+                                    strstr(go_name, "stump"))
+                                    fe.transform = 0;
+                            }
+                        }
+                        if (fe.transform) {
+                            fe.pos_valid = marker_world_position(fe.transform, fe.pos);
+                            g_farm_shared.push_back(fe);
+                        }
+                    }
+                }
+            }
 
             MarkerLook look;
             char pickup_text[40] = {};
@@ -4991,6 +5070,8 @@ static void reset_marker_caches() {
     // Farm entities come from the same registry: stale pointers must not
     // survive a world reload either.
     g_farm_entities.clear();
+    g_farm_shared.clear();
+    g_farm_shared_age = 999999;
     g_farm_blacklist.clear();
     g_farm_rescan = 0;
 }
@@ -5020,6 +5101,12 @@ std::vector<EspMarker> esp_get_markers() {
         // after a respawn), so retry in half a second instead.
         g_marker_rescan_countdown = g_marker_entities.empty() ? 30 : 180;
     }
+
+    // The shared farm cache expires per frame — from here while the farm is
+    // OFF (so a cache cannot sit "fresh" forever and be adopted long after
+    // the world changed), from esp_farm_get_target while it is on (the farm
+    // path runs every active frame; two counters would halve the window).
+    if (!g_farm_mask && g_farm_shared_age < 999999) ++g_farm_shared_age;
 
     // No usable layout (fresh join / respawn, nobody around): learn it from
     // the ENTITY transforms themselves. The layout discovery only needs a
@@ -5207,6 +5294,19 @@ static bool farm_kind_from_loot(uint64_t mineable, int& kind) {
 }
 
 static void rebuild_farm_entities() {
+    // Prefer the X-ray overlay's walk: it already visited every Mineable
+    // (trees included) a moment ago. Adopting its cache means the farm adds
+    // ZERO registry traffic while the overlay is on.
+    if (g_farm_shared_age < 240 && !g_farm_shared.empty()) {
+        g_farm_entities.clear();
+        for (const FarmEntity& e : g_farm_shared) {
+            if (!(g_farm_mask & (1u << e.kind))) continue;
+            g_farm_entities.push_back(e);
+            if (g_farm_entities.size() >= 512) break;
+        }
+        return;
+    }
+
     // A transient read failure (the game rewrites the dictionary mid-scan)
     // must NOT wipe the working cache: that was the "marker disappears, bot
     // stops, marker comes back" stutter. The old list stays until a scan
@@ -5388,6 +5488,208 @@ static bool farm_name_is_spot(int kind, const char* name) {
            strstr(name, "plus") || x_lead;
 }
 
+// Collect a transform subtree with BATCHED reads: one call for every child
+// count in a level, one for the child-array pointers, one for the arrays
+// themselves. A 400-node tree costs ~10 syscalls instead of ~1200.
+static void farm_collect_subtree(uint64_t root, std::vector<uint64_t>& nodes, size_t max_nodes) {
+    nodes.clear();
+    if (!root) return;
+    nodes.push_back(root);
+    size_t level_start = 0;
+    while (level_start < nodes.size() && nodes.size() < max_nodes) {
+        const size_t level_end = nodes.size();
+        const int n = (int)(level_end - level_start);
+
+        // (1) child counts of the whole level — one read.
+        std::vector<int32_t> counts((size_t)n, 0);
+        {
+            std::vector<struct iovec> lv((size_t)n), rv((size_t)n);
+            for (int i = 0; i < n; ++i) {
+                lv[(size_t)i] = {&counts[(size_t)i], sizeof(int32_t)};
+                rv[(size_t)i] = {(void*)(nodes[level_start + (size_t)i] + TRANSFORM_CHILD_COUNT), sizeof(int32_t)};
+            }
+            bulk_read_v(n, lv.data(), rv.data());
+        }
+        int total = 0;
+        for (int i = 0; i < n; ++i) {
+            // A count that is not 1..128 is garbage (mid-update read) — drop
+            // the node for this level, exactly like read_transform_children did.
+            if (counts[i] < 1 || counts[i] > 128) counts[i] = 0;
+            total += counts[i];
+        }
+        if (total <= 0) { level_start = level_end; continue; }
+
+        // (2) the child-array pointers — one read.
+        std::vector<uint64_t> arrays((size_t)n, 0);
+        {
+            std::vector<struct iovec> lv((size_t)total), rv((size_t)total);
+            int k = 0;
+            for (int i = 0; i < n; ++i) {
+                if (counts[i] <= 0) continue;
+                lv[(size_t)k] = {&arrays[(size_t)i], sizeof(uint64_t)};
+                rv[(size_t)k] = {(void*)(nodes[level_start + (size_t)i] + TRANSFORM_CHILDREN_ARRAY), sizeof(uint64_t)};
+                ++k;
+            }
+            bulk_read_v(k, lv.data(), rv.data());
+        }
+
+        // (3) the child arrays themselves — one read.
+        if (nodes.size() < max_nodes) {
+            std::vector<uint64_t> buffer((size_t)total);
+            std::vector<struct iovec> lv((size_t)total), rv((size_t)total);
+            int k = 0;
+            for (int i = 0; i < n && nodes.size() < max_nodes; ++i) {
+                if (counts[i] <= 0 || !arrays[(size_t)i]) continue;
+                int c = counts[i];
+                if ((int)nodes.size() + c > (int)max_nodes) c = (int)(max_nodes - nodes.size());
+                for (int j = 0; j < c; ++j) {
+                    lv[(size_t)k] = {&buffer[(size_t)k], sizeof(uint64_t)};
+                    rv[(size_t)k] = {(void*)(arrays[(size_t)i] + (size_t)j * sizeof(uint64_t)), sizeof(uint64_t)};
+                    ++k;
+                }
+            }
+            bulk_read_v(k, lv.data(), rv.data());
+            for (int i = 0; i < k && nodes.size() < max_nodes; ++i)
+                if (buffer[(size_t)i]) nodes.push_back(buffer[(size_t)i]);
+        }
+        level_start = level_end;
+    }
+}
+
+// World positions for many native transforms in ONE scan (~10-15 syscalls for
+// the whole batch, whatever its size) with the same layouts the X-ray
+// markers use. Nodes the learned layout cannot read come back flagged and
+// the caller retries them individually.
+static void farm_bulk_positions(const uint64_t* tr, int n, Vec3* out, uint8_t* ok) {
+    const TransformHierarchyLayout* layout = nullptr;
+    if (g_skeleton_layout_valid) layout = &g_skeleton_layout;
+    else if (g_transform_hierarchy_layout_valid) layout = &g_transform_hierarchy_layout;
+    for (int i = 0; i < n; ++i) { out[i] = {}; ok[i] = 0; }
+    if (!layout || n <= 0) return;
+
+    // Round 1: hierarchy data pointer + matrix index per transform.
+    std::vector<uint64_t> data((size_t)n, 0);
+    std::vector<int32_t> idx((size_t)n, -1);
+    {
+        std::vector<struct iovec> lv((size_t)n * 2), rv((size_t)n * 2);
+        for (int i = 0; i < n; ++i) {
+            lv[(size_t)i * 2]     = {&data[(size_t)i], sizeof(uint64_t)};
+            rv[(size_t)i * 2]     = {(void*)(tr[(size_t)i] + layout->data_offset), sizeof(uint64_t)};
+            lv[(size_t)i * 2 + 1] = {&idx[(size_t)i], sizeof(int32_t)};
+            rv[(size_t)i * 2 + 1] = {(void*)(tr[(size_t)i] + layout->index_offset), sizeof(int32_t)};
+        }
+        bulk_read_v(n * 2, lv.data(), rv.data());
+    }
+    std::vector<uint8_t> valid((size_t)n, 0);
+    for (int i = 0; i < n; ++i)
+        valid[(size_t)i] = (data[(size_t)i] && idx[(size_t)i] >= 0 && idx[(size_t)i] <= 100000) ? 1 : 0;
+    if (!std::any_of(valid.begin(), valid.end(), [](uint8_t v) { return v != 0; })) return;
+
+    // Round 2: matrix/index arrays behind the data pointer.
+    std::vector<uint64_t> matrices((size_t)n, 0), indices((size_t)n, 0);
+    {
+        std::vector<struct iovec> lv((size_t)n * 2), rv((size_t)n * 2);
+        int k = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!valid[(size_t)i]) continue;
+            lv[(size_t)k] = {&matrices[(size_t)i], sizeof(uint64_t)};
+            rv[(size_t)k] = {(void*)(data[(size_t)i] + layout->matrices_offset), sizeof(uint64_t)};
+            lv[(size_t)k + 1] = {&indices[(size_t)i], sizeof(uint64_t)};
+            rv[(size_t)k + 1] = {(void*)(data[(size_t)i] + layout->indices_offset), sizeof(uint64_t)};
+            k += 2;
+        }
+        bulk_read_v(k, lv.data(), rv.data());
+        if (layout->matrices_indirect || layout->indices_indirect) {
+            k = 0;
+            for (int i = 0; i < n; ++i) {
+                if (!valid[(size_t)i]) continue;
+                if (layout->matrices_indirect) {
+                    lv[(size_t)k] = {&matrices[(size_t)i], sizeof(uint64_t)};
+                    rv[(size_t)k] = {(void*)matrices[(size_t)i], sizeof(uint64_t)};
+                    ++k;
+                }
+                if (layout->indices_indirect) {
+                    lv[(size_t)k] = {&indices[(size_t)i], sizeof(uint64_t)};
+                    rv[(size_t)k] = {(void*)indices[(size_t)i], sizeof(uint64_t)};
+                    ++k;
+                }
+            }
+            bulk_read_v(k, lv.data(), rv.data());
+        }
+    }
+    for (int i = 0; i < n; ++i)
+        if (valid[(size_t)i] && (!matrices[(size_t)i] || !indices[(size_t)i])) valid[(size_t)i] = 0;
+
+    // Round 3: own matrix + root parent index per transform.
+    std::vector<Matrix34> mat((size_t)n);
+    std::vector<int32_t> parent((size_t)n, -2);
+    {
+        std::vector<struct iovec> lv((size_t)n * 2), rv((size_t)n * 2);
+        int k = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!valid[(size_t)i]) continue;
+            lv[(size_t)k] = {&mat[(size_t)i], sizeof(Matrix34)};
+            rv[(size_t)k] = {(void*)(matrices[(size_t)i] + (size_t)idx[(size_t)i] * sizeof(Matrix34)), sizeof(Matrix34)};
+            lv[(size_t)k + 1] = {&parent[(size_t)i], sizeof(int32_t)};
+            rv[(size_t)k + 1] = {(void*)(indices[(size_t)i] + (size_t)idx[(size_t)i] * sizeof(int32_t)), sizeof(int32_t)};
+            k += 2;
+        }
+        bulk_read_v(k, lv.data(), rv.data());
+    }
+    // The walk composes onto the transform's OWN translation.
+    for (int i = 0; i < n; ++i) {
+        if (!valid[(size_t)i] || !matrix34_is_valid(mat[(size_t)i])) { valid[(size_t)i] = 0; continue; }
+        out[(size_t)i] = {mat[(size_t)i].translation.x,
+                          mat[(size_t)i].translation.y,
+                          mat[(size_t)i].translation.z};
+    }
+
+    // Parent walk, one level per read round (the chain is 2-5 deep for
+    // world transforms; 128 is the same guard read_transform_hierarchy_* uses).
+    int depth = 0;
+    while (depth < 128) {
+        bool any = false;
+        for (int i = 0; i < n; ++i)
+            if (valid[(size_t)i] && parent[(size_t)i] >= 0 && parent[(size_t)i] <= 100000) { any = true; break; }
+        if (!any) break;
+        std::vector<Matrix34> pm((size_t)n);
+        std::vector<int32_t> np((size_t)n, -2);
+        {
+            std::vector<struct iovec> lv((size_t)n * 2), rv((size_t)n * 2);
+            int k = 0;
+            for (int i = 0; i < n; ++i) {
+                if (!valid[(size_t)i] || parent[(size_t)i] < 0 || parent[(size_t)i] > 100000) continue;
+                lv[(size_t)k] = {&pm[(size_t)i], sizeof(Matrix34)};
+                rv[(size_t)k] = {(void*)(matrices[(size_t)i] + (size_t)parent[(size_t)i] * sizeof(Matrix34)), sizeof(Matrix34)};
+                lv[(size_t)k + 1] = {&np[(size_t)i], sizeof(int32_t)};
+                rv[(size_t)k + 1] = {(void*)(indices[(size_t)i] + (size_t)parent[(size_t)i] * sizeof(int32_t)), sizeof(int32_t)};
+                k += 2;
+            }
+            bulk_read_v(k, lv.data(), rv.data());
+        }
+        for (int i = 0; i < n; ++i) {
+            if (!valid[(size_t)i] || parent[(size_t)i] < 0 || parent[(size_t)i] > 100000) continue;
+            const Matrix34& matrix = pm[(size_t)i];
+            if (!matrix34_is_valid(matrix)) { valid[(size_t)i] = 0; continue; }
+            const Vec3& s = out[(size_t)i];
+            const Vec3 scaled = {s.x * matrix.scale.x, s.y * matrix.scale.y, s.z * matrix.scale.z};
+            const Vec3 rotated = rotate_vector(matrix.rotation, scaled);
+            out[(size_t)i] = {matrix.translation.x + rotated.x,
+                              matrix.translation.y + rotated.y,
+                              matrix.translation.z + rotated.z};
+            parent[(size_t)i] = np[(size_t)i];
+        }
+        ++depth;
+    }
+    for (int i = 0; i < n; ++i) {
+        if (!valid[(size_t)i]) continue;
+        if (parent[(size_t)i] != -1 || !matrix34_is_valid(mat[(size_t)i]) ||
+            !vec3_is_finite(out[(size_t)i]) || !position_looks_like_world_space(out[(size_t)i]))
+            valid[(size_t)i] = 0;
+    }
+    for (int i = 0; i < n; ++i) ok[(size_t)i] = valid[(size_t)i];
+}
+
 // Find the live X under the node. `keep` is the previous pick — it is held
 // while it is still alive, so one bad read (the game rewriting the transform
 // mid-update) does not drop the lock. Returns 0 when no live X is found.
@@ -5396,28 +5698,45 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
 
     std::vector<uint64_t> nodes;
     // Trees carry a LOT of children (LODs, foliage, colliders).
-    collect_transform_subtree(node_transform, nodes, kind == 0 ? 400 : 256);
+    farm_collect_subtree(node_transform, nodes, kind == 0 ? 400 : 256);
+    const int n = (int)nodes.size();
+
+    // All child positions in a couple of batched reads (x-ray style);
+    // anything the learned layout cannot read is retried one by one.
+    std::vector<Vec3> pos((size_t)n);
+    std::vector<uint8_t> ok((size_t)n, 0);
+    farm_bulk_positions(nodes.data(), n, pos.data(), ok.data());
+    for (int i = 0; i < n; ++i) {
+        if (ok[(size_t)i] || nodes[(size_t)i] == node_transform) continue;
+        if (marker_world_position(nodes[(size_t)i], pos[(size_t)i])) ok[(size_t)i] = 1;
+    }
 
     struct Cand { uint64_t node; float err; };
     std::vector<Cand> live;
     live.reserve(nodes.size());
-    uint64_t named = 0;
-    float named_err = 1e9F;
-    for (uint64_t node : nodes) {
-        if (node == node_transform) continue;
-        Vec3 p{};
-        if (!marker_world_position(node, p)) continue;
+    for (int i = 0; i < n; ++i) {
+        if (!ok[(size_t)i]) continue;
+        if (nodes[(size_t)i] == node_transform) continue;
+        const Vec3 p = pos[(size_t)i];
+        if (!vec3_is_finite(p)) continue;
         float err = 1e9F;
         if (!farm_spot_alive(kind, node_pos, p, &err)) continue;
-        live.push_back({node, err});
-        if (g_go_name_offset_valid) {
+        live.push_back({nodes[(size_t)i], err});
+    }
+    // Names only for the few geometry-live candidates (the old code read the
+    // name of EVERY child — hundreds of extra syscalls per scan for names
+    // that are almost never the deciding factor).
+    uint64_t named = 0;
+    float named_err = 1e9F;
+    if (g_go_name_offset_valid) {
+        for (const Cand& c : live) {
             char name[48];
-            if (read_transform_name(node, name, sizeof(name))) {
-                for (char* c = name; *c; ++c)
-                    if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
-                if (farm_name_is_spot(kind, name) && err < named_err) {
-                    named_err = err;
-                    named = node;
+            if (read_transform_name(c.node, name, sizeof(name))) {
+                for (char* ch = name; *ch; ++ch)
+                    if (*ch >= 'A' && *ch <= 'Z') *ch = (char)(*ch - 'A' + 'a');
+                if (farm_name_is_spot(kind, name) && c.err < named_err) {
+                    named_err = c.err;
+                    named = c.node;
                 }
             }
         }
@@ -5458,6 +5777,7 @@ void esp_farm_debug(int& nodes_cached, int& idle_reason) {
 
 bool esp_farm_get_target(FarmTarget& out) {
     out = FarmTarget{};
+    if (g_farm_shared_age < 999999) ++g_farm_shared_age;
     if (!g_farm_mask) { g_farm_idle_reason = 1; return false; }
     if (g_pid <= 0 || !g_il2cpp_base) { g_farm_idle_reason = 2; return false; }
     // Same self-repair as the markers: when the box pipeline did not publish
@@ -5547,14 +5867,37 @@ bool esp_farm_get_target(FarmTarget& out) {
         s_spot_last = {};
         s_spot_hold = 0;
     }
-    if (--s_spot_recheck <= 0) {
-        s_spot_recheck = s_spot_transform ? 12 : 6;
-        uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform);
-        if (found != s_spot_transform) {
-            if (!found) {
+    // The X only exists in melee range, so the subtree is only scanned while
+    // we are actually near the node (scanning it from 50 m away was pure
+    // read noise). And a spot that has not moved between two scans is
+    // re-checked less often — the mark only hops after a hit.
+    {
+        const float hpx = g_frame_local_pos.x - best->pos.x;
+        const float hpz = g_frame_local_pos.z - best->pos.z;
+        const bool near_node = hpx * hpx + hpz * hpz < 8.0F * 8.0F;
+        if (near_node && --s_spot_recheck <= 0) {
+            static Vec3 s_spot_prev{};
+            static bool s_spot_prev_valid = false;
+            static uint64_t s_spot_prev_owner = 0;
+            if (s_spot_prev_owner != best->component) {
+                s_spot_prev = {};
+                s_spot_prev_valid = false;
+                s_spot_prev_owner = best->component;
+            }
+            const Vec3 old_prev = s_spot_prev; // where the mark was at the LAST scan
+            uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform);
+            if (found == s_spot_transform) {
+                // Same mark: refresh its position for the stability test.
+                Vec3 cur = s_spot_prev;
+                if (found && marker_world_position(found, cur) && vec3_is_finite(cur)) {
+                    s_spot_prev = cur;
+                    s_spot_prev_valid = true;
+                }
+            } else if (!found) {
                 s_spot_transform = 0;
                 s_spot_last = {};
                 s_spot_hold = 0;
+                s_spot_prev_valid = false;
             } else {
                 // Switch only to a candidate that is ALIVE right now: a
                 // mid-update read can make the scan "see" a child that is
@@ -5566,9 +5909,15 @@ bool esp_farm_get_target(FarmTarget& out) {
                     s_spot_transform = found;
                     s_spot_last = {};
                     s_spot_hold = 0;
+                    s_spot_prev = test;
+                    s_spot_prev_valid = true;
                 }
                 // Otherwise keep the current pick; the scan runs again soon.
             }
+            const bool stable = s_spot_transform && s_spot_prev_valid &&
+                (s_spot_prev.x - old_prev.x) * (s_spot_prev.x - old_prev.x) +
+                (s_spot_prev.z - old_prev.z) * (s_spot_prev.z - old_prev.z) < 0.0004F;
+            s_spot_recheck = !s_spot_transform ? 6 : (stable ? 36 : 12);
         }
     }
 
