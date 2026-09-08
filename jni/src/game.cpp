@@ -5166,13 +5166,30 @@ void esp_farm_blacklist(unsigned long long id, float seconds) {
     if (g_farm_rescan > 15) g_farm_rescan = 15;
 }
 
+// Kind-aware "is this child the glowing X". Tree pivots sit at the BASE, so
+// the mark is above them and away from the trunk. Ore pivots sit near the
+// TOP of a small boulder, so the mark is often BELOW the pivot and closer
+// than 35 cm — the tree filter was rejecting every ore X (no green mark,
+// swings at the body).
+static bool farm_spot_plausible(int kind, const Vec3& node_pos, const Vec3& p, float* d2_out = nullptr) {
+    float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
+    float d2 = sx * sx + sy * sy + sz * sz;
+    if (d2_out) *d2_out = d2;
+    if (kind == 0) {
+        if (d2 <= 0.35F * 0.35F || d2 >= 6.0F * 6.0F) return false;
+        return sy > 0.2F && sy < 2.8F;
+    }
+    if (d2 <= 0.08F * 0.08F || d2 >= 3.5F * 3.5F) return false;
+    return sy > -1.6F && sy < 1.8F;
+}
+
 // The glowing bonus "X" is a child GameObject of the node. Search the subtree
 // for a name that looks like it AND that sits visibly away from the node
 // pivot: every prefab also carries a dormant template child parked exactly at
 // the pivot (tree base) until the real X activates, and returning that one
 // made the bot chop the bottom of the trunk. The result is cached per
 // component and re-checked because the spot jumps around between hits.
-static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, uint64_t keep) {
+static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, int kind, uint64_t keep) {
     if (!node_transform) return 0;
     std::vector<uint64_t> nodes;
     // Trees carry a LOT of children (LODs, foliage, colliders) — a small cap
@@ -5190,10 +5207,7 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, ui
     }
 
     auto plausible = [&](const Vec3& p) -> bool {
-        float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
-        float d2 = sx * sx + sy * sy + sz * sz;
-        if (d2 <= 0.35F * 0.35F || d2 >= 6.0F * 6.0F) return false;
-        return sy > 0.2F && sy < 2.8F;
+        return farm_spot_plausible(kind, node_pos, p);
     };
 
     // Pass 1: by name (rock prefabs name their X clearly).
@@ -5211,6 +5225,11 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, ui
                          strstr(name, "hitpoint") ||
                          (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
                                              (name[1] >= '0' && name[1] <= '9')));
+            // Ore X is often named Marker / Plus / Gather / Target. On trees
+            // those words match LOD children and snap the lock onto the trunk.
+            if (!looks && kind != 0)
+                looks = strstr(name, "marker") || strstr(name, "gather") ||
+                        strstr(name, "target") || strstr(name, "plus");
             if (!looks) continue;
             if (!plausible(cand.pos)) continue;
             float sx = cand.pos.x - node_pos.x, sy = cand.pos.y - node_pos.y, sz = cand.pos.z - node_pos.z;
@@ -5383,7 +5402,7 @@ bool esp_farm_get_target(FarmTarget& out) {
         // не затирает известный трансформ нулём и не меняет его на LOD/имя,
         // пока текущий ещё на коре — иначе метка слетает на ствол.
         s_spot_recheck = s_spot_transform ? 24 : 12;
-        uint64_t found = farm_find_spot(best->transform, best->pos, s_spot_transform);
+        uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform);
         if (found && found != s_spot_transform) {
             s_spot_transform = found;
             s_spot_last_ok = false;
@@ -5407,11 +5426,12 @@ bool esp_farm_get_target(FarmTarget& out) {
         if (read_ok) {
             float sx = spot.x - best->pos.x, sy = spot.y - best->pos.y, sz = spot.z - best->pos.z;
             float d2 = sx * sx + sy * sy + sz * sz;
-            if (d2 >= 6.0F * 6.0F) {
+            const float max_r = (best->kind == 0) ? 6.0F : 3.5F;
+            if (d2 >= max_r * max_r) {
                 s_spot_transform = 0;
                 s_spot_last_ok = false;
                 s_spot_hold = 0;
-            } else if (d2 > 0.35F * 0.35F && sy > 0.15F && sy < 2.9F) {
+            } else if (farm_spot_plausible(best->kind, best->pos, spot)) {
                 s_spot_last = spot;
                 s_spot_last_ok = true;
                 s_spot_hold = 48;
@@ -5465,8 +5485,8 @@ bool esp_farm_get_target(FarmTarget& out) {
             aim.x = spot_raw.x - dirx * pull;
             aim.z = spot_raw.z - dirz * pull;
             aim.y = spot_raw.y;
-            float from_node = (best->kind == 0) ? 1.35F : 2.00F;
-            float from_spot = (best->kind == 0) ? 0.70F : 1.00F;
+            float from_node = (best->kind == 0) ? 1.35F : 1.55F;
+            float from_spot = (best->kind == 0) ? 0.70F : 0.70F;
             float stand_r = psl + from_spot;
             if (stand_r < from_node) stand_r = from_node;
             stand.x = best->pos.x + dirx * stand_r;
@@ -5531,7 +5551,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     // Screen position of the aim point, for the on-screen target mark.
     if (g_frame_vp_valid) {
         Vec2 screen{};
-        if (w2s(g_frame_vp, aim, g_frame_sw, g_frame_sh, screen, false) &&
+        if (w2s(g_frame_vp, (spot_ok ? spot_raw : aim), g_frame_sw, g_frame_sh, screen, false) &&
             std::isfinite(screen.x) && std::isfinite(screen.y) &&
             screen.x >= -64.0F && screen.x <= g_frame_sw + 64.0F &&
             screen.y >= -64.0F && screen.y <= g_frame_sh + 64.0F) {

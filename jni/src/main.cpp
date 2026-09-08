@@ -3702,14 +3702,14 @@ static void UpdateFarm(float dt) {
 
     // ---- decide the phase ----
     // reachDist is deliberately tight for trees (a thin trunk holds its node
-    // position dead centre, and stopping 3+ m away leaves melee short); rocks
-    // are physically bigger, so their centre sits further from where the
-    // player can stand. While mining the move finger keeps nudging forward
-    // until walkUntil, closing the last step on its own.
+    // position dead centre, and stopping 3+ m away leaves melee short). Ore
+    // X sits on the boulder surface, often below the top-mounted pivot, so
+    // stand/melee are measured to that mark — not 2 m off the node centre.
+    // While mining the move finger keeps nudging forward until walkUntil.
     const bool  isTree    = (tgt.kind == 0);
-    const float reachDist = isTree ? 2.6f : 3.4f; // body: close enough to swing
-    const float meleeX    = isTree ? 1.45f : 2.05f; // must actually REACH the X
-    const float meleeHold = isTree ? 1.70f : 2.35f; // hysteresis while mining
+    const float reachDist = isTree ? 2.6f : 2.4f; // body: close enough to swing
+    const float meleeX    = isTree ? 1.45f : 1.55f; // must actually REACH the X
+    const float meleeHold = isTree ? 1.70f : 1.80f; // hysteresis while mining
     const float aimedYaw  = (g_farmPhase == 3) ? 8.f : 14.f;
     const float standArrive = s_moveDown ? 0.45f : 0.65f;
     bool goStand = tgt.has_spot && tgt.stand_ok && tgt.stand_dist > standArrive;
