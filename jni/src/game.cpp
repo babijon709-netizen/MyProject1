@@ -2573,10 +2573,24 @@ static void prune_player_track(const std::vector<uint64_t>& players) {
     if (g_player_track_pick.size() > 256) g_player_track_pick.clear();
 }
 
+static float vec3_horiz2(const Vec3& a, const Vec3& b) {
+    float dx = a.x - b.x, dz = a.z - b.z;
+    return dx * dx + dz * dz;
+}
+
 static bool player_is_mounted(uint64_t player) {
     if (!player) return false;
     uint32_t vehicle = rd<uint32_t>(player + PLAYER_VEHICLE_ID);
-    return vehicle != 0 && vehicle != 0xFFFFFFFFu;
+    if (vehicle != 0 && vehicle != 0xFFFFFFFFu) return true;
+    // Copters / some seats leave vehicleID at 0; seatID is still non-zero.
+    uint32_t seat = rd<uint32_t>(player + PLAYER_SEAT_ID);
+    return seat != 0 && seat != 0xFFFFFFFFu && seat < 32u;
+}
+
+static bool player_saved_position(uint64_t player, Vec3& out) {
+    uint64_t off = g_player_position_offset ? g_player_position_offset : (uint64_t)PLAYER_POSITION;
+    out = rd_v3(player + off);
+    return vec3_is_finite(out) && position_looks_like_world_space(out);
 }
 
 // World position of the player's own transform (worldCameraRoot). While he is
@@ -2585,56 +2599,150 @@ static bool player_rendered_position(uint64_t player, Vec3& out) {
     uint64_t native = resolve_player_native_transform(player);
     if (!native) return false;
     if (g_skeleton_layout_valid && read_transform_hierarchy_layout(native, g_skeleton_layout, out)
-        && vec3_is_finite(out))
+        && vec3_is_finite(out) && position_looks_like_world_space(out))
         return true;
-    return read_transform_hierarchy_position(native, out) && vec3_is_finite(out);
+    return read_transform_hierarchy_position(native, out) && vec3_is_finite(out)
+        && position_looks_like_world_space(out);
+}
+
+// Seated body: characterModel is parented to the seat even when worldCameraRoot
+// is left behind at the boarding point.
+static bool player_model_position(uint64_t player, Vec3& out) {
+    uint64_t root = skeleton_model_root(player);
+    if (!root) return false;
+    if (g_skeleton_layout_valid && read_transform_hierarchy_layout(root, g_skeleton_layout, out)
+        && vec3_is_finite(out) && position_looks_like_world_space(out))
+        return true;
+    return read_transform_hierarchy_position(root, out) && vec3_is_finite(out)
+        && position_looks_like_world_space(out);
 }
 
 // worldCameraRoot sits at eye level, the box is built from the feet.
 static constexpr float kCameraRootHeight = 1.60F;
 
-// Mounted-state latch. Two raw reads flicker frame to frame while a player
-// rides a vehicle: the vehicleID SyncVar (rewritten by the net tick mid-read,
-// occasionally reads 0) and the rendered transform (fails sporadically).
-// Trusting them directly bounced the box between the live vehicle position
-// and the stale mount point every few frames. The latch engages on the first
-// mounted read, disengages only after ~a quarter second of consistent
-// unmounted reads, and holds the last good rendered position across read
-// hiccups.
+// Mounted-state latch. lastSavedPosition freezes at the boarding point while
+// the rendered transform (and/or the character model) rides with the vehicle.
+// vehicleID / the transform also flicker mid-tick. Engage on seat/vehicle OR
+// on lastSaved freeze + a live visual that has left the mount; never snap the
+// box back to that mount mid-ride.
 struct MountLatch {
     int  unmounted_streak = 0;
+    int  saved_still = 0;
     bool engaged = false;
     Vec3 last{};
     bool last_ok = false;
+    Vec3 prev_saved{};
+    bool have_saved = false;
 };
 static std::unordered_map<uint64_t, MountLatch> g_mount_latch;
 
-static void apply_mounted_position(uint64_t player, Vec3& feet) {
-    if (!g_use_direct_player_position) return; // already using the transform
-    bool mounted_now = player_is_mounted(player);
+static bool player_mount_engaged(uint64_t player) {
     auto found = g_mount_latch.find(player);
-    if (!mounted_now && found == g_mount_latch.end()) return; // common case: on foot
-    if (g_mount_latch.size() > 256) g_mount_latch.clear();
+    return found != g_mount_latch.end() && found->second.engaged;
+}
+
+static void apply_mounted_position(uint64_t player, Vec3& feet) {
+    Vec3 saved{};
+    if (!player_saved_position(player, saved)) saved = feet;
+
+    bool id_mounted = player_is_mounted(player);
+    if (g_mount_latch.size() > 256 && g_mount_latch.find(player) == g_mount_latch.end()) return;
     MountLatch& latch = g_mount_latch[player];
-    if (mounted_now) {
-        latch.engaged = true;
-        latch.unmounted_streak = 0;
-    } else if (latch.engaged && ++latch.unmounted_streak >= 15) {
-        g_mount_latch.erase(player); // truly dismounted (~1/4 s of clean reads)
-        return;
-    }
-    if (!latch.engaged) return;
-    Vec3 rendered{};
-    if (player_rendered_position(player, rendered)) {
-        rendered.y -= kCameraRootHeight;
-        if (position_looks_like_world_space(rendered)) {
-            latch.last = rendered;
-            latch.last_ok = true;
+
+    if (latch.have_saved) {
+        if (vec3_horiz2(saved, latch.prev_saved) < 0.15F * 0.15F) {
+            if (latch.saved_still < 100000) ++latch.saved_still;
+        } else {
+            latch.saved_still = 0;
         }
     }
-    // On a failed read keep the previous vehicle position — never fall back
-    // to the stale mount point mid-ride.
+    latch.prev_saved = saved;
+    latch.have_saved = true;
+
+    // On foot the box already sits on lastSaved. Skip the transform walks
+    // unless the seat says mounted, we are already riding, or lastSaved has
+    // been frozen long enough that this may be a boarding (copter vehicleID
+    // is often 0).
+    if (!id_mounted && !latch.engaged && (latch.saved_still < 8 || (latch.saved_still & 7) != 0))
+        return;
+
+    Vec3 cam{};
+    bool have_cam = player_rendered_position(player, cam);
+    Vec3 model{};
+    bool have_model = player_model_position(player, model);
+
+    // Direct path builds the box from feet; hierarchy path treats the value as
+    // eye height and subtracts 1.60 later. Keep whichever space `feet` is in.
+    const bool ground = g_use_direct_player_position;
+    Vec3 live{};
+    bool have_live = false;
+    float live_h2 = -1.0F;
+    if (have_cam) {
+        Vec3 p = cam;
+        if (ground) p.y -= kCameraRootHeight;
+        if (position_looks_like_world_space(p) || position_looks_like_world_space(cam)) {
+            live = p;
+            have_live = true;
+            live_h2 = vec3_horiz2(p, saved);
+        }
+    }
+    if (have_model) {
+        Vec3 p = model;
+        if (!ground) p.y += 0.90F; // hips -> roughly eye, matches hierarchy boxes
+        float h2 = vec3_horiz2(p, saved);
+        if (!have_live || h2 > live_h2 + 0.25F) {
+            live = p;
+            have_live = true;
+            live_h2 = h2;
+        }
+    }
+    if (!ground && !have_live && position_looks_like_world_space(feet)) {
+        live = feet;
+        have_live = true;
+        live_h2 = vec3_horiz2(feet, saved);
+    }
+
+    bool pos_mounted = latch.saved_still >= 8 && have_live && live_h2 > 1.6F * 1.6F;
+    bool keep_mounted = latch.engaged && have_live && live_h2 > 1.6F * 1.6F;
+    if (id_mounted || pos_mounted || keep_mounted) {
+        latch.engaged = true;
+        latch.unmounted_streak = 0;
+    } else if (latch.engaged) {
+        if (++latch.unmounted_streak >= 45) {
+            latch.engaged = false;
+            latch.last_ok = false;
+            latch.unmounted_streak = 0;
+        }
+    }
+    if (!latch.engaged) return;
+
+    if (have_live) {
+        float last_h2 = latch.last_ok ? vec3_horiz2(latch.last, saved) : 0.0F;
+        // Rendered transform snapped back to the frozen boarding point.
+        if (latch.last_ok && live_h2 < 1.25F * 1.25F && last_h2 > 2.5F * 2.5F) {
+            feet = latch.last;
+            return;
+        }
+        // Same flicker, but the bad sample did not land exactly on lastSaved.
+        if (latch.last_ok && last_h2 > 4.0F &&
+            vec3_horiz2(live, latch.last) > 4.0F * 4.0F && live_h2 < last_h2 * 0.25F) {
+            feet = latch.last;
+            return;
+        }
+        latch.last = live;
+        latch.last_ok = true;
+        feet = live;
+        return;
+    }
     if (latch.last_ok) feet = latch.last;
+}
+
+static void prune_mount_latch(const std::vector<uint64_t>& players) {
+    for (auto it = g_mount_latch.begin(); it != g_mount_latch.end();) {
+        bool present = false;
+        for (uint64_t player : players) if (player == it->first) { present = true; break; }
+        if (!present) it = g_mount_latch.erase(it); else ++it;
+    }
 }
 
 static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
@@ -3693,6 +3801,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     prune_player_aux(s_transforms);
     prune_player_text(s_transforms);
     prune_player_track(s_transforms);
+    prune_mount_latch(s_transforms);
     if (want_bones) prune_skeleton_cache(s_transforms);
     else if (!g_skeletons.empty()) g_skeletons.clear();
     g_skeleton_builds_this_frame = 0;
@@ -3861,9 +3970,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             size_t rival = found->second;
             int mine = tracked->second.still_frames;
             int theirs = g_player_track[s_transforms[rival]].still_frames;
+            bool mine_ride = player_mount_engaged(s_transforms[index]);
+            bool their_ride = player_mount_engaged(s_transforms[rival]);
             bool take_mine;
             if (index == local_entity_index)      take_mine = true;
             else if (rival == local_entity_index) take_mine = false;
+            else if (mine_ride != their_ride)     take_mine = mine_ride;
             else if (mine != theirs)              take_mine = mine < theirs;
             else {
                 auto sticky = g_player_track_pick.find(uid);
@@ -3873,6 +3985,21 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (take_mine) found->second = index;
         }
         for (const auto& entry : chosen) g_player_track_pick[entry.first] = s_transforms[entry.second];
+        // Ghost PlayerManager left at the boarding point: same frozen lastSaved
+        // as a rider, even when userID on the leftover is empty.
+        for (size_t index = 0; index < s_transforms.size(); ++index) {
+            if (!position_ok[index] || suppressed[index]) continue;
+            auto lit = g_mount_latch.find(s_transforms[index]);
+            if (lit == g_mount_latch.end() || !lit->second.engaged || !lit->second.have_saved) continue;
+            const Vec3& mount = lit->second.prev_saved;
+            for (size_t other = 0; other < s_transforms.size(); ++other) {
+                if (other == index || !position_ok[other] || suppressed[other]) continue;
+                if (other == local_entity_index) continue;
+                if (player_mount_engaged(s_transforms[other])) continue;
+                if (vec3_horiz2(positions[other], mount) < 1.8F * 1.8F)
+                    suppressed[other] = 1;
+            }
+        }
     }
 
     for (size_t i = 0; i < s_transforms.size(); ++i) {
@@ -3993,8 +4120,21 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             box.corners[corner][0] = projected ? sc.x : -1.0F;
             box.corners[corner][1] = projected ? sc.y : -1.0F;
         }
-        if (want_bones && !transform_camera_mode)
+        if (want_bones && !transform_camera_mode) {
             fill_skeleton_box(s_transforms[i], vp, sw, sh, box);
+            // Dummy rig stays at the boarding point while the box rides the
+            // vehicle — drawing both is the two-position flicker.
+            auto sk = g_skeletons.find(s_transforms[i]);
+            if (sk != g_skeletons.end() && box.has_skeleton &&
+                sk->second.bone_world_age[BONE_HIPS] >= 1) {
+                float hx = sk->second.bone_world[BONE_HIPS].x - feet.x;
+                float hz = sk->second.bone_world[BONE_HIPS].z - feet.z;
+                if (hx * hx + hz * hz > 3.0F * 3.0F) {
+                    box.has_skeleton = false;
+                    for (int b = 0; b < ESP_BONE_COUNT; ++b) box.bone_valid[b] = false;
+                }
+            }
+        }
 
         // Head slot: prefer the centre of the server-side Head hit volume over
         // the rig-derived estimate. This is the exact volume the shot is tested
@@ -4032,7 +4172,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // (2) game-maintained head transform (moves with crouch/animation)
             if (player_head_world(aux, head)) {
                 float dy = head.y - feet.y;
-                have_head = dy > 0.4F && dy < 2.4F;
+                float hx = head.x - feet.x, hz = head.z - feet.z;
+                have_head = dy > 0.4F && dy < 2.4F && (hx * hx + hz * hz) < 1.5F * 1.5F;
             }
             const float n_down = 0.12F;                    // head -> neck
             const float c_down = crouched ? 0.26F : 0.34F; // head -> chest
