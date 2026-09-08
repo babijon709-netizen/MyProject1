@@ -181,37 +181,60 @@ static void always_day_tick() {
         if (hour < 0 || hour > 24) { g_day_tod = 0; }
     }
     if (!g_day_tod) {
-        if (--g_day_retry > 0) return;
-        g_day_retry = 60; // ~1 c между попытками
-        // ВРЕМЕННО: разовый дамп кандидатов в файл — почему инстанс не найден.
-        static int s_day_log_left = 3;
-        FILE* dlog = nullptr;
-        if (s_day_log_left > 0) {
-            --s_day_log_left;
-            dlog = fopen("/storage/emulated/0/benzhack/day_log.txt", s_day_log_left == 2 ? "w" : "a");
-        }
-        for (uint64_t rva : TOD_TYPEINFO_RVA_CANDIDATES) {
-            uint64_t klass = rd_ptr(g_il2cpp_base + rva);
-            std::string kname = (klass >= 0x10000) ? read_remote_string(rd_ptr(klass + 0x10)) : "";
-            uint64_t statics = (klass >= 0x10000) ? rd_ptr(klass + 0xB8) : 0;
-            uint64_t tod = (statics >= 0x10000) ? rd_ptr(statics) : 0;
-            uint64_t obj_klass = (tod >= 0x10000) ? rd_ptr(tod) : 0;
-            std::string cname = (obj_klass >= 0x10000) ? read_remote_string(rd_ptr(obj_klass + 0x10)) : "";
-            if (dlog) {
-                int hour = tod >= 0x10000 ? rd<int32_t>(tod + TOD_CURRENT_HOUR) : -99;
-                float norm = tod >= 0x10000 ? rd<float>(tod + TOD_NORM_TIME) : -99.0F;
-                fprintf(dlog, "rva=%llx klass=%llx '%s' statics=%llx tod=%llx '%s' hour=%d norm=%.3f\n",
-                        (unsigned long long)rva, (unsigned long long)klass, kname.c_str(),
-                        (unsigned long long)statics, (unsigned long long)tod, cname.c_str(),
-                        hour, (double)norm);
+        // Лог показал: фиксированные слоты-кандидаты не инициализированы на
+        // части сцен (ленивые metadata-слоты il2cpp, нечётные токены вместо
+        // указателей). Поэтому класс ищется сканом всей области слотов:
+        // порциями по 128 слотов за кадр, значение-указатель -> имя класса
+        // "TimeOfDay" + namespace "Oxide". Найденный klass кэшируется.
+        static uint64_t s_tod_klass = 0;
+        static uint64_t s_scan_rva = 0xD7A0000;
+        constexpr uint64_t kScanEnd = 0xD840000;
+        if (!s_tod_klass) {
+            uint64_t slots[128];
+            if (rd_buf(g_il2cpp_base + s_scan_rva, slots, sizeof(slots))) {
+                for (int i = 0; i < 128 && !s_tod_klass; ++i) {
+                    uint64_t v = slots[i];
+                    if (v < 0x10000 || (v & 0x7) != 0) continue; // токен/мусор
+                    char nm[12] = {};
+                    uint64_t name_ptr = rd_ptr(v + 0x10);
+                    if (name_ptr < 0x10000) continue;
+                    if (!rd_buf(name_ptr, nm, 10)) continue;
+                    if (memcmp(nm, "TimeOfDay", 10) != 0) continue; // с NUL
+                    char ns[8] = {};
+                    uint64_t ns_ptr = rd_ptr(v + 0x18);
+                    if (ns_ptr < 0x10000 || !rd_buf(ns_ptr, ns, 6)) continue;
+                    if (memcmp(ns, "Oxide", 6) != 0) continue;      // с NUL
+                    s_tod_klass = v;
+                }
             }
-            if (cname != "TimeOfDay") continue;
-            g_day_tod = tod;
-            break;
+            s_scan_rva += 128 * 8;
+            if (s_scan_rva >= kScanEnd) s_scan_rva = 0xD7A0000; // круг заново
+            if (!s_tod_klass) return;
         }
-        if (dlog) {
-            fprintf(dlog, "-> найден: %llx\n", (unsigned long long)g_day_tod);
-            fclose(dlog);
+        // klass найден — это сам Oxide.TimeOfDay; его инстанс достаём из
+        // статики generic-синглтона нельзя (klass другой), зато Awake кладёт
+        // инстанс в статику себя? Нет: у самого класса статик-полей нет.
+        // Инстанс ищем через статику pzF`1<TimeOfDay>: её klass лежит в тех
+        // же слотах — ищем по статик-полю, указывающему на объект klass'а.
+        static uint64_t s_scan2_rva = 0xD7A0000;
+        {
+            uint64_t slots[128];
+            if (rd_buf(g_il2cpp_base + s_scan2_rva, slots, sizeof(slots))) {
+                for (int i = 0; i < 128 && !g_day_tod; ++i) {
+                    uint64_t v = slots[i];
+                    if (v < 0x10000 || (v & 0x7) != 0) continue;
+                    uint64_t statics = rd_ptr(v + 0xB8);
+                    if (statics < 0x10000) continue;
+                    uint64_t obj = rd_ptr(statics);
+                    if (obj < 0x10000) continue;
+                    if (rd_ptr(obj) != s_tod_klass) continue; // объект типа TimeOfDay
+                    int hour = rd<int32_t>(obj + TOD_CURRENT_HOUR);
+                    if (hour < 0 || hour > 24) continue;
+                    g_day_tod = obj;
+                }
+            }
+            s_scan2_rva += 128 * 8;
+            if (s_scan2_rva >= kScanEnd) s_scan2_rva = 0xD7A0000;
         }
         if (!g_day_tod) return;
     }
@@ -5360,10 +5383,38 @@ bool esp_farm_get_target(FarmTarget& out) {
         }
     }
     if (spot_ok) {
-        // Aim EXACTLY at the X child. Earlier builds pulled the point inward
-        // "to help side swings", but that put the marker (and the crosshair)
-        // inside the trunk next to the decal — the game then registered body
-        // hits instead of X hits. The decal is what the hit test wants.
+        // Крест-декаль выпирает из поверхности узла. В лоб это не мешает —
+        // луч прицела всё равно входит в тело узла у креста. Сбоку точка
+        // висит в воздухе РЯДОМ со стволом, и удар уходит мимо. Умный
+        // вариант: смотрим, проходит ли луч «глаз -> крест» сквозь тело
+        // узла (цилиндр радиуса r вокруг оси); если проходит — целимся
+        // ровно в крест (как в лоб), если промахивается — подтягиваем точку
+        // к оси ровно настолько, чтобы луч зацепил тело у самого креста.
+        float ex = aim.x - g_frame_local_pos.x;
+        float ez = aim.z - g_frame_local_pos.z;
+        float el = sqrtf(ex * ex + ez * ez);
+        const float body_r = (best->kind == 0) ? 0.24F : 0.55F; // ствол/валун
+        if (std::isfinite(el) && el > 0.5F) {
+            float nx = ex / el, nz = ez / el;               // направление луча (2D)
+            float cx = best->pos.x - g_frame_local_pos.x;
+            float cz = best->pos.z - g_frame_local_pos.z;
+            float along = cx * nx + cz * nz;                 // ось узла вдоль луча
+            float px = cx - along * nx, pz = cz - along * nz;
+            float miss = sqrtf(px * px + pz * pz);           // промах луча мимо оси
+            if (!(along > 0.0F) || miss > body_r) {
+                // Луч не задевает тело: сдвигаем aim по горизонтали к оси,
+                // сохраняя направление и высоту креста. Прижимаем не к самой
+                // оси, а к поверхности (body_r) — попадание засчитывается по
+                // кресту, а маркер визуально остаётся на нём.
+                float hx = aim.x - best->pos.x, hz = aim.z - best->pos.z;
+                float hl = sqrtf(hx * hx + hz * hz);
+                if (std::isfinite(hl) && hl > body_r) {
+                    float s = body_r / hl;
+                    aim.x = best->pos.x + hx * s;
+                    aim.z = best->pos.z + hz * s;
+                }
+            }
+        }
     }
     if (!spot_ok) {
         aim = best->pos;

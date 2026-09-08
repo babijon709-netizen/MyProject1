@@ -3796,12 +3796,30 @@ static void UpdateFarm(float dt) {
         // only once actually inside — no down/up flapping at the boundary
         // (the "stomping in place" bug).
         float pressAt = s_moveDown ? walkUntil : walkUntil + 0.5f;
-        // No-drain walk-in (thin tree, standing a hair short): a smooth
-        // WINDOW instead of the old 0.5 s/1.5 s pulse train — the pulses
-        // read as "the bot is jerking the stick". One continuous gentle
-        // push for 2 s, then a 2 s pause to let the swings land, repeat.
-        bool nudgeIn = phase == 3 && s_sinceDrain > 3.f &&
-                       fmodf(s_sinceDrain - 3.f, 4.f) < 2.f;
+        // Умное дожимание вместо слепого цикла. Старый вариант толкал бота
+        // вперёд по 2 с независимо ни от чего — бот въезжал в дерево, прицел
+        // сбивался, удары мимо креста. Теперь рывок:
+        //   * короткий (0.35 с) и одиночный — после него пауза 2.5 с, чтобы
+        //     оценить эффект (пошло ХП — рывки больше не нужны);
+        //   * только когда прицел УЖЕ устаканился на цели (иначе шаг вперёд
+        //     гарантированно смажет выстрел);
+        //   * только если есть куда идти (dist заметно больше walkUntil);
+        //   * максимум 4 попытки на узел — дальше пусть решает watchdog.
+        static float s_nudgeTimer = 0.f;   // >0: рывок идёт
+        static float s_nudgeCd    = 0.f;   // кулдаун между рывками
+        static int   s_nudgeTries = 0;
+        if (s_nudgeTimer > 0.f) s_nudgeTimer -= dt;
+        if (s_nudgeCd > 0.f)    s_nudgeCd    -= dt;
+        if (s_sinceDrain < 1.f) s_nudgeTries = 0;   // ХП идёт — счёт заново
+        bool aimCalm = fabsf(tgt.yaw) <= 4.f && fabsf(tgt.pitch) <= 6.f;
+        if (phase == 3 && s_sinceDrain > 3.f && s_nudgeTimer <= 0.f &&
+            s_nudgeCd <= 0.f && aimCalm && s_nudgeTries < 4 &&
+            tgt.dist > walkUntil * 0.75f) {
+            s_nudgeTimer = 0.35f;
+            s_nudgeCd    = 2.5f;
+            ++s_nudgeTries;
+        }
+        bool nudgeIn = phase == 3 && s_nudgeTimer > 0.f;
         bool wantWalk = (phase == 2) ||
                         (phase == 1 && fabsf(tgt.yaw) < 70.f && tgt.dist > reachDist * 2.f) ||
                         (phase == 3 && tgt.dist > pressAt) ||
