@@ -5365,42 +5365,16 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         }
     }
 
-    // Pass 3 (trees): still X already sitting on the bark — jumper never
-    // fires until it hops, and many trees show the mark before the first hit.
+    // Pass 3 (trees): still X already on the bark. Do NOT skip a child just
+    // because a particle/light sits on the same point — that is the usual
+    // prefab (decal+fx), and skipping the cluster was "tree 3 never locks".
     uint64_t isolate = 0;
     if (kind == 0) {
-        const float cluster_r2 = 0.10F * 0.10F;
-        int isolated_n = 0;
-        uint64_t isolated[16];
-        Vec3 isolated_pos[16];
+        float best_err = 1e9F;
         for (const SpotCand& cand : live) {
             if (!on_bark(cand.pos)) continue;
-            bool clustered = false;
-            for (const SpotCand& other : live) {
-                if (other.node == cand.node) continue;
-                float dx = cand.pos.x - other.pos.x;
-                float dy = cand.pos.y - other.pos.y;
-                float dz = cand.pos.z - other.pos.z;
-                if (dx * dx + dy * dy + dz * dz < cluster_r2) { clustered = true; break; }
-            }
-            if (clustered) continue;
-            if (isolated_n < 16) {
-                isolated[isolated_n] = cand.node;
-                isolated_pos[isolated_n] = cand.pos;
-                ++isolated_n;
-            }
-        }
-        // World-space, any yaw. Flush against the trunk the camera may not
-        // see the mark (near-clip), but the child is still on the bark.
-        if (isolated_n >= 1) {
-            int best_i = -1;
-            float best_err = 1e9F;
-            for (int i = 0; i < isolated_n; ++i) {
-                if (!farm_spot_above_dirt(isolated_pos[i])) continue;
-                float err = farm_spot_chest_err(node_pos, isolated_pos[i]);
-                if (err < best_err) { best_err = err; best_i = i; }
-            }
-            if (best_i >= 0) isolate = isolated[best_i];
+            float err = farm_spot_chest_err(node_pos, cand.pos);
+            if (err < best_err) { best_err = err; isolate = cand.node; }
         }
     }
 

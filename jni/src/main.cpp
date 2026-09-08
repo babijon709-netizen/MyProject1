@@ -3854,12 +3854,14 @@ static void UpdateFarm(float dt) {
         // only once actually inside — no down/up flapping at the boundary
         // (the "stomping in place" bug).
         float pressAt = s_moveDown ? meleeX : meleeX + 0.25f;
+        // Без лока креста не лезем в ствол: на 1.4 м камера внутри меша и
+        // метка перед лицом пропадает (near-clip). Держимся ~2 м, пока X
+        // не найден — иначе третье дерево рубится в кору без зелёной метки.
+        if (isTree && !tgt.has_spot) pressAt = s_moveDown ? 2.00f : 2.15f;
         // Не идём, пока камера не смотрит примерно на цель ног: при yaw 90–180°
         // стик «вперёд» уводит от креста. Сначала доворот, потом шаг.
         bool alignedForWalk = fabsf(goalYaw) < 72.f;
-        // Вплотную к коре камера смотрит внутрь ствола — крест перед лицом,
-        // но за near-clip / вне кадра. Отойти, пока метка не попадёт в FOV.
-        bool tooCloseNoX = isTree && !tgt.has_spot && tgt.dist < 1.85f && phase == 3;
+        bool tooCloseNoX = isTree && !tgt.has_spot && tgt.dist < 2.00f && phase == 3;
         bool wantWalk = (phase == 2) ||
                         (phase == 1 && alignedForWalk && goalDist > reachDist * 2.f) ||
                         (goStand && alignedForWalk && goalDist > standArrive) ||
