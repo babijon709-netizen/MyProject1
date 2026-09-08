@@ -274,21 +274,12 @@ static void *TypeA(void *arg) {
 bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
     char temp[128];
     DIR *dir = opendir("/dev/input/");
-    if (!dir) {
-        // /dev/input недоступен (SELinux-контекст без dir-search — типично
-        // при запуске через менеджеры на A12+). Раньше readdir(NULL) ловил
-        // FORTIFY-abort и ронял весь процесс; теперь просто нет тача —
-        // retry-поток в main.cpp продолжит попытки.
-        puts("Failed init touch: /dev/input is not accessible!");
-        return false;
-    }
     dirent *ptr = NULL;
     int eventCount = 0;
     while ((ptr = readdir(dir)) != NULL) {
         if (strstr(ptr->d_name, "event"))
             eventCount++;
     }
-    closedir(dir);
     struct input_absinfo abs, absX[maxE], absY[maxE];
     int fd, i, tmp1, tmp2;
     int screenX, screenY, minCnt = eventCount + 1;
