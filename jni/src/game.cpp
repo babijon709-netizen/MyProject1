@@ -157,6 +157,7 @@ static void xray_apply(uint64_t native_cam) {
 // у настоящего инстанса m_DayDuration — разумные секунды, а m_CurrentHour в
 // 0..23. Каждый кадр, пока включено, пишем полдень в нормализованное время
 // (uLu 0xB8) и час (0x3C) — Update() игры сам разворачивает солнце.
+static std::string read_remote_string(uint64_t address); // определена ниже
 static bool     g_day_enabled = false;
 static uint64_t g_day_tod = 0;          // подтверждённый инстанс TimeOfDay
 static int      g_day_retry = 0;
@@ -164,7 +165,15 @@ static int      g_day_retry = 0;
 void esp_set_always_day(bool enabled) { g_day_enabled = enabled; }
 
 static void always_day_tick() {
-    if (!g_day_enabled) { g_day_tod = 0; return; }
+    if (!g_day_enabled) {
+        // Выключили: вернуть игре ход времени (один раз, пока инстанс жив).
+        if (g_day_tod) {
+            uint8_t run = 0;
+            wr_buf(g_day_tod + TOD_STOP_TIME, &run, sizeof(uint8_t));
+            g_day_tod = 0;
+        }
+        return;
+    }
     if (!g_il2cpp_base || g_pid <= 0) return;
     if (g_day_tod) {
         // Живучесть: инстанс мог умереть при перезагрузке мира.
@@ -181,21 +190,25 @@ static void always_day_tick() {
             if (statics < 0x10000) continue;
             uint64_t tod = rd_ptr(statics); // ukg — первое статик-поле
             if (tod < 0x10000) continue;
-            int hour = rd<int32_t>(tod + TOD_CURRENT_HOUR);
-            int day_len = rd<int32_t>(tod + TOD_DAY_DURATION);
-            float norm = rd<float>(tod + TOD_NORM_TIME);
-            if (hour >= 0 && hour <= 24 && day_len > 10 && day_len < 100000 &&
-                std::isfinite(norm) && norm >= -0.01F && norm <= 1.01F) {
-                g_day_tod = tod;
-                break;
-            }
+            // Железная проверка: имя класса самого объекта. Валидация по
+            // полям (час/длина суток) пропускала все кандидаты — у чужих
+            // синглтонов значения по этим смещениям тоже «правдоподобны».
+            uint64_t obj_klass = rd_ptr(tod);
+            if (obj_klass < 0x10000) continue;
+            std::string cname = read_remote_string(rd_ptr(obj_klass + 0x10)); // IL2CPP_CLASS_NAME
+            if (cname != "TimeOfDay") continue;
+            g_day_tod = tod;
+            break;
         }
         if (!g_day_tod) return;
     }
-    // Полдень: norm 0.5, час 12. Пишем каждый кадр — Update() игры двигает
-    // время дальше, а мы его каждый раз возвращаем в день.
+    // Полдень: стопим ход времени (m_StopTime — Update() игры сам перестаёт
+    // прибавлять dt) и держим нормализованное время в 0.5. Час игра
+    // пересчитает сама из нормализованного (str w8,[x19,#0x3C] в Update).
+    uint8_t stop = 1;
     float noon = 0.5F;
     int32_t hour12 = 12;
+    wr_buf(g_day_tod + TOD_STOP_TIME, &stop, sizeof(uint8_t));
     wr_buf(g_day_tod + TOD_NORM_TIME, &noon, sizeof(float));
     wr_buf(g_day_tod + TOD_CURRENT_HOUR, &hour12, sizeof(int32_t));
 }
@@ -4960,10 +4973,35 @@ std::vector<EspMarker> esp_get_markers() {
             // Живое ХП: pmp.Entity -> pmK.Health(ARP<float>).latestValue,
             // максимум — GenericVitals.m_MaxHealth на самом компоненте.
             float hp = -1.0F, hp_max = rd<float>(entity.vitals + VITALS_MAX_HEALTH);
+            // Текущее ХП: несколько кандидатов — generic-шаринг ARP<float>
+            // хранит latestValue то инлайном, то boxed-объектом, а на части
+            // билдов клиентское ХП лежит кэшем прямо в GenericVitals (uqm).
+            auto plaus = [&](float v) {
+                return std::isfinite(v) && v > 0.0F &&
+                       std::isfinite(hp_max) && hp_max > 0.0F && v <= hp_max * 1.01F;
+            };
             uint64_t ent = rd_ptr(entity.vitals + PMP_ENTITY);
             if (ent) {
                 uint64_t arp = rd_ptr(ent + PMK_HEALTH);
-                if (arp) hp = rd<float>(arp + ARP_LATEST_VALUE);
+                if (arp) {
+                    float inl = rd<float>(arp + ARP_LATEST_VALUE);
+                    if (plaus(inl)) hp = inl;
+                    if (hp < 0.0F) {
+                        uint64_t box = rd_ptr(arp + ARP_LATEST_VALUE);
+                        if (box > 0x10000) {
+                            float bx = rd<float>(box + 0x10); // boxed float value
+                            if (plaus(bx)) hp = bx;
+                        }
+                    }
+                }
+            }
+            if (hp < 0.0F) {
+                float uqm = rd<float>(entity.vitals + 0xB8); // GenericVitals.uqm
+                if (plaus(uqm)) hp = uqm;
+            }
+            if (hp < 0.0F) {
+                float uqz = rd<float>(entity.vitals + 0xBC); // GenericVitals.uqz
+                if (plaus(uqz)) hp = uqz;
             }
             if (std::isfinite(hp) && hp >= 0.0F && std::isfinite(hp_max) &&
                 hp_max > 0.0F && hp <= hp_max * 1.01F)
