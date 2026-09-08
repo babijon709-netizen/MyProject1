@@ -571,6 +571,8 @@ struct AppState {
     bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;
     bool  esp_ore = false, esp_animal = false, esp_loot = false, esp_team = false;
     bool  esp_pickup = false;
+    bool  esp_building = false;   // ХП дверей/стен
+    bool  always_day = false;     // всегда день
     float marker_dist = 150.f;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
@@ -600,6 +602,7 @@ struct AppState {
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
+    float a_esp_building = 0, a_always_day = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
     float a_xray_on = 0;
@@ -637,6 +640,8 @@ static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_aim_bones_enabled(g_state.aim_touch);
         esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
                                 g_state.esp_loot, g_state.esp_pickup);
+        esp_set_building_markers(g_state.esp_building);
+        esp_set_always_day(g_state.always_day);
         esp_set_marker_max_distance(g_state.marker_dist);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
@@ -668,7 +673,7 @@ static void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_building) return;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
@@ -903,7 +908,7 @@ static void DrawEspOverlay() {
     // ---- World markers: ore nodes and animals ----------------------------
     // One pill with the resource / animal name at the object's position; the
     // scan itself is done by the game layer and reuses this frame's camera.
-    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup) {
+    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup || g_state.esp_building) {
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;
@@ -919,6 +924,7 @@ static void DrawEspOverlay() {
             ImU32 col = marker.rainbow ? rainbow_col
                 : marker.has_color
                 ? IM_COL32(marker.color_rgb[0], marker.color_rgb[1], marker.color_rgb[2], 255)
+                : marker.kind == ESP_MARKER_BUILDING ? IM_COL32(255, 120, 90, 255)
                 : ColU32(marker.kind == ESP_MARKER_LOOT   ? cfg::esp::loot_col
                        : marker.kind == ESP_MARKER_PICKUP ? cfg::esp::pickup_col
                                                           : cfg::esp::animal_col);
@@ -2743,8 +2749,9 @@ float TabContent(int tab, float dt, float cW) {
                 {"##van", XS("Животные"), &g_state.esp_animal,       &g_state.a_esp_animal,       &cfg::esp::animal_col},
                 {"##vlt", XS("Ящики"),    &g_state.esp_loot,         &g_state.a_esp_loot,         &cfg::esp::loot_col},
                 {"##vpk", XS("Предметы"), &g_state.esp_pickup,       &g_state.a_esp_pickup,       &cfg::esp::pickup_col},
+                {"##vbd", XS("Постройки"), &g_state.esp_building,     &g_state.a_esp_building,     nullptr},
             };
-            constexpr int NW = 4;
+            constexpr int NW = 5;
             CardBg(rowH * NW);
             for (int i = 0; i < NW; i++)
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NW-1);
@@ -3082,6 +3089,11 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##xr0", XS("Иксрей"), &g_state.xray_on, g_state.a_xray_on, false, true);
         SliderRow("##xr1", XS("Дальность"), &g_state.xray_range,
                   1.f, 50.f, XS("%.0f м"), true, false, g_state.sl_xray, dt);
+
+        // Всегда день: время суток каждую секунду возвращается в полдень.
+        SHdr(XS("Мир"));
+        CardBg(Layout::RowH);
+        ToggleRow("##wd0", XS("Всегда день"), &g_state.always_day, g_state.a_always_day, true, true);
 
         ImGui::Dummy({1.f, 12.f});
     }
@@ -4002,6 +4014,8 @@ void RenderMenu() {
     Tick(g_state.a_esp_animal, g_state.esp_animal,         dt);
     Tick(g_state.a_esp_loot,   g_state.esp_loot,           dt);
     Tick(g_state.a_esp_pickup, g_state.esp_pickup,         dt);
+    Tick(g_state.a_esp_building, g_state.esp_building,      dt);
+    Tick(g_state.a_always_day,  g_state.always_day,         dt);
     Tick(g_state.a_esp_team,   g_state.esp_team,           dt);
     Tick(g_state.a_aim_pr0,    g_state.aim_priority == 0,  dt);
     Tick(g_state.a_aim_pr1,    g_state.aim_priority == 1,  dt);

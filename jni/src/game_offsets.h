@@ -252,6 +252,25 @@ inline constexpr std::uint64_t DICT_ENTRY_VALUE  = 0x10;
 inline constexpr std::uint64_t NETID_NET_ID     = 0x58; // uint netId
 inline constexpr std::uint64_t NETID_BEHAVIOURS = 0x80; // NetworkBehaviour[]
 
+// ---- Постройки: ХП дверей/стен (Oxide.PieceVitals : GenericVitals : pmp) ----
+// pmp.Entity (0x68) -> pmK; pmK.Health (0x98) -> AsyncReactiveProperty<float>,
+// текущее значение в latestValue (0x18). Максимум — GenericVitals.m_MaxHealth.
+inline constexpr std::uint64_t PMP_ENTITY            = 0x68; // pmK Entity
+inline constexpr std::uint64_t PMK_HEALTH            = 0x98; // AsyncReactiveProperty<float>
+inline constexpr std::uint64_t ARP_LATEST_VALUE      = 0x18; // float latestValue
+inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_MaxHealth
+
+// ---- Время суток (Oxide.TimeOfDay, синглтон pzF`1<TimeOfDay>.ukg) ----------
+// Кандидаты RVA глобала Il2CppClass* pzF`1<Oxide.TimeOfDay> — из дизасма
+// TimeOfDay.Awake (init-блок); какой именно — решает рантайм-валидация полей.
+inline constexpr std::uint64_t TOD_TYPEINFO_RVA_CANDIDATES[] = {
+    0xD7DDD28, 0xD7E39B8, 0xD7EA168, 0xD82A8B0,
+};
+inline constexpr std::uint64_t TOD_STOP_TIME    = 0x38; // bool m_StopTime
+inline constexpr std::uint64_t TOD_CURRENT_HOUR = 0x3C; // int m_CurrentHour
+inline constexpr std::uint64_t TOD_DAY_DURATION = 0x44; // int m_DayDuration
+inline constexpr std::uint64_t TOD_NORM_TIME    = 0xB8; // float uLu (0..1, сутки)
+
 // Oxide.MineableObject — the shared base of ore nodes, trees and animals.
 inline constexpr std::uint64_t MINEABLE_LOOT           = 0xA0; // List<Oxide.LootItem>
 inline constexpr std::uint64_t MINEABLE_FINISH_BONUS   = 0xA8;

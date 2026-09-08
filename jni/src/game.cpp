@@ -151,6 +151,55 @@ static void xray_apply(uint64_t native_cam) {
     }
 }
 
+// ==== Всегда день: Oxide.TimeOfDay ==========================================
+// Синглтон живёт в статике generic-класса pzF`1<TimeOfDay>. Точный RVA его
+// TypeInfo среди кандидатов (из дизасма Awake) выбирается валидацией полей:
+// у настоящего инстанса m_DayDuration — разумные секунды, а m_CurrentHour в
+// 0..23. Каждый кадр, пока включено, пишем полдень в нормализованное время
+// (uLu 0xB8) и час (0x3C) — Update() игры сам разворачивает солнце.
+static bool     g_day_enabled = false;
+static uint64_t g_day_tod = 0;          // подтверждённый инстанс TimeOfDay
+static int      g_day_retry = 0;
+
+void esp_set_always_day(bool enabled) { g_day_enabled = enabled; }
+
+static void always_day_tick() {
+    if (!g_day_enabled) { g_day_tod = 0; return; }
+    if (!g_il2cpp_base || g_pid <= 0) return;
+    if (g_day_tod) {
+        // Живучесть: инстанс мог умереть при перезагрузке мира.
+        int hour = rd<int32_t>(g_day_tod + TOD_CURRENT_HOUR);
+        if (hour < 0 || hour > 24) { g_day_tod = 0; }
+    }
+    if (!g_day_tod) {
+        if (--g_day_retry > 0) return;
+        g_day_retry = 60; // ~1 c между попытками
+        for (uint64_t rva : TOD_TYPEINFO_RVA_CANDIDATES) {
+            uint64_t klass = rd_ptr(g_il2cpp_base + rva);
+            if (klass < 0x10000) continue;
+            uint64_t statics = rd_ptr(klass + 0xB8); // Il2CppClass::static_fields
+            if (statics < 0x10000) continue;
+            uint64_t tod = rd_ptr(statics); // ukg — первое статик-поле
+            if (tod < 0x10000) continue;
+            int hour = rd<int32_t>(tod + TOD_CURRENT_HOUR);
+            int day_len = rd<int32_t>(tod + TOD_DAY_DURATION);
+            float norm = rd<float>(tod + TOD_NORM_TIME);
+            if (hour >= 0 && hour <= 24 && day_len > 10 && day_len < 100000 &&
+                std::isfinite(norm) && norm >= -0.01F && norm <= 1.01F) {
+                g_day_tod = tod;
+                break;
+            }
+        }
+        if (!g_day_tod) return;
+    }
+    // Полдень: norm 0.5, час 12. Пишем каждый кадр — Update() игры двигает
+    // время дальше, а мы его каждый раз возвращаем в день.
+    float noon = 0.5F;
+    int32_t hour12 = 12;
+    wr_buf(g_day_tod + TOD_NORM_TIME, &noon, sizeof(float));
+    wr_buf(g_day_tod + TOD_CURRENT_HOUR, &hour12, sizeof(int32_t));
+}
+
 static std::string read_remote_string(uint64_t address) {
     if (!address) return {};
     char buffer[96]{};
@@ -3439,6 +3488,7 @@ static void reset_world_caches() {
 void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
+    g_day_tod = 0; g_day_retry = 0;
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_frame_publish_fail_streak = 0;
     g_aim_ref_valid = false;
@@ -3494,6 +3544,7 @@ static bool publish_camera_only_frame(float sw, float sh) {
     if (!(sw >= 100.0F) || !(sh >= 100.0F)) { sw = 1080.0F; sh = 2400.0F; }
     Mat4 solo_proj{}, solo_view{};
     xray_apply(cam_native);
+    always_day_tick();
     if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) return false;
     Vec3 cam_pos{};
     if (!camera_position_from_view(solo_view, cam_pos)) return false;
@@ -3617,6 +3668,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             return result;
         }
         xray_apply(native_cam);
+        always_day_tick();
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
             return result;
         }
@@ -3987,6 +4039,12 @@ void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups) {
     g_markers_pickup_enabled = pickups;
 }
 
+static bool g_markers_building_enabled = false;
+void esp_set_building_markers(bool enabled) {
+    if (enabled != g_markers_building_enabled) g_marker_rescan_countdown = 0;
+    g_markers_building_enabled = enabled;
+}
+
 void esp_set_marker_max_distance(float metres) {
     if (!std::isfinite(metres)) return;
     if (metres < 10.0F) metres = 10.0F;
@@ -4008,6 +4066,8 @@ struct MarkerEntity {
     bool     has_color = false;
     bool     rainbow = false;
     unsigned char color_rgb[3] = {255, 255, 255};
+    // Постройки (ХП дверей/стен): компонент PieceVitals для живого чтения ХП.
+    uint64_t vitals = 0;
 };
 static std::vector<MarkerEntity> g_marker_entities;
 static std::unordered_map<uint64_t, uint8_t> g_marker_class_kind;
@@ -4555,7 +4615,7 @@ static bool pickup_marker(uint64_t component, char* label, size_t label_cap) {
 enum MarkerClass : uint8_t {
     MARKER_CLASS_NONE = 0, MARKER_CLASS_MINEABLE = 1,
     MARKER_CLASS_LOOT = 2, MARKER_CLASS_PICKUP = 3,
-    MARKER_CLASS_BARREL = 4,
+    MARKER_CLASS_BARREL = 4, MARKER_CLASS_PIECE_VITALS = 5,
 };
 
 static uint8_t marker_class_of(uint64_t klass) {
@@ -4573,6 +4633,9 @@ static uint8_t marker_class_of(uint64_t klass) {
     // loud is kept as a safety net for other builds.
     else if (name == "LootDestroyable" ||
              name.find("Barrel") != std::string::npos)      kind = MARKER_CLASS_BARREL;
+    // ХП дверей/стен: PieceVitals висит на каждой постройке (лог round-11:
+    // skip-class 'PieceVitals' go='door_double_wood (Clone)').
+    else if (name == "PieceVitals")                          kind = MARKER_CLASS_PIECE_VITALS;
     if (g_marker_class_kind.size() < 512) g_marker_class_kind[klass] = kind;
     return kind;
 }
@@ -4691,6 +4754,36 @@ static void rebuild_marker_entities() {
                 known = barrel_look_from_object_name(object_name, look) ||
                         barrel_look_from_object_name(root_name, look);
                 if (!known) { look = kSmashBox; known = true; }
+            } else if (component_class == MARKER_CLASS_PIECE_VITALS) {
+                if (!g_markers_building_enabled) continue;
+                // ХП дверей/стен. Тип постройки — по имени префаба; ХП
+                // дочитывается живьём при отрисовке (см. esp_get_markers).
+                look.kind = ESP_MARKER_BUILDING;
+                look.has_color = false;
+                look.label = nullptr;
+                const char* what = "Постройка";
+                const char* nm = object_name[0] ? object_name : root_name;
+                if (nm && nm[0]) {
+                    char low[48];
+                    size_t n = 0;
+                    for (const char* p = nm; *p && n + 1 < sizeof(low); ++p)
+                        low[n++] = (*p >= 'A' && *p <= 'Z') ? (char)(*p - 'A' + 'a') : *p;
+                    low[n] = '\0';
+                    if (strstr(low, "door"))            what = "Дверь";
+                    else if (strstr(low, "window") ||
+                             strstr(low, "embrasure"))  what = "Окно";
+                    else if (strstr(low, "wall"))       what = "Стена";
+                    else if (strstr(low, "foundation")) what = "Фундамент";
+                    else if (strstr(low, "floor") ||
+                             strstr(low, "ceiling"))    what = "Потолок";
+                    else if (strstr(low, "stairs") ||
+                             strstr(low, "ramp"))       what = "Лестница";
+                    else if (strstr(low, "roof"))       what = "Крыша";
+                    else if (strstr(low, "gate"))       what = "Ворота";
+                    else if (strstr(low, "cupboard"))   what = "Шкаф";
+                }
+                snprintf(pickup_text, sizeof(pickup_text), "%s", what);
+                known = true;
             } else if (component_class == MARKER_CLASS_LOOT) {
                 if (!g_markers_loot_enabled) continue;
                 known = loot_marker(component, object_name, root_name, look);
@@ -4727,6 +4820,7 @@ static void rebuild_marker_entities() {
             entity.transform = native_component_transform(managed_object_native(component));
             if (!entity.transform) // component without its own renderer: use the identity
                 entity.transform = native_component_transform(managed_object_native(identity));
+            if (component_class == MARKER_CLASS_PIECE_VITALS) entity.vitals = component;
             entity.position_valid = marker_world_position(entity.transform, entity.position);
             if (entity.transform) g_marker_entities.push_back(entity);
             if (g_marker_entities.size() >= 512) break;
@@ -4814,6 +4908,7 @@ std::vector<EspMarker> esp_get_markers() {
         if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
         if (entity.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) continue;
         if (entity.kind == ESP_MARKER_PICKUP && !g_markers_pickup_enabled) continue;
+        if (entity.kind == ESP_MARKER_BUILDING && !g_markers_building_enabled) continue;
         // Ore nodes never move, so their position is only read on a rescan.
         // Animals DO move, but re-reading a transform chain (4+ syscalls)
         // for every animal every frame is the single hottest path here —
@@ -4861,8 +4956,25 @@ std::vector<EspMarker> esp_get_markers() {
         marker.color_rgb[0] = entity.color_rgb[0];
         marker.color_rgb[1] = entity.color_rgb[1];
         marker.color_rgb[2] = entity.color_rgb[2];
-        snprintf(marker.name, sizeof(marker.name), "%s",
-                 entity.label ? entity.label : entity.text);
+        if (entity.kind == ESP_MARKER_BUILDING && entity.vitals) {
+            // Живое ХП: pmp.Entity -> pmK.Health(ARP<float>).latestValue,
+            // максимум — GenericVitals.m_MaxHealth на самом компоненте.
+            float hp = -1.0F, hp_max = rd<float>(entity.vitals + VITALS_MAX_HEALTH);
+            uint64_t ent = rd_ptr(entity.vitals + PMP_ENTITY);
+            if (ent) {
+                uint64_t arp = rd_ptr(ent + PMK_HEALTH);
+                if (arp) hp = rd<float>(arp + ARP_LATEST_VALUE);
+            }
+            if (std::isfinite(hp) && hp >= 0.0F && std::isfinite(hp_max) &&
+                hp_max > 0.0F && hp <= hp_max * 1.01F)
+                snprintf(marker.name, sizeof(marker.name), "%s %.0f/%.0f",
+                         entity.text, hp, hp_max);
+            else
+                snprintf(marker.name, sizeof(marker.name), "%s", entity.text);
+        } else {
+            snprintf(marker.name, sizeof(marker.name), "%s",
+                     entity.label ? entity.label : entity.text);
+        }
         result.push_back(marker);
     }
 
