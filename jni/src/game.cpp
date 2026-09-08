@@ -5386,11 +5386,6 @@ bool esp_farm_get_target(FarmTarget& out) {
             // real X activates — aiming there is the "hits the bottom of the
             // tree" bug. Such a spot is ignored until it moves.
             if (d2 < 6.0F * 6.0F && d2 > 0.35F * 0.35F) {
-                // Крест берём в работу ТОЛЬКО когда он повёрнут к нам
-                // (угол крест-узел-игрок <= 60°). Боковые/задние кресты не
-                // атакуем и не обходим: бьём тело (ХП снимается всегда),
-                // после ударов декаль перепрыгивает — рано или поздно
-                // окажется лицом, тогда и переключимся на неё.
                 float pncx = best->pos.x - g_frame_local_pos.x;
                 float pncz = best->pos.z - g_frame_local_pos.z;
                 float pnl = sqrtf(pncx * pncx + pncz * pncz);
@@ -5398,20 +5393,40 @@ bool esp_farm_get_target(FarmTarget& out) {
                 spot_facing = true;
                 if (pnl > 0.05F && psl > 0.05F) {
                     float c = ((-pncx) * sx + (-pncz) * sz) / (pnl * psl);
-                    // Гистерезис: «не лицом» с 65°, обратно «лицом» с 55° —
-                    // на границе бот не дёргается ходить/бить попеременно.
+                    // Гистерезис на УЗЕЛ: общий static залипал «лицом» с
+                    // прошлого дерева. «Лицом» только в ~40°, сброс с ~50° —
+                    // боковой крест больше не считается досягаемым с места.
+                    static uint64_t s_face_id = 0;
                     static bool s_face_state = true;
-                    if (s_face_state) { if (c < 0.42F) s_face_state = false; } // >65°
-                    else              { if (c > 0.57F) s_face_state = true;  } // <55°
+                    if (s_face_id != best->identity) {
+                        s_face_id = best->identity;
+                        s_face_state = true;
+                    }
+                    if (s_face_state) { if (c < 0.64F) s_face_state = false; } // >50°
+                    else              { if (c > 0.77F) s_face_state = true;  } // <40°
                     spot_facing = s_face_state;
                 }
                 aim = spot;
                 spot_ok = true;
-                // Точка стоянки перед крестом: метр наружу от узла по
-                // нормали креста. Ноги бота идут туда, когда крест не лицом.
                 if (psl > 0.05F) {
-                    stand.x = spot.x + (sx / psl) * 1.0F;
-                    stand.z = spot.z + (sz / psl) * 1.0F;
+                    float inv = 1.0F / psl;
+                    float dirx = sx * inv, dirz = sz * inv;
+                    // Декаль креста на дереве сидит чуть СНАРУЖИ коры —
+                    // сырой transform торчит, луч пролетает мимо ствола.
+                    // Тянем точку прицела к пивоту, чтобы метка легла на кору.
+                    float pull = (best->kind == 0) ? 0.14F : 0.05F;
+                    if (pull > psl * 0.45F) pull = psl * 0.45F;
+                    aim.x = spot.x - dirx * pull;
+                    aim.z = spot.z - dirz * pull;
+                    aim.y = spot.y;
+                    // Стоянка: перед крестом на дистанции удара, не у центра
+                    // дерева. Бот подходит к кресту даже если он далеко/сбоку.
+                    float from_node = (best->kind == 0) ? 1.50F : 2.20F;
+                    float from_spot = (best->kind == 0) ? 0.85F : 1.10F;
+                    float stand_r = psl + from_spot;
+                    if (stand_r < from_node) stand_r = from_node;
+                    stand.x = best->pos.x + dirx * stand_r;
+                    stand.z = best->pos.z + dirz * stand_r;
                     stand.y = spot.y;
                     stand_ok = true;
                 }
@@ -5423,10 +5438,7 @@ bool esp_farm_get_target(FarmTarget& out) {
             // «крестики пропадают, бот бьёт в ствол».
         }
     }
-    // Дистанция до сырой точки прицела: запоминается ДО подтяжки к
-    // поверхности, иначе aim_dist схлопывается к dist и контроллер never
-    // узнаёт, что крест на дальней стороне (рывки не запускались).
-    // spot_ok => целимся ровно в крест (он уже отфильтрован: повёрнут к нам).
+    // Нет живого креста — целимся в тело (грудь дерева / пояс руды).
     if (!spot_ok) {
         aim = best->pos;
         aim.y += (best->kind == 0) ? 1.15F : 0.15F;

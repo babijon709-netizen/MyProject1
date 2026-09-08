@@ -3710,32 +3710,18 @@ static void UpdateFarm(float dt) {
     const float reachDist = isTree ? 2.6f : 3.4f; // close enough to swing
     const float walkUntil = isTree ? 1.6f : 2.6f; // keep stepping in until this
     const float aimedYaw  = (g_farmPhase == 3) ? 8.f : 14.f; // deg tolerance
-    // A spot on the FAR side of a big boulder is out of melee even when the
-    // node centre is in reach — walk in some more. RELATIVE check only (spot
-    // clearly beyond the centre): both distances are measured from the
-    // camera, which rides metres behind the player, so comparing aim_dist
-    // against an absolute reach here deadlocked the bot (phase 3 became
-    // unreachable with any spot visible — it walked forever and never swung).
-    // ...but ONLY while there is still room to close in. Once the bot is at
-    // point-blank range it cannot get any closer, and holding phase 3 hostage
-    // deadlocked it: stuck watchdog -> evade dance -> 30 s blacklist, seen as
-    // "marker fell off a half-mined node". At the node, swing no matter where
-    // the X sits — hits through the node still connect.
-    bool spotFar  = tgt.has_spot && (tgt.aim_dist - tgt.dist) > 0.6f &&
-                    tgt.dist > walkUntil + 0.3f;
-    bool inReach  = tgt.dist <= reachDist && !spotFar;
-    bool aimed    = fabsf(tgt.yaw) <= aimedYaw;
-
-    // Крест не «лоб в лоб» или не достаём: цель ног — точка СТОЯНКИ перед
-    // крестом (метр наружу по его нормали, отдаёт game.cpp). Идём обычной
-    // ходьбой с поворотом камеры на стоянку — как человек обходит дерево:
-    // ногами по дуге, а не слепым стрейфом. Пришли (<0.7 м) — цель снова
-    // крест, фаза добычи.
-    bool goStand = tgt.has_spot && tgt.stand_ok &&
-                   (!tgt.spot_facing || spotFar) &&
-                   tgt.stand_dist > 0.7f;
+    // Всегда идём к точке ПЕРЕД крестом, если он есть и мы ещё не там —
+    // даже когда крест далеко или сбоку. Раньше при «лицом» шли к центру
+    // дерева, и крест оставался сбоку: бот не подходил и махал мимо.
+    const float standArrive = s_moveDown ? 0.50f : 0.70f;
+    bool goStand = tgt.has_spot && tgt.stand_ok && tgt.stand_dist > standArrive;
     float goalYaw  = goStand ? tgt.stand_yaw  : tgt.yaw;
     float goalDist = goStand ? tgt.stand_dist : tgt.dist;
+
+    bool inReach = tgt.has_spot
+        ? (tgt.aim_dist <= (isTree ? 2.5f : 3.2f))
+        : (tgt.dist <= reachDist);
+    bool aimed = fabsf(tgt.yaw) <= aimedYaw;
 
     int phase;
     if (goStand)      phase = (fabsf(goalYaw) <= 14.f) ? 2 : 1;
@@ -3811,15 +3797,13 @@ static void UpdateFarm(float dt) {
         // only once actually inside — no down/up flapping at the boundary
         // (the "stomping in place" bug).
         float pressAt = s_moveDown ? walkUntil : walkUntil + 0.5f;
-        float standStop = s_moveDown ? 0.5f : 0.7f; // гистерезис прихода на стоянку
-        // Никаких стрейфов вокруг узла: крест, повёрнутый боком/назад,
-        // игра больше не отдаёт как цель (фильтр в game.cpp) — бот просто
-        // бьёт тело, ХП капает, декаль перепрыгивает и рано или поздно
-        // оказывается лицом. Тогда прицел сам переключается на неё.
+        // Не идём, пока камера не смотрит примерно на цель ног: при yaw 90–180°
+        // стик «вперёд» уводит от креста. Сначала доворот, потом шаг.
+        bool alignedForWalk = fabsf(goalYaw) < 72.f;
         bool wantWalk = (phase == 2) ||
-                        (phase == 1 && fabsf(goalYaw) < 70.f && goalDist > reachDist * 2.f) ||
-                        (goStand && goalDist > standStop) ||
-                        (phase == 3 && tgt.dist > pressAt);
+                        (phase == 1 && alignedForWalk && goalDist > reachDist * 2.f) ||
+                        (goStand && alignedForWalk && goalDist > standArrive) ||
+                        (phase == 3 && (tgt.has_spot ? tgt.aim_dist : tgt.dist) > pressAt);
         if (s_evadeTime > 0.f) wantWalk = true; // manoeuvre drives the stick itself
         // Release hysteresis: phases flicker for a frame or two around their
         // thresholds (dist/yaw noise), and every flicker used to lift and
@@ -3864,11 +3848,22 @@ static void UpdateFarm(float dt) {
                 // frame, and steering off it was the left-right stick flapping.
                 float yawSteer = (phase == 3 && !goStand) ? tgt.yaw : goalYaw;
                 if (fabsf(yawSteer) < 4.f) yawSteer = 0.f;
-                float steer = yawSteer / 70.f;
-                if (steer >  0.6f) steer =  0.6f;
-                if (steer < -0.6f) steer = -0.6f;
-                px = cx + r * steer;
-                py = cy - r * sqrtf(1.f - steer * steer);
+                // Крест сбоку/сзади и мы уже у ствола: обходим, а не прём
+                // сквозь дерево к стоянке «через» пивот.
+                bool orbit = goStand && !tgt.spot_facing && tgt.dist < 5.0f;
+                if (orbit) {
+                    float side = (fabsf(goalYaw) > 8.f)
+                        ? ((goalYaw > 0.f) ? 1.f : -1.f)
+                        : s_evadeDir;
+                    px = cx + r * 0.92f * side;
+                    py = cy - r * 0.42f;
+                } else {
+                    float steer = yawSteer / 70.f;
+                    if (steer >  0.6f) steer =  0.6f;
+                    if (steer < -0.6f) steer = -0.6f;
+                    px = cx + r * steer;
+                    py = cy - r * sqrtf(1.f - steer * steer);
+                }
                 if (phase == 3) {
                     // Final approach: gentle forward nudge, steering smoothly
                     // proportional to the error (no sign() jumps).
