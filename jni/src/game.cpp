@@ -183,22 +183,35 @@ static void always_day_tick() {
     if (!g_day_tod) {
         if (--g_day_retry > 0) return;
         g_day_retry = 60; // ~1 c между попытками
+        // ВРЕМЕННО: разовый дамп кандидатов в файл — почему инстанс не найден.
+        static int s_day_log_left = 3;
+        FILE* dlog = nullptr;
+        if (s_day_log_left > 0) {
+            --s_day_log_left;
+            dlog = fopen("/storage/emulated/0/benzhack/day_log.txt", s_day_log_left == 2 ? "w" : "a");
+        }
         for (uint64_t rva : TOD_TYPEINFO_RVA_CANDIDATES) {
             uint64_t klass = rd_ptr(g_il2cpp_base + rva);
-            if (klass < 0x10000) continue;
-            uint64_t statics = rd_ptr(klass + 0xB8); // Il2CppClass::static_fields
-            if (statics < 0x10000) continue;
-            uint64_t tod = rd_ptr(statics); // ukg — первое статик-поле
-            if (tod < 0x10000) continue;
-            // Железная проверка: имя класса самого объекта. Валидация по
-            // полям (час/длина суток) пропускала все кандидаты — у чужих
-            // синглтонов значения по этим смещениям тоже «правдоподобны».
-            uint64_t obj_klass = rd_ptr(tod);
-            if (obj_klass < 0x10000) continue;
-            std::string cname = read_remote_string(rd_ptr(obj_klass + 0x10)); // IL2CPP_CLASS_NAME
+            std::string kname = (klass >= 0x10000) ? read_remote_string(rd_ptr(klass + 0x10)) : "";
+            uint64_t statics = (klass >= 0x10000) ? rd_ptr(klass + 0xB8) : 0;
+            uint64_t tod = (statics >= 0x10000) ? rd_ptr(statics) : 0;
+            uint64_t obj_klass = (tod >= 0x10000) ? rd_ptr(tod) : 0;
+            std::string cname = (obj_klass >= 0x10000) ? read_remote_string(rd_ptr(obj_klass + 0x10)) : "";
+            if (dlog) {
+                int hour = tod >= 0x10000 ? rd<int32_t>(tod + TOD_CURRENT_HOUR) : -99;
+                float norm = tod >= 0x10000 ? rd<float>(tod + TOD_NORM_TIME) : -99.0F;
+                fprintf(dlog, "rva=%llx klass=%llx '%s' statics=%llx tod=%llx '%s' hour=%d norm=%.3f\n",
+                        (unsigned long long)rva, (unsigned long long)klass, kname.c_str(),
+                        (unsigned long long)statics, (unsigned long long)tod, cname.c_str(),
+                        hour, (double)norm);
+            }
             if (cname != "TimeOfDay") continue;
             g_day_tod = tod;
             break;
+        }
+        if (dlog) {
+            fprintf(dlog, "-> найден: %llx\n", (unsigned long long)g_day_tod);
+            fclose(dlog);
         }
         if (!g_day_tod) return;
     }
@@ -4052,11 +4065,6 @@ void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups) {
     g_markers_pickup_enabled = pickups;
 }
 
-static bool g_markers_building_enabled = false;
-void esp_set_building_markers(bool enabled) {
-    if (enabled != g_markers_building_enabled) g_marker_rescan_countdown = 0;
-    g_markers_building_enabled = enabled;
-}
 
 void esp_set_marker_max_distance(float metres) {
     if (!std::isfinite(metres)) return;
@@ -4079,8 +4087,6 @@ struct MarkerEntity {
     bool     has_color = false;
     bool     rainbow = false;
     unsigned char color_rgb[3] = {255, 255, 255};
-    // Постройки (ХП дверей/стен): компонент PieceVitals для живого чтения ХП.
-    uint64_t vitals = 0;
 };
 static std::vector<MarkerEntity> g_marker_entities;
 static std::unordered_map<uint64_t, uint8_t> g_marker_class_kind;
@@ -4628,7 +4634,7 @@ static bool pickup_marker(uint64_t component, char* label, size_t label_cap) {
 enum MarkerClass : uint8_t {
     MARKER_CLASS_NONE = 0, MARKER_CLASS_MINEABLE = 1,
     MARKER_CLASS_LOOT = 2, MARKER_CLASS_PICKUP = 3,
-    MARKER_CLASS_BARREL = 4, MARKER_CLASS_PIECE_VITALS = 5,
+    MARKER_CLASS_BARREL = 4,
 };
 
 static uint8_t marker_class_of(uint64_t klass) {
@@ -4646,9 +4652,6 @@ static uint8_t marker_class_of(uint64_t klass) {
     // loud is kept as a safety net for other builds.
     else if (name == "LootDestroyable" ||
              name.find("Barrel") != std::string::npos)      kind = MARKER_CLASS_BARREL;
-    // ХП дверей/стен: PieceVitals висит на каждой постройке (лог round-11:
-    // skip-class 'PieceVitals' go='door_double_wood (Clone)').
-    else if (name == "PieceVitals")                          kind = MARKER_CLASS_PIECE_VITALS;
     if (g_marker_class_kind.size() < 512) g_marker_class_kind[klass] = kind;
     return kind;
 }
@@ -4767,36 +4770,6 @@ static void rebuild_marker_entities() {
                 known = barrel_look_from_object_name(object_name, look) ||
                         barrel_look_from_object_name(root_name, look);
                 if (!known) { look = kSmashBox; known = true; }
-            } else if (component_class == MARKER_CLASS_PIECE_VITALS) {
-                if (!g_markers_building_enabled) continue;
-                // ХП дверей/стен. Тип постройки — по имени префаба; ХП
-                // дочитывается живьём при отрисовке (см. esp_get_markers).
-                look.kind = ESP_MARKER_BUILDING;
-                look.has_color = false;
-                look.label = nullptr;
-                const char* what = "Постройка";
-                const char* nm = object_name[0] ? object_name : root_name;
-                if (nm && nm[0]) {
-                    char low[48];
-                    size_t n = 0;
-                    for (const char* p = nm; *p && n + 1 < sizeof(low); ++p)
-                        low[n++] = (*p >= 'A' && *p <= 'Z') ? (char)(*p - 'A' + 'a') : *p;
-                    low[n] = '\0';
-                    if (strstr(low, "door"))            what = "Дверь";
-                    else if (strstr(low, "window") ||
-                             strstr(low, "embrasure"))  what = "Окно";
-                    else if (strstr(low, "wall"))       what = "Стена";
-                    else if (strstr(low, "foundation")) what = "Фундамент";
-                    else if (strstr(low, "floor") ||
-                             strstr(low, "ceiling"))    what = "Потолок";
-                    else if (strstr(low, "stairs") ||
-                             strstr(low, "ramp"))       what = "Лестница";
-                    else if (strstr(low, "roof"))       what = "Крыша";
-                    else if (strstr(low, "gate"))       what = "Ворота";
-                    else if (strstr(low, "cupboard"))   what = "Шкаф";
-                }
-                snprintf(pickup_text, sizeof(pickup_text), "%s", what);
-                known = true;
             } else if (component_class == MARKER_CLASS_LOOT) {
                 if (!g_markers_loot_enabled) continue;
                 known = loot_marker(component, object_name, root_name, look);
@@ -4833,7 +4806,6 @@ static void rebuild_marker_entities() {
             entity.transform = native_component_transform(managed_object_native(component));
             if (!entity.transform) // component without its own renderer: use the identity
                 entity.transform = native_component_transform(managed_object_native(identity));
-            if (component_class == MARKER_CLASS_PIECE_VITALS) entity.vitals = component;
             entity.position_valid = marker_world_position(entity.transform, entity.position);
             if (entity.transform) g_marker_entities.push_back(entity);
             if (g_marker_entities.size() >= 512) break;
@@ -4921,7 +4893,6 @@ std::vector<EspMarker> esp_get_markers() {
         if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
         if (entity.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) continue;
         if (entity.kind == ESP_MARKER_PICKUP && !g_markers_pickup_enabled) continue;
-        if (entity.kind == ESP_MARKER_BUILDING && !g_markers_building_enabled) continue;
         // Ore nodes never move, so their position is only read on a rescan.
         // Animals DO move, but re-reading a transform chain (4+ syscalls)
         // for every animal every frame is the single hottest path here —
@@ -4969,50 +4940,8 @@ std::vector<EspMarker> esp_get_markers() {
         marker.color_rgb[0] = entity.color_rgb[0];
         marker.color_rgb[1] = entity.color_rgb[1];
         marker.color_rgb[2] = entity.color_rgb[2];
-        if (entity.kind == ESP_MARKER_BUILDING && entity.vitals) {
-            // Живое ХП: pmp.Entity -> pmK.Health(ARP<float>).latestValue,
-            // максимум — GenericVitals.m_MaxHealth на самом компоненте.
-            float hp = -1.0F, hp_max = rd<float>(entity.vitals + VITALS_MAX_HEALTH);
-            // Текущее ХП: несколько кандидатов — generic-шаринг ARP<float>
-            // хранит latestValue то инлайном, то boxed-объектом, а на части
-            // билдов клиентское ХП лежит кэшем прямо в GenericVitals (uqm).
-            auto plaus = [&](float v) {
-                return std::isfinite(v) && v > 0.0F &&
-                       std::isfinite(hp_max) && hp_max > 0.0F && v <= hp_max * 1.01F;
-            };
-            uint64_t ent = rd_ptr(entity.vitals + PMP_ENTITY);
-            if (ent) {
-                uint64_t arp = rd_ptr(ent + PMK_HEALTH);
-                if (arp) {
-                    float inl = rd<float>(arp + ARP_LATEST_VALUE);
-                    if (plaus(inl)) hp = inl;
-                    if (hp < 0.0F) {
-                        uint64_t box = rd_ptr(arp + ARP_LATEST_VALUE);
-                        if (box > 0x10000) {
-                            float bx = rd<float>(box + 0x10); // boxed float value
-                            if (plaus(bx)) hp = bx;
-                        }
-                    }
-                }
-            }
-            if (hp < 0.0F) {
-                float uqm = rd<float>(entity.vitals + 0xB8); // GenericVitals.uqm
-                if (plaus(uqm)) hp = uqm;
-            }
-            if (hp < 0.0F) {
-                float uqz = rd<float>(entity.vitals + 0xBC); // GenericVitals.uqz
-                if (plaus(uqz)) hp = uqz;
-            }
-            if (std::isfinite(hp) && hp >= 0.0F && std::isfinite(hp_max) &&
-                hp_max > 0.0F && hp <= hp_max * 1.01F)
-                snprintf(marker.name, sizeof(marker.name), "%s %.0f/%.0f",
-                         entity.text, hp, hp_max);
-            else
-                snprintf(marker.name, sizeof(marker.name), "%s", entity.text);
-        } else {
-            snprintf(marker.name, sizeof(marker.name), "%s",
-                     entity.label ? entity.label : entity.text);
-        }
+        snprintf(marker.name, sizeof(marker.name), "%s",
+                 entity.label ? entity.label : entity.text);
         result.push_back(marker);
     }
 
