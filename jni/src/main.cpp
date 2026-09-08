@@ -4669,12 +4669,3 @@ int main(int argc, char* argv[]) {
     AudioFree();
     shutdown(); Touch_Close(); return 0;
 }
-tached) {
-        esp_reset();
-        g_esp_attached = false;
-    }
-    Blur::Free();
-    CfgWatchFree();
-    AudioFree();
-    shutdown(); Touch_Close(); return 0;
-}

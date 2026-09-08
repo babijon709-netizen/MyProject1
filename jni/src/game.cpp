@@ -5712,9 +5712,3 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F) ? fraction : -1.0F;
     return true;
 }
-d : best_dist;
-    }
-    float fraction = rd<float>(best->component + MINEABLE_FRACTION);
-    out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F) ? fraction : -1.0F;
-    return true;
-}
