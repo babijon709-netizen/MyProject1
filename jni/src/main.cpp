@@ -955,6 +955,21 @@ static std::string CfgPath(const char* name) {
     return std::string(kCfgDir) + name + XS(".cfg");
 }
 
+static std::string CfgLastPath() {
+    return std::string(kCfgDir) + XS(".last");
+}
+
+static void RememberLastConfigName(const char* name) {
+    if (!name || !name[0]) return;
+    mkdir(kCfgDir, 0777);
+    std::ofstream f(CfgLastPath(), std::ios::trunc);
+    if (f) f << name;
+}
+
+static void ForgetLastConfigName() {
+    remove(CfgLastPath().c_str());
+}
+
 static void XorBuf(uint8_t* buf, size_t sz) {
     for (size_t i = 0; i < sz; i++) buf[i] ^= (kXorKey ^ (uint8_t)(i * 0x1D + 0x3B));
 }
@@ -1117,6 +1132,7 @@ static void ConfigSave() {
     } while (access(cfgpath.c_str(), F_OK) == 0);
     ConfigSaveToPath(cfgpath);
     CfgScanDir();
+    RememberLastConfigName(baseName);
     ShowToast(XS("Конфиг создан"));
     PlaySound(SND_SUCCESS);
 }
@@ -1129,11 +1145,11 @@ static void ConfigUpdate(int idx) {
     PlaySound(SND_SUCCESS);
 }
 
-static void ConfigLoad(int idx) {
+static void ConfigLoad(int idx, bool announce = true) {
     if (idx < 0 || idx >= g_configCount) return;
     std::string path = CfgPath(g_configs[idx].name);
     std::ifstream f(path, std::ios::binary);
-    if (!f) { ShowToast(XS("Файл не найден")); return; }
+    if (!f) { if (announce) ShowToast(XS("Файл не найден")); return; }
 
     CfgBlob s;
 
@@ -1141,10 +1157,10 @@ static void ConfigLoad(int idx) {
     f.read((char*)buf, sizeof(buf));
     size_t got = (size_t)f.gcount();
     f.close();
-    if (got != sizeof(buf)) { ShowToast(XS("Несовместимый конфиг")); return; }
+    if (got != sizeof(buf)) { if (announce) ShowToast(XS("Несовместимый конфиг")); return; }
     XorBuf(buf, sizeof(s));
     memcpy(&s, buf, sizeof(s));
-    if (s.magic != 0x58564345U || s.version != 4) { ShowToast(XS("Старый конфиг — пересохрани")); return; }
+    if (s.magic != 0x58564345U || s.version != 4) { if (announce) ShowToast(XS("Старый конфиг — пересохрани")); return; }
 
     g_state.aim_touch   = s.aim_touch;
     // «Только видимых» убран из меню — значение из конфига игнорируется.
@@ -1215,8 +1231,40 @@ static void ConfigLoad(int idx) {
     snprintf(g_loadedConfigName, sizeof(g_loadedConfigName), "%s", g_configs[idx].name);
     g_cfgLoadedIdx = idx;
     for (int i = 0; i < kMaxConfigs; i++) g_cfgLoadAnim[i] = 0.f;
-    ShowToast(XS("Конфиг загружен"));
-    PlaySound(SND_SUCCESS);
+    RememberLastConfigName(g_configs[idx].name);
+    if (announce) {
+        ShowToast(XS("Конфиг загружен"));
+        PlaySound(SND_SUCCESS);
+    }
+}
+
+static void ConfigLoadLast() {
+    std::ifstream f(CfgLastPath());
+    std::string name;
+    if (f) {
+        std::getline(f, name);
+        while (!name.empty() && (name.back() == '\n' || name.back() == '\r' || name.back() == ' '))
+            name.pop_back();
+    }
+    if (!name.empty()) {
+        for (int i = 0; i < g_configCount; i++) {
+            if (strcmp(g_configs[i].name, name.c_str()) == 0) {
+                ConfigLoad(i, false);
+                return;
+            }
+        }
+    }
+    time_t best_mtime = 0;
+    int best = -1;
+    for (int i = 0; i < g_configCount; i++) {
+        struct stat st{};
+        if (stat(CfgPath(g_configs[i].name).c_str(), &st) != 0) continue;
+        if (best < 0 || st.st_mtime >= best_mtime) {
+            best_mtime = st.st_mtime;
+            best = i;
+        }
+    }
+    if (best >= 0) ConfigLoad(best, false);
 }
 
 static void ConfigDelete(int idx) {
@@ -4588,6 +4636,8 @@ int main(int argc, char* argv[]) {
     LoadTabIcons();
     ApplyTheme();
     CfgScanDir();
+    ConfigLoadLast();
+    ApplyTheme();
     CenterMenuOnDisplay();
     g_menuFadeIn = 0.f;
 

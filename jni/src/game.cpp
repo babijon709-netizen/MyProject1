@@ -5166,6 +5166,20 @@ void esp_farm_blacklist(unsigned long long id, float seconds) {
     if (g_farm_rescan > 15) g_farm_rescan = 15;
 }
 
+static float farm_eye_y() {
+    if (g_cam_pose_valid) return g_cam_pos.y;
+    if (g_frame_local_valid) return g_frame_local_pos.y;
+    return 0.0F;
+}
+
+static bool farm_spot_above_dirt(const Vec3& p) {
+    if (!g_cam_pose_valid && !g_frame_local_valid) return true;
+    // Camera sits ~1.6 m above the soil. Anything near the feet is a root /
+    // interaction volume / shadow — that was the green mark on the dirt
+    // in front of the tree.
+    return p.y > farm_eye_y() - 1.15F;
+}
+
 // Kind-aware "is this child the glowing X". Both trees and ore park a dormant
 // template on the node pivot; the live mark sits on the surface, often closer
 // than 35 cm and not strictly above the pivot (tree pivot is mid-trunk, ore
@@ -5183,6 +5197,7 @@ static bool farm_spot_plausible(int kind, const Vec3& node_pos, const Vec3& p, f
         // had with a top-mounted pivot.
         if (d2 <= 0.10F * 0.10F || d2 >= 6.0F * 6.0F) return false;
         if (sy < -1.2F || sy > 3.5F) return false;
+        if (!farm_spot_above_dirt(p)) return false;
         // X is on the bark, never on the trunk axis. The old |sy|>0.25
         // alternative accepted the mesh origin after a hit-sway — that is
         // "the mark is there, we still chop the trunk".
@@ -5205,8 +5220,11 @@ static bool farm_spot_on_bark(int kind, const Vec3& node_pos, const Vec3& p) {
     if (kind != 0) return true;
     float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
     float horiz2 = sx * sx + sz * sz;
-    if (horiz2 < 0.12F * 0.12F || horiz2 > 1.05F * 1.05F) return false;
-    if (sy < -0.8F || sy > 2.6F) return false;
+    // Thin/medium trunk radius. 1 m out is the dirt in front of the tree
+    // (interaction volume), not the mark on the bark.
+    if (horiz2 < 0.12F * 0.12F || horiz2 > 0.55F * 0.55F) return false;
+    if (sy < -0.5F || sy > 2.6F) return false;
+    if (!farm_spot_above_dirt(p)) return false;
     return true;
 }
 
