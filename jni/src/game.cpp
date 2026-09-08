@@ -166,87 +166,72 @@ void esp_set_always_day(bool enabled) { g_day_enabled = enabled; }
 
 static void always_day_tick() {
     if (!g_day_enabled) {
-        // Выключили: вернуть игре ход времени (один раз, пока инстанс жив).
-        if (g_day_tod) {
-            uint8_t run = 0;
-            wr_buf(g_day_tod + TOD_STOP_TIME, &run, sizeof(uint8_t));
-            g_day_tod = 0;
-        }
+        // Выключили: ничего восстанавливать не нужно — часы идут сами, а
+        // Cycle.Hour мы больше не перезаписываем.
+        g_day_tod = 0;
         return;
     }
     if (!g_il2cpp_base || g_pid <= 0) return;
     if (g_day_tod) {
         // Живучесть: инстанс мог умереть при перезагрузке мира.
-        int hour = rd<int32_t>(g_day_tod + TOD_CURRENT_HOUR);
-        if (hour < 0 || hour > 24) { g_day_tod = 0; }
+        uint64_t cyc = rd_ptr(g_day_tod + 0x40);
+        float hour = (cyc >= 0x10000) ? rd<float>(cyc + 0x10) : -1.0F;
+        if (!(std::isfinite(hour) && hour >= 0.0F && hour <= 24.0F)) g_day_tod = 0;
     }
+    // g_day_tod здесь — объект TOD_Sky (небесный менеджер ассета Time of
+    // Day; класс обфусцирован, в этом дампе "Gq"). Прежний Oxide.TimeOfDay в
+    // боевых сценах не существует: его ленивые метадата-слоты так и не
+    // инициализированы (лог day_log: нечётные токены) — Awake ни разу не
+    // вызывался. TOD_Sky ищем по СИГНАТУРЕ, без имён: у его класса первое
+    // статик-поле — список инстансов List<Gq>; элемент списка — объект того
+    // же класса; у объекта по +0x40 лежит TOD_CycleParameters с полями
+    // Hour(float 0..24)/Day(1..31)/Month(1..12)/Year(1900..2100).
     if (!g_day_tod) {
-        // Лог показал: фиксированные слоты-кандидаты не инициализированы на
-        // части сцен (ленивые metadata-слоты il2cpp, нечётные токены вместо
-        // указателей). Поэтому класс ищется сканом всей области слотов:
-        // порциями по 128 слотов за кадр, значение-указатель -> имя класса
-        // "TimeOfDay" + namespace "Oxide". Найденный klass кэшируется.
-        static uint64_t s_tod_klass = 0;
         static uint64_t s_scan_rva = 0xD7A0000;
         constexpr uint64_t kScanEnd = 0xD840000;
-        if (!s_tod_klass) {
-            uint64_t slots[128];
-            if (rd_buf(g_il2cpp_base + s_scan_rva, slots, sizeof(slots))) {
-                for (int i = 0; i < 128 && !s_tod_klass; ++i) {
-                    uint64_t v = slots[i];
-                    if (v < 0x10000 || (v & 0x7) != 0) continue; // токен/мусор
-                    char nm[12] = {};
-                    uint64_t name_ptr = rd_ptr(v + 0x10);
-                    if (name_ptr < 0x10000) continue;
-                    if (!rd_buf(name_ptr, nm, 10)) continue;
-                    if (memcmp(nm, "TimeOfDay", 10) != 0) continue; // с NUL
-                    char ns[8] = {};
-                    uint64_t ns_ptr = rd_ptr(v + 0x18);
-                    if (ns_ptr < 0x10000 || !rd_buf(ns_ptr, ns, 6)) continue;
-                    if (memcmp(ns, "Oxide", 6) != 0) continue;      // с NUL
-                    s_tod_klass = v;
-                }
+        constexpr uint64_t kCycleOff = 0x40;   // Gq.Cycle
+        uint64_t slots[128];
+        if (rd_buf(g_il2cpp_base + s_scan_rva, slots, sizeof(slots))) {
+            for (int i = 0; i < 128 && !g_day_tod; ++i) {
+                uint64_t klass = slots[i];
+                if (klass < 0x10000 || (klass & 0x7) != 0) continue;
+                uint64_t statics = rd_ptr(klass + 0xB8);
+                if (statics < 0x10000) continue;
+                uint64_t list = rd_ptr(statics);      // static List<Gq> instances
+                if (list < 0x10000) continue;
+                uint64_t items = rd_ptr(list + 0x10); // List._items
+                int32_t size = rd<int32_t>(list + 0x18);
+                if (items < 0x10000 || size <= 0 || size > 4) continue;
+                uint64_t sky = rd_ptr(items + 0x20);  // [0]
+                if (sky < 0x10000) continue;
+                if (rd_ptr(sky) != klass) continue;   // элемент — того же класса
+                uint64_t cyc = rd_ptr(sky + kCycleOff);
+                if (cyc < 0x10000) continue;
+                float hour = rd<float>(cyc + 0x10);
+                int day = rd<int32_t>(cyc + 0x14);
+                int mon = rd<int32_t>(cyc + 0x18);
+                int year = rd<int32_t>(cyc + 0x1C);
+                if (std::isfinite(hour) && hour >= 0.0F && hour <= 24.0F &&
+                    day >= 1 && day <= 31 && mon >= 1 && mon <= 12 &&
+                    year >= 1900 && year <= 2100)
+                    g_day_tod = sky;
             }
-            s_scan_rva += 128 * 8;
-            if (s_scan_rva >= kScanEnd) s_scan_rva = 0xD7A0000; // круг заново
-            if (!s_tod_klass) return;
         }
-        // klass найден — это сам Oxide.TimeOfDay; его инстанс достаём из
-        // статики generic-синглтона нельзя (klass другой), зато Awake кладёт
-        // инстанс в статику себя? Нет: у самого класса статик-полей нет.
-        // Инстанс ищем через статику pzF`1<TimeOfDay>: её klass лежит в тех
-        // же слотах — ищем по статик-полю, указывающему на объект klass'а.
-        static uint64_t s_scan2_rva = 0xD7A0000;
-        {
-            uint64_t slots[128];
-            if (rd_buf(g_il2cpp_base + s_scan2_rva, slots, sizeof(slots))) {
-                for (int i = 0; i < 128 && !g_day_tod; ++i) {
-                    uint64_t v = slots[i];
-                    if (v < 0x10000 || (v & 0x7) != 0) continue;
-                    uint64_t statics = rd_ptr(v + 0xB8);
-                    if (statics < 0x10000) continue;
-                    uint64_t obj = rd_ptr(statics);
-                    if (obj < 0x10000) continue;
-                    if (rd_ptr(obj) != s_tod_klass) continue; // объект типа TimeOfDay
-                    int hour = rd<int32_t>(obj + TOD_CURRENT_HOUR);
-                    if (hour < 0 || hour > 24) continue;
-                    g_day_tod = obj;
-                }
-            }
-            s_scan2_rva += 128 * 8;
-            if (s_scan2_rva >= kScanEnd) s_scan2_rva = 0xD7A0000;
-        }
+        s_scan_rva += 128 * 8;
+        if (s_scan_rva >= kScanEnd) s_scan_rva = 0xD7A0000;
         if (!g_day_tod) return;
     }
-    // Полдень: стопим ход времени (m_StopTime — Update() игры сам перестаёт
-    // прибавлять dt) и держим нормализованное время в 0.5. Час игра
-    // пересчитает сама из нормализованного (str w8,[x19,#0x3C] в Update).
-    uint8_t stop = 1;
-    float noon = 0.5F;
-    int32_t hour12 = 12;
-    wr_buf(g_day_tod + TOD_STOP_TIME, &stop, sizeof(uint8_t));
-    wr_buf(g_day_tod + TOD_NORM_TIME, &noon, sizeof(float));
-    wr_buf(g_day_tod + TOD_CURRENT_HOUR, &hour12, sizeof(int32_t));
+    // Полдень: пишем Cycle.Hour = 12 каждый кадр — TOD_Sky пересчитывает
+    // солнце/небо из этого значения в своём Update.
+    {
+        uint64_t cyc = rd_ptr(g_day_tod + 0x40);
+        if (cyc >= 0x10000) {
+            float noon = 12.0F;
+            wr_buf(cyc + 0x10, &noon, sizeof(float));
+        } else {
+            g_day_tod = 0; // объект умер (смена сцены) — переискать
+        }
+    }
 }
 
 static std::string read_remote_string(uint64_t address) {
@@ -5382,6 +5367,10 @@ bool esp_farm_get_target(FarmTarget& out) {
             else if (d2 >= 6.0F * 6.0F) s_spot_transform = 0;
         }
     }
+    // Дистанция до сырой точки прицела: запоминается ДО подтяжки к
+    // поверхности, иначе aim_dist схлопывается к dist и контроллер never
+    // узнаёт, что крест на дальней стороне (рывки не запускались).
+    float raw_aim_x = aim.x, raw_aim_z = aim.z;
     if (spot_ok) {
         // Крест-декаль выпирает из поверхности узла. В лоб это не мешает —
         // луч прицела всё равно входит в тело узла у креста. Сбоку точка
@@ -5493,8 +5482,8 @@ bool esp_farm_get_target(FarmTarget& out) {
         // Horizontal distance to the aim point itself: the melee-reach check
         // must measure what the pick actually has to hit — a spot on the far
         // side of a boulder is metres further than the node centre.
-        float ax = aim.x - g_frame_local_pos.x;
-        float az = aim.z - g_frame_local_pos.z;
+        float ax = raw_aim_x - g_frame_local_pos.x;
+        float az = raw_aim_z - g_frame_local_pos.z;
         float ad = sqrtf(ax * ax + az * az);
         out.aim_dist = std::isfinite(ad) ? ad : best_dist;
     }
