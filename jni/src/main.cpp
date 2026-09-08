@@ -3547,21 +3547,29 @@ static void UpdateAim(float dt) {
 
 // ============================ Auto-farm =============================
 //
-// Fully touch-driven: three synthetic fingers (move joystick, camera swipe,
-// attack tap) — the game layer only tells us where the nearest selected
-// resource node is (yaw/pitch/distance). The camera finger reuses the same
-// gain the aimbot learned, or probes carefully with a fixed one.
+// Touch controller for the farm. Three synthetic fingers:
+//   0 — move joystick (walking)
+//   1 — camera swipe (turning / aiming)
+//   2 — attack tap (tool swing)
 //
-// State machine per frame:
-//   TURN  — swipe the camera towards the node until it is roughly centred;
-//   WALK  — hold the move joystick forward (steering with the camera) until
-//           the node is within reach;
-//   MINE  — stand still, keep the crosshair on the node (glowing X when the
-//           game shows one) and tap-attack repeatedly;
-//   node depleted / lost -> pick the next one automatically.
+// The game layer (game.cpp) reports the nearest selected node and, when the
+// game shows one, the glowing X (bonus spot) on it. Strategy per node:
+//   APPROACH — turn the camera onto the node, walk straight at it until the
+//              tool reaches (the X appears in reach);
+//   MINE     — stand still, hold the crosshair on the X (on the body when the
+//              X is gone) and tap-attack. The X hops after every hit, so the
+//              aim keeps re-acquiring it; when the node is drained, on to
+//              the next one automatically.
+//
+// Hitting the X is the fast path: the bonus spot takes extra damage per
+// swing. So the bot parks at the node, chases the mark, and swings at it.
+//
+// The walk ALWAYS goes at the node body (walk_yaw) — only the crosshair
+// chases the X. Steering the walk by the X was the left-right weaving on
+// every tree.
 
 bool g_farmActive = false;   // for the status line in the menu
-int  g_farmPhase = 0;        // 0 idle, 1 turn, 2 walk, 3 mine
+int  g_farmPhase = 0;        // 0 idle, 1 approach, 2 mine
 int  g_farmNodes = 0;        // nodes found by the last registry scan
 int  g_farmReason = 1;       // idle reason from esp_farm_debug()
 float g_farmTgtDist = 0.f;   // distance to the current target (m)
@@ -3573,6 +3581,7 @@ int  g_farmTgtKind = 0;      // current target resource kind
 int  g_farmCalib = 0;
 
 static void UpdateFarm(float dt) {
+    // ---- fingers ----
     static bool  s_moveDown = false;  // finger 0: move joystick
     static bool  s_lookDown = false;  // finger 1: camera swipe
     static bool  s_tapDown  = false;  // finger 2: attack taps
@@ -3583,24 +3592,25 @@ static void UpdateFarm(float dt) {
     static float s_lastCamYaw = 0.f;
     static float s_lastDx = 0.f;
     static bool  s_haveLast = false;
+    static float s_stickPx = 0.f, s_stickPy = 0.f; // smoothed stick position
+    // ---- target bookkeeping ----
     static unsigned long long s_nodeId = 0;
-    static float s_stuckTime = 0.f;   // seconds without closing distance
-    static float s_lastDist = 1e9f;
-    static float s_mineTime = 0.f;    // seconds spent mining this node
-    static float s_fracStart = -1.f;
-    static float s_sinceDrain = 0.f;  // seconds since the node last lost HP
-    static float s_evadeTime = 0.f;   // >0: sidestep manoeuvre in progress
+    static float s_settle = 0.f;      // pause between targets (fingers up)
+    static float s_lostTime = 0.f;    // target dropout tolerance
+    // ---- watchdogs ----
+    static float s_lastGoal = 1e9f;   // last value of the progress metric
+    static float s_stuckTime = 0.f;   // seconds without progress
+    static float s_evadeTime = 0.f;   // >0: back-off + sidestep in progress
     static float s_evadeDir = 1.f;    // +1 right, -1 left
     static int   s_evadeCount = 0;    // manoeuvres tried on this node
-    static float s_settle = 0.f;      // pause between targets (fingers up)
-    static float s_stickPx = 0.f, s_stickPy = 0.f; // smoothed stick position
-    static bool  s_goStandLatched = false; // don't flip stand/body mid-approach
+    static float s_mineTime = 0.f;    // seconds since the node last lost HP
+    static float s_fracRef = -1.f;    // fraction the drain check compares to
+    static float s_nudgeTime = 0.f;   // seconds stuck nudging into reach
 
     auto releaseAll = [&]() {
         if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
-        if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; }
+        if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; s_haveLast = false; }
         if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }
-        s_haveLast = false;
         s_lookHold = 0;
     };
 
@@ -3625,9 +3635,9 @@ static void UpdateFarm(float dt) {
     if (!active) {
         releaseAll();
         g_farmActive = false; g_farmPhase = 0;
-        s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
-        s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f; s_settle = 0.f;
-        s_goStandLatched = false;
+        s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f; s_fracRef = -1.f;
+        s_nudgeTime = 0.f; s_lostTime = 0.f;
+        s_evadeTime = 0.f; s_evadeCount = 0; s_settle = 0.f;
         return;
     }
 
@@ -3648,12 +3658,11 @@ static void UpdateFarm(float dt) {
     FarmTarget tgt;
     bool haveTgt = esp_farm_get_target(tgt) && tgt.valid;
     esp_farm_debug(g_farmNodes, g_farmReason);
-    static float s_lostTime = 0.f; // target dropout tolerance
     if (!haveTgt) {
         // A working target can vanish for a few frames (registry rescan, a
         // failed read mid-update) and come right back. Dropping everything
-        // instantly caused the stop-start-stop shuffle: freeze inputs briefly
-        // and only reset for real when the target stays gone.
+        // instantly caused the stop-start-stop shuffle: freeze inputs
+        // briefly and only reset for real when the target stays gone.
         if (s_nodeId != 0 && s_lostTime < 0.8f) {
             s_lostTime += dt;
             if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; } // no blind swings
@@ -3662,10 +3671,10 @@ static void UpdateFarm(float dt) {
         }
         releaseAll();
         g_farmActive = false; g_farmPhase = 0;
-        s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
-        s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f; s_settle = 0.f;
+        s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f; s_fracRef = -1.f;
+        s_nudgeTime = 0.f;
+        s_evadeTime = 0.f; s_evadeCount = 0; s_settle = 0.f;
         s_lostTime = 0.f;
-        s_goStandLatched = false;
         return;
     }
     s_lostTime = 0.f;
@@ -3680,26 +3689,23 @@ static void UpdateFarm(float dt) {
         // right after a node is finished.
         bool hadNode = s_nodeId != 0;
         s_nodeId = tgt.id;
-        s_stuckTime = 0.f; s_lastDist = tgt.dist;
-        s_mineTime = 0.f;  s_fracStart = tgt.fraction;
-        s_sinceDrain = 0.f; s_evadeTime = 0.f; s_evadeCount = 0;
-        s_goStandLatched = false;
-        if (hadNode) { releaseAll(); s_settle = 0.7f; }
+        s_stuckTime = 0.f; s_lastGoal = 1e9f;
+        s_mineTime = 0.f; s_fracRef = -1.f; s_nudgeTime = 0.f;
+        s_evadeTime = 0.f; s_evadeCount = 0;
+        if (hadNode) { releaseAll(); s_settle = 0.6f; }
     }
 
     // A node that is already mined out gets blacklisted on the spot instead
-    // of being circled: the picker would only fall back to it when nothing
-    // else is in range, and dancing around an empty stump helps nobody.
-    // Debounced: fraction is a raw memory read and a single garbage frame
-    // (mid-update value, failed read) used to abandon a half-chopped tree —
-    // only a solidly repeated "empty" counts.
+    // of being circled. Debounced: fraction is a raw memory read and a
+    // single garbage frame (mid-update value, failed read) used to abandon
+    // a half-chopped tree — only a solidly repeated "empty" counts.
     static int s_depletedFrames = 0;
     if (tgt.fraction >= 0.f && tgt.fraction < 0.03f) {
         if (++s_depletedFrames >= 10) {
             s_depletedFrames = 0;
             esp_farm_blacklist(tgt.id, 120.f);
             releaseAll();
-            s_settle = 0.7f;
+            s_settle = 0.6f;
             s_nodeId = 0;
             g_farmPhase = 0;
             return;
@@ -3716,9 +3722,10 @@ static void UpdateFarm(float dt) {
         return;
     }
 
-    // On-screen mark on the exact point the farm is working: the glowing spot
-    // when one is found, otherwise the node body. Doubles as debug output —
-    // if the mark is on the wrong object, the target picker is what to fix.
+    // On-screen mark on the exact point the farm is working: the glowing
+    // spot when one is found, otherwise the node body. Doubles as debug
+    // output — if the mark is on the wrong object, the target picker is
+    // what to fix.
     if (tgt.on_screen) {
         auto* fg = ImGui::GetForegroundDrawList();
         ImU32 mc = tgt.has_spot ? IM_COL32(80, 255, 120, 230) : IM_COL32(255, 200, 60, 230);
@@ -3730,7 +3737,7 @@ static void UpdateFarm(float dt) {
         fg->AddLine({tgt.sx, tgt.sy + r * 0.5f}, {tgt.sx, tgt.sy + r * 1.6f}, mc, 3.f);
     }
 
-    // ---- camera gain: learn from our own swipe, fall back to the aimbot's ----
+    // ---- camera gain: learn from our own swipe, fall back to a safe probe ----
     float camYaw = 0.f, camPitch = 0.f;
     bool haveCam = esp_camera_angles(camYaw, camPitch);
     if (haveCam && s_haveLast && fabsf(s_lastDx) >= 1.f) {
@@ -3752,73 +3759,42 @@ static void UpdateFarm(float dt) {
 
     float gain = (s_gainYaw != 0.f) ? s_gainYaw : 0.25f; // deg per px, safe probe
 
-    // ---- decide the phase ----
-    // reachDist is deliberately tight for trees (a thin trunk holds its node
-    // position dead centre, and stopping 3+ m away leaves melee short). Ore
-    // X sits on the boulder surface, often below the top-mounted pivot, so
-    // stand/melee are measured to that mark — not 2 m off the node centre.
-    // While mining the move finger keeps nudging forward until walkUntil.
-    const bool  isTree    = (tgt.kind == 0);
-    const float reachDist = isTree ? 2.6f : 2.4f; // body: close enough to swing
-    const float meleeX    = isTree ? 0.80f : 1.55f; // hatchet reach is ~0.8 m to the bark
-    const float meleeHold = isTree ? 1.00f : 1.80f; // hysteresis while mining
-    const float aimedYaw  = tgt.has_spot
-        ? ((g_farmPhase == 3) ? 3.f : 8.f)
-        : ((g_farmPhase == 3) ? 8.f : 14.f);
-    const float standArrive = isTree
-        ? (s_moveDown ? 0.18f : 0.28f)  // don't stop half a metre short of the X
-        : (s_moveDown ? 0.45f : 0.65f);
-    // Stand / X-aim only when already at the tree. From far away a bark
-    // child (or a hopping X) sits LEFT then RIGHT of the trunk — walking
-    // toward that yaw the whole way was the left-right jerk on every tree.
-    float closeGate = s_goStandLatched ? 3.6f : 2.6f;
-    bool closeForX  = tgt.dist < closeGate;
-    if (tgt.dist > 3.8f) s_goStandLatched = false;
-    else if (closeForX)  s_goStandLatched = true;
-    bool goStand = tgt.has_spot && tgt.stand_ok && tgt.stand_dist > standArrive && closeForX;
-    float meleeNow = (g_farmPhase == 3) ? meleeHold : meleeX;
-    bool xInMelee  = tgt.has_spot && tgt.aim_dist <= meleeNow;
-    bool needCloser = tgt.has_spot && !xInMelee && closeForX;
-
-    float goalYaw, goalDist;
-    if (goStand) {
-        goalYaw = tgt.stand_yaw; goalDist = tgt.stand_dist;
-    } else if (needCloser) {
-        goalYaw = tgt.yaw;       goalDist = tgt.aim_dist;
-    } else {
-        goalYaw = tgt.yaw;       goalDist = tgt.dist;
-    }
-
-    bool inReach = tgt.has_spot ? xInMelee : (tgt.dist <= reachDist);
-    bool aimed = fabsf(tgt.yaw) <= aimedYaw;
-
-    int phase;
-    if (goStand || needCloser) phase = (fabsf(goalYaw) <= 14.f) ? 2 : 1;
-    else if (inReach)          phase = 3;
-    else                       phase = (aimed ? 2 : 1);
+    // ---- phase ----
+    // The X can be on the FAR side of the node: the tool cannot reach it
+    // through the trunk/boulder, so first circle until it faces us (orbit).
+    const bool  isTree = (tgt.kind == 0);
+    const bool  orbit  = tgt.has_spot && !tgt.spot_front;
+    const float meleeX = isTree ? 0.80f : 1.55f; // how far the tool actually reaches
+    const float reachX = isTree ? 2.6f  : 2.4f;  // close enough to start (body aim)
+    const bool  inMelee = orbit ? false
+                 : (tgt.has_spot ? (tgt.aim_dist <= meleeX)
+                                 : (tgt.dist <= reachX));
+    const int phase = inMelee ? 2 : 1;
     g_farmPhase = phase;
 
     // ---- finger 1: camera swipe (yaw always; pitch only while mining) ----
     {
-        float steerYaw = (phase == 3) ? tgt.yaw : goalYaw;
+        // MINE (and orbit): chase the exact aim point — the X. APPROACH: the
+        // node body, so the walk goes straight at the node and the camera is
+        // already on the X by the time we stop (it sits on the node, a few
+        // degrees off the body).
+        float steerYaw = (phase == 2 || orbit) ? tgt.yaw : tgt.walk_yaw;
+        float steerPitch = tgt.pitch;
         float wantYawPx = steerYaw / gain;
-        // Pitch: while mining, pull the crosshair exactly onto the node/spot.
         // While walking, only fix a BADLY tilted camera (left looking at the
         // ground after mining ore) — a generous dead zone, or the two axes
         // fight each other and the camera wanders.
         float wantPitchPx = 0.f;
-        float pitchDead = (phase == 3) ? 0.f : 18.f;
-        if (fabsf(tgt.pitch) > pitchDead) {
-            float gp = fabsf(gain);
-            wantPitchPx = -tgt.pitch / gp;
-        }
-        // Dead zones in degrees with hysteresis: a swipe only starts when the
-        // error is clearly outside, and stops well inside. This is what keeps
-        // the camera from twitching left-right around the centre.
-        float startDeg = (phase == 3) ? (tgt.has_spot ? 1.2f : 4.0f) : 10.f;
-        float stopDeg  = (phase == 3) ? (tgt.has_spot ? 0.35f : 1.5f) : 4.f;
-        float pitchErr = (phase == 3) ? fabsf(tgt.pitch)
-                       : fmaxf(fabsf(tgt.pitch) - pitchDead, 0.f);
+        float pitchDead = (phase == 2) ? 0.f : 18.f;
+        if (fabsf(steerPitch) > pitchDead)
+            wantPitchPx = -steerPitch / fabsf(gain);
+        // Dead zones in degrees with hysteresis: a swipe only starts when
+        // the error is clearly outside, and stops well inside. This is what
+        // keeps the camera from twitching left-right around the centre.
+        float startDeg = (phase == 2) ? (tgt.has_spot ? 1.2f : 4.0f) : 10.f;
+        float stopDeg  = (phase == 2) ? (tgt.has_spot ? 0.35f : 1.5f) : 4.f;
+        float pitchErr = (phase == 2) ? fabsf(steerPitch)
+                       : fmaxf(fabsf(steerPitch) - pitchDead, 0.f);
         float errDeg = fmaxf(fabsf(steerYaw), pitchErr);
         bool needTurn = s_lookDown ? (errDeg > stopDeg) : (errDeg > startDeg);
 
@@ -3836,7 +3812,7 @@ static void UpdateFarm(float dt) {
                 // frame, capped. Fast on big errors, glides into the centre
                 // without the stair-step jerks of fixed-size increments.
                 float maxStep = sh * 0.075f;
-                float kAim = (phase == 3 && tgt.has_spot) ? 0.42f : 0.28f;
+                float kAim = (phase == 2 && tgt.has_spot) ? 0.42f : 0.28f;
                 float dx = wantYawPx * kAim;
                 if (dx >  maxStep) dx =  maxStep;
                 if (dx < -maxStep) dx = -maxStep;
@@ -3859,37 +3835,68 @@ static void UpdateFarm(float dt) {
         }
     }
 
-    // ---- finger 0: move joystick (bottom-left), held while walking ----
+    // ---- finger 0: move joystick (bottom-left) ----
+    bool stickDeflected = false;
     {
-        // Keep pressing in while mining until we are right at the node, so
-        // thin trees (node centre inside the trunk) end up in melee range.
-        // walkUntil gets hysteresis: press while further than +0.5 m, release
-        // only once actually inside — no down/up flapping at the boundary
-        // (the "stomping in place" bug).
-        float pressAt = s_moveDown ? meleeX : meleeX + (isTree ? 0.08f : 0.25f);
-        // Не идём, пока камера не смотрит примерно на цель ног: при yaw 90–180°
-        // стик «вперёд» уводит от креста. Сначала доворот, потом шаг.
-        bool alignedForWalk = fabsf(goalYaw) < 72.f;
-        // Только если уже внутри меша (линза в стволе). Иначе 2 м держали
-        // бота слишком далеко от тонких деревьев — удары не долетали, X не
-        // спавнился.
-        bool tooCloseNoX = isTree && !tgt.has_spot && tgt.dist < 0.55f && phase == 3;
-        // Phase 1 is TURN: only creep forward when already almost facing the
-        // node and still far. Walking at yaw 30–70° with a steered stick
-        // weaved left-right all the way in.
-        bool wantWalk = (phase == 2) ||
-                        (phase == 1 && fabsf(goalYaw) < 18.f && goalDist > 8.f) ||
-                        (goStand && alignedForWalk && goalDist > standArrive) ||
-                        (needCloser && alignedForWalk) ||
-                        (phase == 3 && (tgt.has_spot ? tgt.aim_dist : tgt.dist) > pressAt) ||
-                        tooCloseNoX;
-        if (s_evadeTime > 0.f) wantWalk = true; // manoeuvre drives the stick itself
+        // Virtual stick centre: calibrated position when set, sensible
+        // default otherwise.
+        float cx = (g_state.farm_joy_x >= 0.f) ? sw * g_state.farm_joy_x : sw * 0.165f;
+        float cy = (g_state.farm_joy_y >= 0.f) ? sh * g_state.farm_joy_y : sh * 0.70f;
+        float r = sh * 0.16f;
+        float px = cx, py = cy;
+        bool wantWalk = false;
+
+        if (s_evadeTime > 0.f) {
+            // Obstacle manoeuvre: back off briefly, then strafe hard to one
+            // side (still angled a bit forward) to slide around walls/rocks
+            // the straight-line walk keeps bumping into.
+            wantWalk = true;
+            s_evadeTime -= dt;
+            if (s_evadeTime > 1.1f) {          // first ~0.6 s: step back
+                px = cx;
+                py = cy + r * 0.9f;
+            } else {                            // then: diagonal sidestep
+                px = cx + r * 0.95f * s_evadeDir;
+                py = cy - r * 0.35f;
+            }
+            if (s_evadeTime <= 0.f) { s_evadeTime = 0.f; s_stuckTime = 0.f; s_lastGoal = 1e9f; }
+        } else if (orbit) {
+            // X on the far side: slide around the node until it faces us.
+            // A short arc in one direction, not 360 degrees.
+            wantWalk = true;
+            px = cx + r * 0.9f * tgt.orbit_side;
+            py = cy - r * 0.4f;
+        } else if (phase == 1) {
+            // Walk straight at the node once the camera is roughly on it
+            // (steering the stick at a big yaw would send the bot sideways).
+            if (fabsf(tgt.walk_yaw) < 45.f) {
+                wantWalk = true;
+                float steer = tgt.walk_yaw / 60.f;  // slight steering
+                if (steer >  0.5f) steer =  0.5f;
+                if (steer < -0.5f) steer = -0.5f;
+                px = cx + r * steer;
+                py = cy - r * 0.9f * sqrtf(1.f - steer * steer);
+            }
+        } else {
+            // Mining: nudge forward only while the tool still does not
+            // reach (thin trees: the node centre sits inside the trunk).
+            float toHit = tgt.has_spot ? tgt.aim_dist : tgt.dist;
+            if (toHit > meleeX + 0.15f) {
+                wantWalk = true;
+                float steer = tgt.walk_yaw / 60.f;
+                if (steer >  1.f) steer =  1.f;
+                if (steer < -1.f) steer = -1.f;
+                px = cx + r * 0.35f * steer;
+                py = cy - r * 0.55f;
+            }
+        }
+
         // Release hysteresis: phases flicker for a frame or two around their
         // thresholds (dist/yaw noise), and every flicker used to lift and
-        // re-plant the move finger — the visible "joystick jerking" while
-        // walking to a node. The finger now lifts only after the walk has
-        // been unwanted for a quarter of a second straight; mining taps are
-        // unaffected (finger 2 is independent).
+        // re-plant the move finger — the visible "joystick jerking". The
+        // finger now lifts only after the walk has been unwanted for a
+        // quarter of a second straight; mining taps are unaffected (finger 2
+        // is independent).
         static float s_walkOffTime = 0.f;
         if (wantWalk) {
             s_walkOffTime = 0.f;
@@ -3897,76 +3904,10 @@ static void UpdateFarm(float dt) {
             s_walkOffTime += dt;
             if (s_walkOffTime < 0.25f) {
                 wantWalk = true;               // держим палец, гасим дёрганье
-                // но к центру стика — чтобы не толкало вперёд лишний метр
+                px = cx; py = cy;              // но к центру стика
             }
         }
         if (wantWalk) {
-            // Virtual stick centre and a forward push, slightly steered
-            // towards the node so small yaw errors do not need camera swipes.
-            // Centre: calibrated position when set, sensible default otherwise.
-            float cx = (g_state.farm_joy_x >= 0.f) ? sw * g_state.farm_joy_x : sw * 0.165f;
-            float cy = (g_state.farm_joy_y >= 0.f) ? sh * g_state.farm_joy_y : sh * 0.70f;
-            float r = sh * 0.16f;
-            float px, py;
-            if (s_evadeTime > 0.f) {
-                // Obstacle manoeuvre: back off briefly, then strafe hard to
-                // one side while still angled a bit forward, to slide around
-                // walls/rocks the straight-line walk keeps bumping into.
-                s_evadeTime -= dt;
-                if (s_evadeTime > 1.1f) {          // first ~0.6 s: step back
-                    px = cx;
-                    py = cy + r * 0.9f;
-                } else {                            // then: diagonal sidestep
-                    px = cx + r * 0.95f * s_evadeDir;
-                    py = cy - r * 0.35f;
-                }
-                if (s_evadeTime <= 0.f) { s_evadeTime = 0.f; s_stuckTime = 0.f; s_lastDist = 1e9f; }
-            } else {
-                // Dead zone: a couple of degrees of yaw jitter must not steer
-                // the stick at all — the sign of a near-zero error flips every
-                // frame, and steering off it was the left-right stick flapping.
-                // Far approach: camera does the turning, stick is forward.
-                // Lateral stick on a noisy yaw (X hopping around the bark)
-                // was the left-right shuffle toward every tree.
-                float yawSteer = 0.f;
-                if (tgt.dist < 3.5f || phase == 3) {
-                    yawSteer = (phase == 3 && !goStand) ? tgt.yaw : goalYaw;
-                    float yawDead = (tgt.dist > 2.8f) ? 10.f : 4.f;
-                    if (fabsf(yawSteer) < yawDead) yawSteer = 0.f;
-                }
-                // Крест сзади и мы УЖЕ у ствола: короткий обход, не 360° и
-                // не с пяти метров.
-                bool orbit = tgt.has_spot && !tgt.spot_facing && tgt.dist < 2.2f &&
-                             (goStand || needCloser);
-                if (orbit) {
-                    float side = (fabsf(goalYaw) > 8.f)
-                        ? ((goalYaw > 0.f) ? 1.f : -1.f)
-                        : s_evadeDir;
-                    px = cx + r * 0.92f * side;
-                    py = cy - r * 0.42f;
-                } else {
-                    float steer = yawSteer / 70.f;
-                    if (steer >  0.6f) steer =  0.6f;
-                    if (steer < -0.6f) steer = -0.6f;
-                    px = cx + r * steer;
-                    py = cy - r * sqrtf(1.f - steer * steer);
-                }
-                if (phase == 3) {
-                    // Final approach: gentle forward nudge, steering smoothly
-                    // proportional to the error (no sign() jumps).
-                    float s3 = yawSteer / 45.f;
-                    if (s3 >  1.f) s3 =  1.f;
-                    if (s3 < -1.f) s3 = -1.f;
-                    px = cx + r * 0.35f * s3;
-                    py = cy - r * 0.75f;
-                }
-                if (s_walkOffTime > 0.f) {
-                    // Hysteresis hold: walk not wanted any more — glide the
-                    // stick back to centre instead of lifting the finger.
-                    px = cx;
-                    py = cy;
-                }
-            }
             if (!s_moveDown) {
                 Touch_Down_N(0, cx, cy);      // land on the stick centre first
                 s_moveDown = true;
@@ -3983,41 +3924,44 @@ static void UpdateFarm(float dt) {
         } else if (s_moveDown) {
             Touch_Up_N(0); s_moveDown = false;
         }
+        stickDeflected = s_moveDown &&
+            (fabsf(s_stickPx - cx) > r * 0.2f || fabsf(s_stickPy - cy) > r * 0.2f);
     }
 
-    // ---- finger 2: attack taps while in reach ----
+    // ---- finger 2: attack taps while mining ----
     {
-        if (phase == 3) {
-            s_mineTime += dt;
-            // Hold fire while the crosshair is still swinging onto a glowing
-            // spot: a tap mid-swipe lands where the camera used to be, which
-            // is exactly the "missed the X" complaint. Body hits are lenient
-            // (the node is huge), spot hits want the reticle settled.
-            bool aimSettled = tgt.has_spot
+        if (phase == 2) {
+            if (!stickDeflected) s_mineTime += dt; // only count real standing time
+            // Hold fire while the crosshair is still swinging onto the mark:
+            // a tap mid-swipe lands where the camera used to be — exactly
+            // the "missed the X" complaint. Body hits are lenient (the node
+            // is huge), spot hits want the reticle settled.
+            bool settled = tgt.has_spot
                 ? (fabsf(tgt.yaw) <= 1.6f && fabsf(tgt.pitch) <= 2.0f)
-                : (fabsf(tgt.yaw) <= 8.f);
-            if (goStand || needCloser) aimSettled = false; // не дотягиваемся — не машем в воздух
-            // Tap rhythm: ~85 ms down, ~230 ms up — a believable fast tapper
-            // that also matches melee swing cadence (extra taps are ignored
-            // by the game, they just queue the next swing).
-            s_tapTimer -= (int)roundf(dt * 1000.f);
-            if (s_tapTimer <= 0 && !aimSettled && !s_tapDown) {
-                // wait for the camera; keep the timer pinned so the next
-                // tap fires the moment the reticle settles
-                s_tapTimer = 0;
-            } else if (s_tapTimer <= 0) {
-                if (!s_tapDown) {
-                    // Attack tap: calibrated fire button when set, otherwise
-                    // the right half of the screen clear of the look finger.
-                    float fx = (g_state.farm_fire_x >= 0.f) ? sw * g_state.farm_fire_x : sw * 0.88f;
-                    float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
-                    Touch_Down_N(2, fx, fy);
-                    s_tapDown = true;
-                    s_tapTimer = 85;
-                } else {
-                    Touch_Up_N(2);
-                    s_tapDown = false;
-                    s_tapTimer = 230;
+                : (fabsf(tgt.yaw) <= 8.f && fabsf(tgt.pitch) <= 10.f);
+            if (!settled || stickDeflected) {
+                if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; }
+                s_tapTimer = 0;   // next tap fires the moment the reticle settles
+            } else {
+                // Tap rhythm: ~85 ms down, ~230 ms up — a believable fast
+                // tapper that also matches melee swing cadence (extra taps
+                // are ignored by the game, they just queue the next swing).
+                s_tapTimer -= (int)roundf(dt * 1000.f);
+                if (s_tapTimer <= 0) {
+                    if (!s_tapDown) {
+                        // Attack tap: calibrated fire button when set,
+                        // otherwise the right half of the screen clear of the
+                        // look finger.
+                        float fx = (g_state.farm_fire_x >= 0.f) ? sw * g_state.farm_fire_x : sw * 0.88f;
+                        float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
+                        Touch_Down_N(2, fx, fy);
+                        s_tapDown = true;
+                        s_tapTimer = 85;
+                    } else {
+                        Touch_Up_N(2);
+                        s_tapDown = false;
+                        s_tapTimer = 230;
+                    }
                 }
             }
         } else {
@@ -4028,16 +3972,23 @@ static void UpdateFarm(float dt) {
     }
 
     // ---- watchdogs ----
-    if (phase == 2 || phase == 1) {
-        // No progress towards the node -> ran into an obstacle. First try to
-        // walk around it (back off + sidestep, alternating sides); only when
-        // the manoeuvres keep failing does the node get blacklisted.
-        // Прогресс меряем к ТЕКУЩЕЙ цели ног: при заходе на стоянку перед
-        // крестом дистанция до узла почти не меняется — по ней watchdog
-        // ложно срабатывал и утаскивал бота в evade-танец.
-        if (goalDist < s_lastDist - 0.25f) {
-            s_lastDist = goalDist;
-            s_stuckTime = 0.f;
+    if (phase == 1) {
+        // No progress towards the goal -> ran into an obstacle (or, while
+        // orbiting, the X will not come around). First try to walk around it
+        // (back off + sidestep, alternating sides); only when the manoeuvres
+        // keep failing does the node get blacklisted.
+        // Progress metric: distance to the node — or the angle to the X
+        // while orbiting (the distance does not change there; measuring by
+        // it made the watchdog fire and drag the bot into the evade dance).
+        float goalNow = orbit ? tgt.orbit_angle : tgt.dist;
+        bool progress = goalNow < s_lastGoal - 0.15f ||
+                        goalNow < s_lastGoal - s_lastGoal * 0.02f;
+        // Count "stuck" only while actually TRYING to move: a 180-degree
+        // camera turn in place does not change the distance, and counting
+        // it used to fire the evade manoeuvre mid-turn.
+        if (progress || !stickDeflected) {
+            s_lastGoal = progress ? goalNow : s_lastGoal;
+            if (progress) s_stuckTime = 0.f;
         } else if (s_evadeTime <= 0.f) {
             s_stuckTime += dt;
             if (s_stuckTime > 3.f) {
@@ -4048,33 +3999,50 @@ static void UpdateFarm(float dt) {
                     s_stuckTime = 0.f;
                 } else {
                     esp_farm_blacklist(tgt.id, 30.f);
-                    s_stuckTime = 0.f; s_lastDist = 1e9f; s_nodeId = 0;
+                    releaseAll();
+                    s_settle = 0.6f;
+                    s_stuckTime = 0.f; s_lastGoal = 1e9f;
                     s_evadeCount = 0; s_evadeTime = 0.f;
+                    s_nodeId = 0;
+                    g_farmPhase = 0;
                 }
             }
         }
-    } else if (phase == 3) {
+    } else {
         s_evadeCount = 0; s_evadeTime = 0.f; // reached the node — obstacles cleared
-        // Swinging but the node is not draining -> standing a hair too far
-        // (thin trees) or wrong tool. The walk-in nudge handles the former;
-        // if HP still will not move, give up sooner rather than later.
-        bool draining = (tgt.fraction >= 0.f && s_fracStart >= 0.f && tgt.fraction < s_fracStart - 0.01f);
-        if (tgt.fraction >= 0.f && s_fracStart < 0.f) s_fracStart = tgt.fraction; // first good read
-        if (draining) { s_fracStart = tgt.fraction; s_mineTime = 0.f; s_sinceDrain = 0.f; }
-        else {
-            s_sinceDrain += dt;
-            // Give up only when the fraction is READABLE and provably not
-            // moving for a long stretch. With an unreadable fraction (-1)
-            // the old 14 s timer abandoned perfectly fine nodes halfway —
-            // the "stops mining before the node is empty" bug; without HP
-            // info the depleted/stuck watchdogs are the ones that decide.
-            float giveUpAfter = (tgt.fraction >= 0.f) ? 20.f : 45.f;
-            if (s_mineTime > giveUpAfter) {
+        // Swinging (or nudging into reach) but the node is not draining:
+        // standing a hair too far, blocked, or wrong tool. The walk-in nudge
+        // handles the former; give up on the rest rather than stand there
+        // forever. Give up only when the fraction is READABLE and provably
+        // not moving for a long stretch — with an unreadable fraction (-1)
+        // the old short timer abandoned perfectly fine nodes halfway.
+        if (tgt.fraction >= 0.f) {
+            if (s_fracRef < 0.f) s_fracRef = tgt.fraction; // first good read
+            if (tgt.fraction < s_fracRef - 0.01f) {
+                s_fracRef = tgt.fraction;
+                s_mineTime = 0.f;
+                s_nudgeTime = 0.f;
+            } else if (s_mineTime > 20.f || s_nudgeTime > 8.f) {
                 esp_farm_blacklist(tgt.id, 60.f);
-                s_mineTime = 0.f; s_sinceDrain = 0.f; s_nodeId = 0;
+                releaseAll();
+                s_settle = 0.6f;
+                s_mineTime = 0.f; s_fracRef = -1.f; s_nudgeTime = 0.f;
+                s_nodeId = 0;
+                g_farmPhase = 0;
             }
+        } else if (s_mineTime > 45.f || s_nudgeTime > 8.f) {
+            esp_farm_blacklist(tgt.id, 60.f);
+            releaseAll();
+            s_settle = 0.6f;
+            s_mineTime = 0.f; s_fracRef = -1.f; s_nudgeTime = 0.f;
+            s_nodeId = 0;
+            g_farmPhase = 0;
         }
     }
+    // Nudging into reach that never gets there (a wall between us and the
+    // trunk) is a stuck state: count it.
+    if (phase == 2 && stickDeflected) s_nudgeTime += dt;
+    else if (phase != 2) s_nudgeTime = 0.f;
 }
 
 void RenderMenu() {

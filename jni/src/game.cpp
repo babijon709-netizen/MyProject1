@@ -5142,11 +5142,25 @@ std::vector<EspMarker> esp_get_markers() {
 
 // ============================== Auto-farm ====================================
 //
-// Finds the nearest tree / stone / iron / sulfur node in Mirror's registry and
-// reports where it is relative to the camera. Walking to it and swinging the
-// tool is done with synthetic touches in main.cpp; nothing here writes to the
-// game. The glowing "X" bonus spot is looked up as a child GameObject of the
-// node, so the swings land on it when the game shows one.
+// The farm's provider. Finds the nearest selected resource node in Mirror's
+// registry and reports what the touch controller in main.cpp needs:
+//
+//   * where to WALK — the node body (walk_yaw, dist);
+//   * where to AIM  — the glowing X (the bonus spot) while it is live,
+//                     otherwise the node body (yaw, pitch, aim_dist);
+//   * whether the X is on OUR side of the node (spot_front + orbit hints).
+//
+// Nothing here writes to the game.
+//
+// The X is a child GameObject of the node. Two flavours exist:
+//   * NAMED — rocks (and some prefabs) name it clearly ("spot", "cross",
+//     "weakpoint", ...);
+//   * ANONYMOUS — a plain child that appears on the bark/boulder once the
+//     player is in melee range and hops to a new place after every hit.
+// Every prefab also carries a DORMANT template child parked exactly at the
+// node pivot; it must never be picked (that was the "chops the base of the
+// trunk" bug). A live X is: a readable child, not at the pivot, on the
+// surface, above the dirt.
 
 // Farm kind from a loot item short name. Rank: richer resource wins (metal and
 // sulfur nodes drop stones too). Processed items are filtered like the ore
@@ -5313,266 +5327,128 @@ static float farm_eye_y() {
     return 0.0F;
 }
 
+// ---- The glowing X (bonus spot) ---------------------------------------------
+
+// Anything at foot level is a root / interaction volume / shadow — that was
+// the green mark on the dirt in front of the tree.
 static bool farm_spot_above_dirt(const Vec3& p) {
     if (!g_cam_pose_valid && !g_frame_local_valid) return true;
-    // Camera sits ~1.6 m above the soil. Anything near the feet is a root /
-    // interaction volume / shadow — that was the green mark on the dirt
-    // in front of the tree.
     return p.y > farm_eye_y() - 1.15F;
 }
 
-// Lower is better. Chest height, then INNER on the bark. The X decal sits
-// on the mesh; a particle/light is often 10–30 cm in front — scoring
-// "- horiz" locked that FX, so the green mark stuck out and melee
-// (measured to it) never reached the tree. Pith is already rejected by
-// on_bark (horiz >= 16 cm).
-static float farm_spot_chest_err(const Vec3& node_pos, const Vec3& p) {
-    float want_y = farm_eye_y() - 0.40F;
-    float sx = p.x - node_pos.x, sz = p.z - node_pos.z;
-    float horiz = sqrtf(sx * sx + sz * sz);
-    return fabsf(p.y - want_y) + horiz * 0.45F;
-}
-
-// Kind-aware "is this child the glowing X". Both trees and ore park a dormant
-// template on the node pivot; the live mark sits on the surface, often closer
-// than 35 cm and not strictly above the pivot (tree pivot is mid-trunk, ore
-// pivot is the top of the boulder). Reject only the exact pivot.
-static bool farm_spot_plausible(int kind, const Vec3& node_pos, const Vec3& p, float* d2_out = nullptr) {
+// Geometry test: is this child's position a live X for this node kind?
+// `err_out` (lower is better) ranks candidates: chest height first, then
+// closer to the node axis — that is what picks the decal on the bark over
+// the particle/light floating 10–30 cm in front of it.
+static bool farm_spot_alive(int kind, const Vec3& node_pos, const Vec3& p, float* err_out = nullptr) {
+    if (!vec3_is_finite(p)) return false;
     float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
     float d2 = sx * sx + sy * sy + sz * sz;
-    if (d2_out) *d2_out = d2;
-    float horiz2 = sx * sx + sz * sz;
+    float h2 = sx * sx + sz * sz;
     if (kind == 0) {
-        // Skip only the dormant template parked ON the pivot. A thin trunk's
-        // glowing X sits 15–30 cm off-centre (pivot is mid-mesh, not the
-        // soil), so the old 35 cm / sy>0.2 floor treated every such mark as
-        // the template — no green overlay, swings at the body. Same bug ore
-        // had with a top-mounted pivot.
-        if (d2 <= 0.10F * 0.10F || d2 >= 6.0F * 6.0F) return false;
-        if (sy < -1.2F || sy > 3.5F) return false;
+        // Tree: the mark sits on the bark, 15–60 cm off the trunk axis
+        // (the pivot is mid-mesh, not the soil), chest height, above dirt.
+        // A child parked at the pivot is the dormant template.
+        if (d2 <= 0.10F * 0.10F) return false;
+        if (d2 >= 6.0F * 6.0F)   return false;
+        if (h2 < 0.15F * 0.15F || h2 > 0.60F * 0.60F) return false;
+        if (sy < -1.0F || sy > 3.5F) return false;
         if (!farm_spot_above_dirt(p)) return false;
-        // X is on the bark, never on the trunk axis. The old |sy|>0.25
-        // alternative accepted the mesh origin after a hit-sway — that is
-        // "the mark is there, we still chop the trunk".
-        return horiz2 > 0.15F * 0.15F && horiz2 < 1.6F * 1.6F;
+    } else {
+        // Rock: the pivot rides near the top of the boulder, so the mark can
+        // sit a little BELOW it.
+        if (d2 <= 0.08F * 0.08F) return false;
+        if (d2 >= 3.5F * 3.5F)   return false;
+        if (sy < -1.6F || sy > 1.8F) return false;
     }
-    if (d2 <= 0.08F * 0.08F || d2 >= 3.5F * 3.5F) return false;
-    return sy > -1.6F && sy < 1.8F;
-}
-
-// The glowing bonus "X" is a child GameObject of the node. Search the subtree
-// for a name that looks like it AND that sits visibly away from the node
-// pivot: every prefab also carries a dormant template child parked exactly at
-// the pivot (tree base) until the real X activates, and returning that one
-// made the bot chop the bottom of the trunk. The result is cached per
-// component and re-checked because the spot jumps around between hits.
-// Tight bark cylinder used to DISCOVER a tree X. Holding a live lock still
-// uses the looser farm_spot_plausible so a hop that swings wide is not dropped.
-static bool farm_spot_on_bark(int kind, const Vec3& node_pos, const Vec3& p) {
-    if (!farm_spot_plausible(kind, node_pos, p)) return false;
-    if (kind != 0) return true;
-    float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
-    float horiz2 = sx * sx + sz * sz;
-    // Thin-trunk X is 15–30 cm off the mid-mesh pivot. Below ~15 cm is the
-    // LOD/collider origin — locking that painted the green mark on the pith.
-    if (horiz2 < 0.16F * 0.16F || horiz2 > 0.50F * 0.50F) return false;
-    if (sy < -0.5F || sy > 2.6F) return false;
-    if (!farm_spot_above_dirt(p)) return false;
+    if (err_out) {
+        float want_y = farm_eye_y() - 0.40F;
+        *err_out = fabsf(p.y - want_y) + sqrtf(h2) * 0.45F;
+    }
     return true;
 }
 
-static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, int kind, uint64_t keep, uint64_t node_id) {
+// Does this GameObject name (already lower-cased by the caller) look like the
+// X? Trees only accept TIGHT names: generic "spot"/"cross"/"marker" matches
+// LOD children and glued the lock onto the trunk.
+static bool farm_name_is_spot(int kind, const char* name) {
+    if (!name || !name[0]) return false;
+    size_t len = strnlen(name, 47);
+    bool x_lead = name[0] == 'x' &&
+        (len == 1 || name[1] == '_' || name[1] == ' ' || (name[1] >= '0' && name[1] <= '9'));
+    if (kind == 0)
+        return strstr(name, "bonus") || strstr(name, "hitpoint") ||
+               strstr(name, "weakspot") || strstr(name, "sweetspot") ||
+               strstr(name, "hitmark") || strstr(name, "xmark") ||
+               strstr(name, "weakpoint") || x_lead;
+    return strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
+           strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
+           strstr(name, "hitpoint") || strstr(name, "marker") ||
+           strstr(name, "gather") || strstr(name, "target") ||
+           strstr(name, "plus") || x_lead;
+}
+
+// Find the live X under the node. `keep` is the previous pick — it is held
+// while it is still alive, so one bad read (the game rewriting the transform
+// mid-update) does not drop the lock. Returns 0 when no live X is found.
+static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, int kind, uint64_t keep) {
     if (!node_transform) return 0;
+
     std::vector<uint64_t> nodes;
-    // Trees carry a LOT of children (LODs, foliage, colliders) — a small cap
-    // used to cut the walk off before it ever reached the X child.
+    // Trees carry a LOT of children (LODs, foliage, colliders).
     collect_transform_subtree(node_transform, nodes, kind == 0 ? 400 : 256);
 
-    struct SpotCand { uint64_t node; Vec3 pos; };
-    std::vector<SpotCand> live;
+    struct Cand { uint64_t node; float err; };
+    std::vector<Cand> live;
     live.reserve(nodes.size());
+    uint64_t named = 0;
+    float named_err = 1e9F;
     for (uint64_t node : nodes) {
         if (node == node_transform) continue;
         Vec3 p{};
-        if (!marker_world_position(node, p) || !vec3_is_finite(p)) continue;
-        live.push_back({node, p});
-    }
-
-    auto plausible = [&](const Vec3& p) -> bool {
-        return farm_spot_plausible(kind, node_pos, p);
-    };
-    auto on_bark = [&](const Vec3& p) -> bool {
-        return farm_spot_on_bark(kind, node_pos, p);
-    };
-
-    // Pass 1: by name. Rocks name their X clearly. Trees only accept TIGHT
-    // names — "spot"/"cross"/"marker" match LOD children and glue the lock
-    // onto the trunk.
-    uint64_t named = 0;
-    if (g_go_name_offset_valid) {
-        char name[48];
-        int best_score = -1;
-        float best_d2 = 0.0F;
-        for (const SpotCand& cand : live) {
-            if (!read_transform_name(cand.node, name, sizeof(name))) continue;
-            size_t len = 0;
-            for (char* p = name; *p; ++p, ++len) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
-            bool looks = false;
-            if (kind == 0) {
-                looks = strstr(name, "bonus") || strstr(name, "hitpoint") ||
-                        strstr(name, "weakspot") || strstr(name, "sweetspot") ||
-                        strstr(name, "hitmark") || strstr(name, "xmark") ||
-                        strstr(name, "weakpoint") ||
-                        (name[0] == 'x' && (len == 1 || name[1] == '_' || name[1] == ' ' ||
-                                            (name[1] >= '0' && name[1] <= '9')));
-            } else {
-                looks = strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
-                        strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
-                        strstr(name, "hitpoint") ||
-                        (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
-                                            (name[1] >= '0' && name[1] <= '9')));
-                if (!looks)
-                    looks = strstr(name, "marker") || strstr(name, "gather") ||
-                            strstr(name, "target") || strstr(name, "plus");
-            }
-            if (!looks) continue;
-            if (kind == 0) { if (!on_bark(cand.pos)) continue; }
-            else           { if (!plausible(cand.pos)) continue; }
-            float sx = cand.pos.x - node_pos.x, sy = cand.pos.y - node_pos.y, sz = cand.pos.z - node_pos.z;
-            float d2 = sx * sx + sy * sy + sz * sz;
-            int score = 2;
-            if (sx * sx + sz * sz > 0.04F) score += 1;
-            // Trees: the inner child of a named pair is the decal on the
-            // bark; the outer one is the particle that sticks out.
-            bool better = score > best_score;
-            if (!better && score == best_score)
-                better = (kind == 0) ? (d2 < best_d2) : (d2 > best_d2);
-            if (better) {
-                best_score = score;
-                best_d2 = d2;
-                named = cand.node;
-            }
-        }
-    }
-
-    // Pass 2: movement + appear. Same-transform hops, OR a new child that
-    // spawned on the bark (the X is often a NEW GameObject, so pointer-match
-    // jumper never sees it). Unique-mover so a whole-tree hit-sway cannot
-    // lock the mesh origin.
-    static uint64_t s_move_root = 0;
-    static uint64_t s_move_id = 0;
-    static std::vector<SpotCand> s_move_prev;
-    if (node_id && s_move_id != node_id) {
-        s_move_id = node_id;
-        s_move_root = 0;
-        s_move_prev.clear();
-    }
-    uint64_t jumper = 0;
-    float jumper_m2 = 0.0F;
-    float second_m2 = 0.0F;
-    int jumper_n = 0;
-    float keep_m2 = 0.0F;
-    bool keep_ok = false;
-    uint64_t appear = 0;
-    float appear_err = 1e9F;
-    const bool have_prev = (s_move_root == node_transform && !s_move_prev.empty());
-    if (have_prev) {
-        for (const SpotCand& cand : live) {
-            bool seen = false;
-            for (const SpotCand& prev : s_move_prev) {
-                if (prev.node != cand.node) continue;
-                seen = true;
-                float mx = cand.pos.x - prev.pos.x;
-                float my = cand.pos.y - prev.pos.y;
-                float mz = cand.pos.z - prev.pos.z;
-                float m2 = mx * mx + my * my + mz * mz;
-                if (cand.node == keep) keep_m2 = m2;
-                if (m2 > 0.12F * 0.12F && m2 < 5.0F * 5.0F && on_bark(cand.pos)) {
-                    ++jumper_n;
-                    if (m2 > jumper_m2) {
-                        second_m2 = jumper_m2;
-                        jumper_m2 = m2;
-                        jumper = cand.node;
-                    } else if (m2 > second_m2) {
-                        second_m2 = m2;
-                    }
+        if (!marker_world_position(node, p)) continue;
+        float err = 1e9F;
+        if (!farm_spot_alive(kind, node_pos, p, &err)) continue;
+        live.push_back({node, err});
+        if (g_go_name_offset_valid) {
+            char name[48];
+            if (read_transform_name(node, name, sizeof(name))) {
+                for (char* c = name; *c; ++c)
+                    if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
+                if (farm_name_is_spot(kind, name) && err < named_err) {
+                    named_err = err;
+                    named = node;
                 }
-                break;
-            }
-            // Decal + particle + light often spawn together — don't require
-            // a unique new child. Pick the one at chest height on the bark.
-            if (!seen && on_bark(cand.pos)) {
-                float err = farm_spot_chest_err(node_pos, cand.pos);
-                if (err < appear_err) { appear_err = err; appear = cand.node; }
             }
         }
     }
-    const bool unique_jumper = jumper && jumper_m2 > 0.16F * 0.16F &&
-        (jumper_n == 1 || jumper_m2 > second_m2 * 1.8F || second_m2 < 0.10F * 0.10F);
-    if (keep) {
-        for (const SpotCand& cand : live) {
-            bool ok = (kind == 0) ? on_bark(cand.pos) : plausible(cand.pos);
-            if (cand.node == keep && ok) { keep_ok = true; break; }
-        }
-    }
 
-    // Pass 3 (trees): still X already on the bark. Do NOT skip a child just
-    // because a particle/light sits on the same point — that is the usual
-    // prefab (decal+fx), and skipping the cluster was "tree 3 never locks".
-    uint64_t isolate = 0;
-    if (kind == 0) {
-        float best_err = 1e9F;
-        for (const SpotCand& cand : live) {
-            if (!on_bark(cand.pos)) continue;
-            float sx = cand.pos.x - node_pos.x, sz = cand.pos.z - node_pos.z;
-            if (sx * sx + sz * sz < 0.18F * 0.18F) continue;
-            float err = farm_spot_chest_err(node_pos, cand.pos);
-            if (err < best_err) { best_err = err; isolate = cand.node; }
-        }
-    }
-
-    s_move_root = node_transform;
-    s_move_prev = live;
-
-    if (kind == 0) {
-        // X prefab = decal on the bark + particle a bit in front. Whatever
-        // pass won, snap to the INNER neighbour of that cluster so the green
-        // mark sits on the bark, not in the air.
-        auto innermost = [&](uint64_t pick) -> uint64_t {
-            if (!pick) return 0;
-            const SpotCand* pp = nullptr;
-            for (const SpotCand& c : live) if (c.node == pick) { pp = &c; break; }
-            if (!pp) return pick;
-            uint64_t best = pick;
-            float bh2 = (pp->pos.x - node_pos.x) * (pp->pos.x - node_pos.x)
-                      + (pp->pos.z - node_pos.z) * (pp->pos.z - node_pos.z);
-            for (const SpotCand& c : live) {
-                if (!on_bark(c.pos)) continue;
-                float dx = c.pos.x - pp->pos.x, dy = c.pos.y - pp->pos.y, dz = c.pos.z - pp->pos.z;
-                if (dx * dx + dy * dy + dz * dz > 0.22F * 0.22F) continue;
-                float h2 = (c.pos.x - node_pos.x) * (c.pos.x - node_pos.x)
-                         + (c.pos.z - node_pos.z) * (c.pos.z - node_pos.z);
-                if (h2 < 0.16F * 0.16F) continue;
-                if (h2 < bh2) { bh2 = h2; best = c.node; }
-            }
-            return best;
-        };
-        if (unique_jumper) return innermost(jumper);
-        if (appear) return innermost(appear);
-        if (keep_ok) return innermost(keep);
-        if (named) return innermost(named);
-        if (isolate) return innermost(isolate);
-        return 0;
-    }
-    const float hop = 0.55F * 0.55F;
-    if (keep_ok) {
-        if (jumper && jumper != keep && jumper_m2 > hop && keep_m2 < 0.12F * 0.12F)
-            return jumper;
-        return keep;
-    }
-    if (unique_jumper) return jumper;
+    // 1) A child named like the X (rocks name theirs clearly).
+    // 2) The previous pick, while still alive (hysteresis).
+    // 3) The live child closest to the chest on the surface — covers the
+    //    anonymous mark, including one that just spawned.
     if (named) return named;
-    return keep;
+    for (const Cand& c : live) if (c.node == keep) return keep;
+    const Cand* best = nullptr;
+    for (const Cand& c : live) if (!best || c.err < best->err) best = &c;
+    return best ? best->node : 0;
+}
+
+// ---- The target picker --------------------------------------------------------
+
+// Full-circle angles from the camera axis: the node may be BEHIND the player,
+// so the forward component can be negative and the yaw spans +-180.
+static bool farm_angles(const Vec3& origin, const Vec3& fwd, const Vec3& right,
+                        const Vec3& up, const Vec3& point, float& yaw_deg, float& pitch_deg) {
+    Vec3 d = {point.x - origin.x, point.y - origin.y, point.z - origin.z};
+    float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
+    float rx = d.x * right.x + d.y * right.y + d.z * right.z;
+    float ux = d.x * up.x + d.y * up.y + d.z * up.z;
+    if (!std::isfinite(fx) || !std::isfinite(rx) || !std::isfinite(ux)) return false;
+    constexpr float rad2deg = 57.29577951F;
+    yaw_deg = atan2f(rx, fx) * rad2deg;
+    pitch_deg = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
+    return std::isfinite(yaw_deg) && std::isfinite(pitch_deg);
 }
 
 void esp_farm_debug(int& nodes_cached, int& idle_reason) {
@@ -5584,8 +5460,8 @@ bool esp_farm_get_target(FarmTarget& out) {
     out = FarmTarget{};
     if (!g_farm_mask) { g_farm_idle_reason = 1; return false; }
     if (g_pid <= 0 || !g_il2cpp_base) { g_farm_idle_reason = 2; return false; }
-    // Same self-repair as the markers: if the box pipeline did not publish a
-    // frame (empty player list etc.), build one straight from the camera.
+    // Same self-repair as the markers: when the box pipeline did not publish
+    // a frame (empty player list, ...), build one straight from the camera.
     if (!g_frame_local_valid || !g_frame_vp_valid) {
         if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh)) {
             g_farm_idle_reason = 2;
@@ -5593,57 +5469,46 @@ bool esp_farm_get_target(FarmTarget& out) {
         }
     }
 
-    // Blacklist bookkeeping (called once per frame from the controller).
+    // Blacklist expiry (called once per frame by the controller).
     for (auto it = g_farm_blacklist.begin(); it != g_farm_blacklist.end();) {
         if (--(it->second) <= 0) it = g_farm_blacklist.erase(it);
         else ++it;
     }
-
     if (--g_farm_rescan <= 0) {
         rebuild_farm_entities();
         g_farm_rescan = g_farm_entities.empty() ? 30 : 120; // ~0.5 s / ~2 s
     }
 
-    // Sticky target: keep working the node we already picked while it is
-    // alive, otherwise the controller would flip between equidistant nodes.
+    // ---- pick the node: nearest, with stickiness --------------------------
     static uint64_t s_last_identity = 0;
-
-    const float kMaxFarmDistance = g_farm_max_distance;
     const FarmEntity* best = nullptr;
-    float best_score = 1e18F;
-    float best_dist = 0.0F;
+    float best_score = 1e18F, best_dist = 0.0F;
     for (const FarmEntity& entity : g_farm_entities) {
         if (!(g_farm_mask & (1u << entity.kind))) continue;
         if (!entity.pos_valid) continue;
         if (g_farm_blacklist.count(entity.identity)) continue;
 
-        // Horizontal distance (Unity: Y up). The controller compares this
-        // against melee reach, and a tall tree's pivot sits metres up the
-        // trunk — 3D distance never drops below the threshold there, which
-        // had the bot circling thin trees forever and walking face-first
-        // into nodes it was already standing at.
+        // Horizontal distance (Unity: Y up). The controller compares this to
+        // melee reach, and a tall tree's pivot sits metres up the trunk — a
+        // 3D distance never drops below the threshold there, which had the
+        // bot circling thin trees forever.
         float dx = entity.pos.x - g_frame_local_pos.x;
         float dy = entity.pos.y - g_frame_local_pos.y;
         float dz = entity.pos.z - g_frame_local_pos.z;
         float dist = sqrtf(dx * dx + dz * dz);
+        if (!std::isfinite(dist) || dist > g_farm_max_distance) continue;
         // Still reject nodes on a different vertical level (cliff above/below).
-        if (!std::isfinite(dist) || dist > kMaxFarmDistance) continue;
         if (!std::isfinite(dy) || fabsf(dy) > 30.0F) continue;
 
         float score = dist;
-        // Nodes that look mined out go to the back of the queue instead of
-        // being skipped outright: the exact meaning of fractionRemaining is
-        // not certain on every build, and a wrong guess here would make the
-        // farm ignore every node ("nothing happens"). If the pick is wrong
-        // the mining watchdog blacklists it within seconds anyway.
-        // NEVER for the node we are currently working though: one garbage
-        // fraction read mid-mine used to shove the current target to the
-        // back of the queue — the marker jumped to another node while this
-        // one was still half full. The controller's own debounced depleted
-        // check is what retires the current node.
         if (entity.identity != s_last_identity) {
-            // Refresh the cached fraction at most once a second per node —
-            // one nearby node used to cost one syscall per node per frame.
+            // Nodes that look mined out go to the back of the queue instead
+            // of being skipped: the exact meaning of fractionRemaining is
+            // build-dependent, and a wrong guess here would make the farm
+            // ignore every node ("nothing happens"). The controller's own
+            // debounced depleted check retires the current node. NEVER
+            // applied to the node we are working: one garbage fraction read
+            // mid-mine used to shove it to the back of the queue.
             FarmEntity& mut = const_cast<FarmEntity&>(entity);
             if (--mut.frac_age <= 0) {
                 mut.frac_age = 60;
@@ -5653,7 +5518,7 @@ bool esp_farm_get_target(FarmTarget& out) {
                 mut.fraction <= 1.001F && mut.fraction < 0.03F)
                 score += 1000.0F;
         } else {
-            score *= 0.6F; // stickiness
+            score *= 0.6F; // stickiness: don't flip between equidistant nodes
         }
         if (score < best_score) { best_score = score; best = &entity; best_dist = dist; }
     }
@@ -5664,154 +5529,122 @@ bool esp_farm_get_target(FarmTarget& out) {
     }
     s_last_identity = best->identity;
 
-    // Where to look: the glowing spot when the node shows one, otherwise the
-    // body of the node (trees are hit at chest height, rocks a bit lower).
+    // ---- track the X on this node -----------------------------------------
+    // The X appears when we are in melee range and hops to a new spot after
+    // every hit, so the pick is re-verified periodically: ~0.1 s without a
+    // live mark (so its appearance is noticed fast), ~0.2 s with one.
     static uint64_t s_spot_component = 0;
     static uint64_t s_spot_identity = 0;
     static uint64_t s_spot_transform = 0;
     static int      s_spot_recheck = 0;
     static Vec3     s_spot_last{};
-    static bool     s_spot_last_ok = false;
     static int      s_spot_hold = 0;
-    static int      s_spot_pivot_frames = 0;
     if (s_spot_component != best->component || s_spot_identity != best->identity) {
         s_spot_component = best->component;
         s_spot_identity = best->identity;
         s_spot_transform = 0;
         s_spot_recheck = 0;
-        s_spot_last_ok = false;
+        s_spot_last = {};
         s_spot_hold = 0;
-        s_spot_pivot_frames = 0;
     }
     if (--s_spot_recheck <= 0) {
-        // Без живого креста ищем часто (~0.2 с), с живым — реже. Скан НИКОГДА
-        // не затирает известный трансформ нулём и не меняет его на LOD/имя,
-        // пока текущий ещё на коре — иначе метка слетает на ствол.
-        s_spot_recheck = s_spot_transform ? 24 : (best->kind == 0 ? 1 : 12);
-        uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform, best->identity);
-        if (found && found != s_spot_transform) {
-            s_spot_transform = found;
-            s_spot_last_ok = false;
-            s_spot_hold = 0;
-            s_spot_pivot_frames = 0;
-        } else if (found) {
-            s_spot_transform = found;
+        s_spot_recheck = s_spot_transform ? 12 : 6;
+        uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform);
+        if (found != s_spot_transform) {
+            if (!found) {
+                s_spot_transform = 0;
+                s_spot_last = {};
+                s_spot_hold = 0;
+            } else {
+                // Switch only to a candidate that is ALIVE right now: a
+                // mid-update read can make the scan "see" a child that is
+                // dead on the next frame, and switching to it would throw
+                // the crosshair at a garbage point.
+                Vec3 test{};
+                if (marker_world_position(found, test) && vec3_is_finite(test) &&
+                    farm_spot_alive(best->kind, best->pos, test)) {
+                    s_spot_transform = found;
+                    s_spot_last = {};
+                    s_spot_hold = 0;
+                }
+                // Otherwise keep the current pick; the scan runs again soon.
+            }
         }
     }
 
     Vec3 aim{};
     bool spot_ok = false;
-    bool spot_facing = true;
-    Vec3 stand{};
-    bool stand_ok = false;
-    Vec3 spot_raw{};
+    bool spot_front = true;
+    float orbit_side = 0.0F;
     if (s_spot_transform) {
         Vec3 spot{};
-        bool read_ok = marker_world_position(s_spot_transform, spot) && vec3_is_finite(spot);
-        bool use_held = false;
+        bool read_ok = marker_world_position(s_spot_transform, spot) &&
+                       vec3_is_finite(spot) &&
+                       farm_spot_alive(best->kind, best->pos, spot);
         if (read_ok) {
-            float sx = spot.x - best->pos.x, sy = spot.y - best->pos.y, sz = spot.z - best->pos.z;
-            float d2 = sx * sx + sy * sy + sz * sz;
-            const float max_r = (best->kind == 0) ? 6.0F : 3.5F;
-            if (d2 >= max_r * max_r) {
-                s_spot_transform = 0;
-                s_spot_last_ok = false;
-                s_spot_hold = 0;
-            } else if (farm_spot_plausible(best->kind, best->pos, spot)) {
-                s_spot_last = spot;
-                s_spot_last_ok = true;
-                s_spot_hold = 48;
-                s_spot_pivot_frames = 0;
-                spot_raw = spot;
-                spot_ok = true;
-            } else {
-                // Прыжок декали через пивот / чтение в середине апдейта:
-                // НЕ целимся в ствол — держим прошлую точку креста.
-                ++s_spot_pivot_frames;
-                use_held = true;
-                if (s_spot_pivot_frames > 25) {
-                    s_spot_transform = 0;
-                    s_spot_recheck = 0;
+            s_spot_last = spot;
+            s_spot_hold = 48;
+            spot_ok = true;
+            aim = spot;
+            // Is the X on OUR side of the node? When the mark is on the far
+            // side of the trunk/boulder the tool cannot reach it — the
+            // controller circles until it faces us.
+            float sx = spot.x - best->pos.x, sz = spot.z - best->pos.z;
+            float px = g_frame_local_pos.x - best->pos.x;
+            float pz = g_frame_local_pos.z - best->pos.z;
+            float sl = sqrtf(sx * sx + sz * sz);
+            float pl = sqrtf(px * px + pz * pz);
+            if (sl > 0.05F && pl > 0.3F) {
+                float dot = (sx * px + sz * pz) / (sl * pl);
+                if (!(dot > -0.35F)) {
+                    spot_front = false;
+                    // Which way to circle: rotate the (player - node) vector
+                    // towards the (spot - node) one. theta = atan2(x, z); the
+                    // strafe axis is the camera right (same basis as the
+                    // angles below, picked once at the end).
+                    float t1 = atan2f(px, pz);
+                    float t2 = atan2f(sx, sz);
+                    float a = t2 - t1;
+                    while (a >  3.14159265F) a -= 6.2831853F;
+                    while (a < -3.14159265F) a += 6.2831853F;
+                    out.orbit_angle = fabsf(a) * 57.29577951F;
+                    // side is resolved against the camera right once the
+                    // basis is known below; keep the signed angle for then.
+                    orbit_side = a;
                 }
             }
-        } else {
-            use_held = true;
-        }
-        if (!spot_ok && use_held && s_spot_last_ok && s_spot_hold > 0) {
+        } else if (s_spot_hold > 0) {
+            // One failed read (game mid-update): hold the last good mark for
+            // up to ~0.8 s instead of snapping the crosshair to the body.
             --s_spot_hold;
-            spot_raw = s_spot_last;
             spot_ok = true;
+            aim = s_spot_last;
+            spot_front = true; // held mark was on our side when it was good
+        } else {
+            s_spot_transform = 0; // the mark is gone — aim the body
         }
     }
-    if (spot_ok) {
-        float sx = spot_raw.x - best->pos.x, sz = spot_raw.z - best->pos.z;
-        float pncx = best->pos.x - g_frame_local_pos.x;
-        float pncz = best->pos.z - g_frame_local_pos.z;
-        float pnl = sqrtf(pncx * pncx + pncz * pncz);
-        float psl = sqrtf(sx * sx + sz * sz);
-        spot_facing = true;
-        if (pnl > 0.05F && psl > 0.05F) {
-            float c = ((-pncx) * sx + (-pncz) * sz) / (pnl * psl);
-            static uint64_t s_face_id = 0;
-            static bool s_face_state = true;
-            if (s_face_id != best->identity) {
-                s_face_id = best->identity;
-                s_face_state = true;
-            }
-            if (s_face_state) { if (c < 0.64F) s_face_state = false; }
-            else              { if (c > 0.77F) s_face_state = true;  }
-            spot_facing = s_face_state;
-        }
-        // Aim is the glowing X itself — any pull toward the pivot was a
-        // visible miss (crosshair on bark, not on the mark). Stand stays
-        // in front of the decal so the bot does not walk into the mesh.
-        aim = spot_raw;
-        if (psl > 0.05F) {
-            float inv = 1.0F / psl;
-            float dirx = sx * inv, dirz = sz * inv;
-            float from_node = (best->kind == 0) ? 0.70F : 1.55F;
-            float from_spot = (best->kind == 0) ? 0.18F : 0.70F;
-            float stand_r = psl + from_spot;
-            if (stand_r < from_node) stand_r = from_node;
-            stand.x = best->pos.x + dirx * stand_r;
-            stand.z = best->pos.z + dirz * stand_r;
-            stand.y = spot_raw.y;
-            stand_ok = true;
-        }
-    }
-    // Нет живого креста — целимся в тело (грудь дерева / пояс руды).
+    // No live X: aim the body (tree chest / ore waist). Height is clamped
+    // against the camera eye below — node pivots lie (a rock's pivot rides
+    // near its top, a tall tree's sits metres up the trunk).
     if (!spot_ok) {
         aim = best->pos;
         aim.y += (best->kind == 0) ? 1.15F : 0.15F;
-        // Height is clamped against the camera eye below, once the camera
-        // origin is known — node and player pivots are both unreliable.
     }
 
-    // Full-circle angles from the camera (or firing) axis: unlike
-    // aim_angles_for() this must work for nodes behind us, so the forward
-    // component may be negative and yaw spans +-180. Order of preference:
-    // firing reference > transform pose > basis from this frame's view matrix
-    // (the last one exists on devices where the pose read fails — the reason
-    // the farm used to sit in "нет позиции камеры").
-    if (!g_cam_pose_valid && !g_aim_ref_valid && !g_frame_cam_basis_valid) {
+    // Camera basis, in order of preference: transform pose > basis from this
+    // frame's view matrix (the last one exists on devices where the pose
+    // read fails — the reason the farm used to sit in "no camera pose").
+    if (!g_cam_pose_valid && !g_frame_cam_basis_valid) {
         g_farm_idle_reason = 5;
         return false;
     }
-    // With a live X, measure against the CAMERA so the crosshair sits on
-    // the mark the player sees. Look-root sway was a few degrees of miss.
-    // Body aim (no X) still uses the firing reference — that is what melee
-    // actually swings along, and the node is huge.
-    const bool use_ref = g_aim_ref_valid && !(spot_ok && g_cam_pose_valid);
-    const bool use_pose = !use_ref && g_cam_pose_valid;
-    const Vec3& origin = use_ref ? g_aim_ref_origin  : use_pose ? g_cam_pos     : g_frame_cam_pos;
-    const Vec3& fwd    = use_ref ? g_aim_ref_forward : use_pose ? g_cam_forward : g_frame_cam_fwd;
-    const Vec3& right  = use_ref ? g_aim_ref_right   : use_pose ? g_cam_right   : g_frame_cam_right;
-    const Vec3& up     = use_ref ? g_aim_ref_up      : use_pose ? g_cam_up      : g_frame_cam_up;
+    const bool use_pose = g_cam_pose_valid;
+    const Vec3& origin = use_pose ? g_cam_pos       : g_frame_cam_pos;
+    const Vec3& fwd    = use_pose ? g_cam_forward   : g_frame_cam_fwd;
+    const Vec3& right  = use_pose ? g_cam_right     : g_frame_cam_right;
+    const Vec3& up     = use_pose ? g_cam_up        : g_frame_cam_up;
 
-    // Body aim (no glowing spot): clamp the aim height against the CAMERA
-    // EYE, the only height reference that is reliable on every prefab. Node
-    // pivots lie (a rock's pivot rides near its top — that was "hits above
-    // the ore"; a tall tree's sits metres up the trunk).
     if (!spot_ok) {
         if (best->kind == 0) {
             // Trees: chest band — slightly below the eye up to eye level.
@@ -5826,20 +5659,36 @@ bool esp_farm_get_target(FarmTarget& out) {
         }
     }
 
-    Vec3 d = {aim.x - origin.x, aim.y - origin.y, aim.z - origin.z};
-    float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
-    float rx = d.x * right.x + d.y * right.y + d.z * right.z;
-    float ux = d.x * up.x + d.y * up.y + d.z * up.z;
-    if (!std::isfinite(fx) || !std::isfinite(rx) || !std::isfinite(ux)) { g_farm_idle_reason = 5; return false; }
-    constexpr float rad2deg = 57.29577951F;
-    float yaw = atan2f(rx, fx) * rad2deg;
-    float pitch = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
-    if (!std::isfinite(yaw) || !std::isfinite(pitch)) { g_farm_idle_reason = 5; return false; }
+    if (!farm_angles(origin, fwd, right, up, aim, out.yaw, out.pitch)) {
+        g_farm_idle_reason = 5;
+        return false;
+    }
+
+    // Orbit direction needs the camera right: strafe along it until the X
+    // faces us. Moving the player along d changes the (player - node) angle
+    // theta = atan2(x, z) proportionally to (pz*dx - px*dz); we need that to
+    // carry the sign of the signed angle `a` stored in orbit_side.
+    if (!spot_front) {
+        float px = g_frame_local_pos.x - best->pos.x;
+        float pz = g_frame_local_pos.z - best->pos.z;
+        float crossz = pz * right.x - px * right.z;
+        orbit_side = ((orbit_side > 0.f) == (crossz > 0.f)) ? 1.f : -1.f;
+    }
+
+    // Walk: straight at the node body, at soil level (the pivot is useless
+    // here — a tall tree's sits metres up the trunk).
+    Vec3 walk = best->pos;
+    walk.y = farm_eye_y() - 1.6F;
+    float walk_pitch = 0.f;
+    if (!farm_angles(origin, fwd, right, up, walk, out.walk_yaw, walk_pitch)) {
+        g_farm_idle_reason = 5;
+        return false;
+    }
 
     // Screen position of the aim point, for the on-screen target mark.
     if (g_frame_vp_valid) {
         Vec2 screen{};
-        if (w2s(g_frame_vp, (spot_ok ? spot_raw : aim), g_frame_sw, g_frame_sh, screen, false) &&
+        if (w2s(g_frame_vp, aim, g_frame_sw, g_frame_sh, screen, false) &&
             std::isfinite(screen.x) && std::isfinite(screen.y) &&
             screen.x >= -64.0F && screen.x <= g_frame_sw + 64.0F &&
             screen.y >= -64.0F && screen.y <= g_frame_sh + 64.0F) {
@@ -5853,30 +5702,15 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.valid = true;
     out.id = best->identity;
     out.kind = best->kind;
-    out.yaw = yaw;
-    out.pitch = pitch;
     out.dist = best_dist;
     out.has_spot = spot_ok;
-    out.spot_facing = !spot_ok || spot_facing;
-    if (spot_ok && stand_ok) {
-        float sdx = stand.x - g_frame_local_pos.x;
-        float sdz = stand.z - g_frame_local_pos.z;
-        float sd = sqrtf(sdx * sdx + sdz * sdz);
-        if (std::isfinite(sd)) {
-            out.stand_dist = sd;
-            Vec3 dd = {stand.x - origin.x, 0.0F, stand.z - origin.z};
-            float sfx = dd.x * fwd.x + dd.z * fwd.z;
-            float srx = dd.x * right.x + dd.z * right.z;
-            float syaw = atan2f(srx, sfx) * 57.29577951F;
-            if (std::isfinite(syaw)) { out.stand_yaw = syaw; out.stand_ok = true; }
-        }
-    }
+    out.spot_front = spot_front;
+    out.orbit_side = orbit_side;
     {
-        // Дистанция до СЫРОГО креста (не подтянутого прицела): контроллер
-        // решает «дотягиваюсь / подойти ближе» по ней.
-        const Vec3& reach_pt = spot_ok ? spot_raw : aim;
-        float ax = reach_pt.x - g_frame_local_pos.x;
-        float az = reach_pt.z - g_frame_local_pos.z;
+        // Horizontal distance to the RAW aim point (the X, when live): the
+        // controller decides "in reach / step closer" from it.
+        float ax = aim.x - g_frame_local_pos.x;
+        float az = aim.z - g_frame_local_pos.z;
         float ad = sqrtf(ax * ax + az * az);
         out.aim_dist = std::isfinite(ad) ? ad : best_dist;
     }
