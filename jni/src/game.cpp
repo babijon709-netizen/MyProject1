@@ -5180,12 +5180,14 @@ static bool farm_spot_above_dirt(const Vec3& p) {
     return p.y > farm_eye_y() - 1.15F;
 }
 
-// Lower is better. Prefers chest height on the trunk, any yaw — the mark
-// behind the tree must win over a facing child on the dirt/near bark.
+// Lower is better. Chest height AND out on the bark (larger horiz) — the
+// previous "+ horiz" term preferred the LOD on the pith, which is why the
+// green mark sat on the trunk instead of the X.
 static float farm_spot_chest_err(const Vec3& node_pos, const Vec3& p) {
     float want_y = farm_eye_y() - 0.40F;
     float sx = p.x - node_pos.x, sz = p.z - node_pos.z;
-    return fabsf(p.y - want_y) + sqrtf(sx * sx + sz * sz) * 0.35F;
+    float horiz = sqrtf(sx * sx + sz * sz);
+    return fabsf(p.y - want_y) - horiz;
 }
 
 // Kind-aware "is this child the glowing X". Both trees and ore park a dormant
@@ -5228,9 +5230,9 @@ static bool farm_spot_on_bark(int kind, const Vec3& node_pos, const Vec3& p) {
     if (kind != 0) return true;
     float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
     float horiz2 = sx * sx + sz * sz;
-    // Thin/medium trunk radius. 1 m out is the dirt in front of the tree
-    // (interaction volume), not the mark on the bark.
-    if (horiz2 < 0.12F * 0.12F || horiz2 > 0.55F * 0.55F) return false;
+    // Thin-trunk X is 15–30 cm off the mid-mesh pivot. Below ~15 cm is the
+    // LOD/collider origin — locking that painted the green mark on the pith.
+    if (horiz2 < 0.16F * 0.16F || horiz2 > 0.50F * 0.50F) return false;
     if (sy < -0.5F || sy > 2.6F) return false;
     if (!farm_spot_above_dirt(p)) return false;
     return true;
@@ -5361,7 +5363,8 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         (jumper_n == 1 || jumper_m2 > second_m2 * 1.8F || second_m2 < 0.10F * 0.10F);
     if (keep) {
         for (const SpotCand& cand : live) {
-            if (cand.node == keep && plausible(cand.pos)) { keep_ok = true; break; }
+            bool ok = (kind == 0) ? on_bark(cand.pos) : plausible(cand.pos);
+            if (cand.node == keep && ok) { keep_ok = true; break; }
         }
     }
 
@@ -5594,8 +5597,8 @@ bool esp_farm_get_target(FarmTarget& out) {
         if (psl > 0.05F) {
             float inv = 1.0F / psl;
             float dirx = sx * inv, dirz = sz * inv;
-            float from_node = (best->kind == 0) ? 1.35F : 1.55F;
-            float from_spot = (best->kind == 0) ? 0.70F : 0.70F;
+            float from_node = (best->kind == 0) ? 1.15F : 1.55F;
+            float from_spot = (best->kind == 0) ? 0.50F : 0.70F;
             float stand_r = psl + from_spot;
             if (stand_r < from_node) stand_r = from_node;
             stand.x = best->pos.x + dirx * stand_r;
@@ -5704,6 +5707,12 @@ bool esp_farm_get_target(FarmTarget& out) {
         float az = reach_pt.z - g_frame_local_pos.z;
         float ad = sqrtf(ax * ax + az * az);
         out.aim_dist = std::isfinite(ad) ? ad : best_dist;
+    }
+    float fraction = rd<float>(best->component + MINEABLE_FRACTION);
+    out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F) ? fraction : -1.0F;
+    return true;
+}
+d : best_dist;
     }
     float fraction = rd<float>(best->component + MINEABLE_FRACTION);
     out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F) ? fraction : -1.0F;

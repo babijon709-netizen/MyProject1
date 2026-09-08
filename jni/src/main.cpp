@@ -3854,14 +3854,13 @@ static void UpdateFarm(float dt) {
         // only once actually inside — no down/up flapping at the boundary
         // (the "stomping in place" bug).
         float pressAt = s_moveDown ? meleeX : meleeX + 0.25f;
-        // Без лока креста не лезем в ствол: на 1.4 м камера внутри меша и
-        // метка перед лицом пропадает (near-clip). Держимся ~2 м, пока X
-        // не найден — иначе третье дерево рубится в кору без зелёной метки.
-        if (isTree && !tgt.has_spot) pressAt = s_moveDown ? 2.00f : 2.15f;
         // Не идём, пока камера не смотрит примерно на цель ног: при yaw 90–180°
         // стик «вперёд» уводит от креста. Сначала доворот, потом шаг.
         bool alignedForWalk = fabsf(goalYaw) < 72.f;
-        bool tooCloseNoX = isTree && !tgt.has_spot && tgt.dist < 2.00f && phase == 3;
+        // Только если уже внутри меша (линза в стволе). Иначе 2 м держали
+        // бота слишком далеко от тонких деревьев — удары не долетали, X не
+        // спавнился.
+        bool tooCloseNoX = isTree && !tgt.has_spot && tgt.dist < 1.15f && phase == 3;
         bool wantWalk = (phase == 2) ||
                         (phase == 1 && alignedForWalk && goalDist > reachDist * 2.f) ||
                         (goStand && alignedForWalk && goalDist > standArrive) ||
@@ -4662,6 +4661,15 @@ int main(int argc, char* argv[]) {
     while (!g_frame_done.load()) {}
     stop_attach_thread();
     if (g_esp_attached) {
+        esp_reset();
+        g_esp_attached = false;
+    }
+    Blur::Free();
+    CfgWatchFree();
+    AudioFree();
+    shutdown(); Touch_Close(); return 0;
+}
+tached) {
         esp_reset();
         g_esp_attached = false;
     }
