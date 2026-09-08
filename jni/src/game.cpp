@@ -10,6 +10,8 @@
 #include <cmath>
 #include <string>
 #include <chrono>
+#include <atomic>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -160,19 +162,16 @@ static void xray_apply(uint64_t native_cam) {
 static std::string read_remote_string(uint64_t address); // определена ниже
 static bool     g_day_enabled = false;
 static uint64_t g_day_tod = 0;          // подтверждённый инстанс TimeOfDay
-static uint64_t g_day_gl_sf = 0;        // статики драйвера времени (GL)
+static std::atomic<uint64_t> g_day_cycle_addr{0}; // Cycle.Hour для писателя
+static std::atomic<bool>     g_day_writer_running{false};
 static int      g_day_retry = 0;
 
 void esp_set_always_day(bool enabled) { g_day_enabled = enabled; }
 
 static void always_day_tick() {
     if (!g_day_enabled) {
-        // Выключили: вернуть игре ход времени (снять статик-оверрайд GL).
-        if (g_day_gl_sf) {
-            uint16_t run = 0x0000;
-            wr_buf(g_day_gl_sf + 0x10, &run, sizeof(run));
-            g_day_gl_sf = 0;
-        }
+        // Выключили: писатель замолкает (адрес в 0), часы игры идут сами.
+        g_day_cycle_addr.store(0);
         g_day_tod = 0;
         return;
     }
@@ -226,27 +225,30 @@ static void always_day_tick() {
         if (s_scan_rva >= kScanEnd) s_scan_rva = 0xD7A0000;
         if (!g_day_tod) return;
     }
-    // Полдень: пишем Cycle.Hour = 12 + глушим игровой драйвер времени.
-    // Драйвер (GL.FixedUpdate) сам писал Hour 50 раз/с — наша запись и его
-    // чередовались, отсюда миллисекундные мерцания старого времени. Статики
-    // GL (klass @ RVA 0xD7F0B58): halfword +0x10, низкий байт = «оверрайд
-    // включён», высокий = «время идёт». 0x0001 = стоп-время.
+    // Полдень: писатель-доминатор. Игровой писатель обновляет Cycle.Hour
+    // каждый кадр, и запись раз в кадр оверлея с ним гонялась — отсюда
+    // миллисекундные проблески старого времени. Теперь час пишет фоновый
+    // поток с периодом ~2 мс: окно, в котором игра успевает и записать своё
+    // время, и отрендерить его, практически исчезает.
     {
         uint64_t cyc = rd_ptr(g_day_tod + 0x40);
         if (cyc >= 0x10000) {
-            float noon = 12.0F;
-            wr_buf(cyc + 0x10, &noon, sizeof(float));
-            uint64_t gl_klass = rd_ptr(g_il2cpp_base + 0xD7F0B58);
-            if (gl_klass >= 0x10000) {
-                uint64_t gl_sf = rd_ptr(gl_klass + 0xB8);
-                if (gl_sf >= 0x10000) {
-                    uint16_t halt = 0x0001;
-                    wr_buf(gl_sf + 0x10, &halt, sizeof(halt));
-                    g_day_gl_sf = gl_sf; // для восстановления при выключении
-                }
+            g_day_cycle_addr.store(cyc + 0x10);
+            if (!g_day_writer_running.exchange(true)) {
+                std::thread([]() {
+                    while (g_day_writer_running.load()) {
+                        uint64_t addr = g_day_cycle_addr.load();
+                        if (addr && g_day_enabled && g_pid > 0) {
+                            float noon = 12.0F;
+                            wr_buf(addr, &noon, sizeof(float));
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    }
+                }).detach();
             }
         } else {
             g_day_tod = 0; // объект умер (смена сцены) — переискать
+            g_day_cycle_addr.store(0);
         }
     }
 }
@@ -3539,7 +3541,7 @@ static void reset_world_caches() {
 void esp_reset() {
     g_pid = -1; g_il2cpp_base = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
-    g_day_tod = 0; g_day_retry = 0; g_day_gl_sf = 0;
+    g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_frame_publish_fail_streak = 0;
     g_aim_ref_valid = false;
