@@ -3707,26 +3707,32 @@ static void UpdateFarm(float dt) {
     // player can stand. While mining the move finger keeps nudging forward
     // until walkUntil, closing the last step on its own.
     const bool  isTree    = (tgt.kind == 0);
-    const float reachDist = isTree ? 2.6f : 3.4f; // close enough to swing
-    const float walkUntil = isTree ? 1.6f : 2.6f; // keep stepping in until this
-    const float aimedYaw  = (g_farmPhase == 3) ? 8.f : 14.f; // deg tolerance
-    // Всегда идём к точке ПЕРЕД крестом, если он есть и мы ещё не там —
-    // даже когда крест далеко или сбоку. Раньше при «лицом» шли к центру
-    // дерева, и крест оставался сбоку: бот не подходил и махал мимо.
-    const float standArrive = s_moveDown ? 0.50f : 0.70f;
+    const float reachDist = isTree ? 2.6f : 3.4f; // body: close enough to swing
+    const float meleeX    = isTree ? 1.45f : 2.05f; // must actually REACH the X
+    const float meleeHold = isTree ? 1.70f : 2.35f; // hysteresis while mining
+    const float aimedYaw  = (g_farmPhase == 3) ? 8.f : 14.f;
+    const float standArrive = s_moveDown ? 0.45f : 0.65f;
     bool goStand = tgt.has_spot && tgt.stand_ok && tgt.stand_dist > standArrive;
-    float goalYaw  = goStand ? tgt.stand_yaw  : tgt.yaw;
-    float goalDist = goStand ? tgt.stand_dist : tgt.dist;
+    float meleeNow = (g_farmPhase == 3) ? meleeHold : meleeX;
+    bool xInMelee  = tgt.has_spot && tgt.aim_dist <= meleeNow;
+    bool needCloser = tgt.has_spot && !xInMelee;
 
-    bool inReach = tgt.has_spot
-        ? (tgt.aim_dist <= (isTree ? 2.5f : 3.2f))
-        : (tgt.dist <= reachDist);
+    float goalYaw, goalDist;
+    if (goStand) {
+        goalYaw = tgt.stand_yaw; goalDist = tgt.stand_dist;
+    } else if (needCloser) {
+        goalYaw = tgt.yaw;       goalDist = tgt.aim_dist;
+    } else {
+        goalYaw = tgt.yaw;       goalDist = tgt.dist;
+    }
+
+    bool inReach = tgt.has_spot ? xInMelee : (tgt.dist <= reachDist);
     bool aimed = fabsf(tgt.yaw) <= aimedYaw;
 
     int phase;
-    if (goStand)      phase = (fabsf(goalYaw) <= 14.f) ? 2 : 1;
-    else if (inReach) phase = 3;
-    else              phase = (aimed ? 2 : 1);
+    if (goStand || needCloser) phase = (fabsf(goalYaw) <= 14.f) ? 2 : 1;
+    else if (inReach)          phase = 3;
+    else                       phase = (aimed ? 2 : 1);
     g_farmPhase = phase;
 
     // ---- finger 1: camera swipe (yaw always; pitch only while mining) ----
@@ -3796,13 +3802,14 @@ static void UpdateFarm(float dt) {
         // walkUntil gets hysteresis: press while further than +0.5 m, release
         // only once actually inside — no down/up flapping at the boundary
         // (the "stomping in place" bug).
-        float pressAt = s_moveDown ? walkUntil : walkUntil + 0.5f;
+        float pressAt = s_moveDown ? meleeX : meleeX + 0.25f;
         // Не идём, пока камера не смотрит примерно на цель ног: при yaw 90–180°
         // стик «вперёд» уводит от креста. Сначала доворот, потом шаг.
         bool alignedForWalk = fabsf(goalYaw) < 72.f;
         bool wantWalk = (phase == 2) ||
                         (phase == 1 && alignedForWalk && goalDist > reachDist * 2.f) ||
                         (goStand && alignedForWalk && goalDist > standArrive) ||
+                        (needCloser && alignedForWalk) ||
                         (phase == 3 && (tgt.has_spot ? tgt.aim_dist : tgt.dist) > pressAt);
         if (s_evadeTime > 0.f) wantWalk = true; // manoeuvre drives the stick itself
         // Release hysteresis: phases flicker for a frame or two around their
@@ -3850,7 +3857,8 @@ static void UpdateFarm(float dt) {
                 if (fabsf(yawSteer) < 4.f) yawSteer = 0.f;
                 // Крест сбоку/сзади и мы уже у ствола: обходим, а не прём
                 // сквозь дерево к стоянке «через» пивот.
-                bool orbit = goStand && !tgt.spot_facing && tgt.dist < 5.0f;
+                bool orbit = tgt.has_spot && !tgt.spot_facing && tgt.dist < 5.0f &&
+                             (goStand || needCloser);
                 if (orbit) {
                     float side = (fabsf(goalYaw) > 8.f)
                         ? ((goalYaw > 0.f) ? 1.f : -1.f)
@@ -3909,7 +3917,7 @@ static void UpdateFarm(float dt) {
             bool aimSettled = tgt.has_spot
                 ? (fabsf(tgt.yaw) <= 3.5f && fabsf(tgt.pitch) <= 5.f)
                 : (fabsf(tgt.yaw) <= 8.f);
-            if (goStand) aimSettled = false; // идём на стоянку — в воздух не машем
+            if (goStand || needCloser) aimSettled = false; // не дотягиваемся — не машем в воздух
             // Tap rhythm: ~85 ms down, ~230 ms up — a believable fast tapper
             // that also matches melee swing cadence (extra taps are ignored
             // by the game, they just queue the next swing).
@@ -4601,5 +4609,8 @@ int main(int argc, char* argv[]) {
     Blur::Free();
     CfgWatchFree();
     AudioFree();
+    shutdown(); Touch_Close(); return 0;
+}
+);
     shutdown(); Touch_Close(); return 0;
 }

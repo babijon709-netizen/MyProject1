@@ -5172,15 +5172,13 @@ void esp_farm_blacklist(unsigned long long id, float seconds) {
 // the pivot (tree base) until the real X activates, and returning that one
 // made the bot chop the bottom of the trunk. The result is cached per
 // component and re-checked because the spot jumps around between hits.
-static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos) {
+static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, uint64_t keep) {
     if (!node_transform) return 0;
     std::vector<uint64_t> nodes;
     // Trees carry a LOT of children (LODs, foliage, colliders) — a small cap
     // used to cut the walk off before it ever reached the X child.
     collect_transform_subtree(node_transform, nodes, 256);
 
-    // Positions of the whole subtree, read once: the name pass scores with
-    // them and the movement pass compares them against the previous scan.
     struct SpotCand { uint64_t node; Vec3 pos; };
     std::vector<SpotCand> live;
     live.reserve(nodes.size());
@@ -5194,12 +5192,12 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos) {
     auto plausible = [&](const Vec3& p) -> bool {
         float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
         float d2 = sx * sx + sy * sy + sz * sz;
-        if (d2 <= 0.35F * 0.35F || d2 >= 6.0F * 6.0F) return false; // at pivot / off the node
-        return sy > 0.2F && sy < 2.8F;                              // swingable height
+        if (d2 <= 0.35F * 0.35F || d2 >= 6.0F * 6.0F) return false;
+        return sy > 0.2F && sy < 2.8F;
     };
 
     // Pass 1: by name (rock prefabs name their X clearly).
-    uint64_t best_node = 0;
+    uint64_t named = 0;
     if (g_go_name_offset_valid) {
         char name[48];
         int best_score = -1;
@@ -5210,32 +5208,32 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos) {
             for (char* p = name; *p; ++p, ++len) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
             bool looks = strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
                          strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
-                         strstr(name, "marker") || strstr(name, "gather") || strstr(name, "target") ||
-                         strstr(name, "hitpoint") || strstr(name, "plus") ||
+                         strstr(name, "hitpoint") ||
                          (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
                                              (name[1] >= '0' && name[1] <= '9')));
             if (!looks) continue;
-            if (!plausible(cand.pos)) continue; // dormant template at the pivot etc.
+            if (!plausible(cand.pos)) continue;
             float sx = cand.pos.x - node_pos.x, sy = cand.pos.y - node_pos.y, sz = cand.pos.z - node_pos.z;
             float d2 = sx * sx + sy * sy + sz * sz;
             int score = 2;
-            if (sx * sx + sz * sz > 0.04F) score += 1; // off the trunk axis
+            if (sx * sx + sz * sz > 0.04F) score += 1;
             if (score > best_score || (score == best_score && d2 > best_d2)) {
                 best_score = score;
                 best_d2 = d2;
-                best_node = cand.node;
+                named = cand.node;
             }
         }
     }
 
-    // Pass 2: by movement. Tree prefabs do not name their X anything
-    // recognisable, but the X is the only child that JUMPS between hits —
-    // LODs, colliders and foliage transforms never move. Compare against the
-    // previous scan of the same node and take the biggest plausible jump.
+    // Pass 2: movement. Tree X is unnamed — the only child that JUMPS between
+    // hits. Threshold is high so foliage sway cannot steal a live lock.
     static uint64_t s_move_root = 0;
     static std::vector<SpotCand> s_move_prev;
-    if (!best_node && s_move_root == node_transform) {
-        float best_m2 = 0.15F * 0.15F; // ignore sub-15 cm jitter
+    uint64_t jumper = 0;
+    float jumper_m2 = 0.0F;
+    float keep_m2 = 0.0F;
+    bool keep_ok = false;
+    if (s_move_root == node_transform) {
         for (const SpotCand& cand : live) {
             for (const SpotCand& prev : s_move_prev) {
                 if (prev.node != cand.node) continue;
@@ -5243,17 +5241,35 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos) {
                 float my = cand.pos.y - prev.pos.y;
                 float mz = cand.pos.z - prev.pos.z;
                 float m2 = mx * mx + my * my + mz * mz;
-                if (m2 > best_m2 && m2 < 5.0F * 5.0F && plausible(cand.pos)) {
-                    best_m2 = m2;
-                    best_node = cand.node;
+                if (cand.node == keep) keep_m2 = m2;
+                if (m2 > jumper_m2 && m2 < 5.0F * 5.0F && plausible(cand.pos)) {
+                    jumper_m2 = m2;
+                    jumper = cand.node;
                 }
                 break;
             }
         }
     }
+    if (keep) {
+        for (const SpotCand& cand : live) {
+            if (cand.node == keep && plausible(cand.pos)) { keep_ok = true; break; }
+        }
+    }
     s_move_root = node_transform;
     s_move_prev = std::move(live);
-    return best_node;
+
+    // Живой крест не отдаём: рескан по имени/LOD «marker» срывал метку на ствол.
+    // Меняем трансформ только если ДРУГОЙ чайлд реально прыгнул (крест переехал),
+    // а текущий стоит на месте / у пивота.
+    const float hop = 0.55F * 0.55F;
+    if (keep_ok) {
+        if (jumper && jumper != keep && jumper_m2 > hop && keep_m2 < 0.12F * 0.12F)
+            return jumper;
+        return keep;
+    }
+    if (jumper && jumper_m2 > 0.35F * 0.35F) return jumper;
+    if (named) return named;
+    return keep;
 }
 
 void esp_farm_debug(int& nodes_cached, int& idle_reason) {
@@ -5347,26 +5363,35 @@ bool esp_farm_get_target(FarmTarget& out) {
 
     // Where to look: the glowing spot when the node shows one, otherwise the
     // body of the node (trees are hit at chest height, rocks a bit lower).
-    static uint64_t s_spot_component = 0;   // whose spot the cache belongs to
+    static uint64_t s_spot_component = 0;
     static uint64_t s_spot_transform = 0;
     static int      s_spot_recheck = 0;
+    static Vec3     s_spot_last{};
+    static bool     s_spot_last_ok = false;
+    static int      s_spot_hold = 0;
+    static int      s_spot_pivot_frames = 0;
     if (s_spot_component != best->component) {
         s_spot_component = best->component;
         s_spot_transform = 0;
         s_spot_recheck = 0;
+        s_spot_last_ok = false;
+        s_spot_hold = 0;
+        s_spot_pivot_frames = 0;
     }
     if (--s_spot_recheck <= 0) {
-        // The spot only spawns after the first hit and jumps around between
-        // hits, so keep the search hot: ~0.3 s while no live spot is known,
-        // ~0.7 s to re-validate a known one. IMPORTANT: a scan that finds
-        // nothing must NOT clear a known spot — the movement detector only
-        // sees the X while it is jumping, and overwriting the cache with 0
-        // between jumps was why the bot noticed the cross for half a second
-        // and went back to chopping the trunk. The position sanity check
-        // below is what retires a spot that actually went bad.
-        s_spot_recheck = s_spot_transform ? 40 : 18;
-        uint64_t found = farm_find_spot(best->transform, best->pos);
-        if (found) s_spot_transform = found;
+        // Без живого креста ищем часто (~0.2 с), с живым — реже. Скан НИКОГДА
+        // не затирает известный трансформ нулём и не меняет его на LOD/имя,
+        // пока текущий ещё на коре — иначе метка слетает на ствол.
+        s_spot_recheck = s_spot_transform ? 24 : 12;
+        uint64_t found = farm_find_spot(best->transform, best->pos, s_spot_transform);
+        if (found && found != s_spot_transform) {
+            s_spot_transform = found;
+            s_spot_last_ok = false;
+            s_spot_hold = 0;
+            s_spot_pivot_frames = 0;
+        } else if (found) {
+            s_spot_transform = found;
+        }
     }
 
     Vec3 aim{};
@@ -5374,68 +5399,80 @@ bool esp_farm_get_target(FarmTarget& out) {
     bool spot_facing = true;
     Vec3 stand{};
     bool stand_ok = false;
+    Vec3 spot_raw{};
     if (s_spot_transform) {
         Vec3 spot{};
-        if (marker_world_position(s_spot_transform, spot) && vec3_is_finite(spot)) {
-            // Sanity: the spot must be near its node, else the cached
-            // transform went stale (respawned node reuses memory).
+        bool read_ok = marker_world_position(s_spot_transform, spot) && vec3_is_finite(spot);
+        bool use_held = false;
+        if (read_ok) {
             float sx = spot.x - best->pos.x, sy = spot.y - best->pos.y, sz = spot.z - best->pos.z;
             float d2 = sx * sx + sy * sy + sz * sz;
-            // ...and it must sit visibly AWAY from the node pivot. A dormant
-            // template child rests exactly at the pivot (tree base) until the
-            // real X activates — aiming there is the "hits the bottom of the
-            // tree" bug. Such a spot is ignored until it moves.
-            if (d2 < 6.0F * 6.0F && d2 > 0.35F * 0.35F) {
-                float pncx = best->pos.x - g_frame_local_pos.x;
-                float pncz = best->pos.z - g_frame_local_pos.z;
-                float pnl = sqrtf(pncx * pncx + pncz * pncz);
-                float psl = sqrtf(sx * sx + sz * sz);
-                spot_facing = true;
-                if (pnl > 0.05F && psl > 0.05F) {
-                    float c = ((-pncx) * sx + (-pncz) * sz) / (pnl * psl);
-                    // Гистерезис на УЗЕЛ: общий static залипал «лицом» с
-                    // прошлого дерева. «Лицом» только в ~40°, сброс с ~50° —
-                    // боковой крест больше не считается досягаемым с места.
-                    static uint64_t s_face_id = 0;
-                    static bool s_face_state = true;
-                    if (s_face_id != best->identity) {
-                        s_face_id = best->identity;
-                        s_face_state = true;
-                    }
-                    if (s_face_state) { if (c < 0.64F) s_face_state = false; } // >50°
-                    else              { if (c > 0.77F) s_face_state = true;  } // <40°
-                    spot_facing = s_face_state;
-                }
-                aim = spot;
+            if (d2 >= 6.0F * 6.0F) {
+                s_spot_transform = 0;
+                s_spot_last_ok = false;
+                s_spot_hold = 0;
+            } else if (d2 > 0.35F * 0.35F && sy > 0.15F && sy < 2.9F) {
+                s_spot_last = spot;
+                s_spot_last_ok = true;
+                s_spot_hold = 48;
+                s_spot_pivot_frames = 0;
+                spot_raw = spot;
                 spot_ok = true;
-                if (psl > 0.05F) {
-                    float inv = 1.0F / psl;
-                    float dirx = sx * inv, dirz = sz * inv;
-                    // Декаль креста на дереве сидит чуть СНАРУЖИ коры —
-                    // сырой transform торчит, луч пролетает мимо ствола.
-                    // Тянем точку прицела к пивоту, чтобы метка легла на кору.
-                    float pull = (best->kind == 0) ? 0.14F : 0.05F;
-                    if (pull > psl * 0.45F) pull = psl * 0.45F;
-                    aim.x = spot.x - dirx * pull;
-                    aim.z = spot.z - dirz * pull;
-                    aim.y = spot.y;
-                    // Стоянка: перед крестом на дистанции удара, не у центра
-                    // дерева. Бот подходит к кресту даже если он далеко/сбоку.
-                    float from_node = (best->kind == 0) ? 1.50F : 2.20F;
-                    float from_spot = (best->kind == 0) ? 0.85F : 1.10F;
-                    float stand_r = psl + from_spot;
-                    if (stand_r < from_node) stand_r = from_node;
-                    stand.x = best->pos.x + dirx * stand_r;
-                    stand.z = best->pos.z + dirz * stand_r;
-                    stand.y = spot.y;
-                    stand_ok = true;
+            } else {
+                // Прыжок декали через пивот / чтение в середине апдейта:
+                // НЕ целимся в ствол — держим прошлую точку креста.
+                ++s_spot_pivot_frames;
+                use_held = true;
+                if (s_spot_pivot_frames > 25) {
+                    s_spot_transform = 0;
+                    s_spot_recheck = 0;
                 }
             }
-            else if (d2 >= 6.0F * 6.0F) s_spot_transform = 0;
-            // d2 <= 0.35^2: крест в даный кадр «прижался» к пивоту (анимация
-            // прыжка/переспавн декали). НЕ сбрасываем транс форм — на
-            // следующем кадре он снова отскочит; сбрасывание здесь и было
-            // «крестики пропадают, бот бьёт в ствол».
+        } else {
+            use_held = true;
+        }
+        if (!spot_ok && use_held && s_spot_last_ok && s_spot_hold > 0) {
+            --s_spot_hold;
+            spot_raw = s_spot_last;
+            spot_ok = true;
+        }
+    }
+    if (spot_ok) {
+        float sx = spot_raw.x - best->pos.x, sz = spot_raw.z - best->pos.z;
+        float pncx = best->pos.x - g_frame_local_pos.x;
+        float pncz = best->pos.z - g_frame_local_pos.z;
+        float pnl = sqrtf(pncx * pncx + pncz * pncz);
+        float psl = sqrtf(sx * sx + sz * sz);
+        spot_facing = true;
+        if (pnl > 0.05F && psl > 0.05F) {
+            float c = ((-pncx) * sx + (-pncz) * sz) / (pnl * psl);
+            static uint64_t s_face_id = 0;
+            static bool s_face_state = true;
+            if (s_face_id != best->identity) {
+                s_face_id = best->identity;
+                s_face_state = true;
+            }
+            if (s_face_state) { if (c < 0.64F) s_face_state = false; }
+            else              { if (c > 0.77F) s_face_state = true;  }
+            spot_facing = s_face_state;
+        }
+        aim = spot_raw;
+        if (psl > 0.05F) {
+            float inv = 1.0F / psl;
+            float dirx = sx * inv, dirz = sz * inv;
+            float pull = (best->kind == 0) ? 0.14F : 0.05F;
+            if (pull > psl * 0.45F) pull = psl * 0.45F;
+            aim.x = spot_raw.x - dirx * pull;
+            aim.z = spot_raw.z - dirz * pull;
+            aim.y = spot_raw.y;
+            float from_node = (best->kind == 0) ? 1.35F : 2.00F;
+            float from_spot = (best->kind == 0) ? 0.70F : 1.00F;
+            float stand_r = psl + from_spot;
+            if (stand_r < from_node) stand_r = from_node;
+            stand.x = best->pos.x + dirx * stand_r;
+            stand.z = best->pos.z + dirz * stand_r;
+            stand.y = spot_raw.y;
+            stand_ok = true;
         }
     }
     // Нет живого креста — целимся в тело (грудь дерева / пояс руды).
@@ -5527,11 +5564,11 @@ bool esp_farm_get_target(FarmTarget& out) {
         }
     }
     {
-        // Horizontal distance to the aim point itself: the melee-reach check
-        // must measure what the pick actually has to hit — a spot on the far
-        // side of a boulder is metres further than the node centre.
-        float ax = aim.x - g_frame_local_pos.x;
-        float az = aim.z - g_frame_local_pos.z;
+        // Дистанция до СЫРОГО креста (не подтянутого прицела): контроллер
+        // решает «дотягиваюсь / подойти ближе» по ней.
+        const Vec3& reach_pt = spot_ok ? spot_raw : aim;
+        float ax = reach_pt.x - g_frame_local_pos.x;
+        float az = reach_pt.z - g_frame_local_pos.z;
         float ad = sqrtf(ax * ax + az * az);
         out.aim_dist = std::isfinite(ad) ? ad : best_dist;
     }

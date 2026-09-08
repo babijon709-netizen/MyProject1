@@ -102,7 +102,7 @@ struct FarmTarget {
     float dist = 0.f;               // metres from the local player
     float fraction = -1.f;          // resource remaining 0..1, -1 unknown
     bool  has_spot = false;         // true when aiming at the glowing weak spot
-    float aim_dist = 0.f;           // horizontal metres to the (bark-pulled) aim point
+    float aim_dist = 0.f;           // horizontal metres to the raw X (melee reach)
     bool  spot_facing = true;       // крест примерно лицом (~40°); иначе обходим ствол
     bool  stand_ok = false;         // есть точка стоянки перед крестом
     float stand_yaw = 0.f;          // куда идти к стоянке (градусы)
