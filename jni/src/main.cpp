@@ -3842,7 +3842,10 @@ static void UpdateFarm(float dt) {
         // default otherwise.
         float cx = (g_state.farm_joy_x >= 0.f) ? sw * g_state.farm_joy_x : sw * 0.165f;
         float cy = (g_state.farm_joy_y >= 0.f) ? sh * g_state.farm_joy_y : sh * 0.70f;
-        float r = sh * 0.16f;
+        // Stick deflection radius. The game RUNS only when the stick is
+        // pushed near its full extent — a half-deflected stick walks, which
+        // is why the farm used to approach at a stroll.
+        float r = sh * 0.20f;
         float px = cx, py = cy;
         bool wantWalk = false;
 
@@ -3854,10 +3857,10 @@ static void UpdateFarm(float dt) {
             s_evadeTime -= dt;
             if (s_evadeTime > 1.1f) {          // first ~0.6 s: step back
                 px = cx;
-                py = cy + r * 0.9f;
+                py = cy + r * 0.95f;
             } else {                            // then: diagonal sidestep
                 px = cx + r * 0.95f * s_evadeDir;
-                py = cy - r * 0.35f;
+                py = cy - r * 0.4f;
             }
             if (s_evadeTime <= 0.f) { s_evadeTime = 0.f; s_stuckTime = 0.f; s_lastGoal = 1e9f; }
         } else if (orbit) {
@@ -3865,7 +3868,7 @@ static void UpdateFarm(float dt) {
             // A short arc in one direction, not 360 degrees.
             wantWalk = true;
             px = cx + r * 0.9f * tgt.orbit_side;
-            py = cy - r * 0.4f;
+            py = cy - r * 0.5f;
         } else if (phase == 1) {
             // Walk straight at the node once the camera is roughly on it
             // (steering the stick at a big yaw would send the bot sideways).
@@ -3874,8 +3877,10 @@ static void UpdateFarm(float dt) {
                 float steer = tgt.walk_yaw / 60.f;  // slight steering
                 if (steer >  0.5f) steer =  0.5f;
                 if (steer < -0.5f) steer = -0.5f;
+                // FULL deflection = run speed: the stick is pushed to its
+                // whole radius, angled a bit toward the target.
                 px = cx + r * steer;
-                py = cy - r * 0.9f * sqrtf(1.f - steer * steer);
+                py = cy - r * 0.99f * sqrtf(1.f - steer * steer);
             }
         } else {
             // Mining: nudge forward only while the tool still does not

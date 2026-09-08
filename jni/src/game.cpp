@@ -5922,6 +5922,10 @@ bool esp_farm_get_target(FarmTarget& out) {
     }
 
     Vec3 aim{};
+    Vec3 marker_pt{}; // where to DRAW the target mark: the actual glowing X
+                      // (on the bark). The swing aim is pulled to the surface
+                      // separately, so the marker never floats in mid-air or
+                      // inside the trunk.
     bool spot_ok = false;
     bool spot_front = true;
     float orbit_side = 0.0F;
@@ -5935,6 +5939,7 @@ bool esp_farm_get_target(FarmTarget& out) {
             s_spot_hold = 48;
             spot_ok = true;
             aim = spot;
+            marker_pt = spot;
             // Is the X on OUR side of the node? When the mark is on the far
             // side of the trunk/boulder the tool cannot reach it — the
             // controller circles until it faces us.
@@ -5968,6 +5973,7 @@ bool esp_farm_get_target(FarmTarget& out) {
             --s_spot_hold;
             spot_ok = true;
             aim = s_spot_last;
+            marker_pt = s_spot_last;
             spot_front = true; // held mark was on our side when it was good
         } else {
             s_spot_transform = 0; // the mark is gone — aim the body
@@ -5979,42 +5985,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     if (!spot_ok) {
         aim = best->pos;
         aim.y += (best->kind == 0) ? 1.15F : 0.15F;
-    }
-
-    // The live X floats a few cm OFF the bark. Aiming exactly at that
-    // floating point sends the swing ray PAST the trunk up close at a
-    // shallow angle (the mark is outside the trunk's silhouette), so the
-    // bot whiffed on every tree. Pull the aim point IN to the node's
-    // volume: the eye-to-aim ray then always enters the node, and the
-    // impact lands on the near bark right next to the mark (a few cm off
-    // it, which stays on the mark's screen sprite at farming distance).
-    if (spot_ok) {
-        if (best->kind == 0) {
-            // Tree: in towards the trunk axis, keeping the mark's height —
-            // that height is where the bonus applies. Half-way is far enough
-            // inside the bark that the ray always enters the trunk (the
-            // protrusion is a fraction of the trunk radius), yet close enough
-            // to the mark that the impact stays next to it.
-            float ax = aim.x - best->pos.x, az = aim.z - best->pos.z;
-            float h = sqrtf(ax * ax + az * az);
-            float r_aim = fmaxf(0.08F, 0.5F * h);
-            if (r_aim < h) {
-                float k = r_aim / h;
-                aim.x = best->pos.x + ax * k;
-                aim.z = best->pos.z + az * k;
-            }
-        } else {
-            // Ore: in towards the pivot (it rides inside the boulder).
-            float vx = aim.x - best->pos.x, vy = aim.y - best->pos.y, vz = aim.z - best->pos.z;
-            float d = sqrtf(vx * vx + vy * vy + vz * vz);
-            float r_aim = fmaxf(0.30F, 0.5F * d);
-            if (r_aim < d) {
-                float k = r_aim / d;
-                aim.x = best->pos.x + vx * k;
-                aim.y = best->pos.y + vy * k;
-                aim.z = best->pos.z + vz * k;
-            }
-        }
+        marker_pt = aim;
     }
 
     // Camera basis, in order of preference: transform pose > basis from this
@@ -6029,6 +6000,91 @@ bool esp_farm_get_target(FarmTarget& out) {
     const Vec3& fwd    = use_pose ? g_cam_forward   : g_frame_cam_fwd;
     const Vec3& right  = use_pose ? g_cam_right     : g_frame_cam_right;
     const Vec3& up     = use_pose ? g_cam_up        : g_frame_cam_up;
+
+    // The live X floats a few cm OFF the bark. Aiming exactly at the mark
+    // sends the swing ray PAST the trunk at a shallow angle up close (the
+    // mark is outside the trunk's silhouette) — the whiffs; aiming deep in
+    // the node puts the reticle "inside the tree". The right aim is where
+    // the eye->mark ray ENTERS the node: on the bark, on the X's own line,
+    // a hair inside the surface so the hit always lands. The drawn marker
+    // (marker_pt) stays on the mark itself.
+    if (spot_ok) {
+        Vec3 ray = {marker_pt.x - origin.x, marker_pt.y - origin.y, marker_pt.z - origin.z};
+        float rl = sqrtf(ray.x * ray.x + ray.y * ray.y + ray.z * ray.z);
+        aim = marker_pt;
+        if (rl > 0.05F && rl < 50.0F) {
+            ray.x /= rl; ray.y /= rl; ray.z /= rl;
+            if (best->kind == 0) {
+                // Trunk = vertical cylinder at the node axis. Radius: the
+                // mark's radius minus the (few cm) protrusion — the estimate
+                // lands a couple of cm INSIDE the real bark, so the swing
+                // ray always crosses the bark right at the X (aiming exactly
+                // at the mark's line instead misses at a shallow angle, and
+                // aiming at the estimated surface instead can sit outside a
+                // thin trunk).
+                float hx = marker_pt.x - best->pos.x, hz = marker_pt.z - best->pos.z;
+                float r_est = fmaxf(0.05F, sqrtf(hx * hx + hz * hz) - 0.08F);
+                float wx = origin.x - best->pos.x, wz = origin.z - best->pos.z;
+                float a = ray.x * ray.x + ray.z * ray.z;
+                float b = 2.0F * (wx * ray.x + wz * ray.z);
+                float c = wx * wx + wz * wz - r_est * r_est;
+                float t = -1.0F;
+                if (a > 1e-6F) {
+                    float disc = b * b - 4.0F * a * c;
+                    if (disc > 0.0F) {
+                        float s = sqrtf(disc);
+                        float t1 = (-b - s) / (2.0F * a);
+                        float t2 = (-b + s) / (2.0F * a);
+                        t = (t1 > 0.05F) ? t1 : ((t2 > 0.05F) ? t2 : -1.0F);
+                    }
+                }
+                if (t > 0.0F) {
+                    // Entry point on the bark along the eye->mark ray.
+                    aim = {origin.x + ray.x * t, origin.y + ray.y * t, origin.z + ray.z * t};
+                } else {
+                    // The ray clips the cylinder at a grazing angle: aim a
+                    // little inside along the X's own radial line — sure
+                    // hit, the impact still lands at the X.
+                    float h = sqrtf(hx * hx + hz * hz);
+                    if (h > 0.02F) {
+                        float k = r_est / h;
+                        if (k < 1.0F) {
+                            aim.x = best->pos.x + hx * k;
+                            aim.z = best->pos.z + hz * k;
+                            aim.y = marker_pt.y;
+                        }
+                    }
+                }
+            } else {
+                // Boulder ~ sphere at the pivot (the pivot rides near the
+                // top; the mark's distance is the local surface radius).
+                float vx = marker_pt.x - best->pos.x, vy = marker_pt.y - best->pos.y, vz = marker_pt.z - best->pos.z;
+                float dv = sqrtf(vx * vx + vy * vy + vz * vz);
+                float r_est = fmaxf(0.25F, dv - 0.08F);
+                float ox = origin.x - best->pos.x, oy = origin.y - best->pos.y, oz = origin.z - best->pos.z;
+                float b2 = 2.0F * (ox * ray.x + oy * ray.y + oz * ray.z);
+                float c2 = ox * ox + oy * oy + oz * oz - r_est * r_est;
+                float t = -1.0F;
+                float disc = b2 * b2 - 4.0F * c2;
+                if (disc > 0.0F) {
+                    float s = sqrtf(disc);
+                    float t1 = (-b2 - s) / 2.0F;
+                    float t2 = (-b2 + s) / 2.0F;
+                    t = (t1 > 0.05F) ? t1 : ((t2 > 0.05F) ? t2 : -1.0F);
+                }
+                if (t > 0.0F) {
+                    aim = {origin.x + ray.x * t, origin.y + ray.y * t, origin.z + ray.z * t};
+                } else if (dv > 0.02F) {
+                    float k = r_est / dv;
+                    if (k < 1.0F) {
+                        aim.x = best->pos.x + vx * k;
+                        aim.y = best->pos.y + vy * k;
+                        aim.z = best->pos.z + vz * k;
+                    }
+                }
+            }
+        }
+    }
 
     if (!spot_ok) {
         if (best->kind == 0) {
@@ -6070,10 +6126,12 @@ bool esp_farm_get_target(FarmTarget& out) {
         return false;
     }
 
-    // Screen position of the aim point, for the on-screen target mark.
+    // Screen position of the target mark: the glowing X itself when live
+    // (on the bark), the body point otherwise — NOT the slightly pulled
+    // swing aim, which would draw the mark inside the trunk.
     if (g_frame_vp_valid) {
         Vec2 screen{};
-        if (w2s(g_frame_vp, aim, g_frame_sw, g_frame_sh, screen, false) &&
+        if (w2s(g_frame_vp, marker_pt, g_frame_sw, g_frame_sh, screen, false) &&
             std::isfinite(screen.x) && std::isfinite(screen.y) &&
             screen.x >= -64.0F && screen.x <= g_frame_sw + 64.0F &&
             screen.y >= -64.0F && screen.y <= g_frame_sh + 64.0F) {
