@@ -3710,7 +3710,9 @@ static void UpdateFarm(float dt) {
     const float reachDist = isTree ? 2.6f : 2.4f; // body: close enough to swing
     const float meleeX    = isTree ? 1.45f : 1.55f; // must actually REACH the X
     const float meleeHold = isTree ? 1.70f : 1.80f; // hysteresis while mining
-    const float aimedYaw  = (g_farmPhase == 3) ? 8.f : 14.f;
+    const float aimedYaw  = tgt.has_spot
+        ? ((g_farmPhase == 3) ? 3.f : 8.f)
+        : ((g_farmPhase == 3) ? 8.f : 14.f);
     const float standArrive = s_moveDown ? 0.45f : 0.65f;
     bool goStand = tgt.has_spot && tgt.stand_ok && tgt.stand_dist > standArrive;
     float meleeNow = (g_farmPhase == 3) ? meleeHold : meleeX;
@@ -3752,8 +3754,8 @@ static void UpdateFarm(float dt) {
         // Dead zones in degrees with hysteresis: a swipe only starts when the
         // error is clearly outside, and stops well inside. This is what keeps
         // the camera from twitching left-right around the centre.
-        float startDeg = (phase == 3) ? 4.0f : 10.f;
-        float stopDeg  = (phase == 3) ? 1.5f : 4.f;
+        float startDeg = (phase == 3) ? (tgt.has_spot ? 1.2f : 4.0f) : 10.f;
+        float stopDeg  = (phase == 3) ? (tgt.has_spot ? 0.35f : 1.5f) : 4.f;
         float pitchErr = (phase == 3) ? fabsf(tgt.pitch)
                        : fmaxf(fabsf(tgt.pitch) - pitchDead, 0.f);
         float errDeg = fmaxf(fabsf(steerYaw), pitchErr);
@@ -3773,10 +3775,11 @@ static void UpdateFarm(float dt) {
                 // frame, capped. Fast on big errors, glides into the centre
                 // without the stair-step jerks of fixed-size increments.
                 float maxStep = sh * 0.075f;
-                float dx = wantYawPx * 0.28f;
+                float kAim = (phase == 3 && tgt.has_spot) ? 0.42f : 0.28f;
+                float dx = wantYawPx * kAim;
                 if (dx >  maxStep) dx =  maxStep;
                 if (dx < -maxStep) dx = -maxStep;
-                float dy = wantPitchPx * 0.28f;
+                float dy = wantPitchPx * kAim;
                 float maxStepY = maxStep * 0.5f;
                 if (dy >  maxStepY) dy =  maxStepY;
                 if (dy < -maxStepY) dy = -maxStepY;
@@ -3915,7 +3918,7 @@ static void UpdateFarm(float dt) {
             // is exactly the "missed the X" complaint. Body hits are lenient
             // (the node is huge), spot hits want the reticle settled.
             bool aimSettled = tgt.has_spot
-                ? (fabsf(tgt.yaw) <= 3.5f && fabsf(tgt.pitch) <= 5.f)
+                ? (fabsf(tgt.yaw) <= 1.6f && fabsf(tgt.pitch) <= 2.0f)
                 : (fabsf(tgt.yaw) <= 8.f);
             if (goStand || needCloser) aimSettled = false; // не дотягиваемся — не машем в воздух
             // Tap rhythm: ~85 ms down, ~230 ms up — a believable fast tapper
@@ -4608,6 +4611,10 @@ int main(int argc, char* argv[]) {
     }
     Blur::Free();
     CfgWatchFree();
+    AudioFree();
+    shutdown(); Touch_Close(); return 0;
+}
+atchFree();
     AudioFree();
     shutdown(); Touch_Close(); return 0;
 }

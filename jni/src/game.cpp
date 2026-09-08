@@ -5476,15 +5476,13 @@ bool esp_farm_get_target(FarmTarget& out) {
             else              { if (c > 0.77F) s_face_state = true;  }
             spot_facing = s_face_state;
         }
+        // Aim is the glowing X itself — any pull toward the pivot was a
+        // visible miss (crosshair on bark, not on the mark). Stand stays
+        // in front of the decal so the bot does not walk into the mesh.
         aim = spot_raw;
         if (psl > 0.05F) {
             float inv = 1.0F / psl;
             float dirx = sx * inv, dirz = sz * inv;
-            float pull = (best->kind == 0) ? 0.14F : 0.05F;
-            if (pull > psl * 0.45F) pull = psl * 0.45F;
-            aim.x = spot_raw.x - dirx * pull;
-            aim.z = spot_raw.z - dirz * pull;
-            aim.y = spot_raw.y;
             float from_node = (best->kind == 0) ? 1.35F : 1.55F;
             float from_spot = (best->kind == 0) ? 0.70F : 0.70F;
             float stand_r = psl + from_spot;
@@ -5513,7 +5511,11 @@ bool esp_farm_get_target(FarmTarget& out) {
         g_farm_idle_reason = 5;
         return false;
     }
-    const bool use_ref = g_aim_ref_valid;
+    // With a live X, measure against the CAMERA so the crosshair sits on
+    // the mark the player sees. Look-root sway was a few degrees of miss.
+    // Body aim (no X) still uses the firing reference — that is what melee
+    // actually swings along, and the node is huge.
+    const bool use_ref = g_aim_ref_valid && !(spot_ok && g_cam_pose_valid);
     const bool use_pose = !use_ref && g_cam_pose_valid;
     const Vec3& origin = use_ref ? g_aim_ref_origin  : use_pose ? g_cam_pos     : g_frame_cam_pos;
     const Vec3& fwd    = use_ref ? g_aim_ref_forward : use_pose ? g_cam_forward : g_frame_cam_fwd;
