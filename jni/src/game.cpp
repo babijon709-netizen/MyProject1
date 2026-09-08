@@ -5370,40 +5370,13 @@ bool esp_farm_get_target(FarmTarget& out) {
     // Дистанция до сырой точки прицела: запоминается ДО подтяжки к
     // поверхности, иначе aim_dist схлопывается к dist и контроллер never
     // узнаёт, что крест на дальней стороне (рывки не запускались).
-    float raw_aim_x = aim.x, raw_aim_z = aim.z;
     if (spot_ok) {
-        // Крест-декаль выпирает из поверхности узла. В лоб это не мешает —
-        // луч прицела всё равно входит в тело узла у креста. Сбоку точка
-        // висит в воздухе РЯДОМ со стволом, и удар уходит мимо. Умный
-        // вариант: смотрим, проходит ли луч «глаз -> крест» сквозь тело
-        // узла (цилиндр радиуса r вокруг оси); если проходит — целимся
-        // ровно в крест (как в лоб), если промахивается — подтягиваем точку
-        // к оси ровно настолько, чтобы луч зацепил тело у самого креста.
-        float ex = aim.x - g_frame_local_pos.x;
-        float ez = aim.z - g_frame_local_pos.z;
-        float el = sqrtf(ex * ex + ez * ez);
-        const float body_r = (best->kind == 0) ? 0.24F : 0.55F; // ствол/валун
-        if (std::isfinite(el) && el > 0.5F) {
-            float nx = ex / el, nz = ez / el;               // направление луча (2D)
-            float cx = best->pos.x - g_frame_local_pos.x;
-            float cz = best->pos.z - g_frame_local_pos.z;
-            float along = cx * nx + cz * nz;                 // ось узла вдоль луча
-            float px = cx - along * nx, pz = cz - along * nz;
-            float miss = sqrtf(px * px + pz * pz);           // промах луча мимо оси
-            if (!(along > 0.0F) || miss > body_r) {
-                // Луч не задевает тело: сдвигаем aim по горизонтали к оси,
-                // сохраняя направление и высоту креста. Прижимаем не к самой
-                // оси, а к поверхности (body_r) — попадание засчитывается по
-                // кресту, а маркер визуально остаётся на нём.
-                float hx = aim.x - best->pos.x, hz = aim.z - best->pos.z;
-                float hl = sqrtf(hx * hx + hz * hz);
-                if (std::isfinite(hl) && hl > body_r) {
-                    float s = body_r / hl;
-                    aim.x = best->pos.x + hx * s;
-                    aim.z = best->pos.z + hz * s;
-                }
-            }
-        }
+        // Целимся РОВНО в крест. Ударная механика игры — рейкаст от камеры:
+        // если луч проходит сквозь декаль, попадание засчитывается по кресту.
+        // Прежняя «подтяжка к поверхности» уводила точку в тело узла — бот
+        // бил рядом с крестом (жалоба «метка не на крестике»). Если крест
+        // повёрнут ребром/на дальней стороне — это решает ОБХОД в
+        // контроллере (spot_side/spot_behind ниже), а не смещение прицела.
     }
     if (!spot_ok) {
         aim = best->pos;
@@ -5482,10 +5455,20 @@ bool esp_farm_get_target(FarmTarget& out) {
         // Horizontal distance to the aim point itself: the melee-reach check
         // must measure what the pick actually has to hit — a spot on the far
         // side of a boulder is metres further than the node centre.
-        float ax = raw_aim_x - g_frame_local_pos.x;
-        float az = raw_aim_z - g_frame_local_pos.z;
+        float ax = aim.x - g_frame_local_pos.x;
+        float az = aim.z - g_frame_local_pos.z;
         float ad = sqrtf(ax * ax + az * az);
         out.aim_dist = std::isfinite(ad) ? ad : best_dist;
+        // Геометрия для обхода: крест за узлом (дальше тела) и с какой
+        // стороны от линии «глаз -> узел» он висит. Контроллер стрейфит в
+        // эту сторону, пока крест не окажется лицом.
+        if (spot_ok) {
+            out.spot_behind = (ad - best_dist) > 0.35F;
+            float ncx = best->pos.x - g_frame_local_pos.x;
+            float ncz = best->pos.z - g_frame_local_pos.z;
+            float cross = ncx * (aim.z - best->pos.z) - ncz * (aim.x - best->pos.x);
+            out.spot_side = (cross >= 0.0F) ? 1 : -1;
+        }
     }
     float fraction = rd<float>(best->component + MINEABLE_FRACTION);
     out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F) ? fraction : -1.0F;

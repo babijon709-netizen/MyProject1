@@ -3796,39 +3796,25 @@ static void UpdateFarm(float dt) {
         // only once actually inside — no down/up flapping at the boundary
         // (the "stomping in place" bug).
         float pressAt = s_moveDown ? walkUntil : walkUntil + 0.5f;
-        // Умное дожимание вместо слепого цикла. Старый вариант толкал бота
-        // вперёд по 2 с независимо ни от чего — бот въезжал в дерево, прицел
-        // сбивался, удары мимо креста. Теперь рывок:
-        //   * короткий (0.35 с) и одиночный — после него пауза 2.5 с, чтобы
-        //     оценить эффект (пошло ХП — рывки больше не нужны);
-        //   * только когда прицел УЖЕ устаканился на цели (иначе шаг вперёд
-        //     гарантированно смажет выстрел);
-        //   * только если есть куда идти (dist заметно больше walkUntil);
-        //   * максимум 4 попытки на узел — дальше пусть решает watchdog.
-        static float s_nudgeTimer = 0.f;   // >0: рывок идёт
-        static float s_nudgeCd    = 0.f;   // кулдаун между рывками
-        static int   s_nudgeTries = 0;
-        if (s_nudgeTimer > 0.f) s_nudgeTimer -= dt;
-        if (s_nudgeCd > 0.f)    s_nudgeCd    -= dt;
-        if (s_sinceDrain < 1.f) s_nudgeTries = 0;   // ХП идёт — счёт заново
-        // «Не достаю до крестика»: крест на дальней стороне узла — точка
-        // прицела заметно дальше тела узла (обе дистанции от камеры, разница
-        // гасит её смещение). В этом случае рывок нужен ДАЖЕ когда бот уже
-        // у самого ствола — старая проверка dist > 0.75*walkUntil это
-        // блокировала, и бот вечно махал в недосягаемый крест.
-        bool spotOut = tgt.has_spot && (tgt.aim_dist - tgt.dist) > 0.4f;
-        // Прицел «на месте»: по горизонтали строго, по вертикали мягко —
-        // у высокого/низкого креста pitch-ошибка держится дольше, из-за неё
-        // рывки вообще не запускались.
-        bool aimCalm = fabsf(tgt.yaw) <= 6.f;
-        if (phase == 3 && s_sinceDrain > 2.f && s_nudgeTimer <= 0.f &&
-            s_nudgeCd <= 0.f && aimCalm && s_nudgeTries < 6 &&
-            (spotOut || tgt.dist > walkUntil * 0.75f)) {
-            s_nudgeTimer = 0.35f;
-            s_nudgeCd    = 2.0f;
-            ++s_nudgeTries;
+        // Крест недосягаем НЕ из-за дистанции, а из-за геометрии: он висит
+        // на дальней/боковой грани узла (spot_behind от игры). Удары по телу
+        // при этом ВСЁ РАВНО снимают ХП, поэтому прежний триггер «нет
+        // снятия N секунд» не срабатывал никогда. Решение как у человека:
+        // СТРЕЙФ вокруг узла в сторону креста (spot_side), пока крест не
+        // окажется лицом. Идём короткими шагами по 0.4 с с паузой 0.6 с
+        // (камера доворачивается, крест «переезжает» на нашу сторону).
+        static float s_orbitTimer = 0.f;   // >0: шаг обхода идёт
+        static float s_orbitCd    = 0.f;
+        static float s_orbitDir   = 1.f;
+        if (s_orbitTimer > 0.f) s_orbitTimer -= dt;
+        if (s_orbitCd > 0.f)    s_orbitCd    -= dt;
+        if (phase == 3 && tgt.has_spot && tgt.spot_behind &&
+            s_orbitTimer <= 0.f && s_orbitCd <= 0.f) {
+            s_orbitTimer = 0.4f;
+            s_orbitCd    = 1.0f;
+            s_orbitDir   = (tgt.spot_side >= 0) ? 1.f : -1.f;
         }
-        bool nudgeIn = phase == 3 && s_nudgeTimer > 0.f;
+        bool nudgeIn = phase == 3 && s_orbitTimer > 0.f;
         bool wantWalk = (phase == 2) ||
                         (phase == 1 && fabsf(tgt.yaw) < 70.f && tgt.dist > reachDist * 2.f) ||
                         (phase == 3 && tgt.dist > pressAt) ||
@@ -3890,6 +3876,12 @@ static void UpdateFarm(float dt) {
                     if (s3 < -1.f) s3 = -1.f;
                     px = cx + r * 0.35f * s3;
                     py = cy - r * 0.75f;
+                    if (s_orbitTimer > 0.f) {
+                        // Шаг обхода: чистый боковой стрейф вокруг узла в
+                        // сторону креста, чуть вперёд, чтобы не отдаляться.
+                        px = cx + r * 0.85f * s_orbitDir;
+                        py = cy - r * 0.30f;
+                    }
                 }
                 if (s_walkOffTime > 0.f) {
                     // Hysteresis hold: walk not wanted any more — glide the
