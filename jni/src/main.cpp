@@ -4611,6 +4611,3 @@ int main(int argc, char* argv[]) {
     AudioFree();
     shutdown(); Touch_Close(); return 0;
 }
-);
-    shutdown(); Touch_Close(); return 0;
-}
