@@ -5195,7 +5195,7 @@ static bool farm_spot_plausible(int kind, const Vec3& node_pos, const Vec3& p, f
 // the pivot (tree base) until the real X activates, and returning that one
 // made the bot chop the bottom of the trunk. The result is cached per
 // component and re-checked because the spot jumps around between hits.
-static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, int kind, uint64_t keep) {
+static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, int kind, uint64_t keep, uint64_t node_id) {
     if (!node_transform) return 0;
     std::vector<uint64_t> nodes;
     // Trees carry a LOT of children (LODs, foliage, colliders) — a small cap
@@ -5216,9 +5216,11 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         return farm_spot_plausible(kind, node_pos, p);
     };
 
-    // Pass 1: by name (rock prefabs name their X clearly).
+    // Pass 1: by name. Rocks name their X; trees do NOT — matching LOD /
+    // foliage ("spot", "cross", …) glues the lock onto the trunk, which is
+    // why tree #1 could hit the mark and every tree after it chopped bark.
     uint64_t named = 0;
-    if (g_go_name_offset_valid) {
+    if (kind != 0 && g_go_name_offset_valid) {
         char name[48];
         int best_score = -1;
         float best_d2 = 0.0F;
@@ -5231,9 +5233,7 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
                          strstr(name, "hitpoint") ||
                          (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
                                              (name[1] >= '0' && name[1] <= '9')));
-            // Ore X is often named Marker / Plus / Gather / Target. On trees
-            // those words match LOD children and snap the lock onto the trunk.
-            if (!looks && kind != 0)
+            if (!looks)
                 looks = strstr(name, "marker") || strstr(name, "gather") ||
                         strstr(name, "target") || strstr(name, "plus");
             if (!looks) continue;
@@ -5253,7 +5253,16 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
     // Pass 2: movement. Tree X is unnamed — the only child that JUMPS between
     // hits. Threshold is high so foliage sway cannot steal a live lock.
     static uint64_t s_move_root = 0;
+    static uint64_t s_move_id = 0;
     static std::vector<SpotCand> s_move_prev;
+    // New NetworkIdentity (or pooled transform reused on another tree):
+    // previous child positions are a TELEPORT, not an X hop — that made
+    // the next tree lock a random LOD and never leave the trunk.
+    if (node_id && s_move_id != node_id) {
+        s_move_id = node_id;
+        s_move_root = 0;
+        s_move_prev.clear();
+    }
     uint64_t jumper = 0;
     float jumper_m2 = 0.0F;
     float keep_m2 = 0.0F;
@@ -5286,7 +5295,14 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
     // Живой крест не отдаём: рескан по имени/LOD «marker» срывал метку на ствол.
     // Меняем трансформ только если ДРУГОЙ чайлд реально прыгнул (крест переехал),
     // а текущий стоит на месте / у пивота.
-    const float hop = 0.55F * 0.55F;
+    // Trees: the glowing X is the child that JUMPS. Follow it even if we
+    // already latched something — a still LOD on the trunk must not win.
+    const float hop = (kind == 0) ? (0.35F * 0.35F) : (0.55F * 0.55F);
+    if (kind == 0) {
+        if (jumper && jumper_m2 > 0.35F * 0.35F) return jumper;
+        if (keep_ok) return keep;
+        return 0;
+    }
     if (keep_ok) {
         if (jumper && jumper != keep && jumper_m2 > hop && keep_m2 < 0.12F * 0.12F)
             return jumper;
@@ -5389,14 +5405,16 @@ bool esp_farm_get_target(FarmTarget& out) {
     // Where to look: the glowing spot when the node shows one, otherwise the
     // body of the node (trees are hit at chest height, rocks a bit lower).
     static uint64_t s_spot_component = 0;
+    static uint64_t s_spot_identity = 0;
     static uint64_t s_spot_transform = 0;
     static int      s_spot_recheck = 0;
     static Vec3     s_spot_last{};
     static bool     s_spot_last_ok = false;
     static int      s_spot_hold = 0;
     static int      s_spot_pivot_frames = 0;
-    if (s_spot_component != best->component) {
+    if (s_spot_component != best->component || s_spot_identity != best->identity) {
         s_spot_component = best->component;
+        s_spot_identity = best->identity;
         s_spot_transform = 0;
         s_spot_recheck = 0;
         s_spot_last_ok = false;
@@ -5407,8 +5425,8 @@ bool esp_farm_get_target(FarmTarget& out) {
         // Без живого креста ищем часто (~0.2 с), с живым — реже. Скан НИКОГДА
         // не затирает известный трансформ нулём и не меняет его на LOD/имя,
         // пока текущий ещё на коре — иначе метка слетает на ствол.
-        s_spot_recheck = s_spot_transform ? 24 : 12;
-        uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform);
+        s_spot_recheck = s_spot_transform ? 24 : (best->kind == 0 ? 8 : 12);
+        uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform, best->identity);
         if (found && found != s_spot_transform) {
             s_spot_transform = found;
             s_spot_last_ok = false;
