@@ -5446,18 +5446,21 @@ static bool farm_spot_alive(int kind, const Vec3& node_pos, const Vec3& p, float
     float d2 = sx * sx + sy * sy + sz * sz;
     float h2 = sx * sx + sz * sz;
     if (kind == 0) {
-        // Tree: the mark sits on the bark, 15–60 cm off the trunk axis
-        // (the pivot is mid-mesh, not the soil), chest height, above dirt.
-        // A child parked at the pivot is the dormant template.
-        if (d2 <= 0.10F * 0.10F) return false;
+        // Tree: the mark sits on the bark, a few cm proud of it, at chest
+        // height. The pivot is mid-mesh, not the soil, and a child parked
+        // exactly at the pivot is the dormant template (d <= 5 cm from the
+        // node). On THIN trunks the whole offset from the node axis can be
+        // under 15 cm — the old h >= 0.15 floor rejected those live marks,
+        // so the bot "lost" the X and kept striking the trunk middle.
+        if (d2 <= 0.05F * 0.05F) return false;
         if (d2 >= 6.0F * 6.0F)   return false;
-        if (h2 < 0.15F * 0.15F || h2 > 0.60F * 0.60F) return false;
+        if (h2 < 0.06F * 0.06F || h2 > 0.85F * 0.85F) return false;
         if (sy < -1.0F || sy > 3.5F) return false;
         if (!farm_spot_above_dirt(p)) return false;
     } else {
         // Rock: the pivot rides near the top of the boulder, so the mark can
         // sit a little BELOW it.
-        if (d2 <= 0.08F * 0.08F) return false;
+        if (d2 <= 0.05F * 0.05F) return false;
         if (d2 >= 3.5F * 3.5F)   return false;
         if (sy < -1.6F || sy > 1.8F) return false;
     }
@@ -5698,7 +5701,7 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
 
     std::vector<uint64_t> nodes;
     // Trees carry a LOT of children (LODs, foliage, colliders).
-    farm_collect_subtree(node_transform, nodes, kind == 0 ? 400 : 256);
+    farm_collect_subtree(node_transform, nodes, kind == 0 ? 512 : 384);
     const int n = (int)nodes.size();
 
     // All child positions in a couple of batched reads (x-ray style);
@@ -5887,7 +5890,11 @@ bool esp_farm_get_target(FarmTarget& out) {
             const Vec3 old_prev = s_spot_prev; // where the mark was at the LAST scan
             uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform);
             if (found == s_spot_transform) {
-                // Same mark: refresh its position for the stability test.
+                // The scan SEEING the mark alive is authoritative — renew
+                // the hold so a few failed per-frame reads (game mid-update)
+                // can no longer drop a live X. The spot is only dropped when
+                // the SCAN says it is gone (the !found branch below).
+                if (found) s_spot_hold = 120;
                 Vec3 cur = s_spot_prev;
                 if (found && marker_world_position(found, cur) && vec3_is_finite(cur)) {
                     s_spot_prev = cur;
@@ -5936,7 +5943,7 @@ bool esp_farm_get_target(FarmTarget& out) {
                        farm_spot_alive(best->kind, best->pos, spot);
         if (read_ok) {
             s_spot_last = spot;
-            s_spot_hold = 48;
+            s_spot_hold = 120;
             spot_ok = true;
             aim = spot;
             marker_pt = spot;
