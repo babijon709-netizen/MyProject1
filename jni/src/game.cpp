@@ -5748,7 +5748,7 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         if (marker_world_position(nodes[(size_t)i], pos[(size_t)i])) ok[(size_t)i] = 1;
     }
 
-    struct Cand { uint64_t node; float err; float h; size_t idx; };
+    struct Cand { uint64_t node; float err; float h; };
     std::vector<Cand> live;
     live.reserve(nodes.size());
     for (int i = 0; i < n; ++i) {
@@ -5759,7 +5759,7 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         float err = 1e9F;
         if (!farm_spot_alive(kind, node_pos, p, &err)) continue;
         float dx = p.x - node_pos.x, dz = p.z - node_pos.z;
-        live.push_back({nodes[(size_t)i], err, sqrtf(dx * dx + dz * dz), (size_t)i});
+        live.push_back({nodes[(size_t)i], err, sqrtf(dx * dx + dz * dz)});
     }
     // The real X is a decal painted ON the bark: among the live candidates
     // it is the child closest to the trunk axis. Children floating in the
@@ -5820,53 +5820,6 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         }
     }
 
-    // Diagnostics: when the pick changes (and periodically while farming)
-    // write every candidate — name, position, distance from the axis — to
-    // a file. Ground truth for models where the marker floats in the air:
-    // the line marked * is what we picked, the rest show where the real
-    // decal sits. First writable of the three paths wins.
-    {
-        static const char* const dump_paths[3] = {
-            "/sdcard/xvcen_farm_dump.txt",
-            "/storage/emulated/0/xvcen_farm_dump.txt",
-            "/data/local/tmp/xvcen_farm_dump.txt",
-        };
-        static int     s_path = -2;   // -2: untried, 3: nowhere writable
-        static uint64_t s_last_pick = 0;
-        static double   s_last_ts = -1e9;
-        double ts = mono_seconds();
-        if (s_path == -2) {
-            s_path = 3;
-            for (int i = 0; i < 3; ++i) {
-                FILE* t = fopen(dump_paths[i], "w");
-                if (t) { fclose(t); s_path = i; break; }
-            }
-        }
-        if (picked && s_path < 3 &&
-            (picked != s_last_pick || ts - s_last_ts > 5.0)) {
-            s_last_pick = picked;
-            s_last_ts = ts;
-            FILE* f = fopen(dump_paths[s_path], "w");
-            if (f) {
-                fprintf(f, "t=%.1f kind=%d node=(%.3f,%.3f,%.3f) candidates=%zu bark_band=%.3f\n",
-                        ts, kind, node_pos.x, node_pos.y, node_pos.z,
-                        (size_t)live.size(), kind == 0 ? min_h + 0.10F : 0.f);
-                for (const Cand& c : live) {
-                    const Vec3& pp = pos[c.idx];
-                    char name[48] = "";
-                    if (g_go_name_offset_valid) read_transform_name(c.node, name, sizeof(name));
-                    double d = sqrt((double)(pp.x - node_pos.x) * (pp.x - node_pos.x) +
-                                    (double)(pp.y - node_pos.y) * (pp.y - node_pos.y) +
-                                    (double)(pp.z - node_pos.z) * (pp.z - node_pos.z));
-                    fprintf(f, "%s h=%.3f d=%.3f sy=%.3f err=%.3f (%.3f,%.3f,%.3f) %s\n",
-                            c.node == picked ? "*" : " ", c.h, (float)d,
-                            pp.y - node_pos.y, c.err, pp.x, pp.y, pp.z,
-                            name[0] ? name : "(anon)");
-                }
-                fclose(f);
-            }
-        }
-    }
     return picked;
 }
 
@@ -6237,9 +6190,24 @@ bool esp_farm_get_target(FarmTarget& out) {
         orbit_side = ((orbit_side > 0.f) == (crossz > 0.f)) ? 1.f : -1.f;
     }
 
-    // Walk: straight at the node body, at soil level (the pivot is useless
-    // here — a tall tree's sits metres up the trunk).
+    // Walk: with a live X on our side of the trunk, aim the walk at the
+    // point directly in front of the X — on the radial line axis->X, at
+    // the tool's standoff (the tree meleeX in main.cpp). The bot then stops
+    // face-on to the mark, the body in line with the cross, instead of
+    // arriving next to it: a shallow angle to the bark sends the swing ray
+    // past the trunk, and the X hops after every hit anyway, so "in front"
+    // is re-established by the mining slide in the controller. Without a
+    // live X (or with it on the far side — the orbit branch owns that)
+    // walk straight at the node body, at soil level.
     Vec3 walk = best->pos;
+    if (spot_ok && spot_front && best->kind == 0) {
+        float sx = marker_pt.x - best->pos.x, sz = marker_pt.z - best->pos.z;
+        float sl = sqrtf(sx * sx + sz * sz);
+        if (sl > 0.05F) {
+            walk.x = best->pos.x + sx / sl * (sl + 1.05F);
+            walk.z = best->pos.z + sz / sl * (sl + 1.05F);
+        }
+    }
     walk.y = farm_eye_y() - 1.6F;
     float walk_pitch = 0.f;
     if (!farm_angles(origin, fwd, right, up, walk, out.walk_yaw, walk_pitch)) {
