@@ -376,3 +376,612 @@ MOVE ph=2 spot=1 front=1 orbit=0 st=(0.00,-0.02) up d=0.80 ad=0.61 wyaw=-132.5 y
 LOG kind=0 d=0.80 ad=0.61 wyaw=-131.1 yaw=0.1 spot=1 front=1 oa=0 body=(-1123.5,-708.8) node=(-1123.4,-709.5) x=(-1123.3,-709.2)
 MOVE ph=2 spot=1 front=1 orbit=0 st=(0.00,-0.02) up d=0.80 ad=0.61 wyaw=-130.2 yaw=-0.0
 LOG kind=0 d=0.80 ad=0.61 wyaw=-129.8 yaw=0.3 spot=1 front=1 oa=0 body=(-1123.5,-708.8) node=(-1123.4,-709.5) x=(-1123.3,-709.2)
+==== xvcen farm log (pid=26752 cmd=/data/local/tmp/xvcen.sh) ====
+path=/sdcard/Download/xvcen_farm.log
+CACHE tree=100 stone=0 iron=0 sulfur=0 mask=1
+LOG kind=0 d=4.23 ad=4.23 wyaw=164.0 yaw=167.6 pitch=-43.2 spot=0 front=1 oa=0 body=(-1119.5,-708.0) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-1.54,-3.89) up d=4.23 ad=4.23 wyaw=67.1 yaw=81.5
+LOG kind=0 d=4.23 ad=4.23 wyaw=63.0 yaw=78.2 pitch=24.9 spot=0 front=1 oa=0 body=(-1119.5,-708.0) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.12,-0.76) d=4.20 ad=4.20 wyaw=1.9 yaw=2.2
+LOG kind=0 d=4.09 ad=4.09 wyaw=1.9 yaw=2.2 pitch=23.3 spot=0 front=1 oa=0 body=(-1119.6,-708.0) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.04,-0.98) d=3.44 ad=3.44 wyaw=2.7 yaw=2.9
+LOG kind=0 d=3.13 ad=3.13 wyaw=2.0 yaw=2.1 pitch=-2.7 spot=0 front=1 oa=0 body=(-1120.5,-708.3) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.02,-0.72) d=2.19 ad=2.19 wyaw=2.2 yaw=2.3
+LOG kind=0 d=1.91 ad=1.91 wyaw=0.6 yaw=0.7 pitch=-6.4 spot=0 front=1 oa=0 body=(-1121.6,-708.8) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.01,-0.56) d=1.22 ad=1.22 wyaw=2.3 yaw=2.9
+LOG kind=0 d=1.09 ad=1.09 wyaw=2.2 yaw=2.9 pitch=-3.1 spot=0 front=1 oa=0 body=(-1122.4,-709.1) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.04) d=0.64 ad=0.64 wyaw=0.5 yaw=0.9
+LOG kind=0 d=0.61 ad=0.61 wyaw=0.2 yaw=0.5 pitch=-4.9 spot=0 front=1 oa=0 body=(-1122.8,-709.3) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.61 ad=0.61 wyaw=-0.4 yaw=-0.7
+LOG kind=0 d=0.61 ad=0.61 wyaw=-0.4 yaw=-0.7 pitch=-1.5 spot=0 front=1 oa=0 body=(-1122.8,-709.3) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=1 spot=1 front=0 orbit=1 tap=0 st=(0.00,0.00) d=0.61 ad=1.35 wyaw=-1.5 yaw=-4.8
+LOG kind=0 d=0.61 ad=0.26 wyaw=22.5 yaw=-1.1 pitch=-20.8 spot=1 front=1 oa=1 body=(-1122.8,-709.3) node=(-1123.4,-709.5) x=(-1123.0,-709.4)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) d=0.61 ad=0.44 wyaw=-0.8 yaw=1.1
+LOG kind=0 d=0.61 ad=0.44 wyaw=-0.8 yaw=0.9 pitch=-4.5 spot=1 front=1 oa=0 body=(-1122.8,-709.3) node=(-1123.4,-709.5) x=(-1123.2,-709.4)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.01) up d=0.61 ad=0.44 wyaw=2.1 yaw=-0.5
+LOG kind=0 d=0.61 ad=0.44 wyaw=2.7 yaw=-0.7 pitch=-0.8 spot=1 front=1 oa=0 body=(-1122.8,-709.3) node=(-1123.4,-709.5) x=(-1123.2,-709.4)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.01) up d=0.61 ad=0.44 wyaw=1.2 yaw=0.0
+LOG kind=0 d=0.61 ad=0.44 wyaw=1.3 yaw=-0.0 pitch=-0.3 spot=1 front=1 oa=0 body=(-1122.8,-709.3) node=(-1123.4,-709.5) x=(-1123.2,-709.4)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.01) up d=0.61 ad=0.44 wyaw=1.0 yaw=0.2
+LOG kind=0 d=0.61 ad=0.44 wyaw=0.5 yaw=0.4 pitch=-2.3 spot=1 front=1 oa=0 body=(-1122.8,-709.3) node=(-1123.4,-709.5) x=(-1123.2,-709.4)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.00,-0.01) up d=0.61 ad=0.44 wyaw=3.5 yaw=-1.1
+LOG kind=0 d=0.61 ad=0.53 wyaw=50.9 yaw=29.6 pitch=39.6 spot=1 front=1 oa=60 body=(-1122.8,-709.3) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.86,0.00) d=0.66 ad=0.54 wyaw=59.7 yaw=-16.0
+LOG kind=0 d=0.71 ad=0.56 wyaw=57.3 yaw=-24.8 pitch=9.2 spot=1 front=1 oa=45 body=(-1122.8,-709.1) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.59,0.00) d=1.08 ad=0.88 wyaw=89.5 yaw=-10.2
+LOG kind=0 d=1.15 ad=0.93 wyaw=86.0 yaw=-14.7 pitch=11.5 spot=1 front=1 oa=17 body=(-1122.9,-708.5) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) d=1.41 ad=1.16 wyaw=177.5 yaw=-3.4
+LOG kind=0 d=1.41 ad=1.16 wyaw=-179.6 yaw=-3.4 pitch=3.4 spot=1 front=1 oa=0 body=(-1123.2,-708.1) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.44 ad=1.19 wyaw=-174.0 yaw=-0.3
+LOG kind=0 d=1.44 ad=1.19 wyaw=-174.0 yaw=-0.5 pitch=-1.0 spot=1 front=1 oa=1 body=(-1123.2,-708.1) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.44 ad=1.38 wyaw=-64.3 yaw=-6.6
+LOG kind=0 d=1.44 ad=1.38 wyaw=-50.8 yaw=5.1 pitch=-10.5 spot=1 front=1 oa=66 body=(-1123.2,-708.1) node=(-1123.4,-709.5) x=(-1123.2,-709.5)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.06,-0.87) d=1.44 ad=1.38 wyaw=-1.7 yaw=44.9
+LOG kind=0 d=1.43 ad=1.37 wyaw=-9.2 yaw=39.0 pitch=-6.5 spot=1 front=1 oa=66 body=(-1123.2,-708.1) node=(-1123.4,-709.5) x=(-1123.2,-709.5)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(-0.28,-0.77) d=1.13 ad=1.02 wyaw=-0.3 yaw=70.3
+LOG kind=0 d=1.11 ad=1.00 wyaw=-0.8 yaw=73.6 pitch=-8.9 spot=1 front=1 oa=43 body=(-1122.8,-708.6) node=(-1123.4,-709.5) x=(-1123.2,-709.5)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.22,-0.05) d=1.28 ad=1.13 wyaw=-40.6 yaw=12.1
+LOG kind=0 d=1.33 ad=1.17 wyaw=-23.3 yaw=7.9 pitch=1.3 spot=1 front=1 oa=7 body=(-1122.2,-709.0) node=(-1123.4,-709.5) x=(-1123.2,-709.5)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.42) d=1.35 ad=1.19 wyaw=7.2 yaw=0.1
+LOG kind=0 d=1.30 ad=1.14 wyaw=12.0 yaw=0.7 pitch=-0.5 spot=1 front=1 oa=3 body=(-1122.1,-709.2) node=(-1123.4,-709.5) x=(-1123.2,-709.5)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.03) d=1.06 ad=0.89 wyaw=49.6 yaw=0.9
+LOG kind=0 d=1.04 ad=0.88 wyaw=32.4 yaw=-0.6 pitch=0.7 spot=1 front=1 oa=5 body=(-1122.4,-709.3) node=(-1123.4,-709.5) x=(-1123.2,-709.5)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=1.03 ad=0.87 wyaw=40.7 yaw=-0.7
+LOG kind=0 d=1.03 ad=0.86 wyaw=34.5 yaw=-0.5 pitch=0.2 spot=1 front=1 oa=5 body=(-1122.4,-709.3) node=(-1123.4,-709.5) x=(-1123.2,-709.5)
+CACHE tree=100 stone=0 iron=0 sulfur=0 mask=1
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.71,0.00) d=1.03 ad=0.89 wyaw=60.6 yaw=8.1
+LOG kind=0 d=1.03 ad=0.89 wyaw=60.1 yaw=7.1 pitch=27.0 spot=1 front=1 oa=41 body=(-1122.4,-709.3) node=(-1123.4,-709.5) x=(-1123.2,-709.3)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.45,0.00) d=1.11 ad=0.95 wyaw=86.5 yaw=-12.5
+LOG kind=0 d=1.16 ad=0.98 wyaw=129.0 yaw=-12.4 pitch=4.3 spot=1 front=1 oa=15 body=(-1122.5,-708.8) node=(-1123.4,-709.5) x=(-1123.2,-709.3)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=1.39 ad=1.19 wyaw=-164.7 yaw=1.0
+LOG kind=0 d=1.40 ad=1.20 wyaw=-160.8 yaw=0.5 pitch=1.1 spot=1 front=1 oa=5 body=(-1122.7,-708.4) node=(-1123.4,-709.5) x=(-1123.2,-709.3)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.14,-0.22) d=1.35 ad=1.15 wyaw=-166.5 yaw=1.7
+LOG kind=0 d=1.29 ad=1.10 wyaw=-172.9 yaw=3.2 pitch=0.0 spot=1 front=1 oa=2 body=(-1122.7,-708.5) node=(-1123.4,-709.5) x=(-1123.2,-709.3)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.01,-0.01) up d=1.12 ad=0.93 wyaw=170.1 yaw=0.8
+LOG kind=0 d=1.12 ad=0.92 wyaw=115.1 yaw=8.6 pitch=-17.0 spot=1 front=1 oa=38 body=(-1122.7,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.87,0.00) d=1.13 ad=0.99 wyaw=108.7 yaw=-3.3
+LOG kind=0 d=1.15 ad=0.98 wyaw=109.2 yaw=-6.1 pitch=-13.5 spot=1 front=1 oa=30 body=(-1122.8,-708.6) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.14,0.00) d=1.42 ad=1.16 wyaw=87.9 yaw=-5.3
+LOG kind=0 d=1.47 ad=1.20 wyaw=109.8 yaw=-3.3 pitch=2.6 spot=1 front=1 oa=4 body=(-1123.2,-708.1) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.09,-0.38) d=1.47 ad=1.20 wyaw=-156.8 yaw=-0.7
+LOG kind=0 d=1.41 ad=1.14 wyaw=-152.3 yaw=-1.0 pitch=-0.1 spot=1 front=1 oa=4 body=(-1123.4,-708.1) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) d=1.14 ad=0.88 wyaw=-162.2 yaw=-0.3
+LOG kind=0 d=1.13 ad=0.86 wyaw=-162.6 yaw=-0.4 pitch=1.5 spot=1 front=1 oa=5 body=(-1123.4,-708.4) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=1.11 ad=0.84 wyaw=-165.5 yaw=-1.6
+LOG kind=0 d=1.11 ad=0.84 wyaw=-165.1 yaw=-0.9 pitch=-0.5 spot=1 front=1 oa=5 body=(-1123.4,-708.4) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=1.10 ad=0.85 wyaw=-51.3 yaw=-0.8
+LOG kind=0 d=1.10 ad=0.85 wyaw=-58.4 yaw=-1.7 pitch=-0.4 spot=1 front=1 oa=11 body=(-1123.4,-708.4) node=(-1123.4,-709.5) x=(-1123.3,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=1.10 ad=0.85 wyaw=-50.7 yaw=0.6
+LOG kind=0 d=1.10 ad=0.85 wyaw=-59.1 yaw=-0.2 pitch=-0.7 spot=1 front=1 oa=11 body=(-1123.4,-708.4) node=(-1123.4,-709.5) x=(-1123.3,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=1.10 ad=0.85 wyaw=-56.3 yaw=0.3
+LOG kind=0 d=1.10 ad=0.85 wyaw=-62.1 yaw=-0.7 pitch=-1.4 spot=1 front=1 oa=11 body=(-1123.4,-708.4) node=(-1123.4,-709.5) x=(-1123.3,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.00,-0.02) up d=1.10 ad=0.85 wyaw=-53.9 yaw=0.3
+LOG kind=0 d=1.10 ad=0.85 wyaw=-55.1 yaw=-0.0 pitch=0.3 spot=1 front=1 oa=11 body=(-1123.4,-708.4) node=(-1123.4,-709.5) x=(-1123.3,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.00,-0.02) up d=1.10 ad=0.85 wyaw=-55.2 yaw=0.3
+LOG kind=0 d=1.10 ad=0.85 wyaw=-55.7 yaw=-0.2 pitch=0.0 spot=1 front=1 oa=11 body=(-1123.4,-708.4) node=(-1123.4,-709.5) x=(-1123.3,-709.2)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(-0.70,0.00) d=1.10 ad=0.95 wyaw=-57.7 yaw=-3.9
+LOG kind=0 d=1.11 ad=1.06 wyaw=-57.3 yaw=-5.4 pitch=23.3 spot=1 front=1 oa=35 body=(-1123.4,-708.4) node=(-1123.4,-709.5) x=(-1123.2,-709.3)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.21,0.00) d=1.25 ad=1.06 wyaw=-94.7 yaw=13.9
+LOG kind=0 d=1.29 ad=1.10 wyaw=-142.9 yaw=10.1 pitch=-4.5 spot=1 front=1 oa=9 body=(-1122.8,-708.4) node=(-1123.4,-709.5) x=(-1123.2,-709.3)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.08,-0.12) d=1.41 ad=1.20 wyaw=-171.7 yaw=1.0
+LOG kind=0 d=1.41 ad=1.21 wyaw=-173.8 yaw=0.5 pitch=-0.4 spot=1 front=1 oa=0 body=(-1122.6,-708.4) node=(-1123.4,-709.5) x=(-1123.2,-709.3)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.14,-0.22) d=1.33 ad=1.13 wyaw=-153.6 yaw=0.6
+LOG kind=0 d=1.27 ad=1.06 wyaw=-162.7 yaw=1.6 pitch=-1.6 spot=1 front=1 oa=3 body=(-1122.7,-708.5) node=(-1123.4,-709.5) x=(-1123.2,-709.3)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=1.11 ad=0.91 wyaw=-173.5 yaw=2.1
+LOG kind=0 d=1.10 ad=0.90 wyaw=-175.1 yaw=0.3 pitch=1.4 spot=1 front=1 oa=1 body=(-1122.8,-708.6) node=(-1123.4,-709.5) x=(-1123.2,-709.3)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.90 ad=0.76 wyaw=124.7 yaw=19.8
+LOG kind=0 d=0.88 ad=0.70 wyaw=132.0 yaw=19.9 pitch=-1.9 spot=1 front=1 oa=27 body=(-1123.1,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.1)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.86 ad=0.65 wyaw=119.5 yaw=-0.5
+LOG kind=0 d=0.86 ad=0.65 wyaw=116.5 yaw=-0.7 pitch=-0.1 spot=1 front=1 oa=25 body=(-1123.1,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.1)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.86 ad=0.65 wyaw=115.2 yaw=0.5
+LOG kind=0 d=0.86 ad=0.65 wyaw=115.5 yaw=-0.1 pitch=0.9 spot=1 front=1 oa=25 body=(-1123.1,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.1)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.86 ad=0.66 wyaw=118.2 yaw=-0.3
+LOG kind=0 d=0.86 ad=0.65 wyaw=119.4 yaw=-0.4 pitch=-1.6 spot=1 front=1 oa=25 body=(-1123.1,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.1)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.86 ad=0.65 wyaw=114.4 yaw=0.8
+LOG kind=0 d=0.86 ad=0.65 wyaw=116.9 yaw=0.9 pitch=0.6 spot=1 front=1 oa=25 body=(-1123.1,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.1)
+CACHE tree=100 stone=0 iron=0 sulfur=0 mask=1
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.86 ad=0.65 wyaw=116.8 yaw=0.4
+LOG kind=0 d=0.86 ad=0.65 wyaw=117.2 yaw=0.1 pitch=-0.0 spot=1 front=1 oa=25 body=(-1123.1,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.1)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.86 ad=0.61 wyaw=143.5 yaw=-6.5
+LOG kind=0 d=0.86 ad=0.61 wyaw=143.5 yaw=-6.5 pitch=-9.0 spot=1 front=1 oa=11 body=(-1123.1,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.85 ad=0.59 wyaw=-12.9 yaw=-1.2
+LOG kind=0 d=0.85 ad=0.59 wyaw=-152.1 yaw=0.2 pitch=10.1 spot=1 front=1 oa=2 body=(-1123.3,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.01,-0.02) up d=0.85 ad=0.59 wyaw=-171.9 yaw=-0.6
+LOG kind=0 d=0.85 ad=0.59 wyaw=-171.9 yaw=-0.7 pitch=0.7 spot=1 front=1 oa=2 body=(-1123.3,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.85 ad=0.59 wyaw=-171.2 yaw=1.3
+LOG kind=0 d=0.85 ad=0.59 wyaw=-170.7 yaw=1.7 pitch=-2.4 spot=1 front=1 oa=2 body=(-1123.3,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.2)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.85 ad=0.59 wyaw=-172.2 yaw=0.4
+LOG kind=0 d=0.85 ad=0.68 wyaw=112.1 yaw=23.4 pitch=25.4 spot=1 front=1 oa=28 body=(-1123.3,-708.7) node=(-1123.4,-709.5) x=(-1123.6,-709.2)
+X-LOST node=0x78529b5ae0 kind=0 last=(-1123.56,8.67,-709.16)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.85 ad=0.85 wyaw=2.5 yaw=3.0
+LOG kind=0 d=0.85 ad=0.85 wyaw=2.2 yaw=3.1 pitch=-3.3 spot=0 front=1 oa=0 body=(-1123.3,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.85 ad=0.85 wyaw=1.4 yaw=2.1
+LOG kind=0 d=0.85 ad=0.85 wyaw=2.1 yaw=3.3 pitch=2.6 spot=0 front=1 oa=0 body=(-1123.3,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=1 st=(-0.01,-0.02) up d=0.85 ad=0.85 wyaw=1.2 yaw=1.9
+LOG kind=0 d=0.85 ad=0.85 wyaw=1.1 yaw=1.8 pitch=2.8 spot=0 front=1 oa=0 body=(-1123.3,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.85 ad=0.85 wyaw=1.0 yaw=1.5
+LOG kind=0 d=0.85 ad=0.85 wyaw=1.2 yaw=1.8 pitch=-0.3 spot=0 front=1 oa=0 body=(-1123.3,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=0.85 ad=0.85 wyaw=2.7 yaw=3.5
+LOG kind=0 d=0.85 ad=0.85 wyaw=3.3 yaw=4.5 pitch=1.9 spot=0 front=1 oa=0 body=(-1123.3,-708.7) node=(-1123.4,-709.5) x=(-1123.4,-709.5)
+LOG kind=0 d=10.94 ad=10.94 wyaw=-81.8 yaw=-85.4 pitch=2.4 spot=0 front=1 oa=0 body=(-1123.3,-708.7) node=(-1112.5,-710.1) x=(-1112.5,-710.1)
+LOG kind=0 d=10.94 ad=10.94 wyaw=-83.8 yaw=-87.1 pitch=1.7 spot=0 front=1 oa=0 body=(-1123.3,-708.7) node=(-1112.5,-710.1) x=(-1112.5,-710.1)
+LOG kind=0 d=10.94 ad=10.94 wyaw=-85.2 yaw=-88.3 pitch=1.2 spot=0 front=1 oa=0 body=(-1123.3,-708.7) node=(-1112.5,-710.1) x=(-1112.5,-710.1)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.01,-0.02) up d=10.94 ad=10.94 wyaw=-73.0 yaw=-76.2
+LOG kind=0 d=10.94 ad=10.94 wyaw=-58.0 yaw=-60.9 pitch=11.5 spot=0 front=1 oa=0 body=(-1123.3,-708.7) node=(-1112.5,-710.1) x=(-1112.5,-710.1)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.15,-0.84) d=10.89 ad=10.89 wyaw=12.1 yaw=12.4
+LOG kind=0 d=10.81 ad=10.81 wyaw=7.0 yaw=7.1 pitch=9.0 spot=0 front=1 oa=0 body=(-1123.2,-708.6) node=(-1112.5,-710.1) x=(-1112.5,-710.1)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.08,-0.98) d=10.19 ad=10.19 wyaw=5.0 yaw=5.2
+LOG kind=0 d=10.01 ad=10.01 wyaw=5.6 yaw=5.7 pitch=9.4 spot=0 front=1 oa=0 body=(-1122.3,-708.4) node=(-1112.5,-710.1) x=(-1112.5,-710.1)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.11,-0.98) d=8.89 ad=8.89 wyaw=6.6 yaw=6.9
+LOG kind=0 d=8.79 ad=8.79 wyaw=6.4 yaw=6.6 pitch=12.4 spot=0 front=1 oa=0 body=(-1121.1,-708.4) node=(-1112.5,-710.1) x=(-1112.5,-710.1)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.01,-0.98) d=8.66 ad=8.36 wyaw=-5.8 yaw=2.1
+LOG kind=0 d=8.66 ad=8.36 wyaw=-5.8 yaw=2.1 pitch=3.8 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(-0.05,-0.99) d=8.66 ad=8.36 wyaw=-2.0 yaw=4.1
+LOG kind=0 d=8.66 ad=8.36 wyaw=-1.0 yaw=4.7 pitch=6.2 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.06,-0.99) d=8.66 ad=8.36 wyaw=6.0 yaw=7.9
+LOG kind=0 d=8.66 ad=8.36 wyaw=7.7 yaw=8.5 pitch=11.8 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.22,-0.96) d=8.66 ad=8.36 wyaw=16.0 yaw=10.5
+LOG kind=0 d=8.66 ad=8.36 wyaw=17.5 yaw=10.5 pitch=21.4 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.35,-0.93) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.37,-0.92) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+CACHE tree=99 stone=0 iron=0 sulfur=0 mask=1
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.37,-0.92) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.37,-0.92) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.37,-0.92) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.37,-0.92) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.14,0.22) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.01,0.91) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.00,0.95) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.62,0.07) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.93,-0.37) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.95,-0.40) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.95,-0.40) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.95,-0.40) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.95,-0.40) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.41,-0.89) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.37,-0.92) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.37,-0.92) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.37,-0.92) d=8.66 ad=8.36 wyaw=22.2 yaw=6.7
+LOG kind=0 d=8.66 ad=8.36 wyaw=22.2 yaw=6.7 pitch=30.0 spot=1 front=1 oa=64 body=(-1121.0,-708.4) node=(-1112.5,-710.1) x=(-1112.7,-709.3)
+LOG kind=0 d=34.33 ad=34.33 wyaw=-26.4 yaw=-26.4 pitch=0.2 spot=0 front=1 oa=0 body=(317.6,1262.4) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.20,-0.40) d=34.33 ad=34.33 wyaw=-26.4 yaw=-26.4
+LOG kind=0 d=34.33 ad=34.33 wyaw=-26.4 yaw=-26.4 pitch=0.2 spot=0 front=1 oa=0 body=(317.6,1262.4) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.43,-0.86) d=34.33 ad=34.33 wyaw=-26.4 yaw=-26.4
+LOG kind=0 d=34.33 ad=34.33 wyaw=-26.4 yaw=-26.4 pitch=0.2 spot=0 front=1 oa=0 body=(317.6,1262.4) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.31,-0.63) d=34.33 ad=34.33 wyaw=-168.1 yaw=-168.1
+CACHE tree=104 stone=0 iron=0 sulfur=0 mask=1
+LOG kind=0 d=35.14 ad=35.14 wyaw=-148.4 yaw=-148.7 pitch=-9.7 spot=0 front=1 oa=0 body=(317.4,1263.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.02,-0.04) d=35.19 ad=35.19 wyaw=-150.3 yaw=-150.6
+LOG kind=0 d=34.33 ad=34.33 wyaw=-110.8 yaw=-111.1 pitch=-2.3 spot=0 front=1 oa=0 body=(317.6,1262.4) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.01,-0.03) up d=34.33 ad=34.33 wyaw=-92.9 yaw=-93.2
+LOG kind=0 d=34.33 ad=34.33 wyaw=-16.5 yaw=-16.6 pitch=6.0 spot=0 front=1 oa=0 body=(317.6,1262.4) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.24,-0.76) d=34.42 ad=34.42 wyaw=-8.4 yaw=-8.5
+LOG kind=0 d=34.16 ad=34.16 wyaw=-7.7 yaw=-7.7 pitch=4.0 spot=0 front=1 oa=0 body=(317.4,1262.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.12,-0.97) d=33.92 ad=33.92 wyaw=-8.7 yaw=-8.7
+LOG kind=0 d=33.13 ad=33.13 wyaw=-5.9 yaw=-5.9 pitch=5.8 spot=0 front=1 oa=0 body=(317.1,1261.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.11,-0.98) d=32.83 ad=32.83 wyaw=-3.1 yaw=-3.1
+LOG kind=0 d=31.82 ad=31.82 wyaw=-0.1 yaw=-0.1 pitch=5.6 spot=0 front=1 oa=0 body=(316.8,1260.0) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.01,-0.99) d=31.60 ad=31.60 wyaw=-0.8 yaw=-0.8
+LOG kind=0 d=30.54 ad=30.54 wyaw=-1.8 yaw=-1.8 pitch=2.8 spot=0 front=1 oa=0 body=(316.6,1258.7) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.03,-0.99) d=30.32 ad=30.32 wyaw=-2.7 yaw=-2.7
+LOG kind=0 d=29.25 ad=29.25 wyaw=-5.9 yaw=-5.9 pitch=-0.8 spot=0 front=1 oa=0 body=(316.3,1257.5) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.08,-0.99) d=28.93 ad=28.93 wyaw=-5.1 yaw=-5.1
+LOG kind=0 d=27.96 ad=27.96 wyaw=-2.7 yaw=-2.7 pitch=4.1 spot=0 front=1 oa=0 body=(316.0,1256.2) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.06,-0.99) d=27.63 ad=27.63 wyaw=-2.6 yaw=-2.6
+LOG kind=0 d=26.66 ad=26.66 wyaw=-4.8 yaw=-4.8 pitch=1.5 spot=0 front=1 oa=0 body=(315.8,1254.9) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.08,-0.99) d=26.33 ad=26.33 wyaw=-6.4 yaw=-6.4
+LOG kind=0 d=25.26 ad=25.26 wyaw=-7.5 yaw=-7.5 pitch=1.5 spot=0 front=1 oa=0 body=(315.5,1253.6) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.12,-0.98) d=25.04 ad=25.04 wyaw=-7.5 yaw=-7.5
+LOG kind=0 d=23.97 ad=23.97 wyaw=-7.6 yaw=-7.6 pitch=5.8 spot=0 front=1 oa=0 body=(315.2,1252.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.12,-0.98) d=23.75 ad=23.75 wyaw=-7.5 yaw=-7.6
+LOG kind=0 d=22.67 ad=22.67 wyaw=-8.5 yaw=-8.6 pitch=2.5 spot=0 front=1 oa=0 body=(315.0,1251.0) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.11,-0.98) d=22.45 ad=22.45 wyaw=-0.8 yaw=-0.8
+LOG kind=0 d=21.36 ad=21.36 wyaw=-2.9 yaw=-2.9 pitch=1.2 spot=0 front=1 oa=0 body=(314.8,1249.7) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.04,-0.99) d=21.15 ad=21.15 wyaw=-5.1 yaw=-5.1
+LOG kind=0 d=20.05 ad=20.05 wyaw=-6.3 yaw=-6.3 pitch=1.0 spot=0 front=1 oa=0 body=(314.5,1248.5) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.10,-0.98) d=19.83 ad=19.83 wyaw=-7.2 yaw=-7.2
+LOG kind=0 d=18.83 ad=18.83 wyaw=-6.5 yaw=-6.4 pitch=-6.6 spot=0 front=1 oa=0 body=(314.2,1247.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.11,-0.98) d=18.53 ad=18.53 wyaw=-3.9 yaw=-3.9
+LOG kind=0 d=17.70 ad=17.70 wyaw=-0.3 yaw=-0.3 pitch=-5.6 spot=0 front=1 oa=0 body=(314.0,1246.1) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.02,-0.99) d=17.26 ad=17.26 wyaw=-1.3 yaw=-1.3
+LOG kind=0 d=16.25 ad=16.25 wyaw=1.1 yaw=1.1 pitch=-2.6 spot=0 front=1 oa=0 body=(313.8,1244.7) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.01,-0.99) d=16.07 ad=16.07 wyaw=-0.2 yaw=-0.2
+LOG kind=0 d=15.20 ad=15.20 wyaw=-2.3 yaw=-2.3 pitch=-6.8 spot=0 front=1 oa=0 body=(313.7,1243.7) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.04,-0.99) d=15.03 ad=15.03 wyaw=-4.9 yaw=-4.8
+LOG kind=0 d=14.24 ad=14.24 wyaw=-4.3 yaw=-4.3 pitch=-2.6 spot=0 front=1 oa=0 body=(313.5,1242.7) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.07,-0.99) d=14.09 ad=14.09 wyaw=-2.8 yaw=-2.8
+LOG kind=0 d=13.26 ad=13.26 wyaw=-0.0 yaw=-0.0 pitch=-3.1 spot=0 front=1 oa=0 body=(313.3,1241.8) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.00,-0.99) d=13.06 ad=13.06 wyaw=0.7 yaw=0.7
+LOG kind=0 d=11.88 ad=11.88 wyaw=-2.6 yaw=-2.6 pitch=-6.5 spot=0 front=1 oa=0 body=(313.1,1240.4) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.02,-0.99) d=11.66 ad=11.66 wyaw=-3.2 yaw=-3.1
+LOG kind=0 d=10.63 ad=10.63 wyaw=-1.5 yaw=-1.5 pitch=-2.2 spot=0 front=1 oa=0 body=(312.9,1239.2) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.03,-0.99) d=10.42 ad=10.42 wyaw=-0.6 yaw=-0.6
+LOG kind=0 d=9.36 ad=9.36 wyaw=-0.6 yaw=-0.6 pitch=-2.8 spot=0 front=1 oa=0 body=(312.7,1237.9) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.00,-0.99) d=9.14 ad=9.14 wyaw=-0.8 yaw=-0.8
+LOG kind=0 d=7.96 ad=7.96 wyaw=-0.1 yaw=-0.1 pitch=-4.0 spot=0 front=1 oa=0 body=(312.4,1236.5) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.01,-0.99) d=7.74 ad=7.74 wyaw=0.6 yaw=0.6
+CACHE tree=136 stone=0 iron=0 sulfur=0 mask=1
+LOG kind=0 d=6.70 ad=6.70 wyaw=2.3 yaw=2.3 pitch=-1.8 spot=0 front=1 oa=0 body=(312.2,1235.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.03,-0.99) d=6.49 ad=6.49 wyaw=2.1 yaw=2.1
+LOG kind=0 d=5.46 ad=5.46 wyaw=-0.5 yaw=-0.5 pitch=-3.0 spot=0 front=1 oa=0 body=(312.1,1234.1) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.00,-0.99) d=5.25 ad=5.25 wyaw=-0.8 yaw=-0.8
+LOG kind=0 d=4.12 ad=4.12 wyaw=-4.4 yaw=-4.3 pitch=-1.4 spot=0 front=1 oa=0 body=(311.8,1232.8) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.07,-0.99) d=3.92 ad=3.92 wyaw=-3.4 yaw=-3.4
+LOG kind=0 d=2.90 ad=2.90 wyaw=-2.5 yaw=-2.5 pitch=2.4 spot=0 front=1 oa=0 body=(311.6,1231.6) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.04,-0.99) d=2.70 ad=2.70 wyaw=-2.7 yaw=-2.7
+LOG kind=0 d=1.76 ad=1.76 wyaw=-2.3 yaw=-2.1 pitch=-5.0 spot=0 front=1 oa=0 body=(311.4,1230.4) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(-0.02,-0.59) d=1.63 ad=1.63 wyaw=-2.2 yaw=-2.1
+LOG kind=0 d=1.06 ad=1.06 wyaw=-0.5 yaw=-0.5 pitch=-2.6 spot=0 front=1 oa=0 body=(311.3,1229.7) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=1 st=(-0.00,-0.17) d=0.93 ad=0.93 wyaw=0.3 yaw=0.5
+LOG kind=0 d=0.64 ad=0.64 wyaw=-0.2 yaw=-0.2 pitch=-4.1 spot=0 front=1 oa=0 body=(311.3,1229.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.63 ad=0.63 wyaw=-0.3 yaw=-0.5
+LOG kind=0 d=0.61 ad=0.61 wyaw=-1.4 yaw=-1.5 pitch=-1.6 spot=0 front=1 oa=0 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.00,-0.02) up d=0.61 ad=0.56 wyaw=23.1 yaw=-1.5
+LOG kind=0 d=0.61 ad=0.56 wyaw=23.4 yaw=-0.3 pitch=0.3 spot=1 front=1 oa=5 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.56 wyaw=24.9 yaw=-0.5
+LOG kind=0 d=0.61 ad=0.56 wyaw=29.6 yaw=-0.6 pitch=-1.5 spot=1 front=1 oa=5 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.56 wyaw=33.3 yaw=-1.1
+LOG kind=0 d=0.61 ad=0.56 wyaw=23.7 yaw=-0.4 pitch=0.5 spot=1 front=1 oa=5 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.56 wyaw=23.8 yaw=-1.5
+LOG kind=0 d=0.61 ad=0.56 wyaw=22.1 yaw=1.4 pitch=-0.1 spot=1 front=1 oa=5 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.00,-0.02) up d=0.61 ad=0.56 wyaw=22.8 yaw=0.9
+LOG kind=0 d=0.61 ad=0.56 wyaw=25.1 yaw=0.9 pitch=-0.9 spot=1 front=1 oa=0 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-82.4 yaw=-13.3
+LOG kind=0 d=0.61 ad=0.46 wyaw=-45.0 yaw=-1.0 pitch=1.4 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-46.9 yaw=-0.8
+LOG kind=0 d=0.61 ad=0.46 wyaw=-46.0 yaw=1.2 pitch=0.7 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-46.5 yaw=0.1
+LOG kind=0 d=0.61 ad=0.46 wyaw=-49.3 yaw=-1.0 pitch=-1.6 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-49.6 yaw=-0.7
+LOG kind=0 d=0.61 ad=0.46 wyaw=-44.5 yaw=-0.7 pitch=1.6 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-43.3 yaw=-0.4
+LOG kind=0 d=0.61 ad=0.46 wyaw=-46.0 yaw=-0.4 pitch=-1.4 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-44.6 yaw=0.7
+LOG kind=0 d=0.61 ad=0.46 wyaw=-48.6 yaw=-0.7 pitch=-1.4 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-49.8 yaw=-1.6
+LOG kind=0 d=0.61 ad=0.46 wyaw=-45.6 yaw=-0.3 pitch=1.0 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-45.0 yaw=1.1
+LOG kind=0 d=0.61 ad=0.46 wyaw=-47.5 yaw=0.2 pitch=-0.4 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-46.6 yaw=1.0
+LOG kind=0 d=0.61 ad=0.46 wyaw=-46.8 yaw=-0.6 pitch=-0.9 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-48.4 yaw=-0.1
+LOG kind=0 d=0.61 ad=0.46 wyaw=-44.7 yaw=2.3 pitch=0.6 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-48.6 yaw=-0.1
+LOG kind=0 d=0.61 ad=0.46 wyaw=-46.9 yaw=-1.0 pitch=-0.1 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-45.5 yaw=0.3
+LOG kind=0 d=0.61 ad=0.46 wyaw=-48.9 yaw=-1.8 pitch=-1.3 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+CACHE tree=136 stone=0 iron=0 sulfur=0 mask=1
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-48.1 yaw=-1.3
+LOG kind=0 d=0.61 ad=0.46 wyaw=-47.3 yaw=-1.1 pitch=-0.2 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-47.4 yaw=-1.2
+LOG kind=0 d=0.61 ad=0.46 wyaw=-44.9 yaw=-0.3 pitch=1.5 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-44.1 yaw=0.1
+LOG kind=0 d=0.61 ad=0.46 wyaw=-52.8 yaw=-0.5 pitch=-3.9 spot=1 front=1 oa=20 body=(311.2,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.61 ad=0.46 wyaw=-51.1 yaw=-0.5
+LOG kind=0 d=0.61 ad=0.39 wyaw=-35.6 yaw=27.0 pitch=-6.9 spot=1 front=1 oa=2 body=(311.5,1229.2) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.00,-0.02) up d=0.65 ad=0.47 wyaw=-2.2 yaw=33.7
+LOG kind=0 d=0.81 ad=0.65 wyaw=49.8 yaw=1.4 pitch=6.8 spot=1 front=1 oa=37 body=(311.9,1229.0) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.65,0.00) d=0.82 ad=0.66 wyaw=49.0 yaw=-0.3
+LOG kind=0 d=0.94 ad=0.77 wyaw=37.7 yaw=-21.7 pitch=8.1 spot=1 front=1 oa=20 body=(311.9,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.31,0.00) d=1.03 ad=0.83 wyaw=35.7 yaw=-22.2
+LOG kind=0 d=1.25 ad=1.04 wyaw=-21.8 yaw=-2.1 pitch=0.6 spot=1 front=1 oa=2 body=(311.7,1229.8) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=1.26 ad=1.05 wyaw=-35.7 yaw=-1.4
+LOG kind=0 d=1.28 ad=1.07 wyaw=-35.1 yaw=-0.2 pitch=0.6 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-34.1 yaw=-0.3
+LOG kind=0 d=1.28 ad=1.07 wyaw=-48.2 yaw=0.5 pitch=-1.3 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-57.1 yaw=0.1
+LOG kind=0 d=1.28 ad=1.07 wyaw=-43.9 yaw=-0.7 pitch=-0.6 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-35.4 yaw=-0.4
+LOG kind=0 d=1.28 ad=1.07 wyaw=-33.7 yaw=0.4 pitch=0.9 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-38.9 yaw=0.1
+LOG kind=0 d=1.28 ad=1.07 wyaw=-50.5 yaw=-0.4 pitch=-1.3 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-32.9 yaw=-0.0
+LOG kind=0 d=1.28 ad=1.07 wyaw=-39.5 yaw=-0.6 pitch=-0.0 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-36.8 yaw=-1.2
+LOG kind=0 d=1.28 ad=1.07 wyaw=-41.4 yaw=0.3 pitch=0.0 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-42.7 yaw=0.1
+LOG kind=0 d=1.28 ad=1.07 wyaw=-51.4 yaw=0.6 pitch=-1.4 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-48.3 yaw=0.1
+LOG kind=0 d=1.28 ad=1.07 wyaw=-41.3 yaw=-0.5 pitch=-0.2 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-41.9 yaw=-0.8
+LOG kind=0 d=1.28 ad=1.07 wyaw=-39.0 yaw=-0.7 pitch=0.0 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-41.7 yaw=-0.8
+LOG kind=0 d=1.28 ad=1.07 wyaw=-51.1 yaw=-1.1 pitch=-1.4 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-33.9 yaw=-0.3
+LOG kind=0 d=1.28 ad=1.07 wyaw=-34.4 yaw=0.9 pitch=0.4 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-38.3 yaw=0.4
+LOG kind=0 d=1.28 ad=1.07 wyaw=-35.3 yaw=-1.7 pitch=0.6 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-35.9 yaw=-1.4
+LOG kind=0 d=1.28 ad=1.07 wyaw=-57.1 yaw=0.1 pitch=-1.8 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-61.1 yaw=1.1
+LOG kind=0 d=1.28 ad=1.07 wyaw=-33.2 yaw=-0.6 pitch=1.0 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-30.5 yaw=-0.8
+LOG kind=0 d=1.28 ad=1.07 wyaw=-49.3 yaw=-1.9 pitch=-0.9 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-49.3 yaw=-1.9
+LOG kind=0 d=1.28 ad=1.07 wyaw=-49.6 yaw=-0.6 pitch=-0.9 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-40.2 yaw=-0.9
+CACHE tree=136 stone=0 iron=0 sulfur=0 mask=1
+LOG kind=0 d=1.28 ad=1.07 wyaw=-40.9 yaw=-1.7 pitch=-0.2 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-42.0 yaw=-1.8
+LOG kind=0 d=1.28 ad=1.07 wyaw=-45.5 yaw=0.8 pitch=-0.8 spot=1 front=1 oa=4 body=(311.7,1229.9) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=1.28 ad=1.07 wyaw=-51.4 yaw=0.9
+LOG kind=0 d=1.22 ad=1.01 wyaw=-58.1 yaw=-0.2 pitch=-0.7 spot=1 front=1 oa=4 body=(311.6,1229.8) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=1.15 ad=0.93 wyaw=-95.3 yaw=-0.4
+LOG kind=0 d=0.73 ad=0.52 wyaw=-84.5 yaw=0.1 pitch=-12.5 spot=1 front=1 oa=6 body=(311.4,1229.4) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=0.71 ad=0.50 wyaw=-67.7 yaw=0.2
+LOG kind=0 d=0.67 ad=0.46 wyaw=-18.7 yaw=-0.6 pitch=-0.6 spot=1 front=1 oa=5 body=(311.4,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=0.67 ad=0.46 wyaw=-18.7 yaw=-0.6
+LOG kind=0 d=0.67 ad=0.45 wyaw=-17.6 yaw=-1.6 pitch=-1.4 spot=1 front=1 oa=5 body=(311.4,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=0.67 ad=0.45 wyaw=-17.6 yaw=-1.6
+LOG kind=0 d=0.67 ad=0.45 wyaw=-17.5 yaw=-0.6 pitch=0.2 spot=1 front=1 oa=5 body=(311.4,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=0.67 ad=0.45 wyaw=-17.5 yaw=-0.6
+LOG kind=0 d=0.67 ad=0.45 wyaw=-18.1 yaw=0.0 pitch=-0.6 spot=1 front=1 oa=5 body=(311.4,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=0.67 ad=0.45 wyaw=-18.1 yaw=0.0
+LOG kind=0 d=0.67 ad=0.45 wyaw=-20.6 yaw=0.6 pitch=-1.2 spot=1 front=1 oa=0 body=(311.4,1229.3) node=(311.2,1228.7) x=(311.3,1228.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=0.67 ad=0.45 wyaw=-20.6 yaw=0.6
+X-LOST node=0x78532b1e50 kind=0 last=(311.30,7.77,1228.95)
+LOG kind=0 d=0.67 ad=0.67 wyaw=-0.7 yaw=-1.2 pitch=0.3 spot=0 front=1 oa=0 body=(311.4,1229.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=0.67 ad=0.67 wyaw=-0.7 yaw=-1.2
+LOG kind=0 d=0.67 ad=0.67 wyaw=-2.0 yaw=-3.3 pitch=-2.3 spot=0 front=1 oa=0 body=(311.4,1229.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=0.67 ad=0.67 wyaw=-2.0 yaw=-3.3
+LOG kind=0 d=0.67 ad=0.67 wyaw=-2.7 yaw=-4.5 pitch=-2.7 spot=0 front=1 oa=0 body=(311.4,1229.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.03,0.00) up d=0.67 ad=0.67 wyaw=-2.7 yaw=-4.5
+LOG kind=0 d=0.67 ad=0.67 wyaw=-2.0 yaw=-3.1 pitch=1.7 spot=0 front=1 oa=0 body=(311.4,1229.3) node=(311.2,1228.7) x=(311.2,1228.7)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=1 st=(0.03,0.00) up d=0.67 ad=0.67 wyaw=-2.0 yaw=-3.1
+LOG kind=0 d=16.18 ad=16.18 wyaw=31.6 yaw=33.0 pitch=19.7 spot=0 front=1 oa=0 body=(311.4,1229.3) node=(297.8,1220.6) x=(297.8,1220.6)
+LOG kind=0 d=16.18 ad=16.18 wyaw=36.0 yaw=37.6 pitch=20.3 spot=0 front=1 oa=0 body=(311.4,1229.3) node=(297.8,1220.6) x=(297.8,1220.6)
+LOG kind=0 d=16.18 ad=16.18 wyaw=40.1 yaw=42.4 pitch=25.1 spot=0 front=1 oa=0 body=(311.4,1229.3) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.05,-0.91) d=15.96 ad=15.96 wyaw=-2.4 yaw=-2.4
+LOG kind=0 d=15.89 ad=15.89 wyaw=-2.6 yaw=-2.7 pitch=8.6 spot=0 front=1 oa=0 body=(311.1,1229.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.06,-0.98) d=14.81 ad=14.81 wyaw=-5.9 yaw=-6.1
+LOG kind=0 d=14.71 ad=14.71 wyaw=-6.9 yaw=-7.1 pitch=15.2 spot=0 front=1 oa=0 body=(310.1,1228.6) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.14,-0.98) d=13.45 ad=13.45 wyaw=-8.2 yaw=-8.4
+LOG kind=0 d=13.45 ad=13.45 wyaw=-8.2 yaw=-8.4 pitch=11.6 spot=0 front=1 oa=0 body=(309.0,1228.0) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.11,-0.98) d=12.18 ad=12.18 wyaw=-5.9 yaw=-6.0
+LOG kind=0 d=12.18 ad=12.18 wyaw=-5.9 yaw=-6.0 pitch=7.2 spot=0 front=1 oa=0 body=(307.9,1227.3) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.06,-0.99) d=10.91 ad=10.91 wyaw=-2.1 yaw=-2.1
+LOG kind=0 d=10.91 ad=10.91 wyaw=-2.1 yaw=-2.1 pitch=8.2 spot=0 front=1 oa=0 body=(306.9,1226.7) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.03,-0.99) d=9.65 ad=9.65 wyaw=-1.3 yaw=-1.3
+LOG kind=0 d=9.54 ad=9.54 wyaw=-0.8 yaw=-0.9 pitch=10.2 spot=0 front=1 oa=0 body=(305.7,1225.9) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.01,-0.99) d=8.39 ad=8.39 wyaw=1.1 yaw=1.1
+LOG kind=0 d=8.29 ad=8.29 wyaw=1.4 yaw=1.4 pitch=4.4 spot=0 front=1 oa=0 body=(304.7,1225.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.05,-0.99) d=7.00 ad=6.68 wyaw=1.5 yaw=-6.3
+LOG kind=0 d=7.00 ad=6.68 wyaw=1.5 yaw=-6.3 pitch=0.4 spot=1 front=1 oa=46 body=(303.6,1224.5) node=(297.8,1220.6) x=(297.9,1221.3)
+CACHE tree=135 stone=0 iron=0 sulfur=0 mask=1
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.01,-0.99) d=5.84 ad=5.49 wyaw=0.5 yaw=-9.1
+LOG kind=0 d=5.72 ad=5.37 wyaw=1.2 yaw=-8.7 pitch=-4.0 spot=1 front=1 oa=43 body=(302.4,1224.0) node=(297.8,1220.6) x=(297.9,1221.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.11,-0.98) d=4.61 ad=4.22 wyaw=8.8 yaw=-3.9
+LOG kind=0 d=4.50 ad=4.11 wyaw=8.9 yaw=-4.1 pitch=-9.2 spot=1 front=1 oa=40 body=(301.2,1223.5) node=(297.8,1220.6) x=(297.9,1221.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.12,-0.98) d=3.29 ad=2.85 wyaw=2.5 yaw=-16.6
+LOG kind=0 d=3.19 ad=2.74 wyaw=1.1 yaw=-18.8 pitch=-13.4 spot=1 front=1 oa=33 body=(299.9,1222.9) node=(297.8,1220.6) x=(297.9,1221.3)
+MOVE ph=1 spot=1 front=1 orbit=0 tap=0 st=(0.01,-0.99) d=2.25 ad=1.68 wyaw=-0.6 yaw=-34.5
+LOG kind=0 d=2.17 ad=1.60 wyaw=-0.7 yaw=-36.6 pitch=-33.1 spot=1 front=1 oa=16 body=(298.7,1222.6) node=(297.8,1220.6) x=(297.9,1221.3)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(-0.01,-0.49) d=1.58 ad=1.02 wyaw=-1.6 yaw=-43.6
+LOG kind=0 d=1.56 ad=1.04 wyaw=-1.8 yaw=-45.3 pitch=-35.3 spot=1 front=1 oa=0 body=(297.5,1222.1) node=(297.8,1220.6) x=(297.9,1221.3)
+X-LOST node=0x78532dca60 kind=0 last=(297.90,9.50,1221.28)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(-0.01,-0.33) d=1.48 ad=1.48 wyaw=5.3 yaw=10.7
+LOG kind=0 d=1.48 ad=1.48 wyaw=5.3 yaw=10.7 pitch=46.9 spot=0 front=1 oa=0 body=(297.0,1221.8) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.01,-0.29) d=1.07 ad=1.07 wyaw=2.8 yaw=3.8
+LOG kind=0 d=1.07 ad=1.07 wyaw=2.8 yaw=3.8 pitch=-1.8 spot=0 front=1 oa=0 body=(297.2,1221.5) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.02) d=0.71 ad=0.71 wyaw=0.5 yaw=0.9
+LOG kind=0 d=0.71 ad=0.71 wyaw=0.5 yaw=0.9 pitch=0.9 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.71 wyaw=-0.3 yaw=-0.7
+LOG kind=0 d=0.71 ad=0.71 wyaw=-0.5 yaw=-1.0 pitch=0.8 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=-1.8 yaw=-0.8
+LOG kind=0 d=0.71 ad=0.43 wyaw=-1.8 yaw=-0.8 pitch=3.6 spot=1 front=1 oa=1 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=-3.5 yaw=-0.0
+LOG kind=0 d=0.71 ad=0.43 wyaw=-3.5 yaw=-0.0 pitch=1.8 spot=1 front=1 oa=1 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=-5.8 yaw=0.7
+LOG kind=0 d=0.71 ad=0.43 wyaw=-6.6 yaw=0.9 pitch=-0.7 spot=1 front=1 oa=1 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=-6.7 yaw=1.5
+LOG kind=0 d=0.71 ad=0.43 wyaw=-7.3 yaw=1.6 pitch=0.5 spot=1 front=1 oa=1 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=-0.9 yaw=-1.4
+LOG kind=0 d=0.71 ad=0.43 wyaw=-2.9 yaw=-0.6 pitch=-0.7 spot=1 front=1 oa=1 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=45.2 yaw=6.8
+LOG kind=0 d=0.71 ad=0.44 wyaw=45.2 yaw=6.8 pitch=52.2 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=165.7 yaw=-1.8
+LOG kind=0 d=0.71 ad=0.44 wyaw=167.3 yaw=-0.6 pitch=-1.3 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=167.7 yaw=0.3
+LOG kind=0 d=0.71 ad=0.44 wyaw=167.7 yaw=0.3 pitch=-0.3 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=168.1 yaw=0.7
+LOG kind=0 d=0.71 ad=0.44 wyaw=168.1 yaw=0.7 pitch=-1.2 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=167.8 yaw=0.4
+LOG kind=0 d=0.71 ad=0.44 wyaw=167.7 yaw=0.1 pitch=-0.6 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=176.6 yaw=-8.9
+LOG kind=0 d=0.71 ad=0.43 wyaw=176.6 yaw=-8.9 pitch=-36.2 spot=1 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=177.4 yaw=-0.8
+LOG kind=0 d=0.71 ad=0.43 wyaw=175.7 yaw=-1.3 pitch=0.4 spot=1 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=171.1 yaw=-2.8
+LOG kind=0 d=0.71 ad=0.43 wyaw=172.5 yaw=-2.5 pitch=-1.6 spot=1 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=173.9 yaw=-1.4
+LOG kind=0 d=0.71 ad=0.43 wyaw=174.5 yaw=-1.3 pitch=1.3 spot=1 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=175.9 yaw=-1.6
+LOG kind=0 d=0.71 ad=0.43 wyaw=176.3 yaw=-1.3 pitch=-1.8 spot=1 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.47 wyaw=-140.2 yaw=-1.0
+LOG kind=0 d=0.71 ad=0.47 wyaw=-140.2 yaw=-1.0 pitch=31.1 spot=1 front=1 oa=14 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.7,1220.9)
+CACHE tree=145 stone=0 iron=0 sulfur=0 mask=1
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.47 wyaw=-160.5 yaw=-1.0
+LOG kind=0 d=0.71 ad=0.47 wyaw=-160.5 yaw=-1.0 pitch=-1.1 spot=1 front=1 oa=14 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.7,1220.9)
+LOG kind=0 d=0.71 ad=0.47 wyaw=-160.2 yaw=-1.1 pitch=0.1 spot=1 front=1 oa=14 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.7,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.47 wyaw=-160.6 yaw=-1.3
+LOG kind=0 d=0.71 ad=0.47 wyaw=-160.5 yaw=-1.2 pitch=-0.4 spot=1 front=1 oa=14 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.7,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.47 wyaw=-160.5 yaw=-1.2
+LOG kind=0 d=0.71 ad=0.44 wyaw=-171.7 yaw=7.5 pitch=-19.4 spot=1 front=1 oa=3 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=-171.7 yaw=7.5
+LOG kind=0 d=0.71 ad=0.44 wyaw=-175.0 yaw=-2.1 pitch=1.8 spot=1 front=1 oa=3 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=-175.0 yaw=-2.1
+LOG kind=0 d=0.71 ad=0.44 wyaw=-172.2 yaw=1.5 pitch=0.5 spot=1 front=1 oa=3 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=-172.2 yaw=1.5
+LOG kind=0 d=0.71 ad=0.44 wyaw=-175.3 yaw=-2.4 pitch=1.5 spot=1 front=1 oa=3 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=-175.3 yaw=-2.4
+LOG kind=0 d=0.71 ad=0.44 wyaw=-171.6 yaw=2.2 pitch=0.5 spot=1 front=1 oa=3 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=-171.6 yaw=2.2
+LOG kind=0 d=0.71 ad=0.43 wyaw=162.6 yaw=0.4 pitch=-6.4 spot=1 front=1 oa=6 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=162.6 yaw=0.4
+LOG kind=0 d=0.71 ad=0.43 wyaw=151.9 yaw=0.2 pitch=0.9 spot=1 front=1 oa=6 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=151.9 yaw=0.2
+LOG kind=0 d=0.71 ad=0.43 wyaw=153.2 yaw=-0.8 pitch=-0.8 spot=1 front=1 oa=6 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=153.2 yaw=-0.8
+LOG kind=0 d=0.71 ad=0.43 wyaw=157.9 yaw=3.7 pitch=0.4 spot=1 front=1 oa=6 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=157.9 yaw=3.7
+LOG kind=0 d=0.71 ad=0.43 wyaw=152.8 yaw=-0.6 pitch=-0.3 spot=1 front=1 oa=6 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=152.8 yaw=-0.6
+LOG kind=0 d=0.71 ad=0.54 wyaw=87.4 yaw=5.9 pitch=-7.4 spot=1 front=1 oa=24 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.5,1220.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.54 wyaw=87.4 yaw=5.9
+LOG kind=0 d=0.71 ad=0.54 wyaw=66.5 yaw=3.5 pitch=1.5 spot=1 front=1 oa=24 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.5,1220.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.54 wyaw=66.5 yaw=3.5
+LOG kind=0 d=0.71 ad=0.54 wyaw=68.3 yaw=1.9 pitch=-0.0 spot=1 front=1 oa=24 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.5,1220.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.54 wyaw=68.3 yaw=1.9
+LOG kind=0 d=0.71 ad=0.54 wyaw=67.6 yaw=0.8 pitch=0.0 spot=1 front=1 oa=24 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.5,1220.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.54 wyaw=67.6 yaw=0.8
+LOG kind=0 d=0.71 ad=0.54 wyaw=65.9 yaw=-0.0 pitch=0.9 spot=1 front=1 oa=24 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.5,1220.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.54 wyaw=65.9 yaw=-0.0
+LOG kind=0 d=0.71 ad=0.43 wyaw=171.4 yaw=-2.8 pitch=1.3 spot=1 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=171.4 yaw=-2.8
+LOG kind=0 d=0.71 ad=0.43 wyaw=-178.1 yaw=-0.7 pitch=-0.6 spot=1 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=-178.1 yaw=-0.7
+LOG kind=0 d=0.71 ad=0.43 wyaw=-169.2 yaw=1.1 pitch=1.3 spot=1 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=-169.2 yaw=1.1
+LOG kind=0 d=0.71 ad=0.43 wyaw=-179.6 yaw=-1.2 pitch=-1.5 spot=1 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=-179.6 yaw=-1.2
+LOG kind=0 d=0.71 ad=0.44 wyaw=111.2 yaw=6.6 pitch=37.3 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=111.2 yaw=6.6
+LOG kind=0 d=0.71 ad=0.44 wyaw=167.8 yaw=1.7 pitch=-0.8 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=167.8 yaw=1.7
+CACHE tree=145 stone=0 iron=0 sulfur=0 mask=1
+LOG kind=0 d=0.71 ad=0.44 wyaw=166.3 yaw=-1.1 pitch=-2.0 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=166.6 yaw=-0.6
+LOG kind=0 d=0.71 ad=0.44 wyaw=166.0 yaw=0.3 pitch=2.2 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=166.0 yaw=0.3
+LOG kind=0 d=0.71 ad=0.44 wyaw=166.8 yaw=0.3 pitch=-0.4 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=166.8 yaw=0.3
+LOG kind=0 d=0.71 ad=0.45 wyaw=-164.2 yaw=0.8 pitch=-2.7 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.45 wyaw=-164.2 yaw=0.8
+LOG kind=0 d=0.71 ad=0.45 wyaw=-165.9 yaw=-2.1 pitch=0.5 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.45 wyaw=-165.9 yaw=-2.1
+LOG kind=0 d=0.71 ad=0.45 wyaw=-165.6 yaw=-1.0 pitch=-0.9 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.45 wyaw=-166.9 yaw=-2.5
+LOG kind=0 d=0.71 ad=0.45 wyaw=-163.7 yaw=-0.1 pitch=2.0 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.45 wyaw=-163.7 yaw=-0.1
+LOG kind=0 d=0.71 ad=0.45 wyaw=-160.7 yaw=3.4 pitch=2.3 spot=1 front=1 oa=7 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.45 wyaw=-160.7 yaw=3.6
+LOG kind=0 d=0.71 ad=0.43 wyaw=173.9 yaw=3.2 pitch=3.1 spot=1 front=1 oa=4 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=172.6 yaw=0.8
+LOG kind=0 d=0.71 ad=0.43 wyaw=172.1 yaw=-0.5 pitch=0.0 spot=1 front=1 oa=4 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=172.6 yaw=0.0
+LOG kind=0 d=0.71 ad=0.43 wyaw=173.9 yaw=2.3 pitch=0.0 spot=1 front=1 oa=4 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=173.5 yaw=1.6
+LOG kind=0 d=0.71 ad=0.43 wyaw=171.4 yaw=-2.3 pitch=-1.9 spot=1 front=1 oa=4 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=171.9 yaw=-1.2
+LOG kind=0 d=0.71 ad=0.44 wyaw=172.9 yaw=2.5 pitch=1.5 spot=1 front=1 oa=4 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.43 wyaw=172.7 yaw=2.4
+LOG kind=0 d=0.71 ad=0.44 wyaw=-168.0 yaw=0.3 pitch=4.2 spot=1 front=1 oa=3 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=-168.2 yaw=0.1
+LOG kind=0 d=0.71 ad=0.44 wyaw=-169.6 yaw=0.5 pitch=-0.3 spot=1 front=1 oa=3 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=-169.3 yaw=0.7
+LOG kind=0 d=0.71 ad=0.44 wyaw=-168.1 yaw=1.4 pitch=0.9 spot=1 front=1 oa=3 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=-168.1 yaw=1.4
+LOG kind=0 d=0.71 ad=0.44 wyaw=-169.3 yaw=0.5 pitch=0.4 spot=1 front=1 oa=3 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.6,1220.9)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.44 wyaw=-170.6 yaw=-0.1
+LOG kind=0 d=0.71 ad=0.51 wyaw=118.8 yaw=22.0 pitch=6.9 spot=1 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.5,1220.7)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.51 wyaw=118.8 yaw=22.0
+X-LOST node=0x78532dca60 kind=0 last=(297.46,10.94,1220.73)
+LOG kind=0 d=0.71 ad=0.71 wyaw=-0.5 yaw=-1.0 pitch=3.1 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.71 wyaw=-0.3 yaw=-0.6
+LOG kind=0 d=0.71 ad=0.71 wyaw=0.5 yaw=0.9 pitch=-0.2 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.71 wyaw=0.5 yaw=0.9
+LOG kind=0 d=0.71 ad=0.71 wyaw=0.8 yaw=1.4 pitch=-1.2 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.71 wyaw=0.8 yaw=1.4
+LOG kind=0 d=0.71 ad=0.71 wyaw=2.0 yaw=3.2 pitch=2.5 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.71 ad=0.71 wyaw=2.0 yaw=3.2
+LOG kind=0 d=0.71 ad=0.71 wyaw=1.7 yaw=1.6 pitch=-0.7 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.71 wyaw=1.5 yaw=1.3
+LOG kind=0 d=0.71 ad=0.71 wyaw=-2.0 yaw=-3.4 pitch=-5.1 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.71 wyaw=-1.7 yaw=-2.8
+LOG kind=0 d=0.71 ad=0.71 wyaw=1.8 yaw=3.3 pitch=4.4 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.71 wyaw=1.8 yaw=3.3
+CACHE tree=145 stone=0 iron=0 sulfur=0 mask=1
+LOG kind=0 d=0.71 ad=0.71 wyaw=0.9 yaw=1.4 pitch=-5.4 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(297.8,1220.6) x=(297.8,1220.6)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.71 ad=0.71 wyaw=0.9 yaw=1.4
+LOG kind=0 d=8.30 ad=8.30 wyaw=172.9 yaw=173.4 pitch=-39.2 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(292.7,1228.0) x=(292.7,1228.0)
+LOG kind=0 d=8.30 ad=8.30 wyaw=176.1 yaw=176.4 pitch=-40.8 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(292.7,1228.0) x=(292.7,1228.0)
+LOG kind=0 d=8.30 ad=8.30 wyaw=172.4 yaw=172.8 pitch=-36.4 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(292.7,1228.0) x=(292.7,1228.0)
+LOG kind=0 d=8.30 ad=8.30 wyaw=98.3 yaw=103.2 pitch=-31.1 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(292.7,1228.0) x=(292.7,1228.0)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=8.30 ad=8.30 wyaw=98.3 yaw=103.2
+LOG kind=0 d=8.30 ad=8.30 wyaw=0.2 yaw=0.3 pitch=25.9 spot=0 front=1 oa=0 body=(297.4,1221.2) node=(292.7,1228.0) x=(292.7,1228.0)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.12,-0.67) d=8.30 ad=8.30 wyaw=0.2 yaw=0.3
+LOG kind=0 d=7.55 ad=7.55 wyaw=-0.7 yaw=-0.7 pitch=15.6 spot=0 front=1 oa=0 body=(297.1,1221.9) node=(292.7,1228.0) x=(292.7,1228.0)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(-0.01,-0.97) d=7.55 ad=7.55 wyaw=-0.7 yaw=-0.7
+LOG kind=0 d=6.26 ad=6.26 wyaw=2.0 yaw=2.2 pitch=20.5 spot=0 front=1 oa=0 body=(296.3,1222.9) node=(292.7,1228.0) x=(292.7,1228.0)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.99) d=6.26 ad=6.26 wyaw=2.0 yaw=2.2
+LOG kind=0 d=4.95 ad=4.95 wyaw=1.0 yaw=1.0 pitch=17.9 spot=0 front=1 oa=0 body=(295.6,1224.0) node=(292.7,1228.0) x=(292.7,1228.0)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.02,-0.99) d=4.95 ad=4.95 wyaw=1.0 yaw=1.0
+LOG kind=0 d=3.53 ad=3.53 wyaw=1.2 yaw=1.4 pitch=18.8 spot=0 front=1 oa=0 body=(294.7,1225.1) node=(292.7,1228.0) x=(292.7,1228.0)
+MOVE ph=1 spot=0 front=1 orbit=0 tap=0 st=(0.02,-0.99) d=3.53 ad=3.53 wyaw=1.2 yaw=1.4
+LOG kind=0 d=2.21 ad=2.21 wyaw=2.4 yaw=3.0 pitch=14.4 spot=0 front=1 oa=0 body=(294.0,1226.2) node=(292.7,1228.0) x=(292.7,1228.0)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.02,-0.74) d=2.21 ad=2.21 wyaw=2.4 yaw=3.0
+LOG kind=0 d=1.22 ad=1.22 wyaw=1.0 yaw=1.3 pitch=-7.4 spot=0 front=1 oa=0 body=(293.4,1227.0) node=(292.7,1228.0) x=(292.7,1228.0)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.01,-0.50) d=1.15 ad=1.15 wyaw=1.4 yaw=1.7
+LOG kind=0 d=0.58 ad=0.58 wyaw=0.2 yaw=0.2 pitch=-3.4 spot=0 front=1 oa=0 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.7,1228.0)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=0 st=(0.00,-0.03) d=0.58 ad=0.58 wyaw=0.2 yaw=0.2
+LOG kind=0 d=0.52 ad=0.52 wyaw=0.2 yaw=0.0 pitch=-1.8 spot=0 front=1 oa=0 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.7,1228.0)
+MOVE ph=2 spot=0 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.52 ad=0.52 wyaw=0.2 yaw=0.0
+LOG kind=0 d=0.52 ad=0.31 wyaw=9.5 yaw=0.1 pitch=6.4 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=9.2 yaw=-0.3
+LOG kind=0 d=0.52 ad=0.31 wyaw=11.0 yaw=-0.0 pitch=-0.2 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=10.8 yaw=0.1
+LOG kind=0 d=0.52 ad=0.31 wyaw=11.5 yaw=-0.0 pitch=-2.0 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=11.4 yaw=-0.1
+LOG kind=0 d=0.52 ad=0.31 wyaw=10.1 yaw=0.5 pitch=0.1 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=10.0 yaw=0.5
+LOG kind=0 d=0.52 ad=0.31 wyaw=10.4 yaw=0.6 pitch=0.7 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=10.6 yaw=0.5
+LOG kind=0 d=0.52 ad=0.31 wyaw=11.4 yaw=-0.1 pitch=-1.8 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=11.4 yaw=-0.1
+LOG kind=0 d=0.52 ad=0.31 wyaw=11.5 yaw=-0.4 pitch=0.1 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=11.5 yaw=-0.4
+LOG kind=0 d=0.52 ad=0.31 wyaw=11.9 yaw=-0.5 pitch=-0.7 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=11.9 yaw=-0.6
+LOG kind=0 d=0.52 ad=0.31 wyaw=11.4 yaw=-0.2 pitch=-1.2 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=9.9 yaw=0.6
+LOG kind=0 d=0.52 ad=0.31 wyaw=9.0 yaw=1.0 pitch=-0.1 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=9.2 yaw=0.8
+LOG kind=0 d=0.52 ad=0.31 wyaw=12.1 yaw=-0.8 pitch=0.2 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=12.1 yaw=-0.8
+CACHE tree=144 stone=0 iron=0 sulfur=0 mask=1
+LOG kind=0 d=0.52 ad=0.31 wyaw=11.9 yaw=-0.6 pitch=-0.2 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=11.9 yaw=-0.6
+LOG kind=0 d=0.52 ad=0.31 wyaw=12.6 yaw=-1.2 pitch=0.3 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=12.8 yaw=-1.3
+LOG kind=0 d=0.52 ad=0.31 wyaw=12.0 yaw=-0.7 pitch=0.8 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=12.4 yaw=-0.6
+LOG kind=0 d=0.52 ad=0.31 wyaw=14.0 yaw=0.2 pitch=-2.2 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=14.0 yaw=0.2
+LOG kind=0 d=0.52 ad=0.31 wyaw=9.2 yaw=1.2 pitch=1.3 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=9.2 yaw=1.2
+LOG kind=0 d=0.52 ad=0.31 wyaw=10.6 yaw=0.5 pitch=-1.9 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=10.6 yaw=0.5
+LOG kind=0 d=0.52 ad=0.31 wyaw=13.5 yaw=-2.1 pitch=1.8 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=13.5 yaw=-2.1
+LOG kind=0 d=0.52 ad=0.31 wyaw=14.1 yaw=-1.5 pitch=0.6 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=1 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=14.1 yaw=-1.3
+LOG kind=0 d=0.52 ad=0.31 wyaw=10.8 yaw=0.6 pitch=0.2 spot=1 front=1 oa=5 body=(293.0,1227.6) node=(292.7,1228.0) x=(292.9,1227.8)
+MOVE ph=2 spot=1 front=1 orbit=0 tap=0 st=(0.00,-0.02) up d=0.52 ad=0.31 wyaw=10.4 yaw=1.0
