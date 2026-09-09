@@ -4939,6 +4939,9 @@ static bool marker_world_position(uint64_t transform, Vec3& out) {
 }
 
 // Walk Mirror's client registry and cache every ore node / animal in it.
+// TEMP ore diagnosis (defined below, near farm_find_spot).
+static void ore_diag_append(const char* line);
+
 static void rebuild_marker_entities() {
     g_marker_entities.clear();
 
@@ -5024,6 +5027,21 @@ static void rebuild_marker_entities() {
                         if (fe.transform) {
                             fe.pos_valid = marker_world_position(fe.transform, fe.pos);
                             g_farm_shared.push_back(fe);
+                            // TEMP ore diagnosis: an ore node entered the cache.
+                            if (fe.kind != 0) {
+                                static std::unordered_set<uint64_t> s_vis;
+                                if (s_vis.size() < 32 &&
+                                    s_vis.insert(fe.transform).second) {
+                                    char line[192];
+                                    snprintf(line, sizeof(line),
+                                             "VIS node=0x%llx kind=%d pos=(%.2f,%.2f,%.2f) player=(%.2f,%.2f,%.2f)\n",
+                                             (unsigned long long)fe.transform, fe.kind,
+                                             fe.pos.x, fe.pos.y, fe.pos.z,
+                                             g_frame_local_pos.x, g_frame_local_pos.y,
+                                             g_frame_local_pos.z);
+                                    ore_diag_append(line);
+                                }
+                            }
                         }
                     }
                 }
@@ -5731,6 +5749,57 @@ static void farm_bulk_positions(const uint64_t* tr, int n, Vec3* out, uint8_t* o
 // Find the live X under the node. `keep` is the previous pick — it is held
 // while it is still alive, so one bad read (the game rewriting the transform
 // mid-update) does not drop the lock. Returns 0 when no live X is found.
+// ---- TEMP ore diagnosis (remove once ore farming is fixed) ------------------
+// Three probes, one file:
+//   VIS   an ore node entered the farm's cache       (registry rebuild)
+//   TGT   the farm actually picked that node         (target selection)
+//   SCAN  every live X candidate + the pick          (farm_find_spot)
+// The launch context decides which path is writable (adb shell, termux, a
+// plain app), so the file list is tried once and the first that opens
+// wins; the path is recorded in the file itself.
+static void ore_diag_append(const char* line) {
+    static FILE* s_file = nullptr;
+    static bool  s_header_done = false;
+    static int   s_tries = 0;
+    if (!s_file && s_tries < 60) {
+        ++s_tries;
+        char cmd[128] = "";
+        if (FILE* cf = fopen("/proc/self/cmdline", "r")) {
+            size_t n = 0;
+            int c;
+            while (n < sizeof(cmd) - 1 && (c = fgetc(cf)) != EOF && c != 0)
+                cmd[n++] = (char)c;
+            cmd[n] = 0;
+            fclose(cf);
+        }
+        char cands[5][512];
+        int nc = 0;
+        snprintf(cands[nc++], sizeof(cands[0]), "/data/local/tmp/xvcen_ore_dump.txt");
+        snprintf(cands[nc++], sizeof(cands[0]), "./xvcen_ore_dump.txt");
+        snprintf(cands[nc++], sizeof(cands[0]), "/sdcard/xvcen_ore_dump.txt");
+        snprintf(cands[nc++], sizeof(cands[0]), "/storage/emulated/0/xvcen_ore_dump.txt");
+        if (cmd[0])
+            snprintf(cands[nc++], sizeof(cands[0]),
+                     "/storage/emulated/0/Android/data/%s/files/xvcen_ore_dump.txt", cmd);
+        for (int i = 0; i < nc; ++i) {
+            FILE* f = fopen(cands[i], "a");
+            if (!f) continue;
+            if (!s_header_done) {
+                fprintf(f, "==== xvcen ore diagnosis (pid=%d cmd=%s) ====\n",
+                        (int)getpid(), cmd[0] ? cmd : "(?)");
+                s_header_done = true;
+            }
+            fprintf(f, "path=%s\n", cands[i]);
+            s_file = f;
+            break;
+        }
+        if (!s_file) return;
+    }
+    if (!s_file) return;
+    fputs(line, s_file);
+    fflush(s_file);
+}
+
 static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, int kind, uint64_t keep) {
     if (!node_transform) return 0;
 
@@ -5821,37 +5890,32 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         }
     }
 
-    // TEMP (ore diagnosis): one snapshot per ore node — every live
-    // candidate with its name and geometry, plus the pick. One file
-    // (appended) after a few rocks shows exactly why the ore's X is or
-    // is not selected. Remove once ore farming is fixed.
+    // TEMP ore diagnosis: one snapshot per ore node — every live
+    // candidate with its name and geometry, plus the pick ("*" line).
+    // Remove once ore farming is fixed.
     if (kind != 0) {
         static std::unordered_set<uint64_t> s_dumped;
         if (s_dumped.size() < 16 && s_dumped.insert(node_transform).second) {
-            static const char* const paths[3] = {
-                "/sdcard/xvcen_ore_dump.txt",
-                "/storage/emulated/0/xvcen_ore_dump.txt",
-                "/data/local/tmp/xvcen_ore_dump.txt",
-            };
-            for (int i = 0; i < 3; ++i) {
-                FILE* f = fopen(paths[i], "a");
-                if (!f) continue;
-                fprintf(f, "\nnode=0x%llx kind=%d pos=(%.3f,%.3f,%.3f) eye_y=%.3f\n",
-                        (unsigned long long)node_transform, kind,
-                        node_pos.x, node_pos.y, node_pos.z, farm_eye_y());
-                for (const Cand& c : live) {
-                    char name[48] = "";
-                    if (g_go_name_offset_valid) read_transform_name(c.node, name, sizeof(name));
-                    double d3 = sqrt((double)(c.p.x - node_pos.x) * (c.p.x - node_pos.x) +
-                                     (double)(c.p.y - node_pos.y) * (c.p.y - node_pos.y) +
-                                     (double)(c.p.z - node_pos.z) * (c.p.z - node_pos.z));
-                    fprintf(f, "%s h=%.3f d=%.3f sy=%.3f err=%.3f (%.3f,%.3f,%.3f) %s\n",
-                            c.node == picked ? "*" : " ", c.h, (float)d3,
-                            c.p.y - node_pos.y, c.err, c.p.x, c.p.y, c.p.z,
-                            name[0] ? name : "(anon)");
-                }
-                fclose(f);
-                break;
+            char line[384];
+            snprintf(line, sizeof(line),
+                     "SCAN node=0x%llx kind=%d n_children=%d pos=(%.3f,%.3f,%.3f) eye_y=%.3f\n",
+                     (unsigned long long)node_transform, kind, n,
+                     node_pos.x, node_pos.y, node_pos.z, farm_eye_y());
+            ore_diag_append(line);
+            for (const Cand& c : live) {
+                char name[48] = "";
+                if (g_go_name_offset_valid) read_transform_name(c.node, name, sizeof(name));
+                for (char* ch = name; *ch; ++ch)
+                    if (*ch >= 'A' && *ch <= 'Z') *ch = (char)(*ch - 'A' + 'a');
+                double d3 = sqrt((double)(c.p.x - node_pos.x) * (c.p.x - node_pos.x) +
+                                 (double)(c.p.y - node_pos.y) * (c.p.y - node_pos.y) +
+                                 (double)(c.p.z - node_pos.z) * (c.p.z - node_pos.z));
+                snprintf(line, sizeof(line),
+                         "%s h=%.3f d=%.3f sy=%.3f err=%.3f (%.3f,%.3f,%.3f) %s\n",
+                         c.node == picked ? "*" : " ", c.h, (float)d3,
+                         c.p.y - node_pos.y, c.err, c.p.x, c.p.y, c.p.z,
+                         name[0] ? name : "(anon)");
+                ore_diag_append(line);
             }
         }
     }
@@ -5952,6 +6016,18 @@ bool esp_farm_get_target(FarmTarget& out) {
         s_last_identity = 0;
         g_farm_idle_reason = g_farm_entities.empty() ? 3 : 4;
         return false;
+    }
+    // TEMP ore diagnosis: the farm actually picked this node as target.
+    if (best->kind != 0) {
+        static std::unordered_set<uint64_t> s_tgt;
+        if (s_tgt.size() < 32 && s_tgt.insert(best->transform).second) {
+            char line[192];
+            snprintf(line, sizeof(line),
+                     "TGT node=0x%llx kind=%d dist=%.2f pos=(%.2f,%.2f,%.2f)\n",
+                     (unsigned long long)best->transform, best->kind, best_dist,
+                     best->pos.x, best->pos.y, best->pos.z);
+            ore_diag_append(line);
+        }
     }
     s_last_identity = best->identity;
 

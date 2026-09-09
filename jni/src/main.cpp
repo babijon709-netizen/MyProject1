@@ -3769,16 +3769,29 @@ static void UpdateFarm(float dt) {
     // to stand a bit off the trunk, not pressed against it.
     const float meleeX = isTree ? 1.05f : 1.55f;
     const float reachX = isTree ? 2.6f  : 2.4f;  // close enough to start (body aim)
-    // Strike the mark head-on: at a shallow angle the swing ray passes the
-    // trunk and the hit whiffs, so mining (and the taps) start only when
-    // the body is roughly on the radial line through the X (walk_yaw ~ 0).
-    // Hysteresis 20/30 deg keeps the phase from flickering at the border.
-    static bool s_head_on = true;
-    if (tgt.has_spot && !orbit) {
-        if (!s_head_on) s_head_on = (fabsf(tgt.walk_yaw) < 20.f);
-        else            s_head_on = (fabsf(tgt.walk_yaw) < 30.f);
+    // Strike the mark head-on, without chasing it: the tool swings in a
+    // wide arc in front of the body, so the body only has to stand
+    // roughly in FRONT of the trunk — a wide 25/45-deg band around the
+    // radial line, not the line itself (a human miner does not re-position
+    // after every hop either). The gate works on a LOW-PASSED walk_yaw:
+    // the X hops after every hit, and chasing the instantaneous line is
+    // exactly the left-right running the old slide produced. Outside the
+    // band the body takes ONE quick step back in front, then stands still
+    // and taps.
+    static bool    s_head_on = true;
+    static float   s_yaw_filt = 0.f;
+    static unsigned long long s_yaw_owner = 0;
+    if (tgt.id != s_yaw_owner) {
+        s_yaw_owner = tgt.id;
+        s_yaw_filt = tgt.walk_yaw;
+        s_head_on = true;
     }
-    // In reach for a long time without ever getting head-on (terrain, a
+    if (tgt.has_spot && !orbit) {
+        s_yaw_filt += (tgt.walk_yaw - s_yaw_filt) * (1.f - expf(-dt / 0.25f));
+        if (!s_head_on) s_head_on = (fabsf(s_yaw_filt) < 25.f);
+        else            s_head_on = (fabsf(s_yaw_filt) < 45.f);
+    }
+    // In reach for a long time while staying outside the band (terrain, a
     // mark that keeps hopping sideways): strike anyway — a side hit beats
     // no hit at all.
     static float s_range_time = 0.f;
@@ -3900,15 +3913,17 @@ static void UpdateFarm(float dt) {
             if (fabsf(tgt.walk_yaw) < 45.f) {
                 wantWalk = true;
                 if (inRange && tgt.has_spot) {
-                    // In reach, but off the radial line through the X: glide
-                    // onto it — mostly sideways at walk speed. Running
-                    // full-tilt would overshoot the line and the stick would
-                    // start sawing left-right.
-                    float steer = tgt.walk_yaw / 40.f;
-                    if (steer >  1.f) steer =  1.f;
-                    if (steer < -1.f) steer = -1.f;
-                    px = cx + r * 0.55f * steer;
-                    py = cy - r * 0.30f;
+                    // In reach but outside the head-on band: ONE quick
+                    // step back in front of the trunk (run speed, fully
+                    // deflected stick), then stand still — the filtered
+                    // gate angle closes the loop. A slow sideways glide
+                    // kept drifting while the X kept hopping: that was
+                    // the left-right running.
+                    float steer = tgt.walk_yaw / 45.f;
+                    if (steer >  0.85f) steer =  0.85f;
+                    if (steer < -0.85f) steer = -0.85f;
+                    px = cx + r * steer;
+                    py = cy - r * 0.92f * sqrtf(1.f - steer * steer);
                 } else {
                     float steer = tgt.walk_yaw / 60.f;  // slight steering
                     if (steer >  0.5f) steer =  0.5f;
