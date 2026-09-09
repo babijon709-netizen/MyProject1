@@ -3769,40 +3769,31 @@ static void UpdateFarm(float dt) {
     // to stand a bit off the trunk, not pressed against it.
     const float meleeX = isTree ? 1.05f : 1.55f;
     const float reachX = isTree ? 2.6f  : 2.4f;  // close enough to start (body aim)
-    // Strike the mark head-on, without chasing it: the tool swings in a
-    // wide arc in front of the body, so the body only has to stand
-    // roughly in FRONT of the trunk — a wide 25/45-deg band around the
-    // radial line, not the line itself (a human miner does not re-position
-    // after every hop either). The gate works on a LOW-PASSED walk_yaw:
-    // the X hops after every hit, and chasing the instantaneous line is
-    // exactly the left-right running the old slide produced. Outside the
-    // band the body takes ONE quick step back in front, then stands still
-    // and taps.
-    static bool    s_head_on = true;
-    static float   s_yaw_filt = 0.f;
-    static unsigned long long s_yaw_owner = 0;
-    if (tgt.id != s_yaw_owner) {
-        s_yaw_owner = tgt.id;
-        s_yaw_filt = tgt.walk_yaw;
-        s_head_on = true;
-    }
-    if (tgt.has_spot && !orbit) {
-        s_yaw_filt += (tgt.walk_yaw - s_yaw_filt) * (1.f - expf(-dt / 0.25f));
-        if (!s_head_on) s_head_on = (fabsf(s_yaw_filt) < 25.f);
-        else            s_head_on = (fabsf(s_yaw_filt) < 45.f);
-    }
-    // In reach for a long time while staying outside the band (terrain, a
-    // mark that keeps hopping sideways): strike anyway — a side hit beats
-    // no hit at all.
-    static float s_range_time = 0.f;
-    const bool inRange = tgt.has_spot ? (tgt.aim_dist <= meleeX)
-                                      : (tgt.dist <= reachX);
-    // Grows only while in reach AND off the line: the moment the body gets
-    // head-on (or leaves the range) the head-on gate re-arms.
-    if (inRange && tgt.has_spot && !orbit && !s_head_on) s_range_time += dt;
-    else s_range_time = 0.f;
-    const bool headOn = !tgt.has_spot || orbit || s_head_on || s_range_time > 4.0f;
-    const bool inMelee = orbit ? false : (inRange && headOn);
+    // In reach = the swing lands: with a live X the horizontal distance
+    // to the mark is at the tool's standoff, without one the body is at
+    // the reach distance. ENTER/EXIT margins (hysteresis) on purpose: at
+    // the tree standoff aim_dist sits right ON the 1.05 m boundary, and
+    // without the margins the phase flickers 1<->2 on read noise and the
+    // stick keeps re-triggering the approach run in front of the trunk.
+    static bool  s_in_range = false;
+    static unsigned long long s_range_owner = 0;
+    const bool inRaw = tgt.has_spot ? (tgt.aim_dist <= meleeX)
+                                    : (tgt.dist <= reachX);
+    const bool outRaw = tgt.has_spot ? (tgt.aim_dist > meleeX + 0.30f)
+                                     : (tgt.dist > reachX + 0.30f);
+    if (tgt.id != s_range_owner) { s_range_owner = tgt.id; s_in_range = inRaw; }
+    else if (inRaw) s_in_range = true;
+    else if (outRaw) s_in_range = false;
+    const bool inRange = s_in_range;
+    // In range the body does NOT walk at all: the camera and the tool
+    // chase the live X, and the swing ray (body -> X) clears the trunk
+    // while the X is inside the reachable arc (spot_front, 65 deg — see
+    // game.cpp; the geometric limit at this standoff is ~74 deg).
+    // Re-aiming the body at the mark on every hop is exactly what made
+    // the bot run left-right in front of the tree. The only in-range
+    // movement left is the orbit: the X hopped past the reachable arc,
+    // so circle a short arc until it faces us again.
+    const bool inMelee = orbit ? false : inRange;
     const int phase = inMelee ? 2 : 1;
     g_farmPhase = phase;
 
@@ -3903,36 +3894,18 @@ static void UpdateFarm(float dt) {
             wantWalk = true;
             px = cx + r * 0.9f * tgt.orbit_side;
             py = cy - r * 0.5f;
-        } else if (phase == 1 ||
-                   (inRange && tgt.has_spot && !orbit && !s_head_on &&
-                    s_range_time > 4.0f)) {
+        } else if (phase == 1) {
             // Walk at the walk target once the camera is roughly on it
             // (steering the stick at a big yaw would send the bot sideways).
-            // The fallback branch: in reach and striking side-on for 4 s —
-            // keep tapping (phase 2) but keep sliding onto the line too.
             if (fabsf(tgt.walk_yaw) < 45.f) {
                 wantWalk = true;
-                if (inRange && tgt.has_spot) {
-                    // In reach but outside the head-on band: ONE quick
-                    // step back in front of the trunk (run speed, fully
-                    // deflected stick), then stand still — the filtered
-                    // gate angle closes the loop. A slow sideways glide
-                    // kept drifting while the X kept hopping: that was
-                    // the left-right running.
-                    float steer = tgt.walk_yaw / 45.f;
-                    if (steer >  0.85f) steer =  0.85f;
-                    if (steer < -0.85f) steer = -0.85f;
-                    px = cx + r * steer;
-                    py = cy - r * 0.92f * sqrtf(1.f - steer * steer);
-                } else {
-                    float steer = tgt.walk_yaw / 60.f;  // slight steering
-                    if (steer >  0.5f) steer =  0.5f;
-                    if (steer < -0.5f) steer = -0.5f;
-                    // FULL deflection = run speed: the stick is pushed to
-                    // its whole radius, angled a bit toward the target.
-                    px = cx + r * steer;
-                    py = cy - r * 0.99f * sqrtf(1.f - steer * steer);
-                }
+                float steer = tgt.walk_yaw / 60.f;  // slight steering
+                if (steer >  0.5f) steer =  0.5f;
+                if (steer < -0.5f) steer = -0.5f;
+                // FULL deflection = run speed: the stick is pushed to
+                // its whole radius, angled a bit toward the target.
+                px = cx + r * steer;
+                py = cy - r * 0.99f * sqrtf(1.f - steer * steer);
             }
         } else {
             // Mining: nudge forward only while the tool still does not
@@ -3983,6 +3956,28 @@ static void UpdateFarm(float dt) {
         }
         stickDeflected = s_moveDown &&
             (fabsf(s_stickPx - cx) > r * 0.2f || fabsf(s_stickPy - cy) > r * 0.2f);
+        // TEMP farm log (remove once the movement is stable): what the
+        // joystick is doing, 5 Hz — paired with the LOG lines from
+        // game.cpp in the same file.
+        {
+            static float s_t = 0.f;
+            static int   s_n = 0;
+            s_t += dt;
+            if (s_t >= 0.2f) {
+                s_t = 0.f;
+                if (s_n < 4000) {
+                    ++s_n;
+                    char line[176];
+                    snprintf(line, sizeof(line),
+                             "MOVE ph=%d spot=%d front=%d orbit=%d st=(%.2f,%.2f)%s d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f\n",
+                             phase, tgt.has_spot ? 1 : 0, tgt.spot_front ? 1 : 0,
+                             orbit ? 1 : 0, (s_stickPx - cx) / r, (s_stickPy - cy) / r,
+                             s_moveDown ? "" : " up", tgt.dist, tgt.aim_dist,
+                             tgt.walk_yaw, tgt.yaw);
+                    esp_farm_log_line(line);
+                }
+            }
+        }
     }
 
     // ---- finger 2: attack taps while mining ----

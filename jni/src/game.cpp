@@ -4939,8 +4939,8 @@ static bool marker_world_position(uint64_t transform, Vec3& out) {
 }
 
 // Walk Mirror's client registry and cache every ore node / animal in it.
-// TEMP ore diagnosis (defined below, near farm_find_spot).
-static void ore_diag_append(const char* line);
+// TEMP farm log (defined below, near farm_find_spot).
+static void farm_log_append(const char* line);
 
 static void rebuild_marker_entities() {
     g_marker_entities.clear();
@@ -5039,7 +5039,7 @@ static void rebuild_marker_entities() {
                                              fe.pos.x, fe.pos.y, fe.pos.z,
                                              g_frame_local_pos.x, g_frame_local_pos.y,
                                              g_frame_local_pos.z);
-                                    ore_diag_append(line);
+                                    farm_log_append(line);
                                 }
                             }
                         }
@@ -5749,15 +5749,16 @@ static void farm_bulk_positions(const uint64_t* tr, int n, Vec3* out, uint8_t* o
 // Find the live X under the node. `keep` is the previous pick — it is held
 // while it is still alive, so one bad read (the game rewriting the transform
 // mid-update) does not drop the lock. Returns 0 when no live X is found.
-// ---- TEMP ore diagnosis (remove once ore farming is fixed) ------------------
-// Three probes, one file:
+// ---- TEMP farm log (remove once the movement and ore issues are fixed) -----
+// One file in the Downloads folder (the place a human looks), with
+// fallbacks for launch contexts that cannot write there. Probes:
 //   VIS   an ore node entered the farm's cache       (registry rebuild)
 //   TGT   the farm actually picked that node         (target selection)
 //   SCAN  every live X candidate + the pick          (farm_find_spot)
-// The launch context decides which path is writable (adb shell, termux, a
-// plain app), so the file list is tried once and the first that opens
-// wins; the path is recorded in the file itself.
-static void ore_diag_append(const char* line) {
+//   LOG   5 Hz controller snapshot while at the node (esp_farm_get_target)
+//   MOVE  5 Hz joystick snapshot                     (main.cpp)
+// The path actually used is recorded in the file itself.
+static void farm_log_append(const char* line) {
     static FILE* s_file = nullptr;
     static bool  s_header_done = false;
     static int   s_tries = 0;
@@ -5772,20 +5773,22 @@ static void ore_diag_append(const char* line) {
             cmd[n] = 0;
             fclose(cf);
         }
-        char cands[5][512];
+        char cands[7][512];
         int nc = 0;
-        snprintf(cands[nc++], sizeof(cands[0]), "/data/local/tmp/xvcen_ore_dump.txt");
-        snprintf(cands[nc++], sizeof(cands[0]), "./xvcen_ore_dump.txt");
-        snprintf(cands[nc++], sizeof(cands[0]), "/sdcard/xvcen_ore_dump.txt");
-        snprintf(cands[nc++], sizeof(cands[0]), "/storage/emulated/0/xvcen_ore_dump.txt");
+        snprintf(cands[nc++], sizeof(cands[0]), "/sdcard/Download/xvcen_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/storage/emulated/0/Download/xvcen_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/data/local/tmp/xvcen_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "./xvcen_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/sdcard/xvcen_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/storage/emulated/0/xvcen_farm.log");
         if (cmd[0])
             snprintf(cands[nc++], sizeof(cands[0]),
-                     "/storage/emulated/0/Android/data/%s/files/xvcen_ore_dump.txt", cmd);
+                     "/storage/emulated/0/Android/data/%s/files/xvcen_farm.log", cmd);
         for (int i = 0; i < nc; ++i) {
             FILE* f = fopen(cands[i], "a");
             if (!f) continue;
             if (!s_header_done) {
-                fprintf(f, "==== xvcen ore diagnosis (pid=%d cmd=%s) ====\n",
+                fprintf(f, "==== xvcen farm log (pid=%d cmd=%s) ====\n",
                         (int)getpid(), cmd[0] ? cmd : "(?)");
                 s_header_done = true;
             }
@@ -5799,6 +5802,7 @@ static void ore_diag_append(const char* line) {
     fputs(line, s_file);
     fflush(s_file);
 }
+void esp_farm_log_line(const char* line) { farm_log_append(line); }
 
 static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, int kind, uint64_t keep) {
     if (!node_transform) return 0;
@@ -5901,7 +5905,7 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
                      "SCAN node=0x%llx kind=%d n_children=%d pos=(%.3f,%.3f,%.3f) eye_y=%.3f\n",
                      (unsigned long long)node_transform, kind, n,
                      node_pos.x, node_pos.y, node_pos.z, farm_eye_y());
-            ore_diag_append(line);
+            farm_log_append(line);
             for (const Cand& c : live) {
                 char name[48] = "";
                 if (g_go_name_offset_valid) read_transform_name(c.node, name, sizeof(name));
@@ -5915,7 +5919,7 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
                          c.node == picked ? "*" : " ", c.h, (float)d3,
                          c.p.y - node_pos.y, c.err, c.p.x, c.p.y, c.p.z,
                          name[0] ? name : "(anon)");
-                ore_diag_append(line);
+                farm_log_append(line);
             }
         }
     }
@@ -6026,7 +6030,7 @@ bool esp_farm_get_target(FarmTarget& out) {
                      "TGT node=0x%llx kind=%d dist=%.2f pos=(%.2f,%.2f,%.2f)\n",
                      (unsigned long long)best->transform, best->kind, best_dist,
                      best->pos.x, best->pos.y, best->pos.z);
-            ore_diag_append(line);
+            farm_log_append(line);
         }
     }
     s_last_identity = best->identity;
@@ -6073,13 +6077,30 @@ bool esp_farm_get_target(FarmTarget& out) {
                 // the hold so a few failed per-frame reads (game mid-update)
                 // can no longer drop a live X. The spot is only dropped when
                 // the SCAN says it is gone (the !found branch below).
-                if (found) s_spot_hold = 120;
+                if (found) {
+                    s_spot_hold = 120;
+                    if (!s_spot_transform) {
+                        char line[160];
+                        snprintf(line, sizeof(line),
+                                 "X-APPEAR node=0x%llx kind=%d\n",
+                                 (unsigned long long)best->transform, best->kind);
+                        farm_log_append(line);
+                    }
+                }
                 Vec3 cur = s_spot_prev;
                 if (found && marker_world_position(found, cur) && vec3_is_finite(cur)) {
                     s_spot_prev = cur;
                     s_spot_prev_valid = true;
                 }
             } else if (!found) {
+                if (s_spot_transform) {
+                    char line[160];
+                    snprintf(line, sizeof(line),
+                             "X-LOST node=0x%llx kind=%d last=(%.2f,%.2f,%.2f)\n",
+                             (unsigned long long)best->transform, best->kind,
+                             s_spot_last.x, s_spot_last.y, s_spot_last.z);
+                    farm_log_append(line);
+                }
                 s_spot_transform = 0;
                 s_spot_last = {};
                 s_spot_hold = 0;
@@ -6131,9 +6152,15 @@ bool esp_farm_get_target(FarmTarget& out) {
             spot_ok = true;
             aim = spot;
             marker_pt = spot;
-            // Is the X on OUR side of the node? When the mark is on the far
-            // side of the trunk/boulder the tool cannot reach it — the
-            // controller circles until it faces us.
+            // Can the swing actually REACH the X? The swing ray goes
+            // body -> mark and clears the trunk only while the mark sits
+            // within acos(r_t / (r_t + standoff)) of our radial — ~74 deg
+            // at the tree standoff (1.05 m). The old -0.35 threshold
+            // (110 deg) let the mark sit 74..110 deg off, where every
+            // swing hit the NEAR bark instead of the mark — the "standing
+            // and hitting from the side". Orbit a little earlier, at
+            // 65 deg: the arc to cover is short and the mark is always
+            // comfortably inside the tool's sweep.
             float sx = spot.x - best->pos.x, sz = spot.z - best->pos.z;
             float px = g_frame_local_pos.x - best->pos.x;
             float pz = g_frame_local_pos.z - best->pos.z;
@@ -6141,7 +6168,7 @@ bool esp_farm_get_target(FarmTarget& out) {
             float pl = sqrtf(px * px + pz * pz);
             if (sl > 0.05F && pl > 0.3F) {
                 float dot = (sx * px + sz * pz) / (sl * pl);
-                if (!(dot > -0.35F)) {
+                if (!(dot > 0.42F)) {   // cos 65 deg
                     spot_front = false;
                     // Which way to circle: rotate the (player - node) vector
                     // towards the (spot - node) one. theta = atan2(x, z); the
@@ -6365,5 +6392,24 @@ bool esp_farm_get_target(FarmTarget& out) {
     }
     float fraction = rd<float>(best->component + MINEABLE_FRACTION);
     out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F) ? fraction : -1.0F;
+    // TEMP farm log: 5 Hz snapshot of everything the controller sees
+    // while at the node (remove with the other probes).
+    {
+        static std::chrono::steady_clock::time_point s_last;
+        static int s_n = 0;
+        auto now = std::chrono::steady_clock::now();
+        if (s_n < 4000 && (now - s_last) >= std::chrono::milliseconds(200)) {
+            s_last = now;
+            ++s_n;
+            char line[208];
+            snprintf(line, sizeof(line),
+                     "LOG kind=%d d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f spot=%d front=%d oa=%.0f body=(%.1f,%.1f) node=(%.1f,%.1f) x=(%.1f,%.1f)\n",
+                     best->kind, best_dist, out.aim_dist, out.walk_yaw, out.yaw,
+                     spot_ok ? 1 : 0, spot_front ? 1 : 0, out.orbit_angle,
+                     g_frame_local_pos.x, g_frame_local_pos.z,
+                     best->pos.x, best->pos.z, marker_pt.x, marker_pt.z);
+            farm_log_append(line);
+        }
+    }
     return true;
 }
