@@ -5727,6 +5727,71 @@ static void farm_bulk_positions(const uint64_t* tr, int n, Vec3* out, uint8_t* o
     for (int i = 0; i < n; ++i) ok[(size_t)i] = valid[(size_t)i];
 }
 
+// Rewrite the transform's LOCAL translation so its world position becomes
+// `pin` (parent chain untouched). This is what holds the glowing X in
+// place: the game re-places the mark on the bark after every hit, and no
+// amount of reading can stop that — writing the transform back is the only
+// lever. The write is rare and small: a few reads plus one 48-byte write,
+// and only on the frames where the mark actually moved.
+static bool farm_pin_transform(uint64_t native_transform, const Vec3& pin) {
+    const TransformHierarchyLayout* layout = nullptr;
+    if (g_skeleton_layout_valid) layout = &g_skeleton_layout;
+    else if (g_transform_hierarchy_layout_valid) layout = &g_transform_hierarchy_layout;
+    if (!layout || !native_transform) return false;
+
+    uint64_t transform_data = rd_ptr(native_transform + layout->data_offset);
+    int32_t  transform_index = rd<int32_t>(native_transform + layout->index_offset);
+    if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
+    uint64_t matrices = rd_ptr(transform_data + layout->matrices_offset);
+    uint64_t indices  = rd_ptr(transform_data + layout->indices_offset);
+    if (layout->matrices_indirect) { uint64_t p = rd_ptr(matrices); if (!p) return false; matrices = p; }
+    if (layout->indices_indirect)  { uint64_t p = rd_ptr(indices);  if (!p) return false; indices = p; }
+    if (!matrices || !indices) return false;
+
+    const uint64_t own_addr = matrices + (uint64_t)transform_index * sizeof(Matrix34);
+    Matrix34 own{};
+    if (!rd_exact(own_addr, own) || !matrix34_is_valid(own)) return false;
+
+    // Parent chain, direct parent first (same guards as the forward read).
+    Matrix34 parents[16];
+    int depth = 0;
+    int32_t parent = rd<int32_t>(indices + (uint64_t)transform_index * sizeof(int32_t));
+    if (parent < 0) parent = -1;
+    int32_t previous = transform_index;
+    while (parent >= 0) {
+        if (depth >= 16 || parent > 100000 || parent == previous) return false;
+        Matrix34 m{};
+        if (!rd_exact(matrices + (uint64_t)parent * sizeof(Matrix34), m) || !matrix34_is_valid(m)) return false;
+        parents[depth++] = m;
+        previous = parent;
+        parent = rd<int32_t>(indices + (uint64_t)parent * sizeof(int32_t));
+        if (parent < 0) parent = -1;
+    }
+    if (parent != -1) return false; // the chain must reach the root, like the read path
+
+    // Un-project the pinned world point, topmost parent first: the inverse
+    // of  v' = T + R(S·v)  is  v = R⁻¹((v' − T) / S).
+    Vec3 p = pin;
+    for (int d = depth - 1; d >= 0; --d) {
+        const Matrix34& m = parents[d];
+        float sx = m.scale.x, sy = m.scale.y, sz = m.scale.z;
+        if (sx < 0.01F || sx > 1000.f || sy < 0.01F || sy > 1000.f || sz < 0.01F || sz > 1000.f) return false;
+        Vec4 q = {-m.rotation.x, -m.rotation.y, -m.rotation.z, m.rotation.w}; // conjugate = inverse
+        p = rotate_vector(q, {(p.x - m.translation.x) / sx,
+                              (p.y - m.translation.y) / sy,
+                              (p.z - m.translation.z) / sz});
+    }
+    if (!vec3_is_finite(p)) return false;
+    // Safety: pinning corrects a mark hop (tens of cm), never metres.
+    double dx = (double)p.x - own.translation.x, dy = (double)p.y - own.translation.y,
+           dz = (double)p.z - own.translation.z;
+    if (dx * dx + dy * dy + dz * dz > 9.0) return false;
+    own.translation.x = p.x;
+    own.translation.y = p.y;
+    own.translation.z = p.z;
+    return wr_buf(own_addr, &own, sizeof(Matrix34));
+}
+
 // Find the live X under the node. `keep` is the previous pick — it is held
 // while it is still alive, so one bad read (the game rewriting the transform
 // mid-update) does not drop the lock. Returns 0 when no live X is found.
@@ -5929,6 +5994,8 @@ bool esp_farm_get_target(FarmTarget& out) {
     static int      s_spot_recheck = 0;
     static Vec3     s_spot_last{};
     static int      s_spot_hold = 0;
+    static Vec3     s_spot_pin{};    // where the X is HELD (see below)
+    static bool     s_spot_pinned = false;
     if (s_spot_component != best->component || s_spot_identity != best->identity) {
         s_spot_component = best->component;
         s_spot_identity = best->identity;
@@ -5936,6 +6003,7 @@ bool esp_farm_get_target(FarmTarget& out) {
         s_spot_recheck = 0;
         s_spot_last = {};
         s_spot_hold = 0;
+        s_spot_pinned = false;
     }
     // The X only exists in melee range, so the subtree is only scanned while
     // we are actually near the node (scanning it from 50 m away was pure
@@ -6012,8 +6080,24 @@ bool esp_farm_get_target(FarmTarget& out) {
             s_spot_last = spot;
             s_spot_hold = 120;
             spot_ok = true;
-            aim = spot;
-            marker_pt = spot;
+            // Hold the X where it first appeared: the game re-places the
+            // mark on the bark after every hit, and on those frames we
+            // write the transform back to the pinned spot (a hop of the
+            // mark = a hop of the bot's aim otherwise). Aim/marker always
+            // use the pin, so they never jump even in the 1-2 frames
+            // between the game's move and our write.
+            if (!s_spot_pinned) {
+                s_spot_pin = spot;
+                s_spot_pinned = true;
+            } else {
+                double ddx = (double)spot.x - s_spot_pin.x,
+                       ddy = (double)spot.y - s_spot_pin.y,
+                       ddz = (double)spot.z - s_spot_pin.z;
+                if (ddx * ddx + ddy * ddy + ddz * ddz > 0.05F * 0.05F)
+                    farm_pin_transform(s_spot_transform, s_spot_pin);
+            }
+            aim = s_spot_pin;
+            marker_pt = s_spot_pin;
             // Is the X on OUR side of the node? When the mark is on the far
             // side of the trunk/boulder the tool cannot reach it — the
             // controller circles until it faces us.
@@ -6046,11 +6130,12 @@ bool esp_farm_get_target(FarmTarget& out) {
             // up to ~0.8 s instead of snapping the crosshair to the body.
             --s_spot_hold;
             spot_ok = true;
-            aim = s_spot_last;
-            marker_pt = s_spot_last;
+            if (s_spot_pinned) { aim = s_spot_pin; marker_pt = s_spot_pin; }
+            else { aim = s_spot_last; marker_pt = s_spot_last; }
             spot_front = true; // held mark was on our side when it was good
         } else {
             s_spot_transform = 0; // the mark is gone — aim the body
+            s_spot_pinned = false;
         }
     }
     // No live X: aim the body (tree chest / ore waist). Height is clamped
