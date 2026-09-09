@@ -6392,16 +6392,34 @@ bool esp_farm_get_target(FarmTarget& out) {
     // while at the node (remove with the other probes).
     {
         static std::chrono::steady_clock::time_point s_last;
+        static std::chrono::steady_clock::time_point s_cache_last;
         static int s_n = 0;
+        {
+            auto cnow = std::chrono::steady_clock::now();
+            if ((cnow - s_cache_last) >= std::chrono::seconds(5)) {
+                s_cache_last = cnow;
+                int n0 = 0, n1 = 0, n2 = 0, n3 = 0;
+                for (const FarmEntity& e : g_farm_entities) {
+                    if (e.kind == 0) ++n0; else if (e.kind == 1) ++n1;
+                    else if (e.kind == 2) ++n2; else ++n3;
+                }
+                char line[128];
+                snprintf(line, sizeof(line),
+                         "CACHE tree=%d stone=%d iron=%d sulfur=%d mask=%u\n",
+                         n0, n1, n2, n3, (unsigned)g_farm_mask);
+                farm_log_append(line);
+            }
+        }
         auto now = std::chrono::steady_clock::now();
         if (s_n < 4000 && (now - s_last) >= std::chrono::milliseconds(200)) {
             s_last = now;
             ++s_n;
             char line[208];
             snprintf(line, sizeof(line),
-                     "LOG kind=%d d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f spot=%d front=%d oa=%.0f body=(%.1f,%.1f) node=(%.1f,%.1f) x=(%.1f,%.1f)\n",
+                     "LOG kind=%d d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f pitch=%.1f spot=%d front=%d oa=%.0f body=(%.1f,%.1f) node=(%.1f,%.1f) x=(%.1f,%.1f)\n",
                      best->kind, best_dist, out.aim_dist, out.walk_yaw, out.yaw,
-                     spot_ok ? 1 : 0, spot_front ? 1 : 0, out.orbit_angle,
+                     out.pitch, spot_ok ? 1 : 0, spot_front ? 1 : 0,
+                     out.orbit_angle,
                      g_frame_local_pos.x, g_frame_local_pos.z,
                      best->pos.x, best->pos.z, marker_pt.x, marker_pt.z);
             farm_log_append(line);

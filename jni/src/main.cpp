@@ -3986,9 +3986,10 @@ static void UpdateFarm(float dt) {
                     ++s_n;
                     char line[176];
                     snprintf(line, sizeof(line),
-                             "MOVE ph=%d spot=%d front=%d orbit=%d st=(%.2f,%.2f)%s d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f\n",
+                             "MOVE ph=%d spot=%d front=%d orbit=%d tap=%d st=(%.2f,%.2f)%s d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f\n",
                              phase, tgt.has_spot ? 1 : 0, tgt.spot_front ? 1 : 0,
-                             orbit ? 1 : 0, (s_stickPx - cx) / r, (s_stickPy - cy) / r,
+                             orbit ? 1 : 0, s_tapDown ? 1 : 0,
+                             (s_stickPx - cx) / r, (s_stickPy - cy) / r,
                              s_moveDown ? "" : " up", tgt.dist, tgt.aim_dist,
                              tgt.walk_yaw, tgt.yaw);
                     esp_farm_log_line(line);
@@ -4060,10 +4061,18 @@ static void UpdateFarm(float dt) {
             if (progress) s_stuckTime = 0.f;
         } else if (s_evadeTime <= 0.f) {
             s_stuckTime += dt;
-            if (s_stuckTime > 3.f) {
+            if (s_stuckTime > 2.f) {
                 if (s_evadeCount < 4) {
                     s_evadeTime = 1.7f;                       // ~0.6 s back + ~1.1 s strafe
-                    s_evadeDir = (s_evadeCount % 2 == 0) ? 1.f : -1.f;
+                    // Sidestep towards the side the GOAL is on (the wall is
+                    // usually in the way straight ahead, so the goal side is
+                    // the open side). Blind alternating used to strafe away
+                    // from the node and slide along the wall in the wrong
+                    // direction; fall back to alternating when the goal is
+                    // straight ahead (either side is a coin flip).
+                    if (tgt.walk_yaw >  8.f)      s_evadeDir =  1.f;
+                    else if (tgt.walk_yaw < -8.f) s_evadeDir = -1.f;
+                    else                          s_evadeDir = (s_evadeCount % 2 == 0) ? 1.f : -1.f;
                     ++s_evadeCount;
                     s_stuckTime = 0.f;
                 } else {
