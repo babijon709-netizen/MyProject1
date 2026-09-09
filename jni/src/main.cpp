@@ -3769,9 +3769,27 @@ static void UpdateFarm(float dt) {
     // to stand a bit off the trunk, not pressed against it.
     const float meleeX = isTree ? 1.05f : 1.55f;
     const float reachX = isTree ? 2.6f  : 2.4f;  // close enough to start (body aim)
-    const bool  inMelee = orbit ? false
-                 : (tgt.has_spot ? (tgt.aim_dist <= meleeX)
-                                 : (tgt.dist <= reachX));
+    // Strike the mark head-on: at a shallow angle the swing ray passes the
+    // trunk and the hit whiffs, so mining (and the taps) start only when
+    // the body is roughly on the radial line through the X (walk_yaw ~ 0).
+    // Hysteresis 20/30 deg keeps the phase from flickering at the border.
+    static bool s_head_on = true;
+    if (tgt.has_spot && !orbit) {
+        if (!s_head_on) s_head_on = (fabsf(tgt.walk_yaw) < 20.f);
+        else            s_head_on = (fabsf(tgt.walk_yaw) < 30.f);
+    }
+    // In reach for a long time without ever getting head-on (terrain, a
+    // mark that keeps hopping sideways): strike anyway — a side hit beats
+    // no hit at all.
+    static float s_range_time = 0.f;
+    const bool inRange = tgt.has_spot ? (tgt.aim_dist <= meleeX)
+                                      : (tgt.dist <= reachX);
+    // Grows only while in reach AND off the line: the moment the body gets
+    // head-on (or leaves the range) the head-on gate re-arms.
+    if (inRange && tgt.has_spot && !orbit && !s_head_on) s_range_time += dt;
+    else s_range_time = 0.f;
+    const bool headOn = !tgt.has_spot || orbit || s_head_on || s_range_time > 4.0f;
+    const bool inMelee = orbit ? false : (inRange && headOn);
     const int phase = inMelee ? 2 : 1;
     g_farmPhase = phase;
 
@@ -3872,18 +3890,34 @@ static void UpdateFarm(float dt) {
             wantWalk = true;
             px = cx + r * 0.9f * tgt.orbit_side;
             py = cy - r * 0.5f;
-        } else if (phase == 1) {
-            // Walk straight at the node once the camera is roughly on it
+        } else if (phase == 1 ||
+                   (inRange && tgt.has_spot && !orbit && !s_head_on &&
+                    s_range_time > 4.0f)) {
+            // Walk at the walk target once the camera is roughly on it
             // (steering the stick at a big yaw would send the bot sideways).
+            // The fallback branch: in reach and striking side-on for 4 s —
+            // keep tapping (phase 2) but keep sliding onto the line too.
             if (fabsf(tgt.walk_yaw) < 45.f) {
                 wantWalk = true;
-                float steer = tgt.walk_yaw / 60.f;  // slight steering
-                if (steer >  0.5f) steer =  0.5f;
-                if (steer < -0.5f) steer = -0.5f;
-                // FULL deflection = run speed: the stick is pushed to its
-                // whole radius, angled a bit toward the target.
-                px = cx + r * steer;
-                py = cy - r * 0.99f * sqrtf(1.f - steer * steer);
+                if (inRange && tgt.has_spot) {
+                    // In reach, but off the radial line through the X: glide
+                    // onto it — mostly sideways at walk speed. Running
+                    // full-tilt would overshoot the line and the stick would
+                    // start sawing left-right.
+                    float steer = tgt.walk_yaw / 40.f;
+                    if (steer >  1.f) steer =  1.f;
+                    if (steer < -1.f) steer = -1.f;
+                    px = cx + r * 0.55f * steer;
+                    py = cy - r * 0.30f;
+                } else {
+                    float steer = tgt.walk_yaw / 60.f;  // slight steering
+                    if (steer >  0.5f) steer =  0.5f;
+                    if (steer < -0.5f) steer = -0.5f;
+                    // FULL deflection = run speed: the stick is pushed to
+                    // its whole radius, angled a bit toward the target.
+                    px = cx + r * steer;
+                    py = cy - r * 0.99f * sqrtf(1.f - steer * steer);
+                }
             }
         } else {
             // Mining: nudge forward only while the tool still does not

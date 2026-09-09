@@ -5492,11 +5492,12 @@ static bool farm_spot_alive(int kind, const Vec3& node_pos, const Vec3& p, float
         if (sy < -1.0F || sy > 3.5F) return false;
         if (!farm_spot_above_dirt(p)) return false;
     } else {
-        // Rock: the pivot rides near the top of the boulder, so the mark can
-        // sit a little BELOW it.
+        // Rock: the pivot rides near the top of the boulder, so the mark
+        // sits BELOW it — on a big rock well below: the window is wide,
+        // the name and the err ranking do the picking.
         if (d2 <= 0.08F * 0.08F) return false;
-        if (d2 >= 3.5F * 3.5F)   return false;
-        if (sy < -1.6F || sy > 1.8F) return false;
+        if (d2 >= 4.5F * 4.5F)   return false;
+        if (sy < -2.8F || sy > 2.4F) return false;
     }
     if (err_out) {
         float want_y = farm_eye_y() - 0.40F;
@@ -5748,7 +5749,7 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         if (marker_world_position(nodes[(size_t)i], pos[(size_t)i])) ok[(size_t)i] = 1;
     }
 
-    struct Cand { uint64_t node; float err; float h; };
+    struct Cand { uint64_t node; float err; float h; Vec3 p; };
     std::vector<Cand> live;
     live.reserve(nodes.size());
     for (int i = 0; i < n; ++i) {
@@ -5759,7 +5760,7 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         float err = 1e9F;
         if (!farm_spot_alive(kind, node_pos, p, &err)) continue;
         float dx = p.x - node_pos.x, dz = p.z - node_pos.z;
-        live.push_back({nodes[(size_t)i], err, sqrtf(dx * dx + dz * dz)});
+        live.push_back({nodes[(size_t)i], err, sqrtf(dx * dx + dz * dz), p});
     }
     // The real X is a decal painted ON the bark: among the live candidates
     // it is the child closest to the trunk axis. Children floating in the
@@ -5817,6 +5818,41 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
             if (!best)
                 for (const Cand& c : live) if (!best || c.err < best->err) best = &c;
             picked = best ? best->node : 0;
+        }
+    }
+
+    // TEMP (ore diagnosis): one snapshot per ore node — every live
+    // candidate with its name and geometry, plus the pick. One file
+    // (appended) after a few rocks shows exactly why the ore's X is or
+    // is not selected. Remove once ore farming is fixed.
+    if (kind != 0) {
+        static std::unordered_set<uint64_t> s_dumped;
+        if (s_dumped.size() < 16 && s_dumped.insert(node_transform).second) {
+            static const char* const paths[3] = {
+                "/sdcard/xvcen_ore_dump.txt",
+                "/storage/emulated/0/xvcen_ore_dump.txt",
+                "/data/local/tmp/xvcen_ore_dump.txt",
+            };
+            for (int i = 0; i < 3; ++i) {
+                FILE* f = fopen(paths[i], "a");
+                if (!f) continue;
+                fprintf(f, "\nnode=0x%llx kind=%d pos=(%.3f,%.3f,%.3f) eye_y=%.3f\n",
+                        (unsigned long long)node_transform, kind,
+                        node_pos.x, node_pos.y, node_pos.z, farm_eye_y());
+                for (const Cand& c : live) {
+                    char name[48] = "";
+                    if (g_go_name_offset_valid) read_transform_name(c.node, name, sizeof(name));
+                    double d3 = sqrt((double)(c.p.x - node_pos.x) * (c.p.x - node_pos.x) +
+                                     (double)(c.p.y - node_pos.y) * (c.p.y - node_pos.y) +
+                                     (double)(c.p.z - node_pos.z) * (c.p.z - node_pos.z));
+                    fprintf(f, "%s h=%.3f d=%.3f sy=%.3f err=%.3f (%.3f,%.3f,%.3f) %s\n",
+                            c.node == picked ? "*" : " ", c.h, (float)d3,
+                            c.p.y - node_pos.y, c.err, c.p.x, c.p.y, c.p.z,
+                            name[0] ? name : "(anon)");
+                }
+                fclose(f);
+                break;
+            }
         }
     }
 
