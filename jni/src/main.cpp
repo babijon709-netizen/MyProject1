@@ -3627,6 +3627,22 @@ static void UpdateFarm(float dt) {
     esp_farm_set_resources(mask);
     esp_farm_set_range(g_state.farm_range);
 
+    // TEMP farm log: mask change events — settles the "I enabled the ore
+    // but the bot stood there" question with data: if the toggles ever
+    // register, this line appears with the new bits.
+    {
+        static unsigned s_mask_prev = 0xFFFFFFFFu;
+        if (s_mask_prev != mask) {
+            char line[96];
+            snprintf(line, sizeof(line),
+                     "MASK mask=%u wood=%d stone=%d metal=%d sulfur=%d",
+                     mask, (int)g_state.farm_wood, (int)g_state.farm_stone,
+                     (int)g_state.farm_metal, (int)g_state.farm_sulfur);
+            esp_farm_log_line(line);
+            s_mask_prev = mask;
+        }
+    }
+
     const bool menuBlocked = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     // The aimbot owns the camera while it is on a player — farm yields fully.
     // g_farmCalib: пока пользователь тапает зоны, бот молчит.

@@ -5383,9 +5383,11 @@ static void rebuild_farm_entities() {
     static int s_cls[4] = {0, 0, 0, 0};
     static std::unordered_map<int, int> s_raw;
     static std::unordered_map<int, std::string> s_raw_name;
+    static std::unordered_map<std::string, int> s_tree_names;
     s_cls[0] = s_cls[1] = s_cls[2] = s_cls[3] = 0;
     s_raw.clear();
     s_raw_name.clear();
+    s_tree_names.clear();
 
     uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
@@ -5457,6 +5459,12 @@ static void rebuild_farm_entities() {
                         strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
                         strstr(go_name, "stump"))
                         continue;
+                    // TEMP farm log: tree-name census (the names are
+                    // already read for the filter above — free data).
+                    // If size is encoded in the name, this is the
+                    // pre-filter for "thick only".
+                    if (s_tree_names.size() < 16 || s_tree_names.count(go_name))
+                        s_tree_names[go_name]++;
                 }
             }
 
@@ -5483,6 +5491,11 @@ static void rebuild_farm_entities() {
                     o += snprintf(line + o, sizeof(line) - (size_t)o,
                                   " raw%d=%d(%s)", kv.first, kv.second,
                                   s_raw_name[kv.first].c_str());
+            }
+            for (const auto& kv : s_tree_names) {
+                if (o < (int)sizeof(line) - 40)
+                    o += snprintf(line + o, sizeof(line) - (size_t)o,
+                                  " T[%s]=%d", kv.first.c_str(), kv.second);
             }
             farm_log_append(line);
         }
@@ -6228,6 +6241,24 @@ bool esp_farm_get_target(FarmTarget& out) {
             float pz = g_frame_local_pos.z - best->pos.z;
             float sl = sqrtf(sx * sx + sz * sz);
             float pl = sqrtf(px * px + pz * pz);
+
+            // TEMP: the user wants the farm to skip thin trees. The X
+            // sits ON the bark, so sl is the trunk radius itself: below
+            // the floor it is a sapling — blacklist it for 3 minutes and
+            // let the selection pick the next tree. (A thin tree is
+            // walked to once per 3 min to measure itself, then skipped.)
+            if (best->kind == 0 && sl > 0.05F && sl < 0.60F) {
+                static uint64_t s_thin_logged = 0;
+                if (s_thin_logged != best->identity) {
+                    s_thin_logged = best->identity;
+                    char line[128];
+                    snprintf(line, sizeof(line),
+                             "THIN node=0x%llx h=%.2f — dropped",
+                             (unsigned long long)best->identity, sl);
+                    farm_log_append(line);
+                }
+                esp_farm_blacklist(best->identity, 180.0F);
+            }
             if (sl > 0.05F && pl > 0.3F) {
                 float t1 = atan2f(px, pz);
                 float t2 = atan2f(sx, sz);
