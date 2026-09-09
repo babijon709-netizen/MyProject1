@@ -3771,6 +3771,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         reset_world_caches();
     }
 
+    // The camera read can fail transiently (the game is mid-frame writing
+    // the matrices, or swaps the active camera while aiming). Blank the
+    // whole ESP for such a frame and the overlay "flickers" — so remember
+    // the previous frame's camera: on a failure we project through it for
+    // one frame (positions are still read fresh, only the view lags).
+    const Mat4  prev_vp    = g_frame_vp;
+    const Vec3  prev_local = g_frame_local_pos;
+    const bool  prev_valid = g_frame_vp_valid && g_frame_local_valid;
+
     // Markers reuse this frame's camera; invalidate it until it is rebuilt so
     // an early return here can never leave them projecting through a stale one.
     g_frame_vp_valid = false;
@@ -3837,6 +3846,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     bool transform_camera_mode = false; // light fix: always use native cam matrices, avoid dead-body-as-camera on death
+    bool camera_fallback = false;       // project through the PREVIOUS frame's camera
     if (!transform_camera_mode) {
         uint64_t managed_cam = 0;
         if (g_game_controller_class) {
@@ -3847,25 +3857,39 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
         if (!managed_cam) {
-            return result;
-        }
-        native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-        if (!native_cam) {
-            return result;
-        }
-        xray_apply(native_cam);
-        always_day_tick();
-        if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
-            return result;
-        }
-        if (!g_matrix_configuration_validated) {
-            if (!optimize_matrix_configuration(native_cam, s_transforms)) {
-                return result;
+            if (!prev_valid) return result;
+            camera_fallback = true; // camera object momentarily gone (camera swap)
+        } else {
+            native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
+            if (!native_cam) {
+                if (!prev_valid) return result;
+                camera_fallback = true; // same: the swap is in progress
+            } else {
+                xray_apply(native_cam);
+                always_day_tick();
+                if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
+                    if (!prev_valid) return result;
+                    camera_fallback = true; // read hit a mid-update write
+                }
+                if (!camera_fallback && !g_matrix_configuration_validated) {
+                    if (!optimize_matrix_configuration(native_cam, s_transforms)) {
+                        return result;
+                    }
+                    if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
+                        if (!prev_valid) return result;
+                        camera_fallback = true;
+                    }
+                }
             }
-            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
         }
-        // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
-        vp = mat_mul(projection, view);
+        if (camera_fallback) {
+            // One-frame-old view: boxes keep moving (fresh positions below),
+            // only the projection lags a frame. Far better than no boxes.
+            vp = prev_vp;
+        } else {
+            // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
+            vp = mat_mul(projection, view);
+        }
     }
 
     bool has_local_position = false;
@@ -3878,7 +3902,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     {
         Vec3 camera_position{};
-        bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
+        bool has_camera_position;
+        if (camera_fallback) {
+            // No fresh view matrix — last frame's local position is where
+            // we were; the local player barely moves in one frame.
+            camera_position = prev_local;
+            has_camera_position = true;
+        } else {
+            has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
+        }
         double nearest_distance_squared = INFINITY;
         size_t first_valid_index = s_transforms.size();
         Vec3 first_valid_position{};
@@ -3912,7 +3944,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_sw = sw; g_frame_sh = sh;
     g_frame_local_pos = local;
     g_frame_local_valid = has_local_position;
-    g_frame_publish_fail_streak = 0; // this frame is healthy
+    if (!camera_fallback) g_frame_publish_fail_streak = 0; // healthy frame
+    // A fallback frame keeps counting toward the watchdog: a camera that
+    // stays dead for a few seconds still triggers the world rebuild.
 
     // Fallback camera basis straight from the view matrix (rows: right, up,
     // -forward). Kept separate from g_cam_* — the pose path stays authoritative
