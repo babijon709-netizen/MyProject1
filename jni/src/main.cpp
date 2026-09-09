@@ -3785,15 +3785,29 @@ static void UpdateFarm(float dt) {
     else if (inRaw) s_in_range = true;
     else if (outRaw) s_in_range = false;
     const bool inRange = s_in_range;
-    // In range the body does NOT walk at all: the camera and the tool
-    // chase the live X, and the swing ray (body -> X) clears the trunk
-    // while the X is inside the reachable arc (spot_front, 65 deg — see
-    // game.cpp; the geometric limit at this standoff is ~74 deg).
-    // Re-aiming the body at the mark on every hop is exactly what made
-    // the bot run left-right in front of the tree. The only in-range
-    // movement left is the orbit: the X hopped past the reachable arc,
-    // so circle a short arc until it faces us again.
-    const bool inMelee = orbit ? false : inRange;
+    // Strike the mark head-on: the body should stand roughly on the
+    // radial line through the X — swinging at a mark that sits 40-60 deg
+    // AROUND the trunk lands on the bark from the side. But the X hops
+    // after every hit, so re-aligning on every hop made the bot saw
+    // left-right. Both problems at once:
+    //  - hysteresis: start aligning only when the mark is >35 deg around
+    //    the trunk from our line, call it head-on when it is <25 deg —
+    //    small hops do not move the body at all;
+    //  - the alignment is a smooth ARC around the trunk (strafe at the
+    //    current radius, one direction), not a walk at the point in front
+    //    of the mark — the mark hops, that point jumps, chasing it was
+    //    the running.
+    static bool  s_head_on = true;
+    static unsigned long long s_side_owner = 0;
+    if (tgt.id != s_side_owner) { s_side_owner = tgt.id; s_head_on = true; }
+    if (tgt.has_spot && inRange) {
+        if (s_head_on) s_head_on = (tgt.orbit_angle < 35.f);
+        else           s_head_on = (tgt.orbit_angle < 25.f);
+    } else if (tgt.has_spot) {
+        s_head_on = true; // approaching: the approach lands in front of it
+    }
+    const bool headOn = !tgt.has_spot || s_head_on;
+    const bool inMelee = inRange && headOn;
     const int phase = inMelee ? 2 : 1;
     g_farmPhase = phase;
 
@@ -3803,7 +3817,8 @@ static void UpdateFarm(float dt) {
         // node body, so the walk goes straight at the node and the camera is
         // already on the X by the time we stop (it sits on the node, a few
         // degrees off the body).
-        float steerYaw = (phase == 2 || orbit) ? tgt.yaw : tgt.walk_yaw;
+        // Mining and aligning: chase the X. Approach: the node body.
+        float steerYaw = (tgt.has_spot && inRange) ? tgt.yaw : tgt.walk_yaw;
         float steerPitch = tgt.pitch;
         float wantYawPx = steerYaw / gain;
         // While walking, only fix a BADLY tilted camera (left looking at the
@@ -3888,12 +3903,14 @@ static void UpdateFarm(float dt) {
                 py = cy - r * 0.4f;
             }
             if (s_evadeTime <= 0.f) { s_evadeTime = 0.f; s_stuckTime = 0.f; s_lastGoal = 1e9f; }
-        } else if (orbit) {
-            // X on the far side: slide around the node until it faces us.
-            // A short arc in one direction, not 360 degrees.
+        } else if (tgt.has_spot && inRange && !s_head_on) {
+            // The mark is around the side (or far) of the trunk: strafe a
+            // smooth arc at the current radius until it faces us, then
+            // stand still and strike. Pure strafe (no forward): the
+            // standoff distance is kept, only the angle is fixed.
             wantWalk = true;
-            px = cx + r * 0.9f * tgt.orbit_side;
-            py = cy - r * 0.5f;
+            px = cx + r * 0.95f * tgt.orbit_side;
+            py = cy;
         } else if (phase == 1) {
             // Walk at the walk target once the camera is roughly on it
             // (steering the stick at a big yaw would send the bot sideways).

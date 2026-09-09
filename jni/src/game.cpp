@@ -6152,37 +6152,32 @@ bool esp_farm_get_target(FarmTarget& out) {
             spot_ok = true;
             aim = spot;
             marker_pt = spot;
-            // Can the swing actually REACH the X? The swing ray goes
-            // body -> mark and clears the trunk only while the mark sits
-            // within acos(r_t / (r_t + standoff)) of our radial — ~74 deg
-            // at the tree standoff (1.05 m). The old -0.35 threshold
-            // (110 deg) let the mark sit 74..110 deg off, where every
-            // swing hit the NEAR bark instead of the mark — the "standing
-            // and hitting from the side". Orbit a little earlier, at
-            // 65 deg: the arc to cover is short and the mark is always
-            // comfortably inside the tool's sweep.
+            // The signed angle around the node from our radial to the
+            // mark's radial — ALWAYS reported: the controller arcs around
+            // the trunk until the mark is in front (head-on, ~<25 deg)
+            // and strikes from there. The swing ray body -> mark also
+            // clears the trunk only while |a| is within ~74 deg at the
+            // tree standoff (acos(r_t/(r_t+1.05))), so beyond ~70 deg the
+            // mark is unreachable until we circle closer to it:
+            // spot_front marks that border.
             float sx = spot.x - best->pos.x, sz = spot.z - best->pos.z;
             float px = g_frame_local_pos.x - best->pos.x;
             float pz = g_frame_local_pos.z - best->pos.z;
             float sl = sqrtf(sx * sx + sz * sz);
             float pl = sqrtf(px * px + pz * pz);
             if (sl > 0.05F && pl > 0.3F) {
+                float t1 = atan2f(px, pz);
+                float t2 = atan2f(sx, sz);
+                float a = t2 - t1;
+                while (a >  3.14159265F) a -= 6.2831853F;
+                while (a < -3.14159265F) a += 6.2831853F;
+                out.orbit_angle = fabsf(a) * 57.29577951F;
+                // side is resolved against the camera right once the
+                // basis is known below; keep the signed angle for then.
+                orbit_side = a;
                 float dot = (sx * px + sz * pz) / (sl * pl);
-                if (!(dot > 0.42F)) {   // cos 65 deg
+                if (!(dot > 0.342F)) {   // cos 70 deg: the trunk blocks the swing
                     spot_front = false;
-                    // Which way to circle: rotate the (player - node) vector
-                    // towards the (spot - node) one. theta = atan2(x, z); the
-                    // strafe axis is the camera right (same basis as the
-                    // angles below, picked once at the end).
-                    float t1 = atan2f(px, pz);
-                    float t2 = atan2f(sx, sz);
-                    float a = t2 - t1;
-                    while (a >  3.14159265F) a -= 6.2831853F;
-                    while (a < -3.14159265F) a += 6.2831853F;
-                    out.orbit_angle = fabsf(a) * 57.29577951F;
-                    // side is resolved against the camera right once the
-                    // basis is known below; keep the signed angle for then.
-                    orbit_side = a;
                 }
             }
         } else if (s_spot_hold > 0) {
@@ -6323,11 +6318,12 @@ bool esp_farm_get_target(FarmTarget& out) {
         return false;
     }
 
-    // Orbit direction needs the camera right: strafe along it until the X
-    // faces us. Moving the player along d changes the (player - node) angle
-    // theta = atan2(x, z) proportionally to (pz*dx - px*dz); we need that to
-    // carry the sign of the signed angle `a` stored in orbit_side.
-    if (!spot_front) {
+    // Alignment direction needs the camera right: the strafe arc runs
+    // along it until the X faces us. Moving the player along d changes the
+    // (player - node) angle theta = atan2(x, z) proportionally to
+    // (pz*dx - px*dz); we need that to carry the sign of the signed angle
+    // `a` stored in orbit_side.
+    if (spot_ok) {
         float px = g_frame_local_pos.x - best->pos.x;
         float pz = g_frame_local_pos.z - best->pos.z;
         float crossz = pz * right.x - px * right.z;
