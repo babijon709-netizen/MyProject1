@@ -5748,7 +5748,7 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         if (marker_world_position(nodes[(size_t)i], pos[(size_t)i])) ok[(size_t)i] = 1;
     }
 
-    struct Cand { uint64_t node; float err; };
+    struct Cand { uint64_t node; float err; float h; size_t idx; };
     std::vector<Cand> live;
     live.reserve(nodes.size());
     for (int i = 0; i < n; ++i) {
@@ -5758,15 +5758,34 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         if (!vec3_is_finite(p)) continue;
         float err = 1e9F;
         if (!farm_spot_alive(kind, node_pos, p, &err)) continue;
-        live.push_back({nodes[(size_t)i], err});
+        float dx = p.x - node_pos.x, dz = p.z - node_pos.z;
+        live.push_back({nodes[(size_t)i], err, sqrtf(dx * dx + dz * dz), (size_t)i});
     }
+    // The real X is a decal painted ON the bark: among the live candidates
+    // it is the child closest to the trunk axis. Children floating in the
+    // AIR in front of the bark (a glow light, a particle anchor, a
+    // hit-marker container) sit farther out from the axis — and on some
+    // tree models (the "tank" tree) such a child even carries an X-like
+    // NAME, so name/err-picking made the marker float in the air instead of
+    // lying on the cross, and the swing missed it. On trees the choice is
+    // therefore restricted to candidates within 10 cm of the innermost one
+    // (the bark surface).
+    float min_h = 1e9F;
+    for (const Cand& c : live) if (c.h < min_h) min_h = c.h;
+    const float bark_band = kind == 0 ? min_h + 0.10F : 1e9F;
+    auto on_bark = [bark_band](const Cand& c) { return c.h <= bark_band; };
+    bool have_bark = false;
+    for (const Cand& c : live) if (on_bark(c)) { have_bark = true; break; }
+
     // Names only for the few geometry-live candidates (the old code read the
     // name of EVERY child — hundreds of extra syscalls per scan for names
-    // that are almost never the deciding factor).
+    // that are almost never the deciding factor). A named child floating in
+    // the air is not the decal, so it can never win by name.
     uint64_t named = 0;
     float named_err = 1e9F;
     if (g_go_name_offset_valid) {
         for (const Cand& c : live) {
+            if (!on_bark(c)) continue;
             char name[48];
             if (read_transform_name(c.node, name, sizeof(name))) {
                 for (char* ch = name; *ch; ++ch)
@@ -5779,15 +5798,76 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         }
     }
 
-    // 1) A child named like the X (rocks name theirs clearly).
-    // 2) The previous pick, while still alive (hysteresis).
-    // 3) The live child closest to the chest on the surface — covers the
-    //    anonymous mark, including one that just spawned.
-    if (named) return named;
-    for (const Cand& c : live) if (c.node == keep) return keep;
-    const Cand* best = nullptr;
-    for (const Cand& c : live) if (!best || c.err < best->err) best = &c;
-    return best ? best->node : 0;
+    // 1) A child named like the X (rocks name theirs clearly) — on the bark.
+    // 2) The previous pick while still alive (hysteresis) — but not when a
+    //    bark candidate is available and the previous pick floats farther
+    //    out: that is the tank-tree lock-on the marker sticks to.
+    // 3) Closest to the chest among the bark candidates; if nothing sits in
+    //    the bark band (odd geometry) fall back to the best overall so the
+    //    spot is at least not lost.
+    uint64_t picked = 0;
+    if (named) {
+        picked = named;
+    } else {
+        for (const Cand& c : live)
+            if (c.node == keep && (!have_bark || on_bark(c))) { picked = keep; break; }
+        if (!picked) {
+            const Cand* best = nullptr;
+            for (const Cand& c : live) if (on_bark(c) && (!best || c.err < best->err)) best = &c;
+            if (!best)
+                for (const Cand& c : live) if (!best || c.err < best->err) best = &c;
+            picked = best ? best->node : 0;
+        }
+    }
+
+    // Diagnostics: when the pick changes (and periodically while farming)
+    // write every candidate — name, position, distance from the axis — to
+    // a file. Ground truth for models where the marker floats in the air:
+    // the line marked * is what we picked, the rest show where the real
+    // decal sits. First writable of the three paths wins.
+    {
+        static const char* const dump_paths[3] = {
+            "/sdcard/xvcen_farm_dump.txt",
+            "/storage/emulated/0/xvcen_farm_dump.txt",
+            "/data/local/tmp/xvcen_farm_dump.txt",
+        };
+        static int     s_path = -2;   // -2: untried, 3: nowhere writable
+        static uint64_t s_last_pick = 0;
+        static double   s_last_ts = -1e9;
+        double ts = mono_seconds();
+        if (s_path == -2) {
+            s_path = 3;
+            for (int i = 0; i < 3; ++i) {
+                FILE* t = fopen(dump_paths[i], "w");
+                if (t) { fclose(t); s_path = i; break; }
+            }
+        }
+        if (picked && s_path < 3 &&
+            (picked != s_last_pick || ts - s_last_ts > 5.0)) {
+            s_last_pick = picked;
+            s_last_ts = ts;
+            FILE* f = fopen(dump_paths[s_path], "w");
+            if (f) {
+                fprintf(f, "t=%.1f kind=%d node=(%.3f,%.3f,%.3f) candidates=%zu bark_band=%.3f\n",
+                        ts, kind, node_pos.x, node_pos.y, node_pos.z,
+                        (size_t)live.size(), kind == 0 ? min_h + 0.10F : 0.f);
+                for (const Cand& c : live) {
+                    const Vec3& pp = pos[c.idx];
+                    char name[48] = "";
+                    if (g_go_name_offset_valid) read_transform_name(c.node, name, sizeof(name));
+                    double d = sqrt((double)(pp.x - node_pos.x) * (pp.x - node_pos.x) +
+                                    (double)(pp.y - node_pos.y) * (pp.y - node_pos.y) +
+                                    (double)(pp.z - node_pos.z) * (pp.z - node_pos.z));
+                    fprintf(f, "%s h=%.3f d=%.3f sy=%.3f err=%.3f (%.3f,%.3f,%.3f) %s\n",
+                            c.node == picked ? "*" : " ", c.h, (float)d,
+                            pp.y - node_pos.y, c.err, pp.x, pp.y, pp.z,
+                            name[0] ? name : "(anon)");
+                }
+                fclose(f);
+            }
+        }
+    }
+    return picked;
 }
 
 // ---- The target picker --------------------------------------------------------
