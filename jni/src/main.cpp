@@ -3764,7 +3764,10 @@ static void UpdateFarm(float dt) {
     // through the trunk/boulder, so first circle until it faces us (orbit).
     const bool  isTree = (tgt.kind == 0);
     const bool  orbit  = tgt.has_spot && !tgt.spot_front;
-    const float meleeX = isTree ? 0.80f : 1.55f; // how far the tool actually reaches
+    // Stop distance: the tree one is the standoff, not the reach — the tool
+    // comfortably reaches farther (ore mines at 1.55), but the player wants
+    // to stand a bit off the trunk, not pressed against it.
+    const float meleeX = isTree ? 1.05f : 1.55f;
     const float reachX = isTree ? 2.6f  : 2.4f;  // close enough to start (body aim)
     const bool  inMelee = orbit ? false
                  : (tgt.has_spot ? (tgt.aim_dist <= meleeX)
