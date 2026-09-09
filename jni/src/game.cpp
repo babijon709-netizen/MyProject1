@@ -5377,6 +5377,16 @@ static void rebuild_farm_entities() {
     if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
     g_farm_entities.clear(); // scan is readable from here on — rebuild for real
 
+    // TEMP farm log: per-scan classification census (BEFORE the mask
+    // filter) — the ore question: are ore nodes classified at all, and
+    // with which raw entityType values does this build label them.
+    static int s_cls[4] = {0, 0, 0, 0};
+    static std::unordered_map<int, int> s_raw;
+    static std::unordered_map<int, std::string> s_raw_name;
+    s_cls[0] = s_cls[1] = s_cls[2] = s_cls[3] = 0;
+    s_raw.clear();
+    s_raw_name.clear();
+
     uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
         uint64_t identity = 0;
@@ -5398,14 +5408,32 @@ static void rebuild_farm_entities() {
 
             // Kind: the entityType enum first (cheap and exact), loot second.
             int kind = -1;
-            switch ((MineableEntityType)rd<int32_t>(component + MINEABLE_ENTITY_TYPE)) {
+            int raw_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
+            switch ((MineableEntityType)raw_type) {
                 case MineableEntityType::Tree:   kind = 0; break;
                 case MineableEntityType::Stone:  kind = 1; break;
                 case MineableEntityType::Iron:   kind = 2; break;
                 case MineableEntityType::Sulfur: kind = 3; break;
                 default: break;
             }
-            if (kind < 0 && !farm_kind_from_loot(component, kind)) continue;
+            if (kind < 0 && !farm_kind_from_loot(component, kind)) {
+                // TEMP farm log: a mineable the farm DROPS — what value
+                // does the build label it with, and what is it called?
+                // (If the ores in this world carry a value outside the
+                // enum, this is where they go.)
+                if (s_raw.size() < 12) {
+                    s_raw[raw_type]++;
+                    if (s_raw_name.find(raw_type) == s_raw_name.end()) {
+                        char nm[48] = "";
+                        uint64_t tf = native_component_transform(managed_object_native(component));
+                        if (tf && g_go_name_offset_valid)
+                            read_transform_name(tf, nm, sizeof(nm));
+                        s_raw_name[raw_type] = nm[0] ? nm : "(anon)";
+                    }
+                }
+                continue;
+            }
+            if (kind >= 0 && kind < 4) s_cls[kind]++;
             if (!(g_farm_mask & (1u << kind))) continue;
 
             FarmEntity entity;
@@ -5437,6 +5465,27 @@ static void rebuild_farm_entities() {
             if (g_farm_entities.size() >= 512) break;
         }
         if (g_farm_entities.size() >= 512) break;
+    }
+
+    // TEMP farm log: the census, at most one line per 5 s.
+    {
+        static std::chrono::steady_clock::time_point s_cls_last;
+        auto now = std::chrono::steady_clock::now();
+        if ((now - s_cls_last) >= std::chrono::seconds(5) &&
+            (s_cls[0] || s_cls[1] || s_cls[2] || s_cls[3] || !s_raw.empty())) {
+            s_cls_last = now;
+            char line[768];
+            int o = snprintf(line, sizeof(line),
+                             "CLS tree=%d stone=%d iron=%d sulfur=%d",
+                             s_cls[0], s_cls[1], s_cls[2], s_cls[3]);
+            for (const auto& kv : s_raw) {
+                if (o < (int)sizeof(line) - 40)
+                    o += snprintf(line + o, sizeof(line) - (size_t)o,
+                                  " raw%d=%d(%s)", kv.first, kv.second,
+                                  s_raw_name[kv.first].c_str());
+            }
+            farm_log_append(line);
+        }
     }
 }
 
@@ -5506,7 +5555,12 @@ static bool farm_spot_alive(int kind, const Vec3& node_pos, const Vec3& p, float
         // so the bot "lost" the X and kept striking the trunk middle.
         if (d2 <= 0.05F * 0.05F) return false;
         if (d2 >= 6.0F * 6.0F)   return false;
-        if (h2 < 0.06F * 0.06F || h2 > 0.85F * 0.85F) return false;
+        // The axis cap is wide on purpose: a THICK trunk's bark sits a
+        // metre or more from the axis, and the old 0.85 m cap rejected
+        // every live mark on a big tree (the bot then struck the trunk
+        // middle forever). Airborne floaters are rejected downstream by
+        // the bark band, not by this cap.
+        if (h2 < 0.06F * 0.06F || h2 > 2.5F * 2.5F) return false;
         if (sy < -1.0F || sy > 3.5F) return false;
         if (!farm_spot_above_dirt(p)) return false;
     } else {
@@ -5846,7 +5900,11 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
     // (the bark surface).
     float min_h = 1e9F;
     for (const Cand& c : live) if (c.h < min_h) min_h = c.h;
-    const float bark_band = kind == 0 ? min_h + 0.10F : 1e9F;
+    // 10 cm absolute on thin trunks; on a thick trunk the X sits at the
+    // radius and in-bark structure varies by a PERCENTAGE of it, so the
+    // band scales with the radius there (still far below a floater's
+    // 20+ cm offset).
+    const float bark_band = kind == 0 ? min_h + fmaxf(0.10F, 0.12F * min_h) : 1e9F;
     auto on_bark = [bark_band](const Cand& c) { return c.h <= bark_band; };
     bool have_bark = false;
     for (const Cand& c : live) if (on_bark(c)) { have_bark = true; break; }
@@ -5994,7 +6052,12 @@ bool esp_farm_get_target(FarmTarget& out) {
         // Still reject nodes on a different vertical level (cliff above/below).
         if (!std::isfinite(dy) || fabsf(dy) > 30.0F) continue;
 
-        float score = dist;
+        // Tree pivots sit at the trunk AXIS: a thick trunk's bark is a
+        // metre or more closer than its pivot, so scoring by axis
+        // distance made the farm farm THIN trees exclusively (they always
+        // scored closer than a thick tree at the same standoff). Score by
+        // the estimated bark distance instead (0.5 m median trunk radius).
+        float score = (entity.kind == 0) ? dist - 0.5F : dist;
         if (entity.identity != s_last_identity) {
             // Nodes that look mined out go to the back of the queue instead
             // of being skipped: the exact meaning of fractionRemaining is
