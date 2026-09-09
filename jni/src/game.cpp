@@ -5494,7 +5494,7 @@ static bool farm_spot_alive(int kind, const Vec3& node_pos, const Vec3& p, float
     } else {
         // Rock: the pivot rides near the top of the boulder, so the mark can
         // sit a little BELOW it.
-        if (d2 <= 0.05F * 0.05F) return false;
+        if (d2 <= 0.08F * 0.08F) return false;
         if (d2 >= 3.5F * 3.5F)   return false;
         if (sy < -1.6F || sy > 1.8F) return false;
     }
@@ -5725,109 +5725,6 @@ static void farm_bulk_positions(const uint64_t* tr, int n, Vec3* out, uint8_t* o
             valid[(size_t)i] = 0;
     }
     for (int i = 0; i < n; ++i) ok[(size_t)i] = valid[(size_t)i];
-}
-
-// Rewrite the transform's LOCAL translation so its world position becomes
-// `pin` (parent chain untouched). This is what holds the glowing X in
-// place: the game re-places the mark on the bark after every hit, and no
-// amount of reading can stop that — writing the transform back is the only
-// lever. The write is rare and small: a few reads plus one 48-byte write,
-// and only on the frames where the mark actually moved.
-static bool farm_pin_transform(uint64_t native_transform, const Vec3& pin) {
-    const TransformHierarchyLayout* layout = nullptr;
-    if (g_skeleton_layout_valid) layout = &g_skeleton_layout;
-    else if (g_transform_hierarchy_layout_valid) layout = &g_transform_hierarchy_layout;
-    if (!layout || !native_transform) return false;
-
-    uint64_t transform_data = rd_ptr(native_transform + layout->data_offset);
-    int32_t  transform_index = rd<int32_t>(native_transform + layout->index_offset);
-    if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
-    uint64_t matrices = rd_ptr(transform_data + layout->matrices_offset);
-    uint64_t indices  = rd_ptr(transform_data + layout->indices_offset);
-    if (layout->matrices_indirect) { uint64_t p = rd_ptr(matrices); if (!p) return false; matrices = p; }
-    if (layout->indices_indirect)  { uint64_t p = rd_ptr(indices);  if (!p) return false; indices = p; }
-    if (!matrices || !indices) return false;
-
-    const uint64_t own_addr = matrices + (uint64_t)transform_index * sizeof(Matrix34);
-    Matrix34 own{};
-    if (!rd_exact(own_addr, own) || !matrix34_is_valid(own)) return false;
-
-    // Parent chain, direct parent first (same guards as the forward read).
-    Matrix34 parents[16];
-    int depth = 0;
-    int32_t parent = rd<int32_t>(indices + (uint64_t)transform_index * sizeof(int32_t));
-    if (parent < 0) parent = -1;
-    int32_t previous = transform_index;
-    while (parent >= 0) {
-        if (depth >= 16 || parent > 100000 || parent == previous) return false;
-        Matrix34 m{};
-        if (!rd_exact(matrices + (uint64_t)parent * sizeof(Matrix34), m) || !matrix34_is_valid(m)) return false;
-        parents[depth++] = m;
-        previous = parent;
-        parent = rd<int32_t>(indices + (uint64_t)parent * sizeof(int32_t));
-        if (parent < 0) parent = -1;
-    }
-    if (parent != -1) return false; // the chain must reach the root, like the read path
-
-    // Un-project the pinned world point, topmost parent first: the inverse
-    // of  v' = T + R(S·v)  is  v = R⁻¹((v' − T) / S).
-    Vec3 p = pin;
-    for (int d = depth - 1; d >= 0; --d) {
-        const Matrix34& m = parents[d];
-        float sx = m.scale.x, sy = m.scale.y, sz = m.scale.z;
-        if (sx < 0.01F || sx > 1000.f || sy < 0.01F || sy > 1000.f || sz < 0.01F || sz > 1000.f) return false;
-        Vec4 q = {-m.rotation.x, -m.rotation.y, -m.rotation.z, m.rotation.w}; // conjugate = inverse
-        p = rotate_vector(q, {(p.x - m.translation.x) / sx,
-                              (p.y - m.translation.y) / sy,
-                              (p.z - m.translation.z) / sz});
-    }
-    if (!vec3_is_finite(p)) return false;
-    // Safety: pinning corrects a mark hop (tens of cm), never metres.
-    double dx = (double)p.x - own.translation.x, dy = (double)p.y - own.translation.y,
-           dz = (double)p.z - own.translation.z;
-    if (dx * dx + dy * dy + dz * dz > 9.0) return false;
-    own.translation.x = p.x;
-    own.translation.y = p.y;
-    own.translation.z = p.z;
-    return wr_buf(own_addr, &own, sizeof(Matrix34));
-}
-
-// Hold the glowing X where it first appeared — the ENTIRE mechanism
-// (per-node state, drift check, the transform write) in this one function,
-// called once per frame. The game re-places the mark on the bark after
-// every hit and no reading can stop that; when a read shows the mark moved
-// by more than 5 cm, farm_pin_transform() writes its local transform back
-// to the pinned spot. Returns the position the farm must aim at and draw
-// the marker on: the pin whenever it is active, the fresh spot before the
-// first pin, {} when there is no live spot this frame.
-static Vec3 farm_hold_spot(uint64_t component, uint64_t identity,
-                           uint64_t spot_transform, const Vec3& spot,
-                           bool read_ok, bool active) {
-    static uint64_t s_component = 0;
-    static uint64_t s_identity  = 0;
-    static Vec3     s_pin{};
-    static bool     s_pinned = false;
-    // A new node, or the spot gone (despawn / lost): the pin dies with it,
-    // so a re-spawned X is pinned where IT appears, not at the old spot.
-    if (s_component != component || s_identity != identity || !active) {
-        s_component = component;
-        s_identity  = identity;
-        s_pinned    = false;
-    }
-    if (!active) return {};
-    if (read_ok) {
-        if (!s_pinned) {
-            s_pin = spot;
-            s_pinned = true;
-        } else {
-            double ddx = (double)spot.x - s_pin.x,
-                   ddy = (double)spot.y - s_pin.y,
-                   ddz = (double)spot.z - s_pin.z;
-            if (ddx * ddx + ddy * ddy + ddz * ddz > 0.05F * 0.05F)
-                farm_pin_transform(spot_transform, s_pin);
-        }
-    }
-    return s_pinned ? s_pin : spot;
 }
 
 // Find the live X under the node. `keep` is the previous pick — it is held
@@ -6106,67 +6003,59 @@ bool esp_farm_get_target(FarmTarget& out) {
     bool spot_ok = false;
     bool spot_front = true;
     float orbit_side = 0.0F;
-    {
+    if (s_spot_transform) {
+        // Chase the LIVE mark: the game re-places the X after every hit, and
+        // the bonus (if the game pays one) follows the game's own hitpoint —
+        // not the rendered decal, so pinning the decal's transform in place
+        // only made every hit count as a trunk hit. Aim and the marker use
+        // the fresh read; a few failed reads hold the last good position.
         Vec3 spot{};
-        bool read_ok = false;
-        if (s_spot_transform)
-            read_ok = marker_world_position(s_spot_transform, spot) &&
-                      vec3_is_finite(spot) &&
-                      farm_spot_alive(best->kind, best->pos, spot);
-        bool active = false;
+        bool read_ok = marker_world_position(s_spot_transform, spot) &&
+                       vec3_is_finite(spot) &&
+                       farm_spot_alive(best->kind, best->pos, spot);
         if (read_ok) {
             s_spot_last = spot;
             s_spot_hold = 120;
-            active = true;
-        } else if (s_spot_transform && s_spot_hold > 0) {
-            // One failed read (game mid-update): hold the last good mark
-            // for up to ~0.8 s instead of snapping the crosshair to the body.
-            --s_spot_hold;
-            active = true;
-        } else if (s_spot_transform) {
-            s_spot_transform = 0; // the mark is gone — aim the body
-        }
-        // The pin (and its transform write) runs here and nowhere else.
-        const Vec3 held = farm_hold_spot(best->component, best->identity,
-                                         s_spot_transform,
-                                         read_ok ? spot : s_spot_last,
-                                         read_ok, active);
-        if (active) {
             spot_ok = true;
-            aim = held;
-            marker_pt = held;
-            if (read_ok) {
-                // Is the X on OUR side of the node? When the mark is on the
-                // far side of the trunk/boulder the tool cannot reach it —
-                // the controller circles until it faces us.
-                float sx = spot.x - best->pos.x, sz = spot.z - best->pos.z;
-                float px = g_frame_local_pos.x - best->pos.x;
-                float pz = g_frame_local_pos.z - best->pos.z;
-                float sl = sqrtf(sx * sx + sz * sz);
-                float pl = sqrtf(px * px + pz * pz);
-                if (sl > 0.05F && pl > 0.3F) {
-                    float dot = (sx * px + sz * pz) / (sl * pl);
-                    if (!(dot > -0.35F)) {
-                        spot_front = false;
-                        // Which way to circle: rotate the (player - node)
-                        // vector towards the (spot - node) one. theta =
-                        // atan2(x, z); the strafe axis is the camera right
-                        // (same basis as the angles below, picked once at
-                        // the end).
-                        float t1 = atan2f(px, pz);
-                        float t2 = atan2f(sx, sz);
-                        float a = t2 - t1;
-                        while (a >  3.14159265F) a -= 6.2831853F;
-                        while (a < -3.14159265F) a += 6.2831853F;
-                        out.orbit_angle = fabsf(a) * 57.29577951F;
-                        // side is resolved against the camera right once the
-                        // basis is known below; keep the signed angle for then.
-                        orbit_side = a;
-                    }
+            aim = spot;
+            marker_pt = spot;
+            // Is the X on OUR side of the node? When the mark is on the far
+            // side of the trunk/boulder the tool cannot reach it — the
+            // controller circles until it faces us.
+            float sx = spot.x - best->pos.x, sz = spot.z - best->pos.z;
+            float px = g_frame_local_pos.x - best->pos.x;
+            float pz = g_frame_local_pos.z - best->pos.z;
+            float sl = sqrtf(sx * sx + sz * sz);
+            float pl = sqrtf(px * px + pz * pz);
+            if (sl > 0.05F && pl > 0.3F) {
+                float dot = (sx * px + sz * pz) / (sl * pl);
+                if (!(dot > -0.35F)) {
+                    spot_front = false;
+                    // Which way to circle: rotate the (player - node) vector
+                    // towards the (spot - node) one. theta = atan2(x, z); the
+                    // strafe axis is the camera right (same basis as the
+                    // angles below, picked once at the end).
+                    float t1 = atan2f(px, pz);
+                    float t2 = atan2f(sx, sz);
+                    float a = t2 - t1;
+                    while (a >  3.14159265F) a -= 6.2831853F;
+                    while (a < -3.14159265F) a += 6.2831853F;
+                    out.orbit_angle = fabsf(a) * 57.29577951F;
+                    // side is resolved against the camera right once the
+                    // basis is known below; keep the signed angle for then.
+                    orbit_side = a;
                 }
-            } else {
-                spot_front = true; // held mark was on our side when it was good
             }
+        } else if (s_spot_hold > 0) {
+            // One failed read (game mid-update): hold the last good mark for
+            // up to ~1 s instead of snapping the crosshair to the body.
+            --s_spot_hold;
+            spot_ok = true;
+            aim = s_spot_last;
+            marker_pt = s_spot_last;
+            spot_front = true; // held mark was on our side when it was good
+        } else {
+            s_spot_transform = 0; // the mark is gone — aim the body
         }
     }
     // No live X: aim the body (tree chest / ore waist). Height is clamped
