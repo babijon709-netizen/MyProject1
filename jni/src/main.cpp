@@ -3896,25 +3896,6 @@ static void UpdateFarm(float dt) {
                 if (steer < -1.f) steer = -1.f;
                 px = cx + r * 0.35f * steer;
                 py = cy - r * 0.55f;
-            } else if (tgt.has_spot && !orbit && fabsf(tgt.walk_yaw) <= 80.f) {
-                // Stand in FRONT of the X, not next to it. The walk target
-                // is the point on the radial line through the mark, so
-                // walk_yaw ~0 means face-on; the X hops to a new spot after
-                // every hit, and the body has to slide along the arc onto
-                // the new radial. The camera keeps chasing the X (above),
-                // the swing waits while the stick is deflected (below).
-                static bool s_sliding = false;
-                bool slide = s_sliding ? (fabsf(tgt.walk_yaw) > 6.f)
-                                       : (fabsf(tgt.walk_yaw) > 16.f);
-                s_sliding = slide;
-                if (slide) {
-                    wantWalk = true;
-                    float steer = tgt.walk_yaw / 45.f;
-                    if (steer >  1.f) steer =  1.f;
-                    if (steer < -1.f) steer = -1.f;
-                    px = cx + r * 0.6f * steer;   // mostly along the arc...
-                    py = cy - r * 0.15f;          // ...a hair forward
-                }
             }
         }
 
