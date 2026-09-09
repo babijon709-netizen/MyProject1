@@ -4942,6 +4942,61 @@ static bool marker_world_position(uint64_t transform, Vec3& out) {
 // TEMP farm log (defined below, near farm_find_spot).
 static void farm_log_append(const char* line);
 
+// TEMP farm log: classification census — fed by BOTH walk paths (the
+// overlay's rebuild and the farm's own walk; whichever runs is the one
+// that classifies the mineables), logged at most once per 30 s:
+// kind counts, unknown raw entityType values (with the first example
+// name) and the tree prefab names.
+static int g_census_cls[4] = {0, 0, 0, 0};
+static std::unordered_map<int, int> g_census_raw;
+static std::unordered_map<int, std::string> g_census_raw_name;
+static std::unordered_map<std::string, int> g_census_tree_names;
+static std::chrono::steady_clock::time_point g_census_last_log;
+
+static void census_begin() {
+    g_census_cls[0] = g_census_cls[1] = g_census_cls[2] = g_census_cls[3] = 0;
+    g_census_raw.clear();
+    g_census_raw_name.clear();
+    g_census_tree_names.clear();
+}
+
+static void census_add_raw(int raw, uint64_t component) {
+    if (g_census_raw.size() < 12) {
+        g_census_raw[raw]++;
+        if (g_census_raw_name.find(raw) == g_census_raw_name.end()) {
+            char nm[48] = "";
+            uint64_t tf = native_component_transform(managed_object_native(component));
+            if (tf && g_go_name_offset_valid) read_transform_name(tf, nm, sizeof(nm));
+            g_census_raw_name[raw] = nm[0] ? nm : "(anon)";
+        }
+    }
+}
+
+static void census_log() {
+    auto now = std::chrono::steady_clock::now();
+    if ((now - g_census_last_log) < std::chrono::seconds(30)) return;
+    if (!g_census_cls[0] && !g_census_cls[1] && !g_census_cls[2] &&
+        !g_census_cls[3] && g_census_raw.empty() && g_census_tree_names.empty())
+        return;
+    g_census_last_log = now;
+    char line[1024];
+    int o = snprintf(line, sizeof(line),
+                     "CLS tree=%d stone=%d iron=%d sulfur=%d\n",
+                     g_census_cls[0], g_census_cls[1], g_census_cls[2],
+                     g_census_cls[3]);
+    for (const auto& kv : g_census_raw) {
+        if (o < (int)sizeof(line) - 48)
+            o += snprintf(line + o, sizeof(line) - (size_t)o, " raw%d=%d(%s)",
+                          kv.first, kv.second, g_census_raw_name[kv.first].c_str());
+    }
+    for (const auto& kv : g_census_tree_names) {
+        if (o < (int)sizeof(line) - 48)
+            o += snprintf(line + o, sizeof(line) - (size_t)o, " T[%s]=%d",
+                          kv.first.c_str(), kv.second);
+    }
+    farm_log_append(line);
+}
+
 static void rebuild_marker_entities() {
     g_marker_entities.clear();
 
@@ -4966,6 +5021,7 @@ static void rebuild_marker_entities() {
     // the marker list already tolerates).
     g_farm_shared.clear();
     g_farm_shared_age = 0;
+    census_begin();
 
     uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
@@ -4995,14 +5051,18 @@ static void rebuild_marker_entities() {
             // entityType read per Mineable — negligible at the 3 s cadence.
             if (component_class == MARKER_CLASS_MINEABLE && g_farm_shared.size() < 512) {
                 int farm_kind = -1;
-                switch ((MineableEntityType)rd<int32_t>(component + MINEABLE_ENTITY_TYPE)) {
+                int raw_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
+                switch ((MineableEntityType)raw_type) {
                     case MineableEntityType::Tree:   farm_kind = 0; break;
                     case MineableEntityType::Stone:  farm_kind = 1; break;
                     case MineableEntityType::Iron:   farm_kind = 2; break;
                     case MineableEntityType::Sulfur: farm_kind = 3; break;
-                    default: break;
+                    // TEMP: an unknown mineable type — the ores may carry
+                    // a value outside this enum in the current build.
+                    default: census_add_raw(raw_type, component); break;
                 }
                 if (farm_kind >= 0) {
+                    g_census_cls[farm_kind]++;
                     FarmEntity fe;
                     fe.identity = identity;
                     fe.component = component;
@@ -5022,6 +5082,12 @@ static void rebuild_marker_entities() {
                                     strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
                                     strstr(go_name, "stump"))
                                     fe.transform = 0;
+                                // TEMP: tree-name census (the name is
+                                // already read for the filter above).
+                                if (fe.transform &&
+                                    (g_census_tree_names.size() < 16 ||
+                                     g_census_tree_names.count(go_name)))
+                                    g_census_tree_names[go_name]++;
                             }
                         }
                         if (fe.transform) {
@@ -5111,6 +5177,7 @@ static void rebuild_marker_entities() {
         }
         if (g_marker_entities.size() >= 512) break;
     }
+    census_log();
 }
 
 static void reset_marker_caches() {
@@ -5376,18 +5443,7 @@ static void rebuild_farm_entities() {
     std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
     if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
     g_farm_entities.clear(); // scan is readable from here on — rebuild for real
-
-    // TEMP farm log: per-scan classification census (BEFORE the mask
-    // filter) — the ore question: are ore nodes classified at all, and
-    // with which raw entityType values does this build label them.
-    static int s_cls[4] = {0, 0, 0, 0};
-    static std::unordered_map<int, int> s_raw;
-    static std::unordered_map<int, std::string> s_raw_name;
-    static std::unordered_map<std::string, int> s_tree_names;
-    s_cls[0] = s_cls[1] = s_cls[2] = s_cls[3] = 0;
-    s_raw.clear();
-    s_raw_name.clear();
-    s_tree_names.clear();
+    census_begin();
 
     uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
@@ -5419,23 +5475,12 @@ static void rebuild_farm_entities() {
                 default: break;
             }
             if (kind < 0 && !farm_kind_from_loot(component, kind)) {
-                // TEMP farm log: a mineable the farm DROPS — what value
-                // does the build label it with, and what is it called?
-                // (If the ores in this world carry a value outside the
-                // enum, this is where they go.)
-                if (s_raw.size() < 12) {
-                    s_raw[raw_type]++;
-                    if (s_raw_name.find(raw_type) == s_raw_name.end()) {
-                        char nm[48] = "";
-                        uint64_t tf = native_component_transform(managed_object_native(component));
-                        if (tf && g_go_name_offset_valid)
-                            read_transform_name(tf, nm, sizeof(nm));
-                        s_raw_name[raw_type] = nm[0] ? nm : "(anon)";
-                    }
-                }
+                // TEMP: a mineable the farm DROPS — what does the build
+                // label it with? (Ores outside the enum land here.)
+                census_add_raw(raw_type, component);
                 continue;
             }
-            if (kind >= 0 && kind < 4) s_cls[kind]++;
+            if (kind >= 0 && kind < 4) g_census_cls[kind]++;
             if (!(g_farm_mask & (1u << kind))) continue;
 
             FarmEntity entity;
@@ -5459,12 +5504,10 @@ static void rebuild_farm_entities() {
                         strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
                         strstr(go_name, "stump"))
                         continue;
-                    // TEMP farm log: tree-name census (the names are
-                    // already read for the filter above — free data).
-                    // If size is encoded in the name, this is the
-                    // pre-filter for "thick only".
-                    if (s_tree_names.size() < 16 || s_tree_names.count(go_name))
-                        s_tree_names[go_name]++;
+                    // TEMP: tree-name census (name already read above).
+                    if (g_census_tree_names.size() < 16 ||
+                        g_census_tree_names.count(go_name))
+                        g_census_tree_names[go_name]++;
                 }
             }
 
@@ -5475,31 +5518,7 @@ static void rebuild_farm_entities() {
         if (g_farm_entities.size() >= 512) break;
     }
 
-    // TEMP farm log: the census, at most one line per 5 s.
-    {
-        static std::chrono::steady_clock::time_point s_cls_last;
-        auto now = std::chrono::steady_clock::now();
-        if ((now - s_cls_last) >= std::chrono::seconds(5) &&
-            (s_cls[0] || s_cls[1] || s_cls[2] || s_cls[3] || !s_raw.empty())) {
-            s_cls_last = now;
-            char line[768];
-            int o = snprintf(line, sizeof(line),
-                             "CLS tree=%d stone=%d iron=%d sulfur=%d",
-                             s_cls[0], s_cls[1], s_cls[2], s_cls[3]);
-            for (const auto& kv : s_raw) {
-                if (o < (int)sizeof(line) - 40)
-                    o += snprintf(line + o, sizeof(line) - (size_t)o,
-                                  " raw%d=%d(%s)", kv.first, kv.second,
-                                  s_raw_name[kv.first].c_str());
-            }
-            for (const auto& kv : s_tree_names) {
-                if (o < (int)sizeof(line) - 40)
-                    o += snprintf(line + o, sizeof(line) - (size_t)o,
-                                  " T[%s]=%d", kv.first.c_str(), kv.second);
-            }
-            farm_log_append(line);
-        }
-    }
+    census_log();
 }
 
 void esp_farm_set_resources(unsigned mask) {
@@ -6156,10 +6175,16 @@ bool esp_farm_get_target(FarmTarget& out) {
                 if (found) {
                     s_spot_hold = 120;
                     if (!s_spot_transform) {
-                        char line[160];
+                        Vec3 ap{};
+                        float ah = -1.f;
+                        if (marker_world_position(found, ap) && vec3_is_finite(ap)) {
+                            float dx = ap.x - best->pos.x, dz = ap.z - best->pos.z;
+                            ah = sqrtf(dx * dx + dz * dz);
+                        }
+                        char line[192];
                         snprintf(line, sizeof(line),
-                                 "X-APPEAR node=0x%llx kind=%d\n",
-                                 (unsigned long long)best->transform, best->kind);
+                                 "X-APPEAR node=0x%llx kind=%d h=%.2f\n",
+                                 (unsigned long long)best->transform, best->kind, ah);
                         farm_log_append(line);
                     }
                 }
@@ -6242,23 +6267,6 @@ bool esp_farm_get_target(FarmTarget& out) {
             float sl = sqrtf(sx * sx + sz * sz);
             float pl = sqrtf(px * px + pz * pz);
 
-            // TEMP: the user wants the farm to skip thin trees. The X
-            // sits ON the bark, so sl is the trunk radius itself: below
-            // the floor it is a sapling — blacklist it for 3 minutes and
-            // let the selection pick the next tree. (A thin tree is
-            // walked to once per 3 min to measure itself, then skipped.)
-            if (best->kind == 0 && sl > 0.05F && sl < 0.60F) {
-                static uint64_t s_thin_logged = 0;
-                if (s_thin_logged != best->identity) {
-                    s_thin_logged = best->identity;
-                    char line[128];
-                    snprintf(line, sizeof(line),
-                             "THIN node=0x%llx h=%.2f — dropped",
-                             (unsigned long long)best->identity, sl);
-                    farm_log_append(line);
-                }
-                esp_farm_blacklist(best->identity, 180.0F);
-            }
             if (sl > 0.05F && pl > 0.3F) {
                 float t1 = atan2f(px, pz);
                 float t2 = atan2f(sx, sz);

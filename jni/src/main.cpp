@@ -3635,7 +3635,7 @@ static void UpdateFarm(float dt) {
         if (s_mask_prev != mask) {
             char line[96];
             snprintf(line, sizeof(line),
-                     "MASK mask=%u wood=%d stone=%d metal=%d sulfur=%d",
+                     "MASK mask=%u wood=%d stone=%d metal=%d sulfur=%d\n",
                      mask, (int)g_state.farm_wood, (int)g_state.farm_stone,
                      (int)g_state.farm_metal, (int)g_state.farm_sulfur);
             esp_farm_log_line(line);
