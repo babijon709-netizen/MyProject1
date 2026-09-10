@@ -5645,7 +5645,16 @@ static bool farm_spot_alive(int kind, const Vec3& node_pos, const Vec3& p, float
         // middle forever). Airborne floaters are rejected downstream by
         // the bark band, not by this cap.
         if (h2 < 0.06F * 0.06F || h2 > 2.5F * 2.5F) return false;
-        if (sy < -1.0F || sy > 3.5F) return false;
+        // The game's X sits on the bark at chest height — it is never in
+        // the bottom 40 cm above the pivot. A static child at dy ~+0.2,
+        // h ~0.8-0.9 (a root / interaction volume on the ground in front
+        // of the trunk) passed the eye-based dirt check whenever the
+        // player stood a ledge higher than the tree (the check uses the
+        // PLAYER's eye, not the local ground), and the keep-hysteresis
+        // then flip-flopped between it and the real X — the green mark on
+        // the ground in front of the tree. It never moves after a hit;
+        // the real X hops.
+        if (sy < 0.40F || sy > 3.5F) return false;
         if (!farm_spot_above_dirt(p)) return false;
     } else {
         // Rock: the pivot rides near the top of the boulder, so the mark
@@ -6036,10 +6045,9 @@ static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, in
         }
     }
 
-    // TEMP ore diagnosis: one snapshot per ore node — every live
-    // candidate with its name and geometry, plus the pick ("*" line).
-    // Remove once ore farming is fixed.
-    if (kind != 0) {
+    // TEMP diagnosis: one snapshot per node — every live candidate with
+    // its name and geometry, plus the pick ("*" line).
+    if (true) {
         static std::unordered_set<uint64_t> s_dumped;
         if (s_dumped.size() < 16 && s_dumped.insert(node_transform).second) {
             char line[384];
@@ -6271,11 +6279,15 @@ bool esp_farm_get_target(FarmTarget& out) {
                     s_spot_hold = 0;
                     s_spot_prev = test;
                     s_spot_prev_valid = true;
-                    char line[192];
+                    char aname[48] = "";
+                    if (g_go_name_offset_valid)
+                        read_transform_name(found, aname, sizeof(aname));
+                    char line[256];
                     snprintf(line, sizeof(line),
-                             "X-APPEAR node=0x%llx kind=%d p=(%.2f,%.2f,%.2f) eye=%.2f\n",
+                             "X-APPEAR node=0x%llx kind=%d p=(%.2f,%.2f,%.2f) eye=%.2f name=%s\n",
                              (unsigned long long)best->transform, best->kind,
-                             test.x, test.y, test.z, farm_eye_y());
+                             test.x, test.y, test.z, farm_eye_y(),
+                             aname[0] ? aname : "(anon)");
                     farm_log_append(line);
                 }
                 // Otherwise keep the current pick; the scan runs again soon.
