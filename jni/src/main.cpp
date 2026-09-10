@@ -3717,7 +3717,7 @@ static void UpdateFarm(float dt) {
     // a half-chopped tree — only a solidly repeated "empty" counts.
     static int s_depletedFrames = 0;
     if (tgt.fraction >= 0.f && tgt.fraction < 0.03f) {
-        if (++s_depletedFrames >= 10) {
+        if (++s_depletedFrames >= 300) {
             s_depletedFrames = 0;
             esp_farm_blacklist(tgt.id, 120.f);
             releaseAll();
@@ -3982,12 +3982,10 @@ static void UpdateFarm(float dt) {
             // creep in to a safe approach stop, back off inside the
             // collision zone.
             float toHit   = tgt.has_spot ? tgt.aim_dist : tgt.dist;
-            // Ore stands a bit closer: the boulder surface curves away
-            // from the mark, so at the same distance a swing ray aimed
-            // at the X can clip past it ("то достаёт, то нет").
-            float backAt  = tgt.has_spot ? (isTree ? 0.70f : 0.65f)
+            // Ore standoff: ~1.5 m from the X (requested). Trees 0.70-1.30.
+            float backAt  = tgt.has_spot ? (isTree ? 0.70f : 1.35f)
                                          : (isTree ? 0.95f : 1.00f);
-            float creepAt = tgt.has_spot ? (isTree ? 1.30f : 1.15f)
+            float creepAt = tgt.has_spot ? (isTree ? 1.30f : 1.70f)
                                          : (isTree ? 1.35f : 1.70f);
             if (toHit < backAt) {
                 wantWalk = true;
@@ -4165,7 +4163,7 @@ static void UpdateFarm(float dt) {
                 s_fracRef = tgt.fraction;
                 s_mineTime = 0.f;
                 s_nudgeTime = 0.f;
-            } else if (s_mineTime > 20.f || s_nudgeTime > 8.f) {
+            } else if (s_mineTime > 60.f || s_nudgeTime > 15.f) {
                 esp_farm_blacklist(tgt.id, 60.f);
                 releaseAll();
                 s_settle = 0.6f;
@@ -4173,7 +4171,7 @@ static void UpdateFarm(float dt) {
                 s_nodeId = 0;
                 g_farmPhase = 0;
             }
-        } else if (s_mineTime > 45.f || s_nudgeTime > 8.f) {
+        } else if (s_mineTime > 120.f || s_nudgeTime > 15.f) {
             esp_farm_blacklist(tgt.id, 60.f);
             releaseAll();
             s_settle = 0.6f;
@@ -4183,9 +4181,23 @@ static void UpdateFarm(float dt) {
         }
     }
     // Nudging into reach that never gets there (a wall between us and the
-    // trunk) is a stuck state: count it.
-    if (phase == 2 && stickDeflected) s_nudgeTime += dt;
-    else if (phase != 2) s_nudgeTime = 0.f;
+    // trunk) is a stuck state: count it. Standing still is NOT nudging —
+    // the old code never reset while standing, so a few seconds of band
+    // creep + arc across a miss burst added up to the 8 s cap and
+    // blacklisted a live node ("stops mining mid-process").
+    {
+        static float s_stillTime = 0.f;
+        if (phase == 2 && stickDeflected) {
+            s_stillTime = 0.f;
+            s_nudgeTime += dt;
+        } else if (phase != 2) {
+            s_nudgeTime = 0.f;
+            s_stillTime = 0.f;
+        } else if (s_nudgeTime > 0.f) {
+            s_stillTime += dt;
+            if (s_stillTime > 1.5f) s_nudgeTime = 0.f;
+        }
+    }
 }
 
 void RenderMenu() {

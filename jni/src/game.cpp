@@ -5605,8 +5605,20 @@ static float farm_eye_y() {
 // Anything at foot level is a root / interaction volume / shadow — that was
 // the green mark on the dirt in front of the tree.
 static bool farm_spot_above_dirt(const Vec3& p) {
-    if (!g_cam_pose_valid && !g_frame_local_valid) return true;
-    return p.y > farm_eye_y() - 1.15F;
+    // The pose read can fail for a frame or two (game mid-update). A check
+    // that silently PASSES on a failed read let a ground-level root child
+    // through one unlucky scan; the 120-frame hold then kept that dirt
+    // point as "the X" — the green mark on the ground in front of the
+    // tree, and the bot swinging into the dirt. Fall back to the last
+    // GOOD eye height instead of letting it through.
+    static float s_eye = 0.f;
+    static bool  s_eye_ok = false;
+    if (g_cam_pose_valid || g_frame_local_valid) {
+        const float e = farm_eye_y();
+        if (std::isfinite(e) && e > 0.f) { s_eye = e; s_eye_ok = true; }
+    }
+    if (!s_eye_ok) return true;   // never had a pose: nothing to compare
+    return p.y > s_eye - 1.15F;
 }
 
 // Geometry test: is this child's position a live X for this node kind?
@@ -6255,10 +6267,16 @@ bool esp_farm_get_target(FarmTarget& out) {
                 if (marker_world_position(found, test) && vec3_is_finite(test) &&
                     farm_spot_alive(best->kind, best->pos, test)) {
                     s_spot_transform = found;
-                    s_spot_last = {};
+                    s_spot_last = test;
                     s_spot_hold = 0;
                     s_spot_prev = test;
                     s_spot_prev_valid = true;
+                    char line[192];
+                    snprintf(line, sizeof(line),
+                             "X-APPEAR node=0x%llx kind=%d p=(%.2f,%.2f,%.2f) eye=%.2f\n",
+                             (unsigned long long)best->transform, best->kind,
+                             test.x, test.y, test.z, farm_eye_y());
+                    farm_log_append(line);
                 }
                 // Otherwise keep the current pick; the scan runs again soon.
             }
@@ -6323,13 +6341,24 @@ bool esp_farm_get_target(FarmTarget& out) {
                 }
             }
         } else if (s_spot_hold > 0) {
-            // One failed read (game mid-update): hold the last good mark for
-            // up to ~1 s instead of snapping the crosshair to the body.
-            --s_spot_hold;
-            spot_ok = true;
-            aim = s_spot_last;
-            marker_pt = s_spot_last;
-            spot_front = true; // held mark was on our side when it was good
+            // The hold is for a failed READ (game mid-update). A successful
+            // read that FAILS the alive test is authoritative — the mark
+            // moved (hopped onto dirt, or the eye read came back and the
+            // dirt check now runs): drop it, do not keep aiming at the
+            // stale point.
+            Vec3 now_pt{};
+            if (marker_world_position(s_spot_transform, now_pt) &&
+                vec3_is_finite(now_pt) &&
+                !farm_spot_alive(best->kind, best->pos, now_pt)) {
+                s_spot_transform = 0;
+                s_spot_hold = 0;
+            } else {
+                --s_spot_hold;
+                spot_ok = true;
+                aim = s_spot_last;
+                marker_pt = s_spot_last;
+                spot_front = true; // held mark was on our side when it was good
+            }
         } else {
             s_spot_transform = 0; // the mark is gone — aim the body
         }
@@ -6546,12 +6575,13 @@ bool esp_farm_get_target(FarmTarget& out) {
             ++s_n;
             char line[208];
             snprintf(line, sizeof(line),
-                     "LOG kind=%d d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f pitch=%.1f spot=%d front=%d oa=%.0f body=(%.1f,%.1f) node=(%.1f,%.1f) x=(%.1f,%.1f)\n",
+                     "LOG kind=%d d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f pitch=%.1f spot=%d front=%d oa=%.0f body=(%.1f,%.1f,%.1f) node=(%.1f,%.1f,%.1f) x=(%.1f,%.1f,%.1f)\n",
                      best->kind, best_dist, out.aim_dist, out.walk_yaw, out.yaw,
                      out.pitch, spot_ok ? 1 : 0, spot_front ? 1 : 0,
                      out.orbit_angle,
-                     g_frame_local_pos.x, g_frame_local_pos.z,
-                     best->pos.x, best->pos.z, marker_pt.x, marker_pt.z);
+                     g_frame_local_pos.x, g_frame_local_pos.y, g_frame_local_pos.z,
+                     best->pos.x, best->pos.y, best->pos.z,
+                     marker_pt.x, marker_pt.y, marker_pt.z);
             farm_log_append(line);
         }
     }
