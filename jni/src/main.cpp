@@ -3842,7 +3842,12 @@ static void UpdateFarm(float dt) {
         // already on the X by the time we stop (it sits on the node, a few
         // degrees off the body).
         // Mining and aligning: chase the X. Approach: the node body.
-        float steerYaw = (tgt.has_spot && inRange) ? tgt.yaw : tgt.walk_yaw;
+        // Chase the X whenever it is alive — AT ANY RANGE. Gating on
+        // inRange made the target FLIP between the X and the walk point
+        // at the range boundary (they can be 130 deg apart): the camera
+        // snapped left-right every time the flicker crossed the line.
+        // No live X: the node body (the walk point is the body now).
+        float steerYaw = tgt.has_spot ? tgt.yaw : tgt.walk_yaw;
         float steerPitch = tgt.pitch;
         float wantYawPx = steerYaw / gain;
         // While walking, only fix a BADLY tilted camera (left looking at the
@@ -3949,32 +3954,35 @@ static void UpdateFarm(float dt) {
                 py = cy - r * 0.99f * sqrtf(1.f - steer * steer);
             }
         } else {
-            // Mining: hold the tool's standoff from the mark. The old
-            // forward-only creep ran the bot into the bark (0.3 m away —
-            // every slightly off-angle hit then looked like a side hit):
-            // too close -> ease back, still short -> creep in. Walking
-            // pace only (a 0.55 stick is RUN speed on this game and the
-            // run-in used to overshoot straight into the trunk).
-            float toHit = tgt.has_spot ? tgt.aim_dist : tgt.dist;
-            if (tgt.has_spot && toHit < meleeX - 0.15f) {
+            // Mining: hold a standoff band around the aim point. The
+            // band is WIDE on purpose (0.70..1.30 from the live mark):
+            // the narrow 0.30 m band + stick glide made the bot flap
+            // forward/back every few frames (25 direction flips in the
+            // last log). The tool reaches ~1.5, so even the outer edge
+            // is a hitting distance — the old ore band at 1.4-1.70 from
+            // the X was OUTSIDE reach, which is how the bot stood and
+            // missed the marks ("не достаёт до крестиков").
+            // Without a live mark the metric is the node distance:
+            // creep in to a safe approach stop, back off inside the
+            // collision zone.
+            float toHit   = tgt.has_spot ? tgt.aim_dist : tgt.dist;
+            float backAt  = tgt.has_spot ? 0.70f : (isTree ? 0.95f : 1.00f);
+            float creepAt = tgt.has_spot ? 1.30f : (isTree ? 1.35f : 1.70f);
+            if (toHit < backAt) {
                 wantWalk = true;
                 px = cx;
-                py = cy + r * 0.45f;   // ease back to the standoff
-            } else if (!tgt.has_spot && toHit < 1.0f) {
-                wantWalk = true;
-                px = cx;
-                py = cy + r * 0.45f;   // inside the collision zone
-            } else if (toHit > meleeX + 0.15f) {
+                py = cy + r * 0.45f;      // pressed in: ease back
+            } else if (toHit > creepAt) {
                 wantWalk = true;
                 float steer = tgt.walk_yaw / 60.f;
                 if (steer >  1.f) steer =  1.f;
                 if (steer < -1.f) steer = -1.f;
                 px = cx + r * 0.35f * steer;
-                py = cy - r * 0.45f;
+                py = cy - r * 0.45f;      // still short: walking pace
             }
         }
 
-        // Release hysteresis: phases flicker for a frame or two around their
+    // Release hysteresis: phases flicker for a frame or two around their
         // thresholds (dist/yaw noise), and every flicker used to lift and
         // re-plant the move finger — the visible "joystick jerking". The
         // finger now lifts only after the walk has been unwanted for a

@@ -6472,24 +6472,12 @@ bool esp_farm_get_target(FarmTarget& out) {
         orbit_side = ((orbit_side > 0.f) == (crossz > 0.f)) ? 1.f : -1.f;
     }
 
-    // Walk: with a live X on our side of the trunk, aim the walk at the
-    // point directly in front of the X — on the radial line axis->X, at
-    // the tool's standoff (the tree meleeX in main.cpp). The bot then stops
-    // face-on to the mark, the body in line with the cross, instead of
-    // arriving next to it: a shallow angle to the bark sends the swing ray
-    // past the trunk, and the X hops after every hit anyway, so "in front"
-    // is re-established by the mining slide in the controller. Without a
-    // live X (or with it on the far side — the orbit branch owns that)
-    // walk straight at the node body, at soil level.
+    // Walk point = the NODE BODY, always. The old "point in front of the
+    // X" variant orbited around the body as the X hopped along the bark
+    // (walk_yaw swung -130..+131 deg mid-approach in the log) and the
+    // camera fallback chased it — the left-right camera shake. Arriving
+    // head-on is the arc's job; the standoff band owns the distance.
     Vec3 walk = best->pos;
-    if (spot_ok && spot_front && best->kind == 0) {
-        float sx = marker_pt.x - best->pos.x, sz = marker_pt.z - best->pos.z;
-        float sl = sqrtf(sx * sx + sz * sz);
-        if (sl > 0.05F) {
-            walk.x = best->pos.x + sx / sl * (sl + 1.05F);
-            walk.z = best->pos.z + sz / sl * (sl + 1.05F);
-        }
-    }
     walk.y = farm_eye_y() - 1.6F;
     float walk_pitch = 0.f;
     if (!farm_angles(origin, fwd, right, up, walk, out.walk_yaw, walk_pitch)) {
