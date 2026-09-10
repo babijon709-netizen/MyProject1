@@ -3780,27 +3780,16 @@ static void UpdateFarm(float dt) {
     // The X can be on the FAR side of the node: the tool cannot reach it
     // through the trunk/boulder, so first circle until it faces us (orbit).
     const bool  isTree = (tgt.kind == 0);
-    // Stop distance: the tree one is the standoff, not the reach — the tool
-    // comfortably reaches farther (ore mines at 1.55), but the player wants
-    // to stand a bit off the trunk, not pressed against it.
-    const float meleeX = isTree ? 1.05f : 1.55f;
-    const float reachX = isTree ? 2.6f  : 2.4f;  // close enough to start (body aim)
-    // In reach = the swing lands: with a live X the horizontal distance
-    // to the mark is at the tool's standoff, without one the body is at
-    // the reach distance. ENTER/EXIT margins (hysteresis) on purpose: at
-    // the tree standoff aim_dist sits right ON the 1.05 m boundary, and
-    // without the margins the phase flickers 1<->2 on read noise and the
-    // stick keeps re-triggering the approach run in front of the trunk.
-    static bool  s_in_range = false;
-    static unsigned long long s_range_owner = 0;
-    const bool inRaw = tgt.has_spot ? (tgt.aim_dist <= meleeX)
-                                    : (tgt.dist <= reachX);
-    const bool outRaw = tgt.has_spot ? (tgt.aim_dist > meleeX + 0.30f)
-                                     : (tgt.dist > reachX + 0.30f);
-    if (tgt.id != s_range_owner) { s_range_owner = tgt.id; s_in_range = inRaw; }
-    else if (inRaw) s_in_range = true;
-    else if (outRaw) s_in_range = false;
-    const bool inRange = s_in_range;
+    // Close enough to mine (body aim). "At the node" is the BODY distance
+    // — it is stable while the bot stands in the standoff band, unlike the
+    // old sticky aim_dist<=1.05 metric: after an X hop the bot sat at
+    // ad 1.06-1.47, OUTSIDE that metric (no phase 2, no taps!) but INSIDE
+    // the walk band (no walk needed either) — it stood for seconds without
+    // swinging and the phase-1 watchdog then dragged it into the evade
+    // dance ("бегает туда-сюда" in the log). The band + arc own the exact
+    // positioning; the phase only needs "we are at the node".
+    const float reachX = isTree ? 2.6f : 2.4f;
+    const bool  atNode = tgt.dist <= reachX;
     // Strike the mark head-on: the body should stand roughly on the
     // radial line through the X — swinging at a mark that sits 40-60 deg
     // AROUND the trunk lands on the bark from the side. But the X hops
@@ -3816,7 +3805,7 @@ static void UpdateFarm(float dt) {
     static bool  s_head_on = true;
     static unsigned long long s_side_owner = 0;
     if (tgt.id != s_side_owner) { s_side_owner = tgt.id; s_head_on = true; }
-    if (tgt.has_spot && inRange) {
+    if (tgt.has_spot && atNode) {
         // |angle| around the trunk: strike only within ~10 deg of our
         // radial, start the arc above 20. 25/15 made the arc fire on
         // some X hops and not others ("то обходит, то нет") — a 20-25
@@ -3834,7 +3823,7 @@ static void UpdateFarm(float dt) {
     // trunk until it faces us (the watchdog measures the angle while it
     // runs — the distance does not change there).
     const bool orbit  = tgt.has_spot && !s_head_on;
-    const bool inMelee = inRange && headOn;
+    const bool inMelee = atNode && headOn;
     const int phase = inMelee ? 2 : 1;
     g_farmPhase = phase;
 
@@ -3935,7 +3924,7 @@ static void UpdateFarm(float dt) {
                 py = cy - r * 0.4f;
             }
             if (s_evadeTime <= 0.f) { s_evadeTime = 0.f; s_stuckTime = 0.f; s_lastGoal = 1e9f; }
-        } else if (tgt.has_spot && inRange && !s_head_on) {
+        } else if (tgt.has_spot && atNode && !s_head_on) {
             // The mark is around the side (or far) of the trunk: strafe a
             // smooth arc at the current radius until it faces us, then
             // stand still and strike. Pure strafe (no forward): the

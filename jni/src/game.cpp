@@ -3626,6 +3626,7 @@ static bool g_frame_vp_valid = false;
 static float g_frame_sw = 0.0F, g_frame_sh = 0.0F;
 static Vec3 g_frame_local_pos{};
 static bool g_frame_local_valid = false;
+static uint64_t g_frame_local_transform = 0;  // character root (input probe)
 // Camera basis recovered from this frame's VIEW MATRIX (not the transform
 // pose). On devices where the transform pose read fails, this is the only
 // camera orientation available — good enough for the farm's slow turns,
@@ -3944,6 +3945,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_sw = sw; g_frame_sh = sh;
     g_frame_local_pos = local;
     g_frame_local_valid = has_local_position;
+    g_frame_local_transform =
+        (local_entity_index < s_transforms.size()) ? s_transforms[local_entity_index] : 0;
     if (!camera_fallback) g_frame_publish_fail_streak = 0; // healthy frame
     // A fallback frame keeps counting toward the watchdog: a camera that
     // stays dead for a few seconds still triggers the world rebuild.
@@ -5689,6 +5692,29 @@ static void input_probe_walk_go(uint64_t go, const char* which) {
     }
 }
 
+// Walk this GO and its child GOs (depth 2) for the handler.
+static void input_probe_walk_go_depth(uint64_t go, const char* which, int depth) {
+    if (!go || g_ip.handler) return;
+    input_probe_walk_go(go, which);
+    if (g_ip.handler || depth >= 2) return;
+    // The GO's Transform is pairs[0]+8 (the codebase's convention); child
+    // transforms are a direct-pointer array on the transform itself.
+    uint64_t pairs = rd_ptr(go + GAMEOBJECT_COMPONENT_ARRAY);
+    if (!pairs) return;
+    uint64_t t = rd_ptr(pairs + COMPONENT_PAIR_PTR);
+    if (!t || rd_ptr(t + COMPONENT_GAMEOBJECT) != go) return;
+    int32_t cc = rd<int32_t>(t + TRANSFORM_CHILD_COUNT);
+    uint64_t carr = rd_ptr(t + TRANSFORM_CHILDREN_ARRAY);
+    if (cc < 1 || cc > 32 || !carr) return;
+    for (int i = 0; i < cc && i < 16; ++i) {
+        uint64_t ct = rd_ptr(carr + (uint64_t)i * 8);
+        if (!ct || rd_ptr(ct + COMPONENT_GAMEOBJECT) == go) continue;
+        uint64_t cgo = rd_ptr(ct + COMPONENT_GAMEOBJECT);
+        if (cgo) input_probe_walk_go_depth(cgo, which, depth + 1);
+        if (g_ip.handler) return;
+    }
+}
+
 void esp_input_probe() {
     if (g_pid <= 0) return;
     const uint64_t now = ip_now_ms();
@@ -5696,36 +5722,38 @@ void esp_input_probe() {
     // Discovery: at most once per second, and only while we have no live
     // handler. The handler is a plain MonoBehaviour — it survives world
     // reloads as long as the class pointer does, so a failed re-check just
-    // retries later.
+    // retries later. Diagnostics throttled to one line per 30 s — the
+    // previous 5 s cadence filled a 25k-line log with "not found".
     if (g_ip.handler && rd_ptr(g_ip.handler) != g_ip.handler_klass)
         g_ip.handler = 0; // gone (respawn / world change): re-discover
     if (!g_ip.handler) {
         if (now - g_ip.last_discover_ms < 1000) return;
         g_ip.last_discover_ms = now;
-        uint64_t player = resolve_local_player();
-        if (!player) {
-            if (!g_ip.logged_walk && now - g_ip.last_log_ms > 5000) {
-                g_ip.last_log_ms = now;
-                farm_log_append("IPROBE no player\n");
+        bool found_any = false;
+        // Anchor: the character root transform (the one whose position IS
+        // the player position). The first attempt used the PlayerManager's
+        // own GameObject — the manager is a singleton object, the input
+        // components live on the character.
+        uint64_t ctrans = g_frame_local_transform;
+        if (ctrans) {
+            uint64_t cgo = rd_ptr(ctrans + COMPONENT_GAMEOBJECT);
+            if (cgo) { input_probe_walk_go_depth(cgo, "char", 0); found_any = true; }
+        }
+        if (!g_ip.handler) {
+            uint64_t player = resolve_local_player();
+            uint64_t kcc = player ? rd_ptr(player + PLAYER_KCC_REFERENCE) : 0;
+            if (kcc) {
+                uint64_t knc = managed_object_native(kcc);
+                uint64_t kg = knc ? rd_ptr(knc + COMPONENT_GAMEOBJECT) : 0;
+                if (kg) { input_probe_walk_go_depth(kg, "kcc", 0); found_any = true; }
             }
-            return;
         }
-        uint64_t kcc = rd_ptr(player + PLAYER_KCC_REFERENCE);
-        uint64_t pbeh = kcc ? rd_ptr(kcc + KCC_PLAYER_BACKREF) : 0;
-        uint64_t ncomp = managed_object_native(pbeh);
-        uint64_t go = ncomp ? rd_ptr(ncomp + COMPONENT_GAMEOBJECT) : 0;
-        if (go) input_probe_walk_go(go, "player");
-        if (!g_ip.handler && kcc) {
-            // Not on the character root? Try the KCC's own GameObject.
-            uint64_t knc = managed_object_native(kcc);
-            uint64_t kg = knc ? rd_ptr(knc + COMPONENT_GAMEOBJECT) : 0;
-            if (kg && kg != go) input_probe_walk_go(kg, "kcc");
-        }
-        if (!g_ip.handler && now - g_ip.last_log_ms > 5000) {
+        if (!g_ip.handler && now - g_ip.last_log_ms > 30000) {
             g_ip.last_log_ms = now;
             char line[160];
-            snprintf(line, sizeof(line), "IPROBE not found player=0x%llx kcc=0x%llx go=0x%llx\n",
-                     (unsigned long long)player, (unsigned long long)kcc, (unsigned long long)go);
+            snprintf(line, sizeof(line),
+                     "IPROBE not found ctrans=0x%llx any_go=%d\n",
+                     (unsigned long long)ctrans, (int)found_any);
             farm_log_append(line);
         }
     }
