@@ -4941,6 +4941,8 @@ static bool marker_world_position(uint64_t transform, Vec3& out) {
 // Walk Mirror's client registry and cache every ore node / animal in it.
 // TEMP farm log (defined below, near farm_find_spot).
 static void farm_log_append(const char* line);
+static int farm_kind_from_node_name(uint64_t transform, int& kind);
+static bool farm_kind_from_loot(uint64_t mineable, int& kind);
 
 // TEMP farm log: classification census — fed by BOTH walk paths (the
 // overlay's rebuild and the farm's own walk; whichever runs is the one
@@ -5057,42 +5059,54 @@ static void rebuild_marker_entities() {
                     case MineableEntityType::Stone:  farm_kind = 1; break;
                     case MineableEntityType::Iron:   farm_kind = 2; break;
                     case MineableEntityType::Sulfur: farm_kind = 3; break;
-                    // TEMP: an unknown mineable type — the ores may carry
-                    // a value outside this enum in the current build.
-                    default: census_add_raw(raw_type, component); break;
+                    // Ores carry None(0) in this build: classified by
+                    // prefab name below.
+                    default: break;
                 }
-                if (farm_kind >= 0) {
-                    g_census_cls[farm_kind]++;
-                    FarmEntity fe;
-                    fe.identity = identity;
-                    fe.component = component;
-                    fe.kind = farm_kind;
-                    fe.transform = native_component_transform(managed_object_native(component));
-                    if (!fe.transform)
-                        fe.transform = native_component_transform(managed_object_native(identity));
-                    if (fe.transform) {
-                        // Fallen logs register as "Tree" but cannot be chopped
-                        // — same name filter the farm's own walk uses.
-                        if (farm_kind == 0 && g_go_name_offset_valid) {
-                            char go_name[48];
-                            if (read_transform_name(fe.transform, go_name, sizeof(go_name))) {
-                                for (char* p = go_name; *p; ++p)
-                                    if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
-                                if (strstr(go_name, "log") || strstr(go_name, "fallen") ||
-                                    strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
-                                    strstr(go_name, "stump"))
-                                    fe.transform = 0;
-                                // TEMP: tree-name census (the name is
-                                // already read for the filter above).
-                                if (fe.transform &&
-                                    (g_census_tree_names.size() < 16 ||
-                                     g_census_tree_names.count(go_name)))
-                                    g_census_tree_names[go_name]++;
-                            }
+                uint64_t fe_transform = native_component_transform(managed_object_native(component));
+                if (!fe_transform)
+                    fe_transform = native_component_transform(managed_object_native(identity));
+                if (farm_kind < 0) {
+                    // No enum type: try the prefab name (OreFerum, ...),
+                    // then the loot list.
+                    if (fe_transform && !farm_kind_from_node_name(fe_transform, farm_kind))
+                        farm_kind_from_loot(component, farm_kind);
+                    if (farm_kind < 0) {
+                        // Dropped (animals and the like) — keep the
+                        // census of what the build labels how.
+                        census_add_raw(raw_type, component);
+                        continue;
+                    }
+                }
+                g_census_cls[farm_kind]++;
+                FarmEntity fe;
+                fe.identity = identity;
+                fe.component = component;
+                fe.kind = farm_kind;
+                fe.transform = fe_transform;
+                if (fe.transform) {
+                    // Fallen logs and saplings register as "Tree" but are
+                    // not farmable (the user farms real trees only) —
+                    // same name filter the farm's own walk uses.
+                    if (farm_kind == 0 && g_go_name_offset_valid) {
+                        char go_name[48];
+                        if (read_transform_name(fe.transform, go_name, sizeof(go_name))) {
+                            for (char* p = go_name; *p; ++p)
+                                if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+                            if (strstr(go_name, "log") || strstr(go_name, "fallen") ||
+                                strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
+                                strstr(go_name, "stump") || strstr(go_name, "sapling"))
+                                fe.transform = 0;
+                            // TEMP: tree-name census (name already read).
+                            if (fe.transform &&
+                                (g_census_tree_names.size() < 16 ||
+                                 g_census_tree_names.count(go_name)))
+                                g_census_tree_names[go_name]++;
                         }
-                        if (fe.transform) {
-                            fe.pos_valid = marker_world_position(fe.transform, fe.pos);
-                            g_farm_shared.push_back(fe);
+                    }
+                    if (fe.transform) {
+                        fe.pos_valid = marker_world_position(fe.transform, fe.pos);
+                        g_farm_shared.push_back(fe);
                             // TEMP ore diagnosis: an ore node entered the cache.
                             if (fe.kind != 0) {
                                 static std::unordered_set<uint64_t> s_vis;
@@ -5110,7 +5124,6 @@ static void rebuild_marker_entities() {
                             }
                         }
                     }
-                }
             }
 
             MarkerLook look;
@@ -5391,6 +5404,29 @@ static int farm_kind_for_item_name(const char* item_name, int& kind) {
     return 0;
 }
 
+// Ores in the current build carry entityType None(0) — the CLS census
+// showed 27 nodes named "OreFerum (Clone)" all labelled raw0. The prefab
+// name IS the type. Rank 4 = known ore keyword; a bare "ore"/"rock" with
+// an unknown keyword still farms as metal (rank 1, overridable by loot)
+// so a new ore variant is not silently skipped — the CLS census keeps
+// its name visible for a proper keyword.
+static int farm_kind_from_node_name(uint64_t transform, int& kind) {
+    if (!transform || !g_go_name_offset_valid) return 0;
+    char nm[48];
+    if (!read_transform_name(transform, nm, sizeof(nm))) return 0;
+    for (char* p = nm; *p; ++p)
+        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+    if (strstr(nm, "ferum") || strstr(nm, "ferrum") || strstr(nm, "iron"))
+        { kind = 2; return 4; }
+    if (strstr(nm, "sulfur") || strstr(nm, "sulphur"))
+        { kind = 3; return 4; }
+    if (strstr(nm, "stone") || strstr(nm, "quartz") || strstr(nm, "granite"))
+        { kind = 1; return 4; }
+    if (strstr(nm, "ore") || strstr(nm, "rock"))
+        { kind = 2; return 1; }
+    return 0;
+}
+
 // Same two loot lists the markers read, but wood ranks too (trees are the
 // whole point here, while the markers skip them to keep the screen clean).
 static bool farm_kind_from_loot(uint64_t mineable, int& kind) {
@@ -5464,7 +5500,8 @@ static void rebuild_farm_entities() {
             if (!valid_obj(component)) continue;
             if (marker_class_of(rd_ptr(component)) != MARKER_CLASS_MINEABLE) continue;
 
-            // Kind: the entityType enum first (cheap and exact), loot second.
+            // Kind: the entityType enum first (cheap and exact), then the
+            // prefab name (ores in this build carry None(0)), then loot.
             int kind = -1;
             int raw_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
             switch ((MineableEntityType)raw_type) {
@@ -5474,11 +5511,17 @@ static void rebuild_farm_entities() {
                 case MineableEntityType::Sulfur: kind = 3; break;
                 default: break;
             }
-            if (kind < 0 && !farm_kind_from_loot(component, kind)) {
-                // TEMP: a mineable the farm DROPS — what does the build
-                // label it with? (Ores outside the enum land here.)
-                census_add_raw(raw_type, component);
-                continue;
+            uint64_t ent_transform = native_component_transform(managed_object_native(component));
+            if (!ent_transform)
+                ent_transform = native_component_transform(managed_object_native(identity));
+            if (kind < 0) {
+                if (ent_transform && !farm_kind_from_node_name(ent_transform, kind))
+                    farm_kind_from_loot(component, kind);
+                if (kind < 0) {
+                    // Dropped (animals and the like) — census it.
+                    census_add_raw(raw_type, component);
+                    continue;
+                }
             }
             if (kind >= 0 && kind < 4) g_census_cls[kind]++;
             if (!(g_farm_mask & (1u << kind))) continue;
@@ -5487,14 +5530,11 @@ static void rebuild_farm_entities() {
             entity.identity = identity;
             entity.component = component;
             entity.kind = kind;
-            entity.transform = native_component_transform(managed_object_native(component));
-            if (!entity.transform)
-                entity.transform = native_component_transform(managed_object_native(identity));
+            entity.transform = ent_transform;
             if (!entity.transform) continue;
 
-            // Fallen logs register as "Tree" but cannot be chopped the same
-            // way — the bot just circles them. Filter them out by prefab
-            // name (log / fallen / dead / driftwood variants).
+            // Fallen logs and saplings register as "Tree" but are not
+            // farmable — filtered out by prefab name.
             if (kind == 0 && g_go_name_offset_valid) {
                 char go_name[48];
                 if (read_transform_name(entity.transform, go_name, sizeof(go_name))) {
@@ -5502,7 +5542,7 @@ static void rebuild_farm_entities() {
                         if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
                     if (strstr(go_name, "log") || strstr(go_name, "fallen") ||
                         strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
-                        strstr(go_name, "stump"))
+                        strstr(go_name, "stump") || strstr(go_name, "sapling"))
                         continue;
                     // TEMP: tree-name census (name already read above).
                     if (g_census_tree_names.size() < 16 ||

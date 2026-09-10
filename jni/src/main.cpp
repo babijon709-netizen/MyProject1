@@ -3779,7 +3779,6 @@ static void UpdateFarm(float dt) {
     // The X can be on the FAR side of the node: the tool cannot reach it
     // through the trunk/boulder, so first circle until it faces us (orbit).
     const bool  isTree = (tgt.kind == 0);
-    const bool  orbit  = tgt.has_spot && !tgt.spot_front;
     // Stop distance: the tree one is the standoff, not the reach — the tool
     // comfortably reaches farther (ore mines at 1.55), but the player wants
     // to stand a bit off the trunk, not pressed against it.
@@ -3817,12 +3816,21 @@ static void UpdateFarm(float dt) {
     static unsigned long long s_side_owner = 0;
     if (tgt.id != s_side_owner) { s_side_owner = tgt.id; s_head_on = true; }
     if (tgt.has_spot && inRange) {
-        if (s_head_on) s_head_on = (tgt.orbit_angle < 35.f);
-        else           s_head_on = (tgt.orbit_angle < 25.f);
+        // |angle| around the trunk: strike only within ~15 deg of our
+        // radial, start the arc above 25. fabs on purpose — the old
+        // SIGNED compare never triggered for a mark drifting LEFT of the
+        // trunk, so the bot stood and swung at it from the side.
+        const float oaAbs = fabsf(tgt.orbit_angle);
+        if (s_head_on) s_head_on = (oaAbs < 25.f);
+        else           s_head_on = (oaAbs < 15.f);
     } else if (tgt.has_spot) {
         s_head_on = true; // approaching: the approach lands in front of it
     }
     const bool headOn = !tgt.has_spot || s_head_on;
+    // Arc in progress: the X is off to the side, we strafe around the
+    // trunk until it faces us (the watchdog measures the angle while it
+    // runs — the distance does not change there).
+    const bool orbit  = tgt.has_spot && !s_head_on;
     const bool inMelee = inRange && headOn;
     const int phase = inMelee ? 2 : 1;
     g_farmPhase = phase;
@@ -3941,16 +3949,28 @@ static void UpdateFarm(float dt) {
                 py = cy - r * 0.99f * sqrtf(1.f - steer * steer);
             }
         } else {
-            // Mining: nudge forward only while the tool still does not
-            // reach (thin trees: the node centre sits inside the trunk).
+            // Mining: hold the tool's standoff from the mark. The old
+            // forward-only creep ran the bot into the bark (0.3 m away —
+            // every slightly off-angle hit then looked like a side hit):
+            // too close -> ease back, still short -> creep in. Walking
+            // pace only (a 0.55 stick is RUN speed on this game and the
+            // run-in used to overshoot straight into the trunk).
             float toHit = tgt.has_spot ? tgt.aim_dist : tgt.dist;
-            if (toHit > meleeX + 0.15f) {
+            if (tgt.has_spot && toHit < meleeX - 0.15f) {
+                wantWalk = true;
+                px = cx;
+                py = cy + r * 0.45f;   // ease back to the standoff
+            } else if (!tgt.has_spot && toHit < 1.0f) {
+                wantWalk = true;
+                px = cx;
+                py = cy + r * 0.45f;   // inside the collision zone
+            } else if (toHit > meleeX + 0.15f) {
                 wantWalk = true;
                 float steer = tgt.walk_yaw / 60.f;
                 if (steer >  1.f) steer =  1.f;
                 if (steer < -1.f) steer = -1.f;
                 px = cx + r * 0.35f * steer;
-                py = cy - r * 0.55f;
+                py = cy - r * 0.45f;
             }
         }
 
@@ -4066,7 +4086,7 @@ static void UpdateFarm(float dt) {
         // Progress metric: distance to the node — or the angle to the X
         // while orbiting (the distance does not change there; measuring by
         // it made the watchdog fire and drag the bot into the evade dance).
-        float goalNow = orbit ? tgt.orbit_angle : tgt.dist;
+        float goalNow = orbit ? fabsf(tgt.orbit_angle) : tgt.dist;
         bool progress = goalNow < s_lastGoal - 0.15f ||
                         goalNow < s_lastGoal - s_lastGoal * 0.02f;
         // Count "stuck" only while actually TRYING to move: a 180-degree
