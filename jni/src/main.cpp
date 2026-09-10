@@ -643,6 +643,7 @@ static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_marker_max_distance(g_state.marker_dist);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
+        esp_input_probe();
     }
     return s_boxes;
 }

@@ -5600,6 +5600,163 @@ static float farm_eye_y() {
     return 0.0F;
 }
 
+// ---- Stage 1: memory input probe (READ-ONLY) ---------------------------------
+// Calibration for the memory-driven farm (the uinput path is the source of
+// the movement bugs — OS touch pipeline latency and the game's own stick
+// physics). The game's authoritative input is the PlayerInput value struct
+// on Oxide.PlayerInputHandler (dumped layout, offsets from il2cpp):
+//   +0x40 Vector2 MovementInput  (joystick)
+//   +0x48 Vector3 LookDirection  (aim direction)
+//   +0x54 float   YRotation      (camera yaw)
+//   +0x58 Jump +0x59 Sprint +0x5A Crouch +0x5B Aim +0x5C Ready (bools)
+//   +0x60 uint32  Tick           (input tick counter)
+//   +0x64 bool    TooClose
+// The probe finds that component on the player GameObject through the
+// native component list (the native->managed bridge offset is discovered
+// by round-trip: managed + 0x10 must point back at the native component)
+// and logs the struct 5 Hz. Stage 2 writes the struct instead of the OS
+// touches. Nothing here writes to the game.
+struct InputProbeState {
+    uint64_t handler = 0;      // managed Oxide.PlayerInputHandler instance
+    uint64_t handler_klass = 0;
+    int      bridge_off = -1;  // native Component -> managed MonoBehaviour
+    uint64_t last_discover_ms = 0;
+    uint64_t last_log_ms = 0;
+    int      log_n = 0;
+    bool     logged_walk = false;
+};
+static InputProbeState g_ip;
+
+static uint64_t ip_now_ms() {
+    return (uint64_t)(std::chrono::steady_clock::now().time_since_epoch().count() / 1000);
+}
+
+// One GameObject's native component list: count (probed offsets) + pairs.
+static void input_probe_walk_go(uint64_t go, const char* which) {
+    uint64_t pairs = rd_ptr(go + GAMEOBJECT_COMPONENT_ARRAY);
+    if (!pairs) return;
+    int count = -1;
+    for (uint64_t coff : {0x18ULL, 0x1CULL, 0x28ULL}) {
+        int32_t c = rd<int32_t>(go + coff);
+        if (c >= 1 && c <= 64) { count = c; break; }
+    }
+    if (count < 0) return;
+    if (!g_ip.logged_walk) {
+        char line[96];
+        snprintf(line, sizeof(line), "IPOBJ go=0x%llx %s count=%d\n",
+                 (unsigned long long)go, which, count);
+        farm_log_append(line);
+    }
+    for (int i = 0; i < count && i < 48; ++i) {
+        uint64_t nc = rd_ptr(pairs + (uint64_t)i * 16);
+        if (!nc) nc = rd_ptr(pairs + (uint64_t)i * 16 + COMPONENT_PAIR_PTR);
+        if (!nc) continue;
+        // Discover the native->managed bridge once (round-trip proves it).
+        if (g_ip.bridge_off < 0) {
+            for (int off = 0x08; off <= 0x70; off += 8) {
+                uint64_t cand = rd_ptr(nc + (uint64_t)off);
+                if (cand && managed_object_native(cand) == nc) {
+                    g_ip.bridge_off = off;
+                    char line[64];
+                    snprintf(line, sizeof(line), "IPROBE bridge=0x%02x\n", off);
+                    farm_log_append(line);
+                    break;
+                }
+            }
+        }
+        if (g_ip.bridge_off < 0) continue;
+        uint64_t managed = rd_ptr(nc + (uint64_t)g_ip.bridge_off);
+        if (managed_object_native(managed) != nc) continue;
+        uint64_t klass = rd_ptr(managed);
+        if (!valid_obj(klass)) continue;
+        std::string name = read_remote_string(rd_ptr(klass + 0x10));
+        if (!g_ip.logged_walk) {
+            char line[96];
+            snprintf(line, sizeof(line), "IPOBJ comp=0x%llx name=%s\n",
+                     (unsigned long long)nc, name.empty() ? "?" : name.c_str());
+            farm_log_append(line);
+        }
+        if (name == "PlayerInputHandler") {
+            g_ip.handler = managed;
+            g_ip.handler_klass = klass;
+            g_ip.logged_walk = true;
+            char line[128];
+            snprintf(line, sizeof(line), "IPROBE handler=0x%llx on %s\n",
+                     (unsigned long long)managed, which);
+            farm_log_append(line);
+            return;
+        }
+    }
+}
+
+void esp_input_probe() {
+    if (g_pid <= 0) return;
+    const uint64_t now = ip_now_ms();
+
+    // Discovery: at most once per second, and only while we have no live
+    // handler. The handler is a plain MonoBehaviour — it survives world
+    // reloads as long as the class pointer does, so a failed re-check just
+    // retries later.
+    if (g_ip.handler && rd_ptr(g_ip.handler) != g_ip.handler_klass)
+        g_ip.handler = 0; // gone (respawn / world change): re-discover
+    if (!g_ip.handler) {
+        if (now - g_ip.last_discover_ms < 1000) return;
+        g_ip.last_discover_ms = now;
+        uint64_t player = resolve_local_player();
+        if (!player) {
+            if (!g_ip.logged_walk && now - g_ip.last_log_ms > 5000) {
+                g_ip.last_log_ms = now;
+                farm_log_append("IPROBE no player\n");
+            }
+            return;
+        }
+        uint64_t kcc = rd_ptr(player + PLAYER_KCC_REFERENCE);
+        uint64_t pbeh = kcc ? rd_ptr(kcc + KCC_PLAYER_BACKREF) : 0;
+        uint64_t ncomp = managed_object_native(pbeh);
+        uint64_t go = ncomp ? rd_ptr(ncomp + COMPONENT_GAMEOBJECT) : 0;
+        if (go) input_probe_walk_go(go, "player");
+        if (!g_ip.handler && kcc) {
+            // Not on the character root? Try the KCC's own GameObject.
+            uint64_t knc = managed_object_native(kcc);
+            uint64_t kg = knc ? rd_ptr(knc + COMPONENT_GAMEOBJECT) : 0;
+            if (kg && kg != go) input_probe_walk_go(kg, "kcc");
+        }
+        if (!g_ip.handler && now - g_ip.last_log_ms > 5000) {
+            g_ip.last_log_ms = now;
+            char line[160];
+            snprintf(line, sizeof(line), "IPROBE not found player=0x%llx kcc=0x%llx go=0x%llx\n",
+                     (unsigned long long)player, (unsigned long long)kcc, (unsigned long long)go);
+            farm_log_append(line);
+        }
+    }
+
+    // 5 Hz snapshot of the game's own input state.
+    if (!g_ip.handler || now - g_ip.last_log_ms < 200) return;
+    g_ip.last_log_ms = now;
+    if (g_ip.log_n >= 4000) return;
+    ++g_ip.log_n;
+    float mvx = rd<float>(g_ip.handler + 0x40);
+    float mvy = rd<float>(g_ip.handler + 0x44);
+    Vec3 look = rd_v3(g_ip.handler + 0x48);
+    float yaw = rd<float>(g_ip.handler + 0x54);
+    uint8_t jb = rd<uint8_t>(g_ip.handler + 0x58);
+    uint8_t sp = rd<uint8_t>(g_ip.handler + 0x59);
+    uint8_t cr = rd<uint8_t>(g_ip.handler + 0x5A);
+    uint8_t ai = rd<uint8_t>(g_ip.handler + 0x5B);
+    uint8_t ry = rd<uint8_t>(g_ip.handler + 0x5C);
+    uint32_t tick = rd<uint32_t>(g_ip.handler + 0x60);
+    uint8_t tc = rd<uint8_t>(g_ip.handler + 0x64);
+    float camYaw = 0.f, camPitch = 0.f;
+    bool haveCam = esp_camera_angles(camYaw, camPitch);
+    char line[208];
+    snprintf(line, sizeof(line),
+             "INPUT mv=(%.2f,%.2f) look=(%.2f,%.2f,%.2f) yaw=%.4f J=%d Sp=%d C=%d A=%d R=%d tick=%u tc=%d cam=%s(%.2f,%.2f) p=(%.1f,%.1f,%.1f)\n",
+             mvx, mvy, look.x, look.y, look.z, yaw, jb, sp, cr, ai, ry,
+             (unsigned)tick, tc, haveCam ? "" : "?", camYaw, camPitch,
+             g_frame_local_pos.x, g_frame_local_pos.y, g_frame_local_pos.z);
+    farm_log_append(line);
+}
+
 // ---- The glowing X (bonus spot) ---------------------------------------------
 
 // Anything at foot level is a root / interaction volume / shadow — that was

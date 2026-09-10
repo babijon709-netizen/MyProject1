@@ -122,6 +122,7 @@ struct FarmTarget {
 // TEMP farm log line (remove with the log probes once the movement and
 // ore issues are fixed): appended to /sdcard/Download/xvcen_farm.log.
 void        esp_farm_log_line(const char* line);
+void        esp_input_probe();          // stage-1 memory input probe (read-only)
 // Which resources to farm: bit0 wood, bit1 stone, bit2 metal, bit3 sulfur.
 // 0 disables the scan entirely (no extra work per frame).
 void        esp_farm_set_resources(unsigned mask);
