@@ -3816,13 +3816,15 @@ static void UpdateFarm(float dt) {
     static unsigned long long s_side_owner = 0;
     if (tgt.id != s_side_owner) { s_side_owner = tgt.id; s_head_on = true; }
     if (tgt.has_spot && inRange) {
-        // |angle| around the trunk: strike only within ~15 deg of our
-        // radial, start the arc above 25. fabs on purpose — the old
-        // SIGNED compare never triggered for a mark drifting LEFT of the
-        // trunk, so the bot stood and swung at it from the side.
+        // |angle| around the trunk: strike only within ~10 deg of our
+        // radial, start the arc above 20. 25/15 made the arc fire on
+        // some X hops and not others ("то обходит, то нет") — a 20-25
+        // deg mark was struck from the side. 20/10 arcs a bit more,
+        // but every strike is head-on. fabs on purpose — the old SIGNED
+        // compare never triggered for a mark drifting LEFT of the trunk.
         const float oaAbs = fabsf(tgt.orbit_angle);
-        if (s_head_on) s_head_on = (oaAbs < 25.f);
-        else           s_head_on = (oaAbs < 15.f);
+        if (s_head_on) s_head_on = (oaAbs < 20.f);
+        else           s_head_on = (oaAbs < 10.f);
     } else if (tgt.has_spot) {
         s_head_on = true; // approaching: the approach lands in front of it
     }
@@ -3941,17 +3943,31 @@ static void UpdateFarm(float dt) {
             px = cx + r * 0.95f * tgt.orbit_side;
             py = cy;
         } else if (phase == 1) {
-            // Walk at the walk target once the camera is roughly on it
-            // (steering the stick at a big yaw would send the bot sideways).
+            // Approach: run until close, then BRAKE proportionally so the
+            // bot arrives inside the standoff band instead of crashing
+            // into the bark at run speed and having to back off (the
+            // "подходит впритык, потом отходит и бьёт" pattern — the old
+            // code switched from full run to a creep stick at 2.6 m, but
+            // the body kept run speed for 0.3-0.5 s and overshot into
+            // the trunk). Stick size = distance to the stop line: full
+            // run far away, walk mid-way, slow creep over the last
+            // ~1.5 m — velocity tapers to ~0 exactly at the band.
             if (fabsf(tgt.walk_yaw) < 45.f) {
-                wantWalk = true;
-                float steer = tgt.walk_yaw / 60.f;  // slight steering
-                if (steer >  0.5f) steer =  0.5f;
-                if (steer < -0.5f) steer = -0.5f;
-                // FULL deflection = run speed: the stick is pushed to
-                // its whole radius, angled a bit toward the target.
-                px = cx + r * steer;
-                py = cy - r * 0.99f * sqrtf(1.f - steer * steer);
+                const float stopAt = isTree ? 1.35f : 1.70f;
+                const float toGo   = tgt.dist - stopAt;
+                if (toGo > 0.f) {
+                    wantWalk = true;
+                    float steer = tgt.walk_yaw / 60.f;  // slight steering
+                    if (steer >  0.5f) steer =  0.5f;
+                    if (steer < -0.5f) steer = -0.5f;
+                    // 1.5 m braking zone, floor at a slow walk.
+                    float spd = (toGo - 0.15f) / 1.5f;
+                    if (spd > 1.f)   spd = 1.f;
+                    if (spd < 0.30f) spd = 0.30f;
+                    px = cx + r * steer * spd;
+                    py = cy - r * spd * sqrtf(1.f - steer * steer);
+                }
+                // toGo <= 0: already inside the band — stand still.
             }
         } else {
             // Mining: hold a standoff band around the aim point. The
@@ -3966,8 +3982,13 @@ static void UpdateFarm(float dt) {
             // creep in to a safe approach stop, back off inside the
             // collision zone.
             float toHit   = tgt.has_spot ? tgt.aim_dist : tgt.dist;
-            float backAt  = tgt.has_spot ? 0.70f : (isTree ? 0.95f : 1.00f);
-            float creepAt = tgt.has_spot ? 1.30f : (isTree ? 1.35f : 1.70f);
+            // Ore stands a bit closer: the boulder surface curves away
+            // from the mark, so at the same distance a swing ray aimed
+            // at the X can clip past it ("то достаёт, то нет").
+            float backAt  = tgt.has_spot ? (isTree ? 0.70f : 0.65f)
+                                         : (isTree ? 0.95f : 1.00f);
+            float creepAt = tgt.has_spot ? (isTree ? 1.30f : 1.15f)
+                                         : (isTree ? 1.35f : 1.70f);
             if (toHit < backAt) {
                 wantWalk = true;
                 px = cx;
