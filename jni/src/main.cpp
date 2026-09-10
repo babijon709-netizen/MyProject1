@@ -3604,6 +3604,7 @@ static void UpdateFarm(float dt) {
     static float s_evadeTime = 0.f;   // >0: back-off + sidestep in progress
     static float s_evadeDir = 1.f;    // +1 right, -1 left
     static int   s_evadeCount = 0;    // manoeuvres tried on this node
+    static float s_blockedTime = 0.f; // phase-2: stick pushed, body not moving
     static float s_mineTime = 0.f;    // seconds since the node last lost HP
     static float s_fracRef = -1.f;    // fraction the drain check compares to
     static float s_nudgeTime = 0.f;   // seconds stuck nudging into reach
@@ -3708,7 +3709,7 @@ static void UpdateFarm(float dt) {
         s_nodeId = tgt.id;
         s_stuckTime = 0.f; s_lastGoal = 1e9f;
         s_mineTime = 0.f; s_fracRef = -1.f; s_nudgeTime = 0.f;
-        s_evadeTime = 0.f; s_evadeCount = 0;
+        s_evadeTime = 0.f; s_evadeCount = 0; s_blockedTime = 0.f;
         if (hadNode) { releaseAll(); s_settle = 0.6f; }
     }
 
@@ -3804,7 +3805,9 @@ static void UpdateFarm(float dt) {
     //    the running.
     static bool  s_head_on = true;
     static unsigned long long s_side_owner = 0;
-    if (tgt.id != s_side_owner) { s_side_owner = tgt.id; s_head_on = true; }
+    static float s_arcImmune = 0.f;   // >0: just finished an arc, small hops stay put
+    if (tgt.id != s_side_owner) { s_side_owner = tgt.id; s_head_on = true; s_arcImmune = 0.f; }
+    if (s_arcImmune > 0.f) s_arcImmune -= dt;
     if (tgt.has_spot && atNode) {
         // |angle| around the trunk: strike only within ~10 deg of our
         // radial, start the arc above 20. 25/15 made the arc fire on
@@ -3812,9 +3815,19 @@ static void UpdateFarm(float dt) {
         // deg mark was struck from the side. 20/10 arcs a bit more,
         // but every strike is head-on. fabs on purpose — the old SIGNED
         // compare never triggered for a mark drifting LEFT of the trunk.
+        //
+        // Anti-flap (log s8): the X hops a few degrees around our radial
+        // after most hits, so 20/10 alone re-triggered a short arc every
+        // few seconds and the taps stopped for each one. After an arc
+        // completes, small marks (<35 deg) do NOT re-start it for 2.5 s —
+        // a 20-35 deg mark is still in the tool's reach, it just lands a
+        // little to the side. A mark truly around the far side (>35)
+        // arcs immediately.
         const float oaAbs = fabsf(tgt.orbit_angle);
-        if (s_head_on) s_head_on = (oaAbs < 20.f);
-        else           s_head_on = (oaAbs < 10.f);
+        if (s_head_on) s_head_on = (oaAbs < 20.f) || (s_arcImmune > 0.f && oaAbs < 35.f);
+        else {
+            if (oaAbs < 10.f) { s_head_on = true; s_arcImmune = 2.5f; }
+        }
     } else if (tgt.has_spot) {
         s_head_on = true; // approaching: the approach lands in front of it
     }
@@ -3898,6 +3911,7 @@ static void UpdateFarm(float dt) {
 
     // ---- finger 0: move joystick (bottom-left) ----
     bool stickDeflected = false;
+    bool wantWalkNow = false;   // this frame's walk request (for the watchdog)
     {
         // Virtual stick centre: calibrated position when set, sensible
         // default otherwise.
@@ -4048,13 +4062,15 @@ static void UpdateFarm(float dt) {
                     esp_farm_log_line(line);
                 }
             }
+            wantWalkNow = wantWalk;
         }
     }
 
     // ---- finger 2: attack taps while mining ----
     {
         if (phase == 2) {
-            if (!stickDeflected) s_mineTime += dt; // only count real standing time
+            if (!stickDeflected || tgt.player_speed <= 0.4f)
+                s_mineTime += dt; // standing (even stick-pushed-but-blocked)
             // Hold fire while the crosshair is still swinging onto the mark:
             // a tap mid-swipe lands where the camera used to be — exactly
             // the "missed the X" complaint. Body hits are lenient (the node
@@ -4062,7 +4078,15 @@ static void UpdateFarm(float dt) {
             bool settled = tgt.has_spot
                 ? (fabsf(tgt.yaw) <= 1.6f && fabsf(tgt.pitch) <= 2.0f)
                 : (fabsf(tgt.yaw) <= 8.f && fabsf(tgt.pitch) <= 10.f);
-            if (!settled || stickDeflected) {
+            // A deflected stick only counts as "moving" when the player is
+            // actually moving: the game will not walk down a steep slope or
+            // through a wall, so the stick stays deflected while the body
+            // stands still. Blocking the swing on the deflection alone left
+            // the bot standing at a slope-locked ore for a minute with zero
+            // taps (log s8). Standing (blocked or not) + settled reticle =
+            // swing; the swing harmlessly whiffs when out of reach.
+            const bool moving = stickDeflected && tgt.player_speed > 0.4f;
+            if (!settled || moving) {
                 if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; }
                 s_tapTimer = 0;   // next tap fires the moment the reticle settles
             } else {
@@ -4140,7 +4164,27 @@ static void UpdateFarm(float dt) {
             }
         }
     } else {
-        s_evadeCount = 0; s_evadeTime = 0.f; // reached the node — obstacles cleared
+        // Blocked in phase 2: the stick is pushed (band creep / nudge) but
+        // the body does not move — the game will not walk down a steep
+        // slope or into a wall. The phase-1 watchdog never runs here, so
+        // without this the bot stood at a slope-locked ore for a full
+        // minute (log s8: "подбежал и стоял"). Slide sideways like the
+        // approach evade — it finds the descent. The count persists for
+        // the whole stay at the node (reset on node switch), so the
+        // manoeuvre is tried at most 4 times, then the fraction watchdog
+        // decides.
+        if (s_evadeTime <= 0.f) {
+            if (wantWalkNow && tgt.player_speed <= 0.4f) s_blockedTime += dt;
+            else s_blockedTime = 0.f;
+            if (s_blockedTime > 1.5f && s_evadeCount < 4) {
+                s_evadeTime = 1.7f;
+                s_evadeDir = (s_evadeCount % 2 == 0) ? 1.f : -1.f;
+                ++s_evadeCount;
+                s_blockedTime = 0.f;
+            }
+        } else {
+            s_blockedTime = 0.f;
+        }
         // Swinging (or nudging into reach) but the node is not draining:
         // standing a hair too far, blocked, or wrong tool. The walk-in nudge
         // handles the former; give up on the rest rather than stand there

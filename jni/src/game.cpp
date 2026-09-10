@@ -5730,30 +5730,33 @@ void esp_input_probe() {
         if (now - g_ip.last_discover_ms < 1000) return;
         g_ip.last_discover_ms = now;
         bool found_any = false;
-        // Anchor: the character root transform (the one whose position IS
-        // the player position). The first attempt used the PlayerManager's
-        // own GameObject — the manager is a singleton object, the input
-        // components live on the character.
-        uint64_t ctrans = g_frame_local_transform;
-        if (ctrans) {
-            uint64_t cgo = rd_ptr(ctrans + COMPONENT_GAMEOBJECT);
-            if (cgo) { input_probe_walk_go_depth(cgo, "char", 0); found_any = true; }
+        uint64_t diag_kgo = 0, diag_tgo = 0;
+        // Anchor 1: the KCC component's OWN GameObject. The KCC lives on
+        // the character root, so this is the character's GO — the input
+        // components (PlayerInputHandler) sit there or under it.
+        uint64_t player = resolve_local_player();
+        uint64_t kcc = player ? rd_ptr(player + PLAYER_KCC_REFERENCE) : 0;
+        if (kcc) {
+            uint64_t knc = managed_object_native(kcc);
+            diag_kgo = knc ? rd_ptr(knc + COMPONENT_GAMEOBJECT) : 0;
+            if (diag_kgo) { input_probe_walk_go_depth(diag_kgo, "kcc", 0); found_any = true; }
         }
-        if (!g_ip.handler) {
-            uint64_t player = resolve_local_player();
-            uint64_t kcc = player ? rd_ptr(player + PLAYER_KCC_REFERENCE) : 0;
-            if (kcc) {
-                uint64_t knc = managed_object_native(kcc);
-                uint64_t kg = knc ? rd_ptr(knc + COMPONENT_GAMEOBJECT) : 0;
-                if (kg) { input_probe_walk_go_depth(kg, "kcc", 0); found_any = true; }
-            }
+        // Anchor 2: the local player entity's transform (managed entity ->
+        // native transform via the same chain the position read uses) and
+        // its GameObject — that is the camera root, the handler may be a
+        // sibling under the same hierarchy, hence the child walk.
+        uint64_t ctrans = g_frame_local_transform;
+        if (!g_ip.handler && ctrans) {
+            uint64_t ntrans = resolve_player_native_transform(ctrans);
+            diag_tgo = ntrans ? rd_ptr(ntrans + COMPONENT_GAMEOBJECT) : 0;
+            if (diag_tgo) { input_probe_walk_go_depth(diag_tgo, "xform", 0); found_any = true; }
         }
         if (!g_ip.handler && now - g_ip.last_log_ms > 30000) {
             g_ip.last_log_ms = now;
-            char line[160];
+            char line[200];
             snprintf(line, sizeof(line),
-                     "IPROBE not found ctrans=0x%llx any_go=%d\n",
-                     (unsigned long long)ctrans, (int)found_any);
+                     "IPROBE not found kcc_go=0x%llx xform_go=0x%llx\n",
+                     (unsigned long long)diag_kgo, (unsigned long long)diag_tgo);
             farm_log_append(line);
         }
     }
@@ -6375,6 +6378,40 @@ bool esp_farm_get_target(FarmTarget& out) {
     }
     s_last_identity = best->identity;
 
+    // Local-player speed over the last ~0.25 s (from the position the
+    // frame already publishes — no extra reads). The controller uses it
+    // to tell "walking" from "stick pushed but the game will not move us
+    // (slope / edge / wall)".
+    static Vec3     s_sp_pos{};
+    static uint64_t s_sp_t = 0;
+    static float    s_sp_v = 0.f;
+    {
+        const uint64_t now = ip_now_ms();
+        if (s_sp_t) {
+            const uint64_t el = now - s_sp_t;
+            if (el >= 250) {
+                const float dt = (float)el / 1000.f;
+                const float dx = g_frame_local_pos.x - s_sp_pos.x;
+                const float dy = g_frame_local_pos.y - s_sp_pos.y;
+                const float dz = g_frame_local_pos.z - s_sp_pos.z;
+                const float jump2 = dx * dx + dy * dy + dz * dz;
+                if (jump2 > 900.0F) {        // warp / respawn: re-seed
+                    s_sp_pos = g_frame_local_pos;
+                    s_sp_t = now;
+                } else {
+                    const float v = sqrtf(jump2) / dt;
+                    s_sp_v = s_sp_v * 0.5F + v * 0.5F;
+                    s_sp_pos = g_frame_local_pos;
+                    s_sp_t = now;
+                }
+            }
+        } else {
+            s_sp_pos = g_frame_local_pos;
+            s_sp_t = now;
+        }
+    }
+    out.player_speed = s_sp_v;
+
     // ---- track the X on this node -----------------------------------------
     // The X appears when we are in melee range and hops to a new spot after
     // every hit, so the pick is re-verified periodically: ~0.1 s without a
@@ -6506,8 +6543,34 @@ bool esp_farm_get_target(FarmTarget& out) {
             s_spot_last = spot;
             s_spot_hold = 120;
             spot_ok = true;
-            aim = spot;
-            marker_pt = spot;
+            marker_pt = spot;   // the on-screen mark stays on the RAW X
+            // The camera, however, chases a SLOWED copy of the X. The mark
+            // hops 0.3-0.8 m after every hit and the raw chase swung the
+            // crosshair +-30 deg in a second ("before the eyes" the bot
+            // kept changing its mind); eased, the reticle glides to each
+            // new mark and the tap gate settles in ~0.3 s. A jump over
+            // 1.5 m is a new node / respawn — snap, do not trail.
+            static Vec3     s_aim_ease{};
+            static bool     s_aim_ease_valid = false;
+            static uint64_t s_aim_ease_owner = 0;
+            if (s_aim_ease_owner != best->component || !s_aim_ease_valid) {
+                s_aim_ease = spot;
+                s_aim_ease_valid = true;
+                s_aim_ease_owner = best->component;
+            } else {
+                float ex = spot.x - s_aim_ease.x;
+                float ey = spot.y - s_aim_ease.y;
+                float ez = spot.z - s_aim_ease.z;
+                if (ex * ex + ey * ey + ez * ez > 2.25F) {
+                    s_aim_ease = spot;
+                } else {
+                    const float k = 0.065F; // ~1 - exp(-4 dt) at 60 fps
+                    s_aim_ease.x += ex * k;
+                    s_aim_ease.y += ey * k;
+                    s_aim_ease.z += ez * k;
+                }
+            }
+            aim = s_aim_ease;
             // The signed angle around the node from our radial to the
             // mark's radial — ALWAYS reported: the controller arcs around
             // the trunk until the mark is in front (head-on, ~<25 deg)

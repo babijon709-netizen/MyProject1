@@ -108,6 +108,7 @@ struct FarmTarget {
     float walk_yaw = 0.f;           // to the node BODY (deg from camera forward) — the walk goes straight at it
     float dist = 0.f;               // horizontal metres from the local player to the node
     float aim_dist = 0.f;           // horizontal metres to the aim point (the X, when live)
+    float player_speed = 0.f;       // measured local-player speed (m/s)
     float fraction = -1.f;          // resource remaining 0..1, -1 unknown
     bool  has_spot = false;         // true when the glowing X is live and being aimed
     // The X can sit on the FAR side of the node: the tool cannot reach it
