@@ -105,7 +105,8 @@ struct FarmTarget {
     unsigned long long id = 0;
     int   kind = 0;                 // 0 wood, 1 stone, 2 metal, 3 sulfur
     float yaw = 0.f, pitch = 0.f;   // to the AIM point: X when live, else the node body (deg from camera forward, +right/+up)
-    float walk_yaw = 0.f;           // to the node BODY (deg from camera forward) — the walk goes straight at it
+    float walk_yaw = 0.f;           // to the WALK POINT (deg from camera forward) — the X when live, else the node body
+    float walk_dist = 0.f;          // horizontal metres to the walk point
     float dist = 0.f;               // horizontal metres from the local player to the node
     float aim_dist = 0.f;           // horizontal metres to the aim point (the X, when live)
     float player_speed = 0.f;       // measured local-player speed (m/s)

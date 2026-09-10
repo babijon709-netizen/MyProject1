@@ -3719,7 +3719,7 @@ static void UpdateFarm(float dt) {
     // a half-chopped tree — only a solidly repeated "empty" counts.
     static int s_depletedFrames = 0;
     if (tgt.fraction >= 0.f && tgt.fraction < 0.03f) {
-        if (++s_depletedFrames >= 300) {
+        if (++s_depletedFrames >= 90) {
             s_depletedFrames = 0;
             esp_farm_blacklist(tgt.id, 120.f);
             releaseAll();
@@ -3958,7 +3958,7 @@ static void UpdateFarm(float dt) {
             // ~1.5 m — velocity tapers to ~0 exactly at the band.
             if (fabsf(tgt.walk_yaw) < 45.f) {
                 const float stopAt = isTree ? 1.35f : 1.70f;
-                const float toGo   = tgt.dist - stopAt;
+                const float toGo   = tgt.walk_dist - stopAt;
                 if (toGo > 0.f) {
                     wantWalk = true;
                     float steer = tgt.walk_yaw / 60.f;  // slight steering
@@ -4127,7 +4127,7 @@ static void UpdateFarm(float dt) {
         // Progress metric: distance to the node — or the angle to the X
         // while orbiting (the distance does not change there; measuring by
         // it made the watchdog fire and drag the bot into the evade dance).
-        float goalNow = orbit ? fabsf(tgt.orbit_angle) : tgt.dist;
+        float goalNow = orbit ? fabsf(tgt.orbit_angle) : tgt.walk_dist;
         bool progress = goalNow < s_lastGoal - 0.15f ||
                         goalNow < s_lastGoal - s_lastGoal * 0.02f;
         // Count "stuck" only while actually TRYING to move: a 180-degree

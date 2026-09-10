@@ -5630,8 +5630,12 @@ struct InputProbeState {
 };
 static InputProbeState g_ip;
 
+// steady_clock ticks are NANOSECONDS — /1000 would give microseconds and
+// every "per second / per 30 s" cadence below would run at 1000x speed:
+// the discovery walk hammered the render thread every frame (the
+// intermittent menu/ESP stutter) and the diagnostics spammed the log.
 static uint64_t ip_now_ms() {
-    return (uint64_t)(std::chrono::steady_clock::now().time_since_epoch().count() / 1000);
+    return (uint64_t)(std::chrono::steady_clock::now().time_since_epoch().count() / 1000000);
 }
 
 // One GameObject's native component list: count (probed offsets) + pairs.
@@ -6356,6 +6360,14 @@ bool esp_farm_get_target(FarmTarget& out) {
                 score += 1000.0F;
         } else {
             score *= 0.6F; // stickiness: don't flip between equidistant nodes
+            // The node we ARE working gets a FRESH fraction read with the
+            // same penalty: without it the farm (and its on-screen marker)
+            // kept working a felled tree for seconds after the fall. The
+            // controller's debounced depletion check still guards against a
+            // single garbage mid-update value.
+            float cf = rd<float>(entity.component + MINEABLE_FRACTION);
+            if (std::isfinite(cf) && cf >= 0.0F && cf <= 1.001F && cf < 0.03F)
+                score += 1000.0F;
         }
         if (score < best_score) { best_score = score; best = &entity; best_dist = dist; }
     }
@@ -6455,7 +6467,7 @@ bool esp_farm_get_target(FarmTarget& out) {
                 // can no longer drop a live X. The spot is only dropped when
                 // the SCAN says it is gone (the !found branch below).
                 if (found) {
-                    s_spot_hold = 120;
+                    s_spot_hold = 40;
                     if (!s_spot_transform) {
                         Vec3 ap{};
                         float ah = -1.f;
@@ -6541,7 +6553,7 @@ bool esp_farm_get_target(FarmTarget& out) {
                        farm_spot_alive(best->kind, best->pos, spot);
         if (read_ok) {
             s_spot_last = spot;
-            s_spot_hold = 120;
+            s_spot_hold = 40;
             spot_ok = true;
             marker_pt = spot;   // the on-screen mark stays on the RAW X
             // The camera, however, chases a SLOWED copy of the X. The mark
@@ -6761,17 +6773,25 @@ bool esp_farm_get_target(FarmTarget& out) {
         orbit_side = ((orbit_side > 0.f) == (crossz > 0.f)) ? 1.f : -1.f;
     }
 
-    // Walk point = the NODE BODY, always. The old "point in front of the
-    // X" variant orbited around the body as the X hopped along the bark
-    // (walk_yaw swung -130..+131 deg mid-approach in the log) and the
-    // camera fallback chased it — the left-right camera shake. Arriving
-    // head-on is the arc's job; the standoff band owns the distance.
-    Vec3 walk = best->pos;
+    // Walk point: the X when it is live, the node body otherwise.
+    // The ore mark sits a metre or more OFF the rock's centre, so walking
+    // at the body while the stop band measured from the X put the stop
+    // point on the wrong radial — the X swung behind the trunk on every
+    // approach step (walk -> orbit -> walk, "ходит туда-сюда", log s9).
+    // Walking AT the mark (the braking stops `stopAt` short of it) lands
+    // on the mark's radial head-on. For trees the mark is on the trunk,
+    // so this is the same point as the body.
+    Vec3 walk = spot_ok ? aim : best->pos;
     walk.y = farm_eye_y() - 1.6F;
     float walk_pitch = 0.f;
     if (!farm_angles(origin, fwd, right, up, walk, out.walk_yaw, walk_pitch)) {
         g_farm_idle_reason = 5;
         return false;
+    }
+    {
+        float wx = walk.x - g_frame_local_pos.x;
+        float wz = walk.z - g_frame_local_pos.z;
+        out.walk_dist = sqrtf(wx * wx + wz * wz);
     }
 
     // Screen position of the target mark: the glowing X itself when live
