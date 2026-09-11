@@ -46,5 +46,27 @@ if [[ -f "${ROOT}/libs/arm64-v8a/xvcen" && ! -f "${ROOT}/libs/arm64-v8a/xvcen.sh
     cp -f "${ROOT}/libs/arm64-v8a/xvcen" "${ROOT}/libs/arm64-v8a/xvcen.sh"
 fi
 
+# Распаковываем скрипты FT-драйвера рядом с бинарем: софт в KERNEL-режиме
+# ищет их в <папка бинаря>/drivers/ft/ (на телефоне это /data/local/tmp/drivers/ft).
+if [[ -f "${ROOT}/FTDriver.zip" ]]; then
+    DRV_DIR="${ROOT}/libs/arm64-v8a/drivers/ft"
+    mkdir -p "${DRV_DIR}"
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -o -j -q "${ROOT}/FTDriver.zip" -d "${DRV_DIR}"
+    else
+        python3 - "${ROOT}/FTDriver.zip" "${DRV_DIR}" <<'PYEOF'
+import os, sys, zipfile
+zf = zipfile.ZipFile(sys.argv[1])
+for name in zf.namelist():
+    if name.endswith('/'):
+        continue
+    with open(os.path.join(sys.argv[2], os.path.basename(name)), 'wb') as f:
+        f.write(zf.read(name))
+PYEOF
+    fi
+    chmod 755 "${DRV_DIR}"/*.sh 2>/dev/null || true
+    echo "FT driver scripts: $(ls -1 "${DRV_DIR}" | wc -l) files -> ${DRV_DIR}"
+fi
+
 test -f "${ROOT}/libs/arm64-v8a/xvcen.sh"
 echo "built ${ROOT}/libs/arm64-v8a/xvcen.sh"

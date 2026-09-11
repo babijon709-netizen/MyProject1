@@ -1,5 +1,6 @@
 #include "main.h"
 #include "game.h"
+#include "driver.h"         // режимы NONKERNEL / KERNEL (FT-драйвер)
 #include "game_offsets.h"   // PLAYER_BOX_WIDTH_RATIO (box proportions)
 #include <cmath>
 #include <atomic>
@@ -4261,6 +4262,265 @@ static void UpdateFarm(float dt) {
     }
 }
 
+// ============================================================================
+//  Стартовое окно: выбор режима запуска NONKERNEL / KERNEL.
+//  Показывается при каждом запуске софта, пока режим не выбран.
+// ============================================================================
+enum class BootPhase { Select, KernelLoad, Running };
+static BootPhase g_boot = BootPhase::Select;
+static float     g_bootFade = 0.f;   // затемнение фона при старте
+
+static void EnterRunning() {
+    g_boot = BootPhase::Running;
+    start_attach_thread();
+    if (driver::mode() == driver::Mode::Kernel)
+        ShowToast(driver::kernel_verified()
+            ? "KERNEL: драйвер ядра активен"
+            : "KERNEL: режим ядра включен");
+    else
+        ShowToast("NONKERNEL: обычный режим");
+}
+
+// Карточка по центру экрана (общая для обоих стартовых экранов).
+static ImVec2 BootCardRect(ImVec2& pos) {
+    auto& io = ImGui::GetIO();
+    float W = ImMin(io.DisplaySize.x * 0.88f, 620.f);
+    float H = ImMin(io.DisplaySize.y * 0.80f, 640.f);
+    pos = { (io.DisplaySize.x - W) * 0.5f, (io.DisplaySize.y - H) * 0.5f };
+    return { W, H };
+}
+
+static void DrawBootBackdrop(float alpha) {
+    auto* fdl = ImGui::GetForegroundDrawList();
+    fdl->AddRectFilled({0, 0}, ImGui::GetIO().DisplaySize,
+                       IM_COL32(8, 8, 18, (int)(alpha * 216)));
+}
+
+// Большая кнопка режима: ручная отрисовка + InvisibleButton.
+static bool BootButton(ImVec2 min, ImVec2 max, const char* title, const char* sub,
+                       ImVec4 accent, bool& pressedAnim, float dt) {
+    char id[32];
+    snprintf(id, sizeof(id), "##bootbtn_%s", title);
+    ImGui::SetCursorScreenPos(min);
+    ImGui::InvisibleButton(id, { max.x - min.x, max.y - min.y });
+    bool tapped = WasTappedHere();
+    Tick(pressedAnim, tapped, dt, 14.f);
+    bool held = ImGui::IsItemActive() && ImGui::IsMouseDown(0);
+
+    auto* dl = ImGui::GetForegroundDrawList();
+    float press = pressedAnim * 6.f;
+    ImVec2 bmin = { min.x + press, min.y + press };
+    ImVec2 bmax = { max.x - press, max.y - press };
+    dl->AddRectFilled(bmin, bmax, C::U(C::Card()), R::Btn);
+    dl->AddRectFilled(bmin, bmax, C::UA(accent, held ? 0.30f : 0.14f), R::Btn);
+    dl->AddRect(bmin, bmax, C::UA(accent, held ? 0.95f : 0.55f), R::Btn, 0, 1.6f);
+
+    float fs    = ImGui::GetFontSize();
+    auto  tszT  = ImGui::GetFont()->CalcTextSizeA(fs * 1.25f, FLT_MAX, 0, title);
+    auto  tszS  = ImGui::GetFont()->CalcTextSizeA(fs * 0.92f, FLT_MAX, 0, sub);
+    float cx    = (min.x + max.x) * 0.5f;
+    float blockH = tszT.y + 8.f + tszS.y;
+    float ty    = min.y + ((max.y - min.y) - blockH) * 0.5f;
+    dl->AddText(ImGui::GetFont(), fs * 1.25f, { cx - tszT.x * 0.5f, ty }, C::U(C::Txt()), title);
+    dl->AddText(ImGui::GetFont(), fs * 0.92f, { cx - tszS.x * 0.5f, ty + tszT.y + 8.f },
+                C::U(C::Dim()), sub);
+    return tapped;
+}
+
+// Текстовая строка «ключ: значение» внутри карточки.
+static void BootInfoRow(ImVec2& cursor, float width, const char* key, const char* value,
+                        ImVec4 valueColor) {
+    auto* dl = ImGui::GetForegroundDrawList();
+    float fs = ImGui::GetFontSize();
+    auto tk = ImGui::GetFont()->CalcTextSizeA(fs * 0.95f, FLT_MAX, 0, key);
+    auto tv = ImGui::GetFont()->CalcTextSizeA(fs * 0.95f, FLT_MAX, 0, value);
+    dl->AddText(ImGui::GetFont(), fs * 0.95f, cursor, C::U(C::Dim()), key);
+    dl->AddText(ImGui::GetFont(), fs * 0.95f, { cursor.x + width - tv.x, cursor.y },
+                valueColor, value);
+    (void)tk;
+    cursor.y += fs * 1.55f;
+}
+
+// ---- Экран 1: выбор режима --------------------------------------------------
+static void RenderBootSelect() {
+    auto& io = ImGui::GetIO();
+    float dt = io.DeltaTime;
+    g_bootFade = ImMin(g_bootFade + dt * 2.5f, 1.f);
+    DrawBootBackdrop(g_bootFade);
+
+    // Полноэкранное невидимое окно-хост: в нём живут InvisibleButton-кнопки.
+    ImGui::SetNextWindowPos({0, 0});
+    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                          ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNav |
+                          ImGuiWindowFlags_NoBringToFrontOnFocus;
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
+    ImGui::Begin("##bootselect", nullptr, wf);
+
+    ImVec2 pos;
+    ImVec2 sz = BootCardRect(pos);
+    auto* dl  = ImGui::GetForegroundDrawList();
+
+    float ease = EaseOut3(g_bootFade);
+    float rise = (1.f - ease) * 26.f;
+    pos.y += rise;
+
+    dl->AddRectFilled(pos, { pos.x + sz.x, pos.y + sz.y }, C::U(C::Bg()), R::Card);
+    dl->AddRect(pos, { pos.x + sz.x, pos.y + sz.y }, C::UA(C::Sep(), 0.9f), R::Card, 0, 1.4f);
+
+    float fs = ImGui::GetFontSize();
+    float pad = 30.f;
+    float cx  = pos.x + sz.x * 0.5f;
+
+    const char* title = "XVCEN";
+    auto tt = ImGui::GetFont()->CalcTextSizeA(fs * 2.0f, FLT_MAX, 0, title);
+    dl->AddText(ImGui::GetFont(), fs * 2.0f, { cx - tt.x * 0.5f, pos.y + pad }, C::U(C::Txt()), title);
+    const char* subtitle = XS("выбор режима запуска");
+    auto st = ImGui::GetFont()->CalcTextSizeA(fs * 0.95f, FLT_MAX, 0, subtitle);
+    dl->AddText(ImGui::GetFont(), fs * 0.95f, { cx - st.x * 0.5f, pos.y + pad + tt.y + 6.f },
+                C::U(C::Dim()), subtitle);
+
+    // Кнопки режимов.
+    float btnW = sz.x - pad * 2.f;
+    float btnH = 92.f;
+    float btnX = pos.x + pad;
+    float btnY = pos.y + pad + tt.y + st.y + 44.f;
+
+    static float animKernel = 0.f, animNonKernel = 0.f;
+    bool pickKernel = BootButton({ btnX, btnY }, { btnX + btnW, btnY + btnH },
+        "KERNEL", XS("работа от ядра телефона (FTDriver)"), C::Acc(), animKernel, dt);
+    bool pickNonKernel = BootButton({ btnX, btnY + btnH + 14.f }, { btnX + btnW, btnY + btnH * 2.f + 14.f },
+        "NONKERNEL", XS("обычный режим (process_vm)"), C::TrkOff(), animNonKernel, dt);
+
+    // Сводка окружения под кнопками.
+    ImVec2 rowCursor = { btnX + 4.f, btnY + btnH * 2.f + 14.f + 26.f };
+    const char* kv = driver::kernel_version();
+    BootInfoRow(rowCursor, btnW, XS("Ядро телефона"), kv[0] ? kv : "-", C::Txt());
+    BootInfoRow(rowCursor, btnW, XS("Root (su)"),
+                getuid() == 0 ? XS("есть (root)") :
+                (driver::su_path()[0] ? driver::su_path() : XS("не найден")),
+                getuid() == 0 || driver::su_path()[0] ? C::Acc() : C::Red());
+
+    const char* hint = XS("KERNEL нужен root и скрипт драйвера под твою версию ядра");
+    auto ht = ImGui::GetFont()->CalcTextSizeA(fs * 0.82f, FLT_MAX, 0, hint);
+    dl->AddText(ImGui::GetFont(), fs * 0.82f,
+                { cx - ht.x * 0.5f, pos.y + sz.y - pad - ht.y }, C::UA(C::Dim(), 0.8f), hint);
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+
+    if (pickKernel) {
+        PlaySound(SND_CLICK);
+        driver::set_mode(driver::Mode::Kernel);
+        driver::start_kernel_driver(TARGET_PACKAGE);
+        g_boot = BootPhase::KernelLoad;
+    } else if (pickNonKernel) {
+        PlaySound(SND_CLICK);
+        driver::set_mode(driver::Mode::NonKernel);
+        EnterRunning();
+    }
+}
+
+// ---- Экран 2: загрузка KERNEL-драйвера ---------------------------------------
+static void RenderKernelLoad() {
+    auto& io = ImGui::GetIO();
+    float dt = io.DeltaTime;
+    DrawBootBackdrop(g_bootFade);
+
+    ImGui::SetNextWindowPos({0, 0});
+    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                          ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNav |
+                          ImGuiWindowFlags_NoBringToFrontOnFocus;
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
+    ImGui::Begin("##bootkernel", nullptr, wf);
+
+    ImVec2 pos;
+    ImVec2 sz = BootCardRect(pos);
+    auto* dl  = ImGui::GetForegroundDrawList();
+    dl->AddRectFilled(pos, { pos.x + sz.x, pos.y + sz.y }, C::U(C::Bg()), R::Card);
+    dl->AddRect(pos, { pos.x + sz.x, pos.y + sz.y }, C::UA(C::Sep(), 0.9f), R::Card, 0, 1.4f);
+
+    float fs = ImGui::GetFontSize();
+    float pad = 30.f;
+    float cx  = pos.x + sz.x * 0.5f;
+
+    driver::KernelState st = driver::kernel_state();
+    bool busy  = st == driver::KernelState::Detecting || st == driver::KernelState::Launching ||
+                 st == driver::KernelState::Waiting;
+    bool ready = st == driver::KernelState::Ready;
+    bool bad   = st == driver::KernelState::NoScript || st == driver::KernelState::NoRoot ||
+                 st == driver::KernelState::Failed;
+
+    // Спиннер + заголовок состояния.
+    ImVec2 spc = { cx, pos.y + pad + 14.f };
+    float  r   = 15.f;
+    float  a   = (float)ImGui::GetTime() * 3.2f;
+    if (busy) {
+        for (int i = 0; i < 10; i++) {
+            float t = a - i * 0.32f;
+            float alpha = 0.10f + 0.90f * fabsf(sinf(t));
+            dl->AddCircleFilled({ spc.x + cosf(t) * r, spc.y + sinf(t) * r }, 3.2f,
+                                C::UA(C::Acc(), alpha));
+        }
+    } else {
+        ImVec4 col = ready ? C::Acc() : C::Red();
+        dl->AddCircleFilled(spc, r + 4.f, C::UA(col, 0.22f));
+        dl->AddText(ImGui::GetFont(), fs * 1.3f, { spc.x - 6.f, spc.y - fs * 0.75f },
+                    C::U(col), ready ? "+" : "!");
+    }
+
+    const char* stateTitle = busy ? XS("Поднимаю драйвер ядра...") :
+                             ready ? XS("Драйвер ядра готов") :
+                                     XS("Драйвер ядра не поднялся");
+    auto tt = ImGui::GetFont()->CalcTextSizeA(fs * 1.25f, FLT_MAX, 0, stateTitle);
+    dl->AddText(ImGui::GetFont(), fs * 1.25f, { cx - tt.x * 0.5f, spc.y + r + 22.f },
+                C::U(C::Txt()), stateTitle);
+
+    // Детали состояния.
+    ImVec2 rowCursor = { pos.x + pad, spc.y + r + 22.f + tt.y + 26.f };
+    float rowW = sz.x - pad * 2.f;
+    BootInfoRow(rowCursor, rowW, XS("Ядро"), driver::kernel_version()[0] ? driver::kernel_version() : "-", C::Txt());
+    BootInfoRow(rowCursor, rowW, XS("Скрипт драйвера"),
+                driver::driver_script()[0] ? driver::driver_script() : "-", C::Txt());
+    BootInfoRow(rowCursor, rowW, XS("Root (su)"),
+                getuid() == 0 ? XS("есть (root)") :
+                (driver::su_path()[0] ? driver::su_path() : XS("не найден")),
+                (getuid() == 0 || driver::su_path()[0]) ? C::Acc() : C::Red());
+    BootInfoRow(rowCursor, rowW, XS("Статус"), driver::kernel_state_text(),
+                ready ? C::Acc() : (bad ? C::Red() : C::Dim()));
+    if (driver::kernel_verified())
+        BootInfoRow(rowCursor, rowW, XS("Память игры"), XS("читается через ядро"), C::Acc());
+
+    const char* err = driver::last_error();
+    if (bad && err[0]) {
+        auto et = ImGui::GetFont()->CalcTextSizeA(fs * 0.88f, FLT_MAX, rowW - 8.f, err);
+        dl->AddText(ImGui::GetFont(), fs * 0.88f, { pos.x + pad, rowCursor.y + 4.f },
+                    C::U(C::Red()), err, nullptr, rowW - 8.f);
+        rowCursor.y += et.y + 8.f;
+    }
+
+    // Кнопки: «Продолжить» (можно и после ошибки — память может открыться
+    // обычным путём, если софт запущен от root) и «Назад».
+    float btnW = (sz.x - pad * 2.f - 12.f) * 0.5f;
+    float btnH = 74.f;
+    float btnY = pos.y + sz.y - pad - btnH;
+    static float animGo = 0.f, animBack = 0.f;
+    bool canGo = !busy;
+    bool go = BootButton({ pos.x + pad, btnY }, { pos.x + pad + btnW, btnY + btnH },
+                         XS("Продолжить"), canGo ? XS("к игре") : XS("подожди..."),
+                         canGo ? C::Acc() : C::TrkOff(), animGo, dt);
+    bool back = BootButton({ pos.x + pad + btnW + 12.f, btnY }, { pos.x + sz.x - pad, btnY + btnH },
+                           XS("Назад"), XS("выбрать режим"), C::TrkOff(), animBack, dt);
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+
+    if (!canGo) go = false;
+    if (go) { PlaySound(SND_CLICK); EnterRunning(); }
+    else if (back) { PlaySound(SND_CLICK); g_boot = BootPhase::Select; }
+}
+
 void RenderMenu() {
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
@@ -4681,6 +4941,33 @@ void RenderMenu() {
         auto tsz = ImGui::GetFont()->CalcTextSizeA(titleFS, FLT_MAX, 0, titles[g_state.cur_tab]);
         cdl->AddText(ImGui::GetFont(), titleFS,
             {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles[g_state.cur_tab]);
+
+        // Бейдж режима доступа: KERNEL (через ядро) / NONKERNEL. Справа в
+        // шапке — мелкая пилюля, чтобы всегда видеть, как читается игра.
+        {
+            bool kernel = (driver::mode() == driver::Mode::Kernel);
+            const char* badge = kernel ? "KERNEL" : "NONKERNEL";
+            float bfs = ImGui::GetFontSize() * 0.62f;
+            auto bsz = ImGui::GetFont()->CalcTextSizeA(bfs, FLT_MAX, 0, badge);
+            float bpad = 10.f;
+            float dotR = kernel ? 3.4f : 0.f;   // зелёная точка у KERNEL
+            float bw   = bsz.x + bpad * 2.f + (dotR > 0.f ? dotR * 2.f + 6.f : 0.f);
+            float bh   = bsz.y + 12.f;
+            float bx1  = hp.x + cW - 18.f;
+            float bx0  = bx1 - bw;
+            float by0  = hp.y + (hH - bh) * 0.5f;
+            cdl->AddRectFilled({bx0, by0}, {bx1, by0 + bh}, C::UA(kernel ? C::Acc() : C::Dim(), 0.16f), R::Pill);
+            cdl->AddRect({bx0, by0}, {bx1, by0 + bh}, C::UA(kernel ? C::Acc() : C::Dim(), 0.45f), R::Pill, 0, 1.f);
+            float tx = bx0 + bpad;
+            if (dotR > 0.f) {
+                bool ok = driver::kernel_state() == driver::KernelState::Ready;
+                cdl->AddCircleFilled({tx + dotR, by0 + bh * 0.5f}, dotR,
+                                     ok ? IM_COL32(90, 220, 130, 255) : IM_COL32(240, 180, 70, 255));
+                tx += dotR * 2.f + 6.f;
+            }
+            cdl->AddText(ImGui::GetFont(), bfs, {tx, by0 + (bh - bsz.y) * 0.5f},
+                         C::U(kernel ? C::Acc() : C::Dim()), badge);
+        }
         ImGui::Dummy({cW, hH});
     }
 
@@ -4857,11 +5144,19 @@ int main(int argc, char* argv[]) {
         g_frame_done.store(false);
         drawBegin();
 
-        ui::bar::set_game_alpha(0.f);
-        DrawEspOverlay();
-        UpdateAim(ImGui::GetIO().DeltaTime);
-        UpdateFarm(ImGui::GetIO().DeltaTime);
-        RenderMenu();
+        if (g_boot == BootPhase::Select) {
+            // Стартовое окно: выбор NONKERNEL / KERNEL. Всё остальное
+            // (ESP, аим, фарм, меню) стоит, пока режим не выбран.
+            RenderBootSelect();
+        } else if (g_boot == BootPhase::KernelLoad) {
+            RenderKernelLoad();
+        } else {
+            ui::bar::set_game_alpha(0.f);
+            DrawEspOverlay();
+            UpdateAim(ImGui::GetIO().DeltaTime);
+            UpdateFarm(ImGui::GetIO().DeltaTime);
+            RenderMenu();
+        }
         drawEnd();
         g_frame_done.store(true);
     }

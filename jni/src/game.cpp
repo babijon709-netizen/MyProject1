@@ -1,6 +1,7 @@
 #include "game.h"
 #include "game_offsets.h"
 #include "Vector.h"
+#include "driver.h"     // доступ к памяти: NONKERNEL (process_vm) / KERNEL (FT-драйвер)
 
 #include <string.h>
 #include <strings.h>   // strncasecmp (weapon prefab label cleanup)
@@ -18,12 +19,15 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
+// Весь обмен с памятью игры идёт через driver:: — он переключает режим
+// NONKERNEL/KERNEL, выбранный в стартовом окне. Сигнатуры сохранены как у
+// process_vm_readv/writev, поэтому остальной код не меняется.
 static ssize_t remote_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
-    return syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+    return driver::readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
 }
 
 static ssize_t remote_vm_writev(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
-    return syscall(__NR_process_vm_writev, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+    return driver::writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
 }
 
 using namespace game_offsets;
