@@ -3582,63 +3582,90 @@ int  g_farmTgtKind = 0;      // current target resource kind
 int  g_farmCalib = 0;
 
 static void UpdateFarm(float dt) {
-    // ---- fingers ----
+    // ---- IDEAL FARM MOVEMENT ----
+    // Two backends:
+    //  * Stage2 memory drive (esp_farm_has_input) -> frame-perfect, no touch latency, no glide
+    //  * Touch fallback (3 fingers) -> P-controller camera with ack-pending, instant orbit/evade
+    //
+    // Walk point is ALWAYS node body (game.cpp fix). Aim point is X when live.
+    // Approach uses braking: clamp((walk_dist-stopAt)/1.5) with 0.3 floor.
+    // Orbit uses hysteresis 20/30 + arcImmune 2.5s to avoid flap.
+
+    // ---- fingers (touch fallback) ----
     static bool  s_moveDown = false;  // finger 0: move joystick
     static bool  s_lookDown = false;  // finger 1: camera swipe
     static bool  s_tapDown  = false;  // finger 2: attack taps
     static float s_lookX = 0.f, s_lookY = 0.f;
     static int   s_lookHold = 0;
     static int   s_tapTimer = 0;
-    static float s_gainYaw = 0.f;     // deg per px, learned from our own swipes
-    static float s_lastCamYaw = 0.f;
-    static float s_lastDx = 0.f;
+    static float s_gainYaw = 0.f;     // deg per px, learned
+    static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f;
     static bool  s_haveLast = false;
-    static float s_stickPx = 0.f, s_stickPy = 0.f; // smoothed stick position
+    static float s_lastDx = 0.f, s_lastDy = 0.f;
+    static float s_pendDx = 0.f, s_pendDy = 0.f; // ack-pending (like UpdateAim)
+    static float s_pendTime = 0.f;
+    static float s_stickPx = 0.f, s_stickPy = 0.f;
     // ---- target bookkeeping ----
     static unsigned long long s_nodeId = 0;
-    static bool s_nodeStruck = false; // first swing of this node: pin the aim
-    static float s_settle = 0.f;      // pause between targets (fingers up)
-    static float s_lostTime = 0.f;    // target dropout tolerance
+    static bool s_nodeStruck = false;
+    static float s_settle = 0.f;
+    static float s_lostTime = 0.f;
     // ---- watchdogs ----
-    static float s_lastGoal = 1e9f;   // last value of the progress metric
-    static float s_stuckTime = 0.f;   // seconds without progress
-    static float s_evadeTime = 0.f;   // >0: back-off + sidestep in progress
-    static float s_evadeDir = 1.f;    // +1 right, -1 left
-    static int   s_evadeCount = 0;    // manoeuvres tried on this node
-    static float s_blockedTime = 0.f; // phase-2: stick pushed, body not moving
-    static float s_mineTime = 0.f;    // seconds since the node last lost HP
-    static float s_fracRef = -1.f;    // fraction the drain check compares to
-    static float s_nudgeTime = 0.f;   // seconds stuck nudging into reach
+    static float s_lastGoal = 1e9f;
+    static float s_stuckTime = 0.f;
+    static float s_evadeTime = 0.f;
+    static float s_evadeDir = 1.f;
+    static int   s_evadeCount = 0;
+    static float s_blockedTime = 0.f;
+    static float s_mineTime = 0.f;
+    static float s_fracRef = -1.f;
+    static float s_nudgeTime = 0.f;
+    // ---- orbit hysteresis ----
+    static bool  s_head_on = true;
+    static unsigned long long s_side_owner = 0;
+    static float s_arcImmune = 0.f;
+    static float s_walkOffTime = 0.f;
+    static int   s_depletedFrames = 0;
+
+    auto memStop = [&]() {
+        if (esp_farm_has_input()) {
+            float cy=0,cp=0;
+            if (!esp_camera_angles(cy, cp)) { cy=0; cp=0; }
+            float yawR = cy * (float)M_PI/180.f;
+            float pitR = cp * (float)M_PI/180.f;
+            float lx = sinf(yawR)*cosf(pitR);
+            float ly = sinf(pitR);
+            float lz = cosf(yawR)*cosf(pitR);
+            esp_farm_drive(0.f,0.f,false,cy,lx,ly,lz);
+        }
+    };
 
     auto releaseAll = [&]() {
         if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
-        if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; s_haveLast = false; }
+        if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; s_haveLast = false; s_pendDx=s_pendDy=0.f; s_pendTime=0.f; }
         if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }
         s_lookHold = 0;
+        memStop();
     };
 
-    if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
+    if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f/60.f;
     if (dt > 0.1f) dt = 0.1f;
 
     unsigned mask = 0;
     if (g_state.farm_on) {
-        if (g_state.farm_wood)   mask |= 1u;
-        if (g_state.farm_stone)  mask |= 2u;
-        if (g_state.farm_metal)  mask |= 4u;
+        if (g_state.farm_wood)  mask |= 1u;
+        if (g_state.farm_stone) mask |= 2u;
+        if (g_state.farm_metal) mask |= 4u;
         if (g_state.farm_sulfur) mask |= 8u;
     }
     esp_farm_set_resources(mask);
     esp_farm_set_range(g_state.farm_range);
 
-    // TEMP farm log: mask change events — settles the "I enabled the ore
-    // but the bot stood there" question with data: if the toggles ever
-    // register, this line appears with the new bits.
     {
         static unsigned s_mask_prev = 0xFFFFFFFFu;
         if (s_mask_prev != mask) {
             char line[96];
-            snprintf(line, sizeof(line),
-                     "MASK mask=%u wood=%d stone=%d metal=%d sulfur=%d\n",
+            snprintf(line, sizeof(line), "MASK mask=%u wood=%d stone=%d metal=%d sulfur=%d\n",
                      mask, (int)g_state.farm_wood, (int)g_state.farm_stone,
                      (int)g_state.farm_metal, (int)g_state.farm_sulfur);
             esp_farm_log_line(line);
@@ -3647,53 +3674,47 @@ static void UpdateFarm(float dt) {
     }
 
     const bool menuBlocked = g_sheet.visible || (g_pop.visible && !g_pop.closing);
-    // The aimbot owns the camera while it is on a player — farm yields fully.
-    // g_farmCalib: пока пользователь тапает зоны, бот молчит.
     bool active = mask != 0 && g_esp_attached && !menuBlocked && !s_fingerDown && g_farmCalib == 0;
 
     if (!active) {
         releaseAll();
-        g_farmActive = false; g_farmPhase = 0;
-        s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f; s_fracRef = -1.f;
-        s_nudgeTime = 0.f; s_lostTime = 0.f;
-        s_evadeTime = 0.f; s_evadeCount = 0; s_settle = 0.f;
+        g_farmActive=false; g_farmPhase=0;
+        s_nodeId=0; s_stuckTime=0.f; s_mineTime=0.f; s_fracRef=-1.f;
+        s_nudgeTime=0.f; s_lostTime=0.f; s_evadeTime=0.f; s_evadeCount=0; s_settle=0.f;
+        s_head_on=true; s_arcImmune=0.f; s_walkOffTime=0.f; s_depletedFrames=0;
+        s_pendDx=s_pendDy=0.f; s_pendTime=0.f;
         return;
     }
 
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;
     if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
-        sw = (float)displayInfo.width;  sh = (float)displayInfo.height;
+        sw = (float)displayInfo.width; sh = (float)displayInfo.height;
     } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
         sw = (float)displayInfo.height; sh = (float)displayInfo.width;
     }
-    if (sw < 100.f || sh < 100.f) { releaseAll(); g_farmActive = false; return; }
+    if (sw < 100.f || sh < 100.f) { releaseAll(); g_farmActive=false; return; }
 
-    // The farm target is measured against the camera state published by
-    // esp_get_boxes(); make sure this frame's snapshot exists even when the
-    // ESP overlay and the aimbot did not request one.
     FrameBoxes(sw, sh);
 
     FarmTarget tgt;
     bool haveTgt = esp_farm_get_target(tgt) && tgt.valid;
     esp_farm_debug(g_farmNodes, g_farmReason);
+
     if (!haveTgt) {
-        // A working target can vanish for a few frames (registry rescan, a
-        // failed read mid-update) and come right back. Dropping everything
-        // instantly caused the stop-start-stop shuffle: freeze inputs
-        // briefly and only reset for real when the target stays gone.
         if (s_nodeId != 0 && s_lostTime < 0.8f) {
             s_lostTime += dt;
-            if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; } // no blind swings
-            if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; s_haveLast = false; }
-            return; // keep the move finger where it was
+            if (s_tapDown) { Touch_Up_N(2); s_tapDown=false; }
+            if (s_lookDown) { Touch_Up_N(1); s_lookDown=false; s_haveLast=false; s_pendDx=s_pendDy=0.f; }
+            // memory: keep moving? stop camera but keep walk? For ideal we keep walk zero? Keep last walk for 0.8s
+            return;
         }
         releaseAll();
-        g_farmActive = false; g_farmPhase = 0;
-        s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f; s_fracRef = -1.f;
-        s_nudgeTime = 0.f;
-        s_evadeTime = 0.f; s_evadeCount = 0; s_settle = 0.f;
-        s_lostTime = 0.f;
+        g_farmActive=false; g_farmPhase=0;
+        s_nodeId=0; s_stuckTime=0.f; s_mineTime=0.f; s_fracRef=-1.f;
+        s_nudgeTime=0.f; s_evadeTime=0.f; s_evadeCount=0; s_settle=0.f; s_lostTime=0.f;
+        s_head_on=true; s_arcImmune=0.f; s_walkOffTime=0.f; s_depletedFrames=0;
+        s_pendDx=s_pendDy=0.f; s_pendTime=0.f;
         return;
     }
     s_lostTime = 0.f;
@@ -3702,564 +3723,369 @@ static void UpdateFarm(float dt) {
     g_farmTgtKind = tgt.kind;
 
     if (tgt.id != s_nodeId) {
-        // Switching nodes: lift every finger and stand still for a moment.
-        // Without this the old walk/look inputs keep replaying against the
-        // new target for a few frames — the frantic stomping-and-shaking
-        // right after a node is finished.
         bool hadNode = s_nodeId != 0;
         s_nodeId = tgt.id;
-        s_stuckTime = 0.f; s_lastGoal = 1e9f;
-        s_mineTime = 0.f; s_fracRef = -1.f; s_nudgeTime = 0.f;
-        s_evadeTime = 0.f; s_evadeCount = 0; s_blockedTime = 0.f;
-        s_nodeStruck = false;         // the new node pins on its first swing
-        if (hadNode) { releaseAll(); s_settle = 0.6f; }
+        s_stuckTime=0.f; s_lastGoal=1e9f;
+        s_mineTime=0.f; s_fracRef=-1.f; s_nudgeTime=0.f;
+        s_evadeTime=0.f; s_evadeCount=0; s_blockedTime=0.f;
+        s_nodeStruck=false;
+        s_head_on=true; s_arcImmune=0.f; s_walkOffTime=0.f; s_depletedFrames=0;
+        s_pendDx=s_pendDy=0.f; s_pendTime=0.f;
+        if (hadNode) { releaseAll(); s_settle=0.5f; }
     }
 
-    // A node that is already mined out gets blacklisted on the spot instead
-    // of being circled. Debounced: fraction is a raw memory read and a
-    // single garbage frame (mid-update value, failed read) used to abandon
-    // a half-chopped tree — only a solidly repeated "empty" counts.
-    static int s_depletedFrames = 0;
     if (tgt.fraction >= 0.f && tgt.fraction < 0.03f) {
         if (++s_depletedFrames >= 90) {
-            s_depletedFrames = 0;
+            s_depletedFrames=0;
             esp_farm_blacklist(tgt.id, 120.f);
-            releaseAll();
-            s_settle = 0.6f;
-            s_nodeId = 0;
-            g_farmPhase = 0;
-            return;
+            releaseAll(); s_settle=0.5f; s_nodeId=0; g_farmPhase=0; return;
         }
-    } else {
-        s_depletedFrames = 0;
-    }
+    } else s_depletedFrames=0;
 
-    // Settle pause between targets: fingers stay up, the camera stops, and
-    // the next target starts from a clean slate.
-    if (s_settle > 0.f) {
-        s_settle -= dt;
-        releaseAll();
-        return;
-    }
+    if (s_settle > 0.f) { s_settle -= dt; releaseAll(); return; }
 
-    // On-screen mark on the exact point the farm is working: the glowing
-    // spot when one is found, otherwise the node body. Doubles as debug
-    // output — if the mark is on the wrong object, the target picker is
-    // what to fix.
     if (tgt.on_screen) {
         auto* fg = ImGui::GetForegroundDrawList();
-        ImU32 mc = tgt.has_spot ? IM_COL32(80, 255, 120, 230) : IM_COL32(255, 200, 60, 230);
-        float r = 14.f;
-        fg->AddCircle({tgt.sx, tgt.sy}, r, mc, 24, 3.f);
-        fg->AddLine({tgt.sx - r * 1.6f, tgt.sy}, {tgt.sx - r * 0.5f, tgt.sy}, mc, 3.f);
-        fg->AddLine({tgt.sx + r * 0.5f, tgt.sy}, {tgt.sx + r * 1.6f, tgt.sy}, mc, 3.f);
-        fg->AddLine({tgt.sx, tgt.sy - r * 1.6f}, {tgt.sx, tgt.sy - r * 0.5f}, mc, 3.f);
-        fg->AddLine({tgt.sx, tgt.sy + r * 0.5f}, {tgt.sx, tgt.sy + r * 1.6f}, mc, 3.f);
+        ImU32 mc = tgt.has_spot ? IM_COL32(80,255,120,230) : IM_COL32(255,200,60,230);
+        float r=14.f;
+        fg->AddCircle({tgt.sx,tgt.sy}, r, mc, 24, 3.f);
+        fg->AddLine({tgt.sx-r*1.6f,tgt.sy},{tgt.sx-r*0.5f,tgt.sy}, mc, 3.f);
+        fg->AddLine({tgt.sx+r*0.5f,tgt.sy},{tgt.sx+r*1.6f,tgt.sy}, mc, 3.f);
+        fg->AddLine({tgt.sx,tgt.sy-r*1.6f},{tgt.sx,tgt.sy-r*0.5f}, mc, 3.f);
+        fg->AddLine({tgt.sx,tgt.sy+r*0.5f},{tgt.sx,tgt.sy+r*1.6f}, mc, 3.f);
     }
 
-    // ---- camera gain: learn from our own swipe, fall back to a safe probe ----
-    float camYaw = 0.f, camPitch = 0.f;
+    // ---- camera pose & gain learning (touch) ----
+    float camYaw=0.f, camPitch=0.f;
     bool haveCam = esp_camera_angles(camYaw, camPitch);
-    if (haveCam && s_haveLast && fabsf(s_lastDx) >= 1.f) {
-        float dyaw = camYaw - s_lastCamYaw;
-        while (dyaw > 180.f) dyaw -= 360.f;
-        while (dyaw < -180.f) dyaw += 360.f;
-        float measured = dyaw / s_lastDx;
-        float m = fabsf(measured);
-        if (std::isfinite(measured) && m > 0.005f && m < 2.f) {
-            if (s_gainYaw == 0.f || m > fabsf(s_gainYaw) * 1.5f || m < fabsf(s_gainYaw) * 0.5f)
-                s_gainYaw = measured;
-            else
-                s_gainYaw = s_gainYaw * 0.8f + measured * 0.2f;
-        }
+    float camYawDelta=0.f, camPitchDelta=0.f;
+    bool camMoved=false;
+    if (haveCam && s_haveLast) {
+        camYawDelta = camYaw - s_lastCamYaw;
+        while (camYawDelta > 180.f) camYawDelta -= 360.f;
+        while (camYawDelta < -180.f) camYawDelta += 360.f;
+        camPitchDelta = camPitch - s_lastCamPitch;
+        camMoved = fabsf(camYawDelta)>0.02f || fabsf(camPitchDelta)>0.02f;
     }
-    if (haveCam) s_lastCamYaw = camYaw;
-    s_haveLast = haveCam;
-    s_lastDx = 0.f;
+    if (haveCam && s_haveLast && s_lookDown && camMoved) {
+        auto learn = [](float& gain, float measured){
+            float m=fabsf(measured);
+            if (!std::isfinite(measured) || m<0.005f || m>2.f) return;
+            if (gain==0.f || m>fabsf(gain)*1.5f || m<fabsf(gain)*0.5f) gain=measured;
+            else gain=gain*0.8f+measured*0.2f;
+        };
+        if (fabsf(s_pendDx)>=1.f) learn(s_gainYaw, camYawDelta / s_pendDx);
+        // pitch gain not needed separately, reuse yaw magnitude
+        s_pendDx=0.f; s_pendDy=0.f; s_pendTime=0.f;
+    }
+    if (haveCam) { s_lastCamYaw=camYaw; s_lastCamPitch=camPitch; s_haveLast=true; }
+    else { s_haveLast=false; s_pendDx=s_pendDy=0.f; s_pendTime=0.f; }
 
-    float gain = (s_gainYaw != 0.f) ? s_gainYaw : 0.25f; // deg per px, safe probe
+    float gain = (s_gainYaw!=0.f) ? s_gainYaw : 0.25f;
 
-    // ---- phase ----
-    // The X can be on the FAR side of the node: the tool cannot reach it
-    // through the trunk/boulder, so first circle until it faces us (orbit).
-    const bool  isTree = (tgt.kind == 0);
-    // Close enough to mine. "At the node" is the distance to the WALK
-    // POINT — the live X when it is up, the node body otherwise: the same
-    // point the standoff band and the braking are measured against.
-    // (log s10, ore: the X sits ~1.5 m off the rock centre, so the bot
-    // parked at ad 1.3-1.5 where the band wants it, but the BODY distance
-    // was 2.45-2.75 — OUTSIDE the old body metric (d<=2.4). Phase stuck
-    // at 1 = no taps for 20-30 s until the X dropped or hopped close,
-    // then phase 2 and a burst of taps: "то добывает то нет". The arc hit
-    // the same boundary mid-strafe and the phase-1 diagonal walk kicked
-    // in, lurching the bot around the rock: "двигался хаотично".)
+    // ---- phase & orbit hysteresis ----
+    const bool isTree = (tgt.kind==0);
     const float reachX = isTree ? 2.6f : 2.4f;
-    const bool  atNode = tgt.walk_dist <= reachX;
-    // Strike the mark head-on: the body should stand roughly on the
-    // radial line through the X — swinging at a mark that sits 40-60 deg
-    // AROUND the trunk lands on the bark from the side. But the X hops
-    // after every hit, so re-aligning on every hop made the bot saw
-    // left-right. Both problems at once:
-    //  - hysteresis: start aligning only when the mark is >35 deg around
-    //    the trunk from our line, call it head-on when it is <25 deg —
-    //    small hops do not move the body at all;
-    //  - the alignment is a smooth ARC around the trunk (strafe at the
-    //    current radius, one direction), not a walk at the point in front
-    //    of the mark — the mark hops, that point jumps, chasing it was
-    //    the running.
-    static bool  s_head_on = true;
-    static unsigned long long s_side_owner = 0;
-    static float s_arcImmune = 0.f;   // >0: just finished an arc, small hops stay put
-    if (tgt.id != s_side_owner) { s_side_owner = tgt.id; s_head_on = true; s_arcImmune = 0.f; }
-    if (s_arcImmune > 0.f) s_arcImmune -= dt;
+    const bool atNode = tgt.walk_dist <= reachX;
+
+    if (tgt.id != s_side_owner) { s_side_owner=tgt.id; s_head_on=true; s_arcImmune=0.f; }
+    if (s_arcImmune>0.f) s_arcImmune-=dt;
+
     if (tgt.has_spot && atNode) {
-        // |angle| around the trunk: strike only within ~10 deg of our
-        // radial, start the arc above 20. 25/15 made the arc fire on
-        // some X hops and not others ("то обходит, то нет") — a 20-25
-        // deg mark was struck from the side. 20/10 arcs a bit more,
-        // but every strike is head-on. fabs on purpose — the old SIGNED
-        // compare never triggered for a mark drifting LEFT of the trunk.
-        //
-        // Anti-flap (log s8): the X hops a few degrees around our radial
-        // after most hits, so 20/10 alone re-triggered a short arc every
-        // few seconds and the taps stopped for each one. After an arc
-        // completes, small marks (<35 deg) do NOT re-start it for 2.5 s —
-        // a 20-35 deg mark is still in the tool's reach, it just lands a
-        // little to the side. A mark truly around the far side (>35)
-        // arcs immediately.
-        const float oaAbs = fabsf(tgt.orbit_angle);
-        if (s_head_on) s_head_on = (oaAbs < 20.f) || (s_arcImmune > 0.f && oaAbs < 35.f);
+        float oaAbs = fabsf(tgt.orbit_angle);
+        if (s_head_on) s_head_on = (oaAbs < 20.f) || (s_arcImmune>0.f && oaAbs < 30.f);
         else {
-            if (oaAbs < 10.f) { s_head_on = true; s_arcImmune = 2.5f; }
+            if (oaAbs < 10.f) { s_head_on=true; s_arcImmune=2.5f; }
         }
     } else if (tgt.has_spot) {
-        s_head_on = true; // approaching: the approach lands in front of it
+        s_head_on = true;
     }
     const bool headOn = !tgt.has_spot || s_head_on;
-    // Arc in progress: the X is off to the side, we strafe around the
-    // trunk until it faces us (the watchdog measures the angle while it
-    // runs — the distance does not change there).
-    const bool orbit  = tgt.has_spot && !s_head_on;
+    const bool orbit = tgt.has_spot && !s_head_on;
     const bool inMelee = atNode && headOn;
     const int phase = inMelee ? 2 : 1;
     g_farmPhase = phase;
 
-    // ---- finger 1: camera swipe (yaw always; pitch only while mining) ----
-    {
-        // MINE (and orbit): chase the exact aim point — the X. APPROACH: the
-        // node body, so the walk goes straight at the node and the camera is
-        // already on the X by the time we stop (it sits on the node, a few
-        // degrees off the body).
-        // Mining and aligning: chase the X. Approach: the node body.
-        // Chase the X whenever it is alive — AT ANY RANGE. Gating on
-        // inRange made the target FLIP between the X and the walk point
-        // at the range boundary (they can be 130 deg apart): the camera
-        // snapped left-right every time the flicker crossed the line.
-        // No live X: the node body (the walk point is the body now).
-        float steerYaw = tgt.has_spot ? tgt.yaw : tgt.walk_yaw;
-        float steerPitch = tgt.pitch;
-        float wantYawPx = steerYaw / gain;
-        // While walking, only fix a BADLY tilted camera (left looking at the
-        // ground after mining ore) — a generous dead zone, or the two axes
-        // fight each other and the camera wanders.
-        float wantPitchPx = 0.f;
-        float pitchDead = (phase == 2) ? 0.f : 18.f;
-        if (fabsf(steerPitch) > pitchDead)
-            wantPitchPx = -steerPitch / fabsf(gain);
-        // Dead zones in degrees with hysteresis: a swipe only starts when
-        // the error is clearly outside, and stops well inside. This is what
-        // keeps the camera from twitching left-right around the centre.
-        float startDeg = (phase == 2) ? (tgt.has_spot ? 1.2f : 4.0f) : 10.f;
-        float stopDeg  = (phase == 2) ? (tgt.has_spot ? 0.35f : 1.5f) : 4.f;
-        float pitchErr = (phase == 2) ? fabsf(steerPitch)
-                       : fmaxf(fabsf(steerPitch) - pitchDead, 0.f);
-        float errDeg = fmaxf(fabsf(steerYaw), pitchErr);
-        bool needTurn = s_lookDown ? (errDeg > stopDeg) : (errDeg > startDeg);
+    // ---- desired camera ----
+    float steerYaw = tgt.has_spot ? tgt.yaw : tgt.walk_yaw;
+    float steerPitch = tgt.pitch;
+    float desYaw = camYaw + steerYaw;
+    float desPitch = camPitch + steerPitch;
+    // normalize yaw
+    while (desYaw > 180.f) desYaw-=360.f;
+    while (desYaw < -180.f) desYaw+=360.f;
+    if (desPitch > 85.f) desPitch=85.f;
+    if (desPitch < -85.f) desPitch=-85.f;
+    float desYawR = desYaw * (float)M_PI/180.f;
+    float desPitR = desPitch * (float)M_PI/180.f;
+    float lookX = sinf(desYawR)*cosf(desPitR);
+    float lookY = sinf(desPitR);
+    float lookZ = cosf(desYawR)*cosf(desPitR);
 
-        if (needTurn) {
-            if (!s_lookDown) {
-                s_lookX = sw * 0.74f; s_lookY = sh * 0.42f;
+    // ---- desired movement (unit vector in camera space) ----
+    float wantMoveX=0.f, wantMoveY=0.f;
+    bool wantWalk=false;
+    bool isEvade = s_evadeTime > 0.f;
+
+    if (isEvade) {
+        wantWalk=true;
+        s_evadeTime-=dt;
+        if (s_evadeTime > 1.1f) { wantMoveX=0.f; wantMoveY=-0.95f; }
+        else { wantMoveX=0.95f*s_evadeDir; wantMoveY=0.4f; } // forward diagonal
+        if (s_evadeTime <= 0.f) { s_evadeTime=0.f; s_stuckTime=0.f; s_lastGoal=1e9f; }
+    } else if (orbit) {
+        wantWalk=true;
+        wantMoveX = 0.75f * tgt.orbit_side;
+        wantMoveY = 0.f;
+    } else if (phase==1) {
+        if (fabsf(tgt.walk_yaw) < 60.f) {
+            float stopAt = isTree ? 1.35f : 1.70f;
+            float toGo = tgt.walk_dist - stopAt;
+            if (toGo > 0.f) {
+                wantWalk=true;
+                float spd = (toGo - 0.15f) / 1.5f; // braking
+                if (spd > 1.f) spd=1.f;
+                if (spd < 0.30f) spd=0.30f;
+                float wyr = tgt.walk_yaw * (float)M_PI/180.f;
+                wantMoveX = sinf(wyr) * spd;
+                wantMoveY = cosf(wyr) * spd;
+            }
+        }
+    } else {
+        float toHit = tgt.has_spot ? tgt.aim_dist : tgt.dist;
+        float backAt = tgt.has_spot ? (isTree?0.60f:1.00f) : (isTree?0.80f:0.85f);
+        float creepAt= tgt.has_spot ? 1.45f : (isTree?1.50f:1.85f);
+        if (toHit < backAt) {
+            wantWalk=true;
+            wantMoveX=0.f; wantMoveY=-0.35f;
+        } else if (toHit > creepAt) {
+            wantWalk=true;
+            float wyr = tgt.walk_yaw * (float)M_PI/180.f;
+            wantMoveX = sinf(wyr)*0.35f;
+            wantMoveY = cosf(wyr)*0.35f;
+        }
+    }
+
+    bool useMem = esp_farm_has_input();
+    if (useMem) {
+        if (s_moveDown) { Touch_Up_N(0); s_moveDown=false; }
+        if (s_lookDown) { Touch_Up_N(1); s_lookDown=false; s_haveLast=false; s_pendDx=s_pendDy=0.f; s_pendTime=0.f; }
+    }
+
+    // ---- camera execution ----
+    if (useMem) {
+        // memory: camera is instant via look vector, no P needed
+    } else {
+        // touch fallback with ack-pending P-controller
+        float startDeg = (phase==2) ? (tgt.has_spot?1.2f:4.f) : 10.f;
+        float stopDeg  = (phase==2) ? (tgt.has_spot?0.35f:1.5f) : 4.f;
+        float pitchDead = (phase==2)?0.f:18.f;
+        float pitchErr = (phase==2)? fabsf(steerPitch) : fmaxf(fabsf(steerPitch)-pitchDead,0.f);
+        float errDeg = fmaxf(fabsf(steerYaw), pitchErr);
+        bool needTurn = s_lookDown ? (errDeg>stopDeg) : (errDeg>startDeg);
+
+        bool pendHolding = false;
+        if (s_lookDown && !camMoved && (fabsf(s_pendDx)>=1.f || fabsf(s_pendDy)>=1.f)) {
+            s_pendTime+=dt;
+            if (s_pendTime < 0.25f) {
                 Touch_Down_N(1, s_lookX, s_lookY);
-                s_lookDown = true;
-                s_lookHold = 0;
-            } else if (s_lookHold < 1) {
-                ++s_lookHold; // let the game register the touch first
+                pendHolding = true;
+            } else {
+                s_pendDx=s_pendDy=0.f; s_pendTime=0.f;
+            }
+        }
+        if (pendHolding) {
+            // keep finger alive, skip new correction
+        } else if (needTurn) {
+            if (!s_lookDown) {
+                s_lookX = sw*0.74f; s_lookY=sh*0.42f;
+                Touch_Down_N(1, s_lookX, s_lookY);
+                s_lookDown=true; s_lookHold=0;
+            } else if (s_lookHold<1) {
+                ++s_lookHold;
                 Touch_Down_N(1, s_lookX, s_lookY);
             } else {
-                // Proportional step: cover ~28% of the remaining error per
-                // frame, capped. Fast on big errors, glides into the centre
-                // without the stair-step jerks of fixed-size increments.
-                float maxStep = sh * 0.075f;
-                float kAim = (phase == 2 && tgt.has_spot) ? 0.42f : 0.28f;
-                float dx = wantYawPx * kAim;
-                if (dx >  maxStep) dx =  maxStep;
-                if (dx < -maxStep) dx = -maxStep;
-                float dy = wantPitchPx * kAim;
-                float maxStepY = maxStep * 0.5f;
-                if (dy >  maxStepY) dy =  maxStepY;
-                if (dy < -maxStepY) dy = -maxStepY;
-                float nx = s_lookX + dx, ny = s_lookY + dy;
-                // Edge: lift and re-centre rather than dragging off-screen.
-                if (nx < sw * 0.56f || nx > sw * 0.97f || ny < sh * 0.12f || ny > sh * 0.88f) {
-                    Touch_Up_N(1); s_lookDown = false; s_haveLast = false;
+                // skip if still pending
+                if (s_pendTime>0.f && s_pendTime<0.25f) {
+                    // already handled
                 } else {
-                    s_lookX = nx; s_lookY = ny;
-                    Touch_Down_N(1, s_lookX, s_lookY);
-                    s_lastDx = dx;
+                    float wantYawPx = steerYaw / gain;
+                    float wantPitPx = 0.f;
+                    if (fabsf(steerPitch) > pitchDead) wantPitPx = -steerPitch / fabsf(gain);
+                    float maxStep = sh*0.075f;
+                    float kAim = (phase==2 && tgt.has_spot)?0.42f:0.28f;
+                    float dx = wantYawPx * kAim;
+                    float dy = wantPitPx * kAim;
+                    if (dx>maxStep) dx=maxStep; if (dx<-maxStep) dx=-maxStep;
+                    if (dy>maxStep*0.5f) dy=maxStep*0.5f; if (dy<-maxStep*0.5f) dy=-maxStep*0.5f;
+                    float nx = s_lookX + dx, ny = s_lookY + dy;
+                    if (nx < sw*0.56f || nx > sw*0.97f || ny < sh*0.12f || ny > sh*0.88f) {
+                        Touch_Up_N(1); s_lookDown=false; s_haveLast=false; s_pendDx=s_pendDy=0.f;
+                    } else {
+                        s_lookX=nx; s_lookY=ny;
+                        Touch_Down_N(1, s_lookX, s_lookY);
+                        s_lastDx=dx; s_lastDy=dy;
+                        s_pendDx+=dx; s_pendDy+=dy;
+                    }
                 }
             }
         } else if (s_lookDown) {
-            Touch_Up_N(1); s_lookDown = false;
+            Touch_Up_N(1); s_lookDown=false; s_pendDx=s_pendDy=0.f; s_pendTime=0.f;
         }
     }
 
-    // ---- finger 0: move joystick (bottom-left) ----
-    bool stickDeflected = false;
-    bool wantWalkNow = false;   // this frame's walk request (for the watchdog)
-    {
-        // Virtual stick centre: calibrated position when set, sensible
-        // default otherwise.
-        float cx = (g_state.farm_joy_x >= 0.f) ? sw * g_state.farm_joy_x : sw * 0.165f;
-        float cy = (g_state.farm_joy_y >= 0.f) ? sh * g_state.farm_joy_y : sh * 0.70f;
-        // Stick deflection radius. The game RUNS only when the stick is
-        // pushed near its full extent — a half-deflected stick walks, which
-        // is why the farm used to approach at a stroll.
-        float r = sh * 0.20f;
-        float px = cx, py = cy;
-        bool wantWalk = false;
-
-        if (s_evadeTime > 0.f) {
-            // Obstacle manoeuvre: back off briefly, then strafe hard to one
-            // side (still angled a bit forward) to slide around walls/rocks
-            // the straight-line walk keeps bumping into.
-            wantWalk = true;
-            s_evadeTime -= dt;
-            if (s_evadeTime > 1.1f) {          // first ~0.6 s: step back
-                px = cx;
-                py = cy + r * 0.95f;
-            } else {                            // then: diagonal sidestep
-                px = cx + r * 0.95f * s_evadeDir;
-                py = cy - r * 0.4f;
-            }
-            if (s_evadeTime <= 0.f) { s_evadeTime = 0.f; s_stuckTime = 0.f; s_lastGoal = 1e9f; }
-        } else if (tgt.has_spot && atNode && !s_head_on) {
-            // The mark is around the side (or far) of the trunk: strafe a
-            // smooth arc at the current radius until it faces us, then
-            // stand still and strike. Pure strafe (no forward): the
-            // standoff distance is kept, only the angle is fixed.
-            wantWalk = true;
-            px = cx + r * 0.75f * tgt.orbit_side;   // 0.95 overshot the
-            py = cy;                                // 10 deg exit line
-        } else if (phase == 1) {
-            // Approach: run until close, then BRAKE proportionally so the
-            // bot arrives inside the standoff band instead of crashing
-            // into the bark at run speed and having to back off (the
-            // "подходит впритык, потом отходит и бьёт" pattern — the old
-            // code switched from full run to a creep stick at 2.6 m, but
-            // the body kept run speed for 0.3-0.5 s and overshot into
-            // the trunk). Stick size = distance to the stop line: full
-            // run far away, walk mid-way, slow creep over the last
-            // ~1.5 m — velocity tapers to ~0 exactly at the band.
-            // The walk yaw is the angle to the WALK POINT (the live X when
-            // it is up). Marks around the side of a rock can sit >45 deg
-            // off while we are still 3-6 m out — the old gate made the bot
-            // stand in the open (no walk, no arc yet: not atNode, no
-            // deflected stick for the watchdog) — 60 deg lets it close
-            // diagonally; the steer clamp above keeps the walk on-axis.
-            if (fabsf(tgt.walk_yaw) < 60.f) {
-                const float stopAt = isTree ? 1.35f : 1.70f;
-                const float toGo   = tgt.walk_dist - stopAt;
-                if (toGo > 0.f) {
-                    wantWalk = true;
-                    float steer = tgt.walk_yaw / 60.f;  // slight steering
-                    if (steer >  0.5f) steer =  0.5f;
-                    if (steer < -0.5f) steer = -0.5f;
-                    // 1.5 m braking zone, floor at a slow walk.
-                    float spd = (toGo - 0.15f) / 1.5f;
-                    if (spd > 1.f)   spd = 1.f;
-                    if (spd < 0.30f) spd = 0.30f;
-                    px = cx + r * steer * spd;
-                    py = cy - r * spd * sqrtf(1.f - steer * steer);
-                }
-                // toGo <= 0: already inside the band — stand still.
-            }
+    // ---- movement execution ----
+    bool stickDeflected=false;
+    bool wantWalkNow=false;
+    if (useMem) {
+        if (wantWalk) {
+            float mx = wantMoveX, my = wantMoveY;
+            // clamp
+            float len = sqrtf(mx*mx+my*my);
+            if (len>1.f) { mx/=len; my/=len; }
+            esp_farm_drive(mx, my, true, desYaw, lookX, lookY, lookZ);
+            stickDeflected = len>0.2f;
+            wantWalkNow=true;
         } else {
-            // Mining: hold a standoff band around the aim point. The
-            // band is WIDE on purpose (0.70..1.30 from the live mark):
-            // the narrow 0.30 m band + stick glide made the bot flap
-            // forward/back every few frames (25 direction flips in the
-            // last log). The tool reaches ~1.5, so even the outer edge
-            // is a hitting distance — the old ore band at 1.4-1.70 from
-            // the X was OUTSIDE reach, which is how the bot stood and
-            // missed the marks ("не достаёт до крестиков").
-            // Without a live mark the metric is the node distance:
-            // creep in to a safe approach stop, back off inside the
-            // collision zone.
-            float toHit   = tgt.has_spot ? tgt.aim_dist : tgt.dist;
-            // Standoff the bot SETTLES at: ore ~1.15-1.30 from the X
-            // (requested), trees 0.70-1.30. The stick ACTUATION edges are
-            // wider than the standoff (log s11): a 0.15 m actuation band
-            // with a 0.45 crawl stick made the bot bounce +-0.4 m every
-            // 0.8 s (33 F/B flips), the "moving" tap gate suppressed every
-            // swing in between, and the camera chased the bounce — mining
-            // took minutes. Now the stick only corrects drift past the
-            // edges; inside 1.00-1.45 it stays at centre and the swings
-            // go out at a normal cadence.
-            float backAt  = tgt.has_spot ? (isTree ? 0.60f : 1.00f)
-                                         : (isTree ? 0.80f : 0.85f);
-            float creepAt = tgt.has_spot ? (isTree ? 1.45f : 1.45f)
-                                         : (isTree ? 1.50f : 1.85f);
-            if (toHit < backAt) {
-                wantWalk = true;
-                px = cx;
-                py = cy + r * 0.30f;      // pressed in: slow ease back
-            } else if (toHit > creepAt) {
-                wantWalk = true;
-                float steer = tgt.walk_yaw / 60.f;
-                if (steer >  1.f) steer =  1.f;
-                if (steer < -1.f) steer = -1.f;
-                px = cx + r * 0.35f * steer;
-                py = cy - r * 0.30f;      // still short: slow creep
-            }
+            esp_farm_drive(0.f,0.f,false,desYaw,lookX,lookY,lookZ);
+            stickDeflected=false;
+            wantWalkNow=false;
         }
-
-    // Release hysteresis: phases flicker for a frame or two around their
-        // thresholds (dist/yaw noise), and every flicker used to lift and
-        // re-plant the move finger — the visible "joystick jerking". The
-        // finger now lifts only after the walk has been unwanted for a
-        // quarter of a second straight; mining taps are unaffected (finger 2
-        // is independent).
-        static float s_walkOffTime = 0.f;
-        if (wantWalk) {
-            s_walkOffTime = 0.f;
-        } else if (s_moveDown) {
-            s_walkOffTime += dt;
-            if (s_walkOffTime < 0.25f) {
-                wantWalk = true;               // держим палец, гасим дёрганье
-                px = cx; py = cy;              // но к центру стика
-            }
+    } else {
+        float cx = (g_state.farm_joy_x>=0.f)? sw*g_state.farm_joy_x : sw*0.165f;
+        float cy = (g_state.farm_joy_y>=0.f)? sh*g_state.farm_joy_y : sh*0.70f;
+        float r = sh*0.20f;
+        float px=cx, py=cy;
+        bool wWalk = wantWalk;
+        if (wWalk) {
+            px = cx + r*wantMoveX;
+            py = cy - r*wantMoveY;
         }
-        if (wantWalk) {
+        if (wWalk) s_walkOffTime=0.f;
+        else if (s_moveDown) {
+            s_walkOffTime+=dt;
+            if (s_walkOffTime < 0.25f) { wWalk=true; px=cx; py=cy; }
+        }
+        if (wWalk) {
             if (!s_moveDown) {
-                Touch_Down_N(0, cx, cy);      // land on the stick centre first
-                s_moveDown = true;
-                s_stickPx = cx; s_stickPy = cy;
+                Touch_Down_N(0,cx,cy);
+                s_moveDown=true; s_stickPx=cx; s_stickPy=cy;
             } else {
-                // Glide the stick towards the wanted deflection instead of
-                // teleporting it: some devices/game builds latch a huge jump
-                // as a sideways flick, which sent the bot strafing off-line.
-                float k = 1.f - expf(-14.f * dt);   // ~90% of the way in 0.16 s
-                s_stickPx += (px - s_stickPx) * k;
-                s_stickPy += (py - s_stickPy) * k;
-                Touch_Down_N(0, s_stickPx, s_stickPy);
+                float k;
+                if (isEvade || orbit) {
+                    s_stickPx=px; s_stickPy=py; // instant
+                } else {
+                    k = 1.f - expf(-20.f*dt);
+                    s_stickPx += (px - s_stickPx)*k;
+                    s_stickPy += (py - s_stickPy)*k;
+                }
+                Touch_Down_N(0,s_stickPx,s_stickPy);
             }
-        } else if (s_moveDown) {
-            Touch_Up_N(0); s_moveDown = false;
-        }
-        stickDeflected = s_moveDown &&
-            (fabsf(s_stickPx - cx) > r * 0.2f || fabsf(s_stickPy - cy) > r * 0.2f);
-        // TEMP farm log (remove once the movement is stable): what the
-        // joystick is doing, 5 Hz — paired with the LOG lines from
-        // game.cpp in the same file.
+        } else if (s_moveDown) { Touch_Up_N(0); s_moveDown=false; }
+        stickDeflected = s_moveDown && (fabsf(s_stickPx-cx)>r*0.2f || fabsf(s_stickPy-cy)>r*0.2f);
+        wantWalkNow = wWalk;
         {
-            static float s_t = 0.f;
-            static int   s_n = 0;
-            s_t += dt;
-            if (s_t >= 0.2f) {
-                s_t = 0.f;
-                if (s_n < 4000) {
+            static float s_t=0.f; static int s_n=0;
+            s_t+=dt;
+            if (s_t>=0.2f) {
+                s_t=0.f;
+                if (s_n<4000) {
                     ++s_n;
-                    char line[176];
-                    snprintf(line, sizeof(line),
-                             "MOVE ph=%d spot=%d front=%d orbit=%d tap=%d st=(%.2f,%.2f)%s d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f\n",
-                             phase, tgt.has_spot ? 1 : 0, tgt.spot_front ? 1 : 0,
-                             orbit ? 1 : 0, s_tapDown ? 1 : 0,
-                             (s_stickPx - cx) / r, (s_stickPy - cy) / r,
-                             s_moveDown ? "" : " up", tgt.dist, tgt.aim_dist,
-                             tgt.walk_yaw, tgt.yaw);
+                    char line[192];
+                    snprintf(line,sizeof(line),"MOVE ph=%d spot=%d front=%d orbit=%d tap=%d st=(%.2f,%.2f)%s d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f mem=%d\n",
+                             phase, tgt.has_spot?1:0, tgt.spot_front?1:0, orbit?1:0, s_tapDown?1:0,
+                             (s_stickPx-cx)/r, (s_stickPy-cy)/r, s_moveDown?"":" up",
+                             tgt.dist, tgt.aim_dist, tgt.walk_yaw, tgt.yaw, useMem?1:0);
                     esp_farm_log_line(line);
                 }
             }
-            wantWalkNow = wantWalk;
         }
     }
 
-    // ---- finger 2: attack taps while mining ----
+    // ---- attack taps ----
     {
-        if (phase == 2) {
-            if (!stickDeflected || tgt.player_speed <= 0.4f)
-                s_mineTime += dt; // standing (even stick-pushed-but-blocked)
-            // Hold fire while the crosshair is still swinging onto the mark:
-            // a tap mid-swipe lands where the camera used to be — exactly
-            // the "missed the X" complaint. Body hits are lenient (the node
-            // is huge), spot hits want the reticle settled.
-            bool settled = tgt.has_spot
-                ? (fabsf(tgt.yaw) <= 1.6f && fabsf(tgt.pitch) <= 2.0f)
-                : (fabsf(tgt.yaw) <= 8.f && fabsf(tgt.pitch) <= 10.f);
-            // Suppress the swing only for REAL movement: the approach run,
-            // an evade manoeuvre, or a fast walk (>1 m/s). Band
-            // micro-corrections (~0.5 m/s crawl) and a blocked
-            // stick-pushed stand do NOT count — the camera keeps the
-            // reticle on the mark while the body shuffles, and the swing
-            // still lands on it. (log s8: a slope-locked stand with zero
-            // taps; log s11: the band flap's crawl suppressed nearly
-            // every swing — 9 taps in 50 s.)
-            const bool moving = s_evadeTime > 0.f || tgt.player_speed > 1.0f;
+        if (phase==2) {
+            if (!stickDeflected || tgt.player_speed<=0.4f) s_mineTime+=dt;
+            bool settled = tgt.has_spot ? (fabsf(tgt.yaw)<=1.6f && fabsf(tgt.pitch)<=2.0f)
+                                        : (fabsf(tgt.yaw)<=8.f && fabsf(tgt.pitch)<=10.f);
+            bool moving = s_evadeTime>0.f || tgt.player_speed>1.f;
             if (!settled || moving) {
-                if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; }
-                s_tapTimer = 0;   // next tap fires the moment the reticle settles
+                if (s_tapDown) { Touch_Up_N(2); s_tapDown=false; }
+                s_tapTimer=0;
             } else {
-                // Tap rhythm: ~85 ms down, ~230 ms up — a believable fast
-                // tapper that also matches melee swing cadence (extra taps
-                // are ignored by the game, they just queue the next swing).
-                s_tapTimer -= (int)roundf(dt * 1000.f);
-                if (s_tapTimer <= 0) {
+                s_tapTimer -= (int)roundf(dt*1000.f);
+                if (s_tapTimer<=0) {
                     if (!s_tapDown) {
-                        // Attack tap: calibrated fire button when set,
-                        // otherwise the right half of the screen clear of the
-                        // look finger.
-                        float fx = (g_state.farm_fire_x >= 0.f) ? sw * g_state.farm_fire_x : sw * 0.88f;
-                        float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
+                        float fx = (g_state.farm_fire_x>=0.f)? sw*g_state.farm_fire_x : sw*0.88f;
+                        float fy = (g_state.farm_fire_y>=0.f)? sh*g_state.farm_fire_y : sh*0.66f;
                         Touch_Down_N(2, fx, fy);
-                        s_tapDown = true;
-                        s_tapTimer = 85;
-                        if (!s_nodeStruck) {
-                            // First swing of this node: freeze the strike
-                            // point. All later swings go to this exact
-                            // spot (the game's X is ignored until the
-                            // node is switched) — no more chasing hops.
-                            s_nodeStruck = true;
-                            esp_farm_lock_aim();
-                        }
+                        s_tapDown=true; s_tapTimer=85;
+                        if (!s_nodeStruck) { s_nodeStruck=true; esp_farm_lock_aim(); }
                     } else {
-                        Touch_Up_N(2);
-                        s_tapDown = false;
-                        s_tapTimer = 230;
+                        Touch_Up_N(2); s_tapDown=false; s_tapTimer=230;
                     }
                 }
             }
         } else {
-            if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; }
-            s_tapTimer = 0;
-            s_mineTime = 0.f;
+            if (s_tapDown) { Touch_Up_N(2); s_tapDown=false; }
+            s_tapTimer=0; s_mineTime=0.f;
         }
     }
 
     // ---- watchdogs ----
-    if (phase == 1) {
-        // No progress towards the goal -> ran into an obstacle (or, while
-        // orbiting, the X will not come around). First try to walk around it
-        // (back off + sidestep, alternating sides); only when the manoeuvres
-        // keep failing does the node get blacklisted.
-        // Progress metric: distance to the node — or the angle to the X
-        // while orbiting (the distance does not change there; measuring by
-        // it made the watchdog fire and drag the bot into the evade dance).
+    if (phase==1) {
         float goalNow = orbit ? fabsf(tgt.orbit_angle) : tgt.walk_dist;
-        bool progress = goalNow < s_lastGoal - 0.15f ||
-                        goalNow < s_lastGoal - s_lastGoal * 0.02f;
-        // Count "stuck" only while actually TRYING to move: a 180-degree
-        // camera turn in place does not change the distance, and counting
-        // it used to fire the evade manoeuvre mid-turn.
+        bool progress = goalNow < s_lastGoal - 0.15f || goalNow < s_lastGoal - s_lastGoal*0.02f;
         if (progress || !stickDeflected) {
-            s_lastGoal = progress ? goalNow : s_lastGoal;
-            if (progress) s_stuckTime = 0.f;
-        } else if (s_evadeTime <= 0.f) {
-            s_stuckTime += dt;
-            if (s_stuckTime > 2.f) {
-                if (s_evadeCount < 4) {
-                    s_evadeTime = 1.7f;                       // ~0.6 s back + ~1.1 s strafe
-                    // Sidestep towards the side the GOAL is on (the wall is
-                    // usually in the way straight ahead, so the goal side is
-                    // the open side). Blind alternating used to strafe away
-                    // from the node and slide along the wall in the wrong
-                    // direction; fall back to alternating when the goal is
-                    // straight ahead (either side is a coin flip).
-                    if (tgt.walk_yaw >  8.f)      s_evadeDir =  1.f;
-                    else if (tgt.walk_yaw < -8.f) s_evadeDir = -1.f;
-                    else                          s_evadeDir = (s_evadeCount % 2 == 0) ? 1.f : -1.f;
-                    ++s_evadeCount;
-                    s_stuckTime = 0.f;
+            s_lastGoal = progress?goalNow:s_lastGoal;
+            if (progress) s_stuckTime=0.f;
+        } else if (s_evadeTime<=0.f) {
+            s_stuckTime+=dt;
+            if (s_stuckTime>2.f) {
+                if (s_evadeCount<4) {
+                    s_evadeTime=1.7f;
+                    if (tgt.walk_yaw>8.f) s_evadeDir=1.f;
+                    else if (tgt.walk_yaw<-8.f) s_evadeDir=-1.f;
+                    else s_evadeDir=(s_evadeCount%2==0)?1.f:-1.f;
+                    ++s_evadeCount; s_stuckTime=0.f;
                 } else {
-                    esp_farm_blacklist(tgt.id, 30.f);
-                    releaseAll();
-                    s_settle = 0.6f;
-                    s_stuckTime = 0.f; s_lastGoal = 1e9f;
-                    s_evadeCount = 0; s_evadeTime = 0.f;
-                    s_nodeId = 0;
-                    g_farmPhase = 0;
+                    esp_farm_blacklist(tgt.id,30.f);
+                    releaseAll(); s_settle=0.6f; s_stuckTime=0.f; s_lastGoal=1e9f;
+                    s_evadeCount=0; s_evadeTime=0.f; s_nodeId=0; g_farmPhase=0;
                 }
             }
         }
     } else {
-        // Blocked in phase 2: the stick is pushed (band creep / nudge) but
-        // the body does not move — the game will not walk down a steep
-        // slope or into a wall. The phase-1 watchdog never runs here, so
-        // without this the bot stood at a slope-locked ore for a full
-        // minute (log s8: "подбежал и стоял"). Slide sideways like the
-        // approach evade — it finds the descent. The count persists for
-        // the whole stay at the node (reset on node switch), so the
-        // manoeuvre is tried at most 4 times, then the fraction watchdog
-        // decides.
-        if (s_evadeTime <= 0.f) {
-            if (wantWalkNow && tgt.player_speed <= 0.4f) s_blockedTime += dt;
-            else s_blockedTime = 0.f;
-            if (s_blockedTime > 1.5f && s_evadeCount < 4) {
-                s_evadeTime = 1.7f;
-                s_evadeDir = (s_evadeCount % 2 == 0) ? 1.f : -1.f;
-                ++s_evadeCount;
-                s_blockedTime = 0.f;
+        if (s_evadeTime<=0.f) {
+            if (wantWalkNow && tgt.player_speed<=0.4f) s_blockedTime+=dt;
+            else s_blockedTime=0.f;
+            if (s_blockedTime>1.5f && s_evadeCount<4) {
+                s_evadeTime=1.7f; s_evadeDir=(s_evadeCount%2==0)?1.f:-1.f;
+                ++s_evadeCount; s_blockedTime=0.f;
             }
-        } else {
-            s_blockedTime = 0.f;
-        }
-        // Swinging (or nudging into reach) but the node is not draining:
-        // standing a hair too far, blocked, or wrong tool. The walk-in nudge
-        // handles the former; give up on the rest rather than stand there
-        // forever. Give up only when the fraction is READABLE and provably
-        // not moving for a long stretch — with an unreadable fraction (-1)
-        // the old short timer abandoned perfectly fine nodes halfway.
-        if (tgt.fraction >= 0.f) {
-            if (s_fracRef < 0.f) s_fracRef = tgt.fraction; // first good read
-            if (tgt.fraction < s_fracRef - 0.01f) {
-                s_fracRef = tgt.fraction;
-                s_mineTime = 0.f;
-                s_nudgeTime = 0.f;
-            } else if (s_mineTime > 60.f || s_nudgeTime > 15.f) {
-                esp_farm_blacklist(tgt.id, 60.f);
-                releaseAll();
-                s_settle = 0.6f;
-                s_mineTime = 0.f; s_fracRef = -1.f; s_nudgeTime = 0.f;
-                s_nodeId = 0;
-                g_farmPhase = 0;
+        } else s_blockedTime=0.f;
+
+        if (tgt.fraction>=0.f) {
+            if (s_fracRef<0.f) s_fracRef=tgt.fraction;
+            if (tgt.fraction < s_fracRef-0.01f) { s_fracRef=tgt.fraction; s_mineTime=0.f; s_nudgeTime=0.f; }
+            else if (s_mineTime>60.f || s_nudgeTime>15.f) {
+                esp_farm_blacklist(tgt.id,60.f);
+                releaseAll(); s_settle=0.6f; s_mineTime=0.f; s_fracRef=-1.f; s_nudgeTime=0.f; s_nodeId=0; g_farmPhase=0;
             }
-        } else if (s_mineTime > 120.f || s_nudgeTime > 15.f) {
-            esp_farm_blacklist(tgt.id, 60.f);
-            releaseAll();
-            s_settle = 0.6f;
-            s_mineTime = 0.f; s_fracRef = -1.f; s_nudgeTime = 0.f;
-            s_nodeId = 0;
-            g_farmPhase = 0;
+        } else if (s_mineTime>120.f || s_nudgeTime>15.f) {
+            esp_farm_blacklist(tgt.id,60.f);
+            releaseAll(); s_settle=0.6f; s_mineTime=0.f; s_fracRef=-1.f; s_nudgeTime=0.f; s_nodeId=0; g_farmPhase=0;
         }
     }
-    // Nudging into reach that never gets there (a wall between us and the
-    // trunk) is a stuck state: count it. Standing still is NOT nudging —
-    // the old code never reset while standing, so a few seconds of band
-    // creep + arc across a miss burst added up to the 8 s cap and
-    // blacklisted a live node ("stops mining mid-process").
     {
-        static float s_stillTime = 0.f;
-        if (phase == 2 && stickDeflected) {
-            s_stillTime = 0.f;
-            s_nudgeTime += dt;
-        } else if (phase != 2) {
-            s_nudgeTime = 0.f;
-            s_stillTime = 0.f;
-        } else if (s_nudgeTime > 0.f) {
-            s_stillTime += dt;
-            if (s_stillTime > 1.5f) s_nudgeTime = 0.f;
-        }
+        static float s_stillTime=0.f;
+        if (phase==2 && stickDeflected) { s_stillTime=0.f; s_nudgeTime+=dt; }
+        else if (phase!=2) { s_nudgeTime=0.f; s_stillTime=0.f; }
+        else if (s_nudgeTime>0.f) { s_stillTime+=dt; if (s_stillTime>1.5f) s_nudgeTime=0.f; }
     }
 }
+
+
 
 void RenderMenu() {
     auto& io = ImGui::GetIO();

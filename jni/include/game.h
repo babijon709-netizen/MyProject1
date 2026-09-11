@@ -125,6 +125,9 @@ struct FarmTarget {
 // ore issues are fixed): appended to /sdcard/Download/xvcen_farm.log.
 void        esp_farm_log_line(const char* line);
 void        esp_input_probe();          // stage-1 memory input probe (read-only)
+bool        esp_farm_has_input();       // true when handler is live (Stage 2)
+bool        esp_farm_drive(float move_x, float move_y, bool sprint,
+                           float yaw_deg, float look_x, float look_y, float look_z); // Stage 2 memory write
 // Which resources to farm: bit0 wood, bit1 stone, bit2 metal, bit3 sulfur.
 // 0 disables the scan entirely (no extra work per frame).
 void        esp_farm_set_resources(unsigned mask);

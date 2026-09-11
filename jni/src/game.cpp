@@ -5792,6 +5792,67 @@ void esp_input_probe() {
     farm_log_append(line);
 }
 
+// ---- Stage 2: memory input WRITE (ideal farm drive) -------------------------
+// Writes directly into PlayerInputHandler (see Stage 1 offsets). This bypasses
+// the OS touch stack (no uinput latency, no glide) and makes the farm's
+// movement & camera frame-perfect. Required sequence:
+//   read Tick @+0x60, Tick+1, write MovementInput + LookDir + YRotation +
+//   Sprint + Ready=1 + TooClose=0 + Tick.
+// All writes are via process_vm_writev (no code injection). Returns false
+// if handler is dead.
+bool esp_farm_has_input() {
+    if (!g_ip.handler) return false;
+    if (rd_ptr(g_ip.handler) != g_ip.handler_klass) { g_ip.handler = 0; return false; }
+    return true;
+}
+
+bool esp_farm_drive(float move_x, float move_y, bool sprint,
+                    float yaw_deg, float look_x, float look_y, float look_z) {
+    if (!g_ip.handler) return false;
+    if (rd_ptr(g_ip.handler) != g_ip.handler_klass) { g_ip.handler = 0; return false; }
+    // Clamp & sanitize
+    if (!std::isfinite(move_x) || !std::isfinite(move_y)) { move_x = 0.f; move_y = 0.f; }
+    if (move_x > 1.f) move_x = 1.f; if (move_x < -1.f) move_x = -1.f;
+    if (move_y > 1.f) move_y = 1.f; if (move_y < -1.f) move_y = -1.f;
+    if (!std::isfinite(yaw_deg)) yaw_deg = 0.f;
+    // Normalize look direction
+    float lx = look_x, ly = look_y, lz = look_z;
+    if (!std::isfinite(lx) || !std::isfinite(ly) || !std::isfinite(lz)) { lx = 0.f; ly = 0.f; lz = 1.f; }
+    float llen = sqrtf(lx*lx + ly*ly + lz*lz);
+    if (llen < 0.001f) { lx = 0.f; ly = 0.f; lz = 1.f; }
+    else { lx /= llen; ly /= llen; lz /= llen; }
+    // Tick must increment, otherwise game ignores the struct
+    uint32_t tick = 0;
+    if (!rd_exact(g_ip.handler + 0x60, tick)) tick = 0;
+    tick++;
+
+    // Build bool payload: Jump=0, Sprint=sprint, Crouch=0, Aim=0, Ready=1
+    uint8_t bool5[5];
+    bool5[0] = 0;
+    bool5[1] = sprint ? 1 : 0;
+    bool5[2] = 0;
+    bool5[3] = 0;
+    bool5[4] = 1;
+    uint8_t zero = 0;
+
+    bool ok = true;
+    // MovementInput (Vec2) @0x40
+    ok &= wr_buf(g_ip.handler + 0x40, &move_x, sizeof(float));
+    ok &= wr_buf(g_ip.handler + 0x44, &move_y, sizeof(float));
+    // LookDirection @0x48
+    Vec3 look = {lx, ly, lz};
+    ok &= wr_buf(g_ip.handler + 0x48, &look, sizeof(Vec3));
+    // YRotation @0x54
+    ok &= wr_buf(g_ip.handler + 0x54, &yaw_deg, sizeof(float));
+    // Bools @0x58..0x5C (5 bytes)
+    ok &= wr_buf(g_ip.handler + 0x58, bool5, sizeof(bool5));
+    // Tick @0x60
+    ok &= wr_buf(g_ip.handler + 0x60, &tick, sizeof(uint32_t));
+    // TooClose @0x64 = false
+    ok &= wr_buf(g_ip.handler + 0x64, &zero, 1);
+    return ok;
+}
+
 // ---- The glowing X (bonus spot) ---------------------------------------------
 
 // Anything at foot level is a root / interaction volume / shadow — that was
@@ -6812,15 +6873,12 @@ bool esp_farm_get_target(FarmTarget& out) {
         orbit_side = ((orbit_side > 0.f) == (crossz > 0.f)) ? 1.f : -1.f;
     }
 
-    // Walk point: the X when it is live, the node body otherwise.
-    // The ore mark sits a metre or more OFF the rock's centre, so walking
-    // at the body while the stop band measured from the X put the stop
-    // point on the wrong radial — the X swung behind the trunk on every
-    // approach step (walk -> orbit -> walk, "ходит туда-сюда", log s9).
-    // Walking AT the mark (the braking stops `stopAt` short of it) lands
-    // on the mark's radial head-on. For trees the mark is on the trunk,
-    // so this is the same point as the body.
-    Vec3 walk = (spot_ok || g_farm_pin_valid) ? aim : best->pos;
+    // IDEAL WALK: always walk to the node BODY, never to the X.
+    // The old code walked to X when live, which made ore farming weave:
+    // X is 1-1.5m off-center, so walk_yaw pointed off the node center.
+    // Camera (yaw) still chases X, but movement (walk_yaw) goes to body.
+    // This separates approach (body) from aim (X) — no weaving.
+    Vec3 walk = best->pos;
     walk.y = farm_eye_y() - 1.6F;
     float walk_pitch = 0.f;
     if (!farm_angles(origin, fwd, right, up, walk, out.walk_yaw, walk_pitch)) {
@@ -6832,6 +6890,8 @@ bool esp_farm_get_target(FarmTarget& out) {
         float wz = walk.z - g_frame_local_pos.z;
         out.walk_dist = sqrtf(wx * wx + wz * wz);
     }
+    // Keep raw body yaw for perfect memory drive (same as walk_yaw now)
+    // but preserve for future extensions.
 
     // Screen position of the target mark: the glowing X itself when live
     // (on the bark), the body point otherwise — NOT the slightly pulled
