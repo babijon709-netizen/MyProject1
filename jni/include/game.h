@@ -122,7 +122,7 @@ struct FarmTarget {
     float sx = 0.f, sy = 0.f;
 };
 // TEMP farm log line (remove with the log probes once the movement and
-// ore issues are fixed): appended to /sdcard/Download/xvcen_farm.log.
+// ore issues are fixed): appended to /sdcard/Download/benzware_farm.log.
 void        esp_farm_log_line(const char* line);
 void        esp_input_probe();          // stage-1 memory input probe (read-only)
 // Which resources to farm: bit0 wood, bit1 stone, bit2 metal, bit3 sulfur.

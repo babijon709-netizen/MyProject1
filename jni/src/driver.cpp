@@ -224,64 +224,6 @@ bool write_process_memory(pid_t pid, uint64_t addr, const void* in, size_t len) 
 
 Stats stats() { return g_stats; }
 
-// ---- Проверка, что FT-драйвер прошит в ядро --------------------------------
-// FT-драйвер патчит в ядре проверки доступа (ptrace_may_access и родственные):
-// после прошивки ЧУЖУЮ память может читать даже непривилегированный процесс.
-// Именно это и проверяем: ребёнок роняет свои права до обычного пользователя
-// (uid 2000, shell) и пробует прочитать 8 байт кода нашего root-процесса
-// прямым syscall process_vm_readv.
-//   ядро без драйвера -> EPERM (читать чужое нельзя);
-//   ядро с драйвером  -> чтение проходит.
-// Так KERNEL-режим зависит именно от драйвера, а не от прав root.
-bool driver_active() {
-    int fds[2];
-    if (pipe(fds) != 0) return false;
-    uint64_t addr = (uint64_t)(uintptr_t)&driver_active;   // валидный адрес в нас
-
-    pid_t child = fork();
-    if (child < 0) { close(fds[0]); close(fds[1]); return false; }
-    if (child == 0) {
-        // ребёнок: непривилегированный пользователь
-        close(fds[0]);
-        if (setgid(2000) != 0 || setuid(2000) != 0) _exit(50);
-        unsigned char buf[8];
-        struct iovec l = { buf, sizeof(buf) };
-        struct iovec r = { (void*)(uintptr_t)addr, sizeof(buf) };
-        ssize_t n = pv_readv(getppid(), &l, 1, &r, 1, 0);
-        if (n > 0) _exit(42);                    // прочиталось — драйвер в ядре
-        unsigned char e = (unsigned char)(errno ? errno : 99);
-        if (write(fds[1], &e, 1) < 0) {}         // отдадим errno родителю
-        _exit(43);
-    }
-    close(fds[1]);
-
-    int st = 0;
-    bool done = false;
-    for (int i = 0; i < 30 && !done; i++) {       // до 3 секунд
-        if (waitpid(child, &st, WNOHANG) == child) { done = true; break; }
-        usleep(100 * 1000);
-    }
-    if (!done) { kill(child, SIGKILL); waitpid(child, &st, 0); close(fds[0]);
-                 applog::write("KERNEL: probe драйвера завис — считаю, что драйвера нет");
-                 return false; }
-
-    unsigned char e = 0;
-    ssize_t got = read(fds[0], &e, 1);
-    close(fds[0]);
-    if (WIFEXITED(st) && WEXITSTATUS(st) == 42) {
-        applog::write("KERNEL: FT-драйвер в ядре активен "
-                      "(непривилегированное чтение прошло)");
-        return true;
-    }
-    if (WIFEXITED(st) && WEXITSTATUS(st) == 50) {
-        applog::write("KERNEL: не смог сбросить права для probe — считаю, что драйвера нет");
-        return false;
-    }
-    applog::write("KERNEL: FT-драйвер не обнаружен в ядре (непривилегированное "
-                  "чтение: errno %d)%s", (int)(got == 1 ? e : 0),
-                  (got == 1 && e == 1) ? " — доступ запрещён, драйвер не прошит" : "");
-    return false;
-}
 
 // ---- Режим -------------------------------------------------------------------
 void set_mode(Mode m) {
@@ -394,13 +336,13 @@ bool try_escalate_root(int argc, char* argv[]) {
     char su[128] = {};
     if (!find_su(su, sizeof(su))) {
         applog::write("root: su не найден (Magisk/KSU не установлен?)");
-        fprintf(stderr, "[xvcen] su не найден: запусти от root, иначе память игры не прочитается\n");
+        fprintf(stderr, "[benzware] su не найден: запусти от root, иначе память игры не прочитается\n");
         return false;
     }
     bool dash_c = su_probe_works(su, true);
     if (!dash_c && !su_probe_works(su, false)) {
         applog::write("root: %s не даёт root (диалог Magisk/KSU не подтверждён)", su);
-        fprintf(stderr, "[xvcen] root через %s не выдан (проверь диалог Magisk/KSU)\n", su);
+        fprintf(stderr, "[benzware] root через %s не выдан (проверь диалог Magisk/KSU)\n", su);
         return false;
     }
     applog::write("root: доступ есть (%s, режим su %s)", su, dash_c ? "-c" : "0");
@@ -416,7 +358,7 @@ bool try_escalate_root(int argc, char* argv[]) {
     for (int i = 1; i < argc && w > 0 && w < (int)sizeof(cmd) - 2; i++)
         w += snprintf(cmd + w, sizeof(cmd) - w, " \"%s\"", argv[i]);
 
-    fprintf(stderr, "[xvcen] перезапускаюсь от root (%s)...\n", su);
+    fprintf(stderr, "[benzware] перезапускаюсь от root (%s)...\n", su);
     pid_t child = fork();
     if (child < 0) return false;
     if (child == 0) {
@@ -431,15 +373,15 @@ bool try_escalate_root(int argc, char* argv[]) {
         int st = 0;
         if (waitpid(child, &st, WNOHANG) == child) {
             if (WIFEXITED(st) && WEXITSTATUS(st) == 127) {
-                fprintf(stderr, "[xvcen] su не смог запустить команду, продолжаю без root\n");
+                fprintf(stderr, "[benzware] su не смог запустить команду, продолжаю без root\n");
                 return false;
             }
-            fprintf(stderr, "[xvcen] root-копия умерла (код %d), продолжаю без root\n",
+            fprintf(stderr, "[benzware] root-копия умерла (код %d), продолжаю без root\n",
                     WIFEXITED(st) ? WEXITSTATUS(st) : -1);
             return false;
         }
         if (scan_root_copy(exe)) {
-            fprintf(stderr, "[xvcen] root-копия работает\n");
+            fprintf(stderr, "[benzware] root-копия работает\n");
             _exit(0);
         }
         usleep(100 * 1000);

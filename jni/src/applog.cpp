@@ -18,9 +18,9 @@ char       s_path[160] = {};
 long long  s_ftdrv_off = 0;   // сколько байт ftdrv.log уже зеркалировано
 
 const char* kCandidates[] = {
-    "/sdcard/Download/xvcen.log",
-    "/storage/emulated/0/Download/xvcen.log",
-    "/data/local/tmp/xvcen.log",
+    "/sdcard/Download/benzware.log",
+    "/storage/emulated/0/Download/benzware.log",
+    "/data/local/tmp/benzware.log",
 };
 
 // Не даём логу бесконечно расти: слишком большой — переименовываем в .1.

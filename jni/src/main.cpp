@@ -4310,7 +4310,7 @@ static ImVec2 BootCardRect(ImVec2& pos) {
         vh = io.DisplaySize.y;
     }
     float W = ImMin(vw * 0.88f, 620.f);
-    float H = ImMin(vh * 0.86f, 640.f);
+    float H = ImMin(vh * 0.86f, 430.f);
     pos = { (vw - W) * 0.5f, (vh - H) * 0.5f };
     return { W, H };
 }
@@ -4323,13 +4323,6 @@ static void BootVisibleSize(float& vw, float& vh) {
         vw = io.DisplaySize.x;
         vh = io.DisplaySize.y;
     }
-}
-
-static void DrawBootBackdrop(float alpha) {
-    float vw = 0.f, vh = 0.f;
-    BootVisibleSize(vw, vh);
-    auto* fdl = ImGui::GetForegroundDrawList();
-    fdl->AddRectFilled({0, 0}, {vw, vh}, IM_COL32(8, 8, 18, (int)(alpha * 216)));
 }
 
 // Большая кнопка режима: ручная отрисовка + InvisibleButton.
@@ -4352,29 +4345,18 @@ static bool BootButton(ImVec2 min, ImVec2 max, const char* title, const char* su
     dl->AddRect(bmin, bmax, C::UA(accent, held ? 0.95f : 0.55f), R::Btn, 0, 1.6f);
 
     float fs    = ImGui::GetFontSize();
+    bool  hasSub = sub && sub[0];
     auto  tszT  = ImGui::GetFont()->CalcTextSizeA(fs * 1.25f, FLT_MAX, 0, title);
-    auto  tszS  = ImGui::GetFont()->CalcTextSizeA(fs * 0.92f, FLT_MAX, 0, sub);
+    auto  tszS  = hasSub ? ImGui::GetFont()->CalcTextSizeA(fs * 0.92f, FLT_MAX, 0, sub)
+                         : ImVec2(0.f, 0.f);
     float cx    = (min.x + max.x) * 0.5f;
-    float blockH = tszT.y + 8.f + tszS.y;
+    float blockH = tszT.y + (hasSub ? 8.f + tszS.y : 0.f);
     float ty    = min.y + ((max.y - min.y) - blockH) * 0.5f;
     dl->AddText(ImGui::GetFont(), fs * 1.25f, { cx - tszT.x * 0.5f, ty }, C::U(C::Txt()), title);
-    dl->AddText(ImGui::GetFont(), fs * 0.92f, { cx - tszS.x * 0.5f, ty + tszT.y + 8.f },
-                C::U(C::Dim()), sub);
+    if (hasSub)
+        dl->AddText(ImGui::GetFont(), fs * 0.92f, { cx - tszS.x * 0.5f, ty + tszT.y + 8.f },
+                    C::U(C::Dim()), sub);
     return tapped;
-}
-
-// Текстовая строка «ключ: значение» внутри карточки.
-static void BootInfoRow(ImVec2& cursor, float width, const char* key, const char* value,
-                        ImVec4 valueColor) {
-    auto* dl = ImGui::GetForegroundDrawList();
-    float fs = ImGui::GetFontSize();
-    auto tk = ImGui::GetFont()->CalcTextSizeA(fs * 0.95f, FLT_MAX, 0, key);
-    auto tv = ImGui::GetFont()->CalcTextSizeA(fs * 0.95f, FLT_MAX, 0, value);
-    dl->AddText(ImGui::GetFont(), fs * 0.95f, cursor, C::U(C::Dim()), key);
-    dl->AddText(ImGui::GetFont(), fs * 0.95f, { cursor.x + width - tv.x, cursor.y },
-                C::U(valueColor), value);
-    (void)tk;
-    cursor.y += fs * 1.55f;
 }
 
 // ---- Экран 1: выбор режима --------------------------------------------------
@@ -4382,7 +4364,6 @@ static void RenderBootSelect() {
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
     g_bootFade = ImMin(g_bootFade + dt * 2.5f, 1.f);
-    DrawBootBackdrop(g_bootFade);
 
     // Полноэкранное невидимое окно-хост: в нём живут InvisibleButton-кнопки.
     float hvw = 0.f, hvh = 0.f;
@@ -4403,54 +4384,42 @@ static void RenderBootSelect() {
     float rise = (1.f - ease) * 26.f;
     pos.y += rise;
 
-    dl->AddRectFilled(pos, { pos.x + sz.x, pos.y + sz.y }, C::U(C::Bg()), R::Card);
+    dl->AddRectFilled(pos, { pos.x + sz.x, pos.y + sz.y },
+                      C::UA(C::Bg(), 0.35f + 0.65f * ease), R::Card);
     dl->AddRect(pos, { pos.x + sz.x, pos.y + sz.y }, C::UA(C::Sep(), 0.9f), R::Card, 0, 1.4f);
 
-    float fs = ImGui::GetFontSize();
-    float pad = 30.f;
+    float fs  = ImGui::GetFontSize();
+    float pad = 36.f;
     float cx  = pos.x + sz.x * 0.5f;
 
-    const char* title = "XVCEN";
-    auto tt = ImGui::GetFont()->CalcTextSizeA(fs * 2.0f, FLT_MAX, 0, title);
-    dl->AddText(ImGui::GetFont(), fs * 2.0f, { cx - tt.x * 0.5f, pos.y + pad }, C::U(C::Txt()), title);
-    const char* subtitle = XS("выбор режима запуска");
-    auto st = ImGui::GetFont()->CalcTextSizeA(fs * 0.95f, FLT_MAX, 0, subtitle);
-    dl->AddText(ImGui::GetFont(), fs * 0.95f, { cx - st.x * 0.5f, pos.y + pad + tt.y + 6.f },
-                C::U(C::Dim()), subtitle);
+    // Заголовок.
+    const char* title = "benzware";
+    float tfs = fs * 2.3f;
+    auto tt = ImGui::GetFont()->CalcTextSizeA(tfs, FLT_MAX, 0, title);
+    dl->AddText(ImGui::GetFont(), tfs, { cx - tt.x * 0.5f, pos.y + pad }, C::U(C::Txt()), title);
+    dl->AddRectFilled({ cx - 26.f, pos.y + pad + tt.y + 14.f },
+                      { cx + 26.f, pos.y + pad + tt.y + 18.f }, C::U(C::Acc()), R::Pill);
 
     // Кнопки режимов.
     float btnW = sz.x - pad * 2.f;
-    float btnH = 92.f;
+    float btnH = 96.f;
     float btnX = pos.x + pad;
-    float btnY = pos.y + pad + tt.y + st.y + 44.f;
+    float btnY = pos.y + pad + tt.y + 46.f;
 
     static float animKernel = 0.f, animNonKernel = 0.f;
     bool pickKernel = BootButton({ btnX, btnY }, { btnX + btnW, btnY + btnH },
-        "KERNEL", XS("работа от ядра телефона (FTDriver)"), C::Acc(), animKernel, dt);
-    bool pickNonKernel = BootButton({ btnX, btnY + btnH + 14.f }, { btnX + btnW, btnY + btnH * 2.f + 14.f },
-        "NONKERNEL", XS("обычный режим (process_vm)"), C::TrkOff(), animNonKernel, dt);
-
-    const char* hint = XS("KERNEL требует прошитый FT-драйвер (установка вручную)");
-    auto ht = ImGui::GetFont()->CalcTextSizeA(fs * 0.82f, FLT_MAX, 0, hint);
-    dl->AddText(ImGui::GetFont(), fs * 0.82f,
-                { cx - ht.x * 0.5f, pos.y + sz.y - pad - ht.y }, C::UA(C::Dim(), 0.8f), hint);
+        "KERNEL", nullptr, C::Acc(), animKernel, dt);
+    bool pickNonKernel = BootButton({ btnX, btnY + btnH + 16.f }, { btnX + btnW, btnY + btnH * 2.f + 16.f },
+        "NONKERNEL", nullptr, C::TrkOff(), animNonKernel, dt);
 
     ImGui::End();
     ImGui::PopStyleColor();
 
     if (pickKernel) {
         PlaySound(SND_CLICK);
-        // KERNEL работает только с прошитым FT-драйвером: софт проверяет,
-        // что ядро пропускает непривилегированное чтение (это и есть патч
-        // драйвера). Без драйвера — не пускаем, иначе это был бы обычный
-        // экстернал от root.
-        if (driver::driver_active()) {
-            driver::set_mode(driver::Mode::Kernel);
-            applog::write("выбран режим KERNEL (драйвер в ядре активен)");
-            EnterRunning();
-        } else {
-            ShowToast(XS("Драйвер ядра не прошит (см. DRIVER_MODE.md)"));
-        }
+        driver::set_mode(driver::Mode::Kernel);
+        applog::write("выбран режим KERNEL (чтение напрямую через ядро)");
+        EnterRunning();
     } else if (pickNonKernel) {
         PlaySound(SND_CLICK);
         driver::set_mode(driver::Mode::NonKernel);
@@ -5011,13 +4980,13 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
     signal(SIGHUP,  [](int) { main_thread_flag.store(false); });
 
-    // Лог диагностики в «Загрузках»: /sdcard/Download/xvcen.log
+    // Лог диагностики в «Загрузках»: /sdcard/Download/benzware.log
     // (оба процесса — до и после root-эскалации — пишут в один файл).
     applog::init();
     applog::write("=== запуск: uid=%d, ядро '%s' ===",
                   (int)getuid(), driver::kernel_version());
     if (applog::path()[0])
-        fprintf(stderr, "[xvcen] лог: %s\n", applog::path());
+        fprintf(stderr, "[benzware] лог: %s\n", applog::path());
 
     // Память игры читается только с правами root (или после патча ядра).
     // Если нас запустили без root и есть su — перезапускаемся от root.

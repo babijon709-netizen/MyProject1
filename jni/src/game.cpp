@@ -6118,20 +6118,20 @@ static void farm_log_append(const char* line) {
         }
         char cands[7][512];
         int nc = 0;
-        snprintf(cands[nc++], sizeof(cands[0]), "/sdcard/Download/xvcen_farm.log");
-        snprintf(cands[nc++], sizeof(cands[0]), "/storage/emulated/0/Download/xvcen_farm.log");
-        snprintf(cands[nc++], sizeof(cands[0]), "/data/local/tmp/xvcen_farm.log");
-        snprintf(cands[nc++], sizeof(cands[0]), "./xvcen_farm.log");
-        snprintf(cands[nc++], sizeof(cands[0]), "/sdcard/xvcen_farm.log");
-        snprintf(cands[nc++], sizeof(cands[0]), "/storage/emulated/0/xvcen_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/sdcard/Download/benzware_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/storage/emulated/0/Download/benzware_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/data/local/tmp/benzware_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "./benzware_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/sdcard/benzware_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/storage/emulated/0/benzware_farm.log");
         if (cmd[0])
             snprintf(cands[nc++], sizeof(cands[0]),
-                     "/storage/emulated/0/Android/data/%s/files/xvcen_farm.log", cmd);
+                     "/storage/emulated/0/Android/data/%s/files/benzware_farm.log", cmd);
         for (int i = 0; i < nc; ++i) {
             FILE* f = fopen(cands[i], "a");
             if (!f) continue;
             if (!s_header_done) {
-                fprintf(f, "==== xvcen farm log (pid=%d cmd=%s) ====\n",
+                fprintf(f, "==== benzware farm log (pid=%d cmd=%s) ====\n",
                         (int)getpid(), cmd[0] ? cmd : "(?)");
                 s_header_done = true;
             }
