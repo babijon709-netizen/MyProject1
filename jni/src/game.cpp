@@ -6291,6 +6291,27 @@ void esp_farm_debug(int& nodes_cached, int& idle_reason) {
     idle_reason = g_farm_idle_reason;
 }
 
+// ---- strike-point pin (user request) -----------------------------------
+// The game re-rolls the glowing X after every hit; chasing it is what
+// made the farm hunt the mark around the trunk/rock. Instead: the
+// controller pins the aim to the spot the FIRST swing connected, and
+// every later strike goes there. aim/walk/band/marker all follow the
+// pin; the orbit/arc is disabled while pinned.
+static Vec3     g_farm_aim_raw{};      // this frame's raw strike point
+static bool     g_farm_aim_raw_valid = false;
+static uint64_t g_farm_cur_component = 0;
+static uint64_t g_farm_pin_owner = 0;
+static Vec3     g_farm_pin_pt{};
+static bool     g_farm_pin_valid = false;
+
+void esp_farm_lock_aim() {
+    if (!g_farm_aim_raw_valid) return;
+    g_farm_pin_pt = g_farm_aim_raw;
+    g_farm_pin_valid = true;
+    g_farm_pin_owner = g_farm_cur_component;
+    g_farm_aim_raw_valid = false;
+}
+
 bool esp_farm_get_target(FarmTarget& out) {
     out = FarmTarget{};
     if (g_farm_shared_age < 999999) ++g_farm_shared_age;
@@ -6389,6 +6410,11 @@ bool esp_farm_get_target(FarmTarget& out) {
         }
     }
     s_last_identity = best->identity;
+    if (best->component != g_farm_pin_owner) {
+        g_farm_pin_owner = best->component;
+        g_farm_pin_valid = false;       // new node: pins on its first swing
+        g_farm_aim_raw_valid = false;
+    }
 
     // Local-player speed over the last ~0.25 s (from the position the
     // frame already publishes — no extra reads). The controller uses it
@@ -6756,6 +6782,19 @@ bool esp_farm_get_target(FarmTarget& out) {
         }
     }
 
+    // Raw strike point of this frame (the pin copies it on the first
+    // swing). Once pinned, ALL aiming uses the pinned spot: the game's X
+    // may hop anywhere, the swings keep going to the first hit location.
+    g_farm_aim_raw = aim;
+    g_farm_aim_raw_valid = true;
+    if (g_farm_pin_valid) {
+        aim = g_farm_pin_pt;
+        marker_pt = g_farm_pin_pt;
+        out.orbit_angle = 0.f;          // no arcs: the spot is fixed
+        spot_front = true;
+        orbit_side = 0.f;
+    }
+
     if (!farm_angles(origin, fwd, right, up, aim, out.yaw, out.pitch)) {
         g_farm_idle_reason = 5;
         return false;
@@ -6766,7 +6805,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     // (player - node) angle theta = atan2(x, z) proportionally to
     // (pz*dx - px*dz); we need that to carry the sign of the signed angle
     // `a` stored in orbit_side.
-    if (spot_ok) {
+    if (spot_ok && !g_farm_pin_valid) {
         float px = g_frame_local_pos.x - best->pos.x;
         float pz = g_frame_local_pos.z - best->pos.z;
         float crossz = pz * right.x - px * right.z;
@@ -6781,7 +6820,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     // Walking AT the mark (the braking stops `stopAt` short of it) lands
     // on the mark's radial head-on. For trees the mark is on the trunk,
     // so this is the same point as the body.
-    Vec3 walk = spot_ok ? aim : best->pos;
+    Vec3 walk = (spot_ok || g_farm_pin_valid) ? aim : best->pos;
     walk.y = farm_eye_y() - 1.6F;
     float walk_pitch = 0.f;
     if (!farm_angles(origin, fwd, right, up, walk, out.walk_yaw, walk_pitch)) {
@@ -6814,7 +6853,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.id = best->identity;
     out.kind = best->kind;
     out.dist = best_dist;
-    out.has_spot = spot_ok;
+    out.has_spot = spot_ok || g_farm_pin_valid;
     out.spot_front = spot_front;
     out.orbit_side = orbit_side;
     {
@@ -6853,12 +6892,12 @@ bool esp_farm_get_target(FarmTarget& out) {
         if (s_n < 4000 && (now - s_last) >= std::chrono::milliseconds(200)) {
             s_last = now;
             ++s_n;
-            char line[208];
+            char line[224];
             snprintf(line, sizeof(line),
-                     "LOG kind=%d d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f pitch=%.1f spot=%d front=%d oa=%.0f body=(%.1f,%.1f,%.1f) node=(%.1f,%.1f,%.1f) x=(%.1f,%.1f,%.1f)\n",
+                     "LOG kind=%d d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f pitch=%.1f spot=%d front=%d oa=%.0f pin=%d body=(%.1f,%.1f,%.1f) node=(%.1f,%.1f,%.1f) x=(%.1f,%.1f,%.1f)\n",
                      best->kind, best_dist, out.aim_dist, out.walk_yaw, out.yaw,
                      out.pitch, spot_ok ? 1 : 0, spot_front ? 1 : 0,
-                     out.orbit_angle,
+                     out.orbit_angle, g_farm_pin_valid ? 1 : 0,
                      g_frame_local_pos.x, g_frame_local_pos.y, g_frame_local_pos.z,
                      best->pos.x, best->pos.y, best->pos.z,
                      marker_pt.x, marker_pt.y, marker_pt.z);

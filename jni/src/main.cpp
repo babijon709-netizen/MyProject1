@@ -3596,6 +3596,7 @@ static void UpdateFarm(float dt) {
     static float s_stickPx = 0.f, s_stickPy = 0.f; // smoothed stick position
     // ---- target bookkeeping ----
     static unsigned long long s_nodeId = 0;
+    static bool s_nodeStruck = false; // first swing of this node: pin the aim
     static float s_settle = 0.f;      // pause between targets (fingers up)
     static float s_lostTime = 0.f;    // target dropout tolerance
     // ---- watchdogs ----
@@ -3710,6 +3711,7 @@ static void UpdateFarm(float dt) {
         s_stuckTime = 0.f; s_lastGoal = 1e9f;
         s_mineTime = 0.f; s_fracRef = -1.f; s_nudgeTime = 0.f;
         s_evadeTime = 0.f; s_evadeCount = 0; s_blockedTime = 0.f;
+        s_nodeStruck = false;         // the new node pins on its first swing
         if (hadNode) { releaseAll(); s_settle = 0.6f; }
     }
 
@@ -4121,6 +4123,14 @@ static void UpdateFarm(float dt) {
                         Touch_Down_N(2, fx, fy);
                         s_tapDown = true;
                         s_tapTimer = 85;
+                        if (!s_nodeStruck) {
+                            // First swing of this node: freeze the strike
+                            // point. All later swings go to this exact
+                            // spot (the game's X is ignored until the
+                            // node is switched) — no more chasing hops.
+                            s_nodeStruck = true;
+                            esp_farm_lock_aim();
+                        }
                     } else {
                         Touch_Up_N(2);
                         s_tapDown = false;

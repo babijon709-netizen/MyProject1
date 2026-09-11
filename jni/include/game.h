@@ -132,6 +132,11 @@ void        esp_farm_set_resources(unsigned mask);
 void        esp_farm_set_range(float meters);
 // Nearest matching node as of the last esp_get_boxes() (needs its camera).
 bool        esp_farm_get_target(FarmTarget& out);
+// Pin the farm aim to the strike point of the node's FIRST swing: from
+// then on every strike (aim, walk, band, marker) goes to that one spot
+// and the game's hopping X is ignored until the node is switched. Called
+// by the controller when the first attack tap of a node fires.
+void        esp_farm_lock_aim();
 // Give up on a node (unreachable / stuck) for `seconds`.
 void        esp_farm_blacklist(unsigned long long id, float seconds);
 // Why the last esp_farm_get_target() returned nothing + how many nodes the
