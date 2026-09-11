@@ -286,8 +286,13 @@ static pid_t find_pid(const char* pkg) {
     return child_fallback;
 }
 
+// Запуск потока подключения к игре. БЕЗОПАСЕН при повторном вызове:
+// main() стартует поток ещё до окна выбора режима (для бейджа/диагностики),
+// а EnterRunning() зовёт его снова при входе в режим. Присвоить
+// std::thread поверх joinable-потока = std::terminate (краш 134), поэтому
+// второй вызов просто выходит — поток уже работает.
 static void start_attach_thread() {
-    g_attach_running.store(true);
+    if (g_attach_running.exchange(true)) return;   // уже запущен
     g_attach_thread = std::thread([]() {
         auto lastFailLog = std::chrono::steady_clock::time_point{};
         while (g_attach_running.load()) {
