@@ -485,10 +485,29 @@ static bool pick_script(Script& best) {
         "/sdcard/Download/drivers/ft", "/sdcard/Download/ft", "/sdcard/Download",
     };
     std::vector<Script> scripts;
-    for (auto& d : dirs) collect_scripts(d, scripts);
+    bool sdcard_logged = false;
+    for (auto& d : dirs) {
+        // /sdcard от root-процесса идёт через FUSE и может задуматься —
+        // пишем в лог до входа, чтобы было видно, где застряли.
+        if (!sdcard_logged && d.rfind("/sdcard", 0) == 0) {
+            sdcard_logged = true;
+            applog::write("KERNEL: сканирую /sdcard/Download (через FUSE, может занять время)...");
+        }
+        collect_scripts(d, scripts);
+    }
+    applog::write("KERNEL: найдено скриптов FTDriver: %zu", scripts.size());
     if (scripts.empty()) {
         set_error("скрипты FTDriver не найдены (положи папку drivers/ft рядом с бинарем)");
         return false;
+    }
+
+    // Кастомное ядро (SuiKernel/KSU/прочие сборки) — эксплойты FT писались
+    // под стоковые ядра, адреса символов могут не совпасть.
+    if (strstr(u.release, "SuiKernel") || strstr(u.release, "KSU") ||
+        strstr(u.release, "KernelSU")  || strstr(u.release, "custom") ||
+        strstr(u.release, "Custom")    || strstr(u.release, "AK4")) {
+        applog::write("KERNEL: ВНИМАНИЕ: ядро кастомное ('%s') — скрипт может не подойти",
+                      u.release);
     }
 
     Vendor v = detect_vendor();
@@ -501,6 +520,7 @@ static bool pick_script(Script& best) {
         return false;
     }
     best = *winner;
+    applog::write("KERNEL: под ядро '%s' выбран %s.sh", u.release, winner->base.c_str());
     return true;
 }
 
@@ -533,6 +553,7 @@ static bool ensure_local_copy(const Script& s) {
         return true;
     }
     snprintf(g_script_path, sizeof(g_script_path), "/data/local/tmp/ftdrv_%s.sh", s.base.c_str());
+    applog::write("KERNEL: копирую скрипт %s -> %s", s.path.c_str(), g_script_path);
     FILE* in = fopen(s.path.c_str(), "rb");
     if (!in) { set_error("не открыть %s", s.path.c_str()); return false; }
     FILE* out = fopen(g_script_path, "wb");
@@ -767,45 +788,59 @@ const char* driver_log_tail() {
 }
 
 // ---- Публичное API ядрового драйвера ---------------------------------------------------
+// Вся последовательность (поиск скрипта → копия → su → запуск) живёт в
+// фоновом потоке: если какая-то папка (например /sdcard через FUSE от
+// root-процесса) зависнет, UI останется живым, а в xvcen.log будет виден
+// последний шаг.
+static void kernel_launch_thread(std::string game_package) {
+    applog::write("KERNEL: ищу скрипт драйвера (ядро '%s')", kernel_version());
+
+    Script s;
+    if (!pick_script(s)) {
+        applog::write("KERNEL: подбор скрипта не удался — %s", g_error);
+        g_state.store((int)KernelState::NoScript);
+        g_launching.store(false);
+        return;
+    }
+    if (!ensure_local_copy(s)) {
+        applog::write("KERNEL: не подготовить скрипт — %s", g_error);
+        g_state.store((int)KernelState::NoScript);
+        g_launching.store(false);
+        return;
+    }
+
+    char su[128] = {};
+    if (!find_su(su, sizeof(su))) {
+        set_error("su не найден: для KERNEL-режима нужен root");
+        applog::write("KERNEL: su не найден, запуск невозможен");
+        g_state.store((int)KernelState::NoRoot);
+        g_launching.store(false);
+        return;
+    }
+    snprintf(g_su_path, sizeof(g_su_path), "%s", su);   // для экрана загрузки
+
+    g_state.store((int)KernelState::Launching);
+    applog::write("KERNEL: запускаю %s (su %s)", g_script_path, su);
+    pid_t child = launch_script(su, g_script_path, "/data/local/tmp/ftdrv.log");
+    if (child < 0) {
+        set_error("fork()/execl не удался: %s", strerror(errno));
+        applog::write("KERNEL: fork()/execl не удался: %s", strerror(errno));
+        g_state.store((int)KernelState::Failed);
+        g_launching.store(false);
+        return;
+    }
+
+    // Дальше — фоновый поток: ждём, пока память игры станет читаться.
+    g_state.store((int)KernelState::Waiting);
+    std::thread(wait_kernel_thread, game_package, child).detach();
+}
+
 bool start_kernel_driver(const char* game_package) {
     if (g_launching.exchange(true)) return false; // уже запускается
     g_state.store((int)KernelState::Detecting);
     g_error[0] = 0;
     g_verified.store(false);
-
-    Script s;
-    if (!pick_script(s)) {
-        g_state.store((int)KernelState::NoScript);
-        g_launching.store(false);
-        return false;
-    }
-    if (!ensure_local_copy(s)) {
-        g_state.store((int)KernelState::NoScript);
-        g_launching.store(false);
-        return false;
-    }
-
-    char su[128] = {};
-    snprintf(su, sizeof(su), "%s", su_path());
-    if (!su[0]) {
-        set_error("su не найден: для KERNEL-режима нужен root");
-        g_state.store((int)KernelState::NoRoot);
-        g_launching.store(false);
-        return false;
-    }
-
-    g_state.store((int)KernelState::Launching);
-    pid_t child = launch_script(su, g_script_path, "/data/local/tmp/ftdrv.log");
-    if (child < 0) {
-        set_error("fork()/execl не удался: %s", strerror(errno));
-        g_state.store((int)KernelState::Failed);
-        g_launching.store(false);
-        return false;
-    }
-
-    // Дальше — фоновый поток: ждём, пока память игры станет читаться.
-    g_state.store((int)KernelState::Waiting);
-    std::thread(wait_kernel_thread, std::string(game_package), child).detach();
+    std::thread(kernel_launch_thread, std::string(game_package)).detach();
     return true;
 }
 
