@@ -647,7 +647,19 @@ bool start_kernel_driver(const char* game_package) {
 
 KernelState kernel_state() { return (KernelState)g_state.load(); }
 bool        kernel_verified() { return g_verified.load(); }
-const char* kernel_version() { return g_kernel_release; }
+// Ленивое чтение uname(): первый вызов заполняет и кэширует версию ядра,
+// дальше только отдаёт (стартовое окно показывает её сразу).
+const char* kernel_version() {
+    static std::atomic<bool> checked{false};
+    if (!checked.exchange(true)) {
+        if (!g_kernel_release[0]) {
+            struct utsname u;
+            if (uname(&u) == 0)
+                snprintf(g_kernel_release, sizeof(g_kernel_release), "%s", u.release);
+        }
+    }
+    return g_kernel_release;
+}
 const char* driver_script()  { return g_script_name; }
 const char* su_path()        { return g_su_path; }
 const char* last_error()     { return g_error; }
