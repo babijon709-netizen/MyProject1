@@ -92,25 +92,39 @@ int         esp_nearby_player_count();
 bool        esp_local_player_is_aiming();
 
 // ---- Auto-farm ---------------------------------------------------------------
-// The touch controller in main.cpp walks to the nearest selected resource node
-// and swings at it; this side only finds the node and tells where to look.
+// The touch controller in main.cpp walks to the nearest selected resource
+// node and swings at it; this side only finds the node and tells where to
+// look and where to walk.
+//
+// Aim vs walk are reported separately on purpose: the crosshair chases the
+// glowing X (the bonus spot — the fast farm path), while the walk always
+// goes at the node body. Aiming the walk at the X made the approach weave
+// from side to side on every tree.
 struct FarmTarget {
     bool  valid = false;
     unsigned long long id = 0;
     int   kind = 0;                 // 0 wood, 1 stone, 2 metal, 3 sulfur
-    float yaw = 0.f, pitch = 0.f;   // degrees from camera forward (+right, +up)
-    float dist = 0.f;               // metres from the local player
+    float yaw = 0.f, pitch = 0.f;   // to the AIM point: X when live, else the node body (deg from camera forward, +right/+up)
+    float walk_yaw = 0.f;           // to the WALK POINT (deg from camera forward) — the X when live, else the node body
+    float walk_dist = 0.f;          // horizontal metres to the walk point
+    float dist = 0.f;               // horizontal metres from the local player to the node
+    float aim_dist = 0.f;           // horizontal metres to the aim point (the X, when live)
+    float player_speed = 0.f;       // measured local-player speed (m/s)
     float fraction = -1.f;          // resource remaining 0..1, -1 unknown
-    bool  has_spot = false;         // true when aiming at the glowing weak spot
-    float aim_dist = 0.f;           // horizontal metres to the raw X (melee reach)
-    bool  spot_facing = true;       // крест примерно лицом (~40°); иначе обходим ствол
-    bool  stand_ok = false;         // есть точка стоянки перед крестом
-    float stand_yaw = 0.f;          // куда идти к стоянке (градусы)
-    float stand_dist = 0.f;         // метры до стоянки
+    bool  has_spot = false;         // true when the glowing X is live and being aimed
+    // The X can sit on the FAR side of the node: the tool cannot reach it
+    // through the trunk/boulder, so the controller circles until it faces us.
+    bool  spot_front = true;        // X is on our side of the node
+    float orbit_side = 0.f;         // !spot_front: strafe side to bring the X around (+1 camera right, -1 left)
+    float orbit_angle = 0.f;        // !spot_front: degrees from our side to the X side (progress metric)
     // Screen-space position of the aim point (for the on-screen target mark).
     bool  on_screen = false;
     float sx = 0.f, sy = 0.f;
 };
+// TEMP farm log line (remove with the log probes once the movement and
+// ore issues are fixed): appended to /sdcard/Download/xvcen_farm.log.
+void        esp_farm_log_line(const char* line);
+void        esp_input_probe();          // stage-1 memory input probe (read-only)
 // Which resources to farm: bit0 wood, bit1 stone, bit2 metal, bit3 sulfur.
 // 0 disables the scan entirely (no extra work per frame).
 void        esp_farm_set_resources(unsigned mask);

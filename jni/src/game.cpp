@@ -98,6 +98,30 @@ static bool rd_exact(uint64_t addr, T& value) {
     struct iovec remote = {(void*)addr, sizeof(T)};
     return remote_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)sizeof(T);
 }
+
+// ---- Batched remote reads ("x-ray style") -----------------------------------
+// One process_vm_readv carries many remote segments at once (UIO_MAXIOV).
+// The X-ray marker pipeline has always used this: one read for the whole
+// registry entry array, one for a player's bone matrices, ... The farm used
+// to do the opposite (one syscall per value: a single spot check was
+// thousands of reads). These helpers collapse a whole subtree scan into a
+// handful of calls, so the farm's traffic looks like the rest of the ESP
+// traffic — small, periodic, indistinguishable — instead of a constant
+// storm.
+//
+// Semantics on a mid-batch fault (a pointer went stale mid-update): the
+// transfer stops and the tail stays as the caller pre-filled it (zero),
+// which every consumer already treats as "unread" — the same as a failed
+// rd<T>. Nothing here ever writes to the target process.
+static void bulk_read_v(int n, struct iovec* local, struct iovec* remote) {
+    while (n > 0) {
+        const int chunk = n > 512 ? 512 : n; // stay far below UIO_MAXIOV
+        (void)remote_vm_readv(g_pid, local, chunk, remote, chunk, 0);
+        local += chunk;
+        remote += chunk;
+        n -= chunk;
+    }
+}
 static uint64_t rd_ptr(uint64_t a) { return rd<uint64_t>(a); }
 static Vec3     rd_v3 (uint64_t a) { return rd<Vec3>(a);     }
 static Mat4     rd_m4 (uint64_t a) { return rd<Mat4>(a);     }
@@ -3602,6 +3626,7 @@ static bool g_frame_vp_valid = false;
 static float g_frame_sw = 0.0F, g_frame_sh = 0.0F;
 static Vec3 g_frame_local_pos{};
 static bool g_frame_local_valid = false;
+static uint64_t g_frame_local_transform = 0;  // character root (input probe)
 // Camera basis recovered from this frame's VIEW MATRIX (not the transform
 // pose). On devices where the transform pose read fails, this is the only
 // camera orientation available — good enough for the farm's slow turns,
@@ -3747,6 +3772,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         reset_world_caches();
     }
 
+    // The camera read can fail transiently (the game is mid-frame writing
+    // the matrices, or swaps the active camera while aiming). Blank the
+    // whole ESP for such a frame and the overlay "flickers" — so remember
+    // the previous frame's camera: on a failure we project through it for
+    // one frame (positions are still read fresh, only the view lags).
+    const Mat4  prev_vp    = g_frame_vp;
+    const Vec3  prev_local = g_frame_local_pos;
+    const bool  prev_valid = g_frame_vp_valid && g_frame_local_valid;
+
     // Markers reuse this frame's camera; invalidate it until it is rebuilt so
     // an early return here can never leave them projecting through a stale one.
     g_frame_vp_valid = false;
@@ -3813,6 +3847,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     bool transform_camera_mode = false; // light fix: always use native cam matrices, avoid dead-body-as-camera on death
+    bool camera_fallback = false;       // project through the PREVIOUS frame's camera
     if (!transform_camera_mode) {
         uint64_t managed_cam = 0;
         if (g_game_controller_class) {
@@ -3823,25 +3858,39 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
         if (!managed_cam) {
-            return result;
-        }
-        native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-        if (!native_cam) {
-            return result;
-        }
-        xray_apply(native_cam);
-        always_day_tick();
-        if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
-            return result;
-        }
-        if (!g_matrix_configuration_validated) {
-            if (!optimize_matrix_configuration(native_cam, s_transforms)) {
-                return result;
+            if (!prev_valid) return result;
+            camera_fallback = true; // camera object momentarily gone (camera swap)
+        } else {
+            native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
+            if (!native_cam) {
+                if (!prev_valid) return result;
+                camera_fallback = true; // same: the swap is in progress
+            } else {
+                xray_apply(native_cam);
+                always_day_tick();
+                if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
+                    if (!prev_valid) return result;
+                    camera_fallback = true; // read hit a mid-update write
+                }
+                if (!camera_fallback && !g_matrix_configuration_validated) {
+                    if (!optimize_matrix_configuration(native_cam, s_transforms)) {
+                        return result;
+                    }
+                    if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
+                        if (!prev_valid) return result;
+                        camera_fallback = true;
+                    }
+                }
             }
-            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
         }
-        // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
-        vp = mat_mul(projection, view);
+        if (camera_fallback) {
+            // One-frame-old view: boxes keep moving (fresh positions below),
+            // only the projection lags a frame. Far better than no boxes.
+            vp = prev_vp;
+        } else {
+            // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
+            vp = mat_mul(projection, view);
+        }
     }
 
     bool has_local_position = false;
@@ -3854,7 +3903,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     {
         Vec3 camera_position{};
-        bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
+        bool has_camera_position;
+        if (camera_fallback) {
+            // No fresh view matrix — last frame's local position is where
+            // we were; the local player barely moves in one frame.
+            camera_position = prev_local;
+            has_camera_position = true;
+        } else {
+            has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
+        }
         double nearest_distance_squared = INFINITY;
         size_t first_valid_index = s_transforms.size();
         Vec3 first_valid_position{};
@@ -3888,7 +3945,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_sw = sw; g_frame_sh = sh;
     g_frame_local_pos = local;
     g_frame_local_valid = has_local_position;
-    g_frame_publish_fail_streak = 0; // this frame is healthy
+    g_frame_local_transform =
+        (local_entity_index < s_transforms.size()) ? s_transforms[local_entity_index] : 0;
+    if (!camera_fallback) g_frame_publish_fail_streak = 0; // healthy frame
+    // A fallback frame keeps counting toward the watchdog: a camera that
+    // stays dead for a few seconds still triggers the world rebuild.
 
     // Fallback camera basis straight from the view matrix (rows: right, up,
     // -forward). Kept separate from g_cam_* — the pose path stays authoritative
@@ -4281,6 +4342,13 @@ struct FarmEntity {
 static std::vector<FarmEntity> g_farm_entities;
 static std::unordered_map<uint64_t, int> g_farm_blacklist; // identity -> frames left
 static int g_farm_rescan = 0;
+// The X-ray overlay's registry walk visits every Mineable anyway (trees
+// included — the overlay just doesn't draw them). When that walk ran
+// recently, the farm adopts its cache instead of walking the registry a
+// second time: one read pass feeds both, and the farm adds no traffic of
+// its own while the overlay is on.
+static std::vector<FarmEntity> g_farm_shared;
+static int g_farm_shared_age = 999999; // frames since the shared walk ran
 // Why the picker returned nothing (surfaced in the menu status line):
 // 0 ok, 1 off, 2 frame not published, 3 no nodes in registry, 4 none in
 // range, 5 camera pose unreadable.
@@ -4874,6 +4942,66 @@ static bool marker_world_position(uint64_t transform, Vec3& out) {
 }
 
 // Walk Mirror's client registry and cache every ore node / animal in it.
+// TEMP farm log (defined below, near farm_find_spot).
+static void farm_log_append(const char* line);
+static int farm_kind_from_node_name(uint64_t transform, int& kind);
+static bool farm_kind_from_loot(uint64_t mineable, int& kind);
+
+// TEMP farm log: classification census — fed by BOTH walk paths (the
+// overlay's rebuild and the farm's own walk; whichever runs is the one
+// that classifies the mineables), logged at most once per 30 s:
+// kind counts, unknown raw entityType values (with the first example
+// name) and the tree prefab names.
+static int g_census_cls[4] = {0, 0, 0, 0};
+static std::unordered_map<int, int> g_census_raw;
+static std::unordered_map<int, std::string> g_census_raw_name;
+static std::unordered_map<std::string, int> g_census_tree_names;
+static std::chrono::steady_clock::time_point g_census_last_log;
+
+static void census_begin() {
+    g_census_cls[0] = g_census_cls[1] = g_census_cls[2] = g_census_cls[3] = 0;
+    g_census_raw.clear();
+    g_census_raw_name.clear();
+    g_census_tree_names.clear();
+}
+
+static void census_add_raw(int raw, uint64_t component) {
+    if (g_census_raw.size() < 12) {
+        g_census_raw[raw]++;
+        if (g_census_raw_name.find(raw) == g_census_raw_name.end()) {
+            char nm[48] = "";
+            uint64_t tf = native_component_transform(managed_object_native(component));
+            if (tf && g_go_name_offset_valid) read_transform_name(tf, nm, sizeof(nm));
+            g_census_raw_name[raw] = nm[0] ? nm : "(anon)";
+        }
+    }
+}
+
+static void census_log() {
+    auto now = std::chrono::steady_clock::now();
+    if ((now - g_census_last_log) < std::chrono::seconds(30)) return;
+    if (!g_census_cls[0] && !g_census_cls[1] && !g_census_cls[2] &&
+        !g_census_cls[3] && g_census_raw.empty() && g_census_tree_names.empty())
+        return;
+    g_census_last_log = now;
+    char line[1024];
+    int o = snprintf(line, sizeof(line),
+                     "CLS tree=%d stone=%d iron=%d sulfur=%d\n",
+                     g_census_cls[0], g_census_cls[1], g_census_cls[2],
+                     g_census_cls[3]);
+    for (const auto& kv : g_census_raw) {
+        if (o < (int)sizeof(line) - 48)
+            o += snprintf(line + o, sizeof(line) - (size_t)o, " raw%d=%d(%s)",
+                          kv.first, kv.second, g_census_raw_name[kv.first].c_str());
+    }
+    for (const auto& kv : g_census_tree_names) {
+        if (o < (int)sizeof(line) - 48)
+            o += snprintf(line + o, sizeof(line) - (size_t)o, " T[%s]=%d",
+                          kv.first.c_str(), kv.second);
+    }
+    farm_log_append(line);
+}
+
 static void rebuild_marker_entities() {
     g_marker_entities.clear();
 
@@ -4892,6 +5020,13 @@ static void rebuild_marker_entities() {
     // One bulk read for the whole entry array instead of one read per entry.
     std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
     if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
+
+    // The registry is readable from here on: the farm's shared cache is
+    // rebuilt for real (a partially read walk is fine — the same staleness
+    // the marker list already tolerates).
+    g_farm_shared.clear();
+    g_farm_shared_age = 0;
+    census_begin();
 
     uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
@@ -4915,6 +5050,84 @@ static void rebuild_marker_entities() {
             if (!valid_obj(component)) continue;
             const uint8_t component_class = marker_class_of(rd_ptr(component));
             if (component_class == MARKER_CLASS_NONE) continue;
+
+            // Feed the farm from this same walk (see g_farm_shared): the
+            // overlay skips trees, the farm lives on them. One extra
+            // entityType read per Mineable — negligible at the 3 s cadence.
+            if (component_class == MARKER_CLASS_MINEABLE && g_farm_shared.size() < 512) {
+                int farm_kind = -1;
+                int raw_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
+                switch ((MineableEntityType)raw_type) {
+                    case MineableEntityType::Tree:   farm_kind = 0; break;
+                    case MineableEntityType::Stone:  farm_kind = 1; break;
+                    case MineableEntityType::Iron:   farm_kind = 2; break;
+                    case MineableEntityType::Sulfur: farm_kind = 3; break;
+                    // Ores carry None(0) in this build: classified by
+                    // prefab name below.
+                    default: break;
+                }
+                uint64_t fe_transform = native_component_transform(managed_object_native(component));
+                if (!fe_transform)
+                    fe_transform = native_component_transform(managed_object_native(identity));
+                if (farm_kind < 0) {
+                    // No enum type: try the prefab name (OreFerum, ...),
+                    // then the loot list.
+                    if (fe_transform && !farm_kind_from_node_name(fe_transform, farm_kind))
+                        farm_kind_from_loot(component, farm_kind);
+                    if (farm_kind < 0) {
+                        // Dropped (animals and the like) — keep the
+                        // census of what the build labels how.
+                        census_add_raw(raw_type, component);
+                        continue;
+                    }
+                }
+                g_census_cls[farm_kind]++;
+                FarmEntity fe;
+                fe.identity = identity;
+                fe.component = component;
+                fe.kind = farm_kind;
+                fe.transform = fe_transform;
+                if (fe.transform) {
+                    // Fallen logs and saplings register as "Tree" but are
+                    // not farmable (the user farms real trees only) —
+                    // same name filter the farm's own walk uses.
+                    if (farm_kind == 0 && g_go_name_offset_valid) {
+                        char go_name[48];
+                        if (read_transform_name(fe.transform, go_name, sizeof(go_name))) {
+                            for (char* p = go_name; *p; ++p)
+                                if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+                            if (strstr(go_name, "log") || strstr(go_name, "fallen") ||
+                                strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
+                                strstr(go_name, "stump") || strstr(go_name, "sapling"))
+                                fe.transform = 0;
+                            // TEMP: tree-name census (name already read).
+                            if (fe.transform &&
+                                (g_census_tree_names.size() < 16 ||
+                                 g_census_tree_names.count(go_name)))
+                                g_census_tree_names[go_name]++;
+                        }
+                    }
+                    if (fe.transform) {
+                        fe.pos_valid = marker_world_position(fe.transform, fe.pos);
+                        g_farm_shared.push_back(fe);
+                            // TEMP ore diagnosis: an ore node entered the cache.
+                            if (fe.kind != 0) {
+                                static std::unordered_set<uint64_t> s_vis;
+                                if (s_vis.size() < 32 &&
+                                    s_vis.insert(fe.transform).second) {
+                                    char line[192];
+                                    snprintf(line, sizeof(line),
+                                             "VIS node=0x%llx kind=%d pos=(%.2f,%.2f,%.2f) player=(%.2f,%.2f,%.2f)\n",
+                                             (unsigned long long)fe.transform, fe.kind,
+                                             fe.pos.x, fe.pos.y, fe.pos.z,
+                                             g_frame_local_pos.x, g_frame_local_pos.y,
+                                             g_frame_local_pos.z);
+                                    farm_log_append(line);
+                                }
+                            }
+                        }
+                    }
+            }
 
             MarkerLook look;
             char pickup_text[40] = {};
@@ -4980,6 +5193,7 @@ static void rebuild_marker_entities() {
         }
         if (g_marker_entities.size() >= 512) break;
     }
+    census_log();
 }
 
 static void reset_marker_caches() {
@@ -4991,6 +5205,8 @@ static void reset_marker_caches() {
     // Farm entities come from the same registry: stale pointers must not
     // survive a world reload either.
     g_farm_entities.clear();
+    g_farm_shared.clear();
+    g_farm_shared_age = 999999;
     g_farm_blacklist.clear();
     g_farm_rescan = 0;
 }
@@ -5020,6 +5236,12 @@ std::vector<EspMarker> esp_get_markers() {
         // after a respawn), so retry in half a second instead.
         g_marker_rescan_countdown = g_marker_entities.empty() ? 30 : 180;
     }
+
+    // The shared farm cache expires per frame — from here while the farm is
+    // OFF (so a cache cannot sit "fresh" forever and be adopted long after
+    // the world changed), from esp_farm_get_target while it is on (the farm
+    // path runs every active frame; two counters would halve the window).
+    if (!g_farm_mask && g_farm_shared_age < 999999) ++g_farm_shared_age;
 
     // No usable layout (fresh join / respawn, nobody around): learn it from
     // the ENTITY transforms themselves. The layout discovery only needs a
@@ -5142,11 +5364,25 @@ std::vector<EspMarker> esp_get_markers() {
 
 // ============================== Auto-farm ====================================
 //
-// Finds the nearest tree / stone / iron / sulfur node in Mirror's registry and
-// reports where it is relative to the camera. Walking to it and swinging the
-// tool is done with synthetic touches in main.cpp; nothing here writes to the
-// game. The glowing "X" bonus spot is looked up as a child GameObject of the
-// node, so the swings land on it when the game shows one.
+// The farm's provider. Finds the nearest selected resource node in Mirror's
+// registry and reports what the touch controller in main.cpp needs:
+//
+//   * where to WALK — the node body (walk_yaw, dist);
+//   * where to AIM  — the glowing X (the bonus spot) while it is live,
+//                     otherwise the node body (yaw, pitch, aim_dist);
+//   * whether the X is on OUR side of the node (spot_front + orbit hints).
+//
+// Nothing here writes to the game.
+//
+// The X is a child GameObject of the node. Two flavours exist:
+//   * NAMED — rocks (and some prefabs) name it clearly ("spot", "cross",
+//     "weakpoint", ...);
+//   * ANONYMOUS — a plain child that appears on the bark/boulder once the
+//     player is in melee range and hops to a new place after every hit.
+// Every prefab also carries a DORMANT template child parked exactly at the
+// node pivot; it must never be picked (that was the "chops the base of the
+// trunk" bug). A live X is: a readable child, not at the pivot, on the
+// surface, above the dirt.
 
 // Farm kind from a loot item short name. Rank: richer resource wins (metal and
 // sulfur nodes drop stones too). Processed items are filtered like the ore
@@ -5168,6 +5404,29 @@ static int farm_kind_for_item_name(const char* item_name, int& kind) {
     if (strstr(key, "metal"))  { kind = 2; return 3; }
     if (strstr(key, "stone"))  { kind = 1; return 2; }
     if (strstr(key, "wood"))   { kind = 0; return 1; }
+    return 0;
+}
+
+// Ores in the current build carry entityType None(0) — the CLS census
+// showed 27 nodes named "OreFerum (Clone)" all labelled raw0. The prefab
+// name IS the type. Rank 4 = known ore keyword; a bare "ore"/"rock" with
+// an unknown keyword still farms as metal (rank 1, overridable by loot)
+// so a new ore variant is not silently skipped — the CLS census keeps
+// its name visible for a proper keyword.
+static int farm_kind_from_node_name(uint64_t transform, int& kind) {
+    if (!transform || !g_go_name_offset_valid) return 0;
+    char nm[48];
+    if (!read_transform_name(transform, nm, sizeof(nm))) return 0;
+    for (char* p = nm; *p; ++p)
+        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+    if (strstr(nm, "ferum") || strstr(nm, "ferrum") || strstr(nm, "iron"))
+        { kind = 2; return 4; }
+    if (strstr(nm, "sulfur") || strstr(nm, "sulphur"))
+        { kind = 3; return 4; }
+    if (strstr(nm, "stone") || strstr(nm, "quartz") || strstr(nm, "granite"))
+        { kind = 1; return 4; }
+    if (strstr(nm, "ore") || strstr(nm, "rock"))
+        { kind = 2; return 1; }
     return 0;
 }
 
@@ -5193,6 +5452,19 @@ static bool farm_kind_from_loot(uint64_t mineable, int& kind) {
 }
 
 static void rebuild_farm_entities() {
+    // Prefer the X-ray overlay's walk: it already visited every Mineable
+    // (trees included) a moment ago. Adopting its cache means the farm adds
+    // ZERO registry traffic while the overlay is on.
+    if (g_farm_shared_age < 240 && !g_farm_shared.empty()) {
+        g_farm_entities.clear();
+        for (const FarmEntity& e : g_farm_shared) {
+            if (!(g_farm_mask & (1u << e.kind))) continue;
+            g_farm_entities.push_back(e);
+            if (g_farm_entities.size() >= 512) break;
+        }
+        return;
+    }
+
     // A transient read failure (the game rewrites the dictionary mid-scan)
     // must NOT wipe the working cache: that was the "marker disappears, bot
     // stops, marker comes back" stutter. The old list stays until a scan
@@ -5210,6 +5482,7 @@ static void rebuild_farm_entities() {
     std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
     if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
     g_farm_entities.clear(); // scan is readable from here on — rebuild for real
+    census_begin();
 
     uint64_t behaviours[32];
     for (int32_t i = 0; i < count; ++i) {
@@ -5230,30 +5503,41 @@ static void rebuild_farm_entities() {
             if (!valid_obj(component)) continue;
             if (marker_class_of(rd_ptr(component)) != MARKER_CLASS_MINEABLE) continue;
 
-            // Kind: the entityType enum first (cheap and exact), loot second.
+            // Kind: the entityType enum first (cheap and exact), then the
+            // prefab name (ores in this build carry None(0)), then loot.
             int kind = -1;
-            switch ((MineableEntityType)rd<int32_t>(component + MINEABLE_ENTITY_TYPE)) {
+            int raw_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
+            switch ((MineableEntityType)raw_type) {
                 case MineableEntityType::Tree:   kind = 0; break;
                 case MineableEntityType::Stone:  kind = 1; break;
                 case MineableEntityType::Iron:   kind = 2; break;
                 case MineableEntityType::Sulfur: kind = 3; break;
                 default: break;
             }
-            if (kind < 0 && !farm_kind_from_loot(component, kind)) continue;
+            uint64_t ent_transform = native_component_transform(managed_object_native(component));
+            if (!ent_transform)
+                ent_transform = native_component_transform(managed_object_native(identity));
+            if (kind < 0) {
+                if (ent_transform && !farm_kind_from_node_name(ent_transform, kind))
+                    farm_kind_from_loot(component, kind);
+                if (kind < 0) {
+                    // Dropped (animals and the like) — census it.
+                    census_add_raw(raw_type, component);
+                    continue;
+                }
+            }
+            if (kind >= 0 && kind < 4) g_census_cls[kind]++;
             if (!(g_farm_mask & (1u << kind))) continue;
 
             FarmEntity entity;
             entity.identity = identity;
             entity.component = component;
             entity.kind = kind;
-            entity.transform = native_component_transform(managed_object_native(component));
-            if (!entity.transform)
-                entity.transform = native_component_transform(managed_object_native(identity));
+            entity.transform = ent_transform;
             if (!entity.transform) continue;
 
-            // Fallen logs register as "Tree" but cannot be chopped the same
-            // way — the bot just circles them. Filter them out by prefab
-            // name (log / fallen / dead / driftwood variants).
+            // Fallen logs and saplings register as "Tree" but are not
+            // farmable — filtered out by prefab name.
             if (kind == 0 && g_go_name_offset_valid) {
                 char go_name[48];
                 if (read_transform_name(entity.transform, go_name, sizeof(go_name))) {
@@ -5261,8 +5545,12 @@ static void rebuild_farm_entities() {
                         if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
                     if (strstr(go_name, "log") || strstr(go_name, "fallen") ||
                         strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
-                        strstr(go_name, "stump"))
+                        strstr(go_name, "stump") || strstr(go_name, "sapling"))
                         continue;
+                    // TEMP: tree-name census (name already read above).
+                    if (g_census_tree_names.size() < 16 ||
+                        g_census_tree_names.count(go_name))
+                        g_census_tree_names[go_name]++;
                 }
             }
 
@@ -5272,6 +5560,8 @@ static void rebuild_farm_entities() {
         }
         if (g_farm_entities.size() >= 512) break;
     }
+
+    census_log();
 }
 
 void esp_farm_set_resources(unsigned mask) {
@@ -5313,266 +5603,687 @@ static float farm_eye_y() {
     return 0.0F;
 }
 
+// ---- Stage 1: memory input probe (READ-ONLY) ---------------------------------
+// Calibration for the memory-driven farm (the uinput path is the source of
+// the movement bugs — OS touch pipeline latency and the game's own stick
+// physics). The game's authoritative input is the PlayerInput value struct
+// on Oxide.PlayerInputHandler (dumped layout, offsets from il2cpp):
+//   +0x40 Vector2 MovementInput  (joystick)
+//   +0x48 Vector3 LookDirection  (aim direction)
+//   +0x54 float   YRotation      (camera yaw)
+//   +0x58 Jump +0x59 Sprint +0x5A Crouch +0x5B Aim +0x5C Ready (bools)
+//   +0x60 uint32  Tick           (input tick counter)
+//   +0x64 bool    TooClose
+// The probe finds that component on the player GameObject through the
+// native component list (the native->managed bridge offset is discovered
+// by round-trip: managed + 0x10 must point back at the native component)
+// and logs the struct 5 Hz. Stage 2 writes the struct instead of the OS
+// touches. Nothing here writes to the game.
+struct InputProbeState {
+    uint64_t handler = 0;      // managed Oxide.PlayerInputHandler instance
+    uint64_t handler_klass = 0;
+    int      bridge_off = -1;  // native Component -> managed MonoBehaviour
+    uint64_t last_discover_ms = 0;
+    uint64_t last_log_ms = 0;
+    int      log_n = 0;
+    bool     logged_walk = false;
+};
+static InputProbeState g_ip;
+
+// steady_clock ticks are NANOSECONDS — /1000 would give microseconds and
+// every "per second / per 30 s" cadence below would run at 1000x speed:
+// the discovery walk hammered the render thread every frame (the
+// intermittent menu/ESP stutter) and the diagnostics spammed the log.
+static uint64_t ip_now_ms() {
+    return (uint64_t)(std::chrono::steady_clock::now().time_since_epoch().count() / 1000000);
+}
+
+// One GameObject's native component list: count (probed offsets) + pairs.
+static void input_probe_walk_go(uint64_t go, const char* which) {
+    uint64_t pairs = rd_ptr(go + GAMEOBJECT_COMPONENT_ARRAY);
+    if (!pairs) return;
+    int count = -1;
+    for (uint64_t coff : {0x18ULL, 0x1CULL, 0x28ULL}) {
+        int32_t c = rd<int32_t>(go + coff);
+        if (c >= 1 && c <= 64) { count = c; break; }
+    }
+    if (count < 0) return;
+    if (!g_ip.logged_walk) {
+        char line[96];
+        snprintf(line, sizeof(line), "IPOBJ go=0x%llx %s count=%d\n",
+                 (unsigned long long)go, which, count);
+        farm_log_append(line);
+    }
+    for (int i = 0; i < count && i < 48; ++i) {
+        uint64_t nc = rd_ptr(pairs + (uint64_t)i * 16);
+        if (!nc) nc = rd_ptr(pairs + (uint64_t)i * 16 + COMPONENT_PAIR_PTR);
+        if (!nc) continue;
+        // Discover the native->managed bridge once (round-trip proves it).
+        if (g_ip.bridge_off < 0) {
+            for (int off = 0x08; off <= 0x70; off += 8) {
+                uint64_t cand = rd_ptr(nc + (uint64_t)off);
+                if (cand && managed_object_native(cand) == nc) {
+                    g_ip.bridge_off = off;
+                    char line[64];
+                    snprintf(line, sizeof(line), "IPROBE bridge=0x%02x\n", off);
+                    farm_log_append(line);
+                    break;
+                }
+            }
+        }
+        if (g_ip.bridge_off < 0) continue;
+        uint64_t managed = rd_ptr(nc + (uint64_t)g_ip.bridge_off);
+        if (managed_object_native(managed) != nc) continue;
+        uint64_t klass = rd_ptr(managed);
+        if (!valid_obj(klass)) continue;
+        std::string name = read_remote_string(rd_ptr(klass + 0x10));
+        if (!g_ip.logged_walk) {
+            char line[96];
+            snprintf(line, sizeof(line), "IPOBJ comp=0x%llx name=%s\n",
+                     (unsigned long long)nc, name.empty() ? "?" : name.c_str());
+            farm_log_append(line);
+        }
+        if (name == "PlayerInputHandler") {
+            g_ip.handler = managed;
+            g_ip.handler_klass = klass;
+            g_ip.logged_walk = true;
+            char line[128];
+            snprintf(line, sizeof(line), "IPROBE handler=0x%llx on %s\n",
+                     (unsigned long long)managed, which);
+            farm_log_append(line);
+            return;
+        }
+    }
+}
+
+// Walk this GO and its child GOs (depth 2) for the handler.
+static void input_probe_walk_go_depth(uint64_t go, const char* which, int depth) {
+    if (!go || g_ip.handler) return;
+    input_probe_walk_go(go, which);
+    if (g_ip.handler || depth >= 2) return;
+    // The GO's Transform is pairs[0]+8 (the codebase's convention); child
+    // transforms are a direct-pointer array on the transform itself.
+    uint64_t pairs = rd_ptr(go + GAMEOBJECT_COMPONENT_ARRAY);
+    if (!pairs) return;
+    uint64_t t = rd_ptr(pairs + COMPONENT_PAIR_PTR);
+    if (!t || rd_ptr(t + COMPONENT_GAMEOBJECT) != go) return;
+    int32_t cc = rd<int32_t>(t + TRANSFORM_CHILD_COUNT);
+    uint64_t carr = rd_ptr(t + TRANSFORM_CHILDREN_ARRAY);
+    if (cc < 1 || cc > 32 || !carr) return;
+    for (int i = 0; i < cc && i < 16; ++i) {
+        uint64_t ct = rd_ptr(carr + (uint64_t)i * 8);
+        if (!ct || rd_ptr(ct + COMPONENT_GAMEOBJECT) == go) continue;
+        uint64_t cgo = rd_ptr(ct + COMPONENT_GAMEOBJECT);
+        if (cgo) input_probe_walk_go_depth(cgo, which, depth + 1);
+        if (g_ip.handler) return;
+    }
+}
+
+void esp_input_probe() {
+    if (g_pid <= 0) return;
+    const uint64_t now = ip_now_ms();
+
+    // Discovery: at most once per second, and only while we have no live
+    // handler. The handler is a plain MonoBehaviour — it survives world
+    // reloads as long as the class pointer does, so a failed re-check just
+    // retries later. Diagnostics throttled to one line per 30 s — the
+    // previous 5 s cadence filled a 25k-line log with "not found".
+    if (g_ip.handler && rd_ptr(g_ip.handler) != g_ip.handler_klass)
+        g_ip.handler = 0; // gone (respawn / world change): re-discover
+    if (!g_ip.handler) {
+        if (now - g_ip.last_discover_ms < 1000) return;
+        g_ip.last_discover_ms = now;
+        bool found_any = false;
+        uint64_t diag_kgo = 0, diag_tgo = 0;
+        // Anchor 1: the KCC component's OWN GameObject. The KCC lives on
+        // the character root, so this is the character's GO — the input
+        // components (PlayerInputHandler) sit there or under it.
+        uint64_t player = resolve_local_player();
+        uint64_t kcc = player ? rd_ptr(player + PLAYER_KCC_REFERENCE) : 0;
+        if (kcc) {
+            uint64_t knc = managed_object_native(kcc);
+            diag_kgo = knc ? rd_ptr(knc + COMPONENT_GAMEOBJECT) : 0;
+            if (diag_kgo) { input_probe_walk_go_depth(diag_kgo, "kcc", 0); found_any = true; }
+        }
+        // Anchor 2: the local player entity's transform (managed entity ->
+        // native transform via the same chain the position read uses) and
+        // its GameObject — that is the camera root, the handler may be a
+        // sibling under the same hierarchy, hence the child walk.
+        uint64_t ctrans = g_frame_local_transform;
+        if (!g_ip.handler && ctrans) {
+            uint64_t ntrans = resolve_player_native_transform(ctrans);
+            diag_tgo = ntrans ? rd_ptr(ntrans + COMPONENT_GAMEOBJECT) : 0;
+            if (diag_tgo) { input_probe_walk_go_depth(diag_tgo, "xform", 0); found_any = true; }
+        }
+        if (!g_ip.handler && now - g_ip.last_log_ms > 30000) {
+            g_ip.last_log_ms = now;
+            char line[200];
+            snprintf(line, sizeof(line),
+                     "IPROBE not found kcc_go=0x%llx xform_go=0x%llx\n",
+                     (unsigned long long)diag_kgo, (unsigned long long)diag_tgo);
+            farm_log_append(line);
+        }
+    }
+
+    // 5 Hz snapshot of the game's own input state.
+    if (!g_ip.handler || now - g_ip.last_log_ms < 200) return;
+    g_ip.last_log_ms = now;
+    if (g_ip.log_n >= 4000) return;
+    ++g_ip.log_n;
+    float mvx = rd<float>(g_ip.handler + 0x40);
+    float mvy = rd<float>(g_ip.handler + 0x44);
+    Vec3 look = rd_v3(g_ip.handler + 0x48);
+    float yaw = rd<float>(g_ip.handler + 0x54);
+    uint8_t jb = rd<uint8_t>(g_ip.handler + 0x58);
+    uint8_t sp = rd<uint8_t>(g_ip.handler + 0x59);
+    uint8_t cr = rd<uint8_t>(g_ip.handler + 0x5A);
+    uint8_t ai = rd<uint8_t>(g_ip.handler + 0x5B);
+    uint8_t ry = rd<uint8_t>(g_ip.handler + 0x5C);
+    uint32_t tick = rd<uint32_t>(g_ip.handler + 0x60);
+    uint8_t tc = rd<uint8_t>(g_ip.handler + 0x64);
+    float camYaw = 0.f, camPitch = 0.f;
+    bool haveCam = esp_camera_angles(camYaw, camPitch);
+    char line[208];
+    snprintf(line, sizeof(line),
+             "INPUT mv=(%.2f,%.2f) look=(%.2f,%.2f,%.2f) yaw=%.4f J=%d Sp=%d C=%d A=%d R=%d tick=%u tc=%d cam=%s(%.2f,%.2f) p=(%.1f,%.1f,%.1f)\n",
+             mvx, mvy, look.x, look.y, look.z, yaw, jb, sp, cr, ai, ry,
+             (unsigned)tick, tc, haveCam ? "" : "?", camYaw, camPitch,
+             g_frame_local_pos.x, g_frame_local_pos.y, g_frame_local_pos.z);
+    farm_log_append(line);
+}
+
+// ---- The glowing X (bonus spot) ---------------------------------------------
+
+// Anything at foot level is a root / interaction volume / shadow — that was
+// the green mark on the dirt in front of the tree.
 static bool farm_spot_above_dirt(const Vec3& p) {
-    if (!g_cam_pose_valid && !g_frame_local_valid) return true;
-    // Camera sits ~1.6 m above the soil. Anything near the feet is a root /
-    // interaction volume / shadow — that was the green mark on the dirt
-    // in front of the tree.
-    return p.y > farm_eye_y() - 1.15F;
+    // The pose read can fail for a frame or two (game mid-update). A check
+    // that silently PASSES on a failed read let a ground-level root child
+    // through one unlucky scan; the 120-frame hold then kept that dirt
+    // point as "the X" — the green mark on the ground in front of the
+    // tree, and the bot swinging into the dirt. Fall back to the last
+    // GOOD eye height instead of letting it through.
+    static float s_eye = 0.f;
+    static bool  s_eye_ok = false;
+    if (g_cam_pose_valid || g_frame_local_valid) {
+        const float e = farm_eye_y();
+        if (std::isfinite(e) && e > 0.f) { s_eye = e; s_eye_ok = true; }
+    }
+    if (!s_eye_ok) return true;   // never had a pose: nothing to compare
+    return p.y > s_eye - 1.15F;
 }
 
-// Lower is better. Chest height, then INNER on the bark. The X decal sits
-// on the mesh; a particle/light is often 10–30 cm in front — scoring
-// "- horiz" locked that FX, so the green mark stuck out and melee
-// (measured to it) never reached the tree. Pith is already rejected by
-// on_bark (horiz >= 16 cm).
-static float farm_spot_chest_err(const Vec3& node_pos, const Vec3& p) {
-    float want_y = farm_eye_y() - 0.40F;
-    float sx = p.x - node_pos.x, sz = p.z - node_pos.z;
-    float horiz = sqrtf(sx * sx + sz * sz);
-    return fabsf(p.y - want_y) + horiz * 0.45F;
-}
-
-// Kind-aware "is this child the glowing X". Both trees and ore park a dormant
-// template on the node pivot; the live mark sits on the surface, often closer
-// than 35 cm and not strictly above the pivot (tree pivot is mid-trunk, ore
-// pivot is the top of the boulder). Reject only the exact pivot.
-static bool farm_spot_plausible(int kind, const Vec3& node_pos, const Vec3& p, float* d2_out = nullptr) {
+// Geometry test: is this child's position a live X for this node kind?
+// `err_out` (lower is better) ranks candidates: chest height first, then
+// closer to the node axis — that is what picks the decal on the bark over
+// the particle/light floating 10–30 cm in front of it.
+static bool farm_spot_alive(int kind, const Vec3& node_pos, const Vec3& p, float* err_out = nullptr) {
+    if (!vec3_is_finite(p)) return false;
     float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
     float d2 = sx * sx + sy * sy + sz * sz;
-    if (d2_out) *d2_out = d2;
-    float horiz2 = sx * sx + sz * sz;
+    float h2 = sx * sx + sz * sz;
     if (kind == 0) {
-        // Skip only the dormant template parked ON the pivot. A thin trunk's
-        // glowing X sits 15–30 cm off-centre (pivot is mid-mesh, not the
-        // soil), so the old 35 cm / sy>0.2 floor treated every such mark as
-        // the template — no green overlay, swings at the body. Same bug ore
-        // had with a top-mounted pivot.
-        if (d2 <= 0.10F * 0.10F || d2 >= 6.0F * 6.0F) return false;
-        if (sy < -1.2F || sy > 3.5F) return false;
+        // Tree: the mark sits on the bark, a few cm proud of it, at chest
+        // height. The pivot is mid-mesh, not the soil, and a child parked
+        // exactly at the pivot is the dormant template (d <= 5 cm from the
+        // node). On THIN trunks the whole offset from the node axis can be
+        // under 15 cm — the old h >= 0.15 floor rejected those live marks,
+        // so the bot "lost" the X and kept striking the trunk middle.
+        if (d2 <= 0.05F * 0.05F) return false;
+        if (d2 >= 6.0F * 6.0F)   return false;
+        // The axis cap is wide on purpose: a THICK trunk's bark sits a
+        // metre or more from the axis, and the old 0.85 m cap rejected
+        // every live mark on a big tree (the bot then struck the trunk
+        // middle forever). Airborne floaters are rejected downstream by
+        // the bark band, not by this cap.
+        if (h2 < 0.06F * 0.06F || h2 > 2.5F * 2.5F) return false;
+        // The game's X sits on the bark at chest height — it is never in
+        // the bottom 40 cm above the pivot. A static child at dy ~+0.2,
+        // h ~0.8-0.9 (a root / interaction volume on the ground in front
+        // of the trunk) passed the eye-based dirt check whenever the
+        // player stood a ledge higher than the tree (the check uses the
+        // PLAYER's eye, not the local ground), and the keep-hysteresis
+        // then flip-flopped between it and the real X — the green mark on
+        // the ground in front of the tree. It never moves after a hit;
+        // the real X hops.
+        if (sy < 0.40F || sy > 3.5F) return false;
         if (!farm_spot_above_dirt(p)) return false;
-        // X is on the bark, never on the trunk axis. The old |sy|>0.25
-        // alternative accepted the mesh origin after a hit-sway — that is
-        // "the mark is there, we still chop the trunk".
-        return horiz2 > 0.15F * 0.15F && horiz2 < 1.6F * 1.6F;
+    } else {
+        // Rock: the pivot rides near the top of the boulder, so the mark
+        // sits BELOW it — on a big rock well below: the window is wide,
+        // the name and the err ranking do the picking.
+        if (d2 <= 0.08F * 0.08F) return false;
+        if (d2 >= 4.5F * 4.5F)   return false;
+        if (sy < -2.8F || sy > 2.4F) return false;
     }
-    if (d2 <= 0.08F * 0.08F || d2 >= 3.5F * 3.5F) return false;
-    return sy > -1.6F && sy < 1.8F;
-}
-
-// The glowing bonus "X" is a child GameObject of the node. Search the subtree
-// for a name that looks like it AND that sits visibly away from the node
-// pivot: every prefab also carries a dormant template child parked exactly at
-// the pivot (tree base) until the real X activates, and returning that one
-// made the bot chop the bottom of the trunk. The result is cached per
-// component and re-checked because the spot jumps around between hits.
-// Tight bark cylinder used to DISCOVER a tree X. Holding a live lock still
-// uses the looser farm_spot_plausible so a hop that swings wide is not dropped.
-static bool farm_spot_on_bark(int kind, const Vec3& node_pos, const Vec3& p) {
-    if (!farm_spot_plausible(kind, node_pos, p)) return false;
-    if (kind != 0) return true;
-    float sx = p.x - node_pos.x, sy = p.y - node_pos.y, sz = p.z - node_pos.z;
-    float horiz2 = sx * sx + sz * sz;
-    // Thin-trunk X is 15–30 cm off the mid-mesh pivot. Below ~15 cm is the
-    // LOD/collider origin — locking that painted the green mark on the pith.
-    if (horiz2 < 0.16F * 0.16F || horiz2 > 0.50F * 0.50F) return false;
-    if (sy < -0.5F || sy > 2.6F) return false;
-    if (!farm_spot_above_dirt(p)) return false;
+    if (err_out) {
+        float want_y = farm_eye_y() - 0.40F;
+        *err_out = fabsf(p.y - want_y) + sqrtf(h2) * 0.45F;
+    }
     return true;
 }
 
-static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, int kind, uint64_t keep, uint64_t node_id) {
-    if (!node_transform) return 0;
-    std::vector<uint64_t> nodes;
-    // Trees carry a LOT of children (LODs, foliage, colliders) — a small cap
-    // used to cut the walk off before it ever reached the X child.
-    collect_transform_subtree(node_transform, nodes, kind == 0 ? 400 : 256);
+// Does this GameObject name (already lower-cased by the caller) look like the
+// X? Trees only accept TIGHT names: generic "spot"/"cross"/"marker" matches
+// LOD children and glued the lock onto the trunk.
+static bool farm_name_is_spot(int kind, const char* name) {
+    if (!name || !name[0]) return false;
+    size_t len = strnlen(name, 47);
+    bool x_lead = name[0] == 'x' &&
+        (len == 1 || name[1] == '_' || name[1] == ' ' || (name[1] >= '0' && name[1] <= '9'));
+    if (kind == 0)
+        return strstr(name, "bonus") || strstr(name, "hitpoint") ||
+               strstr(name, "weakspot") || strstr(name, "sweetspot") ||
+               strstr(name, "hitmark") || strstr(name, "xmark") ||
+               strstr(name, "weakpoint") || x_lead;
+    return strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
+           strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
+           strstr(name, "hitpoint") || strstr(name, "marker") ||
+           strstr(name, "gather") || strstr(name, "target") ||
+           strstr(name, "plus") || x_lead;
+}
 
-    struct SpotCand { uint64_t node; Vec3 pos; };
-    std::vector<SpotCand> live;
-    live.reserve(nodes.size());
-    for (uint64_t node : nodes) {
-        if (node == node_transform) continue;
-        Vec3 p{};
-        if (!marker_world_position(node, p) || !vec3_is_finite(p)) continue;
-        live.push_back({node, p});
-    }
+// Collect a transform subtree with BATCHED reads: one call for every child
+// count in a level, one for the child-array pointers, one for the arrays
+// themselves. A 400-node tree costs ~10 syscalls instead of ~1200.
+static void farm_collect_subtree(uint64_t root, std::vector<uint64_t>& nodes, size_t max_nodes) {
+    nodes.clear();
+    if (!root) return;
+    nodes.push_back(root);
+    size_t level_start = 0;
+    while (level_start < nodes.size() && nodes.size() < max_nodes) {
+        const size_t level_end = nodes.size();
+        const int n = (int)(level_end - level_start);
 
-    auto plausible = [&](const Vec3& p) -> bool {
-        return farm_spot_plausible(kind, node_pos, p);
-    };
-    auto on_bark = [&](const Vec3& p) -> bool {
-        return farm_spot_on_bark(kind, node_pos, p);
-    };
-
-    // Pass 1: by name. Rocks name their X clearly. Trees only accept TIGHT
-    // names — "spot"/"cross"/"marker" match LOD children and glue the lock
-    // onto the trunk.
-    uint64_t named = 0;
-    if (g_go_name_offset_valid) {
-        char name[48];
-        int best_score = -1;
-        float best_d2 = 0.0F;
-        for (const SpotCand& cand : live) {
-            if (!read_transform_name(cand.node, name, sizeof(name))) continue;
-            size_t len = 0;
-            for (char* p = name; *p; ++p, ++len) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
-            bool looks = false;
-            if (kind == 0) {
-                looks = strstr(name, "bonus") || strstr(name, "hitpoint") ||
-                        strstr(name, "weakspot") || strstr(name, "sweetspot") ||
-                        strstr(name, "hitmark") || strstr(name, "xmark") ||
-                        strstr(name, "weakpoint") ||
-                        (name[0] == 'x' && (len == 1 || name[1] == '_' || name[1] == ' ' ||
-                                            (name[1] >= '0' && name[1] <= '9')));
-            } else {
-                looks = strstr(name, "spot") || strstr(name, "bonus") || strstr(name, "cross") ||
-                        strstr(name, "weak") || strstr(name, "sweet") || strstr(name, "crit") ||
-                        strstr(name, "hitpoint") ||
-                        (name[0] == 'x' && (len == 1 || name[1] == ' ' || name[1] == '_' || name[1] == '(' ||
-                                            (name[1] >= '0' && name[1] <= '9')));
-                if (!looks)
-                    looks = strstr(name, "marker") || strstr(name, "gather") ||
-                            strstr(name, "target") || strstr(name, "plus");
+        // (1) child counts of the whole level — one read.
+        std::vector<int32_t> counts((size_t)n, 0);
+        {
+            std::vector<struct iovec> lv((size_t)n), rv((size_t)n);
+            for (int i = 0; i < n; ++i) {
+                lv[(size_t)i] = {&counts[(size_t)i], sizeof(int32_t)};
+                rv[(size_t)i] = {(void*)(nodes[level_start + (size_t)i] + TRANSFORM_CHILD_COUNT), sizeof(int32_t)};
             }
-            if (!looks) continue;
-            if (kind == 0) { if (!on_bark(cand.pos)) continue; }
-            else           { if (!plausible(cand.pos)) continue; }
-            float sx = cand.pos.x - node_pos.x, sy = cand.pos.y - node_pos.y, sz = cand.pos.z - node_pos.z;
-            float d2 = sx * sx + sy * sy + sz * sz;
-            int score = 2;
-            if (sx * sx + sz * sz > 0.04F) score += 1;
-            // Trees: the inner child of a named pair is the decal on the
-            // bark; the outer one is the particle that sticks out.
-            bool better = score > best_score;
-            if (!better && score == best_score)
-                better = (kind == 0) ? (d2 < best_d2) : (d2 > best_d2);
-            if (better) {
-                best_score = score;
-                best_d2 = d2;
-                named = cand.node;
-            }
+            bulk_read_v(n, lv.data(), rv.data());
         }
-    }
+        int total = 0;
+        for (int i = 0; i < n; ++i) {
+            // A count that is not 1..128 is garbage (mid-update read) — drop
+            // the node for this level, exactly like read_transform_children did.
+            if (counts[i] < 1 || counts[i] > 128) counts[i] = 0;
+            total += counts[i];
+        }
+        if (total <= 0) { level_start = level_end; continue; }
 
-    // Pass 2: movement + appear. Same-transform hops, OR a new child that
-    // spawned on the bark (the X is often a NEW GameObject, so pointer-match
-    // jumper never sees it). Unique-mover so a whole-tree hit-sway cannot
-    // lock the mesh origin.
-    static uint64_t s_move_root = 0;
-    static uint64_t s_move_id = 0;
-    static std::vector<SpotCand> s_move_prev;
-    if (node_id && s_move_id != node_id) {
-        s_move_id = node_id;
-        s_move_root = 0;
-        s_move_prev.clear();
-    }
-    uint64_t jumper = 0;
-    float jumper_m2 = 0.0F;
-    float second_m2 = 0.0F;
-    int jumper_n = 0;
-    float keep_m2 = 0.0F;
-    bool keep_ok = false;
-    uint64_t appear = 0;
-    float appear_err = 1e9F;
-    const bool have_prev = (s_move_root == node_transform && !s_move_prev.empty());
-    if (have_prev) {
-        for (const SpotCand& cand : live) {
-            bool seen = false;
-            for (const SpotCand& prev : s_move_prev) {
-                if (prev.node != cand.node) continue;
-                seen = true;
-                float mx = cand.pos.x - prev.pos.x;
-                float my = cand.pos.y - prev.pos.y;
-                float mz = cand.pos.z - prev.pos.z;
-                float m2 = mx * mx + my * my + mz * mz;
-                if (cand.node == keep) keep_m2 = m2;
-                if (m2 > 0.12F * 0.12F && m2 < 5.0F * 5.0F && on_bark(cand.pos)) {
-                    ++jumper_n;
-                    if (m2 > jumper_m2) {
-                        second_m2 = jumper_m2;
-                        jumper_m2 = m2;
-                        jumper = cand.node;
-                    } else if (m2 > second_m2) {
-                        second_m2 = m2;
-                    }
+        // (2) the child-array pointers — one read.
+        std::vector<uint64_t> arrays((size_t)n, 0);
+        {
+            std::vector<struct iovec> lv((size_t)total), rv((size_t)total);
+            int k = 0;
+            for (int i = 0; i < n; ++i) {
+                if (counts[i] <= 0) continue;
+                lv[(size_t)k] = {&arrays[(size_t)i], sizeof(uint64_t)};
+                rv[(size_t)k] = {(void*)(nodes[level_start + (size_t)i] + TRANSFORM_CHILDREN_ARRAY), sizeof(uint64_t)};
+                ++k;
+            }
+            bulk_read_v(k, lv.data(), rv.data());
+        }
+
+        // (3) the child arrays themselves — one read.
+        if (nodes.size() < max_nodes) {
+            std::vector<uint64_t> buffer((size_t)total);
+            std::vector<struct iovec> lv((size_t)total), rv((size_t)total);
+            int k = 0;
+            for (int i = 0; i < n && nodes.size() < max_nodes; ++i) {
+                if (counts[i] <= 0 || !arrays[(size_t)i]) continue;
+                int c = counts[i];
+                if ((int)nodes.size() + c > (int)max_nodes) c = (int)(max_nodes - nodes.size());
+                for (int j = 0; j < c; ++j) {
+                    lv[(size_t)k] = {&buffer[(size_t)k], sizeof(uint64_t)};
+                    rv[(size_t)k] = {(void*)(arrays[(size_t)i] + (size_t)j * sizeof(uint64_t)), sizeof(uint64_t)};
+                    ++k;
                 }
-                break;
             }
-            // Decal + particle + light often spawn together — don't require
-            // a unique new child. Pick the one at chest height on the bark.
-            if (!seen && on_bark(cand.pos)) {
-                float err = farm_spot_chest_err(node_pos, cand.pos);
-                if (err < appear_err) { appear_err = err; appear = cand.node; }
+            bulk_read_v(k, lv.data(), rv.data());
+            for (int i = 0; i < k && nodes.size() < max_nodes; ++i)
+                if (buffer[(size_t)i]) nodes.push_back(buffer[(size_t)i]);
+        }
+        level_start = level_end;
+    }
+}
+
+// World positions for many native transforms in ONE scan (~10-15 syscalls for
+// the whole batch, whatever its size) with the same layouts the X-ray
+// markers use. Nodes the learned layout cannot read come back flagged and
+// the caller retries them individually.
+static void farm_bulk_positions(const uint64_t* tr, int n, Vec3* out, uint8_t* ok) {
+    const TransformHierarchyLayout* layout = nullptr;
+    if (g_skeleton_layout_valid) layout = &g_skeleton_layout;
+    else if (g_transform_hierarchy_layout_valid) layout = &g_transform_hierarchy_layout;
+    for (int i = 0; i < n; ++i) { out[i] = {}; ok[i] = 0; }
+    if (!layout || n <= 0) return;
+
+    // Round 1: hierarchy data pointer + matrix index per transform.
+    std::vector<uint64_t> data((size_t)n, 0);
+    std::vector<int32_t> idx((size_t)n, -1);
+    {
+        std::vector<struct iovec> lv((size_t)n * 2), rv((size_t)n * 2);
+        for (int i = 0; i < n; ++i) {
+            lv[(size_t)i * 2]     = {&data[(size_t)i], sizeof(uint64_t)};
+            rv[(size_t)i * 2]     = {(void*)(tr[(size_t)i] + layout->data_offset), sizeof(uint64_t)};
+            lv[(size_t)i * 2 + 1] = {&idx[(size_t)i], sizeof(int32_t)};
+            rv[(size_t)i * 2 + 1] = {(void*)(tr[(size_t)i] + layout->index_offset), sizeof(int32_t)};
+        }
+        bulk_read_v(n * 2, lv.data(), rv.data());
+    }
+    std::vector<uint8_t> valid((size_t)n, 0);
+    for (int i = 0; i < n; ++i)
+        valid[(size_t)i] = (data[(size_t)i] && idx[(size_t)i] >= 0 && idx[(size_t)i] <= 100000) ? 1 : 0;
+    if (!std::any_of(valid.begin(), valid.end(), [](uint8_t v) { return v != 0; })) return;
+
+    // Round 2: matrix/index arrays behind the data pointer.
+    std::vector<uint64_t> matrices((size_t)n, 0), indices((size_t)n, 0);
+    {
+        std::vector<struct iovec> lv((size_t)n * 2), rv((size_t)n * 2);
+        int k = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!valid[(size_t)i]) continue;
+            lv[(size_t)k] = {&matrices[(size_t)i], sizeof(uint64_t)};
+            rv[(size_t)k] = {(void*)(data[(size_t)i] + layout->matrices_offset), sizeof(uint64_t)};
+            lv[(size_t)k + 1] = {&indices[(size_t)i], sizeof(uint64_t)};
+            rv[(size_t)k + 1] = {(void*)(data[(size_t)i] + layout->indices_offset), sizeof(uint64_t)};
+            k += 2;
+        }
+        bulk_read_v(k, lv.data(), rv.data());
+        if (layout->matrices_indirect || layout->indices_indirect) {
+            k = 0;
+            for (int i = 0; i < n; ++i) {
+                if (!valid[(size_t)i]) continue;
+                if (layout->matrices_indirect) {
+                    lv[(size_t)k] = {&matrices[(size_t)i], sizeof(uint64_t)};
+                    rv[(size_t)k] = {(void*)matrices[(size_t)i], sizeof(uint64_t)};
+                    ++k;
+                }
+                if (layout->indices_indirect) {
+                    lv[(size_t)k] = {&indices[(size_t)i], sizeof(uint64_t)};
+                    rv[(size_t)k] = {(void*)indices[(size_t)i], sizeof(uint64_t)};
+                    ++k;
+                }
+            }
+            bulk_read_v(k, lv.data(), rv.data());
+        }
+    }
+    for (int i = 0; i < n; ++i)
+        if (valid[(size_t)i] && (!matrices[(size_t)i] || !indices[(size_t)i])) valid[(size_t)i] = 0;
+
+    // Round 3: own matrix + root parent index per transform.
+    std::vector<Matrix34> mat((size_t)n);
+    std::vector<int32_t> parent((size_t)n, -2);
+    {
+        std::vector<struct iovec> lv((size_t)n * 2), rv((size_t)n * 2);
+        int k = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!valid[(size_t)i]) continue;
+            lv[(size_t)k] = {&mat[(size_t)i], sizeof(Matrix34)};
+            rv[(size_t)k] = {(void*)(matrices[(size_t)i] + (size_t)idx[(size_t)i] * sizeof(Matrix34)), sizeof(Matrix34)};
+            lv[(size_t)k + 1] = {&parent[(size_t)i], sizeof(int32_t)};
+            rv[(size_t)k + 1] = {(void*)(indices[(size_t)i] + (size_t)idx[(size_t)i] * sizeof(int32_t)), sizeof(int32_t)};
+            k += 2;
+        }
+        bulk_read_v(k, lv.data(), rv.data());
+    }
+    // The walk composes onto the transform's OWN translation.
+    for (int i = 0; i < n; ++i) {
+        if (!valid[(size_t)i] || !matrix34_is_valid(mat[(size_t)i])) { valid[(size_t)i] = 0; continue; }
+        out[(size_t)i] = {mat[(size_t)i].translation.x,
+                          mat[(size_t)i].translation.y,
+                          mat[(size_t)i].translation.z};
+    }
+
+    // Parent walk, one level per read round (the chain is 2-5 deep for
+    // world transforms; 128 is the same guard read_transform_hierarchy_* uses).
+    int depth = 0;
+    while (depth < 128) {
+        bool any = false;
+        for (int i = 0; i < n; ++i)
+            if (valid[(size_t)i] && parent[(size_t)i] >= 0 && parent[(size_t)i] <= 100000) { any = true; break; }
+        if (!any) break;
+        std::vector<Matrix34> pm((size_t)n);
+        std::vector<int32_t> np((size_t)n, -2);
+        {
+            std::vector<struct iovec> lv((size_t)n * 2), rv((size_t)n * 2);
+            int k = 0;
+            for (int i = 0; i < n; ++i) {
+                if (!valid[(size_t)i] || parent[(size_t)i] < 0 || parent[(size_t)i] > 100000) continue;
+                lv[(size_t)k] = {&pm[(size_t)i], sizeof(Matrix34)};
+                rv[(size_t)k] = {(void*)(matrices[(size_t)i] + (size_t)parent[(size_t)i] * sizeof(Matrix34)), sizeof(Matrix34)};
+                lv[(size_t)k + 1] = {&np[(size_t)i], sizeof(int32_t)};
+                rv[(size_t)k + 1] = {(void*)(indices[(size_t)i] + (size_t)parent[(size_t)i] * sizeof(int32_t)), sizeof(int32_t)};
+                k += 2;
+            }
+            bulk_read_v(k, lv.data(), rv.data());
+        }
+        for (int i = 0; i < n; ++i) {
+            if (!valid[(size_t)i] || parent[(size_t)i] < 0 || parent[(size_t)i] > 100000) continue;
+            const Matrix34& matrix = pm[(size_t)i];
+            if (!matrix34_is_valid(matrix)) { valid[(size_t)i] = 0; continue; }
+            const Vec3& s = out[(size_t)i];
+            const Vec3 scaled = {s.x * matrix.scale.x, s.y * matrix.scale.y, s.z * matrix.scale.z};
+            const Vec3 rotated = rotate_vector(matrix.rotation, scaled);
+            out[(size_t)i] = {matrix.translation.x + rotated.x,
+                              matrix.translation.y + rotated.y,
+                              matrix.translation.z + rotated.z};
+            parent[(size_t)i] = np[(size_t)i];
+        }
+        ++depth;
+    }
+    for (int i = 0; i < n; ++i) {
+        if (!valid[(size_t)i]) continue;
+        if (parent[(size_t)i] != -1 || !matrix34_is_valid(mat[(size_t)i]) ||
+            !vec3_is_finite(out[(size_t)i]) || !position_looks_like_world_space(out[(size_t)i]))
+            valid[(size_t)i] = 0;
+    }
+    for (int i = 0; i < n; ++i) ok[(size_t)i] = valid[(size_t)i];
+}
+
+// Find the live X under the node. `keep` is the previous pick — it is held
+// while it is still alive, so one bad read (the game rewriting the transform
+// mid-update) does not drop the lock. Returns 0 when no live X is found.
+// ---- TEMP farm log (remove once the movement and ore issues are fixed) -----
+// One file in the Downloads folder (the place a human looks), with
+// fallbacks for launch contexts that cannot write there. Probes:
+//   VIS   an ore node entered the farm's cache       (registry rebuild)
+//   TGT   the farm actually picked that node         (target selection)
+//   SCAN  every live X candidate + the pick          (farm_find_spot)
+//   LOG   5 Hz controller snapshot while at the node (esp_farm_get_target)
+//   MOVE  5 Hz joystick snapshot                     (main.cpp)
+// The path actually used is recorded in the file itself.
+static void farm_log_append(const char* line) {
+    static FILE* s_file = nullptr;
+    static bool  s_header_done = false;
+    static int   s_tries = 0;
+    if (!s_file && s_tries < 60) {
+        ++s_tries;
+        char cmd[128] = "";
+        if (FILE* cf = fopen("/proc/self/cmdline", "r")) {
+            size_t n = 0;
+            int c;
+            while (n < sizeof(cmd) - 1 && (c = fgetc(cf)) != EOF && c != 0)
+                cmd[n++] = (char)c;
+            cmd[n] = 0;
+            fclose(cf);
+        }
+        char cands[7][512];
+        int nc = 0;
+        snprintf(cands[nc++], sizeof(cands[0]), "/sdcard/Download/xvcen_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/storage/emulated/0/Download/xvcen_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/data/local/tmp/xvcen_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "./xvcen_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/sdcard/xvcen_farm.log");
+        snprintf(cands[nc++], sizeof(cands[0]), "/storage/emulated/0/xvcen_farm.log");
+        if (cmd[0])
+            snprintf(cands[nc++], sizeof(cands[0]),
+                     "/storage/emulated/0/Android/data/%s/files/xvcen_farm.log", cmd);
+        for (int i = 0; i < nc; ++i) {
+            FILE* f = fopen(cands[i], "a");
+            if (!f) continue;
+            if (!s_header_done) {
+                fprintf(f, "==== xvcen farm log (pid=%d cmd=%s) ====\n",
+                        (int)getpid(), cmd[0] ? cmd : "(?)");
+                s_header_done = true;
+            }
+            fprintf(f, "path=%s\n", cands[i]);
+            s_file = f;
+            break;
+        }
+        if (!s_file) return;
+    }
+    if (!s_file) return;
+    fputs(line, s_file);
+    fflush(s_file);
+}
+void esp_farm_log_line(const char* line) { farm_log_append(line); }
+
+static uint64_t farm_find_spot(uint64_t node_transform, const Vec3& node_pos, int kind, uint64_t keep) {
+    if (!node_transform) return 0;
+
+    std::vector<uint64_t> nodes;
+    // Trees carry a LOT of children (LODs, foliage, colliders).
+    farm_collect_subtree(node_transform, nodes, kind == 0 ? 512 : 384);
+    const int n = (int)nodes.size();
+
+    // All child positions in a couple of batched reads (x-ray style);
+    // anything the learned layout cannot read is retried one by one.
+    std::vector<Vec3> pos((size_t)n);
+    std::vector<uint8_t> ok((size_t)n, 0);
+    farm_bulk_positions(nodes.data(), n, pos.data(), ok.data());
+    for (int i = 0; i < n; ++i) {
+        if (ok[(size_t)i] || nodes[(size_t)i] == node_transform) continue;
+        if (marker_world_position(nodes[(size_t)i], pos[(size_t)i])) ok[(size_t)i] = 1;
+    }
+
+    struct Cand { uint64_t node; float err; float h; Vec3 p; };
+    std::vector<Cand> live;
+    live.reserve(nodes.size());
+    for (int i = 0; i < n; ++i) {
+        if (!ok[(size_t)i]) continue;
+        if (nodes[(size_t)i] == node_transform) continue;
+        const Vec3 p = pos[(size_t)i];
+        if (!vec3_is_finite(p)) continue;
+        float err = 1e9F;
+        if (!farm_spot_alive(kind, node_pos, p, &err)) continue;
+        float dx = p.x - node_pos.x, dz = p.z - node_pos.z;
+        live.push_back({nodes[(size_t)i], err, sqrtf(dx * dx + dz * dz), p});
+    }
+    // The real X is a decal painted ON the bark: among the live candidates
+    // it is the child closest to the trunk axis. Children floating in the
+    // AIR in front of the bark (a glow light, a particle anchor, a
+    // hit-marker container) sit farther out from the axis — and on some
+    // tree models (the "tank" tree) such a child even carries an X-like
+    // NAME, so name/err-picking made the marker float in the air instead of
+    // lying on the cross, and the swing missed it. On trees the choice is
+    // therefore restricted to candidates within 10 cm of the innermost one
+    // (the bark surface).
+    float min_h = 1e9F;
+    for (const Cand& c : live) if (c.h < min_h) min_h = c.h;
+    // 10 cm absolute on thin trunks; on a thick trunk the X sits at the
+    // radius and in-bark structure varies by a PERCENTAGE of it, so the
+    // band scales with the radius there (still far below a floater's
+    // 20+ cm offset).
+    const float bark_band = kind == 0 ? min_h + fmaxf(0.10F, 0.12F * min_h) : 1e9F;
+    auto on_bark = [bark_band](const Cand& c) { return c.h <= bark_band; };
+    bool have_bark = false;
+    for (const Cand& c : live) if (on_bark(c)) { have_bark = true; break; }
+
+    // Names only for the few geometry-live candidates (the old code read the
+    // name of EVERY child — hundreds of extra syscalls per scan for names
+    // that are almost never the deciding factor). A named child floating in
+    // the air is not the decal, so it can never win by name.
+    uint64_t named = 0;
+    float named_err = 1e9F;
+    if (g_go_name_offset_valid) {
+        for (const Cand& c : live) {
+            if (!on_bark(c)) continue;
+            char name[48];
+            if (read_transform_name(c.node, name, sizeof(name))) {
+                for (char* ch = name; *ch; ++ch)
+                    if (*ch >= 'A' && *ch <= 'Z') *ch = (char)(*ch - 'A' + 'a');
+                if (farm_name_is_spot(kind, name) && c.err < named_err) {
+                    named_err = c.err;
+                    named = c.node;
+                }
             }
         }
     }
-    const bool unique_jumper = jumper && jumper_m2 > 0.16F * 0.16F &&
-        (jumper_n == 1 || jumper_m2 > second_m2 * 1.8F || second_m2 < 0.10F * 0.10F);
-    if (keep) {
-        for (const SpotCand& cand : live) {
-            bool ok = (kind == 0) ? on_bark(cand.pos) : plausible(cand.pos);
-            if (cand.node == keep && ok) { keep_ok = true; break; }
+
+    // 1) A child named like the X (rocks name theirs clearly) — on the bark.
+    // 2) The previous pick while still alive (hysteresis) — but not when a
+    //    bark candidate is available and the previous pick floats farther
+    //    out: that is the tank-tree lock-on the marker sticks to.
+    // 3) Closest to the chest among the bark candidates; if nothing sits in
+    //    the bark band (odd geometry) fall back to the best overall so the
+    //    spot is at least not lost.
+    uint64_t picked = 0;
+    if (named) {
+        picked = named;
+    } else {
+        for (const Cand& c : live)
+            if (c.node == keep && (!have_bark || on_bark(c))) { picked = keep; break; }
+        if (!picked) {
+            const Cand* best = nullptr;
+            for (const Cand& c : live) if (on_bark(c) && (!best || c.err < best->err)) best = &c;
+            if (!best)
+                for (const Cand& c : live) if (!best || c.err < best->err) best = &c;
+            picked = best ? best->node : 0;
         }
     }
 
-    // Pass 3 (trees): still X already on the bark. Do NOT skip a child just
-    // because a particle/light sits on the same point — that is the usual
-    // prefab (decal+fx), and skipping the cluster was "tree 3 never locks".
-    uint64_t isolate = 0;
-    if (kind == 0) {
-        float best_err = 1e9F;
-        for (const SpotCand& cand : live) {
-            if (!on_bark(cand.pos)) continue;
-            float sx = cand.pos.x - node_pos.x, sz = cand.pos.z - node_pos.z;
-            if (sx * sx + sz * sz < 0.18F * 0.18F) continue;
-            float err = farm_spot_chest_err(node_pos, cand.pos);
-            if (err < best_err) { best_err = err; isolate = cand.node; }
-        }
-    }
-
-    s_move_root = node_transform;
-    s_move_prev = live;
-
-    if (kind == 0) {
-        // X prefab = decal on the bark + particle a bit in front. Whatever
-        // pass won, snap to the INNER neighbour of that cluster so the green
-        // mark sits on the bark, not in the air.
-        auto innermost = [&](uint64_t pick) -> uint64_t {
-            if (!pick) return 0;
-            const SpotCand* pp = nullptr;
-            for (const SpotCand& c : live) if (c.node == pick) { pp = &c; break; }
-            if (!pp) return pick;
-            uint64_t best = pick;
-            float bh2 = (pp->pos.x - node_pos.x) * (pp->pos.x - node_pos.x)
-                      + (pp->pos.z - node_pos.z) * (pp->pos.z - node_pos.z);
-            for (const SpotCand& c : live) {
-                if (!on_bark(c.pos)) continue;
-                float dx = c.pos.x - pp->pos.x, dy = c.pos.y - pp->pos.y, dz = c.pos.z - pp->pos.z;
-                if (dx * dx + dy * dy + dz * dz > 0.22F * 0.22F) continue;
-                float h2 = (c.pos.x - node_pos.x) * (c.pos.x - node_pos.x)
-                         + (c.pos.z - node_pos.z) * (c.pos.z - node_pos.z);
-                if (h2 < 0.16F * 0.16F) continue;
-                if (h2 < bh2) { bh2 = h2; best = c.node; }
+    // TEMP diagnosis: one snapshot per node — every live candidate with
+    // its name and geometry, plus the pick ("*" line).
+    if (true) {
+        static std::unordered_set<uint64_t> s_dumped;
+        if (s_dumped.size() < 16 && s_dumped.insert(node_transform).second) {
+            char line[384];
+            snprintf(line, sizeof(line),
+                     "SCAN node=0x%llx kind=%d n_children=%d pos=(%.3f,%.3f,%.3f) eye_y=%.3f\n",
+                     (unsigned long long)node_transform, kind, n,
+                     node_pos.x, node_pos.y, node_pos.z, farm_eye_y());
+            farm_log_append(line);
+            for (const Cand& c : live) {
+                char name[48] = "";
+                if (g_go_name_offset_valid) read_transform_name(c.node, name, sizeof(name));
+                for (char* ch = name; *ch; ++ch)
+                    if (*ch >= 'A' && *ch <= 'Z') *ch = (char)(*ch - 'A' + 'a');
+                double d3 = sqrt((double)(c.p.x - node_pos.x) * (c.p.x - node_pos.x) +
+                                 (double)(c.p.y - node_pos.y) * (c.p.y - node_pos.y) +
+                                 (double)(c.p.z - node_pos.z) * (c.p.z - node_pos.z));
+                snprintf(line, sizeof(line),
+                         "%s h=%.3f d=%.3f sy=%.3f err=%.3f (%.3f,%.3f,%.3f) %s\n",
+                         c.node == picked ? "*" : " ", c.h, (float)d3,
+                         c.p.y - node_pos.y, c.err, c.p.x, c.p.y, c.p.z,
+                         name[0] ? name : "(anon)");
+                farm_log_append(line);
             }
-            return best;
-        };
-        if (unique_jumper) return innermost(jumper);
-        if (appear) return innermost(appear);
-        if (keep_ok) return innermost(keep);
-        if (named) return innermost(named);
-        if (isolate) return innermost(isolate);
-        return 0;
+        }
     }
-    const float hop = 0.55F * 0.55F;
-    if (keep_ok) {
-        if (jumper && jumper != keep && jumper_m2 > hop && keep_m2 < 0.12F * 0.12F)
-            return jumper;
-        return keep;
-    }
-    if (unique_jumper) return jumper;
-    if (named) return named;
-    return keep;
+
+    return picked;
+}
+
+// ---- The target picker --------------------------------------------------------
+
+// Full-circle angles from the camera axis: the node may be BEHIND the player,
+// so the forward component can be negative and the yaw spans +-180.
+static bool farm_angles(const Vec3& origin, const Vec3& fwd, const Vec3& right,
+                        const Vec3& up, const Vec3& point, float& yaw_deg, float& pitch_deg) {
+    Vec3 d = {point.x - origin.x, point.y - origin.y, point.z - origin.z};
+    float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
+    float rx = d.x * right.x + d.y * right.y + d.z * right.z;
+    float ux = d.x * up.x + d.y * up.y + d.z * up.z;
+    if (!std::isfinite(fx) || !std::isfinite(rx) || !std::isfinite(ux)) return false;
+    constexpr float rad2deg = 57.29577951F;
+    yaw_deg = atan2f(rx, fx) * rad2deg;
+    pitch_deg = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
+    return std::isfinite(yaw_deg) && std::isfinite(pitch_deg);
 }
 
 void esp_farm_debug(int& nodes_cached, int& idle_reason) {
@@ -5582,10 +6293,11 @@ void esp_farm_debug(int& nodes_cached, int& idle_reason) {
 
 bool esp_farm_get_target(FarmTarget& out) {
     out = FarmTarget{};
+    if (g_farm_shared_age < 999999) ++g_farm_shared_age;
     if (!g_farm_mask) { g_farm_idle_reason = 1; return false; }
     if (g_pid <= 0 || !g_il2cpp_base) { g_farm_idle_reason = 2; return false; }
-    // Same self-repair as the markers: if the box pipeline did not publish a
-    // frame (empty player list etc.), build one straight from the camera.
+    // Same self-repair as the markers: when the box pipeline did not publish
+    // a frame (empty player list, ...), build one straight from the camera.
     if (!g_frame_local_valid || !g_frame_vp_valid) {
         if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh)) {
             g_farm_idle_reason = 2;
@@ -5593,57 +6305,51 @@ bool esp_farm_get_target(FarmTarget& out) {
         }
     }
 
-    // Blacklist bookkeeping (called once per frame from the controller).
+    // Blacklist expiry (called once per frame by the controller).
     for (auto it = g_farm_blacklist.begin(); it != g_farm_blacklist.end();) {
         if (--(it->second) <= 0) it = g_farm_blacklist.erase(it);
         else ++it;
     }
-
     if (--g_farm_rescan <= 0) {
         rebuild_farm_entities();
         g_farm_rescan = g_farm_entities.empty() ? 30 : 120; // ~0.5 s / ~2 s
     }
 
-    // Sticky target: keep working the node we already picked while it is
-    // alive, otherwise the controller would flip between equidistant nodes.
+    // ---- pick the node: nearest, with stickiness --------------------------
     static uint64_t s_last_identity = 0;
-
-    const float kMaxFarmDistance = g_farm_max_distance;
     const FarmEntity* best = nullptr;
-    float best_score = 1e18F;
-    float best_dist = 0.0F;
+    float best_score = 1e18F, best_dist = 0.0F;
     for (const FarmEntity& entity : g_farm_entities) {
         if (!(g_farm_mask & (1u << entity.kind))) continue;
         if (!entity.pos_valid) continue;
         if (g_farm_blacklist.count(entity.identity)) continue;
 
-        // Horizontal distance (Unity: Y up). The controller compares this
-        // against melee reach, and a tall tree's pivot sits metres up the
-        // trunk — 3D distance never drops below the threshold there, which
-        // had the bot circling thin trees forever and walking face-first
-        // into nodes it was already standing at.
+        // Horizontal distance (Unity: Y up). The controller compares this to
+        // melee reach, and a tall tree's pivot sits metres up the trunk — a
+        // 3D distance never drops below the threshold there, which had the
+        // bot circling thin trees forever.
         float dx = entity.pos.x - g_frame_local_pos.x;
         float dy = entity.pos.y - g_frame_local_pos.y;
         float dz = entity.pos.z - g_frame_local_pos.z;
         float dist = sqrtf(dx * dx + dz * dz);
+        if (!std::isfinite(dist) || dist > g_farm_max_distance) continue;
         // Still reject nodes on a different vertical level (cliff above/below).
-        if (!std::isfinite(dist) || dist > kMaxFarmDistance) continue;
         if (!std::isfinite(dy) || fabsf(dy) > 30.0F) continue;
 
-        float score = dist;
-        // Nodes that look mined out go to the back of the queue instead of
-        // being skipped outright: the exact meaning of fractionRemaining is
-        // not certain on every build, and a wrong guess here would make the
-        // farm ignore every node ("nothing happens"). If the pick is wrong
-        // the mining watchdog blacklists it within seconds anyway.
-        // NEVER for the node we are currently working though: one garbage
-        // fraction read mid-mine used to shove the current target to the
-        // back of the queue — the marker jumped to another node while this
-        // one was still half full. The controller's own debounced depleted
-        // check is what retires the current node.
+        // Tree pivots sit at the trunk AXIS: a thick trunk's bark is a
+        // metre or more closer than its pivot, so scoring by axis
+        // distance made the farm farm THIN trees exclusively (they always
+        // scored closer than a thick tree at the same standoff). Score by
+        // the estimated bark distance instead (0.5 m median trunk radius).
+        float score = (entity.kind == 0) ? dist - 0.5F : dist;
         if (entity.identity != s_last_identity) {
-            // Refresh the cached fraction at most once a second per node —
-            // one nearby node used to cost one syscall per node per frame.
+            // Nodes that look mined out go to the back of the queue instead
+            // of being skipped: the exact meaning of fractionRemaining is
+            // build-dependent, and a wrong guess here would make the farm
+            // ignore every node ("nothing happens"). The controller's own
+            // debounced depleted check retires the current node. NEVER
+            // applied to the node we are working: one garbage fraction read
+            // mid-mine used to shove it to the back of the queue.
             FarmEntity& mut = const_cast<FarmEntity&>(entity);
             if (--mut.frac_age <= 0) {
                 mut.frac_age = 60;
@@ -5653,7 +6359,15 @@ bool esp_farm_get_target(FarmTarget& out) {
                 mut.fraction <= 1.001F && mut.fraction < 0.03F)
                 score += 1000.0F;
         } else {
-            score *= 0.6F; // stickiness
+            score *= 0.6F; // stickiness: don't flip between equidistant nodes
+            // The node we ARE working gets a FRESH fraction read with the
+            // same penalty: without it the farm (and its on-screen marker)
+            // kept working a felled tree for seconds after the fall. The
+            // controller's debounced depletion check still guards against a
+            // single garbage mid-update value.
+            float cf = rd<float>(entity.component + MINEABLE_FRACTION);
+            if (std::isfinite(cf) && cf >= 0.0F && cf <= 1.001F && cf < 0.03F)
+                score += 1000.0F;
         }
         if (score < best_score) { best_score = score; best = &entity; best_dist = dist; }
     }
@@ -5662,156 +6376,372 @@ bool esp_farm_get_target(FarmTarget& out) {
         g_farm_idle_reason = g_farm_entities.empty() ? 3 : 4;
         return false;
     }
+    // TEMP ore diagnosis: the farm actually picked this node as target.
+    if (best->kind != 0) {
+        static std::unordered_set<uint64_t> s_tgt;
+        if (s_tgt.size() < 32 && s_tgt.insert(best->transform).second) {
+            char line[192];
+            snprintf(line, sizeof(line),
+                     "TGT node=0x%llx kind=%d dist=%.2f pos=(%.2f,%.2f,%.2f)\n",
+                     (unsigned long long)best->transform, best->kind, best_dist,
+                     best->pos.x, best->pos.y, best->pos.z);
+            farm_log_append(line);
+        }
+    }
     s_last_identity = best->identity;
 
-    // Where to look: the glowing spot when the node shows one, otherwise the
-    // body of the node (trees are hit at chest height, rocks a bit lower).
+    // Local-player speed over the last ~0.25 s (from the position the
+    // frame already publishes — no extra reads). The controller uses it
+    // to tell "walking" from "stick pushed but the game will not move us
+    // (slope / edge / wall)".
+    static Vec3     s_sp_pos{};
+    static uint64_t s_sp_t = 0;
+    static float    s_sp_v = 0.f;
+    {
+        const uint64_t now = ip_now_ms();
+        if (s_sp_t) {
+            const uint64_t el = now - s_sp_t;
+            if (el >= 250) {
+                const float dt = (float)el / 1000.f;
+                const float dx = g_frame_local_pos.x - s_sp_pos.x;
+                const float dy = g_frame_local_pos.y - s_sp_pos.y;
+                const float dz = g_frame_local_pos.z - s_sp_pos.z;
+                const float jump2 = dx * dx + dy * dy + dz * dz;
+                if (jump2 > 900.0F) {        // warp / respawn: re-seed
+                    s_sp_pos = g_frame_local_pos;
+                    s_sp_t = now;
+                } else {
+                    const float v = sqrtf(jump2) / dt;
+                    s_sp_v = s_sp_v * 0.5F + v * 0.5F;
+                    s_sp_pos = g_frame_local_pos;
+                    s_sp_t = now;
+                }
+            }
+        } else {
+            s_sp_pos = g_frame_local_pos;
+            s_sp_t = now;
+        }
+    }
+    out.player_speed = s_sp_v;
+
+    // ---- track the X on this node -----------------------------------------
+    // The X appears when we are in melee range and hops to a new spot after
+    // every hit, so the pick is re-verified periodically: ~0.1 s without a
+    // live mark (so its appearance is noticed fast), ~0.2 s with one.
     static uint64_t s_spot_component = 0;
     static uint64_t s_spot_identity = 0;
     static uint64_t s_spot_transform = 0;
     static int      s_spot_recheck = 0;
     static Vec3     s_spot_last{};
-    static bool     s_spot_last_ok = false;
     static int      s_spot_hold = 0;
-    static int      s_spot_pivot_frames = 0;
     if (s_spot_component != best->component || s_spot_identity != best->identity) {
         s_spot_component = best->component;
         s_spot_identity = best->identity;
         s_spot_transform = 0;
         s_spot_recheck = 0;
-        s_spot_last_ok = false;
+        s_spot_last = {};
         s_spot_hold = 0;
-        s_spot_pivot_frames = 0;
     }
-    if (--s_spot_recheck <= 0) {
-        // Без живого креста ищем часто (~0.2 с), с живым — реже. Скан НИКОГДА
-        // не затирает известный трансформ нулём и не меняет его на LOD/имя,
-        // пока текущий ещё на коре — иначе метка слетает на ствол.
-        s_spot_recheck = s_spot_transform ? 24 : (best->kind == 0 ? 1 : 12);
-        uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform, best->identity);
-        if (found && found != s_spot_transform) {
-            s_spot_transform = found;
-            s_spot_last_ok = false;
-            s_spot_hold = 0;
-            s_spot_pivot_frames = 0;
-        } else if (found) {
-            s_spot_transform = found;
+    // The X only exists in melee range, so the subtree is only scanned while
+    // we are actually near the node (scanning it from 50 m away was pure
+    // read noise). And a spot that has not moved between two scans is
+    // re-checked less often — the mark only hops after a hit.
+    {
+        const float hpx = g_frame_local_pos.x - best->pos.x;
+        const float hpz = g_frame_local_pos.z - best->pos.z;
+        const bool near_node = hpx * hpx + hpz * hpz < 8.0F * 8.0F;
+        if (near_node && --s_spot_recheck <= 0) {
+            static Vec3 s_spot_prev{};
+            static bool s_spot_prev_valid = false;
+            static uint64_t s_spot_prev_owner = 0;
+            if (s_spot_prev_owner != best->component) {
+                s_spot_prev = {};
+                s_spot_prev_valid = false;
+                s_spot_prev_owner = best->component;
+            }
+            const Vec3 old_prev = s_spot_prev; // where the mark was at the LAST scan
+            uint64_t found = farm_find_spot(best->transform, best->pos, best->kind, s_spot_transform);
+            if (found == s_spot_transform) {
+                // The scan SEEING the mark alive is authoritative — renew
+                // the hold so a few failed per-frame reads (game mid-update)
+                // can no longer drop a live X. The spot is only dropped when
+                // the SCAN says it is gone (the !found branch below).
+                if (found) {
+                    s_spot_hold = 40;
+                    if (!s_spot_transform) {
+                        Vec3 ap{};
+                        float ah = -1.f;
+                        if (marker_world_position(found, ap) && vec3_is_finite(ap)) {
+                            float dx = ap.x - best->pos.x, dz = ap.z - best->pos.z;
+                            ah = sqrtf(dx * dx + dz * dz);
+                        }
+                        char line[192];
+                        snprintf(line, sizeof(line),
+                                 "X-APPEAR node=0x%llx kind=%d h=%.2f\n",
+                                 (unsigned long long)best->transform, best->kind, ah);
+                        farm_log_append(line);
+                    }
+                }
+                Vec3 cur = s_spot_prev;
+                if (found && marker_world_position(found, cur) && vec3_is_finite(cur)) {
+                    s_spot_prev = cur;
+                    s_spot_prev_valid = true;
+                }
+            } else if (!found) {
+                if (s_spot_transform) {
+                    char line[160];
+                    snprintf(line, sizeof(line),
+                             "X-LOST node=0x%llx kind=%d last=(%.2f,%.2f,%.2f)\n",
+                             (unsigned long long)best->transform, best->kind,
+                             s_spot_last.x, s_spot_last.y, s_spot_last.z);
+                    farm_log_append(line);
+                }
+                s_spot_transform = 0;
+                s_spot_last = {};
+                s_spot_hold = 0;
+                s_spot_prev_valid = false;
+            } else {
+                // Switch only to a candidate that is ALIVE right now: a
+                // mid-update read can make the scan "see" a child that is
+                // dead on the next frame, and switching to it would throw
+                // the crosshair at a garbage point.
+                Vec3 test{};
+                if (marker_world_position(found, test) && vec3_is_finite(test) &&
+                    farm_spot_alive(best->kind, best->pos, test)) {
+                    s_spot_transform = found;
+                    s_spot_last = test;
+                    s_spot_hold = 0;
+                    s_spot_prev = test;
+                    s_spot_prev_valid = true;
+                    char aname[48] = "";
+                    if (g_go_name_offset_valid)
+                        read_transform_name(found, aname, sizeof(aname));
+                    char line[256];
+                    snprintf(line, sizeof(line),
+                             "X-APPEAR node=0x%llx kind=%d p=(%.2f,%.2f,%.2f) eye=%.2f name=%s\n",
+                             (unsigned long long)best->transform, best->kind,
+                             test.x, test.y, test.z, farm_eye_y(),
+                             aname[0] ? aname : "(anon)");
+                    farm_log_append(line);
+                }
+                // Otherwise keep the current pick; the scan runs again soon.
+            }
+            const bool stable = s_spot_transform && s_spot_prev_valid &&
+                (s_spot_prev.x - old_prev.x) * (s_spot_prev.x - old_prev.x) +
+                (s_spot_prev.z - old_prev.z) * (s_spot_prev.z - old_prev.z) < 0.0004F;
+            s_spot_recheck = !s_spot_transform ? 6 : (stable ? 36 : 12);
         }
     }
 
     Vec3 aim{};
+    Vec3 marker_pt{}; // where to DRAW the target mark: the actual glowing X
+                      // (on the bark). The swing aim is pulled to the surface
+                      // separately, so the marker never floats in mid-air or
+                      // inside the trunk.
     bool spot_ok = false;
-    bool spot_facing = true;
-    Vec3 stand{};
-    bool stand_ok = false;
-    Vec3 spot_raw{};
+    bool spot_front = true;
+    float orbit_side = 0.0F;
     if (s_spot_transform) {
+        // Chase the LIVE mark: the game re-places the X after every hit, and
+        // the bonus (if the game pays one) follows the game's own hitpoint —
+        // not the rendered decal, so pinning the decal's transform in place
+        // only made every hit count as a trunk hit. Aim and the marker use
+        // the fresh read; a few failed reads hold the last good position.
         Vec3 spot{};
-        bool read_ok = marker_world_position(s_spot_transform, spot) && vec3_is_finite(spot);
-        bool use_held = false;
+        bool read_ok = marker_world_position(s_spot_transform, spot) &&
+                       vec3_is_finite(spot) &&
+                       farm_spot_alive(best->kind, best->pos, spot);
         if (read_ok) {
-            float sx = spot.x - best->pos.x, sy = spot.y - best->pos.y, sz = spot.z - best->pos.z;
-            float d2 = sx * sx + sy * sy + sz * sz;
-            const float max_r = (best->kind == 0) ? 6.0F : 3.5F;
-            if (d2 >= max_r * max_r) {
-                s_spot_transform = 0;
-                s_spot_last_ok = false;
-                s_spot_hold = 0;
-            } else if (farm_spot_plausible(best->kind, best->pos, spot)) {
-                s_spot_last = spot;
-                s_spot_last_ok = true;
-                s_spot_hold = 48;
-                s_spot_pivot_frames = 0;
-                spot_raw = spot;
-                spot_ok = true;
+            s_spot_last = spot;
+            s_spot_hold = 40;
+            spot_ok = true;
+            marker_pt = spot;   // the on-screen mark stays on the RAW X
+            // The camera, however, chases a SLOWED copy of the X. The mark
+            // hops 0.3-0.8 m after every hit and the raw chase swung the
+            // crosshair +-30 deg in a second ("before the eyes" the bot
+            // kept changing its mind); eased, the reticle glides to each
+            // new mark and the tap gate settles in ~0.3 s. A jump over
+            // 1.5 m is a new node / respawn — snap, do not trail.
+            static Vec3     s_aim_ease{};
+            static bool     s_aim_ease_valid = false;
+            static uint64_t s_aim_ease_owner = 0;
+            if (s_aim_ease_owner != best->component || !s_aim_ease_valid) {
+                s_aim_ease = spot;
+                s_aim_ease_valid = true;
+                s_aim_ease_owner = best->component;
             } else {
-                // Прыжок декали через пивот / чтение в середине апдейта:
-                // НЕ целимся в ствол — держим прошлую точку креста.
-                ++s_spot_pivot_frames;
-                use_held = true;
-                if (s_spot_pivot_frames > 25) {
-                    s_spot_transform = 0;
-                    s_spot_recheck = 0;
+                float ex = spot.x - s_aim_ease.x;
+                float ey = spot.y - s_aim_ease.y;
+                float ez = spot.z - s_aim_ease.z;
+                if (ex * ex + ey * ey + ez * ez > 2.25F) {
+                    s_aim_ease = spot;
+                } else {
+                    const float k = 0.065F; // ~1 - exp(-4 dt) at 60 fps
+                    s_aim_ease.x += ex * k;
+                    s_aim_ease.y += ey * k;
+                    s_aim_ease.z += ez * k;
                 }
             }
-        } else {
-            use_held = true;
-        }
-        if (!spot_ok && use_held && s_spot_last_ok && s_spot_hold > 0) {
-            --s_spot_hold;
-            spot_raw = s_spot_last;
-            spot_ok = true;
-        }
-    }
-    if (spot_ok) {
-        float sx = spot_raw.x - best->pos.x, sz = spot_raw.z - best->pos.z;
-        float pncx = best->pos.x - g_frame_local_pos.x;
-        float pncz = best->pos.z - g_frame_local_pos.z;
-        float pnl = sqrtf(pncx * pncx + pncz * pncz);
-        float psl = sqrtf(sx * sx + sz * sz);
-        spot_facing = true;
-        if (pnl > 0.05F && psl > 0.05F) {
-            float c = ((-pncx) * sx + (-pncz) * sz) / (pnl * psl);
-            static uint64_t s_face_id = 0;
-            static bool s_face_state = true;
-            if (s_face_id != best->identity) {
-                s_face_id = best->identity;
-                s_face_state = true;
+            aim = s_aim_ease;
+            // The signed angle around the node from our radial to the
+            // mark's radial — ALWAYS reported: the controller arcs around
+            // the trunk until the mark is in front (head-on, ~<25 deg)
+            // and strikes from there. The swing ray body -> mark also
+            // clears the trunk only while |a| is within ~74 deg at the
+            // tree standoff (acos(r_t/(r_t+1.05))), so beyond ~70 deg the
+            // mark is unreachable until we circle closer to it:
+            // spot_front marks that border.
+            float sx = spot.x - best->pos.x, sz = spot.z - best->pos.z;
+            float px = g_frame_local_pos.x - best->pos.x;
+            float pz = g_frame_local_pos.z - best->pos.z;
+            float sl = sqrtf(sx * sx + sz * sz);
+            float pl = sqrtf(px * px + pz * pz);
+
+            if (sl > 0.05F && pl > 0.3F) {
+                float t1 = atan2f(px, pz);
+                float t2 = atan2f(sx, sz);
+                float a = t2 - t1;
+                while (a >  3.14159265F) a -= 6.2831853F;
+                while (a < -3.14159265F) a += 6.2831853F;
+                out.orbit_angle = fabsf(a) * 57.29577951F;
+                // side is resolved against the camera right once the
+                // basis is known below; keep the signed angle for then.
+                orbit_side = a;
+                float dot = (sx * px + sz * pz) / (sl * pl);
+                if (!(dot > 0.342F)) {   // cos 70 deg: the trunk blocks the swing
+                    spot_front = false;
+                }
             }
-            if (s_face_state) { if (c < 0.64F) s_face_state = false; }
-            else              { if (c > 0.77F) s_face_state = true;  }
-            spot_facing = s_face_state;
-        }
-        // Aim is the glowing X itself — any pull toward the pivot was a
-        // visible miss (crosshair on bark, not on the mark). Stand stays
-        // in front of the decal so the bot does not walk into the mesh.
-        aim = spot_raw;
-        if (psl > 0.05F) {
-            float inv = 1.0F / psl;
-            float dirx = sx * inv, dirz = sz * inv;
-            float from_node = (best->kind == 0) ? 0.70F : 1.55F;
-            float from_spot = (best->kind == 0) ? 0.18F : 0.70F;
-            float stand_r = psl + from_spot;
-            if (stand_r < from_node) stand_r = from_node;
-            stand.x = best->pos.x + dirx * stand_r;
-            stand.z = best->pos.z + dirz * stand_r;
-            stand.y = spot_raw.y;
-            stand_ok = true;
+        } else if (s_spot_hold > 0) {
+            // The hold is for a failed READ (game mid-update). A successful
+            // read that FAILS the alive test is authoritative — the mark
+            // moved (hopped onto dirt, or the eye read came back and the
+            // dirt check now runs): drop it, do not keep aiming at the
+            // stale point.
+            Vec3 now_pt{};
+            if (marker_world_position(s_spot_transform, now_pt) &&
+                vec3_is_finite(now_pt) &&
+                !farm_spot_alive(best->kind, best->pos, now_pt)) {
+                s_spot_transform = 0;
+                s_spot_hold = 0;
+            } else {
+                --s_spot_hold;
+                spot_ok = true;
+                aim = s_spot_last;
+                marker_pt = s_spot_last;
+                spot_front = true; // held mark was on our side when it was good
+            }
+        } else {
+            s_spot_transform = 0; // the mark is gone — aim the body
         }
     }
-    // Нет живого креста — целимся в тело (грудь дерева / пояс руды).
+    // No live X: aim the body (tree chest / ore waist). Height is clamped
+    // against the camera eye below — node pivots lie (a rock's pivot rides
+    // near its top, a tall tree's sits metres up the trunk).
     if (!spot_ok) {
         aim = best->pos;
         aim.y += (best->kind == 0) ? 1.15F : 0.15F;
-        // Height is clamped against the camera eye below, once the camera
-        // origin is known — node and player pivots are both unreliable.
+        marker_pt = aim;
     }
 
-    // Full-circle angles from the camera (or firing) axis: unlike
-    // aim_angles_for() this must work for nodes behind us, so the forward
-    // component may be negative and yaw spans +-180. Order of preference:
-    // firing reference > transform pose > basis from this frame's view matrix
-    // (the last one exists on devices where the pose read fails — the reason
-    // the farm used to sit in "нет позиции камеры").
-    if (!g_cam_pose_valid && !g_aim_ref_valid && !g_frame_cam_basis_valid) {
+    // Camera basis, in order of preference: transform pose > basis from this
+    // frame's view matrix (the last one exists on devices where the pose
+    // read fails — the reason the farm used to sit in "no camera pose").
+    if (!g_cam_pose_valid && !g_frame_cam_basis_valid) {
         g_farm_idle_reason = 5;
         return false;
     }
-    // With a live X, measure against the CAMERA so the crosshair sits on
-    // the mark the player sees. Look-root sway was a few degrees of miss.
-    // Body aim (no X) still uses the firing reference — that is what melee
-    // actually swings along, and the node is huge.
-    const bool use_ref = g_aim_ref_valid && !(spot_ok && g_cam_pose_valid);
-    const bool use_pose = !use_ref && g_cam_pose_valid;
-    const Vec3& origin = use_ref ? g_aim_ref_origin  : use_pose ? g_cam_pos     : g_frame_cam_pos;
-    const Vec3& fwd    = use_ref ? g_aim_ref_forward : use_pose ? g_cam_forward : g_frame_cam_fwd;
-    const Vec3& right  = use_ref ? g_aim_ref_right   : use_pose ? g_cam_right   : g_frame_cam_right;
-    const Vec3& up     = use_ref ? g_aim_ref_up      : use_pose ? g_cam_up      : g_frame_cam_up;
+    const bool use_pose = g_cam_pose_valid;
+    const Vec3& origin = use_pose ? g_cam_pos       : g_frame_cam_pos;
+    const Vec3& fwd    = use_pose ? g_cam_forward   : g_frame_cam_fwd;
+    const Vec3& right  = use_pose ? g_cam_right     : g_frame_cam_right;
+    const Vec3& up     = use_pose ? g_cam_up        : g_frame_cam_up;
 
-    // Body aim (no glowing spot): clamp the aim height against the CAMERA
-    // EYE, the only height reference that is reliable on every prefab. Node
-    // pivots lie (a rock's pivot rides near its top — that was "hits above
-    // the ore"; a tall tree's sits metres up the trunk).
+    // The live X floats a few cm OFF the bark. Aiming exactly at the mark
+    // sends the swing ray PAST the trunk at a shallow angle up close (the
+    // mark is outside the trunk's silhouette) — the whiffs; aiming deep in
+    // the node puts the reticle "inside the tree". The right aim is where
+    // the eye->mark ray ENTERS the node: on the bark, on the X's own line,
+    // a hair inside the surface so the hit always lands. The drawn marker
+    // (marker_pt) stays on the mark itself.
+    if (spot_ok) {
+        Vec3 ray = {marker_pt.x - origin.x, marker_pt.y - origin.y, marker_pt.z - origin.z};
+        float rl = sqrtf(ray.x * ray.x + ray.y * ray.y + ray.z * ray.z);
+        aim = marker_pt;
+        if (rl > 0.05F && rl < 50.0F) {
+            ray.x /= rl; ray.y /= rl; ray.z /= rl;
+            if (best->kind == 0) {
+                // Trunk = vertical cylinder at the node axis. Radius: the
+                // mark's radius minus the (few cm) protrusion — the estimate
+                // lands a couple of cm INSIDE the real bark, so the swing
+                // ray always crosses the bark right at the X (aiming exactly
+                // at the mark's line instead misses at a shallow angle, and
+                // aiming at the estimated surface instead can sit outside a
+                // thin trunk).
+                float hx = marker_pt.x - best->pos.x, hz = marker_pt.z - best->pos.z;
+                float r_est = fmaxf(0.05F, sqrtf(hx * hx + hz * hz) - 0.08F);
+                float wx = origin.x - best->pos.x, wz = origin.z - best->pos.z;
+                float a = ray.x * ray.x + ray.z * ray.z;
+                float b = 2.0F * (wx * ray.x + wz * ray.z);
+                float c = wx * wx + wz * wz - r_est * r_est;
+                float t = -1.0F;
+                if (a > 1e-6F) {
+                    float disc = b * b - 4.0F * a * c;
+                    if (disc > 0.0F) {
+                        float s = sqrtf(disc);
+                        float t1 = (-b - s) / (2.0F * a);
+                        float t2 = (-b + s) / (2.0F * a);
+                        t = (t1 > 0.05F) ? t1 : ((t2 > 0.05F) ? t2 : -1.0F);
+                    }
+                }
+                if (t > 0.0F) {
+                    // Entry point on the bark along the eye->mark ray.
+                    aim = {origin.x + ray.x * t, origin.y + ray.y * t, origin.z + ray.z * t};
+                } else {
+                    // The ray clips the cylinder at a grazing angle: aim a
+                    // little inside along the X's own radial line — sure
+                    // hit, the impact still lands at the X.
+                    float h = sqrtf(hx * hx + hz * hz);
+                    if (h > 0.02F) {
+                        float k = r_est / h;
+                        if (k < 1.0F) {
+                            aim.x = best->pos.x + hx * k;
+                            aim.z = best->pos.z + hz * k;
+                            aim.y = marker_pt.y;
+                        }
+                    }
+                }
+            } else {
+                // Boulder ~ sphere at the pivot (the pivot rides near the
+                // top; the mark's distance is the local surface radius).
+                float vx = marker_pt.x - best->pos.x, vy = marker_pt.y - best->pos.y, vz = marker_pt.z - best->pos.z;
+                float dv = sqrtf(vx * vx + vy * vy + vz * vz);
+                float r_est = fmaxf(0.25F, dv - 0.08F);
+                float ox = origin.x - best->pos.x, oy = origin.y - best->pos.y, oz = origin.z - best->pos.z;
+                float b2 = 2.0F * (ox * ray.x + oy * ray.y + oz * ray.z);
+                float c2 = ox * ox + oy * oy + oz * oz - r_est * r_est;
+                float t = -1.0F;
+                float disc = b2 * b2 - 4.0F * c2;
+                if (disc > 0.0F) {
+                    float s = sqrtf(disc);
+                    float t1 = (-b2 - s) / 2.0F;
+                    float t2 = (-b2 + s) / 2.0F;
+                    t = (t1 > 0.05F) ? t1 : ((t2 > 0.05F) ? t2 : -1.0F);
+                }
+                if (t > 0.0F) {
+                    aim = {origin.x + ray.x * t, origin.y + ray.y * t, origin.z + ray.z * t};
+                } else if (dv > 0.02F) {
+                    float k = r_est / dv;
+                    if (k < 1.0F) {
+                        aim.x = best->pos.x + vx * k;
+                        aim.y = best->pos.y + vy * k;
+                        aim.z = best->pos.z + vz * k;
+                    }
+                }
+            }
+        }
+    }
+
     if (!spot_ok) {
         if (best->kind == 0) {
             // Trees: chest band — slightly below the eye up to eye level.
@@ -5826,20 +6756,50 @@ bool esp_farm_get_target(FarmTarget& out) {
         }
     }
 
-    Vec3 d = {aim.x - origin.x, aim.y - origin.y, aim.z - origin.z};
-    float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
-    float rx = d.x * right.x + d.y * right.y + d.z * right.z;
-    float ux = d.x * up.x + d.y * up.y + d.z * up.z;
-    if (!std::isfinite(fx) || !std::isfinite(rx) || !std::isfinite(ux)) { g_farm_idle_reason = 5; return false; }
-    constexpr float rad2deg = 57.29577951F;
-    float yaw = atan2f(rx, fx) * rad2deg;
-    float pitch = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
-    if (!std::isfinite(yaw) || !std::isfinite(pitch)) { g_farm_idle_reason = 5; return false; }
+    if (!farm_angles(origin, fwd, right, up, aim, out.yaw, out.pitch)) {
+        g_farm_idle_reason = 5;
+        return false;
+    }
 
-    // Screen position of the aim point, for the on-screen target mark.
+    // Alignment direction needs the camera right: the strafe arc runs
+    // along it until the X faces us. Moving the player along d changes the
+    // (player - node) angle theta = atan2(x, z) proportionally to
+    // (pz*dx - px*dz); we need that to carry the sign of the signed angle
+    // `a` stored in orbit_side.
+    if (spot_ok) {
+        float px = g_frame_local_pos.x - best->pos.x;
+        float pz = g_frame_local_pos.z - best->pos.z;
+        float crossz = pz * right.x - px * right.z;
+        orbit_side = ((orbit_side > 0.f) == (crossz > 0.f)) ? 1.f : -1.f;
+    }
+
+    // Walk point: the X when it is live, the node body otherwise.
+    // The ore mark sits a metre or more OFF the rock's centre, so walking
+    // at the body while the stop band measured from the X put the stop
+    // point on the wrong radial — the X swung behind the trunk on every
+    // approach step (walk -> orbit -> walk, "ходит туда-сюда", log s9).
+    // Walking AT the mark (the braking stops `stopAt` short of it) lands
+    // on the mark's radial head-on. For trees the mark is on the trunk,
+    // so this is the same point as the body.
+    Vec3 walk = spot_ok ? aim : best->pos;
+    walk.y = farm_eye_y() - 1.6F;
+    float walk_pitch = 0.f;
+    if (!farm_angles(origin, fwd, right, up, walk, out.walk_yaw, walk_pitch)) {
+        g_farm_idle_reason = 5;
+        return false;
+    }
+    {
+        float wx = walk.x - g_frame_local_pos.x;
+        float wz = walk.z - g_frame_local_pos.z;
+        out.walk_dist = sqrtf(wx * wx + wz * wz);
+    }
+
+    // Screen position of the target mark: the glowing X itself when live
+    // (on the bark), the body point otherwise — NOT the slightly pulled
+    // swing aim, which would draw the mark inside the trunk.
     if (g_frame_vp_valid) {
         Vec2 screen{};
-        if (w2s(g_frame_vp, (spot_ok ? spot_raw : aim), g_frame_sw, g_frame_sh, screen, false) &&
+        if (w2s(g_frame_vp, marker_pt, g_frame_sw, g_frame_sh, screen, false) &&
             std::isfinite(screen.x) && std::isfinite(screen.y) &&
             screen.x >= -64.0F && screen.x <= g_frame_sw + 64.0F &&
             screen.y >= -64.0F && screen.y <= g_frame_sh + 64.0F) {
@@ -5853,34 +6813,57 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.valid = true;
     out.id = best->identity;
     out.kind = best->kind;
-    out.yaw = yaw;
-    out.pitch = pitch;
     out.dist = best_dist;
     out.has_spot = spot_ok;
-    out.spot_facing = !spot_ok || spot_facing;
-    if (spot_ok && stand_ok) {
-        float sdx = stand.x - g_frame_local_pos.x;
-        float sdz = stand.z - g_frame_local_pos.z;
-        float sd = sqrtf(sdx * sdx + sdz * sdz);
-        if (std::isfinite(sd)) {
-            out.stand_dist = sd;
-            Vec3 dd = {stand.x - origin.x, 0.0F, stand.z - origin.z};
-            float sfx = dd.x * fwd.x + dd.z * fwd.z;
-            float srx = dd.x * right.x + dd.z * right.z;
-            float syaw = atan2f(srx, sfx) * 57.29577951F;
-            if (std::isfinite(syaw)) { out.stand_yaw = syaw; out.stand_ok = true; }
-        }
-    }
+    out.spot_front = spot_front;
+    out.orbit_side = orbit_side;
     {
-        // Дистанция до СЫРОГО креста (не подтянутого прицела): контроллер
-        // решает «дотягиваюсь / подойти ближе» по ней.
-        const Vec3& reach_pt = spot_ok ? spot_raw : aim;
-        float ax = reach_pt.x - g_frame_local_pos.x;
-        float az = reach_pt.z - g_frame_local_pos.z;
+        // Horizontal distance to the RAW aim point (the X, when live): the
+        // controller decides "in reach / step closer" from it.
+        float ax = aim.x - g_frame_local_pos.x;
+        float az = aim.z - g_frame_local_pos.z;
         float ad = sqrtf(ax * ax + az * az);
         out.aim_dist = std::isfinite(ad) ? ad : best_dist;
     }
     float fraction = rd<float>(best->component + MINEABLE_FRACTION);
     out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F) ? fraction : -1.0F;
+    // TEMP farm log: 5 Hz snapshot of everything the controller sees
+    // while at the node (remove with the other probes).
+    {
+        static std::chrono::steady_clock::time_point s_last;
+        static std::chrono::steady_clock::time_point s_cache_last;
+        static int s_n = 0;
+        {
+            auto cnow = std::chrono::steady_clock::now();
+            if ((cnow - s_cache_last) >= std::chrono::seconds(5)) {
+                s_cache_last = cnow;
+                int n0 = 0, n1 = 0, n2 = 0, n3 = 0;
+                for (const FarmEntity& e : g_farm_entities) {
+                    if (e.kind == 0) ++n0; else if (e.kind == 1) ++n1;
+                    else if (e.kind == 2) ++n2; else ++n3;
+                }
+                char line[128];
+                snprintf(line, sizeof(line),
+                         "CACHE tree=%d stone=%d iron=%d sulfur=%d mask=%u\n",
+                         n0, n1, n2, n3, (unsigned)g_farm_mask);
+                farm_log_append(line);
+            }
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (s_n < 4000 && (now - s_last) >= std::chrono::milliseconds(200)) {
+            s_last = now;
+            ++s_n;
+            char line[208];
+            snprintf(line, sizeof(line),
+                     "LOG kind=%d d=%.2f ad=%.2f wyaw=%.1f yaw=%.1f pitch=%.1f spot=%d front=%d oa=%.0f body=(%.1f,%.1f,%.1f) node=(%.1f,%.1f,%.1f) x=(%.1f,%.1f,%.1f)\n",
+                     best->kind, best_dist, out.aim_dist, out.walk_yaw, out.yaw,
+                     out.pitch, spot_ok ? 1 : 0, spot_front ? 1 : 0,
+                     out.orbit_angle,
+                     g_frame_local_pos.x, g_frame_local_pos.y, g_frame_local_pos.z,
+                     best->pos.x, best->pos.y, best->pos.z,
+                     marker_pt.x, marker_pt.y, marker_pt.z);
+            farm_log_append(line);
+        }
+    }
     return true;
 }
