@@ -1,6 +1,7 @@
 #include "game.h"
 #include "game_offsets.h"
 #include "Vector.h"
+#include "kdriver.h"
 
 #include <string.h>
 #include <strings.h>   // strncasecmp (weapon prefab label cleanup)
@@ -17,16 +18,18 @@
 #include <vector>
 #include <unistd.h>
 #include <sys/syscall.h>
-
-static ssize_t remote_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
-    return syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
-}
-
-static ssize_t remote_vm_writev(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
-    return syscall(__NR_process_vm_writev, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
-}
+#include <fcntl.h>
 
 using namespace game_offsets;
+
+// ---- Kernel driver wrappers (fallback to proc_vm when driver absent) ----
+// g_pid is set in esp_init and used by kdriver for target pid.
+// All low-level memory ops go through kdriver so that FT 2.3.0 / JiangNight / BeiFall drivers work from kernel.
+static bool vec3_is_finite(const Vec3& value); // forward for get_base fallback
+
+// Forward declarations for functions defined later but needed in get_base
+static uint64_t get_base_fallback(const char* lib);
+static uint64_t get_base(const char* lib); // actual implementation uses kdriver + fallback
 
 
 
@@ -85,59 +88,32 @@ static bool vec3_is_finite(const Vec3& value);
 template<typename T>
 static T rd(uint64_t addr) {
     T v{};
-    struct iovec lv = { &v, sizeof(T) };
-    struct iovec rv = { (void*)addr, sizeof(T) };
-    remote_vm_readv(g_pid, &lv, 1, &rv, 1, 0);
+    if (!addr) return v;
+    kdrv_read(addr, &v, sizeof(T));
     return v;
 }
 template<typename T>
 static bool rd_exact(uint64_t addr, T& value) {
     value = {};
     if (!addr) return false;
-    struct iovec local = {&value, sizeof(T)};
-    struct iovec remote = {(void*)addr, sizeof(T)};
-    return remote_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)sizeof(T);
+    return kdrv_read(addr, &value, sizeof(T));
 }
 
-// ---- Batched remote reads ("x-ray style") -----------------------------------
-// One process_vm_readv carries many remote segments at once (UIO_MAXIOV).
-// The X-ray marker pipeline has always used this: one read for the whole
-// registry entry array, one for a player's bone matrices, ... The farm used
-// to do the opposite (one syscall per value: a single spot check was
-// thousands of reads). These helpers collapse a whole subtree scan into a
-// handful of calls, so the farm's traffic looks like the rest of the ESP
-// traffic — small, periodic, indistinguishable — instead of a constant
-// storm.
-//
-// Semantics on a mid-batch fault (a pointer went stale mid-update): the
-// transfer stops and the tail stays as the caller pre-filled it (zero),
-// which every consumer already treats as "unread" — the same as a failed
-// rd<T>. Nothing here ever writes to the target process.
 static void bulk_read_v(int n, struct iovec* local, struct iovec* remote) {
-    while (n > 0) {
-        const int chunk = n > 512 ? 512 : n; // stay far below UIO_MAXIOV
-        (void)remote_vm_readv(g_pid, local, chunk, remote, chunk, 0);
-        local += chunk;
-        remote += chunk;
-        n -= chunk;
-    }
+    kdrv_bulk_read(n, local, remote);
 }
 static uint64_t rd_ptr(uint64_t a) { return rd<uint64_t>(a); }
 static Vec3     rd_v3 (uint64_t a) { return rd<Vec3>(a);     }
 static Mat4     rd_m4 (uint64_t a) { return rd<Mat4>(a);     }
 
 static bool rd_buf(uint64_t addr, void* out, size_t size) {
-    if (!addr || !size) return false;
-    struct iovec local = {out, size};
-    struct iovec remote = {(void*)addr, size};
-    return remote_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)size;
+    if (!addr || !size || !out) return false;
+    return kdrv_read(addr, out, size);
 }
 
 static bool wr_buf(uint64_t addr, const void* in, size_t size) {
-    if (!addr || !size) return false;
-    struct iovec local = {(void*)in, size};
-    struct iovec remote = {(void*)addr, size};
-    return remote_vm_writev(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)size;
+    if (!addr || !size || !in) return false;
+    return kdrv_write(addr, in, size);
 }
 
 // ==== X-ray: камера отсекает всё ближе N метров (near clip plane) ==========
@@ -280,10 +256,7 @@ static void always_day_tick() {
 static std::string read_remote_string(uint64_t address) {
     if (!address) return {};
     char buffer[96]{};
-    struct iovec local = {buffer, sizeof(buffer) - 1};
-    struct iovec remote = {(void*)address, sizeof(buffer) - 1};
-    ssize_t count = remote_vm_readv(g_pid, &local, 1, &remote, 1, 0);
-    if (count <= 0) return {};
+    if (!kdrv_read(address, buffer, sizeof(buffer)-1)) return {};
     buffer[sizeof(buffer) - 1] = '\0';
     return std::string(buffer);
 }
@@ -773,7 +746,7 @@ static void prune_player_text(const std::vector<uint64_t>& players) {
     }
 }
 
-static uint64_t get_base(const char* lib) {
+static uint64_t get_base_fallback(const char* lib) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", g_pid);
     FILE* file = fopen(path, "r");
@@ -791,6 +764,13 @@ static uint64_t get_base(const char* lib) {
     }
     fclose(file);
     return fallback;
+}
+
+static uint64_t get_base(const char* lib) {
+    uint64_t kbase = kdrv_get_module_base(g_pid, lib);
+    if (!kbase) kbase = kdrv_get_module_base_current(lib);
+    if (kbase) return kbase;
+    return get_base_fallback(lib);
 }
 
 static bool validate_player_list(uint64_t list, uint64_t player_class) {
@@ -3552,6 +3532,7 @@ bool esp_camera_angles(float& yaw_deg, float& pitch_deg) {
 //        then the per-bone mask torso|armL|armR|legL|legR.
 bool esp_init(pid_t pid) {
     g_pid = pid;
+    kdrv_init(pid);
     g_il2cpp_base = get_base("libil2cpp.so");
     if (!g_il2cpp_base) return false;
     return true;
@@ -3672,6 +3653,7 @@ static void reset_world_caches() {
 }
 
 void esp_reset() {
+    kdrv_deinit();
     g_pid = -1; g_il2cpp_base = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
