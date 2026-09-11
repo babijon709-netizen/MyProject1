@@ -4282,18 +4282,39 @@ static void EnterRunning() {
 }
 
 // Карточка по центру экрана (общая для обоих стартовых экранов).
+// ВАЖНО: io.DisplaySize здесь — квадрат (оверлей-поверхность квадратная,
+// см. drawBegin()), а видимая область в координатах ImGui — VisibleScreen().
+// Центрировать надо по ней, иначе окно уезжает за экран.
 static ImVec2 BootCardRect(ImVec2& pos) {
-    auto& io = ImGui::GetIO();
-    float W = ImMin(io.DisplaySize.x * 0.88f, 620.f);
-    float H = ImMin(io.DisplaySize.y * 0.80f, 640.f);
-    pos = { (io.DisplaySize.x - W) * 0.5f, (io.DisplaySize.y - H) * 0.5f };
+    float vw = 0.f, vh = 0.f;
+    VisibleScreen(vw, vh);
+    if (vw < 100.f || vh < 100.f) {
+        // запасной вариант, если displayInfo ещё не заполнился
+        auto& io = ImGui::GetIO();
+        vw = io.DisplaySize.x;
+        vh = io.DisplaySize.y;
+    }
+    float W = ImMin(vw * 0.88f, 620.f);
+    float H = ImMin(vh * 0.86f, 640.f);
+    pos = { (vw - W) * 0.5f, (vh - H) * 0.5f };
     return { W, H };
 }
 
+// Видимая область экрана (см. комментарий в BootCardRect).
+static void BootVisibleSize(float& vw, float& vh) {
+    VisibleScreen(vw, vh);
+    if (vw < 100.f || vh < 100.f) {
+        auto& io = ImGui::GetIO();
+        vw = io.DisplaySize.x;
+        vh = io.DisplaySize.y;
+    }
+}
+
 static void DrawBootBackdrop(float alpha) {
+    float vw = 0.f, vh = 0.f;
+    BootVisibleSize(vw, vh);
     auto* fdl = ImGui::GetForegroundDrawList();
-    fdl->AddRectFilled({0, 0}, ImGui::GetIO().DisplaySize,
-                       IM_COL32(8, 8, 18, (int)(alpha * 216)));
+    fdl->AddRectFilled({0, 0}, {vw, vh}, IM_COL32(8, 8, 18, (int)(alpha * 216)));
 }
 
 // Большая кнопка режима: ручная отрисовка + InvisibleButton.
@@ -4349,8 +4370,10 @@ static void RenderBootSelect() {
     DrawBootBackdrop(g_bootFade);
 
     // Полноэкранное невидимое окно-хост: в нём живут InvisibleButton-кнопки.
+    float hvw = 0.f, hvh = 0.f;
+    BootVisibleSize(hvw, hvh);
     ImGui::SetNextWindowPos({0, 0});
-    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGui::SetNextWindowSize({hvw, hvh});
     ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                           ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNav |
                           ImGuiWindowFlags_NoBringToFrontOnFocus;
@@ -4427,8 +4450,10 @@ static void RenderKernelLoad() {
     float dt = io.DeltaTime;
     DrawBootBackdrop(g_bootFade);
 
+    float hvw = 0.f, hvh = 0.f;
+    BootVisibleSize(hvw, hvh);
     ImGui::SetNextWindowPos({0, 0});
-    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGui::SetNextWindowSize({hvw, hvh});
     ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                           ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNav |
                           ImGuiWindowFlags_NoBringToFrontOnFocus;
