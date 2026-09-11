@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <string>
+#include "applog.h"
 #include <vector>
 #include <thread>
 #include <mutex>
@@ -557,6 +558,7 @@ static void wait_kernel_thread(std::string package, pid_t child) {
         int st = 0;
         if (waitpid(child, &st, WNOHANG) == child && WEXITSTATUS(st) == 127) {
             set_error("не удалось выполнить скрипт (su/sh отсутствуют?)");
+            applog::write("KERNEL: скрипт не выполнился (код 127, su/sh отсутствуют?)");
             g_state.store((int)KernelState::Failed);
             g_launching.store(false);
             return;
@@ -564,6 +566,7 @@ static void wait_kernel_thread(std::string package, pid_t child) {
     }
 
     while (std::chrono::steady_clock::now() < deadline) {
+        applog::mirror_ftdrv();   // тянем вывод скрипта в лог «Загрузок»
         pid_t pid = find_process(package.c_str());
         if (pid > 0) {
             uint64_t base = 0;
@@ -572,6 +575,8 @@ static void wait_kernel_thread(std::string package, pid_t child) {
                 if (read_process_memory(pid, base, probe, sizeof(probe))) {
                     g_verified.store(true);
                     g_state.store((int)KernelState::Ready);
+                    applog::write("KERNEL: драйвер готов — память игры (pid %d) читается", (int)pid);
+                    applog::mirror_ftdrv();
                     return;
                 }
             }
@@ -580,6 +585,8 @@ static void wait_kernel_thread(std::string package, pid_t child) {
             // поднятым без проверки; attach-поток проверит при подключении.
             g_verified.store(false);
             g_state.store((int)KernelState::Ready);
+            applog::write("KERNEL: скрипт отработал, игра не запущена — без проверки");
+            applog::mirror_ftdrv();
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(700));
@@ -587,12 +594,16 @@ static void wait_kernel_thread(std::string package, pid_t child) {
 
     // Драйвер не поднялся: если процесс su уже умер — это ошибка запуска,
     // иначе память игры так и не стала доступной.
+    applog::mirror_ftdrv();
     int st = 0;
     pid_t r = waitpid(child, &st, WNOHANG);
-    if (r == child)
+    if (r == child) {
         set_error("драйвер завершился (код %d) — память игры недоступна", WEXITSTATUS(st));
-    else
+        applog::write("KERNEL: драйвер завершился (код %d) — память игры недоступна", WEXITSTATUS(st));
+    } else {
         set_error("таймаут: память игры так и не читается (драйвер не поднялся?)");
+        applog::write("KERNEL: таймаут 40 с — память игры не читается");
+    }
     g_state.store((int)KernelState::Failed);
     g_launching.store(false);
 }
@@ -681,14 +692,17 @@ bool try_escalate_root(int argc, char* argv[]) {
 
     char su[128] = {};
     if (!find_su(su, sizeof(su))) {
+        applog::write("root: su не найден (Magisk/KSU не установлен?)");
         fprintf(stderr, "[xvcen] su не найден: запусти от root, иначе память игры не прочитается\n");
         return false;
     }
     bool dash_c = su_probe_works(su, true);
     if (!dash_c && !su_probe_works(su, false)) {
+        applog::write("root: %s не даёт root (диалог Magisk/KSU не подтверждён)", su);
         fprintf(stderr, "[xvcen] root через %s не выдан (проверь диалог Magisk/KSU)\n", su);
         return false;
     }
+    applog::write("root: доступ есть (%s, режим su %s)", su, dash_c ? "-c" : "0");
 
     char exe[512] = {};
     ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);

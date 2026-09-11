@@ -1,6 +1,7 @@
 #include "main.h"
 #include "game.h"
 #include "driver.h"         // режимы NONKERNEL / KERNEL (FT-драйвер)
+#include "applog.h"         // лог диагностики в «Загрузках»
 #include "game_offsets.h"   // PLAYER_BOX_WIDTH_RATIO (box proportions)
 #include <cmath>
 #include <atomic>
@@ -288,16 +289,28 @@ static pid_t find_pid(const char* pkg) {
 static void start_attach_thread() {
     g_attach_running.store(true);
     g_attach_thread = std::thread([]() {
+        auto lastFailLog = std::chrono::steady_clock::time_point{};
         while (g_attach_running.load()) {
             if (!g_esp_attached) {
                 pid_t pid = find_pid(TARGET_PACKAGE);
                 if (pid > 0 && esp_init(pid)) {
                     g_target_pid = pid;
                     g_esp_attached = true;
+                    applog::write("игра подключена: pid %d (%s)", (int)pid, TARGET_PACKAGE);
+                } else if (pid > 0) {
+                    // не подключились — пишем не чаще раза в 15 секунд
+                    auto now = std::chrono::steady_clock::now();
+                    if (now - lastFailLog > std::chrono::seconds(15)) {
+                        lastFailLog = now;
+                        applog::write("не могу подключиться к игре (pid %d): память не читается%s",
+                                      (int)pid, getuid() == 0 ? "" : " — софт без root");
+                    }
                 }
             } else {
                 pid_t current = find_pid(TARGET_PACKAGE);
                 if (current != g_target_pid) {
+                    applog::write("игра отключена (pid %d -> %d)",
+                                  (int)g_target_pid, (int)current);
                     esp_reset();
                     g_esp_attached = false;
                     g_target_pid = -1;
@@ -4273,6 +4286,9 @@ static float     g_bootFade = 0.f;   // затемнение фона при с�
 static void EnterRunning() {
     g_boot = BootPhase::Running;
     start_attach_thread();
+    applog::write("режим запущен: %s%s", driver::mode() == driver::Mode::Kernel ? "KERNEL" : "NONKERNEL",
+                  driver::mode() == driver::Mode::Kernel && !driver::kernel_verified()
+                      ? " (драйвер не проверен)" : "");
     if (driver::mode() == driver::Mode::Kernel)
         ShowToast(driver::kernel_verified()
             ? "KERNEL: драйвер ядра активен"
@@ -4435,11 +4451,13 @@ static void RenderBootSelect() {
     if (pickKernel) {
         PlaySound(SND_CLICK);
         driver::set_mode(driver::Mode::Kernel);
+        applog::write("выбран режим KERNEL (драйвер ядра)");
         driver::start_kernel_driver(TARGET_PACKAGE);
         g_boot = BootPhase::KernelLoad;
     } else if (pickNonKernel) {
         PlaySound(SND_CLICK);
         driver::set_mode(driver::Mode::NonKernel);
+        applog::write("выбран режим NONKERNEL (process_vm)");
         EnterRunning();
     }
 }
@@ -5153,6 +5171,14 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
     signal(SIGHUP,  [](int) { main_thread_flag.store(false); });
 
+    // Лог диагностики в «Загрузках»: /sdcard/Download/xvcen.log
+    // (оба процесса — до и после root-эскалации — пишут в один файл).
+    applog::init();
+    applog::write("=== запуск: uid=%d, ядро '%s' ===",
+                  (int)getuid(), driver::kernel_version());
+    if (applog::path()[0])
+        fprintf(stderr, "[xvcen] лог: %s\n", applog::path());
+
     // Память игры читается только с правами root (или после патча ядра).
     // Если нас запустили без root и есть su — перезапускаемся от root.
     driver::try_escalate_root(argc, argv);
@@ -5220,6 +5246,7 @@ int main(int argc, char* argv[]) {
     }
     while (!g_frame_done.load()) {}
     stop_attach_thread();
+    applog::write("выход");
     if (g_esp_attached) {
         esp_reset();
         g_esp_attached = false;
