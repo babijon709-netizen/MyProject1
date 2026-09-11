@@ -3135,6 +3135,76 @@ float TabContent(int tab, float dt, float cW) {
             float ty  = pos.y + (rowH - exitFS) * 0.5f;
             dl->AddText(ImGui::GetFont(), exitFS, {tx, ty}, C::U(C::Red()), exitTxt);
         }
+
+        // ---- Диагностика: статус всего, от чего зависит работа -------------
+        SHdr(XS("Диагностика"));
+        {
+            auto* dl  = ImGui::GetWindowDrawList();
+            auto* fn  = ImGui::GetFont();
+            float avW = ImGui::GetContentRegionAvail().x;
+            const float inset = Layout::Inset;
+            const float fs = ImGui::GetFontSize();
+            const float rowH = 36.f;
+            const float padX = Layout::PadX;
+
+            driver::Stats st = driver::stats();
+            pid_t gp = find_pid(TARGET_PACKAGE);
+
+            char pidbuf[48], membuf[96];
+            if (g_esp_attached)        snprintf(pidbuf, sizeof(pidbuf), XS("подключена (pid %d)"), (int)g_target_pid);
+            else if (gp > 0)           snprintf(pidbuf, sizeof(pidbuf), XS("запущена (pid %d)"), (int)gp);
+            else                       snprintf(pidbuf, sizeof(pidbuf), "%s", XS("не запущена"));
+            snprintf(membuf, sizeof(membuf), "pv:%llu  mem:%llu  %s:%llu",
+                     (unsigned long long)st.pv_reads, (unsigned long long)st.mem_reads,
+                     XS("ошибки"), (unsigned long long)st.failed_reads);
+
+            driver::KernelState ks = driver::kernel_state();
+            bool ks_bad = ks == driver::KernelState::NoScript || ks == driver::KernelState::NoRoot ||
+                          ks == driver::KernelState::Failed;
+            char drvbuf[128];
+            if (driver::driver_script()[0])
+                snprintf(drvbuf, sizeof(drvbuf), "%s (%s)", driver::kernel_state_text(), driver::driver_script());
+            else
+                snprintf(drvbuf, sizeof(drvbuf), "%s", driver::kernel_state_text());
+
+            struct DRow { const char* lbl; const char* val; bool ok; bool warn; };
+            const DRow rows[] = {
+                { XS("Режим"),   driver::mode() == driver::Mode::Kernel ? "KERNEL" : "NONKERNEL",
+                  driver::mode() == driver::Mode::Kernel, false },
+                { XS("Root"),    getuid() == 0 ? XS("есть") : XS("нет"),
+                  getuid() == 0, false },
+                { XS("Ядро"),    driver::kernel_version()[0] ? driver::kernel_version() : "-", false, false },
+                { XS("Драйвер"), drvbuf,
+                  ks == driver::KernelState::Ready, ks_bad },
+                { XS("Игра"),    pidbuf, g_esp_attached, gp > 0 },
+                { XS("Чтений"),  membuf, st.failed_reads == 0 && (st.pv_reads || st.mem_reads), false },
+                { XS("Лог"),     applog::path()[0] ? applog::path() : XS("недоступен"),
+                  applog::path()[0] != 0, false },
+            };
+            const int nrows = (int)(sizeof(rows) / sizeof(rows[0]));
+
+            float cardH = rowH * nrows;
+            auto pos = ImGui::GetCursorScreenPos();
+            dl->AddRectFilled({pos.x + inset, pos.y}, {pos.x + avW - inset, pos.y + cardH},
+                              C::U(C::Card()), R::Card);
+            if (g_state.ui_show_sep)
+                dl->AddRect({pos.x + inset, pos.y}, {pos.x + avW - inset, pos.y + cardH},
+                            C::U(C::Sep()), R::Card, 0, 1.2f);
+            for (int i = 0; i < nrows; i++) {
+                float cy = pos.y + rowH * i;
+                if (i) dl->AddLine({pos.x + inset + padX, cy}, {pos.x + avW - inset - padX, cy},
+                                   C::UA(C::Sep(), 0.5f), 1.f);
+                float ty = cy + (rowH - fs) * 0.5f;
+                dl->AddText(fn, fs, {pos.x + inset + padX, ty}, C::UA(C::Dim(), 0.95f), rows[i].lbl);
+                auto vsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, rows[i].val);
+                ImU32 vc = rows[i].ok   ? C::U(C::Acc())
+                         : rows[i].warn ? C::U(C::Red())
+                                        : C::U(C::Txt());
+                dl->AddText(fn, fs, {pos.x + avW - inset - padX - vsz.x, ty}, vc, rows[i].val);
+            }
+            ImGui::SetCursorScreenPos({pos.x, pos.y + cardH});
+            ImGui::Dummy({avW, 0.f});
+        }
     } else if (tab == 3) {
         // Разное: каждая крупная функция — своя карточка-«вкладка»,
         // открывающая отдельное окно (как «Ещё настройки» в ESP).
