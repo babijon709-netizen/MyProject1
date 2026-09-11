@@ -1,2 +1,32 @@
 [22:34:31] === запуск: uid=0, ядро '5.10.255-SuiKernel-Stable-KSUN' ===
 [22:34:33] выбран режим KERNEL (драйвер ядра)
+[22:36:24] === запуск: uid=0, ядро '5.10.255-SuiKernel-Stable-KSUN' ===
+[22:36:25] выбран режим NONKERNEL (process_vm)
+[22:36:29] === запуск: uid=0, ядро '5.10.255-SuiKernel-Stable-KSUN' ===
+[22:36:35] выбран режим KERNEL (драйвер ядра)
+[22:36:49] === запуск: uid=0, ядро '5.10.255-SuiKernel-Stable-KSUN' ===
+[22:36:50] выбран режим KERNEL (драйвер ядра)
+[22:51:28] === запуск: uid=0, ядро '5.10.255-SuiKernel-Stable-KSUN' ===
+[22:51:29] выбран режим KERNEL (драйвер ядра)
+[22:51:29] KERNEL: ищу скрипт драйвера (ядро '5.10.255-SuiKernel-Stable-KSUN')
+[22:51:29] KERNEL: сканирую /sdcard/Download (через FUSE, может занять время)...
+[22:51:29] KERNEL: найдено скриптов FTDriver: 2
+[22:51:29] KERNEL: ВНИМАНИЕ: ядро кастомное ('5.10.255-SuiKernel-Stable-KSUN') — скрипт может не подойти
+[22:51:29] KERNEL: под ядро '5.10.255-SuiKernel-Stable-KSUN' выбран 5.10.sh
+[22:51:29] KERNEL: запускаю /data/local/tmp/5.10.sh (su (root))
+---- ftdrv.log ----
+telegram @nullnb6
+已刷入驱动无需重复刷入
+[22:51:42] KERNEL: скрипт отработал, игра не запущена — без проверки
+[22:52:30] === запуск: uid=0, ядро '5.10.255-SuiKernel-Stable-KSUN' ===
+[22:52:32] выбран режим KERNEL (драйвер ядра)
+[22:52:32] KERNEL: ищу скрипт драйвера (ядро '5.10.255-SuiKernel-Stable-KSUN')
+[22:52:32] KERNEL: сканирую /sdcard/Download (через FUSE, может занять время)...
+[22:52:32] KERNEL: найдено скриптов FTDriver: 2
+[22:52:32] KERNEL: ВНИМАНИЕ: ядро кастомное ('5.10.255-SuiKernel-Stable-KSUN') — скрипт может не подойти
+[22:52:32] KERNEL: под ядро '5.10.255-SuiKernel-Stable-KSUN' выбран 5.10.sh
+[22:52:32] KERNEL: запускаю /data/local/tmp/5.10.sh (su (root))
+---- ftdrv.log ----
+telegram @nullnb6
+已刷入驱动无需重复刷入
+[22:52:45] KERNEL: скрипт отработал, игра не запущена — без проверки
