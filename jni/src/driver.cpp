@@ -18,6 +18,7 @@
 #include <sys/system_properties.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/poll.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -186,15 +187,12 @@ ssize_t readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt,
               const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
     if (pid <= 0 || !local_iov || !remote_iov) { errno = EINVAL; return -1; }
 
-    if ((Mode)g_mode.load() == Mode::Kernel && !g_prefers_mem.load()) {
+    bool kernel = ((Mode)g_mode.load() == Mode::Kernel);
+    if (!kernel || !g_prefers_mem.load()) {
         ssize_t n = pv_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
         if (n > 0) { g_stats.pv_reads++; return n; }
         if (n == 0) return 0;
         // отказ (EPERM/ESRCH/...) — пробуем /proc/<pid>/mem
-    } else if ((Mode)g_mode.load() == Mode::NonKernel) {
-        ssize_t n = pv_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
-        if (n > 0) g_stats.pv_reads++;
-        return n;
     }
 
     ssize_t n = mem_transfer(pid, false, local_iov, liovcnt, remote_iov, riovcnt);
@@ -211,14 +209,11 @@ ssize_t writev(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt,
                const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
     if (pid <= 0 || !local_iov || !remote_iov) { errno = EINVAL; return -1; }
 
-    if ((Mode)g_mode.load() == Mode::Kernel && !g_prefers_mem.load()) {
+    bool kernel = ((Mode)g_mode.load() == Mode::Kernel);
+    if (!kernel || !g_prefers_mem.load()) {
         ssize_t n = pv_writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
         if (n > 0) { g_stats.pv_writes++; return n; }
         if (n == 0) return 0;
-    } else if ((Mode)g_mode.load() == Mode::NonKernel) {
-        ssize_t n = pv_writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
-        if (n > 0) g_stats.pv_writes++;
-        return n;
     }
 
     ssize_t n = mem_transfer(pid, true, local_iov, liovcnt, remote_iov, riovcnt);
@@ -600,6 +595,161 @@ static void wait_kernel_thread(std::string package, pid_t child) {
         set_error("таймаут: память игры так и не читается (драйвер не поднялся?)");
     g_state.store((int)KernelState::Failed);
     g_launching.store(false);
+}
+
+// ---- Автоматическое получение root --------------------------------------------
+// Софт рассчитан на запуск от root (как в логах: чтение памяти игры идёт
+// через process_vm_readv, а без root ядро его просто запрещает). Если бинаррь
+// запущен обычным пользователем и есть su — перезапускаем себя через su.
+// Флаг --rooted в argv защищает от цикла перезапуска.
+static bool su_probe_works(const char* su, bool use_dash_c) {
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+    pid_t child = fork();
+    if (child < 0) { close(fds[0]); close(fds[1]); return false; }
+    if (child == 0) {
+        dup2(fds[1], 1);
+        dup2(fds[1], 2);
+        close(fds[0]); close(fds[1]);
+        if (use_dash_c) execl(su, su, "-c", "id", (char*)nullptr);
+        else            execl(su, su, "0", "id", (char*)nullptr);
+        _exit(127);
+    }
+    close(fds[1]);
+    char buf[256] = {};
+    ssize_t total = 0;
+    // читаем с таймаутом 6 секунд (ждём ответа su / диалог Magisk)
+    struct pollfd pfd = { fds[0], POLLIN, 0 };
+    for (int waited = 0; waited < 60; waited++) {
+        int r = poll(&pfd, 1, 100);
+        if (r > 0) {
+            ssize_t n = read(fds[0], buf + total, sizeof(buf) - 1 - total);
+            if (n <= 0) break;
+            total += n;
+            if (strstr(buf, "uid=")) break;
+        }
+        int st = 0;
+        if (waitpid(child, &st, WNOHANG) == child) break;
+        usleep(100 * 1000);
+    }
+    close(fds[0]);
+    int st = 0;
+    kill(child, SIGKILL);
+    waitpid(child, &st, 0);
+    return total > 0 && strstr(buf, "uid=0");
+}
+
+// Проверяет, поднялась ли уже root-копия этого бинарника (su -> sh -> exe).
+static bool scan_root_copy(const char* exe) {
+    DIR* d = opendir("/proc");
+    if (!d) return false;
+    struct dirent* de;
+    while ((de = readdir(d))) {
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+        char link[96], target[512];
+        snprintf(link, sizeof(link), "/proc/%s/exe", de->d_name);
+        ssize_t n = readlink(link, target, sizeof(target) - 1);
+        if (n <= 0) continue;
+        target[n] = 0;
+        if (strcmp(target, exe) != 0) continue;
+        char sp[96];
+        snprintf(sp, sizeof(sp), "/proc/%s/status", de->d_name);
+        FILE* f = fopen(sp, "r");
+        if (!f) continue;
+        char line[256];
+        bool isroot = false;
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "Uid:", 4) == 0) {
+                unsigned u = 1;
+                if (sscanf(line + 4, "%u", &u) == 1) isroot = (u == 0);
+                break;
+            }
+        }
+        fclose(f);
+        if (isroot) { closedir(d); return true; }
+    }
+    closedir(d);
+    return false;
+}
+
+// Запускает root-копию процесса; родитель ждёт подтверждения и завершается.
+// Возвращает false, если root получить не удалось (продолжаем как есть).
+bool try_escalate_root(int argc, char* argv[]) {
+    if (getuid() == 0) return true;               // уже root
+    for (int i = 1; i < argc; i++)
+        if (strcmp(argv[i], "--rooted") == 0) return false;  // уже пробуем
+
+    char su[128] = {};
+    if (!find_su(su, sizeof(su))) {
+        fprintf(stderr, "[xvcen] su не найден: запусти от root, иначе память игры не прочитается\n");
+        return false;
+    }
+    bool dash_c = su_probe_works(su, true);
+    if (!dash_c && !su_probe_works(su, false)) {
+        fprintf(stderr, "[xvcen] root через %s не выдан (проверь диалог Magisk/KSU)\n", su);
+        return false;
+    }
+
+    char exe[512] = {};
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (n <= 0) return false;
+    exe[n] = 0;
+
+    // команда: "<exe>" --rooted [исходные аргументы]
+    char cmd[1024] = {};
+    int w = snprintf(cmd, sizeof(cmd), "\"%s\" --rooted", exe);
+    for (int i = 1; i < argc && w > 0 && w < (int)sizeof(cmd) - 2; i++)
+        w += snprintf(cmd + w, sizeof(cmd) - w, " \"%s\"", argv[i]);
+
+    fprintf(stderr, "[xvcen] перезапускаюсь от root (%s)...\n", su);
+    pid_t child = fork();
+    if (child < 0) return false;
+    if (child == 0) {
+        setsid();
+        if (dash_c) execl(su, su, "-c", cmd, (char*)nullptr);
+        else        execl(su, su, "0", "sh", "-c", cmd, (char*)nullptr);
+        _exit(127);
+    }
+    // Ждём до 15 секунд: если root-копия поднялась — выходим сразу, как
+    // только увидим её в /proc; если ребёнок умер — root не дали.
+    for (int waited = 0; waited < 150; waited++) {
+        int st = 0;
+        if (waitpid(child, &st, WNOHANG) == child) {
+            if (WIFEXITED(st) && WEXITSTATUS(st) == 127) {
+                fprintf(stderr, "[xvcen] su не смог запустить команду, продолжаю без root\n");
+                return false;
+            }
+            fprintf(stderr, "[xvcen] root-копия умерла (код %d), продолжаю без root\n",
+                    WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+            return false;
+        }
+        if (scan_root_copy(exe)) {
+            fprintf(stderr, "[xvcen] root-копия работает\n");
+            _exit(0);
+        }
+        usleep(100 * 1000);
+    }
+    _exit(0);  // таймаут: считаем, что root-копия поднялась (медленный /proc)
+}
+
+// ---- Хвост лога драйвера (для экрана загрузки) --------------------------------
+static char g_drvlog_tail[640] = {};
+const char* driver_log_tail() {
+    FILE* f = fopen("/data/local/tmp/ftdrv.log", "rb");
+    if (!f) { g_drvlog_tail[0] = 0; return g_drvlog_tail; }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    long off = sz > (long)(sizeof(g_drvlog_tail) - 1) ? sz - (long)(sizeof(g_drvlog_tail) - 1) : 0;
+    fseek(f, off, SEEK_SET);
+    size_t n = fread(g_drvlog_tail, 1, sizeof(g_drvlog_tail) - 1, f);
+    g_drvlog_tail[n] = 0;
+    fclose(f);
+    // выкидываем \r и непечатаемые
+    for (size_t i = 0; i < n; i++) {
+        char c = g_drvlog_tail[i];
+        if (c != '\n' && (c < 0x20 || c == 0x7f)) g_drvlog_tail[i] = ' ';
+    }
+    return g_drvlog_tail;
 }
 
 // ---- Публичное API ядрового драйвера ---------------------------------------------------

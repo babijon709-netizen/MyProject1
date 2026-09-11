@@ -4495,6 +4495,14 @@ static void RenderKernelLoad() {
                     C::U(col), ready ? "+" : "!");
     }
 
+    static double s_started = 0.0;
+    if (st == driver::KernelState::Launching && s_started == 0.0)
+        s_started = ImGui::GetTime();
+    if (st == driver::KernelState::Detecting || st == driver::KernelState::Ready ||
+        st == driver::KernelState::Failed || st == driver::KernelState::NoScript ||
+        st == driver::KernelState::NoRoot)
+        s_started = 0.0;
+
     const char* stateTitle = busy ? XS("Поднимаю драйвер ядра...") :
                              ready ? XS("Драйвер ядра готов") :
                                      XS("Драйвер ядра не поднялся");
@@ -4508,14 +4516,27 @@ static void RenderKernelLoad() {
     BootInfoRow(rowCursor, rowW, XS("Ядро"), driver::kernel_version()[0] ? driver::kernel_version() : "-", C::Txt());
     BootInfoRow(rowCursor, rowW, XS("Скрипт драйвера"),
                 driver::driver_script()[0] ? driver::driver_script() : "-", C::Txt());
-    BootInfoRow(rowCursor, rowW, XS("Root (su)"),
-                getuid() == 0 ? XS("есть (root)") :
-                (driver::su_path()[0] ? driver::su_path() : XS("не найден")),
-                (getuid() == 0 || driver::su_path()[0]) ? C::Acc() : C::Red());
+    BootInfoRow(rowCursor, rowW, XS("Root"),
+                getuid() == 0 ? XS("есть") :
+                (driver::su_path()[0] ? XS("нет (su есть, выдай доступ)") :
+                                        XS("нет (нужен Magisk/KSU)")),
+                getuid() == 0 ? C::Acc() : C::Red());
+    {
+        pid_t gp = find_pid(TARGET_PACKAGE);
+        char gbuf[32];
+        if (gp > 0) snprintf(gbuf, sizeof(gbuf), "pid %d", (int)gp);
+        else snprintf(gbuf, sizeof(gbuf), "%s", XS("не запущена"));
+        BootInfoRow(rowCursor, rowW, XS("Игра"), gbuf, gp > 0 ? C::Acc() : C::Red());
+    }
+    if (busy && s_started > 0.0) {
+        char ebuf[32];
+        snprintf(ebuf, sizeof(ebuf), "%.0f с", ImGui::GetTime() - s_started);
+        BootInfoRow(rowCursor, rowW, XS("Прошло"), ebuf, C::Dim());
+    }
     BootInfoRow(rowCursor, rowW, XS("Статус"), driver::kernel_state_text(),
                 ready ? C::Acc() : (bad ? C::Red() : C::Dim()));
     if (driver::kernel_verified())
-        BootInfoRow(rowCursor, rowW, XS("Память игры"), XS("читается через ядро"), C::Acc());
+        BootInfoRow(rowCursor, rowW, XS("Память игры"), XS("читается"), C::Acc());
 
     const char* err = driver::last_error();
     if (bad && err[0]) {
@@ -4525,23 +4546,31 @@ static void RenderKernelLoad() {
         rowCursor.y += et.y + 8.f;
     }
 
-    // Кнопки: «Продолжить» (можно и после ошибки — память может открыться
-    // обычным путём, если софт запущен от root) и «Назад».
+    // Хвост лога скрипта драйвера — видно, что он напечатал.
+    {
+        const char* tail = driver::driver_log_tail();
+        if (tail && tail[0]) {
+            float lfs = fs * 0.78f;
+            dl->AddText(ImGui::GetFont(), lfs, { pos.x + pad, rowCursor.y + 2.f },
+                        C::UA(C::Dim(), 0.9f), tail, nullptr, rowW - 8.f);
+            auto lt = ImGui::GetFont()->CalcTextSizeA(lfs, FLT_MAX, rowW - 8.f, tail);
+            rowCursor.y += lt.y + 6.f;
+        }
+    }
+
+    // Кнопки: «Продолжить» (доступна всегда — можно не ждать драйвер) и «Назад».
     float btnW = (sz.x - pad * 2.f - 12.f) * 0.5f;
     float btnH = 74.f;
     float btnY = pos.y + sz.y - pad - btnH;
     static float animGo = 0.f, animBack = 0.f;
-    bool canGo = !busy;
     bool go = BootButton({ pos.x + pad, btnY }, { pos.x + pad + btnW, btnY + btnH },
-                         XS("Продолжить"), canGo ? XS("к игре") : XS("подожди..."),
-                         canGo ? C::Acc() : C::TrkOff(), animGo, dt);
+                         XS("Продолжить"), XS("к игре"), C::Acc(), animGo, dt);
     bool back = BootButton({ pos.x + pad + btnW + 12.f, btnY }, { pos.x + sz.x - pad, btnY + btnH },
                            XS("Назад"), XS("выбрать режим"), C::TrkOff(), animBack, dt);
 
     ImGui::End();
     ImGui::PopStyleColor();
 
-    if (!canGo) go = false;
     if (go) { PlaySound(SND_CLICK); EnterRunning(); }
     else if (back) { PlaySound(SND_CLICK); g_boot = BootPhase::Select; }
 }
@@ -4968,15 +4997,15 @@ void RenderMenu() {
             {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles[g_state.cur_tab]);
 
         // Бейдж режима доступа: KERNEL (через ядро) / NONKERNEL. Справа в
-        // шапке — мелкая пилюля, чтобы всегда видеть, как читается игра.
+        // шапке — мелкая пилюля; точка зелёная, когда игра реально подключена.
         {
             bool kernel = (driver::mode() == driver::Mode::Kernel);
             const char* badge = kernel ? "KERNEL" : "NONKERNEL";
             float bfs = ImGui::GetFontSize() * 0.62f;
             auto bsz = ImGui::GetFont()->CalcTextSizeA(bfs, FLT_MAX, 0, badge);
             float bpad = 10.f;
-            float dotR = kernel ? 3.4f : 0.f;   // зелёная точка у KERNEL
-            float bw   = bsz.x + bpad * 2.f + (dotR > 0.f ? dotR * 2.f + 6.f : 0.f);
+            float dotR = 3.4f;                       // точка статуса подключения
+            float bw   = bsz.x + bpad * 2.f + dotR * 2.f + 6.f;
             float bh   = bsz.y + 12.f;
             float bx1  = hp.x + cW - 18.f;
             float bx0  = bx1 - bw;
@@ -4984,8 +5013,8 @@ void RenderMenu() {
             cdl->AddRectFilled({bx0, by0}, {bx1, by0 + bh}, C::UA(kernel ? C::Acc() : C::Dim(), 0.16f), R::Pill);
             cdl->AddRect({bx0, by0}, {bx1, by0 + bh}, C::UA(kernel ? C::Acc() : C::Dim(), 0.45f), R::Pill, 0, 1.f);
             float tx = bx0 + bpad;
-            if (dotR > 0.f) {
-                bool ok = driver::kernel_state() == driver::KernelState::Ready;
+            {
+                bool ok = g_esp_attached;
                 cdl->AddCircleFilled({tx + dotR, by0 + bh * 0.5f}, dotR,
                                      ok ? IM_COL32(90, 220, 130, 255) : IM_COL32(240, 180, 70, 255));
                 tx += dotR * 2.f + 6.f;
@@ -5123,6 +5152,10 @@ int main(int argc, char* argv[]) {
     signal(SIGINT,  [](int) { main_thread_flag.store(false); });
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
     signal(SIGHUP,  [](int) { main_thread_flag.store(false); });
+
+    // Память игры читается только с правами root (или после патча ядра).
+    // Если нас запустили без root и есть su — перезапускаемся от root.
+    driver::try_escalate_root(argc, argv);
 
     prot::Init();
     screen_config();
