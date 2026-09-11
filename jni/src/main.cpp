@@ -3781,16 +3781,18 @@ static void UpdateFarm(float dt) {
     // The X can be on the FAR side of the node: the tool cannot reach it
     // through the trunk/boulder, so first circle until it faces us (orbit).
     const bool  isTree = (tgt.kind == 0);
-    // Close enough to mine (body aim). "At the node" is the BODY distance
-    // — it is stable while the bot stands in the standoff band, unlike the
-    // old sticky aim_dist<=1.05 metric: after an X hop the bot sat at
-    // ad 1.06-1.47, OUTSIDE that metric (no phase 2, no taps!) but INSIDE
-    // the walk band (no walk needed either) — it stood for seconds without
-    // swinging and the phase-1 watchdog then dragged it into the evade
-    // dance ("бегает туда-сюда" in the log). The band + arc own the exact
-    // positioning; the phase only needs "we are at the node".
+    // Close enough to mine. "At the node" is the distance to the WALK
+    // POINT — the live X when it is up, the node body otherwise: the same
+    // point the standoff band and the braking are measured against.
+    // (log s10, ore: the X sits ~1.5 m off the rock centre, so the bot
+    // parked at ad 1.3-1.5 where the band wants it, but the BODY distance
+    // was 2.45-2.75 — OUTSIDE the old body metric (d<=2.4). Phase stuck
+    // at 1 = no taps for 20-30 s until the X dropped or hopped close,
+    // then phase 2 and a burst of taps: "то добывает то нет". The arc hit
+    // the same boundary mid-strafe and the phase-1 diagonal walk kicked
+    // in, lurching the bot around the rock: "двигался хаотично".)
     const float reachX = isTree ? 2.6f : 2.4f;
-    const bool  atNode = tgt.dist <= reachX;
+    const bool  atNode = tgt.walk_dist <= reachX;
     // Strike the mark head-on: the body should stand roughly on the
     // radial line through the X — swinging at a mark that sits 40-60 deg
     // AROUND the trunk lands on the bark from the side. But the X hops
@@ -3956,7 +3958,13 @@ static void UpdateFarm(float dt) {
             // the trunk). Stick size = distance to the stop line: full
             // run far away, walk mid-way, slow creep over the last
             // ~1.5 m — velocity tapers to ~0 exactly at the band.
-            if (fabsf(tgt.walk_yaw) < 45.f) {
+            // The walk yaw is the angle to the WALK POINT (the live X when
+            // it is up). Marks around the side of a rock can sit >45 deg
+            // off while we are still 3-6 m out — the old gate made the bot
+            // stand in the open (no walk, no arc yet: not atNode, no
+            // deflected stick for the watchdog) — 60 deg lets it close
+            // diagonally; the steer clamp above keeps the walk on-axis.
+            if (fabsf(tgt.walk_yaw) < 60.f) {
                 const float stopAt = isTree ? 1.35f : 1.70f;
                 const float toGo   = tgt.walk_dist - stopAt;
                 if (toGo > 0.f) {
