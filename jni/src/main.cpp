@@ -3140,6 +3140,31 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::RowH);
         ToggleRow("##wd0", XS("Всегда день"), &g_state.always_day, g_state.a_always_day, true, true);
 
+        // ---- Kernel driver status ----
+        SHdr(XS("Драйвер"));
+        {
+            bool active = esp_kdriver_active();
+            const char* backend = esp_kdriver_backend_name();
+            const char* dev = esp_kdriver_device_path();
+            char buf[128];
+            if (active)
+                snprintf(buf, sizeof(buf), "KDRV: %s [%s] ACTIVE", backend ? backend : "?", dev ? dev : "");
+            else
+                snprintf(buf, sizeof(buf), "KDRV: %s NO DRIVER (proc_vm fallback blocked)", backend ? backend : "proc_vm");
+
+            auto* dl = ImGui::GetWindowDrawList();
+            float avW = ImGui::GetContentRegionAvail().x;
+            const float inset = Layout::Inset;
+            const float rowH = Layout::RowH;
+            auto pos = ImGui::GetCursorScreenPos();
+            CardBg(rowH);
+            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize()*1.0f,
+                        {pos.x + inset + Layout::PadX, pos.y + (rowH - ImGui::GetFontSize())*0.5f},
+                        active ? IM_COL32(80,255,120,255) : IM_COL32(255,80,80,255),
+                        buf);
+            ImGui::Dummy({avW, rowH});
+        }
+
         ImGui::Dummy({1.f, 12.f});
     }
 

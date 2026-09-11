@@ -66,6 +66,11 @@ struct EspMarker {
 
 bool        esp_init(pid_t pid);
 void        esp_reset();
+// Kernel driver status (for UI / logs). Backend name: \"proc_vm\", \"kernel:dev_file\", \"kernel:socket_hook\", \"none\"
+bool        esp_kdriver_active();
+const char* esp_kdriver_backend_name();
+const char* esp_kdriver_device_path();
+void        esp_set_kdriver_required(bool req); // runtime: false = allow proc_vm fallback
 void        esp_set_skeleton_enabled(bool enabled);
 // Enable the ore / animal / loot / pickup marker scan (all off = no work).
 void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups);

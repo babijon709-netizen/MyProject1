@@ -19,6 +19,9 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <fcntl.h>
+#include <android/log.h>
+
+static void farm_log_append(const char* line); // forward for early logging in esp_init
 
 using namespace game_offsets;
 
@@ -3530,13 +3533,72 @@ bool esp_camera_angles(float& yaw_deg, float& pitch_deg) {
 //   C  = players with a valid cached skeleton
 //   D  = distinct transform hierarchies used by the bones (re-parenting),
 //        then the per-bone mask torso|armL|armR|legL|legR.
+// Strict mode: require kernel driver. Comment out to allow proc_vm fallback.
+//#define KDRV_REQUIRE_FALLBACK
+#ifndef KDRV_REQUIRE_FALLBACK
+#define KDRV_REQUIRE
+#endif
+static bool g_kdrv_require = true; // runtime flag, default strict
+void esp_set_kdriver_required(bool req) { g_kdrv_require = req; }
+
 bool esp_init(pid_t pid) {
     g_pid = pid;
     kdrv_init(pid);
+
+    const char* backend = kdrv_backend_name();
+    const char* dev = kdrv_device_path();
+    bool active = kdrv_is_active();
+    int fd = kdrv_fd();
+
+    // Logcat (adb logcat -s xvcen)
+    __android_log_print(ANDROID_LOG_INFO, "xvcen",
+                        "kdriver init pid=%d backend=%s dev=%s fd=%d active=%d require=%d",
+                        (int)pid, backend ? backend : "null",
+                        dev ? dev : "", fd, active ? 1 : 0, g_kdrv_require ? 1 : 0);
+
+    char line[256];
+    snprintf(line, sizeof(line), "KDRV backend=%s dev=%s fd=%d active=%d pid=%d require=%d\n",
+             backend ? backend : "null", dev ? dev : "", fd, active ? 1 : 0, (int)pid, g_kdrv_require ? 1 : 0);
+    farm_log_append(line);
+
+    bool require = g_kdrv_require;
+#ifdef KDRV_REQUIRE
+    require = true; // compile-time forces strict
+#endif
+#ifdef KDRV_REQUIRE_FALLBACK
+    require = g_kdrv_require; // allow runtime control when fallback explicitly enabled
+#endif
+
+    if (!active) {
+        __android_log_print(ANDROID_LOG_WARN, "xvcen",
+                            "kdriver fallback proc_vm - no kernel driver found (/dev/* ioctl 0x801/601 + socket probe failed) require=%d",
+                            require ? 1 : 0);
+        farm_log_append("KDRV WARN fallback proc_vm - driver not found\n");
+        if (require) {
+            __android_log_print(ANDROID_LOG_ERROR, "xvcen", "KDRV REQUIRE failed pid=%d backend=%s -> esp_init FAIL (driver mandatory)", (int)pid, backend);
+            farm_log_append("KDRV REQUIRE FAIL: no kernel driver -> esp_init false\n");
+            return false;
+        }
+        farm_log_append("KDRV fallback allowed, using process_vm_readv\n");
+    } else {
+        __android_log_print(ANDROID_LOG_INFO, "xvcen", "kdriver ACTIVE via %s backend=%s", dev ? dev : "?", backend ? backend : "?");
+        snprintf(line, sizeof(line), "KDRV ACTIVE %s %s\n", backend ? backend : "null", dev ? dev : "");
+        farm_log_append(line);
+    }
+
     g_il2cpp_base = get_base("libil2cpp.so");
-    if (!g_il2cpp_base) return false;
+    if (!g_il2cpp_base) {
+        __android_log_print(ANDROID_LOG_ERROR, "xvcen", "get_base libil2cpp.so failed backend=%s active=%d", backend, active ? 1 : 0);
+        farm_log_append("KDRV get_base libil2cpp FAILED\n");
+        return false;
+    }
     return true;
 }
+
+// Helpers for UI / menu to show which backend is in use
+bool esp_kdriver_active() { return kdrv_is_active(); }
+const char* esp_kdriver_backend_name() { return kdrv_backend_name(); }
+const char* esp_kdriver_device_path() { return kdrv_device_path(); }
 
 // KCC.Move.Position: the simulated character position (capsule bottom) the
 // game itself moves the character with. Independent of the discovered
