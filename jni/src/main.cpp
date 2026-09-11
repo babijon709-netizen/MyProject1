@@ -4430,7 +4430,7 @@ static void RenderBootSelect() {
     bool pickNonKernel = BootButton({ btnX, btnY + btnH + 14.f }, { btnX + btnW, btnY + btnH * 2.f + 14.f },
         "NONKERNEL", XS("обычный режим (process_vm)"), C::TrkOff(), animNonKernel, dt);
 
-    const char* hint = XS("KERNEL: драйвер прошивается вручную, чтение напрямую через ядро");
+    const char* hint = XS("KERNEL требует прошитый FT-драйвер (установка вручную)");
     auto ht = ImGui::GetFont()->CalcTextSizeA(fs * 0.82f, FLT_MAX, 0, hint);
     dl->AddText(ImGui::GetFont(), fs * 0.82f,
                 { cx - ht.x * 0.5f, pos.y + sz.y - pad - ht.y }, C::UA(C::Dim(), 0.8f), hint);
@@ -4440,9 +4440,17 @@ static void RenderBootSelect() {
 
     if (pickKernel) {
         PlaySound(SND_CLICK);
-        driver::set_mode(driver::Mode::Kernel);
-        applog::write("выбран режим KERNEL (чтение напрямую через ядро)");
-        EnterRunning();
+        // KERNEL работает только с прошитым FT-драйвером: софт проверяет,
+        // что ядро пропускает непривилегированное чтение (это и есть патч
+        // драйвера). Без драйвера — не пускаем, иначе это был бы обычный
+        // экстернал от root.
+        if (driver::driver_active()) {
+            driver::set_mode(driver::Mode::Kernel);
+            applog::write("выбран режим KERNEL (драйвер в ядре активен)");
+            EnterRunning();
+        } else {
+            ShowToast(XS("Драйвер ядра не прошит (см. DRIVER_MODE.md)"));
+        }
     } else if (pickNonKernel) {
         PlaySound(SND_CLICK);
         driver::set_mode(driver::Mode::NonKernel);

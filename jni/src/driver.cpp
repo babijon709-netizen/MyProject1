@@ -224,6 +224,65 @@ bool write_process_memory(pid_t pid, uint64_t addr, const void* in, size_t len) 
 
 Stats stats() { return g_stats; }
 
+// ---- Проверка, что FT-драйвер прошит в ядро --------------------------------
+// FT-драйвер патчит в ядре проверки доступа (ptrace_may_access и родственные):
+// после прошивки ЧУЖУЮ память может читать даже непривилегированный процесс.
+// Именно это и проверяем: ребёнок роняет свои права до обычного пользователя
+// (uid 2000, shell) и пробует прочитать 8 байт кода нашего root-процесса
+// прямым syscall process_vm_readv.
+//   ядро без драйвера -> EPERM (читать чужое нельзя);
+//   ядро с драйвером  -> чтение проходит.
+// Так KERNEL-режим зависит именно от драйвера, а не от прав root.
+bool driver_active() {
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+    uint64_t addr = (uint64_t)(uintptr_t)&driver_active;   // валидный адрес в нас
+
+    pid_t child = fork();
+    if (child < 0) { close(fds[0]); close(fds[1]); return false; }
+    if (child == 0) {
+        // ребёнок: непривилегированный пользователь
+        close(fds[0]);
+        if (setgid(2000) != 0 || setuid(2000) != 0) _exit(50);
+        unsigned char buf[8];
+        struct iovec l = { buf, sizeof(buf) };
+        struct iovec r = { (void*)(uintptr_t)addr, sizeof(buf) };
+        ssize_t n = pv_readv(getppid(), &l, 1, &r, 1, 0);
+        if (n > 0) _exit(42);                    // прочиталось — драйвер в ядре
+        unsigned char e = (unsigned char)(errno ? errno : 99);
+        if (write(fds[1], &e, 1) < 0) {}         // отдадим errno родителю
+        _exit(43);
+    }
+    close(fds[1]);
+
+    int st = 0;
+    bool done = false;
+    for (int i = 0; i < 30 && !done; i++) {       // до 3 секунд
+        if (waitpid(child, &st, WNOHANG) == child) { done = true; break; }
+        usleep(100 * 1000);
+    }
+    if (!done) { kill(child, SIGKILL); waitpid(child, &st, 0); close(fds[0]);
+                 applog::write("KERNEL: probe драйвера завис — считаю, что драйвера нет");
+                 return false; }
+
+    unsigned char e = 0;
+    ssize_t got = read(fds[0], &e, 1);
+    close(fds[0]);
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 42) {
+        applog::write("KERNEL: FT-драйвер в ядре активен "
+                      "(непривилегированное чтение прошло)");
+        return true;
+    }
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 50) {
+        applog::write("KERNEL: не смог сбросить права для probe — считаю, что драйвера нет");
+        return false;
+    }
+    applog::write("KERNEL: FT-драйвер не обнаружен в ядре (непривилегированное "
+                  "чтение: errno %d)%s", (int)(got == 1 ? e : 0),
+                  (got == 1 && e == 1) ? " — доступ запрещён, драйвер не прошит" : "");
+    return false;
+}
+
 // ---- Режим -------------------------------------------------------------------
 void set_mode(Mode m) {
     g_mode.store((int)m);
