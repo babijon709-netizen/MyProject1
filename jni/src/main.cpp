@@ -3989,7 +3989,7 @@ static void UpdateFarm(float dt) {
             // Ore standoff: ~1.3 m from the X (requested). Trees 0.70-1.30.
             float backAt  = tgt.has_spot ? (isTree ? 0.70f : 1.15f)
                                          : (isTree ? 0.95f : 1.00f);
-            float creepAt = tgt.has_spot ? (isTree ? 1.30f : 1.50f)
+            float creepAt = tgt.has_spot ? (isTree ? 1.30f : 1.30f)
                                          : (isTree ? 1.35f : 1.70f);
             if (toHit < backAt) {
                 wantWalk = true;
