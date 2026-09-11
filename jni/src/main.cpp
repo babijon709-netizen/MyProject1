@@ -4298,7 +4298,7 @@ static void DrawBootBackdrop(float alpha) {
 
 // Большая кнопка режима: ручная отрисовка + InvisibleButton.
 static bool BootButton(ImVec2 min, ImVec2 max, const char* title, const char* sub,
-                       ImVec4 accent, bool& pressedAnim, float dt) {
+                       ImVec4 accent, float& pressedAnim, float dt) {
     char id[32];
     snprintf(id, sizeof(id), "##bootbtn_%s", title);
     ImGui::SetCursorScreenPos(min);
@@ -4336,7 +4336,7 @@ static void BootInfoRow(ImVec2& cursor, float width, const char* key, const char
     auto tv = ImGui::GetFont()->CalcTextSizeA(fs * 0.95f, FLT_MAX, 0, value);
     dl->AddText(ImGui::GetFont(), fs * 0.95f, cursor, C::U(C::Dim()), key);
     dl->AddText(ImGui::GetFont(), fs * 0.95f, { cursor.x + width - tv.x, cursor.y },
-                valueColor, value);
+                C::U(valueColor), value);
     (void)tk;
     cursor.y += fs * 1.55f;
 }
