@@ -6576,7 +6576,7 @@ bool esp_farm_get_target(FarmTarget& out) {
                 if (ex * ex + ey * ey + ez * ez > 2.25F) {
                     s_aim_ease = spot;
                 } else {
-                    const float k = 0.065F; // ~1 - exp(-4 dt) at 60 fps
+                    const float k = 0.10F;  // ~1 - exp(-6 dt) at 60 fps
                     s_aim_ease.x += ex * k;
                     s_aim_ease.y += ey * k;
                     s_aim_ease.z += ez * k;

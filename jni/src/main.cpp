@@ -3946,8 +3946,8 @@ static void UpdateFarm(float dt) {
             // stand still and strike. Pure strafe (no forward): the
             // standoff distance is kept, only the angle is fixed.
             wantWalk = true;
-            px = cx + r * 0.95f * tgt.orbit_side;
-            py = cy;
+            px = cx + r * 0.75f * tgt.orbit_side;   // 0.95 overshot the
+            py = cy;                                // 10 deg exit line
         } else if (phase == 1) {
             // Approach: run until close, then BRAKE proportionally so the
             // bot arrives inside the standoff band instead of crashing
@@ -3994,22 +3994,30 @@ static void UpdateFarm(float dt) {
             // creep in to a safe approach stop, back off inside the
             // collision zone.
             float toHit   = tgt.has_spot ? tgt.aim_dist : tgt.dist;
-            // Ore standoff: ~1.3 m from the X (requested). Trees 0.70-1.30.
-            float backAt  = tgt.has_spot ? (isTree ? 0.70f : 1.15f)
-                                         : (isTree ? 0.95f : 1.00f);
-            float creepAt = tgt.has_spot ? (isTree ? 1.30f : 1.30f)
-                                         : (isTree ? 1.35f : 1.70f);
+            // Standoff the bot SETTLES at: ore ~1.15-1.30 from the X
+            // (requested), trees 0.70-1.30. The stick ACTUATION edges are
+            // wider than the standoff (log s11): a 0.15 m actuation band
+            // with a 0.45 crawl stick made the bot bounce +-0.4 m every
+            // 0.8 s (33 F/B flips), the "moving" tap gate suppressed every
+            // swing in between, and the camera chased the bounce — mining
+            // took minutes. Now the stick only corrects drift past the
+            // edges; inside 1.00-1.45 it stays at centre and the swings
+            // go out at a normal cadence.
+            float backAt  = tgt.has_spot ? (isTree ? 0.60f : 1.00f)
+                                         : (isTree ? 0.80f : 0.85f);
+            float creepAt = tgt.has_spot ? (isTree ? 1.45f : 1.45f)
+                                         : (isTree ? 1.50f : 1.85f);
             if (toHit < backAt) {
                 wantWalk = true;
                 px = cx;
-                py = cy + r * 0.45f;      // pressed in: ease back
+                py = cy + r * 0.30f;      // pressed in: slow ease back
             } else if (toHit > creepAt) {
                 wantWalk = true;
                 float steer = tgt.walk_yaw / 60.f;
                 if (steer >  1.f) steer =  1.f;
                 if (steer < -1.f) steer = -1.f;
                 px = cx + r * 0.35f * steer;
-                py = cy - r * 0.45f;      // still short: walking pace
+                py = cy - r * 0.30f;      // still short: slow creep
             }
         }
 
@@ -4086,14 +4094,15 @@ static void UpdateFarm(float dt) {
             bool settled = tgt.has_spot
                 ? (fabsf(tgt.yaw) <= 1.6f && fabsf(tgt.pitch) <= 2.0f)
                 : (fabsf(tgt.yaw) <= 8.f && fabsf(tgt.pitch) <= 10.f);
-            // A deflected stick only counts as "moving" when the player is
-            // actually moving: the game will not walk down a steep slope or
-            // through a wall, so the stick stays deflected while the body
-            // stands still. Blocking the swing on the deflection alone left
-            // the bot standing at a slope-locked ore for a minute with zero
-            // taps (log s8). Standing (blocked or not) + settled reticle =
-            // swing; the swing harmlessly whiffs when out of reach.
-            const bool moving = stickDeflected && tgt.player_speed > 0.4f;
+            // Suppress the swing only for REAL movement: the approach run,
+            // an evade manoeuvre, or a fast walk (>1 m/s). Band
+            // micro-corrections (~0.5 m/s crawl) and a blocked
+            // stick-pushed stand do NOT count — the camera keeps the
+            // reticle on the mark while the body shuffles, and the swing
+            // still lands on it. (log s8: a slope-locked stand with zero
+            // taps; log s11: the band flap's crawl suppressed nearly
+            // every swing — 9 taps in 50 s.)
+            const bool moving = s_evadeTime > 0.f || tgt.player_speed > 1.0f;
             if (!settled || moving) {
                 if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; }
                 s_tapTimer = 0;   // next tap fires the moment the reticle settles
