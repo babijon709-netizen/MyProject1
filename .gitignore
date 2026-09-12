@@ -2,3 +2,14 @@ obj/
 
 __pycache__/
 *.pyc
+
+# генерируется build.sh: встроенный в бинарник bw_mem.ko
+jni/src/bw_ko_data.h
+
+# артефакты сборки драйвера (CI)
+kernel_driver/bw_mem.ko
+kernel_driver/.*.cmd
+kernel_driver/Module.symvers
+kernel_driver/modules.order
+linux-5.10.255.tar.xz
+linux-5.10.255/

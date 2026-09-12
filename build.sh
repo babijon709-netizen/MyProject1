@@ -18,6 +18,67 @@ fi
 echo "Using NDK at ${NDK}"
 "${NDK}/ndk-build" --version || true
 
+# ---- Сборка своего драйвера bw_mem.ko (Linux 5.10.255, arm64) ---------------
+# Модуль встраивается в бинарник массивом байт (jni/src/bw_ko_data.h):
+# команда --loadmod без пути извлекает и загружает его на устройстве.
+# Ядро 5.10.255 = версия устройства (SuiKernel); vermagic/CRC расходятся со
+# стоком, поэтому загрузка идёт с MODULE_INIT_IGNORE_MODVERSIONS|IGNORE_VERMAGIC.
+KVER="5.10.255"
+KDIR="${ROOT}/linux-${KVER}"
+KO_OUT="${ROOT}/kernel_driver/bw_mem.ko"
+KO_HDR="${ROOT}/jni/src/bw_ko_data.h"
+
+build_ko() {
+    if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+        sudo apt-get update -qq || true
+        sudo apt-get install -y -qq gcc-aarch64-linux-gnu bison flex bc libelf-dev || return 1
+    fi
+    command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || return 1
+
+    if [[ ! -d "${KDIR}" ]]; then
+        curl -fsSL --retry 3 -o "linux-${KVER}.tar.xz" \
+             "https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${KVER}.tar.xz" \
+        || curl -fsSL --retry 3 -o "linux-${KVER}.tar.xz" \
+             "https://mirrors.edge.kernel.org/pub/linux/kernel/v5.x/linux-${KVER}.tar.xz" \
+        || return 1
+        tar -xf "linux-${KVER}.tar.xz" || return 1
+    fi
+
+    [[ -f "${KDIR}/.config" ]] || \
+        make -C "${KDIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig || return 1
+    [[ -f "${KDIR}/scripts/module.lds" ]] || \
+        make -C "${KDIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" modules_prepare || return 1
+    touch "${KDIR}/Module.symvers"
+
+    make -C "${KDIR}" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+         M="${ROOT}/kernel_driver" modules || return 1
+    [[ -f "${KO_OUT}" ]]
+}
+
+if build_ko; then
+    file "${KO_OUT}"
+    python3 - "${KO_OUT}" "${KO_HDR}" <<'PYEOF'
+import sys
+data = open(sys.argv[1], 'rb').read()
+with open(sys.argv[2], 'w') as f:
+    f.write("// Сгенерировано build.sh из kernel_driver/bw_mem.ko — НЕ редактировать.\n")
+    f.write("// Встроенный драйвер benzware; извлекается командой --loadmod.\n")
+    f.write("static const unsigned char bw_ko_data[] = {\n")
+    for i in range(0, len(data), 20):
+        f.write("  " + ", ".join(str(b) for b in data[i:i+20]) + ",\n")
+    f.write("};\n")
+    f.write("static const unsigned long bw_ko_size = sizeof(bw_ko_data); // %d байт\n" % len(data))
+print("embedded bw_mem.ko: %d bytes" % len(data))
+PYEOF
+else
+    echo "::warning::bw_mem.ko не собрался — бинарник будет без встроенного драйвера"
+    cat > "${KO_HDR}" <<'EOF'
+// bw_mem.ko не собрался (см. warning в логе CI) — встроенного драйвера нет.
+static const unsigned char bw_ko_data[] = { 0 };
+static const unsigned long bw_ko_size = 0;
+EOF
+fi
+
 export NDK_PROJECT_PATH="${ROOT}"
 export NDK_APPLICATION_MK="${ROOT}/jni/Application.mk"
 

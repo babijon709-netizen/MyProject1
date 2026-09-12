@@ -7,6 +7,16 @@
 #include <dirent.h>
 #include <sys/syscall.h>
 #include <sys/prctl.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <cstdint>
+#include "bwmem_ioctl.h"    // протокол своего драйвера bw_mem
+#if __has_include("bw_ko_data.h")
+#include "bw_ko_data.h"     // встроенный bw_mem.ko (генерирует build.sh)
+#else
+static const unsigned char bw_ko_data[] = { 0 };
+static const unsigned long bw_ko_size = 0;
+#endif
 #include "game_offsets.h"   // PLAYER_BOX_WIDTH_RATIO (box proportions)
 #include <cmath>
 #include <atomic>
@@ -5217,6 +5227,175 @@ static void FtProbe() {
     printf("[ftprobe] готово, детали в %s\n", applog::path());
 }
 
+// ---- Свой драйвер bw_mem: загрузка/выгрузка/самотест ------------------------
+// Загрузка: ./xvcen.sh --loadmod /data/local/tmp/bw_mem.ko [name=xyz ...]
+// Выгрузка: ./xvcen.sh --unloadmod [имя_модуля]   (по умолчанию bw_mem)
+// После загрузки софт сам делает PING + самотест: читает собственную память
+// через драйвер — полный круг проверки без запуска игры.
+
+static void BwSelfTest(const char* devpath) {
+    int fd = open(devpath, O_RDWR);
+    if (fd < 0) {
+        applog::write("loadmod: %s не открывается (%s) — посмотри dmesg | tail -20",
+                      devpath, strerror(errno));
+        printf("[loadmod] open %s: %s\n", devpath, strerror(errno));
+        return;
+    }
+
+    struct bw_ping p;
+    memset(&p, 0, sizeof(p));
+    if (ioctl(fd, BW_IOCTL_PING, &p) != 0) {
+        applog::write("loadmod: PING ioctl: %s", strerror(errno));
+        printf("[loadmod] PING: %s\n", strerror(errno));
+        close(fd);
+        return;
+    }
+    applog::write("loadmod: PING: ver=%u, kallsyms-резолв=%s (kln=0x%llx)",
+                  p.ver, p.kln_ok ? "ОК" : "НЕТ (kprobe не сработал — пришли dmesg!)",
+                  (unsigned long long)p.kln_addr);
+    printf("[loadmod] PING ver=%u kln_ok=%u\n", p.ver, p.kln_ok);
+    if (!p.kln_ok) { close(fd); return; }
+
+    // самотест: читаем собственную память через драйвер
+    volatile int probe = 0x1337C0DE;
+    struct bw_attach att;
+    memset(&att, 0, sizeof(att));
+    att.pid = (uint32_t)getpid();
+    if (ioctl(fd, BW_IOCTL_ATTACH, &att) != 0) {
+        applog::write("loadmod: ATTACH(self): %s", strerror(errno));
+        printf("[loadmod] ATTACH: %s\n", strerror(errno));
+        close(fd);
+        return;
+    }
+
+    unsigned char buf[4] = {0, 0, 0, 0};
+    struct bw_read rd;
+    memset(&rd, 0, sizeof(rd));
+    rd.addr = (uint64_t)(uintptr_t)&probe;
+    rd.buf  = (uint64_t)(uintptr_t)buf;
+    rd.len  = 4;
+    long r = ioctl(fd, BW_IOCTL_READ, &rd);
+    int got = 0;
+    memcpy(&got, buf, 4);
+    bool ok = (r == 4) && (got == 0x1337C0DE);
+    applog::write("loadmod: самотест READ: ioctl=%ld, значение=0x%08x %s",
+                  r, got, ok ? "— СОВПАЛО, мост работает!" : "— НЕ совпало");
+    printf("[loadmod] selftest: %s\n", ok ? "OK — мост работает" : "FAIL");
+    close(fd);
+}
+
+static int BwLoadAndTest(int argc, char* argv[]) {
+    char kopath[300] = "";
+    char params[512] = "";
+
+    // первый аргумент после --loadmod: путь к .ko или сразу параметр (name=...).
+    // аргумент с '=' считаем параметром модуля, а не путём.
+    int first = 2;
+    if (argc > 2 && argv[2] && !strstr(argv[2], "=")) {
+        snprintf(kopath, sizeof(kopath), "%s", argv[2]);
+        first = 3;
+    }
+
+    // параметры модуля: всё остальное, склеенное пробелом
+    size_t plen = 0;
+    for (int i = first; i < argc; i++) {
+        size_t l = strlen(argv[i]);
+        if (plen + l + 2 >= sizeof(params)) break;
+        if (plen) params[plen++] = ' ';
+        memcpy(params + plen, argv[i], l);
+        plen += l;
+        params[plen] = 0;
+    }
+
+    // путь не указан — извлекаем встроенный bw_mem.ko
+    if (!kopath[0]) {
+        if (bw_ko_size == 0) {
+            applog::write("loadmod: встроенного драйвера нет (сборка без .ko) — "
+                          "укажи путь: --loadmod /data/local/tmp/bw_mem.ko");
+            printf("[loadmod] embedded ko missing\n");
+            return 1;
+        }
+        snprintf(kopath, sizeof(kopath), "/data/local/tmp/bw_mem.ko");
+        FILE* f = fopen(kopath, "wb");
+        if (!f) {
+            applog::write("loadmod: %s не создаётся (%s)", kopath, strerror(errno));
+            printf("[loadmod] %s: %s\n", kopath, strerror(errno));
+            return 1;
+        }
+        size_t w = fwrite(bw_ko_data, 1, bw_ko_size, f);
+        fclose(f);
+        chmod(kopath, 0644);
+        if (w != bw_ko_size) {
+            applog::write("loadmod: запись %s оборвалась (%lu из %lu)", kopath,
+                          (unsigned long)w, (unsigned long)bw_ko_size);
+            return 1;
+        }
+        applog::write("loadmod: извлёк встроенный драйвер (%lu байт) -> %s",
+                      (unsigned long)bw_ko_size, kopath);
+        printf("[loadmod] extracted embedded ko (%lu bytes) -> %s\n",
+               (unsigned long)bw_ko_size, kopath);
+    }
+
+    applog::write("loadmod: загружаю %s (params: '%s')", kopath, params);
+    printf("[loadmod] %s params='%s'\n", kopath, params);
+
+    int fd = open(kopath, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        applog::write("loadmod: open %s: %s", kopath, strerror(errno));
+        printf("[loadmod] open: %s\n", strerror(errno));
+        return 1;
+    }
+
+    // 3 = MODULE_INIT_IGNORE_MODVERSIONS | MODULE_INIT_IGNORE_VERMAGIC:
+    // модуль собран по стоковому linux-5.10.255, а ядро устройства — кастом
+    // (SuiKernel), vermagic и CRC символов не совпадают — потому игнорируем.
+    long r = syscall(__NR_finit_module, fd, params, 3);
+    close(fd);
+    if (r != 0) {
+        int e = errno;
+        if (e == EEXIST) {
+            applog::write("loadmod: модуль уже загружен (EEXIST) — просто проверяю его");
+            printf("[loadmod] already loaded, testing\n");
+        } else {
+            applog::write("loadmod: finit_module: %s", strerror(e));
+            if (e == ENOKEY || e == EKEYREJECTED)
+                applog::write("loadmod: ядро требует подписанные модули (CONFIG_MODULE_SIG_FORCE)");
+            if (e == EPERM)
+                applog::write("loadmod: загрузка модулей запрещена (modules_disabled?)");
+            printf("[loadmod] FAILED: %s — подробности: dmesg | tail -20\n", strerror(e));
+            return 1;
+        }
+    } else {
+        applog::write("loadmod: модуль загружен (finit_module ok)");
+        printf("[loadmod] loaded\n");
+    }
+
+    // имя устройства: параметр name=... или bwmem по умолчанию
+    char devname[64] = BW_MEM_DEV_DEFAULT;
+    for (char* s = strstr(params, "name="); s; s = strstr(s + 5, "name=")) {
+        char* d = devname;
+        s += 5;
+        while (*s && *s != ' ' && d < devname + sizeof(devname) - 1) *d++ = *s++;
+        *d = 0;
+    }
+    char devpath[96];
+    snprintf(devpath, sizeof(devpath), "/dev/%s", devname);
+    BwSelfTest(devpath);
+    return 0;
+}
+
+static int BwUnload(const char* modname) {
+    long r = syscall(__NR_delete_module, modname, 0);
+    if (r != 0) {
+        applog::write("unloadmod: delete_module(%s): %s", modname, strerror(errno));
+        printf("[unloadmod] %s\n", strerror(errno));
+        return 1;
+    }
+    applog::write("unloadmod: модуль %s выгружен", modname);
+    printf("[unloadmod] ok\n");
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     signal(SIGINT,  [](int) { main_thread_flag.store(false); });
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
@@ -5235,6 +5414,18 @@ int main(int argc, char* argv[]) {
         driver::try_escalate_root(argc, argv);
         FtProbe();
         return 0;
+    }
+
+    // Свой драйвер bw_mem: ./xvcen.sh --loadmod [путь/к/bw_mem.ko] [name=xyz]
+    // Без пути — извлекается встроенный в бинарник bw_mem.ko.
+    if (argc > 1 && strcmp(argv[1], "--loadmod") == 0) {
+        driver::try_escalate_root(argc, argv);
+        return BwLoadAndTest(argc, argv);
+    }
+    // Выгрузка: ./xvcen.sh --unloadmod [имя_модуля]
+    if (argc > 1 && strcmp(argv[1], "--unloadmod") == 0) {
+        driver::try_escalate_root(argc, argv);
+        return BwUnload(argc > 2 ? argv[2] : BW_MOD_NAME);
     }
 
     // Память игры читается только с правами root (или после патча ядра).
