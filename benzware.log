@@ -1552,3 +1552,11 @@
 [11:55:50]   229 fuse
 [11:55:50]   242 rfkill
 [11:55:50] === ftprobe завершён: лог смотри выше / /sdcard/Download/benzware.log ===
+[12:41:57] === запуск: uid=0, ядро '5.10.255-SuiKernel-Stable-KSUN' ===
+[12:42:00] выбран режим KERNEL (чтение напрямую через ядро)
+[12:42:00] режим запущен: KERNEL
+[12:42:05] выход
+[12:43:25] === запуск: uid=0, ядро '5.10.255-SuiKernel-Stable-KSUN' ===
+[12:43:25] loadmod: извлёк встроенный драйвер (328264 байт) -> /data/local/tmp/bw_mem.ko
+[12:43:25] loadmod: загружаю /data/local/tmp/bw_mem.ko (params: '')
+[12:43:25] loadmod: finit_module: Exec format error
