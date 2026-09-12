@@ -4,6 +4,9 @@
 #include "applog.h"         // лог диагностики в «Загрузках»
 #include <sys/socket.h>
 #include <ctype.h>
+#include <dirent.h>
+#include <sys/syscall.h>
+#include <sys/prctl.h>
 #include "game_offsets.h"   // PLAYER_BOX_WIDTH_RATIO (box proportions)
 #include <cmath>
 #include <atomic>
@@ -4977,12 +4980,15 @@ void RenderMenu() {
     }
 }
 
-// ---- Зонд протокола FT-драйвера --------------------------------------------
+// ---- Зонд протокола FT-драйвера v2 ------------------------------------------
 // Запуск: ./xvcen.sh --ftprobe (из MT Manager / терминала, лучше от root).
 // Реверс показал: FT-драйвер регистирует в ядре КАСТОМНОЕ СЕМЕЙСТВО СОКЕТОВ,
 // клиент (демон) находит его перебором socket(fam, type=6, 0), fam ≈ 12..42.
-// Зонд повторяет этот перебор на реальном ядре и дампит всё, что выдаёт
-// ядро о загруженном модуле — это ключ к протоколу чтения памяти.
+// v2 добавляет: errno для КАЖДОГО fam (EAFNOSUPPORT = семейства нет, любой
+// другой код = семейство есть, но отказывает), скан всех типов сокетов,
+// повтор скана с comm='driver:probe' (вдруг модель фильтрует по имени),
+// поиск скрытых модулей (/sys/module минус /proc/modules), метки [модуль]
+// из /proc/kallsyms и хвост журнала ядра (судьба insmod).
 static void FtDumpFile(const char* path, const char* needle) {
     FILE* f = fopen(path, "rb");
     if (!f) { applog::write("ftprobe: %s не открывается (%s)", path, strerror(errno)); return; }
@@ -5008,35 +5014,189 @@ static void FtDumpFile(const char* path, const char* needle) {
     if (n == 0) applog::write("  (совпадений нет или файл пуст)");
 }
 
-static void FtProbe() {
-    applog::write("=== ftprobe: uid=%d, ядро '%s' ===", (int)getuid(),
-                  driver::kernel_version());
-    printf("[ftprobe] uid=%d kernel=%s\n", (int)getuid(), driver::kernel_version());
+// v2: важно различать errno: EAFNOSUPPORT = семейство НЕ зарегистрировано,
+// любой другой код = семейство ЗАРЕГИСТРИРОВАНО, но отказывает клиенту
+// (или не поддерживает такой тип сокета).
+static void FtScanSockets(const char* label, int type) {
+    applog::write("ftprobe: скан socket(fam, %s, 0) по fam 0..47 (успехи и errno != EAFNOSUPPORT):", label);
+    int answers = 0;
+    for (int fam = 0; fam <= 47; fam++) {
+        errno = 0;
+        int fd = socket(fam, type, 0);
+        if (fd >= 0) {
+            applog::write("  fam=%d: УСПЕХ (fd=%d) <== кандидат FT-семейства", fam, fd);
+            close(fd);
+            answers++;
+        } else if (errno != EAFNOSUPPORT) {
+            applog::write("  fam=%d: errno=%d (%s) <== семейство зарегистрировано", fam, errno, strerror(errno));
+            answers++;
+        }
+    }
+    if (answers == 0) applog::write("  (все fam -> EAFNOSUPPORT: посторонних семейств нет)");
+}
 
-    // 1) перебор семейств сокетов, как делает демон FT
-    applog::write("ftprobe: скан socket(fam, type=6, 0) по fam 0..44:");
-    for (int fam = 0; fam <= 44; fam++) {
+// Повтор скана с подменой имени процесса: если create() модуля пускает
+// только процессы с comm, как у демона ("driver:..."), это проявится.
+static void FtScanSpoofedComm() {
+    char old[32] = {0};
+    prctl(PR_GET_NAME, (unsigned long)old, 0, 0, 0);
+    prctl(PR_SET_NAME, (unsigned long)"driver:probe", 0, 0, 0);
+    applog::write("ftprobe: повторный скан type=6 с comm='driver:probe':");
+    int answers = 0;
+    for (int fam = 0; fam <= 47; fam++) {
         errno = 0;
         int fd = socket(fam, 6, 0);
         if (fd >= 0) {
-            applog::write("  fam=%d: УСПЕХ (fd=%d)  <== кандидат FT-семейства", fam, fd);
+            applog::write("  fam=%d: УСПЕХ (fd=%d) <== ОТВЕТ ПОД comm ДЕМОНА", fam, fd);
             close(fd);
+            answers++;
+        } else if (errno != EAFNOSUPPORT) {
+            applog::write("  fam=%d: errno=%d (%s)", fam, errno, strerror(errno));
+            answers++;
         }
     }
-    // контроль: те же fam с обычным типом (SOCK_DGRAM)
-    applog::write("ftprobe: контроль socket(fam, SOCK_DGRAM):");
-    for (int fam = 30; fam <= 44; fam++) {
-        errno = 0;
-        int fd = socket(fam, SOCK_DGRAM, 0);
-        if (fd >= 0) {
-            applog::write("  fam=%d (SOCK_DGRAM): успех", fam);
-            close(fd);
+    if (answers == 0) applog::write("  (все fam -> EAFNOSUPPORT)");
+    if (old[0]) prctl(PR_SET_NAME, (unsigned long)old, 0, 0, 0);
+}
+
+// Есть ли имя модуля в /proc/modules? -1 = файла нет, 0 = имени нет, 1 = есть.
+static int FtInProcModules(const char* name, size_t len) {
+    FILE* f = fopen("/proc/modules", "rb");
+    if (!f) return -1;
+    char line[512];
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, name, len) == 0 && (line[len] == ' ' || line[len] == '\t')) {
+            found = 1;
+            break;
         }
+    }
+    fclose(f);
+    return found;
+}
+
+// Скрытые модули: есть в /sys/module, но отсутствуют в /proc/modules.
+// Драйвер, вырезавший себя из списка модулей, обычно остаётся в /sys/module.
+// (Часть найденного может оказаться вкомпилированным в ядро (built-in) — это норма.)
+static void FtHiddenModules() {
+    DIR* d = opendir("/sys/module");
+    if (!d) { applog::write("ftprobe: /sys/module не открывается (%s)", strerror(errno)); return; }
+    static char names[256][96];
+    int n = 0;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr && n < 256) {
+        if (e->d_name[0] == '.') continue;
+        if (strlen(e->d_name) >= 96) continue;
+        snprintf(names[n], 96, "%s", e->d_name);
+        n++;
+    }
+    closedir(d);
+    int hidden = 0;
+    for (int i = 0; i < n; i++) {
+        if (FtInProcModules(names[i], strlen(names[i])) == 0) {
+            if (hidden == 0) applog::write("ftprobe: есть в /sys/module, но НЕТ в /proc/modules:");
+            applog::write("  %s", names[i]);
+            hidden++;
+        }
+    }
+    if (hidden == 0) applog::write("ftprobe: скрытых модулей нет (/sys/module = /proc/modules)");
+    else applog::write("  итого: %d (часть может быть built-in)", hidden);
+}
+
+// Все метки [имя_модуля] в /proc/kallsyms: модульные символы видны даже у
+// модулей, спрятанных из /proc/modules (если их не вычистили и из kallsyms).
+static void FtKallsymsModules() {
+    FILE* f = fopen("/proc/kallsyms", "rb");
+    if (!f) { applog::write("ftprobe: /proc/kallsyms не открывается (%s)", strerror(errno)); return; }
+    char line[1024];
+    static char names[96][80];
+    int n = 0;
+    while (fgets(line, sizeof(line), f) && n < 96) {
+        char* lb = strchr(line, '[');
+        if (!lb) continue;
+        char* rb = strchr(lb, ']');
+        if (!rb) continue;
+        *rb = 0;
+        const char* nm = lb + 1;
+        if (!*nm || strlen(nm) >= 80) continue;
+        int dup = 0;
+        for (int i = 0; i < n; i++) if (strcmp(names[i], nm) == 0) { dup = 1; break; }
+        if (!dup) { snprintf(names[n], 80, "%s", nm); n++; }
+    }
+    fclose(f);
+    applog::write("ftprobe: модули по меткам [имя] в /proc/kallsyms (%d):", n);
+    for (int i = 0; i < n; i++) applog::write("  [%s]", names[i]);
+}
+
+// Хвост журнала ядра: судьба insmod (ошибки загрузки модуля видны только тут).
+static void FtKlogTail() {
+    static char buf[300 * 1024];
+    errno = 0;
+    long n = (long)syscall(__NR_syslog, 3, buf, (long)(sizeof(buf) - 1)); // SYSLOG_ACTION_READ_ALL
+    if (n <= 0) {
+        applog::write("ftprobe: klog syslog(READ_ALL)=%ld errno=%d (%s)", n, errno, strerror(errno));
+        return;
+    }
+    if (n > (long)sizeof(buf) - 1) n = (long)sizeof(buf) - 1;
+    buf[n] = 0;
+
+    int lines = 0;
+    for (long i = 0; i < n; i++) if (buf[i] == '\n') lines++;
+    int skip = lines - 150;
+    if (skip < 0) skip = 0;
+    long start = 0;
+    while (skip > 0 && start < n) {
+        if (buf[start] == '\n') skip--;
+        start++;
     }
 
-    // 2) загруженные модули ядра
+    applog::write("ftprobe: журнал ядра, последние строки (всего в буфере %d):", lines);
+    for (long i = start; i < n; ) {
+        long j = i;
+        while (j < n && buf[j] != '\n') j++;
+        char line[256];
+        long l = j - i;
+        if (l > 255) l = 255;
+        memcpy(line, buf + i, (size_t)l);
+        line[l] = 0;
+        applog::write("  %s", line);
+        i = j + 1;
+    }
+
+    // отдельно: все строки буфера, где упоминаются модули
+    applog::write("ftprobe: строки klog про модули (module/insmod/taint/FT):");
+    int m = 0;
+    char* save = nullptr;
+    for (char* tok = strtok_r(buf, "\n", &save); tok; tok = strtok_r(nullptr, "\n", &save)) {
+        char low[256];
+        snprintf(low, sizeof(low), "%s", tok);
+        for (char* c = low; *c; c++) *c = (char)tolower((unsigned char)*c);
+        if (strstr(low, "module") || strstr(low, "insmod") || strstr(low, "taint") || strstr(tok, "FT")) {
+            applog::write("  %s", tok);
+            if (++m >= 150) { applog::write("  ... (обрезано)"); break; }
+        }
+    }
+    if (m == 0) applog::write("  (упоминаний модулей в klog нет)");
+}
+
+static void FtProbe() {
+    applog::write("=== ftprobe v2: uid=%d, ядро '%s' ===", (int)getuid(),
+                  driver::kernel_version());
+    printf("[ftprobe] uid=%d kernel=%s\n", (int)getuid(), driver::kernel_version());
+
+    // 1) скан семейств сокетов с полным логом errno
+    FtScanSockets("type=6 (как демон)", 6);
+    FtScanSockets("SOCK_DGRAM", SOCK_DGRAM);
+    FtScanSockets("SOCK_STREAM", SOCK_STREAM);
+    FtScanSockets("SOCK_SEQPACKET", SOCK_SEQPACKET);
+    FtScanSockets("SOCK_RAW", SOCK_RAW);
+    FtScanSpoofedComm();
+
+    // 2) загруженные модули + поиск скрытых
     applog::write("ftprobe: /proc/modules:");
     FtDumpFile("/proc/modules", "");
+    FtHiddenModules();
+    FtKallsymsModules();
 
     // 3) символы ядра, похожие на FT-драйвер
     applog::write("ftprobe: /proc/kallsyms (поиск 'ft'):");
@@ -5050,7 +5210,10 @@ static void FtProbe() {
     applog::write("ftprobe: /proc/misc:");
     FtDumpFile("/proc/misc", "");
 
-    applog::write("=== ftprobe завершён: лог смотри выше / %s ===", applog::path());
+    // 5) журнал ядра
+    FtKlogTail();
+
+    applog::write("=== ftprobe v2 завершён: %s ===", applog::path());
     printf("[ftprobe] готово, детали в %s\n", applog::path());
 }
 
