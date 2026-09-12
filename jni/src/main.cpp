@@ -2,6 +2,8 @@
 #include "game.h"
 #include "driver.h"         // режимы NONKERNEL / KERNEL (FT-драйвер)
 #include "applog.h"         // лог диагностики в «Загрузках»
+#include <sys/socket.h>
+#include <ctype.h>
 #include "game_offsets.h"   // PLAYER_BOX_WIDTH_RATIO (box proportions)
 #include <cmath>
 #include <atomic>
@@ -4975,6 +4977,83 @@ void RenderMenu() {
     }
 }
 
+// ---- Зонд протокола FT-драйвера --------------------------------------------
+// Запуск: ./xvcen.sh --ftprobe (из MT Manager / терминала, лучше от root).
+// Реверс показал: FT-драйвер регистирует в ядре КАСТОМНОЕ СЕМЕЙСТВО СОКЕТОВ,
+// клиент (демон) находит его перебором socket(fam, type=6, 0), fam ≈ 12..42.
+// Зонд повторяет этот перебор на реальном ядре и дампит всё, что выдаёт
+// ядро о загруженном модуле — это ключ к протоколу чтения памяти.
+static void FtDumpFile(const char* path, const char* needle) {
+    FILE* f = fopen(path, "rb");
+    if (!f) { applog::write("ftprobe: %s не открывается (%s)", path, strerror(errno)); return; }
+    char line[512];
+    int n = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (needle && *needle) {
+            // поиск подстроки без учёта регистра
+            char low[512];
+            snprintf(low, sizeof(low), "%s", line);
+            for (char* c = low; *c; c++) *c = (char)tolower((unsigned char)*c);
+            char ln[64];
+            snprintf(ln, sizeof(ln), "%s", needle);
+            for (char* c = ln; *c; c++) *c = (char)tolower((unsigned char)*c);
+            if (!strstr(low, ln)) continue;
+        }
+        size_t len = strlen(line);
+        while (len && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = 0;
+        applog::write("  %s", line);
+        if (++n >= 200) { applog::write("  ... (обрезано до 200 строк)"); break; }
+    }
+    fclose(f);
+    if (n == 0) applog::write("  (совпадений нет или файл пуст)");
+}
+
+static void FtProbe() {
+    applog::write("=== ftprobe: uid=%d, ядро '%s' ===", (int)getuid(),
+                  driver::kernel_version());
+    printf("[ftprobe] uid=%d kernel=%s\n", (int)getuid(), driver::kernel_version());
+
+    // 1) перебор семейств сокетов, как делает демон FT
+    applog::write("ftprobe: скан socket(fam, type=6, 0) по fam 0..44:");
+    for (int fam = 0; fam <= 44; fam++) {
+        errno = 0;
+        int fd = socket(fam, 6, 0);
+        if (fd >= 0) {
+            applog::write("  fam=%d: УСПЕХ (fd=%d)  <== кандидат FT-семейства", fam, fd);
+            close(fd);
+        }
+    }
+    // контроль: те же fam с обычным типом (SOCK_DGRAM)
+    applog::write("ftprobe: контроль socket(fam, SOCK_DGRAM):");
+    for (int fam = 30; fam <= 44; fam++) {
+        errno = 0;
+        int fd = socket(fam, SOCK_DGRAM, 0);
+        if (fd >= 0) {
+            applog::write("  fam=%d (SOCK_DGRAM): успех", fam);
+            close(fd);
+        }
+    }
+
+    // 2) загруженные модули ядра
+    applog::write("ftprobe: /proc/modules:");
+    FtDumpFile("/proc/modules", "");
+
+    // 3) символы ядра, похожие на FT-драйвер
+    applog::write("ftprobe: /proc/kallsyms (поиск 'ft'):");
+    FtDumpFile("/proc/kallsyms", "ft");
+    applog::write("ftprobe: /proc/kallsyms (поиск 'driver'):");
+    FtDumpFile("/proc/kallsyms", "driver");
+
+    // 4) устройства
+    applog::write("ftprobe: /proc/devices:");
+    FtDumpFile("/proc/devices", "");
+    applog::write("ftprobe: /proc/misc:");
+    FtDumpFile("/proc/misc", "");
+
+    applog::write("=== ftprobe завершён: лог смотри выше / %s ===", applog::path());
+    printf("[ftprobe] готово, детали в %s\n", applog::path());
+}
+
 int main(int argc, char* argv[]) {
     signal(SIGINT,  [](int) { main_thread_flag.store(false); });
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
@@ -4987,6 +5066,13 @@ int main(int argc, char* argv[]) {
                   (int)getuid(), driver::kernel_version());
     if (applog::path()[0])
         fprintf(stderr, "[benzware] лог: %s\n", applog::path());
+
+    // Диагностика FT-драйвера: ./xvcen.sh --ftprobe
+    if (argc > 1 && strcmp(argv[1], "--ftprobe") == 0) {
+        driver::try_escalate_root(argc, argv);
+        FtProbe();
+        return 0;
+    }
 
     // Память игры читается только с правами root (или после патча ядра).
     // Если нас запустили без root и есть su — перезапускаемся от root.
