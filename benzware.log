@@ -783,3 +783,772 @@
 [11:40:11]   229 fuse
 [11:40:11]   242 rfkill
 [11:40:11] === ftprobe завершён: лог смотри выше / /sdcard/Download/benzware.log ===
+[11:55:32] === запуск: uid=0, ядро '5.10.255-SuiKernel-Stable-KSUN' ===
+[11:55:32] === ftprobe: uid=0, ядро '5.10.255-SuiKernel-Stable-KSUN' ===
+[11:55:32] ftprobe: скан socket(fam, type=6, 0) по fam 0..44:
+[11:55:32] ftprobe: контроль socket(fam, SOCK_DGRAM):
+[11:55:32]   fam=30 (SOCK_DGRAM): успех
+[11:55:32]   fam=31 (SOCK_DGRAM): успех
+[11:55:32]   fam=36 (SOCK_DGRAM): успех
+[11:55:32] ftprobe: /proc/modules:
+[11:55:32]   wlan_drv_gen4m_6789 2801664 0 - Live 0x0000000000000000 (O)
+[11:55:32]   wmt_chrdev_wifi 61440 1 wlan_drv_gen4m_6789, Live 0x0000000000000000 (O)
+[11:55:32]   gps_pwr 20480 2 - Live 0x0000000000000000 (O)
+[11:55:32]   gps_drv_stp 131072 2 - Live 0x0000000000000000 (O)
+[11:55:32]   fmradio_drv_mt6631_6635 294912 0 - Live 0x0000000000000000 (O)
+[11:55:32]   bt_drv_connac1x 69632 0 - Live 0x0000000000000000 (O)
+[11:55:32]   wmt_drv 1617920 6 wlan_drv_gen4m_6789,wmt_chrdev_wifi,gps_drv_stp,fmradio_drv_mt6631_6635,bt_drv_connac1x, Live 0x0000000000000000 (O)
+[11:55:32]   connfem 57344 0 - Live 0x0000000000000000 (O)
+[11:55:32]   trans_sched 49152 0 - Live 0x0000000000000000 (O)
+[11:55:32]   shrink_slabd 16384 0 - Live 0x0000000000000000 (O)
+[11:55:32]   look_around 20480 0 - Live 0x0000000000000000 (O)
+[11:55:32]   tnek 24576 0 - Live 0x0000000000000000
+[11:55:32]   atomic_info 16384 0 - Live 0x0000000000000000
+[11:55:32]   lzo_rle 16384 0 - Live 0x0000000000000000
+[11:55:32]   lzo 16384 0 - Live 0x0000000000000000
+[11:55:32]   tran_fre 126976 0 - Live 0x0000000000000000 (PO)
+[11:55:32]   pnpmgr 135168 0 - Live 0x0000000000000000
+[11:55:32]   tran_perf_util 20480 0 - Live 0x0000000000000000
+[11:55:32]   transsion_resmonitor 32768 0 - Live 0x0000000000000000
+[11:55:32]   nfc_i2c 49152 0 - Live 0x0000000000000000
+[11:55:32]   fs3xxx_haptic 122880 0 - Live 0x0000000000000000
+[11:55:32]   aw862xx_haptic 163840 0 - Live 0x0000000000000000
+[11:55:32]   mtk_disp_sec 20480 0 - Live 0x0000000000000000
+[11:55:32]   spmtwam 32768 0 - Live 0x0000000000000000
+[11:55:32]   pmsr 16384 0 - Live 0x0000000000000000
+[11:55:32]   task_turbo 86016 0 - Live 0x0000000000000000
+[11:55:32]   fair 32768 0 - Live 0x0000000000000000
+[11:55:32]   mtk_perf_common 57344 0 - Live 0x0000000000000000
+[11:55:32]   widevine_driver 24576 0 - Live 0x0000000000000000
+[11:55:32]   vdec_fmt 143360 2 - Live 0x0000000000000000
+[11:55:32]   uload_ind 36864 0 - Live 0x0000000000000000
+[11:55:32]   load_track 16384 1 uload_ind, Live 0x0000000000000000
+[11:55:32]   mtk_cm_mgr_mt6789 20480 0 - Live 0x0000000000000000
+[11:55:32]   camera_isp 647168 0 - Live 0x0000000000000000
+[11:55:32]   cam_qos 24576 1 camera_isp, Live 0x0000000000000000
+[11:55:32]   camera_mem 131072 0 - Live 0x0000000000000000
+[11:55:32]   archcounter_timesync 20480 1 camera_isp,[permanent], Live 0x0000000000000000
+[11:55:32]   camera_dip_isp6s 790528 0 - Live 0x0000000000000000
+[11:55:32]   camera_eeprom 176128 0 - Live 0x0000000000000000
+[11:55:32]   imgsensor_isp6s 397312 0 - Live 0x0000000000000000
+[11:55:32]   mtk_pm_domain_disable_unused 16384 0 - Live 0x0000000000000000
+[11:55:32]   clk_disable_unused 16384 0 - Live 0x0000000000000000
+[11:55:32]   sensorhub 98304 0 - Live 0x0000000000000000
+[11:55:32]   hf_manager 53248 5 sensorhub, Live 0x0000000000000000
+[11:55:32]   fhctl 159744 0 - Live 0x0000000000000000
+[11:55:32]   mtk_lpm_dbg_mt6789 69632 0 - Live 0x0000000000000000
+[11:55:32]   mtk_lpm_plat_v1 32768 0 - Live 0x0000000000000000
+[11:55:32]   mtk_lpm_dbg_common_v1 110592 2 mtk_lpm_dbg_mt6789,mtk_lpm_plat_v1, Live 0x0000000000000000
+[11:55:32]   mtk_lpm 65536 3 mtk_lpm_dbg_mt6789,mtk_lpm_plat_v1,mtk_lpm_dbg_common_v1, Live 0x0000000000000000
+[11:55:32]   camera_fdvt_isp51 569344 0 - Live 0x0000000000000000
+[11:55:32]   camera_rsc_isp60 110592 0 - Live 0x0000000000000000
+[11:55:32]   mtk_irtx_pwm 20480 0 - Live 0x0000000000000000
+[11:55:32]   mtk_pwm 86016 1 mtk_irtx_pwm, Live 0x0000000000000000
+[11:55:32]   trace_mmstat 36864 0 - Live 0x0000000000000000
+[11:55:32]   flashlights_aw36515 28672 0 - Live 0x0000000000000000
+[11:55:32]   flashlight 61440 1 flashlights_aw36515, Live 0x0000000000000000
+[11:55:32]   sub2af 32768 0 - Live 0x0000000000000000
+[11:55:32]   subaf 65536 0 - Live 0x0000000000000000
+[11:55:32]   main3af 40960 0 - Live 0x0000000000000000
+[11:55:32]   main2af 110592 0 - Live 0x0000000000000000
+[11:55:32]   mainaf 274432 0 - Live 0x0000000000000000
+[11:55:32]   trancam_driver_elapsedtime 16384 6 imgsensor_isp6s,sub2af,subaf,main3af,main2af,mainaf, Live 0x0000000000000000
+[11:55:32]   fpsgo 1150976 0 - Live 0x0000000000000000 (PO)
+[11:55:32]   mtk_fpsgo 520192 3 tran_fre,pnpmgr,fpsgo, Live 0x0000000000000000
+[11:55:32]   mtk_cm_mgr 49152 2 mtk_cm_mgr_mt6789,mtk_fpsgo, Live 0x0000000000000000
+[11:55:32]   mtk_cm_ipi 16384 2 mtk_cm_mgr_mt6789,mtk_cm_mgr, Live 0x0000000000000000
+[11:55:32]   mtk_perf_ioctl 32768 1 mtk_fpsgo, Live 0x0000000000000000
+[11:55:32]   cpuqos_v3 61440 1 mtk_perf_ioctl, Live 0x0000000000000000
+[11:55:32]   mtk_core_ctl 73728 1 mtk_perf_ioctl, Live 0x0000000000000000
+[11:55:32]   scheduler 163840 4 trans_sched,task_turbo,mtk_perf_ioctl,mtk_core_ctl, Live 0x0000000000000000
+[11:55:32]   cpufreq_sugov_ext 57344 3 mtk_fpsgo,mtk_core_ctl,scheduler, Live 0x0000000000000000
+[11:55:32]   cpudvfs 24576 0 - Live 0x0000000000000000
+[11:55:32]   mtk_dvfsrc_start 16384 0 - Live 0x0000000000000000
+[11:55:32]   mcupm 40960 1 fhctl, Live 0x0000000000000000
+[11:55:32]   mtk_cqdma 36864 0 - Live 0x0000000000000000
+[11:55:32]   mtk_heap_debug 53248 0 - Live 0x0000000000000000
+[11:55:32]   gz_virtio_mod 32768 0 - Live 0x0000000000000000
+[11:55:32]   gz_irq_mod 28672 0 - Live 0x0000000000000000
+[11:55:32]   gz_main_mod 49152 0 - Live 0x0000000000000000
+[11:55:32]   gz_log_mod 28672 0 - Live 0x0000000000000000
+[11:55:32]   mtk_vcodec_enc_v1 180224 0 - Live 0x0000000000000000
+[11:55:32]   mtk_vcodec_dec_v1 180224 0 - Live 0x0000000000000000
+[11:55:32]   mtk_vcu 126976 2 - Live 0x0000000000000000
+[11:55:32]   mtk_vcodec_common 69632 3 mtk_vcodec_enc_v1,mtk_vcodec_dec_v1,mtk_vcu, Live 0x0000000000000000
+[11:55:32]   mtk_jpeg 61440 0 - Live 0x0000000000000000
+[11:55:32]   vcp 139264 3 mtk_vcodec_enc_v1,mtk_vcodec_dec_v1,mtk_vcu, Live 0x0000000000000000
+[11:55:32]   atf_logger 36864 0 - Live 0x0000000000000000
+[11:55:32]   mddp 102400 1 wlan_drv_gen4m_6789, Live 0x0000000000000000
+[11:55:32]   mt6789_mt6366 53248 1 - Live 0x0000000000000000
+[11:55:32]   snd_soc_mt6366 155648 2 mt6789_mt6366, Live 0x0000000000000000
+[11:55:32]   snd_soc_fs1599 73728 1 mt6789_mt6366, Live 0x0000000000000000
+[11:55:32]   snd_soc_mt6789_afe 327680 2 mt6789_mt6366, Live 0x0000000000000000
+[11:55:32]   snd_soc_mtk_scp_ultra 36864 2 snd_soc_mt6789_afe, Live 0x0000000000000000
+[11:55:32]   mtk_scp_ultra 16384 1 snd_soc_mtk_scp_ultra, Live 0x0000000000000000
+[11:55:32]   snd_soc_mtk_common 77824 4 snd_soc_mt6789_afe, Live 0x0000000000000000
+[11:55:32]   mtk_btcvsd 40960 1 - Live 0x0000000000000000
+[11:55:32]   snd_soc_tfa98xx 221184 0 - Live 0x0000000000000000
+[11:55:32]   snd_soc_rt5512 40960 0 - Live 0x0000000000000000
+[11:55:32]   richtek_spm_cls 24576 1 snd_soc_rt5512, Live 0x0000000000000000
+[11:55:32]   mtk_sp_spk_amp 20480 4 mt6789_mt6366,snd_soc_tfa98xx,snd_soc_rt5512,richtek_spm_cls, Live 0x0000000000000000
+[11:55:32]   mtk_scp_audio 69632 3 snd_soc_mt6789_afe,snd_soc_mtk_common,mtk_sp_spk_amp, Live 0x0000000000000000
+[11:55:32]   snd_soc_audiodsp_common 106496 2 snd_soc_mtk_common,mtk_sp_spk_amp, Live 0x0000000000000000
+[11:55:32]   audio_ipi 245760 4 snd_soc_mtk_common,mtk_sp_spk_amp,mtk_scp_audio,snd_soc_audiodsp_common, Live 0x0000000000000000
+[11:55:32]   mtk_scp_audiocommon 20480 2 mtk_scp_audio,audio_ipi, Live 0x0000000000000000
+[11:55:32]   adsp 102400 3 snd_soc_mtk_common,snd_soc_audiodsp_common,audio_ipi, Live 0x0000000000000000
+[11:55:32]   mt6358_accdet 45056 2 mt6789_mt6366,snd_soc_mt6366, Live 0x0000000000000000
+[11:55:32]   nvmem_mt635x_efuse 16384 4 - Live 0x0000000000000000
+[11:55:32]   connadp 49152 3 wlan_drv_gen4m_6789,gps_pwr,wmt_drv, Live 0x0000000000000000
+[11:55:32]   btif_drv 159744 1 wmt_drv, Live 0x0000000000000000
+[11:55:32]   backlight_cooling 16384 0 - Live 0x0000000000000000
+[11:55:32]   charger_cooling 16384 0 - Live 0x0000000000000000
+[11:55:32]   md_cooling_all 36864 0 - Live 0x0000000000000000
+[11:55:32]   board_temp 20480 0 - Live 0x0000000000000000
+[11:55:32]   thermal_trace 102400 1 md_cooling_all, Live 0x0000000000000000
+[11:55:32]   thermal_generic_adc 16384 0 - Live 0x0000000000000000
+[11:55:32]   pmic_temp 24576 0 - Live 0x0000000000000000
+[11:55:32]   soc_temp_lvts 90112 0 - Live 0x0000000000000000
+[11:55:32]   mali_kbase_mt6789 1056768 41 - Live 0x0000000000000000 (O)
+[11:55:32]   mtk_gpufreq_mt6789 114688 0 - Live 0x0000000000000000
+[11:55:32]   syscon_reboot_mode 16384 0 - Live 0x0000000000000000
+[11:55:32]   reboot_mode 16384 1 syscon_reboot_mode, Live 0x0000000000000000
+[11:55:32]   mtk_cpu_power_throttling 16384 0 - Live 0x0000000000000000
+[11:55:32]   mtk_md_power_throttling 16384 0 - Live 0x0000000000000000
+[11:55:32]   mtk_usb_f_rndis 45056 2 - Live 0x0000000000000000
+[11:55:32]   mtk_u_ether 53248 1 mtk_usb_f_rndis, Live 0x0000000000000000
+[11:55:32]   c2k_usb_f_via_pcv 16384 0 - Live 0x0000000000000000
+[11:55:32]   c2k_usb_f_via_modem 16384 1 - Live 0x0000000000000000
+[11:55:32]   c2k_usb_f_via_gps 16384 0 - Live 0x0000000000000000
+[11:55:32]   c2k_usb_f_via_ets 16384 1 - Live 0x0000000000000000
+[11:55:32]   c2k_usb_f_via_atc 16384 1 - Live 0x0000000000000000
+[11:55:32]   c2k_usb 53248 8 c2k_usb_f_via_pcv,c2k_usb_f_via_modem,c2k_usb_f_via_gps,c2k_usb_f_via_ets,c2k_usb_f_via_atc, Live 0x0000000000000000
+[11:55:32]   ccci_fsm_scp 24576 0 [permanent], Live 0x0000000000000000
+[11:55:32]   ccci_dpmaif 823296 0 - Live 0x0000000000000000
+[11:55:32]   ccci_ccif 110592 1 ccci_dpmaif, Live 0x0000000000000000
+[11:55:32]   ccci_rtc 16384 0 [permanent], Live 0x0000000000000000
+[11:55:32]   ccci_md_clk 16384 0 [permanent], Live 0x0000000000000000
+[11:55:32]   mtk_ssc_dbg_v2 16384 0 - Live 0x0000000000000000
+[11:55:32]   clk_dbg_mt6789 20480 0 - Live 0x0000000000000000
+[11:55:32]   mt63xx_oc_debug 20480 0 - Live 0x0000000000000000
+[11:55:32]   ccci_md_all 610304 43 wlan_drv_gen4m_6789,wmt_drv,mddp,snd_soc_mtk_common,md_cooling_all,mtk_md_power_throttling,c2k_usb,ccci_fsm_scp,ccci_dpmaif,ccci_ccif,mt63xx_oc_debug,[permanent], Live 0x0000000000000000
+[11:55:32]   ccmni 40960 2 ccci_dpmaif,ccci_md_all, Live 0x0000000000000000
+[11:55:32]   rps_perf 16384 2 mtk_u_ether,ccmni, Live 0x0000000000000000
+[11:55:32]   ccci_auxadc 16384 1 ccci_md_all,[permanent], Live 0x0000000000000000
+[11:55:32]   ccci_util_lib 139264 22 snd_soc_mtk_common,ccci_fsm_scp,ccci_dpmaif,ccci_ccif,ccci_rtc,ccci_md_clk,ccci_md_all,ccci_auxadc,[permanent], Live 0x0000000000000000
+[11:55:32]   mdp_drv_mt6789 622592 4 - Live 0x0000000000000000
+[11:55:32]   cmdq_sec_drv 65536 9 mtk_disp_sec,camera_fdvt_isp51,mtk_vcu,mdp_drv_mt6789,[permanent], Live 0x0000000000000000
+[11:55:32]   mtk_sec_heap 40960 10 mtk_disp_sec,widevine_driver,camera_mem,camera_fdvt_isp51,mtk_heap_debug,gz_main_mod,mtk_vcodec_enc_v1,mtk_vcodec_dec_v1,mtk_vcu,mdp_drv_mt6789, Live 0x0000000000000000
+[11:55:32]   trusted_mem 90112 2 gz_main_mod,mtk_sec_heap, Live 0x0000000000000000
+[11:55:32]   iommu_gz 16384 5 mtk_vcodec_enc_v1,mtk_vcodec_dec_v1,mtk_vcu,mtk_sec_heap,trusted_mem, Live 0x0000000000000000
+[11:55:32]   gz_tz_system 61440 4 gz_main_mod,cmdq_sec_drv,trusted_mem,iommu_gz, Live 0x0000000000000000
+[11:55:32]   gz_ipc_mod 57344 2 gz_main_mod,gz_tz_system, Live 0x0000000000000000
+[11:55:32]   gz_trusty_mod 40960 6 gz_virtio_mod,gz_irq_mod,gz_main_mod,gz_log_mod,gz_tz_system,gz_ipc_mod, Live 0x0000000000000000
+[11:55:32]   mtk_scp_vow 16384 0 - Live 0x0000000000000000
+[11:55:32]   mtk_vow 118784 3 mtk_scp_vow, Live 0x0000000000000000
+[11:55:32]   scp 192512 8 sensorhub,snd_soc_mtk_scp_ultra,mtk_scp_audio,audio_ipi,mtk_scp_audiocommon,ccci_fsm_scp,mtk_scp_vow,mtk_vow, Live 0x0000000000000000
+[11:55:32]   mtk_afe_external 20480 5 snd_soc_mtk_scp_ultra,mtk_scp_ultra,snd_soc_mtk_common,mtk_scp_vow,scp, Live 0x0000000000000000
+[11:55:32]   mtk_swpm_dbg_v6789 49152 0 - Live 0x0000000000000000
+[11:55:32]   mtk_swpm_dbg_common_v1 16384 1 mtk_swpm_dbg_v6789, Live 0x0000000000000000
+[11:55:32]   ged 352256 3 mtk_fpsgo,mali_kbase_mt6789,mtk_swpm_dbg_common_v1, Live 0x0000000000000000
+[11:55:32]   mtk_gpu_qos 24576 2 mali_kbase_mt6789,ged, Live 0x0000000000000000
+[11:55:32]   mtk_qos 36864 3 mtk_perf_common,mtk_swpm_dbg_v6789,mtk_gpu_qos, Live 0x0000000000000000
+[11:55:32]   mtk_swpm 36864 2 mtk_swpm_dbg_v6789,mtk_swpm_dbg_common_v1, Live 0x0000000000000000
+[11:55:32]   sspm_v3 32768 5 mali_kbase_mt6789,mtk_swpm_dbg_v6789,ged,mtk_qos,mtk_swpm, Live 0x0000000000000000
+[11:55:32]   zram 135168 1 - Live 0x0000000000000000
+[11:55:32]   zsmalloc 57344 1 zram, Live 0x0000000000000000
+[11:55:32]   gt9896s 122880 0 - Live 0x0000000000000000
+[11:55:32]   gt9886 122880 0 - Live 0x0000000000000000
+[11:55:32]   tran_fp 151552 2 - Live 0x0000000000000000
+[11:55:32]   tran_rhi 28672 2 atomic_info,zram, Live 0x0000000000000000
+[11:55:32]   tkv_recovery 53248 0 - Live 0x0000000000000000
+[11:55:32]   tkv 53248 0 - Live 0x0000000000000000
+[11:55:32]   sec 94208 0 - Live 0x0000000000000000
+[11:55:32]   mtk_socinfo 16384 0 - Live 0x0000000000000000
+[11:55:32]   mtk_mbox_mailbox 20480 2 [permanent], Live 0x0000000000000000
+[11:55:32]   mac80211 1359872 0 - Live 0x0000000000000000
+[11:55:32]   cfg80211 1351680 2 wlan_drv_gen4m_6789,mac80211, Live 0x0000000000000000
+[11:55:32]   mediatek_cpufreq_hw 28672 0 - Live 0x0000000000000000
+[11:55:32]   meta 45056 0 - Live 0x0000000000000000
+[11:55:32]   reset_ti_syscon 16384 4 - Live 0x0000000000000000
+[11:55:32]   mtk_dvfsrc_devfreq 16384 0 - Live 0x0000000000000000
+[11:55:32]   mtk_dvfsrc_helper 143360 1 mtk_perf_common, Live 0x0000000000000000
+[11:55:32]   tcpci_late_sync 16384 0 [permanent], Live 0x0000000000000000
+[11:55:32]   extcon_mtk_usb 20480 0 - Live 0x0000000000000000
+[11:55:32]   leds_mtk_pwm 16384 0 - Live 0x0000000000000000
+[11:55:32]   leds_mtk_disp 16384 0 - Live 0x0000000000000000
+[11:55:32]   rt4831a_drv 24576 1 leds_mtk_disp, Live 0x0000000000000000
+[11:55:32]   pwm_mtk_disp 32768 1 - Live 0x0000000000000000
+[11:55:32]   mt6358_battery 409600 1 - Live 0x0000000000000000
+[11:55:32]   rt_pd_manager 20480 0 - Live 0x0000000000000000
+[11:55:32]   tran_battery_aging 36864 0 - Live 0x0000000000000000
+[11:55:32]   mtk_pep50 135168 0 - Live 0x0000000000000000
+[11:55:32]   mtk_tran_hvdcp20 40960 0 - Live 0x0000000000000000
+[11:55:32]   mtk_tran_tc30 40960 0 - Live 0x0000000000000000
+[11:55:32]   sc8548_charger 45056 0 - Live 0x0000000000000000
+[11:55:32]   usb_switch 24576 0 - Live 0x0000000000000000
+[11:55:32]   pca_rfc_ta 20480 0 - Live 0x0000000000000000
+[11:55:32]   tran_auto_test 32768 4 mt6358_battery,mtk_pep50,usb_switch,pca_rfc_ta, Live 0x0000000000000000
+[11:55:32]   rfc_ta 28672 0 - Live 0x0000000000000000
+[11:55:32]   prop_ta_class 32768 4 mtk_pep50,usb_switch,pca_rfc_ta,rfc_ta, Live 0x0000000000000000
+[11:55:32]   mtk_pd_charging 45056 0 - Live 0x0000000000000000
+[11:55:32]   ... (обрезано до 200 строк)
+[11:55:32] ftprobe: /proc/kallsyms (поиск 'ft'):
+[11:55:32]   0000000000000000 T __do_softirq
+[11:55:32]   0000000000000000 T __softirqentry_text_start
+[11:55:32]   0000000000000000 T __softirqentry_text_end
+[11:55:32]   0000000000000000 T aarch64_insn_gen_add_sub_shifted_reg
+[11:55:32]   0000000000000000 T aarch64_insn_gen_logical_shifted_reg
+[11:55:32]   0000000000000000 t init_cpu_ftr_reg
+[11:55:32]   0000000000000000 t check_update_ftr_reg
+[11:55:32]   0000000000000000 T read_sanitised_ftr_reg
+[11:55:32]   0000000000000000 t search_cmp_ftr_reg$ca828aab88baaa9a5acc2d1f15999e57
+[11:55:32]   0000000000000000 T __arm64_compat_sys_aarch32_ftruncate64
+[11:55:32]   0000000000000000 T kvm_pmu_software_increment
+[11:55:32]   0000000000000000 T __traceiter_softirq_entry
+[11:55:32]   0000000000000000 T __traceiter_softirq_exit
+[11:55:32]   0000000000000000 T __traceiter_softirq_raise
+[11:55:32]   0000000000000000 t trace_event_raw_event_softirq$67f91ce390f543cbb01a05d6888f867f
+[11:55:32]   0000000000000000 t perf_trace_softirq$67f91ce390f543cbb01a05d6888f867f
+[11:55:32]   0000000000000000 t __bpf_trace_softirq$67f91ce390f543cbb01a05d6888f867f
+[11:55:32]   0000000000000000 T do_softirq
+[11:55:32]   0000000000000000 T raise_softirq_irqoff
+[11:55:32]   0000000000000000 T __raise_softirq_irqoff
+[11:55:32]   0000000000000000 T raise_softirq
+[11:55:32]   0000000000000000 T open_softirq
+[11:55:32]   0000000000000000 t trace_raw_output_softirq$67f91ce390f543cbb01a05d6888f867f
+[11:55:32]   0000000000000000 t ksoftirqd_should_run$67f91ce390f543cbb01a05d6888f867f
+[11:55:32]   0000000000000000 t run_ksoftirqd$67f91ce390f543cbb01a05d6888f867f
+[11:55:32]   0000000000000000 T wakeme_after_rcu
+[11:55:32]   0000000000000000 T rcu_softirq_qs
+[11:55:32]   0000000000000000 t run_timer_softirq$ccf1b16f9f496089890beaf02f08e1a9
+[11:55:32]   0000000000000000 t hrtimer_update_softirq_timer
+[11:55:32]   0000000000000000 t hrtimer_run_softirq$de53a8a24b0b695d64345d34bf1642e9
+[11:55:32]   0000000000000000 T clocks_calc_mult_shift
+[11:55:32]   0000000000000000 T cgroup_rm_cftypes
+[11:55:32]   0000000000000000 t cgroup_rm_cftypes_locked.llvm.16231242966821290905
+[11:55:32]   0000000000000000 T cgroup_add_dfl_cftypes
+[11:55:32]   0000000000000000 t cgroup_add_cftypes
+[11:55:32]   0000000000000000 T cgroup_add_legacy_cftypes
+[11:55:32]   0000000000000000 t cgroup_init_cftypes
+[11:55:32]   0000000000000000 t cgroup_apply_cftypes
+[11:55:32]   0000000000000000 W arch_check_ftrace_location
+[11:55:32]   0000000000000000 T register_ftrace_export
+[11:55:32]   0000000000000000 T unregister_ftrace_export
+[11:55:32]   0000000000000000 T ftrace_now
+[11:55:32]   0000000000000000 t ftrace_exports
+[11:55:32]   0000000000000000 t __ftrace_trace_stack
+[11:55:32]   0000000000000000 T ftrace_dump
+[11:55:32]   0000000000000000 T ftrace_find_event
+[11:55:32]   0000000000000000 T __ftrace_vbprintk
+[11:55:32]   0000000000000000 T __ftrace_vprintk
+[11:55:32]   0000000000000000 t ftrace_formats_open$8c53ef6a6b610965dd86b679be65ead3
+[11:55:32]   0000000000000000 t __ftrace_event_enable_disable.llvm.10464459870358782878
+[11:55:32]   0000000000000000 T ftrace_set_clr_event
+[11:55:32]   0000000000000000 t __ftrace_clear_event_pids
+[11:55:32]   0000000000000000 t __ftrace_set_clr_event_nolock
+[11:55:32]   0000000000000000 t ftrace_event_write$eaffcb771fbe5534c6630ec1fed52758
+[11:55:32]   0000000000000000 t ftrace_event_set_open$eaffcb771fbe5534c6630ec1fed52758
+[11:55:32]   0000000000000000 t ftrace_event_release$eaffcb771fbe5534c6630ec1fed52758
+[11:55:32]   0000000000000000 t ftrace_event_pid_write$eaffcb771fbe5534c6630ec1fed52758
+[11:55:32]   0000000000000000 t ftrace_event_set_pid_open$eaffcb771fbe5534c6630ec1fed52758
+[11:55:32]   0000000000000000 t ftrace_event_npid_write$eaffcb771fbe5534c6630ec1fed52758
+[11:55:32]   0000000000000000 t ftrace_event_set_npid_open$eaffcb771fbe5534c6630ec1fed52758
+[11:55:32]   0000000000000000 t ftrace_event_avail_open$eaffcb771fbe5534c6630ec1fed52758
+[11:55:32]   0000000000000000 T ftrace_event_is_function
+[11:55:32]   0000000000000000 t ftrace_event_register$152ea4bbc88284c4dad574a3752151de
+[11:55:32]   0000000000000000 T ftrace_profile_free_filter
+[11:55:32]   0000000000000000 T ftrace_profile_set_filter
+[11:55:32]   0000000000000000 T tnum_lshift
+[11:55:32]   0000000000000000 T tnum_rshift
+[11:55:32]   0000000000000000 T tnum_arshift
+[11:55:32]   0000000000000000 T __traceiter_mm_vmscan_memcg_softlimit_reclaim_begin
+[11:55:32]   0000000000000000 T __traceiter_mm_vmscan_memcg_softlimit_reclaim_end
+[11:55:32]   0000000000000000 T vma_interval_tree_insert_after
+[11:55:32]   0000000000000000 T fixup_red_left
+[11:55:32]   0000000000000000 T mem_cgroup_soft_limit_reclaim
+[11:55:32]   0000000000000000 t damon_reclaim_after_aggregation$3afd6ccfa23b0a1af5213abd00370ffa
+[11:55:32]   0000000000000000 T do_sys_ftruncate
+[11:55:32]   0000000000000000 T __arm64_sys_ftruncate
+[11:55:32]   0000000000000000 T __arm64_compat_sys_ftruncate
+[11:55:32]   0000000000000000 T too_many_pipe_buffers_soft
+[11:55:32]   0000000000000000 T fs_ftype_to_dtype
+[11:55:32]   0000000000000000 T fs_umode_to_ftype
+[11:55:32]   0000000000000000 t show_softirqs$21045ae5e8b108a508db0ffc3219f0ab
+[11:55:32]   0000000000000000 T ext4_free_clusters_after_init
+[11:55:32]   0000000000000000 t ext4_ext_shift_extents
+[11:55:32]   0000000000000000 t ext4_ext_shift_path_extents
+[11:55:32]   0000000000000000 t pstore_ftrace_seq_start$cc64a431f2c78b247c8fd74b8fc4f821
+[11:55:32]   0000000000000000 t pstore_ftrace_seq_stop$cc64a431f2c78b247c8fd74b8fc4f821
+[11:55:32]   0000000000000000 t pstore_ftrace_seq_next$cc64a431f2c78b247c8fd74b8fc4f821
+[11:55:32]   0000000000000000 t pstore_ftrace_seq_show$cc64a431f2c78b247c8fd74b8fc4f821
+[11:55:32]   0000000000000000 t z_erofs_shifted_transform
+[11:55:32]   0000000000000000 T security_sock_graft
+[11:55:32]   0000000000000000 t selinux_sock_graft$fed2e45c13bad487cf3b941239a078c2
+[11:55:32]   0000000000000000 t software_key_determine_akcipher
+[11:55:32]   0000000000000000 t software_key_query$7bc09c711c2555a46f4dc2e32fcd2fbe
+[11:55:32]   0000000000000000 t software_key_eds_op$7bc09c711c2555a46f4dc2e32fcd2fbe
+[11:55:32]   0000000000000000 T x509_note_not_after
+[11:55:32]   0000000000000000 t blk_done_softirq$2a0ba6b8c3a5af6cb170e579e47ee9c6
+[11:55:32]   0000000000000000 t blk_softirq_cpu_dead$2a0ba6b8c3a5af6cb170e579e47ee9c6
+[11:55:32]   0000000000000000 t hweight_after_donation
+[11:55:32]   0000000000000000 T bfq_mark_bfqq_softrt_update
+[11:55:32]   0000000000000000 T bfq_clear_bfqq_softrt_update
+[11:55:32]   0000000000000000 T bfq_bfqq_softrt_update
+[11:55:32]   0000000000000000 T __bitmap_shift_right
+[11:55:32]   0000000000000000 T __bitmap_shift_left
+[11:55:32]   0000000000000000 T crc32_le_shift
+[11:55:32]   0000000000000000 T __crc32c_le_shift
+[11:55:32]   0000000000000000 T mpihelp_lshift
+[11:55:32]   0000000000000000 T mpihelp_rshift
+[11:55:32]   0000000000000000 T mpi_rshift_limbs
+[11:55:32]   0000000000000000 T mpi_rshift
+[11:55:32]   0000000000000000 T mpi_lshift_limbs
+[11:55:32]   0000000000000000 T mpi_lshift
+[11:55:32]   0000000000000000 T xa_find_after
+[11:55:32]   0000000000000000 t delay_250ms_after_flr$5e58071908950fc762613cd5abd7895c
+[11:55:32]   0000000000000000 T regulator_set_soft_start_regmap
+[11:55:32]   0000000000000000 t sysrq_ftrace_dump$7ad31f58a0e59b8f14622f1039170f3b
+[11:55:32]   0000000000000000 t iomem_reg_shift_show$047ed7d5ff9c77ad6dfb73f1b9002585
+[11:55:32]   0000000000000000 T mipi_dsi_dcs_soft_reset
+[11:55:32]   0000000000000000 T is_software_node
+[11:55:32]   0000000000000000 T to_software_node
+[11:55:32]   0000000000000000 T software_node_fwnode
+[11:55:32]   0000000000000000 T software_node_find_by_name
+[11:55:32]   0000000000000000 T software_node_register_nodes
+[11:55:32]   0000000000000000 T software_node_register
+[11:55:32]   0000000000000000 T software_node_unregister_nodes
+[11:55:32]   0000000000000000 T software_node_unregister
+[11:55:32]   0000000000000000 T software_node_register_node_group
+[11:55:32]   0000000000000000 T software_node_unregister_node_group
+[11:55:32]   0000000000000000 T fwnode_remove_software_node
+[11:55:32]   0000000000000000 T fwnode_create_software_node
+[11:55:32]   0000000000000000 T device_add_software_node
+[11:55:32]   0000000000000000 T software_node_notify
+[11:55:32]   0000000000000000 T device_remove_software_node
+[11:55:32]   0000000000000000 t software_node_get$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 t software_node_put$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 t software_node_property_present$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 t software_node_read_int_array$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 t software_node_read_string_array$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 t software_node_get_name$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 t software_node_get_name_prefix$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 t software_node_get_parent$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 t software_node_get_next_child$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 t software_node_get_named_child_node$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 t software_node_get_reference_args$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 t software_node_release$bcb17fe65f5e24fdadb242242b32cebd
+[11:55:32]   0000000000000000 T device_pm_move_after
+[11:55:32]   0000000000000000 t scsi_softirq_done$2264a7f16179e1a1d903f6137f647875
+[11:55:32]   0000000000000000 t sdev_show_evt_soft_threshold_reached$d40394367ee5e7d688252a477c3b0d21
+[11:55:32]   0000000000000000 t sdev_store_evt_soft_threshold_reached$d40394367ee5e7d688252a477c3b0d21
+[11:55:32]   0000000000000000 t peer_remove_after_dead
+[11:55:32]   0000000000000000 T phy_check_downshift
+[11:55:32]   0000000000000000 T phy_reset_after_clk_enable
+[11:55:32]   0000000000000000 T genphy_soft_reset
+[11:55:32]   0000000000000000 T dwc3_core_soft_reset
+[11:55:32]   0000000000000000 t acm_softint$be92a30069f939bd5209a78978e3f6e4
+[11:55:32]   0000000000000000 t soft_connect_store$98fdc7a6a12421457b5c0d1fdf0a6c06
+[11:55:32]   0000000000000000 T input_enable_softrepeat
+[11:55:32]   0000000000000000 t atkbd_do_show_softrepeat$d21c525a36dc7f1653088cbbf0021a3c
+[11:55:32]   0000000000000000 t atkbd_do_set_softrepeat$d21c525a36dc7f1653088cbbf0021a3c
+[11:55:32]   0000000000000000 t atkbd_show_softrepeat$d21c525a36dc7f1653088cbbf0021a3c
+[11:55:32]   0000000000000000 t atkbd_set_softrepeat$d21c525a36dc7f1653088cbbf0021a3c
+[11:55:32]   0000000000000000 t atkbd_do_show_softraw$d21c525a36dc7f1653088cbbf0021a3c
+[11:55:32]   0000000000000000 t atkbd_do_set_softraw$d21c525a36dc7f1653088cbbf0021a3c
+[11:55:32]   0000000000000000 t atkbd_show_softraw$d21c525a36dc7f1653088cbbf0021a3c
+[11:55:32]   0000000000000000 t atkbd_set_softraw$d21c525a36dc7f1653088cbbf0021a3c
+[11:55:32]   0000000000000000 t v4l_print_buftype$6f2d05631cb6e3e730b35a36bb428a42
+[11:55:32]   0000000000000000 T dm_shift_arg
+[11:55:32]   0000000000000000 t dm_softirq_done$fcbe772a3047d603fd8a3597a2a6435d
+[11:55:32]   0000000000000000 T led_stop_software_blink
+[11:55:32]   0000000000000000 t led_set_software_blink
+[11:55:32]   0000000000000000 T __efi_soft_reserve_enabled
+[11:55:32]   0000000000000000 T __traceiter_android_rvh_after_enqueue_task
+[11:55:32]   0000000000000000 T __traceiter_android_rvh_after_dequeue_task
+[11:55:32]   0000000000000000 T __traceiter_android_vh_ftrace_oops_enter
+[11:55:32]   0000000000000000 T __traceiter_android_vh_ftrace_oops_exit
+[11:55:32]   0000000000000000 T __traceiter_android_vh_ftrace_size_check
+[11:55:32]   0000000000000000 T __traceiter_android_vh_ftrace_format_check
+[11:55:32]   0000000000000000 T __traceiter_android_vh_ftrace_dump_buffer
+[11:55:32]   0000000000000000 T __traceiter_android_vh_watchdog_timer_softlockup
+[11:55:32]   0000000000000000 T __traceiter_android_vh_set_module_permit_after_init
+[11:55:32]   0000000000000000 t snd_ftu_eff_switch_info$8bbc066d5dc120c60a25a9ef97dd4fef
+[11:55:32]   0000000000000000 t snd_ftu_eff_switch_get$8bbc066d5dc120c60a25a9ef97dd4fef
+[11:55:33]   0000000000000000 t snd_ftu_eff_switch_put$8bbc066d5dc120c60a25a9ef97dd4fef
+[11:55:33]   0000000000000000 t snd_ftu_eff_switch_update$8bbc066d5dc120c60a25a9ef97dd4fef
+[11:55:33]   0000000000000000 t setup_fmt_after_resume_quirk$5d275004e8bea298ede1dafccab3a27f
+[11:55:33]   0000000000000000 t snd_usbmidi_ftdi_input$4be384ca0e1941777e7d0adc54317b9e
+[11:55:33]   0000000000000000 T skb_shift
+[11:55:33]   0000000000000000 t rps_trigger_softirq$7d3add3d3ca5cfd70dfd2cbd29645b2a
+[11:55:33]   0000000000000000 t sk_msg_shift_left
+[11:55:33]   0000000000000000 t softnet_seq_start$422a70798d2f27d0561145a039bda346
+[11:55:33]   0000000000000000 t softnet_seq_stop$422a70798d2f27d0561145a039bda346
+[11:55:33]   0000000000000000 t softnet_seq_next$422a70798d2f27d0561145a039bda346
+[11:55:33]   0000000000000000 t softnet_seq_show$422a70798d2f27d0561145a039bda346
+[11:55:33]   0000000000000000 T dev_graft_qdisc
+[11:55:33]   0000000000000000 t mq_graft$1590f00d756a7161751d977149b08438
+[11:55:33]   0000000000000000 T qdisc_offload_graft_helper
+[11:55:33]   0000000000000000 t qdisc_graft
+[11:55:33]   0000000000000000 t htb_graft$f79b2f017201597663dd00667a477971
+[11:55:33]   0000000000000000 t tbf_graft$aea8ba5d83708326c66ade7caaa4ec91
+[11:55:33]   0000000000000000 t prio_graft$99ad851798c459998b1577f514bd7c5b
+[11:55:33]   0000000000000000 t multiq_graft$4a683a88297c9d63beec769b9671ada8
+[11:55:33]   ... (обрезано до 200 строк)
+[11:55:33] ftprobe: /proc/kallsyms (поиск 'driver'):
+[11:55:33]   0000000000000000 T check_range_driver_managed
+[11:55:33]   0000000000000000 T populate_range_driver_managed
+[11:55:33]   0000000000000000 T depopulate_range_driver_managed
+[11:55:33]   0000000000000000 T add_memory_driver_managed
+[11:55:33]   0000000000000000 T proc_tty_register_driver
+[11:55:34]   0000000000000000 T proc_tty_unregister_driver
+[11:55:34]   0000000000000000 t show_tty_driver$4e491ee0ffba781bd0c01fd7f2f2dc09
+[11:55:34]   0000000000000000 T services_compute_xperms_drivers
+[11:55:34]   0000000000000000 t blk_mq_get_driver_tag
+[11:55:34]   0000000000000000 T __blkdev_driver_ioctl
+[11:55:34]   0000000000000000 T __pci_register_driver
+[11:55:34]   0000000000000000 T pci_unregister_driver
+[11:55:34]   0000000000000000 T pci_dev_driver
+[11:55:34]   0000000000000000 t driver_override_show$9c63cde73cce8e10c7dd625f123a32c2
+[11:55:34]   0000000000000000 t driver_override_store$9c63cde73cce8e10c7dd625f123a32c2
+[11:55:34]   0000000000000000 T pci_vf_drivers_autoprobe
+[11:55:34]   0000000000000000 t sriov_drivers_autoprobe_show$fa61532b17b734663226f153c70fd8eb
+[11:55:34]   0000000000000000 t sriov_drivers_autoprobe_store$fa61532b17b734663226f153c70fd8eb
+[11:55:34]   0000000000000000 T pci_epf_unregister_driver
+[11:55:34]   0000000000000000 T __pci_epf_register_driver
+[11:55:34]   0000000000000000 T amba_driver_register
+[11:55:34]   0000000000000000 T amba_driver_unregister
+[11:55:34]   0000000000000000 t driver_override_show$cb4c20bb6f5f5fb3e641f6db8fe5a905
+[11:55:34]   0000000000000000 t driver_override_store$cb4c20bb6f5f5fb3e641f6db8fe5a905
+[11:55:34]   0000000000000000 t gpio_clk_driver_probe$516fe25d032d008c0722d481fe1093bd
+[11:55:34]   0000000000000000 T virtio_check_driver_offered_feature
+[11:55:34]   0000000000000000 T register_virtio_driver
+[11:55:34]   0000000000000000 T unregister_virtio_driver
+[11:55:34]   0000000000000000 T tty_driver_name
+[11:55:34]   0000000000000000 t tty_lookup_driver
+[11:55:34]   0000000000000000 T tty_driver_kref_put
+[11:55:34]   0000000000000000 T __tty_alloc_driver
+[11:55:35]   0000000000000000 t destruct_tty_driver$9f558fdd25c7325f9caf85c74cae824a
+[11:55:35]   0000000000000000 T put_tty_driver
+[11:55:35]   0000000000000000 T tty_register_driver
+[11:55:35]   0000000000000000 T tty_unregister_driver
+[11:55:35]   0000000000000000 t get_tty_driver
+[11:55:35]   0000000000000000 t tty_open_by_driver
+[11:55:35]   0000000000000000 T tty_driver_flush_buffer
+[11:55:35]   0000000000000000 T uart_register_driver
+[11:55:35]   0000000000000000 T uart_unregister_driver
+[11:55:35]   0000000000000000 T __serdev_device_driver_register
+[11:55:35]   0000000000000000 t drm_crtc_fence_get_driver_name$656840386d68baccb0220432b9089374
+[11:55:35]   0000000000000000 T drm_driver_legacy_fb_format
+[11:55:35]   0000000000000000 T drm_mode_validate_driver
+[11:55:35]   0000000000000000 t drm_writeback_fence_get_driver_name$8fbdf3047a30801635da1395af2a47cb
+[11:55:35]   0000000000000000 T mipi_dsi_driver_register_full
+[11:55:35]   0000000000000000 T mipi_dsi_driver_unregister
+[11:55:35]   0000000000000000 T device_links_driver_bound
+[11:55:35]   0000000000000000 T device_links_no_driver
+[11:55:35]   0000000000000000 T device_links_driver_cleanup
+[11:55:35]   0000000000000000 T dev_driver_string
+[11:55:35]   0000000000000000 T bus_add_driver
+[11:55:35]   0000000000000000 T bus_remove_driver
+[11:55:35]   0000000000000000 t driver_release$cfe447704ea26472b2c5f750343f7345
+[11:55:35]   0000000000000000 t drivers_probe_store$cfe447704ea26472b2c5f750343f7345
+[11:55:36]   0000000000000000 t drivers_autoprobe_show$cfe447704ea26472b2c5f750343f7345
+[11:55:36]   0000000000000000 t drivers_autoprobe_store$cfe447704ea26472b2c5f750343f7345
+[11:55:36]   0000000000000000 T driver_deferred_probe_add
+[11:55:36]   0000000000000000 T driver_deferred_probe_del
+[11:55:36]   0000000000000000 t driver_deferred_probe_trigger.llvm.1386628214379611273
+[11:55:36]   0000000000000000 T driver_deferred_probe_check_state
+[11:55:36]   0000000000000000 T device_bind_driver
+[11:55:36]   0000000000000000 t driver_sysfs_add
+[11:55:36]   0000000000000000 t driver_bound
+[11:55:36]   0000000000000000 T driver_probe_done
+[11:55:36]   0000000000000000 T driver_probe_device
+[11:55:36]   0000000000000000 T driver_allows_async_probing
+[11:55:36]   0000000000000000 T device_driver_attach
+[11:55:36]   0000000000000000 T driver_attach
+[11:55:36]   0000000000000000 t __driver_attach$dc206e6e580d14cca444fee23ee9f85e
+[11:55:36]   0000000000000000 T device_release_driver_internal
+[11:55:36]   0000000000000000 T device_release_driver
+[11:55:36]   0000000000000000 T device_driver_detach
+[11:55:36]   0000000000000000 T driver_detach
+[11:55:36]   0000000000000000 t __device_attach_driver$dc206e6e580d14cca444fee23ee9f85e
+[11:55:36]   0000000000000000 t __driver_attach_async_helper$dc206e6e580d14cca444fee23ee9f85e
+[11:55:36]   0000000000000000 T driver_set_override
+[11:55:36]   0000000000000000 T driver_for_each_device
+[11:55:36]   0000000000000000 T driver_find_device
+[11:55:37]   0000000000000000 T driver_create_file
+[11:55:37]   0000000000000000 T driver_remove_file
+[11:55:37]   0000000000000000 T driver_add_groups
+[11:55:37]   0000000000000000 T driver_remove_groups
+[11:55:37]   0000000000000000 T driver_register
+[11:55:37]   0000000000000000 T driver_find
+[11:55:37]   0000000000000000 T driver_unregister
+[11:55:37]   0000000000000000 T __platform_driver_register
+[11:55:37]   0000000000000000 T platform_driver_unregister
+[11:55:37]   0000000000000000 T __platform_driver_probe
+[11:55:37]   0000000000000000 T __platform_register_drivers
+[11:55:37]   0000000000000000 T platform_unregister_drivers
+[11:55:37]   0000000000000000 T platform_find_device_by_driver
+[11:55:37]   0000000000000000 t driver_override_show$ec5db4f86637831e3461617c77c8a216
+[11:55:37]   0000000000000000 t driver_override_store$ec5db4f86637831e3461617c77c8a216
+[11:55:37]   0000000000000000 T module_add_driver
+[11:55:37]   0000000000000000 T module_remove_driver
+[11:55:37]   0000000000000000 T __nd_driver_register
+[11:55:37]   0000000000000000 T __dax_driver_register
+[11:55:37]   0000000000000000 T dax_driver_unregister
+[11:55:37]   0000000000000000 t dma_fence_array_get_driver_name$a08d4fc09b09653a26926e2291960b4c
+[11:55:37]   0000000000000000 t dma_fence_chain_get_driver_name$4ef1b45c35d04d2dd6aa5f0069a6ce48
+[11:55:37]   0000000000000000 t seqno_fence_get_driver_name$4763beb8e3be6a48c6032642c6337f51
+[11:55:37]   0000000000000000 T scsi_register_driver
+[11:55:38]   0000000000000000 T __spi_register_driver
+[11:55:38]   0000000000000000 t driver_override_show$7f9cd9d87f1b480c2e0097d1ab44e304
+[11:55:38]   0000000000000000 t driver_override_store$7f9cd9d87f1b480c2e0097d1ab44e304
+[11:55:38]   0000000000000000 T spi_mem_driver_register_with_owner
+[11:55:38]   0000000000000000 T spi_mem_driver_unregister
+[11:55:38]   0000000000000000 T __spmi_driver_register
+[11:55:38]   0000000000000000 t phy_request_driver_module
+[11:55:38]   0000000000000000 T phy_driver_is_genphy
+[11:55:38]   0000000000000000 T phy_driver_is_genphy_10g
+[11:55:38]   0000000000000000 T phy_driver_register
+[11:55:38]   0000000000000000 T phy_drivers_register
+[11:55:38]   0000000000000000 T phy_driver_unregister
+[11:55:38]   0000000000000000 T phy_drivers_unregister
+[11:55:38]   0000000000000000 T mdio_driver_register
+[11:55:38]   0000000000000000 T mdio_driver_unregister
+[11:55:38]   0000000000000000 T usb_driver_set_configuration
+[11:55:38]   0000000000000000 t driver_set_config_work$78d96ab75944f41f7dca4f81064fbf3c
+[11:55:38]   0000000000000000 T usb_driver_claim_interface
+[11:55:38]   0000000000000000 T usb_driver_release_interface
+[11:55:38]   0000000000000000 T usb_driver_applicable
+[11:55:38]   0000000000000000 T usb_register_device_driver
+[11:55:38]   0000000000000000 t __usb_bus_reprobe_drivers$5b7d776198244cd210c35faf8f786923
+[11:55:38]   0000000000000000 T usb_deregister_device_driver
+[11:55:39]   0000000000000000 T usb_register_driver
+[11:55:39]   0000000000000000 t driver_probe$7b20ab0b7c72ef4a35d24d14c93a107c
+[11:55:39]   0000000000000000 t driver_disconnect$7b20ab0b7c72ef4a35d24d14c93a107c
+[11:55:39]   0000000000000000 t driver_suspend$7b20ab0b7c72ef4a35d24d14c93a107c
+[11:55:39]   0000000000000000 t driver_resume$7b20ab0b7c72ef4a35d24d14c93a107c
+[11:55:39]   0000000000000000 T usb_generic_driver_probe
+[11:55:39]   0000000000000000 T usb_generic_driver_disconnect
+[11:55:39]   0000000000000000 T usb_generic_driver_suspend
+[11:55:39]   0000000000000000 T usb_generic_driver_resume
+[11:55:39]   0000000000000000 t usb_generic_driver_match$d0e7f179b720d56ee3df783deef0dbab
+[11:55:39]   0000000000000000 T ehci_init_driver
+[11:55:39]   0000000000000000 T xhci_init_driver
+[11:55:39]   0000000000000000 t usb_gadget_remove_driver
+[11:55:39]   0000000000000000 T usb_gadget_probe_driver
+[11:55:39]   0000000000000000 t udc_bind_to_driver
+[11:55:39]   0000000000000000 T usb_gadget_unregister_driver
+[11:55:39]   0000000000000000 T __typec_altmode_register_driver
+[11:55:39]   0000000000000000 T typec_altmode_unregister_driver
+[11:55:39]   0000000000000000 T __serio_register_driver
+[11:55:39]   0000000000000000 T serio_unregister_driver
+[11:55:39]   0000000000000000 t serio_driver_probe$7a21247c2a7bade72a23b5758a53528d
+[11:55:39]   0000000000000000 t serio_driver_remove$7a21247c2a7bade72a23b5758a53528d
+[11:55:40]   0000000000000000 T i2c_register_driver
+[11:55:40]   0000000000000000 t __process_new_driver$932b06b9b2e7be1c8767ee66263f3ef8
+[11:55:40]   0000000000000000 T i2c_del_driver
+[11:55:40]   0000000000000000 t __process_removed_driver$932b06b9b2e7be1c8767ee66263f3ef8
+[11:55:40]   0000000000000000 T i3c_driver_register_with_owner
+[11:55:40]   0000000000000000 T i3c_driver_unregister
+[11:55:40]   0000000000000000 t __enqueue_in_driver
+[11:55:40]   0000000000000000 T cpufreq_driver_resolve_freq
+[11:55:40]   0000000000000000 T __cpufreq_driver_target
+[11:55:40]   0000000000000000 T cpufreq_driver_test_flags
+[11:55:40]   0000000000000000 T cpufreq_get_current_driver
+[11:55:40]   0000000000000000 T cpufreq_get_driver_data
+[11:55:40]   0000000000000000 T cpufreq_driver_fast_switch
+[11:55:40]   0000000000000000 T cpufreq_driver_target
+[11:55:40]   0000000000000000 T cpufreq_register_driver
+[11:55:40]   0000000000000000 T cpufreq_unregister_driver
+[11:55:40]   0000000000000000 t show_scaling_driver$d466a7b9e8f556f5211ee61b19b94bd8
+[11:55:40]   0000000000000000 T cpuidle_register_driver
+[11:55:40]   0000000000000000 T cpuidle_get_driver
+[11:55:40]   0000000000000000 T cpuidle_unregister_driver
+[11:55:40]   0000000000000000 T cpuidle_get_cpu_driver
+[11:55:41]   0000000000000000 T cpuidle_driver_state_disabled
+[11:55:41]   0000000000000000 t show_current_driver$42e6e85f31f5dc629cfb25051318cf80
+[11:55:41]   0000000000000000 t cpuidle_driver_sysfs_release$42e6e85f31f5dc629cfb25051318cf80
+[11:55:41]   0000000000000000 t cpuidle_driver_show$42e6e85f31f5dc629cfb25051318cf80
+[11:55:41]   0000000000000000 t cpuidle_driver_store$42e6e85f31f5dc629cfb25051318cf80
+[11:55:41]   0000000000000000 t show_driver_name$42e6e85f31f5dc629cfb25051318cf80
+[11:55:41]   0000000000000000 T dt_init_idle_driver
+[11:55:41]   0000000000000000 T mmc_set_driver_type
+[11:55:41]   0000000000000000 T mmc_register_driver
+[11:55:41]   0000000000000000 T mmc_unregister_driver
+[11:55:41]   0000000000000000 T sdio_register_driver
+[11:55:41]   0000000000000000 T sdio_unregister_driver
+[11:55:41]   0000000000000000 T scmi_driver_register
+[11:55:41]   0000000000000000 T scmi_driver_unregister
+[11:55:41]   0000000000000000 T __hid_register_driver
+[11:55:41]   0000000000000000 t __hid_bus_driver_added$77472763d0b2fcb43fb636770ba4d42a
+[11:55:41]   0000000000000000 T hid_unregister_driver
+[11:55:41]   0000000000000000 t __bus_removed_driver$77472763d0b2fcb43fb636770ba4d42a
+[11:55:41]   0000000000000000 t __hid_bus_reprobe_drivers$77472763d0b2fcb43fb636770ba4d42a
+[11:55:41]   0000000000000000 T __register_rpmsg_driver
+[11:55:41]   0000000000000000 T unregister_rpmsg_driver
+[11:55:42]   0000000000000000 t driver_override_show$f3b1afe15853d58e8238fbb497994f2e
+[11:55:42]   0000000000000000 t driver_override_store$f3b1afe15853d58e8238fbb497994f2e
+[11:55:42]   0000000000000000 T __traceiter_android_vh_blk_mq_get_driver_tag
+[11:55:42]   0000000000000000 T snd_soc_unregister_component_by_driver
+[11:55:42]   0000000000000000 T netdev_drivername
+[11:55:42]   0000000000000000 T nfc_driver_failure
+[11:55:42]   0000000000000000 t __pci_register_driver.cfi_jt
+[11:55:42]   0000000000000000 t xhci_init_driver.cfi_jt
+[11:55:42]   0000000000000000 t __traceiter_android_vh_blk_mq_get_driver_tag.cfi_jt
+[11:55:42]   ... (обрезано до 200 строк)
+[11:55:42] ftprobe: /proc/devices:
+[11:55:42]   Character devices:
+[11:55:42]     1 mem
+[11:55:42]     4 ttyS
+[11:55:42]     5 /dev/tty
+[11:55:42]     5 /dev/console
+[11:55:42]     5 /dev/ptmx
+[11:55:42]    10 misc
+[11:55:42]    13 input
+[11:55:42]    81 video4linux
+[11:55:42]   108 ppp
+[11:55:43]   116 alsa
+[11:55:43]   128 ptm
+[11:55:43]   136 pts
+[11:55:43]   154 mtk_wcn_detect
+[11:55:43]   166 ttyACM
+[11:55:43]   180 usb
+[11:55:43]   182 sec
+[11:55:43]   189 usb_device
+[11:55:43]   190 mtk_stp_wmt
+[11:55:43]   191 mtk_stp_GPS_chrdev
+[11:55:43]   191 mtk_stp_GPS2_chrdev
+[11:55:43]   192 mtk_stp_bt_chrdev
+[11:55:43]   216 rfcomm
+[11:55:43]   226 drm
+[11:55:43]   234 binder
+[11:55:43]   235 roccat
+[11:55:43]   236 hidraw
+[11:55:43]   237 rpmb
+[11:55:43]   238 ttyGS
+[11:55:43]   239 uio
+[11:55:43]   240 bsg
+[11:55:44]   241 watchdog
+[11:55:44]   242 iio
+[11:55:44]   243 remoteproc
+[11:55:44]   244 cec
+[11:55:44]   245 lirc
+[11:55:44]   246 media
+[11:55:44]   247 rtc
+[11:55:44]   248 dma_heap
+[11:55:44]   249 dax
+[11:55:44]   250 dimmctl
+[11:55:44]   251 ndctl
+[11:55:44]   252 rpmsg
+[11:55:44]   253 pmsg
+[11:55:44]   254 gpiochip
+[11:55:44]   471 fw_log_ics
+[11:55:44]   472 fw_log_wifi
+[11:55:44]   473 mtk_wmt_wifi_chrdev
+[11:55:44]   474 gps_pwr
+[11:55:44]   475 fw_log_gps
+[11:55:44]   476 gps_emi
+[11:55:44]   477 fm
+[11:55:44]   478 fw_log_bt
+[11:55:45]   479 fw_log_wmt
+[11:55:45]   480 connfem
+[11:55:45]   481 pnpmgr
+[11:55:45]   482 pn553
+[11:55:45]   483 drm_wv
+[11:55:45]   484 vdec-fmt
+[11:55:45]   485 camera-isp
+[11:55:45]   486 camera-mem
+[11:55:45]   487 camera-dip
+[11:55:45]   488 camera_eeprom1
+[11:55:45]   489 camera_eeprom0
+[11:55:45]   490 seninf_n3d
+[11:55:45]   491 seninf
+[11:55:45]   492 kd_camera_hw
+[11:55:45]   493 hf_manager
+[11:55:45]   494 camera-fdvt
+[11:55:45]   495 camera-rsc
+[11:55:45]   496 flashlight
+[11:55:45]   497 MAINAF
+[11:55:46]   498 hidg
+[11:55:46]   499 vcu
+[11:55:46]   500 accdet
+[11:55:46]   501 ccci
+[11:55:46]   502 ccci_fsm
+[11:55:46]   503 ccci_pin_sta
+[11:55:46]   504 ccci_md_sta
+[11:55:46]   505 mtk_mdp
+[11:55:46]   506 gz_ipc_mod
+[11:55:46]   507 MT_pmic_adc_cali
+[11:55:46]   508 trustonic_tee
+[11:55:46]   509 teeperf
+[11:55:46]   510 rpmb
+[11:55:46]   511 gnss
+[11:55:46]   
+[11:55:46]   Block devices:
+[11:55:46]     1 ramdisk
+[11:55:46]     7 loop
+[11:55:46]     8 sd
+[11:55:46]    65 sd
+[11:55:47]    66 sd
+[11:55:47]    67 sd
+[11:55:47]    68 sd
+[11:55:47]    69 sd
+[11:55:47]    70 sd
+[11:55:47]    71 sd
+[11:55:47]   128 sd
+[11:55:47]   129 sd
+[11:55:47]   130 sd
+[11:55:47]   131 sd
+[11:55:47]   132 sd
+[11:55:47]   133 sd
+[11:55:47]   134 sd
+[11:55:47]   135 sd
+[11:55:47]   179 mmc
+[11:55:47]   253 zram
+[11:55:47]   254 device-mapper
+[11:55:47]   259 blkext
+[11:55:47] ftprobe: /proc/misc:
+[11:55:47]   101 wlan
+[11:55:48]   102 trans_sched
+[11:55:48]   103 tnek
+[11:55:48]   104 fmt_sync
+[11:55:48]   105 cpu_loading
+[11:55:48]   106 mali0
+[11:55:48]   107 usb_accessory
+[11:55:48]   108 mcupm
+[11:55:48]   109 gz_kree
+[11:55:48]   110 fs15xx
+[11:55:48]   111 usip
+[11:55:48]   112 audio_ipi
+[11:55:48]   113 mdp_sync
+[11:55:48]   114 vow
+[11:55:48]   115 scp
+[11:55:48]   116 sspm
+[11:55:48]   228 fpsensor
+[11:55:48]   117 eara-io
+[11:55:48]   249 tranlog_cloudctl
+[11:55:48]   251 tranlog_config
+[11:55:48]   252 tranlog_ctl
+[11:55:49]   253 tranlog_kernel
+[11:55:49]   254 tranlog_user
+[11:55:49]   118 aed2
+[11:55:49]   119 mml_pq
+[11:55:49]   120 mmp
+[11:55:49]   130 watchdog
+[11:55:49]   121 RT_Monitor
+[11:55:49]   122 aed1
+[11:55:49]   123 aed0
+[11:55:49]   124 cpu_dma_latency
+[11:55:49]   125 vsock
+[11:55:49]   126 ashmem
+[11:55:49]   241 vhost-vsock
+[11:55:49]   239 uhid
+[11:55:49]   236 device-mapper
+[11:55:49]   223 uinput
+[11:55:49]   200 tun
+[11:55:49]   127 ntsync
+[11:55:49]   237 loop-control
+[11:55:49]   183 hw_random
+[11:55:50]   229 fuse
+[11:55:50]   242 rfkill
+[11:55:50] === ftprobe завершён: лог смотри выше / /sdcard/Download/benzware.log ===
