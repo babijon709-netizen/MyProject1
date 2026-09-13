@@ -280,6 +280,65 @@ inline constexpr std::uint64_t LOOTITEM_ITEM_NAME      = 0x10;
 inline constexpr std::uint64_t MINEABLE_MAX_HEALTH     = 0xC0;
 inline constexpr std::uint64_t MINEABLE_FRACTION       = 0xD0; // fractionRemaining
 inline constexpr std::uint64_t MINEABLE_ENTITY_TYPE    = 0xD8; // ServerPlayersAnalytics.EntityType
+// Кеш JE-экстеншенов узла (MineableObjectExtension_*). Заполняется в
+// MineableObject.cik() через GetComponents<JE> на GameObject узла; cik
+// вызывается из OnStartClient -> ciQ() (то есть кеш готов сразу при спавне
+// узла на клиенте) и при каждом попадании (SRl -> cik). Именно здесь живёт
+// «крестик» ресурса — см. блок ниже.
+inline constexpr std::uint64_t MINEABLE_EXTENSIONS     = 0xE8; // JE[]
+
+// ---- Крестик (hit-streak marker) --------------------------------------------
+// «Крестик» — не часть меша дерева/камня, а отдельный объект, который игра
+// создаёт при первом же попадании по узлу:
+//
+//   MineableObject.SRl(локальный удар) -> cik() -> JE.gir(hitInfo)
+//     руда:   OreHitstreaks.gir -> giu() (Collider.ClosestPoint — точка на
+//             поверхности камня) -> gil() (Instantiate + SetParent +
+//             set_position) -> MoW = живой клон; его transform и есть X.
+//     дерево: TreeHitstreaks.gir -> raycast по стволу -> Instantiate ->
+//             MTn = живой клон, а мировая точка попадания пишется в MTQ/MTu.
+//
+// Проверка «попал ли удар в крестик» (OreHitstreaks.os для руды и
+// TreeHitstreaks.giL + вся его обвязка rRS/DMU/Dne/DfW для деревьев) меряет
+// дистанцию от точки удара ИМЕННО до этих полей: для руды — до позиции
+// transform'а маркера, для дерева — до отрезка MTQ..MTu (радиус 0.15 м).
+// Поэтому они и есть единственно верная цель автофарма: удар по ним игра
+// засчитывает как попадание в серию, а всё остальное (корпус, LOD-меш,
+// спящий шаблон на пивоте) — нет.
+
+// MineableObjectExtension_OreHitstreaks : JE — руда/камень/сера.
+inline constexpr std::uint64_t OREHS_STREAK_INDEX      = 0x20; // int hitstreakIndex
+inline constexpr std::uint64_t OREHS_MARKER_TEMPLATE   = 0x28; // спящий шаблон на пивоте узла
+inline constexpr std::uint64_t OREHS_MARKER            = 0x30; // MoW — живой клон (X), null до первого удара
+inline constexpr std::uint64_t OREHS_COLLIDER          = 0x38;
+inline constexpr std::uint64_t OREHS_MINEABLE          = 0x40; // обратная ссылка на узел
+
+// MineableObjectExtension_OreHitstreaksMarker : MonoBehaviour — сам X.
+// Мировая позиция его transform'а = точка крестика. MTG (0x58) — таймер
+// жизни: Update() гасит X через 15 секунд после последнего попадания
+// (SetActive(false) + giq), так что «поле заполнено» != «крестик жив».
+inline constexpr std::uint64_t OREMARK_RENDERER        = 0x20; // MeshRenderer
+inline constexpr std::uint64_t OREMARK_OWNER           = 0x38; // MTD — обратная ссылка на OreHitstreaks
+inline constexpr std::uint64_t OREMARK_SCALE           = 0x48; // float
+inline constexpr std::uint64_t OREMARK_AGE             = 0x58; // float, секунды
+inline constexpr float         OREMARK_LIFETIME        = 15.0F;
+
+// MineableObjectExtension_TreeHitstreaks : JE — деревья.
+inline constexpr std::uint64_t TREEHS_MOVING_METHOD    = 0x20; // enum MovingMethod (Static/AroundTree)
+inline constexpr std::uint64_t TREEHS_MARKER_TEMPLATE  = 0x28; // HitMarkerItem — шаблон
+inline constexpr std::uint64_t TREEHS_STREAK           = 0x48; // MTz (сбрасывается в gie)
+inline constexpr std::uint64_t TREEHS_MARKER           = 0x50; // MTn — живой клон (X), null до первого удара
+inline constexpr std::uint64_t TREEHS_SPOT_A           = 0x88; // MTQ, Vector3 — точка X в мировых
+inline constexpr std::uint64_t TREEHS_SPOT_B           = 0xA4; // MTu, Vector3 — второй конец отрезка X
+
+// MineableObjectExtension_HitMarkerItem : MonoBehaviour — визуальный X на
+// дереве. mark (0x38) — managed Transform декаля: giI ставит его в точку
+// попадания + normal*0.25 (чтобы не z-файтил с корой), поэтому для
+// прицеливания первична MTQ (точка на коре), а декаль — запасной вариант.
+inline constexpr std::uint64_t HITMARK_LIFETIME        = 0x20;
+inline constexpr std::uint64_t HITMARK_FILTER          = 0x28;
+inline constexpr std::uint64_t HITMARK_RENDERER        = 0x30;
+inline constexpr std::uint64_t HITMARK_MARK            = 0x38; // Transform самого крестика
 
 // ServerPlayersAnalytics.EntityType values used for the labels.
 enum class MineableEntityType : std::int32_t {

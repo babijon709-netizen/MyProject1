@@ -891,5 +891,165 @@
   "field": "_ukx_k__BackingField",
   "type": "Mirror_NetworkIdentity_o*",
   "offset": 8
+ },
+ "MINEABLE_EXTENSIONS": {
+  "kind": "field",
+  "class": "MineableObject",
+  "struct": "Oxide_MineableObject_Fields",
+  "field": "QWD",
+  "type": "Il2CppObject*",
+  "offset": 232
+ },
+ "OREHS_STREAK_INDEX": {
+  "kind": "field",
+  "class": "MineableObjectExtension_OreHitstreaks",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields",
+  "field": "hitstreakIndex",
+  "type": "int32_t",
+  "offset": 32
+ },
+ "OREHS_MARKER_TEMPLATE": {
+  "kind": "field",
+  "class": "MineableObjectExtension_OreHitstreaks",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields",
+  "field": "hitStreakMarker",
+  "type": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_o*",
+  "offset": 40
+ },
+ "OREHS_MARKER": {
+  "kind": "field",
+  "class": "MineableObjectExtension_OreHitstreaks",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields",
+  "field": "MoW",
+  "type": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_o*",
+  "offset": 48
+ },
+ "OREHS_COLLIDER": {
+  "kind": "field",
+  "class": "MineableObjectExtension_OreHitstreaks",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields",
+  "field": "Mom",
+  "type": "UnityEngine_Collider_o*",
+  "offset": 56
+ },
+ "OREHS_MINEABLE": {
+  "kind": "field",
+  "class": "MineableObjectExtension_OreHitstreaks",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields",
+  "field": "MoK",
+  "type": "Oxide_MineableObject_o*",
+  "offset": 64
+ },
+ "OREMARK_RENDERER": {
+  "kind": "field",
+  "class": "MineableObjectExtension_OreHitstreaksMarker",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields",
+  "field": "meshRenderer",
+  "type": "UnityEngine_MeshRenderer_o*",
+  "offset": 32
+ },
+ "OREMARK_OWNER": {
+  "kind": "field",
+  "class": "MineableObjectExtension_OreHitstreaksMarker",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields",
+  "field": "MTD",
+  "type": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_o*",
+  "offset": 56
+ },
+ "OREMARK_SCALE": {
+  "kind": "field",
+  "class": "MineableObjectExtension_OreHitstreaksMarker",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields",
+  "field": "MTS",
+  "type": "float",
+  "offset": 72
+ },
+ "OREMARK_AGE": {
+  "kind": "field",
+  "class": "MineableObjectExtension_OreHitstreaksMarker",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields",
+  "field": "MTg",
+  "type": "float",
+  "offset": 88
+ },
+ "TREEHS_MOVING_METHOD": {
+  "kind": "field",
+  "class": "MineableObjectExtension_TreeHitstreaks",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
+  "field": "movingMethod",
+  "type": "int32_t",
+  "offset": 32
+ },
+ "TREEHS_MARKER_TEMPLATE": {
+  "kind": "field",
+  "class": "MineableObjectExtension_TreeHitstreaks",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
+  "field": "hitStreakMarkerOriginal",
+  "type": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_o*",
+  "offset": 40
+ },
+ "TREEHS_STREAK": {
+  "kind": "field",
+  "class": "MineableObjectExtension_TreeHitstreaks",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
+  "field": "MTz",
+  "type": "int32_t",
+  "offset": 72
+ },
+ "TREEHS_MARKER": {
+  "kind": "field",
+  "class": "MineableObjectExtension_TreeHitstreaks",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
+  "field": "MTn",
+  "type": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_o*",
+  "offset": 80
+ },
+ "TREEHS_SPOT_A": {
+  "kind": "field",
+  "class": "MineableObjectExtension_TreeHitstreaks",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
+  "field": "MTQ",
+  "type": "UnityEngine_Vector3_o",
+  "offset": 136
+ },
+ "TREEHS_SPOT_B": {
+  "kind": "field",
+  "class": "MineableObjectExtension_TreeHitstreaks",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
+  "field": "MTu",
+  "type": "UnityEngine_Vector3_o",
+  "offset": 164
+ },
+ "HITMARK_LIFETIME": {
+  "kind": "field",
+  "class": "MineableObjectExtension_HitMarkerItem",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_Fields",
+  "field": "lifetime",
+  "type": "float",
+  "offset": 32
+ },
+ "HITMARK_FILTER": {
+  "kind": "field",
+  "class": "MineableObjectExtension_HitMarkerItem",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_Fields",
+  "field": "mFilter",
+  "type": "UnityEngine_MeshFilter_o*",
+  "offset": 40
+ },
+ "HITMARK_RENDERER": {
+  "kind": "field",
+  "class": "MineableObjectExtension_HitMarkerItem",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_Fields",
+  "field": "renderer",
+  "type": "UnityEngine_Renderer_o*",
+  "offset": 48
+ },
+ "HITMARK_MARK": {
+  "kind": "field",
+  "class": "MineableObjectExtension_HitMarkerItem",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_Fields",
+  "field": "mark",
+  "type": "UnityEngine_Transform_o*",
+  "offset": 56
  }
 }

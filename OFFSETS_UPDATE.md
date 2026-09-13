@@ -515,6 +515,82 @@ Fragments», «Stone Hatchet»), поэтому в таблице есть и н
 | `COMPONENT_PAIR_PTR` | 0x08 | |
 | `GAMEOBJECT_NAME_GUESS` | 0x48 | (проверяется по именам костей) |
 
+### 3.10. Автофарм: «крестик» (hit-streak marker)
+
+Автофарм бьёт не по корпусу ресурса, а по светящемуся крестику: попадание в
+него игра засчитывает в серию (`hitstreakIndex`) и даёт бонусный ресурс.
+Крестик — отдельный объект, который игра создаёт сама, и его координаты лежат
+в экстеншенах узла. Цепочка целиком (все адреса — из `libil2cpp.so` текущего
+билда, VA−0x4000 = смещение в файле):
+
+```
+MineableObject.OnStartClient (0x648f4e8) -> ciQ (0x648c768) -> cik (0x648e6ec)
+    cik: GetComponents<JE>(gameObject) -> QWD (0xE8)   [кеш готов при спавне]
+MineableObject.SRl (0x6490918)  [локальный удар]       -> cik -> JE.gir(hitInfo)
+
+руда   OreHitstreaks.gir (0x772d1ec):
+         MoW == null -> giu (0x772a260, Collider.ClosestPoint по поверхности)
+                     -> gil (Instantiate + SetParent + set_position) -> MoW
+       OreHitstreaks.os (0x772c7f4)  [проверка попадания]:
+         get_transform(MoW) -> get_position -> дистанция до точки удара
+       OreHitstreaksMarker.Update (0x772f3bc): MTG += dt; MTG > 15 ->
+         SetActive(false) -> giq (0x7729c90): Destroy(маркер), MoW = null
+
+дерево TreeHitstreaks.gir (0x7733120):
+         MTn == null -> raycast + giJ -> Instantiate (0x77335ec) -> MTn (0x50),
+         точка попадания на коре -> MTQ (0x88), второй конец отрезка -> MTu (0xA4)
+       TreeHitstreaks.giL (0x77313dc) и вся обвязка (rRS/DMU/Dne/DfW):
+         дистанция от точки удара до ОТРЕЗКА MTQ..MTu, радиус 0.15 м (MTx=0.15,
+         MTc=0.0225). Наведение ровно на MTQ даёт нулевую дистанцию до отрезка.
+       HitMarkerItem.giI (0x7731728): mark.localPosition = точка + normal*0.25
+         (декаль вынесен с коры, чтобы не z-файтил) — поэтому MTQ первична,
+         а трансформ декаля (`HITMARK_MARK`) используется только как запасной.
+```
+
+| Константа | Смещение | Поле / откуда |
+|---|---|---|
+| `MINEABLE_EXTENSIONS` | 0xE8 | `MineableObject.QWD` — `JE[]`, кеш экстеншенов |
+| `OREHS_STREAK_INDEX` | 0x20 | `OreHitstreaks.hitstreakIndex` (int) |
+| `OREHS_MARKER_TEMPLATE` | 0x28 | спящий шаблон на пивоте узла (не цель!) |
+| `OREHS_MARKER` | 0x30 | `OreHitstreaks.MoW` — живой клон-крестик |
+| `OREHS_COLLIDER` / `OREHS_MINEABLE` | 0x38 / 0x40 | `Mom` / `MoK` |
+| `OREMARK_RENDERER` / `OREMARK_OWNER` | 0x20 / 0x38 | `meshRenderer` / `MTD` (back-ref) |
+| `OREMARK_SCALE` / `OREMARK_AGE` | 0x48 / 0x58 | `MTS` / `MTg` (секунды жизни, > 15 — гаснет) |
+| `TREEHS_MOVING_METHOD` | 0x20 | enum `MovingMethod` (Static / AroundTree) |
+| `TREEHS_MARKER_TEMPLATE` | 0x28 | `hitStreakMarkerOriginal` (`HitMarkerItem`) |
+| `TREEHS_STREAK` | 0x48 | `MTz` (сбрасывается в `gie`) |
+| `TREEHS_MARKER` | 0x50 | `MTn` — живой клон-крестик |
+| `TREEHS_SPOT_A` / `TREEHS_SPOT_B` | 0x88 / 0xA4 | `MTQ` / `MTu` — Vector3, мировые |
+| `HITMARK_LIFETIME` / `HITMARK_MARK` | 0x20 / 0x38 | `lifetime` / `mark` (Transform декаля) |
+
+**Как найти заново после апдейта игры.** Имена классов обфусцированы, но
+структура та же: ищем в `dump.cs` классы `MineableObjectExtension_*`
+(`OreHitstreaks`, `TreeHitstreaks`, `OreHitstreaksMarker`, `HitMarkerItem`) —
+они наследуют `JE` (интерфейс экстеншенов) и `MonoBehaviour` соответственно.
+Порядок такой:
+
+1. `MineableObject`: найти метод, который делает `GetComponents<JE>` и пишет
+   результат в поле-массив (`cik`); поле = `MINEABLE_EXTENSIONS`.
+2. В классе-наследнике `JE` для руды: метод с `Instantiate` + `set_position`
+   (`gil`) пишет живой маркер — это `OREHS_MARKER`; тот же метод/обвязка пишет
+   `hitstreakIndex` (`OREHS_STREAK_INDEX`).
+3. В наследнике `JE` для деревьев: метод проверки попадания (`giL`) читает два
+   `Vector3` и сравнивает дистанцию до отрезка с константой 0.15 — меньший
+   offset = `TREEHS_SPOT_A`, больший = `TREEHS_SPOT_B`; рядом `ldr x?,[x?,#?]!`
+   с null-проверкой — `TREEHS_MARKER`.
+4. Мировые координаты читаются штатно: `managed_object_native()` ->
+   `native_component_transform()` -> `marker_world_position()` (для дерева
+   `TREEHS_SPOT_A` — уже готовый `Vector3`, трансформ не нужен).
+
+Все значения продублированы в `tools/offsets/offsets_map.json`, поэтому
+`python3 tools/offsets/update_offsets.py` после апдейта пересчитает их сам
+(поля ищутся по имени, а обфусцированные — позиционным выравниванием типов).
+
+Клиент/сервер: `PlayerInteraction.AvG` (0x657a360) — клиентский отправитель
+`[Command]` c `MineableObjectHitInfoCompact`, `PlayerInteraction.ABi`
+(0x656e120) — серверный обработчик. Крестик создаётся на КЛИЕНТЕ локальным
+путём удара (`SRl`), поэтому читать его можно без всякой сетевой задержки.
+
 ---
 
 ## 4. Ключевые правила (не забудь после апдейта)

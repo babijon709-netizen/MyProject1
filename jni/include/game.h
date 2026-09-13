@@ -91,40 +91,59 @@ int         esp_nearby_player_count();
 // weapon, menus, etc.), so "aim only while scoped" fails closed.
 bool        esp_local_player_is_aiming();
 
-// ---- Auto-farm ---------------------------------------------------------------
-// The touch controller in main.cpp walks to the nearest selected resource node
-// and swings at it; this side only finds the node and tells where to look.
+// ---- Автофарм ---------------------------------------------------------------
+// Слой памяти только находит узел и говорит, куда смотреть и куда идти; сам
+// подход и удары делает контроллер на синтетических тачах в main.cpp.
+//
+// «Крестик» (hit-streak marker) — объект, который игра сама создаёт на ресурсе
+// после первого попадания и уничтожает через 15 секунд простоя. Его координаты
+// читаются напрямую из экстеншенов узла (OreHitstreaks.MoW / TreeHitstreaks.MTQ,
+// см. game_offsets.h) — именно до них игра меряет дистанцию удара, поэтому
+// попадание в крестик засчитывается в серию и даёт бонусный ресурс.
 struct FarmTarget {
     bool  valid = false;
-    unsigned long long id = 0;
-    int   kind = 0;                 // 0 wood, 1 stone, 2 metal, 3 sulfur
-    float yaw = 0.f, pitch = 0.f;   // degrees from camera forward (+right, +up)
-    float dist = 0.f;               // metres from the local player
-    float fraction = -1.f;          // resource remaining 0..1, -1 unknown
-    bool  has_spot = false;         // true when aiming at the glowing weak spot
-    float aim_dist = 0.f;           // horizontal metres to the raw X (melee reach)
-    bool  spot_facing = true;       // крест примерно лицом (~40°); иначе обходим ствол
-    bool  stand_ok = false;         // есть точка стоянки перед крестом
-    float stand_yaw = 0.f;          // куда идти к стоянке (градусы)
-    float stand_dist = 0.f;         // метры до стоянки
-    // Screen-space position of the aim point (for the on-screen target mark).
+    unsigned long long id = 0;    // NetworkIdentity (для чёрного списка)
+    int   kind = 0;               // 0 дерево, 1 камень, 2 металл, 3 сера
+    float fraction = -1.f;        // остаток ресурса 0..1, -1 = не читается
+
+    // Точка прицела: крестик, пока он жив и с нашей стороны; иначе корпус узла
+    // (первый же удар по корпусу создаёт крестик — так задумано игрой).
+    float yaw = 0.f, pitch = 0.f; // градусы от оси выстрела (+вправо, +вверх)
+    float aim_dist = 0.f;         // метры по горизонтали до точки прицела
+    float aim_3d = 0.f;           // 3D-дистанция от глаза до точки прицела
+    bool  at_spot = false;        // точка прицела — крестик (не корпус)
+
+    // Состояние крестика.
+    bool  ext_found = false;      // найден ли сам экстеншен крестика на узле
+    bool  has_spot = false;       // X прочитан из памяти игры
+    bool  spot_front = false;     // X с нашей стороны узла (иначе он за стволом)
+    int   spot_source = 0;        // 1 маркер руды, 2 точка дерева MTQ, 3 декаль дерева
+    int   streak = 0;             // hitstreakIndex / MTz: сколько подряд попали в X
+
+    // Куда идти: точка подхода перед крестиком (или перед узлом, если X нет).
+    float walk_yaw = 0.f;         // градусы от оси камеры (+вправо)
+    float walk_dist = 0.f;        // метры до точки подхода
+    float node_dist = 0.f;        // метры по горизонтали до самого узла
+
+    // Проекция точки прицела на экран — для метки «куда бьёт бот».
     bool  on_screen = false;
     float sx = 0.f, sy = 0.f;
 };
-// Which resources to farm: bit0 wood, bit1 stone, bit2 metal, bit3 sulfur.
-// 0 disables the scan entirely (no extra work per frame).
+// Какие ресурсы добывать: bit0 дерево, bit1 камень, bit2 металл, bit3 сера.
+// 0 выключает скан целиком (никакой лишней работы в кадре).
 void        esp_farm_set_resources(unsigned mask);
-// Search radius for farm nodes in metres (clamped to 10..300).
+// Радиус поиска узлов в метрах (зажимается в 10..300).
 void        esp_farm_set_range(float meters);
-// Nearest matching node as of the last esp_get_boxes() (needs its camera).
+// Ближайший подходящий узел по состоянию последнего esp_get_boxes() (нужна
+// его камера).
 bool        esp_farm_get_target(FarmTarget& out);
-// Give up on a node (unreachable / stuck) for `seconds`.
+// Сдаться на узле (недостижим / застряли) на `seconds`.
 void        esp_farm_blacklist(unsigned long long id, float seconds);
-// Why the last esp_farm_get_target() returned nothing + how many nodes the
-// last registry scan cached. Reasons: 0 ok, 1 farm off, 2 frame not published
-// (no camera/local position this frame), 3 registry scan found no matching
-// nodes, 4 nodes exist but none in range / all blacklisted, 5 camera pose
-// unreadable (cannot compute angles).
+// Почему последний esp_farm_get_target() ничего не вернул + сколько узлов
+// насчитал последний скан реестра. Причины: 0 ок, 1 фарм выключен,
+// 2 кадр не опубликован (нет камеры/позиции), 3 в реестре нет подходящих
+// узлов, 4 узлы есть, но все вне радиуса / в чёрном списке, 5 поза камеры
+// не читается (не посчитать углы).
 void        esp_farm_debug(int& nodes_cached, int& idle_reason);
 // X-ray: камера не рисует всё ближе `meters` (запись near clip plane).
 // 0 выключает и восстанавливает исходное значение. Диапазон 0..50 м.
