@@ -2290,16 +2290,16 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                 if (g_farmSpot == 1)      snprintf(spotTxt, sizeof(spotTxt), XS("есть · руда · %d"), g_farmStreak);
                 else if (g_farmSpot == 2) snprintf(spotTxt, sizeof(spotTxt), XS("есть · кора · %d"), g_farmStreak);
                 else if (g_farmSpot == 3) snprintf(spotTxt, sizeof(spotTxt), XS("есть · декаль · %d"), g_farmStreak);
-                else if (g_farmSpot < 0)  snprintf(spotTxt, sizeof(spotTxt), XS("экстеншен не найден"));
-                else                      snprintf(spotTxt, sizeof(spotTxt), XS("нет — бьём по корпусу"));
+                else if (g_farmSpot < 0)  snprintf(spotTxt, sizeof(spotTxt), "%s", XS("экстеншен не найден"));
+                else                      snprintf(spotTxt, sizeof(spotTxt), "%s", XS("нет — бьём по корпусу"));
                 spotCol = g_farmSpot > 0 ? C::UA(C::Acc(), alpha)
                         : g_farmSpot < 0 ? C::UA(C::Red(), alpha)
                                          : C::UA(C::Dim(), alpha);
                 switch (g_farmPhase) {
-                    case 1: snprintf(phaseTxt, sizeof(phaseTxt), XS("поворот камеры")); break;
-                    case 2: snprintf(phaseTxt, sizeof(phaseTxt), XS("подход")); break;
-                    case 3: snprintf(phaseTxt, sizeof(phaseTxt), XS("удар по цели")); break;
-                    default: snprintf(phaseTxt, sizeof(phaseTxt), XS("простой")); break;
+                    case 1: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("поворот камеры")); break;
+                    case 2: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("подход")); break;
+                    case 3: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("удар по цели")); break;
+                    default: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("простой")); break;
                 }
             } else {
                 snprintf(tgtTxt, sizeof(tgtTxt), XS("узлов в кеше: %d"), g_farmNodes);
