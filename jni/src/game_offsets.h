@@ -84,18 +84,23 @@ inline constexpr std::uint64_t IL2CPP_STRING_LENGTH = 0x10;
 inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
 
 // Local player "is aiming" (ADS) state (dump.cs + libil2cpp disasm):
-//   PlayerManager.playerEventHandler (0x78) -> class pmi (was fvp)
+//   PlayerManager.playerEventHandler (0x78) -> class Gum (was DqO)
 //   handler.manager (0xD0) back-ref == PlayerManager (validation)
-//   handler.Aim (0x268) -> toggle activity (class pmh, was fvT), its
+//   handler.Aim (0x270, was 0x268) -> toggle activity (class Gub, was Dqg), its
 //   <...>k__BackingField (0x10) == Active
 //   This exact byte is what FPManager.LateUpdate reads to blend the camera to aimFOV.
+//   The handler class is a live target: builds add/remove activities in the middle
+//   of it. A KnockDoor field inserted at 0x188 shifted every later field by +8, so
+//   Aim moved 0x268 -> 0x270 and 0x268 became Jump ("only in scope" silently read
+//   the jump flag). offsets_map.json reaches these through `via`
+//   (playerEventHandler -> Aim), so update_offsets.py verifies them by field name.
 // Fallback: PlayerManager.fpManager (0x90) -> FPManager.LtZ (0x58, current FPWeaponBase)
 //   FPObject.Player (0xC0) back-ref == PlayerManager (validation)
 //   FPWeaponBase.<LKk>k__BackingField (0x120) == isAiming (set in weapon StartAim)
 //   FPManager.<LtX>k__BackingField (0xA8) == aim blend 0..1 (secondary hint)
 inline constexpr std::uint64_t PLAYER_EVENT_HANDLER          = 0x78;
 inline constexpr std::uint64_t EVENT_HANDLER_MANAGER_BACKREF = 0xD0;
-inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x268;
+inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x270;
 // Remote-player held-weapon candidates (dump.cs Oxide.PlayerManager). The FP
 // manager (0x90) is a local MonoBehaviour and is often empty for other players,
 // so these are the synced/inventory-backed fallbacks to probe:

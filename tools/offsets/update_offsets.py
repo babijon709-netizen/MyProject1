@@ -21,6 +21,14 @@
 переживают апдейт, — а если имя обфусцировано, выравниваем список полей
 позиционно по последовательности типов и берём поле с тем же номером.
 
+Часть констант лежит не в именованной структуре, а в классе ПО указателю из
+неё (`PlayerManager.playerEventHandler -> Aim`), и имя того класса тоже
+ротирует. Для таких записей в карте есть `via` — путь от стабильной структуры
+по читаемым именам полей; скрипт разрешает его в имена структур обоих дампов и
+дальше проверяет константу как обычное поле. Запись без `via` в такой цепочке
+проверяла бы «у PlayerManager есть поле 0x268» — всегда правда, поэтому сдвиг
+внутри хендлера (Aim 0x268 -> 0x270 после вставки KnockDoor) прошёл бы молча.
+
 Зависимости: py7zr, capstone, xz (см. README.md).
 """
 import argparse
@@ -53,6 +61,10 @@ lay = load_module('il2cpp_layout', os.path.join(HERE, 'il2cpp_layout.py'))
 
 OBF_RE = re.compile(r'^[A-Za-z]{1,4}(_[A-Za-z0-9]{1,4})*$')
 BACKING_RE = re.compile(r'^_(.+)_k__BackingField$')
+# «Слово» в обычном регистре: Aim, Jump, KnockDoor, manager, nicklabel.
+WORD_RE = re.compile(r'^[A-Z][a-z]+([A-Z][a-z]+)*$|^[a-z][a-z0-9]*([A-Z][a-z0-9]+)*$')
+# Сериализованные поля Unity не обфусцируются и не ротируют: m_Text, m_Name.
+UNITY_RE = re.compile(r'^m_[A-Z][A-Za-z0-9]*$')
 
 
 def obfuscated(name):
@@ -63,13 +75,26 @@ def obfuscated(name):
     билд свой). Без разворачивания этой обёртки такие поля выглядят
     «читаемыми», и сверка со старым дампом ложно стопорит весь пересчёт:
     имя уехало, а смещение-то осталось прежним.
+
+    Короткое имя ещё не значит мусорное. `Aim`, `Jump`, `Voice` — нормальные
+    имена полей в PlayerEventHandler, а `uRP`, `ccW`, `nfD` — перекатываемые.
+    Различаем по регистру: слово/camelCase читаемо, смесь регистров внутри
+    короткого имени — нет. Цена ошибки здесь высокая: приняв `Aim` за мусор,
+    скрипт вообще снимает его с проверки (в --verify) или отдаёт на
+    позиционное выравнивание, а оно в классе с перекатываемыми именами типов
+    (`norm()` сводит их к одному токену) вставку поля не видит. Именно так
+    сдвиг Aim 0x268 -> 0x270 прошёл незамеченным.
     """
     if name.startswith('<'):
         return True
     m = BACKING_RE.match(name)
     if m:
         name = m.group(1)
-    return bool(OBF_RE.match(name))
+    if UNITY_RE.match(name):
+        return False
+    if not OBF_RE.match(name):
+        return False
+    return not WORD_RE.match(name)
 
 
 # ----------------------------------------------------------------- дампы ----
@@ -224,14 +249,49 @@ def main():
     new = lay.Dump(os.path.join(newdir, 'il2cpp.h'))
     old = lay.Dump(os.path.join(olddir, 'il2cpp.h')) if olddir else None
 
+    # Непрямые цепочки (`via`). Часть констант живёт не в той структуре, где
+    # лежит указатель, а в классе ПО этому указателю:
+    # PlayerManager.playerEventHandler -> Aim. Имя такого класса обфускатор
+    # перекатывает каждый билд (DqO -> Gum), поэтому в карте пишется путь от
+    # стабильной структуры по читаемым именам полей, а имя структуры
+    # разрешается здесь — отдельно для нового и для старого дампа.
+    #
+    # Без этого проверка вырождается в «у PlayerManager есть поле по 0x268»,
+    # что верно всегда, и сдвиг внутри самого хендлера проходит молча: в билд
+    # добавили поле KnockDoor (0x188), Aim уехал 0x268 -> 0x270, а «Только в
+    # прицеле» начало читать флаг прыжка. Вдобавок --apply «освежил» имена этих
+    # записей по чужой структуре, и provenance превратился в мусор.
+    def resolve_via(dump, via):
+        st = None
+        for i, hop in enumerate(via):
+            st = hop.get('struct') or st
+            want = [f for f in (dump.fields(st) or []) if f[0] == hop['field']]
+            if len(want) != 1 or not want[0][2].endswith('_o*'):
+                return None, f'шаг {i + 1}: {st}.{hop["field"]}'
+            st = want[0][2][:-len('_o*')] + '_Fields'
+        return st, None
+
+    for const, ent in omap.items():
+        if ent.get('kind') != 'field' or not ent.get('via'):
+            continue
+        st_new, bad = resolve_via(new, ent['via'])
+        if st_new is None:
+            sys.exit(f'{const}: путь via не разрешился в новом дампе ({bad}) — '
+                     f'поле переименовали или тип перестал быть указателем; поправь карту')
+        ent['_struct'] = st_new
+        ent['_struct_old'] = resolve_via(old, ent['via'])[0] if old is not None else None
+
     src = open(HEADER, encoding='utf-8').read()
     header_vals = {m.group(2): int(m.group(3), 0) for m in CONST_RE.finditer(src)}
 
-    # по структурам, чтобы поля одной структуры выравнивать один раз
+    # по структурам, чтобы поля одной структуры выравнивать один раз; ключ —
+    # пара (имя в новом дампе, имя в старом): у via-записей они разные
     per_struct = {}
     for const, ent in omap.items():
         if ent.get('kind') == 'field':
-            per_struct.setdefault(ent['struct'], []).append(const)
+            key = (ent.get('_struct') or ent['struct'],
+                   ent.get('_struct_old') or ent['struct'])
+            per_struct.setdefault(key, []).append(const)
 
     # Карта описывает то состояние заголовка, которое есть сейчас, а оно
     # получено из ПРЕДЫДУЩЕГО дампа. Если подсунуть дамп через поколение,
@@ -242,7 +302,7 @@ def main():
         for const, ent in omap.items():
             if ent.get('kind') != 'field':
                 continue
-            fold = old.fields(ent['struct'])
+            fold = old.fields(ent.get('_struct_old') or ent['struct'])
             if not fold or obfuscated(ent.get('field', '')):
                 continue
             here = [f for f in fold if f[1] == ent['offset']]
@@ -268,7 +328,8 @@ def main():
         for ent in omap.values():
             if ent.get('kind') != 'field':
                 continue
-            fo, fn = old.fields(ent['struct']), new.fields(ent['struct'])
+            fo = old.fields(ent.get('_struct_old') or ent['struct'])
+            fn = new.fields(ent.get('_struct') or ent['struct'])
             if not fo or not fn:
                 continue
             ho = [f for f in fo if f[1] == ent['offset']]
@@ -285,10 +346,13 @@ def main():
             return 2
 
     changes, warnings, checked, unverifiable = {}, [], 0, []
-    for struct, consts in sorted(per_struct.items()):
+    for (struct, struct_old), consts in sorted(per_struct.items()):
+        ent0 = omap[consts[0]]
         label = lay.TRACKED.get(struct, struct)
+        if ent0.get('via'):
+            label = f'{label} via {".".join(h["field"] for h in ent0["via"])}'
         fnew = new.fields(struct)
-        fold = old.fields(struct) if old else None
+        fold = old.fields(struct_old) if old else None
         if fnew is None:
             warnings.append(f'[{label}] структуры нет в новом дампе — переименована? '
                             f'ищи форму: il2cpp_layout.py find')
@@ -311,7 +375,18 @@ def main():
             # 2. то же поле в новом дампе
             hit = None
             if a.verify and obfuscated(ent.get('field', '')):
-                unverifiable.append(const)
+                # Имя без старого дампа не восстановить, но проверить, что по
+                # этому смещению всё ещё поле того же типа, можно: этого
+                # хватает, чтобы заметить вставку/удаление поля выше по классу.
+                at = [f for f in fnew if f[1] == ent['offset']]
+                if not at:
+                    warnings.append(f'{const}: в новом дампе у {label} нет поля по '
+                                    f'0x{ent["offset"]:X}')
+                elif ent.get('type') and lay.norm(at[0][2]) != lay.norm(ent['type']):
+                    warnings.append(f'{const}: {label} по 0x{ent["offset"]:X} теперь '
+                                    f'{at[0][2]}, а карта ждёт {ent["type"]}')
+                else:
+                    unverifiable.append(const)
                 continue
             if ent.get('field') and not obfuscated(ent['field']):
                 same = [f for f in fnew if f[0] == ent['field']]
@@ -388,7 +463,7 @@ def main():
         for c, ent in omap.items():
             if ent.get('kind') != 'field':
                 continue
-            st = ent['struct']
+            st = ent.get('_struct') or ent['struct']
             if st not in fl_cache:
                 fl_cache[st] = new.fields(st) or []
             for fn, off, ty in fl_cache[st]:
@@ -396,6 +471,13 @@ def main():
                     ent['field'], ent['type'] = fn, ty
                     renamed += 1
                     break
+            if ent.get('via'):
+                # класс по указателю ротирует — пишем имя из текущего дампа,
+                # а путь via остаётся, чтобы в следующий раз разрешить заново
+                ent['struct'] = st
+        for ent in omap.values():
+            ent.pop('_struct', None)
+            ent.pop('_struct_old', None)
         json.dump(omap, open(a.map, 'w', encoding='utf-8'), indent=1, ensure_ascii=False)
         print(f'\nзаписано в {os.path.relpath(HEADER, ROOT)}'
               f'{"" if not changes else " и карту"}'

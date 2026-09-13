@@ -14,9 +14,9 @@
 
 | класс | сколько | откуда | уезжает ли каждый билд | чем проверяется |
 |---|---|---|---|---|
-| **A. Смещения полей** | 111 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
+| **A. Смещения полей** | 114 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
 | **B. `*_TYPEINFO_RVA`** | 3 | слоты глобальных `Il2CppClass*` в `.data.rel.ro` `libil2cpp.so` | **да, всегда** | `typeinfo_rva.py` + отпечаток со старого дампа |
-| **C. Рантайм/ABI** | 40 | раскладка Unity/IL2CPP-объектов, не выводится из `dump.cs` | только при смене версии Unity/IL2CPP | вручную (дизасм паттернов), см. §C |
+| **C. Рантайм/ABI** | 37 | раскладка Unity/IL2CPP-объектов, не выводится из `dump.cs` | только при смене версии Unity/IL2CPP | вручную (дизасм паттернов), см. §C |
 
 Отдельно — не константы, но тоже привязано к билду: имена классов (сверяются
 в рантайме со строкой `Il2CppClass.name`) и окно скана `TOD_SCAN_RVA_*`.
@@ -30,6 +30,17 @@
 (`MoW`→`lzD`), поэтому искать поле надо по смещению+типу, а не по имени;
 скрипт так и делает (сначала имя, если оно читаемое, иначе позиционное
 выравнивание последовательности типов старой структуры на новую).
+
+Часть констант живёт не в именованной структуре, а в классе ПО указателю
+из неё (`PlayerManager.playerEventHandler` → `Aim`), и имя того класса
+тоже ротирует (`DqO`→`Gum`). В карте такие записи несут `via` — путь от
+стабильной структуры по читаемым именам полей; `update_offsets.py`
+разрешает его в имена структур обоих дампов и проверяет константу как
+обычное поле. Без `via` проверка вырождается в «у `PlayerManager` есть
+поле по 0x268» — это верно всегда, и сдвиг внутри самого хендлера
+проходит молча. Так и вышло в билде `62a8534`: туда вставили `KnockDoor`
+(0x188), всё после него уехало на +8, `Aim` сместился 0x268→0x270, а по
+0x268 встал `Jump` — переключатель «Только в прицеле» читал флаг прыжка.
 
 ### `Oxide_PlayerManager_StaticFields`  (PlayerManager.static)
 
@@ -56,21 +67,17 @@
 | константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `PLAYER_TRANSFORM` | 0x68 | `worldCameraRoot` | `UnityEngine_Transform_o*` |
-| `VOICE_PLAYER_TAG` | 0x78 | `playerEventHandler` | `Gum_o*` |
 | `PLAYER_EVENT_HANDLER` | 0x78 | `playerEventHandler` | `Gum_o*` |
 | `PLAYER_FP_MANAGER` | 0x90 | `fpManager` | `Oxide_FPManager_o*` |
 | `PLAYER_INVENTORY` | 0x98 | `inventory` | `Oxide_PlayerInventory_o*` |
 | `PLAYER_KCC_REFERENCE` | 0xb0 | `kccReference` | `Il2CppObject*` |
-| `EVENT_HANDLER_MANAGER_BACKREF` | 0xd0 | `stats` | `GKy_o*` |
 | `PLAYER_WEAPON_REFERENCE` | 0xf0 | `weaponReference` | `Il2CppObject*` |
 | `PLAYER_NICKLABEL` | 0x130 | `nicklabel` | `oh_o*` |
 | `PLAYER_VOICE_PLAYER` | 0x140 | `voicePlayer` | `Gmv_o*` |
-| `EVENT_HANDLER_LOOK_DIRECTION` | 0x140 | `voicePlayer` | `Gmv_o*` |
 | `PLAYER_CHARACTER_MODEL` | 0x150 | `characterModel` | `UnityEngine_GameObject_o*` |
 | `PLAYER_WEAPONS_ARRAY` | 0x198 | `weapons` | `Il2CppObject*` |
 | `PLAYER_POSITION` | 0x1d4 | `lastSavedPosition` | `UnityEngine_Vector3_o` |
 | `PLAYER_DISPLAY_NAME` | 0x220 | `LWQ` | `System_String_o*` |
-| `EVENT_HANDLER_AIM_ACTIVITY` | 0x268 | `foreignCupboardZoneIntrusion` | `HyperHug_Games_Oxide_Features_GameModes_ForeignCupboardZone_ForeignCupboardZoneIntrusion_o*` |
 | `PLAYER_USER_ID` | 0x278 | `userID` | `System_String_o*` |
 | `PLAYER_TEAM_NAME` | 0x280 | `teamName` | `System_String_o*` |
 | `PLAYER_VEHICLE_ID` | 0x288 | `vehicleID` | `uint32_t` |
@@ -78,6 +85,13 @@
 | `PLAYER_CLAN_ID` | 0x290 | `clanId` | `System_String_o*` |
 | `PLAYER_CLAN_TAG` | 0x298 | `clanTag` | `System_String_o*` |
 | `PLAYER_VOICE_STATE` | 0x2e8 | `Llp` | `Dissonance_VoicePlayerState_o*` |
+
+### `oh_Fields`  (nicklabel widget (имя ротирует: OS -> oh))
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `NICKLABEL_PLAYER_BACKREF` | 0x20 | `player` | `Oxide_PlayerManager_o*` |
+| `NICKLABEL_NICKNAME_TEXT` | 0x38 | `nickname` | `UnityEngine_UI_Text_o*` |
 
 ### `UnityEngine_UI_Text_Fields`  (UI.Text)
 
@@ -99,6 +113,12 @@
 |---|---|---|---|
 | `VOICE_STATE_NAME` | 0x38 | `_Name_k__BackingField` | `System_String_o*` |
 
+### `Gmv_Fields`  (VoicePlayer (имя ротирует: DEY -> Gmv))
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `VOICE_PLAYER_TAG` | 0x78 | `ccW` | `System_String_o*` |
+
 ### `Oxide_Item_Fields`  (Item)
 
 | константа | offset | поле в билде `62a8534` | тип |
@@ -111,6 +131,14 @@
 |---|---|---|---|
 | `ITEMDATA_NAME` | 0x18 | `m_Name` | `System_String_o*` |
 | `ITEMDATA_SHORTNAME` | 0x20 | `m_ShortName` | `System_String_o*` |
+
+### `Gum_Fields`  (PlayerEventHandler (имя ротирует: DqO -> Gum))
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `EVENT_HANDLER_MANAGER_BACKREF` | 0xd0 | `manager` | `Oxide_PlayerManager_o*` |
+| `EVENT_HANDLER_LOOK_DIRECTION` | 0x140 | `LookDirection` | `Il2CppObject*` |
+| `EVENT_HANDLER_AIM_ACTIVITY` | 0x270 | `Aim` | `Gub_o*` |
 
 ### `Oxide_PlayerInventory_Fields`  (PlayerInventory)
 
@@ -143,6 +171,12 @@
 | `MODELINFO_RIGHT_WEAPON_HOLDER` | 0x28 | `rightWeaponHolder` | `UnityEngine_Transform_o*` |
 | `MODELINFO_LEFT_WEAPON_HOLDER` | 0x30 | `leftWeaponHolder` | `UnityEngine_Transform_o*` |
 | `CHARANIM_PLAYER_MODEL_INFO` | 0x30 | `leftWeaponHolder` | `UnityEngine_Transform_o*` |
+
+### `Gub_Fields`  (Activity (имя ротирует: Dqg -> Gub))
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `ACTIVITY_ACTIVE_FLAG` | 0x10 | `_LEb_k__BackingField` | `bool` |
 
 ### `Oxide_FPManager_Fields`  (FPManager)
 
@@ -351,8 +385,6 @@ runtime`) — после крупного апдейта движка сверя
 | `CAMERA_VIEW_DIRTY` | 0x502 | нативная Camera: dirty-байт кеша view (0x502) |
 | `CAMERA_PROJ_DIRTY` | 0x500 | нативная Camera: dirty-байт кеша projection (0x500) |
 | `MANAGED_CACHED_PTR` | 0x10 | UnityEngine.Object.m_CachedPtr: managed-обёртка -> нативный объект |
-| `NICKLABEL_PLAYER_BACKREF` | 0x20 | виджет никлейбла (имя класса ротирует: wK -> ij): back-ref на PlayerManager |
-| `NICKLABEL_NICKNAME_TEXT` | 0x38 | виджет никлейбла: UI.Text с ником |
 | `IL2CPP_STRING_LENGTH` | 0x10 | System.String.length (UTF-16) |
 | `IL2CPP_STRING_CHARS` | 0x14 | System.String: первый символ (UTF-16) |
 | `WEAPONVIEW_WEAPON_BASE` | 0x48 | обёртка weapon view (имя класса обфусцировано): указатель на WeaponBase |
@@ -362,7 +394,6 @@ runtime`) — после крупного апдейта движка сверя
 | `IL2CPP_CLASS_NAME` | 0x10 | Il2CppClass.name (Il2CppString*) — по нему код сверяет имена классов в рантайме |
 | `IL2CPP_CLASS_NAMESPACE` | 0x18 | Il2CppClass.namespace (Il2CppString*) |
 | `SYNC_VALUE_OFFSET` | 0x20 | Mirror SyncVar<T>.Value |
-| `ACTIVITY_ACTIVE_FLAG` | 0x10 | флаг активности объекта-активности (PlayerEventHandler.Aim), byte |
 | `IL2CPP_ARRAY_LENGTH` | 0x18 | Il2CppArray.max_length (int32) |
 | `TRANSFORM_CHILDREN_ARRAY` | 0x48 | нативный Transform: массив детей |
 | `TRANSFORM_CHILD_COUNT` | 0x58 | нативный Transform: число детей (int32) |

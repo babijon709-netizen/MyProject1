@@ -140,14 +140,33 @@
   "offset": 544
  },
  "NICKLABEL_PLAYER_BACKREF": {
-  "kind": "runtime",
+  "kind": "field",
+  "class": "nicklabel widget (имя ротирует: OS -> oh)",
+  "struct": "oh_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "nicklabel"
+   }
+  ],
+  "field": "player",
+  "type": "Oxide_PlayerManager_o*",
   "offset": 32,
-  "note": "виджет никлейбла (имя класса ротирует: wK -> ij): back-ref на PlayerManager"
+  "note": "back-ref на PlayerManager"
  },
  "NICKLABEL_NICKNAME_TEXT": {
-  "kind": "runtime",
-  "offset": 56,
-  "note": "виджет никлейбла: UI.Text с ником"
+  "kind": "field",
+  "class": "nicklabel widget (имя ротирует: OS -> oh)",
+  "struct": "oh_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "nicklabel"
+   }
+  ],
+  "field": "nickname",
+  "type": "UnityEngine_UI_Text_o*",
+  "offset": 56
  },
  "UI_TEXT_MTEXT": {
   "kind": "field",
@@ -191,11 +210,18 @@
  },
  "VOICE_PLAYER_TAG": {
   "kind": "field",
-  "class": "PlayerManager",
-  "struct": "Oxide_PlayerManager_Fields",
-  "field": "playerEventHandler",
-  "type": "Gum_o*",
-  "offset": 120
+  "class": "VoicePlayer (имя ротирует: DEY -> Gmv)",
+  "struct": "Gmv_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "voicePlayer"
+   }
+  ],
+  "field": "ccW",
+  "type": "System_String_o*",
+  "offset": 120,
+  "note": "строка ника в голосовом трекере; имя поля обфусцировано (uRP -> ccW)"
  },
  "FPOBJECT_ITEM": {
   "kind": "field",
@@ -249,19 +275,33 @@
  },
  "EVENT_HANDLER_MANAGER_BACKREF": {
   "kind": "field",
-  "class": "PlayerManager",
-  "struct": "Oxide_PlayerManager_Fields",
-  "field": "stats",
-  "type": "GKy_o*",
-  "offset": 208
+  "class": "PlayerEventHandler (имя ротирует: DqO -> Gum)",
+  "struct": "Gum_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "playerEventHandler"
+   }
+  ],
+  "field": "manager",
+  "type": "Oxide_PlayerManager_o*",
+  "offset": 208,
+  "note": "back-ref на PlayerManager — проверка, что указатель прочитан верно"
  },
  "EVENT_HANDLER_AIM_ACTIVITY": {
   "kind": "field",
-  "class": "PlayerManager",
-  "struct": "Oxide_PlayerManager_Fields",
-  "field": "foreignCupboardZoneIntrusion",
-  "type": "HyperHug_Games_Oxide_Features_GameModes_ForeignCupboardZone_ForeignCupboardZoneIntrusion_o*",
-  "offset": 616
+  "class": "PlayerEventHandler (имя ротирует: DqO -> Gum)",
+  "struct": "Gum_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "playerEventHandler"
+   }
+  ],
+  "field": "Aim",
+  "type": "Gub_o*",
+  "offset": 624,
+  "note": "было 0x268: в билд добавили KnockDoor (0x188), всё после него +8; по 0x268 теперь Jump"
  },
  "PLAYER_INVENTORY": {
   "kind": "field",
@@ -415,10 +455,16 @@
  },
  "EVENT_HANDLER_LOOK_DIRECTION": {
   "kind": "field",
-  "class": "PlayerManager",
-  "struct": "Oxide_PlayerManager_Fields",
-  "field": "voicePlayer",
-  "type": "Gmv_o*",
+  "class": "PlayerEventHandler (имя ротирует: DqO -> Gum)",
+  "struct": "Gum_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "playerEventHandler"
+   }
+  ],
+  "field": "LookDirection",
+  "type": "Il2CppObject*",
   "offset": 320
  },
  "SYNC_VALUE_OFFSET": {
@@ -427,9 +473,22 @@
   "note": "Mirror SyncVar<T>.Value"
  },
  "ACTIVITY_ACTIVE_FLAG": {
-  "kind": "runtime",
+  "kind": "field",
+  "class": "Activity (имя ротирует: Dqg -> Gub)",
+  "struct": "Gub_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "playerEventHandler"
+   },
+   {
+    "field": "Aim"
+   }
+  ],
+  "field": "_LEb_k__BackingField",
+  "type": "bool",
   "offset": 16,
-  "note": "флаг активности объекта-активности (PlayerEventHandler.Aim), byte"
+  "note": "флаг активности (PlayerEventHandler.Aim), byte; имя — автосвойство, ротирует"
  },
  "PLAYER_FP_MANAGER": {
   "kind": "field",
