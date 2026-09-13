@@ -839,6 +839,24 @@
   "type": "int32_t",
   "offset": 216
  },
+ "MINEABLE_REQUIRED_TOOL_PURPOSE": {
+  "kind": "field",
+  "class": "MineableObject",
+  "struct": "Oxide_MineableObject_Fields",
+  "field": "m_RequiredToolPurpose",
+  "type": "int32_t",
+  "offset": 112,
+  "note": "enum Oxide.FPTool.ToolPurpose (CutWood=1, BreakRocks=2, CutAnimals=4): каким орудием узел добывается. Сравнение с FPTool.m_ToolPurposes побитовое — автофарм не берёт узел, который нечем взять"
+ },
+ "MINEABLE_EXPERIENCE": {
+  "kind": "field",
+  "class": "MineableObject",
+  "struct": "Oxide_MineableObject_Fields",
+  "field": "m_Experience",
+  "type": "int32_t",
+  "offset": 212,
+  "note": "сколько опыта даёт узел — только для строки статуса автофарма"
+ },
  "PLAYER_USER_ID": {
   "kind": "field",
   "class": "PlayerManager",
@@ -1015,13 +1033,14 @@
   "type": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_o*",
   "offset": 56
  },
- "OREMARK_SCALE": {
+ "OREMARK_SMOOTH": {
   "kind": "field",
   "class": "MineableObjectExtension_OreHitstreaksMarker",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields",
   "field": "lzA",
   "type": "float",
-  "offset": 72
+  "offset": 72,
+  "note": "lzA, float: плавное текущее значение (Update догоняет им цель); не используется кодом, оставлен как метка расклада класса"
  },
  "OREMARK_AGE": {
   "kind": "field",
@@ -1111,6 +1130,15 @@
   "type": "UnityEngine_Transform_o*",
   "offset": 56
  },
+ "HITMARK_AGE": {
+  "kind": "field",
+  "class": "MineableObjectExtension_HitMarkerItem",
+  "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_Fields",
+  "field": "lzr",
+  "type": "float",
+  "offset": 200,
+  "note": "возраст крестика: Update (0x786485c) делает lzr += Time.deltaTime и при lzr > lifetime (0x20) отдаёт объект владельцу lzT (0xC0) в пул. Живой X — только пока lzr <= lifetime"
+ },
  "TOD_CYCLE_HOUR": {
   "kind": "field",
   "class": "TOD_CycleParameters",
@@ -1167,6 +1195,15 @@
   "offset": 144,
   "note": "имя поля обфусцировано (LUw), тип — якорь; компонент лучей, общий на орудие"
  },
+ "FPOBJECT_EVENT_HANDLER": {
+  "kind": "field",
+  "class": "FPObject",
+  "struct": "Oxide_FPObject_Fields",
+  "field": "PlayerEventHandler",
+  "type": "Gum_o*",
+  "offset": 200,
+  "note": "FPMelee.ZkX (0x6533a20) берёт результаты лучей отсюда: handler[0x160][0x20], при null — handler[0x168][0x20]"
+ },
  "FPMELEE_MAX_REACH": {
   "kind": "field",
   "class": "FPMelee",
@@ -1184,6 +1221,33 @@
   "type": "float",
   "offset": 300,
   "note": "радиус сферы запасного каста и добавка к дальности удара; заглушка в конструкторе 0.1"
+ },
+ "FPMELEE_TIME_BETWEEN_ATTACKS": {
+  "kind": "field",
+  "class": "FPMelee",
+  "struct": "Oxide_FPMelee_Fields",
+  "field": "m_TimeBetweenAttacks",
+  "type": "float",
+  "offset": 304,
+  "note": "ритм ударов орудия (сек): из префаба, в конструкторе заглушка 0.85. Автофарм тапает чуть медленнее: ранний тап игра ставит в очередь"
+ },
+ "FPMELEE_PAUSE_AFTER_ATTACK": {
+  "kind": "field",
+  "class": "FPMelee",
+  "struct": "Oxide_FPMelee_Fields",
+  "field": "pauseAfterAttack",
+  "type": "float",
+  "offset": 308,
+  "note": "пауза после удара (сек), в конструкторе 0.15; вместе с m_TimeBetweenAttacks даёт такт тапов бота"
+ },
+ "FPTOOL_TOOL_PURPOSES": {
+  "kind": "field",
+  "class": "FPTool",
+  "struct": "Oxide_FPTool_Fields",
+  "field": "m_ToolPurposes",
+  "type": "int32_t",
+  "offset": 352,
+  "note": "флаги ToolPurpose орудия в руках. Поле есть только у FPTool и его наследника FPChainsaw: у прочих FPMelee (FPSpear/FPBuildingHammer/FPTorch) на 0x160 своё, поэтому чтение gated по имени класса"
  },
  "RAYCASTMAN_PLAYER": {
   "kind": "field",
@@ -1229,5 +1293,67 @@
   "type": "float",
   "offset": 68,
   "note": "порог «слишком близко» для активности IsCloseToAnObject; default 1.0"
+ },
+ "GUM_RAYCAST_DATA": {
+  "kind": "field",
+  "class": "PlayerEventHandler (имя ротирует: DqO -> Gum)",
+  "struct": "Gum_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "playerEventHandler"
+   }
+  ],
+  "field": "RaycastData",
+  "type": "Il2CppObject*",
+  "offset": 352,
+  "note": "обёртка GuI`1<GKo> результата короткого луча (RaycastManager.m_RayLength, default 1.5); значение на +0x20"
+ },
+ "GUM_AIM_RAYCAST": {
+  "kind": "field",
+  "class": "PlayerEventHandler (имя ротирует: DqO -> Gum)",
+  "struct": "Gum_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "playerEventHandler"
+   }
+  ],
+  "field": "AimRaycast",
+  "type": "Il2CppObject*",
+  "offset": 360,
+  "note": "обёртка GuI`1<GKo> результата сферкаста длиной m_AimRayLength (FPMelee.On_Draw кладёт туда m_MaxReach) и радиусом hitRadius; FPMelee.ZkX берёт его, когда RaycastData пуст"
+ },
+ "GUI_VALUE": {
+  "kind": "runtime",
+  "offset": 32,
+  "note": "значение внутри обёртки GuI`1<T>: в il2cpp.h у GuI_1_Fields полей нет (generic), смещение подтверждено дизассемблером FPMelee.ZkX 0x6533a20 — ldr x8,[x19,#0xc8]; ldr x8,[x8,#0x160]; ldr x20,[x8,#0x20]"
+ },
+ "GKO_HIT_OBJECT": {
+  "kind": "field",
+  "class": "результат луча (имя ротирует; ищется по форме: RaycastHit на 0x48 и GameObject на 0x18)",
+  "struct": "GKo_Fields",
+  "field": "_Ltj_k__BackingField",
+  "type": "UnityEngine_GameObject_o*",
+  "offset": 24,
+  "note": "во что упёрся луч; null — луч ничего не принёс"
+ },
+ "GKO_RAYCAST_HIT": {
+  "kind": "field",
+  "class": "результат луча (имя ротирует; см. GKO_HIT_OBJECT)",
+  "struct": "GKo_Fields",
+  "field": "_Ltt_k__BackingField",
+  "type": "UnityEngine_RaycastHit_o",
+  "offset": 72,
+  "note": "UnityEngine.RaycastHit целиком (0x2C байт); FPMelee.ZkX копирует его и берёт get_distance()"
+ },
+ "RAYCASTHIT_DISTANCE": {
+  "kind": "field",
+  "class": "UnityEngine.RaycastHit",
+  "struct": "UnityEngine_RaycastHit_Fields",
+  "field": "m_Distance",
+  "type": "float",
+  "offset": 28,
+  "note": "3D-метры от начала луча (камеры) до попадания — ровно то, что игра сравнивает с m_MaxReach + hitRadius"
  }
 }

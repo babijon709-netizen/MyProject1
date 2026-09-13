@@ -2557,6 +2557,15 @@ struct PlayerTrack {
     Vec3   vel_ref{};       // position the current estimate was measured from
     double vel_ref_t = 0.0; // and when
     bool   have_vel_ref = false;
+    // Последняя ПРИНЯТАЯ позиция и счётчики временного фильтра (см.
+    // filter_player_position): бокс рисуется по ним, а не по сырому чтению.
+    Vec3   drawn{};
+    bool   has_drawn = false;
+    double drawn_t = 0.0;
+    int    hold_frames = 0;  // сколько кадров живём без успешного чтения
+    Vec3   jump{};           // подозрительный отсчёт, ждущий подтверждения
+    bool   has_jump = false;
+    int    jump_frames = 0;
 };
 
 static double mono_seconds() {
@@ -2751,10 +2760,18 @@ static void prune_mount_latch(const std::vector<uint64_t>& players) {
 static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
     PlayerTrack& track = g_player_track[player];
     if (--track.uid_recheck <= 0) {
-        track.uid_recheck = 120; // ~2 s: pooled objects change owner
         char uid[40] = {};
-        read_managed_string_ex(rd_ptr(player + PLAYER_USER_ID), uid, sizeof(uid), 39);
-        memcpy(track.uid, uid, sizeof(track.uid));
+        // Перезаписываем кеш ТОЛЬКО успешным чтением. Безусловный memcpy
+        // стирал userID после любого сбоя чтения, и на пару секунд дубли
+        // объекта (копия после посадки в транспорт, остаток респауна)
+        // переставали подавляться: второй бокс вспыхивал в стороне и пропадал.
+        if (read_managed_string_ex(rd_ptr(player + PLAYER_USER_ID), uid, sizeof(uid), 39)) {
+            memcpy(track.uid, uid, sizeof(track.uid));
+            track.uid_recheck = 120; // ~2 s: pooled objects change owner
+        } else {
+            // Старый кеш не трогаем. Если кеша нет вовсе, пробуем быстрее.
+            track.uid_recheck = track.uid[0] ? 120 : 20;
+        }
     }
     // Velocity, measured between the moments the position actually changed.
     // A remote player's position only arrives on the network tick, so most
@@ -2796,6 +2813,97 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
     track.last = position;
     track.has_last = true;
     return track;
+}
+
+// ---- Временной фильтр позиции ------------------------------------------------
+// Два артефакта, которые видели как «визуалы мерцают и телепаются в другую
+// сторону»:
+//   1. один кадр без успешного чтения позиции — бокс пропадал и возвращался;
+//   2. один мусорный отсчёт (позиция не дописана игрой, объект из пула чужой,
+//      чтение попало между кадрами симуляции) — бокс улетал в сторону и на
+//      следующем кадре возвращался обратно.
+// Ни то ни другое не похоже на настоящее движение: позиция игрока меняется
+// плавно, а телепорт/респаун держится в памяти и на следующем кадре тоже.
+// Поэтому одиночный сбой чтения дорисовываем по последней принятой позиции
+// (продолжая её по измеренной скорости), а подозрительный скачок рисуем
+// только когда он подтверждается подряд несколькими кадрами.
+//
+// Допуск скачка взят с запасом: бег ~8 м/с, техника до ~50 м/с, а координаты
+// чужих игроков приходят пачкой раз в ~0.1 с, так что законный «прыжок» между
+// кадрами может быть в несколько метров. Всё, что больше, почти всегда мусор —
+// и даже если это настоящий телепорт, мы отстанем от него на пару кадров.
+static constexpr int   kPosHoldFrames        = 3;     // ~50 мс без чтения — ещё не пропажа
+static constexpr int   kPosJumpConfirmFrames = 2;     // скачок должен повториться
+static constexpr float kPosJumpMeters        = 3.0F;  // базовый допуск, метры
+static constexpr float kPosJumpSpeed         = 55.0F; // плюс м/с на каждый кадр
+static constexpr float kPosExtrapolateLimit  = 1.5F;  // насколько дорисовываем по скорости
+static constexpr float kPosJumpSameSpot      = 1.5F;  // «тот же» подозрительный отсчёт
+
+// Возвращает false, когда бокс в этом кадре рисовать не надо. pos — вход
+// (сырое чтение, при read_ok) и выход (то, что рисуем).
+static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos) {
+    const double now = mono_seconds();
+
+    if (!track.has_drawn) {
+        if (!read_ok) return false;
+        track.drawn = pos; track.drawn_t = now; track.has_drawn = true;
+        track.hold_frames = 0; track.has_jump = false; track.jump_frames = 0;
+        return true;
+    }
+
+    double dt = now - track.drawn_t;
+    if (!(dt > 0.0)) dt = 0.0;
+    if (dt > 0.25) dt = 0.25;
+    const float fdt = (float)dt;
+
+    // Последняя принятая позиция, продвинутая по измеренной скорости; дальше
+    // метра-полутора не продлеваем, чтобы не унести бокс самим фильтром.
+    Vec3 predicted = track.drawn;
+    {
+        const float mx = track.vel.x * fdt, my = track.vel.y * fdt, mz = track.vel.z * fdt;
+        const float step2 = mx * mx + my * my + mz * mz;
+        const float limit2 = kPosExtrapolateLimit * kPosExtrapolateLimit;
+        const float scale = (step2 > limit2 && step2 > 0.0F) ? sqrtf(limit2 / step2) : 1.0F;
+        predicted.x += mx * scale; predicted.y += my * scale; predicted.z += mz * scale;
+    }
+
+    if (!read_ok) {
+        if (++track.hold_frames > kPosHoldFrames) return false;  // объект реально пропал
+        pos = predicted;
+        return true;
+    }
+
+    const float dx = pos.x - predicted.x, dy = pos.y - predicted.y, dz = pos.z - predicted.z;
+    const float dev = sqrtf(dx * dx + dy * dy + dz * dz);
+    const float limit = kPosJumpMeters + kPosJumpSpeed * fdt;
+    if (std::isfinite(dev) && dev <= limit) {
+        track.drawn = pos; track.drawn_t = now;
+        track.hold_frames = 0; track.has_jump = false; track.jump_frames = 0;
+        return true;
+    }
+
+    // Скачок за пределы правдоподобия. Один и тот же отсчёт подряд — похоже на
+    // настоящий телепорт, принимаем; каждый кадр разный — это мусор, остаёмся
+    // на последней хорошей позиции.
+    bool same = false;
+    if (track.has_jump) {
+        const float jx = pos.x - track.jump.x, jy = pos.y - track.jump.y, jz = pos.z - track.jump.z;
+        same = std::isfinite(jx) && (jx * jx + jy * jy + jz * jz) < kPosJumpSameSpot * kPosJumpSameSpot;
+    }
+    if (same) ++track.jump_frames;
+    else { track.jump = pos; track.jump_frames = 1; }
+    track.has_jump = true;
+
+    if (track.jump_frames >= kPosJumpConfirmFrames) {
+        track.drawn = pos; track.drawn_t = now;
+        track.has_jump = false; track.jump_frames = 0; track.hold_frames = 0;
+        // Скорость через телепорт не измеряется — сбрасываем, иначе упреждение
+        // будет на пару кадров смотреть в старую сторону.
+        track.vel = {}; track.have_vel_ref = false;
+        return true;
+    }
+    pos = predicted;
+    return true;
 }
 
 // ===================== Remote (third-person) held weapon =====================
@@ -3513,6 +3621,22 @@ struct MeleeReach {
     float total = 0.0F;       // порог засчёта удара, 3D-метры от глаза
     float ray_length = 0.0F;  // RaycastManager.m_RayLength (0x38)
     char  tool[24] = {};      // имя класса орудия
+    // Ритм ударов этого орудия: FPMelee.m_TimeBetweenAttacks (0x130) и
+    // pauseAfterAttack (0x134). Всё, что чаще первого, игра ставит в очередь
+    // и съедает, так что такт бота берётся отсюда, а не из миллисекунд «на глаз».
+    float time_between_attacks = 0.0F;
+    float pause_after_attack = 0.0F;
+    // Что орудие умеет (FPTool.m_ToolPurposes, флаги ToolPurpose). Читается
+    // только у FPTool/FPChainsaw — у прочих FPMelee на 0x160 свои поля.
+    int   tool_purposes = 0;
+    bool  purposes_valid = false;
+    // Что прямо сейчас видит прицел. Игра сама кастует лучи (RaycastManager) и
+    // кладёт результат в активности PlayerEventHandler (Gum); FPMelee.ZkX
+    // берёт distance именно оттуда. По нему видно, не перекрыт ли узел: луч
+    // упёрся ближе, чем наша точка прицела, — значит удар уйдёт в перекрытие.
+    bool  ray_valid = false;      // в активностях есть GKo
+    bool  ray_hit_object = false; // у попадания есть GameObject
+    float ray_distance = 0.0F;    // м от камеры вдоль прицела (0 = неизвестно)
 };
 
 // Имена классов ближнего орудия читаемые и между билдами не ротируют
@@ -3577,6 +3701,55 @@ static bool read_local_melee_reach(MeleeReach& out) {
         float ray = 0.0F;
         if (rd_exact(rm + RAYCASTMAN_RAY_LENGTH, ray) && std::isfinite(ray) &&
             ray > 0.0F && ray < 500.0F) out.ray_length = ray;
+    }
+
+    // Ритм ударов. В конструкторе FPMelee стоят заглушки (0.85/0.15), настоящие
+    // значения сериализованы в префабе каждого инструмента, поэтому читаем их
+    // так же, как дальность, — из живого орудия, с проверкой правдоподобия.
+    float tba = 0.0F, pause = 0.0F;
+    if (rd_exact(weapon + FPMELEE_TIME_BETWEEN_ATTACKS, tba) &&
+        std::isfinite(tba) && tba > 0.05F && tba < 10.0F)
+        out.time_between_attacks = tba;
+    if (rd_exact(weapon + FPMELEE_PAUSE_AFTER_ATTACK, pause) &&
+        std::isfinite(pause) && pause >= 0.0F && pause < 10.0F)
+        out.pause_after_attack = pause;
+
+    // Умения орудия (какой ресурс оно вообще может добывать).
+    if (!strcmp(s_melee_klass_name, "FPTool") || !strcmp(s_melee_klass_name, "FPChainsaw")) {
+        int32_t purposes = 0;
+        if (rd_exact(weapon + FPTOOL_TOOL_PURPOSES, purposes)) {
+            const int32_t known = (int32_t)ToolPurpose::CutWood |
+                                  (int32_t)ToolPurpose::BreakRocks |
+                                  (int32_t)ToolPurpose::CutAnimals;
+            if (purposes != 0 && (purposes & ~known) == 0) {
+                out.tool_purposes = (int)purposes;
+                out.purposes_valid = true;
+            }
+        }
+    }
+
+    // Луч прицела. Порядок ровно как в FPMelee.ZkX (0x6533a20): сначала
+    // RaycastData (0x160), при null — AimRaycast (0x168); значение лежит в
+    // обёртке GuI`1<GKo> на +0x20, а «валидность» там — просто data != null.
+    {
+        const uint64_t handler = rd_ptr(weapon + FPOBJECT_EVENT_HANDLER);
+        if (valid_obj(handler)) {
+            uint64_t data = 0;
+            const uint64_t primary = rd_ptr(handler + GUM_RAYCAST_DATA);
+            if (valid_obj(primary)) data = rd_ptr(primary + GUI_VALUE);
+            if (!valid_obj(data)) {
+                const uint64_t fallback = rd_ptr(handler + GUM_AIM_RAYCAST);
+                if (valid_obj(fallback)) data = rd_ptr(fallback + GUI_VALUE);
+            }
+            if (valid_obj(data)) {
+                out.ray_valid = true;
+                out.ray_hit_object = valid_obj(rd_ptr(data + GKO_HIT_OBJECT));
+                float dist = 0.0F;
+                if (rd_exact(data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE, dist) &&
+                    std::isfinite(dist) && dist > 0.0F && dist < 1000.0F)
+                    out.ray_distance = dist;
+            }
+        }
     }
     return true;
 }
@@ -3684,6 +3857,13 @@ static void read_local_aim_reference(uint64_t local_player, const PlayerAux* loc
 // Per-frame player list, kept across frames so a transient empty read does
 // not blank the overlay, but dropped on a real world change.
 static std::vector<uint64_t> g_frame_transforms;
+// Игроки, пропавшие из реестра в последние пару кадров. Список
+// PlayerManager читается по одному указателю на элемент, и одиночный
+// сбой чтения (или непрочитавшаяся проверка класса) выбрасывал игрока
+// из кадра — его бокс гас и загорался обратно. Держим пропавшего ещё
+// кадр-два: настоящий уход/смерть задерживается на ~30 мс, а мерцание
+// исчезает. Значение — сколько кадров подряд игрока нет в списке.
+static std::unordered_map<uint64_t, int> g_frame_transforms_lost;
 
 // Frame projection state, published by esp_get_boxes() so that world markers
 // (ore / animals) project through exactly the same camera as the player boxes.
@@ -3731,6 +3911,7 @@ static void reset_world_caches() {
     g_player_text.clear();
     g_player_track.clear();
     g_player_track_pick.clear();
+    g_frame_transforms_lost.clear();
     g_mount_latch.clear();
     g_skeletons.clear();
     reset_marker_caches();
@@ -3757,6 +3938,7 @@ void esp_reset() {
     g_player_text.clear();
     g_player_track.clear();
     g_player_track_pick.clear();
+    g_frame_transforms_lost.clear();
     g_mount_latch.clear();
     g_skeletons.clear();
     g_skeleton_layout = {}; g_skeleton_layout_valid = false;
@@ -3862,13 +4044,27 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // the previous population). This also has to fire when we are alone on
         // the server -- respawning solo replaces our single PlayerManager and
         // used to leave every cache pointing at the dead one.
+        bool overlap = false;
         if (!s_transforms.empty()) {
-            bool overlap = false;
             for (uint64_t previous : s_transforms) {
                 for (uint64_t current : refreshed) if (previous == current) { overlap = true; break; }
                 if (overlap) break;
             }
             if (!overlap) reset_world_caches();
+        }
+        // Население то же, но кого-то не досчитались: почти всегда это сбой
+        // чтения одного элемента, а не уход игрока. Возвращаем пропавших в
+        // список ещё на пару кадров (иначе их боксы мигают), после чего
+        // отпускаем — иначе ушедший игрок остался бы в списке навсегда.
+        if (overlap && refreshed.size() < s_transforms.size()) {
+            for (uint64_t previous : s_transforms) {
+                bool present = false;
+                for (uint64_t current : refreshed) if (current == previous) { present = true; break; }
+                if (present) { g_frame_transforms_lost.erase(previous); continue; }
+                if (++g_frame_transforms_lost[previous] <= 2) refreshed.push_back(previous);
+                else g_frame_transforms_lost.erase(previous);
+            }
+            if (g_frame_transforms_lost.size() > 256) g_frame_transforms_lost.clear();
         }
         s_transforms = std::move(refreshed);
         g_frame_transforms_empty_streak = 0;
@@ -3950,7 +4146,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         Vec3 first_valid_position{};
         for (size_t index = 0; index < s_transforms.size(); ++index) {
             Vec3 candidate{};
-            if (!read_entity_position(s_transforms[index], candidate)) continue;
+            // Мусорный отсчёт (нули после респауна, денормали, координаты чужого
+            // объекта из пула) отбрасываем сразу: это finite-вектор, но не
+            // мировая позиция, и именно он утаскивал бокс «в другую сторону».
+            const bool read_ok = read_entity_position(s_transforms[index], candidate) &&
+                                 position_looks_like_world_space(candidate);
+            // Один сбой чтения или один мусорный кадр больше не гасят и не
+            // дёргают бокс — см. filter_player_position.
+            PlayerTrack& filter = g_player_track[s_transforms[index]];
+            if (!filter_player_position(filter, read_ok, candidate)) continue;
             apply_mounted_position(s_transforms[index], candidate);
             positions[index] = candidate;
             position_ok[index] = 1;
@@ -4373,13 +4577,23 @@ struct FarmEntity {
     uint64_t ext = 0;
     int      ext_kind = 0;   // FARM_EXT_NONE / _ORE / _TREE
     int      ext_age = 0;    // кадров до повторного поиска
+    // Каким орудием узел добывается (MineableObject.m_RequiredToolPurpose,
+    // флаги ToolPurpose). Значение из префаба и за жизнь узла не меняется,
+    // поэтому читается один раз при скане. 0 = неизвестно/без требования.
+    int      required_purpose = 0;
 };
 static std::vector<FarmEntity> g_farm_entities;
 static std::unordered_map<uint64_t, int> g_farm_blacklist; // identity -> frames left
 static int g_farm_rescan = 0;
+// Орудие в руках и что запросили отброшенные узлы (флаги ToolPurpose) — для
+// строки статуса в меню: «нужен топор» вместо бессмысленного «все узлы вне
+// радиуса».
+static int g_farm_tool_have = 0;
+static int g_farm_tool_need = 0;
 // Why the picker returned nothing (surfaced in the menu status line):
 // 0 ok, 1 off, 2 frame not published, 3 no nodes in registry, 4 none in
-// range, 5 camera pose unreadable.
+// range, 5 camera pose unreadable, 6 nodes are there but the tool in hand
+// cannot harvest them (m_RequiredToolPurpose vs FPTool.m_ToolPurposes).
 static int g_farm_idle_reason = 1;
 
 // What a single marker looks like: kind picks the toggle it belongs to, and ore
@@ -5362,6 +5576,17 @@ static void rebuild_farm_entities() {
                 }
             }
 
+            // Чем этот узел вообще можно взять. Мусорное значение (не из
+            // набора флагов) считаем отсутствием требования, чтобы ошибка
+            // чтения не оставила фарм без целей.
+            {
+                const int32_t known = (int32_t)ToolPurpose::CutWood |
+                                      (int32_t)ToolPurpose::BreakRocks |
+                                      (int32_t)ToolPurpose::CutAnimals;
+                const int32_t purpose = rd<int32_t>(component + MINEABLE_REQUIRED_TOOL_PURPOSE);
+                entity.required_purpose = ((purpose & ~known) == 0) ? (int)purpose : 0;
+            }
+
             entity.pos_valid = marker_world_position(entity.transform, entity.pos);
             g_farm_entities.push_back(entity);
             if (g_farm_entities.size() >= 512) break;
@@ -5468,11 +5693,29 @@ static void farm_resolve_extension(FarmEntity& entity) {
 }
 
 // Мировая точка крестика и откуда она взялась (для диагностики в меню).
-// source: 1 — трансформ маркера руды, 2 — MTQ дерева (точка на коре, её и
-// меряет проверка попадания), 3 — трансформ декаля дерева (запасной путь;
-// декаль смещён от коры на 0.25 м по нормали, поэтому он второй).
-static bool farm_read_spot(const FarmEntity& entity, Vec3& out, int& source, int& streak) {
-    out = {}; source = 0; streak = 0;
+// source: 1 — трансформ маркера руды, 2 — точка на коре дерева (MTQ, либо
+// ближайшая к глазу точка отрезка MTQ..MTu — именно до отрезка игра меряет
+// попадание), 3 — трансформ декаля дерева (запасной путь; декаль смещён от
+// коры на 0.25 м по нормали, поэтому он второй).
+// life_left — сколько секунд крестику осталось жить (0 = уже потух, -1 = не
+// прочиталось).
+// Сколько секунд жизни осталось у крестика: у руды возраст (lHG) сравнивается
+// с 15.0 прямо в OreHitstreaksMarker.Update, у дерева — свой lifetime, который
+// HitMarkerItem.Update набирает в lzr. Мусорное значение отдаёт -1 («не
+// знаю»), и тогда вызывающий код ведёт себя как раньше.
+// Возвращает остаток жизни в секундах; 0.0F — ровно «потух» (вызывающий код
+// сравнивает с нулём), -1.0F — «не прочиталось» (тогда верим полю маркера, как
+// раньше, чтобы сбой чтения не лишал бота крестика).
+static float farm_marker_life_left(uint64_t marker, uint64_t age_offset, float lifetime) {
+    float age = 0.0F;
+    if (!rd_exact(marker + age_offset, age) || !std::isfinite(age) || age < 0.0F) return -1.0F;
+    if (!(lifetime > 0.0F)) return -1.0F;
+    const float left = lifetime - age;
+    return left > 0.0F ? left : 0.0F;
+}
+
+static bool farm_read_spot(const FarmEntity& entity, Vec3& out, int& source, int& streak, float& life_left) {
+    out = {}; source = 0; streak = 0; life_left = -1.0F;
     if (!valid_obj(entity.ext)) return false;
 
     if (entity.ext_kind == FARM_EXT_ORE) {
@@ -5480,11 +5723,18 @@ static bool farm_read_spot(const FarmEntity& entity, Vec3& out, int& source, int
         // когда X потух (giq: Destroy маркера + str xzr,[x19,#0x30]).
         const uint64_t marker = rd_ptr(entity.ext + OREHS_MARKER);
         if (!valid_obj(marker)) return false;
+        // Обнуление поля и гашение GameObject происходят не одним тактом, а
+        // отсчёт своих 15 секунд маркер ведёт сам (Update: lHG += dt; lHG > 15
+        // -> SetActive(false) + вызов владельца). Пока поле ещё заполнено, но
+        // время вышло, прицел стоит на невидимой точке и удары уходят в никуда.
+        const float life = farm_marker_life_left(marker, OREMARK_AGE, OREMARK_LIFETIME);
+        if (life == 0.0F) return false;
         const uint64_t transform = native_component_transform(managed_object_native(marker));
         if (!transform || !marker_world_position(transform, out)) return false;
         if (!farm_spot_on_node(out, entity.pos, entity.kind)) return false;
         const int32_t s = rd<int32_t>(entity.ext + OREHS_STREAK_INDEX);
         streak = (s >= 0 && s < 10000) ? s : 0;
+        life_left = life;
         source = 1;
         return true;
     }
@@ -5494,12 +5744,41 @@ static bool farm_read_spot(const FarmEntity& entity, Vec3& out, int& source, int
         // клона серия не засчитывается, так что это и есть признак «X есть».
         const uint64_t marker = rd_ptr(entity.ext + TREEHS_MARKER);
         if (!valid_obj(marker)) return false;
+        // HitMarkerItem живёт свой lifetime, а по истечении уходит в пул
+        // (Update: lzr += dt; lzr > lifetime -> вызов владельца lzT), где его
+        // переиспользуют для другого дерева. Возраст поэтому проверяем до того,
+        // как поверить в координаты.
+        float lifetime = 0.0F;
+        if (!rd_exact(marker + HITMARK_LIFETIME, lifetime) || !std::isfinite(lifetime) || lifetime < 0.0F)
+            lifetime = 0.0F;
+        const float life = farm_marker_life_left(marker, HITMARK_AGE, lifetime);
+        if (life == 0.0F) return false;
         const int32_t s = rd<int32_t>(entity.ext + TREEHS_STREAK);
         streak = (s >= 0 && s < 10000) ? s : 0;
 
         const Vec3 a = rd_v3(entity.ext + TREEHS_SPOT_A);
         if (vec3_is_finite(a) && farm_spot_on_node(a, entity.pos, entity.kind)) {
-            out = a; source = 2; return true;
+            out = a; source = 2; life_left = life;
+            // Проверка попадания у дерева меряет дистанцию до ОТРЕЗКА MTQ..MTu
+            // радиусом 0.15 м, а не до его начала. Если проекция глаза на
+            // отрезок ложится строго внутрь и до неё ближе, чем до конца A, —
+            // целимся в неё: это тот же крестик, но запас на промах больше.
+            const Vec3 b = rd_v3(entity.ext + TREEHS_SPOT_B);
+            if (vec3_is_finite(b) && farm_spot_on_node(b, entity.pos, entity.kind)) {
+                const Vec3& eye = g_cam_pose_valid ? g_cam_pos : g_frame_cam_pos;
+                const float abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+                const float len2 = abx * abx + aby * aby + abz * abz;
+                if (std::isfinite(len2) && len2 > 0.0001F) {
+                    const float t = ((eye.x - a.x) * abx + (eye.y - a.y) * aby + (eye.z - a.z) * abz) / len2;
+                    if (std::isfinite(t) && t > 0.02F && t < 0.98F) {
+                        const Vec3 p = {a.x + abx * t, a.y + aby * t, a.z + abz * t};
+                        const float pe = (p.x - eye.x) * (p.x - eye.x) + (p.y - eye.y) * (p.y - eye.y) + (p.z - eye.z) * (p.z - eye.z);
+                        const float ae = (a.x - eye.x) * (a.x - eye.x) + (a.y - eye.y) * (a.y - eye.y) + (a.z - eye.z) * (a.z - eye.z);
+                        if (std::isfinite(pe) && pe + 0.0225F < ae) out = p; // ближе на 15+ см
+                    }
+                }
+            }
+            return true;
         }
         // MTQ не читается (нули/мусор) — берём трансформ самого декаля.
         const uint64_t mark = rd_ptr(marker + HITMARK_MARK);
@@ -5507,6 +5786,7 @@ static bool farm_read_spot(const FarmEntity& entity, Vec3& out, int& source, int
         if (!transform) transform = native_component_transform(managed_object_native(marker));
         if (!transform || !marker_world_position(transform, out)) return false;
         if (!farm_spot_on_node(out, entity.pos, entity.kind)) return false;
+        life_left = life;
         source = 3;
         return true;
     }
@@ -5516,6 +5796,11 @@ static bool farm_read_spot(const FarmEntity& entity, Vec3& out, int& source, int
 void esp_farm_debug(int& nodes_cached, int& idle_reason) {
     nodes_cached = (int)g_farm_entities.size();
     idle_reason = g_farm_idle_reason;
+}
+
+void esp_farm_tool_info(int& purposes_have, int& purposes_need) {
+    purposes_have = g_farm_tool_have;
+    purposes_need = g_farm_tool_need;
 }
 
 bool esp_farm_get_target(FarmTarget& out) {
@@ -5546,6 +5831,13 @@ bool esp_farm_get_target(FarmTarget& out) {
     // переключался бы между двумя равноудалёнными узлами каждый кадр.
     static uint64_t s_last_identity = 0;
 
+    // Орудие в руках читаем один раз на кадр: из него и дальность удара, и ритм,
+    // и умения (какой ресурс этим орудием вообще добывается).
+    MeleeReach reach{};
+    const bool have_reach = read_local_melee_reach(reach);
+    g_farm_tool_have = (have_reach && reach.purposes_valid) ? reach.tool_purposes : 0;
+    int tool_need = 0;
+
     const float kMaxFarmDistance = g_farm_max_distance;
     const FarmEntity* best = nullptr;
     float best_score = 1e18F;
@@ -5554,6 +5846,16 @@ bool esp_farm_get_target(FarmTarget& out) {
         if (!(g_farm_mask & (1u << entity.kind))) continue;
         if (!entity.pos_valid) continue;
         if (g_farm_blacklist.count(entity.identity)) continue;
+
+        // Узел, который нечем взять текущим орудием, целью не становится:
+        // сравнение побитовое, тип у обоих полей один (FPTool.ToolPurpose).
+        // Без этого бот с киркой в руках вечно кружил вокруг дерева (и
+        // наоборот), теряя на каждый узел весь give-up таймер.
+        if (have_reach && reach.purposes_valid && entity.required_purpose != 0 &&
+            (reach.tool_purposes & entity.required_purpose) == 0) {
+            tool_need |= entity.required_purpose;
+            continue;
+        }
 
         // Дистанция по горизонтали (в Unity ось Y вверх). Контроллер сравнивает
         // её с дальностью удара, а пивот высокого дерева сидит в метрах над
@@ -5593,9 +5895,12 @@ bool esp_farm_get_target(FarmTarget& out) {
     }
     if (!best) {
         s_last_identity = 0;
-        g_farm_idle_reason = g_farm_entities.empty() ? 3 : 4;
+        g_farm_tool_need = tool_need;
+        // 6 — рядом есть узлы, но текущим орудием они не добываются.
+        g_farm_idle_reason = tool_need ? 6 : (g_farm_entities.empty() ? 3 : 4);
         return false;
     }
+    g_farm_tool_need = 0;
     s_last_identity = best->identity;
     FarmEntity& node = const_cast<FarmEntity&>(*best);
 
@@ -5603,7 +5908,8 @@ bool esp_farm_get_target(FarmTarget& out) {
     farm_resolve_extension(node);
     Vec3 spot{};
     int spot_source = 0, streak = 0;
-    const bool has_spot = farm_read_spot(node, spot, spot_source, streak);
+    float spot_life = -1.0F;
+    const bool has_spot = farm_read_spot(node, spot, spot_source, streak, spot_life);
 
     // С какой стороны узла X. Если с обратной, то (а) идти к нему — значит
     // упираться в ствол/камень, и (б) удар сквозь меш не засчитается в серию.
@@ -5747,16 +6053,42 @@ bool esp_farm_get_target(FarmTarget& out) {
     // Дальность удара текущего орудия — из игры (FPMelee.m_MaxReach +
     // hitRadius), а не «на глаз». Ноль значит «в руках не ближнее орудие или
     // чтение не удалось» — тогда контроллер остаётся на эмпирических порогах.
-    MeleeReach reach{};
-    if (read_local_melee_reach(reach)) {
+    if (reach.valid) {
         out.melee_reach = reach.total;
         out.melee_ray = reach.ray_length;
+        out.tool_purposes = reach.purposes_valid ? reach.tool_purposes : 0;
+        if (reach.time_between_attacks > 0.0F)
+            out.attack_period = reach.time_between_attacks + reach.pause_after_attack;
+        // Перекрыт ли узел: луч игры упёрся заметно раньше нашей точки
+        // прицела. Полметра допуска — на разницу между камерой и осью
+        // выстрела (качание/отдача) и на то, что X стоит на поверхности меша.
+        out.ray_valid = reach.ray_valid;
+        out.ray_distance = reach.ray_distance;
+        out.ray_blocked = reach.ray_valid && reach.ray_hit_object &&
+                          reach.ray_distance > 0.0F &&
+                          reach.ray_distance < out.aim_3d - 0.6F;
+    }
+    // Состояние самого узла. Здоровье — самый тонкий признак того, что удары
+    // доходят: fractionRemaining сдвигается на проценты, а m_CurrentHealth
+    // падает уже от первого попадания.
+    {
+        float hp = 0.0F, hp_max = 0.0F;
+        if (rd_exact(best->component + MINEABLE_CURRENT_HEALTH, hp) &&
+            std::isfinite(hp) && hp >= 0.0F && hp < 1000000.0F)
+            out.node_health = hp;
+        if (rd_exact(best->component + MINEABLE_MAX_HEALTH, hp_max) &&
+            std::isfinite(hp_max) && hp_max > 0.0F && hp_max < 1000000.0F)
+            out.node_health_max = hp_max;
+        int32_t xp = 0;
+        if (rd_exact(best->component + MINEABLE_EXPERIENCE, xp) && xp >= 0 && xp < 1000000)
+            out.node_experience = (int)xp;
     }
     out.at_spot = at_spot;
     out.has_spot = has_spot;
     out.spot_front = spot_front;
     out.spot_source = spot_source;
     out.streak = streak;
+    out.spot_life = spot_life;
     out.walk_yaw = walk_yaw;
     out.walk_dist = walk_dist;
     out.node_dist = best_dist;

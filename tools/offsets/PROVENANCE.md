@@ -5,7 +5,7 @@
 `libil2cpp.7z`; распаковка — `tools/offsets/extract_dumps.sh <dir> [git-ref]`.
 
 Машиночитаемый источник истины — `tools/offsets/offsets_map.json`
-(162 записей); этот файл — его человеческое объяснение: не «какое число
+(175 записей); этот файл — его человеческое объяснение: не «какое число
 стоит», а «откуда оно взялось и как его найти заново». Значения здесь
 совпадают с `jni/src/game_offsets.h`; при расхождении верить заголовку и
 карте, а этот файл пересобрать (`make_provenance.py`).
@@ -14,9 +14,9 @@
 
 | класс | сколько | откуда | уезжает ли каждый билд | чем проверяется |
 |---|---|---|---|---|
-| **A. Смещения полей** | 122 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
+| **A. Смещения полей** | 134 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
 | **B. `*_TYPEINFO_RVA`** | 3 | слоты глобальных `Il2CppClass*` в `.data.rel.ro` `libil2cpp.so` | **да, всегда** | `typeinfo_rva.py` + отпечаток со старого дампа |
-| **C. Рантайм/ABI** | 37 | раскладка Unity/IL2CPP-объектов, не выводится из `dump.cs` | только при смене версии Unity/IL2CPP | вручную (дизасм паттернов), см. §C |
+| **C. Рантайм/ABI** | 38 | раскладка Unity/IL2CPP-объектов, не выводится из `dump.cs` | только при смене версии Unity/IL2CPP | вручную (дизасм паттернов), см. §C |
 
 Отдельно — не константы, но тоже привязано к билду: имена классов (сверяются
 в рантайме со строкой `Il2CppClass.name`) и окно скана `TOD_SCAN_RVA_*`.
@@ -107,6 +107,7 @@
 | `FPOBJECT_OBJECT_NAME` | 0x78 | `m_ObjectName` | `System_String_o*` |
 | `FPOBJECT_RAYCAST_MANAGER` | 0x90 | `LUw` | `Oxide_RaycastManager_o*` |
 | `FPOBJECT_PLAYER_BACKREF` | 0xc0 | `Player` | `Oxide_PlayerManager_o*` |
+| `FPOBJECT_EVENT_HANDLER` | 0xc8 | `PlayerEventHandler` | `Gum_o*` |
 
 ### `Dissonance_VoicePlayerState_Fields`  (VoicePlayerState)
 
@@ -139,6 +140,8 @@
 |---|---|---|---|
 | `EVENT_HANDLER_MANAGER_BACKREF` | 0xd0 | `manager` | `Oxide_PlayerManager_o*` |
 | `EVENT_HANDLER_LOOK_DIRECTION` | 0x140 | `LookDirection` | `Il2CppObject*` |
+| `GUM_RAYCAST_DATA` | 0x160 | `RaycastData` | `Il2CppObject*` |
+| `GUM_AIM_RAYCAST` | 0x168 | `AimRaycast` | `Il2CppObject*` |
 | `EVENT_HANDLER_AIM_ACTIVITY` | 0x270 | `Aim` | `Gub_o*` |
 
 ### `Oxide_PlayerInventory_Fields`  (PlayerInventory)
@@ -253,11 +256,13 @@
 
 | константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
+| `MINEABLE_REQUIRED_TOOL_PURPOSE` | 0x70 | `m_RequiredToolPurpose` | `int32_t` |
 | `MINEABLE_CURRENT_HEALTH` | 0x78 | `m_CurrentHealth` | `float` |
 | `MINEABLE_LOOT` | 0xa0 | `m_Loot` | `Il2CppObject*` |
 | `MINEABLE_FINISH_BONUS` | 0xa8 | `m_FinishBonus` | `Il2CppObject*` |
 | `MINEABLE_MAX_HEALTH` | 0xc0 | `m_MaxHealth` | `float` |
 | `MINEABLE_FRACTION` | 0xd0 | `fractionRemaining` | `float` |
+| `MINEABLE_EXPERIENCE` | 0xd4 | `m_Experience` | `int32_t` |
 | `MINEABLE_ENTITY_TYPE` | 0xd8 | `entityType` | `int32_t` |
 | `MINEABLE_EXTENSIONS` | 0xe8 | `LXZ` | `Il2CppObject*` |
 
@@ -300,7 +305,7 @@
 |---|---|---|---|
 | `OREMARK_RENDERER` | 0x20 | `meshRenderer` | `UnityEngine_MeshRenderer_o*` |
 | `OREMARK_OWNER` | 0x38 | `lzF` | `HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_o*` |
-| `OREMARK_SCALE` | 0x48 | `lzA` | `float` |
+| `OREMARK_SMOOTH` | 0x48 | `lzA` | `float` |
 | `OREMARK_AGE` | 0x58 | `lHG` | `float` |
 
 ### `HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields`  (MineableObjectExtension_TreeHitstreaks)
@@ -322,6 +327,7 @@
 | `HITMARK_FILTER` | 0x28 | `mFilter` | `UnityEngine_MeshFilter_o*` |
 | `HITMARK_RENDERER` | 0x30 | `renderer` | `UnityEngine_Renderer_o*` |
 | `HITMARK_MARK` | 0x38 | `mark` | `UnityEngine_Transform_o*` |
+| `HITMARK_AGE` | 0xc8 | `lzr` | `float` |
 
 ### `TOD_CycleParameters_Fields`  (TOD_CycleParameters)
 
@@ -338,6 +344,14 @@
 |---|---|---|---|
 | `FPMELEE_MAX_REACH` | 0x128 | `m_MaxReach` | `float` |
 | `FPMELEE_HIT_RADIUS` | 0x12c | `hitRadius` | `float` |
+| `FPMELEE_TIME_BETWEEN_ATTACKS` | 0x130 | `m_TimeBetweenAttacks` | `float` |
+| `FPMELEE_PAUSE_AFTER_ATTACK` | 0x134 | `pauseAfterAttack` | `float` |
+
+### `Oxide_FPTool_Fields`  (FPTool)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `FPTOOL_TOOL_PURPOSES` | 0x160 | `m_ToolPurposes` | `int32_t` |
 
 ### `Oxide_RaycastManager_Fields`  (RaycastManager)
 
@@ -348,6 +362,19 @@
 | `RAYCASTMAN_AIM_RAY_LENGTH` | 0x3c | `m_AimRayLength` | `float` |
 | `RAYCASTMAN_SPHERE_RADIUS` | 0x40 | `LtS` | `float` |
 | `RAYCASTMAN_TOO_CLOSE` | 0x44 | `m_TooCloseThreeshold` | `float` |
+
+### `GKo_Fields`  (результат луча (имя ротирует; ищется по форме: RaycastHit на 0x48 и GameObject на 0x18))
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `GKO_HIT_OBJECT` | 0x18 | `_Ltj_k__BackingField` | `UnityEngine_GameObject_o*` |
+| `GKO_RAYCAST_HIT` | 0x48 | `_Ltt_k__BackingField` | `UnityEngine_RaycastHit_o` |
+
+### `UnityEngine_RaycastHit_Fields`  (UnityEngine.RaycastHit)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `RAYCASTHIT_DISTANCE` | 0x1c | `m_Distance` | `float` |
 
 ---
 
@@ -428,6 +455,7 @@ runtime`) — после крупного апдейта движка сверя
 | `TOD_SKY_CYCLE` | 0x40 | TOD_Sky.Cycle. Имя класса TOD_Sky обфусцировано и ротирует каждый билд (IY -> UV), поэтому не field: искать grep'ом 'TOD_CycleParameters_o* Cycle' в il2cpp.h — offset поля Cycle и есть это значение |
 | `TOD_SCAN_RVA_BEGIN` | 0xd8d0000 | НЕ поле: начало области глобальных Il2CppClass*-слотов в .data.rel.ro, которую скан в always_day_tick() перебирает в поисках TOD_Sky. Уезжает каждый билд вместе с *_TYPEINFO_RVA (было 0xD7A0000). Проверка: кандидаты typeinfo_rva.py для класса TOD_Sky обязаны попасть в [BEGIN,END) |
 | `TOD_SCAN_RVA_END` | 0xd970000 | конец окна скана TOD_Sky = BEGIN + 0xA0000 (было 0xD840000) |
+| `GUI_VALUE` | 0x20 | значение внутри обёртки GuI`1<T>: в il2cpp.h у GuI_1_Fields полей нет (generic), смещение подтверждено дизассемблером FPMelee.ZkX 0x6533a20 — ldr x8,[x19,#0xc8]; ldr x8,[x8,#0x160]; ldr x20,[x8,#0x20] |
 
 Дешёвая перепроверка ABI по новому `libil2cpp.so` (без запуска игры):
 

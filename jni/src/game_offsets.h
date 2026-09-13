@@ -195,17 +195,40 @@ inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;
 //   FPMelee.On_Draw кладёт туда свои m_MaxReach и hitRadius (RaycastManager.ZIj),
 //   сфера -> AimRaycast; m_TooCloseThreeshold (0x44, default 1.0).
 inline constexpr std::uint64_t FPOBJECT_RAYCAST_MANAGER      = 0x90;
+inline constexpr std::uint64_t FPOBJECT_EVENT_HANDLER        = 0xC8; // Gum (PlayerEventHandler)
 inline constexpr std::uint64_t FPMELEE_MAX_REACH             = 0x128;
 inline constexpr std::uint64_t FPMELEE_HIT_RADIUS            = 0x12C;
+// Ритм ударов самого орудия (секунды, сериализованы в префабе; в конструкторе
+// FPMelee стоят 0.85 и 0.15). Тап быстрее m_TimeBetweenAttacks игра ставит в
+// очередь и часть ударов съедает, медленнее — простой; поэтому такт бота берём
+// отсюда, а не из подобранных на глаз миллисекунд.
+inline constexpr std::uint64_t FPMELEE_TIME_BETWEEN_ATTACKS  = 0x130;
+inline constexpr std::uint64_t FPMELEE_PAUSE_AFTER_ATTACK    = 0x134;
+// Oxide.FPTool : Oxide.FPMelee — поля есть только у FPTool и FPChainsaw
+// (прочие FPMelee: FPSpear, FPBuildingHammer, FPTorch — там на 0x160 своё).
+inline constexpr std::uint64_t FPTOOL_TOOL_PURPOSES          = 0x160; // enum ToolPurpose, флаги
+// Рядом (не читаем): 0x164 m_Efficiency (множитель урона), 0x168 alwaysCrit,
+// 0x169 useAmmo, 0x16C attacksPerAmmo.
 inline constexpr std::uint64_t RAYCASTMAN_PLAYER             = 0x20;
 inline constexpr std::uint64_t RAYCASTMAN_RAY_LENGTH         = 0x38;
 inline constexpr std::uint64_t RAYCASTMAN_AIM_RAY_LENGTH     = 0x3C;
 inline constexpr std::uint64_t RAYCASTMAN_SPHERE_RADIUS      = 0x40;
 inline constexpr std::uint64_t RAYCASTMAN_TOO_CLOSE          = 0x44;
-// Источники данных луча в PlayerEventHandler (класс Gum): RaycastData на 0x160
-// и AimRaycast на 0x168, значение (GKo*) у обеих активностей как обычно на
-// +0x20. Код их пока не читает — константы не заводим, чтобы не устаревали
-// молча (см. журнал: мёртвые константы TOD_* пришлось вычищать).
+// Что прямо сейчас видит прицел — результат лучей RaycastManager, разложенный
+// в активности PlayerEventHandler (класс Gum). FPMelee.ZkX берёт их ровно так
+// (дизассемблер 0x6533a20):
+//   handler = weapon[0xC8]; data = handler[0x160][0x20]  (RaycastData)
+//   if (data == null)       data = handler[0x168][0x20]  (AimRaycast)
+//   if (data != null && data.RaycastHit.distance < m_MaxReach + hitRadius) Hit
+// «Валидность» — это просто data != null (геттер 0x654fc58: cmp x0,#0; cset).
+// Отсюда же берём «не перекрыт ли узел»: если луч игры упёрся ближе, чем наша
+// точка прицела, удар уйдёт в перекрытие, а не в ресурс.
+inline constexpr std::uint64_t GUM_RAYCAST_DATA              = 0x160; // GuI`1<GKo>
+inline constexpr std::uint64_t GUM_AIM_RAYCAST               = 0x168; // GuI`1<GKo>
+inline constexpr std::uint64_t GUI_VALUE                     = 0x20;  // значение внутри GuI`1<T>
+inline constexpr std::uint64_t GKO_HIT_OBJECT                = 0x18;  // GameObject попадания
+inline constexpr std::uint64_t GKO_RAYCAST_HIT               = 0x48;  // UnityEngine.RaycastHit (0x2C)
+inline constexpr std::uint64_t RAYCASTHIT_DISTANCE           = 0x1C;  // m_Distance внутри RaycastHit
 
 // Ragdoll bone list route (dump.cs) — game-maintained list of rig bone
 // transforms, no name matching needed:
@@ -323,14 +346,29 @@ inline constexpr std::uint64_t TOD_CYCLE_MONTH    = 0x18;
 inline constexpr std::uint64_t TOD_CYCLE_YEAR     = 0x1C;
 
 // Oxide.MineableObject — the shared base of ore nodes, trees and animals.
+// Всё сверено с дампом 62a8534 (il2cpp.h: Oxide_MineableObject_Fields).
 inline constexpr std::uint64_t MINEABLE_LOOT           = 0xA0; // List<Oxide.LootItem>
 inline constexpr std::uint64_t MINEABLE_FINISH_BONUS   = 0xA8;
-inline constexpr std::uint64_t MINEABLE_CURRENT_HEALTH = 0x78;
+inline constexpr std::uint64_t MINEABLE_CURRENT_HEALTH = 0x78; // float, убывает от каждого удара
 // Oxide.LootItem: the item short name the node drops ("stone", "metal.ore", ...)
 inline constexpr std::uint64_t LOOTITEM_ITEM_NAME      = 0x10;
-inline constexpr std::uint64_t MINEABLE_MAX_HEALTH     = 0xC0;
+inline constexpr std::uint64_t MINEABLE_MAX_HEALTH     = 0xC0; // float
 inline constexpr std::uint64_t MINEABLE_FRACTION       = 0xD0; // fractionRemaining
 inline constexpr std::uint64_t MINEABLE_ENTITY_TYPE    = 0xD8; // ServerPlayersAnalytics.EntityType
+// Каким орудием узел вообще добывается. Тип — тот же enum Oxide.FPTool.
+// ToolPurpose, что и у орудия в руке (FPTool.m_ToolPurposes), то есть сравнение
+// побитовое: (purposes & required) != 0. Кирка не рубит дерево и наоборот —
+// без этой проверки бот вечно кружил вокруг узла, который нечем взять.
+inline constexpr std::uint64_t MINEABLE_REQUIRED_TOOL_PURPOSE = 0x70; // int32, флаги
+// Сколько опыта даёт узел (int32). Только для строки статуса.
+inline constexpr std::uint64_t MINEABLE_EXPERIENCE     = 0xD4;
+
+enum class ToolPurpose : std::int32_t {
+    None       = 0,
+    CutWood    = 1, // топор/пила
+    BreakRocks = 2, // кирка
+    CutAnimals = 4, // нож
+};
 // Кеш JE-экстеншенов узла (MineableObjectExtension_*). Заполняется в
 // MineableObject.cik() через GetComponents<JE> на GameObject узла; cik
 // вызывается из OnStartClient -> ciQ() (то есть кеш готов сразу при спавне
@@ -365,13 +403,19 @@ inline constexpr std::uint64_t OREHS_COLLIDER          = 0x38;
 inline constexpr std::uint64_t OREHS_MINEABLE          = 0x40; // обратная ссылка на узел
 
 // MineableObjectExtension_OreHitstreaksMarker : MonoBehaviour — сам X.
-// Мировая позиция его transform'а = точка крестика. MTG (0x58) — таймер
-// жизни: Update() гасит X через 15 секунд после последнего попадания
-// (SetActive(false) + giq), так что «поле заполнено» != «крестик жив».
+// Мировая позиция его transform'а = точка крестика. lHG (0x58) — таймер
+// жизни: Update() (RVA 0x786eb40) делает `lHG += Time.deltaTime` и сравнивает
+// с 15.0 (`fmov s1,#15.0; fcmp s0,s1; b.le`); при превышении — SetActive(false)
+// на своём GameObject и хвостовой вызов владельца (lzF, 0x38). Так что
+// «поле OREHS_MARKER заполнено» != «крестик жив»: проверять надо возраст.
+// Имена полей — из il2cpp.h дампа 62a8534.
+// Полный расклад класса (для сверки при апдейте): 0x20 meshRenderer,
+// 0x28 ignoringLayerMask, 0x30 sizeByDistance (AnimationCurve), 0x38 lzF
+// (владелец), 0x40 lzN (MaterialPropertyBlock), 0x48 lzA, 0x50 lHh, 0x58 lHG.
 inline constexpr std::uint64_t OREMARK_RENDERER        = 0x20; // MeshRenderer
-inline constexpr std::uint64_t OREMARK_OWNER           = 0x38; // MTD — обратная ссылка на OreHitstreaks
-inline constexpr std::uint64_t OREMARK_SCALE           = 0x48; // float
-inline constexpr std::uint64_t OREMARK_AGE             = 0x58; // float, секунды
+inline constexpr std::uint64_t OREMARK_OWNER           = 0x38; // lzF — обратная ссылка на OreHitstreaks
+inline constexpr std::uint64_t OREMARK_SMOOTH          = 0x48; // lzA, float — плавное значение размера
+inline constexpr std::uint64_t OREMARK_AGE             = 0x58; // lHG, float — секунды с появления
 inline constexpr float         OREMARK_LIFETIME        = 15.0F;
 
 // MineableObjectExtension_TreeHitstreaks : JE — деревья.
@@ -386,10 +430,15 @@ inline constexpr std::uint64_t TREEHS_SPOT_B           = 0xA4; // MTu, Vector3 �
 // дереве. mark (0x38) — managed Transform декаля: giI ставит его в точку
 // попадания + normal*0.25 (чтобы не z-файтил с корой), поэтому для
 // прицеливания первична MTQ (точка на коре), а декаль — запасной вариант.
-inline constexpr std::uint64_t HITMARK_LIFETIME        = 0x20;
-inline constexpr std::uint64_t HITMARK_FILTER          = 0x28;
-inline constexpr std::uint64_t HITMARK_RENDERER        = 0x30;
+// lifetime (0x20) — ПОЛНЫЙ срок жизни, а возраст маркер набирает сам в lzr
+// (0xC8): Update() (RVA 0x786485c) делает `lzr += Time.deltaTime` и при
+// `lzr > lifetime` отдаёт объект владельцу (lzT, 0xC0) — то есть в пул, где его
+// переиспользуют для другого дерева. Живой X — только пока lzr <= lifetime.
+inline constexpr std::uint64_t HITMARK_LIFETIME        = 0x20; // float, полный срок
+inline constexpr std::uint64_t HITMARK_FILTER          = 0x28; // MeshFilter
+inline constexpr std::uint64_t HITMARK_RENDERER        = 0x30; // Renderer
 inline constexpr std::uint64_t HITMARK_MARK            = 0x38; // Transform самого крестика
+inline constexpr std::uint64_t HITMARK_AGE             = 0xC8; // lzr, float — сколько уже прожито
 
 // ServerPlayersAnalytics.EntityType values used for the labels.
 enum class MineableEntityType : std::int32_t {

@@ -186,6 +186,13 @@ extern int  g_farmTgtKind;    // 0 дерево, 1 камень, 2 металл,
 extern int  g_farmSpot;       // 0 крестика нет, иначе его источник (1 руда, 2/3 дерево)
 extern bool g_farmPaused;     // бот на паузе (открыто меню / камеру ведёт аимбот)
 extern int  g_farmStreak;     // сколько попаданий подряд игра засчитала в крестик
+extern float g_farmHpPct;     // здоровье узла в процентах
+extern float g_farmSpotLife;  // остаток жизни крестика, с
+extern float g_farmAttackPeriod; // ритм ударов орудия, с
+extern int  g_farmToolHave;   // что умеет орудие в руках (флаги ToolPurpose)
+extern int  g_farmToolNeed;   // что нужно ближайшим узлам (флаги ToolPurpose)
+extern int  g_farmXp;         // опыт за текущий узел
+extern bool g_farmBlocked;    // узел перекрыт
 
 namespace ui { namespace bar {
     inline float g_game_alpha = 1.f;
@@ -2266,7 +2273,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         // «нет» здесь означает ровно то, что его сейчас нет и в игре: узел ещё
         // не ударили, либо X потух по своим 15 секундам.
         FgSHdr(XS("Сейчас"));
-        FgCardBg(rH * 3);
+        FgCardBg(rH * 4);
         {
             auto FgInfoRow = [&](const char* lbl, const char* val, ImU32 vc, bool last) {
                 float cy2 = curY + rH * 0.5f;
@@ -2282,33 +2289,78 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                 curY += rH;
             };
 
-            char tgtTxt[64], spotTxt[48], phaseTxt[48];
+            char tgtTxt[112], spotTxt[64], phaseTxt[48], toolTxt[64];
             ImU32 spotCol = C::UA(C::Dim(), alpha);
+            ImU32 toolCol = C::UA(C::Dim(), alpha);
+
+            // Что умеет орудие в руках: флаги FPTool.ToolPurpose (1 — рубить
+            // дерево, 2 — бить камень, 4 — разделывать животных) читаются из
+            // того же объекта, что и дальность удара.
+            const bool toolWood = (g_farmToolHave & 1) != 0;
+            const bool toolRock = (g_farmToolHave & 2) != 0;
 
             if (g_farmActive) {
                 const char* kn[4] = {XS("Дерево"), XS("Камень"), XS("Металл"), XS("Сера")};
                 const char* kname = (g_farmTgtKind >= 0 && g_farmTgtKind < 4) ? kn[g_farmTgtKind] : XS("Узел");
                 // «удар до X.XX» — живая дальность орудия из памяти игры
                 // (FPMelee.m_MaxReach + hitRadius): с ней бот решает, достанет ли.
-                if (g_farmReach > 0.f)
-                    snprintf(tgtTxt, sizeof(tgtTxt), XS("%s · %.1f м · удар до %.2f"),
-                             kname, g_farmTgtDist, g_farmReach);
+                char reachTxt[32];
+                if (g_farmReach > 0.f) snprintf(reachTxt, sizeof(reachTxt), XS("удар до %.2f"), g_farmReach);
+                else                   snprintf(reachTxt, sizeof(reachTxt), "%s", XS("удар ?"));
+                // Здоровье узла (m_CurrentHealth/m_MaxHealth) — по нему же
+                // watchdog видит, доходят ли удары.
+                if (g_farmHpPct >= 0.f)
+                    snprintf(tgtTxt, sizeof(tgtTxt), XS("%s · %.1f м · %s · HP %.0f%%"),
+                             kname, g_farmTgtDist, reachTxt, g_farmHpPct);
                 else
-                    snprintf(tgtTxt, sizeof(tgtTxt), XS("%s · %.1f м · удар ?"),
-                             kname, g_farmTgtDist);
-                if (g_farmSpot == 1)      snprintf(spotTxt, sizeof(spotTxt), XS("есть · руда · %d"), g_farmStreak);
-                else if (g_farmSpot == 2) snprintf(spotTxt, sizeof(spotTxt), XS("есть · кора · %d"), g_farmStreak);
-                else if (g_farmSpot == 3) snprintf(spotTxt, sizeof(spotTxt), XS("есть · декаль · %d"), g_farmStreak);
-                else if (g_farmSpot < 0)  snprintf(spotTxt, sizeof(spotTxt), "%s", XS("экстеншен не найден"));
-                else                      snprintf(spotTxt, sizeof(spotTxt), "%s", XS("нет — бьём по корпусу"));
+                    snprintf(tgtTxt, sizeof(tgtTxt), XS("%s · %.1f м · %s"),
+                             kname, g_farmTgtDist, reachTxt);
+
+                if (g_farmSpot > 0) {
+                    const char* spotKind = (g_farmSpot == 1) ? XS("руда")
+                                         : (g_farmSpot == 2) ? XS("кора") : XS("декаль");
+                    // Остаток жизни крестика: руда гаснет через 15 с, дерево —
+                    // через свой lifetime (HitMarkerItem.Update).
+                    if (g_farmSpotLife >= 0.f)
+                        snprintf(spotTxt, sizeof(spotTxt), XS("есть · %s · %d · %.0f с"),
+                                 spotKind, g_farmStreak, g_farmSpotLife);
+                    else
+                        snprintf(spotTxt, sizeof(spotTxt), XS("есть · %s · %d"),
+                                 spotKind, g_farmStreak);
+                } else if (g_farmSpot < 0) snprintf(spotTxt, sizeof(spotTxt), "%s", XS("экстеншен не найден"));
+                else                       snprintf(spotTxt, sizeof(spotTxt), "%s", XS("нет — бьём по корпусу"));
                 spotCol = g_farmSpot > 0 ? C::UA(C::Acc(), alpha)
                         : g_farmSpot < 0 ? C::UA(C::Red(), alpha)
                                          : C::UA(C::Dim(), alpha);
+
+                if (toolWood && toolRock)  snprintf(toolTxt, sizeof(toolTxt), "%s", XS("дерево и камень"));
+                else if (toolWood)         snprintf(toolTxt, sizeof(toolTxt), "%s", XS("рубит дерево"));
+                else if (toolRock)         snprintf(toolTxt, sizeof(toolTxt), "%s", XS("бьёт камень"));
+                else snprintf(toolTxt, sizeof(toolTxt), "%s",
+                              (g_farmReach > 0.f) ? XS("не инструмент") : XS("нет орудия"));
+                // Ритм ударов — m_TimeBetweenAttacks + pauseAfterAttack орудия,
+                // и сколько опыта даёт этот узел (MineableObject.m_Experience).
+                char per[40];
+                if (g_farmAttackPeriod > 0.f && g_farmXp > 0)
+                    snprintf(per, sizeof(per), XS(" · %.2f с · +%d XP"), g_farmAttackPeriod, g_farmXp);
+                else if (g_farmAttackPeriod > 0.f)
+                    snprintf(per, sizeof(per), XS(" · %.2f с"), g_farmAttackPeriod);
+                else if (g_farmXp > 0)
+                    snprintf(per, sizeof(per), XS(" · +%d XP"), g_farmXp);
+                else
+                    per[0] = 0;
+                if (per[0]) {
+                    const size_t used = strlen(toolTxt);
+                    if (used + strlen(per) + 1 < sizeof(toolTxt)) memcpy(toolTxt + used, per, strlen(per) + 1);
+                }
+                toolCol = (toolWood || toolRock) ? C::UA(C::Txt(), alpha) : C::UA(C::Red(), alpha);
+
                 switch (g_farmPaused ? -1 : g_farmPhase) {
                     case -1: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("пауза — меню открыто")); break;
                     case 1: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("поворот камеры")); break;
                     case 2: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("подход")); break;
-                    case 3: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("удар по цели")); break;
+                    case 3: snprintf(phaseTxt, sizeof(phaseTxt), "%s",
+                                     g_farmBlocked ? XS("перекрыт — обхожу") : XS("удар по цели")); break;
                     default: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("простой")); break;
                 }
             } else {
@@ -2320,14 +2372,31 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                     case 3: why = XS("нет узлов в реестре"); break;
                     case 4: why = XS("все узлы вне радиуса"); break;
                     case 5: why = XS("поза камеры не читается"); break;
+                    case 6: {
+                        // Узлы рядом есть, но текущим орудием не добываются:
+                        // говорим, что именно взять в руки.
+                        const bool needWood = (g_farmToolNeed & 1) != 0;
+                        const bool needRock = (g_farmToolNeed & 2) != 0;
+                        why = (needWood && needRock) ? XS("нужны топор и кирка")
+                            : needWood               ? XS("нужен топор")
+                            : needRock               ? XS("нужна кирка")
+                                                     : XS("нужен другой инструмент");
+                        break;
+                    }
                     default: why = g_state.farm_on ? XS("ждём цель") : XS("выключен"); break;
                 }
                 snprintf(phaseTxt, sizeof(phaseTxt), "%s", why);
                 snprintf(spotTxt, sizeof(spotTxt), "—");
+                if (toolWood && toolRock) snprintf(toolTxt, sizeof(toolTxt), "%s", XS("дерево и камень"));
+                else if (toolWood)        snprintf(toolTxt, sizeof(toolTxt), "%s", XS("рубит дерево"));
+                else if (toolRock)        snprintf(toolTxt, sizeof(toolTxt), "%s", XS("бьёт камень"));
+                else                      snprintf(toolTxt, sizeof(toolTxt), "%s", XS("в руках не инструмент"));
+                toolCol = g_farmReason == 6 ? C::UA(C::Red(), alpha) : C::UA(C::Dim(), alpha);
             }
 
             FgInfoRow(XS("Цель"), tgtTxt, C::UA(C::Txt(), alpha), false);
             FgInfoRow(XS("Крестик"), spotTxt, spotCol, false);
+            FgInfoRow(XS("Орудие"), toolTxt, toolCol, false);
             FgInfoRow(XS("Фаза"), phaseTxt, C::UA(C::Acc(), alpha), true);
         }
 
@@ -3654,6 +3723,13 @@ int  g_farmTgtKind = 0;      // ресурс текущей цели
 int  g_farmSpot = 0;         // 0 — крестика нет, иначе его источник (1 руда, 2/3 дерево)
 bool g_farmPaused = false;   // цель видна, но ввод остановлен (открыто меню / работает аимбот)
 int  g_farmStreak = 0;       // hitstreakIndex: сколько подряд попали в крестик
+float g_farmHpPct = -1.f;    // здоровье узла в процентах (-1 = не читается)
+float g_farmSpotLife = -1.f; // сколько секунд осталось жить крестику (-1 = неизвестно)
+float g_farmAttackPeriod = 0.f; // секунд между ударами орудия (0 = неизвестно)
+int  g_farmToolHave = 0;     // флаги ToolPurpose орудия в руках (0 = неизвестно)
+int  g_farmToolNeed = 0;     // какие умения запросили отброшенные узлы
+int  g_farmXp = 0;           // сколько опыта даёт текущий узел (0 = неизвестно)
+bool g_farmBlocked = false;  // узел перекрыт: луч игры упёрся ближе точки прицела
 
 // Калибровка зон бота: 0 — нет, 1 — ждём тап по джойстику, 2 — по кнопке огня.
 // Пока калибровка активна, меню скрыто и первый тап по экрану пишет позицию
@@ -3725,6 +3801,7 @@ constexpr int   kDepletedFrames = 10;    // дебаунс сырого чтен
 constexpr float kStuckTime     = 3.00f;  // нет продвижения к точке подхода
 constexpr float kEvadeTime     = 1.70f;  // ~0.6 назад + ~1.1 вбок
 constexpr int   kEvadeMax      = 4;
+constexpr float kBlockedTime   = 0.45f;  // узел перекрыт дольше — пробуем обойти
 constexpr float kGiveUpDrain   = 20.f;   // бьём, а остаток не падает
 constexpr float kGiveUpBlind   = 45.f;   // то же, но остаток не читается
 
@@ -3748,6 +3825,8 @@ static void UpdateFarm(float dt) {
     static float s_lostTime = 0.f;    // цель пропала: ждём, вдруг вернётся
     static float s_mineTime = 0.f;    // сколько бьём этот узел без прогресса
     static float s_fracStart = -1.f;  // остаток на входе (для контроля добычи)
+    static float s_healthStart = -1.f;// здоровье узла на входе (m_CurrentHealth)
+    static float s_blockedTime = 0.f; // сколько подряд узел перекрыт
     static int   s_bestStreak = 0;    // максимум серии по крестику на этом узле
     static int   s_depletedFrames = 0;
     static float s_lastWalk = 1e9f;   // лучшая дистанция до точки подхода
@@ -3768,6 +3847,7 @@ static void UpdateFarm(float dt) {
     auto resetNode = [&]() {
         s_nodeId = 0;
         s_mineTime = 0.f; s_fracStart = -1.f; s_bestStreak = 0;
+        s_healthStart = -1.f; s_blockedTime = 0.f;
         s_depletedFrames = 0;
         s_lastWalk = 1e9f; s_stuckTime = 0.f;
         s_evadeTime = 0.f; s_evadeCount = 0;
@@ -3791,6 +3871,7 @@ static void UpdateFarm(float dt) {
     if (mask == 0 || !g_esp_attached) {
         releaseAll();
         g_farmActive = false; g_farmPhase = 0; g_farmPaused = false;
+        g_farmHpPct = -1.f; g_farmSpotLife = -1.f; g_farmBlocked = false;
         g_farmSpot = 0; g_farmStreak = 0;
         resetNode(); s_settle = 0.f; s_lostTime = 0.f;
         return;
@@ -3832,6 +3913,7 @@ static void UpdateFarm(float dt) {
         }
         releaseAll();
         g_farmActive = false; g_farmPhase = 0; g_farmPaused = false;
+        g_farmHpPct = -1.f; g_farmSpotLife = -1.f; g_farmBlocked = false;
         g_farmSpot = 0; g_farmStreak = 0;
         resetNode(); s_settle = 0.f; s_lostTime = 0.f;
         return;
@@ -3844,6 +3926,18 @@ static void UpdateFarm(float dt) {
     g_farmTgtKind = tgt.kind;
     g_farmSpot    = tgt.has_spot ? tgt.spot_source : (tgt.ext_found ? 0 : -1);
     g_farmStreak  = tgt.streak;
+    g_farmHpPct   = (tgt.node_health >= 0.f && tgt.node_health_max > 0.f)
+                  ? 100.f * tgt.node_health / tgt.node_health_max : -1.f;
+    g_farmSpotLife = tgt.has_spot ? tgt.spot_life : -1.f;
+    g_farmAttackPeriod = tgt.attack_period;
+    g_farmXp = tgt.node_experience;
+    g_farmBlocked = tgt.ray_blocked;
+    {   // умения орудия: своё поле у FPTool, у узлов — своё требование
+        int have = 0, need = 0;
+        esp_farm_tool_info(have, need);
+        g_farmToolHave = have ? have : tgt.tool_purposes;
+        g_farmToolNeed = need;
+    }
 
     if (!driving) {
         // Меню открыто / камеру ведёт аимбот / идёт калибровка зон: статус
@@ -3866,6 +3960,8 @@ static void UpdateFarm(float dt) {
         s_nodeId = tgt.id;
         s_lastWalk = tgt.walk_dist;
         s_fracStart = tgt.fraction;
+        s_healthStart = tgt.node_health;
+        s_blockedTime = 0.f;
         if (hadNode) { releaseAll(); s_settle = kSettleTime; }
     }
 
@@ -4116,6 +4212,33 @@ static void UpdateFarm(float dt) {
         }
     }
 
+    // ---- перекрыт ли узел ------------------------------------------------------
+    // Луч, которым игра сама проверяет удар (RaycastManager -> активности
+    // PlayerEventHandler -> GKo.RaycastHit), упёрся заметно ближе нашей точки
+    // прицела: между нами и крестиком камень, забор или склон. Удар в такую
+    // точку уходит в перекрытие, так что не машем — отходим тем же манёвром,
+    // что и при застревании, и только исчерпав попытки сдаём узел. Дебаунс
+    // обязателен: на неуспевшем сесть прицеле луч смотрит мимо узла и даёт
+    // короткое ложное «перекрыто».
+    if (phase == 3 && tgt.ray_blocked) {
+        s_blockedTime += dt;
+        if (s_blockedTime > kBlockedTime && s_evadeTime <= 0.f) {
+            s_blockedTime = 0.f;
+            if (s_evadeCount < kEvadeMax) {
+                s_evadeTime = kEvadeTime;
+                s_evadeDir = (s_evadeCount % 2 == 0) ? 1.f : -1.f;
+                ++s_evadeCount;
+            } else {
+                esp_farm_blacklist(tgt.id, 60.f);
+                releaseAll();
+                resetNode();
+                s_settle = kSettleTime;
+            }
+        }
+    } else {
+        s_blockedTime = 0.f;
+    }
+
     // ---- палец 2: удары --------------------------------------------------------
     if (phase == 3) {
         s_mineTime += dt;
@@ -4125,9 +4248,22 @@ static void UpdateFarm(float dt) {
         const bool aimSettled = atSpot
             ? (fabsf(tgt.yaw) <= kSwingSpotYaw && fabsf(tgt.pitch) <= kSwingSpotPitch)
             : (fabsf(tgt.yaw) <= kSwingBodyYaw);
+        // Ритм ударов — из самого орудия: FPMelee.m_TimeBetweenAttacks +
+        // pauseAfterAttack (у каждого инструмента свои, сериализованы в
+        // префабе). Тап раньше срока игра ставит в очередь, и он вылетает уже
+        // в уведённую камеру, поэтому держимся чуть медленнее кулдауна;
+        // живого значения нет — остаёмся на подобранных миллисекундах.
+        float tapDownMs = kTapDownMs, tapUpMs = kTapUpMs;
+        if (tgt.attack_period > 0.05f && tgt.attack_period < 5.f) {
+            const float periodMs = fminf(fmaxf(tgt.attack_period * 1020.f, 250.f), 2000.f);
+            tapDownMs = fminf(fmaxf(periodMs * 0.10f, 40.f), 120.f);
+            tapUpMs   = fmaxf(periodMs - tapDownMs, 60.f);
+        }
+        // Перекрытый узел не бьём: ждём, пока манёвр выведет на линию удара.
+        const bool swingBlocked = tgt.ray_blocked;
         s_tapTimer -= (int)roundf(dt * 1000.f);
-        if (s_tapTimer <= 0 && !aimSettled && !s_tapDown) {
-            s_tapTimer = 0;              // ждём камеру, не теряя такт
+        if (s_tapTimer <= 0 && (!aimSettled || swingBlocked) && !s_tapDown) {
+            s_tapTimer = 0;              // ждём камеру/обход, не теряя такт
         } else if (s_tapTimer <= 0) {
             if (!s_tapDown) {
                 // Кнопка огня: откалиброванная зона, иначе правая половина
@@ -4136,11 +4272,11 @@ static void UpdateFarm(float dt) {
                 const float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
                 Touch_Down_N(2, fx, fy);
                 s_tapDown = true;
-                s_tapTimer = (int)kTapDownMs;
+                s_tapTimer = (int)tapDownMs;
             } else {
                 Touch_Up_N(2);
                 s_tapDown = false;
-                s_tapTimer = (int)kTapUpMs;
+                s_tapTimer = (int)tapUpMs;
             }
         }
     } else {
@@ -4183,6 +4319,14 @@ static void UpdateFarm(float dt) {
         // крестику (streak растёт только когда игра засчитала удар в X, так что
         // это самый честный сигнал, что фарм действительно работает).
         bool progress = false;
+        // Здоровье узла — самый тонкий признак: m_CurrentHealth падает уже от
+        // первого дошедшего удара, тогда как fractionRemaining сдвигается на
+        // проценты лишь спустя десятки попаданий (а у некоторых узлов не
+        // сдвигается вовсе, и watchdog сдавал живой узел).
+        if (tgt.node_health >= 0.f) {
+            if (s_healthStart < 0.f) s_healthStart = tgt.node_health;
+            else if (tgt.node_health < s_healthStart - 0.01f) { s_healthStart = tgt.node_health; progress = true; }
+        }
         if (tgt.fraction >= 0.f) {
             if (s_fracStart < 0.f) s_fracStart = tgt.fraction;
             else if (tgt.fraction < s_fracStart - 0.01f) { s_fracStart = tgt.fraction; progress = true; }
@@ -4191,10 +4335,12 @@ static void UpdateFarm(float dt) {
         if (progress) {
             s_mineTime = 0.f;
         } else {
-            // Сдаёмся, только когда остаток ЧИТАЕТСЯ и явно не двигается долго.
-            // При нечитаемом остатке (-1) прежний 14-секундный таймер бросал
-            // вполне живые узлы на середине — «перестаёт добивать узел».
-            const float giveUp = (tgt.fraction >= 0.f) ? kGiveUpDrain : kGiveUpBlind;
+            // Сдаёмся, только когда прогресс есть чем мерить (здоровье или
+            // остаток ЧИТАЮТСЯ) и он явно не двигается долго. Когда не читается
+            // ничего, прежний 14-секундный таймер бросал вполне живые узлы на
+            // середине — «перестаёт добивать узел».
+            const float giveUp = (tgt.node_health >= 0.f || tgt.fraction >= 0.f)
+                               ? kGiveUpDrain : kGiveUpBlind;
             if (s_mineTime > giveUp) {
                 esp_farm_blacklist(tgt.id, 60.f);
                 releaseAll();

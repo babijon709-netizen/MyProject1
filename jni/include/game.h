@@ -134,6 +134,27 @@ struct FarmTarget {
     float walk_dist = 0.f;        // метры до точки подхода
     float node_dist = 0.f;        // метры по горизонтали до самого узла
 
+    // Орудие в руках и состояние узла — значения из самой игры (дамп 62a8534:
+    // FPTool.m_ToolPurposes, FPMelee.m_TimeBetweenAttacks/pauseAfterAttack,
+    // MineableObject.m_CurrentHealth/m_MaxHealth/m_Experience).
+    int   tool_purposes = 0;      // флаги ToolPurpose (1 дерево, 2 камень, 4 животные); 0 = неизвестно
+    float attack_period = 0.f;    // секунд между ударами этого орудия; 0 = неизвестно
+    float node_health = -1.f;     // текущее здоровье цели
+    float node_health_max = -1.f; // его же максимум (для процентов)
+    int   node_experience = 0;    // сколько опыта даёт узел
+
+    // Луч прицела: результат тех же лучей RaycastManager, из которых игра берёт
+    // distance для засчёта удара (Gum.RaycastData/AimRaycast -> GKo.RaycastHit).
+    // ray_blocked — луч упёрся заметно раньше нашей точки прицела, то есть узел
+    // перекрыт и удар уйдёт в перекрытие: махать в такой ситуации впустую.
+    bool  ray_valid = false;
+    float ray_distance = 0.f;
+    bool  ray_blocked = false;
+
+    // Сколько секунд осталось жить крестику (руда — из 15, дерево — из своего
+    // lifetime). -1 = неизвестно; 0 = вот-вот потухнет.
+    float spot_life = -1.f;
+
     // Проекция точки прицела на экран — для метки «куда бьёт бот».
     bool  on_screen = false;
     float sx = 0.f, sy = 0.f;
@@ -154,6 +175,9 @@ void        esp_farm_blacklist(unsigned long long id, float seconds);
 // узлов, 4 узлы есть, но все вне радиуса / в чёрном списке, 5 поза камеры
 // не читается (не посчитать углы).
 void        esp_farm_debug(int& nodes_cached, int& idle_reason);
+// Что умеет орудие в руках и какие умения запросили отброшенные узлы (флаги
+// ToolPurpose). need != 0 при reason == 6 — «ближайший узел нечем взять».
+void        esp_farm_tool_info(int& purposes_have, int& purposes_need);
 // X-ray: камера не рисует всё ближе `meters` (запись near clip plane).
 // 0 выключает и восстанавливает исходное значение. Диапазон 0..50 м.
 void        esp_set_xray(float meters);
