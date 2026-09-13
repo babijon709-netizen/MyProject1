@@ -183,6 +183,7 @@ extern int  g_farmReason;     // причина простоя (см. esp_farm_d
 extern float g_farmTgtDist;   // дистанция до точки прицела, м
 extern int  g_farmTgtKind;    // 0 дерево, 1 камень, 2 металл, 3 сера
 extern int  g_farmSpot;       // 0 крестика нет, иначе его источник (1 руда, 2/3 дерево)
+extern bool g_farmPaused;     // бот на паузе (открыто меню / камеру ведёт аимбот)
 extern int  g_farmStreak;     // сколько попаданий подряд игра засчитала в крестик
 
 namespace ui { namespace bar {
@@ -2295,7 +2296,8 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                 spotCol = g_farmSpot > 0 ? C::UA(C::Acc(), alpha)
                         : g_farmSpot < 0 ? C::UA(C::Red(), alpha)
                                          : C::UA(C::Dim(), alpha);
-                switch (g_farmPhase) {
+                switch (g_farmPaused ? -1 : g_farmPhase) {
+                    case -1: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("пауза — меню открыто")); break;
                     case 1: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("поворот камеры")); break;
                     case 2: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("подход")); break;
                     case 3: snprintf(phaseTxt, sizeof(phaseTxt), "%s", XS("удар по цели")); break;
@@ -3641,6 +3643,7 @@ int  g_farmReason = 1;       // причина простоя из esp_farm_debu
 float g_farmTgtDist = 0.f;   // метры до точки прицела
 int  g_farmTgtKind = 0;      // ресурс текущей цели
 int  g_farmSpot = 0;         // 0 — крестика нет, иначе его источник (1 руда, 2/3 дерево)
+bool g_farmPaused = false;   // цель видна, но ввод остановлен (открыто меню / работает аимбот)
 int  g_farmStreak = 0;       // hitstreakIndex: сколько подряд попали в крестик
 
 // Калибровка зон бота: 0 — нет, 1 — ждём тап по джойстику, 2 — по кнопке огня.
@@ -3758,17 +3761,19 @@ static void UpdateFarm(float dt) {
     esp_farm_set_range(g_state.farm_range);
 
     const bool menuBlocked = g_sheet.visible || (g_pop.visible && !g_pop.closing);
-    // Аимбот владеет камерой, пока ведёт игрока, — фарм уступает полностью.
-    // g_farmCalib: пока пользователь тапает зоны, бот молчит.
-    const bool active = mask != 0 && g_esp_attached && !menuBlocked &&
-                        !s_fingerDown && g_farmCalib == 0;
-    if (!active) {
+    if (mask == 0 || !g_esp_attached) {
         releaseAll();
-        g_farmActive = false; g_farmPhase = 0;
+        g_farmActive = false; g_farmPhase = 0; g_farmPaused = false;
         g_farmSpot = 0; g_farmStreak = 0;
         resetNode(); s_settle = 0.f; s_lostTime = 0.f;
         return;
     }
+    // Водим пальцами только когда ничто не мешает: аимбот владеет камерой,
+    // пока ведёт игрока (фарм уступает полностью), открытое меню и калибровка
+    // зон — тоже пауза. А вот цель читаем всегда: иначе строка статуса в окне
+    // автофарма показывала бы «простой» ровно тогда, когда на неё смотрят
+    // (само это окно и ставит бота на паузу).
+    const bool driving = !menuBlocked && !s_fingerDown && g_farmCalib == 0;
 
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;
@@ -3799,17 +3804,30 @@ static void UpdateFarm(float dt) {
             return; // палец движения оставляем, где был
         }
         releaseAll();
-        g_farmActive = false; g_farmPhase = 0;
+        g_farmActive = false; g_farmPhase = 0; g_farmPaused = false;
         g_farmSpot = 0; g_farmStreak = 0;
         resetNode(); s_settle = 0.f; s_lostTime = 0.f;
         return;
     }
     s_lostTime = 0.f;
     g_farmActive = true;
+    g_farmPaused = !driving;
     g_farmTgtDist = tgt.aim_dist;
     g_farmTgtKind = tgt.kind;
     g_farmSpot    = tgt.has_spot ? tgt.spot_source : (tgt.ext_found ? 0 : -1);
     g_farmStreak  = tgt.streak;
+
+    if (!driving) {
+        // Меню открыто / камеру ведёт аимбот / идёт калибровка зон: статус
+        // живой, ввод стоит. Таймеры подхода и добычи не крутятся, иначе бот
+        // «застревал» и сдавался на узле за то время, пока пользователь
+        // смотрел в настройки.
+        releaseAll();
+        g_farmPhase = 0;
+        s_walkOffTime = 0.f;
+        s_haveLast = false;
+        return;
+    }
 
     if (tgt.id != s_nodeId) {
         // Смена узла: поднять все пальцы и постоять. Иначе старые вводные
