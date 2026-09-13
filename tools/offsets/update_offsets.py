@@ -52,11 +52,24 @@ def load_module(name, path):
 lay = load_module('il2cpp_layout', os.path.join(HERE, 'il2cpp_layout.py'))
 
 OBF_RE = re.compile(r'^[A-Za-z]{1,4}(_[A-Za-z0-9]{1,4})*$')
+BACKING_RE = re.compile(r'^_(.+)_k__BackingField$')
 
 
 def obfuscated(name):
-    """Имя, которое обфускатор перекатит на следующем билде."""
-    return bool(OBF_RE.match(name)) or name.startswith('<')
+    """Имя, которое обфускатор перекатит на следующем билде.
+
+    Автосвойства компилятор заворачивает в `_XXXX_k__BackingField`, и XXXX
+    там такой же перекатываемый мусор (`_ukT_`, `_QCF_`, `_LPj_` — каждый
+    билд свой). Без разворачивания этой обёртки такие поля выглядят
+    «читаемыми», и сверка со старым дампом ложно стопорит весь пересчёт:
+    имя уехало, а смещение-то осталось прежним.
+    """
+    if name.startswith('<'):
+        return True
+    m = BACKING_RE.match(name)
+    if m:
+        name = m.group(1)
+    return bool(OBF_RE.match(name))
 
 
 # ----------------------------------------------------------------- дампы ----
@@ -112,34 +125,72 @@ def align(old_fields, new_fields):
     return out
 
 
-def rva_scan(sofile, scriptfile, classes):
-    """{класс: RVA} через typeinfo_rva.py — берём верхнего кандидата.
+def rva_candidates(sofile, scriptfile, classes, top=6, methods=3000):
+    """{класс: [(RVA, обращений, отпечаток статик-полей), ...]} — ВСЕ кандидаты.
 
-    Формат вывода того скрипта:
-        Oxide.PlayerManager  (методов просканировано: 400)
-           0xD7E4310   обращений=7  ...
-    Верхний кандидат почти всегда верен, но не всегда (см. предупреждение
-    самого typeinfo_rva.py про GameControllerBase), поэтому значение,
-    отличающееся от текущего, стоит перепроверить руками на старом дампе.
+    Формат вывода typeinfo_rva.py:
+        Oxide.PlayerManager  (методов просканировано: 645)
+           0xD7AAAF8   обращений=5    читаемые статик-поля[0x1A0x1]
+
+    `--methods 3000` обязателен: со значением по умолчанию (400) у
+    PlayerManager в новом билде не находится ни одного кандидата — нужные
+    методы просто не попадают в первую четыреста.
     """
     if not classes:
         return {}
     cmd = [sys.executable, os.path.join(HERE, 'typeinfo_rva.py'),
-           '--so', sofile, '--script', scriptfile, '--top', '1'] + classes
+           '--so', sofile, '--script', scriptfile,
+           '--top', str(top), '--methods', str(methods)] + classes
     res = subprocess.run(cmd, capture_output=True, text=True)
     found, cur = {}, None
     for line in (res.stdout or '').splitlines():
         head = re.match(r'^(\S+)\s+\(', line)
         if head:
             cur = head.group(1)
+            found.setdefault(cur, [])
             continue
-        m = re.match(r'^\s+0x([0-9A-Fa-f]{5,})\s', line)
+        m = re.match(r'^\s+0x([0-9A-Fa-f]{5,})\s+обращений=(\d+)\s+'
+                     r'читаемые статик-поля\[([^\]]*)\]', line)
         if cur and m:
-            found[cur] = int(m.group(1), 16)
-            cur = None
-    if not found:
-        print('   typeinfo_rva.py ничего не вернул:', (res.stderr or '').strip()[:200])
+            fp = tuple(sorted(t.strip() for t in m.group(3).split(',') if t.strip() != '-'))
+            found[cur].append((int(m.group(1), 16), int(m.group(2)), fp))
     return found
+
+
+def pick_rva(cls, old_c, new_c, cur):
+    """Выбор нового RVA по отпечатку старого значения (см. docstring
+    typeinfo_rva.py: верхний кандидат верен НЕ всегда — у GameControllerBase
+    его стабильно обгоняет чужой слот).
+
+    Возвращает (RVA|None, как_нашли, предупреждение|None).
+    """
+    if not new_c:
+        return None, '', ('кандидатов нет — попробуй --methods больше или другой класс-якорь')
+    if not old_c or cur is None:
+        return new_c[0][0], 'верхний (сверки со старым не было)', (
+            f'{cls}: нет старого дампа/значения — взят верхний кандидат, проверь руками')
+    # отпечаток того кандидата, который в СТАРОМ билде и был верным значением
+    mine = [(n, s) for r, n, s in old_c if r == cur]
+    if not mine:
+        return new_c[0][0], 'верхний (старое значение среди кандидатов не нашлось)', (
+            f'{cls}: текущее {cur:#x} не воспроизводится на старом дампе — '
+            f'взят верхний кандидат {new_c[0][0]:#x}, проверь руками')
+    o_refs, o_fp = mine[0]
+    exact = [(r, n) for r, n, s in new_c if s == o_fp and n == o_refs]
+    if exact:
+        return exact[0][0], f'отпечаток (обращений={o_refs}, статик-поля[{", ".join(o_fp) or "-"}]', None
+    same_fp = [(r, n) for r, n, s in new_c if s == o_fp]
+    if len(same_fp) > 1:
+        return same_fp[0][0], 'отпечаток (неоднозначно)', (
+            f'{cls}: под отпечаток подходит несколько кандидатов '
+            f'{[hex(r) for r, _ in same_fp]} — проверь руками')
+    if same_fp:
+        return same_fp[0][0], f'отпечаток статик-полей[{", ".join(o_fp) or "-"}]', (
+            f'{cls}: число обращений изменилось {o_refs}->{same_fp[0][1]}, '
+            f'отпечаток статик-полей совпал')
+    return new_c[0][0], 'верхний (отпечаток не совпал)', (
+        f'{cls}: отпечаток старого значения [{", ".join(o_fp) or "-"}] в новом дампе '
+        f'не встретился — взят верхний кандидат {new_c[0][0]:#x}, ОБЯЗАТЕЛЬНО проверь руками')
 
 
 # ------------------------------------------------------------------ main ----
@@ -207,6 +258,32 @@ def main():
                   f'(сверка только с текущим дампом).')
             return 2
 
+    # Защита от повторного --apply. Карта описывает тот дамп, из которого её
+    # последний раз обновляли: запущенная дважды на одном и том же новом дампе,
+    # она сдвинет значения ЕЩЁ раз (реальный случай этого апдейта: PIECE
+    # 0x100 -> 0x110 -> 0x120). Признак — имена полей в карте совпадают с
+    # новым дампом чаще, чем со старым.
+    if old is not None:
+        mo = mn = 0
+        for ent in omap.values():
+            if ent.get('kind') != 'field':
+                continue
+            fo, fn = old.fields(ent['struct']), new.fields(ent['struct'])
+            if not fo or not fn:
+                continue
+            ho = [f for f in fo if f[1] == ent['offset']]
+            hn = [f for f in fn if f[1] == ent['offset']]
+            if ho and ho[0][0] == ent.get('field'): mo += 1
+            if hn and hn[0][0] == ent.get('field'): mn += 1
+        if mn >= mo + 3:
+            print(f'СТОП: карта уже описывает НОВЫЙ дамп ({mn} имён полей совпадают '
+                  f'с новым против {mo} со старым) — значит --apply на этом дампе '
+                  f'уже отработал.\n      Повторный прогон сдвинет значения ещё раз. '
+                  f'Если заголовок испорчен: git checkout -- '
+                  f'{os.path.relpath(HEADER, ROOT)} {os.path.relpath(a.map, ROOT)} '
+                  f'и запусти один раз.')
+            return 2
+
     changes, warnings, checked, unverifiable = {}, [], 0, []
     for struct, consts in sorted(per_struct.items()):
         label = lay.TRACKED.get(struct, struct)
@@ -251,21 +328,27 @@ def main():
             if want is None or hit[0] != want:
                 changes[const] = (want, hit[0], f'{label}.{ent.get("field")}', hit[1])
 
-    # TYPEINFO_RVA
+    # TYPEINFO_RVA — подбираем по отпечатку со старого дампа, не «верхним»
     rva_consts = [c for c, e in omap.items() if e.get('kind') == 'typeinfo_rva']
     if rva_consts and not a.no_rva:
         classes = [omap[c].get('class') for c in rva_consts if omap[c].get('class')]
         print(f'пересчёт RVA для {len(classes)} классов (дизассемблирование, ~минута)...')
-        found = rva_scan(os.path.join(newdir, 'libil2cpp.so'),
-                         os.path.join(newdir, 'script.json'), classes)
+        new_c = rva_candidates(os.path.join(newdir, 'libil2cpp.so'),
+                               os.path.join(newdir, 'script.json'), classes)
+        old_c = rva_candidates(os.path.join(olddir, 'libil2cpp.so'),
+                               os.path.join(olddir, 'script.json'), classes) if olddir else {}
         for const in rva_consts:
             cls = omap[const].get('class')
-            got = found.get(cls)
             cur = header_vals.get(const)
+            got, how, warn = pick_rva(cls, old_c.get(cls, []), new_c.get(cls, []), cur)
+            if warn:
+                warnings.append(f'{const}: {warn}')
             if got is None:
                 warnings.append(f'{const}: RVA для {cls} не найден — запусти typeinfo_rva.py вручную')
             elif cur != got:
-                changes[const] = (cur, got, f'TypeInfo {cls}', 'дизасм')
+                changes[const] = (cur, got, f'TypeInfo {cls}', how)
+            else:
+                print(f'  {const}: {got:#x} — без изменений ({how})')
 
     # ------------------------------------------------------------- отчёт ---
     if unverifiable:
@@ -286,20 +369,38 @@ def main():
         for w in warnings:
             print('  ! ' + w)
 
-    if a.apply and changes:
-        def sub(m):
-            c = m.group(2)
-            return m.group(1) + ('0x%X' % changes[c][1]) + m.group(4) if c in changes else m.group(0)
-        open(HEADER, 'w', encoding='utf-8').write(CONST_RE.sub(sub, src))
-        for c, (o, n, _, _) in changes.items():
-            if omap[c].get('kind') == 'field':
-                omap[c]['offset'] = n
-                fl = new.fields(omap[c]['struct']) or []
-                for fn, off, ty in fl:
-                    if off == n:
-                        omap[c]['field'], omap[c]['type'] = fn, ty
+    if a.apply and (changes or not a.verify):
+        if changes:
+            def sub(m):
+                c = m.group(2)
+                return m.group(1) + ('0x%X' % changes[c][1]) + m.group(4) if c in changes else m.group(0)
+            open(HEADER, 'w', encoding='utf-8').write(CONST_RE.sub(sub, src))
+            for c, (o, n, _, _) in changes.items():
+                if omap[c].get('kind') == 'field':
+                    omap[c]['offset'] = n
+        # Карта обязана описывать ТЕКУЩИЙ дамп, а не тот, из которого её
+        # последний раз меняли: обфусцированные имена полей ротируют каждый
+        # билд (MoW -> lzD), и устаревшее имя в карте — это проваленный поиск
+        # «по имени» при следующем апдейте. Поэтому имена/типы перечитываются
+        # для всех полевых записей, а не только для изменившихся.
+        renamed = 0
+        fl_cache = {}
+        for c, ent in omap.items():
+            if ent.get('kind') != 'field':
+                continue
+            st = ent['struct']
+            if st not in fl_cache:
+                fl_cache[st] = new.fields(st) or []
+            for fn, off, ty in fl_cache[st]:
+                if off == ent['offset'] and (fn != ent.get('field') or ty != ent.get('type')):
+                    ent['field'], ent['type'] = fn, ty
+                    renamed += 1
+                    break
         json.dump(omap, open(a.map, 'w', encoding='utf-8'), indent=1, ensure_ascii=False)
-        print(f'\nзаписано в {os.path.relpath(HEADER, ROOT)} и карту. '
+        print(f'\nзаписано в {os.path.relpath(HEADER, ROOT)}'
+              f'{"" if not changes else " и карту"}'
+              f'{"" if changes else " (карта: имена полей освежены)"}'
+              f'{f" (карта: имён полей обновлено {renamed})" if changes and renamed else ""}. '
               f'Проверь сборку и добавь строку в OFFSETS_UPDATE.md.')
     elif changes:
         print('\nчтобы записать: тот же вызов с --apply')

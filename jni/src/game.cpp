@@ -153,12 +153,12 @@ static void xray_apply(uint64_t native_cam) {
     }
 }
 
-// ==== Всегда день: Oxide.TimeOfDay ==========================================
-// Синглтон живёт в статике generic-класса pzF`1<TimeOfDay>. Точный RVA его
-// TypeInfo среди кандидатов (из дизасма Awake) выбирается валидацией полей:
-// у настоящего инстанса m_DayDuration — разумные секунды, а m_CurrentHour в
-// 0..23. Каждый кадр, пока включено, пишем полдень в нормализованное время
-// (uLu 0xB8) и час (0x3C) — Update() игры сам разворачивает солнце.
+// ==== Всегда день: TOD_Sky (ассет Time Of Day) ==============================
+// Инстанс ищется сканом области TypeInfo-слотов и валидируется структурой
+// (см. TOD_* в game_offsets.h): статик-список инстансов -> элемент того же
+// класса -> Cycle -> Hour/Day/Month/Year в разумных пределах. Пока включено,
+// фоновый поток пишет полдень прямо в Cycle.Hour — игровой Update сам
+// разворачивает солнце.
 static std::string read_remote_string(uint64_t address); // определена ниже
 static bool     g_day_enabled = false;
 static uint64_t g_day_tod = 0;          // подтверждённый инстанс TimeOfDay
@@ -178,22 +178,25 @@ static void always_day_tick() {
     if (!g_il2cpp_base || g_pid <= 0) return;
     if (g_day_tod) {
         // Живучесть: инстанс мог умереть при перезагрузке мира.
-        uint64_t cyc = rd_ptr(g_day_tod + 0x40);
-        float hour = (cyc >= 0x10000) ? rd<float>(cyc + 0x10) : -1.0F;
+        uint64_t cyc = rd_ptr(g_day_tod + TOD_SKY_CYCLE);
+        float hour = (cyc >= 0x10000) ? rd<float>(cyc + TOD_CYCLE_HOUR) : -1.0F;
         if (!(std::isfinite(hour) && hour >= 0.0F && hour <= 24.0F)) g_day_tod = 0;
     }
     // g_day_tod здесь — объект TOD_Sky (небесный менеджер ассета Time of
-    // Day; класс обфусцирован, в этом дампе "Gq"). Прежний Oxide.TimeOfDay в
-    // боевых сценах не существует: его ленивые метадата-слоты так и не
-    // инициализированы (лог day_log: нечётные токены) — Awake ни разу не
-    // вызывался. TOD_Sky ищем по СИГНАТУРЕ, без имён: у его класса первое
-    // статик-поле — список инстансов List<Gq>; элемент списка — объект того
-    // же класса; у объекта по +0x40 лежит TOD_CycleParameters с полями
-    // Hour(float 0..24)/Day(1..31)/Month(1..12)/Year(1900..2100).
+    // Day). Имя его класса обфусцировано и РОТИРУЕТ каждый билд: в дампе
+    // 89e0b63 это был "IY", в 62a8534 — "UV" (в ещё более старом — "Gq").
+    // Прежний Oxide.TimeOfDay в боевых сценах не существует: его ленивые
+    // метадата-слоты так и не инициализированы (лог day_log: нечётные токены)
+    // — Awake ни разу не вызывался. TOD_Sky ищем по СИГНАТУРЕ, без имён: у его
+    // класса первое статик-поле — список инстансов List<Self>; элемент списка —
+    // объект того же класса; у объекта по TOD_SKY_CYCLE (0x40) лежит
+    // TOD_CycleParameters с полями Hour(float 0..24)/Day(1..31)/Month(1..12)/
+    // Year(1900..2100). Имя TOD_CycleParameters не обфусцировано — по нему
+    // класс и находится в новом дампе (grep 'TOD_CycleParameters_o\* Cycle').
     if (!g_day_tod) {
-        static uint64_t s_scan_rva = 0xD7A0000;
-        constexpr uint64_t kScanEnd = 0xD840000;
-        constexpr uint64_t kCycleOff = 0x40;   // Gq.Cycle
+        static uint64_t s_scan_rva = TOD_SCAN_RVA_BEGIN;
+        constexpr uint64_t kScanEnd = TOD_SCAN_RVA_END;
+        constexpr uint64_t kCycleOff = TOD_SKY_CYCLE;
         uint64_t slots[128];
         if (rd_buf(g_il2cpp_base + s_scan_rva, slots, sizeof(slots))) {
             for (int i = 0; i < 128 && !g_day_tod; ++i) {
@@ -211,10 +214,10 @@ static void always_day_tick() {
                 if (rd_ptr(sky) != klass) continue;   // элемент — того же класса
                 uint64_t cyc = rd_ptr(sky + kCycleOff);
                 if (cyc < 0x10000) continue;
-                float hour = rd<float>(cyc + 0x10);
-                int day = rd<int32_t>(cyc + 0x14);
-                int mon = rd<int32_t>(cyc + 0x18);
-                int year = rd<int32_t>(cyc + 0x1C);
+                float hour = rd<float>(cyc + TOD_CYCLE_HOUR);
+                int day = rd<int32_t>(cyc + TOD_CYCLE_DAY);
+                int mon = rd<int32_t>(cyc + TOD_CYCLE_MONTH);
+                int year = rd<int32_t>(cyc + TOD_CYCLE_YEAR);
                 if (std::isfinite(hour) && hour >= 0.0F && hour <= 24.0F &&
                     day >= 1 && day <= 31 && mon >= 1 && mon <= 12 &&
                     year >= 1900 && year <= 2100)
@@ -222,7 +225,7 @@ static void always_day_tick() {
             }
         }
         s_scan_rva += 128 * 8;
-        if (s_scan_rva >= kScanEnd) s_scan_rva = 0xD7A0000;
+        if (s_scan_rva >= kScanEnd) s_scan_rva = TOD_SCAN_RVA_BEGIN;
         if (!g_day_tod) return;
     }
     // Полдень: писатель-доминатор. Игровой писатель обновляет Cycle.Hour
@@ -231,9 +234,9 @@ static void always_day_tick() {
     // поток с периодом ~2 мс: окно, в котором игра успевает и записать своё
     // время, и отрендерить его, практически исчезает.
     {
-        uint64_t cyc = rd_ptr(g_day_tod + 0x40);
+        uint64_t cyc = rd_ptr(g_day_tod + TOD_SKY_CYCLE);
         if (cyc >= 0x10000) {
-            g_day_cycle_addr.store(cyc + 0x10);
+            g_day_cycle_addr.store(cyc + TOD_CYCLE_HOUR);
             if (!g_day_writer_running.exchange(true)) {
                 std::thread([]() {
                     while (g_day_writer_running.load()) {

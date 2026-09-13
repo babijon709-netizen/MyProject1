@@ -41,10 +41,10 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // own methods and following  adrp/ldr -> R_AARCH64_RELATIVE addend -> slot,
 // keeping only slots that are then dereferenced as  ldr x8,[klass,#0xB8]
 // (Il2CppClass::static_fields) - i.e. exactly the access our reader performs.
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD7AAAF8;
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD8DB8B8;
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD7A5E10; // GameControllerBase
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD8D61E8; // GameControllerBase
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
@@ -125,10 +125,10 @@ inline constexpr std::uint64_t INV_PLAYER_INVENTORY_CLIENT = 0x28; // _playerInv
 // _weaponPiece / _weaponState tail, not by name (names are re-obfuscated).
 // NB: the new layout also has a second WeaponPiece at 0xA8 - that one is NOT
 // the SyncVar and must not be used.
-inline constexpr std::uint64_t PLAYERWEAPON_VIEW           = 0xD0;
-inline constexpr std::uint64_t PLAYERWEAPON_PIECE          = 0x100;
-inline constexpr std::uint64_t PLAYERWEAPON_STATE          = 0x110;
-inline constexpr std::uint64_t PLAYERWEAPON_PLAYER_BACKREF = 0x128;
+inline constexpr std::uint64_t PLAYERWEAPON_VIEW           = 0xE0;
+inline constexpr std::uint64_t PLAYERWEAPON_PIECE          = 0x110;
+inline constexpr std::uint64_t PLAYERWEAPON_STATE          = 0x120;
+inline constexpr std::uint64_t PLAYERWEAPON_PLAYER_BACKREF = 0x138;
 // Oxide.WeaponPiece (value type): Enabled 0x0, Number 0x2, Skin 0x4,
 // SkinLevel 0x6, Loaded 0x7, Mods 0x8. Number is the item id of the weapon.
 inline constexpr std::uint64_t WEAPONPIECE_ENABLED = 0x00;
@@ -237,7 +237,7 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
 // Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD7A9DC8;
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD8DAB08;
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x28;
 
 // System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
@@ -260,16 +260,32 @@ inline constexpr std::uint64_t PMK_HEALTH            = 0x98; // AsyncReactivePro
 inline constexpr std::uint64_t ARP_LATEST_VALUE      = 0x18; // float latestValue
 inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_MaxHealth
 
-// ---- Время суток (Oxide.TimeOfDay, синглтон pzF`1<TimeOfDay>.ukg) ----------
-// Кандидаты RVA глобала Il2CppClass* pzF`1<Oxide.TimeOfDay> — из дизасма
-// TimeOfDay.Awake (init-блок); какой именно — решает рантайм-валидация полей.
-inline constexpr std::uint64_t TOD_TYPEINFO_RVA_CANDIDATES[] = {
-    0xD7DDD28, 0xD7E39B8, 0xD7EA168, 0xD82A8B0,
-};
-inline constexpr std::uint64_t TOD_STOP_TIME    = 0x38; // bool m_StopTime
-inline constexpr std::uint64_t TOD_CURRENT_HOUR = 0x3C; // int m_CurrentHour
-inline constexpr std::uint64_t TOD_DAY_DURATION = 0x44; // int m_DayDuration
-inline constexpr std::uint64_t TOD_NORM_TIME    = 0xB8; // float uLu (0..1, сутки)
+// ---- Время суток: TOD_Sky (ассет Time Of Day) ------------------------------
+// Oxide.TimeOfDay в боевых сценах не живёт: его ленивые метадата-слоты не
+// инициализированы (Awake ни разу не вызывается), поэтому day/night читается
+// из TOD_Sky. Имя его класса ОБФУСЦИРОВАНО И РОТИРУЕТ КАЖДЫЙ БИЛД: в дампе
+// 89e0b63 это `IY`, в этом (62a8534) — `UV`. Структура же стабильна:
+//   * единственный статик — List<Self> (первое статик-поле, offset 0x0);
+//   * у инстанса `TOD_CycleParameters_o* Cycle` на 0x40;
+//   * у TOD_CycleParameters: Hour(float)@0x10, Day@0x14, Month@0x18, Year@0x1C.
+// Имя TOD_CycleParameters не обфусцировано — по нему класс и находится:
+//   grep -n 'TOD_CycleParameters_o\* Cycle' il2cpp.h   # -> 0x40 = TOD_Sky
+//
+// TOD_SCAN_RVA_* — окно в .data.rel.ro, где лежат глобальные Il2CppClass*-слоты;
+// day_tod_scan() в game.cpp перебирает его по 1 КБ за кадр и валидирует каждый
+// кандидат по структуре выше. Это НЕ поля, но уезжают они КАЖДЫЙ билд вместе
+// со всеми *_TYPEINFO_RVA — проверить:
+//   python3 tools/offsets/typeinfo_rva.py --so <new>/libil2cpp.so \
+//       --script <new>/script.json --methods 2000 UV
+// оба кандидата TOD_Sky (здесь 0xD8DF4C8 и 0xD8DFC98) обязаны попасть в окно.
+// Прошлое окно было 0xD7A0000..0xD840000 — сдвинулось ровно на +0x130000.
+inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xD8D0000;
+inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xD970000; // BEGIN + 0xA0000
+inline constexpr std::uint64_t TOD_SKY_CYCLE      = 0x40; // TOD_Sky.Cycle
+inline constexpr std::uint64_t TOD_CYCLE_HOUR     = 0x10; // TOD_CycleParameters.Hour
+inline constexpr std::uint64_t TOD_CYCLE_DAY      = 0x14;
+inline constexpr std::uint64_t TOD_CYCLE_MONTH    = 0x18;
+inline constexpr std::uint64_t TOD_CYCLE_YEAR     = 0x1C;
 
 // Oxide.MineableObject — the shared base of ore nodes, trees and animals.
 inline constexpr std::uint64_t MINEABLE_LOOT           = 0xA0; // List<Oxide.LootItem>

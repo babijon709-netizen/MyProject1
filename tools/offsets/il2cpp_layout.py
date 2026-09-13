@@ -47,6 +47,12 @@ TRACKED = {
     'Oxide_LootObject_Fields': 'LootObject',
     'Oxide_ItemPickup_Fields': 'ItemPickup',
     'Oxide_MineableObject_Fields': 'MineableObject',
+    # Крестик (hit-streak marker) — цель автофарма, см. OFFSETS_UPDATE.md §3.10
+    'HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields': 'OreHitstreaks',
+    'HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields': 'OreHitstreaksMarker',
+    'HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields': 'TreeHitstreaks',
+    'HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_Fields': 'HitMarkerItem',
+    'Oxide_MineableObjectHitInfoCompact_Fields': 'MineableObjectHitInfoCompact',
     'Oxide_FPManager_Fields': 'FPManager',
     'Oxide_FPObject_Fields': 'FPObject',
     'Oxide_FPWeaponBase_Fields': 'FPWeaponBase',

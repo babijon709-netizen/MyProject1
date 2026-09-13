@@ -65,8 +65,13 @@
 ### 3.3. Глобальные TypeInfo RVA (libil2cpp.so)
 | Константа | RVA | Класс |
 |---|---|---|
-| `PLAYER_MANAGER_TYPEINFO_RVA` | 0xD7E4310 | Oxide.PlayerManager |
-| `GAME_CONTROLLER_TYPEINFO_RVA` | 0xD7DF6C8 | GameControllerBase |
+| `PLAYER_MANAGER_TYPEINFO_RVA` | 0xD8DB8B8 | Oxide.PlayerManager |
+| `GAME_CONTROLLER_TYPEINFO_RVA` | 0xD8D61E8 | GameControllerBase |
+| `NETWORK_CLIENT_TYPEINFO_RVA` | 0xD8DAB08 | Mirror.NetworkClient |
+| `TOD_SCAN_RVA_BEGIN..END` | 0xD8D0000..0xD970000 | окно скана TOD_Sky (не поле!) |
+
+> Значения — для билда `62a8534`. Источник истины — `jni/src/game_offsets.h`;
+> таблица здесь может отстать, заголовок не может.
 | `PLAYER_MANAGER_STATIC_FIELDS_LIST` | 0x10 | clientPlayerList (поле статики) |
 | `GAME_CONTROLLER_LOCAL_PLAYER_FIELD` | 0x10 | `<ukT>k__BackingField` (локальный игрок) |
 | `GAME_CONTROLLER_CAMERA_MANAGER_FIELD` | 0x38 | `<ukA>k__BackingField` |
@@ -586,6 +591,29 @@ MineableObject.SRl (0x6490918)  [локальный удар]       -> cik -> JE
 `python3 tools/offsets/update_offsets.py` после апдейта пересчитает их сам
 (поля ищутся по имени, а обфусцированные — позиционным выравниванием типов).
 
+**Сверка с билдом `62a8534` (сентябрь 2026): все 20 оффсетов крестика БЕЗ
+ИЗМЕНЕНИЙ.** Раскладка `OreHitstreaks` / `OreHitstreaksMarker` /
+`TreeHitstreaks` / `HitMarkerItem` / `MineableObject` совпала 1:1 по типам и
+смещениям, имена самих классов (`MineableObjectExtension_*`) не изменились —
+ротировали только обфусцированные имена полей и базовый интерфейс экстеншенов
+(`JE` -> `dk`, на него код не смотрит):
+
+| было | стало | константа |
+|---|---|---|
+| `QWD` | `LXZ` | `MINEABLE_EXTENSIONS` 0xE8 |
+| `MoW` / `MoK` / `Mom` | `lzD` / `lzk` / `lzR` | `OREHS_MARKER` 0x30 / `OREHS_MINEABLE` 0x40 / `OREHS_COLLIDER` 0x38 |
+| `MTD` / `MTS` / `MTg` | `lzF` / `lzA` / `lHG` | маркер руды 0x38 / 0x48 / 0x58 |
+| `MTz` / `MTn` / `MTQ` / `MTu` | `lHX` / `lHe` / `lHC` / `lHl` | `TREEHS_STREAK` 0x48 / `TREEHS_MARKER` 0x50 / `SPOT_A` 0x88 / `SPOT_B` 0xA4 |
+
+Семантика (а не только раскладка) перепроверена дизассемблером по новому
+`libil2cpp.so`: `OreHitstreaks.Update` (0x786b260) по-прежнему перечитывает
+0x30/0x40; у маркера `Update` (0x786eb40) таймер `0x58 += Time.deltaTime`
+сравнивается с **15.0** и уходит в `Destroy`, обратная ссылка на экстеншен —
+0x38; `0xE8` у `MineableObject` лениво заполняется `GetComponents<dk>`
+(0x65677d0, запись через пред-индекс `str x0,[x22]`, где `x22 = this+0xE8`);
+у дерева `0x50` читается 11 раз и зануляется дважды, `0x88`/`0xA4` пишутся
+парой при пересчёте сегмента, `0x48` сбрасывается в ноль.
+
 Клиент/сервер: `PlayerInteraction.AvG` (0x657a360) — клиентский отправитель
 `[Command]` c `MineableObjectHitInfoCompact`, `PlayerInteraction.ABi`
 (0x656e120) — серверный обработчик. Крестик создаётся на КЛИЕНТЕ локальным
@@ -653,11 +681,66 @@ python3 tools/offsets/typeinfo_rva.py --so /tmp/new/libil2cpp.so --script /tmp/n
 5. Нативные Unity-смещения не меняются между версиями Unity-рантайма — только
    если игра обновила сам Unity (`libunity.7z` в репозитории тот же блоб →
    раздел 3.1 не трогаем).
-6. Пересобери: пушишь в `arena/01a068cd-myproject1` → GitHub Actions соберёт
+6. Пересобери: пушишь в рабочую ветку сессии → GitHub Actions соберёт
    `xvcen-sh-arm64-v8a` → забираешь артефакт из CI.
 7. Проверка на устройстве: ESP показывает **реальные ники**, корректное оружие,
    боксы не сливаются. Если что-то не так — верни временный дамп полей из
    истории коммитов, таблица в разделе 6.
+
+### 5.1. Что делает скрипт и что остаётся руками (с билда `62a8534`)
+
+```bash
+python3 tools/offsets/update_offsets.py            # сухой прогон: список изменений
+python3 tools/offsets/update_offsets.py --apply    # записать в заголовок и карту
+```
+
+Автоматически: 111 полевых констант (по имени, а обфусцированные — позиционным
+выравниванием типов) и 3 `*_TYPEINFO_RVA`. RVA теперь подбираются **по
+отпечатку со старого дампа**, а не «верхним кандидатом»: скрипт ищет в старом
+дампе тот кандидат, который равен текущему значению заголовка, запоминает его
+отпечаток (число обращений + прочитанные статик-поля) и в новом берёт кандидат
+с тем же отпечатком. Без этого `GameControllerBase` получает чужой слот
+(0xD8E4CD8 вместо верного 0xD8D61E8) — ESP тихо умирает. Прогон с
+`--methods 3000` обязателен: на 400 методах у `PlayerManager` в новом билде не
+находится ни одного кандидата.
+
+**Запустить `--apply` можно ровно один раз на дамп.** После него карта описывает
+новый дамп, и повторный прогон сдвинет значения ещё раз (`PIECE`
+0x100→0x110→0x120). Скрипт это ловит сам и останавливается («карта уже
+описывает НОВЫЙ дамп»); если всё же испортил — `git checkout --
+jni/src/game_offsets.h tools/offsets/offsets_map.json` и один прогон заново.
+
+Откуда берётся каждый оффсет и чем он подтверждён — `tools/offsets/PROVENANCE.md`
+(пересобирается `tools/offsets/make_provenance.py` из карты и заголовка).
+
+Руками после скрипта (в карте помечены `kind: runtime`, их 40):
+
+1. **Окно скана `TOD_SCAN_RVA_BEGIN/END`** (время суток). Это не поля, а
+   диапазон `.data.rel.ro` с глобальными `Il2CppClass*`-слотами; уезжает каждый
+   билд вместе с RVA. Пересчитать — см. комментарий в `game_offsets.h`
+   (`typeinfo_rva.py ... UV`, оба кандидата обязаны попасть в окно).
+   **Скрипт это не проверяет** — именно так в прошлом билде оно и протухло бы.
+2. **Имена классов**, которые код сверяет в рантайме:
+   `MineableObjectExtension_{OreHitstreaks,TreeHitstreaks}`, `Mineable*`,
+   `LootObject`, `ItemPickup`, `LootDestroyable`, `PlayerManager`,
+   `GameControllerBase`, `NetworkClient`, `NetworkIdentity`, `List\`1`.
+   Быстрая сверка: `grep '^public class' new/dump.cs`.
+3. **Нативные Unity/IL2CPP ABI** (`COMPONENT_GAMEOBJECT` 0x20,
+   `TRANSFORM_CHILDREN_ARRAY` 0x48 / `CHILD_COUNT` 0x58, `ARRAY_LENGTH` 0x18 /
+   `FIRST_ELEMENT` 0x20, `Il2CppClass.name` 0x10 / `namespace` 0x18 /
+   `static_fields` 0xB8, раскладка `List`/`Dictionary`). Меняются только со
+   сменой версии Unity. Дешёвая перепроверка по новому бинарю: в любом методе,
+   читающем статики класса, должен быть `ldr x?,[x?,#0xb8]`, а в переборе
+   интерфейсов — `ldrh w?,[x?,#0x12e]` + `ldr x?,[x?,#0xb0]` (в билде `62a8534`
+   оба на месте, см. `OreHitstreaksMarker.Update` 0x786eb9c и `MineableObject`
+   0x656781c).
+4. **Таблица item-id → название оружия** (`weapon_label_for_item_id` в
+   `game.cpp`). Она снята с устройства (`items.txt`, `/storage/emulated/0/
+   benzhack`), а не из дампа, поэтому из дампов не проверяется. Если игра
+   меняла базу предметов — снять заново; промах не фатален, unbekанный id
+   уходит на фолбэк по имени префаба.
+5. **`MineableEntityType`** (значения enum) — сверить в `dump.cs`: числа могут
+   не сдвинуться, но новые члены появляются.
 
 ## 6. Как вернуть временную диагностику (если снова что-то сломалось)
 В релизной сборке диагностики нет — она пишет на карту памяти, поэтому все
@@ -826,3 +909,76 @@ python3 tools/offsets/typeinfo_rva.py --so /tmp/new/libil2cpp.so --script /tmp/n
   сверены через ADD-immediate (2056/2042 и 77/78 — в пределах шума).
 * Итог: **раскладка Camera в libunity не менялась, все нативные константы
   (§3.1/§3.9) действительны, править нечего.**
+
+### Апдейт от 13 сентября 2026 (новые `dump.7z` / `libil2cpp.7z`, коммиты `d22586f`/`d3bb574`/`62a8534`)
+
+Дампы: `dump.7z` sha256 `2dc425af…4fa1` (24 889 304 Б), `libil2cpp.7z` sha256
+`57f9f051…06a1` (23 546 006 Б). Прошлые дампы — `89e0b63` (`dump.7z`
+24 731 290 Б, `libil2cpp.7z` 23 378 070 Б). Идентичность поколения backing-полей
+в новом билде — `L*` (в `89e0b63` было `Q*`, до того `_uk*_`), смещения те же.
+
+**Что изменилось (7 констант):**
+
+| Константа | было | стало | как найдено |
+|---|---|---|---|
+| `PLAYER_MANAGER_TYPEINFO_RVA` | 0xD7AAAF8 | **0xD8DB8B8** | отпечаток: 5 обращений, статик-поля `[0x1A0x1]` |
+| `GAME_CONTROLLER_TYPEINFO_RVA` | 0xD7A5E10 | **0xD8D61E8** | отпечаток: 1 обращение, статик-полей нет |
+| `NETWORK_CLIENT_TYPEINFO_RVA` | 0xD7A9DC8 | **0xD8DAB08** | отпечаток: 6 обращений, статик-полей нет |
+| `PLAYERWEAPON_VIEW` | 0xD0 | 0xE0 | по имени `playerWeaponViewReference` |
+| `PLAYERWEAPON_PIECE` | 0x100 | 0x110 | позиционно (`Oxide_WeaponPiece_o`) |
+| `PLAYERWEAPON_STATE` | 0x110 | 0x120 | позиционно (`int32_t` за piece) |
+| `PLAYERWEAPON_PLAYER_BACKREF` | 0x128 | 0x138 | по имени `_player_k__BackingField` |
+
+Плюс вручную: `TOD_SCAN_RVA_BEGIN/END` 0xD7A0000/0xD840000 → **0xD8D0000/0xD970000**.
+
+**Что НЕ изменилось:** все 20 оффсетов автофарма-крестика (§3.10), `PlayerManager`
+(129 полей), `KCC`, `CharacterAnimation`, `Ragdoll`, `HitBox`, `Item`, `LootObject`,
+`ItemPickup`, `FPObject`, `FPWeaponBase`, `FPManager`, `WeaponPiece`,
+`NetworkIdentity`, статики `NetworkClient`/`GameControllerBase`, `TimeOfDay`,
+`TOD_CycleParameters`, весь блок нативных Unity/IL2CPP ABI.
+
+**Ловушки этого апдейта (все три стоили бы молча сломанного чита):**
+
+1. **`GAME_CONTROLLER_TYPEINFO_RVA` — верхний кандидат ВРЕТ.** `typeinfo_rva.py`
+   на новом дампе выдаёт 0xD8E4CD8 (16 обращений, статик-поля `[0x8x8, 0x0x8]`)
+   и 0xD8D61E8 (1 обращение, прочерк). Верный — второй; прогон на старом дампе
+   это подтверждает (там та же пара: 0xD7B4390 чужой против 0xD7A5E10 верного,
+   и 0xD7A5E10 — значение из git). `update_offsets.py` раньше брал `--top 1`,
+   то есть записал бы чужой слот → `resolve_local_player()` вернул бы 0 →
+   пустой ESP и мёртвый фарм. Теперь скрипт подбирает по отпечатку со старого
+   дампа (см. §5.1).
+2. **`PLAYER_MANAGER_TYPEINFO_RVA` не ищется на 400 методах.** В новом билде
+   первые 400 методов `Oxide.PlayerManager` в порядке `script.json` не содержат
+   чтения статик-полей — «кандидатов нет». С `--methods 3000` находится
+   0xD8DB8B8, и ровно он же воспроизводится на старом дампе (0xD7AAAF8 из git).
+3. **Окно скана TOD_Sky захардкожено в `game.cpp`, а не в заголовке.**
+   `s_scan_rva = 0xD7A0000` / `kScanEnd = 0xD840000` — RVA прошлого билда;
+   в новом в этом окне осталось 35 слотов вместо 82 154, то есть «всегда день»
+   не нашёл бы инстанс никогда. Окно уехало ровно на +0x130000 (в новом
+   0xD8D0000..0xD970000 — 82 167 слотов, оба кандидата TOD_Sky 0xD8DF4C8 и
+   0xD8DFC98 внутри). Константы перенесены в `game_offsets.h`
+   (`TOD_SCAN_RVA_*`) и занесены в карту, чтобы следующий апдейт их увидел.
+   Заодно удалены мёртвые `TOD_TYPEINFO_RVA_CANDIDATES` / `TOD_STOP_TIME` /
+   `TOD_CURRENT_HOUR` / `TOD_DAY_DURATION` / `TOD_NORM_TIME`: их никто не
+   читал с тех пор, как day/night переведён на TOD_Sky, а устаревали они молча.
+
+**Отдельно проверено руками (не скриптом):**
+
+* `PlayerWeapon` разъехался на 41 смещение (вставлены поля около 0x68), поэтому
+  позиционное выравнивание перепроверено глазами: old `nwY`(0x100,
+  `Oxide_WeaponPiece_o`)→new `CxH`(0x110), old `nwt`(0x110,int32)→new
+  `Cxn`(0x120), old `_player_k__BackingField`(0x128)→new(0x138); Mirror-делегаты
+  `__weaponPiece`/`__weaponState` уехали на те же +0x10 (0x148→0x158,
+  0x150→0x160), порядок piece→state сохранён.
+* Читаемые имена полей у `PlayerWeapon` в этом билде ВПЕРВЫЕ обфусцированы
+  (`playerWeaponViewReference`→`Cxm` на 0xD0 в старом дампе — это другая
+  проверка; в новом `playerWeaponViewReference` снова читаемое на 0xE0).
+  Страховка скрипта «читаемые имена не ротируют» на этом билде дала сбой на
+  8 повёрнутых `_k__BackingField` — `_XXXX_k__BackingField` теперь считается
+  обфусцированным именем (`BACKING_RE` в `update_offsets.py`).
+* Имена классов крестика в новом `dump.cs` на месте
+  (`MineableObjectExtension_{OreHitstreaks,TreeHitstreaks,OreHitstreaksMarker,HitMarkerItem}`),
+  базовый интерфейс ротировал `JE`→`dk` (код его не использует).
+* Единственное имя класса, исчезнувшее между билдами, — `DVL`; в коде это
+  только строка-лейбл в таблице-канонизаторе `kWeaponNames`, совпадением имени
+  класса оно не было, так что ничего не сломалось.
