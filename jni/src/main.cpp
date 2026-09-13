@@ -3894,10 +3894,16 @@ static void UpdateFarm(float dt) {
     const bool isTree = (tgt.kind == 0);
     const bool atSpot = tgt.at_spot;
     const bool wasMining = (g_farmPhase == 3);
-    const float reachNow = atSpot
-        ? (isTree ? (wasMining ? kReachTreeHold : kReachTreeSpot)
-                  : (wasMining ? kReachOreHold  : kReachOreSpot))
-        : (isTree ? kReachTreeBody : kReachOreBody);
+    // meleeTight — дистанция, с которой удар реально достаёт точку прицела.
+    // По крестику она же решает «достали ли» (с гистерезисом meleeHold, чтобы
+    // не выпускать узел из-за полуметрового дрожания дистанции). По корпусу
+    // фаза удара начинается раньше — узел большой, — НО стик продолжает
+    // поджимать вперёд вплоть до meleeTight: иначе топор до коры не дотянется,
+    // первый удар не пройдёт и крестик так и не появится.
+    const float meleeTight = isTree ? kReachTreeSpot : kReachOreSpot;
+    const float meleeHold  = isTree ? kReachTreeHold : kReachOreHold;
+    const float reachNow = atSpot ? (wasMining ? meleeHold : meleeTight)
+                                  : (isTree ? kReachTreeBody : kReachOreBody);
     const bool inReach = tgt.aim_dist <= reachNow;
 
     // Доводка камеры с гистерезисом: свайп начинается, когда ошибка явно
@@ -3970,13 +3976,13 @@ static void UpdateFarm(float dt) {
     // ---- палец 0: джойстик движения -------------------------------------------
     {
         // В фазе удара всё ещё поджимаем вперёд, пока до точки прицела дальше
-        // порога: у тонких деревьев пивот в центре ствола, и остановка в паре
-        // метров оставляла удар коротким. pressAt с гистерезисом — жмём, пока
-        // дальше +0.1..0.25 м, отпускаем только внутри (без хлопанья на
-        // границе, которое выглядело как топтание на месте).
+        // meleeTight: у тонких деревьев пивот в центре ствола, и остановка в
+        // паре метров оставляла удар коротким. Гистерезис — жмём, пока дальше
+        // +0.1..0.25 м, отпускаем только внутри (без хлопанья на границе,
+        // которое выглядело как топтание на месте).
         const float pressAt = s_moveDown
-            ? reachNow
-            : reachNow + (isTree ? 0.08f : 0.25f);
+            ? meleeTight
+            : meleeTight + (isTree ? 0.08f : 0.25f);
         bool wantWalk =
             (phase == 2 && tgt.walk_dist > kArriveWalk) ||
             (phase == 1 && fabsf(tgt.walk_yaw) < kCreepYaw && tgt.walk_dist > kCreepDist) ||
