@@ -626,6 +626,83 @@ MineableObject.SRl (0x6490918)  [локальный удар]       -> cik -> JE
 (0x656e120) — серверный обработчик. Крестик создаётся на КЛИЕНТЕ локальным
 путём удара (`SRl`), поэтому читать его можно без всякой сетевой задержки.
 
+### 3.11. Дальность удара ближним орудием (топор / кирка / пила)
+
+**Как игра решает, попал ли удар** — `Oxide.FPMelee.ZkX` (RVA 0x6533a20 в билде
+`62a8534`), дословно из дизасма:
+
+```
+handler = FPObject.PlayerEventHandler (0xC8)
+data    = handler.RaycastData (0x160) -> value (+0x20)      // основной луч
+if (!GKo.ZnJ(data))                                          // невалиден —
+    data = handler.AimRaycast (0x168) -> value (+0x20)       // запасная сфера
+if (!GKo.ZnJ(data)) -> On_Woosh()
+if (data.RaycastHit.distance < m_MaxReach + hitRadius) -> On_Hit(data)
+else -> On_Woosh()
+```
+
+`distance` — `UnityEngine.RaycastHit.get_distance()` (RVA 0xc87e3a4), то есть
+**3D-метры от камеры/оси выстрела**, а не горизонтальное расстояние до узла.
+Сравнение — `fadd s1, m_MaxReach, hitRadius; fcmp s0, s1; b.pl On_Woosh`.
+
+| Константа | Смещение | Откуда / комментарий |
+|---|---|---|
+| `FPMELEE_MAX_REACH` | 0x128 | `FPMelee.m_MaxReach` — дальность удара орудия |
+| `FPMELEE_HIT_RADIUS` | 0x12C | `FPMelee.hitRadius` — радиус сферы и добавка к дальности |
+| `FPOBJECT_RAYCAST_MANAGER` | 0x90 | `FPObject.LUw` — компонент лучей (один на орудие) |
+| `RAYCASTMAN_PLAYER` | 0x20 | back-ref на `PlayerManager` (проверка «свой») |
+| `RAYCASTMAN_RAY_LENGTH` | 0x38 | `m_RayLength` — длина основного луча |
+| `RAYCASTMAN_AIM_RAY_LENGTH` | 0x3C | `m_AimRayLength` — длина запасного `SphereCast` |
+| `RAYCASTMAN_SPHERE_RADIUS` | 0x40 | радиус сферы (`LtS`) |
+| `RAYCASTMAN_TOO_CLOSE` | 0x44 | порог «слишком близко» для `IsCloseToAnObject` |
+
+**Самих чисел в дампе нет**: `m_MaxReach`, `hitRadius`, `m_RayLength`
+сериализованы в префабе каждого инструмента. В конструкторах — заглушки:
+`FPMelee..ctor` (0x6533b4c) пишет `m_MaxReach 0.5`, `hitRadius 0.1`,
+`m_TimeBetweenAttacks 0.85`, `m_DamagePerHit 15`, `m_ImpactForce 15`;
+`RaycastManager..ctor` (0x6553310) — `m_RayLength 1.5`, `m_AimRayLength 1.5`,
+`m_TooCloseThreeshold 1.0`. Поэтому значение читается из живого орудия в руках:
+`read_local_melee_reach()` в `game.cpp`, наружу — `FarmTarget.melee_reach`, а
+панель цели показывает его («Дерево · 1.9 м · удар до 2.40»).
+
+**Кто и что кастует** — `Oxide.RaycastManager.Update` (RVA 0x65559fc):
+
+* основной `Physics.Raycast(ray, out hit, m_RayLength, m_LayerMask)` →
+  активность `RaycastData` (0x160); луч строит `GuL.ZJP` (0x64e7924) из позы
+  камеры через `GuL.ZJS` + `Camera.nearClipPlane`;
+* запасной `Physics.SphereCast(ray, radius, out hit, m_AimRayLength,
+  m_AimLayerMask, ...)` → `AimRaycast` (0x168), и кастуется **только если
+  основной луч промахнулся** (`RaycastData.value == null`, проверка на
+  0x6555ebc) и `m_AimRayLength > 0` и радиус > 0;
+* при доставании орудия `FPMelee.On_Draw` (0x6533b14) кладёт свои `m_MaxReach`
+  и `hitRadius` в `m_AimRayLength`/радиус сферы — `RaycastManager.ZIj`
+  (0x6555868) это буквально `stp s0, s1, [x0, #0x3c]`.
+
+Отсюда рабочая дальность удара: по основному лучу
+`min(m_RayLength, m_MaxReach + hitRadius)`, а если он промахнулся — по сфере до
+`m_MaxReach` вдоль луча плюс `hitRadius` бокового прощения (для сферы проверка
+`distance < m_MaxReach + hitRadius` проходит всегда). Итоговый ориентир —
+**`m_MaxReach + hitRadius` 3D-метров от глаза**; автофарм берёт его с запасом
+0.90 (`kReachLiveTight`), гистерезис 0.98 (`kReachLiveHold`), а по корпусу без
+крестика добавляет 1.20 м на радиус узла (`kReachBodyAllowance`). Если орудие не
+опознано или значение не прочиталось, работают прежние эмпирические пороги
+`kReach*` — метрика при этом горизонтальная (`aim_dist`), с живой — `aim_3d`.
+
+**Классы ближнего орудия** (имена читаемые, между билдами не ротируют):
+`Oxide.FPMelee` → `Oxide.FPTool` (`m_ToolPurposes` 0x160: CutWood=1,
+BreakRocks=2, CutAnimals=4; `m_Efficiency` 0x164) → `Oxide.FPChainsaw`; рядом
+`FPSpear`, `FPBuildingHammer`, `FPTorch`. Проверка имени класса обязательна: у
+прочих `FPObject` на 0x128 свои поля — у `FPCrossbow`/`FPSnowball` там
+`m_MaxDistance` (сотни метров), и без проверки бот решил бы, что арбалетом можно
+рубить деревья с двухсот метров.
+
+**Как найти заново после апдейта.** Якорь — читаемые имена `m_MaxReach` и
+`hitRadius` в `Oxide_FPMelee_Fields` (`il2cpp_layout.py find m_MaxReach`), дальше
+`Oxide_RaycastManager_Fields` (`m_RayLength`/`m_AimRayLength`). Все восемь
+констант занесены в `offsets_map.json` с читаемыми именами полей, поэтому
+`update_offsets.py` пересчитывает их сам; обфусцированы только `FPObject.LUw` и
+`RaycastManager.LtS` — их ведёт позиционное выравнивание по типу.
+
 ---
 
 ## 4. Ключевые правила (не забудь после апдейта)
@@ -1063,3 +1140,62 @@ jni/src/game_offsets.h tools/offsets/offsets_map.json` и один прогон 
 в обоих билдах не имеет собственных полей — `WEAPONVIEW_*` остаются
 рантайм-значениями из базового класса, менять нечего (сдвинулся только сам
 указатель `PLAYERWEAPON_VIEW` 0xD0→0xE0, это сделано в `49e6dc9`).
+
+### 13 сентября 2026: дальность удара по руде/дереву — из дампа, а не «на глаз»
+
+Запрос: определить по дампу максимальную дальность удара по руде/дереву и т.п.
+Подробности с RVA и дизасмом — в §3.11, здесь только итог и что изменилось.
+
+Что нашлось:
+
+* дальность удара — это **`FPMelee.m_MaxReach` (0x128) + `FPMelee.hitRadius`
+  (0x12C)**: ровно эту сумму `FPMelee.ZkX` сравнивает с `RaycastHit.distance`,
+  и если не дотянули — играет `On_Woosh()` вместо `On_Hit()`;
+* `distance` — 3D-метры **от камеры/оси выстрела**, а не горизонтальное
+  расстояние до узла. Автофарм до этого мерил по горизонтали (`aim_dist`)
+  эмпирическими порогами 0.80 м (дерево) и 1.55 м (руда), подобранными на
+  устройстве;
+* самих чисел в дампе нет — они сериализованы в префабе каждого инструмента. В
+  конструкторах заглушки: `m_MaxReach 0.5`, `hitRadius 0.1` (плюс
+  `m_TimeBetweenAttacks 0.85`, `m_DamagePerHit 15`, `m_ImpactForce 15`),
+  `m_RayLength 1.5`, `m_AimRayLength 1.5`, `m_TooCloseThreeshold 1.0`. Поэтому
+  значение читается из живого орудия в руках;
+* основной луч (`RaycastData`, активность 0x160) кастуется на `m_RayLength`, а
+  запасная сфера (`AimRaycast`, 0x168) — только если основной промахнулся; её
+  длину и радиус `FPMelee.On_Draw` заполняет теми же `m_MaxReach`/`hitRadius`.
+  Отсюда рабочая дальность — `m_MaxReach + hitRadius` от глаза.
+
+Что сделано:
+
+* `game_offsets.h`: восемь новых констант (`FPMELEE_MAX_REACH`,
+  `FPMELEE_HIT_RADIUS`, `FPOBJECT_RAYCAST_MANAGER`, `RAYCASTMAN_PLAYER`,
+  `RAYCASTMAN_RAY_LENGTH`, `RAYCASTMAN_AIM_RAY_LENGTH`,
+  `RAYCASTMAN_SPHERE_RADIUS`, `RAYCASTMAN_TOO_CLOSE`) с provenance в
+  комментариях; все занесены в `offsets_map.json` (стало 162 записи),
+  `update_offsets.py --verify` проходит без замечаний — 122 полевые константы
+  сверяются, из них новые по читаемым именам;
+* `game.cpp`: `read_local_melee_reach()` — локальный игрок → `FPManager` →
+  текущее оружие → back-ref → **имя класса** (только семейство `FPMelee`:
+  `FPTool`, `FPChainsaw`, `FPMelee`, `FPSpear`, `FPBuildingHammer`, `FPTorch`) →
+  чтение двух float с проверкой правдоподобия; имя класса кэшируется на
+  `Il2CppClass`, чтобы не дёргать строку каждый кадр. Без проверки имени читать
+  0x128 нельзя: у `FPCrossbow`/`FPSnowball` там `m_MaxDistance` — сотни метров.
+  Наружу значение отдаётся полем `FarmTarget.melee_reach` (отдельного API не
+  заводим — единственный потребитель сейчас автофарм);
+* `game.h` + `game.cpp`: `FarmTarget.aim_3d` теперь считается от глаза/оси
+  выстрела — той же точки, от которой берутся углы наведения, — а не от
+  `g_frame_local_pos` (корень игрока, ~1.5 м ниже глаза). Раньше это поле никто
+  не читал, и оно расходилось с собственным описанием; добавлены `melee_reach` и
+  `melee_ray`;
+* `main.cpp`: если дальность орудия прочитана, порог «можно бить» и «поджимать
+  вперёд» считается по правилу игры в `aim_3d` (запас 0.90, гистерезис 0.98, по
+  корпусу без крестика +1.20 м на радиус узла). Если не прочитана — прежние
+  эмпирические пороги по горизонтали, поведение не меняется. В панели цели живая
+  дальность видна: «Дерево · 1.9 м · удар до 2.40» (или «удар ?», если орудие не
+  опознано).
+
+Проверено: `game.cpp` компилируется (`g++ -fsyntax-only -std=c++17`), изменённые
+выражения `main.cpp` — изолированным тестом с теми же константами и мок-переменными
+(NDK в песочнице нет, полный билд делает CI). Три сценария дали ожидаемые пороги:
+дерево с живой дальностью 2.40 → 2.16 м по `aim_3d`; без живой → прежние 0.80 м
+по горизонтали; руда по корпусу с живой 2.10 → 3.09 м и стик продолжает поджимать.

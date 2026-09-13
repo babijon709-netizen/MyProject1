@@ -177,6 +177,36 @@ inline constexpr std::uint64_t FPMANAGER_AIM_BLEND           = 0xA8;
 inline constexpr std::uint64_t FPOBJECT_PLAYER_BACKREF       = 0xC0;
 inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;
 
+// Максимальная дальность удара ближним орудием (топор/кирка/пила/копьё).
+// Из дампа 62a8534, класс Oxide.FPMelee (наследники: FPTool -> FPChainsaw,
+// FPSpear, FPBuildingHammer, FPTorch — имена читаемые, не ротируют):
+//   FPMelee.m_MaxReach (0x128) + FPMelee.hitRadius (0x12C)
+// Игра засчитывает удар в FPMelee.ZkX() ровно так:
+//   GKo data = handler.RaycastData (0x160), если невалиден — handler.AimRaycast (0x168)
+//   if (data.RaycastHit.distance < m_MaxReach + hitRadius) On_Hit(data); else On_Woosh();
+// distance — это UnityEngine.RaycastHit.get_distance(), то есть 3D-метры ОТ
+// КАМЕРЫ (луч строит GuL.ZJP из позы камеры/головы), а не по горизонтали.
+// Значения сериализованы в префабе каждого инструмента; в конструкторе FPMelee
+// стоят заглушки m_MaxReach=0.5, hitRadius=0.1 (m_TimeBetweenAttacks=0.85,
+// m_DamagePerHit=15, m_ImpactForce=15), поэтому читать их надо из живого объекта.
+// Лучи кастует Oxide.RaycastManager (FPObject.RaycastManager, 0x90):
+//   m_RayLength (0x38, default 1.5) — длина обычного луча -> RaycastData;
+//   m_AimRayLength (0x3C) и радиус сферы (0x40) — при доставании орудия
+//   FPMelee.On_Draw кладёт туда свои m_MaxReach и hitRadius (RaycastManager.ZIj),
+//   сфера -> AimRaycast; m_TooCloseThreeshold (0x44, default 1.0).
+inline constexpr std::uint64_t FPOBJECT_RAYCAST_MANAGER      = 0x90;
+inline constexpr std::uint64_t FPMELEE_MAX_REACH             = 0x128;
+inline constexpr std::uint64_t FPMELEE_HIT_RADIUS            = 0x12C;
+inline constexpr std::uint64_t RAYCASTMAN_PLAYER             = 0x20;
+inline constexpr std::uint64_t RAYCASTMAN_RAY_LENGTH         = 0x38;
+inline constexpr std::uint64_t RAYCASTMAN_AIM_RAY_LENGTH     = 0x3C;
+inline constexpr std::uint64_t RAYCASTMAN_SPHERE_RADIUS      = 0x40;
+inline constexpr std::uint64_t RAYCASTMAN_TOO_CLOSE          = 0x44;
+// Источники данных луча в PlayerEventHandler (класс Gum): RaycastData на 0x160
+// и AimRaycast на 0x168, значение (GKo*) у обеих активностей как обычно на
+// +0x20. Код их пока не читает — константы не заводим, чтобы не устаревали
+// молча (см. журнал: мёртвые константы TOD_* пришлось вычищать).
+
 // Ragdoll bone list route (dump.cs) — game-maintained list of rig bone
 // transforms, no name matching needed:
 //   PlayerManager.kccReference (0xB0, possibly a wrapper) -> KCC

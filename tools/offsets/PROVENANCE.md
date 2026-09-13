@@ -5,7 +5,7 @@
 `libil2cpp.7z`; распаковка — `tools/offsets/extract_dumps.sh <dir> [git-ref]`.
 
 Машиночитаемый источник истины — `tools/offsets/offsets_map.json`
-(154 записей); этот файл — его человеческое объяснение: не «какое число
+(162 записей); этот файл — его человеческое объяснение: не «какое число
 стоит», а «откуда оно взялось и как его найти заново». Значения здесь
 совпадают с `jni/src/game_offsets.h`; при расхождении верить заголовку и
 карте, а этот файл пересобрать (`make_provenance.py`).
@@ -14,7 +14,7 @@
 
 | класс | сколько | откуда | уезжает ли каждый билд | чем проверяется |
 |---|---|---|---|---|
-| **A. Смещения полей** | 114 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
+| **A. Смещения полей** | 122 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
 | **B. `*_TYPEINFO_RVA`** | 3 | слоты глобальных `Il2CppClass*` в `.data.rel.ro` `libil2cpp.so` | **да, всегда** | `typeinfo_rva.py` + отпечаток со старого дампа |
 | **C. Рантайм/ABI** | 37 | раскладка Unity/IL2CPP-объектов, не выводится из `dump.cs` | только при смене версии Unity/IL2CPP | вручную (дизасм паттернов), см. §C |
 
@@ -105,6 +105,7 @@
 |---|---|---|---|
 | `FPOBJECT_ITEM` | 0x40 | `_Lwx_k__BackingField` | `Oxide_Item_o*` |
 | `FPOBJECT_OBJECT_NAME` | 0x78 | `m_ObjectName` | `System_String_o*` |
+| `FPOBJECT_RAYCAST_MANAGER` | 0x90 | `LUw` | `Oxide_RaycastManager_o*` |
 | `FPOBJECT_PLAYER_BACKREF` | 0xc0 | `Player` | `Oxide_PlayerManager_o*` |
 
 ### `Dissonance_VoicePlayerState_Fields`  (VoicePlayerState)
@@ -330,6 +331,23 @@
 | `TOD_CYCLE_DAY` | 0x14 | `Day` | `int32_t` |
 | `TOD_CYCLE_MONTH` | 0x18 | `Month` | `int32_t` |
 | `TOD_CYCLE_YEAR` | 0x1c | `Year` | `int32_t` |
+
+### `Oxide_FPMelee_Fields`  (FPMelee)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `FPMELEE_MAX_REACH` | 0x128 | `m_MaxReach` | `float` |
+| `FPMELEE_HIT_RADIUS` | 0x12c | `hitRadius` | `float` |
+
+### `Oxide_RaycastManager_Fields`  (RaycastManager)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `RAYCASTMAN_PLAYER` | 0x20 | `player` | `Oxide_PlayerManager_o*` |
+| `RAYCASTMAN_RAY_LENGTH` | 0x38 | `m_RayLength` | `float` |
+| `RAYCASTMAN_AIM_RAY_LENGTH` | 0x3c | `m_AimRayLength` | `float` |
+| `RAYCASTMAN_SPHERE_RADIUS` | 0x40 | `LtS` | `float` |
+| `RAYCASTMAN_TOO_CLOSE` | 0x44 | `m_TooCloseThreeshold` | `float` |
 
 ---
 

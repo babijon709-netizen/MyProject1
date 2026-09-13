@@ -3494,6 +3494,93 @@ bool esp_local_player_is_aiming() {
     return g_aim_state.aiming;
 }
 
+// ---- Дальность удара ближним орудием: FPMelee.m_MaxReach + hitRadius --------
+// Сами числа сериализованы в префабе каждого инструмента, в дампе их нет: в
+// конструкторе FPMelee стоят заглушки (m_MaxReach 0.5, hitRadius 0.1,
+// m_TimeBetweenAttacks 0.85, m_DamagePerHit 15, m_ImpactForce 15). Поэтому
+// читаем живой объект в руках.
+//
+// Как игру это использует (FPMelee.ZkX, дизасм билда 62a8534):
+//   data = handler.RaycastData(0x160); если невалиден — handler.AimRaycast(0x168)
+//   if (data.RaycastHit.distance < m_MaxReach + hitRadius) On_Hit(data)
+//   else On_Woosh()
+// distance — UnityEngine.RaycastHit.get_distance(), то есть 3D-метры от
+// камеры/оси выстрела, а НЕ горизонтальное расстояние до узла.
+struct MeleeReach {
+    bool  valid = false;
+    float max_reach = 0.0F;   // FPMelee.m_MaxReach  (0x128)
+    float hit_radius = 0.0F;  // FPMelee.hitRadius   (0x12C)
+    float total = 0.0F;       // порог засчёта удара, 3D-метры от глаза
+    float ray_length = 0.0F;  // RaycastManager.m_RayLength (0x38)
+    char  tool[24] = {};      // имя класса орудия
+};
+
+// Имена классов ближнего орудия читаемые и между билдами не ротируют
+// (dump.cs: Oxide.FPMelee -> Oxide.FPTool -> Oxide.FPChainsaw, плюс FPSpear,
+// FPBuildingHammer, FPTorch). Проверка обязательна: у прочих FPObject на 0x128
+// свои поля (у FPCrossbow/FPSnowball там m_MaxDistance — сотни метров).
+static const char* const kMeleeFamily[] = {
+    "FPTool", "FPChainsaw", "FPMelee", "FPSpear", "FPBuildingHammer", "FPTorch"};
+static uint64_t s_melee_klass = 0;
+static bool     s_melee_klass_ok = false;
+static char     s_melee_klass_name[24] = {};
+
+static bool read_local_melee_reach(MeleeReach& out) {
+    out = MeleeReach{};
+    if (g_pid <= 0 || !g_il2cpp_base) return false;
+    const uint64_t local = resolve_local_player();
+    if (!local) return false;
+    const uint64_t fp_manager = rd_ptr(local + PLAYER_FP_MANAGER);
+    if (!valid_obj(fp_manager)) return false;
+    uint64_t weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_WEAPON);
+    if (!valid_obj(weapon) || rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) != local) {
+        weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_OBJECT);
+        if (!valid_obj(weapon) || rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) != local)
+            return false;
+    }
+    const uint64_t klass = rd_ptr(weapon);
+    if (!valid_obj(klass)) return false;
+    if (klass != s_melee_klass) {  // имя класса читаем один раз на предмет в руках
+        s_melee_klass = klass;
+        s_melee_klass_ok = false;
+        s_melee_klass_name[0] = '\0';
+        const std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME));
+        if (!name.empty() && name.size() < sizeof(s_melee_klass_name)) {
+            for (const char* family : kMeleeFamily) {
+                if (name == family) { s_melee_klass_ok = true; break; }
+            }
+            memcpy(s_melee_klass_name, name.c_str(), name.size() + 1);
+        }
+    }
+    if (!s_melee_klass_ok) return false;
+
+    float reach = 0.0F, radius = 0.0F;
+    if (!rd_exact(weapon + FPMELEE_MAX_REACH, reach) ||
+        !rd_exact(weapon + FPMELEE_HIT_RADIUS, radius)) return false;
+    if (!std::isfinite(reach) || !std::isfinite(radius)) return false;
+    // Правдоподобие: настоящие орудия — единицы метров. Вне диапазона значит
+    // либо класс совпал случайно, либо чтение разъехалось после апдейта игры.
+    if (reach < 0.2F || reach > 20.0F || radius < 0.0F || radius > 5.0F) return false;
+
+    out.valid = true;
+    out.max_reach = reach;
+    out.hit_radius = radius;
+    out.total = reach + radius;
+    strncpy(out.tool, s_melee_klass_name, sizeof(out.tool) - 1);
+
+    // Длина луча, которым игра ищет точку взаимодействия (префаб
+    // RaycastManager, default 1.5). m_AimRayLength (0x3C) и радиус сферы (0x40)
+    // при доставании орудия перезаписываются его же m_MaxReach/hitRadius
+    // (FPMelee.On_Draw -> RaycastManager.ZIj), поэтому интересен именно 0x38.
+    const uint64_t rm = rd_ptr(weapon + FPOBJECT_RAYCAST_MANAGER);
+    if (valid_obj(rm) && rd_ptr(rm + RAYCASTMAN_PLAYER) == local) {
+        float ray = 0.0F;
+        if (rd_exact(rm + RAYCASTMAN_RAY_LENGTH, ray) && std::isfinite(ray) &&
+            ray > 0.0F && ray < 500.0F) out.ray_length = ray;
+    }
+    return true;
+}
+
 float esp_camera_fov_deg() { return g_cam_fov_deg; }
 
 // Bit 0: camera pose known. Bit 1: pose was derived from the view matrix
@@ -5639,8 +5726,14 @@ bool esp_farm_get_target(FarmTarget& out) {
 
     const float adx = aim.x - g_frame_local_pos.x;
     const float adz = aim.z - g_frame_local_pos.z;
-    const float ady = aim.y - g_frame_local_pos.y;
     const float aim_dist = sqrtf(adx * adx + adz * adz);
+    // 3D-дистанция от ТОЙ ЖЕ точки, от которой считаем углы (глаз / ось
+    // выстрела): именно её игра сравнивает с m_MaxReach + hitRadius в
+    // FPMelee.ZkX, решая засчитать удар или сыграть промах. От
+    // g_frame_local_pos (корень игрока) её мерить нельзя: глаз выше примерно
+    // на 1.5 м, а вся дальность удара — пара метров.
+    const float edx = aim.x - origin.x, edy = aim.y - origin.y, edz = aim.z - origin.z;
+    const float aim_3d = sqrtf(edx * edx + edy * edy + edz * edz);
 
     g_farm_idle_reason = 0;
     out.valid = true;
@@ -5650,7 +5743,15 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.yaw = yaw;
     out.pitch = pitch;
     out.aim_dist = std::isfinite(aim_dist) ? aim_dist : best_dist;
-    out.aim_3d = sqrtf(adx * adx + ady * ady + adz * adz);
+    out.aim_3d = std::isfinite(aim_3d) ? aim_3d : out.aim_dist;
+    // Дальность удара текущего орудия — из игры (FPMelee.m_MaxReach +
+    // hitRadius), а не «на глаз». Ноль значит «в руках не ближнее орудие или
+    // чтение не удалось» — тогда контроллер остаётся на эмпирических порогах.
+    MeleeReach reach{};
+    if (read_local_melee_reach(reach)) {
+        out.melee_reach = reach.total;
+        out.melee_ray = reach.ray_length;
+    }
     out.at_spot = at_spot;
     out.has_spot = has_spot;
     out.spot_front = spot_front;

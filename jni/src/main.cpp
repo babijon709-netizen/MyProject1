@@ -181,6 +181,7 @@ extern int  g_farmPhase;
 extern int  g_farmNodes;      // сколько узлов нашёл последний скан реестра
 extern int  g_farmReason;     // причина простоя (см. esp_farm_debug)
 extern float g_farmTgtDist;   // дистанция до точки прицела, м
+extern float g_farmReach;     // живая дальность удара орудия, м (0 = не прочиталась)
 extern int  g_farmTgtKind;    // 0 дерево, 1 камень, 2 металл, 3 сера
 extern int  g_farmSpot;       // 0 крестика нет, иначе его источник (1 руда, 2/3 дерево)
 extern bool g_farmPaused;     // бот на паузе (открыто меню / камеру ведёт аимбот)
@@ -2287,7 +2288,14 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             if (g_farmActive) {
                 const char* kn[4] = {XS("Дерево"), XS("Камень"), XS("Металл"), XS("Сера")};
                 const char* kname = (g_farmTgtKind >= 0 && g_farmTgtKind < 4) ? kn[g_farmTgtKind] : XS("Узел");
-                snprintf(tgtTxt, sizeof(tgtTxt), XS("%s · %.1f м"), kname, g_farmTgtDist);
+                // «удар до X.XX» — живая дальность орудия из памяти игры
+                // (FPMelee.m_MaxReach + hitRadius): с ней бот решает, достанет ли.
+                if (g_farmReach > 0.f)
+                    snprintf(tgtTxt, sizeof(tgtTxt), XS("%s · %.1f м · удар до %.2f"),
+                             kname, g_farmTgtDist, g_farmReach);
+                else
+                    snprintf(tgtTxt, sizeof(tgtTxt), XS("%s · %.1f м · удар ?"),
+                             kname, g_farmTgtDist);
                 if (g_farmSpot == 1)      snprintf(spotTxt, sizeof(spotTxt), XS("есть · руда · %d"), g_farmStreak);
                 else if (g_farmSpot == 2) snprintf(spotTxt, sizeof(spotTxt), XS("есть · кора · %d"), g_farmStreak);
                 else if (g_farmSpot == 3) snprintf(spotTxt, sizeof(spotTxt), XS("есть · декаль · %d"), g_farmStreak);
@@ -3641,6 +3649,7 @@ int  g_farmPhase = 0;        // 0 простой, 1 поворот, 2 подхо
 int  g_farmNodes = 0;        // узлов насчитал последний скан реестра
 int  g_farmReason = 1;       // причина простоя из esp_farm_debug()
 float g_farmTgtDist = 0.f;   // метры до точки прицела
+float g_farmReach = 0.f;     // FPMelee.m_MaxReach + hitRadius орудия в руках, м
 int  g_farmTgtKind = 0;      // ресурс текущей цели
 int  g_farmSpot = 0;         // 0 — крестика нет, иначе его источник (1 руда, 2/3 дерево)
 bool g_farmPaused = false;   // цель видна, но ввод остановлен (открыто меню / работает аимбот)
@@ -3653,10 +3662,11 @@ int  g_farmCalib = 0;
 
 namespace {
 
-// Дальность удара: горизонтальные метры до ТОЧКИ ПРИЦЕЛА. Подбиралось на
-// устройстве: топор дотягивается до коры примерно с 0.8 м, а по камню удар
-// проходит и с полутора — пивот камня часто зарыт, и крестик стоит на склоне
-// в стороне от него. *Hold — гистерезис: подошли один раз, не дёргаемся.
+// Дальность удара, если орудие в руках не опознано / значение не прочиталось.
+// Горизонтальные метры до ТОЧКИ ПРИЦЕЛА; подбиралось на устройстве: топор
+// дотягивается до коры примерно с 0.8 м, а по камню удар проходит и с полутора —
+// пивот камня часто зарыт, и крестик стоит на склоне в стороне от него.
+// *Hold — гистерезис: подошли один раз, не дёргаемся.
 constexpr float kReachTreeSpot = 0.80f;
 constexpr float kReachOreSpot  = 1.55f;
 constexpr float kReachTreeHold = 1.00f;
@@ -3665,6 +3675,23 @@ constexpr float kReachOreHold  = 1.80f;
 // чтобы первый удар создал X.
 constexpr float kReachTreeBody = 2.60f;
 constexpr float kReachOreBody  = 2.40f;
+
+// Живая дальность орудия (tgt.melee_reach = FPMelee.m_MaxReach + hitRadius,
+// читается из памяти). Игра засчитывает удар строго внутри этой дистанции,
+// меряя 3D-метры ОТ ГЛАЗА до точки попадания (FPMelee.ZkX:
+// `if (RaycastHit.distance < m_MaxReach + hitRadius) On_Hit else On_Woosh`),
+// поэтому с ней работаем в aim_3d, а не по горизонтали. Запас kReachLiveTight —
+// на подачу вперёд за время тапа; kReachLiveHold держит узел в работе до самого
+// порога, но не за ним (иначе удары свистят впустую).
+constexpr float kReachLiveTight = 0.90f;
+constexpr float kReachLiveHold  = 0.98f;
+// По корпусу (крестика ещё нет) точка прицела стоит в глубине узла — пивот
+// дерева в центре ствола, у камня бывает зарыт, — поэтому к дальности удара
+// добавляем запас на радиус узла: первому удару достаточно создать X.
+constexpr float kReachBodyAllowance = 1.20f;
+// Меньше этого живая дальность недостоверна (в конструкторе FPMelee заглушки
+// 0.5/0.1 — префаб их перезаписывает, но и префаб может не успеть примениться).
+constexpr float kReachLiveMin = 0.70f;
 
 // Допуск наведения, градусы. По крестику жёстко: 2° промаха на 1.5 м — это
 // 5 см в стороне, а засчитываемая зона у дерева всего 15 см.
@@ -3813,6 +3840,7 @@ static void UpdateFarm(float dt) {
     g_farmActive = true;
     g_farmPaused = !driving;
     g_farmTgtDist = tgt.aim_dist;
+    g_farmReach = tgt.melee_reach;
     g_farmTgtKind = tgt.kind;
     g_farmSpot    = tgt.has_spot ? tgt.spot_source : (tgt.ext_found ? 0 : -1);
     g_farmStreak  = tgt.streak;
@@ -3918,11 +3946,24 @@ static void UpdateFarm(float dt) {
     // фаза удара начинается раньше — узел большой, — НО стик продолжает
     // поджимать вперёд вплоть до meleeTight: иначе топор до коры не дотянется,
     // первый удар не пройдёт и крестик так и не появится.
-    const float meleeTight = isTree ? kReachTreeSpot : kReachOreSpot;
-    const float meleeHold  = isTree ? kReachTreeHold : kReachOreHold;
-    const float reachNow = atSpot ? (wasMining ? meleeHold : meleeTight)
-                                  : (isTree ? kReachTreeBody : kReachOreBody);
-    const bool inReach = tgt.aim_dist <= reachNow;
+    // Живая дальность орудия (из памяти игры) важнее эмпирических порогов:
+    // это ровно то число, с которым игра сравнивает дистанцию удара.
+    const bool liveReach = (tgt.melee_reach >= kReachLiveMin);
+    // Меряем в той же метрике, в которой задан порог: с живой дальностью —
+    // 3D-метры от глаза (как считает игра), без неё — прежние горизонтальные.
+    const float distNow = liveReach ? tgt.aim_3d : tgt.aim_dist;
+    float meleeTight, meleeHold, meleeBody;
+    if (liveReach) {
+        meleeTight = tgt.melee_reach * kReachLiveTight;
+        meleeHold  = tgt.melee_reach * kReachLiveHold;
+        meleeBody  = meleeTight + kReachBodyAllowance;
+    } else {
+        meleeTight = isTree ? kReachTreeSpot : kReachOreSpot;
+        meleeHold  = isTree ? kReachTreeHold : kReachOreHold;
+        meleeBody  = isTree ? kReachTreeBody : kReachOreBody;
+    }
+    const float reachNow = atSpot ? (wasMining ? meleeHold : meleeTight) : meleeBody;
+    const bool inReach = distNow <= reachNow;
 
     // Доводка камеры с гистерезисом: свайп начинается, когда ошибка явно
     // снаружи, и заканчивается глубоко внутри — иначе камера дёргается
@@ -4000,11 +4041,11 @@ static void UpdateFarm(float dt) {
         // которое выглядело как топтание на месте).
         const float pressAt = s_moveDown
             ? meleeTight
-            : meleeTight + (isTree ? 0.08f : 0.25f);
+            : meleeTight + (liveReach ? 0.12f : (isTree ? 0.08f : 0.25f));
         bool wantWalk =
             (phase == 2 && tgt.walk_dist > kArriveWalk) ||
             (phase == 1 && fabsf(tgt.walk_yaw) < kCreepYaw && tgt.walk_dist > kCreepDist) ||
-            (phase == 3 && tgt.aim_dist > pressAt);
+            (phase == 3 && distNow > pressAt);
         if (s_evadeTime > 0.f) wantWalk = true;  // манёвр ведёт стик сам
 
         // Гистерезис отпускания: фаза мигает на кадр-другой вокруг порогов

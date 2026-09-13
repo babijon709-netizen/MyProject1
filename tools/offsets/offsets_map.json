@@ -1157,5 +1157,77 @@
   "kind": "runtime",
   "offset": 227999744,
   "note": "конец окна скана TOD_Sky = BEGIN + 0xA0000 (было 0xD840000)"
+ },
+ "FPOBJECT_RAYCAST_MANAGER": {
+  "kind": "field",
+  "class": "FPObject",
+  "struct": "Oxide_FPObject_Fields",
+  "field": "LUw",
+  "type": "Oxide_RaycastManager_o*",
+  "offset": 144,
+  "note": "имя поля обфусцировано (LUw), тип — якорь; компонент лучей, общий на орудие"
+ },
+ "FPMELEE_MAX_REACH": {
+  "kind": "field",
+  "class": "FPMelee",
+  "struct": "Oxide_FPMelee_Fields",
+  "field": "m_MaxReach",
+  "type": "float",
+  "offset": 296,
+  "note": "дальность удара: FPMelee.ZkX бьёт, если RaycastHit.distance < m_MaxReach + hitRadius; значение из префаба, в конструкторе заглушка 0.5"
+ },
+ "FPMELEE_HIT_RADIUS": {
+  "kind": "field",
+  "class": "FPMelee",
+  "struct": "Oxide_FPMelee_Fields",
+  "field": "hitRadius",
+  "type": "float",
+  "offset": 300,
+  "note": "радиус сферы запасного каста и добавка к дальности удара; заглушка в конструкторе 0.1"
+ },
+ "RAYCASTMAN_PLAYER": {
+  "kind": "field",
+  "class": "RaycastManager",
+  "struct": "Oxide_RaycastManager_Fields",
+  "field": "player",
+  "type": "Oxide_PlayerManager_o*",
+  "offset": 32,
+  "note": "back-ref на PlayerManager — проверка, что прочитан свой компонент"
+ },
+ "RAYCASTMAN_RAY_LENGTH": {
+  "kind": "field",
+  "class": "RaycastManager",
+  "struct": "Oxide_RaycastManager_Fields",
+  "field": "m_RayLength",
+  "type": "float",
+  "offset": 56,
+  "note": "длина основного луча -> активность RaycastData (0x160); default 1.5 из конструктора"
+ },
+ "RAYCASTMAN_AIM_RAY_LENGTH": {
+  "kind": "field",
+  "class": "RaycastManager",
+  "struct": "Oxide_RaycastManager_Fields",
+  "field": "m_AimRayLength",
+  "type": "float",
+  "offset": 60,
+  "note": "длина SphereCast -> AimRaycast (0x168); FPMelee.On_Draw кладёт сюда m_MaxReach"
+ },
+ "RAYCASTMAN_SPHERE_RADIUS": {
+  "kind": "field",
+  "class": "RaycastManager",
+  "struct": "Oxide_RaycastManager_Fields",
+  "field": "LtS",
+  "type": "float",
+  "offset": 64,
+  "note": "радиус сферы; FPMelee.On_Draw кладёт сюда hitRadius (имя поля обфусцировано)"
+ },
+ "RAYCASTMAN_TOO_CLOSE": {
+  "kind": "field",
+  "class": "RaycastManager",
+  "struct": "Oxide_RaycastManager_Fields",
+  "field": "m_TooCloseThreeshold",
+  "type": "float",
+  "offset": 68,
+  "note": "порог «слишком близко» для активности IsCloseToAnObject; default 1.0"
  }
 }
