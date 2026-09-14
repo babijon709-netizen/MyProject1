@@ -3777,6 +3777,20 @@ bool esp_camera_angles(float& yaw_deg, float& pitch_deg) {
     return true;
 }
 
+bool esp_local_eye_position(float& x, float& y, float& z) {
+    // Приоритет — точка выстрела (KCC LookDirection): она не качается от sway/
+    // отдачи, поэтому производная по ней и есть реальное движение персонажа.
+    if (g_aim_ref_valid && vec3_is_finite(g_aim_ref_origin)) {
+        x = g_aim_ref_origin.x; y = g_aim_ref_origin.y; z = g_aim_ref_origin.z;
+        return true;
+    }
+    if (g_cam_pose_valid && vec3_is_finite(g_cam_pos)) {
+        x = g_cam_pos.x; y = g_cam_pos.y; z = g_cam_pos.z;
+        return true;
+    }
+    return false;
+}
+
 
 // Pipeline status for the on-screen debug line:
 //   R  = ragdoll build stage (0 ok; 2 no KCC, 3 no anim, 4 anim backref,

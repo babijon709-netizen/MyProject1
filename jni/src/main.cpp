@@ -18,6 +18,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <cstdarg>
 #include <csignal>
 #include <thread>
 #include <mutex>
@@ -193,6 +194,10 @@ extern int  g_farmToolHave;   // что умеет орудие в руках (�
 extern int  g_farmToolNeed;   // что нужно ближайшим узлам (флаги ToolPurpose)
 extern int  g_farmXp;         // опыт за текущий узел
 extern bool g_farmBlocked;    // узел перекрыт
+
+// Путь к текущему файлу лога автофарма (пустая строка, пока лог не открыт).
+// Объявлен здесь, потому что меню в файле идёт выше namespace farmlog.
+const char* FarmLogPath();
 
 namespace ui { namespace bar {
     inline float g_game_alpha = 1.f;
@@ -588,6 +593,11 @@ struct AppState {
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
     // Автофарм: главный выключатель + какие ресурсы добывать.
     bool  farm_on = false;
+    // Лог автофарма в «Загрузки» (см. namespace farmlog). В CfgBlob для него
+    // места нет — байтовый расклад конфига версии 4 заморожен, а ради
+    // отладочного флага ломать совместимость сохранённых конфигов не за что:
+    // флаг живёт только до перезапуска.
+    bool  farm_log = true;
     bool  farm_wood = true, farm_stone = false, farm_metal = false, farm_sulfur = false;
     // Калибровка зон бота (доли экрана 0..1; -1 = не задано, берём дефолт).
     // Джойстик движения и кнопка огня/атаки — у всех раскладки разные.
@@ -615,6 +625,7 @@ struct AppState {
     float a_always_day = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
+    float a_farm_log = 0;
     float a_xray_on = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray;
@@ -2485,6 +2496,14 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             }
         }
 
+        // Отладка: лог каждого кадра бота. Когда бот «дёргается» или «идёт не
+        // туда», по строкам видно, какое именно звено врёт: команда стику
+        // против реального движения персонажа, доводка камеры против остатка
+        // ошибки, ритм тапов против падающего здоровья узла.
+        FgSHdr(XS("Отладка"));
+        FgCardBg(rH * 1);
+        FgToggleRow(XS("Лог фарма"), &g_state.farm_log, g_state.a_farm_log, true);
+
         // Подсказка, как этим пользоваться.
         {
             curY += 14.f;
@@ -2493,6 +2512,17 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             fg->AddText(fn, fs * 0.92f, {cX + inset + 4.f, curY}, C::UA(C::Dim(), alpha), h1);
             fg->AddText(fn, fs * 0.92f, {cX + inset + 4.f, curY + fs}, C::UA(C::Dim(), alpha), h2);
             curY += fs * 2.f + 6.f;
+            if (g_state.farm_log) {
+                // Куда именно пишется лог: обычно Загрузки, но если доступ к
+                // общему хранилищу закрыт, файл уходит в каталог конфигов —
+                // путь показываем настоящий, чтобы его не искали наугад.
+                char lg[256];
+                const char* lp = FarmLogPath();
+                if (lp && lp[0]) snprintf(lg, sizeof(lg), XS("Лог: %s"), lp);
+                else             snprintf(lg, sizeof(lg), "%s", XS("Лог: Загрузки/farm_debug.log"));
+                fg->AddText(fn, fs * 0.92f, {cX + inset + 4.f, curY}, C::UA(C::Dim(), alpha), lg);
+                curY += fs + 6.f;
+            }
         }
 
     } else if (secId == 2) {
@@ -3809,7 +3839,441 @@ constexpr float kCamGainProbe  = 0.25f;  // град/px, пока коэффиц
 
 } // namespace
 
+// ================================ лог автофарма ===============================
+// На глаз от бота видно только «дёргается» или «пошёл не туда», а чинить надо
+// конкретное звено: подбор цели, доводку камеры, стик или тапы. Поэтому каждый
+// кадр работы бота ложится одной строкой с ровными столбцами (тот же формат,
+// которым раньше писался xvcen_aim_debug.log), а каждое решение контроллера —
+// отдельной строкой EV с человеческим текстом.
+//
+// Куда: Загрузки/farm_debug.log. Основной путь /storage/emulated/0/Download/,
+// запасные — /sdcard/Download/ и каталог конфигов: если в Загрузки писать не
+// дали (сборки без доступа к общему хранилищу), лог всё равно появится, а
+// выбранный каталог написан в шапке файла.
+//
+// Сколько: строка ~245 байт, на 60 к/с это ~15 КБ/с, поэтому файл крутится —
+// набрав 8 МБ он закрывается и уезжает в farm_debug.1.log, так что под рукой
+// всегда последние ~9 минут работы бота. Пишем только пока автофарм включён;
+// кадр без цели (простой) пишется 4 раза в секунду, а не 60.
+//
+// Как читать: сначала ex (почему кадр вообще ничего не делал), потом
+// ww/slen/sdir против mv_dps/mv_dir (команда стику против реального движения),
+// потом yaw/pitch против ldx/ldy (доводка камеры), потом tp/tapms против
+// hp/frac/strk (доходят ли удары). Строки EV объясняют переключения сами.
+namespace farmlog {
+
+constexpr size_t kMaxBytes = 8u * 1024u * 1024u; // ротация файла
+constexpr float  kIdleHz   = 4.0f;    // строки простоя: 4 в секунду
+constexpr float  kFlushSec = 0.15f;   // как часто буфер уходит на диск
+constexpr float  kNA       = -99.0f;  // «не читается» в дробных колонках
+constexpr int    kNAi      = -9;      // то же в целых
+
+// Куда UpdateFarm вышел в этом кадре. Первая колонка, в которую смотришь: если
+// ex != 0, движения в этом кадре не было вовсе, и причину надо искать не в
+// стике, а в том, что кадр оборвали.
+enum Exit : int {
+    EX_FULL     = 0,  // кадр отработан целиком (пальцы двигались или ждали такта)
+    EX_OFF      = 1,  // фарм выключен, маска ресурсов пуста или нет прикрепления
+    EX_NOSCREEN = 2,  // размер экрана не прочитан
+    EX_NOTARGET = 3,  // цели нет — почему, в колонке reason
+    EX_LOSTHOLD = 4,  // цель мигнула на рескане: держим узел, ввод заморожен
+    EX_PAUSED   = 5,  // меню / камеру ведёт аимбот / калибровка зон
+    EX_SETTLE   = 6,  // пауза после смены узла (пальцы подняты)
+    EX_DEPLETED = 7,  // узел добыт, ушёл в чёрный список
+};
+
+// Всё, что знает один кадр. Значения по умолчанию — «не читается»: строка
+// пишется даже с оборванного кадра, и по -99 видно, до чего код не дошёл.
+struct Row {
+    float t = 0.f, fps = 0.f, dtms = 0.f;
+    int   ph = 0;                 // фаза: 1 доворот, 2 подход, 3 удар
+    int   ex = EX_FULL;
+    unsigned node = 0;            // короткий хеш NetworkIdentity узла
+    int   kind = kNAi;            // 0 дерево, 1 камень, 2 металл, 3 сера
+    float dist = kNA, aim3d = kNA, walkd = kNA;
+    float wyaw = kNA, yaw = kNA, pitch = kNA;
+    int   at = 0;                 // точка прицела — крестик (1) или корпус (0)
+    int   spot = kNAi;            // -1 экстеншен не найден, 0 нет, 1 руда, 2 кора, 3 декаль
+    float life = kNA;             // сколько крестику осталось жить, с
+    int   strk = 0;               // hitstreakIndex: подряд попаданий в X
+    float hp = kNA, frac = kNA;   // здоровье узла в % и остаток ресурса
+    float reach = kNA, per = kNA; // дальность удара орудия и его ритм, с
+    float ray = kNA;              // дистанция луча игры до первой преграды
+    int   blk = 0;                // 1 = узел перекрыт
+    int   toolH = kNAi, toolN = 0;// флаги ToolPurpose: орудие в руке / нужно узлу
+    int   ww = 0;                 // стик: 0 не нужен, 1 идём, 2 держим гистерезисом
+    float slen = 0.f, sdir = 0.f; // отклонение стика от центра: px и градусы (0 вперёд, + вправо)
+    int   mv = 0;                 // палец движения нажат
+    float mvDps = kNA, mvDir = kNA; // куда и как быстро персонаж пошёл НА САМОМ ДЕЛЕ
+    float ldx = 0.f, ldy = 0.f;   // сколько px послали камерным пальцем в этом кадре
+    int   lk = 0, tp = 0;         // пальцы камеры и удара нажаты
+    int   tapms = 0;              // мс до следующего переключения пальца удара
+    float gain = 0.f;             // выученный коэффициент камеры, град/px
+    float evd = 0.f;              // осталось секунд манёвра обхода
+    int   evn = 0;                // номер попытки обхода
+    float stk = 0.f, mine = 0.f, set = 0.f, blkt = 0.f; // таймеры контроллера
+    int   reason = 0;             // почему нет цели (esp_farm_debug)
+
+    // Не печатаются: нужны, чтобы посчитать печатное.
+    float camYaw = 0.f;                 // абсолютный yaw камеры, град
+    float stickCx = 0.f, stickCy = 0.f;  // центр виртуального стика, px
+};
+static Row g_row;                 // заполняется по ходу UpdateFarm
+
+static FILE* g_f       = nullptr;
+static char  g_buf[16 * 1024];    // свой буфер: меньше системных вызовов на кадр
+static char  g_path[192]  = {};
+static char  g_prev[192]  = {};
+static bool  g_pathReady  = false;
+static bool  g_pathFailed = false; // писать некуда — в этом запуске больше не пробуем
+static size_t g_bytes     = 0;
+static double g_t0        = 0;    // монотонное время старта файла
+static float  g_sinceFlush = 0.f;
+static float  g_idleAcc   = 0.f;
+static float  g_fpsAvg    = 0.f;
+static bool   g_haveEye   = false;
+static float  g_eyeX = 0.f, g_eyeY = 0.f, g_eyeZ = 0.f;
+static double g_eyeT      = 0;
+
+// Переходы, которые важно видеть отдельной строкой: их ищем в логе первыми.
+static unsigned long long g_prevNode = 0;
+static int  g_prevReason = -999;
+static int  g_prevSpot   = -999;
+static int  g_prevAt     = -999;
+static int  g_prevPaused = 0;    // 0, а не «не было»: иначе первый кадр пишет «пауза снята»
+static bool g_wasOff     = false;
+
+// Имена и пути держим обфусцированными, как каталог конфигов: в бинарнике не
+// должно быть лишних следов. Содержимое лога — обычный текст: оно всё равно
+// ложится на диск открыто, прятать его в исходнике смысла нет.
+static const char* nameLog()  noexcept { static constexpr auto s = xp::_mk("farm_debug.log");   return s.d(); }
+static const char* namePrev() noexcept { static constexpr auto s = xp::_mk("farm_debug.1.log"); return s.d(); }
+static const char* dirA()     noexcept { static constexpr auto s = xp::_mk("/storage/emulated/0/Download/"); return s.d(); }
+static const char* dirB()     noexcept { static constexpr auto s = xp::_mk("/sdcard/Download/"); return s.d(); }
+
+static double tNow() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
+}
+static float tSec() {
+    const double n = tNow();
+    if (g_t0 <= 0.0) g_t0 = n;   // первый кадр задаёт точку отсчёта файла
+    return (float)(n - g_t0);
+}
+
+// Ровные столбцы: формат строки и шапка подобраны друг под друга, менять их
+// надо вместе (ширина каждой колонки в шапке равна ширине в формате).
+static const char* kRowFmt =
+    "%7.2f %5.1f %5.1f %2d %2d %6x %1d %6.2f %6.2f %6.2f %6.1f %6.1f %6.1f %1d %4d %5.1f %4d "
+    "%6.1f %6.3f %5.2f %5.2f %6.2f %3d %2d %2d %2d %5.1f %5.1f %2d %6.2f %6.1f %6.1f %6.1f "
+    "%2d %2d %5d %6.3f %5.2f %3d %5.2f %6.2f %5.2f %5.2f %6d";
+static const char* kColHdr =
+    "    t_s   fps dt_ms ph ex   node k   dist  aim3d  walkd   wyaw    yaw  pitch at spot  "
+    "life strk     hp   frac reach   per    ray blk tH tN ww  slen  sdir mv mv_dps mv_dir    "
+    "ldx    ldy lk tp tapms   gain   evd evn   stk   mine   set  blkt reason";
+
+static void writeHeader() {
+    if (!g_f) return;
+    char stamp[32] = {};
+    time_t tt = time(nullptr);
+    struct tm tmv{};
+    localtime_r(&tt, &tmv);
+    strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tmv);
+    const float sw = (float)displayInfo.width, sh = (float)displayInfo.height;
+    // Зоны бота печатаем в шапке: половина «ошибок движения» — это
+    // некалиброванный джойстик (стик жмётся мимо центра и персонаж идёт не
+    // туда), и в самих строках это не видно — там только посланные пиксели.
+    fprintf(g_f,
+        "# зоны бота: джойстик %.1f%% x %.1f%% (%s), огонь %.1f%% x %.1f%% (%s), искать до %.0f м, добыча:%s%s%s%s\n",
+        (double)(g_state.farm_joy_x >= 0.f ? g_state.farm_joy_x * 100.f : 16.5f),
+        (double)(g_state.farm_joy_y >= 0.f ? g_state.farm_joy_y * 100.f : 70.0f),
+        (g_state.farm_joy_x >= 0.f) ? "калибровано" : "по умолчанию",
+        (double)(g_state.farm_fire_x >= 0.f ? g_state.farm_fire_x * 100.f : 88.0f),
+        (double)(g_state.farm_fire_y >= 0.f ? g_state.farm_fire_y * 100.f : 66.0f),
+        (g_state.farm_fire_x >= 0.f) ? "калибровано" : "по умолчанию",
+        (double)g_state.farm_range,
+        g_state.farm_wood ? " дерево" : "", g_state.farm_stone ? " камень" : "",
+        g_state.farm_metal ? " металл" : "", g_state.farm_sulfur ? " сера" : "");
+    fprintf(g_f,
+        "# автофарм: одна строка на кадр, пока бот включён; строки EV — решения контроллера\n"
+        "# старт %s  экран %.0fx%.0f  файл %s  -99/-9 = не читается\n"
+        "# t_s/fps/dt_ms — секунды от старта файла, сглаженный fps оверлея, длительность кадра\n"
+        "# ph — фаза: 1 доворот камеры, 2 подход, 3 удар; ex — куда кадр вышел:\n"
+        "#   0 отработал, 1 фарм выключен, 2 нет экрана, 3 нет цели, 4 цель мигнула (hold),\n"
+        "#   5 пауза (меню/аимбот/калибровка), 6 пауза смены узла, 7 узел добыт\n"
+        "# node — короткий хеш NetworkIdentity узла: по нему видны смены цели и возвраты\n"
+        "# k — ресурс: 0 дерево, 1 камень, 2 металл, 3 сера\n"
+        "# dist/aim3d — метры до точки прицела по горизонтали и 3D от глаза; удар игра\n"
+        "#   засчитывает, когда aim3d < reach. walkd/wyaw — до точки подхода и угол к ней\n"
+        "#   (по ним работает стик). yaw/pitch — остаток ошибки камеры, градусы («хвост»)\n"
+        "# at — 1 точка прицела на крестике, 0 на корпусе; spot — -1 экстеншен не найден,\n"
+        "#   0 крестика нет, 1 руда, 2 кора, 3 декаль; life — сколько ему жить, с\n"
+        "#   (-1 = крестика нет); strk — сколько подряд игра засчитала в X\n"
+        "# hp/frac — здоровье узла в %% и остаток ресурса 0..1 (сигналы прогресса watchdog'а)\n"
+        "# reach/per — дальность удара орудия и его ритм (FPMelee/FPTool из памяти игры)\n"
+        "# ray/blk — куда упёрся луч игры (RaycastManager -> GKo.RaycastHit.distance) и 1,\n"
+        "#   если он заметно ближе точки прицела, то есть узел перекрыт\n"
+        "# tH/tN — флаги ToolPurpose орудия в руке и требуемые узлом (1 дерево, 2 камень,\n"
+        "#   4 животные): tN не входит в tH — узел нечем взять\n"
+        "# ww — стик: 0 не нужен, 1 идём, 2 держим гистерезисом отпускания; slen/sdir —\n"
+        "#   отклонение от центра в px и в градусах (0 вперёд, + вправо); mv — палец нажат\n"
+        "# mv_dps/mv_dir — куда и как быстро персонаж пошёл НА САМОМ ДЕЛЕ (производная\n"
+        "#   позиции глаза; mv_dir относительно камеры: 0 вперёд, + вправо). sdir и mv_dir\n"
+        "#   расходятся — команда уходит не туда; mv_dps ~0 при slen > 0 — упёрлись или зона\n"
+        "#   джойстика выставлена мимо\n"
+        "# ldx/ldy — сколько px послали камерным пальцем за кадр; lk — палец нажат;\n"
+        "#   gain — выученный град/px (по нему px переводятся в градусы и обратно)\n"
+        "# tp — палец удара нажат; tapms — мс до следующего переключения (ритм тапов)\n"
+        "# evd/evn — манёвр обхода препятствия: осталось секунд / номер попытки;\n"
+        "#   stk — таймер застревания; mine — сколько бьём этот узел; set — пауза смены\n"
+        "#   цели; blkt — сколько подряд узел перекрыт\n"
+        "# reason — почему нет цели: 0 ок, 1 выключен, 2 кадр не опубликован, 3 нет узлов,\n"
+        "#   4 все вне радиуса или в чёрном списке, 5 поза камеры не читается, 6 нечем взять\n",
+        stamp, (double)sw, (double)sh, g_path);
+    fprintf(g_f, "%s\n", kColHdr);
+}
+
+// Открыть файл (или дооткрыть после ротации). false — писать некуда.
+static bool ensureOpen() {
+    if (g_f) return true;
+    if (g_pathFailed) return false;
+    if (!g_pathReady) {
+        const char* dirs[3];
+        dirs[0] = dirA(); dirs[1] = dirB(); dirs[2] = kCfgDir;
+        for (int i = 0; i < 3; ++i) {
+            mkdir(dirs[i], 0777);   // Загрузки есть всегда; каталог конфигов — на всякий
+            char probe[192];
+            snprintf(probe, sizeof(probe), "%s%s", dirs[i], nameLog());
+            FILE* f = fopen(probe, "ab");
+            if (!f) continue;
+            fclose(f);
+            snprintf(g_path, sizeof(g_path), "%s", probe);
+            snprintf(g_prev, sizeof(g_prev), "%s%s", dirs[i], namePrev());
+            g_pathReady = true;
+            break;
+        }
+        if (!g_pathReady) { g_pathFailed = true; return false; }
+    }
+    struct stat st{};
+    size_t have = (stat(g_path, &st) == 0) ? (size_t)st.st_size : 0;
+    if (have > kMaxBytes) {           // прошлый сеанс уже налил больше нормы
+        remove(g_prev);
+        rename(g_path, g_prev);
+        have = 0;
+    }
+    g_f = fopen(g_path, "ab");
+    if (!g_f) { g_pathFailed = true; return false; }
+    setvbuf(g_f, g_buf, _IOFBF, sizeof(g_buf));
+    g_t0 = tNow();
+    g_haveEye = false;
+    g_idleAcc = 0.f;
+    g_sinceFlush = 0.f;
+    writeHeader();
+    g_bytes = (size_t)ftell(g_f);
+    fflush(g_f);
+    return true;
+}
+
+static void closeFile() {
+    if (!g_f) return;
+    fflush(g_f);
+    fclose(g_f);
+    g_f = nullptr;
+}
+
+// keepOff — не трогать флаг «фарм выключен»: он и есть память об этой ветке,
+// иначе строка «фарм остановлен» писалась бы каждый кадр.
+static void resetTransitions(bool keepOff = false) {
+    if (!keepOff) g_wasOff = false;
+    g_prevNode = 0;
+    g_prevReason = -999;
+    g_prevSpot = -999;
+    g_prevAt = -999;
+    g_prevPaused = 0;
+}
+
+static void rotate() {
+    if (!g_f) return;
+    fprintf(g_f, "EV %7.2f ротация: файл полный, прежний кусок уезжает в %s\n",
+            (double)tSec(), g_prev);
+    fflush(g_f);
+    fclose(g_f);
+    g_f = nullptr;
+    remove(g_prev);
+    rename(g_path, g_prev);           // кусок истории остаётся рядом
+    g_bytes = 0;
+    ensureOpen();                     // новый файл с новой шапкой
+}
+
+// Строка решения. Пишется сразу с fflush: события редкие, а теряются они ровно
+// тогда, когда бот сделал что-то не то и приложение вот-вот закроют.
+static void event(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+static void event(const char* fmt, ...) {
+    if (!g_state.farm_log) return;
+    if (!ensureOpen()) return;
+    fprintf(g_f, "EV %7.2f ", (double)tSec());
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_f, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_f);
+    g_bytes = (size_t)ftell(g_f);
+    fflush(g_f);
+    g_sinceFlush = 0.f;
+    if (g_bytes > kMaxBytes) rotate();
+}
+
+// Путь к текущему файлу лога — для подсказки в меню (пусто, пока не открыт).
+static const char* path() { return g_pathReady ? g_path : ""; }
+
+static void beginFrame() { g_row = Row{}; }
+
+// Переходы состояния, которые в потоке строк теряются: смена узла, появление и
+// пропажа крестика, причина простоя, пауза.
+static void transitions() {
+    const Row& r = g_row;
+    // Строка без цели (ex 3) и «цель мигнула» (ex 4) данных об узле не несут:
+    // там в колонках -99, и если сравнивать их с прошлым кадром, в лог полезут
+    // выдуманные «экстеншен крестика не найден» и «точка прицела: корпус».
+    const bool haveData = (r.ex != EX_NOTARGET && r.ex != EX_LOSTHOLD);
+    if (r.node != g_prevNode) {
+        if (r.node) {
+            event("узел %06x: %s, dist %.2f aim3d %.2f reach %.2f, spot %d life %.1f, tH %d tN %d",
+                  r.node,
+                  (r.kind == 0) ? "дерево" : (r.kind == 1) ? "камень"
+                  : (r.kind == 2) ? "металл" : (r.kind == 3) ? "сера" : "узел",
+                  (double)r.dist, (double)r.aim3d, (double)r.reach,
+                  r.spot, (double)r.life, r.toolH, r.toolN);
+            g_prevSpot = haveData ? r.spot : -999;
+            g_prevAt   = haveData ? r.at : -999;
+        } else {
+            g_prevSpot = -999;   // цели нет — сравнивать будет не с чем
+            g_prevAt   = -999;
+        }
+        g_prevNode = r.node;
+    }
+    if (r.ex == EX_NOTARGET && r.reason != g_prevReason) {
+        static const char* why[] = {
+            "ок", "фарм выключен", "кадр не опубликован", "в реестре нет узлов",
+            "все узлы вне радиуса или в чёрном списке", "поза камеры не читается",
+            "ближайший узел нечем взять",
+        };
+        const int i = (r.reason >= 0 && r.reason < 7) ? r.reason : 0;
+        event("нет цели: reason %d — %s (tH %d, tN %d)", r.reason, why[i], r.toolH, r.toolN);
+        g_prevReason = r.reason;
+    } else if (r.ex != EX_NOTARGET) {
+        g_prevReason = -999;
+    }
+    const int paused = (r.ex == EX_PAUSED) ? 1 : 0;
+    if (paused != g_prevPaused && r.ex != EX_OFF) {
+        event(paused ? "пауза: меню, аимбот или калибровка зон" : "пауза снята");
+        g_prevPaused = paused;
+    }
+    if (haveData && r.node && r.node == g_prevNode) {
+        if (r.spot != g_prevSpot) {
+            if (r.spot > 0)       event("крестик появился: источник %d, жизнь %.1f с", r.spot, (double)r.life);
+            else if (r.spot == 0) event("крестик пропал — бьём по корпусу");
+            else                  event("экстеншен крестика на узле не найден");
+            g_prevSpot = r.spot;
+        }
+        if (r.at != g_prevAt) {
+            event("точка прицела: %s", r.at ? "крестик" : "корпус");
+            g_prevAt = r.at;
+        }
+    }
+}
+
+static void endFrame(float dt) {
+    if (!g_state.farm_log) { closeFile(); resetTransitions(); return; }
+    Row& r = g_row;
+    if (r.ex == EX_OFF || r.ex == EX_NOSCREEN) {
+        // Одна строка на переход, а не на кадр: иначе лог забивается «выключено»
+        // за всё время, пока игра не прикреплена или автофарм снят с галочки.
+        if (!g_wasOff) {
+            g_wasOff = true;
+            event(r.ex == EX_OFF ? "фарм остановлен: выключен, пустая маска ресурсов или нет прикрепления"
+                                 : "нет размера экрана — бот остановлен");
+        }
+        resetTransitions(true);
+        return;
+    }
+    g_wasOff = false;
+
+    r.t = tSec();
+    r.dtms = dt * 1000.f;
+    const float inst = (dt > 1e-4f) ? (1.f / dt) : 0.f;
+    g_fpsAvg = (g_fpsAvg <= 0.f) ? inst : (g_fpsAvg * 0.92f + inst * 0.08f);
+    r.fps = g_fpsAvg;
+
+    // Реальное движение — производная позиции глаза. mv_dir приводим к камере,
+    // чтобы его можно было сравнивать с sdir напрямую: расхождение означает, что
+    // команда стику уходит не туда (не та зона, не та раскладка, инверсия оси).
+    float ex = 0.f, ey = 0.f, ez = 0.f;
+    const bool haveEye = esp_local_eye_position(ex, ey, ez);
+    const double now = tNow();
+    if (haveEye && g_haveEye) {
+        const double dts = now - g_eyeT;
+        if (dts > 1e-3 && dts < 0.5) {
+            const float dx = ex - g_eyeX, dy = ey - g_eyeY, dz = ez - g_eyeZ;
+            r.mvDps = sqrtf(dx * dx + dy * dy + dz * dz) / (float)dts;
+            float dir = atan2f(dx, dz) * 57.2957795f - r.camYaw;
+            while (dir >  180.f) dir -= 360.f;
+            while (dir < -180.f) dir += 360.f;
+            r.mvDir = (r.mvDps < 0.25f) ? kNA : dir;  // standing still has no heading
+        }
+    }
+    if (haveEye) { g_eyeX = ex; g_eyeY = ey; g_eyeZ = ez; g_eyeT = now; }
+    g_haveEye = haveEye;
+
+    transitions();
+
+    // Простой без цели пишем реже: минуты ожидания узлов не должны вытеснять из
+    // файла те кадры, где бот реально двигался.
+    if (r.ex == EX_NOTARGET) {
+        g_idleAcc += dt;
+        if (g_idleAcc < 1.f / kIdleHz) return;
+        g_idleAcc = 0.f;
+    } else {
+        g_idleAcc = 0.f;
+    }
+
+    if (!ensureOpen()) return;
+    fprintf(g_f, kRowFmt,
+            (double)r.t, (double)r.fps, (double)r.dtms, r.ph, r.ex, r.node, r.kind,
+            (double)r.dist, (double)r.aim3d, (double)r.walkd, (double)r.wyaw,
+            (double)r.yaw, (double)r.pitch, r.at, r.spot, (double)r.life, r.strk,
+            (double)r.hp, (double)r.frac, (double)r.reach, (double)r.per, (double)r.ray,
+            r.blk, r.toolH, r.toolN, r.ww, (double)r.slen, (double)r.sdir, r.mv,
+            (double)r.mvDps, (double)r.mvDir, (double)r.ldx, (double)r.ldy, r.lk, r.tp,
+            r.tapms, (double)r.gain, (double)r.evd, r.evn, (double)r.stk, (double)r.mine,
+            (double)r.set, (double)r.blkt, r.reason);
+    fputc('\n', g_f);
+    g_bytes = (size_t)ftell(g_f);
+
+    g_sinceFlush += dt;
+    if (g_sinceFlush >= kFlushSec) { fflush(g_f); g_sinceFlush = 0.f; }
+    if (g_bytes > kMaxBytes) rotate();
+}
+
+} // namespace farmlog
+
+const char* FarmLogPath() { return farmlog::path(); }
+
+
+static void UpdateFarmInner(float dt);
+
+// Обёртка: сам контроллер ничего про лог не знает на уровне потока управления —
+// кадр начинается чистым, а пишется целиком на выходе, каким бы путём функция
+// ни вернулась (early return'ов в ней с десяток, и именно они чаще всего и есть
+// ответ на «почему бот стоял»).
 static void UpdateFarm(float dt) {
+    farmlog::beginFrame();
+    UpdateFarmInner(dt);
+    farmlog::endFrame(dt);
+}
+
+static void UpdateFarmInner(float dt) {
     static bool  s_moveDown = false;  // палец 0: джойстик движения
     static bool  s_lookDown = false;  // палец 1: камера
     static bool  s_tapDown  = false;  // палец 2: удары
@@ -3834,6 +4298,7 @@ static void UpdateFarm(float dt) {
     static float s_evadeTime = 0.f;   // > 0: идёт манёвр обхода препятствия
     static float s_evadeDir = 1.f;    // +1 вправо, -1 влево
     static int   s_evadeCount = 0;
+    static int   s_evadeWhy = 0;      // 0 нет, 1 застрял на подходе, 2 узел перекрыт
     static float s_walkOffTime = 0.f; // гистерезис отпускания джойстика
     static float s_stickPx = 0.f, s_stickPy = 0.f; // сглаженная позиция стика
 
@@ -3850,9 +4315,12 @@ static void UpdateFarm(float dt) {
         s_healthStart = -1.f; s_blockedTime = 0.f;
         s_depletedFrames = 0;
         s_lastWalk = 1e9f; s_stuckTime = 0.f;
-        s_evadeTime = 0.f; s_evadeCount = 0;
+        s_evadeTime = 0.f; s_evadeCount = 0; s_evadeWhy = 0;
         s_walkOffTime = 0.f;
     };
+
+    // Строка лога этого кадра: заполняем по ходу, на выходе её пишет обёртка.
+    auto& fl = farmlog::g_row;
 
     if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
     if (dt > 0.1f) dt = 0.1f;
@@ -3869,6 +4337,7 @@ static void UpdateFarm(float dt) {
 
     const bool menuBlocked = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     if (mask == 0 || !g_esp_attached) {
+        fl.ex = farmlog::EX_OFF;
         releaseAll();
         g_farmActive = false; g_farmPhase = 0; g_farmPaused = false;
         g_farmHpPct = -1.f; g_farmSpotLife = -1.f; g_farmBlocked = false;
@@ -3890,7 +4359,10 @@ static void UpdateFarm(float dt) {
     } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
         sw = (float)displayInfo.height; sh = (float)displayInfo.width;
     }
-    if (sw < 100.f || sh < 100.f) { releaseAll(); g_farmActive = false; return; }
+    if (sw < 100.f || sh < 100.f) {
+        fl.ex = farmlog::EX_NOSCREEN;
+        releaseAll(); g_farmActive = false; return;
+    }
 
     // Цель меряется относительно состояния камеры, которое публикует
     // esp_get_boxes(); убедимся, что снимок этого кадра есть, даже если ни
@@ -3905,7 +4377,11 @@ static void UpdateFarm(float dt) {
         // чтения посреди апдейта) и тут же вернуться. Мгновенный сброс всего
         // давал топтание «стоп-шаг-стоп»: на короткое время просто замораживаем
         // ввод, а по-настоящему сбрасываемся, только если цель не вернулась.
+        fl.ex = farmlog::EX_NOTARGET;
+        fl.reason = g_farmReason;
         if (s_nodeId != 0 && s_lostTime < kLostHold) {
+            fl.ex = farmlog::EX_LOSTHOLD;
+            fl.node = (unsigned)(s_nodeId & 0xFFFFFFu);
             s_lostTime += dt;
             if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; } // вслепую не машем
             if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; s_haveLast = false; }
@@ -3939,7 +4415,30 @@ static void UpdateFarm(float dt) {
         g_farmToolNeed = need;
     }
 
+    // Всё, что контроллер знает о цели в этом кадре, — одной записью в лог.
+    fl.node  = (unsigned)(tgt.id & 0xFFFFFFu);
+    fl.kind  = tgt.kind;
+    fl.dist  = tgt.aim_dist;
+    fl.aim3d = tgt.aim_3d;
+    fl.walkd = tgt.walk_dist;
+    fl.wyaw  = tgt.walk_yaw;
+    fl.yaw   = tgt.yaw;
+    fl.pitch = tgt.pitch;
+    fl.at    = tgt.at_spot ? 1 : 0;
+    fl.spot  = tgt.has_spot ? tgt.spot_source : (tgt.ext_found ? 0 : -1);
+    fl.life  = tgt.spot_life;
+    fl.strk  = tgt.streak;
+    fl.hp    = g_farmHpPct;
+    fl.frac  = tgt.fraction;
+    fl.reach = tgt.melee_reach;
+    fl.per   = tgt.attack_period;
+    fl.ray   = tgt.ray_valid ? tgt.ray_distance : farmlog::kNA;
+    fl.blk   = tgt.ray_blocked ? 1 : 0;
+    fl.toolH = g_farmToolHave;
+    fl.toolN = g_farmToolNeed;
+
     if (!driving) {
+        fl.ex = farmlog::EX_PAUSED;
         // Меню открыто / камеру ведёт аимбот / идёт калибровка зон: статус
         // живой, ввод стоит. Таймеры подхода и добычи не крутятся, иначе бот
         // «застревал» и сдавался на узле за то время, пока пользователь
@@ -3972,6 +4471,9 @@ static void UpdateFarm(float dt) {
     // бросал наполовину срубленное дерево — считается только устойчивое «пусто».
     if (tgt.fraction >= 0.f && tgt.fraction < kDepletedFrac) {
         if (++s_depletedFrames >= kDepletedFrames) {
+            farmlog::event("узел %06x добыт (frac %.3f, hp %.0f%%) — в чёрный список на 120 с",
+                           fl.node, (double)tgt.fraction, (double)g_farmHpPct);
+            fl.ex = farmlog::EX_DEPLETED;
             esp_farm_blacklist(tgt.id, 120.f);
             releaseAll();
             resetNode();
@@ -3986,6 +4488,8 @@ static void UpdateFarm(float dt) {
     // Пауза между целями: пальцы подняты, камера стоит, следующая цель
     // начинается с чистого листа.
     if (s_settle > 0.f) {
+        fl.ex = farmlog::EX_SETTLE;
+        fl.set = s_settle;
         s_settle -= dt;
         releaseAll();
         return;
@@ -4018,10 +4522,17 @@ static void UpdateFarm(float dt) {
         const float measured = dyaw / s_lastDx;
         const float m = fabsf(measured);
         if (std::isfinite(measured) && m > 0.005f && m < 2.f) {
-            if (s_gainYaw == 0.f || m > fabsf(s_gainYaw) * 1.5f || m < fabsf(s_gainYaw) * 0.5f)
+            if (s_gainYaw == 0.f || m > fabsf(s_gainYaw) * 1.5f || m < fabsf(s_gainYaw) * 0.5f) {
+                // Первое измерение или выброс: коэффициент заменяется целиком.
+                // Именно здесь камера «вдруг начинает дёргаться» — если замена
+                // произошла на мусорном измерении, свайп дальше идёт не в ту силу.
+                farmlog::event("камера: коэффициент %.4f -> %.4f град/px (послали %.1f px, "
+                               "получили %.2f град)",
+                               (double)s_gainYaw, (double)measured, (double)s_lastDx, (double)dyaw);
                 s_gainYaw = measured;          // выброс/первое измерение — берём целиком
-            else
+            } else {
                 s_gainYaw = s_gainYaw * 0.8f + measured * 0.2f;
+            }
         }
     }
     if (haveCam) s_lastCamYaw = camYaw;
@@ -4116,11 +4627,16 @@ static void UpdateFarm(float dt) {
                 const float nx = s_lookX + dx, ny = s_lookY + dy;
                 // Край экрана: lift и перенос в центр, а не drag за границу.
                 if (nx < sw * 0.56f || nx > sw * 0.97f || ny < sh * 0.12f || ny > sh * 0.88f) {
+                    // Палец дошёл до края: поднимаем и переносим в центр. Камера
+                    // при этом стоит кадр-другой — в логе видно как обрыв ldx/ldy.
+                    farmlog::event("камера: палец на краю (%.0f,%.0f), перенос в центр",
+                                   (double)s_lookX, (double)s_lookY);
                     Touch_Up_N(1); s_lookDown = false; s_haveLast = false;
                 } else {
                     s_lookX = nx; s_lookY = ny;
                     Touch_Down_N(1, s_lookX, s_lookY);
                     s_lastDx = dx;
+                    fl.ldx = dx; fl.ldy = dy;
                 }
             }
         } else if (s_lookDown) {
@@ -4149,11 +4665,13 @@ static void UpdateFarm(float dt) {
         // ставило палец движения — видимое «дёрганье джойстика» на подходе.
         // Теперь палец поднимается, только если ходьба не нужна четверть
         // секунды подряд; на удары это не влияет (палец 2 независим).
+        const int wwWant = wantWalk ? 1 : 0;
         if (wantWalk) s_walkOffTime = 0.f;
         else if (s_moveDown) {
             s_walkOffTime += dt;
             if (s_walkOffTime < kWalkOffHold) wantWalk = true; // держим, гасим дёрганье
         }
+        fl.ww = wantWalk ? (wwWant ? 1 : 2) : 0;   // 2 = держим только гистерезисом
 
         if (wantWalk) {
             // Центр виртуального стика и толчок вперёд, чуть подруливающий к
@@ -4207,6 +4725,12 @@ static void UpdateFarm(float dt) {
                 s_stickPy += (py - s_stickPy) * k;
                 Touch_Down_N(0, s_stickPx, s_stickPy);
             }
+            // В лог — фактически посланная точка стика (не желаемая): игру
+            // интересует именно она, и с ней сравнивается реальное движение.
+            fl.stickCx = cx; fl.stickCy = cy;
+            fl.slen = sqrtf((s_stickPx - cx) * (s_stickPx - cx) +
+                            (s_stickPy - cy) * (s_stickPy - cy));
+            fl.sdir = atan2f(s_stickPx - cx, cy - s_stickPy) * 57.2957795f;
         } else if (s_moveDown) {
             Touch_Up_N(0); s_moveDown = false;
         }
@@ -4225,10 +4749,16 @@ static void UpdateFarm(float dt) {
         if (s_blockedTime > kBlockedTime && s_evadeTime <= 0.f) {
             s_blockedTime = 0.f;
             if (s_evadeCount < kEvadeMax) {
+                farmlog::event("перекрыт: луч игры %.2f м при точке прицела %.2f м — обход #%d (%s)",
+                               (double)tgt.ray_distance, (double)tgt.aim_3d, s_evadeCount + 1,
+                               (s_evadeCount % 2 == 0) ? "вправо" : "влево");
+                s_evadeWhy = 2;
                 s_evadeTime = kEvadeTime;
                 s_evadeDir = (s_evadeCount % 2 == 0) ? 1.f : -1.f;
                 ++s_evadeCount;
             } else {
+                farmlog::event("перекрыт: %d обходов не помогли, узел %06x в чёрный список на 60 с",
+                               kEvadeMax, fl.node);
                 esp_farm_blacklist(tgt.id, 60.f);
                 releaseAll();
                 resetNode();
@@ -4237,6 +4767,9 @@ static void UpdateFarm(float dt) {
         }
     } else {
         s_blockedTime = 0.f;
+        // Узел снова простреливается и манёвр доделан — прощаем счётчик обходов,
+        // иначе следующая перекрытая точка начнётся сразу с отказа от узла.
+        if (s_evadeTime <= 0.f && s_evadeWhy == 2) { s_evadeWhy = 0; s_evadeCount = 0; }
     }
 
     // ---- палец 2: удары --------------------------------------------------------
@@ -4299,11 +4832,18 @@ static void UpdateFarm(float dt) {
             s_stuckTime += dt;
             if (s_stuckTime > kStuckTime) {
                 if (s_evadeCount < kEvadeMax) {
+                    farmlog::event("застрял: %.1f с без приближения (walkd %.2f, лучший %.2f) — "
+                                   "обход #%d (%s)",
+                                   (double)s_stuckTime, (double)tgt.walk_dist, (double)s_lastWalk,
+                                   s_evadeCount + 1, (s_evadeCount % 2 == 0) ? "вправо" : "влево");
+                    s_evadeWhy = 1;
                     s_evadeTime = kEvadeTime;
                     s_evadeDir = (s_evadeCount % 2 == 0) ? 1.f : -1.f;
                     ++s_evadeCount;
                     s_stuckTime = 0.f;
                 } else {
+                    farmlog::event("застрял: %d обходов не вывели (walkd %.2f), узел %06x в чёрный "
+                                   "список на 30 с", kEvadeMax, (double)tgt.walk_dist, fl.node);
                     esp_farm_blacklist(tgt.id, 30.f);
                     releaseAll();
                     resetNode();
@@ -4312,7 +4852,13 @@ static void UpdateFarm(float dt) {
             }
         }
     } else {
-        s_evadeCount = 0; s_evadeTime = 0.f;  // дошли — препятствий больше нет
+        // Дошли — препятствий на подходе больше нет, бюджет обходов обнуляем.
+        // НО манёвр из-за ПЕРЕКРЫТОГО узла (s_evadeWhy == 2) не трогаем: он
+        // начинается в этой же фазе, и обнуление здесь означало, что обход не
+        // отрабатывал ни одного кадра — счётчик сбрасывался, обход запускался
+        // заново и бот вечно танцевал на месте, не доходя до отказа от узла.
+        // Контроль прогресса ниже при этом работает в обоих случаях.
+        if (s_evadeWhy != 2) { s_evadeCount = 0; s_evadeTime = 0.f; s_evadeWhy = 0; }
         // Машем, а узел не убывает: стоим на волосок дальше нужного (финальный
         // подвод это лечит) или в руке не инструмент. Прогресс теперь видим по
         // двум независимым признакам — падение остатка И рост серии попаданий по
@@ -4342,6 +4888,11 @@ static void UpdateFarm(float dt) {
             const float giveUp = (tgt.node_health >= 0.f || tgt.fraction >= 0.f)
                                ? kGiveUpDrain : kGiveUpBlind;
             if (s_mineTime > giveUp) {
+                farmlog::event("нет прогресса %.1f с: hp %.0f%% frac %.3f strk %d (лучший %d), "
+                               "at %d blk %d — узел %06x в чёрный список на 60 с",
+                               (double)s_mineTime, (double)g_farmHpPct, (double)tgt.fraction,
+                               tgt.streak, s_bestStreak, tgt.at_spot ? 1 : 0,
+                               tgt.ray_blocked ? 1 : 0, fl.node);
                 esp_farm_blacklist(tgt.id, 60.f);
                 releaseAll();
                 resetNode();
@@ -4349,6 +4900,21 @@ static void UpdateFarm(float dt) {
             }
         }
     }
+
+    // Состояние контроллера на конец кадра — одной записью. Всё это посчитано
+    // выше; сюда не доходят только early return'ы, а у них в логе ex != 0.
+    fl.ph     = phase;
+    fl.gain   = gain;
+    fl.camYaw = haveCam ? camYaw : farmlog::kNA;
+    fl.lk     = s_lookDown ? 1 : 0;
+    fl.mv     = s_moveDown ? 1 : 0;
+    fl.tp     = s_tapDown ? 1 : 0;
+    fl.tapms  = s_tapTimer;
+    fl.evd    = s_evadeTime;
+    fl.evn    = s_evadeCount;
+    fl.stk    = s_stuckTime;
+    fl.mine   = s_mineTime;
+    fl.blkt   = s_blockedTime;
 }
 
 void RenderMenu() {
@@ -4397,6 +4963,7 @@ void RenderMenu() {
     Tick(g_state.a_farm_stone,  g_state.farm_stone,  dt);
     Tick(g_state.a_farm_metal,  g_state.farm_metal,  dt);
     Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
+    Tick(g_state.a_farm_log,    g_state.farm_log,    dt);
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
     ApplyTheme();
 
@@ -4956,6 +5523,7 @@ int main(int argc, char* argv[]) {
         g_frame_done.store(true);
     }
     while (!g_frame_done.load()) {}
+    farmlog::closeFile();   // лог автофарма: хвост буфера должен попасть на диск
     stop_attach_thread();
     if (g_esp_attached) {
         esp_reset();

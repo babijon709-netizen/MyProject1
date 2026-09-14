@@ -192,3 +192,9 @@ bool        esp_camera_angles(float& yaw_deg, float& pitch_deg);
 // Diagnostic: bit 0 camera pose known, bit 1 pose derived from the view
 // matrix, bit 2 firing reference in use. See esp_camera_state() in game.cpp.
 int         esp_camera_state();
+
+// Позиция глаза локального игрока в мире — та же точка, от которой меряются
+// углы прицела (PlayerEventHandler.LookDirection из KCC, а если её нет — поза
+// камеры). Логу автофарма нужна, чтобы сравнивать команды стика с тем, куда
+// персонаж пошёл на самом деле. false = поза в этом кадре не прочитана.
+bool        esp_local_eye_position(float& x, float& y, float& z);
