@@ -650,6 +650,33 @@ static float AimFovRadiusPx(float sw, float sh) {
     return r;
 }
 
+// --- Профилировщик кадра оверлея -------------------------------------------
+// На устройстве лаг выглядит как «всё тормозит», а снаружи видна только сумма:
+// в логе dt_ms прыгал с 8.5 до 40-100 мс, и по одной этой цифре не понять, кто
+// именно съел кадр — чтение памяти игры (каждая позиция/кость — это syscall),
+// рисование ESP, маркеры ресурсов, аим, фарм, меню или ImGui+GL. Поэтому стадии
+// кадра копятся по отдельности (скользящее среднее + максимум за окно), а раз в
+// kProfEvSec всё уходит одной строкой EV в лог автофарма вместе со счетчиками
+// нарисованного. Замер — CLOCK_MONOTONIC через vDSO (десятки наносекунд), на
+// кадр получается ~14 вызовов, то есть сам профилировщик в кадре не заметен.
+struct FrameProf {
+    float begin = 0.f, boxes = 0.f, markers = 0.f, esp = 0.f, aim = 0.f,
+          farm = 0.f, menu = 0.f, end = 0.f, sleep = 0.f, work = 0.f;
+    float boxesRaw = 0.f, markersRaw = 0.f;  // instantaneous, усредняются в ProfStage
+    float workMax = 0.f;
+    int   nBoxes = 0, nMarkers = 0;
+    double nextEv = 0.0;
+    static void avg(float& acc, float v) { acc += (v - acc) * 0.1f; }
+};
+static FrameProf g_prof;
+static constexpr double kProfEvSec = 2.0;   // как часто пишем разбор кадра в лог
+
+static inline double profNowMs() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
 // One remote snapshot per frame, shared by the ESP overlay and the aimbot.
 static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
     static std::vector<EspBox> s_boxes;
@@ -670,6 +697,12 @@ static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
 }
 
 static void DrawEspOverlay() {
+    // Две самые дорогие части ESP меряются здесь: снимок памяти игры (игроки и
+    // их кости — каждый запрос это syscall) и маркеры ресурсов (позиции + w2s +
+    // пилюли с текстом). Обнуляем на входе: иначе ранние return'ы оставят в
+    // разборе кадра числа прошлого кадра.
+    g_prof.boxesRaw = 0.f; g_prof.markersRaw = 0.f;
+    g_prof.nBoxes = 0;     g_prof.nMarkers = 0;
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;
     if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
@@ -695,7 +728,10 @@ static void DrawEspOverlay() {
 
     if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup) return;
 
+    const double tBoxes = profNowMs();
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
+    g_prof.boxesRaw = (float)(profNowMs() - tBoxes);
+    g_prof.nBoxes = (int)boxes.size();
     constexpr int BOX_EDGES[][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},
@@ -929,6 +965,7 @@ static void DrawEspOverlay() {
     // One pill with the resource / animal name at the object's position; the
     // scan itself is done by the game layer and reuses this frame's camera.
     if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup) {
+        const double tMarkers = profNowMs();
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;
@@ -952,7 +989,9 @@ static void DrawEspOverlay() {
             snprintf(label, sizeof(label), "%.0fm", marker.distance);
             EspPill(marker.x, marker.y + PillH(marker.name, kMarkerScale) + 2.f, label,
                     ColU32(cfg::esp::distance_col), kMarkerScale);
+            ++g_prof.nMarkers;   // считаем только реально нарисованные
         }
+        g_prof.markersRaw = (float)(profNowMs() - tMarkers);
     }
 }
 
@@ -3922,8 +3961,12 @@ static void writeHeader() {
         g_state.farm_metal ? " металл" : "", g_state.farm_sulfur ? " сера" : "");
     fprintf(g_f,
         "# автофарм: одна строка на кадр, пока бот включён; строки EV — решения контроллера\n"
+        "#   и раз в ~2 с — разбор кадра оверлея по стадиям («кадры оверлея: …»): миллисекунды\n"
+        "#   на begin/esp/aim/farm/menu/end, сон до своего темпа, сколько игроков и маркеров\n"
+        "#   нарисовано. По нему видно, кто именно съел кадр, когда игра начинает лагать\n"
         "# старт %s  экран %.0fx%.0f  файл %s  -99/-9 = не читается\n"
-        "# t_s/fps/dt_ms — секунды от старта файла, сглаженный fps оверлея, длительность кадра\n"
+        "# t_s/fps/dt_ms — секунды от старта файла, частота кадров ОВЕРЛЕЯ (НЕ игры!),\n"
+        "#   длительность кадра оверлея вместе со сном до своего темпа\n"
         "# ph — фаза: 1 доворот камеры, 2 подход, 3 удар; ex — куда кадр вышел:\n"
         "#   0 отработал, 1 фарм выключен, 2 нет экрана, 3 нет цели, 4 цель мигнула (hold),\n"
         "#   5 пауза (меню/аимбот/калибровка), 6 пауза смены узла, 7 узел добыт\n"
@@ -3958,8 +4001,16 @@ static void writeHeader() {
         "#   stk — таймер застревания; mine — сколько бьём этот узел; set — пауза смены\n"
         "#   цели; blkt — сколько подряд узел перекрыт\n"
         "# reason — почему нет цели: 0 ок, 1 выключен, 2 кадр не опубликован, 3 нет узлов,\n"
-        "#   4 все вне радиуса или в чёрном списке, 5 поза камеры не читается, 6 нечем взять\n",
-        stamp, (double)sw, (double)sh, g_path);
+        "#   4 все вне радиуса или в чёрном списке, 5 поза камеры не читается, 6 нечем взять\n"
+        "# панель %.0f Гц, темп оверлея %.0f Гц. Оверлей — это свой слой со своим окном и\n"
+        "#   выключенным vsync, к кадрам игры он не привязан, поэтому колонка fps показывает\n"
+        "#   частоту ОВЕРЛЕЯ, а не ФПС игры: игра может быть ограничена своими 60 ФПС, а\n"
+        "#   оверлей при этом крутить 60 кадров/с (раньше крутил пик панели — ~118, и именно\n"
+        "#   этот свободный цикл отъедал у игры ядро и GPU, отсюда лаги). Настоящую частоту\n"
+        "#   кадров игры снаружи не прочитать: в дампе нет UnityEngine.Time (frameCount/\n"
+        "#   deltaTime), поэтому честного «ФПС игры» в этом логе нет и не будет\n",
+        stamp, (double)sw, (double)sh, g_path,
+        (double)overlay_peak_hz(), (double)overlay_pace_hz());
     fprintf(g_f, "%s\n", kColHdr);
 }
 
@@ -5631,6 +5682,46 @@ void RenderMenu() {
     }
 }
 
+// Принять времена стадий одного кадра (мс) и раз в kProfEvSec отдать их в лог.
+// Строка EV называется «кадры оверлея: …» и отвечает на вопрос «кто съел кадр»:
+// работа (begin/esp/aim/farm/menu/end) отдельно от сна до темпа, плюс сколько
+// игроков и маркеров было нарисовано — по ним видно, растёт ли цена кадра вместе
+// с количеством объектов вокруг (на устройстве так и было: в новой местности
+// кадр вырастал с 8.5 до 40-100 мс).
+static void ProfStage(double begin, double esp, double aim, double farm,
+                      double menu, double end) {
+    FrameProf& p = g_prof;
+    p.sleep = (float)overlay_pace_sleep_ms();
+    // Сон до темпа живёт внутри drawEnd, поэтому из «работы» его вычитаем:
+    // иначе медленный кадр выглядел бы как работа, а быстрый — как работа+сон.
+    const float endWork = (float)end - p.sleep;
+    FrameProf::avg(p.begin, (float)begin);
+    FrameProf::avg(p.esp,   (float)esp);
+    FrameProf::avg(p.aim,   (float)aim);
+    FrameProf::avg(p.farm,  (float)farm);
+    FrameProf::avg(p.menu,  (float)menu);
+    FrameProf::avg(p.end,   endWork);
+    FrameProf::avg(p.boxes,   p.boxesRaw);
+    FrameProf::avg(p.markers, p.markersRaw);
+    const float work = p.begin + p.esp + p.aim + p.farm + p.menu + endWork;
+    FrameProf::avg(p.work, work);
+    if (work > p.workMax) p.workMax = work;
+
+    const double now = profNowMs() / 1000.0;
+    if (p.nextEv <= 0.0) p.nextEv = now + kProfEvSec;
+    if (now < p.nextEv) return;
+    p.nextEv = now + kProfEvSec;
+    farmlog::event(
+        "кадры оверлея: работа %.1f мс/кадр (begin %.1f esp %.1f [снимок %.1f маркеры %.1f] "
+        "aim %.1f farm %.1f menu %.1f end %.1f) сон до темпа %.1f макс работы %.1f | "
+        "игроков %d маркеров %d оверлей %.1f к/с (панель %.0f Гц, темп %.0f Гц)",
+        (double)p.work, (double)p.begin, (double)p.esp, (double)p.boxes, (double)p.markers,
+        (double)p.aim, (double)p.farm, (double)p.menu, (double)p.end, (double)p.sleep,
+        (double)p.workMax, p.nBoxes, p.nMarkers, (double)overlay_fps(),
+        (double)overlay_peak_hz(), (double)overlay_pace_hz());
+    p.workMax = 0.f;
+}
+
 int main(int argc, char* argv[]) {
     signal(SIGINT,  [](int) { main_thread_flag.store(false); });
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
@@ -5679,14 +5770,25 @@ int main(int argc, char* argv[]) {
 
     while (main_thread_flag) {
         g_frame_done.store(false);
+        // Замер стадий кадра оверлея: суммы уходят в лог строкой EV «кадры
+        // оверлея: …» (см. ProfStage) — по ней видно, кто съел кадр при лагах.
+        const double prof0 = profNowMs();
         drawBegin();
+        const double prof1 = profNowMs();
 
         ui::bar::set_game_alpha(0.f);
         DrawEspOverlay();
+        const double prof2 = profNowMs();
         UpdateAim(ImGui::GetIO().DeltaTime);
+        const double prof3 = profNowMs();
         UpdateFarm(ImGui::GetIO().DeltaTime);
+        const double prof4 = profNowMs();
         RenderMenu();
+        const double prof5 = profNowMs();
         drawEnd();
+        const double prof6 = profNowMs();
+        ProfStage(prof1 - prof0, prof2 - prof1, prof3 - prof2,
+                  prof4 - prof3, prof5 - prof4, prof6 - prof5);
         g_frame_done.store(true);
     }
     while (!g_frame_done.load()) {}

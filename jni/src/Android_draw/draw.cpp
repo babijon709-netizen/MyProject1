@@ -20,9 +20,31 @@ anwc::ANativeWindowCreator::DisplayInfo displayInfo{0};
 uint32_t orientation  = 0;
 bool     g_Initialized = false;
 ImGuiWindow *g_window  = nullptr;
+// Темп оверлея: 60 кадров/с, а не пик дисплея.
+//
+// Оверлей — это своё окно (свой ANativeWindow «Surface») и свой EGL-контекст,
+// vsync у него выключен (eglSwapInterval(display, 0)), поэтому без ограничения
+// цикл крутился на пиковой герцовке панели: на устройстве вышло ~118 кадров/с
+// при 8.5 мс на кадр, то есть ПОСТОЯННО занятое ядро и вдвое больше
+// полноэкранных отрисовок, чем делает сама игра (а игра у пользователя capped
+// на 60 ФПС). Показывать оверлею чаще, чем обновляется игра, всё равно нечего —
+// каждый наш кадр читает память игры (syscall'ы на каждую позицию/кость) и
+// рисует всю ESP-сцену заново. Отсюда и лаги: чем меньше работы на кадр (фарм
+// выключен), тем больше витков в секунду и тем сильнее мы отъедаем ядро, GPU и
+// композитор у игры — пользователь это и видел как «с выключенным фармом лагает
+// ещё сильнее». Плюс 120 Гц на панели = вдвое больше тепла, а троттлинг на
+// телефоне добивал остаток: в логе первые 90 с шли ровно, потом кадр вырос до
+// 40-100 мс.
+//
+// Поэтому: темп жёстко 60 Гц (совпадает с частотой кадров игры), и режим
+// высокой герцовки у дисплея больше не выпрашивается — игре он не нужен, а
+// композитор из-за него работает вдвое чаще. g_peak_hz остаётся только для
+// диагностики (пишется в шапку лога).
+static constexpr float kOverlayPaceHz = 60.f;
 static float g_peak_hz = 60.f;
 static float g_overlay_fps = 60.f;
 static double g_prev_swap = 0.0;
+static double g_pace_sleep_ms = 0.0;  // сколько последний кадр проспал до своего темпа
 static int g_refresh_tick = 0;
 
 static float SnapHz(float h) {
@@ -103,6 +125,10 @@ static void ApplyOverlayRefresh(ANativeWindow* w, float hz) {
     static SetBC  setbc  = (SetBC)dlsym(RTLD_DEFAULT, "ANativeWindow_setBufferCount");
     static bool buffers_set = false;
     if (setbc && !buffers_set) { setbc(w, 4); buffers_set = true; }
+    // hz <= 61 — сознательно: оверлей больше не переводит панель в 120 Гц ради
+    // своих кадров (игра всё равно рисует 60, а композитор и батарея платят за
+    // удвоенную герцовку). Ветка оставлена на случай, если темп когда-нибудь
+    // снова поднимут выше 61 Гц.
     if (hz > 61.f) {
         if (setfr2) setfr2(w, hz, 0, 1);
         else if (setfr) setfr(w, hz, 0);
@@ -112,6 +138,22 @@ static void ApplyOverlayRefresh(ANativeWindow* w, float hz) {
 
 float overlay_fps() {
     return g_overlay_fps;
+}
+
+// Сколько миллисекунд последний кадр проспал, дожидаясь своего темпа (60 Гц).
+// В логе это разделяет «кадр тормозит из-за работы» и «кадр просто ждёт темп».
+double overlay_pace_sleep_ms() {
+    return g_pace_sleep_ms;
+}
+
+// Пиковая герцовка панели (диагностика): в шапку лога пишется вместе с темпом
+// оверлея, чтобы 60 у оверлея не путали с ФПС игры.
+float overlay_peak_hz() {
+    return g_peak_hz;
+}
+
+float overlay_pace_hz() {
+    return kOverlayPaceHz;
 }
 
 bool initGUI_draw(uint32_t _screen_x, uint32_t _screen_y, bool log) {
@@ -162,8 +204,8 @@ bool init_egl(uint32_t _screen_x, uint32_t _screen_y, bool log) {
     if (!eglMakeCurrent(display, surface, surface, context)) return false;
 
     eglSwapInterval(display, 0);
-    g_peak_hz = DetectPeakRefresh();
-    ApplyOverlayRefresh(::native_window, g_peak_hz);
+    g_peak_hz = DetectPeakRefresh();          // только для шапки лога/диагностики
+    ApplyOverlayRefresh(::native_window, kOverlayPaceHz);
 
     return true;
 }
@@ -203,7 +245,7 @@ void drawBegin() {
     screen_config();
 
     if ((++g_refresh_tick % 180) == 0)
-        ApplyOverlayRefresh(::native_window, g_peak_hz);
+        ApplyOverlayRefresh(::native_window, kOverlayPaceHz);
 
     if (::orientation != displayInfo.orientation) {
         ::orientation = displayInfo.orientation;
@@ -234,9 +276,14 @@ void drawEnd() {
     struct timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     double now = (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
-    float pace = g_peak_hz > 61.f ? g_peak_hz : 120.f;
+    // Темп — фиксированные 60 Гц (см. kOverlayPaceHz): раньше здесь стоял пик
+    // панели (120), и оверлей крутился вдвое чаще игры. Сон учитывается
+    // отдельно и уходит в лог: по нему видно, кадр упирается в работу (сон ~0)
+    // или в темп (сон ~8 мс при 60 Гц).
+    const double pace = (double)kOverlayPaceHz;
+    double slept = 0.0;
     if (g_prev_swap > 0.0) {
-        double target = 1.0 / (double)pace;
+        double target = 1.0 / pace;
         double elapsed = now - g_prev_swap;
         if (elapsed > 0.0 && elapsed < target - 0.00035) {
             double sl = target - elapsed;
@@ -245,9 +292,12 @@ void drawEnd() {
             req.tv_nsec = (long)((sl - (double)req.tv_sec) * 1000000000.0);
             clock_nanosleep(CLOCK_MONOTONIC, 0, &req, nullptr);
             clock_gettime(CLOCK_MONOTONIC, &ts);
-            now = (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+            const double after = (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+            slept = after - now;
+            now = after;
         }
     }
+    g_pace_sleep_ms = slept * 1000.0;
     if (g_prev_swap > 0.0) {
         float d = (float)(now - g_prev_swap);
         if (d > 0.0002f && d < 0.25f)

@@ -4613,11 +4613,43 @@ static double g_marker_next_scan = 0.0;
 static uint64_t g_network_client_class = 0;
 static uint64_t g_network_identity_class = 0;
 
+// Скан маркеров идёт порциями, а не одним кадром.
+//
+// Полный проход по словарю заспавненных объектов — это десятки тысяч обращений
+// к памяти игры (на каждый компонент: класс, имя GameObject, трансформ,
+// позиция), и раньше он делался целиком за один вызов. В спокойном режиме это
+// стоило ~25 мс (в логе видно как dt_max 21-29 мс каждые ~3 с), а когда процесс
+// уже придушен — до 280 мс одним кадром (те самые пики dt_max 212-283 мс в
+// медленной части лога): игра в этот момент visibly дёргается.
+//
+// Поэтому порция ограничена ВРЕМЕНЕМ (kMarkerScanBudgetSec), а не числом
+// объектов: цена записи словаря плавает от «не маркер, три чтения» до «кластер
+// камней на 30 компонентов», а в придавленной троттлингом процессе те же чтения
+// стоят в разы дороже — лимит по миллисекундам держит кадр ровным в обоих
+// случаях. Курсор запоминается, собирается всё во временный список, и
+// g_marker_entities подменяется разом, когда цикл завершён: старый список
+// показывается до последнего кадра цикла, поэтому маркеры не мигают и не
+// пропадают на время пересборки (это уже ломали однажды — см. «ESP flicker»).
+// Узел разбирается целиком (проверка времени только между узлами): оборви мы
+// его на середине, следующий кадр начал бы с того же узла и его уже собранные
+// компоненты попали бы в список второй раз.
+constexpr double kMarkerScanBudgetSec = 0.006;   // 6 мс на порцию при бюджете кадра 16.7 мс
+static int32_t g_marker_scan_cursor = -1;    // -1: цикл не начат
+static int32_t g_marker_scan_total  = 0;
+static uint64_t g_marker_scan_identity_class = 0;
+static std::vector<uint8_t> g_marker_scan_buffer;
+// g_marker_scan_pending (список, который собирается сейчас) и marker_scan_abort()
+// объявлены ниже, вместе с MarkerEntity; фильтр категорий меняется раньше по
+// файлу, поэтому здесь только объявление.
+static void marker_scan_abort();
+
 void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups) {
     // Loot containers and ground pickups are filtered out during the registry
     // walk, so switching a category on has to invalidate the cached list.
-    if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled)
+    if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled) {
         g_marker_next_scan = 0.0;
+        marker_scan_abort();   // половина списка собрана по старым фильтрам
+    }
     g_markers_ore_enabled = ore;
     g_markers_animal_enabled = animals;
     g_markers_loot_enabled = loot;
@@ -4648,6 +4680,21 @@ struct MarkerEntity {
     unsigned char color_rgb[3] = {255, 255, 255};
 };
 static std::vector<MarkerEntity> g_marker_entities;
+// Список, который собирается порциями прямо сейчас: g_marker_entities
+// подменяется им только когда цикл завершён, чтобы маркеры не мигали.
+static std::vector<MarkerEntity> g_marker_scan_pending;
+
+// Прервать незавершённый цикл: следующая порция начнёт его заново. Нужно при
+// смене фильтров (иначе в список доехала бы старая категория) и при перезагрузке
+// мира. g_marker_entities при этом остаётся прежним — показываем его до конца
+// следующего цикла.
+static void marker_scan_abort() {
+    g_marker_scan_cursor = -1;
+    g_marker_scan_total  = 0;
+    g_marker_scan_buffer.clear();
+    g_marker_scan_buffer.shrink_to_fit();
+    g_marker_scan_pending.clear();
+}
 static std::unordered_map<uint64_t, uint8_t> g_marker_class_kind;
 
 // ---- Auto-farm state ---------------------------------------------------------
@@ -5289,29 +5336,53 @@ static bool marker_world_position(uint64_t transform, Vec3& out) {
 }
 
 // Walk Mirror's client registry and cache every ore node / animal in it.
-static void rebuild_marker_entities() {
-    g_marker_entities.clear();
+// true  — цикл завершён: список собран целиком и подменён (или собирать нечего,
+//         тогда он пустой);
+// false — обработана только порция, продолжать нужно на следующем кадре.
+// Все отказы (словарь не читается, мир грузится) возвращают true: иначе вызывающий
+// поставит «продолжать немедленно» и будет долбить в стену каждый кадр.
+static bool rebuild_marker_entities() {
+    if (g_marker_scan_cursor < 0) {
+        // Начало цикла: действующий список НЕ трогаем — он показывается до
+        // завершения сборки, поэтому маркеры не мигают.
+        g_marker_scan_pending.clear();
+        g_marker_scan_buffer.clear();
 
-    uint64_t dictionary = resolve_network_client_spawned();
-    if (!dictionary) return;
-    // Needed to read prefab names (wolves / rats); harmless if it fails, the
-    // loot and entityType paths still work.
-    if (!g_go_name_offset_valid && g_local_player) ensure_gameobject_name_offset(g_local_player);
-    uint64_t identity_class = resolve_network_identity_class();
+        uint64_t dictionary = resolve_network_client_spawned();
+        if (!dictionary) { marker_scan_abort(); return true; }
+        // Needed to read prefab names (wolves / rats); harmless if it fails, the
+        // loot and entityType paths still work.
+        if (!g_go_name_offset_valid && g_local_player) ensure_gameobject_name_offset(g_local_player);
+        g_marker_scan_identity_class = resolve_network_identity_class();
 
-    uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
-    int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
-    if (!valid_obj(entries) || count <= 0) return;
-    if (count > 4096) count = 4096;
+        uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
+        int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
+        if (!valid_obj(entries) || count <= 0) { marker_scan_abort(); return true; }
+        if (count > 4096) count = 4096;
 
-    // One bulk read for the whole entry array instead of one read per entry.
-    std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
-    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
+        // One bulk read for the whole entry array instead of one read per entry.
+        // Буфер живёт до конца цикла: порции разбирают уже прочитанное.
+        g_marker_scan_buffer.resize((size_t)count * DICT_ENTRY_STRIDE);
+        if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, g_marker_scan_buffer.data(),
+                    g_marker_scan_buffer.size())) {
+            marker_scan_abort();
+            return true;
+        }
+        g_marker_scan_total  = count;
+        g_marker_scan_cursor = 0;
+    }
 
+    const uint64_t identity_class = g_marker_scan_identity_class;
+    const int32_t count = g_marker_scan_total;
+    const double t_budget = mono_seconds();
     uint64_t behaviours[32];
-    for (int32_t i = 0; i < count; ++i) {
+    int32_t i = g_marker_scan_cursor;
+    for (; i < count; ++i) {
+        // Первый узел порции разбираем всегда (иначе цикл мог бы встать),
+        // дальше — пока не выбрано время.
+        if (i > g_marker_scan_cursor && mono_seconds() - t_budget > kMarkerScanBudgetSec) break;
         uint64_t identity = 0;
-        memcpy(&identity, buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE, sizeof(identity));
+        memcpy(&identity, g_marker_scan_buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE, sizeof(identity));
         if (!valid_obj(identity)) continue;
         if (identity_class && rd_ptr(identity) != identity_class) continue;
         uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
@@ -5330,6 +5401,9 @@ static void rebuild_marker_entities() {
             if (!valid_obj(component)) continue;
             const uint8_t component_class = marker_class_of(rd_ptr(component));
             if (component_class == MARKER_CLASS_NONE) continue;
+            // «Дорогой» компонент: имя GameObject, трансформ и позиция — это
+            // десятки обращений к памяти игры, поэтому время порции проверяется
+            // снаружи, между узлами.
 
             MarkerLook look;
             char pickup_text[40] = {};
@@ -5390,16 +5464,29 @@ static void rebuild_marker_entities() {
             if (!entity.transform) // component without its own renderer: use the identity
                 entity.transform = native_component_transform(managed_object_native(identity));
             entity.position_valid = marker_world_position(entity.transform, entity.position);
-            if (entity.transform) g_marker_entities.push_back(entity);
-            if (g_marker_entities.size() >= 512) break;
+            if (entity.transform) g_marker_scan_pending.push_back(entity);
+            if (g_marker_scan_pending.size() >= 512) break;
         }
-        if (g_marker_entities.size() >= 512) break;
+        if (g_marker_scan_pending.size() >= 512) break;
     }
+
+    if (i < count && g_marker_scan_pending.size() < 512) {
+        // Порция израсходована (вышло время), цикл не закончен — продолжим на
+        // следующем кадре с этого же узла.
+        g_marker_scan_cursor = i;
+        return false;
+    }
+    // Конец цикла: словарь пройден либо уперлись в лимит списка (512).
+    // Подменяем список разом.
+    g_marker_entities.swap(g_marker_scan_pending);
+    marker_scan_abort();
+    return true;
 }
 
 static void reset_marker_caches() {
     g_marker_entities.clear();
     g_marker_next_scan = 0.0;
+    marker_scan_abort();   // незавершённая порция после перезагрузки мира не нужна
     g_marker_class_kind.clear();
     g_network_client_class = 0;
     g_network_identity_class = 0;
@@ -5416,6 +5503,7 @@ std::vector<EspMarker> esp_get_markers() {
         !g_markers_loot_enabled && !g_markers_pickup_enabled) {
         if (!g_marker_entities.empty()) g_marker_entities.clear();
         g_marker_next_scan = 0.0;
+        marker_scan_abort();   // не тащить незавершённую порцию через выключенный ESP
         return result;
     }
     if (g_pid <= 0 || !g_il2cpp_base) return result;
@@ -5431,12 +5519,16 @@ std::vector<EspMarker> esp_get_markers() {
     {
         const double now = mono_seconds();
         if (now >= g_marker_next_scan) {
-            rebuild_marker_entities();
+            const bool scan_done = rebuild_marker_entities();
             // ~3 s between scans: entities spawn and despawn slowly. An empty
             // result means the registry was not readable (world still loading in
             // after a respawn), so retry in half a second instead. Интервал в
             // секундах: при счёте в кадрах на 118 fps скан выходил вдвое чаще.
-            g_marker_next_scan = now + (g_marker_entities.empty() ? 0.5 : 3.0);
+            // Незавершённую порцию продолжаем на следующем кадре (scan_done ==
+            // false), иначе список собирался бы по кусочку раз в 3 секунды.
+            g_marker_next_scan = scan_done
+                ? now + (g_marker_entities.empty() ? 0.5 : 3.0)
+                : now;
         }
     }
 

@@ -47,6 +47,10 @@ namespace ImGui { inline ImDrawList* GetForegroundDrawList() { static ImDrawList
 // ---- окружение оверлея ----
 struct { int width = 2460, height = 1080, orientation = 0; } displayInfo;
 static int native_window_screen_x = 2460, native_window_screen_y = 1080;
+// Шапка лога печатает герцовку панели и темп оверлея (настоящие живут в
+// Android_draw/draw.cpp, которого в харнессе нет).
+static float overlay_peak_hz() { return 120.f; }
+static float overlay_pace_hz() { return 60.f; }
 static bool g_esp_attached = true;
 static int  g_farmCalib = 0;
 static bool s_fingerDown = false;
