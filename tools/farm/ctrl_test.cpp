@@ -161,7 +161,7 @@ static void Touch_Up_N(int id) {
 #include "ctrl.inc"
 
 int main(int argc, char** argv) {
-    const int frames = (argc > 1) ? atoi(argv[1]) : 4200;
+    const int frames = (argc > 1) ? atoi(argv[1]) : 4700;
     SetZones();
     const float dt = 1.f / 60.f;
     unsigned long long id = 0x5152535455ULL;
@@ -185,6 +185,12 @@ int main(int argc, char** argv) {
     // удержание прежней цели = хорошо).
     int   flicks = 0, holdFrames = 0, settleFrames = 0, framesFlick = 0;
     int   flickTail = 0;   // кадров после мигания, за которые пауза = провал
+    // Участок I: камень, у которого луч игры упёрся в собственную породу.
+    // Считаем тапы и всё, что говорит об обходе (evd/blk из строки лога): на
+    // таком узле бот обязан бить, а не кружить.
+    int   framesSelfOre = 0, tapsSelfOre = 0, phase3SelfOre = 0;
+    int   evadeSelfOre = 0, blkSelfOre = 0, tapPrevI = 0;
+    bool  selfOreSpot = false;
 
     g_tgt.valid = true; g_tgt.id = id; g_tgt.kind = 0;
     g_tgt.node_health_max = 100.f; g_tgt.node_experience = 12;
@@ -213,6 +219,9 @@ int main(int argc, char** argv) {
         const bool flickWin  = (f >= 900 && f < 1100);   // G: цель мигает на кадр
         const bool noRayWin  = (f >= 3850 && f < 3970);  // F: 2 с без луча игры
         const bool afterNoRay = (f >= 3970 && f < 4190);
+        // I: камень с точкой прицела внутри породы — последний участок, его
+        // строки лежат в самом хвосте лога (run.sh проверяет и хвост тоже).
+        const bool selfOreWin = (f >= 4300);
 
         // цель
         if (!deadNode && f % 200 == 0 && dist > 0.62f) dist -= 0.9f;  // мир приближается
@@ -249,6 +258,35 @@ int main(int argc, char** argv) {
         g_tgt.node_health_max = 100.f;
         g_tgt.ray_distance = blockedWin ? 1.05f : dist + 1.6f;
         g_tgt.ray_blocked = blockedWin;
+        g_tgt.ray_self = false;
+        if (selfOreWin) {
+            // Лог 14.09.2026, узел 86a3c0: 1595 кадров, луч игры 0.51..0.77 м
+            // при точке прицела 1.97..2.33 м, blk=1 на всех кадрах, ноль тапов
+            // и два «обход (вправо)» подряд. Луч упирался в поверхность
+            // СОБСТВЕННОГО камня: game.cpp теперь сравнивает m_Collider луча с
+            // коллайдером узла (OREHS_COLLIDER) и отдаёт ray_self=true при
+            // ray_blocked=false. Дальность удара кирки — живая (1.5 м), ритм её
+            // же. Пока X нет, точка прицела — пивот внутри породы (aim_3d ~2.1
+            // м); как только первый удар поставил X через Collider.ClosestPoint,
+            // прицел стоит уже на поверхности, то есть почти там же, где луч.
+            dist = 0.62f;
+            g_tgt.melee_reach = 1.5f;
+            g_tgt.tool_purposes = 2; g_farmToolHave = 2; g_farmToolNeed = 2;
+            g_tgt.ray_distance = 0.60f;
+            g_tgt.ray_blocked = false;
+            g_tgt.ray_self = true;
+            g_tgt.ray_valid = true;
+            g_tgt.ray_point_valid = true;
+            // Пивот берём глубже, чем в логе (dist + 2.4 = 3.02 м при дальности
+            // удара 1.5 м): это крупный камень, у которого aim_3d не влезает ни
+            // в один порог (meleeBody = 1.5*0.9 + 1.2 = 2.55 м). Без перехода на
+            // дистанцию луча игры (tgt.ray_self) бот не попал бы в фазу удара и
+            // на таком камне — участок проверяет обе половины починки.
+            g_tgt.aim_3d = (spot > 0) ? 0.75f : dist + 2.4f;
+            if (hp < 70.f) hp = 70.f;
+            if (frac < 0.6f) frac = 0.6f;
+            if (f == 4300) { spot = 0; strk = 0; life = -1.f; }   // X ещё нет
+        }
         // F: крестик жив, прицел сел, но у игры нет данных рейкаста — так
         // выглядит прицел на декали, висящей в 25 см от коры сбоку ствола.
         g_tgt.ray_valid = !noRayWin;
@@ -296,6 +334,18 @@ int main(int argc, char** argv) {
         tapDownPrev = g_touchDown[2];
         if (noRayWin) { ++framesNoRay; if (g_touchDown[0] > g_touchUp[0]) ++stickNoRay; }
 
+        // учёт участка I: тапы по камню и отсутствие обходов (evd/blk берём из
+        // строки лога этого же кадра — их пишет сам контроллер)
+        if (selfOreWin) {
+            ++framesSelfOre;
+            const farmlog::Row& r = farmlog::g_row;
+            if (g_farmPhase == 3) ++phase3SelfOre;
+            if (r.blk != 0) ++blkSelfOre;
+            if (r.evd > 0.f) ++evadeSelfOre;
+            if (g_touchDown[2] > tapPrevI) ++tapsSelfOre;
+        }
+        tapPrevI = g_touchDown[2];
+
         // H: что сделал камерный палец в этом кадре. Раскачка и перелёт ищутся
         // по подряд идущим кадрам с опущенным пальцем: скачок азимута цели между
         // ними законен (дерево падает, крестик переезжает) и раскачкой не является.
@@ -327,9 +377,16 @@ int main(int argc, char** argv) {
         // мир реагирует: камера докатывает отклик на палец (с задержкой)
         SimCameraStep();
         if (g_touchDown[0] > g_touchUp[0] && !deadNode) { g_eye[0] += 0.05f; g_eye[2] += 0.03f; }
-        if (g_farmPhase == 3 && f % 38 == 0 && !deadNode && !blockedWin) {
+        if (g_farmPhase == 3 && f % 38 == 0 && !deadNode && !blockedWin && !selfOreWin) {
             hp -= 6.5f; frac -= 0.05f;
             if (spot == 0) { spot = 2; life = 12.f; } else { strk++; }
+        }
+        // I: камень отвечает на удар так же, но крестик у руды свой — источник 1
+        // (OreHitstreaks.MoW) и жизнь 15 с (OREMARK_AGE). Появление X здесь —
+        // главный признак, что удар дошёл: до починки его не было вовсе.
+        if (selfOreWin && g_farmPhase == 3 && f % 38 == 0) {
+            hp -= 5.0f; frac -= 0.04f;
+            if (spot == 0) { spot = 1; life = 15.f; selfOreSpot = true; } else { strk++; }
         }
         if (life > 0.f) { life -= dt; if (life <= 0.f) { life = -1.f; spot = 0; strk = 0; } }
         if (hp <= 0.f || frac <= 0.f) {   // узел добыт — контроллер сменит цель
@@ -347,5 +404,8 @@ int main(int argc, char** argv) {
             (gainMin > 1e8f) ? 0.f : gainMin, (gainMax < -1e8f) ? 0.f : gainMax);
     fprintf(stderr, "МИГАНИЕ: кадров %d, миганий %d, удержано %d, пауз_смены_после_мигания %d\n",
             framesFlick, flicks, holdFrames, settleFrames);
+    fprintf(stderr, "РУДА_СВОЙ_ЛУЧ: кадров %d, фаза3 %d, тапов %d, blk %d, обходов %d, крестик %d\n",
+            framesSelfOre, phase3SelfOre, tapsSelfOre, blkSelfOre, evadeSelfOre,
+            selfOreSpot ? 1 : 0);
     return 0;
 }

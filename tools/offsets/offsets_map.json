@@ -1355,5 +1355,32 @@
   "type": "float",
   "offset": 28,
   "note": "3D-метры от начала луча (камеры) до попадания — ровно то, что игра сравнивает с m_MaxReach + hitRadius"
+ },
+ "RAYCASTHIT_POINT": {
+  "kind": "field",
+  "class": "UnityEngine.RaycastHit",
+  "struct": "UnityEngine_RaycastHit_Fields",
+  "field": "m_Point",
+  "type": "UnityEngine_Vector3_o",
+  "offset": 0,
+  "note": "куда луч игры упёрся в мире: по нему мерялся сдвиг декали крестика от коры (0.108 м по замеру 55 замахов в логе 14.09) и берётся радиус ствола на высоте X"
+ },
+ "RAYCASTHIT_NORMAL": {
+  "kind": "field",
+  "class": "UnityEngine.RaycastHit",
+  "struct": "UnityEngine_RaycastHit_Fields",
+  "field": "m_Normal",
+  "type": "UnityEngine_Vector3_o",
+  "offset": 12,
+  "note": "нормаль поверхности в точке попадания: по ней отличают кору от декали, висящей снаружи ствола"
+ },
+ "RAYCASTHIT_COLLIDER": {
+  "kind": "field",
+  "class": "UnityEngine.RaycastHit",
+  "struct": "UnityEngine_RaycastHit_Fields",
+  "field": "m_Collider",
+  "type": "UnityEngine_Collider_o*",
+  "offset": 40,
+  "note": "в КАКОМ коллайдере луч остановился. Сравнивается с OREHS_COLLIDER узла (тот же UnityEngine_Collider_o*) и с GameObject узла: у камня точка прицела — пивот внутри породы, поэтому без этой проверки попадание луча в собственную поверхность выглядело перекрытием и бот вечно обходил камень (лог 14.09, узел 86a3c0: 1595 кадров, ray 0.51..0.77 м при aim_3d 1.97..2.33 м, blk=1, ноль тапов)"
  }
 }

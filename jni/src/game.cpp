@@ -1645,7 +1645,7 @@ static bool g_skeleton_layout_valid = false;
 static uint64_t g_go_name_offset = 0;
 static bool     g_go_name_plain_pointer = false; // fallback: name stored as raw char*
 static bool     g_go_name_offset_valid = false;
-static int      g_go_name_retry_cooldown = 0;
+static double   g_go_name_retry_at = 0.0;   // mono_seconds: не раньше этого момента
 static int      g_skeleton_builds_this_frame = 0; // heavy rescans: max 1 per frame
 
 void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled = enabled; }
@@ -2932,13 +2932,22 @@ static bool object_class_name_is(uint64_t obj, const char* expected) {
 // the character model subtree (cheap: one BFS, then cached process-wide).
 static bool ensure_gameobject_name_offset(uint64_t player) {
     if (g_go_name_offset_valid) return true;
-    if (g_go_name_retry_cooldown > 0) { --g_go_name_retry_cooldown; return false; }
+    // Кулдаун в СЕКУНДАХ, а не в вызовах. Функцию зовут из мест с совершенно
+    // разной частотой: конвейер имён ESP — каждый кадр на каждого игрока, сканы
+    // реестра — раз в пару секунд. Прежние «60 вызовов» на первом сценарии
+    // означали новую попытку каждые ~0.1 с, а попытка — это обход поддерева
+    // трансформов модели до 256 узлов, то есть сотни process_vm_readv одним
+    // кадром. Пока смещение не найдено (или не читается поза игрока), это был
+    // один из самых дорогих периодических рывков: в логе 14.09 медленные кадры
+    // шли с интервалами 8/52/68/112 — наложение нескольких таких периодик.
+    const double now = mono_seconds();
+    if (now < g_go_name_retry_at) return false;
     uint64_t root = skeleton_model_root(player);
-    if (!root) { g_go_name_retry_cooldown = 60; return false; }
+    if (!root) { g_go_name_retry_at = now + 2.0; return false; }
     static std::vector<uint64_t> nodes;
     collect_transform_subtree(root, nodes, 256);
     if (nodes.size() < 8 || !discover_gameobject_name_offset(nodes)) {
-        g_go_name_retry_cooldown = 60;
+        g_go_name_retry_at = now + 2.0;
         return false;
     }
     return true;
@@ -3644,6 +3653,12 @@ struct MeleeReach {
     // прицел стоит на мешевом коллайдере, а не в воздухе рядом с ним.
     bool  ray_point_valid = false;
     Vec3  ray_point{}, ray_normal{};
+    // В ЧЁМ именно остановился луч: RaycastHit.m_Collider (managed Collider) и
+    // GameObject попадания (GKo.m_HitObject, тот же, из которого выше
+    // ray_hit_object). По ним отличаем «луч упёрся в сам узел добычи» от «узел
+    // перекрыт чужой геометрией» — см. ray_hit_is_self_node.
+    uint64_t ray_collider = 0;
+    uint64_t ray_hit_go = 0;
 };
 
 // Имена классов ближнего орудия читаемые и между билдами не ротируют
@@ -3750,7 +3765,15 @@ static bool read_local_melee_reach(MeleeReach& out) {
             }
             if (valid_obj(data)) {
                 out.ray_valid = true;
-                out.ray_hit_object = valid_obj(rd_ptr(data + GKO_HIT_OBJECT));
+                // GameObject и Collider попадания держим указателями: по ним
+                // проверяется, не в сам ли узел упёрся луч (у камня точка
+                // прицела внутри породы, и без этого свой камень выглядит
+                // стеной — бот вечно обходил его, не сделав ни удара).
+                const uint64_t hit_go = rd_ptr(data + GKO_HIT_OBJECT);
+                out.ray_hit_go = valid_obj(hit_go) ? hit_go : 0;
+                out.ray_hit_object = (out.ray_hit_go != 0);
+                const uint64_t hit_col = rd_ptr(data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER);
+                out.ray_collider = valid_obj(hit_col) ? hit_col : 0;
                 float dist = 0.0F;
                 if (rd_exact(data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE, dist) &&
                     std::isfinite(dist) && dist > 0.0F && dist < 1000.0F)
@@ -4013,7 +4036,7 @@ void esp_reset() {
     g_skeletons.clear();
     g_skeleton_layout = {}; g_skeleton_layout_valid = false;
     g_go_name_offset = 0; g_go_name_plain_pointer = false;
-    g_go_name_offset_valid = false; g_go_name_retry_cooldown = 0;
+    g_go_name_offset_valid = false; g_go_name_retry_at = 0.0;
     g_frame_vp_valid = false; g_frame_local_valid = false;
     reset_marker_caches();
 }
@@ -4582,7 +4605,11 @@ static bool g_markers_animal_enabled = false;
 static bool g_markers_loot_enabled = false;
 static bool g_markers_pickup_enabled = false;
 static float g_marker_max_distance = 150.0F;
-static int g_marker_rescan_countdown = 0;
+// Когда можно начинать следующий проход скана маркеров, в mono_seconds().
+// Раньше здесь был счётчик кадров (180, при пустом списке 30) из расчёта на
+// 60 fps; устройство пользователя рисует 118 кадров/с, поэтому скан шёл вдвое
+// чаще задуманного — 1.5 с вместо 3 с, а при пустом списке 0.25 с вместо 0.5 с.
+static double g_marker_next_scan = 0.0;
 static uint64_t g_network_client_class = 0;
 static uint64_t g_network_identity_class = 0;
 
@@ -4590,7 +4617,7 @@ void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups) {
     // Loot containers and ground pickups are filtered out during the registry
     // walk, so switching a category on has to invalidate the cached list.
     if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled)
-        g_marker_rescan_countdown = 0;
+        g_marker_next_scan = 0.0;
     g_markers_ore_enabled = ore;
     g_markers_animal_enabled = animals;
     g_markers_loot_enabled = loot;
@@ -4654,7 +4681,15 @@ struct FarmEntity {
 };
 static std::vector<FarmEntity> g_farm_entities;
 static std::unordered_map<uint64_t, int> g_farm_blacklist; // identity -> frames left
-static int g_farm_rescan = 0;
+// Когда можно начинать следующий проход скана реестра, в mono_seconds().
+// Раньше здесь был счётчик КАДРОВ (120, при пустом списке 30), рассчитанный на
+// 60 fps: устройство пользователя рисует 118 кадров/с, поэтому скан запускался
+// вдвое чаще задуманного — раз в ~1 с, а при пустом списке раз в 0.25 с.
+static double g_farm_next_scan = 0.0;
+// Определение скана ниже (ему нужны FarmEntity и резолверы реестра), а
+// сбрасывать его приходится и отсюда — при перезагрузке мира.
+static void farm_scan_abort();
+static void farm_scan_reset();
 // Орудие в руках и что запросили отброшенные узлы (флаги ToolPurpose) — для
 // строки статуса в меню: «нужен топор» вместо бессмысленного «все узлы вне
 // радиуса».
@@ -5364,7 +5399,7 @@ static void rebuild_marker_entities() {
 
 static void reset_marker_caches() {
     g_marker_entities.clear();
-    g_marker_rescan_countdown = 0;
+    g_marker_next_scan = 0.0;
     g_marker_class_kind.clear();
     g_network_client_class = 0;
     g_network_identity_class = 0;
@@ -5372,7 +5407,7 @@ static void reset_marker_caches() {
     // survive a world reload either.
     g_farm_entities.clear();
     g_farm_blacklist.clear();
-    g_farm_rescan = 0;
+    farm_scan_reset();
 }
 
 std::vector<EspMarker> esp_get_markers() {
@@ -5380,7 +5415,7 @@ std::vector<EspMarker> esp_get_markers() {
     if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
         !g_markers_loot_enabled && !g_markers_pickup_enabled) {
         if (!g_marker_entities.empty()) g_marker_entities.clear();
-        g_marker_rescan_countdown = 0;
+        g_marker_next_scan = 0.0;
         return result;
     }
     if (g_pid <= 0 || !g_il2cpp_base) return result;
@@ -5393,12 +5428,16 @@ std::vector<EspMarker> esp_get_markers() {
             return result;
     }
 
-    if (--g_marker_rescan_countdown <= 0) {
-        rebuild_marker_entities();
-        // ~3 s between scans: entities spawn and despawn slowly. An empty
-        // result means the registry was not readable (world still loading in
-        // after a respawn), so retry in half a second instead.
-        g_marker_rescan_countdown = g_marker_entities.empty() ? 30 : 180;
+    {
+        const double now = mono_seconds();
+        if (now >= g_marker_next_scan) {
+            rebuild_marker_entities();
+            // ~3 s between scans: entities spawn and despawn slowly. An empty
+            // result means the registry was not readable (world still loading in
+            // after a respawn), so retry in half a second instead. Интервал в
+            // секундах: при счёте в кадрах на 118 fps скан выходил вдвое чаще.
+            g_marker_next_scan = now + (g_marker_entities.empty() ? 0.5 : 3.0);
+        }
     }
 
     // No usable layout (fresh join / respawn, nobody around): learn it from
@@ -5572,104 +5611,248 @@ static bool farm_kind_from_loot(uint64_t mineable, int& kind) {
     return best > 0;
 }
 
-static void rebuild_farm_entities() {
-    // A transient read failure (the game rewrites the dictionary mid-scan)
-    // must NOT wipe the working cache: that was the "marker disappears, bot
-    // stops, marker comes back" stutter. The old list stays until a scan
-    // actually succeeds — nodes barely change between two seconds anyway.
-    uint64_t dictionary = resolve_network_client_spawned();
-    if (!dictionary) return;
-    if (!g_go_name_offset_valid && g_local_player) ensure_gameobject_name_offset(g_local_player);
-    uint64_t identity_class = resolve_network_identity_class();
+// ---- Скан реестра: порциями и с отрицательным кешем -------------------------
+// Жалоба пользователя: «при включении автофарма минуту лагают все визуалы, потом
+// иногда подлагивает». Замер по логу 14.09: кадр оверлея в норме 8.5 мс, но 153
+// кадра из 10053 вырастали до 12..34 мс, и интервалы между ними складываются в
+// периодический рисунок 8/52/68/112 кадров — это ресканы. Один проход стоил
+// столько, сколько записей в NetworkClient.spawned: у каждой читались класс,
+// список компонентов и сами компоненты (~10 process_vm_readv), а объектов в мире
+// тысячи. Десятки тысяч чтений одним кадром — тот самый рывок, который видно
+// глазом; на 118 fps скан к тому же запускался вдвое чаще задуманного, потому
+// что счётчик был в кадрах из расчёта на 60 fps.
+//
+// Теперь три вещи сразу:
+//   1) отрицательный кеш: запись, у которой в компонентах нет MineableObject,
+//      запоминается вместе с указателем её списка компонентов и в следующих
+//      проходах проверяется ОДНИМ чтением вместо десяти: пока поле указывает на
+//      тот же список, объект тот же и вердикт в силе. Адрес освободившегося
+//      объекта игра может отдать новому (в том числе узлу добычи) — тогда поле
+//      почти наверняка смотрит на другой список, запись выбрасывается и объект
+//      классифицируется заново. Узлов добычи в мире десятки, прочих объектов
+//      тысячи, поэтому установившийся проход стоит по одному чтению на запись;
+//   2) порционность: расход кадра задан в условных чтениях (kFarmScanBudget),
+//      сверка с кешем стоит одно чтение, классификация новой записи — около
+//      двенадцати, поэтому даже холодный проход растягивается по кадрам и ни
+//      один кадр не платит за весь мир сразу;
+//   3) результат прохода подменяет рабочий список ЦЕЛИКОМ в конце: пока проход
+//      идёт, бот работает по прежнему списку. Прежняя гарантия («сбой чтения не
+//      должен вычищать кеш — иначе маркер пропадал и бот вставал») сохранена и
+//      усилена: окна «целей нет» на время скана больше не существует вовсе.
+// identity -> указатель её списка компонентов на момент вердикта «не узел».
+static std::unordered_map<uint64_t, uint64_t> g_farm_not_node;
+static std::vector<uint64_t>   g_farm_scan_ids;       // записи текущего прохода
+static size_t                  g_farm_scan_idx = 0;   // курсор прохода
+static std::vector<FarmEntity> g_farm_scan_stage;     // накопленный результат
+static bool                    g_farm_scan_run = false;
 
-    uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
-    int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
-    if (!valid_obj(entries) || count <= 0) return;
-    if (count > 4096) count = 4096;
+// Бюджет прохода — в условных чтениях за кадр, а не в записях: сверка с кешем
+// стоит одно чтение, классификация новой записи — около двенадцати (класс,
+// список, компоненты, трансформ, иногда имя префаба и loot-списки). Пока целей
+// нет вовсе (старт фарма, перезагрузка мира), бот просто стоит, поэтому идём
+// вчетверо быстрее; когда список есть — спешить некуда, старый список остаётся
+// рабочим до конца прохода.
+constexpr int    kFarmScanBudget     = 200;  // мягкий бюджет, единицы чтения/кадр
+constexpr int    kFarmScanBudgetFast = 600;  // пока рабочий список пуст
+constexpr int    kFarmScanCostCached = 1;    // сверка записи из кеша
+constexpr int    kFarmScanCostNew    = 12;   // классификация новой записи
+constexpr double kFarmScanPeriod   = 2.0;   // с между проходами, когда узлы есть
+constexpr double kFarmScanRetry    = 0.5;   // с, когда список пуст (мир грузится)
+constexpr size_t kFarmNegCacheMax  = 16384; // потолок кеша, записей
 
-    std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
-    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) return;
-    g_farm_entities.clear(); // scan is readable from here on — rebuild for real
+// Бросить незавершённый проход (смена маски ресурсов, перезагрузка мира).
+static void farm_scan_abort() {
+    g_farm_scan_run = false;
+    g_farm_scan_idx = 0;
+    g_farm_scan_ids.clear();
+    g_farm_scan_stage.clear();
+}
 
-    uint64_t behaviours[32];
-    for (int32_t i = 0; i < count; ++i) {
-        uint64_t identity = 0;
-        memcpy(&identity, buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE, sizeof(identity));
-        if (!valid_obj(identity)) continue;
-        if (identity_class && rd_ptr(identity) != identity_class) continue;
-        uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
-        if (!valid_obj(array)) continue;
-        int32_t behaviour_count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
-        if (behaviour_count <= 0) continue;
-        if (behaviour_count > 32) behaviour_count = 32;
-        if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)behaviour_count * sizeof(uint64_t)))
-            continue;
+// Полный сброс скана: рабочий список чистит вызывающий, здесь — кеш и проход.
+static void farm_scan_reset() {
+    farm_scan_abort();
+    g_farm_not_node.clear();
+    g_farm_next_scan = 0.0;
+}
 
-        for (int32_t b = 0; b < behaviour_count; ++b) {
-            uint64_t component = behaviours[b];
-            if (!valid_obj(component)) continue;
-            if (marker_class_of(rd_ptr(component)) != MARKER_CLASS_MINEABLE) continue;
+// Вердикт по одной записи реестра:
+//   0 — структурно не узел добычи; behaviours — её список компонентов (по нему
+//       запись потом сверяется одним чтением вместо полной классификации);
+//   1 — узел есть, но сейчас он не наш: маска ресурсов, сбой чтения, ещё не
+//       изучена раскладка трансформов. Запоминать НЕЛЬЗЯ — условие временное;
+//   2 — наш узел, entity заполнена (transform, required_purpose, pos);
+//   3 — запись вообще не NetworkIdentity: кешировать нечего, повторная проверка
+//       и так стоит одно чтение за проход.
+static int farm_classify_identity(uint64_t identity, uint64_t identity_class,
+                                  FarmEntity& entity, uint64_t& behaviours) {
+    behaviours = 0;
+    if (identity_class && rd_ptr(identity) != identity_class) return 3;
+    uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
+    if (!valid_obj(array)) return 3;
+    behaviours = array;
+    int32_t behaviour_count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
+    if (behaviour_count <= 0) return 0;
+    if (behaviour_count > 32) behaviour_count = 32;
+    uint64_t comps[32];   // список компонентов (behaviours — выходной параметр)
+    if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, comps,
+                (size_t)behaviour_count * sizeof(uint64_t)))
+        return 1;   // словарь переписывают на ходу: не вердикт, а повод повторить
 
-            // Kind: the entityType enum first (cheap and exact), loot second.
-            int kind = -1;
-            switch ((MineableEntityType)rd<int32_t>(component + MINEABLE_ENTITY_TYPE)) {
-                case MineableEntityType::Tree:   kind = 0; break;
-                case MineableEntityType::Stone:  kind = 1; break;
-                case MineableEntityType::Iron:   kind = 2; break;
-                case MineableEntityType::Sulfur: kind = 3; break;
-                default: break;
-            }
-            if (kind < 0 && !farm_kind_from_loot(component, kind)) continue;
-            if (!(g_farm_mask & (1u << kind))) continue;
-
-            FarmEntity entity;
-            entity.identity = identity;
-            entity.component = component;
-            entity.kind = kind;
-            entity.transform = native_component_transform(managed_object_native(component));
-            if (!entity.transform)
-                entity.transform = native_component_transform(managed_object_native(identity));
-            if (!entity.transform) continue;
-
-            // Fallen logs register as "Tree" but cannot be chopped the same
-            // way — the bot just circles them. Filter them out by prefab
-            // name (log / fallen / dead / driftwood variants).
-            if (kind == 0 && g_go_name_offset_valid) {
-                char go_name[48];
-                if (read_transform_name(entity.transform, go_name, sizeof(go_name))) {
-                    for (char* p = go_name; *p; ++p)
-                        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
-                    if (strstr(go_name, "log") || strstr(go_name, "fallen") ||
-                        strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
-                        strstr(go_name, "stump"))
-                        continue;
-                }
-            }
-
-            // Чем этот узел вообще можно взять. Мусорное значение (не из
-            // набора флагов) считаем отсутствием требования, чтобы ошибка
-            // чтения не оставила фарм без целей.
-            {
-                const int32_t known = (int32_t)ToolPurpose::CutWood |
-                                      (int32_t)ToolPurpose::BreakRocks |
-                                      (int32_t)ToolPurpose::CutAnimals;
-                const int32_t purpose = rd<int32_t>(component + MINEABLE_REQUIRED_TOOL_PURPOSE);
-                entity.required_purpose = ((purpose & ~known) == 0) ? (int)purpose : 0;
-            }
-
-            entity.pos_valid = marker_world_position(entity.transform, entity.pos);
-            g_farm_entities.push_back(entity);
-            if (g_farm_entities.size() >= 512) break;
+    // Kind: the entityType enum first (cheap and exact), loot second.
+    uint64_t component = 0;
+    int kind = -1;
+    for (int32_t b = 0; b < behaviour_count && kind < 0; ++b) {
+        const uint64_t cand = comps[b];
+        if (!valid_obj(cand)) continue;
+        if (marker_class_of(rd_ptr(cand)) != MARKER_CLASS_MINEABLE) continue;
+        component = cand;
+        switch ((MineableEntityType)rd<int32_t>(component + MINEABLE_ENTITY_TYPE)) {
+            case MineableEntityType::Tree:   kind = 0; break;
+            case MineableEntityType::Stone:  kind = 1; break;
+            case MineableEntityType::Iron:   kind = 2; break;
+            case MineableEntityType::Sulfur: kind = 3; break;
+            default: break;
         }
-        if (g_farm_entities.size() >= 512) break;
+        if (kind < 0 && !farm_kind_from_loot(component, kind)) kind = -1;
     }
+    if (!component) return 0;   // в компонентах нет MineableObject — не узел
+    if (kind < 0) return 1;     // узел, но ресурс не опознан (сбой чтения)
+    if (!(g_farm_mask & (1u << kind))) return 1;   // маску меняют на лету
+
+    entity.identity = identity;
+    entity.component = component;
+    entity.kind = kind;
+    entity.transform = native_component_transform(managed_object_native(component));
+    if (!entity.transform)
+        entity.transform = native_component_transform(managed_object_native(identity));
+    if (!entity.transform) return 1;   // раскладка трансформов ещё не изучена
+
+    // Fallen logs register as "Tree" but cannot be chopped the same way — the
+    // bot just circles them. Filter them out by prefab name (log / fallen /
+    // dead / driftwood variants). Вердикт структурный, поэтому бревно уходит в
+    // отрицательный кеш: чтение имени (несколько syscall'ов плюс строка) больше
+    // не повторяется на каждом проходе.
+    if (kind == 0 && g_go_name_offset_valid) {
+        char go_name[48];
+        if (read_transform_name(entity.transform, go_name, sizeof(go_name))) {
+            for (char* p = go_name; *p; ++p)
+                if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+            if (strstr(go_name, "log") || strstr(go_name, "fallen") ||
+                strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
+                strstr(go_name, "stump"))
+                return 0;
+        }
+    }
+
+    // Чем этот узел вообще можно взять. Мусорное значение (не из набора флагов)
+    // считаем отсутствием требования, чтобы ошибка чтения не оставила фарм без
+    // целей.
+    {
+        const int32_t known = (int32_t)ToolPurpose::CutWood |
+                              (int32_t)ToolPurpose::BreakRocks |
+                              (int32_t)ToolPurpose::CutAnimals;
+        const int32_t purpose = rd<int32_t>(component + MINEABLE_REQUIRED_TOOL_PURPOSE);
+        entity.required_purpose = ((purpose & ~known) == 0) ? (int)purpose : 0;
+    }
+
+    entity.pos_valid = marker_world_position(entity.transform, entity.pos);
+    return 2;
+}
+
+// Один шаг скана. Вызывается каждый кадр; сам решает, пора ли начинать проход и
+// не пора ли его закончить. Дороже kFarmScanBudget записей за кадр не делает.
+static void farm_scan_tick() {
+    const double now = mono_seconds();
+    if (!g_farm_scan_run && now < g_farm_next_scan) return;
+
+    if (!g_farm_scan_run) {
+        // Начало прохода. Сам словарь читается одним куском (это дёшево), а вот
+        // классификация записей растягивается по кадрам. Сбой чтения здесь не
+        // вердикт: рабочий список не тронут, повторим через kFarmScanRetry.
+        uint64_t dictionary = resolve_network_client_spawned();
+        if (!dictionary) { g_farm_next_scan = now + kFarmScanRetry; return; }
+        uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
+        int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
+        if (!valid_obj(entries) || count <= 0) {
+            g_farm_next_scan = now + kFarmScanRetry;
+            return;
+        }
+        if (count > 4096) count = 4096;
+        std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
+        if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) {
+            g_farm_next_scan = now + kFarmScanRetry;
+            return;
+        }
+        g_farm_scan_ids.resize((size_t)count);
+        for (int32_t i = 0; i < count; ++i)
+            memcpy(&g_farm_scan_ids[(size_t)i],
+                   buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE,
+                   sizeof(uint64_t));
+        g_farm_scan_idx = 0;
+        g_farm_scan_stage.clear();
+        g_farm_scan_run = true;
+        // Фильтр поваленных брёвен нуждается в смещении имени GameObject.
+        // Ищем его раз на проход (а не каждый кадр прохода): попытка стоит
+        // обхода поддерева трансформов, см. ensure_gameobject_name_offset.
+        if (!g_go_name_offset_valid && g_local_player)
+            ensure_gameobject_name_offset(g_local_player);
+    }
+
+    const uint64_t identity_class = resolve_network_identity_class();
+
+    int budget = g_farm_entities.empty() ? kFarmScanBudgetFast : kFarmScanBudget;
+    while (g_farm_scan_idx < g_farm_scan_ids.size()) {
+        const uint64_t identity = g_farm_scan_ids[g_farm_scan_idx++];
+        if (!valid_obj(identity)) continue;
+        const auto cached = g_farm_not_node.find(identity);
+        const int cost = (cached != g_farm_not_node.end()) ? kFarmScanCostCached
+                                                           : kFarmScanCostNew;
+        if (budget < cost) { --g_farm_scan_idx; break; }  // доработаем в следующем кадре
+        budget -= cost;
+
+        if (cached != g_farm_not_node.end()) {
+            // Одно чтение: список компонентов на месте и тот же — объект не
+            // сменился, вердикт «не узел добычи» остаётся в силе.
+            if (rd_ptr(identity + NETID_BEHAVIOURS) == cached->second) continue;
+            g_farm_not_node.erase(cached);   // адрес переиспользовали
+        }
+
+        FarmEntity entity;
+        uint64_t behaviours = 0;
+        const int verdict = farm_classify_identity(identity, identity_class, entity, behaviours);
+        if (verdict == 0) {
+            if (behaviours && g_farm_not_node.size() < kFarmNegCacheMax)
+                g_farm_not_node.emplace(identity, behaviours);
+            continue;
+        }
+        if (verdict != 2) continue;
+        g_farm_scan_stage.push_back(entity);
+        if (g_farm_scan_stage.size() >= 512) {
+            g_farm_scan_idx = g_farm_scan_ids.size();
+            break;
+        }
+    }
+    if (g_farm_scan_idx < g_farm_scan_ids.size()) return;   // проход не закончен
+
+    g_farm_entities = std::move(g_farm_scan_stage);
+    g_farm_scan_stage.clear();
+    g_farm_scan_ids.clear();
+    g_farm_scan_idx = 0;
+    g_farm_scan_run = false;
+    // Пустой результат означает «реестр ещё не читается / мир грузится после
+    // респауна» — повторяем чаще, но всё равно не каждый кадр.
+    g_farm_next_scan = now + (g_farm_entities.empty() ? kFarmScanRetry : kFarmScanPeriod);
 }
 
 void esp_farm_set_resources(unsigned mask) {
     if (g_farm_mask != mask) {
         g_farm_mask = mask;
         g_farm_entities.clear();
-        g_farm_rescan = 0;
+        // Проход скана, если он шёл, собран под старой маской — выбрасываем его
+        // и начинаем заново. Отрицательный кеш при этом жив: «нет компонента
+        // MineableObject» от выбранных галочек ресурсов не зависит.
+        farm_scan_abort();
+        g_farm_next_scan = 0.0;
     }
     if (!mask) g_farm_blacklist.clear();
 }
@@ -5695,7 +5878,8 @@ void esp_farm_blacklist(unsigned long long id, float seconds) {
     for (auto it = g_farm_entities.begin(); it != g_farm_entities.end(); ++it) {
         if (it->identity == (uint64_t)id) { g_farm_entities.erase(it); break; }
     }
-    if (g_farm_rescan > 15) g_farm_rescan = 15;
+    const double soon = mono_seconds() + 0.25;
+    if (g_farm_next_scan > soon) g_farm_next_scan = soon;
 }
 
 // ---- Крестик: читаем из памяти, а не угадываем ------------------------------
@@ -5897,6 +6081,46 @@ void esp_farm_tool_info(int& purposes_have, int& purposes_need) {
     purposes_need = g_farm_tool_need;
 }
 
+// Упёрся ли луч прицела в САМ узел добычи, а не в перекрытие.
+//
+// Зачем: у камня точка прицела — пивот узла с зажимом по высоте, то есть точка
+// ВНУТРИ породы. Луч игры останавливается на ближней поверхности камня гораздо
+// раньше неё (лог 14.09, узел 86a3c0: ray 0.51..0.77 м при aim_3d 1.97..2.33 м
+// на всех 1595 кадрах окна), поэтому прежняя формула «луч дошёл заметно раньше
+// точки прицела => перекрыт» принимала за стену собственный камень. Дальше
+// контроллер честно отрабатывал перекрытие: «перекрыт — обхожу», круги вокруг
+// узла, ноль тапов и ноль крестиков. Дерево при этом работало: там поправка на
+// кору ставит прицел НА поверхность, ray_distance ≈ aim_3d и «перекрыт» не
+// возникало — на деревья эта проверка не влияет.
+//
+// Удар по своему же камню игра засчитывает: FPMelee.ZkX сравнивает с
+// m_MaxReach + hitRadius distance ЭТОГО луча (0.5..0.8 м при дальности 1.5 м),
+// а не нашу дистанцию до точки прицела. После первого удара OreHitstreaks.giu
+// ставит X через Collider.ClosestPoint — уже на поверхности, и дальше прицел
+// стоит на крестике, как у дерева.
+//
+// Своим считается попадание по любому из двух признаков:
+//   1) m_Collider луча — коллайдер экстеншена руды (OREHS_COLLIDER: тот самый
+//      Collider, которым игра ставит X). Сначала сравниваем managed-указатели
+//      напрямую, потом их нативные объекты — обёртка может быть другой;
+//   2) GameObject попадания — GameObject узла. У узла в кеше transform уже
+//      нативный, у попадания managed, поэтому сравниваем нативные.
+// Вызывается только когда старая формула сказала «перекрыт», так что лишние
+// чтения (3..5) достаются лишь редким кадрам с реальным подозрением на стену.
+static bool ray_hit_is_self_node(const MeleeReach& reach, const FarmEntity& node) {
+    if (!reach.ray_valid || !reach.ray_hit_go) return false;
+    if (reach.ray_collider && node.ext && node.ext_kind == FARM_EXT_ORE) {
+        const uint64_t col = rd_ptr(node.ext + OREHS_COLLIDER);
+        if (col && (col == reach.ray_collider ||
+                    managed_object_native(col) == managed_object_native(reach.ray_collider)))
+            return true;
+    }
+    if (!node.transform) return false;
+    const uint64_t node_go = rd_ptr(node.transform + COMPONENT_GAMEOBJECT);
+    if (!node_go) return false;
+    return managed_object_native(reach.ray_hit_go) == node_go;
+}
+
 bool esp_farm_get_target(FarmTarget& out) {
     out = FarmTarget{};
     if (!g_farm_mask) { g_farm_idle_reason = 1; return false; }
@@ -5916,10 +6140,7 @@ bool esp_farm_get_target(FarmTarget& out) {
         else ++it;
     }
 
-    if (--g_farm_rescan <= 0) {
-        rebuild_farm_entities();
-        g_farm_rescan = g_farm_entities.empty() ? 30 : 120; // ~0.5 с / ~2 с
-    }
+    farm_scan_tick();
 
     // Липкая цель: пока текущий узел жив, работаем по нему — иначе контроллер
     // переключался бы между двумя равноудалёнными узлами каждый кадр.
@@ -5976,7 +6197,10 @@ bool esp_farm_get_target(FarmTarget& out) {
             // иначе один ближний узел стоил по syscall'у на узел каждый кадр.
             FarmEntity& mut = const_cast<FarmEntity&>(entity);
             if (--mut.frac_age <= 0) {
-                mut.frac_age = 60;
+                // 120 кадров: «раз в секунду» задумывалось при 60 fps, а на
+                // 118 fps выходило вдвое чаще — по syscall'у на каждый ближний
+                // узел дважды в секунду.
+                mut.frac_age = 120;
                 mut.fraction = rd<float>(entity.component + MINEABLE_FRACTION);
             }
             if (std::isfinite(mut.fraction) && mut.fraction >= 0.0F &&
@@ -6241,6 +6465,13 @@ bool esp_farm_get_target(FarmTarget& out) {
         out.ray_blocked = reach.ray_valid && reach.ray_hit_object &&
                           reach.ray_distance > 0.0F &&
                           reach.ray_distance < out.aim_3d - 0.6F;
+        // Луч, упёршийся в собственный узел, перекрытием не считается: у камня
+        // точка прицела внутри породы, и иначе бот вечно обходил бы свой же
+        // камень (см. ray_hit_is_self_node).
+        if (out.ray_blocked) {
+            out.ray_self = ray_hit_is_self_node(reach, node);
+            if (out.ray_self) out.ray_blocked = false;
+        }
         out.ray_point_valid = reach.ray_point_valid;
         if (reach.ray_point_valid) {
             out.ray_px = reach.ray_point.x; out.ray_py = reach.ray_point.y;

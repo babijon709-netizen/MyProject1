@@ -234,6 +234,11 @@ inline constexpr std::uint64_t RAYCASTHIT_DISTANCE           = 0x1C;  // m_Dista
 //   m_Distance 0x1C, m_UV 0x20, m_Collider 0x28  — размер 0x2C.
 inline constexpr std::uint64_t RAYCASTHIT_POINT              = 0x00;  // куда луч упёрся (мир)
 inline constexpr std::uint64_t RAYCASTHIT_NORMAL             = 0x0C;  // нормаль поверхности там
+// m_Collider — В КАКОМ коллайдере луч остановился. Нужен, чтобы отличить «луч
+// упёрся в сам узел добычи» от «узел перекрыт чужой геометрией»: у камня точка
+// прицела лежит внутри породы, поэтому луч всегда доходит до неё раньше и без
+// этого поля собственный камень выглядел стеной (см. ray_hit_is_self_node).
+inline constexpr std::uint64_t RAYCASTHIT_COLLIDER           = 0x28;  // UnityEngine.Collider
 
 // Ragdoll bone list route (dump.cs) — game-maintained list of rig bone
 // transforms, no name matching needed:
