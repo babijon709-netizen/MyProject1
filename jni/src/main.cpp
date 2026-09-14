@@ -3798,6 +3798,15 @@ constexpr float kReachBodyAllowance = 1.20f;
 // Меньше этого живая дальность недостоверна (в конструкторе FPMelee заглушки
 // 0.5/0.1 — префаб их перезаписывает, но и префаб может не успеть примениться).
 constexpr float kReachLiveMin = 0.70f;
+// Пока у игры нет данных рейкаста прицела (обёртка GKo пуста), удар не
+// засчитывается вовсе — FPMelee.ZkX играет один On_Woosh. Лог 14.09.2026:
+// валидность луча 97% на aim3d ~0.50 м и 19% на ~0.75 м, а из 48 замахов без
+// урона луча не было в 43. Поэтому (а) тап держим, пока луч не появится, но не
+// дольше kNoRaySwingAfter — вдруг на этой сборке обёртка просто не читается, и
+// (б) стик тем временем поджимает ближе, к kNoRayCloseTo, где луч живёт.
+constexpr float kNoRaySwingAfter = 2.5f;   // с без луча — больше не ждём, бьём
+constexpr float kNoRayCloseTo    = 0.50f;  // м: докуда поджимаем, пока луча нет
+                                           // (ровно тот aim3d, где луч жил в 97%)
 
 // Допуск наведения, градусы. По крестику жёстко: 2° промаха на 1.5 м — это
 // 5 см в стороне, а засчитываемая зона у дерева всего 15 см.
@@ -3826,6 +3835,13 @@ constexpr float kTapUpMs   = 230.f;      // лишние игра просто �
 
 constexpr float kSettleTime    = 0.70f;  // пауза при смене узла
 constexpr float kLostHold      = 0.80f;  // цель может мигнуть на рескане реестра
+// Смена узла тоже дебаунсится: новый обязан продержаться «лучшим» несколько
+// кадров подряд. Лог 14.09.2026 — узел в 20 м перехватывал цель ровно на один
+// кадр 9 раз за 150 с, и каждая смена в обе стороны стоила 0.7 с паузы
+// (kSettleTime): 854 кадра простоя. Если цель так и прыгает туда-сюда дольше
+// kFlickerGiveUp, переключаемся по-настоящему — иначе бот застыл бы навсегда.
+constexpr int   kNodeDebounce  = 3;      // кадров подряд на новом узле
+constexpr float kFlickerGiveUp = 1.0f;   // с прыжков — больше не держимся
 constexpr float kDepletedFrac  = 0.03f;
 constexpr int   kDepletedFrames = 10;    // дебаунс сырого чтения остатка
 constexpr float kStuckTime     = 3.00f;  // нет продвижения к точке подхода
@@ -3917,6 +3933,19 @@ struct Row {
     // Не печатаются: нужны, чтобы посчитать печатное.
     float camYaw = 0.f;                 // абсолютный yaw камеры, град
     float stickCx = 0.f, stickCy = 0.f;  // центр виртуального стика, px
+
+    // Не печатаются: геометрия для строк EV. По ним в логе видно, стоял ли
+    // прицел на коллайдере ствола и куда упёрся луч самой игры.
+    float aimX = 0.f, aimY = 0.f, aimZ = 0.f;    // точка прицела, мир
+    float nodeX = 0.f, nodeY = 0.f, nodeZ = 0.f; // пивот узла (ось ствола), мир
+    float rayX = 0.f, rayY = 0.f, rayZ = 0.f;    // RaycastHit.m_Point луча игры
+    float rayNX = 0.f, rayNY = 0.f, rayNZ = 0.f; // RaycastHit.m_Normal там же
+    int   rayPt = 0;                             // 1 = точка луча прочитана
+    float rawAx = 0.f, rawAy = 0.f, rawAz = 0.f; // сырой SPOT_A (точка на коре)
+    float rawBx = 0.f, rawBy = 0.f, rawBz = 0.f; // сырой SPOT_B (конец сегмента)
+    int   rawWhy = 3;                            // почему SPOT_A не стал прицелом
+    float rawLen = -1.f;                         // |A-B|, м
+    float noRayT = 0.f;                          // сколько подряд нет луча игры, с
 };
 static Row g_row;                 // заполняется по ходу UpdateFarm
 
@@ -3940,6 +3969,7 @@ static unsigned long long g_prevNode = 0;
 static int  g_prevReason = -999;
 static int  g_prevSpot   = -999;
 static int  g_prevAt     = -999;
+static int  g_prevTp     = 0;    // палец удара: по фронту 0->1 пишем строку замаха
 static int  g_prevPaused = 0;    // 0, а не «не было»: иначе первый кадр пишет «пауза снята»
 static bool g_wasOff     = false;
 
@@ -4090,6 +4120,7 @@ static void resetTransitions(bool keepOff = false) {
     g_prevReason = -999;
     g_prevSpot = -999;
     g_prevAt = -999;
+    g_prevTp = 0;
     g_prevPaused = 0;
 }
 
@@ -4172,7 +4203,21 @@ static void transitions() {
     }
     if (haveData && r.node && r.node == g_prevNode) {
         if (r.spot != g_prevSpot) {
-            if (r.spot > 0)       event("крестик появился: источник %d, жизнь %.1f с", r.spot, (double)r.life);
+            if (r.spot > 0) {
+                // Сразу и диагностика точки прицела. В логе 14.09.2026 источник
+                // был 3 (декаль) во всех 10887 строках и ни разу 2 (точка на
+                // коре): по сырым полям SPOT_A/SPOT_B видно, пусты ли они в
+                // памяти или значения есть, но их отвергла проверка «на узле».
+                event("крестик появился: источник %d, жизнь %.1f с; SPOT_A %.2f,%.2f,%.2f "
+                      "SPOT_B %.2f,%.2f,%.2f len %.2f why %d (0 принят, 1 не конечен, "
+                      "2 вне узла, 3 не читали); прицел %.2f,%.2f,%.2f узел %.2f,%.2f,%.2f",
+                      r.spot, (double)r.life,
+                      (double)r.rawAx, (double)r.rawAy, (double)r.rawAz,
+                      (double)r.rawBx, (double)r.rawBy, (double)r.rawBz,
+                      (double)r.rawLen, r.rawWhy,
+                      (double)r.aimX, (double)r.aimY, (double)r.aimZ,
+                      (double)r.nodeX, (double)r.nodeY, (double)r.nodeZ);
+            }
             else if (r.spot == 0) event("крестик пропал — бьём по корпусу");
             else                  event("экстеншен крестика на узле не найден");
             g_prevSpot = r.spot;
@@ -4182,6 +4227,38 @@ static void transitions() {
             g_prevAt = r.at;
         }
     }
+
+    // Каждый тап удара — отдельной строкой: по ней видно, был ли у игры луч
+    // прицела и куда он упёрся относительно нашей точки. Это ровно то, что
+    // отличает удар по коре от удара в воздух: FPMelee.ZkX берёт distance из
+    // GKo (RaycastData/AimRaycast), а с пустой обёрткой играет один On_Woosh.
+    if (haveData && r.tp == 1 && g_prevTp != 1 && r.node) {
+        char rayTxt[176];
+        if (r.rayPt) {
+            const float dx = r.rayX - r.aimX, dy = r.rayY - r.aimY, dz = r.rayZ - r.aimZ;
+            snprintf(rayTxt, sizeof(rayTxt),
+                     "луч %.2f (%+.3f к прицелу) точка %.2f,%.2f,%.2f (%.3f м от прицела) "
+                     "n %.2f,%.2f,%.2f",
+                     (double)r.ray, (double)(r.ray - r.aim3d),
+                     (double)r.rayX, (double)r.rayY, (double)r.rayZ,
+                     (double)sqrtf(dx * dx + dy * dy + dz * dz),
+                     (double)r.rayNX, (double)r.rayNY, (double)r.rayNZ);
+        } else if (r.ray > -90.f) {
+            snprintf(rayTxt, sizeof(rayTxt), "луч %.2f (%+.3f к прицелу), точка не прочиталась",
+                     (double)r.ray, (double)(r.ray - r.aim3d));
+        } else {
+            snprintf(rayTxt, sizeof(rayTxt), "ЛУЧА НЕТ - удар не засчитается (On_Woosh)");
+        }
+        event("замах: dist %.2f aim3d %.2f yaw %+.2f pitch %+.2f at %d spot %d life %.1f "
+              "strk %d hp %.1f blk %d | %s | прицел %.2f,%.2f,%.2f узел %.2f,%.2f,%.2f | "
+              "без луча %.2f с",
+              (double)r.dist, (double)r.aim3d, (double)r.yaw, (double)r.pitch,
+              r.at, r.spot, (double)r.life, r.strk, (double)r.hp, r.blk, rayTxt,
+              (double)r.aimX, (double)r.aimY, (double)r.aimZ,
+              (double)r.nodeX, (double)r.nodeY, (double)r.nodeZ,
+              (double)r.noRayT);
+    }
+    g_prevTp = r.tp;
 }
 
 static void endFrame(float dt) {
@@ -4301,6 +4378,10 @@ static void UpdateFarmInner(float dt) {
     static int   s_evadeWhy = 0;      // 0 нет, 1 застрял на подходе, 2 узел перекрыт
     static float s_walkOffTime = 0.f; // гистерезис отпускания джойстика
     static float s_stickPx = 0.f, s_stickPy = 0.f; // сглаженная позиция стика
+    static float s_noRayTime = 0.f;   // сколько подряд у игры нет луча прицела
+    static unsigned long long s_candId = 0; // узел-кандидат на смену цели
+    static int   s_candFrames = 0;    // сколько кадров подряд он лучший
+    static float s_flickerTime = 0.f; // сколько держимся прежнего, с
 
     auto releaseAll = [&]() {
         if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
@@ -4316,7 +4397,8 @@ static void UpdateFarmInner(float dt) {
         s_depletedFrames = 0;
         s_lastWalk = 1e9f; s_stuckTime = 0.f;
         s_evadeTime = 0.f; s_evadeCount = 0; s_evadeWhy = 0;
-        s_walkOffTime = 0.f;
+        s_walkOffTime = 0.f; s_noRayTime = 0.f;
+        s_candId = 0; s_candFrames = 0; s_flickerTime = 0.f;
     };
 
     // Строка лога этого кадра: заполняем по ходу, на выходе её пишет обёртка.
@@ -4436,6 +4518,29 @@ static void UpdateFarmInner(float dt) {
     fl.blk   = tgt.ray_blocked ? 1 : 0;
     fl.toolH = g_farmToolHave;
     fl.toolN = g_farmToolNeed;
+    // Геометрия для строк EV (в сами колонки не идёт, чтобы не ломать формат).
+    fl.aimX  = tgt.aim_x;  fl.aimY  = tgt.aim_y;  fl.aimZ  = tgt.aim_z;
+    fl.nodeX = tgt.node_x; fl.nodeY = tgt.node_y; fl.nodeZ = tgt.node_z;
+    fl.rayPt = tgt.ray_point_valid ? 1 : 0;
+    if (tgt.ray_point_valid) {
+        fl.rayX  = tgt.ray_px; fl.rayY  = tgt.ray_py; fl.rayZ  = tgt.ray_pz;
+        fl.rayNX = tgt.ray_nx; fl.rayNY = tgt.ray_ny; fl.rayNZ = tgt.ray_nz;
+    }
+    {
+        float ax = 0.f, ay = 0.f, az = 0.f, bx = 0.f, by = 0.f, bz = 0.f, rlen = -1.f;
+        int   rwhy = 3;
+        esp_farm_spot_raw(ax, ay, az, bx, by, bz, rwhy, rlen);
+        fl.rawAx = ax; fl.rawAy = ay; fl.rawAz = az;
+        fl.rawBx = bx; fl.rawBy = by; fl.rawBz = bz;
+        fl.rawWhy = rwhy; fl.rawLen = rlen;
+    }
+    // Есть ли у игры данные рейкаста прицела. FPMelee.ZkX берёт distance из
+    // GKo (RaycastData/AimRaycast); пока обёртка пуста, удар не засчитывается
+    // вовсе — играет один On_Woosh. Лог 14.09.2026: 43 из 48 замахов без урона
+    // шли вообще без луча, а из 39 результативных луч был в 37.
+    const bool noRay = tgt.at_spot && !tgt.ray_valid;
+    s_noRayTime = noRay ? (s_noRayTime + dt) : 0.f;
+    fl.noRayT = s_noRayTime;
 
     if (!driving) {
         fl.ex = farmlog::EX_PAUSED;
@@ -4450,7 +4555,32 @@ static void UpdateFarmInner(float dt) {
         return;
     }
 
-    if (tgt.id != s_nodeId) {
+    if (tgt.id == s_nodeId) {
+        // Цель на месте — кандидат сбрасывается: считать надо кадры ПОДРЯД,
+        // иначе редкие однокадровые мигания на один и тот же чужой узел
+        // накопились бы и переключение всё равно случилось (проверено стендом:
+        // на 3-м мигании s_candFrames дорастал до kNodeDebounce).
+        s_candId = 0; s_candFrames = 0; s_flickerTime = 0.f;
+    } else {
+        // Дебаунс: один кадр на новом узле — это ещё не смена цели (рескан
+        // реестра легко роняет рабочую цель на кадр). Держим прежний узел тем
+        // же способом, что и при пропаже цели: ввод заморожен, ничего не
+        // сбрасывается, иначе каждое мигание стоило бы 0.7 с паузы.
+        if (tgt.id == s_candId) ++s_candFrames;
+        else { s_candId = tgt.id; s_candFrames = 1; s_flickerTime = 0.f; }
+        if (s_nodeId != 0 && s_candFrames < kNodeDebounce && s_flickerTime < kFlickerGiveUp) {
+            s_flickerTime += dt;
+            if (s_candFrames == 1)
+                farmlog::event("цель мигнула на узел %06x (dist %.1f aim3d %.1f) — держим %06x",
+                               (unsigned)(tgt.id & 0xFFFFFFu), (double)tgt.node_dist,
+                               (double)tgt.aim_3d, (unsigned)(s_nodeId & 0xFFFFFFu));
+            fl.ex = farmlog::EX_LOSTHOLD;
+            fl.node = (unsigned)(s_nodeId & 0xFFFFFFu);
+            if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }   // вслепую не машем
+            if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; s_haveLast = false; }
+            return;   // палец движения оставляем, где был
+        }
+        s_candId = 0; s_candFrames = 0; s_flickerTime = 0.f;
         // Смена узла: поднять все пальцы и постоять. Иначе старые вводные
         // движения/камеры ещё несколько кадров проигрываются против новой цели
         // — та самая бешеная тряска сразу после того, как узел добыт.
@@ -4657,7 +4787,13 @@ static void UpdateFarmInner(float dt) {
         bool wantWalk =
             (phase == 2 && tgt.walk_dist > kArriveWalk) ||
             (phase == 1 && fabsf(tgt.walk_yaw) < kCreepYaw && tgt.walk_dist > kCreepDist) ||
-            (phase == 3 && distNow > pressAt);
+            (phase == 3 && distNow > pressAt) ||
+            // Нет луча игры — прицел мимо меша: поджимаем вплотную, там ствол
+            // перекрывает уход декали вбок и луч появляется (97% на 0.5 м).
+            // Только пока ждём луч: после kNoRaySwingAfter поведение прежнее,
+            // чтобы на сборке с нечитаемым GKo бот не тёрся о ствол вечно.
+            (phase == 3 && noRay && s_noRayTime < kNoRaySwingAfter &&
+             distNow > kNoRayCloseTo);
         if (s_evadeTime > 0.f) wantWalk = true;  // манёвр ведёт стик сам
 
         // Гистерезис отпускания: фаза мигает на кадр-другой вокруг порогов
@@ -4793,7 +4929,11 @@ static void UpdateFarmInner(float dt) {
             tapUpMs   = fmaxf(periodMs - tapDownMs, 60.f);
         }
         // Перекрытый узел не бьём: ждём, пока манёвр выведет на линию удара.
-        const bool swingBlocked = tgt.ray_blocked;
+        // Так же держим тап, пока у игры вообще нет луча прицела: без данных
+        // GKo FPMelee.ZkX не может засчитать удар и играет один On_Woosh —
+        // ровно те «удары в воздух», которые видно со стороны. Ждём не вечно
+        // (kNoRaySwingAfter), а стик всё это время поджимает ближе к стволу.
+        const bool swingBlocked = tgt.ray_blocked || (noRay && s_noRayTime < kNoRaySwingAfter);
         s_tapTimer -= (int)roundf(dt * 1000.f);
         if (s_tapTimer <= 0 && (!aimSettled || swingBlocked) && !s_tapDown) {
             s_tapTimer = 0;              // ждём камеру/обход, не теряя такт

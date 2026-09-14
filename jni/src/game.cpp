@@ -3637,6 +3637,13 @@ struct MeleeReach {
     bool  ray_valid = false;      // в активностях есть GKo
     bool  ray_hit_object = false; // у попадания есть GameObject
     float ray_distance = 0.0F;    // м от камеры вдоль прицела (0 = неизвестно)
+    // Куда именно упёрся луч игры (m_Point) и нормаль поверхности там
+    // (m_Normal). Нужны, чтобы в логе автофарма видеть разницу между нашей
+    // точкой прицела и реальным попаданием луча: по ней эмпирически меряется
+    // сдвиг декали крестика от коры (0.25 м по дампу) и проверяется, что
+    // прицел стоит на мешевом коллайдере, а не в воздухе рядом с ним.
+    bool  ray_point_valid = false;
+    Vec3  ray_point{}, ray_normal{};
 };
 
 // Имена классов ближнего орудия читаемые и между билдами не ротируют
@@ -3748,6 +3755,15 @@ static bool read_local_melee_reach(MeleeReach& out) {
                 if (rd_exact(data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE, dist) &&
                     std::isfinite(dist) && dist > 0.0F && dist < 1000.0F)
                     out.ray_distance = dist;
+                Vec3 rp{}, rn{};
+                if (rd_exact(data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT, rp) &&
+                    vec3_is_finite(rp) && position_looks_like_world_space(rp)) {
+                    out.ray_point = rp;
+                    out.ray_point_valid = true;
+                    if (rd_exact(data + GKO_RAYCAST_HIT + RAYCASTHIT_NORMAL, rn) &&
+                        vec3_is_finite(rn))
+                        out.ray_normal = rn;
+                }
             }
         }
     }
@@ -3762,35 +3778,6 @@ float esp_camera_fov_deg() { return g_cam_fov_deg; }
 int esp_camera_state() {
     return (g_cam_pose_valid ? 1 : 0) | (g_cam_pose_derived ? 2 : 0) | (g_aim_ref_valid ? 4 : 0);
 }
-
-bool esp_camera_angles(float& yaw_deg, float& pitch_deg) {
-    if (!g_cam_pose_valid && !g_aim_ref_valid) return false;
-    // Same reference the aim angles are measured against (firing direction
-    // when available), so finger-gain learning and target lead stay consistent.
-    const Vec3& f = g_aim_ref_valid ? g_aim_ref_forward : g_cam_forward;
-    constexpr float rad2deg = 57.29577951F;
-    float yaw = atan2f(f.x, f.z) * rad2deg;
-    float horiz = sqrtf(f.x * f.x + f.z * f.z);
-    float pitch = atan2f(f.y, horiz) * rad2deg;
-    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return false;
-    yaw_deg = yaw; pitch_deg = pitch;
-    return true;
-}
-
-bool esp_local_eye_position(float& x, float& y, float& z) {
-    // Приоритет — точка выстрела (KCC LookDirection): она не качается от sway/
-    // отдачи, поэтому производная по ней и есть реальное движение персонажа.
-    if (g_aim_ref_valid && vec3_is_finite(g_aim_ref_origin)) {
-        x = g_aim_ref_origin.x; y = g_aim_ref_origin.y; z = g_aim_ref_origin.z;
-        return true;
-    }
-    if (g_cam_pose_valid && vec3_is_finite(g_cam_pos)) {
-        x = g_cam_pos.x; y = g_cam_pos.y; z = g_cam_pos.z;
-        return true;
-    }
-    return false;
-}
-
 
 // Pipeline status for the on-screen debug line:
 //   R  = ragdoll build stage (0 ok; 2 no KCC, 3 no anim, 4 anim backref,
@@ -3892,6 +3879,75 @@ static bool g_frame_local_valid = false;
 // though not for the aimbot (the fallback matrix lags a frame).
 static bool g_frame_cam_basis_valid = false;
 static Vec3 g_frame_cam_pos{}, g_frame_cam_fwd{}, g_frame_cam_right{}, g_frame_cam_up{};
+
+// Камерный источник годен, если его позиция конечна и близка к корню игрока.
+// Нулевой вектор конечен, поэтому одна проверка isfinite пропускала мусор: в
+// логе 14.09.2026 было 11 кадров с origin=(0,0,0) — aim3d улетал на 864 и
+// 1027 м при dist 0.8 м, а yaw на 158-164°, то есть камера получала команду
+// развернуться почти на пол-оборота. Глаз выше корня игрока примерно на 1.5 м,
+// так что 25 м запаса отсекают только явный мусор.
+// Доступ к камере (esp_camera_angles / esp_local_eye_position) объявлен ниже,
+// сразу за g_frame_cam_*: базис из матрицы вида — третий источник углов и
+// позиции глаза, и он обязан быть объявлен раньше этих функций.
+static bool farm_cam_source_ok(const Vec3& p) {
+    if (!vec3_is_finite(p)) return false;
+    if (!g_frame_local_valid) return true;
+    const float dx = p.x - g_frame_local_pos.x;
+    const float dy = p.y - g_frame_local_pos.y;
+    const float dz = p.z - g_frame_local_pos.z;
+    return dx * dx + dy * dy + dz * dz < 625.0F;
+}
+
+bool esp_camera_angles(float& yaw_deg, float& pitch_deg) {
+    // Третий источник — базис из матрицы вида этого кадра. На устройстве из
+    // лога 14.09.2026 поза камеры и ось выстрела НЕ ЧИТАЮТСЯ вовсе: gain застыл
+    // на 0.250 (константа-догадка kCamGainProbe) во всех 11932 кадрах фарма, то
+    // есть камера управлялась разомкнуто, по угаданному коэффициенту, и никогда
+    // его не уточняла (в логе нет ни одного EV «камера: gain»). Базис при этом
+    // есть всегда — фарм считает по нему yaw/pitch и сводит ошибки к ~1°, —
+    // поэтому отдаём его, когда двух первых нет: обучение коэффициента, шаг
+    // «палец на краю» и упреждение начинают работать по обратной связи.
+    // Тот же фильтр мусора, что у точки прицела: источник с нулевой/улетевшей
+    // позицией не годится и для углов, иначе обучение коэффициента камеры
+    // хлебнёт поворот на 158° из ниоткуда.
+    const bool ok_ref   = g_aim_ref_valid  && farm_cam_source_ok(g_aim_ref_origin);
+    const bool ok_pose  = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
+    const bool ok_frame = g_frame_cam_basis_valid && farm_cam_source_ok(g_frame_cam_pos);
+    if (!ok_ref && !ok_pose && !ok_frame) return false;
+    // Same reference the aim angles are measured against (firing direction
+    // when available), so finger-gain learning and target lead stay consistent.
+    const Vec3& f = ok_ref ? g_aim_ref_forward : ok_pose ? g_cam_forward : g_frame_cam_fwd;
+    constexpr float rad2deg = 57.29577951F;
+    float yaw = atan2f(f.x, f.z) * rad2deg;
+    float horiz = sqrtf(f.x * f.x + f.z * f.z);
+    float pitch = atan2f(f.y, horiz) * rad2deg;
+    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return false;
+    yaw_deg = yaw; pitch_deg = pitch;
+    return true;
+}
+
+bool esp_local_eye_position(float& x, float& y, float& z) {
+    // Приоритет — точка выстрела (KCC LookDirection): она не качается от sway/
+    // отдачи, поэтому производная по ней и есть реальное движение персонажа.
+    if (g_aim_ref_valid && farm_cam_source_ok(g_aim_ref_origin)) {
+        x = g_aim_ref_origin.x; y = g_aim_ref_origin.y; z = g_aim_ref_origin.z;
+        return true;
+    }
+    if (g_cam_pose_valid && farm_cam_source_ok(g_cam_pos)) {
+        x = g_cam_pos.x; y = g_cam_pos.y; z = g_cam_pos.z;
+        return true;
+    }
+    // Третьим — позиция из матрицы вида. Без неё на устройстве из лога
+    // 14.09.2026 mv_dps/mv_dir были -99 во всех 14499 строках: контроллер
+    // движения шёл вслепую — не знал, что персонаж уже разогнался или упёрся
+    // в ствол, и не мог отличить «идём» от «стоим».
+    if (g_frame_cam_basis_valid && farm_cam_source_ok(g_frame_cam_pos)) {
+        x = g_frame_cam_pos.x; y = g_frame_cam_pos.y; z = g_frame_cam_pos.z;
+        return true;
+    }
+    return false;
+}
+
 // Players near us this frame (all 360 degrees, not only the ones projected
 // on screen). Feeds the enemy-counter pill in the overlay.
 static int  g_frame_player_count = 0;
@@ -5728,8 +5784,25 @@ static float farm_marker_life_left(uint64_t marker, uint64_t age_offset, float l
     return left > 0.0F ? left : 0.0F;
 }
 
+// Диагностика крестика для лога автофарма: что реально лежит в полях сегмента
+// дерева (SPOT_A = точка на коре, SPOT_B = конец сегмента) и почему точка на
+// коре не стала точкой прицела. В логе 14.09.2026 источник был 3 (декаль) во
+// всех 10887 строках и ни разу 2 (кора) — без сырых значений не отличить «поля
+// пусты» от «значения есть, но проверка их отвергла».
+static Vec3  g_farmSpotRawA{}, g_farmSpotRawB{};
+static int   g_farmSpotRawWhy = 3;      // 0 A принят, 1 не конечен, 2 вне узла, 3 не читали
+static float g_farmSpotRawLen = -1.0F;  // |A-B| в метрах, -1 = не считалось
+
+void esp_farm_spot_raw(float& ax, float& ay, float& az, float& bx, float& by, float& bz,
+                       int& why, float& len) {
+    ax = g_farmSpotRawA.x; ay = g_farmSpotRawA.y; az = g_farmSpotRawA.z;
+    bx = g_farmSpotRawB.x; by = g_farmSpotRawB.y; bz = g_farmSpotRawB.z;
+    why = g_farmSpotRawWhy; len = g_farmSpotRawLen;
+}
+
 static bool farm_read_spot(const FarmEntity& entity, Vec3& out, int& source, int& streak, float& life_left) {
     out = {}; source = 0; streak = 0; life_left = -1.0F;
+    g_farmSpotRawA = {}; g_farmSpotRawB = {}; g_farmSpotRawWhy = 3; g_farmSpotRawLen = -1.0F;
     if (!valid_obj(entity.ext)) return false;
 
     if (entity.ext_kind == FARM_EXT_ORE) {
@@ -5771,13 +5844,21 @@ static bool farm_read_spot(const FarmEntity& entity, Vec3& out, int& source, int
         streak = (s >= 0 && s < 10000) ? s : 0;
 
         const Vec3 a = rd_v3(entity.ext + TREEHS_SPOT_A);
+        const Vec3 b = rd_v3(entity.ext + TREEHS_SPOT_B);
+        g_farmSpotRawA = a;
+        g_farmSpotRawB = b;
+        if (vec3_is_finite(a) && vec3_is_finite(b)) {
+            const float lx = b.x - a.x, ly = b.y - a.y, lz = b.z - a.z;
+            g_farmSpotRawLen = sqrtf(lx * lx + ly * ly + lz * lz);
+        }
+        g_farmSpotRawWhy = !vec3_is_finite(a) ? 1
+                         : !farm_spot_on_node(a, entity.pos, entity.kind) ? 2 : 0;
         if (vec3_is_finite(a) && farm_spot_on_node(a, entity.pos, entity.kind)) {
             out = a; source = 2; life_left = life;
             // Проверка попадания у дерева меряет дистанцию до ОТРЕЗКА MTQ..MTu
             // радиусом 0.15 м, а не до его начала. Если проекция глаза на
             // отрезок ложится строго внутрь и до неё ближе, чем до конца A, —
             // целимся в неё: это тот же крестик, но запас на промах больше.
-            const Vec3 b = rd_v3(entity.ext + TREEHS_SPOT_B);
             if (vec3_is_finite(b) && farm_spot_on_node(b, entity.pos, entity.kind)) {
                 const Vec3& eye = g_cam_pose_valid ? g_cam_pos : g_frame_cam_pos;
                 const float abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
@@ -5944,6 +6025,39 @@ bool esp_farm_get_target(FarmTarget& out) {
     }
     const bool at_spot = has_spot && spot_front;
 
+    // ---- Декаль крестика висит НЕ НА КОРЁ -----------------------------------
+    // HitMarkerItem ставит mark.localPosition = точка_на_коре + normal * 0.25
+    // (сдвиг против z-файта), и когда точка из полей сегмента (SPOT_A) не
+    // прочиталась, прицел встаёт ровно на эту висячую декаль — тот самый
+    // «крестик сбоку дерева, а метка отступает от коры», который видно глазами.
+    // Для удара это фатально: луч «глаз -> декаль» на боку ствола проходит МИМО
+    // дерева, у игры не заполняется GKo (RaycastData/AimRaycast) и FPMelee.ZkX
+    // не может засчитать удар вовсе — играет один On_Woosh.
+    // Лог 14.09.2026 (farm_debug.log, 14500 кадров, 87 замахов):
+    //   урона нет у 48 замахов, и луч игры читался лишь в 5 из них;
+    //   урон есть у 39, и луч читался в 37;
+    //   ошибка камеры при этом одинаково мала (|yaw| 0.1°, |pitch| 0.3-0.5°) —
+    //   то есть промах не от наведения, а от того, что прицел стоит в воздухе;
+    //   валидность луча 97% на aim3d ~0.50 м и 19% на ~0.75 м (чем дальше, тем
+    //   меньше ствол перекрывает уход декали вбок).
+    // Тянем точку прицела обратно к оси ствола (пивот узла у дерева — в центре
+    // ствола) ровно на сдвиг декали: прицел встаёт на кору, луч цепляет ствол
+    // с любой стороны, а точка подхода (spot + 0.45 м наружу) сама становится
+    // на 0.25 м ближе — туда, где луч живёт.
+    // Тянем ПОСЛЕ проверки стороны: «с нашей ли стороны X» честнее мерить по
+    // самой декали (она дальше от оси и лучше различима), а вот прицел и точка
+    // подхода должны стоять на коре.
+    if (has_spot && spot_source == 3 && node.kind == 0) {
+        const float cdx = spot.x - node.pos.x, cdz = spot.z - node.pos.z;
+        const float choriz = sqrtf(cdx * cdx + cdz * cdz);
+        constexpr float kDecalOff = 0.25F;   // сдвиг декали по нормали (дамп)
+        if (choriz > kDecalOff + 0.08F) {    // иначе X почти на оси — тянуть некуда
+            const float ck = (choriz - kDecalOff) / choriz;
+            spot.x = node.pos.x + cdx * ck;
+            spot.z = node.pos.z + cdz * ck;
+        }
+    }
+
     // ---- Точка прицела -------------------------------------------------------
     Vec3 aim = at_spot ? spot : best->pos;
     if (!at_spot) aim.y += (best->kind == 0) ? 1.15F : 0.15F;
@@ -5954,7 +6068,10 @@ bool esp_farm_get_target(FarmTarget& out) {
     // ось выстрела > поза трансформа > базис из матрицы вида этого кадра
     // (последний есть на устройствах, где поза не читается — именно из-за него
     // фарм раньше висел в «нет позиции камеры»).
-    if (!g_cam_pose_valid && !g_aim_ref_valid && !g_frame_cam_basis_valid) {
+    const bool ok_ref   = g_aim_ref_valid  && farm_cam_source_ok(g_aim_ref_origin);
+    const bool ok_pose  = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
+    const bool ok_frame = g_frame_cam_basis_valid && farm_cam_source_ok(g_frame_cam_pos);
+    if (!ok_ref && !ok_pose && !ok_frame) {
         g_farm_idle_reason = 5;
         return false;
     }
@@ -5962,8 +6079,8 @@ bool esp_farm_get_target(FarmTarget& out) {
     // отметке, которую видит игрок (покачивание look-root давало пару градусов
     // промаха). По корпусу — от оси выстрела: вдоль неё и идёт удар, а сам узел
     // огромный.
-    const bool use_ref  = g_aim_ref_valid && !(at_spot && g_cam_pose_valid);
-    const bool use_pose = !use_ref && g_cam_pose_valid;
+    const bool use_ref  = ok_ref && !(at_spot && ok_pose);
+    const bool use_pose = !use_ref && ok_pose;
     const Vec3& origin = use_ref ? g_aim_ref_origin  : use_pose ? g_cam_pos     : g_frame_cam_pos;
     const Vec3& fwd    = use_ref ? g_aim_ref_forward : use_pose ? g_cam_forward : g_frame_cam_fwd;
     const Vec3& right  = use_ref ? g_aim_ref_right   : use_pose ? g_cam_right   : g_frame_cam_right;
@@ -6064,6 +6181,8 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.pitch = pitch;
     out.aim_dist = std::isfinite(aim_dist) ? aim_dist : best_dist;
     out.aim_3d = std::isfinite(aim_3d) ? aim_3d : out.aim_dist;
+    out.aim_x = aim.x; out.aim_y = aim.y; out.aim_z = aim.z;
+    out.node_x = best->pos.x; out.node_y = best->pos.y; out.node_z = best->pos.z;
     // Дальность удара текущего орудия — из игры (FPMelee.m_MaxReach +
     // hitRadius), а не «на глаз». Ноль значит «в руках не ближнее орудие или
     // чтение не удалось» — тогда контроллер остаётся на эмпирических порогах.
@@ -6081,6 +6200,13 @@ bool esp_farm_get_target(FarmTarget& out) {
         out.ray_blocked = reach.ray_valid && reach.ray_hit_object &&
                           reach.ray_distance > 0.0F &&
                           reach.ray_distance < out.aim_3d - 0.6F;
+        out.ray_point_valid = reach.ray_point_valid;
+        if (reach.ray_point_valid) {
+            out.ray_px = reach.ray_point.x; out.ray_py = reach.ray_point.y;
+            out.ray_pz = reach.ray_point.z;
+            out.ray_nx = reach.ray_normal.x; out.ray_ny = reach.ray_normal.y;
+            out.ray_nz = reach.ray_normal.z;
+        }
     }
     // Состояние самого узла. Здоровье — самый тонкий признак того, что удары
     // доходят: fractionRemaining сдвигается на проценты, а m_CurrentHealth

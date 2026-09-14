@@ -229,6 +229,11 @@ inline constexpr std::uint64_t GUI_VALUE                     = 0x20;  // зна�
 inline constexpr std::uint64_t GKO_HIT_OBJECT                = 0x18;  // GameObject попадания
 inline constexpr std::uint64_t GKO_RAYCAST_HIT               = 0x48;  // UnityEngine.RaycastHit (0x2C)
 inline constexpr std::uint64_t RAYCASTHIT_DISTANCE           = 0x1C;  // m_Distance внутри RaycastHit
+// Тот же struct UnityEngine.RaycastHit (dump.cs 62a8534, строка 642061):
+//   m_Point 0x0 (Vector3), m_Normal 0xC (Vector3), m_FaceID 0x18,
+//   m_Distance 0x1C, m_UV 0x20, m_Collider 0x28  — размер 0x2C.
+inline constexpr std::uint64_t RAYCASTHIT_POINT              = 0x00;  // куда луч упёрся (мир)
+inline constexpr std::uint64_t RAYCASTHIT_NORMAL             = 0x0C;  // нормаль поверхности там
 
 // Ragdoll bone list route (dump.cs) — game-maintained list of rig bone
 // transforms, no name matching needed:
