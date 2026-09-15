@@ -3883,9 +3883,58 @@ struct Row {
     float noRayT = 0.f;                          // сколько подряд нет луча игры, с
 };
 static Row g_row;                 // заполняется по ходу UpdateFarm
+// Стадия автофарма в профиле кадра — это UpdateFarm целиком: и контроллер, и
+// запись строки лога. Пока лог писался прямо в кадре, обе половины попадали в
+// одно число «farm 90 мс», и по нему нельзя было понять, что оптимизировать.
+// Держим их раздельно (EXP-сглаживание, как у остальных стадий кадра).
+static float g_innerMs = 0.f;     // UpdateFarmInner: чтения памяти и логика
+static float g_logMs   = 0.f;     // endFrame: форматирование строки и канал
 
 static FILE* g_f       = nullptr;
-static char  g_buf[16 * 1024];    // свой буфер: меньше системных вызовов на кадр
+static char  g_buf[64 * 1024];    // свой буфер: меньше системных вызовов на кадр
+// ---- Канал записи в отдельном потоке ---------------------------------------
+// Файл лога лежит на «внешнем» хранилище (/storage/emulated/0/...), а это FUSE:
+// запись туда идёт через медиасервис и может встать на десятки миллисекунд — в
+// том числе на fflush(). Раньше это делалось прямо в кадре: строка кадра
+// (fprintf в 16 КБ буфер + fflush каждые 0.15 с) жила ВНУТРИ стадии автофарма, и
+// именно её время попадало в профиль как «farm 90 мс» — при том что в самой
+// памяти игры за кадр читается всего пара сотен syscall'ов. Теперь поток кадра
+// только форматирует строку и кладёт её в буфер канала (memcpy + push в
+// std::string, без ввода-вывода), а на диск её пишет отдельный поток: события —
+// по готовности, строки кадров — пачками раз в 0.25 с.
+static std::mutex              g_wmutex;
+static std::condition_variable g_wcv;
+static std::string             g_pending;     // ещё не записанные байты
+static bool                    g_wstop = false;
+static bool                    g_wnow  = false;  // событие/полный буфер: писать сейчас
+static std::thread             g_writer;
+// Потолок буфера канала: больше — будим поток немедленно, иначе на длинной
+// серии кадров без событий память росла бы до следующего тика.
+static constexpr size_t        kWriteBufWake = 256 * 1024;
+
+// Останов канала: будим поток, ждём, пока он допишет остаток, закрываем файл.
+static void stopWriterAndClose() {
+    if (g_writer.joinable()) {
+        {
+            std::lock_guard<std::mutex> lk(g_wmutex);
+            g_wstop = true;
+        }
+        g_wcv.notify_all();
+        g_writer.join();
+    }
+    if (!g_f) return;
+    fflush(g_f);
+    fclose(g_f);
+    g_f = nullptr;
+}
+
+// Без этого деструктор joinable std::thread на выходе из процесса зовёт
+// std::terminate — то есть приложение падало бы при закрытии, а последние
+// строки лога (всё, что лежало в буфере канала) не доходили бы до файла.
+// Объявлено ДО буфера и потока: разрушается последним, когда канал уже никто
+// не трогает.
+struct WriteChannelGuard { ~WriteChannelGuard() { stopWriterAndClose(); } };
+static WriteChannelGuard g_write_channel_guard;
 static char  g_path[192]  = {};
 static char  g_prev[192]  = {};
 static bool  g_pathReady  = false;
@@ -4056,12 +4105,61 @@ static bool ensureOpen() {
     return true;
 }
 
-static void closeFile() {
-    if (!g_f) return;
-    fflush(g_f);
-    fclose(g_f);
-    g_f = nullptr;
+static void rotate();   // определена ниже: зовётся из потока записи при переполнении
+
+static void writerLoop() {
+    std::string batch;
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(g_wmutex);
+            g_wcv.wait_for(lk, std::chrono::milliseconds(250),
+                           [] { return g_wstop || (g_wnow && !g_pending.empty()); });
+            if (!g_pending.empty()) {
+                // clear() перед swap обязателен: обмен с уже заполненным batch
+                // вернул бы прошлую пачку в очередь, и та писалась бы повторно
+                // (проверено стендом: лог рос в 100 раз быстрее).
+                batch.clear();
+                batch.swap(g_pending);
+                g_wnow = false;
+            } else if (g_wstop) {
+                break;
+            } else {
+                continue;   // тик без данных: строк ещё нет
+            }
+        }
+        if (!ensureOpen()) continue;
+        const size_t n = batch.size();
+        // Короткая запись на FUSE — обычное дело; остаток дописываем, потому что
+        // строка лога не должна рваться посередине (по ней потом парсят столбцы).
+        size_t off = 0;
+        while (off < n) {
+            const size_t wrote = fwrite(batch.data() + off, 1, n - off, g_f);
+            if (wrote == 0) break;
+            off += wrote;
+        }
+        fflush(g_f);
+        g_bytes += off;
+        if (g_bytes > kMaxBytes) rotate();
+    }
 }
+
+// Кладём готовый текст в канал. События просят запись сразу (по ним видно, что
+// бот сделал не то, а приложение вот-вот закроют) — им же будится поток записи.
+static void enqueue(const char* data, size_t n, bool immediate) {
+    if (!n) return;
+    {
+        std::lock_guard<std::mutex> lk(g_wmutex);
+        g_pending.append(data, n);
+        if (immediate || g_pending.size() >= kWriteBufWake) g_wnow = true;
+        if (!g_writer.joinable()) {
+            g_wstop = false;
+            g_writer = std::thread(writerLoop);
+        }
+    }
+    if (immediate) g_wcv.notify_one();
+}
+
+static void closeFile() { stopWriterAndClose(); }
 
 // keepOff — не трогать флаг «фарм выключен»: он и есть память об этой ветке,
 // иначе строка «фарм остановлен» писалась бы каждый кадр.
@@ -4088,22 +4186,27 @@ static void rotate() {
     ensureOpen();                     // новый файл с новой шапкой
 }
 
-// Строка решения. Пишется сразу с fflush: события редкие, а теряются они ровно
-// тогда, когда бот сделал что-то не то и приложение вот-вот закроют.
+// Строка решения. Форматируется в буфер кадра и уходит в канал записи с
+// пометкой «сразу»: события редкие, а теряются они ровно тогда, когда бот сделал
+// что-то не то и приложение вот-вот закроют. Порядок строк сохраняется: и
+// события, и строки кадров идут через один канал.
 static void event(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 static void event(const char* fmt, ...) {
     if (!g_state.farm_log) return;
-    if (!ensureOpen()) return;
-    fprintf(g_f, "EV %7.2f ", (double)tSec());
+    char line[1024];
+    const int head = snprintf(line, sizeof(line), "EV %7.2f ", (double)tSec());
+    if (head <= 0) return;
+    size_t used = (size_t)head < sizeof(line) ? (size_t)head : sizeof(line) - 1;
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(g_f, fmt, ap);
+    const int tail = vsnprintf(line + used, sizeof(line) - used, fmt, ap);
     va_end(ap);
-    fputc('\n', g_f);
-    g_bytes = (size_t)ftell(g_f);
-    fflush(g_f);
-    g_sinceFlush = 0.f;
-    if (g_bytes > kMaxBytes) rotate();
+    if (tail > 0) {
+        const size_t want = (size_t)tail;
+        used += (want < sizeof(line) - used) ? want : sizeof(line) - used - 1;
+    }
+    if (used + 1 < sizeof(line)) line[used++] = '\n';
+    enqueue(line, used, true);
 }
 
 // Путь к текущему файлу лога — для подсказки в меню (пусто, пока не открыт).
@@ -4266,8 +4369,11 @@ static void endFrame(float dt) {
         g_idleAcc = 0.f;
     }
 
-    if (!ensureOpen()) return;
-    fprintf(g_f, kRowFmt,
+    // Строка кадра — в буфер, на диск её пишет поток записи (см. enqueue).
+    // Раньше здесь был fprintf прямо в FILE* плюс fflush каждые 0.15 с, то есть
+    // запись на FUSE внутри стадии автофарма: именно она и растягивала кадр.
+    char line[512];
+    int len = snprintf(line, sizeof(line), kRowFmt,
             (double)r.t, (double)r.fps, (double)r.dtms, r.ph, r.ex, r.node, r.kind,
             (double)r.dist, (double)r.aim3d, (double)r.walkd, (double)r.wyaw,
             (double)r.yaw, (double)r.pitch, r.at, r.spot, (double)r.life, r.strk,
@@ -4276,12 +4382,11 @@ static void endFrame(float dt) {
             (double)r.mvDps, (double)r.mvDir, (double)r.ldx, (double)r.ldy, r.lk, r.tp,
             r.tapms, (double)r.gain, (double)r.evd, r.evn, (double)r.stk, (double)r.mine,
             (double)r.set, (double)r.blkt, r.reason);
-    fputc('\n', g_f);
-    g_bytes = (size_t)ftell(g_f);
-
+    if (len < 0) return;
+    size_t used = (size_t)len < sizeof(line) ? (size_t)len : sizeof(line) - 1;
+    if (used + 1 < sizeof(line)) line[used++] = '\n';
+    enqueue(line, used, false);
     g_sinceFlush += dt;
-    if (g_sinceFlush >= kFlushSec) { fflush(g_f); g_sinceFlush = 0.f; }
-    if (g_bytes > kMaxBytes) rotate();
 }
 
 } // namespace farmlog
@@ -4296,9 +4401,19 @@ static void UpdateFarmInner(float dt);
 // ни вернулась (early return'ов в ней с десяток, и именно они чаще всего и есть
 // ответ на «почему бот стоял»).
 static void UpdateFarm(float dt) {
+    // Время берём часами farmlog (монотонные секунды): profNowMs объявлен выше
+    // по файлу, а этот регион стенд собирает отдельно, без него.
+    const double t0 = farmlog::tNow();
     farmlog::beginFrame();
     UpdateFarmInner(dt);
+    const double t1 = farmlog::tNow();
     farmlog::endFrame(dt);
+    const double t2 = farmlog::tNow();
+    // EXP-сглаживание то же, что у стадий FrameProf (0.1 на кадр): усреднять
+    // через FrameProf отсюда нельзя — его объявление выше по файлу, а этот
+    // регион собирается стендом отдельно (tools/farm/run.sh).
+    farmlog::g_innerMs += ((float)((t1 - t0) * 1000.0) - farmlog::g_innerMs) * 0.1f;
+    farmlog::g_logMs   += ((float)((t2 - t1) * 1000.0) - farmlog::g_logMs) * 0.1f;
 }
 
 static void UpdateFarmInner(float dt) {
@@ -4458,9 +4573,9 @@ static void UpdateFarmInner(float dt) {
         s_selfLog -= dt;
         if (tgt.ray_self && (s_selfNode != tgt.id || s_selfLog <= 0.f)) {
             s_selfNode = tgt.id; s_selfLog = 2.f;
-            farmlog::event("луч игры %.2f м упёрся в сам узел (точка прицела %.2f м) — "
-                           "это не перекрытие, бьём",
-                           (double)tgt.ray_distance, (double)tgt.aim_3d);
+            farmlog::event("луч игры %.2f м упёрся в сам узел (точка прицела %.2f м, проверка %d: "
+                           "1 коллайдер X, 2 GO узла, 3 поддерево) — это не перекрытие, бьём",
+                           (double)tgt.ray_distance, (double)tgt.aim_3d, tgt.ray_self_why);
         }
     }
     {   // умения орудия: своё поле у FPTool, у узлов — своё требование
@@ -4954,9 +5069,25 @@ static void UpdateFarmInner(float dt) {
         if (s_blockedTime > kBlockedTime && s_evadeTime <= 0.f) {
             s_blockedTime = 0.f;
             if (s_evadeCount < kEvadeMax) {
-                farmlog::event("перекрыт: луч игры %.2f м при точке прицела %.2f м — обход #%d (%s)",
+                // В событие идёт и вердикт «чей это луч»: если попадание не
+                // признано деталью узла, в логе видно и куда луч упёрся, и что
+                // якорь руды (MineableObject.LXX) говорит о поверхности камня.
+                // Без этого «перекрыт» на устройстве не отличить от «свой же
+                // камень» — именно на этом 15.09.2026 руда и вставала: четыре
+                // обхода, чёрный список, ноль ударов.
+                farmlog::event("перекрыт: луч игры %.2f м при точке прицела %.2f м — обход #%d (%s) | "
+                               "свои: %d (1 коллайдер X, 2 GO узла, 3 поддерево), попадание %.2f,%.2f,%.2f, "
+                               "прицел %.2f,%.2f,%.2f, узел %.2f,%.2f,%.2f | якорь руды: %s (%.2f,%.2f,%.2f), "
+                               "до точки луча %.2f м",
                                (double)tgt.ray_distance, (double)tgt.aim_3d, s_evadeCount + 1,
-                               (s_evadeCount % 2 == 0) ? "вправо" : "влево");
+                               (s_evadeCount % 2 == 0) ? "вправо" : "влево",
+                               tgt.ray_self_why,
+                               (double)tgt.ray_px, (double)tgt.ray_py, (double)tgt.ray_pz,
+                               (double)tgt.aim_x, (double)tgt.aim_y, (double)tgt.aim_z,
+                               (double)tgt.node_x, (double)tgt.node_y, (double)tgt.node_z,
+                               tgt.ore_anchor_valid ? "есть" : "нет",
+                               (double)tgt.ore_anchor_x, (double)tgt.ore_anchor_y, (double)tgt.ore_anchor_z,
+                               (double)tgt.ore_anchor_to_ray);
                 s_evadeWhy = 2;
                 s_evadeTime = kEvadeTime;
                 s_evadeDir = (s_evadeCount % 2 == 0) ? 1.f : -1.f;
@@ -5728,28 +5859,33 @@ static void ProfStage(double begin, double esp, double aim, double farm,
     esp_io_meter(rdCalls, rdMs, wrCalls, wrMs);
     static unsigned long long prevTouchCalls = 0;
     static double             prevTouchMs = 0.0;
-    unsigned long long touchCalls = 0;
+    static unsigned long long prevTouchSkipped = 0;
+    unsigned long long touchCalls = 0, touchSkipped = 0;
     double             touchMs = 0.0;
-    Touch_UploadStats(touchCalls, touchMs);
+    Touch_UploadStats(touchCalls, touchMs, touchSkipped);
     const unsigned long long dTouchCalls = touchCalls - prevTouchCalls;
     const double             dTouchMs    = touchMs - prevTouchMs;
+    const unsigned long long dTouchSkipped = touchSkipped - prevTouchSkipped;
     prevTouchCalls = touchCalls;
     prevTouchMs    = touchMs;
+    prevTouchSkipped = touchSkipped;
 
     farmlog::event(
         "кадры оверлея: работа %.1f мс/кадр (begin %.1f esp %.1f [снимок %.1f маркеры %.1f] "
         "aim %.1f farm %.1f menu %.1f end %.1f) сон до темпа %.1f макс работы %.1f | "
         "игроков %d маркеров %d оверлей %.1f к/с (панель %.0f Гц, темп %.0f Гц) | "
-        "чтений %d (%.1f мс) записей %d (%.1f мс) тач %llu (%.1f мс) | "
-        "фарм: скан %.1f орудие %.1f перебор %.1f крестик %.1f всего %.1f [реестр %d/%d, "
+        "чтений %d (%.1f мс) записей %d (%.1f мс) тач %llu пропуск %llu (%.1f мс) | "
+        "фарм: скан %.1f орудие %.1f перебор %.1f крестик %.1f всего %.1f "
+        "контроллер %.1f запись лога %.1f [реестр %d/%d, "
         "единиц %d, новых %d, узлов %d, кеш %d, ЧС %d, spot %d]",
         (double)p.work, (double)p.begin, (double)p.esp, (double)p.boxes, (double)p.markers,
         (double)p.aim, (double)p.farm, (double)p.menu, (double)p.end, (double)p.sleep,
         (double)p.workMax, p.nBoxes, p.nMarkers, (double)overlay_fps(),
         (double)overlay_peak_hz(), (double)overlay_pace_hz(),
-        rdCalls, rdMs, wrCalls, wrMs, (unsigned long long)dTouchCalls, dTouchMs,
+        rdCalls, rdMs, wrCalls, wrMs, (unsigned long long)dTouchCalls,
+        (unsigned long long)dTouchSkipped, dTouchMs,
         (double)fd.scan_ms, (double)fd.reach_ms, (double)fd.loop_ms, (double)fd.spot_ms,
-        (double)fd.total_ms,
+        (double)fd.total_ms, (double)farmlog::g_innerMs, (double)farmlog::g_logMs,
         fd.scan_total, fd.scan_left, fd.scan_units, fd.scan_new, fd.entities,
         fd.neg_cache, fd.blacklisted, fd.spot_source);
     p.workMax = 0.f;

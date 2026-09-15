@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <cmath>
 #include <ctime>
+#include <cstring>
 #include <linux/input.h>
 #include <linux/uinput.h>
 
@@ -97,10 +98,17 @@ static void genRandomString(char *string, int length) {
 // статья расхода кадра, но из лога автофарма её раньше не было видно вовсе.
 static unsigned long long g_touch_upload_calls = 0;
 static double             g_touch_upload_ms    = 0.0;
+static unsigned long long g_touch_upload_skipped = 0;
+// Последний отправленный пакет: повторы не пишем в uinput (см. Upload()).
+// input_event в этой сборке заголовков — 8 байт, но берём размер с запасом от
+// самого типа: 11 пальцев × 6 событий + SYN_REPORT + до двух BTN_* при подъёме.
+static struct input_event g_touch_last_packet[80];
+static size_t             g_touch_last_bytes = 0;
 
-void Touch_UploadStats(unsigned long long& calls, double& ms) {
-    calls = g_touch_upload_calls;
-    ms    = g_touch_upload_ms;
+void Touch_UploadStats(unsigned long long& calls, double& ms, unsigned long long& skipped) {
+    calls   = g_touch_upload_calls;
+    ms      = g_touch_upload_ms;
+    skipped = g_touch_upload_skipped;
 }
 
 static inline double TouchNowMs() {
@@ -109,12 +117,19 @@ static inline double TouchNowMs() {
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
 }
 
+// Upload() зовут ДВА потока: поток чтения тачскрина (на каждый SYN_REPORT) и
+// поток оверлея через синтетические пальцы (каждый Touch_Down_N/Move/Up). Пока
+// пакет собирается, второй должен ждать — раньше это было `while (bTouch);`,
+// то есть активное ожидание на ядре: на телефоне такие ожидания съедают квант
+// CPU у самой игры и превращаются в просадку кадров ровно тогда, когда бот
+// активно водит пальцами. Обычный мьютекс ждёт без расхода CPU.
+static pthread_mutex_t g_touch_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool            g_touch_first_down = true;
+
 static void Upload() {
     const double t0 = TouchNowMs();
-    static bool bTouch = false;
-    static bool isFirstDown = true;
-    while (bTouch);
-    bTouch = true;
+    pthread_mutex_lock(&g_touch_mutex);
+    bool isFirstDown = g_touch_first_down;
     int tmpCnt = 0, tmpCnt2 = 0, i, j;
     for (i = 0; i < fdNum; i++) {
         for (j = 0; j < maxF; j++) {
@@ -180,16 +195,41 @@ static void Upload() {
     input.event[tmpCnt].value = 0;
     tmpCnt++;
 
+    // ---- Пропуск повторов ---------------------------------------------------
+    // В событие входит только список касаний, но Upload() зовётся на КАЖДЫЙ
+    // SYN_REPORT от тачскрина и на каждое изменение синтетического пальца, а
+    // полный пакет состоит из 6 событий на палец (ABS_X/Y, MT_POSITION_X/Y,
+    // TRACKING_ID, SYN_MT_REPORT) плюс SYN_REPORT. Кадры, где пальцы стоят на
+    // месте (а таких при фарме большинство: палец удара переставляется пару
+    // раз в секунду, джойстик — только когда бот реально идёт), пересобирали и
+    // переписывали ровно тот же пакет: на 4 пальцах это ~26 событий в uinput на
+    // каждый SYN_REPORT — десятки лишних write() в секунду на обеих сторонах
+    // (наш поток и input-поток системы). Сравниваем пакет с уже отправленным и
+    // молчим, если он не изменился. Первый пакет после старта и всё, что
+    // менялось (позиция, нажатие, отпускание, ids), уходят как раньше.
+    const size_t bytes = sizeof(struct input_event) * (size_t)tmpCnt;
+    if (bytes == g_touch_last_bytes && memcmp(input.event, g_touch_last_packet, bytes) == 0) {
+        g_touch_first_down = isFirstDown;
+        ++g_touch_upload_calls;      // вызов был, но отправки не потребовал
+        ++g_touch_upload_skipped;
+        g_touch_upload_ms += TouchNowMs() - t0;
+        pthread_mutex_unlock(&g_touch_mutex);
+        return;
+    }
+    memcpy(g_touch_last_packet, input.event, bytes);
+    g_touch_last_bytes = bytes;
+
     if (is && isFirstDown) {
         isFirstDown = false;
         write(nowfd, &input, sizeof(struct input_event) * (tmpCnt + 2));
     } else {
         write(nowfd, input.event, sizeof(struct input_event) * tmpCnt);
     }
+    g_touch_first_down = isFirstDown;
 
-    bTouch = false;
     ++g_touch_upload_calls;
     g_touch_upload_ms += TouchNowMs() - t0;
+    pthread_mutex_unlock(&g_touch_mutex);
 }
 
 static void *TypeA(void *arg) {

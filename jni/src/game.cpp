@@ -6249,18 +6249,124 @@ void esp_farm_tool_info(int& purposes_have, int& purposes_need) {
 //      нативный, у попадания managed, поэтому сравниваем нативные.
 // Вызывается только когда старая формула сказала «перекрыт», так что лишние
 // чтения (3..5) достаются лишь редким кадрам с реальным подозрением на стену.
-static bool ray_hit_is_self_node(const MeleeReach& reach, const FarmEntity& node) {
+// Трансформ, о который остановился луч: у попадания есть GameObject (managed,
+// читаем его native), а у коллайдера — прямой путь до Transform. Коллайдер
+// точнее (это ровно та геометрия, в которую попал луч), GameObject — запасной
+// путь, когда m_Collider пуст.
+static uint64_t ray_hit_transform(const MeleeReach& reach) {
+    if (reach.ray_collider) {
+        const uint64_t col = managed_object_native(reach.ray_collider);
+        if (col) {
+            const uint64_t t = native_component_transform(col);
+            if (t) return t;
+        }
+    }
+    const uint64_t go = managed_object_native(reach.ray_hit_go);
+    if (!go) return 0;
+    const uint64_t pairs = rd_ptr(go + GAMEOBJECT_COMPONENT_ARRAY);
+    if (!pairs) return 0;
+    const uint64_t t = rd_ptr(pairs + COMPONENT_PAIR_PTR);
+    if (!t || rd_ptr(t + COMPONENT_GAMEOBJECT) != go) return 0;
+    return t;
+}
+
+// Лежит ли попадание луча ВНУТРИ поддерева узла.
+//
+// Проверка «GameObject попадания == GameObject узла» слишком строга: у камня и
+// дерева меш с коллайдером висит на дочернем GameObject (LOD-модели, обломки,
+// «корка»), и корневой GO узла с ним не совпадает НИКОГДА. Лог 15.09.2026 это и
+// показал: у руды луч упирался в собственную породу (0.5 м при точке прицела
+// 2.3 м), покидал узел как «перекрытый» — четыре обхода, чёрный список, ноль
+// ударов. Поэтому сравниваем с ПОДДЕРЕВОМ трансформа узла: попадание в любую его
+// деталь — это попадание в сам узел.
+//
+// Обход стоит несколько чтений на узел поддерева, поэтому вердикт кешируется по
+// паре (узел, трансформ попадания): луч стоит в одной и той же детали десятки
+// кадров подряд, а обход делается один раз.
+static bool ray_hit_in_node_subtree(const MeleeReach& reach, const FarmEntity& node,
+                                    uint64_t& hit_transform_out, int& nodes_walked) {
+    hit_transform_out = 0;
+    nodes_walked = 0;
+    if (!node.transform) return false;
+    const uint64_t hit_transform = ray_hit_transform(reach);
+    if (!hit_transform) return false;
+    hit_transform_out = hit_transform;
+    if (hit_transform == node.transform) return true;
+
+    static unsigned long long s_node_id = 0;
+    static uint64_t s_hit_transform = 0;
+    static bool     s_verdict = false;
+    if (s_node_id == node.identity && s_hit_transform == hit_transform) return s_verdict;
+
+    static std::vector<uint64_t> s_subtree;
+    collect_transform_subtree(node.transform, s_subtree, 128);
+    nodes_walked = (int)s_subtree.size();
+    bool verdict = false;
+    for (uint64_t t : s_subtree) {
+        if (t == hit_transform) { verdict = true; break; }
+    }
+    s_node_id = node.identity;
+    s_hit_transform = hit_transform;
+    s_verdict = verdict;
+    return verdict;
+}
+
+static bool ray_hit_is_self_node(const MeleeReach& reach, const FarmEntity& node, int& why) {
+    why = 0;
     if (!reach.ray_valid || !reach.ray_hit_go) return false;
+    // 1. Самая дешёвая проверка: коллайдер попадания — тот самый, которым игра
+    //    ставит крестик руды (OREHS_COLLIDER, lzR). Поле заполняется в gir, то
+    //    есть уже ПОСЛЕ первого попадания (и живёт, пока жив крестик).
     if (reach.ray_collider && node.ext && node.ext_kind == FARM_EXT_ORE) {
         const uint64_t col = rd_ptr(node.ext + OREHS_COLLIDER);
         if (col && (col == reach.ray_collider ||
-                    managed_object_native(col) == managed_object_native(reach.ray_collider)))
+                    managed_object_native(col) == managed_object_native(reach.ray_collider))) {
+            why = 1;
             return true;
+        }
     }
     if (!node.transform) return false;
+    // 2. Коллайдер (или сам узел) висит на корневом GameObject узла.
     const uint64_t node_go = rd_ptr(node.transform + COMPONENT_GAMEOBJECT);
     if (!node_go) return false;
-    return managed_object_native(reach.ray_hit_go) == node_go;
+    if (managed_object_native(reach.ray_hit_go) == node_go) {
+        why = 2;
+        return true;
+    }
+    // 3. Меш с коллайдером — деталь узла: попадание внутрь его поддерева.
+    uint64_t hit_transform = 0;
+    int nodes_walked = 0;
+    if (ray_hit_in_node_subtree(reach, node, hit_transform, nodes_walked)) {
+        why = 3;
+        return true;
+    }
+    return false;
+}
+
+static bool ray_hit_is_self_node(const MeleeReach& reach, const FarmEntity& node) {
+    int why = 0;
+    return ray_hit_is_self_node(reach, node, why);
+}
+
+// Сырая прикидка «где на узле сидит точка попадания» из самого узла, без
+// крестика: MineableObject.LXX (0xC8) — Transform, который игра использует как
+// якорь точки удара (ZgL() отдаёт его мировую позицию, а сам он живёт в
+// hitInfo). Если это действительно якорь поверхности, он даёт точку прицела для
+// руды ещё ДО первого удара — тогда «перекрытие собственным камнем» исчезает
+// само, без всяких послаблений. Пока это только замер для лога: пишем позицию
+// якоря и дистанцию до точки попадания луча, чтобы на устройстве увидеть,
+// совпадают ли они (0.0x м = якорь на поверхности, десятки метров = мусор).
+static bool farm_ore_anchor_point(const FarmEntity& node, Vec3& out, float& dist_to_ray, int& valid) {
+    valid = 0;
+    dist_to_ray = -1.0F;
+    if (node.kind == 0 || !valid_obj(node.component)) return false;
+    const uint64_t anchor = rd_ptr(node.component + MINEABLE_HIT_ANCHOR);
+    if (!valid_obj(anchor)) return false;
+    const uint64_t transform = native_component_transform(managed_object_native(anchor));
+    if (!transform) return false;
+    if (!marker_world_position(transform, out)) return false;
+    valid = 1;
+    return true;
 }
 
 // Профиль одного вызова esp_farm_get_target. Пишется им же, читается строкой
@@ -6667,10 +6773,32 @@ bool esp_farm_get_target(FarmTarget& out) {
                           reach.ray_distance < out.aim_3d - 0.6F;
         // Луч, упёршийся в собственный узел, перекрытием не считается: у камня
         // точка прицела внутри породы, и иначе бот вечно обходил бы свой же
-        // камень (см. ray_hit_is_self_node).
+        // камень (см. ray_hit_is_self_node). В out.ray_self_why остаётся, какая
+        // именно проверка это доказала (1 коллайдер крестика, 2 GameObject узла,
+        // 3 попадание в деталь поддерева) — по ней в логе видно, работает ли
+        // послабление и почему нет.
         if (out.ray_blocked) {
-            out.ray_self = ray_hit_is_self_node(reach, node);
+            out.ray_self = ray_hit_is_self_node(reach, node, out.ray_self_why);
             if (out.ray_self) out.ray_blocked = false;
+            // Якорь точки удара (MineableObject.LXX) — замер для лога: если его
+            // мировая позиция совпадает с точкой попадания луча, это готовая
+            // точка прицела на поверхности камня ещё до первого удара.
+            if (node.kind != 0) {
+                Vec3 anchor{};
+                float to_ray = -1.0F;
+                int   valid = 0;
+                if (farm_ore_anchor_point(node, anchor, to_ray, valid)) {
+                    out.ore_anchor_valid = true;
+                    out.ore_anchor_x = anchor.x; out.ore_anchor_y = anchor.y;
+                    out.ore_anchor_z = anchor.z;
+                    if (reach.ray_point_valid) {
+                        const float dx = anchor.x - reach.ray_point.x;
+                        const float dy = anchor.y - reach.ray_point.y;
+                        const float dz = anchor.z - reach.ray_point.z;
+                        out.ore_anchor_to_ray = sqrtf(dx * dx + dy * dy + dz * dz);
+                    }
+                }
+            }
         }
         out.ray_point_valid = reach.ray_point_valid;
         if (reach.ray_point_valid) {

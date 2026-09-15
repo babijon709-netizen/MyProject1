@@ -360,9 +360,17 @@ inline constexpr std::uint64_t TOD_CYCLE_YEAR     = 0x1C;
 inline constexpr std::uint64_t MINEABLE_LOOT           = 0xA0; // List<Oxide.LootItem>
 inline constexpr std::uint64_t MINEABLE_FINISH_BONUS   = 0xA8;
 inline constexpr std::uint64_t MINEABLE_CURRENT_HEALTH = 0x78; // float, убывает от каждого удара
+inline constexpr std::uint64_t MINEABLE_HIT_ANCHOR     = 0xC8; // LXX, Transform точки удара (см. ниже)
 // Oxide.LootItem: the item short name the node drops ("stone", "metal.ore", ...)
 inline constexpr std::uint64_t LOOTITEM_ITEM_NAME      = 0x10;
 inline constexpr std::uint64_t MINEABLE_MAX_HEALTH     = 0xC0; // float
+// LXX (0xC8) — Transform-якорь точки удара: ZgL() отдаёт его мировую позицию, а
+// hitInfo (MineableObjectHitInfoCompact) несёт её дальше в экстеншены. У руды
+// именно к этой точке игра привязывает Collider.ClosestPoint при первом ударе
+// (OreHitstreaks.giu), у дерева — рейкаст по стволу. Нужен как запасная точка
+// прицела на руде: пивот камня стоит ВНУТРИ породы, и прицел по нему оставляет
+// луч игры на поверхности раньше точки прицела. Читается только в диагностике
+// и только когда цель — руда.
 inline constexpr std::uint64_t MINEABLE_FRACTION       = 0xD0; // fractionRemaining
 inline constexpr std::uint64_t MINEABLE_ENTITY_TYPE    = 0xD8; // ServerPlayersAnalytics.EntityType
 // Каким орудием узел вообще добывается. Тип — тот же enum Oxide.FPTool.

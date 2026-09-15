@@ -26,6 +26,10 @@
 #include <ctime>
 #include <vector>
 #include <algorithm>
+#include <string>            // буфер канала записи лога (farmlog)
+#include <mutex>
+#include <condition_variable>
+#include <thread>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
