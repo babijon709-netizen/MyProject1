@@ -3307,6 +3307,12 @@ static void UpdateAim(float dt) {
     // сдвиг пальца с момента последнего НАБЛЮДАЕМОГО поворота камеры.
     static float s_pendDx = 0.f, s_pendDy = 0.f;
     static float s_pendTime = 0.f;
+    // Был ли поворот камеры виден в ПРОШЛОМ кадре. Нужен такту с подтверждением:
+    // базис из матрицы вида (источник углов на устройствах, где поза камеры не
+    // читается) отстаёт на кадр, и строгое «камера не двинулась в этом кадре»
+    // заставляло ждать лишний такт на каждом шаге — ведение становилось в
+    // несколько раз медленнее (в логе это чередование st 2 и st 0).
+    static bool  s_camMovedPrev = false;
     static unsigned long long s_lastId = 0;        // sticky target
     static int   s_lostFrames = 0;
     static int   s_holdFrames = 0;
@@ -3516,7 +3522,15 @@ static void UpdateAim(float dt) {
     // коррекцию: ошибка на экране устаревшая, и вторая поправка по ней —
     // это двойная коррекция, тот самый перелёт-раскачка. Держим палец на
     // месте и ждём реакции камеры (таймаут на случай проглоченного ввода).
-    if (s_fingerDown && !camMoved &&
+    //
+    // Ответ принимаем и за прошлый кадр: часть источников углов (базис из
+    // матрицы вида) отдаёт поворот кадра на кадр позже, и без этого запаса
+    // каждый шаг ждал лишний такт — аим вёл цель заметно медленнее, чем может.
+    // Настоящий обрыв ввода всё равно ловится: ответа нет ни в этом кадре, ни в
+    // прошлом — значит игра шаг не отработала.
+    const bool camAnswered = camMoved || s_camMovedPrev;
+    s_camMovedPrev = camMoved;
+    if (s_fingerDown && !camAnswered &&
         (fabsf(s_pendDx) >= 1.f || fabsf(s_pendDy) >= 1.f)) {
         s_pendTime += dt;
         if (s_pendTime < 0.25f) {
@@ -4878,7 +4892,7 @@ static void UpdateFarmInner(float dt) {
     // ошибки (рывок на 8° за кадр), при 1.97 не двигал камеру вовсе. Один и тот
     // же свайп 81 px измерялся как -2.39°, -13.21° и -17.02°.
     float camYaw = 0.f, camPitch = 0.f;
-    const bool haveCam = esp_camera_angles_farm(camYaw, camPitch);   // фарм: с базисом из матрицы вида (аимбот — см. esp_camera_angles)
+    const bool haveCam = esp_camera_angles(camYaw, camPitch);
     float camYawDelta = 0.f;
     bool camMoved = false;
     if (haveCam && s_haveLast) {

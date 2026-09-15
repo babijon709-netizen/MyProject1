@@ -265,15 +265,11 @@ void        esp_set_xray(float meters);
 float       esp_camera_fov_deg();
 
 // Absolute camera orientation (degrees; yaw around world up, pitch +up) as of
-// the last esp_get_boxes(). Returns false if the camera pose is unknown.
-// Источники для аимбота — поза камеры и ось выстрела (как было в сборке без
-// правок автофарма): по этим углам аимбот учит чувствительность и ждёт ответа
-// игры на свой шаг, а базис из матрицы вида отстаёт на кадр и ломает это
-// ожидание. Автофарм использует esp_camera_angles_farm().
+// the last esp_get_boxes(). Returns false if no source is readable at all.
+// Источники: поза камеры, ось выстрела, а если ни одно не читается — базис из
+// матрицы вида этого кадра (отстаёт на кадр; аимбот это учитывает в такте с
+// подтверждением, см. UpdateAim).
 bool        esp_camera_angles(float& yaw_deg, float& pitch_deg);
-// Те же углы, но с третьим источником — базисом из матрицы вида кадра. Нужен
-// автофарму на устройствах, где поза камеры не читается вовсе; отстаёт на кадр.
-bool        esp_camera_angles_farm(float& yaw_deg, float& pitch_deg);
 // Diagnostic: bit 0 camera pose known, bit 1 pose derived from the view
 // matrix, bit 2 firing reference in use. See esp_camera_state() in game.cpp.
 int         esp_camera_state();

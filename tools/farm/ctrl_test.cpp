@@ -146,9 +146,6 @@ void esp_farm_spot_raw(float& ax, float& ay, float& az, float& bx, float& by, fl
 }
 float esp_camera_fov_deg() { return 60.f; }
 bool esp_camera_angles(float& y, float& p) { y = g_camYaw; p = g_camPitch; return true; }
-// Фарм берёт углы с базисом из матрицы вида (третий источник); на стенде он не
-// нужен — отдаём те же углы, что и аимботу.
-bool esp_camera_angles_farm(float& y, float& p) { return esp_camera_angles(y, p); }
 int  esp_camera_state() { return 5; }
 bool esp_local_eye_position(float& x, float& y, float& z) { x = g_eye[0]; y = g_eye[1]; z = g_eye[2]; return true; }
 
