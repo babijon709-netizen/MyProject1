@@ -5636,8 +5636,11 @@ void RenderMenu() {
             bool onLights = false;
             {
                 float d = 0.f, gap = 0.f;
-                TrafficLightMetrics(panelLeft ? AvatarRailW(g_win.w) : g_win.w, d, gap);
-                const ImVec2 tlPos = TrafficLightPos(g_win.pos, panelLeft);
+                // Раскладка берётся прямо из настроек: этот блок идёт до того,
+                // как в RenderMenu посчитан panelLeft.
+                const bool pl = g_state.ui_panel_left;
+                TrafficLightMetrics(pl ? AvatarRailW(g_win.w) : g_win.w, d, gap);
+                const ImVec2 tlPos = TrafficLightPos(g_win.pos, pl);
                 for (int i = 0; i < kTLN; ++i) {
                     ImVec2 mn, mx;
                     TrafficLightRect(tlPos, d, gap, i, mn, mx);
