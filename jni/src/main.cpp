@@ -5293,19 +5293,18 @@ static void UpdateFarmInner(float dt) {
 
 // Кружок-аватарка и «светофор» в левом верхнем углу меню.
 //
-// Кружок (радиус 58.5 — диаметр 117, это в 1.5 раза меньше предыдущих 176)
-// живёт в панели вкладок, и панель считается от него: отступ + диаметр +
-// отступ. Над кружком, в самом углу окна, стоят три кнопки как в macOS
-// (красная — закрыть меню, жёлтая — свернуть в минимальный размер, зелёная —
-// развернуть на весь экран и обратно).
-static const float kAvatarR    = 58.5f;  // радиус кружка (диаметр 117)
+// Кружок (радиус 87.75 — диаметр 175.5) живёт в панели вкладок, и панель
+// считается от него: отступ + диаметр + отступ. Над кружком, в самом углу
+// окна, стоят три кнопки как в macOS (красная — закрыть меню, жёлтая —
+// свернуть в минимальный размер, зелёная — развернуть на весь экран и обратно).
+static const float kAvatarR    = 87.75f; // радиус кружка (диаметр 175.5)
 static const float kAvatarPad  = 20.f;   // отступ по бокам внутри панели
 static const float kAvatarPadT = 12.f;   // от верхнего края окна
 
-// «Светофор»: три кружка по 30 px с зазором 10 — как в macOS, только в
-// масштабе интерфейса этой менюшки (там они 12 px при системном шрифте 13).
-static const float kTLD   = 30.f;        // диаметр кружка светофора
-static const float kTLGap = 10.f;        // зазор между кружками
+// «Светофор»: три кружка по 20 px с зазором 6.7 — та же пропорция, что в
+// macOS (12 px при системном шрифте 13), в 1.5 раза меньше прежних 30/10.
+static const float kTLD   = 20.f;        // диаметр кружка светофора
+static const float kTLGap = 6.7f;        // зазор между кружками
 static const float kTLPad = 12.f;        // отступ светофора от краёв окна
 static const int   kTLN   = 3;           // красный, жёлтый, зелёный
 
@@ -5715,50 +5714,77 @@ void RenderMenu() {
     static constexpr int kTabShown = 5;
     static constexpr int kTabOrder[kTabShown] = {1, 2, 3, 4, 5};
 
-    // Иконка вкладки + подпись, по центру ячейки (общая для обеих панелей).
+    // Ячейка вкладки: иконка + подпись. В нижней панели — иконка сверху,
+    // подпись под ней по центру; в левой панели — подпись СПРАВА от иконки
+    // (иконки стоят на одной вертикали, подписи — в одну колонку, как в
+    // боковых панелях macOS). Размеры подгоняются под ширину ячейки, поэтому
+    // длинные подписи («Конфиги») не вылезают за панель.
     auto DrawTabCell = [&](ImDrawList* fdl, int i, float cellX, float cellY,
-                           float cellW, float cellH, float iconSize, float lblFS) {
-        bool   active = (i == g_state.cur_tab);
-        ImVec4 col    = active ? C::Acc() : C::Dim();
-        auto   tsz    = ImGui::GetFont()->CalcTextSizeA(lblFS, FLT_MAX, 0, tabNames[i]);
-        float  blockH = iconSize + 6.f + tsz.y;
-        float  iconY  = cellY + (cellH - blockH) * 0.5f;
-        float  cxr    = cellX + cellW * 0.5f;
+                           float cellW, float cellH, float iconSize, float lblFS,
+                           bool horiz = false) {
+        const bool   active = (i == g_state.cur_tab);
+        const ImVec4 col    = active ? C::Acc() : C::Dim();
+        auto*  font = ImGui::GetFont();
+
+        float  icoW = iconSize, icoH = iconSize, icoX = 0.f, icoY = 0.f;
+        float  fs   = lblFS;
+        ImVec2 lpos{};
+
+        if (horiz) {
+            const float padL = 16.f, padR = 12.f, gap = 12.f;
+            auto labelW = [&](float f) { return font->CalcTextSizeA(f, FLT_MAX, 0, tabNames[i]).x; };
+            const float avail = cellW - padL - padR - gap;
+            for (int it = 0; it < 4 && icoW + labelW(fs) > avail; ++it) {
+                const float k = ImMax(0.6f, avail / ImMax(1.f, icoW + labelW(fs)));
+                icoW = ImMax(30.f, icoW * k);
+                fs   = ImMax(12.f, fs * ImMax(0.75f, k));
+            }
+            icoH = icoW;
+            icoX = cellX + padL;
+            icoY = cellY + (cellH - icoH) * 0.5f;
+            const auto lsz = font->CalcTextSizeA(fs, FLT_MAX, 0, tabNames[i]);
+            lpos = {icoX + icoW + gap, cellY + (cellH - lsz.y) * 0.5f};
+        } else {
+            const auto  tsz    = font->CalcTextSizeA(fs, FLT_MAX, 0, tabNames[i]);
+            const float blockH = icoH + 6.f + tsz.y;
+            icoX = cellX + cellW * 0.5f - icoW * 0.5f;
+            icoY = cellY + (cellH - blockH) * 0.5f;
+            lpos = {cellX + cellW * 0.5f - tsz.x * 0.5f, icoY + icoH + 6.f};
+        }
+
         if (i == 3) {
             // У «Разное» своя векторная иконка (сетка 2x2), чтобы не
             // совпадала с иконкой «Конфиги» из общего атласа.
-            float half = iconSize * 0.5f;
-            float gx0 = cxr - half, gy0 = iconY;
-            float cell = iconSize * 0.44f, gap2 = iconSize - cell * 2.f;
+            float gx0 = icoX, gy0 = icoY;
+            float cell = icoW * 0.44f, gap2 = icoW - cell * 2.f;
             ImU32 gcol = C::UA(C::Acc(), active ? 1.f : 0.55f);
             float rr = cell * 0.3f;
             fdl->AddRectFilled({gx0, gy0}, {gx0 + cell, gy0 + cell}, gcol, rr);
-            fdl->AddRectFilled({gx0 + cell + gap2, gy0}, {gx0 + iconSize, gy0 + cell}, gcol, rr);
-            fdl->AddRectFilled({gx0, gy0 + cell + gap2}, {gx0 + cell, gy0 + iconSize}, gcol, rr);
+            fdl->AddRectFilled({gx0 + cell + gap2, gy0}, {gx0 + icoW, gy0 + cell}, gcol, rr);
+            fdl->AddRectFilled({gx0, gy0 + cell + gap2}, {gx0 + cell, gy0 + icoW}, gcol, rr);
             // Четвёртый квадрат — контурный, чтобы иконка читалась как «прочее».
-            fdl->AddRect({gx0 + cell + gap2, gy0 + cell + gap2}, {gx0 + iconSize, gy0 + iconSize}, gcol, rr, 0, 2.f);
+            fdl->AddRect({gx0 + cell + gap2, gy0 + cell + gap2}, {gx0 + icoW, gy0 + icoW}, gcol, rr, 0, 2.f);
         } else if (g_tabIcons[i]) {
-            ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
-            ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
+            ImVec2 iMin = {icoX, icoY};
+            ImVec2 iMax = {icoX + icoW, icoY + icoH};
             fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax,
                 {0,0}, {1,1}, IM_COL32(255, 255, 255, active ? 255 : 165), 9.f);
         } else {
             // Заглушка: скруглённый квадрат с первой буквой вкладки.
-            ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
-            ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
+            ImVec2 iMin = {icoX, icoY};
+            ImVec2 iMax = {icoX + icoW, icoY + icoH};
             fdl->AddRectFilled(iMin, iMax, C::UA(C::Acc(), active ? 0.9f : 0.35f), 9.f);
             char letter[8] = {};
             int gl = 0;
             letter[gl++] = tabNames[i][0];
             if ((unsigned char)tabNames[i][0] >= 0xC0) letter[gl++] = tabNames[i][1];
-            float gfs = iconSize * 0.55f;
-            auto gsz = ImGui::GetFont()->CalcTextSizeA(gfs, FLT_MAX, 0, letter);
-            fdl->AddText(ImGui::GetFont(), gfs,
-                {cxr - gsz.x * 0.5f, iconY + (iconSize - gsz.y) * 0.5f},
+            float gfs = icoW * 0.55f;
+            auto gsz = font->CalcTextSizeA(gfs, FLT_MAX, 0, letter);
+            fdl->AddText(font, gfs,
+                {icoX + icoW * 0.5f - gsz.x * 0.5f, icoY + (icoH - gsz.y) * 0.5f},
                 IM_COL32(255, 255, 255, active ? 255 : 200), letter);
         }
-        fdl->AddText(ImGui::GetFont(), lblFS,
-            {cxr - tsz.x * 0.5f, iconY + iconSize + 6.f}, C::U(col), tabNames[i]);
+        fdl->AddText(font, fs, lpos, C::U(col), tabNames[i]);
     };
 
     auto TabTap = [&](int i) {
@@ -5837,8 +5863,9 @@ void RenderMenu() {
             auto* fdl = ImGui::GetForegroundDrawList();
             for (int s = 0; s < kTabShown; s++) {
                 const int i = kTabOrder[s];
+                // Иконка слева, подпись справа — как в боковых панелях macOS.
                 DrawTabCell(fdl, i, lpPos.x, tab_rects[i].sx, railW, tabH, 56.f,
-                            ImGui::GetFontSize() * 0.88f);
+                            ImGui::GetFontSize() * 0.88f, true);
             }
         }
 
