@@ -22,7 +22,8 @@ LOCAL_LDFLAGS := -Wl,--gc-sections,-s,--strip-all -Wl,-x -Wl,--build-id=none -pi
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PATH)/include/ImGui/backends $(LOCAL_PATH)/src
 
 LOCAL_SRC_FILES := \
-    src/main.cpp src/game.cpp src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
+    src/main.cpp src/game.cpp src/lang.cpp \
+    src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
     src/VidAvatar.cpp \
     src/third_party/tjpgd/tjpgd.c \
     src/Blur/Blur.cpp \

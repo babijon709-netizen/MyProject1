@@ -47,6 +47,15 @@ if [[ -f "${ROOT}/libs/arm64-v8a/xvcen" && ! -f "${ROOT}/libs/arm64-v8a/xvcen.sh
 fi
 
 test -f "${ROOT}/libs/arm64-v8a/xvcen.sh"
+
+# Переводы РУ/EN: строка меню без перевода в английском меню просто остаётся
+# русской — на устройстве это видно, а в сборке нет. Проверка сверяет таблицы с
+# кодом и роняет сборку с подсказкой, что запустить.
+if command -v python3 >/dev/null 2>&1; then
+    python3 "${ROOT}/tools/lang/check.py"
+else
+    echo "python3 не найден — проверка таблиц перевода пропущена" >&2
+fi
 # Вес бинарника — виден прямо в логе сборки (в нём кадры аватарки ~300 КБ,
 # см. tools/video/gen_avatar.py; ролик целиком в бинарник не вшивается).
 ls -la "${ROOT}/libs/arm64-v8a/xvcen.sh"

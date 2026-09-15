@@ -38,6 +38,7 @@
 #include "stb_image/stb_image.h"
 #include "Blur/Blur.h"
 #include "Android_touch/TouchHelperA.h"   // счётчики Upload (диагностика лага)
+#include "lang.h"                         // РУ/EN: перевод меню и визуалов
 
 // Аватарка-видео в кружке слева сверху (кадры вшиты, см. VidAvatar.cpp).
 #include "VidAvatar.h"
@@ -168,7 +169,15 @@ template<size_t N> constexpr auto _mk(const char (&s)[N]) noexcept { return _XS<
 
 }
 
-#define XS(s) ([]() noexcept -> const char* { static constexpr auto _x = xp::_mk(s); return _x.d(); }())
+// Русская строка ровно так, как она написана в коде (декодируется один раз на
+// место вызова). Нужна там, где перевод не должен применяться: имена вкладок
+// для счётчиков ширины, строка-ключ таблицы переводов, служебный лог.
+#define XS_RU(s) ([]() noexcept -> const char* { static constexpr auto _x = xp::_mk(s); return _x.d(); }())
+
+// Строка интерфейса на текущем языке (РУ по умолчанию, EN — по выбору в
+// «Опциях»). Язык меняется на ходу, поэтому подстановка идёт здесь, а не в
+// статических массивах — иначе меню осталось бы на языке запуска.
+#define XS(s) (lang::text(XS_RU(s)))
 
 namespace prot {
 static void Init() {}
@@ -1048,6 +1057,27 @@ static void ForgetLastConfigName() {
     remove(CfgLastPath().c_str());
 }
 
+// Язык интерфейса лежит рядом с конфигами отдельным файлом (.lang): выбор
+// нужен и без конфига, иначе он терялся бы при каждом запуске. Конфиг тоже
+// несёт язык — при загрузке конфиг побеждает и переписывает этот файл.
+static std::string CfgLangPath() {
+    return std::string(kCfgDir) + ".lang";
+}
+
+static void RememberLang() {
+    mkdir(kCfgDir, 0777);
+    std::ofstream f(CfgLangPath(), std::ios::trunc);
+    if (f) f << (lang::english() ? "en" : "ru");
+}
+
+static void RestoreLang() {
+    std::ifstream f(CfgLangPath());
+    if (!f) return;
+    std::string v;
+    std::getline(f, v);
+    if (!v.empty() && v[0] == 'e') lang::set(lang::LANG_EN);
+}
+
 static void XorBuf(uint8_t* buf, size_t sz) {
     for (size_t i = 0; i < sz; i++) buf[i] ^= (kXorKey ^ (uint8_t)(i * 0x1D + 0x3B));
 }
@@ -1124,7 +1154,10 @@ struct CfgBlob {
     bool  aim_scope_only, esp_animal, esp_vis_check, esp_fill;
     float esp_thick, esp_stroke, esp_rounding, esp_fill_pct;
     float gun_str, gun_fov, gun_trigger_delay;
-    bool  ui_fps, ui_dark_mode, ui_show_sep;
+    //   ui_fps        -> ui_lang_en       (счётчик FPS убран навсегда, а слот
+    //                                      bool в раскладке заморожен версией;
+    //                                      теперь тут язык: 0 рус / 1 англ)
+    bool  ui_lang_en, ui_dark_mode, ui_show_sep;
     ImVec4 esp_box_col, esp_box_col_invis, esp_name_col, esp_ally_col, esp_distance_col;
     ImVec4 esp_weapon_col, esp_loot_col, esp_tracer_col, esp_skeleton_col, esp_animal_col;
     // Four scalars that had no slot of their own:
@@ -1169,7 +1202,7 @@ static void ConfigSaveToPath(const std::string& path) {
     s.gun_str     = g_state.gun_str;
     s.gun_fov     = g_state.gun_fov;
     s.gun_trigger_delay     = g_state.gun_trigger_delay;
-    s.ui_fps      = g_state.ui_fps;      s.ui_dark_mode= g_state.ui_dark_mode;
+    s.ui_lang_en  = lang::english();     s.ui_dark_mode= g_state.ui_dark_mode;
     s.ui_show_sep = g_state.ui_show_sep;
     s.esp_box_col          = cfg::esp::box_col;
     s.esp_box_col_invis    = cfg::esp::box_col_invis;
@@ -1287,8 +1320,11 @@ static void ConfigLoad(int idx, bool announce = true) {
     if (g_state.gun_fov > 180.f) g_state.gun_fov = 180.f;
     g_state.gun_trigger_delay     = s.gun_trigger_delay;
     g_state.ui_dark_mode= s.ui_dark_mode;
-    // ui_fps и ui_show_sep из конфига игнорируются: счётчик FPS убран,
-    // рамки карточек всегда включены.
+    // Язык интерфейса живёт в бывшем слоте ui_fps (счётчик FPS убран навсегда).
+    // Старые конфиги держат там false — это и есть русский по умолчанию.
+    lang::set(s.ui_lang_en ? lang::LANG_EN : lang::LANG_RU);
+    RememberLang();
+    // ui_show_sep из конфига игнорируется: рамки карточек всегда включены.
     g_state.ui_fps      = false;
     g_state.ui_show_sep = true;
     cfg::esp::box_col          = s.esp_box_col;
@@ -3116,8 +3152,64 @@ float TabContent(int tab, float dt, float cW) {
         }
 
     } else if (tab == 5) {
-        // Опции (interface + system) — now the bottom-most tab.
+        // Опции (язык + интерфейс + система) — нижняя вкладка.
         // Счётчик FPS и «Рамки карточек» убраны: рамки включены принудительно.
+        // ---- Язык: русский или английский -------------------------------
+        // Переводится всё, что рисует оверлей: подписи меню и вкладок, тосты и
+        // подписи визуалов (оружие, предметы, животные, ящики). Переключение
+        // применяется сразу, на текущем кадре. Названия самих языков пишем на
+        // них самих — так строка понятна при любом выбранном языке.
+        SHdr(XS("Язык"));
+        {
+            auto* dl  = ImGui::GetWindowDrawList();
+            auto* fn  = ImGui::GetFont();
+            float avW = ImGui::GetContentRegionAvail().x;
+            const float inset = Layout::Inset;
+            const float rowH  = Layout::RowH;
+            auto  pos = ImGui::GetCursorScreenPos();
+            bool  popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+
+            const char* const langNames[2] = { "Русский", "English" };
+            const float gap = 10.f;
+            const float halfW = (avW - inset * 2.f - gap) * 0.5f;
+
+            for (int li = 0; li < 2; li++) {
+                const bool sel = (lang::current() == (li == 0 ? lang::LANG_RU : lang::LANG_EN));
+                const float x0 = pos.x + inset + li * (halfW + gap);
+                const float x1 = x0 + halfW;
+
+                dl->AddRectFilled({x0, pos.y}, {x1, pos.y + rowH}, C::U(C::Card()), R::Card);
+                if (sel) {
+                    dl->AddRectFilled({x0, pos.y}, {x1, pos.y + rowH},
+                        C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), R::Card);
+                    dl->AddRect({x0, pos.y}, {x1, pos.y + rowH}, C::UA(C::Acc(), 0.8f), R::Card, 0, 2.f);
+                } else if (g_state.ui_show_sep) {
+                    dl->AddRect({x0, pos.y}, {x1, pos.y + rowH}, C::U(C::Sep()), R::Card, 0, 1.2f);
+                }
+
+                auto lsz = fn->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0, langNames[li]);
+                dl->AddText(fn, ImGui::GetFontSize(),
+                    {x0 + (halfW - lsz.x) * 0.5f, pos.y + (rowH - lsz.y) * 0.5f},
+                    C::U(sel ? C::Acc() : C::Txt()), langNames[li]);
+
+                char lid[16]; snprintf(lid, sizeof(lid), "##lang%d", li);
+                ImGui::SetCursorScreenPos({x0, pos.y});
+                ImGui::InvisibleButton(lid, {halfW, rowH});
+                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed && !sel) {
+                    lang::set(li == 0 ? lang::LANG_RU : lang::LANG_EN);
+                    RememberLang();
+                    // Тост — уже на выбранном языке: он и показывает, что
+                    // переключение сработало в этом же кадре.
+                    char _b[160];
+                    snprintf(_b, sizeof(_b), "%s|%s", lang::text(XS_RU("Язык")), langNames[li]);
+                    ShowToast(_b);
+                    PlaySound(SND_CLICK);
+                }
+            }
+            ImGui::SetCursorScreenPos({pos.x, pos.y + rowH});
+            ImGui::Dummy({avW, 0.f});
+        }
+
         SHdr(XS("Интерфейс"));
         CardBg(Layout::RowH * 1);
         if (ToggleRow("##ud2", XS("Тёмная тема"), &g_state.ui_dark_mode, g_state.a_ui_dark, true, true))
@@ -5422,10 +5514,18 @@ static void UpdateFarmInner(float dt) {
 }
 
 // Названия вкладок — одни и те же в шапке контента и в обеих панелях.
-// XS() подставляет перевод строки интерфейса.
-static const char* kTabTitles[kTabCount] = {
-    XS("Меню"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")
+// Русские оригиналы лежат здесь (они же ключи таблицы переводов), а язык
+// подставляется на каждом обращении: подпись вкладки нужна и для отрисовки, и
+// для расчёта ширины панели, а язык может смениться на ходу — массив со
+// строками, собранный один раз при запуске, остался бы на языке запуска.
+static const char* const kTabTitlesRu[kTabCount] = {
+    XS_RU("Меню"), XS_RU("Аим"), XS_RU("ESP"), XS_RU("Разное"), XS_RU("Конфиги"), XS_RU("Опции")
 };
+
+static const char* TabTitle(int k) {
+    if (k < 0 || k >= kTabCount) return "";
+    return lang::text(kTabTitlesRu[k]);
+}
 
 // Ячейка вкладки в левой панели: иконка слева и крупная подпись справа.
 // Иконка 60 px — в 1.5 раза больше прежних 40. Подпись — обычным начертанием
@@ -5444,7 +5544,7 @@ static float RailTabsW() {
     const float fs = ImGui::GetFontSize() * 0.88f * kRailFS;
     float worst = 0.f;
     for (int k = 1; k < kTabCount; ++k)
-        worst = ImMax(worst, ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, kTabTitles[k]).x);
+        worst = ImMax(worst, ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, TabTitle(k)).x);
     return kRailPadL + kRailIcon + kRailGap + worst + kRailPadR;
 }
 
@@ -5864,7 +5964,9 @@ void RenderMenu() {
     SpringTick(g_state.tab_slide, g_state.tab_slide_vel, 0.f, dt);
 
     // Короткие и понятные названия вкладок (индекс = id вкладки) — общий список.
-    const char* const* tabNames = kTabTitles;
+    // Подпись вкладки берётся на текущем языке: и в шапке, и в панели, и в
+    // расчёте ширины ячейки.
+    auto tabNames = [](int k) { return TabTitle(k); };
     // Вкладка «Меню» (id 0) удалена: её функционал переехал в «Опции».
     // id контента вкладок не меняются — конфиги и логика остаются как были.
     static constexpr int kTabShown = 5;
@@ -5890,7 +5992,7 @@ void RenderMenu() {
             float worst = 0.f;
             for (int k = 0; k < kTabShown; ++k)
                 worst = ImMax(worst, ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0,
-                                                                    tabNames[kTabOrder[k]]).x);
+                                                                    tabNames(kTabOrder[k])).x);
             return worst;
         };
         for (float fs = want; fs > baseFS; fs -= 1.f) {
@@ -5924,7 +6026,7 @@ void RenderMenu() {
             const float padL = padL0 > 0.f ? padL0 : 16.f;
             const float padR = padR0 > 0.f ? padR0 : 12.f;
             const float gap  = gap0  > 0.f ? gap0  : 12.f;
-            auto labelW = [&](float f) { return font->CalcTextSizeA(f, FLT_MAX, 0, tabNames[i]).x; };
+            auto labelW = [&](float f) { return font->CalcTextSizeA(f, FLT_MAX, 0, tabNames(i)).x; };
             // Подгонка — только на совсем узкой панели: обычно размеры уже
             // посчитаны в RailMetrics под самую длинную подпись.
             const float avail = cellW - padL - padR - gap;
@@ -5936,10 +6038,10 @@ void RenderMenu() {
             icoH = icoW;
             icoX = cellX + padL;
             icoY = cellY + (cellH - icoH) * 0.5f;
-            const auto lsz = font->CalcTextSizeA(fs, FLT_MAX, 0, tabNames[i]);
+            const auto lsz = font->CalcTextSizeA(fs, FLT_MAX, 0, tabNames(i));
             lpos = {icoX + icoW + gap, cellY + (cellH - lsz.y) * 0.5f};
         } else {
-            const auto  tsz    = font->CalcTextSizeA(fs, FLT_MAX, 0, tabNames[i]);
+            const auto  tsz    = font->CalcTextSizeA(fs, FLT_MAX, 0, tabNames(i));
             const float blockH = icoH + 6.f + tsz.y;
             icoX = cellX + cellW * 0.5f - icoW * 0.5f;
             icoY = cellY + (cellH - blockH) * 0.5f;
@@ -5970,15 +6072,15 @@ void RenderMenu() {
             fdl->AddRectFilled(iMin, iMax, C::UA(C::Acc(), active ? 0.9f : 0.35f), 9.f);
             char letter[8] = {};
             int gl = 0;
-            letter[gl++] = tabNames[i][0];
-            if ((unsigned char)tabNames[i][0] >= 0xC0) letter[gl++] = tabNames[i][1];
+            letter[gl++] = tabNames(i)[0];
+            if ((unsigned char)tabNames(i)[0] >= 0xC0) letter[gl++] = tabNames(i)[1];
             float gfs = icoW * 0.55f;
             auto gsz = font->CalcTextSizeA(gfs, FLT_MAX, 0, letter);
             fdl->AddText(font, gfs,
                 {icoX + icoW * 0.5f - gsz.x * 0.5f, icoY + (icoH - gsz.y) * 0.5f},
                 IM_COL32(255, 255, 255, active ? 255 : 200), letter);
         }
-        fdl->AddText(font, fs, lpos, C::U(col), tabNames[i]);
+        fdl->AddText(font, fs, lpos, C::U(col), tabNames(i));
     };
 
     auto TabTap = [&](int i) {
@@ -6148,14 +6250,14 @@ void RenderMenu() {
 
     {
         // Шапка: заголовок вкладки по центру.
-        const char* const* titles = kTabTitles;
+        auto titles = [](int k) { return TabTitle(k); };
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
         const float hH = hdrH;
         const float titleFS = ImGui::GetFontSize() * 1.45f;
-        auto tsz = ImGui::GetFont()->CalcTextSizeA(titleFS, FLT_MAX, 0, titles[g_state.cur_tab]);
+        auto tsz = ImGui::GetFont()->CalcTextSizeA(titleFS, FLT_MAX, 0, titles(g_state.cur_tab));
         cdl->AddText(ImGui::GetFont(), titleFS,
-            {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles[g_state.cur_tab]);
+            {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles(g_state.cur_tab));
         if (!panelLeft) {
             // Светофор — у левого края, кружок — сразу за ним, по центру полосы.
             const float midY = hp.y + hdrH * 0.5f;
@@ -6411,6 +6513,7 @@ int main(int argc, char* argv[]) {
     LoadAnimeImage();
     LoadTabIcons();
     ApplyTheme();
+    RestoreLang();          // язык из прошлого запуска (конфиг ниже может его переписать)
     CfgScanDir();
     ConfigLoadLast();
     ApplyTheme();

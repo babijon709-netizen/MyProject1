@@ -45,4 +45,7 @@ echo "VidAvatar.cpp: ОК"
 # shellcheck disable=SC2086
 g++ $FLAGS $INC jni/src/game.cpp
 echo "game.cpp: ОК"
+# shellcheck disable=SC2086
+g++ $FLAGS $INC jni/src/lang.cpp
+echo "lang.cpp: ОК"
 echo "сборка хостовым g++ пройдена"

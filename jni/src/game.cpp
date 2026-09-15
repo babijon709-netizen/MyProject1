@@ -1,6 +1,7 @@
 #include "game.h"
 #include "game_offsets.h"
 #include "Vector.h"
+#include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
 
 #include <string.h>
 #include <strings.h>   // strncasecmp (weapon prefab label cleanup)
@@ -667,8 +668,9 @@ static const WeaponName kWeaponNames[] = {
 // whatever decoration its skin prefab carried. Weapons missing from the table
 // keep their cleaned name, so nothing ever disappears from the box.
 //
-// Russian labels are on; set to false to print the game's own English names.
-static constexpr bool kWeaponLabelRussian = true;
+// Язык подписи оружия берётся из переключателя в «Опциях»: русский (или
+// короткое имя из таблицы, если русского нет) либо английское имя, как его
+// пишет сама игра в ItemData.m_Name — оно и лежит в колонке `en`.
 
 static bool canonical_weapon_label(char* label, size_t cap) {
     if (!label || !label[0] || cap < 2) return false;
@@ -683,7 +685,7 @@ static bool canonical_weapon_label(char* label, size_t cap) {
         if (len > best_len && strstr(key, entry.key)) { best = &entry; best_len = len; }
     }
     if (!best) return false;
-    const char* pick = (kWeaponLabelRussian && best->ru) ? best->ru : best->en;
+    const char* pick = (lang::english() || !best->ru) ? best->en : best->ru;
     if (!pick || !pick[0]) return false;
     strncpy(label, pick, cap - 1);
     label[cap - 1] = '\0';
@@ -5296,11 +5298,14 @@ static bool pickup_marker(uint64_t component, char* label, size_t label_cap) {
         if (!fallback[0]) snprintf(fallback, sizeof(fallback), "%.30s", short_name);
         translated = fallback;
     }
+    // Перевод — до «x12»: количество дописывается к готовой подписи, и в
+    // английском она получается такой же короткой, как в русском.
+    const char* shown = lang::visual(translated);
     int32_t amount = rd<int32_t>(component + ITEMPICKUP_AMOUNT);
     if (amount > 1 && amount < 1000000)
-        snprintf(label, label_cap, "%s x%d", translated, (int)amount);
+        snprintf(label, label_cap, "%s x%d", shown, (int)amount);
     else
-        snprintf(label, label_cap, "%s", translated);
+        snprintf(label, label_cap, "%s", shown);
     return label[0] != '\0';
 }
 
@@ -5664,8 +5669,11 @@ std::vector<EspMarker> esp_get_markers() {
         marker.color_rgb[0] = entity.color_rgb[0];
         marker.color_rgb[1] = entity.color_rgb[1];
         marker.color_rgb[2] = entity.color_rgb[2];
+        // Подпись маркера — на текущем языке (в русском это она и есть,
+        // в английском — перевод по таблице имён; неизвестное остаётся как
+        // есть, поэтому подпись никогда не пропадает).
         snprintf(marker.name, sizeof(marker.name), "%s",
-                 entity.label ? entity.label : entity.text);
+                 lang::visual(entity.label ? entity.label : entity.text));
         result.push_back(marker);
     }
 
