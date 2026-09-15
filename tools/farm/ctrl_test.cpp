@@ -18,6 +18,11 @@
 //   G цель мигает на один кадр (рескан реестра): смены узла быть не должно —
 //     иначе каждое мигание стоит 0.7 с паузы (в логе так простаивал 14 с из 150).
 #include <cstdio>
+// В исходнике пользователя лог автофарма асинхронный: очередь строк и поток
+// записи (g_wmutex/g_wcv/writerLoop), поэтому стенду нужны те же заголовки.
+#include <mutex>
+#include <condition_variable>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <cstdarg>

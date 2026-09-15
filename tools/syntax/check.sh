@@ -14,11 +14,14 @@
 set -e
 cd "$(dirname "$0")/../.."
 STUB=tools/syntax/stub
-INC="-I$STUB -Ijni/include -Ijni/include/ImGui -Ijni/src"
-FILES="${*:-jni/src/main.cpp jni/src/game.cpp jni/src/Android_draw/draw.cpp}"
+INC="-I$STUB -Ijni/include -Ijni/include/ImGui -Ijni/include/ImGui/backends -Ijni/src"
+FILES="${*:-jni/src/main.cpp jni/src/game.cpp jni/src/Android_draw/draw.cpp \
+    jni/src/Android_touch/TouchHelperA.cpp jni/src/Blur/Blur.cpp jni/src/VidAvatar.cpp}"
 rc=0
 for f in $FILES; do
-    if g++ -std=c++17 -fsyntax-only -Wall $INC "$f" 2> /tmp/syntax_err.txt; then
+    CC=g++; STD=-std=c++17
+    case "$f" in *.c) CC=gcc; STD=-std=c11 ;; esac
+    if $CC $STD -fsyntax-only -Wall $INC "$f" 2> /tmp/syntax_err.txt; then
         echo "OK   $f"
     else
         # -Wcomment в game_offsets.h:346 — давний и известный, не ошибка сборки.
@@ -29,4 +32,12 @@ for f in $FILES; do
         fi
     fi
 done
+# C-источник декодера JPEG (собран своим компилятором в Android.mk)
+if [ -f jni/src/third_party/tjpgd/tjpgd.c ]; then
+    if gcc -std=c11 -fsyntax-only -I$STUB -Ijni/src/third_party/tjpgd jni/src/third_party/tjpgd/tjpgd.c 2> /tmp/syntax_err.txt; then
+        echo "OK   jni/src/third_party/tjpgd/tjpgd.c"
+    else
+        echo "ОШИБКА jni/src/third_party/tjpgd/tjpgd.c"; head -20 /tmp/syntax_err.txt; rc=1
+    fi
+fi
 exit $rc
