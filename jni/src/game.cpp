@@ -18,12 +18,51 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
+// ---- Счётчик обращений к памяти игры (диагностика лага) --------------------
+// process_vm_readv — это syscall, и стоит он на телефоне заметно дороже, чем
+// звучит «чтение памяти»: замер 15.09.2026 показал, что стадия автофарма
+// занимает 35..122 мс на кадр, а делает она ровно это — сотни и тысячи
+// вызовов (скан реестра: по чтению на запись прохода, три-четыре десятка на
+// классификацию новой записи). Видно по логу было только «стадия фарма съела
+// кадр», и по этому счётчику видно, за что именно заплачено: сколько чтений за
+// кадр, сколько микросекунд в среднем на чтение и сколько из кадра ушло в
+// конкретные участки esp_farm_get_target.
+struct IoMeter {
+    int       calls = 0;
+    long long ns    = 0;
+};
+static IoMeter g_rd_meter;
+static IoMeter g_wr_meter;
+
+static inline long long meter_now_ns() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+}
+
+void esp_io_meter_reset() { g_rd_meter = IoMeter{}; g_wr_meter = IoMeter{}; }
+
+void esp_io_meter(int& read_calls, double& read_ms, int& write_calls, double& write_ms) {
+    read_calls  = g_rd_meter.calls;
+    read_ms     = (double)g_rd_meter.ns / 1e6;
+    write_calls = g_wr_meter.calls;
+    write_ms    = (double)g_wr_meter.ns / 1e6;
+}
+
 static ssize_t remote_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
-    return syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+    const long long t0 = meter_now_ns();
+    const ssize_t n = syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+    g_rd_meter.ns += meter_now_ns() - t0;
+    ++g_rd_meter.calls;
+    return n;
 }
 
 static ssize_t remote_vm_writev(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
-    return syscall(__NR_process_vm_writev, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+    const long long t0 = meter_now_ns();
+    const ssize_t n = syscall(__NR_process_vm_writev, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+    g_wr_meter.ns += meter_now_ns() - t0;
+    ++g_wr_meter.calls;
+    return n;
 }
 
 using namespace game_offsets;
@@ -5737,6 +5776,12 @@ static std::vector<uint64_t>   g_farm_scan_ids;       // записи текущ
 static size_t                  g_farm_scan_idx = 0;   // курсор прохода
 static std::vector<FarmEntity> g_farm_scan_stage;     // накопленный результат
 static bool                    g_farm_scan_run = false;
+// Сколько условных единиц бюджета скан потратил на прошлом кадре и сколько
+// записей реестра в нём всего/осталось. Печатается в строке «кадры оверлея»:
+// по этим числам видно, идёт ли проход прямо сейчас и насколько он длинный.
+static int                     g_farm_scan_units = 0;
+static int                     g_farm_scan_total = 0;
+static int                     g_farm_scan_new   = 0;
 
 // Бюджет прохода — в условных чтениях за кадр, а не в записях: сверка с кешем
 // стоит одно чтение, классификация новой записи — около двенадцати (класс,
@@ -5876,6 +5921,7 @@ static void farm_scan_tick() {
             return;
         }
         g_farm_scan_ids.resize((size_t)count);
+        g_farm_scan_total = count;
         for (int32_t i = 0; i < count; ++i)
             memcpy(&g_farm_scan_ids[(size_t)i],
                    buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE,
@@ -5893,6 +5939,8 @@ static void farm_scan_tick() {
     const uint64_t identity_class = resolve_network_identity_class();
 
     int budget = g_farm_entities.empty() ? kFarmScanBudgetFast : kFarmScanBudget;
+    g_farm_scan_units = 0;
+    g_farm_scan_new = 0;
     while (g_farm_scan_idx < g_farm_scan_ids.size()) {
         const uint64_t identity = g_farm_scan_ids[g_farm_scan_idx++];
         if (!valid_obj(identity)) continue;
@@ -5901,6 +5949,8 @@ static void farm_scan_tick() {
                                                            : kFarmScanCostNew;
         if (budget < cost) { --g_farm_scan_idx; break; }  // доработаем в следующем кадре
         budget -= cost;
+        g_farm_scan_units += cost;
+        if (cost == kFarmScanCostNew) ++g_farm_scan_new;
 
         if (cached != g_farm_not_node.end()) {
             // Одно чтение: список компонентов на месте и тот же — объект не
@@ -6213,7 +6263,48 @@ static bool ray_hit_is_self_node(const MeleeReach& reach, const FarmEntity& node
     return managed_object_native(reach.ray_hit_go) == node_go;
 }
 
+// Профиль одного вызова esp_farm_get_target. Пишется им же, читается строкой
+// «кадры оверлея» сразу после вызова: цель разбора — ответить, какая именно
+// часть кадра автофарма стоит десятки миллисекунд (скан реестра, чтение орудия,
+// крестик) и сколько syscall'ов на это ушло. Публикуется на выходе из функции
+// на всех путях, включая early return'ы, — отдельным объектом с деструктором.
+static FarmTargetDiag g_farm_tgt_diag;   // последний вызов, для строки профиля
+
+struct FarmTargetDiagScope {
+    FarmTargetDiag d{};
+    long long t0 = 0;
+    int    reads0 = 0, writes0 = 0;
+    double read_ms0 = 0.0, write_ms0 = 0.0;
+
+    FarmTargetDiagScope() {
+        esp_io_meter(reads0, read_ms0, writes0, write_ms0);
+        t0 = meter_now_ns();
+    }
+    ~FarmTargetDiagScope() {
+        d.total_ms = (float)((double)(meter_now_ns() - t0) / 1e6);
+        int rc = 0, wc = 0;
+        double rms = 0.0, wms = 0.0;
+        esp_io_meter(rc, rms, wc, wms);
+        d.reads = rc - reads0;
+        d.read_ms = rms - read_ms0;
+        d.scan_running = g_farm_scan_run ? 1 : 0;
+        d.scan_total = g_farm_scan_total;
+        d.scan_left = (int)g_farm_scan_ids.size() - (int)g_farm_scan_idx;
+        if (d.scan_left < 0) d.scan_left = 0;
+        d.scan_units = g_farm_scan_units;
+        d.scan_new = g_farm_scan_new;
+        d.entities = (int)g_farm_entities.size();
+        d.neg_cache = (int)g_farm_not_node.size();
+        d.blacklisted = (int)g_farm_blacklist.size();
+        g_farm_tgt_diag = d;
+    }
+};
+
+void esp_farm_target_diag(FarmTargetDiag& out) { out = g_farm_tgt_diag; }
+
 bool esp_farm_get_target(FarmTarget& out) {
+    FarmTargetDiagScope diag;
+    FarmTargetDiag& dg = diag.d;
     out = FarmTarget{};
     if (!g_farm_mask) { g_farm_idle_reason = 1; return false; }
     if (g_pid <= 0 || !g_il2cpp_base) { g_farm_idle_reason = 2; return false; }
@@ -6232,7 +6323,11 @@ bool esp_farm_get_target(FarmTarget& out) {
         else ++it;
     }
 
-    farm_scan_tick();
+    {
+        const long long t = meter_now_ns();
+        farm_scan_tick();
+        dg.scan_ms = (float)((double)(meter_now_ns() - t) / 1e6);
+    }
 
     // Липкая цель: пока текущий узел жив, работаем по нему — иначе контроллер
     // переключался бы между двумя равноудалёнными узлами каждый кадр.
@@ -6241,7 +6336,12 @@ bool esp_farm_get_target(FarmTarget& out) {
     // Орудие в руках читаем один раз на кадр: из него и дальность удара, и ритм,
     // и умения (какой ресурс этим орудием вообще добывается).
     MeleeReach reach{};
-    const bool have_reach = read_local_melee_reach(reach);
+    bool have_reach = false;
+    {
+        const long long t = meter_now_ns();
+        have_reach = read_local_melee_reach(reach);
+        dg.reach_ms = (float)((double)(meter_now_ns() - t) / 1e6);
+    }
     g_farm_tool_have = (have_reach && reach.purposes_valid) ? reach.tool_purposes : 0;
     int tool_need = 0;
 
@@ -6249,6 +6349,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     const FarmEntity* best = nullptr;
     float best_score = 1e18F;
     float best_dist = 0.0F;
+    const long long t_loop0 = meter_now_ns();
     for (const FarmEntity& entity : g_farm_entities) {
         if (!(g_farm_mask & (1u << entity.kind))) continue;
         if (!entity.pos_valid) continue;
@@ -6303,6 +6404,7 @@ bool esp_farm_get_target(FarmTarget& out) {
         }
         if (score < best_score) { best_score = score; best = &entity; best_dist = dist; }
     }
+    dg.loop_ms = (float)((double)(meter_now_ns() - t_loop0) / 1e6);
     if (!best) {
         s_last_identity = 0;
         g_farm_tool_need = tool_need;
@@ -6315,11 +6417,17 @@ bool esp_farm_get_target(FarmTarget& out) {
     FarmEntity& node = const_cast<FarmEntity&>(*best);
 
     // ---- Крестик -------------------------------------------------------------
-    farm_resolve_extension(node);
     Vec3 spot{};
     int spot_source = 0, streak = 0;
     float spot_life = -1.0F;
-    const bool has_spot = farm_read_spot(node, spot, spot_source, streak, spot_life);
+    bool has_spot = false;
+    {
+        const long long t = meter_now_ns();
+        farm_resolve_extension(node);
+        has_spot = farm_read_spot(node, spot, spot_source, streak, spot_life);
+        dg.spot_ms = (float)((double)(meter_now_ns() - t) / 1e6);
+        dg.spot_source = has_spot ? spot_source : 0;
+    }
 
     // С какой стороны узла X. Если с обратной, то (а) идти к нему — значит
     // упираться в ствол/камень, и (б) удар сквозь меш не засчитается в серию.

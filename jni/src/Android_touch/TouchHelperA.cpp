@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <cmath>
+#include <ctime>
 #include <linux/input.h>
 #include <linux/uinput.h>
 
@@ -89,7 +90,27 @@ static void genRandomString(char *string, int length) {
     string[length - 1] = '\0';
 }
 
+// Диагностика лага автофарма: сколько раз пересобирали и отправляли пакет
+// событий синтетического тача и сколько миллисекунд на это ушло суммарно.
+// Upload() вызывается на КАЖДЫЙ SYN_REPORT, то есть десятки раз в секунду, и
+// делает write() в uinput плюс ожидание флага — на телефоне это заметная
+// статья расхода кадра, но из лога автофарма её раньше не было видно вовсе.
+static unsigned long long g_touch_upload_calls = 0;
+static double             g_touch_upload_ms    = 0.0;
+
+void Touch_UploadStats(unsigned long long& calls, double& ms) {
+    calls = g_touch_upload_calls;
+    ms    = g_touch_upload_ms;
+}
+
+static inline double TouchNowMs() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
 static void Upload() {
+    const double t0 = TouchNowMs();
     static bool bTouch = false;
     static bool isFirstDown = true;
     while (bTouch);
@@ -167,6 +188,8 @@ static void Upload() {
     }
 
     bTouch = false;
+    ++g_touch_upload_calls;
+    g_touch_upload_ms += TouchNowMs() - t0;
 }
 
 static void *TypeA(void *arg) {

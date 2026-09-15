@@ -37,6 +37,7 @@
 #define STBI_NO_STDIO
 #include "stb_image/stb_image.h"
 #include "Blur/Blur.h"
+#include "Android_touch/TouchHelperA.h"   // счётчики Upload (диагностика лага)
 
 #if __has_include("media/audio.h")
 #  include "media/audio.h"
@@ -5711,14 +5712,46 @@ static void ProfStage(double begin, double esp, double aim, double farm,
     if (p.nextEv <= 0.0) p.nextEv = now + kProfEvSec;
     if (now < p.nextEv) return;
     p.nextEv = now + kProfEvSec;
+
+    // ---- Из чего состояла стадия автофарма ---------------------------------
+    // В логах 14-15.09.2026 «farm» съедал 35..122 мс кадра, и по одной этой
+    // цифре нельзя было понять, что именно платит: скан реестра растянут по
+    // кадрам и делает по чтению на запись, классификация новой записи — три
+    // десятка чтений, чтение орудия и крестика — по нескольку. Счётчик
+    // syscall'ов и таймеры участков внутри esp_farm_get_target разводят эти
+    // версии. Заодно видно, сколько кадра стоит инъекция касаний (Upload
+    // вызывается на каждый SYN_REPORT) — её в логе не было видно вовсе.
+    FarmTargetDiag fd;
+    esp_farm_target_diag(fd);
+    int rdCalls = 0, wrCalls = 0;
+    double rdMs = 0.0, wrMs = 0.0;
+    esp_io_meter(rdCalls, rdMs, wrCalls, wrMs);
+    static unsigned long long prevTouchCalls = 0;
+    static double             prevTouchMs = 0.0;
+    unsigned long long touchCalls = 0;
+    double             touchMs = 0.0;
+    Touch_UploadStats(touchCalls, touchMs);
+    const unsigned long long dTouchCalls = touchCalls - prevTouchCalls;
+    const double             dTouchMs    = touchMs - prevTouchMs;
+    prevTouchCalls = touchCalls;
+    prevTouchMs    = touchMs;
+
     farmlog::event(
         "кадры оверлея: работа %.1f мс/кадр (begin %.1f esp %.1f [снимок %.1f маркеры %.1f] "
         "aim %.1f farm %.1f menu %.1f end %.1f) сон до темпа %.1f макс работы %.1f | "
-        "игроков %d маркеров %d оверлей %.1f к/с (панель %.0f Гц, темп %.0f Гц)",
+        "игроков %d маркеров %d оверлей %.1f к/с (панель %.0f Гц, темп %.0f Гц) | "
+        "чтений %d (%.1f мс) записей %d (%.1f мс) тач %llu (%.1f мс) | "
+        "фарм: скан %.1f орудие %.1f перебор %.1f крестик %.1f всего %.1f [реестр %d/%d, "
+        "единиц %d, новых %d, узлов %d, кеш %d, ЧС %d, spot %d]",
         (double)p.work, (double)p.begin, (double)p.esp, (double)p.boxes, (double)p.markers,
         (double)p.aim, (double)p.farm, (double)p.menu, (double)p.end, (double)p.sleep,
         (double)p.workMax, p.nBoxes, p.nMarkers, (double)overlay_fps(),
-        (double)overlay_peak_hz(), (double)overlay_pace_hz());
+        (double)overlay_peak_hz(), (double)overlay_pace_hz(),
+        rdCalls, rdMs, wrCalls, wrMs, (unsigned long long)dTouchCalls, dTouchMs,
+        (double)fd.scan_ms, (double)fd.reach_ms, (double)fd.loop_ms, (double)fd.spot_ms,
+        (double)fd.total_ms,
+        fd.scan_total, fd.scan_left, fd.scan_units, fd.scan_new, fd.entities,
+        fd.neg_cache, fd.blacklisted, fd.spot_source);
     p.workMax = 0.f;
 }
 
@@ -5773,6 +5806,7 @@ int main(int argc, char* argv[]) {
         // Замер стадий кадра оверлея: суммы уходят в лог строкой EV «кадры
         // оверлея: …» (см. ProfStage) — по ней видно, кто съел кадр при лагах.
         const double prof0 = profNowMs();
+        esp_io_meter_reset();   // счётчики syscall'ов этого кадра (см. ProfStage)
         drawBegin();
         const double prof1 = profNowMs();
 

@@ -20,3 +20,9 @@ void Touch_Up_N(int finger);
 // created). False in read-only fallback mode — everything that injects
 // touches (aimbot, auto-farm) silently does nothing then.
 bool Touch_CanInject();
+
+// Диагностика: сколько раз Upload() собрал пакет синтетического тача и сколько
+// миллисекунд на это ушло суммарно (счётчики накопительные). Хозяин цикла
+// оверлея снимает их раз в кадр, считая разницу, — по этой паре видно, сколько
+// лага приносит инъекция касаний, а не чтение памяти игры.
+void Touch_UploadStats(unsigned long long& calls, double& ms);
