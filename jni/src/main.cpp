@@ -556,9 +556,22 @@ void ApplyTheme() {
     c[ImGuiCol_Separator]             = C::Sep();
 }
 
-// Радиус кружка-аватарки в левом верхнем углу меню (диаметр 88 px в окне
-// шириной 840 — как раз по ширине панели вкладок 128 px с полями).
-static const float kAvatarR = 44.f;
+// Радиус кружка-аватарки в левом верхнем углу меню. 88 px — это диаметр
+// (кружок в ширину панели вкладок: 128 px минус 6 px отступа слева и 34
+// справа, чтобы не прижимался к её краю). 256 px ролика читаются при этом
+// кадр в кадр, без уменьшения; больше брать некуда — кружок шире панели
+// вкладок налез бы на её разделитель, а на телефоне 260 px ширины панели —
+// практически на всё меню.
+static const float kAvatarR = 88.f;
+
+// Где кружок стоит в каждой из двух раскладок меню (панель вкладок слева или
+// снизу): нужен и для отрисовки, и для полосы, которую он занимает в шапке.
+static float AvatarCx(float winX, float winW, bool panelLeft) {
+    return panelLeft ? (winX + 6.f + kAvatarR) : (winX + kAvatarR);
+}
+
+// Нижняя граница кружка в координатах окна меню.
+static float AvatarBottom(float winY) { return winY + 12.f + kAvatarR * 2.f; }
 
 namespace Layout {
     static constexpr float RowH      = 78.f;
@@ -5592,17 +5605,21 @@ void RenderMenu() {
                      C::UA(C::Sep(), 0.8f), 1.f);
 
         // Кружок с видео — в левом верхнем углу окна, над столбцом вкладок
-        // (у них сверху остаётся запас: столбец центрируется по высоте).
-        VidAvatar::Draw(ldl, lpPos.x + railW * 0.5f, lpPos.y + 6.f + kAvatarR, kAvatarR, dt,
+        // (столбец начинается ниже кружка, см. startY).
+        VidAvatar::Draw(ldl, AvatarCx(lpPos.x, g_win.w, true),
+                        lpPos.y + 12.f + kAvatarR, kAvatarR, dt,
                         C::UA(C::Acc(), 0.9f), C::U(C::LeftBg()));
 
         const float tabH   = Layout::TabHV;
         const float colH   = tabH * kTabShown;
-        // Столбец центрируется по высоте, но не залезает на кружок аватарки:
-        // при минимальной высоте окна (720) центр дал бы 90 px, а кружок
-        // занимает 6..94 — поэтому снизу от него оставляем ещё 14 px.
-        const float startY = ImMax(kAvatarR * 2.f + kAvatarR * 0.32f,
-                                   (WH - colH) * 0.5f);
+        // Столбец вкладок: по центру высоты, но ниже кружка аватарки. При
+        // минимальной высоте окна (720) под кружок уходит 200 px, а столбцу
+        // нужно 540 — целиком они не расходятся, поэтому столбец прижимается
+        // к низу окна, а кружок заходит на пустую верхушку первой ячейки
+        // (иконка и подпись в ней ниже и не задеты). В высоком окне столбец
+        // просто центрируется под кружком.
+        const float startY = ImMin(ImMax(AvatarBottom(0.f) + 12.f, (WH - colH) * 0.5f),
+                                   ImMax(0.f, WH - colH - 6.f));
 
         for (int s = 0; s < kTabShown; s++) {
             const int i = kTabOrder[s];
@@ -5731,7 +5748,7 @@ void RenderMenu() {
         cdl->AddText(ImGui::GetFont(), titleFS,
             {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles[g_state.cur_tab]);
         if (!panelLeft)
-            VidAvatar::Draw(cdl, hp.x + 6.f + kAvatarR, hp.y + 6.f + kAvatarR, kAvatarR, dt,
+            VidAvatar::Draw(cdl, AvatarCx(hp.x, cW, false), hp.y + 12.f + kAvatarR, kAvatarR, dt,
                             C::UA(C::Acc(), 0.9f), C::U(C::Bg()));
         ImGui::Dummy({cW, hH});
     }
