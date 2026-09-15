@@ -5303,7 +5303,7 @@ static const char* kTabTitles[kTabCount] = {
 // раза крупнее базового кегля панели. Ширина панели считается так, чтобы
 // влезли и крупная иконка, и такая подпись (см. RailTabsW).
 static const float kRailIcon = 60.f;    // сторона иконки вкладки
-static const float kRailFS   = 2.f;     // кегль подписи от базового (0.88 от кегля меню)
+static const float kRailFS   = 1.55f;   // кегль подписи от базового (0.88 от кегля меню)
 static const float kRailPadL = 14.f;    // отступ иконки от края панели
 static const float kRailPadR = 10.f;    // отступ текста от края панели
 static const float kRailGap  = 12.f;    // зазор между иконкой и подписью
@@ -5753,7 +5753,7 @@ void RenderMenu() {
     auto RailMetrics = [&](float railW) -> RailCell {
         RailCell m;
         const float baseFS = ImGui::GetFontSize() * 0.88f;   // базовый кегль панели
-        const float want   = baseFS * kRailFS;               // цель — вдвое крупнее
+        const float want   = baseFS * kRailFS;               // цель — крупнее базового
         // Если панель уже, чем посчитано в RailTabsW (узкий экран), кегль и
         // иконка ужимаются: сначала меньше становится иконка, потом подпись.
         auto widest = [&](float fs) {
