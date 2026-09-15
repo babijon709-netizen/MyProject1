@@ -556,22 +556,33 @@ void ApplyTheme() {
     c[ImGuiCol_Separator]             = C::Sep();
 }
 
-// Радиус кружка-аватарки в левом верхнем углу меню. 88 px — это диаметр
-// (кружок в ширину панели вкладок: 128 px минус 6 px отступа слева и 34
-// справа, чтобы не прижимался к её краю). 256 px ролика читаются при этом
-// кадр в кадр, без уменьшения; больше брать некуда — кружок шире панели
-// вкладок налез бы на её разделитель, а на телефоне 260 px ширины панели —
-// практически на всё меню.
-static const float kAvatarR = 88.f;
+// Кружок-аватарка в левом верхнем углу меню. Радиус 88 px — это диаметр 176:
+// вдвое больше исходного варианта. Кружок живёт в панели вкладок, и панель
+// шириной 128 px его больше не вмещает (он вылезал на содержимое вкладок),
+// поэтому ширина панели считается от кружка: отступ слева + диаметр + отступ
+// справа. Контент начинается правее панели, пересечений нет.
+static const float kAvatarR    = 88.f;   // радиус кружка
+static const float kAvatarPad  = 20.f;   // отступ по бокам внутри панели
+static const float kAvatarPadT = 12.f;   // от верхнего края окна
 
-// Где кружок стоит в каждой из двух раскладок меню (панель вкладок слева или
-// снизу): нужен и для отрисовки, и для полосы, которую он занимает в шапке.
-static float AvatarCx(float winX, float winW, bool panelLeft) {
-    return panelLeft ? (winX + 6.f + kAvatarR) : (winX + kAvatarR);
+// Ширина панели вкладок под кружок (при радиусе 88 — 216 px). На узком экране
+// (меню сжимается под ширину дисплея) панель не отдаём больше 45% окна: при
+// этом кружок уменьшается, см. AvatarR().
+static float AvatarRailW(float winW) {
+    return ImMin((kAvatarR + kAvatarPad) * 2.f, ImMax(120.f, winW * 0.45f));
 }
 
-// Нижняя граница кружка в координатах окна меню.
-static float AvatarBottom(float winY) { return winY + 12.f + kAvatarR * 2.f; }
+// Радиус кружка под фактическую ширину панели: узкое окно — кружок меньше,
+// иначе он снова налез бы на содержимое вкладок.
+static float AvatarR(float railW) {
+    return ImMin(kAvatarR, ImMax(24.f, railW * 0.5f - kAvatarPad));
+}
+
+// Центр кружка в координатах окна меню: по центру панели вкладок, то есть ровно
+// над иконками вкладок (в раскладке с нижней панелью панели нет — там кружок
+// встаёт в том же месте от левого края окна).
+static float AvatarCx(float winX, float R) { return winX + kAvatarPad + R; }
+static float AvatarCy(float winY, float R) { return winY + kAvatarPadT + R; }
 
 namespace Layout {
     static constexpr float RowH      = 78.f;
@@ -5517,7 +5528,9 @@ void RenderMenu() {
     // центру) — выбирается в «Опциях». Контент занимает остальную площадь.
     const bool  panelLeft = g_state.ui_panel_left;
     const float botH = Layout::BottomH;
-    const float railW = Layout::RailW;
+    // Панель вкладок шире стандартной (128 px), если в ней стоит кружок: он
+    // должен целиком помещаться в панели, иначе накрывает содержимое вкладок.
+    const float railW = panelLeft ? AvatarRailW(g_win.w) : Layout::RailW;
     const float cH = panelLeft ? g_win.h : g_win.h - botH;
     const float cW = panelLeft ? g_win.w - railW : g_win.w;
     const float cX0 = panelLeft ? railW : 0.f;
@@ -5604,22 +5617,21 @@ void RenderMenu() {
         ldl->AddLine({lpPos.x + railW, lpPos.y + 12.f}, {lpPos.x + railW, lpPos.y + WH - 12.f},
                      C::UA(C::Sep(), 0.8f), 1.f);
 
-        // Кружок с видео — в левом верхнем углу окна, над столбцом вкладок
-        // (столбец начинается ниже кружка, см. startY).
-        VidAvatar::Draw(ldl, AvatarCx(lpPos.x, g_win.w, true),
-                        lpPos.y + 12.f + kAvatarR, kAvatarR, dt,
+        // Кружок с видео — в левом верхнем углу окна, над столбцом вкладок.
+        const float avR = AvatarR(railW);
+        VidAvatar::Draw(ldl, AvatarCx(lpPos.x, avR), AvatarCy(lpPos.y, avR), avR, dt,
                         C::UA(C::Acc(), 0.9f), C::U(C::LeftBg()));
 
-        const float tabH   = Layout::TabHV;
+        // Столбец вкладок идёт ПОД кружком и не пересекается с ним: сверху
+        // оставляем 12 px от кружка, снизу 6 px до края окна. Если в минимальном
+        // окне (720 px) пяти ячейкам по 108 px места не хватает, высота ячейки
+        // поджимается (кружок 176 px + столбец 514 px = 720) — так столбец
+        // целиком остаётся внутри окна, а последняя вкладка не уезжает за край.
+        const float colTop = kAvatarPadT + avR * 2.f + 12.f;
+        const float avail  = ImMax(64.f * kTabShown, WH - colTop - 6.f);
+        const float tabH   = ImMin(Layout::TabHV, avail / (float)kTabShown);
         const float colH   = tabH * kTabShown;
-        // Столбец вкладок: по центру высоты, но ниже кружка аватарки. При
-        // минимальной высоте окна (720) под кружок уходит 200 px, а столбцу
-        // нужно 540 — целиком они не расходятся, поэтому столбец прижимается
-        // к низу окна, а кружок заходит на пустую верхушку первой ячейки
-        // (иконка и подпись в ней ниже и не задеты). В высоком окне столбец
-        // просто центрируется под кружком.
-        const float startY = ImMin(ImMax(AvatarBottom(0.f) + 12.f, (WH - colH) * 0.5f),
-                                   ImMax(0.f, WH - colH - 6.f));
+        const float startY = ImMax(colTop, (WH - colH) * 0.5f);
 
         for (int s = 0; s < kTabShown; s++) {
             const int i = kTabOrder[s];
@@ -5735,7 +5747,7 @@ void RenderMenu() {
     // Когда панель вкладок не слева, кружок аватарки рисуется в шапке контента
     // (там же, где заголовок): полосу шапки под него расширяем, иначе он налез
     // бы на первый ряд вкладки.
-    const float hdrH = Layout::HeaderH + (panelLeft ? 0.f : (kAvatarR * 2.f + 12.f));
+    const float hdrH = Layout::HeaderH + (panelLeft ? 0.f : (kAvatarR * 2.f + kAvatarPadT));
 
     {
         // Шапка: заголовок вкладки по центру.
@@ -5748,7 +5760,7 @@ void RenderMenu() {
         cdl->AddText(ImGui::GetFont(), titleFS,
             {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles[g_state.cur_tab]);
         if (!panelLeft)
-            VidAvatar::Draw(cdl, AvatarCx(hp.x, cW, false), hp.y + 12.f + kAvatarR, kAvatarR, dt,
+            VidAvatar::Draw(cdl, AvatarCx(hp.x, kAvatarR), AvatarCy(hp.y, kAvatarR), kAvatarR, dt,
                             C::UA(C::Acc(), 0.9f), C::U(C::Bg()));
         ImGui::Dummy({cW, hH});
     }
