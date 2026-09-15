@@ -4066,6 +4066,10 @@ static void writeHeader() {
 
 // Открыть файл (или дооткрыть после ротации). false — писать некуда.
 static bool ensureOpen() {
+    // Зовут два потока (кадр и запись), и оба — не держа мьютекс канала: файл
+    // открывается один раз за сеанс, а после ротации — заново. Замок нужен,
+    // чтобы «g_f == nullptr» не поймали одновременно оба и не открыли файл дважды.
+    std::lock_guard<std::mutex> lk(g_wmutex);
     if (g_f) return true;
     if (g_pathFailed) return false;
     if (!g_pathReady) {
@@ -4193,6 +4197,12 @@ static void rotate() {
 static void event(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 static void event(const char* fmt, ...) {
     if (!g_state.farm_log) return;
+    // Файл открывается здесь, в потоке кадра, а не в потоке записи: от момента
+    // открытия отсчитывается колонка t_s, и если бы его открывал поток записи,
+    // первые строки сеанса уехали бы вперёд на всё время до первого сброса.
+    // Открытие — один раз за сеанс (дальше ensureOpen сразу возвращает true),
+    // поэтому кадр оно не растягивает; сама запись идёт через канал.
+    if (!ensureOpen()) return;
     char line[1024];
     const int head = snprintf(line, sizeof(line), "EV %7.2f ", (double)tSec());
     if (head <= 0) return;
@@ -4372,6 +4382,7 @@ static void endFrame(float dt) {
     // Строка кадра — в буфер, на диск её пишет поток записи (см. enqueue).
     // Раньше здесь был fprintf прямо в FILE* плюс fflush каждые 0.15 с, то есть
     // запись на FUSE внутри стадии автофарма: именно она и растягивала кадр.
+    if (!ensureOpen()) return;
     char line[512];
     int len = snprintf(line, sizeof(line), kRowFmt,
             (double)r.t, (double)r.fps, (double)r.dtms, r.ph, r.ex, r.node, r.kind,
