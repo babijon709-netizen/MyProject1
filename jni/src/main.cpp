@@ -5714,6 +5714,54 @@ void RenderMenu() {
     static constexpr int kTabShown = 5;
     static constexpr int kTabOrder[kTabShown] = {1, 2, 3, 4, 5};
 
+    // Пропорции ячейки левой панели: подпись как можно крупнее (цель — вдвое
+    // крупнее базовых 0.88 от кегля меню) и жирная, иконка — слева.
+    //
+    // Место считается по самой длинной подписи: у «Конфиги» при двойном кегле
+    // ширина ~179 px, а в панели после иконки остаётся ~120 px, поэтому берём
+    // максимальный кегль, который влезает, поджав иконку не ниже 40 px. Жирность
+    // набирается проходами текста со сдвигом (см. DrawTabText) — у Roboto в
+    // сборке одно начертание, полужирного файла нет.
+    struct RailCell { float icon = 56.f, fs = 24.f, padL = 14.f, gap = 12.f, padR = 10.f, bold = 0.f; };
+    auto RailMetrics = [&](float railW) -> RailCell {
+        RailCell m;
+        const float baseFS = ImGui::GetFontSize() * 0.88f;   // как было в панели
+        const float want   = baseFS * 2.f;                   // «в два раза больше»
+        m.bold = 0.65f;                                      // добор жирности, px
+        // Ширина текста + запас на утолщение (по букве на проход).
+        auto widest = [&](float fs) {
+            float worst = 0.f;
+            for (int k = 0; k < kTabShown; ++k) {
+                const char* t = tabNames[kTabOrder[k]];
+                float w = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, t).x;
+                int glyphs = 0;
+                for (const char* c = t; *c; ++c)
+                    if (((unsigned char)*c & 0xC0) != 0x80) ++glyphs;
+                worst = ImMax(worst, w + glyphs * m.bold);
+            }
+            return worst;
+        };
+        for (float fs = want; fs > baseFS; fs -= 1.f) {
+            for (float icon = 56.f; icon >= 40.f; icon -= 4.f) {
+                const float avail = railW - m.padL - m.padR - icon - m.gap;
+                if (avail > 0.f && widest(fs) <= avail) { m.icon = icon; m.fs = fs; return m; }
+            }
+        }
+        m.icon = 40.f; m.fs = baseFS;    // совсем узкая панель — базовый кегль
+        return m;
+    };
+
+    // Текст подписи. Жирность — несколькими проходами со сдвигом в доли
+    // пикселя: край букв утолщается и читается как полужирный.
+    auto DrawTabText = [](ImDrawList* dl, ImFont* f, float fs, ImVec2 p, ImU32 col,
+                          const char* t, float bold) {
+        dl->AddText(f, fs, p, col, t);
+        if (bold <= 0.f) return;
+        dl->AddText(f, fs, {p.x + bold, p.y}, col, t);
+        dl->AddText(f, fs, {p.x + bold * 0.5f, p.y + bold}, col, t);
+        dl->AddText(f, fs, {p.x, p.y + bold}, col, t);
+    };
+
     // Ячейка вкладки: иконка + подпись. В нижней панели — иконка сверху,
     // подпись под ней по центру; в левой панели — подпись СПРАВА от иконки
     // (иконки стоят на одной вертикали, подписи — в одну колонку, как в
@@ -5721,7 +5769,8 @@ void RenderMenu() {
     // длинные подписи («Конфиги») не вылезают за панель.
     auto DrawTabCell = [&](ImDrawList* fdl, int i, float cellX, float cellY,
                            float cellW, float cellH, float iconSize, float lblFS,
-                           bool horiz = false) {
+                           bool horiz = false, float bold = 0.f,
+                           float padL0 = 0.f, float padR0 = 0.f, float gap0 = 0.f) {
         const bool   active = (i == g_state.cur_tab);
         const ImVec4 col    = active ? C::Acc() : C::Dim();
         auto*  font = ImGui::GetFont();
@@ -5731,12 +5780,16 @@ void RenderMenu() {
         ImVec2 lpos{};
 
         if (horiz) {
-            const float padL = 16.f, padR = 12.f, gap = 12.f;
+            const float padL = padL0 > 0.f ? padL0 : 16.f;
+            const float padR = padR0 > 0.f ? padR0 : 12.f;
+            const float gap  = gap0  > 0.f ? gap0  : 12.f;
             auto labelW = [&](float f) { return font->CalcTextSizeA(f, FLT_MAX, 0, tabNames[i]).x; };
+            // Подгонка — только на совсем узкой панели: обычно размеры уже
+            // посчитаны в RailMetrics под самую длинную подпись.
             const float avail = cellW - padL - padR - gap;
-            for (int it = 0; it < 4 && icoW + labelW(fs) > avail; ++it) {
+            for (int it = 0; it < 4 && icoW + labelW(fs) + bold * 8.f > avail; ++it) {
                 const float k = ImMax(0.6f, avail / ImMax(1.f, icoW + labelW(fs)));
-                icoW = ImMax(30.f, icoW * k);
+                icoW = ImMax(24.f, icoW * k);
                 fs   = ImMax(12.f, fs * ImMax(0.75f, k));
             }
             icoH = icoW;
@@ -5784,7 +5837,7 @@ void RenderMenu() {
                 {icoX + icoW * 0.5f - gsz.x * 0.5f, icoY + (icoH - gsz.y) * 0.5f},
                 IM_COL32(255, 255, 255, active ? 255 : 200), letter);
         }
-        fdl->AddText(font, fs, lpos, C::U(col), tabNames[i]);
+        DrawTabText(fdl, font, fs, lpos, C::U(col), tabNames[i], bold);
     };
 
     auto TabTap = [&](int i) {
@@ -5815,6 +5868,9 @@ void RenderMenu() {
         const float avR = AvatarR(railW);
         VidAvatar::Draw(ldl, AvatarCx(lpPos.x, avR), AvatarCy(lpPos.y, avR), avR, dt,
                         C::UA(C::Acc(), 0.9f), C::U(C::LeftBg()));
+
+        // Размеры подписи и иконки в этой панели — из ширины панели.
+        const RailCell railM = RailMetrics(railW);
 
         // Столбец вкладок идёт ПОД кружком и не пересекается с ним: сверху
         // оставляем 12 px от кружка, снизу 6 px до края окна. Если в минимальном
@@ -5864,8 +5920,10 @@ void RenderMenu() {
             for (int s = 0; s < kTabShown; s++) {
                 const int i = kTabOrder[s];
                 // Иконка слева, подпись справа — как в боковых панелях macOS.
-                DrawTabCell(fdl, i, lpPos.x, tab_rects[i].sx, railW, tabH, 56.f,
-                            ImGui::GetFontSize() * 0.88f, true);
+                // Кегль и иконка посчитаны под ширину панели (RailMetrics).
+                DrawTabCell(fdl, i, lpPos.x, tab_rects[i].sx, railW, tabH,
+                            railM.icon, railM.fs, true, railM.bold,
+                            railM.padL, railM.padR, railM.gap);
             }
         }
 
