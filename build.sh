@@ -47,4 +47,8 @@ if [[ -f "${ROOT}/libs/arm64-v8a/xvcen" && ! -f "${ROOT}/libs/arm64-v8a/xvcen.sh
 fi
 
 test -f "${ROOT}/libs/arm64-v8a/xvcen.sh"
+# Вес бинарника — виден прямо в логе сборки (в нём кадры аватарки ~300 КБ,
+# см. tools/video/gen_avatar.py; ролик целиком в бинарник не вшивается).
+ls -la "${ROOT}/libs/arm64-v8a/xvcen.sh"
+du -h "${ROOT}/libs/arm64-v8a/xvcen.sh"
 echo "built ${ROOT}/libs/arm64-v8a/xvcen.sh"

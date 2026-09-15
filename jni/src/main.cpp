@@ -5598,7 +5598,11 @@ void RenderMenu() {
 
         const float tabH   = Layout::TabHV;
         const float colH   = tabH * kTabShown;
-        const float startY = ImMax(0.f, (WH - colH) * 0.5f);
+        // Столбец центрируется по высоте, но не залезает на кружок аватарки:
+        // при минимальной высоте окна (720) центр дал бы 90 px, а кружок
+        // занимает 6..94 — поэтому снизу от него оставляем ещё 14 px.
+        const float startY = ImMax(kAvatarR * 2.f + kAvatarR * 0.32f,
+                                   (WH - colH) * 0.5f);
 
         for (int s = 0; s < kTabShown; s++) {
             const int i = kTabOrder[s];
