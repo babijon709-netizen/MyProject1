@@ -5291,6 +5291,45 @@ static void UpdateFarmInner(float dt) {
     fl.blkt   = s_blockedTime;
 }
 
+// Названия вкладок — одни и те же в шапке контента и в обеих панелях.
+// XS() подставляет перевод строки интерфейса.
+static const char* kTabTitles[kTabCount] = {
+    XS("Меню"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")
+};
+
+// Ячейка вкладки в левой панели: иконка слева и крупная жирная подпись справа.
+// Иконка 60 px — в 1.5 раза больше прежних 40. Ширина панели считается так,
+// чтобы влезли обе (см. RailTabsW), иначе подпись пришлось бы ужимать.
+static const float kRailIcon = 60.f;    // сторона иконки вкладки
+static const float kRailFS   = 1.55f;   // кегль подписи от базового (0.88 от кегля меню)
+static const float kRailPadL = 14.f;    // отступ иконки от края панели
+static const float kRailPadR = 10.f;    // отступ текста от края панели
+static const float kRailGap  = 12.f;    // зазор между иконкой и подписью
+
+// Добор «жирности» для подписи: у Roboto в сборке одно начертание, поэтому
+// толщина набирается проходами текста со сдвигом (см. DrawTabText). Добор
+// растёт вместе с кеглем и учтён в расчёте ширины, иначе текст с утолщением
+// вылезал бы за панель.
+static float RailBold(float fs) { return ImMax(0.5f, fs * 0.017f); }
+
+// Сколько места нужно ячейкам левой панели: отступ + иконка + зазор + самая
+// длинная подпись (вкладка 0 «Меню» не показывается, она не в счёт) + отступ.
+static float RailTabsW() {
+    const float baseFS = ImGui::GetFontSize() * 0.88f;
+    const float fs     = baseFS * kRailFS;
+    const float bold   = RailBold(fs);
+    float worst = 0.f;
+    for (int k = 1; k < kTabCount; ++k) {
+        const char* t = kTabTitles[k];
+        float w = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, t).x;
+        int glyphs = 0;
+        for (const char* c = t; *c; ++c)
+            if (((unsigned char)*c & 0xC0) != 0x80) ++glyphs;
+        worst = ImMax(worst, w + glyphs * bold);
+    }
+    return kRailPadL + kRailIcon + kRailGap + worst + kRailPadR;
+}
+
 // Кружок-аватарка и «светофор» в левом верхнем углу меню.
 //
 // Кружок (радиус 87.75 — диаметр 175.5) живёт в панели вкладок, и панель
@@ -5329,7 +5368,8 @@ static void TrafficLightMetrics(float railW, float& d, float& gap) {
 static float AvatarRailW(float winW) {
     const float forAvatar = (kAvatarR + kAvatarPad) * 2.f;   // отступ + диаметр + отступ
     const float forLights = TrafficLightW(kTLD, kTLGap) + kAvatarPad * 2.f;
-    return ImMin(ImMax(forAvatar, forLights), ImMax(120.f, winW * 0.45f));
+    const float forTabs   = RailTabsW();                     // иконка + крупная подпись
+    return ImMin(ImMax(ImMax(forAvatar, forLights), forTabs), ImMax(120.f, winW * 0.45f));
 }
 
 // Радиус кружка под фактическую ширину панели.
@@ -5705,10 +5745,8 @@ void RenderMenu() {
     if (g_state.tab_alpha > .999f) g_state.tab_alpha = 1.f;
     SpringTick(g_state.tab_slide, g_state.tab_slide_vel, 0.f, dt);
 
-    // Короткие и понятные названия вкладок (индекс = id вкладки).
-    const char* tabNames[kTabCount] = {
-        XS("Меню"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")
-    };
+    // Короткие и понятные названия вкладок (индекс = id вкладки) — общий список.
+    const char* const* tabNames = kTabTitles;
     // Вкладка «Меню» (id 0) удалена: её функционал переехал в «Опции».
     // id контента вкладок не меняются — конфиги и логика остаются как были.
     static constexpr int kTabShown = 5;
@@ -5722,13 +5760,15 @@ void RenderMenu() {
     // максимальный кегль, который влезает, поджав иконку не ниже 40 px. Жирность
     // набирается проходами текста со сдвигом (см. DrawTabText) — у Roboto в
     // сборке одно начертание, полужирного файла нет.
-    struct RailCell { float icon = 56.f, fs = 24.f, padL = 14.f, gap = 12.f, padR = 10.f, bold = 0.f; };
+    struct RailCell { float icon = kRailIcon, fs = 20.f, padL = kRailPadL, gap = kRailGap,
+                      padR = kRailPadR, bold = 0.f; };
     auto RailMetrics = [&](float railW) -> RailCell {
         RailCell m;
-        const float baseFS = ImGui::GetFontSize() * 0.88f;   // как было в панели
-        const float want   = baseFS * 2.f;                   // «в два раза больше»
-        m.bold = 0.65f;                                      // добор жирности, px
-        // Ширина текста + запас на утолщение (по букве на проход).
+        const float baseFS = ImGui::GetFontSize() * 0.88f;   // базовый кегль панели
+        const float want   = baseFS * kRailFS;               // цель — крупная подпись
+        // Ширина текста + запас на утолщение (по букве на проход). Если панель
+        // уже, чем посчитано в RailTabsW (узкий экран), кегль и иконка
+        // ужимаются: сначала меньше становится иконка, потом подпись.
         auto widest = [&](float fs) {
             float worst = 0.f;
             for (int k = 0; k < kTabShown; ++k) {
@@ -5737,17 +5777,19 @@ void RenderMenu() {
                 int glyphs = 0;
                 for (const char* c = t; *c; ++c)
                     if (((unsigned char)*c & 0xC0) != 0x80) ++glyphs;
-                worst = ImMax(worst, w + glyphs * m.bold);
+                worst = ImMax(worst, w + glyphs * RailBold(fs));
             }
             return worst;
         };
         for (float fs = want; fs > baseFS; fs -= 1.f) {
-            for (float icon = 56.f; icon >= 40.f; icon -= 4.f) {
+            for (float icon = kRailIcon; icon >= 45.f; icon -= 5.f) {
                 const float avail = railW - m.padL - m.padR - icon - m.gap;
-                if (avail > 0.f && widest(fs) <= avail) { m.icon = icon; m.fs = fs; return m; }
+                if (avail > 0.f && widest(fs) <= avail) {
+                    m.icon = icon; m.fs = fs; m.bold = RailBold(fs); return m;
+                }
             }
         }
-        m.icon = 40.f; m.fs = baseFS;    // совсем узкая панель — базовый кегль
+        m.icon = 45.f; m.fs = baseFS; m.bold = RailBold(baseFS);   // узкая панель
         return m;
     };
 
@@ -6007,7 +6049,7 @@ void RenderMenu() {
 
     {
         // Шапка: заголовок вкладки по центру.
-        const char* titles[kTabCount] = {XS("Меню"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")};
+        const char* const* titles = kTabTitles;
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
         const float hH = hdrH;
