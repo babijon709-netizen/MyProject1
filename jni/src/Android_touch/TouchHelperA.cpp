@@ -18,6 +18,15 @@
 #define UNGRAB 0
 #define GRAB 1
 
+// Слоты синтетических пальцев: 9 — «прежний» палец аимбота (Touch_Down/Move/Up,
+// id 60000), 6..8 — пальцы автофарма (Touch_*_N: 0 стик, 1 камера, 2 удар).
+// Разделение важное: аимбот, в отличие от автофарма, держит палец на месте и
+// ПЕРЕСЫЛАЕТ ту же точку каждый кадр — так у игры остаётся «живым» удержание
+// камеры (см. UpdateAim: hold still, keep the touch alive). Поэтому пропуск
+// повторов пакета к этому пальцу не применяется — см. Upload().
+static constexpr int kAimFingerSlot = 9;
+static constexpr int kAimFingerId   = 60000;
+
 bool other_touch;
 
 static uint32_t orientation = 0;
@@ -130,6 +139,11 @@ static void Upload() {
     const double t0 = TouchNowMs();
     pthread_mutex_lock(&g_touch_mutex);
     bool isFirstDown = g_touch_first_down;
+    // Есть ли в собираемом пакете палец аимбота. Такой пакет уходит в uinput
+    // ВСЕГДА, даже если он байт в байт повторяет предыдущий (см. пропуск
+    // повторов ниже): удержание камеры аимботом держится именно на этих
+    // повторах, и прошлая сборка писала их каждый кадр.
+    bool aimFinger = false;
     int tmpCnt = 0, tmpCnt2 = 0, i, j;
     for (i = 0; i < fdNum; i++) {
         for (j = 0; j < maxF; j++) {
@@ -137,6 +151,7 @@ static void Upload() {
                 if (tmpCnt2++ > 10) {
                     goto finish;
                 }
+                if (Finger[i][j].id == kAimFingerId) aimFinger = true;
                 input.event[tmpCnt].type = EV_ABS;
                 input.event[tmpCnt].code = ABS_X;
                 input.event[tmpCnt].value = Finger[i][j].x;
@@ -207,8 +222,17 @@ static void Upload() {
     // (наш поток и input-поток системы). Сравниваем пакет с уже отправленным и
     // молчим, если он не изменился. Первый пакет после старта и всё, что
     // менялось (позиция, нажатие, отпускание, ids), уходят как раньше.
+    //
+    // Исключение — палец аимбота (aimFinger). Аимбот держит камеру на цели
+    // ПЕРЕСЫЛКОЙ одной и той же точки каждый кадр (UpdateAim: «держим тач живым,
+    // ничего не двигаем»), и в сборке до этих правок такие пакеты уходили всегда.
+    // Как только мы начали их глушить, аим перестал удерживать прицел: у игры
+    // палец числится нажатым, а удержание камеры теряется (автофарм при этом
+    // работает — его пальцы меняют позицию каждый такт). Поэтому повтор
+    // пропускаем, только когда пакет НЕ несёт пальца аимбота: экономия на
+    // простое бота сохраняется полностью, а путь аимбота остаётся прежним.
     const size_t bytes = sizeof(struct input_event) * (size_t)tmpCnt;
-    if (bytes == g_touch_last_bytes && memcmp(input.event, g_touch_last_packet, bytes) == 0) {
+    if (!aimFinger && bytes == g_touch_last_bytes && memcmp(input.event, g_touch_last_packet, bytes) == 0) {
         g_touch_first_down = isFirstDown;
         ++g_touch_upload_calls;      // вызов был, но отправки не потребовал
         ++g_touch_upload_skipped;
@@ -587,8 +611,8 @@ void Touch_Down(float xt, float yt) {
     }
     if (x < 0.0f) x = 0.0f;
     if (y < 0.0f) y = 0.0f;
-    touchObj &touch = Finger[0][9];
-    touch.id = 60000;
+    touchObj &touch = Finger[0][kAimFingerSlot];
+    touch.id = kAimFingerId;
     touch.x = (int) lroundf(x * ::scale_x);
     touch.y = (int) lroundf(y * ::scale_y);
     if (devMaxX > 0 && touch.x > devMaxX) touch.x = devMaxX;
@@ -602,7 +626,7 @@ void Touch_Move(float x, float y) {
 
 void Touch_Up() {
     if (!Touch_initialized || Touch_readOnly) return;
-    touchObj &touch = Finger[0][9];
+    touchObj &touch = Finger[0][kAimFingerSlot];
     touch.isDown = false;
     Upload();
 }
