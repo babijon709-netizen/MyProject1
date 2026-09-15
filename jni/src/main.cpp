@@ -203,6 +203,19 @@ extern bool g_farmBlocked;    // узел перекрыт
 // Объявлен здесь, потому что меню в файле идёт выше namespace farmlog.
 const char* FarmLogPath();
 
+// Строки аимбота — в тот же лог, что и автофарм (namespace farmlog ниже по
+// файлу): так и бот, и аим видны в одной хронологии, а читать их можно теми же
+// инструментами. Объявлено здесь, потому что UpdateAim идёт раньше farmlog.
+//   aimLine  — строка состояния аима (не чаще 5 раз в секунду): чувствительность,
+//              посланный сдвиг пальца, ответ камеры, остаток ошибки, состояние;
+//   aimEvent — событие («цель взята», «палец поставлен/снят») сразу в лог.
+namespace farmlog {
+    void aimLine(float yawErr, float pitchErr, float sentX, float sentY,
+                 float expYaw, float expPitch, float camYaw, float camPitch,
+                 float fingerX, float fingerY, int state, int camState);
+    void aimEvent(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+}
+
 namespace ui { namespace bar {
     inline float g_game_alpha = 1.f;
     inline void  set_game_alpha(float a){ g_game_alpha=a; }
@@ -3273,7 +3286,11 @@ struct AimTarget {
 };
 
 static void AimReleaseFinger(bool& fingerDown) {
-    if (fingerDown) { Touch_Up(); fingerDown = false; }
+    if (fingerDown) {
+        Touch_Up();
+        fingerDown = false;
+        farmlog::aimEvent("палец снят");
+    }
 }
 
 // File-scope so the auto-farm can yield the camera while the aimbot is
@@ -3450,6 +3467,10 @@ static void UpdateAim(float dt) {
         if (haveC) { s_prevCamYawT = cy; s_prevCamPitchT = cp; s_havePrevTgt = true; }
         else s_havePrevTgt = false;
     }
+    if (best.id != s_lastId)
+        farmlog::aimEvent("цель взята: yaw %.2f pitch %.2f, дистанция %.1f м, кадр %.0f ms",
+                          (double)best.yaw, (double)best.pitch, (double)best.world_dist,
+                          (double)(dt * 1000.f));
     s_lastId = best.id;
 
     // ---- learn finger gain (deg per px) from the previous frame ----
@@ -3500,6 +3521,10 @@ static void UpdateAim(float dt) {
         s_pendTime += dt;
         if (s_pendTime < 0.25f) {
             Touch_Move(s_fx, s_fy);   // держим тач живым, ничего не двигаем
+            farmlog::aimLine(best.yaw, best.pitch, s_lastDx, s_lastDy,
+                             s_lastDx * s_gainYaw, -s_lastDy * s_gainPitch,
+                             camYawDelta, camPitchDelta, s_fx, s_fy, 2,
+                             esp_camera_state());
             return;
         }
         s_pendDx = s_pendDy = 0.f;    // ввод потерялся — продолжаем
@@ -3535,6 +3560,9 @@ static void UpdateAim(float dt) {
         s_lastDx = s_lastDy = 0.f;
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
+        farmlog::aimLine(best.yaw, best.pitch, 0.f, 0.f, 0.f, 0.f,
+                         camYawDelta, camPitchDelta, s_fx, s_fy, 1,
+                         esp_camera_state());
         return;
     }
 
@@ -3545,6 +3573,9 @@ static void UpdateAim(float dt) {
         s_fy = snapGrid(sh * 0.50f);
         Touch_Down(s_fx, s_fy);
         s_fingerDown = true;
+        farmlog::aimEvent("палец поставлен (%.0f,%.0f), цель %.2f/%.2f град, дистанция %.1f м",
+                          (double)s_fx, (double)s_fy, (double)best.yaw,
+                          (double)best.pitch, (double)best.world_dist);
         s_lastDx = s_lastDy = 0.f;
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         s_holdFrames = 0;
@@ -3607,6 +3638,11 @@ static void UpdateAim(float dt) {
     // re-place it in the centre of the area instead of getting stuck.
     const float minX = sw * 0.56f, maxX = sw * 0.97f, minY = sh * 0.12f, maxY = sh * 0.88f;
     if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
+        farmlog::aimEvent("палец на краю (%.0f,%.0f) — перенос в центр", (double)s_fx, (double)s_fy);
+        farmlog::aimLine(best.yaw, best.pitch, s_lastDx, s_lastDy,
+                         s_lastDx * s_gainYaw, -s_lastDy * s_gainPitch,
+                         camYawDelta, camPitchDelta, s_fx, s_fy, 3,
+                         esp_camera_state());
         Touch_Up();
         s_fingerDown = false;
         s_fx = snapGrid(sw * 0.74f); s_fy = snapGrid(sh * 0.50f);
@@ -3619,6 +3655,10 @@ static void UpdateAim(float dt) {
     s_lastDx = dx; s_lastDy = dy;
     s_pendDx += dx; s_pendDy += dy;   // ждёт отработки камерой (ack-такт)
     Touch_Move(s_fx, s_fy);
+    farmlog::aimLine(best.yaw, best.pitch, dx, dy,
+                     dx * s_gainYaw, -dy * s_gainPitch,
+                     camYawDelta, camPitchDelta, s_fx, s_fy, 0,
+                     esp_camera_state());
 }
 
 // ============================ Автофарм =============================
@@ -4065,6 +4105,18 @@ static void writeHeader() {
         "#   deltaTime), поэтому честного «ФПС игры» в этом логе нет и не будет\n",
         stamp, (double)sw, (double)sh, g_path,
         (double)overlay_peak_hz(), (double)overlay_pace_hz());
+    // Строки аимбота (см. aimLine): в том же файле, но своим форматом — их
+    // немного (5 в секунду), и они нужны ровно тогда, когда «камеру уводит от
+    // цели». Столбцы: t_s st errY errP sentX sentY expYaw expPitch camYaw camPitch
+    // fx fy cam_st. st: 0 ведёт, 1 мёртвая зона, 2 ждёт ответа камеры, 3 палец на
+    // краю и перенос в центр; exp — сколько градусов должно было выйти из
+    // посланного сдвига по выученному gain, cam — сколько вышло на самом деле;
+    // cam_st: бит0 поза камеры, бит1 поза из матрицы вида, бит2 ось выстрела.
+    fprintf(g_f,
+        "# AIM-строки: состояние аимбота 5 раз в секунду (st/err/sent/exp/cam/f/cam_st),\n"
+        "#   «EV … аим:» — события (цель взята, палец поставлен/снят, палец на краю).\n"
+        "#   exp против cam — главное: если камера отзывается не на то, что послано,\n"
+        "#   аим либо переучил чувствительность, либо ждёт ответа не на тот кадр.\n");
     fprintf(g_f, "%s\n", kColHdr);
 }
 
@@ -4228,6 +4280,70 @@ static void event(const char* fmt, ...) {
     }
     if (used + 1 < sizeof(line)) line[used++] = '\n';
     enqueue(line, used, true);
+}
+
+// ---- Строки аимбота (см. объявление выше по файлу) -------------------------
+// Аимбот раньше писал свой отдельный лог (xvcen_aim_debug.log теми же
+// столбцами), потом он был убран, и на вопрос «почему камеру уводит от цели»
+// ответить стало нечем: в логе автофарма видно только фарм. Пишем строку аима в
+// тот же файл, что и автофарм, — одной хронологией. Строка состояния идёт не
+// чаще 5 раз в секунду (аим работает каждый кадр, а строка в файл — это запись
+// на FUSE), события («цель взята», «палец поставлен») — сразу.
+//
+// Как читать:
+//   st — состояние такта: 0 ведёт (палец сдвинут к цели), 1 мёртвая зона (стоит
+//     на месте, цель уже на крестике), 2 ждёт ответа камеры (шаг послан, но
+//     камера ещё не повернулась), 3 палец на краю зоны — перенос в центр,
+//     4 цель потеряна, палец держим;
+//   gain/gainP — выученная чувствительность (град/px); 0 = ещё не выучена;
+//   err — остаток до цели по yaw и pitch, градусы (со стороны видно как «хвост»);
+//   sent — сдвиг пальца, посланный в прошлом такте (px), exp — сколько градусов
+//     камеры из этого должно получиться по выученному gain;
+//   cam — на сколько градусов камера реально повернулась в этом кадре;
+//     расхождение exp и cam — и есть ошибка чувствительности/ответа игры;
+//   f — где стоит палец (px), cam_st — откуда взяты углы камеры: бит0 поза
+//     (Transform), бит1 поза из матрицы вида, бит2 ось выстрела. 0 = углов нет
+//     вовсе, аим ведёт вслепую по догадке.
+void aimEvent(const char* fmt, ...) {
+    if (!g_state.farm_log) return;
+    if (!ensureOpen()) return;
+    char line[512];
+    const int head = snprintf(line, sizeof(line), "EV %7.2f аим: ", (double)tSec());
+    if (head <= 0) return;
+    size_t used = (size_t)head < sizeof(line) ? (size_t)head : sizeof(line) - 1;
+    va_list ap;
+    va_start(ap, fmt);
+    const int tail = vsnprintf(line + used, sizeof(line) - used, fmt, ap);
+    va_end(ap);
+    if (tail > 0) {
+        const size_t want = (size_t)tail;
+        used += (want < sizeof(line) - used) ? want : sizeof(line) - used - 1;
+    }
+    if (used + 1 < sizeof(line)) line[used++] = '\n';
+    enqueue(line, used, true);
+}
+
+void aimLine(float yawErr, float pitchErr, float sentX, float sentY,
+             float expYaw, float expPitch, float camYaw, float camPitch,
+             float fingerX, float fingerY, int state, int camState) {
+    if (!g_state.farm_log) return;
+    // Не чаще 5 раз в секунду: строка нужна для разбора рывков, а не для
+    // покадрового следа (рывок — это 100+ мс, в него попадают 1-2 строки).
+    static double s_next = 0.0;
+    const double now = tNow();
+    if (now < s_next) return;
+    s_next = now + 0.2;
+    char text[384];
+    const int n = snprintf(text, sizeof(text),
+        "AIM %7.2f st %d  err %+7.3f %+7.3f  sent %+8.2f %+8.2f  exp %+7.3f %+7.3f  "
+        "cam %+7.3f %+7.3f  f %6.1f %6.1f  cam_st %d\n",
+        (double)tSec(), state,
+        (double)yawErr, (double)pitchErr,
+        (double)sentX, (double)sentY,
+        (double)expYaw, (double)expPitch,
+        (double)camYaw, (double)camPitch,
+        (double)fingerX, (double)fingerY, camState);
+    if (n > 0) enqueue(text, (size_t)n < sizeof(text) ? (size_t)n : sizeof(text) - 1, false);
 }
 
 // Путь к текущему файлу лога — для подсказки в меню (пусто, пока не открыт).
@@ -4762,7 +4878,7 @@ static void UpdateFarmInner(float dt) {
     // ошибки (рывок на 8° за кадр), при 1.97 не двигал камеру вовсе. Один и тот
     // же свайп 81 px измерялся как -2.39°, -13.21° и -17.02°.
     float camYaw = 0.f, camPitch = 0.f;
-    const bool haveCam = esp_camera_angles(camYaw, camPitch);
+    const bool haveCam = esp_camera_angles_farm(camYaw, camPitch);   // фарм: с базисом из матрицы вида (аимбот — см. esp_camera_angles)
     float camYawDelta = 0.f;
     bool camMoved = false;
     if (haveCam && s_haveLast) {

@@ -3960,7 +3960,44 @@ static bool farm_cam_source_ok(const Vec3& p) {
     return dx * dx + dy * dy + dz * dz < 625.0F;
 }
 
+// Углы камеры ДЛЯ АИМБОТА. Источники ровно те же, что были до правок автофарма:
+// поза камеры (Transform) и ось выстрела (LookDirection). Базис из матрицы вида
+// (esp_camera_angles_farm) сюда СОЗНАТЕЛЬНО не отдан.
+//
+// Почему это важно. Аимботу углы нужны не как «хоть что-нибудь вместо позы», а
+// как обратная связь по ВРЕМЕНИ: он сравнивает поворот камеры с тем сдвигом
+// пальца, который сам же и послал. По этой разнице он учит чувствительность
+// (град/px) и решает, отработала ли игра прошлый шаг («такт с подтверждением»:
+// пока камера не ответила, новый сдвиг не отправляется — иначе шаги
+// складываются и прицел улетает). Базис из матрицы вида отстаёт на кадр (он
+// относится к предыдущему кадру, см. комментарий у g_frame_cam_basis_valid),
+// поэтому «камера уже повернулась» приходит на шаг раньше, чем на самом деле:
+// подтверждение срабатывает ложно, шаги идут подряд без ожидания, и камеру
+// резко уводит мимо цели ровно в тот момент, когда цель вошла в ФОВ и аим
+// начал вести. Для автофарма эта отсталость не страшна — ему нужны медленные
+// повороты на пару градусов (см. esp_camera_angles_farm).
+//
+// Тот же фильтр мусора, что и у точки прицела: источник с нулевой/улетевшей
+// позицией не годится и для углов, иначе обучение коэффициента камеры хлебнёт
+// поворот на 158° из ниоткуда (лог 14.09.2026: 11 кадров с origin=(0,0,0)).
 bool esp_camera_angles(float& yaw_deg, float& pitch_deg) {
+    if (!g_aim_ref_valid && !g_cam_pose_valid) return false;
+    const bool ok_ref  = g_aim_ref_valid  && farm_cam_source_ok(g_aim_ref_origin);
+    const bool ok_pose = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
+    if (!ok_ref && !ok_pose) return false;
+    // Same reference the aim angles are measured against (firing direction
+    // when available), so finger-gain learning and target lead stay consistent.
+    const Vec3& f = ok_ref ? g_aim_ref_forward : g_cam_forward;
+    constexpr float rad2deg = 57.29577951F;
+    float yaw = atan2f(f.x, f.z) * rad2deg;
+    float horiz = sqrtf(f.x * f.x + f.z * f.z);
+    float pitch = atan2f(f.y, horiz) * rad2deg;
+    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return false;
+    yaw_deg = yaw; pitch_deg = pitch;
+    return true;
+}
+
+bool esp_camera_angles_farm(float& yaw_deg, float& pitch_deg) {
     // Третий источник — базис из матрицы вида этого кадра. На устройстве из
     // лога 14.09.2026 поза камеры и ось выстрела НЕ ЧИТАЮТСЯ вовсе: gain застыл
     // на 0.250 (константа-догадка kCamGainProbe) во всех 11932 кадрах фарма, то
@@ -3969,15 +4006,11 @@ bool esp_camera_angles(float& yaw_deg, float& pitch_deg) {
     // есть всегда — фарм считает по нему yaw/pitch и сводит ошибки к ~1°, —
     // поэтому отдаём его, когда двух первых нет: обучение коэффициента, шаг
     // «палец на краю» и упреждение начинают работать по обратной связи.
-    // Тот же фильтр мусора, что у точки прицела: источник с нулевой/улетевшей
-    // позицией не годится и для углов, иначе обучение коэффициента камеры
-    // хлебнёт поворот на 158° из ниоткуда.
+    // Аимботу этот источник не отдаём — см. esp_camera_angles().
     const bool ok_ref   = g_aim_ref_valid  && farm_cam_source_ok(g_aim_ref_origin);
     const bool ok_pose  = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
     const bool ok_frame = g_frame_cam_basis_valid && farm_cam_source_ok(g_frame_cam_pos);
     if (!ok_ref && !ok_pose && !ok_frame) return false;
-    // Same reference the aim angles are measured against (firing direction
-    // when available), so finger-gain learning and target lead stay consistent.
     const Vec3& f = ok_ref ? g_aim_ref_forward : ok_pose ? g_cam_forward : g_frame_cam_fwd;
     constexpr float rad2deg = 57.29577951F;
     float yaw = atan2f(f.x, f.z) * rad2deg;
