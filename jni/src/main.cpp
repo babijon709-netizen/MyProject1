@@ -1,5 +1,6 @@
 #include "main.h"
 #include "game.h"
+#include "game_offsets.h"   // PLAYER_BOX_WIDTH_RATIO (box proportions)
 #include <cmath>
 #include <atomic>
 #include <chrono>
@@ -23,10 +24,8 @@
 #include <condition_variable>
 #include <time.h>
 
-#if __has_include("media/anime.h")
-#  include "media/anime.h"
-#  define ANIME_IMAGE_AVAILABLE
-#endif
+// media/anime.h (танцующий спрайт) больше не подключается — аватар-гифка
+// убрана из интерфейса, и её данные не должны раздувать бинарник.
 
 #if __has_include("media/icons.h")
 #  include "media/icons.h"
@@ -146,11 +145,17 @@ template<size_t N>
 struct _XS {
     char b[N]{};
     mutable char o[N]{};
+    mutable bool done = false;
     constexpr _XS(const char (&s)[N]) noexcept {
         for (size_t i = 0; i < N; ++i) b[i] = static_cast<char>(static_cast<uint8_t>(s[i]) ^ _xk(i));
     }
     __attribute__((noinline)) const char* d() const noexcept {
-        for (size_t i = 0; i < N; ++i) o[i] = static_cast<char>(static_cast<uint8_t>(b[i]) ^ _xk(i));
+        // Decode once and reuse: every UI label goes through here every
+        // frame, and re-XORing ~125 strings each frame was pure waste.
+        if (!done) {
+            for (size_t i = 0; i < N; ++i) o[i] = static_cast<char>(static_cast<uint8_t>(b[i]) ^ _xk(i));
+            done = true;
+        }
         return o;
     }
 };
@@ -169,7 +174,14 @@ static float g_sh = 1080.f;
 
 static void VisibleScreen(float& w, float& h);
 
-static bool g_noRecoilEnabled = false;
+// Автофарм: статус для строки во вкладке «Разное» (определены рядом с
+// UpdateFarm ниже).
+extern bool g_farmActive;
+extern int  g_farmPhase;
+extern int  g_farmNodes;      // сколько узлов нашёл последний скан реестра
+extern int  g_farmReason;     // причина простоя (см. esp_farm_debug)
+extern float g_farmTgtDist;   // дистанция до текущей цели, м
+extern int  g_farmTgtKind;    // 0 дерево, 1 камень, 2 металл, 3 сера
 
 namespace ui { namespace bar {
     inline float g_game_alpha = 1.f;
@@ -181,21 +193,29 @@ namespace cfg { namespace esp {
     inline ImVec4 box_col         = {0.20f, 0.85f, 0.35f, 1.f};
     inline ImVec4 box_col_invis   = {1.00f, 0.20f, 0.20f, 1.f};
     inline ImVec4 name_col        = {1.00f, 1.00f, 1.00f, 1.f};
-    inline ImVec4 health_col      = {0.20f, 0.85f, 0.35f, 1.f};
     inline ImVec4 distance_col    = {0.70f, 0.70f, 0.70f, 1.f};
     inline ImVec4 weapon_col      = {1.00f, 0.95f, 0.10f, 1.f};
-    inline ImVec4 weapon_icon_col = {1.00f, 0.95f, 0.10f, 1.f};
     inline ImVec4 tracer_col      = {1.00f, 0.20f, 0.20f, 1.f};
     inline ImVec4 skeleton_col    = {0.20f, 0.85f, 0.35f, 1.f};
+    inline ImVec4 animal_col      = {1.00f, 0.60f, 0.25f, 1.f};
+    inline ImVec4 loot_col        = {0.55f, 0.80f, 1.00f, 1.f};
+    inline ImVec4 ally_col        = {0.25f, 0.55f, 1.00f, 1.f};
+    inline ImVec4 pickup_col      = {0.60f, 1.00f, 0.60f, 1.f};
+    // Tracers drawn to a team mate are always green, no matter what colour the
+    // enemy tracers use — that is the whole point of telling them apart.
+    inline ImVec4 ally_tracer_col = {0.20f, 0.90f, 0.35f, 1.f};
 
     inline bool box          = false;
     inline bool name_esp     = false;
-    inline bool health       = false;
     inline bool distance     = false;
     inline bool weapon       = false;
-    inline bool weapon_icon  = false;
     inline bool tracer       = false;
     inline bool skeleton     = false;
+    inline bool ore          = false;
+    inline bool animal       = false;
+    inline bool loot         = false;
+    inline bool team         = false;
+    inline bool pickup       = false;
     inline bool  vis_check        = false;
     inline bool  fill             = false;
     inline float stroke           = 2.f;
@@ -214,6 +234,7 @@ namespace cfg { namespace aim {
     inline bool  enabled           = false;
     inline bool  vis_check         = false;
     inline bool  draw_fov          = false;
+    inline bool  scope_only        = false;   // aim only while ADS (прицел)
     inline float fov               = 80.f;
     inline float smoothness        = 5.f;
     inline int   bone              = 0;
@@ -319,17 +340,8 @@ static void ShowToast(const char* msg) {
     }
 }
 
-struct SpriteState {
-    GLuint texture = 0;
-    static constexpr int   Cols  = 8;
-    static constexpr int   Rows  = 10;
-    static constexpr int   Total = 74;
-    static constexpr float FPS   = 30.f;
-    float timer = 0.f;
-    int   frame = 0;
-};
-static SpriteState g_sprite;
-static GLuint g_tabIcons[5] = {};
+static constexpr int kTabCount = 6;
+static GLuint g_tabIcons[kTabCount] = {};
 
 static GLuint LoadTexFromMemory(const unsigned char* data, int len) {
     int w, h, ch;
@@ -352,26 +364,17 @@ void LoadTabIcons() {
     g_tabIcons[0] = LoadTexFromMemory(main_tab_png, (int)main_tab_png_len);
     g_tabIcons[1] = LoadTexFromMemory(aimbot_png,   (int)aimbot_png_len);
     g_tabIcons[2] = LoadTexFromMemory(visuals_png,  (int)visuals_png_len);
-    g_tabIcons[3] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
-    g_tabIcons[4] = LoadTexFromMemory(settings_png, (int)settings_png_len);
+    // Tab order: 3=Разное, 4=Конфиги, 5=Опции. У «Разное» своя векторная
+    // иконка (рисуется кодом), поэтому текстура ему не нужна — иначе она
+    // дублировала бы иконку «Конфиги» (misc_png).
+    g_tabIcons[3] = 0;
+    g_tabIcons[4] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
+    g_tabIcons[5] = LoadTexFromMemory(settings_png, (int)settings_png_len);
 #endif
 }
 
-void LoadAnimeImage() {
-#ifdef ANIME_IMAGE_AVAILABLE
-    int w, h, ch;
-    unsigned char* px = stbi_load_from_memory(anime_png, (int)anime_png_len, &w, &h, &ch, 4);
-    if (!px) return;
-    glGenTextures(1, &g_sprite.texture);
-    glBindTexture(GL_TEXTURE_2D, g_sprite.texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
-    stbi_image_free(px);
-#endif
-}
+// Танцующий спрайт-аватар убран из интерфейса; текстура больше не грузится.
+void LoadAnimeImage() {}
 
 static inline float Lerpf(float a, float b, float t)   { return a + (b - a) * t; }
 static inline float Clamp01(float t)                    { return t < 0.f ? 0.f : t > 1.f ? 1.f : t; }
@@ -385,12 +388,32 @@ static inline bool WasTappedHere() {
     if (!io.MouseReleased[0]) return false;
     auto min = ImGui::GetItemRectMin();
     auto max = ImGui::GetItemRectMax();
+    // Строки контента существуют и за пределами видимой области (скролл),
+    // поэтому нажатие засчитывается только по видимой (не обрезанной клипом)
+    // части строки. Без этого тап по нижней панели вкладок «проваливается»
+    // в невидимую строку под ней и включает её функцию.
+    {
+        ImVec2 clMin = ImGui::GetWindowDrawList()->GetClipRectMin();
+        ImVec2 clMax = ImGui::GetWindowDrawList()->GetClipRectMax();
+        min.x = ImMax(min.x, clMin.x); min.y = ImMax(min.y, clMin.y);
+        max.x = ImMin(max.x, clMax.x); max.y = ImMin(max.y, clMax.y);
+        if (min.x >= max.x || min.y >= max.y) return false;
+    }
     auto cp  = io.MouseClickedPos[0];
     auto mp  = io.MousePos;
     bool started = cp.x >= min.x && cp.x <= max.x && cp.y >= min.y && cp.y <= max.y;
     bool ended   = mp.x >= min.x - 12.f && mp.x <= max.x + 12.f && mp.y >= min.y - 12.f && mp.y <= max.y + 12.f;
     float dx = mp.x - cp.x, dy = mp.y - cp.y;
     return started && ended && (dx * dx + dy * dy) <= 30.f * 30.f;
+}
+
+// Точка внутри текущего клип-прямоугольника окна? Ручные обработчики кликов
+// (карточки конфигов, цветные точки и т.п.) обязаны проверять это, иначе тап
+// по нижней панели вкладок «проваливается» в прокрученную за неё строку.
+static inline bool PtInClip(ImVec2 p) {
+    auto* dl = ImGui::GetWindowDrawList();
+    ImVec2 mn = dl->GetClipRectMin(), mx = dl->GetClipRectMax();
+    return p.x >= mn.x && p.x <= mx.x && p.y >= mn.y && p.y <= mx.y;
 }
 
 static void SpringTick(float& pos, float& vel, float target, float dt) {
@@ -418,34 +441,39 @@ namespace R {
     static constexpr float Btn   = 18.f;
 }
 
-static bool  g_darkTheme = false;
-static float g_themeT    = 0.f;
+// Тёмная тема по умолчанию — лучше сочетается с фиолетовым акцентом
+// и не слепит поверх игры; светлая включается в Настройках как раньше.
+static bool  g_darkTheme = true;
+static float g_themeT    = 1.f;
 static float g_menuFadeIn = 0.f;
 
 namespace C {
+    // "Graphite & Violet": спокойный графитовый фон + фиолетовый акцент.
+    // Light — мягкий светло-серый с лёгким лавандовым оттенком,
+    // Dark  — глубокий сине-графитовый (почти чёрный), карточки чуть светлее.
     namespace Light {
-        static constexpr ImVec4 Bg     = {0.949f, 0.949f, 0.969f, 1};
-        static constexpr ImVec4 LeftBg = {0.969f, 0.969f, 0.980f, 1};
+        static constexpr ImVec4 Bg     = {0.929f, 0.933f, 0.953f, 1};
+        static constexpr ImVec4 LeftBg = {0.957f, 0.957f, 0.973f, 1};
         static constexpr ImVec4 Card   = {1.000f, 1.000f, 1.000f, 1};
-        static constexpr ImVec4 Acc    = {0.000f, 0.478f, 1.000f, 1};
-        static constexpr ImVec4 AccDk  = {0.000f, 0.380f, 0.850f, 1};
-        static constexpr ImVec4 Red    = {1.000f, 0.231f, 0.188f, 1};
-        static constexpr ImVec4 Txt    = {0.000f, 0.000f, 0.000f, 1};
-        static constexpr ImVec4 Dim    = {0.557f, 0.557f, 0.576f, 1};
-        static constexpr ImVec4 TrkOff = {0.776f, 0.776f, 0.800f, 1};
-        static constexpr ImVec4 Sep    = {0.820f, 0.820f, 0.840f, 1};
+        static constexpr ImVec4 Acc    = {0.424f, 0.361f, 0.906f, 1};
+        static constexpr ImVec4 AccDk  = {0.333f, 0.275f, 0.784f, 1};
+        static constexpr ImVec4 Red    = {1.000f, 0.271f, 0.227f, 1};
+        static constexpr ImVec4 Txt    = {0.078f, 0.082f, 0.102f, 1};
+        static constexpr ImVec4 Dim    = {0.541f, 0.553f, 0.596f, 1};
+        static constexpr ImVec4 TrkOff = {0.788f, 0.796f, 0.839f, 1};
+        static constexpr ImVec4 Sep    = {0.851f, 0.859f, 0.898f, 1};
     }
     namespace Dark {
-        static constexpr ImVec4 Bg     = {0.15f, 0.15f, 0.16f, 1};
-        static constexpr ImVec4 LeftBg = {0.137f, 0.137f, 0.145f, 1};
-        static constexpr ImVec4 Card   = {0.173f, 0.173f, 0.180f, 1};
-        static constexpr ImVec4 Acc    = {0.039f, 0.518f, 1.000f, 1};
-        static constexpr ImVec4 AccDk  = {0.000f, 0.400f, 0.870f, 1};
-        static constexpr ImVec4 Red    = {1.000f, 0.271f, 0.227f, 1};
-        static constexpr ImVec4 Txt    = {1.000f, 1.000f, 1.000f, 1};
-        static constexpr ImVec4 Dim    = {0.557f, 0.557f, 0.576f, 1};
-        static constexpr ImVec4 TrkOff = {0.231f, 0.231f, 0.251f, 1};
-        static constexpr ImVec4 Sep    = {0.260f, 0.260f, 0.290f, 1};
+        static constexpr ImVec4 Bg     = {0.063f, 0.071f, 0.094f, 1};
+        static constexpr ImVec4 LeftBg = {0.047f, 0.055f, 0.075f, 1};
+        static constexpr ImVec4 Card   = {0.106f, 0.118f, 0.153f, 1};
+        static constexpr ImVec4 Acc    = {0.545f, 0.486f, 1.000f, 1};
+        static constexpr ImVec4 AccDk  = {0.424f, 0.361f, 0.906f, 1};
+        static constexpr ImVec4 Red    = {1.000f, 0.361f, 0.322f, 1};
+        static constexpr ImVec4 Txt    = {0.949f, 0.953f, 0.969f, 1};
+        static constexpr ImVec4 Dim    = {0.604f, 0.616f, 0.663f, 1};
+        static constexpr ImVec4 TrkOff = {0.180f, 0.196f, 0.251f, 1};
+        static constexpr ImVec4 Sep    = {0.196f, 0.212f, 0.271f, 1};
     }
 
     static inline ImVec4 Lerp4(ImVec4 a, ImVec4 b) {
@@ -514,9 +542,14 @@ namespace Layout {
     static constexpr float HeaderH   = 66.f;
     static constexpr float Inset     = 16.f;
     static constexpr float PadX      = 20.f;
-    static constexpr float TabH      = 70.f;
-    static constexpr float TabPad    = 6.f;
     static constexpr float BtnH      = 62.f;
+    // Нижняя панель вкладок: строка по центру, иконка + подпись.
+    // Кнопки крупные: панель выше и ячейки шире (~2x от первоначальных).
+    static constexpr float BottomH   = 150.f;
+    static constexpr float TabW      = 136.f;
+    // Левая панель вкладок: вертикальный столбец по центру.
+    static constexpr float RailW     = 128.f;
+    static constexpr float TabHV     = 108.f;
 }
 
 struct InputState {
@@ -528,39 +561,90 @@ struct AppState {
     struct SliderAnim { float pos = -1.f; float vel = 0.f; };
     struct RadioAnim  { float scale = 1.f, scaleVel = 0.f, ring = 0.f, ringVel = 0.f; };
 
-    int   cur_tab = 0;
-    bool  aim_touch = false, aim_pos = false, aim_special = false;
+    int   cur_tab = 1;   // при запуске открыта вкладка «Аим»
+    bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
     int   aim_bone = 0;
-    bool  esp_box = false, esp_name = false, esp_hp = false, esp_wall = false, esp_chams = false;
-    bool  esp_weapon = false, esp_weapon_icon = false, esp_tracer = false, esp_skeleton = false;
+    // 0 = balanced (crosshair + range), 1 = nearest to the crosshair,
+    // 2 = nearest in the world.
+    int   aim_priority = 0;
+    bool  esp_box = false, esp_name = false, esp_wall = false, esp_chams = false;
+    bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;
+    bool  esp_ore = false, esp_animal = false, esp_loot = false, esp_team = false;
+    bool  esp_pickup = false;
+    bool  always_day = false;     // всегда день
+    float marker_dist = 150.f;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
-    bool  ui_fps = false, ui_dark_mode = false, ui_show_sep = false;
+    // Автофарм: главный выключатель + какие ресурсы добывать.
+    bool  farm_on = false;
+    bool  farm_wood = true, farm_stone = false, farm_metal = false, farm_sulfur = false;
+    // Калибровка зон бота (доли экрана 0..1; -1 = не задано, берём дефолт).
+    // Джойстик движения и кнопка огня/атаки — у всех раскладки разные.
+    float farm_joy_x = -1.f, farm_joy_y = -1.f;
+    float farm_fire_x = -1.f, farm_fire_y = -1.f;
+    // Дальность поиска ресурсов, метры.
+    float farm_range = 100.f;
+    // Иксрей: визуально срезает мир вокруг игрока (0 = выкл), метры.
+    bool  xray_on = false;
+    float xray_range = 5.f;
+    // ui_fps выключен навсегда (счётчик убран), рамки карточек — всегда вкл.
+    bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = true;
+    // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
+    bool  ui_panel_left = true;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
-    float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0;
+    float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_scope = 0;
     float a_aim_head  = 1, a_aim_chest = 0, a_aim_pelvis = 0;
     RadioAnim ra_aim_head, ra_aim_chest, ra_aim_pelvis;
-    float a_esp_box = 0, a_esp_name = 0, a_esp_hp = 0, a_esp_wall = 0, a_esp_chams = 0;
-    float a_esp_weapon = 0, a_esp_weapon_icon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
-    float a_ui_fps = 0, a_ui_dark = 0, a_ui_sep = 0;
+    float a_aim_pr0 = 1, a_aim_pr1 = 0, a_aim_pr2 = 0;
+    RadioAnim ra_aim_pr0, ra_aim_pr1, ra_aim_pr2;
+    float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
+    float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
+    float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
+    float a_always_day = 0;
+    float a_ui_dark = 1;
+    float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
+    float a_xray_on = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray;
 };
 static AppState g_state;
+
 
 static ImU32 ColU32(const ImVec4& c) {
     return IM_COL32((int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255), (int)(c.w * 255));
 }
 
+// Radius (px) of the aim FOV circle. Original logic: cfg::aim::fov is an
+// angle against a fixed 60° reference (not the live camera FOV), so the circle
+// stays put on screen when the player zooms in. 180° = whole screen.
 static float AimFovRadiusPx(float sw, float sh) {
     float fov = cfg::aim::fov;
     if (fov <= 0.f) return 0.f;
-    if (fov >= 359.f) return sw + sh;
+    if (fov >= 180.f) return sw + sh;
     float t = tanf(fov * 0.5f * (float)M_PI / 180.f) / tanf(30.f * (float)M_PI / 180.f);
     float r = t * (sh * 0.5f);
-    if (r > sw + sh) r = sw + sh;
+    if (!std::isfinite(r) || r > sw + sh) r = sw + sh;
     return r;
+}
+
+// One remote snapshot per frame, shared by the ESP overlay and the aimbot.
+static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
+    static std::vector<EspBox> s_boxes;
+    static int s_frame = -1;
+    int frame = ImGui::GetFrameCount();
+    if (frame != s_frame) {
+        s_frame = frame;
+        esp_set_skeleton_enabled(g_state.esp_skeleton);
+        esp_set_aim_bones_enabled(g_state.aim_touch);
+        esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
+                                g_state.esp_loot, g_state.esp_pickup);
+        esp_set_always_day(g_state.always_day);
+        esp_set_marker_max_distance(g_state.marker_dist);
+        esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
+        s_boxes = esp_get_boxes((int)sw, (int)sh);
+    }
+    return s_boxes;
 }
 
 static void DrawEspOverlay() {
@@ -587,9 +671,9 @@ static void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup) return;
 
-    std::vector<EspBox> boxes = esp_get_boxes((int)sw, (int)sh);
+    const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},
@@ -598,8 +682,102 @@ static void DrawEspOverlay() {
     float thick = g_state.esp_thick;
     if (thick < 0.5f) thick = 0.5f;
 
+    // Thin dark-gray outline used across all visuals (no bold black strokes).
+    const ImU32 kVisOutline = IM_COL32(45, 45, 52, 220);
+
+    // ESP labels in the GUI style: compact rounded pill (light translucent fill
+    // + thin gray outline) + colored text. The text is drawn with the same font
+    // and size it is measured at (espFont/espFs) so it never spills out of the
+    // pill — the old call drew at the full-size font while sizing at 0.8×, which
+    // made the distance/weapon text overflow the pill.
+    ImFont* espFont = ImGui::GetFont();
+    float espFs = ImGui::GetFontSize() * 0.8f;
+    auto PillH = [&](const char* text, float scale = 1.f) {
+        if (!text || !text[0]) return 0.f;
+        ImVec2 tsz = espFont->CalcTextSizeA(espFs * scale, FLT_MAX, 0, text);
+        return tsz.y + 4.f * scale;
+    };
+    auto EspPill = [&](float cx, float y, const char* text, ImU32 textCol, float scale = 1.f) {
+        if (!text || !text[0]) return;
+        float fsz = espFs * scale;
+        ImVec2 tsz = espFont->CalcTextSizeA(fsz, FLT_MAX, 0, text);
+        const float padX = 5.f * scale, padY = 2.f * scale;
+        float x0 = cx - tsz.x * 0.5f - padX;
+        float x1 = cx + tsz.x * 0.5f + padX;
+        float y1 = y + tsz.y + padY * 2.f;
+        // Light translucent fill (not a dense black block), same for the name,
+        // weapon and distance pills so they read consistently over any scene.
+        dl->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y1), IM_COL32(30, 30, 36, 40), 5.f * scale);
+        dl->AddRect(ImVec2(x0, y), ImVec2(x1, y1), kVisOutline, 5.f * scale, 0, 1.0f);
+        dl->AddText(espFont, fsz, ImVec2(cx - tsz.x * 0.5f, y + padY), textCol, text);
+    };
+    // A far away player projects to a couple of pixels, which used to make the
+    // box degenerate (corners gone, top/bottom strokes fused into one line).
+    // Every visual therefore works on a rect that is grown around its own
+    // centre up to a stroke-aware minimum.
+    //
+    // The growth is a single uniform scale, not a per-axis clamp: clamping the
+    // axes separately pushed the width of a distant player up to the same
+    // minimum as the height and the box turned into a square. Scaling keeps the
+    // player's proportions, so a far away box stays a small tall rectangle.
+    const float kMinBoxSide = 3.0f * (thick + 1.0f) + 8.0f;      // vertical floor
+    const float kMinBoxWidth = 2.0f * 1.5f + (thick + 1.5f);     // 2 stubs + a gap
+    auto NormRect = [&](float& x1, float& y1, float& x2, float& y2) {
+        if (x2 < x1) { float t = x1; x1 = x2; x2 = t; }
+        if (y2 < y1) { float t = y1; y1 = y2; y2 = t; }
+        float cx = (x1 + x2) * 0.5f, cy = (y1 + y2) * 0.5f;
+        float w = x2 - x1, h = y2 - y1;
+        if (!(h > 0.01f)) { h = kMinBoxSide; w = kMinBoxSide * game_offsets::PLAYER_BOX_WIDTH_RATIO; }
+        if (h < kMinBoxSide) { float s = kMinBoxSide / h; h *= s; w *= s; }
+        if (w < kMinBoxWidth) w = kMinBoxWidth; // only for absurdly narrow rects
+        x1 = cx - w * 0.5f; x2 = cx + w * 0.5f;
+        y1 = cy - h * 0.5f; y2 = cy + h * 0.5f;
+    };
+    // Corner box: the middle of every edge is cut out, only corners remain.
+    // The corner length is capped per axis so the two segments of one edge can
+    // never meet — at any distance a visible gap stays in the middle of the
+    // top/bottom (and left/right) edges, which is what makes it read as a
+    // corner box instead of a plain rectangle or a single fused line.
+    auto CornerBox = [&](float x1, float y1, float x2, float y2, ImU32 col) {
+        if (!std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(x2) || !std::isfinite(y2)) return;
+        NormRect(x1, y1, x2, y2);
+        float w = x2 - x1, h = y2 - y1;
+
+        float len = (w < h ? w : h) * 0.28f;
+        if (len > 42.f) len = 42.f;
+
+        // Keep at least ~30% of every edge (and never less than one stroke
+        // plus a pixel) empty in its middle.
+        float gapX = w * 0.30f; if (gapX < thick + 1.5f) gapX = thick + 1.5f;
+        float gapY = h * 0.30f; if (gapY < thick + 1.5f) gapY = thick + 1.5f;
+        float lx = (w - gapX) * 0.5f; if (lx > len) lx = len;
+        float ly = (h - gapY) * 0.5f; if (ly > len) ly = len;
+        if (lx < 1.5f) lx = 1.5f;
+        if (ly < 1.5f) ly = 1.5f;
+
+        const ImVec2 pts[8][2] = {
+            {{x1, y1}, {x1 + lx, y1}}, {{x1, y1}, {x1, y1 + ly}},
+            {{x2 - lx, y1}, {x2, y1}}, {{x2, y1}, {x2, y1 + ly}},
+            {{x1, y2 - ly}, {x1, y2}}, {{x1, y2}, {x1 + lx, y2}},
+            {{x2 - lx, y2}, {x2, y2}}, {{x2, y2 - ly}, {x2, y2}},
+        };
+        for (int i = 0; i < 8; ++i)
+            dl->AddLine(pts[i][0], pts[i][1], kVisOutline, thick + 1.0f);
+        for (int i = 0; i < 8; ++i)
+            dl->AddLine(pts[i][0], pts[i][1], col, thick);
+    };
+
     for (const EspBox& box : boxes) {
         if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
+
+        // Rect every visual (box, tracer, labels) is anchored to: never smaller
+        // than the stroke-aware minimum, so nothing collapses at long range.
+        float bx1 = box.x1, by1 = box.y1, bx2 = box.x2, by2 = box.y2;
+        NormRect(bx1, by1, bx2, by2);
+
+        // Team mates / clan mates get their own colour so they read as
+        // friendly at a glance (and the aimbot leaves them alone).
+        const bool ally = g_state.esp_team && box.ally;
 
         if (g_state.esp_chams) {
             bool all_valid = true;
@@ -610,41 +788,157 @@ static void DrawEspOverlay() {
                 }
             }
             if (all_valid) {
-                for (const auto& edge : BOX_EDGES) {
-                    int a = edge[0], b = edge[1];
-                    dl->AddLine(
-                        ImVec2(box.corners[a][0], box.corners[a][1]),
-                        ImVec2(box.corners[b][0], box.corners[b][1]),
-                        ColU32(cfg::esp::box_col_invis), thick
-                    );
+                ImU32 col = ColU32(cfg::esp::box_col_invis);
+                // 3D box edges collapse to a single line at long range because the
+                // projected top/bottom (and left/right) faces sit within a pixel or
+                // two. Measure the on-screen extent and, when it is below a stroke
+                // aware minimum, draw a flat, centred box with that minimum span so
+                // the horizontal rows stay visibly separated (same guarantee as the
+                // corner box) instead of fusing into one line.
+                float mnX = FLT_MAX, mnY = FLT_MAX, mxX = -FLT_MAX, mxY = -FLT_MAX;
+                for (int c = 0; c < 8; ++c) {
+                    float x = box.corners[c][0], y = box.corners[c][1];
+                    if (x < mnX) mnX = x; if (x > mxX) mxX = x;
+                    if (y < mnY) mnY = y; if (y > mxY) mxY = y;
+                }
+                float dMin = kMinBoxSide;
+                if ((mxX - mnX) >= dMin && (mxY - mnY) >= dMin) {
+                    for (const auto& edge : BOX_EDGES) {
+                        int a = edge[0], b = edge[1];
+                        dl->AddLine(
+                            ImVec2(box.corners[a][0], box.corners[a][1]),
+                            ImVec2(box.corners[b][0], box.corners[b][1]),
+                            col, thick
+                        );
+                    }
+                } else {
+                    dl->AddRect(ImVec2(bx1, by1), ImVec2(bx2, by2), kVisOutline, 0.f, 0, thick + 1.0f);
+                    dl->AddRect(ImVec2(bx1, by1), ImVec2(bx2, by2), col, 0.f, 0, thick);
                 }
             }
         }
 
-        if (g_state.esp_box)
-            dl->AddRect(ImVec2(box.x1, box.y1), ImVec2(box.x2, box.y2), ColU32(cfg::esp::box_col), cfg::esp::box_rounding, 0, thick);
-
-        if (g_state.esp_tracer) {
-            float tx = (box.x1 + box.x2) * 0.5f;
-            float ty = box.y2;
-            dl->AddLine(ImVec2(sw * 0.5f, sh), ImVec2(tx, ty), ColU32(cfg::esp::tracer_col), thick);
+        if (g_state.esp_box) {
+            CornerBox(bx1, by1, bx2, by2, ColU32(ally ? cfg::esp::ally_col : cfg::esp::box_col));
         }
 
-        if (g_state.esp_wall) {
-            char label[32];
-            if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1fm", box.distance);
-            else snprintf(label, sizeof(label), "PLAYER");
-            dl->AddText(ImVec2(box.x1, box.y1 - 22.0f), ColU32(cfg::esp::distance_col), label);
+        if (g_state.esp_skeleton && box.has_skeleton) {
+            ImU32 skelCol = ColU32(cfg::esp::skeleton_col);
+            auto validPt = [&](int b) {
+                return b >= 0 && box.bone_valid[b] &&
+                       std::isfinite(box.bones[b][0]) && std::isfinite(box.bones[b][1]);
+            };
+            auto lineTo = [&](int a, int b) {
+                dl->AddLine(ImVec2(box.bones[a][0], box.bones[a][1]),
+                            ImVec2(box.bones[b][0], box.bones[b][1]),
+                            skelCol, thick);
+            };
+            // Draw each chain connecting consecutive valid bones, skipping
+            // missing ones (0..5 torso, 6..9/10..13 arms, 14..17/18..21 legs).
+            auto drawChain = [&](const int* chain, int n, int anchor) {
+                int prev = validPt(anchor) ? anchor : -1;
+                for (int i = 0; i < n; ++i) {
+                    int b = chain[i];
+                    if (!validPt(b)) continue;
+                    if (prev >= 0) lineTo(prev, b);
+                    prev = b;
+                }
+            };
+            // Arms hang off the highest available spine bone.
+            int chest = -1;
+            for (int c : {3, 2, 1, 0}) { if (validPt(c)) { chest = c; break; } }
+
+            static const int torso[] = {1, 2, 3, 4, 5};
+            static const int armL[]  = {6, 7, 8, 9};
+            static const int armR[]  = {10, 11, 12, 13};
+            static const int legL[]  = {14, 15, 16, 17};
+            static const int legR[]  = {18, 19, 20, 21};
+            drawChain(torso, 5, 0);
+            drawChain(armL, 4, chest);
+            drawChain(armR, 4, chest);
+            drawChain(legL, 4, 0);
+            drawChain(legR, 4, 0);
+        }
+
+
+
+        if (g_state.esp_tracer) {
+            // From the middle of the top edge of the screen to the head area.
+            // Team mates get a green line so a glance at the tracer is enough.
+            float tx = (bx1 + bx2) * 0.5f;
+            ImU32 tracerCol = ColU32(ally ? cfg::esp::ally_tracer_col : cfg::esp::tracer_col);
+            dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, by1),
+                        kVisOutline, thick + 1.0f);
+            dl->AddLine(ImVec2(sw * 0.5f, 0.0f), ImVec2(tx, by1), tracerCol, thick);
+        }
+
+        // Name above the box; distance right under the box, weapon under the
+        // distance.
+        {
+            float cx = (bx1 + bx2) * 0.5f;
+            const float gap = 5.f;
+            if (g_state.esp_name && box.has_name && box.name[0]) {
+                // Clan tag in front of the nick, the way the game shows it.
+                char label[56];
+                if (box.has_tag && box.tag[0])
+                    snprintf(label, sizeof(label), "[%s] %s", box.tag, box.name);
+                else
+                    snprintf(label, sizeof(label), "%s", box.name);
+                float h = PillH(label);
+                EspPill(cx, by1 - h - gap, label,
+                        ColU32(ally ? cfg::esp::ally_col : cfg::esp::name_col));
+            }
+            float belowY = by2 + gap;
+            if (g_state.esp_wall) {
+                char label[32];
+                if (box.distance >= 0.0f) snprintf(label, sizeof(label), "%.1fm", box.distance);
+                else snprintf(label, sizeof(label), "PLAYER");
+                EspPill(cx, belowY, label, ColU32(cfg::esp::distance_col));
+                belowY += PillH(label) + 4.f;
+            }
+            if (g_state.esp_weapon && box.has_weapon && box.weapon[0]) {
+                EspPill(cx, belowY, box.weapon, ColU32(cfg::esp::weapon_col));
+                belowY += PillH(box.weapon) + 4.f;
+            }
+        }
+    }
+
+    // ---- World markers: ore nodes and animals ----------------------------
+    // One pill with the resource / animal name at the object's position; the
+    // scan itself is done by the game layer and reuses this frame's camera.
+    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup) {
+        // Smaller than the player labels (there are many more of them), with the
+        // distance on a second line underneath.
+        constexpr float kMarkerScale = 0.78f;
+        // Elite crates pulse through the spectrum: one hue for all of them per
+        // frame (a full turn every two seconds) so they cannot be missed.
+        const float rainbow_hue = fmodf((float)ImGui::GetTime() * 0.5f, 1.0f);
+        float rr = 1.f, rg = 1.f, rb = 1.f;
+        ImGui::ColorConvertHSVtoRGB(rainbow_hue, 0.85f, 1.0f, rr, rg, rb);
+        const ImU32 rainbow_col = IM_COL32((int)(rr * 255.f), (int)(rg * 255.f), (int)(rb * 255.f), 255);
+        for (const EspMarker& marker : esp_get_markers()) {
+            if (!marker.name[0]) continue;
+            if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
+            ImU32 col = marker.rainbow ? rainbow_col
+                : marker.has_color
+                ? IM_COL32(marker.color_rgb[0], marker.color_rgb[1], marker.color_rgb[2], 255)
+                : ColU32(marker.kind == ESP_MARKER_LOOT   ? cfg::esp::loot_col
+                       : marker.kind == ESP_MARKER_PICKUP ? cfg::esp::pickup_col
+                                                          : cfg::esp::animal_col);
+            EspPill(marker.x, marker.y, marker.name, col, kMarkerScale);
+            char label[24];
+            snprintf(label, sizeof(label), "%.0fm", marker.distance);
+            EspPill(marker.x, marker.y + PillH(marker.name, kMarkerScale) + 2.f, label,
+                    ColU32(cfg::esp::distance_col), kMarkerScale);
         }
     }
 }
-
 
 static constexpr int  kMaxConfigs  = 12;
 static constexpr uint8_t kXorKey   = 0xA7;
 
 static const char* kCfgDir_() noexcept {
-    static constexpr auto _s = xp::_mk("/storage/emulated/0/xvcen/");
+    static constexpr auto _s = xp::_mk("/storage/emulated/0/benzhack/");
     return _s.d();
 }
 #define kCfgDir (kCfgDir_())
@@ -659,6 +953,21 @@ static int         g_cfgLoadedIdx = -1;
 
 static std::string CfgPath(const char* name) {
     return std::string(kCfgDir) + name + XS(".cfg");
+}
+
+static std::string CfgLastPath() {
+    return std::string(kCfgDir) + XS(".last");
+}
+
+static void RememberLastConfigName(const char* name) {
+    if (!name || !name[0]) return;
+    mkdir(kCfgDir, 0777);
+    std::ofstream f(CfgLastPath(), std::ios::trunc);
+    if (f) f << name;
+}
+
+static void ForgetLastConfigName() {
+    remove(CfgLastPath().c_str());
 }
 
 static void XorBuf(uint8_t* buf, size_t sz) {
@@ -718,15 +1027,35 @@ struct CfgBlob {
     bool  aim_touch, aim_pos, aim_special;
     int   aim_bone;
     bool  aim_vis_check, aim_draw_fov;
-    float aim_fov, aim_smoothness;
-    bool  esp_box, esp_name, esp_hp, esp_wall, esp_chams;
-    bool  esp_weapon, esp_weapon_icon, esp_tracer, esp_skeleton;
-    bool  esp_money, esp_ping, esp_vis_check, esp_fill;
+    //   aim_smoothness -> aim_lead   (smoothing has its own gun_str slot,
+    //                                 and this one was only ever a mirror).
+    //                                 Reused: farm search range in metres
+    //                                 (0 in old configs = use the default).
+    float aim_fov, aim_lead;
+    // Every field that a feature outgrew is renamed in place rather than
+    // appended, so the byte layout — and with it version 4 and every config
+    // already saved on a device — stays valid. Current renames:
+    //   esp_hp        -> esp_ore          esp_ping        -> esp_animal
+    //   esp_weapon_icon -> esp_team
+    //   esp_health_col  -> esp_ally_col   esp_money_col   -> esp_animal_col
+    //   esp_weapon_icon_col -> esp_loot_col
+    //   esp_ping_col    -> esp_extra (packed scalars, see below)
+    //   aim_smoothness  -> aim_lead
+    bool  esp_box, esp_name, esp_ore, esp_wall, esp_chams;
+    bool  esp_weapon, esp_team, esp_tracer, esp_skeleton;
+    bool  aim_scope_only, esp_animal, esp_vis_check, esp_fill;
     float esp_thick, esp_stroke, esp_rounding, esp_fill_pct;
     float gun_str, gun_fov, gun_trigger_delay;
     bool  ui_fps, ui_dark_mode, ui_show_sep;
-    ImVec4 esp_box_col, esp_box_col_invis, esp_name_col, esp_health_col, esp_distance_col;
-    ImVec4 esp_weapon_col, esp_weapon_icon_col, esp_tracer_col, esp_skeleton_col, esp_money_col, esp_ping_col;
+    ImVec4 esp_box_col, esp_box_col_invis, esp_name_col, esp_ally_col, esp_distance_col;
+    ImVec4 esp_weapon_col, esp_loot_col, esp_tracer_col, esp_skeleton_col, esp_animal_col;
+    // Four scalars that had no slot of their own:
+    //   x = bit 0 loot ESP, bit 1 pickup ESP,
+    //   y = marker draw distance (m),
+    //   z = aim priority + 1 (so an old config's 1.0 still means "default"),
+    //   w = pickup colour packed as r*65536 + g*256 + b (exact in a float,
+    //       since 0xFFFFFF < 2^24); <= 1 means "never written, use default".
+    ImVec4 esp_extra;
     int   esp_box_type;
     float esp_box_rounding;
 };
@@ -741,16 +1070,18 @@ static void ConfigSaveToPath(const std::string& path) {
     s.aim_vis_check  = cfg::aim::vis_check;
     s.aim_draw_fov   = cfg::aim::draw_fov;
     s.aim_fov        = cfg::aim::fov;
-    s.aim_smoothness = cfg::aim::smoothness;
+    // Слот aim_lead давно свободен (см. CfgBlob) — теперь в нём живёт
+    // дальность автофарма. Старые конфиги держат тут 0 и дадут дефолт.
+    s.aim_lead       = g_state.farm_range;
     s.esp_box     = g_state.esp_box;     s.esp_name    = g_state.esp_name;
-    s.esp_hp      = g_state.esp_hp;      s.esp_wall    = g_state.esp_wall;
+    s.esp_ore     = g_state.esp_ore;     s.esp_wall    = g_state.esp_wall;
     s.esp_chams   = g_state.esp_chams;
     s.esp_weapon      = g_state.esp_weapon;
-    s.esp_weapon_icon = g_state.esp_weapon_icon;
+    s.esp_team        = g_state.esp_team;
     s.esp_tracer      = g_state.esp_tracer;
     s.esp_skeleton    = g_state.esp_skeleton;
-    s.esp_money       = false;
-    s.esp_ping        = false;
+    s.aim_scope_only  = g_state.aim_scope_only;
+    s.esp_animal      = g_state.esp_animal;
     s.esp_vis_check   = cfg::esp::vis_check;
     s.esp_fill        = cfg::esp::fill;
     s.esp_thick       = g_state.esp_thick;
@@ -765,14 +1096,22 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_box_col          = cfg::esp::box_col;
     s.esp_box_col_invis    = cfg::esp::box_col_invis;
     s.esp_name_col         = cfg::esp::name_col;
-    s.esp_health_col       = cfg::esp::health_col;
+    s.esp_ally_col         = cfg::esp::ally_col;
     s.esp_distance_col     = cfg::esp::distance_col;
     s.esp_weapon_col       = cfg::esp::weapon_col;
-    s.esp_weapon_icon_col  = cfg::esp::weapon_icon_col;
+    s.esp_loot_col         = cfg::esp::loot_col;
     s.esp_tracer_col       = cfg::esp::tracer_col;
     s.esp_skeleton_col     = cfg::esp::skeleton_col;
-    s.esp_money_col        = {1.00f, 0.95f, 0.10f, 1.f};
-    s.esp_ping_col         = {0.40f, 0.85f, 1.00f, 1.f};
+    s.esp_animal_col       = cfg::esp::animal_col;
+    {
+        const int flags = (g_state.esp_loot ? 1 : 0) | (g_state.esp_pickup ? 2 : 0);
+        auto ch = [](float v) { int i = (int)(v * 255.f + 0.5f); return i < 0 ? 0 : (i > 255 ? 255 : i); };
+        const float packed = (float)(ch(cfg::esp::pickup_col.x) * 65536
+                                   + ch(cfg::esp::pickup_col.y) * 256
+                                   + ch(cfg::esp::pickup_col.z));
+        s.esp_extra = {(float)flags, g_state.marker_dist,
+                       (float)(g_state.aim_priority + 1), packed};
+    }
     s.esp_box_type         = cfg::esp::box_type;
     s.esp_box_rounding     = cfg::esp::box_rounding;
     uint8_t buf[sizeof(s)];
@@ -793,6 +1132,7 @@ static void ConfigSave() {
     } while (access(cfgpath.c_str(), F_OK) == 0);
     ConfigSaveToPath(cfgpath);
     CfgScanDir();
+    RememberLastConfigName(baseName);
     ShowToast(XS("Конфиг создан"));
     PlaySound(SND_SUCCESS);
 }
@@ -805,11 +1145,11 @@ static void ConfigUpdate(int idx) {
     PlaySound(SND_SUCCESS);
 }
 
-static void ConfigLoad(int idx) {
+static void ConfigLoad(int idx, bool announce = true) {
     if (idx < 0 || idx >= g_configCount) return;
     std::string path = CfgPath(g_configs[idx].name);
     std::ifstream f(path, std::ios::binary);
-    if (!f) { ShowToast(XS("Файл не найден")); return; }
+    if (!f) { if (announce) ShowToast(XS("Файл не найден")); return; }
 
     CfgBlob s;
 
@@ -817,53 +1157,114 @@ static void ConfigLoad(int idx) {
     f.read((char*)buf, sizeof(buf));
     size_t got = (size_t)f.gcount();
     f.close();
-    if (got != sizeof(buf)) { ShowToast(XS("Несовместимый конфиг")); return; }
+    if (got != sizeof(buf)) { if (announce) ShowToast(XS("Несовместимый конфиг")); return; }
     XorBuf(buf, sizeof(s));
     memcpy(&s, buf, sizeof(s));
-    if (s.magic != 0x58564345U || s.version != 4) { ShowToast(XS("Старый конфиг — пересохрани")); return; }
+    if (s.magic != 0x58564345U || s.version != 4) { if (announce) ShowToast(XS("Старый конфиг — пересохрани")); return; }
 
-    g_state.aim_touch   = s.aim_touch;   g_state.aim_pos     = s.aim_pos;
+    g_state.aim_touch   = s.aim_touch;
+    // «Только видимых» убран из меню — значение из конфига игнорируется.
+    g_state.aim_pos     = false;
     g_state.aim_special = s.aim_special;
+    g_state.aim_scope_only = s.aim_scope_only;
+    cfg::aim::scope_only   = s.aim_scope_only;
     g_state.aim_bone    = s.aim_bone;
-    cfg::aim::vis_check  = s.aim_vis_check;
+    cfg::aim::vis_check  = false;
     cfg::aim::draw_fov   = s.aim_draw_fov;
     cfg::aim::fov        = s.aim_fov;
-    cfg::aim::smoothness = s.aim_smoothness;
-    if (cfg::aim::smoothness < 1.f) {
-        cfg::aim::smoothness = (cfg::aim::smoothness <= 0.f) ? 1.f : cfg::aim::smoothness * 10.f;
-        if (cfg::aim::smoothness > 10.f) cfg::aim::smoothness = 10.f;
-    }
-    g_state.gun_str = cfg::aim::smoothness;
+    // Дальность автофарма переехала в бывший слот aim_lead; в старых
+    // конфигах там 0 — тогда остаётся дефолт 100 м.
+    g_state.farm_range   = (s.aim_lead >= 10.f && s.aim_lead <= 300.f) ? s.aim_lead : 100.f;
     g_state.esp_box     = s.esp_box;     g_state.esp_name    = s.esp_name;
-    g_state.esp_hp      = s.esp_hp;      g_state.esp_wall    = s.esp_wall;
+    g_state.esp_wall    = s.esp_wall;
     g_state.esp_chams   = s.esp_chams;
     g_state.esp_weapon      = s.esp_weapon;
-    g_state.esp_weapon_icon = s.esp_weapon_icon;
     g_state.esp_tracer      = s.esp_tracer;
     g_state.esp_skeleton    = s.esp_skeleton;
+    g_state.esp_ore         = s.esp_ore;
+    g_state.esp_animal      = s.esp_animal;
+    g_state.esp_team        = s.esp_team;
+    // Packed scalars. A config written before these existed holds the old ping
+    // colour here, so each value is range-checked and falls back to its default.
+    {
+        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 4.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
+        g_state.esp_loot   = (flags & 1) != 0;
+        g_state.esp_pickup = (flags & 2) != 0;
+        g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
+        int pr = (int)(s.esp_extra.z + 0.5f) - 1;
+        g_state.aim_priority = (pr >= 0 && pr <= 2) ? pr : 0;
+        // Packed pickup colour. Configs written before it existed hold the old
+        // ping alpha (exactly 1.0) here, which is why the check is "> 1".
+        if (s.esp_extra.w > 1.f && s.esp_extra.w <= 16777215.f) {
+            int rgb = (int)(s.esp_extra.w + 0.5f);
+            cfg::esp::pickup_col = ImVec4(((rgb >> 16) & 0xFF) / 255.f,
+                                          ((rgb >> 8) & 0xFF) / 255.f,
+                                          (rgb & 0xFF) / 255.f, 1.f);
+        }
+    }
     g_state.esp_thick   = s.esp_thick;
     g_state.gun_str     = s.gun_str;
     g_state.gun_fov     = s.gun_fov;
+    if (!(g_state.gun_fov >= 5.f)) g_state.gun_fov = 5.f;
+    if (g_state.gun_fov > 180.f) g_state.gun_fov = 180.f;
     g_state.gun_trigger_delay     = s.gun_trigger_delay;
-    g_state.ui_fps      = s.ui_fps;      g_state.ui_dark_mode= s.ui_dark_mode;
-    g_state.ui_show_sep = s.ui_show_sep;
+    g_state.ui_dark_mode= s.ui_dark_mode;
+    // ui_fps и ui_show_sep из конфига игнорируются: счётчик FPS убран,
+    // рамки карточек всегда включены.
+    g_state.ui_fps      = false;
+    g_state.ui_show_sep = true;
     cfg::esp::box_col          = s.esp_box_col;
     cfg::esp::box_col_invis    = s.esp_box_col_invis;
     cfg::esp::name_col         = s.esp_name_col;
-    cfg::esp::health_col       = s.esp_health_col;
     cfg::esp::distance_col     = s.esp_distance_col;
     cfg::esp::weapon_col       = s.esp_weapon_col;
-    cfg::esp::weapon_icon_col  = s.esp_weapon_icon_col;
     cfg::esp::tracer_col       = s.esp_tracer_col;
     cfg::esp::skeleton_col     = s.esp_skeleton_col;
+    cfg::esp::animal_col       = s.esp_animal_col;
+    cfg::esp::loot_col         = s.esp_loot_col;
+    // The ally colour reuses a slot that older configs left pure black.
+    if (s.esp_ally_col.x + s.esp_ally_col.y + s.esp_ally_col.z > 0.05f)
+        cfg::esp::ally_col     = s.esp_ally_col;
     cfg::esp::box_type         = s.esp_box_type;
     cfg::esp::box_rounding     = s.esp_box_rounding;
     g_darkTheme = g_state.ui_dark_mode;
     snprintf(g_loadedConfigName, sizeof(g_loadedConfigName), "%s", g_configs[idx].name);
     g_cfgLoadedIdx = idx;
     for (int i = 0; i < kMaxConfigs; i++) g_cfgLoadAnim[i] = 0.f;
-    ShowToast(XS("Конфиг загружен"));
-    PlaySound(SND_SUCCESS);
+    RememberLastConfigName(g_configs[idx].name);
+    if (announce) {
+        ShowToast(XS("Конфиг загружен"));
+        PlaySound(SND_SUCCESS);
+    }
+}
+
+static void ConfigLoadLast() {
+    std::ifstream f(CfgLastPath());
+    std::string name;
+    if (f) {
+        std::getline(f, name);
+        while (!name.empty() && (name.back() == '\n' || name.back() == '\r' || name.back() == ' '))
+            name.pop_back();
+    }
+    if (!name.empty()) {
+        for (int i = 0; i < g_configCount; i++) {
+            if (strcmp(g_configs[i].name, name.c_str()) == 0) {
+                ConfigLoad(i, false);
+                return;
+            }
+        }
+    }
+    time_t best_mtime = 0;
+    int best = -1;
+    for (int i = 0; i < g_configCount; i++) {
+        struct stat st{};
+        if (stat(CfgPath(g_configs[i].name).c_str(), &st) != 0) continue;
+        if (best < 0 || st.st_mtime >= best_mtime) {
+            best_mtime = st.st_mtime;
+            best = i;
+        }
+    }
+    if (best >= 0) ConfigLoad(best, false);
 }
 
 static void ConfigDelete(int idx) {
@@ -895,11 +1296,12 @@ struct ScrollState {
     bool  sb_hot   = false;
 };
 
+// Позиция «пилюли» активной вкладки на нижней панели (экранный X) + пружина.
 static float pill_y   = -1.f;
 static float pill_vel =  0.f;
 
-struct TabRect { float sy; };
-static TabRect tab_rects[5];
+struct TabRect { float sx; };
+static TabRect tab_rects[kTabCount];
 
 static void ScrollTick(ScrollState& s, bool mIn, bool blocked, float& maxScroll, float dt) {
     auto& io = ImGui::GetIO();
@@ -1072,8 +1474,17 @@ void PopoverOpenColor(const char* title, ImVec4* cp) {
 }
 
 void PopoverOpen(const char* title, int sid) {
-    if (g_pop.visible) return;
+    // Переоткрытие поверх ЗАКРЫВАЮЩЕГОСЯ окна должно работать: калибровка
+    // зон запускается тапом из окна (оно уходит в closing), рисование меню
+    // замирает на время калибровки, и к её завершению окно всё ещё
+    // "visible+closing". Старый ранний выход здесь молча съедал реоткрытие —
+    // пользователя выкидывало на голую вкладку «Разное».
+    if (g_pop.visible) {
+        if (!g_pop.closing) return;
+        g_pop.visible = false; // прервать закрытие и открыть заново
+    }
     snprintf(g_pop.title, sizeof(g_pop.title), "%s", title);
+    g_colP = nullptr; // обычное окно, не палитра
     g_pop.sectionId  = sid;
     g_pop.visible    = true;
     g_pop.closing    = false;
@@ -1247,7 +1658,11 @@ void SHdr(const char* t, float top = 18.f) {
         float  fs  = ImGui::GetFontSize() * 1.15f;
         auto   pos = ImGui::GetCursorScreenPos();
         auto   tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, t);
-        dl->AddText(fn, fs, {pos.x + 32.f, pos.y}, C::U(C::Dim()), t);
+        // Акцентная «капсула» слева от заголовка секции — визуально
+        // связывает секции с индикатором активной вкладки в рейле.
+        dl->AddRectFilled({pos.x + 18.f, pos.y + tsz.y * 0.14f},
+                          {pos.x + 24.f, pos.y + tsz.y * 0.86f}, C::U(C::Acc()), 3.f);
+        dl->AddText(fn, fs, {pos.x + 34.f, pos.y}, C::U(C::Dim()), t);
         ImGui::Dummy({1.f, tsz.y});
     }
     ImGui::Dummy({1.f, 8.f});
@@ -1363,9 +1778,6 @@ static void DrawToast(float dt) {
 }
 
 static float wm_ring   = 2.f;
-static float wm_fps_sm = 0.f;
-static float wm_w      = 0.f;
-static float wm_wvel   = 0.f;
 static bool  menu_open = true;
 
 void DrawWatermark(float dt) {
@@ -1373,61 +1785,82 @@ void DrawWatermark(float dt) {
     auto* fn  = ImGui::GetFont();
     auto* fg  = ImGui::GetForegroundDrawList();
 
-    float rawFps = overlay_fps();
-    if (rawFps < 1.f) rawFps = io.Framerate;
-    const float rates[] = {60.f, 90.f, 120.f, 144.f, 165.f, 180.f, 240.f};
-    float nearest = rawFps, nd = 1e9f;
-    for (float r : rates) {
-        float d = fabsf(rawFps - r);
-        if (d < nd) { nd = d; nearest = r; }
-    }
-    if (nd <= 8.f) rawFps = nearest;
-    wm_fps_sm += (rawFps - wm_fps_sm) * 8.f * dt;
-    if (wm_fps_sm < 1.f) wm_fps_sm = rawFps;
-    wm_ring   += dt * 3.5f;
+    wm_ring += dt * 3.5f;
 
     ImVec4 acc   = C::Acc();
-    ImVec4 cardV = C::Card();
-    ImU32 bgCol  = C::U(cardV);
+    ImU32 bgCol  = C::U(C::Card());
     ImU32 brdCol = C::UA(acc, 0.6f);
-    ImU32 nmCol  = C::U(C::Txt());
 
-    const float fs = 40.f, pad = 22.f, bR = 46.f;
-    const char* name = XS("xvcen");
+    float scrW = 0.f, scrH = 0.f;
+    VisibleScreen(scrW, scrH);
 
-    auto  nSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, name);
-    char  fpsBuf[12]; snprintf(fpsBuf, 12, "%.0f", wm_fps_sm);
-    auto  fSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, fpsBuf);
-
-    TickSlideAnim(wm_w, wm_wvel, !g_state.ui_fps, dt);
-    float fpsA = EaseInOut(wm_w);
-    float fpsSection = fpsA * (pad * 0.7f + 1.5f + pad * 0.7f + fSz.x);
-    float bW = pad + nSz.x + pad + fpsSection;
-    float bH = nSz.y + pad;
-    const float bX = 16.f, bY = 16.f;
-
-    bool in = (io.MousePos.x >= bX && io.MousePos.x <= bX + bW &&
-               io.MousePos.y >= bY && io.MousePos.y <= bY + bH);
-    if (in && io.MouseClicked[0]) { menu_open = !menu_open; wm_ring = 0.f; }
-
-    if (wm_ring < 1.f) {
-        float r = EaseOut3(wm_ring), ex = r * 22.f;
-        fg->AddRectFilled({bX - ex, bY - ex}, {bX + bW + ex, bY + bH + ex},
-            C::UA(acc, 0.18f * (1.f - r)), bR + ex);
+    // ---- Некликабельная пилюля с названием чита (слева сверху) ---------
+    // Тапы по ней не обрабатываются вовсе, так что она «прозрачна» для
+    // кликов и ничему не мешает.
+    {
+        const float fs = 38.f, padX = 24.f, padY = 14.f;
+        const char* name = XS("t.me/benzware");
+        auto nSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, name);
+        float bW = padX * 2.f + nSz.x;
+        float bH = padY * 2.f + nSz.y;
+        const float bX = 12.f, bY = 12.f;
+        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Card(), 0.8f), bH * 0.5f);
+        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, C::UA(acc, 0.5f), bH * 0.5f, 0, 1.5f);
+        fg->AddText(fn, fs, {bX + padX, bY + padY}, C::UA(C::Txt(), 0.95f), name);
     }
 
-    fg->AddRectFilled({bX + 2.f, bY + 3.f}, {bX + bW + 2.f, bY + bH + 3.f},
-        IM_COL32(0, 0, 0, 20), bR);
-    fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, bgCol, bR);
-    fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, brdCol, bR, 0, 1.5f);
+    // ---- Пилюля-счётчик противников (по центру верха экрана) -----------
+    // Показывает, сколько игроков видит ESP; тап по ней открывает/закрывает
+    // меню.
+    {
+        int enemies = 0;
+        if (g_esp_attached) {
+            // Обновляем снимок кадра (кэшируется на кадр) и берём число
+            // игроков вокруг на все 360° — не только тех, кто попал на экран.
+            FrameBoxes(scrW, scrH);
+            enemies = esp_nearby_player_count();
+        }
 
-    float textY = bY + (bH - nSz.y) * 0.5f;
-    fg->AddText(fn, fs, {bX + pad, textY}, nmCol, name);
+        const float fs = 40.f, pad = 22.f, bR = 46.f;
+        const char* lbl = XS("Противники");
+        char cntBuf[16]; snprintf(cntBuf, sizeof(cntBuf), "%d", enemies);
+        auto lSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, lbl);
+        auto cSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, cntBuf);
 
-    if (fpsA > 0.01f) {
-        float sx = bX + pad + nSz.x + pad * 0.7f;
-        fg->AddLine({sx, bY + bH * 0.18f}, {sx, bY + bH * 0.82f}, C::UA(C::Acc(), fpsA * 0.35f), 1.5f);
-        fg->AddText(fn, fs, {sx + pad * 0.7f, textY}, C::UA(C::Acc(), fpsA), fpsBuf);
+        // Точка-индикатор + подпись + число.
+        const float dotR = 7.f;
+        float bW = pad + dotR * 2.f + 12.f + lSz.x + 14.f + cSz.x + pad;
+        float bH = cSz.y + pad;
+        float bX = (scrW - bW) * 0.5f;
+        const float bY = 12.f;
+
+        bool in = (io.MousePos.x >= bX && io.MousePos.x <= bX + bW &&
+                   io.MousePos.y >= bY && io.MousePos.y <= bY + bH);
+        if (in && io.MouseClicked[0]) { menu_open = !menu_open; wm_ring = 0.f; }
+
+        if (wm_ring < 1.f) {
+            float r = EaseOut3(wm_ring), ex = r * 22.f;
+            fg->AddRectFilled({bX - ex, bY - ex}, {bX + bW + ex, bY + bH + ex},
+                C::UA(acc, 0.18f * (1.f - r)), bR + ex);
+        }
+
+        fg->AddRectFilled({bX + 2.f, bY + 3.f}, {bX + bW + 2.f, bY + bH + 3.f},
+            IM_COL32(0, 0, 0, 20), bR);
+        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, bgCol, bR);
+        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, brdCol, bR, 0, 1.5f);
+
+        // Зелёная точка, когда противники рядом есть; серая — когда никого.
+        ImVec4 dotCol = enemies > 0 ? ImVec4{0.24f, 0.78f, 0.42f, 1.f} : C::Dim();
+        float dcy = bY + bH * 0.5f;
+        fg->AddCircleFilled({bX + pad + dotR, dcy}, dotR, C::U(dotCol), 24);
+        if (enemies > 0)
+            fg->AddCircle({bX + pad + dotR, dcy}, dotR + 3.f,
+                C::UA(dotCol, 0.5f + 0.3f * sinf((float)ImGui::GetTime() * 5.f)), 24, 1.8f);
+
+        float tY = bY + (bH - cSz.y) * 0.5f;
+        float lX = bX + pad + dotR * 2.f + 12.f;
+        fg->AddText(fn, fs, {lX, tY}, C::UA(C::Txt(), 0.85f), lbl);
+        fg->AddText(fn, fs, {lX + lSz.x + 14.f, tY}, C::U(acc), cntBuf);
     }
 }
 
@@ -1455,9 +1888,9 @@ bool CollapsibleHeader(const char* id, const char* lbl, int secId = 0) {
     {
         float t = EaseInOut(g_themeT);
         ImU32 ringCol = IM_COL32(
-            int(Lerpf(0,   255, t)),
-            int(Lerpf(50,  255, t)),
-            int(Lerpf(170, 255, t)),
+            int(Lerpf(85,  255, t)),
+            int(Lerpf(70,  255, t)),
+            int(Lerpf(200, 255, t)),
             int(Lerpf(130,  60, t))
         );
         dl->AddCircle({cx2, cy2}, cBtnR + 2.5f, ringCol, 48, 1.5f);
@@ -1798,16 +2231,126 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
     };
 
     if (secId == 0) {
-        FgSHdr(XS("Кость прицела"));
+        FgSHdr(XS("Куда целиться"));
         FgCardBg(rH * 3);
         FgRadioRow(0, &g_state.aim_bone, g_state.ra_aim_head,   &g_state.a_aim_head,   XS("Голова"), false);
-        FgRadioRow(1, &g_state.aim_bone, g_state.ra_aim_chest,  &g_state.a_aim_chest,  XS("Тело"), false);
-        FgRadioRow(2, &g_state.aim_bone, g_state.ra_aim_pelvis, &g_state.a_aim_pelvis, XS("Ноги"), true);
+        FgRadioRow(1, &g_state.aim_bone, g_state.ra_aim_chest,  &g_state.a_aim_chest,  XS("Шея"), false);
+        FgRadioRow(2, &g_state.aim_bone, g_state.ra_aim_pelvis, &g_state.a_aim_pelvis, XS("Тело"), true);
+
+        FgSHdr(XS("Выбор цели"));
+        FgCardBg(rH * 3);
+        FgRadioRow(0, &g_state.aim_priority, g_state.ra_aim_pr0, &g_state.a_aim_pr0, XS("Умный"), false);
+        FgRadioRow(1, &g_state.aim_priority, g_state.ra_aim_pr1, &g_state.a_aim_pr1, XS("Ближе к прицелу"), false);
+        FgRadioRow(2, &g_state.aim_priority, g_state.ra_aim_pr2, &g_state.a_aim_pr2, XS("Ближе ко мне"), true);
 
     } else if (secId == 1) {
-        FgSHdr(XS("Внешний вид"));
+        FgSHdr(XS("Линии и боксы"));
         FgCardBg(Layout::SliderH);
         FgSliderRow(XS("Толщина"),   &g_state.esp_thick, 0.5f, 5.f,   "%.1f",     true, g_state.sl_esp_thick);
+
+    } else if (secId == 5) {
+        // Автофарм: всё управление ботом в одном окне.
+        // (secId 4 занят палитрой цветов — там скролл выключен.)
+        extern int g_farmCalib; // определён рядом с UpdateFarm
+
+        FgSHdr(XS("Автофарм"));
+        FgCardBg(rH * 1);
+        FgToggleRow(XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, true);
+
+        FgSHdr(XS("Что добывать"));
+        FgCardBg(rH * 4);
+        FgToggleRow(XS("Дерево"), &g_state.farm_wood,   g_state.a_farm_wood,   false);
+        FgToggleRow(XS("Камень"), &g_state.farm_stone,  g_state.a_farm_stone,  false);
+        FgToggleRow(XS("Металл"), &g_state.farm_metal,  g_state.a_farm_metal,  false);
+        FgToggleRow(XS("Сера"),   &g_state.farm_sulfur, g_state.a_farm_sulfur, true);
+
+        FgSHdr(XS("Дальность"));
+        FgCardBg(Layout::SliderH);
+        FgSliderRow(XS("Искать до"), &g_state.farm_range, 10.f, 300.f,
+                    XS("%.0f м"), true, g_state.sl_farm_range);
+
+        // Зоны бота: куда жать джойстик движения и кнопку огня.
+        FgSHdr(XS("Зоны бота"));
+        {
+            struct ZoneRow {
+                const char* lbl;
+                int   calib;         // g_farmCalib для этой зоны
+                float zx, zy;        // сохранённые доли экрана (-1 = нет)
+            };
+            const ZoneRow zrows[2] = {
+                {XS("Зона джойстика"), 1, g_state.farm_joy_x,  g_state.farm_joy_y},
+                {XS("Зона огня"),      2, g_state.farm_fire_x, g_state.farm_fire_y},
+            };
+
+            FgCardBg(rH * 2);
+            for (int zi = 0; zi < 2; ++zi) {
+                const ZoneRow& z = zrows[zi];
+
+                if (!blocked && !g_scrollPop.dragging && mouseReleased
+                    && mousePos.x >= cX + inset && mousePos.x <= cX + cW - inset
+                    && mousePos.y >= curY && mousePos.y <= curY + rH
+                    && clickedPos.x >= cX + inset && clickedPos.x <= cX + cW - inset
+                    && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
+                    g_farmCalib = z.calib;
+                    PopoverClose();
+                    PlaySound(SND_CLICK);
+                }
+
+                float cy2 = curY + rH * 0.5f;
+                fg->AddText(fn, fs * 1.15f,
+                    {cX + inset + padX, cy2 - fs * 1.15f * 0.5f},
+                    C::UA(C::Txt(), alpha), z.lbl);
+
+                char st[32];
+                bool set = z.zx >= 0.f;
+                if (set) snprintf(st, sizeof(st), "%d%% %d%%", (int)(z.zx * 100.f), (int)(z.zy * 100.f));
+                else     snprintf(st, sizeof(st), "%s", XS("Задать"));
+                auto stsz = fn->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0, st);
+                float stx = cX + cW - inset - padX - stsz.x;
+                fg->AddText(fn, fs * 1.0f, {stx, cy2 - stsz.y * 0.5f},
+                    set ? C::UA(C::Acc(), alpha) : C::UA(C::Dim(), alpha), st);
+                if (set)
+                    fg->AddCircleFilled({stx - 16.f, cy2}, 5.f, C::UA(C::Acc(), alpha), 16);
+
+                if (zi == 0 && g_state.ui_show_sep)
+                    fg->AddLine({cX + inset + padX, curY + rH - 0.5f},
+                                {cX + cW - inset - padX, curY + rH - 0.5f},
+                                C::UA(C::Sep(), alpha), 0.8f);
+                curY += rH;
+            }
+
+            // Сброс зон к дефолту (если наставил мимо).
+            if (g_state.farm_joy_x >= 0.f || g_state.farm_fire_x >= 0.f) {
+                curY += 8.f;
+                FgCardBg(rH * 1);
+                if (!blocked && !g_scrollPop.dragging && mouseReleased
+                    && mousePos.x >= cX + inset && mousePos.x <= cX + cW - inset
+                    && mousePos.y >= curY && mousePos.y <= curY + rH
+                    && clickedPos.x >= cX + inset && clickedPos.x <= cX + cW - inset
+                    && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
+                    g_state.farm_joy_x = g_state.farm_joy_y = -1.f;
+                    g_state.farm_fire_x = g_state.farm_fire_y = -1.f;
+                    ShowToast(XS("Зоны сброшены"));
+                    PlaySound(SND_CLICK);
+                }
+                const char* rt = XS("Сбросить зоны");
+                auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
+                fg->AddText(fn, fs * 1.05f,
+                    {cX + (cW - rsz.x) * 0.5f, curY + (rH - rsz.y) * 0.5f},
+                    C::UA(C::Dim(), alpha), rt);
+                curY += rH;
+            }
+        }
+
+        // Подсказка, как этим пользоваться.
+        {
+            curY += 14.f;
+            const char* h1 = XS("Возьми в руки инструмент и включи автофарм.");
+            const char* h2 = XS("Бот сам идёт к ближайшему ресурсу и бьёт по крестикам.");
+            fg->AddText(fn, fs * 0.92f, {cX + inset + 4.f, curY}, C::UA(C::Dim(), alpha), h1);
+            fg->AddText(fn, fs * 0.92f, {cX + inset + 4.f, curY + fs}, C::UA(C::Dim(), alpha), h2);
+            curY += fs * 2.f + 6.f;
+        }
 
     } else if (secId == 2) {
         FgSHdr(nullptr, 12.f);
@@ -1963,7 +2506,7 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
     bool mIn = inPop && clickInPop;
 
     static float s_popMaxScroll = 0.f;
-    bool colorPop = (g_pop.sectionId == 4);
+    bool colorPop = (g_pop.sectionId == 4) && g_colP != nullptr;
     if (!colorPop) ScrollTick(g_scrollPop, mIn, g_pop.closing, s_popMaxScroll, dt);
     else { g_scrollPop.off = 0.f; g_scrollPop.vel = 0.f; s_popMaxScroll = 0.f; }
 
@@ -2085,12 +2628,15 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
         fg->PushClipRect({sX, contentY}, {sX + sW, sY + sH - 4.f}, true);
 
         float drawY = contentY - g_scrollPop.off;
+        // mIn: и нажатие, и отпускание внутри области контента (ниже шапки).
+        // Без этого строки, уехавшие при прокрутке под шапку, ловили тапы
+        // «сквозь» крестик закрытия — рисование клипается, хит-тест нет.
         float endY  = DrawPopoverContentFG(fg, fn, fs, g_pop.sectionId, dt,
                                             sX, sW, drawY, easeT,
                                             g_pop.closing,
                                             io.MousePos, io.MouseClickedPos[0],
-                                            io.MouseReleased[0] && !g_scrollPop.dragging,
-                                            io.MouseDown[0]);
+                                            io.MouseReleased[0] && !g_scrollPop.dragging && mIn,
+                                            io.MouseDown[0] && mIn);
 
         float contentTotalH = endY - drawY;
         s_popMaxScroll = ImMax(0.f, contentTotalH - (areaH - 4.f));
@@ -2126,149 +2672,42 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
 float TabContent(int tab, float dt, float cW) {
     float sY = ImGui::GetCursorPosY();
 
-    if (tab == 0) {
-        auto* dl  = ImGui::GetWindowDrawList();
-        auto* fn  = ImGui::GetFont();
-        float avW = ImGui::GetContentRegionAvail().x;
-        const float inset = Layout::Inset, padX = Layout::PadX;
-        const float fs = ImGui::GetFontSize();
-
-        SHdr(XS("\xd0\xa0\xd0\xb0\xd0\xb7\xd1\x80\xd0\xb0\xd0\xb1\xd0\xbe\xd1\x82\xd1\x87\xd0\xb8\xd0\xba"));
-        {
-            const float avatarR = 44.f;
-            const float cardH   = 152.f;
-
-            auto pos  = ImGui::GetCursorScreenPos();
-            float cx0 = pos.x + inset;
-            float cx1 = pos.x + avW - inset;
-            float cardW = cx1 - cx0;
-
-            dl->AddRectFilled({cx0, pos.y}, {cx1, pos.y + cardH}, C::U(C::Card()), R::Card);
-            if (g_state.ui_show_sep)
-                dl->AddRect({cx0, pos.y}, {cx1, pos.y + cardH}, C::U(C::Sep()), R::Card, 0, 1.2f);
-
-            float avCX = cx0 + padX + avatarR + 2.f;
-            float avCY = pos.y + cardH * 0.5f;
-
-            dl->AddCircleFilled({avCX, avCY}, avatarR + 6.f, C::UA(C::Acc(), 0.12f), 64);
-            dl->AddCircleFilled({avCX, avCY}, avatarR + 2.5f, C::U(C::Card()), 64);
-
-            {
-                const int segs = 60;
-                ImVec4 ac = C::Acc();
-                ImVec4 ac2 = {Lerpf(ac.x,0.3f,0.55f), Lerpf(ac.y,0.05f,0.55f), Lerpf(ac.z,0.9f,0.42f), 1.f};
-                for (int si = 0; si < segs; si++) {
-                    float a0 = (float)si/segs*IM_PI*2.f, a1 = (float)(si+1)/segs*IM_PI*2.f;
-                    float tt = (float)si/segs;
-                    ImVec4 ca = {Lerpf(ac2.x,ac.x,tt), Lerpf(ac2.y,ac.y,tt), Lerpf(ac2.z,ac.z,tt), 1.f};
-                    dl->AddTriangleFilled({avCX,avCY},
-                        {avCX+avatarR*cosf(a0),avCY+avatarR*sinf(a0)},
-                        {avCX+avatarR*cosf(a1),avCY+avatarR*sinf(a1)},
-                        IM_COL32(int(ca.x*255),int(ca.y*255),int(ca.z*255),255));
-                }
-                float lfs = avatarR * 1.05f;
-                auto lsz = fn->CalcTextSizeA(lfs, FLT_MAX, 0, XS("\xd0\xa1"));
-                dl->AddText(fn, lfs, {avCX-lsz.x*0.5f, avCY-lsz.y*0.5f}, IM_COL32(255,255,255,245), XS("\xd0\xa1"));
-            }
-
-            dl->AddCircle({avCX,avCY}, avatarR+2.5f, C::UA(C::Acc(),0.9f), 64, 2.5f);
-
-            {
-                float dx = avCX+avatarR*0.72f, dy = avCY+avatarR*0.72f;
-                dl->AddCircleFilled({dx,dy}, 9.f, C::U(C::Card()), 24);
-                dl->AddCircleFilled({dx,dy}, 6.5f, IM_COL32(52,199,89,255), 24);
-            }
-
-            float nameFS = fs * 1.75f;
-            float tagFS  = fs * 1.1f;
-            auto nameSz = fn->CalcTextSizeA(nameFS, FLT_MAX, 0, XS("\xd0\xa1\xd0\xb0\xd0\xbd\xd1\x8f"));
-            float textX = avCX + avatarR + padX + 8.f;
-            float nameY = avCY - nameSz.y - 3.f;
-            float tagY  = avCY + 3.f;
-            dl->AddText(fn, nameFS, {textX, nameY}, C::U(C::Txt()), XS("\xd0\xa1\xd0\xb0\xd0\xbd\xd1\x8f"));
-            dl->AddText(fn, tagFS,  {textX, tagY},  C::U(C::Dim()), XS("@xvcey"));
-
-            const float btnH = 42.f;
-            const float btnW = 132.f;
-            float btnX = cx1 - btnW - padX;
-            float btnY = pos.y + cardH - btnH - 14.f;
-
-            dl->AddRectFilled({btnX,btnY},{btnX+btnW,btnY+btnH}, C::U(C::Acc()), btnH*0.5f);
-
-            auto btsz = fn->CalcTextSizeA(fs*1.05f, FLT_MAX, 0, XS("\xd0\x9d\xd0\xb0\xd0\xbf\xd0\xb8\xd1\x81\xd0\xb0\xd1\x82\xd1\x8c"));
-            dl->AddText(fn, fs*1.05f,
-                {btnX+btnW*0.5f-btsz.x*0.5f, btnY+(btnH-btsz.y)*0.5f},
-                IM_COL32(255,255,255,255),
-                XS("\xd0\x9d\xd0\xb0\xd0\xbf\xd0\xb8\xd1\x81\xd0\xb0\xd1\x82\xd1\x8c"));
-
-            ImGui::SetCursorScreenPos({cx0, pos.y});
-            ImGui::InvisibleButton("##devcard", {cardW, cardH});
-            bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-            if (!popBlk && !IsScrollDragging() && !g_input.touchConsumed && ImGui::GetIO().MouseReleased[0]) {
-                auto mp = ImGui::GetIO().MousePos, cp = ImGui::GetIO().MouseClickedPos[0];
-                if (mp.x>=btnX&&mp.x<=btnX+btnW&&mp.y>=btnY&&mp.y<=btnY+btnH
-                 &&cp.x>=btnX&&cp.x<=btnX+btnW&&cp.y>=btnY&&cp.y<=btnY+btnH) {
-                    system(XS("am start -a android.intent.action.VIEW -d \"https://t.me/xvcey\""));
-                    PlaySound(SND_CLICK);
-                }
-            }
-            ImGui::SetCursorScreenPos({pos.x, pos.y + cardH});
-            ImGui::Dummy({avW, 0.f});
-        }
-
-    } else if (tab == 1) {
+    if (tab == 1) {
 
         cfg::aim::enabled    = g_state.aim_touch;
         cfg::aim::vis_check  = g_state.aim_pos;
         cfg::aim::draw_fov   = g_state.aim_special;
+        cfg::aim::scope_only = g_state.aim_scope_only;
         cfg::aim::fov        = g_state.gun_fov;
         cfg::aim::smoothness = g_state.gun_str;
         cfg::aim::bone       = g_state.aim_bone;
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
 
-        SHdr(XS("Аимбот"));
+        SHdr(XS("Аим"));
         CardBg(Layout::RowH * 3);
-        ToggleRow("##ta1", XS("Включить аимбот"),    &g_state.aim_touch,   g_state.a_aim_touch, false, true);
-        ToggleRow("##ta2", XS("Проверка видимости"),  &g_state.aim_pos,     g_state.a_aim_pos,   false);
-        ToggleRow("##ta3", XS("Показывать FOV круг"), &g_state.aim_special, g_state.a_aim_spec,  true);
+        ToggleRow("##ta1", XS("Аим"),          &g_state.aim_touch,   g_state.a_aim_touch, false, true);
+        ToggleRow("##ta6", XS("Только в прицеле"), &g_state.aim_scope_only, g_state.a_aim_scope, false);
+        ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true);
 
-        SHdr(XS("FOV аимбота"));
-        CardBg(Layout::SliderH);
-        SliderRow("##afov", XS("Радиус FOV"), &g_state.gun_fov, 5.f, 360.f, XS("%.0f°"), true, true, g_state.sl_gun_fov, dt);
-
-        SHdr(XS("Плавность"));
-        CardBg(Layout::SliderH);
-        SliderRow("##asmt", XS("Плавность"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, true, g_state.sl_gun_str, dt);
-
-        ImGui::Dummy({1.f, 8.f});
-        CollapsibleHeader("##cah1", XS("Дополнительные настройки"), 0);
-
-        SHdr(XS("Триггер бот"));
-        CardBg(Layout::RowH * 1);
-        { static float _a_tbot = 0.f; Tick(_a_tbot, cfg::aim::trigger_bot, dt);
-          ToggleRow("##ta5", XS("Триггер бот"), &cfg::aim::trigger_bot, _a_tbot, true); }
-
-        SHdr(XS("Задержка триггера"));
-        CardBg(Layout::SliderH);
-        SliderRow("##atrig", XS("Задержка"), &g_state.gun_trigger_delay, 0.0f, 1.0f, "%.1f", true, true, g_state.sl_gun_trig, dt);
-
-        ImGui::Dummy({1.f, 16.f});
-
-        SHdr(XS("Нет отдачи"));
-        CardBg(Layout::RowH * 1);
-        { static float _a_nr = 0.f; Tick(_a_nr, g_noRecoilEnabled, dt);
-          ToggleRow("##nr1", XS("Нет отдачи"), &g_noRecoilEnabled, _a_nr, true); }
+        SHdr(XS("Наводка"));
+        CardBg(Layout::SliderH * 2);
+        SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
+        SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, false, g_state.sl_gun_str, dt);
 
         ImGui::Dummy({1.f, 12.f});
 
 } else if (tab == 2) {
         cfg::esp::box          = g_state.esp_box;
         cfg::esp::name_esp     = g_state.esp_name;
-        cfg::esp::health       = g_state.esp_hp;
         cfg::esp::distance     = g_state.esp_wall;
         cfg::esp::weapon       = g_state.esp_weapon;
-        cfg::esp::weapon_icon  = g_state.esp_weapon_icon;
         cfg::esp::tracer       = g_state.esp_tracer;
+        cfg::esp::skeleton     = g_state.esp_skeleton;
+        cfg::esp::ore          = g_state.esp_ore;
+        cfg::esp::animal       = g_state.esp_animal;
+        cfg::esp::loot         = g_state.esp_loot;
+        cfg::esp::team         = g_state.esp_team;
+        cfg::esp::pickup       = g_state.esp_pickup;
 
 
 
@@ -2301,7 +2740,7 @@ float TabContent(int tab, float dt, float cW) {
                 float dx = io2.MousePos.x - cx0, dy = io2.MousePos.y - cy0;
                 float moved = dx*dx + dy*dy;
                 bool onDot = (cx0 - dotX)*(cx0 - dotX) + (cy0 - cy)*(cy0 - cy) <= (dotR + 18.f)*(dotR + 18.f);
-                if (io2.MouseReleased[0] && onDot && moved < 28.f*28.f && s_colorHoldId != id) {
+                if (io2.MouseReleased[0] && onDot && PtInClip({dotX, cy}) && moved < 28.f*28.f && s_colorHoldId != id) {
                     s_colorHoldId = id;
                     PopoverOpenColor(lbl, col);
                     PlaySound(SND_CLICK);
@@ -2326,32 +2765,55 @@ float TabContent(int tab, float dt, float cW) {
                 dl->AddLine({cX+padX, pos.y+rowH-0.5f},{cX+cW2-padX, pos.y+rowH-0.5f}, C::UA(C::Sep(),0.35f), 0.8f);
         };
 
-        SHdr(XS("ESP"));
+        SHdr(XS("Игроки"));
         {
             struct ERow { const char* id; const char* lbl; bool* v; float* a; ImVec4* col; };
             ERow rows[] = {
-                {"##vb",  XS("Бокс"),           &g_state.esp_box,          &g_state.a_esp_box,          &cfg::esp::box_col},
-                {"##v3",  XS("3D рамка"),       &g_state.esp_chams,        &g_state.a_esp_chams,        &cfg::esp::box_col_invis},
-                {"##vn",  XS("Имена"),          &g_state.esp_name,         &g_state.a_esp_name,         &cfg::esp::name_col},
-                {"##vh",  XS("HP бар"),         &g_state.esp_hp,           &g_state.a_esp_hp,           &cfg::esp::health_col},
-                {"##vd",  XS("Дистанция"),      &g_state.esp_wall,         &g_state.a_esp_wall,         &cfg::esp::distance_col},
-                {"##vw",  XS("Оружие"),         &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
-                {"##vi",  XS("Иконка оружия"),  &g_state.esp_weapon_icon,  &g_state.a_esp_weapon_icon,  &cfg::esp::weapon_icon_col},
-                {"##vtr", XS("Трейсеры"),       &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
+                {"##vb",  XS("Боксы"),      &g_state.esp_box,          &g_state.a_esp_box,          &cfg::esp::box_col},
+                {"##v3",  XS("3D боксы"),   &g_state.esp_chams,        &g_state.a_esp_chams,        &cfg::esp::box_col_invis},
+                {"##vn",  XS("Ники"),       &g_state.esp_name,         &g_state.a_esp_name,         &cfg::esp::name_col},
+                {"##vd",  XS("Дистанция"),  &g_state.esp_wall,         &g_state.a_esp_wall,         &cfg::esp::distance_col},
+                {"##vw",  XS("Оружие"),     &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
+                {"##vtr", XS("Линии"),      &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
+                {"##vsk", XS("Скелеты"),    &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
+                {"##vtm", XS("Свои"),       &g_state.esp_team,         &g_state.a_esp_team,         &cfg::esp::ally_col},
             };
-            constexpr int N = 8;
-            CardBg(rowH * N);
-            for (int i = 0; i < N; i++) {
-                EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == N-1);
-            }
+            constexpr int NP = 8;
+            CardBg(rowH * NP);
+            for (int i = 0; i < NP; i++)
+                EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NP-1);
         }
 
+        SHdr(XS("Мир"));
+        {
+            struct ERow { const char* id; const char* lbl; bool* v; float* a; ImVec4* col; };
+            ERow rows[] = {
+                // No colour dot: every resource paints itself (stone grey,
+                // metal orange, sulfur yellow).
+                {"##vor", XS("Руда"),      &g_state.esp_ore,          &g_state.a_esp_ore,          nullptr},
+                {"##van", XS("Животные"), &g_state.esp_animal,       &g_state.a_esp_animal,       &cfg::esp::animal_col},
+                {"##vlt", XS("Ящики"),    &g_state.esp_loot,         &g_state.a_esp_loot,         &cfg::esp::loot_col},
+                {"##vpk", XS("Предметы"), &g_state.esp_pickup,       &g_state.a_esp_pickup,       &cfg::esp::pickup_col},
+            };
+            constexpr int NW = 4;
+            CardBg(rowH * NW);
+            for (int i = 0; i < NW; i++)
+                EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NW-1);
+        }
+
+        SHdr(XS("Дальность"));
+        CardBg(Layout::SliderH);
+        SliderRow("##vmd", XS("Показывать до"), &g_state.marker_dist,
+                  25.f, 300.f, XS("%.0f м"), true, true, g_state.sl_marker_dist, dt);
+
         ImGui::Dummy({1.f, 8.f});
-        CollapsibleHeader("##veh1", XS("Дополнительные настройки"), 1);
+        CollapsibleHeader("##veh1", XS("Ещё настройки"), 1);
 
         ImGui::Dummy({1.f, 12.f});
 
-    } else if (tab == 3) {
+    } else if (tab == 4) {
+        // Конфиги (saved profiles). Kept at index 4 so the Мемори tab sits
+        // directly above it in the tab bar.
 
         auto* dl  = ImGui::GetWindowDrawList();
         auto* fn  = ImGui::GetFont();
@@ -2359,7 +2821,7 @@ float TabContent(int tab, float dt, float cW) {
         const float inset = Layout::Inset, padX = Layout::PadX;
         const float fs = ImGui::GetFontSize();
 
-        SHdr(XS("Управление"));
+        SHdr(XS("Новый конфиг"));
         {
             const float btnH = 72.f;
             auto pos = ImGui::GetCursorScreenPos();
@@ -2389,7 +2851,7 @@ float TabContent(int tab, float dt, float cW) {
             dl->AddText(fn, fs * 1.25f, {icX + 32.f, textY}, C::U(C::Acc()), createTxt);
         }
 
-        SHdr(XS("Конфиги"));
+        SHdr(XS("Сохранённые"));
 
         if (g_configCount == 0) {
             const float emptyH = 120.f;
@@ -2456,15 +2918,15 @@ float TabContent(int tab, float dt, float cW) {
                 float icY  = rowCY - icSz * 0.5f;
                 float icCX = icX + icSz * 0.5f;
 
-                if (g_tabIcons[3]) {
-                    dl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[3],
+                if (g_tabIcons[4]) {
+                    dl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[4],
                         {icX, icY}, {icX + icSz, icY + icSz},
                         {0,0}, {1,1}, IM_COL32(255,255,255,255), 12.f);
                 } else {
                     float icR = 14.f;
                     ImU32 icBg = g_darkTheme
-                        ? IM_COL32(55, 120, 220, 255)
-                        : IM_COL32(10, 122, 255, 255);
+                        ? IM_COL32(120, 105, 240, 255)
+                        : IM_COL32(108, 92, 231, 255);
                     dl->AddRectFilled({icX, icY}, {icX + icSz, icY + icSz}, icBg, icR);
                     float lh = icSz * 0.20f;
                     float lx = icCX - lh * 0.45f, ly = rowCY + lh * 0.42f;
@@ -2523,9 +2985,9 @@ float TabContent(int tab, float dt, float cW) {
                 };
 
                 DrawBtn(b1X, bw3,
-                    IM_COL32(235, 242, 255, 255),
-                    IM_COL32(30,  80,  180, 255),
-                    g_darkTheme ? IM_COL32(120, 175, 255, 255) : IM_COL32(10, 100, 220, 255),
+                    IM_COL32(238, 235, 255, 255),
+                    IM_COL32(58,  48,  140, 255),
+                    g_darkTheme ? IM_COL32(170, 158, 255, 255) : IM_COL32(96, 80, 220, 255),
                     XS("Загрузить"));
 
                 DrawBtn(b2X, bw3,
@@ -2542,7 +3004,8 @@ float TabContent(int tab, float dt, float cW) {
 
                 ImGui::InvisibleButton(("##cfg_" + std::to_string(ci)).c_str(), {avW, cardH});
 
-                if (!popBlocking2 && !IsScrollDragging() && !g_input.touchConsumed && io2.MouseReleased[0]) {
+                if (!popBlocking2 && !IsScrollDragging() && !g_input.touchConsumed && io2.MouseReleased[0]
+                    && PtInClip(io2.MouseClickedPos[0])) {
                     auto mp  = io2.MousePos;
                     auto cp2 = io2.MouseClickedPos[0];
                     if (mp.x  >= b1X && mp.x  <= b1X+bw3 && mp.y  >= bY && mp.y  <= bY+btnH2
@@ -2563,13 +3026,80 @@ float TabContent(int tab, float dt, float cW) {
             }
         }
 
-    } else {
+    } else if (tab == 5) {
+        // Опции (interface + system) — now the bottom-most tab.
+        // Счётчик FPS и «Рамки карточек» убраны: рамки включены принудительно.
         SHdr(XS("Интерфейс"));
-        CardBg(Layout::RowH * 3);
-        ToggleRow("##uf2", XS("Показать фпс"),  &g_state.ui_fps,       g_state.a_ui_fps,  false, true);
-        if (ToggleRow("##ud2", XS("Тёмная тема"), &g_state.ui_dark_mode, g_state.a_ui_dark, false))
+        CardBg(Layout::RowH * 1);
+        if (ToggleRow("##ud2", XS("Тёмная тема"), &g_state.ui_dark_mode, g_state.a_ui_dark, true, true))
             g_darkTheme = g_state.ui_dark_mode;
-        ToggleRow("##usep", XS("Разделители строк"), &g_state.ui_show_sep, g_state.a_ui_sep, true);
+
+        // ---- Положение панели вкладок: слева или снизу ------------------
+        // Перенесено сюда из удалённой вкладки «Меню».
+        SHdr(XS("Панель вкладок"));
+        {
+            auto* dl  = ImGui::GetWindowDrawList();
+            auto* fn  = ImGui::GetFont();
+            float avW = ImGui::GetContentRegionAvail().x;
+            const float inset = Layout::Inset;
+            const float fs = ImGui::GetFontSize();
+
+            const float cardH = 120.f;
+            const float gap   = 10.f;
+            auto  pos   = ImGui::GetCursorScreenPos();
+            float x0    = pos.x + inset;
+            float cardW = (avW - inset * 2.f - gap) * 0.5f;
+            bool  popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+
+            struct POpt { const char* lbl; bool left; };
+            const POpt opts[2] = { { XS("Слева"), true }, { XS("Снизу"), false } };
+
+            for (int oi = 0; oi < 2; oi++) {
+                float ox0 = x0 + oi * (cardW + gap);
+                float ox1 = ox0 + cardW;
+                bool  sel = (g_state.ui_panel_left == opts[oi].left);
+
+                dl->AddRectFilled({ox0, pos.y}, {ox1, pos.y + cardH}, C::U(C::Card()), R::Card);
+                if (sel) {
+                    dl->AddRectFilled({ox0, pos.y}, {ox1, pos.y + cardH},
+                        C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), R::Card);
+                    dl->AddRect({ox0, pos.y}, {ox1, pos.y + cardH}, C::UA(C::Acc(), 0.8f), R::Card, 0, 2.f);
+                } else if (g_state.ui_show_sep) {
+                    dl->AddRect({ox0, pos.y}, {ox1, pos.y + cardH}, C::U(C::Sep()), R::Card, 0, 1.2f);
+                }
+
+                // Мини-схема окна: прямоугольник с панелью слева или снизу.
+                float mw = 74.f, mh = 52.f;
+                float mx = ox0 + (cardW - mw) * 0.5f;
+                float my = pos.y + 14.f;
+                ImU32 frameCol = C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.95f : 0.6f);
+                dl->AddRect({mx, my}, {mx + mw, my + mh}, frameCol, 6.f, 0, 2.f);
+                if (opts[oi].left)
+                    dl->AddRectFilled({mx + 3.f, my + 3.f}, {mx + 3.f + 16.f, my + mh - 3.f},
+                                      C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.85f : 0.4f), 4.f);
+                else
+                    dl->AddRectFilled({mx + 3.f, my + mh - 3.f - 12.f}, {mx + mw - 3.f, my + mh - 3.f},
+                                      C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.85f : 0.4f), 4.f);
+
+                auto lsz = fn->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0, opts[oi].lbl);
+                dl->AddText(fn, fs * 1.0f,
+                    {ox0 + (cardW - lsz.x) * 0.5f, pos.y + cardH - 16.f - lsz.y},
+                    C::U(sel ? C::Acc() : C::Txt()), opts[oi].lbl);
+
+                char oid[16]; snprintf(oid, sizeof(oid), "##pstyle%d", oi);
+                ImGui::SetCursorScreenPos({ox0, pos.y});
+                ImGui::InvisibleButton(oid, {cardW, cardH});
+                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed
+                    && g_state.ui_panel_left != opts[oi].left) {
+                    g_state.ui_panel_left = opts[oi].left;
+                    pill_y = -1.f; pill_vel = 0.f;   // «пилюля» меняет ось — сброс пружины
+                    ShowToast(opts[oi].left ? XS("Панель слева") : XS("Панель снизу"));
+                    PlaySound(SND_CLICK);
+                }
+            }
+            ImGui::SetCursorScreenPos({pos.x, pos.y + cardH});
+            ImGui::Dummy({avW, 0.f});
+        }
 
         SHdr(XS("Система"));
         {
@@ -2582,14 +3112,34 @@ float TabContent(int tab, float dt, float cW) {
                 dl->AddRect({pos.x + inset, pos.y}, {pos.x + avW - inset, pos.y + rowH}, C::U(C::Sep()), R::Card, 0, 1.2f);
             ImGui::InvisibleButton("##exit", {avW, rowH});
             if (WasTappedHere() && !IsScrollDragging())
-                PopoverOpen(XS("Выйти из приложения?"), 2);
-            const char* exitTxt = XS("Выйти из приложения");
+                PopoverOpen(XS("Выйти?"), 2);
+            const char* exitTxt = XS("Выйти");
             float exitFS = ImGui::GetFontSize() * 1.15f;
             auto  tsz = ImGui::GetFont()->CalcTextSizeA(exitFS, FLT_MAX, 0, exitTxt);
             float tx  = pos.x + (avW - tsz.x) * 0.5f;
             float ty  = pos.y + (rowH - exitFS) * 0.5f;
             dl->AddText(ImGui::GetFont(), exitFS, {tx, ty}, C::U(C::Red()), exitTxt);
         }
+    } else if (tab == 3) {
+        // Разное: каждая крупная функция — своя карточка-«вкладка»,
+        // открывающая отдельное окно (как «Ещё настройки» в ESP).
+        SHdr(XS("Функции"));
+        CollapsibleHeader("##fnfarm", XS("Автофарм"), 5);
+
+        // Иксрей: рендер отсекает всё ближе выбранной дистанции — стены и
+        // текстуры вокруг игрока пропадают, видно что за ними.
+        SHdr(XS("Иксрей"));
+        CardBg(Layout::RowH + Layout::SliderH);
+        ToggleRow("##xr0", XS("Иксрей"), &g_state.xray_on, g_state.a_xray_on, false, true);
+        SliderRow("##xr1", XS("Дальность"), &g_state.xray_range,
+                  1.f, 50.f, XS("%.0f м"), true, false, g_state.sl_xray, dt);
+
+        // Всегда день: время суток каждую секунду возвращается в полдень.
+        SHdr(XS("Мир"));
+        CardBg(Layout::RowH);
+        ToggleRow("##wd0", XS("Всегда день"), &g_state.always_day, g_state.a_always_day, true, true);
+
+        ImGui::Dummy({1.f, 12.f});
     }
 
     ImGui::Dummy({1.f, 12.f});
@@ -2627,17 +3177,60 @@ static void CenterMenuOnDisplay() {
     g_win.resizing = false;
 }
 
-static void UpdateAim(float dt) {
-    static bool  s_fingerDown = false;
-    static float s_fx = 0.f, s_fy = 0.f;
-    static float s_lastTx = -1e9f, s_lastTy = -1e9f;
+// ============================ Aimbot ============================
+//
+// Drives the game camera with a synthetic "look" finger on the right half of
+// the screen. The target is the exact bone world position (head / chest /
+// pelvis) projected through the live camera matrices, expressed as a yaw/pitch
+// offset from the camera forward axis. The controller is closed-loop: every
+// frame it measures how many degrees the crosshair actually moved per pixel
+// of finger travel and adapts its gain, so it converges in a handful of
+// frames regardless of the in-game sensitivity setting.
 
-    bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
+struct AimTarget {
+    bool  valid = false;
+    unsigned long long id = 0;
+    float yaw = 0.f, pitch = 0.f;   // degrees from crosshair (+right, +up)
+    float sx = 0.f, sy = 0.f;       // screen position (px)
+    float dist = 0.f;               // pixel distance from crosshair
+    float world_dist = 0.f;
+};
+
+static void AimReleaseFinger(bool& fingerDown) {
+    if (fingerDown) { Touch_Up(); fingerDown = false; }
+}
+
+// File-scope so the auto-farm can yield the camera while the aimbot is
+// actively pulling onto a player.
+static bool s_fingerDown = false;
+
+static void UpdateAim(float dt) {
+    static float s_fx = 0.f, s_fy = 0.f;         // finger position (px)
+    static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f; // absolute camera angles
+    static bool  s_haveLast = false;
+    static float s_lastDx = 0.f, s_lastDy = 0.f; // finger delta applied last frame
+    static float s_gainYaw = 0.f, s_gainPitch = 0.f; // deg per px, learned
+    // Ввод, который камера ещё не отработала (низкий FPS игры): накопленный
+    // сдвиг пальца с момента последнего НАБЛЮДАЕМОГО поворота камеры.
+    static float s_pendDx = 0.f, s_pendDy = 0.f;
+    static float s_pendTime = 0.f;
+    static unsigned long long s_lastId = 0;        // sticky target
+    static int   s_lostFrames = 0;
+    static int   s_holdFrames = 0;
+
+    const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     bool active = g_state.aim_touch && g_esp_attached && !menuOpen;
 
+    // "Только с прицелом": only steer while the local player is ADS.
+    if (active && g_state.aim_scope_only && !esp_local_player_is_aiming())
+        active = false;
+
+    if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
+    if (dt > 0.1f) dt = 0.1f;
+
     if (!active) {
-        if (s_fingerDown) { Touch_Up(); s_fingerDown = false; }
-        s_lastTx = -1e9f;
+        AimReleaseFinger(s_fingerDown);
+        s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
         return;
     }
 
@@ -2648,80 +3241,840 @@ static void UpdateAim(float dt) {
     } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
         sw = (float) displayInfo.height; sh = (float) displayInfo.width;
     }
+    if (sw < 100.f || sh < 100.f) { AimReleaseFinger(s_fingerDown); return; }
 
-    std::vector<EspBox> boxes = esp_get_boxes((int) sw, (int) sh);
-    if (boxes.empty()) {
-        if (s_fingerDown) { Touch_Up(); s_fingerDown = false; }
-        s_lastTx = -1e9f;
-        return;
-    }
+    const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
 
     const float crossX = sw * 0.5f, crossY = sh * 0.5f;
     const float fovR = AimFovRadiusPx(sw, sh);
-    const float boneFrac = (g_state.aim_bone == 0) ? 0.06f
-                       : (g_state.aim_bone == 1) ? 0.28f
-                                                  : 0.47f;
+    float camFov = esp_camera_fov_deg();
+    if (!(camFov > 1.f && camFov < 179.f)) camFov = 60.f;
+    // degrees per pixel at the screen centre (vertical axis)
+    const float degPerPx = camFov / sh;
 
-    int   best = -1;
-    float bestScore = 1e18f, bestX = 0.f, bestY = 0.f;
-    for (size_t i = 0; i < boxes.size(); ++i) {
-        const EspBox& b = boxes[i];
-        if (!std::isfinite(b.x1) || !std::isfinite(b.y1) ||
-            !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
-        float h = b.y2 - b.y1;
-        if (h < 4.f || h > sh * 4.f) continue;
-        float px = (b.x1 + b.x2) * 0.5f;
-        float py = b.y1 + boneFrac * h;
-        if (px < -60.f || px > sw + 60.f || py < -60.f || py > sh + 60.f) continue;
-        if (g_state.aim_pos && (b.x1 < 0.f || b.y1 < 0.f || b.x2 > sw || b.y2 > sh)) continue;
-        float dx = px - crossX, dy = py - crossY;
-        float d = sqrtf(dx * dx + dy * dy);
-        if (d > fovR) continue;
-        float score = d;
-        if (s_lastTx > -1e8f) {
-            float lx = px - s_lastTx, ly = py - s_lastTy;
-            if (lx * lx + ly * ly < 80.f * 80.f) score *= 0.5f;
+    const int wantBone = (g_state.aim_bone < 0 || g_state.aim_bone > 2) ? 0 : g_state.aim_bone;
+
+    // ---- choose target ----
+    AimTarget best;
+    float bestScore = 1e18f;
+    for (const EspBox& b : boxes) {
+        // Never pull onto a team mate / clan mate while that ESP category is on.
+        if (g_state.esp_team && b.ally) continue;
+        AimTarget t;
+        // Exact bone, with graceful fallback to the next-best bone.
+        // Slots: 0 head, 1 neck, 2 chest. Never fall back below the chest.
+        static const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 1, 0}};
+        int usedBone = -1;
+        for (int k = 0; k < 3; ++k) {
+            int bi = order[wantBone][k];
+            if (b.aim_valid[bi]) { usedBone = bi; break; }
         }
-        if (score < bestScore) { bestScore = score; best = (int) i; bestX = px; bestY = py; }
+        if (usedBone >= 0) {
+            t.yaw = b.aim_yaw[usedBone];  t.pitch = b.aim_pitch[usedBone];
+            t.sx  = b.aim_pts[usedBone][0]; t.sy = b.aim_pts[usedBone][1];
+            t.valid = std::isfinite(t.yaw) && std::isfinite(t.pitch) &&
+                      std::isfinite(t.sx) && std::isfinite(t.sy);
+        } else {
+            // Box estimate (nothing else resolved): derive angles from pixels.
+            // The box itself is already crouch-aware (KCC pose height).
+            if (!std::isfinite(b.x1) || !std::isfinite(b.y1) || !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
+            float h = b.y2 - b.y1;
+            if (h < 4.f || h > sh * 4.f) continue;
+            const float frac = (wantBone == 0) ? 0.07f : (wantBone == 1) ? 0.15f : 0.30f;
+            t.sx = (b.x1 + b.x2) * 0.5f;
+            t.sy = b.y1 + frac * h;
+            float ex = t.sx - crossX, ey = t.sy - crossY;
+            t.yaw = atanf(ex / (sh * 0.5f) * tanf(camFov * 0.5f * (float)M_PI / 180.f)) * 180.f / (float)M_PI;
+            t.pitch = -atanf(ey / (sh * 0.5f) * tanf(camFov * 0.5f * (float)M_PI / 180.f)) * 180.f / (float)M_PI;
+            t.valid = true;
+        }
+        if (!t.valid) continue;
+        t.id = b.id;
+        const bool sticky = (s_lastId != 0 && b.id == s_lastId);
+        if (t.sx < -sw || t.sx > sw * 2.f || t.sy < -sh || t.sy > sh * 2.f) continue;
+        if (g_state.aim_pos && !sticky && (t.sx < 0.f || t.sy < 0.f || t.sx > sw || t.sy > sh)) continue;
+        float dx = t.sx - crossX, dy = t.sy - crossY;
+        t.dist = sqrtf(dx * dx + dy * dy);
+        t.world_dist = b.distance;
+        // The target we are already pulling to may briefly leave the FOV
+        // circle (overshoot while the gain is still being learned) — keep it.
+        if (t.dist > (sticky ? fovR * 2.f : fovR)) continue;
+
+        // Target priority (see "Приоритет цели"):
+        //   0 balanced  — crosshair distance and range, both normalised
+        //                 (FOV radius, 120 m) and summed;
+        //   1 crosshair — purely the pixel distance from the crosshair;
+        //   2 range     — purely the world distance, crosshair only breaks ties.
+        // Whatever the mode, the current target gets a strong preference so the
+        // aim does not flip between two players standing next to each other.
+        const float pixelTerm = t.dist / (fovR > 1.f ? fovR : 1.f);
+        const bool  haveRange = (t.world_dist >= 0.f) && std::isfinite(t.world_dist);
+        const float rangeTerm = haveRange ? (t.world_dist / 120.f) : 1.f;
+        float score;
+        switch (g_state.aim_priority) {
+            case 1:  score = pixelTerm; break;
+            case 2:  score = rangeTerm * 4.f + pixelTerm * 0.05f; break;
+            default: score = pixelTerm + rangeTerm * 0.8f; break;
+        }
+        if (sticky) score *= 0.35f;
+        if (score < bestScore) { bestScore = score; best = t; }
     }
 
-    if (best < 0) {
-        s_lastTx = -1e9f;
-        if (s_fingerDown) { Touch_Up(); s_fingerDown = false; }
+    if (!best.valid) {
+        // Keep the finger down briefly so a momentary read failure does not
+        // register as a tap (tap-to-shoot in some layouts) or reset momentum.
+        if (++s_lostFrames > 6) {
+            AimReleaseFinger(s_fingerDown);
+            s_haveLast = false; s_lastId = 0;
+        }
         return;
     }
-    s_lastTx = bestX; s_lastTy = bestY;
+    s_lostFrames = 0;
+    if (best.id != s_lastId) s_haveLast = false; // do not learn gain across a target switch
 
-    float ex = bestX - crossX, ey = bestY - crossY;
-    if (fabsf(ex) < 2.5f && fabsf(ey) < 2.5f) return;
+    // Lead a moving target: the game applies our finger delta next frame, by
+    // which time the target has moved on. Use the target's angular velocity
+    // relative to the camera (with the camera's own rotation removed) and
+    // aim one frame ahead. Reset on target switch.
+    static float s_prevTgtYaw = 0.f, s_prevTgtPitch = 0.f, s_prevCamYawT = 0.f, s_prevCamPitchT = 0.f;
+    static bool  s_havePrevTgt = false;
+    {
+        float cy = 0.f, cp = 0.f;
+        bool haveC = esp_camera_angles(cy, cp);
+        if (best.id == s_lastId && s_havePrevTgt && haveC) {
+            float dCamYaw = cy - s_prevCamYawT;
+            while (dCamYaw > 180.f) dCamYaw -= 360.f;
+            while (dCamYaw < -180.f) dCamYaw += 360.f;
+            float dCamPitch = cp - s_prevCamPitchT;
+            // world-space angular motion of the target = change in offset + camera rotation
+            float vYaw = (best.yaw - s_prevTgtYaw) + dCamYaw;
+            float vPitch = (best.pitch - s_prevTgtPitch) + dCamPitch;
+            if (std::isfinite(vYaw) && std::isfinite(vPitch) && fabsf(vYaw) < 10.f && fabsf(vPitch) < 10.f) {
+                s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
+                // Below this the "motion" is bone animation jitter (breathing,
+                // sway), which at long range is larger than the head itself.
+                // Extrapolating it would double the error, so only lead real
+                // movement. Aim more than a frame ahead for fast movers so the
+                // crosshair stays on a laterally running target (the controller
+                // smoothing otherwise makes it trail behind).
+                const float leadMin = degPerPx * 2.f;
+                float vMag = sqrtf(vYaw * vYaw + vPitch * vPitch);
+                if (vMag > leadMin) {
+                    float k = 1.1f * (1.f - leadMin / vMag);
+                    if (k > 1.5f) k = 1.5f;
+                    best.yaw += vYaw * k;
+                    best.pitch += vPitch * k;
+                }
+            } else {
+                s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
+            }
+        } else {
+            s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
+        }
+        if (haveC) { s_prevCamYawT = cy; s_prevCamPitchT = cp; s_havePrevTgt = true; }
+        else s_havePrevTgt = false;
+    }
+    s_lastId = best.id;
 
-    if (!s_fingerDown) {
-        s_fx = sw * 0.72f;
-        s_fy = sh * 0.48f;
-        Touch_Down(s_fx, s_fy);
-        s_fingerDown = true;
+    // ---- learn finger gain (deg per px) from the previous frame ----
+    // Measured from the camera's own rotation, so a moving target does not
+    // pollute the estimate.
+    float camYaw = 0.f, camPitch = 0.f;
+    const bool haveCam = esp_camera_angles(camYaw, camPitch);
+    float camYawDelta = 0.f, camPitchDelta = 0.f;
+    bool camMoved = false;
+    if (haveCam && s_haveLast) {
+        camYawDelta = camYaw - s_lastCamYaw;
+        while (camYawDelta > 180.f) camYawDelta -= 360.f;
+        while (camYawDelta < -180.f) camYawDelta += 360.f;
+        camPitchDelta = camPitch - s_lastCamPitch;
+        camMoved = fabsf(camYawDelta) > 0.02f || fabsf(camPitchDelta) > 0.02f;
+    }
+    if (haveCam && s_haveLast && s_fingerDown && camMoved) {
+        // Signed gains: a negative value simply means the game inverts that
+        // axis (e.g. "invert Y" enabled) and the controller follows suit.
+        // Adopt the measurement outright when it disagrees strongly with the
+        // current estimate (sensitivity changed / first sample), else smooth.
+        auto learn = [](float& gain, float measured) {
+            float m = fabsf(measured);
+            if (!std::isfinite(measured) || m < 0.005f || m > 2.0f) return;
+            if (gain == 0.f || (measured > 0.f) != (gain > 0.f) ||
+                m > fabsf(gain) * 1.3f || m < fabsf(gain) * 0.7f) gain = measured;
+            else gain = gain * 0.7f + measured * 0.3f;
+        };
+        // Учимся на НАКОПЛЕННОМ сдвиге пальца с прошлого поворота камеры:
+        // при низком FPS игра проглатывает несколько наших движений и
+        // поворачивается на их сумму — деление на один последний сдвиг
+        // завышало гейн и раскачивало прицел.
+        if (fabsf(s_pendDx) >= 1.f) learn(s_gainYaw, camYawDelta / s_pendDx);
+        if (fabsf(s_pendDy) >= 1.f) learn(s_gainPitch, -camPitchDelta / s_pendDy);
+        s_pendDx = s_pendDy = 0.f;
+        s_pendTime = 0.f;
+    }
+    if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
+    else { s_haveLast = false; s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f; }
+
+    // Такт с подтверждением: если наш прошлый сдвиг ещё не отразился в
+    // камере (игра не отрендерила кадр — низкий FPS), НЕ шлём новую
+    // коррекцию: ошибка на экране устаревшая, и вторая поправка по ней —
+    // это двойная коррекция, тот самый перелёт-раскачка. Держим палец на
+    // месте и ждём реакции камеры (таймаут на случай проглоченного ввода).
+    if (s_fingerDown && !camMoved &&
+        (fabsf(s_pendDx) >= 1.f || fabsf(s_pendDy) >= 1.f)) {
+        s_pendTime += dt;
+        if (s_pendTime < 0.25f) {
+            Touch_Move(s_fx, s_fy);   // держим тач живым, ничего не двигаем
+            return;
+        }
+        s_pendDx = s_pendDy = 0.f;    // ввод потерялся — продолжаем
+        s_pendTime = 0.f;
     }
 
+    // ---- input quantum ----
+    // The finger can only rest on the digitizer grid, so the camera can only
+    // be steered in steps of (gain / units-per-pixel) degrees. At long range
+    // one such step can exceed the size of a head; the controller therefore
+    // has to settle on the NEAREST reachable position and hold still there,
+    // never hunt back and forth across the target.
+    float unitsPerPx = Touch_DeviceUnitsPerPixel();
+    if (!(unitsPerPx >= 0.25f && unitsPerPx <= 16.f)) unitsPerPx = 1.f;
+    const float gridPx = 1.f / unitsPerPx;               // screen px per device unit
+    const bool  gainKnownYaw = (s_gainYaw != 0.f), gainKnownPitch = (s_gainPitch != 0.f);
+    const float qYaw   = gainKnownYaw   ? fabsf(s_gainYaw)   * gridPx : 0.f; // deg per device unit
+    const float qPitch = gainKnownPitch ? fabsf(s_gainPitch) * gridPx : 0.f;
+
+    // ---- dead zone ----
+    // Target: ~3 cm at the target's range (well inside a head), but never
+    // tighter than what the input grid can actually reach (0.55 step), and
+    // never wider than 1.5 screen px.
+    float deadBase = degPerPx * 1.5f;
+    if (best.world_dist > 1.f && std::isfinite(best.world_dist)) {
+        float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
+        if (d < deadBase) deadBase = d;
+    }
+    float deadYaw = deadBase, deadPitch = deadBase;
+    if (gainKnownYaw   && deadYaw   < qYaw   * 0.55f) deadYaw   = qYaw   * 0.55f;
+    if (gainKnownPitch && deadPitch < qPitch * 0.55f) deadPitch = qPitch * 0.55f;
+    if (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch) {
+        s_lastDx = s_lastDy = 0.f;
+        s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
+        return;
+    }
+
+    auto snapGrid = [&](float v) { return roundf(v * unitsPerPx) / unitsPerPx; };
+
+    if (!s_fingerDown) {
+        s_fx = snapGrid(sw * 0.74f);
+        s_fy = snapGrid(sh * 0.50f);
+        Touch_Down(s_fx, s_fy);
+        s_fingerDown = true;
+        s_lastDx = s_lastDy = 0.f;
+        s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        s_holdFrames = 0;
+        return; // let the game register the touch before moving it
+    }
+    if (s_holdFrames < 1) { ++s_holdFrames; Touch_Move(s_fx, s_fy); return; }
+
+    // ---- controller ----
+    // Speed slider keeps the old direction (higher = faster):
+    //   1 = gentle (~25% of the remaining error per frame), 10 = snap.
     float sm = g_state.gun_str;
-    if (sm < 1.f) sm = 1.f;
+    if (!(sm >= 1.f)) sm = 1.f;
     if (sm > 10.f) sm = 10.f;
-    float rate = 1.5f + (sm - 1.f) * (10.5f / 9.f);
-    float k = 1.f - expf(-rate * dt);
-    if (k > 0.5f) k = 0.5f;
+    float frac = 0.25f + (sm - 1.f) / 9.f * 0.75f;   // 0.25 .. 1.00 per frame @60fps
+    // Frame-rate independent: convert per-frame fraction to a rate.
+    float k = 1.f - powf(1.f - frac, dt * 60.f);
+    if (k > 1.f) k = 1.f;
+    if (k < 0.05f) k = 0.05f;
 
-    float dx = ex * k, dy = ey * k;
-    if (dx >  90.f) dx =  90.f;
-    if (dx < -90.f) dx = -90.f;
-    if (dy >  90.f) dy =  90.f;
-    if (dy < -90.f) dy = -90.f;
+    // Gain (deg per px). Until it has been measured, assume a HIGH in-game
+    // sensitivity so the first probe move can only under-shoot; the true gain
+    // is learned from that move and the next frame snaps the rest of the way.
+    const float probeGain = 0.35f;
+    const bool  learned = (s_gainYaw != 0.f);
+    float gy = learned ? s_gainYaw : probeGain;
+    float gp = (s_gainPitch != 0.f) ? s_gainPitch : (learned ? fabsf(s_gainYaw) : probeGain);
 
-    s_fx += dx;
-    s_fy += dy;
-    if (s_fx < sw * 0.55f) s_fx = sw * 0.55f;
-    if (s_fx > sw * 0.95f) s_fx = sw * 0.95f;
-    if (s_fy < sh * 0.20f) s_fy = sh * 0.20f;
-    if (s_fy > sh * 0.80f) s_fy = sh * 0.80f;
+    float dx =  best.yaw   * k / gy;
+    float dy = -best.pitch * k / gp;
+
+    // Final approach: within a few input steps of the target, stop smoothing
+    // and jump straight to the nearest reachable grid position. Smoothing
+    // here would either creep for many frames or, once rounded, overshoot
+    // and oscillate by a full step around the head.
+    if (gainKnownYaw && fabsf(best.yaw) < qYaw * 3.f)
+        dx = roundf((best.yaw / gy) * unitsPerPx) / unitsPerPx;
+    if (gainKnownPitch && fabsf(best.pitch) < qPitch * 3.f)
+        dy = roundf((-best.pitch / gp) * unitsPerPx) / unitsPerPx;
+
+    // Clamp per-frame travel so a bad gain estimate never slingshots.
+    const float maxStep = learned ? sh * 0.15f : sh * 0.05f;
+    if (dx >  maxStep) dx =  maxStep;
+    if (dx < -maxStep) dx = -maxStep;
+    if (dy >  maxStep) dy =  maxStep;
+    if (dy < -maxStep) dy = -maxStep;
+
+    // Move in whole device units so the applied delta is exactly what we
+    // measure next frame (gain learning) and the finger never accumulates a
+    // hidden sub-unit remainder that later pops out as an unplanned step.
+    float nx = snapGrid(s_fx + dx), ny = snapGrid(s_fy + dy);
+    dx = nx - s_fx; dy = ny - s_fy;
+    if (dx == 0.f && dy == 0.f) {
+        s_lastDx = s_lastDy = 0.f;
+        s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        Touch_Move(s_fx, s_fy);
+        return;
+    }
+
+    // Keep the finger in the look area. If it drifts to an edge, lift and
+    // re-place it in the centre of the area instead of getting stuck.
+    const float minX = sw * 0.56f, maxX = sw * 0.97f, minY = sh * 0.12f, maxY = sh * 0.88f;
+    if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
+        Touch_Up();
+        s_fingerDown = false;
+        s_fx = snapGrid(sw * 0.74f); s_fy = snapGrid(sh * 0.50f);
+        s_lastDx = s_lastDy = 0.f;
+        s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        s_haveLast = false;
+        return;
+    }
+    s_fx = nx; s_fy = ny;
+    s_lastDx = dx; s_lastDy = dy;
+    s_pendDx += dx; s_pendDy += dy;   // ждёт отработки камерой (ack-такт)
     Touch_Move(s_fx, s_fy);
+}
+
+// ============================ Auto-farm =============================
+//
+// Fully touch-driven: three synthetic fingers (move joystick, camera swipe,
+// attack tap) — the game layer only tells us where the nearest selected
+// resource node is (yaw/pitch/distance). The camera finger reuses the same
+// gain the aimbot learned, or probes carefully with a fixed one.
+//
+// State machine per frame:
+//   TURN  — swipe the camera towards the node until it is roughly centred;
+//   WALK  — hold the move joystick forward (steering with the camera) until
+//           the node is within reach;
+//   MINE  — stand still, keep the crosshair on the node (glowing X when the
+//           game shows one) and tap-attack repeatedly;
+//   node depleted / lost -> pick the next one automatically.
+
+bool g_farmActive = false;   // for the status line in the menu
+int  g_farmPhase = 0;        // 0 idle, 1 turn, 2 walk, 3 mine
+int  g_farmNodes = 0;        // nodes found by the last registry scan
+int  g_farmReason = 1;       // idle reason from esp_farm_debug()
+float g_farmTgtDist = 0.f;   // distance to the current target (m)
+int  g_farmTgtKind = 0;      // current target resource kind
+
+// Калибровка зон бота: 0 — нет, 1 — ждём тап по джойстику, 2 — по кнопке
+// огня. Пока калибровка активна, меню скрыто и первый тап по экрану
+// записывает позицию (в долях экрана) в g_state.
+int  g_farmCalib = 0;
+
+static void UpdateFarm(float dt) {
+    static bool  s_moveDown = false;  // finger 0: move joystick
+    static bool  s_lookDown = false;  // finger 1: camera swipe
+    static bool  s_tapDown  = false;  // finger 2: attack taps
+    static float s_lookX = 0.f, s_lookY = 0.f;
+    static int   s_lookHold = 0;
+    static int   s_tapTimer = 0;
+    static float s_gainYaw = 0.f;     // deg per px, learned from our own swipes
+    static float s_lastCamYaw = 0.f;
+    static float s_lastDx = 0.f;
+    static bool  s_haveLast = false;
+    static unsigned long long s_nodeId = 0;
+    static float s_stuckTime = 0.f;   // seconds without closing distance
+    static float s_lastDist = 1e9f;
+    static float s_mineTime = 0.f;    // seconds spent mining this node
+    static float s_fracStart = -1.f;
+    static float s_sinceDrain = 0.f;  // seconds since the node last lost HP
+    static float s_evadeTime = 0.f;   // >0: sidestep manoeuvre in progress
+    static float s_evadeDir = 1.f;    // +1 right, -1 left
+    static int   s_evadeCount = 0;    // manoeuvres tried on this node
+    static float s_settle = 0.f;      // pause between targets (fingers up)
+    static float s_stickPx = 0.f, s_stickPy = 0.f; // smoothed stick position
+    static bool  s_goStandLatched = false; // don't flip stand/body mid-approach
+
+    auto releaseAll = [&]() {
+        if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
+        if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; }
+        if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }
+        s_haveLast = false;
+        s_lookHold = 0;
+    };
+
+    if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
+    if (dt > 0.1f) dt = 0.1f;
+
+    unsigned mask = 0;
+    if (g_state.farm_on) {
+        if (g_state.farm_wood)   mask |= 1u;
+        if (g_state.farm_stone)  mask |= 2u;
+        if (g_state.farm_metal)  mask |= 4u;
+        if (g_state.farm_sulfur) mask |= 8u;
+    }
+    esp_farm_set_resources(mask);
+    esp_farm_set_range(g_state.farm_range);
+
+    const bool menuBlocked = g_sheet.visible || (g_pop.visible && !g_pop.closing);
+    // The aimbot owns the camera while it is on a player — farm yields fully.
+    // g_farmCalib: пока пользователь тапает зоны, бот молчит.
+    bool active = mask != 0 && g_esp_attached && !menuBlocked && !s_fingerDown && g_farmCalib == 0;
+
+    if (!active) {
+        releaseAll();
+        g_farmActive = false; g_farmPhase = 0;
+        s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
+        s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f; s_settle = 0.f;
+        s_goStandLatched = false;
+        return;
+    }
+
+    float sw = (float)native_window_screen_x;
+    float sh = (float)native_window_screen_y;
+    if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
+        sw = (float)displayInfo.width;  sh = (float)displayInfo.height;
+    } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
+        sw = (float)displayInfo.height; sh = (float)displayInfo.width;
+    }
+    if (sw < 100.f || sh < 100.f) { releaseAll(); g_farmActive = false; return; }
+
+    // The farm target is measured against the camera state published by
+    // esp_get_boxes(); make sure this frame's snapshot exists even when the
+    // ESP overlay and the aimbot did not request one.
+    FrameBoxes(sw, sh);
+
+    FarmTarget tgt;
+    bool haveTgt = esp_farm_get_target(tgt) && tgt.valid;
+    esp_farm_debug(g_farmNodes, g_farmReason);
+    static float s_lostTime = 0.f; // target dropout tolerance
+    if (!haveTgt) {
+        // A working target can vanish for a few frames (registry rescan, a
+        // failed read mid-update) and come right back. Dropping everything
+        // instantly caused the stop-start-stop shuffle: freeze inputs briefly
+        // and only reset for real when the target stays gone.
+        if (s_nodeId != 0 && s_lostTime < 0.8f) {
+            s_lostTime += dt;
+            if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; } // no blind swings
+            if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; s_haveLast = false; }
+            return; // keep the move finger where it was
+        }
+        releaseAll();
+        g_farmActive = false; g_farmPhase = 0;
+        s_nodeId = 0; s_stuckTime = 0.f; s_mineTime = 0.f;
+        s_evadeTime = 0.f; s_evadeCount = 0; s_sinceDrain = 0.f; s_settle = 0.f;
+        s_lostTime = 0.f;
+        s_goStandLatched = false;
+        return;
+    }
+    s_lostTime = 0.f;
+    g_farmActive = true;
+    g_farmTgtDist = tgt.dist;
+    g_farmTgtKind = tgt.kind;
+
+    if (tgt.id != s_nodeId) {
+        // Switching nodes: lift every finger and stand still for a moment.
+        // Without this the old walk/look inputs keep replaying against the
+        // new target for a few frames — the frantic stomping-and-shaking
+        // right after a node is finished.
+        bool hadNode = s_nodeId != 0;
+        s_nodeId = tgt.id;
+        s_stuckTime = 0.f; s_lastDist = tgt.dist;
+        s_mineTime = 0.f;  s_fracStart = tgt.fraction;
+        s_sinceDrain = 0.f; s_evadeTime = 0.f; s_evadeCount = 0;
+        s_goStandLatched = false;
+        if (hadNode) { releaseAll(); s_settle = 0.7f; }
+    }
+
+    // A node that is already mined out gets blacklisted on the spot instead
+    // of being circled: the picker would only fall back to it when nothing
+    // else is in range, and dancing around an empty stump helps nobody.
+    // Debounced: fraction is a raw memory read and a single garbage frame
+    // (mid-update value, failed read) used to abandon a half-chopped tree —
+    // only a solidly repeated "empty" counts.
+    static int s_depletedFrames = 0;
+    if (tgt.fraction >= 0.f && tgt.fraction < 0.03f) {
+        if (++s_depletedFrames >= 10) {
+            s_depletedFrames = 0;
+            esp_farm_blacklist(tgt.id, 120.f);
+            releaseAll();
+            s_settle = 0.7f;
+            s_nodeId = 0;
+            g_farmPhase = 0;
+            return;
+        }
+    } else {
+        s_depletedFrames = 0;
+    }
+
+    // Settle pause between targets: fingers stay up, the camera stops, and
+    // the next target starts from a clean slate.
+    if (s_settle > 0.f) {
+        s_settle -= dt;
+        releaseAll();
+        return;
+    }
+
+    // On-screen mark on the exact point the farm is working: the glowing spot
+    // when one is found, otherwise the node body. Doubles as debug output —
+    // if the mark is on the wrong object, the target picker is what to fix.
+    if (tgt.on_screen) {
+        auto* fg = ImGui::GetForegroundDrawList();
+        ImU32 mc = tgt.has_spot ? IM_COL32(80, 255, 120, 230) : IM_COL32(255, 200, 60, 230);
+        float r = 14.f;
+        fg->AddCircle({tgt.sx, tgt.sy}, r, mc, 24, 3.f);
+        fg->AddLine({tgt.sx - r * 1.6f, tgt.sy}, {tgt.sx - r * 0.5f, tgt.sy}, mc, 3.f);
+        fg->AddLine({tgt.sx + r * 0.5f, tgt.sy}, {tgt.sx + r * 1.6f, tgt.sy}, mc, 3.f);
+        fg->AddLine({tgt.sx, tgt.sy - r * 1.6f}, {tgt.sx, tgt.sy - r * 0.5f}, mc, 3.f);
+        fg->AddLine({tgt.sx, tgt.sy + r * 0.5f}, {tgt.sx, tgt.sy + r * 1.6f}, mc, 3.f);
+    }
+
+    // ---- camera gain: learn from our own swipe, fall back to the aimbot's ----
+    float camYaw = 0.f, camPitch = 0.f;
+    bool haveCam = esp_camera_angles(camYaw, camPitch);
+    if (haveCam && s_haveLast && fabsf(s_lastDx) >= 1.f) {
+        float dyaw = camYaw - s_lastCamYaw;
+        while (dyaw > 180.f) dyaw -= 360.f;
+        while (dyaw < -180.f) dyaw += 360.f;
+        float measured = dyaw / s_lastDx;
+        float m = fabsf(measured);
+        if (std::isfinite(measured) && m > 0.005f && m < 2.f) {
+            if (s_gainYaw == 0.f || m > fabsf(s_gainYaw) * 1.5f || m < fabsf(s_gainYaw) * 0.5f)
+                s_gainYaw = measured;
+            else
+                s_gainYaw = s_gainYaw * 0.8f + measured * 0.2f;
+        }
+    }
+    if (haveCam) s_lastCamYaw = camYaw;
+    s_haveLast = haveCam;
+    s_lastDx = 0.f;
+
+    float gain = (s_gainYaw != 0.f) ? s_gainYaw : 0.25f; // deg per px, safe probe
+
+    // ---- decide the phase ----
+    // reachDist is deliberately tight for trees (a thin trunk holds its node
+    // position dead centre, and stopping 3+ m away leaves melee short). Ore
+    // X sits on the boulder surface, often below the top-mounted pivot, so
+    // stand/melee are measured to that mark — not 2 m off the node centre.
+    // While mining the move finger keeps nudging forward until walkUntil.
+    const bool  isTree    = (tgt.kind == 0);
+    const float reachDist = isTree ? 2.6f : 2.4f; // body: close enough to swing
+    const float meleeX    = isTree ? 0.80f : 1.55f; // hatchet reach is ~0.8 m to the bark
+    const float meleeHold = isTree ? 1.00f : 1.80f; // hysteresis while mining
+    const float aimedYaw  = tgt.has_spot
+        ? ((g_farmPhase == 3) ? 3.f : 8.f)
+        : ((g_farmPhase == 3) ? 8.f : 14.f);
+    const float standArrive = isTree
+        ? (s_moveDown ? 0.18f : 0.28f)  // don't stop half a metre short of the X
+        : (s_moveDown ? 0.45f : 0.65f);
+    // Stand / X-aim only when already at the tree. From far away a bark
+    // child (or a hopping X) sits LEFT then RIGHT of the trunk — walking
+    // toward that yaw the whole way was the left-right jerk on every tree.
+    float closeGate = s_goStandLatched ? 3.6f : 2.6f;
+    bool closeForX  = tgt.dist < closeGate;
+    if (tgt.dist > 3.8f) s_goStandLatched = false;
+    else if (closeForX)  s_goStandLatched = true;
+    bool goStand = tgt.has_spot && tgt.stand_ok && tgt.stand_dist > standArrive && closeForX;
+    float meleeNow = (g_farmPhase == 3) ? meleeHold : meleeX;
+    bool xInMelee  = tgt.has_spot && tgt.aim_dist <= meleeNow;
+    bool needCloser = tgt.has_spot && !xInMelee && closeForX;
+
+    float goalYaw, goalDist;
+    if (goStand) {
+        goalYaw = tgt.stand_yaw; goalDist = tgt.stand_dist;
+    } else if (needCloser) {
+        goalYaw = tgt.yaw;       goalDist = tgt.aim_dist;
+    } else {
+        goalYaw = tgt.yaw;       goalDist = tgt.dist;
+    }
+
+    bool inReach = tgt.has_spot ? xInMelee : (tgt.dist <= reachDist);
+    bool aimed = fabsf(tgt.yaw) <= aimedYaw;
+
+    int phase;
+    if (goStand || needCloser) phase = (fabsf(goalYaw) <= 14.f) ? 2 : 1;
+    else if (inReach)          phase = 3;
+    else                       phase = (aimed ? 2 : 1);
+    g_farmPhase = phase;
+
+    // ---- finger 1: camera swipe (yaw always; pitch only while mining) ----
+    {
+        float steerYaw = (phase == 3) ? tgt.yaw : goalYaw;
+        float wantYawPx = steerYaw / gain;
+        // Pitch: while mining, pull the crosshair exactly onto the node/spot.
+        // While walking, only fix a BADLY tilted camera (left looking at the
+        // ground after mining ore) — a generous dead zone, or the two axes
+        // fight each other and the camera wanders.
+        float wantPitchPx = 0.f;
+        float pitchDead = (phase == 3) ? 0.f : 18.f;
+        if (fabsf(tgt.pitch) > pitchDead) {
+            float gp = fabsf(gain);
+            wantPitchPx = -tgt.pitch / gp;
+        }
+        // Dead zones in degrees with hysteresis: a swipe only starts when the
+        // error is clearly outside, and stops well inside. This is what keeps
+        // the camera from twitching left-right around the centre.
+        float startDeg = (phase == 3) ? (tgt.has_spot ? 1.2f : 4.0f) : 10.f;
+        float stopDeg  = (phase == 3) ? (tgt.has_spot ? 0.35f : 1.5f) : 4.f;
+        float pitchErr = (phase == 3) ? fabsf(tgt.pitch)
+                       : fmaxf(fabsf(tgt.pitch) - pitchDead, 0.f);
+        float errDeg = fmaxf(fabsf(steerYaw), pitchErr);
+        bool needTurn = s_lookDown ? (errDeg > stopDeg) : (errDeg > startDeg);
+
+        if (needTurn) {
+            if (!s_lookDown) {
+                s_lookX = sw * 0.74f; s_lookY = sh * 0.42f;
+                Touch_Down_N(1, s_lookX, s_lookY);
+                s_lookDown = true;
+                s_lookHold = 0;
+            } else if (s_lookHold < 1) {
+                ++s_lookHold; // let the game register the touch first
+                Touch_Down_N(1, s_lookX, s_lookY);
+            } else {
+                // Proportional step: cover ~28% of the remaining error per
+                // frame, capped. Fast on big errors, glides into the centre
+                // without the stair-step jerks of fixed-size increments.
+                float maxStep = sh * 0.075f;
+                float kAim = (phase == 3 && tgt.has_spot) ? 0.42f : 0.28f;
+                float dx = wantYawPx * kAim;
+                if (dx >  maxStep) dx =  maxStep;
+                if (dx < -maxStep) dx = -maxStep;
+                float dy = wantPitchPx * kAim;
+                float maxStepY = maxStep * 0.5f;
+                if (dy >  maxStepY) dy =  maxStepY;
+                if (dy < -maxStepY) dy = -maxStepY;
+                float nx = s_lookX + dx, ny = s_lookY + dy;
+                // Edge: lift and re-centre rather than dragging off-screen.
+                if (nx < sw * 0.56f || nx > sw * 0.97f || ny < sh * 0.12f || ny > sh * 0.88f) {
+                    Touch_Up_N(1); s_lookDown = false; s_haveLast = false;
+                } else {
+                    s_lookX = nx; s_lookY = ny;
+                    Touch_Down_N(1, s_lookX, s_lookY);
+                    s_lastDx = dx;
+                }
+            }
+        } else if (s_lookDown) {
+            Touch_Up_N(1); s_lookDown = false;
+        }
+    }
+
+    // ---- finger 0: move joystick (bottom-left), held while walking ----
+    {
+        // Keep pressing in while mining until we are right at the node, so
+        // thin trees (node centre inside the trunk) end up in melee range.
+        // walkUntil gets hysteresis: press while further than +0.5 m, release
+        // only once actually inside — no down/up flapping at the boundary
+        // (the "stomping in place" bug).
+        float pressAt = s_moveDown ? meleeX : meleeX + (isTree ? 0.08f : 0.25f);
+        // Не идём, пока камера не смотрит примерно на цель ног: при yaw 90–180°
+        // стик «вперёд» уводит от креста. Сначала доворот, потом шаг.
+        bool alignedForWalk = fabsf(goalYaw) < 72.f;
+        // Только если уже внутри меша (линза в стволе). Иначе 2 м держали
+        // бота слишком далеко от тонких деревьев — удары не долетали, X не
+        // спавнился.
+        bool tooCloseNoX = isTree && !tgt.has_spot && tgt.dist < 0.55f && phase == 3;
+        // Phase 1 is TURN: only creep forward when already almost facing the
+        // node and still far. Walking at yaw 30–70° with a steered stick
+        // weaved left-right all the way in.
+        bool wantWalk = (phase == 2) ||
+                        (phase == 1 && fabsf(goalYaw) < 18.f && goalDist > 8.f) ||
+                        (goStand && alignedForWalk && goalDist > standArrive) ||
+                        (needCloser && alignedForWalk) ||
+                        (phase == 3 && (tgt.has_spot ? tgt.aim_dist : tgt.dist) > pressAt) ||
+                        tooCloseNoX;
+        if (s_evadeTime > 0.f) wantWalk = true; // manoeuvre drives the stick itself
+        // Release hysteresis: phases flicker for a frame or two around their
+        // thresholds (dist/yaw noise), and every flicker used to lift and
+        // re-plant the move finger — the visible "joystick jerking" while
+        // walking to a node. The finger now lifts only after the walk has
+        // been unwanted for a quarter of a second straight; mining taps are
+        // unaffected (finger 2 is independent).
+        static float s_walkOffTime = 0.f;
+        if (wantWalk) {
+            s_walkOffTime = 0.f;
+        } else if (s_moveDown) {
+            s_walkOffTime += dt;
+            if (s_walkOffTime < 0.25f) {
+                wantWalk = true;               // держим палец, гасим дёрганье
+                // но к центру стика — чтобы не толкало вперёд лишний метр
+            }
+        }
+        if (wantWalk) {
+            // Virtual stick centre and a forward push, slightly steered
+            // towards the node so small yaw errors do not need camera swipes.
+            // Centre: calibrated position when set, sensible default otherwise.
+            float cx = (g_state.farm_joy_x >= 0.f) ? sw * g_state.farm_joy_x : sw * 0.165f;
+            float cy = (g_state.farm_joy_y >= 0.f) ? sh * g_state.farm_joy_y : sh * 0.70f;
+            float r = sh * 0.16f;
+            float px, py;
+            if (s_evadeTime > 0.f) {
+                // Obstacle manoeuvre: back off briefly, then strafe hard to
+                // one side while still angled a bit forward, to slide around
+                // walls/rocks the straight-line walk keeps bumping into.
+                s_evadeTime -= dt;
+                if (s_evadeTime > 1.1f) {          // first ~0.6 s: step back
+                    px = cx;
+                    py = cy + r * 0.9f;
+                } else {                            // then: diagonal sidestep
+                    px = cx + r * 0.95f * s_evadeDir;
+                    py = cy - r * 0.35f;
+                }
+                if (s_evadeTime <= 0.f) { s_evadeTime = 0.f; s_stuckTime = 0.f; s_lastDist = 1e9f; }
+            } else {
+                // Dead zone: a couple of degrees of yaw jitter must not steer
+                // the stick at all — the sign of a near-zero error flips every
+                // frame, and steering off it was the left-right stick flapping.
+                // Far approach: camera does the turning, stick is forward.
+                // Lateral stick on a noisy yaw (X hopping around the bark)
+                // was the left-right shuffle toward every tree.
+                float yawSteer = 0.f;
+                if (tgt.dist < 3.5f || phase == 3) {
+                    yawSteer = (phase == 3 && !goStand) ? tgt.yaw : goalYaw;
+                    float yawDead = (tgt.dist > 2.8f) ? 10.f : 4.f;
+                    if (fabsf(yawSteer) < yawDead) yawSteer = 0.f;
+                }
+                // Крест сзади и мы УЖЕ у ствола: короткий обход, не 360° и
+                // не с пяти метров.
+                bool orbit = tgt.has_spot && !tgt.spot_facing && tgt.dist < 2.2f &&
+                             (goStand || needCloser);
+                if (orbit) {
+                    float side = (fabsf(goalYaw) > 8.f)
+                        ? ((goalYaw > 0.f) ? 1.f : -1.f)
+                        : s_evadeDir;
+                    px = cx + r * 0.92f * side;
+                    py = cy - r * 0.42f;
+                } else {
+                    float steer = yawSteer / 70.f;
+                    if (steer >  0.6f) steer =  0.6f;
+                    if (steer < -0.6f) steer = -0.6f;
+                    px = cx + r * steer;
+                    py = cy - r * sqrtf(1.f - steer * steer);
+                }
+                if (phase == 3) {
+                    // Final approach: gentle forward nudge, steering smoothly
+                    // proportional to the error (no sign() jumps).
+                    float s3 = yawSteer / 45.f;
+                    if (s3 >  1.f) s3 =  1.f;
+                    if (s3 < -1.f) s3 = -1.f;
+                    px = cx + r * 0.35f * s3;
+                    py = cy - r * 0.75f;
+                }
+                if (s_walkOffTime > 0.f) {
+                    // Hysteresis hold: walk not wanted any more — glide the
+                    // stick back to centre instead of lifting the finger.
+                    px = cx;
+                    py = cy;
+                }
+            }
+            if (!s_moveDown) {
+                Touch_Down_N(0, cx, cy);      // land on the stick centre first
+                s_moveDown = true;
+                s_stickPx = cx; s_stickPy = cy;
+            } else {
+                // Glide the stick towards the wanted deflection instead of
+                // teleporting it: some devices/game builds latch a huge jump
+                // as a sideways flick, which sent the bot strafing off-line.
+                float k = 1.f - expf(-14.f * dt);   // ~90% of the way in 0.16 s
+                s_stickPx += (px - s_stickPx) * k;
+                s_stickPy += (py - s_stickPy) * k;
+                Touch_Down_N(0, s_stickPx, s_stickPy);
+            }
+        } else if (s_moveDown) {
+            Touch_Up_N(0); s_moveDown = false;
+        }
+    }
+
+    // ---- finger 2: attack taps while in reach ----
+    {
+        if (phase == 3) {
+            s_mineTime += dt;
+            // Hold fire while the crosshair is still swinging onto a glowing
+            // spot: a tap mid-swipe lands where the camera used to be, which
+            // is exactly the "missed the X" complaint. Body hits are lenient
+            // (the node is huge), spot hits want the reticle settled.
+            bool aimSettled = tgt.has_spot
+                ? (fabsf(tgt.yaw) <= 1.6f && fabsf(tgt.pitch) <= 2.0f)
+                : (fabsf(tgt.yaw) <= 8.f);
+            if (goStand || needCloser) aimSettled = false; // не дотягиваемся — не машем в воздух
+            // Tap rhythm: ~85 ms down, ~230 ms up — a believable fast tapper
+            // that also matches melee swing cadence (extra taps are ignored
+            // by the game, they just queue the next swing).
+            s_tapTimer -= (int)roundf(dt * 1000.f);
+            if (s_tapTimer <= 0 && !aimSettled && !s_tapDown) {
+                // wait for the camera; keep the timer pinned so the next
+                // tap fires the moment the reticle settles
+                s_tapTimer = 0;
+            } else if (s_tapTimer <= 0) {
+                if (!s_tapDown) {
+                    // Attack tap: calibrated fire button when set, otherwise
+                    // the right half of the screen clear of the look finger.
+                    float fx = (g_state.farm_fire_x >= 0.f) ? sw * g_state.farm_fire_x : sw * 0.88f;
+                    float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
+                    Touch_Down_N(2, fx, fy);
+                    s_tapDown = true;
+                    s_tapTimer = 85;
+                } else {
+                    Touch_Up_N(2);
+                    s_tapDown = false;
+                    s_tapTimer = 230;
+                }
+            }
+        } else {
+            if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; }
+            s_tapTimer = 0;
+            s_mineTime = 0.f;
+        }
+    }
+
+    // ---- watchdogs ----
+    if (phase == 2 || phase == 1) {
+        // No progress towards the node -> ran into an obstacle. First try to
+        // walk around it (back off + sidestep, alternating sides); only when
+        // the manoeuvres keep failing does the node get blacklisted.
+        // Прогресс меряем к ТЕКУЩЕЙ цели ног: при заходе на стоянку перед
+        // крестом дистанция до узла почти не меняется — по ней watchdog
+        // ложно срабатывал и утаскивал бота в evade-танец.
+        if (goalDist < s_lastDist - 0.25f) {
+            s_lastDist = goalDist;
+            s_stuckTime = 0.f;
+        } else if (s_evadeTime <= 0.f) {
+            s_stuckTime += dt;
+            if (s_stuckTime > 3.f) {
+                if (s_evadeCount < 4) {
+                    s_evadeTime = 1.7f;                       // ~0.6 s back + ~1.1 s strafe
+                    s_evadeDir = (s_evadeCount % 2 == 0) ? 1.f : -1.f;
+                    ++s_evadeCount;
+                    s_stuckTime = 0.f;
+                } else {
+                    esp_farm_blacklist(tgt.id, 30.f);
+                    s_stuckTime = 0.f; s_lastDist = 1e9f; s_nodeId = 0;
+                    s_evadeCount = 0; s_evadeTime = 0.f;
+                }
+            }
+        }
+    } else if (phase == 3) {
+        s_evadeCount = 0; s_evadeTime = 0.f; // reached the node — obstacles cleared
+        // Swinging but the node is not draining -> standing a hair too far
+        // (thin trees) or wrong tool. The walk-in nudge handles the former;
+        // if HP still will not move, give up sooner rather than later.
+        bool draining = (tgt.fraction >= 0.f && s_fracStart >= 0.f && tgt.fraction < s_fracStart - 0.01f);
+        if (tgt.fraction >= 0.f && s_fracStart < 0.f) s_fracStart = tgt.fraction; // first good read
+        if (draining) { s_fracStart = tgt.fraction; s_mineTime = 0.f; s_sinceDrain = 0.f; }
+        else {
+            s_sinceDrain += dt;
+            // Give up only when the fraction is READABLE and provably not
+            // moving for a long stretch. With an unreadable fraction (-1)
+            // the old 14 s timer abandoned perfectly fine nodes halfway —
+            // the "stops mining before the node is empty" bug; without HP
+            // info the depleted/stuck watchdogs are the ones that decide.
+            float giveUpAfter = (tgt.fraction >= 0.f) ? 20.f : 45.f;
+            if (s_mineTime > giveUpAfter) {
+                esp_farm_blacklist(tgt.id, 60.f);
+                s_mineTime = 0.f; s_sinceDrain = 0.f; s_nodeId = 0;
+            }
+        }
+    }
 }
 
 void RenderMenu() {
@@ -2747,30 +4100,34 @@ void RenderMenu() {
     Tick(g_state.a_aim_chest,  g_state.aim_bone == 1,      dt);
     Tick(g_state.a_aim_pelvis, g_state.aim_bone == 2,      dt);
     Tick(g_state.a_aim_spec,   g_state.aim_special,        dt);
+    Tick(g_state.a_aim_scope,  g_state.aim_scope_only,     dt);
     Tick(g_state.a_esp_box,    g_state.esp_box,            dt);
     Tick(g_state.a_esp_name,   g_state.esp_name,           dt);
-    Tick(g_state.a_esp_hp,     g_state.esp_hp,             dt);
     Tick(g_state.a_esp_wall,   g_state.esp_wall,           dt);
     Tick(g_state.a_esp_chams,  g_state.esp_chams,          dt);
     Tick(g_state.a_esp_weapon, g_state.esp_weapon,         dt);
-    Tick(g_state.a_esp_weapon_icon, g_state.esp_weapon_icon, dt);
+    Tick(g_state.a_esp_ore,    g_state.esp_ore,            dt);
+    Tick(g_state.a_esp_animal, g_state.esp_animal,         dt);
+    Tick(g_state.a_esp_loot,   g_state.esp_loot,           dt);
+    Tick(g_state.a_esp_pickup, g_state.esp_pickup,         dt);
+    Tick(g_state.a_always_day,  g_state.always_day,         dt);
+    Tick(g_state.a_esp_team,   g_state.esp_team,           dt);
+    Tick(g_state.a_aim_pr0,    g_state.aim_priority == 0,  dt);
+    Tick(g_state.a_aim_pr1,    g_state.aim_priority == 1,  dt);
+    Tick(g_state.a_aim_pr2,    g_state.aim_priority == 2,  dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
-    Tick(g_state.a_ui_fps,     g_state.ui_fps,             dt);
     Tick(g_state.a_ui_dark,    g_state.ui_dark_mode,       dt);
-    Tick(g_state.a_ui_sep,     g_state.ui_show_sep,        dt);
+    Tick(g_state.a_farm_on,     g_state.farm_on,     dt);
+    Tick(g_state.a_farm_wood,   g_state.farm_wood,   dt);
+    Tick(g_state.a_farm_stone,  g_state.farm_stone,  dt);
+    Tick(g_state.a_farm_metal,  g_state.farm_metal,  dt);
+    Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
+    Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
     ApplyTheme();
 
     if (g_cfgLoadedIdx >= 0 && g_cfgLoadedIdx < kMaxConfigs)
         g_cfgLoadAnim[g_cfgLoadedIdx] += (1.f - g_cfgLoadAnim[g_cfgLoadedIdx]) * 10.f * dt;
-
-    if (g_sprite.texture && SpriteState::Total > 1) {
-        g_sprite.timer += dt;
-        if (g_sprite.timer >= 1.f / SpriteState::FPS) {
-            g_sprite.timer -= 1.f / SpriteState::FPS;
-            g_sprite.frame = (g_sprite.frame + 1) % SpriteState::Total;
-        }
-    }
 
     bool anyOverlayOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
 
@@ -2781,10 +4138,76 @@ void RenderMenu() {
 
     DrawWatermark(dt);
     DrawToast(dt);
+
+    // ---- Режим калибровки зон автофарма ------------------------------------
+    // Меню спрятано; первый тап по экрану записывает позицию зоны (в долях
+    // экрана). Затем — следующая зона или выход из режима.
+    if (g_farmCalib != 0) {
+        float dw = 0.f, dh = 0.f;
+        VisibleScreen(dw, dh);
+        if (dw < 100.f || dh < 100.f) { g_farmCalib = 0; return; }
+        auto* fg = ImGui::GetForegroundDrawList();
+
+        // Затемнение + рамка-акцент.
+        fg->AddRectFilled({0, 0}, {dw, dh}, IM_COL32(0, 0, 0, 90));
+        fg->AddRect({4.f, 4.f}, {dw - 4.f, dh - 4.f}, C::UA(C::Acc(), 0.9f), 10.f, 0, 3.f);
+
+        // Подпись, что тапать.
+        auto* fn = ImGui::GetFont();
+        const char* title = (g_farmCalib == 1)
+            ? XS("Тапни по центру джойстика движения")
+            : XS("Тапни по кнопке огня / атаки");
+        const char* sub = XS("Тап записывает зону. Меню откроется само.");
+        float tfs = ImGui::GetFontSize() * 1.5f;
+        auto tsz = fn->CalcTextSizeA(tfs, FLT_MAX, 0, title);
+        auto ssz = fn->CalcTextSizeA(tfs * 0.62f, FLT_MAX, 0, sub);
+        float ty = dh * 0.16f;
+        // Плашка под текстом, чтобы читалось на любом фоне.
+        float px0 = (dw - ImMax(tsz.x, ssz.x)) * 0.5f - 26.f;
+        float px1 = (dw + ImMax(tsz.x, ssz.x)) * 0.5f + 26.f;
+        fg->AddRectFilled({px0, ty - 18.f}, {px1, ty + tsz.y + 10.f + ssz.y + 18.f},
+                          C::UA(C::Card(), 0.92f), 18.f);
+        fg->AddText(fn, tfs, {(dw - tsz.x) * 0.5f, ty}, C::U(C::Txt()), title);
+        fg->AddText(fn, tfs * 0.62f, {(dw - ssz.x) * 0.5f, ty + tsz.y + 10.f}, C::U(C::Dim()), sub);
+
+        // Пульсирующий маркер текущей сохранённой зоны (если есть).
+        {
+            float zx = -1.f, zy = -1.f;
+            if (g_farmCalib == 1 && g_state.farm_joy_x >= 0.f) { zx = g_state.farm_joy_x * dw; zy = g_state.farm_joy_y * dh; }
+            if (g_farmCalib == 2 && g_state.farm_fire_x >= 0.f) { zx = g_state.farm_fire_x * dw; zy = g_state.farm_fire_y * dh; }
+            if (zx >= 0.f) {
+                float pr = 34.f + 6.f * sinf((float)ImGui::GetTime() * 4.f);
+                fg->AddCircle({zx, zy}, pr, C::UA(C::Acc(), 0.85f), 40, 3.f);
+                fg->AddCircleFilled({zx, zy}, 7.f, C::U(C::Acc()), 20);
+            }
+        }
+
+        // Тап (отпускание пальца) — записываем зону.
+        if (io.MouseReleased[0]) {
+            float rx = io.MousePos.x / dw, ry = io.MousePos.y / dh;
+            if (rx > 0.f && rx < 1.f && ry > 0.f && ry < 1.f) {
+                if (g_farmCalib == 1) {
+                    g_state.farm_joy_x = rx; g_state.farm_joy_y = ry;
+                    ShowToast(XS("Зона джойстика сохранена"));
+                } else {
+                    g_state.farm_fire_x = rx; g_state.farm_fire_y = ry;
+                    ShowToast(XS("Зона огня сохранена"));
+                }
+                PlaySound(SND_CLICK);
+                g_farmCalib = 0;
+                menu_open = true;
+                // Вернуться прямо в окно автофарма, откуда калибровку запускали.
+                PopoverOpen(XS("Автофарм"), 5);
+                g_input.touchConsumed = true; // этот тап уже отработал
+            }
+        }
+        return; // пока калибруемся, меню не рисуем
+    }
+
     if (!menu_open) return;
 
     const float WW = g_win.w, WH = g_win.h;
-    const float lW_ = 265, hH_ = 66;
+    const float hH_ = Layout::HeaderH;
 
     {
         bool inResize = io.MousePos.x >= g_win.pos.x + g_win.w - R::Card - 14.f
@@ -2812,15 +4235,12 @@ void RenderMenu() {
     {
         if (!io.MouseDown[0]) g_win.dragging = false;
 
-        const float tabsStartY = g_win.pos.y + 120.f;
-
         if (!g_win.dragging && io.MouseDown[0] && !(g_sheet.visible || (g_pop.visible && !g_pop.closing)) && !g_win.resizing) {
             float tx = io.MouseClickedPos[0].x, ty = io.MouseClickedPos[0].y;
-            bool inLeftHeader = tx >= g_win.pos.x      && tx < g_win.pos.x + lW_
-                             && ty >= g_win.pos.y       && ty < tabsStartY;
-            bool inRHdr       = tx >= g_win.pos.x + lW_ && tx < g_win.pos.x + g_win.w
-                             && ty >= g_win.pos.y        && ty < g_win.pos.y + hH_;
-            if (inLeftHeader || inRHdr) {
+            // Тащим окно за верхнюю шапку (по всей ширине).
+            bool inHdr = tx >= g_win.pos.x && tx < g_win.pos.x + g_win.w
+                      && ty >= g_win.pos.y && ty < g_win.pos.y + hH_;
+            if (inHdr) {
                 float dx = io.MousePos.x - io.MouseClickedPos[0].x;
                 float dy = io.MousePos.y - io.MouseClickedPos[0].y;
                 if (fabsf(dx) + fabsf(dy) > 8.f) {
@@ -2861,142 +4281,215 @@ void RenderMenu() {
     }
 
     ImVec2 wp = g_win.pos;
-    auto*  dl = ImGui::GetWindowDrawList();
-    const float lW = 265, cH = g_win.h, cW = g_win.w - lW;
+    // Панель вкладок: слева (вертикальный столбец) или снизу (строка по
+    // центру) — выбирается в «Опциях». Контент занимает остальную площадь.
+    const bool  panelLeft = g_state.ui_panel_left;
+    const float botH = Layout::BottomH;
+    const float railW = Layout::RailW;
+    const float cH = panelLeft ? g_win.h : g_win.h - botH;
+    const float cW = panelLeft ? g_win.w - railW : g_win.w;
+    const float cX0 = panelLeft ? railW : 0.f;
 
     g_state.tab_alpha += (1.f - g_state.tab_alpha) * 5.f * dt;
     if (g_state.tab_alpha > .999f) g_state.tab_alpha = 1.f;
     SpringTick(g_state.tab_slide, g_state.tab_slide_vel, 0.f, dt);
 
-    ImGui::SetCursorPos({0, 0});
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
-    ImGui::BeginChild("##lp", {lW, cH}, false, ImGuiWindowFlags_NoScrollbar);
-    auto  lpPos = ImGui::GetWindowPos();
-    auto* ldl   = ImGui::GetWindowDrawList();
-    ldl->AddRectFilled(lpPos, {lpPos.x + lW, lpPos.y + cH}, C::U(C::LeftBg()), R::Card);
-
-    {
-        float t = EaseInOut(g_themeT);
-        ImU32 fill[3] = {IM_COL32(255, 95, 87, 255), IM_COL32(255, 189, 46, 255), IM_COL32(40, 200, 64, 255)};
-        for (int i = 0; i < 3; i++) {
-            float cx2 = lpPos.x + 28.f + i * 34.f, cy2 = lpPos.y + 32.f;
-            ldl->AddCircleFilled({cx2, cy2}, 13.f, fill[i], 48);
-            ImU32 bordCol = IM_COL32(
-                int(Lerpf(0,   255, t)),
-                int(Lerpf(0,   255, t)),
-                int(Lerpf(0,   255, t)),
-                int(Lerpf(180, 210, t))
-            );
-            ldl->AddCircle({cx2, cy2}, 14.2f, bordCol, 48, 1.5f);
-        }
-    }
-
-    {
-        const float Rad = lW * 0.28f;
-        float cx = lpPos.x + lW * 0.5f, cy = lpPos.y + 30.f + 20.f + Rad + 10.f;
-        ldl->AddCircleFilled({cx + 2.f, cy + 3.f}, Rad, IM_COL32(0, 0, 0, 20), 64);
-        ldl->AddCircleFilled({cx, cy}, Rad, C::U(C::Card()), 64);
-        if (g_sprite.texture) {
-            int col = g_sprite.frame % SpriteState::Cols;
-            int row = g_sprite.frame / SpriteState::Cols;
-            float u0 = col       / (float)SpriteState::Cols;
-            float u1 = (col + 1) / (float)SpriteState::Cols;
-            float v0 = row       / (float)SpriteState::Rows;
-            float v1 = (row + 1) / (float)SpriteState::Rows;
-            ldl->AddImageRounded((ImTextureID)(intptr_t)g_sprite.texture,
-                {cx - Rad, cy - Rad}, {cx + Rad, cy + Rad}, {u0, v0}, {u1, v1}, IM_COL32(255, 255, 255, 255), Rad);
-        } else {
-            ImU32 avatarBg   = g_darkTheme ? IM_COL32(40, 60, 90, 255)   : IM_COL32(200, 218, 240, 255);
-            ImU32 avatarFig  = g_darkTheme ? IM_COL32(70, 100, 145, 255)  : IM_COL32(120, 148, 185, 255);
-            ldl->AddCircleFilled({cx, cy}, Rad, avatarBg, 64);
-            float hR = Rad * 0.30f;
-            ldl->AddCircleFilled({cx, cy - Rad * 0.22f}, hR, avatarFig, 32);
-            ldl->AddRectFilled({cx - Rad * 0.42f, cy + Rad * 0.08f}, {cx + Rad * 0.42f, cy + Rad * 0.82f}, avatarFig, Rad * 0.22f);
-        }
-        {
-            float t = EaseInOut(g_themeT);
-            float ringAlpha = Lerpf(0.72f, 0.90f, t);
-            ldl->AddCircle({cx, cy}, Rad + 2.5f, C::UA(C::Acc(), ringAlpha), 64, 2.f);
-        }
-        ImGui::SetCursorPosY(30.f + 20.f + Rad * 2.f + 10.f + 18.f);
-    }
-
-    {
-        float y = ImGui::GetCursorScreenPos().y;
-        ldl->AddLine({lpPos.x + 20.f, y}, {lpPos.x + lW - 20.f, y}, C::U(C::Sep()), 0.8f);
-        ImGui::Dummy({1.f, 2.f});
-    }
-
-    const char* tabNames[5] = {
-        XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Конфиги"), XS("Настройки")
+    // Короткие и понятные названия вкладок (индекс = id вкладки).
+    const char* tabNames[kTabCount] = {
+        XS("Меню"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")
     };
-    const float tabH = Layout::TabH, tabPad = Layout::TabPad;
+    // Вкладка «Меню» (id 0) удалена: её функционал переехал в «Опции».
+    // id контента вкладок не меняются — конфиги и логика остаются как были.
+    static constexpr int kTabShown = 5;
+    static constexpr int kTabOrder[kTabShown] = {1, 2, 3, 4, 5};
 
-    ImGui::Dummy({1.f, 6.f});
-    for (int i = 0; i < 5; i++) {
-        auto pos2 = ImGui::GetCursorScreenPos();
-        tab_rects[i] = {pos2.y};
-        char tabId[16];
-        snprintf(tabId, sizeof(tabId), "##tab%d", i);
-        ImGui::InvisibleButton(tabId, {lW, tabH});
+    // Иконка вкладки + подпись, по центру ячейки (общая для обеих панелей).
+    auto DrawTabCell = [&](ImDrawList* fdl, int i, float cellX, float cellY,
+                           float cellW, float cellH, float iconSize, float lblFS) {
+        bool   active = (i == g_state.cur_tab);
+        ImVec4 col    = active ? C::Acc() : C::Dim();
+        auto   tsz    = ImGui::GetFont()->CalcTextSizeA(lblFS, FLT_MAX, 0, tabNames[i]);
+        float  blockH = iconSize + 6.f + tsz.y;
+        float  iconY  = cellY + (cellH - blockH) * 0.5f;
+        float  cxr    = cellX + cellW * 0.5f;
+        if (i == 3) {
+            // У «Разное» своя векторная иконка (сетка 2x2), чтобы не
+            // совпадала с иконкой «Конфиги» из общего атласа.
+            float half = iconSize * 0.5f;
+            float gx0 = cxr - half, gy0 = iconY;
+            float cell = iconSize * 0.44f, gap2 = iconSize - cell * 2.f;
+            ImU32 gcol = C::UA(C::Acc(), active ? 1.f : 0.55f);
+            float rr = cell * 0.3f;
+            fdl->AddRectFilled({gx0, gy0}, {gx0 + cell, gy0 + cell}, gcol, rr);
+            fdl->AddRectFilled({gx0 + cell + gap2, gy0}, {gx0 + iconSize, gy0 + cell}, gcol, rr);
+            fdl->AddRectFilled({gx0, gy0 + cell + gap2}, {gx0 + cell, gy0 + iconSize}, gcol, rr);
+            // Четвёртый квадрат — контурный, чтобы иконка читалась как «прочее».
+            fdl->AddRect({gx0 + cell + gap2, gy0 + cell + gap2}, {gx0 + iconSize, gy0 + iconSize}, gcol, rr, 0, 2.f);
+        } else if (g_tabIcons[i]) {
+            ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
+            ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
+            fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax,
+                {0,0}, {1,1}, IM_COL32(255, 255, 255, active ? 255 : 165), 9.f);
+        } else {
+            // Заглушка: скруглённый квадрат с первой буквой вкладки.
+            ImVec2 iMin = {cxr - iconSize * 0.5f, iconY};
+            ImVec2 iMax = {cxr + iconSize * 0.5f, iconY + iconSize};
+            fdl->AddRectFilled(iMin, iMax, C::UA(C::Acc(), active ? 0.9f : 0.35f), 9.f);
+            char letter[8] = {};
+            int gl = 0;
+            letter[gl++] = tabNames[i][0];
+            if ((unsigned char)tabNames[i][0] >= 0xC0) letter[gl++] = tabNames[i][1];
+            float gfs = iconSize * 0.55f;
+            auto gsz = ImGui::GetFont()->CalcTextSizeA(gfs, FLT_MAX, 0, letter);
+            fdl->AddText(ImGui::GetFont(), gfs,
+                {cxr - gsz.x * 0.5f, iconY + (iconSize - gsz.y) * 0.5f},
+                IM_COL32(255, 255, 255, active ? 255 : 200), letter);
+        }
+        fdl->AddText(ImGui::GetFont(), lblFS,
+            {cxr - tsz.x * 0.5f, iconY + iconSize + 6.f}, C::U(col), tabNames[i]);
+    };
+
+    auto TabTap = [&](int i) {
         if (WasTappedHere() && !IsScrollDragging() && !g_input.touchConsumed && g_state.cur_tab != i) {
             g_state.cur_tab       = i;
             g_state.tab_alpha     = 0.f;
             g_state.tab_slide     = 50.f;
             g_state.tab_slide_vel = 0.f;
             g_scrollMain          = {};
+            PlaySound(SND_CLICK);
         }
-    }
+    };
 
-    {
-        float targetRelY = tab_rects[g_state.cur_tab].sy - wp.y;
-        if (pill_y < 0.f) { pill_y = targetRelY; pill_vel = 0.f; }
-        SpringTick(pill_y, pill_vel, targetRelY, dt);
-    }
-    float pill_screen_y = wp.y + pill_y;
+    if (panelLeft) {
+        // ---- Левая панель вкладок (вертикальный столбец по центру) ------
+        ImGui::SetCursorPos({0, 0});
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+        ImGui::BeginChild("##lp", {railW, WH}, false, ImGuiWindowFlags_NoScrollbar);
+        auto  lpPos = ImGui::GetWindowPos();
+        auto* ldl   = ImGui::GetWindowDrawList();
+        ldl->AddRectFilled(lpPos, {lpPos.x + railW, lpPos.y + WH}, C::U(C::LeftBg()), R::Card,
+                           ImDrawFlags_RoundCornersLeft);
+        ldl->AddLine({lpPos.x + railW, lpPos.y + 12.f}, {lpPos.x + railW, lpPos.y + WH - 12.f},
+                     C::UA(C::Sep(), 0.8f), 1.f);
 
-    {
-        auto*       fdl = ImGui::GetForegroundDrawList();
-        const float pad = 8.f, pR = R::Pill;
-        float px0 = wp.x + pad, px1 = wp.x + lW - pad;
-        float py   = pill_screen_y, ph = tabH;
-        float py0  = py + tabPad - 4.f, py1 = py + ph - tabPad + 4.f;
-        fdl->AddRectFilled({px0, py0}, {px1, py1}, C::U(C::Card()), pR);
-        fdl->AddRect({px0, py0}, {px1, py1}, C::U(C::Acc()), pR, 0, 4.f);
-    }
+        const float tabH   = Layout::TabHV;
+        const float colH   = tabH * kTabShown;
+        const float startY = ImMax(0.f, (WH - colH) * 0.5f);
 
-    {
-        auto* fdl = ImGui::GetForegroundDrawList();
-        const float iconSize = 52.f;
-        const float gap      = 16.f;
-        const float leftPad  = 18.f;
-        const float startX   = wp.x + leftPad;
-        for (int i = 0; i < 5; i++) {
-            float    py  = tab_rects[i].sy;
-            ImVec4   col = (i == g_state.cur_tab) ? C::Acc() : C::Dim();
-            const float tfs = ImGui::GetFontSize() * 1.15f;
-            auto tsz = ImGui::GetFont()->CalcTextSizeA(tfs, FLT_MAX, 0, tabNames[i]);
-            float centerY = py + tabH * 0.5f;
-            if (g_tabIcons[i]) {
-                ImVec2 iMin = {startX, centerY - iconSize * 0.5f};
-                ImVec2 iMax = {startX + iconSize, centerY + iconSize * 0.5f};
-                fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax, {0,0}, {1,1}, IM_COL32(255,255,255,255), 10.f);
+        for (int s = 0; s < kTabShown; s++) {
+            const int i = kTabOrder[s];
+            ImGui::SetCursorPos({0, startY + s * tabH});
+            auto pos2 = ImGui::GetCursorScreenPos();
+            tab_rects[i] = {pos2.y};
+            char tabId[16];
+            snprintf(tabId, sizeof(tabId), "##tab%d", i);
+            ImGui::InvisibleButton(tabId, {railW, tabH});
+            TabTap(i);
+        }
+
+        // Пружинная «пилюля» активной вкладки скользит по вертикали.
+        {
+            float targetRel = tab_rects[g_state.cur_tab].sx - wp.y;
+            if (pill_y < 0.f) { pill_y = targetRel; pill_vel = 0.f; }
+            SpringTick(pill_y, pill_vel, targetRel, dt);
+        }
+        float pillY = wp.y + pill_y;
+
+        {
+            auto*       fdl = ImGui::GetForegroundDrawList();
+            const float pR  = R::Pill;
+            float px0 = lpPos.x + 9.f,  px1 = lpPos.x + railW - 9.f;
+            float py0 = pillY + 7.f,    py1 = pillY + tabH - 7.f;
+            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::U(C::Card()), pR);
+            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), pR);
+            fdl->AddRect({px0, py0}, {px1, py1}, C::UA(C::Acc(), 0.5f), pR, 0, 1.5f);
+            // Короткая акцентная полоска на левом краю окна.
+            float icy = (py0 + py1) * 0.5f;
+            fdl->AddRectFilled({lpPos.x - 1.f, icy - 16.f}, {lpPos.x + 3.f, icy + 16.f}, C::U(C::Acc()), 2.f);
+        }
+
+        {
+            auto* fdl = ImGui::GetForegroundDrawList();
+            for (int s = 0; s < kTabShown; s++) {
+                const int i = kTabOrder[s];
+                DrawTabCell(fdl, i, lpPos.x, tab_rects[i].sx, railW, tabH, 56.f,
+                            ImGui::GetFontSize() * 0.88f);
             }
-            fdl->AddText(ImGui::GetFont(), tfs,
-                {startX + iconSize + gap, centerY - tsz.y * 0.5f}, C::U(col), tabNames[i]);
         }
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    } else {
+        // ---- Нижняя панель вкладок (строка по центру) --------------------
+        ImGui::SetCursorPos({0, cH});
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+        ImGui::BeginChild("##lp", {WW, botH}, false, ImGuiWindowFlags_NoScrollbar);
+        auto  lpPos = ImGui::GetWindowPos();
+        auto* ldl   = ImGui::GetWindowDrawList();
+        ldl->AddRectFilled(lpPos, {lpPos.x + WW, lpPos.y + botH}, C::U(C::LeftBg()), R::Card,
+                           ImDrawFlags_RoundCornersBottom);
+        ldl->AddLine({lpPos.x + 14.f, lpPos.y}, {lpPos.x + WW - 14.f, lpPos.y},
+                     C::UA(C::Sep(), 0.8f), 1.f);
+
+        // Ряд вкладок строго по центру панели.
+        const float tabW   = Layout::TabW;
+        const float rowW   = tabW * kTabShown;
+        const float startX = (WW - rowW) * 0.5f;
+
+        for (int s = 0; s < kTabShown; s++) {
+            const int i = kTabOrder[s];   // id вкладки в этой позиции панели
+            ImGui::SetCursorPos({startX + s * tabW, 0});
+            auto pos2 = ImGui::GetCursorScreenPos();
+            tab_rects[i] = {pos2.x};
+            char tabId[16];
+            snprintf(tabId, sizeof(tabId), "##tab%d", i);
+            ImGui::InvisibleButton(tabId, {tabW, botH});
+            TabTap(i);
+        }
+
+        // Пружинная «пилюля» активной вкладки скользит по горизонтали.
+        {
+            float targetRelX = tab_rects[g_state.cur_tab].sx - wp.x;
+            if (pill_y < 0.f) { pill_y = targetRelX; pill_vel = 0.f; }
+            SpringTick(pill_y, pill_vel, targetRelX, dt);
+        }
+        float pillX = wp.x + pill_y;
+        float barY  = lpPos.y;
+
+        {
+            auto*       fdl = ImGui::GetForegroundDrawList();
+            const float pR  = R::Pill;
+            float px0 = pillX + 8.f,        px1 = pillX + tabW - 8.f;
+            float py0 = barY + 12.f,        py1 = barY + botH - 14.f;
+            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::U(C::Card()), pR);
+            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), pR);
+            fdl->AddRect({px0, py0}, {px1, py1}, C::UA(C::Acc(), 0.5f), pR, 0, 1.5f);
+            // Короткая акцентная полоска сверху — указывает на активную вкладку.
+            float icx = (px0 + px1) * 0.5f;
+            fdl->AddRectFilled({icx - 16.f, barY - 1.f}, {icx + 16.f, barY + 3.f}, C::U(C::Acc()), 2.f);
+        }
+
+        {
+            auto* fdl = ImGui::GetForegroundDrawList();
+            for (int s = 0; s < kTabShown; s++) {
+                const int i = kTabOrder[s];
+                DrawTabCell(fdl, i, tab_rects[i].sx, barY, tabW, botH, 62.f,
+                            ImGui::GetFontSize() * 0.95f);
+            }
+        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
     }
 
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-
-    ImGui::SetCursorPos({lW, 0});
+    ImGui::SetCursorPos({cX0, 0});
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
     ImGui::BeginChild("##cp", {cW, cH}, false,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     {
-        const char* titles[5] = {XS("Главная"), XS("Аимбот"), XS("Визуалы"), XS("Конфиги"), XS("Настройки")};
+        // Шапка: заголовок вкладки по центру.
+        const char* titles[kTabCount] = {XS("Меню"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")};
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
         const float hH = Layout::HeaderH;
@@ -3037,7 +4530,7 @@ void RenderMenu() {
         if (g_state.tab_alpha < 0.999f) {
             float fadeA = 1.f - g_state.tab_alpha;
             cdl->AddRectFilled(cpPos, {cpRight, cpPos.y + areaH},
-                C::UA(C::Bg(), fadeA), R::Card, ImDrawFlags_RoundCornersBottomRight);
+                C::UA(C::Bg(), fadeA), R::Card, ImDrawFlags_RoundCornersTop);
         }
 
         s_maxScroll = ImMax(0.f, contentH - (areaH - 4.f));
@@ -3151,11 +4644,28 @@ int main(int argc, char* argv[]) {
     AudioInit();
     if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
         Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
+    // Если полноценный тач не поднялся с первого раза (гонка за /dev/uinput
+    // или grab на старте — обычное дело сразу после запуска игры), чит раньше
+    // навсегда оставался в read-only: автофарм «просто не идёт», пока не
+    // перезапустишь. Теперь фоновый поток раз в 3 секунды пробует поднять
+    // инъекцию заново, пока не получится.
+    static std::atomic<bool> s_touchRetryRun{true};
+    std::thread([]() {
+        while (s_touchRetryRun.load() && main_thread_flag.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            if (Touch_CanInject()) continue;
+            Touch_Close();
+            if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
+                Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
+        }
+    }).detach();
     start_attach_thread();
     LoadAnimeImage();
     LoadTabIcons();
     ApplyTheme();
     CfgScanDir();
+    ConfigLoadLast();
+    ApplyTheme();
     CenterMenuOnDisplay();
     g_menuFadeIn = 0.f;
 
@@ -3166,12 +4676,12 @@ int main(int argc, char* argv[]) {
         ui::bar::set_game_alpha(0.f);
         DrawEspOverlay();
         UpdateAim(ImGui::GetIO().DeltaTime);
+        UpdateFarm(ImGui::GetIO().DeltaTime);
         RenderMenu();
         drawEnd();
         g_frame_done.store(true);
     }
     while (!g_frame_done.load()) {}
-    if (g_sprite.texture) { glDeleteTextures(1, &g_sprite.texture); g_sprite.texture = 0; }
     stop_attach_thread();
     if (g_esp_attached) {
         esp_reset();

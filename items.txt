@@ -1,0 +1,239 @@
+# id	shortName	displayName  (всего в словаре: 237)
+0	log	Wood
+1	plank	Plank
+2	stick	Stick
+3	coal	Coal
+4	stone	Stone
+5	metal.ore	Metal Ore
+6	metal.fragment	Metal Fragment
+7	sulfur.ore	Sulfur Ore
+8	sulfur	Sulfur
+9	cloth	Cloth
+10	leather	Leather
+11	bone	Bone
+12	scrap	Scrap
+13	fat.animal	Animal Fat
+14	hq.metal.ore	High Quality Metal Ore
+15	hq.metal	High Quality Metal
+16	building.plan	Building Plan
+17	stone.hatchet	Stone Hatchet
+18	building.hammer	Building Hammer
+19	axe	Axe
+20	pickaxe	Pickaxe
+21	torch	Torch
+22	pickaxehammer	Pickaxe
+23	saw.ripper	Axe
+24	chainsaw	Axe
+25	jackhammer	Axe
+26	campfire	Campfire
+27	storage.box	Storage Box
+28	furnace	Furnace
+29	sleeping.bag	Sleeping Bag
+30	wooden.door	Wooden Door
+31	cupboard.tool	Cupboard
+32	workbench	Workbench
+33	anvil	Anvil
+34	ceiling.light	Ceiling Light
+35	door.metal	Metal Door
+36	door.armored	Armored Door
+37	storage.box.large	Large Storage Box
+38	candles	Candles
+39	turret	Turret
+901	sam.turret	SAM Turret
+40	guntrap	Gun Trap
+41	cauldron	Cauldron
+42	vending.machine	Vending Machine
+43	mining.quarry	Mining Quarry
+44	snowball.turret	Snowball Turret
+45	holiday.jukebox	Christmas Jukebox
+46	garage.door	Wooden Door
+47	door.double.wood	Wooden Door
+48	door.double.metal	Wooden Door
+49	door.double.armored	Wooden Door
+50	tower.wood	Mining Quarry
+51	hatch.triangle.metal	Wooden Door
+52	hatch.square.metal	Wooden Door
+53	hatch.triangle.armored	Wooden Door
+54	hatch.square.armored	Wooden Door
+55	bed	Bed
+56	mining.quarry.clan	Mining Quarry
+57	sawmill.clan	Sawmill
+58	scrap.recycler.clan	Scrap Recycler
+59	raw.meat	Raw Meat
+60	cooked.meat	Cooked Meat
+61	rotten.meat	Rotten Meat
+62	water.bottle	Water Bottle
+63	blueberries	Blueberries
+64	pumpkin	Pumpkin
+65	candy.cane	Сandy Сane
+66	halloween.candy	Halloween Candy
+67	ice.shard	Ice Shard
+68	raw.fish	Raw Fish
+69	cooked.fish	Cooked Fish
+70	raw.mushroms	Raw Mushroom
+71	cooked.mushroms	Cooked Mushroom
+72	berries	Berries
+73	event.cupids.potion	Cupid's Potion
+74	event.love.elixir	Love elixir
+75	event.warming.potion	Warming Potion
+76	event.chocolates	Chocolate Candies
+77	event.heart.fragment	Heart Shards
+78	easter.egg	Easter Egg
+79	granola.bar	Granola Bar
+80	bp.exp.item	Granola Bar
+81	f2p.lootbox.rare	Easter Egg
+82	f2p.lootbox.epic	Easter Egg
+83	f2p.lootbox.legendary	Easter Egg
+84	blossom.food.mochi	Cooked Fish
+85	blossom.food.ramen	Cooked Fish
+86	blossom.food.sushi	Cooked Fish
+87	mini.bp.exp.item.big	Granola Bar
+88	mini.bp.exp.item.medium	Granola Bar
+89	mini.bp.exp.item.small	Granola Bar
+216	aloe.food	Aloe Food
+217	cactus.food	Cactus Food
+911	event.cheese	Cheese
+213	high.wooden.wall	High Wooden Wall
+214	high.wooden.gates	High Wooden Gates
+215	keylock	Key Lock
+90	codelock	Code Lock
+91	window.wood	Window
+92	high.stone.gates	High Wooden Gates
+93	high.stone.wall	High Wooden Wall
+94	embrasure.metal	Window
+95	wooden.spear	Wooden Spear
+96	iron.spear	Iron Spear
+97	bone.club	Bone Club
+98	machete	Machete
+99	mace	Mace
+100	wooden.spiked.club	Wooden Spiked Club
+102	assault.rifle	Assault Rifle
+103	revolver	Revolver
+104	desert.eagle	Revolver
+105	shotgun	Shotgun
+106	hunting.rifle	Hunting Rifle
+107	submachine.gun	Submachine Gun
+108	flare.gun	Flare Gun
+109	crossbow	Crossbow
+101	wooden.bow	Wooden Bow
+110	rocket.launcher	Rocket Launcher
+111	explosive.charge	Timed Explosive Charge
+112	ice.spear	Ice Spear
+113	thompson	Assault Rifle
+114	dmr	Assault Rifle
+115	winchester	Hunting Rifle
+116	dvl	Hunting Rifle
+117	hmlmg	Assault Rifle
+118	handmade.pistol	Revolver
+119	kriss.vector	Assault Rifle
+120	steel.ball.gun	Submachine Gun
+225	fn.fal	FN FAL
+121	arrow	Arrow
+122	bolt	Bolt
+123	ammo.rifle	5.56 Rifle Ammo
+124	ammo.pistol	Pistol Ammo
+125	ammo.shotgun	12 Gauge Buckshot
+126	rocket	Rocket
+900	sam.rocket	SAM Rocket
+127	snowball	Snowball
+128	event.grenade.smoke	Grenade Smoke
+129	ammo.handmade.shell	12 Gauge Buckshot
+130	event.grenade.makeshift	Grenade Smoke
+131	tactical.air.marker	Grenade Smoke
+132	grenade.military	Grenade Smoke
+133	ammo.steel.ball	12 Gauge Buckshot
+218	weapon.mod.simple.scope	Assault Rifle
+135	weapon.mod.holosight	Assault Rifle
+136	weapon.mod.optical.scope	Assault Rifle
+137	weapon.mod.compensator	Assault Rifle
+138	weapon.mod.muzzle.brake	Assault Rifle
+139	weapon.mod.ext.magazine	Assault Rifle
+141	cctv.camera	CCTV Camera
+219	empty.beans.can	Empty Beans Can
+142	empty.propane.tank	Empty Propane Tank
+143	empty.tuna.can	Empty Tuna Can
+144	explosives	Explosives
+145	fuel.bottle	Fuel Bottle
+146	gears	Gears
+147	gun.powder	Gun Powder
+148	metal.blade	Metal Blade
+149	metal.pipe	Metal Pipe
+150	metal.spring	Metal Spring
+151	rifle.body	Rifle Body
+152	road.signs	Road Signs
+153	rope	Rope
+154	sewing.kit	Sewing Kit
+155	sheet.metal	Sheet Metal
+156	targeting.computer	Targeting Computer
+157	tarp	Tarp
+158	tech.trash	Tech Trash
+159	hard.drive	Tech Trash
+160	microprocessor	Tech Trash
+161	portable.playstation	Tech Trash
+162	wires	Tech Trash
+163	dmr.body	Rifle Body
+164	smg.body	Rifle Body
+165	factory.fuel	Fuel Bottle
+166	factory.product.common	Empty Propane Tank
+167	factory.product.rare	Empty Propane Tank
+168	factory.product.epic	Empty Propane Tank
+169	wooden.helmet	Wooden Helmet
+170	bone.helmet	Bone Helmet
+171	leather.helmet	Leather Helmet
+172	metal.helmet	Metal Mask
+173	wood.chestplate	Wood Chestplate
+220	bone.chestplate	Bone Chestplate
+175	leather.chestplate	Leather Chestplate
+176	metal.chestplate	Metal Chestplate
+177	wooden.leggings	Wooden Leggings
+178	bone.leggings	Bone Leggings
+179	leather.leggings	Leather Leggings
+180	metal.leggings	Metal Leggings
+181	wooden.sandals	Wooden Sandals
+182	leather.boots	Leather Boots
+183	metal.boots	Metal Boots
+184	bone.boots	Bone Boots
+226	backpack	backpack
+906	backpack.big	backpack.big
+185	hazmat	Hazmat
+186	military.suit	Hazmat
+187	snowman	Snowman
+188	christmas.lights	Christmas Lights
+189	fireworks	Fireworks
+190	buggy	Buggy
+191	copter	Copter
+192	scarecrow	Scarecrow
+193	bandage	Bandage
+194	medkit	Medkit
+195	christmas.tree	Christmas Tree
+196	antiradpills	Anti-Radiation Pills
+197	snow.machine	Snow Machine
+198	sock.garland	Stocking Garland
+199	ice.statue	Ice Statue
+200	statue.shop.stone	Stone statue
+201	winter.sleigh.frosty.shop	Sleigh
+202	event.fireworks	Event Fireworks
+203	event.heart.garland.valentine	Heart Garland
+204	paper.lantern	Fireworks
+205	xmas.lid	Fireworks
+206	sticker	Stocking Garland
+207	event.rose	Fireworks
+208	keycard_planecaptain	keycard_planecaptain
+212	pinata.decor	Pinata
+210	skin.vaucher.skin.bed.events.birthday.monster	keycard_planecaptain
+902	?	keycard_planecaptain
+221	?	keycard_planecaptain
+903	?	keycard_planecaptain
+222	skin.vaucher.skin.sticker.events.birthday.pig	keycard_planecaptain
+904	?	keycard_planecaptain
+223	?	keycard_planecaptain
+224	keycard_militarybase	keycard_militarybase
+912	event.textbook	?
+913	event.whistle	?
+905	owl.statue	Owl Statue
+909	?	keycard_planecaptain
+907	?	keycard_planecaptain
+910	?	keycard_planecaptain
+908	?	keycard_planecaptain
+914	?	keycard_planecaptain
+# записано: 237
