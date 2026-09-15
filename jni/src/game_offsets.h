@@ -343,7 +343,7 @@ inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_
 // day_tod_scan() в game.cpp перебирает его по 1 КБ за кадр и валидирует каждый
 // кандидат по структуре выше. Это НЕ поля, но уезжают они КАЖДЫЙ билд вместе
 // со всеми *_TYPEINFO_RVA — проверить:
-//   python3 tools/offsets/typeinfo_rva.py --so <new>/libil2cpp.so \
+//   python3 tools/offsets/typeinfo_rva.py --so <new>/libil2cpp.so
 //       --script <new>/script.json --methods 2000 UV
 // оба кандидата TOD_Sky (здесь 0xD8DF4C8 и 0xD8DFC98) обязаны попасть в окно.
 // Прошлое окно было 0xD7A0000..0xD840000 — сдвинулось ровно на +0x130000.

@@ -103,8 +103,6 @@ UI_EN = {
         'A tap records the zone. The menu reopens by itself.',
     'Зона джойстика сохранена': 'Joystick zone saved',
     'Зона огня сохранена': 'Fire zone saved',
-    'Отладка': 'Debug', 'Лог фарма': 'Farm log', 'Лог: %s': 'Log: %s',
-    'Лог: Загрузки/farm_debug.log': 'Log: Downloads/farm_debug.log',
     # разное и опции
     'Функции': 'Features', 'Иксрей': 'X-Ray', 'Всегда день': 'Always day',
     'Язык': 'Language', 'Интерфейс': 'Interface', 'Тёмная тема': 'Dark theme',

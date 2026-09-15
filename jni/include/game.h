@@ -202,33 +202,6 @@ struct FarmTarget {
 // таймера: чёрный список, позиции узлов); суммы участков к нему не обязаны
 // сходиться в точности — подтаймеры нужны, чтобы найти виновника, а не свести
 // баланс.
-struct FarmTargetDiag {
-    float total_ms = 0.f;    // весь вызов
-    float scan_ms  = 0.f;    // шаг скана реестра (farm_scan_tick)
-    float reach_ms = 0.f;    // чтение орудия в руках (read_local_melee_reach)
-    float loop_ms  = 0.f;    // перебор узлов и выбор лучшего
-    float spot_ms  = 0.f;    // экстеншен крестика + его точка (farm_read_spot)
-    int   reads    = 0;      // syscall'ов чтения за вызов
-    double read_ms = 0.0;    // сколько в них просуммировано
-    // Состояние скана: идёт ли проход сейчас, сколько в нём всего записей и
-    // сколько осталось, сколько условных единиц бюджета истрачено за кадр и
-    // сколько записей пришлось классифицировать всерьёз (не по кешу).
-    int   scan_running = 0;
-    int   scan_total   = 0;
-    int   scan_left    = 0;
-    int   scan_units   = 0;
-    int   scan_new     = 0;
-    int   entities     = 0;  // узлов в рабочем списке
-    int   neg_cache    = 0;  // записей в отрицательном кеше
-    int   blacklisted  = 0;  // узлов в чёрном списке
-    int   spot_source  = 0;  // источник крестика в этом кадре (0 = нет)
-};
-
-// Диагностика обращений к памяти игры: сколько syscall'ов и сколько мс в них
-// ушло с момента последнего сброса. Сбрасывается раз в кадр хозяином цикла.
-void        esp_io_meter_reset();
-void        esp_io_meter(int& read_calls, double& read_ms, int& write_calls, double& write_ms);
-void        esp_farm_target_diag(FarmTargetDiag& out);
 // Какие ресурсы добывать: bit0 дерево, bit1 камень, bit2 металл, bit3 сера.
 // 0 выключает скан целиком (никакой лишней работы в кадре).
 void        esp_farm_set_resources(unsigned mask);
