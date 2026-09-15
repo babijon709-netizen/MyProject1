@@ -3621,17 +3621,42 @@ static void UpdateAim(float dt) {
     if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
     else { s_haveLast = false; s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f; }
 
+    // ---- чувствительность пальца: град поворота камеры на пиксель экрана ----
+    // Шаг считается как err / gain, поэтому ЗАВЫШЕННЫЙ запасной коэффициент это
+    // ровно «аим стал медленным»: палец уходит на gain_истинный/gain_запасной
+    // часть нужных пикселей, и остаток ошибки закрывается не за 1-2 кадра, а
+    // экспонентой. Измерено по накопленному сдвигу пальца в логе автофарма
+    // (14.09.2026, 35 свайпов, медиана 0.10 град/px по yaw; p10 0.078, p90 0.178)
+    // — то же самое число выучил камерный контроллер фарма (kCamGainProbe).
+    // Прежнее запасное 0.35 было завышено в 3.5 раза: в логе 16.09.2026 при
+    // exp = 0 остаток падал как 5.47 -> 0.35 град за 0.2 с (12-13 кадров), то
+    // есть в 3.5 раза медленнее, чем позволяет игра, — при 0.10 хватает 1-2
+    // кадров. Учиться на устройстве аиму не из чего: поза камеры и ось выстрела
+    // не читаются (cam_st = 0 во всех строках аима), а базис из матрицы вида
+    // отстаёт на кадр и выучивал коэффициент со сменой знака (0.072 -> 0.347 ->
+    // -0.072) — «аим дёргается». Пока настоящей оси нет, запасное значение и
+    // есть рабочий коэффициент, поэтому оно обязано быть измеренным.
+    //
+    // Считаем его здесь, а не в контроллере: этим же числом пишется exp в логе
+    // (сколько градусов должно было выйти из шага) — по нему видно, попадает ли
+    // коэффициент в чувствительность игры.
+    const float probeGainYaw   = 0.10f;
+    const float probeGainPitch = 0.10f;
+    const bool  learned = (s_gainYaw != 0.f);
+    const float gy = learned ? s_gainYaw : probeGainYaw;
+    const float gp = (s_gainPitch != 0.f) ? s_gainPitch
+                                         : (learned ? fabsf(s_gainYaw) : probeGainPitch);
+
     // Такт с подтверждением: если наш прошлый сдвиг ещё не отразился в
     // камере (игра не отрендерила кадр — низкий FPS), НЕ шлём новую
     // коррекцию: ошибка на экране устаревшая, и вторая поправка по ней —
     // это двойная коррекция, тот самый перелёт-раскачка. Держим палец на
     // месте и ждём реакции камеры (таймаут на случай проглоченного ввода).
     //
-    // Ответ принимаем и за прошлый кадр: поза камеры может читаться до того,
-    // как игра применит наш ввод этого кадра, и без этого запаса каждый шаг ждал
-    // лишний такт — аим вёл цель заметно медленнее, чем может. Настоящий обрыв
-    // ввода всё равно ловится: ответа нет ни в этом кадре, ни в прошлом —
-    // значит игра шаг не отработала.
+    // Ответ принимаем и за прошлый кадр: поза камеры читается до того, как игра
+    // успевает применить наш ввод, и без этого запаса шаг ждал лишний такт.
+    // Настоящий обрыв ввода всё равно ловится: ответа нет ни в этом кадре, ни в
+    // прошлом — значит игра шаг не отработала.
     //
     // Такт работает только когда углы есть (cam_st != 0). Без настоящей оси
     // s_pendDx обнуляется каждый кадр (см. ветку haveCam выше), поэтому шаг
@@ -3645,7 +3670,7 @@ static void UpdateAim(float dt) {
         if (s_pendTime < 0.25f) {
             Touch_Move(s_fx, s_fy);   // держим тач живым, ничего не двигаем
             farmlog::aimLine(best.yaw, best.pitch, s_lastDx, s_lastDy,
-                             s_lastDx * s_gainYaw, -s_lastDy * s_gainPitch,
+                             s_lastDx * gy, -s_lastDy * gp,
                              camYawDelta, camPitchDelta, s_fx, s_fy, 2,
                              esp_camera_state());
             return;
@@ -3718,14 +3743,6 @@ static void UpdateAim(float dt) {
     if (k > 1.f) k = 1.f;
     if (k < 0.05f) k = 0.05f;
 
-    // Gain (deg per px). Until it has been measured, assume a HIGH in-game
-    // sensitivity so the first probe move can only under-shoot; the true gain
-    // is learned from that move and the next frame snaps the rest of the way.
-    const float probeGain = 0.35f;
-    const bool  learned = (s_gainYaw != 0.f);
-    float gy = learned ? s_gainYaw : probeGain;
-    float gp = (s_gainPitch != 0.f) ? s_gainPitch : (learned ? fabsf(s_gainYaw) : probeGain);
-
     float dx =  best.yaw   * k / gy;
     float dy = -best.pitch * k / gp;
 
@@ -3763,7 +3780,7 @@ static void UpdateAim(float dt) {
     if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
         farmlog::aimEvent("палец на краю (%.0f,%.0f) — перенос в центр", (double)s_fx, (double)s_fy);
         farmlog::aimLine(best.yaw, best.pitch, s_lastDx, s_lastDy,
-                         s_lastDx * s_gainYaw, -s_lastDy * s_gainPitch,
+                         s_lastDx * gy, -s_lastDy * gp,
                          camYawDelta, camPitchDelta, s_fx, s_fy, 3,
                          esp_camera_state());
         Touch_Up();
@@ -3779,7 +3796,7 @@ static void UpdateAim(float dt) {
     s_pendDx += dx; s_pendDy += dy;   // ждёт отработки камерой (ack-такт)
     Touch_Move(s_fx, s_fy);
     farmlog::aimLine(best.yaw, best.pitch, dx, dy,
-                     dx * s_gainYaw, -dy * s_gainPitch,
+                     dx * gy, -dy * gp,
                      camYawDelta, camPitchDelta, s_fx, s_fy, 0,
                      esp_camera_state());
 }
@@ -4418,10 +4435,12 @@ static void event(const char* fmt, ...) {
 //     на месте, цель уже на крестике), 2 ждёт ответа камеры (шаг послан, но
 //     камера ещё не повернулась), 3 палец на краю зоны — перенос в центр,
 //     4 цель потеряна, палец держим;
-//   gain/gainP — выученная чувствительность (град/px); 0 = ещё не выучена;
+//   gain/gainP — чувствительность (град/px): выученная, а пока её нет — запасная
+//     измеренная (0.10, см. probeGainYaw в UpdateAim); 0 = ещё не выучена;
 //   err — остаток до цели по yaw и pitch, градусы (со стороны видно как «хвост»);
 //   sent — сдвиг пальца, посланный в прошлом такте (px), exp — сколько градусов
-//     камеры из этого должно получиться по выученному gain;
+//     камеры из этого должно получиться по коэффициенту, которым считается шаг
+//     (при запасном 0.10 |exp| ≈ |err|, при 0.35 было бы в 3.5 раза меньше);
 //   cam — на сколько градусов камера реально повернулась в этом кадре;
 //     расхождение exp и cam — и есть ошибка чувствительности/ответа игры;
 //   f — где стоит палец (px), cam_st — откуда аим взял углы камеры: бит0 поза
