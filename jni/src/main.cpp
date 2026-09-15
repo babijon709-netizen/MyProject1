@@ -5297,36 +5297,24 @@ static const char* kTabTitles[kTabCount] = {
     XS("Меню"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")
 };
 
-// Ячейка вкладки в левой панели: иконка слева и крупная жирная подпись справа.
-// Иконка 60 px — в 1.5 раза больше прежних 40. Ширина панели считается так,
-// чтобы влезли обе (см. RailTabsW), иначе подпись пришлось бы ужимать.
+// Ячейка вкладки в левой панели: иконка слева и крупная подпись справа.
+// Иконка 60 px — в 1.5 раза больше прежних 40. Подпись — обычным начертанием
+// (шрифт в сборке один, полужирного нет и подделывать его мы не будем) в два
+// раза крупнее базового кегля панели. Ширина панели считается так, чтобы
+// влезли и крупная иконка, и такая подпись (см. RailTabsW).
 static const float kRailIcon = 60.f;    // сторона иконки вкладки
-static const float kRailFS   = 1.55f;   // кегль подписи от базового (0.88 от кегля меню)
+static const float kRailFS   = 2.f;     // кегль подписи от базового (0.88 от кегля меню)
 static const float kRailPadL = 14.f;    // отступ иконки от края панели
 static const float kRailPadR = 10.f;    // отступ текста от края панели
 static const float kRailGap  = 12.f;    // зазор между иконкой и подписью
 
-// Добор «жирности» для подписи: у Roboto в сборке одно начертание, поэтому
-// толщина набирается проходами текста со сдвигом (см. DrawTabText). Добор
-// растёт вместе с кеглем и учтён в расчёте ширины, иначе текст с утолщением
-// вылезал бы за панель.
-static float RailBold(float fs) { return ImMax(0.5f, fs * 0.017f); }
-
 // Сколько места нужно ячейкам левой панели: отступ + иконка + зазор + самая
 // длинная подпись (вкладка 0 «Меню» не показывается, она не в счёт) + отступ.
 static float RailTabsW() {
-    const float baseFS = ImGui::GetFontSize() * 0.88f;
-    const float fs     = baseFS * kRailFS;
-    const float bold   = RailBold(fs);
+    const float fs = ImGui::GetFontSize() * 0.88f * kRailFS;
     float worst = 0.f;
-    for (int k = 1; k < kTabCount; ++k) {
-        const char* t = kTabTitles[k];
-        float w = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, t).x;
-        int glyphs = 0;
-        for (const char* c = t; *c; ++c)
-            if (((unsigned char)*c & 0xC0) != 0x80) ++glyphs;
-        worst = ImMax(worst, w + glyphs * bold);
-    }
+    for (int k = 1; k < kTabCount; ++k)
+        worst = ImMax(worst, ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, kTabTitles[k]).x);
     return kRailPadL + kRailIcon + kRailGap + worst + kRailPadR;
 }
 
@@ -5761,47 +5749,28 @@ void RenderMenu() {
     // набирается проходами текста со сдвигом (см. DrawTabText) — у Roboto в
     // сборке одно начертание, полужирного файла нет.
     struct RailCell { float icon = kRailIcon, fs = 20.f, padL = kRailPadL, gap = kRailGap,
-                      padR = kRailPadR, bold = 0.f; };
+                      padR = kRailPadR; };
     auto RailMetrics = [&](float railW) -> RailCell {
         RailCell m;
         const float baseFS = ImGui::GetFontSize() * 0.88f;   // базовый кегль панели
-        const float want   = baseFS * kRailFS;               // цель — крупная подпись
-        // Ширина текста + запас на утолщение (по букве на проход). Если панель
-        // уже, чем посчитано в RailTabsW (узкий экран), кегль и иконка
-        // ужимаются: сначала меньше становится иконка, потом подпись.
+        const float want   = baseFS * kRailFS;               // цель — вдвое крупнее
+        // Если панель уже, чем посчитано в RailTabsW (узкий экран), кегль и
+        // иконка ужимаются: сначала меньше становится иконка, потом подпись.
         auto widest = [&](float fs) {
             float worst = 0.f;
-            for (int k = 0; k < kTabShown; ++k) {
-                const char* t = tabNames[kTabOrder[k]];
-                float w = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, t).x;
-                int glyphs = 0;
-                for (const char* c = t; *c; ++c)
-                    if (((unsigned char)*c & 0xC0) != 0x80) ++glyphs;
-                worst = ImMax(worst, w + glyphs * RailBold(fs));
-            }
+            for (int k = 0; k < kTabShown; ++k)
+                worst = ImMax(worst, ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0,
+                                                                    tabNames[kTabOrder[k]]).x);
             return worst;
         };
         for (float fs = want; fs > baseFS; fs -= 1.f) {
             for (float icon = kRailIcon; icon >= 45.f; icon -= 5.f) {
                 const float avail = railW - m.padL - m.padR - icon - m.gap;
-                if (avail > 0.f && widest(fs) <= avail) {
-                    m.icon = icon; m.fs = fs; m.bold = RailBold(fs); return m;
-                }
+                if (avail > 0.f && widest(fs) <= avail) { m.icon = icon; m.fs = fs; return m; }
             }
         }
-        m.icon = 45.f; m.fs = baseFS; m.bold = RailBold(baseFS);   // узкая панель
+        m.icon = 45.f; m.fs = baseFS;      // узкая панель — базовый кегль
         return m;
-    };
-
-    // Текст подписи. Жирность — несколькими проходами со сдвигом в доли
-    // пикселя: край букв утолщается и читается как полужирный.
-    auto DrawTabText = [](ImDrawList* dl, ImFont* f, float fs, ImVec2 p, ImU32 col,
-                          const char* t, float bold) {
-        dl->AddText(f, fs, p, col, t);
-        if (bold <= 0.f) return;
-        dl->AddText(f, fs, {p.x + bold, p.y}, col, t);
-        dl->AddText(f, fs, {p.x + bold * 0.5f, p.y + bold}, col, t);
-        dl->AddText(f, fs, {p.x, p.y + bold}, col, t);
     };
 
     // Ячейка вкладки: иконка + подпись. В нижней панели — иконка сверху,
@@ -5811,7 +5780,7 @@ void RenderMenu() {
     // длинные подписи («Конфиги») не вылезают за панель.
     auto DrawTabCell = [&](ImDrawList* fdl, int i, float cellX, float cellY,
                            float cellW, float cellH, float iconSize, float lblFS,
-                           bool horiz = false, float bold = 0.f,
+                           bool horiz = false,
                            float padL0 = 0.f, float padR0 = 0.f, float gap0 = 0.f) {
         const bool   active = (i == g_state.cur_tab);
         const ImVec4 col    = active ? C::Acc() : C::Dim();
@@ -5829,7 +5798,7 @@ void RenderMenu() {
             // Подгонка — только на совсем узкой панели: обычно размеры уже
             // посчитаны в RailMetrics под самую длинную подпись.
             const float avail = cellW - padL - padR - gap;
-            for (int it = 0; it < 4 && icoW + labelW(fs) + bold * 8.f > avail; ++it) {
+            for (int it = 0; it < 4 && icoW + labelW(fs) > avail; ++it) {
                 const float k = ImMax(0.6f, avail / ImMax(1.f, icoW + labelW(fs)));
                 icoW = ImMax(24.f, icoW * k);
                 fs   = ImMax(12.f, fs * ImMax(0.75f, k));
@@ -5879,7 +5848,7 @@ void RenderMenu() {
                 {icoX + icoW * 0.5f - gsz.x * 0.5f, icoY + (icoH - gsz.y) * 0.5f},
                 IM_COL32(255, 255, 255, active ? 255 : 200), letter);
         }
-        DrawTabText(fdl, font, fs, lpos, C::U(col), tabNames[i], bold);
+        fdl->AddText(font, fs, lpos, C::U(col), tabNames[i]);
     };
 
     auto TabTap = [&](int i) {
@@ -5964,7 +5933,7 @@ void RenderMenu() {
                 // Иконка слева, подпись справа — как в боковых панелях macOS.
                 // Кегль и иконка посчитаны под ширину панели (RailMetrics).
                 DrawTabCell(fdl, i, lpPos.x, tab_rects[i].sx, railW, tabH,
-                            railM.icon, railM.fs, true, railM.bold,
+                            railM.icon, railM.fs, true,
                             railM.padL, railM.padR, railM.gap);
             }
         }
