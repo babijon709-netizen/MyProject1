@@ -39,6 +39,9 @@
 #include "Blur/Blur.h"
 #include "Android_touch/TouchHelperA.h"   // счётчики Upload (диагностика лага)
 
+// Аватарка-видео в кружке слева сверху (кадры вшиты, см. VidAvatar.cpp).
+#include "VidAvatar.h"
+
 #if __has_include("media/audio.h")
 #  include "media/audio.h"
 #  define AUDIO_AVAILABLE
@@ -552,6 +555,10 @@ void ApplyTheme() {
     c[ImGuiCol_NavWindowingHighlight] = {0, 0, 0, 0};
     c[ImGuiCol_Separator]             = C::Sep();
 }
+
+// Радиус кружка-аватарки в левом верхнем углу меню (диаметр 88 px в окне
+// шириной 840 — как раз по ширине панели вкладок 128 px с полями).
+static const float kAvatarR = 44.f;
 
 namespace Layout {
     static constexpr float RowH      = 78.f;
@@ -5584,6 +5591,11 @@ void RenderMenu() {
         ldl->AddLine({lpPos.x + railW, lpPos.y + 12.f}, {lpPos.x + railW, lpPos.y + WH - 12.f},
                      C::UA(C::Sep(), 0.8f), 1.f);
 
+        // Кружок с видео — в левом верхнем углу окна, над столбцом вкладок
+        // (у них сверху остаётся запас: столбец центрируется по высоте).
+        VidAvatar::Draw(ldl, lpPos.x + railW * 0.5f, lpPos.y + 6.f + kAvatarR, kAvatarR, dt,
+                        C::UA(C::Acc(), 0.9f), C::U(C::LeftBg()));
+
         const float tabH   = Layout::TabHV;
         const float colH   = tabH * kTabShown;
         const float startY = ImMax(0.f, (WH - colH) * 0.5f);
@@ -5699,22 +5711,30 @@ void RenderMenu() {
     ImGui::BeginChild("##cp", {cW, cH}, false,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
+    // Когда панель вкладок не слева, кружок аватарки рисуется в шапке контента
+    // (там же, где заголовок): полосу шапки под него расширяем, иначе он налез
+    // бы на первый ряд вкладки.
+    const float hdrH = Layout::HeaderH + (panelLeft ? 0.f : (kAvatarR * 2.f + 12.f));
+
     {
         // Шапка: заголовок вкладки по центру.
         const char* titles[kTabCount] = {XS("Меню"), XS("Аим"), XS("ESP"), XS("Разное"), XS("Конфиги"), XS("Опции")};
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
-        const float hH = Layout::HeaderH;
+        const float hH = hdrH;
         const float titleFS = ImGui::GetFontSize() * 1.45f;
         auto tsz = ImGui::GetFont()->CalcTextSizeA(titleFS, FLT_MAX, 0, titles[g_state.cur_tab]);
         cdl->AddText(ImGui::GetFont(), titleFS,
             {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles[g_state.cur_tab]);
+        if (!panelLeft)
+            VidAvatar::Draw(cdl, hp.x + 6.f + kAvatarR, hp.y + 6.f + kAvatarR, kAvatarR, dt,
+                            C::UA(C::Acc(), 0.9f), C::U(C::Bg()));
         ImGui::Dummy({cW, hH});
     }
 
     {
-        const float areaH = cH - Layout::HeaderH;
-        auto cpPos  = ImGui::GetWindowPos(); cpPos.y += Layout::HeaderH;
+        const float areaH = cH - hdrH;
+        auto cpPos  = ImGui::GetWindowPos(); cpPos.y += hdrH;
         const float cpRight = cpPos.x + cW;
 
         bool sheetBlocking = g_sheet.visible || (g_pop.visible && !g_pop.closing);
@@ -5732,7 +5752,7 @@ void RenderMenu() {
         cdl->PushClipRect(cpPos, {cpRight, cpPos.y + areaH - 4.f}, true);
 
         float slideOffset = g_state.tab_slide;
-        ImGui::SetCursorPosY(Layout::HeaderH - g_scrollMain.off + slideOffset);
+        ImGui::SetCursorPosY(hdrH - g_scrollMain.off + slideOffset);
         ImGui::SetCursorPosX(12.f);
 
         if (sheetBlocking) ImGui::BeginDisabled(true);

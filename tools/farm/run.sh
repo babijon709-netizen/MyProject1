@@ -66,7 +66,7 @@ PY
 
 cp jni/include/game.h "$BUILD/game.h"
 g++ -std=gnu++17 -O1 -Wall -Wextra -Wformat=2 -Wno-format-nonliteral \
-    -Wno-unused-parameter -I"$BUILD" -Ijni/include \
+    -Wno-unused-parameter -I"$BUILD" -Ijni/include -Ijni/src \
     -o "$BUILD/ctrl_test" tools/farm/ctrl_test.cpp
 echo "сборка стенда: ОК"
 
