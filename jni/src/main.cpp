@@ -3922,6 +3922,7 @@ static void stopWriterAndClose() {
         g_wcv.notify_all();
         g_writer.join();
     }
+    std::lock_guard<std::mutex> lk(g_wmutex);
     if (!g_f) return;
     fflush(g_f);
     fclose(g_f);
@@ -4178,15 +4179,22 @@ static void resetTransitions(bool keepOff = false) {
 }
 
 static void rotate() {
-    if (!g_f) return;
-    fprintf(g_f, "EV %7.2f ротация: файл полный, прежний кусок уезжает в %s\n",
-            (double)tSec(), g_prev);
-    fflush(g_f);
-    fclose(g_f);
-    g_f = nullptr;
-    remove(g_prev);
-    rename(g_path, g_prev);           // кусок истории остаётся рядом
-    g_bytes = 0;
+    // fclose тут переводит g_f в nullptr, а этот же указатель читает поток кадра
+    // в ensureOpen — поэтому и закрытие, и переименование делаем под замком
+    // канала. ensureOpen зовётся уже ПОСЛЕ его освобождения: mutex не
+    // рекурсивный, из-под своего же замка он бы встал намертво.
+    {
+        std::lock_guard<std::mutex> lk(g_wmutex);
+        if (!g_f) return;
+        fprintf(g_f, "EV %7.2f ротация: файл полный, прежний кусок уезжает в %s\n",
+                (double)tSec(), g_prev);
+        fflush(g_f);
+        fclose(g_f);
+        g_f = nullptr;
+        remove(g_prev);
+        rename(g_path, g_prev);       // кусок истории остаётся рядом
+        g_bytes = 0;
+    }
     ensureOpen();                     // новый файл с новой шапкой
 }
 
