@@ -3836,9 +3836,11 @@ static bool read_local_melee_reach(MeleeReach& out) {
 
 float esp_camera_fov_deg() { return g_cam_fov_deg; }
 
-// Bit 0: camera pose known. Bit 1: pose was derived from the view matrix
-// rather than read from the Transform. Bit 2: the firing reference (look
-// direction from the eye point) is in use instead of the camera axis.
+// Bit 0: camera pose known. Bit 2: the firing reference (look direction from
+// the eye point) is in use instead of the camera axis. Bit 1 не выставляется
+// (там когда-то отмечалась поза, выведенная из матрицы вида) и оставлен, чтобы
+// не разошлись номера битов в разборе строки AIM: cam_st 0 означает «настоящей
+// оси нет» — ровно то, что видит аим (esp_aim_camera_angles).
 int esp_camera_state() {
     return (g_cam_pose_valid ? 1 : 0) | (g_cam_pose_derived ? 2 : 0) | (g_aim_ref_valid ? 4 : 0);
 }
@@ -3962,19 +3964,27 @@ static bool farm_cam_source_ok(const Vec3& p) {
     return dx * dx + dy * dy + dz * dz < 625.0F;
 }
 
-// Углы камеры: поза камеры (Transform), ось выстрела (LookDirection), а если
-// ни то, ни другое не читается — базис из матрицы вида этого кадра.
+// Направление оси -> углы (yaw вокруг мировой вертикали, pitch вверх).
+// Общая часть всех источников: аим и фарм считают угол одинаково.
+static bool angles_from_forward(const Vec3& f, float& yaw_deg, float& pitch_deg) {
+    constexpr float rad2deg = 57.29577951F;
+    float yaw = atan2f(f.x, f.z) * rad2deg;
+    float horiz = sqrtf(f.x * f.x + f.z * f.z);
+    float pitch = atan2f(f.y, horiz) * rad2deg;
+    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return false;
+    yaw_deg = yaw; pitch_deg = pitch;
+    return true;
+}
+
+// Углы камеры для ФАРМА: поза камеры (Transform), ось выстрела (LookDirection),
+// а если ни то, ни другое не читается — базис из матрицы вида этого кадра.
+// Фарм поворачивает камеру медленно и по экранной метке, поэтому базис (отстаёт
+// на кадр) ему подходит; аимботу — нет, у него своя функция ниже.
 //
-// Почему нужны все три. Аимботу углы нужны как обратная связь по времени: он
-// сравнивает поворот камеры со СВОИМ сдвигом пальца и по этому учит
-// чувствительность (град/px) и решает, отработала ли игра прошлый шаг. Без
-// углов вовсе он ведёт вслепую по константе-догадке: и шаг получается в разы
-// меньше нужного, и такт «ждём ответа камеры» срабатывает всегда, потому что
-// «ответа» он не видит, — ведение становится в разы медленнее. На устройстве из
-// лога 14.09.2026 поза камеры и ось выстрела НЕ ЧИТАЮТСЯ вовсе (gain застыл на
-// константе во всех 11932 кадрах фарма), и базис из матрицы вида — единственный
-// источник углов, который там есть. Он отстаёт на кадр, но аим это учитывает
-// (см. такт с подтверждением в UpdateAim: ответ камеры принимается и через кадр).
+// Почему базис вообще нужен. На устройстве из логов 14.09 и 15.09.2026 поза
+// камеры и ось выстрела НЕ ЧИТАЮТСЯ вовсе (cam_st = 0 во всех строках аима), и
+// базис из матрицы вида — единственный источник углов, который там есть: без
+// него фарм висел в «нет позиции камеры».
 //
 // Тот же фильтр мусора, что и у точки прицела: источник с нулевой/улетевшей
 // позицией не годится и для углов, иначе обучение коэффициента камеры хлебнёт
@@ -3987,13 +3997,30 @@ bool esp_camera_angles(float& yaw_deg, float& pitch_deg) {
     // Same reference the aim angles are measured against (firing direction
     // when available), so finger-gain learning and target lead stay consistent.
     const Vec3& f = ok_ref ? g_aim_ref_forward : ok_pose ? g_cam_forward : g_frame_cam_fwd;
-    constexpr float rad2deg = 57.29577951F;
-    float yaw = atan2f(f.x, f.z) * rad2deg;
-    float horiz = sqrtf(f.x * f.x + f.z * f.z);
-    float pitch = atan2f(f.y, horiz) * rad2deg;
-    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return false;
-    yaw_deg = yaw; pitch_deg = pitch;
-    return true;
+    return angles_from_forward(f, yaw_deg, pitch_deg);
+}
+
+// Углы камеры ДЛЯ АИМБОТА: только НАСТОЯЩАЯ ось — поза камеры (Transform) или
+// ось выстрела (LookDirection). Базис из матрицы вида здесь не участвует, хотя
+// фарму он и годится.
+//
+// Почему. Аимбот меряет по этим углам две вещи: чувствительность (град/px,
+// деление поворота камеры на свой сдвиг пальца) и «отработала ли игра прошлый
+// шаг». Базис отстаёт на кадр, и оба измерения по нему врут. В логе 15.09.2026
+// это видно прямо: exp/sent (он же выученный gain) скакал 0.072 -> 0.347 ->
+// -0.072 — со сменой ЗНАКА, — а ход пальца доходил до 162 px за кадр, палец
+// улетал в край экрана (EV «палец на краю ... перенос в центр») и камеру
+// швыряло туда-обратно. Это и есть «аим дёргается».
+//
+// Без настоящей оси аим ведёт цель вслепую запасным коэффициентом и НЕ ждёт
+// ответа камеры (s_camMovedPrev в UpdateAim) — ровно так работала сборка, где
+// он вёл идеально: в том логе cam_st = 0, то есть обучать коэффициент было не
+// на чем, и аим просто шёл к цели фиксированным шагом.
+bool esp_aim_camera_angles(float& yaw_deg, float& pitch_deg) {
+    const bool ok_ref  = g_aim_ref_valid  && farm_cam_source_ok(g_aim_ref_origin);
+    const bool ok_pose = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
+    if (!ok_ref && !ok_pose) return false;
+    return angles_from_forward(ok_ref ? g_aim_ref_forward : g_cam_forward, yaw_deg, pitch_deg);
 }
 
 bool esp_local_eye_position(float& x, float& y, float& z) {

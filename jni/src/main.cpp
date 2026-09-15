@@ -3527,11 +3527,16 @@ static void UpdateAim(float dt) {
     // which time the target has moved on. Use the target's angular velocity
     // relative to the camera (with the camera's own rotation removed) and
     // aim one frame ahead. Reset on target switch.
+    //
+    // Камера здесь та же, что и в обучении коэффициента (esp_aim_camera_angles):
+    // вычитать отстающий базис из матрицы вида из угловой скорости цели нельзя —
+    // в поправку попадал бы его запаздывающий поворот, и прицел уезжал бы в
+    // сторону. Нет настоящей оси — нет и упреждения: так вёл цель эталонный аим.
     static float s_prevTgtYaw = 0.f, s_prevTgtPitch = 0.f, s_prevCamYawT = 0.f, s_prevCamPitchT = 0.f;
     static bool  s_havePrevTgt = false;
     {
         float cy = 0.f, cp = 0.f;
-        bool haveC = esp_camera_angles(cy, cp);
+        bool haveC = esp_aim_camera_angles(cy, cp);
         if (best.id == s_lastId && s_havePrevTgt && haveC) {
             float dCamYaw = cy - s_prevCamYawT;
             while (dCamYaw > 180.f) dCamYaw -= 360.f;
@@ -3574,8 +3579,15 @@ static void UpdateAim(float dt) {
     // ---- learn finger gain (deg per px) from the previous frame ----
     // Measured from the camera's own rotation, so a moving target does not
     // pollute the estimate.
+    //
+    // Углы берём у esp_aim_camera_angles — только настоящая ось (поза камеры или
+    // ось выстрела). Базис из матрицы вида, который фарм получает по
+    // esp_camera_angles, отстаёт на кадр: выученный по нему коэффициент скакал
+    // 0.072 -> 0.347 -> -0.072 (лог 15.09.2026, со сменой знака) и слал палец на
+    // 160 px в край экрана. Нет настоящей оси — аим идёт запасным коэффициентом
+    // без обучения, ровно как в сборке, где он вёл идеально.
     float camYaw = 0.f, camPitch = 0.f;
-    const bool haveCam = esp_camera_angles(camYaw, camPitch);
+    const bool haveCam = esp_aim_camera_angles(camYaw, camPitch);
     float camYawDelta = 0.f, camPitchDelta = 0.f;
     bool camMoved = false;
     if (haveCam && s_haveLast) {
@@ -3615,11 +3627,16 @@ static void UpdateAim(float dt) {
     // это двойная коррекция, тот самый перелёт-раскачка. Держим палец на
     // месте и ждём реакции камеры (таймаут на случай проглоченного ввода).
     //
-    // Ответ принимаем и за прошлый кадр: часть источников углов (базис из
-    // матрицы вида) отдаёт поворот кадра на кадр позже, и без этого запаса
-    // каждый шаг ждал лишний такт — аим вёл цель заметно медленнее, чем может.
-    // Настоящий обрыв ввода всё равно ловится: ответа нет ни в этом кадре, ни в
-    // прошлом — значит игра шаг не отработала.
+    // Ответ принимаем и за прошлый кадр: поза камеры может читаться до того,
+    // как игра применит наш ввод этого кадра, и без этого запаса каждый шаг ждал
+    // лишний такт — аим вёл цель заметно медленнее, чем может. Настоящий обрыв
+    // ввода всё равно ловится: ответа нет ни в этом кадре, ни в прошлом —
+    // значит игра шаг не отработала.
+    //
+    // Такт работает только когда углы есть (cam_st != 0). Без настоящей оси
+    // s_pendDx обнуляется каждый кадр (см. ветку haveCam выше), поэтому шаг
+    // никогда не «ждёт ответа» — иначе аим, у которого углов нет вовсе, стоял бы
+    // по 0.25 с на каждом шаге.
     const bool camAnswered = camMoved || s_camMovedPrev;
     s_camMovedPrev = camMoved;
     if (s_fingerDown && !camAnswered &&
@@ -4407,9 +4424,11 @@ static void event(const char* fmt, ...) {
 //     камеры из этого должно получиться по выученному gain;
 //   cam — на сколько градусов камера реально повернулась в этом кадре;
 //     расхождение exp и cam — и есть ошибка чувствительности/ответа игры;
-//   f — где стоит палец (px), cam_st — откуда взяты углы камеры: бит0 поза
-//     (Transform), бит1 поза из матрицы вида, бит2 ось выстрела. 0 = углов нет
-//     вовсе, аим ведёт вслепую по догадке.
+//   f — где стоит палец (px), cam_st — откуда аим взял углы камеры: бит0 поза
+//     (Transform), бит2 ось выстрела. 0 = настоящей оси нет, аим ведёт цель
+//     вслепую запасным коэффициентом (без обучения). Бит1 (базис из матрицы
+//     вида) не выставляется никогда: этот источник отдаётся только фарму, аиму
+//     он не годится — отстаёт на кадр (лог 15.09.2026: gain со сменой знака).
 void aimEvent(const char* fmt, ...) {
     if (!g_state.farm_log) return;
     if (!ensureOpen()) return;

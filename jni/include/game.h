@@ -267,11 +267,17 @@ float       esp_camera_fov_deg();
 // Absolute camera orientation (degrees; yaw around world up, pitch +up) as of
 // the last esp_get_boxes(). Returns false if no source is readable at all.
 // Источники: поза камеры, ось выстрела, а если ни одно не читается — базис из
-// матрицы вида этого кадра (отстаёт на кадр; аимбот это учитывает в такте с
-// подтверждением, см. UpdateAim).
+// матрицы вида этого кадра. Это источник ФАРМА (медленный доворот по экранной
+// метке): базис отстаёт на кадр, и аимботу он не отдаётся — у аима своя
+// функция esp_aim_camera_angles().
 bool        esp_camera_angles(float& yaw_deg, float& pitch_deg);
-// Diagnostic: bit 0 camera pose known, bit 1 pose derived from the view
-// matrix, bit 2 firing reference in use. See esp_camera_state() in game.cpp.
+// Углы камеры для аима: ТОЛЬКО поза камеры или ось выстрела. false = настоящей
+// оси нет, вести цель можно только вслепую запасным коэффициентом (так аим и
+// вёл её в сборке без правок автофарма). Базис из матрицы вида сюда попасть не
+// может: по нему gain выучивался со сменой знака, и аим дёргался (лог 15.09).
+bool        esp_aim_camera_angles(float& yaw_deg, float& pitch_deg);
+// Diagnostic: bit 0 camera pose known, bit 1 reserved (never set), bit 2 firing
+// reference in use. See esp_camera_state() in game.cpp.
 int         esp_camera_state();
 
 // Позиция глаза локального игрока в мире — та же точка, от которой меряются
