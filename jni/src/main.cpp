@@ -5121,10 +5121,11 @@ void RenderMenu() {
     DrawWatermark(dt);
     DrawToast(dt);
 
-    // ---- Выбор версии игры (стартовый экран) --------------------------------
-    // Показывается при каждом запуске клиента: от версии зависят и оффсеты, и
-    // пакет, к которому подключаться. Пока выбор не сделан, меню не рисуется,
-    // аим и автофарм стоят (g_buildPrompt). Поменять позже можно в «Опциях».
+    // ---- Выбор версии игры (окно при запуске) -------------------------------
+    // Окно в том же виде, что и остальное гуи: та же карточка, тот же радиус и
+    // те же кнопки, что в меню, — только с выбором версии. От версии зависят и
+    // оффсеты, и пакет, к которому подключаться, поэтому пока выбор не сделан,
+    // меню не рисуется, а аим и автофарм стоят (g_buildPrompt).
     if (g_buildPrompt) {
         float dw = 0.f, dh = 0.f;
         VisibleScreen(dw, dh);
@@ -5135,92 +5136,59 @@ void RenderMenu() {
         const float fs = ImGui::GetFontSize();
         const bool betaOk = go::BetaAvailable();
 
-        fg->AddRectFilled({0, 0}, {dw, dh}, IM_COL32(0, 0, 0, 185));
-        fg->AddRect({4.f, 4.f}, {dw - 4.f, dh - 4.f}, C::UA(C::Acc(), 0.9f), 10.f, 0, 3.f);
+        const float padX = Layout::PadX;
+        const float padY = Layout::Inset;
+        const float tfs  = fs * 1.35f;                 // заголовок окна
+        const float btnH = Layout::BtnH;
+        const float gap  = 12.f;
+        const float wW   = ImMax(360.f, ImMin(dw * 0.82f, WW_MIN));
+        const float bw   = (wW - padX * 2.f - gap) * 0.5f;
+        const float wH   = padY + tfs + 20.f + btnH + padY;
+        const float x0   = (dw - wW) * 0.5f;
+        const float y0   = (dh - wH) * 0.5f;
+
+        // Приглушаем игру и рисуем окно — как окно меню, поверх остального.
+        fg->AddRectFilled({0, 0}, {dw, dh}, IM_COL32(0, 0, 0, g_darkTheme ? 150 : 110));
+        fg->AddRectFilled({x0, y0}, {x0 + wW, y0 + wH}, C::U(C::Bg()), R::Card);
+        if (g_state.ui_show_sep)
+            fg->AddRect({x0, y0}, {x0 + wW, y0 + wH}, C::U(C::Sep()), R::Card, 0, 1.2f);
 
         const char* title = XS("Версия игры");
-        const char* sub   = XS("Оффсеты релиза и беты разные — выбери, к какому клиенту подключаться.");
-        float tfs = fs * 1.7f;
         auto tsz = fn->CalcTextSizeA(tfs, FLT_MAX, 0, title);
-        auto ssz = fn->CalcTextSizeA(fs * 0.92f, FLT_MAX, 0, sub);
-        float ty = dh * 0.20f;
-        fg->AddText(fn, tfs, {(dw - tsz.x) * 0.5f, ty}, C::U(C::Txt()), title);
-        fg->AddText(fn, fs * 0.92f, {(dw - ssz.x) * 0.5f, ty + tsz.y + 10.f},
-                    C::U(C::Dim()), sub);
+        fg->AddText(fn, tfs, {x0 + (wW - tsz.x) * 0.5f, y0 + padY}, C::U(C::Txt()), title);
 
-        // Две карточки: релиз и бета. Тап применяет выбор и закрывает экран.
-        const float cardW = ImMin(dw * 0.40f, 460.f);
-        const float cardH = ImMin(dh * 0.26f, 200.f);
-        const float gap   = ImMax(18.f, dw * 0.02f);
-        const float cx0   = (dw - (cardW * 2.f + gap)) * 0.5f;
-        const float cy0   = dh * 0.42f;
+        // Две кнопки — по половине окна каждая, как строки меню.
+        const float by = y0 + padY + tfs + 20.f;
         for (int i = 0; i < 2; ++i) {
             const bool beta = (i == 1);
             const bool enabled = (!beta || betaOk);
             const bool sel = (go::CurrentBuild() == (beta ? go::Build::Beta : go::Build::Release));
-            const float x0 = cx0 + i * (cardW + gap), y0 = cy0;
+            const float bx = x0 + padX + i * (bw + gap);
 
-            fg->AddRectFilled({x0, y0}, {x0 + cardW, y0 + cardH}, C::U(C::Card()), R::Card);
+            fg->AddRectFilled({bx, by}, {bx + bw, by + btnH}, C::U(C::Card()), R::Btn);
             if (sel)
-                fg->AddRectFilled({x0, y0}, {x0 + cardW, y0 + cardH},
-                    C::UA(C::Acc(), g_darkTheme ? 0.18f : 0.10f), R::Card);
-            fg->AddRect({x0, y0}, {x0 + cardW, y0 + cardH},
-                        sel ? C::UA(C::Acc(), 0.9f) : C::U(C::Sep()), R::Card, 0, sel ? 2.5f : 1.2f);
+                fg->AddRectFilled({bx, by}, {bx + bw, by + btnH},
+                    C::UA(C::Acc(), g_darkTheme ? 0.18f : 0.10f), R::Btn);
+            fg->AddRect({bx, by}, {bx + bw, by + btnH},
+                        sel ? C::UA(C::Acc(), 0.9f) : C::U(C::Sep()), R::Btn, 0, sel ? 2.2f : 1.2f);
 
-            const char* name = beta ? XS("Бета") : XS("Релиз");
-            float nfs = fs * 1.5f;
-            auto nsz = fn->CalcTextSizeA(nfs, FLT_MAX, 0, name);
-            fg->AddText(fn, nfs, {x0 + (cardW - nsz.x) * 0.5f, y0 + cardH * 0.22f},
-                        C::UA(enabled ? (sel ? C::Acc() : C::Txt()) : C::Dim(), enabled ? 1.f : 0.6f), name);
-
-            // Подпись под названием: откуда взяты оффсеты этой версии.
-            const char* line = beta ? BuildBetaLine() : XS("сборка релиза");
-            char wrapped[2][160] = {};
-            // В две строки, по словам: у беты в источнике есть и дамп, и отпечаток.
-            {
-                const char* p = line;
-                int row = 0;
-                while (p && *p && row < 2) {
-                    size_t left = strlen(p);
-                    size_t take = left;
-                    char probe[160];
-                    while (take > 8) {
-                        snprintf(probe, sizeof(probe), "%.*s", (int)take, p);
-                        if (fn->CalcTextSizeA(fs * 0.82f, FLT_MAX, 0, probe).x <= cardW - 32.f) break;
-                        take = (size_t)(take * 0.85f);
-                    }
-                    if (take < left) {   // обрезаем по последнему пробелу
-                        size_t cut = take;
-                        while (cut > 0 && p[cut] != ' ') --cut;
-                        if (cut > 8) take = cut;
-                    }
-                    snprintf(wrapped[row], sizeof(wrapped[row]), "%.*s", (int)take, p);
-                    p += take;
-                    while (*p == ' ') ++p;
-                    ++row;
-                }
-            }
-            for (int r = 0; r < 2 && wrapped[r][0]; ++r) {
-                auto lsz = fn->CalcTextSizeA(fs * 0.82f, FLT_MAX, 0, wrapped[r]);
-                fg->AddText(fn, fs * 0.82f,
-                            {x0 + (cardW - lsz.x) * 0.5f, y0 + cardH * 0.52f + r * (fs * 1.1f)},
-                            C::UA(C::Dim(), enabled ? 1.f : 0.6f), wrapped[r]);
-            }
+            const char* name = beta ? "Beta" : "Release";
+            auto nsz = fn->CalcTextSizeA(fs * 1.15f, FLT_MAX, 0, name);
+            fg->AddText(fn, fs * 1.15f,
+                        {bx + (bw - nsz.x) * 0.5f, by + (btnH - fs * 1.15f) * 0.5f},
+                        C::UA(enabled ? (sel ? C::Acc() : C::Txt()) : C::Dim(), enabled ? 1.f : 0.6f),
+                        name);
 
             char id[24];
-            snprintf(id, sizeof(id), "##build%d", i);
-            ImGui::SetCursorScreenPos({x0, y0});
-            ImGui::InvisibleButton(id, {cardW, cardH});
-            if (enabled && WasTappedHere()) {
+            snprintf(id, sizeof(id), "##build_choice%d", i);
+            ImGui::SetCursorScreenPos({bx, by});
+            ImGui::InvisibleButton(id, {bw, btnH});
+            if (enabled && WasTappedHere() && !g_input.touchConsumed) {
                 ApplyBuildChoice(beta ? go::Build::Beta : go::Build::Release);
+                g_input.touchConsumed = true;
                 g_buildPrompt = false;
             }
         }
-
-        const char* hint = XS("Позже можно поменять в «Опциях».");
-        auto hsz = fn->CalcTextSizeA(fs * 0.86f, FLT_MAX, 0, hint);
-        fg->AddText(fn, fs * 0.86f, {(dw - hsz.x) * 0.5f, cy0 + cardH + 24.f},
-                    C::UA(C::Dim(), 0.9f), hint);
 
         return;   // пока выбираем версию, меню не рисуем
     }

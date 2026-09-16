@@ -111,10 +111,6 @@ UI_EN = {
     'Зона огня сохранена': 'Fire zone saved',
     # версия игры (релиз/бета)
     'Версия игры': 'Game version', 'Релиз': 'Release', 'Бета': 'Beta',
-    'сборка релиза': 'release build',
-    'Оффсеты релиза и беты разные — выбери, к какому клиенту подключаться.':
-        'Release and beta use different offsets — pick which client to attach to.',
-    'Позже можно поменять в «Опциях».': 'You can change this later in Options.',
     'Бета недоступна: файл оффсетов не собран':
         'Beta unavailable: offsets file not built',
     'Бета недоступна: не пересчитаны RVA классов':

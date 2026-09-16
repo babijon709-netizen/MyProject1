@@ -65,11 +65,9 @@ static const LangPair kUiEn[] = {
     {"Новый конфиг", "New config"},
     {"Опции", "Options"},
     {"Отмена", "Cancel"},
-    {"Оффсеты релиза и беты разные — выбери, к какому клиенту подключаться.", "Release and beta use different offsets — pick which client to attach to."},
     {"Панель вкладок", "Tab bar"},
     {"Панель слева", "Panel on the left"},
     {"Панель снизу", "Panel at the bottom"},
-    {"Позже можно поменять в «Опциях».", "You can change this later in Options."},
     {"Показывать до", "Show up to"},
     {"Приложение будет закрыто.", "The app will close."},
     {"Противники", "Enemies"},
@@ -109,7 +107,6 @@ static const LangPair kUiEn[] = {
     {"Шея", "Neck"},
     {"Язык", "Language"},
     {"Ящики", "Crates"},
-    {"сборка релиза", "release build"},
 };
 
 // Подписи визуалов ESP: ресурсы, предметы, животные, ящики, оружие.
