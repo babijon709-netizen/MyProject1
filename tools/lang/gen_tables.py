@@ -200,7 +200,7 @@ VISUAL_EN = {
     'Сейф': 'Safe', 'Касса': 'Cash Register', 'Автомат': 'Vending Machine',
     'Контейнер': 'Container', 'Сундук': 'Chest', 'Кейс': 'Case', 'Тайник': 'Stash',
     'Мусорка': 'Trash Can', 'Военный ящик': 'Military Crate',
-    # инструменты и короткие подписи по id предмета (switch в game.cpp)
+    # инструменты и короткие подписи по id предмета (таблица в esp/weapons.cpp)
     'Пила': 'Saw', 'Удочка': 'Fishing Rod', 'Бинокль': 'Binoculars',
     'Камера': 'Camera', 'Фонарик': 'Flashlight', 'Ракетница': 'Flare Gun',
     'Авиамаркер': 'Air Marker', 'Возд. маркер': 'Air Marker',
@@ -281,7 +281,7 @@ def build_text():
     emit('kVisualEn', visual,
          '// Подписи визуалов ESP: ресурсы, предметы, животные, ящики, оружие.\n'
          '// Английские имена оружия взяты из таблицы самой игры (kWeaponNames в\n'
-         '// game.cpp), чтобы подпись совпадала с той, что игра пишет в своём UI.')
+         '// esp/weapons.cpp), чтобы подпись совпадала с той, что игра пишет в своём UI.')
     return buf.getvalue(), visual
 
 

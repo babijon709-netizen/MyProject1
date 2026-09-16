@@ -219,7 +219,7 @@ python3 tools/offsets/typeinfo_rva.py --so /tmp/new/libil2cpp.so --script /tmp/n
   дизассемблированием: `adrp/ldr` → addend релокации `R_AARCH64_RELATIVE` →
   слот в `.data`; оставляем только те, что затем разыменовываются как
   `ldr x8,[klass,#0xB8]` (`Il2CppClass::static_fields`) — ровно так к ним
-  ходит `game.cpp`.
+  ходит `src/esp/*.cpp`.
 * `libil2cpp.7z` сжат LZMA2 + ARM64 BCJ; `py7zr` такой фильтр не умеет,
   поэтому `extract_dumps.sh` вынимает упакованный поток и гонит его через
   `xz --format=raw --arm64`.

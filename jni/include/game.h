@@ -275,7 +275,7 @@ bool        esp_camera_angles(float& yaw_deg, float& pitch_deg);
 // может: по нему gain выучивался со сменой знака, и аим дёргался (лог 15.09).
 bool        esp_aim_camera_angles(float& yaw_deg, float& pitch_deg);
 // Diagnostic: bit 0 camera pose known, bit 1 reserved (never set), bit 2 firing
-// reference in use. See esp_camera_state() in game.cpp.
+// reference in use. See esp_camera_state() in esp/camera.cpp.
 int         esp_camera_state();
 
 // Чувствительность взгляда из настроек клиента (MouseLook.m_Sensitivity).

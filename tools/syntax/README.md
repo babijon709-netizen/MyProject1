@@ -1,7 +1,7 @@
 # Локальная проверка синтаксиса (без NDK)
 
-    sh tools/syntax/check.sh                 # main.cpp, game.cpp, draw.cpp
-    sh tools/syntax/check.sh jni/src/game.cpp
+    sh tools/syntax/check.sh                 # точка входа, все модули, draw.cpp
+    sh tools/syntax/check.sh jni/src/ui/theme.cpp   # один модуль
 
 Что это и зачем. Настоящая сборка — `ndk-build` в CI (arm64-v8a, android-24).
 Ждать её на каждую правку дорого, а ошибки вида «не объявлено имя», «не сошлись
