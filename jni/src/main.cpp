@@ -1078,16 +1078,6 @@ static void RestoreLang() {
     if (!v.empty() && v[0] == 'e') lang::set(lang::LANG_EN);
 }
 
-// ---- Версия игры (релиз или бета) ------------------------------------------
-// Подпись под карточкой беты: пока бета доступна — откуда взяты её оффсеты,
-// иначе — почему её нельзя выбрать (файл не собран / не пересчитаны RVA).
-static const char* BuildBetaLine() {
-    if (go::BetaAvailable()) return go::BetaSource();
-    const char* why = go::BetaReason();
-    return (why && why[0]) ? lang::text(why)
-                           : XS("Бета недоступна: файл оффсетов не собран");
-}
-
 // Оффсеты релиза и беты разные (jni/src/game_offsets_beta.h), и версия
 // выбирается в меню. Выбор хранится рядом с конфигами отдельным файлом, как
 // язык: он нужен ещё до загрузки любого конфига — от него зависит, по какой
@@ -3316,69 +3306,6 @@ float TabContent(int tab, float dt, float cW) {
             ImGui::Dummy({avW, 0.f});
         }
 
-        // ---- Версия игры: релиз или бета ------------------------------------
-        // Та же пара карточек, что на стартовом экране. От версии зависят и
-        // оффсеты (game_offsets_beta.h), и пакет клиента, к которому цепляемся,
-        // поэтому переключение сразу переподключается (см. ApplyBuildChoice).
-        SHdr(XS("Версия игры"));
-        {
-            auto* dl  = ImGui::GetWindowDrawList();
-            auto* fn  = ImGui::GetFont();
-            const float avW2 = ImGui::GetContentRegionAvail().x;
-            const float inset = Layout::Inset;
-            const float rowH  = Layout::RowH;
-            auto  pos = ImGui::GetCursorScreenPos();
-            const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-            const bool betaOk = go::BetaAvailable();
-
-            const char* const names[2] = { XS("Релиз"), XS("Бета") };
-            const float gap = 10.f;
-            const float halfW = (avW2 - inset * 2.f - gap) * 0.5f;
-
-            for (int bi = 0; bi < 2; ++bi) {
-                const bool beta = (bi == 1);
-                const bool enabled = (!beta || betaOk);
-                const bool sel = (go::CurrentBuild() == (beta ? go::Build::Beta : go::Build::Release));
-                const float x0 = pos.x + inset + bi * (halfW + gap);
-                const float x1 = x0 + halfW;
-
-                dl->AddRectFilled({x0, pos.y}, {x1, pos.y + rowH}, C::U(C::Card()), R::Card);
-                if (sel) {
-                    dl->AddRectFilled({x0, pos.y}, {x1, pos.y + rowH},
-                        C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), R::Card);
-                    dl->AddRect({x0, pos.y}, {x1, pos.y + rowH}, C::UA(C::Acc(), 0.8f), R::Card, 0, 2.f);
-                } else if (g_state.ui_show_sep) {
-                    dl->AddRect({x0, pos.y}, {x1, pos.y + rowH}, C::U(C::Sep()), R::Card, 0, 1.2f);
-                }
-
-                auto lsz = fn->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0, names[bi]);
-                dl->AddText(fn, ImGui::GetFontSize(),
-                    {x0 + (halfW - lsz.x) * 0.5f, pos.y + (rowH - lsz.y) * 0.5f},
-                    C::UA(sel ? C::Acc() : (enabled ? C::Txt() : C::Dim()), enabled ? 1.f : 0.6f),
-                    names[bi]);
-
-                char bid[16]; snprintf(bid, sizeof(bid), "##build_tab%d", bi);
-                ImGui::SetCursorScreenPos({x0, pos.y});
-                ImGui::InvisibleButton(bid, {halfW, rowH});
-                if (enabled && WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
-                    ApplyBuildChoice(beta ? go::Build::Beta : go::Build::Release);
-                    g_input.touchConsumed = true;
-                }
-            }
-            ImGui::SetCursorScreenPos({pos.x, pos.y + rowH});
-            ImGui::Dummy({avW2, 0.f});
-
-            // Строка-источник: из какого дампа собраны оффсеты беты. Без неё
-            // непонятно, чего ждать после переключения.
-            const char* src = BuildBetaLine();
-            auto ssz = fn->CalcTextSizeA(ImGui::GetFontSize() * 0.82f, FLT_MAX, 0, src);
-            dl->AddText(fn, ImGui::GetFontSize() * 0.82f,
-                        {pos.x + inset + (avW2 - inset * 2.f - ssz.x) * 0.5f, pos.y + rowH + 6.f},
-                        C::UA(C::Dim(), 0.9f), src);
-            ImGui::SetCursorScreenPos({pos.x, pos.y + rowH + 6.f + ssz.y + 6.f});
-            ImGui::Dummy({avW2, 0.f});
-        }
-
         SHdr(XS("Интерфейс"));
         CardBg(Layout::RowH * 1);
         if (ToggleRow("##ud2", XS("Тёмная тема"), &g_state.ui_dark_mode, g_state.a_ui_dark, true, true))
@@ -5164,8 +5091,8 @@ void RenderMenu() {
         const float x0   = (dw - wW) * 0.5f;
         const float y0   = (dh - wH) * 0.5f;
 
-        // Приглушаем игру и рисуем окно — как окно меню, поверх остального.
-        fg->AddRectFilled({0, 0}, {dw, dh}, IM_COL32(0, 0, 0, g_darkTheme ? 150 : 110));
+        // Окно поверх игры — как окно меню. Экран не затемняем: выбор версии —
+        // единственное, что здесь показано, и гасить игру он не должен.
         fg->AddRectFilled({x0, y0}, {x0 + wW, y0 + wH}, C::U(C::Bg()), R::Card);
         if (g_state.ui_show_sep)
             fg->AddRect({x0, y0}, {x0 + wW, y0 + wH}, C::U(C::Sep()), R::Card, 0, 1.2f);

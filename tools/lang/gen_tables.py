@@ -111,10 +111,6 @@ UI_EN = {
     'Зона огня сохранена': 'Fire zone saved',
     # версия игры (релиз/бета)
     'Версия игры': 'Game version', 'Релиз': 'Release', 'Бета': 'Beta',
-    'Бета недоступна: файл оффсетов не собран':
-        'Beta unavailable: offsets file not built',
-    'Бета недоступна: не пересчитаны RVA классов':
-        'Beta unavailable: class RVAs not recalculated',
     # разное и опции
     'Функции': 'Features', 'Иксрей': 'X-Ray', 'Всегда день': 'Always day',
     'Язык': 'Language', 'Интерфейс': 'Interface', 'Тёмная тема': 'Dark theme',

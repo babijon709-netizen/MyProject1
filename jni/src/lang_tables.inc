@@ -13,8 +13,6 @@ static const LangPair kUiEn[] = {
     {"Автофарм", "Auto-farm"},
     {"Аим", "Aim"},
     {"Бета", "Beta"},
-    {"Бета недоступна: не пересчитаны RVA классов", "Beta unavailable: class RVAs not recalculated"},
-    {"Бета недоступна: файл оффсетов не собран", "Beta unavailable: offsets file not built"},
     {"Ближе к прицелу", "Closest to crosshair"},
     {"Ближе ко мне", "Closest to me"},
     {"Боксы", "Boxes"},
