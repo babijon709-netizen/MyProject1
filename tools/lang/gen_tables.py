@@ -191,10 +191,45 @@ WEAPON_EN_PICK = {
 }
 
 
+def remove_diag_logf(src):
+    """Вырезать вызовы diag::logf(...) целиком, с аргументами.
+
+    Строки диагностического журнала (jni/include/diag.h, DIAGNOSTICS.md)
+    сознательно не переводятся — их разбирают по русским подписям, как и
+    служебный лог автофарма. Без вырезки сборщик литералов принял бы каждый
+    форматный кусок за подпись визуала и потребовал бы перевод.
+    """
+    out, i, n = [], 0, len(src)
+    while i < n:
+        if src.startswith('diag::logf', i) and i and (src[i - 1] in ' \t(;=,{'):
+            j = src.find('(', i)
+            if j < 0:
+                break
+            depth, k = 0, j
+            while k < n:
+                c = src[k]
+                if c == '"':                       # строковый литерал — целиком
+                    k += 1
+                    while k < n and src[k] != '"':
+                        k += 2 if src[k] == '\\' else 1
+                elif c == '(':
+                    depth += 1
+                elif c == ')':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            i = (k + 1) if k < n else n            # за закрывающей скобкой
+            continue
+        out.append(src[i])
+        i += 1
+    return ''.join(out)
+
+
 def build_text():
     """Текст lang_tables.inc. Бросает SystemExit, если что-то не переведено."""
-    game = strip_comments(open(GAME, encoding='utf-8').read())
-    main_src = strip_comments(open(MAIN, encoding='utf-8').read())
+    game = remove_diag_logf(strip_comments(open(GAME, encoding='utf-8').read()))
+    main_src = remove_diag_logf(strip_comments(open(MAIN, encoding='utf-8').read()))
 
     # --- оружие: имена берём из таблицы игры, колонка `en` -------------------
     visual = dict(VISUAL_EN)

@@ -1,6 +1,7 @@
 #include "game.h"
 #include "game_offsets_active.h"   // активные оффсеты: релиз или бета (go::SelectBuild)
 #include "Vector.h"
+#include "diag.h"      // диагностический журнал (DIAGNOSTICS.md)
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
 
 #include <string.h>
@@ -24,16 +25,29 @@
 // звучит «чтение памяти»: замер 15.09.2026 показал, что стадия автофарма
 // занимает десятки миллисекунд на кадр, а делает она ровно это — сотни и тысячи
 // вызовов (скан реестра: по чтению на запись прохода, три-четыре десятка на
-// классификацию новой записи). Поэтому обёртки ниже — минимальные: только сам
-// syscall, без замеров и счётчиков.
+// классификацию новой записи). Поэтому обёртки минимальны, но после появления
+// диагностического журнала (jni/include/diag.h, разбор «у одного пользователя
+// не работает ни одна функция») ведут счёт успехов и отказов: у сломанного
+// окружения счётчик успехов стоит на нуле, а гистограмма errno показывает
+// причину. Атомики — расслабленные: на фоне syscall это шум.
 
 static ssize_t remote_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
     const ssize_t n = syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+    if (n < 0) {
+        diag::note_read_fail((unsigned long long)(remote_iov ? remote_iov[0].iov_base : 0), errno);
+    } else {
+        diag::vm_read_ok.fetch_add(1, std::memory_order_relaxed);
+    }
     return n;
 }
 
 static ssize_t remote_vm_writev(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
     const ssize_t n = syscall(__NR_process_vm_writev, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+    if (n < 0) {
+        diag::note_write_fail((unsigned long long)(remote_iov ? remote_iov[0].iov_base : 0), errno);
+    } else {
+        diag::vm_write_ok.fetch_add(1, std::memory_order_relaxed);
+    }
     return n;
 }
 
@@ -90,6 +104,28 @@ static Vec3      g_aim_ref_forward{}, g_aim_ref_right{}, g_aim_ref_up{};
 // Маска ресурсов автофарма (bit0 дерево..bit3 сера).
 static unsigned g_farm_mask = 0;
 
+// Состояние диагностических сообщений привязки (jni/include/diag.h): каждый
+// вопрос журналу задаётся один раз на привязку, а не каждый кадр. Сброс —
+// в esp_reset().
+struct AttachDiag {
+    int  pm_status       = -1;   // последний статус резолва PlayerManager
+    int  gc_status       = -1;   // последний статус резолва GameControllerBase
+    bool pm_ok_logged    = false;
+    bool gc_ok_logged    = false;
+    bool local_ok_logged = false; // «локальный игрок ок» напечатан
+    bool frame_ok_logged = false; // «кадр собран» напечатан
+    bool day_found       = false; // «всегда день»: TOD найден
+};
+static AttachDiag g_diag;
+static int s_diag_farm_reason = -999;   // последняя напечатанная причина простоя фарма
+
+// Печатать смену статуса всегда, повтор того же негативного — не чаще interval
+// секунд (иначе зацикленный негатив зальёт журнал кадрами). true — пора печатать.
+static bool diag_status_due(int key, int& last, int status, unsigned interval) {
+    if (status == last && !diag::due(key, interval)) return false;
+    last = status;
+    return true;
+}
 
 static bool vec3_is_finite(const Vec3& value);
 
@@ -239,7 +275,20 @@ static void always_day_tick() {
         }
         s_scan_rva += 128 * 8;
         if (s_scan_rva >= kScanEnd) s_scan_rva = TOD_SCAN_RVA_BEGIN;
-        if (!g_day_tod) return;
+        if (!g_day_tod) {
+            // Диагностика (jni/include/diag.h): «всегда день» не находит объект.
+            // Имя класса TOD_Sky ротируется каждым билдом игры — если сигнатурный
+            // скан его не берёт, у пользователя сборка новее дампа оффсетов.
+            if (diag::due(diag::kKeyDay, 60))
+                diag::logf("всегда день: TOD_Sky сигнатурным сканом не находится "
+                           "(окно 0x%llx..0x%llx) — функция не работает, сборка игры новее дампа",
+                           (unsigned long long)TOD_SCAN_RVA_BEGIN, (unsigned long long)TOD_SCAN_RVA_END);
+            return;
+        }
+        if (!g_diag.day_found) {
+            g_diag.day_found = true;
+            diag::logf("всегда день: TOD_Sky найден (0x%llx)", (unsigned long long)g_day_tod);
+        }
     }
     // Полдень: писатель-доминатор. Игровой писатель обновляет Cycle.Hour
     // каждый кадр, и запись раз в кадр оверлея с ним гонялась — отсюда
@@ -770,7 +819,15 @@ static uint64_t get_base(const char* lib) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", g_pid);
     FILE* file = fopen(path, "r");
-    if (!file) return 0;
+    if (!file) {
+        // Диагностика «ни одна функция не работает» (jni/include/diag.h):
+        // maps чужого процесса не открылся — дальше цепочки привязки нет пути.
+        if (diag::due(diag::kKeyMapsDenied, 15))
+            diag::logf("attach: /proc/%d/maps НЕ ОТКРЫЛСЯ errno=%d (%s) — привязка невозможна, "
+                       "чужие /proc этому процессу не дают читать",
+                       (int)g_pid, errno, diag::err_name(errno));
+        return 0;
+    }
     char line[512];
     uint64_t fallback = 0;
     while (fgets(line, sizeof(line), file)) {
@@ -783,6 +840,10 @@ static uint64_t get_base(const char* lib) {
         if (file_offset == 0) { fclose(file); return start; }
     }
     fclose(file);
+    if (!fallback && diag::due(diag::kKeyBaseMissing, 15))
+        diag::logf("attach: %s в /proc/%d/maps ПОКА НЕ НАЙДЕНА — игра ещё грузится, "
+                   "либо клиент другой сборки (не та разрядность/модифицированный)",
+                   lib, (int)g_pid);
     return fallback;
 }
 
@@ -831,8 +892,28 @@ static uint64_t resolve_runtime_player_list() {
         if (candidate) {
             std::string name = read_remote_string(rd_ptr(candidate + 0x10));
             std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
-            if (name == "PlayerManager" && ns == "Oxide")
+            if (name == "PlayerManager" && ns == "Oxide") {
                 g_player_manager_class = candidate;
+                if (!g_diag.pm_ok_logged) {
+                    g_diag.pm_ok_logged = true;
+                    g_diag.pm_status = 0;
+                    diag::logf("PlayerManager: класс ок (0x%llx) — RVA оффсеты совпали с этой сборкой игры",
+                               (unsigned long long)candidate);
+                }
+            } else if (diag_status_due(diag::kKeyPm, g_diag.pm_status, 2, 30)) {
+                // В журнал идёт то, что реально прочиталось по RVA: это прямой
+                // ответ на «у пользователя не та версия игры под оффсеты».
+                char clean_ns[32], clean_name[32];
+                diag::clean_text(clean_ns, sizeof(clean_ns), ns.c_str());
+                diag::clean_text(clean_name, sizeof(clean_name), name.c_str());
+                diag::logf("PlayerManager: по RVA 0x%llx читается класс '%s'/'%s', ожидался "
+                           "'Oxide'/'PlayerManager' — ВЕРСИЯ ИГРЫ НЕ ТА, под которую собраны оффсеты",
+                           (unsigned long long)PLAYER_MANAGER_TYPEINFO_RVA, clean_ns, clean_name);
+            }
+        } else if (diag_status_due(diag::kKeyPm, g_diag.pm_status, 1, 30)) {
+            diag::logf("PlayerManager: слот типинфо по RVA 0x%llx ПУСТ (0) — класса в этой сборке "
+                       "игры нет, оффсеты от другой версии",
+                       (unsigned long long)PLAYER_MANAGER_TYPEINFO_RVA);
         }
     }
     if (!g_player_manager_class) {
@@ -841,12 +922,26 @@ static uint64_t resolve_runtime_player_list() {
     if (!g_player_manager_static_fields)
         g_player_manager_static_fields = get_class_static_fields(g_player_manager_class);
     if (!g_player_manager_static_fields) {
+        if (diag_status_due(diag::kKeyPm, g_diag.pm_status, 3, 30))
+            diag::logf("PlayerManager: static_fields=0 (klass+0xB8) — статика класса ещё не "
+                       "создана игрой или раскладка il2cpp другая");
         return 0;
     }
     uint64_t list = rd_ptr(g_player_manager_static_fields + PLAYER_MANAGER_STATIC_FIELDS_LIST);
     if (!validate_player_list(list, g_player_manager_class)) {
+        if (diag_status_due(diag::kKeyPm, g_diag.pm_status, 4, 30))
+            diag::logf("PlayerManager: реестр игроков НЕ ПРОШЁЛ проверку (list=0x%llx, items=0x%llx, "
+                       "count=%d) — поле сместилось, не та версия игры",
+                       (unsigned long long)list,
+                       (unsigned long long)rd_ptr(list + IL2CPP_LIST_ITEMS),
+                       (int)rd<int32_t>(list + IL2CPP_LIST_SIZE));
         g_player_manager_static_fields = 0;
         return 0;
+    }
+    if (g_diag.pm_status != 0 || !g_diag.pm_ok_logged) {
+        g_diag.pm_status = 0;
+        g_diag.pm_ok_logged = true;
+        diag::logf("PlayerManager: реестр игроков читается — цепочка классов ок");
     }
     return list;
 }
@@ -861,18 +956,46 @@ static uint64_t resolve_local_player() {
         if (candidate) {
             std::string name = read_remote_string(rd_ptr(candidate + 0x10));
             std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
-            if (name == "GameControllerBase" && ns == "Oxide")
+            if (name == "GameControllerBase" && ns == "Oxide") {
                 g_game_controller_class = candidate;
+                if (!g_diag.gc_ok_logged) {
+                    g_diag.gc_ok_logged = true;
+                    g_diag.gc_status = 0;
+                    diag::logf("GameControllerBase: класс ок (0x%llx)", (unsigned long long)candidate);
+                }
+            } else if (diag_status_due(diag::kKeyGc, g_diag.gc_status, 2, 30)) {
+                char clean_ns[32], clean_name[32];
+                diag::clean_text(clean_ns, sizeof(clean_ns), ns.c_str());
+                diag::clean_text(clean_name, sizeof(clean_name), name.c_str());
+                diag::logf("GameControllerBase: по RVA 0x%llx читается класс '%s'/'%s', ожидался "
+                           "'Oxide'/'GameControllerBase' — версия игры не совпадает с оффсетами",
+                           (unsigned long long)GAME_CONTROLLER_TYPEINFO_RVA, clean_ns, clean_name);
+            }
+        } else if (diag_status_due(diag::kKeyGc, g_diag.gc_status, 1, 30)) {
+            diag::logf("GameControllerBase: слот типинфо по RVA 0x%llx ПУСТ (0) — класса в этой "
+                       "сборке игры нет, оффсеты от другой версии",
+                       (unsigned long long)GAME_CONTROLLER_TYPEINFO_RVA);
         }
     }
 
     if (!g_game_controller_class || !g_player_manager_class) return 0;
 
     uint64_t gcb_static_fields = get_class_static_fields(g_game_controller_class);
-    if (!gcb_static_fields) return 0;
+    if (!gcb_static_fields) {
+        // В главном меню статика GameControllerBase может ещё не существовать —
+        // это норма, поэтому не «НЕ ПРОШЛО», а «пока».
+        if (diag_status_due(diag::kKeyGc, g_diag.gc_status, 3, 60))
+            diag::logf("GameControllerBase: static_fields пока = 0 (норма вне матча)");
+        return 0;
+    }
     uint64_t local_player = rd_ptr(gcb_static_fields + GAME_CONTROLLER_LOCAL_PLAYER_FIELD);
     if (local_player && rd_ptr(local_player) == g_player_manager_class) {
         g_local_player = local_player;
+        if (!g_diag.local_ok_logged) {
+            g_diag.local_ok_logged = true;
+            g_diag.gc_status = 0;
+            diag::logf("локальный игрок: ок (0x%llx)", (unsigned long long)local_player);
+        }
         return local_player;
     }
     return 0;
@@ -3833,6 +3956,57 @@ bool esp_init(pid_t pid) {
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
     if (!g_il2cpp_base) return false;
+
+    // ---- Диагностика «ни одна функция не работает» (jni/include/diag.h) ----
+    // Первый СКВОЗНОЙ замер: читаем заголовок ELF по найденной базе. Если
+    // чужую память у этого пользователя не дают читать (SELinux/права ядра),
+    // base найдётся, а чтение не пройдёт — фиксируем это в журнале явно,
+    // вместо молчаливой смерти всех функций. Поведение прежнее: привязку
+    // считаем удавшейся (отрицательный ответ просто повторял бы попытки).
+    uint8_t ehdr[20] = {};
+    struct iovec liov = { ehdr, sizeof(ehdr) };
+    struct iovec riov = { (void*)(uintptr_t)g_il2cpp_base, sizeof(ehdr) };
+    const ssize_t got = syscall(__NR_process_vm_readv, g_pid, &liov, 1, &riov, 1, 0);
+    if (got != (ssize_t)sizeof(ehdr)) {
+        const int e = errno;
+        if (diag::due(diag::kKeyProbe, 15))
+            diag::logf("attach: pid=%d base=0x%llx: ПРОБНОЕ ЧТЕНИЕ ПАМЯТИ НЕ ПРОШЛО errno=%d (%s) — "
+                       "так не заработает НИ ОДНА функция (чужую память читать не дают)",
+                       (int)g_pid, (unsigned long long)g_il2cpp_base, e, diag::err_name(e));
+        return true;
+    }
+    const int      elf_class = ehdr[4];  // 1 = 32 бита, 2 = 64
+    const unsigned machine   = (unsigned)ehdr[18] | ((unsigned)ehdr[19] << 8); // e_machine
+    const char* arch = diag::elf_arch(machine);
+    diag::logf("attach: pid=%d, libil2cpp.so base=0x%llx, ELF: %d бит, %s — чтение памяти работает",
+               (int)g_pid, (unsigned long long)g_il2cpp_base,
+               elf_class == 2 ? 64 : elf_class == 1 ? 32 : 0, arch);
+    if (elf_class != 2 || machine != 183)
+        diag::logf("attach: ВНИМАНИЕ: игра НЕ 64-битная arm64 — раскладка структур другой "
+                   "разрядности не совпадает с оффсетами, функции будут читать мусор");
+
+    // Какой именно APK подключён — косвенный признак версии/источника
+    // установки клиента (полезно, когда классы ниже не совпадут).
+    if (diag::due(diag::kKeyApk, 15)) {
+        char maps_path[64];
+        snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", g_pid);
+        if (FILE* f = fopen(maps_path, "r")) {
+            char line[512], apk[384] = "";
+            while (fgets(line, sizeof(line), f)) {
+                if (!strstr(line, ".apk")) continue;
+                const char* sp = strrchr(line, ' ');
+                if (!sp || !sp[1]) continue;
+                size_t n = strnlen(sp + 1, sizeof(apk) - 1);
+                while (n && (sp[n - 1] == '\n' || sp[n - 1] == '\r' || sp[n - 1] == ' ')) n--;
+                if (!n) continue;
+                memcpy(apk, sp + 1, n);
+                apk[n] = '\0';
+                break;
+            }
+            fclose(f);
+            if (apk[0]) diag::logf("attach: клиент: %s", apk);
+        }
+    }
     return true;
 }
 
@@ -4074,6 +4248,8 @@ void esp_reset() {
     g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
     g_cam_fov_deg = 0.0F; g_cam_pose_valid = false; g_cam_pose_derived = false;
     g_aim_state = {};
+    g_diag = {};              // диагностические сообщения — заново на новую привязку
+    s_diag_farm_reason = -999;
     g_player_aux.clear();
     g_player_text.clear();
     g_player_track.clear();
@@ -4154,6 +4330,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // cheap and rare, and it is what keeps a death / respawn from killing the
     // whole ESP until the app is restarted.
     if (++g_frame_publish_fail_streak > 240) {
+        // Диагностика (jni/include/diag.h): что именно не собирается —
+        // классы, локальный игрок или пустой реестр.
+        if (diag::due(diag::kKeyEspWatchdog, 30))
+            diag::logf("ESP: 240 кадров подряд без камеры/локала — сбрасываю кеши мира "
+                       "(PlayerManager: %s, локал: %s, пустых кадров подряд: %d)",
+                       g_player_manager_class ? "ок" : "НЕ НАЙДЕН (см. строки PlayerManager выше)",
+                       g_local_player ? "ок" : "НЕТ (см. строки GameController выше)",
+                       g_frame_transforms_empty_streak);
         g_frame_publish_fail_streak = 0;
         g_frame_transforms.clear();
         reset_world_caches();
@@ -4323,6 +4507,16 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_local_pos = local;
     g_frame_local_valid = has_local_position;
     g_frame_publish_fail_streak = 0; // this frame is healthy
+
+    // Диагностика (jni/include/diag.h): первый собранный кадр — точка, после
+    // которой все функции формально живы. Если этой строки в журнале нет,
+    // для «ничего не работает» причина уже напечатана строками выше.
+    if (!g_diag.frame_ok_logged) {
+        g_diag.frame_ok_logged = true;
+        diag::logf("ESP: кадр собран (камера+локал ок, объектов %d) — чтение памяти и "
+                   "оффсеты в порядке, дальше функции работают",
+                   (int)s_transforms.size());
+    }
 
     // Fallback camera basis straight from the view matrix (rows: right, up,
     // -forward). Kept separate from g_cam_* — the pose path stays authoritative
@@ -6230,6 +6424,13 @@ static bool farm_read_spot(const FarmEntity& entity, Vec3& out, int& source, int
 void esp_farm_debug(int& nodes_cached, int& idle_reason) {
     nodes_cached = (int)g_farm_entities.size();
     idle_reason = g_farm_idle_reason;
+    // Диагностика (jni/include/diag.h): смена причины простоя автофарма.
+    // Печатаем только переходы — в установившемся состоянии журнал молчит.
+    if (idle_reason != s_diag_farm_reason) {
+        s_diag_farm_reason = idle_reason;
+        diag::logf("автофарм: причина простоя -> %d (%s)", idle_reason,
+                   diag::farm_reason_text(idle_reason));
+    }
 }
 
 void esp_farm_tool_info(int& purposes_have, int& purposes_need) {

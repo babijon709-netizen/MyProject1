@@ -8,10 +8,12 @@
 #include <cmath>
 #include <ctime>
 #include <cstring>
+#include <cerrno>
 #include <linux/input.h>
 #include <linux/uinput.h>
 
 #include "imgui.h"
+#include "diag.h"   // диагностический журнал (DIAGNOSTICS.md)
 
 #define maxE 5
 #define maxF 10
@@ -370,11 +372,13 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
     struct input_absinfo abs, absX[maxE], absY[maxE];
     int fd, i, tmp1, tmp2;
     int screenX, screenY, minCnt = eventCount + 1;
+    int lastOpenErr = 0;   // errno последнего неудачного open (для журнала)
     fdNum = 0;
     for (i = 0; i <= eventCount; i++) {
         sprintf(temp, "/dev/input/event%d", i);
         fd = open(temp, O_RDWR);
         if (fd < 0) {
+            lastOpenErr = errno;
             continue;
         }
         if (checkDeviceIsTouch(fd)) {
@@ -400,6 +404,13 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
     }
 
     if (minCnt > eventCount) {
+        // Диагностика (jni/include/diag.h): ни одного тач-устройства, которое
+        // удалось бы открыть на запись. Повторы от потока повторных попыток
+        // в журнал не пишем — не чаще раза в 15 с.
+        if (diag::due(diag::kKeyTouch, 15))
+            diag::logf("тач: тачскрин НЕ НАЙДЕН (event-устройств: %d, errno последнего open=%d %s, "
+                       "read_only=%d) — синтетические касания не пойдут",
+                       eventCount, lastOpenErr, diag::err_name(lastOpenErr), (int)readOnly);
         puts("Failed init touch!");
         return false;
     }
@@ -408,6 +419,13 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
         struct uinput_user_dev ui_dev;
         nowfd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
         if (nowfd <= 0) {
+            // Диагностика (jni/include/diag.h): читать тачскрин вышло, а создать
+            // виртуальное устройство — нет: это ровно тот случай, когда меню
+            // живо, а ни одна функция не работает.
+            if (diag::due(diag::kKeyTouch, 15))
+                diag::logf("тач: /dev/uinput НЕ ОТКРЫЛСЯ errno=%d (%s) — виртуальный тач не "
+                           "создать, аим/автофарм не смогут водить пальцем",
+                           errno, diag::err_name(errno));
             for (int k = 0; k < fdNum; ++k) { ioctl(origfd[k], EVIOCGRAB, UNGRAB); close(origfd[k]); origfd[k] = 0; }
             fdNum = 0;
             return false;
@@ -484,6 +502,12 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
         write(nowfd, &ui_dev, sizeof(ui_dev));
 
         if (ioctl(nowfd, UI_DEV_CREATE)) {
+            // Диагностика (jni/include/diag.h): устройство настроено, но ядро
+            // отказалось его зарегистрировать.
+            if (diag::due(diag::kKeyTouch, 15))
+                diag::logf("тач: UI_DEV_CREATE НЕ ПРОШЁЛ errno=%d (%s) — виртуальный тач не "
+                           "зарегистрирован, аим/автофарм не смогут водить пальцем",
+                           errno, diag::err_name(errno));
             close(nowfd); nowfd = 0;
             for (int k = 0; k < fdNum; ++k) { ioctl(origfd[k], EVIOCGRAB, UNGRAB); close(origfd[k]); origfd[k] = 0; }
             fdNum = 0;
@@ -492,6 +516,14 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
     }
     Touch_initialized = true;
     Touch_readOnly = readOnly;
+
+    // Диагностика (jni/include/diag.h): успех печатаем один раз за запуск —
+    // повторные Touch_Init (fallback и повторные попытки) журнал не заливают.
+    static bool s_ok_logged = false;
+    if (!s_ok_logged) {
+        s_ok_logged = true;
+        diag::logf("тач: инъекция поднята (тач-устройств %d, read_only=%d)", fdNum, (int)readOnly);
+    }
 
     pthread_t t;
     for (i = 0; i < fdNum; i++) {

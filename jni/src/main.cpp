@@ -38,6 +38,7 @@
 #include "stb_image/stb_image.h"
 #include "Blur/Blur.h"
 #include "Android_touch/TouchHelperA.h"   // счётчики Upload (диагностика лага)
+#include "diag.h"                         // диагностический журнал (DIAGNOSTICS.md)
 #include "lang.h"                         // РУ/EN: перевод меню и визуалов
 
 // Аватарка-видео в кружке слева сверху (кадры вшиты, см. VidAvatar.cpp).
@@ -337,25 +338,48 @@ static pid_t find_pid(const char* pkg) {
 static void start_attach_thread() {
     g_attach_running.store(true);
     g_attach_thread = std::thread([]() {
+        diag::logf("attach: поток привязки запущен (версия оффсетов: %s), пакеты: [%s], затем [%s]",
+                   go::CurrentBuild() == go::Build::Beta ? "бета" : "релиз",
+                   TargetPackageA(), TargetPackageB());
         while (g_attach_running.load()) {
             if (!g_esp_attached) {
                 // Сначала пакет выбранной версии, затем второй: так клиент
                 // находит и бету под релизным пакетом, и наоборот.
+                const char* found_pkg = nullptr;
                 pid_t pid = find_pid(TargetPackageA());
-                if (pid <= 0) pid = find_pid(TargetPackageB());
-                if (pid > 0 && esp_init(pid)) {
-                    g_target_pid = pid;
-                    g_esp_attached = true;
+                if (pid > 0) found_pkg = TargetPackageA();
+                if (pid <= 0) {
+                    pid = find_pid(TargetPackageB());
+                    if (pid > 0) found_pkg = TargetPackageB();
+                }
+                if (pid <= 0) {
+                    if (diag::due(diag::kKeyAttachSearch, 15))
+                        diag::logf("attach: процесс игры НЕ НАЙДЕН (искал [%s] и [%s]) — "
+                                   "игра не запущена или установлена под другим пакетом",
+                                   TargetPackageA(), TargetPackageB());
+                } else {
+                    diag::logf("attach: найден процесс pid=%d (%s)", (int)pid, found_pkg);
+                    if (esp_init(pid)) {
+                        g_target_pid = pid;
+                        g_esp_attached = true;
+                        diag::logf("attach: привязка ок (pid=%d)", (int)pid);
+                    } else if (diag::due(diag::kKeyAttachFail, 15)) {
+                        diag::logf("attach: привязка НЕ УДАЛАСЬ (pid=%d) — причина в строках attach выше",
+                                   (int)pid);
+                    }
                 }
             } else {
                 pid_t current = find_pid(TargetPackageA());
                 if (current <= 0) current = find_pid(TargetPackageB());
                 if (current != g_target_pid) {
+                    diag::logf("attach: игра ОТВЯЗАЛАСЬ (был pid=%d, сейчас %s) — перепривязка",
+                               (int)g_target_pid, current > 0 ? "другой процесс" : "процесса нет");
                     esp_reset();
                     g_esp_attached = false;
                     g_target_pid = -1;
                 }
             }
+            diag::stats_tick();
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
     });
@@ -1095,10 +1119,19 @@ static void RememberBuild() {
 
 static void RestoreBuild() {
     std::ifstream f(CfgBuildPath());
-    if (!f) return;
+    const char* build_name = go::CurrentBuild() == go::Build::Beta ? "бета" : "релиз";
+    if (!f) {
+        diag::logf("версия клиента: %s (файла .build нет — умолчание)", build_name);
+        return;
+    }
     std::string v;
     std::getline(f, v);
-    if (!v.empty() && v[0] == 'b') go::SelectBuild(go::Build::Beta);
+    if (!v.empty() && v[0] == 'b') {
+        go::SelectBuild(go::Build::Beta);
+        diag::logf("версия клиента: бета (восстановлена из .build)");
+    } else {
+        diag::logf("версия клиента: релиз (восстановлена из .build)");
+    }
 }
 
 // Применить выбор версии: подставить оффсеты выбранного клиента и, если версия
@@ -1118,6 +1151,8 @@ static void ApplyBuildChoice(go::Build b) {
         snprintf(_b, sizeof(_b), "%s|%s", XS("Версия игры"),
                  b == go::Build::Beta ? XS("Бета") : XS("Релиз"));
         ShowToast(_b);
+        diag::logf("версия клиента: %s (выбрана в меню) — перепривязка",
+                   b == go::Build::Beta ? "бета" : "релиз");
     }
     PlaySound(SND_CLICK);
 }
@@ -5758,6 +5793,11 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
     signal(SIGHUP,  [](int) { main_thread_flag.store(false); });
 
+    // Журнал диагностики: <каталог конфигов>/diag.log (+ logcat xvcen.diag).
+    // Открыть раньше остальных подсистем, чтобы в нём было видно, на каком
+    // шаге запуска всё встало (см. DIAGNOSTICS.md).
+    diag::init(kCfgDir);
+
     prot::Init();
     screen_config();
     int abs_ScreenX = displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width;
@@ -5768,12 +5808,19 @@ int main(int argc, char* argv[]) {
 
     native_window_screen_x = abs_ScreenX;
     native_window_screen_y = abs_ScreenY;
-    if (!initGUI_draw(native_window_screen_x, native_window_screen_x, true)) return -1;
+    diag::logf("запуск: экран %dx%d", displayInfo.width, displayInfo.height);
+    if (!initGUI_draw(native_window_screen_x, native_window_screen_x, true)) {
+        diag::logf("ОШИБКА: initGUI_draw не поднялся — интерфейс не будет показан");
+        return -1;
+    }
     Blur::Init();
     CfgWatchInit();
     AudioInit();
     if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
         Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
+    diag::logf("тач: инъекция %s", Touch_CanInject()
+        ? "работает"
+        : "НЕ работает (синтетические касания не пойдут: аим/автофарм не смогут водить пальцем)");
     // Если полноценный тач не поднялся с первого раза (гонка за /dev/uinput
     // или grab на старте — обычное дело сразу после запуска игры), чит раньше
     // навсегда оставался в read-only: автофарм «просто не идёт», пока не
@@ -5781,9 +5828,15 @@ int main(int argc, char* argv[]) {
     // инъекцию заново, пока не получится.
     static std::atomic<bool> s_touchRetryRun{true};
     std::thread([]() {
+        bool lastOk = Touch_CanInject();
         while (s_touchRetryRun.load() && main_thread_flag.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(3));
-            if (Touch_CanInject()) continue;
+            const bool ok = Touch_CanInject();
+            if (ok != lastOk) {
+                lastOk = ok;
+                diag::logf("тач: инъекция %s", ok ? "восстановилась" : "ПРОПАЛА — поднимаю заново");
+            }
+            if (ok) continue;
             Touch_Close();
             if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
                 Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
