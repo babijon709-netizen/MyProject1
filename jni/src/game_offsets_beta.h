@@ -3,11 +3,13 @@
 //
 // Источник: dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9, дата сборки файла 16.09.2026.
 // Эталон, от которого считались отличия: релизный dump.7z и jni/src/game_offsets.h.
-// Отличий от релиза: 4 из 178 объявленных констант
+// Отличий от релиза: 9 из 178 объявленных констант
 // (в карте оффсетов 178 записей).
-// Взято из релиза как есть: 38 констант раскладки IL2CPP/Unity
+// Взято из релиза как есть: 36 констант раскладки IL2CPP/Unity
 // (из дампа игры они не выводятся — об этом ниже) и 3 RVA.
-// libil2cpp.so беты не было — RVA остались релизные (классы не найдутся!)
+// Окно скана TOD_Sky сдвинуто на дельту RVA беты (см. RVA_SHIFTED в скрипте):
+// оно зависит от того, где лежит таблица metadata-usage, а не от структур.
+// TYPEINFO_RVA пересчитаны по libil2cpp.so беты.
 //
 // Как пользоваться: выбор версии — в меню клиента («Версия игры», вкладка
 // «Опции») и на стартовом экране; переключатель — go::SelectBuild() в
@@ -23,8 +25,8 @@
 
 namespace game_offsets_beta {
 inline constexpr bool kFromDump = true;
-inline constexpr bool kRvaFromDump = false;
-inline constexpr const char* kReason = "Бета недоступна: не пересчитаны RVA классов";
+inline constexpr bool kRvaFromDump = true;
+inline constexpr const char* kReason = "";
 inline constexpr const char* kSource = "dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9";
 
 
@@ -66,10 +68,10 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // own methods and following  adrp/ldr -> R_AARCH64_RELATIVE addend -> slot,
 // keeping only slots that are then dereferenced as  ldr x8,[klass,#0xB8]
 // (Il2CppClass::static_fields) - i.e. exactly the access our reader performs.
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD8DB8B8;
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD9A34B8;  // бета: было 0xD8DB8B8
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD8D61E8; // GameControllerBase
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD99E8F0; // GameControllerBase  // бета: было 0xD8D61E8
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
@@ -330,7 +332,7 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
 // Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD8DAB08;
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD9A2818;  // бета: было 0xD8DAB08
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x28;
 
 // System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
@@ -372,8 +374,8 @@ inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_
 //       --script <new>/script.json --methods 2000 UV
 // оба кандидата TOD_Sky (здесь 0xD8DF4C8 и 0xD8DFC98) обязаны попасть в окно.
 // Прошлое окно было 0xD7A0000..0xD840000 — сдвинулось ровно на +0x130000.
-inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xD8D0000;
-inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xD970000; // BEGIN + 0xA0000
+inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xD997D10;  // бета: было 0xD8D0000
+inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDA37D10; // BEGIN + 0xA0000  // бета: было 0xD970000
 inline constexpr std::uint64_t TOD_SKY_CYCLE      = 0x40; // TOD_Sky.Cycle
 inline constexpr std::uint64_t TOD_CYCLE_HOUR     = 0x10; // TOD_CycleParameters.Hour
 inline constexpr std::uint64_t TOD_CYCLE_DAY      = 0x14;

@@ -143,8 +143,7 @@ def extract_beta(outdir, archive):
         else:
             nested = find('libil2cpp_beta.7z') or find('libil2cpp.7z')
             if nested:
-                print(f'   libil2cpp.so достаём из {os.path.basename(nested)} (xz raw)')
-                unpack_libil2cpp(nested, so)
+                unpack_so(nested, so)
     if os.path.exists(so):
         print(f'   libil2cpp.so беты: {os.path.getsize(so)} байт')
     else:
@@ -172,11 +171,43 @@ def unpack_libil2cpp(archive, dest):
     os.remove(pack)
 
 
+def unpack_so(archive, dest):
+    """libil2cpp.so из архива — в обоих форматах, в которых его присылают.
+
+    Бета приходит обычным 7z с `libil2cpp.so` внутри (так и было 16.09.2026), а
+    релизный `libil2cpp.7z` — LZMA2 с фильтром ARM64-BCJ, который py7zr не
+    тянет: его распаковывает `unpack_libil2cpp` через `xz --format=raw`.
+    Пробуем первый путь, на любой осечке уходим во второй.
+    """
+    print(f'   libil2cpp.so беты: распаковываю {os.path.basename(archive)}')
+    try:
+        import py7zr
+        with py7zr.SevenZipFile(archive, 'r') as z:
+            names = [n for n in z.getnames() if not n.endswith('/')]
+            so = [n for n in names if n.lower().endswith('.so')]
+            if so:
+                outdir = os.path.dirname(dest) or '.'
+                z.extract(path=outdir, targets=so)
+                got = os.path.join(outdir, so[0])
+                with open(got, 'rb') as f:
+                    elf = f.read(4) == b'\x7fELF'
+                if elf:
+                    os.replace(got, dest)
+                    print(f'   libil2cpp.so беты: {os.path.getsize(dest)} байт')
+                    return dest
+                os.remove(got)
+                print('   внутри оказался не ELF — пробую путь с xz')
+    except Exception as e:  # noqa: BLE001 — причина не важна, есть второй путь
+        print(f'   py7zr не осилил ({e.__class__.__name__}) — пробую путь с xz')
+    unpack_libil2cpp(archive, dest)
+    print(f'   libil2cpp.so беты: {os.path.getsize(dest)} байт (xz raw)')
+    return dest
+
+
 def place_so(src, dest):
     """Положить libil2cpp.so беты на место: файлом или упакованным (.7z)."""
     if src.lower().endswith('.7z'):
-        print(f'   libil2cpp.so беты: распаковываю {os.path.basename(src)} (xz raw)')
-        unpack_libil2cpp(src, dest)
+        unpack_so(src, dest)
     else:
         shutil.copyfile(src, dest)
     print(f'   libil2cpp.so беты: {os.path.getsize(dest)} байт '
@@ -189,6 +220,14 @@ def dump_fingerprint(path):
         for chunk in iter(lambda: f.read(1 << 20), b''):
             h.update(chunk)
     return h.hexdigest()[:16]
+
+
+# Окно скана TOD_Sky (game.cpp ищет в нём класс небесного цикла по сигнатуре).
+# В карте оно помечено как runtime — «из дампа не выводится», и это верно: оно
+# зависит не от раскладки структур, а от того, ГДЕ в .data.rel.ro лежит таблица
+# metadata-usage. У беты она уезжает вместе с RVA классов, поэтому окно едет на
+# ту же дельту: иначе скан уходит в пустоту и «Всегда день» молча не работает.
+RVA_SHIFTED = ('TOD_SCAN_RVA_BEGIN', 'TOD_SCAN_RVA_END')
 
 
 # ------------------------------------------------- форма вместо имени ----
@@ -362,6 +401,22 @@ def compute_beta(rel, beta, omap, rel_vals, with_rva, rel_dir, beta_dir):
 
     if not rva_consts:
         rva_from_dump = True  # пересчитывать нечего — все RVA уже из дампа
+
+    # Окно скана TOD_Sky едет вместе с RVA (см. RVA_SHIFTED).
+    deltas = sorted(values[c] - rel_vals[c] for c in rva_consts
+                    if c in values and c in rel_vals and values[c] != rel_vals[c])
+    if len(deltas) >= 2 and deltas[-1] - deltas[0] <= 0x10000:
+        delta = deltas[len(deltas) // 2]
+        for const in RVA_SHIFTED:
+            if const in rel_vals and omap.get(const, {}).get('kind') == 'runtime':
+                values[const] = rel_vals[const] + delta
+                changes[const] = (rel_vals[const], values[const], 'окно скана RVA',
+                                  f'сдвиг {delta:+#x}')
+    elif len(deltas) >= 2:
+        warnings.append('RVA классов разъехались на разные дельты '
+                        f'({deltas[0]:+#x}..{deltas[-1]:+#x}) — окно скана TOD '
+                        f'осталось релизным, проверь «Всегда день» на бете')
+
     return values, changes, warnings, runtime, rva_consts, rva_note, rva_from_dump
 
 
@@ -440,6 +495,9 @@ def write_beta_header(rel_text, values, changes, runtime, rva_consts, note, stam
     body = body.replace('namespace game_offsets_beta {\n',
                         'namespace game_offsets_beta {\n' + mark, 1)
 
+    # Константы раскладки, которые так и остались релизными (окно TOD_Sky
+    # может быть сдвинуто — тогда оно не «взято как есть», а пересчитано).
+    copied = [c for c in runtime if c not in changes]
     banner = f'''// Оффсеты БЕТА-версии игры. Файл собран tools/offsets/beta_offsets.py — правь
 // скрипт и дампы, а не здесь.
 //
@@ -447,8 +505,10 @@ def write_beta_header(rel_text, values, changes, runtime, rva_consts, note, stam
 // Эталон, от которого считались отличия: релизный dump.7z и jni/src/game_offsets.h.
 // Отличий от релиза: {len(changes)} из {len(values)} объявленных констант
 // (в карте оффсетов {n_map} записей).
-// Взято из релиза как есть: {len(runtime)} констант раскладки IL2CPP/Unity
+// Взято из релиза как есть: {len(copied)} констант раскладки IL2CPP/Unity
 // (из дампа игры они не выводятся — об этом ниже) и {len(rva_consts)} RVA.
+// Окно скана TOD_Sky сдвинуто на дельту RVA беты (см. RVA_SHIFTED в скрипте):
+// оно зависит от того, где лежит таблица metadata-usage, а не от структур.
 // {note or 'TYPEINFO_RVA пересчитаны по libil2cpp.so беты.'}
 //
 // Как пользоваться: выбор версии — в меню клиента («Версия игры», вкладка
@@ -578,7 +638,8 @@ def main():
         print('\nбета в меню предлагаться НЕ будет: RVA классов не пересчитаны.')
         print('  нужен libil2cpp.so той же сборки, что и дамп:')
         print('    python3 tools/offsets/beta_offsets.py --apply --so <файл>')
-        print('  или libil2cpp_beta.7z (сжатый как релизный libil2cpp.7z) в корне.')
+        print('  или положи libil2cpp_beta.7z в корень репозитория ')
+        print('  (обычный 7z с libil2cpp.so внутри; релизный формат с xz тоже понимаем).')
 
     if a.selftest:
         bad = {c for c in rel_vals if c in values and values[c] != rel_vals[c]}

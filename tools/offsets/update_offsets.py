@@ -177,7 +177,14 @@ def rva_candidates(sofile, scriptfile, classes, top=6, methods=3000):
         m = re.match(r'^\s+0x([0-9A-Fa-f]{5,})\s+обращений=(\d+)\s+'
                      r'читаемые статик-поля\[([^\]]*)\]', line)
         if cur and m:
-            fp = tuple(sorted(t.strip() for t in m.group(3).split(',') if t.strip() != '-'))
+            # Смещение статик-поля, БЕЗ счётчика обращений: typeinfo_rva.py
+            # печатает их вместе («0x1A0x1» — поле 0x1A, одно чтение), и если
+            # оставить счётчик в отпечатке, то сверка «отпечаток статик-полей»
+            # ломается от любой правки кода: те же поля читаются другое число
+            # раз (у PlayerManager в бете 5->9) — и верный слот теряется.
+            fp = tuple(sorted(h.group(0) for h in
+                              (re.match(r'0x[0-9A-Fa-f]+', t.strip()) for t in m.group(3).split(','))
+                              if h))
             found[cur].append((int(m.group(1), 16), int(m.group(2)), fp))
     return found
 
