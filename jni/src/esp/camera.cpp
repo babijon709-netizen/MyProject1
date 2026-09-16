@@ -55,28 +55,32 @@ Vec3      g_aim_ref_forward{}, g_aim_ref_right{}, g_aim_ref_up{};
 // dump.cs релиза 205619 и беты 207986; PlayerManager.mouseLook — +0x70 в обоих).
 // Поэтому это НЕ часть таблицы переключения версий (tools/offsets): там только
 // то, что между сборками разъезжается.
-static constexpr uint64_t PLAYER_MOUSE_LOOK_OFFSET      = 0x70;
+// Константы PLAYER_MOUSE_LOOK_OFFSET / MOUSE_LOOK_SENSITIVITY_OFFSET / 
+// MOUSE_LOOK_ACCUM_OFFSET живут в camera.h: ими пользуется ещё и мемори-аим
+// (esp/aim_mem.cpp), а раскладка MouseLook должна быть ровно в одном месте.
 
-static constexpr uint64_t MOUSE_LOOK_SENSITIVITY_OFFSET = 0x34;
-
-bool esp_read_look_sensitivity(float& out) {
-    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+uint64_t esp_resolve_mouse_look() {
+    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return 0;
 
     uint64_t player = resolve_local_player();
     if (!player) {
         // Своей PlayerManager ещё нет (загрузка, только что респавнулись):
         // настройка клиентская, у любой PlayerManager она одна и та же.
         uint64_t list = resolve_runtime_player_list();
-        if (!list) return false;
+        if (!list) return 0;
         uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
         int32_t  count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-        if (!items || count <= 0 || count > 512) return false;
+        if (!items || count <= 0 || count > 512) return 0;
         player = rd_ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT);
     }
-    if (!player) return false;
-    if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) return false;
+    if (!player) return 0;
+    if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) return 0;
 
-    uint64_t mouse_look = rd_ptr(player + PLAYER_MOUSE_LOOK_OFFSET);
+    return rd_ptr(player + PLAYER_MOUSE_LOOK_OFFSET);
+}
+
+bool esp_read_look_sensitivity(float& out) {
+    uint64_t mouse_look = esp_resolve_mouse_look();
     if (!mouse_look) return false;
     float value = rd<float>(mouse_look + MOUSE_LOOK_SENSITIVITY_OFFSET);
     // Мусор в поле (объект переиспользован, память переехала) отдаём как отказ:

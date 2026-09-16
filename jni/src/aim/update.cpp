@@ -6,6 +6,8 @@
 
 #include "app/common.h"
 #include "aim/controller.h"
+#include "aim/memory.h"
+#include "esp/aim_mem.h"
 #include "app/attach.h"
 #include "ui/esp_overlay.h"
 #include "ui/layout.h"
@@ -47,6 +49,38 @@ void UpdateAim(float dt) {
 
     if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
     if (dt > 0.1f) dt = 0.1f;
+
+    // ---- Режим: «Тач» (палец) или «Мемори» (запись поворота в память) -----
+    // Меняется во вкладке «Аим». Обе петли держат собственное состояние, поэтому
+    // на смене режима старое сбрасывается целиком: иначе в новый режим приехал
+    // бы незавершённый шаг пальца, а результат прежнего самотеста — устаревшие
+    // адреса чужого мира. Самотест при этом запускается заново, и его состояние
+    // («подбираю… / готово / нельзя») видно в меню словами.
+    const bool memoryMode = (g_state.aim_mode == 1);
+    static bool s_memModePrev = false;
+    if (memoryMode != s_memModePrev) {
+        s_memModePrev = memoryMode;
+        AimReleaseFinger(s_fingerDown);
+        s_haveLast = false; s_lastId = 0; s_lastBone = -1;
+        s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        s_trackYaw.reset(); s_trackPitch.reset();
+        if (memoryMode) esp_mem_aim_reset();
+    }
+
+    // Самотест и сторож дорожки записи живут отдельно от наведения — их надо
+    // крутить и когда цели нет (иначе «подбираю…» застынет навсегда), но только
+    // когда аим вообще активен: самотест делает пробные довороты, и в меню или
+    // под пальцем игрока их быть не должно.
+    //
+    // Отказ устройства (MEM_AIM_UNSUPPORTED) самотест больше не трогает: там
+    // работает запасная тач-ветка, а её камера — это уже чужое движение, на
+    // котором ни один замер не сойдётся. Перепроверка будет на смене режима или
+    // на перепривязке (esp_reset -> esp_mem_aim_reset).
+    int memState = esp_mem_aim_state();
+    if (active && memoryMode && memState != MEM_AIM_UNSUPPORTED) esp_mem_aim_tick(dt);
+    // Самотест мог закончиться прямо в этом такте (нашёл дорожку или сдался) —
+    // решение о довороте принимаем по свежему состоянию, а не по вчерашнему.
+    if (memoryMode) memState = esp_mem_aim_state();
 
     if (!active) {
         AimReleaseFinger(s_fingerDown);
@@ -159,6 +193,9 @@ void UpdateAim(float dt) {
     }
 
     if (!best.valid) {
+        // В мемори-режиме палец не нужен вовсе: отпускаем сразу, чтобы
+        // оставшийся от прошлого режима тач не крутил камеру.
+        if (memoryMode) AimReleaseFinger(s_fingerDown);
         // Keep the finger down briefly so a momentary read failure does not
         // register as a tap (tap-to-shoot in some layouts) or reset momentum.
         if (++s_lostFrames > 6) {
@@ -204,7 +241,10 @@ void UpdateAim(float dt) {
                 // movement. Aim more than a frame ahead for fast movers so the
                 // crosshair stays on a laterally running target (the controller
                 // smoothing otherwise makes it trail behind).
-                const float leadMin = degPerPx * 2.f;
+                // В тач-режиме порог — два кванта пальца (ниже движение цели
+                // не отличить от дрожания). В мемори-режиме кванта нет: там
+                // порог задан прямо в градусах.
+                const float leadMin = memoryMode ? 0.15f : degPerPx * 2.f;
                 float vMag = sqrtf(vYaw * vYaw + vPitch * vPitch);
                 if (vMag > leadMin) {
                     float k = 1.1f * (1.f - leadMin / vMag);
@@ -221,6 +261,40 @@ void UpdateAim(float dt) {
         if (haveC) { s_prevCamYawT = cy; s_prevCamPitchT = cp; s_havePrevTgt = true; }
         else s_havePrevTgt = false;
     }
+    // ---- Режим «Мемори»: палец не участвует вовсе -------------------------
+    // Прицел доводится записью поворота в память игры (esp/aim_mem.cpp), поэтому
+    // ниже — ни тач-зон, ни кванта ввода, ни обучения град/px: контроллер берёт
+    // остаток ошибки (тот же самый, что у тач-режима, вместе с упреждением) и
+    // считает новые абсолютные углы. Стенд арифметики — tools/aim/run_mem.sh.
+    if (memoryMode) {
+        if (memState == MEM_AIM_READY) {
+            AimReleaseFinger(s_fingerDown);
+            s_lastId = best.id; s_lastBone = best.bone;
+            s_haveLast = false;              // коэффициент тач-режима не ведём
+            s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+            float yaw_now = 0.f, pitch_now = 0.f;
+            if (esp_mem_aim_read_angles(yaw_now, pitch_now)) {
+                float yaw_new = 0.f, pitch_new = 0.f;
+                if (AimMemoryStep(best, dt, g_state.gun_str, best.world_dist,
+                                  yaw_now, pitch_now, yaw_new, pitch_new))
+                    esp_mem_aim_apply(yaw_new, pitch_new);
+            }
+            // Углы пропали — сторож в esp_mem_aim_tick() объявит запись
+            // потерянной и запустит самотест заново; до тех пор не пишем.
+            return;
+        }
+        // Идёт самотест. Палец отпущен и камера не трогается: пробный доворот
+        // меряется по настоящему повороту прицела, и наше же движение его
+        // сломало бы. Самотест ограничен по времени (esp/aim_mem.cpp).
+        if (memState != MEM_AIM_UNSUPPORTED) {
+            AimReleaseFinger(s_fingerDown);
+            return;
+        }
+        // Дорожки записи на этом устройстве нет — ведём тач-веткой ниже, чтобы
+        // аим вообще не остался мёртвым. В меню при этом написано, что режим
+        // «Мемори» не поддержан и работает тач.
+    }
+
     s_lastId = best.id; s_lastBone = best.bone;
 
     // ---- оценка коэффициента по реакции прицела ----

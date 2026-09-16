@@ -4,6 +4,7 @@
 // что здесь лежит и кто это зовёт — в шапке frame.h и в docs/CODE_MAP.md.
 
 #include "esp/common.h"
+#include "esp/aim_mem.h"
 #include "esp/aim_points.h"
 #include "esp/boxes.h"
 #include "esp/camera.h"
@@ -218,6 +219,9 @@ void reset_world_caches() {
 }
 
 void esp_reset() {
+    // Прицел мемори-аима хранится адресами чужого процесса: перепривязка или
+    // загрузка конфига их обнуляют, поэтому дорожку записи надо подобрать заново.
+    esp_mem_aim_reset();
     g_mem.unbind();
     g_attach_state = ESP_ATTACH_OK;
     g_pid = -1; g_il2cpp_base = 0;

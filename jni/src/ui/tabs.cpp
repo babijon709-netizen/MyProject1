@@ -17,6 +17,7 @@
 #include "ui/widgets.h"
 #include "ui/window.h"
 #include "ui/tabs.h"
+#include "esp/aim_mem.h"
 
 float TabContent(int tab, float dt, float cW) {
     float sY = ImGui::GetCursorPosY();
@@ -31,6 +32,124 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::smoothness = g_state.gun_str;
         cfg::aim::bone       = g_state.aim_bone;
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
+
+        // ---- Режим аима: палец или память ----------------------------------
+        // «Тач» — прежний аимбот: водит палец через uinput. «Мемори» — доворот
+        // записью поворота в память игры (esp/aim_mem.cpp): не зависит от прав на
+        // uinput и от настройки чувствительности, а ошибка прицела берётся не с
+        // экрана, а из самих углов — поэтому точнее. Дорожку записи модуль не
+        // угадывает, а подтверждает замером, и строка под переключателем говорит,
+        // чем дело кончилось на этом устройстве. Пока идёт подбор, аим камеру не
+        // трогает — поэтому строка обязана быть видна (подбор ограничен по
+        // времени, а если не вышло — работает тач).
+        SHdr(XS("Режим"));
+        {
+            const float avW   = ImGui::GetContentRegionAvail().x;
+            const float inset = Layout::Inset;
+            const float rowH  = Layout::RowH;
+            auto  pos = ImGui::GetCursorScreenPos();
+            auto* dl  = ImGui::GetWindowDrawList();
+            auto* fn  = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+            const char* const modeNames[2] = { XS("Тач"), XS("Мемори") };
+            const int modeIdx = (g_state.aim_mode == 1) ? 1 : 0;
+            const float gap = 10.f;
+            const float halfW = (avW - inset * 2.f - gap) * 0.5f;
+
+            for (int mi = 0; mi < 2; mi++) {
+                const bool sel = (modeIdx == mi);
+                const float x0 = pos.x + inset + mi * (halfW + gap);
+                const float x1 = x0 + halfW;
+
+                dl->AddRectFilled({x0, pos.y}, {x1, pos.y + rowH}, C::U(C::Card()), R::Card);
+                if (sel) {
+                    dl->AddRectFilled({x0, pos.y}, {x1, pos.y + rowH},
+                        C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), R::Card);
+                    dl->AddRect({x0, pos.y}, {x1, pos.y + rowH}, C::UA(C::Acc(), 0.8f), R::Card, 0, 2.f);
+                } else if (g_state.ui_show_sep) {
+                    dl->AddRect({x0, pos.y}, {x1, pos.y + rowH}, C::U(C::Sep()), R::Card, 0, 1.2f);
+                }
+
+                auto lsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, modeNames[mi]);
+                dl->AddText(fn, fs, {x0 + (halfW - lsz.x) * 0.5f, pos.y + (rowH - lsz.y) * 0.5f},
+                            C::U(sel ? C::Acc() : C::Txt()), modeNames[mi]);
+
+                char mid[20]; snprintf(mid, sizeof(mid), "##aimmode%d", mi);
+                ImGui::SetCursorScreenPos({x0, pos.y});
+                ImGui::InvisibleButton(mid, {halfW, rowH});
+                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed && !sel) {
+                    g_state.aim_mode = mi;
+                    char _b[160]; snprintf(_b, sizeof(_b), XS("%s|%s"), XS("Режим"), modeNames[mi]);
+                    ShowToast(_b);
+                    PlaySound(SND_CLICK);
+                    g_input.touchConsumed = true;
+                }
+            }
+            ImGui::SetCursorScreenPos({pos.x, pos.y + rowH});
+            ImGui::Dummy({avW, 0.f});
+        }
+
+        // Строка состояния мемори-режима: что именно нашлось на этом устройстве.
+        if (g_state.aim_mode == 1) {
+            const int st   = esp_mem_aim_state();
+            const int path = esp_mem_aim_path();
+            const int rsn  = esp_mem_aim_reason();
+            const char* head    = XS("Проверю, когда закроешь меню");
+            const char* detail  = "";
+            ImVec4      headCol = C::Dim();
+
+            auto pathName = [](int p) -> const char* {
+                switch (p) {
+                    case MEM_PATH_STATE_QUAT:  return XS("кватернион поворота");
+                    case MEM_PATH_STATE_DEG:   return XS("углы поворота, градусы");
+                    case MEM_PATH_STATE_RAD:   return XS("углы поворота, радианы");
+                    case MEM_PATH_INPUT:       return XS("ввод поворота игры");
+                    case MEM_PATH_TRANSFORM:   return XS("узел камеры");
+                    default:                   return "";
+                }
+            };
+            auto reasonName = [](int r) -> const char* {
+                switch (r) {
+                    case MEM_REASON_NO_MOUSE_LOOK: return XS("нет доступа к MouseLook");
+                    case MEM_REASON_NO_ANGLES:     return XS("углы прицела не читаются");
+                    case MEM_REASON_NO_FIELD:      return XS("поля поворота не найдены");
+                    case MEM_REASON_WRITE_LOST:    return XS("запись не доворачивает прицел");
+                    default:                       return "";
+                }
+            };
+
+            if (!g_state.aim_touch) {
+                // Самотест идёт только при включённом аиме: без него это были бы
+                // пробные довороты прицела «просто так», при живом игроке.
+                head = XS("Сначала включи «Аим»");
+            } else if (st == MEM_AIM_PROBING) {
+                head = XS("Подбираю способ записи…");
+                headCol = C::Txt();
+                detail = XS("аим пока не трогает камеру");
+            } else if (st == MEM_AIM_READY) {
+                head = XS("Через память — готово");
+                headCol = C::Acc();
+                detail = pathName(path);
+            } else if (st == MEM_AIM_UNSUPPORTED) {
+                head = XS("Через память нельзя — работает тач");
+                headCol = C::Red();
+                detail = reasonName(rsn);
+            }
+
+            const float avW = ImGui::GetContentRegionAvail().x;
+            const float cardH = 96.f;
+            auto p0 = ImGui::GetCursorScreenPos();
+            auto* dl = ImGui::GetWindowDrawList();
+            auto* fn = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            CardBg(cardH);
+            dl->AddText(fn, fs, {p0.x + Layout::Inset + Layout::PadX, p0.y + 24.f}, C::U(headCol), head);
+            if (detail && detail[0])
+                dl->AddText(fn, fs * 0.9f, {p0.x + Layout::Inset + Layout::PadX, p0.y + 58.f},
+                            C::U(C::Dim()), detail);
+            ImGui::Dummy({avW, cardH});
+        }
 
         SHdr(XS("Аим"));
         CardBg(Layout::RowH * 3);

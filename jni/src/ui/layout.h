@@ -34,6 +34,10 @@ struct AppState {
     int   cur_tab = 1;   // при запуске открыта вкладка «Аим»
     bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
     int   aim_bone = 0;
+    // Режим аимбота: 0 — «Тач» (палец через uinput), 1 — «Мемори» (доворот
+    // записью поворота в память игры; см. esp/aim_mem.h). Хранится в конфиге,
+    // см. ui/config.cpp.
+    int   aim_mode = 0;
     // Точка, из которой аимбот водит палец (доли экрана). Выбирается тапом по
     // экрану, как зоны автофарма; -1 = не задана (прежняя позиция 74%/50%).
     float aim_tx = -1.f, aim_ty = -1.f;

@@ -26,7 +26,26 @@ extern Vec3 g_aim_ref_forward, g_aim_ref_right, g_aim_ref_up;
 
 extern int g_offset_extent_fail_streak;
 
+// ---- Данные, которые видят другие модули ----
+
+// MouseLook локального игрока (Oxide.MouseLook): через него игра превращает
+// касание в поворот камеры. Раскладка сверена по dump.cs релиза 205619 и беты
+// 207986; подробности — в комментарии к esp_read_look_sensitivity.
+//   PLAYER_MOUSE_LOOK_OFFSET      — поле PlayerManager, где лежит MouseLook;
+//   MOUSE_LOOK_SENSITIVITY_OFFSET — m_Sensitivity: множитель «сдвиг -> угол»;
+//   MOUSE_LOOK_ACCUM_OFFSET       — накопленный за такт сдвиг взгляда: игра
+//                                   читает его, умножает на m_Sensitivity и
+//                                   применяет к повороту (RVA 0x64e312c).
+// Последнее поле нужно мемори-аиму: запись в него — это тот же поворот, что
+// даёт касание, только без пальца (см. esp/aim_mem.cpp).
+inline constexpr uint64_t PLAYER_MOUSE_LOOK_OFFSET      = 0x70;
+inline constexpr uint64_t MOUSE_LOOK_SENSITIVITY_OFFSET = 0x34;
+inline constexpr uint64_t MOUSE_LOOK_ACCUM_OFFSET       = 0x88;
+
 // ---- Функции, которые видят другие модули ----
+
+// Объект MouseLook локального игрока; 0 — не найден (нет привязки, нет игрока).
+uint64_t esp_resolve_mouse_look();
 
 bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view);
 

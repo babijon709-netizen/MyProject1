@@ -24,7 +24,9 @@
 | строки интерфейса РУ/EN (XOR-таблица) | `jni/src/ui/xp.h` |
 | рисование рамок, скелетов и маркеров поверх игры | `jni/src/ui/esp_overlay.cpp` |
 | аимбот: точка прицела, чувствительность, палец | `jni/src/aim/controller.cpp` |
-| аимбот: сам такт — доводка камеры, обучение коэффициента | `jni/src/aim/update.cpp` |
+| аимбот: сам такт — доводка камеры, обучение коэффициента, выбор режима Тач/Мемори | `jni/src/aim/update.cpp` |
+| мемори-аим: шаг доворота по абсолютным углам (мёртвая зона, доля ошибки) | `jni/src/aim/memory.cpp` |
+| мемори-аим: где игра держит поворот и как в него писать (подбор дорожки замером) | `jni/src/esp/aim_mem.cpp` |
 | автофарм: фазы, удар, обход узлов, разбор крестика | `jni/src/farm/controller.cpp` |
 | автофарм: цифры для строки статуса в окне | `jni/src/farm/state.cpp` |
 | звуки меню (щелчок, подтверждение) | `jni/src/app/audio.cpp` |
@@ -70,6 +72,7 @@ sh tools/hostcheck/run.sh      # синтаксис и типы всех мод�
 sh tools/syntax/check.sh       # то же с заглушками Android-заголовков
 sh tools/lang/run.sh           # таблицы перевода и переключатель языка
 sh tools/farm/run.sh           # стенд автофарма (настоящий код контроллера)
+sh tools/aim/run_mem.sh        # стенд мемори-аима (настоящий код aim/memory.cpp)
 ```
 
 ## ESP (было `game.cpp`)
@@ -77,6 +80,21 @@ sh tools/farm/run.sh           # стенд автофарма (настоящи
 Чтение памяти игры и всё, что из неё достаётся: сущности, скелеты, камера,
 маркеры, цель автофарма. Точка входа публичного API — `jni/include/game.h`
 (`esp_init`, `esp_get_boxes`, `esp_get_markers`, `esp_farm_get_target`, …).
+
+### jni/src/esp/aim_mem.cpp — Мемори-аим: поворот прицела записью в память игры
+
+Строк: 752. Заголовок: `aim_mem.h`.
+
+Внутри: `forward_from_angles`, `angles_from_forward`, `wrap180`, `signed_angle_diff`, `quaternion_between`, `quaternion_inverse`, `read_current_angles`, `read_mouse_look_floats`, `to_stored_yaw`, `path_apply`, `scan_state_fields`, `find_look_root`, `save_probe_value`, `restore_probe_value`, `probe_path_at`, `probe_finish_unsupported`, `probe_accept`, `probe_begin_candidate`, `probe_apply_current`, `probe_next_candidate`, `probe_undo`, `esp_mem_aim_reset`, `esp_mem_aim_tick`, `esp_mem_aim_state`, `esp_mem_aim_path`, `esp_mem_aim_reason`, `esp_mem_aim_read_angles`, `esp_mem_aim_apply`
+
+Что тут важно: ни одна дорожка записи не «угадывается» — самотест делает
+пробный доворот (yaw 2°, тангаж 1°), ждёт применения и меряет настоящий поворот
+прицела; дорожка принимается только если доворот совпал с допуском 0.6° и не
+поехал дальше. Порядок проверки: кватернион в MouseLook, пара углов (градусы и
+радианы), поле накопленного ввода игры (+0x88/+0x8C), узел прицела в иерархии
+Transform. Самотест ограничен по времени (6 с): не нашлось — режим «Мемори»
+объявляет отказ с причиной, и аим продолжает работать тач-веткой.
+
 
 ### jni/src/esp/aim_points.cpp — Точки прицела: голова/шея/грудь и локальный ADS
 
@@ -94,7 +112,7 @@ sh tools/farm/run.sh           # стенд автофарма (настоящи
 
 ### jni/src/esp/camera.cpp — Камера игры: поза, матрицы, углы, чувствительность
 
-Строк: 416. Заголовок: `camera.h`.
+Строк: 420. Заголовок: `camera.h`.
 
 Внутри: `esp_read_look_sensitivity`, `read_camera_transform_pose`, `read_native_camera_matrices`, `w2s_transform_camera`, `optimize_matrix_configuration`, `read_configured_player_transforms`, `esp_camera_fov_deg`, `esp_camera_state`, `read_local_aim_reference`
 
@@ -115,7 +133,7 @@ sh tools/farm/run.sh           # стенд автофарма (настоящи
 
 ### jni/src/esp/frame.cpp — Кадр ESP: состояние, публикация, сброс
 
-Строк: 307. Заголовок: `frame.h`.
+Строк: 311. Заголовок: `frame.h`.
 
 Внутри: `farm_cam_source_ok`, `angles_from_forward`, `esp_camera_angles`, `esp_aim_camera_angles`, `esp_local_eye_position`, `reset_world_caches`, `esp_reset`, `publish_camera_only_frame`
 
@@ -213,7 +231,7 @@ sh tools/farm/run.sh           # стенд автофарма (настоящи
 
 ### jni/src/esp/transform.cpp — Иерархия Transform: где у объекта позиция и как её читать
 
-Строк: 346. Заголовок: `transform.h`.
+Строк: 453. Заголовок: `transform.h`.
 
 Внутри: `read_transform_hierarchy_arrays`, `read_transform_hierarchy_layout`, `read_transform_hierarchy_position`, `resolve_player_native_transform`, `likely_native_pointer`, `evaluate_transform_hierarchy_layout`, `discover_layout_from_native_transforms`, `discover_transform_hierarchy_layout`, `read_entity_position`, `read_entity_pose`, `position_looks_like_world_space`, `evaluate_player_position_offset`, `find_direct_player_position_offset`, `discover_player_position_offset`, `… ещё 1`
 
@@ -238,9 +256,22 @@ sh tools/farm/run.sh           # стенд автофарма (настоящи
 Внутри: `ColU32`, `AimFovRadiusPx`, `AimReleaseFinger`, `MonoNow`, `AimSensitivityScale`, `AimSensitivityGain`
 
 
-### jni/src/aim/update.cpp — UpdateAim: один такт аимбота
+### jni/src/aim/memory.cpp — Мемори-аим: такт доворота по абсолютным углам
 
-Строк: 592. Заголовок: `aim/update.h`.
+Строк: 113. Заголовок: `aim/memory.h`.
+
+Внутри: `AimMemoryStep`
+
+В отличие от тач-аима здесь нет петли «палец -> камера -> экранная ошибка»
+(квант ввода, обучение град/px, ожидание подтверждения). Контроллер получает
+углы прицела и остаток ошибки и решает, куда поставить прицел: мёртвая зона
+(3 см в мире цели), доля остатка за такт из слайдера «Скорость», потолок 12° за
+кадр. Стенд с настоящим кодом этого файла — `tools/aim/run_mem.sh`.
+
+
+### jni/src/aim/update.cpp — UpdateAim: один такт аимбота (режимы Тач и Мемори)
+
+Строк: 663. Заголовок: `aim/update.h`.
 
 Внутри: `UpdateAim`
 
@@ -285,7 +316,7 @@ sh tools/farm/run.sh           # стенд автофарма (настоящи
 
 ### jni/src/ui/config.cpp — Конфиги: файлы, XOR, слежение за каталогом
 
-Строк: 449. Заголовок: `ui/config.h`.
+Строк: 460. Заголовок: `ui/config.h`.
 
 Внутри: `CfgPath`, `CfgLastPath`, `RememberLastConfigName`, `ForgetLastConfigName`, `CfgLangPath`, `RememberLang`, `RestoreLang`, `CfgBuildPath`, `RememberBuild`, `RestoreBuild`, `ApplyBuildChoice`, `XorBuf`, `CfgScanDir`, `CfgWatchInit`, `… ещё 8`
 
@@ -332,7 +363,7 @@ sh tools/farm/run.sh           # стенд автофарма (настоящи
 
 ### jni/src/ui/tabs.cpp — TabContent: содержимое вкладок
 
-Строк: 617. Заголовок: `ui/tabs.h`.
+Строк: 732. Заголовок: `ui/tabs.h`.
 
 Внутри: `TabContent`
 

@@ -211,6 +211,7 @@ struct CfgBlob {
     //   x = bit 0 loot ESP, bit 1 pickup ESP,
     //   y = marker draw distance (m),
     //   z = aim priority + 1 (so an old config's 1.0 still means "default"),
+    //       plus 8 when the aim mode is "Мемори" — see below,
     //   w = pickup colour packed as r*65536 + g*256 + b (exact in a float,
     //       since 0xFFFFFF < 2^24); <= 1 means "never written, use default".
     ImVec4 esp_extra;
@@ -269,8 +270,14 @@ static void ConfigSaveToPath(const std::string& path) {
         const float packed = (float)(ch(cfg::esp::pickup_col.x) * 65536
                                    + ch(cfg::esp::pickup_col.y) * 256
                                    + ch(cfg::esp::pickup_col.z));
-        s.esp_extra = {(float)flags, g_state.marker_dist,
-                       (float)(g_state.aim_priority + 1), packed};
+        // z: приоритет цели плюс режим аима отдельным разрядом (8 = «Мемори»).
+        // Разряд свободен по построению: в старых конфигах здесь лежала альфа
+        // прежнего пинга (0..1), а с тех пор как сюда упаковали приоритет, тут
+        // бывает только 1..3. Значит «>= 8» не может приехать ни из одного
+        // конфига, записанного до появления режимов, и включение «Мемори» — это
+        // всегда выбор пользователя, а не унаследованное значение.
+        const int packedZ = g_state.aim_priority + 1 + (g_state.aim_mode == 1 ? 8 : 0);
+        s.esp_extra = {(float)flags, g_state.marker_dist, (float)packedZ, packed};
     }
     s.esp_box_type         = cfg::esp::box_type;
     s.esp_box_rounding     = cfg::esp::box_rounding;
@@ -352,6 +359,10 @@ void ConfigLoad(int idx, bool announce) {
         g_state.esp_pickup = (flags & 2) != 0;
         g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
         int pr = (int)(s.esp_extra.z + 0.5f) - 1;
+        // Разряд 8 — режим аима (см. ConfigSaveToPath). Всё, что не 8..10, —
+        // старое значение: приоритет по умолчанию, режим «Тач».
+        g_state.aim_mode = (pr >= 8 && pr <= 10) ? 1 : 0;
+        if (g_state.aim_mode) pr -= 8;
         g_state.aim_priority = (pr >= 0 && pr <= 2) ? pr : 0;
         // Packed pickup colour. Configs written before it existed hold the old
         // ping alpha (exactly 1.0) here, which is why the check is "> 1".

@@ -71,24 +71,33 @@ bool read_transform_hierarchy_layout(uint64_t native_transform, const TransformH
 
 bool position_looks_like_world_space(const Vec3& position); // defined below
 
-bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& position) {
-    if (!native_transform) return false;
-    // The learned layout is only a fast path. It is learned from PLAYER
-    // transforms and dies with a world reload — after a respawn it fails (or
-    // reads garbage) for every entity. Returning its result directly here
-    // was the solo-markers-after-respawn bug: the self-probing fallback
-    // below (which needs no players and no learning) was never reached.
-    if (g_transform_hierarchy_layout_valid &&
-        read_transform_hierarchy_layout(native_transform, g_transform_hierarchy_layout, position) &&
-        vec3_is_finite(position) && position_looks_like_world_space(position))
-        return true;
-    // Same probing as read_camera_transform_pose: TransformAccess lives at
-    // +0x38/+0x40 on older builds and at +0x18/+0x20 on this one. Markers ran
-    // only the first probe, which is why they worked ONLY once a nearby
-    // player's skeleton had taught us the layout — the camera (with both
-    // probes) worked solo all along.
+// Разбор адресов иерархии по известной раскладке. Проверка — полным чтением
+// позы: подходит только та пара массивов, по которой узел действительно
+// читается (иначе «нашли» бы адрес случайного поля).
+static bool resolve_arrays_by_layout(uint64_t native_transform, const TransformHierarchyLayout& layout,
+                                     int32_t& transform_index, uint64_t& matrices, uint64_t& indices,
+                                     Vec3* pose_out) {
+    uint64_t transform_data = rd_ptr(native_transform + layout.data_offset);
+    transform_index = rd<int32_t>(native_transform + layout.index_offset);
+    if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
+    matrices = rd_ptr(transform_data + layout.matrices_offset);
+    indices  = rd_ptr(transform_data + layout.indices_offset);
+    if (layout.matrices_indirect) matrices = rd_ptr(matrices);
+    if (layout.indices_indirect)  indices  = rd_ptr(indices);
+    if (!matrices || !indices) return false;
+    Vec3 probe{};
+    if (!read_transform_hierarchy_arrays(matrices, indices, transform_index, probe)) return false;
+    if (pose_out) *pose_out = probe;
+    return true;
+}
+
+// Тот же перебор, что у read_camera_transform_pose: TransformAccess живёт на
+// +0x38/+0x40 у старых сборок и на +0x18/+0x20 у этой. Нужен, когда выученная
+// раскладка ещё не известна или умерла со сменой мира.
+static bool resolve_arrays_by_probe(uint64_t native_transform, int32_t& transform_index,
+                                    uint64_t& matrices, uint64_t& indices, Vec3* pose_out) {
     uint64_t transform_data = rd_ptr(native_transform + 0x38);
-    int32_t transform_index = rd<int32_t>(native_transform + 0x40);
+    transform_index = rd<int32_t>(native_transform + 0x40);
     if (!transform_data || transform_index < 0 || transform_index > 100000) {
         transform_data = rd_ptr(native_transform + 0x18);
         transform_index = rd<int32_t>(native_transform + 0x20);
@@ -101,13 +110,111 @@ bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& position
         if (!matrix_pointer || !index_pointer) continue;
         const uint64_t matrix_candidates[] = {matrix_pointer, rd_ptr(matrix_pointer)};
         const uint64_t index_candidates[] = {index_pointer, rd_ptr(index_pointer)};
-        for (uint64_t matrices : matrix_candidates) {
-            for (uint64_t indices_ptr : index_candidates) {
-                if (read_transform_hierarchy_arrays(matrices, indices_ptr, transform_index, position)) return true;
+        for (uint64_t candidate_matrices : matrix_candidates) {
+            for (uint64_t candidate_indices : index_candidates) {
+                Vec3 probe{};
+                if (!read_transform_hierarchy_arrays(candidate_matrices, candidate_indices, transform_index, probe)) continue;
+                matrices = candidate_matrices; indices = candidate_indices;
+                if (pose_out) *pose_out = probe;
+                return true;
             }
         }
     }
     return false;
+}
+
+bool resolve_transform_arrays(uint64_t native_transform, int32_t& transform_index,
+                              uint64_t& matrices, uint64_t& indices) {
+    if (!native_transform) return false;
+    if (g_transform_hierarchy_layout_valid &&
+        resolve_arrays_by_layout(native_transform, g_transform_hierarchy_layout, transform_index, matrices, indices, nullptr))
+        return true;
+    return resolve_arrays_by_probe(native_transform, transform_index, matrices, indices, nullptr);
+}
+
+static bool read_local_matrix34(uint64_t native_transform, Matrix34& out) {
+    int32_t transform_index = -1;
+    uint64_t matrices = 0, indices = 0;
+    if (!resolve_transform_arrays(native_transform, transform_index, matrices, indices)) return false;
+    if (!rd_exact(matrices + (uint64_t)transform_index * sizeof(Matrix34), out)) return false;
+    return matrix34_is_valid(out);
+}
+
+bool read_transform_local_rotation(uint64_t native_transform, Vec4& local_rotation) {
+    Matrix34 matrix{};
+    if (!read_local_matrix34(native_transform, matrix)) return false;
+    Vec4 rotation = matrix.rotation;
+    if (!normalize_quaternion(rotation)) return false;
+    local_rotation = rotation;
+    return true;
+}
+
+bool read_transform_parent_world_rotation(uint64_t native_transform, Vec4& parent_world_rotation) {
+    int32_t transform_index = -1;
+    uint64_t matrices = 0, indices = 0;
+    if (!resolve_transform_arrays(native_transform, transform_index, matrices, indices)) return false;
+    Vec4 accumulated = {0.f, 0.f, 0.f, 1.f};
+    int32_t parent = -2;
+    if (!rd_exact(indices + (uint64_t)transform_index * sizeof(int32_t), parent)) return false;
+    int32_t previous_parent = transform_index;
+    int depth = 0;
+    while (parent >= 0 && depth++ < 128) {
+        if (parent > 100000 || parent == previous_parent) return false;
+        Matrix34 matrix{};
+        if (!rd_exact(matrices + (uint64_t)parent * sizeof(Matrix34), matrix) || !matrix34_is_valid(matrix)) return false;
+        accumulated = multiply_quaternion(matrix.rotation, accumulated);
+        previous_parent = parent;
+        if (!rd_exact(indices + (uint64_t)parent * sizeof(int32_t), parent)) return false;
+    }
+    if (parent != -1 || depth >= 128) return false;
+    if (!normalize_quaternion(accumulated)) return false;
+    parent_world_rotation = accumulated;
+    return true;
+}
+
+bool write_transform_local_rotation(uint64_t native_transform, const Vec4& local_rotation) {
+    int32_t transform_index = -1;
+    uint64_t matrices = 0, indices = 0;
+    if (!resolve_transform_arrays(native_transform, transform_index, matrices, indices)) return false;
+    Vec4 rotation = local_rotation;
+    if (!normalize_quaternion(rotation)) return false;
+    // Пишем ровно ту запись, которую читает поза: Matrix34 — это
+    // {translation, rotation, scale} (см. Vector.h), локальный поворот лежит
+    // вторым полем.
+    const uint64_t address = matrices + (uint64_t)transform_index * sizeof(Matrix34)
+                           + offsetof(Matrix34, rotation);
+    return wr_buf(address, &rotation, sizeof(Vec4));
+}
+
+bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& position) {
+    if (!native_transform) return false;
+    // The learned layout is only a fast path. It is learned from PLAYER
+    // transforms and dies with a world reload — after a respawn it fails (or
+    // reads garbage) for every entity. Returning its result directly here
+    // was the solo-markers-after-respawn bug: the self-probing fallback
+    // below (which needs no players and no learning) was never reached.
+    if (g_transform_hierarchy_layout_valid) {
+        int32_t transform_index = -1;
+        uint64_t matrices = 0, indices = 0;
+        Vec3 pose{};
+        if (resolve_arrays_by_layout(native_transform, g_transform_hierarchy_layout,
+                                     transform_index, matrices, indices, &pose) &&
+            vec3_is_finite(pose) && position_looks_like_world_space(pose)) {
+            position = pose;
+            return true;
+        }
+    }
+    // Same probing as read_camera_transform_pose: TransformAccess lives at
+    // +0x38/+0x40 on older builds and at +0x18/+0x20 on this one. Markers ran
+    // only the first probe, which is why they worked ONLY once a nearby
+    // player's skeleton had taught us the layout — the camera (with both
+    // probes) worked solo all along.
+    int32_t transform_index = -1;
+    uint64_t matrices = 0, indices = 0;
+    Vec3 pose{};
+    if (!resolve_arrays_by_probe(native_transform, transform_index, matrices, indices, &pose)) return false;
+    position = pose;
+    return true;
 }
 
 uint64_t resolve_player_native_transform(uint64_t player) {
