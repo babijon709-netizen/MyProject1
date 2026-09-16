@@ -1,5 +1,6 @@
 #include "game.h"
-#include "mem_io.h"          // чтение/запись памяти игры: два способа + кэш блоков
+#include "mem_io.h"                // чтение/запись памяти игры: /proc/<pid>/mem + кэш блоков
+#include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // активные оффсеты: релиз или бета (go::SelectBuild)
 #include "Vector.h"
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
@@ -768,38 +769,9 @@ static uint64_t get_base(const char* lib) {
     close(fd);
     if (text.empty()) return 0;
 
-    const size_t lib_len = strlen(lib);
-    uint64_t fallback = 0;
-    size_t pos = 0;
-    while (pos < text.size()) {
-        size_t eol = text.find('\n', pos);
-        if (eol == std::string::npos) eol = text.size();
-        const char* line = text.c_str() + pos;
-        pos = eol + 1;
-
-        unsigned long long start = 0, end = 0, file_offset = 0;
-        char perms[5] = {};
-        if (sscanf(line, "%llx-%llx %4s %llx", &start, &end, perms, &file_offset) != 4)
-            continue;
-        const char* slash = strchr(line, '/');
-        if (!slash) continue;
-        size_t name_len = eol - (size_t)(slash - line);
-        while (name_len > 0 && (slash[name_len - 1] == '\r' || slash[name_len - 1] == ' '))
-            --name_len;
-        const char* deleted = " (deleted)";
-        const size_t deleted_len = strlen(deleted);
-        if (name_len > deleted_len &&
-            strncmp(slash + name_len - deleted_len, deleted, deleted_len) == 0)
-            name_len -= deleted_len;
-        if (name_len < lib_len) continue;
-        if (strncmp(slash + name_len - lib_len, lib, lib_len) != 0) continue;
-        if (name_len > lib_len && slash[name_len - lib_len - 1] != '/') continue;
-
-        const uint64_t load_bias = (uint64_t)start - (uint64_t)file_offset;
-        if (!fallback || load_bias < fallback) fallback = load_bias;
-        if (file_offset == 0) return (uint64_t)start;   // начало отображения — оно
-    }
-    return fallback;
+    // Разбор живёт в maps_lookup.h: там же объяснено, почему именно этот
+    // участок однажды ронял процесс на старте (см. tools/maps).
+    return maps::lookup_library_base(text, lib);
 }
 
 static bool validate_player_list(uint64_t list, uint64_t player_class) {
