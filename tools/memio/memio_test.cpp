@@ -2,16 +2,16 @@
 //
 //   sh tools/memio/run.sh
 //
-// Почему он есть: слой чтения памяти игры меняет способ доступа и кэширует
+// Почему он есть: слой чтения памяти игры ходит в /proc/<pid>/mem и кэширует
 // блоки, а проверить это на телефоне из песочницы нельзя. Здесь то же самое, но
 // на хосте: стенд порождает процесс-ребёнка со страницей узора и читает его
 // память ровно теми же функциями, которыми чит читает игру.
 //
 // Проверки:
-//   1) привязка выбирает рабочий способ и видит ELF-заголовок (здесь — метку,
+//   1) привязка открывает /proc/<pid>/mem и видит ELF-заголовок (здесь — метку,
 //      подложенную ребёнком) — то, чем bind() проверяет доступ;
-//   2) оба способа (process_vm_readv и /proc/<pid>/mem) отдают ОДНИ И ТЕ ЖЕ
-//      данные: второй и есть запасной путь для устройств, где первый запрещён;
+//   2) чтения через кэш отдают данные ребёнка байт в байт (идут тем же pread,
+//      что и на устройстве);
 //   3) кэш блоков: 200 мелких чтений внутри блока = 1 syscall, соседний блок = +1;
 //   4) начало кадра (frame_begin) сбрасывает кэш — данные перечитываются;
 //   5) запись доходит до процесса-ребёнка и не отдаётся из кэша;
@@ -21,6 +21,7 @@
 
 #include "mem_io.h"
 
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -118,28 +119,22 @@ int main() {
     memio::Reader r;
     check(r.bind(child.pid, child.base), "привязка к живому процессу удалась");
     printf("      способ: %s\n", r.backend_name());
-    check(r.backend() == memio::Backend::Readv, "выбран process_vm_readv (самый быстрый)");
+    check(r.bound() && strcmp(r.backend_name(), "/proc/<pid>/mem") == 0,
+          "доступ идёт через /proc/<pid>/mem");
     check(r.verify(), "проверка привязки (verify) — заголовок по адресу пробы читается");
 
-    // 2) Оба способа дают одно и то же.
+    // 2) Чтения отдают данные ребёнка байт в байт (в том числе через кэш).
     {
-        bool same = true, readv_ok = true;
-        for (int pass = 0; pass < 2; ++pass) {
-            const memio::Backend want = pass == 0 ? memio::Backend::Readv : memio::Backend::ProcMem;
-            if (!r.use_backend(want, child.base)) { readv_ok = false; break; }
-            int k = 0;
-            for (size_t off = 0x10; off < 0x400; off += 0x37, ++k) {
-                uint8_t v = 0;
-                if (!r.read(child.base + off, &v, 1) || v != pattern(off)) { same = false; break; }
-            }
-            if (!same) break;
+        bool same = true;
+        int k = 0;
+        for (size_t off = 0x10; off < 0x400; off += 0x37, ++k) {
+            uint8_t v = 0;
+            if (!r.read(child.base + off, &v, 1) || v != pattern(off)) { same = false; break; }
         }
-        check(readv_ok, "оба способа доступны (process_vm_readv и /proc/<pid>/mem)");
-        check(same, "оба способа читают одни и те же данные по 26 адресам");
+        check(same, "чтения из /proc/<pid>/mem совпали с узором ребёнка (26 адресов)");
     }
 
     // 3) Кэш блоков: мелкие чтения внутри блока — один syscall.
-    r.use_backend(memio::Backend::Readv, child.base);
     r.frame_begin();
     r.reset_stats();
     {
@@ -185,8 +180,7 @@ int main() {
 
     // 6) Проверка живости: пока процесс жив — истина, после смерти — ложь.
     {
-        r.use_backend(memio::Backend::Readv, child.base);
-        check(r.verify(), "verify() истинна для живого процесса");
+            check(r.verify(), "verify() истинна для живого процесса");
         kill_child(child);
         uint8_t v = 0;
         check(!r.read(child.base, &v, 1), "чтение из мёртвого процесса отказывает");
@@ -210,7 +204,7 @@ int main() {
 
     // 8) Замер на «рабочей» нагрузке: 40 объектов по 12 полей, 8 кадров — это
     //    профиль кадра ESP без скелета. «Как было» — каждое поле отдельным
-    //    process_vm_readv, «как стало» — через кэш блоков с началом кадра.
+    //    pread, «как стало» — через кэш блоков с началом кадра.
     {
         Child b;
         if (!spawn_child(b, true)) {
@@ -226,19 +220,23 @@ int main() {
             uint8_t* local = (uint8_t*)mmap(nullptr, span, PROT_READ | PROT_WRITE,
                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
+            char mem_path[40];
+            snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", (int)b.pid);
+            const int raw_fd = open(mem_path, O_RDONLY | O_CLOEXEC);
+
             struct timespec t0 {}, t1 {}, t2 {};
             clock_gettime(CLOCK_MONOTONIC, &t0);
             for (int round = 0; round < kRounds; ++round) {
                 for (int obj = 0; obj < kObjects; ++obj) {
                     for (int f = 0; f < kFields; ++f) {
-                        struct iovec l = {local + obj * stride + f * 8, 8};
-                        struct iovec rr = {(void*)(b.base + obj * stride + f * 8), 8};
-                        syscall(__NR_process_vm_readv, b.pid, &l, 1, &rr, 1, 0);
+                        pread(raw_fd, local + obj * stride + f * 8, 8,
+                              (off_t)(b.base + obj * stride + f * 8));
                         sink ^= local[obj * stride + f * 8];
                     }
                 }
             }
             clock_gettime(CLOCK_MONOTONIC, &t1);
+            close(raw_fd);
 
             memio::Reader br;
             br.bind(b.pid, b.base);
@@ -260,7 +258,7 @@ int main() {
             const long long was_calls = (long long)kObjects * kFields * kRounds;
             printf("--- замер на %d чтений (40 объектов x 12 полей x 8 кадров):\n",
                    (int)was_calls);
-            printf("      было : %8.0f мкс, %lld syscall'ов\n", was_us, was_calls);
+            printf("      было : %8.0f мкс, %lld syscall'ов (по pread на поле)\n", was_us, was_calls);
             printf("      стало: %8.0f мкс, %llu syscall'ов (попаданий в кэш %llu)\n",
                    now_us, br.syscalls, br.hits);
             printf("      выигрыш: x%.1f по времени, x%.1f по числу syscall'ов\n",

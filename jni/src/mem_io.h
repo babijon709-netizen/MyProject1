@@ -1,18 +1,22 @@
 // mem_io.h — доступ к памяти чужого процесса (игра) с хоста читателя.
 //
-// Почему не «просто process_vm_readv», как было раньше:
+// Чтение и запись идут ТОЛЬКО через /proc/<pid>/mem (pread/pwrite). Раньше здесь
+// было два способа (process_vm_readv и /proc/<pid>/mem) с пробой по ELF-заголовку
+// и переключением при отказах. Выбор способа убран: он не давал ничего, кроме
+// ветвлений на каждом обращении, а поведение на устройстве определялось пробой,
+// то есть одним из двух исходов, которые и так различимы по факту чтения.
+// Теперь исход один: не открылся/не читается /proc/<pid>/mem — привязка
+// отклоняется (ESP_ATTACH_NO_ACCESS), и поток привязки повторяет попытку.
 //
-//   * на части прошивок этот syscall запрещён политикой (SELinux, патчи ядра,
-//     «прятки» менеджеров root), но разрешён pread по /proc/<pid>/mem — и
-//     наоборот. С одним способом на таких устройствах чит молча не работал:
-//     базовый адрес libil2cpp.so находился, меню рисовалось, а каждое чтение
-//     возвращало ошибку. Поэтому способов два, выбор — пробой по ELF-заголовку
-//     libil2cpp.so, и переключение на второй, если выбранный начал отказывать;
+// Почему /proc/<pid>/mem, а не process_vm_readv: он работает и там, где syscall
+// запрещён политикой (SELinux, патчи ядра, «прятки» root-менеджеров), а
+// короткие чтения через pread не отличаются по числу обращений к ядру от
+// process_vm_readv.
 //
-//   * чтений очень много (ESP на каждого игрока, кости, автофарм): тысячи
-//     мелких чтений по 4-8 байт за кадр. Кэш блоков подтягивает 128 байт одним
-//     чтением и отдаёт соседние поля без syscall — это и быстрее, и тише:
-//     меньше обращений к ядру, меньше шума в аудите.
+// Чтений очень много (ESP на каждого игрока, кости, автофарм): тысячи мелких
+// чтений по 4-8 байт за кадр. Кэш блоков подтягивает 128 байт одним чтением и
+// отдаёт соседние поля без syscall — это и быстрее, и тише: меньше обращений к
+// ядру, меньше шума в аудите.
 //
 // Кэш живёт ОДИН КАДР: game.cpp зовёт frame_begin() в начале кадра, а запись в
 // память игры (Иксрей, «Всегда день») помечает затронутый блок некэшируемым —
@@ -27,16 +31,12 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/syscall.h>
-#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <atomic>
 
 namespace memio {
-
-enum class Backend : int { None = 0, Readv = 1, ProcMem = 2 };
 
 // 128 байт — это несколько рядом лежащих полей объекта il2cpp (и пара матриц
 // трансформа); восемь блоков на поток покрывают типичный кадр ESP: камера,
@@ -49,8 +49,10 @@ constexpr int    kBlocks    = 8;
 // данные не должны жить в кэше дольше, чем пара кадров.
 constexpr double kBlockTtl = 0.05;
 
-// Сколько подряд отказов чтения считается «способ не работает» и запускает
-// пробу второго способа.
+// Сколько подряд неудачных чтений считаем «доступ потерян» и переоткрываем
+// /proc/<pid>/mem. Дескриптор живёт до первого ESP_ATTACH_OK, но процесс мог
+// перезапуститься с тем же pid (дескриптор при этом смотрит в никуда) или
+// доступ могли отобрать — тогда помогает только новое открытие.
 constexpr int kFailStreak = 8;
 
 // Сколько адресов блоков помним как «мы сюда писали» (на деле их 2-3: near clip
@@ -77,52 +79,38 @@ inline double now_seconds() {
 
 class Reader {
 public:
-    // Привязка к процессу. probe — адрес, на котором проверяем способ чтения
-    // (начало отображения libil2cpp.so: там ELF-заголовок, который обязан
-    // читаться). Возвращает false, если ни один способ не работает.
+    // Привязка к процессу. probe — адрес, на котором проверяем доступ: начало
+    // отображения libil2cpp.so, там ELF-заголовок, который обязан читаться.
+    // Возвращает false, если /proc/<pid>/mem не открылся или чтение не прошло.
     bool bind(pid_t pid, uint64_t probe) {
         unbind();
         pid_.store((int)pid);
         probe_addr_ = probe;
         if (pid <= 0 || !probe) return false;
-        if (use_backend(Backend::Readv, probe)) return true;
-        if (use_backend(Backend::ProcMem, probe)) return true;
-        pid_.store(-1);
-        return false;
+        if (!open_mem()) { pid_.store(-1); return false; }
+        if (!probe_readable()) {
+            close_mem();
+            pid_.store(-1);
+            return false;
+        }
+        fail_streak_.store(0);
+        return true;
     }
 
     void unbind() {
         close_mem();
         pid_.store(-1);
-        backend_.store(Backend::None);
         fail_streak_.store(0);
         generation_.fetch_add(1, std::memory_order_relaxed);
         forget_cache();
     }
 
-    bool    bound()  const { return backend_.load() != Backend::None && pid_.load() > 0; }
-    Backend backend() const { return backend_.load(); }
-    pid_t   pid()    const { return (pid_t)pid_.load(); }
+    bool  bound() const { return fd_.load() >= 0 && pid_.load() > 0; }
+    pid_t pid()   const { return (pid_t)pid_.load(); }
 
-    // Проверить способ пробой и сделать его текущим. Открывает /proc/<pid>/mem
-    // под ProcMem и закрывает, если он не понадобился.
-    bool use_backend(Backend want, uint64_t probe) {
-        if (pid_.load() <= 0) return false;
-        if (want == Backend::ProcMem && !open_mem()) return false;
-        const Backend prev = backend_.load();
-        backend_.store(want);
-        uint8_t magic[4] = {};
-        if (!raw_read(probe, magic, sizeof(magic)) ||
-            magic[0] != 0x7F || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F') {
-            backend_.store(prev);
-            if (want == Backend::ProcMem) {
-                close_mem();
-            }
-            return false;
-        }
-        fail_streak_.store(0);
-        forget_cache();
-        return true;
+    // Способ доступа один; строка нужна стенду и диагностике.
+    const char* backend_name() const {
+        return bound() ? "/proc/<pid>/mem" : "нет доступа";
     }
 
     // Кадр начался: данные, прочитанные в прошлом кадре, больше не отдаём.
@@ -136,7 +124,7 @@ public:
     // Чтение. Крупное (больше блока) идёт напрямую, мелкое — через кэш блоков.
     bool read(uint64_t addr, void* out, size_t len) {
         if (!addr || !out || !len) return false;
-        if (backend_.load() == Backend::None || pid_.load() <= 0) return false;
+        if (fd_.load() < 0 || pid_.load() <= 0) return false;
         if (len > kBlockSize) return raw_read(addr, out, len);
 
         const uint64_t base = addr & ~(uint64_t)(kBlockSize - 1);
@@ -180,7 +168,7 @@ public:
 
     bool write(uint64_t addr, const void* in, size_t len) {
         if (!addr || !in || !len) return false;
-        if (backend_.load() == Backend::None || pid_.load() <= 0) return false;
+        if (fd_.load() < 0 || pid_.load() <= 0) return false;
         if (!raw_write(addr, in, len)) return false;
         mark_written(addr, len);
         return true;
@@ -191,55 +179,28 @@ public:
     // с тем же pid, — иначе чит молча стоит с привязкой, которая ничего не читает.
     bool verify() {
         if (!bound() || !probe_addr_) return false;
-        uint8_t magic[4] = {};
-        if (!raw_read(probe_addr_, magic, sizeof(magic))) return false;
-        return magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+        return probe_readable();
     }
 
-    // ---- только для стенда и диагностики -----------------------------------
-    const char* backend_name() const {
-        switch (backend_.load()) {
-            case Backend::Readv:   return "process_vm_readv";
-            case Backend::ProcMem: return "/proc/<pid>/mem";
-            default:               return "нет доступа";
-        }
-    }
 #ifdef MEMIO_STATS
-    unsigned long long syscalls = 0, hits = 0, frames = 0, block_reads = 0;
+    unsigned long long syscalls = 0, hits = 0, frames = 0, block_reads = 0, reopens = 0;
     void reset_stats() { syscalls = hits = frames = block_reads = 0; }
 #endif
 
 private:
     // ---- сам доступ --------------------------------------------------------
     ssize_t read_once(uint64_t addr, void* out, size_t len) {
-        const Backend be = backend_.load();
-        if (be == Backend::Readv) {
-            struct iovec local  = {out, len};
-            struct iovec remote = {(void*)addr, len};
-            return syscall(__NR_process_vm_readv, pid_.load(), &local, 1, &remote, 1, 0);
-        }
-        if (be == Backend::ProcMem) {
-            const int fd = fd_.load();
-            return fd < 0 ? -1 : pread(fd, out, len, (off_t)addr);
-        }
-        return -1;
+        const int fd = fd_.load();
+        return fd < 0 ? -1 : pread(fd, out, len, (off_t)addr);
     }
 
     ssize_t write_once(uint64_t addr, const void* in, size_t len) {
-        if (backend_.load() == Backend::Readv) {
-            struct iovec local  = {(void*)in, len};
-            struct iovec remote = {(void*)addr, len};
-            return syscall(__NR_process_vm_writev, pid_.load(), &local, 1, &remote, 1, 0);
-        }
-        if (backend_.load() == Backend::ProcMem) {
-            const int fd = fd_.load();
-            return fd < 0 ? -1 : pwrite(fd, in, len, (off_t)addr);
-        }
-        return -1;
+        const int fd = fd_.load();
+        return fd < 0 ? -1 : pwrite(fd, in, len, (off_t)addr);
     }
 
-    // Полное чтение: process_vm_readv на границе незанятой страницы отдаёт
-    // меньше запрошенного, /proc/<pid>/mem — тоже умеет короткие чтения.
+    // Полное чтение: pread на границе незанятой страницы отдаёт меньше
+    // запрошенного, поэтому короткие чтения добираем.
     template <typename Once>
     bool read_full(Once once, uint64_t addr, void* out, size_t len) {
         uint8_t* p = (uint8_t*)out;
@@ -295,37 +256,32 @@ private:
         return raw_read(base, b.data, kBlockSize);
     }
 
-    // ---- отказы и переключение способа -------------------------------------
+    // ELF-заголовок по адресу пробы — и заодно проверка доступа к памяти.
+    bool probe_readable() {
+        uint8_t magic[4] = {};
+        if (!raw_read(probe_addr_, magic, sizeof(magic))) return false;
+        return magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+    }
+
+    // ---- отказы -------------------------------------------------------------
     void note_ok() { fail_streak_.store(0); }
 
+    // Способ один, переключаться некуда — но дескриптор мог стать негодным
+    // (процесс перезапустился с тем же pid, доступ отобрали и вернули). После
+    // серии отказов переоткрываем /proc/<pid>/mem и перепроверяем пробу; если и
+    // это не помогло, привязку снимаем — поток привязки подключится заново.
     void note_fail() {
         if (fail_streak_.fetch_add(1) + 1 < kFailStreak) return;
         fail_streak_.store(0);
-        failover();
-    }
-
-    // Выбранный способ перестал работать (процесс перезапустился, отобрали
-    // права, ядро вернуло ошибку). Пробуем второй, при неудаче — тот же ещё раз
-    // (у ProcMem мог закрыться дескриптор).
-    void failover() {
-        const uint64_t probe = probe_addr_;
-        if (!probe) return;
-        const Backend cur = backend_.load();
-        if (cur == Backend::Readv) {
-            if (use_backend(Backend::ProcMem, probe)) return;
-            use_backend(Backend::Readv, probe);
+        if (!probe_addr_ || pid_.load() <= 0) return;
+        close_mem();
+        if (open_mem() && probe_readable()) {
+#ifdef MEMIO_STATS
+            ++reopens;
+#endif
             return;
         }
-        if (cur == Backend::ProcMem) {
-            close_mem();
-            if (open_mem()) {
-                uint8_t magic[4] = {};
-                if (raw_read(probe, magic, sizeof(magic)) &&
-                    magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F')
-                    return;
-            }
-            if (!use_backend(Backend::Readv, probe)) backend_.store(Backend::None);
-        }
+        close_mem();
     }
 
     bool open_mem() {
@@ -372,10 +328,8 @@ private:
     // писатель «Всегда день» — поэтому состояние атомарное.
     std::atomic<int> pid_{-1};
     std::atomic<int> fd_{-1};
-    std::atomic<Backend> backend_{Backend::None};
     std::atomic<int> fail_streak_{0};
-    // Адрес для пробы при переключении способа (запоминается в bind через
-    // use_backend — источник: начало отображения libil2cpp.so).
+    // Адрес для пробы доступа (начало отображения libil2cpp.so).
     uint64_t probe_addr_ = 0;
 
     std::atomic<uint64_t> generation_{1};

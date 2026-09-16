@@ -21,12 +21,9 @@
 #include <sys/syscall.h>
 
 // ---- Доступ к памяти игры ---------------------------------------------------
-// Подробности — в mem_io.h: два способа (process_vm_readv и /proc/<pid>/mem),
-// выбор пробой и автопереключение, кэш блоков на кадр. Здесь только обёртки,
-// которыми пользуется весь остальной код чтения: раньше это были прямые
-// вызовы process_vm_readv, и на устройствах, где политика ядра запрещает
-// именно его, не работало НИЧЕГО — привязка «удавалась», а каждое чтение
-// возвращало ошибку.
+// Подробности — в mem_io.h: только /proc/<pid>/mem (pread/pwrite), проверка
+// доступа пробой по ELF-заголовку и кэш блоков на кадр. Здесь только обёртки,
+// которыми пользуется весь остальной код чтения.
 static memio::Reader g_mem;
 
 static bool rd_buf(uint64_t addr, void* out, size_t size) {
@@ -2969,7 +2966,7 @@ static bool ensure_gameobject_name_offset(uint64_t player) {
     // разной частотой: конвейер имён ESP — каждый кадр на каждого игрока, сканы
     // реестра — раз в пару секунд. Прежние «60 вызовов» на первом сценарии
     // означали новую попытку каждые ~0.1 с, а попытка — это обход поддерева
-    // трансформов модели до 256 узлов, то есть сотни process_vm_readv одним
+    // трансформов модели до 256 узлов, то есть сотни чтений памяти одним
     // кадром. Пока смещение не найдено (или не читается поза игрока), это был
     // один из самых дорогих периодических рывков: в логе 14.09 медленные кадры
     // шли с интервалами 8/52/68/112 — наложение нескольких таких периодик.
@@ -3864,7 +3861,7 @@ bool esp_init(pid_t pid) {
         return false;
     }
     if (!g_mem.bind(pid, g_il2cpp_base)) {
-        // Ни process_vm_readv, ни /proc/<pid>/mem: доступа к памяти нет.
+        // /proc/<pid>/mem не открылся или не читается: доступа к памяти нет.
         g_attach_state = ESP_ATTACH_NO_ACCESS;
         g_il2cpp_base = 0;
         g_pid = -1;
@@ -4807,7 +4804,7 @@ struct FarmEntity {
     bool     pos_valid = false;
     int      kind = 0;          // 0 wood, 1 stone, 2 metal, 3 sulfur
     // Cached fractionRemaining: reading it live for EVERY node on EVERY
-    // frame was a syscall storm (hundreds of process_vm_readv per frame
+    // frame was a syscall storm (hundreds of memory reads per frame
     // with a full cache). The value only matters for de-prioritising
     // mined-out nodes, so a second of staleness changes nothing.
     float    fraction = -1.0F;
@@ -5812,7 +5809,7 @@ static bool farm_kind_from_loot(uint64_t mineable, int& kind) {
 // кадра из 10053 вырастали до 12..34 мс, и интервалы между ними складываются в
 // периодический рисунок 8/52/68/112 кадров — это ресканы. Один проход стоил
 // столько, сколько записей в NetworkClient.spawned: у каждой читались класс,
-// список компонентов и сами компоненты (~10 process_vm_readv), а объектов в мире
+// список компонентов и сами компоненты (~10 чтений), а объектов в мире
 // тысячи. Десятки тысяч чтений одним кадром — тот самый рывок, который видно
 // глазом; на 118 fps скан к тому же запускался вдвое чаще задуманного, потому
 // что счётчик был в кадрах из расчёта на 60 fps.
