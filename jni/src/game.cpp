@@ -770,7 +770,7 @@ static uint64_t get_base(const char* lib) {
     if (text.empty()) return 0;
 
     // Разбор живёт в maps_lookup.h: там же объяснено, почему именно этот
-    // участок однажды ронял процесс на старте (см. tools/maps).
+    // участок однажды ронял процесс на старте.
     return maps::lookup_library_base(text, lib);
 }
 
