@@ -208,6 +208,11 @@ extern int  g_farmToolNeed;   // что нужно ближайшим узлам
 extern int  g_farmXp;         // опыт за текущий узел
 extern bool g_farmBlocked;    // узел перекрыт
 
+// Калибровка зон вводом с экрана (меню прячется, тап записывает точку):
+// 0 — нет, 1 — зона джойстика автофарма, 2 — зона огня автофарма,
+// 3 — точка, из которой аимбот водит палец. См. RenderMenu.
+extern int  g_calibMode;
+
 namespace ui { namespace bar {
     inline float g_game_alpha = 1.f;
     inline void  set_game_alpha(float a){ g_game_alpha=a; }
@@ -589,6 +594,9 @@ struct AppState {
     int   cur_tab = 1;   // при запуске открыта вкладка «Аим»
     bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
     int   aim_bone = 0;
+    // Точка, из которой аимбот водит палец (доли экрана). Выбирается тапом по
+    // экрану, как зоны автофарма; -1 = не задана (прежняя позиция 74%/50%).
+    float aim_tx = -1.f, aim_ty = -1.f;
     // 0 = balanced (crosshair + range), 1 = nearest to the crosshair,
     // 2 = nearest in the world.
     int   aim_priority = 0;
@@ -635,6 +643,17 @@ struct AppState {
 };
 static AppState g_state;
 
+// Точка, из которой аимбот водит палец (доли экрана). Пока в меню не задана —
+// прежняя позиция: справа, по вертикали по центру.
+static constexpr float kAimTouchDefX = 0.74f;
+static constexpr float kAimTouchDefY = 0.50f;
+
+static float AimTouchFracX() {
+    return (g_state.aim_tx > 0.f && g_state.aim_tx < 1.f) ? g_state.aim_tx : kAimTouchDefX;
+}
+static float AimTouchFracY() {
+    return (g_state.aim_ty > 0.f && g_state.aim_ty < 1.f) ? g_state.aim_ty : kAimTouchDefY;
+}
 
 static ImU32 ColU32(const ImVec4& c) {
     return IM_COL32((int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255), (int)(c.w * 255));
@@ -1089,10 +1108,14 @@ struct CfgBlob {
     //   esp_weapon_icon_col -> esp_loot_col
     //   esp_ping_col    -> esp_extra (packed scalars, see below)
     //   aim_smoothness  -> aim_lead
+    //   esp_stroke      -> aim_touch_x    esp_rounding -> aim_touch_y
+    //                      (точка пальца аимбота в долях экрана: те же два
+    //                       float'а на своих местах; в старых конфигах там
+    //                       2.0 и 0.0 — вне диапазона, значит «не задана»)
     bool  esp_box, esp_name, esp_ore, esp_wall, esp_chams;
     bool  esp_weapon, esp_team, esp_tracer, esp_skeleton;
     bool  aim_scope_only, esp_animal, esp_vis_check, esp_fill;
-    float esp_thick, esp_stroke, esp_rounding, esp_fill_pct;
+    float esp_thick, aim_touch_x, aim_touch_y, esp_fill_pct;
     float gun_str, gun_fov, gun_trigger_delay;
     //   ui_fps        -> ui_lang_en       (счётчик FPS убран навсегда, а слот
     //                                      bool в раскладке заморожен версией;
@@ -1136,8 +1159,10 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_vis_check   = cfg::esp::vis_check;
     s.esp_fill        = cfg::esp::fill;
     s.esp_thick       = g_state.esp_thick;
-    s.esp_stroke      = cfg::esp::stroke;
-    s.esp_rounding    = cfg::esp::rounding;
+    // Слоты esp_stroke/esp_rounding теперь несут точку пальца аима; сюда идёт
+    // как есть (-1 = не задана, тогда работает дефолт 74%/50%).
+    s.aim_touch_x     = g_state.aim_tx;
+    s.aim_touch_y     = g_state.aim_ty;
     s.esp_fill_pct    = cfg::esp::fill_pct;
     s.gun_str     = g_state.gun_str;
     s.gun_fov     = g_state.gun_fov;
@@ -1267,6 +1292,10 @@ static void ConfigLoad(int idx, bool announce = true) {
     // ui_show_sep из конфига игнорируется: рамки карточек всегда включены.
     g_state.ui_fps      = false;
     g_state.ui_show_sep = true;
+    // Точка пальца аима. В конфигах, где этого поля ещё не было, лежат значения
+    // прежних настроек ESP (2.0 и 0.0) — они вне 0..1 и читаются как «не задана».
+    g_state.aim_tx = (s.aim_touch_x > 0.f && s.aim_touch_x < 1.f) ? s.aim_touch_x : -1.f;
+    g_state.aim_ty = (s.aim_touch_y > 0.f && s.aim_touch_y < 1.f) ? s.aim_touch_y : -1.f;
     cfg::esp::box_col          = s.esp_box_col;
     cfg::esp::box_col_invis    = s.esp_box_col_invis;
     cfg::esp::name_col         = s.esp_name_col;
@@ -2305,8 +2334,6 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
     } else if (secId == 5) {
         // Автофарм: всё управление ботом в одном окне.
         // (secId 4 занят палитрой цветов — там скролл выключен.)
-        extern int g_farmCalib; // определён рядом с UpdateFarm
-
         FgSHdr(XS("Автофарм"));
         FgCardBg(rH * 1);
         FgToggleRow(XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, true);
@@ -2328,7 +2355,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         {
             struct ZoneRow {
                 const char* lbl;
-                int   calib;         // g_farmCalib для этой зоны
+                int   calib;         // g_calibMode для этой зоны
                 float zx, zy;        // сохранённые доли экрана (-1 = нет)
             };
             const ZoneRow zrows[2] = {
@@ -2345,7 +2372,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                     && mousePos.y >= curY && mousePos.y <= curY + rH
                     && clickedPos.x >= cX + inset && clickedPos.x <= cX + cW - inset
                     && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
-                    g_farmCalib = z.calib;
+                    g_calibMode = z.calib;
                     PopoverClose();
                     PlaySound(SND_CLICK);
                 }
@@ -2737,6 +2764,72 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::SliderH * 2);
         SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, false, g_state.sl_gun_str, dt);
+
+        // ---- Тач-зона аима -------------------------------------------------
+        // Где именно лежит палец, которым аимбот водит камеру. Выбирается
+        // тапом по экрану — как зоны автофарма, только точка одна: меню
+        // прячется, первый тап записывает её в долях экрана.
+        SHdr(XS("Зоны бота"));
+        {
+            const float rowH = Layout::RowH;
+            const float inset = Layout::Inset, padX = Layout::PadX;
+            const float avW   = ImGui::GetContentRegionAvail().x;
+            auto* dl = ImGui::GetWindowDrawList();
+            auto* fn = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+            const bool pointSet = (g_state.aim_tx >= 0.f);
+
+            CardBg(rowH * (pointSet ? 2.f : 1.f));
+
+            // Строка «точка пальца»: подпись слева, доля экрана справа.
+            auto pos = ImGui::GetCursorScreenPos();
+            {
+                const float cX = pos.x + inset, cW = avW - inset * 2.f;
+                const float cy = pos.y + rowH * 0.5f;
+                ImGui::InvisibleButton("##aim_pt", {avW, rowH});
+                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
+                    g_calibMode = 3;   // калибровка: тап по экрану задаёт точку
+                    PlaySound(SND_CLICK);
+                    ShowToast(XS("Задай точку тапом по экрану"));
+                    g_input.touchConsumed = true;
+                }
+
+                char val[32];
+                snprintf(val, sizeof(val), "%d%% %d%%",
+                         (int)(AimTouchFracX() * 100.f + 0.5f),
+                         (int)(AimTouchFracY() * 100.f + 0.5f));
+                auto vsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, val);
+
+                dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f},
+                            C::UA(C::Txt(), 1.f), XS("Точка пальца"));
+                dl->AddText(fn, fs, {cX + cW - padX - vsz.x, cy - vsz.y * 0.5f},
+                            C::UA(C::Acc(), 1.f), val);
+
+                if (pointSet && g_state.ui_show_sep)
+                    dl->AddLine({cX + padX, pos.y + rowH - 0.5f},
+                                {cX + cW - padX, pos.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
+            }
+
+            // Сброс к прежней позиции (74%/50%) — только если точка задана.
+            if (pointSet) {
+                auto rpos = ImGui::GetCursorScreenPos();
+                const float cX = rpos.x + inset, cW = avW - inset * 2.f;
+                ImGui::InvisibleButton("##aim_pt_rst", {avW, rowH});
+                const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
+                if (tapped) {
+                    g_state.aim_tx = g_state.aim_ty = -1.f;
+                    ShowToast(XS("Точка сброшена"));
+                    PlaySound(SND_CLICK);
+                    g_input.touchConsumed = true;
+                }
+                const char* rt = XS("Сбросить точку");
+                auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
+                dl->AddText(fn, fs * 1.05f,
+                            {cX + (cW - rsz.x) * 0.5f, rpos.y + (rowH - rsz.y) * 0.5f},
+                            C::UA(C::Dim(), 1.f), rt);
+            }
+        }
 
         ImGui::Dummy({1.f, 12.f});
 
@@ -3325,7 +3418,9 @@ static void UpdateAim(float dt) {
     static int   s_holdFrames = 0;
 
     const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
-    bool active = g_state.aim_touch && g_esp_attached && !menuOpen;
+    // Во время калибровки зон (тапом по экрану) аим отпускает палец и ничего не
+    // трогает: иначе он водил бы камеру прямо под пальцем пользователя.
+    bool active = g_state.aim_touch && g_esp_attached && !menuOpen && g_calibMode == 0;
 
     // "Только с прицелом": only steer while the local player is ADS.
     if (active && g_state.aim_scope_only && !esp_local_player_is_aiming())
@@ -3348,6 +3443,11 @@ static void UpdateAim(float dt) {
         sw = (float) displayInfo.height; sh = (float) displayInfo.width;
     }
     if (sw < 100.f || sh < 100.f) { AimReleaseFinger(s_fingerDown); return; }
+
+    // Точка, из которой аим водит палец: выбирается в меню тапом по экрану
+    // (вкладка «Аим», см. g_calibMode == 3). Пока не задана — прежняя позиция
+    // справа по центру, поэтому поведение по умолчанию не меняется.
+    const float ptX = AimTouchFracX() * sw, ptY = AimTouchFracY() * sh;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
 
@@ -3619,8 +3719,8 @@ static void UpdateAim(float dt) {
     auto snapGrid = [&](float v) { return roundf(v * unitsPerPx) / unitsPerPx; };
 
     if (!s_fingerDown) {
-        s_fx = snapGrid(sw * 0.74f);
-        s_fy = snapGrid(sh * 0.50f);
+        s_fx = snapGrid(ptX);
+        s_fy = snapGrid(ptY);
         Touch_Down(s_fx, s_fy);
         s_fingerDown = true;
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
@@ -3688,13 +3788,21 @@ static void UpdateAim(float dt) {
         return;
     }
 
-    // Keep the finger in the look area. If it drifts to an edge, lift and
-    // re-place it in the centre of the area instead of getting stuck.
-    const float minX = sw * 0.56f, maxX = sw * 0.97f, minY = sh * 0.12f, maxY = sh * 0.88f;
+    // Keep the finger in the look area around the chosen point. If it drifts to
+    // an edge, lift and re-place it on the point instead of getting stuck.
+    // Размеры области — те же, что были у жёсткой правой полосы (56..97% по X
+    // и 12..88% по Y при точке 74%/50%), но привязаны к выбранной точке, чтобы
+    // она могла стоять в любой части экрана. За экран область не выпускаем.
+    float minX = ptX - 0.18f * sw, maxX = ptX + 0.23f * sw;
+    float minY = ptY - 0.38f * sh, maxY = ptY + 0.38f * sh;
+    if (minX < sw * 0.02f) minX = sw * 0.02f;
+    if (maxX > sw * 0.98f) maxX = sw * 0.98f;
+    if (minY < sh * 0.02f) minY = sh * 0.02f;
+    if (maxY > sh * 0.98f) maxY = sh * 0.98f;
     if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
         Touch_Up();
         s_fingerDown = false;
-        s_fx = snapGrid(sw * 0.74f); s_fy = snapGrid(sh * 0.50f);
+        s_fx = snapGrid(ptX); s_fy = snapGrid(ptY);
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         s_haveLast = false;
         return;
@@ -3747,10 +3855,11 @@ int  g_farmToolNeed = 0;     // какие умения запросили от�
 int  g_farmXp = 0;           // сколько опыта даёт текущий узел (0 = неизвестно)
 bool g_farmBlocked = false;  // узел перекрыт: луч игры упёрся ближе точки прицела
 
-// Калибровка зон бота: 0 — нет, 1 — ждём тап по джойстику, 2 — по кнопке огня.
+// Калибровка зон вводом с экрана: 0 — нет, 1 — ждём тап по джойстику
+// автофарма, 2 — по кнопке огня, 3 — по точке, из которой аимбот водит палец.
 // Пока калибровка активна, меню скрыто и первый тап по экрану пишет позицию
 // (в долях экрана) в g_state.
-int  g_farmCalib = 0;
+int  g_calibMode = 0;
 
 namespace {
 
@@ -3967,7 +4076,7 @@ static void UpdateFarmInner(float dt) {
     // зон — тоже пауза. А вот цель читаем всегда: иначе строка статуса в окне
     // автофарма показывала бы «простой» ровно тогда, когда на неё смотрят
     // (само это окно и ставит бота на паузу).
-    const bool driving = !menuBlocked && !s_fingerDown && g_farmCalib == 0;
+    const bool driving = !menuBlocked && !s_fingerDown && g_calibMode == 0;
 
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;
@@ -4870,13 +4979,13 @@ void RenderMenu() {
     DrawWatermark(dt);
     DrawToast(dt);
 
-    // ---- Режим калибровки зон автофарма ------------------------------------
-    // Меню спрятано; первый тап по экрану записывает позицию зоны (в долях
-    // экрана). Затем — следующая зона или выход из режима.
-    if (g_farmCalib != 0) {
+    // ---- Режим калибровки зон вводом с экрана ------------------------------
+    // Меню спрятано; первый тап по экрану записывает позицию (в долях экрана):
+    // зону джойстика/огня автофарма или точку, из которой аимбот водит палец.
+    if (g_calibMode != 0) {
         float dw = 0.f, dh = 0.f;
         VisibleScreen(dw, dh);
-        if (dw < 100.f || dh < 100.f) { g_farmCalib = 0; return; }
+        if (dw < 100.f || dh < 100.f) { g_calibMode = 0; return; }
         auto* fg = ImGui::GetForegroundDrawList();
 
         // Затемнение + рамка-акцент.
@@ -4885,9 +4994,10 @@ void RenderMenu() {
 
         // Подпись, что тапать.
         auto* fn = ImGui::GetFont();
-        const char* title = (g_farmCalib == 1)
+        const char* title = (g_calibMode == 1)
             ? XS("Тапни по центру джойстика движения")
-            : XS("Тапни по кнопке огня / атаки");
+            : (g_calibMode == 2) ? XS("Тапни по кнопке огня / атаки")
+                                 : XS("Тапни по точке, где аим водит палец");
         const char* sub = XS("Тап записывает зону. Меню откроется само.");
         float tfs = ImGui::GetFontSize() * 1.5f;
         auto tsz = fn->CalcTextSizeA(tfs, FLT_MAX, 0, title);
@@ -4901,11 +5011,14 @@ void RenderMenu() {
         fg->AddText(fn, tfs, {(dw - tsz.x) * 0.5f, ty}, C::U(C::Txt()), title);
         fg->AddText(fn, tfs * 0.62f, {(dw - ssz.x) * 0.5f, ty + tsz.y + 10.f}, C::U(C::Dim()), sub);
 
-        // Пульсирующий маркер текущей сохранённой зоны (если есть).
+        // Пульсирующий маркер текущей сохранённой точки (если есть).
         {
             float zx = -1.f, zy = -1.f;
-            if (g_farmCalib == 1 && g_state.farm_joy_x >= 0.f) { zx = g_state.farm_joy_x * dw; zy = g_state.farm_joy_y * dh; }
-            if (g_farmCalib == 2 && g_state.farm_fire_x >= 0.f) { zx = g_state.farm_fire_x * dw; zy = g_state.farm_fire_y * dh; }
+            if (g_calibMode == 1 && g_state.farm_joy_x >= 0.f) { zx = g_state.farm_joy_x * dw; zy = g_state.farm_joy_y * dh; }
+            if (g_calibMode == 2 && g_state.farm_fire_x >= 0.f) { zx = g_state.farm_fire_x * dw; zy = g_state.farm_fire_y * dh; }
+            // У точки аима маркер виден всегда: пока она не задана, показываем
+            // ту позицию, из которой аим водит палец по умолчанию.
+            if (g_calibMode == 3) { zx = AimTouchFracX() * dw; zy = AimTouchFracY() * dh; }
             if (zx >= 0.f) {
                 float pr = 34.f + 6.f * sinf((float)ImGui::GetTime() * 4.f);
                 fg->AddCircle({zx, zy}, pr, C::UA(C::Acc(), 0.85f), 40, 3.f);
@@ -4917,18 +5030,24 @@ void RenderMenu() {
         if (io.MouseReleased[0]) {
             float rx = io.MousePos.x / dw, ry = io.MousePos.y / dh;
             if (rx > 0.f && rx < 1.f && ry > 0.f && ry < 1.f) {
-                if (g_farmCalib == 1) {
+                const bool farm = (g_calibMode == 1 || g_calibMode == 2);
+                if (g_calibMode == 1) {
                     g_state.farm_joy_x = rx; g_state.farm_joy_y = ry;
                     ShowToast(XS("Зона джойстика сохранена"));
-                } else {
+                } else if (g_calibMode == 2) {
                     g_state.farm_fire_x = rx; g_state.farm_fire_y = ry;
                     ShowToast(XS("Зона огня сохранена"));
+                } else {
+                    g_state.aim_tx = rx; g_state.aim_ty = ry;
+                    ShowToast(XS("Точка пальца сохранена"));
                 }
                 PlaySound(SND_CLICK);
-                g_farmCalib = 0;
+                g_calibMode = 0;
                 menu_open = true;
-                // Вернуться прямо в окно автофарма, откуда калибровку запускали.
-                PopoverOpen(XS("Автофарм"), 5);
+                // Вернуться туда, откуда калибровку запускали: зоны автофарма —
+                // в окно автофарма, точка аима — на вкладку «Аим».
+                if (farm) PopoverOpen(XS("Автофарм"), 5);
+                else      g_state.cur_tab = 1;
                 g_input.touchConsumed = true; // этот тап уже отработал
             }
         }

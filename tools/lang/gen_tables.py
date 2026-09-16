@@ -84,6 +84,12 @@ UI_EN = {
     'Куда целиться': 'Aim point', 'Голова': 'Head', 'Шея': 'Neck', 'Тело': 'Body',
     'Выбор цели': 'Target priority', 'Умный': 'Smart',
     'Ближе к прицелу': 'Closest to crosshair', 'Ближе ко мне': 'Closest to me',
+    # тач-зона аима (точка, из которой аимбот водит палец)
+    'Точка пальца': 'Finger point', 'Сбросить точку': 'Reset point',
+    'Точка сброшена': 'Point reset',
+    'Задай точку тапом по экрану': 'Set the point by tapping the screen',
+    'Точка пальца сохранена': 'Finger point saved',
+    'Тапни по точке, где аим водит палец': 'Tap the point the aim steers from',
     # esp
     'Противники': 'Enemies', 'Игроки': 'Players', 'Боксы': 'Boxes',
     '3D боксы': '3D boxes', 'Ники': 'Nicknames', 'Дистанция': 'Distance',
