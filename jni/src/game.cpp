@@ -1246,6 +1246,49 @@ static void recheck_direct_player_position(const std::vector<uint64_t>& players)
     g_body_caches_dirty = true;
 }
 
+// ---- Чувствительность взгляда (настройка игрока) ---------------------------
+//
+// Oxide.MouseLook.m_Sensitivity — единственный множитель, которым игра
+// превращает накопленный сдвиг касания в поворот камеры: в MouseLook.ZJo
+// (RVA 0x64e312c) накопленное значение читается с +0x88, умножается на +0x34 и
+// уходит в применение поворота; больше ничего на путь «касание -> угол» не
+// влияет. Значит град/px строго пропорционален m_Sensitivity, и аиму нужен
+// именно он, а не зашитое число.
+//
+// Поле публичное и в обеих версиях игры лежит на одном месте (сверено по
+// dump.cs релиза 205619 и беты 207986; PlayerManager.mouseLook — +0x70 в обоих).
+// Поэтому это НЕ часть таблицы переключения версий (tools/offsets): там только
+// то, что между сборками разъезжается.
+static constexpr uint64_t PLAYER_MOUSE_LOOK_OFFSET      = 0x70;
+static constexpr uint64_t MOUSE_LOOK_SENSITIVITY_OFFSET = 0x34;
+
+bool esp_read_look_sensitivity(float& out) {
+    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+
+    uint64_t player = resolve_local_player();
+    if (!player) {
+        // Своей PlayerManager ещё нет (загрузка, только что респавнулись):
+        // настройка клиентская, у любой PlayerManager она одна и та же.
+        uint64_t list = resolve_runtime_player_list();
+        if (!list) return false;
+        uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
+        int32_t  count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
+        if (!items || count <= 0 || count > 512) return false;
+        player = rd_ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT);
+    }
+    if (!player) return false;
+    if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) return false;
+
+    uint64_t mouse_look = rd_ptr(player + PLAYER_MOUSE_LOOK_OFFSET);
+    if (!mouse_look) return false;
+    float value = rd<float>(mouse_look + MOUSE_LOOK_SENSITIVITY_OFFSET);
+    // Мусор в поле (объект переиспользован, память переехала) отдаём как отказ:
+    // заведомо чужое число здесь хуже, чем запасное.
+    if (!std::isfinite(value) || value < 0.05F || value > 100.0F) return false;
+    out = value;
+    return true;
+}
+
 // Unity Matrix4x4 is column-major in memory: m[col*4 + row].
 static float mat_get(const Mat4& matrix, int row, int column) {
     return matrix.m[(size_t)column * 4 + row];

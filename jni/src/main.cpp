@@ -3584,6 +3584,44 @@ static void AimReleaseFinger(bool& fingerDown) {
 // actively pulling onto a player.
 static bool s_fingerDown = false;
 
+// Запасной град/px — из чувствительности, выставленной в настройках клиента.
+//
+// Игра считает поворот как «накопленный сдвиг касания × m_Sensitivity»
+// (MouseLook.ZJo, поле +0x34), поэтому град/px строго пропорционален
+// чувствительности. Измеренное на устройстве 0.10 град/px — это её значение при
+// заводской чувствительности 5.0 (MouseLook..ctor кладёт ровно 5.0f): отсюда
+// kGainAtRef, а дальше коэффициент едет за настройкой игрока — 2.5 -> 0.05,
+// 10 -> 0.20.
+//
+// Зачем это вместо прежнего зашитого 0.10: шаг пальца считается как err/gain, и
+// при чувствительности выше заводской прежнее число завышало град/px ровно во
+// столько же раз — палец не досылал пиксели, доводка тянулась в разы дольше, а
+// финальный снап по сетке цифровера промахивался мимо головы. Своей оси на
+// устройстве нет (поза камеры и ось выстрела не читаются), поэтому выучить
+// коэффициент не из чего — он обязан приходить из настройки игры, и только при
+// недоступной настройке остаётся прежнее измеренное 0.10 (как было раньше).
+static constexpr float kAimRefSensitivity = 5.0f;  // заводская m_Sensitivity (MouseLook..ctor)
+static constexpr float kAimGainAtRef      = 0.10f; // измерено на устройстве при ней же
+
+// Во сколько раз настройка игрока отличается от заводской. Ровно во столько же
+// раз игра меняет град/px, поэтому вместе с настройкой едет и полоса
+// правдоподобия коэффициента: она отмерена при 5.0, и зажимать ею выученное
+// значение при 10 — это прицел, который вдвое медленнее, чем позволяет игра.
+// Настройку прочитать не удалось — считаем её заводской (прежнее поведение).
+static float AimSensitivityScale() {
+    constexpr float kMinScale = 0.2f;   // ~1.0 в настройках
+    constexpr float kMaxScale = 4.0f;   // 20.0 — верх настроек с запасом
+    float sensitivity = 0.f;
+    if (!esp_read_look_sensitivity(sensitivity)) return 1.f;
+    float scale = sensitivity / kAimRefSensitivity;
+    if (!std::isfinite(scale) || scale <= 0.f) return 1.f;
+    if (scale < kMinScale) scale = kMinScale;
+    if (scale > kMaxScale) scale = kMaxScale;
+    return scale;
+}
+
+static float AimSensitivityGain() { return kAimGainAtRef * AimSensitivityScale(); }
+
 static void UpdateAim(float dt) {
     static float s_fx = 0.f, s_fy = 0.f;         // finger position (px)
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f; // absolute camera angles
@@ -3824,7 +3862,7 @@ static void UpdateAim(float dt) {
     // часть нужных пикселей, и остаток ошибки закрывается не за 1-2 кадра, а
     // экспонентой. Измерено по накопленному сдвигу пальца в логе автофарма
     // (14.09.2026, 35 свайпов, медиана 0.10 град/px по yaw; p10 0.078, p90 0.178)
-    // — то же самое число выучил камерный контроллер фарма (kCamGainProbe).
+    // — то же самое число выучил камерный контроллер фарма.
     // Прежнее запасное 0.35 было завышено в 3.5 раза: в логе 16.09.2026 при
     // exp = 0 остаток падал как 5.47 -> 0.35 град за 0.2 с (12-13 кадров), то
     // есть в 3.5 раза медленнее, чем позволяет игра, — при 0.10 хватает 1-2
@@ -3832,12 +3870,14 @@ static void UpdateAim(float dt) {
     // не читаются (cam_st = 0 во всех строках аима), а базис из матрицы вида
     // отстаёт на кадр и выучивал коэффициент со сменой знака (0.072 -> 0.347 ->
     // -0.072) — «аим дёргается». Пока настоящей оси нет, запасное значение и
-    // есть рабочий коэффициент, поэтому оно обязано быть измеренным.
+    // есть рабочий коэффициент.
     //
-    // Запасной коэффициент — измеренная чувствительность игры (0.10 град/px):
-    // им аим ведёт камеру, пока не выучил своё (настоящей оси на устройстве нет).
-    const float probeGainYaw   = 0.10f;
-    const float probeGainPitch = 0.10f;
+    // А запасной берётся из настройки игрока (AimSensitivityGain): игра умножает
+    // накопленный сдвиг касания ровно на m_Sensitivity, поэтому град/px растёт
+    // вместе с ней. Зашитое число работало бы только на одной чувствительности:
+    // на высокой аим не доводил бы цель, на низкой — перелетал.
+    const float probeGainYaw   = AimSensitivityGain();
+    const float probeGainPitch = probeGainYaw;
     const bool  learned = (s_gainYaw != 0.f);
     const float gy = learned ? s_gainYaw : probeGainYaw;
     const float gp = (s_gainPitch != 0.f) ? s_gainPitch
@@ -4138,12 +4178,10 @@ constexpr float kBlockedClear  = 1.20f;
 constexpr float kGiveUpDrain   = 20.f;   // бьём, а остаток не падает
 constexpr float kGiveUpBlind   = 45.f;   // то же, но остаток не читается
 
-// град/px, пока коэффициент не выучен. Измерено по накопленному сдвигу пальца в
-// логе 14.09.2026 (фарм, 118 кадров/с): 0.10 град/px по yaw (35 свайпов,
-// медиана; p10 0.078, p90 0.178) и ~0.06 по pitch. Прежнее запасное 0.25
-// завышало коэффициент в 2.5 раза — палец слал в 2.5 раза меньше пикселей, чем
-// нужно, и доводка тянулась втрое дольше.
-constexpr float kCamGainProbe  = 0.10f;
+// град/px, пока коэффициент не выучен, берётся из чувствительности настроек
+// клиента — AimSensitivityGain() (при заводской 5.0 это измеренные по логу
+// 14.09.2026 0.10 град/px по yaw и ~0.06 по pitch; прежнее запасное 0.25
+// завышало коэффициент в 2.5 раза, и доводка тянулась втрое дольше).
 
 // Камера отвечает не в том же кадре. В том же логе поворот приходил через 2
 // кадра (реже 4..6, кадр 8.5 мс), а контроллер за это время успевал дослать ещё
@@ -4417,6 +4455,10 @@ static void UpdateFarmInner(float dt) {
             fg->AddCircleFilled({tgt.sx, tgt.sy}, 2.5f, mc, 12);
     }
 
+    const float gainScale = AimSensitivityScale();
+    const float gainLo    = kGainLo * gainScale;
+    const float gainHi    = kGainHi * gainScale;
+
     // ---- коэффициент камеры: такт с подтверждением ---------------------------
     // Учимся на накопленном сдвиге пальца между двумя ответами камеры, а не на
     // отношении одного кадра: поза камеры отстаёт от касания на 2 кадра, и
@@ -4450,7 +4492,7 @@ static void UpdateFarmInner(float dt) {
             (sameSign || (s_gainYaw == 0.f && strongPull))) {
             const float measured = camYawDelta / s_gainPendDx;
             const float m = fabsf(measured);
-            if (m >= kGainLo && m <= kGainHi) {
+            if (m >= gainLo && m <= gainHi) {
                 // Медиана последних трёх образцов: одиночный мусорный кадр больше
                 // не может развернуть палец в двадцать раз сильнее нужного.
                 s_gainS3 = s_gainS2; s_gainS2 = s_gainS1; s_gainS1 = measured;
@@ -4485,11 +4527,11 @@ static void UpdateFarmInner(float dt) {
     // 1/gain, и вылет за полосу — это либо перелёт через цель, либо «камера не
     // слушается», то есть ровно то, что игрок видит как дёрганье. Знак сохраняем:
     // отрицательный коэффициент означает инверсию оси в настройках игры.
-    float gain = (s_gainYaw != 0.f) ? s_gainYaw : kCamGainProbe;
-    if (!std::isfinite(gain) || gain == 0.f) gain = kCamGainProbe;
+    float gain = (s_gainYaw != 0.f) ? s_gainYaw : AimSensitivityGain();
+    if (!std::isfinite(gain) || gain == 0.f) gain = AimSensitivityGain();
     const float gainMag = fabsf(gain);
-    if (gainMag < kGainLo)      gain = (gain < 0.f) ? -kGainLo : kGainLo;
-    else if (gainMag > kGainHi) gain = (gain < 0.f) ? -kGainHi : kGainHi;
+    if (gainMag < gainLo)      gain = (gain < 0.f) ? -gainLo : gainLo;
+    else if (gainMag > gainHi) gain = (gain < 0.f) ? -gainHi : gainHi;
     const float invGain = 1.f / gain;
 
     // ---- фаза ---------------------------------------------------------------
