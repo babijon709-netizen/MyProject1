@@ -22,13 +22,21 @@ LOCAL_LDFLAGS := -Wl,--gc-sections,-s,--strip-all -Wl,-x -Wl,--build-id=none -pi
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PATH)/include/ImGui/backends $(LOCAL_PATH)/src
 
 # src/esp/* — слой ESP, разрезанный из прежнего src/game.cpp (каждый модуль =
-# своя задача: память, скелет, камера, маркеры, автофарм). Добавил файл в
-# этот каталог — он уже в сборке, перечислять его здесь не нужно.
+# своя задача: память, скелет, камера, маркеры, автофарм).
+# src/app|ui|aim|farm/* — меню, аим и автофарм, разрезанные из прежнего
+# src/main.cpp (там осталась только точка входа).
+# Добавил файл в любой из этих каталогов — он уже в сборке, перечислять его
+# здесь не нужно.
 ESP_SRC := $(patsubst $(LOCAL_PATH)/%,%,$(wildcard $(LOCAL_PATH)/src/esp/*.cpp))
+MENU_SRC := $(patsubst $(LOCAL_PATH)/%,%,$(wildcard $(LOCAL_PATH)/src/app/*.cpp \
+                                                  $(LOCAL_PATH)/src/ui/*.cpp \
+                                                  $(LOCAL_PATH)/src/aim/*.cpp \
+                                                  $(LOCAL_PATH)/src/farm/*.cpp))
 
 LOCAL_SRC_FILES := \
     src/main.cpp src/lang.cpp \
     $(ESP_SRC) \
+    $(MENU_SRC) \
     src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
     src/VidAvatar.cpp \
     src/third_party/tjpgd/tjpgd.c \

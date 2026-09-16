@@ -1,8 +1,8 @@
 #!/bin/sh
 # Стенд контроллера автофарма.
 #
-# Собирает НАСТОЯЩИЙ код из jni/src/main.cpp — блок констант автофарма,
-# namespace farmlog и UpdateFarm/UpdateFarmInner — вокруг заглушек окружения
+# Собирает НАСТОЯЩИЙ код из jni/src/farm/controller.cpp — блок констант
+# автофарма, namespace farmlog и UpdateFarm/UpdateFarmInner — вокруг заглушек
 # (ImGui, тач, игра, настройки) и прогоняет сценарии, в которых задеты все
 # места событий лога. NDK не нужен: это обычная сборка g++, поэтому гонять
 # можно после каждой правки бота, не дожидаясь CI.
@@ -32,12 +32,14 @@ FRAMES=${1:-4700}
 mkdir -p "$BUILD/cfg"
 rm -f "$BUILD/cfg"/*.log
 
-# Регион контроллера вырезается из main.cpp по содержимому, а не по номерам
-# строк: правки выше по файлу не должны ломать стенд.
+# Регион контроллера вырезается из своего модуля по содержимому, а не по
+# номерам строк: правки выше по файлу не должны ломать стенд. После разрезания
+# монолита контроллер живёт в jni/src/farm/controller.cpp, строки XS — в
+# jni/src/ui/xp.h.
 python3 - "$BUILD" <<'PY'
 import sys
 build = sys.argv[1]
-lines = open('jni/src/main.cpp', encoding='utf-8').read().split('\n')
+lines = open('jni/src/farm/controller.cpp', encoding='utf-8').read().split('\n')
 
 start = None
 for i, l in enumerate(lines):
@@ -56,12 +58,12 @@ for i in range(inner, len(lines)):
 assert end is not None, 'не найден конец UpdateFarmInner'
 open(build + '/ctrl.inc', 'w', encoding='utf-8').write('\n'.join(lines[start:end + 1]) + '\n')
 
-src = open('jni/src/main.cpp', encoding='utf-8').read()
+src = open('jni/src/ui/xp.h', encoding='utf-8').read()
 a = src.index('namespace xp {')
 b = src.index('#define XS(s)')
 c = src.index('\n', b) + 1
 open(build + '/xp.inc', 'w', encoding='utf-8').write(src[a:c])
-print('регион контроллера: строки %d..%d main.cpp' % (start + 1, end + 1))
+print('регион контроллера: строки %d..%d farm/controller.cpp' % (start + 1, end + 1))
 PY
 
 cp jni/include/game.h "$BUILD/game.h"

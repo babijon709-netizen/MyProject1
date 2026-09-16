@@ -15,7 +15,10 @@ set -e
 cd "$(dirname "$0")/../.."
 STUB=tools/syntax/stub
 INC="-I$STUB -Ijni/include -Ijni/include/ImGui -Ijni/src"
-FILES="${*:-jni/src/main.cpp jni/src/Android_draw/draw.cpp jni/src/esp/*.cpp}"
+# Точка входа и все модули: esp — из прежнего game.cpp, app/ui/aim/farm —
+# из прежнего main.cpp.
+FILES="${*:-jni/src/main.cpp jni/src/Android_draw/draw.cpp jni/src/esp/*.cpp \
+         jni/src/app/*.cpp jni/src/ui/*.cpp jni/src/aim/*.cpp jni/src/farm/*.cpp}"
 rc=0
 for f in $FILES; do
     if g++ -std=c++17 -fsyntax-only -Wall $INC "$f" 2> /tmp/syntax_err.txt; then

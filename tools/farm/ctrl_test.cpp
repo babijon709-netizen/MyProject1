@@ -1,6 +1,6 @@
 // Стенд контроллера автофарма (запуск: sh tools/farm/run.sh).
 //
-// Настоящий код из jni/src/main.cpp — блок констант автофарма, namespace
+// Настоящий код из jni/src/farm/controller.cpp — блок констант автофарма, namespace
 // farmlog и UpdateFarm/UpdateFarmInner (его вырезает run.sh в ctrl.inc) —
 // вокруг заглушек окружения: ImGui, синтетический тач, «игра», настройки.
 // Цель — собрать и прогнать контроллер без NDK и поймать ошибки лога и
