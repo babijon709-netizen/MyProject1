@@ -5274,16 +5274,33 @@ void RenderMenu() {
     // чтений памяти и состояние аима. Без неё по логу не отличить «не читаем
     // память» от «читаем, но ничего не находим».
     {
-        unsigned long long reads = 0, fails = 0, reopens = 0;
+        unsigned long long reads = 0, fails = 0, reopens = 0, tagged = 0;
         int last_errno = 0, players = 0;
-        esp_memio_stats(reads, fails, reopens, last_errno);
+        esp_memio_stats(reads, fails, reopens, tagged, last_errno);
         players = esp_nearby_player_count();
         mlog::every("hb", 5.0,
             "сводка: привязка %s, тач %s, боксов %d, игроков рядом %d, чтений %llu, "
-            "отказов %llu, переоткрытий %llu, errno %d",
+            "отказов %llu, переоткрытий %llu, адресов с меткой %llu, errno %d",
             AttachStateText((int)g_attach_report.load()),
             Touch_CanInject() ? "инъекция есть" : "инъекции нет",
-            g_last_box_count, players, reads, fails, reopens, last_errno);
+            g_last_box_count, players, reads, fails, reopens, tagged, last_errno);
+        // Куда именно читали, когда отказывало: если это адреса с меткой —
+        // виноват TBI/MTE, если обычные — раскладка оффсетов не от этого клиента.
+        {
+            uint64_t sample[8] = {};
+            const int n = esp_memio_fail_sample(sample, 8);
+            if (n > 0) {
+                char list[200] = {};
+                size_t used = 0;
+                for (int i = 0; i < n; ++i) {
+                    const int written = snprintf(list + used, sizeof(list) - used, "%s0x%llx",
+                                                 i ? " " : "", (unsigned long long)sample[i]);
+                    if (written <= 0 || (size_t)written >= sizeof(list) - used) break;
+                    used += (size_t)written;
+                }
+                mlog::every("fails", 10.0, "отказы чтения: %s", list);
+            }
+        }
         mlog::every("aim", 5.0,
             "аим: %s, коэффициент %.4f/%.4f (%s), чувствительность %.2f, остаток %.2f/%.2f град, "
             "шагов %d, смен знака %d",

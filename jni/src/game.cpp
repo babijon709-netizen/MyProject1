@@ -44,7 +44,10 @@ static bool rd_exact(uint64_t addr, T& value) {
     if (!addr) return false;
     return g_mem.read(addr, &value, sizeof(T));
 }
-static uint64_t rd_ptr(uint64_t a) { return rd<uint64_t>(a); }
+// Указатели из памяти игры приходят с меткой в старшем байте (TBI/MTE на
+// Android 11+): читать по ним нельзя — ядро вернёт EIO, — и сравнивать их с
+// адресами без метки тоже нельзя. Снимаем метку сразу, на входе.
+static uint64_t rd_ptr(uint64_t a) { return memio::untag(rd<uint64_t>(a)); }
 static Vec3     rd_v3 (uint64_t a) { return rd<Vec3>(a);     }
 static Mat4     rd_m4 (uint64_t a) { return rd<Mat4>(a);     }
 
@@ -4757,11 +4760,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 int esp_nearby_player_count() { return g_frame_player_count; }
 
 void esp_memio_stats(unsigned long long& reads, unsigned long long& fails,
-                     unsigned long long& reopens, int& last_errno) {
+                     unsigned long long& reopens, unsigned long long& tagged,
+                     int& last_errno) {
     reads = g_mem.reads_total();
     fails = g_mem.read_fails_total();
     reopens = g_mem.reopens_total();
+    tagged = g_mem.tagged_total();
     last_errno = g_mem.last_error();
+}
+
+int esp_memio_fail_sample(uint64_t* out, int max) {
+    return g_mem.fail_sample(out, max);
 }
 
 

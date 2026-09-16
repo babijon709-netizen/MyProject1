@@ -38,6 +38,27 @@
 
 namespace memio {
 
+// Снять тег старшего байта с адреса.
+//
+// На Android 11+ (ядро с поддержкой ARM Top-byte Ignore) все указатели на
+// heap-объекты процесса несут в старшем байте метку: её ставит аллокатор, а
+// процессор её игнорирует (TBI), на MTE-устройствах это ещё и 4 бита ключа
+// (bits 59:56). Указатели, которые мы вычитываем ИЗ ПАМЯТИ ИГРЫ, приходят
+// вместе с этой меткой — и это ломает не нас, а само чтение: адрес уходит в
+// /proc/<pid>/mem как есть, ядро тег не снимает (это «чужая» для syscall
+// память), страницы по такому адресу не находит и возвращает EIO.
+//
+// Отсюда ровно то, что видно на части устройств: привязка проходит (пробный
+// ELF-заголовок читается по адресу из карты — он без метки), а дальше почти
+// каждое чтение по указателю из игры отказывает с errno 5, и чит молчит при
+// живом меню. На устройствах без TBI метки нет — там всё работает.
+//
+// Маска — та же, что у untagged_addr() в ядре: user-space адреса на arm64 не
+// выходят за 56 бит, поэтому старший байт можно отбрасывать всегда.
+constexpr uint64_t kAddressTagMask = 0x00FFFFFFFFFFFFFFULL;
+
+inline uint64_t untag(uint64_t address) { return address & kAddressTagMask; }
+
 // 128 байт — это несколько рядом лежащих полей объекта il2cpp (и пара матриц
 // трансформа); восемь блоков на поток покрывают типичный кадр ESP: камера,
 // локальный игрок, цель, пара моделей.
@@ -121,6 +142,20 @@ public:
     unsigned long long reads_total() const { return reads_.load(std::memory_order_relaxed); }
     unsigned long long read_fails_total() const { return read_fails_.load(std::memory_order_relaxed); }
     unsigned long long reopens_total() const { return reopens_.load(std::memory_order_relaxed); }
+    // Сколько адресов пришло с меткой в старшем байте (TBI/MTE). Ноль — метки
+    // на этом устройстве нет; большое число — она есть, и без снятия тега
+    // половина чтений уходила бы в EIO.
+    unsigned long long tagged_total() const { return tagged_.load(std::memory_order_relaxed); }
+    // Последние адреса отказов (не более 8): по ним видно, куда именно читали.
+    int fail_sample(uint64_t* out, int max) const {
+        if (!out || max <= 0) return 0;
+        int n = 0;
+        for (int i = 0; i < kFailSample && n < max; ++i) {
+            const uint64_t v = fail_sample_[i].load(std::memory_order_relaxed);
+            if (v) out[n++] = v - 1;   // храним адрес + 1, чтобы 0 значил «пусто»
+        }
+        return n;
+    }
     int last_error() const { return last_errno_.load(std::memory_order_relaxed); }
     // true — последняя беда была на открытии /proc/<pid>/mem, а не на чтении.
     bool last_error_was_open() const { return last_open_path_.load(std::memory_order_relaxed) != 0; }
@@ -141,6 +176,7 @@ public:
     bool read(uint64_t addr, void* out, size_t len) {
         if (!addr || !out || !len) return false;
         if (fd_.load() < 0 || pid_.load() <= 0) return false;
+        addr = normalize(addr);
         if (len > kBlockSize) return raw_read(addr, out, len);
 
         const uint64_t base = addr & ~(uint64_t)(kBlockSize - 1);
@@ -185,6 +221,7 @@ public:
     bool write(uint64_t addr, const void* in, size_t len) {
         if (!addr || !in || !len) return false;
         if (fd_.load() < 0 || pid_.load() <= 0) return false;
+        addr = normalize(addr);
         if (!raw_write(addr, in, len)) return false;
         mark_written(addr, len);
         return true;
@@ -217,6 +254,13 @@ private:
 
     // Полное чтение: pread на границе незанятой страницы отдаёт меньше
     // запрошенного, поэтому короткие чтения добираем.
+    // Учёт отказа: адрес нужен и счётчику, и выборке последних отказов.
+    void note_fail_at(uint64_t addr) {
+        fail_sample_[fail_next_.fetch_add(1, std::memory_order_relaxed) % kFailSample]
+            .store(addr + 1, std::memory_order_relaxed);
+        note_fail();
+    }
+
     template <typename Once>
     bool read_full(Once once, uint64_t addr, void* out, size_t len) {
         uint8_t* p = (uint8_t*)out;
@@ -229,13 +273,13 @@ private:
             if (n > 0) { got += (size_t)n; continue; }
             if (n < 0 && errno == EINTR) continue;
             if (got == 0) {
-                note_fail();
+                note_fail_at(addr);
                 return false;
             }
             break;
         }
         if (got != len) {
-            note_fail();
+            note_fail_at(addr);
             return false;
         }
         note_ok();
@@ -328,6 +372,13 @@ private:
         if (fd >= 0) close(fd);
     }
 
+    // Снять метку старшего байта, посчитав такие адреса (см. kAddressTagMask).
+    uint64_t normalize(uint64_t addr) {
+        if (!(addr >> 56)) return addr;
+        tagged_.fetch_add(1, std::memory_order_relaxed);
+        return addr & kAddressTagMask;
+    }
+
     // ---- «мы сюда писали»: такие блоки не кэшируем совсем ------------------
     void mark_written(uint64_t addr, size_t len) {
         const uint64_t first = addr & ~(uint64_t)(kBlockSize - 1);
@@ -367,6 +418,10 @@ private:
     std::atomic<unsigned long long> read_fails_{0};
     std::atomic<unsigned long long> reopens_{0};
     std::atomic<int> last_errno_{0};
+    std::atomic<unsigned long long> tagged_{0};
+    static constexpr int kFailSample = 8;
+    std::atomic<uint64_t> fail_sample_[kFailSample] = {};
+    std::atomic<unsigned> fail_next_{0};
     // Признак «последний отказ был на открытии файла» — для текста в логе.
     std::atomic<uint64_t> last_open_path_{0};
 

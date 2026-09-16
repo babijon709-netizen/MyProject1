@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h>
 #include <sys/types.h>
 #include <vector>
 
@@ -104,8 +105,15 @@ int         esp_nearby_player_count();
 // отказов, сколько раз переоткрывали /proc/<pid>/mem и последняя ошибка (errno).
 // Нужны, чтобы по логу с устройства отличать «память не читается вовсе» от
 // «читается, но с отказами» — это разные поломки.
+// tagged — сколько адресов пришло с меткой старшего байта (TBI/MTE): метка есть
+// на Android 11+, и без её снятия чтения по указателям из игры отказывают с EIO.
 void        esp_memio_stats(unsigned long long& reads, unsigned long long& fails,
-                            unsigned long long& reopens, int& last_errno);
+                            unsigned long long& reopens, unsigned long long& tagged,
+                            int& last_errno);
+
+// Последние адреса отказов чтения (не более `max`) — для разбора в логе.
+// Возвращает, сколько адресов записано.
+int         esp_memio_fail_sample(uint64_t* out, int max);
 
 // True while the local player is aiming down sights (ADS) with the current
 // weapon. Returns false when the state cannot be read (not attached, no
