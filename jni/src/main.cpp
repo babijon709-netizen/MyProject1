@@ -5276,8 +5276,9 @@ void RenderMenu() {
     // память» от «читаем, но ничего не находим».
     {
         unsigned long long reads = 0, fails = 0, reopens = 0, tagged = 0, junk = 0;
+        unsigned long long cuts = 0;
         int last_errno = 0, players = 0;
-        esp_memio_stats(reads, fails, reopens, tagged, last_errno);
+        esp_memio_stats(reads, fails, reopens, tagged, cuts, last_errno);
         players = esp_nearby_player_count();
         unsigned long long base = 0, list = 0, local = 0;
         int list_count = 0;
@@ -5292,8 +5293,9 @@ void RenderMenu() {
         // Если список нулевой — не резолвится класс; если элементы есть, а
         // локального нет — не найден свой PlayerManager; и так далее.
         mlog::every("pipe", 5.0,
-            "конвейер: база 0x%llx, список игроков 0x%llx (%d элементов), локальный 0x%llx",
-            base, list, list_count, local);
+            "конвейер: база 0x%llx, список игроков 0x%llx (%d элементов), локальный 0x%llx, "
+            "обрывов чтения %llu, классов по структуре %llu",
+            base, list, list_count, local, cuts, esp_structural_accepts());
         {
             uint64_t junk_first = 0;
             const char* junk_phase = "—";
@@ -5317,7 +5319,8 @@ void RenderMenu() {
                     if (written <= 0 || (size_t)written >= sizeof(list) - used) break;
                     used += (size_t)written;
                 }
-                mlog::every("fails", 10.0, "отказы чтения: %s", list);
+                mlog::every("fails", 10.0, "отказы чтения (последний в фазе «%s»): %s",
+                            esp_memio_fail_phase(), list);
             }
         }
         mlog::every("aim", 5.0,

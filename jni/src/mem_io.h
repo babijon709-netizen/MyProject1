@@ -156,11 +156,17 @@ public:
     // Отказы на заведомо невозможных («мусорных») адресах — это ошибка логики
     // чтения, а не потеря доступа; в логе видно и адрес, и фазу, которая читала.
     unsigned long long junk_total() const { return junk_.load(std::memory_order_relaxed); }
+    // Чтения, которые упёрлись в конец отображения: часть байт отдана, дальше
+    // памяти нет. Это НЕ потеря доступа (первый байт прочитался), но и не полное
+    // чтение — держим отдельным счётчиком, чтобы отказы в логе не путались.
+    unsigned long long cut_total() const { return cut_.load(std::memory_order_relaxed); }
     uint64_t junk_first_address() const {
         const uint64_t v = junk_addr_.load(std::memory_order_relaxed);
         return v ? v - 1 : 0;
     }
     const char* junk_phase() const { return junk_phase_.load(std::memory_order_relaxed); }
+    // Фаза последнего настоящего отказа: по ней видно, какой конвейер читал.
+    const char* fail_phase() const { return fail_phase_.load(std::memory_order_relaxed); }
 
     // Фаза работы чит-кода (какой конвейер читает) — только для диагностики.
     void set_phase(const char* phase) { phase_.store(phase, std::memory_order_relaxed); }
@@ -191,6 +197,14 @@ public:
     }
 
     // Чтение. Крупное (больше блока) идёт напрямую, мелкое — через кэш блоков.
+    // Чтение «на пробу»: тот же доступ, но отказ не попадает в счётчики. Нужно
+    // там, где отказ ожидаем и не значит потерю доступа — например, добор строки
+    // по байту у границы отображения.
+    bool read_quiet(uint64_t addr, void* out, size_t len) {
+        if (!addr || !out || !len) return false;
+        return raw_read(normalize(addr), out, len, false);
+    }
+
     bool read(uint64_t addr, void* out, size_t len) {
         if (!addr || !out || !len) return false;
         if (fd_.load() < 0 || pid_.load() <= 0) return false;
@@ -273,6 +287,17 @@ private:
     // Полное чтение: pread на границе незанятой страницы отдаёт меньше
     // запрошенного, поэтому короткие чтения добираем.
     // Учёт отказа: адрес нужен и счётчику, и выборке последних отказов.
+    // Обрыв на границе отображения: адрес начинается в отображённой памяти, но
+    // запрошено больше, чем там есть.
+    void note_cut_at(uint64_t addr) {
+        fail_sample_[fail_next_.fetch_add(1, std::memory_order_relaxed) % kFailSample]
+            .store(addr + 1, std::memory_order_relaxed);
+        cut_.fetch_add(1, std::memory_order_relaxed);
+        // Первый байт прочитался — доступ к памяти есть, копить серию отказов
+        // (и переоткрывать файл) не из-за чего.
+        note_ok();
+    }
+
     void note_fail_at(uint64_t addr) {
         fail_sample_[fail_next_.fetch_add(1, std::memory_order_relaxed) % kFailSample]
             .store(addr + 1, std::memory_order_relaxed);
@@ -289,6 +314,7 @@ private:
             }
             return;
         }
+        fail_phase_.store(phase_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         note_fail();
     }
 
@@ -313,7 +339,10 @@ private:
             break;
         }
         if (got != len) {
-            if (report) note_fail_at(addr);
+            // Часть байт есть, дальше — конец отображения. Это обрыв, а не отказ:
+            // вызывающий сам решает, хватает ли прочитанного (строку читаем
+            // кусками именно поэтому).
+            if (report) note_cut_at(addr);
             return false;
         }
         note_ok();
@@ -454,9 +483,11 @@ private:
     std::atomic<int> last_errno_{0};
     std::atomic<unsigned long long> tagged_{0};
     std::atomic<unsigned long long> junk_{0};
+    std::atomic<unsigned long long> cut_{0};
     std::atomic<uint64_t> junk_addr_{0};      // первый мусорный адрес + 1
     std::atomic<const char*> junk_phase_{nullptr};
     std::atomic<const char*> phase_{"старт"};
+    std::atomic<const char*> fail_phase_{nullptr};
     static constexpr int kFailSample = 8;
     std::atomic<uint64_t> fail_sample_[kFailSample] = {};
     std::atomic<unsigned> fail_next_{0};

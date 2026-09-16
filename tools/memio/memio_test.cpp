@@ -17,7 +17,11 @@
 //   5) запись доходит до процесса-ребёнка и не отдаётся из кэша;
 //   6) «привязка ещё жива» (verify) истинна для живого процесса и ложна после
 //      его смерти или когда доступ отобран (ребёнок помечен неdumpable);
-//   7) привязка к несуществующему pid честно отказывает, а не «удаётся» молча.
+//   7) обрыв на границе отображения и нечитаемая страница — разные вещи: обрыв
+//      (начало адреса читается, дальше памяти нет) не считается потерей доступа,
+//      а нечитаемая страница (как память имён классов на устройстве из лога) —
+//      считается, с errno EIO;
+//   8) привязка к несуществующему pid честно отказывает, а не «удаётся» молча.
 
 #include "mem_io.h"
 
@@ -76,6 +80,10 @@ static bool spawn_child(Child& c, bool dumpable) {
             char cmd = 0;
             if (read(pc[0], &cmd, 1) != 1) break;
             if (cmd == 'q') break;
+            if (cmd == 'n') {                    // отдать вторую страницу (munmap)
+                const char ack = munmap(p + 4096, len - 4096) == 0 ? 'y' : 'n';
+                if (write(cp[1], &ack, 1) != 1) break;
+            }
             if (cmd == 'c') {                    // «что у тебя по смещению 0x40?»
                 const uint8_t v = p[0x40];
                 if (write(cp[1], &v, 1) != 1) break;
@@ -97,6 +105,13 @@ static void kill_child(Child& c) {
     if (c.to_child >= 0) close(c.to_child);
     if (c.from_child >= 0) close(c.from_child);
     c.pid = -1; c.to_child = -1; c.from_child = -1;
+}
+
+static bool child_unmap_second_page(Child& c) {
+    const char cmd = 'n';
+    if (write(c.to_child, &cmd, 1) != 1) return false;
+    char ack = 0;
+    return read(c.from_child, &ack, 1) == 1 && ack == 'y';
 }
 
 static int child_byte(Child& c) {
@@ -202,7 +217,51 @@ int main() {
         check(child_byte(child) == want, "запись по адресу с меткой дошла до процесса");
     }
 
-    // 7) Проверка живости: пока процесс жив — истина, после смерти — ложь.
+    // 7) Обрыв на границе отображения и нечитаемая страница — два разных случая.
+    //    С устройства пришёл лог, где чтения имён классов падали с errno 5: память
+    //    метаданных (там лежат имена классов) на том устройстве не читается вовсе,
+    //    хотя всё остальное читается: адреса отдают EIO, как у отданной страницы.
+    //    Разбираться в логе нужно точно: «начало адреса читается, дальше памяти
+    //    нет» — это обрыв, он не значит потерю доступа; «адрес не читается
+    //    совсем» — это отказ.
+    {
+        const uint64_t kPageSize = 4096;
+        check(child_unmap_second_page(child), "ребёнок отдал вторую страницу (munmap)");
+
+        const unsigned long long fails_before = r.read_fails_total();
+        const unsigned long long cuts_before  = r.cut_total();
+        uint8_t buf[8] = {};
+        check(!r.read(child.base + kPageSize - 4, buf, sizeof(buf)),
+              "чтение, выходящее за конец отображения, отказывает");
+        check(r.cut_total() == cuts_before + 1, "такое чтение посчитано обрывом");
+        check(r.read_fails_total() == fails_before, "обрыв не засчитан потерей доступа");
+
+        const unsigned long long fails_before2 = r.read_fails_total();
+        uint64_t v = 0;
+        check(!r.read(child.base + kPageSize + 0x40, &v, sizeof(v)),
+              "чтение по нечитаемой странице отказывает");
+        check(r.read_fails_total() == fails_before2 + 1,
+              "нечитаемая страница — это отказ, а не обрыв");
+        check(r.last_error() != 0, "причина отказа записана в счётчиках слоя");
+        printf("      errno нечитаемой страницы: %d\n", r.last_error());
+
+        uint64_t first_page = 0;
+        check(r.read(child.base + 0x40, &first_page, sizeof(first_page)),
+              "первая страница по-прежнему читается (доступ есть)");
+
+        // Чтение «на пробу» (read_quiet) — тот же доступ, но счётчики не трогает:
+        // им чит добирает начало строки у границы отображения, где отказ ожидаем.
+        const unsigned long long quiet_fails = r.read_fails_total();
+        uint8_t one = 0;
+        check(r.read_quiet(child.base + kPageSize + 0x40, &one, 1) == false,
+              "read_quiet по нечитаемой странице отказывает");
+        check(r.read_fails_total() == quiet_fails, "read_quiet не засчитан как отказ");
+        one = 0;
+        check(r.read_quiet(child.base + 0x48, &one, 1) && one == pattern(0x48),
+              "read_quiet читает там, где память есть");
+    }
+
+    // 8) Проверка живости: пока процесс жив — истина, после смерти — ложь.
     {
             check(r.verify(), "verify() истинна для живого процесса");
         kill_child(child);
@@ -211,7 +270,7 @@ int main() {
         check(!r.verify(), "verify() ложна после смерти процесса");
     }
 
-    // 8) Привязка к недоступному процессу честно отказывает.
+    // 9) Привязка к недоступному процессу честно отказывает.
     {
         Child nd;
         if (spawn_child(nd, false)) {                    // PR_SET_DUMPABLE 0 — как «права отобрали»
@@ -226,7 +285,7 @@ int main() {
         check(!r3.bind(999999, 0x400000), "привязка к несуществующему pid отклонена");
     }
 
-    // 9) Замер на «рабочей» нагрузке: 40 объектов по 12 полей, 8 кадров — это
+    // 10) Замер на «рабочей» нагрузке: 40 объектов по 12 полей, 8 кадров — это
     //    профиль кадра ESP без скелета. «Как было» — каждое поле отдельным
     //    pread, «как стало» — через кэш блоков с началом кадра.
     {

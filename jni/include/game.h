@@ -109,11 +109,18 @@ int         esp_nearby_player_count();
 // на Android 11+, и без её снятия чтения по указателям из игры отказывают с EIO.
 void        esp_memio_stats(unsigned long long& reads, unsigned long long& fails,
                             unsigned long long& reopens, unsigned long long& tagged,
-                            int& last_errno);
+                            unsigned long long& cuts, int& last_errno);
+
+// Сколько классов принято по структуре, потому что имя класса прочитать не
+// удалось (память метаданных на части устройств недоступна) — для лога.
+unsigned long long esp_structural_accepts();
 
 // Последние адреса отказов чтения (не более `max`) — для разбора в логе.
 // Возвращает, сколько адресов записано.
 int         esp_memio_fail_sample(uint64_t* out, int max);
+
+// Фаза чтения, в которой случился последний настоящий отказ (для лога).
+const char* esp_memio_fail_phase();
 
 // Отказы на «мусорных» адресах (ниже начала адресного пространства): это ошибка
 // логики чтения, а не потеря доступа. Отдаём первый адрес и конвейер, который

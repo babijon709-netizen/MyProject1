@@ -160,7 +160,7 @@ static void xray_apply(uint64_t native_cam) {
 // класса -> Cycle -> Hour/Day/Month/Year в разумных пределах. Пока включено,
 // фоновый поток пишет полдень прямо в Cycle.Hour — игровой Update сам
 // разворачивает солнце.
-static std::string read_remote_string(uint64_t address); // определена ниже
+static std::string read_remote_string(uint64_t address, bool* readable = nullptr); // определена ниже
 static bool     g_day_enabled = false;
 static uint64_t g_day_tod = 0;          // подтверждённый инстанс TimeOfDay
 static std::atomic<uint64_t> g_day_cycle_addr{0}; // Cycle.Hour для писателя
@@ -259,11 +259,43 @@ static void always_day_tick() {
     }
 }
 
-static std::string read_remote_string(uint64_t address) {
+// Чтение C-строки (имени класса, пространства имён) из памяти игры.
+//
+// Кусками по 8 байт, а не «95 байт на всякий случай», как было раньше. Прежнее
+// чтение ломалось на границе отображения: ядро отдаёт отображённые байты, а на
+// следующем куске возвращает EIO — чтение считалось неудачным целиком, строка
+// терялась, хотя начало прочиталось, и это ещё засчитывалось как потеря доступа.
+// Теперь идём вперёд кусками и останавливаемся на нуле; если кусок упёрся в
+// границу — добираем по байту и сохраняем прочитанное.
+//
+// readable (если передан) — прочитался ли первый кусок. По этому признаку видно,
+// что строка недоступна вообще (в логе устройства все чтения имён классов падали
+// с errno 5: память метаданных там не читается), — и тогда класс опознаётся по
+// структуре, см. class_identity.
+static std::string read_remote_string(uint64_t address, bool* readable) {
+    if (readable) *readable = false;
     if (!address) return {};
-    char buffer[96]{};
-    if (!rd_buf(address, buffer, sizeof(buffer) - 1)) return {};
-    buffer[sizeof(buffer) - 1] = '\0';
+    const size_t kMax = 95;
+    char buffer[kMax + 1] = {};
+    size_t got = 0;
+    while (got < kMax) {
+        const size_t want = (kMax - got < sizeof(uint64_t)) ? (kMax - got) : sizeof(uint64_t);
+        if (!rd_buf(address + got, buffer + got, want)) {
+            if (got == 0) return {};   // первый кусок не читается: строки здесь нет
+            size_t single = 0;
+            while (single < want &&
+                   g_mem.read_quiet(address + got + single, buffer + got + single, 1)) {
+                if (buffer[got + single] == '\0') break;
+                ++single;
+            }
+            got += single;
+            break;
+        }
+        got += want;
+        if (memchr(buffer + got - want, '\0', want)) break;
+    }
+    buffer[kMax] = '\0';
+    if (readable) *readable = true;
     return std::string(buffer);
 }
 
@@ -783,14 +815,46 @@ static int get_base_candidates(const char* lib, uint64_t* out, int max) {
     return maps::lookup_library_bases(text, lib, out, max);
 }
 
-// Класс с ожидаемым именем и пространством имён по адресу Il2CppClass*.
-static bool class_name_at(uint64_t klass, const char* expected_name, const char* expected_ns) {
-    if (!klass) return false;
-    const uint64_t name = rd_ptr(klass + 0x10);
-    const uint64_t space = rd_ptr(klass + 0x18);
-    if (!name || !space) return false;
-    return read_remote_string(name) == expected_name &&
-           read_remote_string(space) == expected_ns;
+// Похож ли адрес на Il2CppClass — по одной структуре, без чтения имён.
+static bool class_looks_alive(uint64_t klass) {
+    if (!valid_obj(klass)) return false;
+    const uint64_t image = rd_ptr(klass);
+    const uint64_t name  = rd_ptr(klass + IL2CPP_CLASS_NAME);
+    const uint64_t space = rd_ptr(klass + IL2CPP_CLASS_NAMESPACE);
+    if (!image || !name || !space) return false;
+    // Имя и пространство имён — указатели в память метаданных: не ноль и не мусор.
+    return name >= 0x10000 && space >= 0x10000;
+}
+
+// Сколько классов принято по структуре (имя прочитать не удалось) — для лога.
+static unsigned long long g_class_structural_accepts = 0;
+
+// Сверка класса с ожидаемым именем и пространством имён.
+//   1 — имя прочитано и совпало;
+//   2 — имя прочитать не удалось, класс принят по структуре;
+//   0 — не он.
+//
+// Почему не только имя. С устройства пришёл лог, где ВСЕ чтения имён классов
+// падали с errno 5: адреса 0x2002a500 и 0x20026580 — это строки имён классов в
+// памяти метаданных, и на том устройстве эта память не отображена вовсе (ядро
+// отдаёт EIO, как по отданной странице), хотя всё остальное — классы, статические
+// поля, куча — читается прекрасно. Из-за одних только имён чит не мог опознать
+// ни одного класса, и «функционал не работает» целиком: отказов 35 тысяч, боксов
+// ноль.
+// Поэтому там, где имя доступно, сверяем его, как раньше (защита от чужой сборки
+// игры); где нет — верим смещению из таблицы оффсетов и проверяем структуру.
+static int class_identity(uint64_t klass, const char* expected_name, const char* expected_ns) {
+    if (!class_looks_alive(klass)) return 0;
+    bool name_readable = false, ns_readable = false;
+    const std::string name  = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME), &name_readable);
+    const std::string space = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAMESPACE), &ns_readable);
+    if (!name_readable && !ns_readable) {
+        ++g_class_structural_accepts;
+        return 2;
+    }
+    if (name_readable && name != expected_name) return 0;
+    if (ns_readable && space != expected_ns) return 0;
+    return 1;
 }
 
 // Живой ли это il2cpp выбранной сборки по адресу base: читаем Il2CppClass*
@@ -802,11 +866,11 @@ static bool base_resolves_game(uint64_t base) {
     if (!base) return false;
     if (PLAYER_MANAGER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(base + PLAYER_MANAGER_TYPEINFO_RVA);
-        if (class_name_at(candidate, "PlayerManager", "Oxide")) return true;
+        if (class_identity(candidate, "PlayerManager", "Oxide") != 0) return true;
     }
     if (GAME_CONTROLLER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(base + GAME_CONTROLLER_TYPEINFO_RVA);
-        if (class_name_at(candidate, "GameControllerBase", "Oxide")) return true;
+        if (class_identity(candidate, "GameControllerBase", "Oxide") != 0) return true;
     }
     return false;
 }
@@ -846,9 +910,13 @@ static bool validate_player_list(uint64_t list, uint64_t player_class) {
     int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
     if (!items || count < 0 || count > 512) return false;
     if (count == 0) {
-        uint64_t list_class = rd_ptr(list);
-        return remote_string_equals(rd_ptr(list_class + 0x10), "List`1") &&
-            remote_string_equals(rd_ptr(list_class + 0x18), "System.Collections.Generic");
+        // Пустой список — обычное состояние, пока игроки не заспавнились, и
+        // сверить класс по элементам нечем. Раньше здесь сверялось имя класса
+        // ("List`1"): там, где память имён недоступна (см. class_identity),
+        // список отвергался — и чит не работал вообще. Теперь: массив элементов
+        // на месте (List хранит его даже пустым), а класс — живой il2cpp-класс.
+        if (!valid_obj(rd_ptr(list + IL2CPP_LIST_ITEMS))) return false;
+        return class_looks_alive(rd_ptr(list));
     }
     int32_t checked = 0;
     for (int32_t index = 0; index < count && checked < 4; ++index) {
@@ -881,13 +949,9 @@ static uint64_t get_class_static_fields(uint64_t klass) {
 
 static uint64_t resolve_runtime_player_list() {
     if (!g_player_manager_class && PLAYER_MANAGER_TYPEINFO_RVA != 0) {
-        uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
-        if (candidate) {
-            std::string name = read_remote_string(rd_ptr(candidate + 0x10));
-            std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
-            if (name == "PlayerManager" && ns == "Oxide")
-                g_player_manager_class = candidate;
-        }
+        const uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
+        if (class_identity(candidate, "PlayerManager", "Oxide") != 0)
+            g_player_manager_class = candidate;
     }
     if (!g_player_manager_class) {
         return 0;
@@ -911,13 +975,9 @@ static uint64_t resolve_local_player() {
     g_local_player = 0;
 
     if (!g_game_controller_class && GAME_CONTROLLER_TYPEINFO_RVA != 0) {
-        uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
-        if (candidate) {
-            std::string name = read_remote_string(rd_ptr(candidate + 0x10));
-            std::string ns   = read_remote_string(rd_ptr(candidate + 0x18));
-            if (name == "GameControllerBase" && ns == "Oxide")
-                g_game_controller_class = candidate;
-        }
+        const uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
+        if (class_identity(candidate, "GameControllerBase", "Oxide") != 0)
+            g_game_controller_class = candidate;
     }
 
     if (!g_game_controller_class || !g_player_manager_class) return 0;
@@ -3055,11 +3115,20 @@ static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos) 
 
 // Il2CppClass name check (klass @0x0, name @0x10) — identifies PlayerWeapon
 // without relying on the obfuscated wrapper layout.
-static bool object_class_name_is(uint64_t obj, const char* expected) {
+// Совпадает ли имя класса объекта с ожидаемым.
+// accept_when_unreadable — что делать, если имя прочитать нельзя (память имён на
+// части устройств недоступна, см. class_identity). Где рядом есть второй,
+// независимый признак (обратная ссылка на игрока) — объект принимаем; где признак
+// только имя — нет, иначе под проверку попадёт что угодно.
+static bool object_class_name_is(uint64_t obj, const char* expected,
+                                 bool accept_when_unreadable = false) {
     if (!valid_obj(obj)) return false;
     uint64_t klass = rd_ptr(obj);
     if (!valid_obj(klass)) return false;
-    return remote_string_equals(rd_ptr(klass + IL2CPP_CLASS_NAME), expected);
+    bool readable = false;
+    const std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME), &readable);
+    if (!readable) return accept_when_unreadable;
+    return name == expected;
 }
 
 // The GameObject-name offset is normally discovered while building a skeleton.
@@ -3191,7 +3260,9 @@ static uint64_t resolve_player_weapon_component(uint64_t player) {
     auto is_player_weapon = [&](uint64_t candidate) {
         return valid_obj(candidate) &&
                rd_ptr(candidate + PLAYERWEAPON_PLAYER_BACKREF) == player &&
-               object_class_name_is(candidate, "PlayerWeapon");
+               // Имя класса — второй признак; если память имён недоступна,
+               // хватает обратной ссылки на игрока (см. object_class_name_is).
+               object_class_name_is(candidate, "PlayerWeapon", true);
     };
     uint64_t reference = rd_ptr(player + PLAYER_WEAPON_REFERENCE);
     if (is_player_weapon(reference)) return reference;
@@ -4277,6 +4348,7 @@ void esp_reset() {
     g_want_reattach.store(false);
     g_aim_ref_valid = false;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
+    g_class_structural_accepts = 0;
     g_game_controller_class = 0; g_local_player = 0;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_offset = PLAYER_POSITION;
@@ -4885,11 +4957,12 @@ int esp_nearby_player_count() { return g_frame_player_count; }
 
 void esp_memio_stats(unsigned long long& reads, unsigned long long& fails,
                      unsigned long long& reopens, unsigned long long& tagged,
-                     int& last_errno) {
+                     unsigned long long& cuts, int& last_errno) {
     reads = g_mem.reads_total();
     fails = g_mem.read_fails_total();
     reopens = g_mem.reopens_total();
     tagged = g_mem.tagged_total();
+    cuts = g_mem.cut_total();
     last_errno = g_mem.last_error();
 }
 
@@ -4897,7 +4970,14 @@ int esp_memio_fail_sample(uint64_t* out, int max) {
     return g_mem.fail_sample(out, max);
 }
 
+const char* esp_memio_fail_phase() {
+    const char* p = g_mem.fail_phase();
+    return p ? p : "—";
+}
+
 bool esp_wants_reattach() { return g_want_reattach.exchange(false); }
+
+unsigned long long esp_structural_accepts() { return g_class_structural_accepts; }
 
 void esp_memio_junk(unsigned long long& junk, uint64_t& first_address, const char*& phase) {
     junk = g_mem.junk_total();
@@ -5358,7 +5438,14 @@ static int read_managed_collection(uint64_t object, uint64_t* out, int max_items
     if (!valid_obj(klass)) return 0;
     uint64_t array = object;
     int32_t count = 0;
-    if (read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME)).rfind("List`1", 0) == 0) {
+    bool name_readable = false;
+    const std::string klass_name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME), &name_readable);
+    const bool is_list = name_readable
+        ? klass_name.rfind("List`1", 0) == 0
+        // Имя класса недоступно: List и массив различаем по структуре — у List на
+        // 0x10 лежит массив элементов, у массива там bounds (обычно ноль).
+        : valid_obj(rd_ptr(object + IL2CPP_LIST_ITEMS));
+    if (is_list) {
         array = rd_ptr(object + IL2CPP_LIST_ITEMS);
         count = rd<int32_t>(object + IL2CPP_LIST_SIZE);
     } else {
@@ -5600,35 +5687,38 @@ enum MarkerClass : uint8_t {
     MARKER_CLASS_NONE = 0, MARKER_CLASS_MINEABLE = 1,
     MARKER_CLASS_LOOT = 2, MARKER_CLASS_PICKUP = 3,
     MARKER_CLASS_BARREL = 4,
+    // Имя класса прочитать не удалось (см. class_identity): семейство неизвестно,
+    // и объект опознаётся дальше по имени GameObject — оно лежит в куче и читается.
+    MARKER_CLASS_UNKNOWN = 5,
 };
 
 static uint8_t marker_class_of(uint64_t klass) {
     if (!valid_obj(klass)) return MARKER_CLASS_NONE;
     auto found = g_marker_class_kind.find(klass);
     if (found != g_marker_class_kind.end()) return found->second;
-    std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME));
-    uint8_t kind = MARKER_CLASS_NONE;
-    if (name.rfind("Mineable", 0) == 0)                       kind = MARKER_CLASS_MINEABLE;
-    else if (name == "LootObject" || name == "PumpkinTrick")  kind = MARKER_CLASS_LOOT;
-    else if (name == "ItemPickup")                            kind = MARKER_CLASS_PICKUP;
-    // Smashable scrap barrels: on this build their component class is
-    // "LootDestroyable" (log: skip-class 'LootDestroyable' go='Barrel_v2') —
-    // not a Mineable and not a LootObject. Any class that says Barrel out
-    // loud is kept as a safety net for other builds.
-    else if (name == "LootDestroyable" ||
-             name.find("Barrel") != std::string::npos)      kind = MARKER_CLASS_BARREL;
+    bool readable = false;
+    const std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME), &readable);
+    uint8_t kind = readable ? MARKER_CLASS_NONE : MARKER_CLASS_UNKNOWN;
+    if (readable) {
+        if (name.rfind("Mineable", 0) == 0)                       kind = MARKER_CLASS_MINEABLE;
+        else if (name == "LootObject" || name == "PumpkinTrick")  kind = MARKER_CLASS_LOOT;
+        else if (name == "ItemPickup")                            kind = MARKER_CLASS_PICKUP;
+        // Smashable scrap barrels: on this build their component class is
+        // "LootDestroyable" (log: skip-class 'LootDestroyable' go='Barrel_v2') —
+        // not a Mineable and not a LootObject. Any class that says Barrel out
+        // loud is kept as a safety net for other builds.
+        else if (name == "LootDestroyable" ||
+                 name.find("Barrel") != std::string::npos)      kind = MARKER_CLASS_BARREL;
+    }
     if (g_marker_class_kind.size() < 512) g_marker_class_kind[klass] = kind;
     return kind;
 }
 
 static uint64_t resolve_network_client_spawned() {
     if (!g_network_client_class && NETWORK_CLIENT_TYPEINFO_RVA != 0) {
-        uint64_t candidate = rd_ptr(g_il2cpp_base + NETWORK_CLIENT_TYPEINFO_RVA);
-        if (valid_obj(candidate)) {
-            std::string name = read_remote_string(rd_ptr(candidate + IL2CPP_CLASS_NAME));
-            std::string ns   = read_remote_string(rd_ptr(candidate + IL2CPP_CLASS_NAMESPACE));
-            if (name == "NetworkClient" && ns == "Mirror") g_network_client_class = candidate;
-        }
+        const uint64_t candidate = rd_ptr(g_il2cpp_base + NETWORK_CLIENT_TYPEINFO_RVA);
+        if (class_identity(candidate, "NetworkClient", "Mirror") != 0)
+            g_network_client_class = candidate;
     }
     if (!g_network_client_class) return 0;
     uint64_t statics = get_class_static_fields(g_network_client_class);
@@ -5649,8 +5739,10 @@ static uint64_t resolve_network_identity_class() {
     if (!valid_obj(identity)) return 0;
     uint64_t klass = rd_ptr(identity);
     if (!valid_obj(klass)) return 0;
-    std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME));
-    if (name != "NetworkIdentity") return 0;
+    bool name_readable = false;
+    const std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME), &name_readable);
+    if (name_readable && name != "NetworkIdentity") return 0;
+    if (!class_looks_alive(klass)) return 0;
     g_network_identity_class = klass;
     return klass;
 }
@@ -5737,6 +5829,10 @@ static bool rebuild_marker_entities() {
             if (!valid_obj(component)) continue;
             const uint8_t component_class = marker_class_of(rd_ptr(component));
             if (component_class == MARKER_CLASS_NONE) continue;
+            // Имя класса компонента может быть недоступно (см. marker_class_of):
+            // тогда семейство неизвестно, и объект опознаётся по имени GameObject —
+            // оно лежит в куче игры и читается всегда. Пробуем семейства по порядку.
+            const bool family_unknown = (component_class == MARKER_CLASS_UNKNOWN);
             // «Дорогой» компонент: имя GameObject, трансформ и позиция — это
             // десятки обращений к памяти игры, поэтому время порции проверяется
             // снаружи, между узлами.
@@ -5747,26 +5843,34 @@ static bool rebuild_marker_entities() {
             managed_component_gameobject_name(component, object_name, sizeof(object_name));
             managed_component_gameobject_name(identity, root_name, sizeof(root_name));
             bool known = false;
-            if (component_class == MARKER_CLASS_PICKUP) {
-                if (!g_markers_pickup_enabled) continue;
+            if ((component_class == MARKER_CLASS_PICKUP || family_unknown) &&
+                g_markers_pickup_enabled) {
                 known = pickup_marker(component, pickup_text, sizeof(pickup_text));
                 if (known) {
                     look.kind = ESP_MARKER_PICKUP;
                     look.label = nullptr;
                     look.has_color = false;
                 }
-            } else if (component_class == MARKER_CLASS_BARREL) {
-                if (!g_markers_loot_enabled) continue;
+            }
+            if (!known && (component_class == MARKER_CLASS_BARREL || family_unknown) &&
+                g_markers_loot_enabled) {
                 // LootDestroyable covers every smashable loot prop; label by
                 // prefab name — "Barrel_v2" is the scrap barrel, anything
                 // else gets the generic smash-box label.
                 known = barrel_look_from_object_name(object_name, look) ||
                         barrel_look_from_object_name(root_name, look);
-                if (!known) { look = kSmashBox; known = true; }
-            } else if (component_class == MARKER_CLASS_LOOT) {
-                if (!g_markers_loot_enabled) continue;
+                // Общая метка «ящик» — только для класса, о котором точно
+                // известно, что он дробимый: при неизвестном семействе иначе
+                // метку получил бы любой объект в реестре.
+                if (!known && component_class == MARKER_CLASS_BARREL) {
+                    look = kSmashBox; known = true;
+                }
+            }
+            if (!known && (component_class == MARKER_CLASS_LOOT || family_unknown) &&
+                g_markers_loot_enabled) {
                 known = loot_marker(component, object_name, root_name, look);
-            } else {
+            }
+            if (!known && (component_class == MARKER_CLASS_MINEABLE || family_unknown)) {
                 // The prefab name is asked first on purpose: animals that the
                 // EntityType enum does not know (wolf, rat, ...) are shipped
                 // with a borrowed entityType -- the wolf prefab says "Boar" --
