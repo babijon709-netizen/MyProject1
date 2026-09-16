@@ -6428,8 +6428,11 @@ void esp_farm_debug(int& nodes_cached, int& idle_reason) {
     // Печатаем только переходы — в установившемся состоянии журнал молчит.
     if (idle_reason != s_diag_farm_reason) {
         s_diag_farm_reason = idle_reason;
-        diag::logf("автофарм: причина простоя -> %d (%s)", idle_reason,
-                   diag::farm_reason_text(idle_reason));
+        // Болтанка причины (2<->5 и т.п.) на проблемном устройстве не должна
+        // печатать по строке на кадр: не чаще раза в 2 с.
+        if (diag::due(diag::kKeyFarmReason, 2))
+            diag::logf("автофарм: причина простоя -> %d (%s)", idle_reason,
+                       diag::farm_reason_text(idle_reason));
     }
 }
 

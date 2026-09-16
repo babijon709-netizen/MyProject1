@@ -358,7 +358,10 @@ static void start_attach_thread() {
                                    "игра не запущена или установлена под другим пакетом",
                                    TargetPackageA(), TargetPackageB());
                 } else {
-                    diag::logf("attach: найден процесс pid=%d (%s)", (int)pid, found_pkg);
+                    // Без троттлинга строка повторялась бы каждые 1.5 с, пока
+                    // игра грузит libil2cpp (десятки секунд) — не чаще 15 с.
+                    if (diag::due(diag::kKeyAttachFound, 15))
+                        diag::logf("attach: найден процесс pid=%d (%s)", (int)pid, found_pkg);
                     if (esp_init(pid)) {
                         g_target_pid = pid;
                         g_esp_attached = true;
@@ -380,6 +383,7 @@ static void start_attach_thread() {
                 }
             }
             diag::stats_tick();
+            diag::pump();   // единственный писатель файла журнала (кроме init)
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
     });

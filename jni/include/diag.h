@@ -9,13 +9,23 @@
 // (камера/игроки). Любое звено может отказать только у одного человека
 // (SELinux, права, 32-битная игра, другая версия клиента, урезанная прошивка),
 // и снаружи все эти случаи выглядели одинаково: меню есть, функций нет.
-// Журнал фиксирует каждое звено и пишет в файл рядом с конфигами —
-// пользователь просто присылает его целиком.
+// Журнал фиксирует каждое звено и пишет его шаг за шагом.
 //
 // Файл: «Загрузки» телефона (/storage/emulated/0/Download/diag.log); если
-// записать туда не вышло — diag.log рядом с конфигами (выбор виден в шапке
-// журнала). Переполненный файл переезжает в diag.log.old. Каждая строка
-// дублируется в logcat (тег xvcen.diag): adb logcat -s xvcen.diag.
+// запись туда не прошла (проверяется реальной записью, а не только fopen) —
+// рядом с конфигами (/storage/emulated/0/benzhack/), затем /data/local/tmp/.
+// Выбор места печатается в шапке журнала. Переполненный файл (400 КБ)
+// переезжает в diag.log.old.
+//
+// Почему запись асинхронная. Строки могут печататься из потока рендера
+// (причины простоя фарма, статусы ESP), а сброс на общее хранилище телефона —
+// это FUSE-обёртка с миллисекундными задержками: синхронная запись из кадра
+// прозрачно тормозит весь оверлей. Поэтому logf() только кладёт строку в
+// очередь и зеркалит её в logcat (быстрый кольцевой буфер ядра), а файл пишет
+// ОДИН поток — pump() из медленного потока привязки (раз в 1.5 с, одной
+// пачкой, с одним сбросом). Каждый открытый файл проверяется реальной записью
+// и контролем ошибок: если хранилище молча глотает строки, журнал переезжает
+// на следующее место, а в logcat остаётся строка с точной причиной.
 //
 // Как читать присланный файл — см. DIAGNOSTICS.md в корне репозитория.
 
@@ -29,6 +39,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <deque>
 #include <mutex>
 #include <string>
 
@@ -124,6 +135,7 @@ inline void note_read_fail(unsigned long long addr, int e) {
 // каждую попытку привязки, печатаются не чаще своего интервала.
 enum Key {
     kKeyAttachSearch = 0,  // процесс игры не найден
+    kKeyAttachFound,       // процесс найден, но привязка ещё не прошла
     kKeyAttachFail,        // привязка не удалась
     kKeyMapsDenied,        // /proc/<pid>/maps не открылся
     kKeyBaseMissing,       // libil2cpp.so нет в maps
@@ -134,6 +146,7 @@ enum Key {
     kKeyEspWatchdog,       // ESP долго не собирает кадр
     kKeyDay,               // «всегда день»: TOD не находится
     kKeyTouch,             // повтор статуса тач-инъекции
+    kKeyFarmReason,        // причина простоя автофарма (защита от болтанки)
     kKeyCount
 };
 
@@ -154,13 +167,34 @@ inline bool due(int key, unsigned period_sec) {
 
 // ============================ детали реализации =============================
 // Не пользуйтесь ими напрямую: это несущие конструкции журнала.
+//
+// Структура записи:
+//   logf()   — любой поток: форматирование, logcat, в очередь под мьютексом.
+//              НИКАКОГО файлового I/O — из потока рендера диск трогать нельзя.
+//   pump()   — только медленный поток привязки: забирает пачку из очереди и
+//              пишет её в файл одним appended-блоком с одним сбросом. Он же
+//              ротирует файл и переживает отказ места (цепочка запасных).
+//
+// Единственный владелец файла — pump() (init() успевает до старта потока
+// привязки), поэтому файловое состояние без собственных блокировок.
 
 constexpr unsigned long long kRotateBytes = 400ull * 1024ull;
+constexpr size_t           kQueueCap     = 800;  // строк; переполнение — с счётчиком
 
 inline std::mutex& impl_mutex() { static std::mutex m; return m; }
+inline std::deque<std::string>& impl_queue() { static std::deque<std::string> q; return q; }
+inline unsigned long long& impl_dropped() { static unsigned long long d = 0; return d; }
+
 inline std::string& impl_path() { static std::string s; return s; }
 inline FILE*& impl_file() { static FILE* f = nullptr; return f; }
 inline unsigned long long& impl_bytes() { static unsigned long long b = 0; return b; }
+
+// Кандидаты места файла, заполняются в init(): [0] «Загрузки», [1] каталог
+// конфигов, [2] /data/local/tmp (доступен root/shell, у таких сборок обычно
+// так и запущено). impl_target() — индекс текущего.
+inline std::string* impl_targets() { static std::string t[3]; return t; }
+inline int& impl_target_count() { static int c = 0; return c; }
+inline int& impl_target_index() { static int i = -1; return i; }
 
 inline unsigned long long impl_now_ms() {
     timespec ts{};
@@ -177,50 +211,114 @@ inline void impl_stamp(char* out, size_t cap, const char* msg) {
     snprintf(out, cap, "[%7.1f] %s", (double)(now - start_ms.load()) / 1000.0, msg);
 }
 
-inline bool impl_reopen_locked() {
-    if (impl_path().empty()) return false;
-    FILE* f = fopen(impl_path().c_str(), "a");
-    if (!f) return false;
-    if (impl_file()) fclose(impl_file());
-    impl_file() = f;
-    setvbuf(f, nullptr, _IOFBF, 8192);
+// Переполненный с прошлого раза файл — в .old, пишем с чистого.
+inline void impl_rotate_stale(const std::string& path) {
     struct stat st{};
-    impl_bytes() = (::stat(impl_path().c_str(), &st) == 0) ? (unsigned long long)st.st_size : 0;
-    return true;
+    if (::stat(path.c_str(), &st) == 0 && (unsigned long long)st.st_size > kRotateBytes) {
+        const std::string old = path + ".old";
+        ::unlink(old.c_str());
+        ::rename(path.c_str(), old.c_str());
+    }
 }
 
-// Дописать строку в файл (уже под мьютексом) и следить за размером:
-// затянувшийся сеанс переезжает в .old, чтобы файл не рос вечно.
-inline void impl_write_locked(const char* line) {
-    FILE* f = impl_file();
-    if (!f) return;
-    fputs(line, f);
-    fputc('\n', f);
-    fflush(f);
-    impl_bytes() += strlen(line) + 1;
-    if (impl_bytes() > kRotateBytes) {
+// Открыть файл кандидата и ПРОВЕРИТЬ РЕАЛЬНУЮ запись пробной строки: fopen
+// на FUSE-хранилище может пройти, а каждая запись молча утекать — именно так
+// выглядит «лога нигде нет». Возвращает открытый файл или nullptr.
+inline FILE* impl_probe_open(const std::string& path, const char* probe_line) {
+    FILE* f = fopen(path.c_str(), "a");
+    if (!f) return nullptr;
+    if (fputs(probe_line, f) < 0 || fputc('\n', f) == EOF ||
+        fflush(f) != 0 || ferror(f)) {
         fclose(f);
-        impl_file() = nullptr;
-        const std::string old = impl_path() + ".old";
-        ::unlink(old.c_str());
-        ::rename(impl_path().c_str(), old.c_str());
-        if (impl_reopen_locked()) {
-            char msg[128], line2[192];
-            snprintf(msg, sizeof(msg),
-                     "журнал переполнился (%llu КБ) — продолжаю здесь, прежний: diag.log.old",
-                     kRotateBytes / 1024ull);
-            impl_stamp(line2, sizeof(line2), msg);
-            fputs(line2, impl_file());
-            fputc('\n', impl_file());
-            fflush(impl_file());
-        }
+        return nullptr;
     }
+    setvbuf(f, nullptr, _IOFBF, 8192);
+    return f;
+}
+
+// Попробовать следующее место из цепочки. current_ok — начинать с текущего
+// (false после отказа записи в нём). Отрицательный индекс (до init/перед
+// оживлением) означает «с начала цепочки».
+inline bool impl_open_next(bool try_current) {
+    const int cur = impl_target_index();
+    int first = try_current ? cur : cur + 1;
+    if (first < 0) first = 0;
+    for (int i = first; i < impl_target_count(); ++i) {
+        impl_target_index() = i;
+        impl_path() = impl_targets()[i] + "diag.log";
+        impl_rotate_stale(impl_path());
+        char probe[192];
+        impl_stamp(probe, sizeof(probe), "=== журнал диагностики ===");
+        FILE* f = impl_probe_open(impl_path(), probe);
+        if (!f) continue;
+        if (impl_file()) fclose(impl_file());
+        impl_file() = f;
+        struct stat st{};
+        impl_bytes() = (::stat(impl_path().c_str(), &st) == 0)
+            ? (unsigned long long)st.st_size : 0;
+        impl_bytes() += strlen(probe) + 1;
+        return true;
+    }
+    impl_target_index() = impl_target_count();
+    return false;
+}
+
+// Дописать пачку строк: один блок, один сброс, контроль ошибок, ротация.
+// Вызывается только из pump() (см. комментарий к структуре записи).
+inline void impl_write_batch(std::deque<std::string>& batch, unsigned long long dropped) {
+    if (!impl_file()) return;
+
+    std::string block;
+    block.reserve(1024 + batch.size() * 96);
+    if (dropped) {
+        char head[128], line[192];
+        snprintf(head, sizeof(head),
+                 "(!) очередь переполнялась, пропущено %llu строк (зеркало — logcat)", dropped);
+        impl_stamp(line, sizeof(line), head);
+        block += line;
+        block += '\n';
+    }
+    for (const std::string& line : batch) {
+        block += line;
+        block += '\n';
+    }
+
+    if (fputs(block.c_str(), impl_file()) >= 0 && fflush(impl_file()) == 0 && !ferror(impl_file())) {
+        impl_bytes() += block.size();
+        // Затянувшийся сеанс: свежий файл важнее истории — текущий в .old.
+        if (impl_bytes() > kRotateBytes) {
+            fclose(impl_file());
+            impl_file() = nullptr;
+            const std::string old = impl_path() + ".old";
+            ::unlink(old.c_str());
+            if (::rename(impl_path().c_str(), old.c_str()) == 0 &&
+                (impl_file() = fopen(impl_path().c_str(), "a")) != nullptr) {
+                setvbuf(impl_file(), nullptr, _IOFBF, 8192);
+                char msg[160], line[224];
+                snprintf(msg, sizeof(msg),
+                         "журнал переполнился (%llu КБ) — продолжаю здесь, прежний: diag.log.old",
+                         kRotateBytes / 1024ull);
+                impl_stamp(line, sizeof(line), msg);
+                fputs(line, impl_file());
+                fputc('\n', impl_file());
+                fflush(impl_file());
+                impl_bytes() = strlen(line) + 1;
+            } else {
+                impl_path().clear();
+            }
+        }
+        return;
+    }
+
+    // Запись не прошла: хранилище отказываёт. Переезд на следующее место —
+    // остаток пачки пишется уже туда; годен ли он — покажет эта же запись.
+    impl_open_next(false);
 }
 
 // ============================ журнал ========================================
 
-// Строка в журнал: метка времени, текст, немедленный сброс на диск и зеркало
-// в logcat. Потокобезопасно.
+// Строка в журнал: метка времени, зеркало в logcat, очередь на запись.
+// НЕ блокируется на диске — файл пишет pump() из медленного потока.
 inline void logf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 inline void logf(const char* fmt, ...) {
     char msg[480];
@@ -235,7 +333,11 @@ inline void logf(const char* fmt, ...) {
     __android_log_print(ANDROID_LOG_INFO, "xvcen.diag", "%s", line);
 #endif
     std::lock_guard<std::mutex> lk(impl_mutex());
-    impl_write_locked(line);
+    if (impl_queue().size() >= kQueueCap) {
+        ++impl_dropped();
+        return;
+    }
+    impl_queue().emplace_back(line);
 }
 
 // Учёт сбоя записи памяти. Записи — единицы на кадр (x-ray, «всегда день»),
@@ -275,19 +377,6 @@ inline void buf_add(char* buf, size_t cap, int& n, const char* fmt, ...) {
     n = (written < 0) ? (int)cap : (n + written >= (int)cap ? (int)cap - 1 : n + written);
 }
 
-// Название архитектуры по e_machine из ELF-заголовка (для строки attach
-// в esp_init). Живёт здесь по той же причине, что и farm_reason_text: строки
-// журнала не переводятся, а все литералы game.cpp собираются для переводов.
-inline const char* elf_arch(unsigned machine) {
-    switch (machine) {
-        case 183: return "aarch64";   // EM_AARCH64
-        case 40:  return "arm";       // EM_ARM
-        case 62:  return "x86_64";    // EM_X86_64
-        case 3:   return "x86";       // EM_386
-        default:  return "прочая";
-    }
-}
-
 // Человеческие подписи причин простоя автофарма (значения g_farm_idle_reason
 // из game.cpp). Живут здесь, а не в game.cpp: строки журнала сознательно не
 // переводятся (их разбирают по русским подписям), а harvesting переводов
@@ -306,61 +395,51 @@ inline const char* farm_reason_text(int reason) {
         ? kTexts[reason] : "?";
 }
 
+// Название архитектуры по e_machine из ELF-заголовка (для строки attach
+// в esp_init). Живёт здесь по той же причине, что и farm_reason_text: строки
+// журнала не переводятся, а все литералы game.cpp собираются для переводов.
+inline const char* elf_arch(unsigned machine) {
+    switch (machine) {
+        case 183: return "aarch64";   // EM_AARCH64
+        case 40:  return "arm";       // EM_ARM
+        case 62:  return "x86_64";    // EM_X86_64
+        case 3:   return "x86";       // EM_386
+        default:  return "прочая";
+    }
+}
+
 // ============================ инициализация =================================
 
 // Открыть файл журнала и записать шапку окружения. dir — предпочтительный
 // каталог («Загрузки» телефона: файл оттуда пользователь найдёт и перешлёт
-// из любой файломенялки), fallback_dir — запасной (каталог конфигов), куда
-// пишем, если запись в загрузки у этого устройства не прошла. Оба пути —
-// с завершающим '/'. Повторный вызов игнорируется.
+// из любой файломенялки), fallback_dir — запасной (каталог конфигов).
+// Оба пути — с завершающим '/'. Повторный вызов игнорируется.
 inline void init(const char* dir, const char* fallback_dir = nullptr) {
     static std::atomic<bool> done{false};
     if (done.exchange(true)) return;
 
-    // Переполненный в прошлый раз файл — в .old, пишем с чистого.
-    auto rotate_if_big = [](const std::string& path) {
-        struct stat st{};
-        if (::stat(path.c_str(), &st) == 0 && (unsigned long long)st.st_size > kRotateBytes) {
-            const std::string old = path + ".old";
-            ::unlink(old.c_str());
-            ::rename(path.c_str(), old.c_str());
-        }
-    };
-
-    int primary_errno = 0;
-    if (dir && dir[0]) {
-        ::mkdir(dir, 0777);                       // «Загрузки» уже есть: EEXIST, игнорируем
-        impl_path() = std::string(dir) + "diag.log";
-        rotate_if_big(impl_path());
-        if (!impl_reopen_locked()) {
-            primary_errno = errno;
-            if (fallback_dir && fallback_dir[0]) {
-                ::mkdir(fallback_dir, 0777);
-                impl_path() = std::string(fallback_dir) + "diag.log";
-                rotate_if_big(impl_path());
-                if (!impl_reopen_locked()) impl_path().clear();
-            }
-        }
-    } else {
-        impl_path().clear();
+    // Цепочка мест: Загрузки -> каталог конфигов -> /data/local/tmp.
+    // Дубликаты пропускаем.
+    const char* const dirs[3] = { dir, fallback_dir, "/data/local/tmp/" };
+    for (const char* d : dirs) {
+        if (!d || !d[0]) continue;
+        bool dup = false;
+        for (int i = 0; i < impl_target_count(); ++i)
+            if (impl_targets()[i] == d) { dup = true; break; }
+        if (dup) continue;
+        impl_targets()[impl_target_count()++] = d;
     }
-    const bool file_ok = impl_file() != nullptr;
 
-logf("=== журнал диагностики, бинарник собран " __DATE__ " " __TIME__ " ===");
-    if (file_ok) {
-        logf("файл журнала: %s", impl_path().c_str());
-        if (primary_errno)
-            logf("загрузки НЕ ЗАПИСАЛИСЬ errno=%d (%s) — журнал здесь, рядом с конфигами",
-                 primary_errno, err_name(primary_errno));
-    } else {
-        logf("файл журнала НЕ ОТКРЫЛСЯ (%s) errno=%d (%s) — журнал будет только в logcat; "
-             "проверь права на запись во внешнее хранилище",
-             primary_errno ? "ни загрузки, ни каталог конфигов" : impl_path().c_str(),
-             primary_errno ? primary_errno : errno, err_name(errno));
+    logf("=== журнал диагностики, бинарник собран " __DATE__ " " __TIME__ " ===");
+    if (!impl_open_next(true)) {
+        logf("файл журнала НЕ ОТКРЫЛСЯ ни в одном месте (Загрузки, каталог конфигов, "
+             "/data/local/tmp) — журнал будет только в logcat (adb logcat -s xvcen.diag); "
+             "причина по errno была в каждой попытке");
+        return;
     }
-logf("легенда: чтений 0 ок при живой привязке — чужая память не читается ВООБЩЕ "
-         "(ни одна функция не заработает); EPERM — запрет (SELinux/права); "
-         "EFAULT — адреса не те (не та версия игры под оффсеты)");
+    logf("файл журнала: %s (запись проверена)", impl_path().c_str());
+    if (impl_target_index() > 0)
+        logf("«Загрузки» не записались (errno был при попытке) — журнал в запасном месте");
 
     // ---- окружение устройства: без него «один пользователь» не отличить ----
 #ifdef DIAG_HAS_PROPERTIES
@@ -403,12 +482,62 @@ logf("легенда: чтений 0 ок при живой привязке —
     strftime(tmbuf, sizeof(tmbuf), "%Y-%m-%d %H:%M:%S", localtime(&wall));
     logf("запуск: %s, pid=%d uid=%d%s", tmbuf, (int)getpid(), (int)getuid(),
          getuid() == 0 ? " (root)" : "");
+    logf("легенда: чтений 0 ок при живой привязке — чужая память не читается ВООБЩЕ "
+         "(ни одна функция не заработает); EPERM — запрет (SELinux/права); "
+         "EFAULT — адреса не те (не та версия игры под оффсеты)");
+
+    // Шапка должна дойти до диска сразу: дальше впервые пишет pump() из
+    // потока привязки, а сейчас мы ещё однопоточны.
+    std::deque<std::string> batch;
+    {
+        std::lock_guard<std::mutex> lk(impl_mutex());
+        batch.swap(impl_queue());
+    }
+    impl_write_batch(batch, 0);
+}
+
+// ============================ запись очереди ================================
+
+// Вынести очередь в файл. Вызывать ТОЛЬКО из медленного потока (поток
+// привязки): это единственный писатель файла после init().
+inline void pump() {
+    std::deque<std::string> batch;
+    unsigned long long dropped = 0;
+    {
+        std::lock_guard<std::mutex> lk(impl_mutex());
+        batch.swap(impl_queue());
+        dropped = impl_dropped();
+        impl_dropped() = 0;
+    }
+    if (!impl_file()) {
+        // Места нет (или все от отказали): строки уже ушли в logcat. Раз в
+        // минуту тихо пробуем всю цепочку заново — хранилище могло
+        // смонтироваться, права могли появиться.
+        batch.clear();
+        static std::atomic<unsigned long long> next_try_ms{0};
+        const unsigned long long now = impl_now_ms();
+        if (now < next_try_ms.load(std::memory_order_relaxed)) return;
+        next_try_ms.store(now + 60000ull, std::memory_order_relaxed);
+        impl_target_index() = -1;
+        if (impl_open_next(true)) {
+            std::deque<std::string> one;
+            char msg[192], line[256];
+            snprintf(msg, sizeof(msg), "журнал: место стало доступно, пишу в %s "
+                     "(прежние строки — только в logcat)", impl_path().c_str());
+            impl_stamp(line, sizeof(line), msg);
+            one.emplace_back(line);
+            impl_write_batch(one, 0);
+        }
+        return;
+    }
+    if (batch.empty()) return;
+    impl_write_batch(batch, dropped);
 }
 
 // ============================ срез счётчиков ================================
-// Вызывается из медленного потока (поток привязки, каждые 1.5 с); сам печатает
-// не чаще раза в kStatsPeriodSec и только если счётчики двигались.
-// В покое журнал молчит, поэтому каждая его строка — событие.
+// Вызывается из медленного потока (поток привязки); печатает не чаще раза в
+// kStatsPeriodSec и только если счётчики двигались. В покое журнал молчит,
+// поэтому каждая его строка — событие.
 constexpr unsigned kStatsPeriodSec = 10;
 
 inline void stats_tick() {
