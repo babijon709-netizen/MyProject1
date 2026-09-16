@@ -1,14 +1,27 @@
+// Оффсеты БЕТА-версии игры. Файл собран tools/offsets/beta_offsets.py — правь
+// скрипт и дампы, а не здесь.
+//
+// Источник: архива dump_beta.7z нет, дата сборки файла 16.09.2026.
+// Эталон, от которого считались отличия: релизный dump.7z и jni/src/game_offsets.h.
+// Отличий от релиза: 0 из 188 объявленных констант
+// (в карте оффсетов 178 записей).
+// Взято из релиза как есть: 38 констант раскладки IL2CPP/Unity
+// (из дампа игры они не выводятся — об этом ниже) и 3 RVA.
+// Файл НЕ собран из дампа беты: значения совпадают с релизом, в меню бета не предлагается (go::BetaAvailable() == false).
+//
+// Как пользоваться: выбор версии — в меню клиента («Версия игры», вкладка
+// «Опции») и на стартовом экране; переключатель — go::SelectBuild() в
+// game_offsets_active.h, он подставляет значения из этого файла. Пока
+// kFromDump == false, бета в меню не предлагается.
+
 #pragma once
 #include <cstdint>
 
-// ВНИМАНИЕ: это оффсеты РЕЛИЗНОЙ версии игры — эталон и источник значений для
-// переключателя версий. Бета-версия живёт отдельным файлом
-// (game_offsets_beta.h, собирается tools/offsets/beta_offsets.py из
-// dump_beta.7z), а код читает память через активный набор
-// (game_offsets_active.h, выбранная версия — go::SelectBuild). Значения здесь
-// правит update_offsets.py; файл беты он не трогает.
 
-namespace game_offsets {
+namespace game_offsets_beta {
+inline constexpr bool kFromDump = false;
+inline constexpr const char* kSource = "архива dump_beta.7z нет";
+
 
 // NOTE: every obfuscated class/field name quoted in the comments below is
 // valid only for the dump it was read from - the obfuscator re-rolls them on
@@ -38,7 +51,7 @@ inline constexpr std::uint64_t CAMERA_PROJ_DIRTY        = 0x500; // byte, set wh
 inline constexpr std::uint64_t MANAGED_CACHED_PTR = 0x10;
 
 inline constexpr float PLAYER_HEIGHT          = 1.8F;
-inline constexpr float PLAYER_BOX_WIDTH_RATIO = 0.40F;
+inline constexpr float PLAYER_BOX_WIDTH_RATIO = 0.4F;
 inline constexpr float MIN_PLAYER_DISTANCE    = 0.0F;
 inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 
@@ -143,8 +156,8 @@ inline constexpr std::uint64_t PLAYERWEAPON_STATE          = 0x120;
 inline constexpr std::uint64_t PLAYERWEAPON_PLAYER_BACKREF = 0x138;
 // Oxide.WeaponPiece (value type): Enabled 0x0, Number 0x2, Skin 0x4,
 // SkinLevel 0x6, Loaded 0x7, Mods 0x8. Number is the item id of the weapon.
-inline constexpr std::uint64_t WEAPONPIECE_ENABLED = 0x00;
-inline constexpr std::uint64_t WEAPONPIECE_NUMBER  = 0x02;
+inline constexpr std::uint64_t WEAPONPIECE_ENABLED = 0x0;
+inline constexpr std::uint64_t WEAPONPIECE_NUMBER  = 0x2;
 // The third-person weapon view (class sR, was Mo; interface sY, was Ms).
 // Found after the rename by field shape, not by name - see tools/offsets:
 //   il2cpp_layout.py find "WeaponBase_o*" "Oxide_WeaponPiece_o" "UnityEngine_Transform_o*"
@@ -239,8 +252,8 @@ inline constexpr std::uint64_t RAYCASTHIT_DISTANCE           = 0x1C;  // m_Dista
 // Тот же struct UnityEngine.RaycastHit (dump.cs 62a8534, строка 642061):
 //   m_Point 0x0 (Vector3), m_Normal 0xC (Vector3), m_FaceID 0x18,
 //   m_Distance 0x1C, m_UV 0x20, m_Collider 0x28  — размер 0x2C.
-inline constexpr std::uint64_t RAYCASTHIT_POINT              = 0x00;  // куда луч упёрся (мир)
-inline constexpr std::uint64_t RAYCASTHIT_NORMAL             = 0x0C;  // нормаль поверхности там
+inline constexpr std::uint64_t RAYCASTHIT_POINT              = 0x0;  // куда луч упёрся (мир)
+inline constexpr std::uint64_t RAYCASTHIT_NORMAL             = 0xC;  // нормаль поверхности там
 // m_Collider — В КАКОМ коллайдере луч остановился. Нужен, чтобы отличить «луч
 // упёрся в сам узел добычи» от «узел перекрыт чужой геометрией»: у камня точка
 // прицела лежит внутри породы, поэтому луч всегда доходит до неё раньше и без
@@ -291,7 +304,7 @@ inline constexpr std::uint64_t TRANSFORM_CHILDREN_ARRAY   = 0x48; // Transform**
 inline constexpr std::uint64_t TRANSFORM_CHILD_COUNT      = 0x58; // int32
 inline constexpr std::uint64_t COMPONENT_GAMEOBJECT       = 0x20; // native Component -> native GameObject*
 inline constexpr std::uint64_t GAMEOBJECT_COMPONENT_ARRAY = 0x20; // native GameObject -> ComponentPair*
-inline constexpr std::uint64_t COMPONENT_PAIR_PTR         = 0x08; // pair[0] + 8 == Transform* (first component)
+inline constexpr std::uint64_t COMPONENT_PAIR_PTR         = 0x8; // pair[0] + 8 == Transform* (first component)
 // GameObject name is a 32-byte core::string (SSO): flags byte at +0x1F,
 // heap pointer at +0x0 when (flags >= 0x40), inline chars otherwise.
 // The exact field offset inside GameObject is discovered at runtime

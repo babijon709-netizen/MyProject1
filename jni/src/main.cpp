@@ -1,6 +1,6 @@
 #include "main.h"
 #include "game.h"
-#include "game_offsets.h"   // PLAYER_BOX_WIDTH_RATIO (box proportions)
+#include "game_offsets_active.h"  // активные оффсеты: релиз или бета (go::SelectBuild)
 #include <cmath>
 #include <atomic>
 #include <chrono>
@@ -282,12 +282,29 @@ static std::mt19937& GetRNG() {
 std::atomic<bool> main_thread_flag{true};
 std::atomic<bool> g_frame_done{true};
 
-#define TARGET_PACKAGE "com.catsbit.oxidesurvivalisland"
+// Пакеты клиентов (релиз/бета). Бета ставится отдельным APK и обычно
+// отличается суффиксом; если у тебя он другой — правь строку здесь, больше
+// нигде это не зашито. Порядок поиска задаёт приоритет, а не ограничение:
+// сначала пакет выбранной версии, затем второй (см. поток привязки ниже).
+static const char* const kPackageRelease = "com.catsbit.oxidesurvivalisland";
+static const char* const kPackageBeta    = "com.catsbit.oxidesurvivalisland.beta";
+
+static const char* TargetPackageA() {
+    return (go::CurrentBuild() == go::Build::Beta) ? kPackageBeta : kPackageRelease;
+}
+static const char* TargetPackageB() {
+    return (go::CurrentBuild() == go::Build::Beta) ? kPackageRelease : kPackageBeta;
+}
 
 static pid_t g_target_pid = -1;
 static bool  g_esp_attached = false;
 static std::thread g_attach_thread;
 static std::atomic<bool> g_attach_running{false};
+
+// Стартовый экран выбора версии игры (релиз или бета). Пока он открыт, меню не
+// рисуется, а аим и автофарм не трогают камеру — иначе бот водил бы палец прямо
+// под пальцем пользователя, пока тот выбирает. См. RenderMenu.
+static bool g_buildPrompt = true;
 
 static pid_t find_pid(const char* pkg) {
     DIR* directory = opendir("/proc");
@@ -319,13 +336,17 @@ static void start_attach_thread() {
     g_attach_thread = std::thread([]() {
         while (g_attach_running.load()) {
             if (!g_esp_attached) {
-                pid_t pid = find_pid(TARGET_PACKAGE);
+                // Сначала пакет выбранной версии, затем второй: так клиент
+                // находит и бету под релизным пакетом, и наоборот.
+                pid_t pid = find_pid(TargetPackageA());
+                if (pid <= 0) pid = find_pid(TargetPackageB());
                 if (pid > 0 && esp_init(pid)) {
                     g_target_pid = pid;
                     g_esp_attached = true;
                 }
             } else {
-                pid_t current = find_pid(TARGET_PACKAGE);
+                pid_t current = find_pid(TargetPackageA());
+                if (current <= 0) current = find_pid(TargetPackageB());
                 if (current != g_target_pid) {
                     esp_reset();
                     g_esp_attached = false;
@@ -1035,6 +1056,51 @@ static void RestoreLang() {
     std::string v;
     std::getline(f, v);
     if (!v.empty() && v[0] == 'e') lang::set(lang::LANG_EN);
+}
+
+// ---- Версия игры (релиз или бета) ------------------------------------------
+// Оффсеты релиза и беты разные (jni/src/game_offsets_beta.h), и версия
+// выбирается в меню. Выбор хранится рядом с конфигами отдельным файлом, как
+// язык: он нужен ещё до загрузки любого конфига — от него зависит, по какой
+// раскладке читать память игры и к какому пакету подключаться.
+//
+static std::string CfgBuildPath() {
+    return std::string(kCfgDir) + ".build";
+}
+
+static void RememberBuild() {
+    mkdir(kCfgDir, 0777);
+    std::ofstream f(CfgBuildPath(), std::ios::trunc);
+    if (f) f << (go::CurrentBuild() == go::Build::Beta ? "beta" : "release");
+}
+
+static void RestoreBuild() {
+    std::ifstream f(CfgBuildPath());
+    if (!f) return;
+    std::string v;
+    std::getline(f, v);
+    if (!v.empty() && v[0] == 'b') go::SelectBuild(go::Build::Beta);
+}
+
+// Применить выбор версии: подставить оффсеты выбранного клиента и, если версия
+// реально сменилась, переподключиться. Всё, что было вычитано по прежней
+// раскладке (классы, инстансы, кеши игроков), после смены недействительно —
+// поэтому esp_reset(), а поток привязки подключится заново сам.
+static void ApplyBuildChoice(go::Build b) {
+    if (b == go::Build::Beta && !go::BetaAvailable()) b = go::Build::Release;
+    const bool changed = (go::CurrentBuild() != b);
+    go::SelectBuild(b);
+    RememberBuild();
+    if (changed) {
+        esp_reset();
+        g_esp_attached = false;
+        g_target_pid = -1;
+        char _b[160];
+        snprintf(_b, sizeof(_b), "%s|%s", XS("Версия игры"),
+                 b == go::Build::Beta ? XS("Бета") : XS("Релиз"));
+        ShowToast(_b);
+    }
+    PlaySound(SND_CLICK);
 }
 
 static void XorBuf(uint8_t* buf, size_t sz) {
@@ -3221,6 +3287,69 @@ float TabContent(int tab, float dt, float cW) {
             ImGui::Dummy({avW, 0.f});
         }
 
+        // ---- Версия игры: релиз или бета ------------------------------------
+        // Та же пара карточек, что на стартовом экране. От версии зависят и
+        // оффсеты (game_offsets_beta.h), и пакет клиента, к которому цепляемся,
+        // поэтому переключение сразу переподключается (см. ApplyBuildChoice).
+        SHdr(XS("Версия игры"));
+        {
+            auto* dl  = ImGui::GetWindowDrawList();
+            auto* fn  = ImGui::GetFont();
+            const float avW2 = ImGui::GetContentRegionAvail().x;
+            const float inset = Layout::Inset;
+            const float rowH  = Layout::RowH;
+            auto  pos = ImGui::GetCursorScreenPos();
+            const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+            const bool betaOk = go::BetaAvailable();
+
+            const char* const names[2] = { XS("Релиз"), XS("Бета") };
+            const float gap = 10.f;
+            const float halfW = (avW2 - inset * 2.f - gap) * 0.5f;
+
+            for (int bi = 0; bi < 2; ++bi) {
+                const bool beta = (bi == 1);
+                const bool enabled = (!beta || betaOk);
+                const bool sel = (go::CurrentBuild() == (beta ? go::Build::Beta : go::Build::Release));
+                const float x0 = pos.x + inset + bi * (halfW + gap);
+                const float x1 = x0 + halfW;
+
+                dl->AddRectFilled({x0, pos.y}, {x1, pos.y + rowH}, C::U(C::Card()), R::Card);
+                if (sel) {
+                    dl->AddRectFilled({x0, pos.y}, {x1, pos.y + rowH},
+                        C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), R::Card);
+                    dl->AddRect({x0, pos.y}, {x1, pos.y + rowH}, C::UA(C::Acc(), 0.8f), R::Card, 0, 2.f);
+                } else if (g_state.ui_show_sep) {
+                    dl->AddRect({x0, pos.y}, {x1, pos.y + rowH}, C::U(C::Sep()), R::Card, 0, 1.2f);
+                }
+
+                auto lsz = fn->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0, names[bi]);
+                dl->AddText(fn, ImGui::GetFontSize(),
+                    {x0 + (halfW - lsz.x) * 0.5f, pos.y + (rowH - lsz.y) * 0.5f},
+                    C::UA(sel ? C::Acc() : (enabled ? C::Txt() : C::Dim()), enabled ? 1.f : 0.6f),
+                    names[bi]);
+
+                char bid[16]; snprintf(bid, sizeof(bid), "##build_tab%d", bi);
+                ImGui::SetCursorScreenPos({x0, pos.y});
+                ImGui::InvisibleButton(bid, {halfW, rowH});
+                if (enabled && WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
+                    ApplyBuildChoice(beta ? go::Build::Beta : go::Build::Release);
+                    g_input.touchConsumed = true;
+                }
+            }
+            ImGui::SetCursorScreenPos({pos.x, pos.y + rowH});
+            ImGui::Dummy({avW2, 0.f});
+
+            // Строка-источник: из какого дампа собраны оффсеты беты. Без неё
+            // непонятно, чего ждать после переключения.
+            const char* src = betaOk ? go::BetaSource() : XS("Бета недоступна: файл оффсетов не собран");
+            auto ssz = fn->CalcTextSizeA(ImGui::GetFontSize() * 0.82f, FLT_MAX, 0, src);
+            dl->AddText(fn, ImGui::GetFontSize() * 0.82f,
+                        {pos.x + inset + (avW2 - inset * 2.f - ssz.x) * 0.5f, pos.y + rowH + 6.f},
+                        C::UA(C::Dim(), 0.9f), src);
+            ImGui::SetCursorScreenPos({pos.x, pos.y + rowH + 6.f + ssz.y + 6.f});
+            ImGui::Dummy({avW2, 0.f});
+        }
+
         SHdr(XS("Интерфейс"));
         CardBg(Layout::RowH * 1);
         if (ToggleRow("##ud2", XS("Тёмная тема"), &g_state.ui_dark_mode, g_state.a_ui_dark, true, true))
@@ -3420,7 +3549,8 @@ static void UpdateAim(float dt) {
     const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     // Во время калибровки зон (тапом по экрану) аим отпускает палец и ничего не
     // трогает: иначе он водил бы камеру прямо под пальцем пользователя.
-    bool active = g_state.aim_touch && g_esp_attached && !menuOpen && g_calibMode == 0;
+    bool active = g_state.aim_touch && g_esp_attached && !menuOpen &&
+                  g_calibMode == 0 && !g_buildPrompt;
 
     // "Только с прицелом": only steer while the local player is ADS.
     if (active && g_state.aim_scope_only && !esp_local_player_is_aiming())
@@ -4076,7 +4206,7 @@ static void UpdateFarmInner(float dt) {
     // зон — тоже пауза. А вот цель читаем всегда: иначе строка статуса в окне
     // автофарма показывала бы «простой» ровно тогда, когда на неё смотрят
     // (само это окно и ставит бота на паузу).
-    const bool driving = !menuBlocked && !s_fingerDown && g_calibMode == 0;
+    const bool driving = !menuBlocked && !s_fingerDown && g_calibMode == 0 && !g_buildPrompt;
 
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;
@@ -4979,6 +5109,112 @@ void RenderMenu() {
     DrawWatermark(dt);
     DrawToast(dt);
 
+    // ---- Выбор версии игры (стартовый экран) --------------------------------
+    // Показывается при каждом запуске клиента: от версии зависят и оффсеты, и
+    // пакет, к которому подключаться. Пока выбор не сделан, меню не рисуется,
+    // аим и автофарм стоят (g_buildPrompt). Поменять позже можно в «Опциях».
+    if (g_buildPrompt) {
+        float dw = 0.f, dh = 0.f;
+        VisibleScreen(dw, dh);
+        if (dw < 100.f || dh < 100.f) return;   // размер экрана ещё неизвестен
+
+        auto* fg = ImGui::GetForegroundDrawList();
+        auto* fn = ImGui::GetFont();
+        const float fs = ImGui::GetFontSize();
+        const bool betaOk = go::BetaAvailable();
+
+        fg->AddRectFilled({0, 0}, {dw, dh}, IM_COL32(0, 0, 0, 185));
+        fg->AddRect({4.f, 4.f}, {dw - 4.f, dh - 4.f}, C::UA(C::Acc(), 0.9f), 10.f, 0, 3.f);
+
+        const char* title = XS("Версия игры");
+        const char* sub   = XS("Оффсеты релиза и беты разные — выбери, к какому клиенту подключаться.");
+        float tfs = fs * 1.7f;
+        auto tsz = fn->CalcTextSizeA(tfs, FLT_MAX, 0, title);
+        auto ssz = fn->CalcTextSizeA(fs * 0.92f, FLT_MAX, 0, sub);
+        float ty = dh * 0.20f;
+        fg->AddText(fn, tfs, {(dw - tsz.x) * 0.5f, ty}, C::U(C::Txt()), title);
+        fg->AddText(fn, fs * 0.92f, {(dw - ssz.x) * 0.5f, ty + tsz.y + 10.f},
+                    C::U(C::Dim()), sub);
+
+        // Две карточки: релиз и бета. Тап применяет выбор и закрывает экран.
+        const float cardW = ImMin(dw * 0.40f, 460.f);
+        const float cardH = ImMin(dh * 0.26f, 200.f);
+        const float gap   = ImMax(18.f, dw * 0.02f);
+        const float cx0   = (dw - (cardW * 2.f + gap)) * 0.5f;
+        const float cy0   = dh * 0.42f;
+        for (int i = 0; i < 2; ++i) {
+            const bool beta = (i == 1);
+            const bool enabled = (!beta || betaOk);
+            const bool sel = (go::CurrentBuild() == (beta ? go::Build::Beta : go::Build::Release));
+            const float x0 = cx0 + i * (cardW + gap), y0 = cy0;
+
+            fg->AddRectFilled({x0, y0}, {x0 + cardW, y0 + cardH}, C::U(C::Card()), R::Card);
+            if (sel)
+                fg->AddRectFilled({x0, y0}, {x0 + cardW, y0 + cardH},
+                    C::UA(C::Acc(), g_darkTheme ? 0.18f : 0.10f), R::Card);
+            fg->AddRect({x0, y0}, {x0 + cardW, y0 + cardH},
+                        sel ? C::UA(C::Acc(), 0.9f) : C::U(C::Sep()), R::Card, 0, sel ? 2.5f : 1.2f);
+
+            const char* name = beta ? XS("Бета") : XS("Релиз");
+            float nfs = fs * 1.5f;
+            auto nsz = fn->CalcTextSizeA(nfs, FLT_MAX, 0, name);
+            fg->AddText(fn, nfs, {x0 + (cardW - nsz.x) * 0.5f, y0 + cardH * 0.22f},
+                        C::UA(enabled ? (sel ? C::Acc() : C::Txt()) : C::Dim(), enabled ? 1.f : 0.6f), name);
+
+            // Подпись под названием: откуда взяты оффсеты этой версии.
+            const char* line = beta ? (betaOk ? go::BetaSource()
+                                              : XS("Бета недоступна: файл оффсетов не собран"))
+                                    : XS("сборка релиза");
+            char wrapped[2][160] = {};
+            // В две строки, по словам: у беты в источнике есть и дамп, и отпечаток.
+            {
+                const char* p = line;
+                int row = 0;
+                while (p && *p && row < 2) {
+                    size_t left = strlen(p);
+                    size_t take = left;
+                    char probe[160];
+                    while (take > 8) {
+                        snprintf(probe, sizeof(probe), "%.*s", (int)take, p);
+                        if (fn->CalcTextSizeA(fs * 0.82f, FLT_MAX, 0, probe).x <= cardW - 32.f) break;
+                        take = (size_t)(take * 0.85f);
+                    }
+                    if (take < left) {   // обрезаем по последнему пробелу
+                        size_t cut = take;
+                        while (cut > 0 && p[cut] != ' ') --cut;
+                        if (cut > 8) take = cut;
+                    }
+                    snprintf(wrapped[row], sizeof(wrapped[row]), "%.*s", (int)take, p);
+                    p += take;
+                    while (*p == ' ') ++p;
+                    ++row;
+                }
+            }
+            for (int r = 0; r < 2 && wrapped[r][0]; ++r) {
+                auto lsz = fn->CalcTextSizeA(fs * 0.82f, FLT_MAX, 0, wrapped[r]);
+                fg->AddText(fn, fs * 0.82f,
+                            {x0 + (cardW - lsz.x) * 0.5f, y0 + cardH * 0.52f + r * (fs * 1.1f)},
+                            C::UA(C::Dim(), enabled ? 1.f : 0.6f), wrapped[r]);
+            }
+
+            char id[24];
+            snprintf(id, sizeof(id), "##build%d", i);
+            ImGui::SetCursorScreenPos({x0, y0});
+            ImGui::InvisibleButton(id, {cardW, cardH});
+            if (enabled && WasTappedHere()) {
+                ApplyBuildChoice(beta ? go::Build::Beta : go::Build::Release);
+                g_buildPrompt = false;
+            }
+        }
+
+        const char* hint = XS("Позже можно поменять в «Опциях».");
+        auto hsz = fn->CalcTextSizeA(fs * 0.86f, FLT_MAX, 0, hint);
+        fg->AddText(fn, fs * 0.86f, {(dw - hsz.x) * 0.5f, cy0 + cardH + 24.f},
+                    C::UA(C::Dim(), 0.9f), hint);
+
+        return;   // пока выбираем версию, меню не рисуем
+    }
+
     // ---- Режим калибровки зон вводом с экрана ------------------------------
     // Меню спрятано; первый тап по экрану записывает позицию (в долях экрана):
     // зону джойстика/огня автофарма или точку, из которой аимбот водит палец.
@@ -5637,6 +5873,7 @@ int main(int argc, char* argv[]) {
     LoadTabIcons();
     ApplyTheme();
     RestoreLang();          // язык из прошлого запуска (конфиг ниже может его переписать)
+    RestoreBuild();         // версия игры из прошлого запуска — до привязки к процессу
     CfgScanDir();
     ConfigLoadLast();
     ApplyTheme();

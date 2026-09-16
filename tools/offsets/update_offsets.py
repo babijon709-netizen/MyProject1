@@ -483,7 +483,9 @@ def main():
               f'{"" if not changes else " и карту"}'
               f'{"" if changes else " (карта: имена полей освежены)"}'
               f'{f" (карта: имён полей обновлено {renamed})" if changes and renamed else ""}. '
-              f'Проверь сборку и добавь строку в OFFSETS_UPDATE.md.')
+              f'Проверь сборку и добавь строку в OFFSETS_UPDATE.md.\n'
+              f'Если у игры есть бета-версия — пересобери её файл оффсетов от нового '
+              f'дампа релиза: python3 tools/offsets/beta_offsets.py --apply')
     elif changes:
         print('\nчтобы записать: тот же вызов с --apply')
     return 1 if warnings else 0

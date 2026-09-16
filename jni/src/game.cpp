@@ -1,5 +1,5 @@
 #include "game.h"
-#include "game_offsets.h"
+#include "game_offsets_active.h"   // активные оффсеты: релиз или бета (go::SelectBuild)
 #include "Vector.h"
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
 
@@ -37,7 +37,10 @@ static ssize_t remote_vm_writev(pid_t pid, const struct iovec* local_iov, unsign
     return n;
 }
 
-using namespace game_offsets;
+// Оффсеты — из активного набора: значения переключаются между релизом и
+// бетой в рантайме (см. game_offsets_active.h), имена те же, что были в
+// game_offsets, поэтому весь код чтения памяти ниже не изменился.
+using namespace go_active;
 
 static pid_t     g_pid         = -1;
 static uint64_t  g_il2cpp_base = 0;
@@ -203,8 +206,10 @@ static void always_day_tick() {
     // класс и находится в новом дампе (grep 'TOD_CycleParameters_o\* Cycle').
     if (!g_day_tod) {
         static uint64_t s_scan_rva = TOD_SCAN_RVA_BEGIN;
-        constexpr uint64_t kScanEnd = TOD_SCAN_RVA_END;
-        constexpr uint64_t kCycleOff = TOD_SKY_CYCLE;
+        // const, а не constexpr: значения приходят из активного набора
+        // оффсетов (релиз/бета), а он переключается в рантайме.
+        const uint64_t kScanEnd = TOD_SCAN_RVA_END;
+        const uint64_t kCycleOff = TOD_SKY_CYCLE;
         uint64_t slots[128];
         if (rd_buf(g_il2cpp_base + s_scan_rva, slots, sizeof(slots))) {
             for (int i = 0; i < 128 && !g_day_tod; ++i) {
