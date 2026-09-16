@@ -3585,6 +3585,7 @@ struct AimTarget {
     float sx = 0.f, sy = 0.f;       // screen position (px)
     float dist = 0.f;               // pixel distance from crosshair
     float world_dist = 0.f;
+    int   bone = -1;                // слот точки прицела (0 голова, 1 шея, 2 грудь)
 };
 
 static void AimReleaseFinger(bool& fingerDown) {
@@ -3709,6 +3710,7 @@ static void UpdateAim(float dt) {
     // шаге — ведение становилось в несколько раз медленнее.
     static bool  s_camMovedPrev = false;
     static unsigned long long s_lastId = 0;        // sticky target
+    static int s_lastBone = -1;                    // слот точки прицела прошлого такта
     static int   s_lostFrames = 0;
     static int   s_holdFrames = 0;
 
@@ -3727,7 +3729,8 @@ static void UpdateAim(float dt) {
 
     if (!active) {
         AimReleaseFinger(s_fingerDown);
-        s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
+        s_haveLast = false; s_lastId = 0; s_lastBone = -1;
+        s_lostFrames = 0; s_holdFrames = 0;
         s_trackYaw.reset(); s_trackPitch.reset();
         return;
     }
@@ -3768,11 +3771,22 @@ static void UpdateAim(float dt) {
         // Slots: 0 head, 1 neck, 2 chest. Never fall back below the chest.
         static const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 1, 0}};
         int usedBone = -1;
-        for (int k = 0; k < 3; ++k) {
-            int bi = order[wantBone][k];
-            if (b.aim_valid[bi]) { usedBone = bi; break; }
+        // Прилипчивость точки прицела. Слоты головы, шеи и груди разнесены на
+        // 0.2-0.3 м (это до полуградуса на дистанции), а читаются они не каждый
+        // кадр: раньше слот перескакивал между ними из кадра в кадр, и прицел
+        // мелко трясло в стороны. Пока цель та же и слот читается — держим его;
+        // цепочка запасных слотов работает заново только когда он пропал.
+        if (b.id != 0 && b.id == s_lastId && s_lastBone >= 0 && s_lastBone < 3 &&
+            b.aim_valid[s_lastBone]) {
+            usedBone = s_lastBone;
+        } else {
+            for (int k = 0; k < 3; ++k) {
+                int bi = order[wantBone][k];
+                if (b.aim_valid[bi]) { usedBone = bi; break; }
+            }
         }
         if (usedBone >= 0) {
+            t.bone = usedBone;
             t.yaw = b.aim_yaw[usedBone];  t.pitch = b.aim_pitch[usedBone];
             t.sx  = b.aim_pts[usedBone][0]; t.sy = b.aim_pts[usedBone][1];
             t.valid = std::isfinite(t.yaw) && std::isfinite(t.pitch) &&
@@ -3828,7 +3842,7 @@ static void UpdateAim(float dt) {
         // register as a tap (tap-to-shoot in some layouts) or reset momentum.
         if (++s_lostFrames > 6) {
             AimReleaseFinger(s_fingerDown);
-            s_haveLast = false; s_lastId = 0;
+            s_haveLast = false; s_lastId = 0; s_lastBone = -1;
             s_trackYaw.reset(); s_trackPitch.reset();
         }
         return;
@@ -3886,7 +3900,7 @@ static void UpdateAim(float dt) {
         if (haveC) { s_prevCamYawT = cy; s_prevCamPitchT = cp; s_havePrevTgt = true; }
         else s_havePrevTgt = false;
     }
-    s_lastId = best.id;
+    s_lastId = best.id; s_lastBone = best.bone;
 
     // ---- оценка коэффициента по реакции прицела ----
     // Скармливаем тот остаток, по которому контроллер и будет считать шаг (после
@@ -4096,9 +4110,16 @@ static void UpdateAim(float dt) {
         float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
         if (d < deadBase) deadBase = d;
     }
+    // Пол мёртвой зоны — ДВА кванта ввода, а не половина. Точка прицела (кость
+    // головы) читается каждый кадр чуть по-разному: дрожь в 1-2 кванта — это
+    // нормальный шум замера, а не движение цели. С полом в половину кванта
+    // контроллер выходил за мёртвую зону на этот шум и гнал палец то влево, то
+    // вправо с частотой кадров («трясёт в разные стороны»). Стенд с шумом замера
+    // +-0.25 град: реверсов пальца 12 -> 2 при мёртвой зоне 0.2 град (два
+    // кванта) и 6 при 0.15.
     float deadYaw = deadBase, deadPitch = deadBase;
-    if (gainKnownYaw   && deadYaw   < qYaw   * 0.55f) deadYaw   = qYaw   * 0.55f;
-    if (gainKnownPitch && deadPitch < qPitch * 0.55f) deadPitch = qPitch * 0.55f;
+    if (gainKnownYaw   && deadYaw   < qYaw   * 2.0f) deadYaw   = qYaw   * 2.0f;
+    if (gainKnownPitch && deadPitch < qPitch * 2.0f) deadPitch = qPitch * 2.0f;
     if (fabsf(errYaw) < deadYaw && fabsf(errPitch) < deadPitch) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         // Заказанное за прошлые такты камера дорабатывает и без нас.
@@ -4154,6 +4175,27 @@ static void UpdateAim(float dt) {
     if (frac < fracMid) k *= frac / fracMid;
     if (k > 1.f) k = 1.f;
     if (k < 0.05f) k = 0.05f;
+
+    // Гаситель «качелей»: остаток по любой из осей перескочил через ноль и уже
+    // набрал заметную величину обратного знака — это перелёт от нашей поправки. На несколько
+    // тактов режем шаг, чтобы вместо дрожи подойти спокойно; восстанавливаемся
+    // плавно (около четырёх тактов). Стенд: реверсы пальца на подходе 6 -> 4,
+    // перелёт не растёт.
+    static float s_flipDamp = 1.f;
+    static float s_prevCtlYaw = 0.f, s_prevCtlPitch = 0.f;
+    static bool  s_haveCtlErr = false;
+    const bool flipYaw = s_haveCtlErr && s_prevCtlYaw * errYaw < 0.f &&
+                         fabsf(errYaw) > fabsf(s_prevCtlYaw) * 0.35f;
+    const bool flipPitch = s_haveCtlErr && s_prevCtlPitch * errPitch < 0.f &&
+                           fabsf(errPitch) > fabsf(s_prevCtlPitch) * 0.35f;
+    if (flipYaw || flipPitch) {
+        s_flipDamp = 0.45f;
+    } else if (s_flipDamp < 1.f) {
+        s_flipDamp += (1.f - s_flipDamp) * (dt * 2.5f);
+        if (s_flipDamp > 1.f) s_flipDamp = 1.f;
+    }
+    s_prevCtlYaw = errYaw; s_prevCtlPitch = errPitch; s_haveCtlErr = true;
+    k *= s_flipDamp;
 
     float dx =  errYaw   * k / gy;
     float dy = -errPitch * k / gp;
@@ -5219,9 +5261,9 @@ static float AvatarBottom(float winY, float R) {
 }
 
 // --- Светофор ===============================================================
-// Кнопки: 0 — красная (закрыть), 1 — жёлтая (свернуть), 2 — зелёная (развернуть).
-// Действие выполняется по тапу; сами кнопки — обычные InvisibleButton, поэтому
-// тап не проваливается в окно и не начинает его перетаскивание.
+// Кружки: 0 — красная, 1 — жёлтая, 2 — зелёная. Это ДЕКОР (просьба игрока:
+// «он как декоративный дизайн»): тапов и действий у кружков нет, поэтому нет и
+// InvisibleButton'ов — окно за них таскается как за обычную шапку.
 enum TrafficLightId { TL_CLOSE = 0, TL_MIN, TL_ZOOM };
 
 // Прямоугольник i-й кнопки (квадрат со стороной d + 8 — палец толще кружка).
@@ -5243,94 +5285,30 @@ static ImU32 TrafficLightColor(int i) {
     }
 }
 
-// Что делает кнопка. Свернуть — минимальный размер окна, развернуть — на весь
-// экран и обратно (прежний размер запоминается).
-static void TrafficLightApply(int i) {
-    switch (i) {
-        case TL_CLOSE:
-            menu_open = false;
-            PlaySound(SND_CLICK);
-            break;
-        case TL_MIN:
-            menu_open = true;
-            g_win.w = WW_MIN;
-            g_win.h = WH_MIN;
-            CenterMenuOnDisplay();
-            PlaySound(SND_CLICK);
-            break;
-        default: {
-            static bool  zoomed = false;
-            static float savedW = 0.f, savedH = 0.f;
-            float dw = 0.f, dh = 0.f;
-            VisibleScreen(dw, dh);
-            if (!zoomed) {
-                savedW = g_win.w; savedH = g_win.h;
-                if (dw > 100.f && dh > 100.f) {
-                    g_win.w = ImMax(WW_MIN, dw - 16.f);
-                    g_win.h = ImMax(WH_MIN, dh - 16.f);
-                }
-                zoomed = true;
-            } else {
-                if (savedW > 0.f) g_win.w = savedW;
-                if (savedH > 0.f) g_win.h = savedH;
-                zoomed = false;
-            }
-            CenterMenuOnDisplay();
-            PlaySound(SND_CLICK);
-            break;
-        }
-    }
-}
+// Полоса шапки контента. В раскладке с нижней панелью она раньше была втрое
+// выше — под кружок аватарки и светофор; кружка там больше нет, и полоса снова
+// обычной высоты (только под заголовок вкладки).
+static float MenuHeaderH(bool) { return Layout::HeaderH; }
 
-// Полоса шапки контента, когда панель вкладок не слева: под кружок и светофор.
-static float MenuHeaderH(bool panelLeft) {
-    return panelLeft ? Layout::HeaderH
-                     : ImMax(Layout::HeaderH, kAvatarR * 2.f + kAvatarPadT * 2.f);
-}
+// Где стоит светофор: в САМОМ левом верхнем углу окна, в обеих раскладках.
+// (В раскладке с нижней панелью он стоял по центру полосы шапки — рядом с
+// кружком аватарки. Кружка там больше нет, и светофор переехал в угол.)
+static ImVec2 TrafficLightPos(ImVec2 winPos, bool) { return winPos; }
 
-// Где стоит светофор: в раскладке с левой панелью — в самом углу окна, в
-// раскладке с нижней панелью — по центру полосы шапки (там он у левого края
-// контента, а кружок сразу справа от него).
-static ImVec2 TrafficLightPos(ImVec2 winPos, bool panelLeft) {
-    if (panelLeft) return winPos;
-    const float midY = winPos.y + MenuHeaderH(false) * 0.5f;
-    return ImVec2{winPos.x, midY - kTLPad - kTLD * 0.5f};
-}
-
-// Импульс нажатия (кольцо вокруг кружка), чтобы тап был виден.
-static float g_tlPulse[kTLN] = {0.f, 0.f, 0.f};
-
-// Нарисовать светофор и обработать тапы. Зовётся из меню один раз за кадр.
-static void TrafficLight(ImVec2 winPos, float railW, float dt) {
+// Нарисовать светофор. Тапы не обрабатываются: это декор, действия закрыть /
+// свернуть / развернуть убраны вместе с ним (меню открывается и закрывается
+// тапом по пилюле «Противники» сверху, окно таскается за шапку и растягивается
+// за правый нижний угол).
+static void TrafficLight(ImVec2 winPos, float railW) {
     float d = 0.f, gap = 0.f;
     TrafficLightMetrics(railW, d, gap);
     ImDrawList* fg = ImGui::GetForegroundDrawList();
-    const auto& io = ImGui::GetIO();
 
     for (int i = 0; i < kTLN; ++i) {
         ImVec2 mn, mx;
         TrafficLightRect(winPos, d, gap, i, mn, mx);
-
-        // Тап: рамка кнопки — квадрат вокруг кружка (палец толще кружка).
-        const bool tap = io.MouseClicked[0] && !g_input.touchConsumed &&
-                         io.MousePos.x >= mn.x && io.MousePos.x <= mx.x &&
-                         io.MousePos.y >= mn.y && io.MousePos.y <= mx.y;
-        if (tap) {
-            g_input.touchConsumed = true;
-            g_tlPulse[i] = 1.f;
-            TrafficLightApply(i);
-        }
-
-        // Импульс гаснет — по нему видно, что тап дошёл.
-        if (g_tlPulse[i] > 0.f) {
-            g_tlPulse[i] = ImMax(0.f, g_tlPulse[i] - dt * 2.5f);
-            const float r = d * 0.5f + 3.f + (1.f - g_tlPulse[i]) * 9.f;
-            fg->AddCircle({(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f}, r,
-                          C::UA(C::Acc(), 0.55f * g_tlPulse[i]), 32, 2.5f);
-        }
-
-        // Сам кружок: как в macOS — цветной, с чуть заметной тёмной кромкой.
         const ImVec2 c{(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f};
+        // Как в macOS: цветной кружок с чуть заметной тёмной кромкой.
         fg->AddCircleFilled(c, d * 0.5f, TrafficLightColor(i), 32);
         fg->AddCircle(c, d * 0.5f, IM_COL32(0, 0, 0, 45), 32, 1.5f);
     }
@@ -5577,25 +5555,9 @@ void RenderMenu() {
 
         if (!g_win.dragging && io.MouseDown[0] && !(g_sheet.visible || (g_pop.visible && !g_pop.closing)) && !g_win.resizing) {
             float tx = io.MouseClickedPos[0].x, ty = io.MouseClickedPos[0].y;
-            // Тащим окно за верхнюю шапку (по всей ширине).
-            // Кнопки светофора — не шапка: тап по ним закрывает/сворачивает
-            // меню, а не тащит окно.
-            bool onLights = false;
-            {
-                float d = 0.f, gap = 0.f;
-                // Раскладка берётся прямо из настроек: этот блок идёт до того,
-                // как в RenderMenu посчитан panelLeft.
-                const bool pl = g_state.ui_panel_left;
-                TrafficLightMetrics(pl ? AvatarRailW(g_win.w) : g_win.w, d, gap);
-                const ImVec2 tlPos = TrafficLightPos(g_win.pos, pl);
-                for (int i = 0; i < kTLN; ++i) {
-                    ImVec2 mn, mx;
-                    TrafficLightRect(tlPos, d, gap, i, mn, mx);
-                    if (tx >= mn.x - 8.f && tx <= mx.x + 8.f &&
-                        ty >= mn.y - 8.f && ty <= mx.y + 8.f) onLights = true;
-                }
-            }
-            bool inHdr = !onLights && tx >= g_win.pos.x && tx < g_win.pos.x + g_win.w
+            // Тащим окно за верхнюю шапку (по всей ширине). Кружки светофора
+            // больше не исключение: они декор и тапов не обрабатывают.
+            bool inHdr = tx >= g_win.pos.x && tx < g_win.pos.x + g_win.w
                       && ty >= g_win.pos.y && ty < g_win.pos.y + hH_;
             if (inHdr) {
                 float dx = io.MousePos.x - io.MouseClickedPos[0].x;
@@ -5797,7 +5759,7 @@ void RenderMenu() {
                      C::UA(C::Sep(), 0.8f), 1.f);
 
         // Светофор как в macOS — в самом углу окна, кружок с видео под ним.
-        TrafficLight(TrafficLightPos(g_win.pos, true), railW, dt);
+        TrafficLight(TrafficLightPos(g_win.pos, true), railW);
         const float avR = AvatarR(railW);
         VidAvatar::Draw(ldl, AvatarCx(lpPos.x, avR), AvatarCy(lpPos.y, avR), avR, dt,
                         C::UA(C::Acc(), 0.9f), C::U(C::LeftBg()));
@@ -5949,16 +5911,9 @@ void RenderMenu() {
         cdl->AddText(ImGui::GetFont(), titleFS,
             {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles(g_state.cur_tab));
         if (!panelLeft) {
-            // Светофор — у левого края, кружок — сразу за ним, по центру полосы.
-            const float midY = hp.y + hdrH * 0.5f;
-            TrafficLight(TrafficLightPos({hp.x, hp.y}, false), cW, dt);
-            float tld = 0.f, tlg = 0.f;
-            TrafficLightMetrics(cW, tld, tlg);
-            const float avR = AvatarR(ImMax(cW, 200.f));
-            VidAvatar::Draw(cdl,
-                            hp.x + kAvatarPad + TrafficLightW(tld, tlg) + kAvatarPadT + avR,
-                            midY, avR, dt,
-                            C::UA(C::Acc(), 0.9f), C::U(C::Bg()));
+            // Светофор — в самом левом верхнем углу окна. Кружка аватарки в
+            // этой раскладке нет (просьба игрока: с нижней панелью он мешает).
+            TrafficLight(TrafficLightPos(g_win.pos, false), cW);
         }
         ImGui::Dummy({cW, hH});
     }
