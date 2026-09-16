@@ -1,26 +1,31 @@
 // Оффсеты БЕТА-версии игры. Файл собран tools/offsets/beta_offsets.py — правь
 // скрипт и дампы, а не здесь.
 //
-// Источник: архива dump_beta.7z нет, дата сборки файла 16.09.2026.
+// Источник: dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9, дата сборки файла 16.09.2026.
 // Эталон, от которого считались отличия: релизный dump.7z и jni/src/game_offsets.h.
-// Отличий от релиза: 0 из 188 объявленных констант
+// Отличий от релиза: 4 из 178 объявленных констант
 // (в карте оффсетов 178 записей).
 // Взято из релиза как есть: 38 констант раскладки IL2CPP/Unity
 // (из дампа игры они не выводятся — об этом ниже) и 3 RVA.
-// Файл НЕ собран из дампа беты: значения совпадают с релизом, в меню бета не предлагается (go::BetaAvailable() == false).
+// libil2cpp.so беты не было — RVA остались релизные (классы не найдутся!)
 //
 // Как пользоваться: выбор версии — в меню клиента («Версия игры», вкладка
 // «Опции») и на стартовом экране; переключатель — go::SelectBuild() в
 // game_offsets_active.h, он подставляет значения из этого файла. Пока
-// kFromDump == false, бета в меню не предлагается.
+// kFromDump == false, бета в меню не предлагается: файл не собран из дампа.
+// kRvaFromDump == false — не пересчитаны RVA классов (нет libil2cpp.so беты):
+// по релизным RVA бета-клиент классов не находит, поэтому такая бета тоже не
+// предлагается. Лечится ключом --so или файлом libil2cpp_beta.7z в корне.
 
 #pragma once
 #include <cstdint>
 
 
 namespace game_offsets_beta {
-inline constexpr bool kFromDump = false;
-inline constexpr const char* kSource = "архива dump_beta.7z нет";
+inline constexpr bool kFromDump = true;
+inline constexpr bool kRvaFromDump = false;
+inline constexpr const char* kReason = "Бета недоступна: не пересчитаны RVA классов";
+inline constexpr const char* kSource = "dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9";
 
 
 // NOTE: every obfuscated class/field name quoted in the comments below is
@@ -51,7 +56,7 @@ inline constexpr std::uint64_t CAMERA_PROJ_DIRTY        = 0x500; // byte, set wh
 inline constexpr std::uint64_t MANAGED_CACHED_PTR = 0x10;
 
 inline constexpr float PLAYER_HEIGHT          = 1.8F;
-inline constexpr float PLAYER_BOX_WIDTH_RATIO = 0.4F;
+inline constexpr float PLAYER_BOX_WIDTH_RATIO = 0.40F;
 inline constexpr float MIN_PLAYER_DISTANCE    = 0.0F;
 inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 
@@ -89,7 +94,7 @@ inline constexpr std::uint64_t UI_TEXT_MTEXT = 0xE0;
 inline constexpr std::uint64_t FPOBJECT_OBJECT_NAME = 0x78;
 // Dissonance voice identity: reliable synced display-name source.
 // PlayerManager.uWr (0x2E8, was LLT) : VoicePlayerState -> <Name>k__BackingField.
-inline constexpr std::uint64_t PLAYER_VOICE_STATE  = 0x2E8;
+inline constexpr std::uint64_t PLAYER_VOICE_STATE  = 0x2F8;  // бета: было 0x2E8
 inline constexpr std::uint64_t VOICE_STATE_NAME     = 0x38;
 // PlayerManager.voicePlayer (class pJk, was fuI) -> display string at 0x78.
 inline constexpr std::uint64_t PLAYER_VOICE_PLAYER = 0x140;
@@ -120,7 +125,7 @@ inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
 //   FPManager.<LtX>k__BackingField (0xA8) == aim blend 0..1 (secondary hint)
 inline constexpr std::uint64_t PLAYER_EVENT_HANDLER          = 0x78;
 inline constexpr std::uint64_t EVENT_HANDLER_MANAGER_BACKREF = 0xD0;
-inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x270;
+inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x290;  // бета: было 0x270
 // Remote-player held-weapon candidates (dump.cs Oxide.PlayerManager). The FP
 // manager (0x90) is a local MonoBehaviour and is often empty for other players,
 // so these are the synced/inventory-backed fallbacks to probe:
@@ -286,8 +291,8 @@ inline constexpr std::uint64_t KCC_LOOK_HEIGHT_OFFSET     = 0x90; // float, eye 
 //   +0x00 MoveState State (0 idle,1 walk,2 run,3 crouching,4 air,5 climb,6 swim,7 dead)
 //   +0x04 Pose (0 Stand, 1 Crouch)   +0x08 bool Aim  +0x0C Vector3 Position
 //   +0x18 Vector3 RealVelocity
-inline constexpr std::uint64_t KCC_MOVE                   = 0x16C;
-inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION     = 0x108;
+inline constexpr std::uint64_t KCC_MOVE                   = 0x154;  // бета: было 0x16C
+inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION     = 0xF0;  // бета: было 0x108
 inline constexpr std::uint64_t CHAR_ANIM_PLAYER_BACKREF    = 0x78;
 inline constexpr std::uint64_t CHAR_ANIM_RAGDOLL           = 0x38;
 inline constexpr std::uint64_t RAGDOLL_PELVIS_RIGIDBODY    = 0x20;

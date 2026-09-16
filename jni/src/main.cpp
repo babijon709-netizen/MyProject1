@@ -1059,6 +1059,15 @@ static void RestoreLang() {
 }
 
 // ---- Версия игры (релиз или бета) ------------------------------------------
+// Подпись под карточкой беты: пока бета доступна — откуда взяты её оффсеты,
+// иначе — почему её нельзя выбрать (файл не собран / не пересчитаны RVA).
+static const char* BuildBetaLine() {
+    if (go::BetaAvailable()) return go::BetaSource();
+    const char* why = go::BetaReason();
+    return (why && why[0]) ? lang::text(why)
+                           : XS("Бета недоступна: файл оффсетов не собран");
+}
+
 // Оффсеты релиза и беты разные (jni/src/game_offsets_beta.h), и версия
 // выбирается в меню. Выбор хранится рядом с конфигами отдельным файлом, как
 // язык: он нужен ещё до загрузки любого конфига — от него зависит, по какой
@@ -3341,7 +3350,7 @@ float TabContent(int tab, float dt, float cW) {
 
             // Строка-источник: из какого дампа собраны оффсеты беты. Без неё
             // непонятно, чего ждать после переключения.
-            const char* src = betaOk ? go::BetaSource() : XS("Бета недоступна: файл оффсетов не собран");
+            const char* src = BuildBetaLine();
             auto ssz = fn->CalcTextSizeA(ImGui::GetFontSize() * 0.82f, FLT_MAX, 0, src);
             dl->AddText(fn, ImGui::GetFontSize() * 0.82f,
                         {pos.x + inset + (avW2 - inset * 2.f - ssz.x) * 0.5f, pos.y + rowH + 6.f},
@@ -5162,9 +5171,7 @@ void RenderMenu() {
                         C::UA(enabled ? (sel ? C::Acc() : C::Txt()) : C::Dim(), enabled ? 1.f : 0.6f), name);
 
             // Подпись под названием: откуда взяты оффсеты этой версии.
-            const char* line = beta ? (betaOk ? go::BetaSource()
-                                              : XS("Бета недоступна: файл оффсетов не собран"))
-                                    : XS("сборка релиза");
+            const char* line = beta ? BuildBetaLine() : XS("сборка релиза");
             char wrapped[2][160] = {};
             // В две строки, по словам: у беты в источнике есть и дамп, и отпечаток.
             {

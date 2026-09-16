@@ -35,7 +35,9 @@ int main() {
     std::size_t n = 0;
     const go::Field* f = go::Fields(n);
     printf("полей в таблице переключателя: %zu\n", n);
-    printf("бета доступна: %s (%s)\n", go::BetaAvailable() ? "да" : "нет", go::BetaSource());
+    printf("бета доступна: %s\n", go::BetaAvailable() ? "да" : "нет");
+    printf("  источник: %s\n", go::BetaSource());
+    if (!go::BetaAvailable()) printf("  причина:  %s\n", go::BetaReason());
 
     // Таблица не должна быть пустой: иначе «переключение» — пустышка.
     CHECK(n >= 150, "в таблице всего %zu полей — переключатель не покрывает оффсеты", n);

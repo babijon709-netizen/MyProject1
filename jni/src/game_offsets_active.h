@@ -47,8 +47,10 @@
 // релиз: имена берём через using-директиву, а доступность отвечает false.
 #if !GO_HAVE_BETA
 namespace game_offsets_beta {
-inline constexpr bool        kFromDump = false;
-inline constexpr const char* kSource   = "файл беты не собран";
+inline constexpr bool        kFromDump    = false;
+inline constexpr bool        kRvaFromDump = false;
+inline constexpr const char* kReason      = "Бета недоступна: файл оффсетов не собран";
+inline constexpr const char* kSource      = "файл беты не собран";
 using namespace game_offsets;
 }
 #endif
@@ -103,10 +105,25 @@ inline Build& CurrentRef() {
     return b;
 }
 
-inline bool BetaAvailable() { return game_offsets_beta::kFromDump; }
+// Бета доступна, только если из её дампа взято ВСЁ, без чего она не работает:
+// сами смещения (kFromDump) и RVA классов (kRvaFromDump) — по релизным RVA
+// бета-клиент классов не находит, и ESP/аим молча ничего не видят. Такую бету
+// лучше не предлагать вовсе, чем показывать пустой экран.
+inline bool BetaAvailable() {
+    return game_offsets_beta::kFromDump && game_offsets_beta::kRvaFromDump;
+}
 
-// Откуда взяты бета-оффсеты (строчка для меню): дамп, его отпечаток или причина,
-// по которой бета недоступна.
+// Почему бету нельзя выбрать (пустая строка — можно). Показывается в меню вместо
+// источника оффсетов: «не собран файл» и «не пересчитаны RVA» лечатся разным.
+inline const char* BetaReason() {
+#if GO_HAVE_BETA
+    return game_offsets_beta::kReason;
+#else
+    return "Бета недоступна: файл оффсетов не собран";
+#endif
+}
+
+// Откуда взяты бета-оффсеты (строчка для меню): дамп и его отпечаток.
 inline const char* BetaSource() {
 #if GO_HAVE_BETA
     return game_offsets_beta::kSource;

@@ -5,6 +5,10 @@
     python3 tools/offsets/beta_offsets.py --apply    # записать файл беты
     python3 tools/offsets/beta_offsets.py --selftest # проверка самого скрипта
 
+Если дамп беты пришёл без `libil2cpp.so`, RVA классов пересчитать нечем — их
+можно подсунуть отдельно: `--so libil2cpp.so` (или `--so libil2cpp_beta.7z`,
+если он сжат как релизный).
+
 Зачем отдельный скрипт, а не `update_offsets.py`. Тот пересчитывает РЕЛИЗНЫЙ
 заголовок по свежему дампу релиза: старый дамп он берёт из истории git, а
 значения — из заголовка. Бета же живёт параллельно релизу, и её оффсеты нужно
@@ -27,8 +31,10 @@
     перемерить вручную (скрипт скажет об этом в шапке файла);
   * `*_TYPEINFO_RVA` — считаются дизассемблером по `libil2cpp.so` той же версии
     игры. Если в архиве беты есть свой `libil2cpp.so` (или он лежит рядом как
-    `libil2cpp_beta.7z`), RVA пересчитаются; если нет — скрипт скажет прямо, а в
-    файле беты останутся релизные RVA (по ним бета-клиент не найдёт классы).
+    `libil2cpp_beta.7z` или указан ключом `--so`), RVA пересчитаются; если нет —
+    скрипт скажет прямо, в файле беты останутся релизные RVA, а `kRvaFromDump`
+    будет false: по релизным RVA бета-клиент классов не находит, поэтому
+    `go::BetaAvailable()` такую бету в меню не предложит.
 
 Результат в репозитории:
 
@@ -37,6 +43,12 @@
     изменившихся строк стоит пометка «бета: …»);
   * `jni/src/game_offsets_active.inc` — таблица «константа → значение беты» для
     рантайм-переключателя (`game_offsets_active.h`).
+
+Имя структуры беты искать не нужно: обфускатор перекатывает его вместе с полями
+(`GKo_Fields` → `RET_Fields`), поэтому пропавшую структуру скрипт подбирает ПО
+ФОРМЕ — по смещениям и типам полей, считая перекатанные имена типов одним
+токеном. Найденное совпадение печатается в отчёте; если похожих структур
+несколько, скрипт молчит и отправляет разбираться руками.
 
 Файл беты пишется ВСЕГДА, даже если архива нет: тогда это копия релиза с
 шапкой «не собран из дампа» и `kFromDump = false` — сборка остаётся рабочей, а
@@ -48,6 +60,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -159,12 +172,69 @@ def unpack_libil2cpp(archive, dest):
     os.remove(pack)
 
 
+def place_so(src, dest):
+    """Положить libil2cpp.so беты на место: файлом или упакованным (.7z)."""
+    if src.lower().endswith('.7z'):
+        print(f'   libil2cpp.so беты: распаковываю {os.path.basename(src)} (xz raw)')
+        unpack_libil2cpp(src, dest)
+    else:
+        shutil.copyfile(src, dest)
+    print(f'   libil2cpp.so беты: {os.path.getsize(dest)} байт '
+          f'(из {os.path.basename(src)})')
+
+
 def dump_fingerprint(path):
     h = hashlib.sha256()
     with open(path, 'rb') as f:
         for chunk in iter(lambda: f.read(1 << 20), b''):
             h.update(chunk)
     return h.hexdigest()[:16]
+
+
+# ------------------------------------------------- форма вместо имени ----
+def type_norm(t):
+    """Тип для сравнения структур: у перекатанных имён остаётся только форма.
+
+    `GKw_o*` в релизе и `REh_o*` в бете — один и тот же класс: обфускатор
+    перегенерировал имя, и совпасть по имени они не могут, а по форме (указатель
+    на класс) — могут. Читаемые типы (`Oxide_PlayerManager_o*`, `float`,
+    `UnityEngine_RaycastHit_o`) сравниваются как есть.
+    """
+    star = '*' if t.endswith('*') else ''
+    base = t[:-1] if star else t
+    return ('обф' + star) if u.obfuscated(base) else t
+
+
+def find_beta_struct(beta, rel_fields, need_offsets):
+    """Структура беты по форме — когда её имя перегенерировали.
+
+    Возвращает `(имя, пояснение)` или `(None, причина)`. Считаем долю полей,
+    совпавших по смещению и нормированному типу; кандидат обязан содержать все
+    нужные нам смещения. Победитель должен быть заметно впереди второго: если
+    структур-близнецов несколько, выбор наугад хуже отказа.
+    """
+    if not rel_fields or not need_offsets:
+        return None, 'нечего сравнивать'
+    want = {o: type_norm(t) for _, o, t in rel_fields}
+    scored = []
+    for name in beta.index:
+        if not name.endswith('_Fields'):
+            continue
+        got = {o: type_norm(t) for _, o, t in (beta.fields(name) or [])}
+        if any(want.get(o) not in (None, got.get(o)) for o in need_offsets):
+            continue
+        score = sum(1 for o, t in want.items() if got.get(o) == t) / len(want)
+        scored.append((score, name))
+    if not scored:
+        return None, 'по форме ничего похожего'
+    scored.sort(reverse=True)
+    best = scored[0]
+    second = scored[1] if len(scored) > 1 else (0.0, '—')
+    if best[0] < 0.8:
+        return None, f'ближайшее по форме — {best[1]}, и то всего {best[0]:.0%}'
+    if best[0] - second[0] < 0.15:
+        return None, f'похожих структур несколько: {best[1]} и {second[1]}'
+    return best[1], f'{best[0]:.0%} полей совпало'
 
 
 # ------------------------------------------------------- пересчёт значений ----
@@ -211,9 +281,17 @@ def compute_beta(rel, beta, omap, rel_vals, with_rva, rel_dir, beta_dir):
         f_beta = beta.fields(st_beta)
         f_rel = rel.fields(st_rel)
         if f_beta is None:
-            warnings.append(f'[{label}] структуры нет в дампе беты — ищи форму: '
-                            f'il2cpp_layout.py find')
-            continue
+            # Имя структуры перекатано — ищем её по форме (смещения + типы).
+            need = [omap[c]['offset'] for c in consts]
+            found, why = find_beta_struct(beta, f_rel, need)
+            if found is None:
+                warnings.append(f'[{label}] структуры нет в дампе беты ({why}) — ищи '
+                                f'форму: il2cpp_layout.py find')
+                continue
+            print(f'   {st_beta} → {found}: структура найдена по форме ({why})')
+            f_beta = beta.fields(found)
+            for c in consts:
+                omap[c]['_struct_beta'] = found
         amap = u.align(f_rel, f_beta)
 
         for const in sorted(consts):
@@ -245,6 +323,7 @@ def compute_beta(rel, beta, omap, rel_vals, with_rva, rel_dir, beta_dir):
     # TYPEINFO_RVA: только по libil2cpp.so САМОЙ беты.
     rva_consts = [c for c, e in omap.items() if e.get('kind') == 'typeinfo_rva']
     rva_note = ''
+    rva_from_dump = False
     so_beta = os.path.join(beta_dir, 'libil2cpp.so')
     script_beta = os.path.join(beta_dir, 'script.json')
     if rva_consts and not with_rva:
@@ -259,6 +338,7 @@ def compute_beta(rel, beta, omap, rel_vals, with_rva, rel_dir, beta_dir):
         cand_rel = u.rva_candidates(os.path.join(rel_dir, 'libil2cpp.so'),
                                     os.path.join(rel_dir, 'script.json'), classes) \
             if os.path.exists(os.path.join(rel_dir, 'libil2cpp.so')) else {}
+        rva_from_dump = True
         for const in rva_consts:
             cls = omap[const].get('class')
             cur = rel_vals.get(const)
@@ -266,20 +346,23 @@ def compute_beta(rel, beta, omap, rel_vals, with_rva, rel_dir, beta_dir):
             if warn:
                 warnings.append(f'{const}: {warn}')
             if got is None:
+                rva_from_dump = False
                 warnings.append(f'{const}: RVA для {cls} в бете не найден — '
                                 f'запусти typeinfo_rva.py вручную')
                 continue
             values[const] = got
             if cur != got:
                 changes[const] = (cur, got, f'TypeInfo {cls}', how)
-    else:
+    elif rva_consts:
         rva_note = 'libil2cpp.so беты не было — RVA остались релизные (классы не найдутся!)'
         warnings.append(rva_note)
         for const in rva_consts:
             if const in rel_vals:
                 values[const] = rel_vals[const]
 
-    return values, changes, warnings, runtime, rva_consts, rva_note
+    if not rva_consts:
+        rva_from_dump = True  # пересчитывать нечего — все RVA уже из дампа
+    return values, changes, warnings, runtime, rva_consts, rva_note, rva_from_dump
 
 
 # ------------------------------------------------------------- генерация ----
@@ -308,7 +391,7 @@ def fmt_value(v):
 
 
 def write_beta_header(rel_text, values, changes, runtime, rva_consts, note, stamp,
-                     dump_src, from_dump, n_map):
+                     dump_src, from_dump, rva_from_dump, n_map):
     """Файл беты: та же структура и комментарии, что у релиза, со значениями беты."""
     out = []
     for line in rel_text.split('\n'):
@@ -340,9 +423,20 @@ def write_beta_header(rel_text, values, changes, runtime, rva_consts, note, stam
 
     # Маркер «собран из дампа или нет» и строка-источник для меню: по ним
     # переключатель решает, предлагать ли бету (go::BetaAvailable()).
+    # Строка для меню: пока бета доступна — это источник оффсетов, иначе причина,
+    # по которой её нельзя выбрать (пустая строка = доступна).
+    if not from_dump:
+        reason = 'Бета недоступна: файл оффсетов не собран'
+    elif not rva_from_dump:
+        reason = 'Бета недоступна: не пересчитаны RVA классов'
+    else:
+        reason = ''
     mark = ('inline constexpr bool kFromDump = %s;\n'
+            'inline constexpr bool kRvaFromDump = %s;\n'
+            'inline constexpr const char* kReason = "%s";\n'
             'inline constexpr const char* kSource = "%s";\n\n'
-            % ('true' if from_dump else 'false', dump_src))
+            % ('true' if from_dump else 'false',
+               'true' if rva_from_dump else 'false', reason, dump_src))
     body = body.replace('namespace game_offsets_beta {\n',
                         'namespace game_offsets_beta {\n' + mark, 1)
 
@@ -360,7 +454,10 @@ def write_beta_header(rel_text, values, changes, runtime, rva_consts, note, stam
 // Как пользоваться: выбор версии — в меню клиента («Версия игры», вкладка
 // «Опции») и на стартовом экране; переключатель — go::SelectBuild() в
 // game_offsets_active.h, он подставляет значения из этого файла. Пока
-// kFromDump == false, бета в меню не предлагается.
+// kFromDump == false, бета в меню не предлагается: файл не собран из дампа.
+// kRvaFromDump == false — не пересчитаны RVA классов (нет libil2cpp.so беты):
+// по релизным RVA бета-клиент классов не находит, поэтому такая бета тоже не
+// предлагается. Лечится ключом --so или файлом libil2cpp_beta.7z в корне.
 
 #pragma once
 #include <cstdint>
@@ -411,6 +508,7 @@ def main():
     ap.add_argument('--selftest', action='store_true',
                     help='проверка скрипта: релиз против релиза (отличий быть не должно)')
     ap.add_argument('--no-rva', action='store_true', help='не пересчитывать TYPEINFO_RVA')
+    ap.add_argument('--so', help='libil2cpp.so беты (файлом или .7z), если его нет в архиве')
     ap.add_argument('--map', default=MAP)
     a = ap.parse_args()
 
@@ -426,6 +524,15 @@ def main():
         if beta_dir is None:
             print(f'архива {a.archive} нет — пишу файл беты как копию релиза '
                   f'(kFromDump = false, в меню бета не предлагается)')
+        elif not os.path.exists(os.path.join(beta_dir, 'libil2cpp.so')):
+            # .so можно дать ключом или положить рядом с дампом — имена
+            # фиксированные, чтобы не искать его по всему диску.
+            for cand in (a.so, os.path.join(ROOT, 'libil2cpp_beta.7z'),
+                         os.path.join(ROOT, 'libil2cpp_beta.so')):
+                if cand and os.path.exists(cand):
+                    place_so(os.path.abspath(cand),
+                             os.path.join(beta_dir, 'libil2cpp.so'))
+                    break
 
     rel = lay.Dump(os.path.join(rel_dir, 'il2cpp.h'))
     rel_text = open(HEADER, encoding='utf-8').read()
@@ -439,12 +546,13 @@ def main():
         note = 'Файл НЕ собран из дампа беты: значения совпадают с релизом, ' \
                'в меню бета не предлагается (go::BetaAvailable() == false).'
         from_dump = False
+        rva_from_dump = False
         dump_src = f'архива {src} нет'
     else:
         beta = lay.Dump(os.path.join(beta_dir, 'il2cpp.h'))
-        values, changes, warnings, runtime, rva_consts, note = compute_beta(
-            rel, beta, omap, rel_vals, not a.no_rva,
-            rel_dir, beta_dir if not a.selftest else rel_dir)
+        values, changes, warnings, runtime, rva_consts, note, rva_from_dump = \
+            compute_beta(rel, beta, omap, rel_vals, not a.no_rva,
+                         rel_dir, beta_dir if not a.selftest else rel_dir)
         from_dump = True
         fp = dump_fingerprint(os.path.join(beta_dir, 'il2cpp.h'))
         dump_src = f'{src}, il2cpp.h sha256:{fp}'
@@ -466,6 +574,11 @@ def main():
         print('\nтребует внимания:')
         for w in warnings:
             print('  ! ' + w)
+    if from_dump and not rva_from_dump:
+        print('\nбета в меню предлагаться НЕ будет: RVA классов не пересчитаны.')
+        print('  нужен libil2cpp.so той же сборки, что и дамп:')
+        print('    python3 tools/offsets/beta_offsets.py --apply --so <файл>')
+        print('  или libil2cpp_beta.7z (сжатый как релизный libil2cpp.7z) в корне.')
 
     if a.selftest:
         bad = {c for c in rel_vals if c in values and values[c] != rel_vals[c]}
@@ -475,7 +588,8 @@ def main():
 
     if a.apply:
         header = write_beta_header(rel_text, values, changes, runtime, rva_consts,
-                                   note, stamp, dump_src, from_dump, len(omap))
+                                   note, stamp, dump_src, from_dump, rva_from_dump,
+                                   len(omap))
         open(BETA, 'w', encoding='utf-8').write(header)
         open(ACTIVE, 'w', encoding='utf-8').write(write_active_inc(rel_decls, stamp))
         print(f'\nзаписано: {os.path.relpath(BETA, ROOT)} '
