@@ -115,6 +115,22 @@ void        esp_memio_stats(unsigned long long& reads, unsigned long long& fails
 // Возвращает, сколько адресов записано.
 int         esp_memio_fail_sample(uint64_t* out, int max);
 
+// Отказы на «мусорных» адресах (ниже начала адресного пространства): это ошибка
+// логики чтения, а не потеря доступа. Отдаём первый адрес и конвейер, который
+// читал, — по ним видно, где именно читается поле несуществующего объекта.
+void        esp_memio_junk(unsigned long long& junk, uint64_t& first_address,
+                           const char*& phase);
+
+// Состояние конвейера для мини-лога: база библиотеки, список игроков, сколько в
+// нём элементов и найденный локальный игрок. По этим четырём числам в логе сразу
+// видно, где остановилось чтение.
+void        esp_debug_state(unsigned long long& base, unsigned long long& list,
+                            int& count, unsigned long long& local);
+
+// Пора ли подключиться к игре заново (сторож трижды не смог собрать кадр).
+// Флаг одноразовый: чтение сбрасывает его.
+bool        esp_wants_reattach();
+
 // True while the local player is aiming down sights (ADS) with the current
 // weapon. Returns false when the state cannot be read (not attached, no
 // weapon, menus, etc.), so "aim only while scoped" fails closed.

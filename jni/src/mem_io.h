@@ -76,6 +76,13 @@ constexpr double kBlockTtl = 0.05;
 // доступ могли отобрать — тогда помогает только новое открытие.
 constexpr int kFailStreak = 8;
 
+// Адрес ниже этого не может быть отображением пользовательского процесса: такой
+// «адрес» — не память, а мусор в переменной (читаем поле объекта, которого нет,
+// чей-то индекс вместо указателя и т. п.). Такие отказы отделяем от потери
+// доступа: иначе каждый мусорный адрес считался бы «доступ пропал» и тянул за
+// собой переоткрытие /proc/<pid>/mem.
+constexpr uint64_t kJunkAddressFloor = 0x1000;
+
 // Сколько адресов блоков помним как «мы сюда писали» (на деле их 2-3: near clip
 // камеры и час в TOD_CycleParameters).
 constexpr int kWriteTags = 8;
@@ -146,6 +153,17 @@ public:
     // на этом устройстве нет; большое число — она есть, и без снятия тега
     // половина чтений уходила бы в EIO.
     unsigned long long tagged_total() const { return tagged_.load(std::memory_order_relaxed); }
+    // Отказы на заведомо невозможных («мусорных») адресах — это ошибка логики
+    // чтения, а не потеря доступа; в логе видно и адрес, и фазу, которая читала.
+    unsigned long long junk_total() const { return junk_.load(std::memory_order_relaxed); }
+    uint64_t junk_first_address() const {
+        const uint64_t v = junk_addr_.load(std::memory_order_relaxed);
+        return v ? v - 1 : 0;
+    }
+    const char* junk_phase() const { return junk_phase_.load(std::memory_order_relaxed); }
+
+    // Фаза работы чит-кода (какой конвейер читает) — только для диагностики.
+    void set_phase(const char* phase) { phase_.store(phase, std::memory_order_relaxed); }
     // Последние адреса отказов (не более 8): по ним видно, куда именно читали.
     int fail_sample(uint64_t* out, int max) const {
         if (!out || max <= 0) return 0;
@@ -258,11 +276,27 @@ private:
     void note_fail_at(uint64_t addr) {
         fail_sample_[fail_next_.fetch_add(1, std::memory_order_relaxed) % kFailSample]
             .store(addr + 1, std::memory_order_relaxed);
+        read_fails_.fetch_add(1, std::memory_order_relaxed);
+        last_errno_.store(errno, std::memory_order_relaxed);
+        if (addr < kJunkAddressFloor) {
+            // Такого отображения быть не может: это мусор в адресе. Запоминаем
+            // первый такой отказ вместе с фазой, которая читала, и НЕ считаем
+            // его потерей доступа (переоткрывать файл тут нечего).
+            junk_.fetch_add(1, std::memory_order_relaxed);
+            if (!junk_addr_.load(std::memory_order_relaxed)) {
+                junk_addr_.store(addr + 1, std::memory_order_relaxed);
+                junk_phase_.store(phase_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            }
+            return;
+        }
         note_fail();
     }
 
+    // report = false — попытка «на пробу» (чтение блока целиком, которое может
+    // не пройти из-за конца отображения): об отказе не сообщаем, чтобы не
+    // считать это потерей доступа и не тянуть переоткрытие файла.
     template <typename Once>
-    bool read_full(Once once, uint64_t addr, void* out, size_t len) {
+    bool read_full(Once once, uint64_t addr, void* out, size_t len, bool report = true) {
         uint8_t* p = (uint8_t*)out;
         size_t got = 0;
         while (got < len) {
@@ -273,13 +307,13 @@ private:
             if (n > 0) { got += (size_t)n; continue; }
             if (n < 0 && errno == EINTR) continue;
             if (got == 0) {
-                note_fail_at(addr);
+                if (report) note_fail_at(addr);
                 return false;
             }
             break;
         }
         if (got != len) {
-            note_fail_at(addr);
+            if (report) note_fail_at(addr);
             return false;
         }
         note_ok();
@@ -299,9 +333,9 @@ private:
         return true;
     }
 
-    bool raw_read(uint64_t addr, void* out, size_t len) {
+    bool raw_read(uint64_t addr, void* out, size_t len, bool report = true) {
         return read_full([this](uint64_t a, void* o, size_t l) { return read_once(a, o, l); },
-                         addr, out, len);
+                         addr, out, len, report);
     }
 
     bool raw_write(uint64_t addr, const void* in, size_t len) {
@@ -313,7 +347,9 @@ private:
 #ifdef MEMIO_STATS
         ++block_reads;
 #endif
-        return raw_read(base, b.data, kBlockSize);
+        // Отказ здесь — не потеря доступа: блок мог выйти за конец отображения,
+        // и вызывающий всё равно прочитает нужные байты поштучно.
+        return raw_read(base, b.data, kBlockSize, false);
     }
 
     // ELF-заголовок по адресу пробы — и заодно проверка доступа к памяти.
@@ -334,8 +370,6 @@ private:
     // серии отказов переоткрываем /proc/<pid>/mem и перепроверяем пробу; если и
     // это не помогло, привязку снимаем — поток привязки подключится заново.
     void note_fail() {
-        read_fails_.fetch_add(1, std::memory_order_relaxed);
-        last_errno_.store(errno, std::memory_order_relaxed);
         if (fail_streak_.fetch_add(1) + 1 < kFailStreak) return;
         fail_streak_.store(0);
         if (!probe_addr_ || pid_.load() <= 0) return;
@@ -419,6 +453,10 @@ private:
     std::atomic<unsigned long long> reopens_{0};
     std::atomic<int> last_errno_{0};
     std::atomic<unsigned long long> tagged_{0};
+    std::atomic<unsigned long long> junk_{0};
+    std::atomic<uint64_t> junk_addr_{0};      // первый мусорный адрес + 1
+    std::atomic<const char*> junk_phase_{nullptr};
+    std::atomic<const char*> phase_{"старт"};
     static constexpr int kFailSample = 8;
     std::atomic<uint64_t> fail_sample_[kFailSample] = {};
     std::atomic<unsigned> fail_next_{0};

@@ -70,6 +70,12 @@ static bool      g_matrix_configuration_validated = false;
 static bool      g_camera_matrix_physical_match = false;
 static uint64_t  g_player_position_offset = PLAYER_POSITION;
 
+// Последние прочитанные список игроков и локальный игрок — только для мини-лога:
+// по ним сразу видно, где остановился конвейер («список не резолвится» / «список
+// есть, но пуст» / «локальный игрок не найден»).
+static uint64_t g_last_player_list = 0;
+static int      g_last_player_count = 0;
+
 struct TransformHierarchyLayout {
     uint64_t data_offset = 0x38;
     uint64_t index_offset = 0x40;
@@ -448,6 +454,7 @@ static bool groups_are_allied(const PlayerGroup& local, const PlayerGroup& other
 }
 
 static bool player_display_name(uint64_t player, char* out, size_t cap) {
+    g_mem.set_phase("ники");
     if (!player || !out || cap < 2) return false;
     char human[32] = {};
     bool have_human = false;
@@ -718,6 +725,7 @@ static void fix_weapon_label_spelling(char* label) {
 // Public entry point: resolve the held weapon and localise the label.
 // Unknown weapons keep their cleaned original name rather than disappearing.
 static bool player_weapon_name(uint64_t player, char* out, size_t cap, bool& definite) {
+    g_mem.set_phase("оружие");
     if (!player_weapon_name_raw(player, out, cap, definite)) return false;
     fix_weapon_label_spelling(out);
     canonical_weapon_label(out, cap);
@@ -747,35 +755,89 @@ static void prune_player_text(const std::vector<uint64_t>& players) {
     }
 }
 
-// Базовый адрес отображённой библиотеки. Карта читается ЦЕЛИКОМ одним
-// дескриптором (раньше был fgets по строкам): это и быстрее, и надёжнее —
-// строку разбираем сами, а имя сверяем с последним сегментом пути, поэтому
-// подстрока в чужом имени (или « (deleted)» в конце) больше не путает.
-static uint64_t get_base(const char* lib) {
-    if (g_pid <= 0) return 0;
+// Карта памяти процесса читается ЦЕЛИКОМ одним дескриптором (раньше был fgets по
+// строкам): это и быстрее, и надёжнее — строку разбираем сами, а имя сверяем с
+// последним сегментом пути, поэтому подстрока в чужом имени (или « (deleted)» в
+// конце) больше не путает.
+// Все базы-кандидаты той же библиотеки (см. maps::lookup_library_bases): после
+// перезапуска игры образов в карте бывает несколько.
+static int get_base_candidates(const char* lib, uint64_t* out, int max) {
+    if (g_pid <= 0 || !out || max <= 0) return 0;
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", g_pid);
     const int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
-
     std::string text;
     char chunk[8192];
     for (;;) {
         const ssize_t n = read(fd, chunk, sizeof(chunk));
         if (n > 0) {
             text.append(chunk, (size_t)n);
-            if (text.size() > (8u << 20)) break;   // столько карта не занимает
+            if (text.size() > (8u << 20)) break;
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
         break;
     }
     close(fd);
-    if (text.empty()) return 0;
+    return maps::lookup_library_bases(text, lib, out, max);
+}
 
-    // Разбор живёт в maps_lookup.h: там же объяснено, почему именно этот
-    // участок однажды ронял процесс на старте.
-    return maps::lookup_library_base(text, lib);
+// Класс с ожидаемым именем и пространством имён по адресу Il2CppClass*.
+static bool class_name_at(uint64_t klass, const char* expected_name, const char* expected_ns) {
+    if (!klass) return false;
+    const uint64_t name = rd_ptr(klass + 0x10);
+    const uint64_t space = rd_ptr(klass + 0x18);
+    if (!name || !space) return false;
+    return read_remote_string(name) == expected_name &&
+           read_remote_string(space) == expected_ns;
+}
+
+// Живой ли это il2cpp выбранной сборки по адресу base: читаем Il2CppClass*
+// PlayerManager из его typeinfo и сверяем имя. Проверка дешёвая (несколько сотен
+// байт) и однозначная: в чужом/мёртвом образе (старый «(deleted)» после
+// перезапуска игры) там мусор, и класс игры не резолвится — привязка при этом
+// выглядит успешной, а весь чит молча не работает.
+static bool base_resolves_game(uint64_t base) {
+    if (!base) return false;
+    if (PLAYER_MANAGER_TYPEINFO_RVA != 0) {
+        const uint64_t candidate = rd_ptr(base + PLAYER_MANAGER_TYPEINFO_RVA);
+        if (class_name_at(candidate, "PlayerManager", "Oxide")) return true;
+    }
+    if (GAME_CONTROLLER_TYPEINFO_RVA != 0) {
+        const uint64_t candidate = rd_ptr(base + GAME_CONTROLLER_TYPEINFO_RVA);
+        if (class_name_at(candidate, "GameControllerBase", "Oxide")) return true;
+    }
+    return false;
+}
+
+// Время запуска процесса игры (/proc/<pid>/stat, поле 22, в тиках после загрузки).
+// Нужно ровно для одного: отличить «тот же процесс, у которого переехала
+// библиотека» от «игра перезапустилась и pid успел достаться ей же» — а это
+// разные причины поломки, и лечатся они по-разному.
+static unsigned long long proc_start_ticks(pid_t pid) {
+    char path[40];
+    snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    char buffer[512] = {};
+    const ssize_t n = read(fd, buffer, sizeof(buffer) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    // Второе поле — имя в скобках, оно может содержать пробелы: начинаем после
+    // последней ')'.
+    const char* p = strrchr(buffer, ')');
+    if (!p) return 0;
+    unsigned long long value = 0;
+    int field = 2;
+    while (*p) {
+        while (*p == ' ') ++p;
+        if (!*p) break;
+        ++field;
+        if (field == 22) { value = strtoull(p, nullptr, 10); break; }
+        while (*p && *p != ' ') ++p;
+    }
+    return value;
 }
 
 static bool validate_player_list(uint64_t list, uint64_t player_class) {
@@ -1261,6 +1323,7 @@ static constexpr uint64_t MOUSE_LOOK_SENSITIVITY_OFFSET = 0x34;
 
 bool esp_read_look_sensitivity(float& out) {
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+    g_mem.set_phase("чувствительность");
 
     uint64_t player = resolve_local_player();
     if (!player) {
@@ -1559,7 +1622,8 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
 static std::vector<uint64_t> read_configured_player_transforms() {
     std::vector<uint64_t> transforms;
     uint64_t list = resolve_runtime_player_list();
-    if (!list) { return transforms; }
+    g_last_player_list = list;
+    if (!list) { g_last_player_count = 0; return transforms; }
 
     uint64_t local_player = resolve_local_player();
     if (local_player && !player_list_contains(list, local_player)) {
@@ -1584,6 +1648,7 @@ static std::vector<uint64_t> read_configured_player_transforms() {
         }
         uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
         int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
+        g_last_player_count = (int)count;
         if (!items || count <= 0 || count > 512) {
             // Empty list, but the local player himself is known: he alone is
             // enough for the whole pipeline (camera, matrix validation and
@@ -3403,6 +3468,7 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat
 }
 
 static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, float sw, float sh, EspBox& box) {
+    g_mem.set_phase("скелеты");
     box.has_skeleton = false;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) box.bone_valid[bone] = false;
     for (int i = 0; i < 3; ++i) box.aim_valid[i] = false;
@@ -3894,8 +3960,11 @@ EspAttachState esp_attach_state() { return g_attach_state; }
 bool esp_init(pid_t pid) {
     esp_reset();
     g_pid = pid;
-    g_il2cpp_base = get_base("libil2cpp.so");
-    if (!g_il2cpp_base) {
+    g_mem.clear_last_error();
+
+    uint64_t candidates[8] = {};
+    const int candidate_count = get_base_candidates("libil2cpp.so", candidates, 8);
+    if (candidate_count == 0) {
         g_attach_state = ESP_ATTACH_NO_LIB;
         g_pid = -1;
         // Без базового адреса читать нечего. В лог — с причиной: чаще всего это
@@ -3906,8 +3975,29 @@ bool esp_init(pid_t pid) {
             "или клиент другого типа)", (int)pid, (int)pid);
         return false;
     }
-    g_mem.clear_last_error();
-    if (!g_mem.bind(pid, g_il2cpp_base)) {
+
+    // База выбирается не «первая по имени в карте», а та, на которой РЕАЛЬНО
+    // резолвится класс игры. После перезапуска игры в карте остаётся ещё и
+    // старый образ libil2cpp.so (обычно «(deleted)»): он читается, ELF-заголовок
+    // на месте, поэтому прежняя проверка доступа его принимала — а метаданные
+    // внутри мертвы, и весь чит молча ничего не находил до перезапуска чита.
+    uint64_t chosen = 0;
+    bool verified = false;
+    for (int i = 0; i < candidate_count; ++i) {
+        if (!g_mem.bind(pid, candidates[i])) continue;
+        if (base_resolves_game(candidates[i])) {
+            chosen = candidates[i]; verified = true; break;
+        }
+        g_mem.unbind();
+    }
+    if (!chosen) {
+        // Ни одна база не подтвердилась (игра ещё грузится?): работаем на первой
+        // пригодной, как раньше, — привязка не хуже прежней.
+        for (int i = 0; i < candidate_count; ++i) {
+            if (g_mem.bind(pid, candidates[i])) { chosen = candidates[i]; break; }
+        }
+    }
+    if (!chosen) {
         // /proc/<pid>/mem не открылся или не читается: доступа к памяти нет.
         const int err = g_mem.last_error();
         mlog::every("no_access", 5.0,
@@ -3920,9 +4010,23 @@ bool esp_init(pid_t pid) {
         g_pid = -1;
         return false;
     }
+
+    g_il2cpp_base = chosen;
     g_attach_state = ESP_ATTACH_OK;
-    mlog::line("привязка: pid %d, libil2cpp.so по адресу 0x%llx, /proc/%d/mem открыт",
-               (int)pid, (unsigned long long)g_il2cpp_base, (int)pid);
+    {
+        char list[200] = {};
+        size_t used = 0;
+        for (int i = 0; i < candidate_count; ++i) {
+            const int written = snprintf(list + used, sizeof(list) - used, "%s0x%llx",
+                                         i ? " " : "", (unsigned long long)candidates[i]);
+            if (written <= 0 || (size_t)written >= sizeof(list) - used) break;
+            used += (size_t)written;
+        }
+        mlog::line("привязка: pid %d (запуск %llu), баз %d: %s — выбран 0x%llx (%s)",
+                   (int)pid, proc_start_ticks(pid), candidate_count, list,
+                   (unsigned long long)chosen,
+                   verified ? "класс игры резолвится" : "класс не подтвердился, но память открылась");
+    }
     return true;
 }
 
@@ -4125,6 +4229,11 @@ static int      g_frame_transforms_empty_streak = 0;
 // Frames in a row esp_get_boxes() gave up before publishing this frame's
 // camera / local position (see the watchdog at the top of it).
 static int      g_frame_publish_fail_streak = 0;
+// Сколько раз подряд сторож сбрасывал кэши, не получив кадра. Три подряд —
+// повод перепривязаться целиком (см. esp_get_boxes).
+static int      g_frame_watchdog_resets = 0;
+// Поток привязки в main.cpp читает этот флаг и переподключается к игре заново.
+static std::atomic<bool> g_want_reattach{false};
 
 // Everything derived from a particular world/session. Called when the whole
 // player population is replaced (scene reload / new session) or the player
@@ -4164,7 +4273,8 @@ void esp_reset() {
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
-    g_frame_publish_fail_streak = 0;
+    g_frame_publish_fail_streak = 0; g_frame_watchdog_resets = 0;
+    g_want_reattach.store(false);
     g_aim_ref_valid = false;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
@@ -4229,6 +4339,7 @@ static bool publish_camera_only_frame(float sw, float sh) {
     g_frame_local_pos = cam_pos;
     g_frame_local_valid = true;
     g_frame_publish_fail_streak = 0;
+    g_frame_watchdog_resets = 0;
     // Camera basis for the farm, same shape as the main path builds.
     Vec3 vr = {mat_get(solo_view, 0, 0), mat_get(solo_view, 0, 1), mat_get(solo_view, 0, 2)};
     Vec3 vu = {mat_get(solo_view, 1, 0), mat_get(solo_view, 1, 1), mat_get(solo_view, 1, 2)};
@@ -4248,6 +4359,7 @@ static bool publish_camera_only_frame(float sw, float sh) {
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
+    g_mem.set_phase("боксы");
 
 
     // Watchdog: every frame that fails to publish a camera + local position
@@ -4256,10 +4368,21 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // cheap and rare, and it is what keeps a death / respawn from killing the
     // whole ESP until the app is restarted.
     if (++g_frame_publish_fail_streak > 240) {
-        mlog::line("мир: 4 с без кадра (сторож) — сброс кэшей, ищу раскладку заново");
         g_frame_publish_fail_streak = 0;
         g_frame_transforms.clear();
         reset_world_caches();
+        ++g_frame_watchdog_resets;
+        mlog::line("мир: 4 с без кадра (сторож) — сброс кэшей, ищу раскладку заново (подряд %d)",
+                   g_frame_watchdog_resets);
+        // Три сброса подряд — это ~12 с полной слепоты: сброс кэшей уже не
+        // помогает, значит неверна сама привязка (база библиотеки, права,
+        // перезапуск игры). Просим поток привязки подключиться заново — он
+        // выберет базу заново и заново проверит доступ.
+        if (g_frame_watchdog_resets >= 3) {
+            g_frame_watchdog_resets = 0;
+            g_want_reattach.store(true);
+            mlog::line("привязка: 12 с без кадра — перепривязываюсь заново");
+        }
     }
 
     // Markers reuse this frame's camera; invalidate it until it is rebuilt so
@@ -4440,6 +4563,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_local_pos = local;
     g_frame_local_valid = has_local_position;
     g_frame_publish_fail_streak = 0; // this frame is healthy
+    g_frame_watchdog_resets = 0;
 
     // Fallback camera basis straight from the view matrix (rows: right, up,
     // -forward). Kept separate from g_cam_* — the pose path stays authoritative
@@ -4771,6 +4895,23 @@ void esp_memio_stats(unsigned long long& reads, unsigned long long& fails,
 
 int esp_memio_fail_sample(uint64_t* out, int max) {
     return g_mem.fail_sample(out, max);
+}
+
+bool esp_wants_reattach() { return g_want_reattach.exchange(false); }
+
+void esp_memio_junk(unsigned long long& junk, uint64_t& first_address, const char*& phase) {
+    junk = g_mem.junk_total();
+    first_address = g_mem.junk_first_address();
+    const char* p = g_mem.junk_phase();
+    phase = p ? p : "—";
+}
+
+void esp_debug_state(unsigned long long& base, unsigned long long& list, int& count,
+                     unsigned long long& local) {
+    base = g_il2cpp_base;
+    list = g_last_player_list;
+    count = g_last_player_count;
+    local = g_local_player;
 }
 
 
@@ -5536,6 +5677,7 @@ static bool marker_world_position(uint64_t transform, Vec3& out) {
 // Все отказы (словарь не читается, мир грузится) возвращают true: иначе вызывающий
 // поставит «продолжать немедленно» и будет долбить в стену каждый кадр.
 static bool rebuild_marker_entities() {
+    g_mem.set_phase("маркеры");
     if (g_marker_scan_cursor < 0) {
         // Начало цикла: действующий список НЕ трогаем — он показывается до
         // завершения сборки, поэтому маркеры не мигают.
@@ -6057,6 +6199,7 @@ static int farm_classify_identity(uint64_t identity, uint64_t identity_class,
 // Один шаг скана. Вызывается каждый кадр; сам решает, пора ли начинать проход и
 // не пора ли его закончить. Дороже kFarmScanBudget записей за кадр не делает.
 static void farm_scan_tick() {
+    g_mem.set_phase("фарм");
     const double now = mono_seconds();
     if (!g_farm_scan_run && now < g_farm_next_scan) return;
 

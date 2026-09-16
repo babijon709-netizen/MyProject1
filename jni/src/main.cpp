@@ -458,7 +458,8 @@ static void start_attach_thread() {
                         (int)esp_attach_state());
                     ReportAttach((int)esp_attach_state());
                 }
-            } else if (!pid_still_game(g_target_pid) || !esp_alive_check()) {
+            } else if (!pid_still_game(g_target_pid) || !esp_alive_check() ||
+                       esp_wants_reattach()) {
                 mlog::line("привязка: процесс %d больше не читается — отвязываюсь",
                            (int)g_target_pid);
                 // Процесс сменился/умер или память перестала читаться (отобрали
@@ -5274,16 +5275,34 @@ void RenderMenu() {
     // чтений памяти и состояние аима. Без неё по логу не отличить «не читаем
     // память» от «читаем, но ничего не находим».
     {
-        unsigned long long reads = 0, fails = 0, reopens = 0, tagged = 0;
+        unsigned long long reads = 0, fails = 0, reopens = 0, tagged = 0, junk = 0;
         int last_errno = 0, players = 0;
         esp_memio_stats(reads, fails, reopens, tagged, last_errno);
         players = esp_nearby_player_count();
+        unsigned long long base = 0, list = 0, local = 0;
+        int list_count = 0;
+        esp_debug_state(base, list, list_count, local);
         mlog::every("hb", 5.0,
             "сводка: привязка %s, тач %s, боксов %d, игроков рядом %d, чтений %llu, "
             "отказов %llu, переоткрытий %llu, адресов с меткой %llu, errno %d",
             AttachStateText((int)g_attach_report.load()),
             Touch_CanInject() ? "инъекция есть" : "инъекции нет",
             g_last_box_count, players, reads, fails, reopens, tagged, last_errno);
+        // Разбор конвейера: база библиотеки, список игроков и локальный игрок.
+        // Если список нулевой — не резолвится класс; если элементы есть, а
+        // локального нет — не найден свой PlayerManager; и так далее.
+        mlog::every("pipe", 5.0,
+            "конвейер: база 0x%llx, список игроков 0x%llx (%d элементов), локальный 0x%llx",
+            base, list, list_count, local);
+        {
+            uint64_t junk_first = 0;
+            const char* junk_phase = "—";
+            esp_memio_junk(junk, junk_first, junk_phase);
+            if (junk > 0)
+                mlog::every("junk", 30.0,
+                    "мусорных адресов %llu (первый 0x%llx в фазе «%s») — читается поле "
+                    "объекта, которого нет", junk, junk_first, junk_phase);
+        }
         // Куда именно читали, когда отказывало: если это адреса с меткой —
         // виноват TBI/MTE, если обычные — раскладка оффсетов не от этого клиента.
         {
