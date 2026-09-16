@@ -64,8 +64,22 @@ struct EspMarker {
     char  name[40] = {};        // localized label (UTF-8), may carry a stack size
 };
 
-bool        esp_init(pid_t pid);
-void        esp_reset();
+// Почему привязка к игре не удалась — main.cpp показывает это пользователю
+// тостом. ESP_ATTACH_NO_PID решает сам main.cpp (процесса игры нет).
+enum EspAttachState {
+    ESP_ATTACH_OK = 0,
+    ESP_ATTACH_NO_PID,
+    ESP_ATTACH_NO_LIB,
+    ESP_ATTACH_NO_ACCESS,
+};
+
+bool          esp_init(pid_t pid);
+void          esp_reset();
+EspAttachState esp_attach_state();
+// Начало кадра: сброс кэша блоков памяти игры (см. mem_io.h).
+void          esp_mem_frame_begin();
+// Привязка ещё читается? (одно чтение; ловит перезапуск процесса и отобранный доступ)
+bool          esp_alive_check();
 void        esp_set_skeleton_enabled(bool enabled);
 // Enable the ore / animal / loot / pickup marker scan (all off = no work).
 void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups);

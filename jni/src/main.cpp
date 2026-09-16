@@ -7,6 +7,8 @@
 #include <string>
 #include <GLES3/gl3.h>
 #include <dirent.h>
+#include <fcntl.h>
+#include <cerrno>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fstream>
@@ -301,6 +303,9 @@ static const char* TargetPackageB() {
 
 static pid_t g_target_pid = -1;
 static bool  g_esp_attached = false;
+// Привязка найдена по пакету (true) или по отображённому libil2cpp.so (false):
+// от этого зависит, как проверять, что процесс всё ещё тот.
+static bool  g_target_by_package = true;
 static std::thread g_attach_thread;
 static std::atomic<bool> g_attach_running{false};
 
@@ -309,29 +314,121 @@ static std::atomic<bool> g_attach_running{false};
 // под пальцем пользователя, пока тот выбирает. См. RenderMenu.
 static bool g_buildPrompt = true;
 
-static pid_t find_pid(const char* pkg) {
-    DIR* directory = opendir("/proc");
-    if (!directory) return -1;
-    struct dirent* entry;
-    char path[256], command[256];
-    pid_t child_fallback = -1;
-    while ((entry = readdir(directory))) {
-        pid_t pid = (pid_t)atoi(entry->d_name);
-        if (pid <= 0) continue;
-        snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
-        FILE* file = fopen(path, "r");
-        if (!file) continue;
-        memset(command, 0, sizeof(command));
-        size_t count = fread(command, 1, sizeof(command) - 1, file);
-        fclose(file);
-        if (count == 0) continue;
-        if (strcmp(command, pkg) == 0) { closedir(directory); return pid; }
-        size_t pkg_len = strlen(pkg);
-        if (child_fallback <= 0 && strncmp(command, pkg, pkg_len) == 0 && command[pkg_len] == ':')
-            child_fallback = pid;
+// ---- Поиск процесса игры ----------------------------------------------------
+// Раньше брался первый процесс, у которого cmdline совпал с пакетом. Процессов
+// с таким cmdline на устройстве бывает несколько (клон приложения, рабочий
+// профиль, «второе пространство»), и не у каждого отображён libil2cpp.so: если
+// попадался не тот, привязка оставалась ложной навсегда — меню рисовалось, а
+// все функции молчали. Теперь кандидат проверяется по карте памяти, а перебор
+// заканчивается на первом пригодном (лишних обращений к /proc не делаем).
+
+// 2 — основной процесс пакета, 1 — его дочерний (pkg:...), -1 — не он.
+static int cmdline_rank(pid_t pid, const char* const* pkgs, int pkg_count) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    char command[256] = {};
+    const ssize_t n = read(fd, command, sizeof(command) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    for (int i = 0; i < pkg_count; ++i) {
+        if (!pkgs[i] || !pkgs[i][0]) continue;
+        if (strcmp(command, pkgs[i]) == 0) return 2;
+        const size_t len = strlen(pkgs[i]);
+        if (strncmp(command, pkgs[i], len) == 0 && command[len] == ':') return 1;
     }
-    closedir(directory);
-    return child_fallback;
+    return -1;
+}
+
+static bool pid_cmdline_matches(pid_t pid) {
+    const char* pkgs[2] = {TargetPackageA(), TargetPackageB()};
+    return cmdline_rank(pid, pkgs, 2) >= 1;
+}
+
+// 1 — libil2cpp.so отображён, 0 — нет, -1 — карта не читается.
+static int proc_libil2cpp(pid_t pid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/maps", pid);
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    std::string text;
+    char buf[8192];
+    for (;;) {
+        const ssize_t n = read(fd, buf, sizeof(buf));
+        if (n > 0) {
+            text.append(buf, (size_t)n);
+            if (text.size() > (8u << 20)) break;   // столько карта не занимает
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        break;
+    }
+    close(fd);
+    return text.find("libil2cpp.so") != std::string::npos ? 1 : 0;
+}
+
+static pid_t find_game_pid() {
+    DIR* dir = opendir("/proc");
+    if (!dir) return -1;
+    const char* pkgs[2] = {TargetPackageA(), TargetPackageB()};
+    const pid_t self = getpid();
+    pid_t best = -1;
+    int best_rank = -1;
+    struct dirent* entry;
+    while ((entry = readdir(dir))) {
+        const pid_t pid = (pid_t)atoi(entry->d_name);
+        if (pid <= 0 || pid == self) continue;
+        const int rank = cmdline_rank(pid, pkgs, 2);
+        if (rank < 0) continue;
+        if (proc_libil2cpp(pid) == 1) { best = pid; break; }   // основной процесс игры — дальше не ищем
+        if (best_rank < 0 || rank > best_rank) { best = pid; best_rank = rank; }
+    }
+    closedir(dir);
+    if (best > 0) g_target_by_package = true;
+    return best;
+}
+
+// Пакет мог быть переименован (клон приложения, рабочий профиль, сборка с другим
+// applicationId) — тогда ищем просто процесс с отображённым libil2cpp.so. Чужие
+// приложения не цепляем: только процессы-приложения (uid >= 10000, то есть не
+// система и не root).
+static pid_t find_unity_pid() {
+    DIR* dir = opendir("/proc");
+    if (!dir) return -1;
+    const pid_t self = getpid();
+    pid_t found = -1;
+    struct dirent* entry;
+    while ((entry = readdir(dir))) {
+        const pid_t pid = (pid_t)atoi(entry->d_name);
+        if (pid <= 0 || pid == self) continue;
+        char path[32];
+        snprintf(path, sizeof(path), "/proc/%d", pid);
+        struct stat st{};
+        if (stat(path, &st) != 0 || st.st_uid < 10000) continue;
+        if (proc_libil2cpp(pid) == 1) { found = pid; g_target_by_package = false; break; }
+    }
+    closedir(dir);
+    return found;
+}
+
+// Процесс всё ещё тот самый? Одно чтение cmdline вместо полного перебора /proc:
+// перебор каждые 1.5 с виден в ядре, а привязку проверять нужно.
+static bool pid_still_game(pid_t pid) {
+    char path[32];
+    snprintf(path, sizeof(path), "/proc/%d", pid);
+    if (access(path, F_OK) != 0) return false;
+    if (g_target_by_package) return pid_cmdline_matches(pid);
+    return proc_libil2cpp(pid) == 1;
+}
+
+// Что случилось с привязкой — показывается тостом из кадра отрисовки (не отсюда:
+// тост живёт в потоке меню, и писать в него из потока привязки нельзя).
+static std::atomic<int> g_attach_report{ESP_ATTACH_OK};
+static int g_attach_report_shown = -1;
+
+static void ReportAttach(int state) {
+    if (state != g_attach_report.load()) g_attach_report.store(state);
 }
 
 static void start_attach_thread() {
@@ -339,22 +436,25 @@ static void start_attach_thread() {
     g_attach_thread = std::thread([]() {
         while (g_attach_running.load()) {
             if (!g_esp_attached) {
-                // Сначала пакет выбранной версии, затем второй: так клиент
-                // находит и бету под релизным пакетом, и наоборот.
-                pid_t pid = find_pid(TargetPackageA());
-                if (pid <= 0) pid = find_pid(TargetPackageB());
-                if (pid > 0 && esp_init(pid)) {
+                pid_t pid = find_game_pid();
+                if (pid <= 0) pid = find_unity_pid();
+                if (pid <= 0) {
+                    ReportAttach(ESP_ATTACH_NO_PID);
+                } else if (esp_init(pid)) {
                     g_target_pid = pid;
                     g_esp_attached = true;
+                    ReportAttach(ESP_ATTACH_OK);
+                } else {
+                    // Нашли процесс, но привязаться не вышло: причина — из game.cpp
+                    // (нет libil2cpp.so или память не читается).
+                    ReportAttach((int)esp_attach_state());
                 }
-            } else {
-                pid_t current = find_pid(TargetPackageA());
-                if (current <= 0) current = find_pid(TargetPackageB());
-                if (current != g_target_pid) {
-                    esp_reset();
-                    g_esp_attached = false;
-                    g_target_pid = -1;
-                }
+            } else if (!pid_still_game(g_target_pid) || !esp_alive_check()) {
+                // Процесс сменился/умер или память перестала читаться (отобрали
+                // доступ, перезапуск с тем же pid): привязываемся заново.
+                esp_reset();
+                g_esp_attached = false;
+                g_target_pid = -1;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
@@ -5062,6 +5162,18 @@ void RenderMenu() {
     bool anyOverlayVisible = g_sheet.visible || g_pop.visible;
     if (!io.MouseDown[0] && !anyOverlayVisible) g_input.touchConsumed = false;
 
+    // Привязка к игре: если её нет, молчать нельзя — на части устройств именно
+    // по этому тосту видно, почему «меню есть, а функции не работают».
+    if (g_attach_report_shown != g_attach_report.load()) {
+        g_attach_report_shown = g_attach_report.load();
+        switch (g_attach_report_shown) {
+            case ESP_ATTACH_NO_PID:    ShowToast(XS("Игра не найдена"));           break;
+            case ESP_ATTACH_NO_LIB:    ShowToast(XS("Клиент не поддерживается")); break;
+            case ESP_ATTACH_NO_ACCESS: ShowToast(XS("Нет доступа к памяти игры")); break;
+            default: break;   // привязка на месте
+        }
+    }
+
     DrawWatermark(dt);
     DrawToast(dt);
 
@@ -5806,6 +5918,7 @@ int main(int argc, char* argv[]) {
         drawBegin();
 
         ui::bar::set_game_alpha(0.f);
+        esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
         DrawEspOverlay();
         UpdateAim(ImGui::GetIO().DeltaTime);
         UpdateFarm(ImGui::GetIO().DeltaTime);

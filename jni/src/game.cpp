@@ -1,4 +1,5 @@
 #include "game.h"
+#include "mem_io.h"          // чтение/запись памяти игры: два способа + кэш блоков
 #include "game_offsets_active.h"   // активные оффсеты: релиз или бета (go::SelectBuild)
 #include "Vector.h"
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
@@ -19,22 +20,37 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
-// ---- Обёртки чтения/записи памяти игры -------------------------------------
-// process_vm_readv — это syscall, и стоит он на телефоне заметно дороже, чем
-// звучит «чтение памяти»: замер 15.09.2026 показал, что стадия автофарма
-// занимает десятки миллисекунд на кадр, а делает она ровно это — сотни и тысячи
-// вызовов (скан реестра: по чтению на запись прохода, три-четыре десятка на
-// классификацию новой записи). Поэтому обёртки ниже — минимальные: только сам
-// syscall, без замеров и счётчиков.
+// ---- Доступ к памяти игры ---------------------------------------------------
+// Подробности — в mem_io.h: два способа (process_vm_readv и /proc/<pid>/mem),
+// выбор пробой и автопереключение, кэш блоков на кадр. Здесь только обёртки,
+// которыми пользуется весь остальной код чтения: раньше это были прямые
+// вызовы process_vm_readv, и на устройствах, где политика ядра запрещает
+// именно его, не работало НИЧЕГО — привязка «удавалась», а каждое чтение
+// возвращало ошибку.
+static memio::Reader g_mem;
 
-static ssize_t remote_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
-    const ssize_t n = syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
-    return n;
+static bool rd_buf(uint64_t addr, void* out, size_t size) {
+    return g_mem.read(addr, out, size);
 }
 
-static ssize_t remote_vm_writev(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt, const struct iovec* remote_iov, unsigned long riovcnt, unsigned long flags) {
-    const ssize_t n = syscall(__NR_process_vm_writev, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
-    return n;
+template<typename T>
+static T rd(uint64_t addr) {
+    T v{};
+    g_mem.read(addr, &v, sizeof(T));
+    return v;
+}
+template<typename T>
+static bool rd_exact(uint64_t addr, T& value) {
+    value = {};
+    if (!addr) return false;
+    return g_mem.read(addr, &value, sizeof(T));
+}
+static uint64_t rd_ptr(uint64_t a) { return rd<uint64_t>(a); }
+static Vec3     rd_v3 (uint64_t a) { return rd<Vec3>(a);     }
+static Mat4     rd_m4 (uint64_t a) { return rd<Mat4>(a);     }
+
+static bool wr_buf(uint64_t addr, const void* in, size_t size) {
+    return g_mem.write(addr, in, size);
 }
 
 // Оффсеты — из активного набора: значения переключаются между релизом и
@@ -92,40 +108,6 @@ static unsigned g_farm_mask = 0;
 
 
 static bool vec3_is_finite(const Vec3& value);
-
-template<typename T>
-static T rd(uint64_t addr) {
-    T v{};
-    struct iovec lv = { &v, sizeof(T) };
-    struct iovec rv = { (void*)addr, sizeof(T) };
-    remote_vm_readv(g_pid, &lv, 1, &rv, 1, 0);
-    return v;
-}
-template<typename T>
-static bool rd_exact(uint64_t addr, T& value) {
-    value = {};
-    if (!addr) return false;
-    struct iovec local = {&value, sizeof(T)};
-    struct iovec remote = {(void*)addr, sizeof(T)};
-    return remote_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)sizeof(T);
-}
-static uint64_t rd_ptr(uint64_t a) { return rd<uint64_t>(a); }
-static Vec3     rd_v3 (uint64_t a) { return rd<Vec3>(a);     }
-static Mat4     rd_m4 (uint64_t a) { return rd<Mat4>(a);     }
-
-static bool rd_buf(uint64_t addr, void* out, size_t size) {
-    if (!addr || !size) return false;
-    struct iovec local = {out, size};
-    struct iovec remote = {(void*)addr, size};
-    return remote_vm_readv(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)size;
-}
-
-static bool wr_buf(uint64_t addr, const void* in, size_t size) {
-    if (!addr || !size) return false;
-    struct iovec local = {(void*)in, size};
-    struct iovec remote = {(void*)addr, size};
-    return remote_vm_writev(g_pid, &local, 1, &remote, 1, 0) == (ssize_t)size;
-}
 
 // ==== X-ray: камера отсекает всё ближе N метров (near clip plane) ==========
 // Пишется прямо в native Camera каждый кадр, пока включено; при выключении
@@ -272,10 +254,7 @@ static void always_day_tick() {
 static std::string read_remote_string(uint64_t address) {
     if (!address) return {};
     char buffer[96]{};
-    struct iovec local = {buffer, sizeof(buffer) - 1};
-    struct iovec remote = {(void*)address, sizeof(buffer) - 1};
-    ssize_t count = remote_vm_readv(g_pid, &local, 1, &remote, 1, 0);
-    if (count <= 0) return {};
+    if (!rd_buf(address, buffer, sizeof(buffer) - 1)) return {};
     buffer[sizeof(buffer) - 1] = '\0';
     return std::string(buffer);
 }
@@ -766,23 +745,63 @@ static void prune_player_text(const std::vector<uint64_t>& players) {
     }
 }
 
+// Базовый адрес отображённой библиотеки. Карта читается ЦЕЛИКОМ одним
+// дескриптором (раньше был fgets по строкам): это и быстрее, и надёжнее —
+// строку разбираем сами, а имя сверяем с последним сегментом пути, поэтому
+// подстрока в чужом имени (или « (deleted)» в конце) больше не путает.
 static uint64_t get_base(const char* lib) {
+    if (g_pid <= 0) return 0;
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", g_pid);
-    FILE* file = fopen(path, "r");
-    if (!file) return 0;
-    char line[512];
-    uint64_t fallback = 0;
-    while (fgets(line, sizeof(line), file)) {
-        if (!strstr(line, lib)) continue;
-        uint64_t start = 0, end = 0, file_offset = 0;
-        char permissions[5]{};
-        if (sscanf(line, "%lx-%lx %4s %lx", &start, &end, permissions, &file_offset) != 4) continue;
-        uint64_t load_bias = start - file_offset;
-        if (!fallback || load_bias < fallback) fallback = load_bias;
-        if (file_offset == 0) { fclose(file); return start; }
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+
+    std::string text;
+    char chunk[8192];
+    for (;;) {
+        const ssize_t n = read(fd, chunk, sizeof(chunk));
+        if (n > 0) {
+            text.append(chunk, (size_t)n);
+            if (text.size() > (8u << 20)) break;   // столько карта не занимает
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        break;
     }
-    fclose(file);
+    close(fd);
+    if (text.empty()) return 0;
+
+    const size_t lib_len = strlen(lib);
+    uint64_t fallback = 0;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t eol = text.find('\n', pos);
+        if (eol == std::string::npos) eol = text.size();
+        const char* line = text.c_str() + pos;
+        pos = eol + 1;
+
+        unsigned long long start = 0, end = 0, file_offset = 0;
+        char perms[5] = {};
+        if (sscanf(line, "%llx-%llx %4s %llx", &start, &end, perms, &file_offset) != 4)
+            continue;
+        const char* slash = strchr(line, '/');
+        if (!slash) continue;
+        size_t name_len = eol - (size_t)(slash - line);
+        while (name_len > 0 && (slash[name_len - 1] == '\r' || slash[name_len - 1] == ' '))
+            --name_len;
+        const char* deleted = " (deleted)";
+        const size_t deleted_len = strlen(deleted);
+        if (name_len > deleted_len &&
+            strncmp(slash + name_len - deleted_len, deleted, deleted_len) == 0)
+            name_len -= deleted_len;
+        if (name_len < lib_len) continue;
+        if (strncmp(slash + name_len - lib_len, lib, lib_len) != 0) continue;
+        if (name_len > lib_len && slash[name_len - lib_len - 1] != '/') continue;
+
+        const uint64_t load_bias = (uint64_t)start - (uint64_t)file_offset;
+        if (!fallback || load_bias < fallback) fallback = load_bias;
+        if (file_offset == 0) return (uint64_t)start;   // начало отображения — оно
+    }
     return fallback;
 }
 
@@ -3829,12 +3848,41 @@ int esp_camera_state() {
 //   C  = players with a valid cached skeleton
 //   D  = distinct transform hierarchies used by the bones (re-parenting),
 //        then the per-bone mask torso|armL|armR|legL|legR.
+// Почему привязка не удалась — main.cpp показывает это тостом, иначе на
+// «неудобных» устройствах чит молча ничего не делал.
+static EspAttachState g_attach_state = ESP_ATTACH_OK;
+
+EspAttachState esp_attach_state() { return g_attach_state; }
+
 bool esp_init(pid_t pid) {
+    esp_reset();
     g_pid = pid;
     g_il2cpp_base = get_base("libil2cpp.so");
-    if (!g_il2cpp_base) return false;
+    if (!g_il2cpp_base) {
+        g_attach_state = ESP_ATTACH_NO_LIB;
+        g_pid = -1;
+        return false;
+    }
+    if (!g_mem.bind(pid, g_il2cpp_base)) {
+        // Ни process_vm_readv, ни /proc/<pid>/mem: доступа к памяти нет.
+        g_attach_state = ESP_ATTACH_NO_ACCESS;
+        g_il2cpp_base = 0;
+        g_pid = -1;
+        return false;
+    }
+    g_attach_state = ESP_ATTACH_OK;
     return true;
 }
+
+// Начало кадра: кэш блоков памяти сбрасывается, чтобы кадр читал свежее
+// состояние игры, но внутри кадра повторные обращения к тем же полям не стоили
+// syscall'а (см. mem_io.h).
+void esp_mem_frame_begin() { g_mem.frame_begin(); }
+
+// Привязка ещё жива? Дешёвая проверка (одно чтение): процесс мог перезапуститься
+// с тем же pid, а доступ — отобрали. Без неё чит оставался «привязанным» и молча
+// ничего не делал до перезапуска приложения.
+bool esp_alive_check() { return g_mem.verify(); }
 
 // KCC.Move.Position: the simulated character position (capsule bottom) the
 // game itself moves the character with. Independent of the discovered
@@ -4058,6 +4106,8 @@ static void reset_world_caches() {
 }
 
 void esp_reset() {
+    g_mem.unbind();
+    g_attach_state = ESP_ATTACH_OK;
     g_pid = -1; g_il2cpp_base = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);

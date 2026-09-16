@@ -111,6 +111,10 @@ UI_EN = {
     'Зона огня сохранена': 'Fire zone saved',
     # версия игры (релиз/бета)
     'Версия игры': 'Game version', 'Релиз': 'Release', 'Бета': 'Beta',
+    # привязка к игре (тост, когда привязаться не удалось)
+    'Игра не найдена': 'Game not found',
+    'Клиент не поддерживается': 'Client not supported',
+    'Нет доступа к памяти игры': 'No access to the game memory',
     # разное и опции
     'Функции': 'Features', 'Иксрей': 'X-Ray', 'Всегда день': 'Always day',
     'Язык': 'Language', 'Интерфейс': 'Interface', 'Тёмная тема': 'Dark theme',
