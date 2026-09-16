@@ -1581,11 +1581,21 @@ static bool w2s_transform_camera(const Vec3& camera_position, const Vec4& camera
     return std::isfinite(output.x) && std::isfinite(output.y);
 }
 
+// Кадры подряд, в которых выборка позиций игроков сошлась в одну точку (см.
+// optimize_matrix_configuration): одному кадру столько же доверия, сколько
+// серии — нельзя, за приговором следует перепоиск смещения с ожиданием 0.6 с.
+static int g_offset_extent_fail_streak = 0;
+
 static bool optimize_matrix_configuration(uint64_t native_camera, const std::vector<uint64_t>& transforms) {
     std::vector<Vec3> samples;
     for (uint64_t source : transforms) {
         Vec3 position{};
         if (!read_entity_position(source, position)) continue;
+        // Нули после респауна и мусор из пула — не мировые позиции. Раньше они
+        // попадали в выборку, сходились в одну точку и объявляли смещение
+        // неверным: дальше шёл поиск смещения заново с ожиданием 0.6 с, и всё
+        // это время боксов не было вовсе.
+        if (!position_looks_like_world_space(position)) continue;
         samples.push_back(position);
         if (samples.size() >= 24) break;
     }
@@ -1603,10 +1613,19 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
     // Several players that never move apart mean the offset is not a position
     // at all -- but only when there are several of them. Alone on the server a
     // zero extent is normal and must not invalidate anything.
+    //
+    // Столпившиеся игроки и мигнувшее чтение выглядят одинаково, поэтому
+    // приговор смещению выносим только по серии кадров: одиночный кадр
+    // с одинаковыми отсчётами раньше запускал поиск смещения заново вместе с
+    // ожиданием 0.6 с, и всё это время боксов не было («мерцание на полсекунды»).
     if (samples.size() >= 2 && extent < 0.1F) {
-        g_player_position_validated = false;
+        if (++g_offset_extent_fail_streak >= 3) {
+            g_offset_extent_fail_streak = 0;
+            g_player_position_validated = false;
+        }
         return false;
     }
+    g_offset_extent_fail_streak = 0;
     if (samples.size() < 2 && !position_looks_like_world_space(samples[0])) return false;
 
     Mat4 validated_projection{}, validated_view{};
@@ -4217,6 +4236,21 @@ static int      g_frame_publish_fail_streak = 0;
 // Сколько раз подряд сторож сбрасывал кэши, не получив кадра. Три подряд —
 // повод перепривязаться целиком (см. esp_get_boxes).
 static int      g_frame_watchdog_resets = 0;
+// Кадры подряд, в которых позиции игроков не прочитались НИ У КОГО. Одного
+// такого кадра мало, чтобы объявить смещение позиции неверным: за этим идёт
+// поиск смещения заново с ожиданием «поля допишутся» (0.6 с), и всё это время
+// боксов нет вовсе — со стороны это «мерцание на полсекунды». Серия кадров
+// отличает мигнувшее чтение от настоящей перезагрузки мира.
+static int      g_local_position_fail_streak = 0;
+// Кадры подряд, в которых состав игроков не пересекается с тем, по которому
+// построены кэши (см. esp_get_boxes). Настоящая перезагрузка мира держится
+// кадров подряд, а одиночный кадр с чужими адресами — это сбой чтения списка, и
+// обнулять по нему все кэши (боксы, метки, раскладку скелета) нельзя.
+// Снапшот хранит именно тот состав, под который собраны кэши: сравнивать с
+// прошлым кадром нельзя — список подменяется уже на первом кадре смены, и
+// следующий кадр пересекается сам с собой (смену состава это бы не заметило).
+static int      g_world_change_streak = 0;
+static std::vector<uint64_t> g_population_snapshot;
 // Поток привязки в main.cpp читает этот флаг и переподключается к игре заново.
 static std::atomic<bool> g_want_reattach{false};
 
@@ -4231,6 +4265,7 @@ static void reset_marker_caches();
 static void reset_world_caches() {
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_validated = false;
+    g_population_snapshot.clear(); g_world_change_streak = 0;
     // The bone-learned transform layout dies with the old world: after a
     // reload it reads garbage from recycled memory (finite numbers, wrong
     // places). It is relearned from the first nearby skeleton; markers use
@@ -4259,6 +4294,9 @@ void esp_reset() {
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_frame_publish_fail_streak = 0; g_frame_watchdog_resets = 0;
+    g_local_position_fail_streak = 0; g_world_change_streak = 0;
+    g_population_snapshot.clear();
+    g_offset_extent_fail_streak = 0;
     g_want_reattach.store(false);
     g_aim_ref_valid = false;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
@@ -4391,15 +4429,31 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // the previous population). This also has to fire when we are alone on
         // the server -- respawning solo replaces our single PlayerManager and
         // used to leave every cache pointing at the dead one.
-        bool overlap = false;
-        if (!s_transforms.empty()) {
-            for (uint64_t previous : s_transforms) {
+        // Пересечение считаем не с прошлым кадром, а со снапшотом — составом,
+        // под который собраны кэши: список подменяется уже на первом кадре
+        // смены, и на следующем кадре сравнение с прошлым кадром пересекается
+        // само с собой, то есть полную смену состава оно бы не заметило.
+        bool overlap = g_population_snapshot.empty();
+        if (!overlap) {
+            for (uint64_t previous : g_population_snapshot) {
                 for (uint64_t current : refreshed) if (previous == current) { overlap = true; break; }
                 if (overlap) break;
             }
-            if (!overlap) {
+        }
+        if (!overlap) {
+            // Не с первого кадра: адреса списка иногда мигают (rd_ptr вернул
+            // чужую копию объекта или мусор из недописанного массива), и такой
+            // одиночный кадр раньше обнулял ВСЕ кэши — боксы, метки и раскладку
+            // скелета — то есть выглядел как «всё пропало и вернулось не туда».
+            // Настоящая перезагрузка мира отличается тем, что новый состав
+            // держится кадров подряд. Снапшот ставим ПОСЛЕ сброса: он чистит его.
+            if (++g_world_change_streak >= 3) {
                 reset_world_caches();
+                g_population_snapshot = refreshed;
             }
+        } else {
+            g_world_change_streak = 0;
+            g_population_snapshot = refreshed;
         }
         // Население то же, но кого-то не досчитались: почти всегда это сбой
         // чтения одного элемента, а не уход игрока. Возвращаем пропавших в
@@ -4529,9 +4583,34 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         has_local_position = local_entity_index != s_transforms.size();
         if (!has_local_position) {
-            g_player_position_validated = false;
+            // Позиции не прочитались ни у одного игрока. Это бывает и на
+            // одном кадре (мигнуло чтение по /proc/<pid>/mem после смерти или
+            // перезагрузки мира), поэтому смещение позиции объявляем неверным
+            // только по серии кадров: за этим следует поиск смещения заново с
+            // ожиданием 0.6 с, и всё это время боксов нет вовсе. Метки и фарм
+            // живут на кадре одной камеры — публикуем его, чтобы пропажа
+            // боксов не гасила и их.
+            if (++g_local_position_fail_streak >= 10) {
+                g_local_position_fail_streak = 0;
+                g_player_position_validated = false;
+            }
+            // Камера этого кадра уже прочитана — публикуем её как есть (без
+            // повторного чтения и повторного xray/day-тика), иначе вместе с
+            // боксами гаснут и метки, и фарм.
+            if (matrix_is_finite(vp)) {
+                g_frame_vp = vp; g_frame_vp_valid = true;
+                g_frame_sw = sw; g_frame_sh = sh;
+                Vec3 camera_only_position{};
+                if (camera_position_from_view(view, camera_only_position)) {
+                    g_frame_local_pos = camera_only_position;
+                    g_frame_local_valid = true;
+                }
+                g_frame_publish_fail_streak = 0;
+                g_frame_watchdog_resets = 0;
+            }
             return result;
         }
+        g_local_position_fail_streak = 0;
     }
 
     g_frame_vp = vp;

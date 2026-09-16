@@ -3836,7 +3836,7 @@ static void UpdateAim(float dt) {
     s_lostFrames = 0;
     if (best.id != s_lastId) {
         s_haveLast = false;                      // do not learn gain across a target switch
-        s_trackYaw.reset(); s_trackPitch.reset();
+        s_trackYaw.reset(); s_trackPitch.reset();  // и оценку коэффициента тоже
     }
 
     // Lead a moving target: the game applies our finger delta next frame, by
@@ -3966,42 +3966,46 @@ static void UpdateAim(float dt) {
     const float probeGainPitch = probeGainYaw;
     const bool  learned = (s_gainYaw != 0.f);
     // Порядок предпочтения коэффициента: оценка по реакции прицела (aim_learn.h)
-    // — она измеряется на этой самой петле, поэтому точнее прочих; затем
-    // выученный по повороту камеры; затем значение из настройки чувствительности.
-    const bool  lsYaw   = s_trackYaw.ready();
-    const bool  lsPitch = s_trackPitch.ready();
-    // Основа — значение из настройки игры: это множитель самой игры, а не догадка.
-    // Выученное значение (по повороту камеры или по реакции прицела) допускается
-    // только если оно ТОГО ЖЕ ЗНАКА и БОЛЬШЕ по модулю. Причина односторонности:
-    // шаг пальца считается как err/gain, поэтому заниженный коэффициент — это шаг
-    // больше нужного, а камера отрабатывает его не сразу: петля
-    // err(t+1) = err(t) - L*err(t-1) при L = k*gain_истинный/gain_рабочий > 1
-    // расходится (|z| = sqrt(L)), и прицел трясёт. Завышенный — просто медленнее.
-    // Знак важен отдельно: выученное со сменой знака уводит прицел мимо цели
-    // (в логе 15.09.2026 gain учился 0.072 -> 0.347 -> -0.072 и палец уходил на
-    // 160 px в край экрана).
-    // Знак: probeGain — значение из настройки игры, оно всегда положительное, а
-    // инверсия оси («инвертировать Y» в настройках) видна только в измерении.
-    // Поэтому отрицательное выученное значение для канала тангажа принимается
-    // (оно и есть инверсия), а для рыскания — нет: там смена знака означала
-    // ошибку обучения (лог 15.09.2026), и прицел уезжал мимо цели. Оценка по
-    // реакции прицела исключение и для рыскания: её знак измерен на самой петле
-    // (если бы аим вёл не туда, корреляция была бы с тем же знаком).
-    auto pickGain = [](float base, float learned, bool allow_flip) {
-        if (!(fabsf(base) > 1e-4f)) return learned;
-        if (!(fabsf(learned) > 1e-4f)) return base;
-        const bool flip = (learned > 0.f) != (base > 0.f);
-        if (flip && !allow_flip) return base;
-        // Знак берём из измерения (инверсия оси), а модуль — не меньше базового:
-        // завышенный коэффициент даёт шаг меньше нужного (медленнее, но устойчиво).
-        const float mag = (fabsf(learned) > fabsf(base)) ? fabsf(learned) : fabsf(base);
-        return flip ? -mag : mag;
+    // — она измеряется на этой самой петле; затем выученный по повороту камеры;
+    // затем значение из настройки чувствительности.
+    // Рабочий коэффициент = значение из настройки чувствительности (это
+    // множитель самой игры), подтянутое выученным — но только В ОДНУ СТОРОНУ и в
+    // узкой полосе. По порядку важности:
+    //
+    // 1. Знак берём у значения из настройки и НЕ переворачиваем по замеру. В
+    //    логе 15.09.2026 выученное уходило 0.072 -> 0.347 -> -0.072: это шум
+    //    замера (палец 160 px, смена знака ошибки), а не инверсия оси — с
+    //    положительным коэффициентом аим цель держит (остаток тангажа
+    //    0.03/-0.85 град в логе 16.09.2026 21:35). С отрицательным он шагает в
+    //    другую сторону от цели, ошибка растёт, палец уходит в край зоны: это и
+    //    видно как «аим дёргается».
+    // 2. Занижать нельзя. Шаг пальца считается как ошибка/коэффициент, поэтому
+    //    заниженный коэффициент — это шаг больше нужного, а камера отвечает не
+    //    сразу: петля err(t+1) = err(t) - L*err(t-1) при L = k*gain_истинный/
+    //    gain_рабочий > 1 расходится (|z| = sqrt(L)). Ровно это давал эталон
+    //    5.0 при настройке 2.00: рабочий 0.04 против измеренных 0.10 — на стенде
+    //    цель не захватывается вовсе, СКЗ остатка 6.6 град, палец ездит по зоне.
+    //    Поэтому нижняя граница подтяжки — сама настройка.
+    // 3. Завышать можно в пределах 1.4x и плавно: завышенный коэффициент даёт шаг
+    //    меньше нужного, то есть аим просто медленнее — безопасная сторона.
+    constexpr float kGainTrimMax   = 1.4f;
+    constexpr float kGainTrimStep  = 0.15f;   // ~10 тактов на новую подтяжку
+    static float s_trimYaw = 1.f, s_trimPitch = 1.f;
+    auto trimTo = [](float trim, float measured, float base) {
+        float want = 1.f;
+        if (fabsf(measured) > 1e-4f && fabsf(base) > 1e-4f) {
+            want = fabsf(measured) / fabsf(base);
+            if (want < 1.f) want = 1.f;
+            if (want > kGainTrimMax) want = kGainTrimMax;
+        }
+        return trim + (want - trim) * kGainTrimStep;
     };
-    float gy = pickGain(probeGainYaw, learned ? s_gainYaw : 0.f, false);
-    if (lsYaw) gy = pickGain(gy, s_trackYaw.gain(), true);
-    float gp = pickGain(probeGainPitch, (s_gainPitch != 0.f) ? s_gainPitch
-                                                             : (learned ? fabsf(s_gainYaw) : 0.f), true);
-    if (lsPitch) gp = pickGain(gp, s_trackPitch.gain(), true);
+    const bool lsYaw   = s_trackYaw.ready();
+    const bool lsPitch = s_trackPitch.ready();
+    s_trimYaw   = trimTo(s_trimYaw,   lsYaw   ? s_trackYaw.gain()   : (learned ? s_gainYaw   : 0.f), probeGainYaw);
+    s_trimPitch = trimTo(s_trimPitch, lsPitch ? s_trackPitch.gain() : s_gainPitch,                    probeGainPitch);
+    const float gy = probeGainYaw   * s_trimYaw;
+    const float gp = probeGainPitch * s_trimPitch;
 
     // Такт с подтверждением: если наш прошлый сдвиг ещё не отразился в
     // камере (игра не отрендерила кадр — низкий FPS), НЕ шлём новую
@@ -4043,6 +4047,28 @@ static void UpdateAim(float dt) {
         s_ackTimeouts = 0;
     }
 
+    // ---- «шаги в полёте» ---------------------------------------------------
+    // Игра отрабатывает наш шаг не в этом такте: поза камеры отстаёт на два
+    // кадра (замер в контроллере фарма — тот же палец и тот же экран). Когда
+    // настоящей оси камеры нет (esp_aim_camera_angles -> false, штатный режим на
+    // этом устройстве), такт с подтверждением выше не работает вовсе: s_pendDx
+    // обнуляется каждый кадр, и контроллер видит ещё не уменьшившийся остаток.
+    // Он шлёт следующую такую же поправку — и к моменту отклика камера
+    // поворачивается вдвое больше нужного: рывок через цель и обратно.
+    // Поэтому шаг считаем по остатку, каким он станет, когда камера покажет
+    // заказанное за два последних такта. Стенд (та же арифметика, задержка два
+    // такта): перелёт 4.8 -> 0.4 град, ход пальца при удержании цели
+    // 718 -> 457 px, захват с 60 град вдвое быстрее.
+    // Шаги берём по их очереди, а не по отклику ошибки: отклик сдвигается и
+    // движением цели, и тогда поправка «съедала» настоящий остаток (прогон
+    // стенда: остаток ошибки 10 град при шаге 1 px — прицел вставал).
+    static float s_flightYaw[2] = {0.f, 0.f}, s_flightPitch[2] = {0.f, 0.f};
+    const bool  useFlight = !haveCam;
+    const float flightYaw   = s_flightYaw[0] + s_flightYaw[1];
+    const float flightPitch = s_flightPitch[0] + s_flightPitch[1];
+    const float errYaw   = useFlight ? (best.yaw   - flightYaw   * gy) : best.yaw;
+    const float errPitch = useFlight ? (best.pitch + flightPitch * gp) : best.pitch;
+
     // ---- input quantum ----
     // The finger can only rest on the digitizer grid, so the camera can only
     // be steered in steps of (gain / units-per-pixel) degrees. At long range
@@ -4073,8 +4099,11 @@ static void UpdateAim(float dt) {
     float deadYaw = deadBase, deadPitch = deadBase;
     if (gainKnownYaw   && deadYaw   < qYaw   * 0.55f) deadYaw   = qYaw   * 0.55f;
     if (gainKnownPitch && deadPitch < qPitch * 0.55f) deadPitch = qPitch * 0.55f;
-    if (fabsf(best.yaw) < deadYaw && fabsf(best.pitch) < deadPitch) {
+    if (fabsf(errYaw) < deadYaw && fabsf(errPitch) < deadPitch) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        // Заказанное за прошлые такты камера дорабатывает и без нас.
+        s_flightYaw[0] = s_flightYaw[1];     s_flightYaw[1] = 0.f;
+        s_flightPitch[0] = s_flightPitch[1]; s_flightPitch[1] = 0.f;
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
         return;
     }
@@ -4088,6 +4117,11 @@ static void UpdateAim(float dt) {
         s_fingerDown = true;
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         s_holdFrames = 0;
+        // Палец опустился заново: окно замера начинается с нуля, иначе первая
+        // же пара «сдвиг пальца -> отклик» посчитает бросок пальца к точке.
+        s_trackYaw.reset(); s_trackPitch.reset();
+        s_flightYaw[0] = s_flightYaw[1] = 0.f;
+        s_flightPitch[0] = s_flightPitch[1] = 0.f;
         return; // let the game register the touch before moving it
     }
     if (s_holdFrames < 1) { ++s_holdFrames; Touch_Move(s_fx, s_fy); return; }
@@ -4121,23 +4155,23 @@ static void UpdateAim(float dt) {
     if (k > 1.f) k = 1.f;
     if (k < 0.05f) k = 0.05f;
 
-    float dx =  best.yaw   * k / gy;
-    float dy = -best.pitch * k / gp;
+    float dx =  errYaw   * k / gy;
+    float dy = -errPitch * k / gp;
 
     // Final approach: within a few input steps of the target, stop smoothing
     // and jump straight to the nearest reachable grid position. Smoothing
     // here would either creep for many frames or, once rounded, overshoot
     // and oscillate by a full step around the head.
-    if (gainKnownYaw && fabsf(best.yaw) < qYaw * 3.f)
-        dx = roundf((best.yaw / gy) * unitsPerPx) / unitsPerPx;
-    if (gainKnownPitch && fabsf(best.pitch) < qPitch * 3.f)
-        dy = roundf((-best.pitch / gp) * unitsPerPx) / unitsPerPx;
+    if (gainKnownYaw && fabsf(errYaw) < qYaw * 3.f)
+        dx = roundf((errYaw / gy) * unitsPerPx) / unitsPerPx;
+    if (gainKnownPitch && fabsf(errPitch) < qPitch * 3.f)
+        dy = roundf((-errPitch / gp) * unitsPerPx) / unitsPerPx;
 
     // Шаг не больше оставшейся ошибки. Иначе собственный шаг перелетает цель, и
     // следующий шаг считается уже по ошибке другого знака — то самое «дёргается»
     // (камера отрабатывает шаг не сразу, поэтому перелёт виден глазом).
-    if (fabsf(dx * gy) > fabsf(best.yaw)) dx = best.yaw / gy;
-    if (fabsf(dy * gp) > fabsf(best.pitch)) dy = -best.pitch / gp;
+    if (fabsf(dx * gy) > fabsf(errYaw)) dx = errYaw / gy;
+    if (fabsf(dy * gp) > fabsf(errPitch)) dy = -errPitch / gp;
 
     // Clamp per-frame travel so a bad gain estimate never slingshots.
     // Потолок шага поднимаем только коэффициенту, выученному по повороту камеры
@@ -4157,6 +4191,8 @@ static void UpdateAim(float dt) {
     dx = nx - s_fx; dy = ny - s_fy;
     if (dx == 0.f && dy == 0.f) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        s_flightYaw[0] = s_flightYaw[1];     s_flightYaw[1] = 0.f;
+        s_flightPitch[0] = s_flightPitch[1]; s_flightPitch[1] = 0.f;
         Touch_Move(s_fx, s_fy);
         return;
     }
@@ -4177,6 +4213,9 @@ static void UpdateAim(float dt) {
         s_fingerDown = false;
         s_fx = snapGrid(ptX); s_fy = snapGrid(ptY);
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        // Палец отпущен — заказанное игра не отработает вовсе.
+        s_flightYaw[0] = s_flightYaw[1] = 0.f;
+        s_flightPitch[0] = s_flightPitch[1] = 0.f;
         s_haveLast = false;
         // Перенос пальца — это не шаг прицела: замер по нему покажет мусор.
         s_trackYaw.reset(); s_trackPitch.reset();
@@ -4184,6 +4223,8 @@ static void UpdateAim(float dt) {
     }
     s_fx = nx; s_fy = ny;
     s_pendDx += dx; s_pendDy += dy;   // ждёт отработки камерой (ack-такт)
+    s_flightYaw[0] = s_flightYaw[1];     s_flightYaw[1] = dx;
+    s_flightPitch[0] = s_flightPitch[1]; s_flightPitch[1] = dy;
     Touch_Move(s_fx, s_fy);
 }
 
