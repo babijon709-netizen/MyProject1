@@ -1208,20 +1208,33 @@ static uint64_t find_direct_player_position_offset(const std::vector<uint64_t>& 
 // reload the position fields are still zero for a few frames; falling back to
 // the transform-hierarchy path on the very first failure used to lock the ESP
 // into that mode (boxes hanging 1.6 m below the player) until restart.
+static double mono_seconds();   // определён ниже: часы ожидания
 static int g_direct_position_fail_streak = 0;
 static int g_direct_position_recheck = 0;
+// Когда началась текущая серия неудач прямых полей. Ожидание «поля допишутся»
+// считается и по кадрам, и по времени: 60 кадров на перезагрузке мира (там же
+// просаживается FPS) растягивались в две-три секунды, и всё это время боксов не
+// было вовсе — ровно то, на что жалоба «после смерти прогружаются не сразу».
+static double g_direct_position_fail_since = 0.0;
+static constexpr double kDirectPositionSettleSeconds = 0.6;
 static bool g_body_caches_dirty = false; // clear per-player caches on the next frame
 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
     uint64_t best_offset = find_direct_player_position_offset(players);
     if (best_offset) {
         g_direct_position_fail_streak = 0;
+        g_direct_position_fail_since = 0.0;
         g_use_direct_player_position = true; g_player_position_offset = best_offset;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
         return true;
     }
-    // Give the direct fields a full second to settle before trying anything else.
-    if (++g_direct_position_fail_streak < 60) return false;
+    // Даём прямым полям устояться, прежде чем уходить на обход иерархии, но не
+    // дольше положенного: и по кадрам (60), и по времени (0.6 с) — что раньше.
+    const double now = mono_seconds();
+    if (g_direct_position_fail_since == 0.0) g_direct_position_fail_since = now;
+    ++g_direct_position_fail_streak;
+    if (g_direct_position_fail_streak < 60 &&
+        (now - g_direct_position_fail_since) < kDirectPositionSettleSeconds) return false;
     size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
     if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
         g_use_direct_player_position = false;
@@ -1241,6 +1254,7 @@ static void recheck_direct_player_position(const std::vector<uint64_t>& players)
     uint64_t best_offset = find_direct_player_position_offset(players);
     if (!best_offset) return;
     g_direct_position_fail_streak = 0;
+    g_direct_position_fail_since = 0.0;
     g_use_direct_player_position = true; g_player_position_offset = best_offset;
     g_matrix_configuration_validated = false;
     g_body_caches_dirty = true;
@@ -4323,7 +4337,13 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_skeleton_builds_this_frame = 0;
 
     if (!g_player_position_validated) {
-        if (!discover_player_position_offset(s_transforms)) return result;
+        if (!discover_player_position_offset(s_transforms)) {
+            // Мир ещё не отдал позиции (перезагрузка после смерти). Боксов в
+            // этом кадре нет, но метки и фарм живут на камере — без публикации
+            // они гаснут вместе с боксами на все секунды ожидания.
+            publish_camera_only_frame(sw, sh);
+            return result;
+        }
     } else {
         recheck_direct_player_position(s_transforms);
     }
