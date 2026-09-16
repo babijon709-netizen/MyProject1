@@ -1,7 +1,6 @@
 #include "main.h"
 #include "game.h"
 #include "game_offsets_active.h"  // активные оффсеты: релиз или бета (go::SelectBuild)
-#include "mini_log.h"             // мини-лог на устройстве (файл рядом с конфигами)
 #include <cmath>
 #include <atomic>
 #include <chrono>
@@ -42,6 +41,8 @@
 #include "Blur/Blur.h"
 #include "Android_touch/TouchHelperA.h"   // счётчики Upload (диагностика лага)
 #include "lang.h"                         // РУ/EN: перевод меню и визуалов
+#include "aim_learn.h"                    // оценка град/px по реакции прицела
+#include "text_utf8.h"                    // копия строки с обрезкой по UTF-8
 
 // Аватарка-видео в кружке слева сверху (кадры вшиты, см. VidAvatar.cpp).
 #include "VidAvatar.h"
@@ -423,15 +424,6 @@ static bool pid_still_game(pid_t pid) {
     return proc_libil2cpp(pid) == 1;
 }
 
-// Что случилось с привязкой — показывается тостом из кадра отрисовки (не отсюда:
-// тост живёт в потоке меню, и писать в него из потока привязки нельзя).
-static std::atomic<int> g_attach_report{ESP_ATTACH_OK};
-static int g_attach_report_shown = -1;
-
-static void ReportAttach(int state) {
-    if (state != g_attach_report.load()) g_attach_report.store(state);
-}
-
 static void start_attach_thread() {
     g_attach_running.store(true);
     g_attach_thread = std::thread([]() {
@@ -441,27 +433,19 @@ static void start_attach_thread() {
                 const bool by_package = (pid > 0);
                 if (pid <= 0) pid = find_unity_pid();
                 if (pid <= 0) {
-                    mlog::every("no_pid", 15.0,
-                        "привязка: процесс игры не найден (пакеты %s / %s, отображён libil2cpp.so "
-                        "у процессов: нет)", TargetPackageA(), TargetPackageB());
-                    ReportAttach(ESP_ATTACH_NO_PID);
+                    // Процесса игры нет: состояния не меняем, повторим попытку на
+                    // следующем круге. Игроку об этом не сообщаем — тост «игра не
+                    // запущена» только мешал (пока игра грузится, он вылезал всегда).
                 } else if (esp_init(pid)) {
                     g_target_pid = pid;
                     g_esp_attached = true;
-                    ReportAttach(ESP_ATTACH_OK);
                 } else {
                     // Нашли процесс, но привязаться не вышло: причина — из game.cpp
-                    // (нет libil2cpp.so или память не читается).
-                    mlog::every("attach_fail", 10.0,
-                        "привязка: процесс найден (pid %d, %s), но доступа нет — состояние %d",
-                        (int)pid, by_package ? "по пакету" : "по libil2cpp.so",
-                        (int)esp_attach_state());
-                    ReportAttach((int)esp_attach_state());
+                    // (нет libil2cpp.so или память не читается). Состояние видно в
+                    // esp_attach_state() для диагностики, тоста нет.
                 }
             } else if (!pid_still_game(g_target_pid) || !esp_alive_check() ||
                        esp_wants_reattach()) {
-                mlog::line("привязка: процесс %d больше не читается — отвязываюсь",
-                           (int)g_target_pid);
                 // Процесс сменился/умер или память перестала читаться (отобрали
                 // доступ, перезапуск с тем же pid): привязываемся заново.
                 esp_reset();
@@ -493,7 +477,7 @@ static ToastState g_toast;
 
 static void ShowToast(const char* msg) {
     if (!g_toast.visible || g_toast.closing) {
-        snprintf(g_toast.msg, sizeof(g_toast.msg), "%s", msg);
+        CopyTextUtf8(g_toast.msg, sizeof(g_toast.msg), msg);
         g_toast.life = 0.f; g_toast.closing = false; g_toast.visible = true;
         g_toast.slidePos = 0.f; g_toast.slideVel = 0.f;
         g_toast.textA = 0.f; g_toast.textAVel = 0.f;
@@ -501,7 +485,7 @@ static void ShowToast(const char* msg) {
         g_toast.widthVel = 0.f;
         g_toast.hasNext = false;
     } else {
-        snprintf(g_toast.nextMsg, sizeof(g_toast.nextMsg), "%s", msg);
+        CopyTextUtf8(g_toast.nextMsg, sizeof(g_toast.nextMsg), msg);
         g_toast.hasNext = true; g_toast.life = 0.f;
     }
 }
@@ -1147,23 +1131,6 @@ static const char* kCfgDir_() noexcept {
     return _s.d();
 }
 #define kCfgDir (kCfgDir_())
-
-// Мини-лог: benzware.log в «Загрузках» — оттуда файл достаётся проще всего
-// (файловый менеджер, кабель, любое приложение). Если каталога нет или он не
-// открылся, пишем рядом с конфигами: лучше лог не там, где просили, чем нигде.
-static std::string LogDir() {
-    static std::string cached;
-    if (!cached.empty()) return cached;
-    const char* candidates[] = {"/storage/emulated/0/Download/", "/sdcard/Download/"};
-    for (const char* dir : candidates) {
-        struct stat st{};
-        if (stat(dir, &st) == 0 && S_ISDIR(st.st_mode)) { cached = dir; break; }
-    }
-    if (cached.empty()) cached = kCfgDir;
-    return cached;
-}
-
-static std::string LogPath() { return LogDir() + "benzware.log"; }
 
 struct ConfigEntry { char name[64] = {}; };
 static ConfigEntry g_configs[kMaxConfigs] = {};
@@ -1885,7 +1852,7 @@ bool ToggleRow(const char* id, const char* lbl, bool* v, float& anim,
     bool popBlocking = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
 
     bool triggered = WasTappedHere() && !popBlocking && !IsScrollDragging() && !g_input.touchConsumed;
-    if (triggered) { *v=!*v; char _b[160]; snprintf(_b,sizeof(_b),XS("%s|%s"),lbl,*v?XS("ON"):XS("OFF")); ShowToast(_b); PlaySound(SND_CLICK); }
+    if (triggered) { *v=!*v; char _b[160]; snprintf(_b,sizeof(_b),XS("%s|%s"),lbl,*v?XS("Вкл"):XS("Выкл")); ShowToast(_b); PlaySound(SND_CLICK); }
 
     RenderToggleRowVisuals(dl, ImGui::GetFont(), ImGui::GetFontSize(),
                            pos.x, pos.y, avW, lbl, anim, 1.f,
@@ -2003,13 +1970,21 @@ static void DrawToast(float dt) {
     VisibleScreen(scrW, scrH);
 
     const char* sep = strchr(g_toast.msg, 124);
-    char np[128] = {}, sp[8] = {}; bool isOn = false;
+    char np[128] = {}, sp[128] = {};
+    bool isOn = false, isOff = false;
     if (sep) {
-        snprintf(np, sizeof(np), "%.*s", (int)(sep - g_toast.msg), g_toast.msg);
-        snprintf(sp, sizeof(sp), "%s", sep + 1);
-        isOn = (sp[0] == 'O' && sp[1] == 'N' && sp[2] == 0);
+        char head[128] = {};
+        CopyTextUtf8(head, sizeof(head), g_toast.msg);
+        if (char* cut = strchr(head, 124)) *cut = '\0';
+        CopyTextUtf8(np, sizeof(np), head);
+        // Буфер значения был на 8 байт — «Русский» в него не влезал и рвался.
+        CopyTextUtf8(sp, sizeof(sp), sep + 1);
+        // Вкл/Выкл — по своей строке, а не по «ON»: в русском это «Вкл», в
+        // английском — «On» из таблицы переводов.
+        isOn  = (strcmp(sp, XS("Вкл")) == 0);
+        isOff = (strcmp(sp, XS("Выкл")) == 0);
     } else {
-        snprintf(np, sizeof(np), "%s", g_toast.msg);
+        CopyTextUtf8(np, sizeof(np), g_toast.msg);
     }
 
     auto nsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, np);
@@ -2061,7 +2036,11 @@ static void DrawToast(float dt) {
         fg->AddText(fn, fs, {cx0, textY},
             IM_COL32(int(dim.x*255), int(dim.y*255), int(dim.z*255), int(ta*170)), XS(" - "));
         cx0 += ssz.x;
-        ImVec4 stCol = isOn ? ImVec4{0.196f, 0.843f, 0.294f, 1.f} : ImVec4{1.f, 0.231f, 0.188f, 1.f};
+        // Зелёный — включено, красный — выключено, нейтральный — всё прочее
+        // (например, выбранный язык: он не «выключен», красным ему не место).
+        ImVec4 stCol = isOn  ? ImVec4{0.196f, 0.843f, 0.294f, 1.f}
+                     : isOff ? ImVec4{1.f, 0.231f, 0.188f, 1.f}
+                             : ImVec4{txt.x, txt.y, txt.z, 1.f};
         fg->AddText(fn, fs, {cx0, textY},
             IM_COL32(int(stCol.x*255), int(stCol.y*255), int(stCol.z*255), int(ta*255)), sp);
     }
@@ -2352,7 +2331,7 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
         if (!g_sheet.closing && io.MouseClicked[0]) {
             if (io.MousePos.x >= tx - 12 && io.MousePos.x <= tx + tW + 12
              && io.MousePos.y >= cY + 8.f && io.MousePos.y <= cY + tH + 32.f)
-                { *v=!*v; char _b[160]; snprintf(_b,sizeof(_b),XS("%s|%s"),g_sheet.title,*v?XS("ON"):XS("OFF")); ShowToast(_b); }
+                { *v=!*v; char _b[160]; snprintf(_b,sizeof(_b),XS("%s|%s"),g_sheet.title,*v?XS("Вкл"):XS("Выкл")); ShowToast(_b); }
         }
         const char* st = *v ? XS("Включено") : XS("Выключено");
         auto stSz = fn->CalcTextSizeA(fs * 1.1f, FLT_MAX, 0, st);
@@ -2449,7 +2428,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             && clickedPos.x >= cX + inset && clickedPos.x <= cX + cW - inset
             && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
             *v = !*v;
-            char _b[160]; snprintf(_b, sizeof(_b), XS("%s|%s"), lbl, *v ? XS("ON") : XS("OFF")); ShowToast(_b);
+            char _b[160]; snprintf(_b, sizeof(_b), XS("%s|%s"), lbl, *v ? XS("Вкл") : XS("Выкл")); ShowToast(_b);
             PlaySound(SND_CLICK);
         }
         curY += rH;
@@ -3108,7 +3087,7 @@ float TabContent(int tab, float dt, float cW) {
             if (!io2.MouseDown[0] && s_colorHoldId == id) s_colorHoldId = nullptr;
 
             bool tapped = !openedColor && WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
-            if (tapped) { *v = !*v; char b[160]; snprintf(b,sizeof(b),XS("%s|%s"),lbl,*v?XS("ON"):XS("OFF")); ShowToast(b); PlaySound(SND_CLICK); }
+            if (tapped) { *v = !*v; char b[160]; snprintf(b,sizeof(b),XS("%s|%s"),lbl,*v?XS("Вкл"):XS("Выкл")); ShowToast(b); PlaySound(SND_CLICK); }
             if (col) {
                 ImVec4& c = *col;
                 dl->AddCircleFilled({dotX, cy}, dotR, IM_COL32((int)(c.x*255),(int)(c.y*255),(int)(c.z*255),255), 32);
@@ -3623,25 +3602,40 @@ static bool s_fingerDown = false;
 //
 // Игра считает поворот как «накопленный сдвиг касания × m_Sensitivity»
 // (MouseLook.ZJo, поле +0x34), поэтому град/px строго пропорционален
-// чувствительности. Измеренное на устройстве 0.10 град/px — это её значение при
-// заводской чувствительности 5.0 (MouseLook..ctor кладёт ровно 5.0f): отсюда
-// kGainAtRef, а дальше коэффициент едет за настройкой игрока — 2.5 -> 0.05,
-// 10 -> 0.20.
+// чувствительности, и коэффициент обязан ехать за настройкой игрока.
 //
-// Зачем это вместо прежнего зашитого 0.10: шаг пальца считается как err/gain, и
-// при чувствительности выше заводской прежнее число завышало град/px ровно во
-// столько же раз — палец не досылал пиксели, доводка тянулась в разы дольше, а
-// финальный снап по сетке цифровера промахивался мимо головы. Своей оси на
-// устройстве нет (поза камеры и ось выстрела не читаются), поэтому выучить
-// коэффициент не из чего — он обязан приходить из настройки игры, и только при
-// недоступной настройке остаётся прежнее измеренное 0.10 (как было раньше).
-static constexpr float kAimRefSensitivity = 5.0f;  // заводская m_Sensitivity (MouseLook..ctor)
+// 0.10 град/px — ИЗМЕРЕННОЕ на устройстве значение (EV «камера: коэффициент …»
+// в логе автофарма 14.09.2026: поворот/сдвиг даёт 0.05..0.18, медиана 0.10,
+// p10 0.078, p90 0.178). Эталон, к которому оно привязано, — та же настройка
+// игрока, при которой шёл замер: 2.00 (поле m_Sensitivity, прочитанное из игры;
+// строка аима «чувствительность 2.00» в my_benzware.log 16.09.2026 21:35).
+//
+// Раньше здесь стояло 5.0 (заводское значение из MouseLook..ctor) — и для игрока
+// с настройкой 2.0 запасной коэффициент выходил 0.04 при измеренных 0.10, то
+// есть шаг пальца считался в 2.5 раза больше нужного. Петля «палец -> камера ->
+// ошибка» при этом расходится (L = k * 0.10 / 0.04 = 1.25 > 1 при k <= 0.5),
+// и прицел трясёт: ровно то, на что жаловался игрок. Проверено на стенде
+// (tools/aim/sim_loop.cpp, модель петли): с рабочим 0.04 при камере 0.10 захват
+// «до 1 град» не наступает вообще, перелёт 5.5..9.8 град, СКЗ хвоста 4.5..6.1;
+// с рабочим 0.10 — захват за 1.30 с и хвост 0.00.
+//
+// Страховка от такой ошибки в эталоне — оценка коэффициента по реакции прицела
+// (aim_learn.h): она сходится к истинному значению за ~секунду и работает на
+// любом устройстве, даже если настройку в игре поменяли на ходу. Запасное
+// значение нужно только на первый такт, пока оценка не готова.
+static constexpr float kAimRefSensitivity = 2.0f;  // настройка игрока при замере 0.10 град/px
 static constexpr float kAimGainAtRef      = 0.10f; // измерено на устройстве при ней же
 
-// Во сколько раз настройка игрока отличается от заводской. Ровно во столько же
-// раз игра меняет град/px, поэтому вместе с настройкой едет и полоса
-// правдоподобия коэффициента: она отмерена при 5.0, и зажимать ею выученное
-// значение при 10 — это прицел, который вдвое медленнее, чем позволяет игра.
+// Полоса правдоподобия коэффициента (в единицах эталона): ниже 0.04 град/px
+// замеров нет, выше 0.25 — тоже (это уже чувствительность 5 и больше).
+static constexpr float kAimScaleMin = 0.4f;
+static constexpr float kAimScaleMax = 2.5f;
+
+// Во сколько раз настройка игрока отличается от эталонной (2.00 при замере).
+// Ровно во столько же раз игра меняет град/px: 2.0 -> 0.10, 5.0 -> 0.25,
+// 1.0 -> 0.05. Полоса правдоподобия едет вместе с настройкой — она отмерена при
+// 2.00, и зажимать ею значение при чувствительности 5 — это прицел, который
+// втрое медленнее, чем позволяет игра.
 //
 // Значение ДЕРЖИМ и обновляем редко. Чтение может не пройти в отдельном кадре
 // (нет локального игрока, мигнул список игроков), а шаг пальца считается как
@@ -3651,10 +3645,17 @@ static constexpr float kAimGainAtRef      = 0.10f; // измерено на ус
 // есть ручная правка настройки в меню игры) и читать чаще 1.5 с не пробуем.
 //
 // from_game = true — коэффициент выведен из настройки игры (значит, годится как
-// «известный»: по нему видно квант ввода), false — прежнее измеренное 0.10.
+// «известный»: по нему видно квант ввода), false — запасное измеренное 0.10.
+//
+// Монотонные секунды. Нужны ровно для одного: «принятое значение
+// чувствительности держим 1.5 с, чаще не читаем».
+static double MonoNow() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
 static float AimSensitivityScale(bool& from_game) {
-    constexpr float  kMinScale    = 0.4f;   // чувствительность 2 в настройках
-    constexpr float  kMaxScale    = 2.5f;   // 12.5 — верх настроек с запасом
     constexpr double kHoldSeconds = 1.5;    // чаще настройку руками не меняют
     constexpr float  kAdoptRatio  = 1.25f;  // мельче этого — не изменение
 
@@ -3662,7 +3663,7 @@ static float AimSensitivityScale(bool& from_game) {
     static bool   held_from_game = false;
     static double held_at        = 0.0;
 
-    const double now = mlog::seconds();
+    const double now = MonoNow();
     if (held_at > 0.0 && (now - held_at) < kHoldSeconds) {
         from_game = held_from_game;
         return held;
@@ -3673,8 +3674,8 @@ static float AimSensitivityScale(bool& from_game) {
     if (esp_read_look_sensitivity(sensitivity)) {
         float scale = sensitivity / kAimRefSensitivity;
         if (!std::isfinite(scale) || scale <= 0.f) scale = 1.f;
-        if (scale < kMinScale) scale = kMinScale;
-        if (scale > kMaxScale) scale = kMaxScale;
+        if (scale < kAimScaleMin) scale = kAimScaleMin;
+        if (scale > kAimScaleMax) scale = kAimScaleMax;
         const bool changed = !(scale < held * kAdoptRatio && scale > held / kAdoptRatio);
         if (!held_from_game || changed) { held = scale; held_from_game = true; }
     } else if (!held_from_game) {
@@ -3690,24 +3691,14 @@ static float AimSensitivityGain(bool& from_game) {
     return kAimGainAtRef * AimSensitivityScale(from_game);
 }
 
-// Что уходит в сводку мини-лога по аиму. Мало и по делу: коэффициент, откуда он
-// (выучен или из настройки), остаток ошибки и сколько раз за интервал шаг менял
-// направление — по последнему и видно «дёргает».
-struct AimLogState {
-    float gain_yaw = 0.f, gain_pitch = 0.f;
-    float err_yaw = 0.f, err_pitch = 0.f;
-    float sensitivity = 0.f;
-    int   steps = 0;      // шагов с прошлой сводки
-    int   flips = 0;      // смен направления шага
-    bool  learned = false, from_sensitivity = false, active = false;
-};
-static AimLogState g_aim_log;
-
 static void UpdateAim(float dt) {
     static float s_fx = 0.f, s_fy = 0.f;         // finger position (px)
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f; // absolute camera angles
     static bool  s_haveLast = false;
     static float s_gainYaw = 0.f, s_gainPitch = 0.f; // deg per px, learned
+    // Оценка коэффициента по реакции прицела (см. aim_learn.h): нужна там, где
+    // настоящей оси камеры нет и выучить его из поворота нечем.
+    static aim::GainTrack s_trackYaw, s_trackPitch;
     // Ввод, который камера ещё не отработала (низкий FPS игры): накопленный
     // сдвиг пальца с момента последнего НАБЛЮДАЕМОГО поворота камеры.
     static float s_pendDx = 0.f, s_pendDy = 0.f;
@@ -3737,7 +3728,7 @@ static void UpdateAim(float dt) {
     if (!active) {
         AimReleaseFinger(s_fingerDown);
         s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
-        g_aim_log = AimLogState{};
+        s_trackYaw.reset(); s_trackPitch.reset();
         return;
     }
 
@@ -3838,11 +3829,15 @@ static void UpdateAim(float dt) {
         if (++s_lostFrames > 6) {
             AimReleaseFinger(s_fingerDown);
             s_haveLast = false; s_lastId = 0;
+            s_trackYaw.reset(); s_trackPitch.reset();
         }
         return;
     }
     s_lostFrames = 0;
-    if (best.id != s_lastId) s_haveLast = false; // do not learn gain across a target switch
+    if (best.id != s_lastId) {
+        s_haveLast = false;                      // do not learn gain across a target switch
+        s_trackYaw.reset(); s_trackPitch.reset();
+    }
 
     // Lead a moving target: the game applies our finger delta next frame, by
     // which time the target has moved on. Use the target's angular velocity
@@ -3892,6 +3887,14 @@ static void UpdateAim(float dt) {
         else s_havePrevTgt = false;
     }
     s_lastId = best.id;
+
+    // ---- оценка коэффициента по реакции прицела ----
+    // Скармливаем тот остаток, по которому контроллер и будет считать шаг (после
+    // упреждения), и позицию пальца до этого шага. Коэффициент считается по
+    // корреляции «сдвинул палец -> изменилась ошибка», поэтому движение цели и
+    // мигание кости на него влияют как шум, а не как сдвиг.
+    s_trackYaw.observe(best.yaw, s_fx);
+    s_trackPitch.observe(best.pitch, s_fy);
 
     // ---- learn finger gain (deg per px) from the previous frame ----
     // Measured from the camera's own rotation, so a moving target does not
@@ -3962,17 +3965,32 @@ static void UpdateAim(float dt) {
     const float probeGainYaw   = AimSensitivityGain(gainFromSens);
     const float probeGainPitch = probeGainYaw;
     const bool  learned = (s_gainYaw != 0.f);
-    const float gy = learned ? s_gainYaw : probeGainYaw;
-    const float gp = (s_gainPitch != 0.f) ? s_gainPitch
-                                         : (learned ? fabsf(s_gainYaw) : probeGainPitch);
-
-    // Что уйдёт в сводку мини-лога по аиму (см. AimLogState).
-    g_aim_log.active = true;
-    g_aim_log.learned = learned;
-    g_aim_log.from_sensitivity = gainFromSens;
-    g_aim_log.gain_yaw = gy; g_aim_log.gain_pitch = gp;
-    g_aim_log.err_yaw = best.yaw; g_aim_log.err_pitch = best.pitch;
-    g_aim_log.sensitivity = gainFromSens ? kAimRefSensitivity * (probeGainYaw / kAimGainAtRef) : 0.f;
+    // Порядок предпочтения коэффициента: оценка по реакции прицела (aim_learn.h)
+    // — она измеряется на этой самой петле, поэтому точнее прочих; затем
+    // выученный по повороту камеры; затем значение из настройки чувствительности.
+    const bool  lsYaw   = s_trackYaw.ready();
+    const bool  lsPitch = s_trackPitch.ready();
+    // Основа — значение из настройки игры: это множитель самой игры, а не догадка.
+    // Выученное значение (по повороту камеры или по реакции прицела) допускается
+    // только если оно ТОГО ЖЕ ЗНАКА и БОЛЬШЕ по модулю. Причина односторонности:
+    // шаг пальца считается как err/gain, поэтому заниженный коэффициент — это шаг
+    // больше нужного, а камера отрабатывает его не сразу: петля
+    // err(t+1) = err(t) - L*err(t-1) при L = k*gain_истинный/gain_рабочий > 1
+    // расходится (|z| = sqrt(L)), и прицел трясёт. Завышенный — просто медленнее.
+    // Знак важен отдельно: выученное со сменой знака уводит прицел мимо цели
+    // (в логе 15.09.2026 gain учился 0.072 -> 0.347 -> -0.072 и палец уходил на
+    // 160 px в край экрана).
+    auto pickGain = [](float base, float learned) {
+        if (!(fabsf(base) > 1e-4f)) return learned;
+        if (!(fabsf(learned) > 1e-4f)) return base;
+        if ((learned > 0.f) != (base > 0.f)) return base;
+        return (fabsf(learned) > fabsf(base)) ? learned : base;
+    };
+    float gy = pickGain(probeGainYaw, learned ? s_gainYaw : 0.f);
+    if (lsYaw) gy = pickGain(gy, s_trackYaw.gain());
+    float gp = pickGain(probeGainPitch, (s_gainPitch != 0.f) ? s_gainPitch
+                                                             : (learned ? fabsf(s_gainYaw) : 0.f));
+    if (lsPitch) gp = pickGain(gp, s_trackPitch.gain());
 
     // Такт с подтверждением: если наш прошлый сдвиг ещё не отразился в
     // камере (игра не отрендерила кадр — низкий FPS), НЕ шлём новую
@@ -3989,9 +4007,18 @@ static void UpdateAim(float dt) {
     // s_pendDx обнуляется каждый кадр (см. ветку haveCam выше), поэтому шаг
     // никогда не «ждёт ответа» — иначе аим, у которого углов нет вовсе, стоял бы
     // по 0.25 с на каждом шаге.
+    // Ось камеры может быть «живой» по чтению и при этом не отражать наши шаги
+    // (замершая поза). Тогда подтверждения не будет никогда, и каждый шаг ждал бы
+    // свой таймаут: аим двигался бы рывками. Считаем таймауты подряд — после
+    // третьего выключаем такт на 5 с и работаем шагами по ошибке (он устойчив и
+    // без подтверждения: доля ошибки за такт ограничена половиной).
+    static int   s_ackTimeouts = 0;
+    static float s_ackDisabled = 0.f;
     const bool camAnswered = camMoved || s_camMovedPrev;
     s_camMovedPrev = camMoved;
-    if (s_fingerDown && !camAnswered &&
+    if (s_ackDisabled > 0.f) s_ackDisabled -= dt;
+    const bool ackGate = (s_ackDisabled <= 0.f);
+    if (ackGate && s_fingerDown && !camAnswered &&
         (fabsf(s_pendDx) >= 1.f || fabsf(s_pendDy) >= 1.f)) {
         s_pendTime += dt;
         if (s_pendTime < 0.25f) {
@@ -4000,6 +4027,9 @@ static void UpdateAim(float dt) {
         }
         s_pendDx = s_pendDy = 0.f;    // ввод потерялся — продолжаем
         s_pendTime = 0.f;
+        if (++s_ackTimeouts >= 3) { s_ackTimeouts = 0; s_ackDisabled = 5.f; }
+    } else if (camAnswered) {
+        s_ackTimeouts = 0;
     }
 
     // ---- input quantum ----
@@ -4013,10 +4043,10 @@ static void UpdateAim(float dt) {
     const float gridPx = 1.f / unitsPerPx;               // screen px per device unit
     // «Известный» коэффициент — это и выученный, и взятый из чувствительности игры:
     // второй не догадка, а множитель самой игры, и по нему видно квант ввода. Без
-    // этого при чувствительности выше заводской шаг цифровера больше мёртвой зоны,
+    // этого при чувствительности выше эталонной шаг цифровера больше мёртвой зоны,
     // и контроллер бесконечно дёргает цель то влево, то вправо — «сильно дергает».
-    const bool  gainKnownYaw   = (s_gainYaw != 0.f)   || gainFromSens;
-    const bool  gainKnownPitch = (s_gainPitch != 0.f) || gainFromSens;
+    const bool  gainKnownYaw   = (s_gainYaw != 0.f)   || gainFromSens || lsYaw;
+    const bool  gainKnownPitch = (s_gainPitch != 0.f) || gainFromSens || lsPitch;
     const float qYaw   = gainKnownYaw   ? fabsf(gy) * gridPx : 0.f; // deg per device unit
     const float qPitch = gainKnownPitch ? fabsf(gp) * gridPx : 0.f;
 
@@ -4092,7 +4122,17 @@ static void UpdateAim(float dt) {
     if (gainKnownPitch && fabsf(best.pitch) < qPitch * 3.f)
         dy = roundf((-best.pitch / gp) * unitsPerPx) / unitsPerPx;
 
+    // Шаг не больше оставшейся ошибки. Иначе собственный шаг перелетает цель, и
+    // следующий шаг считается уже по ошибке другого знака — то самое «дёргается»
+    // (камера отрабатывает шаг не сразу, поэтому перелёт виден глазом).
+    if (fabsf(dx * gy) > fabsf(best.yaw)) dx = best.yaw / gy;
+    if (fabsf(dy * gp) > fabsf(best.pitch)) dy = -best.pitch / gp;
+
     // Clamp per-frame travel so a bad gain estimate never slingshots.
+    // Потолок шага поднимаем только коэффициенту, выученному по повороту камеры
+    // (это прямое измерение град/px). Оценка по реакции прицела и значение из
+    // настройки работают с прежним потолком: большой шаг по непроверенному
+    // коэффициенту — это рывок через пол-экрана.
     const float maxStep = learned ? sh * 0.15f : sh * 0.05f;
     if (dx >  maxStep) dx =  maxStep;
     if (dx < -maxStep) dx = -maxStep;
@@ -4127,19 +4167,9 @@ static void UpdateAim(float dt) {
         s_fx = snapGrid(ptX); s_fy = snapGrid(ptY);
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         s_haveLast = false;
+        // Перенос пальца — это не шаг прицела: замер по нему покажет мусор.
+        s_trackYaw.reset(); s_trackPitch.reset();
         return;
-    }
-    {
-        // Знак отправленного шага: смена знака — это и есть колебание прицела
-        // вокруг цели. Считаем, чтобы в сводке лога было видно, «дёргает» ли
-        // аим и насколько (шагов и смен знака за интервал).
-        static float s_lastStepSign = 0.f;
-        const float sign = (dx > 0.f) ? 1.f : (dx < 0.f ? -1.f : 0.f);
-        if (sign != 0.f) {
-            if (s_lastStepSign != 0.f && sign != s_lastStepSign) ++g_aim_log.flips;
-            s_lastStepSign = sign;
-            ++g_aim_log.steps;
-        }
     }
     s_fx = nx; s_fy = ny;
     s_pendDx += dx; s_pendDy += dy;   // ждёт отработки камерой (ack-такт)
@@ -4287,7 +4317,7 @@ constexpr float kGiveUpDrain   = 20.f;   // бьём, а остаток не п�
 constexpr float kGiveUpBlind   = 45.f;   // то же, но остаток не читается
 
 // град/px, пока коэффициент не выучен, берётся из чувствительности настроек
-// клиента — AimSensitivityGain() (при заводской 5.0 это измеренные по логу
+// клиента — AimSensitivityGain() (для настройки 2.0 это измеренные по логу
 // 14.09.2026 0.10 град/px по yaw и ~0.06 по pitch; прежнее запасное 0.25
 // завышало коэффициент в 2.5 раза, и доводка тянулась втрое дольше).
 
@@ -5254,86 +5284,10 @@ static void TrafficLight(ImVec2 winPos, float railW, float dt) {
     }
 }
 
-// Состояние привязки словами — для сводки в мини-логе.
-static const char* AttachStateText(int state) {
-    switch (state) {
-        case ESP_ATTACH_OK:        return "есть";
-        case ESP_ATTACH_NO_PID:    return "процесс игры не найден";
-        case ESP_ATTACH_NO_LIB:    return "нет libil2cpp.so в карте памяти";
-        case ESP_ATTACH_NO_ACCESS: return "нет доступа к /proc/<pid>/mem";
-        default:                   return "неизвестно";
-    }
-}
-
 void RenderMenu() {
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
     if (dt > 0.1f) dt = 0.1f;
-
-    // ---- сводка в мини-лог (раз в 5 с) --------------------------------------
-    // Самое важное для «меню есть, функции молчат»: состояние привязки, счётчики
-    // чтений памяти и состояние аима. Без неё по логу не отличить «не читаем
-    // память» от «читаем, но ничего не находим».
-    {
-        unsigned long long reads = 0, fails = 0, reopens = 0, tagged = 0, junk = 0;
-        unsigned long long cuts = 0;
-        int last_errno = 0, players = 0;
-        esp_memio_stats(reads, fails, reopens, tagged, cuts, last_errno);
-        players = esp_nearby_player_count();
-        unsigned long long base = 0, list = 0, local = 0;
-        int list_count = 0;
-        esp_debug_state(base, list, list_count, local);
-        mlog::every("hb", 5.0,
-            "сводка: привязка %s, тач %s, боксов %d, игроков рядом %d, чтений %llu, "
-            "отказов %llu, переоткрытий %llu, адресов с меткой %llu, errno %d",
-            AttachStateText((int)g_attach_report.load()),
-            Touch_CanInject() ? "инъекция есть" : "инъекции нет",
-            g_last_box_count, players, reads, fails, reopens, tagged, last_errno);
-        // Разбор конвейера: база библиотеки, список игроков и локальный игрок.
-        // Если список нулевой — не резолвится класс; если элементы есть, а
-        // локального нет — не найден свой PlayerManager; и так далее.
-        mlog::every("pipe", 5.0,
-            "конвейер: база 0x%llx, список игроков 0x%llx (%d элементов), локальный 0x%llx, "
-            "обрывов чтения %llu, классов по структуре %llu",
-            base, list, list_count, local, cuts, esp_structural_accepts());
-        {
-            uint64_t junk_first = 0;
-            const char* junk_phase = "—";
-            esp_memio_junk(junk, junk_first, junk_phase);
-            if (junk > 0)
-                mlog::every("junk", 30.0,
-                    "мусорных адресов %llu (первый 0x%llx в фазе «%s») — читается поле "
-                    "объекта, которого нет", junk, junk_first, junk_phase);
-        }
-        // Куда именно читали, когда отказывало: если это адреса с меткой —
-        // виноват TBI/MTE, если обычные — раскладка оффсетов не от этого клиента.
-        {
-            uint64_t sample[8] = {};
-            const int n = esp_memio_fail_sample(sample, 8);
-            if (n > 0) {
-                char list[200] = {};
-                size_t used = 0;
-                for (int i = 0; i < n; ++i) {
-                    const int written = snprintf(list + used, sizeof(list) - used, "%s0x%llx",
-                                                 i ? " " : "", (unsigned long long)sample[i]);
-                    if (written <= 0 || (size_t)written >= sizeof(list) - used) break;
-                    used += (size_t)written;
-                }
-                mlog::every("fails", 10.0, "отказы чтения (последний в фазе «%s»): %s",
-                            esp_memio_fail_phase(), list);
-            }
-        }
-        mlog::every("aim", 5.0,
-            "аим: %s, коэффициент %.4f/%.4f (%s), чувствительность %.2f, остаток %.2f/%.2f град, "
-            "шагов %d, смен знака %d",
-            g_aim_log.active ? "работает" : "не активен",
-            g_aim_log.gain_yaw, g_aim_log.gain_pitch,
-            g_aim_log.learned ? "выучен" : (g_aim_log.from_sensitivity ? "из настройки" : "запасной"),
-            g_aim_log.sensitivity, g_aim_log.err_yaw, g_aim_log.err_pitch,
-            g_aim_log.steps, g_aim_log.flips);
-        g_aim_log.steps = 0;
-        g_aim_log.flips = 0;
-    }
 
     if (g_menu_orient != displayInfo.orientation || g_menu_dw != (int)displayInfo.width || g_menu_dh != (int)displayInfo.height) {
         g_menu_orient = displayInfo.orientation;
@@ -5388,18 +5342,6 @@ void RenderMenu() {
 
     bool anyOverlayVisible = g_sheet.visible || g_pop.visible;
     if (!io.MouseDown[0] && !anyOverlayVisible) g_input.touchConsumed = false;
-
-    // Привязка к игре: если её нет, молчать нельзя — на части устройств именно
-    // по этому тосту видно, почему «меню есть, а функции не работают».
-    if (g_attach_report_shown != g_attach_report.load()) {
-        g_attach_report_shown = g_attach_report.load();
-        switch (g_attach_report_shown) {
-            case ESP_ATTACH_NO_PID:    ShowToast(XS("Игра не найдена"));           break;
-            case ESP_ATTACH_NO_LIB:    ShowToast(XS("Клиент не поддерживается")); break;
-            case ESP_ATTACH_NO_ACCESS: ShowToast(XS("Нет доступа к памяти игры")); break;
-            default: break;   // привязка на месте
-        }
-    }
 
     DrawWatermark(dt);
     DrawToast(dt);
@@ -6100,20 +6042,7 @@ int main(int argc, char* argv[]) {
     prot::Init();
     screen_config();
 
-    // Мини-лог: файл рядом с конфигами. Открываем до всего остального, чтобы в
-    // него попало и то, что происходит при привязке к игре (она идёт в своём
-    // потоке, сразу после старта).
     mkdir(kCfgDir, 0777);
-    mlog::init(LogPath().c_str());
-    if (!mlog::ready()) {
-        // «Загрузки» не открылись (нет каталога, отобран доступ) — рядом с
-        // конфигами, лишь бы лог вообще был.
-        mlog::init((std::string(kCfgDir) + "benzware.log").c_str());
-    }
-    mlog::line("запуск: экран %dx%d, версия игры %s",
-               (int)displayInfo.width, (int)displayInfo.height,
-               go::CurrentBuild() == go::Build::Beta ? "бета" : "релиз");
-    mlog::line("лог: %s (обрезается на 256 КБ, архив .1)", mlog::path());
     int abs_ScreenX = displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width;
     int abs_ScreenY = displayInfo.height < displayInfo.width ? displayInfo.height : displayInfo.width;
 

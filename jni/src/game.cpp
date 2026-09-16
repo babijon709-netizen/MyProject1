@@ -1,10 +1,10 @@
 #include "game.h"
 #include "mem_io.h"                // чтение/запись памяти игры: /proc/<pid>/mem + кэш блоков
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
-#include "mini_log.h"              // мини-лог на устройстве: почему не читается игра
 #include "game_offsets_active.h"   // активные оффсеты: релиз или бета (go::SelectBuild)
 #include "Vector.h"
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
+#include "text_utf8.h"  // копия подписи в буфер без разрезания символа UTF-8
 
 #include <string.h>
 #include <strings.h>   // strncasecmp (weapon prefab label cleanup)
@@ -70,11 +70,6 @@ static bool      g_matrix_configuration_validated = false;
 static bool      g_camera_matrix_physical_match = false;
 static uint64_t  g_player_position_offset = PLAYER_POSITION;
 
-// Последние прочитанные список игроков и локальный игрок — только для мини-лога:
-// по ним сразу видно, где остановился конвейер («список не резолвится» / «список
-// есть, но пуст» / «локальный игрок не найден»).
-static uint64_t g_last_player_list = 0;
-static int      g_last_player_count = 0;
 
 struct TransformHierarchyLayout {
     uint64_t data_offset = 0x38;
@@ -452,8 +447,7 @@ static bool read_name_source(uint64_t player, int src, char* out, size_t cap) {
         if (!str || !read_managed_string(str, tmp, sizeof(tmp))) return false;
     }
     if (!tmp[0]) return false;
-    memcpy(out, tmp, cap);
-    out[cap - 1] = '\0';
+    CopyTextUtf8(out, cap, tmp);
     return true;
 }
 
@@ -486,7 +480,6 @@ static bool groups_are_allied(const PlayerGroup& local, const PlayerGroup& other
 }
 
 static bool player_display_name(uint64_t player, char* out, size_t cap) {
-    g_mem.set_phase("ники");
     if (!player || !out || cap < 2) return false;
     char human[32] = {};
     bool have_human = false;
@@ -516,7 +509,7 @@ static bool read_item_data_display_name(uint64_t item_data, char* out, size_t ca
     uint64_t str = rd_ptr(item_data + ITEMDATA_NAME);
     if (!str || !read_managed_string(str, tmp, sizeof(tmp))) str = rd_ptr(item_data + ITEMDATA_SHORTNAME);
     if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
-        memcpy(out, tmp, cap); out[cap - 1] = '\0'; return true;
+        CopyTextUtf8(out, cap, tmp); return true;
     }
     return false;
 }
@@ -531,8 +524,7 @@ static bool fp_object_display_name(uint64_t weapon, uint64_t player, bool strict
     char tmp[32] = {};
     uint64_t str = rd_ptr(weapon + FPOBJECT_OBJECT_NAME);
     if (str && read_managed_string(str, tmp, sizeof(tmp)) && tmp[0]) {
-        memcpy(out, tmp, cap);
-        out[cap - 1] = '\0';
+        CopyTextUtf8(out, cap, tmp);
         return true;
     }
     // Fall back to the held item definition (Item -> ItemData m_Name/m_ShortName).
@@ -680,8 +672,7 @@ static bool canonical_weapon_label(char* label, size_t cap) {
     if (!best) return false;
     const char* pick = (lang::english() || !best->ru) ? best->en : best->ru;
     if (!pick || !pick[0]) return false;
-    strncpy(label, pick, cap - 1);
-    label[cap - 1] = '\0';
+    CopyTextUtf8(label, cap, pick);
     return true;
 }
 
@@ -757,7 +748,6 @@ static void fix_weapon_label_spelling(char* label) {
 // Public entry point: resolve the held weapon and localise the label.
 // Unknown weapons keep their cleaned original name rather than disappearing.
 static bool player_weapon_name(uint64_t player, char* out, size_t cap, bool& definite) {
-    g_mem.set_phase("оружие");
     if (!player_weapon_name_raw(player, out, cap, definite)) return false;
     fix_weapon_label_spelling(out);
     canonical_weapon_label(out, cap);
@@ -826,9 +816,6 @@ static bool class_looks_alive(uint64_t klass) {
     return name >= 0x10000 && space >= 0x10000;
 }
 
-// Сколько классов принято по структуре (имя прочитать не удалось) — для лога.
-static unsigned long long g_class_structural_accepts = 0;
-
 // Сверка класса с ожидаемым именем и пространством имён.
 //   1 — имя прочитано и совпало;
 //   2 — имя прочитать не удалось, класс принят по структуре;
@@ -848,10 +835,7 @@ static int class_identity(uint64_t klass, const char* expected_name, const char*
     bool name_readable = false, ns_readable = false;
     const std::string name  = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME), &name_readable);
     const std::string space = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAMESPACE), &ns_readable);
-    if (!name_readable && !ns_readable) {
-        ++g_class_structural_accepts;
-        return 2;
-    }
+    if (!name_readable && !ns_readable) return 2;
     if (name_readable && name != expected_name) return 0;
     if (ns_readable && space != expected_ns) return 0;
     return 1;
@@ -873,35 +857,6 @@ static bool base_resolves_game(uint64_t base) {
         if (class_identity(candidate, "GameControllerBase", "Oxide") != 0) return true;
     }
     return false;
-}
-
-// Время запуска процесса игры (/proc/<pid>/stat, поле 22, в тиках после загрузки).
-// Нужно ровно для одного: отличить «тот же процесс, у которого переехала
-// библиотека» от «игра перезапустилась и pid успел достаться ей же» — а это
-// разные причины поломки, и лечатся они по-разному.
-static unsigned long long proc_start_ticks(pid_t pid) {
-    char path[40];
-    snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
-    const int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return 0;
-    char buffer[512] = {};
-    const ssize_t n = read(fd, buffer, sizeof(buffer) - 1);
-    close(fd);
-    if (n <= 0) return 0;
-    // Второе поле — имя в скобках, оно может содержать пробелы: начинаем после
-    // последней ')'.
-    const char* p = strrchr(buffer, ')');
-    if (!p) return 0;
-    unsigned long long value = 0;
-    int field = 2;
-    while (*p) {
-        while (*p == ' ') ++p;
-        if (!*p) break;
-        ++field;
-        if (field == 22) { value = strtoull(p, nullptr, 10); break; }
-        while (*p && *p != ' ') ++p;
-    }
-    return value;
 }
 
 static bool validate_player_list(uint64_t list, uint64_t player_class) {
@@ -1320,13 +1275,6 @@ static bool g_body_caches_dirty = false; // clear per-player caches on the next 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
     uint64_t best_offset = find_direct_player_position_offset(players);
     if (best_offset) {
-        if (g_direct_position_fail_streak > 0) {
-            const double waited = (g_direct_position_fail_since > 0.0)
-                ? (mono_seconds() - g_direct_position_fail_since) : 0.0;
-            mlog::line("позиции игроков: смещение 0x%llx найдено после %.2f с ожидания "
-                       "(%d кадров без полей)", (unsigned long long)best_offset, waited,
-                       g_direct_position_fail_streak);
-        }
         g_direct_position_fail_streak = 0;
         g_direct_position_fail_since = 0.0;
         g_use_direct_player_position = true; g_player_position_offset = best_offset;
@@ -1383,7 +1331,6 @@ static constexpr uint64_t MOUSE_LOOK_SENSITIVITY_OFFSET = 0x34;
 
 bool esp_read_look_sensitivity(float& out) {
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
-    g_mem.set_phase("чувствительность");
 
     uint64_t player = resolve_local_player();
     if (!player) {
@@ -1682,8 +1629,7 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
 static std::vector<uint64_t> read_configured_player_transforms() {
     std::vector<uint64_t> transforms;
     uint64_t list = resolve_runtime_player_list();
-    g_last_player_list = list;
-    if (!list) { g_last_player_count = 0; return transforms; }
+    if (!list) return transforms;
 
     uint64_t local_player = resolve_local_player();
     if (local_player && !player_list_contains(list, local_player)) {
@@ -1708,7 +1654,6 @@ static std::vector<uint64_t> read_configured_player_transforms() {
         }
         uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
         int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-        g_last_player_count = (int)count;
         if (!items || count <= 0 || count > 512) {
             // Empty list, but the local player himself is known: he alone is
             // enough for the whole pipeline (camera, matrix validation and
@@ -1953,8 +1898,7 @@ static bool read_gameobject_name_at(uint64_t native_go, uint64_t name_offset, bo
         }
     }
     if (!string_is_reasonable_name(buffer)) return false;
-    strncpy(out, buffer, cap - 1);
-    out[cap - 1] = '\0';
+    CopyTextUtf8(out, cap, buffer);
     return true;
 }
 
@@ -3238,8 +3182,7 @@ static bool weapon_label_from_object_name(const char* raw, char* out, size_t cap
     bool has_alpha = false;
     for (const char* p = s; *p; ++p) if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')) { has_alpha = true; break; }
     if (!has_alpha) return false;
-    strncpy(out, s, cap - 1);
-    out[cap - 1] = '\0';
+    CopyTextUtf8(out, cap, s);
     return true;
 }
 
@@ -3539,7 +3482,6 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat
 }
 
 static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, float sw, float sh, EspBox& box) {
-    g_mem.set_phase("скелеты");
     box.has_skeleton = false;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) box.bone_valid[bone] = false;
     for (int i = 0; i < 3; ++i) box.aim_valid[i] = false;
@@ -4038,12 +3980,7 @@ bool esp_init(pid_t pid) {
     if (candidate_count == 0) {
         g_attach_state = ESP_ATTACH_NO_LIB;
         g_pid = -1;
-        // Без базового адреса читать нечего. В лог — с причиной: чаще всего это
-        // не карта памяти, а её отсутствие у чужого процесса (или сам процесс
-        // не тот: клиент другой сборки).
-        mlog::every("no_lib", 5.0,
-            "привязка: pid %d — libil2cpp.so не найден (/proc/%d/maps не читается "
-            "или клиент другого типа)", (int)pid, (int)pid);
+        // Без базового адреса читать нечего.
         return false;
     }
 
@@ -4053,12 +3990,9 @@ bool esp_init(pid_t pid) {
     // на месте, поэтому прежняя проверка доступа его принимала — а метаданные
     // внутри мертвы, и весь чит молча ничего не находил до перезапуска чита.
     uint64_t chosen = 0;
-    bool verified = false;
     for (int i = 0; i < candidate_count; ++i) {
         if (!g_mem.bind(pid, candidates[i])) continue;
-        if (base_resolves_game(candidates[i])) {
-            chosen = candidates[i]; verified = true; break;
-        }
+        if (base_resolves_game(candidates[i])) { chosen = candidates[i]; break; }
         g_mem.unbind();
     }
     if (!chosen) {
@@ -4070,12 +4004,6 @@ bool esp_init(pid_t pid) {
     }
     if (!chosen) {
         // /proc/<pid>/mem не открылся или не читается: доступа к памяти нет.
-        const int err = g_mem.last_error();
-        mlog::every("no_access", 5.0,
-            "привязка: pid %d — /proc/%d/mem недоступен (%s, errno %d)",
-            (int)pid, (int)pid,
-            g_mem.last_error_was_open() ? "открытие файла" : "чтение памяти",
-            err);
         g_attach_state = ESP_ATTACH_NO_ACCESS;
         g_il2cpp_base = 0;
         g_pid = -1;
@@ -4084,20 +4012,6 @@ bool esp_init(pid_t pid) {
 
     g_il2cpp_base = chosen;
     g_attach_state = ESP_ATTACH_OK;
-    {
-        char list[200] = {};
-        size_t used = 0;
-        for (int i = 0; i < candidate_count; ++i) {
-            const int written = snprintf(list + used, sizeof(list) - used, "%s0x%llx",
-                                         i ? " " : "", (unsigned long long)candidates[i]);
-            if (written <= 0 || (size_t)written >= sizeof(list) - used) break;
-            used += (size_t)written;
-        }
-        mlog::line("привязка: pid %d (запуск %llu), баз %d: %s — выбран 0x%llx (%s)",
-                   (int)pid, proc_start_ticks(pid), candidate_count, list,
-                   (unsigned long long)chosen,
-                   verified ? "класс игры резолвится" : "класс не подтвердился, но память открылась");
-    }
     return true;
 }
 
@@ -4348,7 +4262,6 @@ void esp_reset() {
     g_want_reattach.store(false);
     g_aim_ref_valid = false;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
-    g_class_structural_accepts = 0;
     g_game_controller_class = 0; g_local_player = 0;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_offset = PLAYER_POSITION;
@@ -4431,7 +4344,6 @@ static bool publish_camera_only_frame(float sw, float sh) {
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
-    g_mem.set_phase("боксы");
 
 
     // Watchdog: every frame that fails to publish a camera + local position
@@ -4444,8 +4356,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         g_frame_transforms.clear();
         reset_world_caches();
         ++g_frame_watchdog_resets;
-        mlog::line("мир: 4 с без кадра (сторож) — сброс кэшей, ищу раскладку заново (подряд %d)",
-                   g_frame_watchdog_resets);
         // Три сброса подряд — это ~12 с полной слепоты: сброс кэшей уже не
         // помогает, значит неверна сама привязка (база библиотеки, права,
         // перезапуск игры). Просим поток привязки подключиться заново — он
@@ -4453,7 +4363,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (g_frame_watchdog_resets >= 3) {
             g_frame_watchdog_resets = 0;
             g_want_reattach.store(true);
-            mlog::line("привязка: 12 с без кадра — перепривязываюсь заново");
         }
     }
 
@@ -4489,8 +4398,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (overlap) break;
             }
             if (!overlap) {
-                mlog::line("мир: население сменилось (%d -> %d) — перезагрузка, сброс кэшей",
-                           (int)s_transforms.size(), (int)refreshed.size());
                 reset_world_caches();
             }
         }
@@ -4516,8 +4423,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // FALL THROUGH to the empty-list branch below: it publishes the
         // camera-only frame that keeps markers and the farm alive solo.
         if (!s_transforms.empty()) {
-            mlog::line("мир: список игроков пропал на %d кадров — сброс кэшей",
-                       g_frame_transforms_empty_streak);
             s_transforms.clear(); reset_world_caches();
         }
     }
@@ -4937,62 +4842,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         result.push_back(box);
     }
 
-    // Пауза без боксов: по этой строке видно, сколько именно ждал игрок после
-    // смерти/респавна (жалоба «боксы прогружаются не сразу»).
-    {
-        static double s_last_boxes_at = 0.0;
-        static size_t s_last_boxes = 0;
-        const double now = mono_seconds();
-        if (!result.empty() && s_last_boxes == 0 && s_last_boxes_at > 0.0)
-            mlog::line("боксы: появились (%d шт.) после паузы %.2f с",
-                       (int)result.size(), now - s_last_boxes_at);
-        if (!result.empty()) s_last_boxes_at = now;
-        s_last_boxes = result.size();
-    }
-
     return result;
 }
 
 int esp_nearby_player_count() { return g_frame_player_count; }
 
-void esp_memio_stats(unsigned long long& reads, unsigned long long& fails,
-                     unsigned long long& reopens, unsigned long long& tagged,
-                     unsigned long long& cuts, int& last_errno) {
-    reads = g_mem.reads_total();
-    fails = g_mem.read_fails_total();
-    reopens = g_mem.reopens_total();
-    tagged = g_mem.tagged_total();
-    cuts = g_mem.cut_total();
-    last_errno = g_mem.last_error();
-}
-
-int esp_memio_fail_sample(uint64_t* out, int max) {
-    return g_mem.fail_sample(out, max);
-}
-
-const char* esp_memio_fail_phase() {
-    const char* p = g_mem.fail_phase();
-    return p ? p : "—";
-}
-
 bool esp_wants_reattach() { return g_want_reattach.exchange(false); }
-
-unsigned long long esp_structural_accepts() { return g_class_structural_accepts; }
-
-void esp_memio_junk(unsigned long long& junk, uint64_t& first_address, const char*& phase) {
-    junk = g_mem.junk_total();
-    first_address = g_mem.junk_first_address();
-    const char* p = g_mem.junk_phase();
-    phase = p ? p : "—";
-}
-
-void esp_debug_state(unsigned long long& base, unsigned long long& list, int& count,
-                     unsigned long long& local) {
-    base = g_il2cpp_base;
-    list = g_last_player_list;
-    count = g_last_player_count;
-    local = g_local_player;
-}
 
 
 // ===================== World markers: ore nodes and animals =====================
@@ -5769,7 +5624,6 @@ static bool marker_world_position(uint64_t transform, Vec3& out) {
 // Все отказы (словарь не читается, мир грузится) возвращают true: иначе вызывающий
 // поставит «продолжать немедленно» и будет долбить в стену каждый кадр.
 static bool rebuild_marker_entities() {
-    g_mem.set_phase("маркеры");
     if (g_marker_scan_cursor < 0) {
         // Начало цикла: действующий список НЕ трогаем — он показывается до
         // завершения сборки, поэтому маркеры не мигают.
@@ -6303,7 +6157,6 @@ static int farm_classify_identity(uint64_t identity, uint64_t identity_class,
 // Один шаг скана. Вызывается каждый кадр; сам решает, пора ли начинать проход и
 // не пора ли его закончить. Дороже kFarmScanBudget записей за кадр не делает.
 static void farm_scan_tick() {
-    g_mem.set_phase("фарм");
     const double now = mono_seconds();
     if (!g_farm_scan_run && now < g_farm_next_scan) return;
 

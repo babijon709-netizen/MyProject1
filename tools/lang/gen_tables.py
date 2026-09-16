@@ -63,40 +63,6 @@ def has_cyr(s):
     return re.search(r'[А-Яа-яЁё]', s) is not None
 
 
-def strip_log_calls(src):
-    """Убрать аргументы вызовов мини-лога (mlog::line / mlog::every) и меток фазы.
-
-    Их строки не переводятся: лог разбирают по русским подписям на устройстве,
-    как и прежние строки лога автофарма. Без этого правила любая запись в лог или
-    подпись фазы чтения требовала бы английского перевода и валила бы сборку."""
-    out, i, n = [], 0, len(src)
-    needles = ('mlog::line(', 'mlog::every(', 'set_phase(')
-    while i < n:
-        needle = next((nd for nd in needles if src.startswith(nd, i)), None)
-        if needle is None:
-            out.append(src[i]); i += 1; continue
-        out.append(' ' * len(needle)); i += len(needle)
-        depth = 1
-        while i < n and depth:
-            c = src[i]
-            if c == '"':
-                out.append(' '); i += 1
-                while i < n and src[i] != '"':
-                    if src[i] == '\\':
-                        out.append('  '); i += 2; continue
-                    out.append(' '); i += 1
-                if i < n:
-                    out.append(' '); i += 1
-                continue
-            if c == '(':
-                depth += 1
-            elif c == ')':
-                depth -= 1
-            out.append(' ' if depth else ')')
-            i += 1
-    return ''.join(out)
-
-
 # ---------------------------------------------------------------------------
 # Интерфейс: русская строка (как написана в коде) -> английская.
 # Форматные строки переводятся вместе с единицами: "%.0f м" -> "%.0f m".
@@ -145,10 +111,6 @@ UI_EN = {
     'Зона огня сохранена': 'Fire zone saved',
     # версия игры (релиз/бета)
     'Версия игры': 'Game version', 'Релиз': 'Release', 'Бета': 'Beta',
-    # привязка к игре (тост, когда привязаться не удалось)
-    'Игра не найдена': 'Game not found',
-    'Клиент не поддерживается': 'Client not supported',
-    'Нет доступа к памяти игры': 'No access to the game memory',
     # разное и опции
     'Функции': 'Features', 'Иксрей': 'X-Ray', 'Всегда день': 'Always day',
     'Язык': 'Language', 'Интерфейс': 'Interface', 'Тёмная тема': 'Dark theme',
@@ -157,6 +119,8 @@ UI_EN = {
     'Система': 'System', 'Выйти?': 'Exit?', 'Выйти': 'Exit',
     'Приложение будет закрыто.': 'The app will close.', 'Готово': 'Done',
     'Отмена': 'Cancel', 'Включено': 'On', 'Выключено': 'Off',
+    # короткие слова для тостов: значение в тосте обязано быть коротким
+    'Вкл': 'On', 'Выкл': 'Off',
     # вкладки
     'Меню': 'Menu', 'Разное': 'Misc', 'Конфиги': 'Configs', 'Опции': 'Options',
 }
@@ -231,8 +195,8 @@ WEAPON_EN_PICK = {
 
 def build_text():
     """Текст lang_tables.inc. Бросает SystemExit, если что-то не переведено."""
-    game = strip_log_calls(strip_comments(open(GAME, encoding='utf-8').read()))
-    main_src = strip_log_calls(strip_comments(open(MAIN, encoding='utf-8').read()))
+    game = strip_comments(open(GAME, encoding='utf-8').read())
+    main_src = strip_comments(open(MAIN, encoding='utf-8').read())
 
     # --- оружие: имена берём из таблицы игры, колонка `en` -------------------
     visual = dict(VISUAL_EN)

@@ -107,33 +107,6 @@ int         esp_nearby_player_count();
 // «читается, но с отказами» — это разные поломки.
 // tagged — сколько адресов пришло с меткой старшего байта (TBI/MTE): метка есть
 // на Android 11+, и без её снятия чтения по указателям из игры отказывают с EIO.
-void        esp_memio_stats(unsigned long long& reads, unsigned long long& fails,
-                            unsigned long long& reopens, unsigned long long& tagged,
-                            unsigned long long& cuts, int& last_errno);
-
-// Сколько классов принято по структуре, потому что имя класса прочитать не
-// удалось (память метаданных на части устройств недоступна) — для лога.
-unsigned long long esp_structural_accepts();
-
-// Последние адреса отказов чтения (не более `max`) — для разбора в логе.
-// Возвращает, сколько адресов записано.
-int         esp_memio_fail_sample(uint64_t* out, int max);
-
-// Фаза чтения, в которой случился последний настоящий отказ (для лога).
-const char* esp_memio_fail_phase();
-
-// Отказы на «мусорных» адресах (ниже начала адресного пространства): это ошибка
-// логики чтения, а не потеря доступа. Отдаём первый адрес и конвейер, который
-// читал, — по ним видно, где именно читается поле несуществующего объекта.
-void        esp_memio_junk(unsigned long long& junk, uint64_t& first_address,
-                           const char*& phase);
-
-// Состояние конвейера для мини-лога: база библиотеки, список игроков, сколько в
-// нём элементов и найденный локальный игрок. По этим четырём числам в логе сразу
-// видно, где остановилось чтение.
-void        esp_debug_state(unsigned long long& base, unsigned long long& list,
-                            int& count, unsigned long long& local);
-
 // Пора ли подключиться к игре заново (сторож трижды не смог собрать кадр).
 // Флаг одноразовый: чтение сбрасывает его.
 bool        esp_wants_reattach();
