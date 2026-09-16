@@ -225,7 +225,6 @@ int main() {
 
             uint8_t* local = (uint8_t*)mmap(nullptr, span, PROT_READ | PROT_WRITE,
                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            struct iovec remote[kFields];
 
             struct timespec t0 {}, t1 {}, t2 {};
             clock_gettime(CLOCK_MONOTONIC, &t0);
