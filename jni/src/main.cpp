@@ -3980,17 +3980,28 @@ static void UpdateAim(float dt) {
     // Знак важен отдельно: выученное со сменой знака уводит прицел мимо цели
     // (в логе 15.09.2026 gain учился 0.072 -> 0.347 -> -0.072 и палец уходил на
     // 160 px в край экрана).
-    auto pickGain = [](float base, float learned) {
+    // Знак: probeGain — значение из настройки игры, оно всегда положительное, а
+    // инверсия оси («инвертировать Y» в настройках) видна только в измерении.
+    // Поэтому отрицательное выученное значение для канала тангажа принимается
+    // (оно и есть инверсия), а для рыскания — нет: там смена знака означала
+    // ошибку обучения (лог 15.09.2026), и прицел уезжал мимо цели. Оценка по
+    // реакции прицела исключение и для рыскания: её знак измерен на самой петле
+    // (если бы аим вёл не туда, корреляция была бы с тем же знаком).
+    auto pickGain = [](float base, float learned, bool allow_flip) {
         if (!(fabsf(base) > 1e-4f)) return learned;
         if (!(fabsf(learned) > 1e-4f)) return base;
-        if ((learned > 0.f) != (base > 0.f)) return base;
-        return (fabsf(learned) > fabsf(base)) ? learned : base;
+        const bool flip = (learned > 0.f) != (base > 0.f);
+        if (flip && !allow_flip) return base;
+        // Знак берём из измерения (инверсия оси), а модуль — не меньше базового:
+        // завышенный коэффициент даёт шаг меньше нужного (медленнее, но устойчиво).
+        const float mag = (fabsf(learned) > fabsf(base)) ? fabsf(learned) : fabsf(base);
+        return flip ? -mag : mag;
     };
-    float gy = pickGain(probeGainYaw, learned ? s_gainYaw : 0.f);
-    if (lsYaw) gy = pickGain(gy, s_trackYaw.gain());
+    float gy = pickGain(probeGainYaw, learned ? s_gainYaw : 0.f, false);
+    if (lsYaw) gy = pickGain(gy, s_trackYaw.gain(), true);
     float gp = pickGain(probeGainPitch, (s_gainPitch != 0.f) ? s_gainPitch
-                                                             : (learned ? fabsf(s_gainYaw) : 0.f));
-    if (lsPitch) gp = pickGain(gp, s_trackPitch.gain());
+                                                             : (learned ? fabsf(s_gainYaw) : 0.f), true);
+    if (lsPitch) gp = pickGain(gp, s_trackPitch.gain(), true);
 
     // Такт с подтверждением: если наш прошлый сдвиг ещё не отразился в
     // камере (игра не отрендерила кадр — низкий FPS), НЕ шлём новую
