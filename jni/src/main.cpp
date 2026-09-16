@@ -1054,6 +1054,15 @@ static const char* kCfgDir_() noexcept {
 }
 #define kCfgDir (kCfgDir_())
 
+// Журнал диагностики (diag::init) пишем в «Загрузки»: файл оттуда легко найти
+// и переслать, не копаясь в каталоге конфигов. Если записать туда не вышло,
+// журнал ляжет рядом с конфигами — выбор печатается в его шапке.
+static const char* kDownloadDir_() noexcept {
+    static constexpr auto _s = xp::_mk("/storage/emulated/0/Download/");
+    return _s.d();
+}
+#define kDownloadDir (kDownloadDir_())
+
 struct ConfigEntry { char name[64] = {}; };
 static ConfigEntry g_configs[kMaxConfigs] = {};
 static int         g_configCount    = 0;
@@ -5793,10 +5802,11 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
     signal(SIGHUP,  [](int) { main_thread_flag.store(false); });
 
-    // Журнал диагностики: <каталог конфигов>/diag.log (+ logcat xvcen.diag).
-    // Открыть раньше остальных подсистем, чтобы в нём было видно, на каком
-    // шаге запуска всё встало (см. DIAGNOSTICS.md).
-    diag::init(kCfgDir);
+    // Журнал диагностики: «Загрузки»/diag.log, запасной путь — каталог
+    // конфигов (+ logcat xvcen.diag). Открыть раньше остальных подсистем,
+    // чтобы в нём было видно, на каком шаге запуска всё встало (см.
+    // DIAGNOSTICS.md).
+    diag::init(kDownloadDir, kCfgDir);
 
     prot::Init();
     screen_config();

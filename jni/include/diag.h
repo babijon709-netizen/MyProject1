@@ -12,8 +12,10 @@
 // Журнал фиксирует каждое звено и пишет в файл рядом с конфигами —
 // пользователь просто присылает его целиком.
 //
-// Файл: <каталог конфигов>/diag.log (переполненный переезжает в diag.log.old).
-// Каждая строка дублируется в logcat (тег xvcen.diag): adb logcat -s xvcen.diag.
+// Файл: «Загрузки» телефона (/storage/emulated/0/Download/diag.log); если
+// записать туда не вышло — diag.log рядом с конфигами (выбор виден в шапке
+// журнала). Переполненный файл переезжает в diag.log.old. Каждая строка
+// дублируется в logcat (тег xvcen.diag): adb logcat -s xvcen.diag.
 //
 // Как читать присланный файл — см. DIAGNOSTICS.md в корне репозитория.
 
@@ -306,32 +308,57 @@ inline const char* farm_reason_text(int reason) {
 
 // ============================ инициализация =================================
 
-// Открыть файл журнала (dir — каталог конфигов с завершающим '/') и записать
-// шапку окружения. Повторный вызов игнорируется.
-inline void init(const char* dir) {
+// Открыть файл журнала и записать шапку окружения. dir — предпочтительный
+// каталог («Загрузки» телефона: файл оттуда пользователь найдёт и перешлёт
+// из любой файломенялки), fallback_dir — запасной (каталог конфигов), куда
+// пишем, если запись в загрузки у этого устройства не прошла. Оба пути —
+// с завершающим '/'. Повторный вызов игнорируется.
+inline void init(const char* dir, const char* fallback_dir = nullptr) {
     static std::atomic<bool> done{false};
     if (done.exchange(true)) return;
 
-    if (dir && dir[0]) {
-        impl_path() = std::string(dir) + "diag.log";
-        // Переполненный в прошлый раз файл — в .old, пишем с чистого.
+    // Переполненный в прошлый раз файл — в .old, пишем с чистого.
+    auto rotate_if_big = [](const std::string& path) {
         struct stat st{};
-        if (::stat(impl_path().c_str(), &st) == 0 && (unsigned long long)st.st_size > kRotateBytes) {
-            const std::string old = impl_path() + ".old";
+        if (::stat(path.c_str(), &st) == 0 && (unsigned long long)st.st_size > kRotateBytes) {
+            const std::string old = path + ".old";
             ::unlink(old.c_str());
-            ::rename(impl_path().c_str(), old.c_str());
+            ::rename(path.c_str(), old.c_str());
         }
-    }
-    const bool file_ok = impl_reopen_locked();
+    };
 
-    logf("=== журнал диагностики, бинарник собран " __DATE__ " " __TIME__ " ===");
-    if (!file_ok) {
-        logf("файл журнала НЕ ОТКРЫЛСЯ%s%s errno=%d (%s) — журнал будет только в logcat; "
-             "верояная причина: нет записи в каталог конфигов (тогда и конфигы не сохраняются)",
-             impl_path().empty() ? " (каталог не задан)" : ": ",
-             impl_path().c_str(), errno, err_name(errno));
+    int primary_errno = 0;
+    if (dir && dir[0]) {
+        ::mkdir(dir, 0777);                       // «Загрузки» уже есть: EEXIST, игнорируем
+        impl_path() = std::string(dir) + "diag.log";
+        rotate_if_big(impl_path());
+        if (!impl_reopen_locked()) {
+            primary_errno = errno;
+            if (fallback_dir && fallback_dir[0]) {
+                ::mkdir(fallback_dir, 0777);
+                impl_path() = std::string(fallback_dir) + "diag.log";
+                rotate_if_big(impl_path());
+                if (!impl_reopen_locked()) impl_path().clear();
+            }
+        }
+    } else {
+        impl_path().clear();
     }
-    logf("легенда: чтений 0 ок при живой привязке — чужая память не читается ВООБЩЕ "
+    const bool file_ok = impl_file() != nullptr;
+
+logf("=== журнал диагностики, бинарник собран " __DATE__ " " __TIME__ " ===");
+    if (file_ok) {
+        logf("файл журнала: %s", impl_path().c_str());
+        if (primary_errno)
+            logf("загрузки НЕ ЗАПИСАЛИСЬ errno=%d (%s) — журнал здесь, рядом с конфигами",
+                 primary_errno, err_name(primary_errno));
+    } else {
+        logf("файл журнала НЕ ОТКРЫЛСЯ (%s) errno=%d (%s) — журнал будет только в logcat; "
+             "проверь права на запись во внешнее хранилище",
+             primary_errno ? "ни загрузки, ни каталог конфигов" : impl_path().c_str(),
+             primary_errno ? primary_errno : errno, err_name(errno));
+    }
+logf("легенда: чтений 0 ок при живой привязке — чужая память не читается ВООБЩЕ "
          "(ни одна функция не заработает); EPERM — запрет (SELinux/права); "
          "EFAULT — адреса не те (не та версия игры под оффсеты)");
 
