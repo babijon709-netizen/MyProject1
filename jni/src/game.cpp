@@ -1,6 +1,7 @@
 #include "game.h"
 #include "mem_io.h"                // чтение/запись памяти игры: /proc/<pid>/mem + кэш блоков
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
+#include "mini_log.h"              // мини-лог на устройстве: почему не читается игра
 #include "game_offsets_active.h"   // активные оффсеты: релиз или бета (go::SelectBuild)
 #include "Vector.h"
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
@@ -1194,6 +1195,13 @@ static bool g_body_caches_dirty = false; // clear per-player caches on the next 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
     uint64_t best_offset = find_direct_player_position_offset(players);
     if (best_offset) {
+        if (g_direct_position_fail_streak > 0) {
+            const double waited = (g_direct_position_fail_since > 0.0)
+                ? (mono_seconds() - g_direct_position_fail_since) : 0.0;
+            mlog::line("позиции игроков: смещение 0x%llx найдено после %.2f с ожидания "
+                       "(%d кадров без полей)", (unsigned long long)best_offset, waited,
+                       g_direct_position_fail_streak);
+        }
         g_direct_position_fail_streak = 0;
         g_direct_position_fail_since = 0.0;
         g_use_direct_player_position = true; g_player_position_offset = best_offset;
@@ -3887,16 +3895,31 @@ bool esp_init(pid_t pid) {
     if (!g_il2cpp_base) {
         g_attach_state = ESP_ATTACH_NO_LIB;
         g_pid = -1;
+        // Без базового адреса читать нечего. В лог — с причиной: чаще всего это
+        // не карта памяти, а её отсутствие у чужого процесса (или сам процесс
+        // не тот: клиент другой сборки).
+        mlog::every("no_lib", 5.0,
+            "привязка: pid %d — libil2cpp.so не найден (/proc/%d/maps не читается "
+            "или клиент другого типа)", (int)pid, (int)pid);
         return false;
     }
+    g_mem.clear_last_error();
     if (!g_mem.bind(pid, g_il2cpp_base)) {
         // /proc/<pid>/mem не открылся или не читается: доступа к памяти нет.
+        const int err = g_mem.last_error();
+        mlog::every("no_access", 5.0,
+            "привязка: pid %d — /proc/%d/mem недоступен (%s, errno %d)",
+            (int)pid, (int)pid,
+            g_mem.last_error_was_open() ? "открытие файла" : "чтение памяти",
+            err);
         g_attach_state = ESP_ATTACH_NO_ACCESS;
         g_il2cpp_base = 0;
         g_pid = -1;
         return false;
     }
     g_attach_state = ESP_ATTACH_OK;
+    mlog::line("привязка: pid %d, libil2cpp.so по адресу 0x%llx, /proc/%d/mem открыт",
+               (int)pid, (unsigned long long)g_il2cpp_base, (int)pid);
     return true;
 }
 
@@ -4230,6 +4253,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // cheap and rare, and it is what keeps a death / respawn from killing the
     // whole ESP until the app is restarted.
     if (++g_frame_publish_fail_streak > 240) {
+        mlog::line("мир: 4 с без кадра (сторож) — сброс кэшей, ищу раскладку заново");
         g_frame_publish_fail_streak = 0;
         g_frame_transforms.clear();
         reset_world_caches();
@@ -4266,7 +4290,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 for (uint64_t current : refreshed) if (previous == current) { overlap = true; break; }
                 if (overlap) break;
             }
-            if (!overlap) reset_world_caches();
+            if (!overlap) {
+                mlog::line("мир: население сменилось (%d -> %d) — перезагрузка, сброс кэшей",
+                           (int)s_transforms.size(), (int)refreshed.size());
+                reset_world_caches();
+            }
         }
         // Население то же, но кого-то не досчитались: почти всегда это сбой
         // чтения одного элемента, а не уход игрока. Возвращаем пропавших в
@@ -4289,7 +4317,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // or we are simply alone on the server. Clear the player caches, but
         // FALL THROUGH to the empty-list branch below: it publishes the
         // camera-only frame that keeps markers and the farm alive solo.
-        if (!s_transforms.empty()) { s_transforms.clear(); reset_world_caches(); }
+        if (!s_transforms.empty()) {
+            mlog::line("мир: список игроков пропал на %d кадров — сброс кэшей",
+                       g_frame_transforms_empty_streak);
+            s_transforms.clear(); reset_world_caches();
+        }
     }
     if (s_transforms.empty()) {
         // Alone on the server: no player boxes, but markers and the farm
@@ -4706,10 +4738,31 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         result.push_back(box);
     }
 
+    // Пауза без боксов: по этой строке видно, сколько именно ждал игрок после
+    // смерти/респавна (жалоба «боксы прогружаются не сразу»).
+    {
+        static double s_last_boxes_at = 0.0;
+        static size_t s_last_boxes = 0;
+        const double now = mono_seconds();
+        if (!result.empty() && s_last_boxes == 0 && s_last_boxes_at > 0.0)
+            mlog::line("боксы: появились (%d шт.) после паузы %.2f с",
+                       (int)result.size(), now - s_last_boxes_at);
+        if (!result.empty()) s_last_boxes_at = now;
+        s_last_boxes = result.size();
+    }
+
     return result;
 }
 
 int esp_nearby_player_count() { return g_frame_player_count; }
+
+void esp_memio_stats(unsigned long long& reads, unsigned long long& fails,
+                     unsigned long long& reopens, int& last_errno) {
+    reads = g_mem.reads_total();
+    fails = g_mem.read_fails_total();
+    reopens = g_mem.reopens_total();
+    last_errno = g_mem.last_error();
+}
 
 
 // ===================== World markers: ore nodes and animals =====================

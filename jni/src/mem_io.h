@@ -113,6 +113,22 @@ public:
         return bound() ? "/proc/<pid>/mem" : "нет доступа";
     }
 
+    // ---- счётчики для мини-лога ------------------------------------------
+    // Доступны всегда (в отличие от MEMIO_STATS): по ним видно «читается, но с
+    // отказами» и «не читается совсем», а это первое, что нужно разбирать на
+    // устройстве, где работает только меню. Атомарный инкремент в hot path
+    // дешевле одного pread на четыре порядка, поэтому счётчики не отключаем.
+    unsigned long long reads_total() const { return reads_.load(std::memory_order_relaxed); }
+    unsigned long long read_fails_total() const { return read_fails_.load(std::memory_order_relaxed); }
+    unsigned long long reopens_total() const { return reopens_.load(std::memory_order_relaxed); }
+    int last_error() const { return last_errno_.load(std::memory_order_relaxed); }
+    // true — последняя беда была на открытии /proc/<pid>/mem, а не на чтении.
+    bool last_error_was_open() const { return last_open_path_.load(std::memory_order_relaxed) != 0; }
+    void clear_last_error() {
+        last_errno_.store(0, std::memory_order_relaxed);
+        last_open_path_.store(0, std::memory_order_relaxed);
+    }
+
     // Кадр начался: данные, прочитанные в прошлом кадре, больше не отдаём.
     void frame_begin() {
         generation_.fetch_add(1, std::memory_order_relaxed);
@@ -264,18 +280,24 @@ private:
     }
 
     // ---- отказы -------------------------------------------------------------
-    void note_ok() { fail_streak_.store(0); }
+    void note_ok() {
+        fail_streak_.store(0);
+        reads_.fetch_add(1, std::memory_order_relaxed);
+    }
 
     // Способ один, переключаться некуда — но дескриптор мог стать негодным
     // (процесс перезапустился с тем же pid, доступ отобрали и вернули). После
     // серии отказов переоткрываем /proc/<pid>/mem и перепроверяем пробу; если и
     // это не помогло, привязку снимаем — поток привязки подключится заново.
     void note_fail() {
+        read_fails_.fetch_add(1, std::memory_order_relaxed);
+        last_errno_.store(errno, std::memory_order_relaxed);
         if (fail_streak_.fetch_add(1) + 1 < kFailStreak) return;
         fail_streak_.store(0);
         if (!probe_addr_ || pid_.load() <= 0) return;
         close_mem();
         if (open_mem() && probe_readable()) {
+            reopens_.fetch_add(1, std::memory_order_relaxed);
 #ifdef MEMIO_STATS
             ++reopens;
 #endif
@@ -290,7 +312,13 @@ private:
         snprintf(path, sizeof(path), "/proc/%d/mem", pid_.load());
         int fd = open(path, O_RDWR | O_CLOEXEC);
         if (fd < 0) fd = open(path, O_RDONLY | O_CLOEXEC);
-        if (fd < 0) return false;
+        if (fd < 0) {
+            // Ошибка открытия — самая частая причина «работает только меню»
+            // (SELinux, hidepid, root-менеджер): пишем её в счётчики, оттуда в лог.
+            last_errno_.store(errno, std::memory_order_relaxed);
+            last_open_path_.store((uint64_t)1, std::memory_order_relaxed);
+            return false;
+        }
         fd_.store(fd);
         return true;
     }
@@ -333,6 +361,14 @@ private:
     uint64_t probe_addr_ = 0;
 
     std::atomic<uint64_t> generation_{1};
+
+    // Счётчики для мини-лога (см. accessors выше).
+    std::atomic<unsigned long long> reads_{0};
+    std::atomic<unsigned long long> read_fails_{0};
+    std::atomic<unsigned long long> reopens_{0};
+    std::atomic<int> last_errno_{0};
+    // Признак «последний отказ был на открытии файла» — для текста в логе.
+    std::atomic<uint64_t> last_open_path_{0};
 
     std::atomic<uint64_t> write_tags_[kWriteTags] = {};
     std::atomic<unsigned> write_next_{0};

@@ -1,6 +1,7 @@
 #include "main.h"
 #include "game.h"
 #include "game_offsets_active.h"  // активные оффсеты: релиз или бета (go::SelectBuild)
+#include "mini_log.h"             // мини-лог на устройстве (файл рядом с конфигами)
 #include <cmath>
 #include <atomic>
 #include <chrono>
@@ -437,8 +438,12 @@ static void start_attach_thread() {
         while (g_attach_running.load()) {
             if (!g_esp_attached) {
                 pid_t pid = find_game_pid();
+                const bool by_package = (pid > 0);
                 if (pid <= 0) pid = find_unity_pid();
                 if (pid <= 0) {
+                    mlog::every("no_pid", 15.0,
+                        "привязка: процесс игры не найден (пакеты %s / %s, отображён libil2cpp.so "
+                        "у процессов: нет)", TargetPackageA(), TargetPackageB());
                     ReportAttach(ESP_ATTACH_NO_PID);
                 } else if (esp_init(pid)) {
                     g_target_pid = pid;
@@ -447,9 +452,15 @@ static void start_attach_thread() {
                 } else {
                     // Нашли процесс, но привязаться не вышло: причина — из game.cpp
                     // (нет libil2cpp.so или память не читается).
+                    mlog::every("attach_fail", 10.0,
+                        "привязка: процесс найден (pid %d, %s), но доступа нет — состояние %d",
+                        (int)pid, by_package ? "по пакету" : "по libil2cpp.so",
+                        (int)esp_attach_state());
                     ReportAttach((int)esp_attach_state());
                 }
             } else if (!pid_still_game(g_target_pid) || !esp_alive_check()) {
+                mlog::line("привязка: процесс %d больше не читается — отвязываюсь",
+                           (int)g_target_pid);
                 // Процесс сменился/умер или память перестала читаться (отобрали
                 // доступ, перезапуск с тем же pid): привязываемся заново.
                 esp_reset();
@@ -814,6 +825,9 @@ static float AimFovRadiusPx(float sw, float sh) {
 }
 
 // One remote snapshot per frame, shared by the ESP overlay and the aimbot.
+// Сколько боксов нарисовано в последнем кадре — для сводки в мини-логе.
+static int g_last_box_count = 0;
+
 static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
     static std::vector<EspBox> s_boxes;
     static int s_frame = -1;
@@ -828,6 +842,7 @@ static const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_marker_max_distance(g_state.marker_dist);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
+        g_last_box_count = (int)s_boxes.size();
     }
     return s_boxes;
 }
@@ -1124,11 +1139,19 @@ static void DrawEspOverlay() {
 static constexpr int  kMaxConfigs  = 12;
 static constexpr uint8_t kXorKey   = 0xA7;
 
+
+
 static const char* kCfgDir_() noexcept {
     static constexpr auto _s = xp::_mk("/storage/emulated/0/benzhack/");
     return _s.d();
 }
 #define kCfgDir (kCfgDir_())
+
+// Мини-лог: файл рядом с конфигами, чтобы его можно было просто достать с
+// устройства и прислать. Пишется только по событиям и по таймеру, не по кадрам.
+static std::string LogPath() {
+    return std::string(kCfgDir) + "xvcen.log";
+}
 
 struct ConfigEntry { char name[64] = {}; };
 static ConfigEntry g_configs[kMaxConfigs] = {};
@@ -3607,20 +3630,66 @@ static constexpr float kAimGainAtRef      = 0.10f; // измерено на ус
 // раз игра меняет град/px, поэтому вместе с настройкой едет и полоса
 // правдоподобия коэффициента: она отмерена при 5.0, и зажимать ею выученное
 // значение при 10 — это прицел, который вдвое медленнее, чем позволяет игра.
-// Настройку прочитать не удалось — считаем её заводской (прежнее поведение).
-static float AimSensitivityScale() {
-    constexpr float kMinScale = 0.2f;   // ~1.0 в настройках
-    constexpr float kMaxScale = 4.0f;   // 20.0 — верх настроек с запасом
+//
+// Значение ДЕРЖИМ и обновляем редко. Чтение может не пройти в отдельном кадре
+// (нет локального игрока, мигнул список игроков), а шаг пальца считается как
+// err/коэффициент: если значение скачет между прочитанным и запасным, шаг
+// меняется в разы от кадра к кадру — это и видно как «аим сильно дергает».
+// Поэтому: принятое значение живёт до заметного изменения (25% и больше, то
+// есть ручная правка настройки в меню игры) и читать чаще 1.5 с не пробуем.
+//
+// from_game = true — коэффициент выведен из настройки игры (значит, годится как
+// «известный»: по нему видно квант ввода), false — прежнее измеренное 0.10.
+static float AimSensitivityScale(bool& from_game) {
+    constexpr float  kMinScale    = 0.4f;   // чувствительность 2 в настройках
+    constexpr float  kMaxScale    = 2.5f;   // 12.5 — верх настроек с запасом
+    constexpr double kHoldSeconds = 1.5;    // чаще настройку руками не меняют
+    constexpr float  kAdoptRatio  = 1.25f;  // мельче этого — не изменение
+
+    static float  held           = 1.0f;
+    static bool   held_from_game = false;
+    static double held_at        = 0.0;
+
+    const double now = mlog::seconds();
+    if (held_at > 0.0 && (now - held_at) < kHoldSeconds) {
+        from_game = held_from_game;
+        return held;
+    }
+    held_at = now;
+
     float sensitivity = 0.f;
-    if (!esp_read_look_sensitivity(sensitivity)) return 1.f;
-    float scale = sensitivity / kAimRefSensitivity;
-    if (!std::isfinite(scale) || scale <= 0.f) return 1.f;
-    if (scale < kMinScale) scale = kMinScale;
-    if (scale > kMaxScale) scale = kMaxScale;
-    return scale;
+    if (esp_read_look_sensitivity(sensitivity)) {
+        float scale = sensitivity / kAimRefSensitivity;
+        if (!std::isfinite(scale) || scale <= 0.f) scale = 1.f;
+        if (scale < kMinScale) scale = kMinScale;
+        if (scale > kMaxScale) scale = kMaxScale;
+        const bool changed = !(scale < held * kAdoptRatio && scale > held / kAdoptRatio);
+        if (!held_from_game || changed) { held = scale; held_from_game = true; }
+    } else if (!held_from_game) {
+        held = 1.0f;
+    }
+    // Прочитанное однажды значение переживает осечку чтения: оно верное, а
+    // подмена его запасным — это и есть скачок шага.
+    from_game = held_from_game;
+    return held;
 }
 
-static float AimSensitivityGain() { return kAimGainAtRef * AimSensitivityScale(); }
+static float AimSensitivityGain(bool& from_game) {
+    return kAimGainAtRef * AimSensitivityScale(from_game);
+}
+
+// Что уходит в сводку мини-лога по аиму. Мало и по делу: коэффициент, откуда он
+// (выучен или из настройки), остаток ошибки и сколько раз за интервал шаг менял
+// направление — по последнему и видно «дёргает».
+struct AimLogState {
+    float gain_yaw = 0.f, gain_pitch = 0.f;
+    float err_yaw = 0.f, err_pitch = 0.f;
+    float sensitivity = 0.f;
+    int   steps = 0;      // шагов с прошлой сводки
+    int   flips = 0;      // смен направления шага
+    bool  learned = false, from_sensitivity = false, active = false;
+};
+static AimLogState g_aim_log;
 
 static void UpdateAim(float dt) {
     static float s_fx = 0.f, s_fy = 0.f;         // finger position (px)
@@ -3656,6 +3725,7 @@ static void UpdateAim(float dt) {
     if (!active) {
         AimReleaseFinger(s_fingerDown);
         s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
+        g_aim_log = AimLogState{};
         return;
     }
 
@@ -3876,12 +3946,21 @@ static void UpdateAim(float dt) {
     // накопленный сдвиг касания ровно на m_Sensitivity, поэтому град/px растёт
     // вместе с ней. Зашитое число работало бы только на одной чувствительности:
     // на высокой аим не доводил бы цель, на низкой — перелетал.
-    const float probeGainYaw   = AimSensitivityGain();
+    bool gainFromSens = false;
+    const float probeGainYaw   = AimSensitivityGain(gainFromSens);
     const float probeGainPitch = probeGainYaw;
     const bool  learned = (s_gainYaw != 0.f);
     const float gy = learned ? s_gainYaw : probeGainYaw;
     const float gp = (s_gainPitch != 0.f) ? s_gainPitch
                                          : (learned ? fabsf(s_gainYaw) : probeGainPitch);
+
+    // Что уйдёт в сводку мини-лога по аиму (см. AimLogState).
+    g_aim_log.active = true;
+    g_aim_log.learned = learned;
+    g_aim_log.from_sensitivity = gainFromSens;
+    g_aim_log.gain_yaw = gy; g_aim_log.gain_pitch = gp;
+    g_aim_log.err_yaw = best.yaw; g_aim_log.err_pitch = best.pitch;
+    g_aim_log.sensitivity = gainFromSens ? kAimRefSensitivity * (probeGainYaw / kAimGainAtRef) : 0.f;
 
     // Такт с подтверждением: если наш прошлый сдвиг ещё не отразился в
     // камере (игра не отрендерила кадр — низкий FPS), НЕ шлём новую
@@ -3920,9 +3999,14 @@ static void UpdateAim(float dt) {
     float unitsPerPx = Touch_DeviceUnitsPerPixel();
     if (!(unitsPerPx >= 0.25f && unitsPerPx <= 16.f)) unitsPerPx = 1.f;
     const float gridPx = 1.f / unitsPerPx;               // screen px per device unit
-    const bool  gainKnownYaw = (s_gainYaw != 0.f), gainKnownPitch = (s_gainPitch != 0.f);
-    const float qYaw   = gainKnownYaw   ? fabsf(s_gainYaw)   * gridPx : 0.f; // deg per device unit
-    const float qPitch = gainKnownPitch ? fabsf(s_gainPitch) * gridPx : 0.f;
+    // «Известный» коэффициент — это и выученный, и взятый из чувствительности игры:
+    // второй не догадка, а множитель самой игры, и по нему видно квант ввода. Без
+    // этого при чувствительности выше заводской шаг цифровера больше мёртвой зоны,
+    // и контроллер бесконечно дёргает цель то влево, то вправо — «сильно дергает».
+    const bool  gainKnownYaw   = (s_gainYaw != 0.f)   || gainFromSens;
+    const bool  gainKnownPitch = (s_gainPitch != 0.f) || gainFromSens;
+    const float qYaw   = gainKnownYaw   ? fabsf(gy) * gridPx : 0.f; // deg per device unit
+    const float qPitch = gainKnownPitch ? fabsf(gp) * gridPx : 0.f;
 
     // ---- dead zone ----
     // Target: ~3 cm at the target's range (well inside a head), but never
@@ -4032,6 +4116,18 @@ static void UpdateAim(float dt) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         s_haveLast = false;
         return;
+    }
+    {
+        // Знак отправленного шага: смена знака — это и есть колебание прицела
+        // вокруг цели. Считаем, чтобы в сводке лога было видно, «дёргает» ли
+        // аим и насколько (шагов и смен знака за интервал).
+        static float s_lastStepSign = 0.f;
+        const float sign = (dx > 0.f) ? 1.f : (dx < 0.f ? -1.f : 0.f);
+        if (sign != 0.f) {
+            if (s_lastStepSign != 0.f && sign != s_lastStepSign) ++g_aim_log.flips;
+            s_lastStepSign = sign;
+            ++g_aim_log.steps;
+        }
     }
     s_fx = nx; s_fy = ny;
     s_pendDx += dx; s_pendDy += dy;   // ждёт отработки камерой (ack-такт)
@@ -4455,7 +4551,8 @@ static void UpdateFarmInner(float dt) {
             fg->AddCircleFilled({tgt.sx, tgt.sy}, 2.5f, mc, 12);
     }
 
-    const float gainScale = AimSensitivityScale();
+    bool gainFromSensFarm = false;
+    const float gainScale = AimSensitivityScale(gainFromSensFarm);
     const float gainLo    = kGainLo * gainScale;
     const float gainHi    = kGainHi * gainScale;
 
@@ -4527,8 +4624,8 @@ static void UpdateFarmInner(float dt) {
     // 1/gain, и вылет за полосу — это либо перелёт через цель, либо «камера не
     // слушается», то есть ровно то, что игрок видит как дёрганье. Знак сохраняем:
     // отрицательный коэффициент означает инверсию оси в настройках игры.
-    float gain = (s_gainYaw != 0.f) ? s_gainYaw : AimSensitivityGain();
-    if (!std::isfinite(gain) || gain == 0.f) gain = AimSensitivityGain();
+    float gain = (s_gainYaw != 0.f) ? s_gainYaw : (kAimGainAtRef * gainScale);
+    if (!std::isfinite(gain) || gain == 0.f) gain = kAimGainAtRef * gainScale;
     const float gainMag = fabsf(gain);
     if (gainMag < gainLo)      gain = (gain < 0.f) ? -gainLo : gainLo;
     else if (gainMag > gainHi) gain = (gain < 0.f) ? -gainHi : gainHi;
@@ -5145,10 +5242,48 @@ static void TrafficLight(ImVec2 winPos, float railW, float dt) {
     }
 }
 
+// Состояние привязки словами — для сводки в мини-логе.
+static const char* AttachStateText(int state) {
+    switch (state) {
+        case ESP_ATTACH_OK:        return "есть";
+        case ESP_ATTACH_NO_PID:    return "процесс игры не найден";
+        case ESP_ATTACH_NO_LIB:    return "нет libil2cpp.so в карте памяти";
+        case ESP_ATTACH_NO_ACCESS: return "нет доступа к /proc/<pid>/mem";
+        default:                   return "неизвестно";
+    }
+}
+
 void RenderMenu() {
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
     if (dt > 0.1f) dt = 0.1f;
+
+    // ---- сводка в мини-лог (раз в 5 с) --------------------------------------
+    // Самое важное для «меню есть, функции молчат»: состояние привязки, счётчики
+    // чтений памяти и состояние аима. Без неё по логу не отличить «не читаем
+    // память» от «читаем, но ничего не находим».
+    {
+        unsigned long long reads = 0, fails = 0, reopens = 0;
+        int last_errno = 0, players = 0;
+        esp_memio_stats(reads, fails, reopens, last_errno);
+        players = esp_nearby_player_count();
+        mlog::every("hb", 5.0,
+            "сводка: привязка %s, тач %s, боксов %d, игроков рядом %d, чтений %llu, "
+            "отказов %llu, переоткрытий %llu, errno %d",
+            AttachStateText((int)g_attach_report.load()),
+            Touch_CanInject() ? "инъекция есть" : "инъекции нет",
+            g_last_box_count, players, reads, fails, reopens, last_errno);
+        mlog::every("aim", 5.0,
+            "аим: %s, коэффициент %.4f/%.4f (%s), чувствительность %.2f, остаток %.2f/%.2f град, "
+            "шагов %d, смен знака %d",
+            g_aim_log.active ? "работает" : "не активен",
+            g_aim_log.gain_yaw, g_aim_log.gain_pitch,
+            g_aim_log.learned ? "выучен" : (g_aim_log.from_sensitivity ? "из настройки" : "запасной"),
+            g_aim_log.sensitivity, g_aim_log.err_yaw, g_aim_log.err_pitch,
+            g_aim_log.steps, g_aim_log.flips);
+        g_aim_log.steps = 0;
+        g_aim_log.flips = 0;
+    }
 
     if (g_menu_orient != displayInfo.orientation || g_menu_dw != (int)displayInfo.width || g_menu_dh != (int)displayInfo.height) {
         g_menu_orient = displayInfo.orientation;
@@ -5914,6 +6049,16 @@ int main(int argc, char* argv[]) {
 
     prot::Init();
     screen_config();
+
+    // Мини-лог: файл рядом с конфигами. Открываем до всего остального, чтобы в
+    // него попало и то, что происходит при привязке к игре (она идёт в своём
+    // потоке, сразу после старта).
+    mkdir(kCfgDir, 0777);
+    mlog::init(LogPath().c_str());
+    mlog::line("запуск: экран %dx%d, версия игры %s, лог %s",
+               (int)displayInfo.width, (int)displayInfo.height,
+               go::CurrentBuild() == go::Build::Beta ? "бета" : "релиз",
+               LogPath().c_str());
     int abs_ScreenX = displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width;
     int abs_ScreenY = displayInfo.height < displayInfo.width ? displayInfo.height : displayInfo.width;
 
