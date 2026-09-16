@@ -1147,11 +1147,22 @@ static const char* kCfgDir_() noexcept {
 }
 #define kCfgDir (kCfgDir_())
 
-// Мини-лог: файл рядом с конфигами, чтобы его можно было просто достать с
-// устройства и прислать. Пишется только по событиям и по таймеру, не по кадрам.
-static std::string LogPath() {
-    return std::string(kCfgDir) + "xvcen.log";
+// Мини-лог: benzware.log в «Загрузках» — оттуда файл достаётся проще всего
+// (файловый менеджер, кабель, любое приложение). Если каталога нет или он не
+// открылся, пишем рядом с конфигами: лучше лог не там, где просили, чем нигде.
+static std::string LogDir() {
+    static std::string cached;
+    if (!cached.empty()) return cached;
+    const char* candidates[] = {"/storage/emulated/0/Download/", "/sdcard/Download/"};
+    for (const char* dir : candidates) {
+        struct stat st{};
+        if (stat(dir, &st) == 0 && S_ISDIR(st.st_mode)) { cached = dir; break; }
+    }
+    if (cached.empty()) cached = kCfgDir;
+    return cached;
 }
+
+static std::string LogPath() { return LogDir() + "benzware.log"; }
 
 struct ConfigEntry { char name[64] = {}; };
 static ConfigEntry g_configs[kMaxConfigs] = {};
@@ -6055,10 +6066,15 @@ int main(int argc, char* argv[]) {
     // потоке, сразу после старта).
     mkdir(kCfgDir, 0777);
     mlog::init(LogPath().c_str());
-    mlog::line("запуск: экран %dx%d, версия игры %s, лог %s",
+    if (!mlog::ready()) {
+        // «Загрузки» не открылись (нет каталога, отобран доступ) — рядом с
+        // конфигами, лишь бы лог вообще был.
+        mlog::init((std::string(kCfgDir) + "benzware.log").c_str());
+    }
+    mlog::line("запуск: экран %dx%d, версия игры %s",
                (int)displayInfo.width, (int)displayInfo.height,
-               go::CurrentBuild() == go::Build::Beta ? "бета" : "релиз",
-               LogPath().c_str());
+               go::CurrentBuild() == go::Build::Beta ? "бета" : "релиз");
+    mlog::line("лог: %s (обрезается на 256 КБ, архив .1)", mlog::path());
     int abs_ScreenX = displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width;
     int abs_ScreenY = displayInfo.height < displayInfo.width ? displayInfo.height : displayInfo.width;
 
