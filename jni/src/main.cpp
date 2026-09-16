@@ -461,6 +461,23 @@ static inline bool WasTappedHere() {
     return started && ended && (dx * dx + dy * dy) <= 30.f * 30.f;
 }
 
+// Тап по прямоугольнику без виджета ImGui. Нужен там, где гуи рисуется до окна
+// меню (стартовый выбор версии игры): ImGui-виджет в этот момент не попадает
+// ни в одно окно, ImGui кладёт его в своё служебное «Debug##Default» — и тап не
+// срабатывает, и на экране появляется лишнее окно «Debug». Условия те же, что у
+// WasTappedHere: палец опущен внутри, отпущен рядом, сдвиг не больше 30 px.
+static inline bool TapInRect(ImVec2 a, ImVec2 b) {
+    const auto& io = ImGui::GetIO();
+    if (!io.MouseReleased[0]) return false;
+    const ImVec2 cp = io.MouseClickedPos[0];
+    const ImVec2 mp = io.MousePos;
+    const bool started = cp.x >= a.x && cp.x <= b.x && cp.y >= a.y && cp.y <= b.y;
+    const bool ended   = mp.x >= a.x - 12.f && mp.x <= b.x + 12.f &&
+                         mp.y >= a.y - 12.f && mp.y <= b.y + 12.f;
+    const float tdx = mp.x - cp.x, tdy = mp.y - cp.y;
+    return started && ended && (tdx * tdx + tdy * tdy) <= 30.f * 30.f;
+}
+
 // Точка внутри текущего клип-прямоугольника окна? Ручные обработчики кликов
 // (карточки конфигов, цветные точки и т.п.) обязаны проверять это, иначе тап
 // по нижней панели вкладок «проваливается» в прокрученную за неё строку.
@@ -5179,11 +5196,10 @@ void RenderMenu() {
                         C::UA(enabled ? (sel ? C::Acc() : C::Txt()) : C::Dim(), enabled ? 1.f : 0.6f),
                         name);
 
-            char id[24];
-            snprintf(id, sizeof(id), "##build_choice%d", i);
-            ImGui::SetCursorScreenPos({bx, by});
-            ImGui::InvisibleButton(id, {bw, btnH});
-            if (enabled && WasTappedHere() && !g_input.touchConsumed) {
+            // Тап считаем вручную: окна меню в этот момент ещё нет, а ImGui-
+            // виджет ушёл бы в служебное окно «Debug##Default».
+            if (enabled && !g_input.touchConsumed &&
+                TapInRect({bx, by}, {bx + bw, by + btnH})) {
                 ApplyBuildChoice(beta ? go::Build::Beta : go::Build::Release);
                 g_input.touchConsumed = true;
                 g_buildPrompt = false;
