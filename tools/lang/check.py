@@ -13,7 +13,7 @@
     бинарный поиск в lang.cpp: при сдвинутой сортировке часть подписей молча
     осталась бы русской;
   * английские имена оружия совпадают с тем, как называет его игра
-    (kWeaponNames в game.cpp, колонка `en`), кроме подписей, которые заведены
+    (kWeaponNames в esp/weapons.cpp, колонка `en`), кроме подписей, заведённых
     руками в gen_tables.py.
 
 Строки мини-лога (mlog::line / mlog::every) не проверяются — как и прежний лог
@@ -102,7 +102,7 @@ def main():
     #    Одной подписи игра может давать несколько имён (у «Топора» это Axe и
     #    Hatchet), а подписи, заведённые руками в gen_tables.VISUAL_EN, вольны
     #    не совпадать вовсе — они и так наши.
-    game_src = gen_tables.strip_comments(open(gen_tables.GAME, encoding='utf-8').read())
+    game_src = gen_tables.strip_comments(gen_tables.game_sources())
     allowed = {}
     for _key, en, ru in re.findall(
             r'\{"([a-z0-9_\.]+)",\s*"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)"\}', game_src):

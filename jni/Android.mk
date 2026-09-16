@@ -21,8 +21,14 @@ LOCAL_LDFLAGS := -Wl,--gc-sections,-s,--strip-all -Wl,-x -Wl,--build-id=none -pi
 
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PATH)/include/ImGui/backends $(LOCAL_PATH)/src
 
+# src/esp/* — слой ESP, разрезанный из прежнего src/game.cpp (каждый модуль =
+# своя задача: память, скелет, камера, маркеры, автофарм). Добавил файл в
+# этот каталог — он уже в сборке, перечислять его здесь не нужно.
+ESP_SRC := $(patsubst $(LOCAL_PATH)/%,%,$(wildcard $(LOCAL_PATH)/src/esp/*.cpp))
+
 LOCAL_SRC_FILES := \
-    src/main.cpp src/game.cpp src/lang.cpp \
+    src/main.cpp src/lang.cpp \
+    $(ESP_SRC) \
     src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
     src/VidAvatar.cpp \
     src/third_party/tjpgd/tjpgd.c \

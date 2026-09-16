@@ -17,6 +17,10 @@
 #     отношения не имеет. Всё остальное компилируется ровно как в NDK.
 #
 # Скрипт ничего не меняет в репозитории: копия main.cpp пишется во временный файл.
+#
+# Было: одной командой компилировался монолит game.cpp. Теперь он разрезан на
+# модули jni/src/esp/*.cpp, и проверяются все: так же быстро, но ошибка в любом
+# модуле видна отдельной строкой.
 set -e
 cd "$(dirname "$0")/../.."
 STUB=tools/hostcheck/stub
@@ -43,8 +47,10 @@ echo "main.cpp: ОК"
 g++ $FLAGS $INC jni/src/VidAvatar.cpp
 echo "VidAvatar.cpp: ОК"
 # shellcheck disable=SC2086
-g++ $FLAGS $INC jni/src/game.cpp
-echo "game.cpp: ОК"
+for f in jni/src/esp/*.cpp; do
+    g++ $FLAGS $INC "$f" || exit 1
+done
+echo "jni/src/esp/*.cpp: ОК"
 # shellcheck disable=SC2086
 g++ $FLAGS $INC jni/src/lang.cpp
 echo "lang.cpp: ОК"

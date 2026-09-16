@@ -15,7 +15,7 @@ set -e
 cd "$(dirname "$0")/../.."
 STUB=tools/syntax/stub
 INC="-I$STUB -Ijni/include -Ijni/include/ImGui -Ijni/src"
-FILES="${*:-jni/src/main.cpp jni/src/game.cpp jni/src/Android_draw/draw.cpp}"
+FILES="${*:-jni/src/main.cpp jni/src/Android_draw/draw.cpp jni/src/esp/*.cpp}"
 rc=0
 for f in $FILES; do
     if g++ -std=c++17 -fsyntax-only -Wall $INC "$f" 2> /tmp/syntax_err.txt; then

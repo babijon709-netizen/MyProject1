@@ -22,8 +22,36 @@ import re
 import sys
 
 REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
-MAIN = os.path.join(REPO, 'jni/src/main.cpp')
-GAME = os.path.join(REPO, 'jni/src/game.cpp')
+# Русские строки собираются со всех исходников, а не из одного файла: меню и
+# ESP разрезаны на модули (jni/src/esp/*, jni/src/ui/*), и после разрезания
+# искать их в прежнем монолите бессмысленно.
+#
+#   MAIN — меню и всё остальное (main.cpp, ui/*, lang.cpp);
+#   GAME — слой ESP (jni/src/esp/*): подписи визуалов и таблица оружия.
+UI_ROOT = os.path.join(REPO, 'jni/src')
+ESP_ROOT = os.path.join(UI_ROOT, 'esp')
+SKIP_DIRS = {'ImGui', 'third_party'}
+
+
+def _sources(root, skip_esp=True):
+    """Тексты .cpp/.h под каталогом (без ImGui и third_party)."""
+    parts = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        if skip_esp and os.path.abspath(dirpath).startswith(ESP_ROOT):
+            continue
+        for fn in sorted(filenames):
+            if fn.endswith(('.cpp', '.h')):
+                parts.append(open(os.path.join(dirpath, fn), encoding='utf-8').read())
+    return '\n'.join(parts)
+
+
+def main_sources():
+    return _sources(UI_ROOT, skip_esp=True)
+
+
+def game_sources():
+    return _sources(ESP_ROOT, skip_esp=False)
 OUT = os.path.join(REPO, 'jni/src/lang_tables.inc')
 
 
@@ -195,8 +223,8 @@ WEAPON_EN_PICK = {
 
 def build_text():
     """Текст lang_tables.inc. Бросает SystemExit, если что-то не переведено."""
-    game = strip_comments(open(GAME, encoding='utf-8').read())
-    main_src = strip_comments(open(MAIN, encoding='utf-8').read())
+    game = strip_comments(game_sources())
+    main_src = strip_comments(main_sources())
 
     # --- оружие: имена берём из таблицы игры, колонка `en` -------------------
     visual = dict(VISUAL_EN)
@@ -232,7 +260,7 @@ def build_text():
     buf = io.StringIO()
     w = buf.write
     w('// Таблицы перевода РУ/EN. Файл собран tools/lang/gen_tables.py — правь\n')
-    w('// английские строки там (или в таблице оружия game.cpp), а не здесь.\n')
+    w('// английские строки там (или в таблице оружия esp/weapons.cpp), а не здесь.\n')
     w('//\n')
     w('// Сортировка по байтам UTF-8: по этому порядку идёт бинарный поиск (strcmp)\n')
     w('// в lang.cpp. Проверки полноты и сортировки — tools/lang/run.sh.\n\n')
