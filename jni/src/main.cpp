@@ -11,6 +11,7 @@
 #include "widgets.h"
 #include "menu.h"
 #include "config.h"
+#include "logfile.h"
 #include "theme.h"
 #include "app_state.h"
 #include <atomic>
@@ -81,19 +82,30 @@ int main(int argc, char* argv[]) {
     CenterMenuOnDisplay();
     g_menuFadeIn = 0.f;
 
+    LogOpen();
+    LogWatchdogStart();
+    unsigned long frame = 0;
     while (main_thread_flag) {
+        ++frame;
         g_frame_done.store(false);
+        LogStage(kStageFrameBegin);
         drawBegin();
 
         esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
+        LogStage(kStageEsp);
         DrawEspOverlay();
         UpdateAim(ImGui::GetIO().DeltaTime);
+        LogStage(kStageFarm);
         UpdateFarm(ImGui::GetIO().DeltaTime);
+        LogStage(kStageMenu);
         RenderMenu();
         AimEndFrame();        // повтор оси выстрела перед самым концом кадра
+        LogStage(kStageFrameEnd);
         drawEnd();
+        LogFrameBeat(frame);
         g_frame_done.store(true);
     }
+    LogClose();
     while (!g_frame_done.load()) {}
     stop_attach_thread();
     process_detach();

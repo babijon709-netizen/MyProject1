@@ -21,8 +21,24 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <cstdarg>
 
 #include "xp.inc"
+
+// ---- заглушка лога (в стенде пишет в stderr, только если задан AIM_LOG) ----
+#include "logfile.h"
+static bool g_log_echo = getenv("AIM_LOG") != nullptr;
+void LogOpen() {}
+void LogClose() {}
+void LogStage(int) {}
+void LogFrameBeat(unsigned long) {}
+void LogWatchdogStart() {}
+void LogLine(const char* fmt, ...) {
+    if (!g_log_echo) return;
+    va_list a; va_start(a, fmt);
+    fprintf(stderr, "  лог: "); vfprintf(stderr, fmt, a); fputc('\n', stderr);
+    va_end(a);
+}
 
 // ---- заглушка языка (XS() шифрует строку, перевод здесь не нужен) ----
 namespace lang { inline const char* text(const char* ru) { return ru; } }
@@ -56,6 +72,8 @@ void ShowToast(const char*, float) { ++g_toasts; }
 void ShowToast(const char*) { ++g_toasts; }
 
 // ====================== «игра» ==============================================
+static bool g_firing = false;       // стенд: «игрок стреляет»
+
 struct Game {
     // ---- MouseLook ----
     bool  haveLook = true;
@@ -71,6 +89,7 @@ struct Game {
 
     // ---- ось выстрела (PlayerEventHandler.LookDirection) ----
     bool  haveAxis = true;
+    float shotTime = 0.f;           // метка выстрела (FPHitscan.LastLocalHitTime)
     float ax = 0.f, ay = 0.f, az = 1.f;
     int   gameFrames = 0;
 
@@ -99,6 +118,7 @@ struct Game {
         // кадр. Наша запись живёт до следующего кадра игры: это и есть та
         // гонка, ради которой ось повторяют в конце кадра оверлея.
         ax = fx; ay = fy; az = fz;
+        if (g_firing) shotTime += 2.f;   // стрельба: метка растёт
     }
 };
 static Game g_game;
@@ -188,6 +208,8 @@ bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z) {
     x = g_game.ax; y = g_game.ay; z = g_game.az;
     return true;
 }
+bool esp_mem_aim_last_shot(float& time_sec) { time_sec = g_game.shotTime; return true; }
+
 bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     if (!g_game.haveAxis) return false;
     const float len = sqrtf(x * x + y * y + z * z);

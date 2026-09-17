@@ -1,4 +1,5 @@
 #include "aim.h"
+#include "logfile.h"
 #include "main.h"                // displayInfo, native_window_screen_*
 #include "game.h"
 #include "Android_touch/TouchHelperA.h"
@@ -211,6 +212,7 @@ static bool AimBegin(float& dt, float& sw, float& sh) {
 // прилипание, решает режим (палец ждёт шесть кадров, запись в память
 // прекращается сразу). degPerPx наружу — мёртвая зона считается в пикселях.
 static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, float& degPerPx) {
+    LogStage(kStageAimSelect);
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
 
     const float crossX = sw * 0.5f, crossY = sh * 0.5f;
@@ -355,6 +357,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
 
 // ============================ Тач-аим ======================================
 static void UpdateAimTouch(float dt) {
+    LogStage(kStageAimSelect);
     static float s_fx = 0.f, s_fy = 0.f;         // finger position (px)
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f; // absolute camera angles
     static bool  s_haveLast = false;
@@ -775,6 +778,36 @@ static void UpdateAimTouch(float dt) {
     Touch_Move(s_fx, s_fy);
 }
 
+// ---- диагностика режимов: по 4 строки в секунду в лог (Загрузки) ----------
+// Главное, что должно быть видно: выигрывает ли запись гонку у игры. Поэтому
+// в сайленте печатается то, что лежало в оси ДО нашей записи, — если там наше
+// вчерашнее значение, значит игра ось в этом кадре не переписывала.
+static unsigned long s_frames = 0;
+static float         s_logTime = 0.f;
+
+static const char* aim_mode_name() {
+    switch (g_state.aim_mode) {
+        case AIM_MODE_MEMORY: return "память";
+        case AIM_MODE_SILENT: return "сайлент";
+        default:              return "тач";
+    }
+}
+
+static void AimLogTick(float dt) {
+    s_logTime += dt;
+    if (s_logTime < 0.25f) return;
+    s_logTime = 0.f;
+    const AimMemDiag& d = AimMemoryDiag();
+    if (g_state.aim_mode == AIM_MODE_SILENT)
+        LogLine("аим: %s кадр=%lu ось=%d записей=%d отказов=%d dev=%.1f цель=%d",
+                aim_mode_name(), s_frames, (int)d.axis, d.writes, d.fails, d.dev,
+                (int)g_aimActive);
+    else if (g_state.aim_mode == AIM_MODE_MEMORY)
+        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d",
+                aim_mode_name(), s_frames, (int)d.params, (int)d.responded,
+                d.writes, d.fails);
+}
+
 // ====================== Мемори-аим: «память» ===============================
 //
 // Камера ведётся записью углов прямо в MouseLook — в накопитель, из которого
@@ -862,6 +895,7 @@ static void UpdateAimMemory(float dt) {
     // Текущий накопитель углов камеры. Он же — база для нашего шага: игра
     // прибавит к записанному свои углы ввода (ноль, если экран не трогают).
     float accX = 0.f, accY = 0.f;
+    LogStage(kStageAimRead);
     if (!esp_mem_aim_read_angles(accX, accY)) {
         pick.reset(); s_haveLast = false; s_haveCtlErr = false;
         s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
@@ -966,6 +1000,7 @@ static void UpdateAimMemory(float dt) {
 
     // Градусы -> накопитель игры: X — «наклон вниз» (вверх — меньше),
     // Y — рысканье (вправо — больше).
+    LogStage(kStageAimWrite);
     if (!esp_mem_aim_write_angles(accX - stepPitch, accY + stepYaw)) {
         ++s_memDiag.fails;
         return;
@@ -1040,6 +1075,7 @@ static void UpdateAimSilent(float dt) {
     }
 
     float dx = 0.f, dy = 0.f, dz = 0.f;
+    LogStage(kStageAimRead);
     if (!esp_mem_aim_read_fire_dir(dx, dy, dz)) {
         s_haveWritten = false;
         s_devYaw = s_devPitch = 0.f;
@@ -1103,6 +1139,7 @@ static void UpdateAimSilent(float dt) {
     const float newPitchDeg = axisPitch + stepPitch;
     const float cy = newYaw / rad2deg, cp = newPitchDeg / rad2deg;
     const float cpCos = cosf(cp);
+    LogStage(kStageAimWrite);
     if (!esp_mem_aim_write_fire_dir(cpCos * sinf(cy), sinf(cp), cpCos * cosf(cy))) {
         ++s_memDiag.fails;
         return;
@@ -1110,13 +1147,39 @@ static void UpdateAimSilent(float dt) {
     ++s_memDiag.writes;
     s_writtenYaw = newYaw; s_writtenPitch = newPitchDeg; s_haveWritten = true;
     s_memDiag.dev = fabsf(s_devYaw) > fabsf(s_devPitch) ? fabsf(s_devYaw) : fabsf(s_devPitch);
+    // Выиграли ли гонку: ось до записи — это наше вчерашнее значение или игра
+    // уже положила своё? Пишем раз в секунду, чтобы лог не распухал.
+    {
+        static float t = 0.f;
+        t += dt;
+        if (t >= 1.f) {
+            t = 0.f;
+            // Метка выстрела: FPHitscan пишет время попадания, значит между
+            // прошлым и этим кадром стреляли — и ось в тот момент была либо
+            // нашей (ганка выиграна), либо игры.
+            float shot = 0.f;
+            const bool haveShot = esp_mem_aim_last_shot(shot);
+            static float s_lastShot = -1.f;
+            const bool fired = haveShot && (s_lastShot < 0.f || shot != s_lastShot);
+            s_lastShot = haveShot ? shot : -1.f;
+            LogLine("сайлент: кадр=%lu ось до записи рысканье=%.2f тангаж=%.2f "
+                    "(писали %.2f/%.2f) — %s; отклонение %.2f/%.2f%s",
+                    s_frames, axisYaw, axisPitch, s_writtenYaw, s_writtenPitch,
+                    (fabsf(axisYaw - s_writtenYaw) < kSilentFreshEps &&
+                     fabsf(axisPitch - s_writtenPitch) < kSilentFreshEps) ? "НАШЕ" : "игры",
+                    s_devYaw, s_devPitch,
+                    fired ? "; был выстрел" : "");
+        }
+    }
     // Запомним ось: в конце кадра повторим её ещё раз (см. AimEndFrame).
     s_lastDirX = cpCos * sinf(cy); s_lastDirY = sinf(cp); s_lastDirZ = cpCos * cosf(cy);
     s_dirFresh = true;
 }
 
 void UpdateAim(float dt) {
+    ++s_frames;
     const int mode = g_state.aim_mode;
+    AimLogTick(dt);
     if (mode == AIM_MODE_MEMORY)      UpdateAimMemory(dt);
     else if (mode == AIM_MODE_SILENT) UpdateAimSilent(dt);
     else                              UpdateAimTouch(dt);

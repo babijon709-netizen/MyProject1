@@ -344,6 +344,11 @@ bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro);
 bool esp_mem_aim_read_angles(float& x_deg, float& y_deg);
 bool esp_mem_aim_write_angles(float x_deg, float y_deg);
 
+// Метка выстрела: время последнего попадания (PlayerEventHandler.LastLocalHitTime,
+// +0x178 -> +0x20). FPHitscan.ZDW пишет его после каждого выстрела, поэтому по
+// изменению значения видно, что выстрел был — и что в этот момент лежало в оси.
+bool esp_mem_aim_last_shot(float& time_sec);
+
 // Ось выстрела (PlayerEventHandler.LookDirection) — нормированный вектор,
 // вдоль которого игра пускает луч попадания. Читать её приходится и для
 // записи: игру пишет туда forward камеры каждый кадр, поэтому доворачивать

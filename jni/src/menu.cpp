@@ -12,7 +12,8 @@
 #include "audio.h"
 #include "str.h"
 #include "esp_draw.h"
-#include "aim.h"                 // AimTouchFracX/Y (строки калибровки)
+#include "aim.h"
+#include "logfile.h"                 // AimTouchFracX/Y (строки калибровки)
 #include "process.h"             // g_buildPrompt (стартовый выбор версии)
 #include "VidAvatar.h"
 #if __has_include("media/icons.h")
@@ -80,7 +81,10 @@ float TabContent(int tab, float dt, float cW) {
 
         SHdr(XS("Аим"));
         CardBg(Layout::RowH * 3);
+        const bool aimWasOn = g_state.aim_touch;
         ToggleRow("##ta1", XS("Аим"),          &g_state.aim_touch,   g_state.a_aim_touch, false, true);
+        if (aimWasOn != g_state.aim_touch)
+            LogLine("аим: %s (режим %d)", g_state.aim_touch ? "включён" : "выключен", g_state.aim_mode);
         ToggleRow("##ta6", XS("Только в прицеле"), &g_state.aim_scope_only, g_state.a_aim_scope, false);
         ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true);
 
@@ -116,6 +120,8 @@ float TabContent(int tab, float dt, float cW) {
                 const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
                 if (tapped && g_state.aim_mode != mode) {
                     g_state.aim_mode = mode;
+                    LogLine("аим: выбран режим %d (%s), аим %s", mode, lbl,
+                            g_state.aim_touch ? "включён" : "выключен");
                     char b[160];
                     snprintf(b, sizeof(b), XS("%s|%s"), XS("Режим"), lbl);
                     ShowToast(b);

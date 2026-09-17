@@ -4,6 +4,7 @@
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // активные оффсеты: релиз или бета (go::SelectBuild)
 #include "Vector.h"
+#include "logfile.h"     // диагностический лог (Загрузки)
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
 #include "text_utf8.h"  // копия подписи в буфер без разрезания символа UTF-8
 
@@ -1405,6 +1406,9 @@ bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro) {
 // Накопитель углов: +0x4C rotationX (вверх — МЕНЬШЕ), +0x50 rotationY (вправо
 // — больше). Значения всегда в пределах обзора игры: их же клампит сам ZJo,
 // поэтому выход за +-360 означает, что читаем не тот объект.
+// Класс MouseLook, о котором уже писали в лог (адрес меняется на респавне).
+static std::atomic<uint64_t> g_look_addr_logged{0};
+
 bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
     uint64_t mouse_look = 0;
     if (!resolve_local_mouse_look(mouse_look)) return false;
@@ -1414,6 +1418,12 @@ bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
     if (fabsf(angles[0]) > 360.0F || fabsf(angles[1]) > 360.0F) return false;
     x_deg = angles[0];
     y_deg = angles[1];
+    if (mouse_look != g_look_addr_logged.exchange(mouse_look))
+        LogLine("память: MouseLook=0x%llx углы=(%.2f, %.2f) чувствительность=%.3f инверсия=%d гироскоп=%d",
+                (unsigned long long)mouse_look, angles[0], angles[1],
+                (double)rd<float>(mouse_look + MOUSE_LOOK_SENSITIVITY_OFFSET),
+                (int)(rd<uint8_t>(mouse_look + MOUSELOOK_INVERT) != 0),
+                (int)(rd_ptr(mouse_look + MOUSELOOK_GYRO) >= 0x10000));
     return true;
 }
 
@@ -1431,27 +1441,64 @@ bool esp_mem_aim_write_angles(float x_deg, float y_deg) {
 // MouseLook.Update каждый кадр пишет сюда forward камеры (ZJo, RVA 0x64e35a4:
 // приёмник — [this+0x20][0x140], значение — s0/s1/s2 от Transform.get_forward),
 // а FPHitscan пускает луч попадания ровно вдоль этого вектора.
-static bool resolve_look_direction(uint64_t& out) {
+static bool resolve_event_handler(uint64_t& out_handler) {
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
     uint64_t player = resolve_local_player();
     if (!player) return false;
     uint64_t handler = rd_ptr(player + PLAYER_EVENT_HANDLER);
     if (!handler || rd_ptr(handler + EVENT_HANDLER_MANAGER_BACKREF) != player) return false;
+    out_handler = handler;
+    return true;
+}
+
+static bool resolve_look_direction(uint64_t& out) {
+    uint64_t handler = 0;
+    if (!resolve_event_handler(handler)) return false;
     uint64_t look = rd_ptr(handler + EVENT_HANDLER_LOOK_DIRECTION);
     if (look < 0x10000) return false;
     out = look + SYNC_VALUE_OFFSET;
     return true;
 }
 
+bool esp_mem_aim_last_shot(float& time_sec) {
+    uint64_t handler = 0;
+    if (!resolve_event_handler(handler)) return false;
+    const uint64_t sv = rd_ptr(handler + EVENT_HANDLER_LAST_HIT_TIME);
+    if (sv < 0x10000) return false;
+    const float v = rd<float>(sv + SYNC_VALUE_OFFSET);
+    if (!std::isfinite(v)) return false;
+    time_sec = v;
+    return true;
+}
+
+// Цепь оси выстрела, о которой уже писали в лог: адрес меняется на респавне и
+// при смене мира, и это первое, что стоит проверить, когда «сайлент молчит».
+static std::atomic<uint64_t> g_axis_addr_logged{0};
+
+static void log_axis_chain(uint64_t addr, const float* dir) {
+    if (addr == g_axis_addr_logged.load()) return;
+    g_axis_addr_logged.store(addr);
+    if (!addr) { LogLine("сайлент: цепь оси потеряна (нет игрока, хендлера или оси)"); return; }
+    if (!dir) { LogLine("сайлент: цепь оси адрес=0x%llx", (unsigned long long)addr); return; }
+    const float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    LogLine("сайлент: цепь адрес=0x%llx значение=(%.4f, %.4f, %.4f) длина=%.4f",
+            (unsigned long long)addr, dir[0], dir[1], dir[2], len);
+}
+
 bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z) {
     uint64_t addr = 0;
-    if (!resolve_look_direction(addr)) return false;
+    if (!resolve_look_direction(addr)) { log_axis_chain(0, nullptr); return false; }
+    LogStage(kStageAimRead);
     const Vec3 dir = rd_v3(addr);
     if (!vec3_is_finite(dir)) return false;
     const float len = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     // Игра держит тут единичный вектор; всё остальное — не ось, а мусор.
     if (!(len > 0.5F && len < 2.0F)) return false;
     x = dir.x / len; y = dir.y / len; z = dir.z / len;
+    {
+        const float d[3] = {x, y, z};
+        log_axis_chain(addr, d);
+    }
     return true;
 }
 
@@ -1461,7 +1508,20 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     const float len = sqrtf(x * x + y * y + z * z);
     if (!std::isfinite(len) || len < 0.001F) return false;
     const float dir[3] = {x / len, y / len, z / len};
-    return wr_buf(addr, dir, sizeof(dir));
+    LogStage(kStageAimWrite);
+    const bool ok = wr_buf(addr, dir, sizeof(dir));
+    if (!ok) {
+        // Отказ записи — редкость (доступ отобрали или адрес умер); пишем, но
+        // не чаще раза в секунду, чтобы не забить лог.
+        static double last = 0.0;
+        const double now = memio::now_seconds();
+        if (now - last > 1.0) {
+            last = now;
+            LogLine("сайлент: запись оси не прошла, адрес=0x%llx errno=%d",
+                    (unsigned long long)addr, errno);
+        }
+    }
+    return ok;
 }
 
 // Писателя-доминатора оси выстрела (фонового потока, который добивал ось

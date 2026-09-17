@@ -175,6 +175,10 @@ inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = 0x18;
 // MouseLook.Update writes m_LookRoot.forward into it every frame and
 // FPHitscan casts its hit ray along it (not along the camera transform).
 inline constexpr std::uint64_t EVENT_HANDLER_LOOK_DIRECTION  = 0x140;
+// Отметка выстрела: FPHitscan.ZDW(Ray) кладёт сюда точку попадания (0x170) и
+// время (0x178) — по ним в логе видно, когда именно стреляли и что лежало в оси.
+inline constexpr std::uint64_t EVENT_HANDLER_LAST_HIT_POINT  = 0x170;
+inline constexpr std::uint64_t EVENT_HANDLER_LAST_HIT_TIME   = 0x178;
 inline constexpr std::uint64_t SYNC_VALUE_OFFSET             = 0x20;
 inline constexpr std::uint64_t ACTIVITY_ACTIVE_FLAG          = 0x10;
 inline constexpr std::uint64_t PLAYER_FP_MANAGER             = 0x90;

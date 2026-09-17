@@ -26,7 +26,7 @@ LOCAL_SRC_FILES := \
     src/process.cpp src/audio.cpp src/theme.cpp src/hud.cpp \
     src/esp_draw.cpp src/aim.cpp src/farm.cpp \
     src/widgets.cpp src/menu.cpp src/config.cpp \
-    src/game.cpp src/game_markers.cpp src/game_farm.cpp \
+    src/game.cpp src/game_markers.cpp src/game_farm.cpp src/logfile.cpp \
     src/lang.cpp \
     src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
     src/VidAvatar.cpp \
