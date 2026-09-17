@@ -492,18 +492,22 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // которые на нём держатся. Иначе пилюля показывала бы ноль рядом с
     // нарисованными рамками.
     g_frame_player_count = 0;
+    // Почему кадр остался без рамок. По логу устройства это не отличить: пустой
+    // кадр выглядит одинаково и когда игроков рядом нет, и когда не сходятся
+    // матрицы камеры, и когда позиции не читаются. Считаем причины и пишем в
+    // журнал не чаще раза в 5 с — иначе следующая правка делается вслепую.
+    int drop_suppressed = 0, drop_position = 0, drop_far = 0, drop_lower = 0, drop_upper = 0, drop_short = 0;
     for (size_t i = 0; i < s_transforms.size(); ++i) {
-        if (i == local_entity_index) continue;
-        if (!s_transforms[i]) continue;
-        if (suppressed[i]) continue;
-        if (!position_ok[i]) continue;
+        if (i == local_entity_index || !s_transforms[i]) continue;
+        if (suppressed[i]) { ++drop_suppressed; continue; }
+        if (!position_ok[i]) { ++drop_position; continue; }
         Vec3 feet = positions[i];
 
         float distance = -1.0F;
         if (has_local_position) {
             float dx = feet.x - local.x, dy = feet.y - local.y, dz = feet.z - local.z;
             distance = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
+            if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) { ++drop_far; continue; }
         }
 
         // Counted before any screen-space checks: the pill counter must see
@@ -524,14 +528,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         bool bottom_visible = transform_camera_mode
             ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_bottom, sw, sh, sf, false)
             : w2s(vp, body_bottom, sw, sh, sf, false);
-        if (!bottom_visible) continue;
+        if (!bottom_visible) { ++drop_lower; continue; }
         bool top_visible = transform_camera_mode
             ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_top, sw, sh, sh2, false)
             : w2s(vp, body_top, sw, sh, sh2, false);
-        if (!top_visible) continue;
+        if (!top_visible) { ++drop_upper; continue; }
 
         float height = fabsf(sh2.y - sf.y);
-        if (!std::isfinite(height) || height < 2.0F) continue;
+        if (!std::isfinite(height) || height < 2.0F) { ++drop_short; continue; }
         float cx = (sf.x + sh2.x) * 0.5F;
         float cy = (sf.y + sh2.y) * 0.5F;
         float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
@@ -682,6 +686,25 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!box.aim_valid[2]) { Vec3 t = feet; t.y += body_height * 0.72F; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
         }
         result.push_back(box);
+    }
+
+    // Отчёт «почему пусто» — только когда рамок действительно нет: он нужен
+    // ровно для тех секунд, на которые жалоба «ESP мерцает и появляется не
+    // сразу».
+    if (result.empty()) {
+        static double s_empty_report = 0.0;
+        const double now = mono_seconds();
+        if (now - s_empty_report > 5.0) {
+            s_empty_report = now;
+            // Числовые флаги, а не слова: отдельные русские литералы здесь не
+            // нужны (их пришлось бы переводить в таблицах меню), а по «1/0»
+            // в журнале всё читается так же.
+            diag_log("esp", "рамок нет: в списке %d, из них свой %d, скрыто %d, без позиции %d, далеко %d, ниже экрана %d, выше экрана %d, низких %d, матрицы подтверждены: %d, режим узла: %d",
+                     (int)s_transforms.size(), local_entity_index < s_transforms.size() ? 1 : 0,
+                     drop_suppressed, drop_position, drop_far, drop_lower, drop_upper, drop_short,
+                     g_matrix_configuration_validated ? 1 : 0,
+                     transform_camera_mode ? 1 : 0);
+        }
     }
 
     return result;
