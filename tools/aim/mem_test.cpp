@@ -22,6 +22,8 @@
 #include <cstring>
 #include <vector>
 #include <cstdarg>
+#include <future>
+#include <chrono>
 
 #include "xp.inc"
 
@@ -179,8 +181,12 @@ static void snapshot() {
 // ---- esp_* из game.h ----
 float esp_camera_fov_deg() { return 60.f; }
 bool esp_local_player_is_aiming() { return true; }
+// Муссор вместо угла камеры: 0 — камера честная, иначе отдаём это значение.
+// Так проверяется, что кадр не залипнет (см. сценарий «мусорный угол»).
+float g_garbageCam = 0.f;
 bool esp_aim_camera_angles(float& yaw, float& pitch) {
     if (!g_haveCamAxis) return false;
+    if (g_garbageCam != 0.f) { yaw = g_garbageCam; pitch = g_garbageCam; return true; }
     yaw = g_game.camYaw(); pitch = g_game.camPitch();
     return true;
 }
@@ -217,6 +223,9 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     g_game.ax = x / len; g_game.ay = y / len; g_game.az = z / len;
     return true;
 }
+
+// WrapDeg180() — общая обёртка угла, её зовёт вырезанный код ниже.
+#include "ui_util.h"
 
 // Вырезанный настоящий код режимов (см. run.sh): он должен видеть объявления
 // окружения (g_state, FrameBoxes, esp_*), поэтому включается после заглушек.
@@ -276,6 +285,7 @@ static void resetGame() {
     g_state.gun_fov = 60.f;
     g_boxes.clear();
     g_haveCamAxis = true;
+    g_garbageCam = 0.f;
     g_toasts = 0;
     s_memDiag = AimMemDiag{};
 }
@@ -388,6 +398,50 @@ int main() {
         g_state.aim_touch = false;
         Result r = run(AIM_MODE_SILENT, 30);
         check(r.writes == 0, "с выключенным аимом ось отдана игре");
+    }
+
+    // I. Мусорный угол камеры не вешает кадр.
+    //
+    // С устройства пришёл лог, где оверлей встал на 255 с ровно в стадии выбора
+    // цели: приведение угла делалось циклом «пока больше 180 — вычесть 360», а
+    // из памяти пришло мусорное значение (от 1e38 вычитание 360 ничего не
+    // меняет — цикл бесконечен). Игра при этом продолжала работать, потому что
+    // залип только поток отрисовки. Кадр прогоняется в отдельном потоке с
+    // таймаутом: если аим залипнет, стенд скажет «ПРОВАЛ», а не повиснет сам.
+    {
+        resetGame();
+        g_targetYaw = 8.f; g_targetPitch = 4.f;
+        run(AIM_MODE_SILENT, 5);                 // чтобы упреждение развернулось
+
+        const float junk[3] = { 3.4e38f, INFINITY, -INFINITY };
+        int hung = 0;
+        for (float j : junk) {
+            g_garbageCam = j;
+            auto fut = std::async(std::launch::async, [] {
+                snapshot(); UpdateAim(0.08f); AimEndFrame();
+            });
+            if (fut.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+                ++hung;
+                printf("    залип на угле %g\n", j);
+                fut.wait();  // иначе деструктор future всё равно дождётся
+            }
+        }
+        g_garbageCam = 0.f;
+        check(hung == 0, "мусорный угол камеры не вешает кадр (3 значения)");
+    }
+
+    // J. Обёртка угла: одна формула вместо цикла.
+    {
+        check(fabsf(WrapDeg180(190.f) - (-170.f)) < 0.01f, "190° -> -170°");
+        check(fabsf(WrapDeg180(-190.f) - 170.f) < 0.01f,   "-190° -> 170°");
+        check(fabsf(WrapDeg180(360.f)) < 0.01f,            "360° -> 0°");
+        check(fabsf(WrapDeg180(0.f)) < 0.01f,              "0° остаётся 0°");
+        check(WrapDeg180(180.f) == 180.f,                  "180° не переворачивается");
+        const float big = WrapDeg180(3.4e38f);
+        check(std::isfinite(big) && fabsf(big) <= 180.f,   "мусор 1e38 -> конечный угол");
+        check(WrapDeg180(INFINITY) == 0.f,                 "бесконечность -> 0");
+        check(WrapDeg180(-INFINITY) == 0.f,                "минус бесконечность -> 0");
+        check(WrapDeg180(NAN) == 0.f,                      "не число -> 0");
     }
 
     printf(g_fail ? "--- ЕСТЬ ПРОВАЛЫ\n" : "--- все проверки пройдены\n");

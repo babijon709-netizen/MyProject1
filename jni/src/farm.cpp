@@ -436,9 +436,7 @@ static void UpdateFarmInner(float dt) {
     float camYawDelta = 0.f;
     bool camMoved = false;
     if (haveCam && s_haveLast) {
-        camYawDelta = camYaw - s_lastCamYaw;
-        while (camYawDelta > 180.f) camYawDelta -= 360.f;
-        while (camYawDelta < -180.f) camYawDelta += 360.f;
+        camYawDelta = WrapDeg180(camYaw - s_lastCamYaw);
         camMoved = fabsf(camYawDelta) > kCamMovedEps ||
                    fabsf(camPitch - s_lastCamPitch) > kCamMovedEps;
     }

@@ -313,11 +313,12 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // сторону. Нет настоящей оси — нет и упреждения: так вёл цель эталонный аим.
     {
         float cy = 0.f, cp = 0.f;
-        bool haveC = esp_aim_camera_angles(cy, cp);
+        // Мусорный угол камеры (чтение сорвалось) не годится даже в
+        // нормализацию: упреждение по нему уводит прицел, а раньше из-за него
+        // ещё и зависал цикл приведения угла.
+        bool haveC = esp_aim_camera_angles(cy, cp) && std::isfinite(cy) && std::isfinite(cp);
         if (best.id == pick.lastId && pick.havePrev && haveC) {
-            float dCamYaw = cy - pick.prevCamYaw;
-            while (dCamYaw > 180.f) dCamYaw -= 360.f;
-            while (dCamYaw < -180.f) dCamYaw -= 360.f;
+            const float dCamYaw = WrapDeg180(cy - pick.prevCamYaw);
             float dCamPitch = cp - pick.prevCamPitch;
             // world-space angular motion of the target = change in offset + camera rotation
             float vYaw = (best.yaw - pick.prevTgtYaw) + dCamYaw;
@@ -433,9 +434,7 @@ static void UpdateAimTouch(float dt) {
     float camYawDelta = 0.f, camPitchDelta = 0.f;
     bool camMoved = false;
     if (haveCam && s_haveLast) {
-        camYawDelta = camYaw - s_lastCamYaw;
-        while (camYawDelta > 180.f) camYawDelta -= 360.f;
-        while (camYawDelta < -180.f) camYawDelta += 360.f;
+        camYawDelta = WrapDeg180(camYaw - s_lastCamYaw);
         camPitchDelta = camPitch - s_lastCamPitch;
         camMoved = fabsf(camYawDelta) > 0.02f || fabsf(camPitchDelta) > 0.02f;
     }
@@ -926,9 +925,7 @@ static void UpdateAimMemory(float dt) {
     float camYaw = 0.f, camPitch = 0.f;
     const bool haveCam = esp_aim_camera_angles(camYaw, camPitch);
     if (haveCam && s_haveLast) {
-        float dYaw = camYaw - s_lastCamYaw;
-        while (dYaw > 180.f) dYaw -= 360.f;
-        while (dYaw < -180.f) dYaw -= 360.f;
+        const float dYaw = WrapDeg180(camYaw - s_lastCamYaw);
         const float dPitch = camPitch - s_lastCamPitch;
         if ((fabsf(s_pendYaw) > 0.05f && fabsf(dYaw) > kMemCamMoveEps) ||
             (fabsf(s_pendPitch) > 0.05f && fabsf(dPitch) > kMemCamMoveEps)) {
@@ -1111,9 +1108,7 @@ static void UpdateAimSilent(float dt) {
     if (!s_haveWritten) {
         s_devYaw = s_devPitch = 0.f;
     } else {
-        float dYaw = axisYaw - s_writtenYaw;
-        while (dYaw > 180.f) dYaw -= 360.f;
-        while (dYaw < -180.f) dYaw -= 360.f;
+        const float dYaw = WrapDeg180(axisYaw - s_writtenYaw);
         const float dPitch = axisPitch - s_writtenPitch;
         if (fabsf(dYaw) > kSilentFreshEps || fabsf(dPitch) > kSilentFreshEps)
             s_devYaw = s_devPitch = 0.f;
