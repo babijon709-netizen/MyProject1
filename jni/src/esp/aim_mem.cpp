@@ -949,12 +949,47 @@ void esp_mem_aim_tick(float dt) {
             // в таблицах меню.
             auto push_pair_candidate = [&](const AnglePair& spec, int kind, uint64_t owner) {
                 if (!spec.field) return;
-                float pair_yaw = 0.f, pair_pitch = 0.f;
-                if (!pair_read(spec, pair_yaw, pair_pitch)) {
+                // Сырые числа пары и её конвенция: пара годится в дорожку, только
+                // если её значение СЕЙЧАС и есть углы прицела. Проверка обязательна:
+                // по логу устройства пара оружия читалась нулями, пока прицел смотрел
+                // на 173°, — такая дорожка «подтверждалась» пробой, а через такт
+                // расходилась на 80°, и самотест шёл по кругу. Знаки перебираем тут
+                // же: пара могла хранить углы с обратным знаком (после смены мира
+                // знак пары приходится выяснять заново).
+                float raw[2] = {0.f, 0.f};
+                if (!read_mouse_look_floats(spec.field, raw[0], raw[1])) {
                     diag_log("aim", "мемори-режим: пара углов (вид %d, поле %#llx) не читается — пропускаю",
                              kind, (unsigned long long)spec.field);
                     return;
                 }
+                float best_error = 1e9f;
+                bool matched = false;
+                AnglePair best = spec;
+                for (int ys = 0; ys < 2; ++ys) {
+                    for (int ps = 0; ps < 2; ++ps) {
+                        const float ysign = (ys ? -1.f : 1.f) * spec.yaw_sign;
+                        const float psign = (ps ? -1.f : 1.f) * spec.pitch_sign;
+                        const float yaw_value = ysign * raw[spec.yaw_slot];
+                        const float pitch_value = psign * raw[spec.pitch_slot];
+                        if (fabsf(pitch_value) > 89.9f) continue;   // тангаж игра держит в своих пределах
+                        const float error = fabsf(signed_angle_diff(yaw_value, yaw_now)) +
+                                            fabsf(pitch_value - pitch_now);
+                        if (error < best_error) {
+                            best_error = error;
+                            best = spec;
+                            best.yaw_sign = ysign;
+                            best.pitch_sign = psign;
+                            matched = true;
+                        }
+                    }
+                }
+                const bool looks_like_aim = matched && best_error < 3.0f;
+                diag_log("aim", "мемори-режим: пара углов (вид %d) — %0.1f, %0.1f; углы прицела %0.1f, %0.1f; совпали: %d (расхождение %.1f°)",
+                         kind, (double)(spec.yaw_sign * raw[spec.yaw_slot]),
+                         (double)(spec.pitch_sign * raw[spec.pitch_slot]),
+                         (double)yaw_now, (double)pitch_now, looks_like_aim ? 1 : 0,
+                         (double)(best_error < 1e8f ? best_error : 999.f));
+                if (!looks_like_aim) return;
                 for (int i = 0; i < s_candidate_count; ++i) {
                     if (s_candidates[i].field != spec.field) continue;
                     for (int k = i; k + 1 < s_candidate_count; ++k) s_candidates[k] = s_candidates[k + 1];
@@ -967,16 +1002,10 @@ void esp_mem_aim_tick(float dt) {
                 candidate.path = MEM_PATH_STATE_DEG;
                 candidate.field = spec.field;
                 candidate.pair_kind = true;
-                candidate.pair = spec;
+                candidate.pair = best;
                 candidate.pair_owner = owner;
                 s_candidates[0] = candidate;
                 ++s_candidate_count;
-                const bool looks_like_aim =
-                    fabsf(signed_angle_diff(pair_yaw, yaw_now)) < 3.0f &&
-                    fabsf(pair_pitch - pitch_now) < 3.0f;
-                diag_log("aim", "мемори-режим: пара углов (вид %d) — %0.1f, %0.1f; углы прицела %0.1f, %0.1f; совпали: %d",
-                         kind, (double)pair_yaw, (double)pair_pitch, (double)yaw_now, (double)pitch_now,
-                         looks_like_aim ? 1 : 0);
             };
             {
                 AnglePair weapon_pair;
