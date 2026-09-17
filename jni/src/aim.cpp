@@ -1014,6 +1014,12 @@ static constexpr float kSilentMaxPitch = 80.f;
 // Порог «ось обновилась» (градусы): меньше — это шум чтения, а не новая ось.
 static constexpr float kSilentFreshEps = 0.5f;
 
+// Последняя записанная ось выстрела: AimEndFrame повторяет её перед самым
+// концом кадра (одна запись — это один syscall, а шанс, что кадр игры начнётся
+// уже после нашей записи, заметно выше).
+static float s_lastDirX = 0.f, s_lastDirY = 0.f, s_lastDirZ = 1.f;
+static bool  s_dirFresh = false;   // ось записана в этом кадре
+
 static void UpdateAimSilent(float dt) {
     static AimPick pick;
     static float s_devYaw = 0.f, s_devPitch = 0.f;     // накопленное отклонение
@@ -1026,7 +1032,6 @@ static void UpdateAimSilent(float dt) {
     if (!AimBegin(dt, sw, sh)) {
         // Ось возвращается игре: писатель-доминатор выключается, иначе он
         // держал бы чужое направление и после выключения аима.
-        esp_mem_aim_hold_fire_dir(false);
         pick.reset(); s_haveWritten = false;
         s_devYaw = s_devPitch = 0.f;
         s_memDiag = AimMemDiag{};
@@ -1036,7 +1041,6 @@ static void UpdateAimSilent(float dt) {
 
     float dx = 0.f, dy = 0.f, dz = 0.f;
     if (!esp_mem_aim_read_fire_dir(dx, dy, dz)) {
-        esp_mem_aim_hold_fire_dir(false);
         s_haveWritten = false;
         s_devYaw = s_devPitch = 0.f;
         s_memDiag.axis = false;
@@ -1054,7 +1058,6 @@ static void UpdateAimSilent(float dt) {
     float degPerPx = 0.f;
     if (!AimSelectTarget(sw, sh, pick, best, degPerPx)) {
         // Цели нет — ось отдаём игре: сейчас же, а не «когда-нибудь».
-        esp_mem_aim_hold_fire_dir(false);
         pick.reset(); s_haveWritten = false;
         s_devYaw = s_devPitch = 0.f;
         return;
@@ -1107,9 +1110,9 @@ static void UpdateAimSilent(float dt) {
     ++s_memDiag.writes;
     s_writtenYaw = newYaw; s_writtenPitch = newPitchDeg; s_haveWritten = true;
     s_memDiag.dev = fabsf(s_devYaw) > fabsf(s_devPitch) ? fabsf(s_devYaw) : fabsf(s_devPitch);
-    // Доминатор: игра кладёт свою ось каждый кадр, поэтому одна запись за кадр
-    // оверлея в половине кадров не доживает до выстрела.
-    esp_mem_aim_hold_fire_dir(true);
+    // Запомним ось: в конце кадра повторим её ещё раз (см. AimEndFrame).
+    s_lastDirX = cpCos * sinf(cy); s_lastDirY = sinf(cp); s_lastDirZ = cpCos * cosf(cy);
+    s_dirFresh = true;
 }
 
 void UpdateAim(float dt) {
@@ -1117,9 +1120,19 @@ void UpdateAim(float dt) {
     if (mode == AIM_MODE_MEMORY)      UpdateAimMemory(dt);
     else if (mode == AIM_MODE_SILENT) UpdateAimSilent(dt);
     else                              UpdateAimTouch(dt);
-    // Писатель оси выстрела нужен только сайленту: выключили режим — ось
-    // возвращается игре в следующем же кадре.
-    if (mode != AIM_MODE_SILENT) esp_mem_aim_hold_fire_dir(false);
+    if (mode != AIM_MODE_SILENT) s_dirFresh = false;
+}
+
+// Конец кадра оверлея: повторить ось выстрела. Игра кладёт свою ось в своей
+// Update, а когда именно она начнётся относительно нашего кадра — неизвестно:
+// запись перед самым концом кадра перекрывает наибольшее число раскладов.
+// Раньше вместо этого ось добивал отдельный поток (доминатор) — от него чит
+// и вставал (подробности в game.cpp у esp_mem_aim_write_fire_dir).
+void AimEndFrame() {
+    if (!s_dirFresh) return;
+    s_dirFresh = false;
+    if (g_state.aim_mode != AIM_MODE_SILENT) return;
+    esp_mem_aim_write_fire_dir(s_lastDirX, s_lastDirY, s_lastDirZ);
 }
 
 // ============================ Автофарм =============================

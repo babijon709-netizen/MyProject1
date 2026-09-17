@@ -90,6 +90,7 @@ int main(int argc, char* argv[]) {
         UpdateAim(ImGui::GetIO().DeltaTime);
         UpdateFarm(ImGui::GetIO().DeltaTime);
         RenderMenu();
+        AimEndFrame();        // повтор оси выстрела перед самым концом кадра
         drawEnd();
         g_frame_done.store(true);
     }

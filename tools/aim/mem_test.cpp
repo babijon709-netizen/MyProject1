@@ -72,8 +72,6 @@ struct Game {
     // ---- ось выстрела (PlayerEventHandler.LookDirection) ----
     bool  haveAxis = true;
     float ax = 0.f, ay = 0.f, az = 1.f;
-    bool  holdOn = false;           // писатель-доминатор включён
-    bool  holderLoses = false;      // игра перезаписывает ось раньше писателя
     int   gameFrames = 0;
 
     // Камера: rotationX — это «наклон вниз», то есть возвышение с минусом.
@@ -97,9 +95,10 @@ struct Game {
         while (accY < -180.f) accY += 360.f;
         float fx = 0.f, fy = 0.f, fz = 1.f;
         anglesTo(camYaw(), camPitch(), fx, fy, fz);
-        // MouseLook.Update кладёт в ось выстрела forward камеры; писатель
-        // (если он выигрывает гонку) держит там наше направление.
-        if (!holdOn || holderLoses) { ax = fx; ay = fy; az = fz; }
+        // MouseLook.Update кладёт в ось выстрела forward камеры — каждый свой
+        // кадр. Наша запись живёт до следующего кадра игры: это и есть та
+        // гонка, ради которой ось повторяют в конце кадра оверлея.
+        ax = fx; ay = fy; az = fz;
     }
 };
 static Game g_game;
@@ -196,22 +195,24 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     g_game.ax = x / len; g_game.ay = y / len; g_game.az = z / len;
     return true;
 }
-void esp_mem_aim_hold_fire_dir(bool on) { g_game.holdOn = on; }
 
 // Вырезанный настоящий код режимов (см. run.sh): он должен видеть объявления
 // окружения (g_state, FrameBoxes, esp_*), поэтому включается после заглушек.
 #include "ctrl.inc"
 
 // ====================== прогон ============================================
+// Прогон: dt оверлея 80 мс (12 fps, как на устройстве), игра — 60 fps.
+// Остаток мерим дважды: сразу после такта аима (то, что видит наша запись) и
+// после кадров игры (то, что достанется выстрелу, если игра перезаписала ось).
 struct Result {
     int    frames = 0;
-    float  errYaw = 0.f;                    // остаток на последнем кадре
-    float  maxAbsYaw = 0.f;                 // максимум |поворот камеры|
-    int    signFlips = 0;                   // смен знака остатка (раскачка)
+    float  errAfterAim = 0.f;               // остаток по нашей записи
+    float  errAfterGame = 0.f;              // остаток после кадров игры
+    float  maxAbsYaw = 0.f;
+    int    signFlips = 0;
     int    writes = 0, fails = 0, toasts = 0;
 };
 
-// Прогон: dt оверлея 80 мс (12 fps, как на устройстве), игра — 60 fps.
 static Result run(int mode, int frames) {
     g_state.aim_mode = mode;
     Result r;
@@ -221,9 +222,15 @@ static Result run(int mode, int frames) {
     for (int i = 0; i < frames; ++i) {
         snapshot();
         UpdateAim(0.08f);
-        for (int f = 0; f < 5; ++f) g_game.frame();   // 5 кадров игры на кадр оверлея
+        AimEndFrame();                       // повтор оси перед концом кадра
         float eYaw = 0.f, ePitch = 0.f;
         float baseYaw = g_game.camYaw(), basePitch = g_game.camPitch();
+        if (mode == AIM_MODE_SILENT) axisAngles(baseYaw, basePitch);
+        errFrom(baseYaw, basePitch, eYaw, ePitch);
+        r.errAfterAim = fabsf(eYaw);
+
+        for (int f = 0; f < 5; ++f) g_game.frame();   // 5 кадров игры на кадр оверлея
+        baseYaw = g_game.camYaw(); basePitch = g_game.camPitch();
         if (mode == AIM_MODE_SILENT) axisAngles(baseYaw, basePitch);
         errFrom(baseYaw, basePitch, eYaw, ePitch);
         if (havePrev && prevYawErr * eYaw < 0.f) ++r.signFlips;
@@ -232,7 +239,7 @@ static Result run(int mode, int frames) {
         if (ay > r.maxAbsYaw) r.maxAbsYaw = ay;
         ++r.frames;
     }
-    r.errYaw = fabsf(prevYawErr);
+    r.errAfterGame = fabsf(prevYawErr);
     r.writes = AimMemoryDiag().writes - r.writes;
     r.fails = AimMemoryDiag().fails - r.fails;
     r.toasts = g_toasts - toasts0;
@@ -267,8 +274,8 @@ int main() {
         Result r = run(AIM_MODE_MEMORY, 60);
         printf("ПАМЯТЬ: кадров %d, остаток %.2f°, поворот камеры %.1f/%.1f°, "
                "смен знака %d, записей %d\n",
-               r.frames, r.errYaw, g_game.camYaw(), g_game.camPitch(), r.signFlips, r.writes);
-        check(r.errYaw < 0.5f, "сошлось к цели (остаток < 0.5°)");
+               r.frames, r.errAfterAim, g_game.camYaw(), g_game.camPitch(), r.signFlips, r.writes);
+        check(r.errAfterAim < 0.5f, "сошлось к цели (остаток < 0.5°)");
         check(r.signFlips <= 3, "без раскачки (смен знака не больше 3)");
         check(AimMemoryDiag().responded, "камера ответила (запись доходит)");
         check(fabsf(g_game.camPitch() - 5.f) < 0.6f, "тангаж дошёл до цели (знак не перевёрнут)");
@@ -282,8 +289,8 @@ int main() {
         g_haveCamAxis = false;
         Result r = run(AIM_MODE_MEMORY, 60);
         printf("ПАМЯТЬ без оси камеры: остаток %.2f°, поворот %.1f/%.1f°, записей %d\n",
-               r.errYaw, g_game.camYaw(), g_game.camPitch(), r.writes);
-        check(r.errYaw < 0.5f, "ведёт и без настоящей оси камеры");
+               r.errAfterAim, g_game.camYaw(), g_game.camPitch(), r.writes);
+        check(r.errAfterAim < 0.5f, "ведёт и без настоящей оси камеры");
         check(!AimMemoryDiag().responded, "без оси камеры отклик не подтверждён (честно)");
     }
 
@@ -308,9 +315,10 @@ int main() {
         const float axisLen = sqrtf(g_game.ax * g_game.ax + g_game.ay * g_game.ay + g_game.az * g_game.az);
         printf("САЙЛЕНТ: кадров %d, остаток %.2f°, отклонение %.1f°, длина оси %.4f, "
                "поворот камеры %.2f°\n",
-               r.frames, r.errYaw, AimMemoryDiag().dev, axisLen, g_game.camYaw());
-        check(r.errYaw < 0.5f, "ось выстрела смотрит в цель");
+               r.frames, r.errAfterAim, AimMemoryDiag().dev, axisLen, g_game.camYaw());
+        check(r.errAfterAim < 0.5f, "ось выстрела смотрит в цель");
         check(fabsf(axisLen - 1.f) < 1e-3f, "ось осталась единичной");
+        check(r.errAfterGame > 1.f, "кадр игры ось себе вернул (гонка смоделирована)");
         check(fabsf(g_game.camYaw()) < 1e-3f, "камера не двигалась (silent)");
         check(AimMemoryDiag().dev < 15.f, "отклонение в пределах нормы");
     }
@@ -321,7 +329,7 @@ int main() {
         g_targetYaw = 60.f; g_targetPitch = 0.f;
         Result r = run(AIM_MODE_SILENT, 60);
         printf("САЙЛЕНТ цель 60°: отклонение %.1f°, остаток %.1f°, длина оси %.4f\n",
-               AimMemoryDiag().dev, r.errYaw,
+               AimMemoryDiag().dev, r.errAfterAim,
                sqrtf(g_game.ax * g_game.ax + g_game.ay * g_game.ay + g_game.az * g_game.az));
         check(AimMemoryDiag().dev <= 35.5f, "отклонение зажато пределом (35°)");
         check(AimMemoryDiag().dev > 30.f, "ось всё же довёрнута к цели");
@@ -329,16 +337,15 @@ int main() {
               "ось не испортилась");
     }
 
-    // F. «Сайлент», когда игра каждый кадр перезаписывает ось своей
-    //    (писатель проигрывает гонку): отклонение не копится.
+    // F. «Сайлент» долго: отклонение не копится, кадр за кадром ось свежая.
     {
         resetGame();
         g_targetYaw = 8.f; g_targetPitch = 4.f;
-        g_game.holderLoses = true;
-        Result r = run(AIM_MODE_SILENT, 60);
-        printf("САЙЛЕНТ ось игры каждый кадр: отклонение %.1f°, остаток %.1f°\n",
-               AimMemoryDiag().dev, r.errYaw);
+        Result r = run(AIM_MODE_SILENT, 300);
+        printf("САЙЛЕНТ 300 кадров: отклонение %.1f°, остаток %.2f°, смен знака %d\n",
+               AimMemoryDiag().dev, r.errAfterAim, r.signFlips);
         check(AimMemoryDiag().dev <= 35.5f, "отклонение не накопилось за предел");
+        check(r.errAfterAim < 0.5f, "ось каждый кадр доворачивается заново");
         check(std::isfinite(g_game.ay), "ось не испортилась");
     }
 
@@ -347,10 +354,9 @@ int main() {
         resetGame();
         g_game.haveAxis = false;
         Result r = run(AIM_MODE_SILENT, 30);
-        printf("САЙЛЕНТ без оси: записей %d, отказов %d, писатель %s, тостов %d\n",
-               r.writes, r.fails, g_game.holdOn ? "включён" : "выключен", r.toasts);
+        printf("САЙЛЕНТ без оси: записей %d, отказов %d, тостов %d\n", r.writes, r.fails, r.toasts);
         check(r.writes == 0, "записей нет");
-        check(!g_game.holdOn, "писатель оси выключен");
+        check(fabsf(g_game.camYaw()) < 1e-3f, "камера не двигалась");
         check(r.toasts >= 1, "пользователю сказали, почему режим молчит");
     }
 
@@ -359,7 +365,7 @@ int main() {
         resetGame();
         g_state.aim_touch = false;
         Result r = run(AIM_MODE_SILENT, 30);
-        check(r.writes == 0 && !g_game.holdOn, "с выключенным аимом ось отдана игре");
+        check(r.writes == 0, "с выключенным аимом ось отдана игре");
     }
 
     printf(g_fail ? "--- ЕСТЬ ПРОВАЛЫ\n" : "--- все проверки пройдены\n");

@@ -1426,14 +1426,6 @@ bool esp_mem_aim_write_angles(float x_deg, float y_deg) {
     return wr_buf(mouse_look + MOUSELOOK_ANGLES, angles, sizeof(angles));
 }
 
-// Состояние писателя-доминатора оси выстрела (см. esp_mem_aim_hold_fire_dir).
-// Направление и адрес — атомарные: их обновляет поток отрисовки, а пишет
-// фоновый. Адрес 0 означает «ещё не нашли» — тогда фоновый поток не пишет.
-static std::atomic<bool>     g_fire_hold_on{false};
-static std::atomic<bool>     g_fire_hold_running{false};
-static std::atomic<uint64_t> g_fire_dir_addr{0};
-static std::atomic<float>    g_fire_dir_x{0.0F}, g_fire_dir_y{0.0F}, g_fire_dir_z{1.0F};
-
 // Ось выстрела: PlayerManager.playerEventHandler (+0x78, класс Gum) ->
 // LookDirection (+0x140) -> значение Vector3 (+0x20, обёртка синхронизации).
 // MouseLook.Update каждый кадр пишет сюда forward камеры (ZJo, RVA 0x64e35a4:
@@ -1469,74 +1461,20 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     const float len = sqrtf(x * x + y * y + z * z);
     if (!std::isfinite(len) || len < 0.001F) return false;
     const float dir[3] = {x / len, y / len, z / len};
-    g_fire_dir_x.store(dir[0]); g_fire_dir_y.store(dir[1]); g_fire_dir_z.store(dir[2]);
-    g_fire_dir_addr.store(addr);
     return wr_buf(addr, dir, sizeof(dir));
 }
 
-// Писатель-доминатор оси выстрела. Тот же приём, что у «всегда день» (час в
-// TOD_CycleParameters): игра обновляет поле каждый свой кадр, и запись раз в
-// кадр оверлея с ней гонялась — в части кадров до выстрела доживала ось игры,
-// а не наша. Поток добивает поле каждые kPeriodMs мс, пока сайлент включён.
-void esp_mem_aim_hold_fire_dir(bool on) {
-    g_fire_hold_on.store(on);
-    if (!on) {
-        g_fire_dir_addr.store(0);
-        return;
-    }
-    if (g_fire_hold_running.exchange(true)) return;   // поток уже есть
-    std::thread([]() {
-        // 12 мс (~83 записи/с): игра кладёт ось раз в кадр, этого хватает, а
-        // каждая запись — это /proc/<pid>/mem и mmap_lock процесса игры. На
-        // 2 мс (как у «всегда день») игра вставала: вместе с оверлеем, который
-        // читает память через тот же файл.
-        constexpr int kPeriodMs = 12;
-        // Как часто проверять, что адрес всё ещё ось выстрела: объект мог
-        // умереть (респавн, смена мира), и писать 12 байт по чужому адресу
-        // нельзя — затрут что-нибудь живое.
-        constexpr int kCheckEvery = 8;                // раз в ~100 мс
-        uint64_t addr = 0;
-        int      tick = 0;
-        int      fail_streak = 0;
-        while (g_fire_hold_running.load()) {
-            if (g_fire_hold_on.load() && g_pid > 0) {
-                // Адрес приносит поток отрисовки: он переразрешает его каждый
-                // кадр, поэтому из этого потока память игры не разресолвим
-                // вообще — только пишем по готовому адресу.
-                const uint64_t fresh = g_fire_dir_addr.load();
-                if (fresh != addr) { addr = fresh; tick = 0; }
-                if (addr && ++tick >= kCheckEvery) {
-                    tick = 0;
-                    const Vec3 cur = rd_v3(addr);
-                    const float len = vec3_is_finite(cur)
-                        ? sqrtf(cur.x * cur.x + cur.y * cur.y + cur.z * cur.z) : 0.0F;
-                    // Живая ось — единичный вектор; всё остальное значит, что
-                    // адрес умер, и писать туда больше нельзя.
-                    if (!(len > 0.5F && len < 2.0F)) {
-                        addr = 0;
-                        g_fire_dir_addr.store(0);
-                    }
-                }
-                if (addr) {
-                    const float dir[3] = {g_fire_dir_x.load(), g_fire_dir_y.load(), g_fire_dir_z.load()};
-                    const float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-                    if (std::isfinite(len) && len > 0.5F && len < 2.0F &&
-                        wr_buf(addr, dir, sizeof(dir))) {
-                        fail_streak = 0;
-                    } else if (++fail_streak >= 8) {
-                        // Писать сюда больше нельзя: либо адрес умер, либо
-                        // доступ отобрали. Молчим до следующего кадра
-                        // отрисовки — он разрешит адрес заново.
-                        fail_streak = 0;
-                        addr = 0;
-                        g_fire_dir_addr.store(0);
-                    }
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(kPeriodMs));
-        }
-    }).detach();
-}
+// Писателя-доминатора оси выстрела (фонового потока, который добивал ось
+// между кадрами) больше нет: ось пишется один раз за кадр оверлея из потока
+// отрисовки, и этой записью кадр игры и закрывается.
+//
+// Почему убрали. Доминатор давал выигрыш в несколько кадров из сотни, а плата
+// за него — зависший оверлей. Второй поток лез в память игры через общий
+// /proc/<pid>/mem: тот же дескриптор, тот же кэш блоков, те же счётчики
+// отказов, а на серии отказов — закрытие и переоткрытие файла прямо под
+// чтениями потока отрисовки. Итог: игра идёт, а наш кадр встаёт (оверлей
+// замирает, на тапы не отвечает). Проверено на устройстве 16-17.09.2026:
+// период 2 мс — вставал сразу, 12 мс — через ~5 с работы сайлента.
 
 // Unity Matrix4x4 is column-major in memory: m[col*4 + row].
 static float mat_get(const Mat4& matrix, int row, int column) {

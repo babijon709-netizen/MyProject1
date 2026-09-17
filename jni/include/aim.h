@@ -18,6 +18,8 @@ enum AimMode {
 };
 
 void UpdateAim(float dt);
+// Конец кадра оверлея (повтор оси выстрела в сайтелнт-режиме).
+void AimEndFrame();
 float AimSensitivityScale(bool& from_game);
 float AimSensitivityGain(bool& from_game);
 
