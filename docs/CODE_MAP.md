@@ -88,9 +88,9 @@ sh tools/aim/run_mem.sh        # стенд мемори-аима (настоя�
 
 ### jni/src/esp/aim_mem.cpp — Мемори-аим: поворот прицела записью в память игры
 
-Строк: 922.
+Строк: 1000.
 
-Внутри: `forward_from_angles`, `angles_from_forward`, `wrap180`, `signed_angle_diff`, `quaternion_between`, `quaternion_inverse`, `read_current_angles`, `read_mouse_look_angles`, `read_look_root_angles`, `read_witness_angles`, `read_measured_angles`, `read_mouse_look_floats`, `to_stored_yaw`, `path_apply`, `scan_state_fields`, `find_look_root`, `save_probe_value`, `restore_probe_value`, `probe_path_at`, `probe_finish_unsupported`, `probe_accept`, `probe_begin_candidate`, `probe_apply_current`, `probe_next_candidate`, `probe_undo`, `esp_mem_aim_power_on`, `esp_mem_aim_reset`, `esp_mem_aim_tick`, `esp_mem_aim_state`, `esp_mem_aim_path`, `esp_mem_aim_reason`, `esp_mem_aim_read_angles`, `esp_mem_aim_apply`
+Внутри: `forward_from_angles`, `angles_from_forward`, `wrap180`, `signed_angle_diff`, `quaternion_between`, `quaternion_inverse`, `read_current_angles`, `read_mouse_look_angles`, `write_mouse_look_angles`, `read_look_root_angles`, `read_witness_angles`, `read_measured_angles`, `note_probing_pinned_pair`, `read_mouse_look_floats`, `to_stored_yaw`, `path_apply`, `scan_state_fields`, `find_look_root`, `save_probe_value`, `restore_probe_value`, `probe_path_at`, `probe_finish_unsupported`, `probe_accept`, `probe_begin_candidate`, `probe_apply_current`, `probe_next_candidate`, `probe_undo`, `esp_mem_aim_power_on`, `esp_mem_aim_reset`, `esp_mem_aim_tick`, `esp_mem_aim_state`, `esp_mem_aim_path`, `esp_mem_aim_reason`, `esp_mem_aim_read_angles`, `esp_mem_aim_apply`
 
 Что тут важно: ни одна дорожка записи не «угадывается» — самотест делает
 пробный доворот (yaw 2°, тангаж 1°), ждёт применения и меряет настоящий поворот
@@ -107,6 +107,13 @@ sh tools/aim/run_mem.sh        # стенд мемори-аима (настоя�
 каждый такт: запись в узел — гонка за фазой кадра (в логе устройства это
 «дорожка не подтвердилась (причина 4)»). Смещения 0x4C/0x28 одинаковы в релизе и
 бете (проверено по dump.7z и dump_beta.7z).
+
+Знак пары (в игре значение = знак × угол) по дампу не виден, поэтому он
+выясняется замером: если пробный доворот повернул прицел ровно в другую сторону,
+знак переворачивается и проба повторяется (см. `s_pair_yaw_sign`/`s_pair_pitch_sign`).
+Совпадение значения пары с углами прицела больше не требуется — у пары своё
+начало отсчёта, и требование совпадения в 3° отбрасывало верную дорожку ещё до
+пробы; сверка осталась только для строки в журнале.
 
 Текущие углы читаются в первую очередь оттуда же (см. `read_current_angles`):
 раньше источником была камера, и в секунды, когда кадр ESP не собирался, режим
