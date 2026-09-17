@@ -220,6 +220,11 @@ static float     s_pair_pitch_sign = 1.f;
 static int       s_pair_sign_retry = 0;
 static AnglePair s_pair;
 static AnglePair s_probe_pair;
+// Объект, внутри которого лежит пара (для углов оружия — текущее оружие).
+// Смена оружия или мира делает адрес чужим, и это надо заметить: иначе чит
+// писал бы в освобождённую память.
+static uint64_t  s_pair_owner = 0;
+static uint64_t  s_probe_pair_owner = 0;
 
 struct TestCandidate {
     int      path = MEM_PATH_NONE;   // STATE_QUAT / STATE_DEG / STATE_RAD
@@ -694,8 +699,10 @@ static void probe_begin_candidate() {
     s_state_field = candidate.field;
     s_probe_pair = candidate.pair_kind ? candidate.pair : AnglePair{};
 
-    // Ветка для yaw: смотрим, в каком диапазоне поле держит угол.
-    if (candidate.path == MEM_PATH_STATE_DEG) {
+    // Ветка для yaw: смотрим, в каком диапазоне поле держит угол. Только для
+    // полей, найденных перебором: у пары из дампа свой слот и свой знак, и
+    // «первый float ушёл в минус» про диапазон ничего не говорит.
+    if (candidate.path == MEM_PATH_STATE_DEG && !candidate.pair_kind) {
         float stored_yaw = 0.f, stored_pitch = 0.f;
         if (read_mouse_look_floats(candidate.field, stored_yaw, stored_pitch) && stored_yaw < 0.f)
             s_state_range = 1;   // поле уже ушло в плюс — значит ветка [0,360)
@@ -799,6 +806,8 @@ void esp_mem_aim_reset() {
     s_state_field = 0;
     s_pair = {};
     s_probe_pair = {};
+    s_pair_owner = 0;
+    s_probe_pair_owner = 0;
     s_pair_yaw_sign = 1.f;
     s_pair_pitch_sign = 1.f;
     s_pair_sign_retry = 0;
@@ -824,6 +833,30 @@ void esp_mem_aim_tick(float dt) {
     // Готов: следим, что игра продолжает принимать нашу запись. Смена мира или
     // респавн ломают адреса — тогда заново самотест, а не тихая пустота.
     if (s_state == MEM_AIM_READY) {
+        // Пара углов живёт внутри конкретного объекта (для углов оружия — это
+        // текущее оружие, для углов MouseLook — сам MouseLook). Смена оружия или
+        // мира делает адрес чужим, поэтому владельца сверяем каждый такт: три
+        // чтения указателей дешевле, чем запись в освобождённую память.
+        if (s_pair_owner) {
+            const uint64_t owner_now = (s_pair_owner == s_mouse_look)
+                                           ? esp_resolve_mouse_look()
+                                           : resolve_current_weapon();
+            if (owner_now && owner_now != s_pair_owner) {
+                diag_log("aim", "мемори-режим: объект дорожки углов сменился (%#llx → %#llx) — подбираю дорожку заново",
+                         (unsigned long long)s_pair_owner, (unsigned long long)owner_now);
+                s_state = MEM_AIM_PROBING;
+                s_path = MEM_PATH_NONE;
+                s_reason = MEM_REASON_WRITE_LOST;
+                s_probe_step = PROBE_FIND;
+                s_candidate_count = 0;
+                s_candidate_index = 0;
+                s_pair = {};
+                s_pair_owner = 0;
+                s_have_command = false;
+                s_lost_frames = 0;
+                return;
+            }
+        }
         if (s_have_command) {
             float yaw_now = 0.f, pitch_now = 0.f;
             // Сначала узел прицела: он поворачивается только если игра приняла
@@ -844,6 +877,8 @@ void esp_mem_aim_tick(float dt) {
                         s_probe_step = PROBE_FIND;
                         s_candidate_count = 0;
                         s_candidate_index = 0;
+                        s_pair = {};
+                        s_pair_owner = 0;
                         s_have_command = false;
                         s_lost_frames = 0;
                     }
@@ -903,7 +938,7 @@ void esp_mem_aim_tick(float dt) {
             // kind: 0 — пара углов оружия, 1 — пара углов MouseLook. Числа, а не
             // слова: строки в журнале — обычные литералы, их пришлось бы переводить
             // в таблицах меню.
-            auto push_pair_candidate = [&](const AnglePair& spec, int kind) {
+            auto push_pair_candidate = [&](const AnglePair& spec, int kind, uint64_t owner) {
                 if (!spec.field) return;
                 float pair_yaw = 0.f, pair_pitch = 0.f;
                 if (!pair_read(spec, pair_yaw, pair_pitch)) {
@@ -926,6 +961,7 @@ void esp_mem_aim_tick(float dt) {
                 candidate.pair = spec;
                 s_candidates[0] = candidate;
                 ++s_candidate_count;
+                s_probe_pair_owner = owner;
                 const bool looks_like_aim =
                     fabsf(signed_angle_diff(pair_yaw, yaw_now)) < 3.0f &&
                     fabsf(pair_pitch - pitch_now) < 3.0f;
@@ -935,14 +971,15 @@ void esp_mem_aim_tick(float dt) {
             };
             {
                 AnglePair weapon_pair;
-                if (weapon_pair_spec(resolve_current_weapon(), weapon_pair))
-                    push_pair_candidate(weapon_pair, 0);
+                const uint64_t weapon = resolve_current_weapon();
+                if (weapon_pair_spec(weapon, weapon_pair))
+                    push_pair_candidate(weapon_pair, 0, weapon);
                 AnglePair look_pair;
                 if (s_mouse_look) {
                     look_pair.field = s_mouse_look + MOUSE_LOOK_ANGLES_OFFSET;
                     look_pair.yaw_sign = s_pair_yaw_sign;
                     look_pair.pitch_sign = s_pair_pitch_sign;
-                    push_pair_candidate(look_pair, 1);
+                    push_pair_candidate(look_pair, 1, s_mouse_look);
                 }
             }
             s_look_root = find_look_root(s_mouse_look, aim_forward);
@@ -1060,6 +1097,7 @@ void esp_mem_aim_tick(float dt) {
             // Подтверждённую пару запоминаем целиком: ею и читаем текущее, и
             // пишем — по той же конвенции, что проверена замером.
             s_pair = (state_path && s_probe_pair.field) ? s_probe_pair : AnglePair{};
+            s_pair_owner = s_probe_pair.field ? s_probe_pair_owner : 0;
             s_had_success = true;   // игра приняла нашу запись: дорожка реальна
             if (s_probe_pair.field)
                 diag_log("aim", "мемори-режим: дорожка углов прицела подтверждена (поле %#llx, рыскание слот %d знак %d, тангаж слот %d знак %d, доворот %.1f° за %.1f с, попыток со сменой знака %d)",
@@ -1104,6 +1142,8 @@ bool esp_mem_aim_apply(float yaw_deg, float pitch_deg) {
         s_probe_step = PROBE_FIND;
         s_candidate_count = 0;
         s_candidate_index = 0;
+        s_pair = {};
+        s_pair_owner = 0;
         s_have_command = false;
         return false;
     }

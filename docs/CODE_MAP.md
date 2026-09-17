@@ -88,7 +88,7 @@ sh tools/aim/run_mem.sh        # стенд мемори-аима (настоя�
 
 ### jni/src/esp/aim_mem.cpp — Мемори-аим: поворот прицела записью в память игры
 
-Строк: 1109.
+Строк: 1136.
 
 Внутри: `forward_from_angles`, `angles_from_forward`, `wrap180`, `signed_angle_diff`, `quaternion_between`, `quaternion_inverse`, `read_current_angles`, `read_mouse_look_angles`, `pair_read`, `pair_write`, `resolve_current_weapon`, `weapon_pair_spec`, `read_look_root_angles`, `read_witness_angles`, `read_measured_angles`, `note_probing_pair`, `read_mouse_look_floats`, `to_stored_yaw`, `path_apply`, `scan_state_fields`, `find_look_root`, `save_probe_value`, `restore_probe_value`, `probe_path_at`, `probe_finish_unsupported`, `probe_accept`, `probe_begin_candidate`, `probe_apply_current`, `probe_next_candidate`, `probe_undo`, `esp_mem_aim_power_on`, `esp_mem_aim_reset`, `esp_mem_aim_tick`, `esp_mem_aim_state`, `esp_mem_aim_path`, `esp_mem_aim_reason`, `esp_mem_aim_read_angles`, `esp_mem_aim_apply`
 
@@ -111,7 +111,9 @@ sh tools/aim/run_mem.sh        # стенд мемори-аима (настоя�
 Значит настоящая память углов — эти пары, а узел игра перестраивает каждый такт:
 запись в узел была гонкой за фазой кадра (в логе устройства это «дорожка не
 подтвердилась (причина 4)»). Порядок проверки: пара оружия (её читает наш такт
-игры), затем пара MouseLook, затем перебор полей, ввод и узел. Смещения 0x4C/0x28
+игры), затем пара MouseLook, затем перебор полей, ввод и узел. У подтверждённой
+пары помнится объект-владелец: сменилось оружие или мир — адрес чужой, и это
+замечается за три чтения указателей, а не записью в освобождённую память. Смещения 0x4C/0x28
 и 0x2D4 одинаковы в релизе и бете (проверено по dump.7z и dump_beta.7z).
 
 Знак пары (в игре значение = знак × угол) по дампу не виден, поэтому он
