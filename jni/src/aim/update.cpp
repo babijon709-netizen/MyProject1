@@ -9,6 +9,7 @@
 #include "aim/memory.h"
 #include "esp/aim_mem.h"
 #include "esp/frame.h"      // g_world_reload_count: когда мир сменился, самотест повторяем
+#include "esp/esp_time.h"   // секунды: по ним видно, за сколько подобралась дорожка
 #include "app/diag_log.h"
 #include "app/attach.h"
 #include "ui/esp_overlay.h"
@@ -65,13 +66,33 @@ void UpdateAim(float dt) {
     // («подбираю… / готово / нельзя») видно в меню словами.
     const bool memoryMode = (g_state.aim_mode == 1);
     static bool s_memModePrev = false;
+    static double s_memProbeSince = 0.0;   // с какого момента подбираем дорожку
     if (memoryMode != s_memModePrev) {
         s_memModePrev = memoryMode;
         AimReleaseFinger(s_fingerDown);
         s_haveLast = false; s_lastId = 0; s_lastBone = -1;
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         s_trackYaw.reset(); s_trackPitch.reset();
-        if (memoryMode) esp_mem_aim_reset();
+        if (memoryMode) {
+            // Включили «Мемори» — подбор дорожки начинается сразу, без прежней
+            // паузы в 15 секунд после неудачи (жалоба «наводится не сразу»).
+            esp_mem_aim_power_on();
+            s_memProbeSince = mono_seconds();
+        }
+    }
+
+    // Дорожка записи только что подтвердилась — пишем, за сколько секунд: это
+    // прямой ответ на «мемори начинает наводиться не сразу, а через время».
+    if (memoryMode) {
+        static int s_memStatePrev = -1;
+        const int state_now = esp_mem_aim_state();
+        if (s_memStatePrev != MEM_AIM_READY && state_now == MEM_AIM_READY) {
+            if (s_memProbeSince > 0.0)
+                diag_log("aim", "мемори-режим: дорожка записи подтверждена за %.1f с (путь %d)",
+                         mono_seconds() - s_memProbeSince, esp_mem_aim_path());
+            s_memProbeSince = 0.0;
+        }
+        s_memStatePrev = state_now;
     }
 
     // Самотест и сторож дорожки записи живут отдельно от наведения — их надо
@@ -97,12 +118,14 @@ void UpdateAim(float dt) {
             // Первый отказ только запоминаем: второй прогон самотеста подряд
             // ничего нового не покажет, а камеру он трогает.
             s_memFailedGeneration = g_world_reload_count;
-            diag_log("aim", "мемори-режим: дорожка не подтвердилась (причина %d) — в этом мире палец не используется",
-                     esp_mem_aim_reason());
+            if (s_memProbeSince <= 0.0) s_memProbeSince = mono_seconds();
+            diag_log("aim", "мемори-режим: дорожка не подтвердилась (причина %d) — палец не используется, пробую ещё "
+                            "(мир мог быть ещё не готов)", esp_mem_aim_reason());
         } else if (s_memFailedGeneration != g_world_reload_count) {
             s_memFailedGeneration = g_world_reload_count;
             diag_log("aim", "мемори-режим: мир сменился — пробую подобрать дорожку записи заново");
             esp_mem_aim_reset();
+            s_memProbeSince = mono_seconds();
             memState = esp_mem_aim_state();
         }
     }

@@ -3,11 +3,27 @@
 // Модуль новый (не из монолита): появился вместе с разбором «чит сам
 // выключается». Что и зачем пишется — в шапке app/diag_log.h.
 //
-// Как устроено. Файл открывается один раз при старте и живёт открытым: события
-// редкие, но в момент поломки важно, чтобы запись не могла провалиться из-за
-// занятости файла. Строка собирается целиком в буфере и уходит одним write(),
-// под мьютексом: зовут журнал и поток кадра, и поток привязки, и одноразовые
-// потоки тача.
+// Как устроено — и почему именно так.
+//
+// Журнал лежит на внешнем хранилище (/storage/emulated/0/benzhack), а это на
+// Android не «просто файл», а FUSE: write() туда может встать на секунды, если
+// система занята (медиа-скан, MTP, да и просто занятое хранилище). Первая версия
+// писала строку прямо из потока, который её позвал, под общим мьютексом. Это
+// давало сразу две возможности заморозить чит: (1) поток кадра сам упирается в
+// write() на внешнее хранилище; (2) любой другой поток в этот момент ждёт мьютекс
+// журнала, а его держит тот, кто застрял в write(). Симптомы совпадают с
+// жалобой «чит в один момент полностью завис»: в логе последний пульс есть, а
+// дальше ничего — ни «выход», ни «ПАДЕНИЕ», ни следующих пульсов.
+//
+// Поэтому запись теперь АСИНХРОННАЯ: тот, кто зовёт diag_log(), только копирует
+// готовую строку в кольцевой буфер и идёт дальше — без диска, без ожидания
+// мьютекса (мьютекс берётся trylock'ом: не взяли — событие отброшено и посчитано).
+// Файл пишет отдельный поток. Он может встать на внешнем хранилище сколько
+// угодно: поток кадра этого уже не почувствует.
+//
+// Отброшенные события считаются, и счётчик попадает в следующую строку: видно,
+// что журнал «подтормаживал». Из обработчика падения файл по-прежнему пишется
+// напрямую (write без мьютекса) — там ждать нельзя, да и терять строку нельзя.
 #include "app/common.h"
 #include "app/diag_log.h"
 
@@ -28,18 +44,25 @@ namespace {
 
 constexpr size_t kLineMax   = 320;          // одна строка события
 constexpr off_t  kFileLimit = 1 << 20;      // 1 МБ — дальше начинаем заново
-constexpr double kDedupWindow = 2.0;        // одинаковые события внутри окна схлопываем
+constexpr size_t kQueueSize = 64 * 1024;    // кольцевой буфер: ~200 строк (события, которым не хватило места, считаются)
 
 int    g_fd = -1;
 char   g_path[256] = {};
 bool   g_enabled = false;
 double g_start = 0.0;
 
-pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+// Очередь событий (одна строка = одна запись, поэтому кольцо и хвост с длиной).
+pthread_mutex_t g_queue_lock = PTHREAD_MUTEX_INITIALIZER;
+char   g_queue[kQueueSize];
+size_t g_qhead = 0;              // откуда читает поток записи
+size_t g_qtail = 0;              // куда пишут зовущие (под мьютексом)
+unsigned long long g_dropped = 0;
 
 // Схлопывание повторов: держим последнюю строку и счётчик подавленных.
-char   g_last[192] = {};
+char   g_last[224] = {};   // последнее событие (для схлопывания повторов)
 int    g_repeat = 0;
+
+pthread_t g_writer = 0;
 
 double now_seconds() {
     struct timespec ts{};
@@ -47,28 +70,110 @@ double now_seconds() {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-// Запись готовой строки. Вызывать под мьютексом.
-void write_locked(const char* text) {
-    if (g_fd < 0) return;
-    const size_t len = strlen(text);
-    ssize_t written = write(g_fd, text, len);
-    (void)written;
+// Сколько байт свободно в кольце. Читается под мьютексом.
+size_t queue_used_locked() {
+    return (g_qtail + kQueueSize - g_qhead) % kQueueSize;
 }
 
-void emit(const char* tag, const char* text) {
-    char line[kLineMax];
-    pthread_mutex_lock(&g_lock);
-    if (g_repeat > 0) {
-        // Перед новым событием отдаём долг: сколько раз предыдущее повторилось.
-        char tail[224];
-        snprintf(tail, sizeof(tail), "%8.1f %-7s (предыдущее повторилось ×%d)\n",
-                 now_seconds() - g_start, "repeat", g_repeat);
-        write_locked(tail);
-        g_repeat = 0;
+// Положить готовую строку (без перевода строки) в очередь.
+// Зовётся из любого потока. Мьютекс здесь держится ТОЛЬКО на копирование
+// строки: диск под ним не трогается, поэтому ждать его безопасно и правильно
+// (попытка «не ждать» через trylock роняла события на ровном месте — терялись
+// обычные строки при живой нагрузке). Единственный случай, когда событие
+// теряется, — очередь действительно переполнена; тогда оно считается.
+void queue_line(const char* text) {
+    if (g_fd < 0 || !text || !*text) return;
+    const size_t len = strlen(text);
+    if (len == 0 || len > kLineMax) return;
+    pthread_mutex_lock(&g_queue_lock);
+    const size_t used = queue_used_locked();
+    if (used + len + 2 > kQueueSize) {   // +2: перевод строки и запас на кольцо
+        ++g_dropped;
+        pthread_mutex_unlock(&g_queue_lock);
+        return;
     }
-    snprintf(line, sizeof(line), "%8.1f %-7s %s\n", now_seconds() - g_start, tag, text);
-    write_locked(line);
-    pthread_mutex_unlock(&g_lock);
+    const size_t part1 = kQueueSize - g_qtail;
+    if (len <= part1) {
+        memcpy(g_queue + g_qtail, text, len);
+    } else {
+        memcpy(g_queue + g_qtail, text, part1);
+        memcpy(g_queue, text + part1, len - part1);
+    }
+    g_qtail = (g_qtail + len) % kQueueSize;
+    g_queue[g_qtail] = '\n';
+    g_qtail = (g_qtail + 1) % kQueueSize;
+    pthread_mutex_unlock(&g_queue_lock);
+}
+
+// Забрать одну строку из очереди. false — очередь пуста.
+bool pop_line(char* out, size_t out_size) {
+    pthread_mutex_lock(&g_queue_lock);
+    if (g_qhead == g_qtail) {
+        pthread_mutex_unlock(&g_queue_lock);
+        return false;
+    }
+    size_t n = 0;
+    while (g_qhead != g_qtail && n + 1 < out_size) {
+        const char c = g_queue[g_qhead];
+        g_qhead = (g_qhead + 1) % kQueueSize;
+        if (c == '\n') break;
+        out[n++] = c;
+    }
+    out[n] = 0;
+    pthread_mutex_unlock(&g_queue_lock);
+    return true;
+}
+
+// Ротация: журнал дорос до предела — прошлый уходит в .1.
+void rotate_if_needed() {
+    struct stat st{};
+    if (stat(g_path, &st) == 0 && st.st_size > kFileLimit) {
+        char old[280];
+        snprintf(old, sizeof(old), "%s.1", g_path);
+        remove(old);
+        if (g_fd >= 0) close(g_fd);
+        rename(g_path, old);
+        g_fd = open(g_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
+    }
+}
+
+// Поток записи: берёт строки из очереди и пишет в файл. Единственный, кто
+// трогает диск, поэтому его тормоза никого больше не касаются.
+void* writer_thread(void*) {
+    char line[kLineMax + 8];
+    int idle_ticks = 0;
+    for (;;) {
+        if (!pop_line(line, sizeof(line))) {
+            // Пусто: спим коротко. Пустой журнал почти не просыпается, а
+            // всплеск событий разбирается пачкой без задержек.
+            struct timespec req{};
+            req.tv_nsec = (++idle_ticks > 20 ? 40 : 2) * 1000000L;
+            nanosleep(&req, nullptr);
+            continue;
+        }
+        idle_ticks = 0;
+        pthread_mutex_lock(&g_queue_lock);
+        const unsigned long long lost = g_dropped;
+        g_dropped = 0;
+        pthread_mutex_unlock(&g_queue_lock);
+        if (lost > 0) {
+            char note[96];
+            snprintf(note, sizeof(note), "%8.1f %-7s (потеряно событий: %llu)\n",
+                     now_seconds() - g_start, "health", lost);
+            if (g_fd >= 0) {
+                ssize_t w = write(g_fd, note, strlen(note));
+                (void)w;
+            }
+        }
+        char text[kLineMax + 12];
+        snprintf(text, sizeof(text), "%s\n", line);
+        if (g_fd >= 0) {
+            ssize_t w = write(g_fd, text, strlen(text));
+            (void)w;
+        }
+        rotate_if_needed();
+    }
+    return nullptr;
 }
 
 // ---- Аварийная строка из обработчика сигнала --------------------------------
@@ -184,7 +289,11 @@ void diag_self_stats(char* out, size_t size) {
 void diag_init(const char* dir) {
     if (g_fd >= 0) return;
     if (!dir || !dir[0]) return;
-    snprintf(g_path, sizeof(g_path), "%s%s", dir, "xvcen_health.log");
+    // Каталог может прийти и без косой черты на конце — путь склеиваем с
+    // проверкой, иначе журнал лёг бы рядом с каталогом («benzhackxvcen_health.log»).
+    const size_t dir_len = strlen(dir);
+    snprintf(g_path, sizeof(g_path), "%s%s%s", dir,
+             (dir_len > 0 && dir[dir_len - 1] == '/') ? "" : "/", "xvcen_health.log");
     struct stat st{};
     if (stat(g_path, &st) == 0 && st.st_size > kFileLimit) {
         // Дорос до предела: прошлый журнал уходит в .1 (его и смотреть, если
@@ -198,11 +307,15 @@ void diag_init(const char* dir) {
     g_enabled = (g_fd >= 0);
     g_start = now_seconds();
     if (!g_enabled) return;
-    pthread_mutex_lock(&g_lock);
+
+    // Поток записи. Отдельный именно потому, что диск на этом пути может
+    // задуматься, а зовущие diag_log() — это поток кадра, поток привязки и
+    // одноразовые потоки тача: никто из них ждать не должен.
+    pthread_create(&g_writer, nullptr, writer_thread, nullptr);
+
     char head[kLineMax];
-    snprintf(head, sizeof(head), "%8.1f %-7s журнал открыт: %s\n", 0.0, "health", g_path);
-    write_locked(head);
-    pthread_mutex_unlock(&g_lock);
+    snprintf(head, sizeof(head), "%8.1f %-7s журнал открыт: %s", 0.0, "health", g_path);
+    queue_line(head);
 }
 
 bool diag_enabled() { return g_enabled; }
@@ -217,15 +330,39 @@ void diag_log(const char* tag, const char* fmt, ...) {
     vsnprintf(text, sizeof(text), fmt, args);
     va_end(args);
 
-    // Повтор того же события в пределах окна — не строка, а счётчик.
-    pthread_mutex_lock(&g_lock);
+    // Повтор того же события — не строка, а счётчик. Схлопывание делаем здесь,
+    // в зовущем потоке: диску достаётся уже готовое решение, а не поток строк.
     if (g_last[0] && strcmp(g_last, text) == 0) {
-        ++g_repeat;
-        pthread_mutex_unlock(&g_lock);
+        __atomic_add_fetch(&g_repeat, 1, __ATOMIC_RELAXED);
         return;
     }
     snprintf(g_last, sizeof(g_last), "%s", text);
-    pthread_mutex_unlock(&g_lock);
+    const int suppressed = __atomic_exchange_n(&g_repeat, 0, __ATOMIC_RELAXED);
 
-    emit(tag, text);
+    char line[kLineMax];
+    if (suppressed > 0) {
+        char tail[224];
+        snprintf(tail, sizeof(tail), "%8.1f %-7s (предыдущее повторилось ×%d)",
+                 now_seconds() - g_start, "repeat", suppressed);
+        queue_line(tail);
+    }
+    snprintf(line, sizeof(line), "%8.1f %-7s %s", now_seconds() - g_start, tag, text);
+    queue_line(line);
+}
+
+void diag_flush(int wait_ms) {
+    if (g_fd < 0) return;
+    // Выход: даём потоку записи время разобрать очередь. Ждём не бесконечно —
+    // если хранилище уже стоит, уйти всё равно надо.
+    struct timespec req{};
+    req.tv_nsec = 20 * 1000000L;
+    int waited = 0;
+    while (waited < wait_ms) {
+        pthread_mutex_lock(&g_queue_lock);
+        const bool empty = (g_qhead == g_qtail);
+        pthread_mutex_unlock(&g_queue_lock);
+        if (empty) return;
+        nanosleep(&req, nullptr);
+        waited += 20;
+    }
 }

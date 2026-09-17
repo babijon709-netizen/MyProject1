@@ -278,7 +278,27 @@ static bool RebuildSurface(const char* why, int want) {
 // Вызывается в начале кадра. Возвращает true, если окно было пересобрано
 // (кадр продолжается как обычно — ImGui просто создаст GL-объекты заново).
 bool draw_surface_service() {
-    if (!native_window) return false;
+    if (!native_window) {
+        // Окно потеряно (пересборка не удалась, система забрала слой, старт
+        // прошёл не полностью). Раньше здесь просто возвращались — и оверлей
+        // пропадал до перезапуска чита: флаг «надо пересобрать» был взведён, но
+        // использовать его было некому. Пересборка создаёт окно с нуля, старое
+        // ей не нужно, поэтому зовём её и отсюда — не чаще раза в 2 секунды.
+        const double now = NowSeconds();
+        if (now - g_last_rebuild >= 2.0) {
+            int want = g_surface_w > 0 ? g_surface_w : native_window_screen_x;
+            if (want <= 0) {
+                const int dw = displayInfo.width, dh = displayInfo.height;
+                want = (dw >= 100 && dh >= 100) ? (dw > dh ? dw : dh) : 1920;
+            }
+            if (!RebuildSurface("окно потеряно — создаю заново", want)) {
+                g_rebuild_wanted = true;
+                snprintf(g_rebuild_reason, sizeof(g_rebuild_reason), "%s", "окно потеряно");
+            }
+            g_last_rebuild = NowSeconds();
+        }
+        return false;
+    }
 
     if (g_surface_w <= 0 || g_surface_h <= 0) {   // первый кадр: узнаём размер
         g_surface_w = ANativeWindow_getWidth(native_window);

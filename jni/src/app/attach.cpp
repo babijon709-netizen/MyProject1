@@ -13,6 +13,8 @@
 #include "ui/window.h"
 #include "app/attach.h"
 #include "app/diag_log.h"
+#include "app/lifecycle.h"    // шаг кадра и его пульс: сторож «чит завис»
+#include <signal.h>           // pthread_kill: разбудить поток кадра
 #include "esp/esp_time.h"     // mono_seconds: время для пульса и подтверждения
 #include "esp/frame.h"        // g_frame_publish_fail_streak: причина перепривязки
 #include "esp/mem.h"          // esp_alive_check / esp_rebind_memory и счётчики чтений
@@ -201,6 +203,73 @@ static bool access_confirmed_lost(pid_t pid, const char** why, int& err_out) {
     return true;
 }
 
+// ---- Сторож кадра ----------------------------------------------------------
+//
+// Зачем. Жалоба «чит в один момент полностью завис» раньше не оставляла в журнале
+// ничего: последний пульс — и тишина, ни «выхода», ни «ПАДЕНИЯ». Причина в том,
+// что зависает ГЛАВНЫЙ поток: он куда-то встал (обмен с системой, снятие кадра,
+// внешнее хранилище) и кадры перестали идти, а писать о поломке было некому —
+// поток привязки жив, но о кадре он ничего не знал.
+//
+// Теперь знает: главный поток каждый кадр отмечает шаг и время, а этот сторож
+// (он же поток привязки) раз в полторы секунды смотрит, давно ли кадр
+// заканчивался. Встал — пишем, на каком шаге и в каком состоянии поток (S/D/R по
+// /proc), а после 20 с пробуем его разбудить сигналом: обработчик SIGUSR1 в
+// main.cpp поставлен БЕЗ SA_RESTART, поэтому прерванный системный вызов вернётся
+// с ошибкой и кадр доедет до конца цикла. Дальше видно по журналу, помогло ли.
+static void FrameWatchTick() {
+    static double last_report = 0.0;
+    static int    wakeups = 0;
+
+    const double beat = g_frame_heartbeat.load();
+    if (beat <= 0.0) return;               // кадров ещё не было — сторожить нечего
+    const double now = mono_seconds();
+    const double stalled = now - beat;
+    if (stalled < 6.0) {
+        // Кадры снова идут. Если до этого мы будили поток — отмечаем, что помогло.
+        if (wakeups > 0) {
+            diag_log("app", "поток кадра снова рисует (пробуждений сигналом было: %d)", wakeups);
+            wakeups = 0;
+        }
+        return;
+    }
+
+    if (now - last_report >= 10.0) {
+        last_report = now;
+        // Состояние главного потока: D — ждёт в системном вызове, R — работает,
+        // S — спит. Вместе с шагом кадра этого хватает, чтобы понять, где встал.
+        char state[96] = "нет данных";
+        const int tid = g_main_tid.load();
+        if (tid > 0) {
+            char path[64];
+            snprintf(path, sizeof(path), "/proc/self/task/%d/stat", tid);
+            int fd = open(path, O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) {
+                char buf[512];
+                ssize_t n = read(fd, buf, sizeof(buf) - 1);
+                close(fd);
+                if (n > 0) {
+                    buf[n] = 0;
+                    char* close_paren = strrchr(buf, ')');
+                    if (close_paren && close_paren[1] == ' ')
+                        snprintf(state, sizeof(state), "%c", close_paren[2]);
+                }
+            }
+        }
+        diag_log("app", "КАДР НЕ ЗАВЕРШАЕТСЯ %.1f с: шаг «%s», поток кадра в состоянии %s "
+                        "(кадров всего %llu, потоков живо — см. пульс)",
+                 stalled, g_frame_stage.load(), state, g_frame_count.load());
+    }
+
+    if (stalled > 20.0 && g_main_thread) {
+        // Будим: сигнал прервёт ожидание. Если поток в этот момент считает, а не
+        // ждёт, вреда нет — обработчик только ставит флаг.
+        pthread_kill(g_main_thread, SIGUSR1);
+        if (++wakeups <= 3)
+            diag_log("app", "пробую разбудить поток кадра сигналом (%.1f с без кадра)", stalled);
+    }
+}
+
 void start_attach_thread() {
     g_attach_running.store(true);
     g_attach_thread = std::thread([]() {
@@ -288,6 +357,7 @@ void start_attach_thread() {
                 pulse_reads = reads;
                 pulse_fails = fails;
             }
+            FrameWatchTick();
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
     });

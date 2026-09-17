@@ -13,6 +13,7 @@
 //   RenderMenu()           — само меню;
 //   drawEnd()              — отдать кадр дальше.
 #include "app/common.h"
+#include <sys/syscall.h>   // __NR_gettid: номер потока кадра для сторожа
 
 #include "app/attach.h"      // start_attach_thread/stop_attach_thread
 #include "app/lifecycle.h"   // main_thread_flag, g_frame_done, prot::Init
@@ -33,10 +34,39 @@
 // сам обработчик остаётся простым.
 static std::atomic<int> g_exit_signal{0};
 
+// Свой обработчик без SA_RESTART. Разница принципиальная: с SA_RESTART ядро
+// ПЕРЕЗАПУСКАЕТ прерванный системный вызов, и поток, вставший в ожидание
+// (обмен с системой, снятие кадра, запись на хранилище), сигнал просто не
+// заметит — то есть разбудить зависший кадр будет нечем. Без SA_RESTART вызов
+// возвращается с ошибкой, кадр доходит до конца цикла, и там уже видно, что
+// пора уходить.
+static void InstallExitSignal(int sig) {
+    struct sigaction sa{};
+    sa.sa_handler = [](int s) { g_exit_signal.store(s); main_thread_flag.store(false); };
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;              // без SA_RESTART — см. выше
+    sigaction(sig, &sa, nullptr);
+}
+
+// Сторож кадра будит главный поток этим сигналом, когда тот не может закончить
+// кадр (см. поток привязки в app/attach.cpp). Обработчик обязан быть: без него
+// действие SIGUSR1 по умолчанию — завершить процесс, то есть «лечение» убило бы
+// чит. Ничего, кроме отметки в атомарном флаге, здесь делать нельзя.
+static std::atomic<bool> g_frame_wakeup{false};
+
 int main(int argc, char* argv[]) {
-    signal(SIGINT,  [](int sig) { g_exit_signal.store(sig); main_thread_flag.store(false); });
-    signal(SIGTERM, [](int sig) { g_exit_signal.store(sig); main_thread_flag.store(false); });
-    signal(SIGHUP,  [](int sig) { g_exit_signal.store(sig); main_thread_flag.store(false); });
+    g_main_thread = pthread_self();      // кого будить сторожу кадра
+    g_main_tid.store((int)syscall(__NR_gettid));   // и как он называется в ядре
+    InstallExitSignal(SIGINT);
+    InstallExitSignal(SIGTERM);
+    InstallExitSignal(SIGHUP);
+    {
+        struct sigaction sa{};
+        sa.sa_handler = [](int) { g_frame_wakeup.store(true); };
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGUSR1, &sa, nullptr);
+    }
 
     prot::Init();
     screen_config();
@@ -142,16 +172,30 @@ int main(int argc, char* argv[]) {
     unsigned long long frames_drawn = 0;
     while (main_thread_flag) {
         g_frame_done.store(false);
+        // Каждый шаг отмечен по имени: если кадр встанет, в журнале будет видно,
+        // на чём именно (см. сторож кадра в app/attach.cpp).
+        FrameStage("drawBegin");
         drawBegin();
 
         ui::bar::set_game_alpha(0.f);
+        FrameStage("кадр памяти игры");
         esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
+        FrameStage("ESP");
         DrawEspOverlay();
+        FrameStage("аим");
         UpdateAim(ImGui::GetIO().DeltaTime);
+        FrameStage("автофарм");
         UpdateFarm(ImGui::GetIO().DeltaTime);
+        FrameStage("меню");
         RenderMenu();
+        FrameStage("снятие кадра");
         drawEnd();
         ++frames_drawn;
+        FrameDone();
+        // Сторож будил нас сигналом, пока кадр стоял. Отмечаем, что кадр после
+        // этого доехал: по журналу сразу видно, помогла ли побудка.
+        if (g_frame_wakeup.exchange(false))
+            diag_log("app", "кадр, стоявший в ожидании, завершился после сигнала сторожа");
         g_frame_done.store(true);
     }
     // Почему чит закончил работу: свой выход, сигнал извне или падение (для
@@ -163,6 +207,7 @@ int main(int argc, char* argv[]) {
              frames_drawn);
     if (g_exit_signal.load())
         diag_log("app", "сигнал завершения: %d", g_exit_signal.load());
+    diag_flush(300);   // хвост журнала: запись асинхронная, даём ей доехать
     while (!g_frame_done.load()) {}
     stop_attach_thread();
     if (g_esp_attached) {

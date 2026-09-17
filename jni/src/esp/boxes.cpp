@@ -19,7 +19,30 @@
 #include "esp/transform.h"
 #include "esp/weapons.h"
 #include "app/diag_log.h"
+#include <stdarg.h>   // vsnprintf: строка журнала собирается из формата
 #include "boxes.h"
+
+// Почему кадр не собрался — в журнал, но не чаще раза в 5 с и только при смене
+// причины. Это главный вопрос при разборе «чит ничего не показывает»: по логу
+// сразу видно, ждёт ли он мир, не читает ли камеру или матрицы. Раньше здесь
+// молча возвращались, и в журнале оставался только сторож — то есть было видно,
+// ЧТО кадра нет, но не ПОЧЕМУ.
+//
+// Ключ схлопывания — сам текст: каждый вызов передаёт свой строковый литерал,
+// своя причина у каждого, повторы одной и той же гасятся.
+static void note_frame_stage(const char* fmt, ...) {
+    static const char* last_fmt = nullptr;
+    static double last_time = 0.0;
+    const double now = mono_seconds();
+    if (fmt == last_fmt && now - last_time < 5.0) return;
+    last_fmt = fmt; last_time = now;
+    char text[192];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(text, sizeof(text), fmt, args);
+    va_end(args);
+    diag_log("esp", "%s", text);
+}
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
@@ -36,7 +59,23 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (g_frame_publish_fail_streak == 0) s_publish_fail_since = mono_seconds();
         ++g_frame_publish_fail_streak;
         const double stalled = mono_seconds() - s_publish_fail_since;
-        if (stalled > 3.0) {
+        if (stalled > 3.0 && !g_frame_ever_published) {
+            // Ни одного кадра с момента привязки: игра, скорее всего, ещё грузит
+            // мир (нет ссылки на камеру — это видно строкой «кадр не собран» выше).
+            // Сбрасывать кэши нечего, а перепривязка только вредит: она обнуляет
+            // подтверждённую раскладку, позицию игрока и самотест мемори-аима —
+            // именно поэтому на устройстве чит «оживал» только через минуту, а
+            // мемори-аим начинал наводиться «не сразу». Пробуем кадр дальше, но
+            // без разрушительных шагов. Счётчик отказов растёт (по нему видно в
+            // строке «кадр не собран», сколько раз подряд не вышло), а о самом
+            // ожидании говорим раз в 15 с.
+            static double s_wait_reported = 0.0;
+            const double now = mono_seconds();
+            if (now - s_wait_reported > 15.0) {
+                s_wait_reported = now;
+                diag_log("esp", "кадра нет с самой привязки уже %.0f с — жду, пока игра отдаст мир", stalled);
+            }
+        } else if (stalled > 3.0) {
             diag_log("esp", "сторож: %.1f с без кадра (за это время кадров %d) — сброс кэшей мира (сбросов %d)",
                      stalled, g_frame_publish_fail_streak, g_frame_watchdog_resets + 1);
             g_frame_publish_fail_streak = 0;
@@ -188,22 +227,39 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
         if (!managed_cam) {
+            note_frame_stage("кадр не собран: нет ссылки на камеру игры (не собрался %d раз подряд)",
+                             g_frame_publish_fail_streak);
             frame_drop_unpublished(); return result;
         }
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
         if (!native_cam) {
+            note_frame_stage("кадр не собран: нативная камера недоступна — ManagedCachedPtr пуст (%d раз подряд)",
+                             g_frame_publish_fail_streak);
             frame_drop_unpublished(); return result;
         }
         xray_apply(native_cam);
         always_day_tick();
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
+            note_frame_stage("кадр не собран: матрицы камеры не читаются (%d раз подряд)",
+                             g_frame_publish_fail_streak);
             frame_drop_unpublished(); return result;
         }
         if (!g_matrix_configuration_validated) {
-            if (!optimize_matrix_configuration(native_cam, s_transforms)) {
-                frame_drop_unpublished(); return result;
-            }
-            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
+            // Проверка «матрицы физичны» (камера действительно рядом с игроками)
+            // — не условие жизни кадра, а уточнение: от неё зависит только выбор
+            // локального игрока «ближайший к камере» вместо «первый в списке».
+            // РАНЬШЕ неудача этой проверки выбрасывала кадр целиком, и это
+            // замыкалось само на себя: проверке нужны читаемые позиции игроков, а
+            // сторож, не видя кадра, каждые 3 с обнулял кэши (в том числе
+            // подтверждение раскладки) и уходил на перепривязку — в журнале
+            // устройства это ровно так и выглядело: привязка, три сброса,
+            // перепривязка, и так все первые 50 секунд, ESP и аим мертвы.
+            // Теперь кадр публикуется в любом случае, а проверка повторяется на
+            // следующем кадре.
+            if (optimize_matrix_configuration(native_cam, s_transforms) &&
+                !read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
+                note_frame_stage("кадр не собран: матрицы камеры не читаются после проверки раскладки (%d раз подряд)",
+                                 g_frame_publish_fail_streak);
                 frame_drop_unpublished(); return result;
             }
         }

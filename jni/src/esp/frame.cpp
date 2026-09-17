@@ -77,11 +77,19 @@ int g_world_reload_count = 0;
 
 bool g_player_data_stale = false;
 
+bool g_frame_ever_published = false;
+
+unsigned long long g_frame_publish_count = 0;
+
 static constexpr double kFrameHoldSeconds = 0.35;
 
 static constexpr double kWorldSettleSeconds = 1.0;
 
-void frame_note_published() { g_frame_publish_time = mono_seconds(); }
+void frame_note_published() {
+    g_frame_publish_time = mono_seconds();
+    g_frame_ever_published = true;
+    ++g_frame_publish_count;
+}
 
 void frame_drop_unpublished() {
     const double now = mono_seconds();
@@ -273,6 +281,7 @@ void esp_reset() {
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_frame_transforms_empty_since = 0.0;
     g_player_data_stale = false;
+    g_frame_ever_published = false;
     g_frame_publish_fail_streak = 0; g_frame_watchdog_resets = 0;
     g_local_position_fail_streak = 0; g_world_change_streak = 0;
     g_population_snapshot.clear();

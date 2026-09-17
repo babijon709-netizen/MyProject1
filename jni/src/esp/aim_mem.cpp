@@ -147,7 +147,10 @@ static int   s_lost_frames = 0;
 
 // Отложенная перепроверка после отказа и после потери записи.
 static float s_retry_timer = 0.f;
-static constexpr float kRetrySeconds = 15.f;
+static bool  s_ever_ready = false;    // дорожка хоть раз подтверждалась
+static bool  s_had_success = false;   // хоть один кандидат прошёл проверку доворотом
+static constexpr float kRetrySeconds = 15.f;      // долгий повтор, когда сорвалась READY
+static constexpr float kRetryFastSeconds = 2.f;   // быстрый повтор первого самотеста
 
 // Бюджет самотеста. Пока он идёт, аим сознательно не трогает камеру (пробный
 // доворот меряется по настоящему повороту прицела), поэтому у самотеста обязан
@@ -432,16 +435,24 @@ static int probe_path_at(int index) {
 }
 
 static void probe_finish_unsupported(int reason) {
+    const bool ever_ready = s_ever_ready;
     s_state = MEM_AIM_UNSUPPORTED;
     s_path = MEM_PATH_NONE;
     s_reason = reason;
-    s_retry_timer = kRetrySeconds;
+    // Первый самотест мог сорваться просто потому, что мир ещё грузился (позиции
+    // не читались, углы не менялись). Тогда ждать 15 секунд нельзя: это и есть
+    // жалоба «мемори начинает наводиться не сразу, а через время». Пока дорожка
+    // ни разу не подтверждалась — пробуем снова через 2 секунды, после срыва
+    // рабочей дорожки — как раньше, через 15 (тому, что работало, за 2 секунды
+    // не восстановиться, а лишние записи в игру ни к чему).
+    s_retry_timer = (ever_ready || s_had_success) ? kRetrySeconds : kRetryFastSeconds;
     s_have_command = false;
     s_lost_frames = 0;
 }
 
 static void probe_accept(int path) {
     s_state = MEM_AIM_READY;
+    s_ever_ready = true;
     s_path = path;
     s_reason = MEM_REASON_NONE;
     s_probe_elapsed = 0.f;
@@ -540,6 +551,18 @@ static void probe_undo() {
         return;
     }
     if (s_candidate_index < s_candidate_count) restore_probe_value(s_candidates[s_candidate_index].field);
+}
+
+// Включили «Мемори»: подбирать дорожку сразу, а не «когда-нибудь потом».
+// Отдельно от esp_mem_aim_reset: тот зовётся и на смене мира, и при перепривязке,
+// где ждать 15 секунд после отказа как раз разумно. Здесь другое — человек
+// только что включил режим и ждёт наведения сейчас.
+//
+// s_had_success не сбрасывается: он про то, принимала ли игра наши записи в этом
+// процессе вообще, а это не зависит от того, сколько раз мы начинали подбор.
+void esp_mem_aim_power_on() {
+    esp_mem_aim_reset();
+    s_retry_timer = 0.f;
 }
 
 void esp_mem_aim_reset() {
@@ -705,6 +728,7 @@ void esp_mem_aim_tick(float dt) {
             const bool state_path = (path == MEM_PATH_STATE_QUAT || path == MEM_PATH_STATE_DEG ||
                                      path == MEM_PATH_STATE_RAD);
             s_state_field = state_path ? s_candidates[s_candidate_index].field : 0;
+            s_had_success = true;   // игра приняла нашу запись: дорожка реальна
             // У STATE_* углы читаются из того же поля — ветка yaw уже запомнена
             // при заходе на дорожку (см. probe_begin_candidate).
             probe_accept(path);
