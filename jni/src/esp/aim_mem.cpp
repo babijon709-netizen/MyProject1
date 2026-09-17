@@ -224,13 +224,14 @@ static AnglePair s_probe_pair;
 // Смена оружия или мира делает адрес чужим, и это надо заметить: иначе чит
 // писал бы в освобождённую память.
 static uint64_t  s_pair_owner = 0;
-static uint64_t  s_probe_pair_owner = 0;
+static uint64_t  s_probe_pair_owner = 0;   // владелец проверяемого кандидата
 
 struct TestCandidate {
     int      path = MEM_PATH_NONE;   // STATE_QUAT / STATE_DEG / STATE_RAD
     uint64_t field = 0;              // адрес поля в MouseLook
     bool     pair_kind = false;      // дорожка пары углов (см. AnglePair)
     AnglePair pair;                  // её конвенция
+    uint64_t pair_owner = 0;         // объект, внутри которого лежит пара
 };
 
 // Хватает на две пары из дампа (углы оружия и углы MouseLook) и на кандидатов
@@ -429,10 +430,12 @@ static bool read_witness_angles(float& yaw_deg, float& pitch_deg) {
 // (см. read_measured_angles), и правке знаков (см. PROBE_VERIFY).
 static void note_probing_pair() {
     s_probe_pair = {};
+    s_probe_pair_owner = 0;
     if (s_candidate_index >= s_candidate_count) return;
     const TestCandidate& candidate = s_candidates[s_candidate_index];
     if (candidate.path != MEM_PATH_STATE_DEG || !candidate.pair_kind) return;
     s_probe_pair = candidate.pair;
+    s_probe_pair_owner = candidate.pair_owner;
 }
 
 // Углы для ЗАМЕРА пробного доворота. Первым — свидетель (камера, иначе узел
@@ -698,6 +701,7 @@ static void probe_begin_candidate() {
     const TestCandidate& candidate = s_candidates[s_candidate_index];
     s_state_field = candidate.field;
     s_probe_pair = candidate.pair_kind ? candidate.pair : AnglePair{};
+    s_probe_pair_owner = candidate.pair_kind ? candidate.pair_owner : 0;
 
     // Ветка для yaw: смотрим, в каком диапазоне поле держит угол. Только для
     // полей, найденных перебором: у пары из дампа свой слот и свой знак, и
@@ -959,9 +963,9 @@ void esp_mem_aim_tick(float dt) {
                 candidate.field = spec.field;
                 candidate.pair_kind = true;
                 candidate.pair = spec;
+                candidate.pair_owner = owner;
                 s_candidates[0] = candidate;
                 ++s_candidate_count;
-                s_probe_pair_owner = owner;
                 const bool looks_like_aim =
                     fabsf(signed_angle_diff(pair_yaw, yaw_now)) < 3.0f &&
                     fabsf(pair_pitch - pitch_now) < 3.0f;
