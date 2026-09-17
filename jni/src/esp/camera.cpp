@@ -24,6 +24,12 @@ float     g_cam_fov_deg = 0.0F;
 // См. camera.h: 0 — поза камеры, 1 — ось прицела, 2 — удержанный/кэш камеры.
 int       g_cam_view_source = 0;
 
+// Поза камеры в этом сеансе признана негодной: её поворот не сходится ни с осью
+// прицела, ни с углами прицела игры. Вид ESP тогда собирается по оси прицела,
+// g_cam_forward/g_cam_pose_valid при этом НЕ переписываются.
+bool      g_cam_pose_bad = false;
+bool      g_cam_view_suspect = false;
+
 // Расхождение позы камеры с углами прицела (градусы, -1 — замерить не вышло).
 // Только для журнала: см. комментарий в read_native_camera_matrices.
 float     g_cam_view_angle_gap_deg = -1.0F;
@@ -227,6 +233,14 @@ bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4&
             }
         }
     }
+    if (have_live_view && (g_cam_pose_bad || g_cam_view_suspect) && g_aim_ref_valid) {
+        // Поза камеры читается, но доверять ей нельзя: либо она уже уличена в
+        // вранье (g_cam_pose_bad), либо по кадрам видно, что ВСЕ игроки уходят ЗА
+        // камеру (g_cam_view_suspect — так выглядит и устаревший вид после смерти,
+        // когда камера уехала, а позу прочитать не удалось). Вид собираем по оси
+        // прицела: она с устройства читается всегда.
+        have_live_view = false;
+    }
     if (!have_live_view) {
         // Поза камеры не читается (в журналах устройства это cam_st = 0 у аима).
         // До сих пор вид в этом случае брался из кэша камеры +0x70, а он ленивый:
@@ -273,9 +287,32 @@ bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4&
             view = s_last_view;
             g_cam_view_source = 2;
         } else {
-            view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-            if (!matrix_is_finite(view)) return false;
-            g_cam_view_source = 2;
+            // Последний резерв — кэш камеры +0x70. Нативная Matrix4x4f
+            // раскладывается по памяти построчно, а наш mat_get поколоночный
+            // (см. math.h), поэтому «как есть» она читается ПЕРЕВЁРНУТОЙ: поворот
+            // выворачивается, и все точки уходят за камеру («рамок нет: низ N,
+            // вх 0» в журнале устройства). Перевод при этом читается одинаково,
+            // поэтому позиция камеры выглядит правильной и ошибку не видно.
+            // Раскладку определяет view_orientation, и по ней же решается,
+            // переставлять ли матрицу.
+            const Mat4 raw = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
+            const int orientation = view_orientation(raw);
+            if (orientation == 0) {
+                if (s_last_ok && matrix_is_finite(s_last_view)) {
+                    view = s_last_view;
+                    g_cam_view_source = 2;
+                } else {
+                    return false;
+                }
+            } else {
+                view = orientation == 2 ? mat_transposed(raw) : raw;
+                g_cam_view_source = 2;
+                static bool s_layout_reported = false;
+                if (!s_layout_reported) {
+                    s_layout_reported = true;
+                    diag_log("esp", "вид: кэш камеры +0x70, раскладка %d (2 — нативная построчная, переставил)", orientation);
+                }
+            }
         }
     } else {
         g_cam_view_source = 0;
@@ -345,8 +382,13 @@ bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4&
         if (s_last_ok && matrix_is_finite(s_last_proj)) {
             projection = s_last_proj;
         } else {
-            projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-            if (!matrix_is_finite(projection)) return false;
+            // Резерв: кэш проекции камеры. Раскладку определяем так же, как для
+            // вида: нативная Matrix4x4f построчная, и «как есть» перспектива
+            // читается перевёрнутой (у неё строка w становится столбцом).
+            Mat4 cached = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
+            const int orientation = perspective_orientation(cached);
+            if (orientation == 0) return false;
+            projection = orientation == 2 ? mat_transposed(cached) : cached;
         }
     }
     if (matrix_is_finite(projection)) s_last_proj = projection;
@@ -540,14 +582,36 @@ void read_local_aim_reference(uint64_t local_player, const PlayerAux* local_aux,
     float len = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     if (!(len > 0.5F && len < 2.0F)) return;
     dir = {dir.x / len, dir.y / len, dir.z / len};
-    // Ось принимается только со сверкой по камере. Ослабить её (взять ось без
-    // камеры) пробовали 17 сентября 2026 — тач-аим сразу стал целиться в
-    // пустоту: esp_aim_camera_angles считает углы по этой же оси, и любая
-    // непроверенная ось уводит наведение. Свидетель — поза камеры.
-    if (g_cam_pose_valid) {
-        float dot = dir.x * g_cam_forward.x + dir.y * g_cam_forward.y + dir.z * g_cam_forward.z;
-        if (!(dot > 0.94F)) return; // > ~20 deg away from the camera: not the look root
+    // Ось проверяется по двум свидетелям: поза камеры и углы прицела игры
+    // (MouseLook 0x4c/0x50). Одной позы мало — журнал устройства 17.09.2026
+    // показывает, что поза камеры врёт: в «рамок нет» все игроки оказываются ЗА
+    // камерой (w отрицательный), то есть её поворот читается неверно. Сверка
+    // только по позе в этом случае отвергает НАСТОЯЩУЮ ось (она из обработчика
+    // событий игрока, LookDirection), аим остаётся без оси и целится по мусору:
+    // «целится в пустоту и отдергивает в сторону». Поэтому при расхождении
+    // позы и оси третьим голосом идут углы прицела: если с ними сходится ось,
+    // а поза нет — врёт поза, и ось принимается (а поза помечается негодной для
+    // вида ESP, см. g_cam_pose_bad).
+    const float dot_pose = g_cam_pose_valid
+        ? dir.x * g_cam_forward.x + dir.y * g_cam_forward.y + dir.z * g_cam_forward.z
+        : -2.0F;
+    if (g_cam_pose_valid && dot_pose > 0.94F) {
         g_aim_ref_unverified = false;
+    } else if (g_cam_pose_valid) {
+        float look_yaw = 0.0F, look_pitch = 0.0F;
+        bool axis_wins = false;
+        float dot_look_axis = -2.0F, dot_look_pose = -2.0F;
+        if (esp_read_look_angles(look_yaw, look_pitch)) {
+            const Vec3 look_fwd = forward_from_look_angles(look_yaw, look_pitch);
+            dot_look_axis = dir.x * look_fwd.x + dir.y * look_fwd.y + dir.z * look_fwd.z;
+            dot_look_pose = g_cam_forward.x * look_fwd.x + g_cam_forward.y * look_fwd.y + g_cam_forward.z * look_fwd.z;
+            axis_wins = dot_look_axis > 0.94F && dot_look_axis > dot_look_pose;
+        }
+        if (!axis_wins) return; // > ~20 deg away from the camera: not the look root
+        g_cam_pose_bad = true;
+        g_aim_ref_unverified = false;
+        diag_log("aim", "поза камеры против оси прицела: с углами прицела сошлась ось (совпадение %.2f), а поза нет (%.2f) — беру ось, поза негодна для вида ESP",
+                 (double)dot_look_axis, (double)dot_look_pose);
     } else {
         // Сверять не с чем. Ось всё равно берём: она из обработчика событий игрока
         // и нужна и аиму (без неё он вовсе не находит поворот камеры), и как

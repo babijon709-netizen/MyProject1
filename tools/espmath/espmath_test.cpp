@@ -204,6 +204,31 @@ int main() {
         check(perspective_orientation(garbage) == 0, "мусор перспективой не считается");
     }
 
+    // 5. Раскладка матрицы вида. Нативная Matrix4x4f построчная, наш mat_get
+    // поколоночный: читать её «как есть» — значит получить перевёрнутый поворот, и
+    // все точки уйдут за камеру. Именно это и было в журнале устройства
+    // («рамок нет: низ N, вх 0», w у всех отрицательный).
+    {
+        const Pose pose = pose_from_angles(24.0F, -8.0F, {140.0F, 22.0F, -75.0F});
+        const Mat4 proper = mat_view_from_basis(pose.right, pose.up, pose.forward, pose.position);
+        check(view_orientation(proper) == 1, "вид в нашем чтении узнаётся как есть");
+        check(view_orientation(mat_transposed(proper)) == 2, "нативная построчная раскладка узнаётся и переставляется");
+        Mat4 garbage{};
+        for (int i = 0; i < 16; ++i) garbage.m[i] = 10.0F + (float)i;
+        check(view_orientation(garbage) == 0, "невид не считается видом");
+        // Проекция с перевёрнутым поворотом не пускает вперёд ни одну точку —
+        // а это ровно то, что видел журнал.
+        const Mat4 projection = mat_perspective(60.0F, 16.0F / 9.0F, 0.1F, 1000.0F);
+        const Vec3 ahead = {pose.position.x + pose.forward.x * 12.0F,
+                            pose.position.y + pose.forward.y * 12.0F,
+                            pose.position.z + pose.forward.z * 12.0F};
+        Vec2 out{};
+        check(w2s(mat_mul(projection, proper), ahead, kScreenWidth, kScreenHeight, out, false),
+              "правильный вид: точка впереди видна");
+        check(!w2s(mat_mul(projection, mat_transposed(proper)), ahead, kScreenWidth, kScreenHeight, out, false),
+              "перевёрнутый поворот: та же точка уже за камерой");
+    }
+
     if (g_failures == 0) {
         std::printf("\nвсе проверки пройдены: %d\n", g_checks);
         return 0;

@@ -787,6 +787,21 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
     }
 
+    // Вид под подозрением: игроки в кадре есть, а НИ ОДИН не прошёл нижнюю точку
+    // при нуле «выше экрана». Для `w2s` это значит «все за камерой» — так
+    // выглядит устаревший вид (камера уехала, поза не читается: смерть,
+    // респавн, перезагрузка мира). По этой серии кадров следующий кадр берёт вид
+    // из оси прицела (см. g_cam_view_suspect), а не держит прошлый.
+    {
+        static int s_all_behind_streak = 0;
+        const bool all_behind = (drop_lower >= 2 && drop_upper == 0 && drop_short == 0 && result.empty());
+        s_all_behind_streak = all_behind ? s_all_behind_streak + 1 : 0;
+        g_cam_view_suspect = s_all_behind_streak >= 5;
+        if (g_cam_view_suspect && s_all_behind_streak == 5)
+            diag_log("esp", "вид: все игроки за камерой %d кадров подряд (низ %d) — беру вид из оси прицела",
+                     s_all_behind_streak, drop_lower);
+    }
+
     return result;
 }
 

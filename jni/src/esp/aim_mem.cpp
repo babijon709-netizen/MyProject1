@@ -965,28 +965,46 @@ void esp_mem_aim_tick(float dt) {
                 float best_error = 1e9f;
                 bool matched = false;
                 AnglePair best = spec;
-                for (int ys = 0; ys < 2; ++ys) {
-                    for (int ps = 0; ps < 2; ++ps) {
-                        const float ysign = (ys ? -1.f : 1.f) * spec.yaw_sign;
-                        const float psign = (ps ? -1.f : 1.f) * spec.pitch_sign;
-                        const float yaw_value = ysign * raw[spec.yaw_slot];
-                        const float pitch_value = psign * raw[spec.pitch_slot];
-                        if (fabsf(pitch_value) > 89.9f) continue;   // тангаж игра держит в своих пределах
-                        const float error = fabsf(signed_angle_diff(yaw_value, yaw_now)) +
-                                            fabsf(pitch_value - pitch_now);
-                        if (error < best_error) {
-                            best_error = error;
-                            best = spec;
-                            best.yaw_sign = ysign;
-                            best.pitch_sign = psign;
-                            matched = true;
+                // Перебираем и ПОРЯДОК слотов, не только знаки. Журнал устройства
+                // 17.09.2026: пара читалась как «12.2, -171.7», а углы прицела были
+                // «-171.4, -12.2» — те же углы, но рыскание со слотом 1, а тангаж
+                // со слотом 0 (и с обратным знаком). Со старым перебором (только
+                // знаки, порядок жёстко задан) такая пара не совпадала никогда:
+                // тангаж -171.7 отбраковывался как выходящий за пределы, и дорожка
+                // записи так и не находилась — мемори-аим «как не работал, так и не
+                // начал». Порядок в паре решает ВСЁ (куда писать рыскание и куда
+                // тангаж), поэтому он и входит в перебор, а найденный сохраняется
+                // в самом кандидате.
+                for (int order = 0; order < 2; ++order) {
+                    const int yaw_slot = order ? spec.pitch_slot : spec.yaw_slot;
+                    const int pitch_slot = order ? spec.yaw_slot : spec.pitch_slot;
+                    for (int ys = 0; ys < 2; ++ys) {
+                        for (int ps = 0; ps < 2; ++ps) {
+                            const float ysign = (ys ? -1.f : 1.f) * spec.yaw_sign;
+                            const float psign = (ps ? -1.f : 1.f) * spec.pitch_sign;
+                            const float yaw_value = ysign * raw[yaw_slot];
+                            const float pitch_value = psign * raw[pitch_slot];
+                            if (fabsf(pitch_value) > 89.9f) continue;   // тангаж игра держит в своих пределах
+                            const float error = fabsf(signed_angle_diff(yaw_value, yaw_now)) +
+                                                fabsf(pitch_value - pitch_now);
+                            if (error < best_error) {
+                                best_error = error;
+                                best = spec;
+                                best.yaw_slot = yaw_slot;
+                                best.pitch_slot = pitch_slot;
+                                best.yaw_sign = ysign;
+                                best.pitch_sign = psign;
+                                matched = true;
+                            }
                         }
                     }
                 }
                 const bool looks_like_aim = matched && best_error < 3.0f;
-                diag_log("aim", "мемори-режим: пара углов (вид %d) — %0.1f, %0.1f; углы прицела %0.1f, %0.1f; совпали: %d (расхождение %.1f°)",
-                         kind, (double)(spec.yaw_sign * raw[spec.yaw_slot]),
-                         (double)(spec.pitch_sign * raw[spec.pitch_slot]),
+                diag_log("aim", "мемори-режим: пара углов (вид %d, слоты %d/%d, знаки %d/%d) — %0.1f, %0.1f; углы прицела %0.1f, %0.1f; совпали: %d (расхождение %.1f°)",
+                         kind, best.yaw_slot, best.pitch_slot,
+                         best.yaw_sign < 0.f ? -1 : 1, best.pitch_sign < 0.f ? -1 : 1,
+                         (double)(best.yaw_sign * raw[best.yaw_slot]),
+                         (double)(best.pitch_sign * raw[best.pitch_slot]),
                          (double)yaw_now, (double)pitch_now, looks_like_aim ? 1 : 0,
                          (double)(best_error < 1e8f ? best_error : 999.f));
                 if (!looks_like_aim) return;

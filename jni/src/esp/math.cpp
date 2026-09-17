@@ -161,6 +161,36 @@ Mat4 mat_view_from_basis(const Vec3& right, const Vec3& up, const Vec3& forward,
     return view;
 }
 
+// Матрица похожа на вид при такой раскладке? Смотрим на поворотную часть: у вида
+// она ортонормированна, а последняя строка — перевод, то есть (0, 0, 0, 1).
+static bool view_layout_is_rigid(const Mat4& m, bool transpose_read) {
+    const auto at = [&](int row, int column) {
+        return transpose_read ? mat_get(m, column, row) : mat_get(m, row, column);
+    };
+    for (int i = 0; i < 3; ++i) {
+        const float a = at(0, i), b = at(1, i), c = at(2, i);
+        const float length = sqrtf(a * a + b * b + c * c);
+        if (!(length > 0.98F && length < 1.02F)) return false;   // строки единичной длины
+    }
+    if (fabsf(at(3, 0)) > 0.01F || fabsf(at(3, 1)) > 0.01F || fabsf(at(3, 2)) > 0.01F) return false;
+    if (fabsf(at(3, 3) - 1.0F) > 0.01F) return false;
+    // Ортогональность: скалярное произведение двух разных строк поворота — нуль.
+    for (int i = 0; i < 3; ++i) {
+        for (int j = i + 1; j < 3; ++j) {
+            const float dot = at(0, i) * at(0, j) + at(1, i) * at(1, j) + at(2, i) * at(2, j);
+            if (fabsf(dot) > 0.02F) return false;
+        }
+    }
+    return true;
+}
+
+int view_orientation(const Mat4& value) {
+    if (!matrix_is_finite(value)) return 0;
+    if (view_layout_is_rigid(value, false)) return 1;
+    if (view_layout_is_rigid(value, true)) return 2;
+    return 0;
+}
+
 Mat4 mat_world_to_camera(const Vec3& position, const Vec4& rotation) {
     const Vec3 right = rotate_vector(rotation, {1.0F, 0.0F, 0.0F});
     const Vec3 up = rotate_vector(rotation, {0.0F, 1.0F, 0.0F});
