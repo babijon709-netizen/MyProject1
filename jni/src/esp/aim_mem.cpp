@@ -202,7 +202,8 @@ enum ProbeStep {
 
 // Конвенция пары углов: где лежит рыскание, где тангаж и с какими знаками.
 // У пары MouseLook (0x4C) это первый и второй float как есть; у пары оружия
-// (FPWeaponBase+0x2D4) — наоборот: 0x2D4 это тангаж, 0x2D8 это МИНУС рыскание
+// (Oxide.FPHitscan, первое поле пары; в релизе 0x2D4, в бете 0x2DC) — наоборот:
+// первое поле это тангаж, второе — МИНУС рыскание
 // (так пишет FPManager$$ZRH, так читает FPManager$$ZRz).
 // Объявлена до TestCandidate: кандидат на пробу носит её с собой.
 struct AnglePair {
@@ -389,11 +390,15 @@ static uint64_t resolve_current_weapon() {
     return weapon;
 }
 
-// Конвенция пары углов оружия из дампа: FPWeaponBase+0x2D4 (x — тангаж,
-// y — минус рыскание). Проверено дизассемблером релиза:
-//   FPManager$$ZRH (0x652abcc): [weapon+0x2D4] = s1, [weapon+0x2D8] = -s0;
-//   FPManager$$ZRz (0x652d3b8): s0 = -[weapon+0x2D8], s1 = [weapon+0x2D4];
+// Конвенция пары углов оружия из дампа: Oxide.FPHitscan.<Lwj>k__BackingField
+// (x — тангаж, y — минус рыскание). Проверено дизассемблером:
+//   релиз, FPManager$$ZRH (0x652abcc): [weapon+0x2D4] = s1, [+0x2D8] = -s0;
+//   релиз, FPManager$$ZRz (0x652d3b8): s0 = -[weapon+0x2D8], s1 = [+0x2D4];
+//   бета,  FPManager$$swg (0x657cce4): [weapon+0x2DC] = s8, [+0x2E0] = -s0 —
+//   тот же код, только на 8 байт дальше (раскладка оружия у беты сдвинута);
 //   оба зовёт Oxide.MouseLook (читает на 0x64e3e90, пишет на 0x64e4118).
+// Само смещение берётся из переключателя версий (FPHITSAN_LOOK_ANGLES_OFFSET),
+// поэтому бета и релиз читаются одним и тем же кодом.
 static bool weapon_pair_spec(uint64_t weapon, AnglePair& p) {
     if (!weapon) return false;
     p.field = weapon + FPHITSAN_LOOK_ANGLES_OFFSET;
@@ -459,7 +464,7 @@ static bool read_measured_angles(float& yaw_deg, float& pitch_deg) {
 
 static bool path_apply(int path, float yaw_deg, float pitch_deg) {
     if (!s_mouse_look) return false;
-    // Дорожка пары углов (MouseLook 0x4C или оружие 0x2D4): пишем по той же
+    // Дорожка пары углов (углы MouseLook 0x4C или углы оружия): пишем по той же
     // конвенции, по которой читаем, — тогда и обратная связь, и запись смотрят
     // на одно и то же поле.
     if (path == MEM_PATH_STATE_DEG && s_pair.field)

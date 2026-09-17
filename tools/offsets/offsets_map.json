@@ -1382,5 +1382,13 @@
   "type": "UnityEngine_Collider_o*",
   "offset": 40,
   "note": "в КАКОМ коллайдере луч остановился. Сравнивается с OREHS_COLLIDER узла (тот же UnityEngine_Collider_o*) и с GameObject узла: у камня точка прицела — пивот внутри породы, поэтому без этой проверки попадание луча в собственную поверхность выглядело перекрытием и бот вечно обходил камень (лог 14.09, узел 86a3c0: 1595 кадров, ray 0.51..0.77 м при aim_3d 1.97..2.33 м, blk=1, ноль тапов)"
+ },
+ "FPHITSAN_LOOK_ANGLES_OFFSET": {
+  "kind": "field",
+  "class": "FPHitscan",
+  "struct": "Oxide_FPHitscan_Fields",
+  "field": "_Lwj_k__BackingField",
+  "type": "UnityEngine_Vector2_o",
+  "offset": 724
  }
 }

@@ -183,6 +183,15 @@ inline constexpr std::uint64_t FPMANAGER_CURRENT_OBJECT      = 0x50; // _current
 inline constexpr std::uint64_t FPMANAGER_AIM_BLEND           = 0xA8;
 inline constexpr std::uint64_t FPOBJECT_PLAYER_BACKREF       = 0xC0;
 inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;
+// Пара углов прицела в текущем оружии: Oxide.FPHitscan.<Lwj>k__BackingField
+// (Vector2: x — тангаж, y — МИНУС рыскание). Проверено дизассемблером по
+// libil2cpp.so релиза: Oxide.FPManager$$ZRH (RVA 0x652abcc) пишет сюда углы
+// (`fneg` рыскания и две записи подряд), Oxide.FPManager$$ZRz (RVA 0x652d3b8)
+// их читает, а зовёт обоих Oxide.MouseLook — то есть это и есть углы, по которым
+// игра доворачивает прицел. Мемори-аим пишет сюда ровно так же (см.
+// esp/aim_mem.cpp); в бете смещение другое — 0x2DC, за этим следит переключатель
+// версий (game_offsets_beta.h считает его из своего дампа).
+inline constexpr std::uint64_t FPHITSAN_LOOK_ANGLES_OFFSET    = 0x2D4;
 
 // Максимальная дальность удара ближним орудием (топор/кирка/пила/копьё).
 // Из дампа 62a8534, класс Oxide.FPMelee (наследники: FPTool -> FPChainsaw,

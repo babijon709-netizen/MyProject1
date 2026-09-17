@@ -1,10 +1,10 @@
 // Оффсеты БЕТА-версии игры. Файл собран tools/offsets/beta_offsets.py — правь
 // скрипт и дампы, а не здесь.
 //
-// Источник: dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9, дата сборки файла 16.09.2026.
+// Источник: dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9, дата сборки файла 17.09.2026.
 // Эталон, от которого считались отличия: релизный dump.7z и jni/src/game_offsets.h.
-// Отличий от релиза: 9 из 178 объявленных констант
-// (в карте оффсетов 178 записей).
+// Отличий от релиза: 10 из 179 объявленных констант
+// (в карте оффсетов 179 записей).
 // Взято из релиза как есть: 36 констант раскладки IL2CPP/Unity
 // (из дампа игры они не выводятся — об этом ниже) и 3 RVA.
 // Окно скана TOD_Sky сдвинуто на дельту RVA беты (см. RVA_SHIFTED в скрипте):
@@ -203,6 +203,15 @@ inline constexpr std::uint64_t FPMANAGER_CURRENT_OBJECT      = 0x50; // _current
 inline constexpr std::uint64_t FPMANAGER_AIM_BLEND           = 0xA8;
 inline constexpr std::uint64_t FPOBJECT_PLAYER_BACKREF       = 0xC0;
 inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;
+// Пара углов прицела в текущем оружии: Oxide.FPHitscan.<Lwj>k__BackingField
+// (Vector2: x — тангаж, y — МИНУС рыскание). Проверено дизассемблером по
+// libil2cpp.so релиза: Oxide.FPManager$$ZRH (RVA 0x652abcc) пишет сюда углы
+// (`fneg` рыскания и две записи подряд), Oxide.FPManager$$ZRz (RVA 0x652d3b8)
+// их читает, а зовёт обоих Oxide.MouseLook — то есть это и есть углы, по которым
+// игра доворачивает прицел. Мемори-аим пишет сюда ровно так же (см.
+// esp/aim_mem.cpp); в бете смещение другое — 0x2DC, за этим следит переключатель
+// версий (game_offsets_beta.h считает его из своего дампа).
+inline constexpr std::uint64_t FPHITSAN_LOOK_ANGLES_OFFSET    = 0x2DC;  // бета: было 0x2D4
 
 // Максимальная дальность удара ближним орудием (топор/кирка/пила/копьё).
 // Из дампа 62a8534, класс Oxide.FPMelee (наследники: FPTool -> FPChainsaw,
