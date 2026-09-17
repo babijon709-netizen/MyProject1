@@ -258,10 +258,12 @@ static void UpdateFarmInner(float dt) {
     }
     // Водим пальцами только когда ничто не мешает: аимбот владеет камерой,
     // пока ведёт игрока (фарм уступает полностью), открытое меню и калибровка
-    // зон — тоже пауза. А вот цель читаем всегда: иначе строка статуса в окне
+    // зон — тоже пауза. Уступаем и мемори-режимам аима: пальца там нет, а
+    // камеру (или ось выстрела) аим всё равно крутит. А вот цель читаем всегда: иначе строка статуса в окне
     // автофарма показывала бы «простой» ровно тогда, когда на неё смотрят
     // (само это окно и ставит бота на паузу).
-    const bool driving = !menuBlocked && !s_fingerDown && g_calibMode == 0 && !g_buildPrompt;
+    const bool driving = !menuBlocked && !s_fingerDown && !g_aimActive &&
+                         g_calibMode == 0 && !g_buildPrompt;
 
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;

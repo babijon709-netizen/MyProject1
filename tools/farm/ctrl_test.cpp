@@ -58,6 +58,7 @@ static float overlay_pace_hz() { return 60.f; }
 static bool g_esp_attached = true;
 static int  g_farmCalib = 0;
 static bool s_fingerDown = false;
+static bool g_aimActive = false;   // аим ведёт цель (фарм уступает камеру)
 static struct { bool visible = false; } g_sheet;
 static struct { bool visible = false, closing = false; } g_pop;
 

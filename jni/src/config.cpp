@@ -179,6 +179,13 @@ struct CfgBlob {
     bool  aim_touch, aim_pos, aim_special;
     int   aim_bone;
     bool  aim_vis_check, aim_draw_fov;
+    //   aim_mode — режим аима (0 тач / 1 память / 2 сайлент). Лежит в байте
+    //                                 выравнивания, который в раскладке и так
+    //                                 был между aim_draw_fov и float aim_fov:
+    //                                 sizeof(CfgBlob) остаётся 260, версия
+    //                                 остаётся 4. Старые конфиги держат тут 0,
+    //                                 то есть прежний тач-аим.
+    uint8_t aim_mode;
     //   aim_smoothness -> aim_lead   (smoothing has its own gun_str slot,
     //                                 and this one was only ever a mirror).
     //                                 Reused: farm search range in metres
@@ -228,6 +235,7 @@ static void ConfigSaveToPath(const std::string& path) {
     s.aim_bone    = g_state.aim_bone;
     s.aim_vis_check  = cfg::aim::vis_check;
     s.aim_draw_fov   = cfg::aim::draw_fov;
+    s.aim_mode       = (uint8_t)((g_state.aim_mode >= 0 && g_state.aim_mode <= 2) ? g_state.aim_mode : 0);
     s.aim_fov        = cfg::aim::fov;
     // Слот aim_lead давно свободен (см. CfgBlob) — теперь в нём живёт
     // дальность автофарма. Старые конфиги держат тут 0 и дадут дефолт.
@@ -330,6 +338,8 @@ void ConfigLoad(int idx, bool announce) {
     g_state.aim_scope_only = s.aim_scope_only;
     cfg::aim::scope_only   = s.aim_scope_only;
     g_state.aim_bone    = s.aim_bone;
+    // Режим аима: старые конфиги (и любой левый байт) дают 0 — прежний тач.
+    g_state.aim_mode    = (s.aim_mode <= 2) ? (int)s.aim_mode : 0;
     cfg::aim::vis_check  = false;
     cfg::aim::draw_fov   = s.aim_draw_fov;
     cfg::aim::fov        = s.aim_fov;

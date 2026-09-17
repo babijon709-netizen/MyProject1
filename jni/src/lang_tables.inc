@@ -8,6 +8,7 @@
 // Форматные строки переводятся вместе с единицами: "%.0f м" -> "%.0f m".
 static const LangPair kUiEn[] = {
     {"%.0f м", "%.0f m"},
+    {"%.2f град/ед", "%.2f deg/unit"},
     {"3D боксы", "3D boxes"},
     {"«%s»", "\"%s\""},
     {"Автофарм", "Auto-farm"},
@@ -56,6 +57,8 @@ static const LangPair kUiEn[] = {
     {"Куда целиться", "Aim point"},
     {"Линии", "Lines"},
     {"Линии и боксы", "Lines and boxes"},
+    {"Мемори-аим: камера не отвечает", "Memory aim: camera not responding"},
+    {"Мемори-аим: не найден MouseLook", "Memory aim: MouseLook not found"},
     {"Меню", "Menu"},
     {"Мир", "World"},
     {"Наводка", "Aiming"},
@@ -65,6 +68,7 @@ static const LangPair kUiEn[] = {
     {"Новый конфиг", "New config"},
     {"Опции", "Options"},
     {"Отмена", "Cancel"},
+    {"Память", "Memory"},
     {"Панель вкладок", "Tab bar"},
     {"Панель слева", "Panel on the left"},
     {"Панель снизу", "Panel at the bottom"},
@@ -73,8 +77,11 @@ static const LangPair kUiEn[] = {
     {"Противники", "Enemies"},
     {"Радиус", "Radius"},
     {"Разное", "Misc"},
+    {"Режим", "Mode"},
     {"Релиз", "Release"},
     {"Руда", "Ore"},
+    {"Сайлент", "Silent"},
+    {"Сайлент: ось выстрела не найдена", "Silent aim: firing axis not found"},
     {"Сбросить зоны", "Reset zones"},
     {"Сбросить точку", "Reset point"},
     {"Свои", "Teammates"},
@@ -84,6 +91,7 @@ static const LangPair kUiEn[] = {
     {"Слева", "Left"},
     {"Снизу", "Bottom"},
     {"Создать конфиг", "Create config"},
+    {"Состояние", "State"},
     {"Сохранить", "Save"},
     {"Сохранённые", "Saved"},
     {"Старый конфиг — пересохрани", "Old config — save it again"},
@@ -91,6 +99,7 @@ static const LangPair kUiEn[] = {
     {"Тапни по кнопке огня / атаки", "Tap the fire / attack button"},
     {"Тапни по точке, где аим водит палец", "Tap the point the aim steers from"},
     {"Тапни по центру джойстика движения", "Tap the movement joystick centre"},
+    {"Тач", "Touch"},
     {"Тело", "Body"},
     {"Толщина", "Thickness"},
     {"Только в прицеле", "Only while scoped"},
@@ -107,6 +116,9 @@ static const LangPair kUiEn[] = {
     {"Шея", "Neck"},
     {"Язык", "Language"},
     {"Ящики", "Crates"},
+    {"нет объекта", "no object"},
+    {"нет оси", "no axis"},
+    {"нет отклика", "no response"},
 };
 
 // Подписи визуалов ESP: ресурсы, предметы, животные, ящики, оружие.

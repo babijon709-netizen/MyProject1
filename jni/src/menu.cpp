@@ -89,69 +89,145 @@ float TabContent(int tab, float dt, float cW) {
         SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, false, g_state.sl_gun_str, dt);
 
-        // ---- Тач-зона аима -------------------------------------------------
-        // Где именно лежит палец, которым аимбот водит камеру. Выбирается
-        // тапом по экрану — как зоны автофарма, только точка одна: меню
-        // прячется, первый тап записывает её в долях экрана.
-        SHdr(XS("Зоны бота"));
+        // ---- Режим: чем именно аим крутит прицел ---------------------------
+        // Тач — синтетический палец (нужна инъекция касаний); память — запись
+        // ввода взгляда прямо в игру (камера едет как от свайпа, но без
+        // пальца); сайлент — запись оси выстрела (камера стоит на месте, в
+        // цель уходит только выстрел). Последние два работают и там, где
+        // /dev/uinput занят или перехвачен.
+        SHdr(XS("Режим"));
         {
             const float rowH = Layout::RowH;
             const float inset = Layout::Inset, padX = Layout::PadX;
-            const float avW   = ImGui::GetContentRegionAvail().x;
+            const float avW = ImGui::GetContentRegionAvail().x;
             auto* dl = ImGui::GetWindowDrawList();
             auto* fn = ImGui::GetFont();
             const float fs = ImGui::GetFontSize();
             const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-            const bool pointSet = (g_state.aim_tx >= 0.f);
+            const bool touchMode = (g_state.aim_mode == AIM_MODE_TOUCH);
+            // Тачу состояние показывать нечего: у него нет записи в память.
+            CardBg(rowH * (touchMode ? 3.f : 4.f));
 
-            CardBg(rowH * (pointSet ? 2.f : 1.f));
-
-            // Строка «точка пальца»: подпись слева, доля экрана справа.
-            auto pos = ImGui::GetCursorScreenPos();
-            {
+            auto modeRow = [&](const char* id, const char* lbl, int mode, bool last, float& anim) {
+                auto pos = ImGui::GetCursorScreenPos();
                 const float cX = pos.x + inset, cW = avW - inset * 2.f;
                 const float cy = pos.y + rowH * 0.5f;
-                ImGui::InvisibleButton("##aim_pt", {avW, rowH});
-                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
-                    g_calibMode = 3;   // калибровка: тап по экрану задаёт точку
+                ImGui::InvisibleButton(id, {avW, rowH});
+                const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
+                if (tapped && g_state.aim_mode != mode) {
+                    g_state.aim_mode = mode;
+                    char b[160];
+                    snprintf(b, sizeof(b), XS("%s|%s"), XS("Режим"), lbl);
+                    ShowToast(b);
                     PlaySound(SND_CLICK);
-                    ShowToast(XS("Задай точку тапом по экрану"));
                     g_input.touchConsumed = true;
                 }
-
-                char val[32];
-                snprintf(val, sizeof(val), "%d%% %d%%",
-                         (int)(AimTouchFracX() * 100.f + 0.5f),
-                         (int)(AimTouchFracY() * 100.f + 0.5f));
-                auto vsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, val);
-
+                const bool on = (g_state.aim_mode == mode);
+                const float r = 9.f, dotX = cX + cW - padX - r;
+                dl->AddCircle({dotX, cy}, r, C::UA(on ? C::Acc() : C::Dim(), 1.f), 12, on ? 2.f : 1.6f);
+                if (anim > 0.01f) dl->AddCircleFilled({dotX, cy}, r * 0.5f * anim, C::UA(C::Acc(), 1.f), 12);
                 dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f},
-                            C::UA(C::Txt(), 1.f), XS("Точка пальца"));
-                dl->AddText(fn, fs, {cX + cW - padX - vsz.x, cy - vsz.y * 0.5f},
-                            C::UA(C::Acc(), 1.f), val);
-
-                if (pointSet && g_state.ui_show_sep)
+                            C::UA(on ? C::Txt() : C::Dim(), 1.f), lbl);
+                if (!last && g_state.ui_show_sep)
                     dl->AddLine({cX + padX, pos.y + rowH - 0.5f},
                                 {cX + cW - padX, pos.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
-            }
+            };
+            modeRow("##am0", XS("Тач"),     AIM_MODE_TOUCH,  false,     g_state.a_aim_mode0);
+            modeRow("##am1", XS("Память"),  AIM_MODE_MEMORY, false,     g_state.a_aim_mode1);
+            modeRow("##am2", XS("Сайлент"), AIM_MODE_SILENT, touchMode, g_state.a_aim_mode2);
 
-            // Сброс к прежней позиции (74%/50%) — только если точка задана.
-            if (pointSet) {
-                auto rpos = ImGui::GetCursorScreenPos();
-                const float cX = rpos.x + inset, cW = avW - inset * 2.f;
-                ImGui::InvisibleButton("##aim_pt_rst", {avW, rowH});
-                const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
-                if (tapped) {
-                    g_state.aim_tx = g_state.aim_ty = -1.f;
-                    ShowToast(XS("Точка сброшена"));
-                    PlaySound(SND_CLICK);
-                    g_input.touchConsumed = true;
+            // Состояние записи в память. Без него на устройстве не отличить
+            // «объект не нашёлся» от «пишем, но игра перезаписывает поле
+            // раньше, чем читает» — снаружи оба выглядят как «аим не ведёт».
+            if (!touchMode) {
+                auto pos = ImGui::GetCursorScreenPos();
+                const float cX = pos.x + inset, cW = avW - inset * 2.f;
+                const float cy = pos.y + rowH * 0.5f;
+                ImGui::InvisibleButton("##amst", {avW, rowH});
+                const AimMemDiag& d = AimMemoryDiag();
+                char val[32];
+                if (g_state.aim_mode == AIM_MODE_SILENT) {
+                    if (!d.axis) snprintf(val, sizeof(val), "%s", XS("нет оси"));
+                    else         snprintf(val, sizeof(val), XS("%.0f°"), d.dev);
+                } else {
+                    if (!d.params)          snprintf(val, sizeof(val), "%s", XS("нет объекта"));
+                    else if (!d.responded)  snprintf(val, sizeof(val), "%s", XS("нет отклика"));
+                    else                    snprintf(val, sizeof(val), XS("%.2f град/ед"), d.deg_per_unit);
                 }
-                const char* rt = XS("Сбросить точку");
-                auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
-                dl->AddText(fn, fs * 1.05f,
-                            {cX + (cW - rsz.x) * 0.5f, rpos.y + (rowH - rsz.y) * 0.5f},
-                            C::UA(C::Dim(), 1.f), rt);
+                auto vsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, val);
+                dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f},
+                            C::UA(C::Txt(), 1.f), XS("Состояние"));
+                dl->AddText(fn, fs, {cX + cW - padX - vsz.x, cy - vsz.y * 0.5f},
+                            C::UA(C::Acc(), 1.f), val);
+            }
+        }
+
+        // ---- Тач-зона аима -------------------------------------------------
+        // Где именно лежит палец, которым аимбот водит камеру. Выбирается
+        // тапом по экрану — как зоны автофарма, только точка одна: меню
+        // прячется, первый тап записывает её в долях экрана. В режимах записи
+        // в память пальца нет вовсе, поэтому секции здесь нет.
+        if (g_state.aim_mode == AIM_MODE_TOUCH) {
+            SHdr(XS("Зоны бота"));
+            {
+                const float rowH = Layout::RowH;
+                const float inset = Layout::Inset, padX = Layout::PadX;
+                const float avW   = ImGui::GetContentRegionAvail().x;
+                auto* dl = ImGui::GetWindowDrawList();
+                auto* fn = ImGui::GetFont();
+                const float fs = ImGui::GetFontSize();
+                const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+                const bool pointSet = (g_state.aim_tx >= 0.f);
+
+                CardBg(rowH * (pointSet ? 2.f : 1.f));
+
+                // Строка «точка пальца»: подпись слева, доля экрана справа.
+                auto pos = ImGui::GetCursorScreenPos();
+                {
+                    const float cX = pos.x + inset, cW = avW - inset * 2.f;
+                    const float cy = pos.y + rowH * 0.5f;
+                    ImGui::InvisibleButton("##aim_pt", {avW, rowH});
+                    if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
+                        g_calibMode = 3;   // калибровка: тап по экрану задаёт точку
+                        PlaySound(SND_CLICK);
+                        ShowToast(XS("Задай точку тапом по экрану"));
+                        g_input.touchConsumed = true;
+                    }
+
+                    char val[32];
+                    snprintf(val, sizeof(val), "%d%% %d%%",
+                             (int)(AimTouchFracX() * 100.f + 0.5f),
+                             (int)(AimTouchFracY() * 100.f + 0.5f));
+                    auto vsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, val);
+
+                    dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f},
+                                C::UA(C::Txt(), 1.f), XS("Точка пальца"));
+                    dl->AddText(fn, fs, {cX + cW - padX - vsz.x, cy - vsz.y * 0.5f},
+                                C::UA(C::Acc(), 1.f), val);
+
+                    if (pointSet && g_state.ui_show_sep)
+                        dl->AddLine({cX + padX, pos.y + rowH - 0.5f},
+                                    {cX + cW - padX, pos.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
+                }
+
+                // Сброс к прежней позиции (74%/50%) — только если точка задана.
+                if (pointSet) {
+                    auto rpos = ImGui::GetCursorScreenPos();
+                    const float cX = rpos.x + inset, cW = avW - inset * 2.f;
+                    ImGui::InvisibleButton("##aim_pt_rst", {avW, rowH});
+                    const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
+                    if (tapped) {
+                        g_state.aim_tx = g_state.aim_ty = -1.f;
+                        ShowToast(XS("Точка сброшена"));
+                        PlaySound(SND_CLICK);
+                        g_input.touchConsumed = true;
+                    }
+                    const char* rt = XS("Сбросить точку");
+                    auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
+                    dl->AddText(fn, fs * 1.05f,
+                                {cX + (cW - rsz.x) * 0.5f, rpos.y + (rowH - rsz.y) * 0.5f},
+                                C::UA(C::Dim(), 1.f), rt);
+                }
             }
         }
 
@@ -866,6 +942,9 @@ void RenderMenu() {
     Tick(g_state.a_aim_pr0,    g_state.aim_priority == 0,  dt);
     Tick(g_state.a_aim_pr1,    g_state.aim_priority == 1,  dt);
     Tick(g_state.a_aim_pr2,    g_state.aim_priority == 2,  dt);
+    Tick(g_state.a_aim_mode0,  g_state.aim_mode == AIM_MODE_TOUCH,  dt);
+    Tick(g_state.a_aim_mode1,  g_state.aim_mode == AIM_MODE_MEMORY, dt);
+    Tick(g_state.a_aim_mode2,  g_state.aim_mode == AIM_MODE_SILENT, dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
     Tick(g_state.a_ui_dark,    g_state.ui_dark_mode,       dt);

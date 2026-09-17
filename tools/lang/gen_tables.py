@@ -84,6 +84,16 @@ UI_EN = {
     'Куда целиться': 'Aim point', 'Голова': 'Head', 'Шея': 'Neck', 'Тело': 'Body',
     'Выбор цели': 'Target priority', 'Умный': 'Smart',
     'Ближе к прицелу': 'Closest to crosshair', 'Ближе ко мне': 'Closest to me',
+    # режим аима: чем именно он крутит прицел
+    'Режим': 'Mode', 'Тач': 'Touch', 'Память': 'Memory', 'Сайлент': 'Silent',
+    'Состояние': 'State',
+    # состояние записи в память (вкладка «Аим»)
+    'нет объекта': 'no object', 'нет отклика': 'no response', 'нет оси': 'no axis',
+    '%.2f град/ед': '%.2f deg/unit',
+    # мемори-режимы сообщают о поломке тостом
+    'Мемори-аим: не найден MouseLook': 'Memory aim: MouseLook not found',
+    'Мемори-аим: камера не отвечает': 'Memory aim: camera not responding',
+    'Сайлент: ось выстрела не найдена': 'Silent aim: firing axis not found',
     # тач-зона аима (точка, из которой аимбот водит палец)
     'Точка пальца': 'Finger point', 'Сбросить точку': 'Reset point',
     'Точка сброшена': 'Point reset',

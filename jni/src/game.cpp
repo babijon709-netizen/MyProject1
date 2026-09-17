@@ -1320,6 +1320,169 @@ bool esp_read_look_sensitivity(float& out) {
     return true;
 }
 
+// ---- Мемори-аим: запись в память игры -------------------------------------
+//
+// Остальные поля Oxide.MouseLook, которыми аим вертит камерой. Сверены по
+// dump.cs релиза (класс Oxide.MouseLook, строка 205611) и беты (строка 207978)
+// — раскладка одна и та же, отличаются только обфусцированные имена (релиз
+// LGa/Ljj против беты KXf/KXz). Как и m_Sensitivity, это НЕ часть таблицы
+// переключения версий (tools/offsets).
+//
+// Семантика — из дизассемблера MouseLook.ZJo (libil2cpp.so, RVA 0x64e312c,
+// вызывается из MouseLook.Update каждый кадр):
+//
+//   0x64e31d0  ldr  s2, [x19, #0x34]        ; m_Sensitivity
+//   0x64e31e0  fmul s3, s1, s2              ; s1 — вертикаль ввода (+0x8C)
+//   0x64e31e4  fnmul s1, s1, s2             ; знак вертикали: -(y * sens)
+//   0x64e31ec  fmul s0, s0, s2              ; s0 — горизонталь ввода (+0x88)
+//   0x64e31f0  fcsel s1, s1, s3, eq         ; при m_Invert знак не переворачиваем
+//   0x64e32a0  fadd s0, s8, s2              ; прибавить к углам взгляда
+//   0x64e32ac  bl   #0x72fdd14              ; (поворот KCC/хендлера)
+//   0x64e32c0  stur d0, [x19, #0x4c]        ; углы: +0x4C тангаж, +0x50 рысканье
+//   0x64e3328  ldr  s1, [x19, x8]           ; x8 = 0x38/0x40: пределы взгляда
+//   0x64e3348  str  s0, [x19, #0x4c]        ; тангаж зажат пределами
+//   0x64e3418  ldr  s9, [x19, #0x4c]        ; и ушёл в localRotation камеры
+//   0x64e3470  fmul s1, s9, s0              ; s0 = 0,01745 — градусы в радианы
+//
+// Поле ввода (+0x88) игра ПЕРЕЗАПИСЫВАЕТ каждый кадр в MouseLook.ZJX
+// (RVA 0x64e412c) — туда она кладёт сдвиг касания; с гироскопом (объект +0x78)
+// ZJo вместо перезаписи прибавляет к полю показания гироскопа. Поэтому наша
+// запись — это «ввод одного кадра»: сыграет она или нет, зависит от того, кто
+// последним коснулся поля перед чтением. Контроллер в aim.cpp это учитывает:
+// шаг считается по остатку ошибки, а не по «мы записали, значит повернули».
+static constexpr uint64_t MOUSELOOK_INVERT     = 0x30;   // bool
+static constexpr uint64_t MOUSELOOK_ANGLES     = 0x4C;   // Vector2: тангаж, рысканье
+static constexpr uint64_t MOUSELOOK_GYRO       = 0x78;   // объект гироскопа (0 = выключен)
+static constexpr uint64_t MOUSELOOK_LOOK_INPUT = 0x88;   // Vector2: ввод взгляда за кадр
+
+// MouseLook локального игрока. В отличие от esp_read_look_sensitivity() здесь
+// НИКАКИХ запасных вариантов «взять у любого игрока»: запись идёт в память, и
+// попади она в чужой объект — камеру крутило бы не тому игроку.
+static bool resolve_local_mouse_look(uint64_t& out) {
+    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+    uint64_t player = resolve_local_player();
+    if (!player) return false;
+    if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) return false;
+    uint64_t mouse_look = rd_ptr(player + PLAYER_MOUSE_LOOK_OFFSET);
+    if (mouse_look < 0x10000) return false;   // ноль или мусор вместо указателя
+    out = mouse_look;
+    return true;
+}
+
+bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro) {
+    uint64_t mouse_look = 0;
+    if (!resolve_local_mouse_look(mouse_look)) return false;
+    const float value = rd<float>(mouse_look + MOUSE_LOOK_SENSITIVITY_OFFSET);
+    if (!std::isfinite(value) || value < 0.05F || value > 100.0F) return false;
+    deg_per_unit = value;
+    invert_y     = rd<uint8_t>(mouse_look + MOUSELOOK_INVERT) != 0;
+    gyro         = rd_ptr(mouse_look + MOUSELOOK_GYRO) >= 0x10000;
+    return true;
+}
+
+bool esp_mem_aim_write_look(float yaw_units, float pitch_units) {
+    uint64_t mouse_look = 0;
+    if (!resolve_local_mouse_look(mouse_look)) return false;
+    if (!std::isfinite(yaw_units) || !std::isfinite(pitch_units)) return false;
+    float input[2] = {yaw_units, pitch_units};
+    return wr_buf(mouse_look + MOUSELOOK_LOOK_INPUT, input, sizeof(input));
+}
+
+bool esp_mem_aim_read_angles(float& pitch_deg, float& yaw_deg) {
+    uint64_t mouse_look = 0;
+    if (!resolve_local_mouse_look(mouse_look)) return false;
+    float angles[2] = {};
+    if (!rd_buf(mouse_look + MOUSELOOK_ANGLES, angles, sizeof(angles))) return false;
+    if (!std::isfinite(angles[0]) || !std::isfinite(angles[1])) return false;
+    pitch_deg = angles[0];
+    yaw_deg   = angles[1];
+    return true;
+}
+
+// Состояние писателя-доминатора оси выстрела (см. esp_mem_aim_hold_fire_dir).
+// Направление и адрес — атомарные: их обновляет поток отрисовки, а пишет
+// фоновый. Адрес 0 означает «ещё не нашли» — тогда фоновый поток не пишет.
+static std::atomic<bool>     g_fire_hold_on{false};
+static std::atomic<bool>     g_fire_hold_running{false};
+static std::atomic<uint64_t> g_fire_dir_addr{0};
+static std::atomic<float>    g_fire_dir_x{0.0F}, g_fire_dir_y{0.0F}, g_fire_dir_z{1.0F};
+
+// Ось выстрела: PlayerManager.playerEventHandler (+0x78, класс Gum) ->
+// LookDirection (+0x140) -> значение Vector3 (+0x20, обёртка синхронизации).
+// MouseLook.Update каждый кадр пишет сюда forward камеры (ZJo, RVA 0x64e35a4:
+// приёмник — [this+0x20][0x140], значение — s0/s1/s2 от Transform.get_forward),
+// а FPHitscan пускает луч попадания ровно вдоль этого вектора.
+static bool resolve_look_direction(uint64_t& out) {
+    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+    uint64_t player = resolve_local_player();
+    if (!player) return false;
+    uint64_t handler = rd_ptr(player + PLAYER_EVENT_HANDLER);
+    if (!handler || rd_ptr(handler + EVENT_HANDLER_MANAGER_BACKREF) != player) return false;
+    uint64_t look = rd_ptr(handler + EVENT_HANDLER_LOOK_DIRECTION);
+    if (look < 0x10000) return false;
+    out = look + SYNC_VALUE_OFFSET;
+    return true;
+}
+
+bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z) {
+    uint64_t addr = 0;
+    if (!resolve_look_direction(addr)) return false;
+    const Vec3 dir = rd_v3(addr);
+    if (!vec3_is_finite(dir)) return false;
+    const float len = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    // Игра держит тут единичный вектор; всё остальное — не ось, а мусор.
+    if (!(len > 0.5F && len < 2.0F)) return false;
+    x = dir.x / len; y = dir.y / len; z = dir.z / len;
+    return true;
+}
+
+bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
+    uint64_t addr = 0;
+    if (!resolve_look_direction(addr)) return false;
+    const float len = sqrtf(x * x + y * y + z * z);
+    if (!std::isfinite(len) || len < 0.001F) return false;
+    const float dir[3] = {x / len, y / len, z / len};
+    g_fire_dir_x.store(dir[0]); g_fire_dir_y.store(dir[1]); g_fire_dir_z.store(dir[2]);
+    g_fire_dir_addr.store(addr);
+    return wr_buf(addr, dir, sizeof(dir));
+}
+
+// Писатель-доминатор оси выстрела. Тот же приём, что у «всегда день» (час в
+// TOD_CycleParameters): игра обновляет поле каждый свой кадр, и запись раз в
+// кадр оверлея с ней гонялась — в части кадров до выстрела доживала ось игры,
+// а не наша. Поток добивает поле каждые kPeriodMs мс, пока сайлент включён.
+void esp_mem_aim_hold_fire_dir(bool on) {
+    g_fire_hold_on.store(on);
+    if (!on) {
+        g_fire_dir_addr.store(0);
+        return;
+    }
+    if (g_fire_hold_running.exchange(true)) return;   // поток уже есть
+    std::thread([]() {
+        constexpr int kPeriodMs = 2;
+        uint64_t addr = 0;
+        double   resolved_at = 0.0;
+        while (g_fire_hold_running.load()) {
+            if (g_fire_hold_on.load() && g_pid > 0) {
+                const double now = mono_seconds();
+                // Игрок мог респавнуться — объект другой, адрес переезжает.
+                if (!addr || now - resolved_at > 0.5) {
+                    uint64_t fresh = 0;
+                    if (resolve_look_direction(fresh)) { addr = fresh; resolved_at = now; }
+                    else { addr = g_fire_dir_addr.load(); }
+                }
+                if (addr) {
+                    const float dir[3] = {g_fire_dir_x.load(), g_fire_dir_y.load(), g_fire_dir_z.load()};
+                    const float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+                    if (std::isfinite(len) && len > 0.5F && len < 2.0F)
+                        wr_buf(addr, dir, sizeof(dir));
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(kPeriodMs));
+        }
+    }).detach();
+}
+
 // Unity Matrix4x4 is column-major in memory: m[col*4 + row].
 static float mat_get(const Mat4& matrix, int row, int column) {
     return matrix.m[(size_t)column * 4 + row];

@@ -33,16 +33,23 @@
 namespace aim {
 
 struct GainTrack {
+    // Границы оценки. У тача единица ввода — пиксель дигитайзера (ходы по
+    // десятки пикселей, коэффициент 0.02..0.60 град/px), у мемори-аима —
+    // «единица взгляда» игры (ходы по 0.1..2 единицы, коэффициент порядка
+    // m_Sensitivity, то есть единицы градусов). Оценка одна и та же, а масштаб
+    // входа разный, поэтому пороги задаются снаружи (set_bounds).
+    struct Bounds {
+        float  min_span     = 1.0f;    // минимальный ход ввода в окне
+        float  gain_min     = 0.02f;   // правдоподобный коэффициент
+        float  gain_max     = 0.60f;
+        double ready_excite = 60.0;    // сумма dPx^2, после которой оценке верят
+    };
+    void set_bounds(const Bounds& b) { bounds_ = b; }
+
     // Тактов в окне замера: 6 тактов оверлея (~0.5 с при 12 fps) — отклик камеры
     // (1-2 такта) внутри окна, а движение цели за полсекунды ещё не успевает
     // испортить отношение.
     static constexpr int kWindow = 6;
-    // Меньше пикселя за окно — отношение тонет в шуме позиции кости.
-    static constexpr float kMinSpanPx = 1.0f;
-    // Правдоподобные значения коэффициента (замер фарма на устройстве: медиана
-    // 0.10, p10 0.078, p90 0.178 град/px) — с запасом на низкую/высокую
-    // чувствительность в настройках. Ноль и мусор сюда не проходят.
-    static constexpr float kGainMin = 0.02f, kGainMax = 0.60f;
     // Забывание: 0.985 за такт — память около 5 с при 12 fps.
     static constexpr double kForget = 0.985;
     // Качество подгонки. Оценка принимается только когда движение пальца
@@ -51,21 +58,23 @@ struct GainTrack {
     // которая ходит +-2 град с частотой 2 Гц, давало 0.060 вместо 0.10 при
     // истинном 0.10, и аим начинал перелетать). R^2 = xy^2 / (xx * yy).
     static constexpr double kMinFit = 0.6;
-    // Возбуждение, после которого оценке можно верить: сумма dPx^2 с забыванием.
-    // 60 — это примерно восемь тактов с движением пальца на 1-3 px.
-    static constexpr double kReadyExcite = 60.0;
+    // Возбуждение, после которого оценке можно верить (сумма квадратов хода
+    // ввода), и правдоподобная полоса коэффициента — в Bounds: у мемори-аима
+    // единица ввода другая (см. комментарий к Bounds). Для тача 60 — это
+    // примерно восемь тактов с движением пальца на 1-3 px.
 
     void reset() { *this = GainTrack{}; }
 
-    // err — ошибка прицела в градусах (в той же системе знаков, что и шаг пальца
-    // в контроллере), finger — позиция пальца аима в пикселях (кумулятивная).
-    // Оба замера обязаны быть из одного такта.
+    // err — ошибка прицела в градусах (в той же системе знаков, что и шаг
+    // ввода в контроллере), finger — кумулятивный ввод: у тача позиция пальца
+    // в пикселях, у мемори-аима — накопленные единицы взгляда. Оба замера
+    // обязаны быть из одного такта.
     void observe(float err, float finger) {
         if (!std::isfinite(err) || !std::isfinite(finger)) { reset(); return; }
         if (n_ >= kWindow) {
             const float dErr = err - err_[0];
             const float dPx  = finger - finger_[0];
-            if (std::fabs(dPx) >= kMinSpanPx) {
+            if (std::fabs(dPx) >= bounds_.min_span) {
                 xx_ *= kForget; xy_ *= kForget; yy_ *= kForget;
                 xx_ += (double)dPx * dPx;
                 xy_ += (double)dPx * dErr;
@@ -77,12 +86,12 @@ struct GainTrack {
         err_[kWindow - 1] = err; finger_[kWindow - 1] = finger;
         if (n_ < kWindow) ++n_;
 
-        if (xx_ < kReadyExcite) { ready_ = false; return; }
+        if (xx_ < bounds_.ready_excite) { ready_ = false; return; }
         if (xx_ <= 0.0 || yy_ <= 0.0) { ready_ = false; return; }
         if ((xy_ * xy_) / (xx_ * yy_) < kMinFit) return;   // подгонка плохая — ждём
         const float g = (float)(-xy_ / xx_);
         const float m = std::fabs(g);
-        if (!std::isfinite(g) || m < kGainMin || m > kGainMax) return;
+        if (!std::isfinite(g) || m < bounds_.gain_min || m > bounds_.gain_max) return;
         gain_ = g;
         ready_ = true;
     }
@@ -96,6 +105,7 @@ struct GainTrack {
     long  samples() const { return samples_; }
 
 private:
+    Bounds bounds_;
     float  err_[kWindow] = {}, finger_[kWindow] = {};
     int    n_ = 0;
     double xx_ = 0.0, xy_ = 0.0, yy_ = 0.0;

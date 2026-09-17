@@ -17,6 +17,10 @@ struct AppState {
     int   cur_tab = 1;   // при запуске открыта вкладка «Аим»
     bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
     int   aim_bone = 0;
+    // Чем именно аим крутит прицел: 0 тач (синтетический палец), 1 память
+    // (запись ввода взгляда в игру), 2 сайлент (запись оси выстрела).
+    // Значения — enum AimMode в aim.h.
+    int   aim_mode = 0;
     // Точка, из которой аимбот водит палец (доли экрана). Выбирается тапом по
     // экрану, как зоны автофарма; -1 = не задана (прежняя позиция 74%/50%).
     float aim_tx = -1.f, aim_ty = -1.f;
@@ -50,6 +54,8 @@ struct AppState {
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
     float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_scope = 0;
+    float a_aim_mode0 = 1, a_aim_mode1 = 0, a_aim_mode2 = 0;
+    RadioAnim ra_aim_mode0, ra_aim_mode1, ra_aim_mode2;
     float a_aim_head  = 1, a_aim_chest = 0, a_aim_pelvis = 0;
     RadioAnim ra_aim_head, ra_aim_chest, ra_aim_pelvis;
     float a_aim_pr0 = 1, a_aim_pr1 = 0, a_aim_pr2 = 0;
