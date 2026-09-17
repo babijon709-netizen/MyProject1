@@ -123,6 +123,7 @@ static int      s_reason = MEM_REASON_NONE;
 static uint64_t s_mouse_look = 0;     // разрешённый объект MouseLook
 static uint64_t s_look_root = 0;      // managed Transform узла прицела (для TRANSFORM)
 static uint64_t s_state_field = 0;    // адрес поля поворота в MouseLook (для STATE_*)
+static bool     s_pinned_pair_path = false;  // дорожка — углы из дампа (0x4C)
 
 // ---- Углы прицела MouseLook: источник и приёмник (проверено по дампу) ------
 //
@@ -329,6 +330,14 @@ static bool read_witness_angles(float& yaw_deg, float& pitch_deg) {
     return read_look_root_angles(s_mouse_look, yaw_deg, pitch_deg);
 }
 
+// Идёт ли проверка дорожки углов из дампа (0x4C): от этого зависит, кого
+// спрашивать свидетелем — см. read_measured_angles.
+static void note_probing_pinned_pair() {
+    s_pinned_pair_path = s_candidate_index < s_candidate_count &&
+                         s_candidates[s_candidate_index].path == MEM_PATH_STATE_DEG &&
+                         s_candidates[s_candidate_index].field == s_mouse_look + MOUSE_LOOK_ANGLES_OFFSET;
+}
+
 // Углы для ЗАМЕРА пробного доворота. Первым — свидетель (камера, иначе узел
 // прицела): узел игра перестраивает из углов каждый такт, поэтому он доказывает,
 // что запись применила именно игра, а не что мы записали поле и сами же его
@@ -339,6 +348,11 @@ static bool read_witness_angles(float& yaw_deg, float& pitch_deg) {
 // такт). Так дорожка остаётся рабочей и без кадра ESP — это и было «не находит
 // поворот камеры».
 static bool read_measured_angles(float& yaw_deg, float& pitch_deg) {
+    // Для дорожки углов первым свидетелем идёт узел прицела: игру он устраивает
+    // ровно так, как она сама его строит из этих углов, а камера при
+    // прицеливании подмешивается к оружию и повернулась бы меньше записанного —
+    // пробный доворот забраковался бы на ровном месте.
+    if (s_pinned_pair_path && read_look_root_angles(s_mouse_look, yaw_deg, pitch_deg)) return true;
     if (read_witness_angles(yaw_deg, pitch_deg)) return true;
     return read_current_angles(yaw_deg, pitch_deg);
 }
@@ -683,6 +697,7 @@ void esp_mem_aim_reset() {
     s_mouse_look = 0;
     s_look_root = 0;
     s_state_field = 0;
+    s_pinned_pair_path = false;
     s_state_range = 0;
     s_deg_per_unit = 0.f;
     s_deg_per_unit_pitch = 0.f;
@@ -808,6 +823,7 @@ void esp_mem_aim_tick(float dt) {
         }
         case PROBE_VERIFY: {
             const int path = probe_path_at(s_candidate_index);
+            note_probing_pinned_pair();
             float verify_yaw = 0.f, verify_pitch = 0.f;
             if (!read_measured_angles(verify_yaw, verify_pitch)) {
                 s_reason = MEM_REASON_NO_ANGLES; s_probe_step = PROBE_FIND; return;
@@ -849,6 +865,7 @@ void esp_mem_aim_tick(float dt) {
         case PROBE_SETTLE: {
             if (--s_probe_frames > 0) return;
             const int path = probe_path_at(s_candidate_index);
+            note_probing_pinned_pair();
             float settle_yaw = 0.f, settle_pitch = 0.f;
             if (!read_measured_angles(settle_yaw, settle_pitch)) {
                 s_reason = MEM_REASON_NO_ANGLES; s_probe_step = PROBE_FIND; return;
