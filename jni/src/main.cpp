@@ -16,6 +16,7 @@
 
 #include "app/attach.h"      // start_attach_thread/stop_attach_thread
 #include "app/lifecycle.h"   // main_thread_flag, g_frame_done, prot::Init
+#include "app/diag_log.h"   // журнал здоровья: его открывает этот же поток
 #include "app/media.h"       // LoadAnimeImage, LoadTabIcons
 #include "app/screen.h"      // g_sw, g_sh, CenterMenuOnDisplay
 #include "ui/config.h"       // kCfgDir_, Cfg* — конфиги и язык
@@ -26,15 +27,42 @@
 #include "aim/update.h"      // UpdateAim
 #include "farm/controller.h" // UpdateFarm
 
+// Какой сигнал попросил нас закончить (0 = обычный выход по своей воле).
+// Записывается из обработчика как число и читается один раз в конце: так в
+// журнале видно «нас попросили закрыться» отдельно от «мы завершились сами», а
+// сам обработчик остаётся простым.
+static std::atomic<int> g_exit_signal{0};
+
 int main(int argc, char* argv[]) {
-    signal(SIGINT,  [](int) { main_thread_flag.store(false); });
-    signal(SIGTERM, [](int) { main_thread_flag.store(false); });
-    signal(SIGHUP,  [](int) { main_thread_flag.store(false); });
+    signal(SIGINT,  [](int sig) { g_exit_signal.store(sig); main_thread_flag.store(false); });
+    signal(SIGTERM, [](int sig) { g_exit_signal.store(sig); main_thread_flag.store(false); });
+    signal(SIGHUP,  [](int sig) { g_exit_signal.store(sig); main_thread_flag.store(false); });
 
     prot::Init();
     screen_config();
 
     mkdir(kCfgDir_(), 0777);   // путь к каталогу конфигов — в ui/config
+    diag_init(kCfgDir_());     // журнал здоровья рядом с конфигами (app/diag_log.h)
+    diag_install_crash_handler();  // падение процесса тоже попадает в журнал
+
+    // Попросить систему не убивать наш процесс первой. Оверлей живёт рядом с
+    // игрой и на планшетах с небольшим объёмом памяти вполне может попасть под
+    // системный менеджер памяти (LMK) — для человека это выглядит как «чит сам
+    // выключился через некоторое время». Понижение приоритета на убийство
+    // требует прав root (у нас они есть для чтения памяти игры); если не вышло,
+    // просто отмечаем это в журнале — дальше видно по статистике процесса.
+    {
+        int fd = open("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            ssize_t w = write(fd, "-300", 4);
+            close(fd);
+            diag_log("app", "приоритет выживания (oom_score_adj): %s",
+                     (w == 4) ? "понижен убийца памяти реже нас выбирает" : "не принят системой");
+        } else {
+            diag_log("app", "приоритет выживания (oom_score_adj): нет доступа к /proc/self");
+        }
+    }
+
     int abs_ScreenX = displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width;
     int abs_ScreenY = displayInfo.height < displayInfo.width ? displayInfo.height : displayInfo.width;
 
@@ -49,19 +77,54 @@ int main(int argc, char* argv[]) {
     AudioInit();
     if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
         Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
+    diag_log("app", "старт: экран %dx%d, ориентация %u, темп оверлея %.0f Гц, пик панели %.0f Гц, "
+                    "сборка %s, тач: %s",
+             abs_ScreenX, abs_ScreenY, displayInfo.orientation, overlay_pace_hz(), overlay_peak_hz(),
+             go::CurrentBuild() == go::Build::Beta ? "бета" : "релиз",
+             Touch_CanInject() ? "инъекция есть" : "только чтение");
+
     // Если полноценный тач не поднялся с первого раза (гонка за /dev/uinput
     // или grab на старте — обычное дело сразу после запуска игры), чит раньше
     // навсегда оставался в read-only: автофарм «просто не идёт», пока не
-    // перезапустишь. Теперь фоновый поток раз в 3 секунды пробует поднять
-    // инъекцию заново, пока не получится.
+    // перезапустишь. Теперь фоновый поток пробует поднять инъекцию заново.
+    //
+    // Чего нельзя было делать — и что тут переделано. Прежняя версия на каждой
+    // попытке звала Touch_Close() и полный Touch_Init(): он перечисляет
+    // /dev/input, НА ВРЕМЯ ЗАБИРАЕТ у игры тачскрин (EVIOCGRAB) и сбрасывает
+    // состояние всех пальцев. На устройстве, где /dev/uinput закрыт (а это как
+    // раз «некоторые устройства»), проба проваливалась всегда, и весь этот
+    // цикл повторялся каждые 3 секунды — с рывками ввода у игры, сбросом
+    // удерживаемого пальца аима и пересозданием читателей тача (через них же
+    // меню получает тапы). Со стороны: «чит сам выключился» / «перестал
+    // реагировать». Теперь сначала дешёвая проба uinput без захвата устройств,
+    // и только если она прошла — настоящее пересоздание тача; интервал растёт
+    // (3 с → 10 с → 30 с), чтобы не молотить этим вечно.
     static std::atomic<bool> s_touchRetryRun{true};
     std::thread([]() {
-        while (s_touchRetryRun.load() && main_thread_flag.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(3));
-            if (Touch_CanInject()) continue;
+        int delay_seconds = 3;
+        int attempts = 0;
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(delay_seconds));
+            if (!s_touchRetryRun.load() || !main_thread_flag.load()) return;
+            if (Touch_CanInject()) { delay_seconds = 3; attempts = 0; continue; }
+            if (!Touch_ProbeInject()) {
+                // Инъекция недоступна в принципе (SELinux/нет root): трогать тач
+                // нельзя — иначе игра потеряет ввод, а аим останется без пальца.
+                if (++attempts == 1 || attempts % 20 == 0) {
+                    diag_log("touch", "инъекция недоступна, проб не удалась (попытка %d, интервал %d с) — "
+                                      "работаем в режиме чтения", attempts, delay_seconds);
+                }
+                if (delay_seconds < 10)      delay_seconds = 10;
+                else if (delay_seconds < 30) delay_seconds = 30;
+                continue;
+            }
             Touch_Close();
-            if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
-                Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
+            const bool ok = Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false)
+                         || Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
+            diag_log("touch", "переподключение тача: %s (попытка %d)",
+                     Touch_CanInject() ? "инъекция поднялась" : (ok ? "только чтение" : "не вышло"), attempts + 1);
+            delay_seconds = 3;
+            attempts = 0;
         }
     }).detach();
     start_attach_thread();
@@ -76,6 +139,7 @@ int main(int argc, char* argv[]) {
     CenterMenuOnDisplay();
     g_menuFadeIn = 0.f;
 
+    unsigned long long frames_drawn = 0;
     while (main_thread_flag) {
         g_frame_done.store(false);
         drawBegin();
@@ -87,8 +151,18 @@ int main(int argc, char* argv[]) {
         UpdateFarm(ImGui::GetIO().DeltaTime);
         RenderMenu();
         drawEnd();
+        ++frames_drawn;
         g_frame_done.store(true);
     }
+    // Почему чит закончил работу: свой выход, сигнал извне или падение (для
+    // падения строка ниже не появится — вместо неё будет «=== ПАДЕНИЕ» из
+    // обработчика). Это первое, что нужно смотреть в журнале, когда «чит
+    // выключился сам».
+    diag_log("app", "выход: %s, кадров нарисовано %llu",
+             g_exit_signal.load() ? "получен сигнал завершения" : "по своей воле",
+             frames_drawn);
+    if (g_exit_signal.load())
+        diag_log("app", "сигнал завершения: %d", g_exit_signal.load());
     while (!g_frame_done.load()) {}
     stop_attach_thread();
     if (g_esp_attached) {

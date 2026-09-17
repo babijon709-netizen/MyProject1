@@ -1,5 +1,9 @@
 #include "Android_draw/draw.h"
 #include "ImGui/Font/Font.h"
+#include "Blur/Blur.h"
+#include "app/media.h"
+#include "app/diag_log.h"
+#include "app/screen.h"
 #include <dirent.h>
 #include <sys/system_properties.h>
 #include <time.h>
@@ -40,6 +44,41 @@ ImGuiWindow *g_window  = nullptr;
 // высокой герцовки у дисплея больше не выпрашивается — игре он не нужен, а
 // композитор из-за него работает вдвое чаще. g_peak_hz остаётся только для
 // диагностики (пишется в шапку лога).
+// ---- Живучесть окна оверлея ------------------------------------------------
+//
+// Оверлей — это собственная поверхность (ANativeWindow через
+// SurfaceComposerClient) и собственный EGL-контекст. Поверхность может умереть
+// снаружи, без нашего участия: система сменила конфигурацию дисплея (поворот,
+// другое разрешение, складное устройство), панель ушла в сон/на экран
+// блокировки и композитор снял слой, SurfaceFlinger прибил «висящий» слой при
+// смене режима или после тяжёлого кадра. Дальше eglSwapBuffers возвращает
+// EGL_FALSE, картинки нет — и в программе НЕ БЫЛО ничего, что вернуло бы её
+// обратно: цикл продолжал рисовать в мёртвый контекст до перезапуска чита.
+// Ровно это пользователь и описывает как «чит сам выключился через некоторое
+// время» — и, что показательно, «особенно на падах»: там смена конфигурации
+// (поворот, сплит-скрин, чехол) происходит чаще.
+//
+// Поэтому окно теперь пересобирается НА ХОДУ, между кадрами:
+//   * по ошибке eglSwapBuffers (3 кадра подряд),
+//   * когда размер экрана разошёлся с размером поверхности (поворот/режим).
+// ImGui-контекст при этом не уничтожается: окно меню, вкладки, скроллы,
+// позиция меню и шрифт остаются как были — пользователь видит максимум один
+// пустой кадр. Пересборка сама логируется в журнал здоровья.
+static bool   g_rebuild_wanted = false;
+static char   g_rebuild_reason[160] = {};
+static int    g_swap_fail_streak = 0;
+static double g_last_rebuild = 0.0;
+static int    g_rebuilds = 0;
+static int    g_surface_w = 0, g_surface_h = 0;
+static int    g_resize_attempts = 0;
+static int    g_resize_want = 0;
+
+static double NowSeconds() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
 static constexpr float kOverlayPaceHz = 60.f;
 static float g_peak_hz = 60.f;
 static float g_overlay_fps = 60.f;
@@ -156,6 +195,133 @@ float overlay_pace_hz() {
     return kOverlayPaceHz;
 }
 
+void draw_request_surface_rebuild(const char* why) {
+    if (g_rebuild_wanted) return;
+    g_rebuild_wanted = true;
+    snprintf(g_rebuild_reason, sizeof(g_rebuild_reason), "%s", why ? why : "?");
+}
+
+int draw_rebuild_count() { return g_rebuilds; }
+
+// Собрать окно и EGL заново. Зовётся только МЕЖДУ кадрами (из drawBegin):
+// предыдущий eglSwapBuffers уже вернулся, в GPU ничего не «в полёте», а
+// ImGui-кадр закрыт.
+static bool RebuildSurface(const char* why, int want) {
+    const int old = g_surface_w;
+
+    // 1. Отпускаем GL-объекты в ТЕКУЩЕМ (старом) контексте и только потом
+    //    создаём новый: glDelete* с именами из старого контекста в новом могли
+    //    бы задеть чужие объекты (имена начинаются с единицы в любом контексте).
+    glFinish();
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplAndroid_Shutdown();
+    Blur::Free();
+
+    // 2. Старое откладываем в сторону, поднимаем новое. Порядок именно такой:
+    //    если собрать новое не удалось (система в этот момент не готова отдать
+    //    слой), возвращаемся на старое и продолжаем рисовать — а не остаёмся с
+    //    разрушенным окном до конца работы.
+    EGLDisplay old_display = display;
+    EGLSurface old_surface = surface;
+    EGLContext old_context = context;
+    ANativeWindow* old_window = native_window;
+    display = EGL_NO_DISPLAY; surface = EGL_NO_SURFACE;
+    context = EGL_NO_CONTEXT; native_window = nullptr;
+
+    // Как и на старте, поверхность — квадрат по большей стороне экрана: меню
+    // разложено относительно него, и эта геометрия не должна меняться на ходу.
+    native_window_screen_x = native_window_screen_y = want;
+    if (!init_egl((uint32_t)want, (uint32_t)want, false)) {
+        if (native_window) {   // новое окно могло создаться лишь частично
+            ANativeWindow_release(native_window);
+            anwc::ANativeWindowCreator::Destroy(native_window);
+            native_window = nullptr;
+        }
+        display = old_display; surface = old_surface;
+        context = old_context; native_window = old_window;
+        native_window_screen_x = native_window_screen_y = old;
+        if (display != EGL_NO_DISPLAY && surface != EGL_NO_SURFACE)
+            eglMakeCurrent(display, surface, surface, context);
+        // Бэкенд ImGui и блюр были сняты выше — ставим их обратно на старом окне.
+        ImGui_ImplAndroid_Init(native_window);
+        ImGui_ImplOpenGL3_Init("#version 300 es");
+        Blur::Init();
+        diag_log("draw", "окно не пересобралось (%s, размер %d→%d) — продолжаю на старом",
+                 why, old, want);
+        return false;
+    }
+
+    // 3. Новый контекст уже текущий: старую поверхность и её контекст отпускаем.
+    //    eglTerminate здесь НЕ зовём: EGL_DEFAULT_DISPLAY — тот же самый display,
+    //    и завершение работы с ним убило бы только что созданный контекст.
+    if (old_display != EGL_NO_DISPLAY) {
+        if (old_context != EGL_NO_CONTEXT) eglDestroyContext(old_display, old_context);
+        if (old_surface != EGL_NO_SURFACE) eglDestroySurface(old_display, old_surface);
+    }
+    if (old_window) {
+        ANativeWindow_release(old_window);
+        anwc::ANativeWindowCreator::Destroy(old_window);
+    }
+
+    ImGui_ImplAndroid_Init(native_window);
+    ImGui_ImplOpenGL3_Init("#version 300 es");
+    Blur::Init();
+    LoadTabIcons();
+
+    g_surface_w = g_surface_h = want;
+    ++g_rebuilds;
+    diag_log("draw", "окно пересобрано: %s (размер %d→%d, всего пересборок %d)",
+             why, old, want, g_rebuilds);
+    return true;
+}
+
+// Вызывается в начале кадра. Возвращает true, если окно было пересобрано
+// (кадр продолжается как обычно — ImGui просто создаст GL-объекты заново).
+bool draw_surface_service() {
+    if (!native_window) return false;
+
+    if (g_surface_w <= 0 || g_surface_h <= 0) {   // первый кадр: узнаём размер
+        g_surface_w = ANativeWindow_getWidth(native_window);
+        g_surface_h = ANativeWindow_getHeight(native_window);
+        g_resize_want  = g_surface_w;
+    }
+
+    const double now = NowSeconds();
+    if (now - g_last_rebuild < 2.0) return false;   // не дёргаем чаще раза в 2 с
+
+    char reason[160] = {};
+    int want = g_surface_w;
+    if (g_rebuild_wanted) {
+        snprintf(reason, sizeof(reason), "%s", g_rebuild_reason);
+    } else {
+        int dw = displayInfo.width, dh = displayInfo.height;
+        if (dw >= 100 && dh >= 100) {
+            want = dw > dh ? dw : dh;
+            if (want != g_surface_w && (g_resize_attempts < 3 || want != g_resize_want)) {
+                // Размер экрана разошёлся с размером поверхности. Если привести
+                // его не удаётся (композитор отдаёт своё), после третьей попытки
+                // оставляем как есть и больше не дёргаем окно зря.
+                if (want != g_resize_want) { g_resize_want = want; g_resize_attempts = 0; }
+                ++g_resize_attempts;
+                snprintf(reason, sizeof(reason), "размер экрана %dx%d, поверхность %dx%d",
+                         dw, dh, g_surface_w, g_surface_h);
+            }
+        }
+    }
+    if (!reason[0]) return false;
+
+    const bool ok = RebuildSurface(reason, want);
+    g_rebuild_wanted = false;
+    g_rebuild_reason[0] = 0;
+    g_last_rebuild = NowSeconds();
+    if (!ok) {
+        // Не удалось — окно попробует собраться на следующем круге.
+        g_rebuild_wanted = true;
+        snprintf(g_rebuild_reason, sizeof(g_rebuild_reason), "%s", reason);
+    }
+    return ok;
+}
+
 bool initGUI_draw(uint32_t _screen_x, uint32_t _screen_y, bool log) {
     orientation = displayInfo.orientation;
     if (!init_egl(_screen_x, _screen_y, log)) return false;
@@ -244,6 +410,19 @@ bool ImGui_init() {
 void drawBegin() {
     screen_config();
 
+    // Окно могло умереть снаружи (см. шапку про живучесть окна) — до NewFrame
+    // самое безопасное место, чтобы собрать его заново.
+    draw_surface_service();
+
+    // Геометрия меню/проекции считается от displayInfo (VisibleScreen), но
+    // «бумажные» размеры экрана держим в согласии с дисплеем: по ним потом
+    // сверяется следующая пересборка окна.
+    if (displayInfo.width >= 100 && displayInfo.height >= 100) {
+        float mx = (float)(displayInfo.width > displayInfo.height ? displayInfo.width : displayInfo.height);
+        float mn = (float)(displayInfo.width < displayInfo.height ? displayInfo.width : displayInfo.height);
+        if (g_sw != mx || g_sh != mn) { g_sw = mx; g_sh = mn; }
+    }
+
     if ((++g_refresh_tick % 180) == 0)
         ApplyOverlayRefresh(::native_window, kOverlayPaceHz);
 
@@ -271,7 +450,21 @@ void drawEnd() {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    eglSwapBuffers(display, surface);
+    if (eglSwapBuffers(display, surface) != EGL_TRUE) {
+        const EGLint err = eglGetError();
+        // Кадр не дошёл до экрана. Один такой случай — обычное дело (панель
+        // уснула, композитор замер); три подряд — поверхность мертва, и её надо
+        // собрать заново, иначе чит «выключится» навсегда.
+        if (++g_swap_fail_streak >= 3) {
+            g_swap_fail_streak = 0;
+            char why[160];
+            snprintf(why, sizeof(why), "кадр не показывается 3 раза подряд (EGL 0x%x)", (unsigned)err);
+            draw_request_surface_rebuild(why);
+            diag_log("draw", "%s — назначаю пересборку окна", why);
+        }
+    } else {
+        g_swap_fail_streak = 0;
+    }
 
     struct timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -308,6 +501,8 @@ void drawEnd() {
 
 void shutdown() {
     if (!g_Initialized) return;
+    g_surface_w = g_surface_h = 0;
+    g_swap_fail_streak = 0;
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplAndroid_Shutdown();

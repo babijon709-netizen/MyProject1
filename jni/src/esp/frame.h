@@ -29,6 +29,8 @@ extern int g_frame_player_count;
 
 extern int g_frame_transforms_empty_streak;
 
+extern double g_frame_transforms_empty_since;
+
 extern int g_frame_publish_fail_streak;
 
 extern int g_frame_watchdog_resets;
@@ -45,7 +47,27 @@ extern float g_last_overlay_sw;
 
 extern float g_last_overlay_sh;
 
+extern double g_frame_publish_time;
+
+extern double g_world_reload_time;
+
 // ---- Функции, которые видят другие модули ----
+
+// Кадр собран: камера и позиция игрока опубликованы. Отмечается в тех местах,
+// где публикация действительно удалась.
+void frame_note_published();
+
+// Кадр НЕ собрался (указатель камеры мигнул, матрицы не прочитались, позиции
+// игроков не нашлись). Прошлую публикацию держим ещё kFrameHoldSeconds — за это
+// время камера не уезжает, а мигание маркеров и фарма пропадает; если прошлый
+// кадр старше, гасим всё честно, чтобы ничего не проецировалось через мёртвую
+// матрицу.
+void frame_drop_unpublished();
+
+// Идёт перезагрузка мира: кэши сбрасывались только что. Пока так — данные игры
+// ещё дописываются, и по ним нельзя ни объявлять смещение позиции неверным, ни
+// считать состав игроков настоящим.
+bool world_reloading();
 
 bool farm_cam_source_ok(const Vec3& p);
 

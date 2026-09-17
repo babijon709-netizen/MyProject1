@@ -56,3 +56,7 @@ Vec3 rd_v3 (uint64_t a);
 Mat4 rd_m4 (uint64_t a);
 
 bool wr_buf(uint64_t addr, const void* in, size_t size);
+
+// Переоткрыть /proc/<pid>/mem и перечитать пробу (см. mem_io.h). Нужно потоку
+// привязки: прежде чем считать доступ потерянным, он пробует это.
+bool esp_rebind_memory();

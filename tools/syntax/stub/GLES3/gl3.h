@@ -23,3 +23,4 @@ inline void glTexParameteri(GLenum a, GLenum b, GLint c){ (void)a;(void)b;(void)
 inline void glEnable(GLenum a){ (void)a; }
 inline void glBlendFunc(GLenum a, GLenum b){ (void)a;(void)b; }
 inline void glClear(GLenum a){ (void)a; }
+inline void glFinish(){}

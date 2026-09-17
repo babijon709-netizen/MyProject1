@@ -54,6 +54,15 @@ bool resolve_transform_arrays(uint64_t native_transform, int32_t& transform_inde
 
 bool read_transform_local_rotation(uint64_t native_transform, Vec4& local_rotation);
 
+// Забыть последнее подтверждённое смещение позиции игрока. Зовётся при
+// перепривязке (esp_reset): адреса и классы чужого процесса, память о раскладке
+// к ним не относится.
+void reset_player_position_memory();
+
+// Забыть последнее подтверждённое смещение позиции игрока. Зовётся при
+// перепривязке (esp_reset): адреса и классы чужого процесса, память о раскладке
+// к ним не относится.
+
 // Мировое вращение родителя: нужно, чтобы перевести желаемый доворот из
 // мировых осей в локальные оси узла (иерархия может быть повёрнута сама).
 bool read_transform_parent_world_rotation(uint64_t native_transform, Vec4& parent_world_rotation);

@@ -350,7 +350,15 @@ PlayerTrack& track_player(uint64_t player, const Vec3& position) {
 // чужих игроков приходят пачкой раз в ~0.1 с, так что законный «прыжок» между
 // кадрами может быть в несколько метров. Всё, что больше, почти всегда мусор —
 // и даже если это настоящий телепорт, мы отстанем от него на пару кадров.
-static constexpr int   kPosHoldFrames        = 3;     // ~50 мс без чтения — ещё не пропажа
+// Сколько ДЕРЖИМ бокс без успешного чтения позиции. Раньше это были три кадра
+// (около 50 мс) — и после смерти/респавна, когда игра погружает мир, чтения не
+// проходят заметно дольше, поэтому у чужих игроков боксы гасли и возвращались:
+// «ESP мерцает». 0.8 с — это ещё не «игрок вышел», зато переживает перезагрузку
+// мира; во время самой перезагрузки держим ещё дольше (там данные заведомо
+// недописаны, и гаснуть раньше игры просто не за чем).
+static constexpr double kPosHoldSeconds       = 0.8;
+
+static constexpr double kPosHoldReloadSeconds = 3.0;
 
 static constexpr int   kPosJumpConfirmFrames = 2;     // скачок должен повториться
 
@@ -370,7 +378,7 @@ bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos) {
     if (!track.has_drawn) {
         if (!read_ok) return false;
         track.drawn = pos; track.drawn_t = now; track.has_drawn = true;
-        track.hold_frames = 0; track.has_jump = false; track.jump_frames = 0;
+        track.hold_since = 0.0; track.has_jump = false; track.jump_frames = 0;
         return true;
     }
 
@@ -391,17 +399,21 @@ bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos) {
     }
 
     if (!read_ok) {
-        if (++track.hold_frames > kPosHoldFrames) return false;  // объект реально пропал
+        if (track.hold_since <= 0.0) track.hold_since = now;
+        const double held = now - track.hold_since;
+        if (held > (world_reloading() ? kPosHoldReloadSeconds : kPosHoldSeconds))
+            return false;                                        // объект реально пропал
         pos = predicted;
         return true;
     }
+    track.hold_since = 0.0;
 
     const float dx = pos.x - predicted.x, dy = pos.y - predicted.y, dz = pos.z - predicted.z;
     const float dev = sqrtf(dx * dx + dy * dy + dz * dz);
     const float limit = kPosJumpMeters + kPosJumpSpeed * fdt;
     if (std::isfinite(dev) && dev <= limit) {
         track.drawn = pos; track.drawn_t = now;
-        track.hold_frames = 0; track.has_jump = false; track.jump_frames = 0;
+        track.hold_since = 0.0; track.has_jump = false; track.jump_frames = 0;
         return true;
     }
 
@@ -419,7 +431,7 @@ bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos) {
 
     if (track.jump_frames >= kPosJumpConfirmFrames) {
         track.drawn = pos; track.drawn_t = now;
-        track.has_jump = false; track.jump_frames = 0; track.hold_frames = 0;
+        track.has_jump = false; track.jump_frames = 0; track.hold_since = 0.0;
         // Скорость через телепорт не измеряется — сбрасываем, иначе упреждение
         // будет на пару кадров смотреть в старую сторону.
         track.vel = {}; track.have_vel_ref = false;

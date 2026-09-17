@@ -48,3 +48,7 @@ inline EGLint eglSwapInterval(EGLDisplay, EGLint) { return EGL_TRUE; }
 inline EGLint eglDestroySurface(EGLDisplay, EGLSurface) { return EGL_TRUE; }
 inline EGLint eglDestroyContext(EGLDisplay, EGLContext) { return EGL_TRUE; }
 inline EGLint eglTerminate(EGLDisplay) { return EGL_TRUE; }
+#define EGL_SUCCESS 0x3000
+#define EGL_BAD_SURFACE 0x300D
+#define EGL_CONTEXT_LOST 0x300E
+inline EGLint eglGetError() { return EGL_SUCCESS; }

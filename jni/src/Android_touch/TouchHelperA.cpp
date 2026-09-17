@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <dirent.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <cmath>
@@ -12,6 +13,7 @@
 #include <linux/uinput.h>
 
 #include "imgui.h"
+#include "app/diag_log.h"
 
 #define maxE 5
 #define maxF 10
@@ -267,6 +269,13 @@ static void *TypeA(void *arg) {
     while (Touch_initialized) {
         auto readSize = (int32_t) read(origfd[i], inputEvent, sizeof(inputEvent));
         if (readSize <= 0 || (readSize % sizeof(input_event)) != 0) {
+            // Ошибка вместо событий. Раньше здесь стоял голый continue: если
+            // дескриптор умер (устройство вынули, файл закрыли из другого
+            // потока), read() возвращал ошибку немедленно и поток крутился на
+            // 100% ядра до конца сеанса — на слабом устройстве это и троттлинг,
+            // и съеденный квант у игры. Ждём пару миллисекунд: события приходят
+            // пачками на SYN_REPORT, такая задержка не видна, а ядро свободно.
+            if (errno != EINTR) usleep(2000);
             continue;
         }
         size_t count = size_t(readSize) / sizeof(input_event);
@@ -393,6 +402,11 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
                 fdNum++;
                 if (fdNum >= maxE)
                     break;
+            } else {
+                // Похоже на тач, но осей ABS_MT_POSITION_* у него нет: файл надо
+                // закрыть. Без этого каждый вызов Touch_Init (а его зовёт поток
+                // переподключения) оставлял дескриптор открытым навсегда.
+                close(fd);
             }
         } else {
             close(fd);
@@ -400,7 +414,9 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
     }
 
     if (minCnt > eventCount) {
-        puts("Failed init touch!");
+        // В журнал: на устройстве этот отказ — первая причина «аим не работает»
+        // (тач-режим без инъекции молчит), а stdout приложения никто не читает.
+        if (diag_enabled()) diag_log("touch", "Touch_Init: тач-устройств не нашлось (событий %d)", eventCount);
         return false;
     }
 
@@ -408,6 +424,7 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
         struct uinput_user_dev ui_dev;
         nowfd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
         if (nowfd <= 0) {
+            if (diag_enabled()) diag_log("touch", "Touch_Init: /dev/uinput не открылся (errno=%d) — read-only", errno);
             for (int k = 0; k < fdNum; ++k) { ioctl(origfd[k], EVIOCGRAB, UNGRAB); close(origfd[k]); origfd[k] = 0; }
             fdNum = 0;
             return false;
@@ -508,8 +525,37 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
     devMaxY = screenY;
     Touch_UpdateScale();
 
-    system("chmod 000 -R /proc/bus/input/*");
+    // Харденинг входных устройств: раз на процесс. Раньше эта строка стояла в
+    // каждом Touch_Init, то есть при переподключении тача (см. main.cpp) каждые
+    // несколько секунд запускался шелл — fork+exec на слабом устройстве заметен
+    // и без пользы: записи /proc/bus/input создаются один раз при загрузке.
+    static bool s_input_hardened = false;
+    if (!s_input_hardened) {
+        s_input_hardened = true;
+        system("chmod 000 -R /proc/bus/input/*");
+    }
     return true;
+}
+
+// Можно ли вообще инжектить касания? Проба БЕЗ побочных действий: открыть
+// /dev/uinput и создать/удалить пустое устройство. Нужна потоку
+// переподключения: полный Touch_Init перечисляет /dev/input и на время забирает
+// у игры тачскрин (EVIOCGRAB), а если /dev/uinput закрыт (SELinux, нет root) —
+// это повторялось в цикле и выбрасывало игру из её же ввода. Проба же ничего не
+// трогает: не подходит устройство — и ладно, ждём следующей попытки.
+bool Touch_ProbeInject() {
+    int probe_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (probe_fd <= 0) return false;
+    struct uinput_user_dev ui_dev;
+    memset(&ui_dev, 0, sizeof(ui_dev));
+    strncpy(ui_dev.name, "probe", UINPUT_MAX_NAME_SIZE);
+    ioctl(probe_fd, UI_SET_EVBIT, EV_SYN);
+    ui_dev.id.bustype = 0;
+    write(probe_fd, &ui_dev, sizeof(ui_dev));
+    const bool ok = (ioctl(probe_fd, UI_DEV_CREATE) == 0);
+    if (ok) ioctl(probe_fd, UI_DEV_DESTROY);
+    close(probe_fd);
+    return ok;
 }
 void UpdateScreenData(int w, int h, uint32_t orientation_) {
     ::screenWidth = w;

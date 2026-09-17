@@ -12,6 +12,10 @@
 #include "ui/watermark.h"
 #include "ui/window.h"
 #include "app/attach.h"
+#include "app/diag_log.h"
+#include "esp/esp_time.h"     // mono_seconds: время для пульса и подтверждения
+#include "esp/frame.h"        // g_frame_publish_fail_streak: причина перепривязки
+#include "esp/mem.h"          // esp_alive_check / esp_rebind_memory и счётчики чтений
 
 // Пакеты клиентов (релиз/бета). Play-бета ставится ТЕМ ЖЕ applicationId, что и
 // релиз, — тогда имя пакета версию не различает, и какую версию читать, решает
@@ -157,33 +161,132 @@ static bool pid_still_game(pid_t pid) {
     return proc_libil2cpp(pid) == 1;
 }
 
+// Имя состояния привязки — для журнала здоровья.
+static const char* AttachStateName(EspAttachState state) {
+    switch (state) {
+        case ESP_ATTACH_OK:        return "ок";
+        case ESP_ATTACH_NO_PID:    return "нет процесса игры";
+        case ESP_ATTACH_NO_LIB:    return "нет libil2cpp.so";
+        case ESP_ATTACH_NO_ACCESS: return "память не читается";
+    }
+    return "?";
+}
+
+// Доступ к памяти потерян по-настоящему?
+//
+// Одно чтение ELF-заголовка отвечает на вопрос «читается ли процесс», и одиночный
+// его отказ на устройстве под нагрузкой бывает случайным: игра грузит мир, память
+// под давлением, страница ушла в zram, дескриптор стал негодным. Раньше ЛЮБОЙ
+// отказ сразу вёл к esp_reset() — обнулялись классы, смещения, кадр, — и чит
+// оставался выключенным до следующей удачной привязки. Со стороны это и есть
+// «чит сам выключился через некоторое время», а на слабом устройстве (планшет,
+// который и греется, и тормозит) — ещё и надолго.
+//
+// Теперь потеря доступа подтверждается замером: сначала пробуем самое дешёвое —
+// переоткрыть /proc/<pid>/mem и перечитать пробу; если не помогло, ждём 150 мс и
+// проверяем ещё раз. Только после этого привязку рвём. Настоящий уход процесса
+// ловится отдельно, по /proc (pid_still_game), и он по-прежнему мгновенный.
+static bool access_confirmed_lost(pid_t pid, const char** why, int& err_out) {
+    if (esp_alive_check()) return false;
+    if (esp_rebind_memory()) {
+        diag_log("attach", "чтение мигнуло — переоткрыли /proc/%d/mem, доступ вернулся", (int)pid);
+        return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    if (esp_alive_check()) return false;
+    err_out = g_mem.last_error();
+    if (g_mem.last_error_was_open()) *why = "открытие /proc/<pid>/mem";
+    else if (g_mem.fail_phase() && g_mem.fail_phase()[0]) *why = g_mem.fail_phase();
+    else *why = "чтение памяти";
+    return true;
+}
+
 void start_attach_thread() {
     g_attach_running.store(true);
     g_attach_thread = std::thread([]() {
+        int  failed_init_attempts = 0;   // подряд неудачных попыток привязки
+        int  attach_count = 0;           // сколько раз привязывались за сеанс
+        double pulse_at = 0.0;           // когда писать «пульс» в журнал
+        unsigned long long pulse_reads = 0, pulse_fails = 0;
+        bool  logged_no_process = false;
         while (g_attach_running.load()) {
+            const double now = mono_seconds();
             if (!g_esp_attached) {
                 pid_t pid = find_game_pid();
-                const bool by_package = (pid > 0);
                 if (pid <= 0) pid = find_unity_pid();
                 if (pid <= 0) {
                     // Процесса игры нет: состояния не меняем, повторим попытку на
                     // следующем круге. Игроку об этом не сообщаем — тост «игра не
                     // запущена» только мешал (пока игра грузится, он вылезал всегда).
+                    if (!logged_no_process) {
+                        logged_no_process = true;
+                        diag_log("attach", "процесса игры нет — ждём (сборка %s)",
+                                 go::CurrentBuild() == go::Build::Beta ? "бета" : "релиз");
+                    }
                 } else if (esp_init(pid)) {
                     g_target_pid = pid;
                     g_esp_attached = true;
+                    logged_no_process = false;
+                    failed_init_attempts = 0;
+                    ++attach_count;
+                    diag_log("attach", "привязались: pid=%d база=0x%llx сборка=%s (привязка №%d)",
+                             (int)pid, (unsigned long long)g_il2cpp_base,
+                             go::CurrentBuild() == go::Build::Beta ? "бета" : "релиз", attach_count);
                 } else {
-                    // Нашли процесс, но привязаться не вышло: причина — из game.cpp
-                    // (нет libil2cpp.so или память не читается). Состояние видно в
-                    // esp_attach_state() для диагностики, тоста нет.
+                    // Нашли процесс, но привязаться не вышло: нет libil2cpp.so или
+                    // память не читается. В журнал — раз в несколько попыток, чтобы
+                    // не залить файл, когда игра ещё грузится.
+                    if (++failed_init_attempts == 1 || failed_init_attempts % 20 == 0) {
+                        diag_log("attach", "привязка не вышла: pid=%d состояние=%s errno=%d (попыток %d)",
+                                 (int)pid, AttachStateName(esp_attach_state()),
+                                 g_mem.last_error(), failed_init_attempts);
+                    }
                 }
-            } else if (!pid_still_game(g_target_pid) || !esp_alive_check() ||
-                       esp_wants_reattach()) {
-                // Процесс сменился/умер или память перестала читаться (отобрали
-                // доступ, перезапуск с тем же pid): привязываемся заново.
+            } else if (!pid_still_game(g_target_pid)) {
+                // Процесс сменился или умер: это потеря по-настоящему, привязываемся
+                // заново (кэши мира обнулять обязательно — адреса чужие).
+                diag_log("attach", "процесс ушёл: pid=%d — перепривязка", (int)g_target_pid);
                 esp_reset();
                 g_esp_attached = false;
                 g_target_pid = -1;
+            } else if (esp_wants_reattach()) {
+                // Сторож ESP трижды сбросил кэши мира и не получил кадр: дело не в
+                // кэшах, а в самой привязке (база, права, перезапуск игры).
+                diag_log("attach", "перепривязка по сторожу ESP (кадров без публикации: %d)",
+                         g_frame_publish_fail_streak);
+                esp_reset();
+                g_esp_attached = false;
+                g_target_pid = -1;
+            } else {
+                const char* why = "?";
+                int err = 0;
+                if (access_confirmed_lost(g_target_pid, &why, err)) {
+                    diag_log("attach",
+                             "доступ к памяти потерян (%s, errno=%d): чтений=%llu отказов=%llu "
+                             "мусорных=%llu обрывов=%llu переоткрытий=%llu, fps=%.0f — перепривязка",
+                             why, err, g_mem.reads_total(), g_mem.read_fails_total(),
+                             g_mem.junk_total(), g_mem.cut_total(), g_mem.reopens_total(), overlay_fps());
+                    esp_reset();
+                    g_esp_attached = false;
+                    g_target_pid = -1;
+                }
+            }
+
+            // Пульс: раз в 30 с одна строка о том, как шли дела. По ней видно, что
+            // было ДО поломки (частота кадров, отказы чтений), а не только факт
+            // «выключилось».
+            if (now - pulse_at >= 30.0) {
+                pulse_at = now;
+                const unsigned long long reads = g_mem.reads_total();
+                const unsigned long long fails = g_mem.read_fails_total();
+                char self[192];
+                diag_self_stats(self, sizeof(self));
+                diag_log("health", "пульс: привязано=%s fps=%.0f чтений=%llu(+%llu) отказов=%llu(+%llu) "
+                                   "инъекция=%s, %s",
+                         g_esp_attached ? "да" : "нет", overlay_fps(), reads, reads - pulse_reads,
+                         fails, fails - pulse_fails, Touch_CanInject() ? "есть" : "нет", self);
+                pulse_reads = reads;
+                pulse_fails = fails;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }

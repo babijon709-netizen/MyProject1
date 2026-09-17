@@ -19,6 +19,7 @@
 #include "esp/skeleton_cache.h"
 #include "esp/skeleton_names.h"
 #include "transform.h"
+#include "app/diag_log.h"
 
 TransformHierarchyLayout g_transform_hierarchy_layout{};
 
@@ -374,6 +375,15 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
 // equivalent. The rest are legacy guesses kept as a last resort only.
 static const uint64_t k_known_position_offsets[] = {0x1D0, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D4, 0x1DC, 0x1E8};
 
+// Последнее ПОДТВЕРЖДЁННОЕ смещение позиции. Живёт до перепривязки: раскладка
+// класса не меняется внутри одной сборки игры, поэтому после смены мира (смерть,
+// респавн) правильное смещение уже известно — искать его заново с ожиданием
+// «поля допишутся» не нужно, достаточно проверить. Именно этот поиск с ожиданием
+// и был тем «боксы пропали на секунду и вернулись» после респавна.
+static uint64_t s_last_good_offset = 0;
+
+void reset_player_position_memory() { s_last_good_offset = 0; }
+
 static uint64_t find_direct_player_position_offset(const std::vector<uint64_t>& players) {
     bool saved_use_direct = g_use_direct_player_position;
     g_use_direct_player_position = true;
@@ -412,12 +422,29 @@ static constexpr double kDirectPositionSettleSeconds = 0.6;
 bool g_body_caches_dirty = false; // clear per-player caches on the next frame
 
 bool discover_player_position_offset(const std::vector<uint64_t>& players) {
+    // Сначала — прошлое подтверждённое смещение. Оно верно настолько часто, что
+    // отдельный поиск по восьми кандидатам после респавна просто не нужен.
+    if (s_last_good_offset) {
+        double sticky_score = 0.0;
+        if (evaluate_player_position_offset(players, s_last_good_offset, sticky_score)) {
+            g_direct_position_fail_streak = 0;
+            g_direct_position_fail_since = 0.0;
+            g_use_direct_player_position = true; g_player_position_offset = s_last_good_offset;
+            g_player_position_validated = true; g_matrix_configuration_validated = false;
+            return true;
+        }
+    }
     uint64_t best_offset = find_direct_player_position_offset(players);
     if (best_offset) {
         g_direct_position_fail_streak = 0;
         g_direct_position_fail_since = 0.0;
         g_use_direct_player_position = true; g_player_position_offset = best_offset;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
+        if (best_offset != s_last_good_offset) {
+            diag_log("esp", "смещение позиции игрока: 0x%llx → 0x%llx",
+                     (unsigned long long)s_last_good_offset, (unsigned long long)best_offset);
+            s_last_good_offset = best_offset;
+        }
         return true;
     }
     // Даём прямым полям устояться, прежде чем уходить на обход иерархии, но не

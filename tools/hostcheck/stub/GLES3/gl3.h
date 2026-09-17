@@ -27,3 +27,4 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param);
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid* pixels);
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid* pixels);
 void glPixelStorei(GLenum pname, GLint param);
+inline void glFinish(){}

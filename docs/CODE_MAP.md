@@ -31,6 +31,8 @@
 | автофарм: цифры для строки статуса в окне | `jni/src/farm/state.cpp` |
 | звуки меню (щелчок, подтверждение) | `jni/src/app/audio.cpp` |
 | поиск процесса игры и поток привязки | `jni/src/app/attach.cpp` |
+| журнал здоровья: почему чит «выключился», что делал до этого | `jni/src/app/diag_log.cpp` |
+| окно оверлея: живучесть (пересоздание поверхности, ошибки кадра) | `jni/src/Android_draw/draw.cpp` |
 | иконки вкладок | `jni/src/app/media.cpp` |
 | размеры экрана, центрирование окна меню | `jni/src/app/screen.cpp` |
 | флаг «программа работает», остановка потоков | `jni/src/app/lifecycle.cpp` |
@@ -105,14 +107,14 @@ Transform. Самотест ограничен по времени (6 с): не 
 
 ### jni/src/esp/boxes.cpp — esp_get_boxes: рамки, имена, скелет
 
-Строк: 568. Заголовок: `boxes.h`.
+Строк: 611. Заголовок: `boxes.h`.
 
 Внутри: `esp_get_boxes`, `esp_nearby_player_count`, `esp_wants_reattach`
 
 
 ### jni/src/esp/camera.cpp — Камера игры: поза, матрицы, углы, чувствительность
 
-Строк: 420. Заголовок: `camera.h`.
+Строк: 426. Заголовок: `camera.h`.
 
 Внутри: `esp_read_look_sensitivity`, `read_camera_transform_pose`, `read_native_camera_matrices`, `w2s_transform_camera`, `optimize_matrix_configuration`, `read_configured_player_transforms`, `esp_camera_fov_deg`, `esp_camera_state`, `read_local_aim_reference`
 
@@ -133,9 +135,19 @@ Transform. Самотест ограничен по времени (6 с): не 
 
 ### jni/src/esp/frame.cpp — Кадр ESP: состояние, публикация, сброс
 
-Строк: 311. Заголовок: `frame.h`.
+Строк: 354. Заголовок: `frame.h`.
 
-Внутри: `farm_cam_source_ok`, `angles_from_forward`, `esp_camera_angles`, `esp_aim_camera_angles`, `esp_local_eye_position`, `reset_world_caches`, `esp_reset`, `publish_camera_only_frame`
+Внутри: `frame_note_published`, `frame_drop_unpublished`, `world_reloading`, `farm_cam_source_ok`, `angles_from_forward`, `esp_camera_angles`, `esp_aim_camera_angles`, `esp_local_eye_position`, `reset_world_caches`, `esp_reset`, `publish_camera_only_frame`
+
+Что тут важно: кадр камеры больше не гасится на входе (раньше флаги
+`g_frame_vp_valid`/`g_frame_local_valid` сбрасывались в начале `esp_get_boxes`, и
+любой сбой чтения указателя камеры или матриц оставлял экран пустым ровно в этот
+кадр — это и было «мерцание»). Теперь кадр помечается опубликованным
+(`frame_note_published`) при реальной публикации, а при неудаче прошлый кадр
+держится ещё 0.35 с (`frame_drop_unpublished`): камера за это время не уезжает, а
+мигания нет. `world_reloading()` даёт окно в 1 с после `reset_world_caches` — в
+нём «позиции не читаются» и «все игроки в одной точке» не считаются приговором
+смещению, иначе каждый респавн начинался с перепоиска смещения без боксов.
 
 
 ### jni/src/esp/game_patch.cpp — Запись в память игры: X-ray и «всегда день»
@@ -203,7 +215,7 @@ Transform. Самотест ограничен по времени (6 с): не 
 
 ### jni/src/esp/player_pose.cpp — Позиция игрока: трек, скачки, «сидит/на маунте»
 
-Строк: 430. Заголовок: `player_pose.h`.
+Строк: 442. Заголовок: `player_pose.h`.
 
 Внутри: `player_aux`, `player_is_crouched`, `player_head_world`, `player_head_hitbox_world`, `prune_player_aux`, `mono_seconds`, `prune_player_track`, `vec3_horiz2`, `player_is_mounted`, `player_saved_position`, `player_rendered_position`, `player_model_position`, `player_mount_engaged`, `apply_mounted_position`, `… ещё 3`
 
@@ -231,7 +243,7 @@ Transform. Самотест ограничен по времени (6 с): не 
 
 ### jni/src/esp/transform.cpp — Иерархия Transform: где у объекта позиция и как её читать
 
-Строк: 453. Заголовок: `transform.h`.
+Строк: 480. Заголовок: `transform.h`.
 
 Внутри: `read_transform_hierarchy_arrays`, `read_transform_hierarchy_layout`, `read_transform_hierarchy_position`, `resolve_player_native_transform`, `likely_native_pointer`, `evaluate_transform_hierarchy_layout`, `discover_layout_from_native_transforms`, `discover_transform_hierarchy_layout`, `read_entity_position`, `read_entity_pose`, `position_looks_like_world_space`, `evaluate_player_position_offset`, `find_direct_player_position_offset`, `discover_player_position_offset`, `… ещё 1`
 
@@ -278,9 +290,39 @@ Transform. Самотест ограничен по времени (6 с): не 
 
 ### jni/src/app/attach.cpp — Поиск процесса игры и поток привязки
 
-Строк: 196. Заголовок: `app/attach.h`.
+Строк: 299. Заголовок: `app/attach.h`.
 
-Внутри: `TargetPackageA`, `TargetPackageB`, `cmdline_rank`, `pid_cmdline_matches`, `proc_libil2cpp`, `find_game_pid`, `find_unity_pid`, `pid_still_game`, `start_attach_thread`, `stop_attach_thread`
+Внутри: `TargetPackageA`, `TargetPackageB`, `cmdline_rank`, `pid_cmdline_matches`, `proc_libil2cpp`, `find_game_pid`, `find_unity_pid`, `pid_still_game`, `access_confirmed_lost`, `AttachStateName`, `start_attach_thread`, `stop_attach_thread`
+
+Что тут важно: привязка больше не рвётся по одному неудачному чтению. Прежде
+`esp_alive_check()` (одно чтение ELF-заголовка) мог мигнуть на нагрузке, после
+чего вызывался `esp_reset()`, чит замолкал до следующей удачной привязки — со
+стороны это выглядело как «чит сам выключился». Теперь потеря доступа
+подтверждается: переоткрыть дескриптор (`rebind_now`), подождать 150 мс,
+проверить снова — и только потом сбрасывать состояние, записав в журнал фазу
+чтения, errno, счётчики и частоту кадров.
+
+
+### jni/src/app/diag_log.cpp — Журнал здоровья: почему чит «выключился»
+
+Строк: 231. Заголовок: `app/diag_log.h`.
+
+Внутри: `write_locked`, `emit`, `crash_append`, `crash_append_uint`, `crash_append_hex`, `crash_handler`, `diag_init`, `diag_install_crash_handler`, `diag_self_stats`, `diag_enabled`, `diag_path`, `diag_log`
+
+Что тут важно: это не отладочный вывод, а след для разбора живых жалоб («на
+некоторых устройствах чит выключается сам через некоторое время», «ESP мерцает
+после смерти»). Пишется всегда, в `<каталог конфигов>/xvcen_health.log`
+(`/storage/emulated/0/benzhack/xvcen_health.log`), дорос до мегабайта — прошлый
+уходит в `.1`. Формат строки: `секунды тег текст`; теги — `app`, `attach`,
+`health`, `esp`, `touch`, `draw`. События: привязка к процессу (pid, база,
+сборка), потеря доступа к памяти и что ей предшествовало (фаза чтения, errno,
+счётчики), «чтение мигнуло — переоткрыли дескриптор», уход процесса игры,
+перепривязка по сторожу, отказы тача и инъекции, пересборка окна оверлея,
+«падение: сигнал N, адрес» (обработчик сигнала живёт здесь же и пишет в файл
+через write(), без мьютекса и stdio), а раз в 30 с — «пульс»: привязано или нет,
+частота кадров, сколько чтений и отказов, есть ли инъекция, память процесса,
+число открытых дескрипторов, потоков и oom_score_adj. По пульсу видно, течёт ли
+процесс и не собирается ли его выгрузить системный убийца памяти.
 
 
 ### jni/src/app/lifecycle.cpp — Признаки жизни процесса (main_thread_flag, g_frame_done)

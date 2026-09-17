@@ -14,6 +14,7 @@
 #include "esp/player_pose.h"
 #include "esp/transform.h"
 #include "camera.h"
+#include "app/diag_log.h"
 
 // Camera state captured by the last esp_get_boxes() call (used by the aimbot
 // to convert bone positions into yaw/pitch offsets from the crosshair).
@@ -268,9 +269,14 @@ bool optimize_matrix_configuration(uint64_t native_camera, const std::vector<uin
     // с одинаковыми отсчётами раньше запускал поиск смещения заново вместе с
     // ожиданием 0.6 с, и всё это время боксов не было («мерцание на полсекунды»).
     if (samples.size() >= 2 && extent < 0.1F) {
-        if (++g_offset_extent_fail_streak >= 3) {
+        // Во время перезагрузки мира «все игроки в одной точке» — норма: позиции
+        // ещё не дописаны. Приговор смещению тут не выносим, иначе каждый
+        // респавн начинался с перепоиска смещения и ожидания 0.6 с без боксов.
+        if (!world_reloading() && ++g_offset_extent_fail_streak >= 3) {
             g_offset_extent_fail_streak = 0;
             g_player_position_validated = false;
+            diag_log("esp", "позиции игроков сошлись в точку (разброс %.2f м) — поиск смещения заново",
+                     (double)extent);
         }
         return false;
     }

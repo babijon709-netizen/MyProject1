@@ -136,3 +136,5 @@ void esp_mem_frame_begin() { g_mem.frame_begin(); }
 // с тем же pid, а доступ — отобрали. Без неё чит оставался «привязанным» и молча
 // ничего не делал до перезапуска приложения.
 bool esp_alive_check() { return g_mem.verify(); }
+
+bool esp_rebind_memory() { return g_mem.rebind_now(); }

@@ -45,7 +45,7 @@ struct PlayerTrack {
     Vec3   drawn{};
     bool   has_drawn = false;
     double drawn_t = 0.0;
-    int    hold_frames = 0;  // сколько кадров живём без успешного чтения
+    double hold_since = 0.0; // когда началась полоса без успешного чтения (0 = читается)
     Vec3   jump{};           // подозрительный отсчёт, ждущий подтверждения
     bool   has_jump = false;
     int    jump_frames = 0;

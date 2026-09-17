@@ -267,6 +267,20 @@ public:
         return probe_readable();
     }
 
+    // Починить доступ, если он мигнул: закрыть файл, открыть заново и перечитать
+    // пробу. Это первый и самый дешёвый шаг перед тем, как объявить привязку
+    // потерянной (см. app/attach.cpp): перезапуск процесса и отобранный доступ
+    // так не лечатся, а вот дескриптор, ставший негодным (процесс перезапустился
+    // с тем же pid, доступ вернули, страница ушла в zram), — вполне.
+    // true — читать снова можно, рвать привязку не нужно.
+    bool rebind_now() {
+        if (pid_.load() <= 0 || !probe_addr_) return false;
+        close_mem();
+        if (open_mem() && probe_readable()) return true;
+        close_mem();
+        return false;
+    }
+
 #ifdef MEMIO_STATS
     unsigned long long syscalls = 0, hits = 0, frames = 0, block_reads = 0, reopens = 0;
     void reset_stats() { syscalls = hits = frames = block_reads = 0; }

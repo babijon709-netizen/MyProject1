@@ -34,6 +34,14 @@ ImGuiIO& GetIO() {
 }
 } // namespace ImGui
 
+// TouchHelperA.cpp пишет отказы в журнал здоровья (app/diag_log.h). В стенде
+// журнал не нужен: подменяем его пустышками — так же, как ImGui::GetIO() выше.
+// diag_enabled() должен существовать, потому что слой спрашивает его перед
+// формированием строк, а сам модуль журнала к стенду не подключается.
+bool diag_enabled() { return false; }
+
+void diag_log(const char*, const char*, ...) {}
+
 #include "../../jni/src/Android_touch/TouchHelperA.cpp"
 
 // ---------------------------------------------------------------- окружение --

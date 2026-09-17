@@ -61,6 +61,37 @@ Vec3 g_frame_cam_pos{}, g_frame_cam_fwd{}, g_frame_cam_right{}, g_frame_cam_up{}
 // Доступ к камере (esp_camera_angles / esp_local_eye_position) объявлен ниже,
 // сразу за g_frame_cam_*: базис из матрицы вида — третий источник углов и
 // позиции глаза, и он обязан быть объявлен раньше этих функций.
+// Когда камера и позиция игрока были опубликованы в последний раз. Нужно,
+// чтобы отличить «кадр не собрался на один кадр» от «камера пропала совсем»:
+// в первом случае метки и фарм живут на прошлой матрице (см.
+// frame_drop_unpublished), во втором — гаснут, как раньше.
+double g_frame_publish_time = 0.0;
+
+// Когда кэши мира сбрасывались в последний раз (смерть, респавн, смена сцены).
+// В первые мгновения после этого поля игры ещё дописываются: позиции нулевые,
+// состав игроков мигает. По этому времени отключаются все «приговоры» по таким
+// данным — иначе каждый респавн выглядел как «боксы пропали и вернулись».
+double g_world_reload_time = 0.0;
+
+static constexpr double kFrameHoldSeconds = 0.35;
+
+static constexpr double kWorldSettleSeconds = 1.0;
+
+void frame_note_published() { g_frame_publish_time = mono_seconds(); }
+
+void frame_drop_unpublished() {
+    const double now = mono_seconds();
+    if (g_frame_publish_time > 0.0 && (now - g_frame_publish_time) <= kFrameHoldSeconds) return;
+    g_frame_vp_valid = false;
+    g_frame_local_valid = false;
+    g_frame_cam_basis_valid = false;
+}
+
+bool world_reloading() {
+    if (g_world_reload_time <= 0.0) return false;
+    return (mono_seconds() - g_world_reload_time) < kWorldSettleSeconds;
+}
+
 bool farm_cam_source_ok(const Vec3& p) {
     if (!vec3_is_finite(p)) return false;
     if (!g_frame_local_valid) return true;
@@ -156,6 +187,7 @@ bool esp_local_eye_position(float& x, float& y, float& z) {
 int  g_frame_player_count = 0;
 
 int      g_frame_transforms_empty_streak = 0;
+double   g_frame_transforms_empty_since = 0.0;   // с какого времени список пуст (0 = читается)
 
 // Frames in a row esp_get_boxes() gave up before publishing this frame's
 // camera / local position (see the watchdog at the top of it).
@@ -195,6 +227,9 @@ std::atomic<bool> g_want_reattach{false};
 void reset_marker_caches();
 
 void reset_world_caches() {
+    // Время сброса — граница «мир только что сменился»: до её истечения данные
+    // игры считаются недописанными (см. world_reloading).
+    g_world_reload_time = mono_seconds();
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_validated = false;
     g_population_snapshot.clear(); g_world_change_streak = 0;
@@ -222,12 +257,16 @@ void esp_reset() {
     // Прицел мемори-аима хранится адресами чужого процесса: перепривязка или
     // загрузка конфига их обнуляют, поэтому дорожку записи надо подобрать заново.
     esp_mem_aim_reset();
+    // Сеанс начинается заново: держать прошлый кадр нечего и незачем.
+    g_frame_publish_time = 0.0;
+    g_world_reload_time = 0.0;
     g_mem.unbind();
     g_attach_state = ESP_ATTACH_OK;
     g_pid = -1; g_il2cpp_base = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
+    g_frame_transforms_empty_since = 0.0;
     g_frame_publish_fail_streak = 0; g_frame_watchdog_resets = 0;
     g_local_position_fail_streak = 0; g_world_change_streak = 0;
     g_population_snapshot.clear();
@@ -238,6 +277,7 @@ void esp_reset() {
     g_game_controller_class = 0; g_local_player = 0;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_offset = PLAYER_POSITION;
+    reset_player_position_memory();
     g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
     g_player_position_validated = false;
@@ -307,5 +347,8 @@ bool publish_camera_only_frame(float sw, float sh) {
             g_frame_cam_basis_valid = true;
         }
     }
+    // Кадр только с камерой — тоже полноценная публикация: метки и фарм на ней
+    // живут, и «держать прошлый кадр» после неё не нужно.
+    frame_note_published();
     return true;
 }

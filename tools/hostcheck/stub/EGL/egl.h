@@ -28,3 +28,7 @@ static inline EGLContext eglCreateContext(EGLDisplay, EGLConfig, EGLContext, con
 static inline EGLBoolean eglMakeCurrent(EGLDisplay, EGLSurface, EGLSurface, EGLContext) { return 0; }
 static inline EGLBoolean eglSwapBuffers(EGLDisplay, EGLSurface) { return 0; }
 static inline EGLBoolean eglQuerySurface(EGLDisplay, EGLSurface, EGLint, EGLint*) { return 0; }
+#define EGL_SUCCESS 0x3000
+#define EGL_BAD_SURFACE 0x300D
+#define EGL_CONTEXT_LOST 0x300E
+inline EGLint eglGetError() { return EGL_SUCCESS; }
