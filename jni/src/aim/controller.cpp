@@ -49,6 +49,16 @@ void AimReleaseFinger(bool& fingerDown) {
 // actively pulling onto a player.
 bool s_fingerDown = false;
 
+// Ведёт ли цель мемори-аим (запись в память). Отдельный признак, потому что
+// пальца в этом режиме нет вовсе: s_fingerDown остаётся false, и без этой
+// отметки автофарм считал бы камеру свободной и водил бы её своим «глазным»
+// пальцем одновременно с записью в память.
+static bool s_memDriving = false;
+
+bool AimIsDriving() { return s_fingerDown || s_memDriving; }
+
+void AimSetMemoryDriving(bool on) { s_memDriving = on; }
+
 // Запасной град/px — из чувствительности, выставленной в настройках клиента.
 //
 // Игра считает поворот как «накопленный сдвиг касания × m_Sensitivity»

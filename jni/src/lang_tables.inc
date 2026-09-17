@@ -109,7 +109,7 @@ static const LangPair kUiEn[] = {
     {"Умный", "Smart"},
     {"Файл не найден", "File not found"},
     {"Функции", "Features"},
-    {"Через память нельзя — работает тач", "Memory path unavailable — touch is used"},
+    {"Через память нельзя — аим не работает", "Memory path unavailable — aim is off"},
     {"Через память — готово", "Memory path ready"},
     {"Что добывать", "What to farm"},
     {"Шея", "Neck"},

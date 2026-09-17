@@ -99,6 +99,11 @@ struct MarkerEntity {
     uint64_t transform = 0;     // native Transform of the GameObject
     Vec3     position{};
     bool     position_valid = false;
+    // Позицию надо перечитать при первой возможности (ставится, когда мир
+    // сменился): адрес мог быть переиспользован новым миром, и прежняя позиция
+    // держится только как «мост» на время, пока новый список не собран.
+    bool     position_recheck = false;
+    double   stale_since = 0.0; // когда чтения перестали проходить (0 = читается)
     int      pos_cooldown = 0;  // frames until the next position re-read (far animals)
     int      kind = ESP_MARKER_ORE;
     // Fixed labels point into static strings; ground pickups build their own
@@ -360,8 +365,46 @@ static bool rebuild_marker_entities() {
     return true;
 }
 
+// Прочитать позицию маркера, не теряя прошлую из-за одного сбоя чтения.
+//
+// Почему так. Позиция маркера — это цепочка Transform (несколько syscall'ов), и
+// после смерти, когда мир перезагружается, она не читается секундами. Прежний
+// код в этом месте просто не рисовал маркер: пропадали руда, ящики, животные —
+// «ESP мерцает». Держим прошлую позицию до предела (1.5 с, а пока идёт
+// перезагрузка мира — 4 с): вечно держать нельзя (адрес мог достаться новому
+// объекту), но и одного сбоя для пропажи мало.
+static bool refresh_marker_position(MarkerEntity& entity) {
+    Vec3 fresh{};
+    if (marker_world_position(entity.transform, fresh)) {
+        entity.position = fresh;
+        entity.position_valid = true;
+        entity.position_recheck = false;
+        entity.stale_since = 0.0;
+        return true;
+    }
+    if (!entity.position_valid) return false;
+    const double now = mono_seconds();
+    if (entity.stale_since <= 0.0) entity.stale_since = now;
+    const double hold = world_reloading() ? 4.0 : 1.5;
+    if (now - entity.stale_since > hold) {
+        entity.position_valid = false;
+        entity.stale_since = 0.0;
+        return false;
+    }
+    return true;   // рисуем по позиции последнего удачного чтения
+}
+
 void reset_marker_caches() {
-    g_marker_entities.clear();
+    // ВАЖНО: список сущностей здесь НЕ очищается. Раньше очищался — и после
+    // смерти/респавна маркеры (руда, ящики, животные) исчезали с экрана на всё
+    // время нового скана реестра (до трёх секунд и дольше, а пока мир грузился,
+    // скан вообще возвращал пустой список). Теперь прежний список остаётся на
+    // экране как «мост»: позиции перепроверяются при первой возможности, а
+    // готовый новый список подменяет старый разом (см. rebuild_marker_entities).
+    for (MarkerEntity& entity : g_marker_entities) {
+        entity.position_recheck = true;
+        if (entity.stale_since <= 0.0) entity.stale_since = mono_seconds();
+    }
     g_marker_next_scan = 0.0;
     marker_scan_abort();   // незавершённая порция после перезагрузки мира не нужна
     g_marker_class_kind.clear();
@@ -378,7 +421,7 @@ std::vector<EspMarker> esp_get_markers() {
     std::vector<EspMarker> result;
     if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
         !g_markers_loot_enabled && !g_markers_pickup_enabled) {
-        if (!g_marker_entities.empty()) g_marker_entities.clear();
+        if (!g_marker_entities.empty()) g_marker_entities.clear();   // все категории выключены — держать нечего
         g_marker_next_scan = 0.0;
         marker_scan_abort();   // не тащить незавершённую порцию через выключенный ESP
         return result;
@@ -437,8 +480,10 @@ std::vector<EspMarker> esp_get_markers() {
             size_t pos_count = 0, cand_count = 0;
             if (discover_layout_from_native_transforms(seeds, pos_count, cand_count)) {
                 // Re-read every cached position with the fresh layout.
-                for (MarkerEntity& e : g_marker_entities)
-                    e.position_valid = marker_world_position(e.transform, e.position);
+                for (MarkerEntity& e : g_marker_entities) {
+                    e.position_recheck = true;     // раскладка сменилась — читаем заново
+                    refresh_marker_position(e);
+                }
             }
         }
     }
@@ -454,7 +499,7 @@ std::vector<EspMarker> esp_get_markers() {
         // for every animal every frame is the single hottest path here —
         // throttle far ones: within 60 m track every frame, beyond that a
         // few times a second is indistinguishable on screen.
-        bool want_read = !entity.position_valid;
+        bool want_read = !entity.position_valid || entity.position_recheck;
         if (entity.kind == ESP_MARKER_ANIMAL) {
             if (--entity.pos_cooldown <= 0) {
                 want_read = true;
@@ -466,7 +511,7 @@ std::vector<EspMarker> esp_get_markers() {
             }
         }
         if (want_read)
-            entity.position_valid = marker_world_position(entity.transform, entity.position);
+            refresh_marker_position(entity);
         if (!entity.position_valid) continue;
 
         float dx = entity.position.x - g_frame_local_pos.x;

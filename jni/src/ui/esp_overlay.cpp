@@ -13,13 +13,35 @@
 #include "ui/settings.h"
 #include "ui/watermark.h"
 #include "ui/esp_overlay.h"
+#include "esp/esp_time.h"   // mono_seconds: сколько держим прошлый снимок
+#include "esp/frame.h"     // g_player_data_stale: почему кадр пуст (мир грузится)
+#include "app/diag_log.h"
 
 // One remote snapshot per frame, shared by the ESP overlay and the aimbot.
 // Сколько боксов нарисовано в последнем кадре — для сводки в мини-логе.
 static int g_last_box_count = 0;
 
+// Сколько держим прошлый НЕПУСТОЙ снимок, когда новый кадр пришёл пустым.
+//
+// Зачем. Смерть и респавн — это секунды, когда память игры читается вразнобой:
+// список игроков пропадает, позиции не читаются, камера мигает. Раньше каждый
+// такой кадр отдавал пустой список, и ВСЁ, что рисуется по нему (рамки, скелеты,
+// подписи, цель аима), гасло ровно на эти кадры — то самое «ESP мерцает, часто
+// после смерти». Здесь прошлый снимок остаётся на экране, пока не соберётся
+// новый: 0.7 с — это ещё не «игрок ушёл», зато переживает перезагрузку мира.
+static constexpr double kBoxHoldSeconds = 0.7;
+
+// А это окно — для случая «игроки в списке есть, но их данные не читаются»
+// (g_player_data_stale): столько длятся секунды после смерти, пока грузится мир.
+// Держим столько же, сколько держится позиция игрока внутри ESP (см.
+// filter_player_position), чтобы слои не разъезжались.
+static constexpr double kBoxHoldStaleSeconds = 3.0;
+
 const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
     static std::vector<EspBox> s_boxes;
+    static std::vector<EspBox> s_held;    // последний непустой снимок
+    static double s_held_at = 0.0;
+    static bool   s_holding = false;
     static int s_frame = -1;
     int frame = ImGui::GetFrameCount();
     if (frame != s_frame) {
@@ -32,9 +54,54 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_marker_max_distance(g_state.marker_dist);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
+
+        const double now = mono_seconds();
+        if (!s_boxes.empty()) {
+            s_held = s_boxes;
+            s_held_at = now;
+            s_holding = false;
+        } else if (!s_held.empty() &&
+                   now - s_held_at <= (g_player_data_stale ? kBoxHoldStaleSeconds : kBoxHoldSeconds)) {
+            if (!s_holding) {
+                s_holding = true;
+                diag_log("esp", "кадр пуст (данные игроков не читаются: %s) — держу прошлый снимок боксов",
+                         g_player_data_stale ? "да" : "нет");
+            }
+            s_boxes = s_held;
+        } else {
+            s_holding = false;
+            s_held.clear();      // держать больше нечего: игроки ушли
+        }
         g_last_box_count = (int)s_boxes.size();
     }
     return s_boxes;
+}
+
+// Снимок маркеров на кадр — с тем же удержанием прошлого, что и у боксов.
+// Смерть и загрузка мира делают реестр сущностей нечитаемым на секунды, и раньше
+// вместе с боксами пропадали руда, ящики и животные; держим их до 0.7 с, а пока
+// данные игроков не читаются — до 3 с.
+static const std::vector<EspMarker>& FrameMarkers() {
+    static std::vector<EspMarker> s_markers;
+    static std::vector<EspMarker> s_held;
+    static double s_held_at = 0.0;
+    static int s_frame = -1;
+    int frame = ImGui::GetFrameCount();
+    if (frame != s_frame) {
+        s_frame = frame;
+        s_markers = esp_get_markers();   // скан при этом продолжается как обычно
+        const double now = mono_seconds();
+        if (!s_markers.empty()) {
+            s_held = s_markers;
+            s_held_at = now;
+        } else if (!s_held.empty() &&
+                   now - s_held_at <= (g_player_data_stale ? kBoxHoldStaleSeconds : kBoxHoldSeconds)) {
+            s_markers = s_held;
+        } else {
+            s_held.clear();
+        }
+    }
+    return s_markers;
 }
 
 void DrawEspOverlay() {
@@ -308,7 +375,7 @@ void DrawEspOverlay() {
         float rr = 1.f, rg = 1.f, rb = 1.f;
         ImGui::ColorConvertHSVtoRGB(rainbow_hue, 0.85f, 1.0f, rr, rg, rb);
         const ImU32 rainbow_col = IM_COL32((int)(rr * 255.f), (int)(rg * 255.f), (int)(rb * 255.f), 255);
-        for (const EspMarker& marker : esp_get_markers()) {
+        for (const EspMarker& marker : FrameMarkers()) {
             if (!marker.name[0]) continue;
             if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
             ImU32 col = marker.rainbow ? rainbow_col

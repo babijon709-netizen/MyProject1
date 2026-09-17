@@ -115,7 +115,7 @@ UI_EN = {
     'Подбираю способ записи…': 'Finding a write path…',
     'аим пока не трогает камеру': 'the aim steers nothing yet',
     'Через память — готово': 'Memory path ready',
-    'Через память нельзя — работает тач': 'Memory path unavailable — touch is used',
+    'Через память нельзя — аим не работает': 'Memory path unavailable — aim is off',
     'Проверю, когда закроешь меню': 'Will probe once the menu is closed',
     'Сначала включи «Аим»': 'Turn the aim on first',
     'кватернион поворота': 'rotation quaternion',

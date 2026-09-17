@@ -252,7 +252,12 @@ static void UpdateFarmInner(float dt) {
     // зон — тоже пауза. А вот цель читаем всегда: иначе строка статуса в окне
     // автофарма показывала бы «простой» ровно тогда, когда на неё смотрят
     // (само это окно и ставит бота на паузу).
-    const bool driving = !menuBlocked && !s_fingerDown && g_calibMode == 0 && !g_buildPrompt;
+    // Аимбот владеет камерой, пока ведёт игрока — и пальцем, и записью в память
+    // (AimIsDriving, см. aim/controller.h). Без второй части автофарм продолжал
+    // бы водить камеру своим «глазным» пальцем одновременно с мемори-аимом: со
+    // стороны это выглядело как «в режиме «Мемори» аим использует палец»,
+    // а по факту камеру тянули двое в разные стороны.
+    const bool driving = !menuBlocked && !AimIsDriving() && g_calibMode == 0 && !g_buildPrompt;
 
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;

@@ -73,6 +73,10 @@ double g_frame_publish_time = 0.0;
 // данным — иначе каждый респавн выглядел как «боксы пропали и вернулись».
 double g_world_reload_time = 0.0;
 
+int g_world_reload_count = 0;
+
+bool g_player_data_stale = false;
+
 static constexpr double kFrameHoldSeconds = 0.35;
 
 static constexpr double kWorldSettleSeconds = 1.0;
@@ -230,6 +234,7 @@ void reset_world_caches() {
     // Время сброса — граница «мир только что сменился»: до её истечения данные
     // игры считаются недописанными (см. world_reloading).
     g_world_reload_time = mono_seconds();
+    ++g_world_reload_count;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_validated = false;
     g_population_snapshot.clear(); g_world_change_streak = 0;
@@ -267,6 +272,7 @@ void esp_reset() {
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_frame_transforms_empty_since = 0.0;
+    g_player_data_stale = false;
     g_frame_publish_fail_streak = 0; g_frame_watchdog_resets = 0;
     g_local_position_fail_streak = 0; g_world_change_streak = 0;
     g_population_snapshot.clear();

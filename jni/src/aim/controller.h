@@ -33,6 +33,17 @@ float AimFovRadiusPx(float sw, float sh);
 
 void AimReleaseFinger(bool& fingerDown);
 
+// Ведёт ли аим камеру прямо сейчас — пальцем (тач-режим) или записью в память
+// (режим «Мемори»). Автофарм по этому признаку уступает камеру: в «Мемори»
+// пальца нет, и по одному s_fingerDown он не понял бы, что аим тоже тянет
+// прицел, — они тянули бы камеру в разные стороны, а со стороны это выглядело
+// бы как «в режиме памяти работает палец».
+bool AimIsDriving();
+
+// Отметить, что аим ведёт цель записью в память (зовётся из aim/update.cpp
+// каждый такт, где цель взята).
+void AimSetMemoryDriving(bool on);
+
 float AimSensitivityScale(bool& from_game);
 
 float AimSensitivityGain(bool& from_game);

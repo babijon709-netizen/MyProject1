@@ -150,6 +150,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // Alone on the server: no player boxes, but markers and the farm
         // still need this frame's camera + local position.
         g_frame_player_count = 0;   // никого нет — и «пилюля» это показывает
+        g_player_data_stale = false;   // держать нечего: игроков нет
         publish_camera_only_frame(sw, sh);
         return result;
     }
@@ -272,6 +273,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // Камера этого кадра уже прочитана — публикуем её как есть (без
             // повторного чтения и повторного xray/day-тика), иначе вместе с
             // боксами гаснут и метки, и фарм.
+            // Игроки в списке есть, но их позиции в этом кадре не прочитались:
+            // это тот самый момент после смерти/респавна. Рисующий слой держит
+            // прошлый снимок боксов, пока признак стоит (см. g_player_data_stale).
+            g_player_data_stale = true;
             if (matrix_is_finite(vp)) {
                 g_frame_vp = vp; g_frame_vp_valid = true;
                 g_frame_sw = sw; g_frame_sh = sh;
@@ -296,6 +301,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_local_valid = has_local_position;
     g_frame_publish_fail_streak = 0; // this frame is healthy
     g_frame_watchdog_resets = 0;
+    g_player_data_stale = false;     // кадр собран полностью
     frame_note_published();
 
     // Fallback camera basis straight from the view matrix (rows: right, up,
