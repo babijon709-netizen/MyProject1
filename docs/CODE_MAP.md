@@ -88,9 +88,9 @@ sh tools/aim/run_mem.sh        # стенд мемори-аима (настоя�
 
 ### jni/src/esp/aim_mem.cpp — Мемори-аим: поворот прицела записью в память игры
 
-Строк: 999.
+Строк: 1109.
 
-Внутри: `forward_from_angles`, `angles_from_forward`, `wrap180`, `signed_angle_diff`, `quaternion_between`, `quaternion_inverse`, `read_current_angles`, `read_mouse_look_angles`, `write_mouse_look_angles`, `read_look_root_angles`, `read_witness_angles`, `read_measured_angles`, `note_probing_pinned_pair`, `read_mouse_look_floats`, `to_stored_yaw`, `path_apply`, `scan_state_fields`, `find_look_root`, `save_probe_value`, `restore_probe_value`, `probe_path_at`, `probe_finish_unsupported`, `probe_accept`, `probe_begin_candidate`, `probe_apply_current`, `probe_next_candidate`, `probe_undo`, `esp_mem_aim_power_on`, `esp_mem_aim_reset`, `esp_mem_aim_tick`, `esp_mem_aim_state`, `esp_mem_aim_path`, `esp_mem_aim_reason`, `esp_mem_aim_read_angles`, `esp_mem_aim_apply`
+Внутри: `forward_from_angles`, `angles_from_forward`, `wrap180`, `signed_angle_diff`, `quaternion_between`, `quaternion_inverse`, `read_current_angles`, `read_mouse_look_angles`, `pair_read`, `pair_write`, `resolve_current_weapon`, `weapon_pair_spec`, `read_look_root_angles`, `read_witness_angles`, `read_measured_angles`, `note_probing_pair`, `read_mouse_look_floats`, `to_stored_yaw`, `path_apply`, `scan_state_fields`, `find_look_root`, `save_probe_value`, `restore_probe_value`, `probe_path_at`, `probe_finish_unsupported`, `probe_accept`, `probe_begin_candidate`, `probe_apply_current`, `probe_next_candidate`, `probe_undo`, `esp_mem_aim_power_on`, `esp_mem_aim_reset`, `esp_mem_aim_tick`, `esp_mem_aim_state`, `esp_mem_aim_path`, `esp_mem_aim_reason`, `esp_mem_aim_read_angles`, `esp_mem_aim_apply`
 
 Что тут важно: ни одна дорожка записи не «угадывается» — самотест делает
 пробный доворот (yaw 2°, тангаж 1°), ждёт применения и меряет настоящий поворот
@@ -99,14 +99,20 @@ sh tools/aim/run_mem.sh        # стенд мемори-аима (настоя�
 из дампа), кватернион в MouseLook, пара углов (градусы и радианы), поле
 накопленного ввода игры (+0x88/+0x8C), узел прицела в иерархии Transform.
 
-Почему дорожка углов проверяется первой (разбор dump.cs + libil2cpp, RVA
-0x64e312c): Oxide.MouseLook$$ZJo складывает шаг в пару 0x4C/0x50, нормализует
-рыскание и клэмпит тангаж, и только потом строит из этих углов поворот узла
-`m_LookRoot` (0x28) через Quaternion.Euler + Transform.set_localRotation. То есть
-единственная «настоящая» память углов — это 0x4C/0x50, а узел игра перестраивает
-каждый такт: запись в узел — гонка за фазой кадра (в логе устройства это
-«дорожка не подтвердилась (причина 4)»). Смещения 0x4C/0x28 одинаковы в релизе и
-бете (проверено по dump.7z и dump_beta.7z).
+Почему дорожки углов проверяются первыми (разбор dump.cs + libil2cpp): у игры
+есть две пары углов прицела, и обе при деле.
+  * Оружие, FPWeaponBase+0x2D4 (x — тангаж, y — МИНУС рыскание):
+    FPManager$$ZRz (RVA 0x652d3b8) их читает, FPManager$$ZRH (0x652abcc) пишет;
+    оба зовёт Oxide.MouseLook (читает на 0x64e3e90, пишет на 0x64e4118).
+  * MouseLook+0x4C/0x50 (x — рыскание, y — тангаж): туда Oxide.MouseLook$$ZJo
+    (0x64e312c) складывает ввод, нормализует рыскание и клэмпит тангаж, и оттуда
+    же ZJt строит поворот узла `m_LookRoot` (0x28) через Quaternion.Euler +
+    Transform.set_localRotation.
+Значит настоящая память углов — эти пары, а узел игра перестраивает каждый такт:
+запись в узел была гонкой за фазой кадра (в логе устройства это «дорожка не
+подтвердилась (причина 4)»). Порядок проверки: пара оружия (её читает наш такт
+игры), затем пара MouseLook, затем перебор полей, ввод и узел. Смещения 0x4C/0x28
+и 0x2D4 одинаковы в релизе и бете (проверено по dump.7z и dump_beta.7z).
 
 Знак пары (в игре значение = знак × угол) по дампу не виден, поэтому он
 выясняется замером: если пробный доворот повернул прицел ровно в другую сторону,

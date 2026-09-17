@@ -51,6 +51,11 @@ inline constexpr uint64_t MOUSE_LOOK_ACCUM_OFFSET       = 0x88;
 // dump_beta.7z).
 inline constexpr uint64_t MOUSE_LOOK_ANGLES_OFFSET      = 0x4C;
 inline constexpr uint64_t MOUSE_LOOK_LOOK_ROOT_OFFSET   = 0x28;
+// Пара углов в текущем оружии (FPWeaponBase+0x2D4, Vector2: x — тангаж,
+// y — МИНУС рыскание). Игра читает её через FPManager$$ZRz (RVA 0x652d3b8) и
+// пишет через FPManager$$ZRH (RVA 0x652abcc), а зовёт их Oxide.MouseLook: это и
+// есть текущий прицел, который игра применяет к узлу m_LookRoot.
+inline constexpr uint64_t FPHITSAN_LOOK_ANGLES_OFFSET   = 0x2D4;
 
 // ---- Функции, которые видят другие модули ----
 

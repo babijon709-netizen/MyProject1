@@ -123,13 +123,6 @@ static int      s_reason = MEM_REASON_NONE;
 static uint64_t s_mouse_look = 0;     // разрешённый объект MouseLook
 static uint64_t s_look_root = 0;      // managed Transform узла прицела (для TRANSFORM)
 static uint64_t s_state_field = 0;    // адрес поля поворота в MouseLook (для STATE_*)
-static bool     s_pinned_pair_path = false;  // дорожка — углы из дампа (0x4C)
-// Знаки пары углов: в игре значение = sign * угол. Знак выясняется замером на
-// пробе (см. PROBE_VERIFY) — по дампу видно, что пара хранит рыскание и тангаж,
-// но не видно, в какой стороне положительное направление.
-static float    s_pair_yaw_sign = 1.f;
-static float    s_pair_pitch_sign = 1.f;
-static int      s_pair_sign_retry = 0;
 
 // ---- Углы прицела MouseLook: источник и приёмник (проверено по дампу) ------
 //
@@ -207,12 +200,37 @@ enum ProbeStep {
     PROBE_FINISH,       // всё проверено
 };
 
+// Конвенция пары углов: где лежит рыскание, где тангаж и с какими знаками.
+// У пары MouseLook (0x4C) это первый и второй float как есть; у пары оружия
+// (FPWeaponBase+0x2D4) — наоборот: 0x2D4 это тангаж, 0x2D8 это МИНУС рыскание
+// (так пишет FPManager$$ZRH, так читает FPManager$$ZRz).
+// Объявлена до TestCandidate: кандидат на пробу носит её с собой.
+struct AnglePair {
+    uint64_t field = 0;
+    int      yaw_slot = 0;
+    float    yaw_sign = 1.f;
+    int      pitch_slot = 1;
+    float    pitch_sign = 1.f;
+};
+
+// s_pair — подтверждённая пара (ею работаем в READY), s_probe_pair — конвенция
+// проверяемого прямо сейчас кандидата.
+static float     s_pair_yaw_sign = 1.f;
+static float     s_pair_pitch_sign = 1.f;
+static int       s_pair_sign_retry = 0;
+static AnglePair s_pair;
+static AnglePair s_probe_pair;
+
 struct TestCandidate {
     int      path = MEM_PATH_NONE;   // STATE_QUAT / STATE_DEG / STATE_RAD
     uint64_t field = 0;              // адрес поля в MouseLook
+    bool     pair_kind = false;      // дорожка пары углов (см. AnglePair)
+    AnglePair pair;                  // её конвенция
 };
 
-static constexpr int kMaxCandidates = 3;
+// Хватает на две пары из дампа (углы оружия и углы MouseLook) и на кандидатов
+// перебора полей: пары проверяются первыми, и первая подтверждённая побеждает.
+static constexpr int kMaxCandidates = 5;
 static TestCandidate s_candidates[kMaxCandidates];
 static int      s_candidate_count = 0;
 static int      s_candidate_index = 0;
@@ -237,10 +255,20 @@ static float    s_probe_input_units = 0.f;   // сколько единиц вл
 // Углы игры читает блок ниже (он же их и пишет) — здесь только объявление:
 // read_current_angles стоит выше и первым делом спрашивает именно их.
 static bool read_mouse_look_angles(uint64_t mouse_look, float& yaw_deg, float& pitch_deg);
+static bool pair_read(const AnglePair& pair, float& yaw_deg, float& pitch_deg);
+static bool pair_write(const AnglePair& pair, float yaw_deg, float pitch_deg);
 
 static bool read_current_angles(float& yaw_deg, float& pitch_deg) {
-    if (s_state_field && (s_path == MEM_PATH_STATE_QUAT || s_path == MEM_PATH_STATE_DEG ||
-                          s_path == MEM_PATH_STATE_RAD)) {
+    // Подтверждённая пара углов (углы оружия или MouseLook) — раньше всего и
+    // только по своей конвенции: именно из неё игра строит поворот узла, и
+    // именно она равна тому, что увидит игрок. Общая ветка STATE_ ниже читает
+    // пару как «первый float — рыскание», и для пары оружия это была бы чужая
+    // раскладка (там рыскание во втором float и со знаком минус), поэтому при
+    // живой паре общая ветка не применяется вовсе.
+    if (s_pair.field) {
+        if (pair_read(s_pair, yaw_deg, pitch_deg)) return true;
+    } else if (s_state_field && (s_path == MEM_PATH_STATE_QUAT || s_path == MEM_PATH_STATE_DEG ||
+                                 s_path == MEM_PATH_STATE_RAD)) {
         if (s_path == MEM_PATH_STATE_QUAT) {
             Vec4 rotation{};
             if (rd_exact(s_state_field, rotation)) {
@@ -295,34 +323,77 @@ static float to_stored_yaw(float yaw_deg) {
     return wrap180(yaw_deg);
 }
 
-// ---- Углы прицела в MouseLook: чтение, запись, свидетель -------------------
+// Знаки пары углов: в игре значение = sign * угол. Знак выясняется замером на
+// пробе (см. PROBE_VERIFY): по дампу видно, что пара хранит рыскание и тангаж, а
+// вот в какой стороне положительное направление — нет.
 
-// Текущие углы прямо из состояния игры (поле 0x4C). Камеру для этого читать не
-// нужно — именно поэтому дорожка работает и тогда, когда кадр ESP не собрался
+// Прочитать пару по конвенции.
+static bool pair_read(const AnglePair& p, float& yaw_deg, float& pitch_deg) {
+    if (!p.field) return false;
+    float pair[2] = {0.f, 0.f};
+    if (!read_mouse_look_floats(p.field, pair[0], pair[1])) return false;
+    if ((p.yaw_slot | p.pitch_slot) & ~1) return false;
+    if (fabsf(pair[0]) > 100000.f || fabsf(pair[1]) > 100000.f) return false;
+    yaw_deg = wrap180(p.yaw_sign * pair[p.yaw_slot]);
+    pitch_deg = p.pitch_sign * pair[p.pitch_slot];
+    if (fabsf(pitch_deg) > 89.9f) return false;   // тангаж игра держит в своих пределах
+    return std::isfinite(yaw_deg) && std::isfinite(pitch_deg);
+}
+
+// Записать абсолютные углы по конвенции: ровно то, что делает сама игра, когда
+// кладёт в пару итог такта.
+static bool pair_write(const AnglePair& p, float yaw_deg, float pitch_deg) {
+    if (!p.field) return false;
+    if ((p.yaw_slot | p.pitch_slot) & ~1) return false;
+    float pair[2] = {0.f, 0.f};
+    if (!read_mouse_look_floats(p.field, pair[0], pair[1])) return false;
+    const float stored_yaw = to_stored_yaw(p.yaw_sign * yaw_deg);
+    const float stored_pitch = p.pitch_sign * pitch_deg;
+    if (!std::isfinite(stored_yaw) || !std::isfinite(stored_pitch)) return false;
+    pair[p.yaw_slot] = stored_yaw;
+    pair[p.pitch_slot] = stored_pitch;
+    if (!wr_buf(p.field, &pair[0], sizeof(float))) return false;
+    return wr_buf(p.field + sizeof(float), &pair[1], sizeof(float));
+}
+
+// Текущие углы из пары углов MouseLook (0x4C). Камеру для этого читать не нужно
+// — именно поэтому дорожка работает и тогда, когда кадр ESP не собрался
 // («мемори-аим: не находит поворот камеры» в логе устройства случалось ровно в
 // те секунды, когда камера не читалась).
 static bool read_mouse_look_angles(uint64_t mouse_look, float& yaw_deg, float& pitch_deg) {
     if (!mouse_look) return false;
-    float pair[2] = {0.f, 0.f};
-    const uint64_t field = mouse_look + MOUSE_LOOK_ANGLES_OFFSET;
-    if (!read_mouse_look_floats(field, pair[0], pair[1])) return false;
-    if (fabsf(pair[0]) > 100000.f || fabsf(pair[1]) > 89.9f) return false;  // тангаж игра держит в своих пределах
-    yaw_deg = wrap180(s_pair_yaw_sign * pair[0]);
-    pitch_deg = s_pair_pitch_sign * pair[1];
-    return std::isfinite(yaw_deg) && std::isfinite(pitch_deg);
+    AnglePair p;
+    p.field = mouse_look + MOUSE_LOOK_ANGLES_OFFSET;
+    p.yaw_sign = s_pair_yaw_sign;
+    p.pitch_sign = s_pair_pitch_sign;
+    return pair_read(p, yaw_deg, pitch_deg);
 }
 
-// Записать абсолютные углы в ту же пару и с теми же знаками — это то же, что
-// делает Oxide.MouseLook$$ZJo, складывая туда шаг от ввода: пара и есть
-// «настоящие» углы прицела, из которых игра строит поворот узла (0x64e3408).
-static bool write_mouse_look_angles(uint64_t mouse_look, float yaw_deg, float pitch_deg) {
-    if (!mouse_look) return false;
-    const uint64_t field = mouse_look + MOUSE_LOOK_ANGLES_OFFSET;
-    const float stored_yaw = to_stored_yaw(s_pair_yaw_sign * yaw_deg);
-    const float stored_pitch = s_pair_pitch_sign * pitch_deg;
-    if (!std::isfinite(stored_yaw) || !std::isfinite(stored_pitch)) return false;
-    if (!wr_buf(field, &stored_yaw, sizeof(float))) return false;
-    return wr_buf(field + sizeof(float), &stored_pitch, sizeof(float));
+// Текущее оружие локального игрока: PlayerManager (0x90) -> FPManager, у него
+// 0x50 — текущий FPObject (FPHitscan/FPWeaponBase). Это тот же путь, которым
+// ходит сама игра: Oxide.MouseLook$$ZJt забирает углы оружия через
+// PlayerManager+0x90 (RVA 0x64e3e80) и кладёт обратно вызовом FPManager$$ZRH.
+static uint64_t resolve_current_weapon() {
+    const uint64_t local = resolve_local_player();
+    if (!local) return 0;
+    const uint64_t fp_manager = rd_ptr(local + PLAYER_FP_MANAGER);
+    if (!fp_manager) return 0;
+    uint64_t weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_OBJECT);
+    if (!weapon) weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_WEAPON);
+    return weapon;
+}
+
+// Конвенция пары углов оружия из дампа: FPWeaponBase+0x2D4 (x — тангаж,
+// y — минус рыскание). Проверено дизассемблером релиза:
+//   FPManager$$ZRH (0x652abcc): [weapon+0x2D4] = s1, [weapon+0x2D8] = -s0;
+//   FPManager$$ZRz (0x652d3b8): s0 = -[weapon+0x2D8], s1 = [weapon+0x2D4];
+//   оба зовёт Oxide.MouseLook (читает на 0x64e3e90, пишет на 0x64e4118).
+static bool weapon_pair_spec(uint64_t weapon, AnglePair& p) {
+    if (!weapon) return false;
+    p.field = weapon + FPHITSAN_LOOK_ANGLES_OFFSET;
+    p.yaw_slot = 1; p.yaw_sign = -s_pair_yaw_sign;
+    p.pitch_slot = 0; p.pitch_sign = s_pair_pitch_sign;
+    return true;
 }
 
 // Свидетель: направление, по которому видно, что игра ПРИМЕНИЛА запись. Камера
@@ -348,12 +419,15 @@ static bool read_witness_angles(float& yaw_deg, float& pitch_deg) {
     return read_look_root_angles(s_mouse_look, yaw_deg, pitch_deg);
 }
 
-// Идёт ли проверка дорожки углов из дампа (0x4C): от этого зависит, кого
-// спрашивать свидетелем — см. read_measured_angles.
-static void note_probing_pinned_pair() {
-    s_pinned_pair_path = s_candidate_index < s_candidate_count &&
-                         s_candidates[s_candidate_index].path == MEM_PATH_STATE_DEG &&
-                         s_candidates[s_candidate_index].field == s_mouse_look + MOUSE_LOOK_ANGLES_OFFSET;
+// Конвенция проверяемого сейчас кандидата. Пусто — проверяем не пару (поле,
+// ввод или узел). Идёт ли проверка пары углов, важно знать и свидетелю
+// (см. read_measured_angles), и правке знаков (см. PROBE_VERIFY).
+static void note_probing_pair() {
+    s_probe_pair = {};
+    if (s_candidate_index >= s_candidate_count) return;
+    const TestCandidate& candidate = s_candidates[s_candidate_index];
+    if (candidate.path != MEM_PATH_STATE_DEG || !candidate.pair_kind) return;
+    s_probe_pair = candidate.pair;
 }
 
 // Углы для ЗАМЕРА пробного доворота. Первым — свидетель (камера, иначе узел
@@ -370,16 +444,18 @@ static bool read_measured_angles(float& yaw_deg, float& pitch_deg) {
     // ровно так, как она сама его строит из этих углов, а камера при
     // прицеливании подмешивается к оружию и повернулась бы меньше записанного —
     // пробный доворот забраковался бы на ровном месте.
-    if (s_pinned_pair_path && read_look_root_angles(s_mouse_look, yaw_deg, pitch_deg)) return true;
+    if (s_probe_pair.field && read_look_root_angles(s_mouse_look, yaw_deg, pitch_deg)) return true;
     if (read_witness_angles(yaw_deg, pitch_deg)) return true;
     return read_current_angles(yaw_deg, pitch_deg);
 }
 
 static bool path_apply(int path, float yaw_deg, float pitch_deg) {
     if (!s_mouse_look) return false;
-    if (path == MEM_PATH_STATE_DEG &&
-        s_state_field == s_mouse_look + MOUSE_LOOK_ANGLES_OFFSET)
-        return write_mouse_look_angles(s_mouse_look, yaw_deg, pitch_deg);
+    // Дорожка пары углов (MouseLook 0x4C или оружие 0x2D4): пишем по той же
+    // конвенции, по которой читаем, — тогда и обратная связь, и запись смотрят
+    // на одно и то же поле.
+    if (path == MEM_PATH_STATE_DEG && s_pair.field)
+        return pair_write(s_pair, yaw_deg, pitch_deg);
     if (path == MEM_PATH_STATE_QUAT) {
         Vec4 rotation{};
         if (!s_state_field || !rd_exact(s_state_field, rotation)) return false;
@@ -616,6 +692,7 @@ static void probe_begin_candidate() {
     if (s_candidate_index >= s_candidate_count) return;   // ввод или узел прицела
     const TestCandidate& candidate = s_candidates[s_candidate_index];
     s_state_field = candidate.field;
+    s_probe_pair = candidate.pair_kind ? candidate.pair : AnglePair{};
 
     // Ветка для yaw: смотрим, в каком диапазоне поле держит угол.
     if (candidate.path == MEM_PATH_STATE_DEG) {
@@ -636,6 +713,8 @@ static bool probe_apply_current() {
     const float target_pitch = s_probe_pitch_before + kProbePitchDeg;
     s_probe_expected_yaw = kProbeYawDeg;
     s_probe_expected_pitch = kProbePitchDeg;
+    if (path == MEM_PATH_STATE_DEG && s_probe_pair.field)
+        return pair_write(s_probe_pair, target_yaw, target_pitch);
     if (path == MEM_PATH_INPUT) {
         // Ввод меряется в единицах поля: ожидаемый доворот заранее неизвестен
         // (град/единицу выучиваем по этому же замеру), поэтому пишем известное
@@ -718,7 +797,8 @@ void esp_mem_aim_reset() {
     s_mouse_look = 0;
     s_look_root = 0;
     s_state_field = 0;
-    s_pinned_pair_path = false;
+    s_pair = {};
+    s_probe_pair = {};
     s_pair_yaw_sign = 1.f;
     s_pair_pitch_sign = 1.f;
     s_pair_sign_retry = 0;
@@ -814,32 +894,56 @@ void esp_mem_aim_tick(float dt) {
             // готовое значение (см. разбор в шапке блока). Смещение взято из дампа
             // и одинаково в релизе и бете, но подтверждаем его значением: в поле
             // обязаны лежать текущие углы прицела.
-            float pair_yaw = 0.f, pair_pitch = 0.f;
-            if (read_mouse_look_floats(s_mouse_look + MOUSE_LOOK_ANGLES_OFFSET, pair_yaw, pair_pitch) &&
-                std::isfinite(pair_yaw) && std::isfinite(pair_pitch) &&
-                fabsf(pair_yaw) <= 100000.f && fabsf(pair_pitch) <= 89.9f) {
-                // Значение пары сверяем с углами прицела только для журнала:
-                // совпасть оно может и не совпасть (у пары своё начало отсчёта и
-                // знаки), но поле проверено дампом, а проверять дорожку будет
-                // замер — как и любую другую. Раньше требовалось совпадение в
-                // 3°, и дорожка отбрасывалась ещё до пробы.
-                const bool looks_like_aim =
-                    fabsf(signed_angle_diff(s_pair_yaw_sign * pair_yaw, yaw_now)) < 3.0f &&
-                    fabsf(s_pair_pitch_sign * pair_pitch - pitch_now) < 3.0f;
+            // Пары углов из дампа — первыми двумя дорожками. Оружие впереди:
+            // именно его пару читает наш такт игры (FPManager$$ZRz), а MouseLook
+            // 0x4C — вторая память тех же углов. Значение сверяем с углами
+            // прицела только для журнала: у пары своё начало отсчёта и знаки, а
+            // проверять дорожку будет замер. Раньше требовалось совпадение в 3°,
+            // и верная дорожка отбрасывалась ещё до пробы.
+            // kind: 0 — пара углов оружия, 1 — пара углов MouseLook. Числа, а не
+            // слова: строки в журнале — обычные литералы, их пришлось бы переводить
+            // в таблицах меню.
+            auto push_pair_candidate = [&](const AnglePair& spec, int kind) {
+                if (!spec.field) return;
+                float pair_yaw = 0.f, pair_pitch = 0.f;
+                if (!pair_read(spec, pair_yaw, pair_pitch)) {
+                    diag_log("aim", "мемори-режим: пара углов (вид %d, поле %#llx) не читается — пропускаю",
+                             kind, (unsigned long long)spec.field);
+                    return;
+                }
                 for (int i = 0; i < s_candidate_count; ++i) {
-                    if (s_candidates[i].field != s_mouse_look + MOUSE_LOOK_ANGLES_OFFSET) continue;
+                    if (s_candidates[i].field != spec.field) continue;
                     for (int k = i; k + 1 < s_candidate_count; ++k) s_candidates[k] = s_candidates[k + 1];
                     --s_candidate_count;
                     break;
                 }
                 if (s_candidate_count >= kMaxCandidates) --s_candidate_count;
                 for (int i = s_candidate_count; i > 0; --i) s_candidates[i] = s_candidates[i - 1];
-                s_candidates[0] = {MEM_PATH_STATE_DEG, s_mouse_look + MOUSE_LOOK_ANGLES_OFFSET};
+                TestCandidate candidate;
+                candidate.path = MEM_PATH_STATE_DEG;
+                candidate.field = spec.field;
+                candidate.pair_kind = true;
+                candidate.pair = spec;
+                s_candidates[0] = candidate;
                 ++s_candidate_count;
-                if (!looks_like_aim)
-                    diag_log("aim", "мемори-режим: углы игры (%0.1f, %0.1f) не совпали с углами прицела (%0.1f, %0.1f) — проверяю дорожку замером",
-                             (double)(s_pair_yaw_sign * pair_yaw), (double)(s_pair_pitch_sign * pair_pitch),
-                             (double)yaw_now, (double)pitch_now);
+                const bool looks_like_aim =
+                    fabsf(signed_angle_diff(pair_yaw, yaw_now)) < 3.0f &&
+                    fabsf(pair_pitch - pitch_now) < 3.0f;
+                diag_log("aim", "мемори-режим: пара углов (вид %d) — %0.1f, %0.1f; углы прицела %0.1f, %0.1f; совпали: %d",
+                         kind, (double)pair_yaw, (double)pair_pitch, (double)yaw_now, (double)pitch_now,
+                         looks_like_aim ? 1 : 0);
+            };
+            {
+                AnglePair weapon_pair;
+                if (weapon_pair_spec(resolve_current_weapon(), weapon_pair))
+                    push_pair_candidate(weapon_pair, 0);
+                AnglePair look_pair;
+                if (s_mouse_look) {
+                    look_pair.field = s_mouse_look + MOUSE_LOOK_ANGLES_OFFSET;
+                    look_pair.yaw_sign = s_pair_yaw_sign;
+                    look_pair.pitch_sign = s_pair_pitch_sign;
+                    push_pair_candidate(look_pair, 1);
+                }
             }
             s_look_root = find_look_root(s_mouse_look, aim_forward);
             s_probe_yaw_before = yaw_now;
@@ -865,7 +969,7 @@ void esp_mem_aim_tick(float dt) {
         }
         case PROBE_VERIFY: {
             const int path = probe_path_at(s_candidate_index);
-            note_probing_pinned_pair();
+            note_probing_pair();
             float verify_yaw = 0.f, verify_pitch = 0.f;
             if (!read_measured_angles(verify_yaw, verify_pitch)) {
                 s_reason = MEM_REASON_NO_ANGLES; s_probe_step = PROBE_FIND; return;
@@ -896,7 +1000,7 @@ void esp_mem_aim_tick(float dt) {
                 // Знак пары мог оказаться обратным: тогда камера повернулась ровно
                 // в другую сторону. Это не «дорожка не годится», а неизвестный
                 // знак — переворачиваем и меряем снова (не больше двух раз).
-                if (s_pinned_pair_path && s_pair_sign_retry < 2) {
+                if (s_probe_pair.field && s_pair_sign_retry < 2) {
                     const bool yaw_flip = measured_yaw < 0.f &&
                         fabsf(fabsf(measured_yaw) - fabsf(s_probe_expected_yaw)) < kProbeToleranceDeg;
                     const bool pitch_flip = measured_pitch < 0.f &&
@@ -926,7 +1030,7 @@ void esp_mem_aim_tick(float dt) {
         case PROBE_SETTLE: {
             if (--s_probe_frames > 0) return;
             const int path = probe_path_at(s_candidate_index);
-            note_probing_pinned_pair();
+            note_probing_pair();
             float settle_yaw = 0.f, settle_pitch = 0.f;
             if (!read_measured_angles(settle_yaw, settle_pitch)) {
                 s_reason = MEM_REASON_NO_ANGLES; s_probe_step = PROBE_FIND; return;
@@ -937,8 +1041,13 @@ void esp_mem_aim_tick(float dt) {
             // обнуляет, уводило бы камеру всё дальше — такая дорожка не годится.
             const float extra_yaw = fabsf(signed_angle_diff(yaw_now, s_probe_yaw_before));
             const float extra_pitch = fabsf(pitch_now - s_probe_pitch_before);
-            const float limit_yaw = (path == MEM_PATH_INPUT ? 6.f : fabsf(s_probe_expected_yaw) + kProbeRunawayDeg);
-            const float limit_pitch = (path == MEM_PATH_INPUT ? 4.f : fabsf(s_probe_expected_pitch) + kProbeRunawayDeg);
+            // Паре углов даём запас побольше: в неё пишет и сама игра, тем же
+            // тактом добавляя ввод игрока.
+            const bool pair_path = (path == MEM_PATH_STATE_DEG && s_probe_pair.field);
+            const float limit_yaw = (path == MEM_PATH_INPUT ? 6.f :
+                                     fabsf(s_probe_expected_yaw) + (pair_path ? 2.f : kProbeRunawayDeg));
+            const float limit_pitch = (path == MEM_PATH_INPUT ? 4.f :
+                                       fabsf(s_probe_expected_pitch) + (pair_path ? 2.f : kProbeRunawayDeg));
             if (extra_yaw > limit_yaw || extra_pitch > limit_pitch) {
                 probe_undo();
                 probe_next_candidate();
@@ -948,10 +1057,16 @@ void esp_mem_aim_tick(float dt) {
             const bool state_path = (path == MEM_PATH_STATE_QUAT || path == MEM_PATH_STATE_DEG ||
                                      path == MEM_PATH_STATE_RAD);
             s_state_field = state_path ? s_candidates[s_candidate_index].field : 0;
+            // Подтверждённую пару запоминаем целиком: ею и читаем текущее, и
+            // пишем — по той же конвенции, что проверена замером.
+            s_pair = (state_path && s_probe_pair.field) ? s_probe_pair : AnglePair{};
             s_had_success = true;   // игра приняла нашу запись: дорожка реальна
-            if (path == MEM_PATH_STATE_DEG && s_state_field == s_mouse_look + MOUSE_LOOK_ANGLES_OFFSET)
-                diag_log("aim", "мемори-режим: углы прицела игры подтверждены (MouseLook +%#x, доворот %.1f° по рысканию за %.1f с)",
-                         (unsigned)MOUSE_LOOK_ANGLES_OFFSET, (double)extra_yaw, (double)s_probe_elapsed);
+            if (s_probe_pair.field)
+                diag_log("aim", "мемори-режим: дорожка углов прицела подтверждена (поле %#llx, рыскание слот %d знак %d, тангаж слот %d знак %d, доворот %.1f° за %.1f с, попыток со сменой знака %d)",
+                         (unsigned long long)s_probe_pair.field, s_probe_pair.yaw_slot,
+                         s_probe_pair.yaw_sign < 0.f ? -1 : 1, s_probe_pair.pitch_slot,
+                         s_probe_pair.pitch_sign < 0.f ? -1 : 1, (double)extra_yaw,
+                         (double)s_probe_elapsed, s_pair_sign_retry);
             // У STATE_* углы читаются из того же поля — ветка yaw уже запомнена
             // при заходе на дорожку (см. probe_begin_candidate).
             probe_accept(path);
