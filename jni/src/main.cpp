@@ -13,6 +13,7 @@
 #include "config.h"
 #include "logfile.h"
 #include "theme.h"
+#include "silent_patch.h"       // патч кода игры: снять перед выходом
 #include "app_state.h"
 #include <atomic>
 #include <chrono>
@@ -107,6 +108,9 @@ int main(int argc, char* argv[]) {
     }
     LogClose();
     while (!g_frame_done.load()) {}
+    // Код игры возвращаем ДО отвязки: пока патч висит, сеттер оси прыгает в
+    // нашу страницу, а мы её сейчас освободим.
+    SilentPatchRestore();
     stop_attach_thread();
     process_detach();
     Blur::Free();

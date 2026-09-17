@@ -2,6 +2,7 @@
 #include "logfile.h"
 #include "main.h"                // displayInfo, native_window_screen_*
 #include "game.h"
+#include "silent_patch.h"     // перехват сеттера оси в коде игры
 #include "Android_touch/TouchHelperA.h"
 #include "aim_learn.h"           // оценка град/px по реакции прицела
 #include "app_state.h"
@@ -852,6 +853,12 @@ static constexpr float kMemDegCapKnown = 12.0f;
 // Порог «камера ответила», градусы: меньше этого — шум чтения позы, а не
 // поворот. Им же отмеряем «наш ввод до камеры не дошёл».
 static constexpr float kMemCamMoveEps = 0.02f;
+// Рейдж-режим «памяти»: за один такт гасим весь остаток, поэтому предел шага
+// один и большой — иначе камера не успевала бы за целью, бегущей через прицел.
+static constexpr float kRageDegCap   = 90.f;
+// При перескоке через цель шаг режется до этой доли (было 0.45 — для плавного
+// подплывания пальцем; записью в накопитель качается слабее).
+static constexpr float kRageFlipDamp = 0.85f;
 // Меньше этого заказа не было — и поворот камеры нашим не считаем.
 static constexpr float kMemPendEps = 0.05f;
 
@@ -958,29 +965,26 @@ static void UpdateAimMemory(float dt) {
     }
 
     // ---- контроллер --------------------------------------------------------
-    // Тот же, что у пальца: камера отвечает не в этом такте, а через кадр игры,
-    // поэтому устойчивая доля ошибки за такт — половина.
+    // РЕЙДЖ. Пальцем камера «подплывает» к цели: ввод одного кадра — это
+    // сдвиг, который игра превращает в поворот по своей кривой, поэтому там
+    // берут долю остатка (иначе качели). Запись в накопитель другая: мы
+    // кладём УГОЛ, и игра применяет его в своём следующем кадре целиком.
+    // Значит можно гасить весь остаток за один такт — камера магнитится к
+    // голове, а не догоняет её. Настройка силы здесь только отмеряет, на
+    // сколько градусов за такт хватает духу (см. kRageDegCap).
     float sm = g_state.gun_str;
     if (!(sm >= 1.f)) sm = 1.f;
     if (sm > 10.f) sm = 10.f;
-    float frac = 0.25f + (sm - 1.f) / 9.f * 0.75f;
-    float k = 1.f - powf(1.f - frac, dt * 60.f);
-    const float kStable = 0.5f;
-    const float fracMid = 0.25f + (5.f - 1.f) / 9.f * 0.75f;
-    if (k > kStable) k = kStable;
-    if (frac < fracMid) k *= frac / fracMid;
+    float k = 1.f;                        // весь остаток за такт
     if (k > 1.f) k = 1.f;
     if (k < 0.05f) k = 0.05f;
 
     const float errYaw = best.yaw, errPitch = best.pitch;
 
-    // Мёртвая зона: ~3 см на дистанции цели, но не уже шума чтения кости.
-    float deadBase = degPerPx * 1.5f;
-    if (best.world_dist > 1.f && std::isfinite(best.world_dist)) {
-        float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
-        if (d < deadBase) deadBase = d;
-    }
-    if (deadBase < 0.05f) deadBase = 0.05f;
+    // Мёртвая зона — только чтобы не долбить память из-за дрожания чтения
+    // кости: в рейдже цель держится на ней постоянно, и 3 см на дистанции
+    // (как у пальца) означали бы, что голова всё время «уже в прицеле».
+    float deadBase = 0.05f;
     if (fabsf(errYaw) < deadBase && fabsf(errPitch) < deadBase) return;
 
     // Гаситель «качелей»: остаток перескочил через ноль — режем шаг, иначе
@@ -989,8 +993,10 @@ static void UpdateAimMemory(float dt) {
                          fabsf(errYaw) > fabsf(s_prevCtlYaw) * 0.35f;
     const bool flipPitch = s_haveCtlErr && s_prevCtlPitch * errPitch < 0.f &&
                            fabsf(errPitch) > fabsf(s_prevCtlPitch) * 0.35f;
+    // При перескоке через цель шаг режется, но мягко: в рейдже скорость важнее
+    // плавности, а раскачивает запись в накопитель слабее, чем палец.
     if (flipYaw || flipPitch) {
-        s_flipDamp = 0.45f;
+        s_flipDamp = kRageFlipDamp;
     } else if (s_flipDamp < 1.f) {
         s_flipDamp += (1.f - s_flipDamp) * (dt * 2.5f);
         if (s_flipDamp > 1.f) s_flipDamp = 1.f;
@@ -1001,8 +1007,9 @@ static void UpdateAimMemory(float dt) {
     float stepYaw = errYaw * k, stepPitch = errPitch * k;
     if (fabsf(stepYaw) > fabsf(errYaw)) stepYaw = errYaw;
     if (fabsf(stepPitch) > fabsf(errPitch)) stepPitch = errPitch;
-    // Пока запись не подтверждена откликом камеры, идём мелко.
-    const float degCap = s_memDiag.responded ? kMemDegCapKnown : kMemDegCapFirst;
+    // Пока запись не подтверждена откликом камеры, идём мелко: если камера
+    // молчит, большой шаг только закрутит её в сторону при первом же ответе.
+    const float degCap = s_memDiag.responded ? kRageDegCap : kMemDegCapFirst;
     if (stepYaw >  degCap) stepYaw =  degCap;
     if (stepYaw < -degCap) stepYaw = -degCap;
     if (stepPitch >  degCap) stepPitch =  degCap;
@@ -1089,8 +1096,15 @@ static void UpdateAimSilent(float dt) {
     static bool  s_haveWritten = false;
     static float s_noAxisTime = 0.f;
     static bool  s_toasted = false;
+    static bool  s_patched = false;    // ось ведёт патч кода, а не записи извне
 
     float sw = 0.f, sh = 0.f;
+    // Перехват сеттера оси: ставим один раз, как только узнали адрес библиотеки.
+    // Когда он стоит, ЛЮБАЯ запись оси игрой пишет нашу ось (см. silent_patch.cpp),
+    // и добой серией записей в конце кадра больше не нужен.
+    if (!SilentPatchInstalled()) SilentPatchInstall(Il2CppBase());
+    s_patched = SilentPatchInstalled();
+
     if (!AimBegin(dt, sw, sh)) {
         // Ось возвращается игре: писатель-доминатор выключается, иначе он
         // держал бы чужое направление и после выключения аима.
@@ -1098,6 +1112,7 @@ static void UpdateAimSilent(float dt) {
         s_devYaw = s_devPitch = 0.f;
         s_memDiag = AimMemDiag{};
         s_noAxisTime = 0.f; s_toasted = false;
+        SilentPatchSet(false, 0.f, 0.f, 0.f);
         return;
     }
 
@@ -1107,6 +1122,7 @@ static void UpdateAimSilent(float dt) {
         s_haveWritten = false;
         s_devYaw = s_devPitch = 0.f;
         s_memDiag.axis = false;
+        SilentPatchSet(false, 0.f, 0.f, 0.f);
         s_noAxisTime += dt;
         if (s_noAxisTime > 1.5f && !s_toasted) {
             s_toasted = true;
@@ -1123,6 +1139,7 @@ static void UpdateAimSilent(float dt) {
         // Цели нет — ось отдаём игре: сейчас же, а не «когда-нибудь».
         pick.reset(); s_haveWritten = false;
         s_devYaw = s_devPitch = 0.f;
+        SilentPatchSet(false, 0.f, 0.f, 0.f);
         return;
     }
 
@@ -1131,6 +1148,18 @@ static void UpdateAimSilent(float dt) {
     if (horiz < 1e-4f) return;             // смотрим вертикально: рысканье не определено
     float axisYaw = atan2f(dx, dz) * rad2deg;
     float axisPitch = atan2f(dy, horiz) * rad2deg;
+
+    // Поза камеры. Пока перехват стоит, игра не кладёт в ось forward камеры
+    // (мы подменяем каждую её запись), поэтому «куда смотрит игрок» можно
+    // узнать только из самой камеры — из неё же считается и точка прицела.
+    float camYaw = 0.f, camPitch = 0.f;
+    const bool haveCam = esp_camera_pose_angles(camYaw, camPitch);
+    if (s_patched && !haveCam) {
+        // Камеру не читаем: с патчем ось уехала бы от игрока без всякого
+        // предела. Выключаем перехват — сайлент пойдёт записями, как раньше.
+        SilentPatchSet(false, 0.f, 0.f, 0.f);
+        s_patched = false;
+    }
 
     // Игра обновила ось (или мы читаем свою прошлую запись)? Сравниваем с тем,
     // что писали: разошлось — значит игра положила свою, и отклонение наших
@@ -1151,14 +1180,39 @@ static void UpdateAimSilent(float dt) {
     // ось на неё незачем — выстрел всё равно туда же.
     float deadBase = degPerPx * 1.5f;
     if (deadBase < 0.05f) deadBase = 0.05f;
-    if (fabsf(stepYaw) < deadBase && fabsf(stepPitch) < deadBase) return;
+    if (fabsf(stepYaw) < deadBase && fabsf(stepPitch) < deadBase) {
+        // Ось и так на цели. С перехватом отклонение всё равно пересчитаем от
+        // камеры: иначе в диагностике останется вчерашнее значение, а игрок
+        // с тех пор мог повернуть.
+        if (s_patched && haveCam) {
+            s_devYaw = WrapDeg180(axisYaw - camYaw);
+            s_devPitch = axisPitch - camPitch;
+            s_memDiag.dev = fabsf(s_devYaw) > fabsf(s_devPitch)
+                                ? fabsf(s_devYaw) : fabsf(s_devPitch);
+        }
+        return;
+    }
 
-    // Зажим накопленного отклонения: дальше предела ось не уводим.
-    if (s_devYaw + stepYaw >  kSilentMaxDev) stepYaw =  kSilentMaxDev - s_devYaw;
-    if (s_devYaw + stepYaw < -kSilentMaxDev) stepYaw = -kSilentMaxDev - s_devYaw;
-    if (s_devPitch + stepPitch >  kSilentMaxPitch) stepPitch =  kSilentMaxPitch - s_devPitch;
-    if (s_devPitch + stepPitch < -kSilentMaxPitch) stepPitch = -kSilentMaxPitch - s_devPitch;
-    s_devYaw += stepYaw; s_devPitch += stepPitch;
+    // Зажим отклонения: дальше предела ось не уводим.
+    if (s_patched && haveCam) {
+        // С перехватом ось выстрела — это наша же прошлая запись: отклонение
+        // от камеры по ней не измерить, оно станет копиться, и ось встанет
+        // клином на пределе. Считаем предел от настоящей позы камеры.
+        const float devY = WrapDeg180(axisYaw + stepYaw - camYaw);
+        if (devY >  kSilentMaxDev) stepYaw = WrapDeg180(camYaw + kSilentMaxDev - axisYaw);
+        if (devY < -kSilentMaxDev) stepYaw = WrapDeg180(camYaw - kSilentMaxDev - axisYaw);
+        const float devP = axisPitch + stepPitch - camPitch;
+        if (devP >  kSilentMaxPitch) stepPitch = camPitch + kSilentMaxPitch - axisPitch;
+        if (devP < -kSilentMaxPitch) stepPitch = camPitch - kSilentMaxPitch - axisPitch;
+        s_devYaw = WrapDeg180(axisYaw + stepYaw - camYaw);
+        s_devPitch = axisPitch + stepPitch - camPitch;
+    } else {
+        if (s_devYaw + stepYaw >  kSilentMaxDev) stepYaw =  kSilentMaxDev - s_devYaw;
+        if (s_devYaw + stepYaw < -kSilentMaxDev) stepYaw = -kSilentMaxDev - s_devYaw;
+        if (s_devPitch + stepPitch >  kSilentMaxPitch) stepPitch =  kSilentMaxPitch - s_devPitch;
+        if (s_devPitch + stepPitch < -kSilentMaxPitch) stepPitch = -kSilentMaxPitch - s_devPitch;
+        s_devYaw += stepYaw; s_devPitch += stepPitch;
+    }
 
     const float newYaw = axisYaw + stepYaw;
     const float newPitchDeg = axisPitch + stepPitch;
@@ -1170,6 +1224,10 @@ static void UpdateAimSilent(float dt) {
         return;
     }
     ++s_memDiag.writes;
+    if (s_patched) {
+        // Сеттер подменён: он сам положит этот вектор при любой записи оси игрой.
+        SilentPatchSet(true, cpCos * sinf(cy), sinf(cp), cpCos * cosf(cy));
+    }
     s_writtenYaw = newYaw; s_writtenPitch = newPitchDeg; s_haveWritten = true;
     s_memDiag.dev = fabsf(s_devYaw) > fabsf(s_devPitch) ? fabsf(s_devYaw) : fabsf(s_devPitch);
     // Выиграли ли гонку: ось до записи — это наше вчерашнее значение или игра
@@ -1187,18 +1245,20 @@ static void UpdateAimSilent(float dt) {
             static float s_lastShot = -1.f;
             const bool fired = haveShot && (s_lastShot < 0.f || shot != s_lastShot);
             s_lastShot = haveShot ? shot : -1.f;
-            LogLine("сайлент: кадр=%lu ось до записи рысканье=%.2f тангаж=%.2f "
+            LogLine("сайлент: кадр=%lu патч=%d ось до записи рысканье=%.2f тангаж=%.2f "
                     "(писали %.2f/%.2f) — %s; отклонение %.2f/%.2f%s",
-                    s_frames, axisYaw, axisPitch, s_writtenYaw, s_writtenPitch,
+                    s_frames, s_patched ? 1 : 0, axisYaw, axisPitch,
+                    s_writtenYaw, s_writtenPitch,
                     (fabsf(axisYaw - s_writtenYaw) < kSilentFreshEps &&
                      fabsf(axisPitch - s_writtenPitch) < kSilentFreshEps) ? "НАШЕ" : "игры",
                     s_devYaw, s_devPitch,
                     fired ? "; был выстрел" : "");
         }
     }
-    // Запомним ось: в конце кадра повторим её ещё раз (см. AimEndFrame).
+    // Запомним ось: в конце кадра повторим её ещё раз (см. AimEndFrame). Патчу
+    // это не нужно — он и так подменяет каждую запись игры.
     s_lastDirX = cpCos * sinf(cy); s_lastDirY = sinf(cp); s_lastDirZ = cpCos * cosf(cy);
-    s_dirFresh = true;
+    s_dirFresh = !s_patched;
 }
 
 void UpdateAim(float dt) {
@@ -1208,7 +1268,10 @@ void UpdateAim(float dt) {
     if (mode == AIM_MODE_MEMORY)      UpdateAimMemory(dt);
     else if (mode == AIM_MODE_SILENT) UpdateAimSilent(dt);
     else                              UpdateAimTouch(dt);
-    if (mode != AIM_MODE_SILENT) s_dirFresh = false;
+    if (mode != AIM_MODE_SILENT) {
+        s_dirFresh = false;
+        SilentPatchSet(false, 0.f, 0.f, 0.f);   // не сайлент — ось ведёт игра
+    }
 }
 
 // Конец кадра оверлея: повторить ось выстрела. Игра кладёт свою ось в своей

@@ -19,6 +19,7 @@ FILES="${*:-jni/src/main.cpp jni/src/process.cpp jni/src/audio.cpp jni/src/theme
 jni/src/hud.cpp jni/src/esp_draw.cpp jni/src/aim.cpp jni/src/farm.cpp \
 jni/src/widgets.cpp jni/src/menu.cpp jni/src/config.cpp \
 jni/src/game.cpp jni/src/game_markers.cpp jni/src/game_farm.cpp jni/src/lang.cpp \
+jni/src/silent_patch.cpp \
 jni/src/Android_draw/draw.cpp jni/src/Android_touch/TouchHelperA.cpp jni/src/VidAvatar.cpp}"
 rc=0
 for f in $FILES; do

@@ -2,3 +2,6 @@ obj/
 
 __pycache__/
 *.pyc
+
+# capstone для стоек (pip install --target=.tools/capstone): 11 МБ, в репозиторий не идёт
+.tools/

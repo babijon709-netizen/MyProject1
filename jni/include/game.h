@@ -274,6 +274,11 @@ bool        esp_camera_angles(float& yaw_deg, float& pitch_deg);
 // вёл её в сборке без правок автофарма). Базис из матрицы вида сюда попасть не
 // может: по нему gain выучивался со сменой знака, и аим дёргался (лог 15.09).
 bool        esp_aim_camera_angles(float& yaw_deg, float& pitch_deg);
+// Углы камеры БЕЗ оси выстрела: поза камеры (Transform) или, если её нет,
+// базис из матрицы вида. Нужны сайленту с перехватом сеттера: пока перехват
+// стоит, ось выстрела — наша же запись, и мерить по ней нельзя (получится
+// наше же направление, а не то, куда смотрит игрок).
+bool        esp_camera_pose_angles(float& yaw_deg, float& pitch_deg);
 // Diagnostic: bit 0 camera pose known, bit 1 reserved (never set), bit 2 firing
 // reference in use. See esp_camera_state() in game.cpp.
 int         esp_camera_state();
@@ -357,3 +362,7 @@ bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z);
 // Записать ось выстрела. Вектор нормируется здесь: игра множает его на
 // дальность луча. false — ось не нашлась (нет игрока/хендлера/привязки).
 bool esp_mem_aim_write_fire_dir(float x, float y, float z);
+
+// Адрес, по которому загружен libil2cpp.so в процессы игры (0 — ещё не
+// привязались). Нужен, чтобы патчить код игры по RVA.
+uint64_t Il2CppBase();

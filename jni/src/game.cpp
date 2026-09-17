@@ -1568,6 +1568,8 @@ bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z) {
     return true;
 }
 
+uint64_t Il2CppBase() { return g_il2cpp_base; }
+
 bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     uint64_t addr = 0;
     if (!resolve_look_direction(addr)) return false;
@@ -4411,6 +4413,15 @@ bool esp_aim_camera_angles(float& yaw_deg, float& pitch_deg) {
     const bool ok_pose = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
     if (!ok_ref && !ok_pose) return false;
     return angles_from_forward(ok_ref ? g_aim_ref_forward : g_cam_forward, yaw_deg, pitch_deg);
+}
+
+// Углы камеры без оси выстрела (см. объявление в game.h). Порядок такой же,
+// как у esp_camera_angles, но источник LookDirection из списка исключён.
+bool esp_camera_pose_angles(float& yaw_deg, float& pitch_deg) {
+    const bool ok_pose  = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
+    const bool ok_frame = g_frame_cam_basis_valid && farm_cam_source_ok(g_frame_cam_pos);
+    if (!ok_pose && !ok_frame) return false;
+    return angles_from_forward(ok_pose ? g_cam_forward : g_frame_cam_fwd, yaw_deg, pitch_deg);
 }
 
 bool esp_local_eye_position(float& x, float& y, float& z) {
