@@ -88,7 +88,7 @@ sh tools/aim/run_mem.sh        # стенд мемори-аима (настоя�
 
 ### jni/src/esp/aim_mem.cpp — Мемори-аим: поворот прицела записью в память игры
 
-Строк: 1192.
+Строк: 1200.
 
 Внутри: `forward_from_angles`, `angles_from_forward`, `wrap180`, `signed_angle_diff`, `quaternion_between`, `quaternion_inverse`, `read_current_angles`, `read_mouse_look_angles`, `pair_read`, `pair_write`, `resolve_current_weapon`, `weapon_pair_spec`, `read_look_root_angles`, `read_witness_angles`, `read_measured_angles`, `note_probing_pair`, `read_mouse_look_floats`, `to_stored_yaw`, `path_apply`, `scan_state_fields`, `find_look_root`, `save_probe_value`, `restore_probe_value`, `probe_path_at`, `probe_finish_unsupported`, `probe_accept`, `probe_begin_candidate`, `probe_apply_current`, `probe_next_candidate`, `probe_undo`, `esp_mem_aim_power_on`, `esp_mem_aim_reset`, `esp_mem_aim_tick`, `esp_mem_aim_state`, `esp_mem_aim_path`, `esp_mem_aim_reason`, `esp_mem_aim_read_angles`, `esp_mem_aim_apply`
 
@@ -146,7 +146,7 @@ $$swg, RVA 0x657cce4, пишет ту же пару тем же кодом), п�
 
 ### jni/src/esp/boxes.cpp — esp_get_boxes: рамки, имена, скелет
 
-Строк: 715.
+Строк: 768.
 
 Внутри: `note_frame_stage` (почему кадр не собрался — в журнал), `esp_get_boxes`, `esp_nearby_player_count`, `esp_wants_reattach`
 
@@ -174,9 +174,9 @@ $$swg, RVA 0x657cce4, пишет ту же пару тем же кодом), п�
 
 ### jni/src/esp/camera.cpp — Камера игры: поза, матрицы, углы, чувствительность
 
-Строк: 426.
+Строк: 572.
 
-Внутри: `esp_read_look_sensitivity`, `read_camera_transform_pose`, `read_native_camera_matrices`, `w2s_transform_camera`, `optimize_matrix_configuration`, `read_configured_player_transforms`, `esp_camera_fov_deg`, `esp_camera_state`, `read_local_aim_reference`
+Внутри: `esp_read_look_sensitivity`, `esp_read_look_angles`, `forward_from_look_angles`, `camera_pose_vs_look_angle_gap`, `read_camera_transform_pose`, `read_native_camera_matrices`, `w2s_transform_camera`, `optimize_matrix_configuration`, `read_configured_player_transforms`, `esp_camera_fov_deg`, `esp_camera_state`, `read_local_aim_reference`
 
 
 ### jni/src/esp/farm_scan.cpp — Автофарм: скан узлов реестра
@@ -261,9 +261,9 @@ Transform — несколько syscall'ов) не читаются секун�
 
 ### jni/src/esp/math.cpp — Вектор/кватернион/матрица и мировое→экранное
 
-Строк: 155.
+Строк: 189.
 
-Внутри: `vec3_is_finite`, `cross_product`, `rotate_vector`, `multiply_quaternion`, `normalize_quaternion`, `matrix34_is_valid`, `mat_get`, `mat_set`, `matrix_is_finite`, `mat_mul`, `mat_perspective`, `mat_world_to_camera`, `camera_position_from_view`, `w2s`
+Внутри: `vec3_is_finite`, `cross_product`, `rotate_vector`, `multiply_quaternion`, `normalize_quaternion`, `matrix34_is_valid`, `mat_get`, `mat_set`, `matrix_is_finite`, `mat_mul`, `mat_perspective`, `mat_transposed`, `perspective_orientation`, `mat_view_from_basis`, `mat_world_to_camera`, `camera_position_from_view`, `w2s`
 
 
 ### jni/src/esp/melee.cpp — Ближний бой: дальность удара и hitRadius

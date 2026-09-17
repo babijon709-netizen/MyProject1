@@ -110,21 +110,55 @@ Mat4 mat_perspective(float fov_degrees, float aspect, float z_near, float z_far)
     return result;
 }
 
+Mat4 mat_transposed(const Mat4& value) {
+    Mat4 result{};
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column)
+            mat_set(result, row, column, mat_get(value, column, row));
+    return result;
+}
+
+int perspective_orientation(const Mat4& value) {
+    auto looks_like_perspective = [](const Mat4& m) {
+        const float w_row_0 = mat_get(m, 3, 0), w_row_1 = mat_get(m, 3, 1);
+        const float w_row_2 = mat_get(m, 3, 2), w_row_3 = mat_get(m, 3, 3);
+        const float col_3_0 = mat_get(m, 0, 3), col_3_1 = mat_get(m, 1, 3);
+        const float scale_x = mat_get(m, 0, 0), scale_y = mat_get(m, 1, 1);
+        const float depth = mat_get(m, 2, 2);
+        if (fabsf(w_row_0) > 0.01F || fabsf(w_row_1) > 0.01F) return false;
+        if (fabsf(fabsf(w_row_2) - 1.0F) > 0.05F || fabsf(w_row_3) > 0.01F) return false;
+        if (fabsf(col_3_0) > 0.01F || fabsf(col_3_1) > 0.01F) return false;
+        if (!(scale_x > 0.01F && scale_x < 100.0F)) return false;
+        if (!(scale_y > 0.01F && scale_y < 100.0F)) return false;
+        // Глубина у перспективы ненулевая и небольшая по модулю: это
+        // -(far+near)/(far-near) или его обратнознаковая форма.
+        if (!std::isfinite(depth) || fabsf(depth) > 4.0F) return false;
+        return true;
+    };
+    if (!matrix_is_finite(value)) return 0;
+    if (looks_like_perspective(value)) return 1;
+    if (looks_like_perspective(mat_transposed(value))) return 2;
+    return 0;
+}
+
 // worldToCamera from camera world pose (Unity camera looks down -Z).
-Mat4 mat_world_to_camera(const Vec3& position, const Vec4& rotation) {
-    Vec3 right = rotate_vector(rotation, {1.0F, 0.0F, 0.0F});
-    Vec3 up = rotate_vector(rotation, {0.0F, 1.0F, 0.0F});
-    Vec3 forward = rotate_vector(rotation, {0.0F, 0.0F, 1.0F});
-    // View basis: rows = right, up, -forward (camera space).
+Mat4 mat_view_from_basis(const Vec3& right, const Vec3& up, const Vec3& forward, const Vec3& position) {
     Mat4 view{};
     mat_set(view, 0, 0, right.x);   mat_set(view, 0, 1, right.y);   mat_set(view, 0, 2, right.z);
     mat_set(view, 1, 0, up.x);      mat_set(view, 1, 1, up.y);      mat_set(view, 1, 2, up.z);
     mat_set(view, 2, 0, -forward.x); mat_set(view, 2, 1, -forward.y); mat_set(view, 2, 2, -forward.z);
     mat_set(view, 0, 3, -(right.x * position.x + right.y * position.y + right.z * position.z));
     mat_set(view, 1, 3, -(up.x * position.x + up.y * position.y + up.z * position.z));
-    mat_set(view, 2, 3, -(-forward.x * position.x + -forward.y * position.y + -forward.z * position.z));
+    mat_set(view, 2, 3, -(forward.x * position.x + forward.y * position.y + forward.z * position.z));
     mat_set(view, 3, 3, 1.0F);
     return view;
+}
+
+Mat4 mat_world_to_camera(const Vec3& position, const Vec4& rotation) {
+    const Vec3 right = rotate_vector(rotation, {1.0F, 0.0F, 0.0F});
+    const Vec3 up = rotate_vector(rotation, {0.0F, 1.0F, 0.0F});
+    const Vec3 forward = rotate_vector(rotation, {0.0F, 0.0F, 1.0F});
+    return mat_view_from_basis(right, up, forward, position);
 }
 
 bool camera_position_from_view(const Mat4& view, Vec3& position) {

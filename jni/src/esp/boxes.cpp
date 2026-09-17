@@ -44,6 +44,24 @@ static void note_frame_stage(const char* fmt, ...) {
     diag_log("esp", "%s", text);
 }
 
+// Куда уходит точка при проекции: экранные координаты и w. w <= 0.001 —
+// «точка ЗА камерой»: тогда экранных чисел нет, и по отчёту сразу видно, что
+// дело не в краях кадра, а в самом виде (именно этот случай — «все игроки ниже
+// экрана», — когда поза камеры читается неверно).
+static void projection_miss(const Mat4& vp, const Vec3& world, float sw, float sh,
+                            float& screen_x, float& screen_y, float& clip_w) {
+    const float clip_x = mat_get(vp, 0, 0) * world.x + mat_get(vp, 0, 1) * world.y + mat_get(vp, 0, 2) * world.z + mat_get(vp, 0, 3);
+    const float clip_y = mat_get(vp, 1, 0) * world.x + mat_get(vp, 1, 1) * world.y + mat_get(vp, 1, 2) * world.z + mat_get(vp, 1, 3);
+    clip_w = mat_get(vp, 3, 0) * world.x + mat_get(vp, 3, 1) * world.y + mat_get(vp, 3, 2) * world.z + mat_get(vp, 3, 3);
+    if (!(clip_w > 0.001F) || !std::isfinite(clip_x) || !std::isfinite(clip_y) || !std::isfinite(clip_w)) {
+        screen_x = -1.0F;
+        screen_y = -1.0F;
+        return;
+    }
+    screen_x = ((clip_x / clip_w) + 1.0F) * 0.5F * sw;
+    screen_y = ((-clip_y / clip_w) + 1.0F) * 0.5F * sh;
+}
+
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
 
@@ -284,6 +302,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     bool has_local_position = false;
     Vec3 local{};
+    // Позиция камеры для отчёта «рамок нет» (видна и когда кадр собран, и когда
+    // физического совпадения нет — тогда числа покажут именно это).
+    Vec3 report_camera_pos{};
+    if (!camera_position_from_view(view, report_camera_pos)) report_camera_pos = g_cam_pos;
     size_t local_entity_index = s_transforms.size();
     // Positions are read once per frame here and reused below: the box loop
     // must see exactly the same values the local player was picked with.
@@ -293,6 +315,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     {
         Vec3 camera_position{};
         bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
+        report_camera_pos = camera_position;
         double nearest_distance_squared = INFINITY;
         size_t first_valid_index = s_transforms.size();
         Vec3 first_valid_position{};
@@ -497,6 +520,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // матрицы камеры, и когда позиции не читаются. Считаем причины и пишем в
     // журнал не чаще раза в 5 с — иначе следующая правка делается вслепую.
     int drop_suppressed = 0, drop_position = 0, drop_far = 0, drop_lower = 0, drop_upper = 0, drop_short = 0;
+    // Первый игрок, не дошедший до экрана, и его проекция: без этих чисел по
+    // журналу не отличить «точка за камерой» (w <= 0) от «точка ниже кадра».
+    bool have_miss_sample = false;
+    float miss_world_x = 0.0F, miss_world_y = 0.0F, miss_world_z = 0.0F;
+    float miss_screen_x = 0.0F, miss_screen_y = 0.0F, miss_w = 0.0F;
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index || !s_transforms[i]) continue;
         if (suppressed[i]) { ++drop_suppressed; continue; }
@@ -528,11 +556,27 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         bool bottom_visible = transform_camera_mode
             ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_bottom, sw, sh, sf, false)
             : w2s(vp, body_bottom, sw, sh, sf, false);
-        if (!bottom_visible) { ++drop_lower; continue; }
+        if (!bottom_visible) {
+            ++drop_lower;
+            if (!have_miss_sample && !transform_camera_mode) {
+                have_miss_sample = true;
+                miss_world_x = feet.x; miss_world_y = feet.y; miss_world_z = feet.z;
+                projection_miss(vp, body_bottom, sw, sh, miss_screen_x, miss_screen_y, miss_w);
+            }
+            continue;
+        }
         bool top_visible = transform_camera_mode
             ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_top, sw, sh, sh2, false)
             : w2s(vp, body_top, sw, sh, sh2, false);
-        if (!top_visible) { ++drop_upper; continue; }
+        if (!top_visible) {
+            ++drop_upper;
+            if (!have_miss_sample && !transform_camera_mode) {
+                have_miss_sample = true;
+                miss_world_x = feet.x; miss_world_y = feet.y; miss_world_z = feet.z;
+                projection_miss(vp, body_top, sw, sh, miss_screen_x, miss_screen_y, miss_w);
+            }
+            continue;
+        }
 
         float height = fabsf(sh2.y - sf.y);
         if (!std::isfinite(height) || height < 2.0F) { ++drop_short; continue; }
@@ -699,11 +743,20 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // Числовые флаги, а не слова: отдельные русские литералы здесь не
             // нужны (их пришлось бы переводить в таблицах меню), а по «1/0»
             // в журнале всё читается так же.
-            diag_log("esp", "рамок нет: в списке %d, из них свой %d, скрыто %d, без позиции %d, далеко %d, ниже экрана %d, выше экрана %d, низких %d, матрицы подтверждены: %d, режим узла: %d",
+            // Подписи короткие нарочно: журнал режет строку на 240 байтах, и
+            // прежняя длинная строка теряла как раз «матрицы подтверждены».
+            // Порядок — по важности: сколько игроков, куда они денутся, чем
+            // смотрит камера и первый промах с числами (w <= 0 — точка ЗА
+            // камерой, y > высоты экрана — ниже кадра).
+            diag_log("esp", "рамок нет: спис %d свой %d скрыт %d безпоз %d далеко %d низ %d верх %d корот %d матр %d вид %d кам %.1f %.1f %.1f игр %.1f %.1f %.1f экр %.0f %.0f w %.2f расх %.0f",
                      (int)s_transforms.size(), local_entity_index < s_transforms.size() ? 1 : 0,
                      drop_suppressed, drop_position, drop_far, drop_lower, drop_upper, drop_short,
-                     g_matrix_configuration_validated ? 1 : 0,
-                     transform_camera_mode ? 1 : 0);
+                     g_matrix_configuration_validated ? 1 : 0, g_cam_view_source,
+                     report_camera_pos.x,
+                     report_camera_pos.y, report_camera_pos.z,
+                     miss_world_x, miss_world_y, miss_world_z,
+                     miss_screen_x, miss_screen_y, miss_w,
+                     g_cam_view_angle_gap_deg);
         }
     }
 

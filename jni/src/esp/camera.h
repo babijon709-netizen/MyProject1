@@ -20,9 +20,20 @@ extern Vec3 g_cam_right, g_cam_up, g_cam_forward;
 
 extern bool g_aim_ref_valid;
 
+// Ось прицела взята без сверки с позой камеры (камера в этот момент не
+// читалась). Ось при этом настоящая — из обработчика событий игрока.
+extern bool g_aim_ref_unverified;
+
 extern Vec3 g_aim_ref_origin;
 
 extern Vec3 g_aim_ref_forward, g_aim_ref_right, g_aim_ref_up;
+
+// Откуда взят поворот вида: 0 — поза камеры (обычный путь), 1 — углы прицела
+// игры (MouseLook 0x4C). Второй путь включается, когда поза расходится с углами
+// больше чем на 60°: на устройстве поза камеры читается не всегда, и тогда весь
+// мир уезжает за кадр — это и есть «ниже экрана N, выше экрана 0» в журнале.
+extern int   g_cam_view_source;
+extern float g_cam_view_angle_gap_deg;   // расхождение позы с углами, градусы
 
 extern int g_offset_extent_fail_streak;
 
@@ -66,6 +77,16 @@ inline constexpr uint64_t MOUSE_LOOK_LOOK_ROOT_OFFSET   = 0x28;
 
 // Объект MouseLook локального игрока; 0 — не найден (нет привязки, нет игрока).
 uint64_t esp_resolve_mouse_look();
+
+// Углы прицела игры (Oxide.MouseLook 0x4C: x — рыскание, y — тангаж, градусы).
+// Источник тот же, куда пишет мемори-аим, и единственный, который на устройстве
+// читается всегда: он не зависит ни от Transform, ни от матриц камеры.
+bool esp_read_look_angles(float& yaw_deg, float& pitch_deg);
+
+// Направление по углам в общей для проекта конвенции:
+// forward = (sin yaw * cos pitch, sin pitch, cos yaw * cos pitch) — ровно
+// обратная к angles_from_forward, которой меряет аим.
+Vec3 forward_from_look_angles(float yaw_deg, float pitch_deg);
 
 bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view);
 

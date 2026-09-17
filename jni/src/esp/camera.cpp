@@ -8,6 +8,7 @@
 #include "esp/boxes.h"
 #include "esp/farm_target.h"
 #include "esp/frame.h"
+#include "esp/esp_time.h"
 #include "esp/il2cpp.h"
 #include "esp/math.h"
 #include "esp/mem.h"
@@ -19,6 +20,12 @@
 // Camera state captured by the last esp_get_boxes() call (used by the aimbot
 // to convert bone positions into yaw/pitch offsets from the crosshair).
 float     g_cam_fov_deg = 0.0F;
+
+// См. camera.h: вид либо из позы камеры, либо (когда поза не сходится с углами
+// прицела) из самих углов.
+int       g_cam_view_source = 0;
+
+float     g_cam_view_angle_gap_deg = -1.0F;
 
 bool      g_cam_pose_valid = false;
 
@@ -38,6 +45,8 @@ Vec3      g_cam_right{}, g_cam_up{}, g_cam_forward{};
 // reference whenever it can be read, so the aimbot steers the actual firing
 // direction onto the target instead of the camera.
 bool      g_aim_ref_valid = false;
+
+bool      g_aim_ref_unverified = false;
 
 Vec3      g_aim_ref_origin{};
 
@@ -89,6 +98,49 @@ bool esp_read_look_sensitivity(float& out) {
     if (!std::isfinite(value) || value < 0.05F || value > 100.0F) return false;
     out = value;
     return true;
+}
+
+// ---- Углы прицела игры как самостоятельный источник поворота ----------------
+//
+// MouseLook (0x4C): x — рыскание, y — тангаж, градусы. На устройстве это
+// единственный источник поворота, который читается всегда: он не идёт ни через
+// Transform (иерархия на этой сборке Unity читается не всегда), ни через матрицы
+// камеры. Мемори-аим пишет именно сюда, поэтому вид, собранный из этих углов,
+// согласован с тем, что аим делает с прицелом.
+bool esp_read_look_angles(float& yaw_deg, float& pitch_deg) {
+    const uint64_t mouse_look = esp_resolve_mouse_look();
+    if (!mouse_look) return false;
+    const uint64_t field = mouse_look + MOUSE_LOOK_ANGLES_OFFSET;
+    float yaw = rd<float>(field);
+    float pitch = rd<float>(field + sizeof(float));
+    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return false;
+    // Границы нарочно широкие: игре рыскание приходит завёрнутым в 0..360, а
+    // тангаж ограничен её же пределами. Отсекаем только заведомый мусор.
+    if (fabsf(yaw) > 10000.0F || fabsf(pitch) > 90.5F) return false;
+    yaw_deg = yaw;
+    pitch_deg = pitch;
+    return true;
+}
+
+Vec3 forward_from_look_angles(float yaw_deg, float pitch_deg) {
+    constexpr float kDegToRad = 0.01745329252F;
+    const float yaw = yaw_deg * kDegToRad;
+    const float pitch = pitch_deg * kDegToRad;
+    const float cos_pitch = cosf(pitch);
+    return {sinf(yaw) * cos_pitch, sinf(pitch), cosf(yaw) * cos_pitch};
+}
+
+// Насколько поза камеры расходится с углами прицела, градусы; <0 — сравнить
+// не с чем (углы не читаются).
+static float camera_pose_vs_look_angle_gap() {
+    float yaw = 0.0F, pitch = 0.0F;
+    if (!g_cam_pose_valid || !esp_read_look_angles(yaw, pitch)) return -1.0F;
+    const Vec3 by_angles = forward_from_look_angles(yaw, pitch);
+    const Vec3& by_pose = g_cam_forward;
+    const float dot = by_pose.x * by_angles.x + by_pose.y * by_angles.y + by_pose.z * by_angles.z;
+    if (!std::isfinite(dot)) return -1.0F;
+    const float clamped = dot > 1.0F ? 1.0F : (dot < -1.0F ? -1.0F : dot);
+    return acosf(clamped) * 57.29577951F;
 }
 
 static bool read_camera_transform_pose(uint64_t native_transform, Vec3& position, Vec4& rotation) {
@@ -182,9 +234,56 @@ bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4&
             view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
             if (!matrix_is_finite(view)) return false;
         }
-    } else {
-        s_last_view = view;
     }
+
+    // Поворот вида по углам прицела игры. Поза камеры с устройства читается не
+    // всегда (в журнале аима это «cam_st = 0»), а углы — читаются. Пока поза и
+    // углы расходятся, вид собираем из углов: иначе камера «смотрит» не туда,
+    // все игроки оказываются за кадром и боксы молча отбрасываются как «ниже
+    // экрана» (журнал: «ниже экрана 10, выше экрана 0»).
+    // Порог 60° и серия кадров — чтобы не дёргать рабочий вид из-за отдачи,
+    // качки и кадра, прочитанного в середине обновления.
+    {
+        static int s_view_check_countdown = 0;
+        static int s_pose_bad_streak = 0;
+        static int s_pose_good_streak = 0;
+        if (--s_view_check_countdown <= 0) {
+            s_view_check_countdown = 20;   // ~3 раза в секунду
+            const float gap = camera_pose_vs_look_angle_gap();
+            g_cam_view_angle_gap_deg = gap;
+            if (gap >= 0.0F) {
+                if (gap > 60.0F) { ++s_pose_bad_streak; s_pose_good_streak = 0; }
+                else             { ++s_pose_good_streak; s_pose_bad_streak = 0; }
+                if (s_pose_bad_streak >= 3 && g_cam_view_source == 0) {
+                    g_cam_view_source = 1;
+                    diag_log("esp", "вид: поза камеры расходится с углами прицела на %.0f° — беру поворот из углов (поле 0x4c)", (double)gap);
+                } else if (s_pose_good_streak >= 5 && g_cam_view_source == 1) {
+                    g_cam_view_source = 0;
+                    diag_log("esp", "вид: поза камеры снова сошлась с углами прицела (расхождение %.0f°)", (double)gap);
+                }
+            }
+        }
+        if (g_cam_view_source == 1) {
+            float yaw = 0.0F, pitch = 0.0F;
+            if (esp_read_look_angles(yaw, pitch)) {
+                const Vec3 forward = forward_from_look_angles(yaw, pitch);
+                Vec3 right = cross_product({0.0F, 1.0F, 0.0F}, forward);
+                const float right_length = sqrtf(right.x * right.x + right.y * right.y + right.z * right.z);
+                if (right_length > 0.01F) {
+                    right = {right.x / right_length, right.y / right_length, right.z / right_length};
+                    const Vec3 up = cross_product(forward, right);
+                    Mat4 rebuilt = mat_view_from_basis(right, up, forward, g_cam_pos);
+                    if (matrix_is_finite(rebuilt)) {
+                        view = rebuilt;
+                        have_live_view = true;
+                        g_cam_right = right; g_cam_up = up; g_cam_forward = forward;
+                        g_cam_pose_valid = true;
+                    }
+                }
+            }
+        }
+    }
+    if (have_live_view) s_last_view = view;
 
     // Projection params (FOV/aspect/clip) are stored as plain floats and stay hot.
     float fov = rd<float>(native_cam + CAMERA_FOV_DEGREES);
@@ -195,8 +294,42 @@ bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4&
         aspect = (screen_aspect > 0.1F && screen_aspect < 10.0F) ? screen_aspect : (9.0F / 16.0F);
     if (!(z_near > 0.001F && z_near < 100.0F)) z_near = 0.1F;
     if (!(z_far > z_near && z_far < 100000.0F)) z_far = 1000.0F;
-    if (std::isfinite(fov) && fov > 1.0F && fov < 179.0F) g_cam_fov_deg = fov;
-    projection = mat_perspective(fov, aspect, z_near, z_far);
+    // Проекция. Поле угла обзора — это угол по ОСИ камеры (Camera.fovAxis:
+    // вертикаль или горизонталь), и когда игра задаёт её по горизонтали, наша
+    // перспектива выходит слишком узкой по вертикали: всё, что ниже центра
+    // кадра, уезжает за нижний край — ровно «ниже экрана N, выше экрана 0» из
+    // журнала. Поэтому сначала берём кеш проекции самой игры (смещение 0xB0
+    // проверено дизассемблером libunity.so, см. game_offsets.h): движок пишет
+    // его сам на рендере, а внешнее чтение его не портит. Годится только если
+    // структура похожа на перспективу и пропорция совпадает с экраном.
+    bool projection_from_game = false;
+    {
+        Mat4 cached = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
+        int orientation = matrix_is_finite(cached) ? perspective_orientation(cached) : 0;
+        if (orientation == 2) cached = mat_transposed(cached);
+        if (orientation) {
+            const float scale_x = mat_get(cached, 0, 0), scale_y = mat_get(cached, 1, 1);
+            const float cached_aspect = scale_x / scale_y;
+            if (std::isfinite(cached_aspect) && fabsf(cached_aspect - aspect) < aspect * 0.25F) {
+                projection = cached;
+                projection_from_game = true;
+                const float matrix_fov = 2.0F * atanf(1.0F / scale_y) * 57.29577951F;
+                if (std::isfinite(matrix_fov) && matrix_fov > 1.0F && matrix_fov < 179.0F) {
+                    g_cam_fov_deg = matrix_fov;
+                    static double s_fov_report_next = 0.0;
+                    const double now = mono_seconds();
+                    if (std::isfinite(fov) && fabsf(fov - matrix_fov) > 2.0F && now >= s_fov_report_next) {
+                        s_fov_report_next = now + 60.0;
+                        diag_log("esp", "угол обзора: поле %.1f°, матрица игры %.1f° — беру матрицу", (double)fov, (double)matrix_fov);
+                    }
+                }
+            }
+        }
+    }
+    if (!projection_from_game) {
+        if (std::isfinite(fov) && fov > 1.0F && fov < 179.0F) g_cam_fov_deg = fov;
+        projection = mat_perspective(fov, aspect, z_near, z_far);
+    }
     if (!matrix_is_finite(projection)) {
         if (s_last_ok && matrix_is_finite(s_last_proj)) {
             projection = s_last_proj;
@@ -385,7 +518,8 @@ static bool player_kcc_position(const PlayerAux& aux, Vec3& out) {
 // or implausible (must stay within ~20 deg of the camera forward).
 void read_local_aim_reference(uint64_t local_player, const PlayerAux* local_aux, bool local_crouched) {
     g_aim_ref_valid = false;
-    if (!local_player || !g_cam_pose_valid) return;
+    g_aim_ref_unverified = false;
+    if (!local_player) return;
     uint64_t handler = rd_ptr(local_player + PLAYER_EVENT_HANDLER);
     if (!handler || rd_ptr(handler + EVENT_HANDLER_MANAGER_BACKREF) != local_player) return;
     uint64_t look = rd_ptr(handler + EVENT_HANDLER_LOOK_DIRECTION);
@@ -395,8 +529,17 @@ void read_local_aim_reference(uint64_t local_player, const PlayerAux* local_aux,
     float len = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     if (!(len > 0.5F && len < 2.0F)) return;
     dir = {dir.x / len, dir.y / len, dir.z / len};
-    float dot = dir.x * g_cam_forward.x + dir.y * g_cam_forward.y + dir.z * g_cam_forward.z;
-    if (!(dot > 0.94F)) return; // > ~20 deg away from the camera: not the look root
+    if (g_cam_pose_valid) {
+        float dot = dir.x * g_cam_forward.x + dir.y * g_cam_forward.y + dir.z * g_cam_forward.z;
+        if (!(dot > 0.94F)) return; // > ~20 deg away from the camera: not the look root
+    } else {
+        // Поза камеры не читается — сверять не с чем, но это не повод остаться
+        // без оси прицела: она берётся из обработчика событий игрока, а не из
+        // камеры, и именно на неё опирается путь записи мемори-аима. Раньше
+        // здесь стоял выход, и в журнале устройства аим молчал «поля поворота
+        // не найдены» ровно в те секунды, когда камера не читалась.
+        g_aim_ref_unverified = true;
+    }
     Vec3 world_up = {0.0F, 1.0F, 0.0F};
     Vec3 right = cross_product(world_up, dir);
     float rl = sqrtf(right.x * right.x + right.y * right.y + right.z * right.z);
@@ -407,6 +550,7 @@ void read_local_aim_reference(uint64_t local_player, const PlayerAux* local_aux,
     // Eye point: KCC position + (capsule height + lookHeightOffset) * up. Only
     // trusted when it lands close to the camera; otherwise use the camera.
     Vec3 origin = g_cam_pos;
+    const bool origin_from_pose = g_cam_pose_valid;
     if (local_aux && local_aux->kcc) {
         Vec3 kcc_pos{};
         if (player_kcc_position(*local_aux, kcc_pos)) {
@@ -415,7 +559,9 @@ void read_local_aim_reference(uint64_t local_player, const PlayerAux* local_aux,
             if (!std::isfinite(look_offset) || fabsf(look_offset) > 1.0F) look_offset = 0.0F;
             Vec3 eye = {kcc_pos.x, kcc_pos.y + h + look_offset, kcc_pos.z};
             float dx = eye.x - g_cam_pos.x, dy = eye.y - g_cam_pos.y, dz = eye.z - g_cam_pos.z;
-            if (dx * dx + dy * dy + dz * dz < 0.5F * 0.5F) origin = eye;
+            // Без позы камеры сверять глаз не с чем — берём его как есть: он
+            // посчитан из KCC, который читается независимо от Transform.
+            if (!origin_from_pose || dx * dx + dy * dy + dz * dz < 0.5F * 0.5F) origin = eye;
         }
     }
     g_aim_ref_origin = origin;
