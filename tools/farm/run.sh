@@ -1,7 +1,7 @@
 #!/bin/sh
 # Стенд контроллера автофарма.
 #
-# Собирает НАСТОЯЩИЙ код из jni/src/main.cpp — блок констант автофарма,
+# Собирает НАСТОЯЩИЙ код из jni/src/farm.cpp — блок констант автофарма,
 # namespace farmlog и UpdateFarm/UpdateFarmInner — вокруг заглушек окружения
 # (ImGui, тач, игра, настройки) и прогоняет сценарии, в которых задеты все
 # места событий лога. NDK не нужен: это обычная сборка g++, поэтому гонять
@@ -37,7 +37,7 @@ rm -f "$BUILD/cfg"/*.log
 python3 - "$BUILD" <<'PY'
 import sys
 build = sys.argv[1]
-lines = open('jni/src/main.cpp', encoding='utf-8').read().split('\n')
+lines = open('jni/src/farm.cpp', encoding='utf-8').read().split('\n')
 
 start = None
 for i, l in enumerate(lines):
@@ -56,12 +56,12 @@ for i in range(inner, len(lines)):
 assert end is not None, 'не найден конец UpdateFarmInner'
 open(build + '/ctrl.inc', 'w', encoding='utf-8').write('\n'.join(lines[start:end + 1]) + '\n')
 
-src = open('jni/src/main.cpp', encoding='utf-8').read()
+src = open('jni/include/str.h', encoding='utf-8').read()
 a = src.index('namespace xp {')
 b = src.index('#define XS(s)')
 c = src.index('\n', b) + 1
 open(build + '/xp.inc', 'w', encoding='utf-8').write(src[a:c])
-print('регион контроллера: строки %d..%d main.cpp' % (start + 1, end + 1))
+print('регион контроллера: строки %d..%d farm.cpp' % (start + 1, end + 1))
 PY
 
 cp jni/include/game.h "$BUILD/game.h"

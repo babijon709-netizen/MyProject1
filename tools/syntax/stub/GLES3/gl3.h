@@ -23,3 +23,14 @@ inline void glTexParameteri(GLenum a, GLenum b, GLint c){ (void)a;(void)b;(void)
 inline void glEnable(GLenum a){ (void)a; }
 inline void glBlendFunc(GLenum a, GLenum b){ (void)a;(void)b; }
 inline void glClear(GLenum a){ (void)a; }
+#define GL_RGB 0x1907
+#define GL_RED_SIZE 0x0C01
+#define GL_GREEN_SIZE 0x0C02
+#define GL_BLUE_SIZE 0x0C03
+#define GL_ALPHA_SIZE 0x0C04
+#define GL_DEPTH_SIZE 0x0C0A
+#define GL_STENCIL_SIZE 0x0C09
+#define GL_NONE 0
+#define GL_TRUE 1
+#define GL_FALSE 0
+inline void glTexSubImage2D(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum fmt, GLenum type, const void* data){ (void)target;(void)level;(void)x;(void)y;(void)w;(void)h;(void)fmt;(void)type;(void)data; }

@@ -1,5 +1,6 @@
 #include "game.h"
 #include "mem_io.h"                // чтение/запись памяти игры: /proc/<pid>/mem + кэш блоков
+#include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // активные оффсеты: релиз или бета (go::SelectBuild)
 #include "Vector.h"
@@ -26,59 +27,26 @@
 // Подробности — в mem_io.h: только /proc/<pid>/mem (pread/pwrite), проверка
 // доступа пробой по ELF-заголовку и кэш блоков на кадр. Здесь только обёртки,
 // которыми пользуется весь остальной код чтения.
-static memio::Reader g_mem;
+memio::Reader g_mem;
 
-static bool rd_buf(uint64_t addr, void* out, size_t size) {
-    return g_mem.read(addr, out, size);
-}
-
-template<typename T>
-static T rd(uint64_t addr) {
-    T v{};
-    g_mem.read(addr, &v, sizeof(T));
-    return v;
-}
-template<typename T>
-static bool rd_exact(uint64_t addr, T& value) {
-    value = {};
-    if (!addr) return false;
-    return g_mem.read(addr, &value, sizeof(T));
-}
-// Указатели из памяти игры приходят с меткой в старшем байте (TBI/MTE на
-// Android 11+): читать по ним нельзя — ядро вернёт EIO, — и сравнивать их с
 // адресами без метки тоже нельзя. Снимаем метку сразу, на входе.
-static uint64_t rd_ptr(uint64_t a) { return memio::untag(rd<uint64_t>(a)); }
-static Vec3     rd_v3 (uint64_t a) { return rd<Vec3>(a);     }
-static Mat4     rd_m4 (uint64_t a) { return rd<Mat4>(a);     }
-
-static bool wr_buf(uint64_t addr, const void* in, size_t size) {
-    return g_mem.write(addr, in, size);
-}
 
 // Оффсеты — из активного набора: значения переключаются между релизом и
 // бетой в рантайме (см. game_offsets_active.h), имена те же, что были в
 // game_offsets, поэтому весь код чтения памяти ниже не изменился.
 using namespace go_active;
 
-static pid_t     g_pid         = -1;
-static uint64_t  g_il2cpp_base = 0;
+pid_t     g_pid         = -1;
+uint64_t  g_il2cpp_base = 0;
 static uint64_t  g_player_manager_class = 0;
 static uint64_t  g_player_manager_static_fields = 0;
-static uint64_t  g_game_controller_class = 0;
-static uint64_t  g_local_player = 0;
+uint64_t  g_game_controller_class = 0;
+uint64_t  g_local_player = 0;
 static bool      g_matrix_configuration_validated = false;
 static bool      g_camera_matrix_physical_match = false;
 static uint64_t  g_player_position_offset = PLAYER_POSITION;
 
 
-struct TransformHierarchyLayout {
-    uint64_t data_offset = 0x38;
-    uint64_t index_offset = 0x40;
-    uint64_t matrices_offset = 0x18;
-    uint64_t indices_offset = 0x20;
-    bool matrices_indirect = false;
-    bool indices_indirect = false;
-};
 static TransformHierarchyLayout g_transform_hierarchy_layout{};
 static bool g_transform_hierarchy_layout_valid = false;
 
@@ -88,29 +56,28 @@ static bool      g_player_position_validated = false;
 // Camera state captured by the last esp_get_boxes() call (used by the aimbot
 // to convert bone positions into yaw/pitch offsets from the crosshair).
 static float     g_cam_fov_deg = 0.0F;
-static bool      g_cam_pose_valid = false;
+bool      g_cam_pose_valid = false;
 // Reserved: was set when the pose had been recovered from the view matrix.
 // That path is gone -- deriving the pose from the matrix made the aim throw
 // itself across the screen, because the matrix the fallback reads is the
 // stale cached one and every angle measured against it lags reality.
 static bool      g_cam_pose_derived = false;
-static Vec3      g_cam_pos{};
-static Vec3      g_cam_right{}, g_cam_up{}, g_cam_forward{};
+Vec3      g_cam_pos{};
+Vec3      g_cam_right{}, g_cam_up{}, g_cam_forward{};
 
 // The game fires along PlayerEventHandler.LookDirection (= MouseLook.m_LookRoot
 // forward) from the KCC eye point, NOT along the camera transform (which carries
 // visual sway/kick on top). Aim angles are therefore measured against this
 // reference whenever it can be read, so the aimbot steers the actual firing
 // direction onto the target instead of the camera.
-static bool      g_aim_ref_valid = false;
-static Vec3      g_aim_ref_origin{};
-static Vec3      g_aim_ref_forward{}, g_aim_ref_right{}, g_aim_ref_up{};
+bool      g_aim_ref_valid = false;
+Vec3      g_aim_ref_origin{};
+Vec3      g_aim_ref_forward{}, g_aim_ref_right{}, g_aim_ref_up{};
 
 // Маска ресурсов автофарма (bit0 дерево..bit3 сера).
-static unsigned g_farm_mask = 0;
+unsigned g_farm_mask = 0;
 
 
-static bool vec3_is_finite(const Vec3& value);
 
 // ==== X-ray: камера отсекает всё ближе N метров (near clip plane) ==========
 // Пишется прямо в native Camera каждый кадр, пока включено; при выключении
@@ -155,7 +122,6 @@ static void xray_apply(uint64_t native_cam) {
 // класса -> Cycle -> Hour/Day/Month/Year в разумных пределах. Пока включено,
 // фоновый поток пишет полдень прямо в Cycle.Hour — игровой Update сам
 // разворачивает солнце.
-static std::string read_remote_string(uint64_t address, bool* readable = nullptr); // определена ниже
 static bool     g_day_enabled = false;
 static uint64_t g_day_tod = 0;          // подтверждённый инстанс TimeOfDay
 static std::atomic<uint64_t> g_day_cycle_addr{0}; // Cycle.Hour для писателя
@@ -267,7 +233,7 @@ static void always_day_tick() {
 // что строка недоступна вообще (в логе устройства все чтения имён классов падали
 // с errno 5: память метаданных там не читается), — и тогда класс опознаётся по
 // структуре, см. class_identity.
-static std::string read_remote_string(uint64_t address, bool* readable) {
+std::string read_remote_string(uint64_t address, bool* readable) {
     if (readable) *readable = false;
     if (!address) return {};
     const size_t kMax = 95;
@@ -299,7 +265,7 @@ static bool remote_string_equals(uint64_t address, const char* expected) {
     return read_remote_string(address) == expected;
 }
 
-static bool read_managed_string_ex(uint64_t str_obj, char* out, size_t cap, int32_t max_chars) {
+bool read_managed_string_ex(uint64_t str_obj, char* out, size_t cap, int32_t max_chars) {
     if (!str_obj || !out || cap < 2) return false;
     if ((str_obj & 0x1) != 0) return false;
     uint64_t klass = rd_ptr(str_obj);
@@ -355,7 +321,7 @@ static bool read_managed_string_ex(uint64_t str_obj, char* out, size_t cap, int3
     return pos > 0;
 }
 
-static bool read_managed_string(uint64_t str_obj, char* out, size_t cap) {
+bool read_managed_string(uint64_t str_obj, char* out, size_t cap) {
     return read_managed_string_ex(str_obj, out, cap, 31);
 }
 
@@ -413,7 +379,7 @@ static bool accept_display_name(const char* s) {
     return true;
 }
 
-static bool valid_obj(uint64_t p) {
+bool valid_obj(uint64_t p) {
     return p >= 0x10000 && p < 0x0001000000000000ULL && (p & 0x7) == 0;
 }
 
@@ -806,7 +772,7 @@ static int get_base_candidates(const char* lib, uint64_t* out, int max) {
 }
 
 // Похож ли адрес на Il2CppClass — по одной структуре, без чтения имён.
-static bool class_looks_alive(uint64_t klass) {
+bool class_looks_alive(uint64_t klass) {
     if (!valid_obj(klass)) return false;
     const uint64_t image = rd_ptr(klass);
     const uint64_t name  = rd_ptr(klass + IL2CPP_CLASS_NAME);
@@ -830,7 +796,7 @@ static bool class_looks_alive(uint64_t klass) {
 // ноль.
 // Поэтому там, где имя доступно, сверяем его, как раньше (защита от чужой сборки
 // игры); где нет — верим смещению из таблицы оффсетов и проверяем структуру.
-static int class_identity(uint64_t klass, const char* expected_name, const char* expected_ns) {
+int class_identity(uint64_t klass, const char* expected_name, const char* expected_ns) {
     if (!class_looks_alive(klass)) return 0;
     bool name_readable = false, ns_readable = false;
     const std::string name  = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME), &name_readable);
@@ -897,7 +863,7 @@ static bool player_list_contains(uint64_t list, uint64_t player) {
 
 static constexpr uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
 
-static uint64_t get_class_static_fields(uint64_t klass) {
+uint64_t get_class_static_fields(uint64_t klass) {
     if (!klass) return 0;
     return rd_ptr(klass + IL2CPP_CLASS_STATIC_FIELDS);
 }
@@ -952,7 +918,7 @@ static uint64_t resolve_native_transform(uint64_t transform) {
     return rd_ptr(transform + MANAGED_CACHED_PTR);
 }
 
-static bool vec3_is_finite(const Vec3& value) {
+bool vec3_is_finite(const Vec3& value) {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z) &&
         fabsf(value.x) < 1000000.0F && fabsf(value.y) < 1000000.0F && fabsf(value.z) < 1000000.0F;
 }
@@ -1030,7 +996,7 @@ static bool read_transform_hierarchy_arrays(uint64_t matrices, uint64_t indices,
     return true;
 }
 
-static bool read_transform_hierarchy_layout(uint64_t native_transform, const TransformHierarchyLayout& layout, Vec3& position, Vec4* world_rotation = nullptr) {
+bool read_transform_hierarchy_layout(uint64_t native_transform, const TransformHierarchyLayout& layout, Vec3& position, Vec4* world_rotation) {
     if (!native_transform) return false;
     uint64_t transform_data = rd_ptr(native_transform + layout.data_offset);
     int32_t transform_index = rd<int32_t>(native_transform + layout.index_offset);
@@ -1042,9 +1008,8 @@ static bool read_transform_hierarchy_layout(uint64_t native_transform, const Tra
     return read_transform_hierarchy_arrays(matrices, indices, transform_index, position, world_rotation);
 }
 
-static bool position_looks_like_world_space(const Vec3& position); // defined below
 
-static bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& position) {
+bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& position) {
     if (!native_transform) return false;
     // The learned layout is only a fast path. It is learned from PLAYER
     // transforms and dies with a world reload — after a respawn it fails (or
@@ -1111,7 +1076,7 @@ static bool evaluate_transform_hierarchy_layout(const std::vector<uint64_t>& nat
     return position_count >= 2 && std::isfinite(extent) && extent >= 0.1 && extent <= 1000000.0;
 }
 
-static bool discover_layout_from_native_transforms(const std::vector<uint64_t>& native_transforms,
+bool discover_layout_from_native_transforms(const std::vector<uint64_t>& native_transforms,
                                                    size_t& best_position_count, size_t& candidate_count) {
     if (native_transforms.size() < 2) return false;
 
@@ -1193,7 +1158,7 @@ static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
 // A world position we would believe from a single sample: inside the map
 // bounds and not a pile of denormals. Used when we are the only player on the
 // server, where the "several players spread out" test below cannot run.
-static bool position_looks_like_world_space(const Vec3& position) {
+bool position_looks_like_world_space(const Vec3& position) {
     if (!vec3_is_finite(position)) return false;
     if (fabsf(position.x) > 20000.0F || fabsf(position.z) > 20000.0F) return false;
     if (fabsf(position.y) > 10000.0F) return false;
@@ -1261,7 +1226,6 @@ static uint64_t find_direct_player_position_offset(const std::vector<uint64_t>& 
 // reload the position fields are still zero for a few frames; falling back to
 // the transform-hierarchy path on the very first failure used to lock the ESP
 // into that mode (boxes hanging 1.6 m below the player) until restart.
-static double mono_seconds();   // определён ниже: часы ожидания
 static int g_direct_position_fail_streak = 0;
 static int g_direct_position_recheck = 0;
 // Когда началась текущая серия неудач прямых полей. Ожидание «поля допишутся»
@@ -1428,7 +1392,7 @@ static bool camera_position_from_view(const Mat4& view, Vec3& position) {
     return vec3_is_finite(position);
 }
 
-static bool w2s(const Mat4& vp, const Vec3& world, float sw, float sh, Vec2& out, bool clip_to_screen = true) {
+bool w2s(const Mat4& vp, const Vec3& world, float sw, float sh, Vec2& out, bool clip_to_screen) {
     // clip = VP * float4(world, 1) with column-major VP
     float clip_x = mat_get(vp, 0, 0) * world.x + mat_get(vp, 0, 1) * world.y + mat_get(vp, 0, 2) * world.z + mat_get(vp, 0, 3);
     float clip_y = mat_get(vp, 1, 0) * world.x + mat_get(vp, 1, 1) * world.y + mat_get(vp, 1, 2) * world.z + mat_get(vp, 1, 3);
@@ -1798,12 +1762,12 @@ struct PlayerAux {
 };
 static std::unordered_map<uint64_t, PlayerAux> g_player_aux;
 
-static TransformHierarchyLayout g_skeleton_layout{};
-static bool g_skeleton_layout_valid = false;
+TransformHierarchyLayout g_skeleton_layout{};
+bool g_skeleton_layout_valid = false;
 
 static uint64_t g_go_name_offset = 0;
 static bool     g_go_name_plain_pointer = false; // fallback: name stored as raw char*
-static bool     g_go_name_offset_valid = false;
+bool     g_go_name_offset_valid = false;
 static double   g_go_name_retry_at = 0.0;   // mono_seconds: не раньше этого момента
 static int      g_skeleton_builds_this_frame = 0; // heavy rescans: max 1 per frame
 
@@ -1837,7 +1801,7 @@ static int read_transform_children(uint64_t transform, uint64_t* out, int max_ch
     return count;
 }
 
-static void collect_transform_subtree(uint64_t root, std::vector<uint64_t>& nodes, size_t max_nodes) {
+void collect_transform_subtree(uint64_t root, std::vector<uint64_t>& nodes, size_t max_nodes) {
     nodes.clear();
     if (!root) return;
     nodes.push_back(root);
@@ -1921,7 +1885,7 @@ static bool read_gameobject_name_at(uint64_t native_go, uint64_t name_offset, bo
     return true;
 }
 
-static bool read_transform_name(uint64_t transform, char* out, size_t cap) {
+bool read_transform_name(uint64_t transform, char* out, size_t cap) {
     if (!g_go_name_offset_valid || !transform) return false;
     uint64_t native_go = rd_ptr(transform + COMPONENT_GAMEOBJECT);
     if (!native_go) return false;
@@ -2011,7 +1975,7 @@ static bool resolve_skeleton_layout(uint64_t sample_transform) {
 // meshes and BFS depth issues. Intermediate bones (spine chain, neck, shoulders,
 // hands, feet) are recovered structurally from the transform hierarchy.
 
-static uint64_t managed_object_native(uint64_t managed) {
+uint64_t managed_object_native(uint64_t managed) {
     if (!managed) return 0;
     uint64_t native = rd_ptr(managed + MANAGED_CACHED_PTR);
     if (native < 0x10000 || native >= 0x0001000000000000ULL) return 0;
@@ -2027,7 +1991,7 @@ static bool skeleton_transform_ptr_valid(uint64_t transform) {
 }
 
 // Any native Component -> the Transform of its GameObject.
-static uint64_t native_component_transform(uint64_t native_component) {
+uint64_t native_component_transform(uint64_t native_component) {
     if (!native_component) return 0;
     uint64_t go = rd_ptr(native_component + COMPONENT_GAMEOBJECT);
     if (!go) return 0;
@@ -2726,7 +2690,7 @@ struct PlayerTrack {
     int    jump_frames = 0;
 };
 
-static double mono_seconds() {
+double mono_seconds() {
     using namespace std::chrono;
     return duration_cast<duration<double>>(steady_clock::now().time_since_epoch()).count();
 }
@@ -3083,8 +3047,8 @@ static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos) 
 // части устройств недоступна, см. class_identity). Где рядом есть второй,
 // независимый признак (обратная ссылка на игрока) — объект принимаем; где признак
 // только имя — нет, иначе под проверку попадёт что угодно.
-static bool object_class_name_is(uint64_t obj, const char* expected,
-                                 bool accept_when_unreadable = false) {
+bool object_class_name_is(uint64_t obj, const char* expected,
+                                 bool accept_when_unreadable) {
     if (!valid_obj(obj)) return false;
     uint64_t klass = rd_ptr(obj);
     if (!valid_obj(klass)) return false;
@@ -3097,7 +3061,7 @@ static bool object_class_name_is(uint64_t obj, const char* expected,
 // The GameObject-name offset is normally discovered while building a skeleton.
 // Weapon labels must work with skeleton ESP off, so discover it on demand from
 // the character model subtree (cheap: one BFS, then cached process-wide).
-static bool ensure_gameobject_name_offset(uint64_t player) {
+bool ensure_gameobject_name_offset(uint64_t player) {
     if (g_go_name_offset_valid) return true;
     // Кулдаун в СЕКУНДАХ, а не в вызовах. Функцию зовут из мест с совершенно
     // разной частотой: конвейер имён ESP — каждый кадр на каждого игрока, сканы
@@ -3206,7 +3170,7 @@ static bool weapon_label_from_object_name(const char* raw, char* out, size_t cap
 }
 
 // Managed MonoBehaviour/Component -> name of the GameObject it sits on.
-static bool managed_component_gameobject_name(uint64_t managed_component, char* out, size_t cap) {
+bool managed_component_gameobject_name(uint64_t managed_component, char* out, size_t cap) {
     if (!g_go_name_offset_valid) return false;
     uint64_t native = managed_object_native(managed_component);
     if (!native) return false;
@@ -3419,7 +3383,7 @@ static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, b
 // Angular offset of a world point from the camera axis. Prefers the live
 // camera pose; falls back to inverting the projection from the screen point,
 // so aim angles never depend on the transform-pose path succeeding.
-static bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, float sh, float& yaw_deg, float& pitch_deg) {
+bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, float sh, float& yaw_deg, float& pitch_deg) {
     constexpr float rad2deg = 57.29577951F;
     if (g_cam_pose_valid || g_aim_ref_valid) {
         // Prefer the real firing reference (look root direction from the eye
@@ -3791,43 +3755,6 @@ bool esp_local_player_is_aiming() {
 //   else On_Woosh()
 // distance — UnityEngine.RaycastHit.get_distance(), то есть 3D-метры от
 // камеры/оси выстрела, а НЕ горизонтальное расстояние до узла.
-struct MeleeReach {
-    bool  valid = false;
-    float max_reach = 0.0F;   // FPMelee.m_MaxReach  (0x128)
-    float hit_radius = 0.0F;  // FPMelee.hitRadius   (0x12C)
-    float total = 0.0F;       // порог засчёта удара, 3D-метры от глаза
-    float ray_length = 0.0F;  // RaycastManager.m_RayLength (0x38)
-    char  tool[24] = {};      // имя класса орудия
-    // Ритм ударов этого орудия: FPMelee.m_TimeBetweenAttacks (0x130) и
-    // pauseAfterAttack (0x134). Всё, что чаще первого, игра ставит в очередь
-    // и съедает, так что такт бота берётся отсюда, а не из миллисекунд «на глаз».
-    float time_between_attacks = 0.0F;
-    float pause_after_attack = 0.0F;
-    // Что орудие умеет (FPTool.m_ToolPurposes, флаги ToolPurpose). Читается
-    // только у FPTool/FPChainsaw — у прочих FPMelee на 0x160 свои поля.
-    int   tool_purposes = 0;
-    bool  purposes_valid = false;
-    // Что прямо сейчас видит прицел. Игра сама кастует лучи (RaycastManager) и
-    // кладёт результат в активности PlayerEventHandler (Gum); FPMelee.ZkX
-    // берёт distance именно оттуда. По нему видно, не перекрыт ли узел: луч
-    // упёрся ближе, чем наша точка прицела, — значит удар уйдёт в перекрытие.
-    bool  ray_valid = false;      // в активностях есть GKo
-    bool  ray_hit_object = false; // у попадания есть GameObject
-    float ray_distance = 0.0F;    // м от камеры вдоль прицела (0 = неизвестно)
-    // Куда именно упёрся луч игры (m_Point) и нормаль поверхности там
-    // (m_Normal). Нужны, чтобы в логе автофарма видеть разницу между нашей
-    // точкой прицела и реальным попаданием луча: по ней эмпирически меряется
-    // сдвиг декали крестика от коры (0.25 м по дампу) и проверяется, что
-    // прицел стоит на мешевом коллайдере, а не в воздухе рядом с ним.
-    bool  ray_point_valid = false;
-    Vec3  ray_point{}, ray_normal{};
-    // В ЧЁМ именно остановился луч: RaycastHit.m_Collider (managed Collider) и
-    // GameObject попадания (GKo.m_HitObject, тот же, из которого выше
-    // ray_hit_object). По ним отличаем «луч упёрся в сам узел добычи» от «узел
-    // перекрыт чужой геометрией» — см. ray_hit_is_self_node.
-    uint64_t ray_collider = 0;
-    uint64_t ray_hit_go = 0;
-};
 
 // Имена классов ближнего орудия читаемые и между билдами не ротируют
 // (dump.cs: Oxide.FPMelee -> Oxide.FPTool -> Oxide.FPChainsaw, плюс FPSpear,
@@ -3839,7 +3766,7 @@ static uint64_t s_melee_klass = 0;
 static bool     s_melee_klass_ok = false;
 static char     s_melee_klass_name[24] = {};
 
-static bool read_local_melee_reach(MeleeReach& out) {
+bool read_local_melee_reach(MeleeReach& out) {
     out = MeleeReach{};
     if (g_pid <= 0 || !g_il2cpp_base) return false;
     const uint64_t local = resolve_local_player();
@@ -4115,17 +4042,17 @@ static std::unordered_map<uint64_t, int> g_frame_transforms_lost;
 
 // Frame projection state, published by esp_get_boxes() so that world markers
 // (ore / animals) project through exactly the same camera as the player boxes.
-static Mat4 g_frame_vp{};
-static bool g_frame_vp_valid = false;
-static float g_frame_sw = 0.0F, g_frame_sh = 0.0F;
-static Vec3 g_frame_local_pos{};
-static bool g_frame_local_valid = false;
+Mat4 g_frame_vp{};
+bool g_frame_vp_valid = false;
+float g_frame_sw = 0.0F, g_frame_sh = 0.0F;
+Vec3 g_frame_local_pos{};
+bool g_frame_local_valid = false;
 // Camera basis recovered from this frame's VIEW MATRIX (not the transform
 // pose). On devices where the transform pose read fails, this is the only
 // camera orientation available — good enough for the farm's slow turns,
 // though not for the aimbot (the fallback matrix lags a frame).
-static bool g_frame_cam_basis_valid = false;
-static Vec3 g_frame_cam_pos{}, g_frame_cam_fwd{}, g_frame_cam_right{}, g_frame_cam_up{};
+bool g_frame_cam_basis_valid = false;
+Vec3 g_frame_cam_pos{}, g_frame_cam_fwd{}, g_frame_cam_right{}, g_frame_cam_up{};
 
 // Камерный источник годен, если его позиция конечна и близка к корню игрока.
 // Нулевой вектор конечен, поэтому одна проверка isfinite пропускала мусор: в
@@ -4136,7 +4063,7 @@ static Vec3 g_frame_cam_pos{}, g_frame_cam_fwd{}, g_frame_cam_right{}, g_frame_c
 // Доступ к камере (esp_camera_angles / esp_local_eye_position) объявлен ниже,
 // сразу за g_frame_cam_*: базис из матрицы вида — третий источник углов и
 // позиции глаза, и он обязан быть объявлен раньше этих функций.
-static bool farm_cam_source_ok(const Vec3& p) {
+bool farm_cam_source_ok(const Vec3& p) {
     if (!vec3_is_finite(p)) return false;
     if (!g_frame_local_valid) return true;
     const float dx = p.x - g_frame_local_pos.x;
@@ -4260,8 +4187,6 @@ static std::atomic<bool> g_want_reattach{false};
 // world. Deliberately NOT tied to the camera object: the game swaps cameras
 // while aiming, which must not disturb boxes or skeletons.
 // Defined with the marker code further down (needs its caches).
-static void reset_marker_caches();
-
 static void reset_world_caches() {
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_validated = false;
@@ -4327,15 +4252,15 @@ void esp_reset() {
 // Last overlay size esp_get_boxes() was called with — the camera-only frame
 // fallback below needs plausible screen dimensions even when the box pipeline
 // bailed out before publishing anything.
-static float g_last_overlay_sw = 1080.0F;
-static float g_last_overlay_sh = 2400.0F;
+float g_last_overlay_sw = 1080.0F;
+float g_last_overlay_sh = 2400.0F;
 
 // Publish a frame (VP matrix + "local position") straight from the game
 // camera, with no players involved at all. This is what keeps markers and
 // the autofarm alive when the player list is empty or the box pipeline
 // failed: the camera IS where the local player is.
 
-static bool publish_camera_only_frame(float sw, float sh) {
+bool publish_camera_only_frame(float sw, float sh) {
     if (g_pid <= 0 || !g_il2cpp_base) return false;
     // Resolves g_game_controller_class as a side effect — without it the
     // camera lookup below has no class to read statics from.
@@ -4928,2217 +4853,3 @@ int esp_nearby_player_count() { return g_frame_player_count; }
 
 bool esp_wants_reattach() { return g_want_reattach.exchange(false); }
 
-
-// ===================== World markers: ore nodes and animals =====================
-//
-// Ore nodes, trees and animals are all Oxide.MineableObject subclasses
-// (MineableStone / MineableTree / MineableAnimal / ...), and each one is a
-// Mirror.NetworkBehaviour. The client therefore already keeps a complete list
-// of the ones around the player:
-//
-//   Mirror.NetworkClient.spawned  (Dictionary<uint, NetworkIdentity>)
-//     -> NetworkIdentity.NetworkBehaviours[]
-//        -> the Mineable* component  -> entityType tells us what it is
-//     -> the identity's GameObject transform -> world position
-//
-// The class of each behaviour is only inspected once (cached per Il2CppClass),
-// and the whole registry is re-scanned every few seconds rather than per frame;
-// each frame only re-reads the positions, and only for animals, since ore nodes
-// never move.
-
-static bool g_markers_ore_enabled = false;
-static bool g_markers_animal_enabled = false;
-static bool g_markers_loot_enabled = false;
-static bool g_markers_pickup_enabled = false;
-static float g_marker_max_distance = 150.0F;
-// Когда можно начинать следующий проход скана маркеров, в mono_seconds().
-// Раньше здесь был счётчик кадров (180, при пустом списке 30) из расчёта на
-// 60 fps; устройство пользователя рисует 118 кадров/с, поэтому скан шёл вдвое
-// чаще задуманного — 1.5 с вместо 3 с, а при пустом списке 0.25 с вместо 0.5 с.
-static double g_marker_next_scan = 0.0;
-static uint64_t g_network_client_class = 0;
-static uint64_t g_network_identity_class = 0;
-
-// Скан маркеров идёт порциями, а не одним кадром.
-//
-// Полный проход по словарю заспавненных объектов — это десятки тысяч обращений
-// к памяти игры (на каждый компонент: класс, имя GameObject, трансформ,
-// позиция), и раньше он делался целиком за один вызов. В спокойном режиме это
-// стоило ~25 мс (в логе видно как dt_max 21-29 мс каждые ~3 с), а когда процесс
-// уже придушен — до 280 мс одним кадром (те самые пики dt_max 212-283 мс в
-// медленной части лога): игра в этот момент visibly дёргается.
-//
-// Поэтому порция ограничена ВРЕМЕНЕМ (kMarkerScanBudgetSec), а не числом
-// объектов: цена записи словаря плавает от «не маркер, три чтения» до «кластер
-// камней на 30 компонентов», а в придавленной троттлингом процессе те же чтения
-// стоят в разы дороже — лимит по миллисекундам держит кадр ровным в обоих
-// случаях. Курсор запоминается, собирается всё во временный список, и
-// g_marker_entities подменяется разом, когда цикл завершён: старый список
-// показывается до последнего кадра цикла, поэтому маркеры не мигают и не
-// пропадают на время пересборки (это уже ломали однажды — см. «ESP flicker»).
-// Узел разбирается целиком (проверка времени только между узлами): оборви мы
-// его на середине, следующий кадр начал бы с того же узла и его уже собранные
-// компоненты попали бы в список второй раз.
-constexpr double kMarkerScanBudgetSec = 0.006;   // 6 мс на порцию при бюджете кадра 16.7 мс
-static int32_t g_marker_scan_cursor = -1;    // -1: цикл не начат
-static int32_t g_marker_scan_total  = 0;
-static uint64_t g_marker_scan_identity_class = 0;
-static std::vector<uint8_t> g_marker_scan_buffer;
-// g_marker_scan_pending (список, который собирается сейчас) и marker_scan_abort()
-// объявлены ниже, вместе с MarkerEntity; фильтр категорий меняется раньше по
-// файлу, поэтому здесь только объявление.
-static void marker_scan_abort();
-
-void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups) {
-    // Loot containers and ground pickups are filtered out during the registry
-    // walk, so switching a category on has to invalidate the cached list.
-    if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled) {
-        g_marker_next_scan = 0.0;
-        marker_scan_abort();   // половина списка собрана по старым фильтрам
-    }
-    g_markers_ore_enabled = ore;
-    g_markers_animal_enabled = animals;
-    g_markers_loot_enabled = loot;
-    g_markers_pickup_enabled = pickups;
-}
-
-
-void esp_set_marker_max_distance(float metres) {
-    if (!std::isfinite(metres)) return;
-    if (metres < 10.0F) metres = 10.0F;
-    if (metres > MAX_PLAYER_DISTANCE) metres = MAX_PLAYER_DISTANCE;
-    g_marker_max_distance = metres;
-}
-
-struct MarkerEntity {
-    uint64_t identity = 0;
-    uint64_t transform = 0;     // native Transform of the GameObject
-    Vec3     position{};
-    bool     position_valid = false;
-    int      pos_cooldown = 0;  // frames until the next position re-read (far animals)
-    int      kind = ESP_MARKER_ORE;
-    // Fixed labels point into static strings; ground pickups build their own
-    // ("Ягоды x12"), in which case `text` holds it and `label` is null.
-    const char* label = nullptr;
-    char     text[40] = {};
-    bool     has_color = false;
-    bool     rainbow = false;
-    unsigned char color_rgb[3] = {255, 255, 255};
-};
-static std::vector<MarkerEntity> g_marker_entities;
-// Список, который собирается порциями прямо сейчас: g_marker_entities
-// подменяется им только когда цикл завершён, чтобы маркеры не мигали.
-static std::vector<MarkerEntity> g_marker_scan_pending;
-
-// Прервать незавершённый цикл: следующая порция начнёт его заново. Нужно при
-// смене фильтров (иначе в список доехала бы старая категория) и при перезагрузке
-// мира. g_marker_entities при этом остаётся прежним — показываем его до конца
-// следующего цикла.
-static void marker_scan_abort() {
-    g_marker_scan_cursor = -1;
-    g_marker_scan_total  = 0;
-    g_marker_scan_buffer.clear();
-    g_marker_scan_buffer.shrink_to_fit();
-    g_marker_scan_pending.clear();
-}
-static std::unordered_map<uint64_t, uint8_t> g_marker_class_kind;
-
-// ---- Auto-farm state ---------------------------------------------------------
-// The farm has its own entity cache (it wants trees, which the ore markers
-// deliberately skip) and its own rescan cadence. Positions and loot are read
-// the same way the markers read them; the walking/hitting itself is done with
-// synthetic touches in main.cpp.
-struct FarmEntity {
-    uint64_t identity = 0;      // NetworkIdentity (stable id for the blacklist)
-    uint64_t component = 0;     // the Mineable* component (fraction reads)
-    uint64_t transform = 0;     // native Transform (position)
-    Vec3     pos{};
-    bool     pos_valid = false;
-    int      kind = 0;          // 0 wood, 1 stone, 2 metal, 3 sulfur
-    // Cached fractionRemaining: reading it live for EVERY node on EVERY
-    // frame was a syscall storm (hundreds of memory reads per frame
-    // with a full cache). The value only matters for de-prioritising
-    // mined-out nodes, so a second of staleness changes nothing.
-    float    fraction = -1.0F;
-    int      frac_age = 0;
-    // Кеш JE-экстеншена, который хранит крестик узла (OreHitstreaks для руды,
-    // TreeHitstreaks для деревьев). Ищется один раз на узел и переиспользуется:
-    // каждый кадр читаются только сами координаты X.
-    uint64_t ext = 0;
-    int      ext_kind = 0;   // FARM_EXT_NONE / _ORE / _TREE
-    int      ext_age = 0;    // кадров до повторного поиска
-    // Каким орудием узел добывается (MineableObject.m_RequiredToolPurpose,
-    // флаги ToolPurpose). Значение из префаба и за жизнь узла не меняется,
-    // поэтому читается один раз при скане. 0 = неизвестно/без требования.
-    int      required_purpose = 0;
-};
-static std::vector<FarmEntity> g_farm_entities;
-static std::unordered_map<uint64_t, int> g_farm_blacklist; // identity -> frames left
-// Когда можно начинать следующий проход скана реестра, в mono_seconds().
-// Раньше здесь был счётчик КАДРОВ (120, при пустом списке 30), рассчитанный на
-// 60 fps: устройство пользователя рисует 118 кадров/с, поэтому скан запускался
-// вдвое чаще задуманного — раз в ~1 с, а при пустом списке раз в 0.25 с.
-static double g_farm_next_scan = 0.0;
-// Определение скана ниже (ему нужны FarmEntity и резолверы реестра), а
-// сбрасывать его приходится и отсюда — при перезагрузке мира.
-static void farm_scan_abort();
-static void farm_scan_reset();
-// Орудие в руках и что запросили отброшенные узлы (флаги ToolPurpose) — для
-// строки статуса в меню: «нужен топор» вместо бессмысленного «все узлы вне
-// радиуса».
-static int g_farm_tool_have = 0;
-static int g_farm_tool_need = 0;
-// Why the picker returned nothing (surfaced in the menu status line):
-// 0 ok, 1 off, 2 frame not published, 3 no nodes in registry, 4 none in
-// range, 5 camera pose unreadable, 6 nodes are there but the tool in hand
-// cannot harvest them (m_RequiredToolPurpose vs FPTool.m_ToolPurposes).
-static int g_farm_idle_reason = 1;
-
-// What a single marker looks like: kind picks the toggle it belongs to, and ore
-// markers carry a fixed colour per resource (stone grey, metal orange, sulfur
-// yellow) instead of one configurable colour for all of them.
-struct MarkerLook {
-    int kind = ESP_MARKER_ORE;
-    const char* label = nullptr;
-    bool has_color = false;
-    bool rainbow = false; // drawn in a cycling rainbow colour (elite crates)
-    unsigned char rgb[3] = {255, 255, 255};
-};
-
-static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, false, {190, 190, 190}};
-static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, false, {255, 140,  40}};
-static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {255, 225,  50}};
-
-// Barrels are smashed, not opened, so they are MineableObjects and never pass
-// through the LootObject code at all -- the entityType below is the only place
-// they can be recognised. They belong to the loot toggle all the same.
-static const MarkerLook kBarrel    {ESP_MARKER_LOOT, "Бочка",  true,  false, {80, 200, 255}};
-static const MarkerLook kSmashBox  {ESP_MARKER_LOOT, "Ящик",   false, false, {255, 255, 255}};
-
-// Animals: the game's own EntityType only covers some of them, the rest (wolf,
-// rat, ...) are recognised by the prefab name below.
-static MarkerLook animal_look(const char* label) {
-    MarkerLook look;
-    look.kind = ESP_MARKER_ANIMAL;
-    look.label = label;
-    look.has_color = false;
-    return look;
-}
-
-// EntityType -> what to draw. Trees, road signs, buildings and players are
-// left out on purpose; barrels and smashable loot boxes are in, they are the
-// scrap source and the game files them under the same enum.
-static bool marker_for_entity_type(int32_t type, MarkerLook& look) {
-    switch ((MineableEntityType)type) {
-        case MineableEntityType::Stone:    look = kOreStone;  return true;
-        case MineableEntityType::Iron:     look = kOreMetal;  return true;
-        case MineableEntityType::Sulfur:   look = kOreSulfur; return true;
-        case MineableEntityType::Barrel:   look = kBarrel;    return true;
-        case MineableEntityType::Lootbox:  look = kSmashBox;  return true;
-        // Air-drop balloon crates, new in this game build.
-        case MineableEntityType::LootboxBaloon:
-        case MineableEntityType::LootboxBaloonBig: look = kSmashBox; return true;
-        case MineableEntityType::Bear:     look = animal_look("Медведь");  return true;
-        case MineableEntityType::Boar:     look = animal_look("Кабан");    return true;
-        case MineableEntityType::Deer:     look = animal_look("Олень");    return true;
-        case MineableEntityType::Rabbit:   look = animal_look("Кролик");   return true;
-        case MineableEntityType::Hare:     look = animal_look("Заяц");     return true;
-        case MineableEntityType::Chicken:  look = animal_look("Курица");   return true;
-        case MineableEntityType::Fish:     look = animal_look("Рыба");     return true;
-        case MineableEntityType::Cannibal: look = animal_look("Каннибал"); return true;
-        default: return false; // Ice is deliberately not drawn
-    }
-}
-
-// Split a prefab name into lower-case words and hand each one to `visit`.
-// Separators, digits and camelCase humps end a word, so "NPC_Wolf 02(Clone)"
-// yields npc / wolf / clone. Matching whole words (never substrings) is what
-// keeps "Crate" from looking like a rat and "Ratchet" from looking like loot.
-// `visit` returning true stops the walk; that result is returned.
-template <typename Visit>
-static bool for_each_name_token(const char* raw, Visit&& visit) {
-    if (!raw || !raw[0]) return false;
-    char word[24];
-    size_t n = 0;
-    char prev = 0; // previous raw character, to spot camelCase humps
-    for (const char* p = raw;; prev = *p, ++p) {
-        char c = *p;
-        bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-        // A capital after a lower-case letter starts a new word ("BigWolf"),
-        // and so does the LAST capital of an all-caps run when a lower-case
-        // letter follows it ("NPCWolf" = npc + wolf). A pure all-caps run
-        // ("WOLF") stays a single word.
-        bool hump = letter && c >= 'A' && c <= 'Z' && n > 0 &&
-                    ((prev >= 'a' && prev <= 'z') ||
-                     (prev >= 'A' && prev <= 'Z' && p[1] >= 'a' && p[1] <= 'z'));
-        if (letter && !hump && n + 1 < sizeof(word)) {
-            word[n++] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-            continue;
-        }
-        if (n > 0) {
-            word[n] = '\0';
-            if (visit((const char*)word)) return true;
-            n = 0;
-        }
-        if (!c) break;
-        if (hump) { word[n++] = (char)(c - 'A' + 'a'); }
-    }
-    return false;
-}
-
-// Wolves and rats have no EntityType of their own (the enum stops at the
-// analytics animals), so they are recognised by the prefab name of their
-// GameObject.
-static bool animal_look_from_object_name(const char* raw, MarkerLook& look) {
-    static const struct { const char* word; const char* ru; } kAnimals[] = {
-        {"wolf", "Волк"},      {"wolfs", "Волк"},     {"wolves", "Волк"},
-        {"volk", "Волк"},      {"husky", "Волк"},
-        {"rat", "Крыса"},      {"rats", "Крыса"},     {"mouse", "Крыса"},
-        {"bear", "Медведь"},   {"boar", "Кабан"},     {"pig", "Кабан"},
-        {"deer", "Олень"},     {"stag", "Олень"},     {"rabbit", "Кролик"},
-        {"hare", "Заяц"},      {"chicken", "Курица"}, {"hen", "Курица"},
-        {"fish", "Рыба"},      {"shark", "Акула"},    {"cannibal", "Каннибал"},
-        {"horse", "Лошадь"},   {"goat", "Коза"},      {"sheep", "Овца"},
-        {"cow", "Корова"},     {"fox", "Лиса"},       {"snake", "Змея"},
-    };
-    return for_each_name_token(raw, [&](const char* word) {
-        size_t wlen = strlen(word);
-        for (const auto& animal : kAnimals) {
-            if (strcmp(word, animal.word) == 0) { look = animal_look(animal.ru); return true; }
-            // Prefix match for glued prefab words ("wolfmale", "bearbig"):
-            // only for 4+ letter animal tokens, so "rat" never claims
-            // "ratchet" and other short-token accidents stay impossible.
-            size_t alen = strlen(animal.word);
-            if (alen >= 4 && wlen > alen && strncmp(word, animal.word, alen) == 0) {
-                look = animal_look(animal.ru);
-                return true;
-            }
-        }
-        return false;
-    });
-}
-
-// Same safety net as the animals: some barrels come with an empty entityType,
-// and their prefab is the only thing that still says "barrel".
-static bool barrel_look_from_object_name(const char* raw, MarkerLook& look) {
-    return for_each_name_token(raw, [&](const char* word) {
-        // Prefix match: covers "barrel", "barrels", "barrel02", glued names
-        // like "barrelblue", plus the misspelled and localised variants some
-        // prefabs ship with ("barel", "bochka").
-        if (strncmp(word, "barrel", 6) == 0 || strncmp(word, "barel", 5) == 0 ||
-            strncmp(word, "bochka", 6) == 0 ||
-            strcmp(word, "keg") == 0 || strcmp(word, "drum") == 0) {
-            look = kBarrel;
-            return true;
-        }
-        return false;
-    });
-}
-
-// ---- World loot containers --------------------------------------------------
-// Oxide.LootObject is used both for the loot scattered around the map (crates,
-// barrels, airdrops) and for the storage boxes players deploy. Deployed boxes
-// are what we must not draw, and they give themselves away twice: they own a
-// Building.BuildingPiece component, and their prefab is named after the size
-// ("WoodenBoxLarge", "Small Box"). Both signals are used.
-struct LootNameInfo {
-    const char* label = nullptr;
-    int  rank = 0;
-    bool rainbow = false;
-    bool player_box = false;
-};
-
-static void scan_loot_name(const char* raw, LootNameInfo& info) {
-    // Containers a player deploys — never interesting, always hidden. The
-    // concatenated spellings matter because `panelName` is one lower-case word
-    // ("largewoodbox") and never splits into tokens.
-    static const char* const kDeployed[] = {
-        "storage", "stash", "cupboard", "furnace", "campfire", "locker", "bed",
-        "sleeping", "sleepingbag", "bedroll", "shelf", "planter", "composter",
-        "fridge", "mailbox", "workbench", "quarry", "turret", "smelter",
-        "barbecue", "oven", "wardrobe", "rack",
-        "woodbox", "woodenbox", "largewoodbox", "smallwoodbox", "largebox",
-        "smallbox", "bigbox", "storagebox", "toolcupboard", "toolbox2",
-        // Sleeping players and the bag a killed player leaves behind are
-        // lootable too, and they used to show up as an anonymous "Ящик".
-        "corpse", "corpses", "ragdoll", "sleeper", "sleepers", "player",
-        "players", "human", "survivor", "backpack", "deathbag", "death",
-        "died", "grave", "skeleton", "playercorpse", "playerloot",
-        "lootbag", "dropbag", "deathloot",
-        // NOTE: never put a word here that a world container can also use.
-        // "generic" was in this list for one build and it hid every barrel:
-        // barrels open the plain "generic" loot panel.
-    };
-    // A "box" that also says how big it is, is a player box ("Large Box").
-    static const char* const kSizeWords[] = {"small", "large", "big", "wood", "wooden", "medium", "mini"};
-    // label table; a higher rank wins so "MilitaryCrate" beats plain "crate".
-    static const struct { const char* word; const char* ru; int rank; bool rainbow; } kLabels[] = {
-        // Elite / military crates first: they are the ones worth crossing the
-        // map for, so every spelling the prefab or the loot panel might use is
-        // listed and outranks the plain "crate" match below. The elite ones
-        // are flagged rainbow: the overlay cycles their colour.
-        {"military",     "Военный ящик",     4, false},
-        {"militarycrate","Военный ящик",     4, false},
-        {"milcrate",     "Военный ящик",     4, false},
-        {"mil",          "Военный ящик",     4, false},
-        {"army",         "Военный ящик",     4, false},
-        {"soldier",      "Военный ящик",     4, false},
-        {"elite",        "Элитный ящик",     4, true},
-        {"elitecrate",   "Элитный ящик",     4, true},
-        {"eliteloot",    "Элитный ящик",     4, true},
-        {"epic",         "Элитный ящик",     4, true},
-        {"legendary",    "Элитный ящик",     4, true},
-        {"rare",         "Редкий ящик",      4, false},
-        {"airdrop",    "Аирдроп",            3, false},
-        {"supply",     "Аирдроп",            3, false},
-        {"medical",    "Мед. ящик",          3, false},
-        {"medkit",     "Мед. ящик",          3, false},
-        {"ammo",       "Ящик патронов",      3, false},
-        {"toolbox",    "Ящик инструментов",  3, false},
-        {"food",       "Ящик с едой",        3, false},
-        {"heli",       "Ящик с вертолёта",   3, false},
-        {"helicopter", "Ящик с вертолёта",   3, false},
-        {"bradley",    "Ящик с танка",       3, false},
-        {"oilrig",     "Ящик с вышки",       3, false},
-        {"hackable",   "Взломной ящик",      3, false},
-        {"safe",       "Сейф",               3, false},
-        {"cash",       "Касса",              3, false},
-        {"register",   "Касса",              3, false},
-        {"vending",    "Автомат",            3, false},
-        {"barrel",     "Скрап",              2, false}, // barrels are the scrap source
-        {"crate",      "Ящик",               2, false},
-        {"lootbox",    "Ящик",               2, false},
-        {"loot",       "Ящик",               2, false},
-        {"container",  "Контейнер",          2, false},
-        {"chest",      "Сундук",             2, false},
-        {"case",       "Кейс",               2, false},
-        {"cache",      "Тайник",             2, false},
-        {"trash",      "Мусорка",            2, false},
-        {"garbage",    "Мусорка",            2, false},
-    };
-    bool saw_box = false, saw_size = false;
-    for_each_name_token(raw, [&](const char* word) {
-        for (const char* bad : kDeployed)
-            if (strcmp(word, bad) == 0) { info.player_box = true; return true; }
-        if (strcmp(word, "box") == 0) saw_box = true;
-        for (const char* size : kSizeWords)
-            if (strcmp(word, size) == 0) { saw_size = true; break; }
-        for (const auto& entry : kLabels) {
-            if (strcmp(word, entry.word) == 0 && entry.rank > info.rank) {
-                info.rank = entry.rank;
-                info.label = entry.ru;
-                info.rainbow = entry.rainbow;
-            }
-        }
-        return false;
-    });
-    if (saw_box && saw_size) info.player_box = true;
-}
-
-static bool loot_marker(uint64_t component, const char* object_name, const char* root_name,
-                        MarkerLook& look) {
-    // A container that is part of a building is player-placed by definition.
-    if (valid_obj(rd_ptr(component + LOOTOBJECT_BUILDING_PIECE))) return false;
-
-    // Three name sources: the component's GameObject, the network object's
-    // root GameObject, and the loot panel id the UI opens with. The panel is
-    // often the only one that says "militarycrate" out loud.
-    char panel[32] = {};
-    read_managed_string(rd_ptr(component + LOOTOBJECT_PANEL_NAME), panel, sizeof(panel));
-
-    LootNameInfo info;
-    scan_loot_name(object_name, info);
-    if (!info.player_box) scan_loot_name(root_name, info);
-    if (!info.player_box) scan_loot_name(panel, info);
-    if (info.player_box) return false;
-    // No name we recognise -> not drawn. Everything anonymous down here is
-    // something a player owns (a box in a house, a sleeping player, the bag a
-    // corpse leaves), and labelling all of it "Ящик" is exactly the noise the
-    // loot ESP must not produce. World containers always name themselves.
-    if (info.rank <= 0 || !info.label) return false;
-
-    look.kind = ESP_MARKER_LOOT;
-    look.label = info.label;
-    look.rainbow = info.rainbow;
-    look.has_color = false;
-    return true;
-}
-
-// Elements of a managed List<T> or T[] (the dump types these fields as `?`, so
-// the shape is decided at runtime from the class name).
-static int read_managed_collection(uint64_t object, uint64_t* out, int max_items) {
-    if (!valid_obj(object) || !out || max_items <= 0) return 0;
-    uint64_t klass = rd_ptr(object);
-    if (!valid_obj(klass)) return 0;
-    uint64_t array = object;
-    int32_t count = 0;
-    bool name_readable = false;
-    const std::string klass_name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME), &name_readable);
-    const bool is_list = name_readable
-        ? klass_name.rfind("List`1", 0) == 0
-        // Имя класса недоступно: List и массив различаем по структуре — у List на
-        // 0x10 лежит массив элементов, у массива там bounds (обычно ноль).
-        : valid_obj(rd_ptr(object + IL2CPP_LIST_ITEMS));
-    if (is_list) {
-        array = rd_ptr(object + IL2CPP_LIST_ITEMS);
-        count = rd<int32_t>(object + IL2CPP_LIST_SIZE);
-    } else {
-        count = rd<int32_t>(object + IL2CPP_ARRAY_LENGTH);
-    }
-    if (!valid_obj(array) || count <= 0) return 0;
-    if (count > max_items) count = max_items;
-    if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, out, (size_t)count * sizeof(uint64_t))) return 0;
-    return count;
-}
-
-// One loot item short name -> the resource it identifies. Rank breaks ties:
-// sulfur and metal nodes drop stones as well, so the richer resource wins, and
-// wood/cloth/meat (trees, animals, bushes) rank 0 and are ignored here.
-static int ore_look_for_item_name(const char* item_name, MarkerLook& look) {
-    if (!item_name || !item_name[0]) return 0;
-    char key[40];
-    size_t n = 0;
-    for (const char* p = item_name; *p && n + 1 < sizeof(key); ++p) {
-        char c = *p;
-        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        key[n++] = c;
-    }
-    key[n] = '\0';
-    // Processed items (barrels are stuffed with them) are not ore: without
-    // this "metal.fragments" turned every barrel into an iron node.
-    if (strstr(key, "frag") || strstr(key, "pipe") || strstr(key, "sheet") ||
-        strstr(key, "scrap") || strstr(key, "spring") || strstr(key, "gear"))
-        return 0;
-    if (strstr(key, "sulfur")) { look = kOreSulfur; return 3; }
-    if (strstr(key, "metal"))  { look = kOreMetal;  return 2; } // metal.ore, hq.metal.ore
-    if (strstr(key, "stone"))  { look = kOreStone;  return 1; }
-    return 0;
-}
-
-// Ore nodes do not always fill in entityType, but they always know what they
-// drop: MineableObject.m_Loot is a list of Oxide.LootItem and LootItem.ItemName
-// is the item short name ("stone", "metal.ore", "sulfur.ore", "wood", ...).
-static bool marker_from_loot(uint64_t mineable, MarkerLook& look) {
-    const uint64_t sources[2] = {MINEABLE_LOOT, MINEABLE_FINISH_BONUS};
-    int best = 0;
-    for (uint64_t source : sources) {
-        uint64_t items[12];
-        int count = read_managed_collection(rd_ptr(mineable + source), items, 12);
-        for (int i = 0; i < count; ++i) {
-            if (!valid_obj(items[i])) continue;
-            char name[32] = {};
-            if (!read_managed_string(rd_ptr(items[i] + LOOTITEM_ITEM_NAME), name, sizeof(name))) continue;
-            MarkerLook candidate;
-            int rank = ore_look_for_item_name(name, candidate);
-            if (rank > best) { best = rank; look = candidate; }
-            if (best == 3) return true;
-        }
-    }
-    return best > 0;
-}
-
-// ---- Ground pickups ---------------------------------------------------------
-// Oxide.ItemPickup carries the item short name ("cloth", "mushroom", ...) and
-// the stack size, so the label needs nothing but a translation table. Matching
-// is by substring because short names are dotted ("metal.fragments",
-// "low.grade.fuel") and the specific entries are listed before the generic
-// ones. Labels stay short on purpose: they share a 40 byte pill with the count.
-static const char* pickup_label_for_item(const char* short_name) {
-    static const struct { const char* key; const char* ru; } kItems[] = {
-        // -- food and gatherables -------------------------------------------
-        {"mushroom",       "Грибы"},        {"blueberr",       "Ягоды"},
-        {"raspberr",       "Ягоды"},        {"berry",          "Ягоды"},
-        // "berries" не содержит подстроку "berry" — нужен свой ключ; кириллица
-        // в обоих регистрах, ASCII-лаускейс её не трогает.
-        {"berri",          "Ягоды"},
-        {"ягод",           "Ягоды"},        {"Ягод",           "Ягоды"},
-        {"pumpkin",        "Тыква"},        {"corn",           "Кукуруза"},
-        {"potato",         "Картофель"},    {"cactus",         "Кактус"},
-        {"seed",           "Семена"},       {"hemp",           "Конопля"},
-        {"granola",        "Батончик"},     {"chocolate",      "Шоколад"},
-        {"candy",          "Конфета"},      {"apple",          "Яблоко"},
-        {"bread",          "Хлеб"},         {"honey",          "Мёд"},
-        {"egg",            "Яйцо"},         {"beans",          "Фасоль"},
-        {"tuna",           "Тунец"},        {"soda",           "Газировка"},
-        {"cola",           "Газировка"},    {"canned",         "Консервы"},
-        {"can.",           "Консервы"},     {"chicken",        "Курятина"},
-        {"meat",           "Мясо"},         {"fish",           "Рыба"},
-        {"water",          "Вода"},         {"bottle",         "Бутылка"},
-        // -- tools and weapons (before the resources: "Stone Hatchet" is a
-        //    hatchet, not a stone) -------------------------------------------
-        {"pickaxe",        "Кирка"},        {"pick axe",       "Кирка"},
-        {"hatchet",        "Топор"},        {"axe",            "Топор"},
-        {"hammer",         "Молоток"},      {"torch",          "Факел"},
-        {"bucket",         "Ведро"},        {"jerry",          "Канистра"},
-        {"explosive",      "Взрывчатка"},   {"grenade",        "Граната"},
-        {"rocket",         "Ракета"},       {"c4",             "С4"},
-        {"ammo",           "Патроны"},      {"arrow",          "Стрелы"},
-        {"shell",          "Патроны"},      {"rifle",          "Винтовка"},
-        {"pistol",         "Пистолет"},     {"revolver",       "Револьвер"},
-        {"shotgun",        "Дробовик"},     {"crossbow",       "Арбалет"},
-        {"bow",            "Лук"},          {"spear",          "Копьё"},
-        {"machete",        "Мачете"},       {"knife",          "Нож"},
-        {"helmet",         "Шлем"},         {"kevlar",         "Броня"},
-        {"armor",          "Броня"},        {"armour",         "Броня"},
-        {"hoodie",         "Одежда"},       {"jacket",         "Одежда"},
-        {"shirt",          "Одежда"},       {"pants",          "Одежда"},
-        {"boots",          "Одежда"},       {"gloves",         "Одежда"},
-        {"mask",           "Одежда"},
-        // -- resources -------------------------------------------------------
-        {"cloth",          "Ткань"},        {"leather",        "Кожа"},
-        {"fat",            "Жир"},          {"bone",           "Кости"},
-        {"scrap",          "Скрап"},        {"sulfur",         "Сера"},
-        {"high quality",   "Металл HQ"},    {"hq.metal",       "Металл HQ"},
-        {"metal.refined",  "Металл HQ"},    {"metal frag",     "Фрагменты"},
-        {"metal.frag",     "Фрагменты"},    {"fragment",       "Фрагменты"},
-        {"sheet metal",    "Листы"},        {"sheetmetal",     "Листы"},
-        {"sheet",          "Листы"},        {"metal",          "Металл"},
-        {"stone",          "Камень"},       {"wood",           "Дерево"},
-        {"charcoal",       "Уголь"},        {"coal",           "Уголь"},
-        {"gunpowder",      "Порох"},        {"gun powder",     "Порох"},
-        {"low.grade",      "Низкосорт"},    {"lowgrade",       "Низкосорт"},
-        {"low grade",      "Низкосорт"},    {"crude",          "Нефть"},
-        {"diesel",         "Солярка"},      {"fuel",           "Топливо"},
-        {"tech.trash",     "Электроника"},  {"techtrash",      "Электроника"},
-        {"tech trash",     "Электроника"},  {"battery",        "Батарея"},
-        {"gear",           "Шестерни"},     {"spring",         "Пружина"},
-        {"pipe",           "Труба"},        {"blade",          "Лезвие"},
-        {"rope",           "Верёвка"},      {"tarp",           "Брезент"},
-        {"propane",        "Пропан"},       {"sewing",         "Швейный"},
-        {"glue",           "Клей"},         {"tape",           "Скотч"},
-        // -- medical and the rest --------------------------------------------
-        {"medkit",         "Аптечка"},      {"medical",        "Аптечка"},
-        {"syringe",        "Шприц"},        {"bandage",        "Бинт"},
-        {"antirad",        "Антирад"},      {"radiation",      "Антирад"},
-        {"pills",          "Таблетки"},     {"blueprint",      "Чертёж"},
-        {"wrench",         "Гаечный ключ"}, {"door",           "Дверь"},
-        {"key",            "Ключ"},
-    };
-    if (!short_name || !short_name[0]) return nullptr;
-    char key[48];
-    size_t n = 0;
-    for (const char* p = short_name; *p && n + 1 < sizeof(key); ++p) {
-        char c = *p;
-        key[n++] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-    }
-    key[n] = '\0';
-    for (const auto& item : kItems)
-        if (strstr(key, item.key)) return item.ru;
-    return nullptr;
-}
-
-// Bushes, mushroom and berry clusters are harvested rather than picked up, so
-// they arrive as MineableObjects whose loot says what they give. Trees (wood)
-// stay out — they would bury the screen.
-static int gather_look_for_item_name(const char* item_name, MarkerLook& look) {
-    if (!item_name || !item_name[0]) return 0;
-    char key[40];
-    size_t n = 0;
-    for (const char* p = item_name; *p && n + 1 < sizeof(key); ++p) {
-        char c = *p;
-        key[n++] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-    }
-    key[n] = '\0';
-    static const struct { const char* key; const char* ru; int rank; } kGathers[] = {
-        {"mushroom", "Грибы",      3},
-        {"berry",    "Ягоды",      3},
-        {"berri",    "Ягоды",      3}, // "berries"/"blueberries"
-        {"ягод",     "Ягоды",      3}, // русское имя: ASCII-лаускейс не трогает
-        {"Ягод",     "Ягоды",      3}, // кириллицу, поэтому оба регистра
-        {"pumpkin",  "Тыква",      3},
-        {"corn",     "Кукуруза",   3},
-        {"potato",   "Картофель",  3},
-        {"hemp",     "Куст ткани", 2}, // seed.hemp comes from the cloth bush
-        {"cloth",    "Куст ткани", 2},
-    };
-    for (const auto& gather : kGathers) {
-        if (strstr(key, gather.key)) {
-            look.kind = ESP_MARKER_PICKUP;
-            look.label = gather.ru;
-            look.has_color = false;
-            return gather.rank;
-        }
-    }
-    return 0;
-}
-
-// Same walk as marker_from_loot(), but for the gatherables table.
-static bool gather_marker_from_loot(uint64_t mineable, MarkerLook& look) {
-    const uint64_t sources[2] = {MINEABLE_LOOT, MINEABLE_FINISH_BONUS};
-    int best = 0;
-    for (uint64_t source : sources) {
-        uint64_t items[12];
-        int count = read_managed_collection(rd_ptr(mineable + source), items, 12);
-        for (int i = 0; i < count; ++i) {
-            if (!valid_obj(items[i])) continue;
-            char name[32] = {};
-            if (!read_managed_string(rd_ptr(items[i] + LOOTITEM_ITEM_NAME), name, sizeof(name))) continue;
-            MarkerLook candidate;
-            int rank = gather_look_for_item_name(name, candidate);
-            if (rank > best) { best = rank; look = candidate; }
-        }
-    }
-    return best > 0;
-}
-
-// One dropped / spawned item on the ground.
-static bool pickup_marker(uint64_t component, char* label, size_t label_cap) {
-    char short_name[48] = {};
-    if (!read_managed_string_ex(rd_ptr(component + ITEMPICKUP_SHORTNAME), short_name,
-                                sizeof(short_name), 47))
-        return false;
-    const char* translated = pickup_label_for_item(short_name);
-    // Unknown short name: the game's own display name ("Blue Berry", "Mushroom")
-    // goes through the same table -- most of the items that stayed English did
-    // so because their short name is spelled differently from their name. Only
-    // if that misses too is the English name shown as-is, so nothing on the
-    // ground is ever silently dropped.
-    char fallback[40] = {};
-    if (!translated) {
-        uint64_t item = rd_ptr(component + ITEMPICKUP_ITEM_OBJECT);
-        uint64_t data = valid_obj(item) ? rd_ptr(item + ITEM_DATA) : 0;
-        if (valid_obj(data)) read_managed_string(rd_ptr(data + ITEMDATA_NAME), fallback, sizeof(fallback));
-        translated = pickup_label_for_item(fallback);
-    }
-    if (!translated) {
-        if (!fallback[0]) snprintf(fallback, sizeof(fallback), "%.30s", short_name);
-        translated = fallback;
-    }
-    // Перевод — до «x12»: количество дописывается к готовой подписи, и в
-    // английском она получается такой же короткой, как в русском.
-    const char* shown = lang::visual(translated);
-    int32_t amount = rd<int32_t>(component + ITEMPICKUP_AMOUNT);
-    if (amount > 1 && amount < 1000000)
-        snprintf(label, label_cap, "%s x%d", shown, (int)amount);
-    else
-        snprintf(label, label_cap, "%s", shown);
-    return label[0] != '\0';
-}
-
-// Il2CppClass -> which of the two component families this is (cached: the same
-// handful of classes come back for every entity in the registry).
-enum MarkerClass : uint8_t {
-    MARKER_CLASS_NONE = 0, MARKER_CLASS_MINEABLE = 1,
-    MARKER_CLASS_LOOT = 2, MARKER_CLASS_PICKUP = 3,
-    MARKER_CLASS_BARREL = 4,
-    // Имя класса прочитать не удалось (см. class_identity): семейство неизвестно,
-    // и объект опознаётся дальше по имени GameObject — оно лежит в куче и читается.
-    MARKER_CLASS_UNKNOWN = 5,
-};
-
-static uint8_t marker_class_of(uint64_t klass) {
-    if (!valid_obj(klass)) return MARKER_CLASS_NONE;
-    auto found = g_marker_class_kind.find(klass);
-    if (found != g_marker_class_kind.end()) return found->second;
-    bool readable = false;
-    const std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME), &readable);
-    uint8_t kind = readable ? MARKER_CLASS_NONE : MARKER_CLASS_UNKNOWN;
-    if (readable) {
-        if (name.rfind("Mineable", 0) == 0)                       kind = MARKER_CLASS_MINEABLE;
-        else if (name == "LootObject" || name == "PumpkinTrick")  kind = MARKER_CLASS_LOOT;
-        else if (name == "ItemPickup")                            kind = MARKER_CLASS_PICKUP;
-        // Smashable scrap barrels: on this build their component class is
-        // "LootDestroyable" (log: skip-class 'LootDestroyable' go='Barrel_v2') —
-        // not a Mineable and not a LootObject. Any class that says Barrel out
-        // loud is kept as a safety net for other builds.
-        else if (name == "LootDestroyable" ||
-                 name.find("Barrel") != std::string::npos)      kind = MARKER_CLASS_BARREL;
-    }
-    if (g_marker_class_kind.size() < 512) g_marker_class_kind[klass] = kind;
-    return kind;
-}
-
-static uint64_t resolve_network_client_spawned() {
-    if (!g_network_client_class && NETWORK_CLIENT_TYPEINFO_RVA != 0) {
-        const uint64_t candidate = rd_ptr(g_il2cpp_base + NETWORK_CLIENT_TYPEINFO_RVA);
-        if (class_identity(candidate, "NetworkClient", "Mirror") != 0)
-            g_network_client_class = candidate;
-    }
-    if (!g_network_client_class) return 0;
-    uint64_t statics = get_class_static_fields(g_network_client_class);
-    if (!statics) return 0;
-    uint64_t spawned = rd_ptr(statics + NETWORK_CLIENT_SPAWNED);
-    return valid_obj(spawned) ? spawned : 0;
-}
-
-// A known-good NetworkIdentity (the game controller's own) gives us the class
-// pointer every dictionary entry must match — a cheap, exact sanity check that
-// also protects against a wrong entry stride.
-static uint64_t resolve_network_identity_class() {
-    if (g_network_identity_class) return g_network_identity_class;
-    if (!g_game_controller_class) return 0;
-    uint64_t statics = get_class_static_fields(g_game_controller_class);
-    if (!statics) return 0;
-    uint64_t identity = rd_ptr(statics + GAME_CONTROLLER_NET_IDENTITY_FIELD);
-    if (!valid_obj(identity)) return 0;
-    uint64_t klass = rd_ptr(identity);
-    if (!valid_obj(klass)) return 0;
-    bool name_readable = false;
-    const std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME), &name_readable);
-    if (name_readable && name != "NetworkIdentity") return 0;
-    if (!class_looks_alive(klass)) return 0;
-    g_network_identity_class = klass;
-    return klass;
-}
-
-static bool marker_world_position(uint64_t transform, Vec3& out) {
-    if (!transform) return false;
-    // The learned layouts (skeleton / hierarchy) come from PLAYER bones and
-    // can go stale after a world reload or simply not match non-bone
-    // transforms — they then return finite-but-garbage positions, which is
-    // how markers died solo after a respawn (cache full, every distance
-    // absurd, zero on screen). Any implausible read falls through to the
-    // slow probing path instead of being trusted.
-    if (g_skeleton_layout_valid && read_transform_hierarchy_layout(transform, g_skeleton_layout, out) &&
-        vec3_is_finite(out) && position_looks_like_world_space(out))
-        return true;
-    return read_transform_hierarchy_position(transform, out) && vec3_is_finite(out) &&
-           position_looks_like_world_space(out);
-}
-
-// Walk Mirror's client registry and cache every ore node / animal in it.
-// true  — цикл завершён: список собран целиком и подменён (или собирать нечего,
-//         тогда он пустой);
-// false — обработана только порция, продолжать нужно на следующем кадре.
-// Все отказы (словарь не читается, мир грузится) возвращают true: иначе вызывающий
-// поставит «продолжать немедленно» и будет долбить в стену каждый кадр.
-static bool rebuild_marker_entities() {
-    if (g_marker_scan_cursor < 0) {
-        // Начало цикла: действующий список НЕ трогаем — он показывается до
-        // завершения сборки, поэтому маркеры не мигают.
-        g_marker_scan_pending.clear();
-        g_marker_scan_buffer.clear();
-
-        uint64_t dictionary = resolve_network_client_spawned();
-        if (!dictionary) { marker_scan_abort(); return true; }
-        // Needed to read prefab names (wolves / rats); harmless if it fails, the
-        // loot and entityType paths still work.
-        if (!g_go_name_offset_valid && g_local_player) ensure_gameobject_name_offset(g_local_player);
-        g_marker_scan_identity_class = resolve_network_identity_class();
-
-        uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
-        int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
-        if (!valid_obj(entries) || count <= 0) { marker_scan_abort(); return true; }
-        if (count > 4096) count = 4096;
-
-        // One bulk read for the whole entry array instead of one read per entry.
-        // Буфер живёт до конца цикла: порции разбирают уже прочитанное.
-        g_marker_scan_buffer.resize((size_t)count * DICT_ENTRY_STRIDE);
-        if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, g_marker_scan_buffer.data(),
-                    g_marker_scan_buffer.size())) {
-            marker_scan_abort();
-            return true;
-        }
-        g_marker_scan_total  = count;
-        g_marker_scan_cursor = 0;
-    }
-
-    const uint64_t identity_class = g_marker_scan_identity_class;
-    const int32_t count = g_marker_scan_total;
-    const double t_budget = mono_seconds();
-    uint64_t behaviours[32];
-    int32_t i = g_marker_scan_cursor;
-    for (; i < count; ++i) {
-        // Первый узел порции разбираем всегда (иначе цикл мог бы встать),
-        // дальше — пока не выбрано время.
-        if (i > g_marker_scan_cursor && mono_seconds() - t_budget > kMarkerScanBudgetSec) break;
-        uint64_t identity = 0;
-        memcpy(&identity, g_marker_scan_buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE, sizeof(identity));
-        if (!valid_obj(identity)) continue;
-        if (identity_class && rd_ptr(identity) != identity_class) continue;
-        uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
-        if (!valid_obj(array)) continue;
-        int32_t behaviour_count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
-        if (behaviour_count <= 0) continue;
-        if (behaviour_count > 32) behaviour_count = 32;
-        if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)behaviour_count * sizeof(uint64_t)))
-            continue;
-
-        // Mirror collects behaviours with GetComponentsInChildren, so one
-        // identity can carry a whole rock cluster: every Mineable* component
-        // becomes its own marker, positioned by its own GameObject.
-        for (int32_t b = 0; b < behaviour_count; ++b) {
-            uint64_t component = behaviours[b];
-            if (!valid_obj(component)) continue;
-            const uint8_t component_class = marker_class_of(rd_ptr(component));
-            if (component_class == MARKER_CLASS_NONE) continue;
-            // Имя класса компонента может быть недоступно (см. marker_class_of):
-            // тогда семейство неизвестно, и объект опознаётся по имени GameObject —
-            // оно лежит в куче игры и читается всегда. Пробуем семейства по порядку.
-            const bool family_unknown = (component_class == MARKER_CLASS_UNKNOWN);
-            // «Дорогой» компонент: имя GameObject, трансформ и позиция — это
-            // десятки обращений к памяти игры, поэтому время порции проверяется
-            // снаружи, между узлами.
-
-            MarkerLook look;
-            char pickup_text[40] = {};
-            char object_name[48] = {}, root_name[48] = {};
-            managed_component_gameobject_name(component, object_name, sizeof(object_name));
-            managed_component_gameobject_name(identity, root_name, sizeof(root_name));
-            bool known = false;
-            if ((component_class == MARKER_CLASS_PICKUP || family_unknown) &&
-                g_markers_pickup_enabled) {
-                known = pickup_marker(component, pickup_text, sizeof(pickup_text));
-                if (known) {
-                    look.kind = ESP_MARKER_PICKUP;
-                    look.label = nullptr;
-                    look.has_color = false;
-                }
-            }
-            if (!known && (component_class == MARKER_CLASS_BARREL || family_unknown) &&
-                g_markers_loot_enabled) {
-                // LootDestroyable covers every smashable loot prop; label by
-                // prefab name — "Barrel_v2" is the scrap barrel, anything
-                // else gets the generic smash-box label.
-                known = barrel_look_from_object_name(object_name, look) ||
-                        barrel_look_from_object_name(root_name, look);
-                // Общая метка «ящик» — только для класса, о котором точно
-                // известно, что он дробимый: при неизвестном семействе иначе
-                // метку получил бы любой объект в реестре.
-                if (!known && component_class == MARKER_CLASS_BARREL) {
-                    look = kSmashBox; known = true;
-                }
-            }
-            if (!known && (component_class == MARKER_CLASS_LOOT || family_unknown) &&
-                g_markers_loot_enabled) {
-                known = loot_marker(component, object_name, root_name, look);
-            }
-            if (!known && (component_class == MARKER_CLASS_MINEABLE || family_unknown)) {
-                // The prefab name is asked first on purpose: animals that the
-                // EntityType enum does not know (wolf, rat, ...) are shipped
-                // with a borrowed entityType -- the wolf prefab says "Boar" --
-                // so trusting the enum first labelled every wolf as a boar.
-                if (object_name[0]) known = animal_look_from_object_name(object_name, look);
-                if (!known && root_name[0]) known = animal_look_from_object_name(root_name, look);
-                if (!known) {
-                    int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
-                    known = marker_for_entity_type(entity_type, look);
-                }
-                if (!known && object_name[0]) known = barrel_look_from_object_name(object_name, look);
-                if (!known && root_name[0])   known = barrel_look_from_object_name(root_name, look);
-                if (!known) known = marker_from_loot(component, look);
-                // Cloth bushes, mushroom and berry clusters: harvestable, so
-                // they are Mineables, but they belong to the pickup category.
-                if (!known && g_markers_pickup_enabled) known = gather_marker_from_loot(component, look);
-            }
-            if (!known) continue;
-
-            MarkerEntity entity;
-            entity.identity = identity;
-            entity.kind = look.kind;
-            entity.label = look.label;
-            if (!look.label) memcpy(entity.text, pickup_text, sizeof(entity.text));
-            entity.has_color = look.has_color;
-            entity.rainbow = look.rainbow;
-            entity.color_rgb[0] = look.rgb[0];
-            entity.color_rgb[1] = look.rgb[1];
-            entity.color_rgb[2] = look.rgb[2];
-            entity.transform = native_component_transform(managed_object_native(component));
-            if (!entity.transform) // component without its own renderer: use the identity
-                entity.transform = native_component_transform(managed_object_native(identity));
-            entity.position_valid = marker_world_position(entity.transform, entity.position);
-            if (entity.transform) g_marker_scan_pending.push_back(entity);
-            if (g_marker_scan_pending.size() >= 512) break;
-        }
-        if (g_marker_scan_pending.size() >= 512) break;
-    }
-
-    if (i < count && g_marker_scan_pending.size() < 512) {
-        // Порция израсходована (вышло время), цикл не закончен — продолжим на
-        // следующем кадре с этого же узла.
-        g_marker_scan_cursor = i;
-        return false;
-    }
-    // Конец цикла: словарь пройден либо уперлись в лимит списка (512).
-    // Подменяем список разом.
-    g_marker_entities.swap(g_marker_scan_pending);
-    marker_scan_abort();
-    return true;
-}
-
-static void reset_marker_caches() {
-    g_marker_entities.clear();
-    g_marker_next_scan = 0.0;
-    marker_scan_abort();   // незавершённая порция после перезагрузки мира не нужна
-    g_marker_class_kind.clear();
-    g_network_client_class = 0;
-    g_network_identity_class = 0;
-    // Farm entities come from the same registry: stale pointers must not
-    // survive a world reload either.
-    g_farm_entities.clear();
-    g_farm_blacklist.clear();
-    farm_scan_reset();
-}
-
-std::vector<EspMarker> esp_get_markers() {
-    std::vector<EspMarker> result;
-    if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
-        !g_markers_loot_enabled && !g_markers_pickup_enabled) {
-        if (!g_marker_entities.empty()) g_marker_entities.clear();
-        g_marker_next_scan = 0.0;
-        marker_scan_abort();   // не тащить незавершённую порцию через выключенный ESP
-        return result;
-    }
-    if (g_pid <= 0 || !g_il2cpp_base) return result;
-    // The box pipeline publishes the frame while players are visible; when it
-    // bailed out for ANY reason (empty player list, failed position read,
-    // world reload), build a camera-only frame right here. Markers must never
-    // depend on other players being around.
-    if (!g_frame_vp_valid || !g_frame_local_valid) {
-        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh))
-            return result;
-    }
-
-    {
-        const double now = mono_seconds();
-        if (now >= g_marker_next_scan) {
-            const bool scan_done = rebuild_marker_entities();
-            // ~3 s between scans: entities spawn and despawn slowly. An empty
-            // result means the registry was not readable (world still loading in
-            // after a respawn), so retry in half a second instead. Интервал в
-            // секундах: при счёте в кадрах на 118 fps скан выходил вдвое чаще.
-            // Незавершённую порцию продолжаем на следующем кадре (scan_done ==
-            // false), иначе список собирался бы по кусочку раз в 3 секунды.
-            g_marker_next_scan = scan_done
-                ? now + (g_marker_entities.empty() ? 0.5 : 3.0)
-                : now;
-        }
-    }
-
-    // No usable layout (fresh join / respawn, nobody around): learn it from
-    // the ENTITY transforms themselves. The layout discovery only needs a
-    // couple of native transforms scattered across the map — ore nodes are
-    // exactly that. This is what makes markers self-sufficient: previously
-    // the layout could only be learned from other players' skeletons, and
-    // solo after a world reload every position read failed (POS_INVALID).
-    {
-        static int s_solo_learn_cooldown = 0;
-        bool positions_dead = false;
-        if (!g_marker_entities.empty()) {
-            size_t checked = 0, dead = 0;
-            for (MarkerEntity& probe : g_marker_entities) {
-                if (++checked > 6) break;
-                Vec3 test{};
-                if (!marker_world_position(probe.transform, test)) ++dead;
-            }
-            positions_dead = checked > 0 && dead >= checked - (checked > 4 ? 1 : 0);
-        }
-        if (positions_dead && --s_solo_learn_cooldown <= 0) {
-            s_solo_learn_cooldown = 60; // ~1 s between attempts
-            std::vector<uint64_t> seeds;
-            for (const MarkerEntity& e : g_marker_entities) {
-                if (e.transform) seeds.push_back(e.transform);
-                if (seeds.size() >= 8) break;
-            }
-            size_t pos_count = 0, cand_count = 0;
-            if (discover_layout_from_native_transforms(seeds, pos_count, cand_count)) {
-                // Re-read every cached position with the fresh layout.
-                for (MarkerEntity& e : g_marker_entities)
-                    e.position_valid = marker_world_position(e.transform, e.position);
-            }
-        }
-    }
-
-    const float max_distance = g_marker_max_distance;
-    for (MarkerEntity& entity : g_marker_entities) {
-        if (entity.kind == ESP_MARKER_ORE && !g_markers_ore_enabled) continue;
-        if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
-        if (entity.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) continue;
-        if (entity.kind == ESP_MARKER_PICKUP && !g_markers_pickup_enabled) continue;
-        // Ore nodes never move, so their position is only read on a rescan.
-        // Animals DO move, but re-reading a transform chain (4+ syscalls)
-        // for every animal every frame is the single hottest path here —
-        // throttle far ones: within 60 m track every frame, beyond that a
-        // few times a second is indistinguishable on screen.
-        bool want_read = !entity.position_valid;
-        if (entity.kind == ESP_MARKER_ANIMAL) {
-            if (--entity.pos_cooldown <= 0) {
-                want_read = true;
-                float ddx = entity.position.x - g_frame_local_pos.x;
-                float ddz = entity.position.z - g_frame_local_pos.z;
-                float d2 = ddx * ddx + ddz * ddz;
-                entity.pos_cooldown = (!entity.position_valid || d2 < 60.0F * 60.0F) ? 1
-                                    : (d2 < 150.0F * 150.0F) ? 6 : 15;
-            }
-        }
-        if (want_read)
-            entity.position_valid = marker_world_position(entity.transform, entity.position);
-        if (!entity.position_valid) continue;
-
-        float dx = entity.position.x - g_frame_local_pos.x;
-        float dy = entity.position.y - g_frame_local_pos.y;
-        float dz = entity.position.z - g_frame_local_pos.z;
-        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (!std::isfinite(distance) || distance > max_distance) continue;
-
-        Vec2 screen{};
-        Vec3 anchor = entity.position;
-        // above the model: animals are tall, crates sit low on the ground
-        anchor.y += (entity.kind == ESP_MARKER_ANIMAL) ? 1.2F
-                  : (entity.kind == ESP_MARKER_LOOT)   ? 0.6F
-                  : (entity.kind == ESP_MARKER_PICKUP) ? 0.4F : 0.9F;
-        if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) continue;
-        if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
-        if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F) continue;
-        if (screen.y < -64.0F || screen.y > g_frame_sh + 64.0F) continue;
-
-        EspMarker marker;
-        marker.x = screen.x;
-        marker.y = screen.y;
-        marker.distance = distance;
-        marker.kind = entity.kind;
-        marker.has_color = entity.has_color;
-        marker.rainbow = entity.rainbow;
-        marker.color_rgb[0] = entity.color_rgb[0];
-        marker.color_rgb[1] = entity.color_rgb[1];
-        marker.color_rgb[2] = entity.color_rgb[2];
-        // Подпись маркера — на текущем языке (в русском это она и есть,
-        // в английском — перевод по таблице имён; неизвестное остаётся как
-        // есть, поэтому подпись никогда не пропадает).
-        snprintf(marker.name, sizeof(marker.name), "%s",
-                 lang::visual(entity.label ? entity.label : entity.text));
-        result.push_back(marker);
-    }
-
-    std::sort(result.begin(), result.end(), [](const EspMarker& a, const EspMarker& b) {
-        return a.distance < b.distance;
-    });
-
-    // Rock clusters put several nodes within a couple of metres, which would
-    // stack their pills on top of each other: keep the nearest one of each
-    // label per screen neighbourhood.
-    std::vector<EspMarker> thinned;
-    thinned.reserve(result.size());
-    for (const EspMarker& marker : result) {
-        bool covered = false;
-        for (const EspMarker& kept : thinned) {
-            if (kept.kind != marker.kind) continue;
-            // Pickup labels carry a stack size, so two piles of berries never
-            // compare equal — for that category position alone decides.
-            if (marker.kind != ESP_MARKER_PICKUP && strcmp(kept.name, marker.name) != 0) continue;
-            float dx = kept.x - marker.x, dy = kept.y - marker.y;
-            if (dx * dx + dy * dy < 30.0F * 30.0F) { covered = true; break; }
-        }
-        if (covered) continue;
-        thinned.push_back(marker);
-        if (thinned.size() >= 64) break; // keep the screen readable
-    }
-    return thinned;
-}
-
-
-// ============================== Auto-farm ====================================
-//
-// Finds the nearest tree / stone / iron / sulfur node in Mirror's registry and
-// reports where it is relative to the camera. Walking to it and swinging the
-// tool is done with synthetic touches in main.cpp; nothing here writes to the
-// game. The glowing "X" bonus spot is looked up as a child GameObject of the
-// node, so the swings land on it when the game shows one.
-
-// Farm kind from a loot item short name. Rank: richer resource wins (metal and
-// sulfur nodes drop stones too). Processed items are filtered like the ore
-// markers, so barrels never register.
-static int farm_kind_for_item_name(const char* item_name, int& kind) {
-    if (!item_name || !item_name[0]) return 0;
-    char key[40];
-    size_t n = 0;
-    for (const char* p = item_name; *p && n + 1 < sizeof(key); ++p) {
-        char c = *p;
-        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        key[n++] = c;
-    }
-    key[n] = '\0';
-    if (strstr(key, "frag") || strstr(key, "pipe") || strstr(key, "sheet") ||
-        strstr(key, "scrap") || strstr(key, "spring") || strstr(key, "gear"))
-        return 0;
-    if (strstr(key, "sulfur")) { kind = 3; return 4; }
-    if (strstr(key, "metal"))  { kind = 2; return 3; }
-    if (strstr(key, "stone"))  { kind = 1; return 2; }
-    if (strstr(key, "wood"))   { kind = 0; return 1; }
-    return 0;
-}
-
-// Same two loot lists the markers read, but wood ranks too (trees are the
-// whole point here, while the markers skip them to keep the screen clean).
-static bool farm_kind_from_loot(uint64_t mineable, int& kind) {
-    const uint64_t sources[2] = {MINEABLE_LOOT, MINEABLE_FINISH_BONUS};
-    int best = 0;
-    for (uint64_t source : sources) {
-        uint64_t items[12];
-        int count = read_managed_collection(rd_ptr(mineable + source), items, 12);
-        for (int i = 0; i < count; ++i) {
-            if (!valid_obj(items[i])) continue;
-            char name[32] = {};
-            if (!read_managed_string(rd_ptr(items[i] + LOOTITEM_ITEM_NAME), name, sizeof(name))) continue;
-            int candidate = 0;
-            int rank = farm_kind_for_item_name(name, candidate);
-            if (rank > best) { best = rank; kind = candidate; }
-            if (best == 4) return true;
-        }
-    }
-    return best > 0;
-}
-
-// ---- Скан реестра: порциями и с отрицательным кешем -------------------------
-// Жалоба пользователя: «при включении автофарма минуту лагают все визуалы, потом
-// иногда подлагивает». Замер по логу 14.09: кадр оверлея в норме 8.5 мс, но 153
-// кадра из 10053 вырастали до 12..34 мс, и интервалы между ними складываются в
-// периодический рисунок 8/52/68/112 кадров — это ресканы. Один проход стоил
-// столько, сколько записей в NetworkClient.spawned: у каждой читались класс,
-// список компонентов и сами компоненты (~10 чтений), а объектов в мире
-// тысячи. Десятки тысяч чтений одним кадром — тот самый рывок, который видно
-// глазом; на 118 fps скан к тому же запускался вдвое чаще задуманного, потому
-// что счётчик был в кадрах из расчёта на 60 fps.
-//
-// Теперь три вещи сразу:
-//   1) отрицательный кеш: запись, у которой в компонентах нет MineableObject,
-//      запоминается вместе с указателем её списка компонентов и в следующих
-//      проходах проверяется ОДНИМ чтением вместо десяти: пока поле указывает на
-//      тот же список, объект тот же и вердикт в силе. Адрес освободившегося
-//      объекта игра может отдать новому (в том числе узлу добычи) — тогда поле
-//      почти наверняка смотрит на другой список, запись выбрасывается и объект
-//      классифицируется заново. Узлов добычи в мире десятки, прочих объектов
-//      тысячи, поэтому установившийся проход стоит по одному чтению на запись;
-//   2) порционность: расход кадра задан в условных чтениях (kFarmScanBudget),
-//      сверка с кешем стоит одно чтение, классификация новой записи — около
-//      двенадцати, поэтому даже холодный проход растягивается по кадрам и ни
-//      один кадр не платит за весь мир сразу;
-//   3) результат прохода подменяет рабочий список ЦЕЛИКОМ в конце: пока проход
-//      идёт, бот работает по прежнему списку. Прежняя гарантия («сбой чтения не
-//      должен вычищать кеш — иначе маркер пропадал и бот вставал») сохранена и
-//      усилена: окна «целей нет» на время скана больше не существует вовсе.
-// identity -> указатель её списка компонентов на момент вердикта «не узел».
-static std::unordered_map<uint64_t, uint64_t> g_farm_not_node;
-static std::vector<uint64_t>   g_farm_scan_ids;       // записи текущего прохода
-static size_t                  g_farm_scan_idx = 0;   // курсор прохода
-static std::vector<FarmEntity> g_farm_scan_stage;     // накопленный результат
-static bool                    g_farm_scan_run = false;
-// Сколько условных единиц бюджета скан потратил на прошлом кадре и сколько
-// записей реестра в нём всего/осталось. Печатается в строке «кадры оверлея»:
-// по этим числам видно, идёт ли проход прямо сейчас и насколько он длинный.
-static int                     g_farm_scan_units = 0;
-static int                     g_farm_scan_total = 0;
-static int                     g_farm_scan_new   = 0;
-
-// Бюджет прохода — в условных чтениях за кадр, а не в записях: сверка с кешем
-// стоит одно чтение, классификация новой записи — около двенадцати (класс,
-// список, компоненты, трансформ, иногда имя префаба и loot-списки). Пока целей
-// нет вовсе (старт фарма, перезагрузка мира), бот просто стоит, поэтому идём
-// вчетверо быстрее; когда список есть — спешить некуда, старый список остаётся
-// рабочим до конца прохода.
-constexpr int    kFarmScanBudget     = 200;  // мягкий бюджет, единицы чтения/кадр
-constexpr int    kFarmScanBudgetFast = 600;  // пока рабочий список пуст
-constexpr int    kFarmScanCostCached = 1;    // сверка записи из кеша
-constexpr int    kFarmScanCostNew    = 12;   // классификация новой записи
-constexpr double kFarmScanPeriod   = 2.0;   // с между проходами, когда узлы есть
-constexpr double kFarmScanRetry    = 0.5;   // с, когда список пуст (мир грузится)
-constexpr size_t kFarmNegCacheMax  = 16384; // потолок кеша, записей
-
-// Бросить незавершённый проход (смена маски ресурсов, перезагрузка мира).
-static void farm_scan_abort() {
-    g_farm_scan_run = false;
-    g_farm_scan_idx = 0;
-    g_farm_scan_ids.clear();
-    g_farm_scan_stage.clear();
-}
-
-// Полный сброс скана: рабочий список чистит вызывающий, здесь — кеш и проход.
-static void farm_scan_reset() {
-    farm_scan_abort();
-    g_farm_not_node.clear();
-    g_farm_next_scan = 0.0;
-}
-
-// Вердикт по одной записи реестра:
-//   0 — структурно не узел добычи; behaviours — её список компонентов (по нему
-//       запись потом сверяется одним чтением вместо полной классификации);
-//   1 — узел есть, но сейчас он не наш: маска ресурсов, сбой чтения, ещё не
-//       изучена раскладка трансформов. Запоминать НЕЛЬЗЯ — условие временное;
-//   2 — наш узел, entity заполнена (transform, required_purpose, pos);
-//   3 — запись вообще не NetworkIdentity: кешировать нечего, повторная проверка
-//       и так стоит одно чтение за проход.
-static int farm_classify_identity(uint64_t identity, uint64_t identity_class,
-                                  FarmEntity& entity, uint64_t& behaviours) {
-    behaviours = 0;
-    if (identity_class && rd_ptr(identity) != identity_class) return 3;
-    uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
-    if (!valid_obj(array)) return 3;
-    behaviours = array;
-    int32_t behaviour_count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
-    if (behaviour_count <= 0) return 0;
-    if (behaviour_count > 32) behaviour_count = 32;
-    uint64_t comps[32];   // список компонентов (behaviours — выходной параметр)
-    if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, comps,
-                (size_t)behaviour_count * sizeof(uint64_t)))
-        return 1;   // словарь переписывают на ходу: не вердикт, а повод повторить
-
-    // Kind: the entityType enum first (cheap and exact), loot second.
-    uint64_t component = 0;
-    int kind = -1;
-    for (int32_t b = 0; b < behaviour_count && kind < 0; ++b) {
-        const uint64_t cand = comps[b];
-        if (!valid_obj(cand)) continue;
-        if (marker_class_of(rd_ptr(cand)) != MARKER_CLASS_MINEABLE) continue;
-        component = cand;
-        switch ((MineableEntityType)rd<int32_t>(component + MINEABLE_ENTITY_TYPE)) {
-            case MineableEntityType::Tree:   kind = 0; break;
-            case MineableEntityType::Stone:  kind = 1; break;
-            case MineableEntityType::Iron:   kind = 2; break;
-            case MineableEntityType::Sulfur: kind = 3; break;
-            default: break;
-        }
-        if (kind < 0 && !farm_kind_from_loot(component, kind)) kind = -1;
-    }
-    if (!component) return 0;   // в компонентах нет MineableObject — не узел
-    if (kind < 0) return 1;     // узел, но ресурс не опознан (сбой чтения)
-    if (!(g_farm_mask & (1u << kind))) return 1;   // маску меняют на лету
-
-    entity.identity = identity;
-    entity.component = component;
-    entity.kind = kind;
-    entity.transform = native_component_transform(managed_object_native(component));
-    if (!entity.transform)
-        entity.transform = native_component_transform(managed_object_native(identity));
-    if (!entity.transform) return 1;   // раскладка трансформов ещё не изучена
-
-    // Fallen logs register as "Tree" but cannot be chopped the same way — the
-    // bot just circles them. Filter them out by prefab name (log / fallen /
-    // dead / driftwood variants). Вердикт структурный, поэтому бревно уходит в
-    // отрицательный кеш: чтение имени (несколько syscall'ов плюс строка) больше
-    // не повторяется на каждом проходе.
-    if (kind == 0 && g_go_name_offset_valid) {
-        char go_name[48];
-        if (read_transform_name(entity.transform, go_name, sizeof(go_name))) {
-            for (char* p = go_name; *p; ++p)
-                if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
-            if (strstr(go_name, "log") || strstr(go_name, "fallen") ||
-                strstr(go_name, "dead") || strstr(go_name, "driftwood") ||
-                strstr(go_name, "stump"))
-                return 0;
-        }
-    }
-
-    // Чем этот узел вообще можно взять. Мусорное значение (не из набора флагов)
-    // считаем отсутствием требования, чтобы ошибка чтения не оставила фарм без
-    // целей.
-    {
-        const int32_t known = (int32_t)ToolPurpose::CutWood |
-                              (int32_t)ToolPurpose::BreakRocks |
-                              (int32_t)ToolPurpose::CutAnimals;
-        const int32_t purpose = rd<int32_t>(component + MINEABLE_REQUIRED_TOOL_PURPOSE);
-        entity.required_purpose = ((purpose & ~known) == 0) ? (int)purpose : 0;
-    }
-
-    entity.pos_valid = marker_world_position(entity.transform, entity.pos);
-    return 2;
-}
-
-// Один шаг скана. Вызывается каждый кадр; сам решает, пора ли начинать проход и
-// не пора ли его закончить. Дороже kFarmScanBudget записей за кадр не делает.
-static void farm_scan_tick() {
-    const double now = mono_seconds();
-    if (!g_farm_scan_run && now < g_farm_next_scan) return;
-
-    if (!g_farm_scan_run) {
-        // Начало прохода. Сам словарь читается одним куском (это дёшево), а вот
-        // классификация записей растягивается по кадрам. Сбой чтения здесь не
-        // вердикт: рабочий список не тронут, повторим через kFarmScanRetry.
-        uint64_t dictionary = resolve_network_client_spawned();
-        if (!dictionary) { g_farm_next_scan = now + kFarmScanRetry; return; }
-        uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
-        int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
-        if (!valid_obj(entries) || count <= 0) {
-            g_farm_next_scan = now + kFarmScanRetry;
-            return;
-        }
-        if (count > 4096) count = 4096;
-        std::vector<uint8_t> buffer((size_t)count * DICT_ENTRY_STRIDE);
-        if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buffer.data(), buffer.size())) {
-            g_farm_next_scan = now + kFarmScanRetry;
-            return;
-        }
-        g_farm_scan_ids.resize((size_t)count);
-        g_farm_scan_total = count;
-        for (int32_t i = 0; i < count; ++i)
-            memcpy(&g_farm_scan_ids[(size_t)i],
-                   buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE,
-                   sizeof(uint64_t));
-        g_farm_scan_idx = 0;
-        g_farm_scan_stage.clear();
-        g_farm_scan_run = true;
-        // Фильтр поваленных брёвен нуждается в смещении имени GameObject.
-        // Ищем его раз на проход (а не каждый кадр прохода): попытка стоит
-        // обхода поддерева трансформов, см. ensure_gameobject_name_offset.
-        if (!g_go_name_offset_valid && g_local_player)
-            ensure_gameobject_name_offset(g_local_player);
-    }
-
-    const uint64_t identity_class = resolve_network_identity_class();
-
-    int budget = g_farm_entities.empty() ? kFarmScanBudgetFast : kFarmScanBudget;
-    g_farm_scan_units = 0;
-    g_farm_scan_new = 0;
-    while (g_farm_scan_idx < g_farm_scan_ids.size()) {
-        const uint64_t identity = g_farm_scan_ids[g_farm_scan_idx++];
-        if (!valid_obj(identity)) continue;
-        const auto cached = g_farm_not_node.find(identity);
-        const int cost = (cached != g_farm_not_node.end()) ? kFarmScanCostCached
-                                                           : kFarmScanCostNew;
-        if (budget < cost) { --g_farm_scan_idx; break; }  // доработаем в следующем кадре
-        budget -= cost;
-        g_farm_scan_units += cost;
-        if (cost == kFarmScanCostNew) ++g_farm_scan_new;
-
-        if (cached != g_farm_not_node.end()) {
-            // Одно чтение: список компонентов на месте и тот же — объект не
-            // сменился, вердикт «не узел добычи» остаётся в силе.
-            if (rd_ptr(identity + NETID_BEHAVIOURS) == cached->second) continue;
-            g_farm_not_node.erase(cached);   // адрес переиспользовали
-        }
-
-        FarmEntity entity;
-        uint64_t behaviours = 0;
-        const int verdict = farm_classify_identity(identity, identity_class, entity, behaviours);
-        if (verdict == 0) {
-            if (behaviours && g_farm_not_node.size() < kFarmNegCacheMax)
-                g_farm_not_node.emplace(identity, behaviours);
-            continue;
-        }
-        if (verdict != 2) continue;
-        g_farm_scan_stage.push_back(entity);
-        if (g_farm_scan_stage.size() >= 512) {
-            g_farm_scan_idx = g_farm_scan_ids.size();
-            break;
-        }
-    }
-    if (g_farm_scan_idx < g_farm_scan_ids.size()) return;   // проход не закончен
-
-    g_farm_entities = std::move(g_farm_scan_stage);
-    g_farm_scan_stage.clear();
-    g_farm_scan_ids.clear();
-    g_farm_scan_idx = 0;
-    g_farm_scan_run = false;
-    // Пустой результат означает «реестр ещё не читается / мир грузится после
-    // респауна» — повторяем чаще, но всё равно не каждый кадр.
-    g_farm_next_scan = now + (g_farm_entities.empty() ? kFarmScanRetry : kFarmScanPeriod);
-}
-
-void esp_farm_set_resources(unsigned mask) {
-    if (g_farm_mask != mask) {
-        g_farm_mask = mask;
-        g_farm_entities.clear();
-        // Проход скана, если он шёл, собран под старой маской — выбрасываем его
-        // и начинаем заново. Отрицательный кеш при этом жив: «нет компонента
-        // MineableObject» от выбранных галочек ресурсов не зависит.
-        farm_scan_abort();
-        g_farm_next_scan = 0.0;
-    }
-    if (!mask) g_farm_blacklist.clear();
-}
-
-// Search radius for farm nodes, metres. Set from the menu slider.
-static float g_farm_max_distance = 100.0F;
-
-void esp_farm_set_range(float meters) {
-    if (!std::isfinite(meters)) return;
-    if (meters < 10.0F) meters = 10.0F;
-    if (meters > 300.0F) meters = 300.0F;
-    g_farm_max_distance = meters;
-}
-
-void esp_farm_blacklist(unsigned long long id, float seconds) {
-    if (!id) return;
-    int frames = (int)(seconds * 60.0F);
-    if (frames < 60) frames = 60;
-    g_farm_blacklist[(uint64_t)id] = frames;
-    // Drop it from the cache right away and rescan soon: keeping a dead
-    // node around until the next 2 s rescan is what made the bot jerk the
-    // camera at garbage coordinates after finishing a tree.
-    for (auto it = g_farm_entities.begin(); it != g_farm_entities.end(); ++it) {
-        if (it->identity == (uint64_t)id) { g_farm_entities.erase(it); break; }
-    }
-    const double soon = mono_seconds() + 0.25;
-    if (g_farm_next_scan > soon) g_farm_next_scan = soon;
-}
-
-// ---- Крестик: читаем из памяти, а не угадываем ------------------------------
-// Старая реализация искала X перебором детей узла (по именам, LOD-мешам и
-// «прыгающему» трансформу) и потому регулярно целилась в ствол, в спящий
-// шаблон на пивоте или в корень под землёй — отсюда половина багов автофарма.
-//
-// Игра хранит крестик сама, и хранит его там, где его же и проверяет:
-//   MineableObject.QWD (0xE8) — массив JE-экстеншенов узла, заполняется в
-//   MineableObject.cik() (GetComponents<JE> на GameObject узла), который
-//   вызывается из OnStartClient -> ciQ() и при каждом попадании (SRl -> cik).
-//     руда   -> MineableObjectExtension_OreHitstreaks, живой клон в MoW (0x30);
-//               мировая позиция его transform'а и есть точка крестика —
-//               именно её читает проверка попадания OreHitstreaks.os().
-//     дерево -> MineableObjectExtension_TreeHitstreaks, живой клон в MTn (0x50),
-//               а точка попадания на коре — Vector3 в MTQ (0x88); проверка
-//               попадания (giL и обвязка rRS/DMU/Dne/DfW) меряет дистанцию от
-//               точки удара до отрезка MTQ..MTu с радиусом 0.15 м.
-//
-// X существует не всегда: игра создаёт его при ПЕРВОМ попадании по узлу
-// (JE.gir) и уничтожает через 15 секунд простоя (OreHitstreaks.giq /
-// TreeHitstreaks.gie обнуляют MoW/MTn и вызывают Object.Destroy на маркере).
-// Поэтому «крестика нет» — штатное состояние: бьём по корпусу, первый удар
-// создаёт X, и дальше все удары идут уже в него.
-static constexpr const char* kFarmExtOreClass  = "MineableObjectExtension_OreHitstreaks";
-static constexpr const char* kFarmExtTreeClass = "MineableObjectExtension_TreeHitstreaks";
-
-enum { FARM_EXT_NONE = 0, FARM_EXT_ORE = 1, FARM_EXT_TREE = 2 };
-
-// Крестик обязан лежать на узле: у руды его ставит Collider.ClosestPoint
-// (поверхность камня), у дерева — рейкаст по стволу. Всё, что
-// дальше нескольких метров от пивота, — мусор чтения или маркер соседнего узла.
-static bool farm_spot_on_node(const Vec3& spot, const Vec3& node, int kind) {
-    const float dx = spot.x - node.x, dy = spot.y - node.y, dz = spot.z - node.z;
-    if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dz)) return false;
-    const float max_h  = (kind == 0) ? 6.0F : 4.0F;   // крона/ствол vs камень
-    const float max_up = (kind == 0) ? 26.0F : 9.0F;
-    return (dx * dx + dz * dz) <= max_h * max_h && dy >= -8.0F && dy <= max_up;
-}
-
-// JE-экстеншен крестика для узла. QWD заполняется игрой при OnStartClient,
-// поэтому обычно находится с первого раза; если кеш ещё пуст — повторяем раз в
-// полсекунды (чтение имён классов дорогое, гонять его каждый кадр нельзя).
-static void farm_resolve_extension(FarmEntity& entity) {
-    if (entity.ext_kind != FARM_EXT_NONE && valid_obj(entity.ext)) return;
-    if (entity.ext_age > 0) { --entity.ext_age; return; }
-    entity.ext_age = 30;                       // ~0.5 с до следующей попытки
-    entity.ext = 0;
-    entity.ext_kind = FARM_EXT_NONE;
-    if (!valid_obj(entity.component)) return;
-
-    uint64_t items[8];
-    const int count = read_managed_collection(rd_ptr(entity.component + MINEABLE_EXTENSIONS),
-                                              items, 8);
-    for (int i = 0; i < count; ++i) {
-        const uint64_t obj = items[i];
-        if (!valid_obj(obj)) continue;
-        if (object_class_name_is(obj, kFarmExtOreClass)) {
-            entity.ext = obj; entity.ext_kind = FARM_EXT_ORE; return;
-        }
-        if (object_class_name_is(obj, kFarmExtTreeClass)) {
-            entity.ext = obj; entity.ext_kind = FARM_EXT_TREE; return;
-        }
-    }
-}
-
-// Мировая точка крестика и откуда она взялась (для диагностики в меню).
-// source: 1 — трансформ маркера руды, 2 — точка на коре дерева (MTQ, либо
-// ближайшая к глазу точка отрезка MTQ..MTu — именно до отрезка игра меряет
-// попадание), 3 — трансформ декаля дерева (запасной путь; декаль смещён от
-// коры на 0.25 м по нормали, поэтому он второй).
-// life_left — сколько секунд крестику осталось жить (0 = уже потух, -1 = не
-// прочиталось).
-// Сколько секунд жизни осталось у крестика: у руды возраст (lHG) сравнивается
-// с 15.0 прямо в OreHitstreaksMarker.Update, у дерева — свой lifetime, который
-// HitMarkerItem.Update набирает в lzr. Мусорное значение отдаёт -1 («не
-// знаю»), и тогда вызывающий код ведёт себя как раньше.
-// Возвращает остаток жизни в секундах; 0.0F — ровно «потух» (вызывающий код
-// сравнивает с нулём), -1.0F — «не прочиталось» (тогда верим полю маркера, как
-// раньше, чтобы сбой чтения не лишал бота крестика).
-static float farm_marker_life_left(uint64_t marker, uint64_t age_offset, float lifetime) {
-    float age = 0.0F;
-    if (!rd_exact(marker + age_offset, age) || !std::isfinite(age) || age < 0.0F) return -1.0F;
-    if (!(lifetime > 0.0F)) return -1.0F;
-    const float left = lifetime - age;
-    return left > 0.0F ? left : 0.0F;
-}
-
-// Диагностика крестика для лога автофарма: что реально лежит в полях сегмента
-// дерева (SPOT_A = точка на коре, SPOT_B = конец сегмента) и почему точка на
-// коре не стала точкой прицела. В логе 14.09.2026 источник был 3 (декаль) во
-// всех 10887 строках и ни разу 2 (кора) — без сырых значений не отличить «поля
-// пусты» от «значения есть, но проверка их отвергла».
-// Сглаженный радиус ствола на высоте крестика (см. постановку прицела на кору
-// в esp_farm_get_target). Один узел за раз, поэтому хватает одной ячейки.
-static unsigned long long s_bark_id = 0;
-static float              s_bark_r  = -1.0F;
-
-static Vec3  g_farmSpotRawA{}, g_farmSpotRawB{};
-static int   g_farmSpotRawWhy = 3;      // 0 A принят, 1 не конечен, 2 вне узла, 3 не читали
-static float g_farmSpotRawLen = -1.0F;  // |A-B| в метрах, -1 = не считалось
-
-void esp_farm_spot_raw(float& ax, float& ay, float& az, float& bx, float& by, float& bz,
-                       int& why, float& len) {
-    ax = g_farmSpotRawA.x; ay = g_farmSpotRawA.y; az = g_farmSpotRawA.z;
-    bx = g_farmSpotRawB.x; by = g_farmSpotRawB.y; bz = g_farmSpotRawB.z;
-    why = g_farmSpotRawWhy; len = g_farmSpotRawLen;
-}
-
-static bool farm_read_spot(const FarmEntity& entity, Vec3& out, int& source, int& streak, float& life_left) {
-    out = {}; source = 0; streak = 0; life_left = -1.0F;
-    g_farmSpotRawA = {}; g_farmSpotRawB = {}; g_farmSpotRawWhy = 3; g_farmSpotRawLen = -1.0F;
-    if (!valid_obj(entity.ext)) return false;
-
-    if (entity.ext_kind == FARM_EXT_ORE) {
-        // MoW == null означает «крестика сейчас нет» — игра сама обнуляет поле,
-        // когда X потух (giq: Destroy маркера + str xzr,[x19,#0x30]).
-        const uint64_t marker = rd_ptr(entity.ext + OREHS_MARKER);
-        if (!valid_obj(marker)) return false;
-        // Обнуление поля и гашение GameObject происходят не одним тактом, а
-        // отсчёт своих 15 секунд маркер ведёт сам (Update: lHG += dt; lHG > 15
-        // -> SetActive(false) + вызов владельца). Пока поле ещё заполнено, но
-        // время вышло, прицел стоит на невидимой точке и удары уходят в никуда.
-        const float life = farm_marker_life_left(marker, OREMARK_AGE, OREMARK_LIFETIME);
-        if (life == 0.0F) return false;
-        const uint64_t transform = native_component_transform(managed_object_native(marker));
-        if (!transform || !marker_world_position(transform, out)) return false;
-        if (!farm_spot_on_node(out, entity.pos, entity.kind)) return false;
-        const int32_t s = rd<int32_t>(entity.ext + OREHS_STREAK_INDEX);
-        streak = (s >= 0 && s < 10000) ? s : 0;
-        life_left = life;
-        source = 1;
-        return true;
-    }
-
-    if (entity.ext_kind == FARM_EXT_TREE) {
-        // Все проверки попадания у дерева начинаются с MTn != null — без живого
-        // клона серия не засчитывается, так что это и есть признак «X есть».
-        const uint64_t marker = rd_ptr(entity.ext + TREEHS_MARKER);
-        if (!valid_obj(marker)) return false;
-        // HitMarkerItem живёт свой lifetime, а по истечении уходит в пул
-        // (Update: lzr += dt; lzr > lifetime -> вызов владельца lzT), где его
-        // переиспользуют для другого дерева. Возраст поэтому проверяем до того,
-        // как поверить в координаты.
-        float lifetime = 0.0F;
-        if (!rd_exact(marker + HITMARK_LIFETIME, lifetime) || !std::isfinite(lifetime) || lifetime < 0.0F)
-            lifetime = 0.0F;
-        const float life = farm_marker_life_left(marker, HITMARK_AGE, lifetime);
-        if (life == 0.0F) return false;
-        const int32_t s = rd<int32_t>(entity.ext + TREEHS_STREAK);
-        streak = (s >= 0 && s < 10000) ? s : 0;
-
-        // MTQ/MTu (0x88/0xA4) — ЛОКАЛЬНЫЕ координаты дерева, а не мировые:
-        // в логе 14.09 у всех 6 крестиков A = (0, h, 0) — точка на ОСИ ствола
-        // на высоте X, — а B отстоит от неё на радиус ствола (0.40 м у дерева
-        // с корой 0.354 м, 0.04 м у тонкого, у которого кора 0.037 м). Отношение
-        // к мировым размерам одинаковое для обоих (0.885 и 0.93) — это масштаб
-        // дерева. Мировой точкой A поэтому быть не может (узел в 1200 м от
-        // начала координат), и прежняя ветка «прицел = A» была мертва: она
-        // срабатывала только у деревьев рядом с (0,0,0) и давала там мусор.
-        // Сами значения нужны — из них берётся радиус ствола на высоте X
-        // (см. постановку прицела на кору в esp_farm_get_target).
-        const Vec3 a = rd_v3(entity.ext + TREEHS_SPOT_A);
-        const Vec3 b = rd_v3(entity.ext + TREEHS_SPOT_B);
-        g_farmSpotRawA = a;
-        g_farmSpotRawB = b;
-        if (vec3_is_finite(a) && vec3_is_finite(b)) {
-            const float lx = b.x - a.x, ly = b.y - a.y, lz = b.z - a.z;
-            g_farmSpotRawLen = sqrtf(lx * lx + ly * ly + lz * lz);
-        }
-        g_farmSpotRawWhy = !vec3_is_finite(a) ? 1
-                         : !farm_spot_on_node(a, entity.pos, entity.kind) ? 2 : 0;
-        // Мировая точка X берётся из трансформа декали (единственный источник
-        // мировых координат крестика), а локальный отрезок A..B идёт на радиус
-        // ствола: декаль стоит не на коре, поэтому прицел отдельно ставится на
-        // кору — см. «Точка крестика на коре» в esp_farm_get_target.
-        // Проверка попадания у дерева меряет дистанцию до ОТРЕЗКА MTQ..MTu
-        // радиусом 0.15 м: прицел на коре в направлении декали попадает ровно
-        // в конец B этого отрезка, то есть в середину допуска.
-        const uint64_t mark = rd_ptr(marker + HITMARK_MARK);
-        uint64_t transform = valid_obj(mark) ? managed_object_native(mark) : 0;
-        if (!transform) transform = native_component_transform(managed_object_native(marker));
-        if (!transform || !marker_world_position(transform, out)) return false;
-        if (!farm_spot_on_node(out, entity.pos, entity.kind)) return false;
-        life_left = life;
-        source = 3;
-        return true;
-    }
-    return false;
-}
-
-void esp_farm_debug(int& nodes_cached, int& idle_reason) {
-    nodes_cached = (int)g_farm_entities.size();
-    idle_reason = g_farm_idle_reason;
-}
-
-void esp_farm_tool_info(int& purposes_have, int& purposes_need) {
-    purposes_have = g_farm_tool_have;
-    purposes_need = g_farm_tool_need;
-}
-
-// Упёрся ли луч прицела в САМ узел добычи, а не в перекрытие.
-//
-// Зачем: у камня точка прицела — пивот узла с зажимом по высоте, то есть точка
-// ВНУТРИ породы. Луч игры останавливается на ближней поверхности камня гораздо
-// раньше неё (лог 14.09, узел 86a3c0: ray 0.51..0.77 м при aim_3d 1.97..2.33 м
-// на всех 1595 кадрах окна), поэтому прежняя формула «луч дошёл заметно раньше
-// точки прицела => перекрыт» принимала за стену собственный камень. Дальше
-// контроллер честно отрабатывал перекрытие: «перекрыт — обхожу», круги вокруг
-// узла, ноль тапов и ноль крестиков. Дерево при этом работало: там поправка на
-// кору ставит прицел НА поверхность, ray_distance ≈ aim_3d и «перекрыт» не
-// возникало — на деревья эта проверка не влияет.
-//
-// Удар по своему же камню игра засчитывает: FPMelee.ZkX сравнивает с
-// m_MaxReach + hitRadius distance ЭТОГО луча (0.5..0.8 м при дальности 1.5 м),
-// а не нашу дистанцию до точки прицела. После первого удара OreHitstreaks.giu
-// ставит X через Collider.ClosestPoint — уже на поверхности, и дальше прицел
-// стоит на крестике, как у дерева.
-//
-// Своим считается попадание по любому из двух признаков:
-//   1) m_Collider луча — коллайдер экстеншена руды (OREHS_COLLIDER: тот самый
-//      Collider, которым игра ставит X). Сначала сравниваем managed-указатели
-//      напрямую, потом их нативные объекты — обёртка может быть другой;
-//   2) GameObject попадания — GameObject узла. У узла в кеше transform уже
-//      нативный, у попадания managed, поэтому сравниваем нативные.
-// Вызывается только когда старая формула сказала «перекрыт», так что лишние
-// чтения (3..5) достаются лишь редким кадрам с реальным подозрением на стену.
-// Трансформ, о который остановился луч: у попадания есть GameObject (managed,
-// читаем его native), а у коллайдера — прямой путь до Transform. Коллайдер
-// точнее (это ровно та геометрия, в которую попал луч), GameObject — запасной
-// путь, когда m_Collider пуст.
-static uint64_t ray_hit_transform(const MeleeReach& reach) {
-    if (reach.ray_collider) {
-        const uint64_t col = managed_object_native(reach.ray_collider);
-        if (col) {
-            const uint64_t t = native_component_transform(col);
-            if (t) return t;
-        }
-    }
-    const uint64_t go = managed_object_native(reach.ray_hit_go);
-    if (!go) return 0;
-    const uint64_t pairs = rd_ptr(go + GAMEOBJECT_COMPONENT_ARRAY);
-    if (!pairs) return 0;
-    const uint64_t t = rd_ptr(pairs + COMPONENT_PAIR_PTR);
-    if (!t || rd_ptr(t + COMPONENT_GAMEOBJECT) != go) return 0;
-    return t;
-}
-
-// Лежит ли попадание луча ВНУТРИ поддерева узла.
-//
-// Проверка «GameObject попадания == GameObject узла» слишком строга: у камня и
-// дерева меш с коллайдером висит на дочернем GameObject (LOD-модели, обломки,
-// «корка»), и корневой GO узла с ним не совпадает НИКОГДА. Лог 15.09.2026 это и
-// показал: у руды луч упирался в собственную породу (0.5 м при точке прицела
-// 2.3 м), покидал узел как «перекрытый» — четыре обхода, чёрный список, ноль
-// ударов. Поэтому сравниваем с ПОДДЕРЕВОМ трансформа узла: попадание в любую его
-// деталь — это попадание в сам узел.
-//
-// Обход стоит несколько чтений на узел поддерева, поэтому вердикт кешируется по
-// паре (узел, трансформ попадания): луч стоит в одной и той же детали десятки
-// кадров подряд, а обход делается один раз.
-static bool ray_hit_in_node_subtree(const MeleeReach& reach, const FarmEntity& node,
-                                    uint64_t& hit_transform_out, int& nodes_walked) {
-    hit_transform_out = 0;
-    nodes_walked = 0;
-    if (!node.transform) return false;
-    const uint64_t hit_transform = ray_hit_transform(reach);
-    if (!hit_transform) return false;
-    hit_transform_out = hit_transform;
-    if (hit_transform == node.transform) return true;
-
-    static unsigned long long s_node_id = 0;
-    static uint64_t s_hit_transform = 0;
-    static bool     s_verdict = false;
-    if (s_node_id == node.identity && s_hit_transform == hit_transform) return s_verdict;
-
-    static std::vector<uint64_t> s_subtree;
-    collect_transform_subtree(node.transform, s_subtree, 128);
-    nodes_walked = (int)s_subtree.size();
-    bool verdict = false;
-    for (uint64_t t : s_subtree) {
-        if (t == hit_transform) { verdict = true; break; }
-    }
-    s_node_id = node.identity;
-    s_hit_transform = hit_transform;
-    s_verdict = verdict;
-    return verdict;
-}
-
-static bool ray_hit_is_self_node(const MeleeReach& reach, const FarmEntity& node, int& why) {
-    why = 0;
-    if (!reach.ray_valid || !reach.ray_hit_go) return false;
-    // 1. Самая дешёвая проверка: коллайдер попадания — тот самый, которым игра
-    //    ставит крестик руды (OREHS_COLLIDER, lzR). Поле заполняется в gir, то
-    //    есть уже ПОСЛЕ первого попадания (и живёт, пока жив крестик).
-    if (reach.ray_collider && node.ext && node.ext_kind == FARM_EXT_ORE) {
-        const uint64_t col = rd_ptr(node.ext + OREHS_COLLIDER);
-        if (col && (col == reach.ray_collider ||
-                    managed_object_native(col) == managed_object_native(reach.ray_collider))) {
-            why = 1;
-            return true;
-        }
-    }
-    if (!node.transform) return false;
-    // 2. Коллайдер (или сам узел) висит на корневом GameObject узла.
-    const uint64_t node_go = rd_ptr(node.transform + COMPONENT_GAMEOBJECT);
-    if (!node_go) return false;
-    if (managed_object_native(reach.ray_hit_go) == node_go) {
-        why = 2;
-        return true;
-    }
-    // 3. Меш с коллайдером — деталь узла: попадание внутрь его поддерева.
-    uint64_t hit_transform = 0;
-    int nodes_walked = 0;
-    if (ray_hit_in_node_subtree(reach, node, hit_transform, nodes_walked)) {
-        why = 3;
-        return true;
-    }
-    return false;
-}
-
-static bool ray_hit_is_self_node(const MeleeReach& reach, const FarmEntity& node) {
-    int why = 0;
-    return ray_hit_is_self_node(reach, node, why);
-}
-
-// Сырая прикидка «где на узле сидит точка попадания» из самого узла, без
-// крестика: MineableObject.LXX (0xC8) — Transform, который игра использует как
-// якорь точки удара (ZgL() отдаёт его мировую позицию, а сам он живёт в
-// hitInfo). Если это действительно якорь поверхности, он даёт точку прицела для
-// руды ещё ДО первого удара — тогда «перекрытие собственным камнем» исчезает
-// само, без всяких послаблений. Пока это только замер для лога: пишем позицию
-// якоря и дистанцию до точки попадания луча, чтобы на устройстве увидеть,
-// совпадают ли они (0.0x м = якорь на поверхности, десятки метров = мусор).
-static bool farm_ore_anchor_point(const FarmEntity& node, Vec3& out, float& dist_to_ray, int& valid) {
-    valid = 0;
-    dist_to_ray = -1.0F;
-    if (node.kind == 0 || !valid_obj(node.component)) return false;
-    const uint64_t anchor = rd_ptr(node.component + MINEABLE_HIT_ANCHOR);
-    if (!valid_obj(anchor)) return false;
-    const uint64_t transform = native_component_transform(managed_object_native(anchor));
-    if (!transform) return false;
-    if (!marker_world_position(transform, out)) return false;
-    valid = 1;
-    return true;
-}
-
-bool esp_farm_get_target(FarmTarget& out) {
-    out = FarmTarget{};
-    if (!g_farm_mask) { g_farm_idle_reason = 1; return false; }
-    if (g_pid <= 0 || !g_il2cpp_base) { g_farm_idle_reason = 2; return false; }
-    // Та же самопочинка, что у маркеров: если конвейер боксов не опубликовал
-    // кадр (пустой список игроков и т.п.), собираем его прямо из камеры.
-    if (!g_frame_local_valid || !g_frame_vp_valid) {
-        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh)) {
-            g_farm_idle_reason = 2;
-            return false;
-        }
-    }
-
-    // Учёт чёрного списка (контроллер вызывает нас один раз в кадр).
-    for (auto it = g_farm_blacklist.begin(); it != g_farm_blacklist.end();) {
-        if (--(it->second) <= 0) it = g_farm_blacklist.erase(it);
-        else ++it;
-    }
-
-    farm_scan_tick();
-
-    // Липкая цель: пока текущий узел жив, работаем по нему — иначе контроллер
-    // переключался бы между двумя равноудалёнными узлами каждый кадр.
-    static uint64_t s_last_identity = 0;
-
-    // Орудие в руках читаем один раз на кадр: из него и дальность удара, и ритм,
-    // и умения (какой ресурс этим орудием вообще добывается).
-    MeleeReach reach{};
-    bool have_reach = false;
-    have_reach = read_local_melee_reach(reach);
-    g_farm_tool_have = (have_reach && reach.purposes_valid) ? reach.tool_purposes : 0;
-    int tool_need = 0;
-
-    const float kMaxFarmDistance = g_farm_max_distance;
-    const FarmEntity* best = nullptr;
-    float best_score = 1e18F;
-    float best_dist = 0.0F;
-    for (const FarmEntity& entity : g_farm_entities) {
-        if (!(g_farm_mask & (1u << entity.kind))) continue;
-        if (!entity.pos_valid) continue;
-        if (g_farm_blacklist.count(entity.identity)) continue;
-
-        // Узел, который нечем взять текущим орудием, целью не становится:
-        // сравнение побитовое, тип у обоих полей один (FPTool.ToolPurpose).
-        // Без этого бот с киркой в руках вечно кружил вокруг дерева (и
-        // наоборот), теряя на каждый узел весь give-up таймер.
-        if (have_reach && reach.purposes_valid && entity.required_purpose != 0 &&
-            (reach.tool_purposes & entity.required_purpose) == 0) {
-            tool_need |= entity.required_purpose;
-            continue;
-        }
-
-        // Дистанция по горизонтали (в Unity ось Y вверх). Контроллер сравнивает
-        // её с дальностью удара, а пивот высокого дерева сидит в метрах над
-        // землёй — 3D-дистанция до него никогда не опускается до порога, из-за
-        // чего бот вечно кружил вокруг тонких стволов.
-        const float dx = entity.pos.x - g_frame_local_pos.x;
-        const float dy = entity.pos.y - g_frame_local_pos.y;
-        const float dz = entity.pos.z - g_frame_local_pos.z;
-        const float dist = sqrtf(dx * dx + dz * dz);
-        if (!std::isfinite(dist) || dist > kMaxFarmDistance) continue;
-        // Узлы на другом вертикальном уровне (скала сверху/снизу) не берём.
-        if (!std::isfinite(dy) || fabsf(dy) > 30.0F) continue;
-
-        float score = dist;
-        // Похоже добытые узлы отправляются в конец очереди, а не отсеиваются
-        // сразу: точный смысл fractionRemaining на всех сборках не гарантирован,
-        // и ошибочная догадка здесь оставила бы фарм вообще без целей. Если
-        // оценка неверна, watchdog контроллера всё равно снимет узел за
-        // секунды. Для ТЕКУЩЕЙ цели не делаем никогда: один мусорный замер
-        // остатка в середине работы отправлял её в конец очереди, и метка
-        // прыгала на другой узел, хотя этот был ещё наполовину полон.
-        if (entity.identity != s_last_identity) {
-            // Освежаем кешированный остаток не чаще раза в секунду на узел —
-            // иначе один ближний узел стоил по syscall'у на узел каждый кадр.
-            FarmEntity& mut = const_cast<FarmEntity&>(entity);
-            if (--mut.frac_age <= 0) {
-                // 120 кадров: «раз в секунду» задумывалось при 60 fps, а на
-                // 118 fps выходило вдвое чаще — по syscall'у на каждый ближний
-                // узел дважды в секунду.
-                mut.frac_age = 120;
-                mut.fraction = rd<float>(entity.component + MINEABLE_FRACTION);
-            }
-            if (std::isfinite(mut.fraction) && mut.fraction >= 0.0F &&
-                mut.fraction <= 1.001F && mut.fraction < 0.03F)
-                score += 1000.0F;
-        } else {
-            score *= 0.6F; // липкость
-        }
-        if (score < best_score) { best_score = score; best = &entity; best_dist = dist; }
-    }
-    if (!best) {
-        s_last_identity = 0;
-        g_farm_tool_need = tool_need;
-        // 6 — рядом есть узлы, но текущим орудием они не добываются.
-        g_farm_idle_reason = tool_need ? 6 : (g_farm_entities.empty() ? 3 : 4);
-        return false;
-    }
-    g_farm_tool_need = 0;
-    s_last_identity = best->identity;
-    FarmEntity& node = const_cast<FarmEntity&>(*best);
-
-    // ---- Крестик -------------------------------------------------------------
-    Vec3 spot{};
-    int spot_source = 0, streak = 0;
-    float spot_life = -1.0F;
-    bool has_spot = false;
-    farm_resolve_extension(node);
-    has_spot = farm_read_spot(node, spot, spot_source, streak, spot_life);
-
-    // С какой стороны узла X. Если с обратной, то (а) идти к нему — значит
-    // упираться в ствол/камень, и (б) удар сквозь меш не засчитается в серию.
-    // Тогда бьём по корпусу: урон идёт, а игра пересоздаст крестик на месте
-    // нашего попадания, как только текущий потухнет (15 с).
-    bool spot_front = true;
-    if (has_spot) {
-        const float px = g_frame_local_pos.x - best->pos.x;
-        const float pz = g_frame_local_pos.z - best->pos.z;
-        const float sx = spot.x - best->pos.x;
-        const float sz = spot.z - best->pos.z;
-        const float pl = sqrtf(px * px + pz * pz);
-        const float sl = sqrtf(sx * sx + sz * sz);
-        // Только когда обе стороны различимы: у камня пивот бывает зарыт, и X
-        // стоит почти над ним — там «сторона» не определена, считаем своей.
-        if (pl > 0.35F && sl > 0.35F)
-            spot_front = ((px * sx + pz * sz) / (pl * sl)) > -0.1F;
-    }
-    const bool at_spot = has_spot && spot_front;
-
-    // ---- Точка крестика: поставить на кору, а не на декаль и не внутрь ствола --
-    // Декаль X висит СНАРУЖИ коры (сдвиг по нормали против z-файта), поэтому
-    // прицел по ней на боку ствола уходил мимо дерева: луч «глаз -> декаль» не
-    // цеплял меш, GKo оставался пустым и FPMelee.ZkX играл один On_Woosh.
-    // Первая поправка тянула прицел к оси ствола на 0.25 м — «сдвиг декали из
-    // дампа». Замер по логу 14.09 (55 замахов с живым лучом игры, у которого
-    // известны и точка попадания m_Point, и нормаль) показал, что 0.25 м —
-    // много: декаль торчит из коры в среднем на 0.108 м, а прицел после
-    // поправки уходил на 0.138 м ВНУТРЬ ствола (min 0.178, max +0.063 снаружи).
-    // Урон при этом шёл (луч цеплял кору), но попадание оказывалось в 15 см от
-    // крестика — за пределами 0.15 м, которыми игра меряет серию по X, поэтому
-    // серия не росла: «крестик сбоку, а бот по нему мажет».
-    //
-    // Правильная точка — пересечение направления на декаль с корой. Радиус
-    // ствола на высоте X берём из того, что игра меряет сама, по убыванию
-    // точности:
-    //   1. точка попадания её же луча прицела (m_Point) — это буквально кора;
-    //   2. локальный отрезок X (MTQ на оси ствола, MTu на коре): его длина —
-    //      радиус в локальных единицах, а масштаб дерева получается из высоты
-    //      декали над пивотом (декаль стоит на той же высоте, что и X). Замер:
-    //      локальный радиус 0.40 при коре 0.354 и 0.04 при коре 0.037 —
-    //      масштаб 0.885 и 0.93, оба сходятся с высотой (1.93 -> 1.74);
-    //   3. ни луча, ни полей — декаль торчит примерно на 0.3 радиуса, то есть
-    //      кора это 0.77 от её вылета (по замеру 0.757..0.788 на двух деревьях).
-    // Направление всегда от декали: нормаль ствола почти радиальна, а величина
-    // сдвига по нормали нам как раз неизвестна — она и есть ошибка.
-    if (has_spot && node.kind == 0) {
-        const float cdx = spot.x - node.pos.x, cdz = spot.z - node.pos.z;
-        const float choriz = sqrtf(cdx * cdx + cdz * cdz);
-        if (choriz > 0.05F) {
-            float bark = -1.0F;
-            // 1) кора из луча самой игры. Попадание обязано быть на ЭТОМ стволе:
-            //    правдоподобный радиус, не дальше декали с запасом и рядом по
-            //    высоте — иначе это земля, соседнее дерево или крона.
-            if (reach.ray_point_valid && reach.ray_hit_object) {
-                const float hx = reach.ray_point.x - node.pos.x;
-                const float hz = reach.ray_point.z - node.pos.z;
-                const float rh = sqrtf(hx * hx + hz * hz);
-                if (std::isfinite(rh) && rh > 0.03F && rh < 2.5F &&
-                    rh < choriz * 1.6F && fabsf(reach.ray_point.y - spot.y) < 1.2F)
-                    bark = rh;
-            }
-            // 2) локальный отрезок X + масштаб дерева из высоты декали
-            if (bark < 0.0F && node.ext && node.ext_kind == FARM_EXT_TREE) {
-                const Vec3 la = rd_v3(node.ext + TREEHS_SPOT_A);
-                const Vec3 lb = rd_v3(node.ext + TREEHS_SPOT_B);
-                const float h_world = spot.y - node.pos.y;   // высота X над пивотом
-                if (vec3_is_finite(la) && vec3_is_finite(lb) && la.y > 0.25F && h_world > 0.25F) {
-                    const float scale = h_world / la.y;
-                    if (scale > 0.15F && scale < 6.0F) {
-                        const float dx = lb.x - la.x, dz = lb.z - la.z;
-                        const float r_local = sqrtf(dx * dx + dz * dz);
-                        if (r_local > 0.005F) bark = r_local * scale;
-                    }
-                }
-            }
-            // 3) совсем ничего не прочиталось
-            if (bark < 0.0F) bark = choriz * 0.77F;
-
-            if (std::isfinite(bark) && bark > 0.02F && bark < 2.5F) {
-                // Радиус ствола величина почти постоянная, а измерение по лучу
-                // шумит на сантиметры из кадра в кадр (луч попадает в разные
-                // места коры). Сглаживаем и держим на узел: иначе прицел
-                // ползает вместе с шумом, а точка подхода дёргается за ним.
-                if (s_bark_id != node.identity) { s_bark_id = node.identity; s_bark_r = bark; }
-                else s_bark_r += (bark - s_bark_r) * 0.25F;
-                if (s_bark_r > 0.02F && s_bark_r < 2.5F && s_bark_r < choriz * 1.6F) {
-                    const float k = s_bark_r / choriz;
-                    spot.x = node.pos.x + cdx * k;
-                    spot.z = node.pos.z + cdz * k;
-                }
-            }
-        }
-    }
-
-    // ---- Точка прицела -------------------------------------------------------
-    Vec3 aim = at_spot ? spot : best->pos;
-    if (!at_spot) aim.y += (best->kind == 0) ? 1.15F : 0.15F;
-
-    // Полнокруговые углы от оси камеры (или выстрела): в отличие от
-    // aim_angles_for() узел может быть и за спиной, поэтому проекция на
-    // forward бывает отрицательной, а yaw охватывает +-180. Приоритет:
-    // ось выстрела > поза трансформа > базис из матрицы вида этого кадра
-    // (последний есть на устройствах, где поза не читается — именно из-за него
-    // фарм раньше висел в «нет позиции камеры»).
-    const bool ok_ref   = g_aim_ref_valid  && farm_cam_source_ok(g_aim_ref_origin);
-    const bool ok_pose  = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
-    const bool ok_frame = g_frame_cam_basis_valid && farm_cam_source_ok(g_frame_cam_pos);
-    if (!ok_ref && !ok_pose && !ok_frame) {
-        g_farm_idle_reason = 5;
-        return false;
-    }
-    // По живому крестику меряем от КАМЕРЫ: прицел должен стоять ровно на той
-    // отметке, которую видит игрок (покачивание look-root давало пару градусов
-    // промаха). По корпусу — от оси выстрела: вдоль неё и идёт удар, а сам узел
-    // огромный.
-    const bool use_ref  = ok_ref && !(at_spot && ok_pose);
-    const bool use_pose = !use_ref && ok_pose;
-    const Vec3& origin = use_ref ? g_aim_ref_origin  : use_pose ? g_cam_pos     : g_frame_cam_pos;
-    const Vec3& fwd    = use_ref ? g_aim_ref_forward : use_pose ? g_cam_forward : g_frame_cam_fwd;
-    const Vec3& right  = use_ref ? g_aim_ref_right   : use_pose ? g_cam_right   : g_frame_cam_right;
-    const Vec3& up     = use_ref ? g_aim_ref_up      : use_pose ? g_cam_up      : g_frame_cam_up;
-
-    // Прицел по корпусу зажимаем в полосу вокруг ГЛАЗА игрока — единственной
-    // высоты, которая надёжна на всех префабах (пивот камня бывает на макушке,
-    // у дерева — в центре ствола).
-    if (!at_spot) {
-        if (best->kind == 0) {
-            // Дерево: грудь — чуть ниже глаза до уровня глаза.
-            const float lo = origin.y - 0.9F, hi = origin.y + 0.1F;
-            if (aim.y < lo) aim.y = lo;
-            if (aim.y > hi) aim.y = hi;
-        } else {
-            // Руда: от колена до пояса, заметно ниже глаза.
-            const float lo = origin.y - 1.3F, hi = origin.y - 0.55F;
-            if (aim.y < lo) aim.y = lo;
-            if (aim.y > hi) aim.y = hi;
-        }
-    }
-
-    const Vec3 d = {aim.x - origin.x, aim.y - origin.y, aim.z - origin.z};
-    const float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
-    const float rx = d.x * right.x + d.y * right.y + d.z * right.z;
-    const float ux = d.x * up.x + d.y * up.y + d.z * up.z;
-    if (!std::isfinite(fx) || !std::isfinite(rx) || !std::isfinite(ux)) {
-        g_farm_idle_reason = 5;
-        return false;
-    }
-    constexpr float rad2deg = 57.29577951F;
-    const float yaw   = atan2f(rx, fx) * rad2deg;
-    const float pitch = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
-    if (!std::isfinite(yaw) || !std::isfinite(pitch)) { g_farm_idle_reason = 5; return false; }
-
-    // ---- Точка подхода -------------------------------------------------------
-    // С крестиком встаём ПЕРЕД ним (standoff наружу от оси узла), а не в сам
-    // узел: дистанция удара меряется от X, а меш не даёт подойти к пивоту
-    // вплотную. Без крестика идём к узлу — контроллер остановится сам.
-    Vec3 goal = best->pos;
-    if (at_spot) {
-        float ox = spot.x - best->pos.x, oz = spot.z - best->pos.z;
-        float ol = sqrtf(ox * ox + oz * oz);
-        if (ol < 0.05F) {   // X почти над пивотом — заходим со стороны игрока
-            ox = g_frame_local_pos.x - best->pos.x;
-            oz = g_frame_local_pos.z - best->pos.z;
-            ol = sqrtf(ox * ox + oz * oz);
-        }
-        if (ol > 0.05F) {
-            const float standoff = (best->kind == 0) ? 0.45F : 0.95F;
-            goal.x = spot.x + (ox / ol) * standoff;
-            goal.z = spot.z + (oz / ol) * standoff;
-            goal.y = spot.y;
-        }
-    }
-    float walk_yaw = 0.0F, walk_dist = best_dist;
-    {
-        const float gx = goal.x - origin.x, gz = goal.z - origin.z;
-        const float gd = sqrtf(gx * gx + gz * gz);
-        if (std::isfinite(gd)) {
-            walk_dist = gd;
-            const float gyaw = atan2f(gx * right.x + gz * right.z,
-                                      gx * fwd.x + gz * fwd.z) * rad2deg;
-            if (std::isfinite(gyaw)) walk_yaw = gyaw;
-        }
-    }
-
-    // ---- Экранная метка: ровно та точка, по которой бьёт бот ----------------
-    if (g_frame_vp_valid) {
-        Vec2 screen{};
-        if (w2s(g_frame_vp, aim, g_frame_sw, g_frame_sh, screen, false) &&
-            std::isfinite(screen.x) && std::isfinite(screen.y) &&
-            screen.x >= -64.0F && screen.x <= g_frame_sw + 64.0F &&
-            screen.y >= -64.0F && screen.y <= g_frame_sh + 64.0F) {
-            out.on_screen = true;
-            out.sx = screen.x;
-            out.sy = screen.y;
-        }
-    }
-
-    const float adx = aim.x - g_frame_local_pos.x;
-    const float adz = aim.z - g_frame_local_pos.z;
-    const float aim_dist = sqrtf(adx * adx + adz * adz);
-    // 3D-дистанция от ТОЙ ЖЕ точки, от которой считаем углы (глаз / ось
-    // выстрела): именно её игра сравнивает с m_MaxReach + hitRadius в
-    // FPMelee.ZkX, решая засчитать удар или сыграть промах. От
-    // g_frame_local_pos (корень игрока) её мерить нельзя: глаз выше примерно
-    // на 1.5 м, а вся дальность удара — пара метров.
-    const float edx = aim.x - origin.x, edy = aim.y - origin.y, edz = aim.z - origin.z;
-    const float aim_3d = sqrtf(edx * edx + edy * edy + edz * edz);
-
-    g_farm_idle_reason = 0;
-    out.valid = true;
-    out.id = best->identity;
-    out.ext_found = (node.ext_kind != FARM_EXT_NONE);
-    out.kind = best->kind;
-    out.yaw = yaw;
-    out.pitch = pitch;
-    out.aim_dist = std::isfinite(aim_dist) ? aim_dist : best_dist;
-    out.aim_3d = std::isfinite(aim_3d) ? aim_3d : out.aim_dist;
-    out.aim_x = aim.x; out.aim_y = aim.y; out.aim_z = aim.z;
-    out.node_x = best->pos.x; out.node_y = best->pos.y; out.node_z = best->pos.z;
-    // Дальность удара текущего орудия — из игры (FPMelee.m_MaxReach +
-    // hitRadius), а не «на глаз». Ноль значит «в руках не ближнее орудие или
-    // чтение не удалось» — тогда контроллер остаётся на эмпирических порогах.
-    if (reach.valid) {
-        out.melee_reach = reach.total;
-        out.melee_ray = reach.ray_length;
-        out.tool_purposes = reach.purposes_valid ? reach.tool_purposes : 0;
-        if (reach.time_between_attacks > 0.0F)
-            out.attack_period = reach.time_between_attacks + reach.pause_after_attack;
-        // Перекрыт ли узел: луч игры упёрся заметно раньше нашей точки
-        // прицела. Полметра допуска — на разницу между камерой и осью
-        // выстрела (качание/отдача) и на то, что X стоит на поверхности меша.
-        out.ray_valid = reach.ray_valid;
-        out.ray_distance = reach.ray_distance;
-        out.ray_blocked = reach.ray_valid && reach.ray_hit_object &&
-                          reach.ray_distance > 0.0F &&
-                          reach.ray_distance < out.aim_3d - 0.6F;
-        // Луч, упёршийся в собственный узел, перекрытием не считается: у камня
-        // точка прицела внутри породы, и иначе бот вечно обходил бы свой же
-        // камень (см. ray_hit_is_self_node). В out.ray_self_why остаётся, какая
-        // именно проверка это доказала (1 коллайдер крестика, 2 GameObject узла,
-        // 3 попадание в деталь поддерева) — по ней в логе видно, работает ли
-        // послабление и почему нет.
-        if (out.ray_blocked) {
-            out.ray_self = ray_hit_is_self_node(reach, node, out.ray_self_why);
-            if (out.ray_self) out.ray_blocked = false;
-            // Страховка для руды, по которой ещё не было ни одного удара.
-            // Крестика нет (spot 0) — значит, прицел стоит в ПИВОТЕ камня, то
-            // есть внутри породы, а луч игры останавливается на её поверхности
-            // заметно раньше. Проверки выше к такому лучу применимы только
-            // после первого удара (коллайдер крестика заполняется в gir, а
-            // поддерево узла может быть устроено иначе, чем представляется по
-            // дампу), поэтому здесь работает признак, который даёт сама игра:
-            // FPMelee.ZkX сравнивает с m_MaxReach + hitRadius дистанцию ЭТОГО
-            // луча, и если он остановился в пределах дальности удара, удар
-            // засчитается — по камню, в который мы и целимся вдоль оси прицела.
-            // Такой узел надо бить, а не обходить: обход на 2 с водит камеру,
-            // узел остаётся нетронутым и после четырёх обходов уходит в чёрный
-            // список (ровно это и видно в логе 15.09.2026 по руде: 0 тапов).
-            // Дерево сюда не попадает (kind == 0): у него прицел ставится на
-            // кору, и «луч раньше точки прицела» там означает честное
-            // перекрытие. От «бьём в чужой камень» страхует watchdog: ударов
-            // нет прогресса — узел уйдёт в чёрный список.
-            if (!out.ray_self && out.ray_blocked && node.kind != 0 && !at_spot &&
-                out.melee_reach > 0.2F && reach.ray_distance > 0.0F &&
-                reach.ray_distance <= out.melee_reach) {
-                out.ray_self = true;
-                out.ray_self_why = 4;
-                out.ray_blocked = false;
-            }
-            // Якорь точки удара (MineableObject.LXX) — замер для лога: если его
-            // мировая позиция совпадает с точкой попадания луча, это готовая
-            // точка прицела на поверхности камня ещё до первого удара.
-            if (node.kind != 0) {
-                Vec3 anchor{};
-                float to_ray = -1.0F;
-                int   valid = 0;
-                if (farm_ore_anchor_point(node, anchor, to_ray, valid)) {
-                    out.ore_anchor_valid = true;
-                    out.ore_anchor_x = anchor.x; out.ore_anchor_y = anchor.y;
-                    out.ore_anchor_z = anchor.z;
-                    if (reach.ray_point_valid) {
-                        const float dx = anchor.x - reach.ray_point.x;
-                        const float dy = anchor.y - reach.ray_point.y;
-                        const float dz = anchor.z - reach.ray_point.z;
-                        out.ore_anchor_to_ray = sqrtf(dx * dx + dy * dy + dz * dz);
-                    }
-                }
-            }
-        }
-        out.ray_point_valid = reach.ray_point_valid;
-        if (reach.ray_point_valid) {
-            out.ray_px = reach.ray_point.x; out.ray_py = reach.ray_point.y;
-            out.ray_pz = reach.ray_point.z;
-            out.ray_nx = reach.ray_normal.x; out.ray_ny = reach.ray_normal.y;
-            out.ray_nz = reach.ray_normal.z;
-        }
-    }
-    // Состояние самого узла. Здоровье — самый тонкий признак того, что удары
-    // доходят: fractionRemaining сдвигается на проценты, а m_CurrentHealth
-    // падает уже от первого попадания.
-    {
-        float hp = 0.0F, hp_max = 0.0F;
-        if (rd_exact(best->component + MINEABLE_CURRENT_HEALTH, hp) &&
-            std::isfinite(hp) && hp >= 0.0F && hp < 1000000.0F)
-            out.node_health = hp;
-        if (rd_exact(best->component + MINEABLE_MAX_HEALTH, hp_max) &&
-            std::isfinite(hp_max) && hp_max > 0.0F && hp_max < 1000000.0F)
-            out.node_health_max = hp_max;
-        int32_t xp = 0;
-        if (rd_exact(best->component + MINEABLE_EXPERIENCE, xp) && xp >= 0 && xp < 1000000)
-            out.node_experience = (int)xp;
-    }
-    out.at_spot = at_spot;
-    out.has_spot = has_spot;
-    out.spot_front = spot_front;
-    out.spot_source = spot_source;
-    out.streak = streak;
-    out.spot_life = spot_life;
-    out.walk_yaw = walk_yaw;
-    out.walk_dist = walk_dist;
-    out.node_dist = best_dist;
-    const float fraction = rd<float>(best->component + MINEABLE_FRACTION);
-    out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F)
-                 ? fraction : -1.0F;
-    return true;
-}
