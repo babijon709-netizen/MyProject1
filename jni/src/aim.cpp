@@ -802,9 +802,9 @@ static void AimLogTick(float dt) {
                 aim_mode_name(), s_frames, (int)d.axis, d.writes, d.fails, d.dev,
                 (int)g_aimActive);
     else if (g_state.aim_mode == AIM_MODE_MEMORY)
-        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d",
+        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f",
                 aim_mode_name(), s_frames, (int)d.params, (int)d.responded,
-                d.writes, d.fails);
+                d.writes, d.fails, (double)d.mismatch);
 }
 
 // ====================== Мемори-аим: «память» ===============================
@@ -933,6 +933,12 @@ static void UpdateAimMemory(float dt) {
             s_noResponseTime = 0.f;
             s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
         }
+    }
+    // Накопитель и камера должны совпадать: в конце каждого ZJo игра кладёт в
+    // накопитель фактические углы камеры. Разошлись — это чужой MouseLook.
+    if (haveCam) {
+        s_memDiag.mismatch = fabsf(WrapDeg180(accY - camYaw)) +
+                             fabsf(WrapDeg180(accX - camPitch));
     }
     if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
     else { s_haveLast = false; s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f; }

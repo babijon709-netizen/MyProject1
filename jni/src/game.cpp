@@ -892,10 +892,23 @@ static uint64_t resolve_runtime_player_list() {
     return list;
 }
 
+// Сколько кадров подряд прежний адрес игрока не подтверждается чтением. Три —
+// пора искать заново (респавн, смена мира). Один кадр — нормальный сбой чтения:
+// на устройстве до 4 % чтений падают с errno 5 (лог 16.09: отказов 51 тысяча
+// на 1,16 млн чтений), а чтобы записать в память, адрес надо прочитать. Из-за
+// одного такого кадра аим терял MouseLook, молчал полсекунды и показывал
+// «не найден MouseLook» — со стороны «мемори-аим работает через раз».
+static int  g_local_player_miss = 0;
+static const int kLocalPlayerMissLimit = 3;
+
 static uint64_t resolve_local_player() {
-    if (g_local_player && rd_ptr(g_local_player) == g_player_manager_class)
-        return g_local_player;
-    g_local_player = 0;
+    const uint64_t cached = g_local_player;
+    if (cached && g_player_manager_class) {
+        uint64_t klass = rd_ptr(cached);
+        if (klass != g_player_manager_class) klass = rd_ptr(cached); // чтение могло сорваться
+        if (klass == g_player_manager_class) { g_local_player_miss = 0; return cached; }
+        if (++g_local_player_miss < kLocalPlayerMissLimit) return cached;
+    }
 
     if (!g_game_controller_class && GAME_CONTROLLER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
@@ -910,8 +923,13 @@ static uint64_t resolve_local_player() {
     uint64_t local_player = rd_ptr(gcb_static_fields + GAME_CONTROLLER_LOCAL_PLAYER_FIELD);
     if (local_player && rd_ptr(local_player) == g_player_manager_class) {
         g_local_player = local_player;
+        g_local_player_miss = 0;
         return local_player;
     }
+    // Заново найти не вышло (статику не прочитали или игрока ещё нет). Прежний
+    // адрес в кэше не обнуляем: следующий кадр проверит его снова, и если
+    // чтение просто сорвалось — адрес пригодится. Но наружу его не отдаём:
+    // он уже не подтверждён три кадра подряд.
     return 0;
 }
 
@@ -1375,25 +1393,72 @@ static constexpr uint64_t MOUSELOOK_GYRO   = 0x78;   // объект гирос�
 // (логи 14-16.09.2026: метаданные недоступны), поэтому опознаём по структуре.
 static std::atomic<uint64_t> g_mouse_look_klass{0};
 
-static bool resolve_local_mouse_look(uint64_t& out) {
+// Почему MouseLook не нашёлся. Нужен не для красоты: по одной строке «не найден
+// MouseLook» не видно, что чинить — адрес игрока потерялся, объект чужой или
+// просто чтение сорвалось. В лог пишется не чаще раза в 2 с, потому что при
+// настоящей поломке это событие идёт каждый кадр.
+enum class LookFail { none, noPlayer, wrongPlayer, noObject, badSens };
+
+// Сообщение — прямо в вызове лога: отдельные русские литералы в game.cpp
+// проверка переводов считает подписями визуалов (строки лога она уже
+// пропускает, см. tools/lang/gen_tables.py). Пишем не чаще раза в 2 с: при
+// настоящей поломке событие идёт каждый кадр.
+static void log_look_fail(LookFail f, uint64_t mouse_look, float sens) {
+    static double s_last = -1e9;
+    const double now = memio::now_seconds();
+    if (now - s_last < 2.0) return;
+    s_last = now;
+    switch (f) {
+        case LookFail::noPlayer:
+            LogLine("память: MouseLook не найден — нет игрока");
+            break;
+        case LookFail::wrongPlayer:
+            LogLine("память: MouseLook не найден — адрес игрока не той структуры");
+            break;
+        case LookFail::noObject:
+            LogLine("память: MouseLook не найден — объекта нет (0x%llx)",
+                    (unsigned long long)mouse_look);
+            break;
+        case LookFail::badSens:
+            LogLine("память: MouseLook=0x%llx — чувствительность вне диапазона (%.3f)",
+                    (unsigned long long)mouse_look, (double)sens);
+            break;
+        default: break;
+    }
+}
+
+static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
     uint64_t player = resolve_local_player();
-    if (!player) return false;
-    if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) return false;
+    if (!player) { if (why) *why = LookFail::noPlayer; return false; }
+    if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) {
+        if (why) *why = LookFail::wrongPlayer;
+        return false;
+    }
     uint64_t mouse_look = rd_ptr(player + PLAYER_MOUSE_LOOK_OFFSET);
-    if (mouse_look < 0x10000) return false;   // ноль или мусор вместо указателя
+    if (mouse_look < 0x10000) { if (why) *why = LookFail::noObject; return false; }  // ноль или мусор вместо указателя
     const uint64_t klass = rd_ptr(mouse_look);
     const uint64_t known = g_mouse_look_klass.load();
-    if (known ? (klass != known) : (klass < 0x10000)) return false;
+    if (known ? (klass != known) : (klass < 0x10000)) {
+        if (why) *why = LookFail::noObject;
+        return false;
+    }
     out = mouse_look;
     return true;
 }
 
 bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro) {
     uint64_t mouse_look = 0;
-    if (!resolve_local_mouse_look(mouse_look)) return false;
+    LookFail why = LookFail::none;
+    if (!resolve_local_mouse_look(mouse_look, &why)) {
+        log_look_fail(why, mouse_look, 0.f);
+        return false;
+    }
     const float value = rd<float>(mouse_look + MOUSE_LOOK_SENSITIVITY_OFFSET);
-    if (!std::isfinite(value) || value < 0.05F || value > 100.0F) return false;
+    if (!std::isfinite(value) || value < 0.05F || value > 100.0F) {
+        log_look_fail(LookFail::badSens, mouse_look, value);
+        return false;
+    }
     deg_per_unit = value;
     invert_y     = rd<uint8_t>(mouse_look + MOUSELOOK_INVERT) != 0;
     gyro         = rd_ptr(mouse_look + MOUSELOOK_GYRO) >= 0x10000;
