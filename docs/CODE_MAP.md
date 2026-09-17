@@ -88,7 +88,7 @@ sh tools/aim/run_mem.sh        # стенд мемори-аима (настоя�
 
 ### jni/src/esp/aim_mem.cpp — Мемори-аим: поворот прицела записью в память игры
 
-Строк: 1000.
+Строк: 999.
 
 Внутри: `forward_from_angles`, `angles_from_forward`, `wrap180`, `signed_angle_diff`, `quaternion_between`, `quaternion_inverse`, `read_current_angles`, `read_mouse_look_angles`, `write_mouse_look_angles`, `read_look_root_angles`, `read_witness_angles`, `read_measured_angles`, `note_probing_pinned_pair`, `read_mouse_look_floats`, `to_stored_yaw`, `path_apply`, `scan_state_fields`, `find_look_root`, `save_probe_value`, `restore_probe_value`, `probe_path_at`, `probe_finish_unsupported`, `probe_accept`, `probe_begin_candidate`, `probe_apply_current`, `probe_next_candidate`, `probe_undo`, `esp_mem_aim_power_on`, `esp_mem_aim_reset`, `esp_mem_aim_tick`, `esp_mem_aim_state`, `esp_mem_aim_path`, `esp_mem_aim_reason`, `esp_mem_aim_read_angles`, `esp_mem_aim_apply`
 
@@ -135,7 +135,7 @@ sh tools/aim/run_mem.sh        # стенд мемори-аима (настоя�
 
 ### jni/src/esp/boxes.cpp — esp_get_boxes: рамки, имена, скелет
 
-Строк: 731.
+Строк: 715.
 
 Внутри: `note_frame_stage` (почему кадр не собрался — в журнал), `esp_get_boxes`, `esp_nearby_player_count`, `esp_wants_reattach`
 
@@ -278,7 +278,7 @@ Transform — несколько syscall'ов) не читаются секун�
 
 ### jni/src/esp/player_pose.cpp — Позиция игрока: трек, скачки, «сидит/на маунте»
 
-Строк: 442.
+Строк: 443.
 
 Внутри: `player_aux`, `player_is_crouched`, `player_head_world`, `player_head_hitbox_world`, `prune_player_aux`, `mono_seconds`, `prune_player_track`, `vec3_horiz2`, `player_is_mounted`, `player_saved_position`, `player_rendered_position`, `player_model_position`, `player_mount_engaged`, `apply_mounted_position`, `… ещё 3`
 
