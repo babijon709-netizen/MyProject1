@@ -232,8 +232,13 @@ def build_text():
 
     game_lits = {m.group(1) for m in re.finditer(r'"((?:[^"\\]|\\.)*)"', game)
                  if has_cyr(m.group(1))}
+    # Строки диагностики (LogLine/LogStage/...) в интерфейсе не показываются:
+    # они уходят в лог-файл и пишутся по-русски всегда. Перевод им не нужен.
+    log_lits = {m.group(1) for m in re.finditer(
+        r'(?<![\w:])Log(?:Line|Stage|FrameBeat|Watchdog[A-Za-z]*)\(\s*"((?:[^"\\]|\\.)*)"', game)}
     missing_vis = sorted(s for s in game_lits
                          if s not in visual and s not in UI_EN
+                         and s not in log_lits
                          and '%' not in s and not s.startswith(('#', ' ')))
     if missing_vis:
         raise SystemExit('нет перевода для подписей визуалов (добавь в VISUAL_EN):\n    ' +

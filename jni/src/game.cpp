@@ -8,6 +8,7 @@
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
 #include "text_utf8.h"  // копия подписи в буфер без разрезания символа UTF-8
 
+#include <errno.h>     // errno при отказе записи (сайлент: ось выстрела)
 #include <string.h>
 #include <strings.h>   // strncasecmp (weapon prefab label cleanup)
 #include <sys/uio.h>

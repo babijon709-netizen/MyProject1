@@ -37,7 +37,6 @@ long                     g_written = 0;
 struct timespec          g_started{};
 std::atomic<int>         g_stage{kStageNone};
 std::atomic<unsigned long> g_frames{0};
-std::atomic<bool>        g_watchdog_run{false};
 std::atomic<bool>        g_watchdog_on{false};
 
 double uptime_seconds() {
