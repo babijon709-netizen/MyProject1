@@ -112,6 +112,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_last_overlay_sw = sw;
     g_last_overlay_sh = sh;
 
+    // Состав игроков был и пропал (список не читается): рамки ещё держим, но
+    // подпись кадра — «данные устаревшие» (см. g_player_data_stale).
+    static bool s_population_lost = false;
+
     std::vector<uint64_t>& s_transforms = g_frame_transforms;
     std::vector<uint64_t> refreshed = read_configured_player_transforms();
     if (!refreshed.empty()) {
@@ -137,7 +141,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // скелета — то есть выглядел как «всё пропало и вернулось не туда».
             // Настоящая перезагрузка мира отличается тем, что новый состав
             // держится кадров подряд. Снапшот ставим ПОСЛЕ сброса: он чистит его.
-            if (++g_world_change_streak >= 3) {
+            if (++g_world_change_streak >= 5) {
                 reset_world_caches();
                 g_population_snapshot = refreshed;
             }
@@ -163,6 +167,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (g_frame_transforms_lost.size() > 256) g_frame_transforms_lost.clear();
         }
         s_transforms = std::move(refreshed);
+        s_population_lost = false;
         g_frame_transforms_empty_streak = 0;
         g_frame_transforms_empty_since = 0.0;
     } else {
@@ -175,12 +180,18 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         ++g_frame_transforms_empty_streak;
         const double now = mono_seconds();
         if (g_frame_transforms_empty_since <= 0.0) g_frame_transforms_empty_since = now;
+        // 5 с было мало: после смерти и при перезагрузке мира список игроков
+        // молчит дольше, а каждый такой сброс стирал и кэши, и подтверждённую
+        // раскладку — боксы гасли и возвращались, а самотест мемори-аима
+        // начинался заново (в журнале это «мир сменился» каждые 10–20 с).
+        // 12 с — это заведомо «игроков действительно нет», а не «не дочиталось».
         if (g_frame_transforms_empty_streak >= 10 && !world_reloading() &&
-            now - g_frame_transforms_empty_since > 5.0) {
+            now - g_frame_transforms_empty_since > 12.0) {
             if (!s_transforms.empty()) {
                 diag_log("esp", "список игроков пуст %.1f с — чищу кэши мира",
                          now - g_frame_transforms_empty_since);
                 s_transforms.clear(); reset_world_caches();
+                s_population_lost = true;   // рамки держим по длинному окну
             }
             g_frame_transforms_empty_since = 0.0;
         }
@@ -189,7 +200,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // Alone on the server: no player boxes, but markers and the farm
         // still need this frame's camera + local position.
         g_frame_player_count = 0;   // никого нет — и «пилюля» это показывает
-        g_player_data_stale = false;   // держать нечего: игроков нет
+        // Список игроков пропал только что (сброс кэшей выше) — это ещё не
+        // «игроки ушли»: на перезагрузке мира состав возвращается за секунды.
+        // Тогда данные устаревшие: рисующий слой держит рамки по длинному окну
+        // (kBoxHoldStaleSeconds), а не гаснет через полторы секунды.
+        g_player_data_stale = s_population_lost;
         publish_camera_only_frame(sw, sh);
         return result;
     }

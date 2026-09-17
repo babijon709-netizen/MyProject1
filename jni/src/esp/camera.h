@@ -41,6 +41,16 @@ extern int g_offset_extent_fail_streak;
 inline constexpr uint64_t PLAYER_MOUSE_LOOK_OFFSET      = 0x70;
 inline constexpr uint64_t MOUSE_LOOK_SENSITIVITY_OFFSET = 0x34;
 inline constexpr uint64_t MOUSE_LOOK_ACCUM_OFFSET       = 0x88;
+// Углы прицела и узел, который из них поворачивается (dump.cs: Oxide.MouseLook):
+//   m_LookRoot 0x28 — UnityEngine.Transform, ему игра ставит поворот;
+//   LGa/KXf    0x4C — Vector2 углов (x — рыскание, y — тангаж).
+// Oxide.MouseLook$$ZJo (RVA 0x64e312c) складывает сдвиг в 0x4C, нормализует
+// рыскание и клэмпит тангаж, и уже из этих углов строит поворот узла:
+// именно поэтому мемори-аиму правильнее писать в 0x4C, а не в узел (см.
+// esp/aim_mem.cpp). Смещения одинаковы в релизе и бете (проверено по dump.7z и
+// dump_beta.7z).
+inline constexpr uint64_t MOUSE_LOOK_ANGLES_OFFSET      = 0x4C;
+inline constexpr uint64_t MOUSE_LOOK_LOOK_ROOT_OFFSET   = 0x28;
 
 // ---- Функции, которые видят другие модули ----
 

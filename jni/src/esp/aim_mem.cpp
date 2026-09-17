@@ -49,6 +49,7 @@
 // контроллер aim/memory.cpp). Никаких своих решений о том, куда целиться,
 // модуль не принимает: это дело контроллера.
 #include "esp/common.h"
+#include "app/diag_log.h"   // подтверждённая дорожка и приговоры — в журнал
 #include "esp/aim_mem.h"
 #include "esp/camera.h"
 #include "esp/frame.h"
@@ -122,6 +123,31 @@ static int      s_reason = MEM_REASON_NONE;
 static uint64_t s_mouse_look = 0;     // разрешённый объект MouseLook
 static uint64_t s_look_root = 0;      // managed Transform узла прицела (для TRANSFORM)
 static uint64_t s_state_field = 0;    // адрес поля поворота в MouseLook (для STATE_*)
+
+// ---- Углы прицела MouseLook: источник и приёмник (проверено по дампу) ------
+//
+// Разбор дампа 205619 (dump.cs + libil2cpp, RVA ниже) и dump_beta по Oxide.MouseLook:
+//   0x28  m_LookRoot   (UnityEngine.Transform) — узел прицела, его игра и
+//                      поворачивает: Oxide.MouseLook$$ZJo (RVA 0x64e312c) в конце
+//                      зовёт Quaternion.Euler(углы) и Transform.set_localRotation
+//                      на [this+0x28];
+//   0x4C  Vector2 углов прицела (x — рыскание, y — тангаж): функция складывает
+//                      туда шаг (углы += delta*sensitivity), нормализует рыскание
+//                      в [-180,180) и клэмпит тангаж, и только ПОТОМ строит из них
+//                      поворот узла. То есть поле — единственная «настоящая»
+//                      память углов, а поворот узла каждый такт пересчитывается
+//                      игрой.
+// Почему это важно для мемори-режима: писать в узел прицела (доржка «узел
+// камеры») — это гонка за фазой кадра: игра перезапишет поворот на следующем
+// такте, и запись подтверждается только если мы успели между её записью и
+// чтением камерой (в логе устройства это «дорожка не подтвердилась (причина 4)»).
+// Запись в сами углы игры такой гонки не имеет: мы подставляем игре готовое
+// значение, и она сама доворачивает узел — как будто игрок повёл мышью.
+//
+// Смещения (в camera.h рядом с прочими полями MouseLook) одинаковы в релизе и в
+// бете (проверено по обоим дампам), поэтому берём их как проверенную дорожку, а
+// не как догадку.
+
 static int      s_state_range = 0;    // 0: yaw в [-180,180], 1: [0,360)
 static float    s_deg_per_unit = 0.f; // INPUT: град доворота на единицу поля
 static float    s_deg_per_unit_pitch = 0.f;
@@ -201,6 +227,10 @@ static float    s_probe_input_units = 0.f;   // сколько единиц вл
 // базисом из матрицы вида: он отстаёт на кадр, но мемори-аиму это не мешает
 // (шаг всё равно считается от полного остатка ошибки), а на части устройств
 // только он и читается.
+// Углы игры читает блок ниже (он же их и пишет) — здесь только объявление:
+// read_current_angles стоит выше и первым делом спрашивает именно их.
+static bool read_mouse_look_angles(uint64_t mouse_look, float& yaw_deg, float& pitch_deg);
+
 static bool read_current_angles(float& yaw_deg, float& pitch_deg) {
     if (s_state_field && (s_path == MEM_PATH_STATE_QUAT || s_path == MEM_PATH_STATE_DEG ||
                           s_path == MEM_PATH_STATE_RAD)) {
@@ -222,6 +252,10 @@ static bool read_current_angles(float& yaw_deg, float& pitch_deg) {
             }
         }
     }
+    // Углы самой игры: единственный источник, которому камера не нужна вовсе.
+    // Именно из-за его отсутствия мемори-режим и молчал «не находит поворот
+    // камеры» в те секунды, когда кадр ESP не собирался (см. xvcen_health.log).
+    if (read_mouse_look_angles(s_mouse_look, yaw_deg, pitch_deg)) return true;
     if (s_path == MEM_PATH_TRANSFORM && s_look_root) {
         Vec4 local{}, parent{};
         if (read_transform_local_rotation(s_look_root, local) &&
@@ -252,6 +286,61 @@ static float to_stored_yaw(float yaw_deg) {
         return yaw_deg;
     }
     return wrap180(yaw_deg);
+}
+
+// ---- Углы прицела в MouseLook: чтение, запись, свидетель -------------------
+
+// Текущие углы прямо из состояния игры (поле 0x4C). Камеру для этого читать не
+// нужно — именно поэтому дорожка работает и тогда, когда кадр ESP не собрался
+// («мемори-аим: не находит поворот камеры» в логе устройства случалось ровно в
+// те секунды, когда камера не читалась).
+static bool read_mouse_look_angles(uint64_t mouse_look, float& yaw_deg, float& pitch_deg) {
+    if (!mouse_look) return false;
+    float pair[2] = {0.f, 0.f};
+    const uint64_t field = mouse_look + MOUSE_LOOK_ANGLES_OFFSET;
+    if (!read_mouse_look_floats(field, pair[0], pair[1])) return false;
+    if (fabsf(pair[0]) > 100000.f || fabsf(pair[1]) > 100000.f) return false;
+    if (fabsf(pair[1]) > 89.9f) return false;      // игра держит тангаж в своих пределах
+    yaw_deg = wrap180(pair[0]);
+    pitch_deg = pair[1];
+    return std::isfinite(yaw_deg) && std::isfinite(pitch_deg);
+}
+
+// Свидетель: направление, по которому видно, что игра ПРИМЕНИЛА запись. Камера
+// (матрицы ESP или поза выстрела) — лучший свидетель, но её может не быть;
+// тогда смотрим на узел прицела: игра строит его поворот из этих же углов
+// каждый такт, поэтому если запись игра проигнорировала — узел не повернётся,
+// и обмануть проверку чтением того же поля не выйдет.
+static bool read_look_root_angles(uint64_t mouse_look, float& yaw_deg, float& pitch_deg) {
+    if (!mouse_look) return false;
+    uint64_t root = resolve_native_transform(rd_ptr(mouse_look + MOUSE_LOOK_LOOK_ROOT_OFFSET));
+    if (!root) return false;
+    Vec4 local{}, parent{};
+    if (!read_transform_local_rotation(root, local)) return false;
+    if (!read_transform_parent_world_rotation(root, parent)) return false;
+    const Vec4 world = multiply_quaternion(parent, local);
+    return angles_from_forward(rotate_vector(world, {0.f, 0.f, 1.f}), yaw_deg, pitch_deg);
+}
+
+// Свидетель для самотеста: сначала камера, потом узел прицела.
+static bool read_witness_angles(float& yaw_deg, float& pitch_deg) {
+    if (esp_aim_camera_angles(yaw_deg, pitch_deg)) return true;
+    if (esp_camera_angles(yaw_deg, pitch_deg)) return true;
+    return read_look_root_angles(s_mouse_look, yaw_deg, pitch_deg);
+}
+
+// Углы для ЗАМЕРА пробного доворота. Первым — свидетель (камера, иначе узел
+// прицела): узел игра перестраивает из углов каждый такт, поэтому он доказывает,
+// что запись применила именно игра, а не что мы записали поле и сами же его
+// прочли. Если свидетеля нет вовсе (на устройстве не читается ни камера, ни
+// иерархия Transform — в логе это первые секунды после привязки), замеряем по
+// самому полю: оно состояние игры, и если игра его не затирает своим значением,
+// значит доворот по нему игра применит (иначе значение вернулось бы прежним за
+// такт). Так дорожка остаётся рабочей и без кадра ESP — это и было «не находит
+// поворот камеры».
+static bool read_measured_angles(float& yaw_deg, float& pitch_deg) {
+    if (read_witness_angles(yaw_deg, pitch_deg)) return true;
+    return read_current_angles(yaw_deg, pitch_deg);
 }
 
 static bool path_apply(int path, float yaw_deg, float pitch_deg) {
@@ -390,6 +479,28 @@ static void scan_state_fields(uint64_t mouse_look, const Vec3& aim_forward,
 // Узел прицела: managed Transform, чья мировая поза совпадает с осью прицела и
 // точкой глаза. Ищем среди полей MouseLook — так же чтением, как и поля углов.
 static uint64_t find_look_root(uint64_t mouse_look, const Vec3& aim_forward) {
+    // Сначала — узел из дампа: Oxide.MouseLook.m_LookRoot (0x28). Смещение
+    // проверено и в релизе, и в бете, поэтому скан ниже остаётся страховкой на
+    // будущие сборки: раньше узел искался только перебором полей, и на
+    // перезагрузке мира, когда в объекте мигали мусорные указатели, его можно
+    // было не найти вовсе — «не находит поворот камеры».
+    const uint64_t hint = rd_ptr(mouse_look + MOUSE_LOOK_LOOK_ROOT_OFFSET);
+    if (hint >= 0x10000 && hint < 0x0001000000000000ULL && (hint & 0x7) == 0) {
+        const uint64_t native = resolve_native_transform(hint);
+        Vec4 local{}, parent{};
+        if (native && read_transform_local_rotation(native, local) &&
+            read_transform_parent_world_rotation(native, parent)) {
+            const Vec4 world = multiply_quaternion(parent, local);
+            Vec3 forward = rotate_vector(world, {0.f, 0.f, 1.f});
+            const float length = sqrtf(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+            if (length > 0.5f && length < 1.5f) {
+                forward = {forward.x / length, forward.y / length, forward.z / length};
+                const float dot = forward.x * aim_forward.x + forward.y * aim_forward.y +
+                                  forward.z * aim_forward.z;
+                if (dot >= 0.995f) return native;
+            }
+        }
+    }
     for (uint64_t offset = 0x10; offset <= 0x200; offset += 8) {
         const uint64_t value = rd_ptr(mouse_look + offset);
         if (value < 0x10000 || value >= 0x0001000000000000ULL || (value & 0x7) != 0) continue;
@@ -478,9 +589,9 @@ static void probe_begin_candidate() {
             s_state_range = 1;   // поле уже ушло в плюс — значит ветка [0,360)
     }
 
-    if (candidate.path == MEM_PATH_STATE_QUAT)      save_probe_value(candidate.field, (int)sizeof(Vec4));
+    if (candidate.path == MEM_PATH_STATE_QUAT) save_probe_value(candidate.field, (int)sizeof(Vec4));
     else if (candidate.path == MEM_PATH_STATE_DEG ||
-             candidate.path == MEM_PATH_STATE_RAD)  save_probe_value(candidate.field, (int)(sizeof(float) * 2));
+             candidate.path == MEM_PATH_STATE_RAD) save_probe_value(candidate.field, (int)(sizeof(float) * 2));
 }
 
 // Применить пробный доворот той дорожкой, что проверяем сейчас.
@@ -584,6 +695,8 @@ void esp_mem_aim_reset() {
     s_have_command = false;
     s_lost_frames = 0;
     s_retry_timer = 0.f;
+    // s_state_field обнулён выше: объект MouseLook живёт в мире, после смены мира
+    // он другой, и адрес поля углов надо подтверждать заново.
 }
 
 void esp_mem_aim_tick(float dt) {
@@ -594,11 +707,18 @@ void esp_mem_aim_tick(float dt) {
     if (s_state == MEM_AIM_READY) {
         if (s_have_command) {
             float yaw_now = 0.f, pitch_now = 0.f;
-            if (read_current_angles(yaw_now, pitch_now)) {
+            // Сначала узел прицела: он поворачивается только если игра приняла
+            // запись. Поле углов — запасной вариант (по нему видно, что игра
+            // затёрла наше значение своим).
+            const bool have_now = read_look_root_angles(s_mouse_look, yaw_now, pitch_now) ||
+                                  read_current_angles(yaw_now, pitch_now);
+            if (have_now) {
                 const float yaw_miss = fabsf(signed_angle_diff(s_commanded_yaw, yaw_now));
                 const float pitch_miss = fabsf(s_commanded_pitch - pitch_now);
                 if (yaw_miss > kLostToleranceDeg || pitch_miss > kLostToleranceDeg) {
                     if (++s_lost_frames > kLostFramesLimit) {
+                        diag_log("aim", "мемори-режим: запись перестала доворачивать прицел (расхождение %.1f° по рысканию, %.1f° по тангажу, путь %d)",
+                                 (double)yaw_miss, (double)pitch_miss, s_path);
                         s_state = MEM_AIM_PROBING;
                         s_path = MEM_PATH_NONE;
                         s_reason = MEM_REASON_WRITE_LOST;
@@ -650,6 +770,20 @@ void esp_mem_aim_tick(float dt) {
             if (!have_angles) { s_reason = MEM_REASON_NO_ANGLES; s_probe_step = PROBE_FIND; return; }
             const Vec3 aim_forward = forward_from_angles(yaw_now, pitch_now);
             scan_state_fields(s_mouse_look, aim_forward, yaw_now, pitch_now);
+            // Углы самой игры (MouseLook 0x4C) — первой дорожкой: игра строит
+            // поворот узла прицела именно из них, поэтому запись сюда не гонка, а
+            // готовое значение (см. разбор в шапке блока). Смещение взято из дампа
+            // и одинаково в релизе и бете, но подтверждаем его значением: в поле
+            // обязаны лежать текущие углы прицела.
+            float pair_yaw = 0.f, pair_pitch = 0.f;
+            if (read_mouse_look_angles(s_mouse_look, pair_yaw, pair_pitch) &&
+                fabsf(signed_angle_diff(pair_yaw, yaw_now)) < 3.0f &&
+                fabsf(pair_pitch - pitch_now) < 3.0f) {
+                if (s_candidate_count >= kMaxCandidates) --s_candidate_count;
+                for (int i = s_candidate_count; i > 0; --i) s_candidates[i] = s_candidates[i - 1];
+                s_candidates[0] = {MEM_PATH_STATE_DEG, s_mouse_look + MOUSE_LOOK_ANGLES_OFFSET};
+                ++s_candidate_count;
+            }
             s_look_root = find_look_root(s_mouse_look, aim_forward);
             s_probe_yaw_before = yaw_now;
             s_probe_pitch_before = pitch_now;
@@ -673,10 +807,13 @@ void esp_mem_aim_tick(float dt) {
             return;
         }
         case PROBE_VERIFY: {
-            if (!have_angles) { s_reason = MEM_REASON_NO_ANGLES; s_probe_step = PROBE_FIND; return; }
             const int path = probe_path_at(s_candidate_index);
-            const float measured_yaw = signed_angle_diff(yaw_now, s_probe_yaw_before);
-            const float measured_pitch = pitch_now - s_probe_pitch_before;
+            float verify_yaw = 0.f, verify_pitch = 0.f;
+            if (!read_measured_angles(verify_yaw, verify_pitch)) {
+                s_reason = MEM_REASON_NO_ANGLES; s_probe_step = PROBE_FIND; return;
+            }
+            const float measured_yaw = signed_angle_diff(verify_yaw, s_probe_yaw_before);
+            const float measured_pitch = verify_pitch - s_probe_pitch_before;
             if (path == MEM_PATH_INPUT) {
                 // Дорожка ввода: ожидание не в градусах, а в том, что доворот
                 // вообще случился и в ту же сторону. Отсюда же выучиваем
@@ -711,8 +848,13 @@ void esp_mem_aim_tick(float dt) {
         }
         case PROBE_SETTLE: {
             if (--s_probe_frames > 0) return;
-            if (!have_angles) { s_reason = MEM_REASON_NO_ANGLES; s_probe_step = PROBE_FIND; return; }
             const int path = probe_path_at(s_candidate_index);
+            float settle_yaw = 0.f, settle_pitch = 0.f;
+            if (!read_measured_angles(settle_yaw, settle_pitch)) {
+                s_reason = MEM_REASON_NO_ANGLES; s_probe_step = PROBE_FIND; return;
+            }
+            yaw_now = settle_yaw;
+            pitch_now = settle_pitch;
             // Доворот обязан встать и не поехать дальше: поле, которое игра не
             // обнуляет, уводило бы камеру всё дальше — такая дорожка не годится.
             const float extra_yaw = fabsf(signed_angle_diff(yaw_now, s_probe_yaw_before));
@@ -729,6 +871,9 @@ void esp_mem_aim_tick(float dt) {
                                      path == MEM_PATH_STATE_RAD);
             s_state_field = state_path ? s_candidates[s_candidate_index].field : 0;
             s_had_success = true;   // игра приняла нашу запись: дорожка реальна
+            if (path == MEM_PATH_STATE_DEG && s_state_field == s_mouse_look + MOUSE_LOOK_ANGLES_OFFSET)
+                diag_log("aim", "мемори-режим: углы прицела игры подтверждены (MouseLook +%#x, доворот %.1f° по рысканию за %.1f с)",
+                         (unsigned)MOUSE_LOOK_ANGLES_OFFSET, (double)extra_yaw, (double)s_probe_elapsed);
             // У STATE_* углы читаются из того же поля — ветка yaw уже запомнена
             // при заходе на дорожку (см. probe_begin_candidate).
             probe_accept(path);

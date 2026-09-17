@@ -244,15 +244,24 @@ void reset_world_caches() {
     g_world_reload_time = mono_seconds();
     ++g_world_reload_count;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
-    g_player_position_validated = false;
+    // А вот подтверждённое смещение позиции игрока НЕ трогаем: это раскладка
+    // самой сборки игры, а не мира. Раньше сброс забывал и её, и первый кадр
+    // после смерти/перезагрузки уходил искать смещение заново, ждал 0.6 с «пока
+    // поля допишутся» и уходил на обход иерархии — то есть боксов сразу после
+    // перезагрузки не было вовсе и появлялись они с задержкой («после смерти
+    // прогружаются не сразу»). Сбросится оно само, если перестанет совпадать:
+    // см. g_direct_position_fail_streak и g_offset_extent_fail_streak.
+    if (!(g_player_position_validated && g_use_direct_player_position)) {
+        g_player_position_validated = false;
+        g_use_direct_player_position = true; g_player_position_offset = PLAYER_POSITION;
+        g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
+    }
     g_population_snapshot.clear(); g_world_change_streak = 0;
     // The bone-learned transform layout dies with the old world: after a
     // reload it reads garbage from recycled memory (finite numbers, wrong
     // places). It is relearned from the first nearby skeleton; markers use
     // the self-probing path meanwhile.
     g_skeleton_layout = {}; g_skeleton_layout_valid = false;
-    g_use_direct_player_position = true; g_player_position_offset = PLAYER_POSITION;
-    g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
     g_local_player = 0;
     g_aim_state = {};
     g_aim_ref_valid = false;
