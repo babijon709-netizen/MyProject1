@@ -1061,6 +1061,7 @@ static uint64_t g_freecam_transform = 0;
 static uint64_t g_freecam_matrices = 0;   // базы массивов иерархии камеры
 static uint64_t g_freecam_indices = 0;
 static int32_t  g_freecam_index = -1;
+static int      g_freecam_miss = 0;      // чтений подряд, где трансформ не прочитался
 
 static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_t index,
                                      Vec3& pos, Vec4& rot, Vec3& scale);
@@ -1070,25 +1071,43 @@ static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_
 // проверяем: мировая позиция, посчитанная по этому кандидату, должна
 // совпасть с той, что игра отдала для камеры. Иначе легко записать камеру
 // не в ту ячейку — и получить «фрикам не работает» без всяких ошибок.
+// Массивы Transform конкретного трансформа: matrices (локальные TRS),
+// indices (родители) и сам индекс. Перебор — в точности как у рабочего чтения
+// позы камеры (read_camera_transform_pose): и раскладка, и оба расположения
+// TransformAccess, и прямой указатель с разыменованным. Первая сборка фрикама
+// пробовала только прямые указатели и на устройстве не нашла ничего, хотя
+// читать позу камеры по этим же массивам умела.
+//
+// Найденное проверяем: посчитанная мировая позиция обязана совпасть с той,
+// что ESP уже знает (g_cam_pos), иначе это не камера. Расхождение наружу —
+// чтобы в логе было видно, чем именно кончился перебор.
 static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matrices,
-                                     uint64_t& indices, int32_t& index) {
+                                     uint64_t& indices, int32_t& index,
+                                     float* best_dist = nullptr) {
     if (!native_transform) return false;
-    uint64_t cand_m[8] = {}; uint64_t cand_n[8] = {}; int32_t cand_i[8] = {};
-    int count = 0;
+    if (best_dist) *best_dist = -1.f;
 
-    auto add = [&](uint64_t data, int32_t idx, uint64_t m_off, uint64_t n_off) {
-        if (!data || idx < 0 || idx > 100000 || count >= 8) return;
-        uint64_t m = rd_ptr(data + m_off);
-        uint64_t n = rd_ptr(data + n_off);
-        if (m && n) { cand_m[count] = m; cand_n[count] = n; cand_i[count] = idx; ++count; }
+    struct Cand { uint64_t m, n; int32_t i; };
+    Cand cand[16];
+    int count = 0;
+    auto push = [&](uint64_t m, uint64_t n, int32_t i) {
+        if (!m || !n || i < 0 || i > 100000) return;
+        const uint64_t ms[2] = {m, rd_ptr(m)};
+        const uint64_t ns[2] = {n, rd_ptr(n)};
+        for (int a = 0; a < 2 && count < 16; ++a)
+            for (int b = 0; b < 2 && count < 16; ++b)
+                if (ms[a] && ns[b]) cand[count++] = {ms[a], ns[b], i};
     };
+
     if (g_transform_hierarchy_layout_valid) {
         const TransformHierarchyLayout& L = g_transform_hierarchy_layout;
         uint64_t data = rd_ptr(native_transform + L.data_offset);
         int32_t  idx  = rd<int32_t>(native_transform + L.index_offset);
-        add(data, idx, L.matrices_offset, L.indices_offset);
-        if (L.matrices_indirect && count) cand_m[count - 1] = rd_ptr(cand_m[count - 1]);
-        if (L.indices_indirect && count) cand_n[count - 1] = rd_ptr(cand_n[count - 1]);
+        uint64_t m = data ? rd_ptr(data + L.matrices_offset) : 0;
+        uint64_t n = data ? rd_ptr(data + L.indices_offset) : 0;
+        if (L.matrices_indirect) m = rd_ptr(m);
+        if (L.indices_indirect)  n = rd_ptr(n);
+        if (m && n && idx >= 0 && idx <= 100000 && count < 16) cand[count++] = {m, n, idx};
     }
     uint64_t data = rd_ptr(native_transform + 0x38);
     int32_t  idx  = rd<int32_t>(native_transform + 0x40);
@@ -1096,21 +1115,20 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
         data = rd_ptr(native_transform + 0x18);
         idx  = rd<int32_t>(native_transform + 0x20);
     }
-    add(data, idx, 0x18, 0x20);
-    add(data, idx, 0x08, 0x10);
+    push(data ? rd_ptr(data + 0x18) : 0, data ? rd_ptr(data + 0x20) : 0, idx);
+    push(data ? rd_ptr(data + 0x08) : 0, data ? rd_ptr(data + 0x10) : 0, idx);
 
     const bool know_cam = g_cam_pose_valid && vec3_is_finite(g_cam_pos);
     for (int k = 0; k < count; ++k) {
-        Matrix34 m{};
-        if (!rd_exact(cand_m[k] + (uint64_t)cand_i[k] * sizeof(Matrix34), m)) continue;
-        if (!matrix34_is_valid(m)) continue;
-        if (!know_cam) { matrices = cand_m[k]; indices = cand_n[k]; index = cand_i[k]; return true; }
-        Vec3 pos{}, scale{};
-        Vec4 rot{};
-        if (!read_transform_world_trs(cand_m[k], cand_n[k], cand_i[k], pos, rot, scale)) continue;
+        Vec3 pos{};
+        if (!read_transform_hierarchy_arrays(cand[k].m, cand[k].n, cand[k].i, pos)) continue;
+        if (!vec3_is_finite(pos)) continue;
+        if (!know_cam) { matrices = cand[k].m; indices = cand[k].n; index = cand[k].i; return true; }
         const float dx = pos.x - g_cam_pos.x, dy = pos.y - g_cam_pos.y, dz = pos.z - g_cam_pos.z;
-        if (dx * dx + dy * dy + dz * dz < 0.25F) {   // 0.5 м — тот самый трансформ
-            matrices = cand_m[k]; indices = cand_n[k]; index = cand_i[k];
+        const float d2 = dx * dx + dy * dy + dz * dz;
+        if (best_dist && (*best_dist < 0.f || d2 < *best_dist * *best_dist)) *best_dist = sqrtf(d2);
+        if (d2 < 0.25F) {   // 0.5 м — тот самый трансформ
+            matrices = cand[k].m; indices = cand[k].n; index = cand[k].i;
             return true;
         }
     }
@@ -1170,6 +1188,28 @@ static bool transform_world_to_local(uint64_t matrices, uint64_t indices, int32_
     return vec3_is_finite(local);
 }
 
+// Отказ включения — в лог, но не чаще раза в 2 с: меню пробует включить
+// фрикам каждые полсекунды, и без этого лог забивался бы однотипными строками.
+// Причина — номером, а не строкой (русские литералы вне вызова LogLine
+// проверка переводов считает подписями визуалов).
+static void log_freecam_fail(int reason, uint64_t transform, float dist) {
+    static double s_last = -1e9;
+    const double now = memio::now_seconds();
+    if (now - s_last < 2.0) return;
+    s_last = now;
+    if (dist >= 0.f) {
+        LogLine("фрикам: не включён — мировая позиция не совпала с камерой (трансформ 0x%llx, ближайшее расхождение %.1f м)",
+                (unsigned long long)transform, (double)dist);
+        return;
+    }
+    switch (reason) {
+        case 0: LogLine("фрикам: не включён — камера ещё не найдена"); break;
+        case 1: LogLine("фрикам: не включён — нет трансформа камеры (0x%llx)", (unsigned long long)transform); break;
+        case 2: LogLine("фрикам: не включён — массивы Transform не читаются (0x%llx)", (unsigned long long)transform); break;
+        default: LogLine("фрикам: не включён — локальная матрица камеры не читается (0x%llx)", (unsigned long long)transform); break;
+    }
+}
+
 bool esp_freecam_active() { return g_freecam_on; }
 
 bool esp_freecam_set(bool on) {
@@ -1187,15 +1227,22 @@ bool esp_freecam_set(bool on) {
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
     uint64_t transform = 0;
     if (g_native_camera) transform = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
-    if (!transform) return false;
+    if (!transform) {
+        log_freecam_fail(g_native_camera ? 1 : 0, 0, -1.f);
+        return false;
+    }
     uint64_t matrices = 0, indices = 0;
     int32_t index = -1;
-    if (!resolve_transform_arrays(transform, matrices, indices, index)) {
-        LogLine("фрикам: не включён — раскладка трансформа камеры не опознана");
+    float dist = -1.f;
+    if (!resolve_transform_arrays(transform, matrices, indices, index, &dist)) {
+        log_freecam_fail(2, transform, dist);
         return false;
     }
     Matrix34 m{};
-    if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), m)) return false;
+    if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), m)) {
+        log_freecam_fail(3, transform, -1.f);
+        return false;
+    }
     Vec3 pos{}, scale{};
     Vec4 rot{};
     if (!read_transform_world_trs(matrices, indices, index, pos, rot, scale)) return false;
@@ -1216,6 +1263,22 @@ bool esp_freecam_set(bool on) {
 // Сдвинуть камеру: метры вдоль оси взгляда (вперёд), вправо и вверх.
 // Горизонтальные оси берём из самой камеры, но без наклона: иначе «вперёд»
 // при взгляде вниз уводило бы камеру под землю.
+// Записать текущую цель в память. Пишем КАЖДЫЙ кадр, а не только когда палец
+// на джойстике: массивы иерархии игра может пересобирать каждый кадр со
+// своего authoritative-состояния, и тогда разовая запись прожила бы ровно
+// один кадр. Плюс камера перестаёт ехать вместе с телом: мировая цель стоит,
+// а локальная позиция пересчитывается под текущего родителя.
+static bool freecam_write() {
+    if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
+    Vec3 local{};
+    if (!transform_world_to_local(g_freecam_matrices, g_freecam_indices, g_freecam_index,
+                                  g_freecam_pos, local))
+        return false;
+    if (!vec3_is_finite(local)) return false;
+    return wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34) +
+                  offsetof(Matrix34, translation), &local, sizeof(Vec3));
+}
+
 bool esp_freecam_move(float forward, float right, float up) {
     if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
@@ -1230,24 +1293,38 @@ bool esp_freecam_move(float forward, float right, float up) {
     g_freecam_pos.z += f.z * forward + r.z * right;
     g_freecam_pos.y += up;
     if (!vec3_is_finite(g_freecam_pos)) { g_freecam_pos = {}; return false; }
-    Vec3 local{};
-    if (!transform_world_to_local(g_freecam_matrices, g_freecam_indices, g_freecam_index,
-                                  g_freecam_pos, local))
-        return false;
-    if (!wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34) +
-                offsetof(Matrix34, translation), &local, sizeof(Vec3)))
-        return false;
-    return true;
+    return freecam_write();       // сразу, не дожидаясь следующего кадра
 }
 
 // Трансформ камеры мог переехать (смена мира, респавн): если камера уехала
 // далеко от того места, где мы её оставили, — это уже не наш фрикам.
 static void freecam_tick() {
     if (!g_freecam_on) return;
-    if (!g_freecam_transform || !rd_ptr(g_freecam_transform)) {
-        esp_freecam_set(false);
-        return;
+    // Трансформ может умереть (смена мира, респавн), но и на живом объекте
+    // чтение иногда срывается. Одного сбойного кадра мало: по нему фрикам
+    // выключался бы сам посреди полёта.
+    if (g_freecam_transform && rd_ptr(g_freecam_transform)) g_freecam_miss = 0;
+    else if (++g_freecam_miss >= 8) { esp_freecam_set(false); return; }
+
+    // Что записали и что игра видит на самом деле: если она пересчитывает
+    // матрицу камеры сама, числа разойдутся, и по одному логу сразу видно,
+    // надо ли писать позицию каждый кадр.
+    static double s_next = 0.0;
+    const double now = memio::now_seconds();
+    if (now >= s_next) {
+        s_next = now + 1.0;
+        Vec3 in_mem{}, scale{};
+        Vec4 rot{};
+        if (read_transform_world_trs(g_freecam_matrices, g_freecam_indices, g_freecam_index,
+                                     in_mem, rot, scale))
+            LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f)",
+                    (double)g_freecam_pos.x, (double)g_freecam_pos.y, (double)g_freecam_pos.z,
+                    (double)in_mem.x, (double)in_mem.y, (double)in_mem.z,
+                    (double)g_cam_pos.x, (double)g_cam_pos.y, (double)g_cam_pos.z);
     }
+    // Читать надо ДО записи: после неё в массиве лежит наше значение, и
+    // расхождение было бы не видно.
+    freecam_write();
 }
 
 bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& position) {
@@ -1658,41 +1735,88 @@ static uint64_t s_ml_cached = 0;         // сам MouseLook
 static uint64_t s_ml_cached_player = 0;  // игрок, которому он принадлежал
 static double   s_ml_cached_at = -1e9;
 // Сколько верим кешу. Дольше — опаснее: после респавна объект мог быть
-// переиспользован под что-то другое, и писать туда нельзя.
-static constexpr double kMlCacheSec = 4.0;
+// переиспользован под что-то другое, и писать туда нельзя. Шесть секунд
+// перекрывают паузы из лога устройства (объект пропадал на 0.5–1.5 с), а
+// проверка класса и чувствительности каждый кадр страхует от подмены.
+static constexpr double kMlCacheSec = 6.0;
 
 // Кеш годится, только если игрок тот же самый и объект живой: класс на месте
-// и m_Sensitivity в правдоподобных пределах. Иначе объект умер — забываем.
+// и m_Sensitivity в правдоподобных пределах.
+//
+// Важно, что чтение, сорвавшееся В НОЛЬ, кеш не сбрасывает. Раньше любой
+// нулевой указатель выбрасывал объект навсегда (до следующего удачного
+// поиска), а сбой чтения происходит ровно в те же моменты, что и потеря
+// объекта, — то есть кеш погибал первым же кадром, который должен был
+// переждать. Сбрасываем только когда прочитался ЧУЖОЙ класс или заведомо
+// неправдоподобная чувствительность: это уже не сбой чтения, а подмена.
 static bool mouse_look_from_cache(uint64_t player, uint64_t& out) {
-    if (!s_ml_cached || !player || player != s_ml_cached_player) return false;
+    if (!s_ml_cached) return false;
+    if (player && player != s_ml_cached_player) return false;
     if (memio::now_seconds() - s_ml_cached_at > kMlCacheSec) return false;
     const uint64_t klass = rd_ptr(s_ml_cached);
+    if (!klass) return false;                       // чтение сорвалось — кеш жив
     const uint64_t known = g_mouse_look_klass.load();
     if (known ? (klass != known) : (klass < 0x10000)) { s_ml_cached = 0; return false; }
     const float sens = rd<float>(s_ml_cached + MOUSE_LOOK_SENSITIVITY_OFFSET);
-    if (!std::isfinite(sens) || sens < 0.05F || sens > 100.0F) { s_ml_cached = 0; return false; }
+    if (!std::isfinite(sens)) return false;         // тоже сбой чтения
+    if (sens < 0.05F || sens > 100.0F) { s_ml_cached = 0; return false; }
     out = s_ml_cached;
     return true;
+}
+
+// Объект взят из кеша, а не найден заново: в лог пишем не чаще раза в 5 с,
+// потому что при долгой паузе это событие идёт каждый кадр.
+// Причина передаётся номером, а не строкой: русские литералы, висящие не
+// в самом вызове LogLine, проверка переводов считает подписями визуалов и
+// требует для них перевод (см. tools/lang/gen_tables.py).
+static void log_look_cached(int reason, uint64_t mouse_look) {
+    static double s_last = -1e9;
+    static int s_last_reason = -1;
+    const double now = memio::now_seconds();
+    if (now - s_last < 5.0 && reason == s_last_reason) return;
+    s_last = now; s_last_reason = reason;
+    switch (reason) {
+        case 0: LogLine("память: MouseLook=0x%llx взят из кеша — игрок не подтверждён", (unsigned long long)mouse_look); break;
+        case 1: LogLine("память: MouseLook=0x%llx взят из кеша — адрес игрока не той структуры", (unsigned long long)mouse_look); break;
+        case 2: LogLine("память: MouseLook=0x%llx взят из кеша — объект не читается", (unsigned long long)mouse_look); break;
+        default: LogLine("память: MouseLook=0x%llx взят из кеша — объект чужого класса", (unsigned long long)mouse_look); break;
+    }
 }
 
 static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
     uint64_t player = resolve_local_player();
-    if (!player) { if (why) *why = LookFail::noPlayer; return false; }
+    if (!player) {
+        // Игрок на этом кадре не подтвердился (статика GameController не
+        // прочиталась или объект пересоздаётся). Раньше тут был немедленный отказ,
+        // и ровно на этих кадрах память-аим молчал — это и есть «отваливается
+        // на несколько секунд» из жалобы. MouseLook мы и так проверяем отдельно
+        // (класс + чувствительность), поэтому адрес игрока для записи не нужен:
+        // он был нужен только чтобы этот MouseLook найти.
+        if (why) *why = LookFail::noPlayer;
+        if (mouse_look_from_cache(s_ml_cached_player, out)) {
+            log_look_cached(0, out);
+            return true;
+        }
+        return false;
+    }
     if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) {
         if (why) *why = LookFail::wrongPlayer;
-        return mouse_look_from_cache(player, out);
+        if (mouse_look_from_cache(player, out)) { log_look_cached(1, out); return true; }
+        return false;
     }
     uint64_t mouse_look = rd_ptr(player + PLAYER_MOUSE_LOOK_OFFSET);
     if (mouse_look < 0x10000) {  // ноль или мусор вместо указателя
         if (why) *why = LookFail::noObject;
-        return mouse_look_from_cache(player, out);
+        if (mouse_look_from_cache(player, out)) { log_look_cached(2, out); return true; }
+        return false;
     }
     const uint64_t klass = rd_ptr(mouse_look);
     const uint64_t known = g_mouse_look_klass.load();
     if (known ? (klass != known) : (klass < 0x10000)) {
         if (why) *why = LookFail::noObject;
-        return mouse_look_from_cache(player, out);
+        if (mouse_look_from_cache(player, out)) { log_look_cached(3, out); return true; }
+        return false;
     }
     s_ml_cached = mouse_look;
     s_ml_cached_player = player;
