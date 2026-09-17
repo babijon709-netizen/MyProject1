@@ -8,7 +8,6 @@
 // Форматные строки переводятся вместе с единицами: "%.0f м" -> "%.0f m".
 static const LangPair kUiEn[] = {
     {"%.0f м", "%.0f m"},
-    {"%.2f град/ед", "%.2f deg/unit"},
     {"3D боксы", "3D boxes"},
     {"«%s»", "\"%s\""},
     {"Автофарм", "Auto-farm"},
@@ -116,6 +115,7 @@ static const LangPair kUiEn[] = {
     {"Шея", "Neck"},
     {"Язык", "Language"},
     {"Ящики", "Crates"},
+    {"ведёт", "tracking"},
     {"нет объекта", "no object"},
     {"нет оси", "no axis"},
     {"нет отклика", "no response"},

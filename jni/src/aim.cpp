@@ -777,33 +777,30 @@ static void UpdateAimTouch(float dt) {
 
 // ====================== Мемори-аим: «память» ===============================
 //
-// Камера ведётся не пальцем, а записью ввода взгляда прямо в память игры —
-// в то самое поле, куда игра кладёт сдвиг касания за кадр. Что именно пишем и
-// почему это срабатывает, — в game.cpp у esp_mem_aim_*.
+// Камера ведётся записью углов прямо в MouseLook — в накопитель, из которого
+// игра каждый кадр делает поворот камеры:
 //
-// Два отличия от пальца, из которых вытекает вся арифметика:
+//     angles = clamp(angles + input * m_Sensitivity)      (MouseLook.ZJo)
 //
-//   1. Единица ввода — не пиксель дигитайзера, а «единица взгляда», и перевод
-//      её в градусы известен точно: игра умножает ввод на m_Sensitivity (видно
-//      в MouseLook.ZJo). Значит коэффициент берётся из настроек самой игры, а
-//      не выучивается с нуля, как у пальца, где град/px изначально мерить
-//      нечем. Замер по отклику камеры всё равно идёт — он ловит лишний
-//      множитель внутри игры (прицел, транспорт), которого в разборе нет.
+// Наше значение — база, к которой игра прибавляет свой ввод (ноль, пока экран
+// не трогают), клампит пределом обзора и разворачивает в localRotation.
+// Подробности и адреса — в game.cpp у esp_mem_aim_write_angles.
 //
-//   2. Ввод одноразовый: поле перезаписывается игрой каждый кадр (MouseLook.
-//      ZJX кладёт туда сдвиг касания). Наша запись либо попадает в кадр — и
-//      тогда камера повернётся, — либо будет затёрта до чтения. Позиции
-//      пальца, которая живёт между кадрами и копит разницу, здесь нет: шаг
-//      считается заново каждый кадр, а накопленное ждёт подтверждения
-//      камерой ровно как у пальца (s_pendX/s_pendY) — иначе коэффициент,
-//      измеренный по неполному вводу, выйдет завышенным, и прицел начнёт
-//      перелетать.
+// Почему не «ввод взгляда» (+0x88), как кажется правильным: ZJo сначала зовёт
+// ZJX, а тот ПЕРЕЗАПИСЫВАЕТ +0x88 вводом касания, и только потом ZJo читает
+// это поле. Запись между кадрами игры стирается гарантированно — ровно это и
+// было «память не работает»: записи уходили, камера не двигалась.
 //
-// Петля та же, что у пальца: записали -> игра повернула камеру -> остаток
-// ошибки уменьшился -> записали остаток. Поэтому предохранители от раскачки
-// (не больше половины ошибки за такт, мёртвая зона, гаситель «качелей») здесь
-// те же: природа у них одна — камера отвечает не в этом такте, а через
-// кадр-два.
+// Что это меняет в арифметике:
+//   * коэффициента нет. Накопитель — уже градусы, поэтому ни m_Sensitivity для
+//     перевода, ни обучение град/ед не нужны: сколько градусов заказали, на
+//     столько камера и повернётся (с потолком предела обзора);
+//   * отклик быстрый: запись разворачивается в поворот в следующем же кадре
+//     игры, поэтому «шаги в полёте» копить не нужно (у пальца они жили до
+//     четырёх кадров — отсюда вся та возня);
+//   * петля та же: записали -> камера повернулась -> остаток меньше. Поэтому
+//     предохранители от раскачки (не больше половины остатка за такт, мёртвая
+//     зона, гаситель «качелей») работают здесь ровно как у пальца.
 
 // Потолок поворота за такт, градусы. Пока коэффициент не подтверждён откликом
 // камеры, идём мелко: ошибка в коэффициенте (или лишний множитель внутри игры,
@@ -812,15 +809,10 @@ static void UpdateAimTouch(float dt) {
 // равно не больше половины остатка и упирается в сам остаток.
 static constexpr float kMemDegCapFirst = 2.0f;
 static constexpr float kMemDegCapKnown = 12.0f;
-// Тот же предел в единицах ввода — страховка от коэффициента, который
-// отличается от ожидаемого на порядок: тогда потолок в градусах, посчитанный
-// по нашему же коэффициенту, уже не защищает.
-static constexpr float kMemUnitsCap = 64.f;
 // Порог «камера ответила», градусы: меньше этого — шум чтения позы, а не
 // поворот. Им же отмеряем «наш ввод до камеры не дошёл».
 static constexpr float kMemCamMoveEps = 0.02f;
-// Минимальный накопленный ввод, по которому имеет смысл мерить коэффициент
-// (единицы игры). Меньше — отношение тонет в шуме чтения позы камеры.
+// Меньше этого заказа не было — и поворот камеры нашим не считаем.
 static constexpr float kMemPendEps = 0.05f;
 
 static AimMemDiag s_memDiag;
@@ -829,14 +821,10 @@ const AimMemDiag& AimMemoryDiag() { return s_memDiag; }
 
 static void UpdateAimMemory(float dt) {
     static AimPick pick;
-    static float s_gainYaw = 0.f, s_gainPitch = 0.f;   // град/ед, measurement
-    static float s_pendX = 0.f, s_pendY = 0.f;         // записано, камерой не отработано
-    static float s_cmdYaw = 0.f, s_cmdPitch = 0.f;     // всего записано (кумулятивно, ед)
+    static float s_pendYaw = 0.f, s_pendPitch = 0.f;  // заказано, камерой не отработано (град)
     static float s_pendTime = 0.f;
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f;
     static bool  s_haveLast = false;
-    static aim::GainTrack s_trackYaw, s_trackPitch;    // оценка по реакции прицела
-    static float s_flightYaw[2] = {0.f, 0.f}, s_flightPitch[2] = {0.f, 0.f};
     static float s_flipDamp = 1.f;
     static float s_prevCtlYaw = 0.f, s_prevCtlPitch = 0.f;
     static bool  s_haveCtlErr = false;
@@ -847,24 +835,20 @@ static void UpdateAimMemory(float dt) {
     if (!AimBegin(dt, sw, sh)) {
         s_memDiag = AimMemDiag{};
         pick.reset(); s_haveLast = false; s_haveCtlErr = false;
-        s_trackYaw.reset(); s_trackPitch.reset();
-        s_pendX = s_pendY = 0.f; s_cmdYaw = s_cmdPitch = 0.f; s_pendTime = 0.f;
-        s_flightYaw[0] = s_flightYaw[1] = s_flightPitch[0] = s_flightPitch[1] = 0.f;
-        s_gainYaw = s_gainPitch = 0.f;
+        s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
         s_noParamsTime = s_noResponseTime = 0.f; s_toasted = false;
         return;
     }
 
-    // Во сколько игра превращает единицу ввода в градусы (m_Sensitivity).
-    // Это не оценка, а множитель из самой игры — им и работаем, пока замер по
-    // отклику камеры не скажет иного.
+    // MouseLook нужен не ради чувствительности (накопитель уже в градусах), а
+    // как проверка «объект тот»: m_Sensitivity в правдоподобных пределах —
+    // значит это действительно MouseLook локального игрока.
     float sens = 0.f; bool invert = false, gyro = false;
     const bool haveParams = esp_mem_aim_look_params(sens, invert, gyro);
     s_memDiag.params = haveParams;
     if (!haveParams) {
-        // Писать некуда: объект не нашёлся (нет игрока, респавн, смена мира).
-        // На тач НЕ падаем — режим памяти либо работает, либо молчит: иначе
-        // поломку записи не отличить от её отсутствия.
+        // Писать некуда: объекта нет (нет игрока, респавн, смена мира). На тач
+        // НЕ падаем — режим либо работает, либо молчит.
         s_noParamsTime += dt;
         if (s_noParamsTime > 1.5f && !s_toasted) {
             s_toasted = true;
@@ -875,143 +859,62 @@ static void UpdateAimMemory(float dt) {
     s_noParamsTime = 0.f;
     s_memDiag.gyro = gyro;
 
+    // Текущий накопитель углов камеры. Он же — база для нашего шага: игра
+    // прибавит к записанному свои углы ввода (ноль, если экран не трогают).
+    float accX = 0.f, accY = 0.f;
+    if (!esp_mem_aim_read_angles(accX, accY)) {
+        pick.reset(); s_haveLast = false; s_haveCtlErr = false;
+        s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
+        s_noResponseTime += dt;
+        if (s_noResponseTime > 1.5f && !s_toasted) {
+            s_toasted = true;
+            ShowToast(XS("Мемори-аим: не найден MouseLook"));
+        }
+        return;
+    }
+
     AimTarget best;
     float degPerPx = 0.f;
     if (!AimSelectTarget(sw, sh, pick, best, degPerPx)) {
         pick.reset(); s_haveLast = false; s_haveCtlErr = false;
-        s_trackYaw.reset(); s_trackPitch.reset();
-        s_pendX = s_pendY = 0.f; s_cmdYaw = s_cmdPitch = 0.f; s_pendTime = 0.f;
-        s_flightYaw[0] = s_flightYaw[1] = s_flightPitch[0] = s_flightPitch[1] = 0.f;
+        s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
         return;
     }
     if (pick.switched) {
-        // Коэффициент и упреждение мерятся на прошлой цели — к новой не годятся.
         s_haveLast = false; s_haveCtlErr = false;
-        s_trackYaw.reset(); s_trackPitch.reset();
-        s_pendX = s_pendY = 0.f; s_cmdYaw = s_cmdPitch = 0.f; s_pendTime = 0.f;
-        s_flightYaw[0] = s_flightYaw[1] = s_flightPitch[0] = s_flightPitch[1] = 0.f;
+        s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
     }
 
-    // ---- коэффициент по отклику камеры ------------------------------------
-    // Замер тот же, что у пальца (поворот камеры / накопленный ввод), только
-    // ввод в единицах игры. Углы — только настоящая ось (esp_aim_camera_angles):
-    // базис из матрицы вида отстаёт на кадр и выучивал коэффициент со сменой
-    // знака (лог 15.09.2026).
+    // ---- ответ камеры ------------------------------------------------------
+    // Записанный накопитель игра разворачивает в поворот камеры в своём же
+    // кадре, поэтому подтверждение приходит быстро; мерим его всё равно — по
+    // нему видно, что запись вообще доходит (иначе «нет отклика»).
     float camYaw = 0.f, camPitch = 0.f;
     const bool haveCam = esp_aim_camera_angles(camYaw, camPitch);
-    float camYawDelta = 0.f, camPitchDelta = 0.f;
-    bool camMoved = false;
     if (haveCam && s_haveLast) {
-        camYawDelta = camYaw - s_lastCamYaw;
-        while (camYawDelta > 180.f) camYawDelta -= 360.f;
-        while (camYawDelta < -180.f) camYawDelta -= 360.f;
-        camPitchDelta = camPitch - s_lastCamPitch;
-        camMoved = fabsf(camYawDelta) > kMemCamMoveEps || fabsf(camPitchDelta) > kMemCamMoveEps;
-    }
-    if (haveCam && s_haveLast && camMoved) {
-        auto learn = [](float& gain, float measured, float analytic) {
-            const float m = fabsf(measured);
-            if (!std::isfinite(measured) || m < 1e-3f) return false;
-            // Знак берём у аналитического значения (m_Sensitivity) и НЕ
-            // переворачиваем по замеру: отрицательный коэффициент — это шум
-            // замера, а не инверсия оси (у пальца ровно это давало «аим
-            // дёргается»: выученное 0.072 -> 0.347 -> -0.072).
-            const float sign = (analytic < 0.f) ? -1.f : 1.f;
-            float want = sign * m;
-            // Вне правдоподобной полосы (в 5 раз туда или обратно) замер не
-            // принимаем: это либо чужой поворот камеры, либо наша запись
-            // сложилась с вводом игрока.
-            if (want < analytic * 0.2f || want > analytic * 5.f) return false;
-            if (gain == 0.f) gain = want;
-            else gain = gain * 0.7f + want * 0.3f;
-            return true;
-        };
-        // Ответившим считаем только поворот, на который мы что-то записали:
-        // иначе чужое движение камеры (палец игрока, анимация) сочтём за
-        // подтверждение записи.
-        const bool ourInput = (fabsf(s_pendX) >= kMemPendEps) || (fabsf(s_pendY) >= kMemPendEps);
-        if (fabsf(s_pendX) >= kMemPendEps) learn(s_gainYaw, camYawDelta / s_pendX, sens);
-        if (fabsf(s_pendY) >= kMemPendEps) learn(s_gainPitch, -camPitchDelta / s_pendY, sens);
-        if (ourInput) {
+        float dYaw = camYaw - s_lastCamYaw;
+        while (dYaw > 180.f) dYaw -= 360.f;
+        while (dYaw < -180.f) dYaw -= 360.f;
+        const float dPitch = camPitch - s_lastCamPitch;
+        if ((fabsf(s_pendYaw) > 0.05f && fabsf(dYaw) > kMemCamMoveEps) ||
+            (fabsf(s_pendPitch) > 0.05f && fabsf(dPitch) > kMemCamMoveEps)) {
             s_memDiag.responded = true;
             s_noResponseTime = 0.f;
+            s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
         }
-        s_pendX = s_pendY = 0.f; s_pendTime = 0.f;
     }
     if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
-    else { s_haveLast = false; s_pendX = s_pendY = 0.f; s_pendTime = 0.f; }
-
-    // Записали, а камера молчит дольше этого — ввод до игры не дошёл (её
-    // Update перезаписал поле раньше, чем прочитал): копить вход больше
-    // незачем, иначе следующий замер коэффициента выйдет завышенным.
-    if (haveCam && (fabsf(s_pendX) > 0.f || fabsf(s_pendY) > 0.f)) {
+    else { s_haveLast = false; s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f; }
+    // Заказали поворот, а камера молчит дольше этого — запись до игры не
+    // доходит. Копить заказанное больше незачем.
+    if (haveCam && (s_pendYaw != 0.f || s_pendPitch != 0.f)) {
         s_pendTime += dt;
-        if (s_pendTime > 0.35f) {
-            s_pendX = s_pendY = 0.f; s_pendTime = 0.f;
-            s_flightYaw[0] = s_flightPitch[0] = 0.f;
-        }
+        if (s_pendTime > 0.35f) { s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f; }
     }
 
-    // Оценка коэффициента по реакции прицела: единственный замер там, где
-    // настоящей оси камеры нет вовсе (штатный режим на устройстве из логов
-    // 14-16.09.2026: cam_st = 0). Границы — в единицах игры, поэтому они
-    // задаются от m_Sensitivity, а не зашиты, как у пальца.
-    s_trackYaw.set_bounds({0.02f, sens * 0.1f, sens * 10.f, 0.5});
-    s_trackPitch.set_bounds({0.02f, sens * 0.1f, sens * 10.f, 0.5});
-    // В observe идёт подтверждённый ввод: всё записанное минус то, что камера
-    // ещё не отработала (у пальца ровно это — s_fx минус s_pendDx).
-    s_trackYaw.observe(best.yaw, s_cmdYaw - s_pendX);
-    s_trackPitch.observe(best.pitch, s_cmdPitch - s_pendY);
-
-    const bool gainKnown = (s_gainYaw != 0.f);
-    float gy = gainKnown ? s_gainYaw : sens;
-    float gp = gainKnown ? s_gainPitch : sens;
-    // Оценка по реакции прицела подтягивает коэффициент только вверх и
-    // только в пределах полутора аналитических значений: заниженный
-    // коэффициент — это шаг больше нужного и расходящаяся петля (см.
-    // aim_learn.h), завышенный — всего лишь медленный аим.
-    auto trackTrim = [](float base, const aim::GainTrack& t) {
-        if (!t.ready()) return base;
-        const float m = fabsf(t.gain());
-        if (!(m > base)) return base;
-        return m < base * 1.5f ? m : base * 1.5f;
-    };
-    if (!gainKnown) {
-        gy = trackTrim(gy, s_trackYaw);
-        gp = trackTrim(gp, s_trackPitch);
-    }
-    s_memDiag.deg_per_unit = gy;
-
-    // ---- остаток ошибки ---------------------------------------------------
-    // Без настоящей оси камеры вычитаем из остатка то, что уже заказано за
-    // два прошлых такта (steps in flight): иначе контроллер видит не
-    // уменьшившийся остаток и шлёт такую же поправку заново — камера
-    // поворачивается вдвое больше нужного. У пальца это же место.
-    const float flightYaw   = s_flightYaw[0] + s_flightYaw[1];
-    const float flightPitch = s_flightPitch[0] + s_flightPitch[1];
-    const float errYaw   = haveCam ? best.yaw   : (best.yaw   - flightYaw * gy);
-    const float errPitch = haveCam ? best.pitch : (best.pitch + flightPitch * gp);
-
-    // ---- мёртвая зона -----------------------------------------------------
-    // Цель: ~3 см на дистанции цели, но не уже шума чтения кости (0.05 град) —
-    // сетки дигитайзера здесь нет, квантовать нечего.
-    float deadBase = degPerPx * 1.5f;
-    if (best.world_dist > 1.f && std::isfinite(best.world_dist)) {
-        float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
-        if (d < deadBase) deadBase = d;
-    }
-    if (deadBase < 0.05f) deadBase = 0.05f;
-    if (fabsf(errYaw) < deadBase && fabsf(errPitch) < deadBase) {
-        // Заказанное за прошлые такты камера дорабатывает и без нас.
-        s_flightYaw[0] = s_flightYaw[1];     s_flightYaw[1] = 0.f;
-        s_flightPitch[0] = s_flightPitch[1]; s_flightPitch[1] = 0.f;
-        return;
-    }
-
-    // ---- controller ----
-    // Слайдер «Скорость» и предел доли ошибки за такт — те же, что у пальца:
-    // камера отвечает с задержкой в кадр-два при любом способе ввода, поэтому
-    // устойчивая доля ровно та же (половина остатка).
+    // ---- контроллер --------------------------------------------------------
+    // Тот же, что у пальца: камера отвечает не в этом такте, а через кадр игры,
+    // поэтому устойчивая доля ошибки за такт — половина.
     float sm = g_state.gun_str;
     if (!(sm >= 1.f)) sm = 1.f;
     if (sm > 10.f) sm = 10.f;
@@ -1024,7 +927,19 @@ static void UpdateAimMemory(float dt) {
     if (k > 1.f) k = 1.f;
     if (k < 0.05f) k = 0.05f;
 
-    // Гаситель «качелей» (остаток перескочил через ноль): тот же, что у пальца.
+    const float errYaw = best.yaw, errPitch = best.pitch;
+
+    // Мёртвая зона: ~3 см на дистанции цели, но не уже шума чтения кости.
+    float deadBase = degPerPx * 1.5f;
+    if (best.world_dist > 1.f && std::isfinite(best.world_dist)) {
+        float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
+        if (d < deadBase) deadBase = d;
+    }
+    if (deadBase < 0.05f) deadBase = 0.05f;
+    if (fabsf(errYaw) < deadBase && fabsf(errPitch) < deadBase) return;
+
+    // Гаситель «качелей»: остаток перескочил через ноль — режем шаг, иначе
+    // камера ходит туда-сюда (у пальца это же место).
     const bool flipYaw = s_haveCtlErr && s_prevCtlYaw * errYaw < 0.f &&
                          fabsf(errYaw) > fabsf(s_prevCtlYaw) * 0.35f;
     const bool flipPitch = s_haveCtlErr && s_prevCtlPitch * errPitch < 0.f &&
@@ -1038,44 +953,28 @@ static void UpdateAimMemory(float dt) {
     s_prevCtlYaw = errYaw; s_prevCtlPitch = errPitch; s_haveCtlErr = true;
     k *= s_flipDamp;
 
-    // Шаг в градусах: не больше половины остатка (k) и не больше самого
-    // остатка — иначе перелёт, и следующий шаг считается по ошибке другого
-    // знака.
     float stepYaw = errYaw * k, stepPitch = errPitch * k;
     if (fabsf(stepYaw) > fabsf(errYaw)) stepYaw = errYaw;
     if (fabsf(stepPitch) > fabsf(errPitch)) stepPitch = errPitch;
+    // Пока запись не подтверждена откликом камеры, идём мелко.
     const float degCap = s_memDiag.responded ? kMemDegCapKnown : kMemDegCapFirst;
     if (stepYaw >  degCap) stepYaw =  degCap;
     if (stepYaw < -degCap) stepYaw = -degCap;
     if (stepPitch >  degCap) stepPitch =  degCap;
     if (stepPitch < -degCap) stepPitch = -degCap;
+    if (!std::isfinite(stepYaw) || !std::isfinite(stepPitch)) return;
 
-    // Градусы -> единицы ввода игры. Вертикаль: игра переворачивает знак
-    // сама (fnmul в ZJo), а при m_Invert — не переворачивает.
-    float ux = stepYaw / gy;
-    float uy = (invert ? 1.f : -1.f) * stepPitch / gp;
-    if (!(std::isfinite(ux) && std::isfinite(uy))) return;
-    if (ux >  kMemUnitsCap) ux =  kMemUnitsCap;
-    if (ux < -kMemUnitsCap) ux = -kMemUnitsCap;
-    if (uy >  kMemUnitsCap) uy =  kMemUnitsCap;
-    if (uy < -kMemUnitsCap) uy = -kMemUnitsCap;
-
-    if (!esp_mem_aim_write_look(ux, uy)) {
+    // Градусы -> накопитель игры: X — «наклон вниз» (вверх — меньше),
+    // Y — рысканье (вправо — больше).
+    if (!esp_mem_aim_write_angles(accX - stepPitch, accY + stepYaw)) {
         ++s_memDiag.fails;
         return;
     }
     ++s_memDiag.writes;
-    s_pendX += ux; s_pendY += uy;
-    s_cmdYaw += ux; s_cmdPitch += uy;
-    // Заказанное в градусах: по нему вычитаем «шаги в полёте», когда оси
-    // камеры нет.
-    s_flightYaw[0] = s_flightYaw[1];     s_flightYaw[1] = ux;
-    s_flightPitch[0] = s_flightPitch[1]; s_flightPitch[1] = uy;
+    s_pendYaw += stepYaw; s_pendPitch += stepPitch;
 
-    // Камера не отвечает на записи больше трёх секунд подряд при живой оси —
-    // режим не работает (поле перезаписывается игрой раньше, чем читается, или
-    // коэффициент ушёл далеко от m_Sensitivity). На тач не падаем, но
-    // говорим: молчащий аим на устройстве не отличить от сломанного.
+    // Записи идут, а камера не отвечает больше трёх секунд при живой оси —
+    // режим не работает. На тач не падаем, но говорим.
     if (haveCam && !s_memDiag.responded) {
         s_noResponseTime += dt;
         if (s_noResponseTime > 3.f && !s_toasted) {

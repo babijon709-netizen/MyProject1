@@ -89,7 +89,7 @@ UI_EN = {
     'Состояние': 'State',
     # состояние записи в память (вкладка «Аим»)
     'нет объекта': 'no object', 'нет отклика': 'no response', 'нет оси': 'no axis',
-    '%.2f град/ед': '%.2f deg/unit',
+    'ведёт': 'tracking',
     # мемори-режимы сообщают о поломке тостом
     'Мемори-аим: не найден MouseLook': 'Memory aim: MouseLook not found',
     'Мемори-аим: камера не отвечает': 'Memory aim: camera not responding',

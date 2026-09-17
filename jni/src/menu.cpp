@@ -152,7 +152,7 @@ float TabContent(int tab, float dt, float cW) {
                 } else {
                     if (!d.params)          snprintf(val, sizeof(val), "%s", XS("нет объекта"));
                     else if (!d.responded)  snprintf(val, sizeof(val), "%s", XS("нет отклика"));
-                    else                    snprintf(val, sizeof(val), XS("%.2f град/ед"), d.deg_per_unit);
+                    else                    snprintf(val, sizeof(val), "%s", XS("ведёт"));
                 }
                 auto vsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, val);
                 dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f},

@@ -1,22 +1,18 @@
 // Стенд мемори-режимов аима (запуск: sh tools/aim/run.sh).
 //
 // НАСТОЯЩИЙ код из jni/src/aim.cpp — выбор цели, «память» и «сайлент» (их
-// вырезает run.sh в ctrl.inc) — вокруг заглушек игры: MouseLook, камера, ось
-// выстрела. NDK не нужен: обычная сборка g++, поэтому гонять можно после
-// каждой правки, не дожидаясь устройства.
+// вырезает run.sh в ctrl.inc) — вокруг заглушек игры: MouseLook с накопителем
+// углов, камера, ось выстрела. NDK не нужен: обычная сборка g++, поэтому
+// гонять можно после каждой правки, не дожидаясь устройства.
 //
 // Зачем. Запись в память игры снаружи не видна: по экрану не отличить «поле
-// перезаписано игрой раньше, чем прочитано» от «адрес не тот». Стенд
-// проверяет то, что видно только в числах:
-//   * «память»: петля «записали -> камера повернулась -> остаток меньше»
-//     сходится и НЕ раскачивается (перелёт цели — это «прицел дёргается»);
-//     коэффициент град/ед подтверждается замером по отклику камеры;
-//   * «память» при потерянных записях (игра перезаписывает поле раньше, чем
-//     читает): ввод не копится в никуда, камера не улетает;
-//   * «память» без оси камеры (штатный режим на устройстве из логов
-//     14-16.09.2026: cam_st = 0): работает запасная оценка коэффициента;
-//   * Object не найден -> записи нет ВОВСЕ, на тач не падаем (выбор
-//     пользователя: сломанный мемори-аим молчит, а не притворяется тачем);
+// перезаписано игрой» от «адрес не тот». Стенд проверяет то, что видно только
+// в числах:
+//   * «память»: петля «записали в накопитель -> камера повернулась -> остаток
+//     меньше» сходится и НЕ раскачивается (перелёт — это «прицел дёргается»);
+//   * «память» работает и без оси камеры (накопитель — сам по себе угол,
+//     выучивать чувствительность не нужно);
+//   * объекта нет -> записи нет ВОВСЕ, на тач не падаем (выбор пользователя);
 //   * «сайлент»: ось выстрела доворачивается в цель, остаётся единичной и не
 //     уезжает дальше предела; когда игра перезаписала ось своей — отклонение
 //     начинается с нуля, а не копилось.
@@ -37,7 +33,7 @@ namespace lang { inline const char* text(const char* ru) { return ru; } }
 #include "aim_learn.h"     // настоящий GainTrack
 #include "widgets.h"       // Sheet/Popover (меню открыто — аим молчит)
 
-// ====================== заглушки оверлея и игры ===========================
+// ---- заглушки оверлея ----
 static const float kRad2Deg = 57.29577951f;
 
 struct { int width = 2460, height = 1080, orientation = 0; } displayInfo;
@@ -50,6 +46,7 @@ InputState g_input;
 bool       g_aimActive = false;   // аим ведёт цель (автофарм уступает камеру)
 Sheet      g_sheet;
 Popover    g_pop;
+
 // Тач-режим в стенд не входит (его проверяет tools/touch), но диспетчер его
 // зовёт — здесь это пустышка.
 static void UpdateAimTouch(float) { }
@@ -58,45 +55,51 @@ static int g_toasts = 0;
 void ShowToast(const char*, float) { ++g_toasts; }
 void ShowToast(const char*) { ++g_toasts; }
 
-// Тач-режим в стенд не входит (его проверяет tools/touch), но диспетчер его
-// зовёт — для стенда это пустышка.
-// ---- «игра» ----
+// ====================== «игра» ==============================================
 struct Game {
-    // MouseLook: m_Invert, m_Sensitivity, гироскоп, ввод взгляда, углы.
+    // ---- MouseLook ----
     bool  haveLook = true;
-    float sens = 2.0f;              // градусов на единицу ввода
-    bool  invert = false;
-    bool  gyro = false;
-    float lookIn[2] = {0.f, 0.f};   // +0x88: игра перезаписывает его каждый кадр
-    float yaw = 0.f, pitch = 0.f;   // накопленные углы камеры
-    // Ось выстрела: MouseLook.Update кладёт сюда forward камеры.
+    // m_Sensitivity: нужен только проверкой «объект тот»; переводить единицы
+    // ввода в градусы им больше не нужно — накопитель уже в градусах.
+    float sens = 2.0f;
+    bool  invert = false, gyro = false;
+    // Накопитель углов (+0x4C rotationX / +0x50 rotationY). Игра каждый кадр
+    // делает angles = clamp(angles + input * m_Sensitivity) и разворачивает
+    // результат в localRotation камеры (MouseLook.ZJo).
+    float accX = 0.f, accY = 0.f;
+    static constexpr float kPitchLimit = 85.f;      // предел обзора игры
+
+    // ---- ось выстрела (PlayerEventHandler.LookDirection) ----
     bool  haveAxis = true;
     float ax = 0.f, ay = 0.f, az = 1.f;
     bool  holdOn = false;           // писатель-доминатор включён
-    bool  holderLoses = false;      // игра перезаписывает ось раньше, чем писатель
-    // Когда игра читает ввод взгляда: 1 — каждый кадр (повезло), 3 — каждый
-    // третий (ZJX затёр поле до чтения).
-    int   acceptEvery = 1;
+    bool  holderLoses = false;      // игра перезаписывает ось раньше писателя
     int   gameFrames = 0;
-    int   consumed = 0;             // сколько раз ввод дошёл до камеры
 
+    // Камера: rotationX — это «наклон вниз», то есть возвышение с минусом.
+    float camYaw()   const { return accY; }
+    float camPitch() const { return -accX; }
+
+    static void anglesTo(float yaw, float pitch, float& x, float& y, float& z) {
+        const float cy = cosf(yaw / kRad2Deg), sy = sinf(yaw / kRad2Deg);
+        const float cp = cosf(pitch / kRad2Deg), sp = sinf(pitch / kRad2Deg);
+        x = cp * sy; y = sp; z = cp * cy;
+    }
+
+    // Кадр игры: развернуть накопитель в камеру и положить свою ось выстрела.
     void frame() {
         ++gameFrames;
-        const float ux = lookIn[0], uy = lookIn[1];
-        lookIn[0] = lookIn[1] = 0.f;          // ZJX кладёт сюда сдвиг касания
-        if (haveLook && (gameFrames % acceptEvery) == 0) {
-            if (ux != 0.f || uy != 0.f) ++consumed;
-            float vx = ux, vy = invert ? uy : -uy;   // fnmul + fcsel по m_Invert
-            yaw += vx * sens; pitch += vy * sens;
-        }
+        // ZJo: клампит накопитель и оборачивает рысканье. Ввода касания в
+        // стенде нет, поэтому прибавлять нечего.
+        if (accX >  kPitchLimit) accX =  kPitchLimit;
+        if (accX < -kPitchLimit) accX = -kPitchLimit;
+        while (accY >  180.f) accY -= 360.f;
+        while (accY < -180.f) accY += 360.f;
         float fx = 0.f, fy = 0.f, fz = 1.f;
-        anglesTo(yaw, pitch, fx, fy, fz);
+        anglesTo(camYaw(), camPitch(), fx, fy, fz);
+        // MouseLook.Update кладёт в ось выстрела forward камеры; писатель
+        // (если он выигрывает гонку) держит там наше направление.
         if (!holdOn || holderLoses) { ax = fx; ay = fy; az = fz; }
-    }
-    static void anglesTo(float y, float p, float& x, float& yy, float& z) {
-        const float cy = cosf(y / kRad2Deg), sy = sinf(y / kRad2Deg);
-        const float cp = cosf(p / kRad2Deg), sp = sinf(p / kRad2Deg);
-        x = cp * sy; yy = sp; z = cp * cy;
     }
 };
 static Game g_game;
@@ -129,15 +132,18 @@ static void errFrom(float baseYaw, float basePitch, float& eYaw, float& ePitch) 
     ePitch = atan2f(du, sqrtf(df * df + dr * dr)) * kRad2Deg;
 }
 
+// Углы оси выстрела (сайлент крутит не камеру, а её).
+static void axisAngles(float& yaw, float& pitch) {
+    yaw = atan2f(g_game.ax, g_game.az) * kRad2Deg;
+    pitch = atan2f(g_game.ay, sqrtf(g_game.ax * g_game.ax + g_game.az * g_game.az)) * kRad2Deg;
+}
+
 // Снимок ESP вызывается перед каждым тактом аима.
 static void snapshot() {
-    float baseYaw = g_game.yaw, basePitch = g_game.pitch;
+    float baseYaw = g_game.camYaw(), basePitch = g_game.camPitch();
     // Сайлент крутит не камеру, а ось выстрела, и ESP (как aim_angles_for)
     // отсчитывает ошибку от настоящей оси выстрела.
-    if (g_state.aim_mode == AIM_MODE_SILENT) {
-        baseYaw = atan2f(g_game.ax, g_game.az) * kRad2Deg;
-        basePitch = atan2f(g_game.ay, sqrtf(g_game.ax * g_game.ax + g_game.az * g_game.az)) * kRad2Deg;
-    }
+    if (g_state.aim_mode == AIM_MODE_SILENT) axisAngles(baseYaw, basePitch);
     float eYaw = 0.f, ePitch = 0.f;
     errFrom(baseYaw, basePitch, eYaw, ePitch);
     EspBox b{};
@@ -156,7 +162,7 @@ float esp_camera_fov_deg() { return 60.f; }
 bool esp_local_player_is_aiming() { return true; }
 bool esp_aim_camera_angles(float& yaw, float& pitch) {
     if (!g_haveCamAxis) return false;
-    yaw = g_game.yaw; pitch = g_game.pitch;
+    yaw = g_game.camYaw(); pitch = g_game.camPitch();
     return true;
 }
 bool esp_mem_aim_look_params(float& dpu, bool& inv, bool& gyr) {
@@ -164,9 +170,16 @@ bool esp_mem_aim_look_params(float& dpu, bool& inv, bool& gyr) {
     dpu = g_game.sens; inv = g_game.invert; gyr = g_game.gyro;
     return true;
 }
-bool esp_mem_aim_write_look(float ux, float uy) {
+bool esp_mem_aim_read_angles(float& x, float& y) {
     if (!g_game.haveLook) return false;
-    g_game.lookIn[0] = ux; g_game.lookIn[1] = uy;
+    x = g_game.accX; y = g_game.accY;
+    return true;
+}
+bool esp_mem_aim_write_angles(float x, float y) {
+    if (!g_game.haveLook) return false;
+    if (!std::isfinite(x) || !std::isfinite(y)) return false;
+    if (fabsf(x) > 360.f || fabsf(y) > 360.f) return false;
+    g_game.accX = x; g_game.accY = y;
     return true;
 }
 bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z) {
@@ -192,14 +205,14 @@ void esp_mem_aim_hold_fire_dir(bool on) { g_game.holdOn = on; }
 // ====================== прогон ============================================
 struct Result {
     int    frames = 0;
-    float  errYaw = 0.f, errPitch = 0.f;    // остаток на последнем кадре
+    float  errYaw = 0.f;                    // остаток на последнем кадре
     float  maxAbsYaw = 0.f;                 // максимум |поворот камеры|
     int    signFlips = 0;                   // смен знака остатка (раскачка)
     int    writes = 0, fails = 0, toasts = 0;
 };
 
 // Прогон: dt оверлея 80 мс (12 fps, как на устройстве), игра — 60 fps.
-static Result run(int mode, int frames, bool measureAxis = true) {
+static Result run(int mode, int frames) {
     g_state.aim_mode = mode;
     Result r;
     float prevYawErr = 0.f; bool havePrev = false;
@@ -210,17 +223,12 @@ static Result run(int mode, int frames, bool measureAxis = true) {
         UpdateAim(0.08f);
         for (int f = 0; f < 5; ++f) g_game.frame();   // 5 кадров игры на кадр оверлея
         float eYaw = 0.f, ePitch = 0.f;
-        if (measureAxis) {
-            float baseYaw = g_game.yaw, basePitch = g_game.pitch;
-            if (mode == AIM_MODE_SILENT) {
-                baseYaw = atan2f(g_game.ax, g_game.az) * kRad2Deg;
-                basePitch = atan2f(g_game.ay, sqrtf(g_game.ax * g_game.ax + g_game.az * g_game.az)) * kRad2Deg;
-            }
-            errFrom(baseYaw, basePitch, eYaw, ePitch);
-            if (havePrev && prevYawErr * eYaw < 0.f) ++r.signFlips;
-            prevYawErr = eYaw; havePrev = true;
-        }
-        const float ay = fabsf(g_game.yaw);
+        float baseYaw = g_game.camYaw(), basePitch = g_game.camPitch();
+        if (mode == AIM_MODE_SILENT) axisAngles(baseYaw, basePitch);
+        errFrom(baseYaw, basePitch, eYaw, ePitch);
+        if (havePrev && prevYawErr * eYaw < 0.f) ++r.signFlips;
+        prevYawErr = eYaw; havePrev = true;
+        const float ay = fabsf(g_game.camYaw());
         if (ay > r.maxAbsYaw) r.maxAbsYaw = ay;
         ++r.frames;
     }
@@ -252,95 +260,66 @@ static void check(bool ok, const char* what) {
 int main() {
     printf("--- мемори-режимы аима (стенд на настоящем коде aim.cpp)\n");
 
-    // A. «Память»: камера отвечает на каждую запись.
+    // A. «Память»: накопитель углов -> камера.
     {
         resetGame();
         g_targetYaw = 10.f; g_targetPitch = 5.f;
-        Result r = run(AIM_MODE_MEMORY, 120);
-        printf("ПАМЯТЬ отвечает: кадров %d, остаток %.2f°, макс |поворот| %.1f°, "
+        Result r = run(AIM_MODE_MEMORY, 60);
+        printf("ПАМЯТЬ: кадров %d, остаток %.2f°, поворот камеры %.1f/%.1f°, "
                "смен знака %d, записей %d\n",
-               r.frames, r.errYaw, r.maxAbsYaw, r.signFlips, r.writes);
+               r.frames, r.errYaw, g_game.camYaw(), g_game.camPitch(), r.signFlips, r.writes);
         check(r.errYaw < 0.5f, "сошлось к цели (остаток < 0.5°)");
         check(r.signFlips <= 3, "без раскачки (смен знака не больше 3)");
-        check(AimMemoryDiag().responded, "камера ответила (коэффициент подтверждён)");
-        const float gain = AimMemoryDiag().deg_per_unit;
-        check(gain > g_game.sens * 0.5f && gain < g_game.sens * 2.f,
-              "коэффициент град/ед подтверждён замером");
+        check(AimMemoryDiag().responded, "камера ответила (запись доходит)");
+        check(fabsf(g_game.camPitch() - 5.f) < 0.6f, "тангаж дошёл до цели (знак не перевёрнут)");
+        check(fabsf(g_game.camYaw() - 10.f) < 0.6f, "рысканье дошло до цели");
     }
 
-    // A2. «Память» с инвертированной вертикалью в настройках игры: знак
-    //     вертикали переворачивает сама игра (fnmul + fcsel в MouseLook.ZJo).
-    {
-        resetGame();
-        g_game.invert = true;
-        g_targetYaw = 10.f; g_targetPitch = 5.f;
-        Result r = run(AIM_MODE_MEMORY, 120);
-        printf("ПАМЯТЬ инверсия Y: кадров %d, остаток %.2f°, поворот %.1f/%.1f°\n",
-               r.frames, r.errYaw, g_game.yaw, g_game.pitch);
-        check(r.errYaw < 0.5f, "сошлось при m_Invert (вертикаль не перевёрнута)");
-        check(g_game.pitch > 4.f && g_game.pitch < 6.f, "тангаж дошёл до цели, а не в другую сторону");
-    }
-
-    // B. «Память» при потерянных записях: игру перезаписывает поле раньше,
-    //    чем читает (принимается каждый третий кадр).
-    {
-        resetGame();
-        g_game.acceptEvery = 3;
-        Result r = run(AIM_MODE_MEMORY, 240);
-        printf("ПАМЯТЬ 1/3 записей: кадров %d, остаток %.2f°, макс |поворот| %.1f°, "
-               "смен знака %d, дошло до камеры %d\n",
-               r.frames, r.errYaw, r.maxAbsYaw, r.signFlips, g_game.consumed);
-        check(r.errYaw < 1.0f, "сошлось и при потерянных записях");
-        check(r.maxAbsYaw < 20.f, "камера не улетела (ввод не копился в никуда)");
-    }
-
-    // C. «Память» без оси камеры: остаётся запасная оценка коэффициента
-    //    по реакции прицела (cam_st = 0 в логе устройства).
+    // B. «Память» без оси камеры: накопитель — сам по себе угол, поэтому
+    //    работать это обязано и там, где выучивать чувствительность нечем.
     {
         resetGame();
         g_haveCamAxis = false;
-        Result r = run(AIM_MODE_MEMORY, 240);
-        printf("ПАМЯТЬ без оси камеры: кадров %d, остаток %.2f°, макс |поворот| %.1f°, "
-               "смен знака %d\n", r.frames, r.errYaw, r.maxAbsYaw, r.signFlips);
-        check(r.errYaw < 1.5f, "ведёт и без настоящей оси камеры");
-        check(r.maxAbsYaw < 20.f, "без оси камеры не уезжает");
-        check(!AimMemoryDiag().responded, "без оси камеры замер не подтверждён (честно)");
+        Result r = run(AIM_MODE_MEMORY, 60);
+        printf("ПАМЯТЬ без оси камеры: остаток %.2f°, поворот %.1f/%.1f°, записей %d\n",
+               r.errYaw, g_game.camYaw(), g_game.camPitch(), r.writes);
+        check(r.errYaw < 0.5f, "ведёт и без настоящей оси камеры");
+        check(!AimMemoryDiag().responded, "без оси камеры отклик не подтверждён (честно)");
     }
 
-    // D. MouseLook не найден: пишем ноль раз и НЕ падаем на тач.
+    // C. MouseLook не найден: пишем ноль раз и НЕ падаем на тач.
     {
         resetGame();
         g_game.haveLook = false;
-        Result r = run(AIM_MODE_MEMORY, 60);
-        printf("ПАМЯТЬ без MouseLook: записей %d, отказов %d, поворот камеры %.2f°, "
-               "тостов %d\n", r.writes, r.fails, g_game.yaw, r.toasts);
+        Result r = run(AIM_MODE_MEMORY, 30);
+        printf("ПАМЯТЬ без MouseLook: записей %d, поворот камеры %.2f°, тостов %d\n",
+               r.writes, g_game.camYaw(), r.toasts);
         check(r.writes == 0, "записей нет вовсе (не падаем на тач)");
-        check(fabsf(g_game.yaw) < 1e-3f, "камера не двигалась");
+        check(fabsf(g_game.camYaw()) < 1e-3f, "камера не двигалась");
         check(!AimMemoryDiag().params, "диагностика: params = нет");
         check(r.toasts >= 1, "пользователю сказали, почему режим молчит");
     }
 
-    // E. «Сайлент»: ось выстрела доворачивается, камера стоит.
+    // D. «Сайлент»: ось выстрела доворачивается, камера стоит.
     {
         resetGame();
         g_targetYaw = 8.f; g_targetPitch = 4.f;
-        Result r = run(AIM_MODE_SILENT, 120);
+        Result r = run(AIM_MODE_SILENT, 60);
         const float axisLen = sqrtf(g_game.ax * g_game.ax + g_game.ay * g_game.ay + g_game.az * g_game.az);
         printf("САЙЛЕНТ: кадров %d, остаток %.2f°, отклонение %.1f°, длина оси %.4f, "
                "поворот камеры %.2f°\n",
-               r.frames, r.errYaw, AimMemoryDiag().dev, axisLen, g_game.yaw);
+               r.frames, r.errYaw, AimMemoryDiag().dev, axisLen, g_game.camYaw());
         check(r.errYaw < 0.5f, "ось выстрела смотрит в цель");
         check(fabsf(axisLen - 1.f) < 1e-3f, "ось осталась единичной");
-        check(fabsf(g_game.yaw) < 1e-3f, "камера не двигалась (silent)");
+        check(fabsf(g_game.camYaw()) < 1e-3f, "камера не двигалась (silent)");
         check(AimMemoryDiag().dev < 15.f, "отклонение в пределах нормы");
     }
 
-    // F. «Сайлент» с целью за пределами отклонения: ось упирается в предел,
-    //    а не уезжает куда попало.
+    // E. «Сайлент» с целью за пределами отклонения: ось упирается в предел.
     {
         resetGame();
         g_targetYaw = 60.f; g_targetPitch = 0.f;
-        Result r = run(AIM_MODE_SILENT, 120);
+        Result r = run(AIM_MODE_SILENT, 60);
         printf("САЙЛЕНТ цель 60°: отклонение %.1f°, остаток %.1f°, длина оси %.4f\n",
                AimMemoryDiag().dev, r.errYaw,
                sqrtf(g_game.ax * g_game.ax + g_game.ay * g_game.ay + g_game.az * g_game.az));
@@ -350,24 +329,24 @@ int main() {
               "ось не испортилась");
     }
 
-    // G. «Сайлент», когда игра каждый кадр перезаписывает ось своей
+    // F. «Сайлент», когда игра каждый кадр перезаписывает ось своей
     //    (писатель проигрывает гонку): отклонение не копится.
     {
         resetGame();
         g_targetYaw = 8.f; g_targetPitch = 4.f;
         g_game.holderLoses = true;
-        Result r = run(AIM_MODE_SILENT, 120);
+        Result r = run(AIM_MODE_SILENT, 60);
         printf("САЙЛЕНТ ось игры каждый кадр: отклонение %.1f°, остаток %.1f°\n",
                AimMemoryDiag().dev, r.errYaw);
         check(AimMemoryDiag().dev <= 35.5f, "отклонение не накопилось за предел");
         check(std::isfinite(g_game.ay), "ось не испортилась");
     }
 
-    // H. «Сайлент» без оси выстрела: записи нет, ось отдана игре.
+    // G. «Сайлент» без оси выстрела: записи нет, ось отдана игре.
     {
         resetGame();
         g_game.haveAxis = false;
-        Result r = run(AIM_MODE_SILENT, 60);
+        Result r = run(AIM_MODE_SILENT, 30);
         printf("САЙЛЕНТ без оси: записей %d, отказов %d, писатель %s, тостов %d\n",
                r.writes, r.fails, g_game.holdOn ? "включён" : "выключен", r.toasts);
         check(r.writes == 0, "записей нет");
@@ -375,7 +354,7 @@ int main() {
         check(r.toasts >= 1, "пользователю сказали, почему режим молчит");
     }
 
-    // I. Выключенный аим ничего не пишет ни в одном режиме.
+    // H. Выключенный аим ничего не пишет ни в одном режиме.
     {
         resetGame();
         g_state.aim_touch = false;

@@ -1350,14 +1350,29 @@ bool esp_read_look_sensitivity(float& out) {
 // запись — это «ввод одного кадра»: сыграет она или нет, зависит от того, кто
 // последним коснулся поля перед чтением. Контроллер в aim.cpp это учитывает:
 // шаг считается по остатку ошибки, а не по «мы записали, значит повернули».
-static constexpr uint64_t MOUSELOOK_INVERT     = 0x30;   // bool
-static constexpr uint64_t MOUSELOOK_ANGLES     = 0x4C;   // Vector2: тангаж, рысканье
-static constexpr uint64_t MOUSELOOK_GYRO       = 0x78;   // объект гироскопа (0 = выключен)
-static constexpr uint64_t MOUSELOOK_LOOK_INPUT = 0x88;   // Vector2: ввод взгляда за кадр
+// Поля MouseLook (дамп билда 62a8534: oxiclean; в бете те же смещения, имена
+// обфусцированы и ротируют — сверено по dump.7z и dump_beta.7z).
+static constexpr uint64_t MOUSELOOK_INVERT = 0x30;   // m_Invert
+static constexpr uint64_t MOUSELOOK_ANGLES = 0x4C;   // Vector2 накопителя:
+                                                     // [0] rotationX (вверх — меньше),
+                                                     // [1] rotationY (вправо — больше)
+static constexpr uint64_t MOUSELOOK_GYRO   = 0x78;   // объект гироскопа (0 = выключен)
+// Поля ввода взгляда (+0x88) в расчёте больше нет: MouseLook.ZJo сначала зовёт
+// ZJX, а тот перезаписывает +0x88 вводом касания (str d0, [x19, #0x88], файл
+// libil2cpp.so 0x64e0364), и только потом ZJo читает это поле — наша запись
+// между кадрами игры стирается гарантированно.
 
 // MouseLook локального игрока. В отличие от esp_read_look_sensitivity() здесь
 // НИКАКИХ запасных вариантов «взять у любого игрока»: запись идёт в память, и
 // попади она в чужой объект — камеру крутило бы не тому игроку.
+// Класс MouseLook, у которого уже проверяли m_Sensitivity (см.
+// esp_mem_aim_look_params). Запись в память игры разрешена ТОЛЬКО в объект
+// этого класса: указатель по смещению мог остаться от умершего игрока или
+// указывать на чужой объект, а записать 8 байт не туда — это уже не «аим не
+// работает», а падение игры. Имя класса на устройстве может не читаться
+// (логи 14-16.09.2026: метаданные недоступны), поэтому опознаём по структуре.
+static std::atomic<uint64_t> g_mouse_look_klass{0};
+
 static bool resolve_local_mouse_look(uint64_t& out) {
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
     uint64_t player = resolve_local_player();
@@ -1365,6 +1380,9 @@ static bool resolve_local_mouse_look(uint64_t& out) {
     if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) return false;
     uint64_t mouse_look = rd_ptr(player + PLAYER_MOUSE_LOOK_OFFSET);
     if (mouse_look < 0x10000) return false;   // ноль или мусор вместо указателя
+    const uint64_t klass = rd_ptr(mouse_look);
+    const uint64_t known = g_mouse_look_klass.load();
+    if (known ? (klass != known) : (klass < 0x10000)) return false;
     out = mouse_look;
     return true;
 }
@@ -1377,26 +1395,35 @@ bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro) {
     deg_per_unit = value;
     invert_y     = rd<uint8_t>(mouse_look + MOUSELOOK_INVERT) != 0;
     gyro         = rd_ptr(mouse_look + MOUSELOOK_GYRO) >= 0x10000;
+    // Структура сошлась — запоминаем класс: с этого момента писать можно
+    // только в объект ровно этого класса.
+    g_mouse_look_klass.store(rd_ptr(mouse_look));
     return true;
 }
 
-bool esp_mem_aim_write_look(float yaw_units, float pitch_units) {
-    uint64_t mouse_look = 0;
-    if (!resolve_local_mouse_look(mouse_look)) return false;
-    if (!std::isfinite(yaw_units) || !std::isfinite(pitch_units)) return false;
-    float input[2] = {yaw_units, pitch_units};
-    return wr_buf(mouse_look + MOUSELOOK_LOOK_INPUT, input, sizeof(input));
-}
 
-bool esp_mem_aim_read_angles(float& pitch_deg, float& yaw_deg) {
+// Накопитель углов: +0x4C rotationX (вверх — МЕНЬШЕ), +0x50 rotationY (вправо
+// — больше). Значения всегда в пределах обзора игры: их же клампит сам ZJo,
+// поэтому выход за +-360 означает, что читаем не тот объект.
+bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
     uint64_t mouse_look = 0;
     if (!resolve_local_mouse_look(mouse_look)) return false;
     float angles[2] = {};
     if (!rd_buf(mouse_look + MOUSELOOK_ANGLES, angles, sizeof(angles))) return false;
     if (!std::isfinite(angles[0]) || !std::isfinite(angles[1])) return false;
-    pitch_deg = angles[0];
-    yaw_deg   = angles[1];
+    if (fabsf(angles[0]) > 360.0F || fabsf(angles[1]) > 360.0F) return false;
+    x_deg = angles[0];
+    y_deg = angles[1];
     return true;
+}
+
+bool esp_mem_aim_write_angles(float x_deg, float y_deg) {
+    uint64_t mouse_look = 0;
+    if (!resolve_local_mouse_look(mouse_look)) return false;
+    if (!std::isfinite(x_deg) || !std::isfinite(y_deg)) return false;
+    if (fabsf(x_deg) > 360.0F || fabsf(y_deg) > 360.0F) return false;
+    float angles[2] = {x_deg, y_deg};
+    return wr_buf(mouse_look + MOUSELOOK_ANGLES, angles, sizeof(angles));
 }
 
 // Состояние писателя-доминатора оси выстрела (см. esp_mem_aim_hold_fire_dir).
@@ -1459,23 +1486,51 @@ void esp_mem_aim_hold_fire_dir(bool on) {
     }
     if (g_fire_hold_running.exchange(true)) return;   // поток уже есть
     std::thread([]() {
-        constexpr int kPeriodMs = 2;
+        // 12 мс (~83 записи/с): игра кладёт ось раз в кадр, этого хватает, а
+        // каждая запись — это /proc/<pid>/mem и mmap_lock процесса игры. На
+        // 2 мс (как у «всегда день») игра вставала: вместе с оверлеем, который
+        // читает память через тот же файл.
+        constexpr int kPeriodMs = 12;
+        // Как часто проверять, что адрес всё ещё ось выстрела: объект мог
+        // умереть (респавн, смена мира), и писать 12 байт по чужому адресу
+        // нельзя — затрут что-нибудь живое.
+        constexpr int kCheckEvery = 8;                // раз в ~100 мс
         uint64_t addr = 0;
-        double   resolved_at = 0.0;
+        int      tick = 0;
+        int      fail_streak = 0;
         while (g_fire_hold_running.load()) {
             if (g_fire_hold_on.load() && g_pid > 0) {
-                const double now = mono_seconds();
-                // Игрок мог респавнуться — объект другой, адрес переезжает.
-                if (!addr || now - resolved_at > 0.5) {
-                    uint64_t fresh = 0;
-                    if (resolve_look_direction(fresh)) { addr = fresh; resolved_at = now; }
-                    else { addr = g_fire_dir_addr.load(); }
+                // Адрес приносит поток отрисовки: он переразрешает его каждый
+                // кадр, поэтому из этого потока память игры не разресолвим
+                // вообще — только пишем по готовому адресу.
+                const uint64_t fresh = g_fire_dir_addr.load();
+                if (fresh != addr) { addr = fresh; tick = 0; }
+                if (addr && ++tick >= kCheckEvery) {
+                    tick = 0;
+                    const Vec3 cur = rd_v3(addr);
+                    const float len = vec3_is_finite(cur)
+                        ? sqrtf(cur.x * cur.x + cur.y * cur.y + cur.z * cur.z) : 0.0F;
+                    // Живая ось — единичный вектор; всё остальное значит, что
+                    // адрес умер, и писать туда больше нельзя.
+                    if (!(len > 0.5F && len < 2.0F)) {
+                        addr = 0;
+                        g_fire_dir_addr.store(0);
+                    }
                 }
                 if (addr) {
                     const float dir[3] = {g_fire_dir_x.load(), g_fire_dir_y.load(), g_fire_dir_z.load()};
                     const float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-                    if (std::isfinite(len) && len > 0.5F && len < 2.0F)
-                        wr_buf(addr, dir, sizeof(dir));
+                    if (std::isfinite(len) && len > 0.5F && len < 2.0F &&
+                        wr_buf(addr, dir, sizeof(dir))) {
+                        fail_streak = 0;
+                    } else if (++fail_streak >= 8) {
+                        // Писать сюда больше нельзя: либо адрес умер, либо
+                        // доступ отобрали. Молчим до следующего кадра
+                        // отрисовки — он разрешит адрес заново.
+                        fail_streak = 0;
+                        addr = 0;
+                        g_fire_dir_addr.store(0);
+                    }
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(kPeriodMs));

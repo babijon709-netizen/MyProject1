@@ -50,8 +50,6 @@ struct AimMemDiag {
     bool  responded = false;
     // «Сайлент»: ось выстрела читается.
     bool  axis = false;
-    // «Память»: рабочий коэффициент, градусов на единицу ввода.
-    float deg_per_unit = 0.f;
     // «Сайлент»: на сколько градусов ось уведена от той, что положила игра.
     float dev = 0.f;
     int   writes = 0, fails = 0;
