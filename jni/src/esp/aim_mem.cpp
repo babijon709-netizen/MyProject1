@@ -425,16 +425,8 @@ static bool read_look_root_angles(uint64_t mouse_look, float& yaw_deg, float& pi
 
 // Свидетель для самотеста: сначала камера, потом узел прицела.
 static bool read_witness_angles(float& yaw_deg, float& pitch_deg) {
-    // Когда камера повёрнута ИЗ САМИХ углов прицела (g_cam_view_source == 1),
-    // она свидетелем быть не может: это чтение того же поля, куда мы пишем, и
-    // такая проверка «подтвердит» любую запись. Независима ось выстрела
-    // (LookDirection) — её и берём; узел прицела тоже читается независимо.
-    if (g_cam_view_source == 0) {
-        if (esp_aim_camera_angles(yaw_deg, pitch_deg)) return true;
-        if (esp_camera_angles(yaw_deg, pitch_deg)) return true;
-    } else if (g_aim_ref_valid) {
-        if (esp_aim_camera_angles(yaw_deg, pitch_deg)) return true;
-    }
+    if (esp_aim_camera_angles(yaw_deg, pitch_deg)) return true;
+    if (esp_camera_angles(yaw_deg, pitch_deg)) return true;
     return read_look_root_angles(s_mouse_look, yaw_deg, pitch_deg);
 }
 

@@ -144,12 +144,19 @@ int perspective_orientation(const Mat4& value) {
 // worldToCamera from camera world pose (Unity camera looks down -Z).
 Mat4 mat_view_from_basis(const Vec3& right, const Vec3& up, const Vec3& forward, const Vec3& position) {
     Mat4 view{};
+    // Строки поворота: right, up, -forward (в камере Unity взгляд идёт по -Z).
+    // Перевод: -строка * position, поэтому у третьей строки, где стоит -forward,
+    // получается +forward*position. Знак здесь проверен стендом
+    // tools/espmath (точка «прямо перед камерой» обязана попасть в центр экрана
+    // и при камере вдали от начала мира): 17 сентября 2026 «упрощение» этой
+    // строки до -(forward*position) уронило и тач-аим, и боксы — глубина кадра
+    // уезжала на 2*(forward*position).
     mat_set(view, 0, 0, right.x);   mat_set(view, 0, 1, right.y);   mat_set(view, 0, 2, right.z);
     mat_set(view, 1, 0, up.x);      mat_set(view, 1, 1, up.y);      mat_set(view, 1, 2, up.z);
     mat_set(view, 2, 0, -forward.x); mat_set(view, 2, 1, -forward.y); mat_set(view, 2, 2, -forward.z);
     mat_set(view, 0, 3, -(right.x * position.x + right.y * position.y + right.z * position.z));
     mat_set(view, 1, 3, -(up.x * position.x + up.y * position.y + up.z * position.z));
-    mat_set(view, 2, 3, -(forward.x * position.x + forward.y * position.y + forward.z * position.z));
+    mat_set(view, 2, 3, forward.x * position.x + forward.y * position.y + forward.z * position.z);
     mat_set(view, 3, 3, 1.0F);
     return view;
 }

@@ -755,20 +755,29 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (!std::isfinite(value)) return 0.0F;
                 return value > limit ? limit : (value < -limit ? -limit : value);
             };
-            // Легенда подписей (сокращены, чтобы строка влезала в 240 байт):
+            // Легенда подписей. Строка журнала обрезается на 240 байтах
+            // (журнал устройства 17.09.2026 оборвался ровно на «матрицы
+            // подтверждены…»), поэтому причины и числа идут ДВУМЯ строками:
             // спис — сколько в списке, свой — локальный найден, скр — скрыто,
             // бп — без позиции, дл — далеко, низ/вх — не прошли нижняя/верхняя
             // точка, кр — слишком низкая рамка, мт — проверка матриц пройдена,
-            // вд — источник вида (0 поза камеры, 1 углы прицела), км — камера,
-            // иг — игрок, эк — его проекция, w — знаменатель проекции (<= 0
-            // значит точка ЗА камерой).
-            diag_log("esp", "рамок нет: спис %d свой %d скр %d бп %d дл %d низ %d вх %d кр %d мт %d вд %d км %.0f %.0f %.0f иг %.0f %.0f %.0f эк %.0f %.0f w %.2f",
+            // вид — источник вида (0 поза камеры, 1 ось прицела, 2 кэш),
+            // угл — расхождение углов прицела с позой камеры, км — позиция
+            // камеры из матрицы вида, ос — ось прицела, иг — игрок, эк — его
+            // проекция, w — знаменатель проекции (<= 0 значит точка ЗА камерой,
+            // огромное — матрица нечитаемая).
+            diag_log("esp", "рамок нет: спис %d свой %d скр %d бп %d дл %d низ %d вх %d кр %d мт %d вид %d угл %.0f",
                      (int)s_transforms.size(), local_entity_index < s_transforms.size() ? 1 : 0,
                      drop_suppressed, drop_position, drop_far, drop_lower, drop_upper, drop_short,
                      g_matrix_configuration_validated ? 1 : 0, g_cam_view_source,
+                     (double)clamp_report(g_cam_view_angle_gap_deg, 999.0F));
+            diag_log("esp", "рамок нет: км %.0f %.0f %.0f ос %.2f %.2f %.2f иг %.0f %.0f %.0f эк %.0f %.0f w %.2f",
                      (double)clamp_report(report_camera_pos.x, 99999.0F),
                      (double)clamp_report(report_camera_pos.y, 99999.0F),
                      (double)clamp_report(report_camera_pos.z, 99999.0F),
+                     (double)clamp_report(g_aim_ref_forward.x, 9.0F),
+                     (double)clamp_report(g_aim_ref_forward.y, 9.0F),
+                     (double)clamp_report(g_aim_ref_forward.z, 9.0F),
                      (double)clamp_report(miss_world_x, 99999.0F),
                      (double)clamp_report(miss_world_y, 99999.0F),
                      (double)clamp_report(miss_world_z, 99999.0F),
