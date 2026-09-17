@@ -146,7 +146,7 @@ $$swg, RVA 0x657cce4, пишет ту же пару тем же кодом), п�
 
 ### jni/src/esp/boxes.cpp — esp_get_boxes: рамки, имена, скелет
 
-Строк: 768.
+Строк: 786.
 
 Внутри: `note_frame_stage` (почему кадр не собрался — в журнал), `esp_get_boxes`, `esp_nearby_player_count`, `esp_wants_reattach`
 
@@ -381,7 +381,7 @@ AimIsDriving() — по нему автофарм уступает камеру 
 
 ### jni/src/app/attach.cpp — Поиск процесса игры и поток привязки
 
-Строк: 363.
+Строк: 369.
 
 Внутри: `TargetPackageA`, `TargetPackageB`, `cmdline_rank`, `pid_cmdline_matches`, `proc_libil2cpp`, `find_game_pid`, `find_unity_pid`, `pid_still_game`, `access_confirmed_lost`, `AttachStateName`, `FrameWatchTick` (сторож кадра), `start_attach_thread`, `stop_attach_thread`
 
@@ -407,7 +407,7 @@ AimIsDriving() — по нему автофарм уступает камеру 
 
 ### jni/src/app/diag_log.cpp — Журнал здоровья: почему чит «выключился»
 
-Строк: 366.
+Строк: 368.
 
 Внутри: `queue_line`, `pop_line`, `writer_thread`, `rotate_if_needed`, `crash_append`, `crash_append_uint`, `crash_append_hex`, `crash_handler`, `diag_init`, `diag_install_crash_handler`, `diag_self_stats`, `diag_enabled`, `diag_path`, `diag_log`, `diag_flush`
 

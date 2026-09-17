@@ -748,15 +748,33 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // Порядок — по важности: сколько игроков, куда они денутся, чем
             // смотрит камера и первый промах с числами (w <= 0 — точка ЗА
             // камерой, y > высоты экрана — ниже кадра).
-            diag_log("esp", "рамок нет: спис %d свой %d скрыт %d безпоз %d далеко %d низ %d верх %d корот %d матр %d вид %d кам %.1f %.1f %.1f игр %.1f %.1f %.1f экр %.0f %.0f w %.2f расх %.0f",
+            // Числа зажаты: журнал режет строку на 240 байтах, а координаты
+            // «улетевшего» чтения бывают какими угодно — без зажима обрезка
+            // съела бы как раз хвост с w и расхождением.
+            auto clamp_report = [](float value, float limit) {
+                if (!std::isfinite(value)) return 0.0F;
+                return value > limit ? limit : (value < -limit ? -limit : value);
+            };
+            // Легенда подписей (сокращены, чтобы строка влезала в 240 байт):
+            // спис — сколько в списке, свой — локальный найден, скр — скрыто,
+            // бп — без позиции, дл — далеко, низ/вх — не прошли нижняя/верхняя
+            // точка, кр — слишком низкая рамка, мт — проверка матриц пройдена,
+            // вд — источник вида (0 поза камеры, 1 углы прицела), км — камера,
+            // иг — игрок, эк — его проекция, w — знаменатель проекции (<= 0
+            // значит точка ЗА камерой).
+            diag_log("esp", "рамок нет: спис %d свой %d скр %d бп %d дл %d низ %d вх %d кр %d мт %d вд %d км %.0f %.0f %.0f иг %.0f %.0f %.0f эк %.0f %.0f w %.2f",
                      (int)s_transforms.size(), local_entity_index < s_transforms.size() ? 1 : 0,
                      drop_suppressed, drop_position, drop_far, drop_lower, drop_upper, drop_short,
                      g_matrix_configuration_validated ? 1 : 0, g_cam_view_source,
-                     report_camera_pos.x,
-                     report_camera_pos.y, report_camera_pos.z,
-                     miss_world_x, miss_world_y, miss_world_z,
-                     miss_screen_x, miss_screen_y, miss_w,
-                     g_cam_view_angle_gap_deg);
+                     (double)clamp_report(report_camera_pos.x, 99999.0F),
+                     (double)clamp_report(report_camera_pos.y, 99999.0F),
+                     (double)clamp_report(report_camera_pos.z, 99999.0F),
+                     (double)clamp_report(miss_world_x, 99999.0F),
+                     (double)clamp_report(miss_world_y, 99999.0F),
+                     (double)clamp_report(miss_world_z, 99999.0F),
+                     (double)clamp_report(miss_screen_x, 99999.0F),
+                     (double)clamp_report(miss_screen_y, 99999.0F),
+                     (double)clamp_report(miss_w, 9999.0F));
         }
     }
 
