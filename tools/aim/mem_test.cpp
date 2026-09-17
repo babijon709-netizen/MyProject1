@@ -77,10 +77,6 @@ void ShowToast(const char*) { ++g_toasts; }
 // ====================== «игра» ==============================================
 static bool g_firing = false;       // стенд: «игрок стреляет»
 
-// Подмену записи оси включает SilentPatchSet (заглушка ниже): пока она стоит,
-// игра свою ось выстрела положить не может — положит нашу.
-extern bool g_patchActive;
-
 struct Game {
     // ---- MouseLook ----
     bool  haveLook = true;
@@ -125,7 +121,7 @@ struct Game {
         // кадр. Наша запись живёт до следующего кадра игры: это и есть та
         // гонка, ради которой ось повторяют в конце кадра оверлея.
         // С перехватом сеттера гонки нет: игра положит не forward, а нашу ось.
-        if (!g_patchActive) { ax = fx; ay = fy; az = fz; }
+        ax = fx; ay = fy; az = fz;
         if (g_firing) shotTime += 2.f;   // стрельба: метка растёт
     }
 };
@@ -168,9 +164,6 @@ static void axisAngles(float& yaw, float& pitch) {
 // Снимок ESP вызывается перед каждым тактом аима.
 static void snapshot() {
     float baseYaw = g_game.camYaw(), basePitch = g_game.camPitch();
-    // Сайлент крутит не камеру, а ось выстрела, и ESP (как aim_angles_for)
-    // отсчитывает ошибку от настоящей оси выстрела.
-    if (g_state.aim_mode == AIM_MODE_SILENT) axisAngles(baseYaw, basePitch);
     float eYaw = 0.f, ePitch = 0.f;
     errFrom(baseYaw, basePitch, eYaw, ePitch);
     EspBox b{};
@@ -238,19 +231,6 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     return true;
 }
 
-// ---- заглушки патча кода игры (сайлент) ----
-// Настоящий патч правит код игры в памяти — на хосте игры нет, поэтому:
-//   * установку включает сам стенд (g_patchOn);
-//   * подмену записи изображает Game::frame(): пока перехват стоит, игра
-//     свою ось выстрела положить не может, положит нашу (см. g_patchActive).
-// Машинные коды трамполина проверяются отдельно — tools/silentpatch.
-bool g_patchOn = false;         // перехват сеттера установлен
-bool g_patchActive = false;     // подмена включена (SilentPatchSet)
-uint64_t Il2CppBase() { return 0x40000000; }
-bool SilentPatchInstall(uint64_t) { return g_patchOn; }
-void SilentPatchRestore() { g_patchOn = false; g_patchActive = false; }
-bool SilentPatchInstalled() { return g_patchOn; }
-void SilentPatchSet(bool on, float, float, float) { g_patchActive = on; }
 
 // WrapDeg180() — общая обёртка угла, её зовёт вырезанный код ниже.
 #include "ui_util.h"
@@ -281,16 +261,13 @@ static Result run(int mode, int frames) {
     for (int i = 0; i < frames; ++i) {
         snapshot();
         UpdateAim(0.08f);
-        AimEndFrame();                       // повтор оси перед концом кадра
         float eYaw = 0.f, ePitch = 0.f;
         float baseYaw = g_game.camYaw(), basePitch = g_game.camPitch();
-        if (mode == AIM_MODE_SILENT) axisAngles(baseYaw, basePitch);
         errFrom(baseYaw, basePitch, eYaw, ePitch);
         r.errAfterAim = fabsf(eYaw);
 
         for (int f = 0; f < 5; ++f) g_game.frame();   // 5 кадров игры на кадр оверлея
         baseYaw = g_game.camYaw(); basePitch = g_game.camPitch();
-        if (mode == AIM_MODE_SILENT) axisAngles(baseYaw, basePitch);
         errFrom(baseYaw, basePitch, eYaw, ePitch);
         if (havePrev && prevYawErr * eYaw < 0.f) ++r.signFlips;
         prevYawErr = eYaw; havePrev = true;
@@ -314,7 +291,6 @@ static void resetGame() {
     g_boxes.clear();
     g_haveCamAxis = true;
     g_garbageCam = 0.f;
-    g_patchOn = false; g_patchActive = false;
     g_toasts = 0;
     s_memDiag = AimMemDiag{};
 }
@@ -368,124 +344,38 @@ int main() {
         check(r.toasts >= 1, "пользователю сказали, почему режим молчит");
     }
 
-    // D. «Сайлент»: ось выстрела доворачивается, камера стоит.
+    // P. Дрожь точки прицела. Кость головы дышит: прочитанная точка ходит на
+    // сантиметры, на дистанции это доли градуса. Раньше упреждение считалось
+    // по сырому приросту за кадр, а он у дрожащей кости каждый кадр другого
+    // знака — прицел получал рывок в полный размах дрожи плюс столько же
+    // вперёд, то есть дрожь удваивалась. Это и была жалоба «мемори трясётся».
+    // Мера: камера обязана ходить МЕНЬШЕ самой дрожи, а не повторять её.
     {
         resetGame();
         g_targetYaw = 8.f; g_targetPitch = 4.f;
-        Result r = run(AIM_MODE_SILENT, 60);
-        const float axisLen = sqrtf(g_game.ax * g_game.ax + g_game.ay * g_game.ay + g_game.az * g_game.az);
-        printf("САЙЛЕНТ: кадров %d, остаток %.2f°, отклонение %.1f°, длина оси %.4f, "
-               "поворот камеры %.2f°\n",
-               r.frames, r.errAfterAim, AimMemoryDiag().dev, axisLen, g_game.camYaw());
-        check(r.errAfterAim < 0.5f, "ось выстрела смотрит в цель");
-        check(fabsf(axisLen - 1.f) < 1e-3f, "ось осталась единичной");
-        check(r.errAfterGame > 1.f, "кадр игры ось себе вернул (гонка смоделирована)");
-        check(fabsf(g_game.camYaw()) < 1e-3f, "камера не двигалась (silent)");
-        check(AimMemoryDiag().dev < 15.f, "отклонение в пределах нормы");
+        run(AIM_MODE_MEMORY, 40);                    // сначала даём сойтись
+        const float amps[2] = { 0.15f, 0.4f };       // «дышит» и «трясётся»
+        for (float amp : amps) {
+            float prev = g_game.camYaw();
+            float maxStep = 0.f;
+            for (int i = 0; i < 90; ++i) {
+                g_targetYaw = 8.f + ((i & 1) ? amp : -amp);
+                run(AIM_MODE_MEMORY, 1);
+                const float step = fabsf(g_game.camYaw() - prev);
+                if (step > maxStep) maxStep = step;
+                prev = g_game.camYaw();
+            }
+            printf("ДРОЖЬ цели ±%.2f°: камера ходит не больше %.3f° за кадр\n", amp, maxStep);
+            check(maxStep < amp, "камера ходит меньше, чем дрожит цель");
+        }
     }
 
-    // E. «Сайлент» с целью за пределами отклонения: ось упирается в предел.
-    {
-        resetGame();
-        g_targetYaw = 60.f; g_targetPitch = 0.f;
-        Result r = run(AIM_MODE_SILENT, 60);
-        printf("САЙЛЕНТ цель 60°: отклонение %.1f°, остаток %.1f°, длина оси %.4f\n",
-               AimMemoryDiag().dev, r.errAfterAim,
-               sqrtf(g_game.ax * g_game.ax + g_game.ay * g_game.ay + g_game.az * g_game.az));
-        check(AimMemoryDiag().dev <= 35.5f, "отклонение зажато пределом (35°)");
-        check(AimMemoryDiag().dev > 30.f, "ось всё же довёрнута к цели");
-        check(std::isfinite(g_game.ax) && std::isfinite(g_game.ay) && std::isfinite(g_game.az),
-              "ось не испортилась");
-    }
-
-    // F. «Сайлент» долго: отклонение не копится, кадр за кадром ось свежая.
-    {
-        resetGame();
-        g_targetYaw = 8.f; g_targetPitch = 4.f;
-        Result r = run(AIM_MODE_SILENT, 300);
-        printf("САЙЛЕНТ 300 кадров: отклонение %.1f°, остаток %.2f°, смен знака %d\n",
-               AimMemoryDiag().dev, r.errAfterAim, r.signFlips);
-        check(AimMemoryDiag().dev <= 35.5f, "отклонение не накопилось за предел");
-        check(r.errAfterAim < 0.5f, "ось каждый кадр доворачивается заново");
-        check(std::isfinite(g_game.ay), "ось не испортилась");
-    }
-
-    // L. «Сайлент» С ПЕРЕХВАТОМ сеттера: ось ведёт патч, камера стоит, а
-    //    предел отклонения считается от камеры (иначе ось отклеилась бы и
-    //    встала клином на пределе — перехват подменяет ВСЕ записи игры).
-    {
-        resetGame();
-        g_patchOn = true;
-        g_targetYaw = 25.f; g_targetPitch = 0.f;
-        Result r = run(AIM_MODE_SILENT, 60);
-        float ay = 0.f, ap = 0.f; axisAngles(ay, ap);
-        printf("САЙЛЕНТ с перехватом: остаток %.2f°, ось %.1f°, камера %.1f°, "
-               "отклонение %.1f°\n", r.errAfterAim, ay, g_game.camYaw(),
-               AimMemoryDiag().dev);
-        check(g_patchActive, "перехват включён");
-        check(r.errAfterAim < 0.5f, "ось довёрнута к цели");
-        check(fabsf(ay - 25.f) < 0.5f, "ось смотрит на цель (25°)");
-        check(fabsf(g_game.camYaw()) < 1e-3f, "камера не двигалась");
-        check(fabsf(AimMemoryDiag().dev - 25.f) < 0.5f,
-              "отклонение посчитано от камеры, а не накоплено");
-
-        // Игрок повернул камеру на 10°: ось обязана поехать вместе с целью,
-        // а не остаться там, где её оставил патч.
-        g_game.accY += 10.f;
-        run(AIM_MODE_SILENT, 5);
-        axisAngles(ay, ap);
-        printf("  игрок повернул на 10°: ось %.1f°, отклонение %.1f°\n",
-               ay, AimMemoryDiag().dev);
-        check(fabsf(ay - 25.f) < 0.5f, "ось осталась на цели, а не на старом месте");
-        check(fabsf(AimMemoryDiag().dev - 15.f) < 0.5f,
-              "отклонение пересчиталось от новой камеры (15°)");
-    }
-
-    // M. «Сайлент» с перехватом и целью за пределом: предел тот же 35°.
-    {
-        resetGame();
-        g_patchOn = true;
-        g_targetYaw = 60.f; g_targetPitch = 0.f;
-        Result r = run(AIM_MODE_SILENT, 60);
-        float ay = 0.f, ap = 0.f; axisAngles(ay, ap);
-        printf("САЙЛЕНТ с перехватом, цель 60°: ось %.1f°, отклонение %.1f°, "
-               "остаток %.1f°\n", ay, AimMemoryDiag().dev, r.errAfterAim);
-        check(fabsf(ay - 35.f) < 0.5f, "ось уперлась в предел отклонения (35°)");
-        check(AimMemoryDiag().dev <= 35.5f, "предел не превышен");
-        check(std::isfinite(g_game.ax) && std::isfinite(g_game.ay), "ось не испортилась");
-    }
-
-    // N. «Сайлент» с перехватом, но камеру не читаем: патч выключается, и
-    //    ось остаётся игре (иначе она уедет без всякого предела).
-    {
-        resetGame();
-        g_patchOn = true;
-        g_haveCamAxis = false;
-        g_targetYaw = 25.f; g_targetPitch = 0.f;
-        Result r = run(AIM_MODE_SILENT, 30);
-        printf("САЙЛЕНТ с перехватом без камеры: записей %d, ось %.1f°\n",
-               r.writes, atan2f(g_game.ax, g_game.az) * kRad2Deg);
-        check(!g_patchActive, "перехват выключен — ось ведёт игра");
-        check(r.writes > 0, "записи оси пошли старым путём");
-    }
-
-    // G. «Сайлент» без оси выстрела: записи нет, ось отдана игре.
-    {
-        resetGame();
-        g_game.haveAxis = false;
-        Result r = run(AIM_MODE_SILENT, 30);
-        printf("САЙЛЕНТ без оси: записей %d, отказов %d, тостов %d\n", r.writes, r.fails, r.toasts);
-        check(r.writes == 0, "записей нет");
-        check(fabsf(g_game.camYaw()) < 1e-3f, "камера не двигалась");
-        check(r.toasts >= 1, "пользователю сказали, почему режим молчит");
-    }
-
-    // H. Выключенный аим ничего не пишет ни в одном режиме.
+    // H. Выключенный аим ничего не пишет.
     {
         resetGame();
         g_state.aim_touch = false;
-        Result r = run(AIM_MODE_SILENT, 30);
-        check(r.writes == 0, "с выключенным аимом ось отдана игре");
+        Result r = run(AIM_MODE_MEMORY, 30);
+        check(r.writes == 0, "с выключенным аимом камера не трогается");
     }
 
     // K. Рейдж: цель идёт через прицел — камера должна вести её, а не догонять.
@@ -501,7 +391,7 @@ int main() {
             g_targetYaw = 0.5f * (float)i;           // цель идёт 30°/с при 60 fps
             snapshot();
             UpdateAim(0.016f);
-            AimEndFrame();
+
             g_game.frame();                          // кадр игры применил накопитель
             float eYaw = 0.f, ePitch = 0.f;
             errFrom(g_game.camYaw(), g_game.camPitch(), eYaw, ePitch);
@@ -527,14 +417,14 @@ int main() {
     {
         resetGame();
         g_targetYaw = 8.f; g_targetPitch = 4.f;
-        run(AIM_MODE_SILENT, 5);                 // чтобы упреждение развернулось
+        run(AIM_MODE_MEMORY, 5);                  // чтобы упреждение развернулось
 
         const float junk[3] = { 3.4e38f, INFINITY, -INFINITY };
         int hung = 0;
         for (float j : junk) {
             g_garbageCam = j;
             auto fut = std::async(std::launch::async, [] {
-                snapshot(); UpdateAim(0.08f); AimEndFrame();
+                snapshot(); UpdateAim(0.08f);
             });
             if (fut.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
                 ++hung;

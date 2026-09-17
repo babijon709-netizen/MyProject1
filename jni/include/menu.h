@@ -10,5 +10,9 @@
 extern int g_calibMode;
 
 void RenderMenu();
+// Фрикам: держит камеру в полёте и рисует органы управления поверх игры.
+// Зовётся каждый кадр из главного цикла (все записи в память — на потоке
+// отрисовки, как и остальные).
+void UpdateFreecam(float dt);
 void LoadTabIcons();
 void CenterMenuOnDisplay();

@@ -13,7 +13,6 @@
 #include "config.h"
 #include "logfile.h"
 #include "theme.h"
-#include "silent_patch.h"       // патч кода игры: снять перед выходом
 #include "app_state.h"
 #include <atomic>
 #include <chrono>
@@ -100,7 +99,8 @@ int main(int argc, char* argv[]) {
         UpdateFarm(ImGui::GetIO().DeltaTime);
         LogStage(kStageMenu);
         RenderMenu();
-        AimEndFrame();        // повтор оси выстрела перед самым концом кадра
+        LogStage(kStageFreecam);
+        UpdateFreecam(ImGui::GetIO().DeltaTime);   // фрикам: полёт камеры
         LogStage(kStageFrameEnd);
         drawEnd();
         LogFrameBeat(frame);
@@ -108,9 +108,9 @@ int main(int argc, char* argv[]) {
     }
     LogClose();
     while (!g_frame_done.load()) {}
-    // Код игры возвращаем ДО отвязки: пока патч висит, сеттер оси прыгает в
-    // нашу страницу, а мы её сейчас освободим.
-    SilentPatchRestore();
+    // Камеру возвращаем на место ДО отвязки: во фрикаме она улетела от тела,
+    // а после выхода чита возвращать её уже некому.
+    esp_freecam_set(false);
     stop_attach_thread();
     process_detach();
     Blur::Free();

@@ -56,6 +56,7 @@ const char* stage_name(int stage) {
         case kStageAimTouch:   return "инъекция касания";
         case kStageFarm:       return "автофарм";
         case kStageMenu:       return "меню";
+        case kStageFreecam:    return "фрикам";
         case kStageFrameEnd:   return "конец кадра";
         default:               return "вне кадра";
     }

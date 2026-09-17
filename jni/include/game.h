@@ -278,7 +278,6 @@ bool        esp_aim_camera_angles(float& yaw_deg, float& pitch_deg);
 // базис из матрицы вида. Нужны сайленту с перехватом сеттера: пока перехват
 // стоит, ось выстрела — наша же запись, и мерить по ней нельзя (получится
 // наше же направление, а не то, куда смотрит игрок).
-bool        esp_camera_pose_angles(float& yaw_deg, float& pitch_deg);
 // Diagnostic: bit 0 camera pose known, bit 1 reserved (never set), bit 2 firing
 // reference in use. See esp_camera_state() in game.cpp.
 int         esp_camera_state();
@@ -363,6 +362,19 @@ bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z);
 // дальность луча. false — ось не нашлась (нет игрока/хендлера/привязки).
 bool esp_mem_aim_write_fire_dir(float x, float y, float z);
 
+// ---- Фрикам ---------------------------------------------------------------
+// Камера отделяется от тела и летает сквозь стены: пишем локальную позицию
+// трансформа камеры, игра сама разворачивает её в мировую каждый кадр (подробно
+// — в game.cpp, раздел «Фрикам»). Тело при этом остаётся на месте, поэтому
+// для сервера ничего не меняется: это только обзор со стороны.
+//
+// esp_freecam_set(true) запоминает текущую позицию камеры, false — возвращает
+// её на место (и по выходу из чита это делается само).
+bool esp_freecam_set(bool on);
+bool esp_freecam_active();
+// Сдвинуть камеру на метры: вперёд/назад вдоль взгляда (без наклона), вправо
+// и вверх по мировой вертикали.
+bool esp_freecam_move(float forward, float right, float up);
+
 // Адрес, по которому загружен libil2cpp.so в процессы игры (0 — ещё не
-// привязались). Нужен, чтобы патчить код игры по RVA.
-uint64_t Il2CppBase();
+// привязались).

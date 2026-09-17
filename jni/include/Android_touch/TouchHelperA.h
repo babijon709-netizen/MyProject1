@@ -27,3 +27,6 @@ bool Touch_CanInject();
 // цикла оверлея снимает их раз в кадр и считает разницу — по ним видно, сколько
 // лага приносит инъекция касаний, а не чтение памяти игры.
 void Touch_UploadStats(unsigned long long& calls, double& ms, unsigned long long& skipped);
+// Касания внутри прямоугольника (в координатах ImGui, то есть в пикселях
+// оверлея) не уходят в игру: их забирает оверлей. on=false — выключить.
+void Touch_BlockRect(bool on, float x0, float y0, float x1, float y1);

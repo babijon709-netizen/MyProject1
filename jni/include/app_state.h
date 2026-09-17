@@ -47,6 +47,10 @@ struct AppState {
     // Иксрей: визуально срезает мир вокруг игрока (0 = выкл), метры.
     bool  xray_on = false;
     float xray_range = 5.f;
+    // Фрикам: камера отделяется от тела и летает сквозь стены — обзор базы
+    // перед рейдом. Скорость в м/с; пока включён, аим молчит (см. AimBegin).
+    bool  freecam_on = false;
+    float freecam_speed = 12.f;
     // ui_fps выключен навсегда (счётчик убран), рамки карточек — всегда вкл.
     bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = true;
     // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
@@ -67,8 +71,9 @@ struct AppState {
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
     float a_xray_on = 0;
+    float a_freecam_on = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam;
 };
 extern AppState g_state;
 extern std::atomic<bool> main_thread_flag;   // false = выход из main()

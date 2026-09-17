@@ -50,7 +50,7 @@ for f in jni/src/main.cpp \
          "$TMP/audio_hostcheck.cpp" \
          jni/src/theme.cpp jni/src/process.cpp jni/src/hud.cpp jni/src/esp_draw.cpp \
          jni/src/aim.cpp jni/src/farm.cpp jni/src/widgets.cpp jni/src/menu.cpp \
-         jni/src/config.cpp jni/src/silent_patch.cpp \
+         jni/src/config.cpp \
          jni/src/VidAvatar.cpp jni/src/game.cpp jni/src/game_markers.cpp \
          jni/src/game_farm.cpp jni/src/logfile.cpp jni/src/lang.cpp; do
     # shellcheck disable=SC2086
@@ -68,7 +68,7 @@ rm -rf "$BUILD" && mkdir -p "$BUILD"
 # shellcheck disable=SC2086
 CPP_TUS="jni/src/main.cpp $TMP/audio_hostcheck.cpp jni/src/theme.cpp jni/src/process.cpp \
 jni/src/hud.cpp jni/src/esp_draw.cpp jni/src/aim.cpp jni/src/farm.cpp \
-jni/src/widgets.cpp jni/src/menu.cpp jni/src/config.cpp jni/src/silent_patch.cpp \
+jni/src/widgets.cpp jni/src/menu.cpp jni/src/config.cpp \
 jni/src/VidAvatar.cpp \
 jni/src/game.cpp jni/src/game_markers.cpp jni/src/game_farm.cpp jni/src/logfile.cpp \
 jni/src/lang.cpp \

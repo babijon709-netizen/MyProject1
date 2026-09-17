@@ -110,7 +110,7 @@ float TabContent(int tab, float dt, float cW) {
             const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
             const bool touchMode = (g_state.aim_mode == AIM_MODE_TOUCH);
             // Тачу состояние показывать нечего: у него нет записи в память.
-            CardBg(rowH * (touchMode ? 3.f : 4.f));
+            CardBg(rowH * (touchMode ? 2.f : 3.f));
 
             auto modeRow = [&](const char* id, const char* lbl, int mode, bool last, float& anim) {
                 auto pos = ImGui::GetCursorScreenPos();
@@ -138,9 +138,8 @@ float TabContent(int tab, float dt, float cW) {
                     dl->AddLine({cX + padX, pos.y + rowH - 0.5f},
                                 {cX + cW - padX, pos.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
             };
-            modeRow("##am0", XS("Тач"),     AIM_MODE_TOUCH,  false,     g_state.a_aim_mode0);
-            modeRow("##am1", XS("Память"),  AIM_MODE_MEMORY, false,     g_state.a_aim_mode1);
-            modeRow("##am2", XS("Сайлент"), AIM_MODE_SILENT, touchMode, g_state.a_aim_mode2);
+            modeRow("##am0", XS("Тач"),    AIM_MODE_TOUCH,  false,     g_state.a_aim_mode0);
+            modeRow("##am1", XS("Память"), AIM_MODE_MEMORY, touchMode, g_state.a_aim_mode1);
 
             // Состояние записи в память. Без него на устройстве не отличить
             // «объект не нашёлся» от «пишем, но игра перезаписывает поле
@@ -152,14 +151,9 @@ float TabContent(int tab, float dt, float cW) {
                 ImGui::InvisibleButton("##amst", {avW, rowH});
                 const AimMemDiag& d = AimMemoryDiag();
                 char val[32];
-                if (g_state.aim_mode == AIM_MODE_SILENT) {
-                    if (!d.axis) snprintf(val, sizeof(val), "%s", XS("нет оси"));
-                    else         snprintf(val, sizeof(val), XS("%.0f°"), d.dev);
-                } else {
-                    if (!d.params)          snprintf(val, sizeof(val), "%s", XS("нет объекта"));
-                    else if (!d.responded)  snprintf(val, sizeof(val), "%s", XS("нет отклика"));
-                    else                    snprintf(val, sizeof(val), "%s", XS("ведёт"));
-                }
+                if (!d.params)          snprintf(val, sizeof(val), "%s", XS("нет объекта"));
+                else if (!d.responded)  snprintf(val, sizeof(val), "%s", XS("нет отклика"));
+                else                    snprintf(val, sizeof(val), "%s", XS("ведёт"));
                 auto vsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, val);
                 dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f},
                             C::UA(C::Txt(), 1.f), XS("Состояние"));
@@ -732,6 +726,15 @@ float TabContent(int tab, float dt, float cW) {
         SliderRow("##xr1", XS("Дальность"), &g_state.xray_range,
                   1.f, 50.f, XS("%.0f м"), true, false, g_state.sl_xray, dt);
 
+        // Фрикам: камера отделяется от тела и летает сквозь стены — обзор
+        // базы перед рейдом. Пока он включён, аим молчит: точка прицела
+        // считается от глаза персонажа, а камера улетела от него.
+        SHdr(XS("Фрикам"));
+        CardBg(Layout::RowH + Layout::SliderH);
+        ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
+        SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
+                  1.f, 60.f, XS("%.0f м/с"), true, false, g_state.sl_freecam, dt);
+
         // Всегда день: время суток каждую секунду возвращается в полдень.
         SHdr(XS("Мир"));
         CardBg(Layout::RowH);
@@ -910,6 +913,124 @@ static void TrafficLight(ImVec2 winPos, float railW) {
     }
 }
 
+// ====================== Фрикам: управление полётом ========================
+//
+// Пока функция включена, поверх игры лежит джойстик (вперёд/назад, влево/
+// вправо) и две кнопки высоты. Оверлей видит только ОДИН палец: состояние мыши
+// ImGui ведёт поток чтения тачскрина (Android_touch/TouchHelperA.cpp), а он
+// берёт последний слот. Поэтому управление сделано так, чтобы одного пальца
+// хватало: джойстик даёт две оси сразу, высоту меняют отдельными кнопками.
+//
+// Касания внутри панели в игру не уходят (Touch_BlockRect): иначе палец на
+// джойстике ещё и ходил бы персонажем, а камера во фрикаме привязана к телу и
+// поехала бы вместе с ним.
+static float  s_fc_retry = 0.f;
+static bool   s_fc_toasted = false;
+
+void UpdateFreecam(float dt) {
+    // Переключатель -> в игру. Включение может не выйти сразу (камера ещё не
+    // найдена), поэтому пробуем раз в полсекунды, а не каждый кадр — иначе лог
+    // забивался бы однотипными отказами.
+    if (g_state.freecam_on != esp_freecam_active()) {
+        s_fc_retry -= dt;
+        if (s_fc_retry <= 0.f) {
+            s_fc_retry = 0.5f;
+            if (esp_freecam_set(g_state.freecam_on)) {
+                s_fc_toasted = false;
+                if (g_state.freecam_on) ShowToast(XS("Фрикам включён"));
+            } else if (g_state.freecam_on && !s_fc_toasted) {
+                s_fc_toasted = true;
+                ShowToast(XS("Фрикам: камера не найдена"));
+            }
+        }
+    } else {
+        s_fc_retry = 0.f;
+        s_fc_toasted = false;
+    }
+    if (!esp_freecam_active()) { Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f); return; }
+
+    ImGuiIO& io = ImGui::GetIO();
+    const float sw = io.DisplaySize.x, sh = io.DisplaySize.y;
+    if (sw < 100.f || sh < 100.f) return;
+
+    // Панель слева, на уровне большого пальца: выше джойстика движения, ниже
+    // верхней строки интерфейса игры.
+    const float R  = fminf(sw, sh) * 0.10f;          // радиус джойстика
+    const float bw = R * 1.25f, bh = R * 0.62f;      // кнопки высоты
+    const float x0 = 14.f;
+    const float y0 = sh * 0.52f;
+    const float w  = R * 2.f + 10.f + bw;
+    const float h  = R * 2.f;
+    const float cx = x0 + R, cy = y0 + R;
+
+    Touch_BlockRect(true, x0 - 6.f, y0 - 6.f, x0 + w + 6.f, y0 + h + 6.f);
+
+    ImGui::SetNextWindowPos({x0 - 6.f, y0 - 6.f});
+    ImGui::SetNextWindowSize({w + 12.f, h + 12.f});
+    ImGui::Begin("##freecam", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
+                 ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetCursorScreenPos({x0, y0});
+
+    auto* dl = ImGui::GetWindowDrawList();
+    auto* fn = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize() * 0.95f;
+
+    // ---- джойстик ----
+    float ax = 0.f, ay = 0.f;
+    ImGui::SetCursorScreenPos({x0, y0});
+    ImGui::InvisibleButton("##fc_joy", {R * 2.f, R * 2.f});
+    if (ImGui::IsItemActive()) {
+        const ImVec2 d = {io.MousePos.x - cx, io.MousePos.y - cy};
+        const float len = sqrtf(d.x * d.x + d.y * d.y);
+        if (len > 6.f) {
+            const float k = (len > R ? R / len : 1.f);
+            ax = (d.x * k) / R;
+            ay = (-d.y * k) / R;          // палец выше центра — летим вперёд
+        }
+    }
+    {
+        const ImU32 ring = C::UA(C::Dim(), 0.85f);
+        const ImU32 knob = C::UA(C::Acc(), ImGui::IsItemActive() ? 1.f : 0.75f);
+        dl->AddCircle({cx, cy}, R, ring, 24, 2.f);
+        dl->AddCircleFilled({cx + ax * R * 0.62f, cy - ay * R * 0.62f}, R * 0.30f, knob, 24);
+        const char* hz = XS("Вперёд");
+        const auto tsz = fn->CalcTextSizeA(fs * 0.85f, FLT_MAX, 0, hz);
+        dl->AddText(fn, fs * 0.85f, {cx - tsz.x * 0.5f, y0 - fs * 1.1f}, C::UA(C::Dim(), 1.f), hz);
+    }
+
+    // ---- высота ----
+    const float bx = x0 + R * 2.f + 10.f;
+    float up = 0.f;
+    auto holdBtn = [&](const char* id, const char* label, float by, bool& held) {
+        ImGui::SetCursorScreenPos({bx, by});
+        ImGui::InvisibleButton(id, {bw, bh});
+        held = ImGui::IsItemActive();
+        const ImU32 col = C::UA(held ? C::Acc() : C::Card(), held ? 0.95f : 0.75f);
+        dl->AddRectFilled({bx, by}, {bx + bw, by + bh}, col, R * 0.25f);
+        dl->AddRect({bx, by}, {bx + bw, by + bh}, C::UA(C::Sep(), 1.f), R * 0.25f, 0, 1.f);
+        const auto tsz = fn->CalcTextSizeA(fs * 0.85f, FLT_MAX, 0, label);
+        dl->AddText(fn, fs * 0.85f,
+                    {bx + (bw - tsz.x) * 0.5f, by + (bh - tsz.y) * 0.5f},
+                    C::UA(held ? C::Bg() : C::Txt(), 1.f), label);
+    };
+    bool hUp = false, hDn = false;
+    holdBtn("##fc_up", XS("Вверх"), y0 + R * 0.15f, hUp);
+    holdBtn("##fc_dn", XS("Вниз"),  y0 + R * 1.05f, hDn);
+    if (hUp) up += 1.f;
+    if (hDn) up -= 1.f;
+
+    ImGui::End();
+
+    // ---- полёт ----
+    float speed = g_state.freecam_speed;
+    if (!(speed >= 1.f)) speed = 1.f;
+    if (speed > 60.f) speed = 60.f;
+    const float step = speed * dt;
+    if (ax != 0.f || ay != 0.f || up != 0.f) esp_freecam_move(ay * step, ax * step, up * step);
+}
+
 void RenderMenu() {
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
@@ -950,7 +1071,6 @@ void RenderMenu() {
     Tick(g_state.a_aim_pr2,    g_state.aim_priority == 2,  dt);
     Tick(g_state.a_aim_mode0,  g_state.aim_mode == AIM_MODE_TOUCH,  dt);
     Tick(g_state.a_aim_mode1,  g_state.aim_mode == AIM_MODE_MEMORY, dt);
-    Tick(g_state.a_aim_mode2,  g_state.aim_mode == AIM_MODE_SILENT, dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
     Tick(g_state.a_ui_dark,    g_state.ui_dark_mode,       dt);

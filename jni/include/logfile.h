@@ -27,6 +27,7 @@ enum LogStageId {
     kStageAimTouch,        // инъекция касания
     kStageFarm,            // автофарм
     kStageMenu,            // отрисовка меню
+    kStageFreecam,         // фрикам: полёт камеры
     kStageFrameEnd,        // конец кадра (смена буфера)
     kStageCount
 };

@@ -34,6 +34,8 @@ static float screenHeight = 0, screenWidth = 0;
 
 struct touchObj {
     bool isDown = false;
+    // Касание забрал оверлей: в игру оно не уходит (см. Touch_BlockRect).
+    bool blocked = false;
     int x = 0;
     int y = 0;
     int id = 0;
@@ -54,6 +56,19 @@ static struct {
 static targ targF[maxE];
 
 static touchObj Finger[maxE][maxF];
+
+// Прямоугольник экрана, касания внутри которого оверлей забирает себе: в игру
+// они не уходят вовсе. Нужен фрикаму — его джойстик лежит поверх игры, и без
+// этого палец на нём ещё и ходил бы персонажем, а камера во фрикаме привязана
+// к телу и поехала бы вместе с ним. Пока прямоугольник не задан, поведение
+// ровно прежнее: ни один палец не блокируется.
+static bool  g_block_on = false;
+static float g_block_x0 = 0.f, g_block_y0 = 0.f, g_block_x1 = 0.f, g_block_y1 = 0.f;
+
+void Touch_BlockRect(bool on, float x0, float y0, float x1, float y1) {
+    g_block_on = on;
+    g_block_x0 = x0; g_block_y0 = y0; g_block_x1 = x1; g_block_y1 = y1;
+}
 
 static int fdNum = 0, origfd[maxE], nowfd;
 
@@ -147,7 +162,7 @@ static void Upload() {
     int tmpCnt = 0, tmpCnt2 = 0, i, j;
     for (i = 0; i < fdNum; i++) {
         for (j = 0; j < maxF; j++) {
-            if (Finger[i][j].isDown) {
+            if (Finger[i][j].isDown && !Finger[i][j].blocked) {
                 if (tmpCnt2++ > 10) {
                     goto finish;
                 }
@@ -345,8 +360,12 @@ static void *TypeA(void *arg) {
                     }
                     io.MousePos = {x, y};
                     io.MouseDown[0] = true;
+                    Finger[i][latest].blocked = g_block_on && x >= g_block_x0 &&
+                                                x <= g_block_x1 && y >= g_block_y0 &&
+                                                y <= g_block_y1;
                 } else {
                     io.MouseDown[0] = false;
+                    Finger[i][latest].blocked = false;
                 }
                 if (!Touch_readOnly) {
                     Upload();

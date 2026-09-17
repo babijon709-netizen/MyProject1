@@ -96,8 +96,13 @@ void esp_set_xray(float meters) {
     g_xray_meters = meters;
 }
 
+// Нативный указатель камеры последнего кадра: его находит esp_get_boxes, а
+// фрикаму нужен трансформ камеры, чтобы двигать её.
+static uint64_t g_native_camera = 0;
+
 static void xray_apply(uint64_t native_cam) {
     if (!native_cam) return;
+    g_native_camera = native_cam;   // фрикам берёт отсюда трансформ камеры
     if (g_xray_meters > 0.05F) {
         if (g_xray_cam != native_cam || !g_xray_saved_valid) {
             // Другая камера: вернуть клип прежней, запомнить клип новой.
@@ -1029,6 +1034,222 @@ bool read_transform_hierarchy_layout(uint64_t native_transform, const TransformH
 }
 
 
+// ==== Фрикам: камера летит отдельно от тела ================================
+//
+// Зачем. Перед рейдом надо знать, что внутри базы: где шкафы, где стены в два
+// слоя, откуда заходить. Телом сквозь стены летать нельзя — сервер такой
+// телепорт не простит, — поэтому отделяем только камеру: мир рисуется с нового
+// места, персонаж остаётся стоять где стоял.
+//
+// Почему пишем ЛОКАЛЬНУЮ позицию трансформа, а не мировую. Unity хранит в
+// иерархии локальные TRS (matrices[]) и каждый кадр сам разворачивает их в
+// мировые матрицы. Значит:
+//   * локальное смещение, записанное один раз, игра подхватывает и
+//     пересчитывает сама — камера летит ровно, без нашей записи каждый кадр;
+//   * мировую позицию игра затёрла бы в следующем же кадре, и камеру
+//     колбасило бы между нашим местом и телом.
+// Проверено по дампам (tools/offsets): ни MouseLook.ZJo, ни
+// CustomCharacterController.Update сеттеры позиции трансформа не вызывают.
+//
+// Держим позицию в мировых координатах, а перед записью пересчитываем в
+// локальные относительно родителя камеры.
+static bool     g_freecam_on = false;
+static bool     g_freecam_saved_ok = false;
+static Vec3     g_freecam_saved{};        // локальная позиция камеры до включения
+static Vec3     g_freecam_pos{};          // где камера сейчас (мировые)
+static uint64_t g_freecam_transform = 0;
+static uint64_t g_freecam_matrices = 0;   // базы массивов иерархии камеры
+static uint64_t g_freecam_indices = 0;
+static int32_t  g_freecam_index = -1;
+
+static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_t index,
+                                     Vec3& pos, Vec4& rot, Vec3& scale);
+
+// Базы массивов иерархии для трансформа. Кандидатов несколько (раскладку
+// учит скан по игрокам, а он живёт до перезагрузки мира), поэтому каждый
+// проверяем: мировая позиция, посчитанная по этому кандидату, должна
+// совпасть с той, что игра отдала для камеры. Иначе легко записать камеру
+// не в ту ячейку — и получить «фрикам не работает» без всяких ошибок.
+static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matrices,
+                                     uint64_t& indices, int32_t& index) {
+    if (!native_transform) return false;
+    uint64_t cand_m[8] = {}; uint64_t cand_n[8] = {}; int32_t cand_i[8] = {};
+    int count = 0;
+
+    auto add = [&](uint64_t data, int32_t idx, uint64_t m_off, uint64_t n_off) {
+        if (!data || idx < 0 || idx > 100000 || count >= 8) return;
+        uint64_t m = rd_ptr(data + m_off);
+        uint64_t n = rd_ptr(data + n_off);
+        if (m && n) { cand_m[count] = m; cand_n[count] = n; cand_i[count] = idx; ++count; }
+    };
+    if (g_transform_hierarchy_layout_valid) {
+        const TransformHierarchyLayout& L = g_transform_hierarchy_layout;
+        uint64_t data = rd_ptr(native_transform + L.data_offset);
+        int32_t  idx  = rd<int32_t>(native_transform + L.index_offset);
+        add(data, idx, L.matrices_offset, L.indices_offset);
+        if (L.matrices_indirect && count) cand_m[count - 1] = rd_ptr(cand_m[count - 1]);
+        if (L.indices_indirect && count) cand_n[count - 1] = rd_ptr(cand_n[count - 1]);
+    }
+    uint64_t data = rd_ptr(native_transform + 0x38);
+    int32_t  idx  = rd<int32_t>(native_transform + 0x40);
+    if (!data || idx < 0 || idx > 100000) {
+        data = rd_ptr(native_transform + 0x18);
+        idx  = rd<int32_t>(native_transform + 0x20);
+    }
+    add(data, idx, 0x18, 0x20);
+    add(data, idx, 0x08, 0x10);
+
+    const bool know_cam = g_cam_pose_valid && vec3_is_finite(g_cam_pos);
+    for (int k = 0; k < count; ++k) {
+        Matrix34 m{};
+        if (!rd_exact(cand_m[k] + (uint64_t)cand_i[k] * sizeof(Matrix34), m)) continue;
+        if (!matrix34_is_valid(m)) continue;
+        if (!know_cam) { matrices = cand_m[k]; indices = cand_n[k]; index = cand_i[k]; return true; }
+        Vec3 pos{}, scale{};
+        Vec4 rot{};
+        if (!read_transform_world_trs(cand_m[k], cand_n[k], cand_i[k], pos, rot, scale)) continue;
+        const float dx = pos.x - g_cam_pos.x, dy = pos.y - g_cam_pos.y, dz = pos.z - g_cam_pos.z;
+        if (dx * dx + dy * dy + dz * dz < 0.25F) {   // 0.5 м — тот самый трансформ
+            matrices = cand_m[k]; indices = cand_n[k]; index = cand_i[k];
+            return true;
+        }
+    }
+    return false;
+}
+
+// Мировая TRS трансформа: идём вверх по родителям, как это делает Unity.
+static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_t index,
+                                     Vec3& pos, Vec4& rot, Vec3& scale) {
+    if (!matrices || !indices || index < 0 || index > 100000) return false;
+    Matrix34 m{};
+    if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), m)) return false;
+    if (!matrix34_is_valid(m)) return false;
+    pos = {m.translation.x, m.translation.y, m.translation.z};
+    rot = m.rotation;
+    scale = {m.scale.x, m.scale.y, m.scale.z};
+    int32_t parent = -2, previous = index;
+    if (!rd_exact(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
+    int depth = 0;
+    while (parent >= 0 && depth++ < 128) {
+        if (parent > 100000 || parent == previous) return false;
+        Matrix34 p{};
+        if (!rd_exact(matrices + (uint64_t)parent * sizeof(Matrix34), p)) return false;
+        if (!matrix34_is_valid(p)) return false;
+        // world = parentWorld * local (Unity: сначала масштаб, потом поворот,
+        // потом перенос)
+        Vec3 scaled = {pos.x * p.scale.x, pos.y * p.scale.y, pos.z * p.scale.z};
+        Vec3 turned = rotate_vector(p.rotation, scaled);
+        pos = {p.translation.x + turned.x, p.translation.y + turned.y, p.translation.z + turned.z};
+        rot = multiply_quaternion(p.rotation, rot);
+        scale = {p.scale.x * scale.x, p.scale.y * scale.y, p.scale.z * scale.z};
+        previous = parent;
+        if (!rd_exact(indices + (uint64_t)parent * sizeof(int32_t), parent)) return false;
+    }
+    if (parent != -1 || depth >= 128) return false;
+    return vec3_is_finite(pos) && std::isfinite(scale.x) && scale.x > 1e-6F;
+}
+
+// Мировую позицию -> локальную, с учётом родителя камеры.
+static bool transform_world_to_local(uint64_t matrices, uint64_t indices, int32_t index,
+                                     const Vec3& world, Vec3& local) {
+    int32_t parent = -2;
+    if (!rd_exact(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
+    if (parent < 0) { local = world; return true; }
+    Vec3 pPos{}, pScale{};
+    Vec4 pRot{};
+    if (!read_transform_world_trs(matrices, indices, parent, pPos, pRot, pScale)) return false;
+    const Vec3 d = {world.x - pPos.x, world.y - pPos.y, world.z - pPos.z};
+    // поворот назад: сопряжённый кватернион (направление нормализовано)
+    Vec4 inv = pRot;
+    const float len = sqrtf(inv.x * inv.x + inv.y * inv.y + inv.z * inv.z + inv.w * inv.w);
+    if (!(len > 1e-6F)) return false;
+    inv.x = -inv.x / len; inv.y = -inv.y / len; inv.z = -inv.z / len; inv.w = inv.w / len;
+    const Vec3 turned = rotate_vector(inv, d);
+    if (!(fabsf(pScale.x) > 1e-6F && fabsf(pScale.y) > 1e-6F && fabsf(pScale.z) > 1e-6F)) return false;
+    local = {turned.x / pScale.x, turned.y / pScale.y, turned.z / pScale.z};
+    return vec3_is_finite(local);
+}
+
+bool esp_freecam_active() { return g_freecam_on; }
+
+bool esp_freecam_set(bool on) {
+    if (on == g_freecam_on) return g_freecam_on;
+    if (!on) {
+        // Возвращаем камеру на место: пишем сохранённую локальную позицию.
+        if (g_freecam_saved_ok && g_freecam_matrices && g_freecam_index >= 0)
+            wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34) +
+                   offsetof(Matrix34, translation), &g_freecam_saved, sizeof(Vec3));
+        g_freecam_on = false;
+        g_freecam_saved_ok = false;
+        LogLine("фрикам: выключен, камера вернулась к телу");
+        return false;
+    }
+    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+    uint64_t transform = 0;
+    if (g_native_camera) transform = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
+    if (!transform) return false;
+    uint64_t matrices = 0, indices = 0;
+    int32_t index = -1;
+    if (!resolve_transform_arrays(transform, matrices, indices, index)) {
+        LogLine("фрикам: не включён — раскладка трансформа камеры не опознана");
+        return false;
+    }
+    Matrix34 m{};
+    if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), m)) return false;
+    Vec3 pos{}, scale{};
+    Vec4 rot{};
+    if (!read_transform_world_trs(matrices, indices, index, pos, rot, scale)) return false;
+    g_freecam_saved = {m.translation.x, m.translation.y, m.translation.z};
+    g_freecam_saved_ok = true;
+    g_freecam_transform = transform;
+    g_freecam_matrices = matrices;
+    g_freecam_indices = indices;
+    g_freecam_index = index;
+    g_freecam_pos = pos;
+    g_freecam_on = true;
+    LogLine("фрикам: включён, старт (%.1f, %.1f, %.1f), трансформ=0x%llx",
+            (double)pos.x, (double)pos.y, (double)pos.z,
+            (unsigned long long)transform);
+    return true;
+}
+
+// Сдвинуть камеру: метры вдоль оси взгляда (вперёд), вправо и вверх.
+// Горизонтальные оси берём из самой камеры, но без наклона: иначе «вперёд»
+// при взгляде вниз уводило бы камеру под землю.
+bool esp_freecam_move(float forward, float right, float up) {
+    if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
+    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+    if (!std::isfinite(forward) || !std::isfinite(right) || !std::isfinite(up)) return false;
+    Vec3 f = g_cam_forward, r = g_cam_right;
+    if (!g_cam_pose_valid || !vec3_is_finite(f) || !vec3_is_finite(r)) { f = {0, 0, 1}; r = {1, 0, 0}; }
+    float fh = sqrtf(f.x * f.x + f.z * f.z);
+    if (fh > 1e-4F) { f.x /= fh; f.z /= fh; } else { f = {0, 0, 1}; }
+    float rh = sqrtf(r.x * r.x + r.z * r.z);
+    if (rh > 1e-4F) { r.x /= rh; r.z /= rh; } else { r = {1, 0, 0}; }
+    g_freecam_pos.x += f.x * forward + r.x * right;
+    g_freecam_pos.z += f.z * forward + r.z * right;
+    g_freecam_pos.y += up;
+    if (!vec3_is_finite(g_freecam_pos)) { g_freecam_pos = {}; return false; }
+    Vec3 local{};
+    if (!transform_world_to_local(g_freecam_matrices, g_freecam_indices, g_freecam_index,
+                                  g_freecam_pos, local))
+        return false;
+    if (!wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34) +
+                offsetof(Matrix34, translation), &local, sizeof(Vec3)))
+        return false;
+    return true;
+}
+
+// Трансформ камеры мог переехать (смена мира, респавн): если камера уехала
+// далеко от того места, где мы её оставили, — это уже не наш фрикам.
+static void freecam_tick() {
+    if (!g_freecam_on) return;
+    if (!g_freecam_transform || !rd_ptr(g_freecam_transform)) {
+        esp_freecam_set(false);
+        return;
+    }
+}
+
 bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& position) {
     if (!native_transform) return false;
     // The learned layout is only a fast path. It is learned from PLAYER
@@ -1427,22 +1648,55 @@ static void log_look_fail(LookFail f, uint64_t mouse_look, float sens) {
     }
 }
 
+// Последний подтверждённый MouseLook. Зачем. Игрок на устройстве терялся
+// кадр через кадр (лог 17.09: «объект=0/1» по двадцать раз подряд), и каждый
+// такой кадр аим молчал — на улице это выглядит как «мемори-аим отвалился на
+// несколько секунд». Причины две: чтение сорвалось посередине кадра игры
+// (память читается процессом, который в этот момент обновляет объект) и
+// короткие переходы состояния. Обе пережидаемы, поэтому объект держим.
+static uint64_t s_ml_cached = 0;         // сам MouseLook
+static uint64_t s_ml_cached_player = 0;  // игрок, которому он принадлежал
+static double   s_ml_cached_at = -1e9;
+// Сколько верим кешу. Дольше — опаснее: после респавна объект мог быть
+// переиспользован под что-то другое, и писать туда нельзя.
+static constexpr double kMlCacheSec = 4.0;
+
+// Кеш годится, только если игрок тот же самый и объект живой: класс на месте
+// и m_Sensitivity в правдоподобных пределах. Иначе объект умер — забываем.
+static bool mouse_look_from_cache(uint64_t player, uint64_t& out) {
+    if (!s_ml_cached || !player || player != s_ml_cached_player) return false;
+    if (memio::now_seconds() - s_ml_cached_at > kMlCacheSec) return false;
+    const uint64_t klass = rd_ptr(s_ml_cached);
+    const uint64_t known = g_mouse_look_klass.load();
+    if (known ? (klass != known) : (klass < 0x10000)) { s_ml_cached = 0; return false; }
+    const float sens = rd<float>(s_ml_cached + MOUSE_LOOK_SENSITIVITY_OFFSET);
+    if (!std::isfinite(sens) || sens < 0.05F || sens > 100.0F) { s_ml_cached = 0; return false; }
+    out = s_ml_cached;
+    return true;
+}
+
 static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
     uint64_t player = resolve_local_player();
     if (!player) { if (why) *why = LookFail::noPlayer; return false; }
     if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) {
         if (why) *why = LookFail::wrongPlayer;
-        return false;
+        return mouse_look_from_cache(player, out);
     }
     uint64_t mouse_look = rd_ptr(player + PLAYER_MOUSE_LOOK_OFFSET);
-    if (mouse_look < 0x10000) { if (why) *why = LookFail::noObject; return false; }  // ноль или мусор вместо указателя
+    if (mouse_look < 0x10000) {  // ноль или мусор вместо указателя
+        if (why) *why = LookFail::noObject;
+        return mouse_look_from_cache(player, out);
+    }
     const uint64_t klass = rd_ptr(mouse_look);
     const uint64_t known = g_mouse_look_klass.load();
     if (known ? (klass != known) : (klass < 0x10000)) {
         if (why) *why = LookFail::noObject;
-        return false;
+        return mouse_look_from_cache(player, out);
     }
+    s_ml_cached = mouse_look;
+    s_ml_cached_player = player;
+    s_ml_cached_at = memio::now_seconds();
     out = mouse_look;
     return true;
 }
@@ -4415,15 +4669,6 @@ bool esp_aim_camera_angles(float& yaw_deg, float& pitch_deg) {
     return angles_from_forward(ok_ref ? g_aim_ref_forward : g_cam_forward, yaw_deg, pitch_deg);
 }
 
-// Углы камеры без оси выстрела (см. объявление в game.h). Порядок такой же,
-// как у esp_camera_angles, но источник LookDirection из списка исключён.
-bool esp_camera_pose_angles(float& yaw_deg, float& pitch_deg) {
-    const bool ok_pose  = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
-    const bool ok_frame = g_frame_cam_basis_valid && farm_cam_source_ok(g_frame_cam_pos);
-    if (!ok_pose && !ok_frame) return false;
-    return angles_from_forward(ok_pose ? g_cam_forward : g_frame_cam_fwd, yaw_deg, pitch_deg);
-}
-
 bool esp_local_eye_position(float& x, float& y, float& z) {
     // Приоритет — точка выстрела (KCC LookDirection): она не качается от sway/
     // отдачи, поэтому производная по ней и есть реальное движение персонажа.
@@ -4746,6 +4991,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         xray_apply(native_cam);
         always_day_tick();
+        freecam_tick();
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
             return result;
         }
