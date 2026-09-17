@@ -24,6 +24,7 @@
 #include <cstdarg>
 #include <future>
 #include <chrono>
+#include <thread>
 
 #include "xp.inc"
 

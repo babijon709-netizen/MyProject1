@@ -15,6 +15,8 @@
 #include "widgets.h"             // g_sheet, g_pop
 #include <cmath>
 #include <cstdlib>
+#include <thread>
+#include <chrono>
 #include <time.h>
 
 static constexpr float kAimTouchDefX = 0.74f;
@@ -792,15 +794,21 @@ static const char* aim_mode_name() {
     }
 }
 
+// Сколько раз ось выстрелаdobили в конце кадра между двумя строками лога
+// (см. AimEndFrame): по нему видно, что серия действительно идёт.
+static int s_repeatWrites = 0;
+
 static void AimLogTick(float dt) {
     s_logTime += dt;
     if (s_logTime < 0.25f) return;
     s_logTime = 0.f;
     const AimMemDiag& d = AimMemoryDiag();
-    if (g_state.aim_mode == AIM_MODE_SILENT)
-        LogLine("аим: %s кадр=%lu ось=%d записей=%d отказов=%d dev=%.1f цель=%d",
+    if (g_state.aim_mode == AIM_MODE_SILENT) {
+        LogLine("аим: %s кадр=%lu ось=%d записей=%d отказов=%d dev=%.1f цель=%d добой=%d",
                 aim_mode_name(), s_frames, (int)d.axis, d.writes, d.fails, d.dev,
-                (int)g_aimActive);
+                (int)g_aimActive, s_repeatWrites);
+        s_repeatWrites = 0;
+    }
     else if (g_state.aim_mode == AIM_MODE_MEMORY)
         LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f",
                 aim_mode_name(), s_frames, (int)d.params, (int)d.responded,
@@ -1055,6 +1063,22 @@ static constexpr float kSilentFreshEps = 0.5f;
 // Последняя записанная ось выстрела: AimEndFrame повторяет её перед самым
 // концом кадра (одна запись — это один syscall, а шанс, что кадр игры начнётся
 // уже после нашей записи, заметно выше).
+//
+// Повторяем СЕРИЕЙ, а не один раз. Сеттер оси (LookDirection) в этой сборке
+// вызывается из 15 мест, и шесть из них работают каждый кадр:
+// CustomCharacterController.Update — дважды, MouseLook.ZJo и три места в
+// Features.Player.KCC. Выстрел (FPHitscan.jkX) читает ось, нормализует её и
+// пускает луч — то есть берёт то, что легло последним. Одна запись в конце
+// кадра выигрывала эту гонку редко; серия с шагом kSilentRepeatGapUs
+// перекрывает kSilentRepeatCount раз большую долю кадра игры.
+//
+// Считаем грубо: игра пишет ось ~6 раз за кадр (раз в ~2.8 мс при 60 fps), мы —
+// раз в 0.5 мс. Наша доля последних записей 2.8/(2.8+0.5) ~ 85 %. Это гонка,
+// а не гарантия: честный патч кода игры (перехват сеттера) дал бы 100 %, но
+// ценой правки памяти игры на ходу.
+static constexpr int   kSilentRepeatCount = 20;   // записей подряд в конце кадра
+static constexpr int   kSilentRepeatGapUs = 450;  // шаг между ними (мкс)
+static constexpr int   kSilentRepeatMaxMs = 14;   // потолок на всю серию (мс)
 static float s_lastDirX = 0.f, s_lastDirY = 0.f, s_lastDirZ = 1.f;
 static bool  s_dirFresh = false;   // ось записана в этом кадре
 
@@ -1196,7 +1220,21 @@ void AimEndFrame() {
     if (!s_dirFresh) return;
     s_dirFresh = false;
     if (g_state.aim_mode != AIM_MODE_SILENT) return;
-    esp_mem_aim_write_fire_dir(s_lastDirX, s_lastDirY, s_lastDirZ);
+    // Потолок на всякий случай: если сон растёт больше заказанного (так бывает
+    // под нагрузкой), серия не должна съесть весь кадр отрисовки.
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kSilentRepeatMaxMs);
+    for (int i = 0; i < kSilentRepeatCount; ++i) {
+        if (!esp_mem_aim_write_fire_dir(s_lastDirX, s_lastDirY, s_lastDirZ)) {
+            ++s_memDiag.fails;   // ось отвалилась: долбить её незачем
+            break;
+        }
+        ++s_repeatWrites;
+        if (i + 1 >= kSilentRepeatCount) break;
+        if (std::chrono::steady_clock::now() +
+            std::chrono::microseconds(kSilentRepeatGapUs) > deadline) break;
+        std::this_thread::sleep_for(std::chrono::microseconds(kSilentRepeatGapUs));
+    }
 }
 
 // ============================ Автофарм =============================
