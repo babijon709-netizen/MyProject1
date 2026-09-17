@@ -200,3 +200,6 @@ bool farm_cam_source_ok(const Vec3& p);
 // ---- Подсистема маркеров (game_markers.cpp) --------------------------------
 // Сброс кэшей маркеров при esp_reset()/сбросе мира.
 void reset_marker_caches();
+// Сброс скана автофарма (определены в game_farm.cpp) — зовётся при сбросе мира.
+void farm_scan_abort();
+void farm_scan_reset();

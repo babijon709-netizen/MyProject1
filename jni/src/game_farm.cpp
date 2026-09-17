@@ -119,7 +119,7 @@ constexpr double kFarmScanRetry    = 0.5;   // с, когда список пу�
 constexpr size_t kFarmNegCacheMax  = 16384; // потолок кеша, записей
 
 // Бросить незавершённый проход (смена маски ресурсов, перезагрузка мира).
-static void farm_scan_abort() {
+void farm_scan_abort() {
     g_farm_scan_run = false;
     g_farm_scan_idx = 0;
     g_farm_scan_ids.clear();
@@ -127,7 +127,7 @@ static void farm_scan_abort() {
 }
 
 // Полный сброс скана: рабочий список чистит вызывающий, здесь — кеш и проход.
-static void farm_scan_reset() {
+void farm_scan_reset() {
     farm_scan_abort();
     g_farm_not_node.clear();
     g_farm_next_scan = 0.0;

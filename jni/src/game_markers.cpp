@@ -141,8 +141,6 @@ std::unordered_map<uint64_t, int> g_farm_blacklist; // identity -> frames left
 double g_farm_next_scan = 0.0;
 // Определение скана ниже (ему нужны FarmEntity и резолверы реестра), а
 // сбрасывать его приходится и отсюда — при перезагрузке мира.
-static void farm_scan_abort();
-static void farm_scan_reset();
 // Орудие в руках и что запросили отброшенные узлы (флаги ToolPurpose) — для
 // строки статуса в меню: «нужен топор» вместо бессмысленного «все узлы вне
 // радиуса».

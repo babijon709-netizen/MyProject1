@@ -17,6 +17,9 @@ typedef void* EGLConfig; typedef void* EGLNativeWindowType; typedef int EGLint; 
 #define EGL_RENDERABLE_TYPE 0x3040
 #define EGL_OPENGL_ES2_BIT 0x0004
 #define EGL_NONE 0x3038
+#define EGL_DEFAULT_DISPLAY ((EGLDisplay)0)
+#define EGL_BUFFER_SIZE 0x3058
+#define EGL_NATIVE_VISUAL_ID 0x3000
 #define EGL_WIDTH 0x3057
 #define EGL_HEIGHT 0x3056
 #define EGL_CONTEXT_CLIENT_VERSION 0x3098
@@ -28,3 +31,8 @@ static inline EGLContext eglCreateContext(EGLDisplay, EGLConfig, EGLContext, con
 static inline EGLBoolean eglMakeCurrent(EGLDisplay, EGLSurface, EGLSurface, EGLContext) { return 0; }
 static inline EGLBoolean eglSwapBuffers(EGLDisplay, EGLSurface) { return 0; }
 static inline EGLBoolean eglQuerySurface(EGLDisplay, EGLSurface, EGLint, EGLint*) { return 0; }
+static inline EGLBoolean eglDestroySurface(EGLDisplay, EGLSurface) { return 0; }
+static inline EGLBoolean eglDestroyContext(EGLDisplay, EGLContext) { return 0; }
+static inline EGLBoolean eglTerminate(EGLDisplay) { return 0; }
+static inline void eglSwapInterval(EGLDisplay, EGLint) { }
+static inline EGLBoolean eglGetConfigAttrib(EGLDisplay, EGLConfig, EGLint, EGLint*) { return 0; }
