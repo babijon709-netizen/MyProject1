@@ -314,8 +314,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     {
         Vec3 camera_position{};
-        bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
-        report_camera_pos = camera_position;
+        // Позицию камеры для отчёта берём ТОЛЬКО когда её действительно прочитали
+        // (была ошибка: при несработавшей проверке сюда попадал нулевой вектор, и
+        // в журнале «км 0 0 0» выглядело как свойство вида).
+        const bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
+        if (has_camera_position) report_camera_pos = camera_position;
         double nearest_distance_squared = INFINITY;
         size_t first_valid_index = s_transforms.size();
         Vec3 first_valid_position{};
@@ -766,15 +769,16 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // камеры из матрицы вида, ос — ось прицела, иг — игрок, эк — его
             // проекция, w — знаменатель проекции (<= 0 значит точка ЗА камерой,
             // огромное — матрица нечитаемая).
-            diag_log("esp", "рамок нет: спис %d свой %d скр %d бп %d дл %d низ %d вх %d кр %d мт %d вид %d угл %.0f",
+            diag_log("esp", "рамок нет: спис %d свой %d скр %d бп %d дл %d низ %d вх %d кр %d мт %d угл %.0f",
                      (int)s_transforms.size(), local_entity_index < s_transforms.size() ? 1 : 0,
                      drop_suppressed, drop_position, drop_far, drop_lower, drop_upper, drop_short,
-                     g_matrix_configuration_validated ? 1 : 0, g_cam_view_source,
+                     g_matrix_configuration_validated ? 1 : 0,
                      (double)clamp_report(g_cam_view_angle_gap_deg, 999.0F));
-            diag_log("esp", "рамок нет: км %.0f %.0f %.0f ос %.2f %.2f %.2f иг %.0f %.0f %.0f эк %.0f %.0f w %.2f",
+            diag_log("esp", "рамок нет: км %.0f %.0f %.0f физ %d ос %.2f %.2f %.2f иг %.0f %.0f %.0f эк %.0f %.0f w %.2f",
                      (double)clamp_report(report_camera_pos.x, 99999.0F),
                      (double)clamp_report(report_camera_pos.y, 99999.0F),
                      (double)clamp_report(report_camera_pos.z, 99999.0F),
+                     g_camera_matrix_physical_match ? 1 : 0,
                      (double)clamp_report(g_aim_ref_forward.x, 9.0F),
                      (double)clamp_report(g_aim_ref_forward.y, 9.0F),
                      (double)clamp_report(g_aim_ref_forward.z, 9.0F),
@@ -785,21 +789,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                      (double)clamp_report(miss_screen_y, 99999.0F),
                      (double)clamp_report(miss_w, 9999.0F));
         }
-    }
-
-    // Вид под подозрением: игроки в кадре есть, а НИ ОДИН не прошёл нижнюю точку
-    // при нуле «выше экрана». Для `w2s` это значит «все за камерой» — так
-    // выглядит устаревший вид (камера уехала, поза не читается: смерть,
-    // респавн, перезагрузка мира). По этой серии кадров следующий кадр берёт вид
-    // из оси прицела (см. g_cam_view_suspect), а не держит прошлый.
-    {
-        static int s_all_behind_streak = 0;
-        const bool all_behind = (drop_lower >= 2 && drop_upper == 0 && drop_short == 0 && result.empty());
-        s_all_behind_streak = all_behind ? s_all_behind_streak + 1 : 0;
-        g_cam_view_suspect = s_all_behind_streak >= 5;
-        if (g_cam_view_suspect && s_all_behind_streak == 5)
-            diag_log("esp", "вид: все игроки за камерой %d кадров подряд (низ %d) — беру вид из оси прицела",
-                     s_all_behind_streak, drop_lower);
     }
 
     return result;

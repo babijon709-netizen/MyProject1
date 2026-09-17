@@ -122,6 +122,11 @@ static int      s_reason = MEM_REASON_NONE;
 
 static uint64_t s_mouse_look = 0;     // разрешённый объект MouseLook
 static uint64_t s_look_root = 0;      // managed Transform узла прицела (для TRANSFORM)
+// Куда смотрит +Z узла прицела: +1 — вперёд по взгляду, -1 — назад. У камеры
+// Unity взгляд идёт по -Z, и узел камеры на это же завязан, поэтому сравнивать
+// «ось узла» с осью прицела можно только по модулю. Знак выясняется замером
+// (см. find_look_root и read_look_root_angles), а не берётся на веру.
+static float    s_look_root_axis_sign = 1.0F;
 static uint64_t s_state_field = 0;    // адрес поля поворота в MouseLook (для STATE_*)
 
 // ---- Углы прицела MouseLook: источник и приёмник (проверено по дампу) ------
@@ -420,7 +425,22 @@ static bool read_look_root_angles(uint64_t mouse_look, float& yaw_deg, float& pi
     if (!read_transform_local_rotation(root, local)) return false;
     if (!read_transform_parent_world_rotation(root, parent)) return false;
     const Vec4 world = multiply_quaternion(parent, local);
-    return angles_from_forward(rotate_vector(world, {0.f, 0.f, 1.f}), yaw_deg, pitch_deg);
+    Vec3 forward = rotate_vector(world, {0.f, 0.f, 1.f});
+    // Знак оси узла выясняем замером: сравниваем с осью прицела (она из
+    // обработчика событий игрока), при её отсутствии — с позой камеры. Так углы
+    // узла не окажутся перевёрнутыми на 180°, если узел смотрит по -Z.
+    if (g_aim_ref_valid) {
+        const float dot = forward.x * g_aim_ref_forward.x + forward.y * g_aim_ref_forward.y +
+                          forward.z * g_aim_ref_forward.z;
+        s_look_root_axis_sign = dot >= 0.0f ? 1.0F : -1.0F;
+    } else if (g_cam_pose_valid) {
+        const float dot = forward.x * g_cam_forward.x + forward.y * g_cam_forward.y +
+                          forward.z * g_cam_forward.z;
+        s_look_root_axis_sign = dot >= 0.0f ? 1.0F : -1.0F;
+    }
+    forward = {forward.x * s_look_root_axis_sign, forward.y * s_look_root_axis_sign,
+               forward.z * s_look_root_axis_sign};
+    return angles_from_forward(forward, yaw_deg, pitch_deg);
 }
 
 // Свидетель для самотеста: сначала камера, потом узел прицела.
@@ -524,7 +544,12 @@ static bool path_apply(int path, float yaw_deg, float pitch_deg) {
         if (!read_transform_parent_world_rotation(s_look_root, parent)) return false;
         const Vec4 world = multiply_quaternion(parent, local);
         const Vec3 current = rotate_vector(world, {0.f, 0.f, 1.f});
-        const Vec4 delta = quaternion_between(current, forward_from_angles(yaw_deg, pitch_deg));
+        // Куда должен смотреть +Z узла: у камеры Unity взгляд по -Z, поэтому у
+        // узла «вперёд» может быть -Z — знак выяснен замером при поиске узла.
+        const Vec3 aim = forward_from_angles(yaw_deg, pitch_deg);
+        const Vec3 target = {aim.x * s_look_root_axis_sign, aim.y * s_look_root_axis_sign,
+                             aim.z * s_look_root_axis_sign};
+        const Vec4 delta = quaternion_between(current, target);
         // Желаемый мировой поворот -> локальный: L' = P^-1 * (delta * P * L).
         const Vec4 desired_world = multiply_quaternion(delta, world);
         Vec4 updated = multiply_quaternion(quaternion_inverse(parent), desired_world);
@@ -621,7 +646,15 @@ static uint64_t find_look_root(uint64_t mouse_look, const Vec3& aim_forward) {
                 forward = {forward.x / length, forward.y / length, forward.z / length};
                 const float dot = forward.x * aim_forward.x + forward.y * aim_forward.y +
                                   forward.z * aim_forward.z;
-                if (dot >= 0.995f) return native;
+                // Знак оси узла: у камеры Unity взгляд по -Z, поэтому +Z узла
+                // может смотреть НАЗАД. Раньше здесь требовался только +Z
+                // (dot >= 0.995), и узел прицела на устройстве не находился
+                // вовсе — а с ним отваливалась и единственная дорожка, которую
+                // игра читает обратно (см. path_apply, MEM_PATH_TRANSFORM).
+                if (fabsf(dot) >= 0.995f) {
+                    s_look_root_axis_sign = dot >= 0.0f ? 1.0F : -1.0F;
+                    return native;
+                }
             }
         }
     }
@@ -641,7 +674,8 @@ static uint64_t find_look_root(uint64_t mouse_look, const Vec3& aim_forward) {
         const float dot = forward.x * aim_forward.x + forward.y * aim_forward.y + forward.z * aim_forward.z;
         // Ось самого узла и ось прицела (ось выстрела) расходятся максимум на
         // качку/отдачу — это доли градуса, поэтому порог строгий.
-        if (dot < 0.995f) continue;
+        if (fabsf(dot) < 0.995f) continue;
+        s_look_root_axis_sign = dot >= 0.0f ? 1.0F : -1.0F;
         return native;
     }
     return 0;
@@ -812,6 +846,7 @@ void esp_mem_aim_reset() {
     s_reason = MEM_REASON_NONE;
     s_mouse_look = 0;
     s_look_root = 0;
+    s_look_root_axis_sign = 1.0F;
     s_state_field = 0;
     s_pair = {};
     s_probe_pair = {};
@@ -1075,6 +1110,8 @@ void esp_mem_aim_tick(float dt) {
                 // град/единицу — это и есть «настройка чувствительности» игры,
                 // измеренная напрямую, без логов и догадок.
                 if (fabsf(measured_yaw) < 0.15f && fabsf(measured_pitch) < 0.1f) {
+                    diag_log("aim", "мемори-режим: дорожка %d (ввод) не подтвердилась: доворота нет (%.2f/%.2f°)",
+                             path, (double)measured_yaw, (double)measured_pitch);
                     probe_undo();
                     probe_next_candidate();
                     return;
@@ -1111,6 +1148,15 @@ void esp_mem_aim_tick(float dt) {
                 }
                 if (fabsf(measured_yaw - s_probe_expected_yaw) > kProbeToleranceDeg ||
                     fabsf(measured_pitch - s_probe_expected_pitch) > kProbeToleranceDeg) {
+                    // Пишем, ЧТО именно не сошлось: в журнале устройства видно
+                    // только «дорожка не подтвердилась (причина 3)», и по этому
+                    // нельзя отличить «игра не приняла запись» от «свидетеля
+                    // повернуло не туда». Следующая правка без этих чисел — снова
+                    // вслепую.
+                    diag_log("aim", "мемори-режим: дорожка %d (узел %d, пара %d) не подтвердилась: доворот %.2f/%.2f°, ждали %.2f/%.2f°",
+                             path, path == MEM_PATH_TRANSFORM ? 1 : 0, s_probe_pair.field ? 1 : 0,
+                             (double)measured_yaw, (double)measured_pitch,
+                             (double)s_probe_expected_yaw, (double)s_probe_expected_pitch);
                     probe_undo();
                     probe_next_candidate();
                     return;
