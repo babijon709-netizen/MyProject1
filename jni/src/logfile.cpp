@@ -151,6 +151,10 @@ void LogWatchdogStart() {
         struct timespec last_change{};
         clock_gettime(CLOCK_MONOTONIC, &last_change);
         bool reported = false;
+        // Следующий повтор. Без него сторож печатал залипший кадр каждые
+        // 300 мс (период своего цикла), и лог с устройства на 908 строк две
+        // трети состоял из одной и той же строки про 255-секундный залип.
+        double next_report = 0.0;
         while (g_watchdog_on.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
             const unsigned long now = g_frames.load();
@@ -161,15 +165,20 @@ void LogWatchdogStart() {
                 last_change = ts;
                 if (reported) {
                     reported = false;
-                    LogLine("сторож: кадры пошли снова (кадр %lu)", now);
+                    next_report = 0.0;
+                    LogLine("сторож: кадры пошли снова (кадр %lu), стояли %.1f с",
+                            now, (double)(ts.tv_sec - last_change.tv_sec) +
+                                 (double)(ts.tv_nsec - last_change.tv_nsec) * 1e-9);
                 }
                 continue;
             }
             const double still = (double)(ts.tv_sec - last_change.tv_sec) +
                                  (double)(ts.tv_nsec - last_change.tv_nsec) * 1e-9;
             // Кадр не идёт больше полутора секунд — пишем, где его застало.
-            // Дальше — раз в секунду, пока не пойдёт.
-            if (still > 1.5 && (!reported || still > 3.0)) {
+            // Дальше — раз в пять секунд, пока не пойдёт (не каждые 300 мс:
+            // см. next_report выше).
+            if (still > 1.5 && (!reported || still > next_report)) {
+                if (reported) next_report = still + 5.0;
                 reported = true;
                 LogLine("СТОПОР: кадр %lu не идёт %.1f с, стадия: %s",
                         last, still, stage_name(g_stage.load()));
