@@ -1118,19 +1118,61 @@ static bool camera_position_from_view(const Mat4& view, Vec3& position);
 // Найденное проверяем: посчитанная мировая позиция обязана совпасть с той,
 // что ESP уже знает (g_cam_pos), иначе это не камера. Расхождение наружу —
 // чтобы в логе было видно, чем именно кончился перебор.
-// Transform из GameObject. У Unity первый компонент в m_Component — всегда сам
-// Transform, а элемент массива — пара {GameObject*, Component*}. Нужно на тот
-// случай, если Camera + CAMERA_NATIVE_TRANSFORM (0x20) — это не Transform, а
-// GameObject камеры: оба смещения по 0x20, перепутать их легко, и тогда все
-// чтения иерархии идут по чужой структуре (лог 19.09: «массивы Transform не
-// читаются», ни один кандидат не дал годной позиции).
+// Transform из GameObject. Раскладка взята не из догадок, а из libunity.so
+// (сборка не менялась, Unity 6000.3.18f1):
+//
+//   * GetComponentFastPath(obj, range) — 716 вызовов в прошивке; объект в неё
+//     подают как [компонент + 0x20], а внутри она читает
+//         [obj + 0x20] — массив пар, [obj + 0x30] — число элементов,
+//         пара 16 байт: {int typeIndex; Component* component} (значение +0x08).
+//     Значит +0x20 у любого компонента — это его GameObject;
+//   * Transform: 0x7ed62c берёт [x0 + 0x38] и [x0 + 0x40] (данные иерархии и
+//     индекс), а при пустой иерархии подставляет [x0 + 0x28] и свой instanceID —
+//     это и есть TransformAccess из нашей таблицы смещений.
+//
+// Отсюда главное: Camera + 0x20 — это GameObject камеры, а вовсе не Transform.
+// Смещения совпадают (и там, и там 0x20), поэтому перепутать их легче лёгкого,
+// и тогда все чтения иерархии идут по чужой структуре — ровно это и было
+// «массивы Transform не читаются» в логе 19.09: кандидаты нашлись, годной
+// позиции не дал ни один (GameObject на месте Transform даёт мусор в +0x38).
+static constexpr uint64_t GAMEOBJECT_COMPONENT_COUNT  = 0x30;  // число компонентов
+static constexpr uint64_t GAMEOBJECT_COMPONENT_STRIDE = 0x10;  // размер пары
+static constexpr uint64_t TRANSFORM_ACCESS_HIERARCHY  = 0x38;  // данные иерархии
+
 static uint64_t transform_from_gameobject(uint64_t gameobject) {
     if (gameobject < 0x10000) return 0;
     const uint64_t components = rd_ptr(gameobject + GAMEOBJECT_COMPONENT_ARRAY);
     if (components < 0x10000) return 0;
-    const uint64_t transform = rd_ptr(components + COMPONENT_PAIR_PTR);
-    return transform >= 0x10000 ? transform : 0;
+    const int32_t count = rd<int32_t>(gameobject + GAMEOBJECT_COMPONENT_COUNT);
+    // Число не читается — берём первый слот: у Unity он и есть Transform.
+    int n = (count > 0 && count <= 64) ? count : 1;
+    uint64_t fallback = 0;
+    for (int i = 0; i < n; ++i) {
+        const uint64_t component =
+            rd_ptr(components + (uint64_t)i * GAMEOBJECT_COMPONENT_STRIDE + COMPONENT_PAIR_PTR);
+        if (component < 0x10000 || component == gameobject) continue;
+        // Настоящий компонент ссылается назад на свой GameObject (+0x20).
+        const bool backref = rd_ptr(component + COMPONENT_GAMEOBJECT) == gameobject;
+        if (!backref) { if (!fallback) fallback = component; continue; }
+        // Transform — тот, у кого живой указатель иерархии (+0x38).
+        if (rd_ptr(component + TRANSFORM_ACCESS_HIERARCHY) >= 0x10000) return component;
+        if (!fallback) fallback = component;
+    }
+    return fallback;
 }
+
+// Transform камеры. Camera наследует Component, поэтому её GameObject лежит
+// по тому же +0x20, что мы раньше считали трансформом; настоящий Transform
+// достаём из массива компонентов.
+static uint64_t camera_transform_of(uint64_t native_cam) {
+    if (!native_cam) return 0;
+    const uint64_t gameobject = rd_ptr(native_cam + CAMERA_NATIVE_TRANSFORM);
+    if (gameobject < 0x10000) return 0;
+    const uint64_t transform = transform_from_gameobject(gameobject);
+    return transform ? transform : gameobject;
+}
+
+static uint64_t camera_transform() { return camera_transform_of(g_native_camera); }
 
 static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matrices,
                                      uint64_t& indices, int32_t& index,
@@ -1140,6 +1182,8 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
 
     struct Cand { uint64_t m, n; int32_t i; };
     Cand cand[96];
+    int  cand_src[96] = {};   // из какого толкования (tf[0..2]) кандидат
+    int  cur_src = 0;         // текущее толкование для push()
     int count = 0;
     auto push = [&](uint64_t m, uint64_t n, int32_t i) {
         if (!m || !n || i < 0 || i > 100000 || count >= 96) return;
@@ -1147,7 +1191,7 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
         const uint64_t ns[2] = {n, rd_ptr(n)};
         for (int a = 0; a < 2 && count < 96; ++a)
             for (int b = 0; b < 2 && count < 96; ++b)
-                if (ms[a] && ns[b]) cand[count++] = {ms[a], ns[b], i};
+                if (ms[a] && ns[b]) { cand_src[count] = cur_src; cand[count++] = {ms[a], ns[b], i}; }
     };
     // Один проход по указателю трансформа: пара «где данные TransformAccess,
     // где индекс» и все известные пары «массивы матриц / массив родителей».
@@ -1159,15 +1203,18 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
         for (const auto& pr : kPairs) push(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]), idx);
     };
 
-    // Указатели, которые пробуем как Transform: сам адрес и Transform,
-    // доставшийся из того же объекта как из компонента (если это GameObject).
+    // Указатели, которые пробуем как Transform. Что именно пришло на вход,
+    // заранее неизвестно, поэтому пробуем все три толкования:
+    //   tf[0] — сам адрес (вызывающий уже передал Transform);
+    //   tf[1] — Transform из этого объекта как из GameObject (случай камеры:
+    //           Camera + 0x20 — это GameObject, Transform лежит в его массиве
+    //           компонентов, проверено по libunity.so);
+    //   tf[2] — Transform из GameObject, если на вход дали компонент.
     uint64_t tf[3] = {native_transform, 0, 0};
+    tf[1] = transform_from_gameobject(native_transform);
     const uint64_t as_component = rd_ptr(native_transform + COMPONENT_GAMEOBJECT);
-    if (as_component >= 0x10000) {
-        tf[1] = transform_from_gameobject(as_component);
-        const uint64_t nested = rd_ptr(as_component + COMPONENT_GAMEOBJECT);
-        if (nested >= 0x10000 && nested != as_component) tf[2] = transform_from_gameobject(nested);
-    }
+    if (as_component >= 0x10000 && as_component != native_transform)
+        tf[2] = transform_from_gameobject(as_component);
 
     // С чем сверяем найденную позицию. g_cam_pos НЕ годится: его пишет
     // read_camera_transform_pose, то есть ровно тот путь, который на
@@ -1213,6 +1260,7 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
     if (g_transform_hierarchy_layout_valid) {
         const TransformHierarchyLayout& L = g_transform_hierarchy_layout;
         for (int t = 0; t < 3 && tf[t]; ++t) {
+            cur_src = t;
             const uint64_t data = rd_ptr(tf[t] + L.data_offset);
             const int32_t  idx  = rd<int32_t>(tf[t] + L.index_offset);
             uint64_t m = data ? rd_ptr(data + L.matrices_offset) : 0;
@@ -1226,6 +1274,8 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
         }
     }
     for (int t = 0; t < 3 && tf[t]; ++t) {
+        if (tf[t] == tf[0] && t > 0) continue;      // то же толкование — не надо
+        cur_src = t;
         probe(tf[t], 0x38, 0x40);
         probe(tf[t], 0x18, 0x20);
     }
@@ -1240,8 +1290,11 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
         static const uint64_t kExtended[][2] = {{0x20, 0x28}, {0x28, 0x30}, {0x30, 0x38},
                                                 {0x40, 0x48}, {0x10, 0x18}, {0x48, 0x50}};
         const int saved = count;
-        for (int t = 0; t < 3 && tf[t]; ++t)
+        for (int t = 0; t < 3 && tf[t]; ++t) {
+            if (tf[t] == tf[0] && t > 0) continue;
+            cur_src = t;
             for (const auto& off : kExtended) probe(tf[t], off[0], off[1]);
+        }
         // Лучший из быстрых остаётся лучшим: evaluate() сравнивается с ним,
         // а не ищет заново, — иначе потеряли бы расстояние первого прохода.
         evaluate(saved, count);
@@ -1258,6 +1311,12 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
             LogLine("фрикам: перебор — трансформ 0x%llx, из компонента 0x%llx, кандидатов %d, позиций %d, ближайшее %.1f м",
                     (unsigned long long)tf[0], (unsigned long long)tf[1], count, positions,
                     (double)(best_d >= 0.f ? best_d : -1.f));
+            // Которое из трёх толкований дало позицию и что вообще нашлось.
+            // Без этого не видно, сломался путь GameObject или сама иерархия.
+            LogLine("фрикам: источники — кандидат %d из толкования %d, трансформы 0x%llx/0x%llx/0x%llx, камера %d",
+                    best_k, (best_k >= 0 ? cand_src[best_k] : -1),
+                    (unsigned long long)tf[0], (unsigned long long)tf[1],
+                    (unsigned long long)tf[2], (int)know_cam);
         }
         if (best_dist) *best_dist = (best_k >= 0 ? best_d : -1.f);
         return false;
@@ -1365,8 +1424,7 @@ bool esp_freecam_set(bool on) {
         return false;
     }
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
-    uint64_t transform = 0;
-    if (g_native_camera) transform = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
+    uint64_t transform = camera_transform();
     if (!transform) {
         g_freecam_fail = g_native_camera ? 2 : 1; g_freecam_fail_dist = -1.f;
         log_freecam_fail(g_native_camera ? 1 : 0, 0, -1.f);
@@ -1886,6 +1944,30 @@ static void log_look_wrong_owner(uint64_t mouse_look, uint64_t owner, uint64_t p
             (unsigned long long)mouse_look, (unsigned long long)owner, (unsigned long long)player);
 }
 
+// Игрок найден, но помечен как НЕ локальный (Mirror.isLocalPlayer = false).
+// Это ровно тот случай, который раньше проходил все проверки: MouseLook у
+// чужого игрока той же структуры, с той же чувствительностью, — и углы мы
+// писали ему, а своя камера не двигалась.
+static void log_look_not_local(uint64_t player, uint64_t mouse_look) {
+    static double s_last = -1e9;
+    const double now = memio::now_seconds();
+    if (now - s_last < 2.0) return;
+    s_last = now;
+    LogLine("память: игрок 0x%llx не локальный (isLocalPlayer=0) — MouseLook 0x%llx чужой",
+            (unsigned long long)player, (unsigned long long)mouse_look);
+}
+
+// MouseLook той же структуры, но его m_LookRoot стоит не у камеры: объект
+// чужого игрока или умершего. Проверка по геометрии, не по адресу.
+static void log_look_wrong_camera(uint64_t mouse_look, float dist) {
+    static double s_last = -1e9;
+    const double now = memio::now_seconds();
+    if (now - s_last < 2.0) return;
+    s_last = now;
+    LogLine("память: MouseLook=0x%llx не у камеры — m_LookRoot в %.1f м от неё",
+            (unsigned long long)mouse_look, (double)dist);
+}
+
 // Кому принадлежит этот MouseLook. Почему нельзя верить одному адресу: объект
 // лежит по указателю из игрока, но игрок мог уже умереть, а память — уехать
 // под другой объект, у которого класс в первом поле тот же. Тогда мы читаем и
@@ -1901,6 +1983,102 @@ static uint64_t mouse_look_owner(uint64_t mouse_look) {
     const uint64_t owner = rd_ptr(handler + EVENT_HANDLER_MANAGER_BACKREF);
     return owner >= 0x10000 ? owner : 0;
 }
+
+// m_LookRoot — Transform, которым MouseLook вертит камеру (Oxide.MouseLook,
+// dump.cs релиза). По нему и опознаём «свой» объект.
+static constexpr uint64_t MOUSELOOK_LOOK_ROOT = 0x28;
+// Mirror помечает игрока, которым управляет это устройство:
+// NetworkBehaviour.netIdentity (+0x40) -> NetworkIdentity.isLocalPlayer
+// (+0x4A, bool). У остальных игроков флаг false — это единственный признак,
+// который читается у ЛЮБОГО игрока (в отличие от m_EventHandler: чужому
+// MouseLook'у ввод не нужен, поле пустое, и проверка владельца молчит).
+static constexpr uint64_t NETBEHAVIOUR_NET_IDENTITY   = 0x40;
+static constexpr uint64_t NETIDENTITY_IS_LOCAL_PLAYER = 0x4A;
+
+// -1 — прочитать не удалось, 0 — чужой, 1 — локальный.
+static int player_is_local(uint64_t player) {
+    if (player < 0x10000) return -1;
+    const uint64_t identity = rd_ptr(player + NETBEHAVIOUR_NET_IDENTITY);
+    if (identity < 0x10000) return -1;
+    const uint8_t flag = rd<uint8_t>(identity + NETIDENTITY_IS_LOCAL_PLAYER);
+    if (flag != 0 && flag != 1) return -1;   // читается не флаг, а мусор
+    return flag ? 1 : 0;
+}
+
+// Позиция камеры для сверки. Берём из матрицы вида: это та самая матрица, по
+// которой игра рисует кадр, она всегда свежая (g_cam_pos пишет тот путь,
+// который на устройстве как раз и ломается).
+static bool current_camera_position(Vec3& out) {
+    if (g_native_camera) {
+        const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
+        Vec3 v{};
+        if (camera_position_from_view(view, v) && vec3_is_finite(v)) { out = v; return true; }
+    }
+    if (g_frame_cam_basis_valid && vec3_is_finite(g_frame_cam_pos)) { out = g_frame_cam_pos; return true; }
+    if (g_cam_pose_valid && vec3_is_finite(g_cam_pos)) { out = g_cam_pos; return true; }
+    return false;
+}
+
+// Крутит ли этот MouseLook нашу камеру. Проверка не по адресу и не по игроку,
+// а по геометрии: m_LookRoot — это трансформ-опора взгляда, камера висит на
+// нём ребёнком, поэтому расстояние между ними — метры. У чужого игрока
+// m_LookRoot стоит совсем в другом месте. Возврат: 1 — да, 0 — нет (проверено
+// и не сошлось), -1 — сверить не удалось ( чтение сорвалось — тогда решают
+// остальные проверки, как раньше).
+static int mouse_look_camera_distance(uint64_t mouse_look, float& dist) {
+    dist = -1.f;
+    if (mouse_look < 0x10000) return -1;
+    const uint64_t root = rd_ptr(mouse_look + MOUSELOOK_LOOK_ROOT);
+    if (root < 0x10000) return -1;
+    Vec3 p{}, cam{};
+    if (!read_transform_hierarchy_position(root, p)) return -1;
+    if (!vec3_is_finite(p)) return -1;
+    if (!current_camera_position(cam)) return -1;
+    const float dx = p.x - cam.x, dy = p.y - cam.y, dz = p.z - cam.z;
+    dist = sqrtf(dx * dx + dy * dy + dz * dz);
+    return dist <= 8.0f ? 1 : 0;
+}
+
+// MouseLook, найденный от камеры, а не от игрока: идём по компонентам
+// GameObject камеры и ищем объект того же класса. Зачем: путь «GameController
+// -> локальный игрок -> PlayerManager.mouseLook» молча отдаёт объект ЧУЖОГО
+// игрока, если адрес игрока успел смениться (лог 19.09: за полчаса 17 разных
+// MouseLook, ни одного отказа), а камера — она одна, и привязка к ней не
+// зависит от того, кого игра сейчас считает локальным игроком.
+static uint64_t mouse_look_from_camera() {
+    if (!g_native_camera) return 0;
+    const uint64_t gameobject = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
+    if (gameobject < 0x10000) return 0;
+    const uint64_t data  = rd_ptr(gameobject + GAMEOBJECT_COMPONENT_ARRAY);
+    const int32_t  count = rd<int32_t>(gameobject + GAMEOBJECT_COMPONENT_COUNT);
+    if (data < 0x10000) return 0;
+    const int n = (count > 0 && count <= 64) ? count : 8;
+    const uint64_t known = g_mouse_look_klass.load();
+    for (int i = 0; i < n; ++i) {
+        const uint64_t component =
+            rd_ptr(data + (uint64_t)i * GAMEOBJECT_COMPONENT_STRIDE + COMPONENT_PAIR_PTR);
+        if (component < 0x10000 || component == gameobject) continue;
+        if (rd_ptr(component + COMPONENT_GAMEOBJECT) != gameobject) continue;  // чужой слот
+        const uint64_t klass = rd_ptr(component);
+        if (known ? (klass != known) : (klass < 0x10000)) continue;
+        const float sens = rd<float>(component + MOUSE_LOOK_SENSITIVITY_OFFSET);
+        if (!std::isfinite(sens) || sens < 0.05F || sens > 100.0F) continue;
+        float angles[2] = {};
+        if (!rd_buf(component + MOUSELOOK_ANGLES, angles, sizeof(angles))) continue;
+        if (!std::isfinite(angles[0]) || !std::isfinite(angles[1])) continue;
+        if (fabsf(angles[0]) > 360.0F || fabsf(angles[1]) > 360.0F) continue;
+        return component;
+    }
+    return 0;
+}
+
+// Откуда взят текущий MouseLook и что показали проверки. Пишется в ту же
+// строку лога, что и углы: по одной строке видно и объект, и то, почему он
+// считается своим.
+static uint64_t g_look_player_addr = 0; // игрок, из которого взят объект
+static int      g_look_source = -1;     // 0 — игрок, 1 — камера
+static int      g_look_local  = -1;     // isLocalPlayer: 1/0/-1
+static float    g_look_cam_dist = -1.f; // расстояние m_LookRoot..камера, м
 
 // Последний подтверждённый MouseLook. Зачем. Игрок на устройстве терялся
 // кадр через кадр (лог 17.09: «объект=0/1» по двадцать раз подряд), и каждый
@@ -1995,12 +2173,53 @@ static void log_look_cached(int reason, uint64_t mouse_look) {
         case 1: LogLine("память: MouseLook=0x%llx взят из кеша — адрес игрока не той структуры", (unsigned long long)mouse_look); break;
         case 2: LogLine("память: MouseLook=0x%llx взят из кеша — объект не читается", (unsigned long long)mouse_look); break;
         case 4: LogLine("память: MouseLook=0x%llx взят из кеша — найденный объект чужой", (unsigned long long)mouse_look); break;
+        case 5: LogLine("память: MouseLook=0x%llx взят из кеша — игрок не локальный", (unsigned long long)mouse_look); break;
+        case 6: LogLine("память: MouseLook=0x%llx взят из кеша — объект не у камеры", (unsigned long long)mouse_look); break;
         default: LogLine("память: MouseLook=0x%llx взят из кеша — объект чужого класса", (unsigned long long)mouse_look); break;
     }
 }
 
 static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+
+    // 1) MouseLook от камеры. Первым стоит именно этот путь: он не зависит от
+    // того, кого игра сейчас считает локальным игроком, а адрес локального
+    // игрока на устройстве менялся 17 раз за полчаса (лог 19.09) — и каждый
+    // такой переезд отдавал чужой MouseLook, из-за чего память-аим писал
+    // углы в объект, камеру не крутящий (записи шли, отклика не было).
+    float cam_dist = -1.f;
+    uint64_t from_camera = mouse_look_from_camera();
+    if (from_camera) {
+        const int drives = mouse_look_camera_distance(from_camera, cam_dist);
+        if (drives < 0) {                 // сверить не удалось — объект берём,
+            g_look_source = 1;            // но в логе это будет видно
+            g_look_local = -1;
+            g_look_player_addr = 0;
+            g_look_cam_dist = cam_dist;
+            look_mismatch(false);
+            s_ml_cached = from_camera;
+            s_ml_cached_player = 0;
+            s_ml_cached_at = memio::now_seconds();
+            out = from_camera;
+            return true;
+        }
+        if (drives == 0) {                // найден, но его m_LookRoot не у камеры
+            log_look_wrong_camera(from_camera, cam_dist);
+            from_camera = 0;
+        } else {
+            g_look_source = 1;
+            g_look_local = -1;
+            g_look_player_addr = 0;
+            g_look_cam_dist = cam_dist;
+            look_mismatch(false);
+            s_ml_cached = from_camera;
+            s_ml_cached_player = 0;
+            s_ml_cached_at = memio::now_seconds();
+            out = from_camera;
+            return true;
+        }
+    }
+
     uint64_t player = resolve_local_player();
     if (!player) {
         // Игрок на этом кадре не подтвердился (статика GameController не
@@ -2045,6 +2264,31 @@ static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
         if (mouse_look_from_cache(player, out)) { log_look_cached(4, out); return true; }
         return false;
     }
+    // Признак Mirror: isLocalPlayer. В отличие от владельца он читается у
+    // любого игрока, поэтому ловит как раз тот случай, от которого проверка
+    // владельца молчала: чужой MouseLook с пустым m_EventHandler.
+    const int local = player_is_local(player);
+    if (local == 0) {
+        if (why) *why = LookFail::wrongOwner;
+        look_mismatch(true);
+        log_look_not_local(player, mouse_look);
+        if (mouse_look_from_cache(player, out)) { log_look_cached(5, out); return true; }
+        return false;
+    }
+    // И последняя сверка — геометрией: m_LookRoot обязан стоять у камеры.
+    float d = -1.f;
+    const int drives = mouse_look_camera_distance(mouse_look, d);
+    if (drives == 0) {
+        if (why) *why = LookFail::wrongOwner;
+        look_mismatch(true);
+        log_look_wrong_camera(mouse_look, d);
+        if (mouse_look_from_cache(player, out)) { log_look_cached(6, out); return true; }
+        return false;
+    }
+    g_look_source = 0;
+    g_look_player_addr = player;
+    g_look_local = local;
+    g_look_cam_dist = d;
     look_mismatch(false);
     s_ml_cached = mouse_look;
     s_ml_cached_player = player;
@@ -2052,6 +2296,7 @@ static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
     out = mouse_look;
     return true;
 }
+
 
 bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro) {
     uint64_t mouse_look = 0;
@@ -2094,11 +2339,13 @@ bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
     x_deg = angles[0];
     y_deg = angles[1];
     if (mouse_look != g_look_addr_logged.exchange(mouse_look))
-        LogLine("память: MouseLook=0x%llx углы=(%.2f, %.2f) чувствительность=%.3f инверсия=%d гироскоп=%d",
+        LogLine("память: MouseLook=0x%llx углы=(%.2f, %.2f) чувствительность=%.3f инверсия=%d гироскоп=%d источник=%d игрок=0x%llx локальный=%d до камеры=%.1f м",
                 (unsigned long long)mouse_look, angles[0], angles[1],
                 (double)rd<float>(mouse_look + MOUSE_LOOK_SENSITIVITY_OFFSET),
                 (int)(rd<uint8_t>(mouse_look + MOUSELOOK_INVERT) != 0),
-                (int)(rd_ptr(mouse_look + MOUSELOOK_GYRO) >= 0x10000));
+                (int)(rd_ptr(mouse_look + MOUSELOOK_GYRO) >= 0x10000),
+                g_look_source, (unsigned long long)g_look_player_addr,
+                g_look_local, (double)g_look_cam_dist);
     return true;
 }
 
@@ -2340,7 +2587,7 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     // only rebuilt inside Unity getters when dirty-flag +0x502 is set — we never
     // run those getters, so raw +0x70 drifts while the camera moves.
     bool have_live_view = false;
-    uint64_t native_transform = rd_ptr(native_cam + CAMERA_NATIVE_TRANSFORM);
+    uint64_t native_transform = camera_transform_of(native_cam);
     if (native_transform) {
         Vec3 cam_pos{};
         Vec4 cam_rot{};

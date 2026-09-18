@@ -27,7 +27,14 @@ inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = 0xB0;  // Matrix4x4 pr
 inline constexpr std::uint64_t CAMERA_VIEW_MATRIX       = 0x70;  // Matrix4x4 worldToCamera (cached, stale!)
 inline constexpr std::uint64_t CAMERA_WORLD_TO_CLIP     = 0xF0;  // projection * worldToCamera product
 inline constexpr std::uint64_t CAMERA_PREV_VIEW_PROJ    = 0x5C8; // previousViewProjection (frame-written)
-inline constexpr std::uint64_t CAMERA_NATIVE_TRANSFORM  = 0x20;  // Transform* used by w2c dirty rebuild
+inline constexpr std::uint64_t CAMERA_NATIVE_TRANSFORM  = 0x20;  // Camera (наследник Component) + 0x20 —
+                                                                 // GameObject камеры, НЕ Transform. Проверено
+                                                                 // по libunity.so релиза: в коде пересборки
+                                                                 // матрицы вида (strb wzr,[x19,#0x502] /
+                                                                 // stp q0,q1,[x19,#0x70]) значение camera+0x20
+                                                                 // подаётся в GetComponentFastPath — то есть
+                                                                 // это GameObject. Transform камеры достаём из
+                                                                 // его массива компонентов (game.cpp).
 inline constexpr std::uint64_t CAMERA_FOV_DEGREES       = 0x170; // get_fieldOfView storage
 inline constexpr std::uint64_t CAMERA_ASPECT            = 0x4E0;
 inline constexpr std::uint64_t CAMERA_NEAR_CLIP         = 0x454;
