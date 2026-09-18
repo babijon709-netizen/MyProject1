@@ -906,12 +906,43 @@ static uint64_t resolve_runtime_player_list() {
 static int  g_local_player_miss = 0;
 static const int kLocalPlayerMissLimit = 3;
 
+// Свежий адрес из статики GameController: источник, с которым сверяем кеш.
+// Три чтения, поэтому чаще раза в секунду не зовём.
+static uint64_t read_local_player_from_static() {
+    if (!g_game_controller_class || !g_player_manager_class) return 0;
+    uint64_t gcb_static_fields = get_class_static_fields(g_game_controller_class);
+    if (!gcb_static_fields) return 0;
+    uint64_t local_player = rd_ptr(gcb_static_fields + GAME_CONTROLLER_LOCAL_PLAYER_FIELD);
+    if (local_player && rd_ptr(local_player) == g_player_manager_class) return local_player;
+    return 0;
+}
+
 static uint64_t resolve_local_player() {
     const uint64_t cached = g_local_player;
     if (cached && g_player_manager_class) {
         uint64_t klass = rd_ptr(cached);
         if (klass != g_player_manager_class) klass = rd_ptr(cached); // чтение могло сорваться
-        if (klass == g_player_manager_class) { g_local_player_miss = 0; return cached; }
+        if (klass == g_player_manager_class) {
+            g_local_player_miss = 0;
+            // Класс совпал — но адрес мог остаться от умершего игрока: память
+            // переиспользована, а класс в её первом поле тот же. Раньше кеш
+            // держался до тех пор, пока чтение класса не срывалось, и все
+            // производные (MouseLook, KCC, скелет) молча читали чужой объект.
+            // Раз в секунду сверяемся с источником: он один и дешёвый.
+            const double now = memio::now_seconds();
+            static double s_checked_at = -1e9;
+            if (now - s_checked_at >= 1.0) {
+                s_checked_at = now;
+                const uint64_t fresh = read_local_player_from_static();
+                if (fresh && fresh != cached) {
+                    LogLine("память: локальный игрок сменился 0x%llx -> 0x%llx (кеш был чужим)",
+                            (unsigned long long)cached, (unsigned long long)fresh);
+                    g_local_player = fresh;
+                    return fresh;
+                }
+            }
+            return cached;
+        }
         if (++g_local_player_miss < kLocalPlayerMissLimit) return cached;
     }
 
@@ -923,10 +954,8 @@ static uint64_t resolve_local_player() {
 
     if (!g_game_controller_class || !g_player_manager_class) return 0;
 
-    uint64_t gcb_static_fields = get_class_static_fields(g_game_controller_class);
-    if (!gcb_static_fields) return 0;
-    uint64_t local_player = rd_ptr(gcb_static_fields + GAME_CONTROLLER_LOCAL_PLAYER_FIELD);
-    if (local_player && rd_ptr(local_player) == g_player_manager_class) {
+    const uint64_t local_player = read_local_player_from_static();
+    if (local_player) {
         g_local_player = local_player;
         g_local_player_miss = 0;
         return local_player;
@@ -1089,6 +1118,20 @@ static bool camera_position_from_view(const Mat4& view, Vec3& position);
 // Найденное проверяем: посчитанная мировая позиция обязана совпасть с той,
 // что ESP уже знает (g_cam_pos), иначе это не камера. Расхождение наружу —
 // чтобы в логе было видно, чем именно кончился перебор.
+// Transform из GameObject. У Unity первый компонент в m_Component — всегда сам
+// Transform, а элемент массива — пара {GameObject*, Component*}. Нужно на тот
+// случай, если Camera + CAMERA_NATIVE_TRANSFORM (0x20) — это не Transform, а
+// GameObject камеры: оба смещения по 0x20, перепутать их легко, и тогда все
+// чтения иерархии идут по чужой структуре (лог 19.09: «массивы Transform не
+// читаются», ни один кандидат не дал годной позиции).
+static uint64_t transform_from_gameobject(uint64_t gameobject) {
+    if (gameobject < 0x10000) return 0;
+    const uint64_t components = rd_ptr(gameobject + GAMEOBJECT_COMPONENT_ARRAY);
+    if (components < 0x10000) return 0;
+    const uint64_t transform = rd_ptr(components + COMPONENT_PAIR_PTR);
+    return transform >= 0x10000 ? transform : 0;
+}
+
 static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matrices,
                                      uint64_t& indices, int32_t& index,
                                      float* best_dist = nullptr) {
@@ -1096,35 +1139,35 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
     if (best_dist) *best_dist = -1.f;
 
     struct Cand { uint64_t m, n; int32_t i; };
-    Cand cand[16];
+    Cand cand[96];
     int count = 0;
     auto push = [&](uint64_t m, uint64_t n, int32_t i) {
-        if (!m || !n || i < 0 || i > 100000) return;
+        if (!m || !n || i < 0 || i > 100000 || count >= 96) return;
         const uint64_t ms[2] = {m, rd_ptr(m)};
         const uint64_t ns[2] = {n, rd_ptr(n)};
-        for (int a = 0; a < 2 && count < 16; ++a)
-            for (int b = 0; b < 2 && count < 16; ++b)
+        for (int a = 0; a < 2 && count < 96; ++a)
+            for (int b = 0; b < 2 && count < 96; ++b)
                 if (ms[a] && ns[b]) cand[count++] = {ms[a], ns[b], i};
     };
+    // Один проход по указателю трансформа: пара «где данные TransformAccess,
+    // где индекс» и все известные пары «массивы матриц / массив родителей».
+    auto probe = [&](uint64_t base, uint64_t data_offset, uint64_t index_offset) {
+        const uint64_t data = rd_ptr(base + data_offset);
+        const int32_t  idx  = rd<int32_t>(base + index_offset);
+        if (!data || idx < 0 || idx > 100000) return;
+        static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
+        for (const auto& pr : kPairs) push(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]), idx);
+    };
 
-    if (g_transform_hierarchy_layout_valid) {
-        const TransformHierarchyLayout& L = g_transform_hierarchy_layout;
-        uint64_t data = rd_ptr(native_transform + L.data_offset);
-        int32_t  idx  = rd<int32_t>(native_transform + L.index_offset);
-        uint64_t m = data ? rd_ptr(data + L.matrices_offset) : 0;
-        uint64_t n = data ? rd_ptr(data + L.indices_offset) : 0;
-        if (L.matrices_indirect) m = rd_ptr(m);
-        if (L.indices_indirect)  n = rd_ptr(n);
-        if (m && n && idx >= 0 && idx <= 100000 && count < 16) cand[count++] = {m, n, idx};
+    // Указатели, которые пробуем как Transform: сам адрес и Transform,
+    // доставшийся из того же объекта как из компонента (если это GameObject).
+    uint64_t tf[3] = {native_transform, 0, 0};
+    const uint64_t as_component = rd_ptr(native_transform + COMPONENT_GAMEOBJECT);
+    if (as_component >= 0x10000) {
+        tf[1] = transform_from_gameobject(as_component);
+        const uint64_t nested = rd_ptr(as_component + COMPONENT_GAMEOBJECT);
+        if (nested >= 0x10000 && nested != as_component) tf[2] = transform_from_gameobject(nested);
     }
-    uint64_t data = rd_ptr(native_transform + 0x38);
-    int32_t  idx  = rd<int32_t>(native_transform + 0x40);
-    if (!data || idx < 0 || idx > 100000) {
-        data = rd_ptr(native_transform + 0x18);
-        idx  = rd<int32_t>(native_transform + 0x20);
-    }
-    push(data ? rd_ptr(data + 0x18) : 0, data ? rd_ptr(data + 0x20) : 0, idx);
-    push(data ? rd_ptr(data + 0x08) : 0, data ? rd_ptr(data + 0x10) : 0, idx);
 
     // С чем сверяем найденную позицию. g_cam_pos НЕ годится: его пишет
     // read_camera_transform_pose, то есть ровно тот путь, который на
@@ -1146,25 +1189,83 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
     if (!know_cam && g_cam_pose_valid && vec3_is_finite(g_cam_pos)) {
         ref = g_cam_pos; know_cam = true;
     }
+
     int   best_k = -1;
     float best_d = -1.f;
-    for (int k = 0; k < count; ++k) {
-        Vec3 pos{};
-        if (!read_transform_hierarchy_arrays(cand[k].m, cand[k].n, cand[k].i, pos)) continue;
-        if (!vec3_is_finite(pos)) continue;
-        if (!know_cam) { matrices = cand[k].m; indices = cand[k].n; index = cand[k].i; return true; }
-        const float dx = pos.x - ref.x, dy = pos.y - ref.y, dz = pos.z - ref.z;
-        const float d = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (best_k < 0 || d < best_d) { best_k = k; best_d = d; }
-        // Камера не может стоять в двух метрах от себя самой: нашли — выходим.
-        if (d < 2.0F) break;
+    int   positions = 0;                 // сколько кандидатов дали годную позицию
+    auto evaluate = [&](int from, int to) {
+        for (int k = from; k < to; ++k) {
+            Vec3 pos{};
+            if (!read_transform_hierarchy_arrays(cand[k].m, cand[k].n, cand[k].i, pos)) continue;
+            if (!vec3_is_finite(pos)) continue;
+            ++positions;
+            if (!know_cam) { best_k = k; best_d = 0.f; return; }
+            const float dx = pos.x - ref.x, dy = pos.y - ref.y, dz = pos.z - ref.z;
+            const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (best_k < 0 || d < best_d) { best_k = k; best_d = d; }
+            // Камера не может стоять в двух метрах от себя самой: нашли — выходим.
+            if (d < 2.0F) return;
+        }
+    };
+
+    // 1) раскладка, выученная по игрокам; 2) оба известных расположения
+    // TransformAccess на всех трёх указателях.
+    if (g_transform_hierarchy_layout_valid) {
+        const TransformHierarchyLayout& L = g_transform_hierarchy_layout;
+        for (int t = 0; t < 3 && tf[t]; ++t) {
+            const uint64_t data = rd_ptr(tf[t] + L.data_offset);
+            const int32_t  idx  = rd<int32_t>(tf[t] + L.index_offset);
+            uint64_t m = data ? rd_ptr(data + L.matrices_offset) : 0;
+            uint64_t n = data ? rd_ptr(data + L.indices_offset) : 0;
+            if (L.matrices_indirect) m = rd_ptr(m);
+            if (L.indices_indirect)  n = rd_ptr(n);
+            if (m && n && idx >= 0 && idx <= 100000) {
+                cand[count++] = {m, n, idx};
+                break;                    // раскладка одна — хватит первого
+            }
+        }
     }
-    if (best_k < 0) return false;
+    for (int t = 0; t < 3 && tf[t]; ++t) {
+        probe(tf[t], 0x38, 0x40);
+        probe(tf[t], 0x18, 0x20);
+    }
+    evaluate(0, count);
+
+    // 3) широкий перебор — только когда быстрое не дало ничего. Здесь другие
+    // смещения TransformAccess и все три указателя: на устройстве первые два
+    // прохода не нашли ни одной годной позиции, значит смещения сместились.
+    // Проверка та же (мировая позиция должна совпасть с камерой), поэтому
+    // ложного срабатывания не будет — только лишние чтения, и то при отказе.
+    if (best_k < 0 || best_d > 2.0F) {
+        static const uint64_t kExtended[][2] = {{0x20, 0x28}, {0x28, 0x30}, {0x30, 0x38},
+                                                {0x40, 0x48}, {0x10, 0x18}, {0x48, 0x50}};
+        const int saved = count;
+        for (int t = 0; t < 3 && tf[t]; ++t)
+            for (const auto& off : kExtended) probe(tf[t], off[0], off[1]);
+        // Лучший из быстрых остаётся лучшим: evaluate() сравнивается с ним,
+        // а не ищет заново, — иначе потеряли бы расстояние первого прохода.
+        evaluate(saved, count);
+    }
+
+    // Отказ объясняем полностью: какой трансформ, что дал компонентный путь,
+    // сколько кандидатов вообще дали позицию и насколько далеко лучший.
+    // Без этого по одной строке «массивы не читаются» не видно, где искать.
+    if (best_k < 0 || best_d > 2.0F) {
+        static double s_last = -1e9;
+        const double now = memio::now_seconds();
+        if (now - s_last >= 2.0) {
+            s_last = now;
+            LogLine("фрикам: перебор — трансформ 0x%llx, из компонента 0x%llx, кандидатов %d, позиций %d, ближайшее %.1f м",
+                    (unsigned long long)tf[0], (unsigned long long)tf[1], count, positions,
+                    (double)(best_d >= 0.f ? best_d : -1.f));
+        }
+        if (best_dist) *best_dist = (best_k >= 0 ? best_d : -1.f);
+        return false;
+    }
     if (best_dist) *best_dist = best_d;
     // Порог 2 м, а не полметра: g_cam_pos мог прийти из резервной матрицы вида
     // (она считается по другому источнику и чуть расходится), и из-за жёсткого
     // порога фрикам отказывался включаться там, где камера найдена верно.
-    if (best_d > 2.0F) return false;
     matrices = cand[best_k].m; indices = cand[best_k].n; index = cand[best_k].i;
     return true;
 }
@@ -1718,6 +1819,11 @@ static constexpr uint64_t MOUSELOOK_ANGLES = 0x4C;   // Vector2 накопите
                                                      // [0] rotationX (вверх — меньше),
                                                      // [1] rotationY (вправо — больше)
 static constexpr uint64_t MOUSELOOK_GYRO   = 0x78;   // объект гироскопа (0 = выключен)
+// Кому принадлежит объект: MouseLook.m_EventHandler (+0x20) -> его manager
+// (+0xD0) — тот самый PlayerManager, из которого MouseLook и был взят. Держим
+// рядом с остальными полями, потому что это тот же класс из дампа
+// (Oxide_MouseLook_Fields, сверено по il2cpp.h).
+static constexpr uint64_t MOUSELOOK_EVENT_HANDLER = 0x20;
 // Поля ввода взгляда (+0x88) в расчёте больше нет: MouseLook.ZJo сначала зовёт
 // ZJX, а тот перезаписывает +0x88 вводом касания (str d0, [x19, #0x88], файл
 // libil2cpp.so 0x64e0364), и только потом ZJo читает это поле — наша запись
@@ -1738,7 +1844,7 @@ static std::atomic<uint64_t> g_mouse_look_klass{0};
 // MouseLook» не видно, что чинить — адрес игрока потерялся, объект чужой или
 // просто чтение сорвалось. В лог пишется не чаще раза в 2 с, потому что при
 // настоящей поломке это событие идёт каждый кадр.
-enum class LookFail { none, noPlayer, wrongPlayer, noObject, badSens };
+enum class LookFail { none, noPlayer, wrongPlayer, noObject, badSens, wrongOwner };
 
 // Сообщение — прямо в вызове лога: отдельные русские литералы в game.cpp
 // проверка переводов считает подписями визуалов (строки лога она уже
@@ -1766,6 +1872,34 @@ static void log_look_fail(LookFail f, uint64_t mouse_look, float sens) {
             break;
         default: break;
     }
+}
+
+// Чужой MouseLook: адрес нашёлся и класс подошёл, но владелец (m_EventHandler
+// -> manager) — не тот игрок. В лог не чаще раза в 2 с: при подмене объекта
+// событие идёт каждый кадр.
+static void log_look_wrong_owner(uint64_t mouse_look, uint64_t owner, uint64_t player) {
+    static double s_last = -1e9;
+    const double now = memio::now_seconds();
+    if (now - s_last < 2.0) return;
+    s_last = now;
+    LogLine("память: MouseLook=0x%llx чужой — владелец 0x%llx, а не игрок 0x%llx",
+            (unsigned long long)mouse_look, (unsigned long long)owner, (unsigned long long)player);
+}
+
+// Кому принадлежит этот MouseLook. Почему нельзя верить одному адресу: объект
+// лежит по указателю из игрока, но игрок мог уже умереть, а память — уехать
+// под другой объект, у которого класс в первом поле тот же. Тогда мы читаем и
+// пишем углы ЧУЖОГО игрока: камера не поворачивается, а в логе всё выглядит
+// исправным («MouseLook найден») — ровно то, что жалоба называет «мемори
+// теряет MouseLook». Связь проверяемая и дешёвая: m_EventHandler -> manager
+// обязан вернуть того игрока, из которого объект взят (два чтения). Если поле
+// не читается, владелец неизвестен — тогда решают остальные проверки.
+static uint64_t mouse_look_owner(uint64_t mouse_look) {
+    if (mouse_look < 0x10000) return 0;
+    const uint64_t handler = rd_ptr(mouse_look + MOUSELOOK_EVENT_HANDLER);
+    if (handler < 0x10000) return 0;
+    const uint64_t owner = rd_ptr(handler + EVENT_HANDLER_MANAGER_BACKREF);
+    return owner >= 0x10000 ? owner : 0;
 }
 
 // Последний подтверждённый MouseLook. Зачем. Игрок на устройстве терялся
@@ -1830,6 +1964,16 @@ static bool mouse_look_from_cache(uint64_t player, uint64_t& out) {
         s_ml_cached = 0;
         return false;
     }
+    // Тот ли это игрок. Класс и чувствительность совпали — но объект мог
+    // остаться от умершего игрока, чья память уже переиспользована. Сверяем
+    // владельца (m_EventHandler -> manager) с тем игроком, от которого объект.
+    const uint64_t owner = mouse_look_owner(s_ml_cached);
+    const uint64_t known_player = player ? player : s_ml_cached_player;
+    if (owner && known_player && owner != known_player) {
+        look_mismatch(true);
+        s_ml_cached = 0;
+        return false;
+    }
     look_mismatch(false);
     out = s_ml_cached;
     return true;
@@ -1850,6 +1994,7 @@ static void log_look_cached(int reason, uint64_t mouse_look) {
         case 0: LogLine("память: MouseLook=0x%llx взят из кеша — игрок не подтверждён", (unsigned long long)mouse_look); break;
         case 1: LogLine("память: MouseLook=0x%llx взят из кеша — адрес игрока не той структуры", (unsigned long long)mouse_look); break;
         case 2: LogLine("память: MouseLook=0x%llx взят из кеша — объект не читается", (unsigned long long)mouse_look); break;
+        case 4: LogLine("память: MouseLook=0x%llx взят из кеша — найденный объект чужой", (unsigned long long)mouse_look); break;
         default: LogLine("память: MouseLook=0x%llx взят из кеша — объект чужого класса", (unsigned long long)mouse_look); break;
     }
 }
@@ -1887,6 +2032,17 @@ static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
     if (known ? (klass != known) : (klass < 0x10000)) {
         if (why) *why = LookFail::noObject;
         if (mouse_look_from_cache(player, out)) { log_look_cached(3, out); return true; }
+        return false;
+    }
+    // Свежий объект проверяем строже кеша: он только что найден по указателю,
+    // который мог остаться от умершего игрока. Владелец известен и не совпал —
+    // это чужой MouseLook, писать в него углы нельзя (повернём камеру не тому).
+    const uint64_t owner = mouse_look_owner(mouse_look);
+    if (owner && player && owner != player) {
+        if (why) *why = LookFail::wrongOwner;
+        look_mismatch(true);
+        log_look_wrong_owner(mouse_look, owner, player);
+        if (mouse_look_from_cache(player, out)) { log_look_cached(4, out); return true; }
         return false;
     }
     look_mismatch(false);
