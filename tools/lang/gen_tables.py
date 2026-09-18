@@ -127,6 +127,10 @@ UI_EN = {
     'Фрикам включён': 'Freecam on',
     'Фрикам: камера не найдена': 'Freecam: camera not found',
     'Вперёд': 'Forward', 'Назад': 'Back', 'Вверх': 'Up', 'Вниз': 'Down',
+    # состояние поиска камеры во фрикаме (строка в меню)
+    'Камера': 'Camera', 'ок': 'ok', 'нет камеры': 'no camera',
+    'нет трансформа': 'no transform', 'массивы не читаются': 'arrays unreadable',
+    '%.1f м': '%.1f m',
     'Язык': 'Language', 'Интерфейс': 'Interface', 'Тёмная тема': 'Dark theme',
     'Панель вкладок': 'Tab bar', 'Слева': 'Left', 'Снизу': 'Bottom',
     'Панель слева': 'Panel on the left', 'Панель снизу': 'Panel at the bottom',

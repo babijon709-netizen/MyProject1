@@ -1062,9 +1062,17 @@ static uint64_t g_freecam_matrices = 0;   // базы массивов иера�
 static uint64_t g_freecam_indices = 0;
 static int32_t  g_freecam_index = -1;
 static int      g_freecam_miss = 0;      // чтений подряд, где трансформ не прочитался
+// Почему фрикам не включился. Показывается прямо в меню: таскать лог с
+// устройства ради одной строки «камера не найдена» неудобно, а без причины
+// чинить нечего. 0 = порядок, 1 = нет камеры, 2 = нет трансформа,
+// 3 = массивы Transform не читаются, 4 = мировая позиция не совпала.
+static int      g_freecam_fail = 0;
+static float    g_freecam_fail_dist = -1.f;
 
 static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_t index,
                                      Vec3& pos, Vec4& rot, Vec3& scale);
+// Позиция камеры из матрицы вида (объявлена ниже, рядом с её разбором).
+static bool camera_position_from_view(const Mat4& view, Vec3& position);
 
 // Базы массивов иерархии для трансформа. Кандидатов несколько (раскладку
 // учит скан по игрокам, а он живёт до перезагрузки мира), поэтому каждый
@@ -1118,21 +1126,47 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
     push(data ? rd_ptr(data + 0x18) : 0, data ? rd_ptr(data + 0x20) : 0, idx);
     push(data ? rd_ptr(data + 0x08) : 0, data ? rd_ptr(data + 0x10) : 0, idx);
 
-    const bool know_cam = g_cam_pose_valid && vec3_is_finite(g_cam_pos);
+    // С чем сверяем найденную позицию. g_cam_pos НЕ годится: его пишет
+    // read_camera_transform_pose, то есть ровно тот путь, который на
+    // устройстве может не работать (ESP строит боксы из матрицы вида —
+    // transform_camera_mode = false, — и мусор в g_cam_pos годами никому не
+    // мешал). Сверяемся с позицией из матрицы вида: это та самая матрица,
+    // по которой игра рисует кадр, она всегда свежая. Из-за сверки с
+    // мусорным g_cam_pos фрикам и не включался.
+    Vec3 ref{};
+    bool know_cam = false;
+    if (g_native_camera) {
+        const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
+        Vec3 vpos{};
+        if (camera_position_from_view(view, vpos) && vec3_is_finite(vpos)) { ref = vpos; know_cam = true; }
+    }
+    if (!know_cam && g_frame_cam_basis_valid && vec3_is_finite(g_frame_cam_pos)) {
+        ref = g_frame_cam_pos; know_cam = true;
+    }
+    if (!know_cam && g_cam_pose_valid && vec3_is_finite(g_cam_pos)) {
+        ref = g_cam_pos; know_cam = true;
+    }
+    int   best_k = -1;
+    float best_d = -1.f;
     for (int k = 0; k < count; ++k) {
         Vec3 pos{};
         if (!read_transform_hierarchy_arrays(cand[k].m, cand[k].n, cand[k].i, pos)) continue;
         if (!vec3_is_finite(pos)) continue;
         if (!know_cam) { matrices = cand[k].m; indices = cand[k].n; index = cand[k].i; return true; }
-        const float dx = pos.x - g_cam_pos.x, dy = pos.y - g_cam_pos.y, dz = pos.z - g_cam_pos.z;
-        const float d2 = dx * dx + dy * dy + dz * dz;
-        if (best_dist && (*best_dist < 0.f || d2 < *best_dist * *best_dist)) *best_dist = sqrtf(d2);
-        if (d2 < 0.25F) {   // 0.5 м — тот самый трансформ
-            matrices = cand[k].m; indices = cand[k].n; index = cand[k].i;
-            return true;
-        }
+        const float dx = pos.x - ref.x, dy = pos.y - ref.y, dz = pos.z - ref.z;
+        const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (best_k < 0 || d < best_d) { best_k = k; best_d = d; }
+        // Камера не может стоять в двух метрах от себя самой: нашли — выходим.
+        if (d < 2.0F) break;
     }
-    return false;
+    if (best_k < 0) return false;
+    if (best_dist) *best_dist = best_d;
+    // Порог 2 м, а не полметра: g_cam_pos мог прийти из резервной матрицы вида
+    // (она считается по другому источнику и чуть расходится), и из-за жёсткого
+    // порога фрикам отказывался включаться там, где камера найдена верно.
+    if (best_d > 2.0F) return false;
+    matrices = cand[best_k].m; indices = cand[best_k].n; index = cand[best_k].i;
+    return true;
 }
 
 // Мировая TRS трансформа: идём вверх по родителям, как это делает Unity.
@@ -1212,6 +1246,11 @@ static void log_freecam_fail(int reason, uint64_t transform, float dist) {
 
 bool esp_freecam_active() { return g_freecam_on; }
 
+void esp_freecam_diag(int& code, float& dist) {
+    code = g_freecam_fail;
+    dist = g_freecam_fail_dist;
+}
+
 bool esp_freecam_set(bool on) {
     if (on == g_freecam_on) return g_freecam_on;
     if (!on) {
@@ -1228,6 +1267,7 @@ bool esp_freecam_set(bool on) {
     uint64_t transform = 0;
     if (g_native_camera) transform = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
     if (!transform) {
+        g_freecam_fail = g_native_camera ? 2 : 1; g_freecam_fail_dist = -1.f;
         log_freecam_fail(g_native_camera ? 1 : 0, 0, -1.f);
         return false;
     }
@@ -1235,11 +1275,13 @@ bool esp_freecam_set(bool on) {
     int32_t index = -1;
     float dist = -1.f;
     if (!resolve_transform_arrays(transform, matrices, indices, index, &dist)) {
+        g_freecam_fail = dist >= 0.f ? 4 : 3; g_freecam_fail_dist = dist;
         log_freecam_fail(2, transform, dist);
         return false;
     }
     Matrix34 m{};
     if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), m)) {
+        g_freecam_fail = 3; g_freecam_fail_dist = -1.f;
         log_freecam_fail(3, transform, -1.f);
         return false;
     }
@@ -1254,6 +1296,7 @@ bool esp_freecam_set(bool on) {
     g_freecam_index = index;
     g_freecam_pos = pos;
     g_freecam_on = true;
+    g_freecam_fail = 0; g_freecam_fail_dist = dist;   // 0 = порядок
     LogLine("фрикам: включён, старт (%.1f, %.1f, %.1f), трансформ=0x%llx",
             (double)pos.x, (double)pos.y, (double)pos.z,
             (unsigned long long)transform);
@@ -1740,6 +1783,25 @@ static double   s_ml_cached_at = -1e9;
 // проверка класса и чувствительности каждый кадр страхует от подмены.
 static constexpr double kMlCacheSec = 6.0;
 
+// Самолечение выученного класса. g_mouse_look_klass учится один раз и потом
+// служит пропуском: писать можно только в объект ровно этого класса. Но если
+// выучился мусор (чтение сорвалось в момент обучения) или объект подменился
+// (респавн, техника, Spectator), все дальнейшие проверки идут против чужого
+// класса, и память-аим молчит до перезапуска игры — ровно то, на что жалуются:
+// «теряет MouseLook и перестаёт работать на какое-то время». Поэтому если
+// чужой класс идёт дольше двух секунд, забываем его и учим заново.
+static double s_look_mismatch_since = 0.0;
+static void look_mismatch(bool mismatch) {
+    const double now = memio::now_seconds();
+    if (!mismatch) { s_look_mismatch_since = 0.0; return; }
+    if (!s_look_mismatch_since) { s_look_mismatch_since = now; return; }
+    if (now - s_look_mismatch_since > 2.0 && g_mouse_look_klass.load()) {
+        g_mouse_look_klass.store(0);
+        s_look_mismatch_since = 0.0;
+        LogLine("память: класс MouseLook забыт — учу заново");
+    }
+}
+
 // Кеш годится, только если игрок тот же самый и объект живой: класс на месте
 // и m_Sensitivity в правдоподобных пределах.
 //
@@ -1756,10 +1818,19 @@ static bool mouse_look_from_cache(uint64_t player, uint64_t& out) {
     const uint64_t klass = rd_ptr(s_ml_cached);
     if (!klass) return false;                       // чтение сорвалось — кеш жив
     const uint64_t known = g_mouse_look_klass.load();
-    if (known ? (klass != known) : (klass < 0x10000)) { s_ml_cached = 0; return false; }
+    if (known ? (klass != known) : (klass < 0x10000)) {
+        look_mismatch(true);
+        s_ml_cached = 0;
+        return false;
+    }
     const float sens = rd<float>(s_ml_cached + MOUSE_LOOK_SENSITIVITY_OFFSET);
     if (!std::isfinite(sens)) return false;         // тоже сбой чтения
-    if (sens < 0.05F || sens > 100.0F) { s_ml_cached = 0; return false; }
+    if (sens < 0.05F || sens > 100.0F) {
+        look_mismatch(true);
+        s_ml_cached = 0;
+        return false;
+    }
+    look_mismatch(false);
     out = s_ml_cached;
     return true;
 }
@@ -1818,6 +1889,7 @@ static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
         if (mouse_look_from_cache(player, out)) { log_look_cached(3, out); return true; }
         return false;
     }
+    look_mismatch(false);
     s_ml_cached = mouse_look;
     s_ml_cached_player = player;
     s_ml_cached_at = memio::now_seconds();
@@ -1834,6 +1906,7 @@ bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro) {
     }
     const float value = rd<float>(mouse_look + MOUSE_LOOK_SENSITIVITY_OFFSET);
     if (!std::isfinite(value) || value < 0.05F || value > 100.0F) {
+        look_mismatch(true);
         log_look_fail(LookFail::badSens, mouse_look, value);
         return false;
     }
@@ -1841,7 +1914,9 @@ bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro) {
     invert_y     = rd<uint8_t>(mouse_look + MOUSELOOK_INVERT) != 0;
     gyro         = rd_ptr(mouse_look + MOUSELOOK_GYRO) >= 0x10000;
     // Структура сошлась — запоминаем класс: с этого момента писать можно
-    // только в объект ровно этого класса.
+    // только в объект ровно этого класса. Мусор в этом чтении не страшен:
+    // ноль не пройдёт проверку выше, а чужой ненулевой адрес забудется
+    // самолечением через две секунды (см. look_mismatch).
     g_mouse_look_klass.store(rd_ptr(mouse_look));
     return true;
 }

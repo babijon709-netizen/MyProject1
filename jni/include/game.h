@@ -372,6 +372,10 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z);
 // её на место (и по выходу из чита это делается само).
 bool esp_freecam_set(bool on);
 bool esp_freecam_active();
+// Почему фрикам не включился (для меню): 0 порядок, 1 нет камеры,
+// 2 нет трансформа, 3 массивы Transform не читаются, 4 мировая позиция
+// разошлась с той, что знает ESP (расхождение в метрах — во втором аргументе).
+void esp_freecam_diag(int& code, float& dist);
 // Сдвинуть камеру на метры: вперёд/назад вдоль взгляда (без наклона), вправо
 // и вверх по мировой вертикали.
 bool esp_freecam_move(float forward, float right, float up);

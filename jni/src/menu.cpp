@@ -730,10 +730,39 @@ float TabContent(int tab, float dt, float cW) {
         // базы перед рейдом. Пока он включён, аим молчит: точка прицела
         // считается от глаза персонажа, а камера улетела от него.
         SHdr(XS("Фрикам"));
-        CardBg(Layout::RowH + Layout::SliderH);
+        CardBg(Layout::RowH * 2.f + Layout::SliderH);
         ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
         SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
-                  1.f, 60.f, XS("%.0f м/с"), true, false, g_state.sl_freecam, dt);
+                  1.f, 60.f, XS("%.0f м/с"), false, false, g_state.sl_freecam, dt);
+        // Чем кончился поиск камеры. Снаружи любой отказ выглядит одинаково
+        // («камера не найдена»), а причин пять и чинятся они по-разному,
+        // поэтому причина пишется прямо здесь — лог ради неё таскать незачем.
+        {
+            auto* dl  = ImGui::GetWindowDrawList();
+            auto* fn  = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            const float rowH = Layout::RowH, inset = Layout::Inset, padX = Layout::PadX;
+            const float avW  = ImGui::GetContentRegionAvail().x;
+            auto pos = ImGui::GetCursorScreenPos();
+            const float cX = pos.x + inset, cW = avW - inset * 2.f;
+            const float cy = pos.y + rowH * 0.5f;
+            ImGui::InvisibleButton("##fcd", {avW, rowH});
+            int code = 0; float dist = -1.f;
+            esp_freecam_diag(code, dist);
+            char val[32];
+            switch (code) {
+                case 0:  snprintf(val, sizeof(val), "%s", XS("ок")); break;
+                case 1:  snprintf(val, sizeof(val), "%s", XS("нет камеры")); break;
+                case 2:  snprintf(val, sizeof(val), "%s", XS("нет трансформа")); break;
+                case 3:  snprintf(val, sizeof(val), "%s", XS("массивы не читаются")); break;
+                default: snprintf(val, sizeof(val), XS("%.1f м"), (double)dist); break;
+            }
+            auto vsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, val);
+            dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f},
+                        C::UA(C::Txt(), 1.f), XS("Камера"));
+            dl->AddText(fn, fs, {cX + cW - padX - vsz.x, cy - vsz.y * 0.5f},
+                        C::UA(code ? C::Dim() : C::Acc(), 1.f), val);
+        }
 
         // Всегда день: время суток каждую секунду возвращается в полдень.
         SHdr(XS("Мир"));

@@ -9,6 +9,7 @@
 static const LangPair kUiEn[] = {
     {"%.0f м", "%.0f m"},
     {"%.0f м/с", "%.0f m/s"},
+    {"%.1f м", "%.1f m"},
     {"3D боксы", "3D boxes"},
     {"«%s»", "\"%s\""},
     {"Автофарм", "Auto-farm"},
@@ -50,6 +51,7 @@ static const LangPair kUiEn[] = {
     {"Иксрей", "X-Ray"},
     {"Интерфейс", "Interface"},
     {"Искать до", "Search up to"},
+    {"Камера", "Camera"},
     {"Конфиг", "Config"},
     {"Конфиг загружен", "Config loaded"},
     {"Конфиг создан", "Config created"},
@@ -122,8 +124,12 @@ static const LangPair kUiEn[] = {
     {"Язык", "Language"},
     {"Ящики", "Crates"},
     {"ведёт", "tracking"},
+    {"массивы не читаются", "arrays unreadable"},
+    {"нет камеры", "no camera"},
     {"нет объекта", "no object"},
     {"нет отклика", "no response"},
+    {"нет трансформа", "no transform"},
+    {"ок", "ok"},
 };
 
 // Подписи визуалов ESP: ресурсы, предметы, животные, ящики, оружие.
