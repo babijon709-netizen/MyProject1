@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <cmath>
+#include <ctime>
+#include <cstring>
 #include <linux/input.h>
 #include <linux/uinput.h>
 
@@ -16,6 +18,15 @@
 #define UNGRAB 0
 #define GRAB 1
 
+// Слоты синтетических пальцев: 9 — «прежний» палец аимбота (Touch_Down/Move/Up,
+// id 60000), 6..8 — пальцы автофарма (Touch_*_N: 0 стик, 1 камера, 2 удар).
+// Разделение важное: аимбот, в отличие от автофарма, держит палец на месте и
+// ПЕРЕСЫЛАЕТ ту же точку каждый кадр — так у игры остаётся «живым» удержание
+// камеры (см. UpdateAim: hold still, keep the touch alive). Поэтому пропуск
+// повторов пакета к этому пальцу не применяется — см. Upload().
+static constexpr int kAimFingerSlot = 9;
+static constexpr int kAimFingerId   = 60000;
+
 bool other_touch;
 
 static uint32_t orientation = 0;
@@ -23,6 +34,8 @@ static float screenHeight = 0, screenWidth = 0;
 
 struct touchObj {
     bool isDown = false;
+    // Касание забрал оверлей: в игру оно не уходит (см. Touch_BlockRect).
+    bool blocked = false;
     int x = 0;
     int y = 0;
     int id = 0;
@@ -43,6 +56,19 @@ static struct {
 static targ targF[maxE];
 
 static touchObj Finger[maxE][maxF];
+
+// Прямоугольник экрана, касания внутри которого оверлей забирает себе: в игру
+// они не уходят вовсе. Нужен фрикаму — его джойстик лежит поверх игры, и без
+// этого палец на нём ещё и ходил бы персонажем, а камера во фрикаме привязана
+// к телу и поехала бы вместе с ним. Пока прямоугольник не задан, поведение
+// ровно прежнее: ни один палец не блокируется.
+static bool  g_block_on = false;
+static float g_block_x0 = 0.f, g_block_y0 = 0.f, g_block_x1 = 0.f, g_block_y1 = 0.f;
+
+void Touch_BlockRect(bool on, float x0, float y0, float x1, float y1) {
+    g_block_on = on;
+    g_block_x0 = x0; g_block_y0 = y0; g_block_x1 = x1; g_block_y1 = y1;
+}
 
 static int fdNum = 0, origfd[maxE], nowfd;
 
@@ -89,18 +115,58 @@ static void genRandomString(char *string, int length) {
     string[length - 1] = '\0';
 }
 
+// Диагностика лага автофарма: сколько раз пересобирали и отправляли пакет
+// событий синтетического тача и сколько миллисекунд на это ушло суммарно.
+// Upload() вызывается на КАЖДЫЙ SYN_REPORT, то есть десятки раз в секунду, и
+// делает write() в uinput плюс ожидание флага — на телефоне это заметная
+// статья расхода кадра, но из лога автофарма её раньше не было видно вовсе.
+static unsigned long long g_touch_upload_calls = 0;
+static double             g_touch_upload_ms    = 0.0;
+static unsigned long long g_touch_upload_skipped = 0;
+// Последний отправленный пакет: повторы не пишем в uinput (см. Upload()).
+// input_event в этой сборке заголовков — 8 байт, но берём размер с запасом от
+// самого типа: 11 пальцев × 6 событий + SYN_REPORT + до двух BTN_* при подъёме.
+static struct input_event g_touch_last_packet[80];
+static size_t             g_touch_last_bytes = 0;
+
+void Touch_UploadStats(unsigned long long& calls, double& ms, unsigned long long& skipped) {
+    calls   = g_touch_upload_calls;
+    ms      = g_touch_upload_ms;
+    skipped = g_touch_upload_skipped;
+}
+
+static inline double TouchNowMs() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+// Upload() зовут ДВА потока: поток чтения тачскрина (на каждый SYN_REPORT) и
+// поток оверлея через синтетические пальцы (каждый Touch_Down_N/Move/Up). Пока
+// пакет собирается, второй должен ждать — раньше это было `while (bTouch);`,
+// то есть активное ожидание на ядре: на телефоне такие ожидания съедают квант
+// CPU у самой игры и превращаются в просадку кадров ровно тогда, когда бот
+// активно водит пальцами. Обычный мьютекс ждёт без расхода CPU.
+static pthread_mutex_t g_touch_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool            g_touch_first_down = true;
+
 static void Upload() {
-    static bool bTouch = false;
-    static bool isFirstDown = true;
-    while (bTouch);
-    bTouch = true;
+    const double t0 = TouchNowMs();
+    pthread_mutex_lock(&g_touch_mutex);
+    bool isFirstDown = g_touch_first_down;
+    // Есть ли в собираемом пакете палец аимбота. Такой пакет уходит в uinput
+    // ВСЕГДА, даже если он байт в байт повторяет предыдущий (см. пропуск
+    // повторов ниже): удержание камеры аимботом держится именно на этих
+    // повторах, и прошлая сборка писала их каждый кадр.
+    bool aimFinger = false;
     int tmpCnt = 0, tmpCnt2 = 0, i, j;
     for (i = 0; i < fdNum; i++) {
         for (j = 0; j < maxF; j++) {
-            if (Finger[i][j].isDown) {
+            if (Finger[i][j].isDown && !Finger[i][j].blocked) {
                 if (tmpCnt2++ > 10) {
                     goto finish;
                 }
+                if (Finger[i][j].id == kAimFingerId) aimFinger = true;
                 input.event[tmpCnt].type = EV_ABS;
                 input.event[tmpCnt].code = ABS_X;
                 input.event[tmpCnt].value = Finger[i][j].x;
@@ -159,14 +225,50 @@ static void Upload() {
     input.event[tmpCnt].value = 0;
     tmpCnt++;
 
+    // ---- Пропуск повторов ---------------------------------------------------
+    // В событие входит только список касаний, но Upload() зовётся на КАЖДЫЙ
+    // SYN_REPORT от тачскрина и на каждое изменение синтетического пальца, а
+    // полный пакет состоит из 6 событий на палец (ABS_X/Y, MT_POSITION_X/Y,
+    // TRACKING_ID, SYN_MT_REPORT) плюс SYN_REPORT. Кадры, где пальцы стоят на
+    // месте (а таких при фарме большинство: палец удара переставляется пару
+    // раз в секунду, джойстик — только когда бот реально идёт), пересобирали и
+    // переписывали ровно тот же пакет: на 4 пальцах это ~26 событий в uinput на
+    // каждый SYN_REPORT — десятки лишних write() в секунду на обеих сторонах
+    // (наш поток и input-поток системы). Сравниваем пакет с уже отправленным и
+    // молчим, если он не изменился. Первый пакет после старта и всё, что
+    // менялось (позиция, нажатие, отпускание, ids), уходят как раньше.
+    //
+    // Исключение — палец аимбота (aimFinger). Аимбот держит камеру на цели
+    // ПЕРЕСЫЛКОЙ одной и той же точки каждый кадр (UpdateAim: «держим тач живым,
+    // ничего не двигаем»), и в сборке до этих правок такие пакеты уходили всегда.
+    // Как только мы начали их глушить, аим перестал удерживать прицел: у игры
+    // палец числится нажатым, а удержание камеры теряется (автофарм при этом
+    // работает — его пальцы меняют позицию каждый такт). Поэтому повтор
+    // пропускаем, только когда пакет НЕ несёт пальца аимбота: экономия на
+    // простое бота сохраняется полностью, а путь аимбота остаётся прежним.
+    const size_t bytes = sizeof(struct input_event) * (size_t)tmpCnt;
+    if (!aimFinger && bytes == g_touch_last_bytes && memcmp(input.event, g_touch_last_packet, bytes) == 0) {
+        g_touch_first_down = isFirstDown;
+        ++g_touch_upload_calls;      // вызов был, но отправки не потребовал
+        ++g_touch_upload_skipped;
+        g_touch_upload_ms += TouchNowMs() - t0;
+        pthread_mutex_unlock(&g_touch_mutex);
+        return;
+    }
+    memcpy(g_touch_last_packet, input.event, bytes);
+    g_touch_last_bytes = bytes;
+
     if (is && isFirstDown) {
         isFirstDown = false;
         write(nowfd, &input, sizeof(struct input_event) * (tmpCnt + 2));
     } else {
         write(nowfd, input.event, sizeof(struct input_event) * tmpCnt);
     }
+    g_touch_first_down = isFirstDown;
 
-    bTouch = false;
+    ++g_touch_upload_calls;
+    g_touch_upload_ms += TouchNowMs() - t0;
+    pthread_mutex_unlock(&g_touch_mutex);
 }
 
 static void *TypeA(void *arg) {
@@ -258,8 +360,12 @@ static void *TypeA(void *arg) {
                     }
                     io.MousePos = {x, y};
                     io.MouseDown[0] = true;
+                    Finger[i][latest].blocked = g_block_on && x >= g_block_x0 &&
+                                                x <= g_block_x1 && y >= g_block_y0 &&
+                                                y <= g_block_y1;
                 } else {
                     io.MouseDown[0] = false;
+                    Finger[i][latest].blocked = false;
                 }
                 if (!Touch_readOnly) {
                     Upload();
@@ -487,37 +593,49 @@ void Touch_Close() {
     }
 }
 
+float Touch_DeviceUnitsPerPixel() {
+    if (!Touch_initialized || devMaxX <= 0 || devMaxY <= 0) return 1.0f;
+    float s = ::scale_x < ::scale_y ? ::scale_x : ::scale_y;
+    return (s > 0.01f && s < 100.0f) ? s : 1.0f;
+}
+
 void Touch_Down(float xt, float yt) {
     if (!Touch_initialized || Touch_readOnly) return;
-    int x = 0, y = 0;
+    // Keep sub-pixel precision all the way to the device grid: the touch
+    // controller usually has finer resolution than the display, and the game
+    // receives float coordinates. Truncating to whole screen pixels here would
+    // make the smallest possible camera step larger than a head at range.
+    float x = 0.0f, y = 0.0f;
     switch (orientation) {
         case 1: {
-            x = (int) ::screenHeight - (int) yt;
-            y = (int) xt;
+            x = ::screenHeight - yt;
+            y = xt;
             break;
         }
         case 2: {
-            x = (int) ::screenHeight - (int) xt;
-            y = (int) ::screenWidth - (int) yt;
+            x = ::screenHeight - xt;
+            y = ::screenWidth - yt;
             break;
         }
         case 3: {
-            x = (int) yt;
-            y = (int) ::screenWidth - (int) xt;
+            x = yt;
+            y = ::screenWidth - xt;
             break;
         }
         default: {
-            x = (int) xt;
-            y = (int) yt;
+            x = xt;
+            y = yt;
             break;
         }
     }
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    touchObj &touch = Finger[0][9];
-    touch.id = 60000;
-    touch.x = (int) (x * ::scale_x);
-    touch.y = (int) (y * ::scale_y);
+    if (x < 0.0f) x = 0.0f;
+    if (y < 0.0f) y = 0.0f;
+    touchObj &touch = Finger[0][kAimFingerSlot];
+    touch.id = kAimFingerId;
+    touch.x = (int) lroundf(x * ::scale_x);
+    touch.y = (int) lroundf(y * ::scale_y);
+    if (devMaxX > 0 && touch.x > devMaxX) touch.x = devMaxX;
+    if (devMaxY > 0 && touch.y > devMaxY) touch.y = devMaxY;
     touch.isDown = true;
     Upload();
 }
@@ -527,7 +645,44 @@ void Touch_Move(float x, float y) {
 
 void Touch_Up() {
     if (!Touch_initialized || Touch_readOnly) return;
-    touchObj &touch = Finger[0][9];
+    touchObj &touch = Finger[0][kAimFingerSlot];
     touch.isDown = false;
     Upload();
+}
+
+// ---- Extra synthetic fingers (auto-farm) ------------------------------------
+// Same coordinate pipeline as Touch_Down(), but in their own slots (6..8) so
+// they coexist with the aimbot finger in slot 9 and with real fingers.
+void Touch_Down_N(int finger, float xt, float yt) {
+    if (!Touch_initialized || Touch_readOnly) return;
+    if (finger < 0 || finger > 2) return;
+    float x = 0.0f, y = 0.0f;
+    switch (orientation) {
+        case 1: { x = ::screenHeight - yt; y = xt; break; }
+        case 2: { x = ::screenHeight - xt; y = ::screenWidth - yt; break; }
+        case 3: { x = yt; y = ::screenWidth - xt; break; }
+        default: { x = xt; y = yt; break; }
+    }
+    if (x < 0.0f) x = 0.0f;
+    if (y < 0.0f) y = 0.0f;
+    touchObj &touch = Finger[0][6 + finger];
+    touch.id = 61000 + finger;
+    touch.x = (int) lroundf(x * ::scale_x);
+    touch.y = (int) lroundf(y * ::scale_y);
+    if (devMaxX > 0 && touch.x > devMaxX) touch.x = devMaxX;
+    if (devMaxY > 0 && touch.y > devMaxY) touch.y = devMaxY;
+    touch.isDown = true;
+    Upload();
+}
+
+void Touch_Up_N(int finger) {
+    if (!Touch_initialized || Touch_readOnly) return;
+    if (finger < 0 || finger > 2) return;
+    touchObj &touch = Finger[0][6 + finger];
+    touch.isDown = false;
+    Upload();
+}
+
+bool Touch_CanInject() {
+    return Touch_initialized && !Touch_readOnly;
 }

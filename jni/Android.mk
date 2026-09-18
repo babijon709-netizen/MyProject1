@@ -22,7 +22,15 @@ LOCAL_LDFLAGS := -Wl,--gc-sections,-s,--strip-all -Wl,-x -Wl,--build-id=none -pi
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PATH)/include/ImGui/backends $(LOCAL_PATH)/src
 
 LOCAL_SRC_FILES := \
-    src/main.cpp src/game.cpp src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
+    src/main.cpp \
+    src/process.cpp src/audio.cpp src/theme.cpp src/hud.cpp \
+    src/esp_draw.cpp src/aim.cpp src/farm.cpp \
+    src/widgets.cpp src/menu.cpp src/config.cpp \
+    src/game.cpp src/game_markers.cpp src/game_farm.cpp src/logfile.cpp \
+    src/lang.cpp \
+    src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
+    src/VidAvatar.cpp \
+    src/third_party/tjpgd/tjpgd.c \
     src/Blur/Blur.cpp \
     src/ImGui/imgui.cpp src/ImGui/imgui_draw.cpp src/ImGui/imgui_tables.cpp \
     src/ImGui/imgui_widgets.cpp src/ImGui/backends/imgui_impl_android.cpp \

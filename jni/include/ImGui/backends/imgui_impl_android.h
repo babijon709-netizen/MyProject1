@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include "imgui.h"
 #ifndef IMGUI_DISABLE
 
