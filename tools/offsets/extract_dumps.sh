@@ -7,7 +7,7 @@
 #   tools/offsets/extract_dumps.sh /tmp/dump            # текущие дампы из рабочего дерева
 #   tools/offsets/extract_dumps.sh /tmp/olddump HEAD~1  # дампы из прошлого коммита
 #
-# На выходе: <dir>/{dump.cs,il2cpp.h,script.json,libil2cpp.so}
+# На выходе: <dir>/{dump.cs,il2cpp.h,script.json,libil2cpp.so,libunity.so}
 set -euo pipefail
 
 OUT="${1:?usage: extract_dumps.sh <outdir> [git-ref]}"
@@ -60,6 +60,32 @@ PY
 dd if="$OUT/libil2cpp.7z" bs=1M iflag=skip_bytes,count_bytes \
    skip="$OFF" count="$SZ" status=none of="$OUT/pack.bin"
 xz --format=raw --arm64 --lzma2=dict="$DICT" -dc "$OUT/pack.bin" > "$OUT/libil2cpp.so"
-rm -f "$OUT/pack.bin" "$OUT/dump.7z" "$OUT/libil2cpp.7z"
+
+# libunity.so: нативные объекты Unity (Camera, Transform, GameObject) — это
+# класс C из PROVENANCE.md. Из dump.cs он не выводится, но при смене версии
+# движка пересчитывать придётся именно по нему, поэтому кладём рядом.
+echo "== libunity.7z -> $OUT/libunity.so"
+if fetch libunity.7z "$OUT/libunity.7z"; then
+    python3 - "$OUT" <<'PY'
+import sys, py7zr, os, shutil
+out = sys.argv[1]
+with py7zr.SevenZipFile(out + '/libunity.7z', 'r') as z:
+    z.extractall(path=out + '/_unity')
+src = None
+for root, _dirs, files in os.walk(out + '/_unity'):
+    for f in files:
+        if f == 'libunity.so':
+            src = os.path.join(root, f)
+if not src:
+    raise SystemExit('в архиве нет libunity.so')
+shutil.move(src, out + '/libunity.so')
+shutil.rmtree(out + '/_unity')
+PY
+    rm -f "$OUT/libunity.7z"
+else
+    echo "   нет libunity.7z в ${REF:-рабочем дереве} — пропускаю"
+fi
+
+rm -f "$OUT/pack.bin" "$OUT/dump.7z" "$OUT/libil2cpp.7z" "$OUT/libunity.7z"
 
 ls -la "$OUT"

@@ -1,11 +1,30 @@
 # Откуда берётся каждый оффсет (PROVENANCE)
 
 Живой срез для билда `62a8534` (предыдущий — `89e0b63`). Дампы лежат в
-корне репозитория: `dump.7z` (dump.cs, il2cpp.h, script.json) и
-`libil2cpp.7z`; распаковка — `tools/offsets/extract_dumps.sh <dir> [git-ref]`.
+корне репозитория: `dump.7z` (dump.cs, il2cpp.h, script.json), `libil2cpp.7z`
+и `libunity.7z`; распаковка — `bash tools/offsets/extract_dumps.sh <dir> [git-ref]`.
+
+### Отпечаток текущего набора дампов
+
+Первое, что делается с новыми дампами: сравнить эти цифры. Совпала
+версия движка — класс C (рантайм/ABI) трогать не нужно, едут только поля
+и RVA. Не совпала — пересчитывать всё, включая раскладку нативных
+объектов Unity.
+
+| что | значение |
+|---|---|
+| версия Unity | **6000.3.18f1** (из строк libil2cpp.so/libunity.so) |
+| версия метаданных | v39 (шапка dump.cs) |
+| таблицы | типов 31138, методов 275631, полей 136787 |
+| `dump.cs` | 137920389 байт, sha1 `509671dee2f9…` |
+| `il2cpp.h` | 218831888 байт, sha1 `2b6da92bd8ad…` |
+| `script.json` | 232773073 байт, sha1 `bada792c23e1…` |
+| `libil2cpp.so` | 231223744 байт, sha1 `b78938706056…` |
+| `libunity.so` | 24919632 байт, sha1 `354e4084943e…` |
+
 
 Машиночитаемый источник истины — `tools/offsets/offsets_map.json`
-(178 записей); этот файл — его человеческое объяснение: не «какое число
+(186 записей); этот файл — его человеческое объяснение: не «какое число
 стоит», а «откуда оно взялось и как его найти заново». Значения здесь
 совпадают с `jni/src/game_offsets.h`; при расхождении верить заголовку и
 карте, а этот файл пересобрать (`make_provenance.py`).
@@ -14,9 +33,9 @@
 
 | класс | сколько | откуда | уезжает ли каждый билд | чем проверяется |
 |---|---|---|---|---|
-| **A. Смещения полей** | 137 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
+| **A. Смещения полей** | 141 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
 | **B. `*_TYPEINFO_RVA`** | 3 | слоты глобальных `Il2CppClass*` в `.data.rel.ro` `libil2cpp.so` | **да, всегда** | `typeinfo_rva.py` + отпечаток со старого дампа |
-| **C. Рантайм/ABI** | 38 | раскладка Unity/IL2CPP-объектов, не выводится из `dump.cs` | только при смене версии Unity/IL2CPP | вручную (дизасм паттернов), см. §C |
+| **C. Рантайм/ABI** | 41 | раскладка Unity/IL2CPP-объектов, не выводится из `dump.cs` | только при смене версии Unity/IL2CPP | вручную (дизасм паттернов), см. §C |
 
 Отдельно — не константы, но тоже привязано к билду: имена классов (сверяются
 в рантайме со строкой `Il2CppClass.name`) и окно скана `TOD_SCAN_RVA_*`.
@@ -142,6 +161,8 @@
 | `EVENT_HANDLER_LOOK_DIRECTION` | 0x140 | `LookDirection` | `Il2CppObject*` |
 | `GUM_RAYCAST_DATA` | 0x160 | `RaycastData` | `Il2CppObject*` |
 | `GUM_AIM_RAYCAST` | 0x168 | `AimRaycast` | `Il2CppObject*` |
+| `EVENT_HANDLER_LAST_HIT_POINT` | 0x170 | `LastLocalHitPoint` | `Il2CppObject*` |
+| `EVENT_HANDLER_LAST_HIT_TIME` | 0x178 | `LastLocalHitTime` | `Il2CppObject*` |
 | `EVENT_HANDLER_AIM_ACTIVITY` | 0x270 | `Aim` | `Gub_o*` |
 
 ### `Oxide_PlayerInventory_Fields`  (PlayerInventory)
@@ -261,6 +282,7 @@
 | `MINEABLE_LOOT` | 0xa0 | `m_Loot` | `Il2CppObject*` |
 | `MINEABLE_FINISH_BONUS` | 0xa8 | `m_FinishBonus` | `Il2CppObject*` |
 | `MINEABLE_MAX_HEALTH` | 0xc0 | `m_MaxHealth` | `float` |
+| `MINEABLE_HIT_ANCHOR` | 0xc8 | `LXX` | `UnityEngine_Transform_o*` |
 | `MINEABLE_FRACTION` | 0xd0 | `fractionRemaining` | `float` |
 | `MINEABLE_EXPERIENCE` | 0xd4 | `m_Experience` | `int32_t` |
 | `MINEABLE_ENTITY_TYPE` | 0xd8 | `entityType` | `int32_t` |
@@ -377,7 +399,13 @@
 | `RAYCASTHIT_POINT` | 0x0 | `m_Point` | `UnityEngine_Vector3_o` |
 | `RAYCASTHIT_NORMAL` | 0xc | `m_Normal` | `UnityEngine_Vector3_o` |
 | `RAYCASTHIT_DISTANCE` | 0x1c | `m_Distance` | `float` |
-| `RAYCASTHIT_COLLIDER` | 0x28 | `m_Collider` | `UnityEngine_Collider_o*` |
+| `RAYCASTHIT_COLLIDER` | 0x28 | `m_Collider` | `UnityEngine_EntityId_o` |
+
+### `Oxide_GenericVitals_Fields`  (Oxide_GenericVitals_Fields)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `VITALS_MAX_HEALTH` | 0x88 | `m_MaxHealth` | `float` |
 
 ---
 
@@ -419,46 +447,49 @@ python3 tools/offsets/typeinfo_rva.py --so <new>/libil2cpp.so --script <new>/scr
 смене версии Unity. `update_offsets.py` их не проверяет (в карте `kind:
 runtime`) — после крупного апдейта движка сверять руками.
 
-| константа | значение | что это |
-|---|---|---|
-| `CAMERA_PROJECTION_MATRIX` | 0xb0 | нативная Camera (libunity.so): кеш projection Matrix4x4; ленивый, при внешнем чтении устаревает — только фолбэк |
-| `CAMERA_VIEW_MATRIX` | 0x70 | нативная Camera: кеш worldToCamera Matrix4x4; пересобирается только в геттерах Unity по dirty-флагу 0x502, поэтому основной путь — поза живого Transform (0x20) |
-| `CAMERA_WORLD_TO_CLIP` | 0xf0 | нативная Camera: кеш worldToClip Matrix4x4 |
-| `CAMERA_PREV_VIEW_PROJ` | 0x5c8 | нативная Camera: матрица прошлого кадра (motion vectors) |
-| `CAMERA_NATIVE_TRANSFORM` | 0x20 | нативная Camera -> её Transform |
-| `CAMERA_FOV_DEGREES` | 0x170 | нативная Camera: field of view, float (градусы) |
-| `CAMERA_ASPECT` | 0x4e0 | нативная Camera: aspect, float |
-| `CAMERA_NEAR_CLIP` | 0x454 | нативная Camera: near clip plane, float — сюда пишет X-ray и отсюда же восстанавливает |
-| `CAMERA_FAR_CLIP` | 0x458 | нативная Camera: far clip plane, float |
-| `CAMERA_VIEW_DIRTY` | 0x502 | нативная Camera: dirty-байт кеша view (0x502) |
-| `CAMERA_PROJ_DIRTY` | 0x500 | нативная Camera: dirty-байт кеша projection (0x500) |
-| `MANAGED_CACHED_PTR` | 0x10 | UnityEngine.Object.m_CachedPtr: managed-обёртка -> нативный объект |
-| `IL2CPP_STRING_LENGTH` | 0x10 | System.String.length (UTF-16) |
-| `IL2CPP_STRING_CHARS` | 0x14 | System.String: первый символ (UTF-16) |
-| `WEAPONVIEW_WEAPON_BASE` | 0x48 | обёртка weapon view (имя класса обфусцировано): указатель на WeaponBase |
-| `WEAPONVIEW_PIECE` | 0x50 | обёртка weapon view: WeaponPiece |
-| `WEAPONVIEW_ROOT_TRANSFORM` | 0x60 | обёртка weapon view: корневой Transform модели |
-| `WEAPONVIEW_INNER` | 0x10 | обёртка weapon view: внутренний объект (0x10) |
-| `IL2CPP_CLASS_NAME` | 0x10 | Il2CppClass.name (Il2CppString*) — по нему код сверяет имена классов в рантайме |
-| `IL2CPP_CLASS_NAMESPACE` | 0x18 | Il2CppClass.namespace (Il2CppString*) |
-| `SYNC_VALUE_OFFSET` | 0x20 | Mirror SyncVar<T>.Value |
-| `IL2CPP_ARRAY_LENGTH` | 0x18 | Il2CppArray.max_length (int32) |
-| `TRANSFORM_CHILDREN_ARRAY` | 0x48 | нативный Transform: массив детей |
-| `TRANSFORM_CHILD_COUNT` | 0x58 | нативный Transform: число детей (int32) |
-| `COMPONENT_GAMEOBJECT` | 0x20 | нативный Component.m_GameObject |
-| `GAMEOBJECT_COMPONENT_ARRAY` | 0x20 | нативный GameObject.m_Component (массив пар) |
-| `COMPONENT_PAIR_PTR` | 0x8 | элемент m_Component: пара {GameObject*, Component*} — указатель на компонент |
-| `GAMEOBJECT_NAME_GUESS` | 0x48 | первая догадка на GameObject.name (core::string с SSO); уточняется в рантайме перебором кандидатов по именам костей |
-| `IL2CPP_LIST_ITEMS` | 0x10 | List<T>._items |
-| `IL2CPP_LIST_SIZE` | 0x18 | List<T>._size (int32) |
-| `IL2CPP_ARRAY_FIRST_ELEMENT` | 0x20 | Il2CppArray: первый элемент (данные начинаются отсюда) |
-| `DICT_ENTRIES` | 0x18 | Dictionary<K,V>._entries (массив struct Entry) |
-| `DICT_ENTRY_STRIDE` | 0x18 | размер struct Entry {hashCode, next, key, value} |
-| `DICT_ENTRY_VALUE` | 0x10 | смещение value внутри struct Entry |
-| `TOD_SKY_CYCLE` | 0x40 | TOD_Sky.Cycle. Имя класса TOD_Sky обфусцировано и ротирует каждый билд (IY -> UV), поэтому не field: искать grep'ом 'TOD_CycleParameters_o* Cycle' в il2cpp.h — offset поля Cycle и есть это значение |
-| `TOD_SCAN_RVA_BEGIN` | 0xd8d0000 | НЕ поле: начало области глобальных Il2CppClass*-слотов в .data.rel.ro, которую скан в always_day_tick() перебирает в поисках TOD_Sky. Уезжает каждый билд вместе с *_TYPEINFO_RVA (было 0xD7A0000). Проверка: кандидаты typeinfo_rva.py для класса TOD_Sky обязаны попасть в [BEGIN,END) |
-| `TOD_SCAN_RVA_END` | 0xd970000 | конец окна скана TOD_Sky = BEGIN + 0xA0000 (было 0xD840000) |
-| `GUI_VALUE` | 0x20 | значение внутри обёртки GuI`1<T>: в il2cpp.h у GuI_1_Fields полей нет (generic), смещение подтверждено дизассемблером FPMelee.ZkX 0x6533a20 — ldr x8,[x19,#0xc8]; ldr x8,[x8,#0x160]; ldr x20,[x8,#0x20] |
+| константа | значение | что это | где искать в дампах |
+|---|---|---|---|
+| `PMK_HEALTH` | 0x98 | НЕ ИСПОЛЬЗУЕТСЯ. AsyncReactiveProperty<float> здоровья сущности | ? (класс ротирует) — не используется в коде. Если понадобится: в том же классе, что PMP_ENTITY, поле типа AsyncReactiveProperty<float> — проверить по 0x98 |
+| `PMP_ENTITY` | 0x68 | НЕ ИСПОЛЬЗУЕТСЯ. При обновлении можно не переносить; если понадобится — искать класс, у которого на 0x98 лежит AsyncReactiveProperty_1_o* | ? (класс ротирует) — не используется в коде (только в переключателе версий). Класс «pmK» в текущем дампе не опознан: имя обфусцировано и сменилось |
+| `MANAGED_CACHED_PTR` | 0x10 | UnityEngine.Object.m_CachedPtr: managed-обёртка -> нативный объект | ABI + il2cpp.h — UnityEngine.Object: за заголовком объекта (klass 0x0, monitor 0x8) первым идёт m_CachedPtr -> 0x10; проверено на всех managed-обёртках |
+| `IL2CPP_ARRAY_FIRST_ELEMENT` | 0x20 | Il2CppArray: первый элемент (данные начинаются отсюда) | ABI il2cpp — данные массива начинаются с 0x20 |
+| `IL2CPP_ARRAY_LENGTH` | 0x18 | Il2CppArray.max_length (int32) | ABI il2cpp — Il2CppArray: klass 0x0, monitor 0x8, bounds* 0x10, max_length 0x18, данные 0x20 |
+| `IL2CPP_STRING_CHARS` | 0x14 | System.String: первый символ (UTF-16) | il2cpp.h — struct System_String_Fields: _firstChar /* 0x14 */; ПРОВЕРЕНО по дампу |
+| `IL2CPP_STRING_LENGTH` | 0x10 | System.String.length (UTF-16) | il2cpp.h — struct System_String_Fields: _stringLength /* 0x10 */; ПРОВЕРЕНО по дампу |
+| `ARP_LATEST_VALUE` | 0x18 | AsyncReactiveProperty<T>.latestValue — реактивное свойство (здоровье у сущностей) | il2cpp.h + ABI — Cysharp_Threading_Tasks_AsyncReactiveProperty_1_Fields: порядок (triggerEvent, latestValue) плюс заголовок 0x10 -> 0x18 |
+| `DICT_ENTRIES` | 0x18 | Dictionary<K,V>._entries (массив struct Entry) | il2cpp.h + ABI — System_Collections_Generic_Dictionary_2_TKey_TValue__Fields: порядок (_buckets, _entries, ...) плюс заголовок 0x10 -> 0x18 |
+| `DICT_ENTRY_STRIDE` | 0x18 | размер struct Entry {hashCode, next, key, value} | il2cpp.h + ABI — Entry{TKey,TValue}: (hashCode i4, next i4, key ptr, value ptr) = 0x18. Внутри массива заголовка объекта нет — это важно, иначе stride был бы 0x28 |
+| `DICT_ENTRY_VALUE` | 0x10 | смещение value внутри struct Entry | il2cpp.h + ABI — value — четвёртое поле Entry: 0x0+4+8 = 0x10 |
+| `GUI_VALUE` | 0x20 | значение внутри обёртки GuI`1<T>: в il2cpp.h у GuI_1_Fields полей нет (generic), смещение подтверждено дизассемблером FPMelee.ZkX 0x6533a20 — ldr x8,[x19,#0xc8]; ldr x8,[x8,#0x160]; ldr x20,[x8,#0x20] | il2cpp.h + ABI — обёртка GuI`1<T>: в il2cpp.h у GuI_1_Fields полей нет (generic), 0x20 подтверждено дизассемблером геттера |
+| `IL2CPP_LIST_ITEMS` | 0x10 | List<T>._items | il2cpp.h + ABI — System_Collections_Generic_List_1_T__Fields: порядок (_items, _size, _version, _syncRoot) плюс заголовок объекта 0x10 -> 0x10 и 0x18. В дампе у generic смещений нет, поэтому считается по порядку |
+| `IL2CPP_LIST_SIZE` | 0x18 | List<T>._size (int32) | il2cpp.h + ABI — тот же порядок: _size вторым -> 0x18 |
+| `SYNC_VALUE_OFFSET` | 0x20 | Mirror SyncVar<T>.Value | il2cpp.h + ABI — Mirror SyncVar<T>: обёртка из двух полей, значение лежит в 0x20; найдено по содержимому (по этому смещению читается само значение SyncVar) |
+| `TOD_SKY_CYCLE` | 0x40 | TOD_Sky.Cycle. Имя класса TOD_Sky обфусцировано и ротирует каждый билд (IY -> UV), поэтому не field: искать grep'ом 'TOD_CycleParameters_o* Cycle' в il2cpp.h — offset поля Cycle и есть это значение | il2cpp.h + dump.cs — TOD_Sky.Cycle: имя класса ротирует (IY -> UV). Искать класс с полем типа Cycle; проверяется «всегда день» — время суток возвращается в полдень |
+| `WEAPONVIEW_INNER` | 0x10 | обёртка weapon view: внутренний объект (0x10) | il2cpp.h + dump.cs — внутренний объект обёртки (0x10) — сразу за заголовком |
+| `WEAPONVIEW_PIECE` | 0x50 | обёртка weapon view: WeaponPiece | il2cpp.h + dump.cs —  WeaponPiece — второе поле того же класса, сразу за WeaponBase |
+| `WEAPONVIEW_ROOT_TRANSFORM` | 0x60 | обёртка weapon view: корневой Transform модели | il2cpp.h + dump.cs — корневой Transform модели оружия в том же классе |
+| `WEAPONVIEW_WEAPON_BASE` | 0x48 | обёртка weapon view (имя класса обфусцировано): указатель на WeaponBase | il2cpp.h + dump.cs — обёртка weapon view: имя класса обфусцировано и ротирует. Искать класс, у которого рядом лежат WeaponBase*, WeaponPiece* и Transform* |
+| `TOD_SCAN_RVA_BEGIN` | 0xd8d0000 | НЕ поле: начало области глобальных Il2CppClass*-слотов в .data.rel.ro, которую скан в always_day_tick() перебирает в поисках TOD_Sky. Уезжает каждый билд вместе с *_TYPEINFO_RVA (было 0xD7A0000). Проверка: кандидаты typeinfo_rva.py для класса TOD_Sky обязаны попасть в [BEGIN,END) | libil2cpp.so — начало окна .data.rel.ro со слотами глобальных Il2CppClass*, которое перебирает always_day_tick(); уезжает вместе с бинарём |
+| `TOD_SCAN_RVA_END` | 0xd970000 | конец окна скана TOD_Sky = BEGIN + 0xA0000 (было 0xD840000) | libil2cpp.so — конец окна скана = BEGIN + 0xA0000 |
+| `IL2CPP_CLASS_NAME` | 0x10 | Il2CppClass.name (Il2CppString*) — по нему код сверяет имена классов в рантайме | libil2cpp.so (ABI, metadata v39) — Il2CppClass.name; проверяется в рантайме: код читает имя класса и сверяет со строкой — пока имена совпадают, смещение верное |
+| `IL2CPP_CLASS_NAMESPACE` | 0x18 | Il2CppClass.namespace (Il2CppString*) | libil2cpp.so (ABI, metadata v39) — Il2CppClass.namespaze, следующим полем |
+| `CAMERA_ASPECT` | 0x4e0 | нативная Camera: aspect, float | libunity.so — get_aspect; проверено совпадением с sw/sh экрана |
+| `CAMERA_FAR_CLIP` | 0x458 | нативная Camera: far clip plane, float | libunity.so — get_farClipPlane; лежит рядом с near (+4), проверено чтением |
+| `CAMERA_FOV_DEGREES` | 0x170 | нативная Camera: field of view, float (градусы) | libunity.so — get_fieldOfView; проверено поведением: круг FOV в оверлее совпадает с прицелом игры |
+| `CAMERA_NATIVE_TRANSFORM` | 0x20 | нативная Camera -> её Transform | libunity.so — тот Transform, по которому Unity пересобирает кеш view при dirty-флаге; этим же указателем пользуется ESP (read_native_camera_matrices) и фрикам |
+| `CAMERA_NEAR_CLIP` | 0x454 | нативная Camera: near clip plane, float — сюда пишет X-ray и отсюда же восстанавливает | libunity.so — get_nearClipPlane; проверено самой надёжной проверкой — иксрей пишет сюда, и картинка меняется, а при выключении восстанавливается |
+| `CAMERA_PREV_VIEW_PROJ` | 0x5c8 | нативная Camera: матрица прошлого кадра (motion vectors) | libunity.so — матрица прошлого кадра (motion vectors); в коде не используется |
+| `CAMERA_PROJECTION_MATRIX` | 0xb0 | нативная Camera (libunity.so): кеш projection Matrix4x4; ленивый, при внешнем чтении устаревает — только фолбэк | libunity.so — get_projectionMatrix_Injected @ 0x5ac53c -> хелпер 0xe1fe6c отдаёт cam+0xB0 |
+| `CAMERA_PROJ_DIRTY` | 0x500 | нативная Camera: dirty-байт кеша projection (0x500) | libunity.so — dirty-байт кеша projection |
+| `CAMERA_VIEW_DIRTY` | 0x502 | нативная Camera: dirty-байт кеша view (0x502) | libunity.so — dirty-байт кеша view: при движении камеры меняется, без движения — нет |
+| `CAMERA_VIEW_MATRIX` | 0x70 | нативная Camera: кеш worldToCamera Matrix4x4; пересобирается только в геттерах Unity по dirty-флагу 0x502, поэтому основной путь — поза живого Transform (0x20) | libunity.so — get_worldToCameraMatrix_Injected @ 0x5ac514 -> хелпер 0xe1fe08 отдаёт cam+0x70 (записано в комментарии game_offsets.h); кеш ленивый, живёт по dirty-байту +0x502 |
+| `CAMERA_WORLD_TO_CLIP` | 0xf0 | нативная Camera: кеш worldToClip Matrix4x4 | libunity.so — worldToClip идёт следом за projection; в коде не используется, только замер для лога |
+| `COMPONENT_GAMEOBJECT` | 0x20 | нативный Component.m_GameObject | libunity.so — нативный Component.m_GameObject; проверено переходом компонент -> объект |
+| `COMPONENT_PAIR_PTR` | 0x8 | элемент m_Component: пара {GameObject*, Component*} — указатель на компонент | libunity.so — второй указатель в паре элемента m_Component |
+| `GAMEOBJECT_COMPONENT_ARRAY` | 0x20 | нативный GameObject.m_Component (массив пар) | libunity.so — нативный GameObject.m_Component: массив пар {GameObject*, Component*} |
+| `GAMEOBJECT_NAME_GUESS` | 0x48 | первая догадка на GameObject.name (core::string с SSO); уточняется в рантайме перебором кандидатов по именам костей | libunity.so — core::string с SSO; уточняется в рантайме перебором кандидатов по именам |
+| `TRANSFORM_CHILDREN_ARRAY` | 0x48 | нативный Transform: массив детей | libunity.so — нативный Transform: массив детей; проверено обходом иерархии (маркеры, кости, поиск трансформа камеры) |
+| `TRANSFORM_CHILD_COUNT` | 0x58 | нативный Transform: число детей (int32) | libunity.so — нативный Transform: int32 число детей, проверено тем же обходом |
 
 Дешёвая перепроверка ABI по новому `libil2cpp.so` (без запуска игры):
 
@@ -469,6 +500,23 @@ runtime`) — после крупного апдейта движка сверя
   `MineableObject` 0x656781c/0x6567828 (билд `62a8534`).
 * `Il2CppArray`: длина 0x18, первый элемент 0x20; `List<T>`: `_items` 0x10,
   `_size` 0x18 — см. любой перебор коллекции в коде игры.
+
+Где что лежит, коротко: `libunity.so` — нативные Camera/Transform/
+Component/GameObject (Camera ищется по геттерам `*_Injected`, этоякорь
+на весь класс); `libil2cpp.so` — ABI служебных структур и слоты TypeInfo;
+`il2cpp.h` — поля управляемых классов и порядок полей generic-обёрток.
+Смещения generic-обёрток (`List<T>`, `Dictionary<K,V>`, `SyncVar<T>`,
+`AsyncReactiveProperty<T>`) в дампе отсутствуют совсем: они считаются
+порядком полей плюс заголовок объекта 0x10, а у элементов массива
+структур заголовка нет — отсюда `DICT_ENTRY_STRIDE` 0x18, а не 0x28.
+
+**Расхождение, которое надо помнить при обновлении:** `RAYCASTHIT_COLLIDER`
+(0x28) в текущем дампе имеет тип `UnityEngine_EntityId_o`, а не
+`UnityEngine_Collider_o*`, как было записано в карте раньше. Смещение
+верное, тип в карте исправлен, но код (§ поиск «перекрытие собственным
+камнем» в `game.cpp`) всё ещё сравнивает содержимое 0x28 как указатель на
+коллайдер. При обновлении проверить, не стала ли эта проверка всегда
+ложной — тогда руду снова начнёт «перекрывать» своим же камнем.
 
 ---
 
@@ -497,6 +545,29 @@ grep -c '^public class .*MineableObjectExtension_OreHitstreaks' <new>/dump.cs
 
 Между `89e0b63` и `62a8534` из имён, которые знает код, исчез только `DVL` —
 и это не класс в нашем смысле, а строка-лейбл в таблице `kWeaponNames`.
+
+---
+
+## E. Чек-лист обновления (порядок на новые дампы)
+
+1. Распаковать новые дампы: `bash tools/offsets/extract_dumps.sh /tmp/new`
+   (`bash`, не `sh` — в скрипте `set -o pipefail`).
+2. Сличить отпечаток: `python3 tools/offsets/build_map.py /tmp/new --check`.
+   Версия движка та же → класс C не трогаем; отличается → пересчитываем
+   `libunity.so`/ABI руками (§C).
+3. Сверить поля: `python3 tools/offsets/verify_map.py /tmp/new`. Выданный
+   список расхождений и есть рабочий список на обновление.
+4. `python3 tools/offsets/update_offsets.py --old <старый коммит> --apply` —
+   сам пересчитает поля и RVA; без `--apply` он только печатает diff.
+5. Имена классов (§D) сверить grep-ом по новому `dump.cs`.
+6. Пересобрать карту и этот файл:
+   `python3 tools/offsets/build_map.py /tmp/new` и
+   `python3 tools/offsets/make_provenance.py --build <NEW> --prev <OLD>`.
+7. Стенды: `sh tools/offsets/run.sh && sh tools/syntax/check.sh`.
+8. Только после сборки GitHub Actions — просить проверку на устройстве.
+   Первым делом проверять камеру: если PlayerManager/GameController уехал,
+   сыпется вся цепочка до камеры, и это выглядит как «камера не найдена»
+   и «потеря MouseLook» — симптомы, которые легко принять за баг логики.
 
 ---
 
@@ -543,11 +614,7 @@ grep -c '^public class .*MineableObjectExtension_OreHitstreaks' <new>/dump.cs
   должно быть ~80 тысяч (в `89e0b63` их там 82 154, в `62a8534` — 82 167;
   35 слотов в старом окне нового билда — верный признак, что окно протухло).
 * **Нативные смещения `Camera`** (§3.1 `OFFSETS_UPDATE.md`) — из `libunity.so`,
-  обновляются отдельно и только при смене Unity. Для беты сверены 16 сентября
-  2026 (`tools/offsets/unity_layout.py`): Unity там тот же 6000.3.18f1, кластер
-  функций камеры совпал байт-в-байт (677 слов из 704, остальные 27 — переезд
-  адресов), «редкие» счётчики обращений к 0x454/0x458/0x4E0/0x170/0x502 совпали
-  до единицы. Раскладка не менялась — править нечего.
+  обновляются отдельно и только при смене Unity.
 
 ## G. Поколения обфусцированных имён (чтобы не пугаться diff'а)
 
