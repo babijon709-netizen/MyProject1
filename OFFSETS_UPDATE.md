@@ -136,7 +136,7 @@
 | `PLAYER_FP_MANAGER` | 0x90 | fpManager |
 | `PLAYER_KCC_REFERENCE` | 0xB0 | kccReference |
 | `PLAYER_VOICE_PLAYER` | 0x140 | voicePlayer (класс `pJk`, ранее `fuI`) |
-| `PLAYER_VOICE_STATE` | 0x2E8 | VoicePlayerState (поле `uWr`, ранее `LLT`) |
+| `PLAYER_VOICE_STATE` | 0x2F8 | VoicePlayerState (поле `Kmk`, ранее `uWr`/`LLT`) |
 | `PLAYER_USER_ID` | 0x278 | `string userID` (уникален на аккаунт) |
 | `PLAYER_VEHICLE_ID` | 0x288 | `uint vehicleID` (SyncVar, 0 = не в транспорте) |
 | `PLAYER_SEAT_ID` | 0x28C | `uint seatID` (SyncVar) |
@@ -531,14 +531,14 @@ Fragments», «Stone Hatchet»), поэтому в таблице есть и н
 | Константа | Смещение |
 |---|---|
 | `EVENT_HANDLER_MANAGER_BACKREF` | 0xD0 |
-| `EVENT_HANDLER_AIM_ACTIVITY` | 0x270 |
+| `EVENT_HANDLER_AIM_ACTIVITY` | 0x290 |
 | `EVENT_HANDLER_LOOK_DIRECTION` | 0x140 |
 | `SYNC_VALUE_OFFSET` | 0x20 |
 | `ACTIVITY_ACTIVE_FLAG` | 0x10 |
 
 `EVENT_HANDLER_*` и `ACTIVITY_ACTIVE_FLAG` лежат НЕ в `PlayerManager`, а в
 классе по указателю `playerEventHandler` (0x78): он ротирует имя каждый билд
-(`DqO`→`Gum`), и в его середину добавляют новые активности. Из-за вставленного
+(`DqO`→`Gum`→`brc`), и в его середину добавляют новые активности. Из-за вставленного
 `KnockDoor` (0x188) `Aim` уехал 0x268→0x270, а по 0x268 встал `Jump`. В карте
 (`tools/offsets/offsets_map.json`) эти записи идут через `via`, поэтому скрипт
 пересчитывает их по имени поля, а не «на глаз» (см. журнал от 13 сентября 2026).
@@ -551,9 +551,9 @@ Fragments», «Stone Hatchet»), поэтому в таблице есть и н
 | `KCC_NORMAL_HEIGHT` | 0xA0 |
 | `KCC_CROUCH_HEIGHT` | 0xA4 |
 | `KCC_HITBOX_ROOT` | 0x70 |
-| `KCC_CHARACTER_ANIMATION` | 0x108 |
+| `KCC_CHARACTER_ANIMATION` | 0xF0 |
 | `KCC_LOOK_HEIGHT_OFFSET` | 0x90 |
-| `KCC_MOVE` | 0x16C (структура Move, см. заголовок) |
+| `KCC_MOVE` | 0x154 (структура Move, см. заголовок) |
 | `HITBOX_ROOT_ARRAY` | 0x68 |
 | `HITBOX_SIZE` | 0x24 |
 | `HITBOX_CENTER` | 0x30 |
@@ -1937,3 +1937,51 @@ A..B радиусом 0.15 м.
 вместо −0.14. (4) `strk` должен расти сериями, а `yaw`/`pitch` в фазе 3 —
 держаться около 0.5° без пилы. (5) `why` в `EV крестик появился:` по-прежнему 2
 — это нормально: локальные значения идут на радиус ствола, а не на прицел.
+
+### Апдейт от 18 сентября 2026 (новый `dump.7z`, коммиты `dc5567f`/`8946e71`)
+
+Дампы: `dump.7z` sha256 `c0b883f3…ae0c` (24 949 124 Б) — новый; `libil2cpp.7z`
+sha256 `57f9f051…06a1` (23 546 006 Б) — **тот же файл, что и 13 сентября**,
+то есть новый `libil2cpp.so` не приехал (коммит `8946e71` пустой). Прошлый
+`dump.7z` — 24 889 304 Б (коммит `5ba910b`). Поколение backing-полей в новом
+билде — `K*` (в прошлом было `L*`). Таблицы метадаты: 31 251 типов / 277 497
+методов / 137 579 полей (было 31 138 / 275 631 / 136 787).
+
+**Что изменилось (4 константы из 141):**
+
+| Константа | было | стало | как найдено |
+|---|---|---|---|
+| `EVENT_HANDLER_AIM_ACTIVITY` | 0x270 | **0x290** | по имени `Aim` (via `playerEventHandler`) |
+| `KCC_CHARACTER_ANIMATION` | 0x108 | **0xF0** | позиционно (`…_CharacterAnimation_o*`) |
+| `KCC_MOVE` | 0x16C | **0x154** | позиционно (`…_Move_o`) |
+| `PLAYER_VOICE_STATE` | 0x2E8 | **0x2F8** | позиционно (`Dissonance_VoicePlayerState_o*`) |
+
+**Что НЕ изменилось:** остальные 137 полей и весь блок Unity/IL2CPP ABI —
+движок тот же (Unity 6000.3.18f1, metadata v39), значит §3.1 и §3.9 вместе со
+всеми `CAMERA_*` / `IL2CPP_*` / нативными `TRANSFORM_*` остаются действительны.
+
+**Переименования классов (значения те же, имена в карте обновлены):**
+`Gum`→`brc` (7 констант), `GKo`→`brf` (2), `oh`→`Sq` (2), `Gmv`→`bxt`,
+`Gub`→`brB`; по типам: `GqT`→`bLt` (инвентарь), `bp`→`xY` (вид оружия).
+
+**`GKo`→`brf` найден по форме, а не по имени.** Старой структуры в дампе нет,
+`update_offsets.py` это показал отдельным предупреждением. Форма та же:
+`GameObject` на 0x18 и `RaycastHit` на 0x48 —
+`python3 tools/offsets/il2cpp_layout.py --new il2cpp.h find UnityEngine_RaycastHit_o UnityEngine_GameObject_o`.
+`GKO_HIT_OBJECT` и `GKO_RAYCAST_HIT` остались 0x18 и 0x48.
+
+**Косвенная проверка класса A:** `beta_offsets.py` (дамп беты против НОВОГО
+релизного) по полям расхождений не показал вовсе — бета того же поколения, что
+и новый релиз. Разошлись только RVA, что и ожидалось (это другой бинарник).
+
+**НЕ ОБНОВЛЕНО — нужен новый `libil2cpp.so`.** Три `*_TYPEINFO_RVA`
+(`PLAYER_MANAGER` 0xD8DB8B8, `GAME_CONTROLLER` 0xD8D61E8, `NETWORK_CLIENT`
+0xD8DAB08) и окно скана `TOD_SCAN_RVA_*` (0xD8D0000..0xD970000) остались
+значениями прошлого билда. Слоты `.data.rel.ro` уезжают каждый билд, а взять
+их больше неоткуда: в `dump.7z` лежит только управляемая метадата, а
+`script.json` не содержит адресов. Пока они старые, цепочка
+PlayerManager → GameController → CameraManager → Camera не находится, и это
+ровно те симптомы, что приходили с устройства: «камера не найдена» и потеря
+MouseLook. Как только `libil2cpp.7z` обновится —
+`python3 tools/offsets/update_offsets.py --old 5ba910b --apply` (без
+`--no-rva`) пересчитает их сам.

@@ -143,13 +143,13 @@
   "kind": "field",
   "class": "GameControllerBase.static",
   "struct": "Oxide_GameControllerBase_StaticFields",
-  "field": "_LPj_k__BackingField",
+  "field": "_KHr_k__BackingField",
   "type": "Oxide_PlayerManager_o*",
   "offset": 16,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_GameControllerBase_StaticFields",
-   "field": "_LPj_k__BackingField",
+   "field": "_KHr_k__BackingField",
    "how": "смещение — из комментария /* 0x10 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_PlayerManager_o*»"
   }
  },
@@ -157,13 +157,13 @@
   "kind": "field",
   "class": "GameControllerBase.static",
   "struct": "Oxide_GameControllerBase_StaticFields",
-  "field": "_LPU_k__BackingField",
+  "field": "_KHy_k__BackingField",
   "type": "Oxide_CameraManager_o*",
   "offset": 56,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_GameControllerBase_StaticFields",
-   "field": "_LPU_k__BackingField",
+   "field": "_KHy_k__BackingField",
    "how": "смещение — из комментария /* 0x38 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_CameraManager_o*»"
   }
  },
@@ -228,33 +228,33 @@
   "class": "PlayerManager",
   "struct": "Oxide_PlayerManager_Fields",
   "field": "nicklabel",
-  "type": "oh_o*",
+  "type": "Sq_o*",
   "offset": 304,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_PlayerManager_Fields",
    "field": "nicklabel",
-   "how": "смещение — из комментария /* 0x130 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «oh_o*»"
+   "how": "смещение — из комментария /* 0x130 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Sq_o*»"
   }
  },
  "PLAYER_DISPLAY_NAME": {
   "kind": "field",
   "class": "PlayerManager",
   "struct": "Oxide_PlayerManager_Fields",
-  "field": "LWQ",
+  "field": "KmI",
   "type": "System_String_o*",
   "offset": 544,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_PlayerManager_Fields",
-   "field": "LWQ",
+   "field": "KmI",
    "how": "смещение — из комментария /* 0x220 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «System_String_o*»"
   }
  },
  "NICKLABEL_PLAYER_BACKREF": {
   "kind": "field",
   "class": "nicklabel widget (имя ротирует: OS -> oh)",
-  "struct": "oh_Fields",
+  "struct": "Sq_Fields",
   "via": [
    {
     "struct": "Oxide_PlayerManager_Fields",
@@ -267,7 +267,7 @@
   "note": "back-ref на PlayerManager",
   "src": {
    "file": "il2cpp.h",
-   "struct": "oh_Fields",
+   "struct": "Sq_Fields",
    "field": "player",
    "how": "смещение — из комментария /* 0x20 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_PlayerManager_o*», цепочка via — по читаемым именам полей"
   }
@@ -275,7 +275,7 @@
  "NICKLABEL_NICKNAME_TEXT": {
   "kind": "field",
   "class": "nicklabel widget (имя ротирует: OS -> oh)",
-  "struct": "oh_Fields",
+  "struct": "Sq_Fields",
   "via": [
    {
     "struct": "Oxide_PlayerManager_Fields",
@@ -287,7 +287,7 @@
   "offset": 56,
   "src": {
    "file": "il2cpp.h",
-   "struct": "oh_Fields",
+   "struct": "Sq_Fields",
    "field": "nickname",
    "how": "смещение — из комментария /* 0x38 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «UnityEngine_UI_Text_o*», цепочка via — по читаемым именам полей"
   }
@@ -324,14 +324,14 @@
   "kind": "field",
   "class": "PlayerManager",
   "struct": "Oxide_PlayerManager_Fields",
-  "field": "Llp",
+  "field": "Kmk",
   "type": "Dissonance_VoicePlayerState_o*",
-  "offset": 744,
+  "offset": 760,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_PlayerManager_Fields",
-   "field": "Llp",
-   "how": "смещение — из комментария /* 0x2E8 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Dissonance_VoicePlayerState_o*»"
+   "field": "Kmk",
+   "how": "смещение — из комментария /* 0x2F8 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Dissonance_VoicePlayerState_o*»"
   }
  },
  "VOICE_STATE_NAME": {
@@ -353,33 +353,33 @@
   "class": "PlayerManager",
   "struct": "Oxide_PlayerManager_Fields",
   "field": "voicePlayer",
-  "type": "Gmv_o*",
+  "type": "bxt_o*",
   "offset": 320,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_PlayerManager_Fields",
    "field": "voicePlayer",
-   "how": "смещение — из комментария /* 0x140 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Gmv_o*»"
+   "how": "смещение — из комментария /* 0x140 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «bxt_o*»"
   }
  },
  "VOICE_PLAYER_TAG": {
   "kind": "field",
   "class": "VoicePlayer (имя ротирует: DEY -> Gmv)",
-  "struct": "Gmv_Fields",
+  "struct": "bxt_Fields",
   "via": [
    {
     "struct": "Oxide_PlayerManager_Fields",
     "field": "voicePlayer"
    }
   ],
-  "field": "ccW",
+  "field": "lUD",
   "type": "System_String_o*",
   "offset": 120,
   "note": "строка ника в голосовом трекере; имя поля обфусцировано (uRP -> ccW)",
   "src": {
    "file": "il2cpp.h",
-   "struct": "Gmv_Fields",
-   "field": "ccW",
+   "struct": "bxt_Fields",
+   "field": "lUD",
    "how": "смещение — из комментария /* 0x78 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «System_String_o*», цепочка via — по читаемым именам полей"
   }
  },
@@ -387,13 +387,13 @@
   "kind": "field",
   "class": "FPObject",
   "struct": "Oxide_FPObject_Fields",
-  "field": "_Lwx_k__BackingField",
+  "field": "_KKc_k__BackingField",
   "type": "Oxide_Item_o*",
   "offset": 64,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_FPObject_Fields",
-   "field": "_Lwx_k__BackingField",
+   "field": "_KKc_k__BackingField",
    "how": "смещение — из комментария /* 0x40 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_Item_o*»"
   }
  },
@@ -401,13 +401,13 @@
   "kind": "field",
   "class": "Item",
   "struct": "Oxide_Item_Fields",
-  "field": "_LSg_k__BackingField",
+  "field": "_Kyo_k__BackingField",
   "type": "Oxide_ItemData_o*",
   "offset": 32,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_Item_Fields",
-   "field": "_LSg_k__BackingField",
+   "field": "_Kyo_k__BackingField",
    "how": "смещение — из комментария /* 0x20 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_ItemData_o*»"
   }
  },
@@ -462,19 +462,19 @@
   "class": "PlayerManager",
   "struct": "Oxide_PlayerManager_Fields",
   "field": "playerEventHandler",
-  "type": "Gum_o*",
+  "type": "brc_o*",
   "offset": 120,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_PlayerManager_Fields",
    "field": "playerEventHandler",
-   "how": "смещение — из комментария /* 0x78 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Gum_o*»"
+   "how": "смещение — из комментария /* 0x78 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «brc_o*»"
   }
  },
  "EVENT_HANDLER_MANAGER_BACKREF": {
   "kind": "field",
   "class": "PlayerEventHandler (имя ротирует: DqO -> Gum)",
-  "struct": "Gum_Fields",
+  "struct": "brc_Fields",
   "via": [
    {
     "struct": "Oxide_PlayerManager_Fields",
@@ -487,7 +487,7 @@
   "note": "back-ref на PlayerManager — проверка, что указатель прочитан верно",
   "src": {
    "file": "il2cpp.h",
-   "struct": "Gum_Fields",
+   "struct": "brc_Fields",
    "field": "manager",
    "how": "смещение — из комментария /* 0xD0 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_PlayerManager_o*», цепочка via — по читаемым именам полей"
   }
@@ -495,7 +495,7 @@
  "EVENT_HANDLER_AIM_ACTIVITY": {
   "kind": "field",
   "class": "PlayerEventHandler (имя ротирует: DqO -> Gum)",
-  "struct": "Gum_Fields",
+  "struct": "brc_Fields",
   "via": [
    {
     "struct": "Oxide_PlayerManager_Fields",
@@ -503,14 +503,14 @@
    }
   ],
   "field": "Aim",
-  "type": "Gub_o*",
-  "offset": 624,
+  "type": "brB_o*",
+  "offset": 656,
   "note": "было 0x268: в билд добавили KnockDoor (0x188), всё после него +8; по 0x268 теперь Jump",
   "src": {
    "file": "il2cpp.h",
-   "struct": "Gum_Fields",
+   "struct": "brc_Fields",
    "field": "Aim",
-   "how": "смещение — из комментария /* 0x270 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Gub_o*», цепочка via — по читаемым именам полей"
+   "how": "смещение — из комментария /* 0x290 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «brB_o*», цепочка via — по читаемым именам полей"
   }
  },
  "PLAYER_INVENTORY": {
@@ -574,13 +574,13 @@
   "class": "PlayerInventory",
   "struct": "Oxide_PlayerInventory_Fields",
   "field": "_playerInventoryClient",
-  "type": "GqT_o*",
+  "type": "bLt_o*",
   "offset": 40,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_PlayerInventory_Fields",
    "field": "_playerInventoryClient",
-   "how": "смещение — из комментария /* 0x28 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «GqT_o*»"
+   "how": "смещение — из комментария /* 0x28 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «bLt_o*»"
   }
  },
  "PLAYERWEAPON_VIEW": {
@@ -588,26 +588,26 @@
   "class": "PlayerWeapon",
   "struct": "HyperHug_Games_Oxide_Features_Weapons_PlayerWeapon_Fields",
   "field": "playerWeaponViewReference",
-  "type": "bp_o*",
+  "type": "xY_o*",
   "offset": 224,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_Weapons_PlayerWeapon_Fields",
    "field": "playerWeaponViewReference",
-   "how": "смещение — из комментария /* 0xE0 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «bp_o*»"
+   "how": "смещение — из комментария /* 0xE0 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «xY_o*»"
   }
  },
  "PLAYERWEAPON_PIECE": {
   "kind": "field",
   "class": "PlayerWeapon",
   "struct": "HyperHug_Games_Oxide_Features_Weapons_PlayerWeapon_Fields",
-  "field": "CxH",
+  "field": "Qzd",
   "type": "Oxide_WeaponPiece_o",
   "offset": 272,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_Weapons_PlayerWeapon_Fields",
-   "field": "CxH",
+   "field": "Qzd",
    "how": "смещение — из комментария /* 0x110 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_WeaponPiece_o»"
   }
  },
@@ -615,13 +615,13 @@
   "kind": "field",
   "class": "PlayerWeapon",
   "struct": "HyperHug_Games_Oxide_Features_Weapons_PlayerWeapon_Fields",
-  "field": "Cxn",
+  "field": "QzV",
   "type": "int32_t",
   "offset": 288,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_Weapons_PlayerWeapon_Fields",
-   "field": "Cxn",
+   "field": "QzV",
    "how": "смещение — из комментария /* 0x120 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «int32_t»"
   }
  },
@@ -780,7 +780,7 @@
  "EVENT_HANDLER_LOOK_DIRECTION": {
   "kind": "field",
   "class": "PlayerEventHandler (имя ротирует: DqO -> Gum)",
-  "struct": "Gum_Fields",
+  "struct": "brc_Fields",
   "via": [
    {
     "struct": "Oxide_PlayerManager_Fields",
@@ -792,7 +792,7 @@
   "offset": 320,
   "src": {
    "file": "il2cpp.h",
-   "struct": "Gum_Fields",
+   "struct": "brc_Fields",
    "field": "LookDirection",
    "how": "смещение — из комментария /* 0x140 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Il2CppObject*», цепочка via — по читаемым именам полей"
   }
@@ -809,7 +809,7 @@
  "ACTIVITY_ACTIVE_FLAG": {
   "kind": "field",
   "class": "Activity (имя ротирует: Dqg -> Gub)",
-  "struct": "Gub_Fields",
+  "struct": "brB_Fields",
   "via": [
    {
     "struct": "Oxide_PlayerManager_Fields",
@@ -819,14 +819,14 @@
     "field": "Aim"
    }
   ],
-  "field": "_LEb_k__BackingField",
+  "field": "_Kpq_k__BackingField",
   "type": "bool",
   "offset": 16,
   "note": "флаг активности (PlayerEventHandler.Aim), byte; имя — автосвойство, ротирует",
   "src": {
    "file": "il2cpp.h",
-   "struct": "Gub_Fields",
-   "field": "_LEb_k__BackingField",
+   "struct": "brB_Fields",
+   "field": "_Kpq_k__BackingField",
    "how": "смещение — из комментария /* 0x10 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «bool», цепочка via — по читаемым именам полей"
   }
  },
@@ -848,13 +848,13 @@
   "kind": "field",
   "class": "FPManager",
   "struct": "Oxide_FPManager_Fields",
-  "field": "LwC",
+  "field": "KAL",
   "type": "Oxide_FPWeaponBase_o*",
   "offset": 88,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_FPManager_Fields",
-   "field": "LwC",
+   "field": "KAL",
    "how": "смещение — из комментария /* 0x58 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_FPWeaponBase_o*»"
   }
  },
@@ -876,13 +876,13 @@
   "kind": "field",
   "class": "FPManager",
   "struct": "Oxide_FPManager_Fields",
-  "field": "_Lwv_k__BackingField",
+  "field": "_KAU_k__BackingField",
   "type": "float",
   "offset": 168,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_FPManager_Fields",
-   "field": "_Lwv_k__BackingField",
+   "field": "_KAU_k__BackingField",
    "how": "смещение — из комментария /* 0xA8 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «float»"
   }
  },
@@ -904,13 +904,13 @@
   "kind": "field",
   "class": "FPWeaponBase",
   "struct": "Oxide_FPWeaponBase_Fields",
-  "field": "_LUD_k__BackingField",
+  "field": "_KKN_k__BackingField",
   "type": "bool",
   "offset": 288,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_FPWeaponBase_Fields",
-   "field": "_LUD_k__BackingField",
+   "field": "_KKN_k__BackingField",
    "how": "смещение — из комментария /* 0x120 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «bool»"
   }
  },
@@ -1072,41 +1072,41 @@
   "kind": "field",
   "class": "KCC",
   "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
-  "field": "lql",
+  "field": "ovU",
   "type": "HyperHug_Games_Oxide_Features_Player_Move_o",
-  "offset": 364,
+  "offset": 340,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
-   "field": "lql",
-   "how": "смещение — из комментария /* 0x16C */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «HyperHug_Games_Oxide_Features_Player_Move_o»"
+   "field": "ovU",
+   "how": "смещение — из комментария /* 0x154 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «HyperHug_Games_Oxide_Features_Player_Move_o»"
   }
  },
  "KCC_CHARACTER_ANIMATION": {
   "kind": "field",
   "class": "KCC",
   "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
-  "field": "lqU",
+  "field": "ovH",
   "type": "HyperHug_Games_Oxide_Features_Player_CharacterAnimation_o*",
-  "offset": 264,
+  "offset": 240,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_Player_KCC_Fields",
-   "field": "lqU",
-   "how": "смещение — из комментария /* 0x108 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «HyperHug_Games_Oxide_Features_Player_CharacterAnimation_o*»"
+   "field": "ovH",
+   "how": "смещение — из комментария /* 0xF0 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «HyperHug_Games_Oxide_Features_Player_CharacterAnimation_o*»"
   }
  },
  "CHAR_ANIM_PLAYER_BACKREF": {
   "kind": "field",
   "class": "CharacterAnimation",
   "struct": "HyperHug_Games_Oxide_Features_Player_CharacterAnimation_Fields",
-  "field": "lcI",
+  "field": "oTC",
   "type": "Oxide_PlayerManager_o*",
   "offset": 120,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_Player_CharacterAnimation_Fields",
-   "field": "lcI",
+   "field": "oTC",
    "how": "смещение — из комментария /* 0x78 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_PlayerManager_o*»"
   }
  },
@@ -1620,13 +1620,13 @@
   "kind": "field",
   "class": "ItemPickup",
   "struct": "Oxide_ItemPickup_Fields",
-  "field": "_Ltk_k__BackingField",
+  "field": "_KPj_k__BackingField",
   "type": "Oxide_Item_o*",
   "offset": 168,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_ItemPickup_Fields",
-   "field": "_Ltk_k__BackingField",
+   "field": "_KPj_k__BackingField",
    "how": "смещение — из комментария /* 0xA8 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_Item_o*»"
   }
  },
@@ -1662,13 +1662,13 @@
   "kind": "field",
   "class": "GameControllerBase.static",
   "struct": "Oxide_GameControllerBase_StaticFields",
-  "field": "_LPG_k__BackingField",
+  "field": "_KHP_k__BackingField",
   "type": "Mirror_NetworkIdentity_o*",
   "offset": 8,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_GameControllerBase_StaticFields",
-   "field": "_LPG_k__BackingField",
+   "field": "_KHP_k__BackingField",
    "how": "смещение — из комментария /* 0x8 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Mirror_NetworkIdentity_o*»"
   }
  },
@@ -1676,13 +1676,13 @@
   "kind": "field",
   "class": "MineableObject",
   "struct": "Oxide_MineableObject_Fields",
-  "field": "LXZ",
+  "field": "KPm",
   "type": "Il2CppObject*",
   "offset": 232,
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_MineableObject_Fields",
-   "field": "LXZ",
+   "field": "KPm",
    "how": "смещение — из комментария /* 0xE8 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Il2CppObject*»"
   }
  },
@@ -1718,13 +1718,13 @@
   "kind": "field",
   "class": "MineableObjectExtension_OreHitstreaks",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields",
-  "field": "lzD",
+  "field": "pbo",
   "type": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_o*",
   "offset": 48,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields",
-   "field": "lzD",
+   "field": "pbo",
    "how": "смещение — из комментария /* 0x30 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_o*»"
   }
  },
@@ -1732,13 +1732,13 @@
   "kind": "field",
   "class": "MineableObjectExtension_OreHitstreaks",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields",
-  "field": "lzR",
+  "field": "pbp",
   "type": "UnityEngine_Collider_o*",
   "offset": 56,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields",
-   "field": "lzR",
+   "field": "pbp",
    "how": "смещение — из комментария /* 0x38 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «UnityEngine_Collider_o*»"
   }
  },
@@ -1746,13 +1746,13 @@
   "kind": "field",
   "class": "MineableObjectExtension_OreHitstreaks",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields",
-  "field": "lzk",
+  "field": "pbI",
   "type": "Oxide_MineableObject_o*",
   "offset": 64,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields",
-   "field": "lzk",
+   "field": "pbI",
    "how": "смещение — из комментария /* 0x40 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_MineableObject_o*»"
   }
  },
@@ -1774,13 +1774,13 @@
   "kind": "field",
   "class": "MineableObjectExtension_OreHitstreaksMarker",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields",
-  "field": "lzF",
+  "field": "pbH",
   "type": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_o*",
   "offset": 56,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields",
-   "field": "lzF",
+   "field": "pbH",
    "how": "смещение — из комментария /* 0x38 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_o*»"
   }
  },
@@ -1788,14 +1788,14 @@
   "kind": "field",
   "class": "MineableObjectExtension_OreHitstreaksMarker",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields",
-  "field": "lzA",
+  "field": "pbs",
   "type": "float",
   "offset": 72,
   "note": "lzA, float: плавное текущее значение (Update догоняет им цель); не используется кодом, оставлен как метка расклада класса",
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields",
-   "field": "lzA",
+   "field": "pbs",
    "how": "смещение — из комментария /* 0x48 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «float»"
   }
  },
@@ -1803,13 +1803,13 @@
   "kind": "field",
   "class": "MineableObjectExtension_OreHitstreaksMarker",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields",
-  "field": "lHG",
+  "field": "pbY",
   "type": "float",
   "offset": 88,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields",
-   "field": "lHG",
+   "field": "pbY",
    "how": "смещение — из комментария /* 0x58 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «float»"
   }
  },
@@ -1845,13 +1845,13 @@
   "kind": "field",
   "class": "MineableObjectExtension_TreeHitstreaks",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
-  "field": "lHX",
+  "field": "pbn",
   "type": "int32_t",
   "offset": 72,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
-   "field": "lHX",
+   "field": "pbn",
    "how": "смещение — из комментария /* 0x48 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «int32_t»"
   }
  },
@@ -1859,13 +1859,13 @@
   "kind": "field",
   "class": "MineableObjectExtension_TreeHitstreaks",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
-  "field": "lHe",
+  "field": "pbd",
   "type": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_o*",
   "offset": 80,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
-   "field": "lHe",
+   "field": "pbd",
    "how": "смещение — из комментария /* 0x50 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_o*»"
   }
  },
@@ -1873,13 +1873,13 @@
   "kind": "field",
   "class": "MineableObjectExtension_TreeHitstreaks",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
-  "field": "lHC",
+  "field": "pbW",
   "type": "UnityEngine_Vector3_o",
   "offset": 136,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
-   "field": "lHC",
+   "field": "pbW",
    "how": "смещение — из комментария /* 0x88 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «UnityEngine_Vector3_o»"
   }
  },
@@ -1887,13 +1887,13 @@
   "kind": "field",
   "class": "MineableObjectExtension_TreeHitstreaks",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
-  "field": "lHl",
+  "field": "pbk",
   "type": "UnityEngine_Vector3_o",
   "offset": 164,
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields",
-   "field": "lHl",
+   "field": "pbk",
    "how": "смещение — из комментария /* 0xA4 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «UnityEngine_Vector3_o»"
   }
  },
@@ -1957,14 +1957,14 @@
   "kind": "field",
   "class": "MineableObjectExtension_HitMarkerItem",
   "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_Fields",
-  "field": "lzr",
+  "field": "pbz",
   "type": "float",
   "offset": 200,
   "note": "возраст крестика: Update (0x786485c) делает lzr += Time.deltaTime и при lzr > lifetime (0x20) отдаёт объект владельцу lzT (0xC0) в пул. Живой X — только пока lzr <= lifetime",
   "src": {
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_Fields",
-   "field": "lzr",
+   "field": "pbz",
    "how": "смещение — из комментария /* 0xC8 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «float»"
   }
  },
@@ -2055,14 +2055,14 @@
   "kind": "field",
   "class": "FPObject",
   "struct": "Oxide_FPObject_Fields",
-  "field": "LUw",
+  "field": "KKo",
   "type": "Oxide_RaycastManager_o*",
   "offset": 144,
   "note": "имя поля обфусцировано (LUw), тип — якорь; компонент лучей, общий на орудие",
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_FPObject_Fields",
-   "field": "LUw",
+   "field": "KKo",
    "how": "смещение — из комментария /* 0x90 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Oxide_RaycastManager_o*»"
   }
  },
@@ -2071,14 +2071,14 @@
   "class": "FPObject",
   "struct": "Oxide_FPObject_Fields",
   "field": "PlayerEventHandler",
-  "type": "Gum_o*",
+  "type": "brc_o*",
   "offset": 200,
   "note": "FPMelee.ZkX (0x6533a20) берёт результаты лучей отсюда: handler[0x160][0x20], при null — handler[0x168][0x20]",
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_FPObject_Fields",
    "field": "PlayerEventHandler",
-   "how": "смещение — из комментария /* 0xC8 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Gum_o*»"
+   "how": "смещение — из комментария /* 0xC8 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «brc_o*»"
   }
  },
  "FPMELEE_MAX_REACH": {
@@ -2205,14 +2205,14 @@
   "kind": "field",
   "class": "RaycastManager",
   "struct": "Oxide_RaycastManager_Fields",
-  "field": "LtS",
+  "field": "KlX",
   "type": "float",
   "offset": 64,
   "note": "радиус сферы; FPMelee.On_Draw кладёт сюда hitRadius (имя поля обфусцировано)",
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_RaycastManager_Fields",
-   "field": "LtS",
+   "field": "KlX",
    "how": "смещение — из комментария /* 0x40 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «float»"
   }
  },
@@ -2234,7 +2234,7 @@
  "GUM_RAYCAST_DATA": {
   "kind": "field",
   "class": "PlayerEventHandler (имя ротирует: DqO -> Gum)",
-  "struct": "Gum_Fields",
+  "struct": "brc_Fields",
   "via": [
    {
     "struct": "Oxide_PlayerManager_Fields",
@@ -2247,7 +2247,7 @@
   "note": "обёртка GuI`1<GKo> результата короткого луча (RaycastManager.m_RayLength, default 1.5); значение на +0x20",
   "src": {
    "file": "il2cpp.h",
-   "struct": "Gum_Fields",
+   "struct": "brc_Fields",
    "field": "RaycastData",
    "how": "смещение — из комментария /* 0x160 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Il2CppObject*», цепочка via — по читаемым именам полей"
   }
@@ -2255,7 +2255,7 @@
  "GUM_AIM_RAYCAST": {
   "kind": "field",
   "class": "PlayerEventHandler (имя ротирует: DqO -> Gum)",
-  "struct": "Gum_Fields",
+  "struct": "brc_Fields",
   "via": [
    {
     "struct": "Oxide_PlayerManager_Fields",
@@ -2268,7 +2268,7 @@
   "note": "обёртка GuI`1<GKo> результата сферкаста длиной m_AimRayLength (FPMelee.On_Draw кладёт туда m_MaxReach) и радиусом hitRadius; FPMelee.ZkX берёт его, когда RaycastData пуст",
   "src": {
    "file": "il2cpp.h",
-   "struct": "Gum_Fields",
+   "struct": "brc_Fields",
    "field": "AimRaycast",
    "how": "смещение — из комментария /* 0x168 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Il2CppObject*», цепочка via — по читаемым именам полей"
   }
@@ -2285,30 +2285,30 @@
  "GKO_HIT_OBJECT": {
   "kind": "field",
   "class": "результат луча (имя ротирует; ищется по форме: RaycastHit на 0x48 и GameObject на 0x18)",
-  "struct": "GKo_Fields",
-  "field": "_Ltj_k__BackingField",
+  "struct": "brf_Fields",
+  "field": "_KlQ_k__BackingField",
   "type": "UnityEngine_GameObject_o*",
   "offset": 24,
   "note": "во что упёрся луч; null — луч ничего не принёс",
   "src": {
    "file": "il2cpp.h",
-   "struct": "GKo_Fields",
-   "field": "_Ltj_k__BackingField",
+   "struct": "brf_Fields",
+   "field": "_KlQ_k__BackingField",
    "how": "смещение — из комментария /* 0x18 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «UnityEngine_GameObject_o*»"
   }
  },
  "GKO_RAYCAST_HIT": {
   "kind": "field",
   "class": "результат луча (имя ротирует; см. GKO_HIT_OBJECT)",
-  "struct": "GKo_Fields",
-  "field": "_Ltt_k__BackingField",
+  "struct": "brf_Fields",
+  "field": "_Kll_k__BackingField",
   "type": "UnityEngine_RaycastHit_o",
   "offset": 72,
   "note": "UnityEngine.RaycastHit целиком (0x2C байт); FPMelee.ZkX копирует его и берёт get_distance()",
   "src": {
    "file": "il2cpp.h",
-   "struct": "GKo_Fields",
-   "field": "_Ltt_k__BackingField",
+   "struct": "brf_Fields",
+   "field": "_Kll_k__BackingField",
    "how": "смещение — из комментария /* 0x48 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «UnityEngine_RaycastHit_o»"
   }
  },
@@ -2369,13 +2369,13 @@
    "file": "il2cpp.h",
    "struct": "UnityEngine_RaycastHit_Fields",
    "field": "m_Collider",
-   "how": "смещение — из комментария /* 0x28 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «UnityEngine_Collider_o*»"
+   "how": "смещение — из комментария /* 0x28 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «UnityEngine_EntityId_o»"
   }
  },
  "EVENT_HANDLER_LAST_HIT_POINT": {
   "kind": "field",
   "class": "",
-  "struct": "Gum_Fields",
+  "struct": "brc_Fields",
   "field": "LastLocalHitPoint",
   "type": "Il2CppObject*",
   "offset": 368,
@@ -2388,7 +2388,7 @@
   "note": "последняя точка попадания (обёртка SyncVar) — замер для лога",
   "src": {
    "file": "il2cpp.h",
-   "struct": "Gum_Fields",
+   "struct": "brc_Fields",
    "field": "LastLocalHitPoint",
    "how": "смещение — из комментария /* 0x170 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Il2CppObject*», цепочка via — по читаемым именам полей"
   }
@@ -2396,7 +2396,7 @@
  "EVENT_HANDLER_LAST_HIT_TIME": {
   "kind": "field",
   "class": "",
-  "struct": "Gum_Fields",
+  "struct": "brc_Fields",
   "field": "LastLocalHitTime",
   "type": "Il2CppObject*",
   "offset": 376,
@@ -2409,7 +2409,7 @@
   "note": "время последнего попадания (обёртка SyncVar) — замер для лога",
   "src": {
    "file": "il2cpp.h",
-   "struct": "Gum_Fields",
+   "struct": "brc_Fields",
    "field": "LastLocalHitTime",
    "how": "смещение — из комментария /* 0x178 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Il2CppObject*», цепочка via — по читаемым именам полей"
   }
@@ -2433,14 +2433,14 @@
   "kind": "field",
   "class": "",
   "struct": "Oxide_MineableObject_Fields",
-  "field": "LXX",
+  "field": "KPy",
   "type": "UnityEngine_Transform_o*",
   "offset": 200,
   "note": "якорь точки удара по руде (ZgL() отдаёт его мировую позицию); имя LXX ротирует",
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_MineableObject_Fields",
-   "field": "LXX",
+   "field": "KPy",
    "how": "смещение — из комментария /* 0xC8 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «UnityEngine_Transform_o*»"
   }
  },
@@ -2473,16 +2473,16 @@
  },
  "_build": {
   "dump.cs": {
-   "size": 137920389,
-   "sha1_12": "509671dee2f9"
+   "size": 138455960,
+   "sha1_12": "39f77dfab085"
   },
   "il2cpp.h": {
-   "size": 218831888,
-   "sha1_12": "2b6da92bd8ad"
+   "size": 219447477,
+   "sha1_12": "b44f1ed93917"
   },
   "script.json": {
-   "size": 232773073,
-   "sha1_12": "bada792c23e1"
+   "size": 233802100,
+   "sha1_12": "7f447156b477"
   },
   "libil2cpp.so": {
    "size": 231223744,
@@ -2495,9 +2495,9 @@
   "unity": "6000.3.18f1",
   "metadata_version": "39",
   "counts": {
-   "types": 31138,
-   "methods": 275631,
-   "fields": 136787
+   "types": 31251,
+   "methods": 277497,
+   "fields": 137579
   }
  }
 }

@@ -76,7 +76,7 @@ inline constexpr std::uint64_t UI_TEXT_MTEXT = 0xE0;
 inline constexpr std::uint64_t FPOBJECT_OBJECT_NAME = 0x78;
 // Dissonance voice identity: reliable synced display-name source.
 // PlayerManager.uWr (0x2E8, was LLT) : VoicePlayerState -> <Name>k__BackingField.
-inline constexpr std::uint64_t PLAYER_VOICE_STATE  = 0x2E8;
+inline constexpr std::uint64_t PLAYER_VOICE_STATE  = 0x2F8;
 inline constexpr std::uint64_t VOICE_STATE_NAME     = 0x38;
 // PlayerManager.voicePlayer (class pJk, was fuI) -> display string at 0x78.
 inline constexpr std::uint64_t PLAYER_VOICE_PLAYER = 0x140;
@@ -107,7 +107,7 @@ inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
 //   FPManager.<LtX>k__BackingField (0xA8) == aim blend 0..1 (secondary hint)
 inline constexpr std::uint64_t PLAYER_EVENT_HANDLER          = 0x78;
 inline constexpr std::uint64_t EVENT_HANDLER_MANAGER_BACKREF = 0xD0;
-inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x270;
+inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x290;
 // Remote-player held-weapon candidates (dump.cs Oxide.PlayerManager). The FP
 // manager (0x90) is a local MonoBehaviour and is often empty for other players,
 // so these are the synced/inventory-backed fallbacks to probe:
@@ -277,8 +277,8 @@ inline constexpr std::uint64_t KCC_LOOK_HEIGHT_OFFSET     = 0x90; // float, eye 
 //   +0x00 MoveState State (0 idle,1 walk,2 run,3 crouching,4 air,5 climb,6 swim,7 dead)
 //   +0x04 Pose (0 Stand, 1 Crouch)   +0x08 bool Aim  +0x0C Vector3 Position
 //   +0x18 Vector3 RealVelocity
-inline constexpr std::uint64_t KCC_MOVE                   = 0x16C;
-inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION     = 0x108;
+inline constexpr std::uint64_t KCC_MOVE                   = 0x154;
+inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION     = 0xF0;
 inline constexpr std::uint64_t CHAR_ANIM_PLAYER_BACKREF    = 0x78;
 inline constexpr std::uint64_t CHAR_ANIM_RAGDOLL           = 0x38;
 inline constexpr std::uint64_t RAGDOLL_PELVIS_RIGIDBODY    = 0x20;
