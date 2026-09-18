@@ -114,7 +114,8 @@
    "file": "libil2cpp.so",
    "section": ".data.rel.ro",
    "how": "слот глобального Il2CppClass*: ищется typeinfo_rva.py по обращениям adrp/ldr из методов самого класса с последующим чтением static_fields (ldr x8,[klass,#0xB8]). Уезжает КАЖДЫЙ билд — отпечаток см. в PROVENANCE.md, §B"
-  }
+  },
+  "note": "11 обращений, статик-поля [0x1A0x7] (стабильная метка — чтение по 0x1A)"
  },
  "PLAYER_MANAGER_STATIC_FIELDS_LIST": {
   "kind": "field",
@@ -137,7 +138,8 @@
    "file": "libil2cpp.so",
    "section": ".data.rel.ro",
    "how": "слот глобального Il2CppClass*: ищется typeinfo_rva.py по обращениям adrp/ldr из методов самого класса с последующим чтением static_fields (ldr x8,[klass,#0xB8]). Уезжает КАЖДЫЙ билд — отпечаток см. в PROVENANCE.md, §B"
-  }
+  },
+  "note": "1 обращение, статик-полей НЕТ; верхний кандидат (30 обращений, [0x8x15, 0x0x15]) — чужой"
  },
  "GAME_CONTROLLER_LOCAL_PLAYER_FIELD": {
   "kind": "field",
@@ -1263,7 +1265,8 @@
    "file": "libil2cpp.so",
    "section": ".data.rel.ro",
    "how": "слот глобального Il2CppClass*: ищется typeinfo_rva.py по обращениям adrp/ldr из методов самого класса с последующим чтением static_fields (ldr x8,[klass,#0xB8]). Уезжает КАЖДЫЙ билд — отпечаток см. в PROVENANCE.md, §B"
-  }
+  },
+  "note": "6 обращений, статик-полей нет (второй кандидат 2 обращения, [0x0x2] — чужой)"
  },
  "NETWORK_CLIENT_SPAWNED": {
   "kind": "field",
@@ -2035,8 +2038,8 @@
  },
  "TOD_SCAN_RVA_BEGIN": {
   "kind": "runtime",
-  "offset": 227344384,
-  "note": "НЕ поле: начало области глобальных Il2CppClass*-слотов в .data.rel.ro, которую скан в always_day_tick() перебирает в поисках TOD_Sky. Уезжает каждый билд вместе с *_TYPEINFO_RVA (было 0xD7A0000). Проверка: кандидаты typeinfo_rva.py для класса TOD_Sky обязаны попасть в [BEGIN,END)",
+  "offset": 227999744,
+  "note": "НЕ поле: начало области глобальных Il2CppClass*-слотов в .data.rel.ro, которую скан в always_day_tick() перебирает в поисках TOD_Sky. Уезжает каждый билд вместе с *_TYPEINFO_RVA (было 0xD8D0000). Проверка: кандидаты typeinfo_rva.py для класса TOD_Sky обязаны попасть в [BEGIN,END)",
   "src": {
    "file": "libil2cpp.so",
    "how": "начало окна .data.rel.ro со слотами глобальных Il2CppClass*, которое перебирает always_day_tick(); уезжает вместе с бинарём"
@@ -2044,8 +2047,8 @@
  },
  "TOD_SCAN_RVA_END": {
   "kind": "runtime",
-  "offset": 227999744,
-  "note": "конец окна скана TOD_Sky = BEGIN + 0xA0000 (было 0xD840000)",
+  "offset": 228655104,
+  "note": "конец окна скана TOD_Sky = BEGIN + 0xA0000 (было 0xD970000)",
   "src": {
    "file": "libil2cpp.so",
    "how": "конец окна скана = BEGIN + 0xA0000"

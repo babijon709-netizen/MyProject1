@@ -48,10 +48,10 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // own methods and following  adrp/ldr -> R_AARCH64_RELATIVE addend -> slot,
 // keeping only slots that are then dereferenced as  ldr x8,[klass,#0xB8]
 // (Il2CppClass::static_fields) - i.e. exactly the access our reader performs.
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD8DB8B8;
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD9841E0;
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD8D61E8; // GameControllerBase
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD97F598; // GameControllerBase
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
@@ -316,7 +316,7 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
 // Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD8DAB08;
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD983448;
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x28;
 
 // System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
@@ -358,8 +358,8 @@ inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_
 //       --script <new>/script.json --methods 2000 UV
 // оба кандидата TOD_Sky (здесь 0xD8DF4C8 и 0xD8DFC98) обязаны попасть в окно.
 // Прошлое окно было 0xD7A0000..0xD840000 — сдвинулось ровно на +0x130000.
-inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xD8D0000;
-inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xD970000; // BEGIN + 0xA0000
+inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xD970000;
+inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDA10000; // BEGIN + 0xA0000
 inline constexpr std::uint64_t TOD_SKY_CYCLE      = 0x40; // TOD_Sky.Cycle
 inline constexpr std::uint64_t TOD_CYCLE_HOUR     = 0x10; // TOD_CycleParameters.Hour
 inline constexpr std::uint64_t TOD_CYCLE_DAY      = 0x14;

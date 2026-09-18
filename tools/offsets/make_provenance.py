@@ -27,10 +27,15 @@ OUT = os.path.join(HERE, 'PROVENANCE.md')
 # Отпечатки TypeInfo: как отличить верный слот от чужого (проверено на паре
 # дампов 89e0b63 -> 62a8534; см. журнал в OFFSETS_UPDATE.md).
 RVA_FINGERPRINT = {
-    'PLAYER_MANAGER_TYPEINFO_RVA': '5 обращений, статик-поля `[0x1A0x1]`',
+    'PLAYER_MANAGER_TYPEINFO_RVA':
+        '11 обращений, статик-поля `[0x1A0x7]`. Метка класса — чтение статик-поля '
+        'по 0x1A: она повторяется из билда в билд (в прошлом было 5 обращений и '
+        '`[0x1A0x1]`), а число обращений нет',
     'GAME_CONTROLLER_TYPEINFO_RVA':
-        '1 обращение, статик-полей нет — **верхний кандидат здесь всегда чужой**',
-    'NETWORK_CLIENT_TYPEINFO_RVA': '6 обращений, статик-полей нет',
+        '1 обращение, статик-полей нет — **верхний кандидат здесь всегда чужой** '
+        '(в этом билде верхний: 30 обращений, `[0x8x15, 0x0x15]`)',
+    'NETWORK_CLIENT_TYPEINFO_RVA':
+        '6 обращений, статик-полей нет (второй кандидат: 2 обращения, `[0x0x2]` — чужой)',
 }
 
 
@@ -191,9 +196,9 @@ def main():
     w('')
     w('* `Il2CppClass.static_fields == 0xB8` — в любом методе, читающем статики:')
     w('  `adrp/ldr` слота → `ldr xA,[xM]` → `ldr xB,[xA,#0xb8]`. В билде')
-    w(f'  `{a.build}`: `OreHitstreaksMarker.Update` 0x786eb9c.')
+    w(f'  `{a.build}`: `OreHitstreaksMarker.Update` 0x78D0230.')
     w('* `klass->interfaceOffsets == 0xB0`, `interface_offsets_count == 0x12E` —')
-    w(f'  `MineableObject` 0x656781c/0x6567828 (билд `{a.build}`).')
+    w(f'  `MineableObject` 0x65b63d0/0x65b63d8 (билд `{a.build}`).')
     w('* `Il2CppArray`: длина 0x18, первый элемент 0x20; `List<T>`: `_items` 0x10,')
     w('  `_size` 0x18 — см. любой перебор коллекции в коде игры.')
     w('')
