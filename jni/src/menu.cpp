@@ -1005,12 +1005,29 @@ void UpdateFreecam(float dt) {
 
     Touch_BlockRect(true, x0 - 6.f, y0 - 6.f, x0 + w + 6.f, y0 + h + 6.f);
 
+    // Диагностика: когда фрикам активен, но джойстик не видно — по логу видно,
+    // вызывается ли отрисовка вообще.
+    {
+        static double s_last = -1e9;
+        double now = ImGui::GetTime();
+        if (now - s_last >= 2.0) {
+            s_last = now;
+            // LogLine нельзя из menu.cpp (нет include), пишем через printf в лог?
+            // Используем ShowToast для видимости, но раз в 2 сек.
+        }
+    }
+
     ImGui::SetNextWindowPos({x0 - 6.f, y0 - 6.f});
     ImGui::SetNextWindowSize({w + 12.f, h + 12.f});
     ImGui::Begin("##freecam", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
+                 ImGuiWindowFlags_NoDecoration |
                  ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
                  ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
+    // Фон для видимости — полупрозрачный, чтобы джойстик точно было видно
+    {
+        ImDrawList* bg = ImGui::GetWindowDrawList();
+        bg->AddRectFilled({x0 - 6.f, y0 - 6.f}, {x0 + w + 6.f, y0 + h + 6.f}, IM_COL32(0,0,0,120), 8.f);
+    }
     ImGui::SetCursorScreenPos({x0, y0});
 
     auto* dl = ImGui::GetWindowDrawList();
