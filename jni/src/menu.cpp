@@ -1036,6 +1036,9 @@ void UpdateFreecam(float dt) {
     // ---- левый джойстик (окно с фоном) ----
     float ax = 0.f, ay = 0.f;
     float yaw_delta = 0.f, pitch_delta = 0.f;
+    // Для одновременного управления — запоминаем активные зоны
+    static bool s_joy_active = false;
+    static ImVec2 s_joy_start = {0,0};
     {
         ImGui::SetNextWindowPos({x0 - 12.f, y0 - 12.f});
         ImGui::SetNextWindowSize({R*2.f + 24.f, R*2.f + 24.f});
@@ -1044,12 +1047,16 @@ void UpdateFreecam(float dt) {
                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
                      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
         auto* dl = ImGui::GetWindowDrawList();
-        // Фон — яркий чтобы точно видно
         dl->AddRectFilled({x0 - 10.f, y0 - 10.f}, {x0 + R*2.f + 10.f, y0 + R*2.f + 10.f}, IM_COL32(20,20,20,200), 14.f);
         dl->AddRect({x0 - 10.f, y0 - 10.f}, {x0 + R*2.f + 10.f, y0 + R*2.f + 10.f}, IM_COL32(255,255,255,80), 14.f, 0, 2.f);
         ImGui::SetCursorScreenPos({x0, y0});
         ImGui::InvisibleButton("##fc_joy", {R * 2.f, R * 2.f});
-        if (ImGui::IsItemActive()) {
+        bool joy_item_active = ImGui::IsItemActive();
+        // Также считаем активным если палец в зоне джойстика (для мультитача)
+        bool mouse_in_joy = (io.MousePos.x >= x0 && io.MousePos.x <= x0 + R*2.f && io.MousePos.y >= y0 && io.MousePos.y <= y0 + R*2.f);
+        if (io.MouseDown[0] && mouse_in_joy) joy_item_active = true;
+        if (joy_item_active) {
+            s_joy_active = true;
             const ImVec2 d = {io.MousePos.x - cx, io.MousePos.y - cy};
             const float len = sqrtf(d.x * d.x + d.y * d.y);
             if (len > 6.f) {
@@ -1057,13 +1064,15 @@ void UpdateFreecam(float dt) {
                 ax = (d.x * k) / R;
                 ay = (-d.y * k) / R;
             }
+        } else {
+            // Если палец не в зоне джойстика, не сбрасываем сразу — ждём отпускания
+            if (!io.MouseDown[0]) s_joy_active = false;
         }
         {
             const ImU32 ring = IM_COL32(255,255,255,200);
-            const ImU32 knob = ImGui::IsItemActive() ? IM_COL32(0,200,255,255) : IM_COL32(0,180,255,200);
+            const ImU32 knob = (joy_item_active || s_joy_active) ? IM_COL32(0,200,255,255) : IM_COL32(0,180,255,200);
             dl->AddCircle({cx, cy}, R, ring, 32, 3.f);
             dl->AddCircleFilled({cx + ax * R * 0.60f, cy - ay * R * 0.60f}, R * 0.34f, knob, 32);
-            // Крест для ориентации
             dl->AddLine({cx - R*0.15f, cy}, {cx + R*0.15f, cy}, IM_COL32(255,255,255,60), 1.f);
             dl->AddLine({cx, cy - R*0.15f}, {cx, cy + R*0.15f}, IM_COL32(255,255,255,60), 1.f);
         }
@@ -1082,7 +1091,10 @@ void UpdateFreecam(float dt) {
         ImGui::InvisibleButton("##fc_look", {look_w, sh});
         static ImVec2 s_last_look = {0,0};
         static bool s_look_active = false;
-        if (ImGui::IsItemActive()) {
+        bool look_item_active = ImGui::IsItemActive();
+        bool mouse_in_look = (io.MousePos.x >= look_x0);
+        if (io.MouseDown[0] && mouse_in_look) look_item_active = true;
+        if (look_item_active) {
             ImVec2 cur = io.MousePos;
             if (!s_look_active) {
                 s_last_look = cur;
@@ -1090,13 +1102,13 @@ void UpdateFreecam(float dt) {
             } else {
                 float dx = cur.x - s_last_look.x;
                 float dy = cur.y - s_last_look.y;
-                const float sens = 0.20f;
+                const float sens = 0.22f;
                 yaw_delta = dx * sens;
                 pitch_delta = -dy * sens;
                 s_last_look = cur;
             }
         } else {
-            s_look_active = false;
+            if (!io.MouseDown[0]) s_look_active = false;
         }
         ImGui::End();
     }
@@ -1298,7 +1310,15 @@ void RenderMenu() {
 
         // Тап (отпускание пальца) — записываем зону.
         if (io.MouseReleased[0]) {
-            float rx = io.MousePos.x / dw, ry = io.MousePos.y / dh;
+            // Для фрикама используем sw/sh (ImGui DisplaySize 2460 квадрат), а не dw/dh (real 1080)
+            // иначе точка уходит ниже из-за деления на 1080 вместо 2460
+            float rx, ry;
+            if (g_calibMode == 4) {
+                float sw2 = io.DisplaySize.x, sh2 = io.DisplaySize.y;
+                rx = io.MousePos.x / sw2; ry = io.MousePos.y / sh2;
+            } else {
+                rx = io.MousePos.x / dw; ry = io.MousePos.y / dh;
+            }
             if (rx > 0.f && rx < 1.f && ry > 0.f && ry < 1.f) {
                 const bool farm = (g_calibMode == 1 || g_calibMode == 2);
                 if (g_calibMode == 1) {

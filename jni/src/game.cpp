@@ -1888,7 +1888,7 @@ static void freecam_writer_start() {
                 }
                 ++iter;
             }
-            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     }).detach();
 }
@@ -2154,25 +2154,28 @@ bool esp_freecam_move(float forward, float right, float up) {
     if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
     if (!std::isfinite(forward) || !std::isfinite(right) || !std::isfinite(up)) return false;
-    Vec3 f, r;
+    Vec3 f, r, u;
     if (g_freecam_has_yawpitch) {
         float yaw_rad = g_freecam_yaw * 0.0174532925f;
         float pitch_rad = g_freecam_pitch * 0.0174532925f;
         float cy = cosf(yaw_rad), sy = sinf(yaw_rad);
-        float cp = cosf(pitch_rad);
-        f = {sy * cp, 0.f, cy * cp};
+        float cp = cosf(pitch_rad), sp = sinf(pitch_rad);
+        // Полёт В СТОРОНУ ВЗГЛЯДА, а не горизонтально
+        f = {sy * cp, sp, cy * cp};
         r = {cy, 0.f, -sy};
+        u = {0.f, 1.f, 0.f};
     } else {
-        f = g_cam_forward; r = g_cam_right;
-        if (!g_cam_pose_valid || !vec3_is_finite(f) || !vec3_is_finite(r)) { f = {0, 0, 1}; r = {1, 0, 0}; }
+        f = g_cam_forward; r = g_cam_right; u = g_cam_up;
+        if (!g_cam_pose_valid || !vec3_is_finite(f) || !vec3_is_finite(r)) { f = {0, 0, 1}; r = {1, 0, 0}; u = {0,1,0}; }
     }
-    float fh = sqrtf(f.x * f.x + f.z * f.z);
-    if (fh > 1e-4F) { f.x /= fh; f.z /= fh; } else { f = {0, 0, 1}; }
-    float rh = sqrtf(r.x * r.x + r.z * r.z);
-    if (rh > 1e-4F) { r.x /= rh; r.z /= rh; } else { r = {1, 0, 0}; }
-    g_freecam_pos.x += f.x * forward + r.x * right;
-    g_freecam_pos.z += f.z * forward + r.z * right;
-    g_freecam_pos.y += up;
+    // Нормализуем
+    float fl = sqrtf(f.x*f.x + f.y*f.y + f.z*f.z);
+    if (fl > 1e-6f) { f.x/=fl; f.y/=fl; f.z/=fl; }
+    float rl = sqrtf(r.x*r.x + r.y*r.y + r.z*r.z);
+    if (rl > 1e-6f) { r.x/=rl; r.y/=rl; r.z/=rl; }
+    g_freecam_pos.x += f.x * forward + r.x * right + u.x * up;
+    g_freecam_pos.y += f.y * forward + r.y * right + u.y * up;
+    g_freecam_pos.z += f.z * forward + r.z * right + u.z * up;
     if (!vec3_is_finite(g_freecam_pos)) { g_freecam_pos = {}; return false; }
     return freecam_write();
 }
