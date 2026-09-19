@@ -6634,6 +6634,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     if (g_pid <= 0 || !g_il2cpp_base) { return result; }
 
+    // Фрикам — до всех ранних выходов: сводки и покадровая запись нужны и в
+    // пустой местности (раньше тик стоял за выходом «нет игроков» и там не
+    // бежал вовсе — остаточные мерцания было нечем смотреть), а сами
+    // early-out'ы тику не помеха (у него свои проверки живости трансформа).
+    freecam_tick();
+
     uint64_t native_cam = 0;
     Mat4 projection{}, view{}, vp{};
     float sw = overlay_width >= 100 ? (float)overlay_width : 1080.0F;
@@ -6749,7 +6755,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         xray_apply(native_cam);
         always_day_tick();
-        freecam_tick();
+        // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
             return result;
         }
