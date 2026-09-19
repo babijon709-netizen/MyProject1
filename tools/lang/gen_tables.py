@@ -128,6 +128,12 @@ UI_EN = {
     'Фрикам включён': 'Freecam on',
     'Свайп — обзор': 'Swipe to look',
     'Фрикам: камера не найдена': 'Freecam: camera not found',
+    'Настроить джойстик': 'Set up the joystick',
+    'Тапни куда поставить джойстик фрикама': 'Tap where to put the freecam joystick',
+    'Джойстик фрикама сохранён': 'Freecam joystick saved',
+    'Настроить кнопку': 'Set up the button',
+    'Тапни куда поставить кнопку фрикама': 'Tap where to put the freecam button',
+    'Кнопка фрикама сохранена': 'Freecam button saved',
     'Вперёд': 'Forward', 'Назад': 'Back', 'Вверх': 'Up', 'Вниз': 'Down',
     # состояние поиска камеры во фрикаме (строка в меню)
     'Камера': 'Camera', 'ок': 'ok', 'нет камеры': 'no camera',

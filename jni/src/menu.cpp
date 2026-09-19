@@ -802,7 +802,7 @@ float TabContent(int tab, float dt, float cW) {
         // базы перед рейдом. Пока он включён, аим молчит: точка прицела
         // считается от глаза персонажа, а камера улетела от него.
         SHdr(XS("Фрикам"));
-        CardBg(Layout::RowH * 2.f + Layout::SliderH);
+        CardBg(Layout::RowH * 3.f + Layout::SliderH);
         ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
         SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
                   1.f, 60.f, XS("%.0f м/с"), false, false, g_state.sl_freecam, dt);
@@ -814,6 +814,18 @@ float TabContent(int tab, float dt, float cW) {
             ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
             if (ImGui::Button(XS("Настроить джойстик"), {avW - inset*2.f, rowH - 8.f})) {
                 g_calibMode = 4;
+                menu_open = false;
+            }
+        }
+        {
+            // Кнопка настройки положения экранной кнопки фрикама (квадрата
+            // с глазом) — тем же тапом по экрану, что и джойстик.
+            const float rowH = Layout::RowH, inset = Layout::Inset;
+            const float avW = ImGui::GetContentRegionAvail().x;
+            auto pos = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
+            if (ImGui::Button(XS("Настроить кнопку"), {avW - inset*2.f, rowH - 8.f})) {
+                g_calibMode = 6;
                 menu_open = false;
             }
         }
@@ -1473,6 +1485,7 @@ void RenderMenu() {
             : (g_calibMode == 2) ? XS("Тапни по кнопке огня / атаки")
             : (g_calibMode == 4) ? XS("Тапни куда поставить джойстик фрикама")
             : (g_calibMode == 5) ? XS("Тапни куда поставить счётчик игроков")
+            : (g_calibMode == 6) ? XS("Тапни куда поставить кнопку фрикама")
                                  : XS("Тапни по точке, где аим водит палец");
         const char* sub = XS("Тап записывает зону. Меню откроется само.");
         float tfs = ImGui::GetFontSize() * 1.5f;
@@ -1504,6 +1517,11 @@ void RenderMenu() {
                 if (g_state.hud_cnt_x >= 0.f) { zx = g_state.hud_cnt_x * dw; zy = g_state.hud_cnt_y * dh; }
                 else { const HudCounterGeom& hg = HudCounterLast(); zx = hg.bX + hg.bW * 0.5f; zy = hg.bY + hg.bH * 0.5f; }
             }
+            // Кнопка фрикама: сохранённый центр или дефолт справа по центру.
+            if (g_calibMode == 6) {
+                if (g_state.freecam_btn_x >= 0.f) { zx = g_state.freecam_btn_x * dw; zy = g_state.freecam_btn_y * dh; }
+                else { zx = kFcBtnDefX * dw; zy = kFcBtnDefY * dh; }
+            }
             if (zx >= 0.f) {
                 float pr = 34.f + 6.f * sinf((float)ImGui::GetTime() * 4.f);
                 fg->AddCircle({zx, zy}, pr, C::UA(C::Acc(), 0.85f), 40, 3.f);
@@ -1531,6 +1549,24 @@ void RenderMenu() {
             }
         }
 
+        // Режим 6 — то же превью для кнопки фрикама: квадрат следует за
+        // пальцем, у середины липнет к центру по каждой оси с направляющими.
+        if (g_calibMode == 6 && io.MouseDown[0]) {
+            float fx = io.MousePos.x / dw, fy = io.MousePos.y / dh;
+            const bool snapX = fabsf(fx - 0.5f) < 0.04f;
+            const bool snapY = fabsf(fy - 0.5f) < 0.04f;
+            if (snapX) fx = 0.5f;
+            if (snapY) fy = 0.5f;
+            if (snapX) fg->AddLine({dw * 0.5f, 0.f}, {dw * 0.5f, dh}, C::UA(C::Acc(), 0.55f), 2.f);
+            if (snapY) fg->AddLine({0.f, dh * 0.5f}, {dw, dh * 0.5f}, C::UA(C::Acc(), 0.55f), 2.f);
+            if (dw > kFcBtnSide + 16.f && dh > kFcBtnSide + 16.f) {
+                float px = ImClamp(fx * dw - kFcBtnSide * 0.5f, 8.f, dw - kFcBtnSide - 8.f);
+                float py = ImClamp(fy * dh - kFcBtnSide * 0.5f, 8.f, dh - kFcBtnSide - 8.f);
+                fg->AddRectFilled({px, py}, {px + kFcBtnSide, py + kFcBtnSide}, C::UA(C::Card(), 0.85f), kFcBtnRadius);
+                fg->AddRect({px, py}, {px + kFcBtnSide, py + kFcBtnSide}, C::UA(C::Acc(), 0.9f), kFcBtnRadius, 0, 2.5f);
+            }
+        }
+
         // Тап (отпускание пальца) — записываем зону в долях видимого экрана.
         // Фрикам тоже здесь: его геометрия считается от VisibleScreen, как и
         // всё остальное, поэтому отдельная шкала ему больше не нужна.
@@ -1539,6 +1575,8 @@ void RenderMenu() {
             if (rx > 0.f && rx < 1.f && ry > 0.f && ry < 1.f) {
                 const bool farm = (g_calibMode == 1 || g_calibMode == 2);
                 const bool hud  = (g_calibMode == 5);
+                const bool fcb  = (g_calibMode == 6);
+                const bool fcj  = (g_calibMode == 4);
                 if (g_calibMode == 1) {
                     g_state.farm_joy_x = rx; g_state.farm_joy_y = ry;
                     ShowToast(XS("Зона джойстика сохранена"));
@@ -1554,6 +1592,12 @@ void RenderMenu() {
                     if (fabsf(ry - 0.5f) < 0.04f) ry = 0.5f;
                     g_state.hud_cnt_x = rx; g_state.hud_cnt_y = ry;
                     ShowToast(XS("Положение счётчика сохранено"));
+                } else if (fcb) {
+                    // Та же липкость к центру, что в превью: по каждой оси.
+                    if (fabsf(rx - 0.5f) < 0.04f) rx = 0.5f;
+                    if (fabsf(ry - 0.5f) < 0.04f) ry = 0.5f;
+                    g_state.freecam_btn_x = rx; g_state.freecam_btn_y = ry;
+                    ShowToast(XS("Кнопка фрикама сохранена"));
                 } else {
                     g_state.aim_tx = rx; g_state.aim_ty = ry;
                     ShowToast(XS("Точка пальца сохранена"));
@@ -1563,10 +1607,11 @@ void RenderMenu() {
                 menu_open = true;
                 // Вернуться туда, откуда калибровку запускали: зоны автофарма —
                 // в окно автофарма, точка аима — на вкладку «Аим», счётчик —
-                // на вкладку «Опции».
-                if (farm)      PopoverOpen(XS("Автофарм"), 5);
-                else if (hud)  g_state.cur_tab = 5;
-                else           g_state.cur_tab = 1;
+                // на вкладку «Опции», джойстик и кнопка фрикама — в «Разное».
+                if (farm)            PopoverOpen(XS("Автофарм"), 5);
+                else if (hud)        g_state.cur_tab = 5;
+                else if (fcb || fcj) g_state.cur_tab = 3;
+                else                 g_state.cur_tab = 1;
                 g_input.touchConsumed = true; // этот тап уже отработал
             }
         }
@@ -2095,7 +2140,7 @@ void RenderMenu() {
 
 // Калибровка зон вводом с экрана: 0 — нет, 1 — ждём тап по джойстику
 // автофарма, 2 — по кнопке огня, 3 — по точке, из которой аимбот водит палец,
-// 4 — по центру джойстика фрикама, 5 — куда поставить счётчик игроков. Пока
-// калибровка активна, меню скрыто и первый тап по экрану пишет позицию (в
-// долях экрана) в g_state.
+// 4 — по центру джойстика фрикама, 5 — куда поставить счётчик игроков,
+// 6 — куда поставить кнопку фрикама. Пока калибровка активна, меню скрыто
+// и первый тап по экрану пишет позицию (в долях экрана) в g_state.
 int  g_calibMode = 0;

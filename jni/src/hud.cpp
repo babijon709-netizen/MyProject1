@@ -8,6 +8,8 @@
 #include "str.h"         // XS()
 #include "text_utf8.h"   // CopyTextUtf8
 #include "app_state.h"    // g_state.hud_cnt_* — положение счётчика
+#include "menu.h"          // g_calibMode — кнопка молчит при калибровке
+#include "audio.h"         // PlaySound — клик кнопки фрикама
 
 struct ToastState {
     char  msg[128]     = {};
@@ -261,6 +263,49 @@ void DrawWatermark(float dt) {
         float lX = bX + pad + dotR * 2.f + 12.f;
         fg->AddText(fn, fs, {lX, tY}, C::UA(C::Txt(), 0.85f), lbl);
         fg->AddText(fn, fs, {lX + lSz.x + 14.f, tY}, C::U(acc), cntBuf);
+    }
+
+    // ---- Кнопка фрикама: квадрат со скруглениями и глазом ----------------
+    // Тап включает/выключает фрикам (тост «включён» ставит сам UpdateFreecam).
+    // Положение — центр кнопки в долях экрана, дефолт справа по центру;
+    // двигается в «Разное → Фрикам → Настроить кнопку». Тап активен, только
+    // когда меню закрыто и не идёт калибровка.
+    {
+        const float side = kFcBtnSide, rad = kFcBtnRadius;
+        float cx = (g_state.freecam_btn_x >= 0.f ? g_state.freecam_btn_x : kFcBtnDefX) * scrW;
+        float cy = (g_state.freecam_btn_y >= 0.f ? g_state.freecam_btn_y : kFcBtnDefY) * scrH;
+        float qX = cx - side * 0.5f, qY = cy - side * 0.5f;
+        if (scrW > side + 16.f) qX = ImClamp(qX, 8.f, scrW - side - 8.f);
+        if (scrH > side + 16.f) qY = ImClamp(qY, 8.f, scrH - side - 8.f);
+
+        const bool on = g_state.freecam_on;
+        if (!menu_open && g_calibMode == 0 && io.MouseClicked[0] &&
+            io.MousePos.x >= qX && io.MousePos.x <= qX + side &&
+            io.MousePos.y >= qY && io.MousePos.y <= qY + side) {
+            g_state.freecam_on = !g_state.freecam_on;
+            PlaySound(SND_CLICK);
+        }
+
+        fg->AddRectFilled({qX, qY}, {qX + side, qY + side}, C::UA(C::Card(), 0.90f), rad);
+        fg->AddRect({qX, qY}, {qX + side, qY + side},
+                    on ? C::UA(C::Acc(), 0.95f) : C::UA(C::Dim(), 0.8f), rad, 0, on ? 3.f : 1.5f);
+
+        // Глаз: миндалина двумя квадратичными кривыми (контрольная точка
+        // тянет кривую на половину высоты — отсюда удвоение), зрачок и блик.
+        const float ex = qX + side * 0.5f, ey = qY + side * 0.5f;
+        const float aw = side * 0.30f, ah = side * 0.17f;
+        fg->PathLineTo({ex - aw, ey});
+        fg->PathBezierQuadraticCurveTo({ex, ey - ah * 2.f}, {ex + aw, ey});
+        fg->PathBezierQuadraticCurveTo({ex, ey + ah * 1.6f}, {ex - aw, ey});
+        fg->PathFillConvex(C::UA(C::Txt(), on ? 1.f : 0.55f));
+        fg->PathLineTo({ex - aw, ey});
+        fg->PathBezierQuadraticCurveTo({ex, ey - ah * 2.f}, {ex + aw, ey});
+        fg->PathBezierQuadraticCurveTo({ex, ey + ah * 1.6f}, {ex - aw, ey});
+        fg->PathStroke(C::UA(C::Dim(), 0.9f), ImDrawFlags_Closed, 2.f);
+        const float pr = ah * 0.95f;
+        fg->AddCircleFilled({ex, ey}, pr, IM_COL32(20, 20, 26, 255), 24);
+        fg->AddCircleFilled({ex - pr * 0.3f, ey - pr * 0.3f}, pr * 0.28f,
+                            IM_COL32(235, 235, 240, 255), 12);
     }
 }
 
