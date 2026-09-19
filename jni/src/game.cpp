@@ -1814,13 +1814,10 @@ static void freecam_writer_start() {
                     const Vec3 rr = g_cam_right, uu = g_cam_up, ff = g_cam_forward;
                     if (vec3_is_finite(rr) && vec3_is_finite(uu) && vec3_is_finite(ff)) {
                         Mat4 vw{};
-                        vw.m[0]=rr.x; vw.m[1]=rr.y; vw.m[2]=rr.z; vw.m[3]=0.f;
-                        vw.m[4]=uu.x; vw.m[5]=uu.y; vw.m[6]=uu.z; vw.m[7]=0.f;
-                        vw.m[8]=-ff.x; vw.m[9]=-ff.y; vw.m[10]=-ff.z; vw.m[11]=0.f;
-                        vw.m[12]=-(rr.x * g_freecam_pos.x + rr.y * g_freecam_pos.y + rr.z * g_freecam_pos.z);
-                        vw.m[13]=-(uu.x * g_freecam_pos.x + uu.y * g_freecam_pos.y + uu.z * g_freecam_pos.z);
-                        vw.m[14]=-(-ff.x * g_freecam_pos.x + -ff.y * g_freecam_pos.y + -ff.z * g_freecam_pos.z);
-                        vw.m[15]=1.f;
+                        vw.m[0]=rr.x; vw.m[4]=rr.y; vw.m[8]=rr.z;  vw.m[12]=-(rr.x * g_freecam_pos.x + rr.y * g_freecam_pos.y + rr.z * g_freecam_pos.z);
+                        vw.m[1]=uu.x; vw.m[5]=uu.y; vw.m[9]=uu.z;  vw.m[13]=-(uu.x * g_freecam_pos.x + uu.y * g_freecam_pos.y + uu.z * g_freecam_pos.z);
+                        vw.m[2]=-ff.x; vw.m[6]=-ff.y; vw.m[10]=-ff.z; vw.m[14]=-(-ff.x * g_freecam_pos.x + -ff.y * g_freecam_pos.y + -ff.z * g_freecam_pos.z);
+                        vw.m[3]=0.f; vw.m[7]=0.f; vw.m[11]=0.f; vw.m[15]=1.f;
                         wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &vw, sizeof(Mat4));
                     }
                 }
@@ -2016,14 +2013,11 @@ static bool freecam_write() {
         const Vec3 r = g_cam_right, u = g_cam_up, f = g_cam_forward;
         if (vec3_is_finite(r) && vec3_is_finite(u) && vec3_is_finite(f)) {
             Mat4 view{};
-            // column-major: mat_set(row, col, value)
-            view.m[0] = r.x; view.m[1] = r.y; view.m[2] = r.z; view.m[3] = 0.f;
-            view.m[4] = u.x; view.m[5] = u.y; view.m[6] = u.z; view.m[7] = 0.f;
-            view.m[8] = -f.x; view.m[9] = -f.y; view.m[10] = -f.z; view.m[11] = 0.f;
-            view.m[12] = -(r.x * g_freecam_pos.x + r.y * g_freecam_pos.y + r.z * g_freecam_pos.z);
-            view.m[13] = -(u.x * g_freecam_pos.x + u.y * g_freecam_pos.y + u.z * g_freecam_pos.z);
-            view.m[14] = -(-f.x * g_freecam_pos.x + -f.y * g_freecam_pos.y + -f.z * g_freecam_pos.z);
-            view.m[15] = 1.f;
+            // column-major, rows = basis: row0=right, row1=up, row2=-forward
+            view.m[0] = r.x; view.m[4] = r.y; view.m[8]  = r.z; view.m[12] = -(r.x * g_freecam_pos.x + r.y * g_freecam_pos.y + r.z * g_freecam_pos.z);
+            view.m[1] = u.x; view.m[5] = u.y; view.m[9]  = u.z; view.m[13] = -(u.x * g_freecam_pos.x + u.y * g_freecam_pos.y + u.z * g_freecam_pos.z);
+            view.m[2] = -f.x; view.m[6] = -f.y; view.m[10] = -f.z; view.m[14] = -(-f.x * g_freecam_pos.x + -f.y * g_freecam_pos.y + -f.z * g_freecam_pos.z);
+            view.m[3] = 0.f; view.m[7] = 0.f; view.m[11] = 0.f; view.m[15] = 1.f;
             wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &view, sizeof(Mat4));
         }
     }
