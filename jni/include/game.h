@@ -10,10 +10,16 @@ struct EspBox {
     unsigned long long id;   // stable per-player identity (PlayerManager*), for target stickiness
     float x1, y1, x2, y2;
     float distance;
-    // Игрок мёртв (Oxide.PlayerManager.respawning). Аим таких не берёт в цель:
-    // труп продолжает жить в списке игроков и отдавать корректные кости, из-за
-    // чего прицел уезжал на уже убитого (просьба 19.09).
+    // Игрок мёртв. Аим таких не берёт в цель: труп ещё несколько секунд живёт
+    // в списке игроков и отдаёт корректные кости, из-за чего прицел уезжал на
+    // уже убитого (просьба 19.09). Считаем по двум независимым признакам:
+    //   * Oxide.PlayerManager.respawning (bool, 0x208) — «ждать возрождения»;
+    //   * здоровье: PlayerManager.vitals (0xC8) -> GenericVitals.KQN (0xB8).
+    // Первый в логе 14:55 не срабатывал ни разу (мёртвых 0 при жалобе игрока),
+    // поэтому основной признак — здоровье, а оба значения пишутся в лог.
     bool  dead = false;
+    float health = -1.f;          // текущее здоровье (vitals + 0xB8), -1 = не прочитано
+    bool  respawning = false;     // PlayerManager.respawning (0x208)
     float corners[8][2];
     bool  corner_visible[8];
 

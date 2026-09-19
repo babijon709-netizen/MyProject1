@@ -130,6 +130,13 @@ inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x290;
 // (Vector3, 0x1E0) и playerDeathHandlerReference (0x80), но для «не целиться
 // в труп» довольно этого флага.
 inline constexpr std::uint64_t PLAYER_MANAGER_RESPAWNING = 0x208;
+// Цепочка здоровья (релизный дамп):
+//   Oxide.PlayerManager.vitals            (Oxide.PlayerVitals*) 0xC8
+//   Oxide.GenericVitals.KQN               (float, protected)    0xB8
+// m_MaxHealth лежит там же на 0x88, поэтому 0xB8 — текущее здоровье; имя
+// обфусцировано, сверялись позиционно по dump.cs (class Oxide.GenericVitals).
+inline constexpr std::uint64_t PLAYER_VITALS       = 0xC8;
+inline constexpr std::uint64_t VITALS_HEALTH       = 0xB8;
 inline constexpr std::uint64_t PLAYER_INVENTORY         = 0x98;
 inline constexpr std::uint64_t PLAYER_WEAPON_REFERENCE  = 0xF0;
 inline constexpr std::uint64_t PLAYER_WEAPONS_ARRAY     = 0x198;

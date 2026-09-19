@@ -47,6 +47,8 @@ struct AimTarget {
     float dist = 0.f;               // pixel distance from crosshair
     float world_dist = 0.f;
     int   bone = -1;                // слот точки прицела (0 голова, 1 шея, 2 грудь)
+    float health = -1.f;            // здоровье цели (для лога и проверки смерти)
+    bool  respawning = false;       // PlayerManager.respawning (для лога)
 };
 
 static void AimReleaseFinger(bool& fingerDown) {
@@ -226,7 +228,11 @@ static bool AimBegin(float& dt, float& sw, float& sh) {
 // поэтому цель задана константой.
 static constexpr int   kAimBoneSlot = 1;
 
+// Множитель упреждения по скорости цели (кадров вперёд). 0 — выключено.
+static constexpr float kAimVelocityLead = 0.0f;
 static unsigned long s_dead_skipped = 0;   // мёртвых не взяли в цель (для лога)
+static unsigned long s_no_skeleton = 0;         // у цели нет скелета вовсе
+static unsigned long s_bones_not_projected = 0; // скелет есть, кости не легли на экран
 
 static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, float& degPerPx) {
     LogStage(kStageAimSelect);
@@ -288,7 +294,9 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             // По костям цель не нашлась — по просьбе 19.09 («аим полностью по
             // скелету») в цель такие игроки не идут вовсе: запасная точка от
             // габаритов бокса давала прицел выше/ниже настоящей головы.
-            // Считаем, чтобы по логу было видно, часто ли скелет не читается.
+            // Считаем и РАЗДЕЛЯЕМ причины: «скелета нет вообще» и «скелет есть,
+            // но кости не спроецировались» — лечится это по-разному.
+            if (b.has_skeleton) ++s_bones_not_projected; else ++s_no_skeleton;
             {
                 static unsigned long s_no_bones = 0;
                 static double s_no_bones_at = -1e9;
@@ -296,9 +304,10 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                 const double now = (double)clock() / CLOCKS_PER_SEC;
                 if (now - s_no_bones_at >= 5.0) {
                     s_no_bones_at = now;
-                    LogLine("аим: пропущено целей — без костей %lu, мёртвых %lu",
-                            s_no_bones, s_dead_skipped);
+                    LogLine("аим: пропущено целей — без костей %lu (нет скелета %lu, не спроецировались %lu), мёртвых %lu",
+                            s_no_bones, s_no_skeleton, s_bones_not_projected, s_dead_skipped);
                     s_no_bones = 0; s_dead_skipped = 0;
+                    s_no_skeleton = 0; s_bones_not_projected = 0;
                 }
             }
             continue;
@@ -319,6 +328,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         }
         if (!t.valid) continue;
         t.id = b.id;
+        t.health = b.health; t.respawning = b.respawning;
         const bool sticky = (pick.lastId != 0 && b.id == pick.lastId);
         if (t.sx < -sw || t.sx > sw * 2.f || t.sy < -sh || t.sy > sh * 2.f) continue;
         if (g_state.aim_pos && !sticky && (t.sx < 0.f || t.sy < 0.f || t.sx > sw || t.sy > sh)) continue;
@@ -398,7 +408,15 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                     // движение проходит целиком. Множитель больше 1.1 только
                     // мерил: при 2.0 цель идёт с остатком 0.98° против 0.70°,
                     // то есть прицел уезжает вперёд, а не отстаёт.
-                    float k = 1.1f * (1.f - leadMin / vMag);
+                    // Упреждение по скорости ВЫКЛЮЧЕНО (было до 1.5 кадра
+                    // вперёд). Именно оно и выглядело как «аим пытается
+                    // запредиктить движение игрока» (жалоба 19.09): точка
+                    // уезжала вперёд по ходу цели, а когда цель меняла
+                    // направление, прицел оказывался не там. Задержку петли
+                    // теперь гасит окно «в полёте» в контроллере — второе
+                    // упреждение только раскачивает. Константа оставлена:
+                    // вернуть — одна правка числа (было 1.1).
+                    float k = kAimVelocityLead * (1.f - leadMin / vMag);
                     if (k > 1.5f) k = 1.5f;
                     best.yaw   += pick.velYaw   * k;
                     best.pitch += pick.velPitch * k;
@@ -418,6 +436,13 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // Цель взята — с этого такта камера (или ось выстрела) наша: автофарм ей
     // больше не командует.
     g_aimActive = true;
+    // Состояние выбранной цели — чтобы по логу проверить признак смерти:
+    // игрок жаловался, что аим ведёт по мёртвым, а по respawning (0x208) в
+    // логе 14:55 не сработало ни разу. Печатаем здоровье и оба флага.
+    if (best.id != pick.lastId)
+        LogLine("аим: цель 0x%llx здоровье=%.1f respawning=%d дистанция=%.1f м",
+                (unsigned long long)best.id, (double)best.health,
+                (int)best.respawning, (double)best.world_dist);
     pick.switched = (best.id != pick.lastId);
     pick.lastId = best.id; pick.lastBone = best.bone;
     return true;
@@ -650,16 +675,19 @@ static void UpdateAimTouch(float dt) {
     // Шаги берём по их очереди, а не по отклику ошибки: отклик сдвигается и
     // движением цели, и тогда поправка «съедала» настоящий остаток (прогон
     // стенда: остаток ошибки 10 град при шаге 1 px — прицел вставал).
-    // Окно в четыре такта: в комментарии ниже сказано, что у пальца шаги
-    // жили до четырёх кадров, а учитывались два — остаток недоучитывался,
-    // и качели гасли не до конца.
-    static float s_flightYaw[4] = {0.f, 0.f, 0.f, 0.f}, s_flightPitch[4] = {0.f, 0.f, 0.f, 0.f};
+    // Окно в восемь тактов. Касание идёт через систему ввода Android: от
+    // нашего Touch_Move до поворота камеры проходит до 100 мс, то есть шесть-
+    // восемь кадров. Учитывали четыре — остаток недоучитывался, и первые
+    // секунды после захвата цели аим раскачивался (жалоба 19.09): крупные шаги
+    // на подходе уходят «в полёт», камера добирает их все разом и проскакивает.
+    static float s_flightYaw[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    static float s_flightPitch[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
     const bool  useFlight = !haveCam;
-    const float flightYaw   = s_flightYaw[0] + s_flightYaw[1] + s_flightYaw[2] + s_flightYaw[3];
-    const float flightPitch = s_flightPitch[0] + s_flightPitch[1] + s_flightPitch[2] + s_flightPitch[3];
+    float flightYaw = 0.f, flightPitch = 0.f;
+    for (int i = 0; i < 8; ++i) { flightYaw += s_flightYaw[i]; flightPitch += s_flightPitch[i]; }
     auto shiftFlight = [&]() {
-        for (int i = 0; i < 3; ++i) { s_flightYaw[i] = s_flightYaw[i + 1]; s_flightPitch[i] = s_flightPitch[i + 1]; }
-        s_flightYaw[3] = 0.f; s_flightPitch[3] = 0.f;
+        for (int i = 0; i < 7; ++i) { s_flightYaw[i] = s_flightYaw[i + 1]; s_flightPitch[i] = s_flightPitch[i + 1]; }
+        s_flightYaw[7] = 0.f; s_flightPitch[7] = 0.f;
     };
     const float errYaw   = useFlight ? (best.yaw   - flightYaw   * gy) : best.yaw;
     const float errPitch = useFlight ? (best.pitch + flightPitch * gp) : best.pitch;
@@ -721,7 +749,7 @@ static void UpdateAimTouch(float dt) {
         // Палец опустился заново: окно замера начинается с нуля, иначе первая
         // же пара «сдвиг пальца -> отклик» посчитает бросок пальца к точке.
         s_trackYaw.reset(); s_trackPitch.reset();
-        for (int i = 0; i < 4; ++i) { s_flightYaw[i] = 0.f; s_flightPitch[i] = 0.f; }
+        for (int i = 0; i < 8; ++i) { s_flightYaw[i] = 0.f; s_flightPitch[i] = 0.f; }
         return; // let the game register the touch before moving it
     }
     if (s_holdFrames < 1) { ++s_holdFrames; Touch_Move(s_fx, s_fy); return; }
@@ -839,7 +867,7 @@ static void UpdateAimTouch(float dt) {
         s_fx = snapGrid(ptX); s_fy = snapGrid(ptY);
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         // Палец отпущен — заказанное игра не отработает вовсе.
-        for (int i = 0; i < 4; ++i) { s_flightYaw[i] = 0.f; s_flightPitch[i] = 0.f; }
+        for (int i = 0; i < 8; ++i) { s_flightYaw[i] = 0.f; s_flightPitch[i] = 0.f; }
         s_haveLast = false;
         // Перенос пальца — это не шаг прицела: замер по нему покажет мусор.
         s_trackYaw.reset(); s_trackPitch.reset();
@@ -847,8 +875,8 @@ static void UpdateAimTouch(float dt) {
     }
     s_fx = nx; s_fy = ny;
     s_pendDx += dx; s_pendDy += dy;   // ждёт отработки камерой (ack-такт)
-    shiftFlight(); s_flightYaw[3] = dx;
-    s_flightPitch[3] = -dy;
+    shiftFlight(); s_flightYaw[7] = dx;
+    s_flightPitch[7] = -dy;
     Touch_Move(s_fx, s_fy);
 }
 
