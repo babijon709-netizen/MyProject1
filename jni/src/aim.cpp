@@ -226,6 +226,8 @@ static bool AimBegin(float& dt, float& sw, float& sh) {
 // поэтому цель задана константой.
 static constexpr int   kAimBoneSlot = 1;
 
+static unsigned long s_dead_skipped = 0;   // мёртвых не взяли в цель (для лога)
+
 static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, float& degPerPx) {
     LogStage(kStageAimSelect);
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
@@ -254,6 +256,9 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         // как по врагам (вопрос 19.09). Признак своего — из групп/кланов
         // (game.cpp, groups_are_allied), он считается независимо от визуалов.
         if (b.ally) continue;
+        // Мёртвых не берём: труп ещё несколько секунд остаётся в списке
+        // игроков с корректным скелетом, и прицел уезжал на него (19.09).
+        if (b.dead) { ++s_dead_skipped; continue; }
         AimTarget t;
         // Exact bone, with graceful fallback to the next-best bone.
         // Slots: 0 head, 1 neck, 2 chest. Never fall back below the chest.
@@ -291,8 +296,9 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                 const double now = (double)clock() / CLOCKS_PER_SEC;
                 if (now - s_no_bones_at >= 5.0) {
                     s_no_bones_at = now;
-                    LogLine("аим: у %lu целей в кадре не прочитались кости — цель пропущена", s_no_bones);
-                    s_no_bones = 0;
+                    LogLine("аим: пропущено целей — без костей %lu, мёртвых %lu",
+                            s_no_bones, s_dead_skipped);
+                    s_no_bones = 0; s_dead_skipped = 0;
                 }
             }
             continue;
@@ -742,7 +748,12 @@ static void UpdateAimTouch(float dt) {
     // всё равно упирается в потолок maxStep (0.05*sh = 54 px на этом экране),
     // и скорость наведения задаёт он. Слайдер ниже середины продолжает
     // работать: доля считается от устойчивого предела пропорционально frac.
-    const float kStable = 0.5f;
+    // 0.5 даёт |z| = 0.71 — качели гаснут за 2-3 такта. Снизил до 0.45: на
+    // устройстве задержка отработки касания плавает (2-4 кадра), и запас по
+    // устойчивости здесь не лишний — «почти пропал, но не до конца» (19.09).
+    // На скорость захвата это почти не влияет: при большой ошибке шаг всё
+    // равно упирается в потолок maxStep.
+    const float kStable = 0.45f;
     const float fracMid = 0.25f + (5.f - 1.f) / 9.f * 0.75f;   // слайдер 5
     if (k > kStable) k = kStable;
     if (frac < fracMid) k *= frac / fracMid;
@@ -944,8 +955,11 @@ static void UpdateAimMemory(float dt) {
     static AimPick pick;
     // заказано, камерой не отработано (град)
     static float s_pendYaw = 0.f, s_pendPitch = 0.f;
-    // Заказанный, но ещё не отработанный камерой поворот (см. kMemInflightTau):
-    // его надо вычитать из остатка, иначе аим заказывает одно и то же дважды.
+    // Заказанный, но ещё не отработанный камерой поворот: его надо вычитать из
+    // остатка, иначе аим заказывает одно и то же дважды. Два слота = два кадра
+    // задержки (камера отрабатывает запись не в этом кадре); старый шаг
+    // пропадает целиком, а не тает по экспоненте.
+    static float s_flightMemYaw[2] = {0.f, 0.f}, s_flightMemPitch[2] = {0.f, 0.f};
     static float s_inflightYaw = 0.f, s_inflightPitch = 0.f;
     static float s_pendTime = 0.f;
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f;
@@ -1013,7 +1027,14 @@ static void UpdateAimMemory(float dt) {
         s_haveLast = false; s_haveCtlErr = false; s_haveFilt = false;
         s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
         s_inflightYaw = s_inflightPitch = 0.f;
+        s_flightMemYaw[0] = s_flightMemYaw[1] = 0.f;
+        s_flightMemPitch[0] = s_flightMemPitch[1] = 0.f;
     }
+
+    // Сколько из заказанного камера ещё не отработала: остаток читаем по
+    // старой позе, поэтому заказанное вычитаем (иначе заказываем дважды).
+    s_inflightYaw   = s_flightMemYaw[0]   + s_flightMemYaw[1];
+    s_inflightPitch = s_flightMemPitch[0] + s_flightMemPitch[1];
 
     // ---- ответ камеры ------------------------------------------------------
     // Записанный накопитель игра разворачивает в поворот камеры в своём же
@@ -1094,9 +1115,6 @@ static void UpdateAimMemory(float dt) {
     // тактов подряд, камера набирает лишнее и проскакивает цель. У пальца
     // этот вычет давно есть (s_flightYaw); в памяти его не было, и именно
     // поэтому качели здесь были заметнее.
-    const float decay = expf(-dt / kMemInflightTau);
-    s_inflightYaw   *= decay;
-    s_inflightPitch *= decay;
     float errYaw = s_filtYaw - s_inflightYaw, errPitch = s_filtPitch - s_inflightPitch;
     if (fabsf(errYaw)   < kDeadDeg) errYaw   = 0.f;
     else                            errYaw   -= (errYaw   > 0.f ? kDeadDeg : -kDeadDeg);
@@ -1147,6 +1165,14 @@ static void UpdateAimMemory(float dt) {
     ++s_memDiag.writes;
     s_pendYaw += stepYaw; s_pendPitch += stepPitch;
     s_inflightYaw += stepYaw; s_inflightPitch += stepPitch;
+    // Окно сдвигается РОВНО по такту: заказанное живёт два кадра и потом
+    // пропадает целиком (у пальца так же). Экспоненциальный спад, который
+    // здесь был раньше, копил в стационарном режиме около ЧЕТЫРЁХ шагов
+    // (1/(1-e^(-dt/tau)) при tau = 60 мс и 60 кадрах), вычитал их из остатка
+    // и срезал скорость аима вчетверо — «он даже не успевает за игроком».
+    s_flightMemYaw[0] = s_flightMemYaw[1];
+    s_flightMemPitch[0] = s_flightMemPitch[1];
+    s_flightMemYaw[1] = 0.f; s_flightMemPitch[1] = 0.f;
 
     // Записи идут, а камера не отвечает больше трёх секунд при живой оси —
     // режим не работает. На тач не падаем, но говорим.

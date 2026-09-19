@@ -1467,6 +1467,43 @@ static bool resolve_camera_arrays(uint64_t& matrices, uint64_t& indices, int32_t
     return false;
 }
 
+// Массивы камеры ПРЯМО СЕЙЧАС — по раскладке, подтверждённой самим Unity.
+//
+// В libunity.so релиза функция мировой позиции трансформа (0x7F19D8) читает
+// [transform+0x38] (блок данных) и [transform+0x40] (индекс), внутри блока
+// берёт матрицы по [data+0x18], индексы родителей по [data+0x20] и ОБХОДИТ
+// цепочку родителей, собирая мировую матрицу на лету (шаг 0x30 = Matrix34).
+// Отсюда два вывода:
+//   * отдельного массива мировых матриц нет и кэш тут ни при чём: что лежит в
+//     локальной матрице, то игра и нарисует;
+//   * указатели живут в блоке данных трансформа, а игрушка этот блок
+//     ПЕРЕСОБИРАЕТ (переродитель костей, перестройка иерархии при спавне).
+//     Запомненные один раз при включении фрикама указатели устаревают, и мы
+//     писали в уже брошенный массив — отсюда «камера возвращается к телу»
+//     (жалобы 19.09), сколько ни пиши.
+// Поэтому указатели перечитываются на каждом такте писателя.
+static bool camera_arrays_now(uint64_t& matrices, uint64_t& indices, int32_t& index) {
+    if (!g_native_camera) return false;
+    const uint64_t gameobject = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
+    const uint64_t transform = transform_from_gameobject(gameobject);
+    if (!transform) return false;
+    uint64_t data = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);   // 0x38
+    int32_t  idx  = rd<int32_t>(transform + 0x40);
+    if (!data) {
+        // Данные ещё не инициализированы: Unity кладёт сюда собственный блок
+        // трансформа (+0x28) и берёт индекс из +0x30 (то же видно в 0x7ED640
+        // и 0x7F19E0).
+        data = transform + 0x28;
+        idx  = rd<int32_t>(transform + 0x30);
+    }
+    if (!data || idx < 0 || idx > 100000) return false;
+    matrices = rd_ptr(data + 0x18);
+    indices  = rd_ptr(data + 0x20);
+    if (!matrices || !indices) return false;
+    index = idx;
+    return true;
+}
+
 // Писатель-доминатор фрикама.
 //
 // Почему одного кадра оверлея мало. Камера привязана к кости головы, поэтому
@@ -1494,6 +1531,11 @@ static std::atomic<float>    g_fc_tx{0}, g_fc_ty{0}, g_fc_tz{0};   // цель, 
 static std::atomic<bool>     g_fc_writer_running{false};
 static std::atomic<unsigned> g_fc_write_count{0};
 static std::atomic<bool>     g_fc_write_failed{false};
+// Сколько раз за секунду игра подменила массивы иерархии камеры: по этому
+// числу видно, что писать по запомненным указателям было нельзя.
+static std::atomic<unsigned> g_fc_array_changes{0};
+static uint64_t s_last_m = 0, s_last_n = 0;
+static int32_t  s_last_i = -1;
 // Насколько близко камера подошла к цели по последней оценке (метры).
 static std::atomic<float>    g_fc_gap{-1.f};
 
@@ -1546,9 +1588,18 @@ static void freecam_writer_start() {
     if (g_fc_writer_running.exchange(true)) return;
     std::thread([]() {
         while (g_fc_writer_running.load()) {
-            const uint64_t m = g_fc_matrices.load();
-            const uint64_t n = g_fc_indices.load();
-            const int32_t  i = g_fc_index.load();
+            uint64_t m = 0, n = 0;
+            int32_t  i = -1;
+            // Указатели берём СВЕЖИМИ каждый такт: игра пересобирает блок
+            // данных трансформа, и запомненные при включении устаревают.
+            if (camera_arrays_now(m, n, i)) {
+                if (m != s_last_m || n != s_last_n || i != s_last_i) {
+                    g_fc_array_changes.fetch_add(1);
+                    s_last_m = m; s_last_n = n; s_last_i = i;
+                }
+            } else {
+                m = g_fc_matrices.load(); n = g_fc_indices.load(); i = g_fc_index.load();
+            }
             if (m && n && i >= 0 && g_pid > 0) {
                 const Vec3 target = {g_fc_tx.load(), g_fc_ty.load(), g_fc_tz.load()};
                 float gap = -1.f;
@@ -1692,11 +1743,12 @@ static void freecam_tick() {
             const unsigned wc = g_fc_write_count.exchange(0);
             const bool wf = g_fc_write_failed.exchange(false);
             const float gap = g_fc_gap.load();
-            LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f), писатель %u/с, недолёт %.2f м%s",
+            const unsigned ac = g_fc_array_changes.exchange(0);
+            LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f), писатель %u/с, недолёт %.2f м, подмен массивов %u%s",
                     (double)g_freecam_pos.x, (double)g_freecam_pos.y, (double)g_freecam_pos.z,
                     (double)in_mem.x, (double)in_mem.y, (double)in_mem.z,
                     (double)g_cam_pos.x, (double)g_cam_pos.y, (double)g_cam_pos.z,
-                    wc, (double)gap, wf ? " (отказы записи)" : "");
+                    wc, (double)gap, ac, wf ? " (отказы записи)" : "");
         }
     }
     // Читать надо ДО записи: после неё в массиве лежит наше значение, и
@@ -6279,6 +6331,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         box.id = s_transforms[i];
         box.crouched = crouched;
+        // Мёртвый игрок (respawning). Читается прямо с PlayerManager — одного
+        // чтения довольно, цепочки не нужны.
+        box.dead = rd<uint8_t>(s_transforms[i] + game_offsets::PLAYER_MANAGER_RESPAWNING) != 0;
         box.aim_source = 0;
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;

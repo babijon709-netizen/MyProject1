@@ -10,6 +10,10 @@ struct EspBox {
     unsigned long long id;   // stable per-player identity (PlayerManager*), for target stickiness
     float x1, y1, x2, y2;
     float distance;
+    // Игрок мёртв (Oxide.PlayerManager.respawning). Аим таких не берёт в цель:
+    // труп продолжает жить в списке игроков и отдавать корректные кости, из-за
+    // чего прицел уезжал на уже убитого (просьба 19.09).
+    bool  dead = false;
     float corners[8][2];
     bool  corner_visible[8];
 
