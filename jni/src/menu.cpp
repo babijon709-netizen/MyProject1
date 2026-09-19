@@ -1229,17 +1229,16 @@ void UpdateFreecam(float dt) {
     // вредны: невидимая кнопка обзора на пол-экрана висела бы поверх меню.
     auto* fg = ImGui::GetForegroundDrawList();
     {
-        const float bx0 = cx - R - 12.f, by0 = cy - R - 12.f;
-        const float bx1 = cx + R + 12.f, by1 = cy + R + 12.f;
-        fg->AddRectFilled({bx0, by0}, {bx1, by1}, IM_COL32(20,20,20,200), 14.f);
-        fg->AddRect({bx0, by0}, {bx1, by1},
-                    joyHeld ? IM_COL32(0,200,255,140) : IM_COL32(255,255,255,80),
-                    14.f, 0, 2.f);
-        fg->AddCircle({cx, cy}, R, IM_COL32(255,255,255,200), 48, 3.f);
+        // Основание круглое (залитый круг + кольцо), без квадратной рамки.
+        fg->AddCircleFilled({cx, cy}, R, IM_COL32(20,20,20,200), 64);
+        fg->AddCircle({cx, cy}, R,
+                      joyHeld ? IM_COL32(0,200,255,180) : IM_COL32(255,255,255,120),
+                      64, 3.f);
         fg->AddLine({cx - R*0.15f, cy}, {cx + R*0.15f, cy}, IM_COL32(255,255,255,60), 1.f);
         fg->AddLine({cx, cy - R*0.15f}, {cx, cy + R*0.15f}, IM_COL32(255,255,255,60), 1.f);
-        fg->AddCircleFilled({cx + knobDx, cy + knobDy}, R * 0.34f,
-                            joyHeld ? IM_COL32(0,200,255,255) : IM_COL32(0,180,255,200), 32);
+        // Ручка крупнее: 0.42R вместо 0.34R (при R=130 — радиус ~55 px).
+        fg->AddCircleFilled({cx + knobDx, cy + knobDy}, R * 0.42f,
+                            joyHeld ? IM_COL32(0,200,255,255) : IM_COL32(0,180,255,200), 48);
     }
     auto drawHeightBtn = [&](float bx, float by, bool held, bool isUp) {
         fg->AddCircleFilled({bx, by}, kBtnR,
