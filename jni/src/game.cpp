@@ -6648,35 +6648,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 }
             }
         }
-        // Мёртвый — по позе, а не по здоровью.
-        //
-        // Здоровье цели читать бессмысленно (жалоба 19.09, и лог это
-        // подтвердил): цепочка vitals->Entity->Health->+0x20 читается верно
-        // (у живых 100.0, у некоторых 0.0), но нули там принадлежат СПЯЩИМ
-        // игрокам, а у только что убитого здоровье на клиенте остаётся
-        // прежним. Поэтому смотрим на кости: труп лежит. У стоящего игрока
-        // размах скелета по вертикали 1.5-1.8 м при горизонтали 0.4 м; у
-        // лежащего — высота падает до 0.3-0.5 м, а горизонталь вырастает до
-        // полутора. Костей должно быть не меньше половины: по обрубку из
-        // четырёх-пяти костей позу не определишь.
-        box.dead = box.respawning;
-        if (box.skel_bones >= 11 && box.skel_up >= 0.f && box.skel_flat >= 0.f) {
-            const bool lying = box.skel_up < 0.85f || box.skel_flat > box.skel_up * 1.5f;
-            if (lying) box.dead = true;
-        }
-        // Что именно решило судьбу игрока — в лог: без этого порог непроверяем.
-        {
-            static double s_pose_at = 0.0;
-            static int    s_pose_left = 0;
-            const double t3 = memio::now_seconds();
-            if (t3 >= s_pose_at) { s_pose_at = t3 + 8.0; s_pose_left = 3; }
-            if (s_pose_left > 0) {
-                --s_pose_left;
-                LogLine("аим: поза 0x%llx костей=%d высота=%.2f м ширина=%.2f м respawning=%d мёртв=%d здоровье=%.1f",
-                        (unsigned long long)box.id, (int)box.skel_bones, (double)box.skel_up,
-                        (double)box.skel_flat, (int)box.respawning, (int)box.dead, (double)box.health);
-            }
-        }
+        // Мёртвый решается ПОСЛЕ чтения скелета — см. ниже, перед push_back.
+        // Раньше это решение стояло здесь, но fill_skeleton_box вызывается
+        // ниже по циклу, а box создаётся заново каждый кадр (EspBox box{}),
+        // поэтому в этой точке костей всегда 0 и правило не срабатывало ни
+        // разу: в логе 17:06 каждая строка «поза» давала костей=0, а счётчик
+        // пропущенных мёртвых был 0 вместо 142.
 
         box.aim_source = 0;
         box.x1 = cx - half_w; box.y1 = cy - half_h;
@@ -6797,6 +6774,41 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!box.aim_valid[0]) { Vec3 t = feet; t.y += body_height - 0.12F; if (set_aim_point(box, 0, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
             if (!box.aim_valid[1]) { Vec3 t = feet; t.y += body_height - 0.26F; if (set_aim_point(box, 1, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
             if (!box.aim_valid[2]) { Vec3 t = feet; t.y += body_height * 0.72F; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
+        }
+        // Мёртвый — по позе, а не по здоровью.
+        //
+        // Здоровье цели читать бессмысленно (жалоба 19.09, и лог это
+        // подтвердил): цепочка vitals->Entity->Health->+0x20 читается верно
+        // (у живых 100.0, у некоторых 0.0), но нули там принадлежат СПЯЩИМ
+        // игрокам, а у только что убитого здоровье на клиенте остаётся
+        // прежним. Поэтому смотрим на кости: труп лежит. У стоящего игрока
+        // размах скелета по вертикали 1.5-1.8 м при горизонтали 0.4 м; у
+        // лежащего — высота падает до 0.3-0.5 м, а горизонталь вырастает до
+        // полутора. Костей должно быть не меньше половины: по обрубку из
+        // четырёх-пяти костей позу не определишь.
+        //
+        // Здесь, а не раньше: fill_skeleton_box уже отработал и заполнил
+        // skel_bones/skel_up/skel_flat для этого кадра.
+        box.dead = box.respawning;
+        if (box.skel_bones >= 11 && box.skel_up >= 0.f && box.skel_flat >= 0.f) {
+            const bool lying = box.skel_up < 0.85f || box.skel_flat > box.skel_up * 1.5f;
+            if (lying) box.dead = true;
+        }
+        // Что именно решило судьбу игрока — в лог: без этого порог непроверяем.
+        // Печатаем только тех, у кого кости РЕАЛЬНО измерены: в логе 17:06
+        // первые три игрока списка оказывались спящими (костей=0, высота=-1),
+        // и по такому логу порог не проверить.
+        {
+            static double s_pose_at = 0.0;
+            static int    s_pose_left = 0;
+            const double t3 = memio::now_seconds();
+            if (t3 >= s_pose_at) { s_pose_at = t3 + 8.0; s_pose_left = 3; }
+            if (s_pose_left > 0 && box.skel_bones >= 6) {
+                --s_pose_left;
+                LogLine("аим: поза 0x%llx костей=%d высота=%.2f м ширина=%.2f м respawning=%d мёртв=%d здоровье=%.1f",
+                        (unsigned long long)box.id, (int)box.skel_bones, (double)box.skel_up,
+                        (double)box.skel_flat, (int)box.respawning, (int)box.dead, (double)box.health);
+            }
         }
         result.push_back(box);
     }

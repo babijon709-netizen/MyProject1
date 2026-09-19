@@ -1,4 +1,5 @@
 #include "esp_draw.h"
+#include "aim.h"                 // AIM_MODE_MEMORY
 #include "main.h"              // displayInfo, native_window_screen_*
 #include "app_state.h"         // g_state
 #include "cfg.h"
@@ -31,7 +32,12 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
     if (frame != s_frame) {
         s_frame = frame;
         esp_set_skeleton_enabled(g_state.esp_skeleton);
-        esp_set_aim_bones_enabled(g_state.aim_touch);
+        // Кости нужны аиму в обоих режимах: и касание, и память считают ошибку
+        // по точке на шее, взятой из костей. Раньше запрос включался только от
+        // касания, и в режиме «память» при выключенном скелете в ESP кости не
+        // читались вовсе — тогда аим уходил на запасной расчёт по росту, а
+        // признак смерти по позе вообще нечем было мерить.
+        esp_set_aim_bones_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
         esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
                                 g_state.esp_loot, g_state.esp_pickup);
         esp_set_always_day(g_state.always_day);
