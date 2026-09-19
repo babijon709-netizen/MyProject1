@@ -733,7 +733,7 @@ float TabContent(int tab, float dt, float cW) {
         // базы перед рейдом. Пока он включён, аим молчит: точка прицела
         // считается от глаза персонажа, а камера улетела от него.
         SHdr(XS("Фрикам"));
-        CardBg(Layout::RowH * 3.f + Layout::SliderH);
+        CardBg(Layout::RowH * 2.f + Layout::SliderH);
         ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
         SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
                   1.f, 60.f, XS("%.0f м/с"), false, false, g_state.sl_freecam, dt);
@@ -747,35 +747,6 @@ float TabContent(int tab, float dt, float cW) {
                 g_calibMode = 4;
                 menu_open = false;
             }
-        }
-        // Чем кончился поиск камеры. Снаружи любой отказ выглядит одинаково
-        // («камера не найдена»), а причин пять и чинятся они по-разному,
-        // поэтому причина пишется прямо здесь — лог ради неё таскать незачем.
-        {
-            auto* dl  = ImGui::GetWindowDrawList();
-            auto* fn  = ImGui::GetFont();
-            const float fs = ImGui::GetFontSize();
-            const float rowH = Layout::RowH, inset = Layout::Inset, padX = Layout::PadX;
-            const float avW  = ImGui::GetContentRegionAvail().x;
-            auto pos = ImGui::GetCursorScreenPos();
-            const float cX = pos.x + inset, cW = avW - inset * 2.f;
-            const float cy = pos.y + rowH * 0.5f;
-            ImGui::InvisibleButton("##fcd", {avW, rowH});
-            int code = 0; float dist = -1.f;
-            esp_freecam_diag(code, dist);
-            char val[32];
-            switch (code) {
-                case 0:  snprintf(val, sizeof(val), "%s", XS("ок")); break;
-                case 1:  snprintf(val, sizeof(val), "%s", XS("нет камеры")); break;
-                case 2:  snprintf(val, sizeof(val), "%s", XS("нет трансформа")); break;
-                case 3:  snprintf(val, sizeof(val), "%s", XS("массивы не читаются")); break;
-                default: snprintf(val, sizeof(val), XS("%.1f м"), (double)dist); break;
-            }
-            auto vsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, val);
-            dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f},
-                        C::UA(C::Txt(), 1.f), XS("Камера"));
-            dl->AddText(fn, fs, {cX + cW - padX - vsz.x, cy - vsz.y * 0.5f},
-                        C::UA(code ? C::Dim() : C::Acc(), 1.f), val);
         }
 
         // Всегда день: время суток каждую секунду возвращается в полдень.
@@ -1040,23 +1011,27 @@ void UpdateFreecam(float dt) {
     }
 
     // ---- геометрия -------------------------------------------------------
-    const float R = 130.f;                 // ход стика (= радиус круглого основания)
+    // Масштаб тач-зоны под экран: база — короткая сторона 1080 px (на ней все
+    // размеры как были), на остальных экранах — пропорционально. Иначе на
+    // планшете стик с кнопками крошечные, а на маленьком экране — полдисплея.
+    const float S = ImClamp(ImMin(vw, vh) / 1080.f, 0.6f, 2.5f);
+    const float R = 130.f * S;             // ход стика (= радиус круглого основания)
     float cx, cy;                          // центр джойстика
     if (g_state.freecam_joy_x >= 0.f && g_state.freecam_joy_y >= 0.f) {
         cx = g_state.freecam_joy_x * vw;
         cy = g_state.freecam_joy_y * vh;
     } else {
-        cx = 30.f + R;
-        cy = 100.f + R;
+        cx = 30.f * S + R;
+        cy = 100.f * S + R;
     }
     // Центр не даём увести за край и под верхнюю полосу (там пилюли меню).
-    cx = ImClamp(cx, R + 16.f, vw - R - 16.f);
-    cy = ImClamp(cy, R + 100.f, vh - R - 16.f);
+    cx = ImClamp(cx, R + 16.f * S, vw - R - 16.f * S);
+    cy = ImClamp(cy, R + 100.f * S, vh - R - 16.f * S);
 
-    const float kBtnR  = 62.f;             // кнопки высоты у правого края
-    const float kBtnX  = vw - kBtnR - 30.f;
-    const float kUpY   = vh * 0.5f - kBtnR - 26.f;
-    const float kDownY = vh * 0.5f + kBtnR + 26.f;
+    const float kBtnR  = 62.f * S;          // кнопки высоты у правого края
+    const float kBtnX  = vw - kBtnR - 30.f * S;
+    const float kUpY   = vh * 0.5f - kBtnR - 26.f * S;
+    const float kDownY = vh * 0.5f + kBtnR + 26.f * S;
 
     // Всё ниже верхней полосы забираем себе — в игру не уходит ничего.
     Touch_BlockRect(true, 0.f, 90.f, vw, vh);
@@ -1095,7 +1070,7 @@ void UpdateFreecam(float dt) {
     auto stickVec = [&](float px, float py) {
         const float dx = px - cx, dy = py - cy;
         const float len = sqrtf(dx * dx + dy * dy);
-        const float dead = 12.f;           // мёртвая зона у центра
+        const float dead = 12.f * S;        // мёртвая зона у центра
         if (len > dead) {
             float mag = (len - dead) / (R - dead);
             if (mag > 1.f) mag = 1.f;
@@ -1122,7 +1097,7 @@ void UpdateFreecam(float dt) {
     if (s_fc_joy_id == -1 && canGrab && nf > 0) {
         // Захват щедрый (круг шире видимого), а дальше палец ведётся где
         // угодно: вышедший за круг даёт полное отклонение в свою сторону.
-        const float grab = R + 70.f;
+        const float grab = R + 70.f * S;
         for (int i = 0; i < nf; ++i) {
             if (f_id[i] == s_fc_look_id || f_id[i] == s_fc_up_id || f_id[i] == s_fc_down_id) continue;
             if (!isFreshTouch(f_id[i]) || f_y[i] < 90.f) continue;
@@ -1145,14 +1120,14 @@ void UpdateFreecam(float dt) {
         // Держится, пока палец в расширенном круге: съехавший чуть вбок
         // палец кнопку не роняет.
         const float dx = px - bx, dy = py - by;
-        const float keep = kBtnR + 60.f;
+        const float keep = kBtnR + 60.f * S;
         if (dx * dx + dy * dy <= keep * keep) held = true;
         else slot = -1;
     };
     holdButton(s_fc_up_id, kBtnX, kUpY, upHeld);
     holdButton(s_fc_down_id, kBtnX, kDownY, downHeld);
     if (canGrab && nf > 0 && (s_fc_up_id == -1 || s_fc_down_id == -1)) {
-        const float grab = kBtnR + 20.f;
+        const float grab = kBtnR + 20.f * S;
         for (int i = 0; i < nf; ++i) {
             if (f_id[i] == s_fc_joy_id || f_id[i] == s_fc_look_id) continue;
             if (!isFreshTouch(f_id[i]) || f_y[i] < 90.f) continue;
@@ -1179,8 +1154,8 @@ void UpdateFreecam(float dt) {
             const float dx = px - s_fc_look_x, dy = py - s_fc_look_y;
             // Скачок больше четверти экрана за кадр — не свайп, а смена слота:
             // камеру он дёргать не должен.
-            if (fabsf(dx) < 250.f && fabsf(dy) < 250.f) {
-                const float sens = 0.22f;
+            if (fabsf(dx) < 250.f * S && fabsf(dy) < 250.f * S) {
+                const float sens = 0.22f / S;   // градусы на пиксель: чем плотнее экран, тем меньше
                 yaw_delta = dx * sens;
                 pitch_delta = -dy * sens;
             }
@@ -1190,8 +1165,8 @@ void UpdateFreecam(float dt) {
         }
     }
     if (s_fc_look_id == -1 && canGrab && nf > 0) {
-        const float keepOut = R + 40.f;    // рядом со стиком обзор не стартует
-        const float btnOut = kBtnR + 20.f;
+        const float keepOut = R + 40.f * S; // рядом со стиком обзор не стартует
+        const float btnOut = kBtnR + 20.f * S;
         for (int i = 0; i < nf; ++i) {
             if (f_id[i] == s_fc_joy_id || f_id[i] == s_fc_up_id || f_id[i] == s_fc_down_id) continue;
             if (!isFreshTouch(f_id[i]) || f_y[i] < 90.f) continue;
@@ -1246,7 +1221,7 @@ void UpdateFreecam(float dt) {
         fg->AddCircle({bx, by}, kBtnR,
                       held ? IM_COL32(255,255,255,220) : IM_COL32(255,255,255,80),
                       40, 2.5f);
-        const float s = 22.f;
+        const float s = 22.f * S;
         ImVec2 p1, p2, p3;
         if (isUp) { p1 = {bx, by - s}; p2 = {bx - s * 0.9f, by + s * 0.6f}; p3 = {bx + s * 0.9f, by + s * 0.6f}; }
         else      { p1 = {bx, by + s}; p2 = {bx - s * 0.9f, by - s * 0.6f}; p3 = {bx + s * 0.9f, by - s * 0.6f}; }
@@ -1256,8 +1231,8 @@ void UpdateFreecam(float dt) {
     drawHeightBtn(kBtnX, kDownY, downHeld, false);
     if (lookHeld) {
         // Метка пальца обзора — видно, какой палец крутит камеру.
-        fg->AddCircle({lookPx, lookPy}, 34.f, IM_COL32(0,200,255,160), 32, 2.5f);
-        fg->AddCircleFilled({lookPx, lookPy}, 6.f, IM_COL32(0,200,255,160), 20);
+        fg->AddCircle({lookPx, lookPy}, 34.f * S, IM_COL32(0,200,255,160), 32, 2.5f);
+        fg->AddCircleFilled({lookPx, lookPy}, 6.f * S, IM_COL32(0,200,255,160), 20);
     } else if (!menu_open) {
         // Тихая подсказка, пока обзор свободен.
         auto* fn = ImGui::GetFont();
@@ -1265,7 +1240,7 @@ void UpdateFreecam(float dt) {
         const char* hint = XS("Свайп — обзор");
         auto hsz = fn->CalcTextSizeA(hfs, FLT_MAX, 0, hint);
         const float hx = (vw * 0.45f + vw) * 0.5f;
-        fg->AddText(fn, hfs, {hx - hsz.x * 0.5f, vh - hsz.y - 24.f},
+        fg->AddText(fn, hfs, {hx - hsz.x * 0.5f, vh - hsz.y - 24.f * S},
                     IM_COL32(255,255,255,90), hint);
     }
 }
@@ -1319,6 +1294,7 @@ void RenderMenu() {
     Tick(g_state.a_farm_metal,  g_state.farm_metal,  dt);
     Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
+    Tick(g_state.a_freecam_on,  g_state.freecam_on,  dt);
     ApplyTheme();
 
     if (g_cfgLoadedIdx >= 0 && g_cfgLoadedIdx < kMaxConfigs)
