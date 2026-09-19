@@ -1735,6 +1735,15 @@ static int      g_fc_own_n = 0;
 // прямо сейчас обновляет объект, а не переезд массивов.
 static int      g_fc_slot_miss = 0;
 
+// Сколько раз за период камера, по глазам игры, была там, где мы ей велим.
+// Мерцание (жалоба 19.09) видно в логе как «игра видит (-0.0, -0.0, -0.0)»,
+// но раз в секунду — это один отсчёт, и непонятно, мигает камера каждый кадр
+// или раз в секунду. Считаем каждый такт писателя: сколько отсчётов пришлось
+// на цель, сколько на ноль и сколько куда-то ещё. По соотношению видно, что
+// именно ломается — наша запись не доходит (тогда ноль каждый второй кадр)
+// или игра пересчитывает мировую матрицу сама (тогда ноль реже).
+static std::atomic<unsigned> g_fc_samp{0}, g_fc_hit{0}, g_fc_zero{0}, g_fc_other{0};
+
 static void freecam_writer_start() {
     if (g_fc_writer_running.exchange(true)) return;
     std::thread([]() {
@@ -1877,6 +1886,9 @@ bool esp_freecam_set(bool on) {
 // своего authoritative-состояния, и тогда разовая запись прожила бы ровно
 // один кадр. Плюс камера перестаёт ехать вместе с телом: мировая цель стоит,
 // а локальная позиция пересчитывается под текущего родителя.
+// Позиция камеры из матрицы вида; определена ниже, у проверок MouseLook.
+static bool current_camera_position(Vec3& out);
+
 static bool freecam_write() {
     if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
     if (!vec3_is_finite(g_freecam_pos)) return false;
@@ -1951,6 +1963,20 @@ static bool freecam_write() {
     }
     g_fc_addr_n.store(fed);
     if (!fed) return false;
+    // Где камера на самом деле — по матрице вида (ею игра и рисует кадр).
+    {
+        Vec3 cam{};
+        if (current_camera_position(cam)) {
+            const float dx = cam.x - g_freecam_pos.x, dy = cam.y - g_freecam_pos.y,
+                        dz = cam.z - g_freecam_pos.z;
+            const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+            const float r = sqrtf(cam.x * cam.x + cam.y * cam.y + cam.z * cam.z);
+            g_fc_samp.fetch_add(1);
+            if (d <= 2.0F) g_fc_hit.fetch_add(1);
+            else if (r <= 1.0F) g_fc_zero.fetch_add(1);
+            else g_fc_other.fetch_add(1);
+        }
+    }
     freecam_writer_start();
     return ok;
 }
@@ -2027,9 +2053,14 @@ static void freecam_tick() {
                     off += snprintf(buf + off, sizeof(buf) - (size_t)off,
                                     " [набор %d: 0x%llx/0x%llx индекс %d родитель %d%s]",
                                     sl, (unsigned long long)S.m, (unsigned long long)S.n,
-                                    (int)S.i, (int)parent, zero_p ? " НУЛЕВОЙ" : "");
+                                    (int)S.i, (int)parent,
+                                    parent < 0 ? " (корень)" : (zero_p ? " НУЛЕВОЙ" : ""));
                 }
                 LogLine("фрикам: наборы — всего %d%s", (int)g_fc_own_n, buf);
+                const unsigned sf = g_fc_samp.exchange(0), hf = g_fc_hit.exchange(0),
+                               zf = g_fc_zero.exchange(0), of = g_fc_other.exchange(0);
+                LogLine("фрикам: за период отсчётов %u — у цели %u, в нуле %u, другое %u",
+                        sf, hf, zf, of);
             }
             // Чем именно оказалась затёрта наша запись. По этому значению
             // видно, кто второй пишет в ту же ячейку: если это текущая позиция
@@ -2930,15 +2961,55 @@ static uint64_t s_look_wrote_addr = 0;
 static float    s_look_wrote_x = 0.f, s_look_wrote_y = 0.f;
 static double   s_look_wipe_at = -1e9;
 
+// Накопитель MouseLook — это НЕ завёрнутый угол, а сумма всего ввода: игра
+// заворачивает его сама, уже применяя к повороту камеры, а хранит как есть.
+// Лог 20:45 показывает это прямо: накопитель=(0.81, 291.10) при камере
+// (-0.81, -69.69), то есть 291.10 − 360 = −68.9 — и есть поворот камеры;
+// то же на (−185.69 → 174.58) и на (−237.85 → 123.92).
+//
+// Проверка «больше 360 — значит читаем не тот объект» из-за этого была
+// ошибкой: стоило игроку докрутить взгляд за пол-оборота, как аим слепнул.
+// Лог 20:45:48–20:45:51: три секунды подряд «чтение=15 в кадр», ни одной
+// записи при живом MouseLook (объект=1) и включённом прицеле — ровно то, что
+// в жалобе названо «иногда не стреляет по цели».
+//
+// Поэтому обе грани — и чтение, и запись — работают с завёрнутым значением:
+// поворот камеры от этого не меняется (разница ровно на 360°), зато мы
+// остаёмся внутри любого клампа игры и не теряем объект из-за собственной
+// проверки.
+// Значения накопителя, которые мы всё-таки отвергли: миллионы градусов — это
+// уже не накопитель, а мусор вместо объекта. Печатаем, чтобы отличие от
+// законных ±360 было видно, а не угадывалось.
+static void log_angles_out_of_range(uint64_t mouse_look, float x, float y) {
+    static double s_last = -1e9;
+    const double now = memio::now_seconds();
+    if (now - s_last < 2.0) return;
+    s_last = now;
+    LogLine("память: MouseLook=0x%llx — накопитель не angles (%.1f, %.1f)",
+            (unsigned long long)mouse_look, (double)x, (double)y);
+}
+
+static float wrap_deg180(float v) {
+    if (!std::isfinite(v)) return v;
+    float r = fmodf(v + 180.0F, 360.0F);
+    if (r < 0.0F) r += 360.0F;
+    return r - 180.0F;
+}
+
 bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
     uint64_t mouse_look = 0;
     if (!resolve_local_mouse_look(mouse_look)) return false;
     float angles[2] = {};
     if (!rd_buf(mouse_look + MOUSELOOK_ANGLES, angles, sizeof(angles))) return false;
     if (!std::isfinite(angles[0]) || !std::isfinite(angles[1])) return false;
-    if (fabsf(angles[0]) > 360.0F || fabsf(angles[1]) > 360.0F) return false;
-    x_deg = angles[0];
-    y_deg = angles[1];
+    // Широкая граница вместо прежних ±360: она ловит мусор вместо указателя
+    // (миллионы градусов), а не законный накопитель в триста-четыреста.
+    if (fabsf(angles[0]) > 1e6F || fabsf(angles[1]) > 1e6F) {
+        log_angles_out_of_range(mouse_look, angles[0], angles[1]);
+        return false;
+    }
+    x_deg = wrap_deg180(angles[0]);
+    y_deg = wrap_deg180(angles[1]);
     // Наша предыдущая запись: игра должна была развернуть её в поворот камеры
     // в своём же кадре. Если к следующему чтению в накопителе уже другое число,
     // запись стёрта — и писать туда бессмысленно.
@@ -2987,8 +3058,11 @@ bool esp_mem_aim_write_angles(float x_deg, float y_deg) {
     uint64_t mouse_look = 0;
     if (!resolve_local_mouse_look(mouse_look)) return false;
     if (!std::isfinite(x_deg) || !std::isfinite(y_deg)) return false;
-    if (fabsf(x_deg) > 360.0F || fabsf(y_deg) > 360.0F) return false;
-    float angles[2] = {x_deg, y_deg};
+    if (fabsf(x_deg) > 1e6F || fabsf(y_deg) > 1e6F) return false;
+    // Заворачиваем и здесь: иначе следующий же кадр упрётся в накопитель за
+    // ±360 и снова ослепнет (см. wrap_deg180 выше).
+    const float xw = wrap_deg180(x_deg), yw = wrap_deg180(y_deg);
+    float angles[2] = {xw, yw};
     const bool ok = wr_buf(mouse_look + MOUSELOOK_ANGLES, angles, sizeof(angles));
     if (ok) {
         s_look_wrote = true;
