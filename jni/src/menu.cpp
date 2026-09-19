@@ -732,10 +732,21 @@ float TabContent(int tab, float dt, float cW) {
         // базы перед рейдом. Пока он включён, аим молчит: точка прицела
         // считается от глаза персонажа, а камера улетела от него.
         SHdr(XS("Фрикам"));
-        CardBg(Layout::RowH * 2.f + Layout::SliderH);
+        CardBg(Layout::RowH * 3.f + Layout::SliderH);
         ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
         SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
                   1.f, 60.f, XS("%.0f м/с"), false, false, g_state.sl_freecam, dt);
+        {
+            // Кнопка настройки положения джойстика фрикама
+            const float rowH = Layout::RowH, inset = Layout::Inset;
+            const float avW = ImGui::GetContentRegionAvail().x;
+            auto pos = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
+            if (ImGui::Button(XS("Настроить джойстик"), {avW - inset*2.f, rowH - 8.f})) {
+                g_calibMode = 4;
+                menu_open = false;
+            }
+        }
         // Чем кончился поиск камеры. Снаружи любой отказ выглядит одинаково
         // («камера не найдена»), а причин пять и чинятся они по-разному,
         // поэтому причина пишется прямо здесь — лог ради неё таскать незачем.
@@ -978,13 +989,20 @@ void UpdateFreecam(float dt) {
     ImGuiIO& io = ImGui::GetIO();
     const float sw = io.DisplaySize.x, sh = io.DisplaySize.y;
     if (sw < 100.f || sh < 100.f) return;
+    // Реальный размер экрана — из displayInfo, а не из ImGui DisplaySize (который 2460x2460 квадрат)
+    float real_w = (float)displayInfo.width;
+    float real_h = (float)displayInfo.height;
+    if (real_w < 100.f || real_h < 100.f) { real_w = sw; real_h = sh; }
+    // Портрет/ландшафт — берём большую сторону как ширину для расчётов
+    float rw = real_w, rh = real_h;
+    if (rw < rh) { float t=rw; rw=rh; rh=t; }
 
     {
         static double s_last = -1e9;
         double now = ImGui::GetTime();
         if (now - s_last >= 2.0) {
             s_last = now;
-            LogLine("фрикам: UI — активен=%d вкл=%d sw=%.0f sh=%.0f", (int)esp_freecam_active(), (int)g_state.freecam_on, (double)sw, (double)sh);
+            LogLine("фрикам: UI — активен=%d вкл=%d sw=%.0f sh=%.0f real=%.0fx%.0f", (int)esp_freecam_active(), (int)g_state.freecam_on, (double)sw, (double)sh, (double)real_w, (double)real_h);
         }
     }
 
@@ -995,9 +1013,34 @@ void UpdateFreecam(float dt) {
     }
 
     // Игровое управление: слева внизу джойстик, справа — свайп для обзора
-    const float R  = fminf(sw, sh) * 0.11f;
-    const float x0 = 30.f;
-    const float y0 = sh - R * 2.f - 30.f;
+    // R считаем от реального экрана, а не от 2460 квадрата, иначе джойстик огромный и за экраном
+    const float R  = fminf(rw, rh) * 0.12f;
+    // Позиция джойстика — настраиваемая, по умолчанию слева внизу
+    // g_state.freecam_joy_x/y — доля от экрана (0..1), -1 = не настроено
+    float x0, y0;
+    if (g_state.freecam_joy_x >= 0.f && g_state.freecam_joy_y >= 0.f) {
+        // Настроенная точка — центр джойстика
+        float jx = g_state.freecam_joy_x * sw;
+        float jy = g_state.freecam_joy_y * sh;
+        x0 = jx - R;
+        y0 = jy - R;
+    } else {
+        // По умолчанию — слева внизу, с учётом реального экрана
+        x0 = 30.f;
+        // Используем реальную высоту для низа, но в координатах ImGui (sw/sh квадрат)
+        // Поэтому ставим фиксированно y=100 как раньше работало, но теперь снизу:
+        // берём sh - R*2 -30, но если sh=2460, это 1890 — за пределами 1080.
+        // Поэтому используем 100 + (sh - real_h) коррекцию: ставим внизу реального экрана.
+        // Проще: ставим y0 = sh - R*2 - 120 (чуть выше низа квадрата) — при 2460 это 1800,
+        // но при реальном 1080 всё равно видно, т.к. ImGui рисует в квадрате, а отображается
+        // в реальном. Чтобы точно было видно, ставим y0 = 100.f для отладки, а потом
+        // дадим настройку.
+        // Временно: фиксированно снизу в ImGui координатах, но с учётом того что
+        // реальный экран меньше — ставим y0 = sh * 0.62f (было 0.52 и уходило за экран)
+        y0 = sh * 0.62f;
+        // Если настроено — переопределим выше
+        // Для 2460: 0.62*2460=1525, R=~130, низ=1525+260=1785 — в пределах 2460 и видно в 1080
+    }
     const float cx = x0 + R, cy = y0 + R;
 
     // Правая зона обзора — правая половина экрана
@@ -1225,6 +1268,7 @@ void RenderMenu() {
         const char* title = (g_calibMode == 1)
             ? XS("Тапни по центру джойстика движения")
             : (g_calibMode == 2) ? XS("Тапни по кнопке огня / атаки")
+            : (g_calibMode == 4) ? XS("Тапни куда поставить джойстик фрикама")
                                  : XS("Тапни по точке, где аим водит палец");
         const char* sub = XS("Тап записывает зону. Меню откроется само.");
         float tfs = ImGui::GetFontSize() * 1.5f;
@@ -1244,6 +1288,7 @@ void RenderMenu() {
             float zx = -1.f, zy = -1.f;
             if (g_calibMode == 1 && g_state.farm_joy_x >= 0.f) { zx = g_state.farm_joy_x * dw; zy = g_state.farm_joy_y * dh; }
             if (g_calibMode == 2 && g_state.farm_fire_x >= 0.f) { zx = g_state.farm_fire_x * dw; zy = g_state.farm_fire_y * dh; }
+            if (g_calibMode == 4 && g_state.freecam_joy_x >= 0.f) { zx = g_state.freecam_joy_x * dw; zy = g_state.freecam_joy_y * dh; }
             // У точки аима маркер виден всегда: пока она не задана, показываем
             // ту позицию, из которой аим водит палец по умолчанию.
             if (g_calibMode == 3) { zx = AimTouchFracX() * dw; zy = AimTouchFracY() * dh; }
@@ -1265,6 +1310,9 @@ void RenderMenu() {
                 } else if (g_calibMode == 2) {
                     g_state.farm_fire_x = rx; g_state.farm_fire_y = ry;
                     ShowToast(XS("Зона огня сохранена"));
+                } else if (g_calibMode == 4) {
+                    g_state.freecam_joy_x = rx; g_state.freecam_joy_y = ry;
+                    ShowToast(XS("Джойстик фрикама сохранён"));
                 } else {
                     g_state.aim_tx = rx; g_state.aim_ty = ry;
                     ShowToast(XS("Точка пальца сохранена"));

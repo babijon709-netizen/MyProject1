@@ -51,6 +51,7 @@ struct AppState {
     // перед рейдом. Скорость в м/с; пока включён, аим молчит (см. AimBegin).
     bool  freecam_on = false;
     float freecam_speed = 12.f;
+    float freecam_joy_x = -1.f, freecam_joy_y = -1.f;
     // ui_fps выключен навсегда (счётчик убран), рамки карточек — всегда вкл.
     bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = true;
     // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
