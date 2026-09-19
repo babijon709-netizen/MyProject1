@@ -2329,6 +2329,25 @@ bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro) {
 // Класс MouseLook, о котором уже писали в лог (адрес меняется на респавне).
 static std::atomic<uint64_t> g_look_addr_logged{0};
 
+// Куда именно писать угол — вопрос, на который статический разбор ответа не
+// даёт. По дизассемблеру Oxide.MouseLook (libil2cpp.so релиза):
+//   * Update() само правит только рысканье: [+0x50] = [+0x50] + CEm();
+//   * CEf() читает накопитель [+0x4C], прибавляет дельту (ввод x чувствительность),
+//     клампит и раскладывает в поворот m_LookRoot — то есть запись в +0x4C
+//     правильная и она survives;
+//   * но VR/CEO/ZBV (обработчики ввода вида, вызываются системой ввода через
+//     интерфейс, статических вызовов нет) КЛАДУТ в +0x4C значение из своего
+//     аргумента, а не прибавляют к прочитанному. Пока палец на экране, они
+//     идут каждый кадр — и тогда наша запись стирается прежде, чем сыграет.
+// Поэтому раз в секунду печатаем все четыре величины: какая из них совпадает
+// с углами камеры, та и есть настоящий рычаг.
+static double   s_look_fields_at = -1e9;
+// Держится ли наша запись до следующего кадра игры.
+static bool     s_look_wrote = false;
+static uint64_t s_look_wrote_addr = 0;
+static float    s_look_wrote_x = 0.f, s_look_wrote_y = 0.f;
+static double   s_look_wipe_at = -1e9;
+
 bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
     uint64_t mouse_look = 0;
     if (!resolve_local_mouse_look(mouse_look)) return false;
@@ -2338,6 +2357,39 @@ bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
     if (fabsf(angles[0]) > 360.0F || fabsf(angles[1]) > 360.0F) return false;
     x_deg = angles[0];
     y_deg = angles[1];
+    // Наша предыдущая запись: игра должна была развернуть её в поворот камеры
+    // в своём же кадре. Если к следующему чтению в накопителе уже другое число,
+    // запись стёрта — и писать туда бессмысленно.
+    if (s_look_wrote && s_look_wrote_addr == mouse_look) {
+        s_look_wrote = false;
+        const bool wiped = fabsf(angles[0] - s_look_wrote_x) > 0.01f ||
+                           fabsf(angles[1] - s_look_wrote_y) > 0.01f;
+        const double now = memio::now_seconds();
+        if (wiped && now - s_look_wipe_at >= 2.0) {
+            s_look_wipe_at = now;
+            LogLine("память: запись стёрта игрой — писали (%.2f, %.2f), читается (%.2f, %.2f)",
+                    (double)s_look_wrote_x, (double)s_look_wrote_y,
+                    (double)angles[0], (double)angles[1]);
+        }
+    }
+    // Все поля раз в секунду: ищем то, что совпадает с углами камеры.
+    {
+        const double now = memio::now_seconds();
+        if (now - s_look_fields_at >= 1.0) {
+            s_look_fields_at = now;
+            float kqq[2] = {}, input[2] = {};
+            rd_buf(mouse_look + 0x70, kqq, sizeof(kqq));
+            rd_buf(mouse_look + 0x88, input, sizeof(input));
+            float cam_yaw = 0.f, cam_pitch = 0.f;
+            const bool have_cam = esp_aim_camera_angles(cam_yaw, cam_pitch);
+            LogLine("память: поля MouseLook=0x%llx накопитель=(%.2f, %.2f) KQQ=(%.2f, %.2f) ввод=(%.3f, %.3f) камера=%d (%.2f, %.2f)",
+                    (unsigned long long)mouse_look,
+                    (double)angles[0], (double)angles[1],
+                    (double)kqq[0], (double)kqq[1],
+                    (double)input[0], (double)input[1],
+                    (int)have_cam, (double)cam_pitch, (double)cam_yaw);
+        }
+    }
     if (mouse_look != g_look_addr_logged.exchange(mouse_look))
         LogLine("память: MouseLook=0x%llx углы=(%.2f, %.2f) чувствительность=%.3f инверсия=%d гироскоп=%d источник=%d игрок=0x%llx локальный=%d до камеры=%.1f м",
                 (unsigned long long)mouse_look, angles[0], angles[1],
@@ -2355,7 +2407,14 @@ bool esp_mem_aim_write_angles(float x_deg, float y_deg) {
     if (!std::isfinite(x_deg) || !std::isfinite(y_deg)) return false;
     if (fabsf(x_deg) > 360.0F || fabsf(y_deg) > 360.0F) return false;
     float angles[2] = {x_deg, y_deg};
-    return wr_buf(mouse_look + MOUSELOOK_ANGLES, angles, sizeof(angles));
+    const bool ok = wr_buf(mouse_look + MOUSELOOK_ANGLES, angles, sizeof(angles));
+    if (ok) {
+        s_look_wrote = true;
+        s_look_wrote_addr = mouse_look;
+        s_look_wrote_x = x_deg;
+        s_look_wrote_y = y_deg;
+    }
+    return ok;
 }
 
 // Ось выстрела: PlayerManager.playerEventHandler (+0x78, класс Gum) ->
