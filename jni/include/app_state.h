@@ -52,6 +52,10 @@ struct AppState {
     bool  freecam_on = false;
     float freecam_speed = 12.f;
     float freecam_joy_x = -1.f, freecam_joy_y = -1.f;
+    // Счётчик игроков (пилюля «Противники»): доли экрана = её ЦЕНТР, -1 = не
+    // задан (дефолт — верх по центру). Задаётся тапом в Опциях → Худ, живёт
+    // только до перезапуска — как и остальные калибровки.
+    float hud_cnt_x = -1.f, hud_cnt_y = -1.f;
     // ui_fps выключен навсегда (счётчик убран), рамки карточек — всегда вкл.
     bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = true;
     // Положение панели вкладок: true = слева (по умолчанию), false = снизу.

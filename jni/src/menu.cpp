@@ -629,6 +629,71 @@ float TabContent(int tab, float dt, float cW) {
         if (ToggleRow("##ud2", XS("Тёмная тема"), &g_state.ui_dark_mode, g_state.a_ui_dark, true, true))
             g_darkTheme = g_state.ui_dark_mode;
 
+        // ---- Худ: где стоит пилюля-счётчик игроков -----------------------
+        // Тап по строке прячет меню и ждёт тап по экрану — туда встанет центр
+        // пилюли (в долях экрана). У середины липнет ровно к центру по каждой
+        // оси: так её ставят и ровно по вертикали, и ровно по горизонтали.
+        SHdr(XS("Худ"));
+        {
+            const float rowH = Layout::RowH;
+            const float inset = Layout::Inset, padX = Layout::PadX;
+            const float avW   = ImGui::GetContentRegionAvail().x;
+            auto* dl = ImGui::GetWindowDrawList();
+            auto* fn = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+            const bool posSet = (g_state.hud_cnt_x >= 0.f);
+
+            CardBg(rowH * (posSet ? 2.f : 1.f));
+
+            auto pos = ImGui::GetCursorScreenPos();
+            {
+                const float cX = pos.x + inset, cW = avW - inset * 2.f;
+                const float cy = pos.y + rowH * 0.5f;
+                ImGui::InvisibleButton("##hud_cnt", {avW, rowH});
+                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
+                    g_calibMode = 5; // калибровка: тап по экрану ставит счётчик
+                    PlaySound(SND_CLICK);
+                    g_input.touchConsumed = true;
+                }
+
+                char val[32];
+                if (posSet) snprintf(val, sizeof(val), "%d%% %d%%",
+                             (int)(g_state.hud_cnt_x * 100.f + 0.5f),
+                             (int)(g_state.hud_cnt_y * 100.f + 0.5f));
+                else        snprintf(val, sizeof(val), "%s", XS("По умолчанию"));
+                auto vsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, val);
+
+                dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f},
+                            C::UA(C::Txt(), 1.f), XS("Счётчик игроков"));
+                dl->AddText(fn, fs, {cX + cW - padX - vsz.x, cy - vsz.y * 0.5f},
+                            C::UA(C::Acc(), 1.f), val);
+
+                if (posSet && g_state.ui_show_sep)
+                    dl->AddLine({cX + padX, pos.y + rowH - 0.5f},
+                                {cX + cW - padX, pos.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
+            }
+
+            // Сброс к верху по центру — только если положение задано.
+            if (posSet) {
+                auto rpos = ImGui::GetCursorScreenPos();
+                const float cX = rpos.x + inset, cW = avW - inset * 2.f;
+                ImGui::InvisibleButton("##hud_cnt_rst", {avW, rowH});
+                const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
+                if (tapped) {
+                    g_state.hud_cnt_x = g_state.hud_cnt_y = -1.f;
+                    ShowToast(XS("Положение сброшено"));
+                    PlaySound(SND_CLICK);
+                    g_input.touchConsumed = true;
+                }
+                const char* rt = XS("Сбросить положение");
+                auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
+                dl->AddText(fn, fs * 1.05f,
+                            {cX + (cW - rsz.x) * 0.5f, rpos.y + (rowH - rsz.y) * 0.5f},
+                            C::UA(C::Dim(), 1.f), rt);
+            }
+        }
+
         // ---- Положение панели вкладок: слева или снизу ------------------
         // Перенесено сюда из удалённой вкладки «Меню».
         SHdr(XS("Панель вкладок"));
@@ -1384,7 +1449,7 @@ void RenderMenu() {
     // ---- Режим калибровки зон вводом с экрана ------------------------------
     // Меню спрятано; первый тап по экрану записывает позицию (в долях экрана):
     // зону джойстика/огня автофарма, точку, из которой аимбот водит палец,
-    // или центр джойстика фрикама (g_calibMode == 4).
+    // центр джойстика фрикама (4) или счётчика игроков (5).
     if (g_calibMode != 0) {
         float dw = 0.f, dh = 0.f;
         VisibleScreen(dw, dh);
@@ -1401,6 +1466,7 @@ void RenderMenu() {
             ? XS("Тапни по центру джойстика движения")
             : (g_calibMode == 2) ? XS("Тапни по кнопке огня / атаки")
             : (g_calibMode == 4) ? XS("Тапни куда поставить джойстик фрикама")
+            : (g_calibMode == 5) ? XS("Тапни куда поставить счётчик игроков")
                                  : XS("Тапни по точке, где аим водит палец");
         const char* sub = XS("Тап записывает зону. Меню откроется само.");
         float tfs = ImGui::GetFontSize() * 1.5f;
@@ -1427,10 +1493,35 @@ void RenderMenu() {
             // У точки аима маркер виден всегда: пока она не задана, показываем
             // ту позицию, из которой аим водит палец по умолчанию.
             if (g_calibMode == 3) { zx = AimTouchFracX() * dw; zy = AimTouchFracY() * dh; }
+            // Счётчик: сохранённый центр или тот, где пилюля стоит сейчас.
+            if (g_calibMode == 5) {
+                if (g_state.hud_cnt_x >= 0.f) { zx = g_state.hud_cnt_x * dw; zy = g_state.hud_cnt_y * dh; }
+                else { const HudCounterGeom& hg = HudCounterLast(); zx = hg.bX + hg.bW * 0.5f; zy = hg.bY + hg.bH * 0.5f; }
+            }
             if (zx >= 0.f) {
                 float pr = 34.f + 6.f * sinf((float)ImGui::GetTime() * 4.f);
                 fg->AddCircle({zx, zy}, pr, C::UA(C::Acc(), 0.85f), 40, 3.f);
                 fg->AddCircleFilled({zx, zy}, 7.f, C::U(C::Acc()), 20);
+            }
+        }
+
+        // Режим 5 — живое превью: пока палец на экране, пилюля следует за ним;
+        // у середины (|доля − 0.5| < 4%) липнет ровно к центру по каждой оси
+        // отдельно — с направляющими. Та же липкость — при записи ниже.
+        if (g_calibMode == 5 && io.MouseDown[0]) {
+            float fx = io.MousePos.x / dw, fy = io.MousePos.y / dh;
+            const bool snapX = fabsf(fx - 0.5f) < 0.04f;
+            const bool snapY = fabsf(fy - 0.5f) < 0.04f;
+            if (snapX) fx = 0.5f;
+            if (snapY) fy = 0.5f;
+            if (snapX) fg->AddLine({dw * 0.5f, 0.f}, {dw * 0.5f, dh}, C::UA(C::Acc(), 0.55f), 2.f);
+            if (snapY) fg->AddLine({0.f, dh * 0.5f}, {dw, dh * 0.5f}, C::UA(C::Acc(), 0.55f), 2.f);
+            const HudCounterGeom& hg = HudCounterLast();
+            if (hg.bW > 1.f && dw > hg.bW + 16.f && dh > hg.bH + 16.f) {
+                float px = ImClamp(fx * dw - hg.bW * 0.5f, 8.f, dw - hg.bW - 8.f);
+                float py = ImClamp(fy * dh - hg.bH * 0.5f, 8.f, dh - hg.bH - 8.f);
+                fg->AddRectFilled({px, py}, {px + hg.bW, py + hg.bH}, C::UA(C::Card(), 0.85f), 46.f);
+                fg->AddRect({px, py}, {px + hg.bW, py + hg.bH}, C::UA(C::Acc(), 0.9f), 46.f, 0, 2.5f);
             }
         }
 
@@ -1441,6 +1532,7 @@ void RenderMenu() {
             float rx = io.MousePos.x / dw, ry = io.MousePos.y / dh;
             if (rx > 0.f && rx < 1.f && ry > 0.f && ry < 1.f) {
                 const bool farm = (g_calibMode == 1 || g_calibMode == 2);
+                const bool hud  = (g_calibMode == 5);
                 if (g_calibMode == 1) {
                     g_state.farm_joy_x = rx; g_state.farm_joy_y = ry;
                     ShowToast(XS("Зона джойстика сохранена"));
@@ -1450,6 +1542,12 @@ void RenderMenu() {
                 } else if (g_calibMode == 4) {
                     g_state.freecam_joy_x = rx; g_state.freecam_joy_y = ry;
                     ShowToast(XS("Джойстик фрикама сохранён"));
+                } else if (hud) {
+                    // Та же липкость к центру, что в превью: по каждой оси.
+                    if (fabsf(rx - 0.5f) < 0.04f) rx = 0.5f;
+                    if (fabsf(ry - 0.5f) < 0.04f) ry = 0.5f;
+                    g_state.hud_cnt_x = rx; g_state.hud_cnt_y = ry;
+                    ShowToast(XS("Положение счётчика сохранено"));
                 } else {
                     g_state.aim_tx = rx; g_state.aim_ty = ry;
                     ShowToast(XS("Точка пальца сохранена"));
@@ -1458,9 +1556,11 @@ void RenderMenu() {
                 g_calibMode = 0;
                 menu_open = true;
                 // Вернуться туда, откуда калибровку запускали: зоны автофарма —
-                // в окно автофарма, точка аима — на вкладку «Аим».
-                if (farm) PopoverOpen(XS("Автофарм"), 5);
-                else      g_state.cur_tab = 1;
+                // в окно автофарма, точка аима — на вкладку «Аим», счётчик —
+                // на вкладку «Опции».
+                if (farm)      PopoverOpen(XS("Автофарм"), 5);
+                else if (hud)  g_state.cur_tab = 5;
+                else           g_state.cur_tab = 1;
                 g_input.touchConsumed = true; // этот тап уже отработал
             }
         }
@@ -1989,6 +2089,7 @@ void RenderMenu() {
 
 // Калибровка зон вводом с экрана: 0 — нет, 1 — ждём тап по джойстику
 // автофарма, 2 — по кнопке огня, 3 — по точке, из которой аимбот водит палец,
-// 4 — по центру джойстика фрикама. Пока калибровка активна, меню скрыто и
-// первый тап по экрану пишет позицию (в долях экрана) в g_state.
+// 4 — по центру джойстика фрикама, 5 — куда поставить счётчик игроков. Пока
+// калибровка активна, меню скрыто и первый тап по экрану пишет позицию (в
+// долях экрана) в g_state.
 int  g_calibMode = 0;

@@ -7,6 +7,7 @@
 #include "ui_util.h"     // EaseOut3, TickSlideAnim
 #include "str.h"         // XS()
 #include "text_utf8.h"   // CopyTextUtf8
+#include "app_state.h"    // g_state.hud_cnt_* — положение счётчика
 
 struct ToastState {
     char  msg[128]     = {};
@@ -162,6 +163,11 @@ static float wm_ring   = 2.f;
 bool  menu_open = true;
 
 
+// Свежая геометрия пилюли-счётчика (см. HudCounterLast в hud.h):
+// DrawWatermark обновляет её каждый кадр раньше меню.
+static HudCounterGeom g_hud_cnt_geom;
+const HudCounterGeom& HudCounterLast() { return g_hud_cnt_geom; }
+
 void DrawWatermark(float dt) {
     auto& io  = ImGui::GetIO();
     auto* fn  = ImGui::GetFont();
@@ -191,7 +197,8 @@ void DrawWatermark(float dt) {
         fg->AddText(fn, fs, {bX + padX, bY + padY}, C::UA(C::Txt(), 0.95f), name);
     }
 
-    // ---- Пилюля-счётчик противников (по центру верха экрана) -----------
+    // ---- Пилюля-счётчик противников --------------------------------------
+    // Дефолт — верх по центру; двигается тапом в Опциях → Худ.
     // Показывает, сколько игроков видит ESP; тап по ней открывает/закрывает
     // меню.
     {
@@ -213,8 +220,19 @@ void DrawWatermark(float dt) {
         const float dotR = 7.f;
         float bW = pad + dotR * 2.f + 12.f + lSz.x + 14.f + cSz.x + pad;
         float bH = cSz.y + pad;
-        float bX = (scrW - bW) * 0.5f;
-        const float bY = 12.f;
+        // Пользовательская позиция: доли экрана = ЦЕНТР пилюли. Кламп
+        // держит её внутри экрана целиком.
+        float bX, bY;
+        if (g_state.hud_cnt_x >= 0.f && g_state.hud_cnt_y >= 0.f) {
+            bX = g_state.hud_cnt_x * scrW - bW * 0.5f;
+            bY = g_state.hud_cnt_y * scrH - bH * 0.5f;
+            if (scrW > bW + 16.f) bX = ImClamp(bX, 8.f, scrW - bW - 8.f);
+            if (scrH > bH + 16.f) bY = ImClamp(bY, 8.f, scrH - bH - 8.f);
+        } else {
+            bX = (scrW - bW) * 0.5f;
+            bY = 12.f;
+        }
+        g_hud_cnt_geom = {bX, bY, bW, bH}; // свежее — для превью калибровки
 
         bool in = (io.MousePos.x >= bX && io.MousePos.x <= bX + bW &&
                    io.MousePos.y >= bY && io.MousePos.y <= bY + bH);

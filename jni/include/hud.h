@@ -10,3 +10,8 @@ extern bool menu_open;
 // Размеры видимого экрана с учётом ориентации (displayInfo может быть
 // «перевёрнутым» — нормуем).
 void VisibleScreen(float& w, float& h);
+// Геометрия пилюли-счётчика за последний отрисованный кадр — калибровка в
+// Опциях → Худ рисует по ней живое превью. DrawWatermark бежит раньше меню в
+// том же кадре, так что данные всегда свежие.
+struct HudCounterGeom { float bX = 0.f, bY = 0.f, bW = 0.f, bH = 0.f; };
+const HudCounterGeom& HudCounterLast();
