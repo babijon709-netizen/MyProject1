@@ -1808,6 +1808,22 @@ static void freecam_writer_start() {
                     const float v2[12] = {mm.tx, mm.ty, mm.tz, mm.tw, mm.rx, mm.ry, mm.rz, mm.rw, mm.sx, mm.sy, mm.sz, mm.sw};
                     if (wr_buf(a2, v2, sizeof(v2))) g_fc_write_count.fetch_add(1);
                 }
+                // Матрицу вида тоже держим в цели: иначе игра, пересчитавшая
+                // её из затёртого трансформа, вернёт камеру в ноль на пол-кадра.
+                if (g_native_camera && g_cam_pose_valid) {
+                    const Vec3 rr = g_cam_right, uu = g_cam_up, ff = g_cam_forward;
+                    if (vec3_is_finite(rr) && vec3_is_finite(uu) && vec3_is_finite(ff)) {
+                        Mat4 vw{};
+                        vw.m[0]=rr.x; vw.m[1]=rr.y; vw.m[2]=rr.z; vw.m[3]=0.f;
+                        vw.m[4]=uu.x; vw.m[5]=uu.y; vw.m[6]=uu.z; vw.m[7]=0.f;
+                        vw.m[8]=-ff.x; vw.m[9]=-ff.y; vw.m[10]=-ff.z; vw.m[11]=0.f;
+                        vw.m[12]=-(rr.x * g_freecam_pos.x + rr.y * g_freecam_pos.y + rr.z * g_freecam_pos.z);
+                        vw.m[13]=-(uu.x * g_freecam_pos.x + uu.y * g_freecam_pos.y + uu.z * g_freecam_pos.z);
+                        vw.m[14]=-(-ff.x * g_freecam_pos.x + -ff.y * g_freecam_pos.y + -ff.z * g_freecam_pos.z);
+                        vw.m[15]=1.f;
+                        wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &vw, sizeof(Mat4));
+                    }
+                }
                 ++iter;
             }
             std::this_thread::sleep_for(std::chrono::microseconds(500));
@@ -1990,6 +2006,27 @@ static bool freecam_write() {
     }
     g_fc_addr_n.store(fed);
     if (!fed) return false;
+    // Дополнительно пишем матрицу вида напрямую: игра может пересчитывать
+    // мировую матрицу трансформа из своего состояния, а матрицу вида — из
+    // трансформа. Если писать только трансформ, гонка остаётся 50/50 (лог
+    // 21:47 — у цели 30, в нуле 28). Пишем и то, и другое: трансформ для
+    // физики/коллизий, матрицу вида — для рендера. Матрица вида строится из
+    // текущего базиса камеры (right/up/forward) и цели фрикама.
+    if (g_native_camera && g_cam_pose_valid) {
+        const Vec3 r = g_cam_right, u = g_cam_up, f = g_cam_forward;
+        if (vec3_is_finite(r) && vec3_is_finite(u) && vec3_is_finite(f)) {
+            Mat4 view{};
+            // column-major: mat_set(row, col, value)
+            view.m[0] = r.x; view.m[1] = r.y; view.m[2] = r.z; view.m[3] = 0.f;
+            view.m[4] = u.x; view.m[5] = u.y; view.m[6] = u.z; view.m[7] = 0.f;
+            view.m[8] = -f.x; view.m[9] = -f.y; view.m[10] = -f.z; view.m[11] = 0.f;
+            view.m[12] = -(r.x * g_freecam_pos.x + r.y * g_freecam_pos.y + r.z * g_freecam_pos.z);
+            view.m[13] = -(u.x * g_freecam_pos.x + u.y * g_freecam_pos.y + u.z * g_freecam_pos.z);
+            view.m[14] = -(-f.x * g_freecam_pos.x + -f.y * g_freecam_pos.y + -f.z * g_freecam_pos.z);
+            view.m[15] = 1.f;
+            wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &view, sizeof(Mat4));
+        }
+    }
     // Где камера на самом деле — по матрице вида (ею игра и рисует кадр).
     {
         Vec3 cam{};
