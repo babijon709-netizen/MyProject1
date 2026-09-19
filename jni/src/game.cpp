@@ -19,6 +19,7 @@
 #include <chrono>
 #include <atomic>
 #include <thread>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1603,7 +1604,7 @@ static bool camera_arrays_now(uint64_t& matrices, uint64_t& indices, int32_t& in
 // 21:10: за период 60 отсчётов — у цели 37, в нуле 23).
 //
 // ==== Что пишет фоновый писатель (и как оно туда попадает) =================
-// Писатель каждые 2 мс повторяет матрицы в памяти игры: игра пересчитывает
+// Писатель каждую 1 мс повторяет матрицы в памяти игры: игра пересчитывает
 // их из трансформа и затирала бы разовую запись. Раньше он ПЕРЕСЧИТЫВАЛ
 // матрицы сам из g_cam_*/g_freecam_pos/g_fc_mat — обычных глобалей, которые
 // главный поток переписывает прямо во время чтения. Писатель получал базис,
@@ -1615,7 +1616,7 @@ static bool camera_arrays_now(uint64_t& matrices, uint64_t& indices, int32_t& in
 // Целостность снимка — сиквенс-локом: писатель повторяет чтение, пока счётчик
 // до и после не совпадёт. Писатель один: поколение g_fc_writer_gen убивает
 // опоздавший поток после быстрого выкл/вкл — иначе два писателя писали бы
-// разное каждые 2 мс и дрались друг с другом.
+// разное каждую 1 мс и дрались друг с другом.
 struct FcSlotPayload {
     uint64_t addr = 0;    // matrices + index*48
     float    m[12] = {};  // Matrix34 целиком
@@ -1679,6 +1680,10 @@ static std::atomic<bool>     g_fc_write_failed{false};
 // переписывает — это главный вопрос фрикама.
 static std::atomic<unsigned> g_fc_overwrites{0};
 static std::atomic<float>    g_fc_over_m{0.f};
+// Замок тройки «счётчик+сумма+позиция» затираний: писатель публикует её в три
+// шага, тик забирает в пять — без замка сводка склеивалась из разных отсчётов
+// («расхождение 0.0 м, в памяти (-640, -437, …)» — лог 02:56).
+static std::mutex            g_fc_ow_mtx;
 // Сколько раз за секунду игра подменила массивы иерархии камеры.
 static std::atomic<unsigned> g_fc_array_changes{0};
 static std::atomic<float>    g_fc_gap{-1.f};
@@ -1848,7 +1853,7 @@ static std::atomic<unsigned> g_fc_samp{0}, g_fc_hit{0}, g_fc_zero{0}, g_fc_other
 static void freecam_writer_start() {
     if (g_fc_writer_running.exchange(true)) return;
     // Поколение: быстрый выкл/вкл плодил двух писателей — старый ещё выходил,
-    // новый уже стартовал, и оба писали (разное) каждые 2 мс. Опоздавший,
+    // новый уже стартовал, и оба писали (разное) каждую 1 мс. Опоздавший,
     // увидев чужое поколение, выходит сам.
     const unsigned my_gen = g_fc_writer_gen.fetch_add(1) + 1;
     std::thread([my_gen]() {
@@ -1878,7 +1883,7 @@ static void freecam_writer_start() {
                 if (s0 == g_fc_pub.seq.load()) { snapped = true; break; }
             }
             if (!snapped || g_pid <= 0 || (!has_view && tn <= 0)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             if (cam != last_cam) { have_last = false; last_cam = cam; }
@@ -1906,6 +1911,7 @@ static void freecam_writer_start() {
                         const Vec3 ps = freecam_pos_from_view(block);
                         const float dx = pm.x - ps.x, dy = pm.y - ps.y, dz = pm.z - ps.z;
                         const float dd = sqrtf(dx * dx + dy * dy + dz * dz);
+                        std::lock_guard<std::mutex> ow_lk(g_fc_ow_mtx);
                         g_fc_overwrites.fetch_add(1);
                         if (std::isfinite(dd))
                             g_fc_over_m.store(g_fc_over_m.load() + dd);
@@ -1935,7 +1941,7 @@ static void freecam_writer_start() {
                 if (wr_buf(t[sl].addr, t[sl].m, sizeof(t[sl].m)))
                     g_fc_write_count.fetch_add(1);
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }).detach();
 }
@@ -1945,7 +1951,7 @@ bool esp_freecam_set(bool on) {
     if (!on) {
         g_fc_writer_running.store(false);
         freecam_payload_clear();   // опоздавший писатель не подхватит старье
-        // Даём витку писателя (2 мс) завершиться: иначе он допишет старый
+        // Даём витку писателя (1 мс) завершиться: иначе он допишет старый
         // снимок уже после восстановления трансформа ниже.
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
         g_fc_last_m = g_fc_last_n = 0; g_fc_last_i = -1;
@@ -2290,8 +2296,13 @@ static void freecam_tick() {
             const bool wf = g_fc_write_failed.exchange(false);
             const float gap = g_fc_gap.load();
             const unsigned ac = g_fc_array_changes.exchange(0);
-            const unsigned ow = g_fc_overwrites.exchange(0);
-            const float owm = g_fc_over_m.exchange(0.f);
+            unsigned ow = 0; float owm = 0.f, owx = 0.f, owy = 0.f, owz = 0.f;
+            {
+                std::lock_guard<std::mutex> ow_lk(g_fc_ow_mtx);
+                ow = g_fc_overwrites.exchange(0);
+                owm = g_fc_over_m.exchange(0.f);
+                owx = g_fc_ow_x.load(); owy = g_fc_ow_y.load(); owz = g_fc_ow_z.load();
+            }
             LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f), писатель %u/с, затёрто игрой %u/с (в среднем %.1f м), недолёт %.2f м, подмен массивов %u%s",
                     (double)g_freecam_pos.x, (double)g_freecam_pos.y, (double)g_freecam_pos.z,
                     (double)in_mem.x, (double)in_mem.y, (double)in_mem.z,
@@ -2336,7 +2347,7 @@ static void freecam_tick() {
             if (ow)
                 LogLine("фрикам: затёрто игрой %u раз за период, расхождение до %.1f м, в памяти оказалось (%.1f, %.1f, %.1f)",
                         ow, (double)(owm / (float)ow),
-                        (double)g_fc_ow_x.load(), (double)g_fc_ow_y.load(), (double)g_fc_ow_z.load());
+                        (double)owx, (double)owy, (double)owz);
             // Чем контур посчитал поправку. По этой строке проверяется вся
             // арифметика: мировая позиция камеры обязана быть равна
             // «позиция родителя + поворот родителя × (масштаб × локальную)»,
