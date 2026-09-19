@@ -340,12 +340,18 @@ static bool skip_object_name(const char* raw) {
     });
 }
 
-// Cars whose entityType is empty: prefab name only. Exact words, never a
-// prefix — "car" starts cargo, carpet, cardboard and carepackage.
+// Одно слово говорит «машина»: целые слова, не префикс — "car" начинает
+// cargo, carpet, cardboard и carepackage. Список один на имя префаба и на
+// имя класса компонента (см. marker_class_of).
+static bool is_vehicle_word(const char* word) {
+    return strcmp(word, "car") == 0 || strcmp(word, "cars") == 0 ||
+           strcmp(word, "vehicle") == 0 || strcmp(word, "vehicles") == 0;
+}
+
+// Cars whose entityType is empty: prefab name only.
 static bool vehicle_look_from_object_name(const char* raw, MarkerLook& look) {
     return for_each_name_token(raw, [&](const char* word) {
-        if (strcmp(word, "car") == 0 || strcmp(word, "cars") == 0 ||
-            strcmp(word, "vehicle") == 0 || strcmp(word, "vehicles") == 0) {
+        if (is_vehicle_word(word)) {
             look = vehicle_look("Машина");
             return true;
         }
@@ -788,6 +794,10 @@ uint8_t marker_class_of(uint64_t klass) {
         // loud is kept as a safety net for other builds.
         else if (name == "LootDestroyable" ||
                  name.find("Barrel") != std::string::npos)      kind = MARKER_CLASS_BARREL;
+        // Машины: класс компонента (CarController, BaseVehicle, ...) — проход
+        // режет camelCase на слова, поэтому Cargo/Carepackage сюда не попадают.
+        // Раньше такие классы уходили в NONE и отсекались до чтения имён.
+        else if (for_each_name_token(name.c_str(), is_vehicle_word)) kind = MARKER_CLASS_VEHICLE;
     }
     if (g_marker_class_kind.size() < 512) g_marker_class_kind[klass] = kind;
     return kind;
@@ -953,6 +963,18 @@ static bool rebuild_marker_entities() {
                 g_markers_loot_enabled) {
                 known = loot_marker(component, object_name, root_name, look);
             }
+            if (!known && component_class == MARKER_CLASS_VEHICLE) {
+                // Класс уже сказал «машина» — этого достаточно: оффсет
+                // entityType у немаинбл-компонента указывает в чужое поле,
+                // поэтому тип здесь не читаем, только отсекаем багги/трупы.
+                // Тумблера нет, как у руды и ботов: опознаётся всегда,
+                // фильтруется при отрисовке (esp_get_markers).
+                if ((object_name[0] && skip_object_name(object_name)) ||
+                    (root_name[0] && skip_object_name(root_name)))
+                    continue;
+                look = vehicle_look("Машина");
+                known = true;
+            }
             if (!known && (component_class == MARKER_CLASS_MINEABLE || family_unknown)) {
                 // The prefab name is asked first on purpose: animals that the
                 // EntityType enum does not know (wolf, rat, ...) are shipped
@@ -1033,12 +1055,14 @@ void reset_marker_caches() {
 }
 
 // Position tracking for markers that move (animals always, bots when drawn
-// or aimed): near ones every frame, far ones a few times a second. Shared by
+// or aimed, vehicles — a driven car outruns the rescan in seconds): near
+// ones every frame, far ones a few times a second. Shared by
 // esp_get_markers() and esp_bot_aim_maintain(); when both run in one frame the
 // cooldown simply ticks twice and far bots re-read twice as often — harmless.
 static void marker_track_position(MarkerEntity& entity) {
     bool want_read = !entity.position_valid;
-    if (entity.kind == ESP_MARKER_ANIMAL || entity.kind == ESP_MARKER_BOT) {
+    if (entity.kind == ESP_MARKER_ANIMAL || entity.kind == ESP_MARKER_BOT ||
+        entity.kind == ESP_MARKER_VEHICLE) {
         if (--entity.pos_cooldown <= 0) {
             want_read = true;
             float ddx = entity.position.x - g_frame_local_pos.x;
