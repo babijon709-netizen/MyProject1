@@ -271,6 +271,57 @@ static void Upload() {
     pthread_mutex_unlock(&g_touch_mutex);
 }
 
+// Единицы тачскрина -> пиксели оверлея (та же система координат, что у
+// ImGui MousePos). Вынесено из TypeA отдельным шагом: снимок мультитача для
+// фрикама (Touch_GetActive) считает те же координаты тем же преобразованием,
+// иначе хит-тесты джойстика/обзора разъехались бы с одним пальцем мыши.
+static void Touch_ToOverlay(int devX, int devY, float& x, float& y) {
+    float sx = ::scale_x > 0.f ? ::scale_x : 1.f;
+    float sy = ::scale_y > 0.f ? ::scale_y : 1.f;
+    float xt = (float)devX / sx;
+    float yt = (float)devY / sy;
+
+    if (other_touch) {
+        switch (orientation) {
+            case 1:
+                x = xt;
+                y = yt;
+                break;
+            case 2:
+                y = yt;
+                x = screenHeight - xt;
+                break;
+            case 3:
+                x = screenHeight - xt;
+                y = screenWidth - yt;
+                break;
+            default:
+                y = xt;
+                x = screenHeight - yt;
+                break;
+        }
+    } else {
+        switch (orientation) {
+            case 1:
+                x = yt;
+                y = screenHeight - xt;
+                break;
+            case 2:
+                x = screenHeight - xt;
+                y = screenWidth - yt;
+                break;
+            case 3:
+                y = xt;
+                x = screenWidth - yt;
+                break;
+            default:
+                x = xt;
+                y = yt;
+                break;
+        }
+    }
+}
+
 static void *TypeA(void *arg) {
     targ tmp = *(targ *) arg;
     int i = tmp.fdNum;
@@ -315,49 +366,8 @@ static void *TypeA(void *arg) {
             if (ie.code == SYN_REPORT) {
                 ImGuiIO &io = ImGui::GetIO();
                 if (Finger[i][latest].isDown) {
-                    float x = Finger[i][latest].x, y = Finger[i][latest].y;
-                    float xt = x / scale_x;
-                    float yt = y / scale_y;
-
-                    if (other_touch) {
-                        switch (orientation) {
-                            case 1:
-                                x = xt;
-                                y = yt;
-                                break;
-                            case 2:
-                                y = yt;
-                                x = screenHeight - xt;
-                                break;
-                            case 3:
-                                x = screenHeight - xt;
-                                y = screenWidth - yt;
-                                break;
-                            default:
-                                y = xt;
-                                x = screenHeight - yt;
-                                break;
-                        }
-                    } else {
-                        switch (orientation) {
-                            case 1:
-                                x = yt;
-                                y = screenHeight - xt;
-                                break;
-                            case 2:
-                                x = screenHeight - xt;
-                                y = screenWidth - yt;
-                                break;
-                            case 3:
-                                y = xt;
-                                x = screenWidth - yt;
-                                break;
-                            default:
-                                x = xt;
-                                y = yt;
-                                break;
-                        }
-                    }
+                    float x = 0.f, y = 0.f;
+                    Touch_ToOverlay(Finger[i][latest].x, Finger[i][latest].y, x, y);
                     io.MousePos = {x, y};
                     io.MouseDown[0] = true;
                     Finger[i][latest].blocked = g_block_on && x >= g_block_x0 &&
@@ -597,6 +607,30 @@ float Touch_DeviceUnitsPerPixel() {
     if (!Touch_initialized || devMaxX <= 0 || devMaxY <= 0) return 1.0f;
     float s = ::scale_x < ::scale_y ? ::scale_x : ::scale_y;
     return (s > 0.01f && s < 100.0f) ? s : 1.0f;
+}
+
+int Touch_GetActive(float* xs, float* ys, int* ids, int maxCount) {
+    if (!xs || !ys || !ids || maxCount <= 0) return 0;
+    if (!Touch_initialized) return 0;
+    pthread_mutex_lock(&g_touch_mutex);
+    int n = 0;
+    for (int i = 0; i < fdNum && n < maxCount; ++i) {
+        for (int j = 0; j < maxF && n < maxCount; ++j) {
+            const touchObj& f = Finger[i][j];
+            if (!f.isDown) continue;
+            // Синтетика аима/фарма — не пальцы игрока: в снимок не берём,
+            // иначе injected-тач уводил бы джойстик и камеру фрикама.
+            if (f.id == kAimFingerId) continue;
+            if (f.id >= 61000 && f.id <= 61002) continue;
+            float x = 0.f, y = 0.f;
+            Touch_ToOverlay(f.x, f.y, x, y);
+            if (!std::isfinite(x) || !std::isfinite(y)) continue;
+            xs[n] = x; ys[n] = y; ids[n] = f.id;
+            ++n;
+        }
+    }
+    pthread_mutex_unlock(&g_touch_mutex);
+    return n;
 }
 
 void Touch_Down(float xt, float yt) {

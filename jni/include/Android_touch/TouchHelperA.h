@@ -30,3 +30,9 @@ void Touch_UploadStats(unsigned long long& calls, double& ms, unsigned long long
 // Касания внутри прямоугольника (в координатах ImGui, то есть в пикселях
 // оверлея) не уходят в игру: их забирает оверлей. on=false — выключить.
 void Touch_BlockRect(bool on, float x0, float y0, float x1, float y1);
+// Снимок активных НАСТОЯЩИХ пальцев для органов управления оверлея (фрикам:
+// джойстик и обзор держат РАЗНЫЕ пальцы одновременно, а ImGui MousePos видит
+// только последний). Координаты — пиксели оверлея, та же система, что у
+// io.MousePos. Синтетические пальцы аима/фарма сюда не попадают. Возвращает
+// число записанных касаний (до maxCount). Потокобезопасно.
+int Touch_GetActive(float* xs, float* ys, int* ids, int maxCount);

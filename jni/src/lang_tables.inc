@@ -88,6 +88,7 @@ static const LangPair kUiEn[] = {
     {"Руда", "Ore"},
     {"Сбросить зоны", "Reset zones"},
     {"Сбросить точку", "Reset point"},
+    {"Свайп — обзор", "Swipe to look"},
     {"Свои", "Teammates"},
     {"Система", "System"},
     {"Скелеты", "Skeletons"},

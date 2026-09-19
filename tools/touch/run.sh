@@ -27,3 +27,12 @@ g++ -std=gnu++17 -O1 -g -Wall -Wextra -Wno-unused-parameter \
     -Ijni/include -Ijni/include/ImGui -Ijni/src \
     -o "$BUILD/touch_repeat_test" tools/touch/touch_repeat_test.cpp
 "$BUILD/touch_repeat_test"
+
+# Второй стенд — Touch_GetActive (снимок мультитача для фрикама): какие пальцы
+# видит оверлей, отсечение синтетики аима/фарма, математика поворота/масштаба.
+g++ -std=gnu++17 -O1 -g -Wall -Wextra -Wno-unused-parameter \
+    -Wno-missing-field-initializers -Wno-unused-variable -Wno-maybe-uninitialized \
+    -pthread \
+    -Ijni/include -Ijni/include/ImGui -Ijni/src \
+    -o "$BUILD/touch_getactive_test" tools/touch/touch_getactive_test.cpp
+"$BUILD/touch_getactive_test"

@@ -1,5 +1,6 @@
 #include "menu.h"
 #include "main.h"
+#include "Android_touch/TouchHelperA.h"   // Touch_GetActive/BlockRect (фрикам)
 #include "game.h"
 #include "game_offsets_active.h"
 #include "app_state.h"
@@ -957,17 +958,46 @@ static void TrafficLight(ImVec2 winPos, float railW) {
 
 // ====================== Фрикам: управление полётом ========================
 //
-// Пока функция включена, поверх игры лежит джойстик (вперёд/назад, влево/
-// вправо) и две кнопки высоты. Оверлей видит только ОДИН палец: состояние мыши
-// ImGui ведёт поток чтения тачскрина (Android_touch/TouchHelperA.cpp), а он
-// берёт последний слот. Поэтому управление сделано так, чтобы одного пальца
-// хватало: джойстик даёт две оси сразу, высоту меняют отдельными кнопками.
+// Пока функция включена, поверх игры лежат три независимых органа управления,
+// каждый со СВОИМ пальцем:
 //
-// Касания внутри панели в игру не уходят (Touch_BlockRect): иначе палец на
-// джойстике ещё и ходил бы персонажем, а камера во фрикаме привязана к телу и
-// поехала бы вместе с ним.
+//   * джойстик слева (вперёд/назад, влево/вправо),
+//   * свайп-зона обзора справа (куда смотрит камера),
+//   * две кнопки высоты у правого края (вверх/вниз).
+//
+// Палец, коснувшийся зоны, ПРИВЯЗЫВАЕТСЯ к ней по id касания и ведётся до
+// отпускания, где бы он ни оказался: уехавший за круг джойстика палец стик не
+// роняет, а даёт полное отклонение в свою сторону. Обзор при этом живёт на
+// другом пальце и джойстику не мешает (и наоборот).
+//
+// Тач-слой отдаёт все пальцы сразу (Touch_GetActive); ImGui MousePos видит
+// только последний, поэтому для фрикама он не используется — только как
+// запасной путь, когда тачскрина нет вовсе (хост/эмулятор).
+//
+// Касания в игру не уходят (Touch_BlockRect на весь экран ниже верхней
+// полосы): иначе палец на джойстике ещё и ходил бы персонажем, а камера во
+// фрикаме привязана к телу и поехала бы вместе с ним.
+//
+// Геометрия — в пикселях видимого экрана (VisibleScreen, как пилюли и меню),
+// а не в квадрате ImGui DisplaySize: иначе привязка к правому/нижнему краю
+// (кнопки высоты) уехала бы за видимую область.
 static float  s_fc_retry = 0.f;
 static bool   s_fc_toasted = false;
+
+// Какой палец что держит (-1 = свободно). Id — из Touch_GetActive, живёт от
+// касания до отпускания; s_fc_prev_* отличают НОВЫЕ касания от удерживаемых,
+// чтобы скользнувший из одной зоны в другую палец не перехватывался.
+static int   s_fc_joy_id = -1;
+static int   s_fc_look_id = -1;
+static float s_fc_look_x = 0.f, s_fc_look_y = 0.f;
+static int   s_fc_up_id = -1, s_fc_down_id = -1;
+static int   s_fc_prev_ids[12];
+static int   s_fc_prev_n = 0;
+
+static void Freecam_ResetGrabs() {
+    s_fc_joy_id = s_fc_look_id = s_fc_up_id = s_fc_down_id = -1;
+    s_fc_prev_n = 0;
+}
 
 void UpdateFreecam(float dt) {
     if (g_state.freecam_on != esp_freecam_active()) {
@@ -986,140 +1016,259 @@ void UpdateFreecam(float dt) {
         s_fc_retry = 0.f;
         s_fc_toasted = false;
     }
-    ImGuiIO& io = ImGui::GetIO();
-    const float sw = io.DisplaySize.x, sh = io.DisplaySize.y;
-    if (sw < 100.f || sh < 100.f) return;
-    // Реальный размер экрана — из displayInfo, а не из ImGui DisplaySize (который 2460x2460 квадрат)
-    float real_w = (float)displayInfo.width;
-    float real_h = (float)displayInfo.height;
-    if (real_w < 100.f || real_h < 100.f) { real_w = sw; real_h = sh; }
-    // Портрет/ландшафт — берём большую сторону как ширину для расчётов
-    float rw = real_w, rh = real_h;
-    if (rw < rh) { float t=rw; rw=rh; rh=t; }
+    // Геометрия — видимый экран (как меню и пилюли), а не квадрат DisplaySize.
+    float vw = 0.f, vh = 0.f;
+    VisibleScreen(vw, vh);
+    if (vw < 100.f || vh < 100.f) return;
 
     {
         static double s_last = -1e9;
         double now = ImGui::GetTime();
-        if (now - s_last >= 2.0) {
+        if (now - s_last >= 5.0) {
             s_last = now;
-            LogLine("фрикам: UI — активен=%d вкл=%d sw=%.0f sh=%.0f real=%.0fx%.0f", (int)esp_freecam_active(), (int)g_state.freecam_on, (double)sw, (double)sh, (double)real_w, (double)real_h);
+            LogLine("фрикам: UI — активен=%d вкл=%d экран=%.0fx%.0f joy=%d look=%d up=%d down=%d",
+                    (int)esp_freecam_active(), (int)g_state.freecam_on,
+                    (double)vw, (double)vh, s_fc_joy_id, s_fc_look_id, s_fc_up_id, s_fc_down_id);
         }
     }
 
     if (!esp_freecam_active()) {
-        if (g_state.freecam_on) Touch_BlockRect(true, 0.f, sh * 0.5f, sw * 0.45f, sh);
+        if (g_state.freecam_on) Touch_BlockRect(true, 0.f, vh * 0.5f, vw * 0.45f, vh);
         else                    Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
+        Freecam_ResetGrabs();   // залипший id не должен уехать в следующий полёт
         return;
     }
 
-    // Игровое управление: слева внизу джойстик, справа — свайп для обзора
-    const float R  = 110.f;
-    float x0, y0;
+    // ---- геометрия -------------------------------------------------------
+    const float R = 110.f;                 // ход стика
+    float cx, cy;                          // центр джойстика
     if (g_state.freecam_joy_x >= 0.f && g_state.freecam_joy_y >= 0.f) {
-        float jx = g_state.freecam_joy_x * sw;
-        float jy = g_state.freecam_joy_y * sh;
-        x0 = jx - R;
-        y0 = jy - R;
+        cx = g_state.freecam_joy_x * vw;
+        cy = g_state.freecam_joy_y * vh;
     } else {
-        x0 = 30.f;
-        y0 = 100.f;
+        cx = 30.f + R;
+        cy = 100.f + R;
     }
-    const float cx = x0 + R, cy = y0 + R;
+    // Центр не даём увести за край и под верхнюю полосу (там пилюли меню).
+    cx = ImClamp(cx, R + 16.f, vw - R - 16.f);
+    cy = ImClamp(cy, R + 100.f, vh - R - 16.f);
 
-    // Правая зона обзора — правая половина экрана
-    const float look_x0 = sw * 0.5f;
-    const float look_w = sw - look_x0;
+    const float kBtnR  = 62.f;             // кнопки высоты у правого края
+    const float kBtnX  = vw - kBtnR - 30.f;
+    const float kUpY   = vh * 0.5f - kBtnR - 26.f;
+    const float kDownY = vh * 0.5f + kBtnR + 26.f;
 
-    // Блокируем всё кроме верхней полосы (меню) — фрикам перехватывает все касания
-    Touch_BlockRect(true, 0.f, 90.f, sw, sh);
+    // Всё ниже верхней полосы забираем себе — в игру не уходит ничего.
+    Touch_BlockRect(true, 0.f, 90.f, vw, vh);
 
-    // ---- левый джойстик (окно с фоном) ----
-    float ax = 0.f, ay = 0.f;
-    float yaw_delta = 0.f, pitch_delta = 0.f;
-    static float s_last_ax = 0.f, s_last_ay = 0.f;
-    static bool s_joy_held = false;
-    {
-        ImGui::SetNextWindowPos({x0 - 12.f, y0 - 12.f});
-        ImGui::SetNextWindowSize({R*2.f + 24.f, R*2.f + 24.f});
-        ImGui::Begin("##fc_joy_win", nullptr,
-                     ImGuiWindowFlags_NoDecoration |
-                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
-                     ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
-        auto* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled({x0 - 10.f, y0 - 10.f}, {x0 + R*2.f + 10.f, y0 + R*2.f + 10.f}, IM_COL32(20,20,20,200), 14.f);
-        dl->AddRect({x0 - 10.f, y0 - 10.f}, {x0 + R*2.f + 10.f, y0 + R*2.f + 10.f}, IM_COL32(255,255,255,80), 14.f, 0, 2.f);
-        ImGui::SetCursorScreenPos({x0, y0});
-        ImGui::InvisibleButton("##fc_joy", {R * 2.f, R * 2.f});
-        bool mouse_in_joy = (io.MousePos.x >= x0 && io.MousePos.x <= x0 + R*2.f && io.MousePos.y >= y0 && io.MousePos.y <= y0 + R*2.f);
-        bool joy_active = io.MouseDown[0] && mouse_in_joy;
-        if (joy_active) {
-            const ImVec2 d = {io.MousePos.x - cx, io.MousePos.y - cy};
-            const float len = sqrtf(d.x * d.x + d.y * d.y);
-            if (len > 6.f) {
-                const float k = (len > R ? R / len : 1.f);
-                ax = (d.x * k) / R;
-                ay = (-d.y * k) / R;
-            }
-            s_last_ax = ax; s_last_ay = ay; s_joy_held = true;
+    // ---- снимок пальцев ----------------------------------------------------
+    float f_x[12], f_y[12];
+    int   f_id[12];
+    int nf = Touch_GetActive(f_x, f_y, f_id, 12);
+    if (nf <= 0 && ImGui::GetIO().MouseDown[0]) {
+        // Запасной путь без тачскрина (хост/эмулятор): один «палец»-мышь.
+        f_x[0] = ImGui::GetIO().MousePos.x;
+        f_y[0] = ImGui::GetIO().MousePos.y;
+        f_id[0] = -1000000;
+        nf = 1;
+    }
+    auto findTouch = [&](int id, float& ox, float& oy) -> bool {
+        for (int i = 0; i < nf; ++i)
+            if (f_id[i] == id) { ox = f_x[i]; oy = f_y[i]; return true; }
+        return false;
+    };
+    auto isFreshTouch = [&](int id) -> bool {
+        for (int i = 0; i < s_fc_prev_n; ++i)
+            if (s_fc_prev_ids[i] == id) return false;
+        return true;
+    };
+    // Зону занимает только свежее касание ниже верхней полосы, которое ещё
+    // никто не держит. Пока открыто меню, новых захватов нет вовсе: тапы по
+    // меню не должны дёргать камеру (уже зажатое продолжает вестись).
+    const bool canGrab = !menu_open;
+
+    float ax = 0.f, ay = 0.f;              // оси стика (-1..1)
+    float knobDx = 0.f, knobDy = 0.f;      // ручка для отрисовки
+    bool  joyHeld = false;
+
+    // ---- джойстик: ведём привязанный палец ---------------------------------
+    auto stickVec = [&](float px, float py) {
+        const float dx = px - cx, dy = py - cy;
+        const float len = sqrtf(dx * dx + dy * dy);
+        const float dead = 12.f;           // мёртвая зона у центра
+        if (len > dead) {
+            float mag = (len - dead) / (R - dead);
+            if (mag > 1.f) mag = 1.f;
+            // Отклик мягче у центра — точнее доводка, резче на краю.
+            mag = mag * (0.35f + 0.65f * mag);
+            ax = (dx / len) * mag;
+            ay = -(dy / len) * mag;
         } else {
-            // Если джойстик не активен, но палец всё ещё зажат (второй палец на обзоре) — держим последнее значение
-            // чтобы движение не прерывалось при одновременном обзоре
-            if (s_joy_held && io.MouseDown[0]) {
-                ax = s_last_ax; ay = s_last_ay;
-            } else {
-                s_joy_held = false;
+            ax = ay = 0.f;
+        }
+        const float cl = (len > R) ? R / len : 1.f;
+        knobDx = dx * cl;
+        knobDy = dy * cl;
+    };
+    if (s_fc_joy_id != -1) {
+        float px, py;
+        if (findTouch(s_fc_joy_id, px, py)) {
+            joyHeld = true;
+            stickVec(px, py);
+        } else {
+            s_fc_joy_id = -1;              // палец поднят — стик свободен
+        }
+    }
+    if (s_fc_joy_id == -1 && canGrab && nf > 0) {
+        // Захват щедрый (круг шире видимого), а дальше палец ведётся где
+        // угодно: вышедший за круг даёт полное отклонение в свою сторону.
+        const float grab = R + 70.f;
+        for (int i = 0; i < nf; ++i) {
+            if (f_id[i] == s_fc_look_id || f_id[i] == s_fc_up_id || f_id[i] == s_fc_down_id) continue;
+            if (!isFreshTouch(f_id[i]) || f_y[i] < 90.f) continue;
+            const float dx = f_x[i] - cx, dy = f_y[i] - cy;
+            if (dx * dx + dy * dy <= grab * grab) {
+                s_fc_joy_id = f_id[i];
+                joyHeld = true;
+                stickVec(f_x[i], f_y[i]);
+                break;
             }
         }
-        {
-            const ImU32 ring = IM_COL32(255,255,255,200);
-            const ImU32 knob = (joy_active || s_joy_held) ? IM_COL32(0,200,255,255) : IM_COL32(0,180,255,200);
-            dl->AddCircle({cx, cy}, R, ring, 32, 3.f);
-            dl->AddCircleFilled({cx + ax * R * 0.60f, cy - ay * R * 0.60f}, R * 0.34f, knob, 32);
-            dl->AddLine({cx - R*0.15f, cy}, {cx + R*0.15f, cy}, IM_COL32(255,255,255,60), 1.f);
-            dl->AddLine({cx, cy - R*0.15f}, {cx, cy + R*0.15f}, IM_COL32(255,255,255,60), 1.f);
-        }
-        ImGui::End();
     }
-    // ---- правая зона обзора ----
-    {
-        ImGui::SetNextWindowPos({look_x0, 0.f});
-        ImGui::SetNextWindowSize({look_w, sh});
-        ImGui::Begin("##fc_look_win", nullptr,
-                     ImGuiWindowFlags_NoDecoration |
-                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
-                     ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar |
-                     ImGuiWindowFlags_NoBackground);
-        ImGui::SetCursorScreenPos({look_x0, 0.f});
-        ImGui::InvisibleButton("##fc_look", {look_w, sh});
-        static ImVec2 s_last_look = {0,0};
-        static bool s_look_active = false;
-        bool mouse_in_look = (io.MousePos.x >= look_x0);
-        bool look_active = io.MouseDown[0] && mouse_in_look;
-        if (look_active) {
-            ImVec2 cur = io.MousePos;
-            if (!s_look_active) {
-                s_last_look = cur;
-                s_look_active = true;
-            } else {
-                float dx = cur.x - s_last_look.x;
-                float dy = cur.y - s_last_look.y;
+
+    // ---- кнопки высоты ------------------------------------------------------
+    bool upHeld = false, downHeld = false;
+    auto holdButton = [&](int& slot, float bx, float by, bool& held) {
+        if (slot == -1) return;
+        float px, py;
+        if (!findTouch(slot, px, py)) { slot = -1; return; }
+        // Держится, пока палец в расширенном круге: съехавший чуть вбок
+        // палец кнопку не роняет.
+        const float dx = px - bx, dy = py - by;
+        const float keep = kBtnR + 60.f;
+        if (dx * dx + dy * dy <= keep * keep) held = true;
+        else slot = -1;
+    };
+    holdButton(s_fc_up_id, kBtnX, kUpY, upHeld);
+    holdButton(s_fc_down_id, kBtnX, kDownY, downHeld);
+    if (canGrab && nf > 0 && (s_fc_up_id == -1 || s_fc_down_id == -1)) {
+        const float grab = kBtnR + 20.f;
+        for (int i = 0; i < nf; ++i) {
+            if (f_id[i] == s_fc_joy_id || f_id[i] == s_fc_look_id) continue;
+            if (!isFreshTouch(f_id[i]) || f_y[i] < 90.f) continue;
+            const float dx = f_x[i] - kBtnX;
+            const float du = f_y[i] - kUpY, dd = f_y[i] - kDownY;
+            if (s_fc_up_id == -1 && dx * dx + du * du <= grab * grab) {
+                s_fc_up_id = f_id[i]; upHeld = true; continue;
+            }
+            if (s_fc_down_id == -1 && dx * dx + dd * dd <= grab * grab) {
+                s_fc_down_id = f_id[i]; downHeld = true; continue;
+            }
+        }
+    }
+    const float hAxis = (upHeld ? 1.f : 0.f) - (downHeld ? 1.f : 0.f);
+
+    // ---- обзор: свайп на своём пальце ---------------------------------------
+    float yaw_delta = 0.f, pitch_delta = 0.f;
+    bool lookHeld = false;
+    float lookPx = 0.f, lookPy = 0.f;
+    if (s_fc_look_id != -1) {
+        float px, py;
+        if (findTouch(s_fc_look_id, px, py)) {
+            lookHeld = true; lookPx = px; lookPy = py;
+            const float dx = px - s_fc_look_x, dy = py - s_fc_look_y;
+            // Скачок больше четверти экрана за кадр — не свайп, а смена слота:
+            // камеру он дёргать не должен.
+            if (fabsf(dx) < 250.f && fabsf(dy) < 250.f) {
                 const float sens = 0.22f;
                 yaw_delta = dx * sens;
                 pitch_delta = -dy * sens;
-                s_last_look = cur;
             }
+            s_fc_look_x = px; s_fc_look_y = py;
         } else {
-            if (!io.MouseDown[0] || !mouse_in_look) s_look_active = false;
+            s_fc_look_id = -1;
         }
-        ImGui::End();
+    }
+    if (s_fc_look_id == -1 && canGrab && nf > 0) {
+        const float keepOut = R + 40.f;    // рядом со стиком обзор не стартует
+        const float btnOut = kBtnR + 20.f;
+        for (int i = 0; i < nf; ++i) {
+            if (f_id[i] == s_fc_joy_id || f_id[i] == s_fc_up_id || f_id[i] == s_fc_down_id) continue;
+            if (!isFreshTouch(f_id[i]) || f_y[i] < 90.f) continue;
+            if (f_x[i] < vw * 0.45f) continue;   // обзор — правая часть экрана
+            const float jx = f_x[i] - cx, jy = f_y[i] - cy;
+            if (jx * jx + jy * jy <= keepOut * keepOut) continue;
+            const float bx = f_x[i] - kBtnX;
+            const float bu = f_y[i] - kUpY, bd = f_y[i] - kDownY;
+            if (bx * bx + bu * bu <= btnOut * btnOut) continue;
+            if (bx * bx + bd * bd <= btnOut * btnOut) continue;
+            s_fc_look_id = f_id[i];
+            s_fc_look_x = f_x[i]; s_fc_look_y = f_y[i];
+            lookHeld = true; lookPx = f_x[i]; lookPy = f_y[i];
+            break;
+        }
     }
 
+    // Запоминаем пальцы кадра — в следующем отличим новые касания.
+    s_fc_prev_n = (nf > 12) ? 12 : nf;
+    for (int i = 0; i < s_fc_prev_n; ++i) s_fc_prev_ids[i] = f_id[i];
+
+    // ---- движение -----------------------------------------------------------
+    if (dt > 0.1f) dt = 0.1f;              // первый кадр не должен телепортить
     float speed = g_state.freecam_speed;
     if (!(speed >= 1.f)) speed = 1.f;
     if (speed > 60.f) speed = 60.f;
     const float step = speed * dt;
-    if (ax != 0.f || ay != 0.f) esp_freecam_move(ay * step, ax * step, 0.f);
-    if (yaw_delta != 0.f || pitch_delta != 0.f) esp_freecam_look(yaw_delta, pitch_delta);
+    if (ax != 0.f || ay != 0.f || hAxis != 0.f)
+        esp_freecam_move(ay * step, ax * step, hAxis * step);
+    if (yaw_delta != 0.f || pitch_delta != 0.f)
+        esp_freecam_look(yaw_delta, pitch_delta);
+
+    // ---- отрисовка: прямо на foreground, без окон ImGui ----------------------
+    // Окна с InvisibleButton здесь не нужны (хит-тесты свои, по пальцам) и
+    // вредны: невидимая кнопка обзора на пол-экрана висела бы поверх меню.
+    auto* fg = ImGui::GetForegroundDrawList();
+    {
+        const float bx0 = cx - R - 12.f, by0 = cy - R - 12.f;
+        const float bx1 = cx + R + 12.f, by1 = cy + R + 12.f;
+        fg->AddRectFilled({bx0, by0}, {bx1, by1}, IM_COL32(20,20,20,200), 14.f);
+        fg->AddRect({bx0, by0}, {bx1, by1},
+                    joyHeld ? IM_COL32(0,200,255,140) : IM_COL32(255,255,255,80),
+                    14.f, 0, 2.f);
+        fg->AddCircle({cx, cy}, R, IM_COL32(255,255,255,200), 48, 3.f);
+        fg->AddLine({cx - R*0.15f, cy}, {cx + R*0.15f, cy}, IM_COL32(255,255,255,60), 1.f);
+        fg->AddLine({cx, cy - R*0.15f}, {cx, cy + R*0.15f}, IM_COL32(255,255,255,60), 1.f);
+        fg->AddCircleFilled({cx + knobDx, cy + knobDy}, R * 0.34f,
+                            joyHeld ? IM_COL32(0,200,255,255) : IM_COL32(0,180,255,200), 32);
+    }
+    auto drawHeightBtn = [&](float bx, float by, bool held, bool isUp) {
+        fg->AddCircleFilled({bx, by}, kBtnR,
+                            held ? IM_COL32(0,180,255,230) : IM_COL32(20,20,20,200), 40);
+        fg->AddCircle({bx, by}, kBtnR,
+                      held ? IM_COL32(255,255,255,220) : IM_COL32(255,255,255,80),
+                      40, 2.5f);
+        const float s = 22.f;
+        ImVec2 p1, p2, p3;
+        if (isUp) { p1 = {bx, by - s}; p2 = {bx - s * 0.9f, by + s * 0.6f}; p3 = {bx + s * 0.9f, by + s * 0.6f}; }
+        else      { p1 = {bx, by + s}; p2 = {bx - s * 0.9f, by - s * 0.6f}; p3 = {bx + s * 0.9f, by - s * 0.6f}; }
+        fg->AddTriangleFilled(p1, p2, p3, IM_COL32(255,255,255,230));
+    };
+    drawHeightBtn(kBtnX, kUpY, upHeld, true);
+    drawHeightBtn(kBtnX, kDownY, downHeld, false);
+    if (lookHeld) {
+        // Метка пальца обзора — видно, какой палец крутит камеру.
+        fg->AddCircle({lookPx, lookPy}, 34.f, IM_COL32(0,200,255,160), 32, 2.5f);
+        fg->AddCircleFilled({lookPx, lookPy}, 6.f, IM_COL32(0,200,255,160), 20);
+    } else if (!menu_open) {
+        // Тихая подсказка, пока обзор свободен.
+        auto* fn = ImGui::GetFont();
+        const float hfs = ImGui::GetFontSize() * 1.1f;
+        const char* hint = XS("Свайп — обзор");
+        auto hsz = fn->CalcTextSizeA(hfs, FLT_MAX, 0, hint);
+        const float hx = (vw * 0.45f + vw) * 0.5f;
+        fg->AddText(fn, hfs, {hx - hsz.x * 0.5f, vh - hsz.y - 24.f},
+                    IM_COL32(255,255,255,90), hint);
+    }
 }
 
 void RenderMenu() {
@@ -1259,7 +1408,8 @@ void RenderMenu() {
 
     // ---- Режим калибровки зон вводом с экрана ------------------------------
     // Меню спрятано; первый тап по экрану записывает позицию (в долях экрана):
-    // зону джойстика/огня автофарма или точку, из которой аимбот водит палец.
+    // зону джойстика/огня автофарма, точку, из которой аимбот водит палец,
+    // или центр джойстика фрикама (g_calibMode == 4).
     if (g_calibMode != 0) {
         float dw = 0.f, dh = 0.f;
         VisibleScreen(dw, dh);
@@ -1309,17 +1459,11 @@ void RenderMenu() {
             }
         }
 
-        // Тап (отпускание пальца) — записываем зону.
+        // Тап (отпускание пальца) — записываем зону в долях видимого экрана.
+        // Фрикам тоже здесь: его геометрия считается от VisibleScreen, как и
+        // всё остальное, поэтому отдельная шкала ему больше не нужна.
         if (io.MouseReleased[0]) {
-            // Для фрикама используем sw/sh (ImGui DisplaySize 2460 квадрат), а не dw/dh (real 1080)
-            // иначе точка уходит ниже из-за деления на 1080 вместо 2460
-            float rx, ry;
-            if (g_calibMode == 4) {
-                float sw2 = io.DisplaySize.x, sh2 = io.DisplaySize.y;
-                rx = io.MousePos.x / sw2; ry = io.MousePos.y / sh2;
-            } else {
-                rx = io.MousePos.x / dw; ry = io.MousePos.y / dh;
-            }
+            float rx = io.MousePos.x / dw, ry = io.MousePos.y / dh;
             if (rx > 0.f && rx < 1.f && ry > 0.f && ry < 1.f) {
                 const bool farm = (g_calibMode == 1 || g_calibMode == 2);
                 if (g_calibMode == 1) {
@@ -1869,7 +2013,7 @@ void RenderMenu() {
 
 
 // Калибровка зон вводом с экрана: 0 — нет, 1 — ждём тап по джойстику
-// автофарма, 2 — по кнопке огня, 3 — по точке, из которой аимбот водит палец.
-// Пока калибровка активна, меню скрыто и первый тап по экрану пишет позицию
-// (в долях экрана) в g_state.
+// автофарма, 2 — по кнопке огня, 3 — по точке, из которой аимбот водит палец,
+// 4 — по центру джойстика фрикама. Пока калибровка активна, меню скрыто и
+// первый тап по экрану пишет позицию (в долях экрана) в g_state.
 int  g_calibMode = 0;
