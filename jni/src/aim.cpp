@@ -233,10 +233,40 @@ static constexpr float kAimVelocityLead = 0.0f;
 static unsigned long s_dead_skipped = 0;   // мёртвых не взяли в цель (для лога)
 static unsigned long s_no_skeleton = 0;         // у цели нет скелета вовсе
 static unsigned long s_bones_not_projected = 0; // скелет есть, кости не легли на экран
+static unsigned long s_ally_skipped = 0;        // союзников не берём никогда
+static unsigned long s_offscreen_skipped = 0;   // есть кости, но точка вне экрана
+static unsigned long s_out_of_fov = 0;          // точка дальше круга обзора
+// Сколько всего игроков приходило на выбор цели за период (для лога): без
+// этой цифры «пропущено N» невозможно прочитать — непонятно, много это или
+// все, кого видно.
+static unsigned long s_seen_boxes = 0;
 
 static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, float& degPerPx) {
     LogStage(kStageAimSelect);
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
+
+    // Сводку пропусков печатаем БЕЗ условий и ДО выбора. В сборке 829a1dc
+    // строка «мёртвых N» жила внутри ветки «кости не нашлись», и когда
+    // мёртвыми оказались вообще все игроки, в логе не появилось НИ ОДНОЙ
+    // строки: причину жалобы «аим вообще не нацеливается на игроков»
+    // (19.09) стало нечем подтвердить. Счётчик, который молчит именно
+    // тогда, когда сломалось, — не диагностика.
+    {
+        static double s_at = -1e9;
+        const double now = (double)clock() / CLOCKS_PER_SEC;
+        const unsigned long total = s_no_skeleton + s_bones_not_projected + s_dead_skipped +
+                                    s_ally_skipped + s_offscreen_skipped + s_out_of_fov;
+        if (now - s_at >= 5.0 && (total || s_seen_boxes)) {
+            s_at = now;
+            LogLine("аим: выбор — игроков %lu, пропущено: союзники %lu, мёртвые %lu, без костей %lu (нет скелета %lu, не спроецировались %lu), вне экрана %lu, вне круга %lu",
+                    s_seen_boxes, s_ally_skipped, s_dead_skipped,
+                    s_no_skeleton + s_bones_not_projected, s_no_skeleton, s_bones_not_projected,
+                    s_offscreen_skipped, s_out_of_fov);
+            s_seen_boxes = 0; s_ally_skipped = 0; s_dead_skipped = 0;
+            s_no_skeleton = 0; s_bones_not_projected = 0;
+            s_offscreen_skipped = 0; s_out_of_fov = 0;
+        }
+    }
 
     const float crossX = sw * 0.5f, crossY = sh * 0.5f;
     const float fovR = AimFovRadiusPx(sw, sh);
@@ -261,7 +291,8 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         // что со скрытыми союзниками (показ выключен) аим работал по ним
         // как по врагам (вопрос 19.09). Признак своего — из групп/кланов
         // (game.cpp, groups_are_allied), он считается независимо от визуалов.
-        if (b.ally) continue;
+        ++s_seen_boxes;
+        if (b.ally) { ++s_ally_skipped; continue; }
         // Мёртвых не берём: труп ещё несколько секунд остаётся в списке
         // игроков с корректным скелетом, и прицел уезжал на него (19.09).
         if (b.dead) { ++s_dead_skipped; continue; }
@@ -297,19 +328,6 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             // Считаем и РАЗДЕЛЯЕМ причины: «скелета нет вообще» и «скелет есть,
             // но кости не спроецировались» — лечится это по-разному.
             if (b.has_skeleton) ++s_bones_not_projected; else ++s_no_skeleton;
-            {
-                static unsigned long s_no_bones = 0;
-                static double s_no_bones_at = -1e9;
-                ++s_no_bones;
-                const double now = (double)clock() / CLOCKS_PER_SEC;
-                if (now - s_no_bones_at >= 5.0) {
-                    s_no_bones_at = now;
-                    LogLine("аим: пропущено целей — без костей %lu (нет скелета %lu, не спроецировались %lu), мёртвых %lu",
-                            s_no_bones, s_no_skeleton, s_bones_not_projected, s_dead_skipped);
-                    s_no_bones = 0; s_dead_skipped = 0;
-                    s_no_skeleton = 0; s_bones_not_projected = 0;
-                }
-            }
             continue;
         }
         if (false) {
@@ -330,14 +348,14 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         t.id = b.id;
         t.health = b.health; t.respawning = b.respawning;
         const bool sticky = (pick.lastId != 0 && b.id == pick.lastId);
-        if (t.sx < -sw || t.sx > sw * 2.f || t.sy < -sh || t.sy > sh * 2.f) continue;
-        if (g_state.aim_pos && !sticky && (t.sx < 0.f || t.sy < 0.f || t.sx > sw || t.sy > sh)) continue;
+        if (t.sx < -sw || t.sx > sw * 2.f || t.sy < -sh || t.sy > sh * 2.f) { ++s_offscreen_skipped; continue; }
+        if (g_state.aim_pos && !sticky && (t.sx < 0.f || t.sy < 0.f || t.sx > sw || t.sy > sh)) { ++s_offscreen_skipped; continue; }
         float dx = t.sx - crossX, dy = t.sy - crossY;
         t.dist = sqrtf(dx * dx + dy * dy);
         t.world_dist = b.distance;
         // The target we are already pulling to may briefly leave the FOV
         // circle (overshoot while the gain is still being learned) — keep it.
-        if (t.dist > (sticky ? fovR * 2.f : fovR)) continue;
+        if (t.dist > (sticky ? fovR * 2.f : fovR)) { ++s_out_of_fov; continue; }
 
         // Target priority (see "Приоритет цели"):
         //   0 balanced  — crosshair distance and range, both normalised

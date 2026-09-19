@@ -1099,7 +1099,7 @@ static int      g_freecam_fail = 0;
 static float    g_freecam_fail_dist = -1.f;
 
 static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_t index,
-                                     Vec3& pos, Vec4& rot, Vec3& scale);
+                                     Vec3& pos, Vec4& rot, Vec3& scale, bool fresh = false);
 // Позиция камеры из матрицы вида (объявлена ниже, рядом с её разбором).
 static bool camera_position_from_view(const Mat4& view, Vec3& position);
 
@@ -1331,31 +1331,48 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
 
 // Мировая TRS трансформа: идём вверх по родителям, как это делает Unity.
 static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_t index,
-                                     Vec3& pos, Vec4& rot, Vec3& scale) {
+                                     Vec3& pos, Vec4& rot, Vec3& scale, bool fresh) {
     if (!matrices || !indices || index < 0 || index > 100000) return false;
+    // fresh — чтение в обход кэша блоков (см. rd_fresh в game_internal.h).
+    auto load = [fresh](uint64_t addr, Matrix34& out) -> bool {
+        const bool got = fresh ? rd_fresh(addr, out) : rd_exact(addr, out);
+        return got && matrix34_is_valid(out);
+    };
+    auto link = [fresh](uint64_t addr, int32_t& out) -> bool {
+        return fresh ? rd_fresh(addr, out) : rd_exact(addr, out);
+    };
     Matrix34 m{};
-    if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), m)) return false;
-    if (!matrix34_is_valid(m)) return false;
+    if (!load(matrices + (uint64_t)index * sizeof(Matrix34), m)) return false;
     pos = {m.translation.x, m.translation.y, m.translation.z};
     rot = m.rotation;
     scale = {m.scale.x, m.scale.y, m.scale.z};
+    // Кватернион нормализуем обязательно. matrix34_is_valid пускает длину от
+    // 0.45 до 1.41 (кость, которую игра пишет прямо сейчас, успевает
+    // прочитаться наполовину), а rotate_vector() разворачивает вектор
+    // ЕДИНИЧНЫМ кватернионом. С ненормированным прямой и обратный разворот
+    // перестают быть взаимными: прямая даёт лишний множитель |q|², обратная
+    // его не знает. Для фрикама это означает, что каждый шаг поправки
+    // отличается от нужного в |q|² раз — контур не сходится.
+    if (!normalize_quaternion(rot)) return false;
     int32_t parent = -2, previous = index;
-    if (!rd_exact(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
+    if (!link(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
     int depth = 0;
     while (parent >= 0 && depth++ < 128) {
         if (parent > 100000 || parent == previous) return false;
         Matrix34 p{};
-        if (!rd_exact(matrices + (uint64_t)parent * sizeof(Matrix34), p)) return false;
-        if (!matrix34_is_valid(p)) return false;
+        if (!load(matrices + (uint64_t)parent * sizeof(Matrix34), p)) return false;
+        Vec4 pr = p.rotation;
+        if (!normalize_quaternion(pr)) return false;
         // world = parentWorld * local (Unity: сначала масштаб, потом поворот,
         // потом перенос)
         Vec3 scaled = {pos.x * p.scale.x, pos.y * p.scale.y, pos.z * p.scale.z};
-        Vec3 turned = rotate_vector(p.rotation, scaled);
+        Vec3 turned = rotate_vector(pr, scaled);
         pos = {p.translation.x + turned.x, p.translation.y + turned.y, p.translation.z + turned.z};
-        rot = multiply_quaternion(p.rotation, rot);
+        rot = multiply_quaternion(pr, rot);
+        if (!normalize_quaternion(rot)) return false;
         scale = {p.scale.x * scale.x, p.scale.y * scale.y, p.scale.z * scale.z};
         previous = parent;
-        if (!rd_exact(indices + (uint64_t)parent * sizeof(int32_t), parent)) return false;
+        if (!link(indices + (uint64_t)parent * sizeof(int32_t), parent)) return false;
     }
     if (parent != -1 || depth >= 128) return false;
     return vec3_is_finite(pos) && std::isfinite(scale.x) && scale.x > 1e-6F;
@@ -1544,12 +1561,31 @@ static std::atomic<float>    g_fc_gap{-1.f};
 // пишет поток (см. ниже). Замеряем, где камера оказалась на самом деле, и
 // доводим её поправкой — ошибка в матрице родителя тогда влияет только на
 // величину шага, а не на саму точку.
+// Чем именно контур получил свою поправку. Заполняется здесь, печатается раз в
+// секунду в freecam_tick. Без этих чисел «фрикам летит в одну сторону сам»
+// остаётся загадкой: по ним видно, какое звено врёт — локальная позиция,
+// мировая, матрица родителя или сам шаг.
+static Vec3    g_fc_diag_local{};
+static Vec3    g_fc_diag_cur{};
+static Vec3    g_fc_diag_step{};
+static Vec3    g_fc_diag_parent_pos{};
+static Vec4    g_fc_diag_parent_rot{};
+static Vec3    g_fc_diag_parent_scale{};
+static int32_t g_fc_diag_parent = -2;
+static bool    g_fc_diag_ok = false;
+
 static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_t index,
                                      const Vec3& target, Vec3& local_out, float& gap) {
     if (!matrices || !indices || index < 0) return false;
+    // Все чтения здесь — в обход кэша блоков (последний аргумент true).
+    // Кэш живёт до конца кадра, а freecam_write() за кадр вызывается несколько
+    // раз: из такта кадра и из каждого события джойстика. Читая из кэша, второй
+    // и следующие вызовы видели позицию ДО своей же предыдущей поправки и
+    // добавляли её ещё раз — контур превращался в интегратор с запаздыванием и
+    // разгонялся. Это и есть «фрикам летит в одну сторону сам» (жалоба 19.09).
     Vec3 cur{}, scale{};
     Vec4 rot{};
-    if (!read_transform_world_trs(matrices, indices, index, cur, rot, scale)) return false;
+    if (!read_transform_world_trs(matrices, indices, index, cur, rot, scale, true)) return false;
     if (!vec3_is_finite(cur)) return false;
     Vec3 d = {target.x - cur.x, target.y - cur.y, target.z - cur.z};
     if (!vec3_is_finite(d)) return false;
@@ -1563,25 +1599,45 @@ static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_
     if (dl > 2.0F) { const float kk = 2.0F / dl; d = {d.x * kk, d.y * kk, d.z * kk}; }
 
     int32_t parent = -2;
-    if (!rd_exact(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
+    if (!rd_fresh(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
     Matrix34 self{};
-    if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), self)) return false;
+    if (!rd_fresh(matrices + (uint64_t)index * sizeof(Matrix34), self)) return false;
+    if (!matrix34_is_valid(self)) return false;
     Vec3 local = {self.translation.x, self.translation.y, self.translation.z};
+    Vec3 step{};
     if (parent >= 0) {
         Vec3 pPos{}, pScale{};
         Vec4 pRot{};
-        if (!read_transform_world_trs(matrices, indices, parent, pPos, pRot, pScale)) return false;
+        if (!read_transform_world_trs(matrices, indices, parent, pPos, pRot, pScale, true)) return false;
+        g_fc_diag_parent_pos = pPos; g_fc_diag_parent_rot = pRot; g_fc_diag_parent_scale = pScale;
         Vec4 inv = pRot;
         const float len = sqrtf(inv.x * inv.x + inv.y * inv.y + inv.z * inv.z + inv.w * inv.w);
         if (!(len > 1e-6F)) return false;
         inv = {-inv.x / len, -inv.y / len, -inv.z / len, inv.w / len};
         const Vec3 turned = rotate_vector(inv, d);
         if (!(fabsf(pScale.x) > 1e-6F && fabsf(pScale.y) > 1e-6F && fabsf(pScale.z) > 1e-6F)) return false;
-        local = {local.x + turned.x / pScale.x, local.y + turned.y / pScale.y, local.z + turned.z / pScale.z};
+        step = {turned.x / pScale.x, turned.y / pScale.y, turned.z / pScale.z};
     } else {
-        local = {local.x + d.x, local.y + d.y, local.z + d.z};
+        step = d;
+        g_fc_diag_parent_pos = {}; g_fc_diag_parent_rot = {}; g_fc_diag_parent_scale = {};
     }
+    g_fc_diag_parent = parent;
+    g_fc_diag_local = local;
+    g_fc_diag_cur = cur;
+    g_fc_diag_step = step;
+    g_fc_diag_ok = true;
+    local = {local.x + step.x, local.y + step.y, local.z + step.z};
     if (!vec3_is_finite(local)) return false;
+    // Предохранитель. Контур замкнутый: если звено где-то врёт, ошибка
+    // накапливается, и камера уезжает всё дальше — именно это выглядело как
+    // «фрикам летит в одну сторону сам». Полкилометра локального смещения
+    // хватает для любого разумного полёта, а за ним мы просто не пишем: пусть
+    // камера останется при теле, чем улетит неизвестно куда.
+    if (fabsf(local.x) > 500.f || fabsf(local.y) > 500.f || fabsf(local.z) > 500.f) {
+        LogLine("фрикам: поправка отброшена — локальная позиция (%.1f, %.1f, %.1f) дальше 500 м",
+                (double)local.x, (double)local.y, (double)local.z);
+        return false;
+    }
     local_out = local;
     return true;
 }
@@ -1770,6 +1826,31 @@ static void freecam_tick() {
                     (double)g_cam_pos.x, (double)g_cam_pos.y, (double)g_cam_pos.z,
                     wc, ow, (double)(ow ? owm / (float)ow : 0.f), (double)gap, ac,
                     wf ? " (отказы записи)" : "");
+            // Чем контур посчитал поправку. По этой строке проверяется вся
+            // арифметика: мировая позиция камеры обязана быть равна
+            // «позиция родителя + поворот родителя × (масштаб × локальную)»,
+            // а шаг — ровно той величине, которая эту мировую позицию доводит
+            // до цели. Разошлось — значит врёт конкретное звено, и видно какое.
+            if (g_fc_diag_ok) {
+                const Vec3& L = g_fc_diag_local;
+                const Vec3& C = g_fc_diag_cur;
+                const Vec3& S = g_fc_diag_step;
+                const Vec3& P = g_fc_diag_parent_pos;
+                const Vec4& Q = g_fc_diag_parent_rot;
+                const Vec3& Z = g_fc_diag_parent_scale;
+                LogLine("фрикам: разбор — индекс %d, родитель %d, лок (%.2f, %.2f, %.2f), посчитано (%.1f, %.1f, %.1f), шаг (%.2f, %.2f, %.2f)",
+                        (int)g_freecam_index, (int)g_fc_diag_parent,
+                        (double)L.x, (double)L.y, (double)L.z,
+                        (double)C.x, (double)C.y, (double)C.z,
+                        (double)S.x, (double)S.y, (double)S.z);
+                LogLine("фрикам: родитель — поза (%.1f, %.1f, %.1f), поворот (%.3f, %.3f, %.3f, %.3f), масштаб (%.3f, %.3f, %.3f), разница с камерой %.2f м",
+                        (double)P.x, (double)P.y, (double)P.z,
+                        (double)Q.x, (double)Q.y, (double)Q.z, (double)Q.w,
+                        (double)Z.x, (double)Z.y, (double)Z.z,
+                        (double)sqrtf((C.x - g_cam_pos.x) * (C.x - g_cam_pos.x) +
+                                      (C.y - g_cam_pos.y) * (C.y - g_cam_pos.y) +
+                                      (C.z - g_cam_pos.z) * (C.z - g_cam_pos.z)));
+            }
         }
     }
     // Читать надо ДО записи: после неё в массиве лежит наше значение, и
@@ -6354,16 +6435,71 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.crouched = crouched;
         // Мёртвый игрок. Два независимых признака: health <= 0 и respawning.
         // Оба кладём в бокс, чтобы по логу было видно, который из них живой.
-        box.respawning = rd<uint8_t>(s_transforms[i] + game_offsets::PLAYER_MANAGER_RESPAWNING) != 0;
+        // Почему здоровье нельзя читать «как получится». rd<float>() при
+        // неудачном чтении возвращает НОЛЬ (game_internal.h: «T v{}» — значение
+        // просто остаётся нулевым), а ноль проходил проверку «здоровье в
+        // диапазоне». То есть любой сбойный syscall помечал игрока мёртвым, и
+        // сборка 829a1dc перестала брать цели ВООБЩЕ: мёртвыми оказывались все
+        // подряд, а строка «мёртвых N» печаталась только из ветки «кости не
+        // нашлись» — в логе не было ни одной строки, и причину жалобы 19.09
+        // «аим вообще не нацеливается на игроков» стало нечем подтвердить.
+        // Теперь: результат чтения проверяется (rd_exact), неудача — не
+        // приговор, а признаку «здоровье = 0» мы верим, только если хотя бы
+        // раз видели живое здоровье. Если смещение не то и всем читается ноль,
+        // фильтр молча выключается: аим продолжает работать, а срез памяти
+        // vitals в логе показывает, где здоровье лежит на самом деле.
+        static float g_hp_max_seen = -1.f;   // максимум здоровья за всё время
+        box.respawning = false;
+        {
+            uint8_t flag = 0;
+            if (rd_exact(s_transforms[i] + game_offsets::PLAYER_MANAGER_RESPAWNING, flag))
+                box.respawning = flag != 0;
+        }
         box.health = -1.f;
         {
             const uint64_t vitals = rd_ptr(s_transforms[i] + game_offsets::PLAYER_VITALS);
             if (vitals >= 0x10000) {
-                const float hp = rd<float>(vitals + game_offsets::VITALS_HEALTH);
-                if (std::isfinite(hp) && hp >= -1.f && hp <= 100000.f) box.health = hp;
+                float hp = 0.f;
+                if (rd_exact(vitals + game_offsets::VITALS_HEALTH, hp) &&
+                    std::isfinite(hp) && hp >= -1.f && hp <= 100000.f) {
+                    box.health = hp;
+                    if (hp > g_hp_max_seen) g_hp_max_seen = hp;
+                }
+                // Срез vitals (0x80..0xBC, 16 чисел): по нему из лога видно, в
+                // каком слоте лежит здоровье, а не «кажется, что работает».
+                // 0x88 — m_MaxHealth (имя есть в дампе), 0xB8 — KQN, который мы
+                // считаем текущим здоровьем. Двум игрокам раз в 6 секунд.
+                static double s_vitals_at = 0.0;
+                static int    s_vitals_left = 0;
+                const double tnow = memio::now_seconds();
+                if (tnow >= s_vitals_at) { s_vitals_at = tnow + 6.0; s_vitals_left = 2; }
+                if (s_vitals_left > 0) {
+                    --s_vitals_left;
+                    float raw[16] = {};
+                    if (rd_buf(vitals + 0x80, raw, sizeof(raw)))
+                        LogLine("аим: vitals 0x%llx срез 0x80..0xBC: %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f",
+                                (unsigned long long)vitals,
+                                (double)raw[0], (double)raw[1], (double)raw[2], (double)raw[3],
+                                (double)raw[4], (double)raw[5], (double)raw[6], (double)raw[7],
+                                (double)raw[8], (double)raw[9], (double)raw[10], (double)raw[11],
+                                (double)raw[12], (double)raw[13], (double)raw[14], (double)raw[15]);
+                }
             }
         }
-        box.dead = box.respawning || (box.health >= 0.f && box.health <= 0.01f);
+        box.dead = box.respawning ||
+                   (g_hp_max_seen > 1.f && box.health >= 0.f && box.health <= 0.01f);
+        // Здоровье читается, но ни у кого ни разу не было больше единицы —
+        // значит смещение не то (или поле не здоровье), и фильтр выключен.
+        // Молчать про это нельзя: иначе непонятно, почему аим снова берёт трупы.
+        if (box.health >= 0.f && box.health <= 0.01f && g_hp_max_seen <= 1.f) {
+            static double s_warned = 0.0;
+            const double t2 = memio::now_seconds();
+            if (t2 >= s_warned) {
+                s_warned = t2 + 10.0;
+                LogLine("аим: признак смерти по здоровью отключён — у всех игроков здоровье %.1f, максимум за сессию %.1f",
+                        (double)box.health, (double)g_hp_max_seen);
+            }
+        }
         box.aim_source = 0;
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;

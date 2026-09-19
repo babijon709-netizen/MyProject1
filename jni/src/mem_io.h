@@ -443,11 +443,20 @@ private:
     }
 
     // ---- «мы сюда писали»: такие блоки не кэшируем совсем ------------------
+    // Кольцо всего на восемь слотов: в комментарии к kWriteTags так и сказано,
+    // «на деле их 2-3». Писатель фрикама пишет один и тот же блок две тысячи
+    // раз в секунду и за минуту вытесняет из кольца ВСЁ остальное — после чего
+    // written_recently() перестаёт находить блоки, в которые мы пишем редко
+    // (near clip камеры, час в TOD_CycleParameters), и кэш начинает отдавать
+    // по ним устаревшие данные. Поэтому повторно метку не ставим: если блок
+    // уже помечен, кольцо не двигаем.
     void mark_written(uint64_t addr, size_t len) {
         const uint64_t first = addr & ~(uint64_t)(kBlockSize - 1);
         const uint64_t last  = (addr + len - 1) & ~(uint64_t)(kBlockSize - 1);
-        for (uint64_t t = first; t <= last; t += kBlockSize)
+        for (uint64_t t = first; t <= last; t += kBlockSize) {
+            if (written_recently(t)) continue;
             write_tags_[write_next_.fetch_add(1) % kWriteTags].store(t + 1);
+        }
     }
 
     bool written_recently(uint64_t base) const {
