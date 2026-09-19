@@ -982,6 +982,16 @@ void UpdateFreecam(float dt) {
     const float sw = io.DisplaySize.x, sh = io.DisplaySize.y;
     if (sw < 100.f || sh < 100.f) return;
 
+    // Диагностика фрикама: в логе видно, активен ли и рисуется ли
+    {
+        static double s_last = -1e9;
+        double now = ImGui::GetTime();
+        if (now - s_last >= 2.0) {
+            s_last = now;
+            LogLine("фрикам: UI — активен=%d вкл=%d sw=%.0f sh=%.0f", (int)esp_freecam_active(), (int)g_state.freecam_on, (double)sw, (double)sh);
+        }
+    }
+
     // Блокируем касания в зоне джойстика, пока выключатель фрикама ВКЛЮЧЁН, а
     // не только когда фрикам действительно поднялся: иначе при неудачном
     // включении (камера не нашлась) палец на джойстике уходил в игру и ходил
