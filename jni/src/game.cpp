@@ -1675,6 +1675,10 @@ static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_
 
 static uint64_t g_fc_last_m = 0, g_fc_last_n = 0;
 static int32_t  g_fc_last_i = -1;
+// Сколько тактов подряд проверенный слот камеры не читается. Перерешаем
+// массивы только после серии отказов: одиночный сбой — это игра, которая
+// прямо сейчас обновляет объект, а не переезд массивов.
+static int      g_fc_slot_miss = 0;
 
 static void freecam_writer_start() {
     if (g_fc_writer_running.exchange(true)) return;
@@ -1780,6 +1784,9 @@ bool esp_freecam_set(bool on) {
     g_freecam_matrices = matrices;
     g_freecam_indices = indices;
     g_freecam_index = index;
+    // Запоминаем и в счётчике подмен: отсюда массивы считаются эталонными,
+    // и freecam_write() больше не имеет права их подменять.
+    g_fc_last_m = matrices; g_fc_last_n = indices; g_fc_last_i = index;
     g_freecam_pos = pos;
     g_freecam_on = true;
     g_freecam_fail = 0; g_freecam_fail_dist = dist;   // 0 = порядок
@@ -1800,17 +1807,48 @@ bool esp_freecam_set(bool on) {
 static bool freecam_write() {
     if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
     if (!vec3_is_finite(g_freecam_pos)) return false;
-    // Массивы каждый кадр берём свежими (игра пересобирает блок данных).
-    uint64_t m = 0, n = 0;
-    int32_t  idx = -1;
-    if (camera_arrays_now(m, n, idx)) {
-        if (m != g_fc_last_m || n != g_fc_last_n || idx != g_fc_last_i) {
-            g_fc_array_changes.fetch_add(1);
-            g_fc_last_m = m; g_fc_last_n = n; g_fc_last_i = idx;
-            g_freecam_matrices = m; g_freecam_indices = n; g_freecam_index = idx;
+    // Массивы НЕ перерешаем: берём те, что нашёл esp_freecam_set().
+    //
+    // Раньше здесь каждый такт вызывался camera_arrays_now() — перебор по
+    // раскладке TransformAccess БЕЗ проверки. Он всегда возвращал один и тот
+    // же ответ («подмен массивов 0» в логе), и из-за этого выглядело будто
+    // массивы в порядке. На деле он находил НЕ тот слот: лог 16:33 показывает
+    // «разбор — индекс 0, родитель -1, посчитано (0.0, 0.0, 0.0)», хотя
+    // камера в это время у цели. Проверенный слот (resolve_camera_arrays —
+    // сверяет позицию с матрицей вида, то есть с тем, чем игра реально
+    // рисует) подменялся непроверенным уже на первом такте после включения.
+    // Отсюда и «камера мерцает и телепортируется под землю»: половину
+    // времени мы писали в пустую ячейку с нулевой матрицей.
+    //
+    // Перерешаем только если проверенный слот перестал читаться подряд
+    // несколько тактов — тогда действительно что-то переехало.
+    uint64_t m = g_freecam_matrices, n = g_freecam_indices;
+    int32_t  idx = g_freecam_index;
+    {
+        Matrix34 probe{};
+        if (!rd_exact(m + (uint64_t)idx * sizeof(Matrix34), probe) || !matrix34_is_valid(probe)) {
+            if (++g_fc_slot_miss < 8) return false;
+            g_fc_slot_miss = 0;
+            Vec3 view_pos{};
+            float err = -1.f;
+            uint64_t nm = 0, nn = 0;
+            int32_t nidx = -1;
+            if (resolve_camera_arrays(nm, nn, nidx, view_pos, err) && nm && nn && nidx >= 0) {
+                if (nm != g_fc_last_m || nn != g_fc_last_n || nidx != g_fc_last_i) {
+                    g_fc_array_changes.fetch_add(1);
+                    g_fc_last_m = nm; g_fc_last_n = nn; g_fc_last_i = nidx;
+                    LogLine("фрикам: массивы перерешены — была позиция (%.1f, %.1f, %.1f), в матрице вида (%.1f, %.1f, %.1f), расхождение %.1f м",
+                            (double)g_freecam_pos.x, (double)g_freecam_pos.y, (double)g_freecam_pos.z,
+                            (double)view_pos.x, (double)view_pos.y, (double)view_pos.z, (double)err);
+                }
+                g_freecam_matrices = nm; g_freecam_indices = nn; g_freecam_index = nidx;
+                m = nm; n = nn; idx = nidx;
+            } else {
+                return false;
+            }
+        } else {
+            g_fc_slot_miss = 0;
         }
-    } else {
-        m = g_freecam_matrices; n = g_freecam_indices; idx = g_freecam_index;
     }
     if (!m || !n || idx < 0) return false;
     // Поправку считаем здесь (60 Гц), а пишет её поток каждые полмиллисекунды:
@@ -5429,6 +5467,34 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     }
     skeleton.fail_streak = 0;
     box.has_skeleton = true;
+    // Габариты скелета в метрах. Нужны для признака смерти: труп ЛЕЖИТ, его
+    // кости вытянуты по горизонтали и почти не имеют высоты. Читать здоровье
+    // цели бессмысленно (жалоба 19.09): у убитого игрока оно на клиенте
+    // остаётся прежним, а нули, которые мы ловили в vitals, принадлежат спящим —
+    // на них аим и отвлекался, пропуская настоящие трупы.
+    {
+        float minY = 1e9f, maxY = -1e9f, minX = 1e9f, maxX = -1e9f, minZ = 1e9f, maxZ = -1e9f;
+        int n = 0;
+        for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
+            if (!box.bone_valid[bone]) continue;
+            if (skeleton.bone_world_age[bone] < 1 || skeleton.bone_world_age[bone] > 9) continue;
+            const Vec3 w = skeleton.bone_world[bone];
+            if (!vec3_is_finite(w)) continue;
+            if (w.y < minY) minY = w.y;
+            if (w.y > maxY) maxY = w.y;
+            if (w.x < minX) minX = w.x;
+            if (w.x > maxX) maxX = w.x;
+            if (w.z < minZ) minZ = w.z;
+            if (w.z > maxZ) maxZ = w.z;
+            ++n;
+        }
+        box.skel_bones = n;
+        if (n >= 6) {
+            box.skel_up   = maxY - minY;
+            const float flatX = maxX - minX, flatZ = maxZ - minZ;
+            box.skel_flat = flatX > flatZ ? flatX : flatZ;
+        }
+    }
     return true;
 }
 
@@ -6566,43 +6632,46 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                         else if (plausible(hp18)) { box.health = hp18; box.health_slot = 0x18; }
                         else                      { box.health = -1.f; box.health_slot = 0; }
                         if (box.health > g_hp_max_seen) g_hp_max_seen = box.health;
-                        // Срез объекта Health: по нему видно, что лежит в
-                        // +0x18 и +0x20 и есть ли рядом максимум.
-                        static double s_hv_at = 0.0;
-                        static int    s_hv_left = 0;
-                        const double tnow = memio::now_seconds();
-                        if (tnow >= s_hv_at) { s_hv_at = tnow + 6.0; s_hv_left = 2; }
-                        if (s_hv_left > 0) {
-                            --s_hv_left;
-                            float raw[16] = {};
-                            if (rd_buf(hv, raw, sizeof(raw)))
-                                LogLine("аим: здоровье 0x%llx макс=%.1f слот 0x%x: +0x18=%.1f +0x20=%.1f | срез +0x00..0x3C: %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f",
-                                        (unsigned long long)hv,
-                                        (double)rd<float>(vitals + game_offsets::VITALS_MAX_HEALTH),
-                                        (unsigned)box.health_slot, (double)hp18, (double)hp20,
-                                        (double)raw[0], (double)raw[1], (double)raw[2], (double)raw[3],
-                                        (double)raw[4], (double)raw[5], (double)raw[6], (double)raw[7],
-                                        (double)raw[8], (double)raw[9], (double)raw[10], (double)raw[11],
-                                        (double)raw[12], (double)raw[13], (double)raw[14], (double)raw[15]);
-                        }
+                        // Срез объекта Health больше не печатаем: слот
+                        // подтверждён логом 16:32 (+0x20 = 100.0 у живых,
+                        // 0.0 у части игроков, +0x24 = прошлое значение).
+                        // Здоровье остаётся только для лога «поза»: решением
+                        // о смерти оно больше не управляет ни при каких
+                        // обстоятельствах (жалоба «смысла читать HP нет»).
                     }
                 }
             }
         }
-        box.dead = box.respawning ||
-                   (g_hp_max_seen > 1.f && box.health >= 0.f && box.health <= 0.01f);
-        // Здоровье читается, но ни у кого ни разу не было больше единицы —
-        // значит смещение не то (или поле не здоровье), и фильтр выключен.
-        // Молчать про это нельзя: иначе непонятно, почему аим снова берёт трупы.
-        if (box.health >= 0.f && box.health <= 0.01f && g_hp_max_seen <= 1.f) {
-            static double s_warned = 0.0;
-            const double t2 = memio::now_seconds();
-            if (t2 >= s_warned) {
-                s_warned = t2 + 10.0;
-                LogLine("аим: признак смерти по здоровью отключён — у всех игроков здоровье %.1f, максимум за сессию %.1f",
-                        (double)box.health, (double)g_hp_max_seen);
+        // Мёртвый — по позе, а не по здоровью.
+        //
+        // Здоровье цели читать бессмысленно (жалоба 19.09, и лог это
+        // подтвердил): цепочка vitals->Entity->Health->+0x20 читается верно
+        // (у живых 100.0, у некоторых 0.0), но нули там принадлежат СПЯЩИМ
+        // игрокам, а у только что убитого здоровье на клиенте остаётся
+        // прежним. Поэтому смотрим на кости: труп лежит. У стоящего игрока
+        // размах скелета по вертикали 1.5-1.8 м при горизонтали 0.4 м; у
+        // лежащего — высота падает до 0.3-0.5 м, а горизонталь вырастает до
+        // полутора. Костей должно быть не меньше половины: по обрубку из
+        // четырёх-пяти костей позу не определишь.
+        box.dead = box.respawning;
+        if (box.skel_bones >= 11 && box.skel_up >= 0.f && box.skel_flat >= 0.f) {
+            const bool lying = box.skel_up < 0.85f || box.skel_flat > box.skel_up * 1.5f;
+            if (lying) box.dead = true;
+        }
+        // Что именно решило судьбу игрока — в лог: без этого порог непроверяем.
+        {
+            static double s_pose_at = 0.0;
+            static int    s_pose_left = 0;
+            const double t3 = memio::now_seconds();
+            if (t3 >= s_pose_at) { s_pose_at = t3 + 8.0; s_pose_left = 3; }
+            if (s_pose_left > 0) {
+                --s_pose_left;
+                LogLine("аим: поза 0x%llx костей=%d высота=%.2f м ширина=%.2f м respawning=%d мёртв=%d здоровье=%.1f",
+                        (unsigned long long)box.id, (int)box.skel_bones, (double)box.skel_up,
+                        (double)box.skel_flat, (int)box.respawning, (int)box.dead, (double)box.health);
             }
         }
+
         box.aim_source = 0;
         box.x1 = cx - half_w; box.y1 = cy - half_h;
         box.x2 = cx + half_w; box.y2 = cy + half_h;

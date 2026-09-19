@@ -23,6 +23,10 @@ struct EspBox {
     bool  dead = false;
     float health = -1.f;          // текущее здоровье, -1 = не прочитано
     unsigned health_slot = 0;     // из какого смещения прочитано (0x18 / 0x20)
+    // Габариты скелета в метрах — по ним и определяется мёртвый (труп лежит).
+    float skel_up = -1.f;         // размах костей по вертикали
+    float skel_flat = -1.f;       // наибольший размах по горизонтали
+    int   skel_bones = 0;         // сколько костей дали мировую позицию
     bool  respawning = false;     // PlayerManager.respawning (0x208)
     float corners[8][2];
     bool  corner_visible[8];

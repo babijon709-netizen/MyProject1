@@ -508,6 +508,9 @@ static void UpdateAimTouch(float dt) {
     // шаге — ведение становилось в несколько раз медленнее.
     static bool  s_camMovedPrev = false;
     static int   s_lostFrames = 0;
+    // Доля шага при захвате цели: 0.3 сразу после захвата, 1.0 через 0.35 с
+    // (см. «мягкий старт» ниже — им гасится маятник первых двух секунд).
+    static float s_acquire = 1.f;
     static int   s_holdFrames = 0;
     static AimPick pick;
 
@@ -786,6 +789,7 @@ static void UpdateAimTouch(float dt) {
         s_fingerDown = true;
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         s_holdFrames = 0;
+        s_acquire = 0.f;
         // Палец опустился заново: окно замера начинается с нуля, иначе первая
         // же пара «сдвиг пальца -> отклик» посчитает бросок пальца к точке.
         s_trackYaw.reset(); s_trackPitch.reset();
@@ -848,6 +852,25 @@ static void UpdateAimTouch(float dt) {
     }
     s_prevCtlYaw = errYaw; s_prevCtlPitch = errPitch; s_haveCtlErr = true;
     k *= s_flipDamp;
+
+    // Мягкий старт при захвате.
+    //
+    // Жалоба 19.09: «тач-аим ходит маятником первые две секунды». Механика
+    // такая: в момент захвата ошибка велика, и контроллер сразу выдаёт шаг под
+    // потолок (0.15*sh пикселей — 162 px на этом экране). Касание идёт до
+    // камеры через систему ввода Android 2—8 кадров, и за это время мы
+    // успеваем заказать ещё столько же. Камера приходит сразу на несколько
+    // шагов и перелетает; ошибка меняет знак; дальше петля ходит, пока окно
+    // «в полёте» не выровняется — эти две секунды и есть.
+    //
+    // Поэтому первые 0.35 с после захвата (и после нового касания) шаг режем
+    // до трети и плавно отдаём полный. Перелёта тогда нет вовсе, а наведение
+    // всё равно занимает считанные кадры: при большой ошибке шаг и в треть
+    // размера упирается в потолок.
+    if (pick.switched) s_acquire = 0.f;
+    s_acquire += dt / 0.35f;
+    if (s_acquire > 1.f) s_acquire = 1.f;
+    k *= 0.3f + 0.7f * s_acquire;
 
     float dx =  errYaw   * k / gy;
     float dy = -errPitch * k / gp;
@@ -942,9 +965,9 @@ static void AimLogTick(float dt) {
     s_logTime = 0.f;
     const AimMemDiag& d = AimMemoryDiag();
     if (g_state.aim_mode == AIM_MODE_MEMORY)
-        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d",
+        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d",
                 aim_mode_name(), s_frames, (int)d.params, (int)d.responded,
-                d.writes, d.fails, (double)d.mismatch, d.inactive);
+                d.writes, d.fails, (double)d.mismatch, d.inactive, d.ads);
 }
 
 // ====================== Мемори-аим: «память» ===============================
@@ -1051,6 +1074,7 @@ static void UpdateAimMemory(float dt) {
         return;
     }
     s_memDiag.inactive = 0;
+    s_memDiag.ads = g_state.aim_scope_only ? (esp_local_player_is_aiming() ? 1 : 0) : -1;
 
     // MouseLook нужен не ради чувствительности (накопитель уже в градусах), а
     // как проверка «объект тот»: m_Sensitivity в правдоподобных пределах —
