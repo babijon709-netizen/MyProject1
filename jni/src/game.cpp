@@ -1573,6 +1573,9 @@ static Vec4    g_fc_diag_parent_rot{};
 static Vec3    g_fc_diag_parent_scale{};
 static int32_t g_fc_diag_parent = -2;
 static bool    g_fc_diag_ok = false;
+static bool    g_fc_diag_absolute = false;   // записали цель целиком (а не шаг)
+// Что лежало в памяти камеры, когда нашу запись затёрли (для лога).
+static std::atomic<float> g_fc_ow_x{0}, g_fc_ow_y{0}, g_fc_ow_z{0};
 
 static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_t index,
                                      const Vec3& target, Vec3& local_out, float& gap) {
@@ -1604,38 +1607,66 @@ static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_
     if (!rd_fresh(matrices + (uint64_t)index * sizeof(Matrix34), self)) return false;
     if (!matrix34_is_valid(self)) return false;
     Vec3 local = {self.translation.x, self.translation.y, self.translation.z};
+    // Поправку больше не интегрируем — пишем цель ЦЕЛИКОМ.
+    //
+    // Почему интегратор пришлось выбросить. Лог 15:59 показал, что камера
+    // ходит ровно двухметровыми шагами вдоль луча «начало координат -> цель»
+    // (все позиции — точные доли 2 м от цели), но шаги эти идут в ОБЕ стороны:
+    // недолёт за секунду менялся на десятки метров то вниз, то вверх. То есть
+    // контур не сходился, а болтался, и величина болтанки ровно равна нашему
+    // ограничению шага. Интегратор в замкнутом контуре, где отсчёт запаздывает
+    // или его кто-то ещё переписывает, разгоняется — это и есть «фрикам
+    // бесконечно летит в одну сторону». Абсолютная запись такой болезни не
+    // имеет в принципе: каждый такт в памяти лежит ровно цель, и сколько бы
+    // тактов ни прошло, камера не уедет.
     Vec3 step{};
-    if (parent >= 0) {
+    bool absolute = false;
+    if (parent < 0) {
+        // Родителя нет — локальная позиция и есть мировая (лог: «родитель -1»).
+        // Тогда цель пишется прямо, без всякой матрицы.
+        step = {target.x - cur.x, target.y - cur.y, target.z - cur.z};
+        local = target;
+        absolute = true;
+    } else {
         Vec3 pPos{}, pScale{};
         Vec4 pRot{};
         if (!read_transform_world_trs(matrices, indices, parent, pPos, pRot, pScale, true)) return false;
         g_fc_diag_parent_pos = pPos; g_fc_diag_parent_rot = pRot; g_fc_diag_parent_scale = pScale;
-        Vec4 inv = pRot;
-        const float len = sqrtf(inv.x * inv.x + inv.y * inv.y + inv.z * inv.z + inv.w * inv.w);
-        if (!(len > 1e-6F)) return false;
-        inv = {-inv.x / len, -inv.y / len, -inv.z / len, inv.w / len};
-        const Vec3 turned = rotate_vector(inv, d);
-        if (!(fabsf(pScale.x) > 1e-6F && fabsf(pScale.y) > 1e-6F && fabsf(pScale.z) > 1e-6F)) return false;
-        step = {turned.x / pScale.x, turned.y / pScale.y, turned.z / pScale.z};
-    } else {
-        step = d;
-        g_fc_diag_parent_pos = {}; g_fc_diag_parent_rot = {}; g_fc_diag_parent_scale = {};
+        // Абсолютная локальная позиция цели. Берём её, если она не уводит
+        // камеру дальше 50 м за такт: так мусорная матрица родителя даст не
+        // телепорт через карту, а длинный, но ограниченный шаг.
+        Vec3 abs_local{};
+        if (transform_world_to_local(matrices, indices, index, target, abs_local) &&
+            vec3_is_finite(abs_local)) {
+            const float jx = abs_local.x - local.x, jy = abs_local.y - local.y, jz = abs_local.z - local.z;
+            if (sqrtf(jx * jx + jy * jy + jz * jz) <= 50.f) {
+                step = {jx, jy, jz};
+                local = abs_local;
+                absolute = true;
+            }
+        }
+        if (!absolute) {
+            Vec4 inv = pRot;
+            const float len = sqrtf(inv.x * inv.x + inv.y * inv.y + inv.z * inv.z + inv.w * inv.w);
+            if (!(len > 1e-6F)) return false;
+            inv = {-inv.x / len, -inv.y / len, -inv.z / len, inv.w / len};
+            const Vec3 turned = rotate_vector(inv, d);
+            if (!(fabsf(pScale.x) > 1e-6F && fabsf(pScale.y) > 1e-6F && fabsf(pScale.z) > 1e-6F)) return false;
+            step = {turned.x / pScale.x, turned.y / pScale.y, turned.z / pScale.z};
+            local = {local.x + step.x, local.y + step.y, local.z + step.z};
+        }
     }
     g_fc_diag_parent = parent;
     g_fc_diag_local = local;
     g_fc_diag_cur = cur;
     g_fc_diag_step = step;
+    g_fc_diag_absolute = absolute;
     g_fc_diag_ok = true;
-    local = {local.x + step.x, local.y + step.y, local.z + step.z};
     if (!vec3_is_finite(local)) return false;
-    // Предохранитель. Контур замкнутый: если звено где-то врёт, ошибка
-    // накапливается, и камера уезжает всё дальше — именно это выглядело как
-    // «фрикам летит в одну сторону сам». Полкилометра локального смещения
-    // хватает для любого разумного полёта, а за ним мы просто не пишем: пусть
-    // камера останется при теле, чем улетит неизвестно куда.
-    if (fabsf(local.x) > 500.f || fabsf(local.y) > 500.f || fabsf(local.z) > 500.f) {
-        LogLine("фрикам: поправка отброшена — локальная позиция (%.1f, %.1f, %.1f) дальше 500 м",
-                (double)local.x, (double)local.y, (double)local.z);
+    // Предохранитель: один шаг длиннее 200 м — это мусорный отсчёт, а не полёт.
+    const float sl = sqrtf(step.x * step.x + step.y * step.y + step.z * step.z);
+    if (sl > 200.f) {
+        LogLine("фрикам: поправка отброшена — шаг %.1f м длиннее 200 м", (double)sl);
         return false;
     }
     local_out = local;
@@ -1649,27 +1680,48 @@ static void freecam_writer_start() {
     if (g_fc_writer_running.exchange(true)) return;
     std::thread([]() {
         unsigned iter = 0;
+        double probe_at = memio::now_seconds() + 3.0;   // первая проба — через 3 с
         while (g_fc_writer_running.load()) {
             const uint64_t addr = g_fc_addr.load();
             if (addr && g_pid > 0) {
                 const float v[3] = {g_fc_lx.load(), g_fc_ly.load(), g_fc_lz.load()};
+                // Проба «игрушка переписала нашу запись».
+                //
+                // Прежний счётчик читал адрес назад сразу после своей же
+                // записи. Это ничего не меряло: поток пишет две тысячи раз в
+                // секунду, поэтому чужое значение живёт в памяти не дольше
+                // полмиллисекунды из шестнадцати, и честный «0/с» получался бы
+                // даже при живом конфликте с игрой (лог 15:59: «затёрто игрой
+                // 0/с» при камере, которая болтается на десятки метров).
+                //
+                // Теперь раз в две секунды поток на один игровой кадр ЗАМОЛКАЕТ
+                // и каждые 2 мс читает адрес. Если его кто-то переписывает, это
+                // видно сразу — и по величине, и по самому значению.
+                const double now = memio::now_seconds();
+                if (now >= probe_at) {
+                    probe_at = now + 2.0;
+                    float worst = 0.f, seen[3] = {};
+                    int changes = 0;
+                    for (int s = 0; s < 12; ++s) {
+                        float c[3] = {};
+                        if (rd_buf(addr, c, sizeof(c))) {
+                            const float dx = c[0] - v[0], dy = c[1] - v[1], dz = c[2] - v[2];
+                            const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+                            if (d > 0.05F) ++changes;
+                            if (d > worst) { worst = d; seen[0] = c[0]; seen[1] = c[1]; seen[2] = c[2]; }
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    }
+                    if (changes) {
+                        g_fc_overwrites.fetch_add((unsigned)changes);
+                        g_fc_over_m.store(g_fc_over_m.load() + worst);
+                        g_fc_ow_x.store(seen[0]); g_fc_ow_y.store(seen[1]); g_fc_ow_z.store(seen[2]);
+                    }
+                    continue;      // в этом проходе не пишем
+                }
                 if (wr_buf(addr, v, sizeof(v))) g_fc_write_count.fetch_add(1);
                 else g_fc_write_failed.store(true);
-                // Раз в 64 итерации (≈30 мс) читаем назад: если там не то, что
-                // мы только что записали, — между записью и чтением позицию
-                // меняла игра. Это и есть тот вопрос, от которого зависит всё
-                // остальное: гонимся мы за игрой или контур сам разгоняется.
-                if ((++iter & 63u) == 0) {
-                    float cur[3] = {};
-                    if (rd_buf(addr, cur, sizeof(cur))) {
-                        const float dx = cur[0] - v[0], dy = cur[1] - v[1], dz = cur[2] - v[2];
-                        const float d = sqrtf(dx * dx + dy * dy + dz * dz);
-                        if (d > 0.02F) {
-                            g_fc_overwrites.fetch_add(1);
-                            g_fc_over_m.store(g_fc_over_m.load() + d);
-                        }
-                    }
-                }
+                ++iter;
             }
             std::this_thread::sleep_for(std::chrono::microseconds(500));
         }
@@ -1826,6 +1878,14 @@ static void freecam_tick() {
                     (double)g_cam_pos.x, (double)g_cam_pos.y, (double)g_cam_pos.z,
                     wc, ow, (double)(ow ? owm / (float)ow : 0.f), (double)gap, ac,
                     wf ? " (отказы записи)" : "");
+            // Чем именно оказалась затёрта наша запись. По этому значению
+            // видно, кто второй пишет в ту же ячейку: если это текущая позиция
+            // головы — запись перебивает игра, и бороться надо её кадром, а не
+            // частотой нашего писателя.
+            if (ow)
+                LogLine("фрикам: затёрто игрой %u раз за период, расхождение до %.1f м, в памяти оказалось (%.1f, %.1f, %.1f)",
+                        ow, (double)(owm / (float)ow),
+                        (double)g_fc_ow_x.load(), (double)g_fc_ow_y.load(), (double)g_fc_ow_z.load());
             // Чем контур посчитал поправку. По этой строке проверяется вся
             // арифметика: мировая позиция камеры обязана быть равна
             // «позиция родителя + поворот родителя × (масштаб × локальную)»,
@@ -1838,8 +1898,12 @@ static void freecam_tick() {
                 const Vec3& P = g_fc_diag_parent_pos;
                 const Vec4& Q = g_fc_diag_parent_rot;
                 const Vec3& Z = g_fc_diag_parent_scale;
-                LogLine("фрикам: разбор — индекс %d, родитель %d, лок (%.2f, %.2f, %.2f), посчитано (%.1f, %.1f, %.1f), шаг (%.2f, %.2f, %.2f)",
+                // Литерал с ведущим пробелом: генератор таблиц перевода
+                // считает подписью визуала любой русский литерал без пробела
+                // в начале, а эта строка уходит только в лог.
+                LogLine("фрикам: разбор — индекс %d, родитель %d,%s, лок (%.2f, %.2f, %.2f), посчитано (%.1f, %.1f, %.1f), шаг (%.2f, %.2f, %.2f)",
                         (int)g_freecam_index, (int)g_fc_diag_parent,
+                        g_fc_diag_absolute ? " запись целиком" : " шаг",
                         (double)L.x, (double)L.y, (double)L.z,
                         (double)C.x, (double)C.y, (double)C.z,
                         (double)S.x, (double)S.y, (double)S.z);
@@ -6459,30 +6523,69 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         {
             const uint64_t vitals = rd_ptr(s_transforms[i] + game_offsets::PLAYER_VITALS);
             if (vitals >= 0x10000) {
-                float hp = 0.f;
-                if (rd_exact(vitals + game_offsets::VITALS_HEALTH, hp) &&
-                    std::isfinite(hp) && hp >= -1.f && hp <= 100000.f) {
-                    box.health = hp;
-                    if (hp > g_hp_max_seen) g_hp_max_seen = hp;
-                }
-                // Срез vitals (0x80..0xBC, 16 чисел): по нему из лога видно, в
-                // каком слоте лежит здоровье, а не «кажется, что работает».
-                // 0x88 — m_MaxHealth (имя есть в дампе), 0xB8 — KQN, который мы
-                // считаем текущим здоровьем. Двум игрокам раз в 6 секунд.
-                static double s_vitals_at = 0.0;
-                static int    s_vitals_left = 0;
-                const double tnow = memio::now_seconds();
-                if (tnow >= s_vitals_at) { s_vitals_at = tnow + 6.0; s_vitals_left = 2; }
-                if (s_vitals_left > 0) {
-                    --s_vitals_left;
-                    float raw[16] = {};
-                    if (rd_buf(vitals + 0x80, raw, sizeof(raw)))
-                        LogLine("аим: vitals 0x%llx срез 0x80..0xBC: %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f",
-                                (unsigned long long)vitals,
-                                (double)raw[0], (double)raw[1], (double)raw[2], (double)raw[3],
-                                (double)raw[4], (double)raw[5], (double)raw[6], (double)raw[7],
-                                (double)raw[8], (double)raw[9], (double)raw[10], (double)raw[11],
-                                (double)raw[12], (double)raw[13], (double)raw[14], (double)raw[15]);
+                // Где здоровье на самом деле. Прошлые две сборки читали
+                // GenericVitals.KQN (0xB8) — и срез памяти из лога 15:56
+                // показал, что там у ВСЕХ игроков ровно 0.0, хотя соседнее
+                // поле m_MaxHealth (0x88) читается как честные 100.0. Значит
+                // объект найден верно, а KQN — не текущее здоровье.
+                //
+                // Правильная цепочка взята из дизассемблера, а не подобрана:
+                //   * GenericVitals.COL() (RVA 0x65391f8) кладёт m_MaxHealth
+                //       s0 = [this + 0x88]
+                //     в сеттер наблюдаемой величины:
+                //       x8 = [this + 0x68]        -- brS.Entity
+                //       x0 = [x8 + 0x98]          -- brz.Health
+                //       setter(x0, s0)
+                //   * сам сеттер (RVA 0xb0f6238) пишет новое значение в
+                //     [x0 + 0x20], а старое относит в [x0 + 0x24]:
+                //       stp s1, s0, [x0, #0x20]
+                //   * в dump.cs этому ровно соответствует
+                //       public class brz : brS  ->  public ? Health;  // 0x98
+                //     а 0x68 у brS — это public brz Entity.
+                // Итого: здоровье = [[[vitals + 0x68] + 0x98] + 0x20].
+                const uint64_t entity = rd_ptr(vitals + game_offsets::PMP_ENTITY);
+                if (entity >= 0x10000) {
+                    const uint64_t hv = rd_ptr(entity + game_offsets::PMK_HEALTH);
+                    if (hv >= 0x10000) {
+                        // Слот значения: дизассемблер сеттера показывает +0x20
+                        // (старое значение при этом относит в +0x24), а по
+                        // раскладке AsyncReactiveProperty<T> из дампа значение
+                        // должно лежать в +0x18. Тип brz.Health в дампе не
+                        // разрешён (там просто «?»), поэтому берём тот слот,
+                        // где лечит правдоподобное здоровье, — и печатаем оба,
+                        // чтобы следующая сборка уже знала точно.
+                        const float hp20 = rd<float>(hv + game_offsets::HEALTH_VALUE);
+                        const float hp18 = rd<float>(hv + game_offsets::ARP_LATEST_VALUE);
+                        auto plausible = [](float v) {
+                            return std::isfinite(v) && v >= 0.f && v <= 100000.f;
+                        };
+                        // Не прочиталось ни там ни там — здоровье НЕИЗВЕСТНО, а
+                        // не «ноль». Именно подстановка нуля вместо неудачи и
+                        // помечала живых игроков мёртвыми (жалоба 19.09).
+                        if (plausible(hp20))      { box.health = hp20; box.health_slot = 0x20; }
+                        else if (plausible(hp18)) { box.health = hp18; box.health_slot = 0x18; }
+                        else                      { box.health = -1.f; box.health_slot = 0; }
+                        if (box.health > g_hp_max_seen) g_hp_max_seen = box.health;
+                        // Срез объекта Health: по нему видно, что лежит в
+                        // +0x18 и +0x20 и есть ли рядом максимум.
+                        static double s_hv_at = 0.0;
+                        static int    s_hv_left = 0;
+                        const double tnow = memio::now_seconds();
+                        if (tnow >= s_hv_at) { s_hv_at = tnow + 6.0; s_hv_left = 2; }
+                        if (s_hv_left > 0) {
+                            --s_hv_left;
+                            float raw[16] = {};
+                            if (rd_buf(hv, raw, sizeof(raw)))
+                                LogLine("аим: здоровье 0x%llx макс=%.1f слот 0x%x: +0x18=%.1f +0x20=%.1f | срез +0x00..0x3C: %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f",
+                                        (unsigned long long)hv,
+                                        (double)rd<float>(vitals + game_offsets::VITALS_MAX_HEALTH),
+                                        (unsigned)box.health_slot, (double)hp18, (double)hp20,
+                                        (double)raw[0], (double)raw[1], (double)raw[2], (double)raw[3],
+                                        (double)raw[4], (double)raw[5], (double)raw[6], (double)raw[7],
+                                        (double)raw[8], (double)raw[9], (double)raw[10], (double)raw[11],
+                                        (double)raw[12], (double)raw[13], (double)raw[14], (double)raw[15]);
+                        }
+                    }
                 }
             }
         }

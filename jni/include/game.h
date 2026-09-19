@@ -14,11 +14,15 @@ struct EspBox {
     // в списке игроков и отдаёт корректные кости, из-за чего прицел уезжал на
     // уже убитого (просьба 19.09). Считаем по двум независимым признакам:
     //   * Oxide.PlayerManager.respawning (bool, 0x208) — «ждать возрождения»;
-    //   * здоровье: PlayerManager.vitals (0xC8) -> GenericVitals.KQN (0xB8).
+    //   * здоровье: PlayerManager.vitals (0xC8) -> brS.Entity (0x68)
+    //     -> brz.Health (0x98) -> значение (+0x18 или +0x20).
     // Первый в логе 14:55 не срабатывал ни разу (мёртвых 0 при жалобе игрока),
     // поэтому основной признак — здоровье, а оба значения пишутся в лог.
+    // Здоровье НЕ в GenericVitals.KQN (0xB8): срез памяти из лога 15:56 показал
+    // там ровно 0.0 у всех игроков при честных 100.0 в m_MaxHealth (0x88).
     bool  dead = false;
-    float health = -1.f;          // текущее здоровье (vitals + 0xB8), -1 = не прочитано
+    float health = -1.f;          // текущее здоровье, -1 = не прочитано
+    unsigned health_slot = 0;     // из какого смещения прочитано (0x18 / 0x20)
     bool  respawning = false;     // PlayerManager.respawning (0x208)
     float corners[8][2];
     bool  corner_visible[8];

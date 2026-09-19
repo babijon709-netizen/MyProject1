@@ -360,6 +360,11 @@ inline constexpr std::uint64_t NETID_BEHAVIOURS = 0x80; // NetworkBehaviour[]
 inline constexpr std::uint64_t PMP_ENTITY            = 0x68; // pmK Entity
 inline constexpr std::uint64_t PMK_HEALTH            = 0x98; // AsyncReactiveProperty<float>
 inline constexpr std::uint64_t ARP_LATEST_VALUE      = 0x18; // float latestValue
+// Второй кандидат на слот значения: в сеттере, который зовёт
+// GenericVitals.COL() (RVA 0xb0f6238), новое значение уходит в [obj+0x20],
+// а старое — в [obj+0x24]. Тип brz.Health в дампе не разрешён («?»), поэтому
+// слот выбирается по правдоподобию, а лог печатает оба.
+inline constexpr std::uint64_t HEALTH_VALUE          = 0x20;
 inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_MaxHealth
 
 // ---- Время суток: TOD_Sky (ассет Time Of Day) ------------------------------
