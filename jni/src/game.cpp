@@ -1491,37 +1491,41 @@ static bool resolve_camera_arrays(uint64_t& matrices, uint64_t& indices, int32_t
     const int32_t  idx  = rd<int32_t>(transform + 0x40);
     if (!data || idx < 0 || idx > 100000) return false;
     static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
-    for (const auto& pr : kPairs) {
-        const uint64_t m0 = rd_ptr(data + pr[0]);
-        const uint64_t n0 = rd_ptr(data + pr[1]);
-        if (!m0 || !n0) continue;
-        // Каждый из указателей может быть ещё и таблицей указателей.
+    static const uint64_t kExt[][2] = {{0x20, 0x28}, {0x28, 0x30}, {0x30, 0x38}, {0x40, 0x48}, {0x10, 0x18}, {0x48, 0x50}};
+    auto try_pair = [&](uint64_t m0, uint64_t n0) {
+        if (!m0 || !n0) return;
         const uint64_t ms[2] = {m0, rd_ptr(m0)};
         const uint64_t ns[2] = {n0, rd_ptr(n0)};
         for (uint64_t m : ms) {
             for (uint64_t n : ns) {
                 if (!m || !n) continue;
-                Vec3 pos{};
-                Vec4 rot{};
-                if (!read_transform_hierarchy_arrays(m, n, idx, pos, &rot)) continue;
-                if (!vec3_is_finite(pos)) continue;
-                const float dx = pos.x - cam_pos.x, dy = pos.y - cam_pos.y, dz = pos.z - cam_pos.z;
-                const float d = sqrtf(dx * dx + dy * dy + dz * dz);
-                if (err_m < 0.f || d < err_m) err_m = d;
-                // Собираем ВСЕ кандидаты, даже далёкие: игра может чередовать
-                // два буфера иерархии, один из которых в момент включения был
-                // в нуле (расстояние 34 м), а второй — у цели. Раньше брали
-                // только d<=1 м, поэтому второй буфер не попадал в список и
-                // камера мерцала 50/50 (лог 21:31 — за период 60 отсчётов у цели
-                // 32, в нуле 27). Теперь собираем до 100 м, а эталоном остаётся
-                // ближайший.
-                fc_slot_add(m, n, idx, d);
-                if (d <= 1.0F && !matrices) { matrices = m; indices = n; index = idx; }
-                // Если ближайший не нашёлся, возьмём любой до 100 м как эталон,
-                // чтобы фрикам включился даже когда камера уже в нуле.
-                if (!matrices && d <= 100.0F) { matrices = m; indices = n; index = idx; }
+                // Пробуем не только точный индекс камеры, но и соседние:
+                // второй буфер может лежать под соседним индексом в том же
+                // массиве (лог 21:47 — слотов 1, а мерцание 50/50).
+                for (int di = -2; di <= 2; ++di) {
+                    const int32_t ii = idx + di;
+                    if (ii < 0 || ii > 100000) continue;
+                    Vec3 pos{};
+                    Vec4 rot{};
+                    if (!read_transform_hierarchy_arrays(m, n, ii, pos, &rot)) continue;
+                    if (!vec3_is_finite(pos)) continue;
+                    const float dx = pos.x - cam_pos.x, dy = pos.y - cam_pos.y, dz = pos.z - cam_pos.z;
+                    const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+                    if (err_m < 0.f || d < err_m) err_m = d;
+                    fc_slot_add(m, n, ii, d);
+                    if (d <= 1.0F && !matrices) { matrices = m; indices = n; index = ii; }
+                    if (!matrices && d <= 100.0F) { matrices = m; indices = n; index = ii; }
+                }
             }
         }
+    };
+    for (const auto& pr : kPairs) {
+        try_pair(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]));
+    }
+    // Широкий перебор — второй буфер иерархии может лежать по другому смещению.
+    // Лог 21:47 всё ещё слотов 1 и 50/50 мерцание, значит второй буфер не нашли.
+    for (const auto& pr : kExt) {
+        try_pair(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]));
     }
     // Наборов могло найтись несколько: matrices/index — первый (эталон для
     // лога), остальные лежат в g_fc_slots.
