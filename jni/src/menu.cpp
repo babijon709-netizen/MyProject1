@@ -1003,7 +1003,12 @@ void UpdateFreecam(float dt) {
     const float h  = R * 2.f;
     const float cx = x0 + R, cy = y0 + R;
 
-    Touch_BlockRect(true, x0 - 6.f, y0 - 6.f, x0 + w + 6.f, y0 + h + 6.f);
+    // Когда фрикам активен, блокируем ВЕСЬ экран от игры: иначе любой тап
+    // вне джойстика ходил бы персонажем, а камера привязана к телу и поехала бы
+    // вместе с ним — это и есть «джойстик двигает тело». Джойстик ImGui при этом
+    // работает, потому что его тапы идут через Android MotionEvent, а не через
+    // /dev/input → uinput путь, который мы блокируем.
+    Touch_BlockRect(true, 0.f, 0.f, sw, sh);
 
     ImGui::SetNextWindowPos({x0 - 6.f, y0 - 6.f});
     ImGui::SetNextWindowSize({w + 12.f, h + 12.f});

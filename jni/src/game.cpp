@@ -1761,8 +1761,26 @@ static void freecam_writer_start() {
             const uint64_t addr = g_fc_addr[0].load();
             const int      nslots = g_fc_addr_n.load();
             if (addr && g_pid > 0) {
+                // Если пишем матрицу вида — 16 флотов, иначе 12 (Matrix34).
+                const bool is_view = (g_native_camera && addr == g_native_camera + CAMERA_VIEW_MATRIX);
                 FcMat m0 = g_fc_mat[0];
-                const float v[12] = {m0.tx, m0.ty, m0.tz, m0.tw, m0.rx, m0.ry, m0.rz, m0.rw, m0.sx, m0.sy, m0.sz, m0.sw};
+                float v_full[16] = {};
+                float v[12] = {m0.tx, m0.ty, m0.tz, m0.tw, m0.rx, m0.ry, m0.rz, m0.rw, m0.sx, m0.sy, m0.sz, m0.sw};
+                if (is_view) {
+                    const Vec3 rr = g_cam_right, uu = g_cam_up, ff = g_cam_forward;
+                    if (vec3_is_finite(rr) && vec3_is_finite(uu) && vec3_is_finite(ff)) {
+                        v_full[0]=rr.x; v_full[4]=rr.y; v_full[8]=rr.z;  v_full[12]=-(rr.x * g_freecam_pos.x + rr.y * g_freecam_pos.y + rr.z * g_freecam_pos.z);
+                        v_full[1]=uu.x; v_full[5]=uu.y; v_full[9]=uu.z;  v_full[13]=-(uu.x * g_freecam_pos.x + uu.y * g_freecam_pos.y + uu.z * g_freecam_pos.z);
+                        v_full[2]=-ff.x; v_full[6]=-ff.y; v_full[10]=-ff.z; v_full[14]=-(-ff.x * g_freecam_pos.x + -ff.y * g_freecam_pos.y + -ff.z * g_freecam_pos.z);
+                        v_full[3]=0.f; v_full[7]=0.f; v_full[11]=0.f; v_full[15]=1.f;
+                    } else {
+                        // базис ещё не готов — пишем то, что было
+                        v_full[0]=m0.tx; v_full[1]=m0.ty; v_full[2]=m0.tz; v_full[3]=m0.tw;
+                        v_full[4]=m0.rx; v_full[5]=m0.ry; v_full[6]=m0.rz; v_full[7]=m0.rw;
+                        v_full[8]=m0.sx; v_full[9]=m0.sy; v_full[10]=m0.sz; v_full[11]=m0.sw;
+                        v_full[12]=g_fc_lx[0].load(); v_full[13]=g_fc_ly[0].load(); v_full[14]=g_fc_lz[0].load(); v_full[15]=1.f;
+                    }
+                }
                 // Проба «игрушка переписала нашу запись».
                 //
                 // Прежний счётчик читал адрес назад сразу после своей же
@@ -1797,28 +1815,18 @@ static void freecam_writer_start() {
                     }
                     continue;      // в этом проходе не пишем
                 }
-                if (wr_buf(addr, v, sizeof(v))) g_fc_write_count.fetch_add(1);
-                else g_fc_write_failed.store(true);
-                // Остальные проверенные слоты — тем же значением: игра читает
-                // то один набор массивов, то другой, и оба должны лежать.
-                for (int sl = 1; sl < nslots; ++sl) {
-                    const uint64_t a2 = g_fc_addr[sl].load();
-                    if (!a2) continue;
-                    FcMat mm = g_fc_mat[sl];
-                    const float v2[12] = {mm.tx, mm.ty, mm.tz, mm.tw, mm.rx, mm.ry, mm.rz, mm.rw, mm.sx, mm.sy, mm.sz, mm.sw};
-                    if (wr_buf(a2, v2, sizeof(v2))) g_fc_write_count.fetch_add(1);
-                }
-                // Матрицу вида тоже держим в цели: иначе игра, пересчитавшая
-                // её из затёртого трансформа, вернёт камеру в ноль на пол-кадра.
-                if (g_native_camera && g_cam_pose_valid) {
-                    const Vec3 rr = g_cam_right, uu = g_cam_up, ff = g_cam_forward;
-                    if (vec3_is_finite(rr) && vec3_is_finite(uu) && vec3_is_finite(ff)) {
-                        Mat4 vw{};
-                        vw.m[0]=rr.x; vw.m[4]=rr.y; vw.m[8]=rr.z;  vw.m[12]=-(rr.x * g_freecam_pos.x + rr.y * g_freecam_pos.y + rr.z * g_freecam_pos.z);
-                        vw.m[1]=uu.x; vw.m[5]=uu.y; vw.m[9]=uu.z;  vw.m[13]=-(uu.x * g_freecam_pos.x + uu.y * g_freecam_pos.y + uu.z * g_freecam_pos.z);
-                        vw.m[2]=-ff.x; vw.m[6]=-ff.y; vw.m[10]=-ff.z; vw.m[14]=-(-ff.x * g_freecam_pos.x + -ff.y * g_freecam_pos.y + -ff.z * g_freecam_pos.z);
-                        vw.m[3]=0.f; vw.m[7]=0.f; vw.m[11]=0.f; vw.m[15]=1.f;
-                        wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &vw, sizeof(Mat4));
+                if (is_view) {
+                    if (wr_buf(addr, v_full, sizeof(v_full))) g_fc_write_count.fetch_add(1);
+                    else g_fc_write_failed.store(true);
+                } else {
+                    if (wr_buf(addr, v, sizeof(v))) g_fc_write_count.fetch_add(1);
+                    else g_fc_write_failed.store(true);
+                    for (int sl = 1; sl < nslots; ++sl) {
+                        const uint64_t a2 = g_fc_addr[sl].load();
+                        if (!a2) continue;
+                        FcMat mm = g_fc_mat[sl];
+                        const float v2[12] = {mm.tx, mm.ty, mm.tz, mm.tw, mm.rx, mm.ry, mm.rz, mm.rw, mm.sx, mm.sy, mm.sz, mm.sw};
+                        if (wr_buf(a2, v2, sizeof(v2))) g_fc_write_count.fetch_add(1);
                     }
                 }
                 ++iter;
@@ -1968,59 +1976,55 @@ static bool freecam_write() {
     // половине кадров читала другой, где лежал ноль, — отсюда мерцание и
     // провал под карту. Локальная позиция у слотов может различаться: она
     // считается от родителя, найденного в этом же наборе массивов.
+    // Фрикам теперь пишет ТОЛЬКО матрицу вида, а не трансформ: запись
+    // трансформа двигала тело (если нашли рут игрока, а не камеру) и не давала
+    // пройти сквозь стены (физика привязана к трансформу). Матрица вида — это
+    // то, чем игра рисует кадр, и её достаточно, чтобы летать сквозь стены и
+    // не трогать тело. Трансформ оставляем игре.
     bool ok = false;
-    int  fed = 0;
-    for (int sl = 0; sl < g_fc_own_n && fed < kFcMaxSlots; ++sl) {
-        const FcSlot& S = g_fc_own[sl];
-        if (!S.m || !S.n || S.i < 0) continue;
-        Vec3 local{};
-        float gap = -1.f;
-        if (!freecam_local_for_target(S.m, S.n, S.i, g_freecam_pos, local, gap)) continue;
-        // Читаем текущую матрицу, чтобы сохранить поворот/масштаб: пишем
-        // целую Matrix34, иначе игра, затёршая поворот нулями, оставит матрицу
-        // невалидной и камера уйдёт в ноль.
-        Matrix34 cur_m{};
-        if (!rd_fresh(S.m + (uint64_t)S.i * sizeof(Matrix34), cur_m)) continue;
-        if (!matrix34_is_valid(cur_m)) {
-            // Если текущая уже невалидна (игра уже затёрла), берём сохранённую
-            // или единичную: иначе мы бы записали мусор.
-            cur_m.rotation = {0.f, 0.f, 0.f, 1.f};
-            cur_m.scale = {1.f, 1.f, 1.f, 0.f};
-        }
-        cur_m.translation.x = local.x; cur_m.translation.y = local.y; cur_m.translation.z = local.z;
-        // tw оставляем как был (обычно 0), чтобы не ломать SIMD-паддинг.
-        const uint64_t addr = S.m + (uint64_t)S.i * sizeof(Matrix34);
-        g_fc_lx[fed].store(local.x);
-        g_fc_ly[fed].store(local.y);
-        g_fc_lz[fed].store(local.z);
-        g_fc_mat[fed] = FcMat{cur_m.translation.x, cur_m.translation.y, cur_m.translation.z, cur_m.translation.w,
-                              cur_m.rotation.x, cur_m.rotation.y, cur_m.rotation.z, cur_m.rotation.w,
-                              cur_m.scale.x, cur_m.scale.y, cur_m.scale.z, cur_m.scale.w};
-        g_fc_addr[fed].store(addr);
-        if (fed == 0) g_fc_gap.store(gap);
-        ++fed;
-        if (wr_buf(addr, &cur_m, sizeof(Matrix34))) ok = true;
-    }
-    g_fc_addr_n.store(fed);
-    if (!fed) return false;
-    // Дополнительно пишем матрицу вида напрямую: игра может пересчитывать
-    // мировую матрицу трансформа из своего состояния, а матрицу вида — из
-    // трансформа. Если писать только трансформ, гонка остаётся 50/50 (лог
-    // 21:47 — у цели 30, в нуле 28). Пишем и то, и другое: трансформ для
-    // физики/коллизий, матрицу вида — для рендера. Матрица вида строится из
-    // текущего базиса камеры (right/up/forward) и цели фрикама.
     if (g_native_camera && g_cam_pose_valid) {
         const Vec3 r = g_cam_right, u = g_cam_up, f = g_cam_forward;
         if (vec3_is_finite(r) && vec3_is_finite(u) && vec3_is_finite(f)) {
             Mat4 view{};
-            // column-major, rows = basis: row0=right, row1=up, row2=-forward
             view.m[0] = r.x; view.m[4] = r.y; view.m[8]  = r.z; view.m[12] = -(r.x * g_freecam_pos.x + r.y * g_freecam_pos.y + r.z * g_freecam_pos.z);
             view.m[1] = u.x; view.m[5] = u.y; view.m[9]  = u.z; view.m[13] = -(u.x * g_freecam_pos.x + u.y * g_freecam_pos.y + u.z * g_freecam_pos.z);
             view.m[2] = -f.x; view.m[6] = -f.y; view.m[10] = -f.z; view.m[14] = -(-f.x * g_freecam_pos.x + -f.y * g_freecam_pos.y + -f.z * g_freecam_pos.z);
             view.m[3] = 0.f; view.m[7] = 0.f; view.m[11] = 0.f; view.m[15] = 1.f;
-            wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &view, sizeof(Mat4));
+            if (wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &view, sizeof(Mat4))) ok = true;
+            // Для писателя — та же матрица вида, чтобы держать её 2000 раз/с.
+            g_fc_lx[0].store(g_freecam_pos.x); g_fc_ly[0].store(g_freecam_pos.y); g_fc_lz[0].store(g_freecam_pos.z);
+            g_fc_addr[0].store(g_native_camera + CAMERA_VIEW_MATRIX);
+            // Сохраняем view как 12 флотов для писателя (первые 3 столбца + трансляция)
+            g_fc_mat[0] = FcMat{view.m[0], view.m[1], view.m[2], view.m[3], view.m[4], view.m[5], view.m[6], view.m[7], view.m[8], view.m[9], view.m[10], view.m[11]};
+            // Отдельно храним трансляцию view для лога gap
+            g_fc_gap.store(0.f);
+            g_fc_addr_n.store(1);
         }
     }
+    if (!ok) {
+        // Если базис ещё не готов, хотя бы попробуем старый путь по трансформу
+        // как фолбэк, чтобы камера не зависала.
+        int fed = 0;
+        for (int sl = 0; sl < g_fc_own_n && fed < kFcMaxSlots; ++sl) {
+            const FcSlot& S = g_fc_own[sl];
+            if (!S.m || !S.n || S.i < 0) continue;
+            Vec3 local{}; float gap = -1.f;
+            if (!freecam_local_for_target(S.m, S.n, S.i, g_freecam_pos, local, gap)) continue;
+            Matrix34 cur_m{};
+            if (!rd_fresh(S.m + (uint64_t)S.i * sizeof(Matrix34), cur_m)) continue;
+            if (!matrix34_is_valid(cur_m)) { cur_m.rotation={0.f,0.f,0.f,1.f}; cur_m.scale={1.f,1.f,1.f,0.f}; }
+            cur_m.translation.x=local.x; cur_m.translation.y=local.y; cur_m.translation.z=local.z;
+            const uint64_t addr = S.m + (uint64_t)S.i * sizeof(Matrix34);
+            g_fc_lx[fed].store(local.x); g_fc_ly[fed].store(local.y); g_fc_lz[fed].store(local.z);
+            g_fc_mat[fed]=FcMat{cur_m.translation.x,cur_m.translation.y,cur_m.translation.z,cur_m.translation.w,cur_m.rotation.x,cur_m.rotation.y,cur_m.rotation.z,cur_m.rotation.w,cur_m.scale.x,cur_m.scale.y,cur_m.scale.z,cur_m.scale.w};
+            g_fc_addr[fed].store(addr);
+            if (fed==0) g_fc_gap.store(gap);
+            ++fed;
+            if (wr_buf(addr,&cur_m,sizeof(Matrix34))) ok=true;
+        }
+        g_fc_addr_n.store(fed);
+    }
+    if (!ok) return false;
     // Где камера на самом деле — по матрице вида (ею игра и рисует кадр).
     {
         Vec3 cam{};
