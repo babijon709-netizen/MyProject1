@@ -1013,33 +1013,18 @@ void UpdateFreecam(float dt) {
     }
 
     // Игровое управление: слева внизу джойстик, справа — свайп для обзора
-    // R считаем от реального экрана, а не от 2460 квадрата, иначе джойстик огромный и за экраном
-    const float R  = fminf(rw, rh) * 0.12f;
+    const float R  = fminf(rw, rh) * 0.13f;
+    if (R < 55.f) {} // минимум
     // Позиция джойстика — настраиваемая, по умолчанию слева внизу
-    // g_state.freecam_joy_x/y — доля от экрана (0..1), -1 = не настроено
     float x0, y0;
     if (g_state.freecam_joy_x >= 0.f && g_state.freecam_joy_y >= 0.f) {
-        // Настроенная точка — центр джойстика
         float jx = g_state.freecam_joy_x * sw;
         float jy = g_state.freecam_joy_y * sh;
         x0 = jx - R;
         y0 = jy - R;
     } else {
-        // По умолчанию — слева внизу, с учётом реального экрана
-        x0 = 30.f;
-        // Используем реальную высоту для низа, но в координатах ImGui (sw/sh квадрат)
-        // Поэтому ставим фиксированно y=100 как раньше работало, но теперь снизу:
-        // берём sh - R*2 -30, но если sh=2460, это 1890 — за пределами 1080.
-        // Поэтому используем 100 + (sh - real_h) коррекцию: ставим внизу реального экрана.
-        // Проще: ставим y0 = sh - R*2 - 120 (чуть выше низа квадрата) — при 2460 это 1800,
-        // но при реальном 1080 всё равно видно, т.к. ImGui рисует в квадрате, а отображается
-        // в реальном. Чтобы точно было видно, ставим y0 = 100.f для отладки, а потом
-        // дадим настройку.
-        // Временно: фиксированно снизу в ImGui координатах, но с учётом того что
-        // реальный экран меньше — ставим y0 = sh * 0.62f (было 0.52 и уходило за экран)
-        y0 = sh * 0.62f;
-        // Если настроено — переопределим выше
-        // Для 2460: 0.62*2460=1525, R=~130, низ=1525+260=1785 — в пределах 2460 и видно в 1080
+        x0 = 40.f;
+        y0 = sh - R * 2.f - 40.f;
     }
     const float cx = x0 + R, cy = y0 + R;
 
@@ -1288,7 +1273,10 @@ void RenderMenu() {
             float zx = -1.f, zy = -1.f;
             if (g_calibMode == 1 && g_state.farm_joy_x >= 0.f) { zx = g_state.farm_joy_x * dw; zy = g_state.farm_joy_y * dh; }
             if (g_calibMode == 2 && g_state.farm_fire_x >= 0.f) { zx = g_state.farm_fire_x * dw; zy = g_state.farm_fire_y * dh; }
-            if (g_calibMode == 4 && g_state.freecam_joy_x >= 0.f) { zx = g_state.freecam_joy_x * dw; zy = g_state.freecam_joy_y * dh; }
+            if (g_calibMode == 4) {
+                if (g_state.freecam_joy_x >= 0.f) { zx = g_state.freecam_joy_x * dw; zy = g_state.freecam_joy_y * dh; }
+                else { zx = dw * 0.12f; zy = dh * 0.82f; } // дефолт слева внизу
+            }
             // У точки аима маркер виден всегда: пока она не задана, показываем
             // ту позицию, из которой аим водит палец по умолчанию.
             if (g_calibMode == 3) { zx = AimTouchFracX() * dw; zy = AimTouchFracY() * dh; }

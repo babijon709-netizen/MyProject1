@@ -1694,9 +1694,18 @@ static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_
         Vec4 pRot{};
         if (!read_transform_world_trs(matrices, indices, parent, pPos, pRot, pScale, true)) return false;
         g_fc_diag_parent_pos = pPos; g_fc_diag_parent_rot = pRot; g_fc_diag_parent_scale = pScale;
-        // Абсолютная локальная позиция цели. Берём её, если она не уводит
-        // камеру дальше 50 м за такт: так мусорная матрица родителя даст не
-        // телепорт через карту, а длинный, но ограниченный шаг.
+        // Если у родителя нулевой масштаб — чиним его на 1,1,1, иначе любая локальная даст 0 в мире
+        if (!(fabsf(pScale.x) > 1e-6F && fabsf(pScale.y) > 1e-6F && fabsf(pScale.z) > 1e-6F)) {
+            Matrix34 pm{};
+            if (rd_fresh(matrices + (uint64_t)parent * sizeof(Matrix34), pm)) {
+                pm.scale = {1.f,1.f,1.f,0.f};
+                if (pm.rotation.x==0.f && pm.rotation.y==0.f && pm.rotation.z==0.f && pm.rotation.w==0.f) pm.rotation.w=1.f;
+                wr_buf(matrices + (uint64_t)parent * sizeof(Matrix34), &pm, sizeof(Matrix34));
+                pScale = {1.f,1.f,1.f};
+            } else {
+                return false;
+            }
+        }
         Vec3 abs_local{};
         if (transform_world_to_local(matrices, indices, index, target, abs_local) &&
             vec3_is_finite(abs_local)) {
@@ -1710,10 +1719,13 @@ static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_
         if (!absolute) {
             Vec4 inv = pRot;
             const float len = sqrtf(inv.x * inv.x + inv.y * inv.y + inv.z * inv.z + inv.w * inv.w);
-            if (!(len > 1e-6F)) return false;
-            inv = {-inv.x / len, -inv.y / len, -inv.z / len, inv.w / len};
+            if (!(len > 1e-6F)) {
+                // Кватернион родителя нулевой — ставим identity
+                inv = {0.f,0.f,0.f,1.f};
+            } else {
+                inv = {-inv.x / len, -inv.y / len, -inv.z / len, inv.w / len};
+            }
             const Vec3 turned = rotate_vector(inv, d);
-            if (!(fabsf(pScale.x) > 1e-6F && fabsf(pScale.y) > 1e-6F && fabsf(pScale.z) > 1e-6F)) return false;
             step = {turned.x / pScale.x, turned.y / pScale.y, turned.z / pScale.z};
             local = {local.x + step.x, local.y + step.y, local.z + step.z};
         }
@@ -1881,9 +1893,6 @@ static void freecam_writer_start() {
 bool esp_freecam_set(bool on) {
     if (on == g_freecam_on) return g_freecam_on;
     if (!on) {
-        // Возвращаем камеру на место: пишем сохранённую локальную позицию.
-        // Писатель останавливается ПЕРВЫМ: иначе он добил бы нашу позицию
-        // поверх только что восстановленной.
         for (int sl = 0; sl < kFcMaxSlots; ++sl) g_fc_addr[sl].store(0);
         g_fc_addr_n.store(0);
         g_fc_writer_running.store(false);
@@ -1891,8 +1900,14 @@ bool esp_freecam_set(bool on) {
         if (g_freecam_saved_ok && g_freecam_matrices && g_freecam_index >= 0)
             wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34),
                    &g_freecam_saved_mat, sizeof(Matrix34));
+        // Восстанавливаем вид: ставим dirty=1 чтобы игра пересчитала view из восстановленного трансформа
+        if (g_native_camera) {
+            uint8_t one=1;
+            wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &one, 1);
+        }
         g_freecam_on = false;
         g_freecam_saved_ok = false;
+        g_freecam_has_yawpitch = false;
         LogLine("фрикам: выключен, камера вернулась к телу");
         return false;
     }
