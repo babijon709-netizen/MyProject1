@@ -135,6 +135,9 @@ public:
 
     bool  bound() const { return fd_.load() >= 0 && pid_.load() > 0; }
     pid_t pid()   const { return (pid_t)pid_.load(); }
+    // Номер кадра (меняется в frame_begin). По нему кэшируют на кадр
+    // дорогие разрешённые вещи (например, слот трансформа камеры).
+    uint64_t frame_generation() const { return generation_.load(std::memory_order_relaxed); }
 
     // Способ доступа один; строка нужна стенду и диагностике.
     const char* backend_name() const {

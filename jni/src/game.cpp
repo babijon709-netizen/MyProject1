@@ -1090,7 +1090,6 @@ static uint64_t g_freecam_transform = 0;
 static uint64_t g_freecam_matrices = 0;   // базы массивов иерархии камеры
 static uint64_t g_freecam_indices = 0;
 static int32_t  g_freecam_index = -1;
-static int      g_freecam_miss = 0;      // чтений подряд, где трансформ не прочитался
 // Почему фрикам не включился. Показывается прямо в меню: таскать лог с
 // устройства ради одной строки «камера не найдена» неудобно, а без причины
 // чинить нечего. 0 = порядок, 1 = нет камеры, 2 = нет трансформа,
@@ -1200,164 +1199,6 @@ static bool view_matrix_plausible(const Mat4& view) {
     return true;
 }
 
-static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matrices,
-                                     uint64_t& indices, int32_t& index,
-                                     float* best_dist = nullptr) {
-    if (!native_transform) return false;
-    if (best_dist) *best_dist = -1.f;
-
-    struct Cand { uint64_t m, n; int32_t i; };
-    Cand cand[96];
-    int  cand_src[96] = {};   // из какого толкования (tf[0..2]) кандидат
-    int  cur_src = 0;         // текущее толкование для push()
-    int count = 0;
-    auto push = [&](uint64_t m, uint64_t n, int32_t i) {
-        if (!m || !n || i < 0 || i > 100000 || count >= 96) return;
-        const uint64_t ms[2] = {m, rd_ptr(m)};
-        const uint64_t ns[2] = {n, rd_ptr(n)};
-        for (int a = 0; a < 2 && count < 96; ++a)
-            for (int b = 0; b < 2 && count < 96; ++b)
-                if (ms[a] && ns[b]) { cand_src[count] = cur_src; cand[count++] = {ms[a], ns[b], i}; }
-    };
-    // Один проход по указателю трансформа: пара «где данные TransformAccess,
-    // где индекс» и все известные пары «массивы матриц / массив родителей».
-    auto probe = [&](uint64_t base, uint64_t data_offset, uint64_t index_offset) {
-        const uint64_t data = rd_ptr(base + data_offset);
-        const int32_t  idx  = rd<int32_t>(base + index_offset);
-        if (!data || idx < 0 || idx > 100000) return;
-        static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
-        for (const auto& pr : kPairs) push(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]), idx);
-    };
-
-    // Указатели, которые пробуем как Transform. Что именно пришло на вход,
-    // заранее неизвестно, поэтому пробуем все три толкования:
-    //   tf[0] — сам адрес (вызывающий уже передал Transform);
-    //   tf[1] — Transform из этого объекта как из GameObject (случай камеры:
-    //           Camera + 0x20 — это GameObject, Transform лежит в его массиве
-    //           компонентов, проверено по libunity.so);
-    //   tf[2] — Transform из GameObject, если на вход дали компонент.
-    uint64_t tf[3] = {native_transform, 0, 0};
-    tf[1] = transform_from_gameobject(native_transform);
-    const uint64_t as_component = rd_ptr(native_transform + COMPONENT_GAMEOBJECT);
-    if (as_component >= 0x10000 && as_component != native_transform)
-        tf[2] = transform_from_gameobject(as_component);
-
-    // С чем сверяем найденную позицию. g_cam_pos НЕ годится: его пишет
-    // read_camera_transform_pose, то есть ровно тот путь, который на
-    // устройстве может не работать (ESP строит боксы из матрицы вида —
-    // transform_camera_mode = false, — и мусор в g_cam_pos годами никому не
-    // мешал). Сверяемся с позицией из матрицы вида: это та самая матрица,
-    // по которой игра рисует кадр, она всегда свежая. Из-за сверки с
-    // мусорным g_cam_pos фрикам и не включался.
-    Vec3 ref{};
-    bool know_cam = false;
-    if (g_native_camera) {
-        const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
-        Vec3 vpos{};
-        // Нулевая/мусорная матрица (сбой чтения) — не база: она даёт (0,0,0),
-        // по которому пустая ячейка пула «у начала координат» проходит сверку.
-        if (view_matrix_plausible(view) && camera_position_from_view(view, vpos) && vec3_is_finite(vpos)) {
-            ref = vpos; know_cam = true;
-        }
-    }
-    if (!know_cam && g_frame_cam_basis_valid && vec3_is_finite(g_frame_cam_pos)) {
-        ref = g_frame_cam_pos; know_cam = true;
-    }
-    if (!know_cam && g_cam_pose_valid && vec3_is_finite(g_cam_pos)) {
-        ref = g_cam_pos; know_cam = true;
-    }
-
-    int   best_k = -1;
-    float best_d = -1.f;
-    int   positions = 0;                 // сколько кандидатов дали годную позицию
-    auto evaluate = [&](int from, int to) {
-        for (int k = from; k < to; ++k) {
-            Vec3 pos{};
-            if (!read_transform_hierarchy_arrays(cand[k].m, cand[k].n, cand[k].i, pos)) continue;
-            if (!vec3_is_finite(pos)) continue;
-            ++positions;
-            if (!know_cam) { best_k = k; best_d = 0.f; return; }
-            const float dx = pos.x - ref.x, dy = pos.y - ref.y, dz = pos.z - ref.z;
-            const float d = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (best_k < 0 || d < best_d) { best_k = k; best_d = d; }
-            // Камера не может стоять в двух метрах от себя самой: нашли — выходим.
-            if (d < 2.0F) return;
-        }
-    };
-
-    // 1) раскладка, выученная по игрокам; 2) оба известных расположения
-    // TransformAccess на всех трёх указателях.
-    if (g_transform_hierarchy_layout_valid) {
-        const TransformHierarchyLayout& L = g_transform_hierarchy_layout;
-        for (int t = 0; t < 3 && tf[t]; ++t) {
-            cur_src = t;
-            const uint64_t data = rd_ptr(tf[t] + L.data_offset);
-            const int32_t  idx  = rd<int32_t>(tf[t] + L.index_offset);
-            uint64_t m = data ? rd_ptr(data + L.matrices_offset) : 0;
-            uint64_t n = data ? rd_ptr(data + L.indices_offset) : 0;
-            if (L.matrices_indirect) m = rd_ptr(m);
-            if (L.indices_indirect)  n = rd_ptr(n);
-            if (m && n && idx >= 0 && idx <= 100000) {
-                cand[count++] = {m, n, idx};
-                break;                    // раскладка одна — хватит первого
-            }
-        }
-    }
-    for (int t = 0; t < 3 && tf[t]; ++t) {
-        if (tf[t] == tf[0] && t > 0) continue;      // то же толкование — не надо
-        cur_src = t;
-        probe(tf[t], 0x38, 0x40);
-        probe(tf[t], 0x18, 0x20);
-    }
-    evaluate(0, count);
-
-    // 3) широкий перебор — только когда быстрое не дало ничего. Здесь другие
-    // смещения TransformAccess и все три указателя: на устройстве первые два
-    // прохода не нашли ни одной годной позиции, значит смещения сместились.
-    // Проверка та же (мировая позиция должна совпасть с камерой), поэтому
-    // ложного срабатывания не будет — только лишние чтения, и то при отказе.
-    if (best_k < 0 || best_d > 2.0F) {
-        static const uint64_t kExtended[][2] = {{0x20, 0x28}, {0x28, 0x30}, {0x30, 0x38},
-                                                {0x40, 0x48}, {0x10, 0x18}, {0x48, 0x50}};
-        const int saved = count;
-        for (int t = 0; t < 3 && tf[t]; ++t) {
-            if (tf[t] == tf[0] && t > 0) continue;
-            cur_src = t;
-            for (const auto& off : kExtended) probe(tf[t], off[0], off[1]);
-        }
-        // Лучший из быстрых остаётся лучшим: evaluate() сравнивается с ним,
-        // а не ищет заново, — иначе потеряли бы расстояние первого прохода.
-        evaluate(saved, count);
-    }
-
-    // Отказ объясняем полностью: какой трансформ, что дал компонентный путь,
-    // сколько кандидатов вообще дали позицию и насколько далеко лучший.
-    // Без этого по одной строке «массивы не читаются» не видно, где искать.
-    if (best_k < 0 || best_d > 2.0F) {
-        static double s_last = -1e9;
-        const double now = memio::now_seconds();
-        if (now - s_last >= 2.0) {
-            s_last = now;
-            LogLine("фрикам: перебор — трансформ 0x%llx, из компонента 0x%llx, кандидатов %d, позиций %d, ближайшее %.1f м",
-                    (unsigned long long)tf[0], (unsigned long long)tf[1], count, positions,
-                    (double)(best_d >= 0.f ? best_d : -1.f));
-            // Которое из трёх толкований дало позицию и что вообще нашлось.
-            // Без этого не видно, сломался путь GameObject или сама иерархия.
-            LogLine("фрикам: источники — кандидат %d из толкования %d, трансформы 0x%llx/0x%llx/0x%llx, камера %d",
-                    best_k, (best_k >= 0 ? cand_src[best_k] : -1),
-                    (unsigned long long)tf[0], (unsigned long long)tf[1],
-                    (unsigned long long)tf[2], (int)know_cam);
-        }
-        if (best_dist) *best_dist = (best_k >= 0 ? best_d : -1.f);
-        return false;
-    }
-    if (best_dist) *best_dist = best_d;
-    // Порог 2 м, а не полметра: g_cam_pos мог прийти из резервной матрицы вида
-    // (она считается по другому источнику и чуть расходится), и из-за жёсткого
-    // порога фрикам отказывался включаться там, где камера найдена верно.
-    matrices = cand[best_k].m; indices = cand[best_k].n; index = cand[best_k].i;
-    return true;
-}
 
 // Мировая TRS трансформа: идём вверх по родителям, как это делает Unity.
 static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_t index,
@@ -1458,103 +1299,144 @@ void esp_freecam_diag(int& code, float& dist) {
     dist = g_freecam_fail_dist;
 }
 
-// Массивы иерархии именно для трансформа камеры.
+// Слот трансформа камеры. Решается КАЖДЫЙ РАЗ С НУЛЯ, за анкором — ОБЪЕКТ
+// камеры (Camera -> GameObject -> Transform -> его «данные/индекс» в массивах
+// иерархии), а не кеш массивов и не перебор кандидатов.
 //
-// Почему не общий resolve_transform_arrays() с перебором 96 кандидатов: у
-// камеры есть ИЗВЕСТНАЯ точка — позиция из матрицы вида (той самой, по которой
-// игра рисует кадр), и известный трансформ (camera_transform(): GameObject
-// камеры -> её Transform). Значит годную пару массивов не надо угадывать по
-// «чья позиция ближе»: годится только та, которая даёт ровно позицию камеры.
-// Перебор же легко брал чужой трансформ, чья позиция случайно оказалась в
-// двух метрах, — и тогда фрикам двигал не камеру, а что-то рядом, а камера
-// оставалась привязанной к телу и каждые полсекунды прыгала между своей
-// точкой и телом (жалоба 19.09).
+// Почему с нуля, а не кеш (лог 19.09, жалоба на фрикам): фрикам зацепился за
+// слот «индекс 0, родитель -1» — пустая ячейка пула с нулевой матрицей, — и
+// камера «мерцала» между телом и целью. Кешёный слот переживает пересборку
+// иерархии (респавн, смена мира): массивы переразделены, индекс стал чужим
+// или пустым, а по кешу это не видно. За анкором в объекте камеры дыра
+// закрыта: указатель Transform читается из GameObject камеры каждый такт,
+// пара (данные, индекс) — из самого трансформа. А пустая ячейка не проходит
+// проверку: её мировая позиция — у начала координат, а камера в десятках
+// метров. Сверка — с позицией из матрицы вида (того самого, чем игра рисует
+// кадр): разошлись на 2.5+ м — это не слот камеры.
 //
-// Позиция «откуда сверять» обязана быть ЧЕСТНОЙ: нулевая матрица вида
-// (сбойное чтение) даёт (0,0,0), и по ней годной оказывается любая пустая
-// ячейка пула. view_matrix_plausible() такое чтение отклоняет, и тогда
-// резолвер отказывается целиком, а не «находит» камеру у начала координат.
-static bool resolve_camera_arrays(uint64_t& matrices, uint64_t& indices, int32_t& index,
-                                  Vec3& cam_pos, float& err_m) {
-    matrices = indices = 0; index = -1; err_m = -1.f;
-    if (!g_native_camera) return false;
+// Все чтения — в обход кэша блоков: это и есть «полностью через чтение
+// памяти игры» — ни одного запомненного между кадрами адреса.
+struct CamSlot {
+    uint64_t m = 0, n = 0;      // массивы matrices / indices
+    int32_t  idx = -1;
+    Vec3     pos{};             // мировая позиция камеры (по слоту)
+    Vec4     world_rot{};       // мировой поворот камеры (по слоту)
+    Vec4     local_rot{};       // СОБСТВЕННЫЙ локальный поворот слота (туда пишем)
+    Vec3     local_scale{};
+    Matrix34 slot{};            // весь слот (на запись: перенос/масштаб сохраняем)
+    Vec3     view_pos{};        // позиция камеры из матрицы вида (эталон)
+};
+
+static bool camera_transform_slot(CamSlot& out) {
+    if (g_pid <= 0 || !g_mem.bound() || !g_native_camera) return false;
+    // Кэш НА КАДР. Игра меняет иерархию только между своими кадрами, а все
+    // наши вызовы (поза для ESP, фрикам, аим) лежат между двумя рендерами —
+    // значит за кадр слот переехать не успевает, и разрешать его достаточно
+    // один раз: все потребители кадра получают ОДИН консистентный срез.
+    // Без кэша то же разрешение уходило бы трижды за кадр по ~80 свежих
+    // чтений — это секунды syscall'ов в минуту и просадки оверлея.
+    static CamSlot  s_cached{};
+    static uint64_t s_gen = 0;
+    static bool     s_ok = false;
+    const uint64_t gen = g_mem.frame_generation();
+    if (s_gen == gen) { out = s_cached; return s_ok; }
+    // Эталон: позиция камеры из матрицы вида. Без правдоподобной матрицы не
+    // решаем вовсе: нулевая матрица счёта даёт (0,0,0), и пустая ячейка
+    // «у начала координат» прошла бы сверку (это и был корень мерцания).
     const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
-    if (!view_matrix_plausible(view)) return false;
-    if (!camera_position_from_view(view, cam_pos) || !vec3_is_finite(cam_pos)) return false;
+    if (!view_matrix_plausible(view) ||
+        !camera_position_from_view(view, out.view_pos) ||
+        !vec3_is_finite(out.view_pos)) return false;
+
     const uint64_t gameobject = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
+    if (gameobject < 0x10000) return false;
     const uint64_t transform = transform_from_gameobject(gameobject);
-    if (!transform) return false;
-    // TransformAccess: данные +0x38, индекс +0x40 — подтверждено кодом самого
-    // Unity (libunity.so 0x7ed62c: читает [x0+0x38], пишет [x0+0x40], а при
-    // пустой иерархии подставляет [x0+0x28]).
-    const uint64_t data = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);
-    const int32_t  idx  = rd<int32_t>(transform + 0x40);
-    if (!data || idx < 0 || idx > 100000) return false;
-    static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
-    for (const auto& pr : kPairs) {
-        const uint64_t m0 = rd_ptr(data + pr[0]);
-        const uint64_t n0 = rd_ptr(data + pr[1]);
-        if (!m0 || !n0) continue;
-        // Каждый из указателей может быть ещё и таблицей указателей.
-        const uint64_t ms[2] = {m0, rd_ptr(m0)};
-        const uint64_t ns[2] = {n0, rd_ptr(n0)};
-        for (uint64_t m : ms) {
-            for (uint64_t n : ns) {
-                if (!m || !n) continue;
-                Vec3 pos{};
-                Vec4 rot{};
-                if (!read_transform_hierarchy_arrays(m, n, idx, pos, &rot)) continue;
-                if (!vec3_is_finite(pos)) continue;
-                const float dx = pos.x - cam_pos.x, dy = pos.y - cam_pos.y, dz = pos.z - cam_pos.z;
-                const float d = sqrtf(dx * dx + dy * dy + dz * dz);
-                if (err_m < 0.f || d < err_m) err_m = d;
-                // Позиция камеры из её же трансформа обязана совпасть с той,
-                // что в матрице вида: это один и тот же объект. Метр допуска
-                // закрывает расхождение на кадр (камера движется между чтениями).
-                if (d > 1.0F) continue;
-                matrices = m; indices = n; index = idx;
-                return true;
+    if (transform < 0x10000) return false;
+
+    // (данные, индекс)TransformAccess у трансформа. Три расположения, по
+    // достоверности:
+    //   1) +0x38/+0x40 — подтверждено кодом самого Unity (libunity.so читает
+    //      [x0+0x38] и пишет [x0+0x40]);
+    //   2) standalone-блок корня: когда +0x38 пуст, Unity кладёт данные в
+    //      собственный блок трансформа (transform+0x28), индекс — по +0x30
+    //      (то же видно в 0x7ED640/0x7F19E0). КАМЕРА — именно такой корень:
+    //      её родитель — LookRoot, а на слоте у камеры часто parent = -1,
+    //      т.е. именно standalone-раскладка;
+    //   3) +0x18/+0x20 — старые сборки.
+    struct Src { uint64_t data; int32_t idx; };
+    Src srcs[3] = {};
+    int nsrc = 0;
+    {
+        const uint64_t d = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);
+        const int32_t  i = rd<int32_t>(transform + 0x40);
+        if (d >= 0x10000 && i >= 0 && i <= 100000) srcs[nsrc++] = {d, i};
+        const int32_t i2 = rd<int32_t>(transform + 0x30);
+        if (i2 >= 0 && i2 <= 100000) srcs[nsrc++] = {transform + 0x28, i2};
+        const uint64_t d2 = rd_ptr(transform + 0x18);
+        const int32_t  i3 = rd<int32_t>(transform + 0x20);
+        if (d2 >= 0x10000 && i3 >= 0 && i3 <= 100000 &&
+            (!nsrc || d2 != srcs[0].data)) srcs[nsrc++] = {d2, i3};
+    }
+    // (matrices, indices) внутри блока данных: раскладки, известные из
+    // дизассемблера Unity (0x18/0x20 — рабочая; остальные — на старые
+    // сборки). Каждый указатель может быть ещё и таблицей указателей.
+    static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10},
+                                         {0x10, 0x18}, {0x20, 0x28}};
+    for (int si = 0; si < nsrc; ++si) {
+        const Src& s = srcs[si];
+        for (const auto& pr : kPairs) {
+            const uint64_t m0 = rd_ptr(s.data + pr[0]);
+            const uint64_t n0 = rd_ptr(s.data + pr[1]);
+            // Меньше 0x10000 — не указатель (в standalone-источнике здесь
+            // могут оказаться обычные поля трансформа): syscall'ов не тратим.
+            if (m0 < 0x10000 || n0 < 0x10000) continue;
+            const uint64_t ms[2] = {m0, rd_ptr(m0)};
+            const uint64_t ns[2] = {n0, rd_ptr(n0)};
+            for (uint64_t matrices : ms) {
+                for (uint64_t indices : ns) {
+                    if (!matrices || !indices) continue;
+                    Vec3 pos{};
+                    Vec4 rot{};
+                    Vec3 scale{};
+                    if (!read_transform_world_trs(matrices, indices, s.idx, pos, rot, scale, true))
+                        continue;
+                    const float dx = pos.x - out.view_pos.x;
+                    const float dy = pos.y - out.view_pos.y;
+                    const float dz = pos.z - out.view_pos.z;
+                    // 2.5 м: за кадр камера сдвигается на доли метра (даже в
+                    // фрикаме до 1 м при максимальной скорости), а чужая или
+                    // пустая ячейка — в десятках метров.
+                    if (dx * dx + dy * dy + dz * dz > 2.5F * 2.5F) continue;
+                    Matrix34 self{};
+                    if (!rd_fresh(matrices + (uint64_t)s.idx * sizeof(Matrix34), self)) continue;
+                    out.m = matrices;
+                    out.n = indices;
+                    out.idx = s.idx;
+                    out.pos = pos;
+                    out.world_rot = rot;
+                    out.local_rot = self.rotation;
+                    out.local_scale = {self.scale.x, self.scale.y, self.scale.z};
+                    out.slot = self;
+                    s_cached = out; s_gen = gen; s_ok = true;
+                    return true;
+                }
             }
         }
     }
-    return false;
-}
-
-// Массивы камеры ПРЯМО СЕЙЧАС — по раскладке, подтверждённой самим Unity.
-//
-// В libunity.so релиза функция мировой позиции трансформа (0x7F19D8) читает
-// [transform+0x38] (блок данных) и [transform+0x40] (индекс), внутри блока
-// берёт матрицы по [data+0x18], индексы родителей по [data+0x20] и ОБХОДИТ
-// цепочку родителей, собирая мировую матрицу на лету (шаг 0x30 = Matrix34).
-// Отсюда два вывода:
-//   * отдельного массива мировых матриц нет и кэш тут ни при чём: что лежит в
-//     локальной матрице, то игра и нарисует;
-//   * указатели живут в блоке данных трансформа, а игрушка этот блок
-//     ПЕРЕСОБИРАЕТ (переродитель костей, перестройка иерархии при спавне).
-//     Запомненные один раз при включении фрикама указатели устаревают, и мы
-//     писали в уже брошенный массив — отсюда «камера возвращается к телу»
-//     (жалобы 19.09), сколько ни пиши.
-// Поэтому указатели перечитываются на каждом такте писателя.
-static bool camera_arrays_now(uint64_t& matrices, uint64_t& indices, int32_t& index) {
-    if (!g_native_camera) return false;
-    const uint64_t gameobject = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
-    const uint64_t transform = transform_from_gameobject(gameobject);
-    if (!transform) return false;
-    uint64_t data = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);   // 0x38
-    int32_t  idx  = rd<int32_t>(transform + 0x40);
-    if (!data) {
-        // Данные ещё не инициализированы: Unity кладёт сюда собственный блок
-        // трансформа (+0x28) и берёт индекс из +0x30 (то же видно в 0x7ED640
-        // и 0x7F19E0).
-        data = transform + 0x28;
-        idx  = rd<int32_t>(transform + 0x30);
+    // Не нашли. В лог (раз в 2 с) — какая именно ступень провалилась:
+    // «нет данных у трансформа» или «есть, но слот не у камеры».
+    static double s_fail_at = -1e9;
+    if (memio::now_seconds() - s_fail_at >= 2.0) {
+        s_fail_at = memio::now_seconds();
+        LogLine("камера: слот не подтвердился — источников (данные/индекс) %d, в матрице вида (%.1f, %.1f, %.1f), трансформ=0x%llx",
+                nsrc, (double)out.view_pos.x, (double)out.view_pos.y, (double)out.view_pos.z,
+                (unsigned long long)transform);
     }
-    if (!data || idx < 0 || idx > 100000) return false;
-    matrices = rd_ptr(data + 0x18);
-    indices  = rd_ptr(data + 0x20);
-    if (!matrices || !indices) return false;
-    index = idx;
-    return true;
+    // Кэшируем и ОТКАЗ на кадр: несколько вызовов в одном кадре не должны
+    // повторять 80 чтений, чтобы получить тот же ответ.
+    out = CamSlot{};
+    s_cached = out; s_gen = gen; s_ok = false;
+    return false;
 }
 
 // Писатель-доминатор фрикама.
@@ -1724,7 +1606,6 @@ static int      g_fc_slot_miss = 0;
 // отлично (нулевая или чужая матрица). Поэтому каждый такт сверяем СЛОТ с
 // матрицей вида — единственным источником, который не зависит от наших
 // массивов (тот же путь, что и ESP). Два расхожих такта — слот старый.
-static int      g_fc_stale_miss = 0;
 // Камера на месте, слот верный, а РЕНДЕРНАЯ позиция так и не дошла до цели:
 // игра записывает локальную позицию камеры сама каждый кадр, и наша запись
 // проигрывает гонку. Это видно честно (позиция рендера ходит за телом), а
@@ -1792,62 +1673,57 @@ bool esp_freecam_set(bool on) {
         g_fc_addr.store(0);
         g_fc_writer_running.store(false);
         g_fc_last_m = g_fc_last_n = 0; g_fc_last_i = -1;
-        g_fc_slot_miss = 0; g_fc_stale_miss = 0; g_fc_stuck_since = 0.0;
+        g_fc_slot_miss = 0; g_fc_stuck_since = 0.0;
         g_fc_diag_ok = false;   // разбор в логе не должен цитировать прошлую сессию
-        if (g_freecam_saved_ok && g_freecam_matrices && g_freecam_index >= 0)
-            wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34) +
-                   offsetof(Matrix34, translation), &g_freecam_saved, sizeof(Vec3));
+        // Слот для восстановления решаем СВЕЖИМ: за время полёта иерархию
+        // могли пересобрать, и кешёный адрес — уже чужая ячейка.
+        if (g_freecam_saved_ok) {
+            CamSlot cs;
+            if (camera_transform_slot(cs))
+                wr_buf(cs.m + (uint64_t)cs.idx * sizeof(Matrix34) +
+                       offsetof(Matrix34, translation), &g_freecam_saved, sizeof(Vec3));
+        }
         g_freecam_on = false;
         g_freecam_saved_ok = false;
+        g_freecam_transform = 0;
+        g_freecam_matrices = 0; g_freecam_indices = 0; g_freecam_index = -1;
         LogLine("фрикам: выключен, камера вернулась к телу");
         return false;
     }
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
-    uint64_t transform = camera_transform();
+    const uint64_t transform = camera_transform();
     if (!transform) {
         g_freecam_fail = g_native_camera ? 2 : 1; g_freecam_fail_dist = -1.f;
         log_freecam_fail(g_native_camera ? 1 : 0, 0, -1.f);
         return false;
     }
-    uint64_t matrices = 0, indices = 0;
-    int32_t index = -1;
-    float dist = -1.f;
-    Vec3 cam_pos{};
-    if (!resolve_camera_arrays(matrices, indices, index, cam_pos, dist)) {
-        // Проверенный путь не дал массивов — тогда старый перебор: он хоть и
-        // грубее, но находил камеру до починки GameObject.
-        if (!resolve_transform_arrays(transform, matrices, indices, index, &dist)) {
-            g_freecam_fail = dist >= 0.f ? 4 : 3; g_freecam_fail_dist = dist;
-            log_freecam_fail(2, transform, dist);
-            return false;
-        }
-    }
-    Matrix34 m{};
-    if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), m)) {
+    // Слот решаем СВЕЖИМ, по объекту камеры и с проверкой по матрице вида:
+    // кешёные массивы после пересборки иерархии указывают на чужую или
+    // пустую ячейку (это и было «мерцает между телом и целью»).
+    CamSlot cs;
+    if (!camera_transform_slot(cs)) {
         g_freecam_fail = 3; g_freecam_fail_dist = -1.f;
-        log_freecam_fail(3, transform, -1.f);
+        log_freecam_fail(2, transform, -1.f);
         return false;
     }
-    Vec3 pos{}, scale{};
-    Vec4 rot{};
-    if (!read_transform_world_trs(matrices, indices, index, pos, rot, scale)) return false;
-    g_freecam_saved = {m.translation.x, m.translation.y, m.translation.z};
+    g_freecam_saved = {cs.slot.translation.x, cs.slot.translation.y, cs.slot.translation.z};
     g_freecam_saved_ok = true;
     g_freecam_transform = transform;
-    g_freecam_matrices = matrices;
-    g_freecam_indices = indices;
-    g_freecam_index = index;
-    // Запоминаем и в счётчике подмен: отсюда массивы считаются эталонными,
-    // и freecam_write() больше не имеет права их подменять.
-    g_fc_last_m = matrices; g_fc_last_n = indices; g_fc_last_i = index;
-    g_freecam_pos = pos;
+    g_freecam_matrices = cs.m;
+    g_freecam_indices = cs.n;
+    g_freecam_index = cs.idx;
+    g_fc_last_m = cs.m; g_fc_last_n = cs.n; g_fc_last_i = cs.idx;
+    // Старт — там, где камера ЕСТЬ на самом деле (из матрицы вида), а не там,
+    // где говорит слот: в пределах 2.5 м они совпадают, а матрица — это то,
+    // что видит игрок.
+    g_freecam_pos = cs.view_pos;
     g_freecam_on = true;
-    g_freecam_fail = 0; g_freecam_fail_dist = dist;   // 0 = порядок
-    g_fc_slot_miss = 0; g_fc_stale_miss = 0; g_fc_stuck_since = 0.0;
+    g_freecam_fail = 0; g_freecam_fail_dist = -1.f;   // 0 = порядок
+    g_fc_slot_miss = 0; g_fc_stuck_since = 0.0;
     g_fc_diag_ok = false;
-    LogLine("фрикам: включён, старт (%.1f, %.1f, %.1f), трансформ=0x%llx",
-            (double)pos.x, (double)pos.y, (double)pos.z,
-            (unsigned long long)transform);
+    LogLine("фрикам: включён, старт (%.1f, %.1f, %.1f), трансформ=0x%llx, слот=%d",
+            (double)cs.pos.x, (double)cs.pos.y, (double)cs.pos.z,
+            (unsigned long long)transform, (int)cs.idx);
     return true;
 }
 
@@ -1860,134 +1736,77 @@ bool esp_freecam_set(bool on) {
 // один кадр. Плюс камера перестаёт ехать вместе с телом: мировая цель стоит,
 // а локальная позиция пересчитывается под текущего родителя.
 static bool freecam_write() {
-    if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
-    if (!vec3_is_finite(g_freecam_pos)) return false;
-    // Слот проверяем КАЖДЫЙ такт, а не только на включении.
-    //
-    // Игра пересобирает иерархию (переродитель, респавн, смена мира): наш
-    // запомненный слот становится чьей-то переразделённой ячейкой, и пока мы
-    // пишем в неё, камера остаётся приклеена к телу (лог 19.09: «индекс 0,
-    // родитель -1, посчитано (0.0, 0.0, 0.0)», камера в 63 м, «затёрто
-    // игрой» — пул обнуляется). «Слот не читается» эту ситуацию НЕ ловит:
-    // переразделённая ячейка читается отлично — там нулевая или чужая
-    // матрица. Поэтому сверяем мировой позицию СЛОТА с позицией камеры из
-    // матрицы вида: единственный источник, который не зависит от наших
-    // массивов (тот же путь, что и ESP). Два расхожих такта подряд — слот
-    // старый, перерешаем проверенным путём.
-    //
-    // Раньше здесь каждый такт вызывался camera_arrays_now() — перебор по
-    // раскладке TransformAccess БЕЗ проверки. Он всегда возвращал один и тот
-    // же ответ («подмен массивов 0» в логе), и из-за этого выглядело будто
-    // массивы в порядке. На деле он находил НЕ тот слот, и проверенный слот
-    // подменялся непроверенным уже на первом такте после включения.
-    uint64_t m = g_freecam_matrices, n = g_freecam_indices;
-    int32_t  idx = g_freecam_index;
-    bool need_resolve = false;
-    {
-        Matrix34 probe{};
-        const bool slot_readable =
-            rd_exact(m + (uint64_t)idx * sizeof(Matrix34), probe) && matrix34_is_valid(probe);
-        if (!slot_readable) {
-            // Одного сбойного кадра мало: игра прямо сейчас может обновлять
-            // объект. После серии — перерешаем.
-            if (++g_fc_slot_miss >= 8) { g_fc_slot_miss = 0; need_resolve = true; }
-            else return false;
-        } else {
+    if (!g_freecam_on || !vec3_is_finite(g_freecam_pos)) return false;
+    // Слот КАЖДЫЙ такт — С НУЛЯ, по объекту камеры и с проверкой по матрице
+    // вида (camera_transform_slot). Кешёных массивов нет вообще: игра
+    // пересобирает иерархию (переродитель, респавн, смена мира), и запомненный
+    // слот становится чьей-то переразделённой ячейкой — в неё писать
+    // отлично, а камера остаётся приклеена к телу (лог 19.09: «индекс 0,
+    // родитель -1, посчитано (0.0, 0.0, 0.0)», камера в 63 м — и мерцание
+    // между телом и целью). Пустая или чужая ячейка по пути не проходит:
+    // её мировая позиция сверяется с матрицей вида на каждом такте.
+    CamSlot cs;
+    if (!camera_transform_slot(cs)) {
+        // Доверять некем: писать в непроверенную ячейку нельзя. Писатель
+        // останавливается, следующий такт попробует снова. g_freecam_fail не
+        // трогаем — он про включение, а это работающий фрикам без слота.
+        g_fc_addr.store(0);
+        if (++g_fc_slot_miss >= 8) {
             g_fc_slot_miss = 0;
-            Vec3 view_pos{};
-            bool have_view = false;
-            if (g_native_camera) {
-                const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
-                if (view_matrix_plausible(view) && camera_position_from_view(view, view_pos))
-                    have_view = vec3_is_finite(view_pos);
-            }
-            if (have_view) {
-                Vec3 slot_world{};
-                Vec4 rot{};
-                Vec3 scale{};
-                if (read_transform_world_trs(m, n, idx, slot_world, rot, scale, true) &&
-                    vec3_is_finite(slot_world)) {
-                    const float dx = slot_world.x - view_pos.x;
-                    const float dy = slot_world.y - view_pos.y;
-                    const float dz = slot_world.z - view_pos.z;
-                    const float d = sqrtf(dx * dx + dy * dy + dz * dz);
-                    if (d < 2.5F) {
-                        g_fc_stale_miss = 0;
-                    } else if (++g_fc_stale_miss >= 2) {
-                        g_fc_stale_miss = 0;
-                        need_resolve = true;
-                    }
-                    // Слот верный, а РЕНДЕРНАЯ камера не дошла до цели: игра
-                    // сама пишет позицию камеры каждый кадр, и наша запись
-                    // проигрывает гонку. Не «чиним» молча — говорим в лог
-                    // (после 1.5 с устойчивого состояния, один раз).
-                    const float tx = g_freecam_pos.x - view_pos.x;
-                    const float ty = g_freecam_pos.y - view_pos.y;
-                    const float tz = g_freecam_pos.z - view_pos.z;
-                    const float dt = sqrtf(tx * tx + ty * ty + tz * tz);
-                    const double now = memio::now_seconds();
-                    if (dt > 3.0F) {
-                        if (g_fc_stuck_since <= 0.0) g_fc_stuck_since = now;
-                        else if (g_fc_stuck_since < now - 1.5) {
-                            g_fc_stuck_since = -1.0;   // дошла до цели — не дублировать
-                            LogLine("фрикам: слот верный, а рендерная позиция не у цели (расхождение %.1f м) — игра пишет позицию камеры сама, фрикам её не удерживает",
-                                    (double)dt);
-                        }
-                    } else {
-                        g_fc_stuck_since = 0.0;
-                    }
-                }
-            }
-            // have_view == false — матрица вида временно не прочиталась:
-            // решений не принимаем (ни перерешение, ни сброс счётчиков).
-        }
-    }
-    if (need_resolve) {
-        Vec3 view_pos{};
-        float err = -1.f;
-        uint64_t nm = 0, nn = 0;
-        int32_t nidx = -1;
-        if (resolve_camera_arrays(nm, nn, nidx, view_pos, err) && nm && nn && nidx >= 0 &&
-            (nm != m || nn != n || nidx != idx)) {
-            g_fc_array_changes.fetch_add(1);
-            g_fc_last_m = nm; g_fc_last_n = nn; g_fc_last_i = nidx;
-            g_freecam_matrices = nm; g_freecam_indices = nn; g_freecam_index = nidx;
-            // Сохранённая на включении локальная позиция относится к СТАРОМУ
-            // слоту: восстанавливать по ней в новом — телепорт камеры. Игра
-            // пересобирает иерархию — значит её контроллер камеры жив и
-            // сам вернёт камеру к телу.
-            g_freecam_saved_ok = false;
-            LogLine("фрикам: слот перерешён — иерархию пересобрали, в матрице вида (%.1f, %.1f, %.1f), расхождение %.1f м",
-                    (double)view_pos.x, (double)view_pos.y, (double)view_pos.z, (double)err);
-            m = nm; n = nn; idx = nidx;
-        } else {
-            // Доверять некем: писать в непроверенную ячейку нельзя (это и
-            // было «телепортируется под землю»). Писатель останавливается,
-            // следующий такт попробует снова. g_freecam_fail НЕ трогаем —
-            // он про включение, а это работающий фрикам без доверенного слота.
-            g_fc_addr.store(0);
             static double s_last = -1e9;
             const double now = memio::now_seconds();
             if (now - s_last >= 2.0) {
                 s_last = now;
-                LogLine("фрикам: нет доверенного слота камеры — писатель остановлен до следующего такта");
+                LogLine("фрикам: нет подтверждённого слота камеры — писатель остановлен, пробую снова");
             }
-            return false;
         }
+        return false;
     }
-    if (!m || !n || idx < 0) return false;
-    // Поправку считаем здесь (60 Гц), а пишет её поток каждые полмиллисекунды:
-    // так наша позиция лежит в памяти почти всё время игрового кадра.
+    g_fc_slot_miss = 0;
+    if (g_fc_last_m != cs.m || g_fc_last_n != cs.n || g_fc_last_i != cs.idx) {
+        g_fc_array_changes.fetch_add(1);
+        g_fc_last_m = cs.m; g_fc_last_n = cs.n; g_fc_last_i = cs.idx;
+        // Слот переехал: сохранённая на включении локальная позиция относится
+        // к СТАРОМУ слоту, восстанавливать по ней в новом — телепорт камеры.
+        g_freecam_saved_ok = false;
+    }
+    g_freecam_matrices = cs.m; g_freecam_indices = cs.n; g_freecam_index = cs.idx;
+    // Цель -> локальная позиция: все чтения свежие (в обход кэша), см.
+    // freecam_local_for_target. Считаем здесь (60 Гц), а пишет поток каждые
+    // полмиллисекунды: наша позиция лежит в памяти почти всё время кадра.
     Vec3 local{};
     float gap = -1.f;
-    if (!freecam_local_for_target(m, n, idx, g_freecam_pos, local, gap)) return false;
-    const uint64_t addr = m + (uint64_t)idx * sizeof(Matrix34) + offsetof(Matrix34, translation);
+    if (!freecam_local_for_target(cs.m, cs.n, cs.idx, g_freecam_pos, local, gap)) {
+        g_fc_addr.store(0);
+        return false;
+    }
+    const uint64_t addr = cs.m + (uint64_t)cs.idx * sizeof(Matrix34) + offsetof(Matrix34, translation);
     g_fc_lx.store(local.x);
     g_fc_ly.store(local.y);
     g_fc_lz.store(local.z);
     g_fc_addr.store(addr);
     g_fc_gap.store(gap);
     freecam_writer_start();
+    // Слот верный, а РЕНДЕРНАЯ камера не дошла до цели: игра сама пишет
+    // позицию камеры каждый кадр, и наша запись проигрывает гонку. Не
+    // «чиним» молча — говорим в лог (после 1.5 с устойчивого состояния).
+    {
+        const float tx = g_freecam_pos.x - cs.view_pos.x;
+        const float ty = g_freecam_pos.y - cs.view_pos.y;
+        const float tz = g_freecam_pos.z - cs.view_pos.z;
+        const float dtv = sqrtf(tx * tx + ty * ty + tz * tz);
+        const double now = memio::now_seconds();
+        if (dtv > 3.0F) {
+            if (g_fc_stuck_since <= 0.0) g_fc_stuck_since = now;
+            else if (g_fc_stuck_since < now - 1.5) {
+                g_fc_stuck_since = -1.0;   // дошла до цели — не дублировать
+                LogLine("фрикам: слот верный, а рендерная позиция не у цели (расхождение %.1f м) — игра пишет позицию камеры сама, фрикам её не удерживает",
+                        (double)dtv);
+            }
+        } else {
+            g_fc_stuck_since = 0.0;
+        }
+    }
     return wr_buf(addr, &local, sizeof(Vec3));
 }
 
@@ -2012,12 +1831,12 @@ bool esp_freecam_move(float forward, float right, float up) {
 // далеко от того места, где мы её оставили, — это уже не наш фрикам.
 static void freecam_tick() {
     if (!g_freecam_on) return;
-    // Трансформ может умереть (смена мира, респавн), но и на живом объекте
-    // чтение иногда срывается. Одного сбойного кадра мало: по нему фрикам
-    // выключался бы сам посреди полёта.
-    if (g_freecam_transform && rd_ptr(g_freecam_transform)) g_freecam_miss = 0;
-    else if (++g_freecam_miss >= 8) { esp_freecam_set(false); return; }
-
+    // Сам по себе полёт фрикам НИКОГДА не выключает: слот решается каждый
+    // такт заново (freecam_write), сбой чтения — это пауза писателя, а не
+    // «фрикам сломан». Раньше 8 сбойных чтений делали esp_freecam_set(false):
+    // камера возвращалась к телу, а повторное включение через полсекунды
+    // пересчитывало старт по ТЕКУЩЕЙ камере (т.е. по телу) — и цель ездила
+    // между «где включил» и «где я сейчас», мерцая.
     // Что записали и что игра видит на самом деле: если она пересчитывает
     // матрицу камеры сама, числа разойдутся, и по одному логу сразу видно,
     // надо ли писать позицию каждый кадр.
@@ -2396,653 +2215,119 @@ bool esp_read_look_sensitivity(float& out) {
     return true;
 }
 
-// ---- Мемори-аим: запись в память игры -------------------------------------
+// ---- Мемори-аим: поворот камеры БЕЗ MouseLook (переделка 19.09) ---------
 //
-// Остальные поля Oxide.MouseLook, которыми аим вертит камерой. Сверены по
-// dump.cs релиза (класс Oxide.MouseLook, строка 205611) и беты (строка 207978)
-// — раскладка одна и та же, отличаются только обфусцированные имена (релиз
-// LGa/Ljj против беты KXf/KXz). Как и m_Sensitivity, это НЕ часть таблицы
-// переключения версий (tools/offsets).
+// Объект MouseLook на устройстве терялся: адрес локального игрока ездил в
+// кадре (17 переездов за полчаса), объект умирал на респавне, а выученный
+// один раз класс потом служил пропуском — и каждый такой сбой молчал аимом
+// («теряет MouseLook и не нацеливается»). Поэтому накопитель MouseLook и
+// вся проверка «чей это объект» убраны: камера вращается ПРЯМО — записью
+// локального поворота её собственного Transform. См. описание API в game.h.
 //
-// Семантика — из дизассемблера MouseLook.ZJo (libil2cpp.so, RVA 0x64e312c,
-// вызывается из MouseLook.Update каждый кадр):
-//
-//   0x64e31d0  ldr  s2, [x19, #0x34]        ; m_Sensitivity
-//   0x64e31e0  fmul s3, s1, s2              ; s1 — вертикаль ввода (+0x8C)
-//   0x64e31e4  fnmul s1, s1, s2             ; знак вертикали: -(y * sens)
-//   0x64e31ec  fmul s0, s0, s2              ; s0 — горизонталь ввода (+0x88)
-//   0x64e31f0  fcsel s1, s1, s3, eq         ; при m_Invert знак не переворачиваем
-//   0x64e32a0  fadd s0, s8, s2              ; прибавить к углам взгляда
-//   0x64e32ac  bl   #0x72fdd14              ; (поворот KCC/хендлера)
-//   0x64e32c0  stur d0, [x19, #0x4c]        ; углы: +0x4C тангаж, +0x50 рысканье
-//   0x64e3328  ldr  s1, [x19, x8]           ; x8 = 0x38/0x40: пределы взгляда
-//   0x64e3348  str  s0, [x19, #0x4c]        ; тангаж зажат пределами
-//   0x64e3418  ldr  s9, [x19, #0x4c]        ; и ушёл в localRotation камеры
-//   0x64e3470  fmul s1, s9, s0              ; s0 = 0,01745 — градусы в радианы
-//
-// Поле ввода (+0x88) игра ПЕРЕЗАПИСЫВАЕТ каждый кадр в MouseLook.ZJX
-// (RVA 0x64e412c) — туда она кладёт сдвиг касания; с гироскопом (объект +0x78)
-// ZJo вместо перезаписи прибавляет к полю показания гироскопа. Поэтому наша
-// запись — это «ввод одного кадра»: сыграет она или нет, зависит от того, кто
-// последним коснулся поля перед чтением. Контроллер в aim.cpp это учитывает:
-// шаг считается по остатку ошибки, а не по «мы записали, значит повернули».
-// Поля MouseLook (дамп билда 62a8534: oxiclean; в бете те же смещения, имена
-// обфусцированы и ротируют — сверено по dump.7z и dump_beta.7z).
-static constexpr uint64_t MOUSELOOK_INVERT = 0x30;   // m_Invert
-static constexpr uint64_t MOUSELOOK_ANGLES = 0x4C;   // Vector2 накопителя:
-                                                     // [0] rotationX (вверх — меньше),
-                                                     // [1] rotationY (вправо — больше)
-static constexpr uint64_t MOUSELOOK_GYRO   = 0x78;   // объект гироскопа (0 = выключен)
-// Кому принадлежит объект: MouseLook.m_EventHandler (+0x20) -> его manager
-// (+0xD0) — тот самый PlayerManager, из которого MouseLook и был взят. Держим
-// рядом с остальными полями, потому что это тот же класс из дампа
-// (Oxide_MouseLook_Fields, сверено по il2cpp.h).
-static constexpr uint64_t MOUSELOOK_EVENT_HANDLER = 0x20;
-// Поля ввода взгляда (+0x88) в расчёте больше нет: MouseLook.ZJo сначала зовёт
-// ZJX, а тот перезаписывает +0x88 вводом касания (str d0, [x19, #0x88], файл
-// libil2cpp.so 0x64e0364), и только потом ZJo читает это поле — наша запись
-// между кадрами игры стирается гарантированно.
+// Математика. Ошибка — угол между текущей осью камеры и направлением на
+// цель; ось доворота — cross(ось, цель), поэтому доворот не несёт с собой
+// крена (камера не заваливается). Дописывать нужно ЛОКАЛЬНЫЙ поворот:
+// мировой поворот камеры = мировой поворот родителя * локальный, а родителем
+// стоит LookRoot, который игра крутит своим вводом каждый кадр. Мировой
+// доворот переводится в систему родителя:
+//     ΔQ_local = Q_parent^-1 * ΔQ_world * Q_parent,
+//     Q_local' = ΔQ_local * Q_local.
+// Игра крутит LookRoot, мы — камеру: сумма каждый кадр гасит ошибку,
+// считанную от ТЕКУЩЕЙ позы (запись, перебитая вводом, компенсируется
+// следующим же тактом), и второй объект, в который «писать углы», — просто
+// нет.
 
-// MouseLook локального игрока. В отличие от esp_read_look_sensitivity() здесь
-// НИКАКИХ запасных вариантов «взять у любого игрока»: запись идёт в память, и
-// попади она в чужой объект — камеру крутило бы не тому игроку.
-// Класс MouseLook, у которого уже проверяли m_Sensitivity (см.
-// esp_mem_aim_look_params). Запись в память игры разрешена ТОЛЬКО в объект
-// этого класса: указатель по смещению мог остаться от умершего игрока или
-// указывать на чужой объект, а записать 8 байт не туда — это уже не «аим не
-// работает», а падение игры. Имя класса на устройстве может не читаться
-// (логи 14-16.09.2026: метаданные недоступны), поэтому опознаём по структуре.
-static std::atomic<uint64_t> g_mouse_look_klass{0};
-
-// Почему MouseLook не нашёлся. Нужен не для красоты: по одной строке «не найден
-// MouseLook» не видно, что чинить — адрес игрока потерялся, объект чужой или
-// просто чтение сорвалось. В лог пишется не чаще раза в 2 с, потому что при
-// настоящей поломке это событие идёт каждый кадр.
-enum class LookFail { none, noPlayer, wrongPlayer, noObject, badSens, wrongOwner };
-
-// Сообщение — прямо в вызове лога: отдельные русские литералы в game.cpp
-// проверка переводов считает подписями визуалов (строки лога она уже
-// пропускает, см. tools/lang/gen_tables.py). Пишем не чаще раза в 2 с: при
-// настоящей поломке событие идёт каждый кадр.
-static void log_look_fail(LookFail f, uint64_t mouse_look, float sens) {
-    static double s_last = -1e9;
-    const double now = memio::now_seconds();
-    if (now - s_last < 2.0) return;
-    s_last = now;
-    switch (f) {
-        case LookFail::noPlayer:
-            LogLine("память: MouseLook не найден — нет игрока");
-            break;
-        case LookFail::wrongPlayer:
-            LogLine("память: MouseLook не найден — адрес игрока не той структуры");
-            break;
-        case LookFail::noObject:
-            LogLine("память: MouseLook не найден — объекта нет (0x%llx)",
-                    (unsigned long long)mouse_look);
-            break;
-        case LookFail::badSens:
-            LogLine("память: MouseLook=0x%llx — чувствительность вне диапазона (%.3f)",
-                    (unsigned long long)mouse_look, (double)sens);
-            break;
-        default: break;
-    }
+static Vec4 quat_from_axis_angle(const Vec3& axis, float angle_rad) {
+    const float s = sinf(angle_rad * 0.5F);
+    return {axis.x * s, axis.y * s, axis.z * s, cosf(angle_rad * 0.5F)};
 }
 
-// Чужой MouseLook: адрес нашёлся и класс подошёл, но владелец (m_EventHandler
-// -> manager) — не тот игрок. В лог не чаще раза в 2 с: при подмене объекта
-// событие идёт каждый кадр.
-static void log_look_wrong_owner(uint64_t mouse_look, uint64_t owner, uint64_t player) {
-    static double s_last = -1e9;
-    const double now = memio::now_seconds();
-    if (now - s_last < 2.0) return;
-    s_last = now;
-    LogLine("память: MouseLook=0x%llx чужой — владелец 0x%llx, а не игрок 0x%llx",
-            (unsigned long long)mouse_look, (unsigned long long)owner, (unsigned long long)player);
-}
+bool esp_mem_aim_point_at(float tx, float ty, float tz, float max_step_deg,
+                          float& err_deg, float& applied_deg) {
+    err_deg = -1.f;
+    applied_deg = 0.f;
+    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+    const Vec3 target = {tx, ty, tz};
+    if (!vec3_is_finite(target) || max_step_deg <= 0.f) return false;
 
-// Игрок найден, но помечен как НЕ локальный (Mirror.isLocalPlayer = false).
-// Это ровно тот случай, который раньше проходил все проверки: MouseLook у
-// чужого игрока той же структуры, с той же чувствительностью, — и углы мы
-// писали ему, а своя камера не двигалась.
-static void log_look_not_local(uint64_t player, uint64_t mouse_look) {
-    static double s_last = -1e9;
-    const double now = memio::now_seconds();
-    if (now - s_last < 2.0) return;
-    s_last = now;
-    LogLine("память: игрок 0x%llx не локальный (isLocalPlayer=0) — MouseLook 0x%llx чужой",
-            (unsigned long long)player, (unsigned long long)mouse_look);
-}
+    // Камера: слот решается с нуля и подтверждён по матрице вида.
+    CamSlot cs;
+    if (!camera_transform_slot(cs)) return false;
+    if (!normalize_quaternion(cs.world_rot)) return false;
+    if (!normalize_quaternion(cs.local_rot)) return false;
 
-// MouseLook той же структуры, но его m_LookRoot стоит не у камеры: объект
-// чужого игрока или умершего. Проверка по геометрии, не по адресу.
-static void log_look_wrong_camera(uint64_t mouse_look, float dist) {
-    static double s_last = -1e9;
-    const double now = memio::now_seconds();
-    if (now - s_last < 2.0) return;
-    s_last = now;
-    LogLine("память: MouseLook=0x%llx не у камеры — m_LookRoot в %.1f м от неё",
-            (unsigned long long)mouse_look, (double)dist);
-}
+    // Ось камеры — её локальный -Z (Unity: камера смотрит вдоль -Z).
+    Vec3 fwd = rotate_vector(cs.world_rot, {0.f, 0.f, -1.f});
+    const float fl = sqrtf(fwd.x * fwd.x + fwd.y * fwd.y + fwd.z * fwd.z);
+    if (fl < 1e-4F) return false;
+    fwd = {fwd.x / fl, fwd.y / fl, fwd.z / fl};
 
-// Кому принадлежит этот MouseLook. Почему нельзя верить одному адресу: объект
-// лежит по указателю из игрока, но игрок мог уже умереть, а память — уехать
-// под другой объект, у которого класс в первом поле тот же. Тогда мы читаем и
-// пишем углы ЧУЖОГО игрока: камера не поворачивается, а в логе всё выглядит
-// исправным («MouseLook найден») — ровно то, что жалоба называет «мемори
-// теряет MouseLook». Связь проверяемая и дешёвая: m_EventHandler -> manager
-// обязан вернуть того игрока, из которого объект взят (два чтения). Если поле
-// не читается, владелец неизвестен — тогда решают остальные проверки.
-static uint64_t mouse_look_owner(uint64_t mouse_look) {
-    if (mouse_look < 0x10000) return 0;
-    const uint64_t handler = rd_ptr(mouse_look + MOUSELOOK_EVENT_HANDLER);
-    if (handler < 0x10000) return 0;
-    const uint64_t owner = rd_ptr(handler + EVENT_HANDLER_MANAGER_BACKREF);
-    return owner >= 0x10000 ? owner : 0;
-}
+    Vec3 d = {target.x - cs.pos.x, target.y - cs.pos.y, target.z - cs.pos.z};
+    if (!vec3_is_finite(d)) return false;
+    const float dist = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
+    if (dist < 0.05F) { err_deg = 0.f; return false; }   // цель в самой камере
+    d = {d.x / dist, d.y / dist, d.z / dist};
 
-// m_LookRoot — Transform, которым MouseLook вертит камеру (Oxide.MouseLook,
-// dump.cs релиза). По нему и опознаём «свой» объект.
-static constexpr uint64_t MOUSELOOK_LOOK_ROOT = 0x28;
-// Mirror помечает игрока, которым управляет это устройство:
-// NetworkBehaviour.netIdentity (+0x40) -> NetworkIdentity.isLocalPlayer
-// (+0x4A, bool). У остальных игроков флаг false — это единственный признак,
-// который читается у ЛЮБОГО игрока (в отличие от m_EventHandler: чужому
-// MouseLook'у ввод не нужен, поле пустое, и проверка владельца молчит).
-static constexpr uint64_t NETBEHAVIOUR_NET_IDENTITY   = 0x40;
-static constexpr uint64_t NETIDENTITY_IS_LOCAL_PLAYER = 0x4A;
+    const float dot = fwd.x * d.x + fwd.y * d.y + fwd.z * d.z;
+    Vec3 axis = {fwd.y * d.z - fwd.z * d.y,
+                 fwd.z * d.x - fwd.x * d.z,
+                 fwd.x * d.y - fwd.y * d.x};
+    const float alen = sqrtf(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+    // Ошибка: atan2(|cross|, dot) — стабилен и у 0, и у 180.
+    const float err = atan2f(alen, dot < -1.f ? -1.f : (dot > 1.f ? 1.f : dot));
+    err_deg = err * 57.29577951308232F;
+    // Мёртвая зона: внутри камера стоит. Без неё микро-дрожь точки прицела
+    // (анимация кости, упреждение) уходила бы в поворот — «мемори трясётся».
+    if (err_deg < 0.15F) return true;
+    if (alen < 1e-6F) return true;                        // цель строго по оси
+    axis = {axis.x / alen, axis.y / alen, axis.z / alen};
 
-// -1 — прочитать не удалось, 0 — чужой, 1 — локальный.
-static int player_is_local(uint64_t player) {
-    if (player < 0x10000) return -1;
-    const uint64_t identity = rd_ptr(player + NETBEHAVIOUR_NET_IDENTITY);
-    if (identity < 0x10000) return -1;
-    const uint8_t flag = rd<uint8_t>(identity + NETIDENTITY_IS_LOCAL_PLAYER);
-    if (flag != 0 && flag != 1) return -1;   // читается не флаг, а мусор
-    return flag ? 1 : 0;
-}
+    float step = err;
+    const float step_cap = max_step_deg * 0.017453292519943295F;
+    if (step > step_cap) step = step_cap;
 
-// Позиция камеры для сверки. Берём из матрицы вида: это та самая матрица, по
-// которой игра рисует кадр, она всегда свежая (g_cam_pos пишет тот путь,
-// который на устройстве как раз и ломается).
-static bool current_camera_position(Vec3& out) {
-    if (g_native_camera) {
-        const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
-        Vec3 v{};
-        // Нулевая матрица счёта даёт (0,0,0) — конечную точку, по которой
-        // честная проверка «LookRoot у камеры» ложно отклоняет нашу камеру.
-        if (view_matrix_plausible(view) && camera_position_from_view(view, v) && vec3_is_finite(v)) {
-            out = v; return true;
-        }
-    }
-    if (g_frame_cam_basis_valid && vec3_is_finite(g_frame_cam_pos)) { out = g_frame_cam_pos; return true; }
-    if (g_cam_pose_valid && vec3_is_finite(g_cam_pos)) { out = g_cam_pos; return true; }
-    return false;
-}
-
-// Крутит ли этот MouseLook нашу камеру. Проверка не по адресу и не по игроку,
-// а по геометрии: m_LookRoot — это трансформ-опора взгляда, камера висит на
-// нём ребёнком, поэтому расстояние между ними — метры. У чужого игрока
-// m_LookRoot стоит совсем в другом месте. Возврат: 1 — да, 0 — нет (проверено
-// и не сошлось), -1 — сверить не удалось ( чтение сорвалось — тогда решают
-// остальные проверки, как раньше).
-// Мировая позиция трансформа по ЕГО СОБСТВЕННЫМ массивам (данные +0x38,
-// индекс +0x40 — подтверждено кодом Unity). read_transform_hierarchy_position()
-// для этого не годится: она первой пробует раскладку, выученную по игрокам, и
-// для объекта камеры та уже устарела — оттого расстояние до камеры в логе
-// 19.09 всегда было «-1» (проверка молчала и никого не отвергала).
-static bool transform_position_direct(uint64_t transform, Vec3& out) {
-    if (transform < 0x10000) return false;
-    const uint64_t data = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);
-    const int32_t  idx  = rd<int32_t>(transform + 0x40);
-    if (!data || idx < 0 || idx > 100000) return false;
-    static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
-    for (const auto& pr : kPairs) {
-        const uint64_t m0 = rd_ptr(data + pr[0]);
-        const uint64_t n0 = rd_ptr(data + pr[1]);
-        if (!m0 || !n0) continue;
-        const uint64_t ms[2] = {m0, rd_ptr(m0)};
-        const uint64_t ns[2] = {n0, rd_ptr(n0)};
-        for (uint64_t m : ms)
-            for (uint64_t n : ns) {
-                Vec3 p{};
-                if (!m || !n) continue;
-                if (!read_transform_hierarchy_arrays(m, n, idx, p)) continue;
-                if (!vec3_is_finite(p)) continue;
-                out = p;
-                return true;
-            }
-    }
-    return false;
-}
-
-static int mouse_look_camera_distance(uint64_t mouse_look, float& dist) {
-    dist = -1.f;
-    if (mouse_look < 0x10000) return -1;
-    const uint64_t root = rd_ptr(mouse_look + MOUSELOOK_LOOK_ROOT);
-    if (root < 0x10000) return -1;
-    Vec3 p{}, cam{};
-    if (!transform_position_direct(root, p)) return -1;
-    if (!vec3_is_finite(p)) return -1;
-    if (!current_camera_position(cam)) return -1;
-    const float dx = p.x - cam.x, dy = p.y - cam.y, dz = p.z - cam.z;
-    dist = sqrtf(dx * dx + dy * dy + dz * dz);
-    return dist <= 8.0f ? 1 : 0;
-}
-
-// MouseLook, найденный от камеры, а не от игрока: идём по компонентам
-// GameObject камеры и ищем объект того же класса. Зачем: путь «GameController
-// -> локальный игрок -> PlayerManager.mouseLook» молча отдаёт объект ЧУЖОГО
-// игрока, если адрес игрока успел смениться (лог 19.09: за полчаса 17 разных
-// MouseLook, ни одного отказа), а камера — она одна, и привязка к ней не
-// зависит от того, кого игра сейчас считает локальным игроком.
-static uint64_t mouse_look_from_camera() {
-    if (!g_native_camera) return 0;
-    const uint64_t gameobject = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
-    if (gameobject < 0x10000) return 0;
-    const uint64_t data  = rd_ptr(gameobject + GAMEOBJECT_COMPONENT_ARRAY);
-    const int32_t  count = rd<int32_t>(gameobject + GAMEOBJECT_COMPONENT_COUNT);
-    if (data < 0x10000) return 0;
-    const int n = (count > 0 && count <= 64) ? count : 8;
-    const uint64_t known = g_mouse_look_klass.load();
-    // Класс должен быть уже выучен (по пути игрока). Без этого условие
-    // вырождается в «указатель похож на указатель», и на камере находится
-    // ЛЮБОЙ компонент: в логе 19.09 так нашёлся объект с чувствительностью
-    // 30.577 и инверсией — не MouseLook, а что-то рядом, и углы мы писали
-    // туда (отсюда «мемори не находит MouseLook» при живом объекте).
-    if (!known) return 0;
-    for (int i = 0; i < n; ++i) {
-        const uint64_t component =
-            rd_ptr(data + (uint64_t)i * GAMEOBJECT_COMPONENT_STRIDE + COMPONENT_PAIR_PTR);
-        if (component < 0x10000 || component == gameobject) continue;
-        if (rd_ptr(component + COMPONENT_GAMEOBJECT) != gameobject) continue;  // чужой слот
-        const uint64_t klass = rd_ptr(component);
-        if (known ? (klass != known) : (klass < 0x10000)) continue;
-        const float sens = rd<float>(component + MOUSE_LOOK_SENSITIVITY_OFFSET);
-        if (!std::isfinite(sens) || sens < 0.05F || sens > 100.0F) continue;
-        float angles[2] = {};
-        if (!rd_buf(component + MOUSELOOK_ANGLES, angles, sizeof(angles))) continue;
-        if (!std::isfinite(angles[0]) || !std::isfinite(angles[1])) continue;
-        if (fabsf(angles[0]) > 360.0F || fabsf(angles[1]) > 360.0F) continue;
-        return component;
-    }
-    return 0;
-}
-
-// ── MouseLook на кадр ───────────────────────────────────────────────────────
-//
-// Аим пишет углы тремя вызовами в одном кадре: параметры (чувствительность),
-// чтение накопителя, запись углов. До переделки каждый из них РЕШАЛ объект
-// заново полным путём (скан камеры + локальный игрок + владелец + геометрия
-// камеры), и сбой чтения на любом шаге давал разным вызовам разный ответ:
-// параметры брались с одного объекта, запись шла в другой, или вообще
-// никуда — и аим молчал несколько секунд. Объект был жив и на месте; кадр
-// просто не договорился сам с собой.
-//
-// Теперь объект решается ОДИН РАЗ в esp_mem_frame_begin(), и все три вызова
-// берут его из кадрового состояния. В пределах кадра чтение и запись не
-// могут расписаться по разным объектам, а «потеря на несколько секунд»
-// остаётся только тогда, когда объекта действительно нет — и это всегда
-// видно в логе (причина).
-//
-// Порядок решения:
-//   1) Последний подтверждённый объект проверяется по СОБСТВЕННОЙ структуре:
-//      класс + диапазон чувствительности + ссылка на владельца (m_EventHandler)
-//      + isLocalPlayer. Ключ — собственные поля объекта, а НЕ адрес игрока:
-//      адрес в кадре двигается (17 переездов за полчаса, лог 19.09), и ключ
-//      по нему убивал кеш ровно на тех кадрах, которые должны были
-//      переждать, — временный чужой адрес означал «игрок другой», объект
-//      выбрасывался. Сбой чтения кеш НЕ сбрасывает (игра обновляет объект
-//      посередине кадра); сбрасывает только настоящее несовпадение — чужой
-//      класс, чувствительность вне диапазона, подменённый владелец или
-//      переключившийся флаг «локальный».
-//   2) Нет объекта — поиск двумя путями, каждый с полным набором проверок:
-//      * локальный игрок: PlayerManager+0x70 → класс, чувствительность,
-//        обратная ссылка владельца на самого игрока, isLocalPlayer не 0,
-//        m_LookRoot у камеры;
-//      * камера: компоненты GameObject камеры → класс, чувствительность,
-//        правдоподобные углы, m_LookRoot у камеры.
-//      Состоятся оба и не совпали — выигрывает путь игрока (у него полная
-//      цепочка подтверждений). Смена объекта попадает в лог.
-//
-// Кадровое состояние — единственный источник объекта для аима.
-struct LookFrame {
-    uint64_t ml = 0;        // MouseLook кадра (0 — объекта нет)
-    bool     valid = false;
-    uint64_t player = 0;    // владеющий игрок (если известен)
-    int      source = -1;   // 0 — игрок, 1 — камера, 2 — кеш
-    int      local = -1;    // isLocalPlayer: 1/0/-1
-    float    cam_dist = -1.f;
-    float    sens = 0.f;
-    bool     invert = false;
-    bool     gyro = false;
-    LookFail why = LookFail::none;   // почему объекта нет
-};
-static LookFrame g_look_frame;
-
-// Откуда взят текущий MouseLook и что показали проверки. Пишется в ту же
-// строку лога, что и углы: по одной строке видно и объект, и то, почему он
-// считается своим.
-static uint64_t g_look_player_addr = 0; // игрок, которому объект принадлежит
-static int      g_look_source = -1;     // 0 — игрок, 1 — камера, 2 — кеш
-static int      g_look_local  = -1;     // isLocalPlayer: 1/0/-1
-static float    g_look_cam_dist = -1.f; // расстояние m_LookRoot..камера, м
-
-// Последний подтверждённый MouseLook — кеш на кадр. Ключ — собственные поля
-// объекта (класс, чувствительность, ссылка на владельца), НЕ адрес игрока.
-static uint64_t g_ml_obj = 0;
-static uint64_t g_ml_klass = 0;
-static float    g_ml_sens = 0.f;
-static uint64_t g_ml_handler = 0;   // m_EventHandler: связь с владельцем
-static uint64_t g_ml_owner = 0;     // владеющий игрок (если известен)
-static double   g_ml_at = -1e9;
-// Сколько верим кешу. Дольше — опаснее: после респавна объект мог быть
-// переиспользован под что-то другое, и писать туда нельзя. Шесть секунд
-// перекрывают паузы из лога устройства (объект пропадал на 0.5–1.5 с), а
-// проверка структуры каждый кадр страхует от подмены.
-static constexpr double kMlCacheSec = 6.0;
-
-// Самолечение выученного класса. g_mouse_look_klass учится один раз и потом
-// служит пропуском: писать можно только в объект ровно этого класса. Но если
-// выучился мусор (чтение сорвалось в момент обучения) или объект подменился
-// (респавн, техника, Spectator), все дальнейшие проверки идут против чужого
-// класса, и память-аим молчит до перезапуска игры — ровно то, на что жалуются:
-// «теряет MouseLook и перестаёт работать на какое-то время». Поэтому если
-// чужой класс идёт дольше двух секунд, забываем его и учим заново.
-static double s_look_mismatch_since = 0.0;
-static void look_mismatch(bool mismatch) {
-    const double now = memio::now_seconds();
-    if (!mismatch) { s_look_mismatch_since = 0.0; return; }
-    if (!s_look_mismatch_since) { s_look_mismatch_since = now; return; }
-    if (now - s_look_mismatch_since > 2.0 && g_mouse_look_klass.load()) {
-        g_mouse_look_klass.store(0);
-        s_look_mismatch_since = 0.0;
-        LogLine("память: класс MouseLook забыт — учу заново");
-    }
-}
-
-// Жив ли последний подтверждённый объект. Ключ — его собственные поля (см.
-// порядок решения над LookFrame). Важно, что чтение, сорвавшееся В НОЛЬ,
-// кеш не сбрасывает: сбой чтения происходит ровно в те же моменты, что и
-// потеря объекта, и кеш, погибший первым же кадром сбоя, — это и была
-// «потеря на несколько секунд». Сбрасываем только настоящее несовпадение:
-// чужой класс, чувствительность вне диапазона, подменённая ссылка на
-// владельца, переключившийся флаг «локальный» — это подмена, а не сбой.
-static bool mouse_look_cache_valid(uint64_t& ml, uint64_t& owner) {
-    ml = 0;
-    owner = 0;
-    const uint64_t obj = g_ml_obj;
-    if (!obj) return false;
-    if (memio::now_seconds() - g_ml_at > kMlCacheSec) return false;
-
-    const uint64_t klass = rd_ptr(obj);
-    if (klass && klass != g_ml_klass) {   // 0 = чтение сорвалось — кеш жив
-        look_mismatch(true);
-        return false;
-    }
-    const float sens = rd<float>(obj + MOUSE_LOOK_SENSITIVITY_OFFSET);
-    if (std::isfinite(sens) && (sens < 0.05F || sens > 100.0F)) {
-        look_mismatch(true);
-        return false;
-    }
-    if (g_ml_handler) {
-        const uint64_t handler = rd_ptr(obj + MOUSELOOK_EVENT_HANDLER);
-        if (handler && handler != g_ml_handler) {
-            look_mismatch(true);
-            return false;
-        }
-    }
-    if (g_ml_owner) {
-        const int local = player_is_local(g_ml_owner);
-        if (local == 0) {   // -1 = не прочиталось — кеш жив
-            look_mismatch(true);
-            return false;
-        }
-    }
-    look_mismatch(false);
-    g_ml_at = memio::now_seconds();
-    if (std::isfinite(sens)) g_ml_sens = sens;
-    ml = obj;
-    owner = g_ml_owner;
-    return true;
-}
-
-// Новый объект: два пути, каждый с полным набором проверок. Состоятся оба и
-// дали разные адреса — выигрывает путь игрока (у него полная цепочка:
-// структура + владелец + isLocalPlayer + геометрия).
-static bool resolve_mouse_look_full(uint64_t& ml, uint64_t& owner,
-                                    int& source, int& local, float& cam_dist,
-                                    LookFail& why) {
-    why = LookFail::none;
-    ml = 0; owner = 0; source = -1; local = -1; cam_dist = -1.f;
-
-    // Путь игрока.
-    uint64_t from_player = 0;
-    int p_local = -1;
-    float p_dist = -1.f;
-    uint64_t player = 0;
-    if (g_pid > 0 && g_il2cpp_base && g_mem.bound()) {
-        player = resolve_local_player();
-    }
-    if (!player) {
-        why = LookFail::noPlayer;
-    } else if (!g_player_manager_class || rd_ptr(player) != g_player_manager_class) {
-        why = LookFail::wrongPlayer;
-    } else {
-        const uint64_t candidate = rd_ptr(player + PLAYER_MOUSE_LOOK_OFFSET);
-        if (candidate < 0x10000) {
-            why = LookFail::noObject;
-        } else {
-            const uint64_t klass = rd_ptr(candidate);
-            const uint64_t known = g_mouse_look_klass.load();
-            const bool klass_ok = known ? klass == known : klass >= 0x10000;
-            const float sens = rd<float>(candidate + MOUSE_LOOK_SENSITIVITY_OFFSET);
-            const bool sens_ok = std::isfinite(sens) && sens >= 0.05F && sens <= 100.0F;
-            if (!klass_ok) {
-                why = LookFail::noObject;
-            } else if (!sens_ok) {
-                why = LookFail::badSens;
-            } else {
-                const uint64_t o = mouse_look_owner(candidate);
-                if (o && o != player) {
-                    log_look_wrong_owner(candidate, o, player);
-                    why = LookFail::wrongOwner;
-                } else {
-                    p_local = player_is_local(player);
-                    if (p_local == 0) {
-                        log_look_not_local(player, candidate);
-                        why = LookFail::wrongOwner;
-                    } else {
-                        const int drives = mouse_look_camera_distance(candidate, p_dist);
-                        if (drives == 0) {
-                            log_look_wrong_camera(candidate, p_dist);
-                            why = LookFail::wrongOwner;
-                        } else {
-                            from_player = candidate;
-                            owner = o ? o : player;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Путь камеры — добор: не зависит от адреса локального игрока.
-    uint64_t from_camera = mouse_look_from_camera();
-    if (from_camera) {
-        float c_dist = -1.f;
-        const int drives = mouse_look_camera_distance(from_camera, c_dist);
-        if (drives == 0) {
-            log_look_wrong_camera(from_camera, c_dist);
-            from_camera = 0;
-        } else {
-            if (drives < 0) c_dist = -1.f;
-            cam_dist = c_dist;
-        }
-    }
-
-    if (from_player) {
-        ml = from_player;
-        source = 0;
-        local = p_local;
-        cam_dist = p_dist;
-    } else if (from_camera) {
-        // Путь игрока не состоялся (нет игрока или сбой чтения) — объект
-        // камеры единственный кандидат. Проверки у него покороче (без
-        // владельца), но класс + чувствительность + геометрия прошли.
-        ml = from_camera;
-        source = 1;
-        local = -1;
-    } else {
-        return false;
-    }
-    return true;
-}
-
-// Присвоить найденный объект кадру и обновить отпечаток кеша.
-static void mouse_look_adopt(uint64_t ml, uint64_t owner, int source, int local,
-                             float cam_dist) {
-    g_look_frame = LookFrame{};
-    g_look_frame.ml = ml;
-    g_look_frame.valid = true;
-    g_look_frame.player = owner;
-    g_look_frame.source = source;
-    g_look_frame.local = local;
-    g_look_frame.cam_dist = cam_dist;
-    g_look_frame.sens = rd<float>(ml + MOUSE_LOOK_SENSITIVITY_OFFSET);
-    g_look_frame.invert = rd<uint8_t>(ml + MOUSELOOK_INVERT) != 0;
-    g_look_frame.gyro = rd_ptr(ml + MOUSELOOK_GYRO) >= 0x10000;
-
-    g_look_player_addr = owner;
-    g_look_source = source;
-    g_look_local = local;
-    g_look_cam_dist = cam_dist;
-
-    // Отпечаток кеша: собственные поля объекта, не адрес игрока.
-    g_ml_obj = ml;
-    const uint64_t klass = rd_ptr(ml);
-    if (klass >= 0x10000) {
-        g_ml_klass = klass;
-        g_mouse_look_klass.store(klass);
-    }
-    g_ml_sens = g_look_frame.sens;
-    g_ml_handler = rd_ptr(ml + MOUSELOOK_EVENT_HANDLER);
-    g_ml_owner = owner;
-    g_ml_at = memio::now_seconds();
-}
-
-
-bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro) {
-    // Объект и его параметры решены в esp_mem_frame_begin(): кадр один,
-    // объект один.
-    const LookFrame& f = g_look_frame;
-    if (!f.valid) {
-        log_look_fail(f.why, 0, 0.f);
-        return false;
-    }
-    deg_per_unit = f.sens;
-    invert_y     = f.invert;
-    gyro         = f.gyro;
-    return true;
-}
-
-
-// Накопитель углов: +0x4C rotationX (вверх — МЕНЬШЕ), +0x50 rotationY (вправо
-// — больше). Значения всегда в пределах обзора игры: их же клампит сам ZJo,
-// поэтому выход за +-360 означает, что читаем не тот объект.
-// Класс MouseLook, о котором уже писали в лог (адрес меняется на респавне).
-static std::atomic<uint64_t> g_look_addr_logged{0};
-
-// Куда именно писать угол — вопрос, на который статический разбор ответа не
-// даёт. По дизассемблеру Oxide.MouseLook (libil2cpp.so релиза):
-//   * Update() само правит только рысканье: [+0x50] = [+0x50] + CEm();
-//   * CEf() читает накопитель [+0x4C], прибавляет дельту (ввод x чувствительность),
-//     клампит и раскладывает в поворот m_LookRoot — то есть запись в +0x4C
-//     правильная и она survives;
-//   * но VR/CEO/ZBV (обработчики ввода вида, вызываются системой ввода через
-//     интерфейс, статических вызовов нет) КЛАДУТ в +0x4C значение из своего
-//     аргумента, а не прибавляют к прочитанному. Пока палец на экране, они
-//     идут каждый кадр — и тогда наша запись стирается прежде, чем сыграет.
-// Поэтому раз в секунду печатаем все четыре величины: какая из них совпадает
-// с углами камеры, та и есть настоящий рычаг.
-static double   s_look_fields_at = -1e9;
-// Держится ли наша запись до следующего кадра игры.
-static bool     s_look_wrote = false;
-static uint64_t s_look_wrote_addr = 0;
-static float    s_look_wrote_x = 0.f, s_look_wrote_y = 0.f;
-static double   s_look_wipe_at = -1e9;
-
-bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
-    // Тот самый объект, что и параметры: кадр не может прочитать накопитель
-    // с одного MouseLook и записать углы в другой (так было до переделки).
-    const LookFrame& f = g_look_frame;
-    if (!f.valid) return false;
-    const uint64_t mouse_look = f.ml;
-    float angles[2] = {};
-    if (!rd_buf(mouse_look + MOUSELOOK_ANGLES, angles, sizeof(angles))) return false;
-    if (!std::isfinite(angles[0]) || !std::isfinite(angles[1])) return false;
-    if (fabsf(angles[0]) > 360.0F || fabsf(angles[1]) > 360.0F) return false;
-    x_deg = angles[0];
-    y_deg = angles[1];
-    // Наша предыдущая запись: игра должна была развернуть её в поворот камеры
-    // в своём же кадре. Если к следующему чтению в накопителе уже другое число,
-    // запись стёрта — и писать туда бессмысленно.
-    if (s_look_wrote && s_look_wrote_addr == mouse_look) {
-        s_look_wrote = false;
-        const bool wiped = fabsf(angles[0] - s_look_wrote_x) > 0.01f ||
-                           fabsf(angles[1] - s_look_wrote_y) > 0.01f;
-        const double now = memio::now_seconds();
-        if (wiped && now - s_look_wipe_at >= 2.0) {
-            s_look_wipe_at = now;
-            LogLine("память: запись стёрта игрой — писали (%.2f, %.2f), читается (%.2f, %.2f)",
-                    (double)s_look_wrote_x, (double)s_look_wrote_y,
-                    (double)angles[0], (double)angles[1]);
-        }
-    }
-    // Все поля раз в секунду: ищем то, что совпадает с углами камеры.
+    const Vec4 dq = quat_from_axis_angle(axis, step);
+    // Мировой доворот -> система родителя (см. формулу в комментарии выше).
+    Vec4 qp = {0.f, 0.f, 0.f, 1.f};
     {
-        const double now = memio::now_seconds();
-        if (now - s_look_fields_at >= 1.0) {
-            s_look_fields_at = now;
-            float kqq[2] = {}, input[2] = {};
-            rd_buf(mouse_look + 0x70, kqq, sizeof(kqq));
-            rd_buf(mouse_look + 0x88, input, sizeof(input));
-            float cam_yaw = 0.f, cam_pitch = 0.f;
-            const bool have_cam = esp_aim_camera_angles(cam_yaw, cam_pitch);
-            LogLine("память: поля MouseLook=0x%llx накопитель=(%.2f, %.2f) KQQ=(%.2f, %.2f) ввод=(%.3f, %.3f) камера=%d (%.2f, %.2f)",
-                    (unsigned long long)mouse_look,
-                    (double)angles[0], (double)angles[1],
-                    (double)kqq[0], (double)kqq[1],
-                    (double)input[0], (double)input[1],
-                    (int)have_cam, (double)cam_pitch, (double)cam_yaw);
+        int32_t parent = -2;
+        if (!rd_fresh(cs.n + (uint64_t)cs.idx * sizeof(int32_t), parent)) return false;
+        if (parent >= 0) {
+            Vec3 ppos{};
+            Vec4 protp{};
+            Vec3 pscale{};
+            if (!read_transform_world_trs(cs.m, cs.n, parent, ppos, protp, pscale, true))
+                return false;   // родителя не прочитали — такт пропускаем, не пишем вслепую
+            qp = protp;
+        } else if (parent != -1) {
+            return false;
         }
     }
-    if (mouse_look != g_look_addr_logged.exchange(mouse_look))
-        LogLine("память: MouseLook=0x%llx углы=(%.2f, %.2f) чувствительность=%.3f инверсия=%d гироскоп=%d источник=%d игрок=0x%llx локальный=%d до камеры=%.1f м",
-                (unsigned long long)mouse_look, angles[0], angles[1],
-                (double)rd<float>(mouse_look + MOUSE_LOOK_SENSITIVITY_OFFSET),
-                (int)(rd<uint8_t>(mouse_look + MOUSELOOK_INVERT) != 0),
-                (int)(rd_ptr(mouse_look + MOUSELOOK_GYRO) >= 0x10000),
-                g_look_source, (unsigned long long)g_look_player_addr,
-                g_look_local, (double)g_look_cam_dist);
-    return true;
-}
+    const Vec4 qpinv = {-qp.x, -qp.y, -qp.z, qp.w};
+    Vec4 dq_local = multiply_quaternion(multiply_quaternion(qpinv, dq), qp);
+    Vec4 q_local = multiply_quaternion(dq_local, cs.local_rot);
+    if (!normalize_quaternion(q_local)) return false;
 
-bool esp_mem_aim_write_angles(float x_deg, float y_deg) {
-    // Запись в тот объект, с которого в этом же кадре прочитан накопитель.
-    const LookFrame& f = g_look_frame;
-    if (!f.valid) return false;
-    const uint64_t mouse_look = f.ml;
-    if (!std::isfinite(x_deg) || !std::isfinite(y_deg)) return false;
-    if (fabsf(x_deg) > 360.0F || fabsf(y_deg) > 360.0F) return false;
-    float angles[2] = {x_deg, y_deg};
-    const bool ok = wr_buf(mouse_look + MOUSELOOK_ANGLES, angles, sizeof(angles));
-    if (ok) {
-        s_look_wrote = true;
-        s_look_wrote_addr = mouse_look;
-        s_look_wrote_x = x_deg;
-        s_look_wrote_y = y_deg;
+    // Пишем слот целиком: поворот заменяем, перенос и масштаб сохраняем.
+    Matrix34 w = cs.slot;
+    w.rotation = q_local;
+    const uint64_t addr = cs.m + (uint64_t)cs.idx * sizeof(Matrix34);
+    if (!wr_buf(addr, &w, sizeof(Matrix34))) return false;
+    applied_deg = step * 57.29577951308232F;
+
+    // Раз в секунду: куда ведём, сколько осталось, что записали и в какой
+    // слот. По одной строке видно всё, что нужно для проверки на устройстве.
+    {
+        static double s_at = -1e9;
+        if (memio::now_seconds() - s_at >= 1.0) {
+            s_at = memio::now_seconds();
+            LogLine("аим: память точка камера=(%.1f, %.1f, %.1f) цель=(%.1f, %.1f, %.1f) до %.1f м осталось=%.1f° доворот=%.2f° слот=%d",
+                    (double)cs.pos.x, (double)cs.pos.y, (double)cs.pos.z,
+                    (double)target.x, (double)target.y, (double)target.z,
+                    (double)dist, err_deg, applied_deg, (int)cs.idx);
+        }
     }
-    return ok;
+    return true;
 }
 
 // Ось выстрела: PlayerManager.playerEventHandler (+0x78, класс Gum) ->
@@ -3282,56 +2567,20 @@ static bool read_camera_transform_pose(uint64_t native_transform, Vec3& position
     return false;
 }
 
-// Массивы камеры, найденные проверенным путём (resolve_camera_arrays). Держим
-// их: пара «данные/индекс» у трансформа камеры постоянна, пока жив мир, а
-// искать её заново каждый кадр — это четыре чтения и разбор иерархии на каждом
-// кадре оверлея.
-static uint64_t s_cam_arr_m = 0, s_cam_arr_n = 0;
-static int32_t  s_cam_arr_idx = -1;
-static bool     s_cam_arr_valid = false;
-static double   s_cam_arr_at = -1e9;
-
-// Поза камеры, сверенная с матрицей вида.
-//
-// Почему нельзя читать позу как попало (read_camera_transform_pose): она
-// первой пробует раскладку, ВЫУЧЕННУЮ ПО ИГРОКАМ, — и для камеры та годилась
-// ровно до первого переезда: массивы подменяются, а раскладка остаётся старой.
-// Тогда поза замирает в точке прошлого мира, и по ней строится вся проекция
-// (боксы, метки, углы цели), пока картинка игры рисуется по другой камере.
-// Отсюда и «маятник» аима: точка цели считалась по одной камере, а поворот —
-// по другой (жалоба 19.09).
-//
-// Здесь поза берётся из массивов, найденных по самой камере, и каждый кадр
-// сверяется с позицией из матрицы вида: разошлись — массивы устарели, ищем
-// заново. Во фрикаме сверку отключаем: там камера НАРОЧНО не там, где её
-// оставила игра, и матрица вида за ней просто не поспевает.
+// Поза камеры. Берётся из слота, решённого СВОИМ кадром (см.
+// camera_transform_slot), — поэтому она не может «замёрзнуть» в точке
+// прошлого мира: кеша массивов больше нет. Дополнительная сверка с ref
+// (позицией из матрицы вида, которую держит вызывающий) — для случая
+// verify: у вызывающего матрица может быть свежее нашей.
 static bool camera_pose_checked(Vec3& position, Vec4& rotation, const Vec3& ref, bool verify) {
-    if (!s_cam_arr_valid) {
-        Vec3 cp{};
-        float err = -1.f;
-        if (!resolve_camera_arrays(s_cam_arr_m, s_cam_arr_n, s_cam_arr_idx, cp, err)) return false;
-        s_cam_arr_valid = true;
-        s_cam_arr_at = memio::now_seconds();
-    }
-    Vec3 p{};
-    Vec4 r{};
-    if (!read_transform_hierarchy_arrays(s_cam_arr_m, s_cam_arr_n, s_cam_arr_idx, p, &r)) {
-        s_cam_arr_valid = false;
-        return false;
-    }
-    if (!vec3_is_finite(p)) { s_cam_arr_valid = false; return false; }
+    CamSlot cs;
+    if (!camera_transform_slot(cs)) return false;
     if (verify) {
-        const float dx = p.x - ref.x, dy = p.y - ref.y, dz = p.z - ref.z;
-        const float d2 = dx * dx + dy * dy + dz * dz;
-        // Два метра: камера успевает сдвинуться между двумя чтениями, а
-        // подмена массивов даёт десятки метров.
-        if (d2 > 2.0F * 2.0F) {
-            s_cam_arr_valid = false;
-            return false;
-        }
+        const float dx = cs.pos.x - ref.x, dy = cs.pos.y - ref.y, dz = cs.pos.z - ref.z;
+        if (dx * dx + dy * dy + dz * dz > 2.5F * 2.5F) return false;
     }
-    position = p;
-    rotation = r;
+    position = cs.pos;
+    rotation = cs.world_rot;
     return true;
 }
 
@@ -5505,6 +4754,9 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat
     box.aim_pts[slot][1] = screen.y;
     box.aim_yaw[slot] = yaw;
     box.aim_pitch[slot] = pitch;
+    box.aim_world[slot][0] = world.x;
+    box.aim_world[slot][1] = world.y;
+    box.aim_world[slot][2] = world.z;
     box.aim_valid[slot] = true;
     return true;
 }
@@ -6049,32 +5301,8 @@ bool esp_init(pid_t pid) {
 // syscall'а (см. mem_io.h).
 void esp_mem_frame_begin() {
     g_mem.frame_begin();
-    // MouseLook кадра: один раз на кадр, его берут все вызовы аима.
-    // Порядок: кеш по собственной структуре объекта → поиск двумя путями.
-    g_look_frame = LookFrame{};
-    uint64_t ml = 0;
-    uint64_t owner = 0;
-    if (mouse_look_cache_valid(ml, owner)) {
-        const int local = owner ? player_is_local(owner) : -1;
-        mouse_look_adopt(ml, owner, 2 /* кеш */, local, -1.f);
-        return;
-    }
-    int source = -1;
-    int local = -1;
-    float cam_dist = -1.f;
-    LookFail why = LookFail::none;
-    if (resolve_mouse_look_full(ml, owner, source, local, cam_dist, why)) {
-        mouse_look_adopt(ml, owner, source, local, cam_dist);
-    } else {
-        // Объекта в этом кадре нет: аим молчит, но причина в логе
-        // (не чаще раза в 2 с) — «потеря MouseLook» больше не молчит.
-        g_look_frame.why = why;
-        g_look_player_addr = 0;
-        g_look_source = -1;
-        g_look_local = -1;
-        g_look_cam_dist = -1.f;
-        log_look_fail(why, 0, 0.f);
-    }
+    // Мемори-аим MouseLook больше не держит: камера вращается прямо,
+    // каждый такт по слоту, решённому с нуля (esp_mem_aim_point_at).
 }
 
 // Привязка ещё жива? Дешёвая проверка (одно чтение): процесс мог перезапуститься
