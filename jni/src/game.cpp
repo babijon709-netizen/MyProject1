@@ -1601,12 +1601,77 @@ static bool camera_arrays_now(uint64_t& matrices, uint64_t& indices, int32_t& in
 // Пишем ЦЕЛУЮ Matrix34 (48 байт), а не только трансляцию: если игра затрёт
 // поворот нулями, матрица станет невалидной и камера уйдёт в ноль (лог
 // 21:10: за период 60 отсчётов — у цели 37, в нуле 23).
-static std::atomic<uint64_t> g_fc_addr[kFcMaxSlots];   // matrices + index*48
-struct FcMat { float tx, ty, tz, tw; float rx, ry, rz, rw; float sx, sy, sz, sw; };
-static std::atomic<float>    g_fc_lx[kFcMaxSlots], g_fc_ly[kFcMaxSlots], g_fc_lz[kFcMaxSlots];
-static FcMat                 g_fc_mat[kFcMaxSlots];
-static std::atomic<int>      g_fc_addr_n{0};
+//
+// ==== Что пишет фоновый писатель (и как оно туда попадает) =================
+// Писатель каждые 2 мс повторяет матрицы в памяти игры: игра пересчитывает
+// их из трансформа и затирала бы разовую запись. Раньше он ПЕРЕСЧИТЫВАЛ
+// матрицы сам из g_cam_*/g_freecam_pos/g_fc_mat — обычных глобалей, которые
+// главный поток переписывает прямо во время чтения. Писатель получал базис,
+// собранный из разных моментов времени (r новый, f старый), и писал ЧУЖУЮ
+// матрицу — кадры чередовались «наша/чужная», небо дёргалось (жалоба 20.09).
+//
+// Теперь главный поток ПУБЛИКУЕТ готовый снимок (view+proj+w2c одним блоком +
+// трансформы слотов), а писатель повторяет его как есть, ничего не считая.
+// Целостность снимка — сиквенс-локом: писатель повторяет чтение, пока счётчик
+// до и после не совпадёт. Писатель один: поколение g_fc_writer_gen убивает
+// опоздавший поток после быстрого выкл/вкл — иначе два писателя писали бы
+// разное каждые 2 мс и дрались друг с другом.
+struct FcSlotPayload {
+    uint64_t addr = 0;    // matrices + index*48
+    float    m[12] = {};  // Matrix34 целиком
+};
+struct FcPayload {
+    std::atomic<unsigned> seq{0};   // чётное = снимок целостен
+    uint64_t cam = 0;               // native Camera на момент публикации
+    bool     has_view = false;
+    float    view[16] = {};
+    float    proj[16] = {};
+    float    w2c[16] = {};
+    FcSlotPayload t[kFcMaxSlots];
+    int      tn = 0;
+};
+// Черновик главного потока (без seq): собирается в freecam_write, публикуется
+// целиком и только при успехе.
+struct FcSnapshotLocal {
+    uint64_t cam = 0;
+    bool     has_view = false;
+    float    view[16] = {};
+    float    proj[16] = {};
+    float    w2c[16] = {};
+    FcSlotPayload t[kFcMaxSlots];
+    int      tn = 0;
+};
+static FcPayload             g_fc_pub;
 static std::atomic<bool>     g_fc_writer_running{false};
+static std::atomic<unsigned> g_fc_writer_gen{0};
+
+static void freecam_payload_publish(const FcSnapshotLocal& s) {
+    g_fc_pub.seq.fetch_add(1);   // нечётное — идёт запись
+    g_fc_pub.cam = s.cam;
+    g_fc_pub.has_view = s.has_view;
+    memcpy(g_fc_pub.view, s.view, sizeof(s.view));
+    memcpy(g_fc_pub.proj, s.proj, sizeof(s.proj));
+    memcpy(g_fc_pub.w2c, s.w2c, sizeof(s.w2c));
+    for (int i = 0; i < kFcMaxSlots; ++i) g_fc_pub.t[i] = s.t[i];
+    g_fc_pub.tn = s.tn;
+    g_fc_pub.seq.fetch_add(1);   // чётное — снимок целостен
+}
+
+static void freecam_payload_clear() {
+    const FcSnapshotLocal empty{};
+    freecam_payload_publish(empty);
+}
+
+// Позиция камеры из матрицы вида: m[12..14] = -R^T·p. Нужно писателю, чтобы
+// посчитать, насколько «затёртое игрой» отличается от нашего (лог).
+static Vec3 freecam_pos_from_view(const float m[16]) {
+    const float tx = m[12], ty = m[13], tz = m[14];
+    Vec3 p = {-(m[0]*tx + m[4]*ty + m[8]*tz),
+              -(m[1]*tx + m[5]*ty + m[9]*tz),
+              -(m[2]*tx + m[6]*ty + m[10]*tz)};
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) p = {};
+    return p;
+}
 static std::atomic<unsigned> g_fc_write_count{0};
 static std::atomic<bool>     g_fc_write_failed{false};
 // Счётчик «игра затёрла нашу запись»: сколько раз за секунду позиция камеры
@@ -1771,119 +1836,93 @@ static std::atomic<unsigned> g_fc_samp{0}, g_fc_hit{0}, g_fc_zero{0}, g_fc_other
 
 static void freecam_writer_start() {
     if (g_fc_writer_running.exchange(true)) return;
-    std::thread([]() {
-        unsigned iter = 0;
-        double probe_at = memio::now_seconds() + 3.0;   // первая проба — через 3 с
+    // Поколение: быстрый выкл/вкл плодил двух писателей — старый ещё выходил,
+    // новый уже стартовал, и оба писали (разное) каждые 2 мс. Опоздавший,
+    // увидев чужое поколение, выходит сам.
+    const unsigned my_gen = g_fc_writer_gen.fetch_add(1) + 1;
+    std::thread([my_gen]() {
+        float last_block[48] = {};
+        bool  have_last = false;
+        uint64_t last_cam = 0;
         while (g_fc_writer_running.load()) {
-            const uint64_t addr = g_fc_addr[0].load();
-            const int      nslots = g_fc_addr_n.load();
-            if (addr && g_pid > 0) {
-                // Если пишем матрицу вида — 16 флотов, иначе 12 (Matrix34).
-                const bool is_view = (g_native_camera && addr == g_native_camera + CAMERA_VIEW_MATRIX);
-                FcMat m0 = g_fc_mat[0];
-                float v_full[16] = {};
-                float v[12] = {m0.tx, m0.ty, m0.tz, m0.tw, m0.rx, m0.ry, m0.rz, m0.rw, m0.sx, m0.sy, m0.sz, m0.sw};
-                if (is_view) {
-                    const Vec3 rr = g_cam_right, uu = g_cam_up, ff = g_cam_forward;
-                    if (vec3_is_finite(rr) && vec3_is_finite(uu) && vec3_is_finite(ff)) {
-                        v_full[0]=rr.x; v_full[4]=rr.y; v_full[8]=rr.z;  v_full[12]=-(rr.x * g_freecam_pos.x + rr.y * g_freecam_pos.y + rr.z * g_freecam_pos.z);
-                        v_full[1]=uu.x; v_full[5]=uu.y; v_full[9]=uu.z;  v_full[13]=-(uu.x * g_freecam_pos.x + uu.y * g_freecam_pos.y + uu.z * g_freecam_pos.z);
-                        v_full[2]=-ff.x; v_full[6]=-ff.y; v_full[10]=-ff.z; v_full[14]=-(-ff.x * g_freecam_pos.x + -ff.y * g_freecam_pos.y + -ff.z * g_freecam_pos.z);
-                        v_full[3]=0.f; v_full[7]=0.f; v_full[11]=0.f; v_full[15]=1.f;
+            if (my_gen != g_fc_writer_gen.load()) return;
+            // Целостный снимок под сиквенс-локом: главный поток публикует
+            // готовые матрицы, мы их только повторяем — ничего не считаем.
+            uint64_t cam = 0;
+            bool     has_view = false;
+            float    view[16] = {}, proj[16] = {}, w2c[16] = {};
+            FcSlotPayload t[kFcMaxSlots];
+            int tn = 0;
+            bool snapped = false;
+            for (int spin = 0; spin < 64; ++spin) {
+                const unsigned s0 = g_fc_pub.seq.load();
+                if (s0 & 1u) continue;   // идёт публикация — повторить
+                cam = g_fc_pub.cam;
+                has_view = g_fc_pub.has_view;
+                memcpy(view, g_fc_pub.view, sizeof(view));
+                memcpy(proj, g_fc_pub.proj, sizeof(proj));
+                memcpy(w2c, g_fc_pub.w2c, sizeof(w2c));
+                for (int i = 0; i < kFcMaxSlots; ++i) t[i] = g_fc_pub.t[i];
+                tn = g_fc_pub.tn;
+                if (s0 == g_fc_pub.seq.load()) { snapped = true; break; }
+            }
+            if (!snapped || g_pid <= 0 || (!has_view && tn <= 0)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
+            if (cam != last_cam) { have_last = false; last_cam = cam; }
+            if (has_view && cam) {
+                // Один блок 0x70..0x130 (view+proj+w2c лежат подряд): одна
+                // запись вместо трёх — игра не может вклинить свой пересчёт
+                // между нашей записью view и w2c и рассогласовать пару.
+                float block[48];
+                memcpy(block, view, sizeof(view));
+                memcpy(block + 16, proj, sizeof(proj));
+                memcpy(block + 32, w2c, sizeof(w2c));
+                const uint64_t vaddr = cam + CAMERA_VIEW_MATRIX;
+                float cur[48] = {};
+                // read_quiet: писатель вне кадра оверлея, блочный кэш ему
+                // чужой — сравнение только по свежим байтам.
+                const bool rd_ok = g_mem.read_quiet(vaddr, cur, sizeof(cur));
+                const bool same = rd_ok && memcmp(cur, block, sizeof(cur)) == 0;
+                if (!same) {
+                    // В памяти не наше нынешнее. Если это и не наше прошлое —
+                    // между записями писал кто-то ещё: это и есть «затёрто
+                    // игрой», только без остановки писателя (прежняя «проба»
+                    // молчала 24 мс каждые 2 с — и сама дёргала картинку).
+                    if (rd_ok && have_last && memcmp(cur, last_block, sizeof(cur)) != 0) {
+                        const Vec3 pm = freecam_pos_from_view(cur);
+                        const Vec3 ps = freecam_pos_from_view(block);
+                        const float dx = pm.x - ps.x, dy = pm.y - ps.y, dz = pm.z - ps.z;
+                        const float dd = sqrtf(dx * dx + dy * dy + dz * dz);
+                        g_fc_overwrites.fetch_add(1);
+                        if (std::isfinite(dd))
+                            g_fc_over_m.store(g_fc_over_m.load() + dd);
+                        g_fc_ow_x.store(pm.x); g_fc_ow_y.store(pm.y); g_fc_ow_z.store(pm.z);
+                    }
+                    if (wr_buf(vaddr, block, sizeof(block))) {
+                        g_fc_write_count.fetch_add(1);
+                        memcpy(last_block, block, sizeof(block));
+                        have_last = true;
                     } else {
-                        // базис ещё не готов — пишем то, что было
-                        v_full[0]=m0.tx; v_full[1]=m0.ty; v_full[2]=m0.tz; v_full[3]=m0.tw;
-                        v_full[4]=m0.rx; v_full[5]=m0.ry; v_full[6]=m0.rz; v_full[7]=m0.rw;
-                        v_full[8]=m0.sx; v_full[9]=m0.sy; v_full[10]=m0.sz; v_full[11]=m0.sw;
-                        v_full[12]=g_fc_lx[0].load(); v_full[13]=g_fc_ly[0].load(); v_full[14]=g_fc_lz[0].load(); v_full[15]=1.f;
+                        g_fc_write_failed.store(true);
                     }
                 }
-                // Проба «игрушка переписала нашу запись».
-                //
-                // Прежний счётчик читал адрес назад сразу после своей же
-                // записи. Это ничего не меряло: поток пишет две тысячи раз в
-                // секунду, поэтому чужое значение живёт в памяти не дольше
-                // полмиллисекунды из шестнадцати, и честный «0/с» получался бы
-                // даже при живом конфликте с игрой (лог 15:59: «затёрто игрой
-                // 0/с» при камере, которая болтается на десятки метров).
-                //
-                // Теперь раз в две секунды поток на один игровой кадр ЗАМОЛКАЕТ
-                // и каждые 2 мс читает адрес. Если его кто-то переписывает, это
-                // видно сразу — и по величине, и по самому значению.
-                const double now = memio::now_seconds();
-                if (now >= probe_at) {
-                    probe_at = now + 2.0;
-                    float worst = 0.f, seen[3] = {};
-                    int changes = 0;
-                    for (int s = 0; s < 12; ++s) {
-                        float c[3] = {};
-                        if (rd_buf(addr, c, sizeof(c))) {
-                            const float dx = c[0] - v[0], dy = c[1] - v[1], dz = c[2] - v[2];
-                            const float d = sqrtf(dx * dx + dy * dy + dz * dz);
-                            if (d > 0.05F) ++changes;
-                            if (d > worst) { worst = d; seen[0] = c[0]; seen[1] = c[1]; seen[2] = c[2]; }
-                        }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                    }
-                    if (changes) {
-                        g_fc_overwrites.fetch_add((unsigned)changes);
-                        g_fc_over_m.store(g_fc_over_m.load() + worst);
-                        g_fc_ow_x.store(seen[0]); g_fc_ow_y.store(seen[1]); g_fc_ow_z.store(seen[2]);
-                    }
-                    continue;      // в этом проходе не пишем
-                }
-                if (is_view) {
-                    if (wr_buf(addr, v_full, sizeof(v_full))) g_fc_write_count.fetch_add(1);
-                    else g_fc_write_failed.store(true);
-                    // worldToClip вторым слотом + флаги грязности + остальные трансформы
-                    Mat4 last_w2c{}; bool have_w2c=false;
-                    if (nslots > 1) {
-                        const uint64_t a2 = g_fc_addr[1].load();
-                        if (a2) {
-                            Mat4 proj = rd_m4(g_native_camera + CAMERA_PROJECTION_MATRIX);
-                            Mat4 vw{}; for(int i=0;i<16;++i) vw.m[i]=v_full[i];
-                            Mat4 w2c = mat_mul(proj, vw);
-                            wr_buf(a2, &w2c, sizeof(Mat4));
-                            last_w2c=w2c; have_w2c=true;
-                            uint8_t zero=0;
-                            wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
-                            wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
-                            wr_buf(g_native_camera + CAMERA_PREV_VIEW_PROJ, &w2c, sizeof(Mat4));
-                        }
-                    } else {
-                        uint8_t zero=0;
-                        wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
-                        wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
-                    }
-                    // Слоты 2.. — трансформы камеры (Matrix34)
-                    for (int sl = 2; sl < nslots; ++sl) {
-                        const uint64_t a2 = g_fc_addr[sl].load();
-                        if (!a2) continue;
-                        FcMat mm = g_fc_mat[sl];
-                        const float v2[12] = {mm.tx, mm.ty, mm.tz, mm.tw, mm.rx, mm.ry, mm.rz, mm.rw, mm.sx, mm.sy, mm.sz, mm.sw};
-                        if (wr_buf(a2, v2, sizeof(v2))) g_fc_write_count.fetch_add(1);
-                    }
-                } else {
-                    if (wr_buf(addr, v, sizeof(v))) g_fc_write_count.fetch_add(1);
-                    else g_fc_write_failed.store(true);
-                    for (int sl = 1; sl < nslots; ++sl) {
-                        const uint64_t a2 = g_fc_addr[sl].load();
-                        if (!a2) continue;
-                        // второй слот может быть worldToClip — 16 флотов
-                        const bool is_view2 = (g_native_camera && a2 == g_native_camera + CAMERA_WORLD_TO_CLIP);
-                        if (is_view2) {
-                            Mat4 proj = rd_m4(g_native_camera + CAMERA_PROJECTION_MATRIX);
-                            Mat4 vw{}; for(int i=0;i<16;++i) vw.m[i]=v_full[i];
-                            Mat4 w2c = mat_mul(proj, vw);
-                            if (wr_buf(a2, &w2c, sizeof(Mat4))) g_fc_write_count.fetch_add(1);
-                        } else {
-                            FcMat mm = g_fc_mat[sl];
-                            const float v2[12] = {mm.tx, mm.ty, mm.tz, mm.tw, mm.rx, mm.ry, mm.rz, mm.rw, mm.sx, mm.sy, mm.sz, mm.sw};
-                            if (wr_buf(a2, v2, sizeof(v2))) g_fc_write_count.fetch_add(1);
-                        }
-                    }
-                }
-                ++iter;
+                // Dirty гасим всегда, даже когда матрицы не писали: игру,
+                // пометившую кэш несвежим после нашей записи, тишина не
+                // остановит — она пересчитает вид из трансформа на рендере.
+                // Однобайтные записи атомарны — рваных чтений они не дают.
+                uint8_t zero = 0;
+                wr_buf(cam + CAMERA_VIEW_DIRTY, &zero, 1);
+                wr_buf(cam + CAMERA_PROJ_DIRTY, &zero, 1);
+            }
+            // Трансформы слотов — безусловно, как раньше: их игра
+            // переписывает каждый кадр из положения тела, сравнение с памятью
+            // здесь всегда «не сошлось» и только лишний syscall.
+            for (int sl = 0; sl < tn && sl < kFcMaxSlots; ++sl) {
+                if (!t[sl].addr) continue;
+                if (wr_buf(t[sl].addr, t[sl].m, sizeof(t[sl].m)))
+                    g_fc_write_count.fetch_add(1);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
@@ -1893,9 +1932,11 @@ static void freecam_writer_start() {
 bool esp_freecam_set(bool on) {
     if (on == g_freecam_on) return g_freecam_on;
     if (!on) {
-        for (int sl = 0; sl < kFcMaxSlots; ++sl) g_fc_addr[sl].store(0);
-        g_fc_addr_n.store(0);
         g_fc_writer_running.store(false);
+        freecam_payload_clear();   // опоздавший писатель не подхватит старье
+        // Даём витку писателя (2 мс) завершиться: иначе он допишет старый
+        // снимок уже после восстановления трансформа ниже.
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
         g_fc_last_m = g_fc_last_n = 0; g_fc_last_i = -1;
         if (g_freecam_saved_ok && g_freecam_matrices && g_freecam_index >= 0)
             wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34),
@@ -2048,6 +2089,12 @@ static bool freecam_write() {
     // её мало: игра может использовать worldToClip напрямую (projection *
     // view), и тогда вид остаётся на месте, а двигаются только визуалы ESP
     // (жалоба «двигаются только визуалы, а от своего лица стою на месте»).
+    // Черновик снимка для писателя: публикуется целиком и только при успехе.
+    // Писатель повторяет снимок как есть — матрицы здесь уже готовые, сам он
+    // ничего не считает (иначе кадры чередовались бы «наша/чуждая» и небо
+    // дёргалось — жалоба 20.09).
+    FcSnapshotLocal pub;
+    pub.cam = g_native_camera;
     // Пишем обе.
     bool ok = false;
     if (g_native_camera && g_cam_pose_valid) {
@@ -2058,58 +2105,48 @@ static bool freecam_write() {
             view.m[1] = u.x; view.m[5] = u.y; view.m[9]  = u.z; view.m[13] = -(u.x * g_freecam_pos.x + u.y * g_freecam_pos.y + u.z * g_freecam_pos.z);
             view.m[2] = -f.x; view.m[6] = -f.y; view.m[10] = -f.z; view.m[14] = -(-f.x * g_freecam_pos.x + -f.y * g_freecam_pos.y + -f.z * g_freecam_pos.z);
             view.m[3] = 0.f; view.m[7] = 0.f; view.m[11] = 0.f; view.m[15] = 1.f;
-            Mat4 proj = rd_m4(g_native_camera + CAMERA_PROJECTION_MATRIX);
-            Mat4 w2c = mat_mul(proj, view);
-            bool wok = false;
-            if (wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &view, sizeof(Mat4))) { ok = true; wok = true; }
-            if (wr_buf(g_native_camera + CAMERA_WORLD_TO_CLIP, &w2c, sizeof(Mat4))) ok = true;
-            // Фикс мерцания неба: не трогаем PREV_VIEW_PROJ (должен быть предыдущим кадром),
-            // а dirty сбрасываем в 0 чтобы игра не пересчитывала вид из трансформа.
-            {
-                uint8_t zero = 0;
-                wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
-                wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
+            // Projection читаем строго (rd_exact): сорванное чтение давало
+            // нулевой w2c — кадр с нулевой матрицей клипа, то есть чёрная
+            // вспышка. Невалидный proj — пропускаем вид целиком: писатель
+            // повторит прошлый хороший снимок, а не мусор.
+            Mat4 proj{};
+            bool proj_ok = false;
+            if (rd_exact(g_native_camera + CAMERA_PROJECTION_MATRIX, proj)) {
+                proj_ok = (proj.m[0] != 0.f);
+                for (int k = 0; proj_ok && k < 16; ++k)
+                    proj_ok = std::isfinite(proj.m[k]);
             }
-            // Для писателя — держим обе матрицы, но адрес — view (основная)
-            g_fc_lx[0].store(g_freecam_pos.x); g_fc_ly[0].store(g_freecam_pos.y); g_fc_lz[0].store(g_freecam_pos.z);
-            g_fc_addr[0].store(g_native_camera + CAMERA_VIEW_MATRIX);
-            g_fc_mat[0] = FcMat{view.m[0], view.m[1], view.m[2], view.m[3], view.m[4], view.m[5], view.m[6], view.m[7], view.m[8], view.m[9], view.m[10], view.m[11]};
-            g_fc_gap.store(0.f);
-            int total = 1;
-            // Вторым слотом — worldToClip, если есть место
-            if (wok) {
-                g_fc_addr[1].store(g_native_camera + CAMERA_WORLD_TO_CLIP);
-                g_fc_mat[1] = FcMat{w2c.m[0], w2c.m[1], w2c.m[2], w2c.m[3], w2c.m[4], w2c.m[5], w2c.m[6], w2c.m[7], w2c.m[8], w2c.m[9], w2c.m[10], w2c.m[11]};
-                total = 2;
+            if (proj_ok) {
+                Mat4 w2c = mat_mul(proj, view);
+                // Один блок 0x70..0x130 (view+proj+w2c лежат подряд, см.
+                // game_offsets.h): за один syscall пара view/w2c не может
+                // рассогласоваться пересчётом игры между двумя записями.
+                // PREV_VIEW_PROJ не трогаем (должен быть предыдущим кадром),
+                // а dirty сбрасываем в 0 чтобы игра не пересчитывала вид.
+                float block[48];
+                memcpy(block, view.m, sizeof(view.m));
+                memcpy(block + 16, proj.m, sizeof(proj.m));
+                memcpy(block + 32, w2c.m, sizeof(w2c.m));
+                if (wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, block, sizeof(block))) ok = true;
+                {
+                    uint8_t zero = 0;
+                    wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
+                    wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
+                }
+                memcpy(pub.view, view.m, sizeof(view.m));
+                memcpy(pub.proj, proj.m, sizeof(proj.m));
+                memcpy(pub.w2c, w2c.m, sizeof(w2c.m));
+                pub.has_view = true;
+                g_fc_gap.store(0.f);
             }
-            // Дополнительно пишем трансформ камеры (из g_fc_own), чтобы
-            // игра, если пересчитает вид из трансформа, всё равно осталась в цели.
-            // Это закрывает случай «двигаются только визуалы, а от первого лица стою».
-            for (int sl = 0; sl < g_fc_own_n && total < kFcMaxSlots; ++sl) {
-                const FcSlot& S = g_fc_own[sl];
-                if (!S.m || !S.n || S.i < 0) continue;
-                Vec3 local{}; float gap = -1.f;
-                if (!freecam_local_for_target(S.m, S.n, S.i, g_freecam_pos, local, gap)) continue;
-                Matrix34 cur_m{};
-                if (!rd_fresh(S.m + (uint64_t)S.i * sizeof(Matrix34), cur_m)) continue;
-                if (!matrix34_is_valid(cur_m)) { cur_m.rotation={0.f,0.f,0.f,1.f}; cur_m.scale={1.f,1.f,1.f,0.f}; }
-                cur_m.translation.x=local.x; cur_m.translation.y=local.y; cur_m.translation.z=local.z;
-                const uint64_t addr = S.m + (uint64_t)S.i * sizeof(Matrix34);
-                // Не затираем слоты 0/1 (view/worldToClip), пишем начиная с total
-                g_fc_lx[total].store(local.x); g_fc_ly[total].store(local.y); g_fc_lz[total].store(local.z);
-                g_fc_mat[total]=FcMat{cur_m.translation.x,cur_m.translation.y,cur_m.translation.z,cur_m.translation.w,cur_m.rotation.x,cur_m.rotation.y,cur_m.rotation.z,cur_m.rotation.w,cur_m.scale.x,cur_m.scale.y,cur_m.scale.z,cur_m.scale.w};
-                g_fc_addr[total].store(addr);
-                if (wr_buf(addr,&cur_m,sizeof(Matrix34))) ok=true;
-                ++total;
-            }
-            g_fc_addr_n.store(total);
         }
     }
-    if (!ok) {
-        // Если базис ещё не готов, хотя бы попробуем старый путь по трансформу
-        // как фолбэк, чтобы камера не зависала.
-        int fed = 0;
-        for (int sl = 0; sl < g_fc_own_n && fed < kFcMaxSlots; ++sl) {
+    // Трансформы слотов пишем всегда (и в снимок, и сразу): если игра всё же
+    // пересчитает вид из трансформа, он возьмётся уже из цели, а не из тела.
+    // Это же закрывает «двигаются только визуалы, а от первого лица стою».
+    {
+        bool first_gap = true;
+        for (int sl = 0; sl < g_fc_own_n && pub.tn < kFcMaxSlots; ++sl) {
             const FcSlot& S = g_fc_own[sl];
             if (!S.m || !S.n || S.i < 0) continue;
             Vec3 local{}; float gap = -1.f;
@@ -2119,15 +2156,18 @@ static bool freecam_write() {
             if (!matrix34_is_valid(cur_m)) { cur_m.rotation={0.f,0.f,0.f,1.f}; cur_m.scale={1.f,1.f,1.f,0.f}; }
             cur_m.translation.x=local.x; cur_m.translation.y=local.y; cur_m.translation.z=local.z;
             const uint64_t addr = S.m + (uint64_t)S.i * sizeof(Matrix34);
-            g_fc_lx[fed].store(local.x); g_fc_ly[fed].store(local.y); g_fc_lz[fed].store(local.z);
-            g_fc_mat[fed]=FcMat{cur_m.translation.x,cur_m.translation.y,cur_m.translation.z,cur_m.translation.w,cur_m.rotation.x,cur_m.rotation.y,cur_m.rotation.z,cur_m.rotation.w,cur_m.scale.x,cur_m.scale.y,cur_m.scale.z,cur_m.scale.w};
-            g_fc_addr[fed].store(addr);
-            if (fed==0) g_fc_gap.store(gap);
-            ++fed;
-            if (wr_buf(addr,&cur_m,sizeof(Matrix34))) ok=true;
+            FcSlotPayload& P = pub.t[pub.tn++];
+            P.addr = addr;
+            P.m[0]=cur_m.translation.x; P.m[1]=cur_m.translation.y; P.m[2]=cur_m.translation.z; P.m[3]=cur_m.translation.w;
+            P.m[4]=cur_m.rotation.x;    P.m[5]=cur_m.rotation.y;    P.m[6]=cur_m.rotation.z;    P.m[7]=cur_m.rotation.w;
+            P.m[8]=cur_m.scale.x;       P.m[9]=cur_m.scale.y;       P.m[10]=cur_m.scale.z;      P.m[11]=cur_m.scale.w;
+            if (wr_buf(addr, &cur_m, sizeof(Matrix34))) ok = true;
+            if (first_gap && gap >= 0.f) { if (!pub.has_view) g_fc_gap.store(gap); first_gap = false; }
         }
-        g_fc_addr_n.store(fed);
     }
+    if (ok) freecam_payload_publish(pub);
+    // Без успеха снимок не трогаем: писатель повторит прошлый хороший, а не
+    // полупустой черновик.
     if (!ok) return false;
     // Где камера на самом деле — по матрице вида (ею игра и рисует кадр).
     {
