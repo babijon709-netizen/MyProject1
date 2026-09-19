@@ -973,8 +973,20 @@ static void UpdateAimMemory(float dt) {
     if (haveCam && s_haveLast) {
         const float dYaw = WrapDeg180(camYaw - s_lastCamYaw);
         const float dPitch = camPitch - s_lastCamPitch;
-        if ((fabsf(s_pendYaw) > 0.05f && fabsf(dYaw) > kMemCamMoveEps) ||
-            (fabsf(s_pendPitch) > 0.05f && fabsf(dPitch) > kMemCamMoveEps)) {
+        // Ответом считаем только поворот, ПОХОЖИЙ на наш заказ: тот же знак и
+        // величина того же порядка. Раньше годилось любое движение камеры, а
+        // палец игрока крутит её почти всегда (огонь, прицеливание касанием) —
+        // чужой поворот засчитывался за наш, отклик подтверждался, и потолок
+        // шага поднимался с 2° до 90°. Дальше один такой шаг уводил прицел на
+        // пол-экрана, ошибка меняла знак, и аим шёл маятником (жалоба 19.09:
+        // «прицел ходит вправо влево как маятник»).
+        auto looks_like_our_move = [](float pend, float moved) {
+            if (fabsf(pend) <= 0.05f) return false;      // заказа не было
+            if (pend * moved <= 0.f) return false;       // камера пошла в другую сторону
+            const float a = fabsf(moved), p = fabsf(pend);
+            return a >= p * 0.25f && a <= p * 3.0f + 0.5f;
+        };
+        if (looks_like_our_move(s_pendYaw, dYaw) || looks_like_our_move(s_pendPitch, dPitch)) {
             s_memDiag.responded = true;
             s_noResponseTime = 0.f;
             s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
@@ -1047,7 +1059,11 @@ static void UpdateAimMemory(float dt) {
     if (fabsf(stepPitch) > fabsf(errPitch)) stepPitch = errPitch;
     // Пока запись не подтверждена откликом камеры, идём мелко: если камера
     // молчит, большой шаг только закрутит её в сторону при первом же ответе.
-    const float degCap = s_memDiag.responded ? kRageDegCap : kMemDegCapFirst;
+    // Потолок после подтверждения — не рейджевские 90°: одним таким шагом
+    // камера проскакивает цель, и начинаются качели. 12° за такт хватает,
+    // чтобы удержать цель, бегущую через прицел, и при этом остаток гасится
+    // не одним рывком, а двумя-тремя.
+    const float degCap = s_memDiag.responded ? kMemDegCapKnown : kMemDegCapFirst;
     if (stepYaw >  degCap) stepYaw =  degCap;
     if (stepYaw < -degCap) stepYaw = -degCap;
     if (stepPitch >  degCap) stepPitch =  degCap;

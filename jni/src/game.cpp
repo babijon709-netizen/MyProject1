@@ -1411,6 +1411,62 @@ void esp_freecam_diag(int& code, float& dist) {
     dist = g_freecam_fail_dist;
 }
 
+// Массивы иерархии именно для трансформа камеры.
+//
+// Почему не общий resolve_transform_arrays() с перебором 96 кандидатов: у
+// камеры есть ИЗВЕСТНАЯ точка — позиция из матрицы вида (той самой, по которой
+// игра рисует кадр), и известный трансформ (camera_transform(): GameObject
+// камеры -> её Transform). Значит годную пару массивов не надо угадывать по
+// «чья позиция ближе»: годится только та, которая даёт ровно позицию камеры.
+// Перебор же легко брал чужой трансформ, чья позиция случайно оказалась в
+// двух метрах, — и тогда фрикам двигал не камеру, а что-то рядом, а камера
+// оставалась привязанной к телу и каждые полсекунды прыгала между своей
+// точкой и телом (жалоба 19.09).
+static bool resolve_camera_arrays(uint64_t& matrices, uint64_t& indices, int32_t& index,
+                                  Vec3& cam_pos, float& err_m) {
+    matrices = indices = 0; index = -1; err_m = -1.f;
+    if (!g_native_camera) return false;
+    const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
+    if (!camera_position_from_view(view, cam_pos) || !vec3_is_finite(cam_pos)) return false;
+    const uint64_t gameobject = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
+    const uint64_t transform = transform_from_gameobject(gameobject);
+    if (!transform) return false;
+    // TransformAccess: данные +0x38, индекс +0x40 — подтверждено кодом самого
+    // Unity (libunity.so 0x7ed62c: читает [x0+0x38], пишет [x0+0x40], а при
+    // пустой иерархии подставляет [x0+0x28]).
+    const uint64_t data = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);
+    const int32_t  idx  = rd<int32_t>(transform + 0x40);
+    if (!data || idx < 0 || idx > 100000) return false;
+    static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
+    for (const auto& pr : kPairs) {
+        const uint64_t m0 = rd_ptr(data + pr[0]);
+        const uint64_t n0 = rd_ptr(data + pr[1]);
+        if (!m0 || !n0) continue;
+        // Каждый из указателей может быть ещё и таблицей указателей.
+        const uint64_t ms[2] = {m0, rd_ptr(m0)};
+        const uint64_t ns[2] = {n0, rd_ptr(n0)};
+        for (uint64_t m : ms) {
+            for (uint64_t n : ns) {
+                if (!m || !n) continue;
+                Vec3 pos{};
+                Vec4 rot{};
+                if (!read_transform_hierarchy_arrays(m, n, idx, pos, &rot)) continue;
+                if (!vec3_is_finite(pos)) continue;
+                const float dx = pos.x - cam_pos.x, dy = pos.y - cam_pos.y, dz = pos.z - cam_pos.z;
+                const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+                if (err_m < 0.f || d < err_m) err_m = d;
+                // Позиция камеры из её же трансформа обязана совпасть с той,
+                // что в матрице вида: это один и тот же объект. Метр допуска
+                // закрывает расхождение на кадр (камера движется между чтениями).
+                if (d > 1.0F) continue;
+                matrices = m; indices = n; index = idx;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool esp_freecam_set(bool on) {
     if (on == g_freecam_on) return g_freecam_on;
     if (!on) {
@@ -1433,10 +1489,15 @@ bool esp_freecam_set(bool on) {
     uint64_t matrices = 0, indices = 0;
     int32_t index = -1;
     float dist = -1.f;
-    if (!resolve_transform_arrays(transform, matrices, indices, index, &dist)) {
-        g_freecam_fail = dist >= 0.f ? 4 : 3; g_freecam_fail_dist = dist;
-        log_freecam_fail(2, transform, dist);
-        return false;
+    Vec3 cam_pos{};
+    if (!resolve_camera_arrays(matrices, indices, index, cam_pos, dist)) {
+        // Проверенный путь не дал массивов — тогда старый перебор: он хоть и
+        // грубее, но находил камеру до починки GameObject.
+        if (!resolve_transform_arrays(transform, matrices, indices, index, &dist)) {
+            g_freecam_fail = dist >= 0.f ? 4 : 3; g_freecam_fail_dist = dist;
+            log_freecam_fail(2, transform, dist);
+            return false;
+        }
     }
     Matrix34 m{};
     if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), m)) {
@@ -2025,13 +2086,43 @@ static bool current_camera_position(Vec3& out) {
 // m_LookRoot стоит совсем в другом месте. Возврат: 1 — да, 0 — нет (проверено
 // и не сошлось), -1 — сверить не удалось ( чтение сорвалось — тогда решают
 // остальные проверки, как раньше).
+// Мировая позиция трансформа по ЕГО СОБСТВЕННЫМ массивам (данные +0x38,
+// индекс +0x40 — подтверждено кодом Unity). read_transform_hierarchy_position()
+// для этого не годится: она первой пробует раскладку, выученную по игрокам, и
+// для объекта камеры та уже устарела — оттого расстояние до камеры в логе
+// 19.09 всегда было «-1» (проверка молчала и никого не отвергала).
+static bool transform_position_direct(uint64_t transform, Vec3& out) {
+    if (transform < 0x10000) return false;
+    const uint64_t data = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);
+    const int32_t  idx  = rd<int32_t>(transform + 0x40);
+    if (!data || idx < 0 || idx > 100000) return false;
+    static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
+    for (const auto& pr : kPairs) {
+        const uint64_t m0 = rd_ptr(data + pr[0]);
+        const uint64_t n0 = rd_ptr(data + pr[1]);
+        if (!m0 || !n0) continue;
+        const uint64_t ms[2] = {m0, rd_ptr(m0)};
+        const uint64_t ns[2] = {n0, rd_ptr(n0)};
+        for (uint64_t m : ms)
+            for (uint64_t n : ns) {
+                Vec3 p{};
+                if (!m || !n) continue;
+                if (!read_transform_hierarchy_arrays(m, n, idx, p)) continue;
+                if (!vec3_is_finite(p)) continue;
+                out = p;
+                return true;
+            }
+    }
+    return false;
+}
+
 static int mouse_look_camera_distance(uint64_t mouse_look, float& dist) {
     dist = -1.f;
     if (mouse_look < 0x10000) return -1;
     const uint64_t root = rd_ptr(mouse_look + MOUSELOOK_LOOK_ROOT);
     if (root < 0x10000) return -1;
     Vec3 p{}, cam{};
-    if (!read_transform_hierarchy_position(root, p)) return -1;
+    if (!transform_position_direct(root, p)) return -1;
     if (!vec3_is_finite(p)) return -1;
     if (!current_camera_position(cam)) return -1;
     const float dx = p.x - cam.x, dy = p.y - cam.y, dz = p.z - cam.z;
@@ -2054,6 +2145,12 @@ static uint64_t mouse_look_from_camera() {
     if (data < 0x10000) return 0;
     const int n = (count > 0 && count <= 64) ? count : 8;
     const uint64_t known = g_mouse_look_klass.load();
+    // Класс должен быть уже выучен (по пути игрока). Без этого условие
+    // вырождается в «указатель похож на указатель», и на камере находится
+    // ЛЮБОЙ компонент: в логе 19.09 так нашёлся объект с чувствительностью
+    // 30.577 и инверсией — не MouseLook, а что-то рядом, и углы мы писали
+    // туда (отсюда «мемори не находит MouseLook» при живом объекте).
+    if (!known) return 0;
     for (int i = 0; i < n; ++i) {
         const uint64_t component =
             rd_ptr(data + (uint64_t)i * GAMEOBJECT_COMPONENT_STRIDE + COMPONENT_PAIR_PTR);
@@ -2577,6 +2674,25 @@ static Mat4 mat_world_to_camera(const Vec3& position, const Vec4& rotation) {
     return view;
 }
 
+// Базис камеры из матрицы вида. Строки поворота — это оси камеры в мировых
+// координатах (Right, Up, и «назад»): камера смотрит вдоль -Z своей системы.
+// Нужно, когда живая поза недоступна, а матрица вида есть: по ней тогда и
+// позиция, и направления, — то есть ровно то, чем игра рисует кадр.
+static bool camera_basis_from_view(const Mat4& view, Vec3& right, Vec3& up, Vec3& forward) {
+    right   = {mat_get(view, 0, 0), mat_get(view, 0, 1), mat_get(view, 0, 2)};
+    up      = {mat_get(view, 1, 0), mat_get(view, 1, 1), mat_get(view, 1, 2)};
+    forward = {-mat_get(view, 2, 0), -mat_get(view, 2, 1), -mat_get(view, 2, 2)};
+    if (!vec3_is_finite(right) || !vec3_is_finite(up) || !vec3_is_finite(forward)) return false;
+    const float rl = sqrtf(right.x * right.x + right.y * right.y + right.z * right.z);
+    const float ul = sqrtf(up.x * up.x + up.y * up.y + up.z * up.z);
+    const float fl = sqrtf(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+    if (!(rl > 1e-4F && ul > 1e-4F && fl > 1e-4F)) return false;
+    right = {right.x / rl, right.y / rl, right.z / rl};
+    up = {up.x / ul, up.y / ul, up.z / ul};
+    forward = {forward.x / fl, forward.y / fl, forward.z / fl};
+    return true;
+}
+
 static bool camera_position_from_view(const Mat4& view, Vec3& position) {
     // For orthonormal worldToCamera: cam_pos = -R^T * t
     float r00 = mat_get(view, 0, 0), r01 = mat_get(view, 0, 1), r02 = mat_get(view, 0, 2);
@@ -2635,6 +2751,59 @@ static bool read_camera_transform_pose(uint64_t native_transform, Vec3& position
     return false;
 }
 
+// Массивы камеры, найденные проверенным путём (resolve_camera_arrays). Держим
+// их: пара «данные/индекс» у трансформа камеры постоянна, пока жив мир, а
+// искать её заново каждый кадр — это четыре чтения и разбор иерархии на каждом
+// кадре оверлея.
+static uint64_t s_cam_arr_m = 0, s_cam_arr_n = 0;
+static int32_t  s_cam_arr_idx = -1;
+static bool     s_cam_arr_valid = false;
+static double   s_cam_arr_at = -1e9;
+
+// Поза камеры, сверенная с матрицей вида.
+//
+// Почему нельзя читать позу как попало (read_camera_transform_pose): она
+// первой пробует раскладку, ВЫУЧЕННУЮ ПО ИГРОКАМ, — и для камеры та годилась
+// ровно до первого переезда: массивы подменяются, а раскладка остаётся старой.
+// Тогда поза замирает в точке прошлого мира, и по ней строится вся проекция
+// (боксы, метки, углы цели), пока картинка игры рисуется по другой камере.
+// Отсюда и «маятник» аима: точка цели считалась по одной камере, а поворот —
+// по другой (жалоба 19.09).
+//
+// Здесь поза берётся из массивов, найденных по самой камере, и каждый кадр
+// сверяется с позицией из матрицы вида: разошлись — массивы устарели, ищем
+// заново. Во фрикаме сверку отключаем: там камера НАРОЧНО не там, где её
+// оставила игра, и матрица вида за ней просто не поспевает.
+static bool camera_pose_checked(Vec3& position, Vec4& rotation, const Vec3& ref, bool verify) {
+    if (!s_cam_arr_valid) {
+        Vec3 cp{};
+        float err = -1.f;
+        if (!resolve_camera_arrays(s_cam_arr_m, s_cam_arr_n, s_cam_arr_idx, cp, err)) return false;
+        s_cam_arr_valid = true;
+        s_cam_arr_at = memio::now_seconds();
+    }
+    Vec3 p{};
+    Vec4 r{};
+    if (!read_transform_hierarchy_arrays(s_cam_arr_m, s_cam_arr_n, s_cam_arr_idx, p, &r)) {
+        s_cam_arr_valid = false;
+        return false;
+    }
+    if (!vec3_is_finite(p)) { s_cam_arr_valid = false; return false; }
+    if (verify) {
+        const float dx = p.x - ref.x, dy = p.y - ref.y, dz = p.z - ref.z;
+        const float d2 = dx * dx + dy * dy + dz * dz;
+        // Два метра: камера успевает сдвинуться между двумя чтениями, а
+        // подмена массивов даёт десятки метров.
+        if (d2 > 2.0F * 2.0F) {
+            s_cam_arr_valid = false;
+            return false;
+        }
+    }
+    position = p;
+    rotation = r;
+    return true;
+}
+
 static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view) {
     if (!native_cam) return false;
 
@@ -2642,15 +2811,19 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     static Mat4 s_last_proj{};
     static bool s_last_ok = false;
 
-    // Fresh view from the Camera's live Transform (cam+0x20). The +0x70 cache is
-    // only rebuilt inside Unity getters when dirty-flag +0x502 is set — we never
-    // run those getters, so raw +0x70 drifts while the camera moves.
+    // Матрица вида из кеша камеры (+0x70) — эталон: по ней игра и рисует кадр.
+    // Живая поза берётся только если она с этим эталоном согласна.
+    const Mat4 cached_view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
+    Vec3 ref_pos{};
+    const bool have_ref = matrix_is_finite(cached_view) && camera_position_from_view(cached_view, ref_pos) &&
+                          vec3_is_finite(ref_pos);
+
     bool have_live_view = false;
     uint64_t native_transform = camera_transform_of(native_cam);
-    if (native_transform) {
+    if (native_transform && have_ref) {
         Vec3 cam_pos{};
         Vec4 cam_rot{};
-        bool pose_ok = read_camera_transform_pose(native_transform, cam_pos, cam_rot);
+        bool pose_ok = camera_pose_checked(cam_pos, cam_rot, ref_pos, !g_freecam_on);
         bool fin_ok = pose_ok && vec3_is_finite(cam_pos);
         bool quat_ok = fin_ok && normalize_quaternion(cam_rot);
         // Teleport rejection: a read that lands mid-update inside the game
@@ -2689,13 +2862,24 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         }
     }
     if (!have_live_view) {
-        if (s_last_ok && matrix_is_finite(s_last_view)) {
+        if (have_ref) {
+            view = cached_view;          // эталон: ровно то, чем рисует игра
+        } else if (s_last_ok && matrix_is_finite(s_last_view)) {
             view = s_last_view;
         } else {
-            view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-            if (!matrix_is_finite(view)) return false;
+            return false;
+        }
+        // Поза берётся из той же матрицы: иначе в g_cam_pos остаётся поза
+        // прошлого мира (её писал живой путь), и по ней строятся и боксы, и
+        // углы цели, пока картинка рисуется по другой камере.
+        Vec3 r{}, u{}, f{};
+        if (have_ref && camera_basis_from_view(cached_view, r, u, f)) {
+            g_cam_pos = ref_pos; g_cam_right = r; g_cam_up = u; g_cam_forward = f;
+            g_cam_pose_valid = true;
+            g_cam_pose_derived = true;
         }
     } else {
+        g_cam_pose_derived = false;
         s_last_view = view;
     }
 
@@ -4579,11 +4763,44 @@ static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, b
     return false;
 }
 
+// Угол до точки по её экранному положению — ровно по тому проецированию,
+// которым нарисована точка (и бокс). Этим же путём углы считались до того,
+// как заработал «живой» трансформ камеры; он остаётся основным, потому что
+// не зависит ни от позы камеры, ни от оси выстрела.
+static float wrap_deg_180(float d) {
+    while (d > 180.0F) d -= 360.0F;
+    while (d < -180.0F) d += 360.0F;
+    return d;
+}
+
+static bool angles_from_screen(const Vec2& screen, float sw, float sh, float& yaw_deg, float& pitch_deg) {
+    constexpr float rad2deg = 57.29577951F;
+    if (!(sw > 1.f) || !(sh > 1.f)) return false;
+    if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) return false;
+    float fov = (g_cam_fov_deg > 1.0F && g_cam_fov_deg < 179.0F) ? g_cam_fov_deg : 60.0F;
+    const float tan_half_v = tanf(fov * 0.5F / rad2deg);
+    const float aspect = sw / sh;
+    const float ndc_x = (screen.x / sw) * 2.0F - 1.0F;
+    const float ndc_y = 1.0F - (screen.y / sh) * 2.0F;
+    yaw_deg = atanf(ndc_x * tan_half_v * aspect) * rad2deg;
+    pitch_deg = atanf(ndc_y * tan_half_v) * rad2deg;
+    return std::isfinite(yaw_deg) && std::isfinite(pitch_deg);
+}
+
 // Angular offset of a world point from the camera axis. Prefers the live
 // camera pose; falls back to inverting the projection from the screen point,
 // so aim angles never depend on the transform-pose path succeeding.
 bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, float sh, float& yaw_deg, float& pitch_deg) {
     constexpr float rad2deg = 57.29577951F;
+    // Углы обязаны быть посчитаны от той же камеры, по которой точка
+    // нарисована на экране. Иначе аим гонится за точкой, смещённой на угол
+    // между источниками, и ходит маятником: боксы строятся матрицей камеры, а
+    // углы считались от оси выстрела (или от «живой» позы трансформа) — это
+    // разные направления, расхождение плавает от кадра к кадру. Поэтому
+    // сначала считаем угол по пикселю (то же проецирование, что у бокса), и
+    // только если 3-D-путь с ним согласен — берём 3-D.
+    float pix_yaw = 0.f, pix_pitch = 0.f;
+    const bool have_pix = angles_from_screen(screen, sw, sh, pix_yaw, pix_pitch);
     if (g_cam_pose_valid || g_aim_ref_valid) {
         // Prefer the real firing reference (look root direction from the eye
         // point); the camera pose is the fallback.
@@ -4599,28 +4816,38 @@ bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, float sh, f
         if (std::isfinite(fx) && std::isfinite(rx) && std::isfinite(ux) && fx > 0.05F) {
             yaw_deg = atan2f(rx, fx) * rad2deg;
             pitch_deg = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
-            if (std::isfinite(yaw_deg) && std::isfinite(pitch_deg)) return true;
+            if (std::isfinite(yaw_deg) && std::isfinite(pitch_deg)) {
+                // Согласен с нарисованным — годится. Не согласен (источники
+                // разошлись) — берём пиксельный угол: он по построению совпадает
+                // с тем, что видит игрок.
+                if (!have_pix) return true;
+                const float dYaw = fabsf(wrap_deg_180(yaw_deg - pix_yaw));
+                const float dPitch = fabsf(pitch_deg - pix_pitch);
+                if (dYaw + dPitch <= 2.5F) return true;
+                static double s_last = -1e9;
+                const double now = memio::now_seconds();
+                if (now - s_last >= 5.0) {
+                    s_last = now;
+                    LogLine("аим: углы разошлись с экраном на %.1f/%.1f° — считаю по экрану",
+                            (double)dYaw, (double)dPitch);
+                }
+                yaw_deg = pix_yaw; pitch_deg = pix_pitch;
+                return true;
+            }
         }
     }
-    float fov = (g_cam_fov_deg > 1.0F && g_cam_fov_deg < 179.0F) ? g_cam_fov_deg : 60.0F;
-    float tan_half_v = tanf(fov * 0.5F / rad2deg);
-    float aspect = sw / sh;
-    float ndc_x = (screen.x / sw) * 2.0F - 1.0F;
-    float ndc_y = 1.0F - (screen.y / sh) * 2.0F;
-    yaw_deg = atanf(ndc_x * tan_half_v * aspect) * rad2deg;
-    pitch_deg = atanf(ndc_y * tan_half_v) * rad2deg;
-    return std::isfinite(yaw_deg) && std::isfinite(pitch_deg);
+    if (have_pix) { yaw_deg = pix_yaw; pitch_deg = pix_pitch; return true; }
+    return false;
 }
 
-// Extra vertical offset applied to every head aim point (metres, world up).
-// Tuned in-game at fighting range: +10 cm lands centre-head. This is the
-// far-range figure; head_lift_for_range() fades down to the near one below.
-static constexpr float g_aim_head_lift = 0.10F;
-// Up close the same 14 cm is a completely different shot: at five metres it
-// is well over a degree, which puts the round over the top of the head, while
-// at fifty it is a tenth of that and still inside the skull. The offset is
-// therefore ramped in with range instead of being a constant.
-static constexpr float g_aim_head_lift_near = 0.04F;
+// Vertical offset of the head aim point (metres, world up). Раньше здесь было
+// +10/+4 см: точка прицела уходила ВЫШЕ головы, и на近距离 это давало промах
+// поверх макушки, а на средней — «прицел стоит на лбу, а не на голове». По
+// просьбе (19.09) смещение выключено совсем: цель — ровно кость головы. Обе
+// величины оставлены на месте и названы своими именами, чтобы вернуть подъём
+// было одной правкой константы.
+static constexpr float g_aim_head_lift = 0.0F;       // вдали
+static constexpr float g_aim_head_lift_near = 0.0F;  // вблизи
 
 static float head_lift_for_range(const Vec3& world) {
     if (!g_cam_pose_valid) return g_aim_head_lift;
