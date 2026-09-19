@@ -1333,109 +1333,165 @@ static bool camera_transform_slot(CamSlot& out) {
     // наши вызовы (поза для ESP, фрикам, аим) лежат между двумя рендерами —
     // значит за кадр слот переехать не успевает, и разрешать его достаточно
     // один раз: все потребители кадра получают ОДИН консистентный срез.
-    // Без кэша то же разрешение уходило бы трижды за кадр по ~80 свежих
-    // чтений — это секунды syscall'ов в минуту и просадки оверлея.
     static CamSlot  s_cached{};
     static uint64_t s_gen = 0;
     static bool     s_ok = false;
     const uint64_t gen = g_mem.frame_generation();
     if (s_gen == gen) { out = s_cached; return s_ok; }
+    auto cache_fail = [&]() {
+        out = CamSlot{}; s_cached = out; s_gen = gen; s_ok = false;
+    };
     // Эталон: позиция камеры из матрицы вида. Без правдоподобной матрицы не
     // решаем вовсе: нулевая матрица счёта даёт (0,0,0), и пустая ячейка
     // «у начала координат» прошла бы сверку (это и был корень мерцания).
     const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
     if (!view_matrix_plausible(view) ||
         !camera_position_from_view(view, out.view_pos) ||
-        !vec3_is_finite(out.view_pos)) return false;
+        !vec3_is_finite(out.view_pos)) { cache_fail(); return false; }
+    // Ось камеры из той же матрицы (для сверки оси слота: по одной позиции
+    // камеру не отличить от её родителя, сидящего в полуметре).
+    const Vec3 cam_fwd = {-view.m[2], -view.m[6], -view.m[10]};   // column-major
+    const float cam_fwd_l = sqrtf(cam_fwd.x * cam_fwd.x + cam_fwd.y * cam_fwd.y + cam_fwd.z * cam_fwd.z);
 
+    // Три толкования указателя — ровно как в рабочей версии (лог 18:46,
+    // cb5fe62): на входе может быть Transform, GameObject или компонент.
+    // 19.09: новая упрощённая версия брала только одно толкование и
+    // раскидала кандидатов — и на устройстве камера пропала («источников 1»,
+    // позиций 0). Сохранили ПЕРЕЧИСЛЕНИЕ ПОЛНОЕ: то, что работало, никуда не
+    // выкидываем.
     const uint64_t gameobject = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
-    if (gameobject < 0x10000) return false;
-    const uint64_t transform = transform_from_gameobject(gameobject);
-    if (transform < 0x10000) return false;
-
-    // (данные, индекс)TransformAccess у трансформа. Три расположения, по
-    // достоверности:
-    //   1) +0x38/+0x40 — подтверждено кодом самого Unity (libunity.so читает
-    //      [x0+0x38] и пишет [x0+0x40]);
-    //   2) standalone-блок корня: когда +0x38 пуст, Unity кладёт данные в
-    //      собственный блок трансформа (transform+0x28), индекс — по +0x30
-    //      (то же видно в 0x7ED640/0x7F19E0). КАМЕРА — именно такой корень:
-    //      её родитель — LookRoot, а на слоте у камеры часто parent = -1,
-    //      т.е. именно standalone-раскладка;
-    //   3) +0x18/+0x20 — старые сборки.
-    struct Src { uint64_t data; int32_t idx; };
-    Src srcs[3] = {};
-    int nsrc = 0;
-    {
-        const uint64_t d = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);
-        const int32_t  i = rd<int32_t>(transform + 0x40);
-        if (d >= 0x10000 && i >= 0 && i <= 100000) srcs[nsrc++] = {d, i};
-        const int32_t i2 = rd<int32_t>(transform + 0x30);
-        if (i2 >= 0 && i2 <= 100000) srcs[nsrc++] = {transform + 0x28, i2};
-        const uint64_t d2 = rd_ptr(transform + 0x18);
-        const int32_t  i3 = rd<int32_t>(transform + 0x20);
-        if (d2 >= 0x10000 && i3 >= 0 && i3 <= 100000 &&
-            (!nsrc || d2 != srcs[0].data)) srcs[nsrc++] = {d2, i3};
+    uint64_t tf[3] = {};
+    int ntf = 0;
+    auto add_tf = [&](uint64_t t) {
+        if (t < 0x10000) return;
+        for (int k = 0; k < ntf; ++k) if (tf[k] == t) return;
+        if (ntf < 3) tf[ntf++] = t;
+    };
+    if (gameobject >= 0x10000) {
+        const uint64_t t0 = transform_from_gameobject(gameobject);
+        add_tf(t0);
+        add_tf(transform_from_gameobject(t0));                       // если дали GameObject
+        const uint64_t go2 = rd_ptr(t0 + COMPONENT_GAMEOBJECT);      // если дали компонент
+        add_tf(transform_from_gameobject(go2));
     }
-    // (matrices, indices) внутри блока данных: раскладки, известные из
-    // дизассемблера Unity (0x18/0x20 — рабочая; остальные — на старые
-    // сборки). Каждый указатель может быть ещё и таблицей указателей.
+
+    // Кандидаты (matrices, indices, idx). Источники (данные/индекс) на каждом
+    // из трёх tf, по достоверности:
+    //   A. раскладка, выученная по игрокам (g_transform_hierarchy_layout) —
+    //      та самая, на которой живут скелеты: самое рабочее место;
+    //   B. TransformAccess: данные +0x38, индекс +0x40 (libunity.so 0x7ed62c:
+    //      читает [x0+0x38], пишет [x0+0x40]);
+    //   C. standalone-блок корня: данные = tf+0x28, индекс +0x30 — Unity
+    //      подставляет собственный блок, когда +0x38 пуст (0x7ED640/0x7F19E0).
+    //      Камера часто именно такой корень (лог 19.09: «индекс 0, parent -1»);
+    //   D. старые сборки: +0x18/+0x20;
+    //   E. широкий перебор (данные,индекс): на случай, если смещения сместились.
+    struct Cand { uint64_t m, n; int32_t i; };
+    Cand cand[192];
+    int ncand = 0;
     static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10},
                                          {0x10, 0x18}, {0x20, 0x28}};
-    for (int si = 0; si < nsrc; ++si) {
-        const Src& s = srcs[si];
-        for (const auto& pr : kPairs) {
-            const uint64_t m0 = rd_ptr(s.data + pr[0]);
-            const uint64_t n0 = rd_ptr(s.data + pr[1]);
-            // Меньше 0x10000 — не указатель (в standalone-источнике здесь
-            // могут оказаться обычные поля трансформа): syscall'ов не тратим.
-            if (m0 < 0x10000 || n0 < 0x10000) continue;
-            const uint64_t ms[2] = {m0, rd_ptr(m0)};
-            const uint64_t ns[2] = {n0, rd_ptr(n0)};
-            for (uint64_t matrices : ms) {
-                for (uint64_t indices : ns) {
-                    if (!matrices || !indices) continue;
-                    Vec3 pos{};
-                    Vec4 rot{};
-                    Vec3 scale{};
-                    if (!read_transform_world_trs(matrices, indices, s.idx, pos, rot, scale, true))
-                        continue;
-                    const float dx = pos.x - out.view_pos.x;
-                    const float dy = pos.y - out.view_pos.y;
-                    const float dz = pos.z - out.view_pos.z;
-                    // 2.5 м: за кадр камера сдвигается на доли метра (даже в
-                    // фрикаме до 1 м при максимальной скорости), а чужая или
-                    // пустая ячейка — в десятках метров.
-                    if (dx * dx + dy * dy + dz * dz > 2.5F * 2.5F) continue;
-                    Matrix34 self{};
-                    if (!rd_fresh(matrices + (uint64_t)s.idx * sizeof(Matrix34), self)) continue;
-                    out.m = matrices;
-                    out.n = indices;
-                    out.idx = s.idx;
-                    out.pos = pos;
-                    out.world_rot = rot;
-                    out.local_rot = self.rotation;
-                    out.local_scale = {self.scale.x, self.scale.y, self.scale.z};
-                    out.slot = self;
-                    s_cached = out; s_gen = gen; s_ok = true;
-                    return true;
-                }
+    auto add = [&](uint64_t m, uint64_t n, int32_t i) {
+        if (m < 0x10000 || n < 0x10000 || i < 0 || i > 100000 || ncand >= 192) return;
+        // Каждый указатель может быть ещё и таблицей указателей.
+        const uint64_t ms[2] = {m, rd_ptr(m)};
+        const uint64_t ns[2] = {n, rd_ptr(n)};
+        for (uint64_t mm : ms) for (uint64_t nn : ns)
+            if (mm >= 0x10000 && nn >= 0x10000 && ncand < 192) cand[ncand++] = {mm, nn, i};
+    };
+    auto probe = [&](uint64_t base, uint64_t data_off, uint64_t idx_off) {
+        const uint64_t data = rd_ptr(base + data_off);
+        const int32_t  idx  = rd<int32_t>(base + idx_off);
+        if (data < 0x10000 || idx < 0 || idx > 100000) return;
+        for (const auto& pr : kPairs) add(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]), idx);
+    };
+    for (int t = 0; t < ntf; ++t) {
+        if (g_transform_hierarchy_layout_valid) {
+            const TransformHierarchyLayout& L = g_transform_hierarchy_layout;
+            const uint64_t data = rd_ptr(tf[t] + L.data_offset);
+            const int32_t  idx  = rd<int32_t>(tf[t] + L.index_offset);
+            if (data >= 0x10000 && idx >= 0 && idx <= 100000) {
+                uint64_t m = rd_ptr(data + L.matrices_offset);
+                uint64_t n = rd_ptr(data + L.indices_offset);
+                if (L.matrices_indirect) m = rd_ptr(m);
+                if (L.indices_indirect)   n = rd_ptr(n);
+                add(m, n, idx);
             }
         }
+        probe(tf[t], 0x38, 0x40);                    // B
+        {                                             // C — standalone-блок
+            const int32_t idx = rd<int32_t>(tf[t] + 0x30);
+            if (idx >= 0 && idx <= 100000)
+                for (const auto& pr : kPairs)
+                    add(rd_ptr(tf[t] + 0x28 + pr[0]), rd_ptr(tf[t] + 0x28 + pr[1]), idx);
+        }
+        probe(tf[t], 0x18, 0x20);                    // D
+        static const uint64_t kExt[][2] = {{0x20, 0x28}, {0x28, 0x30}, {0x30, 0x38},
+                                           {0x40, 0x48}, {0x10, 0x18}, {0x48, 0x50}};
+        for (const auto& e : kExt) probe(tf[t], e[0], e[1]);   // E
     }
-    // Не нашли. В лог (раз в 2 с) — какая именно ступень провалилась:
-    // «нет данных у трансформа» или «есть, но слот не у камеры».
+
+    // Проверка: МИРОВАЯ позиция кандидата = позиция камеры из матрицы вида
+    // (это один и тот же объект). Читатель — read_transform_hierarchy_arrays:
+    // тот же, что в рабочей версии 18:46 (кэш кадра, без требования к
+    // масштабу: read_transform_world_trs отбрасывает кандидата, если в цепи
+    // родителей нашёлся нулевой масштаб, — на устройстве именно это и
+    // гасило камеру).
+    int npos = 0, nrot = 0;
+    float best_d = 1e9f;
+    int best_k = -1;
+    for (int k = 0; k < ncand; ++k) {
+        Vec3 pos{};
+        Vec4 rot{};
+        if (!read_transform_hierarchy_arrays(cand[k].m, cand[k].n, cand[k].i, pos, &rot)) continue;
+        if (!vec3_is_finite(pos)) continue;
+        ++npos;
+        const float dx = pos.x - out.view_pos.x;
+        const float dy = pos.y - out.view_pos.y;
+        const float dz = pos.z - out.view_pos.z;
+        const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+        // Ось слота должна совпадать и с матрицей вида: по Позиции камеру не
+        // отличить от её родителя (LookRoot), сидящего в полуметре. Матрица
+        // вида строится из мировой позы КАМЕРЫ, поэтому истинный слот всегда
+        // совпадает с её осью; 30° — погрешность на наполовину записанный
+        // кватернион (такой слот отбросим и найдём заново).
+        if (cam_fwd_l > 1e-6F) {
+            const Vec3 fslot = rotate_vector(rot, {0.f, 0.f, -1.f});
+            const float dotv = (fslot.x * cam_fwd.x + fslot.y * cam_fwd.y + fslot.z * cam_fwd.z) / cam_fwd_l;
+            if (dotv < 0.8660F) { ++nrot; continue; }   // cos(30°)
+        }
+        if (d < best_d) { best_d = d; best_k = k; }
+        // 2.5 м: за кадр камера сдвигается на доли метра (в фрикаме до 1 м
+        // при максимальной скорости), а чужая или пустая ячейка — в десятках.
+        if (d > 2.5F) continue;
+        // Нашли. Читаем СЛОТ СВЕЖИМ: в него будем писать (аим — поворот,
+        // фрикам — перенос), и локальные поля берём из того же свежего срезa.
+        Matrix34 self{};
+        if (!rd_fresh(cand[k].m + (uint64_t)cand[k].i * sizeof(Matrix34), self)) continue;
+        out.m = cand[k].m;
+        out.n = cand[k].n;
+        out.idx = cand[k].i;
+        out.pos = pos;
+        out.world_rot = rot;
+        out.local_rot = self.rotation;
+        out.local_scale = {self.scale.x, self.scale.y, self.scale.z};
+        out.slot = self;
+        s_cached = out; s_gen = gen; s_ok = true;
+        return true;
+    }
+    (void)best_k;
+    // Не нашли. В лог (раз в 2 с) — где именно провалилось: сколько
+    // толкований трансформа, сколько кандидатов дали позицию, какое
+    // расстояние у ближайшего и сколько отсеял контроль оси.
     static double s_fail_at = -1e9;
     if (memio::now_seconds() - s_fail_at >= 2.0) {
         s_fail_at = memio::now_seconds();
-        LogLine("камера: слот не подтвердился — источников (данные/индекс) %d, в матрице вида (%.1f, %.1f, %.1f), трансформ=0x%llx",
-                nsrc, (double)out.view_pos.x, (double)out.view_pos.y, (double)out.view_pos.z,
-                (unsigned long long)transform);
+        LogLine("камера: слот не подтвердился — трансформов %d, кандидатов %d, позиций %d, оси не сошлись %d, ближайшее %.1f м, в матрице вида (%.1f, %.1f, %.1f), трансформ=0x%llx",
+                ntf, ncand, npos, nrot, (double)(best_d < 1e8f ? best_d : -1.f),
+                (double)out.view_pos.x, (double)out.view_pos.y, (double)out.view_pos.z,
+                (unsigned long long)(ntf ? tf[0] : 0));
     }
-    // Кэшируем и ОТКАЗ на кадр: несколько вызовов в одном кадре не должны
-    // повторять 80 чтений, чтобы получить тот же ответ.
-    out = CamSlot{};
-    s_cached = out; s_gen = gen; s_ok = false;
+    cache_fail();
     return false;
 }
 
