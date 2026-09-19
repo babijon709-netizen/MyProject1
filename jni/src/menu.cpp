@@ -959,9 +959,6 @@ static float  s_fc_retry = 0.f;
 static bool   s_fc_toasted = false;
 
 void UpdateFreecam(float dt) {
-    // Переключатель -> в игру. Включение может не выйти сразу (камера ещё не
-    // найдена), поэтому пробуем раз в полсекунды, а не каждый кадр — иначе лог
-    // забивался бы однотипными отказами.
     if (g_state.freecam_on != esp_freecam_active()) {
         s_fc_retry -= dt;
         if (s_fc_retry <= 0.f) {
@@ -982,7 +979,6 @@ void UpdateFreecam(float dt) {
     const float sw = io.DisplaySize.x, sh = io.DisplaySize.y;
     if (sw < 100.f || sh < 100.f) return;
 
-    // Диагностика фрикама: в логе видно, активен ли и рисуется ли
     {
         static double s_last = -1e9;
         double now = ImGui::GetTime();
@@ -992,52 +988,24 @@ void UpdateFreecam(float dt) {
         }
     }
 
-    // Блокируем касания в зоне джойстика, пока выключатель фрикама ВКЛЮЧЁН, а
-    // не только когда фрикам действительно поднялся: иначе при неудачном
-    // включении (камера не нашлась) палец на джойстике уходил в игру и ходил
-    // ПЕРСОНАЖЕМ — ровно это и было «двигаю джойстик, а двигается тело»
-    // (жалоба 19.09). Выключатель снял — управление вернулось в игру.
     if (!esp_freecam_active()) {
-        if (g_state.freecam_on) {
-            // Блокируем левый низ (джойстик) и правую половину (обзор)
-            // Чтобы палец на фрикаме не уходил в игру
-            Touch_BlockRect(true, 0.f, sh * 0.45f, sw * 0.45f, sh);
-        } else {
-            Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
-        }
+        if (g_state.freecam_on) Touch_BlockRect(true, 0.f, sh * 0.5f, sw * 0.45f, sh);
+        else                    Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
         return;
     }
 
-    // Игровое управление: слева внизу джойстик движения, справа — зона обзора
+    // Игровое управление: слева внизу джойстик, справа — свайп для обзора
     const float R  = fminf(sw, sh) * 0.11f;
-    const float bw = R * 1.15f, bh = R * 0.55f;
-    // Левый низ
-    const float x0 = 28.f;
-    const float y0 = sh - R * 2.f - 28.f - bh * 2.f - 12.f;
-    const float w  = R * 2.f + 10.f + bw;
-    const float h  = R * 2.f + bh * 2.f + 12.f;
-    const float cx = x0 + R, cy = y0 + bh * 2.f + 12.f + R;
+    const float x0 = 30.f;
+    const float y0 = sh - R * 2.f - 30.f;
+    const float cx = x0 + R, cy = y0 + R;
 
-    // Правая зона обзора — от середины экрана до правого края
-    const float look_x0 = sw * 0.42f;
-    const float look_y0 = 0.f;
-    const float look_w  = sw - look_x0;
-    const float look_h  = sh;
+    // Правая зона обзора — правая половина экрана
+    const float look_x0 = sw * 0.5f;
+    const float look_w = sw - look_x0;
 
-    // Блокируем обе зоны от игры
-    // Левый блок
-    Touch_BlockRect(true, 0.f, y0 - 6.f, x0 + w + 20.f, sh);
-    // Правый блок — через второй вызов нельзя, Touch_BlockRect один, поэтому
-    // делаем общий блок, покрывающий обе зоны снизу, а сверху правую половину
-    // блокируем отдельным окном? Пока блокируем весь низ и правую половину:
-    // костыль — блокируем всю нижнюю половину + правую верхнюю через два вызова
-    // не выйдет, поэтому блокируем весь экран кроме центра сверху, но это
-    // перекроет меню. Делаем один большой блок: слева внизу + справа.
-    // Проще: блокируем весь экран, кроме верхней полосы меню (0,0,sw,100)
-    // — игра всё равно не должна получать касания при активном фрикаме.
-    // Оставим как есть: блок левой зоны + правой зоны через два прямоугольника
-    // нельзя, поэтому блокируем всё кроме верха.
-    Touch_BlockRect(true, 0.f, 100.f, sw, sh);
+    // Блокируем всё кроме верхней полосы (меню) — фрикам перехватывает все касания
+    Touch_BlockRect(true, 0.f, 90.f, sw, sh);
 
     ImGui::SetNextWindowPos({0.f, 0.f});
     ImGui::SetNextWindowSize({sw, sh});
@@ -1047,33 +1015,13 @@ void UpdateFreecam(float dt) {
                  ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar |
                  ImGuiWindowFlags_NoBackground);
     auto* dl = ImGui::GetWindowDrawList();
-    auto* fn = ImGui::GetFont();
     const float fs = ImGui::GetFontSize() * 0.95f;
 
-    // ---- левый джойстик (движение) ----
+    // ---- левый джойстик ----
     float ax = 0.f, ay = 0.f;
-    // Фон джойстика
-    dl->AddRectFilled({x0 - 8.f, y0 - 8.f}, {x0 + w + 8.f, y0 + h + 8.f}, IM_COL32(0,0,0,90), 12.f);
-    // Кнопки вверх/вниз над джойстиком
-    float up = 0.f;
-    bool hUp = false, hDn = false;
-    auto holdBtn = [&](const char* id, const char* label, float bx, float by, bool& held) {
-        ImGui::SetCursorScreenPos({bx, by});
-        ImGui::InvisibleButton(id, {bw, bh});
-        held = ImGui::IsItemActive();
-        const ImU32 col = C::UA(held ? C::Acc() : C::Card(), held ? 0.92f : 0.68f);
-        dl->AddRectFilled({bx, by}, {bx + bw, by + bh}, col, 8.f);
-        dl->AddRect({bx, by}, {bx + bw, by + bh}, C::UA(C::Sep(), 1.f), 8.f, 0, 1.f);
-        const auto tsz = fn->CalcTextSizeA(fs * 0.82f, FLT_MAX, 0, label);
-        dl->AddText(fn, fs * 0.82f, {bx + (bw - tsz.x) * 0.5f, by + (bh - tsz.y) * 0.5f},
-                    C::UA(held ? C::Bg() : C::Txt(), 1.f), label);
-    };
-    holdBtn("##fc_up", XS("Вверх"), x0, y0, hUp);
-    holdBtn("##fc_dn", XS("Вниз"), x0 + bw + 8.f, y0, hDn);
-    if (hUp) up += 1.f;
-    if (hDn) up -= 1.f;
-
-    ImGui::SetCursorScreenPos({x0, y0 + bh * 2.f + 12.f});
+    // Фон
+    dl->AddRectFilled({x0 - 10.f, y0 - 10.f}, {x0 + R*2.f + 10.f, y0 + R*2.f + 10.f}, IM_COL32(0,0,0,110), 12.f);
+    ImGui::SetCursorScreenPos({x0, y0});
     ImGui::InvisibleButton("##fc_joy", {R * 2.f, R * 2.f});
     if (ImGui::IsItemActive()) {
         const ImVec2 d = {io.MousePos.x - cx, io.MousePos.y - cy};
@@ -1092,9 +1040,8 @@ void UpdateFreecam(float dt) {
     }
 
     // ---- правая зона обзора ----
-    // Невидимая кнопка на правую половину экрана
-    ImGui::SetCursorScreenPos({look_x0, look_y0});
-    ImGui::InvisibleButton("##fc_look", {look_w, look_h});
+    ImGui::SetCursorScreenPos({look_x0, 0.f});
+    ImGui::InvisibleButton("##fc_look", {look_w, sh});
     static ImVec2 s_last_look = {0,0};
     static bool s_look_active = false;
     float yaw_delta = 0.f, pitch_delta = 0.f;
@@ -1106,8 +1053,7 @@ void UpdateFreecam(float dt) {
         } else {
             float dx = cur.x - s_last_look.x;
             float dy = cur.y - s_last_look.y;
-            // Чувствительность как в игре — подбираем
-            const float sens = 0.18f;
+            const float sens = 0.20f;
             yaw_delta = dx * sens;
             pitch_delta = -dy * sens;
             s_last_look = cur;
@@ -1118,12 +1064,11 @@ void UpdateFreecam(float dt) {
 
     ImGui::End();
 
-    // ---- применяем движение и обзор ----
     float speed = g_state.freecam_speed;
     if (!(speed >= 1.f)) speed = 1.f;
     if (speed > 60.f) speed = 60.f;
     const float step = speed * dt;
-    if (ax != 0.f || ay != 0.f || up != 0.f) esp_freecam_move(ay * step, ax * step, up * step);
+    if (ax != 0.f || ay != 0.f) esp_freecam_move(ay * step, ax * step, 0.f);
     if (yaw_delta != 0.f || pitch_delta != 0.f) esp_freecam_look(yaw_delta, pitch_delta);
 }
 
