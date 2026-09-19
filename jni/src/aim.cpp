@@ -284,6 +284,9 @@ static unsigned long s_seen_boxes = 0;
 // Сколько из них — боты (боксы с is_bot): сводка считает их отдельно, чтобы
 // «игроков N» читалось честно.
 static unsigned long s_seen_bots = 0;
+// Боты пропущены, потому что их ЕСП выключено (аим берёт ботов только
+// с включёнными маркерами).
+static unsigned long s_bot_noesp_skipped = 0;
 
 // why — причина, по которой цель НЕ выбрана (0 когда цель есть). Коды:
 //   1 боксов нет вовсе      2 все союзники      3 все мёртвые
@@ -311,14 +314,15 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         static double s_at = -1e9;
         const double now = (double)clock() / CLOCKS_PER_SEC;
         const unsigned long total = s_no_skeleton + s_bones_not_projected + s_dead_skipped +
-                                    s_ally_skipped + s_offscreen_skipped + s_out_of_fov;
+                                    s_ally_skipped + s_offscreen_skipped + s_out_of_fov +
+                                    s_bot_noesp_skipped;
         if (now - s_at >= 5.0 && (total || s_seen_boxes)) {
             s_at = now;
-            LogLine("аим: выбор — игроков %lu (ботов %lu), пропущено: союзники %lu, мёртвые %lu, без костей %lu (нет скелета %lu, не спроецировались %lu), вне экрана %lu, вне круга %lu",
-                    s_seen_boxes, s_seen_bots, s_ally_skipped, s_dead_skipped,
+            LogLine("аим: выбор — игроков %lu (ботов %lu, из них без есп %lu), пропущено: союзники %lu, мёртвые %lu, без костей %lu (нет скелета %lu, не спроецировались %lu), вне экрана %lu, вне круга %lu",
+                    s_seen_boxes, s_seen_bots, s_bot_noesp_skipped, s_ally_skipped, s_dead_skipped,
                     s_no_skeleton + s_bones_not_projected, s_no_skeleton, s_bones_not_projected,
                     s_offscreen_skipped, s_out_of_fov);
-            s_seen_boxes = 0; s_seen_bots = 0;
+            s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
             s_ally_skipped = 0; s_dead_skipped = 0;
             s_no_skeleton = 0; s_bones_not_projected = 0;
             s_offscreen_skipped = 0; s_out_of_fov = 0;
@@ -350,8 +354,9 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         // (game.cpp, groups_are_allied), он считается независимо от визуалов.
         ++s_seen_boxes;
         if (b.is_bot) ++s_seen_bots;
-        // Боты — цели всегда, независимо от тумблера их ЕСП (инверсия
-        // 1f97b6e отменена: с включёнными маркерами аим по ботам вставал).
+        // Боты — цели, только пока включено их ЕСП: выключил «Боты» —
+        // аим их не трогает. Действует в обоих режимах (выбор цели общий).
+        if (b.is_bot && !g_state.esp_bots) { ++s_bot_noesp_skipped; continue; }
         if (b.ally) { ++s_ally_skipped; continue; }
         // Мёртвых не берём: труп ещё несколько секунд остаётся в списке
         // игроков с корректным скелетом, и прицел уезжал на него (19.09).
