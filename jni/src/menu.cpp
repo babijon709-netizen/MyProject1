@@ -1013,9 +1013,7 @@ void UpdateFreecam(float dt) {
     }
 
     // Игровое управление: слева внизу джойстик, справа — свайп для обзора
-    const float R  = fminf(rw, rh) * 0.13f;
-    if (R < 55.f) {} // минимум
-    // Позиция джойстика — настраиваемая, по умолчанию слева внизу
+    const float R  = 110.f;
     float x0, y0;
     if (g_state.freecam_joy_x >= 0.f && g_state.freecam_joy_y >= 0.f) {
         float jx = g_state.freecam_joy_x * sw;
@@ -1023,8 +1021,8 @@ void UpdateFreecam(float dt) {
         x0 = jx - R;
         y0 = jy - R;
     } else {
-        x0 = 40.f;
-        y0 = sh - R * 2.f - 40.f;
+        x0 = 30.f;
+        y0 = 100.f;
     }
     const float cx = x0 + R, cy = y0 + R;
 

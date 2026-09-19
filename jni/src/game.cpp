@@ -1737,10 +1737,13 @@ static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_
     g_fc_diag_absolute = absolute;
     g_fc_diag_ok = true;
     if (!vec3_is_finite(local)) return false;
-    // Предохранитель: один шаг длиннее 200 м — это мусорный отсчёт, а не полёт.
+    // Предохранитель: шаг длиннее 200 м — мусор, но для корня (родитель -1) разрешаем до 5000 м
+    // иначе при включении далеко от 0,0,0 камера остаётся в нуле и мерцает
     const float sl = sqrtf(step.x * step.x + step.y * step.y + step.z * step.z);
-    if (sl > 200.f) {
-        LogLine("фрикам: поправка отброшена — шаг %.1f м длиннее 200 м", (double)sl);
+    float limit = 200.f;
+    if (parent < 0) limit = 5000.f;
+    if (sl > limit) {
+        LogLine("фрикам: поправка отброшена — шаг %.1f м длиннее %.0f м", (double)sl, (double)limit);
         return false;
     }
     local_out = local;
@@ -1885,7 +1888,7 @@ static void freecam_writer_start() {
                 }
                 ++iter;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
         }
     }).detach();
 }
