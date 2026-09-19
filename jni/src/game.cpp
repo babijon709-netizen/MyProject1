@@ -1103,6 +1103,7 @@ static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_
                                      Vec3& pos, Vec4& rot, Vec3& scale, bool fresh = false);
 // Позиция камеры из матрицы вида (объявлена ниже, рядом с её разбором).
 static bool camera_position_from_view(const Mat4& view, Vec3& position);
+static Mat4 mat_mul(const Mat4& a, const Mat4& b);
 
 // Базы массивов иерархии для трансформа. Кандидатов несколько (раскладку
 // учит скан по игрокам, а он живёт до перезагрузки мира), поэтому каждый
@@ -1818,15 +1819,42 @@ static void freecam_writer_start() {
                 if (is_view) {
                     if (wr_buf(addr, v_full, sizeof(v_full))) g_fc_write_count.fetch_add(1);
                     else g_fc_write_failed.store(true);
+                    // worldToClip вторым слотом + флаги грязности
+                    if (nslots > 1) {
+                        const uint64_t a2 = g_fc_addr[1].load();
+                        if (a2) {
+                            Mat4 proj = rd_m4(g_native_camera + CAMERA_PROJECTION_MATRIX);
+                            Mat4 vw{}; for(int i=0;i<16;++i) vw.m[i]=v_full[i];
+                            Mat4 w2c = mat_mul(proj, vw);
+                            wr_buf(a2, &w2c, sizeof(Mat4));
+                            uint8_t zero=0;
+                            wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
+                            wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
+                            wr_buf(g_native_camera + CAMERA_PREV_VIEW_PROJ, &w2c, sizeof(Mat4));
+                        }
+                    } else {
+                        uint8_t zero=0;
+                        wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
+                        wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
+                    }
                 } else {
                     if (wr_buf(addr, v, sizeof(v))) g_fc_write_count.fetch_add(1);
                     else g_fc_write_failed.store(true);
                     for (int sl = 1; sl < nslots; ++sl) {
                         const uint64_t a2 = g_fc_addr[sl].load();
                         if (!a2) continue;
-                        FcMat mm = g_fc_mat[sl];
-                        const float v2[12] = {mm.tx, mm.ty, mm.tz, mm.tw, mm.rx, mm.ry, mm.rz, mm.rw, mm.sx, mm.sy, mm.sz, mm.sw};
-                        if (wr_buf(a2, v2, sizeof(v2))) g_fc_write_count.fetch_add(1);
+                        // второй слот может быть worldToClip — 16 флотов
+                        const bool is_view2 = (g_native_camera && a2 == g_native_camera + CAMERA_WORLD_TO_CLIP);
+                        if (is_view2) {
+                            Mat4 proj = rd_m4(g_native_camera + CAMERA_PROJECTION_MATRIX);
+                            Mat4 vw{}; for(int i=0;i<16;++i) vw.m[i]=v_full[i];
+                            Mat4 w2c = mat_mul(proj, vw);
+                            if (wr_buf(a2, &w2c, sizeof(Mat4))) g_fc_write_count.fetch_add(1);
+                        } else {
+                            FcMat mm = g_fc_mat[sl];
+                            const float v2[12] = {mm.tx, mm.ty, mm.tz, mm.tw, mm.rx, mm.ry, mm.rz, mm.rw, mm.sx, mm.sy, mm.sz, mm.sw};
+                            if (wr_buf(a2, v2, sizeof(v2))) g_fc_write_count.fetch_add(1);
+                        }
                     }
                 }
                 ++iter;
@@ -1920,6 +1948,7 @@ bool esp_freecam_set(bool on) {
 // а локальная позиция пересчитывается под текущего родителя.
 // Позиция камеры из матрицы вида; определена ниже, у проверок MouseLook.
 static bool current_camera_position(Vec3& out);
+static Mat4 mat_mul(const Mat4& a, const Mat4& b);
 
 static bool freecam_write() {
     if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
@@ -1976,11 +2005,13 @@ static bool freecam_write() {
     // половине кадров читала другой, где лежал ноль, — отсюда мерцание и
     // провал под карту. Локальная позиция у слотов может различаться: она
     // считается от родителя, найденного в этом же наборе массивов.
-    // Фрикам теперь пишет ТОЛЬКО матрицу вида, а не трансформ: запись
-    // трансформа двигала тело (если нашли рут игрока, а не камеру) и не давала
-    // пройти сквозь стены (физика привязана к трансформу). Матрица вида — это
-    // то, чем игра рисует кадр, и её достаточно, чтобы летать сквозь стены и
-    // не трогать тело. Трансформ оставляем игре.
+    // Фрикам теперь пишет матрицу вида и worldToClip, а не трансформ:
+    // запись трансформа двигала тело (если нашли рут игрока) и не давала
+    // пройти сквозь стены. Матрица вида — то, чем игра рисует кадр, но одной
+    // её мало: игра может использовать worldToClip напрямую (projection *
+    // view), и тогда вид остаётся на месте, а двигаются только визуалы ESP
+    // (жалоба «двигаются только визуалы, а от своего лица стою на месте»).
+    // Пишем обе.
     bool ok = false;
     if (g_native_camera && g_cam_pose_valid) {
         const Vec3 r = g_cam_right, u = g_cam_up, f = g_cam_forward;
@@ -1990,15 +2021,36 @@ static bool freecam_write() {
             view.m[1] = u.x; view.m[5] = u.y; view.m[9]  = u.z; view.m[13] = -(u.x * g_freecam_pos.x + u.y * g_freecam_pos.y + u.z * g_freecam_pos.z);
             view.m[2] = -f.x; view.m[6] = -f.y; view.m[10] = -f.z; view.m[14] = -(-f.x * g_freecam_pos.x + -f.y * g_freecam_pos.y + -f.z * g_freecam_pos.z);
             view.m[3] = 0.f; view.m[7] = 0.f; view.m[11] = 0.f; view.m[15] = 1.f;
-            if (wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &view, sizeof(Mat4))) ok = true;
-            // Для писателя — та же матрица вида, чтобы держать её 2000 раз/с.
+            Mat4 proj = rd_m4(g_native_camera + CAMERA_PROJECTION_MATRIX);
+            Mat4 w2c = mat_mul(proj, view);
+            bool wok = false;
+            if (wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &view, sizeof(Mat4))) { ok = true; wok = true; }
+            if (wr_buf(g_native_camera + CAMERA_WORLD_TO_CLIP, &w2c, sizeof(Mat4))) ok = true;
+            // Чтобы игра не пересчитала вид из трансформа и не затёрла нашу запись,
+            // сбрасываем флаги грязности кэша вида/проекции.
+            {
+                uint8_t zero = 0;
+                wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
+                wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
+                // prevViewProj тоже держим в цели — некоторые шейдеры берут его
+                Mat4 prev = w2c;
+                wr_buf(g_native_camera + CAMERA_PREV_VIEW_PROJ, &prev, sizeof(Mat4));
+            }
+            // Для писателя — держим обе матрицы, но адрес — view (основная)
             g_fc_lx[0].store(g_freecam_pos.x); g_fc_ly[0].store(g_freecam_pos.y); g_fc_lz[0].store(g_freecam_pos.z);
             g_fc_addr[0].store(g_native_camera + CAMERA_VIEW_MATRIX);
-            // Сохраняем view как 12 флотов для писателя (первые 3 столбца + трансляция)
             g_fc_mat[0] = FcMat{view.m[0], view.m[1], view.m[2], view.m[3], view.m[4], view.m[5], view.m[6], view.m[7], view.m[8], view.m[9], view.m[10], view.m[11]};
-            // Отдельно храним трансляцию view для лога gap
             g_fc_gap.store(0.f);
             g_fc_addr_n.store(1);
+            // Вторым слотом — worldToClip, если есть место
+            if (wok && g_fc_own_n < kFcMaxSlots) {
+                // Используем второй слот для worldToClip
+                g_fc_addr[1].store(g_native_camera + CAMERA_WORLD_TO_CLIP);
+                // Для простоты храним первые 12 флотов w2c в g_fc_mat[1]
+                g_fc_mat[1] = FcMat{w2c.m[0], w2c.m[1], w2c.m[2], w2c.m[3], w2c.m[4], w2c.m[5], w2c.m[6], w2c.m[7], w2c.m[8], w2c.m[9], w2c.m[10], w2c.m[11]};
+                // Остальные 4 флоата w2c (12..15) допишем отдельно в писателе
+                g_fc_addr_n.store(2);
+            }
         }
     }
     if (!ok) {
