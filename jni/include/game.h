@@ -28,6 +28,10 @@ struct EspBox {
     float skel_flat = -1.f;       // наибольший размах по горизонтали
     int   skel_bones = 0;         // сколько костей дали мировую позицию
     bool  respawning = false;     // PlayerManager.respawning (0x208)
+    // Который признак решил о смерти (для строки «аим: цель»):
+    // 0 — жив, 1 — respawning, 2 — MoveState DEAD, 3 — рэгдолл,
+    // 4 — death-хендлер, 5 — поза «лежит», 6 — клиентское здоровье 0.
+    uint8_t death_reason = 0;
     float corners[8][2];
     bool  corner_visible[8];
 

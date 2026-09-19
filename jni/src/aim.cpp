@@ -58,6 +58,10 @@ struct AimTarget {
     // или его кости ещё стояли.
     int   skel_bones = 0;
     float skel_up = -1.f, skel_flat = -1.f;
+    // Вердикт о смерти цели + какой признак его вынес (см. EspBox.death_reason)
+    // — чтобы по логу «аим: цель» видеть, что память сказала о «мёртвом».
+    bool  dead = false;
+    int   death_reason = 0;
 };
 
 static void AimReleaseFinger(bool& fingerDown) {
@@ -405,6 +409,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         if (!t.valid) continue;
         t.id = b.id;
         t.health = b.health; t.respawning = b.respawning;
+        t.dead = b.dead; t.death_reason = b.death_reason;
         t.skel_bones = b.skel_bones; t.skel_up = b.skel_up; t.skel_flat = b.skel_flat;
         const bool sticky = (pick.lastId != 0 && b.id == pick.lastId);
         if (t.sx < -sw || t.sx > sw * 2.f || t.sy < -sh || t.sy > sh * 2.f) { ++s_offscreen_skipped; continue; }
@@ -533,12 +538,14 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // больше не командует.
     g_aimActive = true;
     // Состояние выбранной цели — чтобы по логу проверить признак смерти:
-    // игрок жаловался, что аим ведёт по мёртвым, а по respawning (0x208) в
-    // логе 14:55 не сработало ни разу. Печатаем здоровье и оба флага.
+    // игрок жаловался, что аим ведёт по мёртвым. Печатаем verdict + КТОИМ
+    // признаком он вынесен (2 MoveState, 3 рэгдолл, 4 хендлер, 5 поза,
+    // 6 здоровье=0) и сырое здоровье: если аим всё же встанет на «мёртвого»,
+    // строка покажет, что именно память сказала в тот момент.
     if (best.id != pick.lastId)
-        LogLine("аим: цель 0x%llx здоровье=%.1f respawning=%d дистанция=%.1f м костей=%d высота=%.2f м ширина=%.2f м",
-                (unsigned long long)best.id, (double)best.health,
-                (int)best.respawning, (double)best.world_dist,
+        LogLine("аим: цель 0x%llx dead=%d причина=%d здоровье=%.1f respawning=%d дистанция=%.1f м костей=%d высота=%.2f м ширина=%.2f м",
+                (unsigned long long)best.id, (int)best.dead, (int)best.death_reason,
+                (double)best.health, (int)best.respawning, (double)best.world_dist,
                 (int)best.skel_bones, (double)best.skel_up, (double)best.skel_flat);
     pick.switched = (best.id != pick.lastId);
     pick.lastId = best.id; pick.lastBone = best.bone;

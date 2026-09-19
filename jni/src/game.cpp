@@ -3795,22 +3795,32 @@ static bool player_is_crouched(const PlayerAux& aux) {
 
 // ===================== Мёртвый ли игрок (без HP — он серверный) ===========
 //
-// Три признака, которые игрок держит САМ на клиенте (HP здесь не читается —
-// оно на сервере, а у только что убитого клиентское значение ещё «живое»):
+// Четыре признака, которые игрок держит САМ на клиенте:
 //
 //  1) KCC.Move.State == DEAD (7). То же поле, что приседание: игра ставит
 //     DEAD в момент смерти, на возрождении — обратно в живые состояния.
+//     Смещение подтверждено в дампе: у настоящего KCC
+//     (HyperHug...Features.Player.KCC, Mirror.NetworkBehaviour) Player.Move
+//     лежит ровно на 0x154, State — первое поле структуры.
 //  2) Ragdoll.RagdollState == Ragdolled (1): рэгдолл активен, пока труп не
 //     собран. BlendToAnim (2) — это «встаёт», уже живой, не считаем.
 //  3) PlayerDeathHandler.death (0xF0): public notserialized bool, стоит
 //     единицей до возрождения. Держится даже когда KCC у спящего игрока не
-//     резолвится — его обёртка (PlayerManager + 0x80) резолвится так же,
-//     как kccReference (0xB0): прямой указатель или поле внутри, кандидат
-//     проходит только с обратной ссылкой на своего игрока.
+//     резолвится — его обёртка (PlayerManager + 0x80 playerDeathHandler-
+//     Reference) резолвится так же, как kccReference (0xB0): прямой
+//     указатель или поле внутри, кандидат проходит только с обратной
+//     ссылкой на своего игрока. Проверяется ВСЕГДА (не только без KCC):
+//     покрывает окно «KCC есть, MoveState ещё не DEAD».
+//  4) Клиентское здоровье == 0 (см. блок решения о смерти): HP живёт на
+//     сервере и у ЧУЖОЙ дальней смерти на клиенте остаётся 100 — поэтому
+//     это вспомогательный признак. Но СВОЮ игру клиент обрабатывает сразу:
+//     лог 15:56 показал 0.0 у убитого самим в том же кадре, раньше
+//     переключения MoveState — закрывает окно «аим ведёт по мёртвому».
 //
-// Любой из трёх — мёртв. Чтение, сорвавшееся в ноль, приговором НЕ является
-// (как и везде здесь): вернём «неизвестно», и решение примут остальные
-// признаки. Знакомство с KCC идёт через тот же кеш PlayerAux, что и поза.
+// Любой из четырёх — мёртв. Чтение, сорвавшееся в ноль, приговором НЕ
+// является (как и везде здесь): вернём «неизвестно», и решение примут
+// остальные признаки. Знакомство с KCC идёт через тот же кеш PlayerAux,
+// что и поза.
 static constexpr int kMoveStateDead      = 7;  // HyperHug...Player.MoveState.DEAD
 static constexpr int kRagdollStateRagdolled = 1; // RagdollState.Ragdolled
 
@@ -3827,48 +3837,59 @@ static uint64_t resolve_death_handler(uint64_t player) {
 }
 
 // Возврат: 1 — мёртв (подтверждено), 0 — жив (подтверждено), -1 — не узнать.
-// Дешёвость: у живого игрока достаточно ОДНОГО байта MoveState (тот же блок,
-// что и приседание — берётся из кэша); рэгдолл-цепочка идёт только когда
-// MoveState не прочитался, а death-хендлер — только когда нет самого KCC.
-static int player_death_state(PlayerAux& aux, uint64_t player) {
+// reason: КТОИМ признаком — 2 MoveState DEAD, 3 рэгдолл, 4 death-хендлер.
+// Порядок по цене: у живого игрока с KCC достаточно ОДНОГО байта MoveState
+// (тот же блок, что и приседание — берётся из кэша); рэгдолл-цепочка — только
+// когда MoveState не прочитался. Death-хендлер проверяется в ОБОИХ случаях
+// (кеш — 1-2 чтения за кадр): его флаг ставится событием смерти и держится
+// до возрождения, так что он покрывает и «KCC есть, но MoveState ещё не
+// переключился» (только что убитый — один-два кадра окна), и «KCC нет»
+// (спящие игроки).
+static int player_death_state(PlayerAux& aux, uint64_t player, int* reason) {
+    int alive = -1;   // 0 — подтверждено жив, -1 — неизвестно
     if (aux.kcc) {
         int32_t state = -1;
         if (rd_exact(aux.kcc + KCC_MOVE + 0x00, state) && state >= 0 && state <= 8) {
             // 0..8 — легальные MoveState (IDLE..SEATED); DEAD среди них.
-            return state == kMoveStateDead ? 1 : 0;
-        }
-        // MoveState не прочитался: рэгдолл — запасной сигнал.
-        // KCC -> CharacterAnimation (обратная ссылка) -> ragdoll.
-        const uint64_t anim = rd_ptr(aux.kcc + KCC_CHARACTER_ANIMATION);
-        if (anim >= 0x10000) {
-            const uint64_t back = rd_ptr(anim + CHAR_ANIM_PLAYER_BACKREF);
-            if (!back || back == player) {
-                const uint64_t ragdoll = rd_ptr(anim + CHAR_ANIM_RAGDOLL);
-                if (ragdoll >= 0x10000) {
-                    int32_t rs = -1;
-                    if (rd_exact(ragdoll + RAGDOLL_STATE, rs)) {
-                        if (rs == kRagdollStateRagdolled) return 1;
-                        if (rs == 0 || rs == 2) return 0;  // Animated / встаёт — жив
+            if (state == kMoveStateDead) { if (reason) *reason = 2; return 1; }
+            alive = 0;
+        } else {
+            // MoveState не прочитался: рэгдолл — запасной сигнал.
+            // KCC -> CharacterAnimation (обратная ссылка) -> ragdoll.
+            const uint64_t anim = rd_ptr(aux.kcc + KCC_CHARACTER_ANIMATION);
+            if (anim >= 0x10000) {
+                const uint64_t back = rd_ptr(anim + CHAR_ANIM_PLAYER_BACKREF);
+                if (!back || back == player) {
+                    const uint64_t ragdoll = rd_ptr(anim + CHAR_ANIM_RAGDOLL);
+                    if (ragdoll >= 0x10000) {
+                        int32_t rs = -1;
+                        if (rd_exact(ragdoll + RAGDOLL_STATE, rs)) {
+                            if (rs == kRagdollStateRagdolled) { if (reason) *reason = 3; return 1; }
+                            if (rs == 0 || rs == 2) alive = 0;  // Animated / встаёт — жив
+                        }
                     }
                 }
             }
         }
-        return -1;   // ни один сигнал не прочитался — не приговор
     }
-    // Без KCC — death handler (спящие игроки). Кешуем в PlayerAux.
+    // Death-хендлер: проверять в обоих случаях. Мёртвый игрок с KCC, чей
+    // MoveState на нашем клиенте ещё не DEAD, ловится именно здесь.
     if (aux.death_handler) {
-        if (rd_ptr(aux.death_handler + DEATH_HANDLER_PLAYER_BACKREF) != player) {
+        if (rd_ptr(aux.death_handler + DEATH_HANDLER_PLAYER_BACKREF) != player)
             aux.death_handler = 0;   // подменён — резолвим заново
+    }
+    if (aux.death_handler) {
+        const uint8_t flag = rd<uint8_t>(aux.death_handler + DEATH_HANDLER_DEAD_FLAG);
+        if (flag == 1) { if (reason) *reason = 4; return 1; }
+        if (flag == 0 && alive < 0) alive = 0;  // ноль держится до возрождения — жив
+    } else {
+        if (aux.death_retry > 0) { --aux.death_retry; }
+        else {
+            aux.death_handler = resolve_death_handler(player);
+            if (!aux.death_handler) aux.death_retry = 30;
         }
     }
-    if (!aux.death_handler) {
-        if (aux.death_retry > 0) { --aux.death_retry; return -1; }
-        aux.death_handler = resolve_death_handler(player);
-        if (!aux.death_handler) { aux.death_retry = 30; return -1; }
-    }
-    const uint8_t flag = rd<uint8_t>(aux.death_handler + DEATH_HANDLER_DEAD_FLAG);
-    if (flag > 1) return -1;         // мусор в байте — не приговор
-    return flag ? 1 : 0;
+    return alive;   // -1 — ни один сигнал не прочитался — не приговор
 }
 
 static bool player_head_world(const PlayerAux& aux, Vec3& out) {
@@ -6140,9 +6161,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                         // Срез объекта Health больше не печатаем: слот
                         // подтверждён логом 16:32 (+0x20 = 100.0 у живых,
                         // 0.0 у части игроков, +0x24 = прошлое значение).
-                        // Здоровье остаётся только для лога «поза»: решением
-                        // о смерти оно больше не управляет ни при каких
-                        // обстоятельствах (жалоба «смысла читать HP нет»).
+                        // Здоровье — вспомогательный признак смерти (см. блок
+                        // ниже): лог 15:56 показал 0.0 у убитого САМИМ игрока
+                        // в том же кадре; у дальней смерти HP на клиенте
+                        // остаётся 100, поэтому основным оно быть не может
+                        // (HP — на сервере).
                     }
                 }
             }
@@ -6291,30 +6314,35 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // Здесь, а не раньше: fill_skeleton_box уже отработал и заполнил
         // skel_bones/skel_up/skel_flat для этого кадра.
         // Причина смерти — номером в лог: 0 нет, 1 respawning, 2 MoveState
-        // DEAD, 3 рэгдолл, 4 death-хендлер, 5 поза «лежит». Без номера
-        // непроверяем, какой именно признак сработал.
+        // DEAD, 3 рэгдолл, 4 death-хендлер, 5 поза «лежит»,
+        // 6 клиентское здоровье = 0. Без номера непроверяем, какой
+        // именно признак сработал.
         box.dead = box.respawning;
         int death_reason = box.respawning ? 1 : 0;
-        {
-            const int ds = player_death_state(aux, s_transforms[i]);
-            if (ds > 0) {
-                box.dead = true;
-                // 2/3/4 различить снаружи нельзя (один вызов), поэтому для
-                // лога разбираем заново — но только для тех, кого печатаем.
-                if (aux.kcc) {
-                    if (rd<int32_t>(aux.kcc + KCC_MOVE + 0x00) == kMoveStateDead) death_reason = 2;
-                    else death_reason = 3;
-                } else {
-                    death_reason = 4;
-                }
-            } else if (ds == 0 && !box.dead) {
-                death_reason = 0;   // состояние подтвердило живого
+        // Решение о смерти имеет смысл только для игрока, который МОЖЕТ стать
+        // целью, — т.е. с скелетом. На сервере 1500+ игроков, большинство —
+        // спящие без модели: читать их состояния — пустые чтения.
+        if (!box.dead && box.skel_bones >= 6) {
+            int reason = 0;
+            const int ds = player_death_state(aux, s_transforms[i], &reason);
+            if (ds > 0) { box.dead = true; death_reason = reason; }
+            else if (ds == 0) { death_reason = 0; }
+            // Клиентское здоровье ноль — ДОПОЛНИТЕЛЬНЫЙ признак, не основной
+            // (HP живёт на сервере, у чужой дальней смерти на клиенте остаётся
+            // 100). Но СВОЮ игру клиент обрабатывает сразу: лог 15:56 показал
+            // 0.0 у только что убитого в том же кадре, раньше переключения
+            // MoveState — именно это окно и давало «аим ведёт по мёртвому».
+            // Верим только если хотя бы раз видели живое значение: сбой
+            // смещения, читающий всем ноль, не должен помечать весь лобби.
+            if (!box.dead && box.health >= 0.f && box.health <= 0.f && g_hp_max_seen > 0.f) {
+                box.dead = true; death_reason = 6;
             }
         }
         if (!box.dead && box.skel_bones >= 11 && box.skel_up >= 0.f && box.skel_flat >= 0.f) {
             const bool lying = box.skel_up < 0.85f || box.skel_flat > box.skel_up * 1.5f;
             if (lying) { box.dead = true; death_reason = 5; }
         }
+        box.death_reason = (uint8_t)death_reason;
         // Что именно решило судьбу игрока — в лог: без этого порог непроверяем.
         // Печатаем всех, у кого есть ЧТО печатать: состояние (новое) или
         // измеренные кости (поза). Спящие без скелета и без состояний не
