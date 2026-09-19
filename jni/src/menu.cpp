@@ -1036,9 +1036,8 @@ void UpdateFreecam(float dt) {
     // ---- левый джойстик (окно с фоном) ----
     float ax = 0.f, ay = 0.f;
     float yaw_delta = 0.f, pitch_delta = 0.f;
-    // Для одновременного управления — запоминаем активные зоны
-    static bool s_joy_active = false;
-    static ImVec2 s_joy_start = {0,0};
+    static float s_last_ax = 0.f, s_last_ay = 0.f;
+    static bool s_joy_held = false;
     {
         ImGui::SetNextWindowPos({x0 - 12.f, y0 - 12.f});
         ImGui::SetNextWindowSize({R*2.f + 24.f, R*2.f + 24.f});
@@ -1051,12 +1050,9 @@ void UpdateFreecam(float dt) {
         dl->AddRect({x0 - 10.f, y0 - 10.f}, {x0 + R*2.f + 10.f, y0 + R*2.f + 10.f}, IM_COL32(255,255,255,80), 14.f, 0, 2.f);
         ImGui::SetCursorScreenPos({x0, y0});
         ImGui::InvisibleButton("##fc_joy", {R * 2.f, R * 2.f});
-        bool joy_item_active = ImGui::IsItemActive();
-        // Также считаем активным если палец в зоне джойстика (для мультитача)
         bool mouse_in_joy = (io.MousePos.x >= x0 && io.MousePos.x <= x0 + R*2.f && io.MousePos.y >= y0 && io.MousePos.y <= y0 + R*2.f);
-        if (io.MouseDown[0] && mouse_in_joy) joy_item_active = true;
-        if (joy_item_active) {
-            s_joy_active = true;
+        bool joy_active = io.MouseDown[0] && mouse_in_joy;
+        if (joy_active) {
             const ImVec2 d = {io.MousePos.x - cx, io.MousePos.y - cy};
             const float len = sqrtf(d.x * d.x + d.y * d.y);
             if (len > 6.f) {
@@ -1064,13 +1060,19 @@ void UpdateFreecam(float dt) {
                 ax = (d.x * k) / R;
                 ay = (-d.y * k) / R;
             }
+            s_last_ax = ax; s_last_ay = ay; s_joy_held = true;
         } else {
-            // Если палец не в зоне джойстика, не сбрасываем сразу — ждём отпускания
-            if (!io.MouseDown[0]) s_joy_active = false;
+            // Если джойстик не активен, но палец всё ещё зажат (второй палец на обзоре) — держим последнее значение
+            // чтобы движение не прерывалось при одновременном обзоре
+            if (s_joy_held && io.MouseDown[0]) {
+                ax = s_last_ax; ay = s_last_ay;
+            } else {
+                s_joy_held = false;
+            }
         }
         {
             const ImU32 ring = IM_COL32(255,255,255,200);
-            const ImU32 knob = (joy_item_active || s_joy_active) ? IM_COL32(0,200,255,255) : IM_COL32(0,180,255,200);
+            const ImU32 knob = (joy_active || s_joy_held) ? IM_COL32(0,200,255,255) : IM_COL32(0,180,255,200);
             dl->AddCircle({cx, cy}, R, ring, 32, 3.f);
             dl->AddCircleFilled({cx + ax * R * 0.60f, cy - ay * R * 0.60f}, R * 0.34f, knob, 32);
             dl->AddLine({cx - R*0.15f, cy}, {cx + R*0.15f, cy}, IM_COL32(255,255,255,60), 1.f);
@@ -1091,10 +1093,9 @@ void UpdateFreecam(float dt) {
         ImGui::InvisibleButton("##fc_look", {look_w, sh});
         static ImVec2 s_last_look = {0,0};
         static bool s_look_active = false;
-        bool look_item_active = ImGui::IsItemActive();
         bool mouse_in_look = (io.MousePos.x >= look_x0);
-        if (io.MouseDown[0] && mouse_in_look) look_item_active = true;
-        if (look_item_active) {
+        bool look_active = io.MouseDown[0] && mouse_in_look;
+        if (look_active) {
             ImVec2 cur = io.MousePos;
             if (!s_look_active) {
                 s_last_look = cur;
@@ -1108,7 +1109,7 @@ void UpdateFreecam(float dt) {
                 s_last_look = cur;
             }
         } else {
-            if (!io.MouseDown[0]) s_look_active = false;
+            if (!io.MouseDown[0] || !mouse_in_look) s_look_active = false;
         }
         ImGui::End();
     }

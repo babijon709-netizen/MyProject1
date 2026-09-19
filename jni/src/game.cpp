@@ -1737,13 +1737,10 @@ static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_
     g_fc_diag_absolute = absolute;
     g_fc_diag_ok = true;
     if (!vec3_is_finite(local)) return false;
-    // Предохранитель: шаг длиннее 200 м — мусор, но для корня (родитель -1) разрешаем до 5000 м
-    // иначе при включении далеко от 0,0,0 камера остаётся в нуле и мерцает
+    // Предохранитель: один шаг длиннее 200 м — это мусорный отсчёт, а не полёт.
     const float sl = sqrtf(step.x * step.x + step.y * step.y + step.z * step.z);
-    float limit = 200.f;
-    if (parent < 0) limit = 5000.f;
-    if (sl > limit) {
-        LogLine("фрикам: поправка отброшена — шаг %.1f м длиннее %.0f м", (double)sl, (double)limit);
+    if (sl > 200.f) {
+        LogLine("фрикам: поправка отброшена — шаг %.1f м длиннее 200 м", (double)sl);
         return false;
     }
     local_out = local;
@@ -1888,7 +1885,7 @@ static void freecam_writer_start() {
                 }
                 ++iter;
             }
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }).detach();
 }
@@ -2160,7 +2157,6 @@ bool esp_freecam_move(float forward, float right, float up) {
         float pitch_rad = g_freecam_pitch * 0.0174532925f;
         float cy = cosf(yaw_rad), sy = sinf(yaw_rad);
         float cp = cosf(pitch_rad), sp = sinf(pitch_rad);
-        // Полёт В СТОРОНУ ВЗГЛЯДА, а не горизонтально
         f = {sy * cp, sp, cy * cp};
         r = {cy, 0.f, -sy};
         u = {0.f, 1.f, 0.f};
@@ -2168,7 +2164,6 @@ bool esp_freecam_move(float forward, float right, float up) {
         f = g_cam_forward; r = g_cam_right; u = g_cam_up;
         if (!g_cam_pose_valid || !vec3_is_finite(f) || !vec3_is_finite(r)) { f = {0, 0, 1}; r = {1, 0, 0}; u = {0,1,0}; }
     }
-    // Нормализуем
     float fl = sqrtf(f.x*f.x + f.y*f.y + f.z*f.z);
     if (fl > 1e-6f) { f.x/=fl; f.y/=fl; f.z/=fl; }
     float rl = sqrtf(r.x*r.x + r.y*r.y + r.z*r.z);
@@ -2179,6 +2174,7 @@ bool esp_freecam_move(float forward, float right, float up) {
     if (!vec3_is_finite(g_freecam_pos)) { g_freecam_pos = {}; return false; }
     return freecam_write();
 }
+
 
 bool esp_freecam_look(float yaw_delta, float pitch_delta) {
     if (!g_freecam_on) return false;
