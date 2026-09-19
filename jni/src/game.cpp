@@ -6612,6 +6612,48 @@ bool publish_camera_only_frame(float sw, float sh) {
     return true;
 }
 
+// Боты в списке боксов: только данные для аима (is_bot), оверлей их не рисует.
+// Бокс собирается из мировой позиции маркера: шея/голова/грудь — по росту от
+// земли, углы — тем же set_aim_point, что у игроков. Начало координат у
+// префаба бота — в ногах (конвенция Unity для персонажей): если тест покажет,
+// что аим уходит выше/ниже, двигать kBot*H.
+static constexpr float kBotHeadH = 1.60F, kBotNeckH = 1.42F, kBotChestH = 1.18F;
+static void append_bot_boxes(std::vector<EspBox>& out) {
+    if (!g_aim_bones_requested) return; // без аима боксы ботов не нужны никому
+    if (!g_frame_vp_valid || !g_frame_local_valid) return;
+    esp_bot_aim_maintain(); // скан по расписанию + свежие позиции
+    for (const BotAimEnt& src : esp_bot_aim_list()) {
+        Vec3 feet{}; feet.x = src.x; feet.y = src.y; feet.z = src.z;
+        EspBox box{};
+        box.id = src.id;
+        box.is_bot = true;
+        float dx = feet.x - g_frame_local_pos.x;
+        float dy = feet.y - g_frame_local_pos.y;
+        float dz = feet.z - g_frame_local_pos.z;
+        box.distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        // Цель — шея (как у игроков); голова и грудь — запасные слоты.
+        Vec3 head = feet;  head.y += kBotHeadH;
+        Vec3 neck = feet;  neck.y += kBotNeckH;
+        Vec3 chest = feet; chest.y += kBotChestH;
+        set_aim_point(box, 0, head, g_frame_vp, g_frame_sw, g_frame_sh);
+        if (!set_aim_point(box, 1, neck, g_frame_vp, g_frame_sw, g_frame_sh)) continue;
+        set_aim_point(box, 2, chest, g_frame_vp, g_frame_sw, g_frame_sh);
+        box.aim_source = 3; // ноги + рост (оценка) — буквально этот случай
+        // Габариты для приличия: ноги и макушка в экранных координатах.
+        Vec3 top = feet; top.y += 1.8F;
+        Vec2 s_feet{}, s_top{};
+        if (!w2s(g_frame_vp, feet, g_frame_sw, g_frame_sh, s_feet, false)) continue;
+        if (!w2s(g_frame_vp, top, g_frame_sw, g_frame_sh, s_top, false)) continue;
+        float h = fabsf(s_feet.y - s_top.y);
+        float w = h * 0.45F;
+        float cx = (s_feet.x + s_top.x) * 0.5F;
+        box.x1 = cx - w * 0.5F; box.x2 = cx + w * 0.5F;
+        box.y1 = s_feet.y < s_top.y ? s_feet.y : s_top.y;
+        box.y2 = s_feet.y < s_top.y ? s_top.y : s_feet.y;
+        out.push_back(box);
+    }
+}
+
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
 
@@ -6722,6 +6764,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // Alone on the server: no player boxes, but markers and the farm
         // still need this frame's camera + local position.
         publish_camera_only_frame(sw, sh);
+        append_bot_boxes(result); // боты — и без игроков
         return result;
     }
 
@@ -6741,6 +6784,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // этом кадре нет, но метки и фарм живут на камере — без публикации
             // они гаснут вместе с боксами на все секунды ожидания.
             publish_camera_only_frame(sw, sh);
+            append_bot_boxes(result);
             return result;
         }
     } else {
@@ -6847,6 +6891,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 g_frame_publish_fail_streak = 0;
                 g_frame_watchdog_resets = 0;
             }
+            append_bot_boxes(result);
             return result;
         }
         g_local_position_fail_streak = 0;
@@ -7302,6 +7347,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         result.push_back(box);
     }
 
+    append_bot_boxes(result);
     return result;
 }
 

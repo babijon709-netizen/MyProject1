@@ -105,6 +105,7 @@ UI_EN = {
     'Линии': 'Lines', 'Скелеты': 'Skeletons', 'Свои': 'Teammates',
     'Линии и боксы': 'Lines and boxes', 'Толщина': 'Thickness',
     'Мир': 'World', 'Руда': 'Ore', 'Животные': 'Animals', 'Ящики': 'Crates',
+    'Боты': 'Bots', 'Машины': 'Vehicles',
     'Показывать до': 'Show up to', 'Ещё настройки': 'More settings',
     # автофарм
     'Автофарм': 'Auto-farm', 'Что добывать': 'What to farm', 'Дальность': 'Range',
@@ -182,6 +183,8 @@ VISUAL_EN = {
     'Кролик': 'Rabbit', 'Заяц': 'Hare', 'Курица': 'Chicken', 'Рыба': 'Fish',
     'Акула': 'Shark', 'Каннибал': 'Cannibal', 'Лошадь': 'Horse', 'Коза': 'Goat',
     'Овца': 'Sheep', 'Корова': 'Cow', 'Лиса': 'Fox', 'Змея': 'Snake',
+    # боты и машины
+    'Бот': 'Bot', 'Машина': 'Car', 'Дорожный знак': 'Road Sign',
     # расходники и прочее
     'Снежок': 'Snowball', 'Фейерверк': 'Firework', 'Канистра': 'Jerry Can',
     'Ведро': 'Bucket', 'Одежда': 'Clothing', 'Шлем': 'Helmet', 'Броня': 'Armor',

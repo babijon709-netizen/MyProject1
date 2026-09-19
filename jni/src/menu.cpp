@@ -246,6 +246,8 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::loot         = g_state.esp_loot;
         cfg::esp::team         = g_state.esp_team;
         cfg::esp::pickup       = g_state.esp_pickup;
+        cfg::esp::bot          = g_state.esp_bots;
+        cfg::esp::vehicle      = g_state.esp_vehicles;
 
 
 
@@ -334,8 +336,10 @@ float TabContent(int tab, float dt, float cW) {
                 {"##van", XS("Животные"), &g_state.esp_animal,       &g_state.a_esp_animal,       &cfg::esp::animal_col},
                 {"##vlt", XS("Ящики"),    &g_state.esp_loot,         &g_state.a_esp_loot,         &cfg::esp::loot_col},
                 {"##vpk", XS("Предметы"), &g_state.esp_pickup,       &g_state.a_esp_pickup,       &cfg::esp::pickup_col},
+                {"##vbt", XS("Боты"),     &g_state.esp_bots,         &g_state.a_esp_bots,         &cfg::esp::bot_col},
+                {"##vvc", XS("Машины"),   &g_state.esp_vehicles,     &g_state.a_esp_vehicles,     &cfg::esp::vehicle_col},
             };
-            constexpr int NW = 4;
+            constexpr int NW = 6;
             CardBg(rowH * NW);
             for (int i = 0; i < NW; i++)
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NW-1);
@@ -1343,6 +1347,8 @@ void RenderMenu() {
     Tick(g_state.a_esp_animal, g_state.esp_animal,         dt);
     Tick(g_state.a_esp_loot,   g_state.esp_loot,           dt);
     Tick(g_state.a_esp_pickup, g_state.esp_pickup,         dt);
+    Tick(g_state.a_esp_bots,   g_state.esp_bots,           dt);
+    Tick(g_state.a_esp_vehicles, g_state.esp_vehicles,     dt);
     Tick(g_state.a_always_day,  g_state.always_day,         dt);
     Tick(g_state.a_esp_team,   g_state.esp_team,           dt);
     Tick(g_state.a_aim_pr0,    g_state.aim_priority == 0,  dt);

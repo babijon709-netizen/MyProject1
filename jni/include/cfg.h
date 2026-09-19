@@ -15,6 +15,8 @@ namespace cfg { namespace esp {
     inline ImVec4 loot_col        = {0.55f, 0.80f, 1.00f, 1.f};
     inline ImVec4 ally_col        = {0.25f, 0.55f, 1.00f, 1.f};
     inline ImVec4 pickup_col      = {0.60f, 1.00f, 0.60f, 1.f};
+    inline ImVec4 bot_col           = {0.85f, 0.40f, 1.00f, 1.f};
+    inline ImVec4 vehicle_col       = {1.00f, 0.85f, 0.20f, 1.f};
     // Tracers drawn to a team mate are always green, no matter what colour the
     // enemy tracers use — that is the whole point of telling them apart.
     inline ImVec4 ally_tracer_col = {0.20f, 0.90f, 0.35f, 1.f};
@@ -30,6 +32,8 @@ namespace cfg { namespace esp {
     inline bool loot         = false;
     inline bool team         = false;
     inline bool pickup       = false;
+    inline bool bot            = false;
+    inline bool vehicle        = false;
     inline bool  vis_check        = false;
     inline bool  fill             = false;
     inline float stroke           = 2.f;

@@ -65,12 +65,17 @@ struct EspBox {
     // degrees (yaw = +right, pitch = +up). Only meaningful when aim_valid[i].
     float aim_yaw[3];
     float aim_pitch[3];
+    // Бот (враждебный NPC): бокс собран не из игрока, а из маркера — только
+    // данные для аима (точка = шея по росту от земли). Оверлей такие боксы
+    // не рисует (ботов рисуют маркеры), аим берёт на общих основаниях.
+    bool  is_bot = false;
 };
 
-// World markers: ore nodes and animals, drawn as a small labelled pill at the
-// object's screen position. Both come from the same networked source
-// (Oxide.MineableObject in Mirror's client registry), so one struct covers them.
-enum EspMarkerKind { ESP_MARKER_ORE = 0, ESP_MARKER_ANIMAL = 1, ESP_MARKER_LOOT = 2, ESP_MARKER_PICKUP = 3 };
+// World markers: ore nodes, animals, bots and vehicles, drawn as a small
+// labelled pill at the object's screen position. All come from the same
+// networked source (Oxide.MineableObject in Mirror's client registry),
+// so one struct covers them.
+enum EspMarkerKind { ESP_MARKER_ORE = 0, ESP_MARKER_ANIMAL = 1, ESP_MARKER_LOOT = 2, ESP_MARKER_PICKUP = 3, ESP_MARKER_BOT = 4, ESP_MARKER_VEHICLE = 5 };
 struct EspMarker {
     float x = 0.0F, y = 0.0F;   // screen position (top-centre of the pill)
     float distance = 0.0F;      // metres from the local player
@@ -101,8 +106,10 @@ void          esp_mem_frame_begin();
 // Привязка ещё читается? (одно чтение; ловит перезапуск процесса и отобранный доступ)
 bool          esp_alive_check();
 void        esp_set_skeleton_enabled(bool enabled);
-// Enable the ore / animal / loot / pickup marker scan (all off = no work).
-void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups);
+// Enable the ore / animal / loot / pickup / vehicle / bot marker scan
+// (all off = no work, unless the bot aim feed below is on).
+void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
+                                    bool vehicles, bool bots);
 // «Всегда день»: время суток удерживается в полдне (клиентский визуал).
 void        esp_set_always_day(bool enabled);
 // Markers further away than this (metres) are dropped. Keeps the screen clean
@@ -113,6 +120,13 @@ void        esp_set_marker_max_distance(float metres);
 std::vector<EspMarker> esp_get_markers();
 // Resolve bones (for aim points) even when skeleton ESP drawing is off.
 void        esp_set_aim_bones_enabled(bool enabled);
+// Bot aim feed: world positions of recognised bots, refreshed (scan +
+// throttled re-reads) even when bot markers are not drawn — so the aimbot
+// keeps working on bots after their ESP is switched off.
+struct BotAimEnt { uint64_t id = 0; float x = 0.f, y = 0.f, z = 0.f; };
+void esp_set_bot_aim_enabled(bool enabled);
+void esp_bot_aim_maintain();
+std::vector<BotAimEnt> esp_bot_aim_list();
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 
 // Players near the local player as of the last esp_get_boxes() call, in all

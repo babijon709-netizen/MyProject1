@@ -32,6 +32,10 @@ static bool g_markers_ore_enabled = false;
 static bool g_markers_animal_enabled = false;
 static bool g_markers_loot_enabled = false;
 static bool g_markers_pickup_enabled = false;
+static bool g_markers_vehicle_enabled = false;
+static bool g_markers_bot_enabled = false;
+// Аим по ботам: скан и позиции ботов живут, даже когда их маркеры выключены.
+static bool g_bot_aim_enabled = false;
 static float g_marker_max_distance = 150.0F;
 // Когда можно начинать следующий проход скана маркеров, в mono_seconds().
 // Раньше здесь был счётчик кадров (180, при пустом списке 30) из расчёта на
@@ -71,7 +75,8 @@ static std::vector<uint8_t> g_marker_scan_buffer;
 // файлу, поэтому здесь только объявление.
 static void marker_scan_abort();
 
-void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups) {
+void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
+                             bool vehicles, bool bots) {
     // Loot containers and ground pickups are filtered out during the registry
     // walk, so switching a category on has to invalidate the cached list.
     if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled) {
@@ -82,6 +87,10 @@ void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups) {
     g_markers_animal_enabled = animals;
     g_markers_loot_enabled = loot;
     g_markers_pickup_enabled = pickups;
+    g_markers_vehicle_enabled = vehicles;
+    g_markers_bot_enabled = bots;
+    // Машины и боты опознаются при скане всегда (как руда и животные) и
+    // отфильтровываются при отрисовке — инвалидация кэша им не нужна.
 }
 
 
@@ -172,6 +181,9 @@ static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {
 // they can be recognised. They belong to the loot toggle all the same.
 static const MarkerLook kBarrel    {ESP_MARKER_LOOT, "Бочка",  true,  false, {80, 200, 255}};
 static const MarkerLook kSmashBox  {ESP_MARKER_LOOT, "Ящик",   false, false, {255, 255, 255}};
+// Дорожный знак — та же дробимая семья, что бочки и ящики: висит на тумблере
+// «Ящики», но подпись у него своя (раньше тонул в общей «Ящик»).
+static const MarkerLook kRoadSign  {ESP_MARKER_LOOT, "Дорожный знак", false, false, {255, 255, 255}};
 
 // Animals: the game's own EntityType only covers some of them, the rest (wolf,
 // rat, ...) are recognised by the prefab name below.
@@ -183,9 +195,26 @@ static MarkerLook animal_look(const char* label) {
     return look;
 }
 
-// EntityType -> what to draw. Trees, road signs, buildings and players are
-// left out on purpose; barrels and smashable loot boxes are in, they are the
-// scrap source and the game files them under the same enum.
+static MarkerLook bot_look(const char* label) {
+    MarkerLook look;
+    look.kind = ESP_MARKER_BOT;
+    look.label = label;
+    look.has_color = false;
+    return look;
+}
+
+static MarkerLook vehicle_look(const char* label) {
+    MarkerLook look;
+    look.kind = ESP_MARKER_VEHICLE;
+    look.label = label;
+    look.has_color = false;
+    return look;
+}
+
+// EntityType -> what to draw. Trees, buildings and players are left out on
+// purpose; barrels and smashable loot boxes are in, they are the scrap source
+// and the game files them under the same enum. Road signs ride the loot
+// toggle (same smashable family); bots and vehicles have their own toggles.
 static bool marker_for_entity_type(int32_t type, MarkerLook& look) {
     switch ((MineableEntityType)type) {
         case MineableEntityType::Stone:    look = kOreStone;  return true;
@@ -196,6 +225,9 @@ static bool marker_for_entity_type(int32_t type, MarkerLook& look) {
         // Air-drop balloon crates, new in this game build.
         case MineableEntityType::LootboxBaloon:
         case MineableEntityType::LootboxBaloonBig: look = kSmashBox; return true;
+        case MineableEntityType::RoadSign: look = kRoadSign;  return true;
+        case MineableEntityType::Human:    look = bot_look("Бот"); return true;
+        case MineableEntityType::Vehicle:  look = vehicle_look("Машина"); return true;
         case MineableEntityType::Bear:     look = animal_look("Медведь");  return true;
         case MineableEntityType::Boar:     look = animal_look("Кабан");    return true;
         case MineableEntityType::Deer:     look = animal_look("Олень");    return true;
@@ -287,6 +319,68 @@ static bool barrel_look_from_object_name(const char* raw, MarkerLook& look) {
             strncmp(word, "bochka", 6) == 0 ||
             strcmp(word, "keg") == 0 || strcmp(word, "drum") == 0) {
             look = kBarrel;
+            return true;
+        }
+        return false;
+    });
+}
+
+// Prefab names that disqualify a Mineable component completely, checked BEFORE
+// the entityType (a borrowed type would otherwise win — the wolf says "Boar"):
+//   * buggies — vehicle ESP is for regular cars only (user request);
+//   * corpses / sleepers — a Human type on them would fake a "bot".
+static bool skip_object_name(const char* raw) {
+    return for_each_name_token(raw, [](const char* word) {
+        if (strcmp(word, "buggy") == 0 || strcmp(word, "buggies") == 0) return true;
+        if (strcmp(word, "corpse") == 0 || strcmp(word, "corpses") == 0 ||
+            strcmp(word, "ragdoll") == 0 || strcmp(word, "sleeper") == 0 ||
+            strcmp(word, "sleepers") == 0 || strcmp(word, "deathbag") == 0 ||
+            strcmp(word, "playercorpse") == 0) return true;
+        return false;
+    });
+}
+
+// Cars whose entityType is empty: prefab name only. Exact words, never a
+// prefix — "car" starts cargo, carpet, cardboard and carepackage.
+static bool vehicle_look_from_object_name(const char* raw, MarkerLook& look) {
+    return for_each_name_token(raw, [&](const char* word) {
+        if (strcmp(word, "car") == 0 || strcmp(word, "cars") == 0 ||
+            strcmp(word, "vehicle") == 0 || strcmp(word, "vehicles") == 0) {
+            look = vehicle_look("Машина");
+            return true;
+        }
+        return false;
+    });
+}
+
+// Hostile NPCs with an empty entityType. Same matching rules as the animals:
+// whole words, plus a prefix match for 4+ letter tokens ("scientistpatrol").
+static bool bot_look_from_object_name(const char* raw, MarkerLook& look) {
+    static const struct { const char* word; } kBots[] = {
+        {"bot"}, {"bots"}, {"npc"}, {"npcs"}, {"scientist"}, {"bandit"},
+    };
+    return for_each_name_token(raw, [&](const char* word) {
+        size_t wlen = strlen(word);
+        for (const auto& bot : kBots) {
+            if (strcmp(word, bot.word) == 0) { look = bot_look("Бот"); return true; }
+            size_t blen = strlen(bot.word);
+            if (blen >= 4 && wlen > blen && strncmp(word, bot.word, blen) == 0) {
+                look = bot_look("Бот");
+                return true;
+            }
+        }
+        return false;
+    });
+}
+
+// Road signs: the smashable family (LootDestroyable) labels everything it
+// cannot name "Ящик", and signs used to drown in there. Whole words only.
+static bool roadsign_look_from_object_name(const char* raw, MarkerLook& look) {
+    return for_each_name_token(raw, [&](const char* word) {
+        if (strcmp(word, "roadsign") == 0 || strcmp(word, "roadsigns") == 0 ||
+            strcmp(word, "signroad") == 0 ||
+            strcmp(word, "sign") == 0 || strcmp(word, "signs") == 0) {
+            look = kRoadSign;
             return true;
         }
         return false;
@@ -843,6 +937,11 @@ static bool rebuild_marker_entities() {
                 // else gets the generic smash-box label.
                 known = barrel_look_from_object_name(object_name, look) ||
                         barrel_look_from_object_name(root_name, look);
+                // Дорожные знаки — та же дробимая семья, но метка у них своя:
+                // раньше они тонули в общей «Ящик» ниже.
+                if (!known)
+                    known = roadsign_look_from_object_name(object_name, look) ||
+                            roadsign_look_from_object_name(root_name, look);
                 // Общая метка «ящик» — только для класса, о котором точно
                 // известно, что он дробимый: при неизвестном семействе иначе
                 // метку получил бы любой объект в реестре.
@@ -861,12 +960,24 @@ static bool rebuild_marker_entities() {
                 // so trusting the enum first labelled every wolf as a boar.
                 if (object_name[0]) known = animal_look_from_object_name(object_name, look);
                 if (!known && root_name[0]) known = animal_look_from_object_name(root_name, look);
+                // Багги и трупы маркерами не становятся вообще (см.
+                // skip_object_name); проверка раньше типа — borrowed-type.
+                if (!known && ((object_name[0] && skip_object_name(object_name)) ||
+                               (root_name[0] && skip_object_name(root_name))))
+                    continue;
                 if (!known) {
                     int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
                     known = marker_for_entity_type(entity_type, look);
                 }
                 if (!known && object_name[0]) known = barrel_look_from_object_name(object_name, look);
                 if (!known && root_name[0])   known = barrel_look_from_object_name(root_name, look);
+                // Бестиповые машины / боты / знаки: только по имени префаба.
+                if (!known && object_name[0]) known = vehicle_look_from_object_name(object_name, look);
+                if (!known && root_name[0])   known = vehicle_look_from_object_name(root_name, look);
+                if (!known && object_name[0]) known = bot_look_from_object_name(object_name, look);
+                if (!known && root_name[0])   known = bot_look_from_object_name(root_name, look);
+                if (!known && object_name[0]) known = roadsign_look_from_object_name(object_name, look);
+                if (!known && root_name[0])   known = roadsign_look_from_object_name(root_name, look);
                 if (!known) known = marker_from_loot(component, look);
                 // Cloth bushes, mushroom and berry clusters: harvestable, so
                 // they are Mineables, but they belong to the pickup category.
@@ -921,10 +1032,31 @@ void reset_marker_caches() {
     farm_scan_reset();
 }
 
+// Position tracking for markers that move (animals always, bots when drawn
+// or aimed): near ones every frame, far ones a few times a second. Shared by
+// esp_get_markers() and esp_bot_aim_maintain(); when both run in one frame the
+// cooldown simply ticks twice and far bots re-read twice as often — harmless.
+static void marker_track_position(MarkerEntity& entity) {
+    bool want_read = !entity.position_valid;
+    if (entity.kind == ESP_MARKER_ANIMAL || entity.kind == ESP_MARKER_BOT) {
+        if (--entity.pos_cooldown <= 0) {
+            want_read = true;
+            float ddx = entity.position.x - g_frame_local_pos.x;
+            float ddz = entity.position.z - g_frame_local_pos.z;
+            float d2 = ddx * ddx + ddz * ddz;
+            entity.pos_cooldown = (!entity.position_valid || d2 < 60.0F * 60.0F) ? 1
+                                : (d2 < 150.0F * 150.0F) ? 6 : 15;
+        }
+    }
+    if (want_read)
+        entity.position_valid = marker_world_position(entity.transform, entity.position);
+}
+
 std::vector<EspMarker> esp_get_markers() {
     std::vector<EspMarker> result;
     if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
-        !g_markers_loot_enabled && !g_markers_pickup_enabled) {
+        !g_markers_loot_enabled && !g_markers_pickup_enabled &&
+        !g_markers_vehicle_enabled && !g_markers_bot_enabled && !g_bot_aim_enabled) {
         if (!g_marker_entities.empty()) g_marker_entities.clear();
         g_marker_next_scan = 0.0;
         marker_scan_abort();   // не тащить незавершённую порцию через выключенный ESP
@@ -996,24 +1128,11 @@ std::vector<EspMarker> esp_get_markers() {
         if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
         if (entity.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) continue;
         if (entity.kind == ESP_MARKER_PICKUP && !g_markers_pickup_enabled) continue;
+        if (entity.kind == ESP_MARKER_VEHICLE && !g_markers_vehicle_enabled) continue;
+        if (entity.kind == ESP_MARKER_BOT && !g_markers_bot_enabled) continue;
         // Ore nodes never move, so their position is only read on a rescan.
-        // Animals DO move, but re-reading a transform chain (4+ syscalls)
-        // for every animal every frame is the single hottest path here —
-        // throttle far ones: within 60 m track every frame, beyond that a
-        // few times a second is indistinguishable on screen.
-        bool want_read = !entity.position_valid;
-        if (entity.kind == ESP_MARKER_ANIMAL) {
-            if (--entity.pos_cooldown <= 0) {
-                want_read = true;
-                float ddx = entity.position.x - g_frame_local_pos.x;
-                float ddz = entity.position.z - g_frame_local_pos.z;
-                float d2 = ddx * ddx + ddz * ddz;
-                entity.pos_cooldown = (!entity.position_valid || d2 < 60.0F * 60.0F) ? 1
-                                    : (d2 < 150.0F * 150.0F) ? 6 : 15;
-            }
-        }
-        if (want_read)
-            entity.position_valid = marker_world_position(entity.transform, entity.position);
+        // Animals and bots DO move — throttled re-reads, see marker_track_position.
+        marker_track_position(entity);
         if (!entity.position_valid) continue;
 
         float dx = entity.position.x - g_frame_local_pos.x;
@@ -1025,9 +1144,12 @@ std::vector<EspMarker> esp_get_markers() {
         Vec2 screen{};
         Vec3 anchor = entity.position;
         // above the model: animals are tall, crates sit low on the ground
-        anchor.y += (entity.kind == ESP_MARKER_ANIMAL) ? 1.2F
-                  : (entity.kind == ESP_MARKER_LOOT)   ? 0.6F
-                  : (entity.kind == ESP_MARKER_PICKUP) ? 0.4F : 0.9F;
+        // Пилюля бота висит на высоте шеи — в той точке, куда целится аим.
+        anchor.y += (entity.kind == ESP_MARKER_ANIMAL)  ? 1.2F
+                  : (entity.kind == ESP_MARKER_LOOT)    ? 0.6F
+                  : (entity.kind == ESP_MARKER_PICKUP)  ? 0.4F
+                  : (entity.kind == ESP_MARKER_BOT)     ? 1.4F
+                  : (entity.kind == ESP_MARKER_VEHICLE) ? 1.2F : 0.9F;
         if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) continue;
         if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
         if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F) continue;
@@ -1075,4 +1197,43 @@ std::vector<EspMarker> esp_get_markers() {
         if (thinned.size() >= 64) break; // keep the screen readable
     }
     return thinned;
+}
+
+void esp_set_bot_aim_enabled(bool enabled) { g_bot_aim_enabled = enabled; }
+
+// Bot aim feed, see game.h: scan on schedule + refresh bot positions even
+// when bot markers are not drawn. Called from esp_get_boxes(), i.e. always
+// before esp_get_markers() in a frame, so drawn pills reuse fresh positions.
+void esp_bot_aim_maintain() {
+    if (!g_bot_aim_enabled) return;
+    if (g_pid <= 0 || !g_il2cpp_base) return;
+    const double now = mono_seconds();
+    if (now >= g_marker_next_scan) {
+        const bool scan_done = rebuild_marker_entities();
+        g_marker_next_scan = scan_done
+            ? now + (g_marker_entities.empty() ? 0.5 : 3.0)
+            : now;
+    }
+    for (MarkerEntity& entity : g_marker_entities) {
+        if (entity.kind != ESP_MARKER_BOT) continue;
+        marker_track_position(entity);
+    }
+}
+
+std::vector<BotAimEnt> esp_bot_aim_list() {
+    std::vector<BotAimEnt> out;
+    if (!g_bot_aim_enabled) return out;
+    for (const MarkerEntity& entity : g_marker_entities) {
+        if (entity.kind != ESP_MARKER_BOT || !entity.position_valid) continue;
+        float dx = entity.position.x - g_frame_local_pos.x;
+        float dy = entity.position.y - g_frame_local_pos.y;
+        float dz = entity.position.z - g_frame_local_pos.z;
+        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(distance) || distance > g_marker_max_distance) continue;
+        BotAimEnt bot;
+        bot.id = entity.identity;
+        bot.x = entity.position.x; bot.y = entity.position.y; bot.z = entity.position.z;
+        out.push_back(bot);
+    }
+    return out;
 }

@@ -31,6 +31,7 @@ struct AppState {
     bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;
     bool  esp_ore = false, esp_animal = false, esp_loot = false, esp_team = false;
     bool  esp_pickup = false;
+    bool  esp_bots = false, esp_vehicles = false;
     bool  always_day = false;     // всегда день
     float marker_dist = 150.f;
     float esp_thick = 1.5f;
@@ -72,6 +73,7 @@ struct AppState {
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
+    float a_esp_bots = 0, a_esp_vehicles = 0;
     float a_always_day = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
