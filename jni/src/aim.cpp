@@ -49,6 +49,12 @@ struct AimTarget {
     int   bone = -1;                // слот точки прицела (0 голова, 1 шея, 2 грудь)
     float health = -1.f;            // здоровье цели (для лога и проверки смерти)
     bool  respawning = false;       // PlayerManager.respawning (для лога)
+    // Поза выбранной цели — те же габариты скелета, по которым решается
+    // «мёртв». В лог они идут вместе с самой целью: иначе, когда игрок
+    // жалуется «аим ведёт по трупу», нечем проверить, лежал ли тот труп
+    // или его кости ещё стояли.
+    int   skel_bones = 0;
+    float skel_up = -1.f, skel_flat = -1.f;
 };
 
 static void AimReleaseFinger(bool& fingerDown) {
@@ -275,8 +281,20 @@ static unsigned long s_out_of_fov = 0;          // точка дальше кр�
 // все, кого видно.
 static unsigned long s_seen_boxes = 0;
 
-static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, float& degPerPx) {
+// why — причина, по которой цель НЕ выбрана (0 когда цель есть). Коды:
+//   1 боксов нет вовсе      2 все союзники      3 все мёртвые
+//   4 нет скелета           5 кости не легли на экран
+//   6 точка вне экрана      7 точка дальше круга обзора
+// Без этого кода кадр «аим активен, прицел есть, записей ноль» нечем
+// прочесть: в логе 17:06 таких было 32 из 92, и что именно не пустило
+// цель — отфильтровали трупа, круг обзора или пустой список — не видно.
+static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, float& degPerPx, int* why = nullptr) {
     LogStage(kStageAimSelect);
+    if (why) *why = 0;
+    const unsigned long was_ally = s_ally_skipped, was_dead = s_dead_skipped;
+    const unsigned long was_nosk = s_no_skeleton,  was_noproj = s_bones_not_projected;
+    const unsigned long was_off  = s_offscreen_skipped, was_fov = s_out_of_fov;
+    const unsigned long was_seen = s_seen_boxes;
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
 
     // Сводку пропусков печатаем БЕЗ условий и ДО выбора. В сборке 829a1dc
@@ -381,6 +399,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         if (!t.valid) continue;
         t.id = b.id;
         t.health = b.health; t.respawning = b.respawning;
+        t.skel_bones = b.skel_bones; t.skel_up = b.skel_up; t.skel_flat = b.skel_flat;
         const bool sticky = (pick.lastId != 0 && b.id == pick.lastId);
         if (t.sx < -sw || t.sx > sw * 2.f || t.sy < -sh || t.sy > sh * 2.f) { ++s_offscreen_skipped; continue; }
         if (g_state.aim_pos && !sticky && (t.sx < 0.f || t.sy < 0.f || t.sx > sw || t.sy > sh)) { ++s_offscreen_skipped; continue; }
@@ -411,7 +430,26 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         if (score < bestScore) { bestScore = score; best = t; }
     }
 
-    if (!best.valid) return false;
+    if (!best.valid) {
+        if (why) {
+            // Берём ту причину, которая в ЭТОМ кадре отсеяла больше всех:
+            // счётчики накопительные, а нужен ответ про конкретный кадр.
+            const unsigned long d[] = {
+                s_seen_boxes - was_seen, s_ally_skipped - was_ally,
+                s_dead_skipped - was_dead, s_no_skeleton - was_nosk,
+                s_bones_not_projected - was_noproj, s_offscreen_skipped - was_off,
+                s_out_of_fov - was_fov
+            };
+            // «Боксов нет» — только когда на выбор не пришёл НИ ОДИН игрок;
+            // иначе причина та, которой отсеяно больше всего.
+            int code = 1; unsigned long top = 0;
+            for (int i = 1; i < 7; ++i) if (d[i] > top) { top = d[i]; code = i + 1; }
+            if (d[0] > 0 && top == 0) code = 1;
+            if (d[0] == 0) code = 1;
+            *why = code;
+        }
+        return false;
+    }
 
     // Lead a moving target: the game applies our step next frame, by
     // which time the target has moved on. Use the target's angular velocity
@@ -492,9 +530,10 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // игрок жаловался, что аим ведёт по мёртвым, а по respawning (0x208) в
     // логе 14:55 не сработало ни разу. Печатаем здоровье и оба флага.
     if (best.id != pick.lastId)
-        LogLine("аим: цель 0x%llx здоровье=%.1f respawning=%d дистанция=%.1f м",
+        LogLine("аим: цель 0x%llx здоровье=%.1f respawning=%d дистанция=%.1f м костей=%d высота=%.2f м ширина=%.2f м",
                 (unsigned long long)best.id, (double)best.health,
-                (int)best.respawning, (double)best.world_dist);
+                (int)best.respawning, (double)best.world_dist,
+                (int)best.skel_bones, (double)best.skel_up, (double)best.skel_flat);
     pick.switched = (best.id != pick.lastId);
     pick.lastId = best.id; pick.lastBone = best.bone;
     return true;
@@ -977,9 +1016,10 @@ static void AimLogTick(float dt) {
     s_logTime = 0.f;
     const AimMemDiag& d = AimMemoryDiag();
     if (g_state.aim_mode == AIM_MODE_MEMORY)
-        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d источник=%d",
+        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d источник=%d нетцели=%d нацели=%d",
                 aim_mode_name(), s_frames, (int)d.params, (int)d.responded,
-                d.writes, d.fails, (double)d.mismatch, d.inactive, d.ads, d.ads_source);
+                d.writes, d.fails, (double)d.mismatch, d.inactive, d.ads, d.ads_source,
+                d.no_target, d.on_target);
 }
 
 // ====================== Мемори-аим: «память» ===============================
@@ -1125,11 +1165,14 @@ static void UpdateAimMemory(float dt) {
 
     AimTarget best;
     float degPerPx = 0.f;
-    if (!AimSelectTarget(sw, sh, pick, best, degPerPx)) {
+    int noTgtWhy = 0;
+    if (!AimSelectTarget(sw, sh, pick, best, degPerPx, &noTgtWhy)) {
+        s_memDiag.no_target = noTgtWhy;
         pick.reset(); s_haveLast = false; s_haveCtlErr = false; s_haveFilt = false;
         s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
         return;
     }
+    s_memDiag.no_target = 0;
     if (pick.switched) {
         // Другая цель: сглаживание прошлой тянет камеру мимо новой, выбрасываем.
         s_haveLast = false; s_haveCtlErr = false; s_haveFilt = false;
@@ -1228,7 +1271,7 @@ static void UpdateAimMemory(float dt) {
     else                            errYaw   -= (errYaw   > 0.f ? kDeadDeg : -kDeadDeg);
     if (fabsf(errPitch) < kDeadDeg) errPitch = 0.f;
     else                            errPitch -= (errPitch > 0.f ? kDeadDeg : -kDeadDeg);
-    if (errYaw == 0.f && errPitch == 0.f) return;
+    if (errYaw == 0.f && errPitch == 0.f) { ++s_memDiag.on_target; return; }
 
     // Гаситель «качелей»: остаток перескочил через ноль — режем шаг, иначе
     // камера ходит туда-сюда (у пальца это же место).
