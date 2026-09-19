@@ -6984,11 +6984,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // неизвестен (-1) и НЕ считается смертью: пометить живого игрока
         // мёртвым хуже, чем один кадр повести по трупу.
         {
-            const uint64_t dh = rd_ptr(s_transforms[i] + game_offsets::PLAYER_DEATH_HANDLER);
-            if (dh >= 0x10000) {
-                const uint32_t f = rd<uint8_t>(dh + game_offsets::DEATH_HANDLER_DEATH);
-                if (f == 1) { box.death_flag = 1; box.dead = true; }
-                else if (f == 0) box.death_flag = 0;
+            const uint64_t ref = rd_ptr(s_transforms[i] + game_offsets::PLAYER_DEATH_HANDLER);
+            if (ref >= 0x10000) {
+                const uint64_t dh = rd_ptr(ref + game_offsets::DEATH_HANDLER_REF_TARGET);
+                if (dh >= 0x10000) {
+                    const uint32_t f = rd<uint8_t>(dh + game_offsets::DEATH_HANDLER_DEATH);
+                    if (f == 1) { box.death_flag = 1; box.dead = true; }
+                    else if (f == 0) box.death_flag = 0;
+                }
             }
         }
         if (box.skel_bones >= 11 && box.skel_up >= 0.f && box.skel_flat >= 0.f) {
