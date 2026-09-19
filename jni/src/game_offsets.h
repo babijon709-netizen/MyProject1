@@ -309,6 +309,31 @@ inline constexpr std::uint64_t RAGDOLL_BONES_ARRAY         = 0x88;
 inline constexpr std::uint64_t RAGDOLL_BODYPART_TRANSFORM  = 0x10;
 inline constexpr std::uint64_t IL2CPP_ARRAY_LENGTH         = 0x18;
 
+// ---- Признак смерти игрока (dump.cs, сверено с бетой — значения совпали) ----
+// HP для этого не годится (серверный), а respawning (0x208) в логах у трупов
+// стоял 0 — нужны состояния, которые игрок сам держит на клиенте:
+//
+// 1) KCC.ZYW (Move, 0x154).State — enum MoveState, DEAD == 7: игра ставит его
+//    в момент смерти и сбрасывает на возрождении. Читаем то же самое, что
+//    уже читает определение приседания (KCC_MOVE + 0x00).
+// 2) CharacterAnimation.ragdoll (0x38) -> Ragdoll.Lxg/QSM (0x98, int) —
+//    enum RagdollState: 0 Animated (жив), 1 Ragdolled (труп), 2 BlendToAnim
+//    (встаёт — уже жив).
+// 3) PlayerManager.playerDeathHandlerReference (0x80) — тот же обфусцированный
+//    ленивый обёрнутый указатель, что и kccReference (0xB0), на
+//    Oxide.PlayerDeathHandler (Mirror.NetworkBehaviour):
+//      player (Oxide.PlayerManager)  0x68 — обратная ссылка (валидация);
+//      death  (bool, notserialized)  0xF0 — стоит, пока игрок не возродился.
+//    Обёртка резолвится так же, как kccReference: прямой указатель либо
+//    поле внутри (probe 0x08..0x60), кандидат проверяется обратной ссылкой.
+inline constexpr std::uint64_t PLAYER_DEATH_HANDLER_REFERENCE = 0x80;
+inline constexpr std::uint64_t DEATH_HANDLER_PLAYER_BACKREF   = 0x68;
+inline constexpr std::uint64_t DEATH_HANDLER_DEAD_FLAG        = 0xF0;
+// Состояние Ragdoll (int в Ragdoll, см. RAGDOLL_STATE): Ragdolled — труп.
+// Animated == 0, Ragdolled == 1, BlendToAnim == 2 — значения enum'а, между
+// релизом и бетой не разъезжаются (сверено по dump.cs и dump_beta.7z).
+inline constexpr std::uint64_t RAGDOLL_STATE = 0x98;
+
 // Native Unity object layout — reversed from libunity.so in this repo:
 //   Transform::get_childCount_Injected -> ldr w0, [x0, #0x58]
 //   Transform::GetChild helper         -> ldr x8, [x0, #0x48]; ldr x0, [x8, w1, uxtw #3]

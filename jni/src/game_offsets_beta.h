@@ -304,6 +304,14 @@ inline constexpr std::uint64_t RAGDOLL_BONES_ARRAY         = 0x88;
 inline constexpr std::uint64_t RAGDOLL_BODYPART_TRANSFORM  = 0x10;
 inline constexpr std::uint64_t IL2CPP_ARRAY_LENGTH         = 0x18;
 
+// Признак смерти игрока — в бете те же значения (сверено по dump_beta.7z:
+// PlayerDeathHandler.player 0x68 / death 0xF0, playerDeathHandlerReference
+// 0x80, Ragdoll-состояние 0x98 — все совпали с релизом).
+inline constexpr std::uint64_t PLAYER_DEATH_HANDLER_REFERENCE = 0x80;
+inline constexpr std::uint64_t DEATH_HANDLER_PLAYER_BACKREF   = 0x68;
+inline constexpr std::uint64_t DEATH_HANDLER_DEAD_FLAG        = 0xF0;
+inline constexpr std::uint64_t RAGDOLL_STATE = 0x98;
+
 // Native Unity object layout — reversed from libunity.so in this repo:
 //   Transform::get_childCount_Injected -> ldr w0, [x0, #0x58]
 //   Transform::GetChild helper         -> ldr x8, [x0, #0x48]; ldr x0, [x8, w1, uxtw #3]
