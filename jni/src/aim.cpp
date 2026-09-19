@@ -1016,10 +1016,10 @@ static void AimLogTick(float dt) {
     s_logTime = 0.f;
     const AimMemDiag& d = AimMemoryDiag();
     if (g_state.aim_mode == AIM_MODE_MEMORY)
-        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d источник=%d нетцели=%d нацели=%d",
+        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d источник=%d нетцели=%d нацели=%d чтение=%d",
                 aim_mode_name(), s_frames, (int)d.params, (int)d.responded,
                 d.writes, d.fails, (double)d.mismatch, d.inactive, d.ads, d.ads_source,
-                d.no_target, d.on_target);
+                d.no_target, d.on_target, d.read_fail);
 }
 
 // ====================== Мемори-аим: «память» ===============================
@@ -1153,6 +1153,9 @@ static void UpdateAimMemory(float dt) {
     float accX = 0.f, accY = 0.f;
     LogStage(kStageAimRead);
     if (!esp_mem_aim_read_angles(accX, accY)) {
+        // Самый молчаливый путь: цель есть, писать нечем, а ни один счётчик
+        // не растёт. Без отметки здесь кадр не отличить от «цели не было».
+        ++s_memDiag.read_fail;
         pick.reset(); s_haveLast = false; s_haveCtlErr = false; s_haveFilt = false;
         s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
         s_noResponseTime += dt;
