@@ -1819,7 +1819,8 @@ static void freecam_writer_start() {
                 if (is_view) {
                     if (wr_buf(addr, v_full, sizeof(v_full))) g_fc_write_count.fetch_add(1);
                     else g_fc_write_failed.store(true);
-                    // worldToClip вторым слотом + флаги грязности
+                    // worldToClip вторым слотом + флаги грязности + остальные трансформы
+                    Mat4 last_w2c{}; bool have_w2c=false;
                     if (nslots > 1) {
                         const uint64_t a2 = g_fc_addr[1].load();
                         if (a2) {
@@ -1827,6 +1828,7 @@ static void freecam_writer_start() {
                             Mat4 vw{}; for(int i=0;i<16;++i) vw.m[i]=v_full[i];
                             Mat4 w2c = mat_mul(proj, vw);
                             wr_buf(a2, &w2c, sizeof(Mat4));
+                            last_w2c=w2c; have_w2c=true;
                             uint8_t zero=0;
                             wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
                             wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
@@ -1836,6 +1838,14 @@ static void freecam_writer_start() {
                         uint8_t zero=0;
                         wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
                         wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
+                    }
+                    // Слоты 2.. — трансформы камеры (Matrix34)
+                    for (int sl = 2; sl < nslots; ++sl) {
+                        const uint64_t a2 = g_fc_addr[sl].load();
+                        if (!a2) continue;
+                        FcMat mm = g_fc_mat[sl];
+                        const float v2[12] = {mm.tx, mm.ty, mm.tz, mm.tw, mm.rx, mm.ry, mm.rz, mm.rw, mm.sx, mm.sy, mm.sz, mm.sw};
+                        if (wr_buf(a2, v2, sizeof(v2))) g_fc_write_count.fetch_add(1);
                     }
                 } else {
                     if (wr_buf(addr, v, sizeof(v))) g_fc_write_count.fetch_add(1);
@@ -2041,16 +2051,34 @@ static bool freecam_write() {
             g_fc_addr[0].store(g_native_camera + CAMERA_VIEW_MATRIX);
             g_fc_mat[0] = FcMat{view.m[0], view.m[1], view.m[2], view.m[3], view.m[4], view.m[5], view.m[6], view.m[7], view.m[8], view.m[9], view.m[10], view.m[11]};
             g_fc_gap.store(0.f);
-            g_fc_addr_n.store(1);
+            int total = 1;
             // Вторым слотом — worldToClip, если есть место
-            if (wok && g_fc_own_n < kFcMaxSlots) {
-                // Используем второй слот для worldToClip
+            if (wok) {
                 g_fc_addr[1].store(g_native_camera + CAMERA_WORLD_TO_CLIP);
-                // Для простоты храним первые 12 флотов w2c в g_fc_mat[1]
                 g_fc_mat[1] = FcMat{w2c.m[0], w2c.m[1], w2c.m[2], w2c.m[3], w2c.m[4], w2c.m[5], w2c.m[6], w2c.m[7], w2c.m[8], w2c.m[9], w2c.m[10], w2c.m[11]};
-                // Остальные 4 флоата w2c (12..15) допишем отдельно в писателе
-                g_fc_addr_n.store(2);
+                total = 2;
             }
+            // Дополнительно пишем трансформ камеры (из g_fc_own), чтобы
+            // игра, если пересчитает вид из трансформа, всё равно осталась в цели.
+            // Это закрывает случай «двигаются только визуалы, а от первого лица стою».
+            for (int sl = 0; sl < g_fc_own_n && total < kFcMaxSlots; ++sl) {
+                const FcSlot& S = g_fc_own[sl];
+                if (!S.m || !S.n || S.i < 0) continue;
+                Vec3 local{}; float gap = -1.f;
+                if (!freecam_local_for_target(S.m, S.n, S.i, g_freecam_pos, local, gap)) continue;
+                Matrix34 cur_m{};
+                if (!rd_fresh(S.m + (uint64_t)S.i * sizeof(Matrix34), cur_m)) continue;
+                if (!matrix34_is_valid(cur_m)) { cur_m.rotation={0.f,0.f,0.f,1.f}; cur_m.scale={1.f,1.f,1.f,0.f}; }
+                cur_m.translation.x=local.x; cur_m.translation.y=local.y; cur_m.translation.z=local.z;
+                const uint64_t addr = S.m + (uint64_t)S.i * sizeof(Matrix34);
+                // Не затираем слоты 0/1 (view/worldToClip), пишем начиная с total
+                g_fc_lx[total].store(local.x); g_fc_ly[total].store(local.y); g_fc_lz[total].store(local.z);
+                g_fc_mat[total]=FcMat{cur_m.translation.x,cur_m.translation.y,cur_m.translation.z,cur_m.translation.w,cur_m.rotation.x,cur_m.rotation.y,cur_m.rotation.z,cur_m.rotation.w,cur_m.scale.x,cur_m.scale.y,cur_m.scale.z,cur_m.scale.w};
+                g_fc_addr[total].store(addr);
+                if (wr_buf(addr,&cur_m,sizeof(Matrix34))) ok=true;
+                ++total;
+            }
+            g_fc_addr_n.store(total);
         }
     }
     if (!ok) {
