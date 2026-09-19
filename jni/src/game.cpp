@@ -1085,6 +1085,7 @@ bool read_transform_hierarchy_layout(uint64_t native_transform, const TransformH
 static bool     g_freecam_on = false;
 static bool     g_freecam_saved_ok = false;
 static Vec3     g_freecam_saved{};        // локальная позиция камеры до включения
+static Matrix34 g_freecam_saved_mat{};    // целая матрица до включения
 static Vec3     g_freecam_pos{};          // где камера сейчас (мировые)
 static uint64_t g_freecam_transform = 0;
 static uint64_t g_freecam_matrices = 0;   // базы массивов иерархии камеры
@@ -1589,9 +1590,13 @@ static bool camera_arrays_now(uint64_t& matrices, uint64_t& indices, int32_t& in
 // Адреса и значения — ПО СЛОТУ (см. FcSlot): игра чередует наборы массивов,
 // поэтому писатель обязан вести их все, иначе половина кадров камеры читает
 // набор, в который мы не пишем.
-static std::atomic<uint64_t> g_fc_addr[kFcMaxSlots];   // matrices + index*48 + 0x24
+// Пишем ЦЕЛУЮ Matrix34 (48 байт), а не только трансляцию: если игра затрёт
+// поворот нулями, матрица станет невалидной и камера уйдёт в ноль (лог
+// 21:10: за период 60 отсчётов — у цели 37, в нуле 23).
+static std::atomic<uint64_t> g_fc_addr[kFcMaxSlots];   // matrices + index*48
+struct FcMat { float tx, ty, tz, tw; float rx, ry, rz, rw; float sx, sy, sz, sw; };
 static std::atomic<float>    g_fc_lx[kFcMaxSlots], g_fc_ly[kFcMaxSlots], g_fc_lz[kFcMaxSlots];
-// Сколько слотов сейчас ведёт писатель.
+static FcMat                 g_fc_mat[kFcMaxSlots];
 static std::atomic<int>      g_fc_addr_n{0};
 static std::atomic<bool>     g_fc_writer_running{false};
 static std::atomic<unsigned> g_fc_write_count{0};
@@ -1753,7 +1758,8 @@ static void freecam_writer_start() {
             const uint64_t addr = g_fc_addr[0].load();
             const int      nslots = g_fc_addr_n.load();
             if (addr && g_pid > 0) {
-                const float v[3] = {g_fc_lx[0].load(), g_fc_ly[0].load(), g_fc_lz[0].load()};
+                FcMat m0 = g_fc_mat[0];
+                const float v[12] = {m0.tx, m0.ty, m0.tz, m0.tw, m0.rx, m0.ry, m0.rz, m0.rw, m0.sx, m0.sy, m0.sz, m0.sw};
                 // Проба «игрушка переписала нашу запись».
                 //
                 // Прежний счётчик читал адрес назад сразу после своей же
@@ -1795,7 +1801,8 @@ static void freecam_writer_start() {
                 for (int sl = 1; sl < nslots; ++sl) {
                     const uint64_t a2 = g_fc_addr[sl].load();
                     if (!a2) continue;
-                    const float v2[3] = {g_fc_lx[sl].load(), g_fc_ly[sl].load(), g_fc_lz[sl].load()};
+                    FcMat mm = g_fc_mat[sl];
+                    const float v2[12] = {mm.tx, mm.ty, mm.tz, mm.tw, mm.rx, mm.ry, mm.rz, mm.rw, mm.sx, mm.sy, mm.sz, mm.sw};
                     if (wr_buf(a2, v2, sizeof(v2))) g_fc_write_count.fetch_add(1);
                 }
                 ++iter;
@@ -1816,8 +1823,8 @@ bool esp_freecam_set(bool on) {
         g_fc_writer_running.store(false);
         g_fc_last_m = g_fc_last_n = 0; g_fc_last_i = -1;
         if (g_freecam_saved_ok && g_freecam_matrices && g_freecam_index >= 0)
-            wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34) +
-                   offsetof(Matrix34, translation), &g_freecam_saved, sizeof(Vec3));
+            wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34),
+                   &g_freecam_saved_mat, sizeof(Matrix34));
         g_freecam_on = false;
         g_freecam_saved_ok = false;
         LogLine("фрикам: выключен, камера вернулась к телу");
@@ -1854,6 +1861,7 @@ bool esp_freecam_set(bool on) {
     Vec4 rot{};
     if (!read_transform_world_trs(matrices, indices, index, pos, rot, scale)) return false;
     g_freecam_saved = {m.translation.x, m.translation.y, m.translation.z};
+    g_freecam_saved_mat = m;
     g_freecam_saved_ok = true;
     g_freecam_transform = transform;
     g_freecam_matrices = matrices;
@@ -1952,14 +1960,30 @@ static bool freecam_write() {
         Vec3 local{};
         float gap = -1.f;
         if (!freecam_local_for_target(S.m, S.n, S.i, g_freecam_pos, local, gap)) continue;
-        const uint64_t addr = S.m + (uint64_t)S.i * sizeof(Matrix34) + offsetof(Matrix34, translation);
+        // Читаем текущую матрицу, чтобы сохранить поворот/масштаб: пишем
+        // целую Matrix34, иначе игра, затёршая поворот нулями, оставит матрицу
+        // невалидной и камера уйдёт в ноль.
+        Matrix34 cur_m{};
+        if (!rd_fresh(S.m + (uint64_t)S.i * sizeof(Matrix34), cur_m)) continue;
+        if (!matrix34_is_valid(cur_m)) {
+            // Если текущая уже невалидна (игра уже затёрла), берём сохранённую
+            // или единичную: иначе мы бы записали мусор.
+            cur_m.rotation = {0.f, 0.f, 0.f, 1.f};
+            cur_m.scale = {1.f, 1.f, 1.f, 0.f};
+        }
+        cur_m.translation.x = local.x; cur_m.translation.y = local.y; cur_m.translation.z = local.z;
+        // tw оставляем как был (обычно 0), чтобы не ломать SIMD-паддинг.
+        const uint64_t addr = S.m + (uint64_t)S.i * sizeof(Matrix34);
         g_fc_lx[fed].store(local.x);
         g_fc_ly[fed].store(local.y);
         g_fc_lz[fed].store(local.z);
+        g_fc_mat[fed] = FcMat{cur_m.translation.x, cur_m.translation.y, cur_m.translation.z, cur_m.translation.w,
+                              cur_m.rotation.x, cur_m.rotation.y, cur_m.rotation.z, cur_m.rotation.w,
+                              cur_m.scale.x, cur_m.scale.y, cur_m.scale.z, cur_m.scale.w};
         g_fc_addr[fed].store(addr);
         if (fed == 0) g_fc_gap.store(gap);
         ++fed;
-        if (wr_buf(addr, &local, sizeof(Vec3))) ok = true;
+        if (wr_buf(addr, &cur_m, sizeof(Matrix34))) ok = true;
     }
     g_fc_addr_n.store(fed);
     if (!fed) return false;
