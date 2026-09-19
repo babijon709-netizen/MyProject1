@@ -54,6 +54,7 @@ struct AimTarget {
     // жалуется «аим ведёт по трупу», нечем проверить, лежал ли тот труп
     // или его кости ещё стояли.
     int   skel_bones = 0;
+    int   death_flag = -1;          // собственный флаг смерти игры
     float skel_up = -1.f, skel_flat = -1.f;
 };
 
@@ -400,6 +401,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         t.id = b.id;
         t.health = b.health; t.respawning = b.respawning;
         t.skel_bones = b.skel_bones; t.skel_up = b.skel_up; t.skel_flat = b.skel_flat;
+        t.death_flag = b.death_flag;
         const bool sticky = (pick.lastId != 0 && b.id == pick.lastId);
         if (t.sx < -sw || t.sx > sw * 2.f || t.sy < -sh || t.sy > sh * 2.f) { ++s_offscreen_skipped; continue; }
         if (g_state.aim_pos && !sticky && (t.sx < 0.f || t.sy < 0.f || t.sx > sw || t.sy > sh)) { ++s_offscreen_skipped; continue; }
@@ -530,9 +532,9 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // игрок жаловался, что аим ведёт по мёртвым, а по respawning (0x208) в
     // логе 14:55 не сработало ни разу. Печатаем здоровье и оба флага.
     if (best.id != pick.lastId)
-        LogLine("аим: цель 0x%llx здоровье=%.1f respawning=%d дистанция=%.1f м костей=%d высота=%.2f м ширина=%.2f м",
+        LogLine("аим: цель 0x%llx здоровье=%.1f respawning=%d смерть=%d дистанция=%.1f м костей=%d высота=%.2f м ширина=%.2f м",
                 (unsigned long long)best.id, (double)best.health,
-                (int)best.respawning, (double)best.world_dist,
+                (int)best.respawning, (int)best.death_flag, (double)best.world_dist,
                 (int)best.skel_bones, (double)best.skel_up, (double)best.skel_flat);
     pick.switched = (best.id != pick.lastId);
     pick.lastId = best.id; pick.lastBone = best.bone;

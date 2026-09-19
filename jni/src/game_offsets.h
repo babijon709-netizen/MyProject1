@@ -130,6 +130,16 @@ inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x290;
 // (Vector3, 0x1E0) и playerDeathHandlerReference (0x80), но для «не целиться
 // в труп» довольно этого флага.
 inline constexpr std::uint64_t PLAYER_MANAGER_RESPAWNING = 0x208;
+// Собственный признак смерти игры, а не догадка по позе. Релизный дамп:
+//     Oxide.PlayerManager.playerDeathHandlerReference   0x80
+//     Oxide.PlayerDeathHandler.death  (bool, synced)    0xF0
+// Подтверждено дизассемблером сеттера Oxide.PlayerDeathHandler.azB
+// (RVA 0x6612a28): and w0, w19, #1 / add x1, x20, #0xf0 / bl <сеттер Mirror>.
+// Нужен потому, что поза ловит не всех: лог 20:45 — из 149 смен цели 14
+// пришлись на игроков с здоровьем 0.0, но СТОЯЩИХ (высота 0.86-1.51 м),
+// и аим ведёт по ним как по живым.
+inline constexpr std::uint64_t PLAYER_DEATH_HANDLER   = 0x80;
+inline constexpr std::uint64_t DEATH_HANDLER_DEATH    = 0xF0;
 // Цепочка здоровья (релизный дамп):
 //   Oxide.PlayerManager.vitals            (Oxide.PlayerVitals*) 0xC8
 //   Oxide.GenericVitals.KQN               (float, protected)    0xB8

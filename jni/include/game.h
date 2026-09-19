@@ -24,6 +24,7 @@ struct EspBox {
     float health = -1.f;          // текущее здоровье, -1 = не прочитано
     unsigned health_slot = 0;     // из какого смещения прочитано (0x18 / 0x20)
     // Габариты скелета в метрах — по ним и определяется мёртвый (труп лежит).
+    int   death_flag = -1;        // Oxide.PlayerDeathHandler.death: 1/0/-1
     float skel_up = -1.f;         // размах костей по вертикали
     float skel_flat = -1.f;       // наибольший размах по горизонтали
     int   skel_bones = 0;         // сколько костей дали мировую позицию

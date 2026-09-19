@@ -6979,6 +6979,18 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // Здесь, а не раньше: fill_skeleton_box уже отработал и заполнил
         // skel_bones/skel_up/skel_flat для этого кадра.
         box.dead = box.respawning;
+        // Собственный флаг смерти игры — первым делом: поза (ниже) ловит
+        // только лежачих, а труп может ещё стоять. Чтение сорвалось — флаг
+        // неизвестен (-1) и НЕ считается смертью: пометить живого игрока
+        // мёртвым хуже, чем один кадр повести по трупу.
+        {
+            const uint64_t dh = rd_ptr(s_transforms[i] + game_offsets::PLAYER_DEATH_HANDLER);
+            if (dh >= 0x10000) {
+                const uint32_t f = rd<uint8_t>(dh + game_offsets::DEATH_HANDLER_DEATH);
+                if (f == 1) { box.death_flag = 1; box.dead = true; }
+                else if (f == 0) box.death_flag = 0;
+            }
+        }
         if (box.skel_bones >= 11 && box.skel_up >= 0.f && box.skel_flat >= 0.f) {
             const bool lying = box.skel_up < 0.85f || box.skel_flat > box.skel_up * 1.5f;
             if (lying) box.dead = true;
@@ -6994,9 +7006,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (t3 >= s_pose_at) { s_pose_at = t3 + 8.0; s_pose_left = 3; }
             if (s_pose_left > 0 && box.skel_bones >= 6) {
                 --s_pose_left;
-                LogLine("аим: поза 0x%llx костей=%d высота=%.2f м ширина=%.2f м respawning=%d мёртв=%d здоровье=%.1f",
+                LogLine("аим: поза 0x%llx костей=%d высота=%.2f м ширина=%.2f м respawning=%d смерть=%d мёртв=%d здоровье=%.1f",
                         (unsigned long long)box.id, (int)box.skel_bones, (double)box.skel_up,
-                        (double)box.skel_flat, (int)box.respawning, (int)box.dead, (double)box.health);
+                        (double)box.skel_flat, (int)box.respawning, (int)box.death_flag,
+                        (int)box.dead, (double)box.health);
             }
         }
         result.push_back(box);
