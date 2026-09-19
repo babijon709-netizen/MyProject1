@@ -1467,10 +1467,48 @@ static bool resolve_camera_arrays(uint64_t& matrices, uint64_t& indices, int32_t
     return false;
 }
 
+// Писатель-доминатор фрикама.
+//
+// Почему одного кадра оверлея мало. Камера привязана к скелету (к кости
+// головы), поэтому игра пишет её TRS каждый раз, когда шевелится тело. Мы же
+// писали раз в кадр оверлея — ПОСЛЕ отрисовки, то есть ровно в тот момент,
+// когда следующий игровой кадр нашу запись гарантированно затрёт. Отсюда
+// прыжки «наша точка <-> тело» (жалоба 19.09, лог 13:38:33—13:38:45): пока
+// тело стоит, видна наша позиция; тело побежало — видна позиция тела, и так
+// каждые полсекунды.
+//
+// Выход тот же, что у «всегда день»: фоновый поток пишет позицию с периодом
+// 2 мс. Окно, в котором игра успевает записать своё И отрендерить, исчезает —
+// кадр игры длится 15—30 мс, а мы пишем каждые 2 мс.
+static std::atomic<uint64_t> g_fc_write_addr{0};   // matrices + index*48 + 0x24
+static std::atomic<float>    g_fc_local_x{0}, g_fc_local_y{0}, g_fc_local_z{0};
+static std::atomic<bool>     g_fc_writer_running{false};
+static std::atomic<unsigned> g_fc_write_count{0};
+static std::atomic<bool>     g_fc_write_failed{false};
+
+static void freecam_writer_start() {
+    if (g_fc_writer_running.exchange(true)) return;
+    std::thread([]() {
+        while (g_fc_writer_running.load()) {
+            const uint64_t addr = g_fc_write_addr.load();
+            if (addr && g_pid > 0) {
+                const float v[3] = {g_fc_local_x.load(), g_fc_local_y.load(), g_fc_local_z.load()};
+                if (wr_buf(addr, v, sizeof(v))) g_fc_write_count.fetch_add(1);
+                else g_fc_write_failed.store(true);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }).detach();
+}
+
 bool esp_freecam_set(bool on) {
     if (on == g_freecam_on) return g_freecam_on;
     if (!on) {
         // Возвращаем камеру на место: пишем сохранённую локальную позицию.
+        // Писатель останавливается ПЕРВЫМ: иначе он добил бы нашу позицию
+        // поверх только что восстановленной.
+        g_fc_write_addr.store(0);
+        g_fc_writer_running.store(false);
         if (g_freecam_saved_ok && g_freecam_matrices && g_freecam_index >= 0)
             wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34) +
                    offsetof(Matrix34, translation), &g_freecam_saved, sizeof(Vec3));
@@ -1538,8 +1576,18 @@ static bool freecam_write() {
                                   g_freecam_pos, local))
         return false;
     if (!vec3_is_finite(local)) return false;
-    return wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34) +
-                  offsetof(Matrix34, translation), &local, sizeof(Vec3));
+    const uint64_t addr = g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34) +
+                          offsetof(Matrix34, translation);
+    // Писателю — адрес и текущая локальная позиция; он сам добивает её каждые
+    // 2 мс, переживая игровой кадр. Разовая запись остаётся на этот кадр.
+    g_fc_local_x.store(local.x);
+    g_fc_local_y.store(local.y);
+    g_fc_local_z.store(local.z);
+    g_fc_write_addr.store(addr);
+    freecam_writer_start();
+    const bool ok = wr_buf(addr, &local, sizeof(Vec3));
+    if (!ok) g_fc_write_failed.store(true);
+    return ok;
 }
 
 bool esp_freecam_move(float forward, float right, float up) {
@@ -1579,11 +1627,15 @@ static void freecam_tick() {
         Vec3 in_mem{}, scale{};
         Vec4 rot{};
         if (read_transform_world_trs(g_freecam_matrices, g_freecam_indices, g_freecam_index,
-                                     in_mem, rot, scale))
-            LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f)",
+                                     in_mem, rot, scale)) {
+            const unsigned wc = g_fc_write_count.exchange(0);
+            const bool wf = g_fc_write_failed.exchange(false);
+            LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f), писатель %u/с%s",
                     (double)g_freecam_pos.x, (double)g_freecam_pos.y, (double)g_freecam_pos.z,
                     (double)in_mem.x, (double)in_mem.y, (double)in_mem.z,
-                    (double)g_cam_pos.x, (double)g_cam_pos.y, (double)g_cam_pos.z);
+                    (double)g_cam_pos.x, (double)g_cam_pos.y, (double)g_cam_pos.z,
+                    wc, wf ? " (отказы записи)" : "");
+        }
     }
     // Читать надо ДО записи: после неё в массиве лежит наше значение, и
     // расхождение было бы не видно.
@@ -4870,7 +4922,13 @@ static float head_lift_for_range(const Vec3& world) {
 // turning from his -- the three things that have no reliable answer on this
 // build. Set per player just below, applied here, and it only shifts the
 // point the aim steers to: the ESP box still draws where the man actually is.
-static constexpr float kAimLeadSeconds = 0.050F;
+// Упреждение ВЫКЛЮЧЕНО (было 0.05 с). Оно уводило прицел туда, где цель
+// ОКАЖЕТСЯ через несколько кадров, и на肉眼 это выглядело как «аим пытается
+// запредиктить движение»: точка прыгала вперёд по ходу цели, аим за ней,
+// цель меняла направление — начинались качели (жалоба 19.09). Теперь аим
+// ведёт ровно по текущему положению кости. Константа оставлена: вернуть
+// упреждение — одна правка числа.
+static constexpr float kAimLeadSeconds = 0.0F;
 static Vec3 g_aim_lead{};
 
 static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat4& vp, float sw, float sh) {
@@ -5057,9 +5115,13 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
                 float dx = head.x - g_cam_pos.x, dy = head.y - g_cam_pos.y, dz = head.z - g_cam_pos.z;
                 range = sqrtf(dx * dx + dy * dy + dz * dz);
             }
-            float lift = range * 0.0010F;          // +10 cm per 100 m
-            if (lift > 0.08F) lift = 0.08F;
-            target[0] = {head.x + dir.x * 0.11F, head.y + dir.y * 0.11F + lift, head.z + dir.z * 0.11F};
+            // Точка головы — ровно кость головы. Раньше здесь было +11 см вверх
+            // по оси шеи плюс до +8 см по дальности (range * 0.001): суммарно
+            // те самые «+12», из-за которых прицел стоял выше макушки. По
+            // просьбе 19.09 смещение убрано совсем: аим ведёт ровно по скелету,
+            // dir и range больше не нужны.
+            (void)dir; (void)range;
+            target[0] = head;
             have[0] = true;
         }
         if (have_neck_bone && have_head_bone) {
@@ -6246,9 +6308,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
 
-        // Aim fallbacks when rig bones are not (yet) available, so the aimbot
-        // always has a crouch-aware target instead of a fixed-height guess.
-        if (g_aim_bones_requested && !transform_camera_mode &&
+        // Запасные точки (по трансформу головы и по росту от пяток) выключены:
+        // просили «аим полностью по скелету и костям». Раньше при нечитаемом
+        // скелете цель бралась от роста персонажа — это давало точку выше/ниже
+        // настоящей головы и вносило ещё одно расхождение с нарисованным
+        // скелетом. Теперь цель либо по костям, либо её нет вовсе (это
+        // видно в логе ниже).
+        // (блок сохранён, чтобы вернуть запасные точки одной правкой условия)
+        if (false && g_aim_bones_requested && !transform_camera_mode &&
             !(box.aim_valid[0] && box.aim_valid[1] && box.aim_valid[2])) {
             Vec3 head{};
             bool have_head = false;

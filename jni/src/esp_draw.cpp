@@ -170,9 +170,14 @@ void DrawEspOverlay() {
         float bx1 = box.x1, by1 = box.y1, bx2 = box.x2, by2 = box.y2;
         NormRect(bx1, by1, bx2, by2);
 
+        // Союзники: выключатель «Союзники» в визуалах. Выключен — на союзнике
+        // не рисуется НИЧЕГО: ни бокс, ни скелет, ни линия, ни ник, ни оружие.
+        // Раньше признак своего влиял только на цвет, и убрать союзников с
+        // экрана было нечем (просьба 19.09).
+        if (box.ally && !g_state.esp_team) continue;
         // Team mates / clan mates get their own colour so they read as
         // friendly at a glance (and the aimbot leaves them alone).
-        const bool ally = g_state.esp_team && box.ally;
+        const bool ally = box.ally;
 
         if (g_state.esp_chams) {
             bool all_valid = true;

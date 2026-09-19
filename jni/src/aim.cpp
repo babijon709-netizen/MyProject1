@@ -236,8 +236,12 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // ---- choose target ----
     float bestScore = 1e18f;
     for (const EspBox& b : boxes) {
-        // Never pull onto a team mate / clan mate while that ESP category is on.
-        if (g_state.esp_team && b.ally) continue;
+        // На союзников аим не работает НИКОГДА, а не только пока в визуалах
+        // включён их показ: проверка «g_state.esp_team && b.ally» означала,
+        // что со скрытыми союзниками (показ выключен) аим работал по ним
+        // как по врагам (вопрос 19.09). Признак своего — из групп/кланов
+        // (game.cpp, groups_are_allied), он считается независимо от визуалов.
+        if (b.ally) continue;
         AimTarget t;
         // Exact bone, with graceful fallback to the next-best bone.
         // Slots: 0 head, 1 neck, 2 chest. Never fall back below the chest.
@@ -264,6 +268,24 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             t.valid = std::isfinite(t.yaw) && std::isfinite(t.pitch) &&
                       std::isfinite(t.sx) && std::isfinite(t.sy);
         } else {
+            // По костям цель не нашлась — по просьбе 19.09 («аим полностью по
+            // скелету») в цель такие игроки не идут вовсе: запасная точка от
+            // габаритов бокса давала прицел выше/ниже настоящей головы.
+            // Считаем, чтобы по логу было видно, часто ли скелет не читается.
+            {
+                static unsigned long s_no_bones = 0;
+                static double s_no_bones_at = -1e9;
+                ++s_no_bones;
+                const double now = (double)clock() / CLOCKS_PER_SEC;
+                if (now - s_no_bones_at >= 5.0) {
+                    s_no_bones_at = now;
+                    LogLine("аим: у %lu целей в кадре не прочитались кости — цель пропущена", s_no_bones);
+                    s_no_bones = 0;
+                }
+            }
+            continue;
+        }
+        if (false) {
             // Box estimate (nothing else resolved): derive angles from pixels.
             // The box itself is already crouch-aware (KCC pose height).
             if (!std::isfinite(b.x1) || !std::isfinite(b.y1) || !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;

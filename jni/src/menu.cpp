@@ -313,7 +313,9 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vw",  XS("Оружие"),     &g_state.esp_weapon,       &g_state.a_esp_weapon,       &cfg::esp::weapon_col},
                 {"##vtr", XS("Линии"),      &g_state.esp_tracer,       &g_state.a_esp_tracer,       &cfg::esp::tracer_col},
                 {"##vsk", XS("Скелеты"),    &g_state.esp_skeleton,     &g_state.a_esp_skeleton,     &cfg::esp::skeleton_col},
-                {"##vtm", XS("Свои"),       &g_state.esp_team,         &g_state.a_esp_team,         &cfg::esp::ally_col},
+                // «Союзники»: показывать ли союзников в ESP совсем (выключено —
+                // на них не рисуется ничего); цвет у них свой, чтобы отличать.
+                {"##vtm", XS("Союзники"),   &g_state.esp_team,         &g_state.a_esp_team,         &cfg::esp::ally_col},
             };
             constexpr int NP = 8;
             CardBg(rowH * NP);
