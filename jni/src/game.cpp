@@ -1087,6 +1087,9 @@ static bool     g_freecam_saved_ok = false;
 static Vec3     g_freecam_saved{};        // локальная позиция камеры до включения
 static Matrix34 g_freecam_saved_mat{};    // целая матрица до включения
 static Vec3     g_freecam_pos{};          // где камера сейчас (мировые)
+static float    g_freecam_yaw = 0.f;      // yaw/pitch фрикама (градусы)
+static float    g_freecam_pitch = 0.f;
+static bool     g_freecam_has_yawpitch = false;
 static uint64_t g_freecam_transform = 0;
 static uint64_t g_freecam_matrices = 0;   // базы массивов иерархии камеры
 static uint64_t g_freecam_indices = 0;
@@ -1457,7 +1460,7 @@ static constexpr int kFcMaxSlots = 8;
 // резервной матрицы вида (она считается по другому источнику и чуть
 // расходится), и из-за жёсткого порога фрикам отказывался включаться там,
 // где камера найдена верно.
-static constexpr float kFcSlotMaxDist = 100.0f;
+static constexpr float kFcSlotMaxDist = 500.0f;
 static FcSlot g_fc_slots[kFcMaxSlots];
 static int    g_fc_slot_n = 0;
 
@@ -1817,28 +1820,13 @@ static void freecam_writer_start() {
                     continue;      // в этом проходе не пишем
                 }
                 if (is_view) {
-                    if (wr_buf(addr, v_full, sizeof(v_full))) g_fc_write_count.fetch_add(1);
-                    else g_fc_write_failed.store(true);
-                    // worldToClip вторым слотом + флаги грязности + остальные трансформы
-                    Mat4 last_w2c{}; bool have_w2c=false;
-                    if (nslots > 1) {
-                        const uint64_t a2 = g_fc_addr[1].load();
-                        if (a2) {
-                            Mat4 proj = rd_m4(g_native_camera + CAMERA_PROJECTION_MATRIX);
-                            Mat4 vw{}; for(int i=0;i<16;++i) vw.m[i]=v_full[i];
-                            Mat4 w2c = mat_mul(proj, vw);
-                            wr_buf(a2, &w2c, sizeof(Mat4));
-                            last_w2c=w2c; have_w2c=true;
-                            uint8_t zero=0;
-                            wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
-                            wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
-                            wr_buf(g_native_camera + CAMERA_PREV_VIEW_PROJ, &w2c, sizeof(Mat4));
-                        }
-                    } else {
-                        uint8_t zero=0;
-                        wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
-                        wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
-                    }
+                    // Фрикам теперь ведётся ТОЛЬКО трансформом, а не матрицей вида,
+                    // чтобы view и worldToClip были консистентны и не мерцало небо.
+                    // Писатель пишет только трансформы (слоты 2..), а view/worldToClip
+                    // пишет freecam_write() раз в кадр (60 Гц) — так нет гонки
+                    // между 2000 Гц и 60 Гц рендера, которая давала мерцание текстур.
+                    uint8_t one=1;
+                    wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &one, 1);
                     // Слоты 2.. — трансформы камеры (Matrix34)
                     for (int sl = 2; sl < nslots; ++sl) {
                         const uint64_t a2 = g_fc_addr[sl].load();
@@ -1846,6 +1834,11 @@ static void freecam_writer_start() {
                         FcMat mm = g_fc_mat[sl];
                         const float v2[12] = {mm.tx, mm.ty, mm.tz, mm.tw, mm.rx, mm.ry, mm.rz, mm.rw, mm.sx, mm.sy, mm.sz, mm.sw};
                         if (wr_buf(a2, v2, sizeof(v2))) g_fc_write_count.fetch_add(1);
+                    }
+                    // Для совместимости — если вдруг трансформ не найден, всё же
+                    // держим view, но это фолбэк, а не основной путь.
+                    if (nslots <= 2) {
+                        if (wr_buf(addr, v_full, sizeof(v_full))) g_fc_write_count.fetch_add(1);
                     }
                 } else {
                     if (wr_buf(addr, v, sizeof(v))) g_fc_write_count.fetch_add(1);
@@ -1869,7 +1862,7 @@ static void freecam_writer_start() {
                 }
                 ++iter;
             }
-            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }).detach();
 }
@@ -1938,6 +1931,15 @@ bool esp_freecam_set(bool on) {
     for (int k = 0; k < g_fc_own_n; ++k) g_fc_own[k] = g_fc_slots[k];
     if (g_fc_own_n <= 0) { g_fc_own[0] = FcSlot{matrices, indices, index, dist}; g_fc_own_n = 1; }
     g_freecam_pos = pos;
+    // Инициализируем yaw/pitch из текущего взгляда
+    if (g_cam_pose_valid && vec3_is_finite(g_cam_forward)) {
+        g_freecam_yaw = atan2f(g_cam_forward.x, g_cam_forward.z) * 57.29578f;
+        float horiz = sqrtf(g_cam_forward.x*g_cam_forward.x + g_cam_forward.z*g_cam_forward.z);
+        g_freecam_pitch = atan2f(g_cam_forward.y, horiz) * 57.29578f;
+        g_freecam_has_yawpitch = true;
+    } else {
+        g_freecam_has_yawpitch = false;
+    }
     g_freecam_on = true;
     g_freecam_fail = 0; g_freecam_fail_dist = dist;   // 0 = порядок
     // Сколько слотов ведём — по логу видно, один набор массивов у камеры или
@@ -2023,7 +2025,36 @@ static bool freecam_write() {
     // (жалоба «двигаются только визуалы, а от своего лица стою на месте»).
     // Пишем обе.
     bool ok = false;
-    if (g_native_camera && g_cam_pose_valid) {
+    // Основной путь — трансформ камеры. Пишем только его и ставим dirty=1,
+    // чтобы игра пересчитала view/worldToClip консистентно — без мерцания.
+    int total = 0;
+    for (int sl = 0; sl < g_fc_own_n && total < kFcMaxSlots; ++sl) {
+        const FcSlot& S = g_fc_own[sl];
+        if (!S.m || !S.n || S.i < 0) continue;
+        Vec3 local{}; float gap = -1.f;
+        if (!freecam_local_for_target(S.m, S.n, S.i, g_freecam_pos, local, gap)) continue;
+        Matrix34 cur_m{};
+        if (!rd_fresh(S.m + (uint64_t)S.i * sizeof(Matrix34), cur_m)) continue;
+        if (!matrix34_is_valid(cur_m)) { cur_m.rotation={0.f,0.f,0.f,1.f}; cur_m.scale={1.f,1.f,1.f,0.f}; }
+        cur_m.translation.x=local.x; cur_m.translation.y=local.y; cur_m.translation.z=local.z;
+        const uint64_t addr = S.m + (uint64_t)S.i * sizeof(Matrix34);
+        g_fc_lx[total].store(local.x); g_fc_ly[total].store(local.y); g_fc_lz[total].store(local.z);
+        g_fc_mat[total]=FcMat{cur_m.translation.x,cur_m.translation.y,cur_m.translation.z,cur_m.translation.w,cur_m.rotation.x,cur_m.rotation.y,cur_m.rotation.z,cur_m.rotation.w,cur_m.scale.x,cur_m.scale.y,cur_m.scale.z,cur_m.scale.w};
+        g_fc_addr[total].store(addr);
+        if (total==0) g_fc_gap.store(gap);
+        if (wr_buf(addr,&cur_m,sizeof(Matrix34))) ok=true;
+        ++total;
+    }
+    if (total>0) {
+        // Есть трансформ — просим игру пересчитать вид из него
+        if (g_native_camera) {
+            uint8_t one=1;
+            wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &one, 1);
+        }
+        g_fc_addr_n.store(total);
+    }
+    // Фолбэк — если трансформ не нашли, пишем view напрямую (старый путь)
+    if (!ok && g_native_camera && g_cam_pose_valid) {
         const Vec3 r = g_cam_right, u = g_cam_up, f = g_cam_forward;
         if (vec3_is_finite(r) && vec3_is_finite(u) && vec3_is_finite(f)) {
             Mat4 view{};
@@ -2031,54 +2062,17 @@ static bool freecam_write() {
             view.m[1] = u.x; view.m[5] = u.y; view.m[9]  = u.z; view.m[13] = -(u.x * g_freecam_pos.x + u.y * g_freecam_pos.y + u.z * g_freecam_pos.z);
             view.m[2] = -f.x; view.m[6] = -f.y; view.m[10] = -f.z; view.m[14] = -(-f.x * g_freecam_pos.x + -f.y * g_freecam_pos.y + -f.z * g_freecam_pos.z);
             view.m[3] = 0.f; view.m[7] = 0.f; view.m[11] = 0.f; view.m[15] = 1.f;
+            if (wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &view, sizeof(Mat4))) ok = true;
             Mat4 proj = rd_m4(g_native_camera + CAMERA_PROJECTION_MATRIX);
             Mat4 w2c = mat_mul(proj, view);
-            bool wok = false;
-            if (wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, &view, sizeof(Mat4))) { ok = true; wok = true; }
-            if (wr_buf(g_native_camera + CAMERA_WORLD_TO_CLIP, &w2c, sizeof(Mat4))) ok = true;
-            // Чтобы игра не пересчитала вид из трансформа и не затёрла нашу запись,
-            // сбрасываем флаги грязности кэша вида/проекции.
-            {
-                uint8_t zero = 0;
-                wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
-                wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
-                // prevViewProj тоже держим в цели — некоторые шейдеры берут его
-                Mat4 prev = w2c;
-                wr_buf(g_native_camera + CAMERA_PREV_VIEW_PROJ, &prev, sizeof(Mat4));
-            }
-            // Для писателя — держим обе матрицы, но адрес — view (основная)
+            wr_buf(g_native_camera + CAMERA_WORLD_TO_CLIP, &w2c, sizeof(Mat4));
+            uint8_t zero=0;
+            wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
             g_fc_lx[0].store(g_freecam_pos.x); g_fc_ly[0].store(g_freecam_pos.y); g_fc_lz[0].store(g_freecam_pos.z);
             g_fc_addr[0].store(g_native_camera + CAMERA_VIEW_MATRIX);
             g_fc_mat[0] = FcMat{view.m[0], view.m[1], view.m[2], view.m[3], view.m[4], view.m[5], view.m[6], view.m[7], view.m[8], view.m[9], view.m[10], view.m[11]};
             g_fc_gap.store(0.f);
-            int total = 1;
-            // Вторым слотом — worldToClip, если есть место
-            if (wok) {
-                g_fc_addr[1].store(g_native_camera + CAMERA_WORLD_TO_CLIP);
-                g_fc_mat[1] = FcMat{w2c.m[0], w2c.m[1], w2c.m[2], w2c.m[3], w2c.m[4], w2c.m[5], w2c.m[6], w2c.m[7], w2c.m[8], w2c.m[9], w2c.m[10], w2c.m[11]};
-                total = 2;
-            }
-            // Дополнительно пишем трансформ камеры (из g_fc_own), чтобы
-            // игра, если пересчитает вид из трансформа, всё равно осталась в цели.
-            // Это закрывает случай «двигаются только визуалы, а от первого лица стою».
-            for (int sl = 0; sl < g_fc_own_n && total < kFcMaxSlots; ++sl) {
-                const FcSlot& S = g_fc_own[sl];
-                if (!S.m || !S.n || S.i < 0) continue;
-                Vec3 local{}; float gap = -1.f;
-                if (!freecam_local_for_target(S.m, S.n, S.i, g_freecam_pos, local, gap)) continue;
-                Matrix34 cur_m{};
-                if (!rd_fresh(S.m + (uint64_t)S.i * sizeof(Matrix34), cur_m)) continue;
-                if (!matrix34_is_valid(cur_m)) { cur_m.rotation={0.f,0.f,0.f,1.f}; cur_m.scale={1.f,1.f,1.f,0.f}; }
-                cur_m.translation.x=local.x; cur_m.translation.y=local.y; cur_m.translation.z=local.z;
-                const uint64_t addr = S.m + (uint64_t)S.i * sizeof(Matrix34);
-                // Не затираем слоты 0/1 (view/worldToClip), пишем начиная с total
-                g_fc_lx[total].store(local.x); g_fc_ly[total].store(local.y); g_fc_lz[total].store(local.z);
-                g_fc_mat[total]=FcMat{cur_m.translation.x,cur_m.translation.y,cur_m.translation.z,cur_m.translation.w,cur_m.rotation.x,cur_m.rotation.y,cur_m.rotation.z,cur_m.rotation.w,cur_m.scale.x,cur_m.scale.y,cur_m.scale.z,cur_m.scale.w};
-                g_fc_addr[total].store(addr);
-                if (wr_buf(addr,&cur_m,sizeof(Matrix34))) ok=true;
-                ++total;
-            }
-            g_fc_addr_n.store(total);
+            g_fc_addr_n.store(1);
         }
     }
     if (!ok) {
@@ -2127,8 +2121,19 @@ bool esp_freecam_move(float forward, float right, float up) {
     if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
     if (!std::isfinite(forward) || !std::isfinite(right) || !std::isfinite(up)) return false;
-    Vec3 f = g_cam_forward, r = g_cam_right;
-    if (!g_cam_pose_valid || !vec3_is_finite(f) || !vec3_is_finite(r)) { f = {0, 0, 1}; r = {1, 0, 0}; }
+    // Если есть yaw/pitch фрикама — используем их, иначе базис из игры
+    Vec3 f, r;
+    if (g_freecam_has_yawpitch) {
+        float yaw_rad = g_freecam_yaw * 0.0174532925f;
+        float pitch_rad = g_freecam_pitch * 0.0174532925f;
+        float cy = cosf(yaw_rad), sy = sinf(yaw_rad);
+        float cp = cosf(pitch_rad), sp = sinf(pitch_rad);
+        f = {sy * cp, sp, cy * cp};
+        r = {cy, 0.f, -sy};
+    } else {
+        f = g_cam_forward; r = g_cam_right;
+        if (!g_cam_pose_valid || !vec3_is_finite(f) || !vec3_is_finite(r)) { f = {0, 0, 1}; r = {1, 0, 0}; }
+    }
     float fh = sqrtf(f.x * f.x + f.z * f.z);
     if (fh > 1e-4F) { f.x /= fh; f.z /= fh; } else { f = {0, 0, 1}; }
     float rh = sqrtf(r.x * r.x + r.z * r.z);
@@ -2137,7 +2142,49 @@ bool esp_freecam_move(float forward, float right, float up) {
     g_freecam_pos.z += f.z * forward + r.z * right;
     g_freecam_pos.y += up;
     if (!vec3_is_finite(g_freecam_pos)) { g_freecam_pos = {}; return false; }
-    return freecam_write();       // сразу, не дожидаясь следующего кадра
+    return freecam_write();
+}
+
+bool esp_freecam_look(float yaw_delta, float pitch_delta) {
+    if (!g_freecam_on) return false;
+    if (!std::isfinite(yaw_delta) || !std::isfinite(pitch_delta)) return false;
+    if (!g_freecam_has_yawpitch) {
+        // Инициализируем из текущего базиса камеры
+        float yaw=0.f, pitch=0.f;
+        if (g_cam_pose_valid && vec3_is_finite(g_cam_forward)) {
+            yaw = atan2f(g_cam_forward.x, g_cam_forward.z) * 57.29578f;
+            float horiz = sqrtf(g_cam_forward.x*g_cam_forward.x + g_cam_forward.z*g_cam_forward.z);
+            pitch = atan2f(g_cam_forward.y, horiz) * 57.29578f;
+        }
+        g_freecam_yaw = yaw;
+        g_freecam_pitch = pitch;
+        g_freecam_has_yawpitch = true;
+    }
+    g_freecam_yaw += yaw_delta;
+    g_freecam_pitch += pitch_delta;
+    if (g_freecam_pitch > 85.f) g_freecam_pitch = 85.f;
+    if (g_freecam_pitch < -85.f) g_freecam_pitch = -85.f;
+    // Пересчитываем базис камеры из yaw/pitch
+    float yaw_rad = g_freecam_yaw * 0.0174532925f;
+    float pitch_rad = g_freecam_pitch * 0.0174532925f;
+    float cy = cosf(yaw_rad), sy = sinf(yaw_rad);
+    float cp = cosf(pitch_rad), sp = sinf(pitch_rad);
+    Vec3 fwd = {sy * cp, sp, cy * cp};
+    Vec3 right = {cy, 0.f, -sy};
+    Vec3 up = {-sy * sp, cp, -cy * sp};
+    // Нормализуем
+    float fl = sqrtf(fwd.x*fwd.x + fwd.y*fwd.y + fwd.z*fwd.z);
+    if (fl > 1e-6f) { fwd.x/=fl; fwd.y/=fl; fwd.z/=fl; }
+    float rl = sqrtf(right.x*right.x + right.y*right.y + right.z*right.z);
+    if (rl > 1e-6f) { right.x/=rl; right.y/=rl; right.z/=rl; }
+    float ul = sqrtf(up.x*up.x + up.y*up.y + up.z*up.z);
+    if (ul > 1e-6f) { up.x/=ul; up.y/=ul; up.z/=ul; }
+    g_cam_forward = fwd;
+    g_cam_right = right;
+    g_cam_up = up;
+    g_cam_pose_valid = true;
+    // Пишем сразу, чтобы вид обновился
+    return freecam_write();
 }
 
 // Трансформ камеры мог переехать (смена мира, респавн): если камера уехала

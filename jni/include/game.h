@@ -403,6 +403,8 @@ void esp_freecam_diag(int& code, float& dist);
 // Сдвинуть камеру на метры: вперёд/назад вдоль взгляда (без наклона), вправо
 // и вверх по мировой вертикали.
 bool esp_freecam_move(float forward, float right, float up);
+// Повернуть камеру: yaw вправо, pitch вверх (градусы)
+bool esp_freecam_look(float yaw_delta, float pitch_delta);
 
 // Адрес, по которому загружен libil2cpp.so в процессы игры (0 — ещё не
 // привязались).
