@@ -328,7 +328,9 @@ static bool barrel_look_from_object_name(const char* raw, MarkerLook& look) {
 // Prefab names that disqualify a Mineable component completely, checked BEFORE
 // the entityType (a borrowed type would otherwise win — the wolf says "Boar"):
 //   * buggies — vehicle ESP is for regular cars only (user request);
-//   * corpses / sleepers — a Human type on them would fake a "bot".
+//   * corpses / sleepers — a Human type on them would fake a "bot";
+//   * copters — they share the Vehicle-ish component classes with cars;
+//   * garages / hangars / depots — car-named buildings, not cars.
 static bool skip_object_name(const char* raw) {
     return for_each_name_token(raw, [](const char* word) {
         if (strcmp(word, "buggy") == 0 || strcmp(word, "buggies") == 0) return true;
@@ -336,6 +338,12 @@ static bool skip_object_name(const char* raw) {
             strcmp(word, "ragdoll") == 0 || strcmp(word, "sleeper") == 0 ||
             strcmp(word, "sleepers") == 0 || strcmp(word, "deathbag") == 0 ||
             strcmp(word, "playercorpse") == 0) return true;
+        if (strcmp(word, "copter") == 0 || strcmp(word, "copters") == 0 ||
+            strcmp(word, "heli") == 0 || strcmp(word, "helicopter") == 0 ||
+            strcmp(word, "helicopters") == 0 || strcmp(word, "minicopter") == 0) return true;
+        if (strcmp(word, "garage") == 0 || strcmp(word, "garages") == 0 ||
+            strcmp(word, "hangar") == 0 || strcmp(word, "hangars") == 0 ||
+            strcmp(word, "depot") == 0 || strcmp(word, "depots") == 0) return true;
         return false;
     });
 }
@@ -964,16 +972,17 @@ static bool rebuild_marker_entities() {
                 known = loot_marker(component, object_name, root_name, look);
             }
             if (!known && component_class == MARKER_CLASS_VEHICLE) {
-                // Класс уже сказал «машина» — этого достаточно: оффсет
-                // entityType у немаинбл-компонента указывает в чужое поле,
-                // поэтому тип здесь не читаем, только отсекаем багги/трупы.
+                // Машина — только если И класс, И имя говорят «машина»:
+                // общий Vehicle-класс висит и на коптерах, а гаражные
+                // постройки — тоже «car-что-то». entityType здесь не читаем:
+                // оффсет у немаинбл-компонента указывает в чужое поле.
                 // Тумблера нет, как у руды и ботов: опознаётся всегда,
                 // фильтруется при отрисовке (esp_get_markers).
                 if ((object_name[0] && skip_object_name(object_name)) ||
                     (root_name[0] && skip_object_name(root_name)))
                     continue;
-                look = vehicle_look("Машина");
-                known = true;
+                if (object_name[0]) known = vehicle_look_from_object_name(object_name, look);
+                if (!known && root_name[0]) known = vehicle_look_from_object_name(root_name, look);
             }
             if (!known && (component_class == MARKER_CLASS_MINEABLE || family_unknown)) {
                 // The prefab name is asked first on purpose: animals that the
