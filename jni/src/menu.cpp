@@ -1045,9 +1045,27 @@ static float s_fc_look_x = 0.f, s_fc_look_y = 0.f;
 static int   s_fc_up_id = -1, s_fc_down_id = -1;
 static int   s_fc_prev_ids[12];
 static int   s_fc_prev_n = 0;
+// Грейс сорванного пальца: снимок Touch_GetActive иногда не видит удерживаемый
+// палец один-два кадра (тач-поток пишет состояние без лока — см. TypeA), и без
+// грейса захват на этих кадрах отпускался и тут же подхватывался заново: рывки
+// «стоп/дальше» у движения и куски у обзора. Держим захват kFcGrace кадров на
+// последнем положении; по-настоящему поднятый палец отпускает как раньше.
+static int   s_fc_joy_miss = 0, s_fc_look_miss = 0;
+static int   s_fc_up_miss = 0, s_fc_down_miss = 0;
+static const int kFcGrace = 3;
+static float s_fc_joy_gx = 0.f, s_fc_joy_gy = 0.f;   // стик на грейсе
+
+// Здоровье ввода за секунду (строка «фрикам: ввод» в логе): кадры, самый
+// длинный кадр, сбросы захватов, спасения грейсом, отбросы дельты обзора.
+static int    s_fc_in_frames = 0;
+static float  s_fc_in_maxdt = 0.f;
+static int    s_fc_in_joyfree = 0, s_fc_in_lookfree = 0;
+static int    s_fc_in_grace = 0, s_fc_in_lookdrop = 0;
+static double s_fc_in_last = -1e9;
 
 static void Freecam_ResetGrabs() {
     s_fc_joy_id = s_fc_look_id = s_fc_up_id = s_fc_down_id = -1;
+    s_fc_joy_miss = s_fc_look_miss = s_fc_up_miss = s_fc_down_miss = 0;
     s_fc_prev_n = 0;
 }
 
@@ -1081,6 +1099,21 @@ void UpdateFreecam(float dt) {
             LogLine("фрикам: UI — активен=%d вкл=%d экран=%.0fx%.0f joy=%d look=%d up=%d down=%d",
                     (int)esp_freecam_active(), (int)g_state.freecam_on,
                     (double)vw, (double)vh, s_fc_joy_id, s_fc_look_id, s_fc_up_id, s_fc_down_id);
+        }
+    }
+    // Здоровье ввода за секунду полёта: видно просадки кадров (макс dt),
+    // моргания захватов (сбросы/грейс) и заморозки обзора (отбросы дельты).
+    if (esp_freecam_active()) {
+        ++s_fc_in_frames;
+        if (dt > s_fc_in_maxdt) s_fc_in_maxdt = dt;
+        const double nowIn = ImGui::GetTime();
+        if (nowIn - s_fc_in_last >= 1.0) {
+            s_fc_in_last = nowIn;
+            LogLine("фрикам: ввод — кадров %d, макс dt %.0f мс, сброс джоя/обзора %d/%d, грейс %d, отброс обзора %d",
+                    s_fc_in_frames, (double)(s_fc_in_maxdt * 1000.f),
+                    s_fc_in_joyfree, s_fc_in_lookfree, s_fc_in_grace, s_fc_in_lookdrop);
+            s_fc_in_frames = 0; s_fc_in_maxdt = 0.f;
+            s_fc_in_joyfree = s_fc_in_lookfree = s_fc_in_grace = s_fc_in_lookdrop = 0;
         }
     }
 
@@ -1169,10 +1202,18 @@ void UpdateFreecam(float dt) {
     if (s_fc_joy_id != -1) {
         float px, py;
         if (findTouch(s_fc_joy_id, px, py)) {
+            if (s_fc_joy_miss > 0) { s_fc_joy_miss = 0; ++s_fc_in_grace; }
             joyHeld = true;
+            s_fc_joy_gx = px; s_fc_joy_gy = py;
             stickVec(px, py);
+        } else if (++s_fc_joy_miss <= kFcGrace) {
+            // Палец моргнул в снимке: держим последнее отклонение, движение
+            // не останавливается.
+            joyHeld = true;
+            stickVec(s_fc_joy_gx, s_fc_joy_gy);
         } else {
-            s_fc_joy_id = -1;              // палец поднят — стик свободен
+            s_fc_joy_id = -1; s_fc_joy_miss = 0;   // палец поднят — стик свободен
+            ++s_fc_in_joyfree;
         }
     }
     if (s_fc_joy_id == -1 && canGrab && nf > 0) {
@@ -1185,6 +1226,8 @@ void UpdateFreecam(float dt) {
             const float dx = f_x[i] - cx, dy = f_y[i] - cy;
             if (dx * dx + dy * dy <= grab * grab) {
                 s_fc_joy_id = f_id[i];
+                s_fc_joy_miss = 0;
+                s_fc_joy_gx = f_x[i]; s_fc_joy_gy = f_y[i];
                 joyHeld = true;
                 stickVec(f_x[i], f_y[i]);
                 break;
@@ -1194,19 +1237,24 @@ void UpdateFreecam(float dt) {
 
     // ---- кнопки высоты ------------------------------------------------------
     bool upHeld = false, downHeld = false;
-    auto holdButton = [&](int& slot, float bx, float by, bool& held) {
+    auto holdButton = [&](int& slot, int& miss, float bx, float by, bool& held) {
         if (slot == -1) return;
         float px, py;
-        if (!findTouch(slot, px, py)) { slot = -1; return; }
+        if (!findTouch(slot, px, py)) {
+            // Моргание снимка: держим кнопку на грейсе, как стик.
+            if (++miss <= kFcGrace) { held = true; return; }
+            slot = -1; miss = 0; return;
+        }
+        if (miss > 0) { miss = 0; ++s_fc_in_grace; }
         // Держится, пока палец в расширенном круге: съехавший чуть вбок
         // палец кнопку не роняет.
         const float dx = px - bx, dy = py - by;
         const float keep = kBtnR + 60.f * S;
         if (dx * dx + dy * dy <= keep * keep) held = true;
-        else slot = -1;
+        else { slot = -1; miss = 0; }   // съехал далеко — отпустил сам
     };
-    holdButton(s_fc_up_id, kBtnX, kUpY, upHeld);
-    holdButton(s_fc_down_id, kBtnX, kDownY, downHeld);
+    holdButton(s_fc_up_id, s_fc_up_miss, kBtnX, kUpY, upHeld);
+    holdButton(s_fc_down_id, s_fc_down_miss, kBtnX, kDownY, downHeld);
     if (canGrab && nf > 0 && (s_fc_up_id == -1 || s_fc_down_id == -1)) {
         const float grab = kBtnR + 20.f * S;
         for (int i = 0; i < nf; ++i) {
@@ -1215,10 +1263,10 @@ void UpdateFreecam(float dt) {
             const float dx = f_x[i] - kBtnX;
             const float du = f_y[i] - kUpY, dd = f_y[i] - kDownY;
             if (s_fc_up_id == -1 && dx * dx + du * du <= grab * grab) {
-                s_fc_up_id = f_id[i]; upHeld = true; continue;
+                s_fc_up_id = f_id[i]; s_fc_up_miss = 0; upHeld = true; continue;
             }
             if (s_fc_down_id == -1 && dx * dx + dd * dd <= grab * grab) {
-                s_fc_down_id = f_id[i]; downHeld = true; continue;
+                s_fc_down_id = f_id[i]; s_fc_down_miss = 0; downHeld = true; continue;
             }
         }
     }
@@ -1231,18 +1279,32 @@ void UpdateFreecam(float dt) {
     if (s_fc_look_id != -1) {
         float px, py;
         if (findTouch(s_fc_look_id, px, py)) {
+            if (s_fc_look_miss > 0) { s_fc_look_miss = 0; ++s_fc_in_grace; }
             lookHeld = true; lookPx = px; lookPy = py;
             const float dx = px - s_fc_look_x, dy = py - s_fc_look_y;
             // Скачок больше четверти экрана за кадр — не свайп, а смена слота:
-            // камеру он дёргать не должен.
-            if (fabsf(dx) < 250.f * S && fabsf(dy) < 250.f * S) {
+            // камеру он дёргать не должен. Но после пропуска кадров (просадка,
+            // грейс) палец за один апдейт честно проезжает больше, и статичный
+            // порог замораживал бы обзор на каждом пропуске. Поэтому порог
+            // растёт со временем кадра (взбесившийся палец всё равно быстрее
+            // 4000 px/с не бывает), а сверху прибит, чтобы смена слота после
+            // долгой паузы не крутила камеру.
+            const float jump = fminf(fmaxf(250.f * S, 4000.f * S * dt), 600.f * S);
+            if (fabsf(dx) < jump && fabsf(dy) < jump) {
                 const float sens = 0.22f / S;   // градусы на пиксель: чем плотнее экран, тем меньше
                 yaw_delta = dx * sens;
                 pitch_delta = -dy * sens;
+            } else {
+                ++s_fc_in_lookdrop;
             }
             s_fc_look_x = px; s_fc_look_y = py;
+        } else if (++s_fc_look_miss <= kFcGrace) {
+            // Якорь НЕ двигаем: движение за пропуск накопится в следующую
+            // дельту, обзор не встанет.
+            lookHeld = true; lookPx = s_fc_look_x; lookPy = s_fc_look_y;
         } else {
-            s_fc_look_id = -1;
+            s_fc_look_id = -1; s_fc_look_miss = 0;
+            ++s_fc_in_lookfree;
         }
     }
     if (s_fc_look_id == -1 && canGrab && nf > 0) {
@@ -1259,6 +1321,7 @@ void UpdateFreecam(float dt) {
             if (bx * bx + bu * bu <= btnOut * btnOut) continue;
             if (bx * bx + bd * bd <= btnOut * btnOut) continue;
             s_fc_look_id = f_id[i];
+            s_fc_look_miss = 0;
             s_fc_look_x = f_x[i]; s_fc_look_y = f_y[i];
             lookHeld = true; lookPx = f_x[i]; lookPy = f_y[i];
             break;
@@ -1270,7 +1333,7 @@ void UpdateFreecam(float dt) {
     for (int i = 0; i < s_fc_prev_n; ++i) s_fc_prev_ids[i] = f_id[i];
 
     // ---- движение -----------------------------------------------------------
-    if (dt > 0.1f) dt = 0.1f;              // первый кадр не должен телепортить
+    if (dt > 0.25f) dt = 0.25f;            // первый кадр не должен телепортить; просадки до 4 к/с скорость не режут
     float speed = g_state.freecam_speed;
     if (!(speed >= 1.f)) speed = 1.f;
     if (speed > 60.f) speed = 60.f;
