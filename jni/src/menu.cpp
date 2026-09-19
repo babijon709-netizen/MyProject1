@@ -1035,62 +1035,73 @@ void UpdateFreecam(float dt) {
     // Блокируем всё кроме верхней полосы (меню) — фрикам перехватывает все касания
     Touch_BlockRect(true, 0.f, 90.f, sw, sh);
 
-    ImGui::SetNextWindowPos({0.f, 0.f});
-    ImGui::SetNextWindowSize({sw, sh});
-    ImGui::Begin("##freecam", nullptr,
-                 ImGuiWindowFlags_NoDecoration |
-                 ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
-                 ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoBackground);
-    auto* dl = ImGui::GetWindowDrawList();
-    const float fs = ImGui::GetFontSize() * 0.95f;
-
-    // ---- левый джойстик ----
+    // ---- левый джойстик (окно с фоном) ----
     float ax = 0.f, ay = 0.f;
-    // Фон
-    dl->AddRectFilled({x0 - 10.f, y0 - 10.f}, {x0 + R*2.f + 10.f, y0 + R*2.f + 10.f}, IM_COL32(0,0,0,110), 12.f);
-    ImGui::SetCursorScreenPos({x0, y0});
-    ImGui::InvisibleButton("##fc_joy", {R * 2.f, R * 2.f});
-    if (ImGui::IsItemActive()) {
-        const ImVec2 d = {io.MousePos.x - cx, io.MousePos.y - cy};
-        const float len = sqrtf(d.x * d.x + d.y * d.y);
-        if (len > 6.f) {
-            const float k = (len > R ? R / len : 1.f);
-            ax = (d.x * k) / R;
-            ay = (-d.y * k) / R;
-        }
-    }
-    {
-        const ImU32 ring = C::UA(C::Dim(), 0.85f);
-        const ImU32 knob = C::UA(C::Acc(), ImGui::IsItemActive() ? 1.f : 0.75f);
-        dl->AddCircle({cx, cy}, R, ring, 28, 2.f);
-        dl->AddCircleFilled({cx + ax * R * 0.62f, cy - ay * R * 0.62f}, R * 0.32f, knob, 28);
-    }
-
-    // ---- правая зона обзора ----
-    ImGui::SetCursorScreenPos({look_x0, 0.f});
-    ImGui::InvisibleButton("##fc_look", {look_w, sh});
-    static ImVec2 s_last_look = {0,0};
-    static bool s_look_active = false;
     float yaw_delta = 0.f, pitch_delta = 0.f;
-    if (ImGui::IsItemActive()) {
-        ImVec2 cur = io.MousePos;
-        if (!s_look_active) {
-            s_last_look = cur;
-            s_look_active = true;
-        } else {
-            float dx = cur.x - s_last_look.x;
-            float dy = cur.y - s_last_look.y;
-            const float sens = 0.20f;
-            yaw_delta = dx * sens;
-            pitch_delta = -dy * sens;
-            s_last_look = cur;
+    {
+        ImGui::SetNextWindowPos({x0 - 12.f, y0 - 12.f});
+        ImGui::SetNextWindowSize({R*2.f + 24.f, R*2.f + 24.f});
+        ImGui::Begin("##fc_joy_win", nullptr,
+                     ImGuiWindowFlags_NoDecoration |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
+        auto* dl = ImGui::GetWindowDrawList();
+        // Фон — яркий чтобы точно видно
+        dl->AddRectFilled({x0 - 10.f, y0 - 10.f}, {x0 + R*2.f + 10.f, y0 + R*2.f + 10.f}, IM_COL32(20,20,20,200), 14.f);
+        dl->AddRect({x0 - 10.f, y0 - 10.f}, {x0 + R*2.f + 10.f, y0 + R*2.f + 10.f}, IM_COL32(255,255,255,80), 14.f, 0, 2.f);
+        ImGui::SetCursorScreenPos({x0, y0});
+        ImGui::InvisibleButton("##fc_joy", {R * 2.f, R * 2.f});
+        if (ImGui::IsItemActive()) {
+            const ImVec2 d = {io.MousePos.x - cx, io.MousePos.y - cy};
+            const float len = sqrtf(d.x * d.x + d.y * d.y);
+            if (len > 6.f) {
+                const float k = (len > R ? R / len : 1.f);
+                ax = (d.x * k) / R;
+                ay = (-d.y * k) / R;
+            }
         }
-    } else {
-        s_look_active = false;
+        {
+            const ImU32 ring = IM_COL32(255,255,255,200);
+            const ImU32 knob = ImGui::IsItemActive() ? IM_COL32(0,200,255,255) : IM_COL32(0,180,255,200);
+            dl->AddCircle({cx, cy}, R, ring, 32, 3.f);
+            dl->AddCircleFilled({cx + ax * R * 0.60f, cy - ay * R * 0.60f}, R * 0.34f, knob, 32);
+            // Крест для ориентации
+            dl->AddLine({cx - R*0.15f, cy}, {cx + R*0.15f, cy}, IM_COL32(255,255,255,60), 1.f);
+            dl->AddLine({cx, cy - R*0.15f}, {cx, cy + R*0.15f}, IM_COL32(255,255,255,60), 1.f);
+        }
+        ImGui::End();
     }
-
-    ImGui::End();
+    // ---- правая зона обзора ----
+    {
+        ImGui::SetNextWindowPos({look_x0, 0.f});
+        ImGui::SetNextWindowSize({look_w, sh});
+        ImGui::Begin("##fc_look_win", nullptr,
+                     ImGuiWindowFlags_NoDecoration |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar |
+                     ImGuiWindowFlags_NoBackground);
+        ImGui::SetCursorScreenPos({look_x0, 0.f});
+        ImGui::InvisibleButton("##fc_look", {look_w, sh});
+        static ImVec2 s_last_look = {0,0};
+        static bool s_look_active = false;
+        if (ImGui::IsItemActive()) {
+            ImVec2 cur = io.MousePos;
+            if (!s_look_active) {
+                s_last_look = cur;
+                s_look_active = true;
+            } else {
+                float dx = cur.x - s_last_look.x;
+                float dy = cur.y - s_last_look.y;
+                const float sens = 0.20f;
+                yaw_delta = dx * sens;
+                pitch_delta = -dy * sens;
+                s_last_look = cur;
+            }
+        } else {
+            s_look_active = false;
+        }
+        ImGui::End();
+    }
 
     float speed = g_state.freecam_speed;
     if (!(speed >= 1.f)) speed = 1.f;
