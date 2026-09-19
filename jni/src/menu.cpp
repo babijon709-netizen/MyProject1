@@ -978,11 +978,20 @@ void UpdateFreecam(float dt) {
         s_fc_retry = 0.f;
         s_fc_toasted = false;
     }
-    if (!esp_freecam_active()) { Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f); return; }
-
     ImGuiIO& io = ImGui::GetIO();
     const float sw = io.DisplaySize.x, sh = io.DisplaySize.y;
     if (sw < 100.f || sh < 100.f) return;
+
+    // Блокируем касания в зоне джойстика, пока выключатель фрикама ВКЛЮЧЁН, а
+    // не только когда фрикам действительно поднялся: иначе при неудачном
+    // включении (камера не нашлась) палец на джойстике уходил в игру и ходил
+    // ПЕРСОНАЖЕМ — ровно это и было «двигаю джойстик, а двигается тело»
+    // (жалоба 19.09). Выключатель снял — управление вернулось в игру.
+    if (!esp_freecam_active()) {
+        if (g_state.freecam_on) Touch_BlockRect(true, 0.f, sh * 0.45f, sw * 0.45f, sh);
+        else                    Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
+        return;
+    }
 
     // Панель слева, на уровне большого пальца: выше джойстика движения, ниже
     // верхней строки интерфейса игры.

@@ -1469,34 +1469,97 @@ static bool resolve_camera_arrays(uint64_t& matrices, uint64_t& indices, int32_t
 
 // Писатель-доминатор фрикама.
 //
-// Почему одного кадра оверлея мало. Камера привязана к скелету (к кости
-// головы), поэтому игра пишет её TRS каждый раз, когда шевелится тело. Мы же
-// писали раз в кадр оверлея — ПОСЛЕ отрисовки, то есть ровно в тот момент,
-// когда следующий игровой кадр нашу запись гарантированно затрёт. Отсюда
-// прыжки «наша точка <-> тело» (жалоба 19.09, лог 13:38:33—13:38:45): пока
-// тело стоит, видна наша позиция; тело побежало — видна позиция тела, и так
-// каждые полсекунды.
+// Почему одного кадра оверлея мало. Камера привязана к кости головы, поэтому
+// игра пишет её TRS каждый раз, когда шевелится тело. Мы же писали раз в кадр
+// оверлея — ПОСЛЕ отрисовки, то есть ровно в тот момент, когда следующий
+// игровой кадр нашу запись гарантированно затрёт. Отсюда прыжки «наша точка
+// <-> тело» (лог 13:38): пока тело стоит — видна наша позиция, тело побежало —
+// видна позиция тела.
 //
-// Выход тот же, что у «всегда день»: фоновый поток пишет позицию с периодом
-// 2 мс. Окно, в котором игра успевает записать своё И отрендерить, исчезает —
-// кадр игры длится 15—30 мс, а мы пишем каждые 2 мс.
-static std::atomic<uint64_t> g_fc_write_addr{0};   // matrices + index*48 + 0x24
-static std::atomic<float>    g_fc_local_x{0}, g_fc_local_y{0}, g_fc_local_z{0};
+// Выход: фоновый поток с периодом 4 мс (тот же приём, что у «всегда день»).
+// Окно, в котором игра успевает записать своё И отрендерить, исчезает — кадр
+// игры длится 15—30 мс.
+//
+// И почему поправка ЗАМКНУТАЯ, а не абсолютная. Раньше мы считали локальную
+// позицию от цели через матрицу родителя (transform_world_to_local). Если
+// матрица родителя прочиталась неверно (а родитель — это кость, и её матрица
+// обновляется игрой отдельно), локальная позиция выходила далёкой от нужной,
+// и камера ТЕЛЕПОРТИРОВАЛАСЬ в произвольное место. Теперь поток каждый такт
+// читает, где камера оказалась на самом деле, и доводит её до цели маленькой
+// поправкой: ошибка в матрице родителя влияет только на величину шага, а не
+// на саму точку, и контур всё равно сходится.
+static std::atomic<uint64_t> g_fc_matrices{0}, g_fc_indices{0};
+static std::atomic<int32_t>  g_fc_index{-1};
+static std::atomic<float>    g_fc_tx{0}, g_fc_ty{0}, g_fc_tz{0};   // цель, мировые
 static std::atomic<bool>     g_fc_writer_running{false};
 static std::atomic<unsigned> g_fc_write_count{0};
 static std::atomic<bool>     g_fc_write_failed{false};
+// Насколько близко камера подошла к цели по последней оценке (метры).
+static std::atomic<float>    g_fc_gap{-1.f};
+
+// Один такт доводки: прочитать, где камера сейчас, и сдвинуть её к цели.
+static bool freecam_correct_once(uint64_t matrices, uint64_t indices, int32_t index,
+                                 const Vec3& target, float& gap) {
+    if (!matrices || !indices || index < 0) return false;
+    Vec3 cur{}, scale{};
+    Vec4 rot{};
+    if (!read_transform_world_trs(matrices, indices, index, cur, rot, scale)) return false;
+    if (!vec3_is_finite(cur)) return false;
+    Vec3 d = {target.x - cur.x, target.y - cur.y, target.z - cur.z};
+    if (!vec3_is_finite(d)) return false;
+    const float dl = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
+    gap = dl;
+    if (dl < 0.002F) return true;                 // уже там
+    // Поправку режем: прочитанная позиция иногда мусорная, и огромный шаг
+    // унёс бы камеру неизвестно куда. Пять метров за такт — это 30 м расхождение
+    // (игра вернула камеру к телу) гасится за шесть тактов, то есть за 25 мс:
+    // на глаз камера просто возвращается на место, а не прыгает.
+    if (dl > 5.0F) { const float kk = 5.0F / dl; d = {d.x * kk, d.y * kk, d.z * kk}; }
+
+    int32_t parent = -2;
+    if (!rd_exact(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
+    Matrix34 self{};
+    if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), self)) return false;
+    Vec3 local = {self.translation.x, self.translation.y, self.translation.z};
+    if (parent >= 0) {
+        Vec3 pPos{}, pScale{};
+        Vec4 pRot{};
+        if (!read_transform_world_trs(matrices, indices, parent, pPos, pRot, pScale)) return false;
+        Vec4 inv = pRot;
+        const float len = sqrtf(inv.x * inv.x + inv.y * inv.y + inv.z * inv.z + inv.w * inv.w);
+        if (!(len > 1e-6F)) return false;
+        inv = {-inv.x / len, -inv.y / len, -inv.z / len, inv.w / len};
+        const Vec3 turned = rotate_vector(inv, d);
+        if (!(fabsf(pScale.x) > 1e-6F && fabsf(pScale.y) > 1e-6F && fabsf(pScale.z) > 1e-6F)) return false;
+        local = {local.x + turned.x / pScale.x, local.y + turned.y / pScale.y, local.z + turned.z / pScale.z};
+    } else {
+        local = {local.x + d.x, local.y + d.y, local.z + d.z};
+    }
+    if (!vec3_is_finite(local)) return false;
+    const bool ok = wr_buf(matrices + (uint64_t)index * sizeof(Matrix34) +
+                           offsetof(Matrix34, translation), &local, sizeof(Vec3));
+    if (!ok) g_fc_write_failed.store(true);
+    return ok;
+}
 
 static void freecam_writer_start() {
     if (g_fc_writer_running.exchange(true)) return;
     std::thread([]() {
         while (g_fc_writer_running.load()) {
-            const uint64_t addr = g_fc_write_addr.load();
-            if (addr && g_pid > 0) {
-                const float v[3] = {g_fc_local_x.load(), g_fc_local_y.load(), g_fc_local_z.load()};
-                if (wr_buf(addr, v, sizeof(v))) g_fc_write_count.fetch_add(1);
-                else g_fc_write_failed.store(true);
+            const uint64_t m = g_fc_matrices.load();
+            const uint64_t n = g_fc_indices.load();
+            const int32_t  i = g_fc_index.load();
+            if (m && n && i >= 0 && g_pid > 0) {
+                const Vec3 target = {g_fc_tx.load(), g_fc_ty.load(), g_fc_tz.load()};
+                float gap = -1.f;
+                if (freecam_correct_once(m, n, i, target, gap)) {
+                    g_fc_write_count.fetch_add(1);
+                    g_fc_gap.store(gap);
+                } else {
+                    g_fc_write_failed.store(true);
+                }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
         }
     }).detach();
 }
@@ -1507,7 +1570,9 @@ bool esp_freecam_set(bool on) {
         // Возвращаем камеру на место: пишем сохранённую локальную позицию.
         // Писатель останавливается ПЕРВЫМ: иначе он добил бы нашу позицию
         // поверх только что восстановленной.
-        g_fc_write_addr.store(0);
+        g_fc_index.store(-1);
+        g_fc_matrices.store(0);
+        g_fc_indices.store(0);
         g_fc_writer_running.store(false);
         if (g_freecam_saved_ok && g_freecam_matrices && g_freecam_index >= 0)
             wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34) +
@@ -1571,23 +1636,19 @@ bool esp_freecam_set(bool on) {
 // а локальная позиция пересчитывается под текущего родителя.
 static bool freecam_write() {
     if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
-    Vec3 local{};
-    if (!transform_world_to_local(g_freecam_matrices, g_freecam_indices, g_freecam_index,
-                                  g_freecam_pos, local))
-        return false;
-    if (!vec3_is_finite(local)) return false;
-    const uint64_t addr = g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34) +
-                          offsetof(Matrix34, translation);
-    // Писателю — адрес и текущая локальная позиция; он сам добивает её каждые
-    // 2 мс, переживая игровой кадр. Разовая запись остаётся на этот кадр.
-    g_fc_local_x.store(local.x);
-    g_fc_local_y.store(local.y);
-    g_fc_local_z.store(local.z);
-    g_fc_write_addr.store(addr);
+    if (!vec3_is_finite(g_freecam_pos)) return false;
+    // Писателю — сама цель (мировые координаты) и массивы: он сам доводит до
+    // неё камеру каждые 4 мс, переживая игровой кадр.
+    g_fc_matrices.store(g_freecam_matrices);
+    g_fc_indices.store(g_freecam_indices);
+    g_fc_index.store(g_freecam_index);
+    g_fc_tx.store(g_freecam_pos.x);
+    g_fc_ty.store(g_freecam_pos.y);
+    g_fc_tz.store(g_freecam_pos.z);
     freecam_writer_start();
-    const bool ok = wr_buf(addr, &local, sizeof(Vec3));
-    if (!ok) g_fc_write_failed.store(true);
-    return ok;
+    float gap = -1.f;
+    return freecam_correct_once(g_freecam_matrices, g_freecam_indices, g_freecam_index,
+                                g_freecam_pos, gap);
 }
 
 bool esp_freecam_move(float forward, float right, float up) {
@@ -1630,11 +1691,12 @@ static void freecam_tick() {
                                      in_mem, rot, scale)) {
             const unsigned wc = g_fc_write_count.exchange(0);
             const bool wf = g_fc_write_failed.exchange(false);
-            LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f), писатель %u/с%s",
+            const float gap = g_fc_gap.load();
+            LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f), писатель %u/с, недолёт %.2f м%s",
                     (double)g_freecam_pos.x, (double)g_freecam_pos.y, (double)g_freecam_pos.z,
                     (double)in_mem.x, (double)in_mem.y, (double)in_mem.z,
                     (double)g_cam_pos.x, (double)g_cam_pos.y, (double)g_cam_pos.z,
-                    wc, wf ? " (отказы записи)" : "");
+                    wc, (double)gap, wf ? " (отказы записи)" : "");
         }
     }
     // Читать надо ДО записи: после неё в массиве лежит наше значение, и
