@@ -195,6 +195,13 @@ struct AimPick {
 //   1 аим выключен          2 нет привязки к процессу   3 открыто меню
 //   4 калибровка зон        5 окно сборки               6 включён фрикам
 //   7 «только с прицелом», а прицела нет                8 не определён экран
+// Признак «в прицеле» и цепочка, которой он прочитан. Запоминаются в AimBegin,
+// потому что на пути «аим молчит» диагностика чистится целиком, и иначе в логе
+// остался бы ноль — он читается как «цепочка не подтвердилась», хотя проверка
+// могла ответить честно и просто «прицела нет».
+static int  s_adsState  = -1;   // 1 в прицеле, 0 нет, -1 режим выключен
+static int  s_adsSource = 0;    // 1 Aim, 2 isAiming, 3 aimFOV, 0 не подтвердилась
+
 static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     g_aimActive = false;
     const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
@@ -206,8 +213,13 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
                   g_calibMode == 0 && !g_buildPrompt && !g_state.freecam_on;
 
     // "Только с прицелом": only steer while the local player is ADS.
-    if (active && g_state.aim_scope_only && !esp_local_player_is_aiming())
-        active = false;
+    if (g_state.aim_scope_only && g_esp_attached) {
+        s_adsState = esp_local_player_is_aiming() ? 1 : 0;
+        s_adsSource = esp_local_aim_source();
+        if (active && !s_adsState) active = false;
+    } else {
+        s_adsState = -1; s_adsSource = 0;
+    }
     if (!active) {
         // Причину пишем по первому же невыполненному условию: в логе 15:57
         // «объект=0» шёл в 219 кадрах из 319, и без расшифровки это выглядело
@@ -965,9 +977,9 @@ static void AimLogTick(float dt) {
     s_logTime = 0.f;
     const AimMemDiag& d = AimMemoryDiag();
     if (g_state.aim_mode == AIM_MODE_MEMORY)
-        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d",
+        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d источник=%d",
                 aim_mode_name(), s_frames, (int)d.params, (int)d.responded,
-                d.writes, d.fails, (double)d.mismatch, d.inactive, d.ads);
+                d.writes, d.fails, (double)d.mismatch, d.inactive, d.ads, d.ads_source);
 }
 
 // ====================== Мемори-аим: «память» ===============================
@@ -1068,13 +1080,14 @@ static void UpdateAimMemory(float dt) {
     if (!AimBegin(dt, sw, sh, &why)) {
         s_memDiag = AimMemDiag{};
         s_memDiag.inactive = why;   // печатается в той же строке «объект=…»
+        s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
         pick.reset(); s_haveLast = false; s_haveCtlErr = false; s_haveFilt = false;
         s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
         s_noParamsTime = s_noResponseTime = 0.f; s_toasted = false;
         return;
     }
     s_memDiag.inactive = 0;
-    s_memDiag.ads = g_state.aim_scope_only ? (esp_local_player_is_aiming() ? 1 : 0) : -1;
+    s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
 
     // MouseLook нужен не ради чувствительности (накопитель уже в градусах), а
     // как проверка «объект тот»: m_Sensitivity в правдоподобных пределах —

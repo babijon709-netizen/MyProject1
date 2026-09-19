@@ -5577,6 +5577,12 @@ bool esp_local_player_is_aiming() {
     return g_aim_state.aiming;
 }
 
+int esp_local_aim_source() {
+    if (g_pid <= 0 || !g_il2cpp_base) return 0;
+    if (!read_local_aim_state()) return 0;
+    return g_aim_state.source;
+}
+
 // ---- Дальность удара ближним орудием: FPMelee.m_MaxReach + hitRadius --------
 // Сами числа сериализованы в префабе каждого инструмента, в дампе их нет: в
 // конструкторе FPMelee стоят заглушки (m_MaxReach 0.5, hitRadius 0.1,

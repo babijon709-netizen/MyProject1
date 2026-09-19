@@ -133,6 +133,11 @@ bool        esp_wants_reattach();
 // weapon. Returns false when the state cannot be read (not attached, no
 // weapon, menus, etc.), so "aim only while scoped" fails closed.
 bool        esp_local_player_is_aiming();
+// Номер цепочки, которой отвечен esp_local_player_is_aiming(): 1 активность
+// Aim, 2 isAiming оружия, 3 примешивание aimFOV, 0 цепочка не подтвердилась.
+// Нужен, чтобы по логу отличать «игрок правда не в прицеле» от «признак
+// прочитан неверной цепочкой».
+int         esp_local_aim_source();
 
 // ---- Автофарм ---------------------------------------------------------------
 // Слой памяти только находит узел и говорит, куда смотреть и куда идти; сам
