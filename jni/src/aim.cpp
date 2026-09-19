@@ -191,7 +191,11 @@ struct AimPick {
 // Начало такта: общие проверки и размер экрана. false — в этом кадре аим
 // работать не должен (меню, калибровка зон, нет привязки, «только в прицеле»
 // без прицела). dt приводится к рабочему диапазону на месте.
-static bool AimBegin(float& dt, float& sw, float& sh) {
+// Коды причины «аим молчит» (AimMemDiag.inactive):
+//   1 аим выключен          2 нет привязки к процессу   3 открыто меню
+//   4 калибровка зон        5 окно сборки               6 включён фрикам
+//   7 «только с прицелом», а прицела нет                8 не определён экран
+static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     g_aimActive = false;
     const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     // Во время калибровки зон (тапом по экрану) аим ничего не трогает: иначе
@@ -204,7 +208,21 @@ static bool AimBegin(float& dt, float& sw, float& sh) {
     // "Только с прицелом": only steer while the local player is ADS.
     if (active && g_state.aim_scope_only && !esp_local_player_is_aiming())
         active = false;
-    if (!active) return false;
+    if (!active) {
+        // Причину пишем по первому же невыполненному условию: в логе 15:57
+        // «объект=0» шёл в 219 кадрах из 319, и без расшифровки это выглядело
+        // как «потерялся MouseLook», хотя проверка объекта даже не запускалась.
+        if (why) {
+            if (!g_state.aim_touch)                  *why = 1;
+            else if (!g_esp_attached)                *why = 2;
+            else if (menuOpen)                       *why = 3;
+            else if (g_calibMode != 0)               *why = 4;
+            else if (g_buildPrompt)                  *why = 5;
+            else if (g_state.freecam_on)             *why = 6;
+            else                                     *why = 7;
+        }
+        return false;
+    }
 
     if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
     if (dt > 0.1f) dt = 0.1f;
@@ -216,7 +234,11 @@ static bool AimBegin(float& dt, float& sw, float& sh) {
     } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
         sw = (float) displayInfo.height; sh = (float) displayInfo.width;
     }
-    return sw >= 100.f && sh >= 100.f;
+    if (sw < 100.f || sh < 100.f) {
+        if (why) *why = 8;
+        return false;
+    }
+    return true;
 }
 
 // Выбор цели и упреждение. false — цели нет; сбрасывать ли из-за этого
@@ -920,9 +942,9 @@ static void AimLogTick(float dt) {
     s_logTime = 0.f;
     const AimMemDiag& d = AimMemoryDiag();
     if (g_state.aim_mode == AIM_MODE_MEMORY)
-        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f",
+        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d",
                 aim_mode_name(), s_frames, (int)d.params, (int)d.responded,
-                d.writes, d.fails, (double)d.mismatch);
+                d.writes, d.fails, (double)d.mismatch, d.inactive);
 }
 
 // ====================== Мемори-аим: «память» ===============================
@@ -1019,13 +1041,16 @@ static void UpdateAimMemory(float dt) {
     static bool  s_haveFilt = false;
 
     float sw = 0.f, sh = 0.f;
-    if (!AimBegin(dt, sw, sh)) {
+    int why = 0;
+    if (!AimBegin(dt, sw, sh, &why)) {
         s_memDiag = AimMemDiag{};
+        s_memDiag.inactive = why;   // печатается в той же строке «объект=…»
         pick.reset(); s_haveLast = false; s_haveCtlErr = false; s_haveFilt = false;
         s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
         s_noParamsTime = s_noResponseTime = 0.f; s_toasted = false;
         return;
     }
+    s_memDiag.inactive = 0;
 
     // MouseLook нужен не ради чувствительности (накопитель уже в градусах), а
     // как проверка «объект тот»: m_Sensitivity в правдоподобных пределах —
