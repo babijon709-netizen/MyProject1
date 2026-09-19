@@ -1439,6 +1439,41 @@ void esp_freecam_diag(int& code, float& dist) {
 // двух метрах, — и тогда фрикам двигал не камеру, а что-то рядом, а камера
 // оставалась привязанной к телу и каждые полсекунды прыгала между своей
 // точкой и телом (жалоба 19.09).
+// Все проверенные слоты камеры, а не один лучший.
+//
+// Лог 19:53:35 — «в памяти (-39.8, 52.2, 38.6), игра видит (-0.0, -0.0, -0.0)»,
+// через секунду наоборот — «в памяти (0.0, 0.0, 0.0), игра видит (-39.8, 52.2,
+// 38.6)». Значит массивов иерархии ДВОЕ, и игра их чередует: пока мы пишем в
+// одни, камера читает другие (пустая ячейка, ноль — отсюда «под картой»), и
+// наоборот. Раньше брался первый слот, подошедший по позиции, поэтому камера
+// половину времени оказывалась в нуле: жалоба «фрикам мерцает». Писать надо
+// во ВСЕ слоты, чья посчитанная позиция совпала с камерой.
+struct FcSlot { uint64_t m = 0, n = 0; int32_t i = -1; float d = -1.f; };
+static constexpr int kFcMaxSlots = 4;
+// Насколько далеко посчитанная позиция слота может стоять от камеры, чтобы
+// слот считался её собственным. 2 м, а не полметра: g_cam_pos мог прийти из
+// резервной матрицы вида (она считается по другому источнику и чуть
+// расходится), и из-за жёсткого порога фрикам отказывался включаться там,
+// где камера найдена верно.
+static constexpr float kFcSlotMaxDist = 2.0f;
+static FcSlot g_fc_slots[kFcMaxSlots];
+static int    g_fc_slot_n = 0;
+
+// Добавить слот в список проверенных, если его ещё нет. Держим ближайшие.
+static void fc_slot_add(uint64_t m, uint64_t n, int32_t i, float d) {
+    if (!m || !n || i < 0) return;
+    for (int k = 0; k < g_fc_slot_n; ++k)
+        if (g_fc_slots[k].m == m && g_fc_slots[k].n == n && g_fc_slots[k].i == i) return;
+    if (g_fc_slot_n < kFcMaxSlots) {
+        g_fc_slots[g_fc_slot_n++] = FcSlot{m, n, i, d};
+        return;
+    }
+    int worst = 0;
+    for (int k = 1; k < g_fc_slot_n; ++k)
+        if (g_fc_slots[k].d > g_fc_slots[worst].d) worst = k;
+    if (g_fc_slots[worst].d > d) g_fc_slots[worst] = FcSlot{m, n, i, d};
+}
+
 static bool resolve_camera_arrays(uint64_t& matrices, uint64_t& indices, int32_t& index,
                                   Vec3& cam_pos, float& err_m) {
     matrices = indices = 0; index = -1; err_m = -1.f;
@@ -1476,12 +1511,21 @@ static bool resolve_camera_arrays(uint64_t& matrices, uint64_t& indices, int32_t
                 // что в матрице вида: это один и тот же объект. Метр допуска
                 // закрывает расхождение на кадр (камера движется между чтениями).
                 if (d > 1.0F) continue;
-                matrices = m; indices = n; index = idx;
-                return true;
+                // Раньше здесь был немедленный выход: брался ПЕРВЫЙ подошедший
+                // набор массивов. Лог 19:53 показал, что камера половину
+                // времени оказывается в нуле — «в памяти (0,0,0), игра видит
+                // (-39.8, 52.2, 38.6)» и через секунду наоборот. Значит,
+                // подходящих наборов больше одного (игра чередует буферы
+                // иерархии), и писать надо во все: иначе в тот набор, куда мы
+                // не пишем, камера приходит за нулевой матрицей.
+                fc_slot_add(m, n, idx, d);
+                if (!matrices) { matrices = m; indices = n; index = idx; }
             }
         }
     }
-    return false;
+    // Наборов могло найтись несколько: matrices/index — первый (эталон для
+    // лога), остальные лежат в g_fc_slots.
+    return matrices != 0;
 }
 
 // Массивы камеры ПРЯМО СЕЙЧАС — по раскладке, подтверждённой самим Unity.
@@ -1542,8 +1586,13 @@ static bool camera_arrays_now(uint64_t& matrices, uint64_t& indices, int32_t& in
 // читает, где камера оказалась на самом деле, и доводит её до цели маленькой
 // поправкой: ошибка в матрице родителя влияет только на величину шага, а не
 // на саму точку, и контур всё равно сходится.
-static std::atomic<uint64_t> g_fc_addr{0};      // matrices + index*48 + 0x24
-static std::atomic<float>    g_fc_lx{0}, g_fc_ly{0}, g_fc_lz{0};   // что писать
+// Адреса и значения — ПО СЛОТУ (см. FcSlot): игра чередует наборы массивов,
+// поэтому писатель обязан вести их все, иначе половина кадров камеры читает
+// набор, в который мы не пишем.
+static std::atomic<uint64_t> g_fc_addr[kFcMaxSlots];   // matrices + index*48 + 0x24
+static std::atomic<float>    g_fc_lx[kFcMaxSlots], g_fc_ly[kFcMaxSlots], g_fc_lz[kFcMaxSlots];
+// Сколько слотов сейчас ведёт писатель.
+static std::atomic<int>      g_fc_addr_n{0};
 static std::atomic<bool>     g_fc_writer_running{false};
 static std::atomic<unsigned> g_fc_write_count{0};
 static std::atomic<bool>     g_fc_write_failed{false};
@@ -1675,6 +1724,12 @@ static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_
 
 static uint64_t g_fc_last_m = 0, g_fc_last_n = 0;
 static int32_t  g_fc_last_i = -1;
+// Слоты, которые фрикам ведёт сам. Снимок делается на включении: общий и
+// список g_fc_slots перезаполняется при каждом вызове resolve_camera_arrays,
+// а вызывают его и другие пути (поза камеры), и чужой вызов не должен менять
+// набор слотов у уже летящей камеры.
+static FcSlot   g_fc_own[kFcMaxSlots];
+static int      g_fc_own_n = 0;
 // Сколько тактов подряд проверенный слот камеры не читается. Перерешаем
 // массивы только после серии отказов: одиночный сбой — это игра, которая
 // прямо сейчас обновляет объект, а не переезд массивов.
@@ -1686,9 +1741,10 @@ static void freecam_writer_start() {
         unsigned iter = 0;
         double probe_at = memio::now_seconds() + 3.0;   // первая проба — через 3 с
         while (g_fc_writer_running.load()) {
-            const uint64_t addr = g_fc_addr.load();
+            const uint64_t addr = g_fc_addr[0].load();
+            const int      nslots = g_fc_addr_n.load();
             if (addr && g_pid > 0) {
-                const float v[3] = {g_fc_lx.load(), g_fc_ly.load(), g_fc_lz.load()};
+                const float v[3] = {g_fc_lx[0].load(), g_fc_ly[0].load(), g_fc_lz[0].load()};
                 // Проба «игрушка переписала нашу запись».
                 //
                 // Прежний счётчик читал адрес назад сразу после своей же
@@ -1725,6 +1781,14 @@ static void freecam_writer_start() {
                 }
                 if (wr_buf(addr, v, sizeof(v))) g_fc_write_count.fetch_add(1);
                 else g_fc_write_failed.store(true);
+                // Остальные проверенные слоты — тем же значением: игра читает
+                // то один набор массивов, то другой, и оба должны лежать.
+                for (int sl = 1; sl < nslots; ++sl) {
+                    const uint64_t a2 = g_fc_addr[sl].load();
+                    if (!a2) continue;
+                    const float v2[3] = {g_fc_lx[sl].load(), g_fc_ly[sl].load(), g_fc_lz[sl].load()};
+                    if (wr_buf(a2, v2, sizeof(v2))) g_fc_write_count.fetch_add(1);
+                }
                 ++iter;
             }
             std::this_thread::sleep_for(std::chrono::microseconds(500));
@@ -1738,7 +1802,8 @@ bool esp_freecam_set(bool on) {
         // Возвращаем камеру на место: пишем сохранённую локальную позицию.
         // Писатель останавливается ПЕРВЫМ: иначе он добил бы нашу позицию
         // поверх только что восстановленной.
-        g_fc_addr.store(0);
+        for (int sl = 0; sl < kFcMaxSlots; ++sl) g_fc_addr[sl].store(0);
+        g_fc_addr_n.store(0);
         g_fc_writer_running.store(false);
         g_fc_last_m = g_fc_last_n = 0; g_fc_last_i = -1;
         if (g_freecam_saved_ok && g_freecam_matrices && g_freecam_index >= 0)
@@ -1760,6 +1825,7 @@ bool esp_freecam_set(bool on) {
     int32_t index = -1;
     float dist = -1.f;
     Vec3 cam_pos{};
+    g_fc_slot_n = 0;
     if (!resolve_camera_arrays(matrices, indices, index, cam_pos, dist)) {
         // Проверенный путь не дал массивов — тогда старый перебор: он хоть и
         // грубее, но находил камеру до починки GameObject.
@@ -1787,12 +1853,19 @@ bool esp_freecam_set(bool on) {
     // Запоминаем и в счётчике подмен: отсюда массивы считаются эталонными,
     // и freecam_write() больше не имеет права их подменять.
     g_fc_last_m = matrices; g_fc_last_n = indices; g_fc_last_i = index;
+    // Снимок слотов. Проверенный путь их уже собрал; у старого перебора
+    // (resolve_transform_arrays) списка нет — тогда ведём один найденный слот.
+    g_fc_own_n = g_fc_slot_n;
+    for (int k = 0; k < g_fc_own_n; ++k) g_fc_own[k] = g_fc_slots[k];
+    if (g_fc_own_n <= 0) { g_fc_own[0] = FcSlot{matrices, indices, index, dist}; g_fc_own_n = 1; }
     g_freecam_pos = pos;
     g_freecam_on = true;
     g_freecam_fail = 0; g_freecam_fail_dist = dist;   // 0 = порядок
-    LogLine("фрикам: включён, старт (%.1f, %.1f, %.1f), трансформ=0x%llx",
+    // Сколько слотов ведём — по логу видно, один набор массивов у камеры или
+    // два чередующихся (жалоба «мерицает»): при одном слоте второй записи нет.
+    LogLine("фрикам: включён, старт (%.1f, %.1f, %.1f), трансформ=0x%llx, слотов %d",
             (double)pos.x, (double)pos.y, (double)pos.z,
-            (unsigned long long)transform);
+            (unsigned long long)transform, (int)g_fc_own_n);
     return true;
 }
 
@@ -1853,17 +1926,33 @@ static bool freecam_write() {
     if (!m || !n || idx < 0) return false;
     // Поправку считаем здесь (60 Гц), а пишет её поток каждые полмиллисекунды:
     // так наша позиция лежит в памяти почти всё время игрового кадра.
-    Vec3 local{};
-    float gap = -1.f;
-    if (!freecam_local_for_target(m, n, idx, g_freecam_pos, local, gap)) return false;
-    const uint64_t addr = m + (uint64_t)idx * sizeof(Matrix34) + offsetof(Matrix34, translation);
-    g_fc_lx.store(local.x);
-    g_fc_ly.store(local.y);
-    g_fc_lz.store(local.z);
-    g_fc_addr.store(addr);
-    g_fc_gap.store(gap);
+    //
+    // Считаем и пишем для КАЖДОГО проверенного слота. Лог 19:53 показал, что
+    // наборов массивов два и игра их чередует: пока мы вели один, камера в
+    // половине кадров читала другой, где лежал ноль, — отсюда мерцание и
+    // провал под карту. Локальная позиция у слотов может различаться: она
+    // считается от родителя, найденного в этом же наборе массивов.
+    bool ok = false;
+    int  fed = 0;
+    for (int sl = 0; sl < g_fc_own_n && fed < kFcMaxSlots; ++sl) {
+        const FcSlot& S = g_fc_own[sl];
+        if (!S.m || !S.n || S.i < 0) continue;
+        Vec3 local{};
+        float gap = -1.f;
+        if (!freecam_local_for_target(S.m, S.n, S.i, g_freecam_pos, local, gap)) continue;
+        const uint64_t addr = S.m + (uint64_t)S.i * sizeof(Matrix34) + offsetof(Matrix34, translation);
+        g_fc_lx[fed].store(local.x);
+        g_fc_ly[fed].store(local.y);
+        g_fc_lz[fed].store(local.z);
+        g_fc_addr[fed].store(addr);
+        if (fed == 0) g_fc_gap.store(gap);
+        ++fed;
+        if (wr_buf(addr, &local, sizeof(Vec3))) ok = true;
+    }
+    g_fc_addr_n.store(fed);
+    if (!fed) return false;
     freecam_writer_start();
-    return wr_buf(addr, &local, sizeof(Vec3));
+    return ok;
 }
 
 bool esp_freecam_move(float forward, float right, float up) {
@@ -1916,6 +2005,32 @@ static void freecam_tick() {
                     (double)g_cam_pos.x, (double)g_cam_pos.y, (double)g_cam_pos.z,
                     wc, ow, (double)(ow ? owm / (float)ow : 0.f), (double)gap, ac,
                     wf ? " (отказы записи)" : "");
+            // Сколько наборов массивов ведём и что лежит в_parent_ у каждого.
+            // Мерцание камеры (жалоба 19.09) живёт ровно здесь: в логе 19:53
+            // «игра видит» через строку меняется с цели на (-0.0, -0.0, -0.0),
+            // а в_parent_ у ведомого набора нули. По этой строке видно, ВСЕ ли
+            // наборы лежат, и не в нулевом ли parent дело, а не в частоте.
+            {
+                char buf[256] = {};
+                int  off = 0;
+                for (int sl = 0; sl < g_fc_own_n && off < 200; ++sl) {
+                    const FcSlot& S = g_fc_own[sl];
+                    int32_t parent = -2;
+                    rd_fresh(S.n + (uint64_t)S.i * sizeof(int32_t), parent);
+                    Matrix34 pm{};
+                    const bool have_p = (parent >= 0) &&
+                        rd_fresh(S.m + (uint64_t)parent * sizeof(Matrix34), pm);
+                    const bool zero_p = !have_p ||
+                        (pm.translation.x == 0.f && pm.translation.y == 0.f && pm.translation.z == 0.f &&
+                         pm.rotation.x == 0.f && pm.rotation.y == 0.f && pm.rotation.z == 0.f &&
+                         pm.scale.x == 0.f && pm.scale.y == 0.f && pm.scale.z == 0.f);
+                    off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+                                    " [набор %d: 0x%llx/0x%llx индекс %d родитель %d%s]",
+                                    sl, (unsigned long long)S.m, (unsigned long long)S.n,
+                                    (int)S.i, (int)parent, zero_p ? " НУЛЕВОЙ" : "");
+                }
+                LogLine("фрикам: наборы — всего %d%s", (int)g_fc_own_n, buf);
+            }
             // Чем именно оказалась затёрта наша запись. По этому значению
             // видно, кто второй пишет в ту же ячейку: если это текущая позиция
             // головы — запись перебивает игра, и бороться надо её кадром, а не
