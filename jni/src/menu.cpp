@@ -1040,7 +1040,7 @@ void UpdateFreecam(float dt) {
     }
 
     // ---- геометрия -------------------------------------------------------
-    const float R = 110.f;                 // ход стика
+    const float R = 130.f;                 // ход стика (= радиус круглого основания)
     float cx, cy;                          // центр джойстика
     if (g_state.freecam_joy_x >= 0.f && g_state.freecam_joy_y >= 0.f) {
         cx = g_state.freecam_joy_x * vw;
