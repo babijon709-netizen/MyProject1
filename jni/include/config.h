@@ -28,5 +28,7 @@ void ConfigDelete(int idx);
 void ApplyBuildChoice(go::Build b);
 void RestoreLang();
 void RestoreBuild();
+void RestoreAccent();
 void RememberLang();
 void RememberBuild();
+void RememberAccent();

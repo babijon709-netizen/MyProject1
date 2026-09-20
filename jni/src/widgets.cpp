@@ -240,7 +240,7 @@ static void RenderSliderVisuals(ImDrawList* dl, ImFont* fn, float fs,
     dl->AddCircleFilled({kx + 0.5f, tY + 1.5f}, knobR + 1.f, IM_COL32(0, 0, 0, int(30 * alpha)));
     dl->AddCircleFilled({kx, tY}, knobR, IM_COL32(255, 255, 255, int(255 * alpha)));
     if (active)
-        dl->AddCircle({kx, tY}, knobR + 4.f, C::UA(C::Light::Acc, 0.85f * alpha), 48, 3.f);
+        dl->AddCircle({kx, tY}, knobR + 4.f, C::UA(C::AccLight(), 0.85f * alpha), 48, 3.f);
 
     if (!last && showSep)
         dl->AddLine({cX + padX, rowY + rowH - 0.5f},
@@ -534,7 +534,7 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
         bool near = s_sheetSliderActive && !g_sheet.closing && io.MouseDown[0];
         fg->AddCircleFilled({kx + 0.7f, trkY + 1.5f}, kR2, IM_COL32(0, 0, 0, 40));
         fg->AddCircleFilled({kx, trkY}, kR2, IM_COL32(255, 255, 255, 255));
-        if (near) fg->AddCircle({kx, trkY}, kR2 + 4.f, C::UA(C::Light::Acc, 0.85f), 48, 3.f);
+        if (near) fg->AddCircle({kx, trkY}, kR2 + 4.f, C::UA(C::AccLight(), 0.85f), 48, 3.f);
         if (near) { float dx = io.MousePos.x - trkX; *v = mn + Clamp01(dx / trkW) * (mx - mn); }
         char minB[16], maxB[16];
         snprintf(minB, 16, g_sheet.slFmt, mn); snprintf(maxB, 16, g_sheet.slFmt, mx);

@@ -65,6 +65,24 @@ static float pill_vel =  0.f;
 struct TabRect { float sx; };
 static TabRect tab_rects[kTabCount];
 
+// ---- Акцент интерфейса: палитра стиля всего GUI ---------------------------
+// 0 — классический фиолет (без оверрайда: Light/Dark как раньше), 1..7 —
+// пресеты, kAccentCustom — свой цвет из g_state.ui_accent_rgb (тап открывает
+// ту же палитру, что точки цвета в ESP). Цвета яркие середины — читаются и на
+// светлой, и на тёмной теме: оверрайд один на обе.
+static const ImVec4 kAccentCols[] = {
+    {0.545f, 0.486f, 1.000f, 1.f},  // 0 фиолет (показывается, не применяется)
+    {0.250f, 0.450f, 1.000f, 1.f},  // 1 синий
+    {0.100f, 0.750f, 0.900f, 1.f},  // 2 голубой
+    {0.200f, 0.750f, 0.350f, 1.f},  // 3 зелёный
+    {0.950f, 0.750f, 0.150f, 1.f},  // 4 жёлтый
+    {1.000f, 0.550f, 0.150f, 1.f},  // 5 оранжевый
+    {0.950f, 0.250f, 0.300f, 1.f},  // 6 красный
+    {1.000f, 0.450f, 0.700f, 1.f},  // 7 розовый
+};
+static constexpr int kAccentCustom = 8;
+static constexpr int kAccentCount = 9;   // 8 пресетов + свой
+
 
 float TabContent(int tab, float dt, float cW) {
     float sY = ImGui::GetCursorPosY();
@@ -632,6 +650,53 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::RowH * 1);
         if (ToggleRow("##ud2", XS("Тёмная тема"), &g_state.ui_dark_mode, g_state.a_ui_dark, true, true))
             g_darkTheme = g_state.ui_dark_mode;
+
+        // ---- Акцент: палитра стиля всего GUI -------------------------------
+        // Ряд кругов: 8 пресетов + свой цвет (тап открывает палитру, как точки
+        // цвета в ESP; повторный тап по выбранному «своему» открывает её снова).
+        // Круги делят строку поровну: диаметр под ширину, не наоборот.
+        SHdr(XS("Цвет интерфейса"));
+        {
+            auto* dl  = ImGui::GetWindowDrawList();
+            float avW = ImGui::GetContentRegionAvail().x;
+            const float inset = Layout::Inset;
+            const float rowH  = Layout::RowH;
+            auto  pos = ImGui::GetCursorScreenPos();
+            bool  popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+
+            CardBg(rowH);
+            const float avail = avW - inset * 2.f;
+            float d = (avail - (kAccentCount - 1) * 10.f) / kAccentCount;
+            if (d > 60.f) d = 60.f;
+            if (d < 28.f) d = 28.f;
+            float gap = (kAccentCount > 1) ? (avail - d * kAccentCount) / (kAccentCount - 1) : 0.f;
+            if (gap < 0.f) gap = 0.f;
+            const float cy = pos.y + rowH * 0.5f;
+            for (int i = 0; i < kAccentCount; ++i) {
+                const float cx = pos.x + inset + d * 0.5f + i * (d + gap);
+                const bool sel = (g_state.ui_accent_idx == i);
+                const ImVec4 col = (i == kAccentCustom) ? g_state.ui_accent_rgb : kAccentCols[i];
+                dl->AddCircleFilled({cx, cy}, d * 0.5f, C::U(col), 40);
+                if (sel)
+                    dl->AddCircle({cx, cy}, d * 0.5f + 3.f, C::U(C::Txt()), 40, 3.f);
+                else if (g_state.ui_show_sep)
+                    dl->AddCircle({cx, cy}, d * 0.5f + 1.f, C::UA(C::Sep(), 0.9f), 40, 1.2f);
+                char aid[16]; snprintf(aid, sizeof(aid), "##acc%d", i);
+                ImGui::SetCursorScreenPos({cx - d * 0.5f, cy - d * 0.5f});
+                ImGui::InvisibleButton(aid, {d, d});
+                const bool customTap = (i == kAccentCustom);
+                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed &&
+                    (!sel || customTap)) {
+                    g_state.ui_accent_idx = i;
+                    g_input.touchConsumed = true;
+                    if (customTap)
+                        PopoverOpenColor(XS("Свой цвет"), &g_state.ui_accent_rgb);
+                    PlaySound(SND_CLICK);
+                }
+            }
+            ImGui::SetCursorScreenPos({pos.x, pos.y + rowH});
+            ImGui::Dummy({avW, 0.f});
+        }
 
         // ---- Худ: где стоит пилюля-счётчик игроков -----------------------
         // Тап по строке прячет меню и ждёт тап по экрану — туда встанет центр
@@ -1389,10 +1454,43 @@ void UpdateFreecam(float dt) {
     }
 }
 
+// Состояние -> тема (каждый кадр: дёшево, а палитра пишет цвет непрерывно,
+// пока её тянут) + сохранение с дебаунсом, чтобы не долбить файл.
+// Пресеты kAccentCols живут выше, перед TabContent: их же рисует секция
+// «Цвет интерфейса» на вкладке опций.
+static void SyncAccentToTheme() {
+    int idx = g_state.ui_accent_idx;
+    if (idx < 0 || idx > kAccentCustom) { idx = 0; g_state.ui_accent_idx = 0; }
+    if (idx == kAccentCustom) {
+        g_accent = g_state.ui_accent_rgb; g_accent.w = 1.f; g_accentOn = true;
+    } else if (idx == 0) {
+        g_accentOn = false;
+    } else {
+        g_accent = kAccentCols[idx]; g_accentOn = true;
+    }
+    const double now = ImGui::GetTime();
+    static double s_accChangedAt = -1e9;
+    static int    s_accSavedIdx = -999;
+    static ImVec4 s_accSavedRgb = {-1.f, -1.f, -1.f, -1.f};
+    const ImVec4& rgb = g_state.ui_accent_rgb;
+    const bool dirty = idx != s_accSavedIdx || rgb.x != s_accSavedRgb.x ||
+                       rgb.y != s_accSavedRgb.y || rgb.z != s_accSavedRgb.z;
+    if (!dirty) { s_accChangedAt = now; return; }
+    if (s_accSavedIdx == -999) {
+        // Первый кадр после запуска: перенимаем без записи.
+        s_accSavedIdx = idx; s_accSavedRgb = rgb; s_accChangedAt = now; return;
+    }
+    if (now - s_accChangedAt >= 0.5) {
+        RememberAccent();
+        s_accSavedIdx = idx; s_accSavedRgb = rgb;
+    }
+}
+
 void RenderMenu() {
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
     if (dt > 0.1f) dt = 0.1f;
+    SyncAccentToTheme();   // акцент палитры -> тема (и дебаунс-сохранение)
 
     if (g_menu_orient != displayInfo.orientation || g_menu_dw != (int)displayInfo.width || g_menu_dh != (int)displayInfo.height) {
         g_menu_orient = displayInfo.orientation;
@@ -2162,7 +2260,7 @@ void RenderMenu() {
         if (g_win.resizing) {
             const float pad = kResizePad, rr = R::Card + pad;
             float t = EaseInOut(g_themeT);
-            ImVec4 bc = {Lerpf(1.f, C::Dark::Acc.x, t), Lerpf(1.f, C::Dark::Acc.y, t), Lerpf(1.f, C::Dark::Acc.z, t), Lerpf(0.9f, 0.8f, t)};
+            ImVec4 bc = {Lerpf(1.f, C::AccDark().x, t), Lerpf(1.f, C::AccDark().y, t), Lerpf(1.f, C::AccDark().z, t), Lerpf(0.9f, 0.8f, t)};
             rdl->AddRect({wp.x - pad,       wp.y - pad},
                          {wp.x + g_win.w + pad, wp.y + g_win.h + pad},
                          C::U(bc), rr, 0, kResizeStroke);

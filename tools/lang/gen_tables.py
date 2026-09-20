@@ -5,15 +5,16 @@
     python3 tools/lang/gen_tables.py        # перезаписать lang_tables.inc
     python3 tools/lang/check.py             # проверить, что файл не разошёлся
 
-Русские строки — источник перевода: строка из XS("...") в main.cpp и подписи
-визуалов из game.cpp. Здесь же лежат их английские варианты. Подписи оружия не
+Русские строки — источник перевода: строки из XS("...") во всех исходниках
+интерфейса (menu/hud/widgets/aim/config) и подписи визуалов из game.cpp и
+game_markers.cpp. Здесь же лежат их английские варианты. Подписи оружия не
 пишутся руками: они берутся из таблицы самой игры (kWeaponNames в game.cpp,
 колонка `en` — то имя, которое игра пишет в своём UI), поэтому в оверлее оно
 такое же, как в игре. Для подписи, которой игра даёт несколько имён (например
-«Топор» — это и Axe, и Hatchet), выбор закреплён в kWeaponEnPick.
+«Топор» — это и Axe, и Hatchet), выбор закреплён в WEAPON_EN_PICK.
 
-Скрипт заодно проверяет полноту: если в main.cpp появилась строка с кириллицей
-без перевода — он не запишет файл, а скажет, какую строку добавить.
+Скрипт заодно проверяет полноту: если в исходниках появилась строка с кириллицей
+без перевода — он не запишет файл, а скажет файл и строку, которую добавить.
 """
 
 import io
@@ -22,9 +23,31 @@ import re
 import sys
 
 REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
-MAIN = os.path.join(REPO, 'jni/src/main.cpp')
 GAME = os.path.join(REPO, 'jni/src/game.cpp')
+MARKERS = os.path.join(REPO, 'jni/src/game_markers.cpp')
 OUT = os.path.join(REPO, 'jni/src/lang_tables.inc')
+
+
+def ui_sources():
+    """Исходники, где живёт XS(): весь jni/src и jni/include верхнего уровня.
+
+    Раньше сканировался один main.cpp, а XS() там нет вовсе — все 150+ строк
+    меню/виджетов/тостов проверку проходили молча, и непереведённое («Союзники»,
+    20.09) замечалось только на устройстве. Подкаталоги (third_party, ImGui)
+    не сканируются — нашего XS() там нет.
+    """
+    out = []
+    for d, exts in (('jni/src', ('.cpp', '.h')), ('jni/include', ('.h',))):
+        dd = os.path.join(REPO, d)
+        for f in sorted(os.listdir(dd)):
+            if f.endswith(exts):
+                out.append(os.path.join(dd, f))
+    return out
+
+
+# XS()/XS_RU() с русской строкой. `(?<!::)` вместо наивного `[\w:]`: тернарное
+# `:XS("Выкл")` — тоже перевод, а квалифицированного `::XS` у макроса не бывает.
+XS_RE = re.compile(r'(?<!::)(?<![\w])(?:XS|XS_RU)\("((?:[^"\\]|\\.)*)"\)')
 
 
 def strip_comments(src):
@@ -102,7 +125,7 @@ UI_EN = {
     # esp
     'Противники': 'Enemies', 'Игроки': 'Players', 'Боксы': 'Boxes',
     '3D боксы': '3D boxes', 'Ники': 'Nicknames', 'Дистанция': 'Distance',
-    'Линии': 'Lines', 'Скелеты': 'Skeletons', 'Свои': 'Teammates',
+    'Линии': 'Lines', 'Скелеты': 'Skeletons', 'Союзники': 'Teammates',
     'Линии и боксы': 'Lines and boxes', 'Толщина': 'Thickness',
     'Мир': 'World', 'Руда': 'Ore', 'Животные': 'Animals', 'Ящики': 'Crates',
     'Боты': 'Bots', 'Машины': 'Vehicles',
@@ -140,6 +163,7 @@ UI_EN = {
     'нет трансформа': 'no transform', 'массивы не читаются': 'arrays unreadable',
     '%.1f м': '%.1f m',
     'Язык': 'Language', 'Интерфейс': 'Interface', 'Тёмная тема': 'Dark theme',
+    'Цвет интерфейса': 'Interface color', 'Свой цвет': 'Custom color',
     'Панель вкладок': 'Tab bar', 'Слева': 'Left', 'Снизу': 'Bottom',
     'Панель слева': 'Panel on the left', 'Панель снизу': 'Panel at the bottom',
     'Система': 'System', 'Выйти?': 'Exit?', 'Выйти': 'Exit',
@@ -230,7 +254,6 @@ WEAPON_EN_PICK = {
 def build_text():
     """Текст lang_tables.inc. Бросает SystemExit, если что-то не переведено."""
     game = strip_comments(open(GAME, encoding='utf-8').read())
-    main_src = strip_comments(open(MAIN, encoding='utf-8').read())
 
     # --- оружие: имена берём из таблицы игры, колонка `en` -------------------
     visual = dict(VISUAL_EN)
@@ -248,25 +271,39 @@ def build_text():
         visual.setdefault(ru, pick)
 
     # --- полнота: ничего из кода не должно остаться без перевода -------------
-    xs = {m.group(1) for m in re.finditer(r'(?<![\w:])(?:XS|XS_RU)\("((?:[^"\\]|\\.)*)"\)', main_src)}
-    missing_ui = sorted(s for s in xs if has_cyr(s) and s not in UI_EN and s not in visual)
+    xs_by_file = {}
+    for path in ui_sources():
+        src = strip_comments(open(path, encoding='utf-8').read())
+        xs_by_file[path] = {m.group(1) for m in XS_RE.finditer(src)}
+    missing_ui = sorted((os.path.relpath(p, REPO), s)
+                        for p, xs in xs_by_file.items() for s in xs
+                        if has_cyr(s) and s not in UI_EN and s not in visual)
     if missing_ui:
         raise SystemExit('нет перевода для строк меню (добавь в UI_EN):\n    ' +
-                         '\n    '.join(missing_ui))
+                         '\n    '.join('%s: %s' % t for t in missing_ui))
 
-    game_lits = {m.group(1) for m in re.finditer(r'"((?:[^"\\]|\\.)*)"', game)
-                 if has_cyr(m.group(1))}
+    # Подписи визуалов живут в двух файлах: game.cpp (оружие, предметы) и
+    # game_markers.cpp (руда, животные, ящики, боты, машины). Файл запоминаем,
+    # чтобы ошибка указывала, куда смотреть.
+    game_lits = {}
+    log_lits = set()
+    for vpath in (GAME, MARKERS):
+        vsrc = game if vpath == GAME else strip_comments(open(vpath, encoding='utf-8').read())
+        for m in re.finditer(r'"((?:[^"\\]|\\.)*)"', vsrc):
+            if has_cyr(m.group(1)):
+                game_lits.setdefault(m.group(1), os.path.relpath(vpath, REPO))
     # Строки диагностики (LogLine/LogStage/...) в интерфейсе не показываются:
     # они уходят в лог-файл и пишутся по-русски всегда. Перевод им не нужен.
-    log_lits = {m.group(1) for m in re.finditer(
-        r'(?<![\w:])Log(?:Line|Stage|FrameBeat|Watchdog[A-Za-z]*)\(\s*"((?:[^"\\]|\\.)*)"', game)}
+    for m in re.finditer(
+        r'(?<![\w:])Log(?:Line|Stage|FrameBeat|Watchdog[A-Za-z]*)\(\s*"((?:[^"\\]|\\.)*)"', game):
+        log_lits.add(m.group(1))
     missing_vis = sorted(s for s in game_lits
                          if s not in visual and s not in UI_EN
                          and s not in log_lits
                          and '%' not in s and not s.startswith(('#', ' ')))
     if missing_vis:
         raise SystemExit('нет перевода для подписей визуалов (добавь в VISUAL_EN):\n    ' +
-                         '\n    '.join(missing_vis))
+                         '\n    '.join('%s: %s' % (game_lits[s], s) for s in missing_vis))
 
     buf = io.StringIO()
     w = buf.write

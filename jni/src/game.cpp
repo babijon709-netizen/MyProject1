@@ -584,6 +584,9 @@ static const WeaponName kWeaponNames[] = {
     {"spear",                 "Spear",               "Копьё"},
     {"fists",                 "Fists",               "Кулаки"},
     {"unarmed",               "Fists",               "Кулаки"},
+    // Пустые руки игра называет головой модели («MaleHead»).
+    {"malehead",              "Hand",                "Рука"},
+    {"femalehead",            "Hand",                "Рука"},
     // ---- Tools ----
     {"stonehatchet",          "Stone Hatchet",   "Каменный топор"},
     {"hatchet",               "Hatchet",         "Топор"},

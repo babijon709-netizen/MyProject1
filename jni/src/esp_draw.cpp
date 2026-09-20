@@ -6,6 +6,7 @@
 #include "process.h"           // g_esp_attached
 #include "ui_util.h"           // ColU32
 #include "game_offsets_active.h" // game_offsets::PLAYER_BOX_WIDTH_RATIO
+#include "lang.h"                // lang::visual: подпись оружия
 #include <cfloat>
 #include <cmath>
 
@@ -310,7 +311,11 @@ void DrawEspOverlay() {
                 belowY += PillH(label) + 4.f;
             }
             if (g_state.esp_weapon && box.has_weapon && box.weapon[0]) {
-                EspPill(cx, belowY, box.weapon, ColU32(cfg::esp::weapon_col));
+                // Короткие подписи из weapon_label_for_item_id («Дигл»,
+                // «Самопал», ...) русские всегда — перевод здесь, в единственной
+                // точке отрисовки. Английское и неизвестное lookup возвращает
+                // как есть, так что остальным путям это не вредит.
+                EspPill(cx, belowY, lang::visual(box.weapon), ColU32(cfg::esp::weapon_col));
                 belowY += PillH(box.weapon) + 4.f;
             }
         }

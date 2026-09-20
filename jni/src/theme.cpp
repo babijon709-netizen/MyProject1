@@ -3,6 +3,8 @@
 bool  g_darkTheme = true;
 float g_themeT    = 1.f;
 float g_menuFadeIn = 0.f;
+ImVec4 g_accent = {0.545f, 0.486f, 1.000f, 1};
+bool   g_accentOn = false;
 
 void ApplyTheme() {
     ImGui::GetIO().ConfigDebugHighlightIdConflicts = false;

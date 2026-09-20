@@ -103,6 +103,31 @@ void RestoreBuild() {
     if (!v.empty() && v[0] == 'b') go::SelectBuild(go::Build::Beta);
 }
 
+// Акцент интерфейса — рядом с конфигами отдельным файлом (.accent), как язык:
+// стиль GUI глобален, а не часть профиля. Формат: индекс пресета (0..8,
+// 8 = свой цвет) и его RGB — пишутся всегда парой, читаются с клампом.
+static std::string CfgAccentPath() {
+    return std::string(kCfgDir) + ".accent";
+}
+
+void RememberAccent() {
+    mkdir(kCfgDir, 0777);
+    std::ofstream f(CfgAccentPath(), std::ios::trunc);
+    if (f) f << g_state.ui_accent_idx << ' ' << g_state.ui_accent_rgb.x << ' '
+             << g_state.ui_accent_rgb.y << ' ' << g_state.ui_accent_rgb.z;
+}
+
+void RestoreAccent() {
+    std::ifstream f(CfgAccentPath());
+    if (!f) return;
+    int idx = 0; float r = 0.545f, g = 0.486f, b = 1.0f;
+    if (!(f >> idx >> r >> g >> b)) return;
+    if (idx < 0 || idx > 8) idx = 0;
+    auto cl = [](float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); };
+    g_state.ui_accent_idx = idx;
+    g_state.ui_accent_rgb = {cl(r), cl(g), cl(b), 1.0f};
+}
+
 // Применить выбор версии: подставить оффсеты выбранного клиента и, если версия
 // реально сменилась, переподключиться. Всё, что было вычитано по прежней
 // раскладке (классы, инстансы, кеши игроков), после смены недействительно —

@@ -76,6 +76,7 @@ int main(int argc, char* argv[]) {
     ApplyTheme();
     RestoreLang();          // язык из прошлого запуска (конфиг ниже может его переписать)
     RestoreBuild();         // версия игры из прошлого запуска — до привязки к процессу
+    RestoreAccent();        // акцент интерфейса из прошлого запуска
     CfgScanDir();
     ConfigLoadLast();
     ApplyTheme();

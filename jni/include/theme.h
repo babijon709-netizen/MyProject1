@@ -19,6 +19,10 @@ namespace R {
 extern bool  g_darkTheme;
 extern float g_themeT;
 extern float g_menuFadeIn;
+// Акцент на выбор пользователя (палитра в «Опциях»): включён — весь GUI
+// красится им вместо фиолетового; выключен — классический Light/Dark.
+extern ImVec4 g_accent;
+extern bool   g_accentOn;
 
 namespace C {
     // "Graphite & Violet": спокойный графитовый фон + фиолетовый акцент.
@@ -57,8 +61,11 @@ namespace C {
     static inline ImVec4 Bg()     { return Lerp4(Light::Bg,     Dark::Bg);     }
     static inline ImVec4 LeftBg() { return Lerp4(Light::LeftBg, Dark::LeftBg); }
     static inline ImVec4 Card()   { return Lerp4(Light::Card,   Dark::Card);   }
-    static inline ImVec4 Acc()    { return Lerp4(Light::Acc,    Dark::Acc);    }
-    static inline ImVec4 AccDk()  { return Lerp4(Light::AccDk,  Dark::AccDk);  }
+    static inline ImVec4 AccLight() { return g_accentOn ? g_accent : Light::Acc; }
+    static inline ImVec4 AccDark()  { return g_accentOn ? g_accent : Dark::Acc; }
+    static inline ImVec4 AccDkOf(ImVec4 v) { return {v.x*0.78f, v.y*0.78f, v.z*0.82f, 1.f}; }
+    static inline ImVec4 Acc()    { return Lerp4(AccLight(), AccDark()); }
+    static inline ImVec4 AccDk()  { return g_accentOn ? AccDkOf(g_accent) : Lerp4(Light::AccDk, Dark::AccDk); }
     static inline ImVec4 Red()    { return Lerp4(Light::Red,    Dark::Red);    }
     static inline ImVec4 Txt()    { return Lerp4(Light::Txt,    Dark::Txt);    }
     static inline ImVec4 Dim()    { return Lerp4(Light::Dim,    Dark::Dim);    }
