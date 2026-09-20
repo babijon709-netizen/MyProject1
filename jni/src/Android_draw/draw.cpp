@@ -211,6 +211,30 @@ bool init_egl(uint32_t _screen_x, uint32_t _screen_y, bool log) {
 }
 
 void screen_config() {
+    // Метрики дисплея — это 2-3 синхронные binder-транзакции в
+    // SurfaceFlinger. Раньше дёргалось КАЖДЫЙ КАДР — и под нагрузкой binder
+    // вставал на 200-600 мс: ожидание без cpu и без наших syscall (вскрытие
+    // 08:10: esp 200-680 при cpu 3-5 и шторме 0 — спал main в drawBegin).
+    // Метрики меняются только на повороте/ресайзе: следим за дешёвым размером
+    // окна (клиентский кэш ANativeWindow, без IPC) и переспрашиваем binder,
+    // только когда он двинулся; остальное ловит фоновое обновление ниже.
+    if (::native_window) {
+        static int s_w = -1, s_h = -1;
+        const int qw = ANativeWindow_getWidth(::native_window);
+        const int qh = ANativeWindow_getHeight(::native_window);
+        if (qw > 0 && qh > 0 && qw == s_w && qh == s_h) return;
+        s_w = qw; s_h = qh;
+    }
+    displayInfo = anwc::ANativeWindowCreator::GetDisplayInfo();
+}
+
+// Принудительное обновление метрик — для фонового потока (раз в ~1.5 с из
+// потока привязки): binder там может стоять сколько угодно, main не задет.
+// Ловит то, что размер окна не видит (поворот на 180°, смена дисплея, окно
+// фиксированного размера). Пишет в displayInfo параллельно с main: поля
+// int-размера, атомарны сами по себе; кадр со смешанными старой/новой
+// метриками раз на поворот незаметен.
+void screen_config_refresh() {
     displayInfo = anwc::ANativeWindowCreator::GetDisplayInfo();
 }
 

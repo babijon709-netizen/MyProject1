@@ -38,6 +38,7 @@ bool init_egl(uint32_t _screen_x, uint32_t _screen_y, bool log = false);
 bool initGUI_draw(uint32_t _screen_x, uint32_t _screen_y, bool log = false);
 bool ImGui_init();
 void screen_config();
+void screen_config_refresh();
 void drawBegin();
 void drawEnd();
 void shutdown();
