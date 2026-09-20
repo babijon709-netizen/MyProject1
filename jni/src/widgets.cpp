@@ -116,19 +116,6 @@ static ImVec4* g_colP = nullptr;
 static bool    g_palSelReset = false;
 
 
-static const ImVec4 kColorPalette[] = {
-    {1.00f, 0.20f, 0.20f, 1.f}, {1.00f, 0.50f, 0.50f, 1.f}, {0.80f, 0.05f, 0.05f, 1.f},
-    {1.00f, 0.60f, 0.10f, 1.f}, {1.00f, 0.75f, 0.30f, 1.f}, {0.90f, 0.40f, 0.00f, 1.f},
-    {1.00f, 0.95f, 0.10f, 1.f}, {1.00f, 0.85f, 0.50f, 1.f}, {0.85f, 0.75f, 0.00f, 1.f},
-    {0.20f, 0.85f, 0.35f, 1.f}, {0.50f, 1.00f, 0.50f, 1.f}, {0.05f, 0.55f, 0.15f, 1.f},
-    {0.10f, 0.90f, 0.90f, 1.f}, {0.40f, 0.85f, 1.00f, 1.f}, {0.00f, 0.60f, 0.70f, 1.f},
-    {0.10f, 0.50f, 1.00f, 1.f}, {0.50f, 0.70f, 1.00f, 1.f}, {0.00f, 0.25f, 0.75f, 1.f},
-    {0.65f, 0.20f, 1.00f, 1.f}, {0.80f, 0.55f, 1.00f, 1.f}, {0.45f, 0.05f, 0.70f, 1.f},
-    {1.00f, 0.30f, 0.80f, 1.f}, {1.00f, 0.60f, 0.90f, 1.f}, {0.80f, 0.05f, 0.50f, 1.f},
-    {1.00f, 1.00f, 1.00f, 1.f}, {0.70f, 0.70f, 0.70f, 1.f}, {0.35f, 0.35f, 0.35f, 1.f},
-    {0.12f, 0.12f, 0.12f, 1.f},
-};
-static constexpr int kPaletteCount = (int)(sizeof(kColorPalette)/sizeof(kColorPalette[0]));
 
 void PopoverOpenColor(const char* title, ImVec4* cp) {
     if (g_pop.visible) return;
@@ -1060,7 +1047,6 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
         float prevY = workTop;
         float svY = prevY + prevH + gap;
         float hueY = svY + svSide + gap;
-        float gridTop = hueY + hueH + gap;
 
         // Preview
         {
@@ -1122,97 +1108,7 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
             }
         }
 
-        const int   COLS     = 7;
-        const float CELL_GAP = 8.f;
-        int   ROWS   = (kPaletteCount + COLS - 1) / COLS;
-        float availH = bY - gridTop - 8.f;
-        float cellW = (W - CELL_GAP * (COLS - 1)) / (float)COLS;
-        float cellH = (availH - CELL_GAP * (ROWS - 1)) / (float)ROWS;
-        float cellSz = cellW < cellH ? cellW : cellH;
-        if (cellSz < 22.f) cellSz = 22.f;
-        float gridW  = COLS * cellSz + (COLS - 1) * CELL_GAP;
-        float gridH  = ROWS * cellSz + (ROWS - 1) * CELL_GAP;
-        float gridX  = X + (W - gridW) * 0.5f;
-        float gridY  = gridTop;
-        if (gridY + gridH > bY - 8.f) gridY = bY - 8.f - gridH;
-        if (gridY < contentY + 8.f) gridY = contentY + 8.f;
-        fg->PushClipRect({sX + 8.f, contentY}, {sX + sW - 8.f, bY - 6.f}, true);
-
-        const float CELL_R = 10.f;
-
-        static int   s_palSel  = -1;
-        static float s_selOffX = 0.f, s_selOffY = 0.f;
-        static float s_selVelX = 0.f, s_selVelY = 0.f;
-        static float s_selSz   = 0.f, s_selVelSz = 0.f;
-        if (g_colP) {
-            float bestDist = 1e9f;
-            int   bestIdx  = -1;
-            for (int pi = 0; pi < kPaletteCount; pi++) {
-                float dr = kColorPalette[pi].x - g_colP->x;
-                float dg = kColorPalette[pi].y - g_colP->y;
-                float db = kColorPalette[pi].z - g_colP->z;
-                float d  = dr*dr + dg*dg + db*db;
-                if (d < bestDist) { bestDist = d; bestIdx = pi; }
-            }
-            if (bestDist < 0.02f) s_palSel = bestIdx; else s_palSel = -1;
-        }
-
-        auto cellCenter = [&](int pi) -> ImVec2 {
-            int r = pi / COLS, c = pi % COLS;
-            return { c * (cellSz + CELL_GAP) + cellSz * 0.5f,
-                     r * (cellSz + CELL_GAP) + cellSz * 0.5f };
-        };
-
-        if (s_palSel >= 0) {
-            ImVec2 tc = cellCenter(s_palSel);
-            if (s_selSz < 0.001f || g_palSelReset) {
-                s_selOffX = tc.x; s_selOffY = tc.y;
-                s_selVelX = 0.f;  s_selVelY = 0.f;
-                if (g_palSelReset) { s_selSz = 1.f; s_selVelSz = 0.f; }
-            }
-            SpringTick(s_selOffX, s_selVelX, tc.x, dt);
-            SpringTick(s_selOffY, s_selVelY, tc.y, dt);
-            SpringTick(s_selSz, s_selVelSz, 1.f, dt);
-        } else {
-            SpringTick(s_selSz, s_selVelSz, 0.f, dt);
-        }
         g_palSelReset = false;
-
-        for (int pi = 0; pi < kPaletteCount; pi++) {
-            int row = pi / COLS, col = pi % COLS;
-            float cx0 = gridX + col * (cellSz + CELL_GAP);
-            float cy0 = gridY + row * (cellSz + CELL_GAP);
-            float cx1 = cx0 + cellSz, cy1 = cy0 + cellSz;
-
-            ImVec4 cv = kColorPalette[pi];
-            ImU32  fill = IM_COL32(int(cv.x*255), int(cv.y*255), int(cv.z*255), 255);
-
-            fg->AddRectFilled({cx0+1.5f, cy0+1.5f}, {cx1+1.5f, cy1+1.5f},
-                IM_COL32(0,0,0, int(18*easeT)), CELL_R);
-            fg->AddRectFilled({cx0, cy0}, {cx1, cy1}, fill, CELL_R);
-
-            if (!g_pop.closing && io.MouseReleased[0]) {
-                ImVec2 mp = io.MousePos, cp = io.MouseClickedPos[0];
-                bool hit = mp.x >= cx0 && mp.x <= cx1 && mp.y >= cy0 && mp.y <= cy1
-                        && cp.x >= cx0 && cp.x <= cx1 && cp.y >= cy0 && cp.y <= cy1;
-                if (hit) {
-                    *g_colP = kColorPalette[pi];
-                    ImGui::ColorConvertRGBtoHSV(g_colP->x, g_colP->y, g_colP->z, s_h, s_s, s_v);
-                    s_palSel = pi;
-                    g_input.touchConsumed = true;
-                }
-            }
-        }
-
-        if (s_selSz > 0.001f) {
-            float ax = gridX + s_selOffX, ay = gridY + s_selOffY;
-            float r = (cellSz * 0.5f + 5.f) * s_selSz;
-            fg->AddRect({ax - r, ay - r}, {ax + r, ay + r},
-                IM_COL32(0,0,0, int(220*easeT*s_selSz)), CELL_R + 5.f * s_selSz, 0, 4.f);
-            fg->AddRect({ax - r + 2.5f, ay - r + 2.5f}, {ax + r - 2.5f, ay + r - 2.5f},
-                IM_COL32(255,255,255, int(255*easeT*s_selSz)), CELL_R + 2.5f * s_selSz, 0, 1.5f);
-        }
-        fg->PopClipRect();
 
         fg->AddRectFilled({X, bY}, {X+W, bY+btnH}, C::UA(C::Acc(), easeT), R::Btn);
         auto bsz = fn->CalcTextSizeA(fs*1.2f, FLT_MAX, 0, XS("Готово"));
