@@ -5367,8 +5367,24 @@ static constexpr float kPosJumpSameSpot      = 1.5F;  // «тот же» под�
 
 // Возвращает false, когда бокс в этом кадре рисовать не надо. pos — вход
 // (сырое чтение, при read_ok) и выход (то, что рисуем).
-static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos) {
+static double s_filt_sec = -1e9;
+static int s_filt_susp = 0, s_filt_conf = 0;
+static uint64_t s_filt_last = 0;
+static float s_filt_last_d = 0.0F;
+
+static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos, uint64_t player) {
     const double now = mono_seconds();
+    // Наблюдение (на решения не влияет): сколько рваных отсчётов в секунду и
+    // сколько из них подтвердилось как настоящий скачок. Строка — не чаще раза
+    // в секунду и только когда было что считать.
+    if (now - s_filt_sec >= 1.0) {
+        s_filt_sec = now;
+        if (s_filt_susp + s_filt_conf > 0) {
+            LogLine("визуал: фильтр позиций за секунду: подозрений %d, подтверждений %d (последний 0x%llx на %.1fм)",
+                    s_filt_susp, s_filt_conf, (unsigned long long)s_filt_last, (double)s_filt_last_d);
+            s_filt_susp = 0; s_filt_conf = 0;
+        }
+    }
 
     if (!track.has_drawn) {
         if (!read_ok) return false;
@@ -5408,6 +5424,7 @@ static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos) 
         return true;
     }
 
+    ++s_filt_susp;   // рваный отсчёт (подтвердится ли — см. ниже)
     // Скачок за пределы правдоподобия. Один и тот же отсчёт подряд — похоже на
     // настоящий телепорт, принимаем; каждый кадр разный — это мусор, остаёмся
     // на последней хорошей позиции.
@@ -5426,6 +5443,7 @@ static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos) 
         // Скорость через телепорт не измеряется — сбрасываем, иначе упреждение
         // будет на пару кадров смотреть в старую сторону.
         track.vel = {}; track.have_vel_ref = false;
+        ++s_filt_conf; s_filt_last = player; s_filt_last_d = dev;   // скачок подтверждён
         return true;
     }
     pos = predicted;
@@ -6838,6 +6856,136 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
     }
 }
 
+
+// ---- Наблюдатель мерцаний визуалов (только фиксирует, ничего не меняет) ----
+// Бокс, нарисованный в прошлом кадре и пропущенный в этом (или наоборот),
+// записывается одной строкой: адрес, причина пропуска, дельта отказов чтения
+// за кадр, смена локального. Так видно, ГДЕ именно пропадает бокс: фильтр
+// позиции, дедупликация, проецирование, смена локального или рваное чтение.
+// Бюджет — 4 строки в секунду, остальное считается молча.
+static std::unordered_map<uint64_t, int> s_watch_gap;   // addr -> кадров с прошлого бокса
+static std::vector<uint64_t> s_watch_pop;
+static uint64_t s_watch_local_addr = 0;
+static unsigned long long s_watch_fails = 0;
+static double s_watch_sec = -1e9;
+static int s_watch_budget = 0;
+static int s_watch_hidden = 0;
+
+static bool watch_allow() {
+    const double now = memio::now_seconds();
+    if (now - s_watch_sec >= 1.0) {
+        s_watch_sec = now;
+        s_watch_budget = 4;
+        if (s_watch_hidden > 0) {
+            LogLine("визуал: ...и ещё %d событий скрыто бюджетом", s_watch_hidden);
+            s_watch_hidden = 0;
+            --s_watch_budget;
+        }
+    }
+    if (s_watch_budget <= 0) { ++s_watch_hidden; return false; }
+    --s_watch_budget;
+    return true;
+}
+
+// tag: 0 = главный путь (боксы строились), иначе номер раннего выхода.
+static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
+                        const std::vector<char>* skip, int tag) {
+    const unsigned long long fails = g_mem.read_fails_total();
+    const unsigned long long fails_delta = fails - s_watch_fails;
+    s_watch_fails = fails;
+
+    // Популяция: кто добавился/ушёл.
+    {
+        int added = 0, gone = 0;
+        uint64_t added_first = 0, gone_first = 0;
+        for (uint64_t p : g_frame_transforms) {
+            bool had = false;
+            for (uint64_t q : s_watch_pop) if (q == p) { had = true; break; }
+            if (!had) { ++added; if (!added_first) added_first = p; }
+        }
+        for (uint64_t q : s_watch_pop) {
+            bool has = false;
+            for (uint64_t p : g_frame_transforms) if (p == q) { has = true; break; }
+            if (!has) { ++gone; if (!gone_first) gone_first = q; }
+        }
+        s_watch_pop = g_frame_transforms;
+        if ((added || gone) && watch_allow())
+            LogLine("визуал: состав %u: +%d -%d (первый +0x%llx -0x%llx)",
+                    (unsigned)g_frame_transforms.size(), added, gone,
+                    (unsigned long long)added_first, (unsigned long long)gone_first);
+    }
+
+    // Локальный: смена адреса.
+    bool local_flipped = false;
+    {
+        uint64_t addr = 0;
+        if (local_index < g_frame_transforms.size()) addr = g_frame_transforms[local_index];
+        if (addr != s_watch_local_addr) {
+            if (s_watch_local_addr && addr) {
+                local_flipped = true;
+                if (watch_allow())
+                    LogLine("визуал: локальный сменился 0x%llx -> 0x%llx",
+                            (unsigned long long)s_watch_local_addr, (unsigned long long)addr);
+            }
+            s_watch_local_addr = addr;
+        }
+    }
+
+    // Нарисованные в этом кадре (боты — не игроки, их пропускаем).
+    std::vector<uint64_t> drawn_now;
+    drawn_now.reserve(result.size());
+    for (const EspBox& box : result) {
+        if (box.is_bot) continue;
+        drawn_now.push_back(box.id);
+        auto it = s_watch_gap.find(box.id);
+        if (it != s_watch_gap.end() && it->second > 0 && watch_allow())
+            LogLine("визуал: бокс 0x%llx ВЕРНУЛСЯ через %d кадр(а), отказов чтения за кадр %llu%s",
+                    (unsigned long long)box.id, it->second,
+                    fails_delta, local_flipped ? ", локальный сменился" : "");
+    }
+
+    // Пропущенные в этом кадре (только главный путь; gap 0 = был в прошлом).
+    if (skip && tag == 0) {
+        for (size_t i = 0; i < skip->size() && i < g_frame_transforms.size(); ++i) {
+            const char reason = (*skip)[i];
+            if (!reason) continue;
+            const uint64_t player = g_frame_transforms[i];
+            auto it = s_watch_gap.find(player);
+            if (it == s_watch_gap.end() || it->second != 0) continue;
+            if (!watch_allow()) continue;
+            const char* why = "?";
+            switch (reason) {
+                case 'L': why = "стал локальным"; break;
+                case 'Z': why = "нулевой адрес"; break;
+                case 'S': why = "задавлен дубликатом"; break;
+                case 'P': why = "фильтр позиции"; break;
+                case 'D': why = "дистанция"; break;
+                case 'B': why = "низ не спроецировался"; break;
+                case 'T': why = "верх не спроецировался"; break;
+                case 'H': why = "высота < 2px"; break;
+            }
+            LogLine("визуал: бокс 0x%llx ПРОПАЛ: %s, отказов чтения за кадр %llu%s",
+                    (unsigned long long)player, why,
+                    fails_delta, local_flipped ? ", локальный сменился" : "");
+        }
+    }
+
+    // Ранний выход: боксов нет вообще.
+    if (tag != 0) {
+        bool had = false;
+        for (const auto& kv : s_watch_gap) if (kv.second == 0) { had = true; break; }
+        if (had && watch_allow())
+            LogLine("визуал: кадр БЕЗ боксов (выход %d), отказов чтения за кадр %llu", tag, fails_delta);
+    }
+
+    // Состарить счётчики, отметить нарисованные, прибрать протухшие.
+    for (auto& kv : s_watch_gap) ++kv.second;
+    for (uint64_t id : drawn_now) s_watch_gap[id] = 0;
+    for (auto it = s_watch_gap.begin(); it != s_watch_gap.end();) {
+        if (it->second > 600) it = s_watch_gap.erase(it); else ++it;
+    }
+}
+
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
 
@@ -6949,7 +7097,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // still need this frame's camera + local position.
         publish_camera_only_frame(sw, sh);
         append_bot_boxes(result); // боты — и без игроков
-        return result;
+        watch_boxes(result, (size_t)-1, nullptr, 1); return result;
     }
 
     if (g_body_caches_dirty) { g_body_caches_dirty = false; g_player_aux.clear(); g_skeletons.clear(); }
@@ -6969,7 +7117,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // они гаснут вместе с боксами на все секунды ожидания.
             publish_camera_only_frame(sw, sh);
             append_bot_boxes(result);
-            return result;
+            watch_boxes(result, (size_t)-1, nullptr, 2); return result;
         }
     } else {
         recheck_direct_player_position(s_transforms);
@@ -6986,23 +7134,23 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
         if (!managed_cam) {
-            return result;
+            watch_boxes(result, (size_t)-1, nullptr, 3); return result;
         }
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
         if (!native_cam) {
-            return result;
+            watch_boxes(result, (size_t)-1, nullptr, 4); return result;
         }
         xray_apply(native_cam);
         always_day_tick();
         // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
-            return result;
+            watch_boxes(result, (size_t)-1, nullptr, 5); return result;
         }
         if (!g_matrix_configuration_validated) {
             if (!optimize_matrix_configuration(native_cam, s_transforms)) {
-                return result;
+                watch_boxes(result, (size_t)-1, nullptr, 6); return result;
             }
-            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) return result;
+            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) { watch_boxes(result, (size_t)-1, nullptr, 7); return result; }
         }
         // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
         vp = mat_mul(projection, view);
@@ -7015,6 +7163,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // must see exactly the same values the local player was picked with.
     std::vector<Vec3> positions(s_transforms.size());
     std::vector<char> position_ok(s_transforms.size(), 0);
+    std::vector<char> skip_reason(s_transforms.size(), 0); // наблюдатель мерцаний: код пропуска
 
     {
         Vec3 camera_position{};
@@ -7032,7 +7181,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // Один сбой чтения или один мусорный кадр больше не гасят и не
             // дёргают бокс — см. filter_player_position.
             PlayerTrack& filter = g_player_track[s_transforms[index]];
-            if (!filter_player_position(filter, read_ok, candidate)) continue;
+            if (!filter_player_position(filter, read_ok, candidate, s_transforms[index])) continue;
             apply_mounted_position(s_transforms[index], candidate);
             positions[index] = candidate;
             position_ok[index] = 1;
@@ -7076,7 +7225,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 g_frame_watchdog_resets = 0;
             }
             append_bot_boxes(result);
-            return result;
+            watch_boxes(result, (size_t)-1, nullptr, 8); return result;
         }
         g_local_position_fail_streak = 0;
     }
@@ -7117,7 +7266,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (transform_camera_mode) {
         if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation)) {
             g_player_position_validated = false;
-            return result;
+            watch_boxes(result, (size_t)-1, nullptr, 9); return result;
         }
         local = transform_camera_position; has_local_position = true;
     }
@@ -7202,17 +7351,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     for (size_t i = 0; i < s_transforms.size(); ++i) {
-        if (i == local_entity_index) continue;
-        if (!s_transforms[i]) continue;
-        if (suppressed[i]) continue;
-        if (!position_ok[i]) continue;
+        if (i == local_entity_index) { skip_reason[i] = 'L'; continue; }
+        if (!s_transforms[i]) { skip_reason[i] = 'Z'; continue; }
+        if (suppressed[i]) { skip_reason[i] = 'S'; continue; }
+        if (!position_ok[i]) { skip_reason[i] = 'P'; continue; }
         Vec3 feet = positions[i];
 
         float distance = -1.0F;
         if (has_local_position) {
             float dx = feet.x - local.x, dy = feet.y - local.y, dz = feet.z - local.z;
             distance = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) continue;
+            if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) { skip_reason[i] = 'D'; continue; }
         }
 
         // Counted before any screen-space checks: the pill counter must see
@@ -7233,14 +7382,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         bool bottom_visible = transform_camera_mode
             ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_bottom, sw, sh, sf, false)
             : w2s(vp, body_bottom, sw, sh, sf, false);
-        if (!bottom_visible) continue;
+        if (!bottom_visible) { skip_reason[i] = 'B'; continue; }
         bool top_visible = transform_camera_mode
             ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_top, sw, sh, sh2, false)
             : w2s(vp, body_top, sw, sh, sh2, false);
-        if (!top_visible) continue;
+        if (!top_visible) { skip_reason[i] = 'T'; continue; }
 
         float height = fabsf(sh2.y - sf.y);
-        if (!std::isfinite(height) || height < 2.0F) continue;
+        if (!std::isfinite(height) || height < 2.0F) { skip_reason[i] = 'H'; continue; }
         float cx = (sf.x + sh2.x) * 0.5F;
         float cy = (sf.y + sh2.y) * 0.5F;
         float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
@@ -7532,7 +7681,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     append_bot_boxes(result);
-    return result;
+    watch_boxes(result, local_entity_index, &skip_reason, 0); return result;
 }
 
 int esp_nearby_player_count() { return g_frame_player_count; }

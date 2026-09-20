@@ -138,6 +138,32 @@ int main(int argc, char* argv[]) {
                     slowT[1] - slowT[0], slowT[2] - slowT[1], slowT[3] - slowT[2],
                     slowT[4] - slowT[3], slowT[5] - slowT[4], slowT[6] - slowT[5]);
         }
+        // Гистограмма кадров раз в секунду: ловит МИКРОтормоза (<100мс), ниже
+        // порога «тормоза». Чистое наблюдение: на кадр не влияет.
+        {
+            static unsigned hist[5] = {};
+            static double worst = 0.0, worstSplit[7] = {};
+            static unsigned long worstFrame = 0;
+            static double lastHist = -1e9;
+            const double total = slowT[6] - slowT[0];
+            hist[total < 20.0 ? 0 : total < 34.0 ? 1 : total < 50.0 ? 2 : total < 100.0 ? 3 : 4]++;
+            if (total > worst) {
+                worst = total; worstFrame = frame;
+                for (int k = 0; k < 7; ++k) worstSplit[k] = slowT[k];
+            }
+            const double nowSec = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (nowSec - lastHist >= 1.0) {
+                lastHist = nowSec;
+                LogLine("кадргист: %u/%u/%u/%u/%u (<20/<34/<50/<100/>=100мс), худший %lu %.0fмс (esp %.0f аим %.0f фарм %.0f меню %.0f фри %.0f своп %.0f)",
+                        hist[0], hist[1], hist[2], hist[3], hist[4], worstFrame, worst,
+                        worstSplit[1] - worstSplit[0], worstSplit[2] - worstSplit[1],
+                        worstSplit[3] - worstSplit[2], worstSplit[4] - worstSplit[3],
+                        worstSplit[5] - worstSplit[4], worstSplit[6] - worstSplit[5]);
+                hist[0] = hist[1] = hist[2] = hist[3] = hist[4] = 0;
+                worst = 0.0; worstFrame = 0;
+            }
+        }
         g_frame_done.store(true);
     }
     LogClose();
