@@ -1553,7 +1553,9 @@ void RenderMenu() {
     bool anyOverlayVisible = g_sheet.visible || g_pop.visible;
     if (!io.MouseDown[0] && !anyOverlayVisible) g_input.touchConsumed = false;
 
-    DrawWatermark(dt);
+    // Пока версия не выбрана — только окно выбора: вотермарка и счётчик
+    // появляются после (g_buildPrompt снимается тапом по версии ниже).
+    if (!g_buildPrompt) DrawWatermark(dt);
     DrawToast(dt);
 
     // ---- Выбор версии игры (окно при запуске) -------------------------------
