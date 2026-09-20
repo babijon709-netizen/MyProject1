@@ -258,7 +258,7 @@ void DrawWatermark(float dt) {
         float tY = bY + (bH - cSz.y) * 0.5f;
         float lX = bX + pad + dotR * 2.f + 12.f;
         fg->AddText(fn, fs, {lX, tY}, C::UA(C::Txt(), 0.85f), lbl);
-        fg->AddText(fn, fs, {lX + lSz.x + 14.f, tY}, C::U(acc), cntBuf);
+        fg->AddText(fn, fs, {lX + lSz.x + 14.f, tY}, C::UA(C::Txt(), 0.85f), cntBuf);
     }
 
     // ---- Кнопка фрикама: квадрат со скруглениями и глазом ----------------

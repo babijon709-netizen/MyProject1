@@ -134,9 +134,6 @@ float TabContent(int tab, float dt, float cW) {
                     g_state.aim_mode = mode;
                     LogLine("аим: выбран режим %d (%s), аим %s", mode, lbl,
                             g_state.aim_touch ? "включён" : "выключен");
-                    char b[160];
-                    snprintf(b, sizeof(b), XS("%s|%s"), XS("Режим"), lbl);
-                    ShowToast(b);
                     PlaySound(SND_CLICK);
                     g_input.touchConsumed = true;
                 }

@@ -67,8 +67,7 @@ static const LangPair kUiEn[] = {
     {"Линии", "Lines"},
     {"Линии и боксы", "Lines and boxes"},
     {"Машины", "Vehicles"},
-    {"Мемори-аим: камера не отвечает", "Memory aim: camera not responding"},
-    {"Мемори-аим: не найден MouseLook", "Memory aim: MouseLook not found"},
+
     {"Меню", "Menu"},
     {"Метка фарма", "Farm marker"},
     {"Мир", "World"},
@@ -100,7 +99,7 @@ static const LangPair kUiEn[] = {
     {"Сбросить зоны", "Reset zones"},
     {"Сбросить положение", "Reset position"},
     {"Сбросить точку", "Reset point"},
-    {"Свайп — обзор", "Swipe to look"},
+
     {"Свой цвет", "Custom color"},
     {"Система", "System"},
     {"Скелеты", "Skeletons"},
@@ -140,7 +139,7 @@ static const LangPair kUiEn[] = {
     {"Функции", "Features"},
     {"Худ", "HUD"},
     {"Цвет интерфейса", "Interface color"},
-    {"Цвет счётчика", "Counter color"},
+
     {"Цвета руды", "Ore colors"},
     {"Что добывать", "What to farm"},
     {"Шея", "Neck"},
@@ -332,7 +331,7 @@ static const LangPair kVisualEn[] = {
     {"Шипованная дубина", "Wooden Spiked Club"},
     {"Шлем", "Helmet"},
     {"Шоколад", "Chocolate"},
-    {"Шприц", "Syringe"},
+    {"Шприц", "Syringe"},�", "Syringe"},
     {"Электроника", "Tech Trash"},
     {"Элитный ящик", "Elite Crate"},
     {"Яблоко", "Apple"},
