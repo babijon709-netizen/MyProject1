@@ -122,9 +122,7 @@ float TabContent(int tab, float dt, float cW) {
             auto* fn = ImGui::GetFont();
             const float fs = ImGui::GetFontSize();
             const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-            const bool touchMode = (g_state.aim_mode == AIM_MODE_TOUCH);
-            // Тачу состояние показывать нечего: у него нет записи в память.
-            CardBg(rowH * (touchMode ? 2.f : 3.f));
+            CardBg(rowH * 2.f);
 
             auto modeRow = [&](const char* id, const char* lbl, int mode, bool last, float& anim) {
                 auto pos = ImGui::GetCursorScreenPos();
@@ -152,28 +150,8 @@ float TabContent(int tab, float dt, float cW) {
                     dl->AddLine({cX + padX, pos.y + rowH - 0.5f},
                                 {cX + cW - padX, pos.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
             };
-            modeRow("##am0", XS("Тач"),    AIM_MODE_TOUCH,  false,     g_state.a_aim_mode0);
-            modeRow("##am1", XS("Память"), AIM_MODE_MEMORY, touchMode, g_state.a_aim_mode1);
-
-            // Состояние записи в память. Без него на устройстве не отличить
-            // «объект не нашёлся» от «пишем, но игра перезаписывает поле
-            // раньше, чем читает» — снаружи оба выглядят как «аим не ведёт».
-            if (!touchMode) {
-                auto pos = ImGui::GetCursorScreenPos();
-                const float cX = pos.x + inset, cW = avW - inset * 2.f;
-                const float cy = pos.y + rowH * 0.5f;
-                ImGui::InvisibleButton("##amst", {avW, rowH});
-                const AimMemDiag& d = AimMemoryDiag();
-                char val[32];
-                if (!d.params)          snprintf(val, sizeof(val), "%s", XS("нет объекта"));
-                else if (!d.responded)  snprintf(val, sizeof(val), "%s", XS("нет отклика"));
-                else                    snprintf(val, sizeof(val), "%s", XS("ведёт"));
-                auto vsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, val);
-                dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f},
-                            C::UA(C::Txt(), 1.f), XS("Состояние"));
-                dl->AddText(fn, fs, {cX + cW - padX - vsz.x, cy - vsz.y * 0.5f},
-                            C::UA(C::Acc(), 1.f), val);
-            }
+            modeRow("##am0", XS("Тач"),    AIM_MODE_TOUCH,  false, g_state.a_aim_mode0);
+            modeRow("##am1", XS("Память"), AIM_MODE_MEMORY, true,  g_state.a_aim_mode1);
         }
 
         SHdr(XS("Куда целиться"));
@@ -761,7 +739,7 @@ float TabContent(int tab, float dt, float cW) {
             const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
             const bool posSet = (g_state.hud_cnt_x >= 0.f);
 
-            CardBg(rowH * (posSet ? 3.f : 2.f));
+            CardBg(rowH * (posSet ? 2.f : 1.f));
 
             auto pos = ImGui::GetCursorScreenPos();
             {
@@ -810,7 +788,6 @@ float TabContent(int tab, float dt, float cW) {
                             {cX + (cW - rsz.x) * 0.5f, rpos.y + (rowH - rsz.y) * 0.5f},
                             C::UA(C::Dim(), 1.f), rt);
             }
-            ColorRow("##hudc", XS("Цвет счётчика"), &cfg::esp::hud_col, true);
         }
 
         // ---- Положение панели вкладок: слева или снизу ------------------
@@ -1498,15 +1475,6 @@ void UpdateFreecam(float dt) {
         // Метка пальца обзора — видно, какой палец крутит камеру.
         fg->AddCircle({lookPx, lookPy}, 34.f * S, IM_COL32(0,200,255,160), 32, 2.5f);
         fg->AddCircleFilled({lookPx, lookPy}, 6.f * S, IM_COL32(0,200,255,160), 20);
-    } else if (!menu_open) {
-        // Тихая подсказка, пока обзор свободен.
-        auto* fn = ImGui::GetFont();
-        const float hfs = ImGui::GetFontSize() * 1.1f;
-        const char* hint = XS("Свайп — обзор");
-        auto hsz = fn->CalcTextSizeA(hfs, FLT_MAX, 0, hint);
-        const float hx = (vw * 0.45f + vw) * 0.5f;
-        fg->AddText(fn, hfs, {hx - hsz.x * 0.5f, vh - hsz.y - 24.f * S},
-                    IM_COL32(255,255,255,90), hint);
     }
 }
 
