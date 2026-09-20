@@ -18,6 +18,12 @@ namespace cfg { namespace esp {
     inline ImVec4 bot_col           = {0.85f, 0.40f, 1.00f, 1.f};
     inline ImVec4 vehicle_col       = {1.00f, 0.85f, 0.20f, 1.f};
     inline ImVec4 scrap_col         = {0.31f, 0.78f, 1.00f, 1.f};
+    inline ImVec4 ore_stone_col     = {0.75f, 0.75f, 0.75f, 1.f};
+    inline ImVec4 ore_metal_col     = {1.00f, 0.55f, 0.16f, 1.f};
+    inline ImVec4 ore_sulfur_col    = {1.00f, 0.88f, 0.20f, 1.f};
+    inline ImVec4 farm_spot_col     = {0.31f, 1.00f, 0.47f, 1.f};
+    inline ImVec4 farm_body_col     = {1.00f, 0.78f, 0.24f, 1.f};
+    inline ImVec4 hud_col           = {1.00f, 1.00f, 1.00f, 1.f};
     // Tracers drawn to a team mate are always green, no matter what colour the
     // enemy tracers use — that is the whole point of telling them apart.
     inline ImVec4 ally_tracer_col = {0.20f, 0.90f, 0.35f, 1.f};
@@ -61,5 +67,5 @@ namespace cfg { namespace aim {
     inline bool  trigger_bot       = false;
     inline bool  knife_bot         = false;
     inline float trigger_delay     = 0.0f;
-    inline float fov_color[4]      = {1.0f, 1.0f, 1.0f, 1.0f};
+    inline ImVec4 fov_col           = {1.0f, 1.0f, 1.0f, 1.0f};
 }}

@@ -1,4 +1,5 @@
 #include "farm.h"
+#include "cfg.h"
 #include "main.h"
 #include "game.h"
 #include "Android_touch/TouchHelperA.h"
@@ -407,7 +408,8 @@ static void UpdateFarmInner(float dt) {
     // цели, а не контроллер.
     if (tgt.on_screen) {
         auto* fg = ImGui::GetForegroundDrawList();
-        const ImU32 mc = tgt.at_spot ? IM_COL32(80, 255, 120, 235) : IM_COL32(255, 200, 60, 230);
+        const ImVec4& fc = tgt.at_spot ? cfg::esp::farm_spot_col : cfg::esp::farm_body_col;
+        const ImU32 mc = IM_COL32((int)(fc.x*255),(int)(fc.y*255),(int)(fc.z*255), tgt.at_spot ? 235 : 230);
         const float r = tgt.at_spot ? 13.f : 17.f;
         fg->AddCircle({tgt.sx, tgt.sy}, r, mc, 24, 3.f);
         fg->AddLine({tgt.sx - r * 1.6f, tgt.sy}, {tgt.sx - r * 0.5f, tgt.sy}, mc, 3.f);

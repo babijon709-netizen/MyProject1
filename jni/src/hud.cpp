@@ -1,4 +1,5 @@
 #include "hud.h"
+#include "cfg.h"
 #include "theme.h"       // C:: палитра
 #include "main.h"        // displayInfo, native_window_screen_*
 #include "game.h"        // esp_nearby_player_count

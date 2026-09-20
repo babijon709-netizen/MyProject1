@@ -83,7 +83,9 @@ void SheetClose();
 void PopoverOpenColor(const char* title, ImVec4* cp);
 void PopoverOpen(const char* title, int sid);
 void PopoverClose();
-bool ToggleRow(const char* id, const char* lbl, bool* v, float& anim, bool last = false, bool first = false);
+bool ToggleRow(const char* id, const char* lbl, bool* v, float& anim, bool last = false, bool first = false,
+               ImVec4* col = nullptr);
+void ColorRow(const char* id, const char* lbl, ImVec4* col, bool last = false);
 bool SliderRow(const char* id, const char* lbl, float* v, float mn, float mx, const char* fmt,
                bool last, bool first, AppState::SliderAnim& anim, float dt);
 void CardBg(float h, ImDrawFlags flags = ImDrawFlags_RoundCornersAll);

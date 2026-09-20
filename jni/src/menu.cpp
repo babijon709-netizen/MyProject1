@@ -105,7 +105,7 @@ float TabContent(int tab, float dt, float cW) {
         if (aimWasOn != g_state.aim_touch)
             LogLine("аим: %s (режим %d)", g_state.aim_touch ? "включён" : "выключен", g_state.aim_mode);
         ToggleRow("##ta6", XS("Только в прицеле"), &g_state.aim_scope_only, g_state.a_aim_scope, false);
-        ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true);
+        ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true, false, &cfg::aim::fov_col);
 
         // ---- Режим: чем именно аим крутит прицел ---------------------------
         // Тач — синтетический палец (нужна инъекция касаний); память — запись
@@ -404,6 +404,12 @@ float TabContent(int tab, float dt, float cW) {
             for (int i = 0; i < NW; i++)
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NW-1);
         }
+
+        SHdr(XS("Цвета руды"));
+        CardBg(Layout::RowH * 3);
+        ColorRow("##orst", XS("Камень"), &cfg::esp::ore_stone_col, false);
+        ColorRow("##ormt", XS("Железо"), &cfg::esp::ore_metal_col, false);
+        ColorRow("##orsf", XS("Сера"),   &cfg::esp::ore_sulfur_col, true);
 
         SHdr(XS("Дальность"));
         CardBg(Layout::SliderH);
@@ -755,7 +761,7 @@ float TabContent(int tab, float dt, float cW) {
             const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
             const bool posSet = (g_state.hud_cnt_x >= 0.f);
 
-            CardBg(rowH * (posSet ? 2.f : 1.f));
+            CardBg(rowH * (posSet ? 3.f : 2.f));
 
             auto pos = ImGui::GetCursorScreenPos();
             {
@@ -804,6 +810,7 @@ float TabContent(int tab, float dt, float cW) {
                             {cX + (cW - rsz.x) * 0.5f, rpos.y + (rowH - rsz.y) * 0.5f},
                             C::UA(C::Dim(), 1.f), rt);
             }
+            ColorRow("##hudc", XS("Цвет счётчика"), &cfg::esp::hud_col, true);
         }
 
         // ---- Положение панели вкладок: слева или снизу ------------------
@@ -897,6 +904,9 @@ float TabContent(int tab, float dt, float cW) {
         // открывающая отдельное окно (как «Ещё настройки» в ESP).
         SHdr(XS("Функции"));
         CollapsibleHeader("##fnfarm", XS("Автофарм"), 5);
+        CardBg(Layout::RowH * 2);
+        ColorRow("##fsp", XS("Метка фарма"), &cfg::esp::farm_spot_col, false);
+        ColorRow("##fbd", XS("Тело ноды"),   &cfg::esp::farm_body_col, true);
 
         // Иксрей: рендер отсекает всё ближе выбранной дистанции — стены и
         // текстуры вокруг игрока пропадают, видно что за ними.

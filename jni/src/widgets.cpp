@@ -248,22 +248,101 @@ static void RenderSliderVisuals(ImDrawList* dl, ImFont* fn, float fs,
 }
 
 bool ToggleRow(const char* id, const char* lbl, bool* v, float& anim,
-               bool last, bool first) {
+               bool last, bool first, ImVec4* col) {
     auto* dl  = ImGui::GetWindowDrawList();
+    auto* fn  = ImGui::GetFont();
     float avW = ImGui::GetContentRegionAvail().x;
     const float rowH = Layout::RowH;
+    const float inset = Layout::Inset, padX = Layout::PadX;
     auto pos = ImGui::GetCursorScreenPos();
+    auto& io2 = ImGui::GetIO();
+    float fs = ImGui::GetFontSize();
 
     ImGui::InvisibleButton(id, {avW, rowH});
     bool popBlocking = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
 
-    bool triggered = WasTappedHere() && !popBlocking && !IsScrollDragging() && !g_input.touchConsumed;
+    float cy = pos.y + rowH * 0.5f;
+    float cX = pos.x + inset;
+    float dotR = 13.f, dotX = 0.f;
+    bool openedColor = false;
+    static const char* s_trColorHold = nullptr;
+    if (col) {
+        auto lblSz = fn->CalcTextSizeA(fs * 1.15f, FLT_MAX, 0, lbl);
+        dotX = cX + padX + lblSz.x + 14.f + dotR;
+        if (!popBlocking && !g_pop.visible) {
+            float cx0 = io2.MouseClickedPos[0].x, cy0 = io2.MouseClickedPos[0].y;
+            float dx = io2.MousePos.x - cx0, dy = io2.MousePos.y - cy0;
+            float moved = dx * dx + dy * dy;
+            bool onDot = (cx0 - dotX) * (cx0 - dotX) + (cy0 - cy) * (cy0 - cy) <= (dotR + 18.f) * (dotR + 18.f);
+            if (io2.MouseReleased[0] && onDot && PtInClip({dotX, cy}) && moved < 28.f * 28.f && s_trColorHold != id) {
+                s_trColorHold = id;
+                PopoverOpenColor(lbl, col);
+                PlaySound(SND_CLICK);
+                g_input.touchConsumed = true;
+                openedColor = true;
+            }
+        }
+        if (!io2.MouseDown[0] && s_trColorHold == id) s_trColorHold = nullptr;
+    }
+
+    bool triggered = !openedColor && WasTappedHere() && !popBlocking && !IsScrollDragging() && !g_input.touchConsumed;
     if (triggered) { *v=!*v; char _b[160]; snprintf(_b,sizeof(_b),XS("%s|%s"),lbl,*v?XS("Вкл"):XS("Выкл")); ShowToast(_b); PlaySound(SND_CLICK); }
 
-    RenderToggleRowVisuals(dl, ImGui::GetFont(), ImGui::GetFontSize(),
-                           pos.x, pos.y, avW, lbl, anim, 1.f,
+    RenderToggleRowVisuals(dl, fn, fs, pos.x, pos.y, avW, lbl, anim, 1.f,
                            g_state.ui_show_sep, last);
+    if (col) {
+        ImVec4& c = *col;
+        dl->AddCircleFilled({dotX, cy}, dotR, IM_COL32((int)(c.x*255),(int)(c.y*255),(int)(c.z*255),255), 32);
+        dl->AddCircle({dotX, cy}, dotR + 2.f, IM_COL32(0,0,0,80), 32, 2.f);
+        dl->AddCircle({dotX, cy}, dotR + 1.f, IM_COL32(255,255,255,180), 32, 1.2f);
+    }
     return triggered;
+}
+
+void ColorRow(const char* id, const char* lbl, ImVec4* col, bool last) {
+    if (!col) return;
+    auto* dl  = ImGui::GetWindowDrawList();
+    auto* fn  = ImGui::GetFont();
+    float avW = ImGui::GetContentRegionAvail().x;
+    const float rowH = Layout::RowH;
+    const float inset = Layout::Inset, padX = Layout::PadX;
+    auto pos = ImGui::GetCursorScreenPos();
+    auto& io2 = ImGui::GetIO();
+    float fs = ImGui::GetFontSize();
+    ImGui::InvisibleButton(id, {avW, rowH});
+    bool popBlocking = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+    float cy = pos.y + rowH * 0.5f;
+    float cX = pos.x + inset, cW = avW - inset * 2.f;
+    float dotR = 16.f;
+    float dotX = cX + cW - padX - dotR;
+    static const char* s_crHold = nullptr;
+    bool opened = false;
+    if (!popBlocking && !g_pop.visible) {
+        float cx0 = io2.MouseClickedPos[0].x, cy0 = io2.MouseClickedPos[0].y;
+        float dx = io2.MousePos.x - cx0, dy = io2.MousePos.y - cy0;
+        bool onDot = (cx0 - dotX) * (cx0 - dotX) + (cy0 - cy) * (cy0 - cy) <= (dotR + 22.f) * (dotR + 22.f);
+        if (io2.MouseReleased[0] && onDot && PtInClip({dotX, cy}) && dx*dx+dy*dy < 28.f*28.f && s_crHold != id) {
+            s_crHold = id;
+            PopoverOpenColor(lbl, col);
+            PlaySound(SND_CLICK);
+            g_input.touchConsumed = true;
+            opened = true;
+        }
+        bool tapped = !opened && WasTappedHere() && !IsScrollDragging() && !g_input.touchConsumed;
+        if (tapped) {
+            PopoverOpenColor(lbl, col);
+            PlaySound(SND_CLICK);
+            g_input.touchConsumed = true;
+        }
+    }
+    if (!io2.MouseDown[0] && s_crHold == id) s_crHold = nullptr;
+    ImVec4& c = *col;
+    dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f}, C::U(C::Txt()), lbl);
+    dl->AddCircleFilled({dotX, cy}, dotR, IM_COL32((int)(c.x*255),(int)(c.y*255),(int)(c.z*255),255), 32);
+    dl->AddCircle({dotX, cy}, dotR + 2.f, IM_COL32(0,0,0,80), 32, 2.f);
+    dl->AddCircle({dotX, cy}, dotR + 1.f, IM_COL32(255,255,255,180), 32, 1.2f);
+    if (!last && g_state.ui_show_sep)
+        dl->AddLine({cX+padX, pos.y+rowH-0.5f},{cX+cW-padX, pos.y+rowH-0.5f}, C::UA(C::Sep(),0.35f), 0.8f);
 }
 
 static void TickSliderAnim(AppState::SliderAnim& anim, float target, bool act, float dt) {
@@ -967,10 +1046,86 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
         float X  = sX + PAD, W = sW - PAD * 2.f;
         float bY = sY + sH - btnH - btnMar;
 
+        static float s_h = 0.f, s_s = 1.f, s_v = 1.f;
+        static int s_hsvDrag = 0; // 0 none, 1 SV, 2 hue
+        if (g_palSelReset && g_colP)
+            ImGui::ColorConvertRGBtoHSV(g_colP->x, g_colP->y, g_colP->z, s_h, s_s, s_v);
+
+        const float hueH = 28.f, gap = 10.f, prevH = 36.f;
+        float workTop = contentY + 8.f;
+        float workBot = bY - 8.f;
+        float svSide = ImMin(W, (workBot - workTop - prevH - hueH - gap * 3.f) * 0.55f);
+        if (svSide < 80.f) svSide = 80.f;
+        float svX = X + (W - svSide) * 0.5f;
+        float prevY = workTop;
+        float svY = prevY + prevH + gap;
+        float hueY = svY + svSide + gap;
+        float gridTop = hueY + hueH + gap;
+
+        // Preview
+        {
+            float r,g,b; ImGui::ColorConvertHSVtoRGB(s_h, s_s, s_v, r, g, b);
+            fg->AddRectFilled({X, prevY}, {X+W, prevY+prevH},
+                IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255), 10.f);
+            fg->AddRect({X, prevY}, {X+W, prevY+prevH}, IM_COL32(255,255,255,80), 10.f, 0, 1.2f);
+        }
+        // SV square
+        {
+            const int steps = 24;
+            float cw = svSide / (float)steps, ch = svSide / (float)steps;
+            for (int yy = 0; yy < steps; ++yy) {
+                float vv = 1.f - (yy + 0.5f) / (float)steps;
+                for (int xx = 0; xx < steps; ++xx) {
+                    float ss = (xx + 0.5f) / (float)steps;
+                    float r,g,b; ImGui::ColorConvertHSVtoRGB(s_h, ss, vv, r, g, b);
+                    float x0 = svX + xx * cw, y0 = svY + yy * ch;
+                    fg->AddRectFilled({x0, y0}, {x0+cw+0.5f, y0+ch+0.5f},
+                        IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255));
+                }
+            }
+            fg->AddRect({svX, svY}, {svX+svSide, svY+svSide}, IM_COL32(255,255,255,90), 0, 0, 1.2f);
+            float kx = svX + s_s * svSide, ky = svY + (1.f - s_v) * svSide;
+            fg->AddCircle({kx, ky}, 8.f, IM_COL32(0,0,0,200), 20, 3.f);
+            fg->AddCircle({kx, ky}, 8.f, IM_COL32(255,255,255,255), 20, 1.6f);
+            bool inSv = io.MousePos.x >= svX && io.MousePos.x <= svX+svSide
+                     && io.MousePos.y >= svY && io.MousePos.y <= svY+svSide;
+            if (!g_pop.closing && io.MouseClicked[0] && inSv) s_hsvDrag = 1;
+            if (!io.MouseDown[0]) s_hsvDrag = 0;
+            if (s_hsvDrag == 1 && io.MouseDown[0]) {
+                s_s = ImClamp((io.MousePos.x - svX) / svSide, 0.f, 1.f);
+                s_v = ImClamp(1.f - (io.MousePos.y - svY) / svSide, 0.f, 1.f);
+                float r,g,b; ImGui::ColorConvertHSVtoRGB(s_h, s_s, s_v, r, g, b);
+                *g_colP = ImVec4(r, g, b, 1.f);
+                g_input.touchConsumed = true;
+            }
+        }
+        // Hue bar
+        {
+            const int hs = 48;
+            float hw = W / (float)hs;
+            for (int i = 0; i < hs; ++i) {
+                float hh = (i + 0.5f) / (float)hs;
+                float r,g,b; ImGui::ColorConvertHSVtoRGB(hh, 1.f, 1.f, r, g, b);
+                fg->AddRectFilled({X + i*hw, hueY}, {X + (i+1)*hw + 0.5f, hueY+hueH},
+                    IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255), i==0||i==hs-1 ? 6.f : 0.f);
+            }
+            float hx = X + s_h * W;
+            fg->AddRect({hx-3.f, hueY-2.f}, {hx+3.f, hueY+hueH+2.f}, IM_COL32(255,255,255,255), 2.f, 0, 2.f);
+            bool inHue = io.MousePos.x >= X && io.MousePos.x <= X+W
+                      && io.MousePos.y >= hueY && io.MousePos.y <= hueY+hueH;
+            if (!g_pop.closing && io.MouseClicked[0] && inHue) s_hsvDrag = 2;
+            if (s_hsvDrag == 2 && io.MouseDown[0]) {
+                s_h = ImClamp((io.MousePos.x - X) / W, 0.f, 1.f);
+                float r,g,b; ImGui::ColorConvertHSVtoRGB(s_h, s_s, s_v, r, g, b);
+                *g_colP = ImVec4(r, g, b, 1.f);
+                g_input.touchConsumed = true;
+            }
+        }
+
         const int   COLS     = 7;
-        const float CELL_GAP = 10.f;
+        const float CELL_GAP = 8.f;
         int   ROWS   = (kPaletteCount + COLS - 1) / COLS;
-        float availH = bY - contentY - 16.f;
+        float availH = bY - gridTop - 8.f;
         float cellW = (W - CELL_GAP * (COLS - 1)) / (float)COLS;
         float cellH = (availH - CELL_GAP * (ROWS - 1)) / (float)ROWS;
         float cellSz = cellW < cellH ? cellW : cellH;
@@ -978,7 +1133,7 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
         float gridW  = COLS * cellSz + (COLS - 1) * CELL_GAP;
         float gridH  = ROWS * cellSz + (ROWS - 1) * CELL_GAP;
         float gridX  = X + (W - gridW) * 0.5f;
-        float gridY  = contentY + (bY - contentY - gridH) * 0.5f;
+        float gridY  = gridTop;
         if (gridY + gridH > bY - 8.f) gridY = bY - 8.f - gridH;
         if (gridY < contentY + 8.f) gridY = contentY + 8.f;
         fg->PushClipRect({sX + 8.f, contentY}, {sX + sW - 8.f, bY - 6.f}, true);
@@ -1042,6 +1197,7 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
                         && cp.x >= cx0 && cp.x <= cx1 && cp.y >= cy0 && cp.y <= cy1;
                 if (hit) {
                     *g_colP = kColorPalette[pi];
+                    ImGui::ColorConvertRGBtoHSV(g_colP->x, g_colP->y, g_colP->z, s_h, s_s, s_v);
                     s_palSel = pi;
                     g_input.touchConsumed = true;
                 }

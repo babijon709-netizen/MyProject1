@@ -1,8 +1,10 @@
 #include "game.h"
+#include "cfg.h"
 #include "game_internal.h"
 #include "game_offsets_active.h"   // оффсеты (go_active)
 #include "lang.h"
 #include <algorithm>
+#include <cstring>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -220,9 +222,9 @@ static MarkerLook vehicle_look(const char* label) {
 // toggle (same smashable family); bots and vehicles have their own toggles.
 static bool marker_for_entity_type(int32_t type, MarkerLook& look) {
     switch ((MineableEntityType)type) {
-        case MineableEntityType::Stone:    look = kOreStone;  return true;
-        case MineableEntityType::Iron:     look = kOreMetal;  return true;
-        case MineableEntityType::Sulfur:   look = kOreSulfur; return true;
+        case MineableEntityType::Stone:    look = kOreStone;  apply_ore_cfg(look); return true;
+        case MineableEntityType::Iron:     look = kOreMetal;  apply_ore_cfg(look); return true;
+        case MineableEntityType::Sulfur:   look = kOreSulfur; apply_ore_cfg(look); return true;
         case MineableEntityType::Barrel:   look = kBarrel;    return true;
         case MineableEntityType::Lootbox:  look = kSmashBox;  return true;
         // Air-drop balloon crates, new in this game build.
@@ -1273,6 +1275,19 @@ std::vector<BotAimEnt> esp_bot_aim_list() {
     if (!g_bot_aim_enabled) return out;
     for (const MarkerEntity& entity : g_marker_entities) {
         if (entity.kind != ESP_MARKER_BOT || !entity.position_valid) continue;
+        float dx = entity.position.x - g_frame_local_pos.x;
+        float dy = entity.position.y - g_frame_local_pos.y;
+        float dz = entity.position.z - g_frame_local_pos.z;
+        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(distance) || distance > g_marker_max_distance) continue;
+        BotAimEnt bot;
+        bot.id = entity.identity;
+        bot.x = entity.position.x; bot.y = entity.position.y; bot.z = entity.position.z;
+        out.push_back(bot);
+    }
+    return out;
+}
+RKER_BOT || !entity.position_valid) continue;
         float dx = entity.position.x - g_frame_local_pos.x;
         float dy = entity.position.y - g_frame_local_pos.y;
         float dz = entity.position.z - g_frame_local_pos.z;

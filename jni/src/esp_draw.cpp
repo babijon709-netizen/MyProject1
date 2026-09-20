@@ -71,8 +71,7 @@ void DrawEspOverlay() {
     if (g_state.aim_touch && g_state.aim_special) {
         float fovR = AimFovRadiusPx(sw, sh);
         if (fovR > 1.f) {
-            ImVec4 fc = ImVec4(cfg::aim::fov_color[0], cfg::aim::fov_color[1],
-                               cfg::aim::fov_color[2], cfg::aim::fov_color[3]);
+            ImVec4 fc = cfg::aim::fov_col;
             dl->AddCircle(ImVec2(sw * 0.5f, sh * 0.5f), fovR,
                           ImGui::ColorConvertFloat4ToU32(fc), 72, 1.5f);
         }

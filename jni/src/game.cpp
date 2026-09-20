@@ -5922,7 +5922,7 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat
     Vec3 world = world_in;
     world.x += g_aim_lead.x; world.y += g_aim_lead.y; world.z += g_aim_lead.z;
     if (slot == 0) world.y += head_lift_for_range(world_in);
-    // На дали пуля садится ниже кости: каждые 20 м — 2 см вниз (тач и память
+    // На дали пуля садится ниже кости: каждые 20 м — 5 см вниз (тач и память
     // берут одну и ту же точку). Слот любой: голова/шея/тело одинаково.
     {
         Vec3 origin = g_cam_pose_valid ? g_cam_pos : g_aim_ref_origin;
@@ -5931,7 +5931,7 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat
             float dx = world_in.x - origin.x, dy = world_in.y - origin.y, dz = world_in.z - origin.z;
             float range = sqrtf(dx * dx + dy * dy + dz * dz);
             if (std::isfinite(range) && range > 0.f)
-                world.y -= 0.02F * (range / 20.0F);
+                world.y -= 0.05F * (range / 20.0F);
         }
     }
     Vec2 screen{};
