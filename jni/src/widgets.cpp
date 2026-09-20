@@ -1038,15 +1038,16 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
         if (g_palSelReset && g_colP)
             ImGui::ColorConvertRGBtoHSV(g_colP->x, g_colP->y, g_colP->z, s_h, s_s, s_v);
 
-        const float hueH = 28.f, gap = 10.f, prevH = 36.f;
-        float workTop = contentY + 8.f;
-        float workBot = bY - 8.f;
-        float svSide = ImMin(W, (workBot - workTop - prevH - hueH - gap * 3.f) * 0.55f);
-        if (svSide < 80.f) svSide = 80.f;
-        float svX = X + (W - svSide) * 0.5f;
+        const float hueH = 36.f, gap = 12.f, prevH = 44.f;
+        float workTop = contentY + 10.f;
+        float workBot = bY - 10.f;
+        float svH = workBot - workTop - prevH - hueH - gap * 2.f;
+        if (svH < 80.f) svH = 80.f;
+        float svW = W;
+        float svX = X;
         float prevY = workTop;
         float svY = prevY + prevH + gap;
-        float hueY = svY + svSide + gap;
+        float hueY = workBot - hueH;
 
         // Preview
         {
@@ -1055,10 +1056,10 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
                 IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255), 10.f);
             fg->AddRect({X, prevY}, {X+W, prevY+prevH}, IM_COL32(255,255,255,80), 10.f, 0, 1.2f);
         }
-        // SV square
+        // SV field — на всю ширину и высоту до полосы оттенка
         {
-            const int steps = 24;
-            float cw = svSide / (float)steps, ch = svSide / (float)steps;
+            const int steps = 32;
+            float cw = svW / (float)steps, ch = svH / (float)steps;
             for (int yy = 0; yy < steps; ++yy) {
                 float vv = 1.f - (yy + 0.5f) / (float)steps;
                 for (int xx = 0; xx < steps; ++xx) {
@@ -1069,34 +1070,34 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
                         IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255));
                 }
             }
-            fg->AddRect({svX, svY}, {svX+svSide, svY+svSide}, IM_COL32(255,255,255,90), 0, 0, 1.2f);
-            float kx = svX + s_s * svSide, ky = svY + (1.f - s_v) * svSide;
-            fg->AddCircle({kx, ky}, 8.f, IM_COL32(0,0,0,200), 20, 3.f);
-            fg->AddCircle({kx, ky}, 8.f, IM_COL32(255,255,255,255), 20, 1.6f);
-            bool inSv = io.MousePos.x >= svX && io.MousePos.x <= svX+svSide
-                     && io.MousePos.y >= svY && io.MousePos.y <= svY+svSide;
+            fg->AddRect({svX, svY}, {svX+svW, svY+svH}, IM_COL32(255,255,255,90), 0, 0, 1.2f);
+            float kx = svX + s_s * svW, ky = svY + (1.f - s_v) * svH;
+            fg->AddCircle({kx, ky}, 10.f, IM_COL32(0,0,0,200), 20, 3.f);
+            fg->AddCircle({kx, ky}, 10.f, IM_COL32(255,255,255,255), 20, 1.6f);
+            bool inSv = io.MousePos.x >= svX && io.MousePos.x <= svX+svW
+                     && io.MousePos.y >= svY && io.MousePos.y <= svY+svH;
             if (!g_pop.closing && io.MouseClicked[0] && inSv) s_hsvDrag = 1;
             if (!io.MouseDown[0]) s_hsvDrag = 0;
             if (s_hsvDrag == 1 && io.MouseDown[0]) {
-                s_s = ImClamp((io.MousePos.x - svX) / svSide, 0.f, 1.f);
-                s_v = ImClamp(1.f - (io.MousePos.y - svY) / svSide, 0.f, 1.f);
+                s_s = ImClamp((io.MousePos.x - svX) / svW, 0.f, 1.f);
+                s_v = ImClamp(1.f - (io.MousePos.y - svY) / svH, 0.f, 1.f);
                 float r,g,b; ImGui::ColorConvertHSVtoRGB(s_h, s_s, s_v, r, g, b);
                 *g_colP = ImVec4(r, g, b, 1.f);
                 g_input.touchConsumed = true;
             }
         }
-        // Hue bar
+        // Hue bar — на всю ширину, сразу над «Готово»
         {
-            const int hs = 48;
+            const int hs = 64;
             float hw = W / (float)hs;
             for (int i = 0; i < hs; ++i) {
                 float hh = (i + 0.5f) / (float)hs;
                 float r,g,b; ImGui::ColorConvertHSVtoRGB(hh, 1.f, 1.f, r, g, b);
                 fg->AddRectFilled({X + i*hw, hueY}, {X + (i+1)*hw + 0.5f, hueY+hueH},
-                    IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255), i==0||i==hs-1 ? 6.f : 0.f);
+                    IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255), i==0||i==hs-1 ? 8.f : 0.f);
             }
             float hx = X + s_h * W;
-            fg->AddRect({hx-3.f, hueY-2.f}, {hx+3.f, hueY+hueH+2.f}, IM_COL32(255,255,255,255), 2.f, 0, 2.f);
+            fg->AddRect({hx-4.f, hueY-2.f}, {hx+4.f, hueY+hueH+2.f}, IM_COL32(255,255,255,255), 2.f, 0, 2.f);
             bool inHue = io.MousePos.x >= X && io.MousePos.x <= X+W
                       && io.MousePos.y >= hueY && io.MousePos.y <= hueY+hueH;
             if (!g_pop.closing && io.MouseClicked[0] && inHue) s_hsvDrag = 2;
