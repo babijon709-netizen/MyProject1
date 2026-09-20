@@ -29,8 +29,7 @@ struct WindowState {
     ImVec2 pos              = {-1.f, -1.f};
     ImVec2 tpos             = {-1.f, -1.f}; // цель позиции: её тащит палец, pos догоняет
     NetSecondOrder2D follow;               // желе-догонялка (готовая, из интернета)
-    NetSecondOrder2D jelly{4.0f, 0.30f, 1.0f}; // желе размера окна (та же готовая пружина)
-    ImVec2 prevPos          = {-1.f, -1.f};   // позиция прошлым кадром — для скорости
+    NetJellyMesh     mesh;                 // сетка: у каждой точки своя пружина (Catlike)
     bool   closing          = false;          // окно улетает обратно в пилюлю
     float  closeAnim        = 1.f;            // 1→0 прогресс улетания
     float  openAnim         = 1.f;          // 0..1 появление окна из кнопки
