@@ -95,6 +95,20 @@ static void SpringTick(float& pos, float& vel, float target, float dt) {
     if (fabsf(target - pos) < kPosTol && fabsf(vel) < kVelTol) { pos = target; vel = 0.f; }
 }
 
+// Та же пружина, но строго без перелёта (демпфер выше критического):
+// догонялка позиции окна — болтанка здесь читалась бы как лаг.
+static void SpringTickCrit(float& pos, float& vel, float target, float dt) {
+    static constexpr float kStiffness = 300.f;
+    static constexpr float kDamping   = 36.f;   // критическое 2*sqrt(300) = 34.6
+    static constexpr float kPosTol    = 0.3f;
+    static constexpr float kVelTol    = 1.f;
+    if (dt > 0.032f) dt = 0.032f;               // шторм кадров не дёргает окно
+    float force = kStiffness * (target - pos) - kDamping * vel;
+    vel += force * dt;
+    pos += vel * dt;
+    if (fabsf(target - pos) < kPosTol && fabsf(vel) < kVelTol) { pos = target; vel = 0.f; }
+}
+
 static void Tick(float& a, bool v, float dt, float spd = 10.f) {
     if (dt > 0.032f) dt = 0.032f;
     a += (float(v) - a) * spd * dt;

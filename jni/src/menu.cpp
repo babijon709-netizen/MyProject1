@@ -922,6 +922,8 @@ void CenterMenuOnDisplay() {
     if (g_win.h > dh - 16.f) g_win.h = ImMax(160.f, dh - 16.f);
     g_win.pos.x = (dw - g_win.w) * 0.5f;
     g_win.pos.y = (dh - g_win.h) * 0.5f;
+    g_win.tpos = g_win.pos;
+    g_win.tvel = {0, 0};
     g_win.dragging = false;
     g_win.resizing = false;
 }
@@ -1786,6 +1788,24 @@ void RenderMenu() {
         return; // пока калибруемся, меню не рисуем
     }
 
+    // Появление из кнопки: в кадре открытия запоминаем центр пилюли-счётчика
+    // (это она открывает меню тапом) и запускаем раскрытие с нуля. Цель
+    // позиции схлопываем в рисуемую — дёргаться нечему.
+    {
+        static bool s_wasOpen = false;
+        if (menu_open && !s_wasOpen) {
+            const HudCounterGeom& hg = HudCounterLast();
+            if (hg.bW > 0.f && hg.bH > 0.f)
+                g_win.openFrom = {hg.bX + hg.bW * 0.5f, hg.bY + hg.bH * 0.5f};
+            else
+                g_win.openFrom = {g_win.pos.x + g_win.w * 0.5f, g_win.pos.y};
+            g_win.openAnim = 0.f;
+            g_win.tpos = g_win.pos;
+            g_win.tvel = {0, 0};
+        }
+        s_wasOpen = menu_open;
+    }
+
     if (!menu_open) return;
 
     const float WW = g_win.w, WH = g_win.h;
@@ -1830,6 +1850,7 @@ void RenderMenu() {
                     g_win.dragging   = true;
                     g_win.touchStart = io.MouseClickedPos[0];
                     g_win.posStart   = g_win.pos;
+                    g_win.tpos       = g_win.pos;
                 }
             }
         }
@@ -1837,11 +1858,22 @@ void RenderMenu() {
         if (g_win.dragging && io.MouseDown[0]) {
             float dx   = io.MousePos.x - g_win.touchStart.x;
             float dy   = io.MousePos.y - g_win.touchStart.y;
-            g_win.pos.x = g_win.posStart.x + dx;
-            g_win.pos.y = g_win.posStart.y + dy;
+            g_win.tpos.x = g_win.posStart.x + dx;
+            g_win.tpos.y = g_win.posStart.y + dy;
         }
         float dw = 0.f, dh = 0.f;
         VisibleScreen(dw, dh);
+        if (dw > 100.f && dh > 100.f) {
+            g_win.tpos.x = ImClamp(g_win.tpos.x, 0.f, ImMax(0.f, dw - g_win.w));
+            g_win.tpos.y = ImClamp(g_win.tpos.y, 0.f, ImMax(0.f, dh - g_win.h));
+        }
+        // Плавное следование без болтанки: палец тащит ЦЕЛЬ (tpos), а рисуемая
+        // позиция догоняет её критически задемпфированной пружиной — быстро и
+        // останавливается точно, без колебаний. В покое пружина схлопнута в
+        // цель, hit-тесты и вёрстка ниже видят обычную позицию, как раньше.
+        if (g_win.tpos.x < 0.f) { g_win.tpos = g_win.pos; g_win.tvel = {0, 0}; }
+        SpringTickCrit(g_win.pos.x, g_win.tvel.x, g_win.tpos.x, dt);
+        SpringTickCrit(g_win.pos.y, g_win.tvel.y, g_win.tpos.y, dt);
         if (dw > 100.f && dh > 100.f) {
             g_win.pos.x = ImClamp(g_win.pos.x, 0.f, ImMax(0.f, dw - g_win.w));
             g_win.pos.y = ImClamp(g_win.pos.y, 0.f, ImMax(0.f, dh - g_win.h));
@@ -1857,6 +1889,19 @@ void RenderMenu() {
                         | ImGuiWindowFlags_NoMove      | ImGuiWindowFlags_NoNav;
 
     ImGui::Begin("##menu", nullptr, wf);
+    // Рост из кнопки: первые 0.28 с контент виден только внутри прямоугольника,
+    // раскрывающегося из точки открытия до полного окна. Само окно всё время
+    // полного размера — вёрстка не перетекает, окно просто проявляется из пилюли.
+    if (g_win.openAnim < 1.f) {
+        g_win.openAnim = ImMin(1.f, g_win.openAnim + dt / 0.28f);
+    }
+    {
+        const float e = EaseOut3(g_win.openAnim);
+        const ImVec2 o = g_win.openFrom;
+        const ImVec2 r0 = {o.x + (g_win.pos.x - o.x) * e, o.y + (g_win.pos.y - o.y) * e};
+        const ImVec2 r1 = {o.x + (g_win.pos.x + WW - o.x) * e, o.y + (g_win.pos.y + WH - o.y) * e};
+        ImGui::GetWindowDrawList()->PushClipRect(r0, r1, false);
+    }
     {
         auto  bgP  = g_win.pos;
         auto* bgDL = ImGui::GetWindowDrawList();
@@ -2295,6 +2340,7 @@ void RenderMenu() {
 
     DrawSheet(dt, wp, WW, WH);
     DrawPopover(dt, wp, WW, WH);
+    ImGui::GetWindowDrawList()->PopClipRect();
     ImGui::End();
     if (g_menuFadeIn < 1.f) {
         float mA = 1.f - EaseInOut(g_menuFadeIn);
