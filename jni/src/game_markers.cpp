@@ -1285,9 +1285,3 @@ std::vector<BotAimEnt> esp_bot_aim_list() {
     }
     return out;
 }
-entity;
-        bot.x = entity.position.x; bot.y = entity.position.y; bot.z = entity.position.z;
-        out.push_back(bot);
-    }
-    return out;
-}
