@@ -237,6 +237,7 @@ float TabContent(int tab, float dt, float cW) {
                     const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
                     if (tapped) {
                         g_state.aim_tx = g_state.aim_ty = -1.f;
+                        RememberLayout();
                         ShowToast(XS("Точка сброшена"));
                         PlaySound(SND_CLICK);
                         g_input.touchConsumed = true;
@@ -751,6 +752,7 @@ float TabContent(int tab, float dt, float cW) {
                 const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
                 if (tapped) {
                     g_state.hud_cnt_x = g_state.hud_cnt_y = -1.f;
+                    RememberLayout();
                     ShowToast(XS("Положение сброшено"));
                     PlaySound(SND_CLICK);
                     g_input.touchConsumed = true;
@@ -883,7 +885,7 @@ float TabContent(int tab, float dt, float cW) {
             }
         }
         {
-            // Кнопка настройки положения экранной кнопки фрикама (квадрата
+            // Кнопка настройки положения экркранной кнопки фрикама (квадрата
             // с глазом) — тем же тапом по экрану, что и джойстик.
             const float rowH = Layout::RowH, inset = Layout::Inset;
             const float avW = ImGui::GetContentRegionAvail().x;
@@ -1764,6 +1766,7 @@ void RenderMenu() {
                     ShowToast(XS("Точка пальца сохранена"));
                 }
                 PlaySound(SND_CLICK);
+                RememberLayout();
                 g_calibMode = 0;
                 menu_open = true;
                 // Вернуться туда, откуда калибровку запускали: зоны автофарма —

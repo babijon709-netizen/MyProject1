@@ -128,6 +128,50 @@ void RestoreAccent() {
     g_state.ui_accent_rgb = {cl(r), cl(g), cl(b), 1.0f};
 }
 
+// Раскладка кнопок и тач-зон — рядом с конфигами отдельным файлом (.layout),
+// как язык и акцент: позиции в долях экрана привязаны к устройству, а не к
+// профилю, и переживают переключение конфигов. В бинарный блоб их не положить
+// (раскладка версии 4 заморожена), а калибровочный тап пишет сразу в g_state —
+// не в момент сохранения конфига. Поэтому каждая запись/сброс тут же вызывает
+// RememberLayout(), а старт — RestoreLayout(). Формат: 12 чисел — шесть пар
+// x y (зона джойстика фарма, зона огня, джойстик фрикама, счётчик HUD, кнопка
+// фрикама, точка пальца аима); -1 = не задана. Точка аима заодно дублируется
+// в блобе (слоты aim_touch_x/y): при загрузке конфиг побеждает и переписывает
+// этот файл — как язык.
+static std::string CfgLayoutPath() {
+    return std::string(kCfgDir) + ".layout";
+}
+
+void RememberLayout() {
+    mkdir(kCfgDir, 0777);
+    std::ofstream f(CfgLayoutPath(), std::ios::trunc);
+    if (!f) return;
+    char b[256];
+    snprintf(b, sizeof(b), "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f",
+             g_state.farm_joy_x, g_state.farm_joy_y,
+             g_state.farm_fire_x, g_state.farm_fire_y,
+             g_state.freecam_joy_x, g_state.freecam_joy_y,
+             g_state.hud_cnt_x, g_state.hud_cnt_y,
+             g_state.freecam_btn_x, g_state.freecam_btn_y,
+             g_state.aim_tx, g_state.aim_ty);
+    f << b;
+}
+
+void RestoreLayout() {
+    std::ifstream f(CfgLayoutPath());
+    if (!f) return;
+    float v[12];
+    for (int i = 0; i < 12; i++)
+        if (!(f >> v[i])) return;
+    auto cl = [](float x) { return (x > 0.f && x < 1.f) ? x : -1.f; };
+    g_state.farm_joy_x = cl(v[0]);  g_state.farm_joy_y = cl(v[1]);
+    g_state.farm_fire_x = cl(v[2]); g_state.farm_fire_y = cl(v[3]);
+    g_state.freecam_joy_x = cl(v[4]); g_state.freecam_joy_y = cl(v[5]);
+    g_state.hud_cnt_x = cl(v[6]);   g_state.hud_cnt_y = cl(v[7]);
+    g_state.freecam_btn_x = cl(v[8]); g_state.freecam_btn_y = cl(v[9]);
+    g_state.aim_tx = cl(v[10]);     g_state.aim_ty = cl(v[11]);
+}
+
 // Применить выбор версии: подставить оффсеты выбранного клиента и, если версия
 // реально сменилась, переподключиться. Всё, что было вычитано по прежней
 // раскладке (классы, инстансы, кеши игроков), после смены недействительно —
@@ -420,6 +464,7 @@ void ConfigLoad(int idx, bool announce) {
     // прежних настроек ESP (2.0 и 0.0) — они вне 0..1 и читаются как «не задана».
     g_state.aim_tx = (s.aim_touch_x > 0.f && s.aim_touch_x < 1.f) ? s.aim_touch_x : -1.f;
     g_state.aim_ty = (s.aim_touch_y > 0.f && s.aim_touch_y < 1.f) ? s.aim_touch_y : -1.f;
+    RememberLayout();
     cfg::esp::box_col          = s.esp_box_col;
     cfg::esp::box_col_invis    = s.esp_box_col_invis;
     cfg::esp::name_col         = s.esp_name_col;

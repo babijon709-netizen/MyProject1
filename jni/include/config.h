@@ -1,6 +1,7 @@
 #pragma once
 // Конфиги (файлы .cfg в каталоге benzhack), язык, выбор версии (релиз/бета),
-// inotify-наблюдение каталога. Каталог — CfgDir().
+// раскладка кнопок и тач-зон (.layout), inotify-наблюдение каталога.
+// Каталог — CfgDir().
 
 #include <string>
 #include "game_offsets_active.h"   // go::Build
@@ -32,3 +33,5 @@ void RestoreAccent();
 void RememberLang();
 void RememberBuild();
 void RememberAccent();
+void RememberLayout();
+void RestoreLayout();

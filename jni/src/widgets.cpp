@@ -789,6 +789,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                     && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
                     g_state.farm_joy_x = g_state.farm_joy_y = -1.f;
                     g_state.farm_fire_x = g_state.farm_fire_y = -1.f;
+                    RememberLayout();
                     ShowToast(XS("Зоны сброшены"));
                     PlaySound(SND_CLICK);
                 }
