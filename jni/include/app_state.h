@@ -16,7 +16,7 @@ struct AppState {
 
     int   cur_tab = 1;   // при запуске открыта вкладка «Аим»
     bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
-    int   aim_bone = 0;
+    int   aim_bone = 1;   // 0 голова, 1 шея, 2 тело (как слоты аима)
     // Чем именно аим крутит прицел: 0 тач (синтетический палец), 1 память
     // (запись ввода взгляда в игру), 2 сайлент (запись оси выстрела).
     // Значения — enum AimMode в aim.h.

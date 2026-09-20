@@ -341,8 +341,8 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // и попадание в неё «по кости» уходит в нижнюю часть головы; шея даёт
     // более крупную и устойчивую зону. Переключателя в меню нет, поэтому
     // значение задано константой: поменять её — поменяется цель аима.
-    const int wantBone = kAimBoneSlot;
-    (void)g_state.aim_bone;
+    int wantBone = g_state.aim_bone;
+    if (wantBone < 0 || wantBone > 2) wantBone = 1;
 
     // ---- choose target ----
     float bestScore = 1e18f;

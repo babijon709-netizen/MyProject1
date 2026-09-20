@@ -107,11 +107,6 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##ta6", XS("Только в прицеле"), &g_state.aim_scope_only, g_state.a_aim_scope, false);
         ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true);
 
-        SHdr(XS("Наводка"));
-        CardBg(Layout::SliderH * 2);
-        SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
-        SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, false, g_state.sl_gun_str, dt);
-
         // ---- Режим: чем именно аим крутит прицел ---------------------------
         // Тач — синтетический палец (нужна инъекция касаний); память — запись
         // ввода взгляда прямо в игру (камера едет как от свайпа, но без
@@ -180,6 +175,50 @@ float TabContent(int tab, float dt, float cW) {
                             C::UA(C::Acc(), 1.f), val);
             }
         }
+
+        SHdr(XS("Куда целиться"));
+        {
+            const float rowH = Layout::RowH;
+            const float inset = Layout::Inset, padX = Layout::PadX;
+            const float avW = ImGui::GetContentRegionAvail().x;
+            auto* dl = ImGui::GetWindowDrawList();
+            auto* fn = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+            CardBg(rowH * 3.f);
+            auto boneRow = [&](const char* id, const char* lbl, int slot, bool last, float& anim) {
+                auto pos = ImGui::GetCursorScreenPos();
+                const float cX = pos.x + inset, cW = avW - inset * 2.f;
+                const float cy = pos.y + rowH * 0.5f;
+                ImGui::InvisibleButton(id, {avW, rowH});
+                const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
+                if (tapped && g_state.aim_bone != slot) {
+                    g_state.aim_bone = slot;
+                    char b[160];
+                    snprintf(b, sizeof(b), XS("%s|%s"), XS("Куда целиться"), lbl);
+                    ShowToast(b);
+                    PlaySound(SND_CLICK);
+                    g_input.touchConsumed = true;
+                }
+                const bool on = (g_state.aim_bone == slot);
+                const float r = 9.f, dotX = cX + cW - padX - r;
+                dl->AddCircle({dotX, cy}, r, C::UA(on ? C::Acc() : C::Dim(), 1.f), 12, on ? 2.f : 1.6f);
+                if (anim > 0.01f) dl->AddCircleFilled({dotX, cy}, r * 0.5f * anim, C::UA(C::Acc(), 1.f), 12);
+                dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f},
+                            C::UA(on ? C::Txt() : C::Dim(), 1.f), lbl);
+                if (!last && g_state.ui_show_sep)
+                    dl->AddLine({cX + padX, pos.y + rowH - 0.5f},
+                                {cX + cW - padX, pos.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
+            };
+            boneRow("##ab0", XS("Голова"), 0, false, g_state.a_aim_head);
+            boneRow("##ab1", XS("Шея"),    1, false, g_state.a_aim_chest);
+            boneRow("##ab2", XS("Тело"),   2, true,  g_state.a_aim_pelvis);
+        }
+
+        SHdr(XS("Наводка"));
+        CardBg(Layout::SliderH * 2);
+        SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
+        SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, false, g_state.sl_gun_str, dt);
 
         // ---- Тач-зона аима -------------------------------------------------
         // Где именно лежит палец, которым аимбот водит камеру. Выбирается
