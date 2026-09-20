@@ -143,13 +143,16 @@ int main(int argc, char* argv[]) {
         {
             static double slowBudgetLast = 0.0;
             static unsigned long long slowBudgetPrev = 0;
+            static unsigned long long slowStormPrev = 0;
             const double nowB = ImGui::GetTime();
             if (nowB - slowBudgetLast >= 1.0) {
                 slowBudgetLast = nowB;
                 const unsigned long long ab = esp_budget_aborts_total();
-                if (ab > slowBudgetPrev)
-                    LogLine("бюджет: за секунду оборвано %llu чтений/записей", ab - slowBudgetPrev);
-                slowBudgetPrev = ab;
+                const unsigned long long st = esp_storm_skips_total();
+                if (ab > slowBudgetPrev || st > slowStormPrev)
+                    LogLine("бюджет: за секунду оборвано %llu чтений/записей (шторм %llu)",
+                            ab - slowBudgetPrev, st - slowStormPrev);
+                slowBudgetPrev = ab; slowStormPrev = st;
             }
         }
         g_frame_done.store(true);

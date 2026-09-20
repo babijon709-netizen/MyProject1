@@ -66,10 +66,12 @@ constexpr uint64_t kAddressTagMask = 0x00FFFFFFFFFFFFFFULL;
 inline uint64_t untag(uint64_t address) { return address & kAddressTagMask; }
 
 // 128 байт — это несколько рядом лежащих полей объекта il2cpp (и пара матриц
-// трансформа); восемь блоков на поток покрывают типичный кадр ESP: камера,
-// локальный игрок, цель, пара моделей.
+// трансформа). Блоков — 64 на поток (8 КБ): рабочий набор кадра ESP это камера,
+// список игроков, десяток игроков с костями и текстами, маркеры и строки —
+// восемь блоков дёргались даже в гладкой игре (бюджет рвал 500+/с при 60 fps,
+// лог 08:01), а каждый лишний syscall — лотерея холодного фолта.
 constexpr size_t kBlockSize = 128;
-constexpr int    kBlocks    = 8;
+constexpr int    kBlocks    = 64;
 
 // Сколько живёт блок. Это ОСНОВНОЙ предел свежести: frame_begin() кэш не
 // сбрасывает, и тёплые данные отдаются сквозь кадры (иначе при стриминге игры
@@ -88,6 +90,15 @@ constexpr double kBlockTtl = 0.05;
 // Меряем именно время ВНУТРИ syscall, а не стену кадра: тяжёлый кадр меню или
 // вытеснение потока между чтениями бюджет тратить не должны.
 constexpr double kFrameBudget = 0.008;
+
+// Штормовой режим (вскрытие 08:01): один syscall дольше 5 мс — игра стоит на
+// вводе-выводе, и каждое наше чтение может уснуть на сотни мс в фолте холодных
+// страниц (писатель при этом ровный — его страница горячая). Тогда на 2 с
+// прекращаем syscall'ы вовсе: скан держит прошлое, оверлей идёт 60 fps. Цена —
+// один стоячий кадр на входе в шторм (его не предсказать); дальше тишина.
+// Выход по времени: через 2 с пробуем снова, медленно — штормим дальше.
+constexpr double kStormSlow = 0.005;
+constexpr double kStormHold = 2.0;
 
 // Сколько подряд неудачных чтений считаем «доступ потерян» и переоткрываем
 // /proc/<pid>/mem. Дескриптор живёт до первого ESP_ATTACH_OK, но процесс мог
@@ -186,6 +197,8 @@ public:
     bool frame_budget_aborted() const { return frame_aborted_.load(std::memory_order_relaxed); }
     // Всего оборванных бюджетом обращений (телеметрия).
     unsigned long long budget_aborts_total() const { return budget_aborts_.load(std::memory_order_relaxed); }
+    // Пропусков штормовым режимом (телеметрия, см. kStormSlow).
+    unsigned long long storm_skips_total() const { return storm_skips_.load(std::memory_order_relaxed); }
     uint64_t junk_first_address() const {
         const uint64_t v = junk_addr_.load(std::memory_order_relaxed);
         return v ? v - 1 : 0;
@@ -318,21 +331,31 @@ private:
         return want != 0 && want == tid_hash();
     }
 
-    // true — бюджет исчерпан, syscall делать нельзя (возвращать отказ).
-    // Каждый оборванный вызов считается: по счётчику виден объём срезанной
-    // работы. Пока окно не открыто (budget_tid_ == 0) не урезан никто.
+    // true — syscall делать нельзя (возвращать отказ): либо бюджет кадра
+    // исчерпан, либо идёт шторм (см. kStormSlow). Каждый оборванный вызов
+    // считается: по счётчику виден объём срезанной работы. Пока окно не открыто
+    // (budget_tid_ == 0) не урезан никто.
     bool budget_exceeded() {
         if (!budget_mine()) return false;
+        const double storm = frame_storm_until_.load(std::memory_order_relaxed);
+        if (storm > 0.0 && now_seconds() < storm) {
+            storm_skips_.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
         if (!frame_aborted_.load(std::memory_order_relaxed)) return false;
         budget_aborts_.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 
     // Учесть время syscall в бюджете кадра (вызывает только свой поток).
+    // Одиночный долгий syscall открывает шторм (см. kStormSlow); продлевать его
+    // нечем — в шторм syscall'ов нет, выход только по времени.
     void note_spent(double t0) {
-        const double spent = frame_spent_.load(std::memory_order_relaxed) + (now_seconds() - t0);
+        const double now = now_seconds();
+        const double spent = frame_spent_.load(std::memory_order_relaxed) + (now - t0);
         frame_spent_.store(spent, std::memory_order_relaxed);
         if (spent > kFrameBudget) frame_aborted_.store(true, std::memory_order_relaxed);
+        if (now - t0 > kStormSlow) frame_storm_until_.store(now + kStormHold, std::memory_order_relaxed);
     }
 
     // ---- сам доступ --------------------------------------------------------
@@ -563,6 +586,8 @@ private:
     std::atomic<bool>     frame_aborted_{false};
     std::atomic<uint64_t> budget_tid_{0};   // 0 — окно не открыто, не урезан никто
     std::atomic<unsigned long long> budget_aborts_{0};
+    std::atomic<double>   frame_storm_until_{0.0};  // тишина syscall до (монотонные с)
+    std::atomic<unsigned long long> storm_skips_{0};
 
     // Счётчики для мини-лога (см. accessors выше).
     std::atomic<unsigned long long> reads_{0};

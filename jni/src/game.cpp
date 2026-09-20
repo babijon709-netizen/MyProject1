@@ -6417,6 +6417,7 @@ bool esp_alive_check() { return g_mem.verify(); }
 
 bool esp_reads_aborted() { return g_mem.frame_budget_aborted(); }
 unsigned long long esp_budget_aborts_total() { return g_mem.budget_aborts_total(); }
+unsigned long long esp_storm_skips_total() { return g_mem.storm_skips_total(); }
 
 // KCC.Move.Position: the simulated character position (capsule bottom) the
 // game itself moves the character with. Independent of the discovered
