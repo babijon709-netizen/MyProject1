@@ -252,13 +252,8 @@ void DrawWatermark(float dt) {
         fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, bgCol, bR);
         fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, brdCol, bR, 0, 1.5f);
 
-        // Зелёная точка, когда противники рядом есть; серая — когда никого.
-        ImVec4 dotCol = enemies > 0 ? ImVec4{0.24f, 0.78f, 0.42f, 1.f} : C::Dim();
         float dcy = bY + bH * 0.5f;
-        fg->AddCircleFilled({bX + pad + dotR, dcy}, dotR, C::U(dotCol), 24);
-        if (enemies > 0)
-            fg->AddCircle({bX + pad + dotR, dcy}, dotR + 3.f,
-                C::UA(dotCol, 0.5f + 0.3f * sinf((float)ImGui::GetTime() * 5.f)), 24, 1.8f);
+        fg->AddCircleFilled({bX + pad + dotR, dcy}, dotR, C::U(acc), 24);
 
         float tY = bY + (bH - cSz.y) * 0.5f;
         float lX = bX + pad + dotR * 2.f + 12.f;

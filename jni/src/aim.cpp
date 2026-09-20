@@ -1125,7 +1125,6 @@ static void UpdateAimMemory(float dt) {
     static float s_prevCtlYaw = 0.f, s_prevCtlPitch = 0.f;
     static bool  s_haveCtlErr = false;
     static float s_noParamsTime = 0.f, s_noResponseTime = 0.f;
-    static bool  s_toasted = false;
     static float s_filtYaw = 0.f, s_filtPitch = 0.f;   // сглаженный остаток
     static bool  s_haveFilt = false;
 
@@ -1137,7 +1136,7 @@ static void UpdateAimMemory(float dt) {
         s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
         pick.reset(); s_haveLast = false; s_haveCtlErr = false; s_haveFilt = false;
         s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
-        s_noParamsTime = s_noResponseTime = 0.f; s_toasted = false;
+        s_noParamsTime = s_noResponseTime = 0.f;
         return;
     }
     s_memDiag.inactive = 0;
@@ -1153,10 +1152,6 @@ static void UpdateAimMemory(float dt) {
         // Писать некуда: объекта нет (нет игрока, респавн, смена мира). На тач
         // НЕ падаем — режим либо работает, либо молчит.
         s_noParamsTime += dt;
-        if (s_noParamsTime > 1.5f && !s_toasted) {
-            s_toasted = true;
-            ShowToast(XS("Мемори-аим: не найден MouseLook"));
-        }
         return;
     }
     s_noParamsTime = 0.f;
@@ -1173,10 +1168,6 @@ static void UpdateAimMemory(float dt) {
         pick.reset(); s_haveLast = false; s_haveCtlErr = false; s_haveFilt = false;
         s_pendYaw = s_pendPitch = 0.f; s_pendTime = 0.f;
         s_noResponseTime += dt;
-        if (s_noResponseTime > 1.5f && !s_toasted) {
-            s_toasted = true;
-            ShowToast(XS("Мемори-аим: не найден MouseLook"));
-        }
         return;
     }
 
@@ -1344,13 +1335,8 @@ static void UpdateAimMemory(float dt) {
 
     // Записи идут, а камера не отвечает больше трёх секунд при живой оси —
     // режим не работает. На тач не падаем, но говорим.
-    if (haveCam && !s_memDiag.responded) {
+    if (haveCam && !s_memDiag.responded)
         s_noResponseTime += dt;
-        if (s_noResponseTime > 3.f && !s_toasted) {
-            s_toasted = true;
-            ShowToast(XS("Мемори-аим: камера не отвечает"));
-        }
-    }
 }
 
 // Диспетчер: какой режим ведёт камеру в этом кадре.
