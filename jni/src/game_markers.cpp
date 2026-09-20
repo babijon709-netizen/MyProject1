@@ -181,10 +181,10 @@ static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, false,
 static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, false, {255, 140,  40}};
 static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {255, 225,  50}};
 
-static void apply_ore_cfg(MarkerLook& look) {
+static void apply_ore_cfg(MarkerLook& look, int which) {
     ImVec4 c = cfg::esp::ore_stone_col;
-    if (look.label && strstr(look.label, "ел")) c = cfg::esp::ore_metal_col;
-    else if (look.label && strstr(look.label, "ер")) c = cfg::esp::ore_sulfur_col;
+    if (which == 1) c = cfg::esp::ore_metal_col;
+    else if (which == 2) c = cfg::esp::ore_sulfur_col;
     look.rgb[0] = (unsigned char)(c.x * 255.f);
     look.rgb[1] = (unsigned char)(c.y * 255.f);
     look.rgb[2] = (unsigned char)(c.z * 255.f);
@@ -232,9 +232,9 @@ static MarkerLook vehicle_look(const char* label) {
 // toggle (same smashable family); bots and vehicles have their own toggles.
 static bool marker_for_entity_type(int32_t type, MarkerLook& look) {
     switch ((MineableEntityType)type) {
-        case MineableEntityType::Stone:    look = kOreStone;  apply_ore_cfg(look); return true;
-        case MineableEntityType::Iron:     look = kOreMetal;  apply_ore_cfg(look); return true;
-        case MineableEntityType::Sulfur:   look = kOreSulfur; apply_ore_cfg(look); return true;
+        case MineableEntityType::Stone:    look = kOreStone;  apply_ore_cfg(look, 0); return true;
+        case MineableEntityType::Iron:     look = kOreMetal;  apply_ore_cfg(look, 1); return true;
+        case MineableEntityType::Sulfur:   look = kOreSulfur; apply_ore_cfg(look, 2); return true;
         case MineableEntityType::Barrel:   look = kBarrel;    return true;
         case MineableEntityType::Lootbox:  look = kSmashBox;  return true;
         // Air-drop balloon crates, new in this game build.
@@ -591,9 +591,9 @@ static int ore_look_for_item_name(const char* item_name, MarkerLook& look) {
     if (strstr(key, "frag") || strstr(key, "pipe") || strstr(key, "sheet") ||
         strstr(key, "scrap") || strstr(key, "spring") || strstr(key, "gear"))
         return 0;
-    if (strstr(key, "sulfur")) { look = kOreSulfur; return 3; }
-    if (strstr(key, "metal"))  { look = kOreMetal;  return 2; } // metal.ore, hq.metal.ore
-    if (strstr(key, "stone"))  { look = kOreStone;  return 1; }
+    if (strstr(key, "sulfur")) { look = kOreSulfur; apply_ore_cfg(look, 2); return 3; }
+    if (strstr(key, "metal"))  { look = kOreMetal;  apply_ore_cfg(look, 1); return 2; }
+    if (strstr(key, "stone"))  { look = kOreStone;  apply_ore_cfg(look, 0); return 1; }
     return 0;
 }
 
