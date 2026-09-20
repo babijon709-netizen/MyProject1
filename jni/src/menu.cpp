@@ -306,6 +306,7 @@ float TabContent(int tab, float dt, float cW) {
         cfg::esp::pickup       = g_state.esp_pickup;
         cfg::esp::bot          = g_state.esp_bots;
         cfg::esp::vehicle      = g_state.esp_vehicles;
+        cfg::esp::scrap        = g_state.esp_scrap;
 
 
 
@@ -393,11 +394,12 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vor", XS("Руда"),      &g_state.esp_ore,          &g_state.a_esp_ore,          nullptr},
                 {"##van", XS("Животные"), &g_state.esp_animal,       &g_state.a_esp_animal,       &cfg::esp::animal_col},
                 {"##vlt", XS("Ящики"),    &g_state.esp_loot,         &g_state.a_esp_loot,         &cfg::esp::loot_col},
+                {"##vsc", XS("Скрап"),    &g_state.esp_scrap,        &g_state.a_esp_scrap,        &cfg::esp::scrap_col},
                 {"##vpk", XS("Предметы"), &g_state.esp_pickup,       &g_state.a_esp_pickup,       &cfg::esp::pickup_col},
                 {"##vbt", XS("Боты"),     &g_state.esp_bots,         &g_state.a_esp_bots,         &cfg::esp::bot_col},
                 {"##vvc", XS("Машины"),   &g_state.esp_vehicles,     &g_state.a_esp_vehicles,     &cfg::esp::vehicle_col},
             };
-            constexpr int NW = 6;
+            constexpr int NW = 7;
             CardBg(rowH * NW);
             for (int i = 0; i < NW; i++)
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NW-1);
@@ -2466,4 +2468,5 @@ void RenderMenu() {
 // 4 — по центру джойстика фрикама, 5 — куда поставить счётчик игроков,
 // 6 — куда поставить кнопку фрикама. Пока калибровка активна, меню скрыто
 // и первый тап по экрану пишет позицию (в долях экрана) в g_state.
+int  g_calibMode = 0;� (в долях экрана) в g_state.
 int  g_calibMode = 0;

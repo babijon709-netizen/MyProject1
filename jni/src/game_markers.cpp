@@ -34,6 +34,7 @@ static bool g_markers_loot_enabled = false;
 static bool g_markers_pickup_enabled = false;
 static bool g_markers_vehicle_enabled = false;
 static bool g_markers_bot_enabled = false;
+static bool g_markers_scrap_enabled = false;
 // Аим по ботам: скан и позиции ботов живут, даже когда их маркеры выключены.
 static bool g_bot_aim_enabled = false;
 static float g_marker_max_distance = 150.0F;
@@ -76,10 +77,11 @@ static std::vector<uint8_t> g_marker_scan_buffer;
 static void marker_scan_abort();
 
 void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
-                             bool vehicles, bool bots) {
+                             bool vehicles, bool bots, bool scrap) {
     // Loot containers and ground pickups are filtered out during the registry
     // walk, so switching a category on has to invalidate the cached list.
-    if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled) {
+    if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled ||
+        scrap != g_markers_scrap_enabled) {
         g_marker_next_scan = 0.0;
         marker_scan_abort();   // половина списка собрана по старым фильтрам
     }
@@ -89,6 +91,7 @@ void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
     g_markers_pickup_enabled = pickups;
     g_markers_vehicle_enabled = vehicles;
     g_markers_bot_enabled = bots;
+    g_markers_scrap_enabled = scrap;
     // Машины и боты опознаются при скане всегда (как руда и животные) и
     // отфильтровываются при отрисовке — инвалидация кэша им не нужна.
 }
@@ -179,11 +182,11 @@ static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {
 // Barrels are smashed, not opened, so they are MineableObjects and never pass
 // through the LootObject code at all -- the entityType below is the only place
 // they can be recognised. They belong to the loot toggle all the same.
-static const MarkerLook kBarrel    {ESP_MARKER_LOOT, "Бочка",  true,  false, {80, 200, 255}};
+static const MarkerLook kBarrel    {ESP_MARKER_SCRAP, "Бочка",  true,  false, {80, 200, 255}};
 static const MarkerLook kSmashBox  {ESP_MARKER_LOOT, "Ящик",   false, false, {255, 255, 255}};
 // Дорожный знак — та же дробимая семья, что бочки и ящики: висит на тумблере
 // «Ящики», но подпись у него своя (раньше тонул в общей «Ящик»).
-static const MarkerLook kRoadSign  {ESP_MARKER_LOOT, "Дорожный знак", false, false, {255, 255, 255}};
+static const MarkerLook kRoadSign  {ESP_MARKER_SCRAP, "Дорожный знак", false, false, {255, 255, 255}};
 
 // Animals: the game's own EntityType only covers some of them, the rest (wolf,
 // rat, ...) are recognised by the prefab name below.
@@ -523,7 +526,8 @@ static bool loot_marker(uint64_t component, const char* object_name, const char*
     // loot ESP must not produce. World containers always name themselves.
     if (info.rank <= 0 || !info.label) return false;
 
-    look.kind = ESP_MARKER_LOOT;
+    look.kind = (info.label && strcmp(info.label, "Скрап") == 0)
+                ? ESP_MARKER_SCRAP : ESP_MARKER_LOOT;
     look.label = info.label;
     look.rainbow = info.rainbow;
     look.has_color = false;
@@ -949,27 +953,22 @@ static bool rebuild_marker_entities() {
                 }
             }
             if (!known && (component_class == MARKER_CLASS_BARREL || family_unknown) &&
-                g_markers_loot_enabled) {
-                // LootDestroyable covers every smashable loot prop; label by
-                // prefab name — "Barrel_v2" is the scrap barrel, anything
-                // else gets the generic smash-box label.
-                known = barrel_look_from_object_name(object_name, look) ||
-                        barrel_look_from_object_name(root_name, look);
-                // Дорожные знаки — та же дробимая семья, но метка у них своя:
-                // раньше они тонули в общей «Ящик» ниже.
-                if (!known)
+                (g_markers_loot_enabled || g_markers_scrap_enabled)) {
+                if (g_markers_scrap_enabled)
+                    known = barrel_look_from_object_name(object_name, look) ||
+                            barrel_look_from_object_name(root_name, look);
+                if (!known && g_markers_scrap_enabled)
                     known = roadsign_look_from_object_name(object_name, look) ||
                             roadsign_look_from_object_name(root_name, look);
-                // Общая метка «ящик» — только для класса, о котором точно
-                // известно, что он дробимый: при неизвестном семействе иначе
-                // метку получил бы любой объект в реестре.
-                if (!known && component_class == MARKER_CLASS_BARREL) {
+                if (!known && component_class == MARKER_CLASS_BARREL && g_markers_loot_enabled) {
                     look = kSmashBox; known = true;
                 }
             }
             if (!known && (component_class == MARKER_CLASS_LOOT || family_unknown) &&
-                g_markers_loot_enabled) {
+                (g_markers_loot_enabled || g_markers_scrap_enabled)) {
                 known = loot_marker(component, object_name, root_name, look);
+                if (known && look.kind == ESP_MARKER_SCRAP && !g_markers_scrap_enabled) known = false;
+                if (known && look.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) known = false;
             }
             if (!known && component_class == MARKER_CLASS_VEHICLE) {
                 // Машина — только если И класс, И имя говорят «машина»:
@@ -1000,15 +999,15 @@ static bool rebuild_marker_entities() {
                     int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
                     known = marker_for_entity_type(entity_type, look);
                 }
-                if (!known && object_name[0]) known = barrel_look_from_object_name(object_name, look);
-                if (!known && root_name[0])   known = barrel_look_from_object_name(root_name, look);
+                if (!known && g_markers_scrap_enabled && object_name[0]) known = barrel_look_from_object_name(object_name, look);
+                if (!known && g_markers_scrap_enabled && root_name[0])   known = barrel_look_from_object_name(root_name, look);
                 // Бестиповые машины / боты / знаки: только по имени префаба.
                 if (!known && object_name[0]) known = vehicle_look_from_object_name(object_name, look);
                 if (!known && root_name[0])   known = vehicle_look_from_object_name(root_name, look);
                 if (!known && object_name[0]) known = bot_look_from_object_name(object_name, look);
                 if (!known && root_name[0])   known = bot_look_from_object_name(root_name, look);
-                if (!known && object_name[0]) known = roadsign_look_from_object_name(object_name, look);
-                if (!known && root_name[0])   known = roadsign_look_from_object_name(root_name, look);
+                if (!known && g_markers_scrap_enabled && object_name[0]) known = roadsign_look_from_object_name(object_name, look);
+                if (!known && g_markers_scrap_enabled && root_name[0])   known = roadsign_look_from_object_name(root_name, look);
                 if (!known) known = marker_from_loot(component, look);
                 // Cloth bushes, mushroom and berry clusters: harvestable, so
                 // they are Mineables, but they belong to the pickup category.
@@ -1096,7 +1095,8 @@ std::vector<EspMarker> esp_get_markers() {
     std::vector<EspMarker> result;
     if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
         !g_markers_loot_enabled && !g_markers_pickup_enabled &&
-        !g_markers_vehicle_enabled && !g_markers_bot_enabled && !g_bot_aim_enabled) {
+        !g_markers_vehicle_enabled && !g_markers_bot_enabled &&
+        !g_markers_scrap_enabled && !g_bot_aim_enabled) {
         if (!g_marker_entities.empty()) g_marker_entities.clear();
         g_marker_next_scan = 0.0;
         marker_scan_abort();   // не тащить незавершённую порцию через выключенный ESP
@@ -1167,6 +1167,7 @@ std::vector<EspMarker> esp_get_markers() {
         if (entity.kind == ESP_MARKER_ORE && !g_markers_ore_enabled) continue;
         if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
         if (entity.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) continue;
+        if (entity.kind == ESP_MARKER_SCRAP && !g_markers_scrap_enabled) continue;
         if (entity.kind == ESP_MARKER_PICKUP && !g_markers_pickup_enabled) continue;
         if (entity.kind == ESP_MARKER_VEHICLE && !g_markers_vehicle_enabled) continue;
         if (entity.kind == ESP_MARKER_BOT && !g_markers_bot_enabled) continue;
@@ -1187,6 +1188,7 @@ std::vector<EspMarker> esp_get_markers() {
         // Пилюля бота висит на высоте шеи — в той точке, куда целится аим.
         anchor.y += (entity.kind == ESP_MARKER_ANIMAL)  ? 1.2F
                   : (entity.kind == ESP_MARKER_LOOT)    ? 0.6F
+                  : (entity.kind == ESP_MARKER_SCRAP)   ? 0.6F
                   : (entity.kind == ESP_MARKER_PICKUP)  ? 0.4F
                   : (entity.kind == ESP_MARKER_BOT)     ? 1.4F
                   : (entity.kind == ESP_MARKER_VEHICLE) ? 1.2F : 0.9F;
@@ -1278,6 +1280,12 @@ std::vector<BotAimEnt> esp_bot_aim_list() {
         if (!std::isfinite(distance) || distance > g_marker_max_distance) continue;
         BotAimEnt bot;
         bot.id = entity.identity;
+        bot.x = entity.position.x; bot.y = entity.position.y; bot.z = entity.position.z;
+        out.push_back(bot);
+    }
+    return out;
+}
+entity;
         bot.x = entity.position.x; bot.y = entity.position.y; bot.z = entity.position.z;
         out.push_back(bot);
     }

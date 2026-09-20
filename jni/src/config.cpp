@@ -287,7 +287,7 @@ struct CfgBlob {
     // Four scalars that had no slot of their own:
     //   x = bit 0 loot ESP, bit 1 pickup ESP, bit 2 bots ESP, bit 3 vehicles ESP,
     //       bit 4 screen freecam button HIDDEN (inverted: old configs hold 0
-    //       here, i.e. the button stays visible, as before),
+    //       here, i.e. the button stays visible, as before), bit 5 scrap ESP,
     //   y = marker draw distance (m),
     //   z = aim priority + 1 (so an old config's 1.0 still means "default"),
     //   w = pickup colour packed as r*65536 + g*256 + b (exact in a float,
@@ -347,7 +347,7 @@ static void ConfigSaveToPath(const std::string& path) {
         // Цвета ботов/машин не сохраняются (в esp_extra нет места) — сессионные.
         const int flags = (g_state.esp_loot ? 1 : 0) | (g_state.esp_pickup ? 2 : 0) |
                           (g_state.esp_bots ? 4 : 0) | (g_state.esp_vehicles ? 8 : 0) |
-                          (g_state.freecam_btn_show ? 0 : 16);
+                          (g_state.freecam_btn_show ? 0 : 16) | (g_state.esp_scrap ? 32 : 0);
         auto ch = [](float v) { int i = (int)(v * 255.f + 0.5f); return i < 0 ? 0 : (i > 255 ? 255 : i); };
         const float packed = (float)(ch(cfg::esp::pickup_col.x) * 65536
                                    + ch(cfg::esp::pickup_col.y) * 256
@@ -432,12 +432,13 @@ void ConfigLoad(int idx, bool announce) {
     // Packed scalars. A config written before these existed holds the old ping
     // colour here, so each value is range-checked and falls back to its default.
     {
-        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 32.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
+        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 64.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
         g_state.esp_loot   = (flags & 1) != 0;
         g_state.esp_pickup = (flags & 2) != 0;
         g_state.esp_bots     = (flags & 4) != 0;
         g_state.esp_vehicles = (flags & 8) != 0;
         g_state.freecam_btn_show = (flags & 16) == 0;
+        g_state.esp_scrap = (flags & 32) != 0;
         g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
         int pr = (int)(s.esp_extra.z + 0.5f) - 1;
         g_state.aim_priority = (pr >= 0 && pr <= 2) ? pr : 0;

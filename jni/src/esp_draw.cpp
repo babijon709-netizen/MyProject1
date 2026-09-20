@@ -41,7 +41,8 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_aim_bones_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
         esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
                                 g_state.esp_loot, g_state.esp_pickup,
-                                g_state.esp_vehicles, g_state.esp_bots);
+                                g_state.esp_vehicles, g_state.esp_bots,
+                                g_state.esp_scrap);
         // Аим по ботам — тем же условием, что кости для аима: работает и
         // когда маркеры ботов выключены.
         esp_set_bot_aim_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
@@ -77,7 +78,7 @@ void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap) return;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
@@ -325,7 +326,7 @@ void DrawEspOverlay() {
     // One pill with the resource / animal / bot / vehicle name at the object's
     // position; the scan itself is done by the game layer and reuses this
     // frame's camera.
-    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup || g_state.esp_bots || g_state.esp_vehicles) {
+    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup || g_state.esp_bots || g_state.esp_vehicles || g_state.esp_scrap) {
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;
@@ -342,6 +343,7 @@ void DrawEspOverlay() {
                 : marker.has_color
                 ? IM_COL32(marker.color_rgb[0], marker.color_rgb[1], marker.color_rgb[2], 255)
                 : ColU32(marker.kind == ESP_MARKER_LOOT    ? cfg::esp::loot_col
+                       : marker.kind == ESP_MARKER_SCRAP   ? cfg::esp::scrap_col
                        : marker.kind == ESP_MARKER_PICKUP  ? cfg::esp::pickup_col
                        : marker.kind == ESP_MARKER_BOT     ? cfg::esp::bot_col
                        : marker.kind == ESP_MARKER_VEHICLE ? cfg::esp::vehicle_col
