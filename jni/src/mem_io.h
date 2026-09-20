@@ -18,9 +18,13 @@
 // отдаёт соседние поля без syscall — это и быстрее, и тише: меньше обращений к
 // ядру, меньше шума в аудите.
 //
-// Кэш живёт ОДИН КАДР: game.cpp зовёт frame_begin() в начале кадра, а запись в
-// память игры (Иксрей, «Всегда день») помечает затронутый блок некэшируемым —
-// иначе мы читали бы свои же значения.
+// Кэш живёт по TTL (kBlockTtl, 50 мс) СКВОЗЬ КАДРЫ: game.cpp зовёт frame_begin()
+// в начале кадра, но он только открывает новое бюджетное окно (kFrameBudget),
+// а блоки не сбрасывает. Раньше сбрасывал — и при стриминге игры каждый кадр
+// заново упирался в холодные страницы: ESP стоял 200-300 мс при cpu 3-4 мс
+// (вскрытие 07:47). Запись в память игры (фрикам, аим, Иксрей, «Всегда день»)
+// помечает затронутый блок некэшируемым — иначе мы читали бы свои же значения,
+// а замкнутые контуры расходились бы (жалоба 19.09 «фрикам летит сам»).
 //
 // Хост-стенд: tools/memio/run.sh (читает память реального процесса-ребёнка).
 
@@ -35,6 +39,8 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <functional>
+#include <thread>
 
 namespace memio {
 
@@ -65,10 +71,23 @@ inline uint64_t untag(uint64_t address) { return address & kAddressTagMask; }
 constexpr size_t kBlockSize = 128;
 constexpr int    kBlocks    = 8;
 
-// Потолок жизни блока. Основной предел — смена кадра (frame_begin), это только
-// страховка: если кадр почему-то не начался (нет привязки, меню спрятано),
-// данные не должны жить в кэше дольше, чем пара кадров.
+// Сколько живёт блок. Это ОСНОВНОЙ предел свежести: frame_begin() кэш не
+// сбрасывает, и тёплые данные отдаются сквозь кадры (иначе при стриминге игры
+// каждый кадр заново упирался бы в холодные страницы — вскрытие 07:47).
+// 50 мс несвежести для ESP/аима/фарма не видны; замкнутые контуры (фрикам,
+// накопитель аима) читают либо в обход кэша (read_quiet/rd_fresh), либо блоки,
+// в которые сами пишут (written_recently — всегда свежие).
 constexpr double kBlockTtl = 0.05;
+
+// Бюджет syscall-времени чтений/записей одного кадра оверлея. Принадлежит
+// потоку, открывшему кадр (frame_begin запоминает его; писатель фрикама и
+// поток привязки не урезаются). Исчерпан — вызовы возвращают false БЕЗ syscall,
+// пока кадр не сменится: скан ESP обрывается на полуслове, фильтры держат
+// боксы, следующий кадр дочитывает (кэш сквозной — прогресс не теряется).
+// 8 мс — половина кадра 60 fps: оверлей не встанет, даже если игра стоит.
+// Меряем именно время ВНУТРИ syscall, а не стену кадра: тяжёлый кадр меню или
+// вытеснение потока между чтениями бюджет тратить не должны.
+constexpr double kFrameBudget = 0.008;
 
 // Сколько подряд неудачных чтений считаем «доступ потерян» и переоткрываем
 // /proc/<pid>/mem. Дескриптор живёт до первого ESP_ATTACH_OK, но процесс мог
@@ -160,6 +179,13 @@ public:
     // памяти нет. Это НЕ потеря доступа (первый байт прочитался), но и не полное
     // чтение — держим отдельным счётчиком, чтобы отказы в логе не путались.
     unsigned long long cut_total() const { return cut_.load(std::memory_order_relaxed); }
+    // Бюджет кадра (см. kFrameBudget): true — чтения/записи этого кадра уже
+    // упирались в бюджет и обрываются. Оборванный скан — это «не прочиталось»,
+    // а не «мира нет»: серии неудач не мотать, кэши не сбрасывать, показывать
+    // прошлое. Сбрасывается следующим frame_begin().
+    bool frame_budget_aborted() const { return frame_aborted_.load(std::memory_order_relaxed); }
+    // Всего оборванных бюджетом обращений (телеметрия).
+    unsigned long long budget_aborts_total() const { return budget_aborts_.load(std::memory_order_relaxed); }
     uint64_t junk_first_address() const {
         const uint64_t v = junk_addr_.load(std::memory_order_relaxed);
         return v ? v - 1 : 0;
@@ -188,9 +214,14 @@ public:
         last_open_path_.store(0, std::memory_order_relaxed);
     }
 
-    // Кадр начался: данные, прочитанные в прошлом кадре, больше не отдаём.
+    // Кадр начался: открываем новое бюджетное окно (см. kFrameBudget). Блоки
+    // при этом НЕ сбрасываем: они живут по TTL сквозь кадры, тёплые страницы
+    // отдаются из кэша, а перечитывается только протухшее. Инвалидация всего
+    // сразу осталась только там, где она нужна: unbind() при потере привязки.
     void frame_begin() {
-        generation_.fetch_add(1, std::memory_order_relaxed);
+        frame_spent_.store(0.0, std::memory_order_relaxed);
+        frame_aborted_.store(false, std::memory_order_relaxed);
+        budget_tid_.store(tid_hash(), std::memory_order_relaxed);
 #ifdef MEMIO_STATS
         ++frames;
 #endif
@@ -273,6 +304,37 @@ public:
 #endif
 
 private:
+    // Хэш id текущего потока (считается один раз на поток): бюджет кадра
+    // принадлежит тому, кто его открыл (frame_begin), остальные не урезаются.
+    static uint64_t tid_hash() {
+        static thread_local const uint64_t h =
+            (uint64_t)std::hash<std::thread::id>{}(std::this_thread::get_id());
+        return h;
+    }
+
+    // Этот вызов — из потока, открывшего кадр (только он тратит бюджет).
+    bool budget_mine() const {
+        const uint64_t want = budget_tid_.load(std::memory_order_relaxed);
+        return want != 0 && want == tid_hash();
+    }
+
+    // true — бюджет исчерпан, syscall делать нельзя (возвращать отказ).
+    // Каждый оборванный вызов считается: по счётчику виден объём срезанной
+    // работы. Пока окно не открыто (budget_tid_ == 0) не урезан никто.
+    bool budget_exceeded() {
+        if (!budget_mine()) return false;
+        if (!frame_aborted_.load(std::memory_order_relaxed)) return false;
+        budget_aborts_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    // Учесть время syscall в бюджете кадра (вызывает только свой поток).
+    void note_spent(double t0) {
+        const double spent = frame_spent_.load(std::memory_order_relaxed) + (now_seconds() - t0);
+        frame_spent_.store(spent, std::memory_order_relaxed);
+        if (spent > kFrameBudget) frame_aborted_.store(true, std::memory_order_relaxed);
+    }
+
     // ---- сам доступ --------------------------------------------------------
     ssize_t read_once(uint64_t addr, void* out, size_t len) {
         const int fd = fd_.load();
@@ -362,14 +424,26 @@ private:
         return true;
     }
 
+    // Бюджет — здесь, в единственной точке syscall: попадания в кэш его не
+    // тратят (стоять там не на чем), а каждый pread/pwrite — учитывается.
     bool raw_read(uint64_t addr, void* out, size_t len, bool report = true) {
-        return read_full([this](uint64_t a, void* o, size_t l) { return read_once(a, o, l); },
-                         addr, out, len, report);
+        if (budget_exceeded()) return false;
+        const bool mine = budget_mine();
+        const double t0 = mine ? now_seconds() : 0.0;
+        const bool ok = read_full([this](uint64_t a, void* o, size_t l) { return read_once(a, o, l); },
+                                  addr, out, len, report);
+        if (mine) note_spent(t0);
+        return ok;
     }
 
     bool raw_write(uint64_t addr, const void* in, size_t len) {
-        return write_full([this](uint64_t a, const void* i, size_t l) { return write_once(a, i, l); },
-                          addr, in, len);
+        if (budget_exceeded()) return false;
+        const bool mine = budget_mine();
+        const double t0 = mine ? now_seconds() : 0.0;
+        const bool ok = write_full([this](uint64_t a, const void* i, size_t l) { return write_once(a, i, l); },
+                                   addr, in, len);
+        if (mine) note_spent(t0);
+        return ok;
     }
 
     bool raw_read_block(uint64_t base, Block& b) {
@@ -484,6 +558,11 @@ private:
     uint64_t probe_addr_ = 0;
 
     std::atomic<uint64_t> generation_{1};
+    // Бюджетное окно кадра (см. kFrameBudget): открывает frame_begin.
+    std::atomic<double>   frame_spent_{0.0};
+    std::atomic<bool>     frame_aborted_{false};
+    std::atomic<uint64_t> budget_tid_{0};   // 0 — окно не открыто, не урезан никто
+    std::atomic<unsigned long long> budget_aborts_{0};
 
     // Счётчики для мини-лога (см. accessors выше).
     std::atomic<unsigned long long> reads_{0};

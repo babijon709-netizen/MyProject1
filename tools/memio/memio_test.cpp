@@ -13,7 +13,7 @@
 //   2) чтения через кэш отдают данные ребёнка байт в байт (идут тем же pread,
 //      что и на устройстве);
 //   3) кэш блоков: 200 мелких чтений внутри блока = 1 syscall, соседний блок = +1;
-//   4) начало кадра (frame_begin) сбрасывает кэш — данные перечитываются;
+//   4) начало кадра (frame_begin) кэш НЕ сбрасывает — блоки живут по TTL;
 //   5) запись доходит до процесса-ребёнка и не отдаётся из кэша;
 //   6) «привязка ещё жива» (verify) истинна для живого процесса и ложна после
 //      его смерти или когда доступ отобран (ребёнок помечен неdumpable);
@@ -149,10 +149,16 @@ int main() {
         check(same, "чтения из /proc/<pid>/mem совпали с узором ребёнка (26 адресов)");
     }
 
-    // 3) Кэш блоков: мелкие чтения внутри блока — один syscall.
+    // 3) Кэш блоков: мелкие чтения внутри блока — один syscall, и он живёт
+    // сквозь frame_begin (по TTL). Перепривязка чистит кэш от чтений раздела 2.
+    r.unbind();
+    check(r.bind(child.pid, child.base), "перепривязка перед замером кэша");
     r.frame_begin();
     r.reset_stats();
     {
+        uint64_t warm = 0;
+        r.read(child.base + 0x10, &warm, 8);
+        check(r.syscalls == 1, "первое чтение блока — 1 syscall (промах)");
         bool ok = true;
         for (int i = 0; i < 200; ++i) {
             // 8..112: первые 4 байта страницы заняты меткой «ELF», по ней bind()
@@ -163,22 +169,37 @@ int main() {
             if ((uint8_t)v != pattern(off)) { ok = false; break; }
         }
         check(ok, "200 чтений по 8 байт из одного блока отдали верные данные");
-        check(r.syscalls == 1, "на 200 чтений — 1 syscall (кэш блока)");
+        check(r.syscalls == 1, "на 200 чтений — 0 новых syscall (попадания в кэш)");
         printf("      syscalls=%llu, попаданий в кэш=%llu\n", r.syscalls, r.hits);
 
+        r.frame_begin();   // новое бюджетное окно, кэш цел
         uint64_t v = 0;
+        r.read(child.base + 0x10, &v, 8);
+        check(r.syscalls == 1, "после frame_begin тот же блок — снова без syscall");
+
         r.read(child.base + 0x100, &v, 8);               // соседний блок
         check(r.syscalls == 2, "соседний блок — ещё один syscall");
     }
 
-    // 4) Начало кадра сбрасывает кэш.
+    // 4) Начало кадра кэш НЕ сбрасывает: блоки живут по TTL сквозь кадры.
     {
         const unsigned long long before = r.syscalls;
         r.frame_begin();
         uint64_t v = 0;
         r.read(child.base + 0x10, &v, 8);
-        check(r.syscalls == before + 1, "после frame_begin данные перечитываются из процесса");
-        check((uint8_t)v == pattern(0x10), "значение верное и после сброса кэша");
+        check(r.syscalls == before, "после frame_begin данные отдаются из кэша (без syscall)");
+        check((uint8_t)v == pattern(0x10), "значение верное и без перечитывания");
+    }
+
+    // 4б) По истечении TTL блок перечитывается (кэш не вечный). Бюджет при
+    // этом не мешает: он считает время ВНУТРИ syscall, а не сон между кадрами.
+    {
+        usleep(60000);   // kBlockTtl = 50 мс
+        const unsigned long long before = r.syscalls;
+        uint64_t v = 0;
+        r.read(child.base + 0x10, &v, 8);
+        check(r.syscalls == before + 1, "после TTL блок перечитывается из процесса");
+        check((uint8_t)v == pattern(0x10), "значение верное и после протухания");
     }
 
     // 5) Запись доходит до ребёнка и не отдаётся из кэша.
