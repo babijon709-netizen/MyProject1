@@ -1648,6 +1648,12 @@ struct FcSnapshotLocal {
 static FcPayload             g_fc_pub;
 static std::atomic<bool>     g_fc_writer_running{false};
 static std::atomic<unsigned> g_fc_writer_gen{0};
+// Поколение последнего ЗАВЕРШИВШЕГОСЯ писателя. Выключение ждёт совпадения с
+// текущим поколением: слепые 5 мс не покрывали syscall'ы к занятой игрой
+// памяти (сводки 06:39 ехали на +30..70 мс), и недождавшийся писатель
+// дописывал СТАРЫЙ снимок уже в новой сессии — рваный кадр на старте сессии
+// плюс «расхождение 0.0 м, в памяти (прошлая цель)».
+static std::atomic<unsigned> s_fc_exited_gen{0};
 
 static void freecam_payload_publish(const FcSnapshotLocal& s) {
     g_fc_pub.seq.fetch_add(1);   // нечётное — идёт запись
@@ -1680,13 +1686,30 @@ static std::atomic<unsigned> g_fc_write_count{0};
 static std::atomic<bool>     g_fc_write_failed{false};
 // Счётчик «игра затёрла нашу запись»: сколько раз за секунду позиция камеры
 // между нашей записью и чтением успела поменяться. По нему видно, кто кого
-// переписывает — это главный вопрос фрикама.
-static std::atomic<unsigned> g_fc_overwrites{0};
-static std::atomic<float>    g_fc_over_m{0.f};
-// Замок тройки «счётчик+сумма+позиция» затираний: писатель публикует её в три
-// шага, тик забирает в пять — без замка сводка склеивалась из разных отсчётов
-// («расхождение 0.0 м, в памяти (-640, -437, …)» — лог 02:56).
-static std::mutex            g_fc_ow_mtx;
+// переписывает — это главный вопрос фрикама. Тройка «счётчик+сумма+позиция»
+// плюс расшифровка снимка — под сиквенс-локом БЕЗ мьютекса.
+//
+// Мьютекс здесь не прижился: сводки («расхождение 1.2 м, в памяти в 200 м»)
+// продолжали склеиваться из разных отсчётов и с ним (лог 06:39 — сборка уже
+// с мьютексом, писатель 1 мс, базис чистый, а рвань та же). То ли std::mutex
+// на этой сборке не исключает, то ли гонка глубже, — разбираться дальше
+// нечем: вместо замка монотонные счётчики и сиквенс-лок по учебнику
+// (релиз-барьер писателя, аквайр-барьер читателя — на ARM сиквенс-лок без
+// барьеров рвётся сам). Писатель один, читатель один; читатель ничего не
+// сбрасывает (иначе два издателя сломали бы чётность) — периоды считаются
+// дельтами от прошлого чтения, сорванное чтение лишь переносит события в
+// следующий период, но не теряет их.
+// Поля ps (расшифровка снимка) — судья спора «кто врёт»: pm далеко + ps
+// рядом = игра написала мусор; оба далеко = мусор наш, из снимка.
+struct FcOwQ {
+    std::atomic<unsigned> seq{0};   // чётное — целостно (пишет только писатель)
+    std::atomic<uint64_t> ow{0};    // всего затираний (монотонно)
+    std::atomic<uint64_t> ev{0};    // номер последнего события
+    std::atomic<double>   owm{0.0}; // сумма расхождений, м (монотонно)
+    std::atomic<float>    pmx{0}, pmy{0}, pmz{0};   // расшифровка памяти
+    std::atomic<float>    psx{0}, psy{0}, psz{0};   // расшифровка снимка
+};
+static FcOwQ g_fc_owq;
 // Сколько раз за секунду игра подменила массивы иерархии камеры.
 static std::atomic<unsigned> g_fc_array_changes{0};
 static std::atomic<float>    g_fc_gap{-1.f};
@@ -1709,8 +1732,6 @@ static Vec3    g_fc_diag_parent_scale{};
 static int32_t g_fc_diag_parent = -2;
 static bool    g_fc_diag_ok = false;
 static bool    g_fc_diag_absolute = false;   // записали цель целиком (а не шаг)
-// Что лежало в памяти камеры, когда нашу запись затёрли (для лога).
-static std::atomic<float> g_fc_ow_x{0}, g_fc_ow_y{0}, g_fc_ow_z{0};
 // Последний хороший базис вида. Поза кадра иногда приходит рваной: чтение
 // 64 байт матрицы вида рвётся о нашу же запись из потока-писателя (каждую
 // ~1 мс) и пересчёты игры, а camera_basis_from_view оси нормирует, но
@@ -1905,6 +1926,9 @@ static void freecam_writer_start() {
     // увидев чужое поколение, выходит сам.
     const unsigned my_gen = g_fc_writer_gen.fetch_add(1) + 1;
     std::thread([my_gen]() {
+        // Метка выхода (RAII — накрывает и выход по поколению, и конец цикла):
+        // выключение ждёт её вместо слепой паузы.
+        struct ExitMark { unsigned g; ~ExitMark() { s_fc_exited_gen.store(g); } } mark{my_gen};
         float last_block[48] = {};
         bool  have_last = false;
         uint64_t last_cam = 0;
@@ -1948,6 +1972,11 @@ static void freecam_writer_start() {
                 // read_quiet: писатель вне кадра оверлея, блочный кэш ему
                 // чужой — сравнение только по свежим байтам.
                 const bool rd_ok = g_mem.read_quiet(vaddr, cur, sizeof(cur));
+                // Чтение могло стоять десятки мс (игра занята): за это время
+                // сессия успевает смениться, и наш снимок — уже прошлое.
+                // Писать его в новую сессию и считать по нему затирания
+                // нельзя — выходим, новое поколение уже работает.
+                if (!g_fc_writer_running.load() || my_gen != g_fc_writer_gen.load()) return;
                 const bool same = rd_ok && memcmp(cur, block, sizeof(cur)) == 0;
                 if (!same) {
                     // В памяти не наше нынешнее. Если это и не наше прошлое —
@@ -1959,11 +1988,25 @@ static void freecam_writer_start() {
                         const Vec3 ps = freecam_pos_from_view(block);
                         const float dx = pm.x - ps.x, dy = pm.y - ps.y, dz = pm.z - ps.z;
                         const float dd = sqrtf(dx * dx + dy * dy + dz * dz);
-                        std::lock_guard<std::mutex> ow_lk(g_fc_ow_mtx);
-                        g_fc_overwrites.fetch_add(1);
+                        // Событие — в сиквенс-лок (см. FcOwQ): нечётный seq,
+                        // поля обычным порядком (писатель один — relaxed
+                        // хватает), релиз-барьер, чётный seq. Проверка
+                        // конечности тут критична: сумма монотонная и не
+                        // сбрасывается — один NaN отравил бы её навсегда.
+                        FcOwQ& q = g_fc_owq;
+                        q.seq.fetch_add(1, std::memory_order_relaxed);
+                        q.ow.store(q.ow.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
                         if (std::isfinite(dd))
-                            g_fc_over_m.store(g_fc_over_m.load() + dd);
-                        g_fc_ow_x.store(pm.x); g_fc_ow_y.store(pm.y); g_fc_ow_z.store(pm.z);
+                            q.owm.store(q.owm.load(std::memory_order_relaxed) + (double)dd, std::memory_order_relaxed);
+                        q.pmx.store(pm.x, std::memory_order_relaxed);
+                        q.pmy.store(pm.y, std::memory_order_relaxed);
+                        q.pmz.store(pm.z, std::memory_order_relaxed);
+                        q.psx.store(ps.x, std::memory_order_relaxed);
+                        q.psy.store(ps.y, std::memory_order_relaxed);
+                        q.psz.store(ps.z, std::memory_order_relaxed);
+                        q.ev.store(q.ev.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+                        std::atomic_thread_fence(std::memory_order_release);
+                        q.seq.fetch_add(1, std::memory_order_relaxed);
                     }
                     if (wr_buf(vaddr, block, sizeof(block))) {
                         g_fc_write_count.fetch_add(1);
@@ -1984,6 +2027,9 @@ static void freecam_writer_start() {
             // Трансформы слотов — безусловно, как раньше: их игра
             // переписывает каждый кадр из положения тела, сравнение с памятью
             // здесь всегда «не сошлось» и только лишний syscall.
+            // Та же проверка протухания, что после чтения: запись вида выше —
+            // тоже syscall, сессия могла смениться уже после снимка.
+            if (!g_fc_writer_running.load() || my_gen != g_fc_writer_gen.load()) return;
             for (int sl = 0; sl < tn && sl < kFcMaxSlots; ++sl) {
                 if (!t[sl].addr) continue;
                 if (wr_buf(t[sl].addr, t[sl].m, sizeof(t[sl].m)))
@@ -1999,9 +2045,16 @@ bool esp_freecam_set(bool on) {
     if (!on) {
         g_fc_writer_running.store(false);
         freecam_payload_clear();   // опоздавший писатель не подхватит старье
-        // Даём витку писателя (1 мс) завершиться: иначе он допишет старый
-        // снимок уже после восстановления трансформа ниже.
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        // Ждём РЕАЛЬНОГО выхода писателя, а не слепые 5 мс: иначе он допишет
+        // старый снимок уже после восстановления трансформа ниже. Пауза была
+        // 5 мс, а syscall'ы к занятой игрой памяти встают на десятки мс.
+        // Не дождались за 300 мс — дальше без него: проверки поколения после
+        // syscall'ов не дадут зависшему писать старье, когда доплывёт.
+        {
+            const unsigned wgen = g_fc_writer_gen.load();
+            for (int w = 0; w < 300 && s_fc_exited_gen.load() != wgen; ++w)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         g_fc_last_m = g_fc_last_n = 0; g_fc_last_i = -1;
         if (g_freecam_saved_ok && g_freecam_matrices && g_freecam_index >= 0)
             wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34),
@@ -2345,12 +2398,37 @@ static void freecam_tick() {
             const bool wf = g_fc_write_failed.exchange(false);
             const float gap = g_fc_gap.load();
             const unsigned ac = g_fc_array_changes.exchange(0);
-            unsigned ow = 0; float owm = 0.f, owx = 0.f, owy = 0.f, owz = 0.f;
-            {
-                std::lock_guard<std::mutex> ow_lk(g_fc_ow_mtx);
-                ow = g_fc_overwrites.exchange(0);
-                owm = g_fc_over_m.exchange(0.f);
-                owx = g_fc_ow_x.load(); owy = g_fc_ow_y.load(); owz = g_fc_ow_z.load();
+            // Чтение сиквенс-лока (см. FcOwQ): чётный seq, поля, аквайр-барьер
+            // (без него на ARM чтения полей уплывают за вторую проверку seq и
+            // снимок рвётся), повторная проверка. Сорвалось — не беда: база
+            // не двигается, и события периода доберутся следующей дельтой.
+            uint64_t ow_t = 0, ev_t = 0; double owm_t = 0.0;
+            float pmx = 0, pmy = 0, pmz = 0, psx = 0, psy = 0, psz = 0;
+            bool ow_snap = false;
+            for (int spin = 0; spin < 64; ++spin) {
+                const unsigned s0 = g_fc_owq.seq.load(std::memory_order_acquire);
+                if (s0 & 1u) continue;
+                ow_t = g_fc_owq.ow.load(std::memory_order_relaxed);
+                owm_t = g_fc_owq.owm.load(std::memory_order_relaxed);
+                pmx = g_fc_owq.pmx.load(std::memory_order_relaxed);
+                pmy = g_fc_owq.pmy.load(std::memory_order_relaxed);
+                pmz = g_fc_owq.pmz.load(std::memory_order_relaxed);
+                psx = g_fc_owq.psx.load(std::memory_order_relaxed);
+                psy = g_fc_owq.psy.load(std::memory_order_relaxed);
+                psz = g_fc_owq.psz.load(std::memory_order_relaxed);
+                ev_t = g_fc_owq.ev.load(std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_acquire);
+                if (s0 == g_fc_owq.seq.load(std::memory_order_acquire)) { ow_snap = true; break; }
+            }
+            static uint64_t s_ow_prev = 0, s_ev_prev = 0;
+            static double   s_owm_prev = 0.0;
+            unsigned ow = 0; float owm = 0.f;
+            float owx = 0.f, owy = 0.f, owz = 0.f, osx = 0.f, osy = 0.f, osz = 0.f;
+            if (ow_snap) {
+                ow = (unsigned)(ow_t - s_ow_prev);
+                owm = (float)(owm_t - s_owm_prev);
+                owx = pmx; owy = pmy; owz = pmz; osx = psx; osy = psy; osz = psz;
+                s_ow_prev = ow_t; s_owm_prev = owm_t; s_ev_prev = ev_t;
             }
             const unsigned sk = g_fc_skew.exchange(0);
             LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f), писатель %u/с, затёрто игрой %u/с (в среднем %.1f м), недолёт %.2f м, подмен массивов %u, кривых базисов %u%s",
@@ -2395,9 +2473,10 @@ static void freecam_tick() {
             // головы — запись перебивает игра, и бороться надо её кадром, а не
             // частотой нашего писателя.
             if (ow)
-                LogLine("фрикам: затёрто игрой %u раз за период, расхождение до %.1f м, в памяти оказалось (%.1f, %.1f, %.1f)",
+                LogLine("фрикам: затёрто игрой %u раз за период, расхождение до %.1f м, в памяти оказалось (%.1f, %.1f, %.1f), снимок был (%.1f, %.1f, %.1f)",
                         ow, (double)(owm / (float)ow),
-                        (double)owx, (double)owy, (double)owz);
+                        (double)owx, (double)owy, (double)owz,
+                        (double)osx, (double)osy, (double)osz);
             // Чем контур посчитал поправку. По этой строке проверяется вся
             // арифметика: мировая позиция камеры обязана быть равна
             // «позиция родителя + поворот родителя × (масштаб × локальную)»,
