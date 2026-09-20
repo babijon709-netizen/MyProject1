@@ -9,6 +9,7 @@
 #include "lang.h"                // lang::visual: подпись оружия
 #include <cfloat>
 #include <cmath>
+#include <mutex>
 
 // Radius (px) of the aim FOV circle. Original logic: cfg::aim::fov is an
 // angle against a fixed 60° reference (not the live camera FOV), so the circle
@@ -23,39 +24,15 @@ float AimFovRadiusPx(float sw, float sh) {
     return r;
 }
 
-// One remote snapshot per frame, shared by the ESP overlay and the aimbot.
-// Сколько боксов нарисовано в последнем кадре — для сводки в мини-логе.
+static std::vector<EspBox>    s_liveBoxes;
+static std::vector<EspMarker> s_liveMarkers;
+static std::mutex             s_pubMu;
+static std::vector<EspBox>    s_pubBoxes;
+static std::vector<EspMarker> s_pubMarkers;
 
-const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
-    static std::vector<EspBox> s_boxes;
-    static int s_frame = -1;
-    int frame = ImGui::GetFrameCount();
-    if (frame != s_frame) {
-        s_frame = frame;
-        esp_set_skeleton_enabled(g_state.esp_skeleton);
-        // Кости нужны аиму в обоих режимах: и касание, и память считают ошибку
-        // по точке на шее, взятой из костей. Раньше запрос включался только от
-        // касания, и в режиме «память» при выключенном скелете в ESP кости не
-        // читались вовсе — тогда аим уходил на запасной расчёт по росту, а
-        // признак смерти по позе вообще нечем было мерить.
-        esp_set_aim_bones_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
-        esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
-                                g_state.esp_loot, g_state.esp_pickup,
-                                g_state.esp_vehicles, g_state.esp_bots);
-        // Аим по ботам — тем же условием, что кости для аима: работает и
-        // когда маркеры ботов выключены.
-        esp_set_bot_aim_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
-        esp_set_always_day(g_state.always_day);
-        esp_set_marker_max_distance(g_state.marker_dist);
-        esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
-        s_boxes = esp_get_boxes((int)sw, (int)sh);
-    }
-    return s_boxes;
-}
-
-void DrawEspOverlay() {
-    float sw = (float)native_window_screen_x;
-    float sh = (float)native_window_screen_y;
+void EspScreenSize(float& sw, float& sh) {
+    sw = (float)native_window_screen_x;
+    sh = (float)native_window_screen_y;
     if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
         sw = (float)displayInfo.width;
         sh = (float)displayInfo.height;
@@ -63,6 +40,38 @@ void DrawEspOverlay() {
         sw = (float)displayInfo.height;
         sh = (float)displayInfo.width;
     }
+}
+
+void EspHarvestFrame(float sw, float sh) {
+    esp_set_skeleton_enabled(g_state.esp_skeleton);
+    esp_set_aim_bones_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
+    esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
+                            g_state.esp_loot, g_state.esp_pickup,
+                            g_state.esp_vehicles, g_state.esp_bots);
+    esp_set_bot_aim_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
+    esp_set_always_day(g_state.always_day);
+    esp_set_marker_max_distance(g_state.marker_dist);
+    esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
+    if (g_esp_attached) {
+        s_liveBoxes = esp_get_boxes((int)sw, (int)sh);
+        s_liveMarkers = esp_get_markers();
+    } else {
+        s_liveBoxes.clear();
+        s_liveMarkers.clear();
+    }
+    std::lock_guard<std::mutex> lock(s_pubMu);
+    s_pubBoxes = s_liveBoxes;
+    s_pubMarkers = s_liveMarkers;
+}
+
+const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
+    (void)sw; (void)sh;
+    return s_liveBoxes;
+}
+
+void DrawEspOverlay() {
+    float sw = 0.f, sh = 0.f;
+    EspScreenSize(sw, sh);
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
     if (!g_esp_attached) return;
@@ -79,7 +88,13 @@ void DrawEspOverlay() {
 
     if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles) return;
 
-    const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
+    std::vector<EspBox> boxes;
+    std::vector<EspMarker> markers;
+    {
+        std::lock_guard<std::mutex> lock(s_pubMu);
+        boxes = s_pubBoxes;
+        markers = s_pubMarkers;
+    }
     constexpr int BOX_EDGES[][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},
@@ -335,7 +350,7 @@ void DrawEspOverlay() {
         float rr = 1.f, rg = 1.f, rb = 1.f;
         ImGui::ColorConvertHSVtoRGB(rainbow_hue, 0.85f, 1.0f, rr, rg, rb);
         const ImU32 rainbow_col = IM_COL32((int)(rr * 255.f), (int)(rg * 255.f), (int)(rb * 255.f), 255);
-        for (const EspMarker& marker : esp_get_markers()) {
+        for (const EspMarker& marker : markers) {
             if (!marker.name[0]) continue;
             if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
             ImU32 col = marker.rainbow ? rainbow_col

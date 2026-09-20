@@ -87,6 +87,30 @@ int main(int argc, char* argv[]) {
 
     LogOpen();
     LogWatchdogStart();
+    // Память игры (ESP/аим/фарм/фрикам) — отдельный поток. process_vm_readv
+    // в шторме стоит 100–200 мс при cpu 3–12% (лог 09:50): если это на
+    // презенте, оверлей замирает целиком. Презент рисует последний снимок.
+    static std::atomic<bool> s_memRun{true};
+    std::thread memThread([]() {
+        auto last = std::chrono::steady_clock::now();
+        while (s_memRun.load() && main_thread_flag.load()) {
+            const auto now = std::chrono::steady_clock::now();
+            float dt = std::chrono::duration<float>(now - last).count();
+            last = now;
+            if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
+            if (dt > 0.1f) dt = 0.1f;
+            LogStage(kStageEsp);
+            esp_mem_frame_begin();
+            float sw = 0.f, sh = 0.f;
+            EspScreenSize(sw, sh);
+            EspHarvestFrame(sw, sh);
+            UpdateAim(dt);
+            LogStage(kStageFarm);
+            UpdateFarm(dt);
+            LogStage(kStageFreecam);
+            UpdateFreecam(dt);
+        }
+    });
     unsigned long frame = 0;
     while (main_thread_flag) {
         ++frame;
@@ -109,20 +133,17 @@ int main(int argc, char* argv[]) {
         slowMark();   // 0: начало кадра
         drawBegin();
 
-        esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
         LogStage(kStageEsp);
         DrawEspOverlay();
         slowMark();   // 1: после ESP
-        UpdateAim(ImGui::GetIO().DeltaTime);
-        slowMark();   // 2: после аима
+        slowMark();   // 2: аим на потоке памяти
         LogStage(kStageFarm);
-        UpdateFarm(ImGui::GetIO().DeltaTime);
-        slowMark();   // 3: после фарма
+        slowMark();   // 3: фарм на потоке памяти
         LogStage(kStageMenu);
         RenderMenu();
         slowMark();   // 4: после меню
         LogStage(kStageFreecam);
-        UpdateFreecam(ImGui::GetIO().DeltaTime);   // фрикам: полёт камеры
+        UpdateFreecam(ImGui::GetIO().DeltaTime);
         slowMark();   // 5: после фрикама
         LogStage(kStageFrameEnd);
         drawEnd();
