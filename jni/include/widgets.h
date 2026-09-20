@@ -5,6 +5,7 @@
 
 #include "imgui.h"
 #include "app_state.h"
+#include "anim_web.h"
 
 const float WW_MIN = 840.f;
 const float WH_MIN = 720.f;
@@ -27,7 +28,7 @@ struct ScrollState {
 struct WindowState {
     ImVec2 pos              = {-1.f, -1.f};
     ImVec2 tpos             = {-1.f, -1.f}; // цель позиции: её тащит палец, pos догоняет
-    ImVec2 tvel             = {0, 0};       // скорость догонялки
+    NetSecondOrder2D follow;               // желе-догонялка (готовая, из интернета)
     float  openAnim         = 1.f;          // 0..1 появление окна из кнопки
     ImVec2 openFrom         = {0, 0};       // точка, из которой окно растёт
     float  w                = WW_MIN;

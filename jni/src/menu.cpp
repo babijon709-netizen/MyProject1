@@ -923,7 +923,7 @@ void CenterMenuOnDisplay() {
     g_win.pos.x = (dw - g_win.w) * 0.5f;
     g_win.pos.y = (dh - g_win.h) * 0.5f;
     g_win.tpos = g_win.pos;
-    g_win.tvel = {0, 0};
+    g_win.follow.reset(g_win.pos.x, g_win.pos.y);
     g_win.dragging = false;
     g_win.resizing = false;
 }
@@ -1491,6 +1491,22 @@ static void SyncAccentToTheme() {
     }
 }
 
+// RAII-скобка на кадр появления: подменяет прямоугольник окна анимированным,
+// а в конце кадра (включая ранние return) возвращает настоящий. Сама кривая —
+// готовая из интернета (anim_web.h), это только подмена-и-возврат.
+struct WinRectAnim {
+    WindowState* w = nullptr;
+    ImVec2 p = {0, 0};
+    float sw = 0.f, sh = 0.f;
+    bool armed = false;
+    void arm(WindowState& ws, ImVec2 ap, float aw, float ah) {
+        w = &ws; p = ws.pos; sw = ws.w; sh = ws.h;
+        ws.pos = ap; ws.w = aw; ws.h = ah;
+        armed = true;
+    }
+    ~WinRectAnim() { if (armed && w) { w->pos = p; w->w = sw; w->h = sh; } }
+};
+
 void RenderMenu() {
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
@@ -1801,14 +1817,14 @@ void RenderMenu() {
                 g_win.openFrom = {g_win.pos.x + g_win.w * 0.5f, g_win.pos.y};
             g_win.openAnim = 0.f;
             g_win.tpos = g_win.pos;
-            g_win.tvel = {0, 0};
+            g_win.follow.reset(g_win.pos.x, g_win.pos.y);
         }
         s_wasOpen = menu_open;
     }
 
     if (!menu_open) return;
 
-    const float WW = g_win.w, WH = g_win.h;
+    float WW = g_win.w, WH = g_win.h;
     const float hH_ = Layout::HeaderH;
 
     {
@@ -1820,7 +1836,7 @@ void RenderMenu() {
         if (!io.MouseDown[0]) g_win.resizing = false;
 
         bool anyOverlay = g_sheet.visible || (g_pop.visible && !g_pop.closing);
-        if (!anyOverlay && io.MouseClicked[0] && inResize) {
+        if (!anyOverlay && io.MouseClicked[0] && inResize && g_win.openAnim >= 1.f) {
             g_win.resizing         = true;
             g_win.resizeTouchStart = io.MousePos;
             g_win.sizeStart        = {g_win.w, g_win.h};
@@ -1837,7 +1853,7 @@ void RenderMenu() {
     {
         if (!io.MouseDown[0]) g_win.dragging = false;
 
-        if (!g_win.dragging && io.MouseDown[0] && !(g_sheet.visible || (g_pop.visible && !g_pop.closing)) && !g_win.resizing) {
+        if (!g_win.dragging && io.MouseDown[0] && !(g_sheet.visible || (g_pop.visible && !g_pop.closing)) && !g_win.resizing && g_win.openAnim >= 1.f) {
             float tx = io.MouseClickedPos[0].x, ty = io.MouseClickedPos[0].y;
             // Тащим окно за верхнюю шапку (по всей ширине). Кружки светофора
             // больше не исключение: они декор и тапов не обрабатывают.
@@ -1851,6 +1867,7 @@ void RenderMenu() {
                     g_win.touchStart = io.MouseClickedPos[0];
                     g_win.posStart   = g_win.pos;
                     g_win.tpos       = g_win.pos;
+                    g_win.follow.reset(g_win.pos.x, g_win.pos.y);
                 }
             }
         }
@@ -1867,18 +1884,44 @@ void RenderMenu() {
             g_win.tpos.x = ImClamp(g_win.tpos.x, 0.f, ImMax(0.f, dw - g_win.w));
             g_win.tpos.y = ImClamp(g_win.tpos.y, 0.f, ImMax(0.f, dh - g_win.h));
         }
-        // Плавное следование без болтанки: палец тащит ЦЕЛЬ (tpos), а рисуемая
-        // позиция догоняет её критически задемпфированной пружиной — быстро и
-        // останавливается точно, без колебаний. В покое пружина схлопнута в
-        // цель, hit-тесты и вёрстка ниже видят обычную позицию, как раньше.
-        if (g_win.tpos.x < 0.f) { g_win.tpos = g_win.pos; g_win.tvel = {0, 0}; }
-        SpringTickCrit(g_win.pos.x, g_win.tvel.x, g_win.tpos.x, dt);
-        SpringTickCrit(g_win.pos.y, g_win.tvel.y, g_win.tpos.y, dt);
-        if (dw > 100.f && dh > 100.f) {
-            g_win.pos.x = ImClamp(g_win.pos.x, 0.f, ImMax(0.f, dw - g_win.w));
-            g_win.pos.y = ImClamp(g_win.pos.y, 0.f, ImMax(0.f, dh - g_win.h));
+    }
+
+    // Появление из кнопки / желе-следование. Кривые — готовые из интернета
+    // (см. anim_web.h), здесь только обвязка: что анимируем и куда.
+    const bool popping = g_win.openAnim < 1.f;
+    if (popping)
+        g_win.openAnim = ImMin(1.f, g_win.openAnim + dt / 0.40f);
+    if (g_win.tpos.x < 0.f) { g_win.tpos = g_win.pos; g_win.follow.reset(g_win.pos.x, g_win.pos.y); }
+
+    WinRectAnim winAnim;
+    if (popping) {
+        // Выскакивание из кнопки: окно растёт easeOutBack (easings.net) из точки
+        // открытия. Высота идёт чуть раньше ширины — выходит сквош-и-стретч:
+        // окно деформируется и принимает свою форму с лёгким перелётом.
+        const ImVec2 o = g_win.openFrom;
+        const float t = g_win.openAnim;
+        const float sw = NetEaseOutBack(t);
+        const float sh = NetEaseOutBack(ImMin(1.f, t * 1.12f));
+        const float aw = ImMax(1.f, g_win.w * ImMax(0.f, sw));
+        const float ah = ImMax(1.f, g_win.h * ImMax(0.f, sh));
+        const ImVec2 tc = {g_win.pos.x + g_win.w * 0.5f, g_win.pos.y + g_win.h * 0.5f};
+        const ImVec2 cc = {o.x + (tc.x - o.x) * sw, o.y + (tc.y - o.y) * sw};
+        winAnim.arm(g_win, {cc.x - aw * 0.5f, cc.y - ah * 0.5f}, aw, ah);
+        g_win.follow.moveInstant(g_win.pos.x, g_win.pos.y);
+    } else {
+        // Желе: second-order dynamics догоняет цель за пальцем с болтанкой.
+        g_win.follow.update(dt > 0.f ? dt : 1e-4f, g_win.tpos.x, g_win.tpos.y);
+        g_win.pos.x = g_win.follow.posX;
+        g_win.pos.y = g_win.follow.posY;
+        float dw2 = 0.f, dh2 = 0.f;
+        VisibleScreen(dw2, dh2);
+        if (dw2 > 100.f && dh2 > 100.f) {
+            g_win.pos.x = ImClamp(g_win.pos.x, 0.f, ImMax(0.f, dw2 - g_win.w));
+            g_win.pos.y = ImClamp(g_win.pos.y, 0.f, ImMax(0.f, dh2 - g_win.h));
+            g_win.follow.setPos(g_win.pos.x, g_win.pos.y);
         }
     }
+    WW = g_win.w; WH = g_win.h;
 
     ImGui::SetNextWindowSize({g_win.w, g_win.h}, ImGuiCond_Always);
     ImGui::SetNextWindowPos(g_win.pos, ImGuiCond_Always);
@@ -1889,19 +1932,6 @@ void RenderMenu() {
                         | ImGuiWindowFlags_NoMove      | ImGuiWindowFlags_NoNav;
 
     ImGui::Begin("##menu", nullptr, wf);
-    // Рост из кнопки: первые 0.28 с контент виден только внутри прямоугольника,
-    // раскрывающегося из точки открытия до полного окна. Само окно всё время
-    // полного размера — вёрстка не перетекает, окно просто проявляется из пилюли.
-    if (g_win.openAnim < 1.f) {
-        g_win.openAnim = ImMin(1.f, g_win.openAnim + dt / 0.28f);
-    }
-    {
-        const float e = EaseOut3(g_win.openAnim);
-        const ImVec2 o = g_win.openFrom;
-        const ImVec2 r0 = {o.x + (g_win.pos.x - o.x) * e, o.y + (g_win.pos.y - o.y) * e};
-        const ImVec2 r1 = {o.x + (g_win.pos.x + WW - o.x) * e, o.y + (g_win.pos.y + WH - o.y) * e};
-        ImGui::GetWindowDrawList()->PushClipRect(r0, r1, false);
-    }
     {
         auto  bgP  = g_win.pos;
         auto* bgDL = ImGui::GetWindowDrawList();
@@ -2340,7 +2370,6 @@ void RenderMenu() {
 
     DrawSheet(dt, wp, WW, WH);
     DrawPopover(dt, wp, WW, WH);
-    ImGui::GetWindowDrawList()->PopClipRect();
     ImGui::End();
     if (g_menuFadeIn < 1.f) {
         float mA = 1.f - EaseInOut(g_menuFadeIn);
