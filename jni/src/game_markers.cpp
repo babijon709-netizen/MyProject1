@@ -181,6 +181,16 @@ static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, false,
 static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, false, {255, 140,  40}};
 static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {255, 225,  50}};
 
+static void apply_ore_cfg(MarkerLook& look) {
+    ImVec4 c = cfg::esp::ore_stone_col;
+    if (look.label && strstr(look.label, "ел")) c = cfg::esp::ore_metal_col;
+    else if (look.label && strstr(look.label, "ер")) c = cfg::esp::ore_sulfur_col;
+    look.rgb[0] = (unsigned char)(c.x * 255.f);
+    look.rgb[1] = (unsigned char)(c.y * 255.f);
+    look.rgb[2] = (unsigned char)(c.z * 255.f);
+    look.has_color = true;
+}
+
 // Barrels are smashed, not opened, so they are MineableObjects and never pass
 // through the LootObject code at all -- the entityType below is the only place
 // they can be recognised. They belong to the loot toggle all the same.
@@ -1275,19 +1285,6 @@ std::vector<BotAimEnt> esp_bot_aim_list() {
     if (!g_bot_aim_enabled) return out;
     for (const MarkerEntity& entity : g_marker_entities) {
         if (entity.kind != ESP_MARKER_BOT || !entity.position_valid) continue;
-        float dx = entity.position.x - g_frame_local_pos.x;
-        float dy = entity.position.y - g_frame_local_pos.y;
-        float dz = entity.position.z - g_frame_local_pos.z;
-        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (!std::isfinite(distance) || distance > g_marker_max_distance) continue;
-        BotAimEnt bot;
-        bot.id = entity.identity;
-        bot.x = entity.position.x; bot.y = entity.position.y; bot.z = entity.position.z;
-        out.push_back(bot);
-    }
-    return out;
-}
-RKER_BOT || !entity.position_valid) continue;
         float dx = entity.position.x - g_frame_local_pos.x;
         float dy = entity.position.y - g_frame_local_pos.y;
         float dz = entity.position.z - g_frame_local_pos.z;
