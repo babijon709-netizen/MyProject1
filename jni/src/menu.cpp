@@ -924,7 +924,6 @@ void CenterMenuOnDisplay() {
     g_win.pos.y = (dh - g_win.h) * 0.5f;
     g_win.tpos = g_win.pos;
     g_win.follow.reset(g_win.pos.x, g_win.pos.y);
-    g_win.mesh.snap(g_win.pos.x, g_win.pos.y, g_win.w, g_win.h);
     g_win.dragging = false;
     g_win.resizing = false;
 }
@@ -1824,7 +1823,6 @@ void RenderMenu() {
             g_win.closing = false;
             g_win.tpos = g_win.pos;
             g_win.follow.reset(g_win.pos.x, g_win.pos.y);
-            g_win.mesh.inited = false;
         }
         if (!menu_open && s_wasOpen) {
             g_win.openFrom = pillCenter();
@@ -1834,7 +1832,6 @@ void RenderMenu() {
             g_win.resizing = false;
             g_win.tpos = g_win.pos;
             g_win.follow.reset(g_win.pos.x, g_win.pos.y);
-            g_win.mesh.inited = false;
         }
         s_wasOpen = menu_open;
     }
@@ -1895,11 +1892,15 @@ void RenderMenu() {
             g_win.tpos.x = g_win.posStart.x + dx;
             g_win.tpos.y = g_win.posStart.y + dy;
         }
-        float dw = 0.f, dh = 0.f;
-        VisibleScreen(dw, dh);
-        if (dw > 100.f && dh > 100.f) {
-            g_win.tpos.x = ImClamp(g_win.tpos.x, 0.f, ImMax(0.f, dw - g_win.w));
-            g_win.tpos.y = ImClamp(g_win.tpos.y, 0.f, ImMax(0.f, dh - g_win.h));
+        // Кламп цели — только когда палец отпущен. Пока тащим, tpos может
+        // уехать за край: рисуемая позиция сжимается rubber-band'ом.
+        if (!g_win.dragging) {
+            float dw = 0.f, dh = 0.f;
+            VisibleScreen(dw, dh);
+            if (dw > 100.f && dh > 100.f) {
+                g_win.tpos.x = ImClamp(g_win.tpos.x, 0.f, ImMax(0.f, dw - g_win.w));
+                g_win.tpos.y = ImClamp(g_win.tpos.y, 0.f, ImMax(0.f, dh - g_win.h));
+            }
         }
     }
 
@@ -1912,7 +1913,7 @@ void RenderMenu() {
         g_win.closeAnim -= dt / 0.40f;
         if (g_win.closeAnim <= 0.f) { g_win.closing = false; return; }
     }
-    if (g_win.tpos.x < 0.f) { g_win.tpos = g_win.pos; g_win.follow.reset(g_win.pos.x, g_win.pos.y); g_win.mesh.inited = false; }
+    if (g_win.tpos.x < 0.f) { g_win.tpos = g_win.pos; g_win.follow.reset(g_win.pos.x, g_win.pos.y); }
 
     WinRectAnim winAnim;
     if (popping) {
@@ -1930,21 +1931,36 @@ void RenderMenu() {
         const ImVec2 cc = {o.x + (tc.x - o.x) * sw, o.y + (tc.y - o.y) * sw};
         winAnim.arm(g_win, {cc.x - aw * 0.5f, cc.y - ah * 0.5f}, aw, ah);
         g_win.follow.moveInstant(g_win.pos.x, g_win.pos.y);
-        g_win.mesh.snap(g_win.pos.x, g_win.pos.y, aw, ah);
     } else {
-        // Желе-позиция: second-order dynamics догоняет цель за пальцем с болтанкой.
+        // Apple: пока палец держит — окно 1:1 (с rubber-band за краем экрана).
+        // Отпустил — критическая пружина (z=1, без желе) доезжает с той же
+        // скоростью, что была у пальца. Всё окно одним прямоугольником.
         const float fdt = dt > 0.f ? dt : 1e-4f;
-        g_win.follow.update(fdt, g_win.tpos.x, g_win.tpos.y);
-        g_win.pos.x = g_win.follow.posX;
-        g_win.pos.y = g_win.follow.posY;
         float dw2 = 0.f, dh2 = 0.f;
         VisibleScreen(dw2, dh2);
-        if (dw2 > 100.f && dh2 > 100.f) {
-            g_win.pos.x = ImClamp(g_win.pos.x, 0.f, ImMax(0.f, dw2 - g_win.w));
-            g_win.pos.y = ImClamp(g_win.pos.y, 0.f, ImMax(0.f, dh2 - g_win.h));
-            g_win.follow.setPos(g_win.pos.x, g_win.pos.y);
+        auto rubberPos = [&](float tx, float ty) {
+            float x = tx, y = ty;
+            if (dw2 > 100.f && dh2 > 100.f) {
+                const float xMax = ImMax(0.f, dw2 - g_win.w);
+                const float yMax = ImMax(0.f, dh2 - g_win.h);
+                if (tx < 0.f)       x = -NetRubberBand(-tx);
+                else if (tx > xMax) x = xMax + NetRubberBand(tx - xMax);
+                if (ty < 0.f)       y = -NetRubberBand(-ty);
+                else if (ty > yMax) y = yMax + NetRubberBand(ty - yMax);
+            }
+            return ImVec2{x, y};
+        };
+        if (g_win.dragging) {
+            const ImVec2 rp = rubberPos(g_win.tpos.x, g_win.tpos.y);
+            const float vx = (rp.x - g_win.pos.x) / fdt;
+            const float vy = (rp.y - g_win.pos.y) / fdt;
+            g_win.pos = rp;
+            g_win.follow.setState(rp.x, rp.y, vx, vy);
+        } else {
+            g_win.follow.update(fdt, g_win.tpos.x, g_win.tpos.y);
+            g_win.pos.x = g_win.follow.posX;
+            g_win.pos.y = g_win.follow.posY;
         }
-        g_win.mesh.tick(fdt, g_win.pos.x, g_win.pos.y, g_win.w, g_win.h);
     }
     WW = g_win.w; WH = g_win.h;
 
@@ -2396,36 +2412,6 @@ void RenderMenu() {
     DrawSheet(dt, wp, WW, WH);
     DrawPopover(dt, wp, WW, WH);
     ImGui::End();
-    // Сетка желе: после отрисовки сдвигаем каждую вершину окна (и то, что
-    // меню дорисовало в foreground). Покой — прямоугольник; рёбра гнутся,
-    // потому что середины сторон живут на своих пружинах.
-    {
-        auto warpDL = [](ImDrawList* dl, const NetJellyMesh& m, float x0, float y0, float x1, float y1) {
-            if (!dl) return;
-            const float pad = 48.f;
-            for (int i = 0; i < dl->VtxBuffer.Size; ++i) {
-                ImVec2& p = dl->VtxBuffer[i].pos;
-                if (p.x < x0 - pad || p.x > x1 + pad || p.y < y0 - pad || p.y > y1 + pad) continue;
-                float ox, oy; m.map(p.x, p.y, ox, oy);
-                p.x = ox; p.y = oy;
-            }
-            for (int i = 0; i < dl->CmdBuffer.Size; ++i) {
-                ImVec4& c = dl->CmdBuffer[i].ClipRect;
-                if (c.z < x0 - pad || c.x > x1 + pad || c.w < y0 - pad || c.y > y1 + pad) continue;
-                float ax, ay, bx, by, cx, cy, dx, dy;
-                m.map(c.x, c.y, ax, ay); m.map(c.z, c.y, bx, by);
-                m.map(c.x, c.w, cx, cy); m.map(c.z, c.w, dx, dy);
-                c.x = ImMin(ImMin(ax, bx), ImMin(cx, dx)) - 2.f;
-                c.y = ImMin(ImMin(ay, by), ImMin(cy, dy)) - 2.f;
-                c.z = ImMax(ImMax(ax, bx), ImMax(cx, dx)) + 2.f;
-                c.w = ImMax(ImMax(ay, by), ImMax(cy, dy)) + 2.f;
-            }
-        };
-        const float x0 = g_win.pos.x, y0 = g_win.pos.y, x1 = x0 + WW, y1 = y0 + WH;
-        if (ImGuiWindow* mw = ImGui::FindWindowByName("##menu"))
-            warpDL(mw->DrawList, g_win.mesh, x0, y0, x1, y1);
-        warpDL(ImGui::GetForegroundDrawList(), g_win.mesh, x0, y0, x1, y1);
-    }
     if (g_menuFadeIn < 1.f) {
         float mA = 1.f - EaseInOut(g_menuFadeIn);
         auto* ofg = ImGui::GetForegroundDrawList();

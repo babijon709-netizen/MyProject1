@@ -27,9 +27,8 @@ struct ScrollState {
 
 struct WindowState {
     ImVec2 pos              = {-1.f, -1.f};
-    ImVec2 tpos             = {-1.f, -1.f}; // цель позиции: её тащит палец, pos догоняет
-    NetSecondOrder2D follow;               // желе-догонялка (готовая, из интернета)
-    NetJellyMesh     mesh;                 // сетка: у каждой точки своя пружина (Catlike)
+    ImVec2 tpos             = {-1.f, -1.f}; // цель пальца (без клампа — rubber-band считает сам)
+    NetSecondOrder2D follow{3.2f, 1.0f, 1.0f}; // Apple: критическое демпфирование, без желе
     bool   closing          = false;          // окно улетает обратно в пилюлю
     float  closeAnim        = 1.f;            // 1→0 прогресс улетания
     float  openAnim         = 1.f;          // 0..1 появление окна из кнопки

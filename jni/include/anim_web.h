@@ -71,7 +71,17 @@ struct NetSecondOrder2D {
         accY = accY + deltaTime * (dstY + k3 * xd_y - posY - k1 * accY) / k2Stable;
     }
     void setPos(float x, float y) { posX = x; posY = y; } // glue: возврат клампа в состояние
+    void setState(float x, float y, float vx, float vy) { // glue: палец 1:1 + скорость на отпускание
+        pDstX = posX = x; pDstY = posY = y; accX = vx; accY = vy;
+    }
 };
+
+// iOS rubber-band: за краем сопротивление растёт, жёсткого стопа нет.
+// limit · x · r / (x · r + limit) — как в шторках (r≈0.55).
+inline float NetRubberBand(float over, float limit = 72.f, float r = 0.55f) {
+    if (over <= 0.f) return 0.f;
+    return limit * over * r / (over * r + limit);
+}
 
 // 3. Mesh Deformer — Catlike Coding (Jasper Flick), 2D-порт:
 //    https://catlikecoding.com/unity/tutorials/mesh-deformation/
