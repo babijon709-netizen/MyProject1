@@ -1711,6 +1711,51 @@ static bool    g_fc_diag_ok = false;
 static bool    g_fc_diag_absolute = false;   // записали цель целиком (а не шаг)
 // Что лежало в памяти камеры, когда нашу запись затёрли (для лога).
 static std::atomic<float> g_fc_ow_x{0}, g_fc_ow_y{0}, g_fc_ow_z{0};
+// Последний хороший базис вида. Поза кадра иногда приходит рваной: чтение
+// 64 байт матрицы вида рвётся о нашу же запись из потока-писателя (каждую
+// ~1 мс) и пересчёты игры, а camera_basis_from_view оси нормирует, но
+// ортогональность не проверяет. Одной конечной-проверки мало: скошенный, но
+// конечный базис уходил в снимок И в память игры — игра рисовала рваный
+// кадр, а расшифровка вида (она считает базис ортонормальным) давала точку
+// в сотнях метров от цели: те самые «затёрто 1 раз, расхождение 0.2 м,
+// в памяти в 767 м» (лог 03:10–03:15 — память и снимок согласны между собой,
+// оба врут одинаково, потому что врёт сам снимок). Кривой базис отбрасываем
+// и строим вид на прошлом хорошем: позиция свежая, ориентация отстаёт не
+// больше чем на тик — вместо рваного кадра игра рисует прошлый хороший.
+static Vec3    s_fc_basis_r{1.f, 0.f, 0.f}, s_fc_basis_u{0.f, 1.f, 0.f}, s_fc_basis_f{0.f, 0.f, 1.f};
+static bool    s_fc_basis_have = false;
+static std::atomic<unsigned> g_fc_skew{0};   // отброшено кривых базисов за секунду
+
+static bool basis_is_orthonormal(const Vec3& r, const Vec3& u, const Vec3& f) {
+    const float rl = r.x * r.x + r.y * r.y + r.z * r.z;
+    const float ul = u.x * u.x + u.y * u.y + u.z * u.z;
+    const float fl = f.x * f.x + f.y * f.y + f.z * f.z;
+    if (fabsf(rl - 1.f) > 0.02f || fabsf(ul - 1.f) > 0.02f || fabsf(fl - 1.f) > 0.02f) return false;
+    // Хорошие пути (кватернион, обзор, целая матрица) дают скалярные ~1e-7,
+    // рваное чтение мешает строки разных ориентаций — десятые доли. Порог
+    // 0.005 (~0.3°) посередине: ни ложных отбраковок, ни видимого перекоса.
+    if (fabsf(r.x * u.x + r.y * u.y + r.z * u.z) > 0.005f) return false;
+    if (fabsf(r.x * f.x + r.y * f.y + r.z * f.z) > 0.005f) return false;
+    if (fabsf(u.x * f.x + u.y * f.y + u.z * f.z) > 0.005f) return false;
+    const float cx = r.y * u.z - r.z * u.y, cy = r.z * u.x - r.x * u.z, cz = r.x * u.y - r.y * u.x;
+    if (cx * f.x + cy * f.y + cz * f.z < 0.99f) return false;   // без зеркал
+    return true;
+}
+
+// Проверить базис позы перед сборкой вида; кривой заменить прошлым хорошим.
+// False — только если хорошего не было ни разу (первый тик с рваной позой —
+// почти невозможно: до первой нашей записи память никто не рвёт).
+static bool freecam_basis_ok(Vec3& r, Vec3& u, Vec3& f) {
+    if (basis_is_orthonormal(r, u, f)) {
+        s_fc_basis_r = r; s_fc_basis_u = u; s_fc_basis_f = f;
+        s_fc_basis_have = true;
+        return true;
+    }
+    if (!s_fc_basis_have) return false;
+    r = s_fc_basis_r; u = s_fc_basis_u; f = s_fc_basis_f;
+    g_fc_skew.fetch_add(1);
+    return true;
+}
 
 static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_t index,
                                      const Vec3& target, Vec3& local_out, float& gap) {
@@ -2118,8 +2163,9 @@ static bool freecam_write() {
     // Пишем обе.
     bool ok = false;
     if (g_native_camera && g_cam_pose_valid) {
-        const Vec3 r = g_cam_right, u = g_cam_up, f = g_cam_forward;
-        if (vec3_is_finite(r) && vec3_is_finite(u) && vec3_is_finite(f)) {
+        Vec3 r = g_cam_right, u = g_cam_up, f = g_cam_forward;
+        if (vec3_is_finite(r) && vec3_is_finite(u) && vec3_is_finite(f) &&
+            freecam_basis_ok(r, u, f)) {
             Mat4 view{};
             view.m[0] = r.x; view.m[4] = r.y; view.m[8]  = r.z; view.m[12] = -(r.x * g_freecam_pos.x + r.y * g_freecam_pos.y + r.z * g_freecam_pos.z);
             view.m[1] = u.x; view.m[5] = u.y; view.m[9]  = u.z; view.m[13] = -(u.x * g_freecam_pos.x + u.y * g_freecam_pos.y + u.z * g_freecam_pos.z);
@@ -2306,11 +2352,12 @@ static void freecam_tick() {
                 owm = g_fc_over_m.exchange(0.f);
                 owx = g_fc_ow_x.load(); owy = g_fc_ow_y.load(); owz = g_fc_ow_z.load();
             }
-            LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f), писатель %u/с, затёрто игрой %u/с (в среднем %.1f м), недолёт %.2f м, подмен массивов %u%s",
+            const unsigned sk = g_fc_skew.exchange(0);
+            LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f), писатель %u/с, затёрто игрой %u/с (в среднем %.1f м), недолёт %.2f м, подмен массивов %u, кривых базисов %u%s",
                     (double)g_freecam_pos.x, (double)g_freecam_pos.y, (double)g_freecam_pos.z,
                     (double)in_mem.x, (double)in_mem.y, (double)in_mem.z,
                     (double)g_cam_pos.x, (double)g_cam_pos.y, (double)g_cam_pos.z,
-                    wc, ow, (double)(ow ? owm / (float)ow : 0.f), (double)gap, ac,
+                    wc, ow, (double)(ow ? owm / (float)ow : 0.f), (double)gap, ac, sk,
                     wf ? " (отказы записи)" : "");
             // Сколько наборов массивов ведём и что лежит в_parent_ у каждого.
             // Мерцание камеры (жалоба 19.09) живёт ровно здесь: в логе 19:53
