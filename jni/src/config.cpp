@@ -28,7 +28,7 @@ static constexpr uint8_t kXorKey   = 0xA7;
 
 
 static const char* kCfgDir_() noexcept {
-    static constexpr auto _s = xp::_mk("/storage/emulated/0/benzhack/");
+    static constexpr auto _s = xp::_mk("/storage/emulated/0/benzware/");
     return _s.d();
 }
 #define kCfgDir (kCfgDir_())

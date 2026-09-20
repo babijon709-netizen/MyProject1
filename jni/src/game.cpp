@@ -5653,7 +5653,7 @@ static uint64_t resolve_player_model_info(uint64_t player, const PlayerAux& aux)
 
 // Route A: PlayerWeapon -> weapon view -> spawned weapon GameObject.
 // Item id -> label, dumped straight from this build's Oxide.ItemDatabase
-// (items.txt, /storage/emulated/0/benzhack). The id comes from the synced
+// (items.txt, /storage/emulated/0/benzware). The id comes from the synced
 // WeaponPiece.Number, so this is the FIRST choice for the weapon label:
 // exact, cheap (no prefab-name reads), and survives prefab renames. The
 // prefab-name path below stays as the fallback for ids not listed here.
