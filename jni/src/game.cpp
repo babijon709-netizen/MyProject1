@@ -6693,6 +6693,12 @@ static int      g_local_position_fail_streak = 0;
 // следующий кадр пересекается сам с собой (смену состава это бы не заметило).
 static int      g_world_change_streak = 0;
 static std::vector<uint64_t> g_population_snapshot;
+// Кандидат на смену мира: последний не пересёкшийся со снапшотом состав и
+// сколько кадров подряд он идёт идентичным (по членству). Рваные кадры тоже
+// идут сериями по 3+ в глубоких штормах, но каждый кадр с РАЗНЫМ мусором —
+// считать «3 любых» сменой мира нельзя (лог 09-20: +0-9 прорывались).
+static std::vector<uint64_t> s_adopt_cand;
+static int s_adopt_ident_streak = 0;
 // Поток привязки в main.cpp читает этот флаг и переподключается к игре заново.
 static std::atomic<bool> g_want_reattach{false};
 
@@ -6706,6 +6712,7 @@ static void reset_world_caches() {
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_validated = false;
     g_population_snapshot.clear(); g_world_change_streak = 0;
+    s_adopt_cand.clear(); s_adopt_ident_streak = 0;
     // The bone-learned transform layout dies with the old world: after a
     // reload it reads garbage from recycled memory (finite numbers, wrong
     // places). It is relearned from the first nearby skeleton; markers use
@@ -7062,20 +7069,44 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (overlap) break;
             }
         }
+        bool adopt_after_reset = false;
         if (!overlap) {
-            // Не с первого кадра: адреса списка иногда мигают (rd_ptr вернул
-            // чужую копию объекта или мусор из недописанного массива), и такой
-            // одиночный кадр раньше обнулял ВСЕ кэши — боксы, метки и раскладку
-            // скелета — то есть выглядел как «всё пропало и вернулось не туда».
-            // Настоящая перезагрузка мира отличается тем, что новый состав
-            // держится кадров подряд. Снапшот ставим ПОСЛЕ сброса: он чистит его.
-            if (++g_world_change_streak >= 3) {
+            // Не-пересекающаяся подмена: либо рваный кадр (гонка ниже проверки
+            // стабильности указателя/счётчика), либо настоящая смена мира.
+            // Рваные кадры в глубоких штормах идут сериями по 3+ подряд, но их
+            // состав каждый кадр РАЗНЫЙ (мусорные адреса меняются) — поэтому
+            // прежнее «3 любых» усыновляло рванину (+0-9 в логе 09-20) и заодно
+            // сбрасывало все кэши с перезаучением (всплески тысяч отказов).
+            // Правило: сброс+усыновление — только по 3 подряд ИДЕНТИЧНЫМ
+            // составам (по членству; порядок не важен — рехеш его меняет).
+            // Подстраховка — 30 любых подряд (полсекунды): рванью столько
+            // длиться не может, это переезд (сервер/мир), но сбрасывать кэши
+            // там не за что — усыновляем список как есть.
+            ++g_world_change_streak;
+            bool identical = (refreshed.size() == s_adopt_cand.size());
+            if (identical) {
+                for (uint64_t c : refreshed) {
+                    bool found = false;
+                    for (uint64_t k : s_adopt_cand) if (k == c) { found = true; break; }
+                    if (!found) { identical = false; break; }
+                }
+            }
+            if (identical) ++s_adopt_ident_streak;
+            else { s_adopt_cand = refreshed; s_adopt_ident_streak = 1; }
+            if (s_adopt_ident_streak >= 3) {
                 reset_world_caches();
                 g_population_snapshot = refreshed;
+                adopt_after_reset = true;
+            } else if (g_world_change_streak >= 30) {
+                g_population_snapshot = refreshed;
+                s_adopt_cand.clear(); s_adopt_ident_streak = 0;
+                g_world_change_streak = 0;
+                adopt_after_reset = true;
             }
         } else {
             g_world_change_streak = 0;
             g_population_snapshot = refreshed;
+            s_adopt_cand.clear(); s_adopt_ident_streak = 0;
         }
         // Население то же, но кого-то не досчитались: почти всегда это сбой
         // чтения одного элемента, а не уход игрока. Возвращаем пропавших в
@@ -7091,14 +7122,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
             if (g_frame_transforms_lost.size() > 256) g_frame_transforms_lost.clear();
         }
-        if (!overlap && g_world_change_streak < 3) {
+        if (!overlap && !adopt_after_reset) {
             // Рваный кадр списка игроков: подмена без пересечения со снапшотом,
-            // серией не подтверждена (лог 09-20: состав +0-9/+7-0 внутри шторма
-            // чтения — покомпонентная гонка ниже проверки стабильности указателя
-            // и счётчика в read_configured_player_transforms). Старый список
-            // целее нового: держим его, иначе 9 боксов из 10 гаснут на 1-2
-            // кадра. Подтверждённая серия (>=3) — настоящая смена мира — идёт
-            // обычным путём со сбросом кэшей выше.
+            // подтверждённой сменой мира не признана (см. правило выше).
+            // Старый список целее нового: держим его, иначе 9 боксов из 10
+            // гаснут, а сброс кэшей запускает перезаучение со всплеском отказов.
         } else {
             s_transforms = std::move(refreshed);
         }
