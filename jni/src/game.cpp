@@ -6415,10 +6415,6 @@ void esp_mem_frame_begin() { g_mem.frame_begin(); }
 // ничего не делал до перезапуска приложения.
 bool esp_alive_check() { return g_mem.verify(); }
 
-bool esp_reads_aborted() { return g_mem.frame_budget_aborted(); }
-unsigned long long esp_budget_aborts_total() { return g_mem.budget_aborts_total(); }
-unsigned long long esp_storm_skips_total() { return g_mem.storm_skips_total(); }
-
 // KCC.Move.Position: the simulated character position (capsule bottom) the
 // game itself moves the character with. Independent of the discovered
 // PlayerManager position field, and validated by the KCC back-reference.
@@ -6845,12 +6841,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     std::vector<uint64_t>& s_transforms = g_frame_transforms;
     std::vector<uint64_t> refreshed = read_configured_player_transforms();
-    // Бюджет чтений исчерпан: список, серии и снапшот не трогаем — чтения
-    // оборваны на полуслове, и любой вывод из них ложный. Кадр дорабатывает на
-    // прошлом составе (чтения ниже оборвутся дёшево, фильтры подержат боксы),
-    // следующий кадр перечитает всё заново.
-    const bool reads_blown = g_mem.frame_budget_aborted();
-    if (!reads_blown && !refreshed.empty()) {
+    if (!refreshed.empty()) {
         // World reload: every PlayerManager object is new (no overlap with
         // the previous population). This also has to fire when we are alone on
         // the server -- respawning solo replaces our single PlayerManager and
@@ -6897,7 +6888,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         s_transforms = std::move(refreshed);
         g_frame_transforms_empty_streak = 0;
-    } else if (!reads_blown && ++g_frame_transforms_empty_streak > 10) {
+    } else if (++g_frame_transforms_empty_streak > 10) {
         // List gone for a while: the world is being torn down / reloaded —
         // or we are simply alone on the server. Clear the player caches, but
         // FALL THROUGH to the empty-list branch below: it publishes the
@@ -7019,7 +7010,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // ожиданием 0.6 с, и всё это время боксов нет вовсе. Метки и фарм
             // живут на кадре одной камеры — публикуем его, чтобы пропажа
             // боксов не гасила и их.
-            if (!g_mem.frame_budget_aborted() && ++g_local_position_fail_streak >= 10) {
+            if (++g_local_position_fail_streak >= 10) {
                 g_local_position_fail_streak = 0;
                 g_player_position_validated = false;
             }

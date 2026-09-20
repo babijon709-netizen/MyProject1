@@ -101,15 +101,8 @@ enum EspAttachState {
 bool          esp_init(pid_t pid);
 void          esp_reset();
 EspAttachState esp_attach_state();
-// Начало кадра: открывает новое бюджетное окно чтений (см. mem_io.h).
+// Начало кадра: сброс кэша блоков памяти игры (см. mem_io.h).
 void          esp_mem_frame_begin();
-// Бюджет чтений этого кадра исчерпан: скан оборван и неполон (серии не мотать,
-// показывать прошлое). См. kFrameBudget в mem_io.h.
-bool          esp_reads_aborted();
-// Всего оборванных бюджетом чтений/записей (телеметрия).
-unsigned long long esp_budget_aborts_total();
-// Пропусков чтений/записей штормовым режимом (телеметрия, см. kStormSlow).
-unsigned long long esp_storm_skips_total();
 // Привязка ещё читается? (одно чтение; ловит перезапуск процесса и отобранный доступ)
 bool          esp_alive_check();
 void        esp_set_skeleton_enabled(bool enabled);

@@ -138,23 +138,6 @@ int main(int argc, char* argv[]) {
                     slowT[1] - slowT[0], slowT[2] - slowT[1], slowT[3] - slowT[2],
                     slowT[4] - slowT[3], slowT[5] - slowT[4], slowT[6] - slowT[5]);
         }
-        // Телеметрия бюджета чтений: сколько чтений/записей оборвано за
-        // секунду. Строка — только когда рвали (в гладкой игре тишина).
-        {
-            static double slowBudgetLast = 0.0;
-            static unsigned long long slowBudgetPrev = 0;
-            static unsigned long long slowStormPrev = 0;
-            const double nowB = ImGui::GetTime();
-            if (nowB - slowBudgetLast >= 1.0) {
-                slowBudgetLast = nowB;
-                const unsigned long long ab = esp_budget_aborts_total();
-                const unsigned long long st = esp_storm_skips_total();
-                if (ab > slowBudgetPrev || st > slowStormPrev)
-                    LogLine("бюджет: за секунду оборвано %llu чтений/записей (шторм %llu)",
-                            ab - slowBudgetPrev, st - slowStormPrev);
-                slowBudgetPrev = ab; slowStormPrev = st;
-            }
-        }
         g_frame_done.store(true);
     }
     LogClose();

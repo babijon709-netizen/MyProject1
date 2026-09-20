@@ -1,6 +1,5 @@
 #include "process.h"
 #include "game.h"
-#include "Android_draw/draw.h"   // screen_config_refresh: метрики дисплея фоном
 #include "game_offsets_active.h"   // go::CurrentBuild()
 
 #include <atomic>
@@ -182,11 +181,6 @@ void start_attach_thread() {
                 g_esp_attached = false;
                 g_target_pid = -1;
             }
-            // Метрики дисплея фоном (binder в SurfaceFlinger): main их больше
-            // не спрашивает каждый кадр (там binder вставал на сотни мс), а
-            // размер окна видит не всё — поворот на 180° и смену дисплея
-            // ловим здесь.
-            screen_config_refresh();
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
     });

@@ -1,5 +1,4 @@
 #include "esp_draw.h"
-#include "game.h"                // esp_get_boxes/маркеры, esp_reads_aborted
 #include "aim.h"                 // AIM_MODE_MEMORY
 #include "main.h"              // displayInfo, native_window_screen_*
 #include "app_state.h"         // g_state
@@ -49,11 +48,7 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_always_day(g_state.always_day);
         esp_set_marker_max_distance(g_state.marker_dist);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
-        // Чтения оборваны бюджетом: пустой скан — это «не прочиталось», а не
-        // «никого нет». Держим прошлые боксы (они максимум на кадр старше),
-        // иначе ESP мигает в провалах игры.
-        std::vector<EspBox> fresh = esp_get_boxes((int)sw, (int)sh);
-        if (!fresh.empty() || !esp_reads_aborted()) s_boxes = std::move(fresh);
+        s_boxes = esp_get_boxes((int)sw, (int)sh);
     }
     return s_boxes;
 }
@@ -340,13 +335,7 @@ void DrawEspOverlay() {
         float rr = 1.f, rg = 1.f, rb = 1.f;
         ImGui::ColorConvertHSVtoRGB(rainbow_hue, 0.85f, 1.0f, rr, rg, rb);
         const ImU32 rainbow_col = IM_COL32((int)(rr * 255.f), (int)(rg * 255.f), (int)(rb * 255.f), 255);
-        // Тот же stale-while-revalidate, что у боксов: оборванный скан держит
-        // прошлые метки вместо мигания.
-        static std::vector<EspMarker> s_last_markers;
-        std::vector<EspMarker> markers = esp_get_markers();
-        if (markers.empty() && esp_reads_aborted()) markers = s_last_markers;
-        else s_last_markers = markers;
-        for (const EspMarker& marker : markers) {
+        for (const EspMarker& marker : esp_get_markers()) {
             if (!marker.name[0]) continue;
             if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
             ImU32 col = marker.rainbow ? rainbow_col
