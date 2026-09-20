@@ -4288,16 +4288,62 @@ static bool discover_gameobject_name_offset(const std::vector<uint64_t>& nodes) 
     return false;
 }
 
-static bool resolve_skeleton_layout(uint64_t sample_transform) {
+// Раскладка прочитала трансформ И дала правдоподобную мировую позицию.
+// Одного чтения мало: комбинация может читать чужую/протухшую иерархию —
+// конечные числа не из того места. Сэмпл здесь — кость игрока, она обязана
+// лежать в мире.
+static bool skeleton_layout_reads_plausible(const TransformHierarchyLayout& layout,
+                                             uint64_t sample_transform) {
     Vec3 probe{};
+    return read_transform_hierarchy_layout(sample_transform, layout, probe) &&
+           vec3_is_finite(probe) && position_looks_like_world_space(probe);
+}
+
+// Отказов подряд действующей раскладке, прежде чем перебирать заново.
+// Раскладка одна на сборку игры (смещения структур Unity одинаковы у всех
+// сущностей), поэтому одиночный отказ — это рваное чтение (спавн как раз
+// перестраивает иерархию), а не смена раскладки. Прежний код сносил общую
+// раскладку по первому же такому сэмплу и перенимал первую читающуюся
+// комбинацию — после каждого нового игрока рядом все чужие скелеты прыгали
+// и гасли на несколько кадров, пока следующий билд не возвращал раскладку
+// обратно (в логе: новый адрес + 3-4 кадра без костей без тормоза).
+static int      g_skeleton_layout_miss = 0;
+static constexpr int kSkeletonLayoutMissLimit = 4;
+// Последний трансформ, успешно прочитанный действующей раскладкой: по нему
+// отличаем «сэмплы рваные» (якорь читается — раскладку держим) от «раскладка
+// правда умерла» (якорь тоже не читается — переучиваем).
+static uint64_t g_skeleton_layout_anchor = 0;
+
+static bool resolve_skeleton_layout(uint64_t sample_transform) {
     if (g_skeleton_layout_valid) {
-        if (read_transform_hierarchy_layout(sample_transform, g_skeleton_layout, probe)) return true;
+        if (skeleton_layout_reads_plausible(g_skeleton_layout, sample_transform)) {
+            g_skeleton_layout_anchor = sample_transform;
+            g_skeleton_layout_miss = 0;
+            return true;
+        }
+        // Действующая не прочитала сэмпл — но сносить её по одному сэмплу
+        // нельзя: этот билд скелета не состоится (пересборка через 20 кадров,
+        // когда иерархия устоится), а остальные игроки продолжают читать по
+        // действующей.
+        if (++g_skeleton_layout_miss < kSkeletonLayoutMissLimit) return false;
+        g_skeleton_layout_miss = 0;
+        if (g_skeleton_layout_anchor &&
+            skeleton_layout_reads_plausible(g_skeleton_layout, g_skeleton_layout_anchor))
+            return false;   // раскладка жива, сэмплы рваные — держим её
         g_skeleton_layout_valid = false;
+        g_skeleton_layout_anchor = 0;
+        static double s_layout_relearn_at = -1e9;
+        const double now = memio::now_seconds();
+        if (now - s_layout_relearn_at >= 2.0) {
+            s_layout_relearn_at = now;
+            LogLine("скелет: раскладка переучивается (4 отказа подряд, якорь тоже не читается)");
+        }
     }
     if (g_transform_hierarchy_layout_valid &&
-        read_transform_hierarchy_layout(sample_transform, g_transform_hierarchy_layout, probe)) {
+        skeleton_layout_reads_plausible(g_transform_hierarchy_layout, sample_transform)) {
         g_skeleton_layout = g_transform_hierarchy_layout;
         g_skeleton_layout_valid = true;
+        g_skeleton_layout_anchor = sample_transform;
         return true;
     }
     const uint64_t base_offsets[][2] = {{0x38, 0x40}, {0x18, 0x20}};
@@ -4313,9 +4359,10 @@ static bool resolve_skeleton_layout(uint64_t sample_transform) {
                     layout.indices_offset = offsets[1];
                     layout.matrices_indirect = matrices_indirect != 0;
                     layout.indices_indirect = indices_indirect != 0;
-                    if (read_transform_hierarchy_layout(sample_transform, layout, probe)) {
+                    if (skeleton_layout_reads_plausible(layout, sample_transform)) {
                         g_skeleton_layout = layout;
                         g_skeleton_layout_valid = true;
+                        g_skeleton_layout_anchor = sample_transform;
                         return true;
                     }
                 }

@@ -1206,8 +1206,11 @@ std::vector<EspMarker> esp_get_markers() {
         result.push_back(marker);
     }
 
-    std::sort(result.begin(), result.end(), [](const EspMarker& a, const EspMarker& b) {
-        return a.distance < b.distance;
+    // Порядок стабильный: ничьи (перечитываемый шум зверей/ботов или два узла
+    // на одной глубине) держат порядок сканирования реестра, а не тасуются
+    // каждый кадр — иначе прореживание ниже прыгало бы между соседними пилюлями.
+    std::stable_sort(result.begin(), result.end(), [](const EspMarker& a, const EspMarker& b) {
+        return floorf(a.distance * 2.0F) < floorf(b.distance * 2.0F);
     });
 
     // Rock clusters put several nodes within a couple of metres, which would
