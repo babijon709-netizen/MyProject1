@@ -869,8 +869,9 @@ float TabContent(int tab, float dt, float cW) {
         // базы перед рейдом. Пока он включён, аим молчит: точка прицела
         // считается от глаза персонажа, а камера улетела от него.
         SHdr(XS("Фрикам"));
-        CardBg(Layout::RowH * 3.f + Layout::SliderH);
+        CardBg(Layout::RowH * 4.f + Layout::SliderH);
         ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
+        ToggleRow("##fc2", XS("Кнопка на экране"), &g_state.freecam_btn_show, g_state.a_freecam_btn_show);
         SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
                   1.f, 60.f, XS("%.0f м/с"), false, false, g_state.sl_freecam, dt);
         {
@@ -885,7 +886,7 @@ float TabContent(int tab, float dt, float cW) {
             }
         }
         {
-            // Кнопка настройки положения экркранной кнопки фрикама (квадрата
+            // Кнопка настройки положения экранной кнопки фрикама (квадрата
             // с глазом) — тем же тапом по экрану, что и джойстик.
             const float rowH = Layout::RowH, inset = Layout::Inset;
             const float avW = ImGui::GetContentRegionAvail().x;
@@ -1541,6 +1542,7 @@ void RenderMenu() {
     Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
     Tick(g_state.a_freecam_on,  g_state.freecam_on,  dt);
+    Tick(g_state.a_freecam_btn_show, g_state.freecam_btn_show, dt);
     ApplyTheme();
 
     if (g_cfgLoadedIdx >= 0 && g_cfgLoadedIdx < kMaxConfigs)

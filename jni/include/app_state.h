@@ -57,6 +57,8 @@ struct AppState {
     // -1 = не задана (дефолт — справа по центру). Ставится тапом в
     // «Разное → Фрикам → Настроить кнопку», живёт до перезапуска.
     float freecam_btn_x = -1.f, freecam_btn_y = -1.f;
+    // Видимость экранной кнопки фрикама (тумблер «Кнопка на экране»).
+    bool  freecam_btn_show = true;
     // Счётчик игроков (пилюля «Противники»): доли экрана = её ЦЕНТР, -1 = не
     // задан (дефолт — верх по центру). Задаётся тапом в Опциях → Худ, живёт
     // только до перезапуска — как и остальные калибровки.
@@ -88,6 +90,7 @@ struct AppState {
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
     float a_xray_on = 0;
     float a_freecam_on = 0;
+    float a_freecam_btn_show = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam;
 };

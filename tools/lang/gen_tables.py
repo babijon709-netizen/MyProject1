@@ -155,6 +155,7 @@ UI_EN = {
     'Тапни куда поставить джойстик фрикама': 'Tap where to put the freecam joystick',
     'Джойстик фрикама сохранён': 'Freecam joystick saved',
     'Настроить кнопку': 'Set up the button',
+    'Кнопка на экране': 'On-screen button',
     'Тапни куда поставить кнопку фрикама': 'Tap where to put the freecam button',
     'Кнопка фрикама сохранена': 'Freecam button saved',
     'Вперёд': 'Forward', 'Назад': 'Back', 'Вверх': 'Up', 'Вниз': 'Down',

@@ -54,6 +54,7 @@ static const LangPair kUiEn[] = {
     {"Интерфейс", "Interface"},
     {"Искать до", "Search up to"},
     {"Камера", "Camera"},
+    {"Кнопка на экране", "On-screen button"},
     {"Кнопка фрикама сохранена", "Freecam button saved"},
     {"Конфиг", "Config"},
     {"Конфиг загружен", "Config loaded"},
