@@ -1043,7 +1043,14 @@ static bool rebuild_marker_entities() {
         return false;
     }
     // Конец цикла: словарь пройден либо уперлись в лимит списка (512).
-    // Подменяем список разом.
+    // Порядок — по стабильному ключу, а не по порядку реестра: словарь игры
+    // при ресайзе тасует узлы, и без этого прореживание пилюль после каждого
+    // рескана перевыбирало бы победителя (метка прыгала бы между соседями).
+    std::sort(g_marker_scan_pending.begin(), g_marker_scan_pending.end(),
+              [](const MarkerEntity& a, const MarkerEntity& b) {
+                  if (a.identity != b.identity) return a.identity < b.identity;
+                  return a.transform < b.transform;
+              });
     g_marker_entities.swap(g_marker_scan_pending);
     marker_scan_abort();
     return true;
@@ -1215,7 +1222,10 @@ std::vector<EspMarker> esp_get_markers() {
 
     // Rock clusters put several nodes within a couple of metres, which would
     // stack their pills on top of each other: keep the nearest one of each
-    // label per screen neighbourhood.
+    // label per screen neighbourhood. 22 px, а не 30: два соседних объекта в
+    // полутора метрах друг от друга на дистанции 50 м дают ~28 px на экране —
+    // у каждого должна быть своя метка, иначе одна прыгает между ними, пока
+    // игрок стрейфится. Узлы кластера ближе ~1 м друг к другу на дальности остаются склеены.
     std::vector<EspMarker> thinned;
     thinned.reserve(result.size());
     for (const EspMarker& marker : result) {
@@ -1226,7 +1236,7 @@ std::vector<EspMarker> esp_get_markers() {
             // compare equal — for that category position alone decides.
             if (marker.kind != ESP_MARKER_PICKUP && strcmp(kept.name, marker.name) != 0) continue;
             float dx = kept.x - marker.x, dy = kept.y - marker.y;
-            if (dx * dx + dy * dy < 30.0F * 30.0F) { covered = true; break; }
+            if (dx * dx + dy * dy < 22.0F * 22.0F) { covered = true; break; }
         }
         if (covered) continue;
         thinned.push_back(marker);

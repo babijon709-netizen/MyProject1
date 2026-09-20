@@ -7173,6 +7173,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         Vec3 camera_position{};
         bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
         double nearest_distance_squared = INFINITY;
+        size_t nearest_index = s_transforms.size();
         size_t first_valid_index = s_transforms.size();
         Vec3 first_valid_position{};
         for (size_t index = 0; index < s_transforms.size(); ++index) {
@@ -7195,11 +7196,62 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             double dx = (double)candidate.x - camera_position.x, dy = (double)candidate.y - camera_position.y, dz = (double)candidate.z - camera_position.z;
             double distance_squared = dx * dx + dy * dy + dz * dz;
             if (std::isfinite(distance_squared) && distance_squared < nearest_distance_squared) {
-                nearest_distance_squared = distance_squared; local_entity_index = index; local = candidate;
+                nearest_distance_squared = distance_squared; nearest_index = index;
             }
         }
-        if (local_entity_index == s_transforms.size() && first_valid_index != s_transforms.size()) {
-            local_entity_index = first_valid_index; local = first_valid_position;
+        // Защёлка локального: выбор «ближайший к камере» флип-флопил на один
+        // кадр, когда соперник оказывался рядом (лог 09-20: два флипа за 162 с,
+        // каждый зажигал churn боксов и прыжок g_frame_local_pos). Трансформ
+        // локального стабилен между кадрами, а меняется только смертью,
+        // респауном или переподключением — тогда же меняется и g_local_player.
+        // Поэтому защёлкнутый адрес держится, пока он в списке и читается, и
+        // перевыбирается только по трём событиям ниже — а не по дистанции.
+        static uint64_t s_local_latch_addr = 0;
+        static int s_local_latch_miss = 0;
+        static uint64_t s_local_latch_trueid = 0;
+        const uint64_t true_local_id = g_local_player;
+        if (s_local_latch_addr != 0 && s_local_latch_trueid != 0 && true_local_id != 0 &&
+            true_local_id != s_local_latch_trueid) {
+            s_local_latch_addr = 0; // настоящий локальный сменился: перепеть
+        }
+        size_t latch_index = s_transforms.size();
+        if (s_local_latch_addr != 0) {
+            for (size_t i = 0; i < s_transforms.size(); ++i)
+                if (s_transforms[i] == s_local_latch_addr) { latch_index = i; break; }
+        }
+        if (latch_index == s_transforms.size() || !position_ok[latch_index]) {
+            // Защёлкнутого нет в списке или не читается (смерть/респаун/мир):
+            // перевыбор только по серии из 5 кадров — одиночный сбой чтения
+            // защёлку не роняет.
+            if (++s_local_latch_miss >= 5) { s_local_latch_addr = 0; s_local_latch_miss = 0; }
+        } else {
+            s_local_latch_miss = 0;
+            // Подстраховка на случай недоступного true_id: кто-то вплотную к
+            // камере (<2 м), а защёлкнутый далеко (>10 м) — защёлка чужая.
+            if (has_camera_position && nearest_index != s_transforms.size() &&
+                nearest_index != latch_index && nearest_distance_squared < 2.0 * 2.0) {
+                const double ldx = (double)positions[latch_index].x - camera_position.x;
+                const double ldy = (double)positions[latch_index].y - camera_position.y;
+                const double ldz = (double)positions[latch_index].z - camera_position.z;
+                if (ldx * ldx + ldy * ldy + ldz * ldz > 10.0 * 10.0) s_local_latch_addr = 0;
+            }
+        }
+        if (s_local_latch_addr == 0) {
+            // Свободная защёлка: цепляемся за ближайшего (на входе в игру
+            // камера сидит на локальном — он и есть ближайший), без камеры —
+            // за первого годного, как раньше.
+            size_t pick = nearest_index;
+            if (pick == s_transforms.size()) pick = first_valid_index;
+            if (pick != s_transforms.size()) {
+                s_local_latch_addr = s_transforms[pick];
+                s_local_latch_miss = 0;
+                s_local_latch_trueid = true_local_id;
+            }
+            latch_index = pick;
+        }
+        if (latch_index != s_transforms.size()) {
+            local_entity_index = latch_index;
+            local = positions[latch_index];
         }
         has_local_position = local_entity_index != s_transforms.size();
         if (!has_local_position) {
