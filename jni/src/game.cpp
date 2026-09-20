@@ -6941,7 +6941,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
         if (it != s_watch_gap.end() && it->second > 0 && watch_allow())
             LogLine("визуал: бокс 0x%llx ВЕРНУЛСЯ через %d кадр(а), отказов чтения за кадр %llu%s",
                     (unsigned long long)box.id, it->second,
-                    fails_delta, local_flipped ? ", локальный сменился" : "");
+                    fails_delta, local_flipped ? ", LOCAL-FLIP" : "");
     }
 
     // Пропущенные в этом кадре (только главный путь; gap 0 = был в прошлом).
@@ -6953,20 +6953,24 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
             auto it = s_watch_gap.find(player);
             if (it == s_watch_gap.end() || it->second != 0) continue;
             if (!watch_allow()) continue;
+            // Коды причин (почему бокс пропущен): local = сам стал локальным,
+            // null = нулевой адрес, dup = задавлен дубликатом того же uid,
+            // filter = отбраковал фильтр позиции, dist = дальше 300м,
+            // bottom/top = точка не спроецировалась, h2px = высота < 2px.
             const char* why = "?";
             switch (reason) {
-                case 'L': why = "стал локальным"; break;
-                case 'Z': why = "нулевой адрес"; break;
-                case 'S': why = "задавлен дубликатом"; break;
-                case 'P': why = "фильтр позиции"; break;
-                case 'D': why = "дистанция"; break;
-                case 'B': why = "низ не спроецировался"; break;
-                case 'T': why = "верх не спроецировался"; break;
-                case 'H': why = "высота < 2px"; break;
+                case 'L': why = "local"; break;
+                case 'Z': why = "null"; break;
+                case 'S': why = "dup"; break;
+                case 'P': why = "filter"; break;
+                case 'D': why = "dist"; break;
+                case 'B': why = "bottom"; break;
+                case 'T': why = "top"; break;
+                case 'H': why = "h2px"; break;
             }
             LogLine("визуал: бокс 0x%llx ПРОПАЛ: %s, отказов чтения за кадр %llu%s",
                     (unsigned long long)player, why,
-                    fails_delta, local_flipped ? ", локальный сменился" : "");
+                    fails_delta, local_flipped ? ", LOCAL-FLIP" : "");
         }
     }
 
