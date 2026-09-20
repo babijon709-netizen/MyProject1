@@ -155,11 +155,22 @@ int main(int argc, char* argv[]) {
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             if (nowSec - lastHist >= 1.0) {
                 lastHist = nowSec;
-                LogLine("кадргист: %u/%u/%u/%u/%u (<20/<34/<50/<100/>=100мс), худший %lu %.0fмс (esp %.0f аим %.0f фарм %.0f меню %.0f фри %.0f своп %.0f)",
+                // Сколько чтений памяти пришлось на кадр за секунду и сколько из
+                // них отказало: отличает «аим раздул объём чтений» от «каждое
+                // чтение ждёт в ядре» (см. esp_mem_reads_total).
+                static unsigned long long lastReads = 0, lastFails = 0;
+                const unsigned long long readsNow = esp_mem_reads_total();
+                const unsigned long long failsNow = esp_mem_read_fails_total();
+                const unsigned frames = hist[0] + hist[1] + hist[2] + hist[3] + hist[4];
+                const double readsPerFrame = frames ? (double)(readsNow - lastReads) / (double)frames : 0.0;
+                const unsigned long long failsDelta = failsNow - lastFails;
+                lastReads = readsNow; lastFails = failsNow;
+                LogLine("кадргист: %u/%u/%u/%u/%u (<20/<34/<50/<100/>=100мс), худший %lu %.0fмс (esp %.0f аим %.0f фарм %.0f меню %.0f фри %.0f своп %.0f) чтений/кадр %.0f отказов %llu",
                         hist[0], hist[1], hist[2], hist[3], hist[4], worstFrame, worst,
                         worstSplit[1] - worstSplit[0], worstSplit[2] - worstSplit[1],
                         worstSplit[3] - worstSplit[2], worstSplit[4] - worstSplit[3],
-                        worstSplit[5] - worstSplit[4], worstSplit[6] - worstSplit[5]);
+                        worstSplit[5] - worstSplit[4], worstSplit[6] - worstSplit[5],
+                        readsPerFrame, failsDelta);
                 hist[0] = hist[1] = hist[2] = hist[3] = hist[4] = 0;
                 worst = 0.0; worstFrame = 0;
             }

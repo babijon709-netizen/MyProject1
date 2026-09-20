@@ -6480,6 +6480,12 @@ void esp_mem_frame_begin() { g_mem.frame_begin(); }
 // ничего не делал до перезапуска приложения.
 bool esp_alive_check() { return g_mem.verify(); }
 
+// Счётчики чтений памяти для диагностики штормов (см. кадргист в main.cpp):
+// отличают «читаем больше» (аим раздул объём) от «читаем так же, но каждое
+// чтение ждёт» (ядро/память устройства под давлением).
+unsigned long long esp_mem_reads_total() { return g_mem.reads_total(); }
+unsigned long long esp_mem_read_fails_total() { return g_mem.read_fails_total(); }
+
 // KCC.Move.Position: the simulated character position (capsule bottom) the
 // game itself moves the character with. Independent of the discovered
 // PlayerManager position field, and validated by the KCC back-reference.
@@ -7085,7 +7091,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
             if (g_frame_transforms_lost.size() > 256) g_frame_transforms_lost.clear();
         }
-        s_transforms = std::move(refreshed);
+        if (!overlap && g_world_change_streak < 3) {
+            // Рваный кадр списка игроков: подмена без пересечения со снапшотом,
+            // серией не подтверждена (лог 09-20: состав +0-9/+7-0 внутри шторма
+            // чтения — покомпонентная гонка ниже проверки стабильности указателя
+            // и счётчика в read_configured_player_transforms). Старый список
+            // целее нового: держим его, иначе 9 боксов из 10 гаснут на 1-2
+            // кадра. Подтверждённая серия (>=3) — настоящая смена мира — идёт
+            // обычным путём со сбросом кэшей выше.
+        } else {
+            s_transforms = std::move(refreshed);
+        }
         g_frame_transforms_empty_streak = 0;
     } else if (++g_frame_transforms_empty_streak > 10) {
         // List gone for a while: the world is being torn down / reloaded —

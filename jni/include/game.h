@@ -105,6 +105,8 @@ EspAttachState esp_attach_state();
 void          esp_mem_frame_begin();
 // Привязка ещё читается? (одно чтение; ловит перезапуск процесса и отобранный доступ)
 bool          esp_alive_check();
+unsigned long long esp_mem_reads_total();
+unsigned long long esp_mem_read_fails_total();
 void        esp_set_skeleton_enabled(bool enabled);
 // Enable the ore / animal / loot / pickup / vehicle / bot marker scan
 // (all off = no work, unless the bot aim feed below is on).
