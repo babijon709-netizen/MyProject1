@@ -5,6 +5,7 @@
 #include <cmath>
 #include "imgui.h"
 #include "imgui_internal.h"   // ImClamp / ImMax / ImMin
+#include "widgets.h"          // g_win.closing: лок тапов, пока окно улетает
 
 inline float Lerpf(float a, float b, float t)   { return a + (b - a) * t; }
 inline float Clamp01(float t)                    { return t < 0.f ? 0.f : t > 1.f ? 1.f : t; }
@@ -35,6 +36,7 @@ inline float WrapDeg180(float d) {
 
 
 inline bool WasTappedHere() {
+    if (g_win.closing) return false; // улетающее в пилюлю окно тапов не принимает
     const auto& io = ImGui::GetIO();
     if (!io.MouseReleased[0]) return false;
     auto min = ImGui::GetItemRectMin();

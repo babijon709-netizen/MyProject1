@@ -924,6 +924,8 @@ void CenterMenuOnDisplay() {
     g_win.pos.y = (dh - g_win.h) * 0.5f;
     g_win.tpos = g_win.pos;
     g_win.follow.reset(g_win.pos.x, g_win.pos.y);
+    g_win.jelly.reset(g_win.w, g_win.h);
+    g_win.prevPos = g_win.pos;
     g_win.dragging = false;
     g_win.resizing = false;
 }
@@ -1804,25 +1806,41 @@ void RenderMenu() {
         return; // пока калибруемся, меню не рисуем
     }
 
-    // Появление из кнопки: в кадре открытия запоминаем центр пилюли-счётчика
-    // (это она открывает меню тапом) и запускаем раскрытие с нуля. Цель
-    // позиции схлопываем в рисуемую — дёргаться нечему.
+    // Появление из кнопки / улетание в неё. В кадре открытия запоминаем центр
+    // пилюли-счётчика (это она открывает меню тапом) и запускаем раскрытие;
+    // в кадре закрытия — то же, но кривая идёт задом наперёд: окно сначала
+    // слегка раздувается (перелёт back-кривой) и втягивается в пилюлю.
     {
         static bool s_wasOpen = false;
-        if (menu_open && !s_wasOpen) {
+        auto pillCenter = [&]() -> ImVec2 {
             const HudCounterGeom& hg = HudCounterLast();
             if (hg.bW > 0.f && hg.bH > 0.f)
-                g_win.openFrom = {hg.bX + hg.bW * 0.5f, hg.bY + hg.bH * 0.5f};
-            else
-                g_win.openFrom = {g_win.pos.x + g_win.w * 0.5f, g_win.pos.y};
-            g_win.openAnim = 0.f;
+                return {hg.bX + hg.bW * 0.5f, hg.bY + hg.bH * 0.5f};
+            return {g_win.pos.x + g_win.w * 0.5f, g_win.pos.y};
+        };
+        if (menu_open && !s_wasOpen) {
+            g_win.openFrom = pillCenter();
+            // Разворот посреди закрытия: продолжаем с текущего кадра, а не с нуля.
+            g_win.openAnim = g_win.closing ? g_win.closeAnim : 0.f;
+            g_win.closing = false;
             g_win.tpos = g_win.pos;
             g_win.follow.reset(g_win.pos.x, g_win.pos.y);
+            g_win.prevPos = g_win.pos;
+        }
+        if (!menu_open && s_wasOpen) {
+            g_win.openFrom = pillCenter();
+            g_win.closing = true;
+            g_win.closeAnim = 1.f;
+            g_win.dragging = false;
+            g_win.resizing = false;
+            g_win.tpos = g_win.pos;
+            g_win.follow.reset(g_win.pos.x, g_win.pos.y);
+            g_win.prevPos = g_win.pos;
         }
         s_wasOpen = menu_open;
     }
 
-    if (!menu_open) return;
+    if (!menu_open && !g_win.closing) return;
 
     float WW = g_win.w, WH = g_win.h;
     const float hH_ = Layout::HeaderH;
@@ -1836,7 +1854,7 @@ void RenderMenu() {
         if (!io.MouseDown[0]) g_win.resizing = false;
 
         bool anyOverlay = g_sheet.visible || (g_pop.visible && !g_pop.closing);
-        if (!anyOverlay && io.MouseClicked[0] && inResize && g_win.openAnim >= 1.f) {
+        if (!anyOverlay && io.MouseClicked[0] && inResize && g_win.openAnim >= 1.f && !g_win.closing) {
             g_win.resizing         = true;
             g_win.resizeTouchStart = io.MousePos;
             g_win.sizeStart        = {g_win.w, g_win.h};
@@ -1853,7 +1871,7 @@ void RenderMenu() {
     {
         if (!io.MouseDown[0]) g_win.dragging = false;
 
-        if (!g_win.dragging && io.MouseDown[0] && !(g_sheet.visible || (g_pop.visible && !g_pop.closing)) && !g_win.resizing && g_win.openAnim >= 1.f) {
+        if (!g_win.dragging && io.MouseDown[0] && !(g_sheet.visible || (g_pop.visible && !g_pop.closing)) && !g_win.resizing && g_win.openAnim >= 1.f && !g_win.closing) {
             float tx = io.MouseClickedPos[0].x, ty = io.MouseClickedPos[0].y;
             // Тащим окно за верхнюю шапку (по всей ширине). Кружки светофора
             // больше не исключение: они декор и тапов не обрабатывают.
@@ -1888,18 +1906,23 @@ void RenderMenu() {
 
     // Появление из кнопки / желе-следование. Кривые — готовые из интернета
     // (см. anim_web.h), здесь только обвязка: что анимируем и куда.
-    const bool popping = g_win.openAnim < 1.f;
-    if (popping)
+    const bool popping = g_win.openAnim < 1.f || g_win.closing;
+    if (g_win.openAnim < 1.f && !g_win.closing)
         g_win.openAnim = ImMin(1.f, g_win.openAnim + dt / 0.40f);
-    if (g_win.tpos.x < 0.f) { g_win.tpos = g_win.pos; g_win.follow.reset(g_win.pos.x, g_win.pos.y); }
+    if (g_win.closing) {
+        g_win.closeAnim -= dt / 0.40f;
+        if (g_win.closeAnim <= 0.f) { g_win.closing = false; return; }
+    }
+    if (g_win.tpos.x < 0.f) { g_win.tpos = g_win.pos; g_win.follow.reset(g_win.pos.x, g_win.pos.y); g_win.jelly.reset(g_win.w, g_win.h); g_win.prevPos = g_win.pos; }
 
     WinRectAnim winAnim;
     if (popping) {
         // Выскакивание из кнопки: окно растёт easeOutBack (easings.net) из точки
         // открытия. Высота идёт чуть раньше ширины — выходит сквош-и-стретч:
         // окно деформируется и принимает свою форму с лёгким перелётом.
+        // При закрытии та же кривая идёт назад — окно втягивается в пилюлю.
         const ImVec2 o = g_win.openFrom;
-        const float t = g_win.openAnim;
+        const float t = g_win.closing ? g_win.closeAnim : g_win.openAnim;
         const float sw = NetEaseOutBack(t);
         const float sh = NetEaseOutBack(ImMin(1.f, t * 1.12f));
         const float aw = ImMax(1.f, g_win.w * ImMax(0.f, sw));
@@ -1908,9 +1931,12 @@ void RenderMenu() {
         const ImVec2 cc = {o.x + (tc.x - o.x) * sw, o.y + (tc.y - o.y) * sw};
         winAnim.arm(g_win, {cc.x - aw * 0.5f, cc.y - ah * 0.5f}, aw, ah);
         g_win.follow.moveInstant(g_win.pos.x, g_win.pos.y);
+        g_win.jelly.moveInstant(aw, ah);
+        g_win.prevPos = g_win.pos;
     } else {
-        // Желе: second-order dynamics догоняет цель за пальцем с болтанкой.
-        g_win.follow.update(dt > 0.f ? dt : 1e-4f, g_win.tpos.x, g_win.tpos.y);
+        // Желе-позиция: second-order dynamics догоняет цель за пальцем с болтанкой.
+        const float fdt = dt > 0.f ? dt : 1e-4f;
+        g_win.follow.update(fdt, g_win.tpos.x, g_win.tpos.y);
         g_win.pos.x = g_win.follow.posX;
         g_win.pos.y = g_win.follow.posY;
         float dw2 = 0.f, dh2 = 0.f;
@@ -1920,6 +1946,21 @@ void RenderMenu() {
             g_win.pos.y = ImClamp(g_win.pos.y, 0.f, ImMax(0.f, dh2 - g_win.h));
             g_win.follow.setPos(g_win.pos.x, g_win.pos.y);
         }
+        // Желе-окно: размер тоже едет на готовой пружине, а цель ей задаёт
+        // скорость окна — тянемся вдоль движения, поперёк жмёмся обратной
+        // величиной (объём +- сохраняем). Идея сквоша: r/Unity2D «Procedural
+        // Squash And Stretch» (scaleX = 1+v*k, scaleY = 1/scaleX).
+        if (g_win.prevPos.x < -0.5f) g_win.prevPos = g_win.pos;
+        const float vx = (g_win.pos.x - g_win.prevPos.x) / fdt;
+        const float vy = (g_win.pos.y - g_win.prevPos.y) / fdt;
+        g_win.prevPos = g_win.pos;
+        const float ex = ImClamp(vx / 900.f, -1.f, 1.f);
+        const float ey = ImClamp(vy / 900.f, -1.f, 1.f);
+        const float sx = (1.f + 0.12f * fabsf(ex)) / (1.f + 0.12f * fabsf(ey));
+        const float sy = (1.f + 0.12f * fabsf(ey)) / (1.f + 0.12f * fabsf(ex));
+        g_win.jelly.update(fdt, g_win.w * sx, g_win.h * sy);
+        winAnim.arm(g_win, g_win.pos,
+                    ImMax(80.f, g_win.jelly.posX), ImMax(80.f, g_win.jelly.posY));
     }
     WW = g_win.w; WH = g_win.h;
 

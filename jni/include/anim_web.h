@@ -31,6 +31,7 @@ struct NetSecondOrder2D {
     float velX = 0.f, velY = 0.f;        // состояние: шаг позиции за кадр
 
     NetSecondOrder2D() { configure(f, z, r); } // glue
+    NetSecondOrder2D(float nf, float nz, float nr) : f(nf), z(nz), r(nr) { configure(f, z, r); } // glue
 
     void configure(float nf, float nz, float nr) {
         f = nf; z = nz; r = nr; // glue: запоминаем параметры
