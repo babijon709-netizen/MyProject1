@@ -85,31 +85,6 @@ static constexpr int kAccentCustom = 8;
 static constexpr int kAccentCount = 9;   // 8 пресетов + свой
 
 
-// Какой штатный поток переноса ускорен: по нему на устройстве видно, что
-// контроллер нашёл именно «Забрать всё», а не чужой await на те же 0.35 с.
-static const char* LootKindText(loot::Kind kind) {
-    switch (kind) {
-        case loot::Kind::Container: return XS("окно лута");
-        case loot::Kind::Pickup:    return XS("зона подбора");
-        case loot::Kind::FastLoad:  return XS("быстрая загрузка");
-        default:                    return XS("поток не определён");
-    }
-}
-
-// Причина отказа мгновенного подбора — строкой в меню (журнал выключен).
-static const char* LootReasonText(loot::Reason reason) {
-    switch (reason) {
-        case loot::Reason::Image:    return XS("образ игры не совпал с таблицей");
-        case loot::Reason::Patched:  return XS("в процессе остался старый патч — перезапустите игру");
-        case loot::Reason::Code:     return XS("код образа не читается");
-        case loot::Reason::Helper:   return XS("PlayerLoopHelper не найден");
-        case loot::Reason::Runners:  return XS("список игровых циклов не читается");
-        case loot::Reason::Read:     return XS("память ожидания не читается");
-        case loot::Reason::Write:    return XS("запись в кучу отклонена");
-        case loot::Reason::Timer:    return XS("таймер ожидания вне границ");
-        default:                     return XS("причина неизвестна");
-    }
-}
 
 float TabContent(int tab, float dt, float cW) {
     float sY = ImGui::GetCursorPosY();
@@ -960,45 +935,6 @@ float TabContent(int tab, float dt, float cW) {
         const bool oldLoot = vm.fast_loot;
         ToggleRow("##instantloot", XS("Мгновенный подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
         if (oldLoot != vm.fast_loot) esp_loot_tick(vm.fast_loot);
-        const auto lootStatus = esp_loot_diagnostics();
-        if (lootStatus.status == loot::Status::Failed) {
-            // Журнал в сборке выключен, поэтому причина и число к ней показываются
-            // здесь: по ним видно, что именно не сошлось (см. loot::Reason).
-            ImGui::TextDisabled("%s: %s", XS("Подбор: не применено"),
-                                LootReasonText(lootStatus.reason));
-            ImGui::TextDisabled("%s: %llX", XS("Данные"),
-                                (unsigned long long)lootStatus.detail);
-            if (lootStatus.reason == loot::Reason::Write)
-                ImGui::TextDisabled("%s", esp_loot_refusal());   // строка maps, без перевода
-        } else if (lootStatus.status == loot::Status::Active)
-            ImGui::TextDisabled("%s (%s)", XS("Подбор: работает"), LootKindText(lootStatus.kind));
-        else if (vm.fast_loot)
-            ImGui::TextDisabled("%s", XS("Ожидание открытого контейнера"));
-        // Поток с чужим патчем или изменившимся кодом отключается сам: показываем,
-        // что ускорена только часть штатных переносов, а не молчим об этом.
-        if (lootStatus.flows && lootStatus.flows != 7u)
-            ImGui::TextDisabled("%s: %u/3", XS("Потоки переноса"),
-                                (unsigned)__builtin_popcount(lootStatus.flows));
-        if (lootStatus.instant)
-            // Патч задержки на месте: забор целого окна выполняется за один
-            // проход state machine — видимого «по слоту» быть не должно.
-            ImGui::TextDisabled("%s: %u/3", XS("Подбор: мгновенно"),
-                                (unsigned)__builtin_popcount(lootStatus.instant));
-        if (lootStatus.hooked) {
-            // Инструкции Run в процессе не совпадают с образом: чужой хук или
-            // модифицированный клиент. Подбору это не мешает — принадлежность
-            // ожидания доказывается именами классов и указателем метода делегата,
-            // а не телом Run, — но слова показываются как прочитались.
-            // Сколько потоков затронуто — тоже часть диагноза: один изменённый
-            // Run похож на точечную чужую правку, три — на общий хук-движок.
-            ImGui::TextDisabled("%s (%u/3): %llX %08X %08X %08X %08X %08X",
-                                XS("Код потока изменён"),
-                                (unsigned)__builtin_popcount(lootStatus.hooked),
-                                (unsigned long long)lootStatus.hooked_run,
-                                (unsigned)lootStatus.hooked_code[0], (unsigned)lootStatus.hooked_code[1],
-                                (unsigned)lootStatus.hooked_code[2], (unsigned)lootStatus.hooked_code[3],
-                                (unsigned)lootStatus.hooked_code[4]);
-        }
 
         SHdr(XS("Лимит FPS"));
         {
@@ -1025,6 +961,27 @@ float TabContent(int tab, float dt, float cW) {
             }
             ImGui::PopID();
             if (normal) ImGui::PopStyleColor();
+            // Какой режим выбран и что реально стоит в памяти игры: раньше видна
+            // была только подсветка кнопки, из-за чего состояние читалось плохо.
+            const auto fpsUi = esp_viewmodel_fps_ui();
+            const char* mode;
+            {
+                char modeBuf[24];
+                if (vm.fps_limit) { snprintf(modeBuf, sizeof(modeBuf), "%d FPS", vm.fps_limit); mode = modeBuf; }
+                else mode = XS("обычный");
+                // Статус: Active означает, что и поле лимита, и type pacing уже
+                // стоят так, как выбрано; Waiting — игра ещё не на связи.
+                const char* st = fpsUi.status == viewmodel::Status::Active ? XS("применено") :
+                                 fpsUi.status == viewmodel::Status::Waiting ? XS("ожидание") :
+                                 fpsUi.status == viewmodel::Status::Failed  ? XS("ошибка") :
+                                                                              XS("выкл");
+                if (vm.fps_limit) {
+                    ImGui::Text("%s: %s · %s (%s: %d)", XS("Режим"), mode, st,
+                                XS("поле игры"), fpsUi.field_value);
+                } else {
+                    ImGui::Text("%s: %s", XS("Режим"), mode);
+                }
+            }
         }
 
         // Иксрей: рендер отсекает всё ближе выбранной дистанции — стены и

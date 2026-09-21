@@ -4,11 +4,9 @@
 1. Misc toggles must animate from the same state used by the row: ToggleRow
    changes the bool but draws the supplied animation value, and forgetting its
    per-frame Tick leaves a functional toggle looking permanently disabled.
-2. Instant pickup must report WHY it refused. The log is compiled out in this
-   build (LogLine is a no-op and farmlog is gone from the tree), so the menu
-   lines are the only diagnostics that ever reach the device: every
-   loot::Reason has to be rendered, with its number, and a heap-gate refusal has
-   to show the /proc/<pid>/maps line it choked on.
+2. Instant pickup draws only the toggle row in the menu: the user asked for
+   NO diagnostic lines under it. The strict refusal diagnostics stay in the
+   loot::Diagnostics structure for tooling; the guard asserts the thin menu.
 """
 from pathlib import Path
 import re
@@ -25,27 +23,17 @@ for setting, anim in [('fov_enabled', 'a_custom_fov'),
     assert re.search(r'Tick\(\s*g_state\.' + anim +
                      r'\s*,\s*g_state\.viewmodel\.' + setting +
                      r'\s*,\s*dt\s*\)', menu), f'missing animation update: {setting}'
-reasons = ['Image', 'Patched', 'Code', 'Helper', 'Runners', 'Read', 'Write', 'Timer']
-body = menu.split('LootReasonText(loot::Reason reason)', 1)[1].split('\n}', 1)[0]
-for reason in reasons:
-    assert re.search(r'case loot::Reason::' + reason + r':\s*return XS\("[^"]+"\);',
-                     body), f'reason not rendered in the menu: {reason}'
-assert 'default:' in body, 'an unknown reason must still print something'
-assert re.search(r'lootStatus\.status == loot::Status::Failed.*?LootReasonText\(lootStatus\.reason\)',
-                 menu, re.S), 'the refusal line does not name the reason'
-assert re.search(r'LootReasonText\(lootStatus\.reason\)', menu)
-assert 'lootStatus.detail' in menu, 'the number behind the reason is not shown'
-assert 'esp_loot_refusal()' in menu, 'a heap-gate refusal must show its maps line'
-assert re.search(r'lootStatus\.flows\b', menu), 'partial flow availability is not shown'
-# A modified Run body is not a refusal, but it must not be hidden either: the
-# words read from the process are the only way to tell a hook from a bad table.
-assert re.search(r'lootStatus\.hooked\b', menu), 'a hooked flow is not reported'
-assert 'lootStatus.hooked_run' in menu and 'lootStatus.hooked_code' in menu, \
-    'the hooked flow must be shown with the words read from the process'
-# The whole-point indicator: with the code patch in place the pickup must
-# visibly switch to instant mode.
-assert re.search(r'lootStatus\.instant\b', menu) and 'Подбор: мгновенно' in menu, \
-    'the instant mode of pickup is not shown in the menu'
-assert 'LootKindText(lootStatus.kind)' in menu, 'the accelerated flow is not named'
+pickup = menu.split('SHdr(XS("Подбор"))', 1)[1].split('SHdr(', 1)[0]
+assert 'ToggleRow("##instantloot"' in pickup and 'esp_loot_tick' in pickup, 'the toggle must still tick'
+for banned in ('lootStatus', 'LootReasonText', 'LootKindText', 'esp_loot_diagnostics', 'esp_loot_refusal'):
+    assert banned not in pickup, 'diagnostics must not be rendered under the toggle: %s' % banned
+# The FPS section must spell out the selected mode and whether it stuck:
+# a highlighted button alone used to read as applied when nothing was.
+fps = menu.split('SHdr(XS("Лимит FPS"))', 1)[1].split('SHdr(', 1)[0]
+assert 'esp_viewmodel_fps_ui()' in fps, 'the fps status line is missing'
+assert 'viewmodel::Status::Active' in fps and 'viewmodel::Status::Failed' in fps, 'apply status not rendered'
+assert 'field_value' in fps, 'the real game field content is not shown'
+assert 'limits[i]' in fps, 'mode buttons are gone'
+
 print('misc toggles: row state and per-frame animation bindings: OK')
-print('instant pickup menu: every refusal reason, its number and the maps line: OK')
+print('instant pickup menu draws only the toggle; fps mode+apply status is rendered: OK')

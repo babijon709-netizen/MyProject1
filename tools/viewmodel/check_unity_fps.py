@@ -10,11 +10,11 @@ import struct
 import sys
 
 header = pathlib.Path(__file__).resolve().parents[2] / 'jni/src/fps_memory.h'
-layouts = re.findall(r'\{(0x[0-9a-f]+)ULL, (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+)\}', header.read_text())
+layouts = re.findall(r'\{(0x[0-9a-f]+)ULL, (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+)\}', header.read_text())
 if len(sys.argv) != 3 or len(layouts) != 2:
     raise SystemExit(__doc__)
 for filename, row in zip(sys.argv[1:], layouts):
-    build_id, getter, target, load = map(lambda v: int(v, 16), row)
+    build_id, getter, target, load, pacing_update, pacing_type = map(lambda v: int(v, 16), row)
     data = pathlib.Path(filename).read_bytes()
     assert data[:6] == b'\x7fELF\x02\x01', 'expected little-endian ELF64'
     assert struct.unpack_from('<H', data, 0x12)[0] == 183, 'expected AArch64'
@@ -35,6 +35,9 @@ for filename, row in zip(sys.argv[1:], layouts):
     # the Android pacing update. We do not execute or patch that native code.
     assert code[3:5] == (code[0], load ^ 0x00400000), 'setter targets another field'
     assert code[5] & 0xfc000000 == 0x14000000, 'setter tailcall changed'
+    assert read(pacing_update, 4) == struct.pack('<I', 0xf81e0ffe), 'pacing update fingerprint'
+    assert any(k == 1 and fl & 2 and va <= pacing_type < va+ms
+               for k, fl, off, va, _, fs, ms, al in segments), 'pacing type not writable'
     imm = ((code[0] >> 5) & 0x7ffff) << 2 | ((code[0] >> 29) & 3)
     if imm & (1 << 20):
         imm -= 1 << 21
@@ -42,4 +45,4 @@ for filename, row in zip(sys.argv[1:], layouts):
     assert actual_target == target, 'incorrect ADRP/LDR target'
     assert any(k == 1 and fl & 2 and va <= target < va+ms
                for k, fl, off, va, _, fs, ms, al in segments), 'target not writable'
-    print(f'{filename}: build ID, getter/setter, writable target {target:#x}: OK')
+    print(f'{filename}: build ID, getter/setter, writable target {target:#x}, pacing {pacing_type:#x}: OK')

@@ -223,25 +223,33 @@ static void config_tests() {
 static void fps_tests() {
     for (const auto& layout : kFpsLayouts) {
         FakeMemory io; FpsController<FakeMemory> c(io);
-        const uint64_t base=0x10000000, target=base+layout.target;
+        const uint64_t base=0x10000000, target=base+layout.target, pace=base+layout.pacing_type;
         io.set(base+0x318,layout.build_id);
         io.set(base+layout.getter,std::array<uint32_t,3>{0xf00083e8,layout.load_instruction,0xd65f03c0});
+        io.set(base+layout.pacing_update,uint32_t(0xf81e0ffe));
+        io.set(pace,int32_t(1));
         io.set(target,int32_t(60));
         c.tick(1,base,0); assert(io.reads==0 && io.writes==0);
-        c.tick(1,base,144); assert(c.status==Status::Active && io.get<int32_t>(target)==144);
+        c.tick(1,base,144);
+        assert(c.status==Status::Active && io.get<int32_t>(target)==144 && io.get<int32_t>(pace)==0);
+        // Settled mode is read-only: nothing keeps landing in the game process.
         for(int i=0;i<20;++i) c.tick(1,base,144);
-        c.tick(1,base,0); assert(io.get<int32_t>(target)==60 && !c.has_state());
+        auto count=io.writes; c.tick(1,base,144); c.tick(1,base,144);
+        assert(io.writes==count && c.status==Status::Active);
+        c.tick(1,base,0); assert(io.get<int32_t>(target)==60 && io.get<int32_t>(pace)==1 && !c.has_state());
         // Switching custom limits must not replace the original snapshot with
         // our previous override. Default restores each real starting value.
         for (int original : {-1, 30, 60, 90, 120, 144, 300}) {
             io.set(target,int32_t(original));
             for (int limit : {90, 120, 144, 120, 90}) {
                 c.tick(1,base,limit);
-                assert(c.status==Status::Active && io.get<int32_t>(target)==limit);
+                assert(c.status==Status::Active && io.get<int32_t>(target)==limit && io.get<int32_t>(pace)==0);
             }
             c.tick(1,base,0);
-            assert(c.status==Status::Off && !c.has_state() && io.get<int32_t>(target)==original);
+            assert(c.status==Status::Off && !c.has_state() && io.get<int32_t>(target)==original && io.get<int32_t>(pace)==1);
         }
+        // The pacing kind from the game is restored, not normalized to native.
+        for (int kind : {1, 2}) { io.set(pace,int32_t(kind)); c.tick(1,base,0); assert(io.get<int32_t>(pace)==kind); }
         // A failed mode switch or reset retains the same original for retry.
         io.set(target,int32_t(60)); c.tick(1,base,90);
         io.failWrite=target; c.tick(1,base,120); assert(c.status==Status::Failed);
@@ -250,10 +258,16 @@ static void fps_tests() {
         io.failRead=0; c.tick(1,base,0); assert(io.get<int32_t>(target)==60);
         c.tick(1,base,90); c.tick(1,base,91); // invalid request is fail-closed/default
         assert(c.status==Status::Off && io.get<int32_t>(target)==60);
+        io.set(pace,int32_t(1)); // восстановленный игровой kind носит прежнее число
         for (int limit : {90, 120, 144}) {
             io.set(target,int32_t(-1)); c.tick(1,base,limit); c.reset(true);
-            assert(io.get<int32_t>(target)==-1);
+            assert(io.get<int32_t>(target)==-1 && io.get<int32_t>(pace)==1);
         }
+        // An unknown pacing kind is fail-closed: cap still applies, status says
+        // the pacing half never did. The foreign value is never overwritten.
+        io.set(pace,int32_t(7)); c.tick(1,base,90);
+        assert(c.status==Status::Failed && io.get<int32_t>(target)==90 && io.get<int32_t>(pace)==7);
+        io.set(pace,int32_t(1)); c.reset(true);
         io.set(target,int32_t(60)); c.tick(1,base,144);
         io.set(target,int32_t(300)); c.tick(1,base,144); c.tick(1,base,0);
         assert(io.get<int32_t>(target)==300); // new graphics preset, not obsolete 60
@@ -262,7 +276,7 @@ static void fps_tests() {
         c.tick(1,base,144); io.failWrite=target; c.tick(1,base,0);
         assert(c.has_state() && c.status==Status::Failed);
         io.failWrite=0; c.tick(1,base,0); assert(io.get<int32_t>(target)==90);
-        io.failRead=target; auto count=io.writes; c.tick(1,base,144);
+        io.failRead=target; count=io.writes; c.tick(1,base,144);
         assert(c.status==Status::Failed && io.writes==count); io.failRead=0;
         io.set(target,int32_t(0x12345678)); c.tick(1,base,144); assert(io.writes==count);
         io.set(target,int32_t(60)); c.tick(1,base,144); count=io.writes;
@@ -270,7 +284,10 @@ static void fps_tests() {
         c.reset(true); assert(io.writes==count); // unknown engine: no restore writes
         io.set(base+0x318,layout.build_id); io.set(base+layout.getter,uint32_t(0));
         c.tick(1,base,144); assert(io.writes==count); // code fingerprint mismatch
-        io.set(base+layout.getter,uint32_t(0xf00083e8));
+        io.set(base+layout.getter,std::array<uint32_t,3>{0xf00083e8,layout.load_instruction,0xd65f03c0});
+        io.set(base+layout.pacing_update,uint32_t(0));
+        c.tick(1,base,144); assert(io.writes==count); // pacing fingerprint mismatch
+        io.set(base+layout.pacing_update,uint32_t(0xf81e0ffe));
         c.tick(1,base,144); count=io.writes; c.tick(2,0,144);
         assert(io.writes==count && !c.has_state()); // lost session: forget
     }

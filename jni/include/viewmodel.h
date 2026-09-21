@@ -78,11 +78,21 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
 }
 enum class Status { Off, Waiting, Active, ADS, Failed };
 struct Diagnostics { Status fov = Status::Off, hands = Status::Off, no_recoil = Status::Off, no_spread = Status::Off; };
+// Снимок состояния limiting FPS для меню: снимается контроллером при последнем
+// тике (до 100 мс назад), дополнительных обращений к памяти игры не делает.
+struct FpsUiInfo {
+    int requested = 0;               // последний обработанный режим (0 = обычный)
+    Status status = Status::Off;
+    int field_value = 0;             // фактическое значение backing-поля targetFrameRate
+    int pace_kind = 0;               // тип Android frame pacing (0 = заглушен)
+};
 }
 
 // Main-thread tick, independent of ESP toggles. No background writer.
 void esp_viewmodel_tick(const ViewmodelSettings& settings);
 viewmodel::Diagnostics esp_viewmodel_diagnostics();
+// Снимок состояния разблокировки FPS для меню (выбран режим / применён / поле).
+viewmodel::FpsUiInfo esp_viewmodel_fps_ui();
 // restore=true only for a live connection (exit/build switch).
 // restore=false on lost process/session: forget old addresses without writes.
 void esp_viewmodel_reset(bool restore);

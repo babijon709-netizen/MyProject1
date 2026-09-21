@@ -173,3 +173,13 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     status.no_spread = weapons.spread;
     return status;
 }
+
+viewmodel::FpsUiInfo esp_viewmodel_fps_ui() {
+    std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
+    viewmodel::FpsUiInfo info;
+    info.requested = fps_last_limit;
+    info.status = fps_controller.status;
+    info.field_value = fps_controller.field_seen();
+    info.pace_kind = fps_controller.pace_seen();
+    return info;
+}
