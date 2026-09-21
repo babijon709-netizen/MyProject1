@@ -393,6 +393,31 @@ float TabContent(int tab, float dt, float cW) {
         SliderRow("##vmd", XS("Показывать до"), &g_state.marker_dist,
                   25.f, 300.f, XS("%.0f м"), true, true, g_state.sl_marker_dist, dt);
 
+        // Компенсация лага камеры: без неё визуалы «оттягиваются» от своих
+        // объектов против движения камеры — подпись отставания оверлея от
+        // очереди кадров SurfaceFlinger. 1-2 кадра вперёд сглаживают это.
+        SHdr(XS("Лаг визуалов"));
+        CardBg(Layout::RowH);
+        {
+            const float width = ImGui::GetContentRegionAvail().x;
+            const float bw = (width - ImGui::GetStyle().ItemSpacing.x * 2.f) / 3.f;
+            const int choices[] = {0, 33, 66};
+            const char* labels[] = {XS("Выкл"), XS("1 кадр"), XS("2 кадра")};
+            static int s_delay_comp = 0;   // сессионный выбор: см. esp_set_delay_comp
+            for (int i = 0; i < 3; ++i) {
+                if (i) ImGui::SameLine();
+                const bool selected = s_delay_comp == choices[i];
+                if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                ImGui::PushID(1000 + i);
+                if (ImGui::Button(labels[i], {bw, Layout::RowH - 8.f})) {
+                    s_delay_comp = choices[i];
+                    esp_set_delay_comp(choices[i]);
+                }
+                ImGui::PopID();
+                if (selected) ImGui::PopStyleColor();
+            }
+        }
+
         ImGui::Dummy({1.f, 8.f});
         CollapsibleHeader("##veh1", XS("Ещё настройки"), 1);
 
