@@ -86,6 +86,14 @@ static constexpr int kAccentCount = 9;   // 8 пресетов + свой
 
 
 
+// Видимая рамка выбранной «пилюли» (Лимит FPS, Лаг визуалов): акцентная
+// обводка вокруг только что нарисованной кнопки.
+static void SelectedOutline() {
+    auto* dl = ImGui::GetWindowDrawList();
+    const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+    dl->AddRect(mn, mx, C::U(C::Acc()), 6.f, 0, 2.0f);
+}
+
 float TabContent(int tab, float dt, float cW) {
     float sY = ImGui::GetCursorPosY();
 
@@ -397,10 +405,9 @@ float TabContent(int tab, float dt, float cW) {
         // объектов против движения камеры — подпись отставания оверлея от
         // очереди кадров SurfaceFlinger. 1-2 кадра вперёд сглаживают это.
         SHdr(XS("Лаг визуалов"));
-        CardBg(Layout::RowH);
         {
             const float width = ImGui::GetContentRegionAvail().x;
-            const float bw = (width - ImGui::GetStyle().ItemSpacing.x * 2.f) / 3.f;
+            const float buttonWidth = (width - ImGui::GetStyle().ItemSpacing.x * 2.f) / 3.f;
             const int choices[] = {0, 33, 66};
             const char* labels[] = {XS("Выкл"), XS("1 кадр"), XS("2 кадра")};
             static int s_delay_comp = 0;   // сессионный выбор: см. esp_set_delay_comp
@@ -408,17 +415,17 @@ float TabContent(int tab, float dt, float cW) {
                 if (i) ImGui::SameLine();
                 const bool selected = s_delay_comp == choices[i];
                 if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-                ImGui::PushID(1000 + i);
-                if (ImGui::Button(labels[i], {bw, Layout::RowH - 8.f})) {
+                ImGui::PushID("lag");
+                if (ImGui::Button(labels[i], {buttonWidth, Layout::RowH - 8.f})) {
                     s_delay_comp = choices[i];
                     esp_set_delay_comp(choices[i]);
                 }
                 ImGui::PopID();
-                if (selected) ImGui::PopStyleColor();
+                if (selected) { ImGui::PopStyleColor(); SelectedOutline(); }
             }
         }
 
-        ImGui::Dummy({1.f, 8.f});
+        ImGui::Dummy({1.f, 12.f});
         CollapsibleHeader("##veh1", XS("Ещё настройки"), 1);
 
         ImGui::Dummy({1.f, 12.f});
@@ -941,8 +948,8 @@ float TabContent(int tab, float dt, float cW) {
         SHdr(XS("Оружие"));
         CardBg(Layout::RowH * 2.f);
         const bool oldRecoil = vm.no_recoil, oldSpread = vm.no_spread;
-        ToggleRow("##norecoil", "No Recoil", &vm.no_recoil, g_state.a_no_recoil, false, true);
-        ToggleRow("##nospread", "No Spread", &vm.no_spread, g_state.a_no_spread, true, false);
+        ToggleRow("##norecoil", XS("Без отдачи"), &vm.no_recoil, g_state.a_no_recoil, false, true);
+        ToggleRow("##nospread", XS("Без разброса"), &vm.no_spread, g_state.a_no_spread, true, false);
         if (oldRecoil != vm.no_recoil || oldSpread != vm.no_spread) esp_viewmodel_tick(vm);
         const auto weaponStatus = esp_viewmodel_diagnostics();
         if (weaponStatus.no_recoil == viewmodel::Status::Failed || weaponStatus.no_spread == viewmodel::Status::Failed)
@@ -975,7 +982,7 @@ float TabContent(int tab, float dt, float cW) {
                     vm.fps_limit = limits[i];
                     esp_viewmodel_tick(vm);
                 }
-                if (selected) ImGui::PopStyleColor();
+                if (selected) { ImGui::PopStyleColor(); SelectedOutline(); }
             }
             const bool normal = vm.fps_limit == 0;
             if (normal) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
@@ -985,7 +992,7 @@ float TabContent(int tab, float dt, float cW) {
                 esp_viewmodel_tick(vm);
             }
             ImGui::PopID();
-            if (normal) ImGui::PopStyleColor();
+            if (normal) { ImGui::PopStyleColor(); SelectedOutline(); }
             // Какой режим выбран и что реально стоит в памяти игры: раньше видна
             // была только подсветка кнопки, из-за чего состояние читалось плохо.
             const auto fpsUi = esp_viewmodel_fps_ui();
