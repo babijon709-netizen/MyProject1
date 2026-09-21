@@ -45,6 +45,7 @@ struct targ {
     int fdNum;
     float S2TX;
     float S2TY;
+    int singleTouch;   // 1: устройство type-A (ABS_X/ABS_Y+BTN_TOUCH) — тачпад ВМ
 };
 
 static struct {
@@ -91,7 +92,15 @@ static bool Touch_initialized = false;
 
 static bool Touch_readOnly = false;
 
-static bool checkDeviceIsTouch(int fd);
+// Класс устройства /dev/input/eventN:
+//   0 — не тачскрин;
+//   1 — мультитач (ABS_MT_POSITION_X/Y; ABS_MT_SLOT НЕ требуем: часть
+//       виртуальных тачскринов ВМ его не сообщает, а поток чтения и без
+//       слота сводится к одному пальцу);
+//   2 — однотачевый type-A (ABS_X/ABS_Y + BTN_TOUCH): так выглядят
+//       virtio/qemu-тачпады и «мышиная интеграция» в VMOS/X8/F1 и облачных
+//       телефонах — из-за них на ВМ и падало «Failed init touch!».
+static int checkDeviceIsTouch(int fd);
 static void genRandomString(char *string, int length) {
     int flag, i;
     srand((unsigned) time(NULL) + length);
@@ -327,8 +336,14 @@ static void *TypeA(void *arg) {
     int i = tmp.fdNum;
     float S2TX = tmp.S2TX;
     float S2TY = tmp.S2TY;
+    const bool single = tmp.singleTouch != 0;
     int latest = 0;
     input_event inputEvent[64]{0};
+
+    if (single) {
+        // На ВМ-тачпаде один палец: слот — всегда нулевой, id стабилен.
+        Finger[i][0].id = (i * 2 + 1) * maxF;
+    }
 
     while (Touch_initialized) {
         auto readSize = (int32_t) read(origfd[i], inputEvent, sizeof(inputEvent));
@@ -338,6 +353,18 @@ static void *TypeA(void *arg) {
         size_t count = size_t(readSize) / sizeof(input_event);
         for (size_t j = 0; j < count; j++) {
             input_event &ie = inputEvent[j];
+            if (single) {
+                // type-A: координаты в ABS_X/ABS_Y, нажатие — BTN_TOUCH; общий
+                // хвост по SYN_REPORT ниже работает как для мультитача.
+                if (ie.type == EV_ABS) {
+                    if (ie.code == ABS_X) { Finger[i][0].x = (int) (ie.value * S2TX); continue; }
+                    if (ie.code == ABS_Y) { Finger[i][0].y = (int) (ie.value * S2TY); continue; }
+                }
+                if (ie.type == EV_KEY && ie.code == BTN_TOUCH) {
+                    Finger[i][0].isDown = ie.value != 0;
+                    continue;
+                }
+            }
             if (ie.type == EV_ABS) {
                 if (ie.code == ABS_MT_SLOT) {
                     latest = ie.value;
@@ -397,8 +424,10 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
             eventCount++;
     }
     struct input_absinfo abs, absX[maxE], absY[maxE];
+    static int s_single[maxE];
     int fd, i, tmp1, tmp2;
     int screenX, screenY, minCnt = eventCount + 1;
+    int minKind = 0;
     fdNum = 0;
     for (i = 0; i <= eventCount; i++) {
         sprintf(temp, "/dev/input/event%d", i);
@@ -406,11 +435,16 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
         if (fd < 0) {
             continue;
         }
-        if (checkDeviceIsTouch(fd)) {
-            tmp1 = ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &absX[fdNum]);
-            tmp2 = ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &absY[fdNum]);
-            if (tmp1 == 0 && tmp2 == 0) {
+        const int kind = checkDeviceIsTouch(fd);
+        if (kind != 0) {
+            // Диапазоны — с тех осей, что устройство реально сообщает:
+            // на ВМ-тачпаде ABS_MT_* может не быть вовсе.
+            tmp1 = ioctl(fd, EVIOCGABS(kind == 1 ? ABS_MT_POSITION_X : ABS_X), &absX[fdNum]);
+            tmp2 = ioctl(fd, EVIOCGABS(kind == 1 ? ABS_MT_POSITION_Y : ABS_Y), &absY[fdNum]);
+            if (tmp1 == 0 && tmp2 == 0 &&
+                absX[fdNum].maximum > 0 && absY[fdNum].maximum > 0) {
                 origfd[fdNum] = fd;
+                s_single[fdNum] = (kind == 2) ? 1 : 0;
                 if (!readOnly) {
                     ioctl(fd, EVIOCGRAB, GRAB);
                 }
@@ -418,10 +452,13 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
                     screenX = absX[fdNum].maximum;
                     screenY = absY[fdNum].maximum;
                     minCnt = i;
+                    minKind = kind;
                 }
                 fdNum++;
                 if (fdNum >= maxE)
                     break;
+            } else {
+                close(fd);
             }
         } else {
             close(fd);
@@ -432,6 +469,7 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
         puts("Failed init touch!");
         return false;
     }
+    printf("touch: event%d %s\n", minCnt, minKind == 2 ? "single-touch (vm pad)" : "multitouch");
 
     if (!readOnly) {
         struct uinput_user_dev ui_dev;
@@ -527,6 +565,7 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
         targF[i].fdNum = i;
         targF[i].S2TX = (float) screenX / (float) absX[i].maximum;
         targF[i].S2TY = (float) screenY / (float) absY[i].maximum;
+        targF[i].singleTouch = s_single[i];
         pthread_create(&t, NULL, TypeA, &targF[i]);
     }
 
@@ -547,11 +586,33 @@ void UpdateScreenData(int w, int h, uint32_t orientation_) {
     Touch_UpdateScale();
 }
 
-static bool checkDeviceIsTouch(int fd) {
+// Есть ли у устройства клавиша keyCode в EV_KEY (нам важен BTN_TOUCH у
+// однотачевых — без неё «ABS_X/ABS_Y» может оказаться джойстиком).
+static bool checkDeviceHasKey(int fd, int keyCode) {
     uint8_t *bits = NULL;
     ssize_t bits_size = 0;
     int res, j, k;
-    bool itmp = false, itmp2 = false, itmp3 = false;
+    bool found = false;
+    while (true) {
+        res = ioctl(fd, EVIOCGBIT(EV_KEY, bits_size), bits);
+        if (res < bits_size)
+            break;
+        bits_size = res + 16;
+        bits = (uint8_t *) realloc(bits, bits_size * 2);
+    }
+    for (j = 0; j < res && !found; j++)
+        for (k = 0; k < 8 && !found; k++)
+            if (bits[j] & 1 << k && j * 8 + k == keyCode)
+                found = true;
+    free(bits);
+    return found;
+}
+
+static int checkDeviceIsTouch(int fd) {
+    uint8_t *bits = NULL;
+    ssize_t bits_size = 0;
+    int res, j, k;
+    bool hasMtX = false, hasMtY = false, hasX = false, hasY = false;
     struct input_absinfo abs{};
     while (true) {
         res = ioctl(fd, EVIOCGBIT(EV_ABS, bits_size), bits);
@@ -563,22 +624,16 @@ static bool checkDeviceIsTouch(int fd) {
     for (j = 0; j < res; j++) {
         for (k = 0; k < 8; k++)
             if (bits[j] & 1 << k && ioctl(fd, EVIOCGABS(j * 8 + k), &abs) == 0) {
-                if (j * 8 + k == ABS_MT_SLOT) {
-                    itmp = true;
-                    continue;
-                }
-                if (j * 8 + k == ABS_MT_POSITION_X) {
-                    itmp2 = true;
-                    continue;
-                }
-                if (j * 8 + k == ABS_MT_POSITION_Y) {
-                    itmp3 = true;
-                    continue;
-                }
+                if (j * 8 + k == ABS_MT_POSITION_X) hasMtX = true;
+                if (j * 8 + k == ABS_MT_POSITION_Y) hasMtY = true;
+                if (j * 8 + k == ABS_X) hasX = true;
+                if (j * 8 + k == ABS_Y) hasY = true;
             }
     }
     free(bits);
-    return itmp && itmp2 && itmp3;
+    if (hasMtX && hasMtY) return 1;
+    if (hasX && hasY && checkDeviceHasKey(fd, BTN_TOUCH)) return 2;
+    return 0;
 }
 
 void Touch_Close() {
