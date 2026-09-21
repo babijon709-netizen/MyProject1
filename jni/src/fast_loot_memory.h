@@ -1,9 +1,6 @@
 #pragma once
 #include "viewmodel.h"
 #include <array>
-#if defined(__aarch64__)
-#include <sys/auxv.h>
-#endif
 
 namespace fast_loot {
 // Only the CollectAllItems inter-item wait is changed. Inventory commands,
@@ -20,17 +17,14 @@ inline constexpr Layout kLayouts[] = {
     {{0xe1,0x07,0x95,0x34,0x9b,0xd7,0xc2,0xcd,0xc7,0xd8,0x52,0x75,0x97,0xc6,0x43,0x95,0xa4,0xef,0xed,0x79},
      0x5af4d04, {0xf0fe3208,0x52800020,0x52800101,0xbd400100,0xaa1403e2,0x2a1f03e3,0xaa1f03e4,0x95a05a57}},
 };
-// One instruction, no shared-pool writes or multi-instruction hot-patch window.
-// FMOV V0.4H,#0.8125 builds halfwords 0x3a80; S0 sees float32 0x3a803a80
-// (0.0009783059s). The verified WaitForSeconds implementation rounds duration
-// * 1000 to an integer: this requests EXACTLY 1 ms, not a zero-duration yield.
-// Scalar FMOV cannot encode 0.001. This vector form requires FEAT_FP16.
-inline constexpr uint32_t kFastInstruction = 0x0f03fd40;
-inline constexpr unsigned kDelayMilliseconds = 1;
+// One baseline AArch64 instruction: FMOV S0,WZR supplies exact float +0.0.
+// WaitForSeconds receives zero; its normal PlayerLoop/cancellation semantics
+// remain in place. No FP16 requirement, shared-pool writes or multi-word patch.
+inline constexpr uint32_t kFastInstruction = 0x1e2703e0;
+inline constexpr unsigned kDelayMilliseconds = 0;
 inline bool instruction_supported() {
 #if defined(__aarch64__)
-    constexpr unsigned long kAsimdHalfPrecision = 1UL << 10; // HWCAP_ASIMDHP
-    return (getauxval(AT_HWCAP) & kAsimdHalfPrecision) != 0;
+    return true;
 #else
     return false;
 #endif

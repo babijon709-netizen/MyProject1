@@ -14,15 +14,13 @@ rows = re.findall(r'\{\{(0x[0-9a-f, x]+)\},\s*(0x[0-9a-f]+),\s*\{(0x[0-9a-f, x]+
 if len(sys.argv) != 3 or len(rows) != 2:
     raise SystemExit(__doc__)
 patch = int(re.search(r'kFastInstruction = (0x[0-9a-f]+)', text)[1], 16)
-assert patch & ~((7 << 16) | (31 << 5)) == 0x0f00fc00, 'not FMOV V0.4H, immediate'
-imm = (((patch >> 16) & 7) << 5) | ((patch >> 5) & 31)
-b = (imm >> 6) & 1
-exponent = ((1-b) << 4) | ((3 if b else 0) << 2) | ((imm >> 4) & 3)
-half = ((imm >> 7) << 15) | (exponent << 10) | ((imm & 15) << 6)
-bits = (half << 16) | half
-fast = struct.unpack('<f', struct.pack('<I', bits))[0]
-fast_ms = round(struct.unpack('<f', struct.pack('<f', fast * 1000))[0])
-assert fast_ms == 1, 'must request one millisecond, not zero'
+assert patch & ~0x3ff == 0x1e270000, 'not FMOV S, W'
+assert (patch >> 5) & 31 == 31, 'source must be WZR'
+assert patch & 31 == 0, 'destination must be S0'
+# WZR is all-zero bits, so the float argument and rounded timer are exactly zero.
+fast = struct.unpack('<f', struct.pack('<I', 0))[0]
+fast_ms = round(fast * 1000)
+assert fast_ms == 0
 for filename, (id_text, site_text, guard_text) in zip(sys.argv[1:], rows):
     expected_id = bytes(int(v.strip(), 16) for v in id_text.split(','))
     site = int(site_text, 16)
@@ -62,7 +60,7 @@ for filename, (id_text, site_text, guard_text) in zip(sys.argv[1:], rows):
         delta -= 1 << 26
     wait = site + 16 + delta*4
     # Verify the conversion used above: scale by 1000, add 0.5 / floor for
-    # positive non-halfway inputs, then convert the rounded value to int32.
+    # nonnegative non-halfway inputs, then convert the rounded value to int32.
     for offset, opcode in ((0x14, 0x1e204008), (0x48, 0x52a88f49),
                            (0x50, 0x1e270129), (0x74, 0x1e290909),
                            (0xc4, 0x1e6c1001), (0xf8, 0x1e612900),

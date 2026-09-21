@@ -49,17 +49,11 @@ struct Fixture {
     }
 };
 int main() {
-    // Decode FMOV V0.4H,#0.8125 and the S0 bits consumed by WaitForSeconds.
+    // FMOV S0,WZR: baseline ARM64, source WZR yields exact positive zero.
     const uint32_t instruction=fast_loot::kFastInstruction;
-    assert((instruction & ~((7u<<16)|(31u<<5)))==0x0f00fc00);
-    const unsigned imm=(((instruction>>16)&7u)<<5)|((instruction>>5)&31u);
-    const unsigned b=(imm>>6)&1u;
-    const unsigned exponent=((1u-b)<<4)|((b?3u:0u)<<2)|((imm>>4)&3u);
-    const uint32_t half=((imm>>7)<<15)|(exponent<<10)|((imm&15u)<<6);
-    const uint32_t bits=(half<<16)|half;
-    float seconds=0; std::memcpy(&seconds,&bits,sizeof(seconds));
-    assert(seconds>0.0005f && seconds<0.0015f);
-    assert(static_cast<unsigned>(seconds*1000.f+0.5f)==fast_loot::kDelayMilliseconds);
+    assert((instruction & ~0x3ffu)==0x1e270000);
+    assert(((instruction>>5)&31u)==31u && (instruction&31u)==0u);
+    assert(fast_loot::kDelayMilliseconds==0);
     for (const auto& layout : fast_loot::kLayouts) {
         { Fixture f(layout); fast_loot::Controller<Memory> unsupported(f.io,false);
           unsupported.tick(1,Fixture::base,true);
@@ -88,8 +82,10 @@ int main() {
             Fixture f(layout); f.io.set(f.guard+i*4,uint32_t(0)); f.tick(true);
             assert(f.c.status==Status::Failed && f.io.writes.empty());
         }
-        { Fixture f(layout); f.io.set(f.site,fast_loot::kFastInstruction); f.tick(true);
-          assert(f.c.status==Status::Failed && f.io.writes.empty()); // never adopt someone else's patch
+        for (uint32_t foreign : {fast_loot::kFastInstruction, 0x0f03fd40u, 0x1e281000u}) {
+          Fixture f(layout); f.io.set(f.site,foreign); f.tick(true);
+          assert(f.c.status==Status::Failed && f.io.writes.empty());
+          f.tick(false); assert(f.io.word(f.site)==foreign); // never adopt or undo a previous process's patch
         }
         { Fixture f(layout); f.io.fail_read=Fixture::base+0x318; f.tick(true);
           assert(f.c.status==Status::Failed && f.io.writes.empty()); f.io.fail_read=0; f.tick(true);
@@ -123,5 +119,5 @@ int main() {
           assert(!f.c.reset(true)); // shutdown reports a failed restore, never claims success
         }
     }
-    std::cout << "fast loot: release/beta, 1ms wait, CPU guard, exact guards, one-word patch, restore, failures, lifecycle: OK\n";
+    std::cout << "fast loot: release/beta, zero wait, architecture guard, exact guards, one-word patch, restore, failures, lifecycle: OK\n";
 }
