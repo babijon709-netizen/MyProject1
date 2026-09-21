@@ -33,7 +33,11 @@ fps = menu.split('SHdr(XS("Лимит FPS"))', 1)[1].split('SHdr(', 1)[0]
 assert 'esp_viewmodel_fps_ui()' in fps, 'the fps status line is missing'
 assert 'viewmodel::Status::Active' in fps and 'viewmodel::Status::Failed' in fps, 'apply status not rendered'
 assert 'field_value' in fps, 'the real game field content is not shown'
-assert 'limits[i]' in fps, 'mode buttons are gone'
+assert 'fpsChip(' in fps, 'chips not drawn'
+assert '##fps90' in fps and '##fps120' in fps and '##fps144' in fps and '##fpsrst' in fps, 'mode buttons are gone'
+assert 'WasTappedHere' in fps, 'chips must use the menu touch pattern, not bare ImGui::Button'
+assert 'ImGui::Button(' not in fps, 'chips must use custom-coded buttons'
+assert 'g_state.a_fps_90' in menu and 'Tick(g_state.a_fps_90' in menu, 'selection fill animation is not ticked'
 
 print('misc toggles: row state and per-frame animation bindings: OK')
 print('instant pickup menu draws only the toggle; fps mode+apply status is rendered: OK')

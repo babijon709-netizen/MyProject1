@@ -134,18 +134,12 @@ static void xray_apply(uint64_t native_cam) {
 // фоновый поток пишет полдень прямо в Cycle.Hour — игровой Update сам
 // разворачивает солнце.
 static bool     g_day_enabled = false;
-static int      g_esp_delay_comp_ms = 0;
 static uint64_t g_day_tod = 0;          // подтверждённый инстанс TimeOfDay
 static std::atomic<uint64_t> g_day_cycle_addr{0}; // Cycle.Hour для писателя
 static std::atomic<bool>     g_day_writer_running{false};
 static int      g_day_retry = 0;
 
 void esp_set_always_day(bool enabled) { g_day_enabled = enabled; }
-
-// Лаг-компенсация камеры (см. cam_pose_extrapolate): 0 — выкл, 33/66 мс —
-// экстраполяция на один/два кадра очереди. Любое другое значение — выкл:
-// случайное из конфига не должно вдруг включить предиктор.
-void esp_set_delay_comp(int ms) { g_esp_delay_comp_ms = (ms == 33 || ms == 66) ? ms : 0; }
 
 static void always_day_tick() {
     if (!g_day_enabled) {
@@ -3850,95 +3844,6 @@ static bool frame_view_accepted(const Mat4& view) {
     return true;
 }
 
-// ---- Лаг-компенсация камеры ---------------------------------------------
-// Оверлей композитится поверх очереди кадров SurfaceFlinger: прочитанная нами
-// поза камеры опережает тот кадр игры, который реально на экране. При
-// повороте/движении камеры визуалы «оттягиваются» в сторону от своих
-// объектов (дрейф всегда против движения камеры — это подпись отставания на
-// 1-2 кадра очереди, а лечить его чтением более «свежей» матрицы нельзя: мы
-// уже читаем эталон игрового кадра). Компенсация экстраполирует позу камеры на
-// заданный лаг вперёд по двум последним принятым кадрам и отбрасывает
-// нефизичные случаи, чтобы незаметно для мусорных серий. По умолчанию выключена
-// (esp_delay_comp_ms = 0).
-struct CamPoseSample {
-    Vec3 pos{}, right{}, up{}, fwd{};
-    float t = 0.0F;
-    bool valid = false;
-};
-static CamPoseSample s_fv_pose[2];
-static void cam_pose_push(const Vec3& pos, const Vec3& r, const Vec3& u, const Vec3& f, float t) {
-    s_fv_pose[0] = s_fv_pose[1];
-    s_fv_pose[1] = CamPoseSample{pos, r, u, f, t, true};
-}
-static Vec4 quaternion_from_basis(const Vec3& r, const Vec3& u, const Vec3& f) {
-    const float m00 = r.x, m01 = u.x, m02 = f.x;
-    const float m10 = r.y, m11 = u.y, m12 = f.y;
-    const float m20 = r.z, m21 = u.z, m22 = f.z;
-    const float trace = m00 + m11 + m22;
-    Vec4 q{};
-    if (trace > 0.0F) {
-        const float s = sqrtf(trace + 1.0F) * 2.0F;
-        q = {(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, s * 0.25F};
-    } else if (m00 > m11 && m00 > m22) {
-        const float s = sqrtf(1.0F + m00 - m11 - m22) * 2.0F;
-        q = {s * 0.25F, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s};
-    } else if (m11 > m22) {
-        const float s = sqrtf(1.0F + m11 - m00 - m22) * 2.0F;
-        q = {(m01 + m10) / s, s * 0.25F, (m12 + m21) / s, (m02 - m20) / s};
-    } else {
-        const float s = sqrtf(1.0F + m22 - m00 - m11) * 2.0F;
-        q = {(m02 + m20) / s, (m12 + m21) / s, s * 0.25F, (m10 - m01) / s};
-    }
-    normalize_quaternion(q);
-    return q;
-}
-// Экстраполяция последнего принятого view на lag секунд вперёд по скорости
-// между двумя последними принятыми кадрами. Шаг позиции прижат к двукратному
-// кадровому смещению, поворот — к 1.5 угла между кадрами, а разброс свыше
-// ~11° поворота за кадр (мусорный отсчёт даже после барьера) отключается сам.
-static void cam_pose_extrapolate(Mat4& view, float lag_seconds) {
-    const CamPoseSample& a = s_fv_pose[0];
-    const CamPoseSample& b = s_fv_pose[1];
-    if (!a.valid || !b.valid || lag_seconds <= 0.0F) return;
-    const float dt = b.t - a.t;
-    if (dt < 0.002F || dt > 0.1F) return;   // не подтверждённый темп кадра
-    float factor = lag_seconds / dt;
-    if (factor > 1.5F) factor = 1.5F;        // максимум полтора кадра вперёд
-    Vec3 d = {b.pos.x - a.pos.x, b.pos.y - a.pos.y, b.pos.z - a.pos.z};
-    const float dist = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
-    if (dist < 1e-5F || dist > 8.0F) {       // нет движения / скачок (телепорт)
-        if (dist >= 8.0F) return;            // не угадывать телепорт
-    }
-    Vec3 pos = {b.pos.x + d.x * factor, b.pos.y + d.y * factor, b.pos.z + d.z * factor};
-    Vec4 q0 = quaternion_from_basis(a.right, a.up, a.fwd);
-    Vec4 q1 = quaternion_from_basis(b.right, b.up, b.fwd);
-    if (q0.x * q1.x + q0.y * q1.y + q0.z * q1.z + q0.w * q1.w < 0.0F) {
-        q0.x = -q0.x; q0.y = -q0.y; q0.z = -q0.z; q0.w = -q0.w;
-    }
-    Vec4 dq = multiply_quaternion(q1, {-q0.x, -q0.y, -q0.z, q0.w});
-    if (!normalize_quaternion(dq)) return;
-    float w = dq.w; if (w > 1.0F) w = 1.0F; if (w < -1.0F) w = -1.0F;
-    const float angle = 2.0F * acosf(w);
-    if (angle > 0.2F) return;                // > ~11.5°/кадр — отсчёт не из мира
-    if (angle > 1e-5F) {
-        const float s0 = sinf(angle * 0.5F);
-        if (fabsf(s0) < 1e-6F) return;
-        const float inv = 1.0F / s0;
-        Vec3 axis = {dq.x * inv, dq.y * inv, dq.z * inv};
-        const float half = angle * 0.5F * factor;
-        const float s = sinf(half), c = cosf(half);
-        Vec4 swing = {axis.x * s, axis.y * s, axis.z * s, c};
-        if (!normalize_quaternion(swing)) return;
-        Vec4 q = multiply_quaternion(swing, q1);
-        if (!normalize_quaternion(q)) return;
-        Mat4 extr = mat_world_to_camera(pos, q);
-        if (matrix_is_finite(extr)) view = extr;
-        return;
-    }
-    Mat4 extr = mat_world_to_camera(pos, q1);
-    if (matrix_is_finite(extr)) view = extr;
-}
-
 static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view) {
     if (!native_cam) return false;
 
@@ -4012,29 +3917,11 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     // Кадровый барьер (см. FrameViewGuard): структурная проверка и скачки.
     // Отклонённый образец заменяется прошлой принятой матрицей — один кадр
     // прежней камеры незаметен, а мусорный был бы виден сразу на всех визуалах.
-    const bool accepted = view_basis_sane(view) && frame_view_accepted(view);
-    if (!accepted) {
+    if (!view_basis_sane(view) || !frame_view_accepted(view)) {
         if (!s_fv_guard.ok) return false;
         view = s_fv_guard.view;
         g_cam_pose_derived = true;
     }
-    // Лаг-компенсация (см. cam_pose_extrapolate): история — только принятых
-    // кадров, поэтому мусор никогда не тянет предиктор за собой; на кадре-
-    // верификации дорисовка тоже идёт вперёд по той же скорости.
-    {
-        using namespace std::chrono;
-        const float now_t = duration_cast<duration<float>>(steady_clock::now().time_since_epoch()).count();
-        if (accepted) {
-            Vec3 p{}, r{}, u{}, f{};
-            if (camera_position_from_view(view, p) && camera_basis_from_view(view, r, u, f))
-                cam_pose_push(p, r, u, f, now_t);
-            else
-                s_fv_pose[0] = s_fv_pose[1] = CamPoseSample{};
-        }
-        const int comp_ms = g_esp_delay_comp_ms;
-        if (comp_ms > 0) cam_pose_extrapolate(view, comp_ms * 0.001F);
-    }
-    (void)accepted;
     // Поза и базис — из финальной матрицы вида, единственной, по которой
     // рисуется кадр: иначе в g_cam_pos оставалась бы поза прошлого мира (её
     // писал живой путь), и по ней строились и боксы, и углы цели.
@@ -4055,6 +3942,34 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         aspect = (screen_aspect > 0.1F && screen_aspect < 10.0F) ? screen_aspect : (9.0F / 16.0F);
     if (!(z_near > 0.001F && z_near < 100.0F)) z_near = 0.1F;
     if (!(z_far > z_near && z_far < 100000.0F)) z_far = 1000.0F;
+    // Aspect и дистанции клипа болтаются в тех же float-полях — и попадают в
+    // тот же полузаписанный кадр разом с видом. Реальный повод для смены
+    // aspect — поворот экрана, держится серией; одиночный скачок растягивает
+    // все визуалы по горизонтали на кадр («телепорт на миллисекунды»).
+    static float s_fv_aspect = 0.0F;
+    static int   s_fv_aspect_streak = 0;
+    if (0.001F <= s_fv_aspect && fabsf(aspect - s_fv_aspect) > 0.3F && s_fv_aspect_streak < 3) {
+        ++s_fv_aspect_streak;
+        aspect = s_fv_aspect;
+    } else {
+        s_fv_aspect_streak = 0;
+        s_fv_aspect = aspect;
+    }
+    static float s_fv_zn = 0.0F, s_fv_zf = 0.0F;
+    static int   s_fv_clip_streak = 0;
+    if (s_fv_zn > 0.0F && s_fv_zf > 0.0F) {
+        const bool clip_jump = z_near > s_fv_zn * 4.0F || z_near < s_fv_zn * 0.25F ||
+                               z_far  > s_fv_zf * 4.0F || z_far  < s_fv_zf * 0.25F;
+        if (clip_jump && s_fv_clip_streak < 3) {
+            ++s_fv_clip_streak;
+            z_near = s_fv_zn; z_far = s_fv_zf;
+        } else {
+            s_fv_clip_streak = 0;
+            s_fv_zn = z_near; s_fv_zf = z_far;
+        }
+    } else {
+        s_fv_zn = z_near; s_fv_zf = z_far;
+    }
     // FOV входит в ту же формулу кадра. Реальная смена (прицеливание, настройка)
     // идёт серией; одиночный скачок — кривой отсчёт, кадр дорисовываем прошлым
     // FOV (иначе вся сцена на миллисекунду меняет масштаб).
@@ -4079,6 +3994,14 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         } else {
             projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
             if (!matrix_is_finite(projection)) return false;
+            // Перспектура Unity: последняя строка (0,0,-1,0). Полузаписанная
+            // матрица нарушает форму и бросает весь кадр — такую не берём.
+            if (fabsf(mat_get(projection, 3, 2) + 1.0F) > 0.05F ||
+                fabsf(mat_get(projection, 3, 0)) > 0.001F ||
+                fabsf(mat_get(projection, 3, 1)) > 0.001F ||
+                fabsf(mat_get(projection, 3, 3)) > 0.001F ||
+                !(mat_get(projection, 0, 0) > 0.0F) ||
+                !(mat_get(projection, 1, 1) > 0.0F)) return false;
         }
     }
     if (matrix_is_finite(projection)) s_last_proj = projection;
@@ -6952,7 +6875,6 @@ static void reset_world_caches() {
     // Камерный страж нового мира ничему не следит: прошлая планета тётушка
     // задержала бы новую камеру на 3 кадра подтверждения «телепорта».
     s_fv_guard = {};
-    s_fv_pose[0] = s_fv_pose[1] = CamPoseSample{};
 }
 
 void esp_reset() {

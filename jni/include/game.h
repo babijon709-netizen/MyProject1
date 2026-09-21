@@ -116,11 +116,7 @@ void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pick
 void        esp_set_always_day(bool enabled);
 // Markers further away than this (metres) are dropped. Keeps the screen clean
 // on open terrain, where the registry easily holds hundreds of nodes.
-void        esp_set_marker_max_distance(float metres);
-// Компенсация лага очереди кадров: экстраполирует позу камеры на 0/33/66 мс
-// вперёд (0 — выкл), чтобы визуалы не «оттягивались» против движения камеры.
-void        esp_set_delay_comp(int ms);
-// Markers for the current frame, nearest first. Call after esp_get_boxes():
+void        esp_set_marker_max_distance(float metres);// Markers for the current frame, nearest first. Call after esp_get_boxes():
 // it reuses the camera/projection state that call established.
 std::vector<EspMarker> esp_get_markers();
 // Resolve bones (for aim points) even when skeleton ESP drawing is off.

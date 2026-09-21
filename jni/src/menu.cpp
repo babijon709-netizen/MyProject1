@@ -86,14 +86,6 @@ static constexpr int kAccentCount = 9;   // 8 пресетов + свой
 
 
 
-// Видимая рамка выбранной «пилюли» (Лимит FPS, Лаг визуалов): акцентная
-// обводка вокруг только что нарисованной кнопки.
-static void SelectedOutline() {
-    auto* dl = ImGui::GetWindowDrawList();
-    const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
-    dl->AddRect(mn, mx, C::U(C::Acc()), 6.f, 0, 2.0f);
-}
-
 float TabContent(int tab, float dt, float cW) {
     float sY = ImGui::GetCursorPosY();
 
@@ -400,30 +392,6 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::SliderH);
         SliderRow("##vmd", XS("Показывать до"), &g_state.marker_dist,
                   25.f, 300.f, XS("%.0f м"), true, true, g_state.sl_marker_dist, dt);
-
-        // Компенсация лага камеры: без неё визуалы «оттягиваются» от своих
-        // объектов против движения камеры — подпись отставания оверлея от
-        // очереди кадров SurfaceFlinger. 1-2 кадра вперёд сглаживают это.
-        SHdr(XS("Лаг визуалов"));
-        {
-            const float width = ImGui::GetContentRegionAvail().x;
-            const float buttonWidth = (width - ImGui::GetStyle().ItemSpacing.x * 2.f) / 3.f;
-            const int choices[] = {0, 33, 66};
-            const char* labels[] = {XS("Выкл"), XS("1 кадр"), XS("2 кадра")};
-            static int s_delay_comp = 0;   // сессионный выбор: см. esp_set_delay_comp
-            for (int i = 0; i < 3; ++i) {
-                if (i) ImGui::SameLine();
-                const bool selected = s_delay_comp == choices[i];
-                if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-                ImGui::PushID("lag");
-                if (ImGui::Button(labels[i], {buttonWidth, Layout::RowH - 8.f})) {
-                    s_delay_comp = choices[i];
-                    esp_set_delay_comp(choices[i]);
-                }
-                ImGui::PopID();
-                if (selected) { ImGui::PopStyleColor(); SelectedOutline(); }
-            }
-        }
 
         ImGui::Dummy({1.f, 12.f});
         CollapsibleHeader("##veh1", XS("Ещё настройки"), 1);
@@ -970,29 +938,53 @@ float TabContent(int tab, float dt, float cW) {
 
         SHdr(XS("Лимит FPS"));
         {
-            const float width = ImGui::GetContentRegionAvail().x;
-            const float buttonWidth = (width - ImGui::GetStyle().ItemSpacing.x * 2.f) / 3.f;
-            const int limits[] = {90, 120, 144};
-            const char* labels[] = {"90 FPS", "120 FPS", "144 FPS"};
-            for (int i = 0; i < 3; ++i) {
-                if (i) ImGui::SameLine();
-                const bool selected = vm.fps_limit == limits[i];
-                if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-                if (ImGui::Button(labels[i], {buttonWidth, Layout::RowH - 8.f})) {
-                    vm.fps_limit = limits[i];
+            // Кастомный тач-паттерн строк режимов (InvisibleButton + WasTappedHere):
+            // голый ImGui::Button в этом меню теряет тапы под собственным тач-
+            // пайплайном. Заливка акцентом плавно наезжает через Tick — как у
+            // остальных переключателей, плюс акцентная рамка у выбранного.
+            const float rowH = Layout::RowH;
+            const float inset = Layout::Inset, padX = Layout::PadX;
+            const float avW = ImGui::GetContentRegionAvail().x;
+            auto* dl = ImGui::GetWindowDrawList();
+            auto* fn = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize() * 1.15f;
+            const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+            CardBg(rowH * 2.f);
+            const auto rowPos = ImGui::GetCursorScreenPos();
+            ImGui::Dummy({avW, rowH * 2.f});
+            auto fpsChip = [&](const char* id, const char* lbl, int limit, int slot, bool wide, float anim) {
+                const float gap = 6.f;
+                const float chipW = wide ? (avW - inset * 2.f)
+                                         : (avW - inset * 2.f - gap * 2.f) / 3.f;
+                const float cX = wide ? rowPos.x + inset
+                                      : rowPos.x + inset + (chipW + gap) * slot;
+                const float cY = wide ? rowPos.y + rowH : rowPos.y + 5.f;
+                const float chipH = rowH - 12.f;
+                ImGui::SetCursorScreenPos({cX, cY});
+                ImGui::InvisibleButton(id, {chipW, chipH});
+                const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
+                if (tapped && vm.fps_limit != limit) {
+                    vm.fps_limit = limit;
                     esp_viewmodel_tick(vm);
+                    PlaySound(SND_CLICK);
+                    g_input.touchConsumed = true;
                 }
-                if (selected) { ImGui::PopStyleColor(); SelectedOutline(); }
-            }
-            const bool normal = vm.fps_limit == 0;
-            if (normal) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-            ImGui::PushID("fps_reset");
-            if (ImGui::Button(XS("Сброс"), {width, Layout::RowH - 8.f})) {
-                vm.fps_limit = 0;
-                esp_viewmodel_tick(vm);
-            }
-            ImGui::PopID();
-            if (normal) { ImGui::PopStyleColor(); SelectedOutline(); }
+                const bool on = (vm.fps_limit == limit);
+                dl->AddRectFilled({cX, cY}, {cX + chipW, cY + chipH}, C::U(C::Card()), 6.f);
+                if (anim > 0.01f)
+                    dl->AddRectFilled({cX, cY}, {cX + chipW, cY + chipH}, C::UA(C::Acc(), 0.9f * anim), 6.f);
+                if (on) dl->AddRect({cX, cY}, {cX + chipW, cY + chipH}, C::UA(C::Acc(), 1.f), 6.f, 0, 1.6f);
+                auto tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, lbl);
+                dl->AddText(fn, fs, {cX + (chipW - tsz.x) * 0.5f, cY + (chipH - tsz.y) * 0.5f},
+                            C::UA(on ? C::Txt() : C::Dim(), 1.f), lbl);
+            };
+            fpsChip("##fps90",  "90 FPS",  90,  0, false, g_state.a_fps_90);
+            fpsChip("##fps120", "120 FPS", 120, 1, false, g_state.a_fps_120);
+            fpsChip("##fps144", "144 FPS", 144, 2, false, g_state.a_fps_144);
+            fpsChip("##fpsrst", XS("Сброс"), 0,  0, true,  g_state.a_fps_rst);
+            // Лямбды чипов двигают курсор в абсолютные координаты — вернуть
+            // под две строки, иначе строка статуса ляжет поверх «Сброса».
+            ImGui::SetCursorScreenPos({rowPos.x, rowPos.y + rowH * 2.f});
             // Какой режим выбран и что реально стоит в памяти игры: раньше видна
             // была только подсветка кнопки, из-за чего состояние читалось плохо.
             const auto fpsUi = esp_viewmodel_fps_ui();
@@ -1713,6 +1705,10 @@ void RenderMenu() {
     Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil, dt);
     Tick(g_state.a_no_spread, g_state.viewmodel.no_spread, dt);
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
+    Tick(g_state.a_fps_90,  g_state.viewmodel.fps_limit == 90,  dt);
+    Tick(g_state.a_fps_120, g_state.viewmodel.fps_limit == 120, dt);
+    Tick(g_state.a_fps_144, g_state.viewmodel.fps_limit == 144, dt);
+    Tick(g_state.a_fps_rst, g_state.viewmodel.fps_limit == 0,   dt);
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
     Tick(g_state.a_freecam_on,  g_state.freecam_on,  dt);
     Tick(g_state.a_freecam_btn_show, g_state.freecam_btn_show, dt);

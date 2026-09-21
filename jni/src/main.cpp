@@ -115,6 +115,21 @@ int main(int argc, char* argv[]) {
         // Мгновенный подбор: один тик на кадр, как и у остальных фич —
         // больше одного предмета за кадр игра всё равно не переносит.
         esp_loot_tick(g_state.viewmodel.fast_loot);
+        {
+            // Отказ разблока подбора показывается всплывающим тостом при
+            // самом переходе: меню у переключателя остаётся чистым, а провал
+            // в бою не молчит. Прежде это была строка статуса под тумблером.
+            static loot::Diagnostics s_loot_toast_prev{};
+            const auto ld = esp_loot_diagnostics();
+            if (g_state.viewmodel.fast_loot && ld.status == loot::Status::Failed &&
+                (ld.status != s_loot_toast_prev.status || ld.reason != s_loot_toast_prev.reason)) {
+                char msg[192];
+                snprintf(msg, sizeof(msg), "%s (%s)",
+                         "Мгновенный подбор: не применено", loot::reason_name(ld.reason));
+                ShowToast(msg);
+            }
+            s_loot_toast_prev = ld;
+        }
         LogStage(kStageEsp);
         DrawEspOverlay();
         slowMark();   // 1: после ESP
