@@ -979,6 +979,11 @@ float TabContent(int tab, float dt, float cW) {
         if (lootStatus.flows && lootStatus.flows != 7u)
             ImGui::TextDisabled("%s: %u/3", XS("Потоки переноса"),
                                 (unsigned)__builtin_popcount(lootStatus.flows));
+        if (lootStatus.instant)
+            // Патч задержки на месте: забор целого окна выполняется за один
+            // проход state machine — видимого «по слоту» быть не должно.
+            ImGui::TextDisabled("%s: %u/3", XS("Подбор: мгновенно"),
+                                (unsigned)__builtin_popcount(lootStatus.instant));
         if (lootStatus.hooked) {
             // Инструкции Run в процессе не совпадают с образом: чужой хук или
             // модифицированный клиент. Подбору это не мешает — принадлежность

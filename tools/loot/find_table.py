@@ -163,7 +163,10 @@ def derive(path):
         if not found:
             continue
         site, word, helper = found
-        flows.append((run, move_next, site, word))
+        # Полная запись потока: поверх якоря задержки достаём и пару инструкций,
+        # которые убирает наш патч (`mov w0, #1` и `bl WaitForSeconds`).
+        flows.append((run, move_next, site, word, site - 8, site + 0x10,
+                      image.word(site - 8), image.word(site + 0x10)))
         helpers.add(helper)
     assert len(helpers) <= 1, 'the flows await through %s' % sorted(hex(h) for h in helpers)
     flows.sort()
@@ -176,9 +179,10 @@ def report(path, found):
     print('  build-id %s   (%d AsyncUniTask`1 Run prologues scanned)'
           % (found['build_id'].hex(), found['prologues']))
     print('  awaited through UniTask.WaitForSeconds %#x' % found['helper'])
-    for run, move_next, site, word in found['flows']:
-        print('    {0x%X, 0x%X, 0x%X, 0x%08Xu},   // Run, MoveNext, delay site, original word'
-              % (run, move_next, site, word))
+    for run, move_next, site, word, flag_site, call_site, flag_w, call_w in found['flows']:
+        print('    {0x%X, 0x%X, 0x%X, 0x%08Xu, 0x%X, 0x%X, 0x%08Xu, 0x%08Xu},'
+              '   // Run, MoveNext, delay site, word, flag site, call site, words'
+              % (run, move_next, site, word, flag_site, call_site, flag_w, call_w))
     print('  PlayerLoopHelper TypeInfo: python3 tools/offsets/typeinfo_rva.py --so %s '
           '--script script.json Cysharp.Threading.Tasks.PlayerLoopHelper' % path)
 

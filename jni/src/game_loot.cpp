@@ -21,6 +21,9 @@
 #include <mutex>
 #include <string>
 
+#include <sys/mman.h>
+#include <unistd.h>
+
 namespace {
 
 // Почему гейт кучи отказал: та же разборка строки /proc/<pid>/maps, что и в
@@ -116,6 +119,41 @@ struct Memory {
             return false;
         }
         return g_mem.write(address, &value, sizeof(T));
+    }
+    // Запись 4 байт кода libil2cpp.so — только для точек из таблицы образа.
+    // Гейты: адрес обязан лежать в r-xp-сегменте именно libil2cpp.so (свежая
+    // карта на момент записи); страница открывается RW и сразу возвращается
+    // RX — состояния RWX не бывает никогда; icache сбрасывается по 4 байтам.
+    bool write_code(uint64_t address, uint32_t word) {
+        if (!g_mem.bound() || g_pid <= 0) return false;
+        std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps");
+        if (!file) return false;
+        std::string line;
+        bool code_page = false;
+        while (std::getline(file, line)) {
+            unsigned long long lo = 0, hi = 0;
+            char perms[5]{}, path[256]{};
+            if (std::sscanf(line.c_str(), "%llx-%llx %4s %*llx %*x:%*x %*u %255s",
+                            &lo, &hi, perms, path) < 3) continue;
+            if (address < lo || address >= hi) continue;
+            code_page = std::strcmp(perms, "r-xp") == 0 &&
+                        std::strstr(path, "libil2cpp.so") != nullptr;
+            break;
+        }
+        if (!code_page) return false;
+        const long page = sysconf(_SC_PAGESIZE);
+        if (page <= 0) return false;
+        const uint64_t start = address & ~(static_cast<uint64_t>(page) - 1);
+        if (mprotect(reinterpret_cast<void*>(start), static_cast<size_t>(page),
+                     PROT_READ | PROT_WRITE) != 0) return false;
+        const bool ok = g_mem.write(address, &word, sizeof(word));
+        mprotect(reinterpret_cast<void*>(start), static_cast<size_t>(page),
+                 PROT_READ | PROT_EXEC);
+#if defined(__aarch64__) || defined(__arm__)
+        __builtin___clear_cache(reinterpret_cast<char*>(address),
+                                reinterpret_cast<char*>(address) + sizeof(word));
+#endif
+        return ok;
     }
 };
 

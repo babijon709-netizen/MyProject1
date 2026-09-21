@@ -42,6 +42,10 @@ assert re.search(r'lootStatus\.flows\b', menu), 'partial flow availability is no
 assert re.search(r'lootStatus\.hooked\b', menu), 'a hooked flow is not reported'
 assert 'lootStatus.hooked_run' in menu and 'lootStatus.hooked_code' in menu, \
     'the hooked flow must be shown with the words read from the process'
+# The whole-point indicator: with the code patch in place the pickup must
+# visibly switch to instant mode.
+assert re.search(r'lootStatus\.instant\b', menu) and 'Подбор: мгновенно' in menu, \
+    'the instant mode of pickup is not shown in the menu'
 assert 'LootKindText(lootStatus.kind)' in menu, 'the accelerated flow is not named'
 print('misc toggles: row state and per-frame animation bindings: OK')
 print('instant pickup menu: every refusal reason, its number and the maps line: OK')

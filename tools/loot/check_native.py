@@ -64,13 +64,13 @@ def parse_table(text):
     assert len(prologue) == 4, prologue
     body = text.split('inline constexpr Layout kLayouts[] = {', 1)[1].split('\n};', 1)[0]
     nums = [int(m, 16) for m in re.findall(r'0x([0-9a-fA-F]+)', body)]
-    assert nums and len(nums) % 33 == 0, 'unexpected layout table shape'
+    assert nums and len(nums) % 45 == 0, 'unexpected layout table shape'
     layouts = []
-    for start in range(0, len(nums), 33):
-        chunk = nums[start:start + 33]
+    for start in range(0, len(nums), 45):
+        chunk = nums[start:start + 45]
         build_id = bytes(chunk[:20])
         helper = chunk[20]
-        flows = [tuple(chunk[21 + i * 4:25 + i * 4]) for i in range(3)]
+        flows = [tuple(chunk[21 + i * 8:29 + i * 8]) for i in range(3)]
         layouts.append({'build_id': build_id, 'helper': helper, 'flows': flows})
     return layouts, prologue
 
@@ -124,7 +124,7 @@ class Image:
 
 
 def check_flow(image, flow, prologue, calls):
-    run, move_next, delay_site, delay_word = flow
+    run, move_next, delay_site, delay_word, flag_site, call_site, flag_word, call_word = flow
     # Run(): the prologue the identity chain matches, decoded.
     words = [image.word(run + i * 4) for i in range(5)]
     assert words[:4] == prologue, 'Run prologue changed at %#x' % run
@@ -166,6 +166,18 @@ def check_flow(image, flow, prologue, calls):
             break
     assert helper is not None, 'no call after the delay site %#x' % delay_site
     calls.add(helper)
+    # Две инструкции вызова задержки — мишень нашего патча: `mov w0, #1` сразу
+    # после adrp (за 8 байт до ldr) и сам `bl WaitForSeconds`. Таблица обязана
+    # держать точные RVA и слова: иначе патч молча попадёт мимо.
+    assert flag_site == delay_site - 8, 'flag site %#x is not delay-8 (%#x)' % (flag_site, delay_site)
+    assert call_site == delay_site + 0x10, 'call site %#x is not delay+0x10 (%#x)' % (call_site, delay_site)
+    assert image.word(flag_site) == flag_word == 0x52800020, \
+        'flag site %#x holds %#x' % (flag_site, image.word(flag_site))
+    assert image.word(call_site) == call_word, \
+        'call site %#x holds %#x, table says %#x' % (call_site, image.word(call_site), call_word)
+    call = image.disasm(call_site, 4)[0]
+    assert call.mnemonic == 'bl' and call.operands[0].imm == helper, \
+        'call site %#x is %s %s' % (call_site, call.mnemonic, call.op_str)
     return ('Run %#x -> MoveNext %#x (m_target +0x20, state machine +0x20); '
             'delay %#x loads %.2f s, ignoreTimeScale + Update(8), awaits %#x'
             % (run, move_next, delay_site, value, helper))
