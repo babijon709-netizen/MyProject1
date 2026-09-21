@@ -40,8 +40,11 @@ for forbidden in ('trampoline', 'detour', 'inline_hook', 'instruction_supported'
 for forbidden in ('trampoline', 'detour', 'inline_hook', 'ptrace', 'dlopen', 'memcpy'):
     assert forbidden not in loot_adapter, forbidden
 # The code writer: fresh /proc maps gate scoped to the r-xp segment of
-# libil2cpp.so, mprotect RW only (RWX never exists), RX restored, icache
-# flushed by the 4 patched bytes.
+# libil2cpp.so, then one pwrite through /proc/<pid>/mem — the kernel COWs the
+# page (FOLL_FORCE), so no permission state of ours or the target's ever
+# changes (RWX cannot appear) and no mprotect/clear_cache may be called on a
+# foreign address (both act on OUR address space and are useless-to-fatal:
+# ENOMEM on the unmapped guest address was what silently killed the patch).
 loot_heap = loot_adapter.split('struct Memory {', 1)[1].split('Memory memory;', 1)[0]
 assert 'if (!object_data::heap_writable(text, address, sizeof(T))) {' in loot_heap
 assert 'note_refusal(text, address);' in loot_heap
@@ -49,10 +52,13 @@ assert 'std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps")' in loot_heap
 assert loot_heap.count('g_mem.write(') == 2      # heap writer + code writer
 assert 'bool write_code(uint64_t address, uint32_t word) {' in loot_heap
 assert 'std::strcmp(perms, "r-xp")' in loot_heap and 'libil2cpp.so' in loot_heap
-assert 'PROT_READ | PROT_WRITE) != 0' in loot_heap
-assert 'PROT_READ | PROT_EXEC)' in loot_heap
-assert 'PROT_READ | PROT_WRITE | PROT_EXEC' not in loot_heap  # RWX, на состояние
-assert '__builtin___clear_cache' in loot_heap
+# Negative checks run on code with comments stripped: comments may (and do)
+# explain WHY these calls must not appear.
+loot_code = re.sub(r'//[^\n]*', '', re.sub(r'/\*.*?\*/', '', loot_heap, flags=re.S))
+assert 'mprotect' not in loot_code, 'permission flips live in the target, not our VA space'
+assert '__builtin___clear_cache' not in loot_code, 'icache flush on OUR va is meaningless'
+assert 'PROT_READ | PROT_WRITE | PROT_EXEC' not in loot_code  # RWX, на состояние
+assert 'return g_mem.write(address, &word, sizeof(word));' in loot_heap
 # Guard words of both the retired patch and ours stay in the table and stay
 # checked before anything is written.
 assert loot_controller.count('delay_word') >= 3
@@ -67,4 +73,4 @@ assert '##instantloot' in menu
 assert 'const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;' in menu
 assert 'vm.no_recoil = nr; vm.no_spread = ns; vm.fast_loot = fl;' in menu
 print('weapons: heap-only adapter and retired fast-loot writer boundaries: OK')
-print('loot: instant patch fenced (2 sites/flow, RW->RX, verify+revert), one heap field, patched images refused: OK')
+print('loot: instant patch fenced (2 sites/flow, COW write, verify+revert), one heap field, patched images refused: OK')
