@@ -23,11 +23,18 @@ sh "${ROOT}/tools/weapons/run.sh"
 # Экспериментальный внутрипроцессный модуль подбора: отдельная библиотека, в
 # xvcen она не попадает. Ошибка её сборки НЕ ломает обычную сборку — печатается
 # предупреждение (в CI по логу видно, собрался ли модуль под текущий NDK).
-if sh "${ROOT}/tools/loot_module/build_android.sh"; then
+_loot_log="$(mktemp)"
+if sh "${ROOT}/tools/loot_module/build_android.sh" >"${_loot_log}" 2>&1; then
     echo "experimental loot module built (separate library, not part of xvcen)"
+    echo "::notice title=experimental loot module::compiled under the current NDK (not part of xvcen)"
 else
-    echo "::warning::experimental loot module did not build; xvcen is unaffected" >&2
+    echo "experimental loot module did not build; xvcen is unaffected" >&2
+    echo "::warning title=experimental loot module::build failed; xvcen is unaffected"
+    grep -E "error:|fatal error:|undefined reference" "${_loot_log}" | head -8 | cut -c1-180 | while IFS= read -r _line; do
+        echo "::warning title=experimental loot module::${_line}"
+    done
 fi
+rm -f "${_loot_log}"
 
 echo "Using NDK at ${NDK}"
 "${NDK}/ndk-build" --version || true
