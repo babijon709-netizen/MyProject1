@@ -256,7 +256,7 @@ float TabContent(int tab, float dt, float cW) {
                         PlaySound(SND_CLICK);
                         g_input.touchConsumed = true;
                     }
-                    const char* rt = XS("Сбросить точку");
+                    const char* rt = XS("Сброс");
                     auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
                     dl->AddText(fn, fs * 1.05f,
                                 {cX + (cW - rsz.x) * 0.5f, rpos.y + (rowH - rsz.y) * 0.5f},
@@ -779,7 +779,7 @@ float TabContent(int tab, float dt, float cW) {
                     PlaySound(SND_CLICK);
                     g_input.touchConsumed = true;
                 }
-                const char* rt = XS("Сбросить положение");
+                const char* rt = XS("Сброс");
                 auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
                 dl->AddText(fn, fs * 1.05f,
                             {cX + (cW - rsz.x) * 0.5f, rpos.y + (rowH - rsz.y) * 0.5f},
@@ -898,14 +898,28 @@ float TabContent(int tab, float dt, float cW) {
                   -50.f, 50.f, XS("%.0f см"), false, false, g_state.sl_hands_y, dt);
         SliderRow("##vmz", XS("Z: ближе / дальше"), &vm.z,
                   -50.f, 50.f, XS("%.0f см"), true, false, g_state.sl_hands_z, dt);
-        if (ImGui::Button(XS("Сбросить FOV и руки"))) {
+        ImGui::PushID("viewmodel_reset");
+        if (ImGui::Button(XS("Сброс"))) {
+            // This button resets only FOV/hands, not the other misc features.
             const int fps = vm.fps_limit;
-            vm = {}; vm.fps_limit = fps;
+            const bool fastLoot = vm.fast_loot;
+            vm = {}; vm.fps_limit = fps; vm.fast_loot = fastLoot;
             g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
             g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
             esp_viewmodel_tick(vm);
         }
+        ImGui::PopID();
         ImGui::Dummy({1.f, 12.f});
+
+        SHdr(XS("Быстрый подбор"));
+        CardBg(Layout::RowH);
+        const bool wasFastLoot = vm.fast_loot;
+        ToggleRow("##fastloot", XS("Быстрый подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
+        if (wasFastLoot != vm.fast_loot) {
+            esp_viewmodel_tick(vm);
+            if (esp_viewmodel_diagnostics().fast_loot == viewmodel::Status::Failed)
+                ShowToast(XS("Быстрый подбор: ошибка применения"));
+        }
 
         SHdr(XS("Лимит FPS"));
         {
@@ -925,10 +939,12 @@ float TabContent(int tab, float dt, float cW) {
             }
             const bool normal = vm.fps_limit == 0;
             if (normal) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-            if (ImGui::Button(XS("Сбросить до обычного"), {width, Layout::RowH - 8.f})) {
+            ImGui::PushID("fps_reset");
+            if (ImGui::Button(XS("Сброс"), {width, Layout::RowH - 8.f})) {
                 vm.fps_limit = 0;
                 esp_viewmodel_tick(vm);
             }
+            ImGui::PopID();
             if (normal) ImGui::PopStyleColor();
         }
 

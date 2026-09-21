@@ -859,7 +859,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                     ShowToast(XS("Зоны сброшены"));
                     PlaySound(SND_CLICK);
                 }
-                const char* rt = XS("Сбросить зоны");
+                const char* rt = XS("Сброс");
                 auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
                 fg->AddText(fn, fs * 1.05f,
                     {cX + (cW - rsz.x) * 0.5f, curY + (rH - rsz.y) * 0.5f},

@@ -17,6 +17,8 @@ fi
 
 echo "Testing viewmodel memory controller"
 sh "${ROOT}/tools/viewmodel/run.sh"
+echo "Testing fast-loot controller"
+sh "${ROOT}/tools/fast_loot/run.sh"
 
 echo "Using NDK at ${NDK}"
 "${NDK}/ndk-build" --version || true

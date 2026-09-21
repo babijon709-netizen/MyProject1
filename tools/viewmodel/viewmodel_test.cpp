@@ -168,11 +168,19 @@ static void config_tests() {
         auto saved=encode(s); assert(decode(&saved,sizeof(saved)).fps_limit==0);
     }
     s.fps_limit=144;
+    s.fast_loot=true; auto loot=encode(s); auto lootLoaded=decode(&loot,sizeof(loot));
+    assert(lootLoaded.fast_loot && lootLoaded.fps_limit==144 && lootLoaded.fov_enabled && lootLoaded.hands_enabled);
+    for (int limit : {0, 90, 120, 144}) {
+        s.fps_limit=limit; auto saved=encode(s); auto loaded=decode(&saved,sizeof(saved));
+        assert(loaded.fast_loot && loaded.fps_limit==limit);
+    }
+    s.fps_limit=144; s.fast_loot=false;
+    assert(!decode(&e,0).fast_loot);
     e.flags=7; auto oldFps=decode(&e,sizeof(e));
-    assert(oldFps.fps_limit==144 && oldFps.fov_enabled && oldFps.hands_enabled);
+    assert(!oldFps.fast_loot && oldFps.fps_limit==144 && oldFps.fov_enabled && oldFps.hands_enabled);
     e.flags=3; auto legacy=decode(&e,sizeof(e));
     assert(legacy.fov_enabled && legacy.hands_enabled && legacy.fps_limit==0);
-    e.version=2; assert(!decode(&e,sizeof(e)).fov_enabled); e=encode(s); e.flags=16; assert(!decode(&e,sizeof(e)).hands_enabled);
+    e.version=2; assert(!decode(&e,sizeof(e)).fov_enabled); e=encode(s); e.flags=32; assert(!decode(&e,sizeof(e)).hands_enabled);
     e=encode(s); e.fov=std::numeric_limits<float>::quiet_NaN(); e.x=std::numeric_limits<float>::infinity(); e.y=-1000; e.z=1000;
     auto d=decode(&e,sizeof(e)); assert(d.fov==90 && d.x==0 && d.y==-50 && d.z==50);
 }

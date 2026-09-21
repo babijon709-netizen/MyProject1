@@ -91,13 +91,15 @@ def has_cyr(s):
 # Форматные строки переводятся вместе с единицами: "%.0f м" -> "%.0f m".
 # ---------------------------------------------------------------------------
 UI_EN = {
+    'Сброс': 'Reset',
     'Применено': 'Applied',
     'Штатно в прицеле': 'Default while aiming',
     'Ошибка чтения/записи': 'Memory read/write failed',
     'Ожидание объекта игры': 'Waiting for game object',
     'Кастомный FOV': 'Custom FOV',
     'Лимит FPS': 'FPS limit',
-    'Сбросить до обычного': 'Restore game default',
+    'Быстрый подбор': 'Fast loot',
+    'Быстрый подбор: ошибка применения': 'Fast loot: apply failed',
     'Обзор мира': 'World FOV',
     'Расположение рук': 'Hand position',
     'Кастомные руки': 'Custom hands',
@@ -106,7 +108,6 @@ UI_EN = {
     'Z: ближе / дальше': 'Z: closer / farther',
     '%.0f см': '%.0f cm',
     'В прицеле FOV и руки возвращаются к штатным значениям.': 'FOV and hands return to defaults while aiming.',
-    'Сбросить FOV и руки': 'Reset FOV and hands',
 
     # конфиги
     'Конфиг создан': 'Config created', 'Конфиг сохранён': 'Config saved',
@@ -134,7 +135,7 @@ UI_EN = {
     'Мемори-аим: не найден MouseLook': 'Memory aim: MouseLook not found',
     'Мемори-аим: камера не отвечает': 'Memory aim: camera not responding',
     # тач-зона аима (точка, из которой аимбот водит палец)
-    'Точка пальца': 'Finger point', 'Сбросить точку': 'Reset point',
+    'Точка пальца': 'Finger point',
     'Точка сброшена': 'Point reset',
     'Задай точку тапом по экрану': 'Set the point by tapping the screen',
     'Точка пальца сохранена': 'Finger point saved',
@@ -154,7 +155,6 @@ UI_EN = {
     'Искать до': 'Search up to', '%.0f м': '%.0f m',
     'Зоны бота': 'Bot zones', 'Зона джойстика': 'Joystick zone',
     'Зона огня': 'Fire zone', 'Задать': 'Set', 'Зоны сброшены': 'Zones reset',
-    'Сбросить зоны': 'Reset zones',
     'Тапни по центру джойстика движения': 'Tap the movement joystick centre',
     'Тапни по кнопке огня / атаки': 'Tap the fire / attack button',
     'Тап записывает зону. Меню откроется само.':
@@ -191,7 +191,7 @@ UI_EN = {
     'Отмена': 'Cancel', 'Включено': 'On', 'Выключено': 'Off',
     # худ: где стоит пилюля-счётчик игроков (Опции → Худ, калибровка тапом)
     'Худ': 'HUD', 'Счётчик игроков': 'Player counter', 'Цвет счётчика': 'Counter color',
-    'По умолчанию': 'Default', 'Сбросить положение': 'Reset position',
+    'По умолчанию': 'Default',
     'Положение сброшено': 'Position reset',
     'Тапни куда поставить счётчик игроков': 'Tap where to put the player counter',
     'Положение счётчика сохранено': 'Counter position saved',
