@@ -1,5 +1,6 @@
 #include "fps_memory.h"
 #include "fast_loot_memory.h"
+#include "weapon_tuning_memory.h"
 #include "maps_lookup.h"
 #include <chrono>
 #include <fstream>
@@ -34,9 +35,13 @@ Memory memory;
 viewmodel::Controller<Memory> controller(memory);
 viewmodel::FpsController<Memory> fps_controller(memory);
 fast_loot::Controller<Memory> loot_controller(memory, fast_loot::instruction_supported());
+weapon_tuning::Controller<Memory> weapon_controller(memory, weapon_tuning::instruction_supported());
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{}, loot_last_tick{};
+Clock::time_point weapon_last_tick{};
+bool weapon_last_recoil = false, weapon_last_spread = false;
+weapon_tuning::Status weapon_last_log{};
 bool loot_last_enabled = false;
 viewmodel::Status loot_last_log = viewmodel::Status::Off;
 int fps_last_limit = 0;
@@ -90,6 +95,19 @@ void tick_fast_loot(uint64_t session, bool enabled) {
                 (int)loot_last_log);
     }
 }
+void tick_weapons(uint64_t session, bool recoil, bool spread) {
+    const auto now = Clock::now();
+    const bool changed = recoil != weapon_last_recoil || spread != weapon_last_spread;
+    if (!changed && now - weapon_last_tick < std::chrono::milliseconds(250)) return;
+    weapon_last_tick = now; weapon_last_recoil = recoil; weapon_last_spread = spread;
+    weapon_controller.tick(session, g_il2cpp_base, recoil, spread);
+    const auto st = weapon_controller.status;
+    if (changed || st.recoil != weapon_last_log.recoil || st.spread != weapon_last_log.spread) {
+        weapon_last_log = st;
+        LogLine("weapons: no-recoil=%d no-spread=%d (0 off,1 waiting,2 active,4 unsupported CPU/image/code or memory error); client FPHitscan only",
+                (int)st.recoil, (int)st.spread);
+    }
+}
 uint64_t epoch = 1;
 viewmodel::Diagnostics last_log{};
 }
@@ -106,6 +124,9 @@ void esp_viewmodel_reset(bool restore) {
     if (!loot_controller.reset(restore && g_mem.bound()))
         LogLine("fast-loot: unable to restore original collect delay before session reset");
     loot_last_tick = {}; loot_last_enabled = false;
+    if (!weapon_controller.reset(restore && g_mem.bound()))
+        LogLine("weapons: unable to restore all original instructions before session reset");
+    weapon_last_tick = {}; weapon_last_recoil = weapon_last_spread = false;
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     ++epoch;
 }
@@ -116,6 +137,10 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); loot_controller.reset(false);
         loot_last_tick = {}; loot_last_enabled = false;
+        weapon_controller.reset(false);
+        weapon_last_tick = {}; weapon_last_recoil = weapon_last_spread = false;
+        weapon_controller.status = {settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off,
+                                    settings.no_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off};
         loot_controller.status = settings.fast_loot ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
@@ -124,6 +149,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     }
     tick_fps(epoch, settings.fps_limit);
     tick_fast_loot(epoch, settings.fast_loot);
+    tick_weapons(epoch, settings.no_recoil, settings.no_spread);
     // Resolve the current local player from the static source, NOT the ESP
     // cache which intentionally tolerates stale identities during respawn.
     uint64_t player = 0;
@@ -153,5 +179,7 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     auto status = controller.status;
     status.fast_loot = loot_controller.status;
+    status.no_recoil = weapon_controller.status.recoil;
+    status.no_spread = weapon_controller.status.spread;
     return status;
 }

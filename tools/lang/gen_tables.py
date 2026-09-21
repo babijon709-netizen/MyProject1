@@ -99,6 +99,8 @@ UI_EN = {
     'Кастомный FOV': 'Custom FOV',
     'Лимит FPS': 'FPS limit',
     'Быстрый подбор': 'Fast loot',
+    'No Recoil: ошибка применения': 'No Recoil: apply failed',
+    'No Spread: ошибка применения': 'No Spread: apply failed',
     'Быстрый подбор: ошибка применения': 'Fast loot: apply failed',
     'Обзор мира': 'World FOV',
     'Расположение рук': 'Hand position',

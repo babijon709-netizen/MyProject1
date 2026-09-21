@@ -174,13 +174,33 @@ static void config_tests() {
         s.fps_limit=limit; auto saved=encode(s); auto loaded=decode(&saved,sizeof(saved));
         assert(loaded.fast_loot && loaded.fps_limit==limit);
     }
+    for (bool recoil : {false, true}) for (bool spread : {false, true}) {
+        s.no_recoil=recoil; s.no_spread=spread;
+        for (int limit : {0,90,120,144}) {
+            s.fps_limit=limit; auto saved=encode(s); auto loaded=decode(&saved,sizeof(saved));
+            assert(loaded.no_recoil==recoil && loaded.no_spread==spread && loaded.fast_loot);
+            assert(loaded.fps_limit==limit && loaded.fov_enabled && loaded.hands_enabled);
+            reset_pose(loaded);
+            assert(!loaded.fov_enabled && !loaded.hands_enabled && loaded.fov==90.f);
+            assert(loaded.x==0.f && loaded.y==0.f && loaded.z==0.f);
+            assert(loaded.no_recoil==recoil && loaded.no_spread==spread && loaded.fast_loot && loaded.fps_limit==limit);
+        }
+    }
+    for (size_t i=0;i<sizeof(e);++i) {
+        auto d=decode(&e,i); assert(!d.no_recoil && !d.no_spread);
+    }
+    for (unsigned flags=0;flags<32;++flags) {
+        auto old=encode(s); old.flags=flags;
+        auto d=decode(&old,sizeof(old)); assert(!d.no_recoil && !d.no_spread);
+    }
+    s.no_recoil=s.no_spread=false;
     s.fps_limit=144; s.fast_loot=false;
     assert(!decode(&e,0).fast_loot);
     e.flags=7; auto oldFps=decode(&e,sizeof(e));
     assert(!oldFps.fast_loot && oldFps.fps_limit==144 && oldFps.fov_enabled && oldFps.hands_enabled);
     e.flags=3; auto legacy=decode(&e,sizeof(e));
     assert(legacy.fov_enabled && legacy.hands_enabled && legacy.fps_limit==0);
-    e.version=2; assert(!decode(&e,sizeof(e)).fov_enabled); e=encode(s); e.flags=32; assert(!decode(&e,sizeof(e)).hands_enabled);
+    e.version=2; assert(!decode(&e,sizeof(e)).fov_enabled); e=encode(s); e.flags=128; assert(!decode(&e,sizeof(e)).hands_enabled);
     e=encode(s); e.fov=std::numeric_limits<float>::quiet_NaN(); e.x=std::numeric_limits<float>::infinity(); e.y=-1000; e.z=1000;
     auto d=decode(&e,sizeof(e)); assert(d.fov==90 && d.x==0 && d.y==-50 && d.z==50);
 }

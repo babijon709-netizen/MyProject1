@@ -12,6 +12,8 @@ static const LangPair kUiEn[] = {
     {"%.0f см", "%.0f cm"},
     {"%.1f м", "%.1f m"},
     {"3D боксы", "3D boxes"},
+    {"No Recoil: ошибка применения", "No Recoil: apply failed"},
+    {"No Spread: ошибка применения", "No Spread: apply failed"},
     {"X: влево / вправо", "X: left / right"},
     {"Y: вниз / вверх", "Y: down / up"},
     {"Z: ближе / дальше", "Z: closer / farther"},

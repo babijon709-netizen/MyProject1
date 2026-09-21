@@ -36,6 +36,7 @@ struct AppState {
     bool  esp_scrap = false;              // бочки и дорожные знаки
     ViewmodelSettings viewmodel;
     float a_custom_fov = 0.f, a_custom_hands = 0.f, a_fast_loot = 0.f;
+    float a_no_recoil = 0.f, a_no_spread = 0.f;
     SliderAnim sl_custom_fov, sl_hands_x, sl_hands_y, sl_hands_z;
     bool  always_day = false;     // всегда день
     float marker_dist = 150.f;

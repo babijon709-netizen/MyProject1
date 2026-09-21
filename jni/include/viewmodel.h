@@ -11,6 +11,8 @@ struct ViewmodelSettings {
     float x = 0.f, y = 0.f, z = 0.f;
     int fps_limit = 0; // 0 = original game limit; otherwise 90 / 120 / 144
     bool fast_loot = false;
+    bool no_recoil = false;
+    bool no_spread = false;
 };
 
 namespace viewmodel {
@@ -33,6 +35,12 @@ inline ViewmodelSettings sanitize(ViewmodelSettings s) {
     s.z = bounded(s.z, -50.f, 50.f, 0.f);
     return s;
 }
+// Reset only camera/pose controls, leaving independent misc switches alone.
+inline void reset_pose(ViewmodelSettings& s) {
+    const ViewmodelSettings defaults;
+    s.fov_enabled = defaults.fov_enabled; s.hands_enabled = defaults.hands_enabled;
+    s.fov = defaults.fov; s.x = defaults.x; s.y = defaults.y; s.z = defaults.z;
+}
 // Optional trailer after the existing v4 config. Old readers ignore it;
 // missing/truncated/unknown trailers load disabled defaults, never stale state.
 struct ConfigExtension {
@@ -48,7 +56,8 @@ inline ConfigExtension encode(ViewmodelSettings s) {
     ConfigExtension e;
     // Bits 2..3: 0 = default, 1 = 144 (legacy toggle), 2 = 90, 3 = 120.
     const uint32_t fps_mode = s.fps_limit == 144 ? 1u : s.fps_limit == 90 ? 2u : s.fps_limit == 120 ? 3u : 0u;
-    e.flags = (s.fov_enabled ? 1u : 0u) | (s.hands_enabled ? 2u : 0u) | (fps_mode << 2) | (s.fast_loot ? 16u : 0u);
+    e.flags = (s.fov_enabled ? 1u : 0u) | (s.hands_enabled ? 2u : 0u) | (fps_mode << 2) | (s.fast_loot ? 16u : 0u) |
+              (s.no_recoil ? 32u : 0u) | (s.no_spread ? 64u : 0u);
     e.fov = s.fov; e.x = s.x; e.y = s.y; e.z = s.z;
     return e;
 }
@@ -56,17 +65,22 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     ViewmodelSettings s;
     if (size != sizeof(ConfigExtension)) return s;
     ConfigExtension e; std::memcpy(&e, bytes, sizeof(e));
-    if (e.magic != 0x31574d56u || e.version != 1 || e.size != sizeof(e) || (e.flags & ~31u)) return s;
+    if (e.magic != 0x31574d56u || e.version != 1 || e.size != sizeof(e) || (e.flags & ~127u)) return s;
     s.fov_enabled = (e.flags & 1u) != 0;
     s.hands_enabled = (e.flags & 2u) != 0;
     const int fps_modes[] = {0, 144, 90, 120};
     s.fps_limit = fps_modes[(e.flags >> 2) & 3u];
     s.fast_loot = (e.flags & 16u) != 0;
+    s.no_recoil = (e.flags & 32u) != 0;
+    s.no_spread = (e.flags & 64u) != 0;
     s.fov = e.fov; s.x = e.x; s.y = e.y; s.z = e.z;
     return sanitize(s);
 }
 enum class Status { Off, Waiting, Active, ADS, Failed };
-struct Diagnostics { Status fov = Status::Off, hands = Status::Off, fast_loot = Status::Off; };
+struct Diagnostics {
+    Status fov = Status::Off, hands = Status::Off, fast_loot = Status::Off;
+    Status no_recoil = Status::Off, no_spread = Status::Off;
+};
 }
 
 // Main-thread tick, independent of ESP toggles. No background writer.

@@ -883,6 +883,19 @@ float TabContent(int tab, float dt, float cW) {
         ColorRow("##fbd", XS("Тело ноды"),   &cfg::esp::farm_body_col, true);
 
         auto& vm = g_state.viewmodel;
+        SHdr(XS("Оружие"));
+        CardBg(Layout::RowH * 2.f);
+        if (ToggleRow("##norecoil", XS("No Recoil"), &vm.no_recoil, g_state.a_no_recoil, false, true)) {
+            esp_viewmodel_tick(vm);
+            if (esp_viewmodel_diagnostics().no_recoil == viewmodel::Status::Failed)
+                ShowToast(XS("No Recoil: ошибка применения"));
+        }
+        if (ToggleRow("##nospread", XS("No Spread"), &vm.no_spread, g_state.a_no_spread, true, false)) {
+            esp_viewmodel_tick(vm);
+            if (esp_viewmodel_diagnostics().no_spread == viewmodel::Status::Failed)
+                ShowToast(XS("No Spread: ошибка применения"));
+        }
+
         SHdr(XS("Кастомный FOV"));
         CardBg(Layout::RowH + Layout::SliderH);
         ToggleRow("##vmfov", XS("Кастомный FOV"), &vm.fov_enabled, g_state.a_custom_fov, false, true);
@@ -901,9 +914,7 @@ float TabContent(int tab, float dt, float cW) {
         ImGui::PushID("viewmodel_reset");
         if (ImGui::Button(XS("Сброс"))) {
             // This button resets only FOV/hands, not the other misc features.
-            const int fps = vm.fps_limit;
-            const bool fastLoot = vm.fast_loot;
-            vm = {}; vm.fps_limit = fps; vm.fast_loot = fastLoot;
+            viewmodel::reset_pose(vm);
             g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
             g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
             esp_viewmodel_tick(vm);
@@ -1643,6 +1654,8 @@ void RenderMenu() {
     Tick(g_state.a_custom_fov, g_state.viewmodel.fov_enabled, dt);
     Tick(g_state.a_custom_hands, g_state.viewmodel.hands_enabled, dt);
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
+    Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil, dt);
+    Tick(g_state.a_no_spread, g_state.viewmodel.no_spread, dt);
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
     Tick(g_state.a_freecam_on,  g_state.freecam_on,  dt);
     Tick(g_state.a_freecam_btn_show, g_state.freecam_btn_show, dt);
