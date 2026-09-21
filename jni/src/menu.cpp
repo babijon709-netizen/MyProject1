@@ -882,6 +882,43 @@ float TabContent(int tab, float dt, float cW) {
         ColorRow("##fsp", XS("Метка фарма"), &cfg::esp::farm_spot_col, false);
         ColorRow("##fbd", XS("Тело ноды"),   &cfg::esp::farm_body_col, true);
 
+        auto vmStatus = [](viewmodel::Status status) -> const char* {
+            switch (status) {
+                case viewmodel::Status::Off: return XS("Выкл");
+                case viewmodel::Status::Active: return XS("Применено");
+                case viewmodel::Status::ADS: return XS("Штатно в прицеле");
+                case viewmodel::Status::Failed: return XS("Ошибка чтения/записи");
+                default: return XS("Ожидание объекта игры");
+            }
+        };
+        const auto vmDiag = esp_viewmodel_diagnostics();
+        auto& vm = g_state.viewmodel;
+        SHdr(XS("Кастомный FOV"));
+        CardBg(Layout::RowH + Layout::SliderH);
+        ToggleRow("##vmfov", XS("Кастомный FOV"), &vm.fov_enabled, g_state.a_custom_fov, false, true);
+        SliderRow("##vmfovvalue", XS("Обзор мира"), &vm.fov,
+                  50.f, 120.f, XS("%.0f°"), true, false, g_state.sl_custom_fov, dt);
+        ImGui::TextDisabled("%s", vmStatus(vmDiag.fov));
+
+        SHdr(XS("Расположение рук"));
+        CardBg(Layout::RowH + Layout::SliderH * 3.f);
+        ToggleRow("##vmhands", XS("Кастомные руки"), &vm.hands_enabled, g_state.a_custom_hands, false, true);
+        SliderRow("##vmx", XS("X: влево / вправо"), &vm.x,
+                  -50.f, 50.f, XS("%.0f см"), false, false, g_state.sl_hands_x, dt);
+        SliderRow("##vmy", XS("Y: вниз / вверх"), &vm.y,
+                  -50.f, 50.f, XS("%.0f см"), false, false, g_state.sl_hands_y, dt);
+        SliderRow("##vmz", XS("Z: ближе / дальше"), &vm.z,
+                  -50.f, 50.f, XS("%.0f см"), true, false, g_state.sl_hands_z, dt);
+        ImGui::TextDisabled("%s", vmStatus(vmDiag.hands));
+        ImGui::TextWrapped("%s", XS("В прицеле FOV и руки возвращаются к штатным значениям."));
+        if (ImGui::Button(XS("Сбросить FOV и руки"))) {
+            vm = {};
+            g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
+            g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
+            esp_viewmodel_tick(vm);
+        }
+        ImGui::Dummy({1.f, 12.f});
+
         // Иксрей: рендер отсекает всё ближе выбранной дистанции — стены и
         // текстуры вокруг игрока пропадают, видно что за ними.
         SHdr(XS("Иксрей"));
@@ -1574,6 +1611,8 @@ void RenderMenu() {
     Tick(g_state.a_farm_stone,  g_state.farm_stone,  dt);
     Tick(g_state.a_farm_metal,  g_state.farm_metal,  dt);
     Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
+    Tick(g_state.a_custom_fov, g_state.viewmodel.fov_enabled, dt);
+    Tick(g_state.a_custom_hands, g_state.viewmodel.hands_enabled, dt);
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
     Tick(g_state.a_freecam_on,  g_state.freecam_on,  dt);
     Tick(g_state.a_freecam_btn_show, g_state.freecam_btn_show, dt);

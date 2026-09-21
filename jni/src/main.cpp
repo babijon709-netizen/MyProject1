@@ -110,6 +110,7 @@ int main(int argc, char* argv[]) {
         drawBegin();
 
         esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
+        esp_viewmodel_tick(g_state.viewmodel); // independent of ESP/aim/farm
         LogStage(kStageEsp);
         DrawEspOverlay();
         slowMark();   // 1: после ESP
@@ -183,6 +184,7 @@ int main(int argc, char* argv[]) {
     // а после выхода чита возвращать её уже некому.
     esp_freecam_set(false);
     stop_attach_thread();
+    esp_viewmodel_reset(true);
     process_detach();
     Blur::Free();
     CfgWatchFree();

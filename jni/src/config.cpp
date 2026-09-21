@@ -179,6 +179,7 @@ void RestoreLayout() {
 void ApplyBuildChoice(go::Build b) {
     if (b == go::Build::Beta && !go::BetaAvailable()) b = go::Build::Release;
     const bool changed = (go::CurrentBuild() != b);
+    if (changed) esp_viewmodel_reset(true); // restore using OLD offsets
     go::SelectBuild(b);
     RememberBuild();
     if (changed) {
@@ -361,7 +362,15 @@ static void ConfigSaveToPath(const std::string& path) {
     memcpy(buf, &s, sizeof(s));
     XorBuf(buf, sizeof(s));
     std::ofstream f(path, std::ios::binary);
-    if (f) { f.write((char*)buf, sizeof(buf)); f.close(); }
+    if (f) {
+        f.write((char*)buf, sizeof(buf));
+        auto extension = viewmodel::encode(g_state.viewmodel);
+        uint8_t extra[sizeof(extension)];
+        memcpy(extra, &extension, sizeof(extra));
+        XorBuf(extra, sizeof(extra));
+        f.write((char*)extra, sizeof(extra));
+        f.close();
+    }
 }
 
 void ConfigSave() {
@@ -399,12 +408,19 @@ void ConfigLoad(int idx, bool announce) {
     uint8_t buf[sizeof(s)];
     f.read((char*)buf, sizeof(buf));
     size_t got = (size_t)f.gcount();
+    uint8_t extra[sizeof(viewmodel::ConfigExtension)]{};
+    f.read((char*)extra, sizeof(extra));
+    size_t extraGot = (size_t)f.gcount();
     f.close();
     if (got != sizeof(buf)) { if (announce) ShowToast(XS("Несовместимый конфиг")); return; }
     XorBuf(buf, sizeof(s));
     memcpy(&s, buf, sizeof(s));
     if (s.magic != 0x58564345U || s.version != 4) { if (announce) ShowToast(XS("Старый конфиг — пересохрани")); return; }
 
+    XorBuf(extra, extraGot);
+    g_state.viewmodel = viewmodel::decode(extra, extraGot);
+    g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
+    g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
     g_state.aim_touch   = s.aim_touch;
     // «Только видимых» убран из меню — значение из конфига игнорируется.
     g_state.aim_pos     = false;

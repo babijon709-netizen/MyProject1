@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include "imgui.h"
+#include "viewmodel.h"
 
 struct InputState {
     bool touchConsumed = false;
@@ -33,6 +34,9 @@ struct AppState {
     bool  esp_pickup = false;
     bool  esp_bots = false, esp_vehicles = false;
     bool  esp_scrap = false;              // бочки и дорожные знаки
+    ViewmodelSettings viewmodel;
+    float a_custom_fov = 0.f, a_custom_hands = 0.f;
+    SliderAnim sl_custom_fov, sl_hands_x, sl_hands_y, sl_hands_z;
     bool  always_day = false;     // всегда день
     float marker_dist = 150.f;
     float esp_thick = 1.5f;

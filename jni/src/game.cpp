@@ -1,4 +1,6 @@
 #include "game.h"
+#include "viewmodel.h"
+#include "game_viewmodel_internal.h"
 #include "mem_io.h"                // чтение/запись памяти игры: /proc/<pid>/mem + кэш блоков
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
@@ -6438,6 +6440,7 @@ static EspAttachState g_attach_state = ESP_ATTACH_OK;
 EspAttachState esp_attach_state() { return g_attach_state; }
 
 bool esp_init(pid_t pid) {
+    std::lock_guard<std::recursive_mutex> viewmodel_guard(viewmodel_session_mutex());
     esp_reset();
     g_pid = pid;
     g_mem.clear_last_error();
@@ -6746,6 +6749,8 @@ static void reset_world_caches() {
 }
 
 void esp_reset() {
+    std::lock_guard<std::recursive_mutex> viewmodel_guard(viewmodel_session_mutex());
+    esp_viewmodel_reset(false); // process lost: never restore to a reused address
     g_mem.unbind();
     g_attach_state = ESP_ATTACH_OK;
     g_pid = -1; g_il2cpp_base = 0;

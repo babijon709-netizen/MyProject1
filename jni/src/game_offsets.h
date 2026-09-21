@@ -556,4 +556,22 @@ inline constexpr std::uint64_t ITEMPICKUP_AMOUNT      = 0xE0; // int amount
 // learn the NetworkIdentity class pointer (validates dictionary entries).
 inline constexpr std::uint64_t GAME_CONTROLLER_NET_IDENTITY_FIELD = 0x8;
 
+// Custom world FOV and first-person model position (VIEWMODEL.md).
+inline constexpr std::uint64_t FPMANAGER_WORLD_FOV_TARGET       = 0x9C; // Oxide_FPManager_Fields.BYu
+inline constexpr std::uint64_t FPOBJECT_DRAW_EVENT              = 0x20; // Oxide_FPObject_Fields.Draw
+inline constexpr std::uint64_t FPDRAW_ACTION                    = 0x10; // eDt_Fields.BXi
+inline constexpr std::uint64_t DELEGATE_TARGET                  = 0x20; // System_Delegate_Fields.m_target
+inline constexpr std::uint64_t MULTICAST_DELEGATES              = 0x78; // System_MulticastDelegate_Fields.delegates
+inline constexpr std::uint64_t FPMOTION_OBJECT                  = 0xC8; // Oxide_FPMotion_Fields.BYc
+inline constexpr std::uint64_t FPMOTION_PLAYER                  = 0xE8; // Oxide_FPMotion_Fields.Player
+inline constexpr std::uint64_t TRANSFORMOFFSET_POSITION         = 0x24; // Oxide_TransformOffset_Fields.m_Position
+inline constexpr std::uint64_t FPMOTION_IDLE_OFFSET             = 0x78; // Oxide_FPMotion_Fields.m_IdleOffset
+inline constexpr std::uint64_t FPMOTION_RUN_OFFSET              = 0x80; // Oxide_FPMotion_Fields.m_RunOffset
+inline constexpr std::uint64_t FPMOTION_RUN_RELOAD_OFFSET       = 0x88; // Oxide_FPMotion_Fields.runReloadOffset
+inline constexpr std::uint64_t FPMOTION_ATTACK_OFFSET           = 0x90; // Oxide_FPMotion_Fields.m_AttackOffset
+inline constexpr std::uint64_t FPMOTION_LADDER_OFFSET           = 0xA0; // Oxide_FPMotion_Fields.m_OnLadderOffset
+inline constexpr std::uint64_t FPMOTION_JUMP_OFFSET             = 0xA8; // Oxide_FPMotion_Fields.m_JumpOffset
+inline constexpr std::uint64_t FPMOTION_LOOK_OFFSET             = 0xB0; // Oxide_FPMotion_Fields.m_LookOffset
+inline constexpr std::uint64_t FPMOTION_CLOSE_OFFSET            = 0xB8; // Oxide_FPMotion_Fields.m_TooCloseOffset
+
 }

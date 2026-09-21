@@ -91,6 +91,21 @@ def has_cyr(s):
 # Форматные строки переводятся вместе с единицами: "%.0f м" -> "%.0f m".
 # ---------------------------------------------------------------------------
 UI_EN = {
+    'Применено': 'Applied',
+    'Штатно в прицеле': 'Default while aiming',
+    'Ошибка чтения/записи': 'Memory read/write failed',
+    'Ожидание объекта игры': 'Waiting for game object',
+    'Кастомный FOV': 'Custom FOV',
+    'Обзор мира': 'World FOV',
+    'Расположение рук': 'Hand position',
+    'Кастомные руки': 'Custom hands',
+    'X: влево / вправо': 'X: left / right',
+    'Y: вниз / вверх': 'Y: down / up',
+    'Z: ближе / дальше': 'Z: closer / farther',
+    '%.0f см': '%.0f cm',
+    'В прицеле FOV и руки возвращаются к штатным значениям.': 'FOV and hands return to defaults while aiming.',
+    'Сбросить FOV и руки': 'Reset FOV and hands',
+
     # конфиги
     'Конфиг создан': 'Config created', 'Конфиг сохранён': 'Config saved',
     'Файл не найден': 'File not found', 'Несовместимый конфиг': 'Incompatible config',

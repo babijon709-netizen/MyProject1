@@ -15,6 +15,9 @@ if [[ ! -x "${NDK}/ndk-build" ]]; then
     exit 1
 fi
 
+echo "Testing viewmodel memory controller"
+sh "${ROOT}/tools/viewmodel/run.sh"
+
 echo "Using NDK at ${NDK}"
 "${NDK}/ndk-build" --version || true
 
