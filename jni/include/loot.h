@@ -44,14 +44,49 @@ enum class Status { Off, Waiting, Active, Failed };
 // загрузка» того же окна.
 enum class Kind { None = -1, Container = 0, Pickup = 1, FastLoad = 2 };
 
+// Почему отказ. Журнал в этой сборке выключен (LogLine — no-op), поэтому
+// причина и одно число к ней показываются прямо в меню: по ним видно, что
+// именно не сошлось — версия образа, оставшийся в процессе старый патч,
+// разрешение класса или гейт кучи.
+enum class Reason {
+    None = 0,
+    Image,      // build-id не совпал с таблицей (или не прочитался)
+    Patched,    // точка прежнего патча изменена: в процессе старый инструмент
+    RunShape,   // пролог Run или цель его ветки не совпали
+    Helper,     // PlayerLoopHelper не разрешается через слот TypeInfo
+    Runners,    // runners[] не читается, пуст или длиннее ожидаемого
+    Read,       // память объекта ожидания не читается
+    Write,      // гейт кучи или сама запись отказали
+    Timer,      // duration/elapsed вне границ
+};
+
 struct Diagnostics {
     Status status = Status::Off;
     Kind kind = Kind::None;
+    Reason reason = Reason::None; // смысл detail — см. reason
+    // Число к причине: первые 8 байт прочитанного build-id (Image), RVA точки
+    // (Patched/RunShape), указатель класса (Helper), прочитанная длина
+    // (Runners), адрес (Read/Write), биты duration|elapsed (Timer).
+    uint64_t detail = 0;
     int timing = -1;              // PlayerLoopTiming раннера, где найдено ожидание
     uint64_t expired = 0;         // сколько ожиданий снято (≈ сколько пауз убрано)
     uint64_t races = 0;           // объект ушёл из-под записи и был исправлен
     uint64_t scans = 0;           // сколько проходов по раннерам сделано
 };
+
+inline const char* reason_name(Reason r) {
+    switch (r) {
+        case Reason::Image:    return "image";
+        case Reason::Patched:  return "patched";
+        case Reason::RunShape: return "run-shape";
+        case Reason::Helper:   return "helper";
+        case Reason::Runners:  return "runners";
+        case Reason::Read:     return "read";
+        case Reason::Write:    return "write";
+        case Reason::Timer:    return "timer";
+        default:               return "none";
+    }
+}
 
 inline const char* kind_name(Kind k) {
     switch (k) {
@@ -70,3 +105,7 @@ loot::Diagnostics esp_loot_diagnostics();
 // Восстанавливать нечего (см. выше), поэтому флага restore нет: вызов просто
 // забывает адреса — при потере процесса, на выходе и при смене версии игры.
 void esp_loot_reset();
+// Строка /proc/<pid>/maps, в которой гейт кучи отказался писать (права, имя
+// mapping'а, inode, признак «хвост файла»). Осмысленна при reason == Write;
+// иначе «-». Показывается в меню: журнал в этой сборке выключен.
+const char* esp_loot_refusal();

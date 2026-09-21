@@ -85,6 +85,21 @@ static constexpr int kAccentCustom = 8;
 static constexpr int kAccentCount = 9;   // 8 пресетов + свой
 
 
+// Причина отказа мгновенного подбора — строкой в меню (журнал выключен).
+static const char* LootReasonText(loot::Reason reason) {
+    switch (reason) {
+        case loot::Reason::Image:    return XS("образ игры не совпал с таблицей");
+        case loot::Reason::Patched:  return XS("в процессе остался старый патч — перезапустите игру");
+        case loot::Reason::RunShape: return XS("код образа изменился");
+        case loot::Reason::Helper:   return XS("PlayerLoopHelper не найден");
+        case loot::Reason::Runners:  return XS("список игровых циклов не читается");
+        case loot::Reason::Read:     return XS("память ожидания не читается");
+        case loot::Reason::Write:    return XS("запись в кучу отклонена");
+        case loot::Reason::Timer:    return XS("таймер ожидания вне границ");
+        default:                     return XS("причина неизвестна");
+    }
+}
+
 float TabContent(int tab, float dt, float cW) {
     float sY = ImGui::GetCursorPosY();
 
@@ -935,9 +950,16 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##instantloot", XS("Мгновенный подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
         if (oldLoot != vm.fast_loot) esp_loot_tick(vm.fast_loot);
         const auto lootStatus = esp_loot_diagnostics();
-        if (lootStatus.status == loot::Status::Failed)
-            ImGui::TextDisabled("%s", XS("Подбор: не применено, проверьте версию игры и журнал"));
-        else if (lootStatus.status == loot::Status::Active)
+        if (lootStatus.status == loot::Status::Failed) {
+            // Журнал в сборке выключен, поэтому причина и число к ней показываются
+            // здесь: по ним видно, что именно не сошлось (см. loot::Reason).
+            ImGui::TextDisabled("%s: %s", XS("Подбор: не применено"),
+                                LootReasonText(lootStatus.reason));
+            ImGui::TextDisabled("%s: %llX", XS("Данные"),
+                                (unsigned long long)lootStatus.detail);
+            if (lootStatus.reason == loot::Reason::Write)
+                ImGui::TextDisabled("%s", esp_loot_refusal());   // строка maps, без перевода
+        } else if (lootStatus.status == loot::Status::Active)
             ImGui::TextDisabled("%s", XS("Подбор: работает"));
         else if (vm.fast_loot)
             ImGui::TextDisabled("%s", XS("Ожидание открытого контейнера"));

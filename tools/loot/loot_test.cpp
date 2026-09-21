@@ -137,7 +137,10 @@ struct Game {
     uint64_t array(const std::vector<uint64_t>& elements) {
         const uint64_t a = io.alloc(0x20 + elements.size() * 8 + 8);
         io.set<uint64_t>(a, io.klass("Object[]", "System"));
-        io.set<uint64_t>(a + kArrayLength, static_cast<uint64_t>(elements.size()));
+        // Длина массива IL2CPP — 32 бита (так её читает и сам игрок), а соседние
+        // четыре байта нам не принадлежат: чтение длины как uint64 взяло бы их.
+        io.set<int32_t>(a + kArrayLength, static_cast<int32_t>(elements.size()));
+        io.set<uint32_t>(a + kArrayLength + 4, 0xDEADBEEFu);
         for (size_t i = 0; i < elements.size(); ++i)
             io.set<uint64_t>(a + kArrayFirst + i * 8, elements[i]);
         return a;
@@ -394,6 +397,9 @@ int main() {
             Controller<FakeMemory> c(g.io);
             for (int i = 0; i < 5; ++i) frame(g, c, 1, true);
             assert(c.diagnostics().status == Status::Failed);
+            assert(c.diagnostics().reason == Reason::Image);
+            // Число к причине — первые 8 байт прочитанного build-id.
+            assert(c.diagnostics().detail != 0);
             assert(g.io.writes == 0);
             assert(g.collect.moved == 0);
         }
@@ -407,6 +413,8 @@ int main() {
                 Controller<FakeMemory> c(g.io);
                 for (int i = 0; i < 5; ++i) frame(g, c, 1, true);
                 assert(c.diagnostics().status == Status::Failed);
+                assert(c.diagnostics().reason == Reason::Patched);
+                assert(c.diagnostics().detail == g.layout.flow[flow].delay_site);
                 assert(g.io.writes == 0);
                 assert(g.collect.moved == 0);
             }
@@ -419,6 +427,8 @@ int main() {
                 Controller<FakeMemory> c(g.io);
                 for (int i = 0; i < 5; ++i) frame(g, c, 1, true);
                 assert(c.diagnostics().status == Status::Failed);
+                assert(c.diagnostics().reason == Reason::RunShape);
+                assert(c.diagnostics().detail == g.layout.flow[flow].run);
                 assert(g.io.writes == 0);
             }
             {   // Run() branches somewhere else than the state machine we know
@@ -430,6 +440,7 @@ int main() {
                 Controller<FakeMemory> c(g.io);
                 for (int i = 0; i < 5; ++i) frame(g, c, 1, true);
                 assert(c.diagnostics().status == Status::Failed);
+                assert(c.diagnostics().reason == Reason::RunShape);
                 assert(g.io.writes == 0);
             }
         }
@@ -442,6 +453,8 @@ int main() {
             Controller<FakeMemory> c(g.io);
             for (int i = 0; i < 5; ++i) frame(g, c, 1, true);
             assert(c.diagnostics().status == Status::Failed);
+            assert(c.diagnostics().reason == Reason::Helper);
+            assert(c.diagnostics().detail == g.promise_klass);
             assert(g.io.writes == 0);
         }
         {   // runners[] is gone (helper not initialised yet)
@@ -453,6 +466,20 @@ int main() {
             Controller<FakeMemory> c(g.io);
             for (int i = 0; i < 5; ++i) frame(g, c, 1, true);
             assert(c.diagnostics().status == Status::Failed);
+            assert(c.diagnostics().reason == Reason::Runners);
+            assert(g.io.writes == 0);
+        }
+        {   // длина массива раннеров вне границ — тоже отказ, с числом в меню
+            Game g;
+            g.map_library();
+            g.build_unitask();
+            g.io.set<int32_t>(g.runners_array + kArrayLength, 4096);
+            g.start_collect(4);
+            Controller<FakeMemory> c(g.io);
+            for (int i = 0; i < 5; ++i) frame(g, c, 1, true);
+            assert(c.diagnostics().status == Status::Failed);
+            assert(c.diagnostics().reason == Reason::Runners);
+            assert(c.diagnostics().detail == 4096);
             assert(g.io.writes == 0);
         }
         std::printf("image checks: unknown build, retired patch and broken Run all refused\n");
@@ -547,16 +574,26 @@ int main() {
         g.io.fail_write = g.collect.promise + kPromiseElapsed;
         c.tick(1, g.base, true);
         assert(c.diagnostics().status == Status::Failed);
+        assert(c.diagnostics().reason == Reason::Write);
+        assert(c.diagnostics().detail == g.collect.promise + kPromiseElapsed);
         g.io.fail_write = 0;
         g.io.fail_read = g.collect.promise + kPromiseDuration;
         c.tick(1, g.base, true);
         assert(c.diagnostics().status == Status::Failed);
+        assert(c.diagnostics().reason == Reason::Read);
+        assert(c.diagnostics().detail == g.collect.promise);
         g.io.fail_read = 0;
         // An out-of-range duration means the identification is not to be
         // trusted: refuse instead of writing.
         g.io.set<float>(g.collect.promise + kPromiseDuration, 1234.f);
+        g.io.set<float>(g.collect.promise + kPromiseElapsed, 0.25f);
         c.tick(1, g.base, true);
         assert(c.diagnostics().status == Status::Failed);
+        assert(c.diagnostics().reason == Reason::Timer);
+        // В меню это видно как два float'а: duration в младшей половине, elapsed
+        // в старшей — ровно те числа, которые контроллер прочитал перед отказом.
+        assert((c.diagnostics().detail & 0xffffffffu) == 0x449A4000u);   // 1234.0f
+        assert((c.diagnostics().detail >> 32) == 0x3E800000u);           // 0.25f
         std::printf("errors: failed write, failed read and a bogus duration all report Failed\n");
     }
 
@@ -591,7 +628,23 @@ int main() {
         std::printf("robustness: junk items and a lying tail neither crash nor stall\n");
     }
 
-    // ---- 12. A busy item list: foreign classes cannot park the search ------
+    // ---- 12. Empty namespace: nested and generic types report it that way --
+    {
+        Game g;
+        g.map_library();
+        g.build_unitask();
+        g.promise_klass = g.io.klass(kPromiseName, "");     // UniTask/Delay...
+        g.start_collect(3);
+        const uint64_t runner_klass = g.io.ptr(g.collect.runner);
+        g.io.classes[runner_klass] = {kRunnerName, ""};     // AsyncUniTask`1<...>
+        Controller<FakeMemory> c(g.io);
+        for (int i = 0; i < 20 && !g.collect.finished; ++i) frame(g, c, 1, true);
+        assert(g.collect.moved == 3);
+        assert(c.diagnostics().status != Status::Failed);
+        std::printf("namespaces: an empty one is accepted for nested/generic types\n");
+    }
+
+    // ---- 13. A busy item list: foreign classes cannot park the search ------
     {
         auto build = [](Game& g, int foreign) {
             g.map_library();
@@ -637,7 +690,7 @@ int main() {
         std::printf("busy list: 40 and 100 foreign classes, our delay found last\n");
     }
 
-    // ---- 13. The shipped tables describe themselves consistently -----------
+    // ---- 14. The shipped tables describe themselves consistently -----------
     {
         for (const auto& layout : kLayouts) {
             assert(layout.helper_typeinfo > 0x100000);

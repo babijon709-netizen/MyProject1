@@ -30,7 +30,11 @@ assert 'instruction_supported' not in loot_controller
 for forbidden in ('mprotect', 'ptrace', 'dlopen', 'process_vm_writev', 'memcpy', 'sys/mman.h'):
     assert forbidden not in loot_adapter, forbidden
 loot_heap = loot_adapter.split('struct Memory {', 1)[1].split('Memory memory;', 1)[0]
-assert 'object_data::heap_writable(text, address, sizeof(T)) &&' in loot_heap
+assert 'if (!object_data::heap_writable(text, address, sizeof(T))) {' in loot_heap
+# Отказ гейта обязан сохранить строку maps: журнал в этой сборке выключен, и это
+# единственный способ узнать на устройстве, какой mapping не подошёл.
+assert 'note_refusal(text, address);' in loot_heap
+assert 'return g_mem.write(address, &value, sizeof(T));' in loot_heap
 assert 'std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps")' in loot_heap
 assert loot_heap.count('g_mem.write(') == 1
 # A process that still carries the retired delay patch must be refused, so the

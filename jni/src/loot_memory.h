@@ -43,6 +43,7 @@
 #include "game_offsets_active.h"
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 namespace loot {
 
@@ -74,10 +75,12 @@ inline constexpr int32_t kUpdateTiming = 8;
 // may produce for it. The names themselves are unique in this assembly.
 inline constexpr const char* kPromiseName    = "DelayIgnoreTimeScalePromise";
 inline constexpr const char* kPromiseNs[]    = {"Cysharp.Threading.Tasks",
-                                                "Cysharp.Threading.Tasks.UniTask"};
+                                                "Cysharp.Threading.Tasks.UniTask",
+                                                ""};   // вложенный тип: пусто
 inline constexpr const char* kRunnerName     = "AsyncUniTask`1";
 inline constexpr const char* kRunnerNs[]     = {"Cysharp.Threading.Tasks.CompilerServices",
-                                                "Cysharp.Threading.Tasks"};
+                                                "Cysharp.Threading.Tasks",
+                                                ""};   // generic-инстанция: пусто
 inline constexpr const char* kHelperName     = "PlayerLoopHelper";
 inline constexpr const char* kHelperNs[]     = {"Cysharp.Threading.Tasks"};
 inline constexpr const char* kLoopRunnerName = "PlayerLoopRunner";
@@ -148,6 +151,12 @@ inline constexpr unsigned kHotFrames   = 10;    // rescan at once right after a 
 inline constexpr float    kMaxDelay    = 10.f;  // sane loot delay, seconds
 inline constexpr float    kMinDelay    = 0.0001f;
 
+inline uint32_t float_bits(float v) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return bits;
+}
+
 template<class IO, size_t N>
 bool named_one_of(IO& io, uint64_t klass, const char* name, const char* const (&ns)[N]) {
     for (size_t i = 0; i < N; ++i) if (io.klass_named(klass, name, ns[i])) return true;
@@ -156,25 +165,38 @@ bool named_one_of(IO& io, uint64_t klass, const char* name, const char* const (&
 
 // Accept an image only when the build-id is known AND every code site we rely on
 // still holds its original instructions. nullptr for an unknown build and for a
-// process that still carries the retired delay patch.
-template<class IO> const Layout* layout_for(IO& io, uint64_t base) {
+// process that still carries the retired delay patch; `reason`/`detail` say which
+// check failed and carry the number that identifies it on the device.
+template<class IO>
+const Layout* layout_for(IO& io, uint64_t base, Reason& reason, uint64_t& detail) {
+    reason = Reason::Image;
+    detail = 0;
     if (base < 0x10000) return nullptr;
     std::array<uint8_t, 20> id{};
     if (!io.read(base + kBuildIdOffset, id)) return nullptr;
+    uint64_t head = 0;
+    for (int i = 7; i >= 0; --i) head = (head << 8) | id[static_cast<size_t>(i)];
+    detail = head;                      // first 8 build-id bytes, little endian
     for (const auto& layout : kLayouts) {
         if (layout.build_id != id) continue;
+        detail = 0;
         for (const auto& flow : layout.flow) {
             uint32_t word = 0;
-            if (!io.read(base + flow.delay_site, word) || word != flow.delay_word) return nullptr;
+            if (!io.read(base + flow.delay_site, word)) return nullptr;
+            if (word != flow.delay_word) { reason = Reason::Patched; detail = flow.delay_site; return nullptr; }
             std::array<uint32_t, 5> code{};
             if (!io.read(base + flow.run, code)) return nullptr;
-            for (int i = 0; i < 4; ++i) if (code[i] != kRunPrologue[i]) return nullptr;
-            if ((code[4] & kBranchMask) != kBranchOp) return nullptr;
+            for (int i = 0; i < 4; ++i)
+                if (code[i] != kRunPrologue[i]) { reason = Reason::RunShape; detail = flow.run; return nullptr; }
+            if ((code[4] & kBranchMask) != kBranchOp) { reason = Reason::RunShape; detail = flow.run; return nullptr; }
             const int32_t imm = (static_cast<int32_t>(code[4] << 6)) >> 6;   // imm26
             const int64_t target = static_cast<int64_t>(base + flow.run) +
                                    static_cast<int64_t>(imm) * 4;
-            if (target != static_cast<int64_t>(base + flow.move_next)) return nullptr;
+            if (target != static_cast<int64_t>(base + flow.move_next)) {
+                reason = Reason::RunShape; detail = flow.run; return nullptr;
+            }
         }
+        reason = Reason::None;
         return &layout;
     }
     return nullptr;
@@ -218,18 +240,29 @@ template<class IO> class Controller {
         return yes;
     }
 
-    bool runners_ready() {
+    bool runners_ready(Reason& reason, uint64_t& detail) {
         if (runners_) return true;
+        // Длина массива IL2CPP — 32 бита: так её читает весь проект и так её
+        // читает сам игрок (`ldr w9,[x8,#0x18]` в PlayerLoopHelper.AddAction).
+        // 8-байтовое чтение взяло бы мусор из соседних байт и отбрило образ.
+        reason = Reason::Helper;
         const uint64_t klass = io.ptr(base_ + layout_->helper_typeinfo);
+        detail = klass;
         if (klass < 0x10000 || !named_one_of(io, klass, kHelperName, kHelperNs)) return false;
         const uint64_t statics = io.ptr(klass + kClassStaticFields);
         if (statics < 0x10000) return false;
+        reason = Reason::Runners;
         const uint64_t array = io.ptr(statics + kHelperRunners);
-        uint64_t length = 0;
-        if (array < 0x10000 || !io.read(array + go_active::IL2CPP_ARRAY_LENGTH, length) ||
-            !length || length > kMaxRunners) return false;
+        detail = array;
+        if (array < 0x10000) return false;
+        int32_t length = 0;
+        if (!io.read(array + go_active::IL2CPP_ARRAY_LENGTH, length)) return false;
+        detail = static_cast<uint64_t>(static_cast<uint32_t>(length));
+        if (length <= 0 || length > static_cast<int32_t>(kMaxRunners)) return false;
         runners_ = array;
         runners_len_ = static_cast<uint32_t>(length);
+        reason = Reason::None;
+        detail = 0;
         return true;
     }
 
@@ -287,12 +320,11 @@ template<class IO> class Controller {
                 if (!loop_runner(object, timing)) continue;
                 if ((pass == 0) != (timing == kUpdateTiming)) continue;
                 const uint64_t items = io.ptr(object + kRunnerItems);
-                uint64_t capacity = 0;
-                int32_t tail = 0;
+                int32_t capacity = 0, tail = 0;
                 if (items < 0x10000 || !io.read(items + go_active::IL2CPP_ARRAY_LENGTH, capacity) ||
-                    !capacity || !io.read(object + kRunnerTail, tail) || tail <= 0) continue;
+                    capacity <= 0 || !io.read(object + kRunnerTail, tail) || tail <= 0) continue;
                 uint64_t count = static_cast<uint64_t>(tail);
-                if (count > capacity) count = capacity;
+                if (count > static_cast<uint64_t>(capacity)) count = static_cast<uint64_t>(capacity);
                 if (count > kMaxItems) count = kMaxItems;
                 for (uint64_t i = 0; i < count && budget; ++i) {
                     --budget;
@@ -331,14 +363,24 @@ template<class IO> class Controller {
 
     // The one write: elapsed = duration, so the game's own next PlayerLoop tick
     // resumes the coroutine instead of waiting the rest of the 0.35 s.
-    bool expire() {
+    bool expire(Reason& reason, uint64_t& detail) {
+        reason = Reason::Read;
+        detail = promise_;
         float duration = 0.f, elapsed = 0.f;
         if (!io.read_fresh(promise_ + kPromiseDuration, duration) ||
             !io.read_fresh(promise_ + kPromiseElapsed, elapsed)) return false;
+        reason = Reason::Timer;
+        detail = (static_cast<uint64_t>(float_bits(elapsed)) << 32) | float_bits(duration);
         if (!viewmodel::finite(duration) || duration < kMinDelay || duration > kMaxDelay) return false;
         if (!viewmodel::finite(elapsed) || elapsed < 0.f) return false;
+        reason = Reason::None;
+        detail = 0;
         if (elapsed >= duration) return true;   // already due: resumes this frame
+        reason = Reason::Write;
+        detail = promise_ + kPromiseElapsed;
         if (!io.write_heap(promise_ + kPromiseElapsed, duration)) return false;
+        reason = Reason::None;
+        detail = 0;
         ++diag_.expired;
         hot_ = kHotFrames;
         // The pool can hand this object to another awaiter between our read and
@@ -386,18 +428,38 @@ public:
             retry_ = hot_ = 0;
             diag_.status = Status::Off;
             diag_.kind = Kind::None;
+            diag_.reason = Reason::None;
+            diag_.detail = 0;
             diag_.timing = -1;
             return;
         }
         diag_.status = Status::Waiting;
         diag_.kind = Kind::None;
+        diag_.reason = Reason::None;
+        diag_.detail = 0;
         diag_.timing = -1;
         if (!base) return;
         if (!layout_) {
-            layout_ = layout_for(io, base);
-            if (!layout_) { diag_.status = Status::Failed; return; }
+            Reason reason = Reason::None;
+            uint64_t detail = 0;
+            layout_ = layout_for(io, base, reason, detail);
+            if (!layout_) {
+                diag_.status = Status::Failed;
+                diag_.reason = reason;
+                diag_.detail = detail;
+                return;
+            }
         }
-        if (!runners_ready()) { diag_.status = Status::Failed; return; }
+        {
+            Reason reason = Reason::None;
+            uint64_t detail = 0;
+            if (!runners_ready(reason, detail)) {
+                diag_.status = Status::Failed;
+                diag_.reason = reason;
+                diag_.detail = detail;
+                return;
+            }
+        }
         if (promise_ && !bound()) drop();
         if (!promise_) {
             if (retry_) { --retry_; return; }
@@ -412,7 +474,14 @@ public:
         }
         diag_.kind = kind_;
         diag_.timing = timing_;
-        diag_.status = expire() ? Status::Active : Status::Failed;
+        {
+            Reason reason = Reason::None;
+            uint64_t detail = 0;
+            const bool done = expire(reason, detail);
+            diag_.status = done ? Status::Active : Status::Failed;
+            diag_.reason = reason;
+            diag_.detail = detail;
+        }
     }
 };
 
