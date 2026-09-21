@@ -101,6 +101,12 @@ UI_EN = {
     'Оружие': 'Weapons',
     'Оружие: не применено, проверьте версию игры и журнал': 'Weapons: not applied; check game version and log',
     'Ожидание подходящего оружия': 'Waiting for a supported weapon',
+    # мгновенный подбор (loot.h): строки состояния повторяют оружейные
+    'Подбор': 'Looting',
+    'Мгновенный подбор': 'Instant pickup',
+    'Подбор: не применено, проверьте версию игры и журнал': 'Pickup: not applied; check game version and log',
+    'Подбор: работает': 'Pickup: active',
+    'Ожидание открытого контейнера': 'Waiting for an open container',
     'Обзор мира': 'World FOV',
     'Расположение рук': 'Hand position',
     'Кастомные руки': 'Custom hands',

@@ -6,6 +6,7 @@
 #include "hud.h"
 #include "audio.h"
 #include "process.h"
+#include "loot.h"
 #include "lang.h"
 #include <algorithm>
 #include <cerrno>
@@ -179,7 +180,10 @@ void RestoreLayout() {
 void ApplyBuildChoice(go::Build b) {
     if (b == go::Build::Beta && !go::BetaAvailable()) b = go::Build::Release;
     const bool changed = (go::CurrentBuild() != b);
-    if (changed) esp_viewmodel_reset(true); // restore using OLD offsets
+    if (changed) {
+        esp_viewmodel_reset(true); // restore using OLD offsets
+        esp_loot_reset();          // подобрать нечего: адресов больше нет
+    }
     go::SelectBuild(b);
     RememberBuild();
     if (changed) {

@@ -11,6 +11,7 @@
 #include "widgets.h"
 #include "menu.h"
 #include "config.h"
+#include "loot.h"
 #include "logfile.h"
 #include "theme.h"
 #include "app_state.h"
@@ -111,6 +112,9 @@ int main(int argc, char* argv[]) {
 
         esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
         esp_viewmodel_tick(g_state.viewmodel); // independent of ESP/aim/farm
+        // Мгновенный подбор: один тик на кадр, как и у остальных фич —
+        // больше одного предмета за кадр игра всё равно не переносит.
+        esp_loot_tick(g_state.viewmodel.fast_loot);
         LogStage(kStageEsp);
         DrawEspOverlay();
         slowMark();   // 1: после ESP
@@ -185,6 +189,7 @@ int main(int argc, char* argv[]) {
     esp_freecam_set(false);
     stop_attach_thread();
     esp_viewmodel_reset(true);
+    esp_loot_reset();
     process_detach();
     Blur::Free();
     CfgWatchFree();

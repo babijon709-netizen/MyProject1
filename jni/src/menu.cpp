@@ -9,6 +9,7 @@
 #include "ui_util.h"
 #include "widgets.h"
 #include "config.h"
+#include "loot.h"          // esp_loot_* (мгновенный подбор)
 #include "hud.h"
 #include "audio.h"
 #include "str.h"
@@ -902,8 +903,8 @@ float TabContent(int tab, float dt, float cW) {
         if (ImGui::Button(XS("Сброс"))) {
             // This button resets only FOV/hands, not the other misc features.
             const int fps = vm.fps_limit;
-            const bool nr = vm.no_recoil, ns = vm.no_spread;
-            vm = {}; vm.fps_limit = fps; vm.no_recoil = nr; vm.no_spread = ns;
+            const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;
+            vm = {}; vm.fps_limit = fps; vm.no_recoil = nr; vm.no_spread = ns; vm.fast_loot = fl;
             g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
             g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
             esp_viewmodel_tick(vm);
@@ -923,6 +924,23 @@ float TabContent(int tab, float dt, float cW) {
         else if ((vm.no_recoil && weaponStatus.no_recoil == viewmodel::Status::Waiting) ||
                  (vm.no_spread && weaponStatus.no_spread == viewmodel::Status::Waiting))
             ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
+
+        // Мгновенный подбор: задержка между предметами в «Собрать всё» живёт в
+        // объекте ожидания (UniTask), а не в коде — дописываем его elapsed в куче,
+        // и игровой цикл сам продолжает корутину на следующем же кадре. Код и
+        // данные библиотек не меняются, по выключению восстанавливать нечего.
+        SHdr(XS("Подбор"));
+        CardBg(Layout::RowH);
+        const bool oldLoot = vm.fast_loot;
+        ToggleRow("##instantloot", XS("Мгновенный подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
+        if (oldLoot != vm.fast_loot) esp_loot_tick(vm.fast_loot);
+        const auto lootStatus = esp_loot_diagnostics();
+        if (lootStatus.status == loot::Status::Failed)
+            ImGui::TextDisabled("%s", XS("Подбор: не применено, проверьте версию игры и журнал"));
+        else if (lootStatus.status == loot::Status::Active)
+            ImGui::TextDisabled("%s", XS("Подбор: работает"));
+        else if (vm.fast_loot)
+            ImGui::TextDisabled("%s", XS("Ожидание открытого контейнера"));
 
         SHdr(XS("Лимит FPS"));
         {
@@ -1647,6 +1665,7 @@ void RenderMenu() {
     Tick(g_state.a_custom_hands, g_state.viewmodel.hands_enabled, dt);
     Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil, dt);
     Tick(g_state.a_no_spread, g_state.viewmodel.no_spread, dt);
+    Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
     Tick(g_state.a_freecam_on,  g_state.freecam_on,  dt);
     Tick(g_state.a_freecam_btn_show, g_state.freecam_btn_show, dt);
