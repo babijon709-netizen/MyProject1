@@ -363,7 +363,7 @@ template<class IO> class Controller {
 
     // Откат в противоположном порядке: сначала обратно bl (x0 уже ноль или
     // скоро им станет — безопасно), затем mov w0,#1. Выключение тумблера
-    // возвращает образ к исходным 24 байтам за ~12 mprotect.
+    // возвращает образ к исходным 24 байтам за 6 записей кода.
     void revert_instant() {
         if (!instant_ || !layout_) { instant_ = 0; return; }
         for (size_t f = 0; f < kFlowCount; ++f) {

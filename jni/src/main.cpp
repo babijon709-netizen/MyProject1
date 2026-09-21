@@ -128,23 +128,6 @@ int main(int argc, char* argv[]) {
                          "Мгновенный подбор: не применено", loot::reason_name(ld.reason));
                 ShowToast(msg);
             }
-            // Ускорение есть (flows>0), а патча мгновенного забора нет (instant==0):
-            // подбор идёт быстро, но не «целым окном» — это видимая для
-            // пользователя деградация, о которой раньше молчали. Тост — раз на
-            // смену состояния (в т.ч. частичные маски потоков).
-            const bool fastOnly = g_state.viewmodel.fast_loot && ld.status == loot::Status::Active &&
-                                  ld.flows != 0 && ld.instant != ld.flows;
-            const bool stateChanged = ld.flows != s_loot_toast_prev.flows ||
-                                      ld.instant != s_loot_toast_prev.instant ||
-                                      ld.status != s_loot_toast_prev.status;
-            if (fastOnly && stateChanged) {
-                char msg[192];
-                snprintf(msg, sizeof(msg), "%s (%u/3, %u/3)",
-                         "Подбор: быстро, но не мгновенно",
-                         (unsigned)__builtin_popcount(ld.flows),
-                         (unsigned)__builtin_popcount(ld.instant));
-                ShowToast(msg);
-            }
             s_loot_toast_prev = ld;
         }
         LogStage(kStageEsp);
