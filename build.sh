@@ -20,6 +20,15 @@ sh "${ROOT}/tools/viewmodel/run.sh"
 echo "Testing object-data weapon controller"
 sh "${ROOT}/tools/weapons/run.sh"
 
+# Экспериментальный внутрипроцессный модуль подбора: отдельная библиотека, в
+# xvcen она не попадает. Ошибка её сборки НЕ ломает обычную сборку — печатается
+# предупреждение (в CI по логу видно, собрался ли модуль под текущий NDK).
+if sh "${ROOT}/tools/loot_module/build_android.sh"; then
+    echo "experimental loot module built (separate library, not part of xvcen)"
+else
+    echo "::warning::experimental loot module did not build; xvcen is unaffected" >&2
+fi
+
 echo "Using NDK at ${NDK}"
 "${NDK}/ndk-build" --version || true
 
