@@ -9,3 +9,5 @@ for flags in '-O0' '-O3 -ffast-math'; do
         tools/viewmodel/viewmodel_test.cpp -o "$DIR/test"
     "$DIR/test"
 done
+
+python3 tools/viewmodel/check_gui.py

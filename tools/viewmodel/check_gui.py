@@ -11,7 +11,6 @@ root = Path(__file__).resolve().parents[2]
 menu = (root / 'jni/src/menu.cpp').read_text()
 for setting, anim in [('fov_enabled', 'a_custom_fov'),
                       ('hands_enabled', 'a_custom_hands'),
-                      ('fast_loot', 'a_fast_loot'),
                       ('no_recoil', 'a_no_recoil'),
                       ('no_spread', 'a_no_spread')]:
     assert re.search(r'ToggleRow\([^;]*&vm\.' + setting +

@@ -1,6 +1,6 @@
 #include "fps_memory.h"
-#include "fast_loot_memory.h"
 #include "weapon_tuning_memory.h"
+#include "object_data_memory.h"
 #include "maps_lookup.h"
 #include <chrono>
 #include <fstream>
@@ -34,16 +34,39 @@ struct Memory {
 Memory memory;
 viewmodel::Controller<Memory> controller(memory);
 viewmodel::FpsController<Memory> fps_controller(memory);
-fast_loot::Controller<Memory> loot_controller(memory, fast_loot::instruction_supported());
-weapon_tuning::Controller<Memory> weapon_controller(memory, weapon_tuning::instruction_supported());
+// Deliberately do not inherit Memory::write: these controllers can only write
+// through the fresh anonymous-heap mapping gate.
+struct HeapMemory {
+    template<class T> bool read(uint64_t address, T& value) { return memory.read(address,value); }
+    bool named(uint64_t object, const char* name, const char* namespaze) {
+        if (object < 0x10000) return false;
+        uint64_t k=memory.ptr(object);
+        if (k < 0x10000) return false;
+        uint64_t np=memory.ptr(k+0x10), sp=memory.ptr(k+0x18);
+        char n[96]{}, ns[96]{};
+        const size_t nl=std::strlen(name)+1, sl=std::strlen(namespaze)+1;
+        return nl<=sizeof(n) && sl<=sizeof(ns) && np && sp &&
+            g_mem.read_quiet(np,n,nl) && g_mem.read_quiet(sp,ns,sl) &&
+            std::memcmp(n,name,nl)==0 && std::memcmp(ns,namespaze,sl)==0;
+    }
+    template<class T> bool write_heap(uint64_t address, const T& value) {
+        if (!g_mem.bound() || g_pid<=0) return false;
+        std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps");
+        if (!file) return false;
+        std::string text, line;
+        while (std::getline(file,line)) {
+            text += line; text += '\n';
+            if (text.size() > (8u<<20)) return false;
+        }
+        return file.eof() && object_data::heap_writable(text,address,sizeof(T)) &&
+            g_mem.write(address,&value,sizeof(T));
+    }
+};
+HeapMemory heap_memory;
+weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
-Clock::time_point fps_last_tick{}, fps_last_resolve{}, loot_last_tick{};
-Clock::time_point weapon_last_tick{};
-bool weapon_last_recoil = false, weapon_last_spread = false;
-weapon_tuning::Status weapon_last_log{};
-bool loot_last_enabled = false;
-viewmodel::Status loot_last_log = viewmodel::Status::Off;
+Clock::time_point fps_last_tick{}, fps_last_resolve{};
 int fps_last_limit = 0;
 viewmodel::Status fps_last_log = viewmodel::Status::Off;
 
@@ -81,33 +104,6 @@ void tick_fps(uint64_t session, int requested_limit) {
                 limit, (int)fps_last_log);
     }
 }
-void tick_fast_loot(uint64_t session, bool enabled) {
-    const auto now = Clock::now();
-    const bool changed = enabled != loot_last_enabled;
-    if (!changed && now - loot_last_tick < std::chrono::milliseconds(250)) return;
-    loot_last_tick = now; loot_last_enabled = enabled;
-    loot_controller.tick(session, g_il2cpp_base, enabled);
-    if (loot_last_log != loot_controller.status || changed) {
-        loot_last_log = loot_controller.status;
-        if (enabled && !fast_loot::instruction_supported())
-            LogLine("fast-loot: instruction requires ARM64");
-        LogLine("fast-loot: status=%d (0 off,1 waiting,2 active,4 unsupported CPU/image/code or memory error); collect mode=batch (inter-item await bypass; server validates transfers)",
-                (int)loot_last_log);
-    }
-}
-void tick_weapons(uint64_t session, bool recoil, bool spread) {
-    const auto now = Clock::now();
-    const bool changed = recoil != weapon_last_recoil || spread != weapon_last_spread;
-    if (!changed && now - weapon_last_tick < std::chrono::milliseconds(250)) return;
-    weapon_last_tick = now; weapon_last_recoil = recoil; weapon_last_spread = spread;
-    weapon_controller.tick(session, g_il2cpp_base, recoil, spread);
-    const auto st = weapon_controller.status;
-    if (changed || st.recoil != weapon_last_log.recoil || st.spread != weapon_last_log.spread) {
-        weapon_last_log = st;
-        LogLine("weapons: no-recoil=%d no-spread=%d (0 off,1 waiting,2 active,4 unsupported CPU/image/code or memory error); client FPHitscan only",
-                (int)st.recoil, (int)st.spread);
-    }
-}
 uint64_t epoch = 1;
 viewmodel::Diagnostics last_log{};
 }
@@ -121,12 +117,8 @@ void esp_viewmodel_reset(bool restore) {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     controller.reset(restore && g_mem.bound());
     fps_controller.reset(restore && g_mem.bound());
-    if (!loot_controller.reset(restore && g_mem.bound()))
-        LogLine("fast-loot: unable to restore original collect delay before session reset");
-    loot_last_tick = {}; loot_last_enabled = false;
-    if (!weapon_controller.reset(restore && g_mem.bound()))
-        LogLine("weapons: unable to restore all original instructions before session reset");
-    weapon_last_tick = {}; weapon_last_recoil = weapon_last_spread = false;
+    if (!weapons.reset(restore && g_mem.bound()))
+        LogLine("weapon data: originals could not all be restored before disconnect; restart game");
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     ++epoch;
 }
@@ -135,25 +127,20 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     using namespace go_active;
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
-        controller.reset(false); fps_controller.reset(false); loot_controller.reset(false);
-        loot_last_tick = {}; loot_last_enabled = false;
-        weapon_controller.reset(false);
-        weapon_last_tick = {}; weapon_last_recoil = weapon_last_spread = false;
-        weapon_controller.status = {settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off,
-                                    settings.no_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off};
-        loot_controller.status = settings.fast_loot ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        controller.reset(false); fps_controller.reset(false); weapons.reset(false);
+        weapons.recoil = settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        weapons.spread = settings.no_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
                              settings.hands_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off};
         return;
     }
     tick_fps(epoch, settings.fps_limit);
-    tick_fast_loot(epoch, settings.fast_loot);
-    tick_weapons(epoch, settings.no_recoil, settings.no_spread);
     // Resolve the current local player from the static source, NOT the ESP
     // cache which intentionally tolerates stale identities during respawn.
     uint64_t player = 0;
-    if (settings.fov_enabled || settings.hands_enabled || controller.has_state()) {
+    if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
+        settings.no_recoil || settings.no_spread || weapons.has_state()) {
         uint64_t klass = memory.ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
         uint64_t sf = memory.klass_is(klass, "GameControllerBase") ? get_class_static_fields(klass) : 0;
         uint64_t raw = 0;
@@ -162,15 +149,19 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             // so a later successful frame can restore a disabled feature.
             auto wait = controller.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Waiting;
             controller.status = {wait, wait};
+            weapons.recoil = settings.no_recoil || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
+            weapons.spread = settings.no_spread || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
             return;
         }
         player = memio::untag(raw); // successful null read means no local player
     }
+    weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, settings.no_spread);
     controller.tick(epoch, player, settings);
-    auto st = controller.status;
-    if (st.fov != last_log.fov || st.hands != last_log.hands) {
-        LogLine("viewmodel: fov=%d hands=%d (0 off,1 waiting,2 active,3 ADS,4 memory error)",
-                (int)st.fov, (int)st.hands);
+    auto st = esp_viewmodel_diagnostics();
+    if (st.fov != last_log.fov || st.hands != last_log.hands ||
+        st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread) {
+        LogLine("viewmodel: fov=%d hands=%d; object-data recoil=%d spread=%d (0 off,1 waiting,2 active,3 ADS,4 unsupported/modified image or memory error)",
+                (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread);
         last_log = st;
     }
 }
@@ -178,8 +169,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
 viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     auto status = controller.status;
-    status.fast_loot = loot_controller.status;
-    status.no_recoil = weapon_controller.status.recoil;
-    status.no_spread = weapon_controller.status.spread;
+    status.no_recoil = weapons.recoil;
+    status.no_spread = weapons.spread;
     return status;
 }

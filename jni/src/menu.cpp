@@ -883,19 +883,6 @@ float TabContent(int tab, float dt, float cW) {
         ColorRow("##fbd", XS("Тело ноды"),   &cfg::esp::farm_body_col, true);
 
         auto& vm = g_state.viewmodel;
-        SHdr(XS("Оружие"));
-        CardBg(Layout::RowH * 2.f);
-        if (ToggleRow("##norecoil", XS("No Recoil"), &vm.no_recoil, g_state.a_no_recoil, false, true)) {
-            esp_viewmodel_tick(vm);
-            if (esp_viewmodel_diagnostics().no_recoil == viewmodel::Status::Failed)
-                ShowToast(XS("No Recoil: ошибка применения"));
-        }
-        if (ToggleRow("##nospread", XS("No Spread"), &vm.no_spread, g_state.a_no_spread, true, false)) {
-            esp_viewmodel_tick(vm);
-            if (esp_viewmodel_diagnostics().no_spread == viewmodel::Status::Failed)
-                ShowToast(XS("No Spread: ошибка применения"));
-        }
-
         SHdr(XS("Кастомный FOV"));
         CardBg(Layout::RowH + Layout::SliderH);
         ToggleRow("##vmfov", XS("Кастомный FOV"), &vm.fov_enabled, g_state.a_custom_fov, false, true);
@@ -914,7 +901,9 @@ float TabContent(int tab, float dt, float cW) {
         ImGui::PushID("viewmodel_reset");
         if (ImGui::Button(XS("Сброс"))) {
             // This button resets only FOV/hands, not the other misc features.
-            viewmodel::reset_pose(vm);
+            const int fps = vm.fps_limit;
+            const bool nr = vm.no_recoil, ns = vm.no_spread;
+            vm = {}; vm.fps_limit = fps; vm.no_recoil = nr; vm.no_spread = ns;
             g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
             g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
             esp_viewmodel_tick(vm);
@@ -922,15 +911,18 @@ float TabContent(int tab, float dt, float cW) {
         ImGui::PopID();
         ImGui::Dummy({1.f, 12.f});
 
-        SHdr(XS("Быстрый подбор"));
-        CardBg(Layout::RowH);
-        const bool wasFastLoot = vm.fast_loot;
-        ToggleRow("##fastloot", XS("Быстрый подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
-        if (wasFastLoot != vm.fast_loot) {
-            esp_viewmodel_tick(vm);
-            if (esp_viewmodel_diagnostics().fast_loot == viewmodel::Status::Failed)
-                ShowToast(XS("Быстрый подбор: ошибка применения"));
-        }
+        SHdr(XS("Оружие"));
+        CardBg(Layout::RowH * 2.f);
+        const bool oldRecoil = vm.no_recoil, oldSpread = vm.no_spread;
+        ToggleRow("##norecoil", "No Recoil", &vm.no_recoil, g_state.a_no_recoil, false, true);
+        ToggleRow("##nospread", "No Spread", &vm.no_spread, g_state.a_no_spread, true, false);
+        if (oldRecoil != vm.no_recoil || oldSpread != vm.no_spread) esp_viewmodel_tick(vm);
+        const auto weaponStatus = esp_viewmodel_diagnostics();
+        if (weaponStatus.no_recoil == viewmodel::Status::Failed || weaponStatus.no_spread == viewmodel::Status::Failed)
+            ImGui::TextDisabled("%s", XS("Оружие: не применено, проверьте версию игры и журнал"));
+        else if ((vm.no_recoil && weaponStatus.no_recoil == viewmodel::Status::Waiting) ||
+                 (vm.no_spread && weaponStatus.no_spread == viewmodel::Status::Waiting))
+            ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
 
         SHdr(XS("Лимит FPS"));
         {
@@ -1653,7 +1645,6 @@ void RenderMenu() {
     Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
     Tick(g_state.a_custom_fov, g_state.viewmodel.fov_enabled, dt);
     Tick(g_state.a_custom_hands, g_state.viewmodel.hands_enabled, dt);
-    Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
     Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil, dt);
     Tick(g_state.a_no_spread, g_state.viewmodel.no_spread, dt);
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);

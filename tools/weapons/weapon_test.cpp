@@ -1,163 +1,183 @@
 #include "weapon_tuning_memory.h"
-#include <cassert>
-#include <cstring>
-#include <iostream>
-#include <map>
+#include "object_data_memory.h"
+#include <unordered_map>
+#include <string>
 #include <vector>
-
-using S = viewmodel::Status;
-struct Memory {
-    std::map<uint64_t, uint8_t> bytes;
+#include <cassert>
+#include <functional>
+#include <limits>
+#include <iostream>
+using namespace weapon_tuning;
+using viewmodel::Status;
+constexpr uint64_t base=0x10000000, player=0x101000, fp=0x102000, weapon=0x103000,
+    config=0x104000, recoil=0x105000, dispersion=0x106000, calc=0x107000, net=0x108000;
+struct Fake {
+    std::unordered_map<uint64_t,uint8_t> bytes;
+    std::unordered_map<uint64_t,std::pair<std::string,std::string>> names;
     std::vector<uint64_t> writes;
-    uint64_t fail_read = 0, fail_write = 0, fail_readback = 0;
-    bool ambiguous_write = false;
-    size_t reads = 0;
-    template<class T> void set(uint64_t a, const T& value) {
-        const auto* p = reinterpret_cast<const uint8_t*>(&value);
-        for (size_t i=0;i<sizeof(T);++i) bytes[a+i]=p[i];
+    uint64_t fail_read=0, fail_write=0;
+    std::function<void(uint64_t)> before_read;
+    std::string maps="100000-200000 rw-p 00000000 00:00 0 [heap]\n";
+    template<class T> void set(uint64_t a,const T& v) {
+        auto p=reinterpret_cast<const uint8_t*>(&v);
+        for(size_t i=0;i<sizeof(T);++i) bytes[a+i]=p[i];
     }
-    template<class T> bool read(uint64_t a, T& value) {
-        ++reads;
-        if (a==fail_read || (a==fail_readback && !writes.empty())) return false;
-        auto* p = reinterpret_cast<uint8_t*>(&value);
-        for (size_t i=0;i<sizeof(T);++i) {
-            auto b=bytes.find(a+i); if(b==bytes.end()) return false;
-            p[i]=b->second;
-        }
+    template<class T> bool read(uint64_t a,T& v) {
+        if(before_read) before_read(a);
+        if(fail_read && a<=fail_read && fail_read<a+sizeof(T)) return false;
+        auto p=reinterpret_cast<uint8_t*>(&v);
+        for(size_t i=0;i<sizeof(T);++i) { auto it=bytes.find(a+i); if(it==bytes.end()) return false; p[i]=it->second; }
         return true;
     }
-    template<class T> bool write(uint64_t a, const T& value) {
-        static_assert(sizeof(T)==4, "only aligned instruction writes");
-        assert(a%4==0);
-        if (a==fail_write) {
-            if (ambiguous_write) { set(a,value); writes.push_back(a); }
-            return false;
-        }
-        set(a,value); writes.push_back(a); return true;
+    template<class T> T get(uint64_t a) { T v{}; assert(read(a,v)); return v; }
+    template<class T> bool write_heap(uint64_t a,const T& v) {
+        if(a==fail_write || !object_data::heap_writable(maps,a,sizeof(T))) return false;
+        assert(a>=0x100000 && a<0x200000); writes.push_back(a); set(a,v); return true;
     }
-    uint32_t word(uint64_t a) {
-        uint32_t w=0;
-        for(unsigned i=0;i<4;++i) w|=uint32_t(bytes.at(a+i))<<(i*8);
-        return w;
+    bool named(uint64_t o,const char* n,const char* ns) {
+        uint64_t k=0; if(!read(o,k)) return false;
+        auto it=names.find(k); return it!=names.end() && it->second.first==n && it->second.second==ns;
     }
-};
-struct Fixture {
-    static constexpr uint64_t base=0x100000000;
-    Memory io;
-    weapon_tuning::Controller<Memory> c{io,true};
-    const weapon_tuning::Layout& layout;
-    explicit Fixture(const weapon_tuning::Layout& l) : layout(l) {
-        io.set(base+0x308,weapon_tuning::kGnuNote); io.set(base+0x318,l.build_id);
-        for (size_t i=0;i<3;++i) io.set(address(i)-12,l.sites[i].guard);
+    void object(uint64_t o,const char* n,const char* ns,bool unity=true) {
+        uint64_t k=o+0x80000; set(o,k); names[k]={n,ns};
+        if(unity) set(o+0x10,o+0x90000);
     }
-    uint64_t address(size_t i) const {return base+layout.sites[i].rva;}
-    void tick(bool recoil, bool spread) {c.tick(1,base,recoil,spread);}
-    void check(bool recoil, bool spread) {
-        for (size_t i=0;i<3;++i) {
-            const auto& site=layout.sites[i];
-            for (size_t j=0;j<8;++j) {
-                const auto want=j==3 && (i==0 ? recoil : spread)
-                    ? (i==0 ? weapon_tuning::kNoRecoil : weapon_tuning::kNoSpread) : site.guard[j];
-                assert(io.word(address(i)-12+j*4)==want);
-            }
-        }
+    explicit Fake(const Layout& l) {
+        set(base+0x318,l.build_id);
+        for(size_t i=0;i<4;++i) set(base+l.guard_sites[i],l.guard_words[i]);
+        object(player,"PlayerManager","Oxide"); object(fp,"FPManager","Oxide");
+        object(weapon,"FPHitscan","Oxide"); object(config,"HitscanWeaponConfig",kWeapons);
+        object(recoil,"RecoilConfig",kWeapons); object(dispersion,"DispersionConfig",kWeapons);
+        object(calc,l.calculator,"",false); object(net,"NetworkIdentity","Mirror");
+        set(player+0x40,net); set(net+0x4a,uint8_t(1)); set(player+0x90,fp);
+        set(fp+0x58,weapon); set(weapon+0xc0,player); set(weapon+0x130,config);
+        set(weapon+0x200,recoil); set(weapon+0x208,config); set(weapon+0x1f8,calc);
+        set(config+0x68,recoil); set(config+0x60,dispersion);
+        set(calc+0x18,config); set(calc+0x10,dispersion);
+        for(unsigned i=0;i<6;++i) set(recoil+0x18+i*4,float(i+1));
+        set(dispersion+0x20,0.5f); set(dispersion+0x24,4.f); set(calc+0x20,2.f);
+        set(config+0x18,42.f); set(config+0x34,0.125f); // damage, fire rate unchanged
     }
 };
-int main() {
-    static_assert(weapon_tuning::kNoRecoil==0xf900013f, "STR XZR,[X9]");
-    static_assert(weapon_tuning::kNoSpread==0x1e2703e0, "FMOV S0,WZR");
-    for (const auto& layout:weapon_tuning::kLayouts) {
-        // Every transition; both features default off and are independent.
-        for (int before=0;before<4;++before) for(int after=0;after<4;++after) {
-            Fixture f(layout); f.tick(before&1,before&2); f.check(before&1,before&2);
-            f.tick(after&1,after&2); f.check(after&1,after&2);
-            assert(f.c.status.recoil==((after&1)?S::Active:S::Off));
-            assert(f.c.status.spread==((after&2)?S::Active:S::Off));
-            auto n=f.io.writes.size(); f.tick(after&1,after&2); assert(f.io.writes.size()==n);
-            assert(f.c.reset(true)); f.check(false,false); assert(!f.c.has_state());
-        }
-        { Fixture f(layout); f.tick(false,false); assert(f.io.reads==0 && f.io.writes.empty()); }
-        { Fixture f(layout); weapon_tuning::Controller<Memory> c(f.io,false);
-          c.tick(1,Fixture::base,true,true); assert(c.status.recoil==S::Failed && c.status.spread==S::Failed);
-          assert(f.io.writes.empty()); }
-        for(uint64_t base:{uint64_t(0),Fixture::base+1,UINT64_MAX-3}) {
-            Fixture f(layout); f.c.tick(1,base,true,true);
-            assert(f.io.writes.empty() && f.io.reads==0);
-            assert(f.c.status.recoil==(base?S::Failed:S::Waiting));
-        }
-        for (size_t i=0;i<20;++i) {
-            Fixture f(layout); auto id=layout.build_id; id[i]^=0xff;
-            f.io.set(Fixture::base+0x318,id); f.tick(true,true);
-            assert(f.io.writes.empty() && f.c.status.recoil==S::Failed && f.c.status.spread==S::Failed);
-        }
-        for (size_t i=0;i<4;++i) {
-            Fixture f(layout); f.io.set(Fixture::base+0x308+i*4,uint32_t(0)); f.tick(true,true);
-            assert(f.io.writes.empty());
-        }
-        // A bad member must not cause the other half of No Spread to be written.
-        for(size_t i=0;i<3;++i) for(size_t j=0;j<8;++j) {
-            Fixture f(layout); f.io.set(f.address(i)-12+j*4,uint32_t(0));
-            f.tick(i==0,i!=0); assert(f.io.writes.empty());
-            assert((i==0 ? f.c.status.recoil : f.c.status.spread)==S::Failed);
-        }
-        for(size_t i=0;i<3;++i) {
-            for(uint32_t foreign:{uint32_t(0xd503201f), i==0?weapon_tuning::kNoRecoil:weapon_tuning::kNoSpread}) {
-                Fixture f(layout); f.io.set(f.address(i),foreign); f.tick(i==0,i!=0);
-                assert(f.io.writes.empty()); f.tick(false,false);
-                assert(f.io.word(f.address(i))==foreign); // no adopting another process's patch
-            }
-        }
-        // Transient apply failures and ambiguous write reports: rollback, retry.
-        for(size_t i=0;i<3;++i) {
-            { Fixture f(layout); f.io.fail_read=f.address(i)-12; f.tick(i==0,i!=0);
-              assert(f.io.writes.empty()); f.io.fail_read=0; f.tick(i==0,i!=0); f.check(i==0,i!=0); }
-            for(bool ambiguous:{false,true}) {
-                Fixture f(layout); f.io.fail_write=f.address(i); f.io.ambiguous_write=ambiguous;
-                f.tick(i==0,i!=0); assert((i==0?f.c.status.recoil:f.c.status.spread)==S::Failed);
-                f.check(false,false); // first spread write is rolled back if second fails
-                f.io.fail_write=0; f.tick(i==0,i!=0); f.check(i==0,i!=0);
-            }
-            { Fixture f(layout); f.io.fail_readback=f.address(i); f.tick(i==0,i!=0);
-              assert((i==0?f.c.status.recoil:f.c.status.spread)==S::Failed);
-              f.io.fail_readback=0; f.tick(false,false); f.check(false,false); assert(!f.c.has_state()); }
-        }
-        // A failing feature never blocks the other one.
-        { Fixture f(layout); f.io.fail_write=f.address(2); f.tick(true,true);
-          assert(f.c.status.recoil==S::Active && f.c.status.spread==S::Failed); f.check(true,false); }
-        { Fixture f(layout); f.io.fail_write=f.address(0); f.tick(true,true);
-          assert(f.c.status.recoil==S::Failed && f.c.status.spread==S::Active); f.check(false,true); }
-        // Restore retries; even a failed half must not stop restoration of the rest.
-        for(size_t i=0;i<3;++i) {
-            Fixture f(layout); f.tick(true,true); f.io.fail_write=f.address(i); f.tick(false,false);
-            assert(f.c.has_state() && (i==0?f.c.status.recoil:f.c.status.spread)==S::Failed);
-            for(size_t j=0;j<3;++j) if(j!=i) assert(f.io.word(f.address(j))==layout.sites[j].guard[3]);
-            f.io.fail_write=0; f.tick(false,false); f.check(false,false); assert(!f.c.has_state());
-        }
-        { Fixture f(layout); f.tick(true,true); f.io.fail_read=f.address(1)-12; f.tick(false,false);
-          assert(f.c.has_state() && f.c.status.spread==S::Failed && f.c.status.recoil==S::Off);
-          f.io.fail_read=0; f.tick(false,false); f.check(false,false); }
-        { Fixture f(layout); f.tick(true,true); f.io.set(f.address(1)-4,uint32_t(0)); f.tick(false,false);
-          assert(f.c.has_state() && f.c.status.spread==S::Failed);
-          f.io.set(f.address(1)-4,layout.sites[1].guard[2]); f.tick(false,false); f.check(false,false); }
-        { Fixture f(layout); f.tick(true,true); f.io.set(f.address(1),uint32_t(0xd503201f)); f.tick(false,false);
-          assert(f.io.word(f.address(1))==0xd503201f && !f.c.has_state()); }
-        { Fixture f(layout); f.tick(true,true); f.io.set(f.address(1),layout.sites[1].guard[3]); f.tick(false,false);
-          f.check(false,false); assert(!f.c.has_state()); }
-        // Identity changes cannot reuse ownership, including another supported ID.
-        for (const auto& other:weapon_tuning::kLayouts) if(&other!=&layout) {
-            Fixture f(layout); f.tick(true,true); auto n=f.io.writes.size();
-            f.io.set(Fixture::base+0x318,other.build_id); f.tick(false,false);
-            assert(f.io.writes.size()==n && f.c.has_state() && f.c.status.recoil==S::Failed);
-            f.io.set(Fixture::base+0x318,layout.build_id); f.tick(false,false); f.check(false,false);
-        }
-        { Fixture f(layout); f.tick(true,true); auto n=f.io.writes.size();
-          f.c.tick(2,Fixture::base,false,false); assert(f.io.writes.size()==n && !f.c.has_state());
-          f.tick(true,true); assert(f.io.writes.size()==n && f.c.status.recoil==S::Failed); }
-        { Fixture f(layout); f.tick(true,true); auto n=f.io.writes.size();
-          f.c.tick(1,Fixture::base+0x100000000,false,false); assert(f.io.writes.size()==n && !f.c.has_state()); }
-        { Fixture f(layout); f.tick(true,true); auto n=f.io.writes.size();
-          assert(f.c.reset(false)); assert(f.io.writes.size()==n); }
-        { Fixture f(layout); f.tick(true,true); f.io.fail_write=f.address(1); assert(!f.c.reset(true)); }
+static void maps_tests() {
+    using object_data::heap_writable;
+    for (const std::string label : {"", "[heap]", "[anon:libc_malloc]", "[anon:scudo:primary]", "[anon:scudo:secondary]"}) {
+        std::string m="100000-200000 rw-p 0 00:00 0 "+label+"\n";
+        assert(heap_writable(m,0x100010,4)); assert(heap_writable(m,0x1ffffc,4));
+        assert(!heap_writable(m,0x1ffffe,4)); assert(!heap_writable(m,0x200000,4));
+        assert(!heap_writable(m,0x100010,0)); assert(!heap_writable(m,0x100010,65));
+        assert(!heap_writable(m,UINT64_MAX-1,4));
     }
-    std::cout << "weapons: both builds, independent toggles, exact guards, ownership, grouped rollback, restore/retry, lifecycle: OK\n";
+    for (const std::string line : {"rw-p 0 08:01 10 /libil2cpp.so", "rw-p 0 08:01 10 /libunity.so (deleted)",
+         "rw-p 0 00:00 1 /memfd:heap", "rwxp 0 00:00 0", "r--p 0 00:00 0", "rw-s 0 00:00 0",
+         "rw-p 0 00:00 0 [anon:.bss]", "rw-p 1000 00:00 0", "rw-p 0 00:00 1", "rw-p 0 00:00 0 [stack]"})
+        assert(!heap_writable("100000-200000 "+line+"\n",0x100010,4));
+    const std::string prefix="100000-110000 rw-p 0 08:01 1 /system/lib64/libother.so\n";
+    assert(!heap_writable(prefix+"110000-200000 rw-p 0 00:00 0\n",0x110010,4));
+    assert(!heap_writable(prefix+"110000-120000 ---p 0 00:00 0\n120000-200000 rw-p 0 00:00 0\n",0x120010,4));
+    assert(heap_writable(prefix+"120000-200000 rw-p 0 00:00 0\n",0x120010,4));
+    assert(!heap_writable("garbage\n100000-200000 rw-p 0 00:00 0\n",0x100010,4));
 }
+static void tests(const Layout& l) {
+    {
+        Fake io(l); Controller<Fake> c(io);
+        c.tick(1,base,player,false,false); assert(io.writes.empty());
+        c.tick(1,base,player,true,false); assert(c.recoil==Status::Active && c.spread==Status::Off && io.writes.size()==6);
+        assert(io.get<float>(calc+0x20)==2.f);
+        c.tick(1,base,player,true,true); assert(c.spread==Status::Active && io.writes.size()==9);
+        for(int i=0;i<10;++i) c.tick(1,base,player,true,true);
+        assert(io.writes.size()==9); // no continuous pwrite flood
+        assert(io.get<float>(config+0x18)==42.f && io.get<float>(config+0x34)==0.125f);
+        c.tick(1,base,player,false,true); assert(io.get<float>(recoil+0x18)==1.f && io.get<float>(calc+0x20)==0.f);
+        c.tick(1,base,player,false,false); assert(!c.has_state());
+        assert(io.get<float>(calc+0x20)==2.f && io.get<float>(dispersion+0x24)==4.f);
+        assert(io.writes.size()==18);
+    }
+    for (int issue=0;issue<8;++issue) {
+        Fake io(l); Controller<Fake> c(io);
+        if(issue==0) io.set(base+0x318,std::array<uint8_t,20>{});
+        if(issue==1) io.set(weapon+0xc0,uint64_t(0x199000));
+        if(issue==2) io.set(net+0x4a,uint8_t(0));
+        if(issue==3) io.set(config+0x68,uint64_t(0));
+        if(issue==4) io.set(weapon+0x10,uint64_t(0));
+        if(issue==5) io.set(base+l.guard_sites[0],uint32_t(0));
+        if(issue==6) io.set(base+l.guard_sites[3],uint32_t(0x1400005d));
+        if(issue==7) io.maps="100000-200000 rw-p 0 08:01 1 /some-library.so\n";
+        c.tick(1,base,player,true,true); assert(io.writes.empty());
+        assert(c.recoil!=Status::Active && c.spread!=Status::Active);
+    }
+    {
+        Fake io(l); Controller<Fake> c(io); int seen=0;
+        io.before_read=[&](uint64_t a){ if(a==weapon+0xc0 && ++seen==2) io.set(a,uint64_t(0)); };
+        c.tick(1,base,player,true,true); assert(io.writes.empty()); // ownership changed just before apply
+    }
+    {
+        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        io.set(recoil+0x18,7.f); c.tick(1,base,player,false,false);
+        assert(io.get<float>(recoil+0x18)==7.f); // external updates win on restore
+    }
+    {
+        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,false);
+        io.set(recoil+0x18,7.f); c.tick(1,base,player,true,false);
+        c.tick(1,base,player,false,false); assert(io.get<float>(recoil+0x18)==7.f); // recapture game update
+    }
+    {
+        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        io.fail_read=recoil; c.tick(1,base,player,false,false);
+        assert(c.has_state() && c.recoil==Status::Failed);
+        io.fail_read=0; c.tick(1,base,player,false,false);
+        assert(!c.has_state() && io.get<float>(recoil+0x18)==1.f);
+    }
+    {
+        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        io.fail_write=recoil+0x18; c.tick(1,base,player,false,false);
+        assert(c.has_state() && c.recoil==Status::Failed);
+        io.fail_write=0; c.tick(1,base,player,false,false); assert(!c.has_state());
+    }
+    {
+        Fake io(l); Controller<Fake> c(io); io.fail_write=recoil+0x1c;
+        c.tick(1,base,player,true,false); assert(c.recoil==Status::Failed && c.has_state());
+        io.fail_write=0; c.tick(1,base,player,false,false);
+        assert(io.get<float>(recoil+0x18)==1.f && io.get<float>(recoil+0x1c)==2.f && !c.has_state());
+    }
+    {
+        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        io.set(weapon+0x10,uint64_t(0)); c.tick(1,base,0,false,false);
+        assert(!c.has_state() && io.get<float>(recoil+0x18)==1.f); // asset survives owner
+        assert(io.get<float>(dispersion+0x24)==4.f && io.get<float>(calc+0x20)==0.f); // no dead calculator write
+    }
+    {
+        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        io.set(recoil+0x10,uint64_t(0x900123)); c.tick(1,base,player,false,false);
+        assert(io.get<float>(recoil+0x18)==0.f); // reused asset identity: drop, don't restore
+    }
+    {
+        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        io.set(fp+0x58,uint64_t(0)); c.tick(1,base,player,true,true);
+        assert(!c.has_state() && c.recoil==Status::Waiting && io.get<float>(calc+0x20)==2.f);
+        io.set(fp+0x58,weapon); c.tick(1,base,player,true,true); assert(c.recoil==Status::Active);
+        assert(c.reset(true)); assert(io.get<float>(recoil+0x18)==1.f);
+    }
+    {
+        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true); auto n=io.writes.size();
+        c.tick(2,base,0,false,false); assert(io.writes.size()==n && !c.has_state());
+    }
+    {
+        Fake io(l); Controller<Fake> c(io);
+        io.set(player+0x90,fp | 0xab00000000000000ULL);
+        io.set(weapon+0x200,recoil | 0xcd00000000000000ULL);
+        c.tick(1,base,player,true,true); assert(c.recoil==Status::Active && c.spread==Status::Active);
+        assert(c.reset(true));
+    }
+    {
+        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,false);
+        io.set(recoil+0x18,std::numeric_limits<float>::quiet_NaN());
+        auto n=io.writes.size(); c.tick(1,base,player,false,false);
+        assert(io.writes.size()==n+5 && !c.has_state());
+    }
+    for(float v : {std::numeric_limits<float>::quiet_NaN(),std::numeric_limits<float>::infinity(),-2000.f,2000.f}) {
+        Fake io(l); Controller<Fake> c(io); io.set(recoil+0x18,v);
+        c.tick(1,base,player,true,false); assert(c.recoil==Status::Failed && io.writes.empty());
+    }
+}
+int main() { maps_tests(); for(const auto& l:kLayouts) tests(l); std::cout<<"weapons: heap-only gate, both builds, ownership, transitions, restoration, failures, finite checks: OK\n"; }

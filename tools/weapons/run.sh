@@ -11,4 +11,4 @@ done
 ${CXX:-g++} -std=c++17 -Wall -Wextra -O2 -Ijni/include -Ijni/src \
     tools/weapons/proc_mem_test.cpp -o "$DIR/proc_test"
 "$DIR/proc_test"
-python3 tools/fast_loot/check_gui.py
+python3 tools/weapons/check_boundaries.py
