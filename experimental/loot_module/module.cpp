@@ -2,12 +2,17 @@
 #include "batch.h"
 #include "layouts.h"
 #include "object_data_memory.h"
+#include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <vector>
 #include <fcntl.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
@@ -26,6 +31,13 @@ struct Memory {
         if(a<0x10000 || a>0x00ffffffffffffffULL-sizeof(T)) return false;
         if(fd<0) fd=open("/proc/self/mem",O_RDONLY|O_CLOEXEC);
         return fd>=0 && pread(fd,&out,sizeof(T),static_cast<off_t>(a))==ssize_t(sizeof(T));
+    }
+    // Bulk reads are used by the heap scan so that one pass costs thousands of
+    // syscalls instead of millions. Same fault-safe /proc/self/mem path.
+    bool read_bytes(uint64_t a,void* out,size_t n) {
+        if(a<0x10000 || !n || n>(1u<<20) || a>0x00ffffffffffffffULL-n) return false;
+        if(fd<0) fd=open("/proc/self/mem",O_RDONLY|O_CLOEXEC);
+        return fd>=0 && pread(fd,out,n,static_cast<off_t>(a))==ssize_t(n);
     }
     uint64_t ptr(uint64_t a) {
         uint64_t p=0;
@@ -130,9 +142,215 @@ uint64_t find_delegate(uint64_t base,const Layout& l,uint64_t view,uint64_t expe
     }
     return found;
 }
+// ---- In-process discovery -------------------------------------------------
+// The module may be loaded into the game without any live managed reference
+// (an external loader cannot hold one). So the live collect listener is found
+// by scanning this very process for the single delegate whose method pointer
+// is the stock callback and which is still reachable from a live Button.
+// Reads go through /proc/self/mem: fault-safe, and the scan never frees
+// anything. Nothing is written except the one delegate pointer in bind_action.
+constexpr uint64_t kMaxScanBytes=6ull<<30;
+constexpr uint64_t kMaxRegionBytes=1ull<<31;
+constexpr uint64_t kScanChunk=256u<<10;
+constexpr int kMaxCandidateChecks=256;
+
+bool anonymous_heap_region(const std::string& name) {
+    return name.empty() || name=="[heap]" || name=="[anon:libc_malloc]" ||
+           name=="[anon:scudo:primary]" || name=="[anon:scudo:secondary]";
+}
+std::vector<uint64_t> image_bases() {
+    std::vector<uint64_t> bases;
+    std::ifstream file("/proc/self/maps");
+    if(!file) return bases;
+    std::string line;
+    while(std::getline(file,line)) {
+        unsigned long long lo=0,hi=0,offset=0,inode=0; unsigned major=0,minor=0;
+        char perms[5]{}; int consumed=0;
+        if(std::sscanf(line.c_str(),"%llx-%llx %4s %llx %x:%x %llu %n",
+                       &lo,&hi,perms,&offset,&major,&minor,&inode,&consumed)!=7 || !consumed) break;
+        std::string name=line.substr(static_cast<size_t>(consumed));
+        while(!name.empty() && (name.back()==' '||name.back()=='\r')) name.pop_back();
+        const auto slash=name.find_last_of('/');
+        const std::string leaf=slash==std::string::npos?name:name.substr(slash+1);
+        if(leaf!="libil2cpp.so" || hi<=lo || lo<offset) continue;
+        const uint64_t base=uint64_t(lo)-uint64_t(offset);
+        if(base<0x10000 || (base&0xfff)) continue;
+        if(std::find(bases.begin(),bases.end(),base)==bases.end()) bases.push_back(base);
+        if(bases.size()>=8) break;
+    }
+    std::sort(bases.begin(),bases.end());
+    return bases;
+}
+const Layout* recognize_self(uint64_t& base) {
+    for(const uint64_t candidate:image_bases())
+        if(const Layout* l=recognize(candidate)) { base=candidate; return l; }
+    return nullptr;
+}
+// Progressive bounded scan over anonymous RW regions. One call reads at most
+// budget bytes and resumes where it stopped, so no single pass stalls the game
+// or floods /proc/self/mem. The needle is the stock callback address; every hit
+// is validated through the same reachability/identity rules as the
+// caller-supplied path, and two live matches fail closed.
+constexpr uint64_t kScanBudget=512ull<<20;
+std::vector<std::pair<uint64_t,uint64_t>> scan_regions;
+size_t scan_index=0;
+uint64_t scan_cursor=0;
+bool refresh_regions() {
+    scan_regions.clear();
+    std::ifstream file("/proc/self/maps");
+    if(!file) return false;
+    std::string line;
+    while(std::getline(file,line)) {
+        unsigned long long lo=0,hi=0,offset=0,inode=0; unsigned major=0,minor=0;
+        char perms[5]{}; int consumed=0;
+        if(std::sscanf(line.c_str(),"%llx-%llx %4s %llx %x:%x %llu %n",
+                       &lo,&hi,perms,&offset,&major,&minor,&inode,&consumed)!=7 || !consumed) return false;
+        std::string name=line.substr(static_cast<size_t>(consumed));
+        while(!name.empty() && (name.back()==' '||name.back()=='\r')) name.pop_back();
+        if(std::string(perms)!="rw-p" || inode || offset || major || minor) continue;
+        if(!anonymous_heap_region(name) || hi<=lo) continue;
+        uint64_t end=hi;
+        if(end-lo>kMaxRegionBytes) end=lo+kMaxRegionBytes;
+        scan_regions.emplace_back(uint64_t(lo),end);
+    }
+    scan_index=0;
+    scan_cursor=scan_regions.empty()?0:scan_regions[0].first;
+    return !scan_regions.empty();
+}
+bool scan_for_delegate(uint64_t base,const Layout& l,uint64_t& out_action,uint64_t& out_view,
+                       uint64_t budget_bytes=kScanBudget,bool restart=false) {
+    if(!base) return false;
+    if(restart || scan_regions.empty()) refresh_regions();
+    const uint64_t needle=base+l.fn[StockClick].rva;
+    uint64_t action=0,view=0,budget=budget_bytes;
+    int checked=0;
+    std::vector<uint8_t> buffer(static_cast<size_t>(kScanChunk));
+    size_t visits=0;
+    while(budget && !scan_regions.empty() && visits++<=scan_regions.size()) {
+        if(scan_index>=scan_regions.size()) {
+            // Sweep finished. A hit keeps its value (ambiguity was already
+            // checked across the whole sweep); otherwise start a fresh pass
+            // with an up-to-date region list.
+            if(action) break;
+            refresh_regions();
+            return false;
+        }
+        auto& region=scan_regions[scan_index];
+        if(scan_cursor<region.first || scan_cursor>=region.second) scan_cursor=region.first;
+        while(scan_cursor+8<=region.second && budget) {
+            const size_t want=static_cast<size_t>(std::min({kScanChunk,region.second-scan_cursor,budget}));
+            if(!memory.read_bytes(scan_cursor,buffer.data(),want)) { scan_cursor=region.second; break; }
+            for(size_t i=0;i+8<=want;i+=8) {
+                uint64_t word=0;
+                std::memcpy(&word,buffer.data()+i,8);
+                if(word!=needle) continue;
+                const uint64_t delegate=scan_cursor+i-0x10;
+                uint64_t invoke=0,target=0,method=0,multicast=1;
+                if(!memory.read(delegate+0x18,invoke) || invoke!=needle) continue;
+                if(!memory.read(delegate+0x20,target) || !target) continue;
+                if(!memory.read(delegate+0x28,method) || !method || memory.ptr(method+8)!=needle) continue;
+                if(!memory.read(delegate+0x78,multicast) || multicast) continue;
+                if(++checked>kMaxCandidateChecks) return false;
+                if(find_delegate(base,l,target,needle)!=delegate) continue;
+                if(action) return false;   // two live bindings: never guess
+                action=delegate; view=target;
+                // A hit is rare (once per loot window): finish this sweep even
+                // past the per-call budget so ambiguity is still ruled out.
+                budget=kMaxScanBytes;
+            }
+            scan_cursor+=want;
+            budget-=want;
+        }
+        if(scan_cursor>=region.second) { ++scan_index; if(scan_index<scan_regions.size()) scan_cursor=scan_regions[scan_index].first; }
+    }
+    if(!action) return false;
+    out_action=action; out_view=view;
+    return true;
+}
+
+// The only foreign write in the whole module: one aligned pointer in a heap
+// delegate object, with the write gate re-checked right before the CAS.
+bool bind_action(uint64_t action,uint64_t view) {
+    if(!layout || !image) return false;
+    const uint64_t original=image+layout->fn[StockClick].rva;
+    if(!delegate_matches(action,view,original,original)) return false;
+    Binding next{view,memory.ptr(view+0x10),action,memory.ptr(action),memory.ptr(action+0x28),original};
+    if(!next.native || !next.klass || !next.method) return false;
+    if(!memory.exchange_heap(action+0x18,original,reinterpret_cast<uint64_t>(&arena_loot_entry))) return false;
+    binding=next;
+    return true;
+}
+
+// ---- Optional periodic worker ---------------------------------------------
+// Started only by an explicit arm/probe call (or by the ARENA_LOOT_AUTOSTART
+// environment opt-in below). It holds no lock while scanning and never calls
+// game code: it re-checks the installed delegate and re-binds after the game
+// recreates the loot window. Without an arm call the module stays inert.
+std::atomic<bool> armed{false};
+std::atomic<bool> worker_started{false};
+void* worker_main(void*) {
+    for(;;) {
+        // Periodic re-check, not part of a batch: the collection path itself
+        // never waits. The lock is held only around state reads/writes, never
+        // during the scan, so a click never blocks for a whole scan.
+        usleep(500*1000);
+        if(!armed.load()) continue;
+        uint64_t base=0;
+        const Layout* l=nullptr;
+        Binding current{};
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex);
+            if(!layout || !image || busy) continue;
+            base=image; l=layout; current=binding;
+        }
+        if(current.action) {
+            const uint64_t entry=reinterpret_cast<uint64_t>(&arena_loot_entry);
+            if(memory.ptr(current.view+0x10)==current.native &&
+               find_delegate(base,*l,current.view,entry)==current.action) continue;
+            // UI recreated or delegate replaced: drop the stale binding rather
+            // than writing anywhere through the old address.
+            std::lock_guard<std::recursive_mutex> lock(mutex);
+            if(binding.action==current.action && binding.view==current.view) {
+                binding={}; enabled=false;
+                report.status=ARENA_LOOT_NOT_READY; report.delegate_address=0;
+            }
+            continue;
+        }
+        uint64_t action=0,view=0;
+        bool found=false;
+        try { found=scan_for_delegate(base,*l,action,view); } catch(...) { found=false; }
+        if(!found) continue;
+        std::lock_guard<std::recursive_mutex> lock(mutex);
+        if(binding.action || !armed.load() || busy) continue;
+        if(bind_action(action,view)) {
+            enabled=true; ui_tid=0; last_frame=-1;
+            report.status=ARENA_LOOT_READY; report.delegate_address=action;
+        }
+    }
+    return nullptr;
+}
+void start_worker() {
+    if(worker_started.exchange(true)) return;
+    pthread_t thread{};
+    if(pthread_create(&thread,nullptr,worker_main,nullptr)!=0) {
+        worker_started.store(false);
+        return;
+    }
+    pthread_detach(thread);
+}
+// Load-time hook: no game reads, no scans, no writes. It only starts the
+// worker when the environment explicitly opts in, which is what an
+// LD_PRELOAD-style launch needs; every other loader must call arm_v2 itself.
+__attribute__((constructor)) void arena_loot_load(void) {
+    const char* mode=std::getenv("ARENA_LOOT_AUTOSTART");
+    if(mode && mode[0]=='1' && mode[1]=='\0') {
+        armed.store(true);
+        start_worker();
+    }
+}
+
 struct Host {
-    uint64_t view;
-    bool snapshot(Context& c) {
+    uint64_t view;    bool snapshot(Context& c) {
         auto& a=c.identity;
         a[0]=view; a[1]=memory.unity(view,"LootScreenViewImpl",views);
         a[18]=memory.ptr(view+0x30); a[19]=memory.unity(a[18],"LootContainerView",views);
@@ -199,11 +417,25 @@ struct Host {
 
 void collect_click_impl(void* view,const void* method) {
     std::lock_guard<std::recursive_mutex> lock(mutex);
-    if(!layout || recognize(image)!=layout) { report.status=ARENA_LOOT_UNSUPPORTED; return; }
-    if(tid()!=ui_tid) { report.status=ARENA_LOOT_WRONG_THREAD; return; }
+    if(!layout || !image || recognize(image)!=layout) { report.status=ARENA_LOOT_UNSUPPORTED; return; }
+    auto stock=function<void(*)(void*,const void*)>(StockClick);
     if(!enabled || reinterpret_cast<uint64_t>(view)!=binding.view) {
-        function<void(*)(void*,const void*)>(StockClick)(view,method);
+        // Acceleration is off, or this is another/new loot view that was
+        // clicked before the worker re-bound the delegate. Only a real
+        // LootScreenViewImpl may be handed to the stock handler: anything else
+        // means the address we once bound was reused by an unrelated object,
+        // and doing nothing is safer than calling the loot handler on it.
+        if(memory.named(reinterpret_cast<uint64_t>(view),"LootScreenViewImpl",views)) stock(view,method);
+        else { report.status=ARENA_LOOT_NOT_READY; report.delegate_address=0; }
         return;
+    }
+    if(ui_tid) {
+        // Copied delegates may be invoked from elsewhere; the stock path is
+        // always correct for those, acceleration is not.
+        if(tid()!=ui_tid) { stock(view,method); return; }
+    } else {
+        // First invocation is Unity's own call, so this IS the UI thread.
+        ui_tid=tid();
     }
     const int32_t frame=function<int32_t(*)(const void*)>(FrameCount)(nullptr);
     if(frame==last_frame) return; // duplicated/copied listeners must not replay the click
@@ -215,8 +447,7 @@ void collect_click_impl(void* view,const void* method) {
     report.status=r.result==Result::Complete?ARENA_LOOT_READY:ARENA_LOOT_NOT_READY;
     // No replay after a partial/throwing batch. Preflight NotReady is safe to
     // delegate back to the stock handler (same UI click, no prior transfer).
-    if(r.result==Result::NotReady && r.attempted==0)
-        function<void(*)(void*,const void*)>(StockClick)(view,method);
+    if(r.result==Result::NotReady && r.attempted==0) stock(view,method);
 }
 }
 
@@ -271,22 +502,19 @@ EXPORT int arena_loot_install_v1(uint64_t base,uint64_t view) {
     // Publication is on the same Unity thread as invocation; no half-filled
     // delegate (method/target/code stay original), just one aligned pointer CAS.
     binding=next; ui_tid=tid(); last_frame=-1; enabled=true;
+    armed.store(true); start_worker();
     if(!memory.exchange_heap(action+0x18,original,reinterpret_cast<uint64_t>(&arena_loot_entry))) {
         binding={}; enabled=false; return ARENA_LOOT_MEMORY_ERROR;
     }
     report={sizeof(report),ARENA_LOOT_READY,0,0,0,0,action};
     return ARENA_LOOT_READY;
 }
-EXPORT int arena_loot_disable_v1() {
-    if(!unity_thread()) return ARENA_LOOT_WRONG_THREAD;
-    std::lock_guard<std::recursive_mutex> lock(mutex);
-    if(busy) return ARENA_LOOT_BINDING_CHANGED;
-    if(ui_tid && tid()!=ui_tid) return ARENA_LOOT_WRONG_THREAD;
+// Shared by both disable paths; caller holds the lock. If Unity destroyed the
+// view or replaced its delegate, nothing is written through the stale address.
+int restore_binding_locked() {
     enabled=false;
     report.status=ARENA_LOOT_OFF;
-    if(binding.action) {
-        // If Unity destroyed the view or replaced its delegate, never write
-        // through the stale address. NODELETE keeps any outstanding copy safe.
+    if(binding.action && layout && image) {
         const bool same=find_delegate(image,*layout,binding.view,reinterpret_cast<uint64_t>(&arena_loot_entry))==binding.action &&
                         memory.ptr(binding.view+0x10)==binding.native &&
                         memory.ptr(binding.action)==binding.klass &&
@@ -300,6 +528,49 @@ EXPORT int arena_loot_disable_v1() {
     }
     binding={}; report.status=ARENA_LOOT_OFF; report.delegate_address=0;
     return ARENA_LOOT_OFF;
+}
+EXPORT int arena_loot_disable_v1() {
+    if(!unity_thread()) return ARENA_LOOT_WRONG_THREAD;
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    armed.store(false);
+    if(busy) return ARENA_LOOT_BINDING_CHANGED;
+    if(ui_tid && tid()!=ui_tid) return ARENA_LOOT_WRONG_THREAD;
+    return restore_binding_locked();
+}
+// Thread-agnostic arm/restore: reads the image and the heap, and performs the
+// single delegate CAS. It calls no game code, so an external loader may call it
+// right after dlopen, from its own thread. The Unity thread is discovered on
+// the first real button callback. The worker then keeps the binding current
+// across UI recreation.
+EXPORT int arena_loot_arm_v2(uint64_t base_hint) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if(busy) return ARENA_LOOT_BINDING_CHANGED;
+    armed.store(true);
+    start_worker();
+    if(binding.action) return ARENA_LOOT_READY;
+    uint64_t base=0;
+    const Layout* l=nullptr;
+    if(base_hint) l=recognize(base_hint);
+    if(l) base=base_hint;
+    if(!l) l=recognize_self(base);
+    if(!l) return ARENA_LOOT_UNSUPPORTED;
+    if((image && image!=base) || (layout && layout!=l)) return ARENA_LOOT_UNSUPPORTED;
+    image=base; layout=l;
+    report={sizeof(report),ARENA_LOOT_NOT_READY,0,0,0,0,0};
+    uint64_t action=0,view=0;
+    bool found=false;
+    try { found=scan_for_delegate(base,*l,action,view); } catch(...) { found=false; }
+    if(!found) return ARENA_LOOT_NOT_READY;
+    if(!bind_action(action,view)) return ARENA_LOOT_BINDING_CHANGED;
+    enabled=true; ui_tid=0; last_frame=-1;
+    report={sizeof(report),ARENA_LOOT_READY,0,0,0,0,action};
+    return ARENA_LOOT_READY;
+}
+EXPORT int arena_loot_restore_v2() {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    armed.store(false);
+    if(busy) return ARENA_LOOT_BINDING_CHANGED;
+    return restore_binding_locked();
 }
 EXPORT int arena_loot_report_v1(ArenaLootReportV1* out,uint32_t size) {
     if(!out || size!=sizeof(ArenaLootReportV1)) return ARENA_LOOT_UNSUPPORTED;
