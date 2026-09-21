@@ -96,6 +96,8 @@ UI_EN = {
     'Ошибка чтения/записи': 'Memory read/write failed',
     'Ожидание объекта игры': 'Waiting for game object',
     'Кастомный FOV': 'Custom FOV',
+    'Лимит FPS': 'FPS limit',
+    'Сбросить до обычного': 'Restore game default',
     'Обзор мира': 'World FOV',
     'Расположение рук': 'Hand position',
     'Кастомные руки': 'Custom hands',

@@ -9,6 +9,7 @@ struct ViewmodelSettings {
     bool hands_enabled = false;
     float fov = 90.f;
     float x = 0.f, y = 0.f, z = 0.f;
+    int fps_limit = 0; // 0 = original game limit; otherwise 90 / 120 / 144
 };
 
 namespace viewmodel {
@@ -20,7 +21,11 @@ inline bool finite(float v) {
 inline float bounded(float v, float lo, float hi, float fallback) {
     return !finite(v) ? fallback : (v < lo ? lo : (v > hi ? hi : v));
 }
+inline int sanitize_fps_limit(int fps) {
+    return fps == 90 || fps == 120 || fps == 144 ? fps : 0;
+}
 inline ViewmodelSettings sanitize(ViewmodelSettings s) {
+    s.fps_limit = sanitize_fps_limit(s.fps_limit);
     s.fov = bounded(s.fov, 50.f, 120.f, 90.f);
     s.x = bounded(s.x, -50.f, 50.f, 0.f);
     s.y = bounded(s.y, -50.f, 50.f, 0.f);
@@ -40,7 +45,9 @@ static_assert(sizeof(ConfigExtension) == 32, "stable config extension");
 inline ConfigExtension encode(ViewmodelSettings s) {
     s = sanitize(s);
     ConfigExtension e;
-    e.flags = (s.fov_enabled ? 1u : 0u) | (s.hands_enabled ? 2u : 0u);
+    // Bits 2..3: 0 = default, 1 = 144 (legacy toggle), 2 = 90, 3 = 120.
+    const uint32_t fps_mode = s.fps_limit == 144 ? 1u : s.fps_limit == 90 ? 2u : s.fps_limit == 120 ? 3u : 0u;
+    e.flags = (s.fov_enabled ? 1u : 0u) | (s.hands_enabled ? 2u : 0u) | (fps_mode << 2);
     e.fov = s.fov; e.x = s.x; e.y = s.y; e.z = s.z;
     return e;
 }
@@ -48,9 +55,11 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     ViewmodelSettings s;
     if (size != sizeof(ConfigExtension)) return s;
     ConfigExtension e; std::memcpy(&e, bytes, sizeof(e));
-    if (e.magic != 0x31574d56u || e.version != 1 || e.size != sizeof(e) || (e.flags & ~3u)) return s;
+    if (e.magic != 0x31574d56u || e.version != 1 || e.size != sizeof(e) || (e.flags & ~15u)) return s;
     s.fov_enabled = (e.flags & 1u) != 0;
     s.hands_enabled = (e.flags & 2u) != 0;
+    const int fps_modes[] = {0, 144, 90, 120};
+    s.fps_limit = fps_modes[(e.flags >> 2) & 3u];
     s.fov = e.fov; s.x = e.x; s.y = e.y; s.z = e.z;
     return sanitize(s);
 }

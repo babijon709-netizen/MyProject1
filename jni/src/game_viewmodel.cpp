@@ -1,4 +1,7 @@
-#include "viewmodel_memory.h"
+#include "fps_memory.h"
+#include "maps_lookup.h"
+#include <chrono>
+#include <fstream>
 #include "game_viewmodel_internal.h"
 #include "game_internal.h"
 #include "logfile.h"
@@ -28,6 +31,47 @@ struct Memory {
 };
 Memory memory;
 viewmodel::Controller<Memory> controller(memory);
+viewmodel::FpsController<Memory> fps_controller(memory);
+uint64_t unity_base = 0;
+using Clock = std::chrono::steady_clock;
+Clock::time_point fps_last_tick{}, fps_last_resolve{};
+int fps_last_limit = 0;
+viewmodel::Status fps_last_log = viewmodel::Status::Off;
+
+uint64_t find_unity() {
+    std::ifstream file("/proc/" + std::to_string(g_pid) + "/maps");
+    std::string text, line;
+    while (std::getline(file, line)) {
+        text += line; text += '\n';
+        if (text.size() > (8u << 20)) return 0;
+    }
+    uint64_t candidates[8]{}, found = 0;
+    int count = maps::lookup_library_bases(text, "libunity.so", candidates, 8);
+    for (int i = 0; i < count; ++i) {
+        if (!viewmodel::fps_layout(memory, candidates[i])) continue;
+        if (found) return 0; // ambiguous live/stale mappings: do not guess
+        found = candidates[i];
+    }
+    return found;
+}
+void tick_fps(uint64_t session, int requested_limit) {
+    const int limit = viewmodel::sanitize_fps_limit(requested_limit);
+    const bool enabled = limit != 0;
+    if (!enabled && !fps_controller.has_state()) { fps_last_limit = 0; return; }
+    const auto now = Clock::now();
+    if (limit == fps_last_limit && now - fps_last_tick < std::chrono::milliseconds(100)) return;
+    const bool changed = limit != fps_last_limit;
+    fps_last_tick = now; fps_last_limit = limit;
+    if (!unity_base && enabled && now - fps_last_resolve >= std::chrono::seconds(1)) {
+        fps_last_resolve = now; unity_base = find_unity();
+    }
+    fps_controller.tick(session, unity_base, limit);
+    if (changed || fps_last_log != fps_controller.status) {
+        fps_last_log = fps_controller.status;
+        LogLine("fps: requested=%d target limit status=%d (0 off,1 waiting,2 set,4 memory error); actual FPS is device/pacing dependent",
+                limit, (int)fps_last_log);
+    }
+}
 uint64_t epoch = 1;
 viewmodel::Diagnostics last_log{};
 }
@@ -40,6 +84,8 @@ std::recursive_mutex& viewmodel_session_mutex() {
 void esp_viewmodel_reset(bool restore) {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     controller.reset(restore && g_mem.bound());
+    fps_controller.reset(restore && g_mem.bound());
+    unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     ++epoch;
 }
 
@@ -47,11 +93,13 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     using namespace go_active;
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
-        controller.reset(false);
+        controller.reset(false); fps_controller.reset(false);
+        unity_base = 0; fps_last_resolve = {};
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
                              settings.hands_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off};
         return;
     }
+    tick_fps(epoch, settings.fps_limit);
     // Resolve the current local player from the static source, NOT the ESP
     // cache which intentionally tolerates stale identities during respawn.
     uint64_t player = 0;

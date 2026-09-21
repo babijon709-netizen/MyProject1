@@ -882,23 +882,12 @@ float TabContent(int tab, float dt, float cW) {
         ColorRow("##fsp", XS("Метка фарма"), &cfg::esp::farm_spot_col, false);
         ColorRow("##fbd", XS("Тело ноды"),   &cfg::esp::farm_body_col, true);
 
-        auto vmStatus = [](viewmodel::Status status) -> const char* {
-            switch (status) {
-                case viewmodel::Status::Off: return XS("Выкл");
-                case viewmodel::Status::Active: return XS("Применено");
-                case viewmodel::Status::ADS: return XS("Штатно в прицеле");
-                case viewmodel::Status::Failed: return XS("Ошибка чтения/записи");
-                default: return XS("Ожидание объекта игры");
-            }
-        };
-        const auto vmDiag = esp_viewmodel_diagnostics();
         auto& vm = g_state.viewmodel;
         SHdr(XS("Кастомный FOV"));
         CardBg(Layout::RowH + Layout::SliderH);
         ToggleRow("##vmfov", XS("Кастомный FOV"), &vm.fov_enabled, g_state.a_custom_fov, false, true);
         SliderRow("##vmfovvalue", XS("Обзор мира"), &vm.fov,
                   50.f, 120.f, XS("%.0f°"), true, false, g_state.sl_custom_fov, dt);
-        ImGui::TextDisabled("%s", vmStatus(vmDiag.fov));
 
         SHdr(XS("Расположение рук"));
         CardBg(Layout::RowH + Layout::SliderH * 3.f);
@@ -909,15 +898,39 @@ float TabContent(int tab, float dt, float cW) {
                   -50.f, 50.f, XS("%.0f см"), false, false, g_state.sl_hands_y, dt);
         SliderRow("##vmz", XS("Z: ближе / дальше"), &vm.z,
                   -50.f, 50.f, XS("%.0f см"), true, false, g_state.sl_hands_z, dt);
-        ImGui::TextDisabled("%s", vmStatus(vmDiag.hands));
-        ImGui::TextWrapped("%s", XS("В прицеле FOV и руки возвращаются к штатным значениям."));
         if (ImGui::Button(XS("Сбросить FOV и руки"))) {
-            vm = {};
+            const int fps = vm.fps_limit;
+            vm = {}; vm.fps_limit = fps;
             g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
             g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
             esp_viewmodel_tick(vm);
         }
         ImGui::Dummy({1.f, 12.f});
+
+        SHdr(XS("Лимит FPS"));
+        {
+            const float width = ImGui::GetContentRegionAvail().x;
+            const float buttonWidth = (width - ImGui::GetStyle().ItemSpacing.x * 2.f) / 3.f;
+            const int limits[] = {90, 120, 144};
+            const char* labels[] = {"90 FPS", "120 FPS", "144 FPS"};
+            for (int i = 0; i < 3; ++i) {
+                if (i) ImGui::SameLine();
+                const bool selected = vm.fps_limit == limits[i];
+                if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                if (ImGui::Button(labels[i], {buttonWidth, Layout::RowH - 8.f})) {
+                    vm.fps_limit = limits[i];
+                    esp_viewmodel_tick(vm);
+                }
+                if (selected) ImGui::PopStyleColor();
+            }
+            const bool normal = vm.fps_limit == 0;
+            if (normal) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            if (ImGui::Button(XS("Сбросить до обычного"), {width, Layout::RowH - 8.f})) {
+                vm.fps_limit = 0;
+                esp_viewmodel_tick(vm);
+            }
+            if (normal) ImGui::PopStyleColor();
+        }
 
         // Иксрей: рендер отсекает всё ближе выбранной дистанции — стены и
         // текстуры вокруг игрока пропадают, видно что за ними.

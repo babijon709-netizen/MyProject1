@@ -1,4 +1,4 @@
-#include "viewmodel_memory.h"
+#include "fps_memory.h"
 #include <cassert>
 #include <iostream>
 #include <limits>
@@ -57,6 +57,7 @@ struct Fixture {
         io.set(action+DELEGATE_TARGET,motion); io.set(motion+FPMOTION_OBJECT,weapon); io.set(motion+FPMOTION_PLAYER,handler);
         io.set(motion+FPMOTION_IDLE_OFFSET,idle); io.set(motion+FPMOTION_RUN_OFFSET,run);
         io.set(idle+TRANSFORMOFFSET_POSITION,origin); io.set(run+TRANSFORMOFFSET_POSITION,origin);
+        io.set(idle+TRANSFORMOFFSET_LERP_SPEED,7.f); io.set(run+TRANSFORMOFFSET_LERP_SPEED,9.f);
     }
     void tick() { c.tick(1,player,s); }
     Position position() { return io.get<Position>(idle+TRANSFORMOFFSET_POSITION); }
@@ -77,7 +78,15 @@ static void tests() {
       f.io.set(f.fp+FPMANAGER_WORLD_FOV_TARGET,25.f); f.tick();
       assert(f.fov()==25.f); assert(same(f.position(),f.origin)); assert(f.c.status.fov==Status::ADS);
       f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(0)); f.io.set(f.fp+FPMANAGER_AIM_BLEND,0.5f); f.tick(); assert(f.fov()==25.f);
+      assert(f.c.status.hands==Status::Active && near(f.position(),Position{0.2f,0.f,0.6f}));
+      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==10000.f);
+      // The real consumer clamps dt * speed; even at 144 FPS the first Update
+      // takes the full step rather than interpolating over multiple frames.
+      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)/144.f >= 1.f);
       f.io.set(f.fp+FPMANAGER_AIM_BLEND,0.f); f.io.set(f.fp+FPMANAGER_WORLD_FOV_TARGET,70.f); f.tick(); assert(f.fov()==100.f);
+      for (int i=0; i<5; ++i) f.tick();
+      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==7.f);
+      assert(f.io.get<float>(f.run+TRANSFORMOFFSET_LERP_SPEED)==9.f);
     }
     { Fixture f; f.tick(); f.io.set(f.fp+FPMANAGER_WORLD_FOV_TARGET,80.f);
       Position newOrigin{0.4f,0.5f,0.6f}; f.io.set(f.idle+TRANSFORMOFFSET_POSITION,newOrigin); f.tick();
@@ -129,18 +138,102 @@ static void tests() {
     { Fixture f; f.io.set(f.fp+FPMANAGER_WORLD_FOV_TARGET,std::numeric_limits<float>::quiet_NaN()); f.tick(); assert(f.c.status.fov==Status::Failed); }
     { Fixture f; f.io.set(f.idle+TRANSFORMOFFSET_POSITION,Position{std::numeric_limits<float>::infinity(),0,0}); f.tick(); assert(f.c.status.hands==Status::Failed); }
     { Fixture f; f.tick(); f.c.reset(true); assert(same(f.position(),f.origin)); assert(f.fov()==70.f); }
+    { Fixture f; f.tick(); // Do not alter normal hip-fire pose animation.
+      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==7.f);
+      f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(1)); f.tick();
+      f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(0)); f.tick(); // immediate zero blend exit
+      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==10000.f);
+      f.s.hands_enabled=false; f.io.failWrite=f.idle+TRANSFORMOFFSET_LERP_SPEED; f.tick();
+      assert(f.c.status.hands==Status::Failed && same(f.position(),f.origin));
+      f.io.failWrite=0; f.tick(); assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==7.f);
+    }
+    { Fixture f; f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(1)); f.tick();
+      f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(0)); f.tick();
+      f.io.set(f.idle+TRANSFORMOFFSET_LERP_SPEED,11.f); // game replaces our value
+      f.c.reset(true); assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==11.f);
+      assert(f.io.get<float>(f.run+TRANSFORMOFFSET_LERP_SPEED)==9.f);
+    }
 }
 static void config_tests() {
-    ViewmodelSettings s{true,true,103.f,10.f,-20.f,30.f}; auto e=encode(s); auto r=decode(&e,sizeof(e));
-    assert(r.fov_enabled && r.hands_enabled && r.fov==103.f && r.x==10.f && r.y==-20.f && r.z==30.f);
-    for(size_t i=0;i<sizeof(e);++i) { auto d=decode(&e,i); assert(!d.fov_enabled && !d.hands_enabled && d.x==0); }
-    e.version=2; assert(!decode(&e,sizeof(e)).fov_enabled); e=encode(s); e.flags=8; assert(!decode(&e,sizeof(e)).hands_enabled);
+    ViewmodelSettings s{true,true,103.f,10.f,-20.f,30.f}; s.fps_limit=144; auto e=encode(s); auto r=decode(&e,sizeof(e));
+    assert(r.fps_limit==144 && r.fov_enabled && r.hands_enabled && r.fov==103.f && r.x==10.f && r.y==-20.f && r.z==30.f);
+    for(size_t i=0;i<sizeof(e);++i) { auto d=decode(&e,i); assert(d.fps_limit==0 && !d.fov_enabled && !d.hands_enabled && d.x==0); }
+    for (int limit : {0, 90, 120, 144}) {
+        s.fps_limit=limit; auto saved=encode(s); auto loaded=decode(&saved,sizeof(saved));
+        assert(loaded.fps_limit==limit && loaded.fov_enabled && loaded.hands_enabled);
+        assert(loaded.fov==103.f && loaded.x==10.f && loaded.y==-20.f && loaded.z==30.f);
+    }
+    for (int invalid : {-1, 1, 60, 91, 145, 1000}) {
+        s.fps_limit=invalid; assert(sanitize(s).fps_limit==0);
+        auto saved=encode(s); assert(decode(&saved,sizeof(saved)).fps_limit==0);
+    }
+    s.fps_limit=144;
+    e.flags=7; auto oldFps=decode(&e,sizeof(e));
+    assert(oldFps.fps_limit==144 && oldFps.fov_enabled && oldFps.hands_enabled);
+    e.flags=3; auto legacy=decode(&e,sizeof(e));
+    assert(legacy.fov_enabled && legacy.hands_enabled && legacy.fps_limit==0);
+    e.version=2; assert(!decode(&e,sizeof(e)).fov_enabled); e=encode(s); e.flags=16; assert(!decode(&e,sizeof(e)).hands_enabled);
     e=encode(s); e.fov=std::numeric_limits<float>::quiet_NaN(); e.x=std::numeric_limits<float>::infinity(); e.y=-1000; e.z=1000;
     auto d=decode(&e,sizeof(e)); assert(d.fov==90 && d.x==0 && d.y==-50 && d.z==50);
 }
+static void fps_tests() {
+    for (const auto& layout : kFpsLayouts) {
+        FakeMemory io; FpsController<FakeMemory> c(io);
+        const uint64_t base=0x10000000, target=base+layout.target;
+        io.set(base+0x318,layout.build_id);
+        io.set(base+layout.getter,std::array<uint32_t,3>{0xf00083e8,layout.load_instruction,0xd65f03c0});
+        io.set(target,int32_t(60));
+        c.tick(1,base,0); assert(io.reads==0 && io.writes==0);
+        c.tick(1,base,144); assert(c.status==Status::Active && io.get<int32_t>(target)==144);
+        for(int i=0;i<20;++i) c.tick(1,base,144);
+        c.tick(1,base,0); assert(io.get<int32_t>(target)==60 && !c.has_state());
+        // Switching custom limits must not replace the original snapshot with
+        // our previous override. Default restores each real starting value.
+        for (int original : {-1, 30, 60, 90, 120, 144, 300}) {
+            io.set(target,int32_t(original));
+            for (int limit : {90, 120, 144, 120, 90}) {
+                c.tick(1,base,limit);
+                assert(c.status==Status::Active && io.get<int32_t>(target)==limit);
+            }
+            c.tick(1,base,0);
+            assert(c.status==Status::Off && !c.has_state() && io.get<int32_t>(target)==original);
+        }
+        // A failed mode switch or reset retains the same original for retry.
+        io.set(target,int32_t(60)); c.tick(1,base,90);
+        io.failWrite=target; c.tick(1,base,120); assert(c.status==Status::Failed);
+        io.failWrite=0; c.tick(1,base,120); assert(io.get<int32_t>(target)==120);
+        io.failRead=target; c.tick(1,base,0); assert(c.status==Status::Failed && c.has_state());
+        io.failRead=0; c.tick(1,base,0); assert(io.get<int32_t>(target)==60);
+        c.tick(1,base,90); c.tick(1,base,91); // invalid request is fail-closed/default
+        assert(c.status==Status::Off && io.get<int32_t>(target)==60);
+        for (int limit : {90, 120, 144}) {
+            io.set(target,int32_t(-1)); c.tick(1,base,limit); c.reset(true);
+            assert(io.get<int32_t>(target)==-1);
+        }
+        io.set(target,int32_t(60)); c.tick(1,base,144);
+        io.set(target,int32_t(300)); c.tick(1,base,144); c.tick(1,base,0);
+        assert(io.get<int32_t>(target)==300); // new graphics preset, not obsolete 60
+        c.tick(1,base,144); io.set(target,int32_t(90)); c.tick(1,base,0);
+        assert(io.get<int32_t>(target)==90); // never clobber a newer game write
+        c.tick(1,base,144); io.failWrite=target; c.tick(1,base,0);
+        assert(c.has_state() && c.status==Status::Failed);
+        io.failWrite=0; c.tick(1,base,0); assert(io.get<int32_t>(target)==90);
+        io.failRead=target; auto count=io.writes; c.tick(1,base,144);
+        assert(c.status==Status::Failed && io.writes==count); io.failRead=0;
+        io.set(target,int32_t(0x12345678)); c.tick(1,base,144); assert(io.writes==count);
+        io.set(target,int32_t(60)); c.tick(1,base,144); count=io.writes;
+        io.set(base+0x318,uint64_t(0)); c.tick(1,base,0); assert(io.writes==count);
+        c.reset(true); assert(io.writes==count); // unknown engine: no restore writes
+        io.set(base+0x318,layout.build_id); io.set(base+layout.getter,uint32_t(0));
+        c.tick(1,base,144); assert(io.writes==count); // code fingerprint mismatch
+        io.set(base+layout.getter,uint32_t(0xf00083e8));
+        c.tick(1,base,144); count=io.writes; c.tick(2,0,144);
+        assert(io.writes==count && !c.has_state()); // lost session: forget
+    }
+}
 int main() {
-    config_tests();
+    config_tests(); fps_tests();
     go::SelectBuild(go::Build::Release); tests();
     assert(go::BetaAvailable()); go::SelectBuild(go::Build::Beta); tests();
-    std::cout << "viewmodel: release/beta, lifecycle, ADS, delegates, config, NaN: OK\n";
+    std::cout << "viewmodel: release/beta, lifecycle, instant ADS return, FPS90/120/144, delegates, config, NaN: OK\n";
 }

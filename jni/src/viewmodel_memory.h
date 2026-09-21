@@ -7,6 +7,8 @@
 
 namespace viewmodel {
 struct Position { float x, y, z; };
+struct BlendSpeed { float value; };
+inline bool valid(BlendSpeed v) { return finite(v.value) && v.value >= 0.f && v.value <= 10000.f; }
 inline bool valid(float v) { return finite(v) && v > 1.f && v < 179.f; }
 inline bool valid(Position v) {
     return finite(v.x) && finite(v.y) && finite(v.z) &&
@@ -58,9 +60,9 @@ template<class IO> class Controller {
     uint64_t session_ = 0;
     Identity player_, fp_, weapon_, motion_;
     Patch<float> fov_;
-    struct HandPatch { uint64_t object = 0, klass = 0, slot = 0; Patch<Position> patch; };
+    struct HandPatch { uint64_t object = 0, klass = 0, slot = 0; Patch<Position> patch; Patch<BlendSpeed> speed; };
     std::array<HandPatch, 8> hands_{};
-    unsigned retry_ = 0;
+    unsigned retry_ = 0, snap_frames_ = 0;
 
     bool restore_hands() {
         using namespace go_active;
@@ -73,7 +75,9 @@ template<class IO> class Controller {
         for (auto& h : hands_) {
             if (!h.object) continue;
             if (io.ptr(h.slot) != h.object || io.ptr(h.object) != h.klass) { h = {}; continue; }
-            if (h.patch.restore(io)) h = {}; else ok = false;
+            bool positionRestored = h.patch.restore(io);
+            bool speedRestored = h.speed.restore(io);
+            if (positionRestored && speedRestored) h = {}; else ok = false;
         }
         return ok;
     }
@@ -105,7 +109,7 @@ public:
     void reset(bool restore) {
         if (restore) { restore_fov(); restore_hands(); }
         player_ = {}; fp_ = {}; weapon_ = {}; motion_ = {};
-        fov_ = {}; hands_ = {}; retry_ = 0; session_ = 0; status = {};
+        fov_ = {}; hands_ = {}; retry_ = 0; snap_frames_ = 0; session_ = 0; status = {};
     }
     void tick(uint64_t session, uint64_t player, ViewmodelSettings s) {
         using namespace go_active;
@@ -147,7 +151,14 @@ public:
             motion_ = {}; retry_ = 0; weapon_ = {};
             if (weapon && io.ptr(weapon + FPOBJECT_PLAYER_BACKREF) == player) weapon_.capture(io, weapon);
         }
-        if (!s.hands_enabled || paused) {
+        // Hands return on the first non-ADS frame, not after the camera's
+        // slowly decaying FOV blend. The working FOV path keeps its own pause.
+        if (aimKnown && aim && s.hands_enabled) snap_frames_ = 3;
+        if (!s.hands_enabled) snap_frames_ = 0;
+        const bool snap = snap_frames_ != 0 || (aimKnown && blend > 0.01f);
+        if (aimKnown && !aim && snap_frames_) --snap_frames_;
+        const bool handsPaused = !aimKnown || aim;
+        if (!s.hands_enabled || handsPaused) {
             bool ok = restore_hands();
             status.hands = !ok ? Status::Failed : (!s.hands_enabled ? Status::Off : (aimKnown ? Status::ADS : Status::Waiting));
             if (!s.fov_enabled && !s.hands_enabled && status.fov == Status::Off && status.hands == Status::Off) {
@@ -197,7 +208,15 @@ public:
             if (!h.patch.sample(io, object + TRANSFORMOFFSET_POSITION)) { ok = false; continue; }
             Position value = h.patch.original;
             value.x += s.x * 0.01f; value.y += s.y * 0.01f; value.z += s.z * 0.01f;
-            if (!h.patch.put(io, value)) ok = false; else any = true;
+            bool positionApplied = h.patch.put(io, value);
+            // Let Unity snap on its next Update, AFTER it copies the old pose's
+            // interpolation cache during a stance switch. Writing that cache
+            // from the overlay would be overwritten by the same switch.
+            bool speedApplied = snap
+                ? (h.speed.sample(io, object + TRANSFORMOFFSET_LERP_SPEED) &&
+                   h.speed.put(io, BlendSpeed{10000.f}))
+                : h.speed.restore(io);
+            if (!positionApplied || !speedApplied) ok = false; else any = true;
         }
         status.hands = !ok ? Status::Failed : (any ? Status::Active : Status::Waiting);
     }

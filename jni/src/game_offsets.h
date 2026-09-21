@@ -574,4 +574,7 @@ inline constexpr std::uint64_t FPMOTION_JUMP_OFFSET             = 0xA8; // Oxide
 inline constexpr std::uint64_t FPMOTION_LOOK_OFFSET             = 0xB0; // Oxide_FPMotion_Fields.m_LookOffset
 inline constexpr std::uint64_t FPMOTION_CLOSE_OFFSET            = 0xB8; // Oxide_FPMotion_Fields.m_TooCloseOffset
 
+// TransformOffset.Tick clamps dt * m_LerpSpeed to 1: snap custom hip poses.
+inline constexpr std::uint64_t TRANSFORMOFFSET_LERP_SPEED = 0x20; // Oxide.TransformOffset.m_LerpSpeed
+
 }

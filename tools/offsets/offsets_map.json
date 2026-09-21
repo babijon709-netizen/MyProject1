@@ -2732,5 +2732,19 @@
    "field": "m_TooCloseOffset",
    "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
+ },
+ "TRANSFORMOFFSET_LERP_SPEED": {
+  "kind": "field",
+  "class": "TransformOffset",
+  "struct": "Oxide_TransformOffset_Fields",
+  "field": "m_LerpSpeed",
+  "type": "float",
+  "offset": 32,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_TransformOffset_Fields",
+   "field": "m_LerpSpeed",
+   "how": "release/beta layout; clamp(dt*m_LerpSpeed) in TransformOffset Tick at release RVA 0x6620EDC"
+  }
  }
 }
