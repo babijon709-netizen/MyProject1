@@ -25,8 +25,7 @@ for setting, anim in [('fov_enabled', 'a_custom_fov'),
     assert re.search(r'Tick\(\s*g_state\.' + anim +
                      r'\s*,\s*g_state\.viewmodel\.' + setting +
                      r'\s*,\s*dt\s*\)', menu), f'missing animation update: {setting}'
-reasons = ['Image', 'Patched', 'Code', 'RunShape', 'Helper', 'Runners',
-           'Read', 'Write', 'Timer']
+reasons = ['Image', 'Patched', 'Code', 'Helper', 'Runners', 'Read', 'Write', 'Timer']
 body = menu.split('LootReasonText(loot::Reason reason)', 1)[1].split('\n}', 1)[0]
 for reason in reasons:
     assert re.search(r'case loot::Reason::' + reason + r':\s*return XS\("[^"]+"\);',
@@ -38,6 +37,11 @@ assert re.search(r'LootReasonText\(lootStatus\.reason\)', menu)
 assert 'lootStatus.detail' in menu, 'the number behind the reason is not shown'
 assert 'esp_loot_refusal()' in menu, 'a heap-gate refusal must show its maps line'
 assert re.search(r'lootStatus\.flows\b', menu), 'partial flow availability is not shown'
+# A modified Run body is not a refusal, but it must not be hidden either: the
+# words read from the process are the only way to tell a hook from a bad table.
+assert re.search(r'lootStatus\.hooked\b', menu), 'a hooked flow is not reported'
+assert 'lootStatus.hooked_run' in menu and 'lootStatus.hooked_code' in menu, \
+    'the hooked flow must be shown with the words read from the process'
 assert 'LootKindText(lootStatus.kind)' in menu, 'the accelerated flow is not named'
 print('misc toggles: row state and per-frame animation bindings: OK')
 print('instant pickup menu: every refusal reason, its number and the maps line: OK')

@@ -149,14 +149,18 @@ void esp_loot_tick(bool enabled) {
     controller.tick(epoch, base, enabled);
     const loot::Diagnostics d = controller.diagnostics();
     if (!last_log_valid || d.status != last_log.status || d.kind != last_log.kind ||
-        d.reason != last_log.reason || d.detail != last_log.detail) {
+        d.reason != last_log.reason || d.detail != last_log.detail ||
+        d.hooked != last_log.hooked || d.flows != last_log.flows) {
         last_log = d;
         last_log_valid = true;
-        LogLine("instant pickup: status=%d kind=%s reason=%s detail=%llx timing=%d "
-                "expired=%llu races=%llu scans=%llu "
+        LogLine("instant pickup: status=%d kind=%s reason=%s detail=%llx flows=%u "
+                "hooked=%u hooked_run=%llx hooked_code=%08x %08x %08x %08x %08x "
+                "timing=%d expired=%llu races=%llu scans=%llu "
                 "(status 0 off,1 waiting,2 active,3 refused)",
                 (int)d.status, loot::kind_name(d.kind), loot::reason_name(d.reason),
-                (unsigned long long)d.detail, d.timing,
+                (unsigned long long)d.detail, d.flows, d.hooked,
+                (unsigned long long)d.hooked_run, d.hooked_code[0], d.hooked_code[1],
+                d.hooked_code[2], d.hooked_code[3], d.hooked_code[4], d.timing,
                 (unsigned long long)d.expired, (unsigned long long)d.races,
                 (unsigned long long)d.scans);
     }

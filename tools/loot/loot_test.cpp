@@ -403,19 +403,19 @@ int main() {
             assert(g.io.writes == 0);
             assert(g.collect.moved == 0);
         }
-        // Три способа испортить поток: чужой патч точки задержки, изменённый
-        // пролог Run, ветка Run не в тот MoveNext. Каждый проверяется в трёх
-        // вариантах: испорчен один поток (образ принимается, остальные потоки
-        // работают, ожидание испорченного не трогается) и испорчены все три
-        // (образ отклоняется с причиной и RVA первой точки).
-        struct Break { const char* what; uint32_t off; uint32_t word; Reason reason; };
+        // Три способа испортить поток. Чужой патч точки задержки — жёсткий отказ
+        // потока: там уже «ускорено» чужой правкой инструкций, а duration после
+        // неё, скорее всего, ноль. Изменённое тело Run — не отказ: build-id уже
+        // привязал таблицу к образу, а принадлежность ожидания доказывается
+        // именами классов и указателем метода делегата, не инструкциями Run.
+        struct Break { const char* what; uint32_t off; uint32_t word; bool hard; };
         const Break breaks[] = {
             {"the retired instruction patch is still in the process",
-             0, 0x14000010u, Reason::Patched},
+             0, 0x14000010u, true},
             {"Run() no longer has the shape the identity chain relies on",
-             4, 0xd65f03c0u, Reason::RunShape},
+             4, 0xd65f03c0u, false},
             {"Run() branches somewhere else than the state machine we know",
-             16, kBranchOp | 0x100u, Reason::RunShape},
+             16, kBranchOp | 0x100u, false},
         };
         const uint32_t all_flows = (1u << kFlowCount) - 1u;
         for (const auto& brk : breaks) {
@@ -424,7 +424,7 @@ int main() {
             };
             for (size_t flow = 0; flow < kFlowCount; ++flow) {
                 const size_t other = (flow + 1) % kFlowCount;
-                {   // один поток испорчен: соседний продолжает ускоряться
+                {   // испорчен один поток: соседний продолжает ускоряться
                     Game g;
                     g.map_library();
                     g.build_unitask();
@@ -432,26 +432,38 @@ int main() {
                     g.start_collect(4, static_cast<Kind>(other));
                     Controller<FakeMemory> c(g.io);
                     for (int i = 0; i < 20 && !g.collect.finished; ++i) frame(g, c, 1, true);
-                    assert(c.diagnostics().flows == (all_flows & ~(1u << flow)));
+                    assert(c.diagnostics().flows ==
+                           (all_flows & ~(brk.hard ? (1u << flow) : 0u)));
                     assert(c.diagnostics().status != Status::Failed);
                     assert(c.diagnostics().kind == static_cast<Kind>(other));
                     assert(g.collect.moved == 4);
                 }
-                {   // ожидание испорченного потока не принимается и не пишется
+                {   // ожидание самого испорченного потока
                     Game g;
                     g.map_library();
                     g.build_unitask();
                     g.io.set<uint32_t>(g.base + site(g, flow), brk.word);
                     g.start_collect(4, static_cast<Kind>(flow));
                     Controller<FakeMemory> c(g.io);
-                    for (int i = 0; i < 20; ++i) frame(g, c, 1, true);
-                    assert(c.diagnostics().flows == (all_flows & ~(1u << flow)));
-                    assert(c.diagnostics().status != Status::Failed);
-                    assert(g.io.writes == 0);
-                    assert(g.collect.moved == 0);
+                    for (int i = 0; i < 20 && !g.collect.finished; ++i) frame(g, c, 1, true);
+                    if (brk.hard) {
+                        // чужой патч задержки: поток отключён, ни одной записи
+                        assert(c.diagnostics().flows == (all_flows & ~(1u << flow)));
+                        assert(c.diagnostics().hooked == 0);
+                        assert(g.io.writes == 0);
+                        assert(g.collect.moved == 0);
+                    } else {
+                        // изменённый Run: поток работает, а слова видны в диагностике
+                        assert(c.diagnostics().flows == all_flows);
+                        assert(c.diagnostics().hooked == (1u << flow));
+                        assert(c.diagnostics().hooked_run == g.layout.flow[flow].run);
+                        assert(c.diagnostics().hooked_code[brk.off / 4] == brk.word);
+                        assert(g.collect.moved == 4);
+                        assert(g.io.writes >= 4);
+                    }
                 }
             }
-            {   // испорчены все три: образ отклоняется целиком
+            {   // испорчены все три потока
                 Game g;
                 g.map_library();
                 g.build_unitask();
@@ -459,17 +471,24 @@ int main() {
                     g.io.set<uint32_t>(g.base + site(g, f), brk.word);
                 g.start_collect(4);
                 Controller<FakeMemory> c(g.io);
-                for (int i = 0; i < 5; ++i) frame(g, c, 1, true);
-                assert(c.diagnostics().status == Status::Failed);
-                assert(c.diagnostics().reason == brk.reason);
-                assert(c.diagnostics().flows == 0);
-                // Число к причине — точка, по которой отказ опознаётся на
-                // устройстве: для чужого патча это сама точка задержки, для
-                // изменившегося кода — RVA Run этого потока.
-                assert(c.diagnostics().detail ==
-                       (brk.off ? g.layout.flow[0].run : g.layout.flow[0].delay_site));
-                assert(g.io.writes == 0);
-                assert(g.collect.moved == 0);
+                for (int i = 0; i < 20 && !g.collect.finished; ++i) frame(g, c, 1, true);
+                if (brk.hard) {
+                    assert(c.diagnostics().status == Status::Failed);
+                    assert(c.diagnostics().reason == Reason::Patched);
+                    assert(c.diagnostics().flows == 0);
+                    // Число к причине — точка, по которой отказ опознаётся на
+                    // устройстве: для чужого патча это сама точка задержки.
+                    assert(c.diagnostics().detail == g.layout.flow[0].delay_site);
+                    assert(g.io.writes == 0);
+                    assert(g.collect.moved == 0);
+                } else {
+                    assert(c.diagnostics().status != Status::Failed);
+                    assert(c.diagnostics().flows == all_flows);
+                    assert(c.diagnostics().hooked == all_flows);
+                    assert(c.diagnostics().hooked_run == g.layout.flow[0].run);
+                    assert(c.diagnostics().hooked_code[brk.off / 4] == brk.word);
+                    assert(g.collect.moved == 4);
+                }
             }
         }
         {   // the metadata slot no longer holds PlayerLoopHelper
@@ -510,7 +529,8 @@ int main() {
             assert(c.diagnostics().detail == 4096);
             assert(g.io.writes == 0);
         }
-        std::printf("image checks: unknown build, retired patch and broken Run all refused\n");
+        std::printf("image checks: unknown build refused, retired patch disables its flow,\n"
+                    "              a modified Run keeps the flow alive and is reported\n");
     }
 
     // ---- 7. Disabled means disabled, and re-enabling rebinds ---------------

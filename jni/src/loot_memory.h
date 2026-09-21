@@ -104,8 +104,12 @@ struct Layout {
     FlowSite flow[3];
 };
 // Run() of every AsyncUniTask`1 instantiation: take &stateMachine at runner+0x20
-// and branch into MoveNext. The four fixed words plus the branch target prove
-// both the RVA and the +0x20 offset the identity chain relies on.
+// and branch into MoveNext. The four fixed words plus the branch target prove the
+// table when it is derived from an image (tools/loot/find_table.py,
+// check_native.py). On the device the build-id already pins the table to the
+// bytes, so a differing body is reported (Diagnostics::hooked) rather than
+// refused: identification rests on class names and the delegate's method
+// pointer, not on Run's instructions.
 inline constexpr uint32_t kRunPrologue[4] = {0xf9401028u, 0x91008000u,
                                              0xf9406108u, 0xf9404101u};
 inline constexpr uint32_t kBranchMask = 0xFC000000u;   // unconditional b
@@ -167,68 +171,87 @@ bool named_one_of(IO& io, uint64_t klass, const char* name, const char* const (&
     return false;
 }
 
-// Один поток проверяется сам по себе: прежний патч или изменившийся код в одном
-// из трёх не должен отключать два других. Отказ по build-id остаётся общим —
-// без него смещения неизвестны, а вот точки кода у каждого потока свои.
+// Проверка одного потока. Жёсткие только два случая: точку задержки изменил
+// прежний патч (значит поток уже «ускорен» чужой правкой инструкций, а duration
+// там, скорее всего, ноль) и код вообще не читается. Отличающееся тело `Run` —
+// не отказ: build-id уже привязал таблицу к образу, принадлежность ожидания
+// доказывается именами классов и указателем метода делегата, а не инструкциями
+// `Run`, а единственная запись идёт в поле `elapsed` объекта кучи. Чужой хук или
+// модифицированный клиент таким образом не выключают подбор, но и не прячутся.
+enum class FlowCheck { Ok, Unreadable, DelayPatched, RunModified };
+
 template<class IO>
-bool flow_ok(IO& io, uint64_t base, const FlowSite& flow, Reason& reason, uint64_t& detail) {
+FlowCheck flow_check(IO& io, uint64_t base, const FlowSite& flow,
+                     std::array<uint32_t, 5>& code) {
     uint32_t word = 0;
-    if (!io.read(base + flow.delay_site, word)) {
-        reason = Reason::Code; detail = flow.delay_site; return false;
-    }
-    if (word != flow.delay_word) { reason = Reason::Patched; detail = flow.delay_site; return false; }
-    std::array<uint32_t, 5> code{};
-    if (!io.read(base + flow.run, code)) { reason = Reason::Code; detail = flow.run; return false; }
+    if (!io.read(base + flow.delay_site, word)) return FlowCheck::Unreadable;
+    if (word != flow.delay_word) return FlowCheck::DelayPatched;
+    code = {};
+    if (!io.read(base + flow.run, code)) return FlowCheck::Unreadable;
+    bool same = true;
     for (int i = 0; i < 4; ++i)
-        if (code[i] != kRunPrologue[i]) { reason = Reason::RunShape; detail = flow.run; return false; }
-    if ((code[4] & kBranchMask) != kBranchOp) { reason = Reason::RunShape; detail = flow.run; return false; }
-    const int32_t imm = (static_cast<int32_t>(code[4] << 6)) >> 6;   // imm26
-    const int64_t target = static_cast<int64_t>(base + flow.run) +
-                           static_cast<int64_t>(imm) * 4;
-    if (target != static_cast<int64_t>(base + flow.move_next)) {
-        reason = Reason::RunShape; detail = flow.run; return false;
+        if (code[i] != kRunPrologue[i]) same = false;
+    if ((code[4] & kBranchMask) != kBranchOp) {
+        same = false;
+    } else {
+        const int32_t imm = (static_cast<int32_t>(code[4] << 6)) >> 6;   // imm26
+        const int64_t target = static_cast<int64_t>(base + flow.run) +
+                               static_cast<int64_t>(imm) * 4;
+        if (target != static_cast<int64_t>(base + flow.move_next)) same = false;
     }
-    reason = Reason::None;
-    detail = 0;
-    return true;
+    return same ? FlowCheck::Ok : FlowCheck::RunModified;
 }
 
-// Accept an image only when the build-id is known; `flows` collects the flows
-// whose code sites still hold their original instructions. nullptr for an
-// unknown build and when not a single flow survived — a process that still
-// carries the retired delay patch in all three, for instance. `reason`/`detail`
-// carry the first failure and the number that identifies it on the device.
-template<class IO>
-const Layout* layout_for(IO& io, uint64_t base, Reason& reason, uint64_t& detail,
-                         uint32_t& flows) {
-    flows = 0;
-    reason = Reason::Image;
-    detail = 0;
-    if (base < 0x10000) return nullptr;
+struct ImageCheck {
+    const Layout* layout = nullptr;
+    uint32_t flows = 0;      // потоки, которые можно использовать
+    uint32_t hooked = 0;     // из них — с изменённым телом Run
+    uint64_t hooked_run = 0;
+    std::array<uint32_t, 5> hooked_code{};
+    Reason reason = Reason::Image;
+    uint64_t detail = 0;
+};
+
+// Образ принимается по build-id; `flows` собирает потоки, у которых точка
+// задержки цела. layout == nullptr, если build-id не из таблицы или не уцелел
+// ни один поток; `reason`/`detail` несут первый отказ и число к нему.
+template<class IO> ImageCheck check_image(IO& io, uint64_t base) {
+    ImageCheck out;
+    out.detail = 0;
+    if (base < 0x10000) return out;
     std::array<uint8_t, 20> id{};
-    if (!io.read(base + kBuildIdOffset, id)) return nullptr;
+    if (!io.read(base + kBuildIdOffset, id)) return out;
     uint64_t head = 0;
     for (int i = 7; i >= 0; --i) head = (head << 8) | id[static_cast<size_t>(i)];
-    detail = head;                      // first 8 build-id bytes, little endian
+    out.detail = head;                    // first 8 build-id bytes, little endian
     for (const auto& layout : kLayouts) {
         if (layout.build_id != id) continue;
-        detail = 0;
+        out.detail = 0;
         Reason first = Reason::None;
         uint64_t first_detail = 0;
         for (size_t f = 0; f < kFlowCount; ++f) {
-            Reason flow_reason = Reason::None;
-            uint64_t flow_detail = 0;
-            if (flow_ok(io, base, layout.flow[f], flow_reason, flow_detail)) {
-                flows |= 1u << f;
+            std::array<uint32_t, 5> code{};
+            const FlowCheck check = flow_check(io, base, layout.flow[f], code);
+            if (check == FlowCheck::Ok || check == FlowCheck::RunModified) {
+                out.flows |= 1u << f;
+                if (check == FlowCheck::RunModified) {
+                    out.hooked |= 1u << f;
+                    if (!out.hooked_run) { out.hooked_run = layout.flow[f].run; out.hooked_code = code; }
+                }
                 continue;
             }
-            if (first == Reason::None) { first = flow_reason; first_detail = flow_detail; }
+            if (first == Reason::None) {
+                first = check == FlowCheck::DelayPatched ? Reason::Patched : Reason::Code;
+                first_detail = check == FlowCheck::DelayPatched ? layout.flow[f].delay_site
+                                                                : layout.flow[f].run;
+            }
         }
-        if (!flows) { reason = first; detail = first_detail; return nullptr; }
-        reason = Reason::None;
-        return &layout;
+        if (!out.flows) { out.reason = first; out.detail = first_detail; return out; }
+        out.layout = &layout;
+        out.reason = Reason::None;
+        return out;
     }
-    return nullptr;
+    return out;
 }
 
 template<class IO> class Controller {
@@ -238,6 +261,10 @@ template<class IO> class Controller {
     // Какие потоки переноса прошли проверку кода (bit i — Kind i): поток с чужим
     // патчем отключается сам, остальные продолжают работать.
     uint32_t flows_ok_ = 0;
+    // Потоки с изменённым телом Run: не отказ, а показ в меню.
+    uint32_t hooked_ = 0;
+    uint64_t hooked_run_ = 0;
+    std::array<uint32_t, 5> hooked_code_{};
     uint64_t runners_ = 0;
     uint32_t runners_len_ = 0;
     uint64_t loop_runner_klass_ = 0, promise_klass_ = 0;
@@ -450,7 +477,9 @@ public:
     // Forget every address. Nothing is written: there is no residue to undo.
     void reset() {
         layout_ = nullptr;
-        flows_ok_ = 0;
+        flows_ok_ = hooked_ = 0;
+        hooked_run_ = 0;
+        hooked_code_ = {};
         runners_ = 0; runners_len_ = 0;
         loop_runner_klass_ = promise_klass_ = known_klass_ = 0;
         memo_ = {};
@@ -472,6 +501,8 @@ public:
             diag_.kind = Kind::None;
             diag_.reason = Reason::None;
             diag_.detail = 0;
+            diag_.flows = 0;
+            diag_.hooked = 0;
             diag_.timing = -1;
             return;
         }
@@ -480,21 +511,28 @@ public:
         diag_.reason = Reason::None;
         diag_.detail = 0;
         diag_.flows = flows_ok_;
+        diag_.hooked = hooked_;
+        diag_.hooked_run = hooked_run_;
+        diag_.hooked_code = hooked_code_;
         diag_.timing = -1;
         if (!base) return;
         if (!layout_) {
-            Reason reason = Reason::None;
-            uint64_t detail = 0;
-            uint32_t flows = 0;
-            layout_ = layout_for(io, base, reason, detail, flows);
-            if (!layout_) {
+            const ImageCheck image = check_image(io, base);
+            if (!image.layout) {
                 diag_.status = Status::Failed;
-                diag_.reason = reason;
-                diag_.detail = detail;
+                diag_.reason = image.reason;
+                diag_.detail = image.detail;
                 return;
             }
-            flows_ok_ = flows;
-            diag_.flows = flows;
+            layout_ = image.layout;
+            flows_ok_ = image.flows;
+            hooked_ = image.hooked;
+            hooked_run_ = image.hooked_run;
+            hooked_code_ = image.hooked_code;
+            diag_.flows = flows_ok_;
+            diag_.hooked = hooked_;
+            diag_.hooked_run = hooked_run_;
+            diag_.hooked_code = hooked_code_;
         }
         {
             Reason reason = Reason::None;

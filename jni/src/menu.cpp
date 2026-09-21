@@ -102,7 +102,6 @@ static const char* LootReasonText(loot::Reason reason) {
         case loot::Reason::Image:    return XS("образ игры не совпал с таблицей");
         case loot::Reason::Patched:  return XS("в процессе остался старый патч — перезапустите игру");
         case loot::Reason::Code:     return XS("код образа не читается");
-        case loot::Reason::RunShape: return XS("код образа изменился");
         case loot::Reason::Helper:   return XS("PlayerLoopHelper не найден");
         case loot::Reason::Runners:  return XS("список игровых циклов не читается");
         case loot::Reason::Read:     return XS("память ожидания не читается");
@@ -980,6 +979,17 @@ float TabContent(int tab, float dt, float cW) {
         if (lootStatus.flows && lootStatus.flows != 7u)
             ImGui::TextDisabled("%s: %u/3", XS("Потоки переноса"),
                                 (unsigned)__builtin_popcount(lootStatus.flows));
+        if (lootStatus.hooked) {
+            // Инструкции Run в процессе не совпадают с образом: чужой хук или
+            // модифицированный клиент. Подбору это не мешает — принадлежность
+            // ожидания доказывается именами классов и указателем метода делегата,
+            // а не телом Run, — но слова показываются как прочитались.
+            ImGui::TextDisabled("%s: %llX %08X %08X %08X %08X %08X", XS("Код потока изменён"),
+                                (unsigned long long)lootStatus.hooked_run,
+                                (unsigned)lootStatus.hooked_code[0], (unsigned)lootStatus.hooked_code[1],
+                                (unsigned)lootStatus.hooked_code[2], (unsigned)lootStatus.hooked_code[3],
+                                (unsigned)lootStatus.hooked_code[4]);
+        }
 
         SHdr(XS("Лимит FPS"));
         {

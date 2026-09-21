@@ -112,12 +112,12 @@ UI_EN = {
     'быстрая загрузка': 'fast load',
     'поток не определён': 'the flow is not identified',
     'код образа не читается': 'the image code is unreadable',
+    'Код потока изменён': 'the flow code was modified in the process',
     'Ожидание открытого контейнера': 'Waiting for an open container',
     'Данные': 'Data',
     # причины отказа подбора (журнал в сборке выключен, поэтому они в меню)
     'образ игры не совпал с таблицей': 'the game image is not in the table',
     'в процессе остался старый патч — перезапустите игру': 'an old patch is still in the process — restart the game',
-    'код образа изменился': 'the image code has changed',
     'PlayerLoopHelper не найден': 'PlayerLoopHelper not found',
     'список игровых циклов не читается': 'the player-loop list is unreadable',
     'память ожидания не читается': 'the await object is unreadable',
