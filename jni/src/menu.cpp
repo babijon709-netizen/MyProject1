@@ -984,7 +984,11 @@ float TabContent(int tab, float dt, float cW) {
             // модифицированный клиент. Подбору это не мешает — принадлежность
             // ожидания доказывается именами классов и указателем метода делегата,
             // а не телом Run, — но слова показываются как прочитались.
-            ImGui::TextDisabled("%s: %llX %08X %08X %08X %08X %08X", XS("Код потока изменён"),
+            // Сколько потоков затронуто — тоже часть диагноза: один изменённый
+            // Run похож на точечную чужую правку, три — на общий хук-движок.
+            ImGui::TextDisabled("%s (%u/3): %llX %08X %08X %08X %08X %08X",
+                                XS("Код потока изменён"),
+                                (unsigned)__builtin_popcount(lootStatus.hooked),
                                 (unsigned long long)lootStatus.hooked_run,
                                 (unsigned)lootStatus.hooked_code[0], (unsigned)lootStatus.hooked_code[1],
                                 (unsigned)lootStatus.hooked_code[2], (unsigned)lootStatus.hooked_code[3],
