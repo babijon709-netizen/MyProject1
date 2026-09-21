@@ -133,7 +133,11 @@ inline constexpr size_t kFlowCount = sizeof(kLayouts[0].flow) / sizeof(kLayouts[
 // scan) because the game mutates loopItems under its own lock while we read it:
 // a lying tail or a grown array must not turn into unbounded work.
 inline constexpr uint32_t kMaxRunners  = 64;
-inline constexpr uint32_t kMaxItems    = 512;
+// Сколько последних элементов одного раннера просматривается за проход.
+// `tail` — это upper bound, а не число живых элементов: завершившиеся оставляют
+// в массиве дыры, и в долгой сессии список растёт. Просмотр идёт с конца, поэтому
+// за пределами окна остаётся старьё, а не свежее ожидание переноса.
+inline constexpr uint32_t kMaxItems    = 1024;
 // Сколько элементов списка просматривается за один проход. Это не счётчик
 // чтений: на элемент приходится одно чтение указателя, а проверка имени класса
 // (до четырёх чтений строк) платится только за класс, которого ещё нет в мемо.
@@ -163,12 +167,41 @@ bool named_one_of(IO& io, uint64_t klass, const char* name, const char* const (&
     return false;
 }
 
-// Accept an image only when the build-id is known AND every code site we rely on
-// still holds its original instructions. nullptr for an unknown build and for a
-// process that still carries the retired delay patch; `reason`/`detail` say which
-// check failed and carry the number that identifies it on the device.
+// Один поток проверяется сам по себе: прежний патч или изменившийся код в одном
+// из трёх не должен отключать два других. Отказ по build-id остаётся общим —
+// без него смещения неизвестны, а вот точки кода у каждого потока свои.
 template<class IO>
-const Layout* layout_for(IO& io, uint64_t base, Reason& reason, uint64_t& detail) {
+bool flow_ok(IO& io, uint64_t base, const FlowSite& flow, Reason& reason, uint64_t& detail) {
+    uint32_t word = 0;
+    if (!io.read(base + flow.delay_site, word)) {
+        reason = Reason::Code; detail = flow.delay_site; return false;
+    }
+    if (word != flow.delay_word) { reason = Reason::Patched; detail = flow.delay_site; return false; }
+    std::array<uint32_t, 5> code{};
+    if (!io.read(base + flow.run, code)) { reason = Reason::Code; detail = flow.run; return false; }
+    for (int i = 0; i < 4; ++i)
+        if (code[i] != kRunPrologue[i]) { reason = Reason::RunShape; detail = flow.run; return false; }
+    if ((code[4] & kBranchMask) != kBranchOp) { reason = Reason::RunShape; detail = flow.run; return false; }
+    const int32_t imm = (static_cast<int32_t>(code[4] << 6)) >> 6;   // imm26
+    const int64_t target = static_cast<int64_t>(base + flow.run) +
+                           static_cast<int64_t>(imm) * 4;
+    if (target != static_cast<int64_t>(base + flow.move_next)) {
+        reason = Reason::RunShape; detail = flow.run; return false;
+    }
+    reason = Reason::None;
+    detail = 0;
+    return true;
+}
+
+// Accept an image only when the build-id is known; `flows` collects the flows
+// whose code sites still hold their original instructions. nullptr for an
+// unknown build and when not a single flow survived — a process that still
+// carries the retired delay patch in all three, for instance. `reason`/`detail`
+// carry the first failure and the number that identifies it on the device.
+template<class IO>
+const Layout* layout_for(IO& io, uint64_t base, Reason& reason, uint64_t& detail,
+                         uint32_t& flows) {
+    flows = 0;
     reason = Reason::Image;
     detail = 0;
     if (base < 0x10000) return nullptr;
@@ -180,22 +213,18 @@ const Layout* layout_for(IO& io, uint64_t base, Reason& reason, uint64_t& detail
     for (const auto& layout : kLayouts) {
         if (layout.build_id != id) continue;
         detail = 0;
-        for (const auto& flow : layout.flow) {
-            uint32_t word = 0;
-            if (!io.read(base + flow.delay_site, word)) return nullptr;
-            if (word != flow.delay_word) { reason = Reason::Patched; detail = flow.delay_site; return nullptr; }
-            std::array<uint32_t, 5> code{};
-            if (!io.read(base + flow.run, code)) return nullptr;
-            for (int i = 0; i < 4; ++i)
-                if (code[i] != kRunPrologue[i]) { reason = Reason::RunShape; detail = flow.run; return nullptr; }
-            if ((code[4] & kBranchMask) != kBranchOp) { reason = Reason::RunShape; detail = flow.run; return nullptr; }
-            const int32_t imm = (static_cast<int32_t>(code[4] << 6)) >> 6;   // imm26
-            const int64_t target = static_cast<int64_t>(base + flow.run) +
-                                   static_cast<int64_t>(imm) * 4;
-            if (target != static_cast<int64_t>(base + flow.move_next)) {
-                reason = Reason::RunShape; detail = flow.run; return nullptr;
+        Reason first = Reason::None;
+        uint64_t first_detail = 0;
+        for (size_t f = 0; f < kFlowCount; ++f) {
+            Reason flow_reason = Reason::None;
+            uint64_t flow_detail = 0;
+            if (flow_ok(io, base, layout.flow[f], flow_reason, flow_detail)) {
+                flows |= 1u << f;
+                continue;
             }
+            if (first == Reason::None) { first = flow_reason; first_detail = flow_detail; }
         }
+        if (!flows) { reason = first; detail = first_detail; return nullptr; }
         reason = Reason::None;
         return &layout;
     }
@@ -206,6 +235,9 @@ template<class IO> class Controller {
     IO& io;
     uint64_t session_ = 0, base_ = 0;
     const Layout* layout_ = nullptr;
+    // Какие потоки переноса прошли проверку кода (bit i — Kind i): поток с чужим
+    // патчем отключается сам, остальные продолжают работать.
+    uint32_t flows_ok_ = 0;
     uint64_t runners_ = 0;
     uint32_t runners_len_ = 0;
     uint64_t loop_runner_klass_ = 0, promise_klass_ = 0;
@@ -287,12 +319,14 @@ template<class IO> class Controller {
         if (!io.read_fresh(state + kDelegateMethodPtr, entry)) return false;
         int found = -1;
         for (size_t i = 0; i < kFlowCount; ++i)
-            if (entry == base_ + layout_->flow[i].run) found = static_cast<int>(i);
+            if ((flows_ok_ & (1u << i)) && entry == base_ + layout_->flow[i].run)
+                found = static_cast<int>(i);
         if (found < 0) {
             // method_code carries the same code address on some delegate shapes.
             if (!io.read_fresh(state + kDelegateMethodCode, entry)) return false;
             for (size_t i = 0; i < kFlowCount; ++i)
-                if (entry == base_ + layout_->flow[i].run) found = static_cast<int>(i);
+                if ((flows_ok_ & (1u << i)) && entry == base_ + layout_->flow[i].run)
+                    found = static_cast<int>(i);
         }
         if (found < 0) return false;
         const uint64_t continuation = io.ptr_fresh(item + kPromiseCore + kCoreContinuation);
@@ -325,10 +359,17 @@ template<class IO> class Controller {
                     capacity <= 0 || !io.read(object + kRunnerTail, tail) || tail <= 0) continue;
                 uint64_t count = static_cast<uint64_t>(tail);
                 if (count > static_cast<uint64_t>(capacity)) count = static_cast<uint64_t>(capacity);
-                if (count > kMaxItems) count = kMaxItems;
-                for (uint64_t i = 0; i < count && budget; ++i) {
+                // Окно просмотра — последние kMaxItems записей, с конца к началу:
+                // AddAction дописывает ожидание в хвост, а уплотнение в Run
+                // переносит последние живые элементы на место завершённых,
+                // поэтому свежее ожидание переноса почти всегда ближе к концу.
+                // Обрезается старьё, а не хвост, в каком бы длинном списке он ни
+                // оказался — иначе ожидание за пределами окна не нашлось бы.
+                const uint64_t begin = count > kMaxItems ? count - kMaxItems : 0;
+                for (uint64_t i = count; i > begin && budget; --i) {
                     --budget;
-                    const uint64_t item = io.ptr(items + go_active::IL2CPP_ARRAY_FIRST_ELEMENT + i * 8);
+                    const uint64_t item = io.ptr(items + go_active::IL2CPP_ARRAY_FIRST_ELEMENT +
+                                                 (i - 1) * 8);
                     if (item < 0x10000 || !is_promise(item, name_checks)) continue;
                     Kind kind = Kind::None;
                     uint64_t delegate = 0, runner = 0;
@@ -409,6 +450,7 @@ public:
     // Forget every address. Nothing is written: there is no residue to undo.
     void reset() {
         layout_ = nullptr;
+        flows_ok_ = 0;
         runners_ = 0; runners_len_ = 0;
         loop_runner_klass_ = promise_klass_ = known_klass_ = 0;
         memo_ = {};
@@ -437,18 +479,22 @@ public:
         diag_.kind = Kind::None;
         diag_.reason = Reason::None;
         diag_.detail = 0;
+        diag_.flows = flows_ok_;
         diag_.timing = -1;
         if (!base) return;
         if (!layout_) {
             Reason reason = Reason::None;
             uint64_t detail = 0;
-            layout_ = layout_for(io, base, reason, detail);
+            uint32_t flows = 0;
+            layout_ = layout_for(io, base, reason, detail, flows);
             if (!layout_) {
                 diag_.status = Status::Failed;
                 diag_.reason = reason;
                 diag_.detail = detail;
                 return;
             }
+            flows_ok_ = flows;
+            diag_.flows = flows;
         }
         {
             Reason reason = Reason::None;

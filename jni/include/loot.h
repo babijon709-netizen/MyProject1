@@ -38,6 +38,11 @@ namespace loot {
 // лута закрыто или она не в ожидании); Active — найдено своё ожидание и снято;
 // Failed — образ игры не поддержан (чужая сборка, следы старого патча
 // инструкций) или память не читается/не пишется.
+//
+// Failed не обязательно означает «не работает ничего»: точки кода проверяются по
+// потокам, и испорченный поток (чужой патч, изменившийся код) отключается сам —
+// образ отклоняется целиком, только когда не уцелел ни один. Какие потоки уцелели,
+// видно в Diagnostics::flows.
 enum class Status { Off, Waiting, Active, Failed };
 
 // Какая именно штатная корутина ускорена: окно лута, сбор с земли или «быстрая
@@ -52,6 +57,7 @@ enum class Reason {
     None = 0,
     Image,      // build-id не совпал с таблицей (или не прочитался)
     Patched,    // точка прежнего патча изменена: в процессе старый инструмент
+    Code,       // код образа не читается (точки таблицы вне доступной памяти)
     RunShape,   // пролог Run или цель его ветки не совпали
     Helper,     // PlayerLoopHelper не разрешается через слот TypeInfo
     Runners,    // runners[] не читается, пуст или длиннее ожидаемого
@@ -64,6 +70,10 @@ struct Diagnostics {
     Status status = Status::Off;
     Kind kind = Kind::None;
     Reason reason = Reason::None; // смысл detail — см. reason
+    // Битовая маска потоков переноса, прошедших проверку (bit i — Kind i).
+    // Поток с чужим патчем или изменившимся кодом отключается сам, не утягивая
+    // за собой остальные; 0 при отказе образа, все биты — в штатном случае.
+    uint32_t flows = 0;
     // Число к причине: первые 8 байт прочитанного build-id (Image), RVA точки
     // (Patched/RunShape), указатель класса (Helper), прочитанная длина
     // (Runners), адрес (Read/Write), биты duration|elapsed (Timer).
@@ -78,6 +88,7 @@ inline const char* reason_name(Reason r) {
     switch (r) {
         case Reason::Image:    return "image";
         case Reason::Patched:  return "patched";
+        case Reason::Code:     return "code";
         case Reason::RunShape: return "run-shape";
         case Reason::Helper:   return "helper";
         case Reason::Runners:  return "runners";

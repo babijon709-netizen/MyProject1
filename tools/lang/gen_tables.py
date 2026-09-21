@@ -106,6 +106,12 @@ UI_EN = {
     'Мгновенный подбор': 'Instant pickup',
     'Подбор: не применено': 'Pickup: not applied',
     'Подбор: работает': 'Pickup: active',
+    'Потоки переноса': 'Transfer flows',
+    'окно лута': 'loot window',
+    'зона подбора': 'pickup zone',
+    'быстрая загрузка': 'fast load',
+    'поток не определён': 'the flow is not identified',
+    'код образа не читается': 'the image code is unreadable',
     'Ожидание открытого контейнера': 'Waiting for an open container',
     'Данные': 'Data',
     # причины отказа подбора (журнал в сборке выключен, поэтому они в меню)

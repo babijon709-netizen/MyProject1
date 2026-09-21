@@ -403,45 +403,73 @@ int main() {
             assert(g.io.writes == 0);
             assert(g.collect.moved == 0);
         }
-        for (size_t flow = 0; flow < kFlowCount; ++flow) {
-            {   // the retired instruction patch is still in the process
+        // Три способа испортить поток: чужой патч точки задержки, изменённый
+        // пролог Run, ветка Run не в тот MoveNext. Каждый проверяется в трёх
+        // вариантах: испорчен один поток (образ принимается, остальные потоки
+        // работают, ожидание испорченного не трогается) и испорчены все три
+        // (образ отклоняется с причиной и RVA первой точки).
+        struct Break { const char* what; uint32_t off; uint32_t word; Reason reason; };
+        const Break breaks[] = {
+            {"the retired instruction patch is still in the process",
+             0, 0x14000010u, Reason::Patched},
+            {"Run() no longer has the shape the identity chain relies on",
+             4, 0xd65f03c0u, Reason::RunShape},
+            {"Run() branches somewhere else than the state machine we know",
+             16, kBranchOp | 0x100u, Reason::RunShape},
+        };
+        const uint32_t all_flows = (1u << kFlowCount) - 1u;
+        for (const auto& brk : breaks) {
+            const auto site = [&brk](const Game& g, size_t f) {
+                return brk.off ? g.layout.flow[f].run + brk.off : g.layout.flow[f].delay_site;
+            };
+            for (size_t flow = 0; flow < kFlowCount; ++flow) {
+                const size_t other = (flow + 1) % kFlowCount;
+                {   // один поток испорчен: соседний продолжает ускоряться
+                    Game g;
+                    g.map_library();
+                    g.build_unitask();
+                    g.io.set<uint32_t>(g.base + site(g, flow), brk.word);
+                    g.start_collect(4, static_cast<Kind>(other));
+                    Controller<FakeMemory> c(g.io);
+                    for (int i = 0; i < 20 && !g.collect.finished; ++i) frame(g, c, 1, true);
+                    assert(c.diagnostics().flows == (all_flows & ~(1u << flow)));
+                    assert(c.diagnostics().status != Status::Failed);
+                    assert(c.diagnostics().kind == static_cast<Kind>(other));
+                    assert(g.collect.moved == 4);
+                }
+                {   // ожидание испорченного потока не принимается и не пишется
+                    Game g;
+                    g.map_library();
+                    g.build_unitask();
+                    g.io.set<uint32_t>(g.base + site(g, flow), brk.word);
+                    g.start_collect(4, static_cast<Kind>(flow));
+                    Controller<FakeMemory> c(g.io);
+                    for (int i = 0; i < 20; ++i) frame(g, c, 1, true);
+                    assert(c.diagnostics().flows == (all_flows & ~(1u << flow)));
+                    assert(c.diagnostics().status != Status::Failed);
+                    assert(g.io.writes == 0);
+                    assert(g.collect.moved == 0);
+                }
+            }
+            {   // испорчены все три: образ отклоняется целиком
                 Game g;
                 g.map_library();
                 g.build_unitask();
-                g.io.set<uint32_t>(g.base + g.layout.flow[flow].delay_site, 0x14000010u);  // b
+                for (size_t f = 0; f < kFlowCount; ++f)
+                    g.io.set<uint32_t>(g.base + site(g, f), brk.word);
                 g.start_collect(4);
                 Controller<FakeMemory> c(g.io);
                 for (int i = 0; i < 5; ++i) frame(g, c, 1, true);
                 assert(c.diagnostics().status == Status::Failed);
-                assert(c.diagnostics().reason == Reason::Patched);
-                assert(c.diagnostics().detail == g.layout.flow[flow].delay_site);
+                assert(c.diagnostics().reason == brk.reason);
+                assert(c.diagnostics().flows == 0);
+                // Число к причине — точка, по которой отказ опознаётся на
+                // устройстве: для чужого патча это сама точка задержки, для
+                // изменившегося кода — RVA Run этого потока.
+                assert(c.diagnostics().detail ==
+                       (brk.off ? g.layout.flow[0].run : g.layout.flow[0].delay_site));
                 assert(g.io.writes == 0);
                 assert(g.collect.moved == 0);
-            }
-            {   // Run() no longer has the shape the identity chain relies on
-                Game g;
-                g.map_library();
-                g.build_unitask();
-                g.io.set<uint32_t>(g.base + g.layout.flow[flow].run + 4, 0xd65f03c0u);  // ret
-                g.start_collect(4);
-                Controller<FakeMemory> c(g.io);
-                for (int i = 0; i < 5; ++i) frame(g, c, 1, true);
-                assert(c.diagnostics().status == Status::Failed);
-                assert(c.diagnostics().reason == Reason::RunShape);
-                assert(c.diagnostics().detail == g.layout.flow[flow].run);
-                assert(g.io.writes == 0);
-            }
-            {   // Run() branches somewhere else than the state machine we know
-                Game g;
-                g.map_library();
-                g.build_unitask();
-                g.io.set<uint32_t>(g.base + g.layout.flow[flow].run + 16, kBranchOp | 0x100u);
-                g.start_collect(4);
-                Controller<FakeMemory> c(g.io);
-                for (int i = 0; i < 5; ++i) frame(g, c, 1, true);
-                assert(c.diagnostics().status == Status::Failed);
-                assert(c.diagnostics().reason == Reason::RunShape);
-                assert(g.io.writes == 0);
             }
         }
         {   // the metadata slot no longer holds PlayerLoopHelper
@@ -646,25 +674,33 @@ int main() {
 
     // ---- 13. A busy item list: foreign classes cannot park the search ------
     {
-        auto build = [](Game& g, int foreign) {
+        // `ours_last` повторяет игру: AddAction дописывает ожидание в хвост,
+        // поэтому свежий перенос оказывается последним элементом списка. Обратный
+        // случай нужен, чтобы проверка бюджета имён и мемо осталась покрытой.
+        auto build = [](Game& g, int foreign, bool ours_last) {
             g.map_library();
             g.build_unitask();
-            for (int i = 0; i < foreign; ++i) {
-                const uint64_t object = g.io.alloc(0x80);
-                const std::string name = "ForeignItem" + std::to_string(i);
-                g.io.set<uint64_t>(object, g.io.klass(name.c_str(), "Some.Namespace"));
-                g.loops[kUpdateTiming].live.push_back(object);
-            }
-            g.start_collect(3);          // our delay is the LAST item
+            const auto push_foreign = [&]() {
+                for (int i = 0; i < foreign; ++i) {
+                    const uint64_t object = g.io.alloc(0x80);
+                    const std::string name = "ForeignItem" + std::to_string(i);
+                    g.io.set<uint64_t>(object, g.io.klass(name.c_str(), "Some.Namespace"));
+                    g.loops[kUpdateTiming].live.push_back(object);
+                }
+            };
+            if (ours_last) push_foreign();
+            g.start_collect(3);
+            if (!ours_last) { push_foreign(); g.publish(kUpdateTiming); }
         };
-        {   // everything fits the memo: after one find, re-scans are free
+        {   // свежее ожидание в хвосте: находится первым же проходом
             Game g;
-            build(g, 40);
+            build(g, 40, true);
             Controller<FakeMemory> c(g.io);
             int frames = 0;
             while (!g.collect.finished && frames < 60) { frame(g, c, 1, true); ++frames; }
             assert(g.collect.moved == 3);
             assert(frames <= 6);
+            assert(c.diagnostics().scans == 1);   // просмотр с конца нашёл его сразу
             g.start_collect(3);
             const unsigned checks = g.io.name_checks;
             frames = 0;
@@ -672,14 +708,24 @@ int main() {
             assert(g.collect.moved == 3);
             assert(g.io.name_checks == checks);   // no class is named twice
         }
-        {   // more classes than the memo holds: the search still converges
+        {   // 100 чужих классов впереди нашего: тоже один проход
             Game g;
-            build(g, 100);
+            build(g, 100, true);
             Controller<FakeMemory> c(g.io);
             int frames = 0;
             while (!g.collect.finished && frames < 60) { frame(g, c, 1, true); ++frames; }
             assert(g.collect.moved == 3);
             assert(frames <= 12);
+            assert(c.diagnostics().scans == 1);
+        }
+        {   // наше ожидание в начале, чужих классов больше, чем мемо и бюджет
+            Game g;
+            build(g, 100, false);
+            Controller<FakeMemory> c(g.io);
+            int frames = 0;
+            while (!g.collect.finished && frames < 60) { frame(g, c, 1, true); ++frames; }
+            assert(g.collect.moved == 3);
+            assert(frames <= 20);
             assert(c.diagnostics().scans >= 2);   // the name budget was spent
             const unsigned before = g.io.name_checks;
             c.tick(1, g.base, true);
@@ -687,7 +733,24 @@ int main() {
             const unsigned per_check = sizeof(kPromiseNs) / sizeof(kPromiseNs[0]);
             assert(g.io.name_checks - before <= kNameChecks * per_check);   // bounded
         }
-        std::printf("busy list: 40 and 100 foreign classes, our delay found last\n");
+        {   // длинный список: хвост за пределами kMaxItems всё равно виден
+            Game g;
+            g.map_library();
+            g.build_unitask();
+            for (int i = 0; i < 1200; ++i) {
+                const uint64_t object = g.io.alloc(0x80);
+                g.io.set<uint64_t>(object, g.io.klass("Crowd", "Some.Namespace"));
+                g.loops[kUpdateTiming].live.push_back(object);
+            }
+            g.start_collect(3);          // element 1200 of 1201
+            Controller<FakeMemory> c(g.io);
+            int frames = 0;
+            while (!g.collect.finished && frames < 60) { frame(g, c, 1, true); ++frames; }
+            assert(g.collect.moved == 3);
+            assert(c.diagnostics().scans == 1);
+            std::printf("long list: 1201 items, the fresh await at the very end\n");
+        }
+        std::printf("busy list: 40 and 100 foreign classes, either end of the list\n");
     }
 
     // ---- 14. The shipped tables describe themselves consistently -----------

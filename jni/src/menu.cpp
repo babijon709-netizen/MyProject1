@@ -85,11 +85,23 @@ static constexpr int kAccentCustom = 8;
 static constexpr int kAccentCount = 9;   // 8 пресетов + свой
 
 
+// Какой штатный поток переноса ускорен: по нему на устройстве видно, что
+// контроллер нашёл именно «Забрать всё», а не чужой await на те же 0.35 с.
+static const char* LootKindText(loot::Kind kind) {
+    switch (kind) {
+        case loot::Kind::Container: return XS("окно лута");
+        case loot::Kind::Pickup:    return XS("зона подбора");
+        case loot::Kind::FastLoad:  return XS("быстрая загрузка");
+        default:                    return XS("поток не определён");
+    }
+}
+
 // Причина отказа мгновенного подбора — строкой в меню (журнал выключен).
 static const char* LootReasonText(loot::Reason reason) {
     switch (reason) {
         case loot::Reason::Image:    return XS("образ игры не совпал с таблицей");
         case loot::Reason::Patched:  return XS("в процессе остался старый патч — перезапустите игру");
+        case loot::Reason::Code:     return XS("код образа не читается");
         case loot::Reason::RunShape: return XS("код образа изменился");
         case loot::Reason::Helper:   return XS("PlayerLoopHelper не найден");
         case loot::Reason::Runners:  return XS("список игровых циклов не читается");
@@ -960,9 +972,14 @@ float TabContent(int tab, float dt, float cW) {
             if (lootStatus.reason == loot::Reason::Write)
                 ImGui::TextDisabled("%s", esp_loot_refusal());   // строка maps, без перевода
         } else if (lootStatus.status == loot::Status::Active)
-            ImGui::TextDisabled("%s", XS("Подбор: работает"));
+            ImGui::TextDisabled("%s (%s)", XS("Подбор: работает"), LootKindText(lootStatus.kind));
         else if (vm.fast_loot)
             ImGui::TextDisabled("%s", XS("Ожидание открытого контейнера"));
+        // Поток с чужим патчем или изменившимся кодом отключается сам: показываем,
+        // что ускорена только часть штатных переносов, а не молчим об этом.
+        if (lootStatus.flows && lootStatus.flows != 7u)
+            ImGui::TextDisabled("%s: %u/3", XS("Потоки переноса"),
+                                (unsigned)__builtin_popcount(lootStatus.flows));
 
         SHdr(XS("Лимит FPS"));
         {
