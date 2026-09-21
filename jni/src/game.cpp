@@ -3781,6 +3781,69 @@ static bool camera_pose_checked(Vec3& position, Vec4& rotation, const Vec3& ref,
     return true;
 }
 
+// Кадровый барьер матрицы вида. Все визуалы (боксы, маркеры, скелеты, линии)
+// рисуются через единый vp = projection * view, поэтому ОДИН кадр с недописанной
+// игрой матрицей разворачивает всю сцену в случайную сторону на миллисекунды —
+// это и было «визуалы телепортируются в рандомное место экрана». Раньше скачок
+// отсекался только в ветке живой позы камеры; кеш камеры и запасной путь шли в
+// кадр без проверок вовсе.
+//
+// Физика такова, что лечится дёшево:
+//   1. worldToCamera у Unity — чистый поворот + перенос, без масштаба: строки
+//      поворота обязаны быть ортонормальными. Смесь двух кадров, прочитанная
+//      на половине записи, таким свойством не обладает.
+//   2. Камера не прыгает на 30+ м и не разворачивается на 60+ градусов за кадр.
+//      Настоящий телепорт/респаун держится в памяти — серия из 4 одинаковых
+//      скачков подтвердит его и пропустит, а одиночный мусор отбрасывается, и
+//      кадр дорисовывается прошлой принятой матрицей.
+struct FrameViewGuard {
+    Mat4 view{};
+    Vec3 pos{};
+    Vec3 fwd{};
+    bool ok = false;
+    int  pos_streak = 0;
+    int  rot_streak = 0;
+};
+static FrameViewGuard s_fv_guard;
+
+// Ортонормальность поворота: camera_basis_from_view нормирует оси, дальше они
+// обязаны быть попарно ортогональными. 0.45 (~63°) — запас против почти
+// прямых углов игровой камеры; серьёзной половинчатой записи сюда не пройти.
+static bool view_basis_sane(const Mat4& view) {
+    if (!matrix_is_finite(view)) return false;
+    Vec3 right{}, up{}, forward{};
+    if (!camera_basis_from_view(view, right, up, forward)) return false;
+    const float d_ru = right.x * up.x + right.y * up.y + right.z * up.z;
+    const float d_rf = right.x * forward.x + right.y * forward.y + right.z * forward.z;
+    const float d_uf = up.x * forward.x + up.y * forward.y + up.z * forward.z;
+    return fabsf(d_ru) < 0.45F && fabsf(d_rf) < 0.45F && fabsf(d_uf) < 0.45F;
+}
+
+// Единый фильтр кадровых скачков для финального view кадра, из какого бы
+// источника он ни пришёл. false — образец отклонён; вызывающий дорисовывает
+// кадр через s_fv_guard.view.
+static bool frame_view_accepted(const Mat4& view) {
+    Vec3 pos{};
+    Vec3 right{}, up{}, fwd{};
+    if (!camera_position_from_view(view, pos)) return false;
+    if (!camera_basis_from_view(view, right, up, fwd)) return false;
+    if (!s_fv_guard.ok) {
+        s_fv_guard.view = view; s_fv_guard.pos = pos; s_fv_guard.fwd = fwd;
+        s_fv_guard.ok = true;
+        return true;
+    }
+    const float dx = pos.x - s_fv_guard.pos.x, dy = pos.y - s_fv_guard.pos.y, dz = pos.z - s_fv_guard.pos.z;
+    const bool pos_jump = dx * dx + dy * dy + dz * dz > 30.0F * 30.0F;
+    const float dot = fwd.x * s_fv_guard.fwd.x + fwd.y * s_fv_guard.fwd.y + fwd.z * s_fv_guard.fwd.z;
+    const bool rot_jump = dot < 0.5F;  // ~60° за кадр
+    if (pos_jump && s_fv_guard.pos_streak < 3) { ++s_fv_guard.pos_streak; return false; }
+    if (pos_jump) s_fv_guard.pos_streak = 0;
+    if (rot_jump && s_fv_guard.rot_streak < 3) { ++s_fv_guard.rot_streak; return false; }
+    if (rot_jump) s_fv_guard.rot_streak = 0;
+    s_fv_guard.view = view; s_fv_guard.pos = pos; s_fv_guard.fwd = fwd;
+    return true;
+}
+
 static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view) {
     if (!native_cam) return false;
 
@@ -3846,18 +3909,28 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         } else {
             return false;
         }
-        // Поза берётся из той же матрицы: иначе в g_cam_pos остаётся поза
-        // прошлого мира (её писал живой путь), и по ней строятся и боксы, и
-        // углы цели, пока картинка рисуется по другой камере.
-        Vec3 r{}, u{}, f{};
-        if (have_ref && camera_basis_from_view(cached_view, r, u, f)) {
-            g_cam_pos = ref_pos; g_cam_right = r; g_cam_up = u; g_cam_forward = f;
-            g_cam_pose_valid = true;
-            g_cam_pose_derived = true;
-        }
+        g_cam_pose_derived = true;
     } else {
         g_cam_pose_derived = false;
         s_last_view = view;
+    }
+    // Кадровый барьер (см. FrameViewGuard): структурная проверка и скачки.
+    // Отклонённый образец заменяется прошлой принятой матрицей — один кадр
+    // прежней камеры незаметен, а мусорный был бы виден сразу на всех визуалах.
+    if (!view_basis_sane(view) || !frame_view_accepted(view)) {
+        if (!s_fv_guard.ok) return false;
+        view = s_fv_guard.view;
+        g_cam_pose_derived = true;
+    }
+    // Поза и базис — из финальной матрицы вида, единственной, по которой
+    // рисуется кадр: иначе в g_cam_pos оставалась бы поза прошлого мира (её
+    // писал живой путь), и по ней строились и боксы, и углы цели.
+    {
+        Vec3 r{}, u{}, f{}, p{};
+        if (camera_basis_from_view(view, r, u, f) && camera_position_from_view(view, p)) {
+            g_cam_pos = p; g_cam_right = r; g_cam_up = u; g_cam_forward = f;
+            g_cam_pose_valid = true;
+        }
     }
 
     // Projection params (FOV/aspect/clip) are stored as plain floats and stay hot.
@@ -3869,6 +3942,22 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         aspect = (screen_aspect > 0.1F && screen_aspect < 10.0F) ? screen_aspect : (9.0F / 16.0F);
     if (!(z_near > 0.001F && z_near < 100.0F)) z_near = 0.1F;
     if (!(z_far > z_near && z_far < 100000.0F)) z_far = 1000.0F;
+    // FOV входит в ту же формулу кадра. Реальная смена (прицеливание, настройка)
+    // идёт серией; одиночный скачок — кривой отсчёт, кадр дорисовываем прошлым
+    // FOV (иначе вся сцена на миллисекунду меняет масштаб).
+    static float s_fv_fov = 0.0F;
+    static int   s_fv_fov_streak = 0;
+    if (std::isfinite(fov) && fov > 1.0F && fov < 179.0F) {
+        if (s_fv_fov > 0.0F && fabsf(fov - s_fv_fov) > 25.0F && s_fv_fov_streak < 3) {
+            ++s_fv_fov_streak;
+            fov = s_fv_fov;
+        } else {
+            s_fv_fov_streak = 0;
+            s_fv_fov = fov;
+        }
+    } else if (s_fv_fov > 0.0F) {
+        fov = s_fv_fov;
+    }
     if (std::isfinite(fov) && fov > 1.0F && fov < 179.0F) g_cam_fov_deg = fov;
     projection = mat_perspective(fov, aspect, z_near, z_far);
     if (!matrix_is_finite(projection)) {
@@ -6747,6 +6836,9 @@ static void reset_world_caches() {
     g_mount_latch.clear();
     g_skeletons.clear();
     reset_marker_caches();
+    // Камерный страж нового мира ничему не следит: прошлая планета тётушка
+    // задержала бы новую камеру на 3 кадра подтверждения «телепорта».
+    s_fv_guard = {};
 }
 
 void esp_reset() {
