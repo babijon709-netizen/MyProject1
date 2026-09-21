@@ -14,13 +14,11 @@ rows = re.findall(r'\{\{(0x[0-9a-f, x]+)\},\s*(0x[0-9a-f]+),\s*\{(0x[0-9a-f, x]+
 if len(sys.argv) != 3 or len(rows) != 2:
     raise SystemExit(__doc__)
 patch = int(re.search(r'kFastInstruction = (0x[0-9a-f]+)', text)[1], 16)
-assert patch & ~0x3ff == 0x1e270000, 'not FMOV S, W'
-assert (patch >> 5) & 31 == 31, 'source must be WZR'
-assert patch & 31 == 0, 'destination must be S0'
-# WZR is all-zero bits, so the float argument and rounded timer are exactly zero.
-fast = struct.unpack('<f', struct.pack('<I', 0))[0]
-fast_ms = round(fast * 1000)
-assert fast_ms == 0
+assert patch & 0xfc000000 == 0x14000000, 'must be B, not a zero timer or BL'
+resume_offset = int(re.search(r'kResumeOffset = (0x[0-9a-f]+)', text)[1], 16)
+resume_text = re.search(r'kResumeGuard = \{([^}]+)\}', text)[1]
+resume_guard = tuple(int(v.strip(), 16) for v in resume_text.split(','))
+assert (patch & 0x3ffffff) * 4 == resume_offset
 for filename, (id_text, site_text, guard_text) in zip(sys.argv[1:], rows):
     expected_id = bytes(int(v.strip(), 16) for v in id_text.split(','))
     site = int(site_text, 16)
@@ -55,15 +53,33 @@ for filename, (id_text, site_text, guard_text) in zip(sys.argv[1:], rows):
     original = struct.unpack('<f', read(constant, 4))[0]
     assert abs(original - 0.35) < 1e-6, 'original is not the 0.35s collect wait'
     assert guard[7] & 0xfc000000 == 0x94000000, 'delay call changed'
-    delta = guard[7] & 0x3ffffff
-    if delta & (1 << 25):
-        delta -= 1 << 26
-    wait = site + 16 + delta*4
-    # Verify the conversion used above: scale by 1000, add 0.5 / floor for
-    # nonnegative non-halfway inputs, then convert the rounded value to int32.
-    for offset, opcode in ((0x14, 0x1e204008), (0x48, 0x52a88f49),
-                           (0x50, 0x1e270129), (0x74, 0x1e290909),
-                           (0xc4, 0x1e6c1001), (0xf8, 0x1e612900),
-                           (0xfc, 0x1e654008), (0x114, 0x1e780109)):
-        assert struct.unpack('<I', read(wait+offset, 4))[0] == opcode, 'WaitForSeconds conversion changed'
-    print(f'{filename}: build ID, RX guard, site {site:#x}, {original:.3f}s -> {fast_ms}ms timer: OK')
+    resume = site + resume_offset
+    tail = struct.unpack('<4I', read(resume, 16))
+    assert tail == resume_guard, 'next-slot tail changed'
+    assert tail[:3] == (0xb9403a68, 0x51000508, 0xb9003a68), 'must decrement existing sourceIndex'
+    tbz = tail[3]
+    assert tbz & 0xfff8001f == 0x36f80008, 'must loop while W8 bit 31 is zero'
+    delta = (tbz >> 5) & 0x3fff
+    if delta & (1 << 13):
+        delta -= 1 << 14
+    loop = resume + 12 + delta*4
+    assert loop == site - 0x1c0, 'branch no longer returns to the per-slot validation path'
+    # Validate existing container/state/slot checks at that destination, and
+    # the transfer call BEFORE our jump. No jump over a transfer or its checks.
+    for offset, opcode in ((0, 0xf94002c0), (4, 0xf9400e74),
+                           (0x20, 0x36001920), (0x2c, 0xf9404108),
+                           (0x48, 0x370017e0), (0x90, 0x5400152d)):
+        assert struct.unpack('<I', read(loop+offset, 4))[0] == opcode, 'source checks changed'
+    assert struct.unpack('<I', read(site-0x24, 4))[0] & 0xfc000000 == 0x94000000, 'transfer call missing'
+    assert site < site+16 < resume, 'await call must be skipped by the forward branch'
+    # Interpret the guarded decrement/test tail for empty and multi-slot sources.
+    # This tests the native control-flow contract, not server acceptance of RPCs.
+    for count in (0, 1, 12, 30, 60, 96):
+        index = count-1
+        visited = []
+        while index >= 0:
+            visited.append(index)
+            index -= 1
+            assert len(visited) <= count, 'unbounded collection loop'
+        assert visited == list(range(count-1, -1, -1))
+    print(f'{filename}: exact image, {site:#x} -> {resume:#x}, guarded next-slot loop {loop:#x}, no await: OK')

@@ -32,6 +32,7 @@ int main() {
             std::memcpy(image,"\x7f" "ELF",4);
             std::memcpy(image+0x318,layout.build_id.data(),20);
             std::memcpy(image+layout.site-12,layout.guard.data(),32);
+            std::memcpy(image+layout.site+fast_loot::kResumeOffset,fast_loot::kResumeGuard.data(),16);
             if (mprotect(image,page,PROT_READ)!=0 ||
                 mprotect(image+code_page,page,PROT_READ|PROT_EXEC)!=0) _exit(4);
             uint64_t base=reinterpret_cast<uint64_t>(image);

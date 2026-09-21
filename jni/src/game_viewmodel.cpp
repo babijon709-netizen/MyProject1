@@ -86,7 +86,7 @@ void tick_fast_loot(uint64_t session, bool enabled) {
         loot_last_log = loot_controller.status;
         if (enabled && !fast_loot::instruction_supported())
             LogLine("fast-loot: instruction requires ARM64");
-        LogLine("fast-loot: status=%d (0 off,1 waiting,2 active,4 unsupported CPU/image/code or memory error); collect delay=0s (no timer delay; game scheduling remains)",
+        LogLine("fast-loot: status=%d (0 off,1 waiting,2 active,4 unsupported CPU/image/code or memory error); collect mode=batch (inter-item await bypass; server validates transfers)",
                 (int)loot_last_log);
     }
 }

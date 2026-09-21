@@ -1642,6 +1642,7 @@ void RenderMenu() {
     Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
     Tick(g_state.a_custom_fov, g_state.viewmodel.fov_enabled, dt);
     Tick(g_state.a_custom_hands, g_state.viewmodel.hands_enabled, dt);
+    Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
     Tick(g_state.a_freecam_on,  g_state.freecam_on,  dt);
     Tick(g_state.a_freecam_btn_show, g_state.freecam_btn_show, dt);

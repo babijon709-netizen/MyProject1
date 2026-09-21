@@ -3,9 +3,10 @@
 #include <array>
 
 namespace fast_loot {
-// Only the CollectAllItems inter-item wait is changed. Inventory commands,
-// capacity checks, cancellation and the separate FastLoadAll (deposit) path
-// are untouched. Exact images and consumer evidence: FAST_LOOT.md.
+// CollectAllItems sends normal transfer requests in one bounded slot pass.
+// Skip the inter-item await, NOT inventory/permission checks or the separate
+// FastLoadAll (deposit) path. Cancellation at the skipped await is no longer
+// polled between items; see FAST_LOOT.md for the synchronous-batch semantics.
 struct Layout {
     std::array<uint8_t, 20> build_id;
     uint64_t site;
@@ -17,11 +18,19 @@ inline constexpr Layout kLayouts[] = {
     {{0xe1,0x07,0x95,0x34,0x9b,0xd7,0xc2,0xcd,0xc7,0xd8,0x52,0x75,0x97,0xc6,0x43,0x95,0xa4,0xef,0xed,0x79},
      0x5af4d04, {0xf0fe3208,0x52800020,0x52800101,0xbd400100,0xaa1403e2,0x2a1f03e3,0xaa1f03e4,0x95a05a57}},
 };
-// One baseline AArch64 instruction: FMOV S0,WZR supplies exact float +0.0.
-// WaitForSeconds receives zero; its normal PlayerLoop/cancellation semantics
-// remain in place. No FP16 requirement, shared-pool writes or multi-word patch.
-inline constexpr uint32_t kFastInstruction = 0x1e2703e0;
-inline constexpr unsigned kDelayMilliseconds = 0;
+// A single forward B at the former duration load skips WaitForSeconds AND
+// the await/suspend block, landing on the existing index decrement. Setting
+// a timer to zero still yielded to PlayerLoop and did not batch the requests.
+inline constexpr uint32_t kFastInstruction = 0x1400005d;
+inline constexpr uint64_t kResumeOffset = 0x174;
+// LDR W8,[X19,#0x38]; SUB W8,W8,#1; STR W8,[X19,#0x38]; TBZ W8,#31,loop.
+// Both builds have the same relative tail. Validate the branch destination too.
+inline constexpr std::array<uint32_t,4> kResumeGuard = {
+    0xb9403a68, 0x51000508, 0xb9003a68, 0x36ffe608
+};
+static_assert((kFastInstruction & 0xfc000000u) == 0x14000000u &&
+              (kFastInstruction & 0x03ffffffu) * 4 == kResumeOffset,
+              "fast loot must branch to the guarded next-slot tail");
 inline bool instruction_supported() {
 #if defined(__aarch64__)
     return true;
@@ -68,6 +77,8 @@ public:
         for (size_t i = 0; i < code.size(); ++i) {
             if (i != 3 && code[i] != layout->guard[i]) return;
         }
+        std::array<uint32_t,4> resume{};
+        if (!io.read(base + layout->site + kResumeOffset, resume) || resume != kResumeGuard) return;
         const uint32_t original = layout->guard[3];
         if (code[3] != original && (code[3] != kFastInstruction || !owned_)) {
             // Another writer owns this instruction. Never overwrite its code.

@@ -42,6 +42,7 @@ struct Fixture {
     uint64_t site, guard;
     explicit Fixture(const fast_loot::Layout& l) : layout(l), site(base+l.site), guard(site-12) {
         io.set(base+0x318,l.build_id); io.set(guard,l.guard);
+        io.set(site+fast_loot::kResumeOffset,fast_loot::kResumeGuard);
     }
     void tick(bool on) { c.tick(1,base,on); }
     void check_original() {
@@ -49,11 +50,9 @@ struct Fixture {
     }
 };
 int main() {
-    // FMOV S0,WZR: baseline ARM64, source WZR yields exact positive zero.
     const uint32_t instruction=fast_loot::kFastInstruction;
-    assert((instruction & ~0x3ffu)==0x1e270000);
-    assert(((instruction>>5)&31u)==31u && (instruction&31u)==0u);
-    assert(fast_loot::kDelayMilliseconds==0);
+    assert((instruction & 0xfc000000u)==0x14000000u); // B, not BL or a zero timer
+    assert((instruction & 0x03ffffffu)*4==fast_loot::kResumeOffset);
     for (const auto& layout : fast_loot::kLayouts) {
         { Fixture f(layout); fast_loot::Controller<Memory> unsupported(f.io,false);
           unsupported.tick(1,Fixture::base,true);
@@ -82,7 +81,18 @@ int main() {
             Fixture f(layout); f.io.set(f.guard+i*4,uint32_t(0)); f.tick(true);
             assert(f.c.status==Status::Failed && f.io.writes.empty());
         }
-        for (uint32_t foreign : {fast_loot::kFastInstruction, 0x0f03fd40u, 0x1e281000u}) {
+        for(size_t i=0;i<4;++i) {
+            Fixture f(layout); f.io.set(f.site+fast_loot::kResumeOffset+i*4,uint32_t(0)); f.tick(true);
+            assert(f.c.status==Status::Failed && f.io.writes.empty());
+        }
+        { Fixture f(layout); f.io.fail_read=f.site+fast_loot::kResumeOffset; f.tick(true);
+          assert(f.c.status==Status::Failed && f.io.writes.empty());
+        }
+        { Fixture f(layout); f.tick(true); f.io.set(f.site+fast_loot::kResumeOffset,uint32_t(0)); f.tick(false);
+          assert(f.c.status==Status::Failed && f.c.has_state() && f.io.writes.size()==1);
+          f.io.set(f.site+fast_loot::kResumeOffset,fast_loot::kResumeGuard); f.tick(false); f.check_original();
+        }
+        for (uint32_t foreign : {fast_loot::kFastInstruction, 0x1e2703e0u, 0x0f03fd40u, 0x1e281000u}) {
           Fixture f(layout); f.io.set(f.site,foreign); f.tick(true);
           assert(f.c.status==Status::Failed && f.io.writes.empty());
           f.tick(false); assert(f.io.word(f.site)==foreign); // never adopt or undo a previous process's patch
@@ -119,5 +129,5 @@ int main() {
           assert(!f.c.reset(true)); // shutdown reports a failed restore, never claims success
         }
     }
-    std::cout << "fast loot: release/beta, zero wait, architecture guard, exact guards, one-word patch, restore, failures, lifecycle: OK\n";
+    std::cout << "fast loot: release/beta, batch branch/destination, architecture guard, exact guards, one-word patch, restore, failures, lifecycle: OK\n";
 }
