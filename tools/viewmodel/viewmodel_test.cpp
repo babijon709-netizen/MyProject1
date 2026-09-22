@@ -409,7 +409,11 @@ static void loot_tests() {
         assert(f.io.get<float>(a + DELAYPROMISE_TIMESPAN) == 0.5f);
         assert(f.io.get<float>(b + DELAYPROMISE_TIMESPAN) == 0.f);
         assert(!viewmodel::finite(f.io.get<float>(nan + DELAYPROMISE_TIMESPAN)));
-        assert(f.io.get<float>(inf + DELAYPROMISE_TIMESPAN) == std::numeric_limits<float>::infinity());
+        // NaN/Inf сверяются по битам: сборка Андроида идёт с -ffast-math
+        // (-ffinite-math-only), при котором сравнение «x == infinity()»
+        // компилятор вправе свернуть в false (на g++ >= 13 так и происходит).
+        assert(f.io.get<uint32_t>(nan + DELAYPROMISE_TIMESPAN) == 0x7fc00000u);
+        assert(f.io.get<uint32_t>(inf + DELAYPROMISE_TIMESPAN) == 0x7f800000u);
         assert(f.io.get<float>(big + DELAYPROMISE_TIMESPAN) == 3.5f);
         assert(!f.c.draining());
     }
