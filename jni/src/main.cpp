@@ -124,8 +124,27 @@ int main(int argc, char* argv[]) {
             if (g_state.viewmodel.fast_loot && ld.status == loot::Status::Failed &&
                 (ld.status != s_loot_toast_prev.status || ld.reason != s_loot_toast_prev.reason)) {
                 char msg[192];
-                snprintf(msg, sizeof(msg), "%s (%s)",
-                         "Мгновенный подбор: не применено", loot::reason_name(ld.reason));
+                // Число к отказу (например, при timer — биты elapsed<<32|duration)
+                // нужно, чтобы определить отказ по отчёту без журнала.
+                snprintf(msg, sizeof(msg), "%s (%s) Данные: %llX",
+                         "Мгновенный подбор: не применено", loot::reason_name(ld.reason),
+                         (unsigned long long)ld.detail);
+                ShowToast(msg);
+            }
+            // Подписи открытых окон: одноразовый тост при первом удачном
+            // DI-скане после включения тумблера. Это единственный способ увидеть
+            // живые имена id окон (статические строки в пришедших дампах не
+            // читаются), гейты подбора/тапа отсюда не зависят.
+            if (g_state.viewmodel.fast_loot && ld.di_stage == 5 &&
+                s_loot_toast_prev.di_stage != 5) {
+                char msg[256]; size_t n = 0;
+                n += (size_t)snprintf(msg + n, sizeof(msg) - n, "Окна (di): %u",
+                                      (unsigned)(ld.di_root + ld.di_overlay));
+                const uint32_t lim = ld.di_names_n < 6 ? ld.di_names_n : 6;
+                for (uint32_t i = 0; i < lim && n < sizeof(msg) - 40; ++i)
+                    n += (size_t)snprintf(msg + n, sizeof(msg) - n, "%s%s(%d)",
+                                          i ? "," : " ", ld.di_names[i],
+                                          (int)ld.di_idindex[i]);
                 ShowToast(msg);
             }
             s_loot_toast_prev = ld;

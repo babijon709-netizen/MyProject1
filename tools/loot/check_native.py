@@ -27,7 +27,11 @@ trusted from the research notes:
   * PlayerLoopHelper resolves through the table's TypeInfo slot: the game's own
     PlayerLoopHelper.AddAction reaches that slot through one pointer, and then
     uses static_fields at +0xB8, runners at +0x30 and the array length at +0x18
-    — the same three offsets the controller reads.
+    — the same three offsets the controller reads;
+  * DelayIgnoreTimeScalePromise: MoveNext really accumulates into [obj+0x1C]
+    against [obj+0x18], and TryReturn zeroes both floats with one xzr store on
+    the way back to the pool — the evidence for treating a dead/zeroed timer
+    as "work is finished", not as a refusal.
 
 This validates addresses and arithmetic against the images. It says nothing
 about live Android ownership, server acceptance or anti-cheat safety.
@@ -54,6 +58,11 @@ ADD_ACTION = [0xc322340, 0xc3048fc]            # release, beta
 # Zenject.ProjectContext.get_Instance и .cctor класса id окон (ms / qn).
 DI_GET_INSTANCE = [0xcccf804, 0xccb1dc0]       # release, beta
 DI_IDS_CCTOR    = [0x73ce78c, 0x735bfd4]       # release, beta
+# DelayIgnoreTimeScalePromise: MoveNext и TryReturn (dump.cs обоих билдов).
+# MoveNext доказывает раскладку таймера (elapsed +0x1C, duration +0x18), а
+# TryReturn — зануление обеих float одной записью xzr при возврате в пул: отсюда
+# правило «таймер занулён/вне окна = конец работы, не отказ».
+PROMISE_OFFSETS = [(0xc32f8f4, 0xc32f9f4), (0xc311eb0, 0xc311fb0)]   # release, beta
 DELAY_SECONDS = 0.35                           # the stock per-item delay
 R_AARCH64_RELATIVE = 0x403
 
@@ -258,7 +267,51 @@ def check_di(image, layout, get_instance, ids_cctor):
     return lines
 
 
-def check(path, layout, prologue, add_action, get_instance, ids_cctor):
+def check_promise(image, move_next, try_return):
+    """DelayIgnoreTimeScalePromise: timer layout and the pool's zero-write."""
+    ldr_elapsed = fadd = ldr_duration = fcmp = str_elapsed = None
+    order = []
+    for ins in image.disasm(move_next, 120 * 4):
+        op = ins.op_str
+        float_load = ins.mnemonic == 'ldr' and op.startswith('s') and op.endswith(']')
+        float_store = ins.mnemonic == 'str' and op.startswith('s') and op.endswith(']')
+        if float_load and op.endswith('#0x1c]'):
+            ldr_elapsed = ins; order.append('L1C')
+        elif float_load and op.endswith('#0x18]'):
+            ldr_duration = ins; order.append('L18')
+        elif ins.mnemonic == 'fadd':
+            fadd = ins; order.append('ADD')
+        elif ins.mnemonic == 'fcmp':
+            fcmp = ins; order.append('CMP')
+        elif float_store and op.endswith('#0x1c]'):
+            str_elapsed = ins; order.append('S1C'); break
+        elif ins.mnemonic == 'ret':
+            break
+    # Порядок операций должен совпасть с dump-семантикой: накопление dt в
+    # elapsed через fadd читается до записи [+0x1c], compare идёт против [+0x18].
+    assert 'L1C' in order and 'ADD' in order and 'L18' in order and 'CMP' in order \
+        and 'S1C' in order, \
+        'MoveNext %#x: the elapsed/duration float pattern is gone (%s)' \
+        % (move_next, order)
+    assert order.index('ADD') < order.index('S1C') and \
+        order.index('L18') < order.index('S1C'), \
+        'MoveNext %#x: timer operations reordered' % move_next
+    assert ldr_elapsed and fadd and ldr_duration and fcmp and str_elapsed
+    zero_write = None
+    for ins in image.disasm(try_return, 60 * 4):
+        if ins.mnemonic in ('str', 'stur') and ins.op_str.startswith('xzr') and \
+                ins.op_str.endswith('#0x18]'):
+            zero_write = ins
+            break
+        if ins.mnemonic == 'ret':
+            break
+    assert zero_write, 'TryReturn %#x: the pool no longer zeroes the timer pair' % try_return
+    return ('promise %#x: MoveNext adds to [+0x1c], compares to [+0x18]; '
+            'TryReturn %#x zeroes the pair, so a dead timer means completed, not failed'
+            % (move_next, try_return))
+
+
+def check(path, layout, prologue, add_action, get_instance, ids_cctor, promise):
     image = Image(path)
     assert image.at(0x318, 20) == layout['build_id'], \
         '%s: build-id %s, the table expects %s' % (
@@ -268,6 +321,7 @@ def check(path, layout, prologue, add_action, get_instance, ids_cctor):
     assert len(calls) == 1, 'the three flows await through %s' % sorted(hex(c) for c in calls)
     lines.append(check_helper(image, layout['helper'], add_action))
     lines.extend(check_di(image, layout, get_instance, ids_cctor))
+    lines.append(check_promise(image, *promise))
     lines.append('all three flows await through UniTask.WaitForSeconds %#x' % calls.pop())
     print('%s: build-id %s OK' % (path, layout['build_id'].hex()))
     for line in lines:
@@ -278,7 +332,8 @@ if __name__ == '__main__':
     layouts, prologue = parse_table(HEADER.read_text())
     if len(sys.argv) != 1 + len(layouts):
         raise SystemExit(__doc__)
-    for path, layout, aa, gi, cc in zip(sys.argv[1:], layouts, ADD_ACTION,
-                                        DI_GET_INSTANCE, DI_IDS_CCTOR):
-        check(path, layout, prologue, aa, gi, cc)
+    for path, layout, aa, gi, cc, pr in zip(sys.argv[1:], layouts, ADD_ACTION,
+                                            DI_GET_INSTANCE, DI_IDS_CCTOR,
+                                            PROMISE_OFFSETS):
+        check(path, layout, prologue, aa, gi, cc, pr)
     print('loot: every address in jni/src/loot_memory.h matches the shipped images')

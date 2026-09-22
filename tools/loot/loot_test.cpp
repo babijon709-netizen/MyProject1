@@ -213,14 +213,28 @@ struct Game {
         }
         return d;
     }
+    // Управляемая строка в фальшивой памяти (System.String: length, UTF-16).
+    void di_string(uint64_t str, const char* text) {
+        io.set<uint64_t>(str, io.klass("String", "System"));
+        const int32_t len = static_cast<int32_t>(std::strlen(text));
+        io.set<int32_t>(str + kDiStrLen, len);
+        for (int32_t c = 0; c < len; ++c)
+            io.set<uint16_t>(str + kDiStrData + static_cast<uint64_t>(c) * 2,
+                             static_cast<uint16_t>(text[c]));
+    }
     // Собрать контейнер вокруг сервиса: ProjectContext(статики) -> инстанс ->
     // контейнер -> словарь биндингов с ключом BindingId.Type == интерфейс.
     // skip_iface / wrong_cached_klass / wrong_service_klass ломают цепь по сценарию.
     void build_zenject(int open_root, int open_overlay,
                        bool unknown_key = false, bool skip_iface = false,
                        bool wrong_cached_klass = false, bool wrong_service_klass = false) {
-        // id-класс окон: статики с 161 указателем на «строки» WindowId.
-        for (uint32_t k = 0; k < kDiIdsCount; ++k) di.ids.push_back(io.alloc(0x20));
+        // id-класс окон: статики с 161 указателем на WindowId (= System.String*),
+        // имена — живые управляемые строки: length @+0x10, UTF-16 @+0x14.
+        for (uint32_t k = 0; k < kDiIdsCount; ++k) di.ids.push_back(io.alloc(0x60));
+        // Понятные имена первым двум: первый корневым окном станет "loot".
+        di_string(di.ids[0], "loot");
+        di_string(di.ids[1], "inventory");
+        di_string(di.ids[32], "chat");
         const uint64_t ids_block = io.alloc(kDiIdsCount * 8 + 8);
         for (uint32_t k = 0; k < kDiIdsCount; ++k)
             io.set<uint64_t>(ids_block + k * 8, di.ids[k]);
@@ -733,7 +747,44 @@ int main() {
         std::printf("race: recycled promise handed back with elapsed = 0\n");
     }
 
-    // ---- 10. Memory errors are reported, never guessed around --------------
+    // ---- 10. TryReturn-zeroed object: end of work, not a failure ----------
+    {
+        Game g;
+        g.map_library();
+        g.build_unitask();
+        g.start_collect(4);
+        Controller<FakeMemory> c(g.io);
+        frame(g, c, 1, true);
+        assert(c.has_binding());
+        const uint64_t promise = g.collect.promise;
+        // Корутина дошла до конца: TryReturn зануляет duration/elapsed одной
+        // записью xzr (образ: str xzr,[obj,#0x18]), объект ещё висит в списке.
+        g.io.set<float>(promise + kPromiseDuration, 0.f);
+        g.io.set<float>(promise + kPromiseElapsed, 0.f);
+        c.tick(1, g.base, true);
+        // Отцепиться без «не применено»: записи нет, статус ждёт, причины нет.
+        assert(c.diagnostics().status == Status::Waiting);
+        assert(c.diagnostics().reason == Reason::None);
+        assert(!c.has_binding());
+        // Скан на следующем кадре тоже не цепляется за почищенный объект.
+        c.tick(1, g.base, true);
+        assert(!c.has_binding());
+        assert(c.diagnostics().status == Status::Waiting);
+        // Мусор вне окна (не обязательно нули) — то же решение: не трогаем.
+        g.io.set<float>(promise + kPromiseDuration, 1234.f);
+        g.io.set<float>(promise + kPromiseElapsed, 0.25f);
+        c.tick(1, g.base, true);
+        assert(c.diagnostics().status == Status::Waiting);
+        assert(!c.has_binding());
+        assert(g.io.get<float>(promise + kPromiseElapsed) == 0.25f);  // не писали
+        // Ни в одном из событий пула записи быть не могло.
+        const unsigned writes_after_pool = std::count(g.io.write_log.begin(), g.io.write_log.end(),
+                                                      promise + kPromiseElapsed);
+        assert(writes_after_pool == 1);            // единственная — само ускорение до этого
+        std::printf("pool-zeroed and bogus timers are dropped and rescan silently skips them\n");
+    }
+
+    // ---- 11. Memory errors are reported, never guessed around --------------
     {
         Game g;
         g.map_library();
@@ -754,21 +805,19 @@ int main() {
         assert(c.diagnostics().reason == Reason::Read);
         assert(c.diagnostics().detail == g.collect.promise);
         g.io.fail_read = 0;
-        // An out-of-range duration means the identification is not to be
-        // trusted: refuse instead of writing.
+        // Таймер вне окна — уже не «отказ» (см. тест 10): пул почищает объект
+        // на выходе, и завершающий await гарантированно попадает под этот случай.
         g.io.set<float>(g.collect.promise + kPromiseDuration, 1234.f);
         g.io.set<float>(g.collect.promise + kPromiseElapsed, 0.25f);
         c.tick(1, g.base, true);
-        assert(c.diagnostics().status == Status::Failed);
-        assert(c.diagnostics().reason == Reason::Timer);
-        // В меню это видно как два float'а: duration в младшей половине, elapsed
-        // в старшей — ровно те числа, которые контроллер прочитал перед отказом.
-        assert((c.diagnostics().detail & 0xffffffffu) == 0x449A4000u);   // 1234.0f
-        assert((c.diagnostics().detail >> 32) == 0x3E800000u);           // 0.25f
-        std::printf("errors: failed write, failed read and a bogus duration all report Failed\n");
+        assert(c.diagnostics().status == Status::Waiting);
+        assert(c.diagnostics().reason == Reason::None);
+        assert(!c.has_binding());
+        assert(g.io.get<float>(g.collect.promise + kPromiseElapsed) == 0.25f);  // не писали
+        std::printf("errors: failed write and failed read report Failed; bogus timer is a silent pool event\n");
     }
 
-    // ---- 11. Junk in the item list and an absurd tail are survived ---------
+    // ---- 12. Junk in the item list and an absurd tail are survived ---------
     {
         Game g;
         g.map_library();
@@ -799,7 +848,7 @@ int main() {
         std::printf("robustness: junk items and a lying tail neither crash nor stall\n");
     }
 
-    // ---- 12. Empty namespace: nested and generic types report it that way --
+    // ---- 13. Empty namespace: nested and generic types report it that way --
     {
         Game g;
         g.map_library();
@@ -815,7 +864,7 @@ int main() {
         std::printf("namespaces: an empty one is accepted for nested/generic types\n");
     }
 
-    // ---- 13. A busy item list: foreign classes cannot park the search ------
+    // ---- 14. A busy item list: foreign classes cannot park the search ------
     {
         // `ours_last` повторяет игру: AddAction дописывает ожидание в хвост,
         // поэтому свежий перенос оказывается последним элементом списка. Обратный
@@ -896,7 +945,7 @@ int main() {
         std::printf("busy list: 40 and 100 foreign classes, either end of the list\n");
     }
 
-    // ---- 14. Код образа не изменяется никогда ------------------------------
+    // ---- 15. Код образа не изменяется никогда ------------------------------
     {
         // Метода записи кода у IO-интерфейса нет (см. комментарий в FakeMemory),
         // поэтому ниже проверяется ровно обратное старому поведению: активный
@@ -992,7 +1041,7 @@ int main() {
         std::printf("no-patch: toggling never touches image bytes\n");
     }
 
-    // ---- 15. The shipped tables describe themselves consistently -----------
+    // ---- 16. The shipped tables describe themselves consistently -----------
     {
         for (const auto& layout : kLayouts) {
             assert(layout.helper_typeinfo > 0x100000);
@@ -1023,7 +1072,7 @@ int main() {
                     sizeof(kLayouts) / sizeof(kLayouts[0]), kFlowCount);
     }
 
-    // ---- 16. Детект окна через DI: только чтение, отказ без догадок --------
+    // ---- 17. Детект окна через DI: только чтение, отказ без догадок --------
     for (size_t image = 0; image < sizeof(kLayouts) / sizeof(kLayouts[0]); ++image) {
         {
             // Полная цепочка: ProjectContext -> контейнер -> биндинг интерфейса
@@ -1038,12 +1087,21 @@ int main() {
             assert(d.di_stage == 5 && d.di_fail == 0);
             assert(d.di_root == 2 && d.di_overlay == 1 && d.di_unknown == 0);
             assert(d.di_scans == 1);
+            // Подписи окон: живые имена прочитаны из ключей, с индексами id и
+            // пометкой оверлея. "loot" — корневое окно (ids[0]), "inventory"
+            // второе корневое (ids[1]), "chat" — оверлей (ids[32]).
+            assert(d.di_names_n == 3);
+            assert(std::strcmp(d.di_names[0].data(), "loot") == 0 && d.di_idindex[0] == 0 &&
+                   d.di_overlay_win[0] == 0);
+            assert(std::strcmp(d.di_names[1].data(), "inventory") == 0 && d.di_idindex[1] == 1);
+            assert(std::strcmp(d.di_names[2].data(), "chat") == 0 && d.di_idindex[2] == 32 &&
+                   d.di_overlay_win[2] == 1);
             // Спонтанное повторное открытие окна: словари перечитываются
             // периодически, новые ключи подхватываются.
             g.start_collect(4, Kind::Container);
             for (int i = 0; i < static_cast<int>(kDiScanFrames + 2); ++i) frame(g, c, 1, true);
             assert(c.diagnostics().di_stage == 5);
-            std::printf("window-detect: image %zu full chain, 2 open + 1 overlay\n", image);
+            std::printf("window-detect: image %zu full chain, 2 open + 1 overlay, names loot/inventory/chat\n", image);
         }
         {
             // Неизвестный ключ окна (не из таблицы id) считается отдельно.
@@ -1055,6 +1113,33 @@ int main() {
             frame(g, c, 1, true);
             const Diagnostics d = c.diagnostics();
             assert(d.di_stage == 5 && d.di_root == 1 && d.di_overlay == 2 && d.di_unknown == 1);
+            // Неизвестный ключ не попадает в имена (ему нет idx), известные читаются.
+            assert(d.di_names_n == 2);
+            assert(std::strcmp(d.di_names[0].data(), "loot") == 0);
+            assert(std::strcmp(d.di_names[1].data(), "chat") == 0 && d.di_overlay_win[1] == 1);
+        }
+        {
+            // Имя ключа — мусор (отрицательная/огромная длина): не «loot» и не
+            // отказ, имя просто молча пропущено, счётчики окон живы.
+            Game g(image);
+            g.map_library();
+            g.build_unitask();
+            g.build_zenject(1, 0);
+            g.io.set<int32_t>(g.di.ids[0] + kDiStrLen, -7);
+            Controller<FakeMemory> c(g.io);
+            frame(g, c, 1, true);
+            const Diagnostics d = c.diagnostics();
+            assert(d.di_stage == 5 && d.di_root == 1 && d.di_unknown == 0);
+            assert(d.di_names_n == 0);
+            // То же с длиной за пределами капы.
+            Game g2(image);
+            g2.map_library();
+            g2.build_unitask();
+            g2.build_zenject(1, 0);
+            g2.io.set<int32_t>(g2.di.ids[0] + kDiStrLen, 4096);
+            Controller<FakeMemory> c2(g2.io);
+            frame(g2, c2, 1, true);
+            assert(c2.diagnostics().di_names_n == 0);
         }
         {
             // Цепи контекста нет: отказ по самому раннему звену, подбор не тронут.

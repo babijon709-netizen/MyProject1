@@ -101,6 +101,14 @@ struct Diagnostics {
     uint32_t di_overlay = 0;      // открытых оверлейных окон (словарь +0x58)
     uint32_t di_unknown = 0;      // ключи окон вне таблицы известных id
     uint64_t di_scans = 0;        // проходов по словарям окон сделано
+    // Подписи открытых окон: имя ключа (живая строка процесса, строгая
+    // ASCII-проверка) + индекс id в статиках id-класса (0..160). Имена читаются
+    // только на устройстве, статистической таблицы тут нет. Канал только
+    // информационный — гейты автотапа сюда не смотрят.
+    std::array<std::array<char, 32>, 8> di_names{};
+    std::array<int32_t, 8> di_idindex{};
+    std::array<uint8_t, 8> di_overlay_win{};
+    uint32_t di_names_n = 0;
 };
 
 inline const char* reason_name(Reason r) {

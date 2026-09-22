@@ -183,6 +183,15 @@ inline constexpr uint64_t   kDiServiceDictA  = 0x50;    // открытые ко
 inline constexpr uint64_t   kDiServiceDictB  = 0x58;    // открытые оверлейные окна
 inline constexpr uint32_t   kDiIdsCount      = 161;     // id окон в статиках id-класса
 inline constexpr uint32_t   kDiMaxBindings   = 4096;
+// Имена id окон: WindowId = value-структура из одного поля _Id (System_String*).
+// Статика id-класса лежит в образе нулями — содержимое строк живёт только в
+// управляемой памяти процесса, поэтому имена читаются только на устройстве и
+// только по живым ключам словаря открытых окон. В статическую таблицу имён мы
+// не верим: сначала снимаем подписи открытых окон в диагностику.
+inline constexpr uint64_t   kDiStrLen        = 0x10;    // System.String: length (int32)
+inline constexpr uint64_t   kDiStrData       = 0x14;    // System.String: chars (UTF-16)
+inline constexpr uint32_t   kDiNameMaxLen    = 32;      // больше не верим: обычно "loot"
+inline constexpr uint32_t   kDiMaxNames      = 8;       // столько имён выносим наружу
 inline constexpr uint32_t   kDiScanFrames    = 30;      // частота перечитывания словарей
 inline constexpr uint32_t   kDiResolveFrames = 60;      // повтор поиска сервиса
 
@@ -429,9 +438,20 @@ template<class IO> class Controller {
         return false;
     }
 
-    // Посчитать открытые окна в одном словаре: сколько записей живо и сколько
-    // их ключей не входит в таблицу известных id (такого быть не должно).
-    bool di_scan_dict(uint64_t dict, uint32_t& open, uint32_t& unknown) {
+    // Строка имени уже заполнена вызывающим; оставляем её, только если имя
+    // целиком ASCII-печатное. Иначе делаем её пустой — скан пропустит имя.
+    static void di_name_sanitize(char* out, int32_t len) {
+        if (len < 1 || static_cast<uint32_t>(len) > kDiNameMaxLen) { out[0] = 0; return; }
+        for (int32_t i = 0; i < len; ++i)
+            if (out[i] < 0x20 || out[i] > 0x7e) { out[0] = 0; return; }
+        out[len] = 0;
+    }
+
+    // Посчитать открытые окна в одном словаре: сколько записей живо, сколько
+    // их ключей не входит в таблицу известных id (такого быть не должно), и
+    // выгрузить первые kDiMaxNames имён ключей с их индексами в статиках.
+    bool di_scan_dict(uint64_t dict, uint32_t& open, uint32_t& unknown,
+                      bool overlay) {
         open = unknown = 0;
         if (dict < 0x10000) return false;
         int32_t count = 0;
@@ -449,10 +469,35 @@ template<class IO> class Controller {
             if (!di_read_i32(entry, hash) || hash < 0) continue;
             ++visited;
             const uint64_t key = io.ptr(entry + kDiWinKey);
-            bool known = false;
+            int32_t known_at = -1;
             for (uint32_t k = 0; k < kDiIdsCount; ++k)
-                if (io.ptr(di_ids_ + k * 8) == key) { known = true; break; }
-            if (!known) ++unknown;
+                if (io.ptr(di_ids_ + k * 8) == key) { known_at = static_cast<int32_t>(k); break; }
+            if (known_at < 0) ++unknown;
+            else if (diag_.di_names_n < kDiMaxNames) {
+                // Имя ключа: UTF-16 в управляемой строке процесса; точный id —
+                // его индекс в статиках id-класса (таблица имён намеренно не
+                // зашита, см. FAST_LOOT.md §«Детект окна через DI»).
+                char name[kDiNameMaxLen + 1];
+                int32_t len = 0;
+                name[0] = 0;
+                if (io.read_fresh(key + kDiStrLen, len) && len > 0 &&
+                    static_cast<uint32_t>(len) <= kDiNameMaxLen) {
+                    for (int32_t c = 0; c < len; ++c) {
+                        uint16_t wc = 0;
+                        if (!io.read_fresh(key + kDiStrData + static_cast<uint64_t>(c) * 2, wc))
+                            { name[0] = 0; break; }
+                        name[c] = static_cast<char>(wc & 0xff);
+                    }
+                    name[len] = 0;
+                    di_name_sanitize(name, len);
+                }
+                if (name[0]) {
+                    const uint32_t slot = diag_.di_names_n++;
+                    std::memcpy(diag_.di_names[slot].data(), name, static_cast<size_t>(len) + 1);
+                    diag_.di_idindex[slot] = known_at;
+                    diag_.di_overlay_win[slot] = overlay ? 1 : 0;
+                }
+            }
             ++open;
         }
         return true;
@@ -534,6 +579,15 @@ template<class IO> class Controller {
         if (continuation < 0x10000 || target < 0x10000) return false;
         const uint64_t klass = io.ptr_fresh(target);
         if (klass < 0x10000 || !named_one_of(io, klass, kRunnerName, kRunnerNs)) return false;
+        // Завершившийся await: TryReturn зануляет duration/elapsed одной записью
+        // xzr (образ: str xzr,[obj,#0x18] на выходе в пул), а bound() этого не
+        // видит. Такой объект ещё кадр-два валяется в списке раннера с целым
+        // делегатом — не цепляемся за него повторно.
+        float duration = 0.f, elapsed = 0.f;
+        if (!io.read_fresh(item + kPromiseDuration, duration) ||
+            !io.read_fresh(item + kPromiseElapsed, elapsed)) return false;
+        if (!viewmodel::finite(duration) || duration < kMinDelay || duration > kMaxDelay) return false;
+        if (!viewmodel::finite(elapsed) || elapsed < 0.f) return false;
         kind = static_cast<Kind>(found);
         delegate = state;
         runner = target;
@@ -676,11 +730,12 @@ public:
         }
         if (di_scan_) { --di_scan_; return; }
         di_scan_ = kDiScanFrames;
+        diag_.di_names_n = 0;              // имена переснимаются целиком раз в скан
         uint32_t a = 0, b = 0, ka = 0, kb = 0;
         const uint64_t da = io.ptr(di_service_ + kDiServiceDictA);
         const uint64_t dbb = io.ptr(di_service_ + kDiServiceDictB);
-        const bool oka = di_scan_dict(da, a, ka);
-        const bool okb = di_scan_dict(dbb, b, kb);
+        const bool oka = di_scan_dict(da, a, ka, false);
+        const bool okb = di_scan_dict(dbb, b, kb, true);
         if (!oka && !okb) { diag_.di_fail = 12; return; }   // сервис умер: не обнуляем указатель сразу
         diag_.di_root = oka ? a : 0;
         diag_.di_overlay = okb ? b : 0;
@@ -769,6 +824,18 @@ public:
             Reason reason = Reason::None;
             uint64_t detail = 0;
             const bool done = expire(reason, detail);
+            if (!done && reason == Reason::Timer) {
+                // Это не отказ функции, а хвост её же работы: корутина дошла до
+                // конца, TryReturn занулил пару float'ов (str xzr,[obj,#0x18] на
+                // выходе в пул), а объект ещё висит в списке раннера. Bound() на
+                // гонку не успевает: отцепляемся и пересканируем на следующем
+                // кадре, тоста «не применено» здесь быть не должно.
+                drop();
+                diag_.status = Status::Waiting;
+                diag_.reason = Reason::None;
+                diag_.detail = 0;
+                return;
+            }
             diag_.status = done ? Status::Active : Status::Failed;
             diag_.reason = reason;
             diag_.detail = detail;

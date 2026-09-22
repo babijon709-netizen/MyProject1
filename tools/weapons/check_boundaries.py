@@ -93,6 +93,18 @@ assert 'd.kind == loot::Kind::Container' in loot_adapter
 assert 'loot_tap_test.cpp' in (root / 'tools/loot/run.sh').read_text()
 assert (root / 'tools/loot/loot_tap_test.cpp').exists()
 
+# Имена id окон (diag канал): только чтение живых строк, строгие капы,
+# контроллер не меняет поведение по имени — оно чисто смотровое.
+loot_diag = (root / 'jni/include/loot.h').read_text()
+for needle in ('kDiStrLen        = 0x10', 'kDiStrData       = 0x14',
+               'kDiNameMaxLen    = 32', 'kDiMaxNames      = 8'):
+    assert needle in loot_controller, needle
+assert 'di_names' in loot_diag and 'di_idindex' in loot_diag and 'di_overlay_win' in loot_diag
+assert 'di_names_n = 0' in loot_controller  # пересъёмка целиком каждый скан
+# Имя читается только свежим чтением и только из ключа словаря.
+assert 'io.read_fresh(key + kDiStrLen, len)' in loot_controller
+assert 'io.read_fresh(key + kDiStrData' in loot_controller
+
 menu = (root / 'jni/src/menu.cpp').read_text()
 assert '##fastloot' not in menu
 assert '##instantloot' in menu
