@@ -111,9 +111,16 @@ main_src = (root / 'jni/src/main.cpp').read_text()
 assert '"Подбор: st=%d fl=%u ex=%llu di=%d:%d r=%u o=%u u=%u"' in main_src
 assert 's_loot_report_arm = g_state.viewmodel.fast_loot ? 180 : 0;' in main_src
 assert ' ключи:' in main_src  # при di<5 сводка несёт имена ключей биндингов
+assert '" w=%u/%u/%u k%u t%u i%llX"' in main_src  # счётчики прохода биндингов
 # Свидетельный канал ключей биндингов: только чтение имени класса, fail-closed.
 assert 'io.klass_name(tclass, dst, kDiNameMaxLen)' in loot_controller
 assert 'bool klass_name(' in loot_adapter
+for needle in ('di_walk_visited', 'di_walk_count', 'di_walk_cap',
+               'di_walk_keyread', 'di_walk_tclass', 'di_walk_impl0'):
+    assert needle in loot_diag, needle
+assert 'diag_.di_walk_count = static_cast<uint32_t>(count)' in loot_controller
+assert '++diag_.di_walk_keyread' in loot_controller
+assert '++diag_.di_walk_tclass' in loot_controller
 
 menu = (root / 'jni/src/menu.cpp').read_text()
 assert '##fastloot' not in menu

@@ -233,9 +233,11 @@ struct Game {
     // Собрать контейнер вокруг сервиса: ProjectContext(статики) -> инстанс ->
     // контейнер -> словарь биндингов с ключом BindingId.Type == интерфейс.
     // skip_iface / wrong_cached_klass / wrong_service_klass ломают цепь по сценарию.
+    // broken_impl зануляет звено Il2CppType->klass у биндинга интерфейса.
     void build_zenject(int open_root, int open_overlay,
                        bool unknown_key = false, bool skip_iface = false,
-                       bool wrong_cached_klass = false, bool wrong_service_klass = false) {
+                       bool wrong_cached_klass = false, bool wrong_service_klass = false,
+                       bool broken_impl = false) {
         // id-класс окон: статики с 161 указателем на WindowId (= System.String*),
         // имена — живые управляемые строки: length @+0x10, UTF-16 @+0x14.
         for (uint32_t k = 0; k < kDiIdsCount; ++k) di.ids.push_back(io.alloc(0x60));
@@ -280,7 +282,7 @@ struct Game {
         // BindingId.Type == интерфейс: Type (+0x10 → Il2CppType; [0] → klass).
         const uint64_t iface_klass = io.klass(layout.iface_name, "");
         const uint64_t il2c_type = io.alloc(0x10);
-        io.set<uint64_t>(il2c_type, iface_klass);
+        io.set<uint64_t>(il2c_type, broken_impl ? 0x40 : iface_klass);
         const uint64_t type_obj = io.alloc(0x20);
         io.set<uint64_t>(type_obj, io.klass("RuntimeType", "System"));
         io.set<uint64_t>(type_obj + kDiTypeImpl, il2c_type);
@@ -1180,6 +1182,29 @@ int main() {
             assert(d.di_names_n >= 1);
             assert(std::memcmp(d.di_names[0].data(), "OtherService", 13) == 0);
             assert(d.di_idindex[0] == 0 && d.di_overlay_win[0] == 0);
+            // Счётчики прохода: одна запись дошла до класса, имя прочитано.
+            assert(d.di_walk_visited == 1 && d.di_walk_keyread == 1);
+            assert(d.di_walk_tclass == 1 && d.di_walk_count == 1);
+            assert(d.di_walk_impl0 != 0);
+        }
+        {
+            // Живой словарь, но звено Il2CppType->klass битое: интерфейс есть
+            // в ключах, а разрешить его нельзя — ноль имён и счётчики
+            // останавливаются ровно на этой ступени (сводка устройства).
+            Game g(image);
+            g.map_library();
+            g.build_unitask();
+            g.build_zenject(0, 0, false, false, false, false, true);
+            g.start_collect(4, Kind::Container);
+            Controller<FakeMemory> c(g.io);
+            for (int i = 0; i < 70 && !g.collect.finished; ++i) frame(g, c, 1, true);
+            const Diagnostics d = c.diagnostics();
+            assert(d.di_stage == 3 && d.di_fail == 6);
+            assert(g.collect.finished);
+            assert(d.di_walk_visited == 2 && d.di_walk_keyread == 2);
+            assert(d.di_walk_tclass == 1 && d.di_walk_count == 2);
+            assert(d.di_names_n == 1);
+            assert(std::memcmp(d.di_names[0].data(), "OtherService", 13) == 0);
         }
         {
             // Провайдер не CachedProvider или класс инстанса не сервис — отказ,

@@ -168,6 +168,18 @@ int main(int argc, char* argv[]) {
                          (int)ld.di_stage, (int)ld.di_fail,
                          (unsigned)ld.di_root, (unsigned)ld.di_overlay,
                          (unsigned)ld.di_unknown);
+                // Диагностика цикла биндингов (он же «почему ключи пусты»):
+                // visited/count/cap и ступени ключа type->impl->klass.
+                if (ld.di_stage >= 3 && ld.di_stage < 5) {
+                    n += (size_t)snprintf(msg + n, sizeof(msg) - n,
+                             " w=%u/%u/%u k%u t%u i%llX",
+                             (unsigned)ld.di_walk_visited,
+                             (unsigned)ld.di_walk_count,
+                             (unsigned)ld.di_walk_cap,
+                             (unsigned)ld.di_walk_keyread,
+                             (unsigned)ld.di_walk_tclass,
+                             (unsigned long long)ld.di_walk_impl0);
+                }
                 // Пока скан окон не дошёл до 5, в di_names лежат не подписи
                 // окон, а имена классов ключей биндингов Zenject — косвенное
                 // свидетельство, как сервис окон зарегистрирован в СБОРКЕ

@@ -399,16 +399,24 @@ template<class IO> class Controller {
             static_cast<uint32_t>(capacity) > kDiMaxBindings * 4) { diag_.di_fail = 5; return false; }
         diag_.di_stage = 3;
         diag_.di_fail = 6;                 // интерфейс не найден, если цикл не выйдет
+        diag_.di_walk_visited = diag_.di_walk_keyread = diag_.di_walk_tclass = 0;
+        diag_.di_walk_count = static_cast<uint32_t>(count);
+        diag_.di_walk_cap = static_cast<uint32_t>(capacity);
+        diag_.di_walk_impl0 = 0;
         int32_t visited = 0;
         for (int32_t i = 0; i < capacity && visited < count; ++i) {
             int32_t hash = 0;
             const uint64_t entry = entries + kDiArrayData + static_cast<uint64_t>(i) * kDiBindStride;
             if (!di_read_i32(entry, hash) || hash < 0) continue;   // свободная запись
             ++visited;
+            diag_.di_walk_visited = static_cast<uint32_t>(visited);
             uint64_t type_ = 0;
             if (!di_read(entry + kDiBindKeyType, type_)) continue;
+            ++diag_.di_walk_keyread;
+            if (!diag_.di_walk_impl0) diag_.di_walk_impl0 = io.ptr(type_ + kDiTypeImpl);
             const uint64_t tclass = io.ptr(io.ptr(type_ + kDiTypeImpl));
             if (tclass < 0x10000) continue;
+            ++diag_.di_walk_tclass;
             // Свидетельный канал «почему не нашли»: имена классов первых
             // биндингов уходят в диагностику (тот же буфер, куда потом скан
             // кладёт подписи окон — перезапишет). Только чтение, ни один

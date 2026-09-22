@@ -113,6 +113,16 @@ struct Diagnostics {
     std::array<int32_t, 8> di_idindex{};
     std::array<uint8_t, 8> di_overlay_win{};
     uint32_t di_names_n = 0;
+    // Счётчики прохода по биндингам Zenject (последняя попытка di_resolve):
+    // позволяют по сводке отличить «ходили не по тем записям» от «ключ не
+    // разрешается в класс». Считает каждая попытка, читается из сводного
+    // тоста на устройстве; на гейты не влияют.
+    uint32_t di_walk_visited = 0;  // занятые записи, дошедшие до проверки ключа
+    uint32_t di_walk_count = 0;    // Dictionary._count
+    uint32_t di_walk_cap = 0;      // ёмкость массива записей
+    uint32_t di_walk_keyread = 0;  // записей с ключом-указателем (System.Type*)
+    uint32_t di_walk_tclass = 0;   // ключей, разрешённых в Il2CppClass*
+    uint64_t di_walk_impl0 = 0;    // содержимое type+0x10 первой занятой записи
 };
 
 inline const char* reason_name(Reason r) {
