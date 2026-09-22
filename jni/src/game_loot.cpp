@@ -151,7 +151,13 @@ struct Memory {
         const double t = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - loot_log_start).count();
         std::fprintf(f, "[%9.2f] ", t);
-        std::fprintf(f, fmt, args...);
+        // NDK clang: -Werror,-Wformat-security запрещает не-литерный формат
+        // БЕЗ аргументов; с аргументами путь исторически светится.
+        if constexpr (sizeof...(args) == 0) {
+            std::fprintf(f, "%s", fmt);
+        } else {
+            std::fprintf(f, fmt, args...);
+        }
         std::fputc('\n', f);
         std::fflush(f);
     }
