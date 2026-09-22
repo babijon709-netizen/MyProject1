@@ -108,6 +108,14 @@ struct FlowSite {
 struct Layout {
     std::array<uint8_t, 20> build_id;
     uint64_t helper_typeinfo;
+    // Детект окна через DI: TypeInfo-слоты Zenject.ProjectContext (статики
+    // хранят инстанс контекста → контейнер) и класса текста id окон (161
+    // статический WindowId = указатели строк; ключи словарей открытых окон
+    // совпадают с ними ПО УКАЗАТЕЛЮ, содержимое строк не читается).
+    uint64_t projctx_typeinfo;
+    uint64_t ids_typeinfo;
+    const char* iface_name;     // интерфейс сервиса окон в ключе биндинга (ns "")
+    const char* service_name;   // класс реализации сервиса окон (ns "")
     FlowSite flow[3];
 };
 // Run() of every AsyncUniTask`1 instantiation: take &stateMachine at runner+0x20
@@ -126,6 +134,9 @@ inline constexpr Layout kLayouts[] = {
     {{{0xd8,0x5e,0x63,0xcd,0x8d,0xcb,0xd4,0x81,0x69,0x50,
        0x12,0xef,0x2e,0x28,0x4f,0x0e,0xeb,0x9e,0xf3,0x07}},
      0xD9C52E0,
+     0xD9C57A8,      // Zenject.ProjectContext
+     0xD9CC4B0,      // ms: статические id окон (инстанс окна стоит в статиках)
+     "mu", "mj",
      {{0xB403D10, 0x5B5C5BC, 0x5B5CAD4, 0xBD495100u, 0x5B5CACC, 0x5B5CAE4, 0x52800020u, 0x959F3174u},   // xw  loot window
       {0xB399854, 0x666147C, 0x6661768, 0xBD495100u, 0x6661760, 0x6661778, 0x52800020u, 0x95731E4Fu},   // eDE pickup zone
       {0xB403428, 0x5B5CE7C, 0x5B5D154, 0xBD495100u, 0x5B5D14C, 0x5B5D164, 0x52800020u, 0x959F2FD4u}}}, // xv  fast load
@@ -133,11 +144,47 @@ inline constexpr Layout kLayouts[] = {
     {{{0xe1,0x07,0x95,0x34,0x9b,0xd7,0xc2,0xcd,0xc7,0xd8,
        0x52,0x75,0x97,0xc6,0x43,0x95,0xa4,0xef,0xed,0x79}},
      0xD9A3488,
+     0xD9A3930,      // Zenject.ProjectContext
+     0xD9AA7D0,      // qn: статические id окон
+     "qK", "qo",
      {{0xB3E1170, 0x5AF47EC, 0x5AF4D04, 0xBD400100u, 0x5AF4CFC, 0x5AF4D14, 0x52800020u, 0x95A05A57u},   // vB  loot window
       {0xB330434, 0x65C3884, 0x65C3B70, 0xBD400100u, 0x65C3B68, 0x65C3B80, 0x52800020u, 0x95751EBCu},   // REd pickup zone
       {0xB3E1A58, 0x5AF5100, 0x5AF53D8, 0xBD400100u, 0x5AF53D0, 0x5AF53E8, 0x52800020u, 0x95A058A2u}}}, // vu  fast load
 };
 inline constexpr size_t kFlowCount = sizeof(kLayouts[0].flow) / sizeof(kLayouts[0].flow[0]);
+
+// Детект окна через Zenject DI. Все смещения выведены только из дампов и
+// образов обоих билдов (FAST_LOOT.md §Детект окна), чтение, записи нет.
+// Классы Zenject.PlayerContext/DiContainer в образе необфусцированы и
+// раскладка одинакова release↔beta; имена сервиса обфусцированы, поэтому
+// лежат в таблице раскладок, а совпадение окон с id — по УКАЗАТЕЛЮ строки
+// (статики id-класса), не по содержимому, которое игрой зашифровано.
+inline constexpr uint64_t   kDiProjCtxInstance  = 0x20; // ProjectContext statics: _instance
+inline constexpr uint64_t   kDiProjCtxContainer = 0x60; // ProjectContext: _container
+inline constexpr uint64_t   kDiContainerProviders = 0x18; // DiContainer: _providers
+inline constexpr uint64_t   kDiDictEntries   = 0x18;    // Dictionary<*,*>: _entries
+inline constexpr uint64_t   kDiDictCount     = 0x20;    // Dictionary<*,*>: _count (int32)
+inline constexpr uint64_t   kDiArrayLen      = 0x18;    // managed array: length (int32)
+inline constexpr uint64_t   kDiArrayData     = 0x20;    // managed array: элементы
+// Dictionary<BindingId, List<ProviderInfo>>: entry {hash,s32; next,s32;
+// BindingId{type*,ident*}; value*}; typeof(BindingId) берётся из ключа.
+inline constexpr uint64_t   kDiBindStride    = 0x20;
+inline constexpr uint64_t   kDiBindKeyType   = 0x08;    // BindingId._type (System.Type*)
+inline constexpr uint64_t   kDiBindValue     = 0x18;    // List<ProviderInfo>*
+inline constexpr uint64_t   kDiTypeImpl      = 0x10;    // System.Type: _impl.value → Il2CppType*
+inline constexpr uint64_t   kDiListItems     = 0x10;    // List<T>: _items
+inline constexpr uint64_t   kDiListSize      = 0x18;    // List<T>: _size (int32)
+inline constexpr uint64_t   kDiProviderInfo  = 0x20;    // ProviderInfo.Provider
+inline constexpr uint64_t   kDiProvInstances = 0x18;    // CachedProvider._instances (List<object>)
+// Dictionary<WindowId, Entry*>: entry {hash,s32; next,s32; WindowId{string*}; value*}
+inline constexpr uint64_t   kDiWinStride     = 0x18;
+inline constexpr uint64_t   kDiWinKey        = 0x08;    // встроенный WindowId = указ. строки
+inline constexpr uint64_t   kDiServiceDictA  = 0x50;    // открытые корневые окна
+inline constexpr uint64_t   kDiServiceDictB  = 0x58;    // открытые оверлейные окна
+inline constexpr uint32_t   kDiIdsCount      = 161;     // id окон в статиках id-класса
+inline constexpr uint32_t   kDiMaxBindings   = 4096;
+inline constexpr uint32_t   kDiScanFrames    = 30;      // частота перечитывания словарей
+inline constexpr uint32_t   kDiResolveFrames = 60;      // повтор поиска сервиса
 
 // Bounds. A scan is bounded three ways (runners, items per runner, items per
 // scan) because the game mutates loopItems under its own lock while we read it:
@@ -298,7 +345,118 @@ template<class IO> class Controller {
     Kind kind_ = Kind::None;
     int timing_ = -1;
     unsigned retry_ = 0, hot_ = 0;
+    // Детект окна: найденный сервис окон (Zenject DI), блок статиков id-класса
+    // окон и расписание сканирований. Всё только читается.
+    uint64_t di_service_ = 0;
+    uint64_t di_ids_ = 0;                 // статики id-класса окон (161 указ.)
+    unsigned di_resolve_ = 0, di_scan_ = 0;
     Diagnostics diag_{};
+
+    // Только чтение с отказом вместо догадки: любой неизвестный указатель
+    // или выход за бюджет — код отказа в диагностику, сервис не принимается.
+    bool di_read(uint64_t addr, uint64_t& v) {
+        v = io.ptr(addr);
+        return v >= 0x10000;
+    }
+    bool di_read_i32(uint64_t addr, int32_t& v) {
+        return io.read(addr, v);
+    }
+
+    // Найти инстанс сервиса окон через контейнер:
+    //   ProjectContext._instance -> _container -> _providers:
+    //   Dictionary<BindingId, List<ProviderInfo>> с ключом BindingId.Type ==
+    //   интерфейс сервиса; единственный провайдер — CachedProvider (singleton
+    //   project-биндинга), его первый инстанс и есть сервис. Провайдер другой
+    //   формы или класс не тот — отказ, ничего не берём на веру.
+    bool di_resolve() {
+        uint64_t klass = 0, statics = 0, instance = 0, container = 0, providers = 0;
+        if (!di_read(base_ + layout_->projctx_typeinfo, klass)) { diag_.di_fail = 1; return false; }
+        if (!di_read(klass + 0xB8, statics)) { diag_.di_fail = 1; return false; }
+        diag_.di_stage = 1;
+        if (!di_read(statics + kDiProjCtxInstance, instance)) { diag_.di_fail = 2; return false; }
+        if (!di_read(instance + kDiProjCtxContainer, container)) { diag_.di_fail = 3; return false; }
+        diag_.di_stage = 2;
+        if (!di_read(container + kDiContainerProviders, providers)) { diag_.di_fail = 4; return false; }
+        int32_t count = 0;
+        if (!di_read_i32(providers + kDiDictCount, count) || count < 1 ||
+            static_cast<uint32_t>(count) > kDiMaxBindings) { diag_.di_fail = 5; return false; }
+        uint64_t entries = 0;
+        if (!di_read(providers + kDiDictEntries, entries)) { diag_.di_fail = 5; return false; }
+        int32_t capacity = 0;
+        if (!di_read_i32(entries + kDiArrayLen, capacity) || capacity < 1 ||
+            static_cast<uint32_t>(capacity) > kDiMaxBindings * 4) { diag_.di_fail = 5; return false; }
+        diag_.di_stage = 3;
+        diag_.di_fail = 6;                 // интерфейс не найден, если цикл не выйдет
+        int32_t visited = 0;
+        for (int32_t i = 0; i < capacity && visited < count; ++i) {
+            int32_t hash = 0;
+            const uint64_t entry = entries + kDiArrayData + static_cast<uint64_t>(i) * kDiBindStride;
+            if (!di_read_i32(entry, hash) || hash < 0) continue;   // свободная запись
+            ++visited;
+            uint64_t type_ = 0;
+            if (!di_read(entry + kDiBindKeyType, type_)) continue;
+            const uint64_t tclass = io.ptr(io.ptr(type_ + kDiTypeImpl));
+            if (tclass < 0x10000) continue;
+            if (!io.klass_named(tclass, layout_->iface_name, "")) continue;
+            // Нашёлся биндинг сервиса. Ровно один провайдер, формы CachedProvider.
+            uint64_t list = 0;
+            if (!di_read(entry + kDiBindValue, list)) { diag_.di_fail = 7; return false; }
+            uint64_t items = 0;
+            if (!di_read(list + kDiListItems, items)) { diag_.di_fail = 7; return false; }
+            int32_t size = 0;
+            if (!di_read_i32(list + kDiListSize, size) || size != 1) { diag_.di_fail = 7; return false; }
+            const uint64_t info = io.ptr(items + kDiArrayData);
+            uint64_t provider = 0;
+            if (info < 0x10000 || !di_read(info + kDiProviderInfo, provider)) { diag_.di_fail = 7; return false; }
+            if (!io.klass_named(io.ptr(provider), "CachedProvider", "Zenject")) { diag_.di_fail = 8; return false; }
+            uint64_t insts = 0, iitems = 0;
+            if (!di_read(provider + kDiProvInstances, insts)) { diag_.di_fail = 8; return false; }
+            if (!di_read(insts + kDiListItems, iitems)) { diag_.di_fail = 8; return false; }
+            int32_t isize = 0;
+            if (!di_read_i32(insts + kDiListSize, isize) || isize < 1) { diag_.di_fail = 8; return false; }
+            const uint64_t svc = io.ptr(iitems + kDiArrayData);
+            if (svc < 0x10000) { diag_.di_fail = 9; return false; }   // ещё не инстанцирован
+            if (!io.klass_named(io.ptr(svc), layout_->service_name, "")) { diag_.di_fail = 10; return false; }
+            uint64_t ids_klass = 0, ids = 0;
+            if (!di_read(base_ + layout_->ids_typeinfo, ids_klass)) { diag_.di_fail = 11; return false; }
+            if (!di_read(ids_klass + 0xB8, ids)) { diag_.di_fail = 11; return false; }
+            di_service_ = svc;
+            di_ids_ = ids;
+            diag_.di_stage = 4;
+            diag_.di_fail = 0;
+            return true;
+        }
+        return false;
+    }
+
+    // Посчитать открытые окна в одном словаре: сколько записей живо и сколько
+    // их ключей не входит в таблицу известных id (такого быть не должно).
+    bool di_scan_dict(uint64_t dict, uint32_t& open, uint32_t& unknown) {
+        open = unknown = 0;
+        if (dict < 0x10000) return false;
+        int32_t count = 0;
+        if (!di_read_i32(dict + kDiDictCount, count) || count < 0 ||
+            static_cast<uint32_t>(count) > 256) return false;
+        uint64_t entries = 0;
+        if (!di_read(dict + kDiDictEntries, entries)) return false;
+        int32_t capacity = 0;
+        if (!di_read_i32(entries + kDiArrayLen, capacity) || capacity < count ||
+            capacity > 1024) return false;
+        int32_t visited = 0;
+        for (int32_t i = 0; i < capacity && visited < count; ++i) {
+            int32_t hash = 0;
+            const uint64_t entry = entries + kDiArrayData + static_cast<uint64_t>(i) * kDiWinStride;
+            if (!di_read_i32(entry, hash) || hash < 0) continue;
+            ++visited;
+            const uint64_t key = io.ptr(entry + kDiWinKey);
+            bool known = false;
+            for (uint32_t k = 0; k < kDiIdsCount; ++k)
+                if (io.ptr(di_ids_ + k * 8) == key) { known = true; break; }
+            if (!known) ++unknown;
+            ++open;
+        }
+        return true;
+    }
 
     bool is_promise(uint64_t object, uint32_t& name_checks) {
         const uint64_t klass = io.ptr(object);
@@ -502,7 +660,34 @@ public:
         name_budget_spent_ = false;
         drop();
         retry_ = hot_ = 0;
+        di_service_ = di_ids_ = 0;
+        di_resolve_ = di_scan_ = 0;
         diag_ = {};
+    }
+
+    // Детект окна: независимый информационный канал в диагностику. Никогда
+    // не влияет на status/flows и не пишет.
+    void di_update() {
+        if (!layout_) { diag_.di_stage = 0; diag_.di_fail = 0; return; }
+        if (!di_service_) {
+            if (di_resolve_) { --di_resolve_; return; }
+            di_resolve_ = kDiResolveFrames;
+            if (!di_resolve()) return;
+        }
+        if (di_scan_) { --di_scan_; return; }
+        di_scan_ = kDiScanFrames;
+        uint32_t a = 0, b = 0, ka = 0, kb = 0;
+        const uint64_t da = io.ptr(di_service_ + kDiServiceDictA);
+        const uint64_t dbb = io.ptr(di_service_ + kDiServiceDictB);
+        const bool oka = di_scan_dict(da, a, ka);
+        const bool okb = di_scan_dict(dbb, b, kb);
+        if (!oka && !okb) { diag_.di_fail = 12; return; }   // сервис умер: не обнуляем указатель сразу
+        diag_.di_root = oka ? a : 0;
+        diag_.di_overlay = okb ? b : 0;
+        diag_.di_unknown = (oka ? ka : 0) + (okb ? kb : 0);
+        diag_.di_stage = 5;
+        diag_.di_fail = 0;
+        ++diag_.di_scans;
     }
 
     void tick(uint64_t session, uint64_t base, bool enabled) {
@@ -512,6 +697,8 @@ public:
             // tick is the game's own pending transfer; there is nothing to undo.
             drop();
             retry_ = hot_ = 0;
+            // Включение перезапускает детект окна сразу, без кадров разогрева.
+            di_scan_ = di_resolve_ = 0;
             diag_.status = Status::Off;
             diag_.kind = Kind::None;
             diag_.reason = Reason::None;
@@ -519,6 +706,9 @@ public:
             diag_.flows = 0;
             diag_.hooked = 0;
             diag_.timing = -1;
+            diag_.di_stage = 0;
+            diag_.di_fail = 0;
+            diag_.di_root = diag_.di_overlay = diag_.di_unknown = 0;
             return;
         }
         diag_.status = Status::Waiting;
@@ -550,6 +740,7 @@ public:
             diag_.hooked_code = hooked_code_;
         }
         diag_.flows = flows_ok_;
+        di_update();
         {
             Reason reason = Reason::None;
             uint64_t detail = 0;

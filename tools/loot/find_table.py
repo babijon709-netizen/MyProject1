@@ -196,7 +196,11 @@ def check(path, found, layouts):
     assert shipped == derived, 'table %s, image %s' % (
         sorted(hex(v) for f in sorted(shipped) for v in f),
         sorted(hex(v) for f in sorted(derived) for v in f))
-    print('  matches jni/src/loot_memory.h (%d flows)' % len(found['flows']))
+    assert row['projctx'] > 0x100000 and row['ids'] > 0x100000, \
+        'row %s misses the window-detection anchors (projctx/ids)' % path
+    assert row['iface'] and row['service'], 'row %s misses DI class names' % path
+    print('  matches jni/src/loot_memory.h (%d flows, DI anchors %s/%s present)' %
+          (len(found['flows']), row['iface'], row['service']))
     # Row order is NOT derived: it decides the reported Kind, so it stays a
     # judgement call against dump.cs. Print both orders side by side.
     shipped_order = [tuple(f) for f in row['flows']]

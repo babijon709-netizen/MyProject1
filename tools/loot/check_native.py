@@ -50,6 +50,10 @@ HEADER = ROOT / 'jni/src/loot_memory.h'
 # resolves PlayerLoopHelper. Nothing in jni/ depends on it; it is here so the
 # TypeInfo slot in the table can be re-derived instead of trusted.
 ADD_ACTION = [0xc322340, 0xc3048fc]            # release, beta
+# Методы, из которых выводятся DI-анкеры детекта окна (script.json обоих билдов):
+# Zenject.ProjectContext.get_Instance и .cctor класса id окон (ms / qn).
+DI_GET_INSTANCE = [0xcccf804, 0xccb1dc0]       # release, beta
+DI_IDS_CCTOR    = [0x73ce78c, 0x735bfd4]       # release, beta
 DELAY_SECONDS = 0.35                           # the stock per-item delay
 R_AARCH64_RELATIVE = 0x403
 
@@ -64,14 +68,18 @@ def parse_table(text):
     assert len(prologue) == 4, prologue
     body = text.split('inline constexpr Layout kLayouts[] = {', 1)[1].split('\n};', 1)[0]
     nums = [int(m, 16) for m in re.findall(r'0x([0-9a-fA-F]+)', body)]
-    assert nums and len(nums) % 45 == 0, 'unexpected layout table shape'
+    # Строка: 20 байт build-id + helper + projctx + ids + 3 потока по 8 чисел.
+    assert nums and len(nums) % 47 == 0, 'unexpected layout table shape'
+    names = re.findall(r'"([A-Za-z][A-Za-z0-9]{1,3})"', body)
     layouts = []
-    for start in range(0, len(nums), 45):
-        chunk = nums[start:start + 45]
+    for i, start in enumerate(range(0, len(nums), 47)):
+        chunk = nums[start:start + 47]
         build_id = bytes(chunk[:20])
-        helper = chunk[20]
-        flows = [tuple(chunk[21 + i * 8:29 + i * 8]) for i in range(3)]
-        layouts.append({'build_id': build_id, 'helper': helper, 'flows': flows})
+        helper, projctx, ids = chunk[20], chunk[21], chunk[22]
+        flows = [tuple(chunk[23 + j * 8:31 + j * 8]) for j in range(3)]
+        layouts.append({'build_id': build_id, 'helper': helper, 'projctx': projctx,
+                        'ids': ids, 'flows': flows,
+                        'iface': names[2 * i], 'service': names[2 * i + 1]})
     return layouts, prologue
 
 
@@ -208,7 +216,49 @@ def check_helper(image, helper_slot, add_action):
         add_action, slot, helper_slot)
 
 
-def check(path, layout, prologue, add_action):
+def _slots_with_addend(image, ins, addend):
+    """Все (addrp; ldr [addrp+off]) слоты, чья релокация указывает на addend."""
+    hits, page = [], None
+    for i in ins:
+        if i.mnemonic == 'adrp':
+            page = i.operands[1].imm
+        elif i.mnemonic == 'ldr' and page is not None and i.operands[1].mem.base:
+            slot = page + i.operands[1].mem.disp
+            rel = image.reloc(slot)
+            if rel and rel[0] == R_AARCH64_RELATIVE and rel[1] == addend:
+                hits.append(slot)
+            page = None
+    return hits
+
+
+def check_di(image, layout, get_instance, ids_cctor):
+    """DI-анкеры детекта окна выводятся из кода образа, не из таблицы."""
+    ins = image.disasm(get_instance, 0xB0)
+    hits = _slots_with_addend(image, ins, layout['projctx'])
+    assert hits, 'get_Instance %#x: нет слота на TypeInfo %#x' % (
+        get_instance, layout['projctx'])
+    text = [i.op_str for i in ins]
+    assert 'x8, [x8, #0xb8]' in text, \
+        'get_Instance %#x: static_fields ушёл с +0xB8' % get_instance
+    assert any(op.startswith(('x8, [x8, #0x20]', 'x19, [x8, #0x20]')) for op in text), \
+        'get_Instance %#x: _instance ушёл с +0x20' % get_instance
+    lines = ['ProjectContext.get_Instance %#x -> slot %#x -> TypeInfo %#x '
+             '(statics +0xB8, _instance +0x20)' % (get_instance, hits[0], layout['projctx'])]
+    ins = image.disasm(ids_cctor, 0x120)
+    hits = _slots_with_addend(image, ins, layout['ids'])
+    assert hits, 'ids .cctor %#x: нет слота на TypeInfo %#x' % (
+        ids_cctor, layout['ids'])
+    text = [i.op_str for i in ins]
+    assert any('#0xb8' in op for op in text), \
+        'ids .cctor %#x: статики не через +0xB8' % ids_cctor
+    assert any(i.mnemonic in ('str', 'stp', 'strb', 'strh', 'stur') for i in ins), \
+        'ids .cctor %#x: id окон не пишутся в статики' % ids_cctor
+    lines.append('%s.cctor %#x -> slot %#x -> TypeInfo %#x (161 id в статиках)' % (
+        layout['service'], ids_cctor, hits[0], layout['ids']))
+    return lines
+
+
+def check(path, layout, prologue, add_action, get_instance, ids_cctor):
     image = Image(path)
     assert image.at(0x318, 20) == layout['build_id'], \
         '%s: build-id %s, the table expects %s' % (
@@ -217,6 +267,7 @@ def check(path, layout, prologue, add_action):
     lines = [check_flow(image, flow, prologue, calls) for flow in layout['flows']]
     assert len(calls) == 1, 'the three flows await through %s' % sorted(hex(c) for c in calls)
     lines.append(check_helper(image, layout['helper'], add_action))
+    lines.extend(check_di(image, layout, get_instance, ids_cctor))
     lines.append('all three flows await through UniTask.WaitForSeconds %#x' % calls.pop())
     print('%s: build-id %s OK' % (path, layout['build_id'].hex()))
     for line in lines:
@@ -227,6 +278,7 @@ if __name__ == '__main__':
     layouts, prologue = parse_table(HEADER.read_text())
     if len(sys.argv) != 1 + len(layouts):
         raise SystemExit(__doc__)
-    for path, layout, add_action in zip(sys.argv[1:], layouts, ADD_ACTION):
-        check(path, layout, prologue, add_action)
+    for path, layout, aa, gi, cc in zip(sys.argv[1:], layouts, ADD_ACTION,
+                                        DI_GET_INSTANCE, DI_IDS_CCTOR):
+        check(path, layout, prologue, aa, gi, cc)
     print('loot: every address in jni/src/loot_memory.h matches the shipped images')

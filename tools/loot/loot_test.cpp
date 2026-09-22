@@ -183,6 +183,124 @@ struct Game {
     void publish_all() {
         for (size_t t = 0; t < loops.size(); ++t) publish(t);
     }
+    // ---- Zenject DI: модель службы окон для детекта (читается контроллером) --
+    struct Di {
+        std::vector<uint64_t> ids;      // 161 указ.-«строка» в статиках id-класса
+        uint64_t service = 0;
+        uint64_t dict_a = 0, dict_b = 0;
+        bool built = false;
+    } di;
+
+    uint64_t di_dict(const std::vector<uint64_t>& keys) {
+        const uint32_t cap = static_cast<uint32_t>(keys.size()) + 3;  // лишние = свободные записи
+        const uint64_t entries = io.alloc(0x20 + cap * kDiWinStride + 8);
+        io.set<uint64_t>(entries, io.klass("Entry[]", "System.Collections.Generic"));
+        io.set<int32_t>(entries + kDiArrayLen, static_cast<int32_t>(cap));
+        const uint64_t d = io.alloc(0x40);
+        io.set<uint64_t>(d, io.klass("Dictionary`2", "System.Collections.Generic"));
+        io.set<uint64_t>(d + kDiDictEntries, entries);
+        io.set<int32_t>(d + kDiDictCount, static_cast<int32_t>(keys.size()));
+        for (size_t i = 0; i < keys.size(); ++i) {
+            const uint64_t e = entries + kDiArrayData + i * kDiWinStride;
+            io.set<int32_t>(e, 0x1000 + static_cast<int32_t>(i));   // hashCode >= 0: живая
+            io.set<int32_t>(e + 4, -1);                             // next
+            io.set<uint64_t>(e + kDiWinKey, keys[i]);
+        }
+        // Одна явно пустая запись (hashCode < 0) за живыми: не должна считаться.
+        if (!keys.empty()) {
+            const uint64_t e = entries + kDiArrayData + keys.size() * kDiWinStride;
+            io.set<int32_t>(e, -1);
+        }
+        return d;
+    }
+    // Собрать контейнер вокруг сервиса: ProjectContext(статики) -> инстанс ->
+    // контейнер -> словарь биндингов с ключом BindingId.Type == интерфейс.
+    // skip_iface / wrong_cached_klass / wrong_service_klass ломают цепь по сценарию.
+    void build_zenject(int open_root, int open_overlay,
+                       bool unknown_key = false, bool skip_iface = false,
+                       bool wrong_cached_klass = false, bool wrong_service_klass = false) {
+        // id-класс окон: статики с 161 указателем на «строки» WindowId.
+        for (uint32_t k = 0; k < kDiIdsCount; ++k) di.ids.push_back(io.alloc(0x20));
+        const uint64_t ids_block = io.alloc(kDiIdsCount * 8 + 8);
+        for (uint32_t k = 0; k < kDiIdsCount; ++k)
+            io.set<uint64_t>(ids_block + k * 8, di.ids[k]);
+        const uint64_t ids_klass = io.klass("idsclass", "");
+        io.set<uint64_t>(ids_klass + 0xB8, ids_block);
+        io.set<uint64_t>(base + layout.ids_typeinfo, ids_klass);
+        // Сервис окон.
+        di.service = io.alloc(0x100);
+        io.set<uint64_t>(di.service,
+                         io.klass(wrong_service_klass ? "not-service" : layout.service_name, ""));
+        std::vector<uint64_t> keys_a, keys_b;
+        for (int i = 0; i < open_root; ++i) keys_a.push_back(di.ids[i]);
+        for (int i = 0; i < open_overlay; ++i) keys_b.push_back(di.ids[32 + i]);
+        if (unknown_key) keys_b.push_back(io.alloc(0x20));           // чужая строка
+        di.dict_a = di_dict(keys_a);
+        di.dict_b = di_dict(keys_b);
+        io.set<uint64_t>(di.service + kDiServiceDictA, di.dict_a);
+        io.set<uint64_t>(di.service + kDiServiceDictB, di.dict_b);
+        // CachedProvider с одним инстансом.
+        const uint64_t provider = io.alloc(0x40);
+        io.set<uint64_t>(provider,
+                         io.klass(wrong_cached_klass ? "TransientProvider" : "CachedProvider", "Zenject"));
+        const uint64_t insts = io.alloc(0x40);
+        io.set<uint64_t>(insts, io.klass("List`1", "System.Collections.Generic"));
+        io.set<uint64_t>(insts + kDiListItems, array({di.service}));
+        io.set<int32_t>(insts + kDiListSize, 1);
+        io.set<uint64_t>(provider + kDiProvInstances, insts);
+        const uint64_t info = io.alloc(0x40);
+        io.set<uint64_t>(info, io.klass("ProviderInfo", "Zenject"));
+        io.set<uint64_t>(info + kDiProviderInfo, provider);
+        const uint64_t prov_list = io.alloc(0x40);
+        io.set<uint64_t>(prov_list, io.klass("List`1", "System.Collections.Generic"));
+        io.set<uint64_t>(prov_list + kDiListItems, array({info}));
+        io.set<int32_t>(prov_list + kDiListSize, 1);
+        // BindingId.Type == интерфейс: Type (+0x10 → Il2CppType; [0] → klass).
+        const uint64_t iface_klass = io.klass(layout.iface_name, "");
+        const uint64_t il2c_type = io.alloc(0x10);
+        io.set<uint64_t>(il2c_type, iface_klass);
+        const uint64_t type_obj = io.alloc(0x20);
+        io.set<uint64_t>(type_obj, io.klass("RuntimeType", "System"));
+        io.set<uint64_t>(type_obj + kDiTypeImpl, il2c_type);
+        // Мешающий биндинг с другим типом ключа.
+        const uint64_t other_klass = io.klass("OtherService", "Other");
+        const uint64_t other_type = io.alloc(0x10);
+        io.set<uint64_t>(other_type, other_klass);
+        const uint64_t other_obj = io.alloc(0x20);
+        io.set<uint64_t>(other_obj, io.klass("RuntimeType", "System"));
+        io.set<uint64_t>(other_obj + kDiTypeImpl, other_type);
+        // Словарь биндингов: distractor, [iface], свободная запись.
+        std::vector<uint64_t> binding_keys = {other_obj};
+        if (!skip_iface) binding_keys.push_back(type_obj);
+        const uint32_t bcap = 6;
+        const uint64_t bentries = io.alloc(0x20 + bcap * kDiBindStride + 8);
+        io.set<uint64_t>(bentries, io.klass("Entry[]", "System.Collections.Generic"));
+        io.set<int32_t>(bentries + kDiArrayLen, static_cast<int32_t>(bcap));
+        for (size_t i = 0; i < binding_keys.size(); ++i) {
+            const uint64_t e = bentries + kDiArrayData + i * kDiBindStride;
+            io.set<int32_t>(e, 0x2000 + static_cast<int32_t>(i));
+            io.set<int32_t>(e + 4, -1);
+            io.set<uint64_t>(e + kDiBindKeyType, binding_keys[i]);
+        }
+        if (!skip_iface) io.set<uint64_t>(bentries + kDiArrayData + kDiBindStride + kDiBindValue, prov_list);
+        io.set<int32_t>(bentries + kDiArrayData + 2 * kDiBindStride, -1);  // свободная
+        const uint64_t providers = io.alloc(0x40);
+        io.set<uint64_t>(providers, io.klass("Dictionary`2", "System.Collections.Generic"));
+        io.set<uint64_t>(providers + kDiDictEntries, bentries);
+        io.set<int32_t>(providers + kDiDictCount, static_cast<int32_t>(binding_keys.size()));
+        const uint64_t container = io.alloc(0x80);
+        io.set<uint64_t>(container, io.klass("DiContainer", "Zenject"));
+        io.set<uint64_t>(container + kDiContainerProviders, providers);
+        const uint64_t instance = io.alloc(0x80);
+        io.set<uint64_t>(instance + kDiProjCtxContainer, container);
+        const uint64_t statics = io.alloc(0x40);
+        io.set<uint64_t>(statics + kDiProjCtxInstance, instance);
+        const uint64_t projctx_klass = io.klass("ProjectContext", "Zenject");
+        io.set<uint64_t>(projctx_klass + 0xB8, statics);
+        io.set<uint64_t>(base + layout.projctx_typeinfo, projctx_klass);
+        di.built = true;
+    }
+
     // A pending delay of the stock collect-all coroutine.
     uint64_t make_collect_promise(Kind kind, float duration = 0.35f) {
         const size_t index = static_cast<size_t>(kind);
@@ -878,6 +996,9 @@ int main() {
     {
         for (const auto& layout : kLayouts) {
             assert(layout.helper_typeinfo > 0x100000);
+            assert(layout.projctx_typeinfo > 0x100000 && layout.ids_typeinfo > 0x100000);
+            assert(layout.iface_name[0] == 'm' || layout.iface_name[0] == 'q');
+            assert(layout.service_name[0] == layout.iface_name[0]);
             for (const auto& flow : layout.flow) {
                 assert(flow.run > 0x100000 && flow.move_next > 0x100000);
                 assert(flow.delay_site > 0x100000);
@@ -888,9 +1009,10 @@ int main() {
                 // ldr s0,[x8] / ldr s0,[x8,#imm]: the retired patch site.
                 assert((flow.delay_word & 0xFFC003E0u) == 0xBD400100u);
                 assert(flow.delay_word == 0xBD495100u || flow.delay_word == 0xBD400100u);
-                // Две инструкции вызова задержки, которые убирает наш патч:
-                // `mov w0, #1` за 8 байт до загрузки константы и `bl` — через 4
-                // слова после неё. Сами байты перепроверяет check_native.py.
+                // Две инструкции у точки задержки как опознавательные знаки
+                // «поток штатный»: `mov w0, #1` за 8 байт до загрузки константы
+                // и `bl` — через 4 слова после неё. Сами байты перепроверяет
+                // check_native.py; несовпадение читается как чужая правка.
                 assert(flow.flag_word == 0x52800020u);
                 assert((flow.call_word & 0xFC000000u) == 0x94000000u);
                 assert(flow.flag_site + 8 == flow.delay_site);
@@ -899,6 +1021,103 @@ int main() {
         }
         std::printf("layouts: %zu images, %zu flows each\n",
                     sizeof(kLayouts) / sizeof(kLayouts[0]), kFlowCount);
+    }
+
+    // ---- 16. Детект окна через DI: только чтение, отказ без догадок --------
+    for (size_t image = 0; image < sizeof(kLayouts) / sizeof(kLayouts[0]); ++image) {
+        {
+            // Полная цепочка: ProjectContext -> контейнер -> биндинг интерфейса
+            // -> CachedProvider -> инстанс сервиса -> словари окон.
+            Game g(image);
+            g.map_library();
+            g.build_unitask();
+            g.build_zenject(2, 1);
+            Controller<FakeMemory> c(g.io);
+            frame(g, c, 1, true);
+            const Diagnostics d = c.diagnostics();
+            assert(d.di_stage == 5 && d.di_fail == 0);
+            assert(d.di_root == 2 && d.di_overlay == 1 && d.di_unknown == 0);
+            assert(d.di_scans == 1);
+            // Спонтанное повторное открытие окна: словари перечитываются
+            // периодически, новые ключи подхватываются.
+            g.start_collect(4, Kind::Container);
+            for (int i = 0; i < static_cast<int>(kDiScanFrames + 2); ++i) frame(g, c, 1, true);
+            assert(c.diagnostics().di_stage == 5);
+            std::printf("window-detect: image %zu full chain, 2 open + 1 overlay\n", image);
+        }
+        {
+            // Неизвестный ключ окна (не из таблицы id) считается отдельно.
+            Game g(image);
+            g.map_library();
+            g.build_unitask();
+            g.build_zenject(1, 1, true);
+            Controller<FakeMemory> c(g.io);
+            frame(g, c, 1, true);
+            const Diagnostics d = c.diagnostics();
+            assert(d.di_stage == 5 && d.di_root == 1 && d.di_overlay == 2 && d.di_unknown == 1);
+        }
+        {
+            // Цепи контекста нет: отказ по самому раннему звену, подбор не тронут.
+            Game g(image);
+            g.map_library();
+            g.build_unitask();
+            g.start_collect(4, Kind::Container);
+            Controller<FakeMemory> c(g.io);
+            for (int i = 0; i < 80 && !g.collect.finished; ++i) frame(g, c, 1, true);
+            assert(c.diagnostics().di_fail == 1);
+            assert(g.collect.finished && g.collect.moved == 4);
+            assert(c.diagnostics().status == Status::Active ||
+                   c.diagnostics().status == Status::Waiting);
+        }
+        {
+            // Биндинг интерфейса отсутствует среди чужих — «не найдено»,
+            // и это не отказ образа: подбор продолжает работать.
+            Game g(image);
+            g.map_library();
+            g.build_unitask();
+            g.build_zenject(0, 0, false, true);
+            g.start_collect(4, Kind::Container);
+            Controller<FakeMemory> c(g.io);
+            for (int i = 0; i < 70 && !g.collect.finished; ++i) frame(g, c, 1, true);
+            const Diagnostics d = c.diagnostics();
+            assert(d.di_stage == 3 && d.di_fail == 6);
+            assert(g.collect.finished);
+        }
+        {
+            // Провайдер не CachedProvider или класс инстанса не сервис — отказ,
+            // поверх несовпадения ничего не принимается.
+            Game g(image);
+            g.map_library();
+            g.build_unitask();
+            g.build_zenject(0, 0, false, false, true);
+            Controller<FakeMemory> c(g.io);
+            frame(g, c, 1, true);
+            assert(c.diagnostics().di_fail == 8);
+            Game g2(image);
+            g2.map_library();
+            g2.build_unitask();
+            g2.build_zenject(0, 0, false, false, false, true);
+            Controller<FakeMemory> c2(g2.io);
+            frame(g2, c2, 1, true);
+            assert(c2.diagnostics().di_fail == 10);
+        }
+        {
+            // Выкл: ди-диагностика обнуляется, состояние сохраняется и
+            // продолжает после вкл без повторного поиска сервиса.
+            Game g(image);
+            g.map_library();
+            g.build_unitask();
+            g.build_zenject(1, 0);
+            Controller<FakeMemory> c(g.io);
+            frame(g, c, 1, true);
+            assert(c.diagnostics().di_stage == 5 && c.diagnostics().di_root == 1);
+            frame(g, c, 1, false);
+            const Diagnostics d = c.diagnostics();
+            assert(d.di_stage == 0 && d.di_root == 0 && d.di_overlay == 0);
+            frame(g, c, 1, true);
+            assert(c.diagnostics().di_stage == 5 && c.diagnostics().di_root == 1);
+        }
+        std::printf("window-detect: image %zu refusal paths ok\n", image);
     }
 
     std::puts("loot: all instant-pickup controller checks passed");

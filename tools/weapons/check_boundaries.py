@@ -51,6 +51,23 @@ assert 'if (!object_data::heap_writable(text, address, sizeof(T))) {' in loot_he
 assert 'note_refusal(text, address);' in loot_heap
 assert 'std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps")' in loot_heap
 assert loot_heap.count('g_mem.write(') == 1      # the heap writer only
+# The DI window detection is held to the same read-only contract: fixed
+# layout constants from il2cpp.h (смещения одинаковы release↔beta).
+for needle in ('kDiProjCtxInstance  = 0x20', 'kDiProjCtxContainer = 0x60',
+               'kDiContainerProviders = 0x18', 'kDiDictEntries   = 0x18',
+               'kDiDictCount     = 0x20', 'kDiBindStride    = 0x20',
+               'kDiBindKeyType   = 0x08', 'kDiBindValue     = 0x18',
+               'kDiTypeImpl      = 0x10', 'kDiListItems     = 0x10',
+               'kDiListSize      = 0x18', 'kDiProviderInfo  = 0x20',
+               'kDiProvInstances = 0x18', 'kDiWinStride     = 0x18',
+               'kDiWinKey        = 0x08', 'kDiServiceDictA  = 0x50',
+               'kDiServiceDictB  = 0x58', 'kDiIdsCount      = 161',
+               'kDiMaxBindings   = 4096'):
+    assert needle in loot_controller, needle
+# Детект окна — только диагностика: сервис ищется через интерфейс, провайдер
+# singleton-а и класс инстанса сверяются по имени, записей нет (см. выше).
+assert 'layout_->iface_name' in loot_controller and 'layout_->service_name' in loot_controller
+assert '"CachedProvider", "Zenject"' in loot_controller
 
 menu = (root / 'jni/src/menu.cpp').read_text()
 assert '##fastloot' not in menu
