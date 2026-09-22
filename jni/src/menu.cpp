@@ -9,7 +9,6 @@
 #include "ui_util.h"
 #include "widgets.h"
 #include "config.h"
-#include "loot.h"          // esp_loot_* (мгновенный подбор)
 #include "hud.h"
 #include "audio.h"
 #include "str.h"
@@ -926,15 +925,11 @@ float TabContent(int tab, float dt, float cW) {
                  (vm.no_spread && weaponStatus.no_spread == viewmodel::Status::Waiting))
             ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
 
-        // Мгновенный подбор: задержка между предметами в «Собрать всё» живёт в
-        // объекте ожидания (UniTask), а не в коде — дописываем его elapsed в куче,
-        // и игровой цикл сам продолжает корутину на следующем же кадре. Код и
-        // данные библиотек не меняются, по выключению восстанавливать нечего.
+        // Мгновенный подбор: логики больше нет (по запросу) — ряд оставлен
+        // только как кнопка (флаг хранится, тумблер переключается).
         SHdr(XS("Подбор"));
         CardBg(Layout::RowH);
-        const bool oldLoot = vm.fast_loot;
         ToggleRow("##instantloot", XS("Мгновенный подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
-        if (oldLoot != vm.fast_loot) esp_loot_tick(vm.fast_loot);
 
         SHdr(XS("Лимит FPS"));
         {

@@ -11,7 +11,6 @@
 #include "widgets.h"
 #include "menu.h"
 #include "config.h"
-#include "loot.h"
 #include "logfile.h"
 #include "theme.h"
 #include "app_state.h"
@@ -112,105 +111,6 @@ int main(int argc, char* argv[]) {
 
         esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
         esp_viewmodel_tick(g_state.viewmodel); // independent of ESP/aim/farm
-        // Мгновенный подбор: один тик на кадр, как и у остальных фич —
-        // больше одного предмета за кадр игра всё равно не переносит.
-        esp_loot_tick(g_state.viewmodel.fast_loot);
-        {
-            // Отказ разблока подбора показывается всплывающим тостом при
-            // самом переходе: меню у переключателя остаётся чистым, а провал
-            // в бою не молчит. Прежде это была строка статуса под тумблером.
-            static loot::Diagnostics s_loot_toast_prev{};
-            const auto ld = esp_loot_diagnostics();
-            if (g_state.viewmodel.fast_loot && ld.status == loot::Status::Failed &&
-                (ld.status != s_loot_toast_prev.status || ld.reason != s_loot_toast_prev.reason)) {
-                char msg[192];
-                // Число к отказу (например, при timer — биты elapsed<<32|duration)
-                // нужно, чтобы определить отказ по отчёту без журнала.
-                snprintf(msg, sizeof(msg), "%s (%s) Данные: %llX",
-                         "Мгновенный подбор: не применено", loot::reason_name(ld.reason),
-                         (unsigned long long)ld.detail);
-                ShowToast(msg);
-            }
-            // Подписи открытых окон: одноразовый тост при первом удачном
-            // DI-скане после включения тумблера. Это единственный способ увидеть
-            // живые имена id окон (статические строки в пришедших дампах не
-            // читаются), гейты подбора/тапа отсюда не зависят.
-            if (g_state.viewmodel.fast_loot && ld.di_stage == 5 &&
-                s_loot_toast_prev.di_stage != 5) {
-                char msg[256]; size_t n = 0;
-                n += (size_t)snprintf(msg + n, sizeof(msg) - n, "Окна (di): %u",
-                                      (unsigned)(ld.di_root + ld.di_overlay));
-                const uint32_t lim = ld.di_names_n < 6 ? ld.di_names_n : 6;
-                for (uint32_t i = 0; i < lim && n < sizeof(msg) - 40; ++i)
-                    n += (size_t)snprintf(msg + n, sizeof(msg) - n, "%s%s(%d)",
-                                          i ? "," : " ", ld.di_names[i],
-                                          (int)ld.di_idindex[i]);
-                ShowToast(msg);
-            }
-            // Одноразовый статус-отчёт через ~3 сек после включения тумблера.
-            // Журнал в этой сборке вырезан, а тосты выше срабатывают только на
-            // Failed и на di_stage==5: если скан окон застрял посередине, а
-            // подбор молчит в Waiting, без этого отчёта устройство видит
-            // тишину. Цифры расшифровываются по таблице в FAST_LOOT.md.
-            static bool s_loot_prev_enabled = false;
-            static int s_loot_report_arm = 0;
-            if (g_state.viewmodel.fast_loot != s_loot_prev_enabled) {
-                s_loot_prev_enabled = g_state.viewmodel.fast_loot;
-                s_loot_report_arm = g_state.viewmodel.fast_loot ? 180 : 0;
-                // Журнал функции пишется в Загрузки: сообщаем путь один раз
-                // на включение, чтобы файл было откуда забрать без гадания.
-                if (g_state.viewmodel.fast_loot) {
-                    const char* path = esp_loot_log_path();
-                    char msg[256];
-                    if (path[0])
-                        snprintf(msg, sizeof(msg), "Журнал подбора: %s", path);
-                    else
-                        snprintf(msg, sizeof(msg), "%s", "Журнал подбора не открылся");
-                    ShowToast(msg);
-                }
-            }
-            if (g_state.viewmodel.fast_loot && s_loot_report_arm > 0 &&
-                --s_loot_report_arm == 0) {
-                char msg[256]; size_t n = 0;
-                n += (size_t)snprintf(msg + n, sizeof(msg) - n,
-                         "Подбор: st=%d fl=%u ex=%llu di=%d:%d r=%u o=%u u=%u",
-                         (int)ld.status, (unsigned)ld.flows,
-                         (unsigned long long)ld.expired,
-                         (int)ld.di_stage, (int)ld.di_fail,
-                         (unsigned)ld.di_root, (unsigned)ld.di_overlay,
-                         (unsigned)ld.di_unknown);
-                // Диагностика цикла биндингов (он же «почему ключи пусты»):
-                // visited/count/cap и ступени ключа type->impl->klass.
-                if (ld.di_stage >= 3 && ld.di_stage < 5) {
-                    n += (size_t)snprintf(msg + n, sizeof(msg) - n,
-                             " w=%u/%u/%u k%u t%u p%u i%llX",
-                             (unsigned)ld.di_walk_visited,
-                             (unsigned)ld.di_walk_count,
-                             (unsigned)ld.di_walk_cap,
-                             (unsigned)ld.di_walk_keyread,
-                             (unsigned)ld.di_walk_tclass,
-                             (unsigned)ld.di_walk_inst,
-                             (unsigned long long)ld.di_walk_impl0);
-                }
-                // Пока скан окон не дошёл до 5, в di_names лежат не подписи
-                // окон, а имена классов ключей биндингов Zenject — косвенное
-                // свидетельство, как сервис окон зарегистрирован в СБОРКЕ
-                // Заказчика. Показываем до 4 непустых.
-                if (ld.di_stage != 5 && ld.di_names_n) {
-                    n += (size_t)snprintf(msg + n, sizeof(msg) - n, "%s", " ключи:");
-                    uint32_t shown = 0;
-                    for (uint32_t i = 0; i < ld.di_names_n && i < 8 && shown < 4 &&
-                                    n < sizeof(msg) - 36; ++i) {
-                        if (!ld.di_names[i][0]) continue;
-                        ++shown;
-                        n += (size_t)snprintf(msg + n, sizeof(msg) - n, " %s(%d)",
-                                              ld.di_names[i], (int)ld.di_idindex[i]);
-                    }
-                }
-                ShowToast(msg);
-            }
-            s_loot_toast_prev = ld;
-        }
         LogStage(kStageEsp);
         DrawEspOverlay();
         slowMark();   // 1: после ESP
@@ -285,7 +185,6 @@ int main(int argc, char* argv[]) {
     esp_freecam_set(false);
     stop_attach_thread();
     esp_viewmodel_reset(true);
-    esp_loot_reset();
     process_detach();
     Blur::Free();
     CfgWatchFree();

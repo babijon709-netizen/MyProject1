@@ -12,7 +12,7 @@ struct ViewmodelSettings {
     int fps_limit = 0; // 0 = original game limit; otherwise 90 / 120 / 144
     bool no_recoil = false, no_spread = false;
     // Мгновенный подбор: не трогает код игры, дописывает только float в куче
-    // (см. loot.h). Живёт в общих настройках, но применяется отдельным тиком.
+    // Кнопка сохранена, логики нет — флаг не влияет на игру.
     bool fast_loot = false;
 };
 

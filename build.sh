@@ -19,8 +19,6 @@ echo "Testing viewmodel memory controller"
 sh "${ROOT}/tools/viewmodel/run.sh"
 echo "Testing object-data weapon controller"
 sh "${ROOT}/tools/weapons/run.sh"
-echo "Testing instant-pickup controller"
-sh "${ROOT}/tools/loot/run.sh"
 
 # Экспериментальный внутрипроцессный модуль подбора: отдельная библиотека, в
 # xvcen она не попадает. Ошибка её сборки НЕ ломает обычную сборку — печатается

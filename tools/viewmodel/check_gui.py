@@ -24,7 +24,10 @@ for setting, anim in [('fov_enabled', 'a_custom_fov'),
                      r'\s*,\s*g_state\.viewmodel\.' + setting +
                      r'\s*,\s*dt\s*\)', menu), f'missing animation update: {setting}'
 pickup = menu.split('SHdr(XS("Подбор"))', 1)[1].split('SHdr(', 1)[0]
-assert 'ToggleRow("##instantloot"' in pickup and 'esp_loot_tick' in pickup, 'the toggle must still tick'
+# Фича удалена по запросу: остался только тумблер, вызовов логики —
+# нет (esp_loot_tick/EspLootState/тосты запрещены секцией ниже тоже).
+assert 'ToggleRow("##instantloot"' in pickup, 'the toggle row must stay'
+assert 'esp_loot_tick' not in pickup, 'no logic calls must remain'
 for banned in ('lootStatus', 'LootReasonText', 'LootKindText', 'esp_loot_diagnostics', 'esp_loot_refusal'):
     assert banned not in pickup, 'diagnostics must not be rendered under the toggle: %s' % banned
 # The FPS section must spell out the selected mode and whether it stuck:
