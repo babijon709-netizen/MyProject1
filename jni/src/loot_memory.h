@@ -424,6 +424,22 @@ template<class IO> class Controller {
         diag_.di_walk_impl0 = 0;
         diag_.di_walk_inst = 0;
         int32_t inst_logged = 0;
+        // Статик-класс id окон — чисто числовой канал (RVA из таблицы версии,
+        // без обфусцированных имён). class WindowId namespaced и не тронут
+        // обфускатором, поэтому id0 служит свидетелем канала.
+        uint64_t ids_klass = 0, ids_pre = 0;
+        const bool ids_ok = di_read(base_ + layout_->ids_typeinfo, ids_klass) &&
+                            di_read(ids_klass + 0xB8, ids_pre) && ids_pre >= 0x10000;
+        if (ids_ok) {
+            const uint64_t id0 = io.ptr(ids_pre);
+            char idn[kDiNameMaxLen]{};
+            if (id0 >= 0x10000 && io.klass_name(io.ptr(id0), idn, kDiNameMaxLen) && idn[0])
+                di_name_sanitize(idn, static_cast<int32_t>(std::strlen(idn)));
+            io.trace("di: ids=%llx id0=%llx klass='%s'",
+                     (unsigned long long)ids_pre, (unsigned long long)id0, idn);
+        } else {
+            io.trace("di: ids-канал не читается (RVA таблицы не для этой сборки?)");
+        }
         // Общий выход: положить сервис+статики id-класса и отчитаться.
         auto di_finish = [&](uint64_t svc) -> bool {
             uint64_t ids_klass = 0, ids = 0;
@@ -595,7 +611,7 @@ template<class IO> class Controller {
                         if (inst_logged < 12) {
                             ++inst_logged;
                             char pn[kDiNameMaxLen]{};
-                            if (io.klass_name(provider, pn, kDiNameMaxLen) && pn[0])
+                            if (io.klass_name(io.ptr(provider), pn, kDiNameMaxLen) && pn[0])
                                 di_name_sanitize(pn, static_cast<int32_t>(std::strlen(pn)));
                             io.trace("di: p%d e%d prov='%s'", (int)inst_logged, (int)i, pn);
                         }
@@ -626,6 +642,44 @@ template<class IO> class Controller {
                                 }
                                 if (io.klass_named(sklass, layout_->service_name, ""))
                                     svc_by_value = first;
+                                // Имя-независимая идентификация: токен сервиса
+                                // на устройстве отличается от дампа сборки, но
+                                // у него есть словарь, ключи которого — те самые
+                                // WindowId-инстансы, что лежат в статиках id-
+                                // класса. Ищем такой словарь среди полей.
+                                if (!svc_by_value && ids_ok) {
+                                    for (uint64_t off = 0x10; off <= 0x88 && !svc_by_value; off += 8) {
+                                        const uint64_t dict = io.ptr(first + off);
+                                        if (dict < 0x10000) continue;
+                                        int32_t dcnt = 0;
+                                        if (!di_read_i32(dict + kDiDictCount, dcnt) || dcnt < 1 || dcnt > 128)
+                                            continue;
+                                        uint64_t dentries = 0;
+                                        if (!di_read(dict + kDiDictEntries, dentries)) continue;
+                                        int32_t dcap = 0;
+                                        if (!di_read_i32(dentries + kDiArrayLen, dcap) || dcap < dcnt || dcap > 512)
+                                            continue;
+                                        int32_t used = 0;
+                                        for (int32_t e2 = 0; e2 < dcap && used < 12 && !svc_by_value; ++e2) {
+                                            int32_t h = 0;
+                                            const uint64_t de = dentries + kDiArrayData + (uint64_t)e2 * kDiWinStride;
+                                            if (!di_read_i32(de, h)) break;
+                                            if (h < 0) continue;
+                                            ++used;
+                                            const uint64_t key = io.ptr(de + kDiWinKey);
+                                            if (key < 0x10000) break;
+                                            for (uint32_t j = 0; j < kDiIdsCount; ++j) {
+                                                if (io.ptr(ids_pre + j * 8) == key) {
+                                                    svc_by_value = first;
+                                                    io.trace("di: контент e%d off=%llx ключ=%llx id=%u",
+                                                             (int)i, (unsigned long long)off,
+                                                             (unsigned long long)key, (unsigned)j);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
