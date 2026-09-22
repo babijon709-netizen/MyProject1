@@ -13,6 +13,9 @@
 //                        where one frame of staleness could mean writing into
 //                        an object the pool has already handed to someone else.
 //   klass_named(klass, name, namespaze)  exact Il2CppClass name+namespace match.
+//   klass_name(klass, out, len)          read-only class-name capture for the
+//                        diagnostics channel; empty string on failure, no gate
+//                        ever trusts it.
 //   write_heap<T>        the only writer, behind the anonymous-heap gate.
 //
 // How a live delay is found (every step is a read, and every step must pass):
@@ -406,6 +409,23 @@ template<class IO> class Controller {
             if (!di_read(entry + kDiBindKeyType, type_)) continue;
             const uint64_t tclass = io.ptr(io.ptr(type_ + kDiTypeImpl));
             if (tclass < 0x10000) continue;
+            // Свидетельный канал «почему не нашли»: имена классов первых
+            // биндингов уходят в диагностику (тот же буфер, куда потом скан
+            // кладёт подписи окон — перезапишет). Только чтение, ни один
+            // гейт на эти строки не опирается.
+            if (visited <= static_cast<int32_t>(kDiMaxNames)) {
+                const size_t slot = static_cast<size_t>(visited - 1);
+                char* dst = diag_.di_names[slot].data();
+                dst[0] = 0;
+                if (io.klass_name(tclass, dst, kDiNameMaxLen) && dst[0]) {
+                    di_name_sanitize(dst, static_cast<int32_t>(std::strlen(dst)));
+                }
+                if (dst[0]) {
+                    diag_.di_idindex[slot] = i;      // порядковый номер записи словаря
+                    diag_.di_overlay_win[slot] = 0;  // не окно: пометка «не оверлей»
+                    diag_.di_names_n = static_cast<uint32_t>(visited);
+                }
+            }
             if (!io.klass_named(tclass, layout_->iface_name, "")) continue;
             // Нашёлся биндинг сервиса. Ровно один провайдер, формы CachedProvider.
             uint64_t list = 0;

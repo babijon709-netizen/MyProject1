@@ -82,6 +82,14 @@ struct FakeMemory {
         auto it = classes.find(klass);
         return it != classes.end() && it->second.first == name && it->second.second == namespaze;
     }
+    bool klass_name(uint64_t klass, char* out, size_t out_len) {
+        if (!out || out_len < 2) return false;
+        out[0] = 0;
+        auto it = classes.find(klass);
+        if (it == classes.end()) return false;
+        std::snprintf(out, out_len, "%s", it->second.first.c_str());
+        return true;
+    }
     template<class T> bool write_heap(uint64_t p, const T& v) {
         if (p == fail_write) return false;
         if (before_write) before_write(p);
@@ -1167,6 +1175,11 @@ int main() {
             const Diagnostics d = c.diagnostics();
             assert(d.di_stage == 3 && d.di_fail == 6);
             assert(g.collect.finished);
+            // Свидетельный канал: при отказе «интерфейс не найден» имена
+            // классов ключей биндингов подняты в диагностику (только чтение).
+            assert(d.di_names_n >= 1);
+            assert(std::memcmp(d.di_names[0].data(), "OtherService", 13) == 0);
+            assert(d.di_idindex[0] == 0 && d.di_overlay_win[0] == 0);
         }
         {
             // Провайдер не CachedProvider или класс инстанса не сервис — отказ,

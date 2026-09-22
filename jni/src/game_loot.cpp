@@ -102,6 +102,20 @@ struct Memory {
         if (!sp) return namespaze[0] == '\0';
         return g_mem.read_quiet(sp, ns, sl) && std::memcmp(ns, namespaze, sl) == 0;
     }
+    // Живое имя класса для свидетельного канала диагностики (ключи биндингов
+    // Zenject, тост сводки): только чтение; неудача — пустая строка, ни один
+    // гейт на содержимое не опирается. Свежие чтения в обход кадрового кэша.
+    bool klass_name(uint64_t klass, char* out, size_t out_len) {
+        using namespace go_active;
+        if (!out || out_len < 2) return false;
+        out[0] = 0;
+        if (klass < 0x10000) return false;
+        const uint64_t np = ptr(klass + IL2CPP_CLASS_NAME);
+        if (!np) return false;
+        if (!g_mem.read_quiet(np, out, out_len - 1)) { out[0] = 0; return false; }
+        out[out_len - 1] = 0;
+        return true;
+    }
     // Единственный писатель. Не наследует read(): карта памяти обязана быть
     // свежей на момент КАЖДОЙ записи, а не на момент начала кадра.
     template<class T> bool write_heap(uint64_t address, const T& value) {

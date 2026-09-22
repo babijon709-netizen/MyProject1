@@ -160,14 +160,29 @@ int main(int argc, char* argv[]) {
             }
             if (g_state.viewmodel.fast_loot && s_loot_report_arm > 0 &&
                 --s_loot_report_arm == 0) {
-                char msg[192];
-                snprintf(msg, sizeof(msg),
+                char msg[256]; size_t n = 0;
+                n += (size_t)snprintf(msg + n, sizeof(msg) - n,
                          "Подбор: st=%d fl=%u ex=%llu di=%d:%d r=%u o=%u u=%u",
                          (int)ld.status, (unsigned)ld.flows,
                          (unsigned long long)ld.expired,
                          (int)ld.di_stage, (int)ld.di_fail,
                          (unsigned)ld.di_root, (unsigned)ld.di_overlay,
                          (unsigned)ld.di_unknown);
+                // Пока скан окон не дошёл до 5, в di_names лежат не подписи
+                // окон, а имена классов ключей биндингов Zenject — косвенное
+                // свидетельство, как сервис окон зарегистрирован в СБОРКЕ
+                // Заказчика. Показываем до 4 непустых.
+                if (ld.di_stage != 5 && ld.di_names_n) {
+                    n += (size_t)snprintf(msg + n, sizeof(msg) - n, "%s", " ключи:");
+                    uint32_t shown = 0;
+                    for (uint32_t i = 0; i < ld.di_names_n && i < 8 && shown < 4 &&
+                                    n < sizeof(msg) - 36; ++i) {
+                        if (!ld.di_names[i][0]) continue;
+                        ++shown;
+                        n += (size_t)snprintf(msg + n, sizeof(msg) - n, " %s(%d)",
+                                              ld.di_names[i], (int)ld.di_idindex[i]);
+                    }
+                }
                 ShowToast(msg);
             }
             s_loot_toast_prev = ld;
