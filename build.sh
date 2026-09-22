@@ -16,9 +16,31 @@ if [[ ! -x "${NDK}/ndk-build" ]]; then
 fi
 
 echo "Testing viewmodel memory controller"
-sh "${ROOT}/tools/viewmodel/run.sh"
+_run_suite() {
+    # Вывод тестов пишется в лог; при падении хвост выносится в GitHub-аннотации
+    # (::error::) — raw-логи не всегда доступны локально, а аннотации отдаются
+    # REST API. Стилистика — как у диагностики ndk-build ниже.
+    local label="$1" script="$2" log status=0
+    log="$(mktemp)"
+    sh "${script}" >"${log}" 2>&1 || status=$?
+    if [[ "${status}" -eq 0 ]]; then
+        echo "${label}: OK"
+        tail -n 2 "${log}" || true
+        rm -f "${log}"
+        return 0
+    fi
+    echo "${label}: FAILED (exit ${status})" >&2
+    tail -n 40 "${log}" >&2 || true
+    grep -E "Assertion|error:|fatal error:|terminate|what\(\)|Aborted|core dumped|Segmentation|internal compiler error|Stack dump" \
+        "${log}" | tail -n 15 | cut -c1-180 | while IFS= read -r _line; do
+        echo "::error title=${label}::${_line}"
+    done
+    rm -f "${log}"
+    return "${status}"
+}
+_run_suite "viewmodel tests" "${ROOT}/tools/viewmodel/run.sh"
 echo "Testing object-data weapon controller"
-sh "${ROOT}/tools/weapons/run.sh"
+_run_suite "weapon tests" "${ROOT}/tools/weapons/run.sh"
 
 # Экспериментальный внутрипроцессный модуль подбора: отдельная библиотека, в
 # xvcen она не попадает. Ошибка её сборки НЕ ломает обычную сборку — печатается
