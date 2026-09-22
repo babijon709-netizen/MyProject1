@@ -1,12 +1,12 @@
 // Оффсеты БЕТА-версии игры. Файл собран tools/offsets/beta_offsets.py — правь
 // скрипт и дампы, а не здесь.
 //
-// Источник: dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9, дата сборки файла 16.09.2026.
+// Источник: dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9, дата сборки файла 22.09.2026.
 // Эталон, от которого считались отличия: релизный dump.7z и jni/src/game_offsets.h.
-// Отличий от релиза: 9 из 178 объявленных констант
-// (в карте оффсетов 178 записей).
-// Взято из релиза как есть: 36 констант раскладки IL2CPP/Unity
-// (из дампа игры они не выводятся — об этом ниже) и 3 RVA.
+// Отличий от релиза: 6 из 207 объявленных констант
+// (в карте оффсетов 210 записей).
+// Взято из релиза как есть: 40 констант раскладки IL2CPP/Unity
+// (из дампа игры они не выводятся — об этом ниже) и 4 RVA.
 // Окно скана TOD_Sky сдвинуто на дельту RVA беты (см. RVA_SHIFTED в скрипте):
 // оно зависит от того, где лежит таблица metadata-usage, а не от структур.
 // TYPEINFO_RVA пересчитаны по libil2cpp.so беты.
@@ -47,7 +47,14 @@ inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = 0xB0;  // Matrix4x4 pr
 inline constexpr std::uint64_t CAMERA_VIEW_MATRIX       = 0x70;  // Matrix4x4 worldToCamera (cached, stale!)
 inline constexpr std::uint64_t CAMERA_WORLD_TO_CLIP     = 0xF0;  // projection * worldToCamera product
 inline constexpr std::uint64_t CAMERA_PREV_VIEW_PROJ    = 0x5C8; // previousViewProjection (frame-written)
-inline constexpr std::uint64_t CAMERA_NATIVE_TRANSFORM  = 0x20;  // Transform* used by w2c dirty rebuild
+inline constexpr std::uint64_t CAMERA_NATIVE_TRANSFORM  = 0x20;  // Camera (наследник Component) + 0x20 —
+                                                                 // GameObject камеры, НЕ Transform. Проверено
+                                                                 // по libunity.so релиза: в коде пересборки
+                                                                 // матрицы вида (strb wzr,[x19,#0x502] /
+                                                                 // stp q0,q1,[x19,#0x70]) значение camera+0x20
+                                                                 // подаётся в GetComponentFastPath — то есть
+                                                                 // это GameObject. Transform камеры достаём из
+                                                                 // его массива компонентов (game.cpp).
 inline constexpr std::uint64_t CAMERA_FOV_DEGREES       = 0x170; // get_fieldOfView storage
 inline constexpr std::uint64_t CAMERA_ASPECT            = 0x4E0;
 inline constexpr std::uint64_t CAMERA_NEAR_CLIP         = 0x454;
@@ -68,10 +75,10 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // own methods and following  adrp/ldr -> R_AARCH64_RELATIVE addend -> slot,
 // keeping only slots that are then dereferenced as  ldr x8,[klass,#0xB8]
 // (Il2CppClass::static_fields) - i.e. exactly the access our reader performs.
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD9A34B8;  // бета: было 0xD8DB8B8
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD9A34B8;  // бета: было 0xD9C5310
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD99E8F0; // GameControllerBase  // бета: было 0xD8D61E8
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD99E8F0; // GameControllerBase  // бета: было 0xD9C0690
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
@@ -96,7 +103,7 @@ inline constexpr std::uint64_t UI_TEXT_MTEXT = 0xE0;
 inline constexpr std::uint64_t FPOBJECT_OBJECT_NAME = 0x78;
 // Dissonance voice identity: reliable synced display-name source.
 // PlayerManager.uWr (0x2E8, was LLT) : VoicePlayerState -> <Name>k__BackingField.
-inline constexpr std::uint64_t PLAYER_VOICE_STATE  = 0x2F8;  // бета: было 0x2E8
+inline constexpr std::uint64_t PLAYER_VOICE_STATE  = 0x2F8;
 inline constexpr std::uint64_t VOICE_STATE_NAME     = 0x38;
 // PlayerManager.voicePlayer (class pJk, was fuI) -> display string at 0x78.
 inline constexpr std::uint64_t PLAYER_VOICE_PLAYER = 0x140;
@@ -127,13 +134,41 @@ inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
 //   FPManager.<LtX>k__BackingField (0xA8) == aim blend 0..1 (secondary hint)
 inline constexpr std::uint64_t PLAYER_EVENT_HANDLER          = 0x78;
 inline constexpr std::uint64_t EVENT_HANDLER_MANAGER_BACKREF = 0xD0;
-inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x290;  // бета: было 0x270
+inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x290;
 // Remote-player held-weapon candidates (dump.cs Oxide.PlayerManager). The FP
 // manager (0x90) is a local MonoBehaviour and is often empty for other players,
 // so these are the synced/inventory-backed fallbacks to probe:
 //   0x98  inventory            (Oxide.PlayerInventory)
 //   0xF0  weaponReference      (private; likely the current remote weapon)
 //   0x198 weapons              (private array of weapon objects)
+// Признак смерти игрока: Oxide.PlayerManager.respawning (bool).
+// Источник — РЕЛИЗНЫЙ дамп (dump.cs, struct Oxide_PlayerManager_Fields):
+//     bool respawning;   // 0x208
+// Стоит единицей, пока игрок мёртв и ждёт возрождения; живой игрок держит
+// ноль. Поле на самом PlayerManager, который уже есть в списке кадров, —
+// поэтому читается одним чтением, без цепочек. Рядом lastDeathPosition
+// (Vector3, 0x1E0) и playerDeathHandlerReference (0x80), но для «не целиться
+// в труп» довольно этого флага.
+inline constexpr std::uint64_t PLAYER_MANAGER_RESPAWNING = 0x208;
+// Собственный признак смерти игры, а не догадка по позе. Релизный дамп:
+//     Oxide.PlayerManager.playerDeathHandlerReference   0x80
+//     Oxide.PlayerDeathHandler.death  (bool, synced)    0xF0
+// Цепочка через обёртку Reference подтверждена дизассемблером:
+//   PlayerManager.get (RVA 0x66bd14c): ldr x8, [x19, #0x80]; cbz; ldr x0, [x8, #0x18]; ret
+//   PlayerDeathHandler.get_death (RVA 0x6613d98): ldrb w0, [x0, #0xf0]; ret
+//   PlayerDeathHandler.set_death (RVA 0x6612a28): and w0, w19, #1 / add x1, x20, #0xf0
+// Нужен потому, что поза ловит не всех: лог 20:45 — из 149 смен цели 14
+// пришлись на игроков с здоровьем 0.0, но СТОЯЩИХ (высота 0.86-1.51 м).
+inline constexpr std::uint64_t PLAYER_DEATH_HANDLER         = 0x80;
+inline constexpr std::uint64_t DEATH_HANDLER_REF_TARGET     = 0x18;
+inline constexpr std::uint64_t DEATH_HANDLER_DEATH          = 0xF0;
+// Цепочка здоровья (релизный дамп):
+//   Oxide.PlayerManager.vitals            (Oxide.PlayerVitals*) 0xC8
+//   Oxide.GenericVitals.KQN               (float, protected)    0xB8
+// m_MaxHealth лежит там же на 0x88, поэтому 0xB8 — текущее здоровье; имя
+// обфусцировано, сверялись позиционно по dump.cs (class Oxide.GenericVitals).
+inline constexpr std::uint64_t PLAYER_VITALS       = 0xC8;
+inline constexpr std::uint64_t VITALS_HEALTH       = 0xB8;
 inline constexpr std::uint64_t PLAYER_INVENTORY         = 0x98;
 inline constexpr std::uint64_t PLAYER_WEAPON_REFERENCE  = 0xF0;
 inline constexpr std::uint64_t PLAYER_WEAPONS_ARRAY     = 0x198;
@@ -191,10 +226,16 @@ inline constexpr std::uint64_t INVDATA_PLAYER_MODEL_INFO  = 0x20;
 // Il2CppClass: name at 0x10, namespace at 0x18 (used to identify PlayerWeapon).
 inline constexpr std::uint64_t IL2CPP_CLASS_NAME      = 0x10;
 inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = 0x18;
+// Il2CppClass.static_fields — блок статик-полей класса (loot_memory.h читает
+// по нему runners[] у PlayerLoopHelper; в game.cpp — то же для PlayerManager
+// и GameControllerBase).
+inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
 // eventHandler.LookDirection (0x140): synced Vector3 wrapper, value at +0x20.
 // MouseLook.Update writes m_LookRoot.forward into it every frame and
 // FPHitscan casts its hit ray along it (not along the camera transform).
 inline constexpr std::uint64_t EVENT_HANDLER_LOOK_DIRECTION  = 0x140;
+// Отметка выстрела: FPHitscan.ZDW(Ray) кладёт сюда точку попадания (0x170) и
+// время (0x178) — по ним в логе видно, когда именно стреляли и что лежало в оси.
 inline constexpr std::uint64_t EVENT_HANDLER_LAST_HIT_POINT  = 0x170;
 inline constexpr std::uint64_t EVENT_HANDLER_LAST_HIT_TIME   = 0x178;
 inline constexpr std::uint64_t SYNC_VALUE_OFFSET             = 0x20;
@@ -295,8 +336,8 @@ inline constexpr std::uint64_t KCC_LOOK_HEIGHT_OFFSET     = 0x90; // float, eye 
 //   +0x00 MoveState State (0 idle,1 walk,2 run,3 crouching,4 air,5 climb,6 swim,7 dead)
 //   +0x04 Pose (0 Stand, 1 Crouch)   +0x08 bool Aim  +0x0C Vector3 Position
 //   +0x18 Vector3 RealVelocity
-inline constexpr std::uint64_t KCC_MOVE                   = 0x154;  // бета: было 0x16C
-inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION     = 0xF0;  // бета: было 0x108
+inline constexpr std::uint64_t KCC_MOVE                   = 0x154;
+inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION     = 0xF0;
 inline constexpr std::uint64_t CHAR_ANIM_PLAYER_BACKREF    = 0x78;
 inline constexpr std::uint64_t CHAR_ANIM_RAGDOLL           = 0x38;
 inline constexpr std::uint64_t RAGDOLL_PELVIS_RIGIDBODY    = 0x20;
@@ -334,7 +375,7 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
 // Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD9A2818;  // бета: было 0xD8DAB08
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD9A2818;  // бета: было 0xD9C4570
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x28;
 
 // System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
@@ -355,6 +396,11 @@ inline constexpr std::uint64_t NETID_BEHAVIOURS = 0x80; // NetworkBehaviour[]
 inline constexpr std::uint64_t PMP_ENTITY            = 0x68; // pmK Entity
 inline constexpr std::uint64_t PMK_HEALTH            = 0x98; // AsyncReactiveProperty<float>
 inline constexpr std::uint64_t ARP_LATEST_VALUE      = 0x18; // float latestValue
+// Второй кандидат на слот значения: в сеттере, который зовёт
+// GenericVitals.COL() (RVA 0xb0f6238), новое значение уходит в [obj+0x20],
+// а старое — в [obj+0x24]. Тип brz.Health в дампе не разрешён («?»), поэтому
+// слот выбирается по правдоподобию, а лог печатает оба.
+inline constexpr std::uint64_t HEALTH_VALUE          = 0x20;
 inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_MaxHealth
 
 // ---- Время суток: TOD_Sky (ассет Time Of Day) ------------------------------
@@ -376,8 +422,8 @@ inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_
 //       --script <new>/script.json --methods 2000 UV
 // оба кандидата TOD_Sky (здесь 0xD8DF4C8 и 0xD8DFC98) обязаны попасть в окно.
 // Прошлое окно было 0xD7A0000..0xD840000 — сдвинулось ровно на +0x130000.
-inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xD997D10;  // бета: было 0xD8D0000
-inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDA37D10; // BEGIN + 0xA0000  // бета: было 0xD970000
+inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xD98E260;  // бета: было 0xD9B0000
+inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDA2E260; // BEGIN + 0xA0000  // бета: было 0xDA50000
 inline constexpr std::uint64_t TOD_SKY_CYCLE      = 0x40; // TOD_Sky.Cycle
 inline constexpr std::uint64_t TOD_CYCLE_HOUR     = 0x10; // TOD_CycleParameters.Hour
 inline constexpr std::uint64_t TOD_CYCLE_DAY      = 0x14;
@@ -529,6 +575,27 @@ inline constexpr std::uint64_t LOOTOBJECT_BUILDING_PIECE = 0xF8; // Building.Bui
 inline constexpr std::uint64_t ITEMPICKUP_ITEM_OBJECT = 0xA8; // Oxide.Item
 inline constexpr std::uint64_t ITEMPICKUP_SHORTNAME   = 0xD8; // string item
 inline constexpr std::uint64_t ITEMPICKUP_AMOUNT      = 0xE0; // int amount
+
+// ---- Мгновенный подбор: темп collect-all в UniTask (Cysharp.Threading.Tasks)
+// Все три потока подбора — «Собрать всё» в окне лута (xw.CollectAllItems),
+// «быстрая загрузка» (xv.FastLoadAll) и автоподбор зоны (eDE.CollectAllItems)
+// — переносят по одному предмету за ожидание UniTask.WaitForSeconds(0.35f,
+// ignoreTimeScale:true). Ожидание — объект DelayIgnoreTimeScalePromise в куче
+// (delayFrameTimeSpan 0x18, elapsed 0x1C, initialFrame 0x20); его тик в
+// PlayerLoop завершает ожидание при elapsed >= delayFrameTimeSpan. Мгновенный
+// подбор (fast_loot::Controller, loot_memory.h) дописывает 0.0 в
+// delayFrameTimeSpan активных обещаний — окно переносится за несколько кадров,
+// только данные, без патчей кода. Путь до обещаний:
+//   PlayerLoopHelper.static_fields.runners[] → PlayerLoopRunner.loopItems[]
+//   → элементы IPlayerLoopItem. Классы UniTask не обфусцированы — сверяются
+//   по имени в рантайме (PROVENANCE.md §D). Поле темпа сверяется побитово с
+//   0.35f (0x3EB33333), остальные ожидания не трогаются.
+inline constexpr std::uint64_t PLAYERLOOPHELPER_TYPEINFO_RVA = 0xD9A3488;  // бета: было 0xD9C52E0
+inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS      = 0x30; // statics: PlayerLoopRunner[] runners
+inline constexpr std::uint64_t LOOPRUNNER_ITEMS              = 0x38; // PlayerLoopRunner.loopItems
+inline constexpr std::uint64_t DELAYPROMISE_TIMESPAN         = 0x18; // float delayFrameTimeSpan
+inline constexpr std::uint64_t DELAYPROMISE_ELAPSED          = 0x1C; // float elapsed
+inline constexpr std::uint64_t DELAYPROMISE_INITIAL_FRAME    = 0x20; // int initialFrame
 
 // Oxide.GameControllerBase static fields: a known-good NetworkIdentity used to
 // learn the NetworkIdentity class pointer (validates dictionary entries).

@@ -925,11 +925,22 @@ float TabContent(int tab, float dt, float cW) {
                  (vm.no_spread && weaponStatus.no_spread == viewmodel::Status::Waiting))
             ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
 
-        // Мгновенный подбор: логики больше нет (по запросу) — ряд оставлен
-        // только как кнопка (флаг хранится, тумблер переключается).
+        // Мгновенный подбор вернулся: heap-реализация без патчей библиотек
+        // (fast_loot::Controller, loot_memory.h) — обнуляет float-темп
+        // (0.35 с/предмет) активных ожиданий collect-all. Статус — как у
+        // оружия: применено / перенос идёт сейчас / не применено.
         SHdr(XS("Подбор"));
-        CardBg(Layout::RowH);
+        CardBg(Layout::RowH * 2.f);
+        const bool oldFastLoot = vm.fast_loot;
         ToggleRow("##instantloot", XS("Мгновенный подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
+        if (oldFastLoot != vm.fast_loot) esp_viewmodel_tick(vm);
+        const auto pickupState = esp_viewmodel_diagnostics();
+        if (pickupState.fast_loot == viewmodel::Status::Failed)
+            ImGui::TextDisabled("%s", XS("Подбор: не применено"));
+        else if (pickupState.fast_loot == viewmodel::Status::Active)
+            ImGui::TextDisabled("%s", pickupState.fast_loot_draining
+                                           ? XS("Подбор: мгновенно")
+                                           : XS("Подбор: работает"));
 
         SHdr(XS("Лимит FPS"));
         {

@@ -4,9 +4,10 @@
 1. Misc toggles must animate from the same state used by the row: ToggleRow
    changes the bool but draws the supplied animation value, and forgetting its
    per-frame Tick leaves a functional toggle looking permanently disabled.
-2. Instant pickup draws only the toggle row in the menu: the user asked for
-   NO diagnostic lines under it. The strict refusal diagnostics stay in the
-   loot::Diagnostics structure for tooling; the guard asserts the thin menu.
+2. Instant pickup is a heap-data feature again (fast_loot::Controller in
+   loot_memory.h): the toggle must drive esp_viewmodel_tick and an apply
+   status line must be rendered from esp_viewmodel_diagnostics. The retired
+   loot-module APIs (esp_loot_tick & co.) stay banned.
 """
 from pathlib import Path
 import re
@@ -24,12 +25,17 @@ for setting, anim in [('fov_enabled', 'a_custom_fov'),
                      r'\s*,\s*g_state\.viewmodel\.' + setting +
                      r'\s*,\s*dt\s*\)', menu), f'missing animation update: {setting}'
 pickup = menu.split('SHdr(XS("Подбор"))', 1)[1].split('SHdr(', 1)[0]
-# Фича удалена по запросу: остался только тумблер, вызовов логики —
-# нет (esp_loot_tick/EspLootState/тосты запрещены секцией ниже тоже).
+# Мгновенный подбор снова рабочий (heap-данные, loot_memory.h): тумблер обязан
+# тикать контроллер и показывать статус применения. API удалённого модуля
+# (esp_loot_tick и имена из loot::Diagnostics) возвращаться не должны.
 assert 'ToggleRow("##instantloot"' in pickup, 'the toggle row must stay'
-assert 'esp_loot_tick' not in pickup, 'no logic calls must remain'
-for banned in ('lootStatus', 'LootReasonText', 'LootKindText', 'esp_loot_diagnostics', 'esp_loot_refusal'):
-    assert banned not in pickup, 'diagnostics must not be rendered under the toggle: %s' % banned
+assert 'esp_viewmodel_tick' in pickup, 'the toggle must drive the controller tick'
+assert 'esp_viewmodel_diagnostics' in pickup, 'apply status must be rendered'
+assert 'fast_loot_draining' in pickup, 'the "transferring now" hint is missing'
+assert 'Подбор: не применено' in pickup and 'Подбор: мгновенно' in pickup, 'status strings are missing'
+for banned in ('esp_loot_tick', 'lootStatus', 'LootReasonText', 'LootKindText',
+               'esp_loot_diagnostics', 'esp_loot_refusal'):
+    assert banned not in pickup, 'retired loot-module API must not come back: %s' % banned
 # The FPS section must spell out the selected mode and whether it stuck:
 # a highlighted button alone used to read as applied when nothing was.
 fps = menu.split('SHdr(XS("Лимит FPS"))', 1)[1].split('SHdr(', 1)[0]
@@ -43,4 +49,4 @@ assert 'ImGui::Button(' not in fps, 'chips must use custom-coded buttons'
 assert 'g_state.a_fps_90' in menu and 'Tick(g_state.a_fps_90' in menu, 'selection fill animation is not ticked'
 
 print('misc toggles: row state and per-frame animation bindings: OK')
-print('instant pickup menu draws only the toggle; fps mode+apply status is rendered: OK')
+print('instant pickup drives the heap controller and renders its apply status; fps mode+apply status is rendered: OK')

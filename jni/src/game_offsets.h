@@ -206,6 +206,10 @@ inline constexpr std::uint64_t INVDATA_PLAYER_MODEL_INFO  = 0x20;
 // Il2CppClass: name at 0x10, namespace at 0x18 (used to identify PlayerWeapon).
 inline constexpr std::uint64_t IL2CPP_CLASS_NAME      = 0x10;
 inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = 0x18;
+// Il2CppClass.static_fields — блок статик-полей класса (loot_memory.h читает
+// по нему runners[] у PlayerLoopHelper; в game.cpp — то же для PlayerManager
+// и GameControllerBase).
+inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
 // eventHandler.LookDirection (0x140): synced Vector3 wrapper, value at +0x20.
 // MouseLook.Update writes m_LookRoot.forward into it every frame and
 // FPHitscan casts its hit ray along it (not along the camera transform).
@@ -551,6 +555,27 @@ inline constexpr std::uint64_t LOOTOBJECT_BUILDING_PIECE = 0xF8; // Building.Bui
 inline constexpr std::uint64_t ITEMPICKUP_ITEM_OBJECT = 0xA8; // Oxide.Item
 inline constexpr std::uint64_t ITEMPICKUP_SHORTNAME   = 0xD8; // string item
 inline constexpr std::uint64_t ITEMPICKUP_AMOUNT      = 0xE0; // int amount
+
+// ---- Мгновенный подбор: темп collect-all в UniTask (Cysharp.Threading.Tasks)
+// Все три потока подбора — «Собрать всё» в окне лута (xw.CollectAllItems),
+// «быстрая загрузка» (xv.FastLoadAll) и автоподбор зоны (eDE.CollectAllItems)
+// — переносят по одному предмету за ожидание UniTask.WaitForSeconds(0.35f,
+// ignoreTimeScale:true). Ожидание — объект DelayIgnoreTimeScalePromise в куче
+// (delayFrameTimeSpan 0x18, elapsed 0x1C, initialFrame 0x20); его тик в
+// PlayerLoop завершает ожидание при elapsed >= delayFrameTimeSpan. Мгновенный
+// подбор (fast_loot::Controller, loot_memory.h) дописывает 0.0 в
+// delayFrameTimeSpan активных обещаний — окно переносится за несколько кадров,
+// только данные, без патчей кода. Путь до обещаний:
+//   PlayerLoopHelper.static_fields.runners[] → PlayerLoopRunner.loopItems[]
+//   → элементы IPlayerLoopItem. Классы UniTask не обфусцированы — сверяются
+//   по имени в рантайме (PROVENANCE.md §D). Поле темпа сверяется побитово с
+//   0.35f (0x3EB33333), остальные ожидания не трогаются.
+inline constexpr std::uint64_t PLAYERLOOPHELPER_TYPEINFO_RVA = 0xD9C52E0;
+inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS      = 0x30; // statics: PlayerLoopRunner[] runners
+inline constexpr std::uint64_t LOOPRUNNER_ITEMS              = 0x38; // PlayerLoopRunner.loopItems
+inline constexpr std::uint64_t DELAYPROMISE_TIMESPAN         = 0x18; // float delayFrameTimeSpan
+inline constexpr std::uint64_t DELAYPROMISE_ELAPSED          = 0x1C; // float elapsed
+inline constexpr std::uint64_t DELAYPROMISE_INITIAL_FRAME    = 0x20; // int initialFrame
 
 // Oxide.GameControllerBase static fields: a known-good NetworkIdentity used to
 // learn the NetworkIdentity class pointer (validates dictionary entries).

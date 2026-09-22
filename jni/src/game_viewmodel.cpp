@@ -1,5 +1,6 @@
 #include "fps_memory.h"
 #include "weapon_tuning_memory.h"
+#include "loot_memory.h"
 #include "object_data_memory.h"
 #include "maps_lookup.h"
 #include <chrono>
@@ -64,6 +65,7 @@ struct HeapMemory {
 };
 HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
+fast_loot::Controller<HeapMemory> loot(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
@@ -119,6 +121,9 @@ void esp_viewmodel_reset(bool restore) {
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))
         LogLine("weapon data: originals could not all be restored before disconnect; restart game");
+    // Мгновенному подбору восстанавливать нечего: поле темпа переписывает сама
+    // игра при каждом новом ожидании, поэтому сброс — это только «забыть адреса».
+    loot.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     ++epoch;
 }
@@ -127,15 +132,19 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     using namespace go_active;
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
-        controller.reset(false); fps_controller.reset(false); weapons.reset(false);
+        controller.reset(false); fps_controller.reset(false); weapons.reset(false); loot.reset();
         weapons.recoil = settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         weapons.spread = settings.no_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        loot.status = settings.fast_loot ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
                              settings.hands_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off};
         return;
     }
     tick_fps(epoch, settings.fps_limit);
+    // Мгновенный подбор не зависит от локального игрока — тикается всегда,
+    // до ветки с резолвом игрока (она ниже может выйти раньше времени).
+    loot.tick(epoch, g_il2cpp_base, settings.fast_loot);
     // Resolve the current local player from the static source, NOT the ESP
     // cache which intentionally tolerates stale identities during respawn.
     uint64_t player = 0;
@@ -159,9 +168,10 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     controller.tick(epoch, player, settings);
     auto st = esp_viewmodel_diagnostics();
     if (st.fov != last_log.fov || st.hands != last_log.hands ||
-        st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread) {
-        LogLine("viewmodel: fov=%d hands=%d; object-data recoil=%d spread=%d (0 off,1 waiting,2 active,3 ADS,4 unsupported/modified image or memory error)",
-                (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread);
+        st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread ||
+        st.fast_loot != last_log.fast_loot) {
+        LogLine("viewmodel: fov=%d hands=%d; object-data recoil=%d spread=%d; instant loot=%d (0 off,1 waiting,2 active,4 unsupported/modified image or memory error)",
+                (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread, (int)st.fast_loot);
         last_log = st;
     }
 }
@@ -171,6 +181,8 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     auto status = controller.status;
     status.no_recoil = weapons.recoil;
     status.no_spread = weapons.spread;
+    status.fast_loot = loot.status;
+    status.fast_loot_draining = loot.draining();
     return status;
 }
 

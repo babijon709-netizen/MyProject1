@@ -1,4 +1,6 @@
 #include "fps_memory.h"
+#include "loot_memory.h"
+#include "object_data_memory.h"
 #include <cassert>
 #include <iostream>
 #include <limits>
@@ -11,11 +13,24 @@ using namespace viewmodel;
 struct FakeMemory {
     std::map<uint64_t, uint8_t> bytes;
     std::map<uint64_t, std::string> names;
+    std::string heap_maps = "150000-260000 rw-p 00000000 00:00 0 [heap]\n";
+    uint64_t heap_next = 0x150000;
+    uint64_t block_heap_write = 0;    // адрес, на котором write_heap врёт «нельзя»
+    bool swallow_heap_writes = false; // write_heap «удачен», но ничего не пишет
     uint64_t next = 0x10000;
     unsigned reads = 0, writes = 0;
     uint64_t failRead = 0, failWrite = 0;
     uint64_t alloc(size_t size = 0x500) {
         uint64_t p = next; next += 0x1000;
+        for (size_t i = 0; i < size; ++i) bytes[p+i] = 0;
+        return p;
+    }
+    // Объекты «управляемой кучи»: только сюда пускает гейт write_heap.
+    // Шаг округляется вверх под размер, чтобы большие массивы не наезжали
+    // на объекты, выделенные следом.
+    uint64_t halloc(size_t size = 0x200) {
+        const size_t step = (size + 0x3FF) & ~size_t(0x3FF);
+        uint64_t p = heap_next; heap_next += step;
         for (size_t i = 0; i < size; ++i) bytes[p+i] = 0;
         return p;
     }
@@ -32,6 +47,26 @@ struct FakeMemory {
     template<class T> bool write(uint64_t p, const T& v) {
         if (p==failWrite) return false;
         ++writes; set(p,v); return true;
+    }
+    // Гейт как у HeapMemory в game_viewmodel.cpp: только анонимная куча.
+    template<class T> bool write_heap(uint64_t p, const T& v) {
+        if (p == block_heap_write || !object_data::heap_writable(heap_maps, p, sizeof(T)))
+            return false;
+        if (!swallow_heap_writes) set(p, v);
+        return true;
+    }
+    // Классы для fast_loot::Controller: klass -> указатели на C-строки
+    // имени/неймспейса, как в настоящем Il2CppClass (+0x10/+0x18).
+    uint64_t cstring(const char* s) {
+        uint64_t p = halloc(strlen(s) + 2);
+        for (size_t i = 0; i <= strlen(s); ++i) bytes[p+i] = (uint8_t)s[i];
+        return p;
+    }
+    uint64_t klass_of(const char* n, const char* ns) {
+        uint64_t k = halloc(0x40);
+        set(k + IL2CPP_CLASS_NAME, cstring(n));
+        set(k + IL2CPP_CLASS_NAMESPACE, cstring(ns));
+        return k;
     }
     uint64_t ptr(uint64_t p) { uint64_t v=0; return read(p,v)?v:0; }
     bool is(uint64_t p, const char* name) { return names[p]==name; }
@@ -292,9 +327,205 @@ static void fps_tests() {
         assert(io.writes==count && !c.has_state()); // lost session: forget
     }
 }
+// ---- Мгновенный подбор: fast_loot::Controller на фейковой памяти --------
+// Проверяется вся цепочка до обещания и единственная запись (float темпа),
+// включая отказы: чужая длительность, чужие классы, не-куча, сессии.
+struct LootFixture {
+    FakeMemory io;
+    fast_loot::Controller<FakeMemory> c{io};
+    const uint64_t base = 0x10000000;
+    uint64_t helper_class = 0, statics = 0, runners = 0, promise_klass = 0, other_klass = 0;
+    std::vector<uint64_t> items_arrays;   // loopItems каждого раннера (для add_item)
+    LootFixture(int nrunners = 2, bool valid = true) {
+        helper_class = hklass(valid ? "PlayerLoopHelper" : "Wrong",
+                              "Cysharp.Threading.Tasks");
+        io.set(base + PLAYERLOOPHELPER_TYPEINFO_RVA, helper_class);
+        statics = io.halloc();
+        io.set(helper_class + IL2CPP_CLASS_STATIC_FIELDS, statics);
+        promise_klass = hklass("DelayIgnoreTimeScalePromise", "");
+        other_klass = hklass("SomethingElse", "");
+        runners = io.halloc();
+        io.set(statics + PLAYERLOOPHELPER_RUNNERS, runners);
+        io.set(runners + IL2CPP_ARRAY_LENGTH, int32_t(nrunners));
+        for (int t = 0; t < nrunners; ++t) {
+            uint64_t runner = io.halloc();
+            io.set(runner, hklass("PlayerLoopRunner", "Cysharp.Threading.Tasks.Internal"));
+            // С запасом под сотни элементов: массив не должен наезжать на
+            // объекты, выделенные следом.
+            uint64_t items = io.halloc(0x20 + 2048 * 8);
+            io.set(runner + LOOPRUNNER_ITEMS, items);
+            io.set(items + IL2CPP_ARRAY_LENGTH, int32_t(0));
+            io.set(runners + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)t * 8, runner);
+            items_arrays.push_back(items);
+        }
+    }
+    uint64_t hklass(const char* n, const char* ns) { return io.klass_of(n, ns); }
+    uint64_t add_item(int runner, uint64_t klass) {
+        uint64_t items = items_arrays[runner];
+        int32_t n = io.get<int32_t>(items + IL2CPP_ARRAY_LENGTH);
+        io.set(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)n * 8, io.halloc());
+        io.set(io.ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)n * 8), klass);
+        io.set(items + IL2CPP_ARRAY_LENGTH, int32_t(n + 1));
+        return io.ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)n * 8);
+    }
+    uint64_t add_promise(int runner, float span, float elapsed = 0.01f,
+                         int32_t frame = 100) {
+        uint64_t p = add_item(runner, promise_klass);
+        io.set(p + DELAYPROMISE_TIMESPAN, span);
+        io.set(p + DELAYPROMISE_ELAPSED, elapsed);
+        io.set(p + DELAYPROMISE_INITIAL_FRAME, frame);
+        return p;
+    }
+    void tick(bool on = true) { c.tick(1, base, on); }
+};
+static void loot_tests() {
+    using fast_loot::kCadenceBits;
+    {   // Счастливый путь: два обещания темпа 0.35 обнулены, чужие не тронуты.
+        LootFixture f;
+        uint64_t a = f.add_promise(0, 0.35f);
+        uint64_t b = f.add_item(0, f.other_klass);      // не обещание
+        f.io.set(b + DELAYPROMISE_TIMESPAN, 0.35f);      // ...и всё равно мимо
+        uint64_t d = f.add_promise(1, 0.35f);
+        f.tick();
+        assert(f.c.status == Status::Active && f.c.neutralized() == 2);
+        assert(f.io.get<uint32_t>(a + DELAYPROMISE_TIMESPAN) == 0u);
+        assert(f.io.get<uint32_t>(d + DELAYPROMISE_TIMESPAN) == 0u);
+        assert(f.io.get<uint32_t>(b + DELAYPROMISE_TIMESPAN) == kCadenceBits);
+        assert(f.c.draining());
+        // Выключение: восстановлений нет — поле дальше пишет сама игра.
+        f.tick(false);
+        assert(f.c.status == Status::Off && !f.c.draining());
+        assert(f.io.get<uint32_t>(a + DELAYPROMISE_TIMESPAN) == 0u);
+    }
+    {   // Чужие длительности/значения — не трогаем даже у настоящего обещания.
+        LootFixture f;
+        uint64_t a = f.add_promise(0, 0.5f);
+        uint64_t b = f.add_promise(0, 0.f);
+        uint64_t nan = f.add_promise(0, std::numeric_limits<float>::quiet_NaN());
+        uint64_t inf = f.add_promise(0, std::numeric_limits<float>::infinity());
+        uint64_t big = f.add_promise(0, 3.5f);
+        f.tick();
+        assert(f.c.status == Status::Active && f.c.neutralized() == 0);
+        assert(f.io.get<float>(a + DELAYPROMISE_TIMESPAN) == 0.5f);
+        assert(f.io.get<float>(b + DELAYPROMISE_TIMESPAN) == 0.f);
+        assert(!viewmodel::finite(f.io.get<float>(nan + DELAYPROMISE_TIMESPAN)));
+        assert(f.io.get<float>(inf + DELAYPROMISE_TIMESPAN) == std::numeric_limits<float>::infinity());
+        assert(f.io.get<float>(big + DELAYPROMISE_TIMESPAN) == 3.5f);
+        assert(!f.c.draining());
+    }
+    {   // Невразумительные elapsed/initialFrame — пропуск без записи.
+        LootFixture f;
+        uint64_t a = f.add_promise(0, 0.35f, std::numeric_limits<float>::quiet_NaN());
+        uint64_t b = f.add_promise(0, 0.35f, 0.4f);
+        uint64_t d = f.add_promise(0, 0.35f, 0.01f, -5);
+        f.tick();
+        assert(f.c.neutralized() == 0);
+        assert(f.io.get<uint32_t>(a + DELAYPROMISE_TIMESPAN) == kCadenceBits);
+        assert(f.io.get<uint32_t>(b + DELAYPROMISE_TIMESPAN) == kCadenceBits);
+        assert(f.io.get<uint32_t>(d + DELAYPROMISE_TIMESPAN) == kCadenceBits);
+    }
+    {   // Не тот билд: слот читается, но класс чужой — Failed, без записей.
+        LootFixture f(1, false);
+        f.add_promise(0, 0.35f);
+        f.tick();
+        assert(f.c.status == Status::Failed && f.c.neutralized() == 0);
+    }
+    {   // Слоты ещё не инициализированы — Waiting, без записей.
+        LootFixture f;
+        f.add_promise(0, 0.35f);
+        f.io.set(f.base + PLAYERLOOPHELPER_TYPEINFO_RVA, uint64_t(0));
+        f.tick(); assert(f.c.status == Status::Waiting && f.c.neutralized() == 0);
+        f.io.set(f.base + PLAYERLOOPHELPER_TYPEINFO_RVA, f.helper_class);
+        f.io.set(f.statics + PLAYERLOOPHELPER_RUNNERS, uint64_t(0));
+        f.tick(); assert(f.c.status == Status::Waiting);
+        f.io.set(f.statics + PLAYERLOOPHELPER_RUNNERS, f.runners);
+        f.io.set(f.runners + IL2CPP_ARRAY_LENGTH, int32_t(0));
+        f.tick(); assert(f.c.status == Status::Waiting);
+    }
+    {   // Раннер с чужим классом: его элементы не рассматриваются вовсе.
+        LootFixture f;
+        // У первого раннера подменяем класс: его элементы не рассматриваются.
+        uint64_t wrong = f.io.klass_of("WrongRunner", "");
+        f.io.set(f.io.ptr(f.runners + IL2CPP_ARRAY_FIRST_ELEMENT), wrong);
+        f.add_promise(0, 0.35f);
+        uint64_t ok = f.add_promise(1, 0.35f);
+        f.tick();
+        assert(f.c.neutralized() == 1);
+        assert(f.io.get<uint32_t>(ok + DELAYPROMISE_TIMESPAN) == 0u);
+    }
+    {   // Гейт кучи: обещание вне анонимной кучи — запись запрещена, Failed.
+        LootFixture f;
+        uint64_t outside = f.io.alloc();
+        f.io.set(outside, f.promise_klass);
+        f.io.set(outside + DELAYPROMISE_TIMESPAN, 0.35f);
+        f.io.set(outside + DELAYPROMISE_ELAPSED, 0.01f);
+        f.io.set(outside + DELAYPROMISE_INITIAL_FRAME, int32_t(100));
+        f.io.set(f.items_arrays[0] + IL2CPP_ARRAY_FIRST_ELEMENT, outside);
+        f.io.set(f.items_arrays[0] + IL2CPP_ARRAY_LENGTH, int32_t(1));
+        f.tick();
+        assert(f.c.status == Status::Failed && f.c.neutralized() == 0);
+        assert(f.io.get<uint32_t>(outside + DELAYPROMISE_TIMESPAN) == kCadenceBits);
+    }
+    {   // Запись «удачна», но память не изменилась (между нами писали/отворили
+        // доступ) — перечитывание обязано это поймать: Failed, без счёта.
+        LootFixture f;
+        uint64_t a = f.add_promise(0, 0.35f);
+        f.io.swallow_heap_writes = true;
+        f.tick();
+        assert(f.c.status == Status::Failed && f.c.neutralized() == 0);
+        assert(f.io.get<uint32_t>(a + DELAYPROMISE_TIMESPAN) == kCadenceBits);
+    }
+    {   // Смена сессии: адреса забыты, всё резолвится заново и работает.
+        LootFixture f;
+        f.add_promise(0, 0.35f);
+        f.c.tick(7, f.base, true);
+        assert(f.c.status == Status::Active && f.c.neutralized() == 1);
+        f.add_promise(0, 0.35f);
+        f.c.tick(8, f.base, true);
+        assert(f.c.status == Status::Active && f.c.neutralized() == 2);
+    }
+    {   // Кэш классов: после первого тика имена уже не нужны — вердикт по
+        // указателю класса (переименование ничего не ломает).
+        LootFixture f;
+        f.add_promise(0, 0.35f);
+        f.tick();
+        assert(f.c.neutralized() == 1);
+        // После первого тика вердикт по указателю класса уже в кэше: даже
+        // «испорченные» строки имён не влияют на следующий проход.
+        f.io.set(f.promise_klass + IL2CPP_CLASS_NAME, uint64_t(0));
+        f.add_promise(0, 0.35f);
+        f.tick();
+        assert(f.c.neutralized() == 2);
+    }
+    {   // Бюджет тика: 600 обещаний в одном раннере — второй раннер не
+        // голодает вечно благодаря вращению начала обхода.
+        LootFixture f;
+        for (int i = 0; i < 600; ++i) f.add_promise(0, 0.35f);
+        uint64_t late = f.add_promise(1, 0.35f);
+        for (int i = 0; i < 8; ++i) f.tick();
+        assert(f.c.status == Status::Active);
+        assert(f.io.get<uint32_t>(late + DELAYPROMISE_TIMESPAN) == 0u);
+        assert(f.c.neutralized() == 601);
+    }
+    {   // Пустые раннеры и нулевые слоты — нормальная тишина, не Failed.
+        LootFixture f(4);
+        f.tick(); f.tick();
+        assert(f.c.status == Status::Active && f.c.neutralized() == 0);
+    }
+    {   // Тегированный указатель класса (TBI/MTE) снимается маской.
+        LootFixture f;
+        f.add_promise(0, 0.35f);
+        uint64_t items = f.items_arrays[0];
+        f.io.set(items + IL2CPP_ARRAY_FIRST_ELEMENT,
+                 f.io.ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT) | 0xAB00000000000000ull);
+        f.tick();
+        assert(f.c.status == Status::Active && f.c.neutralized() == 1);
+    }
+}
+
 int main() {
     config_tests(); fps_tests();
-    go::SelectBuild(go::Build::Release); tests();
-    assert(go::BetaAvailable()); go::SelectBuild(go::Build::Beta); tests();
-    std::cout << "viewmodel: release/beta, lifecycle, instant ADS return, FPS90/120/144, delegates, config, NaN: OK\n";
+    go::SelectBuild(go::Build::Release); tests(); loot_tests();
+    assert(go::BetaAvailable()); go::SelectBuild(go::Build::Beta); tests(); loot_tests();
+    std::cout << "viewmodel: release/beta, lifecycle, instant ADS return, FPS90/120/144, delegates, instant pickup, config, NaN: OK\n";
 }

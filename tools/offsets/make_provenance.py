@@ -28,22 +28,26 @@ OUT = os.path.join(HERE, 'PROVENANCE.md')
 # дампов 89e0b63 -> 62a8534; см. журнал в OFFSETS_UPDATE.md).
 RVA_FINGERPRINT = {
     'PLAYER_MANAGER_TYPEINFO_RVA':
-        '11 обращений, статик-поля `[0x1A0x7]`. Метка класса — чтение статик-поля '
-        'по 0x1A: она повторяется из билда в билд (в прошлом было 5 обращений и '
-        '`[0x1A0x1]`), а число обращений нет',
+        '6 обращений, статик-поля `[0x1A0x2]`. Метка класса — чтение статик-поля '
+        'по 0x1A: она повторяется из билда в билд (было 5 обращений и `[0x1A0x1]`, '
+        'затем 11 и `[0x1A0x7]`), а число обращений нет',
     'GAME_CONTROLLER_TYPEINFO_RVA':
-        '1 обращение, статик-полей нет — **верхний кандидат здесь всегда чужой** '
-        '(в этом билде верхний: 30 обращений, `[0x8x15, 0x0x15]`)',
+        '3 обращения, статик-полей нет — **верхний кандидат здесь всегда чужой** '
+        '(в этом билде верхний: 4 обращения, `[0x8x2, 0x0x2]`)',
     'NETWORK_CLIENT_TYPEINFO_RVA':
         '6 обращений, статик-полей нет (второй кандидат: 2 обращения, `[0x0x2]` — чужой)',
+    'PLAYERLOOPHELPER_TYPEINFO_RVA':
+        '4 обращения, статик-полей нет (второй кандидат: 1 обращение — чужой). '
+        'Косвенная проверка: `PlayerLoopHelper.AddAction` читает `static_fields` '
+        '(`ldr x8,[x0,#0xB8]`), затем runners `+0x30`',
 }
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--build', default='62a8534', help='коммит/билд текущего дампа')
-    ap.add_argument('--prev', default='89e0b63', help='коммит/билд предыдущего дампа')
+    ap.add_argument('--build', default='72e26b9', help='коммит/билд текущего дампа')
+    ap.add_argument('--prev', default='e478e52', help='коммит/билд предыдущего дампа')
     ap.add_argument('--map', default=MAP)
     ap.add_argument('--out', default=OUT)
     a = ap.parse_args()
@@ -163,10 +167,10 @@ def main():
     w('```bash')
     w('# 1) старый дамп: скрипт обязан воспроизвести значения, которые сейчас в git')
     w('python3 tools/offsets/typeinfo_rva.py --so <old>/libil2cpp.so --script <old>/script.json \\')
-    w('        --methods 3000 --top 6 Oxide.PlayerManager Oxide.GameControllerBase Mirror.NetworkClient')
+    w('        --methods 3000 --top 6 Oxide.PlayerManager Oxide.GameControllerBase Mirror.NetworkClient Cysharp.Threading.Tasks.PlayerLoopHelper')
     w('# 2) новый дамп: берём кандидат С ТЕМ ЖЕ отпечатком, а не верхнего')
     w('python3 tools/offsets/typeinfo_rva.py --so <new>/libil2cpp.so --script <new>/script.json \\')
-    w('        --methods 3000 --top 6 Oxide.PlayerManager Oxide.GameControllerBase Mirror.NetworkClient')
+    w('        --methods 3000 --top 6 Oxide.PlayerManager Oxide.GameControllerBase Mirror.NetworkClient Cysharp.Threading.Tasks.PlayerLoopHelper')
     w('```')
     w('')
     w(f'`--methods 3000` обязателен: на 400 методах у `PlayerManager` в билде `{a.build}`')
@@ -232,7 +236,12 @@ def main():
     w('* префикс `Mineable` (`MineableStone`/`MineableTree`/…), `LootObject`,')
     w('  `ItemPickup`, `LootDestroyable`, `PumpkinTrick` — маркеры ESP;')
     w('* `PlayerManager`, `GameControllerBase`, `NetworkClient`, `NetworkIdentity`,')
-    w('  `List\\`1` — служебные проверки.')
+    w('  `List\\`1` — служебные проверки;')
+    w('* классы UniTask (мгновенный подбор, `loot_memory.h`; библиотека не')
+    w('  обфусцирована — имена стабильны): `PlayerLoopHelper` (ns')
+    w('  `Cysharp.Threading.Tasks`), `PlayerLoopRunner` (ns')
+    w('  `Cysharp.Threading.Tasks.Internal`), вложенный')
+    w('  `DelayIgnoreTimeScalePromise` (ns **пустой** — вложен в `UniTask`).')
     w('')
     w('Базовый интерфейс экстеншенов ротировал `JE`→`dk` — код его не использует')
     w('(коллекция `MINEABLE_EXTENSIONS` перебирается с определением формы на лету:')
@@ -244,8 +253,11 @@ def main():
     w("grep -c '^public class .*MineableObjectExtension_OreHitstreaks' <new>/dump.cs")
     w('```')
     w('')
-    w(f'Между `{a.prev}` и `{a.build}` из имён, которые знает код, исчез только `DVL` —')
+    w(f'Между `5ba910b` и `e478e52` из имён, которые знает код, исчез только `DVL` —')
     w('и это не класс в нашем смысле, а строка-лейбл в таблице `kWeaponNames`.')
+    w(f'В билде `{a.build}` (очередная ротация обфускации: `brc`→`eDg`, `K*`→`B*`)')
+    w('все имена из списка выше на месте (сверено grep-ом); обфусцированные имена')
+    w('из карты код в рантайме не сверяет.')
     w('')
     w('---')
     w('')
@@ -281,7 +293,7 @@ def main():
     w('сигнатуре (`dump.cs`: класс + типы параметров) и по характерным константам в')
     w('дизассемблерации.')
     w('')
-    w(f'| роль | билд `{a.prev}` | билд `{a.build}` | как узнать |')
+    w('| роль | билд `5ba910b` | билд `e478e52` | как узнать |')
     w('|---|---|---|---|')
     w('| `MineableObject`: ленивое заполнение `MINEABLE_EXTENSIONS` (0xE8) | `cik` 0x648e6ec '
       '| 0x65677d0 | `ldr x?,[x?,#0xe8]!` → `cbnz` → `GetComponents<dk>` → `str x0,[x22]` |')
@@ -301,6 +313,13 @@ def main():
     w('| дерево: сброс счётчика серии 0x48 | `giD` 0x7731258 | `str wzr,[x19,#0x48]` (3 места) | — |')
     w('| `TOD_Sky` (время суток): класс с `Cycle` на 0x40 | `IY` | `UV` '
       "| `grep -n 'TOD_CycleParameters_o\\* Cycle' il2cpp.h` |")
+    w('')
+    w('Якорь мгновенного подбора — дамп `72e26b9` (лут; имена UniTask не')
+    w('обфусцированы): `UniTask.WaitForSeconds(float)` 0xc3290b4,')
+    w('`DelayIgnoreTimeScalePromise.Create` 0xc329abc, `MoveNext` 0xc32f8f4;')
+    w('константа темпа **0.35f** в `.rodata` 0x213A950 (байт-скан `33 33 B3 3E` —')
+    w('16 пользователей, из них 3 потока подбора: `xw`/`xv`/`eDE`). `MoveNext`')
+    w('завершает ожидание при `elapsed` (0x1C) ≥ `delayFrameTimeSpan` (0x18).')
     w('')
     w('Инструменты ручной сверки: `tools/offsets/il2cpp_layout.py`')
     w('(`diff`/`show`/`find`; список отслеживаемых структур — `TRACKED`, крестик там')

@@ -112,13 +112,16 @@
 ### 3.3. Глобальные TypeInfo RVA (libil2cpp.so)
 | Константа | RVA | Класс |
 |---|---|---|
-| `PLAYER_MANAGER_TYPEINFO_RVA` | 0xD9841E0 | Oxide.PlayerManager |
-| `GAME_CONTROLLER_TYPEINFO_RVA` | 0xD97F598 | GameControllerBase |
-| `NETWORK_CLIENT_TYPEINFO_RVA` | 0xD983448 | Mirror.NetworkClient |
-| `TOD_SCAN_RVA_BEGIN..END` | 0xD970000..0xDA10000 | окно скана TOD_Sky (не поле!) |
+| `PLAYER_MANAGER_TYPEINFO_RVA` | 0xD9C5310 | Oxide.PlayerManager |
+| `GAME_CONTROLLER_TYPEINFO_RVA` | 0xD9C0690 | GameControllerBase |
+| `NETWORK_CLIENT_TYPEINFO_RVA` | 0xD9C4570 | Mirror.NetworkClient |
+| `PLAYERLOOPHELPER_TYPEINFO_RVA` | 0xD9C52E0 | Cysharp.Threading.Tasks.PlayerLoopHelper (мгновенный подбор, §3.13) |
+| `TOD_SCAN_RVA_BEGIN..END` | 0xD9B0000..0xDA50000 | окно скана TOD_Sky (не поле!) |
 
-> Значения — для билда `62a8534`. Источник истины — `jni/src/game_offsets.h`;
-> таблица здесь может отстать, заголовок не может.
+> Значения — для билда `72e26b9` (репо-снапшот 22 сентября 2026; отпечатки
+> кандидатов и историю — см. `tools/offsets/PROVENANCE.md`, §B). Источник
+> истины — `jni/src/game_offsets.h`; таблица здесь может отстать, заголовок
+> не может.
 | `PLAYER_MANAGER_STATIC_FIELDS_LIST` | 0x10 | clientPlayerList (поле статики) |
 | `GAME_CONTROLLER_LOCAL_PLAYER_FIELD` | 0x10 | `<ukT>k__BackingField` (локальный игрок) |
 | `GAME_CONTROLLER_CAMERA_MANAGER_FIELD` | 0x38 | `<ukA>k__BackingField` |
@@ -932,6 +935,45 @@ Watchdog автофарма теперь видит прогресс по трё
 крестиков) и поля `GKo` — их ведут позиционное выравнивание по типу и
 дизасм `Update` обоих маркеров (`fmov s1, #15.0` у руды, `ldr s1, [x19, #0x20]`
 у дерева).
+
+---
+
+### 3.13. Мгновенный подбор: UniTask-ожидания (лут из ящиков)
+
+Задержка переноса предмета — это не игровой таймер, а ожидание
+`Cysharp.Threading.Tasks.UniTask.DelayIgnoreTimeScalePromise` (вложенный в
+`UniTask`, неймспейс **пустой**): все три потока переноса — кнопка «Собрать
+всё» (`xw.CollectAllItems`), «быстрая загрузка» (`xv.FastLoadAll`) и
+автоподбор зоны (`eDE.CollectAllItems`) — переносят по одному предмету за
+`UniTask.WaitForSeconds(0.35f, ignoreTimeScale: true)`. Контроллер
+(`jni/src/loot_memory.h`) обнуляет float-темп **только** у обещаний с
+побитовым значением 0x3EB33333 (0.35f) и вразумительными `elapsed`/`initialFrame`
+— чужие ожидания не трогаются. Единственная точка записи — `write_heap`
+(тот же гейт, что у weapon_tuning); восстановление не нужно: игра пишет 0.35
+заново при каждом новом ожидании.
+
+Путь по памяти (классы UniTask не обфусцированы, сверяются по имени):
+
+| Константа | Значение | Что это |
+|---|---|---|
+| `PLAYERLOOPHELPER_TYPEINFO_RVA` | 0xD9C52E0 | слот `Il2CppClass*` PlayerLoopHelper (§3.3) |
+| `IL2CPP_CLASS_STATIC_FIELDS` | 0xB8 | `Il2CppClass.static_fields` |
+| `PLAYERLOOPHELPER_RUNNERS` | 0x30 | `PlayerLoopRunner[] runners` (слот на каждый `PlayerLoopTiming`) |
+| `LOOPRUNNER_ITEMS` | 0x38 | `IPlayerLoopItem[] loopItems` у раннера |
+| `DELAYPROMISE_TIMESPAN` | 0x18 | `float delayFrameTimeSpan` — **сюда пишется 0.0** |
+| `DELAYPROMISE_ELAPSED` | 0x1C | `float elapsed` |
+| `DELAYPROMISE_INITIAL_FRAME` | 0x20 | `int initialFrame` |
+
+**Как найти заново после апдейта.** Слот — `typeinfo_rva.py` (отпечаток:
+4 обращения, статик-полей нет; см. PROVENANCE.md §B). Поля — по читаемым
+именам в `il2cpp.h` (`runners`, `loopItems`, `delayFrameTimeSpan`, `elapsed`,
+`initialFrame`). Семантика — дизасмом: `DelayIgnoreTimeScalePromise.Create`
+пишет span→+0x18, elapsed→+0x1C, initialFrame→+0x20; `MoveNext` завершает при
+`elapsed ≥ delayFrameTimeSpan`; константа 0.35f ищется байт-сканом `33 33 B3 3E`
+в `.rodata` (якоря VA — PROVENANCE.md §E). Классы сверяются в рантайме
+посимвольным чтением `Il2CppClass.name` (+0x10) / `namespaze` (+0x18) —
+`io.named()` из weapon-паттерна для слота TypeInfo не годится (нужен голый
+`Il2CppClass*`, а не объект).
 
 ---
 
@@ -2004,3 +2046,35 @@ Cycle` на 0x40): 0xD988550 и 0xD98B6C8.
 **Про `.data.rel.ro`:** слоты лежат в `.data` (в новом бинарнике
 0xD71B720..0xDD3A3C8), название секции в комментариях историческое — в коде от
 этого ничего не зависит.
+
+### Приведение карты к дампу `72e26b9` (23 сентября 2026)
+
+Репозиторий стартовал (коммит `72e26b9`, 22 сентября) с дампом **новее**
+журнального `e478e52`: `dump.7z` sha256 `9670bcf4…bb6` (24 941 685 Б),
+`dump.cs` 138 459 888 Б / sha1_12 `02d9673b2d38`, 31 252 типов (было
+31 251), поколение backing-полей `B*` (было `K*`). Записи в журнал тогда не
+было, а заголовок `game_offsets.h` уже содержал новые значения — проверено
+независимо: все три `*_TYPEINFO_RVA` и окно TOD воспроизводятся
+`typeinfo_rva.py` с теми же отпечатками (PlayerManager 0xD9C5310 — 6
+обращений, `[0x1A0x2]`; GameControllerBase 0xD9C0690 — 3 обращения, без
+статик-полей, верхний кандидат 0xD9CF2E0 — чужой; NetworkClient 0xD9C4570 —
+6 обращений; окно 0xD9B0000..0xDA50000 накрывает все слоты).
+
+**Ротация имён (значения не менялись):** `brc`→`eDg` (PlayerEventHandler),
+`Sq`→`gL` (nicklabel), `bxt`→`eIl` (VoicePlayer), `brB`→`eDw` (Activity),
+`brf`→`eDK` (результат луча, снова по форме: GameObject 0x18 + RaycastHit
+0x48), backing-поля `K*`→`B*`, прочие обфусцированные поля — по списку в
+коммите. Все смещения полей совпали со старым поколением один в один.
+
+**Карта приведена к дампу:** 57 переименований по стратегии «смещение+тип»
+(ровно как записано в `src.how` каждой записи; via-цепочки — по читаемым
+именам стабильных структур). `verify_map.py /tmp/dump`: **175 полей совпало,
+расхождений 0**. `_build` в `offsets_map.json` перезаписан (отпечаток
+текущих дампов), `PROVENANCE.md` пересобран (`make_provenance.py`, билд
+`72e26b9`, предыдущий `e478e52`).
+
+**Добавлено для мгновенного подбора (§3.13):** `PLAYERLOOPHELPER_TYPEINFO_RVA`
+0xD9C52E0 (релиз) / 0xD9A3488 (бета) + поля UniTask-обещания (0x30/0x38/0x18/
+0x1C/0x20) и `IL2CPP_CLASS_STATIC_FIELDS` 0xB8. Бета-заголовок перегенерирован
+`beta_offsets.py --apply` (207 констант, 6 отличий от релиза, отпечатки
+совпали).

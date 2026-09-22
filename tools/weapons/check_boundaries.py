@@ -12,14 +12,21 @@ assert 'object_data::heap_writable(text,address,sizeof(T)) &&' in heap
 assert 'std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps")' in heap
 assert heap.count('g_mem.write(') == 1
 assert not (root / 'jni/src/fast_loot_memory.h').exists()
-assert 'fast_loot::' not in adapter
 assert 'instruction_supported' not in controller
 
-# Быстрый подбор удалён по запросу: логики нет, осталась только кнопка-тумблер
-# в меню. Пины фиксируют: ни контроллера/адаптера/стендов, ни вызовов из
-# main/game/config/menu, и ряд в меню на месте.
-for gone in ('jni/src/game_loot.cpp', 'jni/src/loot_memory.h',
-             'jni/src/loot_tap_memory.h', 'jni/include/loot.h', 'tools/loot'):
+# Мгновенный подбор возвращён (heap-only): контроллер в loot_memory.h пишет
+# только 0.0f в float-поле темпа UniTask-обещания через тот же гейт
+# write_heap, что и weapon_tuning. Пины фиксируют: один контроллер, одна
+# точка записи, никакой записи в код библиотек, вайринг в адаптере.
+loot = (root / 'jni/src/loot_memory.h').read_text()
+assert 'namespace fast_loot' in loot
+assert not re.search(r'\bio_\.write\s*\(', loot)
+assert not re.search(r'\bio_\.patch\s*\(', loot)
+assert loot.count('write_heap(') == 1  # единственная точка записи: 0.0f в delayFrameTimeSpan
+assert 'fast_loot::Controller<HeapMemory> loot(heap_memory);' in adapter
+assert 'loot.tick(' in adapter and 'fast_loot_draining = loot.draining();' in adapter
+for gone in ('jni/src/game_loot.cpp', 'jni/src/loot_tap_memory.h',
+             'jni/include/loot.h', 'tools/loot'):
     assert not (root / gone).exists(), gone
 main = (root / 'jni/src/main.cpp').read_text()
 assert 'esp_loot_tick(' not in main and 'esp_loot_diagnostics(' not in main
@@ -31,8 +38,10 @@ menu = (root / 'jni/src/menu.cpp').read_text()
 assert '##fastloot' not in menu
 assert '##instantloot' in menu
 assert 'esp_loot_tick(' not in menu
+# Тумблер мгновенного подбора применяет настройки сразу и рендерит статус.
+assert 'if (oldFastLoot != vm.fast_loot) esp_viewmodel_tick(vm);' in menu
 # The FOV/hands reset button must keep the object-data and pickup flags.
 assert 'const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;' in menu
 assert 'vm.no_recoil = nr; vm.no_spread = ns; vm.fast_loot = fl;' in menu
 print('weapons: heap-only adapter and retired fast-loot writer boundaries: OK')
-print('loot: feature removed, menu toggle retained: OK')
+print('loot: instant pickup via heap-only UniTask controller: OK')
