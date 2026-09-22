@@ -19,6 +19,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -63,6 +64,29 @@ void note_refusal(const std::string& maps, uint64_t address) {
     }
     if (!seen) std::snprintf(refusal_text, sizeof(refusal_text), "no mapping for %llx",
                              (unsigned long long)address);
+}
+
+// Журнал подбора/детекта окна (по просьбе пользователя «больше инфы, чем
+// тосты»): один append-файл в общедоступных Загрузках первого по списку
+// доступного пути. Проба путей — один раз за процесс, лениво, при первой
+// строке; неудача — журнал молча молчит, канал необязательный.
+static FILE* g_loot_log = nullptr;
+static const char* g_loot_log_path = "";
+static const std::chrono::steady_clock::time_point loot_log_start =
+    std::chrono::steady_clock::now();
+
+static FILE* ensure_loot_log_file() {
+    if (g_loot_log) return g_loot_log;
+    static const char* const candidates[] = {
+        "/sdcard/Download/fastloot_di.log",
+        "/storage/emulated/0/Download/fastloot_di.log",
+        "/data/local/tmp/fastloot_di.log",
+    };
+    for (const char* p : candidates) {
+        FILE* f = std::fopen(p, "a");
+        if (f) { g_loot_log = f; g_loot_log_path = p; break; }
+    }
+    return g_loot_log;
 }
 
 struct Memory {
@@ -116,6 +140,21 @@ struct Memory {
         out[out_len - 1] = 0;
         return true;
     }
+    // Журнал функции в Загрузки устройства (по просьбе пользователя): полный
+    // след проходов и событий — то, что не влезает в 200-символьный тост.
+    // Файл открывается один раз лениво; каждая строка сбрасывается на диск
+    // сразу (журнал переживает аварийный выход).
+    template<class... Args>
+    void trace(const char* fmt, Args... args) {
+        FILE* f = ensure_loot_log_file();
+        if (!f) return;
+        const double t = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - loot_log_start).count();
+        std::fprintf(f, "[%9.2f] ", t);
+        std::fprintf(f, fmt, args...);
+        std::fputc('\n', f);
+        std::fflush(f);
+    }
     // Единственный писатель. Не наследует read(): карта памяти обязана быть
     // свежей на момент КАЖДОЙ записи, а не на момент начала кадра.
     template<class T> bool write_heap(uint64_t address, const T& value) {
@@ -156,6 +195,12 @@ std::recursive_mutex& session_mutex() {
 
 } // namespace
 
+// Вне анонимного namespace: main.cpp показывает путь тостом при включении.
+const char* esp_loot_log_path() {
+    if (!g_loot_log) ensure_loot_log_file();
+    return g_loot_log_path;
+}
+
 loot_tap::Tap tap;
 loot_tap::Inject tap_inject = {[](float x, float y) { Touch_Down_N(2, x, y); },
                                []() { Touch_Up_N(2); }};
@@ -176,6 +221,14 @@ void esp_loot_reset() {
 
 void esp_loot_tick(bool enabled) {
     std::lock_guard<std::recursive_mutex> guard(session_mutex());
+    {
+        // Края тумблера — заголовки сессий в журнале, чтобы отделять заходы.
+        static bool prev_enabled = false;
+        if (enabled != prev_enabled) {
+            prev_enabled = enabled;
+            memory.trace("=== fast_loot %s ===", enabled ? "включён" : "выключен");
+        }
+    }
     const uint64_t base = (g_mem.bound() && g_pid > 0) ? g_il2cpp_base : 0;
     controller.tick(epoch, base, enabled);
     const loot::Diagnostics d = controller.diagnostics();

@@ -47,6 +47,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 
 namespace loot {
 
@@ -320,11 +321,21 @@ template<class IO> ImageCheck check_image(IO& io, uint64_t base) {
                                                                  : layout.flow[f].run;
             }
         }
-        if (!out.flows) { out.reason = first; out.detail = first_detail; return out; }
+        if (!out.flows) {
+            out.reason = first;
+            out.detail = first_detail;
+            io.trace("image: layout отказан, flows=0 reason=%d detail=%llx",
+                     (int)first, (unsigned long long)first_detail);
+            return out;
+        }
         out.layout = &layout;
         out.reason = Reason::None;
+        io.trace("image: layout признан, flows=%x hooked=%x hooked_run=%llx",
+                 (unsigned)out.flows, (unsigned)out.hooked,
+                 (unsigned long long)out.hooked_run);
         return out;
     }
+    io.trace("image: build-id не из таблицы, head=%llx", (unsigned long long)head);
     return out;
 }
 
@@ -381,41 +392,66 @@ template<class IO> class Controller {
     //   project-биндинга), его первый инстанс и есть сервис. Провайдер другой
     //   формы или класс не тот — отказ, ничего не берём на веру.
     bool di_resolve() {
+        // Единая точка отказа: код в диагностику плюс строка в журнал
+        // устройства (Загрузки) — журнал видит то, что тост не вмещает.
+        auto di_fail_at = [&](int code) {
+            diag_.di_fail = static_cast<uint32_t>(code);
+            io.trace("di: resolve отказан код=%d на ступени %u", code,
+                     (unsigned)diag_.di_stage);
+            return false;
+        };
         uint64_t klass = 0, statics = 0, instance = 0, container = 0, providers = 0;
-        if (!di_read(base_ + layout_->projctx_typeinfo, klass)) { diag_.di_fail = 1; return false; }
-        if (!di_read(klass + 0xB8, statics)) { diag_.di_fail = 1; return false; }
+        if (!di_read(base_ + layout_->projctx_typeinfo, klass)) return di_fail_at(1);
+        if (!di_read(klass + 0xB8, statics)) return di_fail_at(1);
         diag_.di_stage = 1;
-        if (!di_read(statics + kDiProjCtxInstance, instance)) { diag_.di_fail = 2; return false; }
-        if (!di_read(instance + kDiProjCtxContainer, container)) { diag_.di_fail = 3; return false; }
+        if (!di_read(statics + kDiProjCtxInstance, instance)) return di_fail_at(2);
+        if (!di_read(instance + kDiProjCtxContainer, container)) return di_fail_at(3);
         diag_.di_stage = 2;
-        if (!di_read(container + kDiContainerProviders, providers)) { diag_.di_fail = 4; return false; }
+        if (!di_read(container + kDiContainerProviders, providers)) return di_fail_at(4);
         int32_t count = 0;
         if (!di_read_i32(providers + kDiDictCount, count) || count < 1 ||
-            static_cast<uint32_t>(count) > kDiMaxBindings) { diag_.di_fail = 5; return false; }
+            static_cast<uint32_t>(count) > kDiMaxBindings) return di_fail_at(5);
         uint64_t entries = 0;
-        if (!di_read(providers + kDiDictEntries, entries)) { diag_.di_fail = 5; return false; }
+        if (!di_read(providers + kDiDictEntries, entries)) return di_fail_at(5);
         int32_t capacity = 0;
         if (!di_read_i32(entries + kDiArrayLen, capacity) || capacity < 1 ||
-            static_cast<uint32_t>(capacity) > kDiMaxBindings * 4) { diag_.di_fail = 5; return false; }
+            static_cast<uint32_t>(capacity) > kDiMaxBindings * 4) return di_fail_at(5);
         diag_.di_stage = 3;
         diag_.di_fail = 6;                 // интерфейс не найден, если цикл не выйдет
         diag_.di_walk_visited = diag_.di_walk_keyread = diag_.di_walk_tclass = 0;
         diag_.di_walk_count = static_cast<uint32_t>(count);
         diag_.di_walk_cap = static_cast<uint32_t>(capacity);
         diag_.di_walk_impl0 = 0;
-        int32_t visited = 0;
+        io.trace("di: resolve старт ctx=%llx container=%llx providers=%llx count=%d cap=%d",
+                 (unsigned long long)instance, (unsigned long long)container,
+                 (unsigned long long)providers, (int)count, (int)capacity);
+        int32_t visited = 0, free_cnt = 0;
         for (int32_t i = 0; i < capacity && visited < count; ++i) {
             int32_t hash = 0;
             const uint64_t entry = entries + kDiArrayData + static_cast<uint64_t>(i) * kDiBindStride;
-            if (!di_read_i32(entry, hash) || hash < 0) continue;   // свободная запись
+            if (!di_read_i32(entry, hash)) {
+                io.trace("di: e%d: hash не читается", (int)i);
+                continue;
+            }
+            if (hash < 0) { ++free_cnt; continue; }   // свободная запись
             ++visited;
             diag_.di_walk_visited = static_cast<uint32_t>(visited);
             uint64_t type_ = 0;
-            if (!di_read(entry + kDiBindKeyType, type_)) continue;
+            if (!di_read(entry + kDiBindKeyType, type_)) {
+                io.trace("di: e%d hash=%08x: ключ Type не читается @%llx", (int)i,
+                         (unsigned)hash, (unsigned long long)(entry + kDiBindKeyType));
+                continue;
+            }
             ++diag_.di_walk_keyread;
-            if (!diag_.di_walk_impl0) diag_.di_walk_impl0 = io.ptr(type_ + kDiTypeImpl);
-            const uint64_t tclass = io.ptr(io.ptr(type_ + kDiTypeImpl));
-            if (tclass < 0x10000) continue;
+            const uint64_t impl = io.ptr(type_ + kDiTypeImpl);
+            if (!diag_.di_walk_impl0) diag_.di_walk_impl0 = impl;
+            const uint64_t tclass = io.ptr(impl);
+            if (tclass < 0x10000) {
+                io.trace("di: e%d hash=%08x type=%llx impl=%llx -> битый klass",
+                         (int)i, (unsigned)hash, (unsigned long long)type_,
+                         (unsigned long long)impl);
+                continue;
+            }
             ++diag_.di_walk_tclass;
             // Свидетельный канал «почему не нашли»: имена классов первых
             // биндингов уходят в диагностику (тот же буфер, куда потом скан
@@ -434,35 +470,46 @@ template<class IO> class Controller {
                     diag_.di_names_n = static_cast<uint32_t>(visited);
                 }
             }
-            if (!io.klass_named(tclass, layout_->iface_name, "")) continue;
+            const bool is_iface = io.klass_named(tclass, layout_->iface_name, "");
+            io.trace("di: e%d hash=%08x type=%llx impl=%llx klass=%llx name='%s'%s",
+                     (int)i, (unsigned)hash, (unsigned long long)type_,
+                     (unsigned long long)impl, (unsigned long long)tclass,
+                     (visited <= static_cast<int32_t>(kDiMaxNames))
+                         ? diag_.di_names[static_cast<size_t>(visited - 1)].data() : "",
+                     is_iface ? " == ИНТЕРФЕЙС" : "");
+            if (!is_iface) continue;
             // Нашёлся биндинг сервиса. Ровно один провайдер, формы CachedProvider.
             uint64_t list = 0;
-            if (!di_read(entry + kDiBindValue, list)) { diag_.di_fail = 7; return false; }
+            if (!di_read(entry + kDiBindValue, list)) return di_fail_at(7);
             uint64_t items = 0;
-            if (!di_read(list + kDiListItems, items)) { diag_.di_fail = 7; return false; }
+            if (!di_read(list + kDiListItems, items)) return di_fail_at(7);
             int32_t size = 0;
-            if (!di_read_i32(list + kDiListSize, size) || size != 1) { diag_.di_fail = 7; return false; }
+            if (!di_read_i32(list + kDiListSize, size) || size != 1) return di_fail_at(7);
             const uint64_t info = io.ptr(items + kDiArrayData);
             uint64_t provider = 0;
-            if (info < 0x10000 || !di_read(info + kDiProviderInfo, provider)) { diag_.di_fail = 7; return false; }
-            if (!io.klass_named(io.ptr(provider), "CachedProvider", "Zenject")) { diag_.di_fail = 8; return false; }
+            if (info < 0x10000 || !di_read(info + kDiProviderInfo, provider)) return di_fail_at(7);
+            if (!io.klass_named(io.ptr(provider), "CachedProvider", "Zenject")) return di_fail_at(8);
             uint64_t insts = 0, iitems = 0;
-            if (!di_read(provider + kDiProvInstances, insts)) { diag_.di_fail = 8; return false; }
-            if (!di_read(insts + kDiListItems, iitems)) { diag_.di_fail = 8; return false; }
+            if (!di_read(provider + kDiProvInstances, insts)) return di_fail_at(8);
+            if (!di_read(insts + kDiListItems, iitems)) return di_fail_at(8);
             int32_t isize = 0;
-            if (!di_read_i32(insts + kDiListSize, isize) || isize < 1) { diag_.di_fail = 8; return false; }
+            if (!di_read_i32(insts + kDiListSize, isize) || isize < 1) return di_fail_at(8);
             const uint64_t svc = io.ptr(iitems + kDiArrayData);
-            if (svc < 0x10000) { diag_.di_fail = 9; return false; }   // ещё не инстанцирован
-            if (!io.klass_named(io.ptr(svc), layout_->service_name, "")) { diag_.di_fail = 10; return false; }
+            if (svc < 0x10000) return di_fail_at(9);   // ещё не инстанцирован
+            if (!io.klass_named(io.ptr(svc), layout_->service_name, "")) return di_fail_at(10);
             uint64_t ids_klass = 0, ids = 0;
-            if (!di_read(base_ + layout_->ids_typeinfo, ids_klass)) { diag_.di_fail = 11; return false; }
-            if (!di_read(ids_klass + 0xB8, ids)) { diag_.di_fail = 11; return false; }
+            if (!di_read(base_ + layout_->ids_typeinfo, ids_klass)) return di_fail_at(11);
+            if (!di_read(ids_klass + 0xB8, ids)) return di_fail_at(11);
             di_service_ = svc;
             di_ids_ = ids;
             diag_.di_stage = 4;
             diag_.di_fail = 0;
+            io.trace("di: resolve ok svc=%llx ids=%llx (запись %d)",
+                     (unsigned long long)svc, (unsigned long long)ids, (int)i);
             return true;
         }
+        io.trace("di: walk конец visited=%d free=%d — интерфейс '%s' среди ключей не найден",
+                 (int)visited, (int)free_cnt, layout_->iface_name);
         return false;
     }
 
@@ -706,6 +753,9 @@ template<class IO> class Controller {
         detail = 0;
         ++diag_.expired;
         hot_ = kHotFrames;
+        io.trace("pickup: снята пауза #%llu dur=%.3f el=%.3f @%llx",
+                 (unsigned long long)diag_.expired, (double)duration, (double)elapsed,
+                 (unsigned long long)promise_);
         // The pool can hand this object to another awaiter between our read and
         // our write. Re-check; if it moved on, put back what the game's own
         // Create() leaves there (elapsed = 0) so an unrelated delay is not
@@ -764,13 +814,31 @@ public:
         const uint64_t dbb = io.ptr(di_service_ + kDiServiceDictB);
         const bool oka = di_scan_dict(da, a, ka, false);
         const bool okb = di_scan_dict(dbb, b, kb, true);
-        if (!oka && !okb) { diag_.di_fail = 12; return; }   // сервис умер: не обнуляем указатель сразу
+        if (!oka && !okb) {
+            diag_.di_fail = 12;            // сервис умер: не обнуляем указатель сразу
+            io.trace("di: скан отказан код=12 (оба словаря мертвы, svc=%llx)",
+                     (unsigned long long)di_service_);
+            return;
+        }
         diag_.di_root = oka ? a : 0;
         diag_.di_overlay = okb ? b : 0;
         diag_.di_unknown = (oka ? ka : 0) + (okb ? kb : 0);
         diag_.di_stage = 5;
         diag_.di_fail = 0;
         ++diag_.di_scans;
+        {
+            char names[160] = "";
+            size_t n = 0;
+            for (uint32_t i = 0; i < diag_.di_names_n && n < sizeof(names) - 40; ++i) {
+                if (!diag_.di_names[i][0]) continue;
+                n += static_cast<size_t>(std::snprintf(names + n, sizeof(names) - n,
+                         "%s(%d%s) ", diag_.di_names[i].data(), (int)diag_.di_idindex[i],
+                         diag_.di_overlay_win[i] ? ",ov" : ""));
+            }
+            io.trace("di: скан root=%u overlay=%u unknown=%u имен=%u %s",
+                     (unsigned)diag_.di_root, (unsigned)diag_.di_overlay,
+                     (unsigned)diag_.di_unknown, (unsigned)diag_.di_names_n, names);
+        }
     }
 
     void tick(uint64_t session, uint64_t base, bool enabled) {
@@ -845,6 +913,8 @@ public:
                 return;
             }
             retry_ = 0;
+            io.trace("pickup: привязка promise=%llx kind=%s timing=%d",
+                     (unsigned long long)promise_, kind_name(kind_), (int)timing_);
         }
         diag_.kind = kind_;
         diag_.timing = timing_;
@@ -858,6 +928,8 @@ public:
                 // выходе в пул), а объект ещё висит в списке раннера. Bound() на
                 // гонку не успевает: отцепляемся и пересканируем на следующем
                 // кадре, тоста «не применено» здесь быть не должно.
+                io.trace("pickup: хвост пула (пара занулена TryReturn), отцепили %llx",
+                         (unsigned long long)promise_);
                 drop();
                 diag_.status = Status::Waiting;
                 diag_.reason = Reason::None;

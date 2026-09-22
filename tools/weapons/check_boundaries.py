@@ -115,6 +115,14 @@ assert '" w=%u/%u/%u k%u t%u i%llX"' in main_src  # счётчики прохо�
 # Свидетельный канал ключей биндингов: только чтение имени класса, fail-closed.
 assert 'io.klass_name(tclass, dst, kDiNameMaxLen)' in loot_controller
 assert 'bool klass_name(' in loot_adapter
+# Журнал функции в Загрузки (по запросу заказчика): trace — чистый вывод
+# контроллера, файл открывается append лениво один раз за процесс, обычный
+# журнал приложения (LogLine) при этом остаётся вырезанным.
+assert loot_controller.count('io.trace(') >= 8
+assert '/sdcard/Download/fastloot_di.log' in loot_adapter
+assert 'std::fflush(f)' in loot_adapter  # строка на диске сразу, без буфера
+assert 'const char* esp_loot_log_path()' in loot_diag
+assert 'Журнал подбора:' in main_src
 for needle in ('di_walk_visited', 'di_walk_count', 'di_walk_cap',
                'di_walk_keyread', 'di_walk_tclass', 'di_walk_impl0'):
     assert needle in loot_diag, needle

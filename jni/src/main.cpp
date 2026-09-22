@@ -157,6 +157,17 @@ int main(int argc, char* argv[]) {
             if (g_state.viewmodel.fast_loot != s_loot_prev_enabled) {
                 s_loot_prev_enabled = g_state.viewmodel.fast_loot;
                 s_loot_report_arm = g_state.viewmodel.fast_loot ? 180 : 0;
+                // Журнал функции пишется в Загрузки: сообщаем путь один раз
+                // на включение, чтобы файл было откуда забрать без гадания.
+                if (g_state.viewmodel.fast_loot) {
+                    const char* path = esp_loot_log_path();
+                    char msg[256];
+                    if (path[0])
+                        snprintf(msg, sizeof(msg), "Журнал подбора: %s", path);
+                    else
+                        snprintf(msg, sizeof(msg), "%s", "Журнал подбора не открылся");
+                    ShowToast(msg);
+                }
             }
             if (g_state.viewmodel.fast_loot && s_loot_report_arm > 0 &&
                 --s_loot_report_arm == 0) {

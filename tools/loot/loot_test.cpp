@@ -90,6 +90,20 @@ struct FakeMemory {
         std::snprintf(out, out_len, "%s", it->second.first.c_str());
         return true;
     }
+    // Журнал устройства в стенде — вектор строк; проверяем, что след
+    // диагностики несёт то, что нужно для чтения отказа.
+    std::vector<std::string> trace_log;
+    template<class... Args>
+    void trace(const char* fmt, Args... args) {
+        char buf[512];
+        std::snprintf(buf, sizeof(buf), fmt, args...);
+        trace_log.emplace_back(buf);
+    }
+    bool trace_has(const char* sub) const {
+        for (const auto& line : trace_log)
+            if (std::strstr(line.c_str(), sub)) return true;
+        return false;
+    }
     template<class T> bool write_heap(uint64_t p, const T& v) {
         if (p == fail_write) return false;
         if (before_write) before_write(p);
@@ -1106,6 +1120,11 @@ int main() {
             assert(std::strcmp(d.di_names[1].data(), "inventory") == 0 && d.di_idindex[1] == 1);
             assert(std::strcmp(d.di_names[2].data(), "chat") == 0 && d.di_idindex[2] == 32 &&
                    d.di_overlay_win[2] == 1);
+            // След журнала ведёт полный разбор резолва: биндинг-интерфейс
+            // помечен, провайдерная цепочка завершена адресами.
+            assert(g.io.trace_has("== ИНТЕРФЕЙС"));
+            assert(g.io.trace_has("di: resolve ok svc="));
+            assert(g.io.trace_has("di: скан root=2 overlay=1"));
             // Спонтанное повторное открытие окна: словари перечитываются
             // периодически, новые ключи подхватываются.
             g.start_collect(4, Kind::Container);
@@ -1186,6 +1205,10 @@ int main() {
             assert(d.di_walk_visited == 1 && d.di_walk_keyread == 1);
             assert(d.di_walk_tclass == 1 && d.di_walk_count == 1);
             assert(d.di_walk_impl0 != 0);
+            // След журнала: старт прохода, перечисленная запись, итог.
+            assert(g.io.trace_has("di: resolve старт"));
+            assert(g.io.trace_has("name='OtherService'"));
+            assert(g.io.trace_has("среди ключей не найден"));
         }
         {
             // Живой словарь, но звено Il2CppType->klass битое: интерфейс есть
@@ -1205,6 +1228,8 @@ int main() {
             assert(d.di_walk_tclass == 1 && d.di_walk_count == 2);
             assert(d.di_names_n == 1);
             assert(std::memcmp(d.di_names[0].data(), "OtherService", 13) == 0);
+            // Обрыв на звене Il2CppType->klass виден в следе отдельной строкой.
+            assert(g.io.trace_has("битый klass"));
         }
         {
             // Провайдер не CachedProvider или класс инстанса не сервис — отказ,
