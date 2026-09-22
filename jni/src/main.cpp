@@ -183,12 +183,13 @@ int main(int argc, char* argv[]) {
                 // visited/count/cap и ступени ключа type->impl->klass.
                 if (ld.di_stage >= 3 && ld.di_stage < 5) {
                     n += (size_t)snprintf(msg + n, sizeof(msg) - n,
-                             " w=%u/%u/%u k%u t%u i%llX",
+                             " w=%u/%u/%u k%u t%u p%u i%llX",
                              (unsigned)ld.di_walk_visited,
                              (unsigned)ld.di_walk_count,
                              (unsigned)ld.di_walk_cap,
                              (unsigned)ld.di_walk_keyread,
                              (unsigned)ld.di_walk_tclass,
+                             (unsigned)ld.di_walk_inst,
                              (unsigned long long)ld.di_walk_impl0);
                 }
                 // Пока скан окон не дошёл до 5, в di_names лежат не подписи

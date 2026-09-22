@@ -123,6 +123,7 @@ struct Diagnostics {
     uint32_t di_walk_cap = 0;      // ёмкость массива записей
     uint32_t di_walk_keyread = 0;  // записей с ключом-указателем (System.Type*)
     uint32_t di_walk_tclass = 0;   // ключей, разрешённых в Il2CppClass*
+    uint32_t di_walk_inst = 0;     // биндингов с живым инстансом у провайдера
     uint64_t di_walk_impl0 = 0;    // содержимое type+0x10 первой занятой записи
 };
 

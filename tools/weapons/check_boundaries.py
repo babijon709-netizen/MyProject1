@@ -111,7 +111,13 @@ main_src = (root / 'jni/src/main.cpp').read_text()
 assert '"Подбор: st=%d fl=%u ex=%llu di=%d:%d r=%u o=%u u=%u"' in main_src
 assert 's_loot_report_arm = g_state.viewmodel.fast_loot ? 180 : 0;' in main_src
 assert ' ключи:' in main_src  # при di<5 сводка несёт имена ключей биндингов
-assert '" w=%u/%u/%u k%u t%u i%llX"' in main_src  # счётчики прохода биндингов
+assert '" w=%u/%u/%u k%u t%u p%u i%llX"' in main_src  # счётчики прохода биндингов
+# Детект биндинга стал двусторонним (журнал устройства: ключи — metadata-
+# дескрипторы без имени): сервис ищется и по инстансу внутри провайдера,
+# с теми же гейтами CachedProvider + имя класса из таблицы версии.
+assert 'uint64_t svc_by_value = 0;' in loot_controller
+assert 'io.klass_named(sklass, layout_->service_name' in loot_controller
+assert 'uint32_t di_walk_inst' in (root / 'jni/include/loot.h').read_text()
 # Свидетельный канал ключей биндингов: только чтение имени класса, fail-closed.
 assert 'io.klass_name(tclass, dst, kDiNameMaxLen)' in loot_controller
 assert 'bool klass_name(' in loot_adapter

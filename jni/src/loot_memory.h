@@ -422,6 +422,19 @@ template<class IO> class Controller {
         diag_.di_walk_count = static_cast<uint32_t>(count);
         diag_.di_walk_cap = static_cast<uint32_t>(capacity);
         diag_.di_walk_impl0 = 0;
+        // Общий выход: положить сервис+статики id-класса и отчитаться.
+        auto di_finish = [&](uint64_t svc) -> bool {
+            uint64_t ids_klass = 0, ids = 0;
+            if (!di_read(base_ + layout_->ids_typeinfo, ids_klass)) return di_fail_at(11);
+            if (!di_read(ids_klass + 0xB8, ids)) return di_fail_at(11);
+            di_service_ = svc;
+            di_ids_ = ids;
+            diag_.di_stage = 4;
+            diag_.di_fail = 0;
+            io.trace("di: resolve ok svc=%llx ids=%llx",
+                     (unsigned long long)svc, (unsigned long long)ids);
+            return true;
+        };
         io.trace("di: resolve старт ctx=%llx container=%llx providers=%llx count=%d cap=%d",
                  (unsigned long long)instance, (unsigned long long)container,
                  (unsigned long long)providers, (int)count, (int)capacity);
@@ -562,6 +575,48 @@ template<class IO> class Controller {
                     }
                 }
             }
+            // Второй путь — по стороне значения: у живого синглтон-биндинга
+            // CachedProvider уже держит инстанс, а имя его klass читается
+            // напрямую (цепочка проверена — 'RuntimeType' печаталась) и не
+            // зависит от metadata-раскладки ключей. Провайдер и имя — те же
+            // гейты, что и у ключевого пути: чужой класс не пройдёт.
+            uint64_t svc_by_value = 0;
+            {
+                uint64_t list = 0, items = 0;
+                if (di_read(entry + kDiBindValue, list) &&
+                    di_read(list + kDiListItems, items)) {
+                    const uint64_t info = io.ptr(items + kDiArrayData);
+                    uint64_t provider = 0;
+                    if (info >= 0x10000 && di_read(info + kDiProviderInfo, provider) &&
+                        io.klass_named(io.ptr(provider), "CachedProvider", "Zenject")) {
+                        uint64_t insts = 0, iitems = 0;
+                        int32_t isize = 0;
+                        if (di_read(provider + kDiProvInstances, insts) &&
+                            di_read(insts + kDiListItems, iitems) &&
+                            di_read_i32(insts + kDiListSize, isize) && isize >= 1) {
+                            const uint64_t first = io.ptr(iitems + kDiArrayData);
+                            if (first >= 0x10000) {
+                                ++diag_.di_walk_inst;
+                                const uint64_t sklass = io.ptr(first);
+                                if (visited <= 3) {
+                                    char sn[kDiNameMaxLen]{};
+                                    if (io.klass_name(sklass, sn, kDiNameMaxLen) && sn[0])
+                                        di_name_sanitize(sn, static_cast<int32_t>(std::strlen(sn)));
+                                    io.trace("di: e%d inst=%llx klass='%s'", (int)i,
+                                             (unsigned long long)first, sn);
+                                }
+                                if (io.klass_named(sklass, layout_->service_name, ""))
+                                    svc_by_value = first;
+                            }
+                        }
+                    }
+                }
+            }
+            if (svc_by_value) {
+                io.trace("di: биндинг '%s' найден по инстансу (запись %d)",
+                         layout_->service_name, (int)i);
+                return di_finish(svc_by_value);
+            }
             if (!is_iface) continue;
             // Нашёлся биндинг сервиса. Ровно один провайдер, формы CachedProvider.
             uint64_t list = 0;
@@ -582,19 +637,11 @@ template<class IO> class Controller {
             const uint64_t svc = io.ptr(iitems + kDiArrayData);
             if (svc < 0x10000) return di_fail_at(9);   // ещё не инстанцирован
             if (!io.klass_named(io.ptr(svc), layout_->service_name, "")) return di_fail_at(10);
-            uint64_t ids_klass = 0, ids = 0;
-            if (!di_read(base_ + layout_->ids_typeinfo, ids_klass)) return di_fail_at(11);
-            if (!di_read(ids_klass + 0xB8, ids)) return di_fail_at(11);
-            di_service_ = svc;
-            di_ids_ = ids;
-            diag_.di_stage = 4;
-            diag_.di_fail = 0;
-            io.trace("di: resolve ok svc=%llx ids=%llx (запись %d)",
-                     (unsigned long long)svc, (unsigned long long)ids, (int)i);
-            return true;
+            return di_finish(svc);
         }
-        io.trace("di: walk конец visited=%d free=%d — интерфейс '%s' среди ключей не найден",
-                 (int)visited, (int)free_cnt, layout_->iface_name);
+        io.trace("di: walk конец visited=%d free=%d inst=%u — '%s' не найден ни по ключу, ни по инстансу",
+                 (int)visited, (int)free_cnt, (unsigned)diag_.di_walk_inst,
+                 layout_->iface_name);
         return false;
     }
 

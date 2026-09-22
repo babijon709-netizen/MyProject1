@@ -1210,7 +1210,7 @@ int main() {
             // След журнала: старт прохода, перечисленная запись, итог.
             assert(g.io.trace_has("di: resolve старт"));
             assert(g.io.trace_has("name='OtherService'"));
-            assert(g.io.trace_has("среди ключей не найден"));
+            assert(g.io.trace_has("не найден ни по ключу, ни по инстансу"));
         }
         {
             // Живой словарь, но звено Il2CppType->klass битое: интерфейс есть
