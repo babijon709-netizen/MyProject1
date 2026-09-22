@@ -38,7 +38,6 @@ struct FakeMemory {
     unsigned reads = 0, fresh_reads = 0, writes = 0, name_checks = 0;
     uint64_t fail_read = 0, fail_write = 0;
     std::vector<uint64_t> write_log;
-    std::vector<std::pair<uint64_t, uint32_t>> code_order;  // порядок правок кода
     // Test hook: called before a heap write lands, so a case can move the
     // object out from under the controller the way the pool would.
     std::function<void(uint64_t)> before_write;
@@ -91,15 +90,9 @@ struct FakeMemory {
         set(p, v);
         return true;
     }
-    // То же, что Memory::write_code в game_loot.cpp: запись слова в образ.
-    bool write_code(uint64_t p, uint32_t v) {
-        if (p == fail_code || deny_code) return false;
-        code_order.push_back({p, v});
-        set<uint32_t>(p, v);
-        return true;
-    }
-    uint64_t fail_code = 0;
-    bool deny_code = false;   // «запись кода отказана»: живёт старое ускорение
+    // Метода write_code здесь НАРОЧНО нет: контроллер обязан обходиться
+    // кучей; обращение к записи кода не скомпилируется — регресс-проверка
+    // «ни одной записи в образ» встроена в тип.
     uint64_t klass(const char* name, const char* ns) {
         const uint64_t k = alloc(0x100);
         classes[k] = {name, ns};
@@ -145,11 +138,6 @@ struct Game {
             io.set<uint32_t>(base + flow.run + 16,
                              kBranchOp | (static_cast<uint32_t>(imm) & 0x3FFFFFFu));
         }
-    }
-    // Состояние кода потока: штатная задержка или наш патч (мгновенный забор).
-    bool instant(Kind kind) {
-        return io.get<uint32_t>(base + layout.flow[static_cast<size_t>(kind)].call_site) ==
-               kInstantX1;
     }
     uint64_t array(const std::vector<uint64_t>& elements) {
         const uint64_t a = io.alloc(0x20 + elements.size() * 8 + 8);
@@ -237,11 +225,6 @@ struct Game {
         return promise;
     }
     void start_collect(int slots, Kind kind = Kind::Container, size_t timing = kUpdateTiming) {
-        // Патч на месте: первый же проход MoveNext переносит всё окно целиком,
-        // ожидание ни разу не регистрируется (в state machine await завершён
-        // синхронно), поэтому в списке раннера ничего не появляется.
-        if (instant(kind)) { collect = {}; collect.kind = kind; collect.moved = slots;
-                             collect.finished = true; return; }
         collect.slots = slots;
         collect.moved = 0;
         collect.awaits = 0;
@@ -278,21 +261,11 @@ struct Game {
         }
         publish(timing);
     }
-    // One resume of the stock coroutine: ONE slot, then await again — или всё
-    // сразу, если патч успели применить между возобновлениями (окно открывали
-    // до включения тумблера: первый снятый await переводит цикл на патченый
-    // код, и тот же проход забирает остаток).
+    // One resume of the stock coroutine: ONE slot, then await again.
     void resume_collect(size_t timing) {
         ++collect.moved;
         --collect.slots;
         if (collect.slots <= 0) { collect.finished = true; collect.promise = 0; return; }
-        if (instant(collect.kind)) {
-            collect.moved += collect.slots;
-            collect.slots = 0;
-            collect.finished = true;
-            collect.promise = 0;
-            return;
-        }
         loops[timing].live.push_back(make_collect_promise(collect.kind));
         ++collect.awaits;
     }
@@ -312,7 +285,6 @@ int main() {
         Game g(image);
         g.map_library();
         g.build_unitask();
-        g.io.deny_code = true;   // патч отказан: проверяется ускорение по кадру
         g.start_collect(24);
         Controller<FakeMemory> c(g.io);
         int frames = 0;
@@ -351,7 +323,6 @@ int main() {
         Game g;
         g.map_library();
         g.build_unitask();
-        g.io.deny_code = true;
         g.start_collect(6);
         Controller<FakeMemory> c(g.io);
         for (int i = 0; i < 10 && !g.collect.finished; ++i) frame(g, c, 1, true);
@@ -374,7 +345,6 @@ int main() {
         const uint64_t ui = g.make_unrelated_promise(5.f);
         g.loops[kUpdateTiming].live.push_back(ui);
         g.publish(kUpdateTiming);
-        g.io.deny_code = true;
         Controller<FakeMemory> c(g.io);
         for (int i = 0; i < 40; ++i) frame(g, c, 1, true);
         assert(g.io.writes == 0);
@@ -396,7 +366,6 @@ int main() {
             Game g;
             g.map_library();
             g.build_unitask();
-            g.io.deny_code = true;
             g.start_collect(4, kind);
             Controller<FakeMemory> c(g.io);
             for (int i = 0; i < 20 && !g.collect.finished; ++i) frame(g, c, 1, true);
@@ -411,7 +380,6 @@ int main() {
         Game g;
         g.map_library();
         g.build_unitask();
-        g.io.deny_code = true;
         g.start_collect(3, Kind::Container, 10 /* PreLateUpdate */);
         Controller<FakeMemory> c(g.io);
         for (int i = 0; i < 20 && !g.collect.finished; ++i) {
@@ -465,7 +433,6 @@ int main() {
                     Game g;
                     g.map_library();
                     g.build_unitask();
-                    g.io.deny_code = true;
                     g.io.set<uint32_t>(g.base + site(g, flow), brk.word);
                     g.start_collect(4, static_cast<Kind>(other));
                     Controller<FakeMemory> c(g.io);
@@ -480,7 +447,6 @@ int main() {
                     Game g;
                     g.map_library();
                     g.build_unitask();
-                    g.io.deny_code = true;
                     g.io.set<uint32_t>(g.base + site(g, flow), brk.word);
                     g.start_collect(4, static_cast<Kind>(flow));
                     Controller<FakeMemory> c(g.io);
@@ -506,7 +472,6 @@ int main() {
                 Game g;
                 g.map_library();
                 g.build_unitask();
-                g.io.deny_code = true;
                 for (size_t f = 0; f < kFlowCount; ++f)
                     g.io.set<uint32_t>(g.base + site(g, f), brk.word);
                 g.start_collect(4);
@@ -578,7 +543,6 @@ int main() {
         Game g;
         g.map_library();
         g.build_unitask();
-        g.io.deny_code = true;
         g.start_collect(20);
         Controller<FakeMemory> c(g.io);
         for (int i = 0; i < 3; ++i) frame(g, c, 1, true);
@@ -603,7 +567,6 @@ int main() {
         Game g;
         g.map_library();
         g.build_unitask();
-        g.io.deny_code = true;
         g.start_collect(10);
         Controller<FakeMemory> c(g.io);
         for (int i = 0; i < 3; ++i) frame(g, c, 1, true);
@@ -625,7 +588,6 @@ int main() {
         Game g;
         g.map_library();
         g.build_unitask();
-        g.io.deny_code = true;
         g.start_collect(4);
         Controller<FakeMemory> c(g.io);
         frame(g, c, 1, true);
@@ -658,7 +620,6 @@ int main() {
         Game g;
         g.map_library();
         g.build_unitask();
-        g.io.deny_code = true;
         g.start_collect(4);
         Controller<FakeMemory> c(g.io);
         frame(g, c, 1, true);
@@ -694,7 +655,6 @@ int main() {
         Game g;
         g.map_library();
         g.build_unitask();
-        g.io.deny_code = true;
         g.loops[kUpdateTiming].live.push_back(0);
         g.loops[kUpdateTiming].live.push_back(0xdeadbeef);
         g.loops[kUpdateTiming].live.push_back(g.io.alloc(0x40));   // foreign object
@@ -726,7 +686,6 @@ int main() {
         Game g;
         g.map_library();
         g.build_unitask();
-        g.io.deny_code = true;
         g.promise_klass = g.io.klass(kPromiseName, "");     // UniTask/Delay...
         g.start_collect(3);
         const uint64_t runner_klass = g.io.ptr(g.collect.runner);
@@ -746,7 +705,6 @@ int main() {
         auto build = [](Game& g, int foreign, bool ours_last) {
             g.map_library();
             g.build_unitask();
-            g.io.deny_code = true;
             const auto push_foreign = [&]() {
                 for (int i = 0; i < foreign; ++i) {
                     const uint64_t object = g.io.alloc(0x80);
@@ -804,7 +762,6 @@ int main() {
             Game g;
             g.map_library();
             g.build_unitask();
-            g.io.deny_code = true;
             for (int i = 0; i < 1200; ++i) {
                 const uint64_t object = g.io.alloc(0x80);
                 g.io.set<uint64_t>(object, g.io.klass("Crowd", "Some.Namespace"));
@@ -821,96 +778,65 @@ int main() {
         std::printf("busy list: 40 and 100 foreign classes, either end of the list\n");
     }
 
-    // ---- 14. Instant pickup: the code patch ------------------------------
+    // ---- 14. Код образа не изменяется никогда ------------------------------
     {
-        // Применение: сперва flag, затем call, на каждом потоке — частичное
-        // состояние никогда не опасно идущему рядом кадру.
+        // Метода записи кода у IO-интерфейса нет (см. комментарий в FakeMemory),
+        // поэтому ниже проверяется ровно обратное старому поведению: активный
+        // подбор идёт, а слова потоков в образе остаются штатными.
         Game g;
         g.map_library();
         g.build_unitask();
-        Controller<FakeMemory> c(g.io);
-        frame(g, c, 1, true);
-        const uint32_t all_flows = (1u << kFlowCount) - 1u;
-        assert(c.diagnostics().instant == all_flows);
-        assert(g.io.code_order.size() == kFlowCount * 2);
-        for (size_t f = 0, i = 0; f < kFlowCount; ++f) {
-            assert(g.io.code_order[i].first == g.base + g.layout.flow[f].flag_site);
-            assert(g.io.code_order[i].second == kInstantX0); ++i;
-            assert(g.io.code_order[i].first == g.base + g.layout.flow[f].call_site);
-            assert(g.io.code_order[i].second == kInstantX1); ++i;
-        }
-        // Сверка молчит: патч применяется ровно один раз.
-        g.io.code_order.clear();
-        frame(g, c, 1, true);
-        assert(g.io.code_order.empty());
-        // Целое окно — за один проход, ни одной записи в кучу.
         g.start_collect(24);
+        Controller<FakeMemory> c(g.io);
+        int frames = 0;
+        while (!g.collect.finished && frames < 1000) { frame(g, c, 1, true); ++frames; }
         assert(g.collect.finished && g.collect.moved == 24);
-        assert(g.io.writes == 0);
-        std::printf("instant: applied once, whole window in one pass, zero heap writes\n");
-    }
-    {
-        // Окно открыто до включения тумблера: первый снятый штатный await
-        // возобновляет корутину, и патч уже гонит её до конца без пауз.
-        Game g;
-        g.map_library();
-        g.build_unitask();
-        g.start_collect(6);
-        g.tick();                                   // штатное ожидание 0.35 с
-        assert(g.collect.moved == 0);
-        Controller<FakeMemory> c(g.io);
-        frame(g, c, 1, true);
-        assert(g.collect.finished && g.collect.moved == 6);
-        std::printf("instant: a window opened before enabling still empties at once\n");
-    }
-    {
-        // Патч остался от прошлого запуска оверлея: ни одной повторной записи,
-        // а на выключении байты возвращаются к табличным.
-        Game g;
-        g.map_library();
-        g.build_unitask();
+        assert(g.io.writes > 0);                          // только куча
         for (const auto& flow : g.layout.flow) {
-            g.io.set<uint32_t>(g.base + flow.flag_site, kInstantX0);
-            g.io.set<uint32_t>(g.base + flow.call_site, kInstantX1);
-        }
-        Controller<FakeMemory> c(g.io);
-        frame(g, c, 1, true);
-        assert(c.diagnostics().instant == (1u << kFlowCount) - 1u);
-        assert(g.io.code_order.empty());
-        frame(g, c, 1, false);
-        assert(g.io.code_order.size() == kFlowCount * 2);      // и откат: call, flag
-        for (size_t f = 0, i = 0; f < kFlowCount; ++f) {
-            assert(g.io.code_order[i].first == g.base + g.layout.flow[f].call_site);
-            assert(g.io.code_order[i].second == g.layout.flow[f].call_word); ++i;
-            assert(g.io.code_order[i].first == g.base + g.layout.flow[f].flag_site);
-            assert(g.io.code_order[i].second == g.layout.flow[f].flag_word); ++i;
-        }
-        for (const auto& flow : g.layout.flow) {
+            assert(g.io.get<uint32_t>(g.base + flow.delay_site) == flow.delay_word);
             assert(g.io.get<uint32_t>(g.base + flow.flag_site) == flow.flag_word);
             assert(g.io.get<uint32_t>(g.base + flow.call_site) == flow.call_word);
         }
-        std::printf("instant: an already-patched image is not rewritten, off restores the bytes\n");
+        std::printf("no-patch: window drains per-frame, flow words in the image intact\n");
     }
     {
-        // Выключение откатывает в обратном порядке, повторное включение
-        // применяет снова.
-        Game g;
-        g.map_library();
-        g.build_unitask();
-        Controller<FakeMemory> c(g.io);
-        frame(g, c, 1, true);
-        frame(g, c, 1, false);
-        assert(c.diagnostics().instant == 0);
-        g.io.code_order.clear();
-        frame(g, c, 1, true);
-        assert(g.io.code_order.size() == kFlowCount * 2);
-        g.start_collect(4, Kind::FastLoad);
-        assert(g.collect.finished && g.collect.moved == 4);
-        std::printf("instant: off reverts bytes in reverse order, on re-applies\n");
+        // Образ несёт ОСТАТКИ устаревшего инструкционного патча (старая сборка
+        // оверлея или чужой мод с тем же трюком): слова отличаются от табличных,
+        // для нас это чужая правка — такие потоки отключены, ни одной записи.
+        for (size_t broken = 1; broken <= kFlowCount; ++broken) {
+            Game g;
+            g.map_library();
+            g.build_unitask();
+            for (size_t f = 0; f < broken; ++f) {
+                g.io.set<uint32_t>(g.base + g.layout.flow[f].flag_site, 0xAA1F03E0u);
+                g.io.set<uint32_t>(g.base + g.layout.flow[f].call_site, 0xAA1F03E1u);
+            }
+            const uint32_t alive = ((1u << kFlowCount) - 1u) & ~((1u << broken) - 1u);
+            Controller<FakeMemory> c(g.io);
+            if (broken < kFlowCount) {
+                // Живой поток продолжает ускоряться, испорченный не трогается.
+                g.start_collect(4, static_cast<Kind>(broken));
+                for (int i = 0; i < 30 && !g.collect.finished; ++i) frame(g, c, 1, true);
+                assert(c.diagnostics().flows == alive);
+                assert(c.diagnostics().status != Status::Failed);
+                assert(g.collect.moved == 4);
+            } else {
+                // Все потоки несут чужую правку: жёсткий отказ образа.
+                g.start_collect(4);
+                for (int i = 0; i < 20 && !g.collect.finished; ++i) frame(g, c, 1, true);
+                assert(c.diagnostics().status == Status::Failed);
+                assert(c.diagnostics().reason == Reason::Patched);
+                assert(c.diagnostics().flows == 0);
+                assert(c.diagnostics().detail == g.layout.flow[0].call_site);
+                assert(g.io.writes == 0);
+                assert(g.collect.moved == 0);
+            }
+        }
+        std::printf("no-patch: a patched image is refused flow-by-flow, nothing written\n");
     }
     {
-        // Чужая правка кода: поток отключается ещё проверкой образа, поверх
-        // его слов ничего не пишется, соседние забирают мгновенно.
+        // Чужая правка кода только в одном потоке: отключается один, два соседа
+        // ускоряются; над словами чужой правки ничего не записывается.
         Game g;
         g.map_library();
         g.build_unitask();
@@ -919,73 +845,33 @@ int main() {
         Controller<FakeMemory> c(g.io);
         g.start_collect(5, Kind::Pickup);
         for (int i = 0; i < 20; ++i) frame(g, c, 1, true);
-        assert(g.collect.moved == 0);                 // чужой поток мёртв для нас
+        assert(g.collect.moved == 0);
         assert(g.io.writes == 0);
-        assert(c.diagnostics().flows == ((7u & ~2u)));
-        assert(c.diagnostics().instant == ((7u & ~2u)));
-        assert(g.io.code_order.size() == 4);          // только два живых потока
+        assert(c.diagnostics().flows == (7u & ~2u));
+        assert(g.io.get<uint32_t>(g.base + g.layout.flow[1].flag_site) == 0x14000042u);
         g.start_collect(4, Kind::FastLoad);
-        assert(g.collect.moved == 4 && g.collect.finished);
-        std::printf("instant: a foreign code patch disables only its flow\n");
-    }
-    {
-        // Патч откатили из-под нас (классическая реакция античита): никакого
-        // пинг-понга записей — поток молча возвращается к ускорению по кадру.
-        Game g;
-        g.map_library();
-        g.build_unitask();
-        Controller<FakeMemory> c(g.io);
-        frame(g, c, 1, true);
-        g.io.code_order.clear();
-        g.io.set<uint32_t>(g.base + g.layout.flow[0].flag_site, g.layout.flow[0].flag_word);
-        g.io.set<uint32_t>(g.base + g.layout.flow[0].call_site, g.layout.flow[0].call_word);
-        const uint32_t before = c.diagnostics().flows;
-        frame(g, c, 1, true);
-        assert(g.io.code_order.empty());
-        assert((c.diagnostics().instant & 1u) == 0);
-        assert(c.diagnostics().flows == before);       // поток жив, просто медленнее
-        g.start_collect(3);
         for (int i = 0; i < 30 && !g.collect.finished; ++i) frame(g, c, 1, true);
-        assert(g.collect.moved == 3);
-        assert(g.io.writes > 0);                       // снова ускорение через кучу
-        std::printf("instant: a reverted patch is not re-fought, per-frame mode resumes\n");
+        assert(g.collect.moved == 4 && g.collect.finished);
+        assert(g.io.writes > 0);                         // живой поток — куча
+        std::printf("no-patch: a foreign code patch disables only its flow\n");
     }
     {
-        // Патч куда-то заменили (не наш, не оригинал): поток отключается.
+        // Выкл/вкл тумблера: пишется только kucha, образ остаётся байт-в-байт.
         Game g;
         g.map_library();
         g.build_unitask();
         Controller<FakeMemory> c(g.io);
         frame(g, c, 1, true);
-        g.io.set<uint32_t>(g.base + g.layout.flow[2].call_site, 0xDEADBEEFu);
+        frame(g, c, 1, false);
         frame(g, c, 1, true);
-        assert((c.diagnostics().flows & 4u) == 0);
-        assert((c.diagnostics().instant & 4u) == 0);
-        std::printf("instant: code replaced under the patch disables that flow\n");
-    }
-    {
-        // Отказ записи кода: бита не ставится, полупатч откатывается.
-        Game g;
-        g.map_library();
-        g.build_unitask();
-        Controller<FakeMemory> c(g.io);
-        g.io.fail_code = g.base + g.layout.flow[0].flag_site;
-        frame(g, c, 1, true);
-        assert((c.diagnostics().instant & 1u) == 0);
-        assert(g.io.get<uint32_t>(g.base + g.layout.flow[0].flag_site) ==
-               g.layout.flow[0].flag_word);
-        Game h;
-        h.map_library();
-        h.build_unitask();
-        Controller<FakeMemory> d(h.io);
-        h.io.fail_code = h.base + h.layout.flow[0].call_site;
-        frame(h, d, 1, true);
-        assert((d.diagnostics().instant & 1u) == 0);
-        assert(h.io.get<uint32_t>(h.base + h.layout.flow[0].flag_site) ==
-               h.layout.flow[0].flag_word);            // полупатч убран обратно
-        assert(h.io.get<uint32_t>(h.base + h.layout.flow[0].call_site) ==
-               h.layout.flow[0].call_word);
-        std::printf("instant: a failed code write leaves the image byte-identical\n");
+        g.start_collect(4, Kind::FastLoad);
+        for (int i = 0; i < 30 && !g.collect.finished; ++i) frame(g, c, 1, true);
+        assert(g.collect.finished && g.collect.moved == 4);
+        for (const auto& flow : g.layout.flow) {
+            assert(g.io.get<uint32_t>(g.base + flow.flag_site) == flow.flag_word);
+            assert(g.io.get<uint32_t>(g.base + flow.call_site) == flow.call_word);
+        }
+        std::printf("no-patch: toggling never touches image bytes\n");
     }
 
     // ---- 15. The shipped tables describe themselves consistently -----------

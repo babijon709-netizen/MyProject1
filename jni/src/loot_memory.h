@@ -97,14 +97,11 @@ inline constexpr const char* kLoopRunnerNs[] = {"Cysharp.Threading.Tasks.Interna
 struct FlowSite {
     uint64_t run, move_next, delay_site;
     uint32_t delay_word;
-    // Две инструкции, которые убирают сам вызов WaitForSeconds: `mov w0, #1`
-    // (первый аргумент-флаг) и `bl WaitForSeconds`. Замена их на
-    // `mov x0, xzr` / `mov x1, xzr` возвращает default(UniTask): source == null,
-    // а state machine уже имеет штатный путь «source == null = завершено
-    // синхронно» (два cbz x20 в её коде), поэтому цикл забирает все слоты за
-    // один проход MoveNext — без регистрации ожидания и без единой записи в
-    // кучу. Чтение этих слов обязательно: чужое содержимое = отказ потока,
-    // патч поверх чужой правки не накладывается никогда.
+    // Две инструкции задержки (`mov w0, #1` — флаг-аргумент, и
+    // `bl WaitForSeconds`) — опознавательные знаки потока: их значения
+    // читаются, но НИКОГДА не изменяются. Отличающееся содержимое — чужая
+    // правка образа (хук, модифицированный клиент): поток отключается,
+    // ничего поверх чужого не пишем.
     uint64_t flag_site, call_site;
     uint32_t flag_word, call_word;
 };
@@ -124,11 +121,6 @@ inline constexpr uint32_t kRunPrologue[4] = {0xf9401028u, 0x91008000u,
                                              0xf9406108u, 0xf9404101u};
 inline constexpr uint32_t kBranchMask = 0xFC000000u;   // unconditional b
 inline constexpr uint32_t kBranchOp   = 0x14000000u;
-// Чем заменяются две инструкции задержки: нулевой вектор UniTask делает её
-// await завершающимся синхронно (см. FlowSite::flag_site).
-inline constexpr uint32_t kInstantX0 = 0xAA1F03E0u;  // mov x0, xzr
-inline constexpr uint32_t kInstantX1 = 0xAA1F03E1u;  // mov x1, xzr
-
 inline constexpr Layout kLayouts[] = {
     // release, libil2cpp.so build-id d85e63cd8dcbd481695012ef2e284f0eeb9ef307
     {{{0xd8,0x5e,0x63,0xcd,0x8d,0xcb,0xd4,0x81,0x69,0x50,
@@ -200,16 +192,13 @@ FlowCheck flow_check(IO& io, uint64_t base, const FlowSite& flow,
     uint32_t word = 0;
     if (!io.read(base + flow.delay_site, word)) return FlowCheck::Unreadable;
     if (word != flow.delay_word) return FlowCheck::DelayPatched;
-    // Точки, которые мы же и переписываем: оригинал и наш патч — норма,
-    // смешанное состояние одной пары (полупатч чужих рук) и любое третье
-    // содержимое — чужая правка: поток отключаётся, ничего поверх не пишем.
+    // Опознавательные знаки задержки: только оригинал. Любое отличие — чужая
+    // правка образа (хук, мод): поток отключается, ничего поверх не пишем —
+    // записей в код у этого контроллера нет вообще.
     uint32_t flag = 0, call = 0;
     if (!io.read(base + flow.flag_site, flag) || !io.read(base + flow.call_site, call))
         return FlowCheck::Unreadable;
-    const bool flag_orig = flag == flow.flag_word, flag_ours = flag == kInstantX0;
-    const bool call_orig = call == flow.call_word, call_ours = call == kInstantX1;
-    if (!(flag_orig || flag_ours) || !(call_orig || call_ours)) return FlowCheck::CodePatched;
-    if (flag_orig != call_orig || flag_ours != call_ours) return FlowCheck::CodePatched;
+    if (flag != flow.flag_word || call != flow.call_word) return FlowCheck::CodePatched;
     code = {};
     if (!io.read(base + flow.run, code)) return FlowCheck::Unreadable;
     bool same = true;
@@ -309,74 +298,7 @@ template<class IO> class Controller {
     Kind kind_ = Kind::None;
     int timing_ = -1;
     unsigned retry_ = 0, hot_ = 0;
-    // Маска потоков с применённым патчем задержки (мгновенный забор всего окна)
-    // и флаг «попытка уже была»: повторно насиловать код нельзя — если патч
-    // откатили (античит, чужой инструмент), мы это видим на сверке и просто
-    // снимаем бит, возвращаясь к ускорению по одному слоту за кадр.
-    uint32_t instant_ = 0;
-    bool instant_tried_ = false;
     Diagnostics diag_{};
-
-    // Применение патча задержки: mov w0,#1 -> mov x0,xzr, затем
-    // bl WaitForSeconds -> mov x1,xzr. Порядок выбран так, чтобы любое
-    // частичное состояние было безопасным для идущего рядом кадра: между
-    // записями x0 либо уже ноль (вызов просто получает isTimeScale=false),
-    // либо вызова ещё нет и обе пары уже обнулены.
-    // Чужое содержимое точек отсекается ещё flow_check(), поэтому здесь
-    // встречаются только оригинал и наш патч.
-    void ensure_instant() {
-        for (size_t f = 0; f < kFlowCount; ++f) {
-            if (!(flows_ok_ & (1u << f)) || (instant_ & (1u << f))) continue;
-            const FlowSite& flow = layout_->flow[f];
-            uint32_t flag = 0, call = 0;
-            if (!io.read(base_ + flow.flag_site, flag) ||
-                !io.read(base_ + flow.call_site, call)) continue;
-            if (flag == kInstantX0 && call == kInstantX1) { instant_ |= 1u << f; continue; }
-            if (flag != flow.flag_word || call != flow.call_word) continue;  // между проверками вмешались
-            if (!io.write_code(base_ + flow.flag_site, kInstantX0)) continue;
-            if (!io.write_code(base_ + flow.call_site, kInstantX1)) {
-                io.write_code(base_ + flow.flag_site, flow.flag_word);       // откатить полупатч
-                continue;
-            }
-            instant_ |= 1u << f;
-        }
-    }
-
-    // Сверка: чужой откат не приводит к повторному патчу (пинг-понг записей —
-    // самый заметный факт вмешательства). Правильно откаченный поток продолжает
-    // ускоряться по слоту за кадр; код, который заменили на ТРЕТЬЕ, делает
-    // поток непредсказуемым — он отключается целиком.
-    void verify_instant() {
-        if (!instant_) return;
-        uint32_t mask = instant_;
-        for (size_t f = 0; f < kFlowCount; ++f) {
-            if (!(mask & (1u << f))) continue;
-            const FlowSite& flow = layout_->flow[f];
-            uint32_t flag = 0, call = 0;
-            if (io.read(base_ + flow.flag_site, flag) &&
-                io.read(base_ + flow.call_site, call) &&
-                flag == kInstantX0 && call == kInstantX1) continue;
-            instant_ &= ~(1u << f);
-            if (flag != flow.flag_word || call != flow.call_word) flows_ok_ &= ~(1u << f);
-        }
-    }
-
-    // Откат в противоположном порядке: сначала обратно bl (x0 уже ноль или
-    // скоро им станет — безопасно), затем mov w0,#1. Выключение тумблера
-    // возвращает образ к исходным 24 байтам за 6 записей кода.
-    void revert_instant() {
-        if (!instant_ || !layout_) { instant_ = 0; return; }
-        for (size_t f = 0; f < kFlowCount; ++f) {
-            if (!(instant_ & (1u << f))) continue;
-            const FlowSite& flow = layout_->flow[f];
-            uint32_t flag = 0, call = 0;
-            if (!io.read(base_ + flow.flag_site, flag) ||
-                !io.read(base_ + flow.call_site, call)) continue;
-            if (call == kInstantX1) io.write_code(base_ + flow.call_site, flow.call_word);
-            if (flag == kInstantX0) io.write_code(base_ + flow.flag_site, flow.flag_word);
-        }
-        instant_ = 0;
-    }
 
     bool is_promise(uint64_t object, uint32_t& name_checks) {
         const uint64_t klass = io.ptr(object);
@@ -569,8 +491,6 @@ public:
 
     // Forget every address. Nothing is written: there is no residue to undo.
     void reset() {
-        revert_instant();          // пока base_ ещё указывает на патченый образ
-        instant_tried_ = false;
         layout_ = nullptr;
         flows_ok_ = hooked_ = 0;
         hooked_run_ = 0;
@@ -590,9 +510,6 @@ public:
         if (!enabled) {
             // Stop touching the game at once. A delay expired on the previous
             // tick is the game's own pending transfer; there is nothing to undo.
-            // Патч задержки живёт только при включённом тумблере.
-            revert_instant();
-            instant_tried_ = false;
             drop();
             retry_ = hot_ = 0;
             diag_.status = Status::Off;
@@ -601,7 +518,6 @@ public:
             diag_.detail = 0;
             diag_.flows = 0;
             diag_.hooked = 0;
-            diag_.instant = 0;
             diag_.timing = -1;
             return;
         }
@@ -633,12 +549,7 @@ public:
             diag_.hooked_run = hooked_run_;
             diag_.hooked_code = hooked_code_;
         }
-        if (!instant_tried_ && base_) { ensure_instant(); instant_tried_ = true; }
-        verify_instant();
-        // Маска живого кода могла измениться только что (снятие патча из-под
-        // нас): публикуем уже обновлённую.
         diag_.flows = flows_ok_;
-        diag_.instant = instant_ & flows_ok_;
         {
             Reason reason = Reason::None;
             uint64_t detail = 0;

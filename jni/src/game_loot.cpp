@@ -118,38 +118,11 @@ struct Memory {
         }
         return g_mem.write(address, &value, sizeof(T));
     }
-    // Запись 4 байт кода libil2cpp.so — только для точек из таблицы образа.
-    // Гейт: адрес обязан лежать в r-xp-сегменте именно libil2cpp.so (свежая
-    // карта на момент записи), всё остальное отсекается до syscall'а.
-    // mprotect здесь НЕ нужен и НЕ работает: он действует на НАШЕ адресное
-    // пространство, а адрес чужой игры у нас не отображён — вызов возвращал
-    // ENOMEM и запись кода не доходила до цели вообще (flows=3/3, instant=0/3).
-    // Сама запись идёт через /proc/<pid>/mem (memio::Reader::write → pwrite):
-    // ядро пишет в чужую r-xp-страницу через COW (FOLL_FORCE), отдельный
-    // anon-пейдж подставляется вместо file-backed — прав false, права карты
-    // не меняются, состояния вроде «повернули RX в RW» не существует.
-    // icache цели трогать не надо: подменённая анонимная страница имеет другой
-    // физический адрес, а теги icache на arm64 физические — старая строка не
-    // попадёт, игра вычитает свежие байты.
-    bool write_code(uint64_t address, uint32_t word) {
-        if (!g_mem.bound() || g_pid <= 0) return false;
-        std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps");
-        if (!file) return false;
-        std::string line;
-        bool code_page = false;
-        while (std::getline(file, line)) {
-            unsigned long long lo = 0, hi = 0;
-            char perms[5]{}, path[256]{};
-            if (std::sscanf(line.c_str(), "%llx-%llx %4s %*llx %*x:%*x %*u %255s",
-                            &lo, &hi, perms, path) < 3) continue;
-            if (address < lo || address >= hi) continue;
-            code_page = std::strcmp(perms, "r-xp") == 0 &&
-                        std::strstr(path, "libil2cpp.so") != nullptr;
-            break;
-        }
-        if (!code_page) return false;
-        return g_mem.write(address, &word, sizeof(word));
-    }
+    // Никаких записей в код или данные libil2cpp.so / libunity.so — только
+    // анонимная куча через write_heap. Патч двух инструкций задержки удалён
+    // целиком: модификация .text библиотеки игры — и телеметрическая брешь
+    // (снятие ожидания «за тик» видно серверу), и поверхность для CRC
+    // целостности кода со стороны античита.
 };
 
 Memory memory;
