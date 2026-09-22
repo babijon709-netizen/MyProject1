@@ -336,6 +336,7 @@ struct LootFixture {
     const uint64_t base = 0x10000000;
     uint64_t helper_class = 0, statics = 0, runners = 0, promise_klass = 0, other_klass = 0;
     std::vector<uint64_t> items_arrays;   // loopItems каждого раннера (для add_item)
+    std::vector<uint64_t> runner_objs;    // сами раннеры (для tail)
     LootFixture(int nrunners = 2, bool valid = true) {
         helper_class = hklass(valid ? "PlayerLoopHelper" : "Wrong",
                               "Cysharp.Threading.Tasks");
@@ -355,8 +356,10 @@ struct LootFixture {
             uint64_t items = io.halloc(0x20 + 2048 * 8);
             io.set(runner + LOOPRUNNER_ITEMS, items);
             io.set(items + IL2CPP_ARRAY_LENGTH, int32_t(0));
+            io.set(runner + LOOPRUNNER_TAIL, int32_t(0));
             io.set(runners + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)t * 8, runner);
             items_arrays.push_back(items);
+            runner_objs.push_back(runner);
         }
     }
     uint64_t hklass(const char* n, const char* ns) { return io.klass_of(n, ns); }
@@ -366,6 +369,7 @@ struct LootFixture {
         io.set(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)n * 8, io.halloc());
         io.set(io.ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)n * 8), klass);
         io.set(items + IL2CPP_ARRAY_LENGTH, int32_t(n + 1));
+        io.set(runner_objs[runner] + LOOPRUNNER_TAIL, int32_t(n + 1));
         return io.ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)n * 8);
     }
     uint64_t add_promise(int runner, float span, float elapsed = 0.01f,
@@ -466,9 +470,31 @@ static void loot_tests() {
         f.io.set(outside + DELAYPROMISE_INITIAL_FRAME, int32_t(100));
         f.io.set(f.items_arrays[0] + IL2CPP_ARRAY_FIRST_ELEMENT, outside);
         f.io.set(f.items_arrays[0] + IL2CPP_ARRAY_LENGTH, int32_t(1));
+        f.io.set(f.runner_objs[0] + LOOPRUNNER_TAIL, int32_t(1));
         f.tick();
         assert(f.c.status == Status::Failed && f.c.neutralized() == 0);
         assert(f.io.get<uint32_t>(outside + DELAYPROMISE_TIMESPAN) == kCadenceBits);
+    }
+    {   // tail < длины массива (ёмкость): за tail лежат устаревшие указатели
+        // после компакции RunCore — обещание в мёртвом слоте не трогается,
+        // даже если это переиспользованный пулом объект с темпом 0.35.
+        LootFixture f;
+        uint64_t live = f.add_promise(0, 0.35f);
+        uint64_t stale = f.add_promise(0, 0.35f);
+        // RunCore «удалил» второй: tail=1, но слот и длина остались.
+        f.io.set(f.runner_objs[0] + LOOPRUNNER_TAIL, int32_t(1));
+        f.tick();
+        assert(f.c.status == Status::Active && f.c.neutralized() == 1);
+        assert(f.io.get<uint32_t>(live + DELAYPROMISE_TIMESPAN) == 0u);
+        assert(f.io.get<uint32_t>(stale + DELAYPROMISE_TIMESPAN) == kCadenceBits);
+        // tail испорчен (отрицательный/больше длины) — откат к длине массива:
+        // живой элемент в слоте [0] всё ещё обрабатывается.
+        LootFixture f2;
+        uint64_t a = f2.add_promise(0, 0.35f);
+        f2.io.set(f2.runner_objs[0] + LOOPRUNNER_TAIL, int32_t(-7));
+        f2.tick();
+        assert(f2.c.neutralized() == 1);
+        assert(f2.io.get<uint32_t>(a + DELAYPROMISE_TIMESPAN) == 0u);
     }
     {   // Запись «удачна», но память не изменилась (между нами писали/отворили
         // доступ) — перечитывание обязано это поймать: Failed, без счёта.

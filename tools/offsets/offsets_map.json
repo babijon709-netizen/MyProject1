@@ -2785,6 +2785,21 @@
    "how": "смещение — из комментария /* 0x38 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «Il2CppObject*»"
   }
  },
+ "LOOPRUNNER_TAIL": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.Internal.PlayerLoopRunner",
+  "struct": "Cysharp_Threading_Tasks_Internal_PlayerLoopRunner_Fields",
+  "field": "tail",
+  "type": "int32_t",
+  "offset": 48,
+  "note": "живой счётчик элементов loopItems (AddAction пишет в [0, tail); длина массива — ёмкость, хвост после компакции RunCore — устаревшие указатели). Проверено дизасмом AddAction 0xc362e68/RunCore 0xc363298",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_Internal_PlayerLoopRunner_Fields",
+   "field": "tail",
+   "how": "смещение — из комментария /* 0x30 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «int32_t»"
+  }
+ },
  "DELAYPROMISE_TIMESPAN": {
   "kind": "field",
   "class": "Cysharp.Threading.Tasks.UniTask.DelayIgnoreTimeScalePromise",

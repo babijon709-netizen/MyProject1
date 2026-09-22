@@ -941,6 +941,8 @@ float TabContent(int tab, float dt, float cW) {
             ImGui::TextDisabled("%s", pickupState.fast_loot_draining
                                            ? XS("Подбор: мгновенно")
                                            : XS("Подбор: работает"));
+        else if (pickupState.fast_loot == viewmodel::Status::Waiting)
+            ImGui::TextDisabled("%s", XS("Подбор: ожидание"));
 
         SHdr(XS("Лимит FPS"));
         {

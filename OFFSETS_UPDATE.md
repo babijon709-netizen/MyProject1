@@ -959,10 +959,24 @@ Watchdog автофарма теперь видит прогресс по трё
 | `PLAYERLOOPHELPER_TYPEINFO_RVA` | 0xD9C52E0 | слот `Il2CppClass*` PlayerLoopHelper (§3.3) |
 | `IL2CPP_CLASS_STATIC_FIELDS` | 0xB8 | `Il2CppClass.static_fields` |
 | `PLAYERLOOPHELPER_RUNNERS` | 0x30 | `PlayerLoopRunner[] runners` (слот на каждый `PlayerLoopTiming`) |
-| `LOOPRUNNER_ITEMS` | 0x38 | `IPlayerLoopItem[] loopItems` у раннера |
+| `LOOPRUNNER_ITEMS` | 0x38 | `IPlayerLoopItem[] loopItems` у раннера (длина = **ёмкость**) |
+| `LOOPRUNNER_TAIL` | 0x30 | `int tail` — **живой счётчик**; живые элементы в `[0, tail)`, хвост после компакции — устаревшие указатели |
 | `DELAYPROMISE_TIMESPAN` | 0x18 | `float delayFrameTimeSpan` — **сюда пишется 0.0** |
 | `DELAYPROMISE_ELAPSED` | 0x1C | `float elapsed` |
 | `DELAYPROMISE_INITIAL_FRAME` | 0x20 | `int initialFrame` |
+
+**Потолок скорости (дизасм `AddAction` 0xc362e68 / `RunCore` 0xc363298 / `MoveNext`
+0xc32f8f4, билд `72e26b9`).** Новый промис, созданный вcontinuation во время
+прохода раннера, не может быть обработан в том же проходе: при `running=true`
+`AddAction` кладёт его в `waitQueue` (+0x40), а прямой путь добавления тоже
+берёт `arrayLock` (+0x20), который `RunCore` держит весь проход. Кроме того,
+`MoveNext` не завершает ожидание в кадре создания (`elapsed==0 &&
+Time.frameCount == initialFrame → ждать`), а `Create` всегда перезаписывает
+span=0.35/elapsed=0/initialFrame. Поэтому **гарантированный предел heap-only
+подхода — один предмет за проход PlayerLoop (кадр)**; обнуление span достигает
+этого предела (первое перемещение — следующий кадр после создания ожидания).
+«Весь ящик разом в один кадр» без патча кода невозможен в принципе — только
+через частоту кадров (лимит FPS 144 даёт до ~144 предметов/с).
 
 **Как найти заново после апдейта.** Слот — `typeinfo_rva.py` (отпечаток:
 4 обращения, статик-полей нет; см. PROVENANCE.md §B). Поля — по читаемым

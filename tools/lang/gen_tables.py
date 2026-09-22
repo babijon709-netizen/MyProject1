@@ -113,7 +113,8 @@ UI_EN = {
     'поток не определён': 'the flow is not identified',
     'код образа не читается': 'the image code is unreadable',
     'Код потока изменён': 'the flow code was modified in the process',
-    'Подбор: мгновенно': 'pickup now transfers the whole window in one pass',
+    'Подбор: мгновенно': 'Pickup: instant',
+    'Подбор: ожидание': 'Pickup: waiting',
     'Ожидание открытого контейнера': 'Waiting for an open container',
     'Данные': 'Data',
     # причины отказа подбора (журнал в сборке выключен, поэтому они в меню)

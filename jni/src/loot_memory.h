@@ -233,6 +233,15 @@ public:
             if (!io_.read(items + go_active::IL2CPP_ARRAY_LENGTH, count) ||
                 count < 0 || count > kMaxItemsPerArray)
                 continue;
+            // Живой счётчик раннера — tail (+0x30), длина массива — только
+            // ёмкость: после компакции RunCore в хвосте capacity лежат
+            // устаревшие указатели (в т.ч. на промисы, вернувшиеся в пул и
+            // переиспользованные чужими ожиданиями) — их не трогаем. Ошибка
+            // чтения tail (старая раскладка) — откат к длине массива.
+            int32_t tail = -1;
+            if (io_.read(runner + go_active::LOOPRUNNER_TAIL, tail) &&
+                tail >= 0 && (std::size_t)tail <= (std::size_t)count)
+                count = tail;
             const std::size_t n =
                 (std::size_t)count < budget ? (std::size_t)count : budget;
             // Обычный массив (count <= бюджета) проходится целиком с любого

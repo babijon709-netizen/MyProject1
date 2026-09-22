@@ -573,6 +573,7 @@ inline constexpr std::uint64_t ITEMPICKUP_AMOUNT      = 0xE0; // int amount
 inline constexpr std::uint64_t PLAYERLOOPHELPER_TYPEINFO_RVA = 0xD9C52E0;
 inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS      = 0x30; // statics: PlayerLoopRunner[] runners
 inline constexpr std::uint64_t LOOPRUNNER_ITEMS              = 0x38; // PlayerLoopRunner.loopItems
+inline constexpr std::uint64_t LOOPRUNNER_TAIL               = 0x30; // PlayerLoopRunner.tail: живой счётчик (длина массива — ёмкость)
 inline constexpr std::uint64_t DELAYPROMISE_TIMESPAN         = 0x18; // float delayFrameTimeSpan
 inline constexpr std::uint64_t DELAYPROMISE_ELAPSED          = 0x1C; // float elapsed
 inline constexpr std::uint64_t DELAYPROMISE_INITIAL_FRAME    = 0x20; // int initialFrame

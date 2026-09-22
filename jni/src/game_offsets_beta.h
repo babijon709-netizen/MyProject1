@@ -3,8 +3,8 @@
 //
 // Источник: dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9, дата сборки файла 22.09.2026.
 // Эталон, от которого считались отличия: релизный dump.7z и jni/src/game_offsets.h.
-// Отличий от релиза: 6 из 207 объявленных констант
-// (в карте оффсетов 210 записей).
+// Отличий от релиза: 6 из 210 объявленных констант
+// (в карте оффсетов 211 записей).
 // Взято из релиза как есть: 40 констант раскладки IL2CPP/Unity
 // (из дампа игры они не выводятся — об этом ниже) и 4 RVA.
 // Окно скана TOD_Sky сдвинуто на дельту RVA беты (см. RVA_SHIFTED в скрипте):
@@ -593,6 +593,7 @@ inline constexpr std::uint64_t ITEMPICKUP_AMOUNT      = 0xE0; // int amount
 inline constexpr std::uint64_t PLAYERLOOPHELPER_TYPEINFO_RVA = 0xD9A3488;  // бета: было 0xD9C52E0
 inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS      = 0x30; // statics: PlayerLoopRunner[] runners
 inline constexpr std::uint64_t LOOPRUNNER_ITEMS              = 0x38; // PlayerLoopRunner.loopItems
+inline constexpr std::uint64_t LOOPRUNNER_TAIL               = 0x30; // PlayerLoopRunner.tail: живой счётчик (длина массива — ёмкость)
 inline constexpr std::uint64_t DELAYPROMISE_TIMESPAN         = 0x18; // float delayFrameTimeSpan
 inline constexpr std::uint64_t DELAYPROMISE_ELAPSED          = 0x1C; // float elapsed
 inline constexpr std::uint64_t DELAYPROMISE_INITIAL_FRAME    = 0x20; // int initialFrame
