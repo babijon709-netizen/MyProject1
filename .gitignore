@@ -8,6 +8,3 @@ __pycache__/
 release/
 beta/
 
-# Артефакты журналов с устройства (передаются файлом, в git не нужны)
-fastloot_di.log
-fastloot_di.txt
