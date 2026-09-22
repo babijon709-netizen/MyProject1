@@ -422,6 +422,8 @@ template<class IO> class Controller {
         diag_.di_walk_count = static_cast<uint32_t>(count);
         diag_.di_walk_cap = static_cast<uint32_t>(capacity);
         diag_.di_walk_impl0 = 0;
+        diag_.di_walk_inst = 0;
+        int32_t inst_logged = 0;
         // Общий выход: положить сервис+статики id-класса и отчитаться.
         auto di_finish = [&](uint64_t svc) -> bool {
             uint64_t ids_klass = 0, ids = 0;
@@ -587,7 +589,18 @@ template<class IO> class Controller {
                     di_read(list + kDiListItems, items)) {
                     const uint64_t info = io.ptr(items + kDiArrayData);
                     uint64_t provider = 0;
-                    if (info >= 0x10000 && di_read(info + kDiProviderInfo, provider) &&
+                    if (info >= 0x10000 && di_read(info + kDiProviderInfo, provider)) {
+                        // Форма провайдера — свидетельный канал: если сервис
+                        // не синглтон-CachedProvider, журнал это покажет.
+                        if (inst_logged < 12) {
+                            ++inst_logged;
+                            char pn[kDiNameMaxLen]{};
+                            if (io.klass_name(provider, pn, kDiNameMaxLen) && pn[0])
+                                di_name_sanitize(pn, static_cast<int32_t>(std::strlen(pn)));
+                            io.trace("di: p%d e%d prov='%s'", (int)inst_logged, (int)i, pn);
+                        }
+                    }
+                    if (info >= 0x10000 && provider >= 0x10000 &&
                         io.klass_named(io.ptr(provider), "CachedProvider", "Zenject")) {
                         uint64_t insts = 0, iitems = 0;
                         int32_t isize = 0;
@@ -598,11 +611,17 @@ template<class IO> class Controller {
                             if (first >= 0x10000) {
                                 ++diag_.di_walk_inst;
                                 const uint64_t sklass = io.ptr(first);
-                                if (visited <= 3) {
+                                // Свидетельный канал: провайдер + имя klass'а
+                                // инстанса для первых 12 живых биндингов. По
+                                // журналу устройства видно и форму провайдера,
+                                // и как реально читается имя сервиса.
+                                if (inst_logged < 24) {
+                                    ++inst_logged;
                                     char sn[kDiNameMaxLen]{};
                                     if (io.klass_name(sklass, sn, kDiNameMaxLen) && sn[0])
                                         di_name_sanitize(sn, static_cast<int32_t>(std::strlen(sn)));
-                                    io.trace("di: e%d inst=%llx klass='%s'", (int)i,
+                                    io.trace("di: i%d e%d inst=%llx klass='%s'",
+                                             (int)inst_logged, (int)i,
                                              (unsigned long long)first, sn);
                                 }
                                 if (io.klass_named(sklass, layout_->service_name, ""))
