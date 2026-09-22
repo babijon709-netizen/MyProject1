@@ -11,7 +11,9 @@
 // читаются только build-id, оригинальные инструкции точек старого патча и
 // указатель TypeInfo (см. layout_for в loot_memory.h).
 #include "loot_memory.h"
+#include "loot_tap_memory.h"
 #include "object_data_memory.h"
+#include "Android_touch/TouchHelperA.h"
 #include "game_internal.h"
 #include "logfile.h"
 
@@ -140,9 +142,18 @@ std::recursive_mutex& session_mutex() {
 
 } // namespace
 
+loot_tap::Tap tap;
+loot_tap::Inject tap_inject = {[](float x, float y) { Touch_Down_N(2, x, y); },
+                               []() { Touch_Up_N(2); }};
+int prev_tap_ids[8] = {};
+int prev_n_taps = 0;
+uint64_t tick_frame = 1;
+
 void esp_loot_reset() {
     std::lock_guard<std::recursive_mutex> guard(session_mutex());
     controller.reset();
+    tap.reset();
+    prev_n_taps = 0;
     std::snprintf(refusal_text, sizeof(refusal_text), "-");
     last_log = {};
     last_log_valid = false;
@@ -154,6 +165,26 @@ void esp_loot_tick(bool enabled) {
     const uint64_t base = (g_mem.bound() && g_pid > 0) ? g_il2cpp_base : 0;
     controller.tick(epoch, base, enabled);
     const loot::Diagnostics d = controller.diagnostics();
+    // Авто-тап «Забрать всё»: окно по DI-детекту, жесты игрока, один синтетический
+    // палец. Детект не готов/сломан -> детект-параметр -1 -> точно не стреляем.
+    {
+        float xs[8] = {}, ys[8] = {};
+        int ids[8] = {};
+        const int nf = Touch_GetActive(xs, ys, ids, 8);
+        bool tap_edge = false;
+        float tx = 0.f, ty = 0.f;
+        for (int i = 0; i < nf; ++i) {
+            bool seen = false;
+            for (int j = 0; j < prev_n_taps; ++j) if (prev_tap_ids[j] == ids[i]) { seen = true; break; }
+            if (!seen) { tap_edge = true; tx = xs[i]; ty = ys[i]; }
+        }
+        for (int i = 0; i < nf && i < 8; ++i) prev_tap_ids[i] = ids[i];
+        prev_n_taps = nf > 8 ? 8 : nf;
+        const int root_windows = (d.di_stage == 5) ? static_cast<int>(d.di_root) : -1;
+        const bool window_flow = d.kind == loot::Kind::Container;
+        tap.on_frame(enabled, root_windows, window_flow, tap_edge, tx, ty,
+                     tick_frame++, tap_inject);
+    }
     if (!last_log_valid || d.status != last_log.status || d.kind != last_log.kind ||
         d.reason != last_log.reason || d.detail != last_log.detail ||
         d.hooked != last_log.hooked || d.flows != last_log.flows) {
@@ -175,6 +206,11 @@ void esp_loot_tick(bool enabled) {
 loot::Diagnostics esp_loot_diagnostics() {
     std::lock_guard<std::recursive_mutex> guard(session_mutex());
     return controller.diagnostics();
+}
+
+loot_tap::Diagnostics esp_loot_tap_diagnostics() {
+    std::lock_guard<std::recursive_mutex> guard(session_mutex());
+    return tap.diagnostics();
 }
 
 const char* esp_loot_refusal() {

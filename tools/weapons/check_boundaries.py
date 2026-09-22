@@ -69,6 +69,30 @@ for needle in ('kDiProjCtxInstance  = 0x20', 'kDiProjCtxContainer = 0x60',
 assert 'layout_->iface_name' in loot_controller and 'layout_->service_name' in loot_controller
 assert '"CachedProvider", "Zenject"' in loot_controller
 
+# Auto-tap «Забрать всё» (loot_tap_memory.h): инъекция только синтетическим
+# пальцем слота _N, ноль обращений в память игры, fail-closed по DI-детекту.
+tap_controller = (root / 'jni/src/loot_tap_memory.h').read_text()
+assert 'loot_tap::Tap tap;' in loot_adapter
+tap_code = re.sub(r'//[^\n]*', '', re.sub(r'/\*.*?\*/', '', tap_controller, flags=re.S))
+for forbidden in ('io.', 'g_mem', 'write_heap', '/proc/', 'memcpy', 'ptrace'):
+    assert forbidden not in tap_code, forbidden          # чистая логика, без I/O
+for needle in ('kLearnRadiusPx    = 40', 'kLearnEvents      = 2',
+               'kTapDelayFrames   = 6', 'kTapDownFrames    = 3',
+               'kTapCooldown      = 150', 'kLearnGapFrames   = 16'):
+    assert needle in tap_controller, needle              # гейты не разжижать
+# Точки вклинивания — строго штатный API тач-слоя, слот 2 (id 61002; рядом с
+# прицельным пальцем конфликта нет), без прямого доступа к внутренностям тача.
+assert 'Touch_Down_N(2,' in loot_adapter and 'Touch_Up_N(2);' in loot_adapter
+assert 'Finger[' not in adapter_code and 'Finger[' not in loot_adapter  # чужие пальцы не трогаем
+# Окно считается открытым только при ВЕРНОМ DI-детекте (stage 5): иначе в
+# контроллер уходит -1 и огонь невозможен.
+assert '(d.di_stage == 5) ? static_cast<int>(d.di_root) : -1' in loot_adapter
+# Для обучения/гейта потока берётся именно поток окна контейнера.
+assert 'd.kind == loot::Kind::Container' in loot_adapter
+# Стенд авто-тапа входит в общий прогон loot.
+assert 'loot_tap_test.cpp' in (root / 'tools/loot/run.sh').read_text()
+assert (root / 'tools/loot/loot_tap_test.cpp').exists()
+
 menu = (root / 'jni/src/menu.cpp').read_text()
 assert '##fastloot' not in menu
 assert '##instantloot' in menu

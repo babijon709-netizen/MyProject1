@@ -8,6 +8,10 @@ for flags in '-O0' '-O3 -ffast-math'; do
     ${CXX:-g++} -std=c++17 -Wall -Wextra $flags -Ijni/include -Ijni/src \
         tools/loot/loot_test.cpp -o "$DIR/test"
     "$DIR/test"
+    # The auto-tap (take-all) gating logic: same flags.
+    ${CXX:-g++} -std=c++17 -Wall -Wextra $flags -Ijni/include -Ijni/src \
+        tools/loot/loot_tap_test.cpp -o "$DIR/tap_test"
+    "$DIR/tap_test"
 done
 # If the game images are extracted next to the repo (tools/offsets/PROVENANCE.md
 # says how), re-derive every address in the table from them. Skipped otherwise:
