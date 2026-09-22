@@ -105,6 +105,12 @@ assert 'di_names_n = 0' in loot_controller  # пересъёмка целико�
 assert 'io.read_fresh(key + kDiStrLen, len)' in loot_controller
 assert 'io.read_fresh(key + kDiStrData' in loot_controller
 
+# Статус-отчёт после включения тумблера (main.cpp): одноразовый, тост не в
+# меню, формат зафиксирован — по нему снимается диагноз на устройстве.
+main_src = (root / 'jni/src/main.cpp').read_text()
+assert '"Подбор: st=%d fl=%u ex=%llu di=%d:%d r=%u o=%u u=%u"' in main_src
+assert 's_loot_report_arm = g_state.viewmodel.fast_loot ? 180 : 0;' in main_src
+
 menu = (root / 'jni/src/menu.cpp').read_text()
 assert '##fastloot' not in menu
 assert '##instantloot' in menu

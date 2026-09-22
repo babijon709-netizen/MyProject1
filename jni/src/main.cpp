@@ -147,6 +147,29 @@ int main(int argc, char* argv[]) {
                                           (int)ld.di_idindex[i]);
                 ShowToast(msg);
             }
+            // Одноразовый статус-отчёт через ~3 сек после включения тумблера.
+            // Журнал в этой сборке вырезан, а тосты выше срабатывают только на
+            // Failed и на di_stage==5: если скан окон застрял посередине, а
+            // подбор молчит в Waiting, без этого отчёта устройство видит
+            // тишину. Цифры расшифровываются по таблице в FAST_LOOT.md.
+            static bool s_loot_prev_enabled = false;
+            static int s_loot_report_arm = 0;
+            if (g_state.viewmodel.fast_loot != s_loot_prev_enabled) {
+                s_loot_prev_enabled = g_state.viewmodel.fast_loot;
+                s_loot_report_arm = g_state.viewmodel.fast_loot ? 180 : 0;
+            }
+            if (g_state.viewmodel.fast_loot && s_loot_report_arm > 0 &&
+                --s_loot_report_arm == 0) {
+                char msg[192];
+                snprintf(msg, sizeof(msg),
+                         "Подбор: st=%d fl=%u ex=%llu di=%d:%d r=%u o=%u u=%u",
+                         (int)ld.status, (unsigned)ld.flows,
+                         (unsigned long long)ld.expired,
+                         (int)ld.di_stage, (int)ld.di_fail,
+                         (unsigned)ld.di_root, (unsigned)ld.di_overlay,
+                         (unsigned)ld.di_unknown);
+                ShowToast(msg);
+            }
             s_loot_toast_prev = ld;
         }
         LogStage(kStageEsp);
