@@ -385,6 +385,24 @@ template<class IO> class Controller {
         return io.read(addr, v);
     }
 
+    // System.String -> узкий ASCII: только для свидетельного канала, гейты
+    // на строки не опираются.
+    bool di_str(uint64_t addr, char* out, int32_t max) {
+        out[0] = 0;
+        if (addr < 0x10000) return false;
+        int32_t len = 0;
+        if (!io.read_fresh(addr + kDiStrLen, len) || len < 1 || len > 64) return false;
+        int32_t n = 0;
+        for (; n < len && n + 1 < max; ++n) {
+            char16_t wc = 0;
+            if (!io.read_fresh(addr + kDiStrData + static_cast<uint64_t>(n) * 2, wc)) break;
+            if (wc < 0x20 || wc > 0x7e) break;
+            out[n] = static_cast<char>(wc);
+        }
+        out[n] = 0;
+        return n > 0;
+    }
+
     // Найти инстанс сервиса окон через контейнер:
     //   ProjectContext._instance -> _container -> _providers:
     //   Dictionary<BindingId, List<ProviderInfo>> с ключом BindingId.Type ==
@@ -431,12 +449,12 @@ template<class IO> class Controller {
         const bool ids_ok = di_read(base_ + layout_->ids_typeinfo, ids_klass) &&
                             di_read(ids_klass + 0xB8, ids_pre) && ids_pre >= 0x10000;
         if (ids_ok) {
-            const uint64_t id0 = io.ptr(ids_pre);
-            char idn[kDiNameMaxLen]{};
-            if (id0 >= 0x10000 && io.klass_name(io.ptr(id0), idn, kDiNameMaxLen) && idn[0])
-                di_name_sanitize(idn, static_cast<int32_t>(std::strlen(idn)));
-            io.trace("di: ids=%llx id0=%llx klass='%s'",
-                     (unsigned long long)ids_pre, (unsigned long long)id0, idn);
+            char s0[40]{}, s1[40]{}, s2[40]{};
+            di_str(io.ptr(ids_pre), s0, sizeof(s0));
+            di_str(io.ptr(ids_pre + 8), s1, sizeof(s1));
+            di_str(io.ptr(ids_pre + 16), s2, sizeof(s2));
+            io.trace("di: ids=%llx id0='%s' id1='%s' id2='%s'",
+                     (unsigned long long)ids_pre, s0, s1, s2);
         } else {
             io.trace("di: ids-канал не читается (RVA таблицы не для этой сборки?)");
         }
@@ -659,6 +677,7 @@ template<class IO> class Controller {
                                         int32_t dcap = 0;
                                         if (!di_read_i32(dentries + kDiArrayLen, dcap) || dcap < dcnt || dcap > 512)
                                             continue;
+                                        bool kv_logged = false;
                                         int32_t used = 0;
                                         for (int32_t e2 = 0; e2 < dcap && used < 12 && !svc_by_value; ++e2) {
                                             int32_t h = 0;
@@ -668,6 +687,19 @@ template<class IO> class Controller {
                                             ++used;
                                             const uint64_t key = io.ptr(de + kDiWinKey);
                                             if (key < 0x10000) break;
+                                            // нулевой ключах словарей с живой строкой —
+                                            // свидетель: как читаются ключи практики
+                                            if (!kv_logged && inst_logged < 32) {
+                                                char kt[40]{};
+                                                if (di_str(key, kt, sizeof(kt))) {
+                                                    kv_logged = true;
+                                                    ++inst_logged;
+                                                    io.trace("di: f%d e%d off=%llx cnt=%d k='%s'",
+                                                             (int)inst_logged, (int)i,
+                                                             (unsigned long long)off,
+                                                             (int)dcnt, kt);
+                                                }
+                                            }
                                             for (uint32_t j = 0; j < kDiIdsCount; ++j) {
                                                 if (io.ptr(ids_pre + j * 8) == key) {
                                                     svc_by_value = first;
