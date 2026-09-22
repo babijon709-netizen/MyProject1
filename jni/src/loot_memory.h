@@ -493,16 +493,17 @@ template<class IO> class Controller {
                          ? diag_.di_names[static_cast<size_t>(visited - 1)].data() : "",
                      is_iface ? " == ИНТЕРФЕЙС" : "");
             // Доказательная лесенка, первые записи: байты лучше догадок.
-            // Обе классические цепочки на устройстве мертвы, значит раскладка
-            // иная — печатаем кандидатов c0..c3 (имя-как-у-klass + sыre 16
-            // байт), рёбра chain'а станут видны по hex самим.
+            // Обе классические цепочки на устройстве мертвы — значит раскладка
+            // иная: печатаем c0..c3 (имя-как-у-klass + 16 байт), класс ключа k0,
+            // и скан записи c2 по критерию ЧИТАЕМОГО ИМЕНИ (где-то в ней
+            // лежит настоящий klass — арена 0x6e..).
             if (visited <= 3) {
                 uint64_t cand[4];
                 cand[0] = type_;
                 cand[1] = impl;
                 cand[2] = io.ptr(cand[1]);
                 cand[3] = io.ptr(cand[2]);
-                char line[280];
+                char line[520];
                 size_t n = static_cast<size_t>(std::snprintf(line, sizeof(line),
                                                         "di: e%d лестница", (int)i));
                 for (int c = 0; c < 4 && n < sizeof(line) - 64; ++c) {
@@ -525,6 +526,41 @@ template<class IO> class Controller {
                             nm, hx[0] ? hx : "-"));
                 }
                 io.trace("%s", line);
+                // Класс самого объекта-ключа (ожидаем "RuntimeType"): валидирует,
+                // что c0 — управляемый объект и name-читалка на нём работает.
+                const uint64_t k0 = (type_ >= 0x10000) ? io.ptr(type_) : 0;
+                char k0n[kDiNameMaxLen]{};
+                if (k0 >= 0x10000 && io.klass_name(k0, k0n, kDiNameMaxLen) && k0n[0])
+                    di_name_sanitize(k0n, static_cast<int32_t>(std::strlen(k0n)));
+                io.trace("di: e%d k0=%llx'%s'", (int)i, (unsigned long long)k0, k0n);
+                if (cand[2] >= 0x10000) {
+                    std::array<uint8_t, 64> rec{};
+                    if (io.read(cand[2], rec)) {
+                        {
+                            static const char* H = "0123456789abcdef";
+                            char hx[136]; size_t m = 0;
+                            for (size_t b = 0; b < rec.size() && m + 3 < sizeof(hx); ++b)
+                                { hx[m++] = H[rec[b] >> 4]; hx[m++] = H[rec[b] & 15]; }
+                            hx[m] = 0;
+                            io.trace("di: e%d c2raw=%llx %s", (int)i,
+                                     (unsigned long long)cand[2], hx);
+                        }
+                        char hits[288]; size_t m = 0;
+                        for (size_t off = 0; off + 8 <= rec.size() && m + 48 < sizeof(hits);
+                             off += 4) {
+                            uint64_t v = 0;
+                            std::memcpy(&v, rec.data() + off, 8);
+                            if (v < 0x6e000000000ULL || v >= 0x700000000000ULL) continue;
+                            char nm[kDiNameMaxLen]{};
+                            if (!io.klass_name(v, nm, kDiNameMaxLen) || !nm[0]) continue;
+                            di_name_sanitize(nm, static_cast<int32_t>(std::strlen(nm)));
+                            m += static_cast<size_t>(std::snprintf(hits + m, sizeof(hits) - m,
+                                    " +%02llx=%llx'%s'", (unsigned long long)off,
+                                    (unsigned long long)v, nm));
+                        }
+                        io.trace("di: e%d c2-скан%s", (int)i, m ? hits : " пусто");
+                    }
+                }
             }
             if (!is_iface) continue;
             // Нашёлся биндинг сервиса. Ровно один провайдер, формы CachedProvider.
