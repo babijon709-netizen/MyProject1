@@ -175,7 +175,7 @@ inline constexpr uint64_t   kDiArrayData     = 0x20;    // managed array: эле
 inline constexpr uint64_t   kDiBindStride    = 0x20;
 inline constexpr uint64_t   kDiBindKeyType   = 0x08;    // BindingId._type (System.Type*)
 inline constexpr uint64_t   kDiBindValue     = 0x18;    // List<ProviderInfo>*
-inline constexpr uint64_t   kDiTypeImpl      = 0x10;    // System.Type: _impl.value → Il2CppType*
+inline constexpr uint64_t   kDiTypeImpl      = 0x10;    // System.Type: _impl.value (Il2CppType* ИЛИ сам klass — версия-зависимо, ди-resolve разбирает по читаемости имени)
 inline constexpr uint64_t   kDiListItems     = 0x10;    // List<T>: _items
 inline constexpr uint64_t   kDiListSize      = 0x18;    // List<T>: _size (int32)
 inline constexpr uint64_t   kDiProviderInfo  = 0x20;    // ProviderInfo.Provider
@@ -445,8 +445,23 @@ template<class IO> class Controller {
             ++diag_.di_walk_keyread;
             const uint64_t impl = io.ptr(type_ + kDiTypeImpl);
             if (!diag_.di_walk_impl0) diag_.di_walk_impl0 = impl;
-            const uint64_t tclass = io.ptr(impl);
-            if (tclass < 0x10000) {
+            // Ключ в klass: классическая цепочка — impl = Il2CppType*, klass в
+            // data@0. Но журнал устройства показал живой вариант этой версии:
+            // RuntimeTypeHandle.value сам указывает на Il2CppClass (все impl
+            // 16-байтно выровнены и сидят кластером метаданных, а *impl — без
+            // выравнивания и без имени). Разбираем по имени: пробуем *impl,
+            // не читается — сам impl. Имя и iface всё равно решает klass_named,
+            // так что слабой проверки тут нет: оба претендента проходят гейт.
+            uint64_t tclass = 0;
+            {
+                char probe[kDiNameMaxLen];
+                const uint64_t deref = io.ptr(impl);
+                if (deref >= 0x10000 && io.klass_name(deref, probe, kDiNameMaxLen) && probe[0])
+                    tclass = deref;
+                else if (impl >= 0x10000 && io.klass_name(impl, probe, kDiNameMaxLen) && probe[0])
+                    tclass = impl;
+            }
+            if (!tclass) {
                 io.trace("di: e%d hash=%08x type=%llx impl=%llx -> битый klass",
                          (int)i, (unsigned)hash, (unsigned long long)type_,
                          (unsigned long long)impl);

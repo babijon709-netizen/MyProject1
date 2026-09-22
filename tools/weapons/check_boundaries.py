@@ -115,6 +115,10 @@ assert '" w=%u/%u/%u k%u t%u i%llX"' in main_src  # счётчики прохо�
 # Свидетельный канал ключей биндингов: только чтение имени класса, fail-closed.
 assert 'io.klass_name(tclass, dst, kDiNameMaxLen)' in loot_controller
 assert 'bool klass_name(' in loot_adapter
+# Ключ Type -> klass двусмыслен по версии il2cpp (Il2CppType* или сам klass —
+# устройство показало второй вариант): контроллер обязан пробовать оба пути
+# с гейтом по читаемости имени.
+assert 'io.klass_name(impl, probe, kDiNameMaxLen)' in loot_controller
 # Журнал функции в Загрузки (по запросу заказчика): trace — чистый вывод
 # контроллера, файл открывается append лениво один раз за процесс, обычный
 # журнал приложения (LogLine) при этом остаётся вырезанным.

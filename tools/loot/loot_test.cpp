@@ -248,10 +248,12 @@ struct Game {
     // контейнер -> словарь биндингов с ключом BindingId.Type == интерфейс.
     // skip_iface / wrong_cached_klass / wrong_service_klass ломают цепь по сценарию.
     // broken_impl зануляет звено Il2CppType->klass у биндинга интерфейса.
+    // direct_impl — живой вариант сборки устройства: RuntimeTypeHandle.value
+    // сразу указывает на Il2CppClass без обёртки Il2CppType.
     void build_zenject(int open_root, int open_overlay,
                        bool unknown_key = false, bool skip_iface = false,
                        bool wrong_cached_klass = false, bool wrong_service_klass = false,
-                       bool broken_impl = false) {
+                       bool broken_impl = false, bool direct_impl = false) {
         // id-класс окон: статики с 161 указателем на WindowId (= System.String*),
         // имена — живые управляемые строки: length @+0x10, UTF-16 @+0x14.
         for (uint32_t k = 0; k < kDiIdsCount; ++k) di.ids.push_back(io.alloc(0x60));
@@ -299,7 +301,7 @@ struct Game {
         io.set<uint64_t>(il2c_type, broken_impl ? 0x40 : iface_klass);
         const uint64_t type_obj = io.alloc(0x20);
         io.set<uint64_t>(type_obj, io.klass("RuntimeType", "System"));
-        io.set<uint64_t>(type_obj + kDiTypeImpl, il2c_type);
+        io.set<uint64_t>(type_obj + kDiTypeImpl, direct_impl ? iface_klass : il2c_type);
         // Мешающий биндинг с другим типом ключа.
         const uint64_t other_klass = io.klass("OtherService", "Other");
         const uint64_t other_type = io.alloc(0x10);
@@ -1230,6 +1232,23 @@ int main() {
             assert(std::memcmp(d.di_names[0].data(), "OtherService", 13) == 0);
             // Обрыв на звене Il2CppType->klass виден в следе отдельной строкой.
             assert(g.io.trace_has("битый klass"));
+        }
+        {
+            // Живой вариант устройства: RuntimeTypeHandle.value — сам klass
+            // (без Il2CppType-обёртки). Цепочка обязана различаться по
+            // читаемости имени и находить интерфейс всё равно.
+            Game g(image);
+            g.map_library();
+            g.build_unitask();
+            g.build_zenject(1, 0, false, false, false, false, false, true);
+            Controller<FakeMemory> c(g.io);
+            frame(g, c, 1, true);
+            const Diagnostics d = c.diagnostics();
+            assert(d.di_stage == 5 && d.di_fail == 0);
+            assert(d.di_root == 1 && d.di_unknown == 0);
+            assert(d.di_walk_tclass == 2);   // оба биндинга разрешились в klass
+            assert(g.io.trace_has("== ИНТЕРФЕЙС"));
+            assert(g.io.trace_has("di: resolve ok svc="));
         }
         {
             // Провайдер не CachedProvider или класс инстанса не сервис — отказ,
