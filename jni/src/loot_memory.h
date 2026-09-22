@@ -492,6 +492,40 @@ template<class IO> class Controller {
                      (visited <= static_cast<int32_t>(kDiMaxNames))
                          ? diag_.di_names[static_cast<size_t>(visited - 1)].data() : "",
                      is_iface ? " == ИНТЕРФЕЙС" : "");
+            // Доказательная лесенка, первые записи: байты лучше догадок.
+            // Обе классические цепочки на устройстве мертвы, значит раскладка
+            // иная — печатаем кандидатов c0..c3 (имя-как-у-klass + sыre 16
+            // байт), рёбра chain'а станут видны по hex самим.
+            if (visited <= 3) {
+                uint64_t cand[4];
+                cand[0] = type_;
+                cand[1] = impl;
+                cand[2] = io.ptr(cand[1]);
+                cand[3] = io.ptr(cand[2]);
+                char line[280];
+                size_t n = static_cast<size_t>(std::snprintf(line, sizeof(line),
+                                                        "di: e%d лестница", (int)i));
+                for (int c = 0; c < 4 && n < sizeof(line) - 64; ++c) {
+                    char nm[kDiNameMaxLen]{};
+                    if (cand[c] >= 0x10000 &&
+                        io.klass_name(cand[c], nm, kDiNameMaxLen) && nm[0])
+                        di_name_sanitize(nm, static_cast<int32_t>(std::strlen(nm)));
+                    char hx[40]{};
+                    if (cand[c] >= 0x10000) {
+                        std::array<uint8_t, 16> raw{};
+                        if (io.read(cand[c], raw)) {
+                            static const char* H = "0123456789abcdef";
+                            for (size_t b = 0; b < 16; ++b)
+                                { hx[b * 2] = H[raw[b] >> 4]; hx[b * 2 + 1] = H[raw[b] & 15]; }
+                            hx[32] = 0;
+                        }
+                    }
+                    n += static_cast<size_t>(std::snprintf(line + n, sizeof(line) - n,
+                            " c%d=%llx('%s',%s)", c, (unsigned long long)cand[c],
+                            nm, hx[0] ? hx : "-"));
+                }
+                io.trace("%s", line);
+            }
             if (!is_iface) continue;
             // Нашёлся биндинг сервиса. Ровно один провайдер, формы CachedProvider.
             uint64_t list = 0;
