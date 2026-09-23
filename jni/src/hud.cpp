@@ -187,16 +187,26 @@ void DrawWatermark(float dt) {
     float scrW = 0.f, scrH = 0.f;
     VisibleScreen(scrW, scrH);
 
-    // ---- Некликабельная пилюля с названием чита (слева сверху) ---------
-    // Тапы по ней не обрабатываются вовсе, так что она «прозрачна» для
-    // кликов и ничему не мешает.
+    // ---- Блок кнопок слева: название → счётчик → кнопка фрикама ---------
+    // Всё, что живёт отдельно от окна меню, собрано в один столбец у левого
+    // края экрана (просьба игрока): сверху пилюля с названием чита, под ней
+    // пилюля-счётчик противников (тап открывает/закрывает меню), под ней
+    // кнопка фрикама. Пользовательские положения из «Опций» по-прежнему
+    // имеют приоритет — тогда элемент выпадает из столбца и стоит там, куда
+    // его поставили.
+    const float blockX = 12.f, blockGap = 10.f;
+    float blockNextY = 12.f;
+
+    // Некликабельная пилюля с названием чита — верх блока. Тапы по ней не
+    // обрабатываются вовсе, так что она «прозрачна» для кликов.
     {
         const float fs = 38.f, padX = 24.f, padY = 14.f;
         const char* name = XS("t.me/benzware");
         auto nSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, name);
         float bW = padX * 2.f + nSz.x;
         float bH = padY * 2.f + nSz.y;
-        const float bX = 12.f, bY = 12.f;
+        const float bX = blockX, bY = blockNextY;
+        blockNextY = bY + bH + blockGap;
         fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Card(), 0.88f), bH * 0.5f);
         fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, C::U(C::Hair()), bH * 0.5f, 0, 1.f);
         // Точка-маркер слева: маленький градиент акцента.
@@ -210,9 +220,9 @@ void DrawWatermark(float dt) {
     }
 
     // ---- Пилюля-счётчик противников --------------------------------------
-    // Дефолт — верх по центру; двигается тапом в Опциях → Худ.
-    // Показывает, сколько игроков видит ESP; тап по ней открывает/закрывает
-    // меню.
+    // Дефолт — в блоке кнопок слева (под названием); двигается тапом в
+    // Опциях → Худ. Показывает, сколько игроков видит ESP; тап по ней
+    // открывает/закрывает меню.
     {
         int enemies = 0;
         if (g_esp_attached) {
@@ -233,7 +243,8 @@ void DrawWatermark(float dt) {
         float bW = pad + dotR * 2.f + 12.f + lSz.x + 14.f + cSz.x + pad;
         float bH = cSz.y + pad;
         // Пользовательская позиция: доли экрана = ЦЕНТР пилюли. Кламп
-        // держит её внутри экрана целиком.
+        // держит её внутри экрана целиком. Без неё пилюля стоит в блоке
+        // кнопок слева — под пилюлей с названием.
         float bX, bY;
         if (g_state.hud_cnt_x >= 0.f && g_state.hud_cnt_y >= 0.f) {
             bX = g_state.hud_cnt_x * scrW - bW * 0.5f;
@@ -241,8 +252,8 @@ void DrawWatermark(float dt) {
             if (scrW > bW + 16.f) bX = ImClamp(bX, 8.f, scrW - bW - 8.f);
             if (scrH > bH + 16.f) bY = ImClamp(bY, 8.f, scrH - bH - 8.f);
         } else {
-            bX = (scrW - bW) * 0.5f;
-            bY = 12.f;
+            bX = blockX;
+            bY = blockNextY;
         }
         g_hud_cnt_geom = {bX, bY, bW, bH}; // свежее — для превью калибровки
 
@@ -272,15 +283,22 @@ void DrawWatermark(float dt) {
 
     // ---- Кнопка фрикама: квадрат со скруглениями и глазом ----------------
     // Тап включает/выключает фрикам (тост «включён» ставит сам UpdateFreecam).
-    // Положение — центр кнопки в долях экрана, дефолт справа по центру;
-    // двигается в «Разное → Фрикам → Настроить кнопку». Тап активен, только
-    // когда меню закрыто и не идёт калибровка. Целиком прячется тумблером
-    // «Кнопка на экране» (вместе с тапом — спрятанное не нажимается).
+    // Положение — центр кнопки в долях экрана; дефолт — в блоке кнопок слева,
+    // под пилюлей-счётчиком. Двигается в «Разное → Фрикам → Настроить кнопку».
+    // Тап активен, только когда меню закрыто и не идёт калибровка. Целиком
+    // прячется тумблером «Кнопка на экране» (вместе с тапом — спрятанное
+    // не нажимается).
     if (g_state.freecam_btn_show)
     {
         const float side = kFcBtnSide, rad = kFcBtnRadius;
-        float cx = (g_state.freecam_btn_x >= 0.f ? g_state.freecam_btn_x : kFcBtnDefX) * scrW;
-        float cy = (g_state.freecam_btn_y >= 0.f ? g_state.freecam_btn_y : kFcBtnDefY) * scrH;
+        float cx, cy;
+        if (g_state.freecam_btn_x >= 0.f && g_state.freecam_btn_y >= 0.f) {
+            cx = g_state.freecam_btn_x * scrW;
+            cy = g_state.freecam_btn_y * scrH;
+        } else {
+            cx = g_hud_cnt_geom.bX + side * 0.5f;
+            cy = g_hud_cnt_geom.bY + g_hud_cnt_geom.bH + blockGap + side * 0.5f;
+        }
         float qX = cx - side * 0.5f, qY = cy - side * 0.5f;
         if (scrW > side + 16.f) qX = ImClamp(qX, 8.f, scrW - side - 8.f);
         if (scrH > side + 16.f) qY = ImClamp(qY, 8.f, scrH - side - 8.f);

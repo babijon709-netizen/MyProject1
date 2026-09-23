@@ -1711,10 +1711,16 @@ void RenderMenu() {
                 if (g_state.hud_cnt_x >= 0.f) { zx = g_state.hud_cnt_x * dw; zy = g_state.hud_cnt_y * dh; }
                 else { const HudCounterGeom& hg = HudCounterLast(); zx = hg.bX + hg.bW * 0.5f; zy = hg.bY + hg.bH * 0.5f; }
             }
-            // Кнопка фрикама: сохранённый центр или дефолт справа по центру.
+            // Кнопка фрикама: сохранённый центр или дефолт — в блоке кнопок
+            // слева, под пилюлей-счётчиком (10 — зазор блока, как в
+            // DrawWatermark).
             if (g_calibMode == 6) {
                 if (g_state.freecam_btn_x >= 0.f) { zx = g_state.freecam_btn_x * dw; zy = g_state.freecam_btn_y * dh; }
-                else { zx = kFcBtnDefX * dw; zy = kFcBtnDefY * dh; }
+                else {
+                    const HudCounterGeom& hg = HudCounterLast();
+                    zx = hg.bX + kFcBtnSide * 0.5f;
+                    zy = hg.bY + hg.bH + 10.f + kFcBtnSide * 0.5f;
+                }
             }
             if (zx >= 0.f) {
                 float pr = 34.f + 6.f * sinf((float)ImGui::GetTime() * 4.f);

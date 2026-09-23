@@ -15,10 +15,8 @@ void VisibleScreen(float& w, float& h);
 // том же кадре, так что данные всегда свежие.
 struct HudCounterGeom { float bX = 0.f, bY = 0.f, bW = 0.f, bH = 0.f; };
 const HudCounterGeom& HudCounterLast();
-// Экранная кнопка фрикама (квадрат с глазом): сторона, радиус скругления и
-// дефолтное положение (доли экрана = центр кнопки). Размер фиксирован,
-// поэтому калибровка в меню рисует превью по тем же константам.
+// Экранная кнопка фрикама (квадрат с глазом): сторона и радиус скругления.
+// Положение по умолчанию — в блоке кнопок слева, под пилюлей-счётчиком
+// (см. DrawWatermark); калибровка в меню рисует превью по тем же константам.
 constexpr float kFcBtnSide = 100.f;
 constexpr float kFcBtnRadius = 26.f;
-constexpr float kFcBtnDefX = 0.90f;
-constexpr float kFcBtnDefY = 0.50f;

@@ -105,6 +105,9 @@ def main():
     ap.add_argument("--size", type=int, default=96, help="сторона кадра, px")
     ap.add_argument("--fps", type=int, default=12, help="кадров в секунду")
     ap.add_argument("--q", type=int, default=9, help="качество MJPEG (1..31)")
+    ap.add_argument("--crop", default=None,
+                    help="ручной кроп W:H:X:Y (или crop=W:H:X:Y) вместо автопоиска "
+                         "по белому фону — для роликов не с белым фоном и не 720x688")
     ap.add_argument("--out", default=os.path.join(ROOT, "jni/src/media/avatar_video_data.inc"))
     ap.add_argument("--hdr", default=os.path.join(ROOT, "jni/include/media/avatar_video.h"))
     args = ap.parse_args()
@@ -123,17 +126,20 @@ def main():
     dur = probe(ffmpeg, src)
     print(f"источник: {os.path.basename(src)} ({dur:.1f} с)")
 
-    box = content_box(ffmpeg, src)
-    if box:
-        bx0, by0, bx1, by1 = box
-        cx, cy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
-        side = max(bx1 - bx0, by1 - by0)
-        side = min(side * 1.04, 688.0)          # чуть воздуха по краям
-        left = max(0.0, min(cx - side / 2.0, 720.0 - side))
-        top = max(0.0, min(cy - side / 2.0, 688.0 - side))
-        crop = f"crop={int(round(side))}:{int(round(side))}:{int(round(left))}:{int(round(top))}"
+    if args.crop:
+        crop = args.crop if args.crop.startswith("crop=") else "crop=" + args.crop
     else:
-        crop = "crop=688:688:16:0"
+        box = content_box(ffmpeg, src)
+        if box:
+            bx0, by0, bx1, by1 = box
+            cx, cy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+            side = max(bx1 - bx0, by1 - by0)
+            side = min(side * 1.04, 688.0)          # чуть воздуха по краям
+            left = max(0.0, min(cx - side / 2.0, 720.0 - side))
+            top = max(0.0, min(cy - side / 2.0, 688.0 - side))
+            crop = f"crop={int(round(side))}:{int(round(side))}:{int(round(left))}:{int(round(top))}"
+        else:
+            crop = "crop=688:688:16:0"
     print(f"  кроп: {crop}")
 
     tmp = tempfile.mkdtemp(prefix="avatar_")
