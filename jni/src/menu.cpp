@@ -1026,10 +1026,9 @@ static const char* TabTitle(int k) {
     return lang::text(kTabTitlesRu[k]);
 }
 
-// «Светофор»: три кружка по 20 px с зазором 6.7 — та же пропорция, что в
-// macOS (12 px при системном шрифте 13), в 1.5 раза меньше прежних 30/10.
-static const float kTLD   = 20.f;        // диаметр кружка светофора
-static const float kTLGap = 6.7f;        // зазор между кружками
+// «Светофор»: три классических цветных кружка macOS, 30 px с зазором 10.
+static const float kTLD   = 30.f;        // диаметр кружка светофора
+static const float kTLGap = 10.f;        // зазор между кружками
 static const float kTLPad = 12.f;        // отступ светофора от краёв окна
 static const int   kTLN   = 3;           // красный, жёлтый, зелёный
 
@@ -1054,29 +1053,17 @@ static void TrafficLightMetrics(float winW, float& d, float& gap) {
 // InvisibleButton'ов — окно за них таскается как за обычную шапку.
 enum TrafficLightId { TL_CLOSE = 0, TL_MIN, TL_ZOOM };
 
-// Прямоугольник i-й кнопки (квадрат со стороной d + 8 — палец толще кружка).
-static void TrafficLightRect(ImVec2 winPos, float d, float gap, int i, ImVec2& mn, ImVec2& mx) {
-    const float pitch = d + gap;
-    const float cx = winPos.x + kTLPad + i * pitch + d * 0.5f;
-    const float cy = winPos.y + kTLPad + d * 0.5f;
-    const float h  = d * 0.5f + 4.f;
-    mn = {cx - h, cy - h};
-    mx = {cx + h, cy + h};
-}
-
-// Цвета macOS: закрыть, свернуть, развернуть.
+// Цвета macOS: закрыть — красная, свернуть — жёлтая, развернуть — зелёная.
 static ImU32 TrafficLightColor(int i) {
-    // Дизайн «Глубина»: светофор нейтральный — тёмные кружки с глифами;
-    // красным подсвечивается только «закрыть».
     switch (i) {
-        case TL_CLOSE: return IM_COL32(255,  82,  82, 255);
-        case TL_MIN:   return IM_COL32(120, 132, 158, 255);
-        default:       return IM_COL32(120, 132, 158, 255);
+        case TL_CLOSE: return IM_COL32(255,  95,  87, 255);
+        case TL_MIN:   return IM_COL32(254, 188,  46, 255);
+        default:       return IM_COL32( 40, 200,  64, 255);
     }
 }
 
-// Полоса шапки: светофор в углу + кружок видео-аватара (r = 44) + приветствие.
-// Высота — диаметр кружка (88) с полями по 12 сверху и снизу.
+// Полоса шапки: светофор в углу + кружок видео-аватара (r = 44), текста в
+// шапке нет. Высота — диаметр кружка (88) с полями по 12 сверху и снизу.
 static float MenuHeaderH(bool) { return 88.f + 24.f; }
 
 // Где стоит светофор: в САМОМ левом верхнем углу окна.
@@ -1092,25 +1079,9 @@ static void TrafficLight(ImVec2 winPos, float winW) {
     ImDrawList* fg = ImGui::GetForegroundDrawList();
 
     for (int i = 0; i < kTLN; ++i) {
-        ImVec2 mn, mx;
-        TrafficLightRect(winPos, d, gap, i, mn, mx);
-        const ImVec2 c{(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f};
-        // Нейтральный кружок с глифом: «–» свернуть, «▢» развернуть, «✕» закрыть.
-        // Глифы рисуются линиями — шрифтовые символы в Roboto непредсказуемы.
-        const float r = d * 0.5f;
-        fg->AddCircleFilled(c, r, C::U(C::El()), 24);
-        fg->AddCircle(c, r, C::U(C::Hair()), 24, 1.f);
-        const ImU32 gcol = TrafficLightColor(i);
-        const float gs = r * 0.42f, th = r * 0.16f + 1.f;
-        if (i == TL_MIN) {
-            fg->AddLine({c.x - gs, c.y}, {c.x + gs, c.y}, gcol, th);
-        } else if (i == TL_ZOOM) {
-            const float q = gs * 0.85f;
-            fg->AddRect({c.x - q, c.y - q}, {c.x + q, c.y + q}, gcol, 2.f, 0, th);
-        } else {
-            fg->AddLine({c.x - gs, c.y - gs}, {c.x + gs, c.y + gs}, gcol, th);
-            fg->AddLine({c.x + gs, c.y - gs}, {c.x - gs, c.y + gs}, gcol, th);
-        }
+        const ImVec2 c{winPos.x + kTLPad + i * (d + gap) + d * 0.5f,
+                       winPos.y + kTLPad + d * 0.5f};
+        fg->AddCircleFilled(c, d * 0.5f, TrafficLightColor(i), 24);
     }
 }
 
@@ -2061,13 +2032,11 @@ void RenderMenu() {
     const float hdrH = MenuHeaderH(false);
 
     {
-        // Шапка в духе референса: светофор в углу, правее кружок видео-аватара,
-        // затем «Привет, user»; справа — ряд цветных точек и «* online».
+        // Шапка: светофор в углу и кружок видео-аватара, текста в шапке нет —
+        // «Привет, user», «* online» и ряд цветных точек убраны.
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
-        auto*  fnH = ImGui::GetFont();
         const float hH  = hdrH;
-        const float gFS = ImGui::GetFontSize() * 1.10f;
 
         // Светофор — в самом левом верхнем углу окна.
         TrafficLight(TrafficLightPos(g_win.pos, false), WW);
@@ -2076,37 +2045,12 @@ void RenderMenu() {
         const float tlW = kTLPad + TrafficLightW(d, gap2);
 
         // Кружок видео-аватара правее светофора, по центру полосы шапки.
-        // (Раньше он жил в левой панели вкладок; панель заменена единой
-        // строкой вкладок, и кружок вернулся в шапку — уменьшенным, r = 44.)
         const float avR  = 44.f;
         const float avCx = hp.x + tlW + 16.f + avR;
         const float avCy = hp.y + hH * 0.5f;
         cdl->AddCircleFilled({avCx, avCy}, avR + 12.f, C::UA(C::Acc(), 0.06f), 48);
         cdl->AddCircleFilled({avCx, avCy}, avR +  6.f, C::UA(C::Acc(), 0.10f), 48);
         VidAvatar::Draw(cdl, avCx, avCy, avR, dt, C::U(C::Acc()), C::U(C::Bg()));
-
-        const float cy = hp.y + (hH - gFS) * 0.5f;
-        float tx = avCx + avR + 18.f;
-        const char* greet = XS("Привет,");
-        auto gsz = fnH->CalcTextSizeA(gFS, FLT_MAX, 0, greet);
-        cdl->AddText(fnH, gFS, {tx, cy}, C::U(C::Acc()), greet);
-        cdl->AddText(fnH, gFS, {tx + gsz.x + 8.f, cy}, C::U(C::Txt()), "user");
-
-        // Правый блок: восемь цветных точек статуса + «* online».
-        const float oFS = ImGui::GetFontSize() * 0.85f;
-        auto osz = fnH->CalcTextSizeA(oFS, FLT_MAX, 0, "* online");
-        const float right = hp.x + WW - Layout::PadX;
-        cdl->AddText(fnH, oFS, {right - osz.x, hp.y + (hH - oFS) * 0.5f}, C::U(C::Green()), "* online");
-        static const ImVec4 kDots[8] = {
-            {0.60f, 0.60f, 0.60f, 1.f}, {0.90f, 0.20f, 0.20f, 1.f},
-            {0.90f, 0.60f, 0.20f, 1.f}, {0.90f, 0.90f, 0.30f, 1.f},
-            {0.30f, 0.80f, 0.30f, 1.f}, {0.30f, 0.60f, 0.90f, 1.f},
-            {0.60f, 0.30f, 0.90f, 1.f}, {0.90f, 0.30f, 0.70f, 1.f},
-        };
-        const float dr = 5.f, dstep = 15.f;
-        const float dx = right - osz.x - 14.f - 7.f * dstep - dr;
-        for (int i = 0; i < 8; ++i)
-            cdl->AddCircleFilled({dx + i * dstep, hp.y + hH * 0.5f}, dr, C::U(kDots[i]), 12);
 
         // Неоновая линия под шапкой отделяет её от строки вкладок.
         cdl->AddLine({hp.x, hp.y + hH - 1.f}, {hp.x + WW, hp.y + hH - 1.f}, C::U(C::Hair()), 1.f);
