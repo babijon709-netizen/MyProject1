@@ -846,6 +846,12 @@ uint8_t marker_class_of(uint64_t klass) {
 }
 
 uint64_t resolve_network_client_spawned() {
+    if (!g_network_client_class) {
+        // Автообновление оффсетов: класс по имени переживает апдейт игры.
+        const uint64_t found = offset_resolver_class("NetworkClient", "Mirror");
+        if (found && class_identity(found, "NetworkClient", "Mirror") != 0)
+            g_network_client_class = found;
+    }
     if (!g_network_client_class && NETWORK_CLIENT_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(g_il2cpp_base + NETWORK_CLIENT_TYPEINFO_RVA);
         if (class_identity(candidate, "NetworkClient", "Mirror") != 0)

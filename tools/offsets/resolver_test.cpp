@@ -1,0 +1,377 @@
+// Стенд автообновления оффсетов (jni/src/offset_resolver.cpp).
+//
+//   sh tools/offsets/resolver_test.sh
+//
+// Устройство повторяет то, что видит резолвер на телефоне: процесс-ребёнок,
+// у которого в карте есть файл «.../libil2cpp.so» (mmap подложенного файла)
+// и окно «.../global-metadata.dat», а в них — синтетические слоты классов и
+// массивы полей с импровизированными смещениями. Родитель привязывается к
+// ребёнку тем же слоем /proc/<pid>/mem и гонит НАСТОЯЩИЙ резолвер через все
+// фазы: карты -> скан слотов -> калибровка массива полей -> резолв таблицы.
+//
+// Что проверяется:
+//   * классы находятся по имени без всяких TYPEINFO_RVA (в т.ч. тёзка
+//     «PlayerManager» без полей не мешает резолву — поле ищется в том из
+//     классов, где оно есть);
+//   * смещения полей берутся из FieldInfo и ПЕРЕЗАПИСЫВАЮТ вшитые константы
+//     (подложены значения, отличающиеся от табличных);
+//   * статик-поля резолвятся тем же механизмом;
+//   * константы классов, которых в ребёнке нет, остаются на вшитых значениях;
+//   * найденные классы отдаются по запросу (замена typeinfo-слотов);
+//   * reapply возвращает найденное после порчи слота;
+//   * после reset резолвер проходится заново и приходит к тем же значениям.
+//
+// Нечитаемые имена (устройство с отказом метаданных) здесь не смоделировать —
+// память ребёнка читается вся; на устройстве этот случай оставляет вшитые
+// значения (резолвер ничего не находит и ничего не портит).
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <time.h>
+
+#include <string>
+
+#include "mem_io.h"        // настоящий слой чтения (как на устройстве)
+#include "game_offsets_active.h"
+
+// ---- то, что резолвер ждёт от окружения (в игре живёт в game.cpp) ----------
+memio::Reader g_mem;
+pid_t     g_pid = -1;
+uint64_t  g_il2cpp_base = 0;
+
+bool valid_obj(uint64_t p) {
+    return p >= 0x10000 && p < 0x0001000000000000ULL && (p & 0x7) == 0;
+}
+
+double mono_seconds() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+// Та же семантика, что у read_remote_string в game.cpp.
+std::string read_remote_string(uint64_t address, bool* readable) {
+    if (readable) *readable = false;
+    if (!address) return {};
+    const size_t kMax = 95;
+    char buffer[kMax + 1] = {};
+    size_t got = 0;
+    while (got < kMax) {
+        const size_t want = (kMax - got < sizeof(uint64_t)) ? (kMax - got) : sizeof(uint64_t);
+        if (!g_mem.read(address + got, buffer + got, want)) {
+            if (got == 0) return {};
+            size_t single = 0;
+            while (single < want &&
+                   g_mem.read_quiet(address + got + single, buffer + got + single, 1)) {
+                if (buffer[got + single] == '\0') break;
+                ++single;
+            }
+            got += single;
+            break;
+        }
+        got += want;
+        if (memchr(buffer + got - want, '\0', want)) break;
+    }
+    buffer[kMax] = '\0';
+    if (readable) *readable = true;
+    return std::string(buffer);
+}
+
+// Настоящий резолвер (компилируется вместе со стендом).
+#include "../../jni/src/offset_resolver.cpp"
+
+// ---- утилиты стенда ----------------------------------------------------------
+static int s_checks = 0, s_fails = 0;
+static void check(bool ok, const char* what) {
+    ++s_checks;
+    if (!ok) ++s_fails;
+    printf("  %-64s %s\n", what, ok ? "ок" : "ПРОВАЛ");
+}
+
+struct Handed {
+    uint64_t il2cpp_base, meta_base;
+    uint64_t pm_real, pm_decoy, teammember, netclient;
+};
+
+// Строка в окне метаданных; возвращает её адрес.
+static uint64_t put_string(uint8_t* meta, size_t& off, const char* s) {
+    uint64_t addr = (uint64_t)(uintptr_t)(meta + off);
+    memcpy(meta + off, s, strlen(s) + 1);
+    off += strlen(s) + 1;
+    off = (off + 7) & ~7u;
+    return addr;
+}
+
+// Поле синтетического класса.
+struct PField { const char* name; int32_t offset; };
+
+// Класс в куче ребёнка: Il2CppClass + массив FieldInfo. Возвращает адрес класса.
+static uint64_t build_class(uint8_t* heap, size_t& hoff,
+                            uint64_t image_ptr, uint64_t name_ptr, uint64_t ns_ptr,
+                            const PField* fields, int nfields, uint8_t* meta, size_t& moff) {
+    hoff = (hoff + 0x1FFu) & ~0x1FFu;
+    uint8_t* k = heap + hoff;
+    const uint64_t klass = (uint64_t)(uintptr_t)k;
+    hoff += 0x200;
+    memset(k, 0, 0x200);
+    *(uint64_t*)(k + 0x00) = image_ptr;          // image — в окно libil2cpp
+    *(uint64_t*)(k + 0x10) = name_ptr;           // name  — в окно метаданных
+    *(uint64_t*)(k + 0x18) = ns_ptr;
+    *(uint64_t*)(k + 0x58) = 0;                  // parent
+    *(uint64_t*)(k + 0xB8) = klass + 0x140;      // static_fields — валидный адрес
+    *(uint16_t*)(k + 0x124) = (uint16_t)nfields;
+
+    if (nfields > 0) {
+        uint8_t* farr_p = heap + hoff;
+        const uint64_t farr = (uint64_t)(uintptr_t)farr_p;
+        hoff += 0x20 * nfields + 0x40;
+        *(uint64_t*)(k + 0x80) = farr;           // fields
+        uint64_t type_dummy = (uint64_t)(uintptr_t)(heap + hoff);
+        hoff += 0x40;
+        for (int i = 0; i < nfields; ++i) {
+            uint8_t* f = farr_p + 0x20 * i;
+            *(uint64_t*)(f + 0x00) = put_string(meta, moff, fields[i].name);
+            *(uint64_t*)(f + 0x08) = type_dummy;
+            *(uint64_t*)(f + 0x10) = klass;      // parent == класс
+            *(int32_t*)(f + 0x18)  = fields[i].offset;
+            *(uint32_t*)(f + 0x1C) = 0x04000000u + i;
+        }
+    }
+    return klass;
+}
+
+static void child_main(int out_fd) {
+    char dir[] = "/tmp/resolver_bench.XXXXXX";
+    if (!mkdtemp(dir)) _exit(90);
+    char il_path[128], meta_path[128];
+    snprintf(il_path, sizeof(il_path), "%s/libil2cpp.so", dir);
+    snprintf(meta_path, sizeof(meta_path), "%s/global-metadata.dat", dir);
+
+    const size_t kIlSize = 512u << 10, kMetaSize = 64u << 10;
+    int il_fd = open(il_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    int meta_fd = open(meta_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (il_fd < 0 || meta_fd < 0) _exit(91);
+    if (ftruncate(il_fd, kIlSize) || ftruncate(meta_fd, kMetaSize)) _exit(92);
+
+    uint8_t* il   = (uint8_t*)mmap(NULL, kIlSize, PROT_READ | PROT_WRITE, MAP_SHARED, il_fd, 0);
+    uint8_t* meta = (uint8_t*)mmap(NULL, kMetaSize, PROT_READ | PROT_WRITE, MAP_SHARED, meta_fd, 0);
+    if (il == MAP_FAILED || meta == MAP_FAILED) _exit(93);
+    memcpy(il, "\x7f" "ELF", 4);   // bind() пробует читать начало образа
+
+    // Куча ребёнка под классы/поля.
+    static uint8_t heap[1u << 20];
+    size_t hoff = 0x1000, moff = 0x100;
+
+    const uint64_t il_base  = (uint64_t)(uintptr_t)il;
+    const uint64_t meta_base = (uint64_t)(uintptr_t)meta;
+
+    // Имена классов и пространств имён — в окне метаданных.
+    const uint64_t s_pm   = put_string(meta, moff, "PlayerManager");
+    const uint64_t s_oxide = put_string(meta, moff, "Oxide");
+    const uint64_t s_tm   = put_string(meta, moff, "TeamMember");
+    const uint64_t s_empty = put_string(meta, moff, "");
+    const uint64_t s_nc   = put_string(meta, moff, "NetworkClient");
+    const uint64_t s_mirror = put_string(meta, moff, "Mirror");
+
+    // Окно данных «.so»: сюда кладём слоты-указатели, которые ищет сканер.
+    uint64_t* slots = (uint64_t*)(il + 0x40000);
+    const size_t kSlots = 4096;
+
+    // Настоящий PlayerManager: смещения ОТЛИЧАЮТСЯ от вшитых, чтобы видеть
+    // именно перезапись, а не совпадение.
+    const PField pm_fields[] = {
+        {"teamName",           0x2A0},   // вшито 0x280
+        {"clanId",             0x2B0},   // вшито 0x290
+        {"clanTag",            0x2B8},   // вшито 0x298
+        {"nicklabel",          0x138},   // вшито 0x130
+        {"team",               0x128},   // вшито 0x120
+        {"clientPlayerList",   0x18},    // статик; вшито 0x10
+    };
+    uint64_t pm_real = build_class(heap, hoff, il_base + 0x1000, s_pm, s_oxide,
+                                   pm_fields, 6, meta, moff);
+
+    // Тёзка без полей: резолв не обязан на него попасть.
+    uint64_t pm_decoy = build_class(heap, hoff, il_base + 0x1000, s_pm, s_oxide,
+                                    NULL, 0, meta, moff);
+
+    const PField tm_fields[] = {
+        {"nick",    0x30},   // вшито 0x20
+        {"clanTag", 0x28},   // вшито 0x18
+    };
+    uint64_t teammember = build_class(heap, hoff, il_base + 0x1000, s_tm, s_empty,
+                                      tm_fields, 2, meta, moff);
+
+    const PField nc_fields[] = {
+        {"spawned", 0x40},   // статик
+    };
+    uint64_t netclient = build_class(heap, hoff, il_base + 0x1000, s_nc, s_mirror,
+                                     nc_fields, 1, meta, moff);
+
+    // Слоты: настоящие классы вперемешку с мусором (выравнивание, битые
+    // указатели, указатели в никуда) — фильтры сканера обязаны его отсеять.
+    size_t sn = 0;
+    slots[sn++] = pm_decoy;           // тёзка — раньше настоящего
+    slots[sn++] = 0;
+    slots[sn++] = il_base + 0x1234;   // указатель внутрь .so — не класс
+    slots[sn++] = 0xdeadbeef000ull;   // валидный по форме, чтений нет
+    slots[sn++] = meta_base + 0x40;   // в метаданные — тоже не класс
+    slots[sn++] = pm_real;
+    // Мусор: значения проходят форму указателя, но читаются как нули
+    // (выровнены на 64 КБ, где в ребёнке ничего нет). НЕ в начало кучи:
+    // там лежит настоящий указатель, который сканер честно примет за класс.
+    for (int i = 0; i < 700; ++i) slots[sn++] = 0x400000000ull + (uint64_t)(i * 8);
+    slots[sn++] = teammember;
+    slots[sn++] = netclient;
+    slots[sn++] = 0xFFFFFFFFFFFFFFF8ull;
+    if (sn > kSlots) _exit(94);
+
+    Handed h;
+    h.il2cpp_base = il_base;
+    h.meta_base = meta_base;
+    h.pm_real = pm_real; h.pm_decoy = pm_decoy;
+    h.teammember = teammember; h.netclient = netclient;
+    if (write(out_fd, &h, sizeof(h)) != sizeof(h)) _exit(95);
+
+    raise(SIGSTOP);   // родитель читает память, пока мы спим
+    _exit(0);
+}
+
+int main() {
+    int fds[2];
+    if (pipe(fds)) { perror("pipe"); return 1; }
+    const pid_t child = fork();
+    if (child < 0) { perror("fork"); return 1; }
+    if (child == 0) { close(fds[0]); child_main(fds[1]); _exit(0); }
+    close(fds[1]);
+
+    Handed h;
+    if (read(fds[0], &h, sizeof(h)) != sizeof(h)) {
+        fprintf(stderr, "ребёнок не отдал адреса\n");
+        kill(child, SIGKILL);
+        return 1;
+    }
+    printf("стенд автообновления оффсетов: ребёнок %d, .so@0x%llx, метаданные@0x%llx\n",
+           (int)child, (unsigned long long)h.il2cpp_base, (unsigned long long)h.meta_base);
+
+    if (!g_mem.bind(child, h.il2cpp_base)) {
+        fprintf(stderr, "привязка не удалась\n");
+        kill(child, SIGKILL);
+        return 1;
+    }
+    g_pid = child;
+    g_il2cpp_base = h.il2cpp_base;
+
+    // Вшитые значения констант, которые не должны измениться (классов нет).
+    const uint64_t mineable_before = go_active::MINEABLE_ENTITY_TYPE;
+
+    // ГОНЯЕМ резолвер до готовности (порции по 4 мс, как на устройстве).
+    const double t0 = mono_seconds();
+    for (;;) {
+        g_mem.frame_begin();
+        offset_resolver_tick();
+        char st[96] = {};
+        offset_resolver_status(st, sizeof(st));
+        if (strstr(st, "готов")) break;
+        if (mono_seconds() - t0 > 30.0) {
+            printf("ПРОВАЛ: резолвер не завершился за 30 с (%s)\n", st);
+            offset_resolver_debug_dump();
+            // Диагностика: ЧИТАЕМ НАПРЯМУЮ (в обход кэша блоков), чтобы видеть
+            // правду, а не закэшированный резолвером ноль.
+            char mpath[64];
+            snprintf(mpath, sizeof(mpath), "/proc/%d/mem", (int)child);
+            int mfd = open(mpath, O_RDONLY);
+            if (mfd >= 0) {
+                uint32_t magic = 0;
+                uint64_t slot0 = 0;
+                pread(mfd, &magic, 4, (off_t)h.il2cpp_base);
+                pread(mfd, &slot0, 8, (off_t)(h.il2cpp_base + 0x40000));
+                printf("  прямой pread: магическое %08x, слот @+0x40000=%016llx\n",
+                       magic, (unsigned long long)slot0);
+                close(mfd);
+            } else {
+                printf("  прямой pread: /proc/%d/mem НЕ открылся (ребёнок мёртв?)\n", (int)child);
+            }
+            snprintf(mpath, sizeof(mpath), "/proc/%d/maps", (int)child);
+            FILE* mf = fopen(mpath, "r");
+            if (mf) {
+                char line[512];
+                while (fgets(line, sizeof(line), mf))
+                    if (strstr(line, "libil2cpp") || strstr(line, "global-metadata"))
+                        printf("  maps: %s", line);
+                fclose(mf);
+            } else {
+                printf("  maps: /proc/%d/maps НЕ открылся (ребёнок мёртв?)\n", (int)child);
+            }
+            kill(child, SIGKILL);
+            return 1;
+        }
+        struct timespec ts { 0, 2 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    char st[128] = {};
+    offset_resolver_status(st, sizeof(st));
+    printf("  резолвер: %s (%.2f с)\n", st, mono_seconds() - t0);
+
+    // ---- классы по именам (замена TYPEINFO_RVA) ----------------------------
+    const uint64_t pm_found = offset_resolver_class("PlayerManager", "Oxide");
+    check(pm_found == h.pm_real || pm_found == h.pm_decoy,
+          "PlayerManager найден по имени (без RVA)");
+    check(offset_resolver_class("TeamMember", "") == h.teammember,
+          "TeamMember найден по имени");
+    check(offset_resolver_class("NetworkClient", "Mirror") == h.netclient,
+          "NetworkClient найден по имени");
+    check(offset_resolver_class("GameControllerBase", "Oxide") == 0,
+          "отсутствующий класс не выдумывается");
+
+    // ---- смещения полей: подложенные значения вместо вшитых ----------------
+    check(go_active::PLAYER_TEAM_NAME == 0x2A0, "teamName переписан 0x280 -> 0x2A0");
+    check(go_active::PLAYER_CLAN_ID == 0x2B0,   "clanId переписан 0x290 -> 0x2B0");
+    check(go_active::PLAYER_CLAN_TAG == 0x2B8,  "clanTag переписан 0x298 -> 0x2B8");
+    check(go_active::PLAYER_NICKLABEL == 0x138, "nicklabel переписан 0x130 -> 0x138");
+    check(go_active::PLAYER_TEAM_OBJECT == 0x128, "team переписан 0x120 -> 0x128");
+    check(go_active::PLAYER_MANAGER_STATIC_FIELDS_LIST == 0x18,
+          "статик clientPlayerList переписан 0x10 -> 0x18");
+    check(go_active::TEAM_MEMBER_NICK == 0x30,    "TeamMember.nick переписан 0x20 -> 0x30");
+    check(go_active::TEAM_MEMBER_CLAN_TAG == 0x28, "TeamMember.clanTag 0x18 -> 0x28");
+
+    // ---- чего нет в ребёнке — остаётся вшитым ------------------------------
+    check(go_active::MINEABLE_ENTITY_TYPE == mineable_before,
+          "нерезолвлённая константа не тронута");
+
+    // ---- reapply: после порчи слота найденное возвращается ------------------
+    go_active::PLAYER_TEAM_NAME = 0x1234;
+    offset_resolver_reapply();
+    check(go_active::PLAYER_TEAM_NAME == 0x2A0, "reapply вернул найденное значение");
+
+    // ---- reset: проход заново даёт тот же результат -------------------------
+    offset_resolver_reset();
+    const double t1 = mono_seconds();
+    for (;;) {
+        g_mem.frame_begin();
+        offset_resolver_tick();
+        char st2[96] = {};
+        offset_resolver_status(st2, sizeof(st2));
+        if (strstr(st2, "готов")) break;
+        if (mono_seconds() - t1 > 30.0) {
+            printf("ПРОВАЛ: повторный проход не завершился (%s)\n", st2);
+            kill(child, SIGKILL);
+            return 1;
+        }
+        struct timespec ts { 0, 2 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    check(go_active::PLAYER_TEAM_NAME == 0x2A0, "после reset повторный резолв сошёлся");
+
+    printf(s_fails ? "СТЕНД ПРОВАЛЕН (%d из %d)\n" : "СТЕНД ПРОЙДЕН (%d проверок)\n",
+           s_fails ? s_fails : s_checks, s_checks);
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+    return s_fails ? 1 : 0;
+}

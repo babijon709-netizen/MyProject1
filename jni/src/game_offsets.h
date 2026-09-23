@@ -210,6 +210,28 @@ inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = 0x18;
 // по нему runners[] у PlayerLoopHelper; в game.cpp — то же для PlayerManager
 // и GameControllerBase).
 inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
+// ---- Раскладка Il2CppClass/FieldInfo для автообновления оффсетов -------------
+// Проверено дизасемом САМОГО libil2cpp.so (Unity 6000.3.18f1, обе сборки):
+//   il2cpp_class_get_name      -> ldr x0, [x0, #0x10]   (name 0x10)
+//   il2cpp_class_get_methods   -> ldr x9, [x20, #0x98]  (methods 0x98)
+//                                 + ldrh w10, [x20, #0x120] (method_count)
+//   il2cpp_class_num_fields    -> ldrh w0, [x0, #0x124] (field_count, uint16)
+//   il2cpp_field_get_offset    -> ldrsw x0, [x0, #0x18] (FieldInfo.offset, int32)
+//   il2cpp_field_get_name      -> ldr x0, [x0]          (FieldInfo.name 0x00)
+// Плюс цикл обхода полей в самом рантайме: `ldrh w8,[x0,#0x124]` (счётчик),
+// `ldr x8,[x22,#0x80]` (массив), `add x0,x8,x25,lsl #5` (шаг 0x20) — и функция
+// копирования FieldInfo: name@0x00, type@0x08, parent@0x10, offset|token@0x18
+// (8 байт), запись родителя по +0x10, malloc(count*0x20).
+// Это раскладка РАНТАЙМА il2cpp (зависит от версии Unity, не от билда игры),
+// поэтому она общая для релиза и беты. Резолвер на устройстве дополнительно
+// калибрует смещение `fields` по живому классу, прежде чем ему верить.
+inline constexpr std::uint64_t IL2CPP_CLASS_FIELDS       = 0x80;  // FieldInfo*
+inline constexpr std::uint64_t IL2CPP_CLASS_FIELD_COUNT  = 0x124; // uint16
+inline constexpr std::uint64_t IL2CPP_FIELDINFO_NAME     = 0x00;  // const char*
+inline constexpr std::uint64_t IL2CPP_FIELDINFO_TYPE     = 0x08;  // const Il2CppType*
+inline constexpr std::uint64_t IL2CPP_FIELDINFO_PARENT   = 0x10;  // Il2CppClass*
+inline constexpr std::uint64_t IL2CPP_FIELDINFO_OFFSET   = 0x18;  // int32
+inline constexpr std::uint64_t IL2CPP_FIELDINFO_SIZE     = 0x20;
 // eventHandler.LookDirection (0x140): synced Vector3 wrapper, value at +0x20.
 // MouseLook.Update writes m_LookRoot.forward into it every frame and
 // FPHitscan casts its hit ray along it (not along the camera transform).

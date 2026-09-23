@@ -18,3 +18,7 @@ g++ -std=gnu++17 -O1 -g -Wall -Wextra \
     -o "$BUILD/switch_test" tools/offsets/switch_test.cpp
 
 "$BUILD/switch_test"
+
+# Автообновление оффсетов: настоящий резолвер гоняется по синтетическому
+# процессу-«игре» через /proc/<pid>/mem (стенд без устройства).
+sh tools/offsets/resolver_test.sh

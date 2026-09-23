@@ -910,7 +910,15 @@ static bool base_resolves_game(uint64_t base) {
         const uint64_t candidate = rd_ptr(base + GAME_CONTROLLER_TYPEINFO_RVA);
         if (class_identity(candidate, "GameControllerBase", "Oxide") != 0) return true;
     }
-    return false;
+    // Оба RVA не нашли класс — так бывает после апдейта игры, когда вшитые
+    // смещения устарели (именно ради этого и существует автообновление
+    // оффсетов). Привязку не роняем: принимаем образ с живым ELF-заголовком,
+    // резолвер сам найдёт классы по именам. Базы-кандидаты уже отсортированы
+    // «живой образ с нулевым смещением — первым», так что мёртвый «(deleted)»
+    // образ сюда попадёт только если живых вовсе нет.
+    uint8_t elf[6] = {};
+    if (!rd_buf(base, elf, sizeof(elf))) return false;
+    return elf[0] == 0x7f && elf[1] == 'E' && elf[2] == 'L' && elf[3] == 'F';
 }
 
 static bool validate_player_list(uint64_t list, uint64_t player_class) {
@@ -955,6 +963,13 @@ uint64_t get_class_static_fields(uint64_t klass) {
 }
 
 static uint64_t resolve_runtime_player_list() {
+    if (!g_player_manager_class) {
+        // Сначала автообновление: класс, найденный по имени в живых
+        // метаданных (переживает апдейт игры, когда RVA устарел).
+        const uint64_t found = offset_resolver_class("PlayerManager", "Oxide");
+        if (found && class_identity(found, "PlayerManager", "Oxide") != 0)
+            g_player_manager_class = found;
+    }
     if (!g_player_manager_class && PLAYER_MANAGER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
         if (class_identity(candidate, "PlayerManager", "Oxide") != 0)
@@ -1025,6 +1040,11 @@ static uint64_t resolve_local_player() {
         if (++g_local_player_miss < kLocalPlayerMissLimit) return cached;
     }
 
+    if (!g_game_controller_class) {
+        const uint64_t found = offset_resolver_class("GameControllerBase", "Oxide");
+        if (found && class_identity(found, "GameControllerBase", "Oxide") != 0)
+            g_game_controller_class = found;
+    }
     if (!g_game_controller_class && GAME_CONTROLLER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
         if (class_identity(candidate, "GameControllerBase", "Oxide") != 0)
@@ -7004,6 +7024,7 @@ void esp_reset() {
     g_mem.unbind();
     g_attach_state = ESP_ATTACH_OK;
     g_pid = -1; g_il2cpp_base = 0;
+    offset_resolver_reset();   // процесс ушёл — кэш классов/полей недействителен
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;

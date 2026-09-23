@@ -176,6 +176,10 @@ void RestoreLayout() {
 // реально сменилась, переподключиться. Всё, что было вычитано по прежней
 // раскладке (классы, инстансы, кеши игроков), после смены недействительно —
 // поэтому esp_reset(), а поток привязки подключится заново сам.
+// Из game.h (сам заголовок сюда не включается): вернуть найденные живьём
+// оффсеты поверх табличных после go::SelectBuild.
+void offset_resolver_reapply();
+
 void ApplyBuildChoice(go::Build b) {
     if (b == go::Build::Beta && !go::BetaAvailable()) b = go::Build::Release;
     const bool changed = (go::CurrentBuild() != b);
@@ -183,6 +187,10 @@ void ApplyBuildChoice(go::Build b) {
         esp_viewmodel_reset(true); // restore using OLD offsets
     }
     go::SelectBuild(b);
+    // SelectBuild перезаписал все слоты табличными значениями; резолвер
+    // возвращает поверх них найденное живьём (оно верно для работающего
+    // процесса независимо от выбранной таблицы).
+    offset_resolver_reapply();
     RememberBuild();
     if (changed) {
         process_detach();

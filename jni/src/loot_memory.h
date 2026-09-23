@@ -141,6 +141,15 @@ template <class IO> class Controller {
     enum class Anchor { Ready, NotYet, Mismatch };
     Anchor resolve_helper(std::uint64_t base) {
         if (helper_class_) return Anchor::Ready;
+        // Автообновление оффсетов: класс, найденный по имени в живых
+        // метаданных, переживает апдейт игры (объявление в game.h).
+        extern std::uint64_t offset_resolver_class(const char* name, const char* ns);
+        const std::uint64_t found =
+            offset_resolver_class("PlayerLoopHelper", "Cysharp.Threading.Tasks");
+        if (found && class_is(found, "PlayerLoopHelper", "Cysharp.Threading.Tasks")) {
+            helper_class_ = found;
+            return Anchor::Ready;
+        }
         std::uint64_t klass = 0;
         if (!pointer(base + go_active::PLAYERLOOPHELPER_TYPEINFO_RVA, klass) ||
             klass < 0x10000)

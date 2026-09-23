@@ -2893,5 +2893,53 @@
    "field": "initialFrame",
    "how": "смещение — из комментария /* 0x18 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «int32_t»"
   }
+ },
+ "PLAYER_TEAM_OBJECT": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "team",
+  "type": "euD_o* / Reo_o* (командный NetworkBehaviour; имя класса ротируется, но поле стабильно)",
+  "offset": 288,
+  "src": {
+   "file": "dump.cs",
+   "how": "public euD team (релиз) / public Reo team (бета), оба 0x120"
+  }
+ },
+ "TEAM_MEMBER_ID": {
+  "kind": "field",
+  "class": "TeamMember",
+  "struct": "TeamMember_Fields",
+  "field": "id",
+  "type": "System.String*",
+  "offset": 16,
+  "src": {
+   "file": "dump.cs",
+   "how": "string id, 0x10 в обеих сборках"
+  }
+ },
+ "TEAM_MEMBER_CLAN_TAG": {
+  "kind": "field",
+  "class": "TeamMember",
+  "struct": "TeamMember_Fields",
+  "field": "clanTag",
+  "type": "System.String*",
+  "offset": 24,
+  "src": {
+   "file": "dump.cs",
+   "how": "string clanTag, 0x18 в обеих сборках"
+  }
+ },
+ "TEAM_MEMBER_NICK": {
+  "kind": "field",
+  "class": "TeamMember",
+  "struct": "TeamMember_Fields",
+  "field": "nick",
+  "type": "System.String*",
+  "offset": 32,
+  "src": {
+   "file": "dump.cs",
+   "how": "string nick, 0x20 в обеих сборках"
+  }
  }
 }

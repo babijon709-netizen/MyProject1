@@ -865,6 +865,16 @@ float TabContent(int tab, float dt, float cW) {
             ImGui::Dummy({avW, 0.f});
         }
 
+        // Автообновление оффсетов: что резолвер вычитал из живой игры в этой
+        // сессии (классы по именам + смещения полей; что не нашлось — на
+        // вшитых значениях). См. jni/src/offset_resolver.cpp.
+        {
+            char rstat[96] = {};
+            offset_resolver_status(rstat, sizeof(rstat));
+            ImGui::Dummy({1.f, 10.f});
+            ImGui::TextDisabled("%s: %s", XS("Автообновление оффсетов"), rstat);
+        }
+
         SHdr(XS("Система"));
         {
             auto* dl  = ImGui::GetWindowDrawList();

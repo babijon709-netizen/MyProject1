@@ -17,6 +17,7 @@ static const LangPair kUiEn[] = {
     {"Y: вниз / вверх", "Y: down / up"},
     {"Z: ближе / дальше", "Z: closer / farther"},
     {"«%s»", "\"%s\""},
+    {"Автообновление оффсетов", "Offset auto-update"},
     {"Автофарм", "Auto-farm"},
     {"Аим", "Aim"},
     {"Без отдачи", "No recoil"},

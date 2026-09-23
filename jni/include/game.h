@@ -139,6 +139,16 @@ void esp_get_ally_diag(int* local_team_len, int* local_clan_len,
                        int* roster_valid, int* roster_count,
                        char* roster_team, size_t roster_team_cap);
 
+// ---- Автообновление оффсетов (offset_resolver.cpp) ---------------------------
+// Читает IL2CPP-метаданные живого процесса: ищет классы по именам (заменяет
+// *_TYPEINFO_RVA) и смещения полей по именам (заменяет вшитые константы).
+// Что не нашёл — остаётся на вшитом значении, поэтому хуже не делает никогда.
+void     offset_resolver_tick();       // порционный шаг, звать каждый кадр
+void     offset_resolver_reset();      // привязка сброшена — начать заново
+void     offset_resolver_reapply();    // после go::SelectBuild вернуть найденное
+uint64_t offset_resolver_class(const char* name, const char* ns); // 0 = не найден
+void     offset_resolver_status(char* out, size_t cap);           // строка в меню
+
 // Players near the local player as of the last esp_get_boxes() call, in all
 // directions (360 degrees) — NOT limited to the ones visible on screen.
 // Feeds the enemy-counter pill in the overlay.

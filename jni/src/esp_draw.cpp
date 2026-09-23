@@ -70,6 +70,10 @@ void DrawEspOverlay() {
 
     if (!g_esp_attached) return;
 
+    // Автообновление оффсетов: порционный шаг каждый кадр, пока есть привязка
+    // (до выключателей визуалов — резолверу всё равно, что рисуется).
+    offset_resolver_tick();
+
     if (g_state.aim_touch && g_state.aim_special) {
         float fovR = AimFovRadiusPx(sw, sh);
         if (fovR > 1.f) {

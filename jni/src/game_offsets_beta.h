@@ -230,6 +230,16 @@ inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = 0x18;
 // по нему runners[] у PlayerLoopHelper; в game.cpp — то же для PlayerManager
 // и GameControllerBase).
 inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
+// ---- Раскладка Il2CppClass/FieldInfo для автообновления оффсетов -------------
+// Та же, что в релизе: это рантайм il2cpp (Unity 6000.3.18f1 в обеих
+// сборках), подтверждена дизасемом .so — подробности в game_offsets.h.
+inline constexpr std::uint64_t IL2CPP_CLASS_FIELDS       = 0x80;  // FieldInfo*
+inline constexpr std::uint64_t IL2CPP_CLASS_FIELD_COUNT  = 0x124; // uint16
+inline constexpr std::uint64_t IL2CPP_FIELDINFO_NAME     = 0x00;  // const char*
+inline constexpr std::uint64_t IL2CPP_FIELDINFO_TYPE     = 0x08;  // const Il2CppType*
+inline constexpr std::uint64_t IL2CPP_FIELDINFO_PARENT   = 0x10;  // Il2CppClass*
+inline constexpr std::uint64_t IL2CPP_FIELDINFO_OFFSET   = 0x18;  // int32
+inline constexpr std::uint64_t IL2CPP_FIELDINFO_SIZE     = 0x20;
 // eventHandler.LookDirection (0x140): synced Vector3 wrapper, value at +0x20.
 // MouseLook.Update writes m_LookRoot.forward into it every frame and
 // FPHitscan casts its hit ray along it (not along the camera transform).
