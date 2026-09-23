@@ -148,6 +148,10 @@ void     offset_resolver_reset();      // привязка сброшена — 
 void     offset_resolver_reapply();    // после go::SelectBuild вернуть найденное
 uint64_t offset_resolver_class(const char* name, const char* ns); // 0 = не найден
 void     offset_resolver_status(char* out, size_t cap);           // строка в меню
+// База, где резолвер нашёл живые классы для этого pid (0 = ещё не нашёл):
+// привязка пробует её первой, чтобы не вставать на пустую копию .so.
+uint64_t offset_resolver_good_base(pid_t pid);
+bool     offset_resolver_busy();       // скан/калибровка ещё идут
 
 // Players near the local player as of the last esp_get_boxes() call, in all
 // directions (360 degrees) — NOT limited to the ones visible on screen.

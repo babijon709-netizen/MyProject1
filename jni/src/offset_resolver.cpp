@@ -152,6 +152,24 @@ int      s_names_ok = 0, s_names_fail = 0;
 uint64_t s_fields_off = 0;        // откалиброванное смещение Il2CppClass.fields
 int      s_resolved = 0, s_changed = 0;
 
+// Знания о базах в рамках ЖИВОГО процесса (переживают сброс скана при
+// перепривязке; очищаются только при смене pid). Лог с устройства показал:
+// после самообновления игры в карте процесса живут ДВА образа libil2cpp.so —
+// живой с классами и «пустой» (свежезагруженная копия .so, классов в ней
+// нет). Привязка по одному лишь ELF-заголовку выбирает между ними вслепую и
+// могла встать на пустой — скан 221 МБ закончился нулём. Поэтому:
+//   кандидаты  — все базы образа из карты (перебираем по кругу);
+//   мёртвые    — базы, где полный скан не дал ни одного класса;
+//   живая      — база, где классы нашлись (её и держим).
+uint64_t s_base_candidates[8];
+int      s_candidate_count = 0;
+uint64_t s_dead_bases[8];
+int      s_dead_count = 0;
+uint64_t s_good_base = 0;          // база, где нашлись живые классы
+pid_t    s_known_pid = -1;         // pid, для которого знания выше собраны
+uint64_t s_scan_base = 0;          // база, к которой относится текущий скан
+bool     s_good_logged = false;    // «вернулся на живую базу» не спамить
+
 struct AppliedRec { std::uint64_t* slot; std::uint64_t value; };
 AppliedRec s_applied[256];
 int      s_applied_count = 0;
@@ -167,6 +185,12 @@ constexpr double kTickBudgetSec   = 0.004;  // 4 мс на такт
 constexpr double kScanTotalSec    = 90.0;   // общий потолок скана (образы по 0.5ГБ+)
 constexpr size_t kChunkBytes      = 256 * 1024;
 constexpr size_t kMaxReadsPerChunk = 256;   // предел «дорогих» чтений на порцию
+// Сколько байт достаточно просмотреть, чтобы при НУЛЕ классов признать базу
+// пустой: в живом образе слоты классов лежат в хвостовых сегментах
+// (.data/.relro), а скан идёт с конца образа — живые классы нашлись на
+// устройстве уже в первых 7 МБ. Пустая база (например, свежезагруженная копия
+// .so после самообновления игры) не даст ничего и за все 221 МБ; не ждём.
+constexpr uint64_t kEmptyBaseBytes = 96ull << 20;
 
 static bool all_wanted_found() {
     // Достаточно: все РАЗНЫЕ имена из таблицы найдены хотя бы одним классом.
@@ -185,6 +209,37 @@ static FoundClass* find_class_slot(uint64_t klass) {
     return nullptr;
 }
 
+static bool base_is_dead(uint64_t b) {
+    for (int i = 0; i < s_dead_count; ++i) if (s_dead_bases[i] == b) return true;
+    return false;
+}
+
+// Текущая база не дала классов: пометить пустой и перейти на следующего
+// кандидата из карты. true — перешли (новый список сегментов соберёт
+// PH_MAPS), false — пробовать больше нечего.
+static bool try_next_base() {
+    if (s_dead_count < 8 && !base_is_dead(g_il2cpp_base))
+        s_dead_bases[s_dead_count++] = g_il2cpp_base;
+    for (int i = 0; i < s_candidate_count; ++i) {
+        const uint64_t b = s_base_candidates[i];
+        if (b == g_il2cpp_base || base_is_dead(b)) continue;
+        LogLine("автооффсеты: на базе 0x%llx классов нет — пробую базу 0x%llx "
+                "(кандидат %d из %d)",
+                (unsigned long long)g_il2cpp_base, (unsigned long long)b,
+                i + 1, s_candidate_count);
+        g_il2cpp_base = b;
+        s_scan_base = b;
+        s_bound_base = b;
+        s_names_ok = 0; s_names_fail = 0;
+        s_phase = PH_MAPS;
+        return true;
+    }
+    if (s_dead_count > 1)
+        LogLine("автооффсеты: все базы-кандидаты (%d) пусты — остаюсь на вшитых оффсетах",
+                s_dead_count);
+    return false;
+}
+
 // ---- Фаза MAPS: окна libil2cpp (не исполняемые) и метаданных ---------------
 static void phase_maps() {
     s_seg_count = 0;
@@ -192,6 +247,8 @@ static void phase_maps() {
     s_meta_begin = s_meta_end = 0;
     s_maps_lib_lines = 0; s_maps_cut_window = 0; s_maps_cut_x = 0;
     s_maps_cut_deleted = 0; s_maps_open_failed = false;
+    s_candidate_count = 0;
+    if (!s_scan_base) s_scan_base = g_il2cpp_base;
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
     const int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -221,9 +278,9 @@ static void phase_maps() {
         const char* line = linebuf;
         pos = line_end + 1;
 
-        unsigned long long start = 0, end = 0;
+        unsigned long long start = 0, end = 0, foff = 0;
         char perms[5] = {};
-        if (sscanf(line, "%llx-%llx %4s", &start, &end, perms) != 3) continue;
+        if (sscanf(line, "%llx-%llx %4s %llx", &start, &end, perms, &foff) < 3) continue;
         // Потолок сегмента — 1 ГБ: у больших игр .rodata бывает огромным,
         // а выкинув его целиком мы бы могли выкинуть и нужный сегмент рядом.
         if (end <= start || end - start > (1ull << 30)) continue;
@@ -238,12 +295,21 @@ static void phase_maps() {
         }
         if (!strstr(slash, "libil2cpp.so")) continue;
         ++s_maps_lib_lines;
+        // Начало образа (файловое смещение 0) — кандидат базы для скана. Лог с
+        // устройства показал, что после самообновления игры в карте живут ДВА
+        // образа libil2cpp.so, и по одной лишь базе, выбранной привязкой, классы
+        // могут не находиться — тогда скан пойдёт по следующему кандидату.
+        if (foff == 0 && s_candidate_count < 8) {
+            bool dup = false;
+            for (int i = 0; i < s_candidate_count; ++i) dup |= s_base_candidates[i] == start;
+            if (!dup) s_base_candidates[s_candidate_count++] = start;
+        }
         if (strstr(line, "(deleted)")) { ++s_maps_cut_deleted; continue; }
         if (perms[2] == 'x') { ++s_maps_cut_x; continue; }   // текст не сканируем
-        // Окно вокруг выбранной базы широкое: у больших игр образ занимает
+        // Окно вокруг сканируемой базы широкое: у больших игр образ занимает
         // сотни мегабайт, и сегмент с классами (relro/data) может лежать
         // далеко от начала. Фильтр лишь отсекает ЧУЖИЕ образы.
-        if (g_il2cpp_base && (start < g_il2cpp_base || start > g_il2cpp_base + (2ull << 30))) {
+        if (s_scan_base && (start < s_scan_base || start > s_scan_base + (2ull << 30))) {
             ++s_maps_cut_window;
             continue;
         }
@@ -254,9 +320,11 @@ static void phase_maps() {
         if (end > s_lib_end) s_lib_end = end;
     }
     if (!s_seg_count) {
-        LogLine("автооффсеты: сегментов 0 (строк .so %d: окно %d, иск %d, дел %d, карта %s)",
+        LogLine("автооффсеты: база 0x%llx — сегментов 0 (строк .so %d: окно %d, иск %d, дел %d, карта %s)",
+                (unsigned long long)s_scan_base,
                 s_maps_lib_lines, s_maps_cut_window, s_maps_cut_x, s_maps_cut_deleted,
                 s_maps_open_failed ? "НЕ открылась" : "прочитана");
+        if (try_next_base()) return;
         s_phase = PH_DONE;
         return;
     }
@@ -273,9 +341,14 @@ static void phase_maps() {
         s_total_bytes += s_segments[i].end - s_segments[i].start;
     s_scanned_bytes = 0;
     s_last_progress_log = 0;
-    LogLine("автооффсеты: сегментов %d (%llu МБ), метаданные %s, база 0x%llx",
-            s_seg_count, (unsigned long long)(s_total_bytes >> 20),
-            s_meta_begin ? "найдены" : "НЕ найдены", (unsigned long long)g_il2cpp_base);
+    LogLine("автооффсеты: база 0x%llx — сегментов %d (%llu МБ), образ 0x%llx..0x%llx, "
+            "метаданные %s 0x%llx..0x%llx, кандидатов баз %d",
+            (unsigned long long)s_scan_base, s_seg_count,
+            (unsigned long long)(s_total_bytes >> 20),
+            (unsigned long long)s_lib_begin, (unsigned long long)s_lib_end,
+            s_meta_begin ? "найдены" : "НЕ найдены",
+            (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end,
+            s_candidate_count);
     s_seg_idx = 0;
     s_scan_pos = s_segments[0].start;
     s_scan_deadline = mono_seconds() + kScanTotalSec;
@@ -351,6 +424,9 @@ static void phase_scan(double deadline) {
         }
         if (all_wanted_found()) break;
         if (mono_seconds() >= s_scan_deadline) break;
+        // База, не давшая ни одного класса после стольких прочитанных байт,
+        // считается пустой: не ждём конца её 221 МБ, идём к следующему кандидату.
+        if (!s_class_count && s_scanned_bytes >= kEmptyBaseBytes) break;
         // Прогресс в лог раз в 8 секунд — видно, что скан жив и куда дошёл.
         const double now_s = mono_seconds();
         if (now_s - s_last_progress_log >= 8.0) {
@@ -361,9 +437,21 @@ static void phase_scan(double deadline) {
                     s_class_count, s_names_ok, s_names_fail);
         }
     }
-    if (all_wanted_found() || s_seg_idx >= s_seg_count ||
+    const bool empty_base = !s_class_count && s_scanned_bytes >= kEmptyBaseBytes;
+    if (all_wanted_found() || empty_base || s_seg_idx >= s_seg_count ||
         mono_seconds() >= s_scan_deadline) {
-        s_phase = (s_class_count && s_names_ok) ? PH_FIELDS : PH_DONE;
+        if (s_class_count && s_names_ok) {
+            if (!s_good_base)
+                LogLine("автооффсеты: живые классы нашлись на базе 0x%llx",
+                        (unsigned long long)g_il2cpp_base);
+            s_good_base = g_il2cpp_base;   // живой образ — запомнить для привязки
+            s_phase = PH_FIELDS;
+        } else if (!s_class_count && try_next_base()) {
+            // Классов нет: база помечена пустой, скан пойдёт по следующему
+            // кандидату — новый список сегментов соберёт PH_MAPS.
+        } else {
+            s_phase = PH_DONE;
+        }
     }
 }
 
@@ -474,10 +562,12 @@ static void log_summary() {
     if (s_logged) return;
     s_logged = true;
     LogLine("автооффсеты: классов найдено %d (имён прочитано %d, отказов %d), "
-            "fields@0x%llx, разрешено %d/%d констант (%d изменено), метаданные %s",
+            "fields@0x%llx, разрешено %d/%d констант (%d изменено), метаданные %s, "
+            "база 0x%llx, пустых баз %d",
             s_class_count, s_names_ok, s_names_fail,
             (unsigned long long)s_fields_off, s_resolved, kOrFieldCount, s_changed,
-            s_meta_begin ? "найдены" : "НЕ найдены (фильтр слабее)");
+            s_meta_begin ? "найдены" : "НЕ найдены (фильтр слабее)",
+            (unsigned long long)g_il2cpp_base, s_dead_count);
 }
 
 }  // namespace
@@ -486,18 +576,42 @@ static void log_summary() {
 
 void offset_resolver_tick() {
     if (g_pid <= 0 || !g_il2cpp_base) return;
-    // Сброс — только когда СМЕНИЛСЯ процесс/база (игра перезапустилась).
-    // Перепривязка смотрителем кадра к той же игре состояние не трогает:
-    // найденные классы и смещения полей верны, пока жив тот же процесс —
-    // иначе скан стартовал бы заново на каждом отвалее и не успевал бы
-    // сойтись (так и было на устройстве: «классов 0» по кругу).
+    // Знания о базах (пустые/живая) привязаны к процессу: новый процесс —
+    // новая карта памяти, всё недействительно.
+    if (g_pid != s_known_pid) {
+        s_known_pid = g_pid;
+        s_good_base = 0;
+        s_dead_count = 0;
+        s_good_logged = false;
+    }
+    // Перепривязка может снова встать на пустой образ: после самообновления
+    // игры в карте два образа libil2cpp.so, и ELF-проверка их не различает.
+    // База с живыми классами уже известна — возвращаемся на неё (это же
+    // чинит все чтения чита, которые считаются от g_il2cpp_base).
+    if (s_good_base && g_il2cpp_base != s_good_base && !base_is_dead(s_good_base)) {
+        if (!s_good_logged) {
+            s_good_logged = true;
+            LogLine("автооффсеты: привязка на базе 0x%llx — возвращаюсь на живую базу 0x%llx",
+                    (unsigned long long)g_il2cpp_base, (unsigned long long)s_good_base);
+        }
+        g_il2cpp_base = s_good_base;
+    } else if (s_good_base && g_il2cpp_base == s_good_base) {
+        s_good_logged = false;
+    }
+    // Сброс — только когда СМЕНИЛСЯ процесс/база (игра перезапустилась, либо
+    // привязка встала на базу, которую мы ещё не сканировали). Перепривязка
+    // смотрителем кадра к той же игре и базе состояние не трогает: найденные
+    // классы и смещения полей верны, пока жив тот же процесс — иначе скан
+    // стартовал бы заново на каждом отвале и не успевал бы сойтись.
     if (g_pid != s_bound_pid || g_il2cpp_base != s_bound_base) {
         if (s_bound_pid > 0)
-            LogLine("автооффсеты: процесс/база сменились (%d -> %d), резолв заново",
-                    (int)s_bound_pid, (int)g_pid);
+            LogLine("автооффсеты: процесс/база сменились (%d/0x%llx -> %d/0x%llx), резолв заново",
+                    (int)s_bound_pid, (unsigned long long)s_bound_base,
+                    (int)g_pid, (unsigned long long)g_il2cpp_base);
         offset_resolver_reset();
         s_bound_pid = g_pid;
         s_bound_base = g_il2cpp_base;
+        s_scan_base = g_il2cpp_base;
     }
     const double deadline = mono_seconds() + kTickBudgetSec;
     switch (s_phase) {
@@ -520,6 +634,11 @@ void offset_resolver_reset() {
     s_class_count = 0; s_names_ok = 0; s_names_fail = 0;
     s_fields_off = 0; s_resolved = 0; s_changed = 0;
     s_applied_count = 0; s_logged = false;
+    // Кандидаты баз и сканируемая база собираются заново из карты. Знания
+    // «какие базы пусты, а где классы живые» НЕ сбрасываются: они привязаны
+    // к процессу (s_known_pid) и переживают перепривязки к той же игре.
+    s_candidate_count = 0;
+    s_scan_base = 0;
 }
 
 // После переключения релиз/бета слоты перезаписываются табличными значениями;
@@ -527,6 +646,22 @@ void offset_resolver_reset() {
 void offset_resolver_reapply() {
     for (int i = 0; i < s_applied_count; ++i)
         *(s_applied[i].slot) = s_applied[i].value;
+}
+
+// База, на которой для ЭТОГО процесса нашлись живые классы (0 — неизвестна).
+// Привязка спрашивает её, чтобы после самообновления игры не вставать снова на
+// пустую копию libil2cpp.so: ELF-заголовок есть у обеих, а классы — только в
+// той, по которой реально работает рантайм.
+uint64_t offset_resolver_good_base(pid_t pid) {
+    if (pid <= 0 || pid != s_known_pid) return 0;
+    return s_good_base;
+}
+
+// Идёт ли ещё подбор оффсетов (скан/калибровка). Пока идёт — перепривязка
+// смотрителю кадра не поможет: слепоту после апдейта игры лечат только новые
+// оффсеты, а не новое подключение к тому же процессу и базе.
+bool offset_resolver_busy() {
+    return s_phase == PH_MAPS || s_phase == PH_SCAN || s_phase == PH_FIELDS;
 }
 
 // Найденный класс: короткое имя (+ пространство имён, если задано).

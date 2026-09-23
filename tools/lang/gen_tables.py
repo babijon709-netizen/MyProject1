@@ -174,8 +174,6 @@ UI_EN = {
     'Линии и боксы': 'Lines and boxes', 'Толщина': 'Thickness',
     'Мир': 'World', 'Руда': 'Ore', 'Руды по видам': 'Ore kinds',
     'Автообновление оффсетов': 'Offset auto-update', 'Привязка': 'Attach',
-    'НЕ сработали (игра обновилась?), работает автообновление оффсетов':
-        'Did not fire (game updated?), offset auto-update is running',
     'Животные': 'Animals', 'Ящики': 'Crates',
     'Боты': 'Bots', 'Машины': 'Vehicles',
     'Показывать до': 'Show up to', 'Ещё настройки': 'More settings',

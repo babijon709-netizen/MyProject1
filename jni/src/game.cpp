@@ -927,8 +927,7 @@ static bool base_resolves_game(uint64_t base) {
     uint8_t elf[6] = {};
     if (!rd_buf(base, elf, sizeof(elf))) return false;
     if (elf[0] == 0x7f && elf[1] == 'E' && elf[2] == 'L' && elf[3] == 'F') {
-        LogLine("привязка: база 0x%llx принята по ELF-заголовку — вшитые RVA "
-                "НЕ сработали (игра обновилась?), работает автообновление оффсетов",
+        LogLine("привязка: база 0x%llx принята по ELF-заголовку — вшитые RVA НЕ сработали (игра обновилась?), работает автообновление оффсетов",
                 (unsigned long long)base);
         return true;
     }
@@ -6712,6 +6711,21 @@ bool esp_init(pid_t pid) {
         return false;
     }
 
+    // После самообновления игры в карте могут жить ДВЕ копии libil2cpp.so, и
+    // по одному лишь ELF-заголовку пустую от живой не отличить (лог с
+    // устройства: перепривязка встала на пустую копию, скан 221 МБ дал 0
+    // классов). Если модуль автообновления оффсетов уже нашёл базу с живыми
+    // классами — поднимем её на первое место среди кандидатов.
+    const uint64_t live_base = offset_resolver_good_base(pid);
+    if (live_base && candidate_count > 1) {
+        for (int i = 1; i < candidate_count; ++i) {
+            if (candidates[i] != live_base) continue;
+            for (int j = i; j > 0; --j) candidates[j] = candidates[j - 1];
+            candidates[0] = live_base;
+            break;
+        }
+    }
+
     // База выбирается не «первая по имени в карте», а та, на которой РЕАЛЬНО
     // резолвится класс игры. После перезапуска игры в карте остаётся ещё и
     // старый образ libil2cpp.so (обычно «(deleted)»): он читается, ELF-заголовок
@@ -7328,8 +7342,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // выберет базу заново и заново проверит доступ.
         if (g_frame_watchdog_resets >= 3) {
             g_frame_watchdog_resets = 0;
-            LogLine("смотритель кадра: ~36 с слепоты (сбросов кэша 3) — прошу перепривязку");
-            g_want_reattach.store(true);
+            // Пока идёт подбор оффсетов, перепривязка слепоту не вылечит: после
+            // апдейта игры причина в устаревших смещениях, а не в подключении —
+            // а каждая перепривязка ещё и рискует сорвать скан. Ждём резолвер.
+            if (offset_resolver_busy()) {
+                LogLine("смотритель кадра: ~36 с слепоты (сбросов кэша 3) — перепривязку НЕ прошу, идёт подбор оффсетов");
+            } else {
+                LogLine("смотритель кадра: ~36 с слепоты (сбросов кэша 3) — прошу перепривязку");
+                g_want_reattach.store(true);
+            }
         } else {
             LogLine("смотритель кадра: 240 кадров без кадра, сброс кэшей (№%d из 3)",
                     g_frame_watchdog_resets);

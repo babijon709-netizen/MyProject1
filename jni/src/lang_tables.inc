@@ -87,7 +87,6 @@ static const LangPair kUiEn[] = {
     {"Меню", "Menu"},
     {"Метка фарма", "Farm marker"},
     {"Мир", "World"},
-    {"НЕ сработали (игра обновилась?), работает автообновление оффсетов", "Did not fire (game updated?), offset auto-update is running"},
     {"Наводка", "Aiming"},
     {"Назад", "Back"},
     {"Настроить джойстик", "Set up the joystick"},
