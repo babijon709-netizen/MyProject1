@@ -83,6 +83,13 @@ struct Diagnostics {
     Status fov = Status::Off, hands = Status::Off, no_recoil = Status::Off, no_spread = Status::Off;
     Status fast_loot = Status::Off;
     bool fast_loot_draining = false;
+    // Конвейер подбора последнего тика (контроллер fast_loot): длина массива
+    // раннеров → непустые слоты → опознанные раннеры → элементы loopItems →
+    // обещания нужного класса → совпавший темп 0.35f → прошедшие фильтры →
+    // записи. Ноль в середине цепочки = место, где теряются обещания.
+    unsigned loot_len = 0, loot_slots = 0, loot_runners = 0, loot_items = 0,
+             loot_class = 0, loot_span = 0, loot_val = 0, loot_wr = 0;
+    bool loot_fail = false;
 };
 // Снимок состояния limiting FPS для меню: снимается контроллером при последнем
 // тике (до 100 мс назад), дополнительных обращений к памяти игры не делает.

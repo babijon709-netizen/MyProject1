@@ -943,6 +943,15 @@ float TabContent(int tab, float dt, float cW) {
                                            : XS("Подбор: работает"));
         else if (pickupState.fast_loot == viewmodel::Status::Waiting)
             ImGui::TextDisabled("%s", XS("Подбор: ожидание"));
+        // Снимок конвейера последнего тика: длина/слоты/раннеры → элементы →
+        // обещания → темп → записи. Ноль в середине = где теряются обещания.
+        if (pickupState.fast_loot == viewmodel::Status::Active ||
+            pickupState.fast_loot == viewmodel::Status::Failed)
+            ImGui::TextDisabled(XS("Диаг: раннеры %u/%u/%u, предметы %u, обещания %u, темп %u, записи %u"),
+                                pickupState.loot_len, pickupState.loot_slots,
+                                pickupState.loot_runners, pickupState.loot_items,
+                                pickupState.loot_class, pickupState.loot_span,
+                                pickupState.loot_wr);
 
         SHdr(XS("Лимит FPS"));
         {

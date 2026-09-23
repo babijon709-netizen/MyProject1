@@ -401,6 +401,23 @@ static void loot_tests() {
         assert(f.c.status == Status::Off && !f.c.draining());
         assert(f.io.get<uint32_t>(a + DELAYPROMISE_TIMESPAN) == 0u);
     }
+    {   // Диагностика конвейера: счётчики стадий последнего тика должны
+        // показывать, на каком шаге теряются обещания (меню + лог).
+        LootFixture f;
+        f.add_promise(0, 0.35f);                    // полный конвейер → запись
+        f.add_item(0, f.other_klass);               // не обещание
+        f.add_promise(0, 0.5f);                     // класс тот, темп чужой
+        f.add_promise(0, 0.35f, 0.4f);              // темп тот, elapsed мимо
+        f.tick();
+        const auto& d = f.c.diag;
+        assert(d.len == 2 && d.slots == 2 && d.ok == 2);
+        assert(d.items == 4 && d.cls == 3 && d.span == 2 && d.val == 1);
+        assert(d.wr == 1 && !d.fail);
+        assert(f.c.status == Status::Active && f.c.neutralized() == 1);
+        // Новый тик без изменений: счётчики — снимок последнего тика, а не сумма.
+        f.tick();
+        assert(f.c.diag.items == 4 && f.c.diag.wr == 0);
+    }
     {   // Чужие длительности/значения — не трогаем даже у настоящего обещания.
         LootFixture f;
         uint64_t a = f.add_promise(0, 0.5f);

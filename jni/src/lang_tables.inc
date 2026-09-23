@@ -45,6 +45,7 @@ static const LangPair kUiEn[] = {
     {"Дальность", "Range"},
     {"Данные", "Data"},
     {"Джойстик фрикама сохранён", "Freecam joystick saved"},
+    {"Диаг: раннеры %u/%u/%u, предметы %u, обещания %u, темп %u, записи %u", "Diag: runners %u/%u/%u, items %u, promises %u, cadence %u, writes %u"},
     {"Дистанция", "Distance"},
     {"Ещё настройки", "More settings"},
     {"Животные", "Animals"},

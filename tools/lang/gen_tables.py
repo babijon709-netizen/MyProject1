@@ -106,6 +106,8 @@ UI_EN = {
     'Мгновенный подбор': 'Instant pickup',
     'Подбор: не применено': 'Pickup: not applied',
     'Подбор: работает': 'Pickup: active',
+    'Диаг: раннеры %u/%u/%u, предметы %u, обещания %u, темп %u, записи %u':
+        'Diag: runners %u/%u/%u, items %u, promises %u, cadence %u, writes %u',
     'Потоки переноса': 'Transfer flows',
     'окно лута': 'loot window',
     'зона подбора': 'pickup zone',

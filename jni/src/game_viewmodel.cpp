@@ -174,6 +174,36 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
                 (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread, (int)st.fast_loot);
         last_log = st;
     }
+    // Диагностика подбора: пока тумблер включён, раз в ~2 с (и при смене
+    // картины) пишем снимок конвейера — какой стадии достигли обещания.
+    {
+        static Clock::time_point loot_diag_at = Clock::now() - std::chrono::hours(1);
+        static viewmodel::Diagnostics loot_diag_last = {};
+        const bool live = st.fast_loot == viewmodel::Status::Active ||
+                          st.fast_loot == viewmodel::Status::Waiting ||
+                          st.fast_loot == viewmodel::Status::Failed;
+        const bool changed = st.fast_loot != loot_diag_last.fast_loot ||
+                             st.loot_len != loot_diag_last.loot_len ||
+                             st.loot_slots != loot_diag_last.loot_slots ||
+                             st.loot_runners != loot_diag_last.loot_runners ||
+                             st.loot_items != loot_diag_last.loot_items ||
+                             st.loot_class != loot_diag_last.loot_class ||
+                             st.loot_span != loot_diag_last.loot_span ||
+                             st.loot_wr != loot_diag_last.loot_wr;
+        const auto now = Clock::now();
+        if (live && (changed || st.loot_fail) &&
+            now - loot_diag_at >= std::chrono::milliseconds(2000)) {
+            LogLine("loot diag: runners len=%u slots=%u ok=%u; items=%u class=%u span=%u val=%u writes=%u fail=%d",
+                    st.loot_len, st.loot_slots, st.loot_runners, st.loot_items,
+                    st.loot_class, st.loot_span, st.loot_val, st.loot_wr,
+                    st.loot_fail ? 1 : 0);
+            loot_diag_at = now;
+            loot_diag_last = st;
+        } else if (!live) {
+            loot_diag_at = Clock::now() - std::chrono::hours(1);  // мгновенно после нового включения
+            loot_diag_last = {};
+        }
+    }
 }
 
 viewmodel::Diagnostics esp_viewmodel_diagnostics() {
@@ -183,6 +213,15 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     status.no_spread = weapons.spread;
     status.fast_loot = loot.status;
     status.fast_loot_draining = loot.draining();
+    status.loot_len = loot.diag.len;
+    status.loot_slots = loot.diag.slots;
+    status.loot_runners = loot.diag.ok;
+    status.loot_items = loot.diag.items;
+    status.loot_class = loot.diag.cls;
+    status.loot_span = loot.diag.span;
+    status.loot_val = loot.diag.val;
+    status.loot_wr = loot.diag.wr;
+    status.loot_fail = loot.diag.fail;
     return status;
 }
 

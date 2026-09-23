@@ -164,6 +164,22 @@ template <class IO> class Controller {
     }
 public:
     viewmodel::Status status = viewmodel::Status::Off;
+    // Диагностика последнего тика: сколько объектов прошло каждую стадию
+    // конвейера. Нули в середине цепочки показывают, где именно теряются
+    // обещания (длина массива раннеров → непустые слоты → опознанные раннеры
+    // → элементы loopItems → обещания нужного класса → совпавший темп →
+    // прошедшие фильтры кадра → записи). Отображается в меню и в логе.
+    struct Diag {
+        std::uint32_t len = 0;      // длина массива runners
+        std::uint32_t slots = 0;    // непустые слоты раннеров
+        std::uint32_t ok = 0;       // слоты с классом PlayerLoopRunner
+        std::uint32_t items = 0;    // просмотренные элементы loopItems
+        std::uint32_t cls = 0;      // элементы класса DelayIgnoreTimeScalePromise
+        std::uint32_t span = 0;     // из них с темпом 0.35f побитово
+        std::uint32_t val = 0;      // из них прошедшие фильтры elapsed/frame
+        std::uint32_t wr = 0;       // записей 0.0f в этом тике
+        bool fail = false;          // запись не прошла heap-гейт/сверку
+    } diag;
     explicit Controller(IO& io) : io_(io) {}
     bool draining() const { return writes_last_ > 0 && ticks_since_write_ < kDrainRecentTicks; }
     std::uint32_t neutralized() const { return neutralized_; }
@@ -176,9 +192,11 @@ public:
         session_ = 0; neutralized_ = 0; writes_last_ = 0;
         ticks_since_write_ = kDrainRecentTicks;
         status = viewmodel::Status::Off;
+        diag = Diag{};
     }
     void tick(std::uint64_t session, std::uint64_t base, bool enabled) {
         using viewmodel::Status;
+        diag = Diag{};
         if (!enabled) { reset(); return; }
         if (session != session_) { forget_addresses(); session_ = session; }
         if (!base) { status = Status::Waiting; return; }
@@ -200,6 +218,7 @@ public:
             status = Status::Waiting;   // снимок заменился — попробуем в следующий тик
             return;
         }
+        diag.len = (std::uint32_t)runners_len;
 
         std::uint32_t writes = 0;
         bool write_failed = false;
@@ -214,6 +233,7 @@ public:
                              (std::uint64_t)t * 8, runner) ||
                 !runner)
                 continue;
+            ++diag.slots;
             // Класс раннера: сверяется один раз на класс. Не опознан — это
             // не раннер (снимок устарел или поле в этом билде другое): молча
             // пропускаем, статистики «не применено» здесь не делаем — семантику
@@ -227,6 +247,7 @@ public:
                 remember(runner_classes_, rk, runner_ok);
             }
             if (!runner_ok) continue;
+            ++diag.ok;
             std::uint64_t items = 0;
             if (!pointer(runner + go_active::LOOPRUNNER_ITEMS, items) || !items) continue;
             int32_t count = 0;
@@ -254,13 +275,16 @@ public:
                              item) ||
                     !item)
                     continue;
+                ++diag.items;
                 std::uint64_t promise = 0;
                 if (!promise_by_class(item, promise) || !promise) continue;
+                ++diag.cls;
                 // Поле темпа: побитово 0.35f — иначе это чужое ожидание.
                 std::uint32_t span_bits = 0;
                 if (!io_.read(promise + go_active::DELAYPROMISE_TIMESPAN, span_bits) ||
                     span_bits != kCadenceBits)
                     continue;
+                ++diag.span;
                 float elapsed = 0.f;
                 std::int32_t frame = 0;
                 if (!io_.read(promise + go_active::DELAYPROMISE_ELAPSED, elapsed) ||
@@ -269,13 +293,16 @@ public:
                 if (!io_.read(promise + go_active::DELAYPROMISE_INITIAL_FRAME, frame) ||
                     frame < 0 || frame > 2000000000)
                     continue;
+                ++diag.val;
                 if (!io_.write_heap(promise + go_active::DELAYPROMISE_TIMESPAN, 0.f) ||
                     !io_.read(promise + go_active::DELAYPROMISE_TIMESPAN, span_bits) ||
                     span_bits != 0u) {
                     write_failed = true;
+                    diag.fail = true;
                     continue;
                 }
                 ++writes;
+                ++diag.wr;
             }
             budget -= n;
         }
