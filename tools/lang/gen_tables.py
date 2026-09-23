@@ -172,7 +172,7 @@ UI_EN = {
     '3D боксы': '3D boxes', 'Ники': 'Nicknames', 'Дистанция': 'Distance',
     'Линии': 'Lines', 'Скелеты': 'Skeletons', 'Союзники': 'Teammates',
     'Линии и боксы': 'Lines and boxes', 'Толщина': 'Thickness',
-    'Мир': 'World', 'Руда': 'Ore', 'Цвета руды': 'Ore colors',
+    'Мир': 'World', 'Руда': 'Ore', 'Руды по видам': 'Ore kinds',
     'Животные': 'Animals', 'Ящики': 'Crates',
     'Боты': 'Bots', 'Машины': 'Vehicles',
     'Показывать до': 'Show up to', 'Ещё настройки': 'More settings',
