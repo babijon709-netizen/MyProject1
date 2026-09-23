@@ -29,19 +29,21 @@
 #include "xp.inc"
 
 // ---- заглушка лога (в стенде пишет в stderr, только если задан AIM_LOG) ----
+// logfile.h теперь сам даёт inline-заглушки (LogLine — no-op макрос), поэтому
+// свой вариант с эхом оставляем только при AIM_LOG: гасим макрос дефайном
+// и определяем функцию с печатью.
 #include "logfile.h"
-static bool g_log_echo = getenv("AIM_LOG") != nullptr;
-void LogOpen() {}
-void LogClose() {}
-void LogStage(int) {}
-void LogFrameBeat(unsigned long) {}
-void LogWatchdogStart() {}
-void LogLine(const char* fmt, ...) {
-    if (!g_log_echo) return;
+#ifdef AIM_LOG
+#undef LogLine
+namespace logfile_stub {
+inline void LogLine(const char* fmt, ...) {
     va_list a; va_start(a, fmt);
     fprintf(stderr, "  лог: "); vfprintf(stderr, fmt, a); fputc('\n', stderr);
     va_end(a);
 }
+}
+using logfile_stub::LogLine;
+#endif
 
 // ---- заглушка языка (XS() шифрует строку, перевод здесь не нужен) ----
 namespace lang { inline const char* text(const char* ru) { return ru; } }
@@ -90,6 +92,16 @@ struct Game {
     float accX = 0.f, accY = 0.f;
     static constexpr float kPitchLimit = 85.f;      // предел обзора игры
 
+    // Применённое камерой состояние: КАДР игры разворачивает накопитель в
+    // поворот. Пока кадра не было, в накопителе может лежать наша свежая
+    // запись — камера её ещё не видит (устройство: wr_buf пишет поле сразу,
+    // а ZJo разворачивает его в localRotation своим кадром).
+    float camX = 0.f, camY = 0.f;
+    // История накопителя по кадрам: камера видит запись с задержкой visDelay
+    // кадров (ввод-конвейер + рендер). 0 — кадр применил, камера увидела.
+    std::vector<float> histX, histY;
+    int   visDelay = 0;
+
     // ---- ось выстрела (PlayerEventHandler.LookDirection) ----
     bool  haveAxis = true;
     float shotTime = 0.f;           // метка выстрела (FPHitscan.LastLocalHitTime)
@@ -97,8 +109,8 @@ struct Game {
     int   gameFrames = 0;
 
     // Камера: rotationX — это «наклон вниз», то есть возвышение с минусом.
-    float camYaw()   const { return accY; }
-    float camPitch() const { return -accX; }
+    float camYaw()   const { return camY; }
+    float camPitch() const { return -camX; }
 
     static void anglesTo(float yaw, float pitch, float& x, float& y, float& z) {
         const float cy = cosf(yaw / kRad2Deg), sy = sinf(yaw / kRad2Deg);
@@ -115,6 +127,9 @@ struct Game {
         if (accX < -kPitchLimit) accX = -kPitchLimit;
         while (accY >  180.f) accY -= 360.f;
         while (accY < -180.f) accY += 360.f;
+        histX.push_back(accX); histY.push_back(accY);
+        const int idx = histX.size() - 1 - visDelay;
+        camX = histX[idx > 0 ? idx : 0]; camY = histY[idx > 0 ? idx : 0];
         float fx = 0.f, fy = 0.f, fz = 1.f;
         anglesTo(camYaw(), camPitch(), fx, fy, fz);
         // MouseLook.Update кладёт в ось выстрела forward камеры — каждый свой
@@ -180,6 +195,7 @@ static void snapshot() {
 // ---- esp_* из game.h ----
 float esp_camera_fov_deg() { return 60.f; }
 bool esp_local_player_is_aiming() { return true; }
+int  esp_local_aim_source() { return 1; }
 // Муссор вместо угла камеры: 0 — камера честная, иначе отдаём это значение.
 // Так проверяется, что кадр не залипнет (см. сценарий «мусорный угол»).
 float g_garbageCam = 0.f;
@@ -207,6 +223,9 @@ bool esp_mem_aim_read_angles(float& x, float& y) {
     x = g_game.accX; y = g_game.accY;
     return true;
 }
+// Запись ложится в накопитель СРАЗУ (как wr_buf на устройстве), а КАМЕРА
+// подхватывает её своим кадром (Game::frame) — это и есть граница фаз,
+// из-за которой без окна «в полёте» аим заказывал один доворот дважды.
 bool esp_mem_aim_write_angles(float x, float y) {
     if (!g_game.haveLook) return false;
     if (!std::isfinite(x) || !std::isfinite(y)) return false;
@@ -321,6 +340,10 @@ int main() {
 
     // B. «Память» без оси камеры: накопитель — сам по себе угол, поэтому
     //    работать это обязано и там, где выучивать чувствительность нечем.
+    //    Отклик теперь подтверждается по самому накопителю (мы пишем
+    //    абсолютные углы: если игра запись приняла, в нём лежит ровно она) —
+    //    «камера ответила» больше не требует оси, и потолок шага растёт и на
+    //    устройствах с cam_st = 0 (штатный режим этого устройства).
     {
         resetGame();
         g_haveCamAxis = false;
@@ -328,7 +351,7 @@ int main() {
         printf("ПАМЯТЬ без оси камеры: остаток %.2f°, поворот %.1f/%.1f°, записей %d\n",
                r.errAfterAim, g_game.camYaw(), g_game.camPitch(), r.writes);
         check(r.errAfterAim < 0.5f, "ведёт и без настоящей оси камеры");
-        check(!AimMemoryDiag().responded, "без оси камеры отклик не подтверждён (честно)");
+        check(AimMemoryDiag().responded, "ack по накопителю: отклик виден и без оси");
     }
 
     // C. MouseLook не найден: пишем ноль раз и НЕ падаем на тач.
@@ -341,7 +364,10 @@ int main() {
         check(r.writes == 0, "записей нет вовсе (не падаем на тач)");
         check(fabsf(g_game.camYaw()) < 1e-3f, "камера не двигалась");
         check(!AimMemoryDiag().params, "диагностика: params = нет");
-        check(r.toasts >= 1, "пользователю сказали, почему режим молчит");
+        // Поведение после правки режима: «либо работает, либо молчит» —
+        // тостов при отсутствии MouseLook больше нет (объяснение живёт в
+        // строке диагностики, а не в всплывашке поверх игры).
+        check(r.toasts == 0, "молчит без всплывашек (режим тихо ждёт объект)");
     }
 
     // P. Дрожь точки прицела. Кость головы дышит: прочитанная точка ходит на
@@ -368,6 +394,29 @@ int main() {
             printf("ДРОЖЬ цели ±%.2f°: камера ходит не больше %.3f° за кадр\n", amp, maxStep);
             check(maxStep < amp, "камера ходит меньше, чем дрожит цель");
         }
+    }
+
+    // D. Граница фаз (жалоба 23.09: «мемори аим ходит как маятником первые
+    //    2-3 секунды»). Игра в бою просядает до ~12 fps — до частоты оверлея:
+    //    между двумя тактами аима проходит столько же кадров игры, сколько
+    //    нужно на применение записи, и при неудачной фазе наш доворот
+    //    попадает в боксы только ЧЕРЕЗ такт. Остаток в этом такте его ещё не
+    //    видит — и без окна «в полёте» контроллер заказывает тот же доворот
+    //    снова: камера добирает оба и проскакивает цель, ошибка меняет знак,
+    //    качели идут, пока игра не разгонится. Здесь задержка видимости —
+    //    7 кадров игры (117 мс) при 5 кадрах на такт оверлея: как раз тот
+    //    случай. Проверяется НАСТОЯЩИЙ контроллер с окном kMemFlightLife.
+    {
+        resetGame();
+        g_game.visDelay = 7;
+        g_targetYaw = 10.f; g_targetPitch = 5.f;
+        Result r = run(AIM_MODE_MEMORY, 60);
+        printf("ГРАНИЦА ФАЗ (видимость через такт): остаток %.2f°, смен знака %d, "
+               "записей %d, отклик %d\n",
+               r.errAfterGame, r.signFlips, r.writes, (int)AimMemoryDiag().responded);
+        check(r.errAfterGame < 1.0f, "сошлось и при отстающей камере (граница фаз)");
+        check(r.signFlips <= 3, "без раскачки при отстающей камере");
+        check(r.writes > 0, "записи идут");
     }
 
     // H. Выключенный аим ничего не пишет.

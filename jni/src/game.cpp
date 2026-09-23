@@ -5987,13 +5987,32 @@ bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, float sh, f
                 if (!have_pix) return true;
                 const float dYaw = fabsf(wrap_deg_180(yaw_deg - pix_yaw));
                 const float dPitch = fabsf(pitch_deg - pix_pitch);
-                if (dYaw + dPitch <= 2.5F) return true;
-                static double s_last = -1e9;
-                const double now = memio::now_seconds();
-                if (now - s_last >= 5.0) {
-                    s_last = now;
-                    LogLine("аим: углы разошлись с экраном на %.1f/%.1f° — считаю по экрану",
-                            (double)dYaw, (double)dPitch);
+                // ГИСТЕРЕЗИС, а не один порог (было «<= 2.5° — ось, иначе
+                // экран», жалоба 23.09 «мемори аим ходит как маятник первые
+                // 2-3 секунды и тач аим тоже»). Пока камера ведётся к цели,
+                // ось выстрела и матрица вида расходятся на 2-4° (у оси нет
+                // визуального отклонения камеры, у матрицы есть), и расхождение
+                // плавает вокруг порога: источник углов меняется каждый такт,
+                // а ошибка прыгает на величину расхождения — прицел ходит
+                // туда-сюда ровно столько, сколько длится разворот. Поэтому
+                // переключение через широкую полосу: на экран уходим при
+                // расхождении больше 4°, обратно к оси — меньше 1.5°, между —
+                // держимся прежнего источника.
+                static bool s_pixBasis = false;
+                const float d = dYaw + dPitch;
+                if (!s_pixBasis) {
+                    if (d <= 4.0F) return true;
+                    s_pixBasis = true;
+                    static double s_last = -1e9;
+                    const double now = memio::now_seconds();
+                    if (now - s_last >= 5.0) {
+                        s_last = now;
+                        LogLine("аим: углы разошлись с экраном на %.1f/%.1f° — считаю по экрану",
+                                (double)dYaw, (double)dPitch);
+                    }
+                } else if (d <= 1.5F) {
+                    s_pixBasis = false;
+                    return true;
                 }
                 yaw_deg = pix_yaw; pitch_deg = pix_pitch;
                 return true;
