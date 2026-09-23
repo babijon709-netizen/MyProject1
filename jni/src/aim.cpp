@@ -290,6 +290,83 @@ static unsigned long s_seen_bots = 0;
 // с включёнными маркерами).
 static unsigned long s_bot_noesp_skipped = 0;
 
+// ---- поток камеры между тактами -------------------------------------------
+// Куда и насколько повернулась камера с прошлого такта. Считается по сдвигу
+// ЦЕНТРОВ боксов с совпавшим id: мир стоит, поэтому сдвиг всех боксов разом —
+// это чистый поворот камеры (движение одного-двух игроков давится медианой,
+// для этого и нужен порог в три совпадения).
+//
+// Поток — это наблюдение за КАМЕРОЙ, а не за остатком, и на нём держится учёт
+// «в полёте» у тач-аима при просадке ФПС: когда игра отвечает на касание раз
+// в 5-8 кадров, остаток может стоять или расти и у применённого приказа
+// (цель сама ушла), а камера при этом честно крутится. Поглощение, списанное
+// по потоку, отличает «приказ в трубе ещё не применён» (камера стоит) от
+// «применён» (камера повернулась на столько-то).
+// Знаки: поток положителен туда, куда смотрит камера. Камера вправо — боксы
+// едут влево (медДкс < 0), поэтому рысканье входит с минусом. Камера вверх —
+// боксы едут вниз (медДкс по Y > 0), тангаж входит с плюсом (вверх — больше).
+static float s_flowYawDeg = 0.f, s_flowPitchDeg = 0.f;
+static bool  s_flowValid = false;
+struct AimFlowPrev { unsigned long long id; float cx, cy; };
+static std::vector<AimFlowPrev> s_flowPrev;
+
+static void AimUpdateFlow(const std::vector<EspBox>& boxes, float sw, float sh, float camFov) {
+    s_flowValid = false;
+    s_flowYawDeg = s_flowPitchDeg = 0.f;
+    std::vector<AimFlowPrev> cur;
+    cur.reserve(boxes.size());
+    for (const EspBox& b : boxes) {
+        if (b.id == 0) continue;
+        if (!std::isfinite(b.x1) || !std::isfinite(b.y1) ||
+            !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
+        cur.push_back({b.id, (b.x1 + b.x2) * 0.5f, (b.y1 + b.y2) * 0.5f});
+    }
+    if (!s_flowPrev.empty() && !cur.empty()) {
+        float dxs[32], dys[32]; int n = 0;
+        for (const auto& c : cur) {
+            if (n >= 32) break;
+            for (const auto& p : s_flowPrev) {
+                if (p.id != c.id) continue;
+                dxs[n] = c.cx - p.cx; dys[n] = c.cy - p.cy; ++n;
+                break;
+            }
+        }
+        if (n >= 3) {
+            // Медиана сортировкой вставкой: игроков на экране единицы.
+            for (int i = 1; i < n; ++i) {
+                const float vx = dxs[i], vy = dys[i];
+                int j = i - 1;
+                while (j >= 0 && dxs[j] > vx) { dxs[j + 1] = dxs[j]; --j; }
+                dxs[j + 1] = vx;
+                j = i - 1;
+                while (j >= 0 && dys[j] > vy) { dys[j + 1] = dys[j]; --j; }
+                dys[j + 1] = vy;
+            }
+            const float medDx = dxs[n / 2], medDy = dys[n / 2];
+            const float fovRad = camFov * (float)M_PI / 180.f;
+            // Горизонтальное поле на пиксель — через вертикальное и сторону.
+            const float yawPerPx = 2.f * atanf(tanf(fovRad * 0.5f) * (sw / sh)) *
+                                   (180.f / (float)M_PI) / sw;
+            const float pitchPerPx = camFov / sh;
+            float fy = -medDx * yawPerPx, fp = medDy * pitchPerPx;
+            if (fy >  30.f) fy =  30.f; else if (fy < -30.f) fy = -30.f;
+            if (fp >  30.f) fp =  30.f; else if (fp < -30.f) fp = -30.f;
+            if (std::isfinite(fy) && std::isfinite(fp)) {
+                s_flowYawDeg = fy; s_flowPitchDeg = fp;
+                s_flowValid = true;
+            }
+        }
+    }
+    s_flowPrev = std::move(cur);
+}
+
+// Поток этого такта (в градусах). Ложь — оценить не вышло: меньше трёх боксов
+// совпало по id (дуэль 1 на 1, первая пара кадров, все боксы мусорные).
+static bool aim_camera_flow(float& yawDeg, float& pitchDeg) {
+    yawDeg = s_flowYawDeg; pitchDeg = s_flowPitchDeg;
+    return s_flowValid;
+}
+
 // why — причина, по которой цель НЕ выбрана (0 когда цель есть). Коды:
 //   1 боксов нет вовсе      2 все союзники      3 все мёртвые
 //   4 нет скелета           5 кости не легли на экран
@@ -337,6 +414,10 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     if (!(camFov > 1.f && camFov < 179.f)) camFov = 60.f;
     // degrees per pixel at the screen centre (vertical axis)
     degPerPx = camFov / sh;
+
+    // Поток камеры этого такта: считаем по всем боксам ДО фильтров цели —
+    // камера крутит и союзников, и трупы, и для оценки поворота они годятся.
+    AimUpdateFlow(boxes, sw, sh, camFov);
 
     // Цель — ШЕЯ (просьба 19.09: «пусть аим стреляет в шею, а не в голову»).
     // Слоты: 0 голова, 1 шея, 2 грудь. Голова — это сустав у основания черепа,
@@ -617,6 +698,12 @@ static void UpdateAimTouch(float dt) {
             AimReleaseFinger(s_fingerDown);
             s_haveLast = false; pick.reset();
             s_trackYaw.reset(); s_trackPitch.reset();
+            // Палец отпущен — заказанное игра уже не отработает. Обнуляем
+            // полёт, иначе возврат цели начнётся со старой оценкой.
+            s_flight.clear();
+            s_absorbYaw = s_absorbPitch = 0.f;
+            s_stallYaw = s_stallPitch = 0.f;
+            s_havePrevRaw = false;
         }
         return;
     }
@@ -797,34 +884,47 @@ static void UpdateAimTouch(float dt) {
     // моменту отклика камера поворачивается вдвое больше нужного: рывок через
     // цель и обратно, маятник первых секунд наведения.
     //
-    // Учёт «в полёте» поэтому считается двумя независимыми оценками и берётся
-    // МЕНЬШАЯ из них по величине (стенд tools/aim/lock_sim.cpp, сетка оверлей
-    // 12-60 fps × задержка касания 2-8 кадров игры, захват 30°):
+    // Учёт «в полёте» поэтому считается двумя независимыми оценками, а какая
+    // из них правит — зависит от остатка (стенд tools/aim/lock_sim.cpp, сетка
+    // оверлей 12-60 fps × задержка касания 2-8 кадров игры, захват 30°):
     //
-    //   1. ПОГЛОЩЕНИЕ: заказ копится в градусах, а списывается по фактическому
-    //      уменьшению остатка — камера отработала приказ ровно тогда, когда
-    //      остаток стал меньше. Ни предположений о задержке, ни поедания уже
-    //      отработанных приказов: сколько камера съела, столько списано.
+    //   1. ПОГЛОЩЕНИЕ: заказ копится в градусах, а списывается по факту
+    //      отработки. Основной источник — ПОТОК КАМЕРЫ (см. aim_camera_flow):
+    //      камера повернулась на Х градусов — ровно Х заказанного она съела,
+    //      независимо от того, куда за это время ушла цель. Запасной (когда
+    //      боксов меньше трёх) — падение остатка: камера отработала приказ
+    //      тогда, когда остаток стал меньше. Ни предположений о задержке, ни
+    //      поедания уже отработанных приказов: сколько съедено, столько списано.
     //   2. ОКНО приказов моложе kTouchFlightLife: ограничивает оценку сверху
-    //      на ведении цели (цель убегает — остаток не падает, и поглощение
-    //      само не списывается никогда), а на захвате при долгой задержке
-    //      страхует поглощение от роста без отклика.
+    //      на ведении цели (цель убегает, а поток не посчитался — остаток не
+    //      падает, и поглощение само не списывается никогда).
     //
-    // Прежнее окно «только последний приказ» (жалоба 23.09, второй заход:
-    // «тач аим и мемори аим в первые 2 секунды при наводке двигаются как
-    // маятник вправо-влево») вычитало ОДИН приказ, когда на быстром оверлее
-    // (частота плавает до 60 fps) в полёте висело три-четыри: контроллер
-    // заказывал лишнее, камера приходила на несколько шагов и перелетала —
-    // захват шёл маятником (на стенде перелёт до 34°, до 15 реверсов шага).
-    // Гибрид на той же сетке: перелёт 0.00° и 0 реверсов во всех режимах,
-    // захват не медленнее прежнего.
+    // Выбор оценки по величине остатка. Раньше бралась просто меньшая по
+    // величине из двух, и на просадке ФПС (жалоба 23.09, третий заход: «при
+    // посадке ФПС тач-аим ходит маятником») это давало маятник: приказ живёт
+    // в трубе дольше жизни окна, окно пустеет, меньшая оценка — ноль,
+    // контроллер заказывает заново поверх летящего, по прилёте обоих камера
+    // перелетает цель; плюс таймаут «потерялся» в 0.4 с списывал заказ,
+    // который при 12-15 фпс ещё летит (до 0.7 с). Теперь на захвате
+    // (|остаток| > 2.5°) правит поглощение — оно списывается по потоку камеры
+    // при любой задержке трубы, — а на ведении у цели правит минимум с окном,
+    // чтобы след за целью не растягивался.
     //
-    // Защита знака: оценки покрыли остаток целиком (эффективный остаток
-    // сменил знак) — новый приказ не выдаётся вовсе. Довычитывать приказы,
-    // которых уже нет, или заказывать против хода камеры — это и есть
-    // мелкие реверсы у цели.
+    // Защита знака: остаток перескочил ноль — весь висящий заказ обнуляется
+    // сразу (камера дальше цели, летящий приказ толкнёт ещё дальше), а новый
+    // приказ против хода не выдаётся вовсе. Довычитывать приказы, которых уже
+    // нет, или заказывать против хода камеры — это и есть маятник.
     static constexpr float kTouchFlightLife = 0.13f;  // жизнь приказа в окне, с
-    static constexpr float kTouchStallTime  = 0.40f;  // заказ без отклика — потерялся
+    // Заказ без отклика — потерялся. При просадке ФПС игры труба касания
+    // растягивается на 2-8 кадров ИГРЫ: на 12-15 фпс это до 0.5-0.7 с, а
+    // прежние 0.4 с списывали заказ, который ещё ЛЕТИТ — контроллер считал
+    // его потерянным, заказывал заново, и по прилёте обоих камера перелетала
+    // цель (жалоба 23.09: «при посадке ФПС тач-аим ходит маятником»).
+    // Порог обязан перекрывать худшую задержку трубы с запасом.
+    static constexpr float kTouchStallTime  = 1.00f;  // заказ без отклика — потерялся
+    // Граница «захват/ведение» для выбора оценки в полёте, град: при большом
+    // остатке берём поглощение, при малом — минимум с окном (см. ниже).
+    static constexpr float kTouchInflightBand = 2.5f;
     const bool  useFlight = !haveCam;
     auto clearFlight = [&]() {
         s_flight.clear();
@@ -834,26 +934,56 @@ static void UpdateAimTouch(float dt) {
     };
     float errYaw = best.yaw, errPitch = best.pitch;
     if (useFlight) {
-        // Поглощение: остаток упал с прошлого такта — камера отработала часть
-        // заказа, списываем её из оценки (только в сторону заказа: цель может
-        // и сама идти навстречу, но на захвате её вклад мал против шагов).
+        // Поглощение списывается двумя способами, по возможности:
+        //
+        //   1. ПОТОК КАМЕРЫ (основной): камера повернулась на столько-то —
+        //      ровно столько заказа она отработала, в какую бы сторону ни шёл
+        //      остаток. На просадке ФПС это единственный честный признак:
+        //      остаток может стоять и даже расти у ПРИМЕНЁННОГО приказа
+        //      (цель сама ушла за те 2-8 кадров игры, пока приказ летел), и
+        //      списание по падению остатка там молчит или ест не то.
+        //   2. ПАДЕНИЕ ОСТАТКА (запасной, когда поток не посчитался — дуэль
+        //      1 на 1, меньше трёх боксов на экране): прежний способ, на
+        //      захвате вклад цели мал против шагов и он работает.
         if (s_havePrevRaw) {
-            const float dYaw   = s_prevRawYaw   - best.yaw;
-            const float dPitch = s_prevRawPitch - best.pitch;
-            if (dYaw > 0.f && s_absorbYaw > 0.f) {
-                s_absorbYaw = (dYaw >= s_absorbYaw) ? 0.f : s_absorbYaw - dYaw;
-                s_stallYaw = 0.f;
-            } else if (dYaw < 0.f && s_absorbYaw < 0.f) {
-                s_absorbYaw = (-dYaw >= -s_absorbYaw) ? 0.f : s_absorbYaw - dYaw;
-                s_stallYaw = 0.f;
+            float flowYaw = 0.f, flowPitch = 0.f;
+            const bool flowOk = aim_camera_flow(flowYaw, flowPitch);
+            auto drainFlow = [](float& absorb, float flow) {
+                if (absorb > 0.f && flow > 0.f)
+                    absorb = (flow >= absorb) ? 0.f : absorb - flow;
+                else if (absorb < 0.f && flow < 0.f)
+                    absorb = (-flow >= -absorb) ? 0.f : absorb - flow;
+            };
+            if (flowOk) {
+                const float wasYaw = s_absorbYaw, wasPitch = s_absorbPitch;
+                drainFlow(s_absorbYaw, flowYaw);
+                drainFlow(s_absorbPitch, flowPitch);
+                if (s_absorbYaw   != wasYaw)   s_stallYaw   = 0.f;
+                if (s_absorbPitch != wasPitch) s_stallPitch = 0.f;
+            } else {
+                // Камера повернулась в сторону заказа — остаток упал.
+                const float dYaw   = s_prevRawYaw   - best.yaw;
+                const float dPitch = s_prevRawPitch - best.pitch;
+                if (dYaw > 0.f && s_absorbYaw > 0.f) {
+                    s_absorbYaw = (dYaw >= s_absorbYaw) ? 0.f : s_absorbYaw - dYaw;
+                    s_stallYaw = 0.f;
+                } else if (dYaw < 0.f && s_absorbYaw < 0.f) {
+                    s_absorbYaw = (-dYaw >= -s_absorbYaw) ? 0.f : s_absorbYaw - dYaw;
+                    s_stallYaw = 0.f;
+                }
+                if (dPitch > 0.f && s_absorbPitch > 0.f) {
+                    s_absorbPitch = (dPitch >= s_absorbPitch) ? 0.f : s_absorbPitch - dPitch;
+                    s_stallPitch = 0.f;
+                } else if (dPitch < 0.f && s_absorbPitch < 0.f) {
+                    s_absorbPitch = (-dPitch >= -s_absorbPitch) ? 0.f : s_absorbPitch - dPitch;
+                    s_stallPitch = 0.f;
+                }
             }
-            if (dPitch > 0.f && s_absorbPitch > 0.f) {
-                s_absorbPitch = (dPitch >= s_absorbPitch) ? 0.f : s_absorbPitch - dPitch;
-                s_stallPitch = 0.f;
-            } else if (dPitch < 0.f && s_absorbPitch < 0.f) {
-                s_absorbPitch = (-dPitch >= -s_absorbPitch) ? 0.f : s_absorbPitch - dPitch;
-                s_stallPitch = 0.f;
-            }
+            // Остаток перескочил через ноль — камера уже дальше цели: заказ,
+            // который ещё висит в трубе, толкнёт её ещё дальше. Обнуляем не
+            // дожидаясь прилёта (это и есть гашение перелёта на захвате).
+            if (s_prevRawYaw * best.yaw < 0.f)         s_absorbYaw = 0.f;
+            if (s_prevRawPitch * best.pitch < 0.f)     s_absorbPitch = 0.f;
         }
         s_prevRawYaw = best.yaw; s_prevRawPitch = best.pitch; s_havePrevRaw = true;
         // Заказ давно не откликается — ввод потерялся (палец перехвачен игрой,
@@ -870,8 +1000,22 @@ static void UpdateAimTouch(float dt) {
         const auto minmag = [](float a, float b) {
             return fabsf(a) < fabsf(b) ? a : b;
         };
-        errYaw   -= minmag(s_absorbYaw,   winYaw);
-        errPitch -= minmag(s_absorbPitch, winPitch);
+        // Что вычитать из остатка. Большой остаток — это ЗАХВАТ: приказы
+        // идут один за другим в одну сторону, и правильно списывать их по
+        // факту (поглощение), какая бы ни была задержка трубы — она съедает
+        // ровно то, что заказано. Окно тут только вредило: на просадке ФПС
+        // приказы живут в трубе дольше окна, оно пустеет, и контроллер
+        // заказывал заново поверх летящих — маятник.
+        // Малый остаток — ВЕДЕНИЕ у цели: цель идёт сама, и поглощение без
+        // потока может не списываться вовсе; тут оценка ограничивается окном
+        // (заказано не больше, чем улетело за его жизнь) — след за целью
+        // остаётся коротким даже когда поток не посчитался (1 на 1).
+        const float inflYaw   = (fabsf(best.yaw)   > kTouchInflightBand)
+                              ? s_absorbYaw   : minmag(s_absorbYaw,   winYaw);
+        const float inflPitch = (fabsf(best.pitch) > kTouchInflightBand)
+                              ? s_absorbPitch : minmag(s_absorbPitch, winPitch);
+        errYaw   -= inflYaw;
+        errPitch -= inflPitch;
         // Защита знака: в полёте уже не меньше остатка — стоим, ждём отклика.
         if (best.yaw * errYaw < 0.f)     errYaw = 0.f;
         if (best.pitch * errPitch < 0.f) errPitch = 0.f;
@@ -1152,25 +1296,32 @@ static void AimLogTick(float dt) {
 //     перезаписывают +0x4C, пока палец игрока на экране) не копится долгом —
 //     следующий такт просто снова кладёт направление кости.
 //
-// Дрожь кости гасится мёртвой зоной (остаток внутри неё — камера стоит) и
-// долей шага у самой цели: абсолютная запись сходится монотонно даже долей,
-// а дрожь проходит в камеру ослабленной (см. стенд tools/aim/lock_sim.cpp:
-// камера ходит меньше самой дрожи).
+// Дрожь кости гасится без уменьшения шага. Шаг — ВСЕГДА полный остаток (лок
+// бьёт ровно в кость: доля у цели давала видимое отставание от идущей кости,
+// жалоба 23.09 «мемори отстаёт от головы»). Дрожь отсекает пара фильтров:
+// мёртвая зона (остаток внутри неё — камера стоит) и порог устойчивого
+// однонаправленного дрейфа в полосе у цели — дрожь знак чередует и порог не
+// набирает, настоящее движение знак держит и проходит целиком
+// (см. mem_axis_off; стенды tools/aim/lock_sim.cpp и mem_test: строгая
+// дрожь не двигает камеру вовсе, медленный дрейф 3°/с сходится без следа).
 //
 // Знаки накопителя (замер в логах): [0] rotationX = минус тангаж (вверх —
 // меньше), [1] rotationY = рысканье (вправо — больше).
 
-// Мёртвая зона, град. Внутри неё камера стоит: голова цели «дышит» на
-// сантиметры (доли градуса на дистанции), и без зоны лок повторял бы дыхание
-// кости один в один. 0.12° — ~5 см на 25 м, внутри зоны поражения головы.
+// Мёртвая зона, град. Внутри неё камера стоит: пока остаток меньше зоны,
+// кость «дышит» (анимация двигает точку на сантиметры), и лок дёргал бы
+// камеру на каждый вдох. 0.12° — ~5 см на 25 м, внутри зоны поражения головы.
 static constexpr float kMemDeadDeg  = 0.12f;
-// Полоса «у цели» и доля шага в ней. За полосой шаг полный (захват за такт),
-// в полосе — доля: гасит дрожь кости, не давая камере ходить за ней в полный
-// размах. Абсолютная запись долей сходится монотонно: каждый такт камера
-// доходит до края зоны, а не проскакивает её, поэтому колебаний доля не
-// создаёт (проверено стендом: дрожь ±0.4° -> камера ходит на 0.16°).
-static constexpr float kMemNearBand = 0.60f;
-static constexpr float kMemNearFrac = 0.40f;
+// Полоса «дрожь кости» и порог дрейфа в ней. Выше полосы шаг ВСЕГДА полный:
+// лок бьёт ровно в кость без вычета мёртвой зоны и без долей — прежняя доля
+// 0.4 в полосе 0.6° давала видимое отставание: на идущей цели лок полз к
+// кости со скоростью ~2°/с, а кость уходила на 5-30°/с (жалоба «мемори
+// отстаёт от головы»). Внутри полосы полный шаг выдаётся только при
+// УСТОЙЧИВОМ однонаправленном дрейфе (дрожь кости знак чередует, настоящее
+// движение — нет). Дрожь ±0.15..0.4° при чередовании знака ни разу не
+// набирает порога — камера стоит (проверено стендом).
+static constexpr float kMemJitterBand = 0.45f;
+static constexpr int   kMemDriftStreak = 3;
 // ACK по накопителю: расхождение с нашей записью, в пределах которого игра
 // запись приняла (свой ввод игрок между тактами не добавлял). Только для
 // диагностики («отклик» в меню) — жёсткому локу подтверждать нечего: он
@@ -1181,13 +1332,17 @@ static AimMemDiag s_memDiag;
 
 const AimMemDiag& AimMemoryDiag() { return s_memDiag; }
 
-// Остаток -> шаг к кости: мёртвая зона + доля у цели (см. константы выше).
-// 0 — камера уже на цели, писать нечего.
-static float mem_axis_off(float err) {
-    if (fabsf(err) < kMemDeadDeg) return 0.f;
-    float off = err - (err > 0.f ? kMemDeadDeg : -kMemDeadDeg);
-    if (fabsf(err) < kMemNearBand) off *= kMemNearFrac;
-    return off;
+// Остаток -> шаг к кости. Возврат: полный остаток (лок ровно в кость) или 0
+// (камера на цели / кость дрожит — стоим). Счётчик однонаправленного дрейфа
+// свой у каждой оси.
+static float mem_axis_off(float err, int& streak) {
+    if (fabsf(err) < kMemDeadDeg) { streak = 0; return 0.f; }
+    if (fabsf(err) >= kMemJitterBand) return err;   // настоящее движение — полный лок
+    // Дрожь-зона: полный шаг только при устойчивом дрейфе в одну сторону.
+    const int s = (err > 0.f) ? 1 : -1;
+    streak = (streak * s > 0) ? streak + s : s;
+    if (streak * s >= kMemDriftStreak) return err;
+    return 0.f;
 }
 
 static void UpdateAimMemory(float dt) {
@@ -1198,6 +1353,8 @@ static void UpdateAimMemory(float dt) {
     // вернёт чтение): по совпадению видно, приняла ли игра запись.
     static float s_lastWriteX = 0.f, s_lastWriteY = 0.f;
     static bool  s_haveLastWrite = false;
+    // Счётчики однонаправленного дрейфа (см. mem_axis_off): по своему на ось.
+    static int s_streakYaw = 0, s_streakPitch = 0;
 
     float sw = 0.f, sh = 0.f;
     int why = 0;
@@ -1206,6 +1363,7 @@ static void UpdateAimMemory(float dt) {
         s_memDiag.inactive = why;   // печатается в той же строке «объект=…»
         s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        s_streakYaw = s_streakPitch = 0;
         return;
     }
     s_memDiag.inactive = 0;
@@ -1234,6 +1392,7 @@ static void UpdateAimMemory(float dt) {
         // не растёт. Без отметки здесь кадр не отличить от «цели не было».
         ++s_memDiag.read_fail;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        s_streakYaw = s_streakPitch = 0;
         return;
     }
 
@@ -1243,12 +1402,15 @@ static void UpdateAimMemory(float dt) {
     if (!AimSelectTarget(sw, sh, pick, best, degPerPx, &noTgtWhy)) {
         s_memDiag.no_target = noTgtWhy;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        s_streakYaw = s_streakPitch = 0;
         return;
     }
     s_memDiag.no_target = 0;
     if (pick.switched) {
-        // Другая цель: подтверждение прошлой записи к ней не относится.
+        // Другая цель: подтверждение прошлой записи и дрейф по прежней кости
+        // к ней не относятся.
         s_haveLastWrite = false;
+        s_streakYaw = s_streakPitch = 0;
     }
 
     // ---- ACK по накопителю --------------------------------------------------
@@ -1284,10 +1446,12 @@ static void UpdateAimMemory(float dt) {
     }
 
     // ---- жёсткий лок ---------------------------------------------------------
-    // Остаток до кости по обеим осям: ноль — камера на цели, писать нечего
-    // (иначе лок дёргал бы камеру на дрожь кости каждый такт).
-    const float offYaw   = mem_axis_off(best.yaw);
-    const float offPitch = mem_axis_off(best.pitch);
+    // Шаг по каждой оси — ПОЛНЫЙ остаток: лок бьёт ровно в кость, без вычета
+    // мёртвой зоны (прежний вычет сажал камеру в 0.12° ОТ кости, а доля в
+    // полосе у цели давала ползучее отставание на идущей цели). Ноль — камера
+    // на цели или кость дрожит: писать нечего (см. mem_axis_off).
+    const float offYaw   = mem_axis_off(best.yaw,   s_streakYaw);
+    const float offPitch = mem_axis_off(best.pitch, s_streakPitch);
     if (offYaw == 0.f && offPitch == 0.f) {
         s_haveLastWrite = false;   // подтверждения больше нет — записи нет
         ++s_memDiag.on_target;
@@ -1296,18 +1460,21 @@ static void UpdateAimMemory(float dt) {
 
     // Абсолютное направление кости: база — ТА ЖЕ камера, от которой посчитан
     // остаток (иначе лок встанет на расхождение источников, см.
-    // esp_aim_projection_basis). Запасной путь без базы — инкремент от
-    // накопителя: редок (без матрицы вида не строится сам бокс) и потому
-    // мирится с задержкой видимости, от которой абсолютная запись свободна.
+    // esp_aim_projection_basis). Ось, по которой шага нет, пишем из
+    // накопителя как есть: база в этот такт может отставать от него на кадр
+    // (граница фаз), и запись «база + 0» дёрнула бы камеру назад. Запасной
+    // путь без базы — инкремент от накопителя: редок (без матрицы вида не
+    // строится сам бокс) и потому мирится с задержкой видимости, от которой
+    // абсолютная запись свободна.
     float baseYaw = 0.f, basePitch = 0.f;
     const bool haveBasis = esp_aim_projection_basis(baseYaw, basePitch) &&
                            std::isfinite(baseYaw) && std::isfinite(basePitch);
     float writeX, writeY;
     if (haveBasis) {
-        writeY = WrapDeg180(baseYaw + offYaw);
-        writeX = WrapDeg180(-(basePitch + offPitch));
+        writeY = (offYaw   != 0.f) ? WrapDeg180(baseYaw + offYaw)        : accY;
+        writeX = (offPitch != 0.f) ? WrapDeg180(-(basePitch + offPitch)) : accX;
     } else {
-        writeY = WrapDeg180(accY + offYaw);
+        writeY = WrapDeg180(accY + offYaw);     // +0 — пропуск оси как есть
         writeX = WrapDeg180(accX - offPitch);
     }
 
