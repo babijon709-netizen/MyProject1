@@ -3,14 +3,14 @@
 bool  g_darkTheme = true;
 float g_themeT    = 1.f;
 float g_menuFadeIn = 0.f;
-ImVec4 g_accent = {0.129f, 0.765f, 0.898f, 1};
+ImVec4 g_accent = {0.920f, 0.280f, 0.660f, 1};
 bool   g_accentOn = false;
 
 void ApplyTheme() {
     ImGui::GetIO().ConfigDebugHighlightIdConflicts = false;
     auto& s = ImGui::GetStyle();
-    s.WindowRounding = 22; s.ChildRounding  = 18; s.FrameRounding = 13;
-    s.GrabRounding   = 13; s.PopupRounding  = 18; s.TabRounding   = 13;
+    s.WindowRounding = 14; s.ChildRounding  = 11; s.FrameRounding = 8;
+    s.GrabRounding   = 8; s.PopupRounding   = 11; s.TabRounding   = 8;
     s.WindowBorderSize = 0; s.FrameBorderSize = 0;
     s.ItemSpacing  = {10, 0}; s.FramePadding  = {14, 12}; s.WindowPadding = {0, 0};
     s.ScrollbarSize = 0; s.GrabMinSize = 20;

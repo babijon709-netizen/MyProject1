@@ -113,6 +113,7 @@ static const LangPair kUiEn[] = {
     {"Положение сброшено", "Position reset"},
     {"Положение счётчика сохранено", "Counter position saved"},
     {"Потоки переноса", "Transfer flows"},
+    {"Привет,", "Hello,"},
     {"Приложение будет закрыто.", "The app will close."},
     {"Применено", "Applied"},
     {"Противники", "Enemies"},

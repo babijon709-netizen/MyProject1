@@ -1,5 +1,5 @@
 #include "Android_draw/draw.h"
-#include "ImGui/Font/Font.h"
+#include "ImGui/Font/TermFont.h"
 #include <dirent.h>
 #include <sys/system_properties.h>
 #include <time.h>
@@ -228,10 +228,32 @@ bool ImGui_init() {
     io.IniFilename = NULL;
     io.DisplaySize = ImVec2((float)native_window_screen_x, (float)native_window_screen_y);
 
+    // Шрифт гуи — DejaVu Sans Mono (референс «legit.gui»: моноширинный
+    // терминальный вайб). Диапазоны глифов перечислены явно — ими же урезан
+    // сам TTF в TermFont.h (~48 КБ), кириллица включена.
+    static const ImWchar kMonoRanges[] = {
+        0x0020, 0x00FF,   // латиница + latin-1 (°, ×, ·)
+        0x0400, 0x045F,   // кириллица
+        0x0490, 0x0491,   // Ґ ґ
+        0x2116, 0x2116,   // №
+        0x2190, 0x2193,   // ← ↑ → ↓
+        0x2022, 0x2022,   // •
+        0x2026, 0x2026,   // …
+        0x25A0, 0x25A1,   // ■ □
+        0x25AA, 0x25AB,   // ▪ ▫
+        0x25BA, 0x25BB,   // ► ▻
+        0x25C4, 0x25C5,   // ◄ ◅
+        0x25CF, 0x25CF,   // ●
+        0,
+    };
+    ImFontConfig cfg;
+    cfg.FontDataOwnedByAtlas = false;   // данные — статический массив в бинарнике
     io.Fonts->AddFontFromMemoryTTF(
-        (void*)RobotoFont,
-        (int)RobotoFont_size,
-        28.0f
+        (void*)TermMonoFont,
+        (int)TermMonoFont_size,
+        28.0f,
+        &cfg,
+        kMonoRanges
     );
 
     ImGui::GetStyle().ScaleAllSizes(1.5f);

@@ -425,13 +425,12 @@ void SHdr(const char* t, float top) {
         float  fs  = ImGui::GetFontSize() * 1.15f;
         auto   pos = ImGui::GetCursorScreenPos();
         auto   tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, t);
-        // Градиентная капсула слева от заголовка секции: акцент наверху
-        // уходит в глубокий синий — связывает секции с активной вкладкой.
-        ImVec4 ga = C::Acc(), gb = C::Acc2();
-        dl->AddRectFilledMultiColor({pos.x + 18.f, pos.y + tsz.y * 0.12f},
-                                    {pos.x + 24.f, pos.y + tsz.y * 0.88f},
-                                    C::U(ga), C::U(ga), C::U(gb), C::U(gb));
-        dl->AddText(fn, fs, {pos.x + 34.f, pos.y}, C::U(C::Dim()), t);
+        // Заголовок секции — жёлтым, с тонкой линией до правого края
+        // (как «== Aimbot ==» в референсе).
+        dl->AddText(fn, fs, {pos.x + 18.f, pos.y}, C::U(C::Hdr()), t);
+        dl->AddLine({pos.x + 26.f + tsz.x, pos.y + tsz.y * 0.62f},
+                    {pos.x + ImGui::GetContentRegionAvail().x - 18.f, pos.y + tsz.y * 0.62f},
+                    C::U(C::Hair()), 1.f);
         ImGui::Dummy({1.f, tsz.y});
     }
     ImGui::Dummy({1.f, 8.f});

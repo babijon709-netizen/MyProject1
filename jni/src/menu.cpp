@@ -86,6 +86,7 @@ static constexpr int kAccentCount = 9;   // 8 пресетов + свой
 
 
 float TabContent(int tab, float dt, float cW) {
+    (void)cW;   // ширина берётся из GetContentRegionAvail внутри вкладок
     float sY = ImGui::GetCursorPosY();
 
     if (tab == 1) {
@@ -941,7 +942,7 @@ float TabContent(int tab, float dt, float cW) {
             // пайплайном. Заливка акцентом плавно наезжает через Tick — как у
             // остальных переключателей, плюс акцентная рамка у выбранного.
             const float rowH = Layout::RowH;
-            const float inset = Layout::Inset, padX = Layout::PadX;
+            const float inset = Layout::Inset;
             const float avW = ImGui::GetContentRegionAvail().x;
             auto* dl = ImGui::GetWindowDrawList();
             auto* fn = ImGui::GetFont();
@@ -2492,21 +2493,45 @@ void RenderMenu() {
     const float hdrH = MenuHeaderH(panelLeft);
 
     {
-        // Шапка: заголовок вкладки по центру.
-        auto titles = [](int k) { return TabTitle(k); };
+        // Шапка в духе референса: слева «Привет, user», справа — ряд цветных
+        // точек и зелёная метка «* online».
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
-        const float hH = hdrH;
-        const float titleFS = ImGui::GetFontSize() * 1.45f;
-        auto tsz = ImGui::GetFont()->CalcTextSizeA(titleFS, FLT_MAX, 0, titles(g_state.cur_tab));
-        cdl->AddText(ImGui::GetFont(), titleFS,
-            {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles(g_state.cur_tab));
-        cdl->AddLine({hp.x, hp.y + hH - 1.f}, {hp.x + cW, hp.y + hH - 1.f}, C::U(C::Hair()), 1.f);
+        auto*  fnH = ImGui::GetFont();
+        const float hH  = hdrH;
+        const float gFS = ImGui::GetFontSize() * 1.10f;
+        float tx = hp.x + Layout::PadX;
         if (!panelLeft) {
-            // Светофор — в самом левом верхнем углу окна. Кружка аватарки в
-            // этой раскладке нет (просьба игрока: с нижней панелью он мешает).
+            // Светофор — в самом левом верхнем углу окна, приветствие правее.
             TrafficLight(TrafficLightPos(g_win.pos, false), cW);
+            float d = 0.f, gap2 = 0.f;
+            TrafficLightMetrics(cW, d, gap2);
+            tx += kTLPad + TrafficLightW(d, gap2) + 16.f;
         }
+        const float cy = hp.y + (hH - gFS) * 0.5f;
+        const char* greet = XS("Привет,");
+        auto gsz = fnH->CalcTextSizeA(gFS, FLT_MAX, 0, greet);
+        cdl->AddText(fnH, gFS, {tx, cy}, C::U(C::Acc()), greet);
+        cdl->AddText(fnH, gFS, {tx + gsz.x + 8.f, cy}, C::U(C::Txt()), "user");
+
+        // Правый блок: восемь цветных точек статуса + «* online».
+        const float oFS = ImGui::GetFontSize() * 0.85f;
+        auto osz = fnH->CalcTextSizeA(oFS, FLT_MAX, 0, "* online");
+        const float right = hp.x + cW - Layout::PadX;
+        cdl->AddText(fnH, oFS, {right - osz.x, hp.y + (hH - oFS) * 0.5f}, C::U(C::Green()), "* online");
+        static const ImVec4 kDots[8] = {
+            {0.60f, 0.60f, 0.60f, 1.f}, {0.90f, 0.20f, 0.20f, 1.f},
+            {0.90f, 0.60f, 0.20f, 1.f}, {0.90f, 0.90f, 0.30f, 1.f},
+            {0.30f, 0.80f, 0.30f, 1.f}, {0.30f, 0.60f, 0.90f, 1.f},
+            {0.60f, 0.30f, 0.90f, 1.f}, {0.90f, 0.30f, 0.70f, 1.f},
+        };
+        const float dr = 5.f, dstep = 15.f;
+        const float dx = right - osz.x - 14.f - 7.f * dstep - dr;
+        for (int i = 0; i < 8; ++i)
+            cdl->AddCircleFilled({dx + i * dstep, hp.y + hH * 0.5f}, dr, C::U(kDots[i]), 12);
+
+        // Неоновая линия под шапкой отделяет её от прокручиваемого контента.
+        cdl->AddLine({hp.x, hp.y + hH - 1.f}, {hp.x + cW, hp.y + hH - 1.f}, C::U(C::Hair()), 1.f);
         ImGui::Dummy({cW, hH});
     }
 

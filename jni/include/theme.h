@@ -2,20 +2,20 @@
 // Тема: палитры Light/Dark, радиусы, габариты строк, ApplyTheme().
 // Вынесено из main.cpp — цветами и габаритами пользуются все модули гуи.
 //
-// Дизайн «Глубина»: три слоя поверхности (окно → панель → карточка),
-// волосяные рамки вместо тяжёлых обводок и один акцент — циан, который
-// в градиентах уходит в индиго. Светлая тема — та же лестница,
-// перевёрнутая в светло-серое.
+// Дизайн «legit.gui» (референс — CheatMenu.cpp): почти чёрный
+// фиолетовый фон, неоновая маджента в акцентах и рамках, жёлтые
+// заголовки секций, зелёная точка «онлайн». Светлая тема — та же
+// схема, перевёрнутая в светло-серое.
 
 #include "imgui.h"
 #include "ui_util.h"   // Lerpf / EaseInOut в Lerp4
 
 // Радиусы: карточки крупнее, элементы управления мягче.
 namespace R {
-    static constexpr float Card  = 18.f;
-    static constexpr float Pill  = 15.f;
-    static constexpr float Sheet = 22.f;
-    static constexpr float Btn   = 13.f;
+    static constexpr float Card  = 11.f;
+    static constexpr float Pill  = 11.f;
+    static constexpr float Sheet = 14.f;
+    static constexpr float Btn   = 8.f;
 }
 
 // Тёмная тема по умолчанию — не слепит поверх игры; светлая включается
@@ -32,30 +32,28 @@ namespace C {
     // Dark — лестница «окно → панель → карточка», каждая ступень светлее
     // предыдущей; Light — обратная лестница от светло-серого к белому.
     namespace Light {
-        static constexpr ImVec4 Bg     = {0.906f, 0.910f, 0.929f, 1};
-        static constexpr ImVec4 LeftBg = {0.859f, 0.865f, 0.890f, 1};
-        static constexpr ImVec4 Card   = {0.973f, 0.975f, 0.982f, 1};
-        static constexpr ImVec4 Acc    = {0.024f, 0.576f, 0.741f, 1};
-        static constexpr ImVec4 AccDk  = {0.012f, 0.459f, 0.604f, 1};
-        static constexpr ImVec4 Acc2   = {0.310f, 0.353f, 0.878f, 1};
-        static constexpr ImVec4 Red    = {0.906f, 0.235f, 0.220f, 1};
-        static constexpr ImVec4 Txt    = {0.086f, 0.094f, 0.125f, 1};
-        static constexpr ImVec4 Dim    = {0.467f, 0.482f, 0.537f, 1};
-        static constexpr ImVec4 TrkOff = {0.827f, 0.833f, 0.859f, 1};
-        static constexpr ImVec4 Sep    = {0.816f, 0.822f, 0.847f, 1};
+        static constexpr ImVec4 Bg     = {0.925f, 0.918f, 0.929f, 1};
+        static constexpr ImVec4 LeftBg = {0.878f, 0.867f, 0.886f, 1};
+        static constexpr ImVec4 Card   = {0.976f, 0.973f, 0.980f, 1};
+        static constexpr ImVec4 Acc    = {0.830f, 0.180f, 0.530f, 1};
+        static constexpr ImVec4 AccDk  = {0.690f, 0.110f, 0.435f, 1};
+        static constexpr ImVec4 Red    = {0.870f, 0.220f, 0.208f, 1};
+        static constexpr ImVec4 Txt    = {0.110f, 0.094f, 0.125f, 1};
+        static constexpr ImVec4 Dim    = {0.490f, 0.463f, 0.510f, 1};
+        static constexpr ImVec4 TrkOff = {0.866f, 0.848f, 0.873f, 1};
+        static constexpr ImVec4 Sep    = {0.847f, 0.833f, 0.856f, 1};
     }
     namespace Dark {
-        static constexpr ImVec4 Bg     = {0.075f, 0.081f, 0.110f, 1};
-        static constexpr ImVec4 LeftBg = {0.055f, 0.061f, 0.086f, 1};
-        static constexpr ImVec4 Card   = {0.110f, 0.118f, 0.157f, 1};
-        static constexpr ImVec4 Acc    = {0.129f, 0.765f, 0.898f, 1};
-        static constexpr ImVec4 AccDk  = {0.067f, 0.522f, 0.647f, 1};
-        static constexpr ImVec4 Acc2   = {0.388f, 0.427f, 0.973f, 1};
-        static constexpr ImVec4 Red    = {1.000f, 0.318f, 0.349f, 1};
-        static constexpr ImVec4 Txt    = {0.933f, 0.941f, 0.961f, 1};
-        static constexpr ImVec4 Dim    = {0.557f, 0.576f, 0.639f, 1};
-        static constexpr ImVec4 TrkOff = {0.157f, 0.165f, 0.212f, 1};
-        static constexpr ImVec4 Sep    = {0.196f, 0.204f, 0.259f, 1};
+        static constexpr ImVec4 Bg     = {0.050f, 0.030f, 0.061f, 1};
+        static constexpr ImVec4 LeftBg = {0.070f, 0.043f, 0.086f, 1};
+        static constexpr ImVec4 Card   = {0.080f, 0.050f, 0.100f, 1};
+        static constexpr ImVec4 Acc    = {0.920f, 0.280f, 0.660f, 1};
+        static constexpr ImVec4 AccDk  = {0.750f, 0.150f, 0.500f, 1};
+        static constexpr ImVec4 Red    = {0.960f, 0.240f, 0.280f, 1};
+        static constexpr ImVec4 Txt    = {0.920f, 0.880f, 0.920f, 1};
+        static constexpr ImVec4 Dim    = {0.550f, 0.500f, 0.580f, 1};
+        static constexpr ImVec4 TrkOff = {0.120f, 0.080f, 0.140f, 1};
+        static constexpr ImVec4 Sep    = {0.160f, 0.090f, 0.180f, 1};
     }
 
     static inline ImVec4 Lerp4(ImVec4 a, ImVec4 b) {
@@ -88,15 +86,18 @@ namespace C {
         ImVec4 a = Acc();
         return {(a.x + 0.36f) * 0.5f, (a.y + 0.40f) * 0.5f, (a.z + 0.95f) * 0.5f, 1.f};
     }
-    // Заливка «элемента» — кнопки-призраки, светофор, дно дока: чуть
-    // светлее дорожек, чтобы кнопка читалась на карточке как «выпуклая».
-    static inline ImVec4 El()     { return Lerp4({0.847f, 0.851f, 0.875f, 1.f},
-                                                 {0.176f, 0.184f, 0.235f, 1.f}); }
-    // Волосяная рамка карточек: едва заметная светлая (тёмная тема) или
-    // тёмная (светлая) линия по контуру.
-    static inline ImVec4 Hair()   { return Lerp4A({0.05f, 0.06f, 0.10f, 0.10f}, {0.85f, 0.90f, 1.00f, 0.075f}); }
-    // Подложка под текстом на акценте: тёмно-синий на циане, белый в светлой.
-    static inline ImVec4 OnAcc()  { return Lerp4({1.f, 1.f, 1.f, 1.f}, {0.016f, 0.055f, 0.090f, 1.f}); }
+    // Заливка «элемента» — кнопки, светофор, дно дока (ImGuiCol_Button
+    // референса: фиолетово-розовый чуть светлее фона карточки).
+    static inline ImVec4 El()     { return Lerp4({0.886f, 0.871f, 0.890f, 1.f},
+                                                 {0.160f, 0.090f, 0.180f, 1.f}); }
+    // Неоновая кромка панелей — маджента ~32% (ImGuiCol_Border референса).
+    static inline ImVec4 Hair()   { return Lerp4A({0.55f, 0.18f, 0.42f, 0.28f}, {0.85f, 0.25f, 0.65f, 0.32f}); }
+    // Жёлтый заголовков секций («== Aimbot ==» в референсе).
+    static inline ImVec4 Hdr()    { return Lerp4({0.580f, 0.480f, 0.050f, 1.f}, {0.950f, 0.850f, 0.400f, 1.f}); }
+    // Зелёный индикатор «* online».
+    static inline ImVec4 Green()  { return Lerp4({0.180f, 0.580f, 0.270f, 1.f}, {0.450f, 0.900f, 0.550f, 1.f}); }
+    // Текст на заливке акцентом: белый на мадженте (обе темы).
+    static inline ImVec4 OnAcc()  { return {1.f, 1.f, 1.f, 1.f}; }
 
     static ImU32 Mix(ImVec4 a, ImVec4 b, float t) {
         return IM_COL32(
