@@ -60,6 +60,11 @@
 #include <utility>
 #include <vector>
 
+// Автообновление оффсетов: поиск класса по имени (определение в
+// offset_resolver.cpp). Объявление дублирует game.h, чтобы заголовок
+// оставался самодостаточным (вне пространства имён: функция глобальная).
+std::uint64_t offset_resolver_class(const char* name, const char* ns);
+
 namespace fast_loot {
 
 // Биты 0.3499999940395355f — константа темпа collect-all. Сравнение побитовое:
@@ -142,8 +147,8 @@ template <class IO> class Controller {
     Anchor resolve_helper(std::uint64_t base) {
         if (helper_class_) return Anchor::Ready;
         // Автообновление оффсетов: класс, найденный по имени в живых
-        // метаданных, переживает апдейт игры (объявление в game.h).
-        extern std::uint64_t offset_resolver_class(const char* name, const char* ns);
+        // метаданных, переживает апдейт игры (объявлено выше, определение
+        // в offset_resolver.cpp; в игре — см. game.h).
         const std::uint64_t found =
             offset_resolver_class("PlayerLoopHelper", "Cysharp.Threading.Tasks");
         if (found && class_is(found, "PlayerLoopHelper", "Cysharp.Threading.Tasks")) {
