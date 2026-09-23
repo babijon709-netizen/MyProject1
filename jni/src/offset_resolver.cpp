@@ -59,6 +59,15 @@ static const OrField kOrFields[] = {
 constexpr int kOrFieldCount = (int)(sizeof(kOrFields) / sizeof(kOrFields[0]));
 }  // namespace
 
+// ---- САМОТЕСТ АВТООБНОВЛЕНИЯ (ВРЕМЕННЫЙ, убрать после проверки) -------------
+// Сборка с включённым флагом стартует «сломанной»: перед первым сканом все
+// вшитые оффсеты из таблицы портятся (+0x40), как будто игра обновилась и все
+// смещения устарели. Дальше видно вживую: пока резолвер не сошёлся — ничего
+// не работает; как только он находит живые смещения и перезаписывает слоты —
+// функционал оживает БЕЗ перезапуска. Что резолвер не разрешил — в конце
+// возвращается на исходное вшитое значение, чтобы ничего не осталось битым.
+#define OR_SELFTEST_BREAK_BAKED 1
+
 // ---- «Тихие» чтения резолвера ------------------------------------------------
 // Резолвер ходит по указателям Вслепую: почти каждый кандидат — мусор, и отказ
 // чтения здесь НОРМА, а не «доступ потерян». Обычные обёртки (rd/rd_buf из
@@ -170,6 +179,12 @@ pid_t    s_known_pid = -1;         // pid, для которого знания 
 uint64_t s_scan_base = 0;          // база, к которой относится текущий скан
 bool     s_good_logged = false;    // «вернулся на живую базу» не спамить
 
+// Самтест: исходные вшитые значения испорченных слотов — то, что резолвер не
+// разрешит, в конце вернётся на них (ничего не останется битым навсегда).
+struct SavedSlot { std::uint64_t* slot; std::uint64_t value; };
+SavedSlot s_saved[160];
+int      s_saved_count = 0;
+
 struct AppliedRec { std::uint64_t* slot; std::uint64_t value; };
 AppliedRec s_applied[256];
 int      s_applied_count = 0;
@@ -239,6 +254,46 @@ static bool try_next_base() {
                 s_dead_count);
     return false;
 }
+
+#if OR_SELFTEST_BREAK_BAKED
+// Испортить все вшитые оффсеты из таблицы (запомнив исходные значения).
+static void selftest_break_baked() {
+    // Если прошлый цикл не дошёл до DONE (игра перезапустилась посреди скана),
+    // сначала вернём те слоты на истинные вшитые значения, чтобы не потерять
+    // настоящий базовый уровень.
+    for (int i = 0; i < s_saved_count; ++i) *(s_saved[i].slot) = s_saved[i].value;
+    s_saved_count = 0;
+    for (int i = 0; i < kOrFieldCount; ++i) {
+        std::uint64_t* slot = kOrFields[i].slot;
+        bool seen = false;
+        for (int j = 0; j < s_saved_count; ++j) if (s_saved[j].slot == slot) seen = true;
+        if (seen) continue;
+        if (s_saved_count < 160) {
+            s_saved[s_saved_count].slot = slot;
+            s_saved[s_saved_count].value = *slot;
+            ++s_saved_count;
+        }
+        *slot += 0x40;
+    }
+    LogLine("автооффсеты: САМОТЕСТ — вшитые оффсеты испорчены (%d слотов), "
+            "дальше всё должно починиться живым резолвом", s_saved_count);
+}
+
+// Вернуть на вшитое всё, что резолвер так и не разрешил.
+static void selftest_restore_unresolved() {
+    int restored = 0;
+    for (int i = 0; i < s_saved_count; ++i) {
+        bool resolved = false;
+        for (int j = 0; j < s_applied_count; ++j)
+            if (s_applied[j].slot == s_saved[i].slot) { resolved = true; break; }
+        if (!resolved) { *(s_saved[i].slot) = s_saved[i].value; ++restored; }
+    }
+    LogLine("автооффсеты: САМОТЕСТ — резолвер починил %d из %d слотов, "
+            "возвращено на вшитые %d",
+            s_saved_count - restored, s_saved_count, restored);
+    s_saved_count = 0;
+}
+#endif  // OR_SELFTEST_BREAK_BAKED
 
 // ---- Фаза MAPS: окна libil2cpp (не исполняемые) и метаданных ---------------
 static void phase_maps() {
@@ -561,6 +616,9 @@ static void phase_fields() {
 static void log_summary() {
     if (s_logged) return;
     s_logged = true;
+#if OR_SELFTEST_BREAK_BAKED
+    selftest_restore_unresolved();
+#endif
     LogLine("автооффсеты: классов найдено %d (имён прочитано %d, отказов %d), "
             "fields@0x%llx, разрешено %d/%d констант (%d изменено), метаданные %s, "
             "база 0x%llx, пустых баз %d",
@@ -615,7 +673,12 @@ void offset_resolver_tick() {
     }
     const double deadline = mono_seconds() + kTickBudgetSec;
     switch (s_phase) {
-        case PH_WAIT:   s_phase = PH_MAPS; break;
+        case PH_WAIT:
+#if OR_SELFTEST_BREAK_BAKED
+            selftest_break_baked();
+#endif
+            s_phase = PH_MAPS;
+            break;
         case PH_MAPS:   phase_maps(); break;
         case PH_SCAN:   phase_scan(deadline); break;
         case PH_FIELDS: phase_fields(); break;
