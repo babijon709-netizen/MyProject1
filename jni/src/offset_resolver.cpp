@@ -156,16 +156,16 @@ struct AppliedRec { std::uint64_t* slot; std::uint64_t value; };
 AppliedRec s_applied[256];
 int      s_applied_count = 0;
 bool     s_logged = false;
+pid_t    s_bound_pid = -1;        // к какому процессу/базе собрано состояние
+uint64_t s_bound_base = 0;
+double   s_last_progress_log = 0; // темп строк прогресса в лог
 
-// Бюджет на такт умышленно вдвое меньше, чем у других сканов: на устройстве
-// агрессивное чтение чужой памяти кончалось потерей привязки. Лучше резолвер
-// будет сходиться дольше, чем давить на процесс игры.
-constexpr double kTickBudgetSec   = 0.002;  // 2 мс на такт
+// Бюджет такта 4 мс (как у других сканов): потеря привязки на устройстве, как
+// выяснилось по логу, была не от чтений сканера, а от смотрителя кадра.
+// Крупный кусок — статический буфер, стеку не стоит.
+constexpr double kTickBudgetSec   = 0.004;  // 4 мс на такт
 constexpr double kScanTotalSec    = 90.0;   // общий потолок скана (образы по 0.5ГБ+)
-// Кусок намеренно небольшой: скан не должен давить на процесс игры крупными
-// чтениями (на части устройств это кончается потерей привязки). Буфер ниже
-// статический, так что размер куска стеку не стоит; хотим — берём меньше.
-constexpr size_t kChunkBytes      = 64 * 1024;
+constexpr size_t kChunkBytes      = 256 * 1024;
 constexpr size_t kMaxReadsPerChunk = 256;   // предел «дорогих» чтений на порцию
 
 static bool all_wanted_found() {
@@ -253,7 +253,13 @@ static void phase_maps() {
         if (!s_lib_begin || start < s_lib_begin) s_lib_begin = start;
         if (end > s_lib_end) s_lib_end = end;
     }
-    if (!s_seg_count) { s_phase = PH_DONE; return; }
+    if (!s_seg_count) {
+        LogLine("автооффсеты: сегментов 0 (строк .so %d: окно %d, иск %d, дел %d, карта %s)",
+                s_maps_lib_lines, s_maps_cut_window, s_maps_cut_x, s_maps_cut_deleted,
+                s_maps_open_failed ? "НЕ открылась" : "прочитана");
+        s_phase = PH_DONE;
+        return;
+    }
     // Сканируем с КОНЦА образа: сегменты идут по возрастанию адреса, а слоты
     // классов лежат в .data/.relro ближе к концу; огромный .rodata — в начале.
     // Так классы находятся за первые секунды, а не после минутного прохода.
@@ -266,6 +272,10 @@ static void phase_maps() {
     for (int i = 0; i < s_seg_count; ++i)
         s_total_bytes += s_segments[i].end - s_segments[i].start;
     s_scanned_bytes = 0;
+    s_last_progress_log = 0;
+    LogLine("автооффсеты: сегментов %d (%llu МБ), метаданные %s, база 0x%llx",
+            s_seg_count, (unsigned long long)(s_total_bytes >> 20),
+            s_meta_begin ? "найдены" : "НЕ найдены", (unsigned long long)g_il2cpp_base);
     s_seg_idx = 0;
     s_scan_pos = s_segments[0].start;
     s_scan_deadline = mono_seconds() + kScanTotalSec;
@@ -341,6 +351,15 @@ static void phase_scan(double deadline) {
         }
         if (all_wanted_found()) break;
         if (mono_seconds() >= s_scan_deadline) break;
+        // Прогресс в лог раз в 8 секунд — видно, что скан жив и куда дошёл.
+        const double now_s = mono_seconds();
+        if (now_s - s_last_progress_log >= 8.0) {
+            s_last_progress_log = now_s;
+            LogLine("автооффсеты: скан %llu/%llu МБ, классов %d (имён %d/%d)",
+                    (unsigned long long)(s_scanned_bytes >> 20),
+                    (unsigned long long)(s_total_bytes >> 20),
+                    s_class_count, s_names_ok, s_names_fail);
+        }
     }
     if (all_wanted_found() || s_seg_idx >= s_seg_count ||
         mono_seconds() >= s_scan_deadline) {
@@ -467,6 +486,19 @@ static void log_summary() {
 
 void offset_resolver_tick() {
     if (g_pid <= 0 || !g_il2cpp_base) return;
+    // Сброс — только когда СМЕНИЛСЯ процесс/база (игра перезапустилась).
+    // Перепривязка смотрителем кадра к той же игре состояние не трогает:
+    // найденные классы и смещения полей верны, пока жив тот же процесс —
+    // иначе скан стартовал бы заново на каждом отвалее и не успевал бы
+    // сойтись (так и было на устройстве: «классов 0» по кругу).
+    if (g_pid != s_bound_pid || g_il2cpp_base != s_bound_base) {
+        if (s_bound_pid > 0)
+            LogLine("автооффсеты: процесс/база сменились (%d -> %d), резолв заново",
+                    (int)s_bound_pid, (int)g_pid);
+        offset_resolver_reset();
+        s_bound_pid = g_pid;
+        s_bound_base = g_il2cpp_base;
+    }
     const double deadline = mono_seconds() + kTickBudgetSec;
     switch (s_phase) {
         case PH_WAIT:   s_phase = PH_MAPS; break;
@@ -483,6 +515,8 @@ void offset_resolver_reset() {
     s_seg_count = 0; s_seg_idx = 0; s_scan_pos = 0;
     s_lib_begin = s_lib_end = 0; s_meta_begin = s_meta_end = 0;
     s_total_bytes = 0; s_scanned_bytes = 0;
+    s_maps_lib_lines = 0; s_maps_cut_window = 0; s_maps_cut_x = 0;
+    s_maps_cut_deleted = 0; s_maps_open_failed = false;
     s_class_count = 0; s_names_ok = 0; s_names_fail = 0;
     s_fields_off = 0; s_resolved = 0; s_changed = 0;
     s_applied_count = 0; s_logged = false;

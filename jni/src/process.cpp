@@ -1,5 +1,6 @@
 #include "process.h"
 #include "game.h"
+#include "logfile.h"               // LogLine — диагностика привязки в файл
 #include "game_offsets_active.h"   // go::CurrentBuild()
 
 #include <atomic>
@@ -176,6 +177,8 @@ void start_attach_thread() {
                 } else if (esp_init(pid)) {
                     g_target_pid = pid;
                     g_esp_attached = true;
+                    LogLine("привязка: подключились к pid %d (%s)", (int)pid,
+                            by_package ? "по пакету" : "по libil2cpp в maps");
                 } else {
                     // Нашли процесс, но привязаться не вышло: причина — из game.cpp
                     // (нет libil2cpp.so или память не читается). Состояние видно в
@@ -192,6 +195,7 @@ void start_attach_thread() {
                 if (why) {
                     g_last_detach_reason.store(why);
                     g_detach_count.fetch_add(1);
+                    LogLine("привязка: отвал №%d — %s", g_detach_count.load(), why);
                     esp_reset();
                     g_esp_attached = false;
                     g_target_pid = -1;

@@ -904,11 +904,19 @@ static bool base_resolves_game(uint64_t base) {
     if (!base) return false;
     if (PLAYER_MANAGER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(base + PLAYER_MANAGER_TYPEINFO_RVA);
-        if (class_identity(candidate, "PlayerManager", "Oxide") != 0) return true;
+        if (class_identity(candidate, "PlayerManager", "Oxide") != 0) {
+            LogLine("привязка: база 0x%llx верна по вшитому RVA PlayerManager",
+                    (unsigned long long)base);
+            return true;
+        }
     }
     if (GAME_CONTROLLER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(base + GAME_CONTROLLER_TYPEINFO_RVA);
-        if (class_identity(candidate, "GameControllerBase", "Oxide") != 0) return true;
+        if (class_identity(candidate, "GameControllerBase", "Oxide") != 0) {
+            LogLine("привязка: база 0x%llx верна по вшитому RVA GameControllerBase",
+                    (unsigned long long)base);
+            return true;
+        }
     }
     // Оба RVA не нашли класс — так бывает после апдейта игры, когда вшитые
     // смещения устарели (именно ради этого и существует автообновление
@@ -918,7 +926,13 @@ static bool base_resolves_game(uint64_t base) {
     // образ сюда попадёт только если живых вовсе нет.
     uint8_t elf[6] = {};
     if (!rd_buf(base, elf, sizeof(elf))) return false;
-    return elf[0] == 0x7f && elf[1] == 'E' && elf[2] == 'L' && elf[3] == 'F';
+    if (elf[0] == 0x7f && elf[1] == 'E' && elf[2] == 'L' && elf[3] == 'F') {
+        LogLine("привязка: база 0x%llx принята по ELF-заголовку — вшитые RVA "
+                "НЕ сработали (игра обновилась?), работает автообновление оффсетов",
+                (unsigned long long)base);
+        return true;
+    }
+    return false;
 }
 
 static bool validate_player_list(uint64_t list, uint64_t player_class) {
@@ -7024,7 +7038,10 @@ void esp_reset() {
     g_mem.unbind();
     g_attach_state = ESP_ATTACH_OK;
     g_pid = -1; g_il2cpp_base = 0;
-    offset_resolver_reset();   // процесс ушёл — кэш классов/полей недействителен
+    // Резолвер оффсетов здесь НЕ сбрасываем: перепривязка к тому же процессу
+    // (смотритель кадра) не делает найденные классы/поля недействительными,
+    // а сброс каждый раз запускал скан с нуля и он не успевал сойтись.
+    // Резолвер сам заметит смену процесса/базы в своём тике.
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
@@ -7311,7 +7328,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // выберет базу заново и заново проверит доступ.
         if (g_frame_watchdog_resets >= 3) {
             g_frame_watchdog_resets = 0;
+            LogLine("смотритель кадра: ~36 с слепоты (сбросов кэша 3) — прошу перепривязку");
             g_want_reattach.store(true);
+        } else {
+            LogLine("смотритель кадра: 240 кадров без кадра, сброс кэшей (№%d из 3)",
+                    g_frame_watchdog_resets);
         }
     }
 
