@@ -2010,7 +2010,7 @@ void RenderMenu() {
     SpringTick(g_state.tab_slide, g_state.tab_slide_vel, 0.f, dt);
 
     // Короткие и понятные названия вкладок (индекс = id вкладки) — общий список.
-    // Подпись вкладки берётся на текущем языке: и в строке вкладок, и в
+    // Подпись вкладки берётся на текущем языке: и в колонке вкладок, и в
     // расчёте ширины вкладки.
     auto tabNames = [](int k) { return TabTitle(k); };
     // Вкладка «Меню» (id 0) удалена: её функционал переехал в «Опции».
@@ -2058,91 +2058,94 @@ void RenderMenu() {
         cdl->AddCircleFilled({avCx, avCy}, avR +  6.f, C::UA(C::Acc(), 0.10f), 48);
         VidAvatar::Draw(cdl, avCx, avCy, avR, dt, C::U(C::Acc()), C::U(C::Bg()));
 
-        // Неоновая линия под шапкой отделяет её от строки вкладок.
+        // Неоновая линия под шапкой отделяет её от колонки вкладок и контента.
         cdl->AddLine({hp.x, hp.y + hH - 1.f}, {hp.x + WW, hp.y + hH - 1.f}, C::U(C::Hair()), 1.f);
         ImGui::Dummy({WW, hH});
     }
 
-    // Строка вкладок под шапкой — как в референсе (CheatMenu.cpp): компактные
-    // скруглённые таблетки только с текстом, без иконок. Активная залита
-    // тёмным акцентом, неактивные — карточки с окантовкой; под строкой —
-    // линия-разделитель, как подчёркивание BeginTabBar в референсе.
-    const float tabStripH = Layout::TabBarH;
+    // Колонка вкладок слева — под шапкой, у левого края окна (просьба
+    // игрока). Компактные скруглённые текстовые таблетки, как в референсе
+    // (CheatMenu.cpp): активная залита тёмным акцентом, неактивные —
+    // карточки с окантовкой, без иконок. Колонка центрируется по высоте
+    // полосы под шапкой; справа её от контента отделяет вертикальная линия.
+    //
+    // ВАЖНО (починка бага, из-за которого вкладки «отрывались» от окна):
+    // колонка рисуется на foreground-списке в ЭКРАННЫХ координатах — все
+    // координаты считаются от wp (позиция окна), а не от нуля. Окно игрок
+    // таскает куда хочет — вкладки обязаны ехать вместе с ним.
+    float railW = 0.f;
     {
-        auto*  cdl = ImGui::GetWindowDrawList();
         auto*  fnT = ImGui::GetFont();
         const float tFS  = ImGui::GetFontSize() * 0.95f;
         const float pad  = 22.f;    // горизонтальные поля текста во вкладке
         const float gap  = 10.f;    // зазор между вкладками
         const float tabH = 46.f;    // высота вкладки
+        const float railIns = 10.f; // боковые поля внутри колонки
 
-        float tabWs[kTabShown];
-        float rowW = 0.f;
-        for (int s = 0; s < kTabShown; ++s) {
-            tabWs[s] = fnT->CalcTextSizeA(tFS, FLT_MAX, 0, tabNames(kTabOrder[s])).x + pad * 2.f;
-            rowW    += tabWs[s];
-        }
-        rowW += gap * (float)(kTabShown - 1);
-        const float tabX = (WW - rowW) * 0.5f;
-        const float tabY = hdrH + (tabStripH - tabH) * 0.5f;
+        float maxW = 0.f;
+        for (int s = 0; s < kTabShown; ++s)
+            maxW = ImMax(maxW, fnT->CalcTextSizeA(tFS, FLT_MAX, 0,
+                                                  tabNames(kTabOrder[s])).x + pad * 2.f);
+        railW = maxW + railIns * 2.f;
 
-        // Кнопки-невидимки по вкладкам: тап переключает вкладку с затуханием.
-        float cx0 = tabX;
+        const float colH    = tabH * kTabShown + gap * (kTabShown - 1);
+        const float startY  = hdrH + ImMax(12.f, (WH - hdrH - colH) * 0.5f);
+
+        // Кнопки-невидимки по вкладкам (вся ширина колонки — палец толще
+        // таблетки): тап переключает вкладку с затуханием.
         for (int s = 0; s < kTabShown; ++s) {
-            const int i = kTabOrder[s];   // id вкладки в этой позиции строки
-            ImGui::SetCursorPos({cx0, tabY});
+            const int i = kTabOrder[s];   // id вкладки в этой позиции колонки
+            ImGui::SetCursorPos({0.f, startY + s * (tabH + gap)});
             auto pos2 = ImGui::GetCursorScreenPos();
-            tab_rects[i] = {pos2.x};
+            tab_rects[i] = {pos2.y};      // колонка: храним Y ячейки
             char tabId[16];
             snprintf(tabId, sizeof(tabId), "##tab%d", i);
-            ImGui::InvisibleButton(tabId, {tabWs[s], tabH});
+            ImGui::InvisibleButton(tabId, {railW, tabH});
             TabTap(i);
-            cx0 += tabWs[s] + gap;
         }
 
-        // Пружинная «пилюля» активной вкладки скользит по горизонтали.
-        int curS = 0;
-        for (int s = 0; s < kTabShown; ++s)
-            if (kTabOrder[s] == g_state.cur_tab) curS = s;
+        // Пружинная «пилюля» активной вкладки скользит по вертикали.
         {
-            float targetRelX = tab_rects[g_state.cur_tab].sx - wp.x;
-            if (pill_y < 0.f) { pill_y = targetRelX; pill_vel = 0.f; }
-            SpringTick(pill_y, pill_vel, targetRelX, dt);
+            float targetRelY = tab_rects[g_state.cur_tab].sx - wp.y;
+            if (pill_y < 0.f) { pill_y = targetRelY; pill_vel = 0.f; }
+            SpringTick(pill_y, pill_vel, targetRelY, dt);
         }
-        const float pillX = wp.x + pill_y;
+        const float pillY = wp.y + pill_y;
 
         auto* fdl = ImGui::GetForegroundDrawList();
+        const float tx0 = wp.x + railIns, tx1 = wp.x + railW - railIns;
         // Неактивные вкладки: карточка + тонкая окантовка (если разделители
         // включены в «Опциях»).
         for (int s = 0; s < kTabShown; ++s) {
             const int i = kTabOrder[s];
             if (i == g_state.cur_tab) continue;
-            const float x0 = tab_rects[i].sx, x1 = x0 + tabWs[s];
-            fdl->AddRectFilled({x0, tabY}, {x1, tabY + tabH}, C::U(C::Card()), R::Btn);
+            const float y0 = tab_rects[i].sx;
+            fdl->AddRectFilled({tx0, y0}, {tx1, y0 + tabH}, C::U(C::Card()), R::Btn);
             if (g_state.ui_show_sep)
-                fdl->AddRect({x0, tabY}, {x1, tabY + tabH}, C::U(C::Hair()), R::Btn, 0, 1.f);
+                fdl->AddRect({tx0, y0}, {tx1, y0 + tabH}, C::U(C::Hair()), R::Btn, 0, 1.f);
         }
         // Активная — сплошная заливка тёмным акцентом (TabActive в референсе).
-        fdl->AddRectFilled({pillX, tabY}, {pillX + tabWs[curS], tabY + tabH},
-                           C::U(C::AccDk()), R::Btn);
+        fdl->AddRectFilled({tx0, pillY}, {tx1, pillY + tabH}, C::U(C::AccDk()), R::Btn);
         // Подписи: активная — ярким текстом, прочие — приглушённым.
         for (int s = 0; s < kTabShown; ++s) {
             const int  i   = kTabOrder[s];
             const bool act = (i == g_state.cur_tab);
             const auto lsz = fnT->CalcTextSizeA(tFS, FLT_MAX, 0, tabNames(i));
             fdl->AddText(fnT, tFS,
-                {tab_rects[i].sx + (tabWs[s] - lsz.x) * 0.5f, tabY + (tabH - lsz.y) * 0.5f},
+                {tx0 + ((tx1 - tx0) - lsz.x) * 0.5f,
+                 tab_rects[i].sx + (tabH - lsz.y) * 0.5f},
                 C::U(act ? C::Txt() : C::Dim()), tabNames(i));
         }
-        // Линия под строкой вкладок — как подчёркивание BeginTabBar.
-        cdl->AddLine({wp.x, wp.y + hdrH + tabStripH - 1.f},
-                     {wp.x + WW, wp.y + hdrH + tabStripH - 1.f}, C::U(C::Hair()), 1.f);
+        // Вертикальная линия-разделитель между колонкой и контентом.
+        auto* cdl = ImGui::GetWindowDrawList();
+        cdl->AddLine({wp.x + railW, wp.y + hdrH}, {wp.x + railW, wp.y + WH - 1.f},
+                     C::U(C::Hair()), 1.f);
     }
 
     {
-        const float areaH = WH - hdrH - tabStripH;
-        auto cpPos  = ImGui::GetWindowPos(); cpPos.y += hdrH + tabStripH;
-        const float cpRight = cpPos.x + WW;
+        const float areaH = WH - hdrH;
+        auto cpPos  = ImGui::GetWindowPos(); cpPos.y += hdrH; cpPos.x += railW;
+        const float cpRight = wp.x + WW;
 
         bool sheetBlocking = g_sheet.visible || (g_pop.visible && !g_pop.closing);
         static float s_maxScroll = 0.f;
@@ -2159,11 +2162,11 @@ void RenderMenu() {
         cdl->PushClipRect(cpPos, {cpRight, cpPos.y + areaH - 4.f}, true);
 
         float slideOffset = g_state.tab_slide;
-        ImGui::SetCursorPosY(hdrH + tabStripH - g_scrollMain.off + slideOffset);
-        ImGui::SetCursorPosX(12.f);
+        ImGui::SetCursorPosY(hdrH - g_scrollMain.off + slideOffset);
+        ImGui::SetCursorPosX(railW + 12.f);
 
         if (sheetBlocking) ImGui::BeginDisabled(true);
-        float contentH = TabContent(g_state.cur_tab, dt, WW);
+        float contentH = TabContent(g_state.cur_tab, dt, WW - railW - 12.f);
         if (sheetBlocking) ImGui::EndDisabled();
 
         if (g_state.tab_alpha < 0.999f) {
