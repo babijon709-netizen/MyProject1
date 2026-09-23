@@ -425,9 +425,24 @@ static void loot_tests() {
         assert(d.items == 4 && d.cls == 3 && d.span == 2 && d.val == 1);
         assert(d.wr == 1 && !d.fail);
         assert(f.c.status == Status::Active && f.c.neutralized() == 1);
-        // Новый тик без изменений: счётчики — снимок последнего тика, а не сумма.
+        // Реестр классов: имена читаются у всех элементов, включая чужие
+        // (после одного тика — по числу элементов).
+        auto name_count = [](const LootFixture& fx, const char* name) {
+            for (int i = 0; i < 8 && fx.c.item_class_count(i); ++i)
+                if (std::strcmp(fx.c.item_class_name(i), name) == 0)
+                    return fx.c.item_class_count(i);
+            return 0u;
+        };
+        assert(name_count(f, "DelayIgnoreTimeScalePromise") == 3);
+        assert(name_count(f, "SomethingElse") == 1);
+        assert(name_count(f, "NoSuchClass") == 0);
+        // Новый тик без изменений: счётчики — снимок последнего тика, а не
+        // сумма; реестр имён — накопительный (ещё +3/+1).
         f.tick();
         assert(f.c.diag.items == 4 && f.c.diag.wr == 0);
+        assert(name_count(f, "DelayIgnoreTimeScalePromise") == 6);
+        f.tick(false);
+        assert(f.c.item_class_count(0) == 0);   // выключение чистит реестр
     }
     {   // Time-scaled DelayPromise: та же побитовая сверка темпа, но поля
         // сдвинуты (span 0x1C/elapsed 0x20/frame 0x18) — запись идёт в своё

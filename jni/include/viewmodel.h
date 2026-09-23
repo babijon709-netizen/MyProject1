@@ -97,6 +97,12 @@ struct Diagnostics {
     // +0x18), dpr — DelayPromise (поле +0x1C). До 4 разных значений.
     unsigned loot_ign_bits[4] = {}, loot_ign_n[4] = {};
     unsigned loot_dpr_bits[4] = {}, loot_dpr_n[4] = {};
+    // Накопительный (с момента включения) реестр классов ВСЕХ элементов
+    // loopItems — включая не-обещания: имя и число встреч. Показывает, чем
+    // на самом деле ждёт поток переноса, если это не Delay-обещания.
+    char loot_names[8][48] = {};
+    unsigned loot_name_n[8] = {};
+    unsigned loot_total = 0;   // всего записей 0.0 с момента включения
 };
 
 // Гистограмма темпов в строку вида «3eb33333x12 3f000000x3» (или «-»).
@@ -111,6 +117,22 @@ inline void loot_format_hist(const unsigned* bits, const unsigned* n,
         if (w < 0 || (std::size_t)w >= cap - off) break;
         off += (std::size_t)w;
     }
+}
+
+// Реестр классов в строку вида «DelayIgnoreTimeScalePromise x12, …» (или «-»).
+inline void loot_format_names(const char (*names)[48], const unsigned* n,
+                              char* out, std::size_t cap) {
+    if (cap == 0) return;
+    out[0] = '-'; out[1] = 0;
+    if (n[0] == 0) return;
+    std::size_t off = 0;
+    for (int i = 0; i < 8 && n[i]; ++i) {
+        int w = std::snprintf(out + off, cap - off, "%s x%u, ", names[i], n[i]);
+        if (w < 0 || (std::size_t)w >= cap - off) break;
+        off += (std::size_t)w;
+    }
+    if (off >= 2 && out[off - 1] == ' ' && out[off - 2] == ',')
+        out[off - 2] = '\0';   // убрать хвостовую запятую
 }
 // Снимок состояния limiting FPS для меню: снимается контроллером при последнем
 // тике (до 100 мс назад), дополнительных обращений к памяти игры не делает.

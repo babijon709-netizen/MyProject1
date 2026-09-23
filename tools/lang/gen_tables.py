@@ -106,9 +106,11 @@ UI_EN = {
     'Мгновенный подбор': 'Instant pickup',
     'Подбор: не применено': 'Pickup: not applied',
     'Подбор: работает': 'Pickup: active',
-    'Диаг: раннеры %u/%u/%u, предметы %u, обещания %u, темп %u, записи %u':
-        'Diag: runners %u/%u/%u, items %u, promises %u, cadence %u, writes %u',
-    'Накоп: unscaled %s, scaled %s': 'Accum: unscaled %s, scaled %s',
+    'Диаг: раннеры %u/%u/%u, предметы %u, ожидания %u+%u, темп %u, записи %u, сбой %d':
+        'Diag: runners %u/%u/%u, items %u, waits %u+%u, cadence %u, writes %u, fail %d',
+    'Накоп unscaled: %s': 'Accum unscaled: %s',
+    'Накоп scaled: %s': 'Accum scaled: %s',
+    'Классы: %s': 'Classes: %s',
     'Потоки переноса': 'Transfer flows',
     'окно лута': 'loot window',
     'зона подбора': 'pickup zone',

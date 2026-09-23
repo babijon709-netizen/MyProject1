@@ -944,18 +944,20 @@ float TabContent(int tab, float dt, float cW) {
         else if (pickupState.fast_loot == viewmodel::Status::Waiting)
             ImGui::TextDisabled("%s", XS("Подбор: ожидание"));
         // Снимок конвейера последнего тика: длина/слоты/раннеры → элементы →
-        // обещания → темп → записи. Ноль в середине = где теряются обещания.
+        // ожидания обоих классов → темп → записи → сбой. Ноль в середине =
+        // где теряются обещания.
         if (pickupState.fast_loot == viewmodel::Status::Active ||
             pickupState.fast_loot == viewmodel::Status::Failed)
-            ImGui::TextDisabled(XS("Диаг: раннеры %u/%u/%u, предметы %u, обещания %u, темп %u, записи %u"),
+            ImGui::TextDisabled(XS("Диаг: раннеры %u/%u/%u, предметы %u, ожидания %u+%u, темп %u, записи %u, сбой %d"),
                                 pickupState.loot_len, pickupState.loot_slots,
                                 pickupState.loot_runners, pickupState.loot_items,
-                                pickupState.loot_class, pickupState.loot_span,
-                                pickupState.loot_wr);
-        // Накопительная (с включения тумблера) гистограмма фактических битов
-        // темпа опознанных обещаний: unscaled = DelayIgnoreTimeScalePromise,
-        // scaled = DelayPromise. Показывает реальную константу потока
-        // подбора, даже если побитовый фильтр 0.35f не нашёл совпадений.
+                                pickupState.loot_class, pickupState.loot_dpr,
+                                pickupState.loot_span, pickupState.loot_wr,
+                                pickupState.loot_fail ? 1 : 0);
+        // Накопительные (с включения тумблера) гистограммы фактических битов
+        // темпа опознанных обещаний — по одной строке на класс, чтобы не было
+        // разночтений при переносе строк. unscaled = DelayIgnoreTimeScalePromise
+        // (поле +0x18), scaled = DelayPromise (поле +0x1C).
         if (pickupState.fast_loot == viewmodel::Status::Active ||
             pickupState.fast_loot == viewmodel::Status::Failed) {
             char ign[80], dpr[80];
@@ -963,7 +965,18 @@ float TabContent(int tab, float dt, float cW) {
                                         pickupState.loot_ign_n, ign, sizeof(ign));
             viewmodel::loot_format_hist(pickupState.loot_dpr_bits,
                                         pickupState.loot_dpr_n, dpr, sizeof(dpr));
-            ImGui::TextDisabled(XS("Накоп: unscaled %s, scaled %s"), ign, dpr);
+            ImGui::TextDisabled(XS("Накоп unscaled: %s"), ign);
+            ImGui::TextDisabled(XS("Накоп scaled: %s"), dpr);
+        }
+        // Реестр классов всего, что реально лежит в loopItems (с включения):
+        // если перенос ждёт не Delay-обещания, а что-то другое — имя будет
+        // здесь (например WaitUntilPromise у сетевых ожиданий).
+        if (pickupState.fast_loot == viewmodel::Status::Active ||
+            pickupState.fast_loot == viewmodel::Status::Failed) {
+            char cls[384];
+            viewmodel::loot_format_names(pickupState.loot_names,
+                                         pickupState.loot_name_n, cls, sizeof(cls));
+            ImGui::TextDisabled(XS("Классы: %s"), cls);
         }
 
         SHdr(XS("Лимит FPS"));

@@ -75,6 +75,9 @@ inline constexpr int32_t kMaxItemsPerArray   = 4096;
 // Сколько тиков после последней записи считается, что «перенос идёт сейчас»
 // (для строки статуса «Подбор: мгновенно»; ~2 с при 60 fps).
 inline constexpr std::uint32_t kDrainRecentTicks = 120;
+// Реестр классов элементов loopItems: сколько разных имён помним и размер буфера.
+inline constexpr std::size_t kMaxItemNames = 8;
+inline constexpr std::size_t kItemNameCap  = 48;
 
 template <class IO> class Controller {
     IO& io_;
@@ -175,6 +178,39 @@ template <class IO> class Controller {
         }
         scaled_class_ = klass; return 2;
     }
+    // Чтение C-строки (имя класса) из памяти игры: посимвольно, до NUL.
+    bool read_text(std::uint64_t address, char* buf, std::size_t cap) {
+        if (cap == 0) return false;
+        std::size_t i = 0;
+        for (; i + 1 < cap; ++i) {
+            char c = 0;
+            if (!io_.read(address + i, c)) return false;
+            if (c == '\0') { buf[i] = '\0'; return true; }
+            buf[i] = c;
+        }
+        buf[cap - 1] = '\0';
+        return true;
+    }
+    // Реестр классов всех элементов loopItems (включая не-обещания): копится
+    // с момента включения тумблера, имя читается один раз на класс. Именно он
+    // отвечает на вопрос «чем на самом деле ждёт поток переноса», если это
+    // не Delay-обещания (например, сетевые WaitUntil-обещания).
+    void note_item_class(std::uint64_t object) {
+        std::uint64_t klass = 0;
+        if (!pointer(object, klass) || klass < 0x10000) return;
+        for (const auto& e : name_ids_)
+            if (e.first == klass) { ++name_n_[e.second]; return; }
+        if (name_ids_.size() >= kMaxItemNames) return;   // реестр полон
+        std::uint64_t np = 0;
+        if (!pointer(klass + go_active::IL2CPP_CLASS_NAME, np) || np < 0x10000)
+            return;
+        char buf[kItemNameCap];
+        if (!read_text(np, buf, sizeof(buf)) || buf[0] == '\0') return;
+        const std::size_t slot = name_ids_.size();
+        std::memcpy(names_[slot], buf, kItemNameCap);
+        ++name_n_[slot];
+        name_ids_.emplace_back(klass, slot);
+    }
 public:
     viewmodel::Status status = viewmodel::Status::Off;
     // Диагностика последнего тика: сколько объектов прошло каждую стадию
@@ -212,6 +248,13 @@ public:
             // диагностическая, главное — увидеть константу потока подбора
         }
     } hist_ign, hist_dpr;
+    // Реестр классов элементов loopItems (накопительный, с включения):
+    // имя класса (до kItemNameCap-1 символов) и сколько раз встречался.
+    char names_[kMaxItemNames][kItemNameCap] = {};
+    std::uint32_t name_n_[kMaxItemNames] = {};
+    std::vector<std::pair<std::uint64_t, std::size_t>> name_ids_;
+    const char* item_class_name(std::size_t i) const { return names_[i]; }
+    std::uint32_t item_class_count(std::size_t i) const { return name_n_[i]; }
     explicit Controller(IO& io) : io_(io) {}
     bool draining() const { return writes_last_ > 0 && ticks_since_write_ < kDrainRecentTicks; }
     std::uint32_t neutralized() const { return neutralized_; }
@@ -226,6 +269,11 @@ public:
         status = viewmodel::Status::Off;
         diag = Diag{};
         hist_ign = Hist{}; hist_dpr = Hist{};
+        for (std::size_t i = 0; i < kMaxItemNames; ++i) {
+            names_[i][0] = '\0';
+            name_n_[i] = 0;
+        }
+        name_ids_.clear();
     }
     void tick(std::uint64_t session, std::uint64_t base, bool enabled) {
         using viewmodel::Status;
@@ -309,6 +357,7 @@ public:
                     !item)
                     continue;
                 ++diag.items;
+                note_item_class(item);
                 const int kind = promise_kind(item);
                 if (kind == 0) continue;
                 // Раскладка полей зависит от класса: у time-scaled варианта

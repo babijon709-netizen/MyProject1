@@ -4,6 +4,7 @@
 #include "object_data_memory.h"
 #include "maps_lookup.h"
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include "game_viewmodel_internal.h"
 #include "game_internal.h"
@@ -200,18 +201,30 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         const auto now = Clock::now();
         if (live && (changed || st.loot_fail) &&
             now - loot_diag_at >= std::chrono::milliseconds(2000)) {
-            char ign[80], dpr[80];
+            char ign[80], dpr[80], cls[384];
             viewmodel::loot_format_hist(st.loot_ign_bits, st.loot_ign_n, ign, sizeof(ign));
             viewmodel::loot_format_hist(st.loot_dpr_bits, st.loot_dpr_n, dpr, sizeof(dpr));
-            LogLine("loot diag: runners len=%u slots=%u ok=%u; items=%u class=%u dpr=%u span=%u val=%u writes=%u fail=%d; acc ign=[%s] dpr=[%s]",
+            viewmodel::loot_format_names(st.loot_names, st.loot_name_n, cls, sizeof(cls));
+            LogLine("loot diag: runners len=%u slots=%u ok=%u; items=%u class=%u dpr=%u span=%u val=%u writes=%u fail=%d; acc ign=[%s] dpr=[%s]; classes=[%s]",
                     st.loot_len, st.loot_slots, st.loot_runners, st.loot_items,
                     st.loot_class, st.loot_dpr, st.loot_span, st.loot_val,
-                    st.loot_wr, st.loot_fail ? 1 : 0, ign, dpr);
+                    st.loot_wr, st.loot_fail ? 1 : 0, ign, dpr, cls);
             loot_diag_at = now;
             loot_diag_last = st;
         } else if (!live) {
             loot_diag_at = Clock::now() - std::chrono::hours(1);  // мгновенно после нового включения
             loot_diag_last = {};
+        }
+        // Запись пошла — короткая строка в момент записи (не чаще 0.5 с):
+        // по таймстампам лога видно, как записи соотносятся с реальным
+        // движением предметов (если записи идут, а темп прежний — pacing
+        // задаёт не ожидание, а что-то другое, например сервер).
+        static Clock::time_point loot_wr_at = Clock::now() - std::chrono::hours(1);
+        if (st.loot_wr > 0 && now - loot_wr_at >= std::chrono::milliseconds(500)) {
+            LogLine("loot write: items=%u unscaled=%u scaled=%u cadence=%u writes=%u total=%u",
+                    st.loot_items, st.loot_class, st.loot_dpr, st.loot_span,
+                    st.loot_wr, st.loot_total);
+            loot_wr_at = now;
         }
     }
 }
@@ -233,11 +246,16 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     status.loot_val = loot.diag.val;
     status.loot_wr = loot.diag.wr;
     status.loot_fail = loot.diag.fail;
+    status.loot_total = loot.neutralized();
     for (int i = 0; i < 4; ++i) {
         status.loot_ign_bits[i] = loot.hist_ign.bits[i];
         status.loot_ign_n[i] = loot.hist_ign.n[i];
         status.loot_dpr_bits[i] = loot.hist_dpr.bits[i];
         status.loot_dpr_n[i] = loot.hist_dpr.n[i];
+    }
+    for (int i = 0; i < 8; ++i) {
+        std::memcpy(status.loot_names[i], loot.item_class_name(i), 48);
+        status.loot_name_n[i] = loot.item_class_count(i);
     }
     return status;
 }
