@@ -925,59 +925,16 @@ float TabContent(int tab, float dt, float cW) {
                  (vm.no_spread && weaponStatus.no_spread == viewmodel::Status::Waiting))
             ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
 
-        // Мгновенный подбор вернулся: heap-реализация без патчей библиотек
+        // Быстрый сбор: heap-реализация без патчей библиотек
         // (fast_loot::Controller, loot_memory.h) — обнуляет float-темп
-        // (0.35 с/предмет) активных ожиданий collect-all. Статус — как у
-        // оружия: применено / перенос идёт сейчас / не применено.
+        // (0.35 с/предмет) активных ожиданий collect-all.
         SHdr(XS("Подбор"));
-        CardBg(Layout::RowH * 2.f);
+        CardBg(Layout::RowH * 1);
         const bool oldFastLoot = vm.fast_loot;
-        ToggleRow("##instantloot", XS("Мгновенный подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
+        ToggleRow("##fastloot", XS("Быстрый сбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
         if (oldFastLoot != vm.fast_loot) esp_viewmodel_tick(vm);
-        const auto pickupState = esp_viewmodel_diagnostics();
-        if (pickupState.fast_loot == viewmodel::Status::Failed)
-            ImGui::TextDisabled("%s", XS("Подбор: не применено"));
-        else if (pickupState.fast_loot == viewmodel::Status::Active)
-            ImGui::TextDisabled("%s", pickupState.fast_loot_draining
-                                           ? XS("Подбор: мгновенно")
-                                           : XS("Подбор: работает"));
-        else if (pickupState.fast_loot == viewmodel::Status::Waiting)
-            ImGui::TextDisabled("%s", XS("Подбор: ожидание"));
-        // Снимок конвейера последнего тика: длина/слоты/раннеры → элементы →
-        // ожидания обоих классов → темп → записи → сбой. Ноль в середине =
-        // где теряются обещания.
-        if (pickupState.fast_loot == viewmodel::Status::Active ||
-            pickupState.fast_loot == viewmodel::Status::Failed)
-            ImGui::TextDisabled(XS("Диаг: раннеры %u/%u/%u, предметы %u, ожидания %u+%u, темп %u, записи %u, сбой %d"),
-                                pickupState.loot_len, pickupState.loot_slots,
-                                pickupState.loot_runners, pickupState.loot_items,
-                                pickupState.loot_class, pickupState.loot_dpr,
-                                pickupState.loot_span, pickupState.loot_wr,
-                                pickupState.loot_fail ? 1 : 0);
-        // Накопительные (с включения тумблера) гистограммы фактических битов
-        // темпа опознанных обещаний — по одной строке на класс, чтобы не было
-        // разночтений при переносе строк. unscaled = DelayIgnoreTimeScalePromise
-        // (поле +0x18), scaled = DelayPromise (поле +0x1C).
-        if (pickupState.fast_loot == viewmodel::Status::Active ||
-            pickupState.fast_loot == viewmodel::Status::Failed) {
-            char ign[80], dpr[80];
-            viewmodel::loot_format_hist(pickupState.loot_ign_bits,
-                                        pickupState.loot_ign_n, ign, sizeof(ign));
-            viewmodel::loot_format_hist(pickupState.loot_dpr_bits,
-                                        pickupState.loot_dpr_n, dpr, sizeof(dpr));
-            ImGui::TextDisabled(XS("Накоп unscaled: %s"), ign);
-            ImGui::TextDisabled(XS("Накоп scaled: %s"), dpr);
-        }
-        // Реестр классов всего, что реально лежит в loopItems (с включения):
-        // если перенос ждёт не Delay-обещания, а что-то другое — имя будет
-        // здесь (например WaitUntilPromise у сетевых ожиданий).
-        if (pickupState.fast_loot == viewmodel::Status::Active ||
-            pickupState.fast_loot == viewmodel::Status::Failed) {
-            char cls[384];
-            viewmodel::loot_format_names(pickupState.loot_names,
-                                         pickupState.loot_name_n, cls, sizeof(cls));
-            ImGui::TextDisabled(XS("Классы: %s"), cls);
-        }
+
+        ImGui::Dummy({1.f, 12.f});
 
         SHdr(XS("Лимит FPS"));
         {

@@ -1,7 +1,6 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
-#include <cstdio>
 #include <cstring>
 
 // Vertical world FOV; hands are offsets from each weapon's original pose, cm.
@@ -12,7 +11,7 @@ struct ViewmodelSettings {
     float x = 0.f, y = 0.f, z = 0.f;
     int fps_limit = 0; // 0 = original game limit; otherwise 90 / 120 / 144
     bool no_recoil = false, no_spread = false;
-    // Мгновенный подбор: без патчей кода — контроллер дописывает 0.0 в
+    // Быстрый сбор: без патчей кода — контроллер дописывает 0.0 в
     // float-темп активных ожиданий collect-all в куче (loot_memory.h).
     bool fast_loot = false;
 };
@@ -78,62 +77,11 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     return sanitize(s);
 }
 enum class Status { Off, Waiting, Active, ADS, Failed };
-// fast_loot_draining: прямо сейчас переносится окно лута (последняя запись в
-// поле темпа — секунду-две назад); иначе «применено, ждёт ящика».
 struct Diagnostics {
     Status fov = Status::Off, hands = Status::Off, no_recoil = Status::Off, no_spread = Status::Off;
     Status fast_loot = Status::Off;
-    bool fast_loot_draining = false;
-    // Конвейер подбора последнего тика (контроллер fast_loot): длина массива
-    // раннеров → непустые слоты → опознанные раннеры → элементы loopItems →
-    // обещания нужного класса → совпавший темп 0.35f → прошедшие фильтры →
-    // записи. Ноль в середине цепочки = место, где теряются обещания.
-    unsigned loot_len = 0, loot_slots = 0, loot_runners = 0, loot_items = 0,
-             loot_class = 0, loot_dpr = 0, loot_span = 0, loot_val = 0,
-             loot_wr = 0;
-    bool loot_fail = false;
-    // Накопительные (с момента включения) гистограммы фактических битов
-    // темпа опознанных обещаний: ign — DelayIgnoreTimeScalePromise (поле
-    // +0x18), dpr — DelayPromise (поле +0x1C). До 4 разных значений.
-    unsigned loot_ign_bits[4] = {}, loot_ign_n[4] = {};
-    unsigned loot_dpr_bits[4] = {}, loot_dpr_n[4] = {};
-    // Накопительный (с момента включения) реестр классов ВСЕХ элементов
-    // loopItems — включая не-обещания: имя и число встреч. Показывает, чем
-    // на самом деле ждёт поток переноса, если это не Delay-обещания.
-    char loot_names[8][48] = {};
-    unsigned loot_name_n[8] = {};
-    unsigned loot_total = 0;   // всего записей 0.0 с момента включения
 };
 
-// Гистограмма темпов в строку вида «3eb33333x12 3f000000x3» (или «-»).
-inline void loot_format_hist(const unsigned* bits, const unsigned* n,
-                             char* out, std::size_t cap) {
-    if (cap == 0) return;
-    out[0] = '-'; out[1] = 0;
-    if (n[0] == 0) return;
-    std::size_t off = 0;
-    for (int i = 0; i < 4 && n[i]; ++i) {
-        int w = std::snprintf(out + off, cap - off, "%08xx%u ", bits[i], n[i]);
-        if (w < 0 || (std::size_t)w >= cap - off) break;
-        off += (std::size_t)w;
-    }
-}
-
-// Реестр классов в строку вида «DelayIgnoreTimeScalePromise x12, …» (или «-»).
-inline void loot_format_names(const char (*names)[48], const unsigned* n,
-                              char* out, std::size_t cap) {
-    if (cap == 0) return;
-    out[0] = '-'; out[1] = 0;
-    if (n[0] == 0) return;
-    std::size_t off = 0;
-    for (int i = 0; i < 8 && n[i]; ++i) {
-        int w = std::snprintf(out + off, cap - off, "%s x%u, ", names[i], n[i]);
-        if (w < 0 || (std::size_t)w >= cap - off) break;
-        off += (std::size_t)w;
-    }
-    if (off >= 2 && out[off - 1] == ' ' && out[off - 2] == ',')
-        out[off - 2] = '\0';   // убрать хвостовую запятую
-}
 // Снимок состояния limiting FPS для меню: снимается контроллером при последнем
 // тике (до 100 мс назад), дополнительных обращений к памяти игры не делает.
 struct FpsUiInfo {

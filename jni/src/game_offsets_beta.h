@@ -576,7 +576,7 @@ inline constexpr std::uint64_t ITEMPICKUP_ITEM_OBJECT = 0xA8; // Oxide.Item
 inline constexpr std::uint64_t ITEMPICKUP_SHORTNAME   = 0xD8; // string item
 inline constexpr std::uint64_t ITEMPICKUP_AMOUNT      = 0xE0; // int amount
 
-// ---- Мгновенный подбор: темп collect-all в UniTask (Cysharp.Threading.Tasks)
+// ---- Быстрый сбор: темп collect-all в UniTask (Cysharp.Threading.Tasks)
 // Все три потока подбора — «Собрать всё» в окне лута (xw.CollectAllItems),
 // «быстрая загрузка» (xv.FastLoadAll) и автоподбор зоны (eDE.CollectAllItems)
 // — переносят по одному предмету за ожидание UniTask.WaitForSeconds(0.35f,

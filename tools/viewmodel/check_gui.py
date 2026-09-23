@@ -4,9 +4,8 @@
 1. Misc toggles must animate from the same state used by the row: ToggleRow
    changes the bool but draws the supplied animation value, and forgetting its
    per-frame Tick leaves a functional toggle looking permanently disabled.
-2. Instant pickup is a heap-data feature again (fast_loot::Controller in
-   loot_memory.h): the toggle must drive esp_viewmodel_tick and an apply
-   status line must be rendered from esp_viewmodel_diagnostics. The retired
+2. Fast pickup is a heap-data feature (fast_loot::Controller in
+   loot_memory.h): the toggle must drive esp_viewmodel_tick. The retired
    loot-module APIs (esp_loot_tick & co.) stay banned.
 """
 from pathlib import Path
@@ -24,15 +23,13 @@ for setting, anim in [('fov_enabled', 'a_custom_fov'),
     assert re.search(r'Tick\(\s*g_state\.' + anim +
                      r'\s*,\s*g_state\.viewmodel\.' + setting +
                      r'\s*,\s*dt\s*\)', menu), f'missing animation update: {setting}'
-pickup = menu.split('SHdr(XS("Подбор"))', 1)[1].split('SHdr(', 1)[0]
-# Мгновенный подбор снова рабочий (heap-данные, loot_memory.h): тумблер обязан
-# тикать контроллер и показывать статус применения. API удалённого модуля
-# (esp_loot_tick и имена из loot::Diagnostics) возвращаться не должны.
-assert 'ToggleRow("##instantloot"' in pickup, 'the toggle row must stay'
+pickup = menu.split('SHdr(XS("Подбор"))', 1)[1].split('SHdr(XS("Лимит FPS"))', 1)[0]
+# Быстрый сбор (heap-данные, loot_memory.h): тумблер обязан тикать контроллер;
+# статусов и диагностики под ним нет — только сама строка и отступ до FPS.
+assert 'ToggleRow("##fastloot", XS("Быстрый сбор")' in pickup, 'the toggle row must stay'
 assert 'esp_viewmodel_tick' in pickup, 'the toggle must drive the controller tick'
-assert 'esp_viewmodel_diagnostics' in pickup, 'apply status must be rendered'
-assert 'fast_loot_draining' in pickup, 'the "transferring now" hint is missing'
-assert 'Подбор: не применено' in pickup and 'Подбор: мгновенно' in pickup, 'status strings are missing'
+assert 'ImGui::Dummy' in pickup, 'spacing between pickup and FPS section is missing'
+assert 'esp_viewmodel_diagnostics' not in pickup, 'loot status/diag lines must stay removed'
 for banned in ('esp_loot_tick', 'lootStatus', 'LootReasonText', 'LootKindText',
                'esp_loot_diagnostics', 'esp_loot_refusal'):
     assert banned not in pickup, 'retired loot-module API must not come back: %s' % banned
@@ -49,4 +46,4 @@ assert 'ImGui::Button(' not in fps, 'chips must use custom-coded buttons'
 assert 'g_state.a_fps_90' in menu and 'Tick(g_state.a_fps_90' in menu, 'selection fill animation is not ticked'
 
 print('misc toggles: row state and per-frame animation bindings: OK')
-print('instant pickup drives the heap controller and renders its apply status; fps mode+apply status is rendered: OK')
+print('fast pickup drives the heap controller; spacing to FPS section present: OK')

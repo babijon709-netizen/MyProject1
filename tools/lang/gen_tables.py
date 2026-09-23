@@ -101,16 +101,9 @@ UI_EN = {
     'Оружие': 'Weapons',
     'Оружие: не применено, проверьте версию игры и журнал': 'Weapons: not applied; check game version and log',
     'Ожидание подходящего оружия': 'Waiting for a supported weapon',
-    # мгновенный подбор (loot.h): строки состояния повторяют оружейные
+    # быстрый сбор (loot_memory.h)
     'Подбор': 'Looting',
-    'Мгновенный подбор': 'Instant pickup',
-    'Подбор: не применено': 'Pickup: not applied',
-    'Подбор: работает': 'Pickup: active',
-    'Диаг: раннеры %u/%u/%u, предметы %u, ожидания %u+%u, темп %u, записи %u, сбой %d':
-        'Diag: runners %u/%u/%u, items %u, waits %u+%u, cadence %u, writes %u, fail %d',
-    'Накоп unscaled: %s': 'Accum unscaled: %s',
-    'Накоп scaled: %s': 'Accum scaled: %s',
-    'Классы: %s': 'Classes: %s',
+    'Быстрый сбор': 'Fast pickup',
     'Потоки переноса': 'Transfer flows',
     'окно лута': 'loot window',
     'зона подбора': 'pickup zone',
@@ -118,8 +111,6 @@ UI_EN = {
     'поток не определён': 'the flow is not identified',
     'код образа не читается': 'the image code is unreadable',
     'Код потока изменён': 'the flow code was modified in the process',
-    'Подбор: мгновенно': 'Pickup: instant',
-    'Подбор: ожидание': 'Pickup: waiting',
     'Ожидание открытого контейнера': 'Waiting for an open container',
     'Данные': 'Data',
     # причины отказа подбора (журнал в сборке выключен, поэтому они в меню)

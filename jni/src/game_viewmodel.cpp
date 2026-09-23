@@ -4,7 +4,6 @@
 #include "object_data_memory.h"
 #include "maps_lookup.h"
 #include <chrono>
-#include <cstring>
 #include <fstream>
 #include "game_viewmodel_internal.h"
 #include "game_internal.h"
@@ -122,7 +121,7 @@ void esp_viewmodel_reset(bool restore) {
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))
         LogLine("weapon data: originals could not all be restored before disconnect; restart game");
-    // Мгновенному подбору восстанавливать нечего: поле темпа переписывает сама
+    // Быстрому сбору восстанавливать нечего: поле темпа переписывает сама
     // игра при каждом новом ожидании, поэтому сброс — это только «забыть адреса».
     loot.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
@@ -143,7 +142,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         return;
     }
     tick_fps(epoch, settings.fps_limit);
-    // Мгновенный подбор не зависит от локального игрока — тикается всегда,
+    // Быстрый сбор не зависит от локального игрока — тикается всегда,
     // до ветки с резолвом игрока (она ниже может выйти раньше времени).
     loot.tick(epoch, g_il2cpp_base, settings.fast_loot);
     // Resolve the current local player from the static source, NOT the ESP
@@ -175,88 +174,13 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
                 (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread, (int)st.fast_loot);
         last_log = st;
     }
-    // Диагностика подбора: пока тумблер включён, раз в ~2 с (и при смене
-    // картины) пишем снимок конвейера — какой стадии достигли обещания —
-    // и накопительную гистограмму фактических битов темпа всех опознанных
-    // обещаний (ign = DelayIgnoreTimeScalePromise/+0x18,
-    // dpr = DelayPromise/+0x1C): она показывает реальную константу потока
-    // подбора даже когда побитовый фильтр 0.35f не сработал.
-    {
-        static Clock::time_point loot_diag_at = Clock::now() - std::chrono::hours(1);
-        static viewmodel::Diagnostics loot_diag_last = {};
-        const bool live = st.fast_loot == viewmodel::Status::Active ||
-                          st.fast_loot == viewmodel::Status::Waiting ||
-                          st.fast_loot == viewmodel::Status::Failed;
-        const bool changed = st.fast_loot != loot_diag_last.fast_loot ||
-                             st.loot_len != loot_diag_last.loot_len ||
-                             st.loot_slots != loot_diag_last.loot_slots ||
-                             st.loot_runners != loot_diag_last.loot_runners ||
-                             st.loot_items != loot_diag_last.loot_items ||
-                             st.loot_class != loot_diag_last.loot_class ||
-                             st.loot_dpr != loot_diag_last.loot_dpr ||
-                             st.loot_span != loot_diag_last.loot_span ||
-                             st.loot_wr != loot_diag_last.loot_wr ||
-                             st.loot_ign_n[0] != loot_diag_last.loot_ign_n[0] ||
-                             st.loot_dpr_n[0] != loot_diag_last.loot_dpr_n[0];
-        const auto now = Clock::now();
-        if (live && (changed || st.loot_fail) &&
-            now - loot_diag_at >= std::chrono::milliseconds(2000)) {
-            char ign[80], dpr[80], cls[384];
-            viewmodel::loot_format_hist(st.loot_ign_bits, st.loot_ign_n, ign, sizeof(ign));
-            viewmodel::loot_format_hist(st.loot_dpr_bits, st.loot_dpr_n, dpr, sizeof(dpr));
-            viewmodel::loot_format_names(st.loot_names, st.loot_name_n, cls, sizeof(cls));
-            LogLine("loot diag: runners len=%u slots=%u ok=%u; items=%u class=%u dpr=%u span=%u val=%u writes=%u fail=%d; acc ign=[%s] dpr=[%s]; classes=[%s]",
-                    st.loot_len, st.loot_slots, st.loot_runners, st.loot_items,
-                    st.loot_class, st.loot_dpr, st.loot_span, st.loot_val,
-                    st.loot_wr, st.loot_fail ? 1 : 0, ign, dpr, cls);
-            loot_diag_at = now;
-            loot_diag_last = st;
-        } else if (!live) {
-            loot_diag_at = Clock::now() - std::chrono::hours(1);  // мгновенно после нового включения
-            loot_diag_last = {};
-        }
-        // Запись пошла — короткая строка в момент записи (не чаще 0.5 с):
-        // по таймстампам лога видно, как записи соотносятся с реальным
-        // движением предметов (если записи идут, а темп прежний — pacing
-        // задаёт не ожидание, а что-то другое, например сервер).
-        static Clock::time_point loot_wr_at = Clock::now() - std::chrono::hours(1);
-        if (st.loot_wr > 0 && now - loot_wr_at >= std::chrono::milliseconds(500)) {
-            LogLine("loot write: items=%u unscaled=%u scaled=%u cadence=%u writes=%u total=%u",
-                    st.loot_items, st.loot_class, st.loot_dpr, st.loot_span,
-                    st.loot_wr, st.loot_total);
-            loot_wr_at = now;
-        }
-    }
 }
-
 viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     auto status = controller.status;
     status.no_recoil = weapons.recoil;
     status.no_spread = weapons.spread;
     status.fast_loot = loot.status;
-    status.fast_loot_draining = loot.draining();
-    status.loot_len = loot.diag.len;
-    status.loot_slots = loot.diag.slots;
-    status.loot_runners = loot.diag.ok;
-    status.loot_items = loot.diag.items;
-    status.loot_class = loot.diag.cls;
-    status.loot_dpr = loot.diag.dpr;
-    status.loot_span = loot.diag.span;
-    status.loot_val = loot.diag.val;
-    status.loot_wr = loot.diag.wr;
-    status.loot_fail = loot.diag.fail;
-    status.loot_total = loot.neutralized();
-    for (int i = 0; i < 4; ++i) {
-        status.loot_ign_bits[i] = loot.hist_ign.bits[i];
-        status.loot_ign_n[i] = loot.hist_ign.n[i];
-        status.loot_dpr_bits[i] = loot.hist_dpr.bits[i];
-        status.loot_dpr_n[i] = loot.hist_dpr.n[i];
-    }
-    for (int i = 0; i < 8; ++i) {
-        std::memcpy(status.loot_names[i], loot.item_class_name(i), 48);
-        status.loot_name_n[i] = loot.item_class_count(i);
-    }
     return status;
 }
 

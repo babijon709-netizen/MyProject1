@@ -1,5 +1,5 @@
 #pragma once
-// Мгновенный подбор лута — только данные в управляемой куче.
+// Быстрый сбор лута — только данные в управляемой куче.
 //
 // БЕЗ патчей библиотек (ни инструкций, ни констант в образе .so), БЕЗ вызовов
 // кода игры и БЕЗ инжекции: единственная запись во всю игру — float в куче,
@@ -72,12 +72,6 @@ inline constexpr std::uint32_t kCadenceBits = 0x3EB33333u;
 inline constexpr int32_t kMaxRunners      = 64;
 inline constexpr std::size_t kMaxItemsPerTick = 512;
 inline constexpr int32_t kMaxItemsPerArray   = 4096;
-// Сколько тиков после последней записи считается, что «перенос идёт сейчас»
-// (для строки статуса «Подбор: мгновенно»; ~2 с при 60 fps).
-inline constexpr std::uint32_t kDrainRecentTicks = 120;
-// Реестр классов элементов loopItems: сколько разных имён помним и размер буфера.
-inline constexpr std::size_t kMaxItemNames = 8;
-inline constexpr std::size_t kItemNameCap  = 48;
 
 template <class IO> class Controller {
     IO& io_;
@@ -94,8 +88,6 @@ template <class IO> class Controller {
     // чтобы один огромный массив не голодал соседей и свой хвост.
     std::uint64_t begin_runner_ = 0, item_phase_ = 0;
     std::uint32_t neutralized_ = 0;     // сколько ожиданий ускорено всего
-    std::uint32_t writes_last_ = 0;     // в последнем тике
-    std::uint32_t ticks_since_write_ = kDrainRecentTicks;
     void forget_addresses() {
         // Сессия сменилась: ни один старый адрес не обязан быть валиден.
         helper_class_ = 0; promise_class_ = 0; scaled_class_ = 0;
@@ -178,85 +170,9 @@ template <class IO> class Controller {
         }
         scaled_class_ = klass; return 2;
     }
-    // Чтение C-строки (имя класса) из памяти игры: посимвольно, до NUL.
-    bool read_text(std::uint64_t address, char* buf, std::size_t cap) {
-        if (cap == 0) return false;
-        std::size_t i = 0;
-        for (; i + 1 < cap; ++i) {
-            char c = 0;
-            if (!io_.read(address + i, c)) return false;
-            if (c == '\0') { buf[i] = '\0'; return true; }
-            buf[i] = c;
-        }
-        buf[cap - 1] = '\0';
-        return true;
-    }
-    // Реестр классов всех элементов loopItems (включая не-обещания): копится
-    // с момента включения тумблера, имя читается один раз на класс. Именно он
-    // отвечает на вопрос «чем на самом деле ждёт поток переноса», если это
-    // не Delay-обещания (например, сетевые WaitUntil-обещания).
-    void note_item_class(std::uint64_t object) {
-        std::uint64_t klass = 0;
-        if (!pointer(object, klass) || klass < 0x10000) return;
-        for (const auto& e : name_ids_)
-            if (e.first == klass) { ++name_n_[e.second]; return; }
-        if (name_ids_.size() >= kMaxItemNames) return;   // реестр полон
-        std::uint64_t np = 0;
-        if (!pointer(klass + go_active::IL2CPP_CLASS_NAME, np) || np < 0x10000)
-            return;
-        char buf[kItemNameCap];
-        if (!read_text(np, buf, sizeof(buf)) || buf[0] == '\0') return;
-        const std::size_t slot = name_ids_.size();
-        std::memcpy(names_[slot], buf, kItemNameCap);
-        ++name_n_[slot];
-        name_ids_.emplace_back(klass, slot);
-    }
 public:
     viewmodel::Status status = viewmodel::Status::Off;
-    // Диагностика последнего тика: сколько объектов прошло каждую стадию
-    // конвейера. Нули в середине цепочки показывают, где именно теряются
-    // обещания (длина массива раннеров → непустые слоты → опознанные раннеры
-    // → элементы loopItems → обещания нужного класса → совпавший темп →
-    // прошедшие фильтры кадра → записи). Отображается в меню и в логе.
-    struct Diag {
-        std::uint32_t len = 0;      // длина массива runners
-        std::uint32_t slots = 0;    // непустые слоты раннеров
-        std::uint32_t ok = 0;       // слоты с классом PlayerLoopRunner
-        std::uint32_t items = 0;    // просмотренные элементы loopItems
-        std::uint32_t cls = 0;      // элементы класса DelayIgnoreTimeScalePromise
-        std::uint32_t dpr = 0;      // элементы класса DelayPromise (time-scaled)
-        std::uint32_t span = 0;     // из них с темпом 0.35f побитово
-        std::uint32_t val = 0;      // из них прошедшие фильтры elapsed/frame
-        std::uint32_t wr = 0;       // записей 0.0f в этом тике
-        bool fail = false;          // запись не прошла heap-гейт/сверку
-    } diag;
-    // Накопительная гистограмма фактических битов темпа всех опознанных
-    // обещаний с момента включения тумблера (не снимок тика): какие span
-    // реально живут в loopItems — включая время переноса. Именно она даёт
-    // точный ответ «какая константа у потока подбора», когда побитовый
-    // фильтр 0.35f ничего не находит.
-    struct Hist {
-        static constexpr std::size_t kSlots = 4;
-        std::uint32_t bits[kSlots] = {};
-        std::uint32_t n[kSlots] = {};
-        void add(std::uint32_t b) {
-            for (std::size_t i = 0; i < kSlots; ++i) {
-                if (n[i] == 0) { bits[i] = b; ++n[i]; return; }
-                if (bits[i] == b) { ++n[i]; return; }
-            }
-            // больше четырёх разных значений не помещаем: гистограмма
-            // диагностическая, главное — увидеть константу потока подбора
-        }
-    } hist_ign, hist_dpr;
-    // Реестр классов элементов loopItems (накопительный, с включения):
-    // имя класса (до kItemNameCap-1 символов) и сколько раз встречался.
-    char names_[kMaxItemNames][kItemNameCap] = {};
-    std::uint32_t name_n_[kMaxItemNames] = {};
-    std::vector<std::pair<std::uint64_t, std::size_t>> name_ids_;
-    const char* item_class_name(std::size_t i) const { return names_[i]; }
-    std::uint32_t item_class_count(std::size_t i) const { return name_n_[i]; }
     explicit Controller(IO& io) : io_(io) {}
-    bool draining() const { return writes_last_ > 0 && ticks_since_write_ < kDrainRecentTicks; }
     std::uint32_t neutralized() const { return neutralized_; }
     bool has_state() const { return session_ != 0; }
     void reset() {
@@ -264,20 +180,11 @@ public:
         // каждом новом ожидании, так что возвращать «оригиналы» не нужно —
         // просто всё забываем.
         forget_addresses();
-        session_ = 0; neutralized_ = 0; writes_last_ = 0;
-        ticks_since_write_ = kDrainRecentTicks;
+        session_ = 0; neutralized_ = 0;
         status = viewmodel::Status::Off;
-        diag = Diag{};
-        hist_ign = Hist{}; hist_dpr = Hist{};
-        for (std::size_t i = 0; i < kMaxItemNames; ++i) {
-            names_[i][0] = '\0';
-            name_n_[i] = 0;
-        }
-        name_ids_.clear();
     }
     void tick(std::uint64_t session, std::uint64_t base, bool enabled) {
         using viewmodel::Status;
-        diag = Diag{};
         if (!enabled) { reset(); return; }
         if (session != session_) { forget_addresses(); session_ = session; }
         if (!base) { status = Status::Waiting; return; }
@@ -299,7 +206,6 @@ public:
             status = Status::Waiting;   // снимок заменился — попробуем в следующий тик
             return;
         }
-        diag.len = (std::uint32_t)runners_len;
 
         std::uint32_t writes = 0;
         bool write_failed = false;
@@ -314,7 +220,6 @@ public:
                              (std::uint64_t)t * 8, runner) ||
                 !runner)
                 continue;
-            ++diag.slots;
             // Класс раннера: сверяется один раз на класс. Не опознан — это
             // не раннер (снимок устарел или поле в этом билде другое): молча
             // пропускаем, статистики «не применено» здесь не делаем — семантику
@@ -328,7 +233,6 @@ public:
                 remember(runner_classes_, rk, runner_ok);
             }
             if (!runner_ok) continue;
-            ++diag.ok;
             std::uint64_t items = 0;
             if (!pointer(runner + go_active::LOOPRUNNER_ITEMS, items) || !items) continue;
             int32_t count = 0;
@@ -356,8 +260,6 @@ public:
                              item) ||
                     !item)
                     continue;
-                ++diag.items;
-                note_item_class(item);
                 const int kind = promise_kind(item);
                 if (kind == 0) continue;
                 // Раскладка полей зависит от класса: у time-scaled варианта
@@ -371,17 +273,11 @@ public:
                 const std::uint64_t frame_off =
                     kind == 1 ? go_active::DELAYPROMISE_INITIAL_FRAME
                               : go_active::DELAYPROMISE_SCALED_INITIAL_FRAME;
-                if (kind == 1) ++diag.cls; else ++diag.dpr;
                 // Поле темпа: побитово 0.35f — иначе это чужое ожидание.
-                // Фактические биты любого опознанного обещания попадают в
-                // накопительную гистограмму: она показывает реальную
-                // константу потока подбора даже когда фильтр не сработал.
                 std::uint32_t span_bits = 0;
-                if (!io_.read(item + span_off, span_bits)) continue;
-                (kind == 1 ? hist_ign : hist_dpr).add(span_bits);
-                if (span_bits != kCadenceBits)
+                if (!io_.read(item + span_off, span_bits) ||
+                    span_bits != kCadenceBits)
                     continue;
-                ++diag.span;
                 float elapsed = 0.f;
                 std::int32_t frame = 0;
                 if (!io_.read(item + elapsed_off, elapsed) ||
@@ -390,23 +286,17 @@ public:
                 if (!io_.read(item + frame_off, frame) ||
                     frame < 0 || frame > 2000000000)
                     continue;
-                ++diag.val;
                 if (!io_.write_heap(item + span_off, 0.f) ||
                     !io_.read(item + span_off, span_bits) ||
                     span_bits != 0u) {
                     write_failed = true;
-                    diag.fail = true;
                     continue;
                 }
                 ++writes;
-                ++diag.wr;
             }
             budget -= n;
         }
-        writes_last_ = writes;
         neutralized_ += writes;
-        if (writes > 0) ticks_since_write_ = 0;
-        else if (ticks_since_write_ < kDrainRecentTicks) ++ticks_since_write_;
         status = write_failed ? Status::Failed : Status::Active;
     }
 };

@@ -327,7 +327,7 @@ static void fps_tests() {
         assert(io.writes==count && !c.has_state()); // lost session: forget
     }
 }
-// ---- Мгновенный подбор: fast_loot::Controller на фейковой памяти --------
+// ---- Быстрый сбор: fast_loot::Controller на фейковой памяти --------
 // Проверяется вся цепочка до обещания и единственная запись (float темпа),
 // включая отказы: чужая длительность, чужие классы, не-куча, сессии.
 struct LootFixture {
@@ -406,43 +406,10 @@ static void loot_tests() {
         assert(f.io.get<uint32_t>(a + DELAYPROMISE_TIMESPAN) == 0u);
         assert(f.io.get<uint32_t>(d + DELAYPROMISE_TIMESPAN) == 0u);
         assert(f.io.get<uint32_t>(b + DELAYPROMISE_TIMESPAN) == kCadenceBits);
-        assert(f.c.draining());
         // Выключение: восстановлений нет — поле дальше пишет сама игра.
         f.tick(false);
-        assert(f.c.status == Status::Off && !f.c.draining());
+        assert(f.c.status == Status::Off);
         assert(f.io.get<uint32_t>(a + DELAYPROMISE_TIMESPAN) == 0u);
-    }
-    {   // Диагностика конвейера: счётчики стадий последнего тика должны
-        // показывать, на каком шаге теряются обещания (меню + лог).
-        LootFixture f;
-        f.add_promise(0, 0.35f);                    // полный конвейер → запись
-        f.add_item(0, f.other_klass);               // не обещание
-        f.add_promise(0, 0.5f);                     // класс тот, темп чужой
-        f.add_promise(0, 0.35f, 0.4f);              // темп тот, elapsed мимо
-        f.tick();
-        const auto& d = f.c.diag;
-        assert(d.len == 2 && d.slots == 2 && d.ok == 2);
-        assert(d.items == 4 && d.cls == 3 && d.span == 2 && d.val == 1);
-        assert(d.wr == 1 && !d.fail);
-        assert(f.c.status == Status::Active && f.c.neutralized() == 1);
-        // Реестр классов: имена читаются у всех элементов, включая чужие
-        // (после одного тика — по числу элементов).
-        auto name_count = [](const LootFixture& fx, const char* name) {
-            for (int i = 0; i < 8 && fx.c.item_class_count(i); ++i)
-                if (std::strcmp(fx.c.item_class_name(i), name) == 0)
-                    return fx.c.item_class_count(i);
-            return 0u;
-        };
-        assert(name_count(f, "DelayIgnoreTimeScalePromise") == 3);
-        assert(name_count(f, "SomethingElse") == 1);
-        assert(name_count(f, "NoSuchClass") == 0);
-        // Новый тик без изменений: счётчики — снимок последнего тика, а не
-        // сумма; реестр имён — накопительный (ещё +3/+1).
-        f.tick();
-        assert(f.c.diag.items == 4 && f.c.diag.wr == 0);
-        assert(name_count(f, "DelayIgnoreTimeScalePromise") == 6);
-        f.tick(false);
-        assert(f.c.item_class_count(0) == 0);   // выключение чистит реестр
     }
     {   // Time-scaled DelayPromise: та же побитовая сверка темпа, но поля
         // сдвинуты (span 0x1C/elapsed 0x20/frame 0x18) — запись идёт в своё
@@ -452,39 +419,15 @@ static void loot_tests() {
         uint64_t i = f.add_promise(0, 0.35f);
         f.tick();
         assert(f.c.status == Status::Active && f.c.neutralized() == 2);
-        assert(f.c.diag.cls == 1 && f.c.diag.dpr == 1 && f.c.diag.wr == 2);
         assert(f.io.get<uint32_t>(s + DELAYPROMISE_SCALED_TIMESPAN) == 0u);
         assert(f.io.get<uint32_t>(i + DELAYPROMISE_TIMESPAN) == 0u);
         // Соседние поля не задеты: elapsed/frame на месте у обоих классов.
         assert(f.io.get<float>(s + DELAYPROMISE_SCALED_ELAPSED) == 0.01f);
         assert(f.io.get<int32_t>(i + DELAYPROMISE_INITIAL_FRAME) == 100);
-        // Чужой темп у scaled — не трогаем, но в гистограмму попадает.
-        // Гистограмма накопительная: тик 1 внёс 0.35f (до записи), тик 2 —
-        // 0.0f от обнулённого и 0.5f от нового чужого (порядок слотов
-        // зависит от вращения обхода, поэтому проверяем вхождение).
+        // Чужой темп у scaled — не трогаем.
         uint64_t s2 = f.add_scaled(0, 0.5f);
         f.tick();
         assert(f.io.get<uint32_t>(s2 + DELAYPROMISE_SCALED_TIMESPAN) == 0x3f000000u);
-        auto hist_has = [](const decltype(f.c.hist_dpr)& h, uint32_t b, uint32_t n) {
-            for (int i = 0; i < 4; ++i)
-                if (h.n[i] && h.bits[i] == b) return h.n[i] == n;
-            return false;
-        };
-        assert(hist_has(f.c.hist_dpr, kCadenceBits, 1));
-        assert(hist_has(f.c.hist_dpr, 0x00000000u, 1));
-        assert(hist_has(f.c.hist_dpr, 0x3f000000u, 1));
-    }
-    {   // Гистограмма накапливается с включения и сбрасывается выключением:
-        // какие биты темпа реально встречались — видно даже без совпадений.
-        LootFixture f;
-        f.add_promise(0, 0.5f);
-        f.tick();
-        f.add_promise(0, 0.25f);
-        f.tick();   // 0.5f считается снова: он всё ещё в массиве
-        assert(f.c.hist_ign.n[0] == 2 && f.c.hist_ign.bits[0] == 0x3f000000u);
-        assert(f.c.hist_ign.n[1] == 1 && f.c.hist_ign.bits[1] == 0x3e800000u);
-        f.tick(false);
-        assert(f.c.hist_ign.n[0] == 0 && f.c.hist_ign.n[1] == 0);
     }
     {   // Чужие длительности/значения — не трогаем даже у настоящего обещания.
         LootFixture f;
@@ -504,7 +447,6 @@ static void loot_tests() {
         assert(f.io.get<uint32_t>(nan + DELAYPROMISE_TIMESPAN) == 0x7fc00000u);
         assert(f.io.get<uint32_t>(inf + DELAYPROMISE_TIMESPAN) == 0x7f800000u);
         assert(f.io.get<float>(big + DELAYPROMISE_TIMESPAN) == 3.5f);
-        assert(!f.c.draining());
     }
     {   // Невразумительные elapsed/initialFrame — пропуск без записи.
         LootFixture f;
@@ -642,5 +584,5 @@ int main() {
     config_tests(); fps_tests();
     go::SelectBuild(go::Build::Release); tests(); loot_tests();
     assert(go::BetaAvailable()); go::SelectBuild(go::Build::Beta); tests(); loot_tests();
-    std::cout << "viewmodel: release/beta, lifecycle, instant ADS return, FPS90/120/144, delegates, instant pickup, config, NaN: OK\n";
+    std::cout << "viewmodel: release/beta, lifecycle, instant ADS return, FPS90/120/144, delegates, fast pickup, config, NaN: OK\n";
 }
