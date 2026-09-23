@@ -1,10 +1,10 @@
 // Оффсеты БЕТА-версии игры. Файл собран tools/offsets/beta_offsets.py — правь
 // скрипт и дампы, а не здесь.
 //
-// Источник: dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9, дата сборки файла 22.09.2026.
+// Источник: dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9, дата сборки файла 23.09.2026.
 // Эталон, от которого считались отличия: релизный dump.7z и jni/src/game_offsets.h.
-// Отличий от релиза: 6 из 210 объявленных констант
-// (в карте оффсетов 211 записей).
+// Отличий от релиза: 6 из 213 объявленных констант
+// (в карте оффсетов 214 записей).
 // Взято из релиза как есть: 40 констант раскладки IL2CPP/Unity
 // (из дампа игры они не выводятся — об этом ниже) и 4 RVA.
 // Окно скана TOD_Sky сдвинуто на дельту RVA беты (см. RVA_SHIFTED в скрипте):
@@ -597,6 +597,11 @@ inline constexpr std::uint64_t LOOPRUNNER_TAIL               = 0x30; // PlayerLo
 inline constexpr std::uint64_t DELAYPROMISE_TIMESPAN         = 0x18; // float delayFrameTimeSpan
 inline constexpr std::uint64_t DELAYPROMISE_ELAPSED          = 0x1C; // float elapsed
 inline constexpr std::uint64_t DELAYPROMISE_INITIAL_FRAME    = 0x20; // int initialFrame
+// Обычный (time-scaled) вариант UniTask.Delay — DelayPromise: раскладка
+// полей сдвинута на 4 байта относительно DelayIgnoreTimeScalePromise.
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_TIMESPAN      = 0x1C; // float delayTimeSpan
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_ELAPSED       = 0x20; // float elapsed
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_INITIAL_FRAME = 0x18; // int initialFrame
 
 // Oxide.GameControllerBase static fields: a known-good NetworkIdentity used to
 // learn the NetworkIdentity class pointer (validates dictionary entries).

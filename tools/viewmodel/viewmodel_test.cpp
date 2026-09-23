@@ -334,7 +334,8 @@ struct LootFixture {
     FakeMemory io;
     fast_loot::Controller<FakeMemory> c{io};
     const uint64_t base = 0x10000000;
-    uint64_t helper_class = 0, statics = 0, runners = 0, promise_klass = 0, other_klass = 0;
+    uint64_t helper_class = 0, statics = 0, runners = 0, promise_klass = 0,
+             scaled_klass = 0, other_klass = 0;
     std::vector<uint64_t> items_arrays;   // loopItems каждого раннера (для add_item)
     std::vector<uint64_t> runner_objs;    // сами раннеры (для tail)
     LootFixture(int nrunners = 2, bool valid = true) {
@@ -344,6 +345,7 @@ struct LootFixture {
         statics = io.halloc();
         io.set(helper_class + IL2CPP_CLASS_STATIC_FIELDS, statics);
         promise_klass = hklass("DelayIgnoreTimeScalePromise", "");
+        scaled_klass = hklass("DelayPromise", "");
         other_klass = hklass("SomethingElse", "");
         runners = io.halloc();
         io.set(statics + PLAYERLOOPHELPER_RUNNERS, runners);
@@ -378,6 +380,15 @@ struct LootFixture {
         io.set(p + DELAYPROMISE_TIMESPAN, span);
         io.set(p + DELAYPROMISE_ELAPSED, elapsed);
         io.set(p + DELAYPROMISE_INITIAL_FRAME, frame);
+        return p;
+    }
+    // Обычный (time-scaled) DelayPromise: тройка полей сдвинута на 4 байта.
+    uint64_t add_scaled(int runner, float span, float elapsed = 0.01f,
+                        int32_t frame = 100) {
+        uint64_t p = add_item(runner, scaled_klass);
+        io.set(p + DELAYPROMISE_SCALED_TIMESPAN, span);
+        io.set(p + DELAYPROMISE_SCALED_ELAPSED, elapsed);
+        io.set(p + DELAYPROMISE_SCALED_INITIAL_FRAME, frame);
         return p;
     }
     void tick(bool on = true) { c.tick(1, base, on); }
@@ -417,6 +428,48 @@ static void loot_tests() {
         // Новый тик без изменений: счётчики — снимок последнего тика, а не сумма.
         f.tick();
         assert(f.c.diag.items == 4 && f.c.diag.wr == 0);
+    }
+    {   // Time-scaled DelayPromise: та же побитовая сверка темпа, но поля
+        // сдвинуты (span 0x1C/elapsed 0x20/frame 0x18) — запись идёт в своё
+        // поле и не портит соседние.
+        LootFixture f;
+        uint64_t s = f.add_scaled(0, 0.35f);
+        uint64_t i = f.add_promise(0, 0.35f);
+        f.tick();
+        assert(f.c.status == Status::Active && f.c.neutralized() == 2);
+        assert(f.c.diag.cls == 1 && f.c.diag.dpr == 1 && f.c.diag.wr == 2);
+        assert(f.io.get<uint32_t>(s + DELAYPROMISE_SCALED_TIMESPAN) == 0u);
+        assert(f.io.get<uint32_t>(i + DELAYPROMISE_TIMESPAN) == 0u);
+        // Соседние поля не задеты: elapsed/frame на месте у обоих классов.
+        assert(f.io.get<float>(s + DELAYPROMISE_SCALED_ELAPSED) == 0.01f);
+        assert(f.io.get<int32_t>(i + DELAYPROMISE_INITIAL_FRAME) == 100);
+        // Чужой темп у scaled — не трогаем, но в гистограмму попадает.
+        // Гистограмма накопительная: тик 1 внёс 0.35f (до записи), тик 2 —
+        // 0.0f от обнулённого и 0.5f от нового чужого (порядок слотов
+        // зависит от вращения обхода, поэтому проверяем вхождение).
+        uint64_t s2 = f.add_scaled(0, 0.5f);
+        f.tick();
+        assert(f.io.get<uint32_t>(s2 + DELAYPROMISE_SCALED_TIMESPAN) == 0x3f000000u);
+        auto hist_has = [](const decltype(f.c.hist_dpr)& h, uint32_t b, uint32_t n) {
+            for (int i = 0; i < 4; ++i)
+                if (h.n[i] && h.bits[i] == b) return h.n[i] == n;
+            return false;
+        };
+        assert(hist_has(f.c.hist_dpr, kCadenceBits, 1));
+        assert(hist_has(f.c.hist_dpr, 0x00000000u, 1));
+        assert(hist_has(f.c.hist_dpr, 0x3f000000u, 1));
+    }
+    {   // Гистограмма накапливается с включения и сбрасывается выключением:
+        // какие биты темпа реально встречались — видно даже без совпадений.
+        LootFixture f;
+        f.add_promise(0, 0.5f);
+        f.tick();
+        f.add_promise(0, 0.25f);
+        f.tick();   // 0.5f считается снова: он всё ещё в массиве
+        assert(f.c.hist_ign.n[0] == 2 && f.c.hist_ign.bits[0] == 0x3f000000u);
+        assert(f.c.hist_ign.n[1] == 1 && f.c.hist_ign.bits[1] == 0x3e800000u);
+        f.tick(false);
+        assert(f.c.hist_ign.n[0] == 0 && f.c.hist_ign.n[1] == 0);
     }
     {   // Чужие длительности/значения — не трогаем даже у настоящего обещания.
         LootFixture f;

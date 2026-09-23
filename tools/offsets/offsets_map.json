@@ -2850,5 +2850,48 @@
    "file": "libil2cpp.so (ABI, metadata v39)",
    "how": "Il2CppClass.static_fields; проверяется в рантайме косвенно: statics+0x30 у PlayerLoopHelper обязан быть массивом PlayerLoopRunner"
   }
+ },
+ "DELAYPROMISE_SCALED_TIMESPAN": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.UniTask.DelayPromise",
+  "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+  "field": "delayTimeSpan",
+  "type": "float",
+  "offset": 28,
+  "note": "обычный (time-scaled) вариант обещания UniTask.Delay — раскладка сдвинута относительно DelayIgnoreTimeScalePromise; пишется 0.0 при побитовом темпе 0.35f",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+   "field": "delayTimeSpan",
+   "how": "смещение — из комментария /* 0x1C */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «float»"
+  }
+ },
+ "DELAYPROMISE_SCALED_ELAPSED": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.UniTask.DelayPromise",
+  "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+  "field": "elapsed",
+  "type": "float",
+  "offset": 32,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+   "field": "elapsed",
+   "how": "смещение — из комментария /* 0x20 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «float»"
+  }
+ },
+ "DELAYPROMISE_SCALED_INITIAL_FRAME": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.UniTask.DelayPromise",
+  "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+  "field": "initialFrame",
+  "type": "int32_t",
+  "offset": 24,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+   "field": "initialFrame",
+   "how": "смещение — из комментария /* 0x18 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «int32_t»"
+  }
  }
 }

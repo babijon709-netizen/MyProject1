@@ -952,6 +952,19 @@ float TabContent(int tab, float dt, float cW) {
                                 pickupState.loot_runners, pickupState.loot_items,
                                 pickupState.loot_class, pickupState.loot_span,
                                 pickupState.loot_wr);
+        // Накопительная (с включения тумблера) гистограмма фактических битов
+        // темпа опознанных обещаний: unscaled = DelayIgnoreTimeScalePromise,
+        // scaled = DelayPromise. Показывает реальную константу потока
+        // подбора, даже если побитовый фильтр 0.35f не нашёл совпадений.
+        if (pickupState.fast_loot == viewmodel::Status::Active ||
+            pickupState.fast_loot == viewmodel::Status::Failed) {
+            char ign[80], dpr[80];
+            viewmodel::loot_format_hist(pickupState.loot_ign_bits,
+                                        pickupState.loot_ign_n, ign, sizeof(ign));
+            viewmodel::loot_format_hist(pickupState.loot_dpr_bits,
+                                        pickupState.loot_dpr_n, dpr, sizeof(dpr));
+            ImGui::TextDisabled(XS("Накоп: unscaled %s, scaled %s"), ign, dpr);
+        }
 
         SHdr(XS("Лимит FPS"));
         {

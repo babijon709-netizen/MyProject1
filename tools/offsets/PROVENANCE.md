@@ -24,7 +24,7 @@
 
 
 Машиночитаемый источник истины — `tools/offsets/offsets_map.json`
-(211 записей); этот файл — его человеческое объяснение: не «какое число
+(214 записей); этот файл — его человеческое объяснение: не «какое число
 стоит», а «откуда оно взялось и как его найти заново». Значения здесь
 совпадают с `jni/src/game_offsets.h`; при расхождении верить заголовку и
 карте, а этот файл пересобрать (`make_provenance.py`).
@@ -33,7 +33,7 @@
 
 | класс | сколько | откуда | уезжает ли каждый билд | чем проверяется |
 |---|---|---|---|---|
-| **A. Смещения полей** | 164 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
+| **A. Смещения полей** | 167 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
 | **B. `*_TYPEINFO_RVA`** | 4 | слоты глобальных `Il2CppClass*` в `.data.rel.ro` `libil2cpp.so` | **да, всегда** | `typeinfo_rva.py` + отпечаток со старого дампа |
 | **C. Рантайм/ABI** | 42 | раскладка Unity/IL2CPP-объектов, не выводится из `dump.cs` | только при смене версии Unity/IL2CPP | вручную (дизасм паттернов), см. §C |
 
@@ -469,6 +469,14 @@
 | `DELAYPROMISE_TIMESPAN` | 0x18 | `delayFrameTimeSpan` | `float` |
 | `DELAYPROMISE_ELAPSED` | 0x1c | `elapsed` | `float` |
 | `DELAYPROMISE_INITIAL_FRAME` | 0x20 | `initialFrame` | `int32_t` |
+
+### `Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields`  (Cysharp.Threading.Tasks.UniTask.DelayPromise)
+
+| константа | offset | поле в билде `72e26b9` | тип |
+|---|---|---|---|
+| `DELAYPROMISE_SCALED_INITIAL_FRAME` | 0x18 | `initialFrame` | `int32_t` |
+| `DELAYPROMISE_SCALED_TIMESPAN` | 0x1c | `delayTimeSpan` | `float` |
+| `DELAYPROMISE_SCALED_ELAPSED` | 0x20 | `elapsed` | `float` |
 
 ---
 

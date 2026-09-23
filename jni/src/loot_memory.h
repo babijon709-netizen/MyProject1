@@ -13,20 +13,24 @@
 // 0.35f из .rodata (релиз 0x213A950), у всех трёх одна и та же; задержка
 // «перед подбором», которую видит игрок, — это она.
 //
-// Что мы пишем. Ожидание — это объект Cysharp.Threading.Tasks.UniTask.
-// DelayIgnoreTimeScalePromise в GC-куче:
+// Что мы пишем. Ожидание — это объект в GC-куче: UniTask.
+// DelayIgnoreTimeScalePromise (темп не зависит от TimeScale; все три потока
+// подбора ждут именно так) либо DelayPromise (обычный, time-scaled):
 //
-//   +0x18  float delayFrameTimeSpan   // 0.35 — темп подбора
-//   +0x1C  float elapsed              // копится Time.unscaledDeltaTime
-//   +0x20  int   initialFrame         // кадр создания (ждёт минимум кадр)
+//   DelayIgnoreTimeScalePromise      DelayPromise (time-scaled)
+//   +0x18  float delayFrameTimeSpan  +0x1C  float delayTimeSpan   // темп
+//   +0x1C  float elapsed             +0x20  float elapsed
+//   +0x20  int   initialFrame        +0x18  int   initialFrame
 //
-// Его тик в PlayerLoop завершает ожидание при elapsed >= delayFrameTimeSpan.
-// Дописав 0.0f в delayFrameTimeSpan активного обещания, получаем завершение
-// ближайшим тиком: один предмет за игровой кадр, всё окно — за несколько
-// кадров. Пишем ТОЛЬКО когда поле побитово равно 0x3EB33333 (0.35f) — любые
-// другие ожидания UniTask не трогаем. Игра при каждом новом ожидании сама
-// переписывает поле из скомпилированной константы, поэтому после выключения
-// тумблера темп возвращается сам — восстанавливать нечего (в отличие от
+// Тройка полей у классов сдвинута на 4 байта — контроллер различает классы
+// по имени и пользуется своей раскладкой для каждого. Тик в PlayerLoop
+// завершает ожидание при elapsed >= delayTimeSpan. Дописав 0.0f в поле
+// темпа активного обещания, получаем завершение ближайшим тиком: один
+// предмет за игровой кадр, всё окно — за несколько кадров. Пишем ТОЛЬКО
+// когда поле побитово равно 0x3EB33333 (0.35f) — любые другие ожидания
+// UniTask не трогаем. Игра при каждом новом ожидании сама переписывает
+// поле из скомпилированной константы, поэтому после выключения тумблера
+// темп возвращается сам — восстанавливать нечего (в отличие от
 // weapon_tuning здесь нет «оригиналов», которые нужно вернуть).
 //
 // Как находим активные обещания (всё остальное — только чтение):
@@ -37,9 +41,9 @@
 //     PlayerLoopTiming; AddAction кладёт ожидания именно туда)
 //   runners[t] (класс «PlayerLoopRunner», ns «Cysharp.Threading.Tasks.Internal»)
 //     + LOOPRUNNER_ITEMS → IPlayerLoopItem[] — активные ожидания
-//   элемент: класс «DelayIgnoreTimeScalePromise» (ns пустой — вложенный в
-//     UniTask; сверка и кэш по указателю класса), поле темпа == 0.35f
-//     побитово, elapsed/initialFrame вразумительны.
+//   элемент: класс «DelayIgnoreTimeScalePromise» или «DelayPromise» (ns
+//     пустой — вложенные в UniTask; сверка и кэш по указателю класса),
+//     поле темпа == 0.35f побитово, elapsed/initialFrame вразумительны.
 //
 // Почему это безопасно. Обещание держится массивом loopItems, пока ждёт;
 // классы il2cpp не переезжают; GC на Android не уплотняет объекты. Снимок
@@ -79,6 +83,7 @@ template <class IO> class Controller {
     // по указателю класса достаточно получить один раз.
     std::uint64_t helper_class_ = 0;   // PlayerLoopHelper
     std::uint64_t promise_class_ = 0;  // вложенный DelayIgnoreTimeScalePromise
+    std::uint64_t scaled_class_ = 0;   // вложенный DelayPromise (time-scaled)
     std::vector<std::pair<std::uint64_t, bool>> runner_classes_;
     std::vector<std::pair<std::uint64_t, bool>> item_classes_;
     // Вращение обхода: если массив раннера больше бюджета тика, следующие
@@ -90,7 +95,8 @@ template <class IO> class Controller {
     std::uint32_t ticks_since_write_ = kDrainRecentTicks;
     void forget_addresses() {
         // Сессия сменилась: ни один старый адрес не обязан быть валиден.
-        helper_class_ = 0; promise_class_ = 0; begin_runner_ = item_phase_ = 0;
+        helper_class_ = 0; promise_class_ = 0; scaled_class_ = 0;
+        begin_runner_ = item_phase_ = 0;
         runner_classes_.clear(); item_classes_.clear();
     }
     bool pointer(std::uint64_t address, std::uint64_t& value) {
@@ -149,18 +155,25 @@ template <class IO> class Controller {
         helper_class_ = klass;
         return Anchor::Ready;
     }
-    bool promise_by_class(std::uint64_t object, std::uint64_t& promise) {
+    // Класс элемента loopItems: 0 — не обещание, 1 — DelayIgnoreTimeScalePromise
+    // (темп не зависит от TimeScale; раскладка span 0x18/elapsed 0x1C/frame 0x20),
+    // 2 — DelayPromise (обычный, time-scaled; span 0x1C/elapsed 0x20/frame 0x18).
+    int promise_kind(std::uint64_t object) {
         std::uint64_t klass = 0;
-        if (!pointer(object, klass) || klass < 0x10000) return false;
-        promise = 0;
-        if (klass == promise_class_) { promise = object; return true; }
+        if (!pointer(object, klass) || klass < 0x10000) return 0;
+        if (klass == promise_class_) return 1;
+        if (klass == scaled_class_) return 2;
         bool verdict = false;
         if (!cached(item_classes_, klass, verdict)) {
-            verdict = class_is(klass, "DelayIgnoreTimeScalePromise", "");
+            verdict = class_is(klass, "DelayIgnoreTimeScalePromise", "") ||
+                      class_is(klass, "DelayPromise", "");
             remember(item_classes_, klass, verdict);
         }
-        if (verdict) { promise_class_ = klass; promise = object; return true; }
-        return false;
+        if (!verdict) return 0;
+        if (class_is(klass, "DelayIgnoreTimeScalePromise", "")) {
+            promise_class_ = klass; return 1;
+        }
+        scaled_class_ = klass; return 2;
     }
 public:
     viewmodel::Status status = viewmodel::Status::Off;
@@ -175,11 +188,30 @@ public:
         std::uint32_t ok = 0;       // слоты с классом PlayerLoopRunner
         std::uint32_t items = 0;    // просмотренные элементы loopItems
         std::uint32_t cls = 0;      // элементы класса DelayIgnoreTimeScalePromise
+        std::uint32_t dpr = 0;      // элементы класса DelayPromise (time-scaled)
         std::uint32_t span = 0;     // из них с темпом 0.35f побитово
         std::uint32_t val = 0;      // из них прошедшие фильтры elapsed/frame
         std::uint32_t wr = 0;       // записей 0.0f в этом тике
         bool fail = false;          // запись не прошла heap-гейт/сверку
     } diag;
+    // Накопительная гистограмма фактических битов темпа всех опознанных
+    // обещаний с момента включения тумблера (не снимок тика): какие span
+    // реально живут в loopItems — включая время переноса. Именно она даёт
+    // точный ответ «какая константа у потока подбора», когда побитовый
+    // фильтр 0.35f ничего не находит.
+    struct Hist {
+        static constexpr std::size_t kSlots = 4;
+        std::uint32_t bits[kSlots] = {};
+        std::uint32_t n[kSlots] = {};
+        void add(std::uint32_t b) {
+            for (std::size_t i = 0; i < kSlots; ++i) {
+                if (n[i] == 0) { bits[i] = b; ++n[i]; return; }
+                if (bits[i] == b) { ++n[i]; return; }
+            }
+            // больше четырёх разных значений не помещаем: гистограмма
+            // диагностическая, главное — увидеть константу потока подбора
+        }
+    } hist_ign, hist_dpr;
     explicit Controller(IO& io) : io_(io) {}
     bool draining() const { return writes_last_ > 0 && ticks_since_write_ < kDrainRecentTicks; }
     std::uint32_t neutralized() const { return neutralized_; }
@@ -193,6 +225,7 @@ public:
         ticks_since_write_ = kDrainRecentTicks;
         status = viewmodel::Status::Off;
         diag = Diag{};
+        hist_ign = Hist{}; hist_dpr = Hist{};
     }
     void tick(std::uint64_t session, std::uint64_t base, bool enabled) {
         using viewmodel::Status;
@@ -276,26 +309,41 @@ public:
                     !item)
                     continue;
                 ++diag.items;
-                std::uint64_t promise = 0;
-                if (!promise_by_class(item, promise) || !promise) continue;
-                ++diag.cls;
+                const int kind = promise_kind(item);
+                if (kind == 0) continue;
+                // Раскладка полей зависит от класса: у time-scaled варианта
+                // (DelayPromise) тройка сдвинута на 4 байта.
+                const std::uint64_t span_off =
+                    kind == 1 ? go_active::DELAYPROMISE_TIMESPAN
+                              : go_active::DELAYPROMISE_SCALED_TIMESPAN;
+                const std::uint64_t elapsed_off =
+                    kind == 1 ? go_active::DELAYPROMISE_ELAPSED
+                              : go_active::DELAYPROMISE_SCALED_ELAPSED;
+                const std::uint64_t frame_off =
+                    kind == 1 ? go_active::DELAYPROMISE_INITIAL_FRAME
+                              : go_active::DELAYPROMISE_SCALED_INITIAL_FRAME;
+                if (kind == 1) ++diag.cls; else ++diag.dpr;
                 // Поле темпа: побитово 0.35f — иначе это чужое ожидание.
+                // Фактические биты любого опознанного обещания попадают в
+                // накопительную гистограмму: она показывает реальную
+                // константу потока подбора даже когда фильтр не сработал.
                 std::uint32_t span_bits = 0;
-                if (!io_.read(promise + go_active::DELAYPROMISE_TIMESPAN, span_bits) ||
-                    span_bits != kCadenceBits)
+                if (!io_.read(item + span_off, span_bits)) continue;
+                (kind == 1 ? hist_ign : hist_dpr).add(span_bits);
+                if (span_bits != kCadenceBits)
                     continue;
                 ++diag.span;
                 float elapsed = 0.f;
                 std::int32_t frame = 0;
-                if (!io_.read(promise + go_active::DELAYPROMISE_ELAPSED, elapsed) ||
+                if (!io_.read(item + elapsed_off, elapsed) ||
                     !viewmodel::finite(elapsed) || elapsed < 0.f || elapsed > 0.36f)
                     continue;
-                if (!io_.read(promise + go_active::DELAYPROMISE_INITIAL_FRAME, frame) ||
+                if (!io_.read(item + frame_off, frame) ||
                     frame < 0 || frame > 2000000000)
                     continue;
                 ++diag.val;
-                if (!io_.write_heap(promise + go_active::DELAYPROMISE_TIMESPAN, 0.f) ||
-                    !io_.read(promise + go_active::DELAYPROMISE_TIMESPAN, span_bits) ||
+                if (!io_.write_heap(item + span_off, 0.f) ||
+                    !io_.read(item + span_off, span_bits) ||
                     span_bits != 0u) {
                     write_failed = true;
                     diag.fail = true;

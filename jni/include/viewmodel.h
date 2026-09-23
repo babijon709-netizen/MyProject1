@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 
 // Vertical world FOV; hands are offsets from each weapon's original pose, cm.
@@ -88,9 +89,29 @@ struct Diagnostics {
     // обещания нужного класса → совпавший темп 0.35f → прошедшие фильтры →
     // записи. Ноль в середине цепочки = место, где теряются обещания.
     unsigned loot_len = 0, loot_slots = 0, loot_runners = 0, loot_items = 0,
-             loot_class = 0, loot_span = 0, loot_val = 0, loot_wr = 0;
+             loot_class = 0, loot_dpr = 0, loot_span = 0, loot_val = 0,
+             loot_wr = 0;
     bool loot_fail = false;
+    // Накопительные (с момента включения) гистограммы фактических битов
+    // темпа опознанных обещаний: ign — DelayIgnoreTimeScalePromise (поле
+    // +0x18), dpr — DelayPromise (поле +0x1C). До 4 разных значений.
+    unsigned loot_ign_bits[4] = {}, loot_ign_n[4] = {};
+    unsigned loot_dpr_bits[4] = {}, loot_dpr_n[4] = {};
 };
+
+// Гистограмма темпов в строку вида «3eb33333x12 3f000000x3» (или «-»).
+inline void loot_format_hist(const unsigned* bits, const unsigned* n,
+                             char* out, std::size_t cap) {
+    if (cap == 0) return;
+    out[0] = '-'; out[1] = 0;
+    if (n[0] == 0) return;
+    std::size_t off = 0;
+    for (int i = 0; i < 4 && n[i]; ++i) {
+        int w = std::snprintf(out + off, cap - off, "%08xx%u ", bits[i], n[i]);
+        if (w < 0 || (std::size_t)w >= cap - off) break;
+        off += (std::size_t)w;
+    }
+}
 // Снимок состояния limiting FPS для меню: снимается контроллером при последнем
 // тике (до 100 мс назад), дополнительных обращений к памяти игры не делает.
 struct FpsUiInfo {

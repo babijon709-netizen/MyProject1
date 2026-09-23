@@ -577,6 +577,11 @@ inline constexpr std::uint64_t LOOPRUNNER_TAIL               = 0x30; // PlayerLo
 inline constexpr std::uint64_t DELAYPROMISE_TIMESPAN         = 0x18; // float delayFrameTimeSpan
 inline constexpr std::uint64_t DELAYPROMISE_ELAPSED          = 0x1C; // float elapsed
 inline constexpr std::uint64_t DELAYPROMISE_INITIAL_FRAME    = 0x20; // int initialFrame
+// Обычный (time-scaled) вариант UniTask.Delay — DelayPromise: раскладка
+// полей сдвинута на 4 байта относительно DelayIgnoreTimeScalePromise.
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_TIMESPAN      = 0x1C; // float delayTimeSpan
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_ELAPSED       = 0x20; // float elapsed
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_INITIAL_FRAME = 0x18; // int initialFrame
 
 // Oxide.GameControllerBase static fields: a known-good NetworkIdentity used to
 // learn the NetworkIdentity class pointer (validates dictionary entries).

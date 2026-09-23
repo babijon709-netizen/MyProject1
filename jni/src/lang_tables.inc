@@ -89,6 +89,7 @@ static const LangPair kUiEn[] = {
     {"Мир", "World"},
     {"Наводка", "Aiming"},
     {"Назад", "Back"},
+    {"Накоп: unscaled %s, scaled %s", "Accum: unscaled %s, scaled %s"},
     {"Настроить джойстик", "Set up the joystick"},
     {"Настроить кнопку", "Set up the button"},
     {"Несовместимый конфиг", "Incompatible config"},

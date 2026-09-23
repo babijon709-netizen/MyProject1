@@ -175,7 +175,11 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         last_log = st;
     }
     // Диагностика подбора: пока тумблер включён, раз в ~2 с (и при смене
-    // картины) пишем снимок конвейера — какой стадии достигли обещания.
+    // картины) пишем снимок конвейера — какой стадии достигли обещания —
+    // и накопительную гистограмму фактических битов темпа всех опознанных
+    // обещаний (ign = DelayIgnoreTimeScalePromise/+0x18,
+    // dpr = DelayPromise/+0x1C): она показывает реальную константу потока
+    // подбора даже когда побитовый фильтр 0.35f не сработал.
     {
         static Clock::time_point loot_diag_at = Clock::now() - std::chrono::hours(1);
         static viewmodel::Diagnostics loot_diag_last = {};
@@ -188,15 +192,21 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
                              st.loot_runners != loot_diag_last.loot_runners ||
                              st.loot_items != loot_diag_last.loot_items ||
                              st.loot_class != loot_diag_last.loot_class ||
+                             st.loot_dpr != loot_diag_last.loot_dpr ||
                              st.loot_span != loot_diag_last.loot_span ||
-                             st.loot_wr != loot_diag_last.loot_wr;
+                             st.loot_wr != loot_diag_last.loot_wr ||
+                             st.loot_ign_n[0] != loot_diag_last.loot_ign_n[0] ||
+                             st.loot_dpr_n[0] != loot_diag_last.loot_dpr_n[0];
         const auto now = Clock::now();
         if (live && (changed || st.loot_fail) &&
             now - loot_diag_at >= std::chrono::milliseconds(2000)) {
-            LogLine("loot diag: runners len=%u slots=%u ok=%u; items=%u class=%u span=%u val=%u writes=%u fail=%d",
+            char ign[80], dpr[80];
+            viewmodel::loot_format_hist(st.loot_ign_bits, st.loot_ign_n, ign, sizeof(ign));
+            viewmodel::loot_format_hist(st.loot_dpr_bits, st.loot_dpr_n, dpr, sizeof(dpr));
+            LogLine("loot diag: runners len=%u slots=%u ok=%u; items=%u class=%u dpr=%u span=%u val=%u writes=%u fail=%d; acc ign=[%s] dpr=[%s]",
                     st.loot_len, st.loot_slots, st.loot_runners, st.loot_items,
-                    st.loot_class, st.loot_span, st.loot_val, st.loot_wr,
-                    st.loot_fail ? 1 : 0);
+                    st.loot_class, st.loot_dpr, st.loot_span, st.loot_val,
+                    st.loot_wr, st.loot_fail ? 1 : 0, ign, dpr);
             loot_diag_at = now;
             loot_diag_last = st;
         } else if (!live) {
@@ -218,10 +228,17 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     status.loot_runners = loot.diag.ok;
     status.loot_items = loot.diag.items;
     status.loot_class = loot.diag.cls;
+    status.loot_dpr = loot.diag.dpr;
     status.loot_span = loot.diag.span;
     status.loot_val = loot.diag.val;
     status.loot_wr = loot.diag.wr;
     status.loot_fail = loot.diag.fail;
+    for (int i = 0; i < 4; ++i) {
+        status.loot_ign_bits[i] = loot.hist_ign.bits[i];
+        status.loot_ign_n[i] = loot.hist_ign.n[i];
+        status.loot_dpr_bits[i] = loot.hist_dpr.bits[i];
+        status.loot_dpr_n[i] = loot.hist_dpr.n[i];
+    }
     return status;
 }
 

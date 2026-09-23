@@ -108,6 +108,7 @@ UI_EN = {
     'Подбор: работает': 'Pickup: active',
     'Диаг: раннеры %u/%u/%u, предметы %u, обещания %u, темп %u, записи %u':
         'Diag: runners %u/%u/%u, items %u, promises %u, cadence %u, writes %u',
+    'Накоп: unscaled %s, scaled %s': 'Accum: unscaled %s, scaled %s',
     'Потоки переноса': 'Transfer flows',
     'окно лута': 'loot window',
     'зона подбора': 'pickup zone',

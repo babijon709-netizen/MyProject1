@@ -977,6 +977,40 @@ timing=Update) подтверждает каждую стадию, поэтом�
 | `DELAYPROMISE_TIMESPAN` | 0x18 | `float delayFrameTimeSpan` — **сюда пишется 0.0** |
 | `DELAYPROMISE_ELAPSED` | 0x1C | `float elapsed` |
 | `DELAYPROMISE_INITIAL_FRAME` | 0x20 | `int initialFrame` |
+| `DELAYPROMISE_SCALED_TIMESPAN` | 0x1C | `float delayTimeSpan` обычного (time-scaled) `DelayPromise` — **сюда пишется 0.0** |
+| `DELAYPROMISE_SCALED_ELAPSED` | 0x20 | `float elapsed` (time-scaled вариант) |
+| `DELAYPROMISE_SCALED_INITIAL_FRAME` | 0x18 | `int initialFrame` (time-scaled вариант) |
+
+**Полный реестр создателей ignore-time-scale ожиданий (билд `72e26b9`, скан
+BL-инструкций по .text).** Всего 134 call-сайта семейства Delay; с
+`ignoreTimeScale=true` — 13: три потока подбора с литералом 0.35f
+(`xw.CollectAllItems` 0x5b5cae4, `xv.FastLoadAll` 0x5b5d164,
+`eDE.CollectAllItems` 0x6661778 — все `WaitForSeconds(0.35f, 1, Update)` c
+литералом 0x213A950) и десять чужих (охота/туториал/сервер:
+HuntMedalStack, HuntStagePresentation, HuntVictoryScreen×3,
+PauseManager.BlinkSupportNotificationAsync — динамические значения;
+IntroductionHuntScenario — Delay(250ms) и динамический;
+hA.TryRefreshServerStatus и HY.WaitAsync — Delay(TimeSpan)). Цепочка
+преобразования для лута пересчитана по инструкциям: 0.35f × 1000.0f (float,
+без потери) → modf/round-half-even → 350 мс → `Interval`: (long)(350+0.5)
+× 10⁴ = 3 500 000 тиков → `(float)TotalSeconds` = 0.35f **побитово**
+(0x3EB33333) — т.е. лутовое обещание обязано иметь именно эти биты.
+
+**Поддержка обоих классов обещаний + накопительная гистограмма (после
+`5618b16`).** Диагностика на устройстве показала: конвейер резолвится
+полностью (16/16/16), в loopItems — 2 обещания DelayIgnoreTimeScalePromise,
+но **ни одного с битами 0.35f** — наблюдаемые обещания принадлежат чужим
+потокам из реестра выше. Поскольку поток переноса пользователя может идти
+через обычный time-scaled `DelayPromise` (его раскладка сдвинута:
+initialFrame 0x18 / delayTimeSpan 0x1C / elapsed 0x20), контроллер теперь
+распознаёт **оба** класса и пишет 0.0 в поле темпа каждого (тот же
+побитовый гейт 0x3EB33333, свои офсеты на класс). Для точной диагностики
+фактической константы добавлена накопительная (с момента включения
+тумблера) гистограмма битов темпа всех опознанных обещаний — отдельно для
+unscaled (DelayIgnoreTimeScalePromise) и scaled (DelayPromise): строка
+«Накоп: …» в меню и `acc ign=[…] dpr=[…]` в логе. Гистограмма отвечает на
+вопрос «какие темпы реально живут в loopItems во время переноса», даже
+когда побитовый фильтр ничего не нашёл.
 
 **Потолок скорости (дизасм `AddAction` 0xc362e68 / `RunCore` 0xc363298 / `MoveNext`
 0xc32f8f4, билд `72e26b9`).** Новый промис, созданный вcontinuation во время
