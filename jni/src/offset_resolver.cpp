@@ -104,8 +104,8 @@ int      s_applied_count = 0;
 bool     s_logged = false;
 
 constexpr double kTickBudgetSec   = 0.004;  // 4 мс на такт (как у маркеров)
-constexpr double kScanTotalSec    = 25.0;   // общий потолок скана
-constexpr size_t kChunkBytes      = 64 * 1024;
+constexpr double kScanTotalSec    = 60.0;   // общий потолок скана (образы по 0.5ГБ+)
+constexpr size_t kChunkBytes      = 256 * 1024;
 constexpr size_t kMaxReadsPerChunk = 512;   // предел «дорогих» чтений на порцию
 
 static bool all_wanted_found() {
@@ -184,6 +184,14 @@ static void phase_maps() {
         if (end > s_lib_end) s_lib_end = end;
     }
     if (!s_seg_count) { s_phase = PH_DONE; return; }
+    // Сканируем с КОНЦА образа: сегменты идут по возрастанию адреса, а слоты
+    // классов лежат в .data/.relro ближе к концу; огромный .rodata — в начале.
+    // Так классы находятся за первые секунды, а не после минутного прохода.
+    for (int i = 0, j = s_seg_count - 1; i < j; ++i, --j) {
+        const Segment t = s_segments[i];
+        s_segments[i] = s_segments[j];
+        s_segments[j] = t;
+    }
     s_seg_idx = 0;
     s_scan_pos = s_segments[0].start;
     s_scan_deadline = mono_seconds() + kScanTotalSec;
