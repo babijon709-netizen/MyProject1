@@ -269,6 +269,17 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
 // WrapDeg180() — общая обёртка угла, её зовёт вырезанный код ниже.
 #include "ui_util.h"
 
+// Диагностика союзников (живёт в game.cpp): в стенде всегда «пусто».
+void esp_get_ally_diag(int* local_team_len, int* local_clan_len,
+                       int* roster_valid, int* roster_count,
+                       char* roster_team, size_t roster_team_cap) {
+    if (local_team_len) *local_team_len = 0;
+    if (local_clan_len) *local_clan_len = 0;
+    if (roster_valid) *roster_valid = 0;
+    if (roster_count) *roster_count = 0;
+    if (roster_team && roster_team_cap) roster_team[0] = '\0';
+}
+
 // Вырезанный настоящий код режимов (см. run.sh): он должен видеть объявления
 // окружения (g_state, FrameBoxes, esp_*), поэтому включается после заглушек.
 #include "ctrl.inc"

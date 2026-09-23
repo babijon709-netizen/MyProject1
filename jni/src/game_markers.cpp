@@ -31,6 +31,11 @@ using namespace go_active;
 // never move.
 
 static bool g_markers_ore_enabled = false;
+// Внутри «Руды»: какие виды показывать (по умолчанию все — поведение как
+// раньше). Фильтруется при отрисовке, скан всегда собирает все руды.
+static bool g_markers_ore_stone  = true;
+static bool g_markers_ore_metal  = true;
+static bool g_markers_ore_sulfur = true;
 static bool g_markers_animal_enabled = false;
 static bool g_markers_loot_enabled = false;
 static bool g_markers_pickup_enabled = false;
@@ -98,6 +103,14 @@ void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
     // отфильтровываются при отрисовке — инвалидация кэша им не нужна.
 }
 
+void esp_set_ore_kinds_enabled(bool stone, bool metal, bool sulfur) {
+    // Как и машины/боты: руды собираются сканом все, фильтр — при отрисовке,
+    // поэтому инвалидация списка при переключении не нужна.
+    g_markers_ore_stone  = stone;
+    g_markers_ore_metal  = metal;
+    g_markers_ore_sulfur = sulfur;
+}
+
 
 void esp_set_marker_max_distance(float metres) {
     if (!std::isfinite(metres)) return;
@@ -113,6 +126,7 @@ struct MarkerEntity {
     bool     position_valid = false;
     int      pos_cooldown = 0;  // frames until the next position re-read (far animals)
     int      kind = ESP_MARKER_ORE;
+    int      ore_kind = -1;   // вид руды (0/1/2) для по-видовых тумблеров
     // Fixed labels point into static strings; ground pickups build their own
     // ("Ягоды x12"), in which case `text` holds it and `label` is null.
     const char* label = nullptr;
@@ -175,11 +189,15 @@ struct MarkerLook {
     bool has_color = false;
     bool rainbow = false; // drawn in a cycling rainbow colour (elite crates)
     unsigned char rgb[3] = {255, 255, 255};
+    // Для руды — какой именно вид (0 камень, 1 железо, 2 сера): по нему
+    // работают по-видовые тумблеры. Для остальных категорий -1. Поле в конце,
+    // чтобы старые агрегатные инициализаторы остальных меток не трогать.
+    int ore_kind = -1;
 };
 
-static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, false, {190, 190, 190}};
-static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, false, {255, 140,  40}};
-static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {255, 225,  50}};
+static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, false, {190, 190, 190}, 0};
+static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, false, {255, 140,  40}, 1};
+static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {255, 225,  50}, 2};
 
 static void apply_ore_cfg(MarkerLook& look, int which) {
     ImVec4 c = cfg::esp::ore_stone_col;
@@ -1030,6 +1048,7 @@ static bool rebuild_marker_entities() {
             MarkerEntity entity;
             entity.identity = identity;
             entity.kind = look.kind;
+            entity.ore_kind = look.ore_kind;
             entity.label = look.label;
             if (!look.label) memcpy(entity.text, pickup_text, sizeof(entity.text));
             entity.has_color = look.has_color;
@@ -1177,6 +1196,12 @@ std::vector<EspMarker> esp_get_markers() {
     const float max_distance = g_marker_max_distance;
     for (MarkerEntity& entity : g_marker_entities) {
         if (entity.kind == ESP_MARKER_ORE && !g_markers_ore_enabled) continue;
+        // По-видовые тумблеры руды (работают внутри главного «Руда»).
+        if (entity.kind == ESP_MARKER_ORE) {
+            if (entity.ore_kind == 0 && !g_markers_ore_stone)  continue;
+            if (entity.ore_kind == 1 && !g_markers_ore_metal)  continue;
+            if (entity.ore_kind == 2 && !g_markers_ore_sulfur) continue;
+        }
         if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
         if (entity.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) continue;
         if (entity.kind == ESP_MARKER_SCRAP && !g_markers_scrap_enabled) continue;

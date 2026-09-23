@@ -276,8 +276,8 @@ static constexpr int   kAimBoneSlot = 1;
 // касания, и цель за это время уходит. Мемори-аиму упреждение не нужно и
 // выключено: лок каждый такт пишет в память абсолютный угол самой кости —
 // упреждать нечего, а сдвиг точки вперёд по ходу цели выглядел бы как
-// «прицел убегает от головы» (жалоба 19.09).
-static constexpr float kAimVelocityLead = 0.010f;
+// «прицел убегает от головы» (жалоба 19.09). 0.055 — просьба 24.09.
+static constexpr float kAimVelocityLead = 0.055f;
 static unsigned long s_dead_skipped = 0;   // мёртвых не взяли в цель (для лога)
 static unsigned long s_no_skeleton = 0;         // у цели нет скелета вовсе
 static unsigned long s_bones_not_projected = 0; // скелет есть, кости не легли на экран
@@ -406,6 +406,13 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                     s_seen_boxes, s_seen_bots, s_bot_noesp_skipped, s_ally_skipped, s_dead_skipped,
                     s_no_skeleton + s_bones_not_projected, s_no_skeleton, s_bones_not_projected,
                     s_offscreen_skipped, s_out_of_fov);
+            // Почему союзников 0 или сколько их: своя группа (длины строк) и
+            // запасной источник — состав команды из командного объекта.
+            int dteam = 0, dclan = 0, rval = 0, rcnt = 0;
+            char rteam[32] = {};
+            esp_get_ally_diag(&dteam, &dclan, &rval, &rcnt, rteam, sizeof(rteam));
+            LogLine("аим: союзники — своя группа: команда %d симв., клан %d симв.; состав команды: %s, ников %d",
+                    dteam, dclan, rval ? "найден" : "нет", rcnt);
             s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
             s_ally_skipped = 0; s_dead_skipped = 0;
             s_no_skeleton = 0; s_bones_not_projected = 0;
@@ -609,9 +616,10 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                     // пытается запредиктить движение игрока» (жалоба 19.09):
                     // точка уезжала вперёд по ходу цели, а когда цель меняла
                     // направление, прицел оказывался не там. Поэтому упреждение
-                    // долго стояло на нуле. Просьба 24.09 — вернуть небольшое
-                    // упреждение в тач: 0.010 кадра компенсирует только трубу
-                    // касания и не уезжает вперёд по ходу цели.
+                    // долго стояло на нуле. Просьба 24.09 — вернуть упреждение
+                    // в тач и поднять его до 0.055 кадра: оно компенсирует трубу
+                    // касания и уход цели за время догонки. Кэп 1.5 кадра
+                    // оставлен, чтобы не уезжать далеко вперёд по ходу цели.
                     float k = kAimVelocityLead * (1.f - leadMin / vMag);
                     if (k > 1.5f) k = 1.5f;
                     best.yaw   += pick.velYaw   * k;

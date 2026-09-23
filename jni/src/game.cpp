@@ -455,6 +455,81 @@ static bool groups_are_allied(const PlayerGroup& local, const PlayerGroup& other
     return false;
 }
 
+// Своя группа за последний кадр — для диагностики (аим-лог) и запасного
+// признака союзника. Заполняется в цикле боксов.
+static PlayerGroup s_last_local_group;
+
+// ---- Состав своей команды: запасной признак «свой» ---------------------------
+// Строки teamName помечены в дампе как `notserialized` и на чужих клиентах
+// на практике остаются пустыми — сравнение групп тогда не срабатывает ни у
+// кого (в аим-логе все выборы шли с «союзники 0»). У локального игрока есть
+// свой источник правды: командный компонент (PLAYER_TEAM_OBJECT), в котором
+// сервер держит список участников команды. Читаем его раз в 30 кадров и
+// считаем союзником того, чей видимый ник совпал с ником из списка (ник —
+// единственная стабильно синхронизируемая строка игрока; совпадение полных
+// ников у двух разных игроков в одной команде исключено по построению).
+struct TeamRoster {
+    char     nicks[16][32] = {};
+    char     team_name[32] = {};   // имя команды из объекта — для диагностики
+    uint8_t  count = 0;
+    bool     valid = false;        // объект команды найден и прочитан
+    int      refresh = 30;         // первая попытка — сразу
+};
+static TeamRoster s_team_roster;
+
+static void team_roster_revalidate(uint64_t local_player) {
+    TeamRoster& roster = s_team_roster;
+    roster.valid = false;
+    roster.count = 0;
+    roster.team_name[0] = '\0';
+    if (!valid_obj(local_player)) return;
+    uint64_t teamc = rd_ptr(local_player + PLAYER_TEAM_OBJECT);
+    if (!valid_obj(teamc)) return;
+    // Компонент должен принадлежать именно нашему игроку: при сбитом оффсете
+    // сюда попадёт чужой объект, и обратная ссылка это ловит.
+    uint64_t back = rd_ptr(teamc + TEAM_OBJECT_PLAYER);
+    if (back && back != local_player) return;
+    uint64_t data = rd_ptr(teamc + TEAM_OBJECT_DATA);
+    if (!valid_obj(data)) return;
+    read_managed_string_ex(rd_ptr(data + TEAM_DATA_NAME), roster.team_name,
+                           sizeof(roster.team_name), 31);
+    uint64_t members[16];
+    int count = read_managed_collection(rd_ptr(data + TEAM_DATA_MEMBERS), members, 16);
+    for (int i = 0; i < count; ++i) {
+        if (!valid_obj(members[i])) continue;
+        char nick[32] = {};
+        read_managed_string_ex(rd_ptr(members[i] + TEAM_MEMBER_NICK), nick, sizeof(nick), 31);
+        if (!nick[0]) continue;
+        strncpy(roster.nicks[roster.count], nick, sizeof(roster.nicks[0]) - 1);
+        roster.nicks[roster.count][sizeof(roster.nicks[0]) - 1] = '\0';
+        ++roster.count;
+    }
+    roster.valid = true;   // объект есть: пустой список — легальное состояние
+}
+
+// «Свой» по составу команды: полный ник из ростера совпал с видимым ником.
+// Свой собственный ник тоже в списке — локального игрока цикл боксов и так
+// пропускает, сравнение ему ничем не грозит.
+static bool team_roster_contains_name(const char* name) {
+    const TeamRoster& roster = s_team_roster;
+    if (!roster.valid || roster.count == 0 || !name || !name[0]) return false;
+    for (int i = 0; i < roster.count; ++i)
+        if (strcmp(roster.nicks[i], name) == 0) return true;
+    return false;
+}
+
+// Диагностика для аим-лога: почему союзников видно/не видно.
+void esp_get_ally_diag(int* local_team_len, int* local_clan_len,
+                       int* roster_valid, int* roster_count,
+                       char* roster_team, size_t roster_team_cap) {
+    if (local_team_len) *local_team_len = s_last_local_group.team[0] ? (int)strlen(s_last_local_group.team) : 0;
+    if (local_clan_len) *local_clan_len = s_last_local_group.clan[0] ? (int)strlen(s_last_local_group.clan) : 0;
+    if (roster_valid)  *roster_valid  = s_team_roster.valid ? 1 : 0;
+    if (roster_count)  *roster_count  = s_team_roster.count;
+    if (roster_team && roster_team_cap > 0)
+        snprintf(roster_team, roster_team_cap, "%s", s_team_roster.team_name);
+}
+
 static bool player_display_name(uint64_t player, char* out, size_t cap) {
     if (!player || !out || cap < 2) return false;
     char human[32] = {};
@@ -7570,6 +7645,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (local_entity_index < s_transforms.size()) {
         read_player_group(s_transforms[local_entity_index], local_group);
         local_group_valid = local_group.any();
+        s_last_local_group = local_group;   // для диагностики аим-лога
+        // Запасной источник: состав команды из командного объекта. Тот же
+        // ритм 30 кадров, что у ников/оружия: список меняется редко, а чтение
+        // списка — до полусотни обращений к памяти игры.
+        if (++s_team_roster.refresh >= 30) {
+            s_team_roster.refresh = 0;
+            team_roster_revalidate(s_transforms[local_entity_index]);
+        }
+    } else {
+        s_team_roster.valid = false;
+        s_team_roster.count = 0;
     }
 
     // Firing reference for the aimbot (local look direction + eye point).
@@ -7825,7 +7911,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 }
                 PlayerGroup group;
                 read_player_group(s_transforms[i], group);
-                tc.ally = local_group_valid && groups_are_allied(local_group, group);
+                // «Свой» = совпала группа/клан ИЛИ ник игрока есть в составе
+                // нашей команды (запасной путь: строки группы у чужих игроков
+                // помечены в дампе как notserialized и приходят не всегда,
+                // а ник и ростер — всегда; см. team_roster_revalidate).
+                tc.ally = (local_group_valid && groups_are_allied(local_group, group)) ||
+                          team_roster_contains_name(tc.name);
                 snprintf(tc.tag, sizeof(tc.tag), "%s", group.tag);
                 tc.has_tag = tc.tag[0] != '\0';
             }

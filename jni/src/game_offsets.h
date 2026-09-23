@@ -530,6 +530,23 @@ inline constexpr std::uint64_t PLAYER_TEAM_NAME = 0x280; // string teamName
 inline constexpr std::uint64_t PLAYER_CLAN_ID   = 0x290; // string clanId
 inline constexpr std::uint64_t PLAYER_CLAN_TAG  = 0x298; // string clanTag
 
+// ---- Состав своей команды (запасной признак союзника) ------------------------
+// У локального игрока на команде висит отдельный Mirror.NetworkBehaviour
+// (euD в релизе, Reo в бете): в нём объект команды — две строки и список
+// участников (TeamMember: id/clanTag/nick/lvl/netId). Список заполняется
+// серверными сообщениями и живёт независимо от того, синхронизированы ли
+// строки teamName у чужих игроков; сравнение ников из него с видимым ником
+// игрока — второй, независимый способ сказать «свой».
+// Оба дампа (релиз и бета) дают одинаковую раскладку.
+inline constexpr std::uint64_t PLAYER_TEAM_OBJECT    = 0x120; // euD/Reo team (NetworkBehaviour)
+inline constexpr std::uint64_t TEAM_OBJECT_PLAYER    = 0x80;  // обратная ссылка на свой PlayerManager
+inline constexpr std::uint64_t TEAM_OBJECT_DATA      = 0x90;  // объект команды (wa / nX)
+inline constexpr std::uint64_t TEAM_DATA_NAME        = 0x10;  // string: имя команды
+inline constexpr std::uint64_t TEAM_DATA_MEMBERS     = 0x20;  // List<TeamMember>
+inline constexpr std::uint64_t TEAM_MEMBER_ID        = 0x10;  // string id (userID аккаунта)
+inline constexpr std::uint64_t TEAM_MEMBER_CLAN_TAG  = 0x18;  // string clanTag
+inline constexpr std::uint64_t TEAM_MEMBER_NICK      = 0x20;  // string nick (видимый ник)
+
 // Vehicles: both are SyncVars (uint netId of the vehicle / index of the seat),
 // zero while the player is on foot. A mounted player stops updating
 // lastSavedPosition, so his box has to come from the rendered transform.

@@ -43,6 +43,8 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
                                 g_state.esp_loot, g_state.esp_pickup,
                                 g_state.esp_vehicles, g_state.esp_bots,
                                 g_state.esp_scrap);
+        esp_set_ore_kinds_enabled(g_state.esp_ore_stone, g_state.esp_ore_metal,
+                                  g_state.esp_ore_sulfur);
         // Аим по ботам — тем же условием, что кости для аима: работает и
         // когда маркеры ботов выключены.
         esp_set_bot_aim_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);

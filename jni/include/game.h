@@ -112,6 +112,9 @@ void        esp_set_skeleton_enabled(bool enabled);
 // (all off = no work, unless the bot aim feed below is on).
 void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
                                     bool vehicles, bool bots, bool scrap = false);
+// Внутри главного тумблера «Руда»: какие именно руды показывать.
+// Фильтр применяется при отрисовке, поэтому переключение мгновенное.
+void        esp_set_ore_kinds_enabled(bool stone, bool metal, bool sulfur);
 // «Всегда день»: время суток удерживается в полдне (клиентский визуал).
 void        esp_set_always_day(bool enabled);
 // Markers further away than this (metres) are dropped. Keeps the screen clean
@@ -129,6 +132,12 @@ void esp_set_bot_aim_enabled(bool enabled);
 void esp_bot_aim_maintain();
 std::vector<BotAimEnt> esp_bot_aim_list();
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
+
+// Диагностика признака «союзник» для аим-лога: длина своих строк группы,
+// найден ли командный объект (запасной источник) и сколько в нём ников.
+void esp_get_ally_diag(int* local_team_len, int* local_clan_len,
+                       int* roster_valid, int* roster_count,
+                       char* roster_team, size_t roster_team_cap);
 
 // Players near the local player as of the last esp_get_boxes() call, in all
 // directions (360 degrees) — NOT limited to the ones visible on screen.

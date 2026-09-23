@@ -31,6 +31,9 @@ struct AppState {
     bool  esp_box = false, esp_name = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;
     bool  esp_ore = false, esp_animal = false, esp_loot = false, esp_team = false;
+    // Какие руды показывать (работают внутри главного тумблера «Руда»):
+    // по умолчанию включены все, чтобы поведение не менялось.
+    bool  esp_ore_stone = true, esp_ore_metal = true, esp_ore_sulfur = true;
     bool  esp_pickup = false;
     bool  esp_bots = false, esp_vehicles = false;
     bool  esp_scrap = false;              // бочки и дорожные знаки
@@ -90,6 +93,7 @@ struct AppState {
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
+    float a_esp_ore_stone = 1, a_esp_ore_metal = 1, a_esp_ore_sulfur = 1; // включены по умолчанию
     float a_esp_bots = 0, a_esp_vehicles = 0, a_esp_scrap = 0;
     float a_always_day = 0;
     float a_ui_dark = 1;
