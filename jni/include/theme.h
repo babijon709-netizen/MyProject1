@@ -123,6 +123,8 @@ namespace Layout {
     // Левая панель вкладок: вертикальный столбец по центру.
     static constexpr float RailW     = 128.f;
     static constexpr float TabHV     = 108.f;
+    // Строка вкладок под шапкой окна (единая раскладка, как в референсе).
+    static constexpr float TabBarH   = 64.f;
 }
 
 void ApplyTheme();

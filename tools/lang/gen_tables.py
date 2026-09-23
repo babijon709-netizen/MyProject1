@@ -211,8 +211,6 @@ UI_EN = {
     '%.1f м': '%.1f m',
     'Язык': 'Language', 'Интерфейс': 'Interface', 'Тёмная тема': 'Dark theme',
     'Цвет интерфейса': 'Interface color', 'Свой цвет': 'Custom color',
-    'Панель вкладок': 'Tab bar', 'Слева': 'Left', 'Снизу': 'Bottom',
-    'Панель слева': 'Panel on the left', 'Панель снизу': 'Panel at the bottom',
     'Система': 'System', 'Выйти?': 'Exit?', 'Выйти': 'Exit',
     'Приложение будет закрыто.': 'The app will close.', 'Готово': 'Done',
     'Отмена': 'Cancel', 'Включено': 'On', 'Выключено': 'Off',

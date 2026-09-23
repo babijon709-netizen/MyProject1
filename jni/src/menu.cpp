@@ -787,73 +787,6 @@ float TabContent(int tab, float dt, float cW) {
             }
         }
 
-        // ---- Положение панели вкладок: слева или снизу ------------------
-        // Перенесено сюда из удалённой вкладки «Меню».
-        SHdr(XS("Панель вкладок"));
-        {
-            auto* dl  = ImGui::GetWindowDrawList();
-            auto* fn  = ImGui::GetFont();
-            float avW = ImGui::GetContentRegionAvail().x;
-            const float inset = Layout::Inset;
-            const float fs = ImGui::GetFontSize();
-
-            const float cardH = 120.f;
-            const float gap   = 10.f;
-            auto  pos   = ImGui::GetCursorScreenPos();
-            float x0    = pos.x + inset;
-            float cardW = (avW - inset * 2.f - gap) * 0.5f;
-            bool  popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-
-            struct POpt { const char* lbl; bool left; };
-            const POpt opts[2] = { { XS("Слева"), true }, { XS("Снизу"), false } };
-
-            for (int oi = 0; oi < 2; oi++) {
-                float ox0 = x0 + oi * (cardW + gap);
-                float ox1 = ox0 + cardW;
-                bool  sel = (g_state.ui_panel_left == opts[oi].left);
-
-                dl->AddRectFilled({ox0, pos.y}, {ox1, pos.y + cardH}, C::U(C::Card()), R::Card);
-                if (sel) {
-                    dl->AddRectFilled({ox0, pos.y}, {ox1, pos.y + cardH},
-                        C::UA(C::Acc(), 0.14f), R::Card);
-                    dl->AddRect({ox0, pos.y}, {ox1, pos.y + cardH}, C::UA(C::Acc(), 0.55f), R::Card, 0, 1.5f);
-                } else if (g_state.ui_show_sep) {
-                    dl->AddRect({ox0, pos.y}, {ox1, pos.y + cardH}, C::U(C::Hair()), R::Card, 0, 1.f);
-                }
-
-                // Мини-схема окна: прямоугольник с панелью слева или снизу.
-                float mw = 74.f, mh = 52.f;
-                float mx = ox0 + (cardW - mw) * 0.5f;
-                float my = pos.y + 14.f;
-                ImU32 frameCol = C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.95f : 0.6f);
-                dl->AddRect({mx, my}, {mx + mw, my + mh}, frameCol, 6.f, 0, 2.f);
-                if (opts[oi].left)
-                    dl->AddRectFilled({mx + 3.f, my + 3.f}, {mx + 3.f + 16.f, my + mh - 3.f},
-                                      C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.85f : 0.4f), 4.f);
-                else
-                    dl->AddRectFilled({mx + 3.f, my + mh - 3.f - 12.f}, {mx + mw - 3.f, my + mh - 3.f},
-                                      C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.85f : 0.4f), 4.f);
-
-                auto lsz = fn->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0, opts[oi].lbl);
-                dl->AddText(fn, fs * 1.0f,
-                    {ox0 + (cardW - lsz.x) * 0.5f, pos.y + cardH - 16.f - lsz.y},
-                    C::U(sel ? C::Acc() : C::Txt()), opts[oi].lbl);
-
-                char oid[16]; snprintf(oid, sizeof(oid), "##pstyle%d", oi);
-                ImGui::SetCursorScreenPos({ox0, pos.y});
-                ImGui::InvisibleButton(oid, {cardW, cardH});
-                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed
-                    && g_state.ui_panel_left != opts[oi].left) {
-                    g_state.ui_panel_left = opts[oi].left;
-                    pill_y = -1.f; pill_vel = 0.f;   // «пилюля» меняет ось — сброс пружины
-                    ShowToast(opts[oi].left ? XS("Панель слева") : XS("Панель снизу"));
-                    PlaySound(SND_CLICK);
-                }
-            }
-            ImGui::SetCursorScreenPos({pos.x, pos.y + cardH});
-            ImGui::Dummy({avW, 0.f});
-        }
-
         SHdr(XS("Система"));
         {
             auto* dl  = ImGui::GetWindowDrawList();
@@ -1093,37 +1026,6 @@ static const char* TabTitle(int k) {
     return lang::text(kTabTitlesRu[k]);
 }
 
-// Ячейка вкладки в левой панели: иконка слева и крупная подпись справа.
-// Иконка 60 px — в 1.5 раза больше прежних 40. Подпись — обычным начертанием
-// (шрифт в сборке один, полужирного нет и подделывать его мы не будем) в два
-// раза крупнее базового кегля панели. Ширина панели считается так, чтобы
-// влезли и крупная иконка, и такая подпись (см. RailTabsW).
-static const float kRailIcon = 60.f;    // сторона иконки вкладки
-static const float kRailFS   = 1.55f;   // кегль подписи от базового (0.88 от кегля меню)
-static const float kRailPadL = 14.f;    // отступ иконки от края панели
-static const float kRailPadR = 10.f;    // отступ текста от края панели
-static const float kRailGap  = 12.f;    // зазор между иконкой и подписью
-
-// Сколько места нужно ячейкам левой панели: отступ + иконка + зазор + самая
-// длинная подпись (вкладка 0 «Меню» не показывается, она не в счёт) + отступ.
-static float RailTabsW() {
-    const float fs = ImGui::GetFontSize() * 0.88f * kRailFS;
-    float worst = 0.f;
-    for (int k = 1; k < kTabCount; ++k)
-        worst = ImMax(worst, ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, TabTitle(k)).x);
-    return kRailPadL + kRailIcon + kRailGap + worst + kRailPadR;
-}
-
-// Кружок-аватарка и «светофор» в левом верхнем углу меню.
-//
-// Кружок (радиус 87.75 — диаметр 175.5) живёт в панели вкладок, и панель
-// считается от него: отступ + диаметр + отступ. Над кружком, в самом углу
-// окна, стоят три кнопки как в macOS (красная — закрыть меню, жёлтая —
-// свернуть в минимальный размер, зелёная — развернуть на весь экран и обратно).
-static const float kAvatarR    = 87.75f; // радиус кружка (диаметр 175.5)
-static const float kAvatarPad  = 20.f;   // отступ по бокам внутри панели
-static const float kAvatarPadT = 12.f;   // от верхнего края окна
-
 // «Светофор»: три кружка по 20 px с зазором 6.7 — та же пропорция, что в
 // macOS (12 px при системном шрифте 13), в 1.5 раза меньше прежних 30/10.
 static const float kTLD   = 20.f;        // диаметр кружка светофора
@@ -1134,44 +1036,16 @@ static const int   kTLN   = 3;           // красный, жёлтый, зел
 // Ширина светофора целиком.
 static float TrafficLightW(float d, float gap) { return d * kTLN + gap * (kTLN - 1); }
 
-// Размер кружков светофора под ширину панели: в узком окне он ужимается вместе
-// с панелью, чтобы не вылезти на содержимое вкладок.
-static void TrafficLightMetrics(float railW, float& d, float& gap) {
+// Размер кружков светофора под ширину окна: в узком окне он ужимается, чтобы
+// не вылезти за края шапки.
+static void TrafficLightMetrics(float winW, float& d, float& gap) {
     d = kTLD; gap = kTLGap;
     const float need = TrafficLightW(d, gap);
-    const float have = railW - kAvatarPad * 2.f;
+    const float have = winW - kTLPad * 2.f;
     if (need > 0.f && have > 0.f && need > have) {
         const float k = have / need;
         d *= k; gap *= k;
     }
-}
-
-// Ширина панели вкладок: по кружку (при радиусе 58.5 — 157 px), но не меньше,
-// чем нужно светофору. На узком экране (меню сжимается под ширину дисплея)
-// панель не отдаём больше 45% окна: тогда кружок и светофор уменьшаются.
-static float AvatarRailW(float winW) {
-    const float forAvatar = (kAvatarR + kAvatarPad) * 2.f;   // отступ + диаметр + отступ
-    const float forLights = TrafficLightW(kTLD, kTLGap) + kAvatarPad * 2.f;
-    const float forTabs   = RailTabsW();                     // иконка + крупная подпись
-    return ImMin(ImMax(ImMax(forAvatar, forLights), forTabs), ImMax(120.f, winW * 0.45f));
-}
-
-// Радиус кружка под фактическую ширину панели.
-static float AvatarR(float railW) {
-    return ImMin(kAvatarR, ImMax(24.f, railW * 0.5f - kAvatarPad));
-}
-
-// Центр кружка в координатах окна меню: по центру панели вкладок, то есть ровно
-// над иконками вкладок.
-static float AvatarCx(float winX, float R) { return winX + kAvatarPad + R; }
-// Кружок стоит под светофором.
-static float AvatarCy(float winY, float R) {
-    return winY + kTLPad + kTLD + kAvatarPadT + R;
-}
-
-// Низ кружка в координатах окна меню — от него начинается столбец вкладок.
-static float AvatarBottom(float winY, float R) {
-    return winY + kTLPad + kTLD + kAvatarPadT + R * 2.f;
 }
 
 // --- Светофор ===============================================================
@@ -1201,23 +1075,20 @@ static ImU32 TrafficLightColor(int i) {
     }
 }
 
-// Полоса шапки контента. В раскладке с нижней панелью она раньше была втрое
-// выше — под кружок аватарки и светофор; кружка там больше нет, и полоса снова
-// обычной высоты (только под заголовок вкладки).
-static float MenuHeaderH(bool) { return Layout::HeaderH; }
+// Полоса шапки: светофор в углу + кружок видео-аватара (r = 44) + приветствие.
+// Высота — диаметр кружка (88) с полями по 12 сверху и снизу.
+static float MenuHeaderH(bool) { return 88.f + 24.f; }
 
-// Где стоит светофор: в САМОМ левом верхнем углу окна, в обеих раскладках.
-// (В раскладке с нижней панелью он стоял по центру полосы шапки — рядом с
-// кружком аватарки. Кружка там больше нет, и светофор переехал в угол.)
+// Где стоит светофор: в САМОМ левом верхнем углу окна.
 static ImVec2 TrafficLightPos(ImVec2 winPos, bool) { return winPos; }
 
 // Нарисовать светофор. Тапы не обрабатываются: это декор, действия закрыть /
 // свернуть / развернуть убраны вместе с ним (меню открывается и закрывается
 // тапом по пилюле «Противники» сверху, окно таскается за шапку и растягивается
 // за правый нижний угол).
-static void TrafficLight(ImVec2 winPos, float railW) {
+static void TrafficLight(ImVec2 winPos, float winW) {
     float d = 0.f, gap = 0.f;
-    TrafficLightMetrics(railW, d, gap);
+    TrafficLightMetrics(winW, d, gap);
     ImDrawList* fg = ImGui::GetForegroundDrawList();
 
     for (int i = 0; i < kTLN; ++i) {
@@ -2006,7 +1877,7 @@ void RenderMenu() {
     if (!menu_open && !g_win.closing) return;
 
     float WW = g_win.w, WH = g_win.h;
-    const float hH_ = Layout::HeaderH;
+    const float hH_ = MenuHeaderH(false);
 
     {
         bool inResize = io.MousePos.x >= g_win.pos.x + g_win.w - R::Card - 14.f
@@ -2153,166 +2024,22 @@ void RenderMenu() {
     }
 
     ImVec2 wp = g_win.pos;
-    // Панель вкладок: слева (вертикальный столбец) или снизу (строка по
-    // центру) — выбирается в «Опциях». Контент занимает остальную площадь.
-    const bool  panelLeft = g_state.ui_panel_left;
-    const float botH = Layout::BottomH;
-    // Панель вкладок шире стандартной (128 px), если в ней стоит кружок: он
-    // должен целиком помещаться в панели, иначе накрывает содержимое вкладок.
-    const float railW = panelLeft ? AvatarRailW(g_win.w) : Layout::RailW;
-    const float cH = panelLeft ? g_win.h : g_win.h - botH;
-    const float cW = panelLeft ? g_win.w - railW : g_win.w;
-    const float cX0 = panelLeft ? railW : 0.f;
+    // Единая раскладка в духе референса (CheatMenu.cpp): сразу под шапкой
+    // окна идёт горизонтальная строка компактных текстовых вкладок, контент
+    // занимает всю остальную площадь окна.
 
     g_state.tab_alpha += (1.f - g_state.tab_alpha) * 5.f * dt;
     if (g_state.tab_alpha > .999f) g_state.tab_alpha = 1.f;
     SpringTick(g_state.tab_slide, g_state.tab_slide_vel, 0.f, dt);
 
     // Короткие и понятные названия вкладок (индекс = id вкладки) — общий список.
-    // Подпись вкладки берётся на текущем языке: и в шапке, и в панели, и в
-    // расчёте ширины ячейки.
+    // Подпись вкладки берётся на текущем языке: и в строке вкладок, и в
+    // расчёте ширины вкладки.
     auto tabNames = [](int k) { return TabTitle(k); };
     // Вкладка «Меню» (id 0) удалена: её функционал переехал в «Опции».
     // id контента вкладок не меняются — конфиги и логика остаются как были.
     static constexpr int kTabShown = 5;
     static constexpr int kTabOrder[kTabShown] = {1, 2, 3, 4, 5};
-
-    // Пропорции ячейки левой панели: подпись как можно крупнее (цель — вдвое
-    // крупнее базовых 0.88 от кегля меню) и жирная, иконка — слева.
-    //
-    // Место считается по самой длинной подписи: у «Конфиги» при двойном кегле
-    // ширина ~179 px, а в панели после иконки остаётся ~120 px, поэтому берём
-    // максимальный кегль, который влезает, поджав иконку не ниже 40 px. Жирность
-    // набирается проходами текста со сдвигом (см. DrawTabText) — у Roboto в
-    // сборке одно начертание, полужирного файла нет.
-    struct RailCell { float icon = kRailIcon, fs = 20.f, padL = kRailPadL, gap = kRailGap,
-                      padR = kRailPadR; };
-    auto RailMetrics = [&](float railW) -> RailCell {
-        RailCell m;
-        const float baseFS = ImGui::GetFontSize() * 0.88f;   // базовый кегль панели
-        const float want   = baseFS * kRailFS;               // цель — крупнее базового
-        // Если панель уже, чем посчитано в RailTabsW (узкий экран), кегль и
-        // иконка ужимаются: сначала меньше становится иконка, потом подпись.
-        auto widest = [&](float fs) {
-            float worst = 0.f;
-            for (int k = 0; k < kTabShown; ++k)
-                worst = ImMax(worst, ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0,
-                                                                    tabNames(kTabOrder[k])).x);
-            return worst;
-        };
-        for (float fs = want; fs > baseFS; fs -= 1.f) {
-            for (float icon = kRailIcon; icon >= 45.f; icon -= 5.f) {
-                const float avail = railW - m.padL - m.padR - icon - m.gap;
-                if (avail > 0.f && widest(fs) <= avail) { m.icon = icon; m.fs = fs; return m; }
-            }
-        }
-        m.icon = 45.f; m.fs = baseFS;      // узкая панель — базовый кегль
-        return m;
-    };
-
-    // Ячейка вкладки: иконка + подпись. В нижней панели — иконка сверху,
-    // подпись под ней по центру; в левой панели — подпись СПРАВА от иконки
-    // (иконки стоят на одной вертикали, подписи — в одну колонку, как в
-    // боковых панелях macOS). Размеры подгоняются под ширину ячейки, поэтому
-    // длинные подписи («Конфиги») не вылезают за панель.
-    auto DrawTabCell = [&](ImDrawList* fdl, int i, float cellX, float cellY,
-                           float cellW, float cellH, float iconSize, float lblFS,
-                           bool horiz = false,
-                           float padL0 = 0.f, float padR0 = 0.f, float gap0 = 0.f,
-                           bool onAcc = false) {
-        const bool   active = (i == g_state.cur_tab);
-        auto*  font = ImGui::GetFont();
-
-        float  icoW = iconSize, icoH = iconSize, icoX = 0.f, icoY = 0.f;
-        float  fs   = lblFS;
-        ImVec2 lpos{};
-
-        if (horiz) {
-            const float padL = padL0 > 0.f ? padL0 : 16.f;
-            const float padR = padR0 > 0.f ? padR0 : 12.f;
-            const float gap  = gap0  > 0.f ? gap0  : 12.f;
-            auto labelW = [&](float f) { return font->CalcTextSizeA(f, FLT_MAX, 0, tabNames(i)).x; };
-            // Подгонка — только на совсем узкой панели: обычно размеры уже
-            // посчитаны в RailMetrics под самую длинную подпись.
-            const float avail = cellW - padL - padR - gap;
-            for (int it = 0; it < 4 && icoW + labelW(fs) > avail; ++it) {
-                const float k = ImMax(0.6f, avail / ImMax(1.f, icoW + labelW(fs)));
-                icoW = ImMax(24.f, icoW * k);
-                fs   = ImMax(12.f, fs * ImMax(0.75f, k));
-            }
-            icoH = icoW;
-            icoX = cellX + padL;
-            icoY = cellY + (cellH - icoH) * 0.5f;
-            const auto lsz = font->CalcTextSizeA(fs, FLT_MAX, 0, tabNames(i));
-            lpos = {icoX + icoW + gap, cellY + (cellH - lsz.y) * 0.5f};
-        } else {
-            const auto  tsz    = font->CalcTextSizeA(fs, FLT_MAX, 0, tabNames(i));
-            const float blockH = icoH + 6.f + tsz.y;
-            icoX = cellX + cellW * 0.5f - icoW * 0.5f;
-            icoY = cellY + (cellH - blockH) * 0.5f;
-            lpos = {cellX + cellW * 0.5f - tsz.x * 0.5f, icoY + icoH + 6.f};
-        }
-
-        // Иконки вкладок рисуются векторно (линии/круги): не зависят от
-        // атласа PNG и одинаково читаются в обеих темах. Активная — акцент,
-        // неактивная — приглушённая. Если атлас иконок вшит (media/icons.h),
-        // приоритет остаётся за ним.
-        const ImU32 gcol = C::U(active ? (onAcc ? C::OnAcc() : C::Acc()) : C::Dim());
-        const float lw = ImMax(2.2f, icoW * 0.055f);
-        if (g_tabIcons[i]) {
-            ImVec2 iMin = {icoX, icoY};
-            ImVec2 iMax = {icoX + icoW, icoY + icoH};
-            fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax,
-                {0,0}, {1,1}, IM_COL32(255, 255, 255, active ? 255 : 165), 9.f);
-        } else if (i == 1) {
-            // Аим — прицел: круг, четыре риска, точка в центре.
-            const float cx = icoX + icoW * 0.5f, cy = icoY + icoH * 0.5f;
-            const float rr = icoW * 0.34f;
-            fdl->AddCircle({cx, cy}, rr, gcol, 24, lw);
-            const float t0 = rr * 0.55f, t1 = rr + icoW * 0.16f;
-            fdl->AddLine({cx - t1, cy}, {cx - t0, cy}, gcol, lw);
-            fdl->AddLine({cx + t0, cy}, {cx + t1, cy}, gcol, lw);
-            fdl->AddLine({cx, cy - t1}, {cx, cy - t0}, gcol, lw);
-            fdl->AddLine({cx, cy + t0}, {cx, cy + t1}, gcol, lw);
-            fdl->AddCircleFilled({cx, cy}, icoW * 0.075f, gcol, 12);
-        } else if (i == 2) {
-            // ESP — глаз: два безье-века и зрачок.
-            const float cx = icoX + icoW * 0.5f, cy = icoY + icoH * 0.5f;
-            const float ew = icoW * 0.40f, eh = icoH * 0.34f;
-            fdl->PathLineTo({cx - ew, cy});
-            fdl->PathBezierCubicCurveTo({cx - ew * 0.5f, cy - eh}, {cx + ew * 0.5f, cy - eh}, {cx + ew, cy});
-            fdl->PathStroke(gcol, 0, lw);
-            fdl->PathLineTo({cx - ew, cy});
-            fdl->PathBezierCubicCurveTo({cx - ew * 0.5f, cy + eh}, {cx + ew * 0.5f, cy + eh}, {cx + ew, cy});
-            fdl->PathStroke(gcol, 0, lw);
-            fdl->AddCircleFilled({cx, cy}, icoW * 0.13f, gcol, 16);
-        } else if (i == 3) {
-            // Разное — сетка 2x2, один квадрат контурный.
-            float gx0 = icoX, gy0 = icoY;
-            float cell = icoW * 0.44f, gap2 = icoW - cell * 2.f;
-            float rr = cell * 0.3f;
-            fdl->AddRectFilled({gx0, gy0}, {gx0 + cell, gy0 + cell}, gcol, rr);
-            fdl->AddRectFilled({gx0 + cell + gap2, gy0}, {gx0 + icoW, gy0 + cell}, gcol, rr);
-            fdl->AddRectFilled({gx0, gy0 + cell + gap2}, {gx0 + cell, gy0 + icoW}, gcol, rr);
-            fdl->AddRect({gx0 + cell + gap2, gy0 + cell + gap2}, {gx0 + icoW, gy0 + icoW}, gcol, rr, 0, lw);
-        } else if (i == 4) {
-            // Конфиги — папка: скруглённый корпус + язычок.
-            const float fy = icoY + icoH * 0.30f;
-            fdl->AddRect({icoX, fy}, {icoX + icoW, icoY + icoH}, gcol, icoW * 0.16f, 0, lw);
-            fdl->AddRectFilled({icoX, icoY + icoH * 0.14f}, {icoX + icoW * 0.42f, fy}, gcol, 3.f);
-        } else {
-            // Опции — ползунки: две линии с круглыми ручками.
-            const float lx0 = icoX + icoW * 0.10f, lx1 = icoX + icoW * 0.90f;
-            const float y1 = icoY + icoH * 0.34f, y2 = icoY + icoH * 0.66f;
-            fdl->AddLine({lx0, y1}, {lx1, y1}, gcol, lw);
-            fdl->AddLine({lx0, y2}, {lx1, y2}, gcol, lw);
-            const float kr = icoW * 0.11f;
-            fdl->AddCircleFilled({lx0 + (lx1 - lx0) * 0.68f, y1}, kr, gcol, 16);
-            fdl->AddCircleFilled({lx0 + (lx1 - lx0) * 0.30f, y2}, kr, gcol, 16);
-        }
-        fdl->AddText(font, fs, lpos,
-                     C::U(active ? (onAcc ? C::OnAcc() : C::Txt()) : C::Dim()), tabNames(i));
-    };
 
     auto TabTap = [&](int i) {
         if (WasTappedHere() && !IsScrollDragging() && !g_input.touchConsumed && g_state.cur_tab != i) {
@@ -2325,190 +2052,41 @@ void RenderMenu() {
         }
     };
 
-    if (panelLeft) {
-        // ---- Левая панель вкладок (вертикальный столбец по центру) ------
-        ImGui::SetCursorPos({0, 0});
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
-        ImGui::BeginChild("##lp", {railW, WH}, false, ImGuiWindowFlags_NoScrollbar);
-        auto  lpPos = ImGui::GetWindowPos();
-        auto* ldl   = ImGui::GetWindowDrawList();
-        ldl->AddRectFilled(lpPos, {lpPos.x + railW, lpPos.y + WH}, C::U(C::LeftBg()), R::Sheet,
-                           ImDrawFlags_RoundCornersLeft);
-        ldl->AddLine({lpPos.x + railW, lpPos.y + 1.f}, {lpPos.x + railW, lpPos.y + WH - 1.f},
-                     C::U(C::Hair()), 1.f);
-
-        // Светофор как в macOS — в самом углу окна, кружок с видео под ним.
-        TrafficLight(TrafficLightPos(g_win.pos, true), railW);
-        const float avR = AvatarR(railW);
-        {
-            // Мягкое свечение под кружком видео: два акцентных ореола.
-            const ImVec2 ac{AvatarCx(lpPos.x, avR), AvatarCy(lpPos.y, avR)};
-            ldl->AddCircleFilled(ac, avR + 14.f, C::UA(C::Acc(), 0.06f), 48);
-            ldl->AddCircleFilled(ac, avR + 7.f,  C::UA(C::Acc(), 0.10f), 48);
-        }
-        VidAvatar::Draw(ldl, AvatarCx(lpPos.x, avR), AvatarCy(lpPos.y, avR), avR, dt,
-                        C::U(C::Acc()), C::U(C::LeftBg()));
-
-        // Размеры подписи и иконки в этой панели — из ширины панели.
-        const RailCell railM = RailMetrics(railW);
-
-        // Столбец вкладок идёт ПОД кружком и не пересекается с ним: сверху
-        // оставляем 12 px от кружка, снизу 6 px до края окна. Если в минимальном
-        // окне (720 px) пяти ячейкам по 108 px места не хватает, высота ячейки
-        // поджимается (кружок 176 px + столбец 514 px = 720) — так столбец
-        // целиком остаётся внутри окна, а последняя вкладка не уезжает за край.
-        const float colTop = AvatarBottom(0.f, avR) + 12.f;
-        const float avail  = ImMax(64.f * kTabShown, WH - colTop - 6.f);
-        const float tabH   = ImMin(Layout::TabHV, avail / (float)kTabShown);
-        const float colH   = tabH * kTabShown;
-        const float startY = ImMax(colTop, (WH - colH) * 0.5f);
-
-        for (int s = 0; s < kTabShown; s++) {
-            const int i = kTabOrder[s];
-            ImGui::SetCursorPos({0, startY + s * tabH});
-            auto pos2 = ImGui::GetCursorScreenPos();
-            tab_rects[i] = {pos2.y};
-            char tabId[16];
-            snprintf(tabId, sizeof(tabId), "##tab%d", i);
-            ImGui::InvisibleButton(tabId, {railW, tabH});
-            TabTap(i);
-        }
-
-        // Пружинная «пилюля» активной вкладки скользит по вертикали.
-        {
-            float targetRel = tab_rects[g_state.cur_tab].sx - wp.y;
-            if (pill_y < 0.f) { pill_y = targetRel; pill_vel = 0.f; }
-            SpringTick(pill_y, pill_vel, targetRel, dt);
-        }
-        float pillY = wp.y + pill_y;
-
-        {
-            auto*       fdl = ImGui::GetForegroundDrawList();
-            const float pR  = R::Pill;
-            float px0 = lpPos.x + 9.f,  px1 = lpPos.x + railW - 9.f;
-            float py0 = pillY + 7.f,    py1 = pillY + tabH - 7.f;
-            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::U(C::Card()), pR);
-            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::UA(C::Acc(), 0.14f), pR);
-            fdl->AddRect({px0, py0}, {px1, py1}, C::UA(C::Acc(), 0.45f), pR, 0, 1.f);
-            // Градиентный индикатор на левом краю пилюли: акцент уходит
-            // в глубокий синий к низу.
-            ImVec4 ga = C::Acc(), gb = C::Acc2();
-            fdl->AddRectFilledMultiColor({px0 + 7.f, py0 + 10.f}, {px0 + 11.f, py1 - 10.f},
-                                         C::U(ga), C::U(gb), C::U(gb), C::U(ga));
-        }
-
-        {
-            auto* fdl = ImGui::GetForegroundDrawList();
-            for (int s = 0; s < kTabShown; s++) {
-                const int i = kTabOrder[s];
-                // Иконка слева, подпись справа — как в боковых панелях macOS.
-                // Кегль и иконка посчитаны под ширину панели (RailMetrics).
-                DrawTabCell(fdl, i, lpPos.x, tab_rects[i].sx, railW, tabH,
-                            railM.icon, railM.fs, true,
-                            railM.padL, railM.padR, railM.gap);
-            }
-        }
-
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-    } else {
-        // ---- Нижняя панель вкладок (строка по центру) --------------------
-        ImGui::SetCursorPos({0, cH});
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
-        ImGui::BeginChild("##lp", {WW, botH}, false, ImGuiWindowFlags_NoScrollbar);
-        auto  lpPos = ImGui::GetWindowPos();
-        auto* ldl   = ImGui::GetWindowDrawList();
-        // Плавающий док: панель вкладок не прижата к краям окна — висит
-        // с отступами, как док в мобильных ОС.
-        const float dockInset = 12.f;
-        ldl->AddRectFilled({lpPos.x + dockInset, lpPos.y + 8.f},
-                           {lpPos.x + WW - dockInset, lpPos.y + botH - 8.f},
-                           C::U(C::LeftBg()), 20.f);
-        ldl->AddRect({lpPos.x + dockInset, lpPos.y + 8.f},
-                     {lpPos.x + WW - dockInset, lpPos.y + botH - 8.f},
-                     C::U(C::Hair()), 20.f, 0, 1.f);
-
-        // Ряд вкладок строго по центру панели.
-        const float tabW   = Layout::TabW;
-        const float rowW   = tabW * kTabShown;
-        const float startX = (WW - rowW) * 0.5f;
-
-        for (int s = 0; s < kTabShown; s++) {
-            const int i = kTabOrder[s];   // id вкладки в этой позиции панели
-            ImGui::SetCursorPos({startX + s * tabW, 0});
-            auto pos2 = ImGui::GetCursorScreenPos();
-            tab_rects[i] = {pos2.x};
-            char tabId[16];
-            snprintf(tabId, sizeof(tabId), "##tab%d", i);
-            ImGui::InvisibleButton(tabId, {tabW, botH});
-            TabTap(i);
-        }
-
-        // Пружинная «пилюля» активной вкладки скользит по горизонтали.
-        {
-            float targetRelX = tab_rects[g_state.cur_tab].sx - wp.x;
-            if (pill_y < 0.f) { pill_y = targetRelX; pill_vel = 0.f; }
-            SpringTick(pill_y, pill_vel, targetRelX, dt);
-        }
-        float pillX = wp.x + pill_y;
-        float barY  = lpPos.y;
-
-        {
-            auto*       fdl = ImGui::GetForegroundDrawList();
-            const float pR  = R::Pill;
-            float px0 = pillX + 8.f,        px1 = pillX + tabW - 8.f;
-            float py0 = barY + 12.f,        py1 = barY + botH - 14.f;
-            // Пилюля активной вкладки — сплошной градиент акцента; подпись
-            // и иконка на ней — цветом OnAcc (тёмно-синий на циане).
-            ImVec4 ga = C::Acc(), gb = C::Acc2();
-            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::U(C::Card()), pR);
-            fdl->AddRectFilledMultiColor({px0, py0}, {px1, py1}, C::U(ga), C::U(gb), C::U(gb), C::U(ga));
-        }
-
-        {
-            auto* fdl = ImGui::GetForegroundDrawList();
-            for (int s = 0; s < kTabShown; s++) {
-                const int i = kTabOrder[s];
-                DrawTabCell(fdl, i, tab_rects[i].sx, barY, tabW, botH, 62.f,
-                            ImGui::GetFontSize() * 0.95f,
-                            false, 0.f, 0.f, 0.f, true);
-            }
-        }
-
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-    }
-
-    ImGui::SetCursorPos({cX0, 0});
+    ImGui::SetCursorPos({0, 0});
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
-    ImGui::BeginChild("##cp", {cW, cH}, false,
+    ImGui::BeginChild("##cp", {WW, WH}, false,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-    // Когда панель вкладок не слева, кружок аватарки рисуется в шапке контента
-    // (там же, где заголовок): полосу шапки под него расширяем, иначе он налез
-    // бы на первый ряд вкладки.
-    // В раскладке с нижней панелью вкладок кружок и светофор стоят в шапке
-    // контента: светофор у самого угла окна, кружок сразу справа от него, оба
-    // по центру полосы. Полосу под них расширяем, чтобы не налезли на первый ряд.
-    const float hdrH = MenuHeaderH(panelLeft);
+    // Высота полосы шапки: светофор в углу + кружок видео-аватара + приветствие.
+    const float hdrH = MenuHeaderH(false);
 
     {
-        // Шапка в духе референса: слева «Привет, user», справа — ряд цветных
-        // точек и зелёная метка «* online».
+        // Шапка в духе референса: светофор в углу, правее кружок видео-аватара,
+        // затем «Привет, user»; справа — ряд цветных точек и «* online».
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
         auto*  fnH = ImGui::GetFont();
         const float hH  = hdrH;
         const float gFS = ImGui::GetFontSize() * 1.10f;
-        float tx = hp.x + Layout::PadX;
-        if (!panelLeft) {
-            // Светофор — в самом левом верхнем углу окна, приветствие правее.
-            TrafficLight(TrafficLightPos(g_win.pos, false), cW);
-            float d = 0.f, gap2 = 0.f;
-            TrafficLightMetrics(cW, d, gap2);
-            tx += kTLPad + TrafficLightW(d, gap2) + 16.f;
-        }
+
+        // Светофор — в самом левом верхнем углу окна.
+        TrafficLight(TrafficLightPos(g_win.pos, false), WW);
+        float d = 0.f, gap2 = 0.f;
+        TrafficLightMetrics(WW, d, gap2);
+        const float tlW = kTLPad + TrafficLightW(d, gap2);
+
+        // Кружок видео-аватара правее светофора, по центру полосы шапки.
+        // (Раньше он жил в левой панели вкладок; панель заменена единой
+        // строкой вкладок, и кружок вернулся в шапку — уменьшенным, r = 44.)
+        const float avR  = 44.f;
+        const float avCx = hp.x + tlW + 16.f + avR;
+        const float avCy = hp.y + hH * 0.5f;
+        cdl->AddCircleFilled({avCx, avCy}, avR + 12.f, C::UA(C::Acc(), 0.06f), 48);
+        cdl->AddCircleFilled({avCx, avCy}, avR +  6.f, C::UA(C::Acc(), 0.10f), 48);
+        VidAvatar::Draw(cdl, avCx, avCy, avR, dt, C::U(C::Acc()), C::U(C::Bg()));
+
         const float cy = hp.y + (hH - gFS) * 0.5f;
+        float tx = avCx + avR + 18.f;
         const char* greet = XS("Привет,");
         auto gsz = fnH->CalcTextSizeA(gFS, FLT_MAX, 0, greet);
         cdl->AddText(fnH, gFS, {tx, cy}, C::U(C::Acc()), greet);
@@ -2517,7 +2095,7 @@ void RenderMenu() {
         // Правый блок: восемь цветных точек статуса + «* online».
         const float oFS = ImGui::GetFontSize() * 0.85f;
         auto osz = fnH->CalcTextSizeA(oFS, FLT_MAX, 0, "* online");
-        const float right = hp.x + cW - Layout::PadX;
+        const float right = hp.x + WW - Layout::PadX;
         cdl->AddText(fnH, oFS, {right - osz.x, hp.y + (hH - oFS) * 0.5f}, C::U(C::Green()), "* online");
         static const ImVec4 kDots[8] = {
             {0.60f, 0.60f, 0.60f, 1.f}, {0.90f, 0.20f, 0.20f, 1.f},
@@ -2530,15 +2108,91 @@ void RenderMenu() {
         for (int i = 0; i < 8; ++i)
             cdl->AddCircleFilled({dx + i * dstep, hp.y + hH * 0.5f}, dr, C::U(kDots[i]), 12);
 
-        // Неоновая линия под шапкой отделяет её от прокручиваемого контента.
-        cdl->AddLine({hp.x, hp.y + hH - 1.f}, {hp.x + cW, hp.y + hH - 1.f}, C::U(C::Hair()), 1.f);
-        ImGui::Dummy({cW, hH});
+        // Неоновая линия под шапкой отделяет её от строки вкладок.
+        cdl->AddLine({hp.x, hp.y + hH - 1.f}, {hp.x + WW, hp.y + hH - 1.f}, C::U(C::Hair()), 1.f);
+        ImGui::Dummy({WW, hH});
+    }
+
+    // Строка вкладок под шапкой — как в референсе (CheatMenu.cpp): компактные
+    // скруглённые таблетки только с текстом, без иконок. Активная залита
+    // тёмным акцентом, неактивные — карточки с окантовкой; под строкой —
+    // линия-разделитель, как подчёркивание BeginTabBar в референсе.
+    const float tabStripH = Layout::TabBarH;
+    {
+        auto*  cdl = ImGui::GetWindowDrawList();
+        auto*  fnT = ImGui::GetFont();
+        const float tFS  = ImGui::GetFontSize() * 0.95f;
+        const float pad  = 22.f;    // горизонтальные поля текста во вкладке
+        const float gap  = 10.f;    // зазор между вкладками
+        const float tabH = 46.f;    // высота вкладки
+
+        float tabWs[kTabShown];
+        float rowW = 0.f;
+        for (int s = 0; s < kTabShown; ++s) {
+            tabWs[s] = fnT->CalcTextSizeA(tFS, FLT_MAX, 0, tabNames(kTabOrder[s])).x + pad * 2.f;
+            rowW    += tabWs[s];
+        }
+        rowW += gap * (float)(kTabShown - 1);
+        const float tabX = (WW - rowW) * 0.5f;
+        const float tabY = hdrH + (tabStripH - tabH) * 0.5f;
+
+        // Кнопки-невидимки по вкладкам: тап переключает вкладку с затуханием.
+        float cx0 = tabX;
+        for (int s = 0; s < kTabShown; ++s) {
+            const int i = kTabOrder[s];   // id вкладки в этой позиции строки
+            ImGui::SetCursorPos({cx0, tabY});
+            auto pos2 = ImGui::GetCursorScreenPos();
+            tab_rects[i] = {pos2.x};
+            char tabId[16];
+            snprintf(tabId, sizeof(tabId), "##tab%d", i);
+            ImGui::InvisibleButton(tabId, {tabWs[s], tabH});
+            TabTap(i);
+            cx0 += tabWs[s] + gap;
+        }
+
+        // Пружинная «пилюля» активной вкладки скользит по горизонтали.
+        int curS = 0;
+        for (int s = 0; s < kTabShown; ++s)
+            if (kTabOrder[s] == g_state.cur_tab) curS = s;
+        {
+            float targetRelX = tab_rects[g_state.cur_tab].sx - wp.x;
+            if (pill_y < 0.f) { pill_y = targetRelX; pill_vel = 0.f; }
+            SpringTick(pill_y, pill_vel, targetRelX, dt);
+        }
+        const float pillX = wp.x + pill_y;
+
+        auto* fdl = ImGui::GetForegroundDrawList();
+        // Неактивные вкладки: карточка + тонкая окантовка (если разделители
+        // включены в «Опциях»).
+        for (int s = 0; s < kTabShown; ++s) {
+            const int i = kTabOrder[s];
+            if (i == g_state.cur_tab) continue;
+            const float x0 = tab_rects[i].sx, x1 = x0 + tabWs[s];
+            fdl->AddRectFilled({x0, tabY}, {x1, tabY + tabH}, C::U(C::Card()), R::Btn);
+            if (g_state.ui_show_sep)
+                fdl->AddRect({x0, tabY}, {x1, tabY + tabH}, C::U(C::Hair()), R::Btn, 0, 1.f);
+        }
+        // Активная — сплошная заливка тёмным акцентом (TabActive в референсе).
+        fdl->AddRectFilled({pillX, tabY}, {pillX + tabWs[curS], tabY + tabH},
+                           C::U(C::AccDk()), R::Btn);
+        // Подписи: активная — ярким текстом, прочие — приглушённым.
+        for (int s = 0; s < kTabShown; ++s) {
+            const int  i   = kTabOrder[s];
+            const bool act = (i == g_state.cur_tab);
+            const auto lsz = fnT->CalcTextSizeA(tFS, FLT_MAX, 0, tabNames(i));
+            fdl->AddText(fnT, tFS,
+                {tab_rects[i].sx + (tabWs[s] - lsz.x) * 0.5f, tabY + (tabH - lsz.y) * 0.5f},
+                C::U(act ? C::Txt() : C::Dim()), tabNames(i));
+        }
+        // Линия под строкой вкладок — как подчёркивание BeginTabBar.
+        cdl->AddLine({wp.x, wp.y + hdrH + tabStripH - 1.f},
+                     {wp.x + WW, wp.y + hdrH + tabStripH - 1.f}, C::U(C::Hair()), 1.f);
     }
 
     {
-        const float areaH = cH - hdrH;
-        auto cpPos  = ImGui::GetWindowPos(); cpPos.y += hdrH;
-        const float cpRight = cpPos.x + cW;
+        const float areaH = WH - hdrH - tabStripH;
+        auto cpPos  = ImGui::GetWindowPos(); cpPos.y += hdrH + tabStripH;
+        const float cpRight = cpPos.x + WW;
 
         bool sheetBlocking = g_sheet.visible || (g_pop.visible && !g_pop.closing);
         static float s_maxScroll = 0.f;
@@ -2555,17 +2209,17 @@ void RenderMenu() {
         cdl->PushClipRect(cpPos, {cpRight, cpPos.y + areaH - 4.f}, true);
 
         float slideOffset = g_state.tab_slide;
-        ImGui::SetCursorPosY(hdrH - g_scrollMain.off + slideOffset);
+        ImGui::SetCursorPosY(hdrH + tabStripH - g_scrollMain.off + slideOffset);
         ImGui::SetCursorPosX(12.f);
 
         if (sheetBlocking) ImGui::BeginDisabled(true);
-        float contentH = TabContent(g_state.cur_tab, dt, cW);
+        float contentH = TabContent(g_state.cur_tab, dt, WW);
         if (sheetBlocking) ImGui::EndDisabled();
 
         if (g_state.tab_alpha < 0.999f) {
             float fadeA = 1.f - g_state.tab_alpha;
             cdl->AddRectFilled(cpPos, {cpRight, cpPos.y + areaH},
-                C::UA(C::Bg(), fadeA), R::Card, ImDrawFlags_RoundCornersTop);
+                C::UA(C::Bg(), fadeA), R::Sheet, ImDrawFlags_RoundCornersBottom);
         }
 
         s_maxScroll = ImMax(0.f, contentH - (areaH - 4.f));
