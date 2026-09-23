@@ -11,6 +11,7 @@
 #include "app_state.h"    // g_state.hud_cnt_* — положение счётчика
 #include "menu.h"          // g_calibMode — кнопка молчит при калибровке
 #include "audio.h"         // PlaySound — клик кнопки фрикама
+#include "ascii.h"          // рамки/глифы терминала
 
 struct ToastState {
     char  msg[128]     = {};
@@ -118,12 +119,11 @@ void DrawToast(float dt) {
 
     ImVec4 card = C::Card(), txt = C::Txt(), dim = C::Dim(), acc = C::Acc();
 
-    fg->AddRectFilled({tx + 2.f, ty + 4.f}, {tx + tW + 2.f, ty + tH + 4.f},
-        IM_COL32(0, 0, 0, int(26 * alpha)), 26.f);
+    // Тост — строка статуса терминала: карточка с одинарной рамкой и полосой
+    // «████░░░» вместо прогресс-пилюли.
     fg->AddRectFilled({tx, ty}, {tx + tW, ty + tH},
-        IM_COL32(int(card.x*255), int(card.y*255), int(card.z*255), int(alpha * 245)), 26.f);
-    fg->AddRect({tx, ty}, {tx + tW, ty + tH},
-        C::UA(acc, 0.32f * alpha), 26.f, 0, 1.3f);
+        IM_COL32(int(card.x*255), int(card.y*255), int(card.z*255), int(alpha * 245)));
+    ascii::Frame(fg, {tx, ty}, {tx + tW, ty + tH}, C::UA(acc, 0.45f * alpha), false);
 
     fg->PushClipRect({tx + 1.f, ty + 1.f}, {tx + tW - 1.f, ty + tH - 1.f}, true);
 
@@ -149,14 +149,13 @@ void DrawToast(float dt) {
     }
 
     {
-        float bH  = 10.f, bR = 5.f;
-        float bY  = ty + tH - 8.f - bH;
+        // Прогресс жизни тоста — «██████░░░░░░░░░» мелким кеглем.
+        const float bfs = 13.f;
+        const ImVec2 bcell = ascii::Cell(ascii::SmallFont(), bfs);
         float bx0 = tx + 22.f, bx1 = tx + tW - 22.f;
-        float fx1 = bx0 + g_toast.barW * (bx1 - bx0);
-        int ar = int(acc.x*255), ag = int(acc.y*255), ab = int(acc.z*255);
-        if (fx1 > bx0 + bR * 2.f)
-            fg->AddRectFilled({bx0, bY}, {fx1, bY + bH},
-                IM_COL32(ar, ag, ab, int(alpha * 215)), bR);
+        int   n = ImMax(3, (int)((bx1 - bx0) / bcell.x));
+        ascii::Bar(fg, {bx0, ty + tH - 8.f - bcell.y}, g_toast.barW, n,
+                   C::UA(acc, alpha * 0.85f), C::UA(dim, alpha * 0.4f), bfs);
     }
 
     fg->PopClipRect();
@@ -189,15 +188,19 @@ void DrawWatermark(float dt) {
     // Тапы по ней не обрабатываются вовсе, так что она «прозрачна» для
     // кликов и ничему не мешает.
     {
+        // Имя чита — как заголовок окна тайлового менеджера: «> t.me/benzware».
         const float fs = 38.f, padX = 24.f, padY = 14.f;
         const char* name = XS("t.me/benzware");
+        const char* pfx  = "> ";
+        auto pSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, pfx);
         auto nSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, name);
-        float bW = padX * 2.f + nSz.x;
+        float bW = padX * 2.f + pSz.x + nSz.x;
         float bH = padY * 2.f + nSz.y;
         const float bX = 12.f, bY = 12.f;
-        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Card(), 0.8f), bH * 0.5f);
-        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, C::UA(acc, 0.5f), bH * 0.5f, 0, 1.5f);
-        fg->AddText(fn, fs, {bX + padX, bY + padY}, C::UA(C::Txt(), 0.95f), name);
+        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Card(), 0.85f));
+        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, C::UA(acc, 0.55f), 0, 0, 1.5f);
+        fg->AddText(fn, fs, {bX + padX, bY + padY}, C::UA(acc, 0.9f), pfx);
+        fg->AddText(fn, fs, {bX + padX + pSz.x, bY + padY}, C::UA(C::Txt(), 0.95f), name);
     }
 
     // ---- Пилюля-счётчик противников --------------------------------------
@@ -213,15 +216,16 @@ void DrawWatermark(float dt) {
             enemies = esp_nearby_player_count();
         }
 
-        const float fs = 40.f, pad = 22.f, bR = 46.f;
+        const float fs = 40.f, pad = 22.f;
         const char* lbl = XS("Противники");
         char cntBuf[16]; snprintf(cntBuf, sizeof(cntBuf), "%d", enemies);
         auto lSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, lbl);
         auto cSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, cntBuf);
+        // Индикатор — глиф «●» вместо кружка: [● Противники 12]
+        const float dotW = fn->CalcTextSizeA(fs, FLT_MAX, 0, "\xE2\x97\x8F").x + 12.f;
 
         // Точка-индикатор + подпись + число.
-        const float dotR = 7.f;
-        float bW = pad + dotR * 2.f + 12.f + lSz.x + 14.f + cSz.x + pad;
+        float bW = pad + dotW + lSz.x + 14.f + cSz.x + pad;
         float bH = cSz.y + pad;
         // Пользовательская позиция: доли экрана = ЦЕНТР пилюли. Кламп
         // держит её внутри экрана целиком.
@@ -243,22 +247,18 @@ void DrawWatermark(float dt) {
 
         if (wm_ring < 1.f) {
             float r = EaseOut3(wm_ring), ex = r * 22.f;
-            fg->AddRectFilled({bX - ex, bY - ex}, {bX + bW + ex, bY + bH + ex},
-                C::UA(acc, 0.18f * (1.f - r)), bR + ex);
+            fg->AddRect({bX - ex, bY - ex}, {bX + bW + ex, bY + bH + ex},
+                C::UA(acc, 0.35f * (1.f - r)), 0, 0, 2.f);
         }
 
-        fg->AddRectFilled({bX + 2.f, bY + 3.f}, {bX + bW + 2.f, bY + bH + 3.f},
-            IM_COL32(0, 0, 0, 20), bR);
-        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, bgCol, bR);
-        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, brdCol, bR, 0, 1.5f);
-
-        float dcy = bY + bH * 0.5f;
-        fg->AddCircleFilled({bX + pad + dotR, dcy}, dotR, C::U(acc), 24);
+        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, bgCol);
+        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, brdCol, 0, 0, 1.5f);
 
         float tY = bY + (bH - cSz.y) * 0.5f;
-        float lX = bX + pad + dotR * 2.f + 12.f;
-        fg->AddText(fn, fs, {lX, tY}, C::UA(C::Txt(), 0.85f), lbl);
-        fg->AddText(fn, fs, {lX + lSz.x + 14.f, tY}, C::UA(C::Txt(), 0.85f), cntBuf);
+        float lX = bX + pad;
+        fg->AddText(fn, fs, {lX, tY}, C::U(acc), "\xE2\x97\x8F");  // ●
+        fg->AddText(fn, fs, {lX + dotW, tY}, C::UA(C::Txt(), 0.85f), lbl);
+        fg->AddText(fn, fs, {lX + dotW + lSz.x + 14.f, tY}, C::UA(C::Txt(), 0.85f), cntBuf);
     }
 
     // ---- Кнопка фрикама: квадрат со скруглениями и глазом ----------------
@@ -269,7 +269,7 @@ void DrawWatermark(float dt) {
     // «Кнопка на экране» (вместе с тапом — спрятанное не нажимается).
     if (g_state.freecam_btn_show)
     {
-        const float side = kFcBtnSide, rad = kFcBtnRadius;
+        const float side = kFcBtnSide;
         float cx = (g_state.freecam_btn_x >= 0.f ? g_state.freecam_btn_x : kFcBtnDefX) * scrW;
         float cy = (g_state.freecam_btn_y >= 0.f ? g_state.freecam_btn_y : kFcBtnDefY) * scrH;
         float qX = cx - side * 0.5f, qY = cy - side * 0.5f;
@@ -284,26 +284,17 @@ void DrawWatermark(float dt) {
             PlaySound(SND_CLICK);
         }
 
-        fg->AddRectFilled({qX, qY}, {qX + side, qY + side}, C::UA(C::Card(), 0.90f), rad);
+        // Кнопка фрикама — квадрат с глифом «●»: включена — акцентная,
+        // выключенная — тусклая (глаз-кривые больше не нужны).
+        fg->AddRectFilled({qX, qY}, {qX + side, qY + side}, C::UA(C::Card(), 0.90f));
         fg->AddRect({qX, qY}, {qX + side, qY + side},
-                    on ? C::UA(C::Acc(), 0.95f) : C::UA(C::Dim(), 0.8f), rad, 0, on ? 3.f : 1.5f);
-
-        // Глаз: миндалина двумя квадратичными кривыми (контрольная точка
-        // тянет кривую на половину высоты — отсюда удвоение), зрачок и блик.
-        const float ex = qX + side * 0.5f, ey = qY + side * 0.5f;
-        const float aw = side * 0.30f, ah = side * 0.17f;
-        fg->PathLineTo({ex - aw, ey});
-        fg->PathBezierQuadraticCurveTo({ex, ey - ah * 2.f}, {ex + aw, ey});
-        fg->PathBezierQuadraticCurveTo({ex, ey + ah * 1.6f}, {ex - aw, ey});
-        fg->PathFillConvex(C::UA(C::Txt(), on ? 1.f : 0.55f));
-        fg->PathLineTo({ex - aw, ey});
-        fg->PathBezierQuadraticCurveTo({ex, ey - ah * 2.f}, {ex + aw, ey});
-        fg->PathBezierQuadraticCurveTo({ex, ey + ah * 1.6f}, {ex - aw, ey});
-        fg->PathStroke(C::UA(C::Dim(), 0.9f), ImDrawFlags_Closed, 2.f);
-        const float pr = ah * 0.95f;
-        fg->AddCircleFilled({ex, ey}, pr, IM_COL32(20, 20, 26, 255), 24);
-        fg->AddCircleFilled({ex - pr * 0.3f, ey - pr * 0.3f}, pr * 0.28f,
-                            IM_COL32(235, 235, 240, 255), 12);
+                    on ? C::UA(C::Acc(), 0.95f) : C::UA(C::Dim(), 0.8f), 0, 0, on ? 3.f : 1.5f);
+        {
+            const float gfs = side * 0.52f;
+            const ImVec2 gcell = ascii::Cell(fn, gfs);
+            fg->AddText(fn, gfs, {qX + side * 0.5f - gcell.x * 0.5f, qY + side * 0.5f - gcell.y * 0.5f},
+                        on ? C::U(C::Acc()) : C::UA(C::Dim(), 0.9f), "\xE2\x97\x8F");  // ●
+        }
     }
 }
 

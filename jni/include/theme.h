@@ -7,11 +7,13 @@
 
 // g_darkTheme — целевое состояние (меню/конфиг), g_themeT — сглаженный
 // переход 0..1, g_menuFadeIn — затухание меню при входе.
+// Стиль «ASCII-терминал Linux»: у терминала нет скруглений — все радиусы
+// нулевые, форму задают рамки из символов псевдографики (см. ascii.h).
 namespace R {
-    static constexpr float Card  = 24.f;
-    static constexpr float Pill  = 16.f;
-    static constexpr float Sheet = 26.f;
-    static constexpr float Btn   = 18.f;
+    static constexpr float Card  = 0.f;
+    static constexpr float Pill  = 0.f;
+    static constexpr float Sheet = 0.f;
+    static constexpr float Btn   = 0.f;
 }
 
 // Тёмная тема по умолчанию — лучше сочетается с фиолетовым акцентом
@@ -25,32 +27,33 @@ extern ImVec4 g_accent;
 extern bool   g_accentOn;
 
 namespace C {
-    // "Graphite & Violet": спокойный графитовый фон + фиолетовый акцент.
-    // Light — мягкий светло-серый с лёгким лавандовым оттенком,
-    // Dark  — глубокий сине-графитовый (почти чёрный), карточки чуть светлее.
+    // «Green phosphor terminal»: тёмная тема — классический зелёный
+    // монохромный фосфор P1 на почти чёрном экране; светлая — «бумажный»
+    // терминал xterm по умолчанию (чёрное на белом), акцент — тёмно-зелёный,
+    // как цвета ls на светлой консоли.
     namespace Light {
-        static constexpr ImVec4 Bg     = {0.929f, 0.933f, 0.953f, 1};
-        static constexpr ImVec4 LeftBg = {0.957f, 0.957f, 0.973f, 1};
-        static constexpr ImVec4 Card   = {1.000f, 1.000f, 1.000f, 1};
-        static constexpr ImVec4 Acc    = {0.424f, 0.361f, 0.906f, 1};
-        static constexpr ImVec4 AccDk  = {0.333f, 0.275f, 0.784f, 1};
-        static constexpr ImVec4 Red    = {1.000f, 0.271f, 0.227f, 1};
-        static constexpr ImVec4 Txt    = {0.078f, 0.082f, 0.102f, 1};
-        static constexpr ImVec4 Dim    = {0.541f, 0.553f, 0.596f, 1};
-        static constexpr ImVec4 TrkOff = {0.788f, 0.796f, 0.839f, 1};
-        static constexpr ImVec4 Sep    = {0.851f, 0.859f, 0.898f, 1};
+        static constexpr ImVec4 Bg     = {0.925f, 0.925f, 0.906f, 1};
+        static constexpr ImVec4 LeftBg = {0.867f, 0.867f, 0.848f, 1};
+        static constexpr ImVec4 Card   = {0.965f, 0.965f, 0.949f, 1};
+        static constexpr ImVec4 Acc    = {0.047f, 0.451f, 0.161f, 1};
+        static constexpr ImVec4 AccDk  = {0.031f, 0.337f, 0.118f, 1};
+        static constexpr ImVec4 Red    = {0.780f, 0.137f, 0.098f, 1};
+        static constexpr ImVec4 Txt    = {0.086f, 0.106f, 0.086f, 1};
+        static constexpr ImVec4 Dim    = {0.376f, 0.416f, 0.376f, 1};
+        static constexpr ImVec4 TrkOff = {0.816f, 0.816f, 0.796f, 1};
+        static constexpr ImVec4 Sep    = {0.722f, 0.722f, 0.702f, 1};
     }
     namespace Dark {
-        static constexpr ImVec4 Bg     = {0.063f, 0.071f, 0.094f, 1};
-        static constexpr ImVec4 LeftBg = {0.047f, 0.055f, 0.075f, 1};
-        static constexpr ImVec4 Card   = {0.106f, 0.118f, 0.153f, 1};
-        static constexpr ImVec4 Acc    = {0.545f, 0.486f, 1.000f, 1};
-        static constexpr ImVec4 AccDk  = {0.424f, 0.361f, 0.906f, 1};
-        static constexpr ImVec4 Red    = {1.000f, 0.361f, 0.322f, 1};
-        static constexpr ImVec4 Txt    = {0.949f, 0.953f, 0.969f, 1};
-        static constexpr ImVec4 Dim    = {0.604f, 0.616f, 0.663f, 1};
-        static constexpr ImVec4 TrkOff = {0.180f, 0.196f, 0.251f, 1};
-        static constexpr ImVec4 Sep    = {0.196f, 0.212f, 0.271f, 1};
+        static constexpr ImVec4 Bg     = {0.016f, 0.031f, 0.020f, 1};
+        static constexpr ImVec4 LeftBg = {0.008f, 0.016f, 0.012f, 1};
+        static constexpr ImVec4 Card   = {0.035f, 0.063f, 0.043f, 1};
+        static constexpr ImVec4 Acc    = {0.200f, 0.851f, 0.353f, 1};
+        static constexpr ImVec4 AccDk  = {0.118f, 0.549f, 0.220f, 1};
+        static constexpr ImVec4 Red    = {1.000f, 0.322f, 0.271f, 1};
+        static constexpr ImVec4 Txt    = {0.663f, 0.941f, 0.702f, 1};
+        static constexpr ImVec4 Dim    = {0.318f, 0.549f, 0.361f, 1};
+        static constexpr ImVec4 TrkOff = {0.059f, 0.129f, 0.075f, 1};
+        static constexpr ImVec4 Sep    = {0.102f, 0.220f, 0.125f, 1};
     }
 
     static inline ImVec4 Lerp4(ImVec4 a, ImVec4 b) {

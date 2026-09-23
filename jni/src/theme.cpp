@@ -3,15 +3,19 @@
 bool  g_darkTheme = true;
 float g_themeT    = 1.f;
 float g_menuFadeIn = 0.f;
-ImVec4 g_accent = {0.545f, 0.486f, 1.000f, 1};
+// Дефолтный акцент — «фосфор» терминала: как только пользователь не выбирал
+// свой цвет, весь GUI зелёный монохром (см. SyncAccentToTheme: idx 0 — без
+// оверрайда, палитры Light/Dark сами зелёные).
+ImVec4 g_accent = {0.200f, 0.851f, 0.353f, 1};
 bool   g_accentOn = false;
 
 void ApplyTheme() {
     ImGui::GetIO().ConfigDebugHighlightIdConflicts = false;
     auto& s = ImGui::GetStyle();
-    s.WindowRounding = 24; s.ChildRounding  = 20; s.FrameRounding = 16;
-    s.GrabRounding   = 16; s.PopupRounding  = 16; s.TabRounding   = 16;
-    s.WindowBorderSize = 0; s.FrameBorderSize = 0;
+    // Терминал: никаких скруглений и теней — рамки рисует псевдографика.
+    s.WindowRounding = 0; s.ChildRounding  = 0; s.FrameRounding = 0;
+    s.GrabRounding   = 0; s.PopupRounding  = 0; s.TabRounding   = 0;
+    s.WindowBorderSize = 0; s.FrameBorderSize = 0; s.ScrollbarRounding = 0;
     s.ItemSpacing  = {10, 0}; s.FramePadding  = {14, 12}; s.WindowPadding = {0, 0};
     s.ScrollbarSize = 0; s.GrabMinSize = 20;
     auto* c = s.Colors;
