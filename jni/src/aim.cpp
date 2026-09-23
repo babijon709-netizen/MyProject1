@@ -272,7 +272,12 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
 static constexpr int   kAimBoneSlot = 1;
 
 // Множитель упреждения по скорости цели (кадров вперёд). 0 — выключено.
-static constexpr float kAimVelocityLead = 0.0f;
+// Действует только в ТАЧ-режиме: там камера догоняет кость через трубу
+// касания, и цель за это время уходит. Мемори-аиму упреждение не нужно и
+// выключено: лок каждый такт пишет в память абсолютный угол самой кости —
+// упреждать нечего, а сдвиг точки вперёд по ходу цели выглядел бы как
+// «прицел убегает от головы» (жалоба 19.09).
+static constexpr float kAimVelocityLead = 0.010f;
 static unsigned long s_dead_skipped = 0;   // мёртвых не взяли в цель (для лога)
 static unsigned long s_no_skeleton = 0;         // у цели нет скелета вовсе
 static unsigned long s_bones_not_projected = 0; // скелет есть, кости не легли на экран
@@ -557,7 +562,12 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // вычитать отстающий базис из матрицы вида из угловой скорости цели нельзя —
     // в поправку попадал бы его запаздывающий поворот, и прицел уезжал бы в
     // сторону. Нет настоящей оси — нет и упреждения: так вёл цель эталонный аим.
-    {
+    //
+    // Упреждение действует только в ТАЧ-режиме: камера догоняет кость через
+    // трубу касания, и цель за это время уходит. Мемори-лок пишет абсолютный
+    // угол самой кости каждый такт — ему упреждать нечего (просьба 24.09:
+    // «есть ли упреждение в мемори аиме, оно там не нужно»).
+    if (g_state.aim_mode != AIM_MODE_MEMORY) {
         float cy = 0.f, cp = 0.f;
         // Мусорный угол камеры (чтение сорвалось) не годится даже в
         // нормализацию: упреждение по нему уводит прицел, а раньше из-за него
@@ -595,14 +605,13 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                     // движение проходит целиком. Множитель больше 1.1 только
                     // мерил: при 2.0 цель идёт с остатком 0.98° против 0.70°,
                     // то есть прицел уезжает вперёд, а не отстаёт.
-                    // Упреждение по скорости ВЫКЛЮЧЕНО (было до 1.5 кадра
-                    // вперёд). Именно оно и выглядело как «аим пытается
-                    // запредиктить движение игрока» (жалоба 19.09): точка
-                    // уезжала вперёд по ходу цели, а когда цель меняла
-                    // направление, прицел оказывался не там. Задержку петли
-                    // теперь гасит окно «в полёте» в контроллере — второе
-                    // упреждение только раскачивает. Константа оставлена:
-                    // вернуть — одна правка числа (было 1.1).
+                    // История: было до 1.5 кадра вперёд — выглядело как «аим
+                    // пытается запредиктить движение игрока» (жалоба 19.09):
+                    // точка уезжала вперёд по ходу цели, а когда цель меняла
+                    // направление, прицел оказывался не там. Поэтому упреждение
+                    // долго стояло на нуле. Просьба 24.09 — вернуть небольшое
+                    // упреждение в тач: 0.010 кадра компенсирует только трубу
+                    // касания и не уезжает вперёд по ходу цели.
                     float k = kAimVelocityLead * (1.f - leadMin / vMag);
                     if (k > 1.5f) k = 1.5f;
                     best.yaw   += pick.velYaw   * k;
@@ -669,6 +678,8 @@ static void UpdateAimTouch(float dt) {
     static float s_stallYaw = 0.f, s_stallPitch = 0.f;
     static float s_prevRawYaw = 0.f, s_prevRawPitch = 0.f;
     static bool  s_havePrevRaw = false;
+    // Счётчики однонаправленного остатка в полосе дрожи (см. константы выше).
+    static int s_streakYaw = 0, s_streakPitch = 0;
     static AimPick pick;
 
     float sw = 0.f, sh = 0.f;
@@ -681,6 +692,7 @@ static void UpdateAimTouch(float dt) {
         s_absorbYaw = s_absorbPitch = 0.f;
         s_stallYaw = s_stallPitch = 0.f;
         s_havePrevRaw = false;
+        s_streakYaw = s_streakPitch = 0;
         return;
     }
 
@@ -704,6 +716,7 @@ static void UpdateAimTouch(float dt) {
             s_absorbYaw = s_absorbPitch = 0.f;
             s_stallYaw = s_stallPitch = 0.f;
             s_havePrevRaw = false;
+            s_streakYaw = s_streakPitch = 0;
         }
         return;
     }
@@ -716,6 +729,7 @@ static void UpdateAimTouch(float dt) {
         s_absorbYaw = s_absorbPitch = 0.f;
         s_stallYaw = s_stallPitch = 0.f;
         s_havePrevRaw = false;
+        s_streakYaw = s_streakPitch = 0;
     }
 
     // ---- оценка коэффициента по реакции прицела ----
@@ -914,6 +928,16 @@ static void UpdateAimTouch(float dt) {
     // сразу (камера дальше цели, летящий приказ толкнёт ещё дальше), а новый
     // приказ против хода не выдаётся вовсе. Довычитывать приказы, которых уже
     // нет, или заказывать против хода камеры — это и есть маятник.
+    //
+    // Четвёртый заход по маятнику (жалоба 24.09: «всё равно маятник первые
+    // 1-2 секунды при наводке») добавил три правила, найденные стендом:
+    //   * поглощение клэмпится к ТЕКУЩЕМУ остатку — цель сближается сама, и
+    //     заказ по остатку прошлых тактов перелетал кость;
+    //   * у цели (полоса 0.45°) шаг выдаётся только при устойчивом
+    //     однонаправленном остатке — дрожь кости гоняла палец с частотой
+    //     кадров (110 реверсов на стенде);
+    //   * доля шага спадает вместе с остатком — поздние прилёты длинной
+    //     трубы не перелетают кость.
     static constexpr float kTouchFlightLife = 0.13f;  // жизнь приказа в окне, с
     // Заказ без отклика — потерялся. При просадке ФПС игры труба касания
     // растягивается на 2-8 кадров ИГРЫ: на 12-15 фпс это до 0.5-0.7 с, а
@@ -925,14 +949,28 @@ static void UpdateAimTouch(float dt) {
     // Граница «захват/ведение» для выбора оценки в полёте, град: при большом
     // остатке берём поглощение, при малом — минимум с окном (см. ниже).
     static constexpr float kTouchInflightBand = 2.5f;
+    // Полоса «дрожь кости» у цели и порог устойчивого дрейфа в ней — та же
+    // пара, что в мемори-локе: дрожь знак чередует и порог не набирает
+    // (камера стоит), настоящее медленное движение знак держит и проходит.
+    // Без порога контроллер гонял палец за дрожью с частотой кадров —
+    // 110 реверсов на стенде, видимый маятник у цели.
+    static constexpr float kTouchJitterBand  = 0.45f;
+    static constexpr int   kTouchDriftStreak = 3;
+    // Доля шага у цели падает вместе с остатком (до минимума): при длинной
+    // трубе касания поздние прилёты заказанного не перелетают кость. На
+    // стенде перелёт на дрожи ±0.4° падает с 0.9° до 0.4°, реверсов 0.
+    static constexpr float kTouchRampBand = 2.5f;   // град, с чего начинается спад
+    static constexpr float kTouchRampMin  = 0.40f;  // пол: ниже шаг станет меньше пикселя и прицел залипнет
     const bool  useFlight = !haveCam;
     auto clearFlight = [&]() {
         s_flight.clear();
         s_absorbYaw = s_absorbPitch = 0.f;
         s_stallYaw = s_stallPitch = 0.f;
         s_havePrevRaw = false;
+        s_streakYaw = s_streakPitch = 0;
     };
     float errYaw = best.yaw, errPitch = best.pitch;
+    bool s_flowOkTick = false;
     if (useFlight) {
         // Поглощение списывается двумя способами, по возможности:
         //
@@ -948,6 +986,7 @@ static void UpdateAimTouch(float dt) {
         if (s_havePrevRaw) {
             float flowYaw = 0.f, flowPitch = 0.f;
             const bool flowOk = aim_camera_flow(flowYaw, flowPitch);
+            s_flowOkTick = flowOk;
             auto drainFlow = [](float& absorb, float flow) {
                 if (absorb > 0.f && flow > 0.f)
                     absorb = (flow >= absorb) ? 0.f : absorb - flow;
@@ -990,6 +1029,23 @@ static void UpdateAimTouch(float dt) {
         // экран перекрыт). Обнуляем, иначе оценка вечно ела бы остаток.
         if (s_absorbYaw != 0.f) { s_stallYaw += dt; if (s_stallYaw > kTouchStallTime) s_absorbYaw = 0.f; }
         if (s_absorbPitch != 0.f) { s_stallPitch += dt; if (s_stallPitch > kTouchStallTime) s_absorbPitch = 0.f; }
+        // Заказ не может превышать ТЕКУЩИЙ остаток: цель сближается и сама —
+        // если держать заказ по остатку прошлых тактов, по прилёте камера
+        // проскакивает кость (на стенде перелёт 2.3° на идущей навстречу
+        // цели, с клэмпом меньше, реверсов 0). Клэмп работает только когда
+        // виден поток камеры: без потока уменьшение остатка — единственный
+        // сигнал отработки, и клэмп списывал бы его дважды (на стенде шлейф
+        // ведения в дуэли 1 на 1 рос с 5.6° до 63°).
+        if (s_flowOkTick) {
+            if (s_absorbYaw > 0.f && s_absorbYaw > best.yaw)
+                s_absorbYaw = (best.yaw > 0.f) ? best.yaw : 0.f;
+            if (s_absorbYaw < 0.f && s_absorbYaw < best.yaw)
+                s_absorbYaw = (best.yaw < 0.f) ? best.yaw : 0.f;
+            if (s_absorbPitch > 0.f && s_absorbPitch > best.pitch)
+                s_absorbPitch = (best.pitch > 0.f) ? best.pitch : 0.f;
+            if (s_absorbPitch < 0.f && s_absorbPitch < best.pitch)
+                s_absorbPitch = (best.pitch < 0.f) ? best.pitch : 0.f;
+        }
         // Окно приказов.
         for (auto& o : s_flight) o.age += dt;
         s_flight.erase(std::remove_if(s_flight.begin(), s_flight.end(),
@@ -1000,19 +1056,21 @@ static void UpdateAimTouch(float dt) {
         const auto minmag = [](float a, float b) {
             return fabsf(a) < fabsf(b) ? a : b;
         };
-        // Что вычитать из остатка. Большой остаток — это ЗАХВАТ: приказы
-        // идут один за другим в одну сторону, и правильно списывать их по
-        // факту (поглощение), какая бы ни была задержка трубы — она съедает
-        // ровно то, что заказано. Окно тут только вредило: на просадке ФПС
-        // приказы живут в трубе дольше окна, оно пустеет, и контроллер
-        // заказывал заново поверх летящих — маятник.
-        // Малый остаток — ВЕДЕНИЕ у цели: цель идёт сама, и поглощение без
-        // потока может не списываться вовсе; тут оценка ограничивается окном
-        // (заказано не больше, чем улетело за его жизнь) — след за целью
-        // остаётся коротким даже когда поток не посчитался (1 на 1).
-        const float inflYaw   = (fabsf(best.yaw)   > kTouchInflightBand)
+        // Что вычитается из остатка. Когда виден ПОТОК КАМЕРЫ: большой
+        // остаток — это ЗАХВАТ, приказы идут один за другим в одну сторону,
+        // и правильно списывать их по факту (поглощение, оно сливается по
+        // потоку) какая бы ни была задержка трубы. Окно тут только вредило:
+        // на просадке ФПС приказы живут в трубе дольше окна, оно пустеет, и
+        // контроллер заказывал заново поверх летящих — маятник. Малый
+        // остаток — ВЕДЕНИЕ у цели: минимум с окном держит след коротким.
+        // Когда потока НЕТ (дуэль 1 на 1, меньше трёх боксов): поглощению
+        // сливаться нечем, кроме падения остатка, и на ведении убегающей
+        // цели оно не сливается вовсе (на стенде шлейф рос без границы) —
+        // поэтому оценка ВСЕГДА ограничивается окном, как в первом гибриде.
+        const bool noFlow = !s_flowOkTick;
+        const float inflYaw   = (!noFlow && fabsf(best.yaw) > kTouchInflightBand)
                               ? s_absorbYaw   : minmag(s_absorbYaw,   winYaw);
-        const float inflPitch = (fabsf(best.pitch) > kTouchInflightBand)
+        const float inflPitch = (!noFlow && fabsf(best.pitch) > kTouchInflightBand)
                               ? s_absorbPitch : minmag(s_absorbPitch, winPitch);
         errYaw   -= inflYaw;
         errPitch -= inflPitch;
@@ -1068,6 +1126,27 @@ static void UpdateAimTouch(float dt) {
         // Заказанное за прошлые такты камера дорабатывает и без нас: окно
         // стареет само, приказы молча истекают по kTouchFlightLife.
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
+        return;
+    }
+
+    // ---- полоса дрожи у цели ----
+    // Остаток внутри полосы (но вне мёртвой зоны) — это либо дрожь кости,
+    // либо медленный дрейф. Шаг выдаётся только при УСТОЙЧИВОМ остатке в одну
+    // сторону (порог тактов): дрожь знак чередует и не проходит вовсе,
+    // настоящий дрейф проходит целиком. Та же пара фильтров, что в
+    // мемори-локе — оба режима у цели ведут себя одинаково спокойно.
+    auto jitterGate = [&](float eff, int& streak) {
+        if (eff == 0.f) { streak = 0; return 0.f; }
+        if (fabsf(eff) >= kTouchJitterBand) { streak = 0; return eff; }
+        const int s = (eff > 0.f) ? 1 : -1;
+        streak = (streak * s > 0) ? streak + s : s;
+        return (streak * s >= kTouchDriftStreak) ? eff : 0.f;
+    };
+    errYaw   = jitterGate(errYaw,   s_streakYaw);
+    errPitch = jitterGate(errPitch, s_streakPitch);
+    if (errYaw == 0.f && errPitch == 0.f) {
+        // Дрожь: палец стоит, камера не ходит за костью.
+        if (s_fingerDown) Touch_Move(s_fx, s_fy);
         return;
     }
 
@@ -1163,6 +1242,20 @@ static void UpdateAimTouch(float dt) {
     s_acquire += dt / 0.20f;
     if (s_acquire > 1.f) s_acquire = 1.f;
     k *= 0.3f + 0.7f * s_acquire;
+
+    // Спад доли шага у цели: чем меньше остаток, тем меньшую его долю
+    // заказываем за такт. Иначе заказы, сделанные на последних градусах,
+    // прилетают по длинной трубе уже ПОСЛЕ того, как остаток закрыт, и
+    // камера перелетает кость (захват «маятником» первых секунд). На
+    // скорости захвата почти не сказывается: большой остаток заказывает
+    // полный потолок шага.
+    {
+        const float maxEff = (fabsf(errYaw) > fabsf(errPitch)) ? fabsf(errYaw) : fabsf(errPitch);
+        float ramp = maxEff / kTouchRampBand;
+        if (ramp > 1.f) ramp = 1.f;
+        if (ramp < kTouchRampMin) ramp = kTouchRampMin;
+        k *= ramp;
+    }
 
     float dx =  errYaw   * k / gy;
     float dy = -errPitch * k / gp;

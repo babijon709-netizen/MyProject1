@@ -94,6 +94,11 @@ struct TouchCtrl {
     bool  haveLastErr = false;
     float lastCam = 0.f;      // mode 6: угол камеры прошлого такта (поток)
     bool  haveCamFlow = false;
+    float jitterBand = 0.45f; // mode 6: полоса дрожи у цели, град
+    int   driftStreak = 3;    // mode 6: порог устойчивого остатка в полосе
+    int   streak = 0;
+    float rampBand = 2.5f;    // mode 6: спад доли шага у цели
+    float rampMin  = 0.40f;
 };
 
 static Res runTouch(const Plant& p, TouchCtrl c, float dead) {
@@ -180,6 +185,13 @@ static Res runTouch(const Plant& p, TouchCtrl c, float dead) {
                 const float stall = (c.mode == 6) ? c.stallTime : 0.4f;
                 if (c.pendAge > stall) c.pending = 0.f;   // ввод потерялся
             }
+            if (c.mode == 6 && flowOk) {
+                // Заказ не может превышать текущий остаток: цель сближается
+                // сама. Только при видимом потоке камеры: без потока падение
+                // остатка — единственный сигнал отработки (двойное списание).
+                if (c.pending > 0.f && c.pending > err) c.pending = (err > 0.f) ? err : 0.f;
+                if (c.pending < 0.f && c.pending < err) c.pending = (err < 0.f) ? err : 0.f;
+            }
             pendDeg = c.pending;
             if (c.mode == 6) {
                 float winSum = 0.f;
@@ -187,9 +199,10 @@ static Res runTouch(const Plant& p, TouchCtrl c, float dead) {
                 c.ord.erase(std::remove_if(c.ord.begin(), c.ord.end(),
                             [&](const TouchCtrl::Ord& o) { return o.age >= c.kLife; }), c.ord.end());
                 for (const auto& o : c.ord) winSum += o.px * gy;
-                // Захват правит поглощение (любая задержка трубы), ведение —
-                // минимум с окном (след за целью короткий).
-                if (std::fabs(err) <= c.inflightBand &&
+                // С потоком: захват правит поглощение (любая задержка
+                // трубы), ведение — минимум с окном. Без потока поглощению
+                // сливаться нечем — оценка всегда минимум с окном.
+                if ((std::fabs(err) <= c.inflightBand || !flowOk) &&
                     std::fabs(winSum) < std::fabs(pendDeg)) pendDeg = winSum;
             }
         } else {
@@ -201,7 +214,13 @@ static Res runTouch(const Plant& p, TouchCtrl c, float dead) {
         float eff = err;
         if (c.mode >= 1) eff = err - pendDeg;
         if (c.mode >= 2 && err * eff < 0.f) { prevStep = 0.f; continue; } // защита знака
-        if (std::fabs(eff) < dead) { prevStep = 0.f; continue; }
+        if (std::fabs(eff) < dead) { c.streak = 0; prevStep = 0.f; continue; }
+        if (c.mode == 6 && std::fabs(eff) < c.jitterBand) {
+            // Полоса дрожи: шаг только при устойчивом однонаправленном остатке.
+            const int sg = (eff > 0.f) ? 1 : -1;
+            c.streak = (c.streak * sg > 0) ? c.streak + sg : sg;
+            if (c.streak * sg < c.driftStreak) { prevStep = 0.f; continue; }
+        } else if (c.mode == 6) c.streak = 0;
         float k = c.kStable;
         const bool flip = c.havePrev && c.prevErr * eff < 0.f &&
                           std::fabs(eff) > std::fabs(c.prevErr) * 0.35f;
@@ -215,6 +234,13 @@ static Res runTouch(const Plant& p, TouchCtrl c, float dead) {
         c.acquire += tickDt / c.softT;
         if (c.acquire > 1.f) c.acquire = 1.f;
         k *= 0.3f + 0.7f * c.acquire;
+        if (c.mode == 6) {
+            // Доля шага спадает вместе с остатком: поздние прилёты трубы.
+            float ramp = std::fabs(eff) / c.rampBand;
+            if (ramp > 1.f) ramp = 1.f;
+            if (ramp < c.rampMin) ramp = c.rampMin;
+            k *= ramp;
+        }
         float dx = eff * k / gy;
         if (std::fabs(eff) < gy * 3.f) dx = std::round(eff / gy);
         if (std::fabs(dx * gy) > std::fabs(eff)) dx = eff / gy;
@@ -472,6 +498,26 @@ int main() {
         printf("%-40s захват: перелёт %.2f°, реверсов %d %s | ведение: шлейф %.2f°\n",
                row.name, r.maxOvershoot, r.flips,
                r.settled3s ? "" : " НЕ УСТОЯЛОСЬ", r2.trail);
+    }
+    // Динамический захват (жалоба 24.09, четвёртый заход по маятнику): цель
+    // дрожит с самого начала, идёт навстречу, убегает; быстрый оверлей.
+    // Мера маятника — реверсы шага и кольцо после перескока через ноль.
+    printf("\n===== ТАЧ, динамический захват 30° =====\n");
+    struct DRow { const char* name; Plant p; };
+    const DRow drows[] = {
+        {"дрожь ±0.25° с начала",          [] { Plant p; p.visF = 4; p.overF = 5; p.jitter = 0.25f; return p; }()},
+        {"дрожь ±0.40°, быстрый оверлей",  [] { Plant p; p.visF = 4; p.overF = 1; p.jitter = 0.40f; return p; }()},
+        {"цель идёт навстречу 10°/с",      [] { Plant p; p.visF = 4; p.overF = 5; p.targetV = -10.f; return p; }()},
+        {"цель убегает 10°/с",             [] { Plant p; p.visF = 4; p.overF = 5; p.targetV = 10.f; p.secs = 8.f; return p; }()},
+        {"чистый, задержка 8к (12 фпс)",   [] { Plant p; p.visF = 8; p.overF = 5; return p; }()},
+    };
+    for (const DRow& row : drows) {
+        TouchCtrl c; c.mode = 6;
+        Res r = runTouch(row.p, c, dead);
+        printf("гибрид: %-32s перелёт %5.2f°, реверсов %2d, кольцо %.2f°, 0.5° за %.2f с %s\n",
+               row.name, r.maxOvershoot, r.flips, r.ring, r.lock05,
+               (r.lock05 > 0.f) ? "" : "(не сошлось)");
+        if (r.flips > 1) printf("        МАЯТНИК: реверсов больше одного!\n");
     }
 
     printf("\n===== ПАМЯТЬ, захват 30°: текущий код против жёсткого лока =====\n");
