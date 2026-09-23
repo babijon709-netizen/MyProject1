@@ -90,6 +90,10 @@ struct Game {
     // делает angles = clamp(angles + input * m_Sensitivity) и разворачивает
     // результат в localRotation камеры (MouseLook.ZJo).
     float accX = 0.f, accY = 0.f;
+    // Свой ввод игрока (град за кадр игры): пока палец на экране, обработчики
+    // вида каждый кадр ПЕРЕПИСЫВАЮТ накопитель своим значением — наши записи
+    // стираются. Ноль — экран не трогают.
+    float userInX = 0.f, userInY = 0.f;
     static constexpr float kPitchLimit = 85.f;      // предел обзора игры
 
     // Применённое камерой состояние: КАДР игры разворачивает накопитель в
@@ -121,8 +125,10 @@ struct Game {
     // Кадр игры: развернуть накопитель в камеру и положить свою ось выстрела.
     void frame() {
         ++gameFrames;
-        // ZJo: клампит накопитель и оборачивает рысканье. Ввода касания в
-        // стенде нет, поэтому прибавлять нечего.
+        // Свой ввод игры: игрок крутит камерой — накопитель уходит от нашей
+        // записи (та самая гонка «запись стёрта игрой» с устройства).
+        accX += userInX; accY += userInY;
+        // ZJo: клампит накопитель и оборачивает рысканье.
         if (accX >  kPitchLimit) accX =  kPitchLimit;
         if (accX < -kPitchLimit) accX = -kPitchLimit;
         while (accY >  180.f) accY -= 360.f;
@@ -209,6 +215,15 @@ bool esp_aim_camera_angles(float& yaw, float& pitch) {
 // и по ней «куда смотрит игрок» не измерить.
 bool esp_camera_pose_angles(float& yaw, float& pitch) {
     if (!g_haveCamAxis) return false;
+    if (g_garbageCam != 0.f) { yaw = g_garbageCam; pitch = g_garbageCam; return true; }
+    yaw = g_game.camYaw(); pitch = g_game.camPitch();
+    return true;
+}
+// База углов жёсткого лока: в стенде остаток считается от камеры (см.
+// snapshot/errFrom), поэтому база — она же. Базис матрицы вида существует и
+// там, где настоящей оси нет (на нём нарисован бокс), — поэтому флаг
+// g_haveCamAxis здесь НЕ проверяется: как в жизни на устройстве с cam_st = 0.
+bool esp_aim_projection_basis(float& yaw, float& pitch) {
     if (g_garbageCam != 0.f) { yaw = g_garbageCam; pitch = g_garbageCam; return true; }
     yaw = g_game.camYaw(); pitch = g_game.camPitch();
     return true;
@@ -352,6 +367,37 @@ int main() {
                r.errAfterAim, g_game.camYaw(), g_game.camPitch(), r.writes);
         check(r.errAfterAim < 0.5f, "ведёт и без настоящей оси камеры");
         check(AimMemoryDiag().responded, "ack по накопителю: отклик виден и без оси");
+    }
+
+    // L. Жёсткий лок: захват за один-два такта, без перелёта. Память пишет
+    //    АБСОЛЮТНЫЙ угол кости, поэтому камера встаёт на цель первым же
+    //    применением записи — дробного схождения с потолками больше нет.
+    //    8 кадров оверлея = 0.64 с: в десять раз меньше прежних «2-3 секунды
+    //    маятника» (жалоба 23.09).
+    {
+        resetGame();
+        g_targetYaw = 10.f; g_targetPitch = 5.f;
+        Result r = run(AIM_MODE_MEMORY, 8);
+        printf("ЖЁСТКИЙ ЛОК, 0.64 с: остаток %.3f°, макс. поворот %.2f° (цель 10°), смен знака %d\n",
+               r.errAfterGame, r.maxAbsYaw, r.signFlips);
+        check(r.errAfterGame < 0.35f, "лок: за 0.64 с прицел на кости (< 0.35°)");
+        check(r.maxAbsYaw < 10.5f, "лок: без перелёта цели (не дальше 0.5° за неё)");
+        check(r.signFlips <= 1, "лок: подход монотонный, маятника нет");
+    }
+
+    // M. Игрок крутит камерой сам: его ввод попадает в накопитель каждый кадр
+    //    игры (обработчики вида перезаписывают +0x4C — «запись стёрта
+    //    игрой»). Жёсткий лок обязан держать цель: каждый такт кладёт
+    //    абсолютный угол кости заново, а не дописывает долю к стёртому.
+    {
+        resetGame();
+        g_game.userInY = 0.10f;                 // постоянный свайп вправо
+        g_targetYaw = 10.f; g_targetPitch = 0.f;
+        Result r = run(AIM_MODE_MEMORY, 60);
+        printf("ВВОД ИГРОКА 0.1°/кадр: остаток %.2f°, записей %d, смен знака %d\n",
+               r.errAfterGame, r.writes, r.signFlips);
+        check(r.errAfterGame < 1.5f, "лок держит цель против ввода игрока");
+        check(r.writes > 10, "записи идут, несмотря на стирание");
     }
 
     // C. MouseLook не найден: пишем ноль раз и НЕ падаем на тач.

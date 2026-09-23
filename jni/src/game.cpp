@@ -5927,6 +5927,14 @@ static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, b
     return false;
 }
 
+// Каким источником пользуются углы цели (aim_angles_for): 3-D (ось выстрела
+// или поза камеры) или пиксельным (обратное проецирование экранной точки —
+// базис матрицы вида). Гистерезис переключения живёт в aim_angles_for; флаг
+// вынесен сюда, чтобы мемори-аим брал для жёсткого лока базу углов ровно из
+// того же источника, которым посчитан остаток (иначе абсолютная запись
+// смещала бы камеру на расхождение источников — до 4° в полосе гистерезиса).
+static bool g_aim_pix_basis = false;
+
 // Угол до точки по её экранному положению — ровно по тому проецированию,
 // которым нарисована точка (и бокс). Этим же путём углы считались до того,
 // как заработал «живой» трансформ камеры; он остаётся основным, потому что
@@ -5998,11 +6006,10 @@ bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, float sh, f
                 // переключение через широкую полосу: на экран уходим при
                 // расхождении больше 4°, обратно к оси — меньше 1.5°, между —
                 // держимся прежнего источника.
-                static bool s_pixBasis = false;
                 const float d = dYaw + dPitch;
-                if (!s_pixBasis) {
+                if (!g_aim_pix_basis) {
                     if (d <= 4.0F) return true;
-                    s_pixBasis = true;
+                    g_aim_pix_basis = true;
                     static double s_last = -1e9;
                     const double now = memio::now_seconds();
                     if (now - s_last >= 5.0) {
@@ -6011,7 +6018,7 @@ bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, float sh, f
                                 (double)dYaw, (double)dPitch);
                     }
                 } else if (d <= 1.5F) {
-                    s_pixBasis = false;
+                    g_aim_pix_basis = false;
                     return true;
                 }
                 yaw_deg = pix_yaw; pitch_deg = pix_pitch;
@@ -6801,6 +6808,29 @@ bool esp_aim_camera_angles(float& yaw_deg, float& pitch_deg) {
     const bool ok_pose = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
     if (!ok_ref && !ok_pose) return false;
     return angles_from_forward(ok_ref ? g_aim_ref_forward : g_cam_forward, yaw_deg, pitch_deg);
+}
+
+// Углы той камеры, ОТ КОТОРОЙ посчитаны углы цели (aim_angles_for). Мемори-аим
+// пишет в накопитель АБСОЛЮТНЫЙ угол кости (база + остаток) и база обязана
+// совпадать с источником остатка: возьмёт другую камеру — и жёсткий лок встанет
+// не на кость, а на расхождение между источниками (до 4° в полосе гистерезиса,
+// а без него источник прыгал каждый кадр — тот самый маятник). Поэтому:
+//   * углы цели считаются по 3-D (ось/поза) — берём ту же ось/позу;
+//   * углы цели ушли на пиксельный расчёт (расхождение > 4° или 3-D нет) —
+//     берём базис матрицы вида: ровно ту камеру, которой нарисован бокс.
+// Отдача назад (ни одного источника) на практике невозможна: без матрицы вида
+// не строится сам бокс, — но проверена и она.
+bool esp_aim_projection_basis(float& yaw_deg, float& pitch_deg) {
+    if (!g_aim_pix_basis) {
+        const bool ok_ref  = g_aim_ref_valid  && farm_cam_source_ok(g_aim_ref_origin);
+        const bool ok_pose = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
+        if (ok_ref || ok_pose)
+            return angles_from_forward(ok_ref ? g_aim_ref_forward : g_cam_forward,
+                                       yaw_deg, pitch_deg);
+    }
+    if (g_frame_cam_basis_valid && farm_cam_source_ok(g_frame_cam_pos))
+        return angles_from_forward(g_frame_cam_fwd, yaw_deg, pitch_deg);
+    return false;
 }
 
 bool esp_local_eye_position(float& x, float& y, float& z) {
