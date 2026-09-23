@@ -1,0 +1,1555 @@
+ФРИКАМ — ПОЛНЫЙ КОД (без комментариев)
+Репозиторий: MyProject1, ветка arena/01a0ce05-myproject1, 2026-09-23.
+Ядро — jni/src/game.cpp, управление — jni/src/menu.cpp, кнопка — jni/src/hud.cpp,
+API — jni/include/game.h, состояние — jni/include/app_state.h.
+
+==============================================================================
+1. Публичный API — jni/include/game.h (строки 404–423)
+==============================================================================
+
+bool esp_freecam_set(bool on);
+bool esp_freecam_active();
+void esp_freecam_diag(int& code, float& dist);
+bool esp_freecam_move(float forward, float right, float up);
+bool esp_freecam_look(float yaw_delta, float pitch_delta);
+
+
+==============================================================================
+2. Состояние UI — jni/include/app_state.h (строки 57–68 и 98–99)
+==============================================================================
+
+    bool  freecam_on = false;
+    float freecam_speed = 12.f;
+    float freecam_joy_x = -1.f, freecam_joy_y = -1.f;
+    float freecam_btn_x = -1.f, freecam_btn_y = -1.f;
+    bool  freecam_btn_show = true;
+
+    float a_freecam_on = 0;
+    float a_freecam_btn_show = 0;
+
+==============================================================================
+3. Константы экранной кнопки — jni/include/hud.h (строки 18–24)
+==============================================================================
+
+constexpr float kFcBtnSide = 100.f;
+constexpr float kFcBtnRadius = 26.f;
+constexpr float kFcBtnDefX = 0.90f;
+constexpr float kFcBtnDefY = 0.50f;
+
+==============================================================================
+4. ЯДРО — jni/src/game.cpp (строки 1091–2524)
+==============================================================================
+
+static bool     g_freecam_on = false;
+static bool     g_freecam_saved_ok = false;
+static Vec3     g_freecam_saved{};
+static Matrix34 g_freecam_saved_mat{};
+static Vec3     g_freecam_pos{};
+static float    g_freecam_yaw = 0.f;
+static float    g_freecam_pitch = 0.f;
+static bool     g_freecam_has_yawpitch = false;
+static uint64_t g_freecam_transform = 0;
+static uint64_t g_freecam_matrices = 0;
+static uint64_t g_freecam_indices = 0;
+static int32_t  g_freecam_index = -1;
+static int      g_freecam_miss = 0;
+static int      g_freecam_fail = 0;
+static float    g_freecam_fail_dist = -1.f;
+
+static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_t index,
+                                     Vec3& pos, Vec4& rot, Vec3& scale, bool fresh = false);
+static bool camera_position_from_view(const Mat4& view, Vec3& position);
+static Mat4 mat_mul(const Mat4& a, const Mat4& b);
+static Mat4 mat_mul(const Mat4& a, const Mat4& b);
+
+static constexpr uint64_t GAMEOBJECT_COMPONENT_COUNT  = 0x30;
+static constexpr uint64_t GAMEOBJECT_COMPONENT_STRIDE = 0x10;
+static constexpr uint64_t TRANSFORM_ACCESS_HIERARCHY  = 0x38;
+
+static uint64_t transform_from_gameobject(uint64_t gameobject) {
+    if (gameobject < 0x10000) return 0;
+    const uint64_t components = rd_ptr(gameobject + GAMEOBJECT_COMPONENT_ARRAY);
+    if (components < 0x10000) return 0;
+    const int32_t count = rd<int32_t>(gameobject + GAMEOBJECT_COMPONENT_COUNT);
+    int n = (count > 0 && count <= 64) ? count : 1;
+    uint64_t fallback = 0;
+    for (int i = 0; i < n; ++i) {
+        const uint64_t component =
+            rd_ptr(components + (uint64_t)i * GAMEOBJECT_COMPONENT_STRIDE + COMPONENT_PAIR_PTR);
+        if (component < 0x10000 || component == gameobject) continue;
+        const bool backref = rd_ptr(component + COMPONENT_GAMEOBJECT) == gameobject;
+        if (!backref) { if (!fallback) fallback = component; continue; }
+        if (rd_ptr(component + TRANSFORM_ACCESS_HIERARCHY) >= 0x10000) return component;
+        if (!fallback) fallback = component;
+    }
+    return fallback;
+}
+
+static uint64_t camera_transform_of(uint64_t native_cam) {
+    if (!native_cam) return 0;
+    const uint64_t gameobject = rd_ptr(native_cam + CAMERA_NATIVE_TRANSFORM);
+    if (gameobject < 0x10000) return 0;
+    const uint64_t transform = transform_from_gameobject(gameobject);
+    return transform ? transform : gameobject;
+}
+
+static uint64_t camera_transform() { return camera_transform_of(g_native_camera); }
+
+static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matrices,
+                                     uint64_t& indices, int32_t& index,
+                                     float* best_dist = nullptr) {
+    if (!native_transform) return false;
+    if (best_dist) *best_dist = -1.f;
+
+    struct Cand { uint64_t m, n; int32_t i; };
+    Cand cand[96];
+    int  cand_src[96] = {};
+    int  cur_src = 0;
+    int count = 0;
+    auto push = [&](uint64_t m, uint64_t n, int32_t i) {
+        if (!m || !n || i < 0 || i > 100000 || count >= 96) return;
+        const uint64_t ms[2] = {m, rd_ptr(m)};
+        const uint64_t ns[2] = {n, rd_ptr(n)};
+        for (int a = 0; a < 2 && count < 96; ++a)
+            for (int b = 0; b < 2 && count < 96; ++b)
+                if (ms[a] && ns[b]) { cand_src[count] = cur_src; cand[count++] = {ms[a], ns[b], i}; }
+    };
+    auto probe = [&](uint64_t base, uint64_t data_offset, uint64_t index_offset) {
+        const uint64_t data = rd_ptr(base + data_offset);
+        const int32_t  idx  = rd<int32_t>(base + index_offset);
+        if (!data || idx < 0 || idx > 100000) return;
+        static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
+        for (const auto& pr : kPairs) push(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]), idx);
+    };
+
+    uint64_t tf[3] = {native_transform, 0, 0};
+    tf[1] = transform_from_gameobject(native_transform);
+    const uint64_t as_component = rd_ptr(native_transform + COMPONENT_GAMEOBJECT);
+    if (as_component >= 0x10000 && as_component != native_transform)
+        tf[2] = transform_from_gameobject(as_component);
+
+    Vec3 ref{};
+    bool know_cam = false;
+    if (g_native_camera) {
+        const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
+        Vec3 vpos{};
+        if (camera_position_from_view(view, vpos) && vec3_is_finite(vpos)) { ref = vpos; know_cam = true; }
+    }
+    if (!know_cam && g_frame_cam_basis_valid && vec3_is_finite(g_frame_cam_pos)) {
+        ref = g_frame_cam_pos; know_cam = true;
+    }
+    if (!know_cam && g_cam_pose_valid && vec3_is_finite(g_cam_pos)) {
+        ref = g_cam_pos; know_cam = true;
+    }
+
+    int   best_k = -1;
+    float best_d = -1.f;
+    int   positions = 0;
+    auto evaluate = [&](int from, int to) {
+        for (int k = from; k < to; ++k) {
+            Vec3 pos{};
+            if (!read_transform_hierarchy_arrays(cand[k].m, cand[k].n, cand[k].i, pos)) continue;
+            if (!vec3_is_finite(pos)) continue;
+            ++positions;
+            if (!know_cam) { best_k = k; best_d = 0.f; return; }
+            const float dx = pos.x - ref.x, dy = pos.y - ref.y, dz = pos.z - ref.z;
+            const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (best_k < 0 || d < best_d) { best_k = k; best_d = d; }
+            if (d < 2.0F) return;
+        }
+    };
+
+    if (g_transform_hierarchy_layout_valid) {
+        const TransformHierarchyLayout& L = g_transform_hierarchy_layout;
+        for (int t = 0; t < 3 && tf[t]; ++t) {
+            cur_src = t;
+            const uint64_t data = rd_ptr(tf[t] + L.data_offset);
+            const int32_t  idx  = rd<int32_t>(tf[t] + L.index_offset);
+            uint64_t m = data ? rd_ptr(data + L.matrices_offset) : 0;
+            uint64_t n = data ? rd_ptr(data + L.indices_offset) : 0;
+            if (L.matrices_indirect) m = rd_ptr(m);
+            if (L.indices_indirect)  n = rd_ptr(n);
+            if (m && n && idx >= 0 && idx <= 100000) {
+                cand[count++] = {m, n, idx};
+                break;
+            }
+        }
+    }
+    for (int t = 0; t < 3 && tf[t]; ++t) {
+        if (tf[t] == tf[0] && t > 0) continue;
+        cur_src = t;
+        probe(tf[t], 0x38, 0x40);
+        probe(tf[t], 0x18, 0x20);
+    }
+    evaluate(0, count);
+
+    if (best_k < 0 || best_d > 2.0F) {
+        static const uint64_t kExtended[][2] = {{0x20, 0x28}, {0x28, 0x30}, {0x30, 0x38},
+                                                {0x40, 0x48}, {0x10, 0x18}, {0x48, 0x50}};
+        const int saved = count;
+        for (int t = 0; t < 3 && tf[t]; ++t) {
+            if (tf[t] == tf[0] && t > 0) continue;
+            cur_src = t;
+            for (const auto& off : kExtended) probe(tf[t], off[0], off[1]);
+        }
+        evaluate(saved, count);
+    }
+
+    if (best_k < 0 || best_d > 2.0F) {
+        static double s_last = -1e9;
+        const double now = memio::now_seconds();
+        if (now - s_last >= 2.0) {
+            s_last = now;
+            LogLine("фрикам: перебор — трансформ 0x%llx, из компонента 0x%llx, кандидатов %d, позиций %d, ближайшее %.1f м",
+                    (unsigned long long)tf[0], (unsigned long long)tf[1], count, positions,
+                    (double)(best_d >= 0.f ? best_d : -1.f));
+            LogLine("фрикам: источники — кандидат %d из толкования %d, трансформы 0x%llx/0x%llx/0x%llx, камера %d",
+                    best_k, (best_k >= 0 ? cand_src[best_k] : -1),
+                    (unsigned long long)tf[0], (unsigned long long)tf[1],
+                    (unsigned long long)tf[2], (int)know_cam);
+        }
+        if (best_dist) *best_dist = (best_k >= 0 ? best_d : -1.f);
+        return false;
+    }
+    if (best_dist) *best_dist = best_d;
+    matrices = cand[best_k].m; indices = cand[best_k].n; index = cand[best_k].i;
+    return true;
+}
+
+static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_t index,
+                                     Vec3& pos, Vec4& rot, Vec3& scale, bool fresh) {
+    if (!matrices || !indices || index < 0 || index > 100000) return false;
+    auto load = [fresh](uint64_t addr, Matrix34& out) -> bool {
+        const bool got = fresh ? rd_fresh(addr, out) : rd_exact(addr, out);
+        return got && matrix34_is_valid(out);
+    };
+    auto link = [fresh](uint64_t addr, int32_t& out) -> bool {
+        return fresh ? rd_fresh(addr, out) : rd_exact(addr, out);
+    };
+    Matrix34 m{};
+    if (!load(matrices + (uint64_t)index * sizeof(Matrix34), m)) return false;
+    pos = {m.translation.x, m.translation.y, m.translation.z};
+    rot = m.rotation;
+    scale = {m.scale.x, m.scale.y, m.scale.z};
+    if (!normalize_quaternion(rot)) return false;
+    int32_t parent = -2, previous = index;
+    if (!link(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
+    int depth = 0;
+    while (parent >= 0 && depth++ < 128) {
+        if (parent > 100000 || parent == previous) return false;
+        Matrix34 p{};
+        if (!load(matrices + (uint64_t)parent * sizeof(Matrix34), p)) return false;
+        Vec4 pr = p.rotation;
+        if (!normalize_quaternion(pr)) return false;
+        Vec3 scaled = {pos.x * p.scale.x, pos.y * p.scale.y, pos.z * p.scale.z};
+        Vec3 turned = rotate_vector(pr, scaled);
+        pos = {p.translation.x + turned.x, p.translation.y + turned.y, p.translation.z + turned.z};
+        rot = multiply_quaternion(pr, rot);
+        if (!normalize_quaternion(rot)) return false;
+        scale = {p.scale.x * scale.x, p.scale.y * scale.y, p.scale.z * scale.z};
+        previous = parent;
+        if (!link(indices + (uint64_t)parent * sizeof(int32_t), parent)) return false;
+    }
+    if (parent != -1 || depth >= 128) return false;
+    return vec3_is_finite(pos) && std::isfinite(scale.x) && scale.x > 1e-6F;
+}
+
+static bool transform_world_to_local(uint64_t matrices, uint64_t indices, int32_t index,
+                                     const Vec3& world, Vec3& local) {
+    int32_t parent = -2;
+    if (!rd_exact(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
+    if (parent < 0) { local = world; return true; }
+    Vec3 pPos{}, pScale{};
+    Vec4 pRot{};
+    if (!read_transform_world_trs(matrices, indices, parent, pPos, pRot, pScale)) return false;
+    const Vec3 d = {world.x - pPos.x, world.y - pPos.y, world.z - pPos.z};
+    Vec4 inv = pRot;
+    const float len = sqrtf(inv.x * inv.x + inv.y * inv.y + inv.z * inv.z + inv.w * inv.w);
+    if (!(len > 1e-6F)) return false;
+    inv.x = -inv.x / len; inv.y = -inv.y / len; inv.z = -inv.z / len; inv.w = inv.w / len;
+    const Vec3 turned = rotate_vector(inv, d);
+    if (!(fabsf(pScale.x) > 1e-6F && fabsf(pScale.y) > 1e-6F && fabsf(pScale.z) > 1e-6F)) return false;
+    local = {turned.x / pScale.x, turned.y / pScale.y, turned.z / pScale.z};
+    return vec3_is_finite(local);
+}
+
+static void log_freecam_fail(int reason, uint64_t transform, float dist) {
+    static double s_last = -1e9;
+    const double now = memio::now_seconds();
+    if (now - s_last < 2.0) return;
+    s_last = now;
+    if (dist >= 0.f) {
+        LogLine("фрикам: не включён — мировая позиция не совпала с камерой (трансформ 0x%llx, ближайшее расхождение %.1f м)",
+                (unsigned long long)transform, (double)dist);
+        return;
+    }
+    switch (reason) {
+        case 0: LogLine("фрикам: не включён — камера ещё не найдена"); break;
+        case 1: LogLine("фрикам: не включён — нет трансформа камеры (0x%llx)", (unsigned long long)transform); break;
+        case 2: LogLine("фрикам: не включён — массивы Transform не читаются (0x%llx)", (unsigned long long)transform); break;
+        default: LogLine("фрикам: не включён — локальная матрица камеры не читается (0x%llx)", (unsigned long long)transform); break;
+    }
+}
+
+bool esp_freecam_active() { return g_freecam_on; }
+
+void esp_freecam_diag(int& code, float& dist) {
+    code = g_freecam_fail;
+    dist = g_freecam_fail_dist;
+}
+
+struct FcSlot { uint64_t m = 0, n = 0; int32_t i = -1; float d = -1.f; };
+static constexpr int kFcMaxSlots = 8;
+static constexpr float kFcSlotMaxDist = 500.0f;
+static FcSlot g_fc_slots[kFcMaxSlots];
+static int    g_fc_slot_n = 0;
+
+static void fc_slot_add(uint64_t m, uint64_t n, int32_t i, float d) {
+    if (!m || !n || i < 0) return;
+    for (int k = 0; k < g_fc_slot_n; ++k)
+        if (g_fc_slots[k].m == m && g_fc_slots[k].n == n && g_fc_slots[k].i == i) return;
+    if (g_fc_slot_n < kFcMaxSlots) {
+        g_fc_slots[g_fc_slot_n++] = FcSlot{m, n, i, d};
+        return;
+    }
+    int worst = 0;
+    for (int k = 1; k < g_fc_slot_n; ++k)
+        if (g_fc_slots[k].d > g_fc_slots[worst].d) worst = k;
+    if (g_fc_slots[worst].d > d) g_fc_slots[worst] = FcSlot{m, n, i, d};
+}
+
+static bool resolve_camera_arrays(uint64_t& matrices, uint64_t& indices, int32_t& index,
+                                  Vec3& cam_pos, float& err_m) {
+    matrices = indices = 0; index = -1; err_m = -1.f;
+    if (!g_native_camera) return false;
+    const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
+    if (!camera_position_from_view(view, cam_pos) || !vec3_is_finite(cam_pos)) return false;
+    const uint64_t gameobject = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
+    const uint64_t transform = transform_from_gameobject(gameobject);
+    if (!transform) return false;
+    const uint64_t data = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);
+    const int32_t  idx  = rd<int32_t>(transform + 0x40);
+    if (!data || idx < 0 || idx > 100000) return false;
+    static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
+    static const uint64_t kExt[][2] = {{0x20, 0x28}, {0x28, 0x30}, {0x30, 0x38}, {0x40, 0x48}, {0x10, 0x18}, {0x48, 0x50}};
+    auto try_pair = [&](uint64_t m0, uint64_t n0) {
+        if (!m0 || !n0) return;
+        const uint64_t ms[2] = {m0, rd_ptr(m0)};
+        const uint64_t ns[2] = {n0, rd_ptr(n0)};
+        for (uint64_t m : ms) {
+            for (uint64_t n : ns) {
+                if (!m || !n) continue;
+                for (int di = -2; di <= 2; ++di) {
+                    const int32_t ii = idx + di;
+                    if (ii < 0 || ii > 100000) continue;
+                    Vec3 pos{};
+                    Vec4 rot{};
+                    if (!read_transform_hierarchy_arrays(m, n, ii, pos, &rot)) continue;
+                    if (!vec3_is_finite(pos)) continue;
+                    const float dx = pos.x - cam_pos.x, dy = pos.y - cam_pos.y, dz = pos.z - cam_pos.z;
+                    const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+                    if (err_m < 0.f || d < err_m) err_m = d;
+                    fc_slot_add(m, n, ii, d);
+                    if (d <= 1.0F && !matrices) { matrices = m; indices = n; index = ii; }
+                    if (!matrices && d <= 100.0F) { matrices = m; indices = n; index = ii; }
+                }
+            }
+        }
+    };
+    for (const auto& pr : kPairs) {
+        try_pair(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]));
+    }
+    for (const auto& pr : kExt) {
+        try_pair(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]));
+    }
+    return matrices != 0;
+}
+
+static bool camera_arrays_now(uint64_t& matrices, uint64_t& indices, int32_t& index) {
+    if (!g_native_camera) return false;
+    const uint64_t gameobject = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
+    const uint64_t transform = transform_from_gameobject(gameobject);
+    if (!transform) return false;
+    uint64_t data = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);
+    int32_t  idx  = rd<int32_t>(transform + 0x40);
+    if (!data) {
+        data = transform + 0x28;
+        idx  = rd<int32_t>(transform + 0x30);
+    }
+    if (!data || idx < 0 || idx > 100000) return false;
+    matrices = rd_ptr(data + 0x18);
+    indices  = rd_ptr(data + 0x20);
+    if (!matrices || !indices) return false;
+    index = idx;
+    return true;
+}
+
+struct FcSlotPayload {
+    uint64_t addr = 0;
+    float    m[12] = {};
+};
+struct FcPayload {
+    std::atomic<unsigned> seq{0};
+    uint64_t cam = 0;
+    bool     has_view = false;
+    float    view[16] = {};
+    float    proj[16] = {};
+    float    w2c[16] = {};
+    FcSlotPayload t[kFcMaxSlots];
+    int      tn = 0;
+};
+struct FcSnapshotLocal {
+    uint64_t cam = 0;
+    bool     has_view = false;
+    float    view[16] = {};
+    float    proj[16] = {};
+    float    w2c[16] = {};
+    FcSlotPayload t[kFcMaxSlots];
+    int      tn = 0;
+};
+static FcPayload             g_fc_pub;
+static std::atomic<bool>     g_fc_writer_running{false};
+static std::atomic<unsigned> g_fc_writer_gen{0};
+static std::atomic<unsigned> s_fc_exited_gen{0};
+
+static void freecam_payload_publish(const FcSnapshotLocal& s) {
+    g_fc_pub.seq.fetch_add(1);
+    g_fc_pub.cam = s.cam;
+    g_fc_pub.has_view = s.has_view;
+    memcpy(g_fc_pub.view, s.view, sizeof(s.view));
+    memcpy(g_fc_pub.proj, s.proj, sizeof(s.proj));
+    memcpy(g_fc_pub.w2c, s.w2c, sizeof(s.w2c));
+    for (int i = 0; i < kFcMaxSlots; ++i) g_fc_pub.t[i] = s.t[i];
+    g_fc_pub.tn = s.tn;
+    g_fc_pub.seq.fetch_add(1);
+}
+
+static void freecam_payload_clear() {
+    const FcSnapshotLocal empty{};
+    freecam_payload_publish(empty);
+}
+
+static Vec3 freecam_pos_from_view(const float m[16]) {
+    const float tx = m[12], ty = m[13], tz = m[14];
+    Vec3 p = {-(m[0]*tx + m[1]*ty + m[2]*tz),
+              -(m[4]*tx + m[5]*ty + m[6]*tz),
+              -(m[8]*tx + m[9]*ty + m[10]*tz)};
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) p = {};
+    return p;
+}
+static std::atomic<unsigned> g_fc_write_count{0};
+static std::atomic<bool>     g_fc_write_failed{false};
+struct FcOwQ {
+    std::atomic<unsigned> seq{0};
+    std::atomic<uint64_t> ow{0};
+    std::atomic<uint64_t> ev{0};
+    std::atomic<double>   owm{0.0};
+    std::atomic<float>    pmx{0}, pmy{0}, pmz{0};
+    std::atomic<float>    psx{0}, psy{0}, psz{0};
+};
+static FcOwQ g_fc_owq;
+static std::atomic<unsigned> g_fc_array_changes{0};
+static std::atomic<float>    g_fc_gap{-1.f};
+
+static Vec3    g_fc_diag_local{};
+static Vec3    g_fc_diag_cur{};
+static Vec3    g_fc_diag_step{};
+static Vec3    g_fc_diag_parent_pos{};
+static Vec4    g_fc_diag_parent_rot{};
+static Vec3    g_fc_diag_parent_scale{};
+static int32_t g_fc_diag_parent = -2;
+static bool    g_fc_diag_ok = false;
+static bool    g_fc_diag_absolute = false;
+static Vec3    s_fc_basis_r{1.f, 0.f, 0.f}, s_fc_basis_u{0.f, 1.f, 0.f}, s_fc_basis_f{0.f, 0.f, 1.f};
+static bool    s_fc_basis_have = false;
+static std::atomic<unsigned> g_fc_skew{0};
+
+static bool basis_is_orthonormal(const Vec3& r, const Vec3& u, const Vec3& f) {
+    const float rl = r.x * r.x + r.y * r.y + r.z * r.z;
+    const float ul = u.x * u.x + u.y * u.y + u.z * u.z;
+    const float fl = f.x * f.x + f.y * f.y + f.z * f.z;
+    if (fabsf(rl - 1.f) > 0.02f || fabsf(ul - 1.f) > 0.02f || fabsf(fl - 1.f) > 0.02f) return false;
+    if (fabsf(r.x * u.x + r.y * u.y + r.z * u.z) > 0.005f) return false;
+    if (fabsf(r.x * f.x + r.y * f.y + r.z * f.z) > 0.005f) return false;
+    if (fabsf(u.x * f.x + u.y * f.y + u.z * f.z) > 0.005f) return false;
+    const float cx = r.y * u.z - r.z * u.y, cy = r.z * u.x - r.x * u.z, cz = r.x * u.y - r.y * u.x;
+    if (cx * f.x + cy * f.y + cz * f.z < 0.99f) return false;
+    return true;
+}
+
+static bool freecam_basis_ok(Vec3& r, Vec3& u, Vec3& f) {
+    if (basis_is_orthonormal(r, u, f)) {
+        s_fc_basis_r = r; s_fc_basis_u = u; s_fc_basis_f = f;
+        s_fc_basis_have = true;
+        return true;
+    }
+    if (!s_fc_basis_have) return false;
+    r = s_fc_basis_r; u = s_fc_basis_u; f = s_fc_basis_f;
+    g_fc_skew.fetch_add(1);
+    return true;
+}
+
+static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_t index,
+                                     const Vec3& target, Vec3& local_out, float& gap) {
+    if (!matrices || !indices || index < 0) return false;
+    Vec3 cur{}, scale{};
+    Vec4 rot{};
+    if (!read_transform_world_trs(matrices, indices, index, cur, rot, scale, true)) return false;
+    if (!vec3_is_finite(cur)) return false;
+    Vec3 d = {target.x - cur.x, target.y - cur.y, target.z - cur.z};
+    if (!vec3_is_finite(d)) return false;
+    const float dl = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
+    gap = dl;
+    if (dl > 2.0F) { const float kk = 2.0F / dl; d = {d.x * kk, d.y * kk, d.z * kk}; }
+
+    int32_t parent = -2;
+    if (!rd_fresh(indices + (uint64_t)index * sizeof(int32_t), parent)) return false;
+    Matrix34 self{};
+    if (!rd_fresh(matrices + (uint64_t)index * sizeof(Matrix34), self)) return false;
+    if (!matrix34_is_valid(self)) return false;
+    Vec3 local = {self.translation.x, self.translation.y, self.translation.z};
+    Vec3 step{};
+    bool absolute = false;
+    if (parent < 0) {
+        step = {target.x - cur.x, target.y - cur.y, target.z - cur.z};
+        local = target;
+        absolute = true;
+    } else {
+        Vec3 pPos{}, pScale{};
+        Vec4 pRot{};
+        if (!read_transform_world_trs(matrices, indices, parent, pPos, pRot, pScale, true)) return false;
+        g_fc_diag_parent_pos = pPos; g_fc_diag_parent_rot = pRot; g_fc_diag_parent_scale = pScale;
+        if (!(fabsf(pScale.x) > 1e-6F && fabsf(pScale.y) > 1e-6F && fabsf(pScale.z) > 1e-6F)) {
+            Matrix34 pm{};
+            if (rd_fresh(matrices + (uint64_t)parent * sizeof(Matrix34), pm)) {
+                pm.scale = {1.f,1.f,1.f,0.f};
+                if (pm.rotation.x==0.f && pm.rotation.y==0.f && pm.rotation.z==0.f && pm.rotation.w==0.f) pm.rotation.w=1.f;
+                wr_buf(matrices + (uint64_t)parent * sizeof(Matrix34), &pm, sizeof(Matrix34));
+                pScale = {1.f,1.f,1.f};
+            } else {
+                return false;
+            }
+        }
+        Vec3 abs_local{};
+        if (transform_world_to_local(matrices, indices, index, target, abs_local) &&
+            vec3_is_finite(abs_local)) {
+            const float jx = abs_local.x - local.x, jy = abs_local.y - local.y, jz = abs_local.z - local.z;
+            if (sqrtf(jx * jx + jy * jy + jz * jz) <= 50.f) {
+                step = {jx, jy, jz};
+                local = abs_local;
+                absolute = true;
+            }
+        }
+        if (!absolute) {
+            Vec4 inv = pRot;
+            const float len = sqrtf(inv.x * inv.x + inv.y * inv.y + inv.z * inv.z + inv.w * inv.w);
+            if (!(len > 1e-6F)) {
+                inv = {0.f,0.f,0.f,1.f};
+            } else {
+                inv = {-inv.x / len, -inv.y / len, -inv.z / len, inv.w / len};
+            }
+            const Vec3 turned = rotate_vector(inv, d);
+            step = {turned.x / pScale.x, turned.y / pScale.y, turned.z / pScale.z};
+            local = {local.x + step.x, local.y + step.y, local.z + step.z};
+        }
+    }
+    g_fc_diag_parent = parent;
+    g_fc_diag_local = local;
+    g_fc_diag_cur = cur;
+    g_fc_diag_step = step;
+    g_fc_diag_absolute = absolute;
+    g_fc_diag_ok = true;
+    if (!vec3_is_finite(local)) return false;
+    const float sl = sqrtf(step.x * step.x + step.y * step.y + step.z * step.z);
+    if (sl > 200.f && !absolute) {
+        LogLine("фрикам: поправка отброшена — шаг %.1f м длиннее 200 м", (double)sl);
+        return false;
+    }
+    local_out = local;
+    return true;
+}
+
+static uint64_t g_fc_last_m = 0, g_fc_last_n = 0;
+static int32_t  g_fc_last_i = -1;
+static FcSlot   g_fc_own[kFcMaxSlots];
+static int      g_fc_own_n = 0;
+static int      g_fc_slot_miss = 0;
+
+static std::atomic<unsigned> g_fc_samp{0}, g_fc_hit{0}, g_fc_zero{0}, g_fc_other{0};
+
+static void freecam_writer_start() {
+    if (g_fc_writer_running.exchange(true)) return;
+    const unsigned my_gen = g_fc_writer_gen.fetch_add(1) + 1;
+    std::thread([my_gen]() {
+        struct ExitMark { unsigned g; ~ExitMark() { s_fc_exited_gen.store(g); } } mark{my_gen};
+        float last_block[48] = {};
+        bool  have_last = false;
+        uint64_t last_cam = 0;
+        while (g_fc_writer_running.load()) {
+            if (my_gen != g_fc_writer_gen.load()) return;
+            uint64_t cam = 0;
+            bool     has_view = false;
+            float    view[16] = {}, proj[16] = {}, w2c[16] = {};
+            FcSlotPayload t[kFcMaxSlots];
+            int tn = 0;
+            bool snapped = false;
+            for (int spin = 0; spin < 64; ++spin) {
+                const unsigned s0 = g_fc_pub.seq.load();
+                if (s0 & 1u) continue;
+                cam = g_fc_pub.cam;
+                has_view = g_fc_pub.has_view;
+                memcpy(view, g_fc_pub.view, sizeof(view));
+                memcpy(proj, g_fc_pub.proj, sizeof(proj));
+                memcpy(w2c, g_fc_pub.w2c, sizeof(w2c));
+                for (int i = 0; i < kFcMaxSlots; ++i) t[i] = g_fc_pub.t[i];
+                tn = g_fc_pub.tn;
+                if (s0 == g_fc_pub.seq.load()) { snapped = true; break; }
+            }
+            if (!snapped || g_pid <= 0 || (!has_view && tn <= 0)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            if (cam != last_cam) { have_last = false; last_cam = cam; }
+            if (has_view && cam) {
+                float block[48];
+                memcpy(block, view, sizeof(view));
+                memcpy(block + 16, proj, sizeof(proj));
+                memcpy(block + 32, w2c, sizeof(w2c));
+                const uint64_t vaddr = cam + CAMERA_VIEW_MATRIX;
+                float cur[48] = {};
+                const bool rd_ok = g_mem.read_quiet(vaddr, cur, sizeof(cur));
+                if (!g_fc_writer_running.load() || my_gen != g_fc_writer_gen.load()) return;
+                const bool same = rd_ok && memcmp(cur, block, sizeof(cur)) == 0;
+                if (!same) {
+                    if (rd_ok && have_last && memcmp(cur, last_block, sizeof(cur)) != 0) {
+                        const Vec3 pm = freecam_pos_from_view(cur);
+                        const Vec3 ps = freecam_pos_from_view(block);
+                        const float dx = pm.x - ps.x, dy = pm.y - ps.y, dz = pm.z - ps.z;
+                        const float dd = sqrtf(dx * dx + dy * dy + dz * dz);
+                        FcOwQ& q = g_fc_owq;
+                        q.seq.fetch_add(1, std::memory_order_relaxed);
+                        q.ow.store(q.ow.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+                        if (std::isfinite(dd))
+                            q.owm.store(q.owm.load(std::memory_order_relaxed) + (double)dd, std::memory_order_relaxed);
+                        q.pmx.store(pm.x, std::memory_order_relaxed);
+                        q.pmy.store(pm.y, std::memory_order_relaxed);
+                        q.pmz.store(pm.z, std::memory_order_relaxed);
+                        q.psx.store(ps.x, std::memory_order_relaxed);
+                        q.psy.store(ps.y, std::memory_order_relaxed);
+                        q.psz.store(ps.z, std::memory_order_relaxed);
+                        q.ev.store(q.ev.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+                        std::atomic_thread_fence(std::memory_order_release);
+                        q.seq.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    if (wr_buf(vaddr, block, sizeof(block))) {
+                        g_fc_write_count.fetch_add(1);
+                        memcpy(last_block, block, sizeof(block));
+                        have_last = true;
+                    } else {
+                        g_fc_write_failed.store(true);
+                    }
+                }
+                uint8_t zero = 0;
+                wr_buf(cam + CAMERA_VIEW_DIRTY, &zero, 1);
+                wr_buf(cam + CAMERA_PROJ_DIRTY, &zero, 1);
+            }
+            if (!g_fc_writer_running.load() || my_gen != g_fc_writer_gen.load()) return;
+            for (int sl = 0; sl < tn && sl < kFcMaxSlots; ++sl) {
+                if (!t[sl].addr) continue;
+                if (wr_buf(t[sl].addr, t[sl].m, sizeof(t[sl].m)))
+                    g_fc_write_count.fetch_add(1);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }).detach();
+}
+
+bool esp_freecam_set(bool on) {
+    if (on == g_freecam_on) return g_freecam_on;
+    if (!on) {
+        g_fc_writer_running.store(false);
+        freecam_payload_clear();
+        {
+            const unsigned wgen = g_fc_writer_gen.load();
+            for (int w = 0; w < 300 && s_fc_exited_gen.load() != wgen; ++w)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        g_fc_last_m = g_fc_last_n = 0; g_fc_last_i = -1;
+        if (g_freecam_saved_ok && g_freecam_matrices && g_freecam_index >= 0)
+            wr_buf(g_freecam_matrices + (uint64_t)g_freecam_index * sizeof(Matrix34),
+                   &g_freecam_saved_mat, sizeof(Matrix34));
+        if (g_native_camera) {
+            uint8_t one=1;
+            wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &one, 1);
+        }
+        g_freecam_on = false;
+        g_freecam_saved_ok = false;
+        g_freecam_has_yawpitch = false;
+        LogLine("фрикам: выключен, камера вернулась к телу");
+        return false;
+    }
+    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+    uint64_t transform = camera_transform();
+    if (!transform) {
+        g_freecam_fail = g_native_camera ? 2 : 1; g_freecam_fail_dist = -1.f;
+        log_freecam_fail(g_native_camera ? 1 : 0, 0, -1.f);
+        return false;
+    }
+    uint64_t matrices = 0, indices = 0;
+    int32_t index = -1;
+    float dist = -1.f;
+    Vec3 cam_pos{};
+    g_fc_slot_n = 0;
+    if (!resolve_camera_arrays(matrices, indices, index, cam_pos, dist)) {
+        if (!resolve_transform_arrays(transform, matrices, indices, index, &dist)) {
+            g_freecam_fail = dist >= 0.f ? 4 : 3; g_freecam_fail_dist = dist;
+            log_freecam_fail(2, transform, dist);
+            return false;
+        }
+    }
+    Matrix34 m{};
+    if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), m)) {
+        g_freecam_fail = 3; g_freecam_fail_dist = -1.f;
+        log_freecam_fail(3, transform, -1.f);
+        return false;
+    }
+    Vec3 pos{}, scale{};
+    Vec4 rot{};
+    if (!read_transform_world_trs(matrices, indices, index, pos, rot, scale)) return false;
+    g_freecam_saved = {m.translation.x, m.translation.y, m.translation.z};
+    g_freecam_saved_mat = m;
+    g_freecam_saved_ok = true;
+    g_freecam_transform = transform;
+    g_freecam_matrices = matrices;
+    g_freecam_indices = indices;
+    g_freecam_index = index;
+    g_fc_last_m = matrices; g_fc_last_n = indices; g_fc_last_i = index;
+    g_fc_own_n = g_fc_slot_n;
+    for (int k = 0; k < g_fc_own_n; ++k) g_fc_own[k] = g_fc_slots[k];
+    if (g_fc_own_n <= 0) { g_fc_own[0] = FcSlot{matrices, indices, index, dist}; g_fc_own_n = 1; }
+    g_freecam_pos = pos;
+    if (g_cam_pose_valid && vec3_is_finite(g_cam_forward)) {
+        g_freecam_yaw = atan2f(g_cam_forward.x, g_cam_forward.z) * 57.29578f;
+        float horiz = sqrtf(g_cam_forward.x*g_cam_forward.x + g_cam_forward.z*g_cam_forward.z);
+        g_freecam_pitch = atan2f(g_cam_forward.y, horiz) * 57.29578f;
+        g_freecam_has_yawpitch = true;
+    } else {
+        g_freecam_has_yawpitch = false;
+    }
+    g_freecam_on = true;
+    g_freecam_fail = 0; g_freecam_fail_dist = dist;
+    LogLine("фрикам: включён, старт (%.1f, %.1f, %.1f), трансформ=0x%llx, слотов %d",
+            (double)pos.x, (double)pos.y, (double)pos.z,
+            (unsigned long long)transform, (int)g_fc_own_n);
+    return true;
+}
+
+static bool current_camera_position(Vec3& out);
+static Mat4 mat_mul(const Mat4& a, const Mat4& b);
+
+static bool freecam_write() {
+    if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
+    if (!vec3_is_finite(g_freecam_pos)) return false;
+    uint64_t m = g_freecam_matrices, n = g_freecam_indices;
+    int32_t  idx = g_freecam_index;
+    {
+        Matrix34 probe{};
+        if (!rd_exact(m + (uint64_t)idx * sizeof(Matrix34), probe) || !matrix34_is_valid(probe)) {
+            if (++g_fc_slot_miss < 8) return false;
+            g_fc_slot_miss = 0;
+            Vec3 view_pos{};
+            float err = -1.f;
+            uint64_t nm = 0, nn = 0;
+            int32_t nidx = -1;
+            if (resolve_camera_arrays(nm, nn, nidx, view_pos, err) && nm && nn && nidx >= 0) {
+                if (nm != g_fc_last_m || nn != g_fc_last_n || nidx != g_fc_last_i) {
+                    g_fc_array_changes.fetch_add(1);
+                    g_fc_last_m = nm; g_fc_last_n = nn; g_fc_last_i = nidx;
+                    LogLine("фрикам: массивы перерешены — была позиция (%.1f, %.1f, %.1f), в матрице вида (%.1f, %.1f, %.1f), расхождение %.1f м",
+                            (double)g_freecam_pos.x, (double)g_freecam_pos.y, (double)g_freecam_pos.z,
+                            (double)view_pos.x, (double)view_pos.y, (double)view_pos.z, (double)err);
+                }
+                g_freecam_matrices = nm; g_freecam_indices = nn; g_freecam_index = nidx;
+                m = nm; n = nn; idx = nidx;
+            } else {
+                return false;
+            }
+        } else {
+            g_fc_slot_miss = 0;
+        }
+    }
+    if (!m || !n || idx < 0) return false;
+    FcSnapshotLocal pub;
+    pub.cam = g_native_camera;
+    bool ok = false;
+    if (g_native_camera && g_cam_pose_valid) {
+        Vec3 r = g_cam_right, u = g_cam_up, f = g_cam_forward;
+        if (vec3_is_finite(r) && vec3_is_finite(u) && vec3_is_finite(f) &&
+            freecam_basis_ok(r, u, f)) {
+            Mat4 view{};
+            view.m[0] = r.x; view.m[4] = r.y; view.m[8]  = r.z; view.m[12] = -(r.x * g_freecam_pos.x + r.y * g_freecam_pos.y + r.z * g_freecam_pos.z);
+            view.m[1] = u.x; view.m[5] = u.y; view.m[9]  = u.z; view.m[13] = -(u.x * g_freecam_pos.x + u.y * g_freecam_pos.y + u.z * g_freecam_pos.z);
+            view.m[2] = -f.x; view.m[6] = -f.y; view.m[10] = -f.z; view.m[14] = -(-f.x * g_freecam_pos.x + -f.y * g_freecam_pos.y + -f.z * g_freecam_pos.z);
+            view.m[3] = 0.f; view.m[7] = 0.f; view.m[11] = 0.f; view.m[15] = 1.f;
+            Mat4 proj{};
+            bool proj_ok = false;
+            if (rd_exact(g_native_camera + CAMERA_PROJECTION_MATRIX, proj)) {
+                proj_ok = (proj.m[0] != 0.f);
+                for (int k = 0; proj_ok && k < 16; ++k)
+                    proj_ok = std::isfinite(proj.m[k]);
+            }
+            if (proj_ok) {
+                Mat4 w2c = mat_mul(proj, view);
+                float block[48];
+                memcpy(block, view.m, sizeof(view.m));
+                memcpy(block + 16, proj.m, sizeof(proj.m));
+                memcpy(block + 32, w2c.m, sizeof(w2c.m));
+                if (wr_buf(g_native_camera + CAMERA_VIEW_MATRIX, block, sizeof(block))) ok = true;
+                {
+                    uint8_t zero = 0;
+                    wr_buf(g_native_camera + CAMERA_VIEW_DIRTY, &zero, 1);
+                    wr_buf(g_native_camera + CAMERA_PROJ_DIRTY, &zero, 1);
+                }
+                memcpy(pub.view, view.m, sizeof(view.m));
+                memcpy(pub.proj, proj.m, sizeof(proj.m));
+                memcpy(pub.w2c, w2c.m, sizeof(w2c.m));
+                pub.has_view = true;
+                g_fc_gap.store(0.f);
+            }
+        }
+    }
+    {
+        bool first_gap = true;
+        for (int sl = 0; sl < g_fc_own_n && pub.tn < kFcMaxSlots; ++sl) {
+            const FcSlot& S = g_fc_own[sl];
+            if (!S.m || !S.n || S.i < 0) continue;
+            Vec3 local{}; float gap = -1.f;
+            if (!freecam_local_for_target(S.m, S.n, S.i, g_freecam_pos, local, gap)) continue;
+            Matrix34 cur_m{};
+            if (!rd_fresh(S.m + (uint64_t)S.i * sizeof(Matrix34), cur_m)) continue;
+            if (!matrix34_is_valid(cur_m)) { cur_m.rotation={0.f,0.f,0.f,1.f}; cur_m.scale={1.f,1.f,1.f,0.f}; }
+            cur_m.translation.x=local.x; cur_m.translation.y=local.y; cur_m.translation.z=local.z;
+            const uint64_t addr = S.m + (uint64_t)S.i * sizeof(Matrix34);
+            FcSlotPayload& P = pub.t[pub.tn++];
+            P.addr = addr;
+            P.m[0]=cur_m.translation.x; P.m[1]=cur_m.translation.y; P.m[2]=cur_m.translation.z; P.m[3]=cur_m.translation.w;
+            P.m[4]=cur_m.rotation.x;    P.m[5]=cur_m.rotation.y;    P.m[6]=cur_m.rotation.z;    P.m[7]=cur_m.rotation.w;
+            P.m[8]=cur_m.scale.x;       P.m[9]=cur_m.scale.y;       P.m[10]=cur_m.scale.z;      P.m[11]=cur_m.scale.w;
+            if (wr_buf(addr, &cur_m, sizeof(Matrix34))) ok = true;
+            if (first_gap && gap >= 0.f) { if (!pub.has_view) g_fc_gap.store(gap); first_gap = false; }
+        }
+    }
+    if (ok) freecam_payload_publish(pub);
+    if (!ok) return false;
+    {
+        Vec3 cam{};
+        if (current_camera_position(cam)) {
+            const float dx = cam.x - g_freecam_pos.x, dy = cam.y - g_freecam_pos.y,
+                        dz = cam.z - g_freecam_pos.z;
+            const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+            const float r = sqrtf(cam.x * cam.x + cam.y * cam.y + cam.z * cam.z);
+            g_fc_samp.fetch_add(1);
+            if (d <= 2.0F) g_fc_hit.fetch_add(1);
+            else if (r <= 1.0F) g_fc_zero.fetch_add(1);
+            else g_fc_other.fetch_add(1);
+        }
+    }
+    freecam_writer_start();
+    return ok;
+}
+
+bool esp_freecam_move(float forward, float right, float up) {
+    if (!g_freecam_on || !g_freecam_matrices || !g_freecam_indices || g_freecam_index < 0) return false;
+    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+    if (!std::isfinite(forward) || !std::isfinite(right) || !std::isfinite(up)) return false;
+    Vec3 f, r, u;
+    if (g_freecam_has_yawpitch) {
+        float yaw_rad = g_freecam_yaw * 0.0174532925f;
+        float pitch_rad = g_freecam_pitch * 0.0174532925f;
+        float cy = cosf(yaw_rad), sy = sinf(yaw_rad);
+        float cp = cosf(pitch_rad), sp = sinf(pitch_rad);
+        f = {sy * cp, sp, cy * cp};
+        r = {cy, 0.f, -sy};
+        u = {0.f, 1.f, 0.f};
+    } else {
+        f = g_cam_forward; r = g_cam_right; u = g_cam_up;
+        if (!g_cam_pose_valid || !vec3_is_finite(f) || !vec3_is_finite(r)) { f = {0, 0, 1}; r = {1, 0, 0}; u = {0,1,0}; }
+    }
+    float fl = sqrtf(f.x*f.x + f.y*f.y + f.z*f.z);
+    if (fl > 1e-6f) { f.x/=fl; f.y/=fl; f.z/=fl; }
+    float rl = sqrtf(r.x*r.x + r.y*r.y + r.z*r.z);
+    if (rl > 1e-6f) { r.x/=rl; r.y/=rl; r.z/=rl; }
+    g_freecam_pos.x += f.x * forward + r.x * right + u.x * up;
+    g_freecam_pos.y += f.y * forward + r.y * right + u.y * up;
+    g_freecam_pos.z += f.z * forward + r.z * right + u.z * up;
+    if (!vec3_is_finite(g_freecam_pos)) { g_freecam_pos = {}; return false; }
+    return freecam_write();
+}
+
+bool esp_freecam_look(float yaw_delta, float pitch_delta) {
+    if (!g_freecam_on) return false;
+    if (!std::isfinite(yaw_delta) || !std::isfinite(pitch_delta)) return false;
+    if (!g_freecam_has_yawpitch) {
+        float yaw=0.f, pitch=0.f;
+        if (g_cam_pose_valid && vec3_is_finite(g_cam_forward)) {
+            yaw = atan2f(g_cam_forward.x, g_cam_forward.z) * 57.29578f;
+            float horiz = sqrtf(g_cam_forward.x*g_cam_forward.x + g_cam_forward.z*g_cam_forward.z);
+            pitch = atan2f(g_cam_forward.y, horiz) * 57.29578f;
+        }
+        g_freecam_yaw = yaw;
+        g_freecam_pitch = pitch;
+        g_freecam_has_yawpitch = true;
+    }
+    g_freecam_yaw += yaw_delta;
+    g_freecam_pitch += pitch_delta;
+    if (g_freecam_pitch > 85.f) g_freecam_pitch = 85.f;
+    if (g_freecam_pitch < -85.f) g_freecam_pitch = -85.f;
+    float yaw_rad = g_freecam_yaw * 0.0174532925f;
+    float pitch_rad = g_freecam_pitch * 0.0174532925f;
+    float cy = cosf(yaw_rad), sy = sinf(yaw_rad);
+    float cp = cosf(pitch_rad), sp = sinf(pitch_rad);
+    Vec3 fwd = {sy * cp, sp, cy * cp};
+    Vec3 right = {cy, 0.f, -sy};
+    Vec3 up = {-sy * sp, cp, -cy * sp};
+    float fl = sqrtf(fwd.x*fwd.x + fwd.y*fwd.y + fwd.z*fwd.z);
+    if (fl > 1e-6f) { fwd.x/=fl; fwd.y/=fl; fwd.z/=fl; }
+    float rl = sqrtf(right.x*right.x + right.y*right.y + right.z*right.z);
+    if (rl > 1e-6f) { right.x/=rl; right.y/=rl; right.z/=rl; }
+    float ul = sqrtf(up.x*up.x + up.y*up.y + up.z*up.z);
+    if (ul > 1e-6f) { up.x/=ul; up.y/=ul; up.z/=ul; }
+    g_cam_forward = fwd;
+    g_cam_right = right;
+    g_cam_up = up;
+    g_cam_pose_valid = true;
+    return freecam_write();
+}
+
+static void freecam_tick() {
+    if (!g_freecam_on) return;
+    if (g_freecam_transform && rd_ptr(g_freecam_transform)) g_freecam_miss = 0;
+    else if (++g_freecam_miss >= 8) { esp_freecam_set(false); return; }
+
+    static double s_next = 0.0;
+    const double now = memio::now_seconds();
+    if (now >= s_next) {
+        s_next = now + 1.0;
+        Vec3 in_mem{}, scale{};
+        Vec4 rot{};
+        if (read_transform_world_trs(g_freecam_matrices, g_freecam_indices, g_freecam_index,
+                                     in_mem, rot, scale)) {
+            const unsigned wc = g_fc_write_count.exchange(0);
+            const bool wf = g_fc_write_failed.exchange(false);
+            const float gap = g_fc_gap.load();
+            const unsigned ac = g_fc_array_changes.exchange(0);
+            uint64_t ow_t = 0, ev_t = 0; double owm_t = 0.0;
+            float pmx = 0, pmy = 0, pmz = 0, psx = 0, psy = 0, psz = 0;
+            bool ow_snap = false;
+            for (int spin = 0; spin < 64; ++spin) {
+                const unsigned s0 = g_fc_owq.seq.load(std::memory_order_acquire);
+                if (s0 & 1u) continue;
+                ow_t = g_fc_owq.ow.load(std::memory_order_relaxed);
+                owm_t = g_fc_owq.owm.load(std::memory_order_relaxed);
+                pmx = g_fc_owq.pmx.load(std::memory_order_relaxed);
+                pmy = g_fc_owq.pmy.load(std::memory_order_relaxed);
+                pmz = g_fc_owq.pmz.load(std::memory_order_relaxed);
+                psx = g_fc_owq.psx.load(std::memory_order_relaxed);
+                psy = g_fc_owq.psy.load(std::memory_order_relaxed);
+                psz = g_fc_owq.psz.load(std::memory_order_relaxed);
+                ev_t = g_fc_owq.ev.load(std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_acquire);
+                if (s0 == g_fc_owq.seq.load(std::memory_order_acquire)) { ow_snap = true; break; }
+            }
+            static uint64_t s_ow_prev = 0, s_ev_prev = 0;
+            static double   s_owm_prev = 0.0;
+            unsigned ow = 0; float owm = 0.f;
+            float owx = 0.f, owy = 0.f, owz = 0.f, osx = 0.f, osy = 0.f, osz = 0.f;
+            if (ow_snap) {
+                ow = (unsigned)(ow_t - s_ow_prev);
+                owm = (float)(owm_t - s_owm_prev);
+                owx = pmx; owy = pmy; owz = pmz; osx = psx; osy = psy; osz = psz;
+                s_ow_prev = ow_t; s_owm_prev = owm_t; s_ev_prev = ev_t;
+            }
+            const unsigned sk = g_fc_skew.exchange(0);
+            LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f), писатель %u/с, затёрто игрой %u/с (в среднем %.1f м), недолёт %.2f м, подмен массивов %u, кривых базисов %u%s",
+                    (double)g_freecam_pos.x, (double)g_freecam_pos.y, (double)g_freecam_pos.z,
+                    (double)in_mem.x, (double)in_mem.y, (double)in_mem.z,
+                    (double)g_cam_pos.x, (double)g_cam_pos.y, (double)g_cam_pos.z,
+                    wc, ow, (double)(ow ? owm / (float)ow : 0.f), (double)gap, ac, sk,
+                    wf ? " (отказы записи)" : "");
+            {
+                char buf[256] = {};
+                int  off = 0;
+                for (int sl = 0; sl < g_fc_own_n && off < 200; ++sl) {
+                    const FcSlot& S = g_fc_own[sl];
+                    int32_t parent = -2;
+                    rd_fresh(S.n + (uint64_t)S.i * sizeof(int32_t), parent);
+                    Matrix34 pm{};
+                    const bool have_p = (parent >= 0) &&
+                        rd_fresh(S.m + (uint64_t)parent * sizeof(Matrix34), pm);
+                    const bool zero_p = !have_p ||
+                        (pm.translation.x == 0.f && pm.translation.y == 0.f && pm.translation.z == 0.f &&
+                         pm.rotation.x == 0.f && pm.rotation.y == 0.f && pm.rotation.z == 0.f &&
+                         pm.scale.x == 0.f && pm.scale.y == 0.f && pm.scale.z == 0.f);
+                    off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+                                    " [набор %d: 0x%llx/0x%llx индекс %d родитель %d%s]",
+                                    sl, (unsigned long long)S.m, (unsigned long long)S.n,
+                                    (int)S.i, (int)parent,
+                                    parent < 0 ? " (корень)" : (zero_p ? " НУЛЕВОЙ" : ""));
+                }
+                LogLine("фрикам: наборы — всего %d%s", (int)g_fc_own_n, buf);
+                const unsigned sf = g_fc_samp.exchange(0), hf = g_fc_hit.exchange(0),
+                               zf = g_fc_zero.exchange(0), of = g_fc_other.exchange(0);
+                LogLine("фрикам: за период отсчётов %u — у цели %u, в нуле %u, другое %u",
+                        sf, hf, zf, of);
+            }
+            if (ow)
+                LogLine("фрикам: затёрто игрой %u раз за период, расхождение до %.1f м, в памяти оказалось (%.1f, %.1f, %.1f), снимок был (%.1f, %.1f, %.1f)",
+                        ow, (double)(owm / (float)ow),
+                        (double)owx, (double)owy, (double)owz,
+                        (double)osx, (double)osy, (double)osz);
+            if (g_fc_diag_ok) {
+                const Vec3& L = g_fc_diag_local;
+                const Vec3& C = g_fc_diag_cur;
+                const Vec3& S = g_fc_diag_step;
+                const Vec3& P = g_fc_diag_parent_pos;
+                const Vec4& Q = g_fc_diag_parent_rot;
+                const Vec3& Z = g_fc_diag_parent_scale;
+                LogLine("фрикам: разбор — индекс %d, родитель %d,%s, лок (%.2f, %.2f, %.2f), посчитано (%.1f, %.1f, %.1f), шаг (%.2f, %.2f, %.2f)",
+                        (int)g_freecam_index, (int)g_fc_diag_parent,
+                        g_fc_diag_absolute ? " запись целиком" : " шаг",
+                        (double)L.x, (double)L.y, (double)L.z,
+                        (double)C.x, (double)C.y, (double)C.z,
+                        (double)S.x, (double)S.y, (double)S.z);
+                LogLine("фрикам: родитель — поза (%.1f, %.1f, %.1f), поворот (%.3f, %.3f, %.3f, %.3f), масштаб (%.3f, %.3f, %.3f), разница с камерой %.2f м",
+                        (double)P.x, (double)P.y, (double)P.z,
+                        (double)Q.x, (double)Q.y, (double)Q.z, (double)Q.w,
+                        (double)Z.x, (double)Z.y, (double)Z.z,
+                        (double)sqrtf((C.x - g_cam_pos.x) * (C.x - g_cam_pos.x) +
+                                      (C.y - g_cam_pos.y) * (C.y - g_cam_pos.y) +
+                                      (C.z - g_cam_pos.z) * (C.z - g_cam_pos.z)));
+            }
+        }
+    }
+    freecam_write();
+}
+
+==============================================================================
+5. Вызов тика в кадровом цикле — jni/src/game.cpp (строки 7184–7189)
+==============================================================================
+
+    freecam_tick();
+
+
+==============================================================================
+6. Общие хелперы камеры, которые использует фрикам — jni/src/game.cpp
+==============================================================================
+
+static bool current_camera_position(Vec3& out) {
+    if (g_native_camera) {
+        const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
+        Vec3 v{};
+        if (camera_position_from_view(view, v) && vec3_is_finite(v)) { out = v; return true; }
+    }
+    if (g_frame_cam_basis_valid && vec3_is_finite(g_frame_cam_pos)) { out = g_frame_cam_pos; return true; }
+    if (g_cam_pose_valid && vec3_is_finite(g_cam_pos)) { out = g_cam_pos; return true; }
+    return false;
+}
+
+static Mat4 mat_mul(const Mat4& a, const Mat4& b) {
+    Mat4 result{};
+    for (int column = 0; column < 4; ++column)
+        for (int row = 0; row < 4; ++row) {
+            float value = 0.0F;
+            for (int k = 0; k < 4; ++k) value += mat_get(a, row, k) * mat_get(b, k, column);
+            mat_set(result, row, column, value);
+        }
+    return result;
+}
+
+static Mat4 mat_perspective(float fov_degrees, float aspect, float z_near, float z_far) {
+
+static bool camera_basis_from_view(const Mat4& view, Vec3& right, Vec3& up, Vec3& forward) {
+    right   = {mat_get(view, 0, 0), mat_get(view, 0, 1), mat_get(view, 0, 2)};
+    up      = {mat_get(view, 1, 0), mat_get(view, 1, 1), mat_get(view, 1, 2)};
+    forward = {-mat_get(view, 2, 0), -mat_get(view, 2, 1), -mat_get(view, 2, 2)};
+    if (!vec3_is_finite(right) || !vec3_is_finite(up) || !vec3_is_finite(forward)) return false;
+    const float rl = sqrtf(right.x * right.x + right.y * right.y + right.z * right.z);
+    const float ul = sqrtf(up.x * up.x + up.y * up.y + up.z * up.z);
+    const float fl = sqrtf(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+    if (!(rl > 1e-4F && ul > 1e-4F && fl > 1e-4F)) return false;
+    right = {right.x / rl, right.y / rl, right.z / rl};
+    up = {up.x / ul, up.y / ul, up.z / ul};
+    forward = {forward.x / fl, forward.y / fl, forward.z / fl};
+    return true;
+}
+
+static bool camera_position_from_view(const Mat4& view, Vec3& position) {
+    float r00 = mat_get(view, 0, 0), r01 = mat_get(view, 0, 1), r02 = mat_get(view, 0, 2);
+    float r10 = mat_get(view, 1, 0), r11 = mat_get(view, 1, 1), r12 = mat_get(view, 1, 2);
+    float r20 = mat_get(view, 2, 0), r21 = mat_get(view, 2, 1), r22 = mat_get(view, 2, 2);
+    float tx = mat_get(view, 0, 3), ty = mat_get(view, 1, 3), tz = mat_get(view, 2, 3);
+    position = {
+        -(r00 * tx + r10 * ty + r20 * tz),
+        -(r01 * tx + r11 * ty + r21 * tz),
+        -(r02 * tx + r12 * ty + r22 * tz)
+    };
+    return vec3_is_finite(position);
+
+==============================================================================
+7. Меню: секция «Фрикам» — jni/src/menu.cpp (строки 1015–1045)
+==============================================================================
+
+        SHdr(XS("Фрикам"));
+        CardBg(Layout::RowH * 4.f + Layout::SliderH);
+        ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
+        ToggleRow("##fc2", XS("Кнопка на экране"), &g_state.freecam_btn_show, g_state.a_freecam_btn_show);
+        SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
+                  1.f, 60.f, XS("%.0f м/с"), false, false, g_state.sl_freecam, dt);
+        {
+            const float rowH = Layout::RowH, inset = Layout::Inset;
+            const float avW = ImGui::GetContentRegionAvail().x;
+            auto pos = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
+            if (ImGui::Button(XS("Настроить джойстик"), {avW - inset*2.f, rowH - 8.f})) {
+                g_calibMode = 4;
+                menu_open = false;
+            }
+        }
+        {
+            const float rowH = Layout::RowH, inset = Layout::Inset;
+            const float avW = ImGui::GetContentRegionAvail().x;
+            auto pos = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
+            if (ImGui::Button(XS("Настроить кнопку"), {avW - inset*2.f, rowH - 8.f})) {
+                g_calibMode = 6;
+                menu_open = false;
+            }
+        }
+
+==============================================================================
+8. Управление: джойстик, обзор, высота — jni/src/menu.cpp (строки 1240–1596)
+==============================================================================
+
+static float  s_fc_retry = 0.f;
+static bool   s_fc_toasted = false;
+
+static int   s_fc_joy_id = -1;
+static int   s_fc_look_id = -1;
+static float s_fc_look_x = 0.f, s_fc_look_y = 0.f;
+static int   s_fc_up_id = -1, s_fc_down_id = -1;
+static int   s_fc_prev_ids[12];
+static int   s_fc_prev_n = 0;
+static int   s_fc_joy_miss = 0, s_fc_look_miss = 0;
+static int   s_fc_up_miss = 0, s_fc_down_miss = 0;
+static const int kFcGrace = 3;
+static float s_fc_joy_gx = 0.f, s_fc_joy_gy = 0.f;
+
+static int    s_fc_in_frames = 0;
+static float  s_fc_in_maxdt = 0.f;
+static int    s_fc_in_joyfree = 0, s_fc_in_lookfree = 0;
+static int    s_fc_in_grace = 0, s_fc_in_lookdrop = 0;
+static double s_fc_in_last = -1e9;
+
+static void Freecam_ResetGrabs() {
+    s_fc_joy_id = s_fc_look_id = s_fc_up_id = s_fc_down_id = -1;
+    s_fc_joy_miss = s_fc_look_miss = s_fc_up_miss = s_fc_down_miss = 0;
+    s_fc_prev_n = 0;
+}
+
+void UpdateFreecam(float dt) {
+    if (g_state.freecam_on != esp_freecam_active()) {
+        s_fc_retry -= dt;
+        if (s_fc_retry <= 0.f) {
+            s_fc_retry = 0.5f;
+            if (esp_freecam_set(g_state.freecam_on)) {
+                s_fc_toasted = false;
+                if (g_state.freecam_on) ShowToast(XS("Фрикам включён"));
+            } else if (g_state.freecam_on && !s_fc_toasted) {
+                s_fc_toasted = true;
+                ShowToast(XS("Фрикам: камера не найдена"));
+            }
+        }
+    } else {
+        s_fc_retry = 0.f;
+        s_fc_toasted = false;
+    }
+    float vw = 0.f, vh = 0.f;
+    VisibleScreen(vw, vh);
+    if (vw < 100.f || vh < 100.f) return;
+
+    {
+        static double s_last = -1e9;
+        double now = ImGui::GetTime();
+        if (now - s_last >= 5.0) {
+            s_last = now;
+            LogLine("фрикам: UI — активен=%d вкл=%d экран=%.0fx%.0f joy=%d look=%d up=%d down=%d",
+                    (int)esp_freecam_active(), (int)g_state.freecam_on,
+                    (double)vw, (double)vh, s_fc_joy_id, s_fc_look_id, s_fc_up_id, s_fc_down_id);
+        }
+    }
+    if (esp_freecam_active()) {
+        ++s_fc_in_frames;
+        if (dt > s_fc_in_maxdt) s_fc_in_maxdt = dt;
+        const double nowIn = ImGui::GetTime();
+        if (nowIn - s_fc_in_last >= 1.0) {
+            s_fc_in_last = nowIn;
+            LogLine("фрикам: ввод — кадров %d, макс dt %.0f мс, сброс джоя/обзора %d/%d, грейс %d, отброс обзора %d",
+                    s_fc_in_frames, (double)(s_fc_in_maxdt * 1000.f),
+                    s_fc_in_joyfree, s_fc_in_lookfree, s_fc_in_grace, s_fc_in_lookdrop);
+            s_fc_in_frames = 0; s_fc_in_maxdt = 0.f;
+            s_fc_in_joyfree = s_fc_in_lookfree = s_fc_in_grace = s_fc_in_lookdrop = 0;
+        }
+    }
+
+    if (!esp_freecam_active()) {
+        if (g_state.freecam_on) Touch_BlockRect(true, 0.f, vh * 0.5f, vw * 0.45f, vh);
+        else                    Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
+        Freecam_ResetGrabs();
+        return;
+    }
+
+    const float S = ImClamp(ImMin(vw, vh) / 1080.f, 0.6f, 2.5f);
+    const float R = 130.f * S;
+    float cx, cy;
+    if (g_state.freecam_joy_x >= 0.f && g_state.freecam_joy_y >= 0.f) {
+        cx = g_state.freecam_joy_x * vw;
+        cy = g_state.freecam_joy_y * vh;
+    } else {
+        cx = 30.f * S + R;
+        cy = 100.f * S + R;
+    }
+    cx = ImClamp(cx, R + 16.f * S, vw - R - 16.f * S);
+    cy = ImClamp(cy, R + 100.f * S, vh - R - 16.f * S);
+
+    const float kBtnR  = 62.f * S;
+    const float kBtnX  = vw - kBtnR - 30.f * S;
+    const float kUpY   = vh * 0.5f - kBtnR - 26.f * S;
+    const float kDownY = vh * 0.5f + kBtnR + 26.f * S;
+
+    Touch_BlockRect(true, 0.f, 90.f, vw, vh);
+
+    float f_x[12], f_y[12];
+    int   f_id[12];
+    int nf = Touch_GetActive(f_x, f_y, f_id, 12);
+    if (nf <= 0 && ImGui::GetIO().MouseDown[0]) {
+        f_x[0] = ImGui::GetIO().MousePos.x;
+        f_y[0] = ImGui::GetIO().MousePos.y;
+        f_id[0] = -1000000;
+        nf = 1;
+    }
+    auto findTouch = [&](int id, float& ox, float& oy) -> bool {
+        for (int i = 0; i < nf; ++i)
+            if (f_id[i] == id) { ox = f_x[i]; oy = f_y[i]; return true; }
+        return false;
+    };
+    auto isFreshTouch = [&](int id) -> bool {
+        for (int i = 0; i < s_fc_prev_n; ++i)
+            if (s_fc_prev_ids[i] == id) return false;
+        return true;
+    };
+    const bool canGrab = !menu_open;
+
+    float ax = 0.f, ay = 0.f;
+    float knobDx = 0.f, knobDy = 0.f;
+    bool  joyHeld = false;
+
+    auto stickVec = [&](float px, float py) {
+        const float dx = px - cx, dy = py - cy;
+        const float len = sqrtf(dx * dx + dy * dy);
+        const float dead = 12.f * S;
+        if (len > dead) {
+            float mag = (len - dead) / (R - dead);
+            if (mag > 1.f) mag = 1.f;
+            mag = mag * (0.35f + 0.65f * mag);
+            ax = (dx / len) * mag;
+            ay = -(dy / len) * mag;
+        } else {
+            ax = ay = 0.f;
+        }
+        const float cl = (len > R) ? R / len : 1.f;
+        knobDx = dx * cl;
+        knobDy = dy * cl;
+    };
+    if (s_fc_joy_id != -1) {
+        float px, py;
+        if (findTouch(s_fc_joy_id, px, py)) {
+            if (s_fc_joy_miss > 0) { s_fc_joy_miss = 0; ++s_fc_in_grace; }
+            joyHeld = true;
+            s_fc_joy_gx = px; s_fc_joy_gy = py;
+            stickVec(px, py);
+        } else if (++s_fc_joy_miss <= kFcGrace) {
+            joyHeld = true;
+            stickVec(s_fc_joy_gx, s_fc_joy_gy);
+        } else {
+            s_fc_joy_id = -1; s_fc_joy_miss = 0;
+            ++s_fc_in_joyfree;
+        }
+    }
+    if (s_fc_joy_id == -1 && canGrab && nf > 0) {
+        const float grab = R + 70.f * S;
+        for (int i = 0; i < nf; ++i) {
+            if (f_id[i] == s_fc_look_id || f_id[i] == s_fc_up_id || f_id[i] == s_fc_down_id) continue;
+            if (!isFreshTouch(f_id[i]) || f_y[i] < 90.f) continue;
+            const float dx = f_x[i] - cx, dy = f_y[i] - cy;
+            if (dx * dx + dy * dy <= grab * grab) {
+                s_fc_joy_id = f_id[i];
+                s_fc_joy_miss = 0;
+                s_fc_joy_gx = f_x[i]; s_fc_joy_gy = f_y[i];
+                joyHeld = true;
+                stickVec(f_x[i], f_y[i]);
+                break;
+            }
+        }
+    }
+
+    bool upHeld = false, downHeld = false;
+    auto holdButton = [&](int& slot, int& miss, float bx, float by, bool& held) {
+        if (slot == -1) return;
+        float px, py;
+        if (!findTouch(slot, px, py)) {
+            if (++miss <= kFcGrace) { held = true; return; }
+            slot = -1; miss = 0; return;
+        }
+        if (miss > 0) { miss = 0; ++s_fc_in_grace; }
+        const float dx = px - bx, dy = py - by;
+        const float keep = kBtnR + 60.f * S;
+        if (dx * dx + dy * dy <= keep * keep) held = true;
+        else { slot = -1; miss = 0; }
+    };
+    holdButton(s_fc_up_id, s_fc_up_miss, kBtnX, kUpY, upHeld);
+    holdButton(s_fc_down_id, s_fc_down_miss, kBtnX, kDownY, downHeld);
+    if (canGrab && nf > 0 && (s_fc_up_id == -1 || s_fc_down_id == -1)) {
+        const float grab = kBtnR + 20.f * S;
+        for (int i = 0; i < nf; ++i) {
+            if (f_id[i] == s_fc_joy_id || f_id[i] == s_fc_look_id) continue;
+            if (!isFreshTouch(f_id[i]) || f_y[i] < 90.f) continue;
+            const float dx = f_x[i] - kBtnX;
+            const float du = f_y[i] - kUpY, dd = f_y[i] - kDownY;
+            if (s_fc_up_id == -1 && dx * dx + du * du <= grab * grab) {
+                s_fc_up_id = f_id[i]; s_fc_up_miss = 0; upHeld = true; continue;
+            }
+            if (s_fc_down_id == -1 && dx * dx + dd * dd <= grab * grab) {
+                s_fc_down_id = f_id[i]; s_fc_down_miss = 0; downHeld = true; continue;
+            }
+        }
+    }
+    const float hAxis = (upHeld ? 1.f : 0.f) - (downHeld ? 1.f : 0.f);
+
+    float yaw_delta = 0.f, pitch_delta = 0.f;
+    bool lookHeld = false;
+    float lookPx = 0.f, lookPy = 0.f;
+    if (s_fc_look_id != -1) {
+        float px, py;
+        if (findTouch(s_fc_look_id, px, py)) {
+            if (s_fc_look_miss > 0) { s_fc_look_miss = 0; ++s_fc_in_grace; }
+            lookHeld = true; lookPx = px; lookPy = py;
+            const float dx = px - s_fc_look_x, dy = py - s_fc_look_y;
+            const float jump = fminf(fmaxf(250.f * S, 4000.f * S * dt), 600.f * S);
+            if (fabsf(dx) < jump && fabsf(dy) < jump) {
+                const float sens = 0.22f / S;
+                yaw_delta = dx * sens;
+                pitch_delta = -dy * sens;
+            } else {
+                ++s_fc_in_lookdrop;
+            }
+            s_fc_look_x = px; s_fc_look_y = py;
+        } else if (++s_fc_look_miss <= kFcGrace) {
+            lookHeld = true; lookPx = s_fc_look_x; lookPy = s_fc_look_y;
+        } else {
+            s_fc_look_id = -1; s_fc_look_miss = 0;
+            ++s_fc_in_lookfree;
+        }
+    }
+    if (s_fc_look_id == -1 && canGrab && nf > 0) {
+        const float keepOut = R + 40.f * S;
+        const float btnOut = kBtnR + 20.f * S;
+        for (int i = 0; i < nf; ++i) {
+            if (f_id[i] == s_fc_joy_id || f_id[i] == s_fc_up_id || f_id[i] == s_fc_down_id) continue;
+            if (!isFreshTouch(f_id[i]) || f_y[i] < 90.f) continue;
+            if (f_x[i] < vw * 0.45f) continue;
+            const float jx = f_x[i] - cx, jy = f_y[i] - cy;
+            if (jx * jx + jy * jy <= keepOut * keepOut) continue;
+            const float bx = f_x[i] - kBtnX;
+            const float bu = f_y[i] - kUpY, bd = f_y[i] - kDownY;
+            if (bx * bx + bu * bu <= btnOut * btnOut) continue;
+            if (bx * bx + bd * bd <= btnOut * btnOut) continue;
+            s_fc_look_id = f_id[i];
+            s_fc_look_miss = 0;
+            s_fc_look_x = f_x[i]; s_fc_look_y = f_y[i];
+            lookHeld = true; lookPx = f_x[i]; lookPy = f_y[i];
+            break;
+        }
+    }
+
+    s_fc_prev_n = (nf > 12) ? 12 : nf;
+    for (int i = 0; i < s_fc_prev_n; ++i) s_fc_prev_ids[i] = f_id[i];
+
+    if (dt > 0.25f) dt = 0.25f;
+    float speed = g_state.freecam_speed;
+    if (!(speed >= 1.f)) speed = 1.f;
+    if (speed > 60.f) speed = 60.f;
+    const float step = speed * dt;
+    if (ax != 0.f || ay != 0.f || hAxis != 0.f)
+        esp_freecam_move(ay * step, ax * step, hAxis * step);
+    if (yaw_delta != 0.f || pitch_delta != 0.f)
+        esp_freecam_look(yaw_delta, pitch_delta);
+
+    auto* fg = ImGui::GetForegroundDrawList();
+    {
+        fg->AddCircleFilled({cx, cy}, R, IM_COL32(20,20,20,200), 64);
+        fg->AddCircle({cx, cy}, R,
+                      joyHeld ? IM_COL32(0,200,255,180) : IM_COL32(255,255,255,120),
+                      64, 3.f);
+        fg->AddLine({cx - R*0.15f, cy}, {cx + R*0.15f, cy}, IM_COL32(255,255,255,60), 1.f);
+        fg->AddLine({cx, cy - R*0.15f}, {cx, cy + R*0.15f}, IM_COL32(255,255,255,60), 1.f);
+        fg->AddCircleFilled({cx + knobDx, cy + knobDy}, R * 0.42f,
+                            joyHeld ? IM_COL32(0,200,255,255) : IM_COL32(0,180,255,200), 48);
+    }
+    auto drawHeightBtn = [&](float bx, float by, bool held, bool isUp) {
+        fg->AddCircleFilled({bx, by}, kBtnR,
+                            held ? IM_COL32(0,180,255,230) : IM_COL32(20,20,20,200), 40);
+        fg->AddCircle({bx, by}, kBtnR,
+                      held ? IM_COL32(255,255,255,220) : IM_COL32(255,255,255,80),
+                      40, 2.5f);
+        const float s = 22.f * S;
+        ImVec2 p1, p2, p3;
+        if (isUp) { p1 = {bx, by - s}; p2 = {bx - s * 0.9f, by + s * 0.6f}; p3 = {bx + s * 0.9f, by + s * 0.6f}; }
+        else      { p1 = {bx, by + s}; p2 = {bx - s * 0.9f, by - s * 0.6f}; p3 = {bx + s * 0.9f, by - s * 0.6f}; }
+        fg->AddTriangleFilled(p1, p2, p3, IM_COL32(255,255,255,230));
+    };
+    drawHeightBtn(kBtnX, kUpY, upHeld, true);
+    drawHeightBtn(kBtnX, kDownY, downHeld, false);
+    if (lookHeld) {
+        fg->AddCircle({lookPx, lookPy}, 34.f * S, IM_COL32(0,200,255,160), 32, 2.5f);
+        fg->AddCircleFilled({lookPx, lookPy}, 6.f * S, IM_COL32(0,200,255,160), 20);
+    }
+
+==============================================================================
+9. Экранная кнопка-глаз — jni/src/hud.cpp (строки 264–309)
+==============================================================================
+
+    if (g_state.freecam_btn_show)
+    {
+        const float side = kFcBtnSide, rad = kFcBtnRadius;
+        float cx = (g_state.freecam_btn_x >= 0.f ? g_state.freecam_btn_x : kFcBtnDefX) * scrW;
+        float cy = (g_state.freecam_btn_y >= 0.f ? g_state.freecam_btn_y : kFcBtnDefY) * scrH;
+        float qX = cx - side * 0.5f, qY = cy - side * 0.5f;
+        if (scrW > side + 16.f) qX = ImClamp(qX, 8.f, scrW - side - 8.f);
+        if (scrH > side + 16.f) qY = ImClamp(qY, 8.f, scrH - side - 8.f);
+
+        const bool on = g_state.freecam_on;
+        if (!menu_open && g_calibMode == 0 && io.MouseClicked[0] &&
+            io.MousePos.x >= qX && io.MousePos.x <= qX + side &&
+            io.MousePos.y >= qY && io.MousePos.y <= qY + side) {
+            g_state.freecam_on = !g_state.freecam_on;
+            PlaySound(SND_CLICK);
+        }
+
+        fg->AddRectFilled({qX, qY}, {qX + side, qY + side}, C::UA(C::Card(), 0.90f), rad);
+        fg->AddRect({qX, qY}, {qX + side, qY + side},
+                    on ? C::UA(C::Acc(), 0.95f) : C::UA(C::Dim(), 0.8f), rad, 0, on ? 3.f : 1.5f);
+
+        const float ex = qX + side * 0.5f, ey = qY + side * 0.5f;
+        const float aw = side * 0.30f, ah = side * 0.17f;
+        fg->PathLineTo({ex - aw, ey});
+        fg->PathBezierQuadraticCurveTo({ex, ey - ah * 2.f}, {ex + aw, ey});
+        fg->PathBezierQuadraticCurveTo({ex, ey + ah * 1.6f}, {ex - aw, ey});
+        fg->PathFillConvex(C::UA(C::Txt(), on ? 1.f : 0.55f));
+        fg->PathLineTo({ex - aw, ey});
+        fg->PathBezierQuadraticCurveTo({ex, ey - ah * 2.f}, {ex + aw, ey});
+        fg->PathBezierQuadraticCurveTo({ex, ey + ah * 1.6f}, {ex - aw, ey});
+        fg->PathStroke(C::UA(C::Dim(), 0.9f), ImDrawFlags_Closed, 2.f);
+        const float pr = ah * 0.95f;
+        fg->AddCircleFilled({ex, ey}, pr, IM_COL32(20, 20, 26, 255), 24);
+        fg->AddCircleFilled({ex - pr * 0.3f, ey - pr * 0.3f}, pr * 0.28f,
+                            IM_COL32(235, 235, 240, 255), 12);
+    }
+}
+
+
+==============================================================================
+10. Аим молчит во фрикаме — jni/src/aim.cpp (строки 215–242)
+==============================================================================
+
+    bool active = g_state.aim_touch && g_esp_attached && !menuOpen &&
+                  g_calibMode == 0 && !g_buildPrompt && !g_state.freecam_on;
+
+    if (g_state.aim_scope_only && g_esp_attached) {
+        s_adsState = esp_local_player_is_aiming() ? 1 : 0;
+        s_adsSource = esp_local_aim_source();
+        if (active && !s_adsState) active = false;
+    } else {
+        s_adsState = -1; s_adsSource = 0;
+    }
+    if (!active) {
+        if (why) {
+            if (!g_state.aim_touch)                  *why = 1;
+            else if (!g_esp_attached)                *why = 2;
+            else if (menuOpen)                       *why = 3;
+            else if (g_calibMode != 0)               *why = 4;
+            else if (g_buildPrompt)                  *why = 5;
+            else if (g_state.freecam_on)             *why = 6;
+            else                                     *why = 7;
+        }
+
+==============================================================================
+11. Жизненный цикл — jni/src/main.cpp (строки 124–127 и 182–186)
+==============================================================================
+
+        slowMark();
+        LogStage(kStageFreecam);
+        UpdateFreecam(ImGui::GetIO().DeltaTime);
+        slowMark();
+    ...
+    while (!g_frame_done.load()) {}
+    esp_freecam_set(false);
+    stop_attach_thread();
+
+==============================================================================
+12. Сохранение/загрузка раскладки и флага кнопки — jni/src/config.cpp
+==============================================================================
+
+void RememberLayout() {
+    mkdir(kCfgDir, 0777);
+    std::ofstream f(CfgLayoutPath(), std::ios::trunc);
+    if (!f) return;
+    char b[256];
+    snprintf(b, sizeof(b), "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f",
+             g_state.farm_joy_x, g_state.farm_joy_y,
+             g_state.farm_fire_x, g_state.farm_fire_y,
+             g_state.freecam_joy_x, g_state.freecam_joy_y,
+             g_state.hud_cnt_x, g_state.hud_cnt_y,
+             g_state.freecam_btn_x, g_state.freecam_btn_y,
+             g_state.aim_tx, g_state.aim_ty);
+    f << b;
+}
+
+void RestoreLayout() {
+    std::ifstream f(CfgLayoutPath());
+    if (!f) return;
+    float v[12];
+    for (int i = 0; i < 12; i++)
+        if (!(f >> v[i])) return;
+    auto cl = [](float x) { return (x > 0.f && x < 1.f) ? x : -1.f; };
+    g_state.farm_joy_x = cl(v[0]);  g_state.farm_joy_y = cl(v[1]);
+    g_state.farm_fire_x = cl(v[2]); g_state.farm_fire_y = cl(v[3]);
+    g_state.freecam_joy_x = cl(v[4]); g_state.freecam_joy_y = cl(v[5]);
+    g_state.hud_cnt_x = cl(v[6]);   g_state.hud_cnt_y = cl(v[7]);
+    g_state.freecam_btn_x = cl(v[8]); g_state.freecam_btn_y = cl(v[9]);
+    g_state.aim_tx = cl(v[10]);     g_state.aim_ty = cl(v[11]);
+}
+
+    {
+        const int flags = (g_state.esp_loot ? 1 : 0) | (g_state.esp_pickup ? 2 : 0) |
+                          (g_state.esp_bots ? 4 : 0) | (g_state.esp_vehicles ? 8 : 0) |
+                          (g_state.freecam_btn_show ? 0 : 16) | (g_state.esp_scrap ? 32 : 0);
+        auto ch = [](float v) { int i = (int)(v * 255.f + 0.5f); return i < 0 ? 0 : (i > 255 ? 255 : i); };
+
+    {
+        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 64.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
+        g_state.esp_loot   = (flags & 1) != 0;
+        g_state.esp_pickup = (flags & 2) != 0;
+        g_state.esp_bots     = (flags & 4) != 0;
+        g_state.esp_vehicles = (flags & 8) != 0;
+        g_state.freecam_btn_show = (flags & 16) == 0;
+
