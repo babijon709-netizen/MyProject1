@@ -9,7 +9,6 @@
 #include "menu.h"                // g_calibMode (калибровка зон)
 #include "Blur/Blur.h"
 #include "lang.h"
-#include "ascii.h"               // рамки/чекбоксы/полосы терминала
 #include <cfloat>
 #include <cmath>
 
@@ -170,13 +169,25 @@ void PopoverClose() {
 }
 
 void DrawToggle(ImDrawList* dl, float ax, float cy, float t) {
-    // Терминальный чекбокс «[x]»/«[ ]» вместо пилюли-переключателя.
-    // ax..ax+72 — прежняя зона тумблера, чекбокс рисуется по её центру.
-    const float fs = ImMin(ImGui::GetFontSize() * 1.15f, 26.f);
-    const ImVec2 cell = ascii::Cell(fs);
-    const float w = cell.x * 3.f;
-    ascii::Check(dl, {ax + (72.f - w) * 0.5f, cy - cell.y * 0.5f}, t,
-                 C::U(C::Acc()), C::U(C::Dim()), fs);
+    const float tW = 72.f, tH = 42.f, tR = tH * 0.5f, kR = tR - 3.5f;
+    float tx = ax, ty = cy - tH * 0.5f;
+    // Выключен — нейтральная дорожка с волосяной кромкой; включён —
+    // вертикальный градиент акцента (сверху светлее).
+    if (t < 0.02f) {
+        dl->AddRectFilled({tx, ty}, {tx + tW, ty + tH}, C::U(C::TrkOff()), tR);
+        dl->AddRect({tx, ty}, {tx + tW, ty + tH}, C::U(C::Hair()), tR, 0, 1.f);
+    } else {
+        dl->AddRectFilled({tx, ty}, {tx + tW, ty + tH}, C::Mix(C::TrkOff(), C::Acc(), t), tR);
+        if (t > 0.98f) {
+            ImVec4 a = C::Acc(), b = C::AccDk();
+            dl->AddRectFilledMultiColor({tx, ty}, {tx + tW, ty + tH},
+                C::U(a), C::U(a), C::U(b), C::U(b));
+            dl->AddRect({tx, ty}, {tx + tW, ty + tH}, C::UA(C::Hair(), 0.5f), tR, 0, 1.f);
+        }
+    }
+    float kx = Lerpf(tx + tR + 2.f, tx + tW - tR - 2.f, t);
+    dl->AddCircleFilled({kx + 0.5f, cy + 1.5f}, kR + 1.f, IM_COL32(0, 0, 0, 35));
+    dl->AddCircleFilled({kx, cy}, kR, IM_COL32(255, 255, 255, 255));
 }
 
 static void RenderToggleRowVisuals(ImDrawList* dl, ImFont* fn, float fs,
@@ -186,26 +197,19 @@ static void RenderToggleRowVisuals(ImDrawList* dl, ImFont* fn, float fs,
     const float inset = Layout::Inset, padX = Layout::PadX;
     float cX = rowX + inset, cW = rowW - inset * 2.f;
     const float rowH = Layout::RowH;
-    // Чекбокс «[x]» — 3 знакоместа кегля 1.15: резервируем его ширину справа.
-    const float chkW = ascii::Cell(fs * 1.15f).x * 3.f;
     float textX    = cX + padX;
-    float textMaxX = cX + cW - chkW - padX - 12.f;
+    float textMaxX = cX + cW - 72.f - padX - 16.f;
     float textY    = rowY + (rowH - fs * 1.15f) * 0.5f;
 
     dl->PushClipRect({textX, rowY}, {textMaxX, rowY + rowH}, true);
     dl->AddText(fn, fs * 1.15f, {textX, textY}, C::UA(C::Txt(), alpha), lbl);
     dl->PopClipRect();
 
-    {
-        const ImVec2 cell = ascii::Cell(fs * 1.15f);
-        ascii::Check(dl, {cX + cW - chkW - padX, rowY + (rowH - cell.y) * 0.5f},
-                     EaseInOut(animT), C::UA(C::Acc(), alpha), C::UA(C::Dim(), alpha),
-                     fs * 1.15f);
-    }
+    DrawToggle(dl, cX + cW - 72.f - padX, rowY + rowH * 0.5f, EaseInOut(animT));
 
     if (!last && showSep)
         dl->AddLine({cX + padX, rowY + rowH - 0.5f},
-                    {cX + cW - padX, rowY + rowH - 0.5f}, C::UA(C::Sep(), alpha), 0.8f);
+                    {cX + cW - padX, rowY + rowH - 0.5f}, C::UA(C::Hair(), alpha), 1.f);
 }
 
 static void RenderSliderVisuals(ImDrawList* dl, ImFont* fn, float fs,
@@ -213,34 +217,47 @@ static void RenderSliderVisuals(ImDrawList* dl, ImFont* fn, float fs,
                                  const char* lbl, const char* fmt, float v, float animPos,
                                  bool active, float alpha, bool showSep, bool last) {
     const float inset = Layout::Inset, padX = Layout::PadX;
-    const float padH = 38.f;
+    const float tH = 11.f, kR = 22.f, padH = 38.f;
     float cX = rowX + inset, cW = rowW - inset * 2.f;
 
     char valBuf[24]; snprintf(valBuf, 24, fmt, v);
     auto vsz   = fn->CalcTextSizeA(fs, FLT_MAX, 0, valBuf);
     float textY = rowY + padH * 0.5f;
 
-    // Полоса — цепочка блоков «[████▌░░░░]»: ширина кратна знакоместу,
-    // поэтому она всегда заканчивается ровной скобкой.
-    const float barFS = fs * 1.15f;
-    const ImVec2 cell = ascii::Cell(fn, barFS);
-    float sX = cX + padX;
-    float sW = cW - padX * 2.f;
-    int   cells = ImMax(3, (int)(sW / cell.x) - 2);   // минус «[» и «]»
+    float sX = cX + padX + kR, sW = cW - padX * 2.f - kR * 2.f;
     float tY = rowY + rowH - padH;
+    float kx = sX + animPos * sW;
 
     dl->PushClipRect({cX + padX, rowY}, {cX + cW - vsz.x - padX * 2.f, rowY + rowH * 0.55f}, true);
     dl->AddText(fn, fs * 1.15f, {cX + padX, textY}, C::UA(C::Txt(), alpha), lbl);
     dl->PopClipRect();
-    dl->AddText(fn, fs * 1.15f, {cX + cW - vsz.x - padX, textY},
-                C::UA(C::Acc(), alpha), valBuf);
+    dl->AddText(fn, fs * 1.15f, {cX + cW - vsz.x - padX, textY}, C::UA(C::Acc(), alpha), valBuf);
 
-    ascii::Bar(dl, {sX, tY - cell.y * 0.5f}, animPos, cells,
-               C::UA(C::Acc(), alpha), C::UA(active ? C::Dim() : C::TrkOff(), alpha), barFS);
+    // Дорожка: нейтральная, поверх — заполнение акцентом (у самой ручки
+    // цвет чуть темнее — эффект «стекающей» подсветки без градиента по всей длине).
+    dl->AddRectFilled({sX, tY - tH * 0.5f}, {sX + sW, tY + tH * 0.5f}, C::UA(C::TrkOff(), alpha), tH * 0.5f);
+    dl->AddRectFilled({sX, tY - tH * 0.5f}, {kx,      tY + tH * 0.5f}, C::UA(C::Acc(),    alpha), tH * 0.5f);
+
+    const float knobR = 15.f;
+    dl->AddCircleFilled({kx + 0.5f, tY + 1.5f}, knobR + 1.f, IM_COL32(0, 0, 0, int(30 * alpha)));
+    dl->AddCircleFilled({kx, tY}, knobR, IM_COL32(255, 255, 255, int(255 * alpha)));
+    if (active) {
+        dl->AddCircle({kx, tY}, knobR + 5.f, C::UA(C::AccLight(), 0.55f * alpha), 48, 5.f);
+        dl->AddCircle({kx, tY}, knobR + 1.f, C::UA(C::Acc(), 0.9f * alpha), 48, 2.f);
+        // Бабл со значением над ручкой — не даёт пальцу закрыть цифру.
+        auto bsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, valBuf);
+        float bw = bsz.x + 26.f, bh = bsz.y + 14.f;
+        float bx = ImClamp(kx - bw * 0.5f, cX + padX, cX + cW - padX - bw);
+        float by = tY - tH * 0.5f - bh - 12.f;
+        dl->AddRectFilled({bx, by}, {bx + bw, by + bh}, C::UA(C::Card(), 0.97f * alpha), 10.f);
+        dl->AddRect({bx, by}, {bx + bw, by + bh}, C::UA(C::Hair(), alpha), 10.f, 0, 1.f);
+        dl->AddText(fn, fs * 1.05f, {bx + (bw - bsz.x) * 0.5f, by + (bh - bsz.y) * 0.5f},
+                    C::UA(C::Txt(), alpha), valBuf);
+    }
 
     if (!last && showSep)
         dl->AddLine({cX + padX, rowY + rowH - 0.5f},
-                    {cX + cW - padX, rowY + rowH - 0.5f}, C::UA(C::Sep(), alpha), 0.8f);
+                    {cX + cW - padX, rowY + rowH - 0.5f}, C::UA(C::Hair(), alpha), 1.f);
 }
 
 bool ToggleRow(const char* id, const char* lbl, bool* v, float& anim,
@@ -288,11 +305,9 @@ bool ToggleRow(const char* id, const char* lbl, bool* v, float& anim,
                            g_state.ui_show_sep, last);
     if (col) {
         ImVec4& c = *col;
-        dl->AddRectFilled({dotX - dotR * 0.8f, cy - dotR * 0.8f},
-                          {dotX + dotR * 0.8f, cy + dotR * 0.8f},
-                          IM_COL32((int)(c.x*255),(int)(c.y*255),(int)(c.z*255),255));
-        dl->AddRect({dotX - dotR * 0.8f, cy - dotR * 0.8f},
-                    {dotX + dotR * 0.8f, cy + dotR * 0.8f}, C::U(C::Sep()), 0, 0, 1.2f);
+        dl->AddCircleFilled({dotX, cy}, dotR, IM_COL32((int)(c.x*255),(int)(c.y*255),(int)(c.z*255),255), 32);
+        dl->AddCircle({dotX, cy}, dotR + 2.f, IM_COL32(0,0,0,80), 32, 2.f);
+        dl->AddCircle({dotX, cy}, dotR + 1.f, IM_COL32(255,255,255,180), 32, 1.2f);
     }
     return triggered;
 }
@@ -336,14 +351,11 @@ void ColorRow(const char* id, const char* lbl, ImVec4* col, bool last) {
     if (!io2.MouseDown[0] && s_crHold == id) s_crHold = nullptr;
     ImVec4& c = *col;
     dl->AddText(fn, fs * 1.15f, {cX + padX, cy - fs * 1.15f * 0.5f}, C::U(C::Txt()), lbl);
-    // Свотч — квадрат-плашшка, как образец цвета в палитрах терминала.
-    dl->AddRectFilled({dotX - dotR * 0.8f, cy - dotR * 0.8f},
-                      {dotX + dotR * 0.8f, cy + dotR * 0.8f},
-                      IM_COL32((int)(c.x*255),(int)(c.y*255),(int)(c.z*255),255));
-    dl->AddRect({dotX - dotR * 0.8f, cy - dotR * 0.8f},
-                {dotX + dotR * 0.8f, cy + dotR * 0.8f}, C::U(C::Sep()), 0, 0, 1.2f);
+    dl->AddCircleFilled({dotX, cy}, dotR, IM_COL32((int)(c.x*255),(int)(c.y*255),(int)(c.z*255),255), 32);
+    dl->AddCircle({dotX, cy}, dotR + 2.f, IM_COL32(0,0,0,80), 32, 2.f);
+    dl->AddCircle({dotX, cy}, dotR + 1.f, IM_COL32(255,255,255,180), 32, 1.2f);
     if (!last && g_state.ui_show_sep)
-        dl->AddLine({cX+padX, pos.y+rowH-0.5f},{cX+cW-padX, pos.y+rowH-0.5f}, C::UA(C::Sep(),0.35f), 0.8f);
+        dl->AddLine({cX+padX, pos.y+rowH-0.5f},{cX+cW-padX, pos.y+rowH-0.5f}, C::U(C::Hair()), 1.f);
 }
 
 static void TickSliderAnim(AppState::SliderAnim& anim, float target, bool act, float dt) {
@@ -365,7 +377,7 @@ bool SliderRow(const char* id, const char* lbl, float* v, float mn, float mx,
     auto* dl  = ImGui::GetWindowDrawList();
     auto& io  = ImGui::GetIO();
     float avW = ImGui::GetContentRegionAvail().x;
-    const float rowH = Layout::SliderH;
+    const float rowH = Layout::SliderH, kR = 22.f;
     const float inset = Layout::Inset, padX = Layout::PadX;
     auto pos = ImGui::GetCursorScreenPos();
 
@@ -378,15 +390,8 @@ bool SliderRow(const char* id, const char* lbl, float* v, float mn, float mx,
 
     bool act = itemActive && !scrollVertical && !axisUndecided;
 
-    // Полоса занимает [padX .. padX + n*знакомест] от края карточки — палец
-    // маппится ровно на неё (раньше были круговые ручки по 22 px с краёв).
-    if (act) {
-        const ImVec2 cell = ascii::Cell(ImGui::GetFontSize() * 1.15f);
-        const float  sX   = pos.x + inset + padX;
-        const int    n    = ImMax(3, (int)((avW - inset * 2.f - padX * 2.f) / cell.x) - 2);
-        const float  sW   = (float)(n + 2) * cell.x;
-        *v = mn + Clamp01((io.MousePos.x - sX) / sW) * (mx - mn);
-    }
+    if (act)
+        *v = mn + Clamp01((io.MousePos.x - (pos.x + inset + padX + kR)) / (avW - inset * 2.f - padX * 2.f - kR * 2.f)) * (mx - mn);
 
     float target = Clamp01((*v - mn) / (mx - mn));
 
@@ -406,10 +411,9 @@ void CardBg(float h, ImDrawFlags flags) {
     const float inset = Layout::Inset;
     ImVec2 bMin = {p0.x + inset, p0.y};
     ImVec2 bMax = {p0.x + w - inset, p0.y + h};
-    // Карточка терминала: заливка + одинарная рамка псевдографификой ┌─┐.
-    dl->AddRectFilled(bMin, bMax, C::U(C::Card()));
+    dl->AddRectFilled(bMin, bMax, C::U(C::Card()), R::Card, flags);
     if (g_state.ui_show_sep)
-        ascii::Frame(dl, bMin, bMax, C::U(C::Sep()), false);
+        dl->AddRect(bMin, bMax, C::U(C::Hair()), R::Card, flags, 1.f);
 }
 
 
@@ -421,11 +425,13 @@ void SHdr(const char* t, float top) {
         float  fs  = ImGui::GetFontSize() * 1.15f;
         auto   pos = ImGui::GetCursorScreenPos();
         auto   tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, t);
-        // Заголовок секции — линейка комментария в конфиге:
-        // «──[ Название ]──────────» до правого края контента.
-        const float x1 = pos.x + ImGui::GetContentRegionAvail().x;
-        ascii::HRule(dl, t, pos.x, x1, pos.y + tsz.y * 0.5f,
-                     C::U(C::Sep()), C::U(C::Dim()), fs, true);
+        // Градиентная капсула слева от заголовка секции: акцент наверху
+        // уходит в глубокий синий — связывает секции с активной вкладкой.
+        ImVec4 ga = C::Acc(), gb = C::Acc2();
+        dl->AddRectFilledMultiColor({pos.x + 18.f, pos.y + tsz.y * 0.12f},
+                                    {pos.x + 24.f, pos.y + tsz.y * 0.88f},
+                                    C::U(ga), C::U(ga), C::U(gb), C::U(gb));
+        dl->AddText(fn, fs, {pos.x + 34.f, pos.y}, C::U(C::Dim()), t);
         ImGui::Dummy({1.f, tsz.y});
     }
     ImGui::Dummy({1.f, 8.f});
@@ -438,10 +444,9 @@ bool CollapsibleHeader(const char* id, const char* lbl, int secId) {
     const float rowH = Layout::RowH, inset = Layout::Inset, padX = Layout::PadX;
     auto pos = ImGui::GetCursorScreenPos();
 
-    dl->AddRectFilled({pos.x + inset, pos.y}, {pos.x + avW - inset, pos.y + rowH}, C::U(C::Card()));
+    dl->AddRectFilled({pos.x + inset, pos.y}, {pos.x + avW - inset, pos.y + rowH}, C::U(C::Card()), R::Card);
     if (g_state.ui_show_sep)
-        ascii::Frame(dl, {pos.x + inset, pos.y}, {pos.x + avW - inset, pos.y + rowH},
-                     C::U(C::Sep()), false);
+        dl->AddRect({pos.x + inset, pos.y}, {pos.x + avW - inset, pos.y + rowH}, C::U(C::Hair()), R::Card, 0, 1.f);
 
     ImGui::InvisibleButton(id, {avW, rowH});
     bool clicked = WasTappedHere() && !IsScrollDragging() && !g_input.touchConsumed;
@@ -450,15 +455,15 @@ bool CollapsibleHeader(const char* id, const char* lbl, int secId) {
     float textY = pos.y + (rowH - fs) * 0.5f;
     dl->AddText(ImGui::GetFont(), fs, {pos.x + inset + padX, textY}, C::U(C::Txt()), lbl);
 
-    // Разворачивающая кнопка — «[+]» справа (директория в mc: жмёшь —
-    // открывается список).
-    {
-        const ImVec2 cell = ascii::Cell(fs);
-        const float bW = cell.x * 3.f;
-        dl->AddText(ImGui::GetFont(), fs,
-                    {pos.x + avW - inset - bW - padX * 0.5f, pos.y + (rowH - cell.y) * 0.5f},
-                    C::U(C::Acc()), "[+]");
-    }
+    const float cBtnR = 22.f;
+    float cx2 = pos.x + avW - inset - cBtnR - padX * 0.5f, cy2 = pos.y + rowH * 0.5f;
+    dl->AddCircleFilled({cx2 + 0.5f, cy2 + 1.5f}, cBtnR + 1.f, IM_COL32(0, 0, 0, 28), 48);
+    dl->AddCircleFilled({cx2, cy2}, cBtnR, C::U(C::Acc()), 48);
+    dl->AddCircle({cx2, cy2}, cBtnR + 3.f, C::UA(C::Acc(), 0.30f), 48, 2.f);
+
+    float chs = 10.f, thk = 3.f;
+    dl->AddLine({cx2 - chs * 0.45f, cy2 - chs * 0.8f}, {cx2 + chs * 0.55f, cy2}, IM_COL32(255, 255, 255, 250), thk);
+    dl->AddLine({cx2 + chs * 0.55f, cy2}, {cx2 - chs * 0.45f, cy2 + chs * 0.8f}, IM_COL32(255, 255, 255, 250), thk);
 
     if (clicked && !(g_pop.visible && !g_pop.closing)) {
         PopoverOpen(lbl, secId);
@@ -475,11 +480,12 @@ static void DrawExitButtons(ImDrawList* fg, ImFont* fn, float fs, float alpha,
                              const ImVec2& mousePos, const ImVec2& clickedPos,
                              bool mouseReleased,
                              bool isSheet) {
-    // Кнопки как в dialog-окнах ncurses: «Отмена» — контурная рамка,
-    // «Выйти» — инверсная красная плашка.
-    fg->AddRectFilled({b1X, bY}, {b1X + bW, bY + btnH}, C::UA(C::Card(), alpha));
-    ascii::Frame(fg, {b1X, bY}, {b1X + bW, bY + btnH}, C::UA(C::Txt(), 0.5f * alpha), false, fs);
-    fg->AddRectFilled({b2X, bY}, {b2X + bW, bY + btnH}, C::UA(C::Red(), alpha));
+    fg->AddRectFilled({b1X, bY}, {b1X + bW, bY + btnH}, C::UA(C::Txt(), 0.08f * alpha), R::Btn);
+    fg->AddRectFilled({b2X, bY}, {b2X + bW, bY + btnH}, C::UA(C::Red(), alpha), R::Btn);
+    if (g_state.ui_show_sep) {
+        fg->AddRect({b1X, bY}, {b1X + bW, bY + btnH}, C::UA(C::Txt(), 0.22f * alpha), R::Btn, 0, 1.2f);
+        fg->AddRect({b2X, bY}, {b2X + bW, bY + btnH}, C::UA(C::Txt(), 0.22f * alpha), R::Btn, 0, 1.2f);
+    }
     auto c1Sz = fn->CalcTextSizeA(fs * 1.15f, FLT_MAX, 0, XS("Отмена"));
     auto c2Sz = fn->CalcTextSizeA(fs * 1.15f, FLT_MAX, 0, XS("Выйти"));
     fg->AddText(fn, fs * 1.15f, {b1X + bW * 0.5f - c1Sz.x * 0.5f, bY + (btnH - fs * 1.15f) * 0.5f},
@@ -526,21 +532,26 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
         const float fgR = R::Sheet;
         int ba = int(Lerpf(0.f, 180.f, easeT));
         fg->AddRectFilled(menuPos, {menuPos.x + WW, menuPos.y + WH}, C::UA(C::Bg(), ba / 255.f), fgR);
-        fg->AddRectFilled(menuPos, {menuPos.x + WW, menuPos.y + WH}, IM_COL32(0, 8, 2, int(Lerpf(0.f, 60.f, easeT))), fgR);
+        fg->AddRectFilled({menuPos.x + 2, menuPos.y + 2}, {menuPos.x + WW - 2, menuPos.y + WH - 2}, C::UA(C::Bg(), ba * 0.6f / 255.f), fgR - 1);
+        fg->AddRectFilled({menuPos.x + 4, menuPos.y + 4}, {menuPos.x + WW - 4, menuPos.y + WH - 4}, C::UA(C::Bg(), ba * 0.4f / 255.f), fgR - 2);
+        fg->AddRectFilled(menuPos, {menuPos.x + WW, menuPos.y + WH}, IM_COL32(6, 8, 14, int(Lerpf(0.f, 60.f, easeT))), fgR);
+        fg->AddRect(menuPos, {menuPos.x + WW, menuPos.y + WH}, IM_COL32(255, 255, 255, int(Lerpf(0.f, 30.f, easeT))), fgR, 0, 1.5f);
     }
 
     fg->PushClipRect({menuPos.x - 40.f, menuPos.y + 1.f}, {menuPos.x + WW + 40.f, menuPos.y + WH - 1.f}, true);
 
+    // Шит: мягкая тень + волосяная рамка поверх карточной заливки.
+    for (int i = 3; i >= 1; --i)
+        fg->AddRectFilled({sheetX + i * 2.f, sheetY + i * 3.f},
+                          {sheetX + sheetW + i * 2.f, sheetY + sheetH + i * 2.f},
+                          IM_COL32(0, 0, 0, int(16 * easeT)), R::Sheet + i * 4.f);
     fg->AddRectFilled({sheetX, sheetY}, {sheetX + sheetW, sheetY + sheetH}, C::U(C::Card()), R::Sheet);
-    // Шторка — окно терминала с двойной рамкой.
-    ascii::Frame(fg, {sheetX, sheetY}, {sheetX + sheetW, sheetY + sheetH},
-                 C::UA(C::Dim(), 0.9f * easeT), true);
+    fg->AddRect({sheetX, sheetY}, {sheetX + sheetW, sheetY + sheetH}, C::U(C::Hair()), R::Sheet, 0, 1.f);
 
     {
-        // Ручка-линейка «────» по центру шапки.
-        float dhW = 60.f;
-        float dhX = sheetX + sheetW * 0.5f - dhW * 0.5f, dhY = sheetY + 14.f;
-        ascii::HRule(fg, nullptr, dhX, dhX + dhW, dhY + 3.f, C::UA(C::Dim(), 0.6f * easeT), 0);
+        float dhW = 46.f, dhH = 5.f;
+        float dhX = sheetX + sheetW * 0.5f - dhW * 0.5f, dhY = sheetY + 12.f;
+        fg->AddRectFilled({dhX, dhY}, {dhX + dhW, dhY + dhH}, C::UA(C::Dim(), 0.35f * easeT), dhH * 0.5f);
         bool inHandle = io.MousePos.x >= sheetX && io.MousePos.x <= sheetX + sheetW
                      && io.MousePos.y >= sheetY  && io.MousePos.y <= sheetY + 44.f;
         if (g_sheet.type != 2) {
@@ -562,11 +573,12 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
     }
 
     if (g_sheet.type != 2) {
-        // Закрытие — кнопка «[x]» в шапке (хит-зона прежняя, круглая).
         float cR  = 17.f, cx2 = sheetX + sheetW - cR - 16.f, cy2 = sheetY + 32.f + titleFS * 0.5f;
-        const float cfs = ImGui::GetFontSize() * 1.15f;
-        const ImVec2 ccell = ascii::Cell(cfs);
-        fg->AddText(fn, cfs, {cx2 - ccell.x * 1.5f, cy2 - ccell.y * 0.5f}, C::U(C::Dim()), "[x]");
+        fg->AddCircleFilled({cx2, cy2}, cR, C::U(C::El()), 32);
+        fg->AddCircle({cx2, cy2}, cR, C::U(C::Hair()), 32, 1.f);
+        float cs = 6.f;
+        fg->AddLine({cx2 - cs, cy2 - cs}, {cx2 + cs, cy2 + cs}, C::U(C::Txt()), 2.4f);
+        fg->AddLine({cx2 + cs, cy2 - cs}, {cx2 - cs, cy2 + cs}, C::U(C::Txt()), 2.4f);
         if (!g_sheet.closing && io.MouseClicked[0] &&
             fabsf(io.MousePos.x - cx2) < cR + 8.f && fabsf(io.MousePos.y - cy2) < cR + 8.f)
             SheetClose();
@@ -574,8 +586,7 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
 
     {
         float lineY = sheetY + 32.f + titleFS + 14.f;
-        ascii::HRule(fg, nullptr, sheetX + 18.f, sheetX + sheetW - 18.f, lineY,
-                     C::U(C::Sep()), 0, fs);
+        fg->AddLine({sheetX + 18.f, lineY}, {sheetX + sheetW - 18.f, lineY}, C::U(C::Hair()), 1.f);
     }
 
     float cY = sheetY + 32.f + titleFS + 26.f;
@@ -602,28 +613,29 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
         char vb[24]; snprintf(vb, 24, g_sheet.slFmt, *v);
         auto vSz = fn->CalcTextSizeA(fs * 2.0f, FLT_MAX, 0, vb);
         fg->AddText(fn, fs * 2.0f, {sheetX + sheetW * 0.5f - vSz.x * 0.5f, cY + 10.f}, C::U(C::Acc()), vb);
-        // Полоса — «[████▌░░░]» крупным кеглем: шторка и есть «терминал».
-        const float barFS = fs * 1.45f;
-        const ImVec2 cell = ascii::Cell(fn, barFS);
         float trkY = cY + 78.f, trkX = sheetX + padX + 16.f;
-        float trkW = sheetW - padX * 2.f - 32.f;
-        int   cells = ImMax(3, (int)(trkW / cell.x) - 2);
-        float barW  = (float)(cells + 2) * cell.x;
-        float frac = Clamp01((*v - mn) / (mx - mn));
+        float trkW = sheetW - padX * 2.f - 32.f, kR2 = 20.f, trkH = 8.f;
+        float frac = Clamp01((*v - mn) / (mx - mn)), kx = trkX + frac * trkW;
+        fg->AddRectFilled({trkX, trkY - trkH * 0.5f}, {trkX + trkW, trkY + trkH * 0.5f}, C::U(C::TrkOff()), trkH * 0.5f);
+        fg->AddRectFilled({trkX, trkY - trkH * 0.5f}, {kx,           trkY + trkH * 0.5f}, C::U(C::Acc()), trkH * 0.5f);
         static bool s_sheetSliderActive = false;
         if (!g_sheet.closing && io.MouseClicked[0] && fabsf(io.MousePos.y - trkY) < 56.f
-            && io.MousePos.x >= trkX - 24.f && io.MousePos.x <= trkX + barW + 24.f)
+            && io.MousePos.x >= trkX - 24.f && io.MousePos.x <= trkX + trkW + 24.f)
             s_sheetSliderActive = true;
         if (!io.MouseDown[0]) s_sheetSliderActive = false;
         bool near = s_sheetSliderActive && !g_sheet.closing && io.MouseDown[0];
-        ascii::Bar(fg, {trkX, trkY - cell.y * 0.5f}, frac, cells,
-                   C::U(C::Acc()), C::U(near ? C::Dim() : C::TrkOff()), barFS);
-        if (near) { float dx = io.MousePos.x - trkX; *v = mn + Clamp01(dx / barW) * (mx - mn); }
+        fg->AddCircleFilled({kx + 0.7f, trkY + 1.5f}, kR2, IM_COL32(0, 0, 0, 40));
+        fg->AddCircleFilled({kx, trkY}, kR2, IM_COL32(255, 255, 255, 255));
+        if (near) {
+            fg->AddCircle({kx, trkY}, kR2 + 5.f, C::UA(C::AccLight(), 0.55f), 48, 5.f);
+            fg->AddCircle({kx, trkY}, kR2 + 1.f, C::UA(C::Acc(), 0.9f), 48, 2.f);
+        }
+        if (near) { float dx = io.MousePos.x - trkX; *v = mn + Clamp01(dx / trkW) * (mx - mn); }
         char minB[16], maxB[16];
         snprintf(minB, 16, g_sheet.slFmt, mn); snprintf(maxB, 16, g_sheet.slFmt, mx);
-        fg->AddText(fn, fs * 0.85f, {trkX, trkY + cell.y * 0.5f + 8.f}, C::U(C::Dim()), minB);
+        fg->AddText(fn, fs * 0.85f, {trkX, trkY + kR2 + 8.f}, C::U(C::Dim()), minB);
         auto mxSz = fn->CalcTextSizeA(fs * 0.85f, FLT_MAX, 0, maxB);
-        fg->AddText(fn, fs * 0.85f, {trkX + barW - mxSz.x, trkY + cell.y * 0.5f + 8.f}, C::U(C::Dim()), maxB);
+        fg->AddText(fn, fs * 0.85f, {trkX + trkW - mxSz.x, trkY + kR2 + 8.f}, C::U(C::Dim()), maxB);
     } else if (g_sheet.type == 2) {
         auto dSz = fn->CalcTextSizeA(fs * 1.15f, FLT_MAX, 0, XS("Приложение будет закрыто."));
         fg->AddText(fn, fs * 1.15f, {sheetX + sheetW * 0.5f - dSz.x * 0.5f, cY + 16.f},
@@ -645,7 +657,7 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
             fg->AddRectFilled({bX, btnY}, {bX + bW, btnY + btnH}, C::U(C::Acc()), R::Btn);
             auto bSz = fn->CalcTextSizeA(fs * 1.15f, FLT_MAX, 0, XS("Готово"));
             fg->AddText(fn, fs * 1.15f, {bX + bW * 0.5f - bSz.x * 0.5f, btnY + (btnH - fs * 1.15f) * 0.5f},
-                C::U(C::Bg()), XS("Готово"));
+                IM_COL32(255, 255, 255, 255), XS("Готово"));
             if (!g_sheet.closing && io.MouseClicked[0]
                 && io.MousePos.x >= bX && io.MousePos.x <= bX + bW
                 && io.MousePos.y >= btnY && io.MousePos.y <= btnY + btnH)
@@ -667,8 +679,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         curY += topPad;
         if (t && t[0]) {
             auto tsz = fn->CalcTextSizeA(fs * 1.15f, FLT_MAX, 0, t);
-            ascii::HRule(fg, t, cX + inset, cX + cW - inset, curY + tsz.y * 0.5f,
-                         C::UA(C::Sep(), alpha), C::UA(C::Dim(), alpha), fs * 1.15f, true);
+            fg->AddText(fn, fs * 1.15f, {cX + 32.f, curY}, C::UA(C::Dim(), alpha), t);
             curY += tsz.y + 8.f;
         } else {
             curY += 8.f;
@@ -676,11 +687,9 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
     };
 
     auto FgCardBg = [&](float h, ImDrawFlags flags = ImDrawFlags_RoundCornersAll) {
-        (void)flags;
-        fg->AddRectFilled({cX + inset, curY}, {cX + cW - inset, curY + h}, C::UA(C::Card(), alpha));
+        fg->AddRectFilled({cX + inset, curY}, {cX + cW - inset, curY + h}, C::UA(C::Card(), alpha), R::Card, flags);
         if (g_state.ui_show_sep)
-            ascii::Frame(fg, {cX + inset, curY}, {cX + cW - inset, curY + h},
-                         C::UA(C::Sep(), alpha), false, fs);
+            fg->AddRect({cX + inset, curY}, {cX + cW - inset, curY + h}, C::UA(C::Sep(), alpha), R::Card, flags, 1.2f);
     };
 
     auto FgToggleRow = [&](const char* lbl, bool* v, float& anim, bool last) {
@@ -703,6 +712,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                            const char* lbl, bool last) {
         bool isSelected = (*cur == idx);
         Tick(*fillAnim, isSelected, dt, 10.f);
+        float fill = EaseInOut(*fillAnim);
 
         if (!blocked && mouseReleased
             && mousePos.x >= cX + inset && mousePos.x <= cX + cW - inset
@@ -719,9 +729,6 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         ra.scale = ImMax(0.6f, ra.scale);
         SpringTick(ra.ring, ra.ringVel, 3.5f, dt);
 
-        // Радио-строка терминала: «(●)» — выбрано, «( )» — нет. Пружинки
-        // масштаба/кольца из круглой версии здесь не видны — их заменяет
-        // простая подсветка выбранного пункта.
         const float rR = 22.f;
         float textX = cX + inset + padX, textY = curY + (rH - fs * 1.15f) * 0.5f;
         float textMaxX = cX + cW - inset - rR * 2.f - padX - 16.f;
@@ -729,9 +736,28 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         fg->AddText(fn, fs * 1.15f, {textX, textY}, C::UA(C::Txt(), alpha), lbl);
         fg->PopClipRect();
 
-        float cx2 = cX + cW - inset - rR - padX + rR * 0.4f, cy2 = curY + rH * 0.5f;
-        ascii::Radio(fg, {cx2, cy2}, isSelected, C::UA(C::Acc(), alpha),
-                     C::UA(C::Dim(), alpha * 0.8f), fs * 1.15f);
+        float cx2 = cX + cW - inset - rR - padX, cy2 = curY + rH * 0.5f;
+        float r2 = rR * ra.scale;
+
+        if (ra.ring > 0.05f && ra.ring < 3.4f) {
+            float ringR  = rR + ra.ring * 10.f;
+            float ringA  = (1.f - ra.ring / 3.5f) * 0.55f * alpha;
+            fg->AddCircle({cx2, cy2}, ringR, C::UA(C::Acc(), ringA), 48, 2.5f);
+        }
+
+        ImU32 radioCol = IM_COL32(
+            int(Lerpf(C::TrkOff().x, C::Acc().x, fill)*255),
+            int(Lerpf(C::TrkOff().y, C::Acc().y, fill)*255),
+            int(Lerpf(C::TrkOff().z, C::Acc().z, fill)*255),
+            int(alpha*255));
+        fg->AddCircleFilled({cx2, cy2}, r2, radioCol, 40);
+
+        if (fill > 0.01f)
+            fg->AddCircleFilled({cx2, cy2}, r2 * 0.46f * fill,
+                IM_COL32(255,255,255,int(255*fill*alpha)), 32);
+
+        if (fill < 0.99f)
+            fg->AddCircle({cx2, cy2}, r2, C::UA(C::Sep(), (1.f-fill)*alpha), 40, 1.8f);
 
         if (!last && g_state.ui_show_sep)
             fg->AddLine({cX + inset + padX, curY + rH - 0.5f},
@@ -748,13 +774,8 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             && clickedPos.x >= cX2 && clickedPos.x <= cX2 + cW2
             && clickedPos.y >= curY && clickedPos.y <= curY + rowH;
 
-        if (act) {
-            const ImVec2 cell = ascii::Cell(fs * 1.15f);
-            const float  sX   = cX2 + padX;
-            const int    n    = ImMax(3, (int)(cW2 / cell.x) - 2);
-            const float  sW   = (float)(n + 2) * cell.x;
-            *v = mn + Clamp01((mousePos.x - sX) / sW) * (mx - mn);
-        }
+        if (act)
+            *v = mn + Clamp01((mousePos.x - (cX2 + padX + 22.f)) / (cW2 - padX * 2.f - 44.f)) * (mx - mn);
 
         float target = Clamp01((*v - mn) / (mx - mn));
         TickSliderAnim(anim, target, act, dt);
@@ -843,8 +864,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                 fg->AddText(fn, fs * 1.0f, {stx, cy2 - stsz.y * 0.5f},
                     set ? C::UA(C::Acc(), alpha) : C::UA(C::Dim(), alpha), st);
                 if (set)
-                    fg->AddText(fn, fs, {stx - 16.f - ascii::Cell(fs).x, cy2 - ascii::Cell(fs).y * 0.5f},
-                                C::UA(C::Acc(), alpha), "â");  // ●
+                    fg->AddCircleFilled({stx - 16.f, cy2}, 5.f, C::UA(C::Acc(), alpha), 16);
 
                 if (zi == 0 && g_state.ui_show_sep)
                     fg->AddLine({cX + inset + padX, curY + rH - 0.5f},
@@ -1008,15 +1028,18 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
 
     fg->PushClipRect({menuPos.x, menuPos.y}, {menuPos.x + WW, menuPos.y + WH}, true);
 
-    fg->AddRectFilled({sX, sY}, {sX + sW, sY + sH}, C::U(C::Bg()), R::Sheet);
-    // Поповер — «окно» терминала: двойная рамка ╔═╗.
-    ascii::Frame(fg, {sX, sY}, {sX + sW, sY + sH}, C::UA(C::Dim(), 0.9f * easeT), true);
+    for (int i = 3; i >= 1; --i)
+        fg->AddRectFilled({sX + i * 2.f, sY + i * 3.f},
+                          {sX + sW + i * 2.f, sY + sH + i * 2.f},
+                          IM_COL32(0, 0, 0, int(16 * easeT)), R::Sheet + i * 4.f);
+    fg->AddRectFilled({sX, sY}, {sX + sW, sY + sH}, C::U(C::Card()), R::Sheet);
+    fg->AddRect({sX, sY}, {sX + sW, sY + sH}, C::U(C::Hair()), R::Sheet, 0, 1.f);
 
     {
-        // Ручка-линейка «────» в шапке.
-        float dhW = 72.f;
-        float dhX = sX + sW * 0.5f - dhW * 0.5f, dhY = sY + 16.f;
-        ascii::HRule(fg, nullptr, dhX, dhX + dhW, dhY + 3.f, C::UA(C::Dim(), 0.6f * easeT), 0);
+        float dhW = 56.f, dhH = 5.f;
+        float dhX = sX + sW * 0.5f - dhW * 0.5f, dhY = sY + 14.f;
+        fg->AddRectFilled({dhX, dhY}, {dhX + dhW, dhY + dhH},
+            C::UA(C::Dim(), 0.35f * easeT), dhH * 0.5f);
         if (io.MouseClicked[0]
             && io.MousePos.x >= sX && io.MousePos.x <= sX + sW
             && io.MousePos.y >= sY && io.MousePos.y <= sY + 44.f) {
@@ -1122,11 +1145,16 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
 
         g_palSelReset = false;
 
-        fg->AddRectFilled({X, bY}, {X+W, bY+btnH}, C::UA(C::Acc(), easeT), R::Btn);
+        {
+            ImVec4 ga = C::Acc(), gb = C::Acc2();
+            ImU32 ca = IM_COL32(int(ga.x*255*easeT), int(ga.y*255*easeT), int(ga.z*255*easeT), int(255*easeT));
+            ImU32 cb = IM_COL32(int(gb.x*255*easeT), int(gb.y*255*easeT), int(gb.z*255*easeT), int(255*easeT));
+            fg->AddRectFilledMultiColor({X, bY}, {X+W, bY+btnH}, ca, cb, cb, ca);
+        }
         auto bsz = fn->CalcTextSizeA(fs*1.2f, FLT_MAX, 0, XS("Готово"));
         fg->AddText(fn, fs*1.2f,
             {X + W*0.5f - bsz.x*0.5f, bY + (btnH-bsz.y)*0.5f},
-            C::UA(C::Bg(), easeT), XS("Готово"));
+            C::UA(C::OnAcc(), easeT), XS("Готово"));
 
         if (io.MouseDown[0] || io.MouseReleased[0])
             g_input.touchConsumed = true;
@@ -1165,12 +1193,12 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
             C::UA(C::Txt(), easeT), g_pop.title);
     }
     {
-        // Закрытие — «[x]» в шапке (хит-зона прежняя).
         float cR = 26.f, bcx = sX + sW - cR - 16.f, bcy = sY + 28.f + titleFS * 0.5f;
-        const float cfs = fs * 1.45f;
-        const ImVec2 ccell = ascii::Cell(fn, cfs);
-        fg->AddText(fn, cfs, {bcx - ccell.x * 1.5f, bcy - ccell.y * 0.5f},
-                    C::UA(C::Dim(), easeT), "[x]");
+        fg->AddCircleFilled({bcx, bcy}, cR, C::UA(C::El(), easeT), 32);
+        fg->AddCircle({bcx, bcy}, cR, C::UA(C::Hair(), easeT), 32, 1.f);
+        float cs = 9.f;
+        fg->AddLine({bcx-cs, bcy-cs}, {bcx+cs, bcy+cs}, C::UA(C::Txt(), easeT), 3.2f);
+        fg->AddLine({bcx+cs, bcy-cs}, {bcx-cs, bcy+cs}, C::UA(C::Txt(), easeT), 3.2f);
 
         if (!g_pop.closing && io.MouseReleased[0]
             && fabsf(io.MousePos.x - bcx) < cR + 12.f
@@ -1179,16 +1207,7 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
             g_input.touchConsumed = true;
         }
     }
-    // Под шапкой — двойная линейка ═══, как разделитель статуса в tty.
-    {
-        char buf[256];
-        const ImVec2 tcell = ascii::Cell(fn, fs);
-        int n = (int)((sW - 36.f) / tcell.x);
-        size_t p = 0;
-        for (int i = 0; i < n && p + 3 < sizeof buf; ++i) { memcpy(buf + p, "â", 3); p += 3; }
-        buf[p] = 0;
-        fg->AddText(fn, fs, {sX + 18.f, lineY - tcell.y * 0.5f}, C::UA(C::Sep(), easeT), buf);
-    }
+    fg->AddLine({sX + 18.f, lineY}, {sX + sW - 18.f, lineY}, C::UA(C::Hair(), easeT), 1.f);
 
     fg->PopClipRect();
 }

@@ -1,6 +1,5 @@
 #include "Android_draw/draw.h"
-#include "ImGui/Font/TermFont.h"    // DejaVu Sans Mono: ASCII-терминал
-#include "ascii.h"
+#include "ImGui/Font/Font.h"
 #include <dirent.h>
 #include <sys/system_properties.h>
 #include <time.h>
@@ -21,9 +20,6 @@ anwc::ANativeWindowCreator::DisplayInfo displayInfo{0};
 uint32_t orientation  = 0;
 bool     g_Initialized = false;
 ImGuiWindow *g_window  = nullptr;
-// Малый кегль моноширинного шрифта (14 px) — ASCII-видео в кружке и мелкий
-// текст. Хранится здесь, регистрируется в атлас через ascii::SetSmallFont.
-static ImFont* g_monoSmall = nullptr;
 // Темп оверлея: 60 кадров/с, а не пик дисплея.
 //
 // Оверлей — это своё окно (свой ANativeWindow «Surface») и свой EGL-контекст,
@@ -232,50 +228,14 @@ bool ImGui_init() {
     io.IniFilename = NULL;
     io.DisplaySize = ImVec2((float)native_window_screen_x, (float)native_window_screen_y);
 
-    // Шрифт гуи — DejaVu Sans Mono (классика linux-терминалов): моноширинный,
-    // с кириллицей и всей псевдографикой ┌─┐│└┘ █▓▒░. Диапазоны глифов
-    // перечислены явно — им же урезан сам TTF (TermFont.h, ~48 КБ).
-    // Второй экземпляр того же шрифта в кегле 14 — для ASCII-видео в кружке
-    // (см. VidAvatar) и мелких надписей.
-    static const ImWchar kMonoRanges[] = {
-        0x0020, 0x00FF,   // латиница + latin-1 (°, ×, ·)
-        0x0400, 0x045F,   // кириллица
-        0x0490, 0x0491,   // Ґ ґ
-        0x2116, 0x2116,   // №
-        0x2190, 0x2193,   // ← ↑ → ↓
-        0x2022, 0x2022,   // •
-        0x2026, 0x2026,   // …
-        0x2500, 0x259F,   // псевдографика + блоки
-        0x25A0, 0x25A1,   // ■ □
-        0x25AA, 0x25AB,   // ▪ ▫
-        0x25BA, 0x25BB,   // ► ▻
-        0x25C4, 0x25C5,   // ◄ ◅
-        0x25CF, 0x25CF,   // ●
-        0,
-    };
-    ImFontConfig cfg;
-    cfg.FontDataOwnedByAtlas = false;   // данные — статический массив в бинарнике
     io.Fonts->AddFontFromMemoryTTF(
-        (void*)TermMonoFont,
-        (int)TermMonoFont_size,
-        28.0f,
-        &cfg,
-        kMonoRanges
+        (void*)RobotoFont,
+        (int)RobotoFont_size,
+        28.0f
     );
-    ImFontConfig cfgSmall = cfg;
-    g_monoSmall = io.Fonts->AddFontFromMemoryTTF(
-        (void*)TermMonoFont,
-        (int)TermMonoFont_size,
-        14.0f,
-        &cfgSmall,
-        kMonoRanges
-    );
-    ascii::SetSmallFont(g_monoSmall);
 
     ImGui::GetStyle().ScaleAllSizes(1.5f);
-    // Скругления выключены темой (терминальный стиль), но продублируем и тут:
-    // это значение ставится ПОСЛЕ ApplyTheme и перекрывало бы его.
-    ImGui::GetStyle().WindowRounding = 0.0f;
+    ImGui::GetStyle().WindowRounding = 14.0f;
 
     g_Initialized = true;
     return true;
