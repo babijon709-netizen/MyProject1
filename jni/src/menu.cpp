@@ -873,6 +873,11 @@ float TabContent(int tab, float dt, float cW) {
             offset_resolver_status(rstat, sizeof(rstat));
             ImGui::Dummy({1.f, 10.f});
             ImGui::TextDisabled("%s: %s", XS("Автообновление оффсетов"), rstat);
+            // Диагностика привязки: если её рвёт по кругу, здесь видно,
+            // КАКОЕ условие срабатывает (процесс/память/смотритель кадра).
+            const char* why = process_last_detach_reason();
+            if (why)
+                ImGui::TextDisabled("%s: %s (x%d)", XS("Привязка"), why, process_detach_count());
         }
 
         SHdr(XS("Система"));

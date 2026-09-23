@@ -173,7 +173,7 @@ UI_EN = {
     'Линии': 'Lines', 'Скелеты': 'Skeletons', 'Союзники': 'Teammates',
     'Линии и боксы': 'Lines and boxes', 'Толщина': 'Thickness',
     'Мир': 'World', 'Руда': 'Ore', 'Руды по видам': 'Ore kinds',
-    'Автообновление оффсетов': 'Offset auto-update',
+    'Автообновление оффсетов': 'Offset auto-update', 'Привязка': 'Attach',
     'Животные': 'Animals', 'Ящики': 'Crates',
     'Боты': 'Bots', 'Машины': 'Vehicles',
     'Показывать до': 'Show up to', 'Ещё настройки': 'More settings',

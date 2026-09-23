@@ -137,6 +137,12 @@ uint64_t s_lib_begin = 0, s_lib_end = 0;   // окна libil2cpp (для image-�
 uint64_t s_meta_begin = 0, s_meta_end = 0; // окно строк метаданных (0 = нет)
 uint64_t s_total_bytes = 0;       // сколько всего байт предстоит просмотреть
 uint64_t s_scanned_bytes = 0;     // сколько уже просмотрено (для статуса)
+// Диагностика «сегментов 0»: что именно увидели в карте процесса.
+int      s_maps_lib_lines = 0;    // строк libil2cpp.so вообще
+int      s_maps_cut_window = 0;   // отброшено окном вокруг базы
+int      s_maps_cut_x = 0;        // исполняемые (не сканируются)
+int      s_maps_cut_deleted = 0;  // мёртвый «(deleted)» образ
+bool     s_maps_open_failed = false;
 double   s_scan_deadline = 0;     // общего бюджета скана
 
 FoundClass s_classes[768];
@@ -151,8 +157,11 @@ AppliedRec s_applied[256];
 int      s_applied_count = 0;
 bool     s_logged = false;
 
-constexpr double kTickBudgetSec   = 0.004;  // 4 мс на такт (как у маркеров)
-constexpr double kScanTotalSec    = 60.0;   // общий потолок скана (образы по 0.5ГБ+)
+// Бюджет на такт умышленно вдвое меньше, чем у других сканов: на устройстве
+// агрессивное чтение чужой памяти кончалось потерей привязки. Лучше резолвер
+// будет сходиться дольше, чем давить на процесс игры.
+constexpr double kTickBudgetSec   = 0.002;  // 2 мс на такт
+constexpr double kScanTotalSec    = 90.0;   // общий потолок скана (образы по 0.5ГБ+)
 // Кусок намеренно небольшой: скан не должен давить на процесс игры крупными
 // чтениями (на части устройств это кончается потерей привязки). Буфер ниже
 // статический, так что размер куска стеку не стоит; хотим — берём меньше.
@@ -181,10 +190,12 @@ static void phase_maps() {
     s_seg_count = 0;
     s_lib_begin = s_lib_end = 0;
     s_meta_begin = s_meta_end = 0;
+    s_maps_lib_lines = 0; s_maps_cut_window = 0; s_maps_cut_x = 0;
+    s_maps_cut_deleted = 0; s_maps_open_failed = false;
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
     const int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) { s_phase = PH_DONE; return; }
+    if (fd < 0) { s_maps_open_failed = true; s_phase = PH_DONE; return; }
     std::string text;
     char chunk[8192];
     for (;;) {
@@ -213,7 +224,9 @@ static void phase_maps() {
         unsigned long long start = 0, end = 0;
         char perms[5] = {};
         if (sscanf(line, "%llx-%llx %4s", &start, &end, perms) != 3) continue;
-        if (end <= start || end - start > (256ull << 20)) continue;
+        // Потолок сегмента — 1 ГБ: у больших игр .rodata бывает огромным,
+        // а выкинув его целиком мы бы могли выкинуть и нужный сегмент рядом.
+        if (end <= start || end - start > (1ull << 30)) continue;
         const char* slash = strchr(line, '/');
         if (!slash) continue;
 
@@ -224,10 +237,16 @@ static void phase_maps() {
             continue;
         }
         if (!strstr(slash, "libil2cpp.so")) continue;
-        if (strstr(line, "(deleted)")) continue;
-        if (perms[2] == 'x') continue;   // текст не сканируем
-        if (g_il2cpp_base && (start < g_il2cpp_base || start > g_il2cpp_base + (320ull << 20)))
-            continue;  // чужой/мёртвый образ: держимся вокруг выбранной базы
+        ++s_maps_lib_lines;
+        if (strstr(line, "(deleted)")) { ++s_maps_cut_deleted; continue; }
+        if (perms[2] == 'x') { ++s_maps_cut_x; continue; }   // текст не сканируем
+        // Окно вокруг выбранной базы широкое: у больших игр образ занимает
+        // сотни мегабайт, и сегмент с классами (relro/data) может лежать
+        // далеко от начала. Фильтр лишь отсекает ЧУЖИЕ образы.
+        if (g_il2cpp_base && (start < g_il2cpp_base || start > g_il2cpp_base + (2ull << 30))) {
+            ++s_maps_cut_window;
+            continue;
+        }
         s_segments[s_seg_count].start = start;
         s_segments[s_seg_count].end = end;
         ++s_seg_count;
@@ -532,7 +551,15 @@ void offset_resolver_status(char* out, size_t cap) {
         return;
     }
     if (!s_seg_count) {
-        snprintf(out, cap, "не нашёл сегменты .so — вшитые оффсеты");
+        // Почему сегментов ноль — прямо в строке, чтобы видеть на устройстве.
+        if (s_maps_open_failed) {
+            snprintf(out, cap, "карта процесса не открылась — вшитые оффсеты");
+        } else if (s_maps_lib_lines == 0) {
+            snprintf(out, cap, "в карте нет отображений .so — вшитые оффсеты");
+        } else {
+            snprintf(out, cap, "сегменты .so отброшены (%d): окно %d, иск %d, дел %d",
+                     s_maps_lib_lines, s_maps_cut_window, s_maps_cut_x, s_maps_cut_deleted);
+        }
         return;
     }
     if (s_names_ok == 0 && s_names_fail > 0) {

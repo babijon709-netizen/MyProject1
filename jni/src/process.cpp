@@ -153,6 +153,14 @@ static bool pid_still_game(pid_t pid) {
     return proc_libil2cpp(pid) == 1;
 }
 
+// Диагностика для меню на устройстве: ПОЧЕМУ в последний раз отвалилась
+// привязка и сколько раз. Без этого «теряет привязку по кругу» на телефоне
+// не отличить от смерти игры, отъёма доступа и смотрителя кадра.
+static std::atomic<const char*> g_last_detach_reason{nullptr};
+static std::atomic<int>         g_detach_count{0};
+const char* process_last_detach_reason() { return g_last_detach_reason.load(); }
+int         process_detach_count()       { return g_detach_count.load(); }
+
 void start_attach_thread() {
     g_attach_running.store(true);
     g_attach_thread = std::thread([]() {
@@ -173,13 +181,21 @@ void start_attach_thread() {
                     // (нет libil2cpp.so или память не читается). Состояние видно в
                     // esp_attach_state() для диагностики, тоста нет.
                 }
-            } else if (!pid_still_game(g_target_pid) || !esp_alive_check() ||
-                       esp_wants_reattach()) {
+            } else {
                 // Процесс сменился/умер или память перестала читаться (отобрали
                 // доступ, перезапуск с тем же pid): привязываемся заново.
-                esp_reset();
-                g_esp_attached = false;
-                g_target_pid = -1;
+                // Условия проверяем по одному, чтобы запомнить, КАКОЕ сработало.
+                const char* why = nullptr;
+                if (!pid_still_game(g_target_pid))  why = "процесс игры пропал";
+                else if (!esp_alive_check())        why = "память перестала читаться";
+                else if (esp_wants_reattach())      why = "смотритель кадра (слепота)";
+                if (why) {
+                    g_last_detach_reason.store(why);
+                    g_detach_count.fetch_add(1);
+                    esp_reset();
+                    g_esp_attached = false;
+                    g_target_pid = -1;
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
