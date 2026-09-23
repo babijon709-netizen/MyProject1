@@ -59,6 +59,52 @@ static const OrField kOrFields[] = {
 constexpr int kOrFieldCount = (int)(sizeof(kOrFields) / sizeof(kOrFields[0]));
 }  // namespace
 
+// ---- «Тихие» чтения резолвера ------------------------------------------------
+// Резолвер ходит по указателям Вслепую: почти каждый кандидат — мусор, и отказ
+// чтения здесь НОРМА, а не «доступ потерян». Обычные обёртки (rd/rd_buf из
+// game_internal.h) сообщают об отказе в счётчик отказов memio; спекулятивный
+// скан завалил бы его за пару кусков, а это переоткрывает /proc/<pid>/mem и
+// роняет проверку живости привязки (пользователь видел «теряет привязку по
+// кругу»). Поэтому у резолвера свои чтения — через read_quiet.
+static bool qrd_buf(uint64_t addr, void* out, size_t size) {
+    return g_mem.read_quiet(addr, out, size);
+}
+template <typename T>
+static T qrd(uint64_t addr) {
+    T v{};
+    g_mem.read_quiet(addr, &v, sizeof(T));
+    return v;
+}
+static uint64_t qrd_ptr(uint64_t a) { return memio::untag(qrd<uint64_t>(a)); }
+
+// Тихий аналог read_remote_string (тот использует сообщающие чтения).
+static std::string qrd_string(uint64_t address, bool* readable) {
+    if (readable) *readable = false;
+    if (!address) return {};
+    const size_t kMax = 95;
+    char buffer[kMax + 1] = {};
+    size_t got = 0;
+    while (got < kMax) {
+        const size_t want = (kMax - got < sizeof(uint64_t)) ? (kMax - got) : sizeof(uint64_t);
+        if (!g_mem.read_quiet(address + got, buffer + got, want)) {
+            if (got == 0) return {};
+            size_t single = 0;
+            while (single < want &&
+                   g_mem.read_quiet(address + got + single, buffer + got + single, 1)) {
+                if (buffer[got + single] == '\0') break;
+                ++single;
+            }
+            got += single;
+            break;
+        }
+        got += want;
+        if (memchr(buffer + got - want, '\0', want)) break;
+    }
+    buffer[kMax] = '\0';
+    if (readable) *readable = true;
+    return std::string(buffer);
+}
+
 namespace {
 
 // Один найденный класс. Имя/пространство имён храним как есть (короткое имя
@@ -107,8 +153,11 @@ bool     s_logged = false;
 
 constexpr double kTickBudgetSec   = 0.004;  // 4 мс на такт (как у маркеров)
 constexpr double kScanTotalSec    = 60.0;   // общий потолок скана (образы по 0.5ГБ+)
-constexpr size_t kChunkBytes      = 256 * 1024;
-constexpr size_t kMaxReadsPerChunk = 512;   // предел «дорогих» чтений на порцию
+// Кусок намеренно небольшой: скан не должен давить на процесс игры крупными
+// чтениями (на части устройств это кончается потерей привязки). Буфер ниже
+// статический, так что размер куска стеку не стоит; хотим — берём меньше.
+constexpr size_t kChunkBytes      = 64 * 1024;
+constexpr size_t kMaxReadsPerChunk = 256;   // предел «дорогих» чтений на порцию
 
 static bool all_wanted_found() {
     // Достаточно: все РАЗНЫЕ имена из таблицы найдены хотя бы одним классом.
@@ -208,19 +257,19 @@ static void phase_maps() {
 // метаданных; имя читается строкой. Возврат: 1 принят, 0 отклонён.
 static int try_class_candidate(uint64_t v) {
     if (find_class_slot(v)) return 0;
-    const uint64_t image = rd_ptr(v);
+    const uint64_t image = qrd_ptr(v);
     if (s_lib_begin && (image < s_lib_begin || image >= s_lib_end)) return 0;
     else if (!s_lib_begin && !valid_obj(image)) return 0;
-    const uint64_t nm = rd_ptr(v + IL2CPP_CLASS_NAME);
+    const uint64_t nm = qrd_ptr(v + IL2CPP_CLASS_NAME);
     if (s_meta_begin) {
         if (nm < s_meta_begin || nm >= s_meta_end) return 0;
-        const uint64_t ns = rd_ptr(v + IL2CPP_CLASS_NAMESPACE);
+        const uint64_t ns = qrd_ptr(v + IL2CPP_CLASS_NAMESPACE);
         if (ns < s_meta_begin || ns >= s_meta_end) return 0;
     } else if (!valid_obj(nm)) {
         return 0;
     }
     bool ok = false;
-    const std::string name = read_remote_string(nm, &ok);
+    const std::string name = qrd_string(nm, &ok);
     if (!ok || name.empty() || name.size() > 47) { ++s_names_fail; return 0; }
     ++s_names_ok;
     if (s_class_count >= 768) return 1;
@@ -228,7 +277,7 @@ static int try_class_candidate(uint64_t v) {
     fc.klass = v;
     snprintf(fc.name, sizeof(fc.name), "%s", name.c_str());
     bool ns_ok = false;
-    const std::string ns = read_remote_string(rd_ptr(v + IL2CPP_CLASS_NAMESPACE), &ns_ok);
+    const std::string ns = qrd_string(qrd_ptr(v + IL2CPP_CLASS_NAMESPACE), &ns_ok);
     if (ns_ok && ns.size() < sizeof(fc.ns)) snprintf(fc.ns, sizeof(fc.ns), "%s", ns.c_str());
     ++s_class_count;
     return 1;
@@ -247,7 +296,7 @@ static void phase_scan(double deadline) {
             continue;
         }
         const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
-        if (!rd_buf(s_scan_pos, buf, chunk)) {
+        if (!qrd_buf(s_scan_pos, buf, chunk)) {
             s_scan_pos += chunk;          // дыра в отображении — перешагнуть
             s_scanned_bytes += chunk;
         } else {
@@ -287,14 +336,14 @@ static int fields_shape_score(uint64_t klass, uint64_t fields_ptr, int probe) {
     int score = 0;
     for (int i = 0; i < probe; ++i) {
         const uint64_t e = fields_ptr + (uint64_t)i * IL2CPP_FIELDINFO_SIZE;
-        const uint64_t parent = rd_ptr(e + IL2CPP_FIELDINFO_PARENT);
+        const uint64_t parent = qrd_ptr(e + IL2CPP_FIELDINFO_PARENT);
         if (parent != klass) break;
-        const uint64_t type = rd_ptr(e + IL2CPP_FIELDINFO_TYPE);
+        const uint64_t type = qrd_ptr(e + IL2CPP_FIELDINFO_TYPE);
         if (!valid_obj(type)) break;
-        const int32_t off = rd<int32_t>(e + IL2CPP_FIELDINFO_OFFSET);
+        const int32_t off = qrd<int32_t>(e + IL2CPP_FIELDINFO_OFFSET);
         if (off < -1 || off > 0x20000) break;
         ++score;
-        const uint64_t nmp = rd_ptr(e + IL2CPP_FIELDINFO_NAME);
+        const uint64_t nmp = qrd_ptr(e + IL2CPP_FIELDINFO_NAME);
         if (s_meta_begin && (nmp < s_meta_begin || nmp >= s_meta_end)) break;
     }
     return score;
@@ -303,13 +352,13 @@ static int fields_shape_score(uint64_t klass, uint64_t fields_ptr, int probe) {
 static bool calibrate_fields(uint64_t klass) {
     // Сначала табличное значение — почти всегда оно и есть.
     const uint64_t table_off = IL2CPP_CLASS_FIELDS;
-    if (fields_shape_score(klass, rd_ptr(klass + table_off), 6) >= 5) {
+    if (fields_shape_score(klass, qrd_ptr(klass + table_off), 6) >= 5) {
         s_fields_off = table_off;
         return true;
     }
     for (uint64_t f = 0x70; f <= 0x178; f += 8) {
         if (f == table_off) continue;
-        if (fields_shape_score(klass, rd_ptr(klass + f), 6) >= 5) {
+        if (fields_shape_score(klass, qrd_ptr(klass + f), 6) >= 5) {
             s_fields_off = f;
             return true;
         }
@@ -319,11 +368,11 @@ static bool calibrate_fields(uint64_t klass) {
 
 // Прочитать имя поля; пустой возврат при нечитаемости.
 static bool read_field_name(uint64_t entry, char* out, size_t cap) {
-    const uint64_t nmp = rd_ptr(entry + IL2CPP_FIELDINFO_NAME);
+    const uint64_t nmp = qrd_ptr(entry + IL2CPP_FIELDINFO_NAME);
     if (s_meta_begin && (nmp < s_meta_begin || nmp >= s_meta_end)) return false;
     if (!s_meta_begin && !valid_obj(nmp)) return false;
     bool ok = false;
-    const std::string name = read_remote_string(nmp, &ok);
+    const std::string name = qrd_string(nmp, &ok);
     if (!ok || name.empty() || name.size() >= cap) return false;
     snprintf(out, cap, "%s", name.c_str());
     return true;
@@ -331,16 +380,16 @@ static bool read_field_name(uint64_t entry, char* out, size_t cap) {
 
 // Найти поле по имени в классе; вернуть смещение (-1 если нет).
 static int32_t find_field_offset(uint64_t klass, const char* field) {
-    const uint64_t fields_ptr = rd_ptr(klass + s_fields_off);
+    const uint64_t fields_ptr = qrd_ptr(klass + s_fields_off);
     if (!valid_obj(fields_ptr)) return -1;
-    int count = rd<uint16_t>(klass + IL2CPP_CLASS_FIELD_COUNT);
+    int count = qrd<uint16_t>(klass + IL2CPP_CLASS_FIELD_COUNT);
     if (count <= 0 || count > 2048) return -1;
     char name[48];
     for (int i = 0; i < count; ++i) {
         const uint64_t e = fields_ptr + (uint64_t)i * IL2CPP_FIELDINFO_SIZE;
-        if (rd_ptr(e + IL2CPP_FIELDINFO_PARENT) != klass) break;
+        if (qrd_ptr(e + IL2CPP_FIELDINFO_PARENT) != klass) break;
         if (!read_field_name(e, name, sizeof(name))) continue;
-        if (strcmp(name, field) == 0) return rd<int32_t>(e + IL2CPP_FIELDINFO_OFFSET);
+        if (strcmp(name, field) == 0) return qrd<int32_t>(e + IL2CPP_FIELDINFO_OFFSET);
     }
     return -1;
 }
