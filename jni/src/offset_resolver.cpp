@@ -89,6 +89,8 @@ int      s_seg_idx = 0;
 uint64_t s_scan_pos = 0;          // текущая позиция в текущем сегменте
 uint64_t s_lib_begin = 0, s_lib_end = 0;   // окна libil2cpp (для image-фильтра)
 uint64_t s_meta_begin = 0, s_meta_end = 0; // окно строк метаданных (0 = нет)
+uint64_t s_total_bytes = 0;       // сколько всего байт предстоит просмотреть
+uint64_t s_scanned_bytes = 0;     // сколько уже просмотрено (для статуса)
 double   s_scan_deadline = 0;     // общего бюджета скана
 
 FoundClass s_classes[768];
@@ -192,6 +194,10 @@ static void phase_maps() {
         s_segments[i] = s_segments[j];
         s_segments[j] = t;
     }
+    s_total_bytes = 0;
+    for (int i = 0; i < s_seg_count; ++i)
+        s_total_bytes += s_segments[i].end - s_segments[i].start;
+    s_scanned_bytes = 0;
     s_seg_idx = 0;
     s_scan_pos = s_segments[0].start;
     s_scan_deadline = mono_seconds() + kScanTotalSec;
@@ -229,7 +235,9 @@ static int try_class_candidate(uint64_t v) {
 }
 
 static void phase_scan(double deadline) {
-    uint8_t buf[kChunkBytes];
+    // Буфер осознанно статический: 256 КБ на стеке кадра на телефоне —
+    // риск переполнения стека потока отрисовки. Резолвер однопоточный.
+    static uint8_t buf[kChunkBytes];
     while (s_seg_idx < s_seg_count && mono_seconds() < deadline) {
         const Segment& seg = s_segments[s_seg_idx];
         const uint64_t remain = seg.end - s_scan_pos;
@@ -241,6 +249,7 @@ static void phase_scan(double deadline) {
         const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
         if (!rd_buf(s_scan_pos, buf, chunk)) {
             s_scan_pos += chunk;          // дыра в отображении — перешагнуть
+            s_scanned_bytes += chunk;
         } else {
             // Идём по слотам и сдвигаем s_scan_pos ТОЛЬКО на просмотренное.
             // Если уткнулись в бюджет чтений — выходим, и следующий такт
@@ -260,6 +269,7 @@ static void phase_scan(double deadline) {
                 }
             }
             s_scan_pos += examined * 8;
+            s_scanned_bytes += examined * 8;
         }
         if (all_wanted_found()) break;
         if (mono_seconds() >= s_scan_deadline) break;
@@ -404,6 +414,7 @@ void offset_resolver_reset() {
     s_phase = PH_WAIT;
     s_seg_count = 0; s_seg_idx = 0; s_scan_pos = 0;
     s_lib_begin = s_lib_end = 0; s_meta_begin = s_meta_end = 0;
+    s_total_bytes = 0; s_scanned_bytes = 0;
     s_class_count = 0; s_names_ok = 0; s_names_fail = 0;
     s_fields_off = 0; s_resolved = 0; s_changed = 0;
     s_applied_count = 0; s_logged = false;
@@ -447,16 +458,42 @@ void offset_resolver_debug_dump() {
 }
 #endif  // __ANDROID__
 
-// Строка для меню: что резолвер смог в этой сессии.
+// Строка для меню: что резолвер смог в этой сессии. При нулевом результате —
+// с ПРИЧИНОЙ, чтобы на устройстве было видно, что именно не сложилось.
 void offset_resolver_status(char* out, size_t cap) {
     if (!out || !cap) return;
-    if (s_phase == PH_DONE && !s_class_count && !s_names_ok) {
-        snprintf(out, cap, "не читались имена классов — вшитые оффсеты");
+    if (s_phase == PH_WAIT) {
+        snprintf(out, cap, "ждёт привязку к игре");
         return;
     }
-    const char* state = s_phase == PH_DONE ? "готов"
-                      : s_phase == PH_WAIT ? "ждёт привязку"
-                      : "сканирует";
-    snprintf(out, cap, "%s: классов %d, полей %d/%d (изменено %d)",
-             state, s_class_count, s_resolved, kOrFieldCount, s_changed);
+    if (s_phase == PH_MAPS || s_phase == PH_SCAN || s_phase == PH_FIELDS) {
+        // PH_FIELDS сюда же: «готов» показываем только по факту (PH_DONE),
+        // иначе строка врёт про фазу, где поля ещё не разрешены.
+        snprintf(out, cap, "сканирует: сегментов %d, %llu/%llu МБ, классов %d",
+                 s_seg_count,
+                 (unsigned long long)(s_scanned_bytes >> 20),
+                 (unsigned long long)(s_total_bytes >> 20),
+                 s_class_count);
+        return;
+    }
+    // PH_DONE
+    if (s_class_count > 0) {
+        snprintf(out, cap, "готов: классов %d, полей %d/%d (изменено %d)",
+                 s_class_count, s_resolved, kOrFieldCount, s_changed);
+        return;
+    }
+    if (!s_seg_count) {
+        snprintf(out, cap, "не нашёл сегменты .so — вшитые оффсеты");
+        return;
+    }
+    if (s_names_ok == 0 && s_names_fail > 0) {
+        snprintf(out, cap, "имена классов не читаются (%d отказов) — вшитые оффсеты",
+                 s_names_fail);
+        return;
+    }
+    if (s_names_ok == 0) {
+        snprintf(out, cap, "кандидатов в классы не нашлось — вшитые оффсеты");
+        return;
+    }
+    snprintf(out, cap, "классы не сложились — вшитые оффсеты");
 }
