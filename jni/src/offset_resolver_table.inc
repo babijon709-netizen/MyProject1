@@ -161,3 +161,21 @@ OR_FIELD(VITALS_MAX_HEALTH, "GenericVitals", "m_MaxHealth", false, "f4")
 OR_FIELD(VOICE_STATE_NAME, "VoicePlayerState", "_Name_k__BackingField", false, "str")
 OR_FIELD(WEAPONPIECE_ENABLED, "WeaponPiece", "Enabled", false, "b1")
 OR_FIELD(WEAPONPIECE_NUMBER, "WeaponPiece", "Number", false, "i2")
+
+// Классы с ротированным именем. OR_VIA(константа, "стартовыйКласс",
+// "поле", "поле2" (пусто — цепочка из одного шага), "искомоеПоле", статик, "тип",
+// "ротИмяЦелевогоКласса") — последнее резолвер использует, когда тип поля
+// сам ссылается на ротированный класс («c:eDw»): сверять не с чем, поэтому
+// сопоставляем имя из карты с kidx, который дала цепочка.
+OR_VIA(ACTIVITY_ACTIVE_FLAG, "PlayerManager", "playerEventHandler", "Aim", "_BmS_k__BackingField", false, "b1", "eDw")
+OR_VIA(EVENT_HANDLER_AIM_ACTIVITY, "PlayerManager", "playerEventHandler", "", "Aim", false, "c:eDw", "eDg")
+OR_VIA(EVENT_HANDLER_LAST_HIT_POINT, "PlayerManager", "playerEventHandler", "", "LastLocalHitPoint", false, "obj", "eDg")
+OR_VIA(EVENT_HANDLER_LAST_HIT_TIME, "PlayerManager", "playerEventHandler", "", "LastLocalHitTime", false, "obj", "eDg")
+OR_VIA(EVENT_HANDLER_LOOK_DIRECTION, "PlayerManager", "playerEventHandler", "", "LookDirection", false, "obj", "eDg")
+OR_VIA(EVENT_HANDLER_MANAGER_BACKREF, "PlayerManager", "playerEventHandler", "", "manager", false, "c:PlayerManager", "eDg")
+OR_VIA(FPDRAW_ACTION, "FPObject", "Draw", "", "BXi", false, "c:Action", "eDt")
+OR_VIA(GUM_AIM_RAYCAST, "PlayerManager", "playerEventHandler", "", "AimRaycast", false, "obj", "eDg")
+OR_VIA(GUM_RAYCAST_DATA, "PlayerManager", "playerEventHandler", "", "RaycastData", false, "obj", "eDg")
+OR_VIA(NICKLABEL_NICKNAME_TEXT, "PlayerManager", "nicklabel", "", "nickname", false, "c:Text", "gL")
+OR_VIA(NICKLABEL_PLAYER_BACKREF, "PlayerManager", "nicklabel", "", "player", false, "c:PlayerManager", "gL")
+OR_VIA(VOICE_PLAYER_TAG, "PlayerManager", "voicePlayer", "", "ofT", false, "str", "eIl")

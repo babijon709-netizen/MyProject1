@@ -55,12 +55,41 @@ struct OrField {
     bool           is_static;
     const char*    type;    // "" | f4 | b1 | u4 | i4 | str | obj | c:ИмяКласса
 };
+#define OR_VIA(...)   // в первом массиве цепочки не нужны
 #define OR_FIELD(c, k, f, s, t) { &go_active::c, k, f, s, t },
 static const OrField kOrFields[] = {
 #include "offset_resolver_table.inc"
 };
 #undef OR_FIELD
+#undef OR_VIA
 constexpr int kOrFieldCount = (int)(sizeof(kOrFields) / sizeof(kOrFields[0]));
+
+// Классы с РОТИРУЮЩИМСЯ именами (PlayerEventHandler, nicklabel, VoicePlayer...):
+// обфускатор переименовывает их в каждом билде, поэтому по имени они не
+// находятся. Но их ТИП не меняется: поле PlayerManager.playerEventHandler
+// ссылается именно на такой класс, а FieldInfo.type того поля несёт индекс
+// определения типа (klassIndex). По индексу класс находится в памяти — имя не
+// нужно (см. phase_kid). Таблица описывает цепочку: из какого класса и через
+// какое поле прийти (hops), какое поле забрать (field) и его тип (type).
+struct ViaField {
+    std::uint64_t* slot;
+    const char*    via_cls;    // стартовый класс — ищется по имени в кэше
+    const char*    hops[2];    // hops[0] — поле в via_cls, hops[1] — в классе после него
+    int            nhops;
+    const char*    field;      // искомое поле в целевом классе
+    bool           is_static;
+    const char*    type;       // сигнатура типа (как у OR_FIELD)
+    const char*    rot;        // ротированное имя целевого класса (из карты)
+};
+#define OR_FIELD(...)  // во втором массиве обычные записи не нужны
+#define OR_VIA(c, k, h1, h2, f, s, t, r) \
+    { &go_active::c, k, {h1, h2}, h2[0] ? 2 : 1, f, s, t, r },
+static const ViaField kViaFields[] = {
+#include "offset_resolver_table.inc"
+};
+#undef OR_VIA
+#undef OR_FIELD
+constexpr int kViaFieldCount = (int)(sizeof(kViaFields) / sizeof(kViaFields[0]));
 }  // namespace
 
 // ---- САМОТЕСТ АВТООБНОВЛЕНИЯ (ВРЕМЕННЫЙ, убрать после проверки) -------------
@@ -145,6 +174,7 @@ enum Phase {
     PH_WAIT = 0,    // нет привязки
     PH_MAPS,        // разобрать /proc/<pid>/maps
     PH_SCAN,        // поиск слотов Il2CppClass
+    PH_KID,         // охота за классом по индексу типа (цепочки via)
     PH_FIELDS,      // калибровка массива полей + резолв таблицы
     PH_DONE,
     PH_HEAP,        // скан кучи вокруг «якоря» (когда в .so классов не нашлось)
@@ -342,7 +372,33 @@ AppliedRec s_applied[256];
 // смещения этого класса уже заняты (поле, найденное по имени, повторно не
 // отдаётся полю с ротированным именем).
 const char* s_applied_cls[256];
-int      s_applied_count = 0;
+// ---- Охота за классами с ротированными именами (цепочки via) ---------------
+// Найденные по индексу типа классы: kidx -> живой Il2CppClass.
+struct ViaClass { int32_t kidx = 0; std::uint64_t klass = 0; };
+ViaClass  s_via_classes[16];
+int       s_via_class_count = 0;
+// Что ищем прямо сейчас: индекс определения типа -> чья это цепочка.
+int32_t        s_want_kidx[8];
+const ViaField* s_want_owner[8];
+int            s_want_kidx_count = 0;
+bool           s_via_done = false;   // охоту больше не повторять
+int            s_via_found = 0;      // сколько цепочек замкнулось
+// Курсор охоты по диапазонам (порционно, как и остальные сканы).
+int            s_kid_region = 0;
+std::uint64_t  s_kid_pos = 0;
+std::uint64_t  s_kid_scanned = 0;
+// Ротированное имя класса -> его kidx. Тип поля бывает ссылкой на ДРУГОЙ
+// ротированный класс («c:eDw»), и в кэше классов такого имени нет — сверять
+// не с чем. Зато kidx у таких классов известен из цепочек: eDw — это Aim
+// второй цепочки, а eDg — playerEventHandler первой. Ищем по имени из карты.
+struct RotKidx { const char* name; int32_t kidx; };
+RotKidx  s_rot_kidx[16];
+int      s_rot_kidx_count = 0;
+// Результат цепочки: kidx каждого шага и класс, который по нему нашёлся.
+int32_t       s_via_kidx[kViaFieldCount][2];
+std::uint64_t s_via_klass[kViaFieldCount][2];
+// Метка целевого класса для списка занятых смещений (см. третий проход).
+char          s_via_mark[kViaFieldCount][40];int      s_applied_count = 0;
 bool     s_logged = false;
 pid_t    s_bound_pid = -1;        // к какому процессу/базе собрано состояние
 uint64_t s_bound_base = 0;
@@ -1856,6 +1912,14 @@ static int32_t find_field_offset(uint64_t klass, const char* field) {
 // Возврат: сколько индексов нашли (0 — класса такого типа в кэше нет).
 static int cached_class_type_indices(const char* short_name, int32_t* out, int max) {
     if (!short_name || !short_name[0] || max <= 0) return 0;
+    // Класса с таким именем в кэше нет, но имя может быть РОТИРОВАННЫМ: kidx
+    // тогда берём из цепочки via (см. s_rot_kidx). Без этого поля типа
+    // «c:eDw» не находились бы никогда.
+    for (int i = 0; i < s_rot_kidx_count; ++i) {
+        if (strcmp(s_rot_kidx[i].name, short_name) != 0) continue;
+        if (s_rot_kidx[i].kidx > 0) out[0] = s_rot_kidx[i].kidx;
+        return 1;
+    }
     int n = 0;
     for (int i = 0; i < s_class_count && n < max; ++i) {
         const char* nm = s_classes[i].name;
@@ -2111,8 +2175,10 @@ static int resolve_type_group(const TypeGroup& g, uint64_t klass) {
     // Потом — вынужденный выбор: если на оставшиеся слоты осталось ровно
     // столько же неподелённых полей, последнее поле принадлежит последнему
     // слоту по остатку. При прочих раскладах (полей больше, чем слотов) это
-    // была бы угадайка — её не делаем.
-    for (int s = 0; s < g.n; ++s) {
+    // была бы угадайка — её не делаем. Для «obj» вынужденный выбор НЕ делаем
+    // вовсе: «любой ссылочный» — половина класса, и «последнее оставшееся
+    // поле» может оказаться чем угодно.
+    if (!vague) for (int s = 0; s < g.n; ++s) {
         int slots_left = 0, cands_left = 0, last = -1;
         for (int t = s; t < g.n; ++t) {
             bool done = false;
@@ -2213,6 +2279,212 @@ static bool probe_layout(uint64_t klass, FiLayout& out) {
     return false;
 }
 
+// ---- Охота за классом по индексу типа (цепочки via) ------------------------
+// Имя класса ротируется, но его ТИП известен: это тип поля стартового класса.
+// FieldInfo.type того поля несёт индекс определения типа (klassIndex), а
+// byval_arg@0x20 каждого класса несёт его собственный. Ищем в тех же
+// диапазонах, что и указатели, структуру с нужным индексом. Порциями: чтения
+// десятками мегабайт за кадр на устройстве неприемлемы (см. скан маркеров).
+
+// Похож ли адрес на настоящий Il2CppClass: образ .so на +0x00, имя и
+// пространство имён — читаемые строки, массив полей — валидный адрес.
+static bool kid_class_ok(uint64_t k) {
+    const uint64_t image = qrd_ptr(k);
+    if (!valid_obj(image)) return false;
+    if (s_lib_begin && (image < s_lib_begin || image >= s_lib_end)) return false;
+    const uint64_t nm = qrd_ptr(k + IL2CPP_CLASS_NAME);
+    if (!valid_str_ptr(nm)) return false;
+    bool ok = false;
+    const std::string name = qrd_string(nm, &ok);
+    if (!ok || name.empty() || name.size() > 63) return false;
+    const uint64_t ns = qrd_ptr(k + IL2CPP_CLASS_NAMESPACE);
+    if (!valid_str_ptr(ns)) return false;
+    if (s_meta_begin && (ns < s_meta_begin || ns >= s_meta_end)) return false;
+    if (!valid_obj(qrd_ptr(k + IL2CPP_CLASS_FIELDS))) return false;
+    const int fc = qrd<uint16_t>(k + IL2CPP_CLASS_FIELD_COUNT);
+    return fc > 0 && fc <= 2048;
+}
+
+// kidx класса, чей тип имеет поле field класса klass (-1 если не читается).
+static int32_t field_type_kidx(uint64_t klass, const char* field) {
+    if (!klass || !field || !field[0]) return -1;
+    const uint64_t fields_ptr = qrd_ptr(klass + s_fields_off);
+    if (!valid_obj(fields_ptr)) return -1;
+    const int count = qrd<uint16_t>(klass + IL2CPP_CLASS_FIELD_COUNT);
+    if (count <= 0 || count > 2048) return -1;
+    char name[64];
+    for (int i = 0; i < count; ++i) {
+        const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
+        if (qrd_ptr(e + IL2CPP_FIELDINFO_PARENT) != klass) break;
+        if (!read_field_name(e, name, sizeof(name))) continue;
+        if (strcmp(name, field) != 0) continue;
+        const uint64_t typep = qrd_ptr(e + IL2CPP_FIELDINFO_TYPE);
+        if (!valid_obj(typep)) return -1;
+        return qrd<int32_t>(typep);
+    }
+    return -1;
+}
+
+// Пересчитать, что искать: kidx шага 0 — из кэша (стартовый класс известен по
+// имени), kidx шага 1 — из класса, найденного на шаге 0.
+static void build_via_wants() {
+    s_want_kidx_count = 0;
+    s_rot_kidx_count = 0;
+    for (int i = 0; i < kViaFieldCount; ++i) {
+        const ViaField& v = kViaFields[i];
+        s_via_kidx[i][0] = -1;
+        s_via_kidx[i][1] = -1;
+        s_via_klass[i][0] = 0;
+        s_via_klass[i][1] = 0;
+        // Стартовый класс ищем в кэше по имени. Тёзок может быть несколько
+        // (пустышка PlayerManager кэшируется РАНЬШЕ настоящего — лог 24.09),
+        // поэтому берём тот, у которого поле шага реально читает тип.
+        uint64_t start = 0;
+        int32_t k0 = -1;
+        for (int j = 0; j < s_class_count && k0 <= 0; ++j) {
+            if (strcmp(s_classes[j].name, v.via_cls) != 0) continue;
+            const int32_t kk = field_type_kidx(s_classes[j].klass, v.hops[0]);
+            if (kk > 0) { start = s_classes[j].klass; k0 = kk; }
+        }
+        if (!start) continue;
+        s_via_kidx[i][0] = k0;
+        // Ротированное имя целевого класса этой цепочки -> его kidx. Заполняем
+        // ДО охоты: kidx известен и без неё, а тип «c:eDw» другого поля как раз
+        // и ссылается на такой класс.
+        if (v.rot && v.rot[0] && s_rot_kidx_count < 16 &&
+            s_via_kidx[i][v.nhops - 1] > 0) {
+            s_rot_kidx[s_rot_kidx_count].name = v.rot;
+            s_rot_kidx[s_rot_kidx_count].kidx = s_via_kidx[i][v.nhops - 1];
+            ++s_rot_kidx_count;
+        }
+        if (v.nhops < 2) continue;
+        // Шаг 1: класс шага 0 уже мог найтись в прошлом заходе охоты.
+        uint64_t mid = 0;
+        for (int j = 0; j < s_via_class_count; ++j)
+            if (s_via_classes[j].kidx == k0) mid = s_via_classes[j].klass;
+        if (!mid) continue;
+        const int32_t k1 = field_type_kidx(mid, v.hops[1]);
+        if (k1 <= 0) continue;
+        s_via_kidx[i][1] = k1;
+    }
+    for (int i = 0; i < kViaFieldCount && s_want_kidx_count < 8; ++i) {
+        for (int hop = 0; hop < kViaFields[i].nhops && s_want_kidx_count < 8; ++hop) {
+            if (s_via_kidx[i][hop] <= 0 || s_via_klass[i][hop]) continue;
+            bool dup = false;
+            for (int j = 0; j < s_want_kidx_count; ++j)
+                if (s_want_kidx[j] == s_via_kidx[i][hop]) dup = true;
+            if (dup) continue;
+            s_want_kidx[s_want_kidx_count] = s_via_kidx[i][hop];
+            s_want_owner[s_want_kidx_count] = &kViaFields[i];
+            ++s_want_kidx_count;
+        }
+    }
+}
+
+static void phase_kid(double deadline) {
+    if (s_ptr_range_count == 0) build_scan_ranges();
+    // +0x40: доочитываем хвост куска (см. extra), чтобы класс, чьё начало
+    // попало в последние 0x28 байт куска, не потерялся на границе.
+    static uint8_t buf[kChunkBytes + 0x40];
+    while (s_want_kidx_count > 0 && s_kid_region < s_ptr_range_count &&
+           mono_seconds() < deadline) {
+        const PtrRange& r = s_ptr_ranges[s_kid_region];
+        if (s_kid_pos == r.end) { ++s_kid_region; s_kid_pos = 0; continue; }
+        if (s_kid_pos < r.start || s_kid_pos > r.end) s_kid_pos = r.start;
+        if (s_kid_pos >= r.end) { ++s_kid_region; s_kid_pos = 0; continue; }
+        // Окно строк метаданных пропускаем: там таблицы, а не классы.
+        if (s_meta_begin && r.start < s_meta_end && r.end > s_meta_begin) {
+            s_kid_pos = r.end; ++s_kid_region; continue;
+        }
+        const uint64_t remain = r.end - s_kid_pos;
+        const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
+        if (chunk < 0x40) { s_kid_pos = r.end; ++s_kid_region; continue; }
+        const uint64_t extra = (remain - chunk >= 0x28) ? 0x28 : 0;
+        if (!qrd_buf(s_kid_pos, buf, chunk + extra)) { s_kid_pos += chunk; s_kid_scanned += chunk; continue; }
+        // Шаг 8 байт: Il2CppClass выровнен по указателю. byval_arg лежит на
+        // +0x20, поэтому смотрим на 4 байта с отступом от начала кандидата.
+        // Кандидаты проверяем только до конца куска (p < chunk): хвост уже
+        // будет прочитан в следующем — без него тот же класс увидим дважды.
+        for (uint64_t p = 0; p < chunk && p + 0x28 <= chunk + extra; p += 8) {
+            int32_t kv = 0;
+            memcpy(&kv, buf + p + IL2CPP_CLASS_BYVAL_ARG, 4);
+            if (!kv) continue;
+            int hit = -1;
+            for (int w = 0; w < s_want_kidx_count; ++w)
+                if (s_want_kidx[w] == kv) { hit = w; break; }
+            if (hit < 0) continue;
+            const uint64_t cand = s_kid_pos + p;
+            if (!kid_class_ok(cand)) continue;
+            // Нашлось. Запоминаем — следующий такт охоты может ещё понадобиться.
+            bool known = false;
+            for (int j = 0; j < s_via_class_count; ++j)
+                if (s_via_classes[j].kidx == kv) known = true;
+            if (!known && s_via_class_count < 16) {
+                s_via_classes[s_via_class_count].kidx = kv;
+                s_via_classes[s_via_class_count].klass = cand;
+                ++s_via_class_count;
+                ++s_via_found;
+            }
+            // Класс отдаём ВСЕМ цепочкам, которые ждут именно этот индекс — их
+            // обычно много (все цепочки из PlayerManager делят один kidx).
+            // Двухшаговая цепочка принимает первый шаг только если в классе
+            // ЕСТЬ поле следующего шага: иначе застрянем на мусорном тёзке,
+            // и индекс придётся оставить в поиске.
+            int still_needed = 0;
+            for (int i = 0; i < kViaFieldCount; ++i) {
+                for (int hop = 0; hop < kViaFields[i].nhops; ++hop) {
+                    if (s_via_kidx[i][hop] != kv || s_via_klass[i][hop]) continue;
+                    if (kViaFields[i].nhops == 2 && hop == 0) {
+                        const int32_t k1 = field_type_kidx(cand, kViaFields[i].hops[1]);
+                        if (k1 <= 0) { ++still_needed; continue; }
+                        s_via_kidx[i][1] = k1;
+                    }
+                    s_via_klass[i][hop] = cand;
+                }
+            }
+            // Второй шаг цепочки стал известен только сейчас (из первого) —
+            // кладём его в поиск, чтобы охота не завершилась на полпути.
+            for (int i = 0; i < kViaFieldCount && s_want_kidx_count < 8; ++i) {
+                if (kViaFields[i].nhops < 2) continue;
+                if (!s_via_klass[i][0] || s_via_klass[i][1]) continue;
+                if (s_via_kidx[i][1] <= 0) continue;
+                const int32_t k1 = s_via_kidx[i][1];
+                bool dup = false;
+                for (int w = 0; w < s_want_kidx_count; ++w)
+                    if (s_want_kidx[w] == k1) dup = true;
+                if (dup) continue;
+                s_want_kidx[s_want_kidx_count] = k1;
+                s_want_owner[s_want_kidx_count] = &kViaFields[i];
+                ++s_want_kidx_count;
+            }
+            // Снимаем индекс с поиска только когда он уже никому не нужен.
+            if (still_needed == 0) {
+                for (int w = hit; w + 1 < s_want_kidx_count; ++w) {
+                    s_want_kidx[w] = s_want_kidx[w + 1];
+                    s_want_owner[w] = s_want_owner[w + 1];
+                }
+                --s_want_kidx_count;
+                if (s_want_kidx_count == 0) break;
+            }
+        }
+        s_kid_pos += chunk;
+        s_kid_scanned += chunk;
+    }
+    if (s_want_kidx_count > 0 && s_kid_region >= s_ptr_range_count) {
+        // Все диапазоны пройдены, а искомое не нашлось: охоту не повторяем.
+        s_want_kidx_count = 0;
+        LogLine("автооффсеты: охота по индексу типа — классов не нашлось "
+                "(просмотрено %llu МБ)", (unsigned long long)(s_kid_scanned >> 20));
+    }
+    if (s_want_kidx_count == 0) {
+        s_via_done = true;
+        s_phase = PH_FIELDS;
+        if (s_via_found)
+            LogLine("автооффсеты: найдено классов по индексу типа: %d "
+                    "(имена ротируются — искали не по имени)", s_via_found);
+    }
+}
+
 static void phase_fields() {
     // Якорь: по вшитому TYPEINFO_RVA читается ЖИВОЙ класс (привязка сверяет
     // базу ровно этой проверкой). Логуем его имя — сразу видно, ротированы ли
@@ -2298,6 +2570,20 @@ static void phase_fields() {
                 (unsigned long long)s_calib_best_off);
         s_phase = PH_DONE;
         return;
+    }
+    // Цепочки via: классы с ротированными именами. Считаем, какие индексы типа
+    // нужны, и уходим в охоту — она порционная, поэтому резолв продолжится
+    // следующим тактом и вернётся сюда же (калибровка ниже не повторяется).
+    if (!s_via_done && kViaFieldCount > 0) {
+        build_via_wants();
+        if (s_want_kidx_count > 0) {
+            s_kid_region = 0; s_kid_pos = 0; s_kid_scanned = 0;
+            s_phase = PH_KID;
+            LogLine("автооффсеты: ищу классы по индексу типа (имена ротируются) — "
+                    "%d индекс(ов), цепочек %d", s_want_kidx_count, kViaFieldCount);
+            return;
+        }
+        s_via_done = true;
     }
     if (anchor) {
         // Читаются ли имена ПОЛЕЙ: даже найдя массив, поля мы ищем по имени.
@@ -2432,6 +2718,81 @@ static void phase_fields() {
     if (by_type)
         LogLine("автооффсеты: полей найдено по типу (имена ротированы): %d "
                 "(разведено группами полей одного типа: %d)", by_type, by_group);
+
+    // Третий проход — классы с РОТИРУЮЩИМСЯ именами. Их находил phase_kid:
+    // по типу поля стартового класса брался индекс определения типа, по
+    // индексу — живой класс в памяти. Имя и полю, и классу не нужно: поле
+    // ищется по типу, ровно как во втором проходе.
+    // Второй шаг двухшаговой цепочки стал известен только во время охоты —
+    // дописываем его ротированное имя в таблицу имя->индекс, чтобы типы вида
+    // «c:eDw» (ссылка на второй шаг) тоже разрешались.
+    for (int i = 0; i < kViaFieldCount && s_rot_kidx_count < 16; ++i) {
+        if (kViaFields[i].nhops < 2) continue;
+        if (!kViaFields[i].rot || !kViaFields[i].rot[0]) continue;
+        if (s_via_kidx[i][1] <= 0) continue;
+        bool has = false;
+        for (int j = 0; j < s_rot_kidx_count; ++j)
+            if (strcmp(s_rot_kidx[j].name, kViaFields[i].rot) == 0) has = true;
+        if (has) continue;
+        s_rot_kidx[s_rot_kidx_count].name = kViaFields[i].rot;
+        s_rot_kidx[s_rot_kidx_count].kidx = s_via_kidx[i][1];
+        ++s_rot_kidx_count;
+    }
+    int by_via = 0;
+    for (int i = 0; i < kViaFieldCount; ++i) {
+        const ViaField& vf = kViaFields[i];
+        const uint64_t k = s_via_klass[i][vf.nhops - 1];
+        if (!k) continue;
+        bool done = false;
+        for (int j = 0; j < s_applied_count; ++j)
+            if (s_applied[j].slot == vf.slot) { done = true; break; }
+        if (done) continue;
+        // Метка класса для списка занятых смещений: живое имя целевого класса
+        // (оно ротировано, зато уникально). Две константы, пришедшие в один и
+        // тот же класс, делят занятые поля через одну и ту же метку.
+        bool nok = false;
+        const std::string kname = qrd_string(qrd_ptr(k + IL2CPP_CLASS_NAME), &nok);
+        if (nok && !kname.empty() && kname.size() < 40)
+            snprintf(s_via_mark[i], sizeof(s_via_mark[i]), "%s", kname.c_str());
+        else
+            snprintf(s_via_mark[i], sizeof(s_via_mark[i]), "via#%d", i);
+        OrField of_tmp;
+        of_tmp.slot = vf.slot;
+        of_tmp.cls = s_via_mark[i];
+        of_tmp.field = vf.field;
+        of_tmp.is_static = false;
+        of_tmp.type = vf.type;
+        // Сначала — по имени: имена ПОЛЕЙ внутри ротированного класса обычно
+        // стабильны («Aim», «nickname», «LastLocalHitPoint»), и точное имя
+        // надёжнее любой эвристики по типу. Ротировалось и имя — уходим к типу.
+        const int32_t by_name = find_field_offset(k, vf.field);
+        if (by_name >= 0) {
+            if (vf.is_static) {
+                // Статическое поле: значение лежит в static_fields.
+                const uint64_t sfp = qrd_ptr(k + IL2CPP_CLASS_STATIC_FIELDS);
+                if (valid_obj(sfp) && by_name < 0x400) {
+                    const uint8_t v = qrd<uint8_t>(sfp + (uint64_t)by_name);
+                    if (!(vf.type && vf.type[0] == 'b' && v != 0 && v != 1)) {
+                        of_tmp.is_static = true;
+                        apply_resolution(of_tmp, by_name);
+                        ++by_via;
+                        continue;
+                    }
+                }
+            } else {
+                apply_resolution(of_tmp, by_name);
+                ++by_via;
+                continue;
+            }
+        }
+        TypeGroup g;
+        g.n = 0;
+        g.of[g.n++] = &of_tmp;
+        if (resolve_type_group(g, k)) by_via += g.n;
+    }
+    if (by_via)
+        LogLine("автооффсеты: полей найдено через цепочку via (имена классов "
+                "ротируются): %d", by_via);
 
     for (int i = 0; i < kOrFieldCount; ++i) {
         const OrField& of = kOrFields[i];
@@ -2787,6 +3148,7 @@ void offset_resolver_tick() {
         case PH_MAPS:   phase_maps(); break;
         case PH_SCAN:   phase_scan(deadline); break;
         case PH_HEAP:   phase_heap(deadline); break;
+        case PH_KID:    phase_kid(deadline); break;
         case PH_STRS:   phase_strsearch(deadline); break;
         case PH_BLOB:   phase_blob(deadline); break;
         case PH_PTR:    phase_ptr(deadline); break;
@@ -2848,6 +3210,13 @@ void offset_resolver_reset() {
     // к процессу (s_known_pid) и переживают перепривязки к той же игре.
     s_candidate_count = 0;
     s_scan_base = 0;
+    s_via_class_count = 0; s_via_done = false; s_via_found = 0;
+    s_rot_kidx_count = 0;
+    s_want_kidx_count = 0; s_kid_region = 0; s_kid_pos = 0; s_kid_scanned = 0;
+    for (int i = 0; i < kViaFieldCount; ++i) {
+        s_via_kidx[i][0] = s_via_kidx[i][1] = -1;
+        s_via_klass[i][0] = s_via_klass[i][1] = 0;
+    }
 }
 
 // После переключения релиз/бета слоты перезаписываются табличными значениями;
@@ -2873,6 +3242,7 @@ bool offset_resolver_busy() {
     return s_phase == PH_MAPS || s_phase == PH_SCAN ||
            s_phase == PH_HEAP || s_phase == PH_STRS ||
            s_phase == PH_BLOB || s_phase == PH_PTR ||
+           s_phase == PH_KID ||
            s_phase == PH_FIELDS;
 }
 
@@ -2930,6 +3300,13 @@ void offset_resolver_status(char* out, size_t cap) {
                  (unsigned long long)(s_scanned_bytes >> 20),
                  (unsigned long long)(s_total_bytes >> 20),
                  wanted_in_cache());
+        return;
+    }
+    if (s_phase == PH_KID) {
+        // Охота за классами с ротируемыми именами по индексу типа. «Готов»
+        // показывать нельзя: поля ещё не разрешены (phase_fields впереди).
+        snprintf(out, cap, "ищет классы по индексу типа: %llu МБ, найдено %d",
+                 (unsigned long long)(s_kid_scanned >> 20), s_via_found);
         return;
     }
     if (s_phase == PH_STRS || s_phase == PH_BLOB || s_phase == PH_PTR) {

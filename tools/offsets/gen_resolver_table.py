@@ -124,11 +124,56 @@ def type_sig(entry):
     return ''
 
 
+def rot_name(entry):
+    """Текущее ротированное имя класса из строки класса.
+
+    В карте класс с ротирующимся именем описан как
+    «PlayerEventHandler (имя ротирует: DqO -> Gum -> brc -> eDg)» — последний
+    токен после «->» и есть имя в текущем билде (оно же суффикс struct:
+    eDg_Fields). Для «eDt» ротации в строке нет — имя и так ротированное.
+    Нужно резолверу: тип поля бывает «c:eDw», то есть ссылкой на ДРУГОЙ
+    ротированный класс, и искать такой тип в кэше классов бессмысленно.
+    """
+    cls = entry.get('class') or ''
+    if 'ротирует' not in cls:
+        return cls.split(' ')[0] if cls else ''
+    tail = cls.rsplit('->', 1)[-1].strip()
+    return tail.rstrip(')').strip()
+
+
+def via_hops(entry):
+    """Цепочка «как добраться до класса с ротированным именем» из карты.
+
+    В карте: via = [{'struct': 'Oxide_PlayerManager_Fields', 'field':
+    'playerEventHandler'}, {'field': 'Aim'}] — из PlayerManager через поле
+    playerEventHandler приходим в класс обработчика событий, а через его поле
+    Aim — в класс активности. Возврат: [стартовый_класс, поле, поле2] (поле2
+    может быть ''), либо [] если цепочки нет или она неполная.
+    """
+    via = entry.get('via')
+    if not via:
+        return []
+    hops = []
+    for hop in via:
+        struct = hop.get('struct')
+        if struct:
+            # 'Oxide_PlayerManager_Fields' -> 'PlayerManager'
+            name = struct[:-len('_Fields')] if struct.endswith('_Fields') else struct
+            hops.append(short_class_name(name))
+        hops.append(hop.get('field') or '')
+    if len(hops) == 2:
+        hops.append('')
+    if len(hops) != 3 or not hops[0] or not hops[1]:
+        return []
+    return hops
+
+
 def main():
     omap = json.load(open(MAP, encoding='utf-8'))
     known = go_field_names()
 
     emit = []       # (const, short, field, is_static, sig)
+    emit_via = []   # (const, [стартовый_класс, поле, поле2], field, is_static, sig)
     skipped = []    # (const, причина)
     for const, entry in sorted(omap.items()):
         if entry.get('kind') != 'field':
@@ -138,14 +183,29 @@ def main():
             continue
         cls = entry.get('class') or ''
         note = entry.get('note', '')
+        # Цепочка «через объект»: класс с ротированным именем (или вообще без
+        # имени в карте) достигается как ТИП поля известного класса. По типу
+        # резолвер вычисляет индекс определения типа, а по индексу находит
+        # живой класс в памяти — имя ему не нужно (см. phase_kid).
+        hops = via_hops(entry)
+        via_ok = bool(hops) and (not cls or 'ротирует' in cls or cls in SKIP_CLASSES)
         if not cls:
+            if via_ok:
+                emit_via.append((const, hops, entry.get('field') or '', False,
+                                 type_sig(entry), rot_name(entry)))
+                continue
             skipped.append((const, 'класс не указан (через объект)'))
             continue
         # Ротируется ИМЯ КЛАССА — только это делает класс ненаходимым по имени.
         # Ротируется имя ПОЛЯ — не беда: поле ищется по типу (пятый столбец),
         # поэтому упоминание «ротирует» в note нас не останавливает.
         if 'ротирует' in cls or cls in SKIP_CLASSES:
-            skipped.append((const, 'имя класса ротируется'))
+            if via_ok:
+                emit_via.append((const, hops, entry.get('field') or '',
+                                 cls.endswith('.static'), type_sig(entry),
+                                 rot_name(entry)))
+            else:
+                skipped.append((const, 'имя класса ротируется'))
             continue
         if 'луч' in cls:  # «результат луча» — не класс
             skipped.append((const, 'не класс'))
@@ -185,6 +245,26 @@ def main():
     lines.append('//   obj любой ссылочный; c:Имя — класс/структура с этим коротким именем.')
     for const, short, field, is_static, sig in emit:
         lines.append(f'OR_FIELD({const}, "{short}", "{field}", {str(is_static).lower()}, "{sig}")')
+    # У записей без класса ротированное имя неизвестно, но цепочка та же, что
+    # у соседей (EVENT_HANDLER_LAST_HIT_POINT идёт тем же путём, что и остальные
+    # PlayerEventHandler) — берём имя у них, чтобы и «c:eDw» разрешался.
+    rot_by_chain = {}
+    for _c, _h, _f, _s, _g, _r in emit_via:
+        if _r:
+            rot_by_chain.setdefault(tuple(_h[1:]), _r)
+    emit_via = [(c, h, f, s, g, r or rot_by_chain.get(tuple(h[1:]), ''))
+                for c, h, f, s, g, r in emit_via]
+
+    if emit_via:
+        lines.append('')
+        lines.append('// Классы с ротированным именем. OR_VIA(константа, "стартовыйКласс",')
+        lines.append('// "поле", "поле2" (пусто — цепочка из одного шага), "искомоеПоле", статик, "тип",')
+        lines.append('// "ротИмяЦелевогоКласса") — последнее резолвер использует, когда тип поля')
+        lines.append('// сам ссылается на ротированный класс («c:eDw»): сверять не с чем, поэтому')
+        lines.append('// сопоставляем имя из карты с kidx, который дала цепочка.')
+        for const, hops, field, is_static, sig, rot in emit_via:
+            lines.append(f'OR_VIA({const}, "{hops[0]}", "{hops[1]}", "{hops[2]}", '
+                         f'"{field}", {str(is_static).lower()}, "{sig}", "{rot}")')
 
     header = '\n'.join(lines) + '\n'
     old = open(OUT, encoding='utf-8').read() if os.path.exists(OUT) else ''
@@ -194,6 +274,7 @@ def main():
     else:
         print(f'{OUT} не изменился: {len(emit)} записей')
 
+    print(f'через цепочку (имена классов ротируются): {len(emit_via)}')
     print(f'пропущено {len(skipped)}:')
     from collections import Counter
     by_reason = Counter(r for _, r in skipped)

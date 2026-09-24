@@ -211,6 +211,11 @@ static void child_main(int out_fd) {
     const uint64_t s_oremark = put_string(meta, moff, "MineableObjectExtension_OreHitstreaksMarker");
     const uint64_t s_pickup = put_string(meta, moff, "ItemPickup");
     const uint64_t s_weapon = put_string(meta, moff, "PlayerWeapon");
+    // Классы с ротирующимися именами (цепочки via): лежат только в куче
+    // ребёнка, а не в слотах — по имени кэш их не знает, находит только
+    // охота по индексу типа (byval_arg — индекс типа поля-ссылки).
+    const uint64_t s_peg  = put_string(meta, moff, "eDg");   // PlayerEventHandler
+    const uint64_t s_act  = put_string(meta, moff, "eDw");   // Activity
 
     // Окно данных «.so»: сюда кладём слоты-указатели, которые ищет сканер.
     uint64_t* slots = (uint64_t*)(il + 0x40000);
@@ -225,9 +230,10 @@ static void child_main(int out_fd) {
         PF("nicklabel",          0x138),   // вшито 0x130
         PF("team",               0x128),   // вшито 0x120
         PF("clientPlayerList",   0x18),    // статик; вшито 0x10
+        {"playerEventHandler", 0x348, 0x301, 0x12},  // c:eDg; вшито 0x78; вход в цепочки via
     };
     uint64_t pm_real = build_class(heap, hoff, il_base + 0x1000, s_pm, s_oxide,
-                                   pm_fields, 6, meta, moff, 0x101);
+                                   pm_fields, 7, meta, moff, 0x101);
 
     // Тёзка без полей: резолв не обязан на него попасть.
     uint64_t pm_decoy = build_class(heap, hoff, il_base + 0x1000, s_pm, s_oxide,
@@ -338,6 +344,30 @@ static void child_main(int out_fd) {
     };
     uint64_t playerweapon = build_class(heap, hoff, il_base + 0x1000, s_weapon, s_oxide,
                                         weapon_fields, 1, meta, moff, 0x20E);
+
+    // PlayerEventHandler (ротированное имя eDg): первый шаг цепочек via. В
+    // слотах его НЕТ — кэш по именам его не знает, находит только охота по
+    // индексу типа: byval_arg 0x301 = тип PlayerManager.playerEventHandler.
+    const PField peg_fields[] = {
+        {"Aim",               0x40, 0x302, 0x12},  // Activity; имя читаемое; вшито 0x290
+        {"XqU",               0xD8, 0x101, 0x12},  // c:PlayerManager; имя ротировано ("manager")
+        {"LastLocalHitPoint", 0x180, 0x104, 0x12}, // имя читаемое; вшито 0x170
+        {"LookDirection",     0x140, 0x105, 0x12}, // имя читаемое; вшито 0x140
+        {"XqV",               0x188, 0x106, 0x12}, // балласт: не даём «вынужденному выбору»
+    };
+    uint64_t playerhandler = build_class(heap, hoff, il_base + 0x1000, s_peg, s_oxide,
+                                         peg_fields, 5, meta, moff, 0x301);
+
+    // Activity (ротированное имя eDw): ВТОРОЙ шаг двухшаговой цепочки — тип
+    // поля eDg.Aim (0x302). Два bool-поля с ротированными именами, смещения
+    // уехали от вшитого 0x10: резолвер берёт ближе, если оно единственное.
+    const PField act_fields[] = {
+        {"_XqS_k__BackingField", 0x90, 0, 0x02},  // bool; вшито 0x10
+        {"_XqT_k__BackingField", 0xA0, 0, 0x02},  // bool; второй такой же
+    };
+    uint64_t activity = build_class(heap, hoff, il_base + 0x1000, s_act, s_oxide,
+                                    act_fields, 2, meta, moff, 0x302);
+    (void)playerhandler; (void)activity;
 
     // Слоты: настоящие классы вперемешку с мусором (выравнивание, битые
     // указатели, указатели в никуда) — фильтры сканера обязаны его отсеять.
@@ -522,6 +552,25 @@ int main() {
     // на вшитых значениях. Если резолвер начнёт писать сюда наугад — упадёт.
     check(go_active::OREMARK_AGE == 0x58 && go_active::OREMARK_SMOOTH == 0x48,
           "OreHitstreaksMarker: неразводимые float оставлены вшитыми");
+
+    // ---- цепочки via: классы с ротирующимися именами ------------------------
+    // В кэше PlayerManager-тёзка (пустышка без полей) лежит РАНЬШЕ настоящего:
+    // вход в цепочку обязан найти у настоящего. Целевые классы (ротированные
+    // имена eDg/eDw) в кэше нет вовсе — только охота по индексу типа их
+    // находит в куче ребёнка.
+    check(go_active::PLAYER_EVENT_HANDLER == 0x348,
+          "playerEventHandler по имени 0x78 -> 0x348 (вход в цепочку)");
+    check(go_active::EVENT_HANDLER_AIM_ACTIVITY == 0x40,
+          "eDg.Aim через цепочку по имени 0x290 -> 0x40");
+    check(go_active::EVENT_HANDLER_MANAGER_BACKREF == 0xD8,
+          "eDg: back-ref по типу PlayerManager 0xD0 -> 0xD8 (имя ротировано)");
+    check(go_active::EVENT_HANDLER_LAST_HIT_POINT == 0x180,
+          "eDg.LastLocalHitPoint через цепочку (без класса) 0x170 -> 0x180");
+    check(go_active::ACTIVITY_ACTIVE_FLAG == 0x90,
+          "Activity (двухшаговая цепочка): bool по типу, ближе из двух 0x10 -> 0x90");
+    check(go_active::EVENT_HANDLER_LAST_HIT_TIME == 0x178 &&
+          go_active::GUM_AIM_RAYCAST == 0x168 && go_active::GUM_RAYCAST_DATA == 0x160,
+          "неразводимые via-поля оставлены вшитыми (не угадываем)");
 
     // ---- чего нет в ребёнке — остаётся вшитым ------------------------------
     check(go_active::MINEABLE_ENTITY_TYPE == mineable_before,
