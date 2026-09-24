@@ -138,7 +138,7 @@ enum Phase {
     PH_HEAP,        // скан кучи вокруг «якоря» (когда в .so классов не нашлось)
     PH_STRS,        // поиск строки «PlayerManager» в анонимной памяти
     PH_BLOB,        // поиск в найденном блобе строк всех табличных имён
-    PH_PTR,         // поиск в куче указателей на эти строки (= классы)
+    PH_PTR,         // поиск в образе и куче указателей на эти строки (= классы)
 };
 
 Phase    s_phase = PH_WAIT;
@@ -214,6 +214,17 @@ uint64_t s_ptr_scanned = 0;
 uint64_t s_ptr_hits = 0;          // совпадений указателя с адресом имени
 uint64_t s_ptr_verified = 0;      // из них оказалось живыми классами
 uint64_t s_ptr_inwin = 0;         // значений-указателей внутрь окна строк (любых)
+
+// Диапазоны поиска указателей на имена. Порядок важный: СНАЧАЛА читаемые
+// сегменты самой libil2cpp.so, ПОТОМ анонимная память. Протектор может вшить
+// метадату (массив Il2CppClass вместе с указателями имён) прямо в образ —
+// тогда в куче искать нечего, а классы лежат в .data/.rodata библиотеки.
+struct PtrRange { uint64_t start = 0, end = 0; };
+PtrRange  s_ptr_ranges[128];
+int       s_ptr_range_count = 0;
+uint64_t  s_ptr_seg_bytes = 0;    // сколько МБ в сегментах .so
+uint64_t  s_ptr_anon_bytes = 0;   // сколько МБ в анонимной памяти
+static void build_ptr_ranges();   // определение ниже, вызывается из phase_blob
 
 // Знания о базах в рамках ЖИВОГО процесса (переживают сброс скана при
 // перепривязке; очищаются только при смене pid). Лог с устройства показал:
@@ -806,6 +817,7 @@ static void phase_blob(double deadline) {
             LogLine("автооффсеты: не найдены имена: %s", miss);
         }
         if (s_wanted_str_found > 0) {
+            build_ptr_ranges();
             s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
             s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
             s_last_progress_log = 0;
@@ -818,12 +830,40 @@ static void phase_blob(double deadline) {
     }
 }
 
+// Собираем карту поиска: читаемые (не исполняемые) сегменты libil2cpp.so +
+// все анонимные регионы. Метадата может быть вшита в образ протектором, и
+// тогда пул классов лежит в .data/.rodata библиотеке, а не в куче процесса.
+static void build_ptr_ranges() {
+    s_ptr_range_count = 0;
+    s_ptr_seg_bytes = 0;
+    s_ptr_anon_bytes = 0;
+    for (int i = 0; i < s_seg_count && s_ptr_range_count < 128; ++i) {
+        if (s_segments[i].end <= s_segments[i].start) continue;
+        s_ptr_ranges[s_ptr_range_count].start = s_segments[i].start;
+        s_ptr_ranges[s_ptr_range_count].end = s_segments[i].end;
+        s_ptr_seg_bytes += s_segments[i].end - s_segments[i].start;
+        ++s_ptr_range_count;
+    }
+    for (int i = 0; i < s_anon_count && s_ptr_range_count < 128; ++i) {
+        if (s_anon[i].end <= s_anon[i].start) continue;
+        s_ptr_ranges[s_ptr_range_count].start = s_anon[i].start;
+        s_ptr_ranges[s_ptr_range_count].end = s_anon[i].end;
+        s_ptr_anon_bytes += s_anon[i].end - s_anon[i].start;
+        ++s_ptr_range_count;
+    }
+    LogLine("автооффсеты: ищу указатели на имена в %d диапазонах — "
+            "сегменты libil2cpp.so %llu МБ + анонимная память %llu МБ",
+            s_ptr_range_count,
+            (unsigned long long)(s_ptr_seg_bytes >> 20),
+            (unsigned long long)(s_ptr_anon_bytes >> 20));
+}
+
 static void phase_ptr(double deadline) {
     static uint8_t buf[kChunkBytes];
-    while (s_ptr_region < s_anon_count && mono_seconds() < deadline) {
-        const AnonRegion& r = s_anon[s_ptr_region];
-        // Сканируем ВСЕ анонимные регионы, не только writable: протектор может
-        // закрывать пул классов на r-- после инициализации.
+    while (s_ptr_region < s_ptr_range_count && mono_seconds() < deadline) {
+        const PtrRange& r = s_ptr_ranges[s_ptr_region];
+        // Сканируем и образ, и ВСЕ анонимные регионы, не только writable:
+        // протектор может закрыть пул классов на r-- после инициализации.
         if (s_ptr_pos < r.start) s_ptr_pos = r.start;
         if (s_ptr_pos >= r.end) { ++s_ptr_region; continue; }
         const uint64_t remain = r.end - s_ptr_pos;
@@ -837,10 +877,20 @@ static void phase_ptr(double deadline) {
             uint64_t v;
             memcpy(&v, buf + i * 8, 8);
             v = memio::untag(v);
-            if (v < s_meta_begin || v >= s_meta_end) continue;
-            ++s_ptr_inwin;   // любое значение внутрь окна строк — указатель вообще
+            // Имя может лежать абсолютным указателем, а может — RVA от начала
+            // образа: вшитая в .so метадата часто хранит именно смещения.
+            uint64_t cand[2];
+            int ncand = 0;
+            if (v >= s_meta_begin && v < s_meta_end) cand[ncand++] = v;
+            else if (s_lib_begin && v && v < (2ull << 30) &&
+                     s_lib_begin + v >= s_meta_begin && s_lib_begin + v < s_meta_end)
+                cand[ncand++] = s_lib_begin + v;
+            if (!ncand) continue;
+            ++s_ptr_inwin;   // значение указывает внутрь окна строк (любое)
             for (int n = 0; n < s_wanted_name_count; ++n) {
-                if (s_wanted_str[n] != v) continue;
+                bool hit = false;
+                for (int c = 0; c < ncand; ++c) if (s_wanted_str[n] == cand[c]) hit = true;
+                if (!hit) continue;
                 ++s_ptr_hits;
                 const uint64_t klass = s_ptr_pos + (uint64_t)i * 8 - IL2CPP_CLASS_NAME;
                 const uint64_t image = qrd_ptr(klass);
@@ -865,18 +915,18 @@ static void phase_ptr(double deadline) {
         const double now_s = mono_seconds();
         if (now_s - s_last_progress_log >= 8.0) {
             s_last_progress_log = now_s;
-            LogLine("автооффсеты: поиск указателей %llu МБ, в окне строк %llu, точных %llu, живых классов %llu",
-                    (unsigned long long)(s_ptr_scanned >> 20),
+            LogLine("автооффсеты: поиск указателей %llu МБ (диапазон %d/%d), в окне строк %llu, точных %llu, живых классов %llu",
+                    (unsigned long long)(s_ptr_scanned >> 20), s_ptr_region, s_ptr_range_count,
                     (unsigned long long)s_ptr_inwin,
                     (unsigned long long)s_ptr_hits,
                     (unsigned long long)s_ptr_verified);
         }
     }
-    if (all_wanted_found() || s_ptr_region >= s_anon_count ||
+    if (all_wanted_found() || s_ptr_region >= s_ptr_range_count ||
         s_ptr_scanned >= (768ull << 20) || mono_seconds() >= s_scan_deadline) {
-        LogLine("автооффсеты: бутстрап завершён — просмотрено %llu МБ (%d регионов), "
+        LogLine("автооффсеты: бутстрап завершён — просмотрено %llu МБ (%d диапазонов из %d), "
                 "в окне строк %llu значений, точных указателей %llu, живых классов %llu (в кэше %d)",
-                (unsigned long long)(s_ptr_scanned >> 20), s_ptr_region,
+                (unsigned long long)(s_ptr_scanned >> 20), s_ptr_region, s_ptr_range_count,
                 (unsigned long long)s_ptr_inwin,
                 (unsigned long long)s_ptr_hits,
                 (unsigned long long)s_ptr_verified, s_class_count);
@@ -1319,6 +1369,7 @@ void offset_resolver_reset() {
     for (int i = 0; i < 64; ++i) s_wanted_str[i] = 0;
     s_ptr_pos = 0; s_ptr_region = 0; s_ptr_scanned = 0;
     s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
+    s_ptr_range_count = 0; s_ptr_seg_bytes = 0; s_ptr_anon_bytes = 0;
     s_applied_count = 0; s_logged = false;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
     // «какие базы пусты, а где классы живые» НЕ сбрасываются: они привязаны
