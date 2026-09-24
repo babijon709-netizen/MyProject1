@@ -103,9 +103,11 @@ if [[ -f "${ROOT}/libs/arm64-v8a/xvcen.bin" && -f "${ROOT}/libs/arm64-v8a/benzha
 #   ./xvcen.sh              -> запускает чит
 #   ./xvcen.sh dump [пакет] -> запускает съёмщик памяти игры
 set -e
-DIR="/data/local/tmp/.benzhack_bin"
-mkdir -p "$DIR"
-chmod 777 "$DIR" 2>/dev/null || true
+# Бинарники нужны лишь на время запуска; постоянную .benzhack_bin не создаём.
+# Случайное имя и приватные права не позволяют переиспользовать чужие файлы.
+umask 077
+DIR=$(mktemp -d "${TMPDIR:-/data/local/tmp}/xvcen.XXXXXXXX")
+trap 'rm -rf "$DIR"' 0
 
 # Распаковываем встроенные бинарники, если их ещё нет или этот скрипт новее
 PAYLOAD_LINE=$(awk '/^__PAYLOAD_BELOW__/ {print NR + 1; exit 0; }' "$0")
@@ -114,11 +116,12 @@ chmod 755 "$DIR/xvcen.bin" "$DIR/benzhack_dump" 2>/dev/null || true
 
 if [ "$1" = "dump" ]; then
     shift
-    exec "$DIR/benzhack_dump" "$@"
+    "$DIR/benzhack_dump" "$@"
+    exit $?
 fi
 
-exec "$DIR/xvcen.bin" "$@"
-exit 0
+"$DIR/xvcen.bin" "$@"
+exit $?
 __PAYLOAD_BELOW__
 SH_EOF
     cat "${_payload}" >> "${ROOT}/libs/arm64-v8a/xvcen.sh"
