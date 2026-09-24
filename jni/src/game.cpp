@@ -1052,14 +1052,9 @@ static uint64_t resolve_runtime_player_list() {
             g_player_manager_class = found;
     }
     if (!g_player_manager_class && PLAYER_MANAGER_TYPEINFO_RVA != 0) {
-        uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
+        const uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
         if (class_identity(candidate, "PlayerManager", "Oxide") != 0)
             g_player_manager_class = candidate;
-        else if (go::CurrentBuild() == go::Build::Beta) {
-            candidate = rd_ptr(g_il2cpp_base + 0xDAE42B8);
-            if (class_identity(candidate, "PlayerManager", "Oxide") != 0)
-                g_player_manager_class = candidate;
-        }
     }
     if (!g_player_manager_class) {
         return 0;

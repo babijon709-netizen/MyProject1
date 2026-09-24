@@ -75,10 +75,10 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // own methods and following  adrp/ldr -> R_AARCH64_RELATIVE addend -> slot,
 // keeping only slots that are then dereferenced as  ldr x8,[klass,#0xB8]
 // (Il2CppClass::static_fields) - i.e. exactly the access our reader performs.
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xDAD5D08;  // бета: было 0xD9C5310
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xDAE42B8;  // бета: было 0xD9C5310 / 0xDAD5D08
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xDB2EF10; // GameControllerBase  // бета: было 0xD9C0690
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xDB516E0; // GameControllerBase  // бета: было 0xD9C0690 / 0xDB2EF10
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
