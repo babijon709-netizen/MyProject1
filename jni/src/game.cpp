@@ -6509,8 +6509,32 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
 // ===================== Local player aim (ADS) state =====================
 
 static bool read_local_aim_state() {
+    static uint64_t blend_player = 0;
+    static float last_blend = 0.f;
+    static bool blend_falling = false;
     uint64_t local = resolve_local_player();
-    if (!local) { g_aim_state = {}; return false; }
+    if (!local) { g_aim_state = {}; blend_player = 0; blend_falling = false; return false; }
+    if (local != blend_player) {
+        blend_player = local; last_blend = 0.f; blend_falling = false;
+        g_aim_state = {};
+    }
+    // The animation blend is not an ADS flag: it stays high after release.
+    // Its *falling edge*, however, is the earliest observable un-scope signal
+    // when the obfuscated Aim.Active field cannot be resolved. Latch the edge
+    // until the transition finishes; a stale activity byte must not override it.
+    uint64_t blend_fp = rd_ptr(local + PLAYER_FP_MANAGER);
+    float blend = 0.f;
+    bool blend_ok = blend_fp && rd_exact(blend_fp + FPMANAGER_AIM_BLEND, blend) &&
+                    std::isfinite(blend) && blend >= 0.f && blend <= 1.05f;
+    if (blend_ok) {
+        if (blend + 0.004f < last_blend && blend > 0.02f) blend_falling = true;
+        if (blend > last_blend + 0.004f || blend <= 0.02f) blend_falling = false;
+        last_blend = blend;
+    }
+    if (blend_ok && blend_falling) {
+        g_aim_state.aiming = false; g_aim_state.source = 3;
+        return true;
+    }
 
     // Cheap fast path on cached pointers; re-validate the chain periodically.
     if (g_aim_state.aim_activity && --g_aim_state.revalidate > 0) {
@@ -6568,10 +6592,16 @@ static bool read_local_aim_state() {
                 return true;
             }
         }
-        // FOV blend is an animation value: it decays for seconds after ADS
-        // ends. It must never be used as an input state for scope-only aim.
-        // If neither Aim.Active nor weapon.isAiming can be confirmed, fail
-        // closed rather than continuing to steer after the player unscopes.
+        // Some builds rotate Aim.Active and weapon.isAiming; until those
+        // offsets resolve, accept the blend only outside its falling edge.
+        // The falling edge above cuts off the aim as soon as ADS is released.
+        if (blend_ok && blend > 0.15f) {
+            fresh.fp_manager = fp_manager;
+            fresh.aiming = true;
+            fresh.source = 3;
+            g_aim_state = fresh;
+            return true;
+        }
     }
 
     fresh.aiming = false;

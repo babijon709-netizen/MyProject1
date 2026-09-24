@@ -2416,7 +2416,17 @@ static void phase_kid(double deadline) {
                 if (s_want_kidx[w] == kv) { hit = w; break; }
             if (hit < 0) continue;
             const uint64_t cand = s_kid_pos + p;
-            if (!kid_class_ok(cand)) continue;
+            if (!kid_class_ok(cand)) {
+                static int rejected_logged = 0;
+                if (rejected_logged++ < 4)
+                    LogLine("автооффсеты: кандидат kidx=%d @0x%llx отвергнут: image=0x%llx name=0x%llx ns=0x%llx fields=0x%llx count=%u",
+                            kv, (unsigned long long)cand, (unsigned long long)qrd_ptr(cand),
+                            (unsigned long long)qrd_ptr(cand + IL2CPP_CLASS_NAME),
+                            (unsigned long long)qrd_ptr(cand + IL2CPP_CLASS_NAMESPACE),
+                            (unsigned long long)qrd_ptr(cand + IL2CPP_CLASS_FIELDS),
+                            (unsigned)qrd<uint16_t>(cand + IL2CPP_CLASS_FIELD_COUNT));
+                continue;
+            }
             // Нашлось. Запоминаем — следующий такт охоты может ещё понадобиться.
             bool known = false;
             for (int j = 0; j < s_via_class_count; ++j)
