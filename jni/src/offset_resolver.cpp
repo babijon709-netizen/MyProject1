@@ -2053,8 +2053,15 @@ static int resolve_type_group(const TypeGroup& g, uint64_t klass) {
     }
     TypeMatches m;
     if (!collect_type_matches(klass, *g.of[0], taken, ntaken, m)) return 0;
-    // Плотнее, чем полей: всё решается разом и однозначно.
-    if (g.n > 1 && m.n >= g.n) {
+    // Раскладка разом и однозначно. Для одиночного слота это «ближайшее к
+    // вшитому смещению поле, если оно единственное такое»: в классе почти
+    // всегда НЕСКОЛЬКО полей одного типа (у FPManager десяток float), и после
+    // сдвига ни одно не совпадает со вшитым точь-в-точь. Лог с устройства
+    // 24.09 показал именно такие потери: FPManager::_BYK,
+    // GameControllerBase::_BCX/_BCm/_BCQ, Item::_BKs, ItemPickup::_BQL,
+    // PlayerWeapon::_player, VoicePlayerState::_Name — класс в кэше есть, а
+    // поле не находится, потому что точного совпадения нет.
+    if (m.n >= g.n) {
         TypeAssign a;
         if (assign_type_group(g, m.off, m.n, a)) {
             for (int s = 0; s < g.n; ++s) apply_resolution(*g.of[s], a.off[s]);

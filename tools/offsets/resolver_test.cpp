@@ -99,7 +99,7 @@ struct Handed {
     uint64_t il2cpp_base, meta_base;
     uint64_t pm_real, pm_decoy, teammember, netclient;
     uint64_t fpmanager, item, itemdata;
-    uint64_t treehs, orehs, vec3, hitmarkeritem, oremark;
+    uint64_t treehs, orehs, vec3, hitmarkeritem, oremark, itempickup;
 };
 
 // Строка в окне метаданных; возвращает её адрес.
@@ -209,6 +209,7 @@ static void child_main(int out_fd) {
     const uint64_t s_vec3   = put_string(meta, moff, "Vector3");
     const uint64_t s_hmitem = put_string(meta, moff, "MineableObjectExtension_HitMarkerItem");
     const uint64_t s_oremark = put_string(meta, moff, "MineableObjectExtension_OreHitstreaksMarker");
+    const uint64_t s_pickup = put_string(meta, moff, "ItemPickup");
 
     // Окно данных «.so»: сюда кладём слоты-указатели, которые ищет сканер.
     uint64_t* slots = (uint64_t*)(il + 0x40000);
@@ -262,11 +263,12 @@ static void child_main(int out_fd) {
                                      fpm_fields, 2, meta, moff, 0x206);
 
     // Item: поле с ротированным именем типа ItemData (c:ItemData).
+    const int32_t tid_item = 0x207;
     const PField item_fields[] = {
         {"_ZzQ_k__BackingField", 0x30, tid_itemdata, 0x12},  // class; вшито 0x20
     };
     uint64_t item = build_class(heap, hoff, il_base + 0x1000, s_item, s_oxide,
-                                item_fields, 1, meta, moff, 0x207);
+                                item_fields, 1, meta, moff, tid_item);
 
     // Классы-ТИПЫ для полей автофарма: свои поля не нужны, важен только
     // byval_arg (klassIndex) — по нему резолвер узнаёт тип поля. Имена полные
@@ -316,6 +318,16 @@ static void child_main(int out_fd) {
     uint64_t orehs = build_class(heap, hoff, il_base + 0x1000, s_orehs, s_oxide,
                                  orehs_fields, 2, meta, moff, 0x209);
 
+    // ItemPickup: поле с ротированным именем (_BQL -> XqC) типа Item. Полей
+    // такого типа в классе ДВА (0xB0 и 0xC0), вшитое смещение 0xA8: точного
+    // совпадения нет, резолвер берёт ближайшее — и только если оно единственное.
+    const PField pickup_fields[] = {
+        {"XqC", 0xB0, tid_item, 0x12},   // c:Item; вшито 0xA8
+        {"XqD", 0xC0, tid_item, 0x12},   // c:Item; второй такой же
+    };
+    uint64_t itempickup = build_class(heap, hoff, il_base + 0x1000, s_pickup, s_oxide,
+                                      pickup_fields, 2, meta, moff, 0x20D);
+
     // Слоты: настоящие классы вперемешку с мусором (выравнивание, битые
     // указатели, указатели в никуда) — фильтры сканера обязаны его отсеять.
     size_t sn = 0;
@@ -339,6 +351,7 @@ static void child_main(int out_fd) {
     slots[sn++] = vec3;
     slots[sn++] = hitmarkeritem;
     slots[sn++] = oremark;
+    slots[sn++] = itempickup;
     slots[sn++] = 0xFFFFFFFFFFFFFFF8ull;
     if (sn > kSlots) _exit(94);
 
@@ -349,7 +362,7 @@ static void child_main(int out_fd) {
     h.teammember = teammember; h.netclient = netclient;
     h.fpmanager = fpmanager; h.item = item; h.itemdata = itemdata;
     h.treehs = treehs; h.orehs = orehs; h.vec3 = vec3;
-    h.hitmarkeritem = hitmarkeritem; h.oremark = oremark;
+    h.hitmarkeritem = hitmarkeritem; h.oremark = oremark; h.itempickup = itempickup;
     if (write(out_fd, &h, sizeof(h)) != sizeof(h)) _exit(95);
 
     raise(SIGSTOP);   // родитель читает память, пока мы спим
@@ -481,6 +494,8 @@ int main() {
           "TreeHitstreaks: XzL по типу i4 0x48 -> 0xE0");
     check(go_active::TREEHS_MOVING_METHOD == 0xE8,
           "TreeHitstreaks: movingMethod по имени 0x20 -> 0xE8");
+    check(go_active::ITEMPICKUP_ITEM_OBJECT == 0xB0,
+          "ItemPickup: _BQL по типу Item, ближайшее из двух 0xA8 -> 0xB0");
     // Два поля одного типа Vector3, уехавшие на одно расстояние: разводим по
     // вшитым смещениям (0x88 -> 0x98, 0xA4 -> 0xB4) и не путаем местами.
     check(go_active::TREEHS_SPOT_A == 0x98 && go_active::TREEHS_SPOT_B == 0xB4,
