@@ -213,6 +213,7 @@ int      s_ptr_region = 0;
 uint64_t s_ptr_scanned = 0;
 uint64_t s_ptr_hits = 0;          // совпадений указателя с адресом имени
 uint64_t s_ptr_verified = 0;      // из них оказалось живыми классами
+uint64_t s_ptr_inwin = 0;         // значений-указателей внутрь окна строк (любых)
 
 // Знания о базах в рамках ЖИВОГО процесса (переживают сброс скана при
 // перепривязке; очищаются только при смене pid). Лог с устройства показал:
@@ -693,9 +694,25 @@ static void phase_strsearch(double deadline) {
         const uint8_t* hit = (const uint8_t*)memmem(buf, chunk, kNeedle, kNeed);
         if (hit) {
             s_str_addr = s_str_pos + (uint64_t)(hit - buf);
-            const uint64_t kPad = 16ull << 20;
-            s_meta_begin = (r.start > s_str_addr - kPad) ? r.start : (s_str_addr - kPad);
-            s_meta_end = (r.end < s_str_addr + kPad) ? r.end : (s_str_addr + kPad);
+            // Окно блока строк: строковый раздел метаданных может лежать в
+            // нескольких СМЕЖНЫХ анонимных областях (протектор режет маппинг
+            // кусками). Собираем непрерывную цепочку соседей (до 64 МБ),
+            // иначе имена за границей первой области теряются. Если цепочка
+            // гигантская (один большой регион) — окно ±16 МБ вокруг хита.
+            uint64_t wb = r.start, we = r.end;
+            for (int j = s_str_region + 1; j < s_anon_count &&
+                     s_anon[j].start == we && (we - wb) < (64ull << 20); ++j)
+                we = s_anon[j].end;
+            for (int j = s_str_region - 1; j >= 0 &&
+                     s_anon[j].end == wb && (we - wb) < (64ull << 20); --j)
+                wb = s_anon[j].start;
+            if (we - wb > (32ull << 20)) {
+                const uint64_t kPad = 16ull << 20;
+                wb = (s_str_addr > kPad) ? (s_str_addr - kPad) : 0;
+                we = s_str_addr + kPad;
+            }
+            s_meta_begin = wb;
+            s_meta_end = we;
             build_wanted_names();
             for (int i = 0; i < s_wanted_name_count; ++i) s_wanted_str[i] = 0;
             s_wanted_str_found = 0;
@@ -751,7 +768,10 @@ static void phase_blob(double deadline) {
                 }
             }
         }
-        s_blob_pos += chunk - 64;   // нахлёст на имена, лёгшие на стык
+        // Хвостовой ДЕДЛОК: при остатке [64..128) шаг «chunk - 64» обнулялся,
+        // и скан крутился на месте до дедлайна. Хвост меньше куска — дочитали.
+        if (chunk < kChunkBytes) s_blob_pos = s_meta_end;
+        else s_blob_pos += chunk - 64;   // нахлёст на имена, лёгшие на стык
         const double now_s = mono_seconds();
         if (now_s - s_last_progress_log >= 8.0) {
             s_last_progress_log = now_s;
@@ -765,19 +785,34 @@ static void phase_blob(double deadline) {
         int wr = 0;
         for (int i = 0; i < s_anon_count; ++i) if (s_anon[i].writable) ++wr;
         LogLine("автооффсеты: в блоке строк найдено табличных имён %d из %d, "
-                "writable-регионов в карте %d",
-                s_wanted_str_found, s_wanted_name_count, wr);
-        if (s_wanted_str_found > 0 && wr > 0) {
+                "анонимных регионов в карте %d (writable %d)",
+                s_wanted_str_found, s_wanted_name_count, s_anon_count, wr);
+        // Диагностика ротации: какие табличные имена в блоке отсутствуют.
+        if (s_wanted_str_found > 0 && s_wanted_str_found < s_wanted_name_count) {
+            char miss[512];
+            int mp = 0, shown = 0;
+            const int missing = s_wanted_name_count - s_wanted_str_found;
+            for (int i = 0; i < s_wanted_name_count && mp < (int)sizeof(miss) - 48; ++i) {
+                if (s_wanted_str[i]) continue;
+                mp += snprintf(miss + mp, sizeof(miss) - mp, "%s%s",
+                               shown ? ", " : "", s_wanted_names[i]);
+                ++shown;
+                if (shown >= 10) {
+                    mp += snprintf(miss + mp, sizeof(miss) - mp,
+                                   " и ещё %d", missing - shown);
+                    break;
+                }
+            }
+            LogLine("автооффсеты: не найдены имена: %s", miss);
+        }
+        if (s_wanted_str_found > 0) {
             s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
-            s_ptr_hits = 0; s_ptr_verified = 0;
+            s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
             s_last_progress_log = 0;
             s_scan_deadline = mono_seconds() + 120.0;
             s_phase = PH_PTR;
-        } else if (s_wanted_str_found == 0) {
-            LogLine("автооффсеты: блок строк есть, но табличных имён в нём нет — имена, видимо, ротированы обфускатором");
-            s_phase = PH_DONE;
         } else {
-            LogLine("автооффсеты: в карте процесса нет доступных writable-регионов — классы искать негде");
+            LogLine("автооффсеты: блок строк есть, но табличных имён в нём нет — имена, видимо, ротированы обфускатором");
             s_phase = PH_DONE;
         }
     }
@@ -787,7 +822,8 @@ static void phase_ptr(double deadline) {
     static uint8_t buf[kChunkBytes];
     while (s_ptr_region < s_anon_count && mono_seconds() < deadline) {
         const AnonRegion& r = s_anon[s_ptr_region];
-        if (!r.writable) { ++s_ptr_region; continue; }  // классы живут в writable-куче
+        // Сканируем ВСЕ анонимные регионы, не только writable: протектор может
+        // закрывать пул классов на r-- после инициализации.
         if (s_ptr_pos < r.start) s_ptr_pos = r.start;
         if (s_ptr_pos >= r.end) { ++s_ptr_region; continue; }
         const uint64_t remain = r.end - s_ptr_pos;
@@ -802,6 +838,7 @@ static void phase_ptr(double deadline) {
             memcpy(&v, buf + i * 8, 8);
             v = memio::untag(v);
             if (v < s_meta_begin || v >= s_meta_end) continue;
+            ++s_ptr_inwin;   // любое значение внутрь окна строк — указатель вообще
             for (int n = 0; n < s_wanted_name_count; ++n) {
                 if (s_wanted_str[n] != v) continue;
                 ++s_ptr_hits;
@@ -828,15 +865,19 @@ static void phase_ptr(double deadline) {
         const double now_s = mono_seconds();
         if (now_s - s_last_progress_log >= 8.0) {
             s_last_progress_log = now_s;
-            LogLine("автооффсеты: поиск указателей %llu МБ, совпадений %llu, живых классов %llu",
+            LogLine("автооффсеты: поиск указателей %llu МБ, в окне строк %llu, точных %llu, живых классов %llu",
                     (unsigned long long)(s_ptr_scanned >> 20),
+                    (unsigned long long)s_ptr_inwin,
                     (unsigned long long)s_ptr_hits,
                     (unsigned long long)s_ptr_verified);
         }
     }
     if (all_wanted_found() || s_ptr_region >= s_anon_count ||
         s_ptr_scanned >= (768ull << 20) || mono_seconds() >= s_scan_deadline) {
-        LogLine("автооффсеты: бутстрап завершён — указателей %llu, живых классов %llu (в кэше %d)",
+        LogLine("автооффсеты: бутстрап завершён — просмотрено %llu МБ (%d регионов), "
+                "в окне строк %llu значений, точных указателей %llu, живых классов %llu (в кэше %d)",
+                (unsigned long long)(s_ptr_scanned >> 20), s_ptr_region,
+                (unsigned long long)s_ptr_inwin,
                 (unsigned long long)s_ptr_hits,
                 (unsigned long long)s_ptr_verified, s_class_count);
         s_phase = PH_FIELDS;
@@ -1277,7 +1318,7 @@ void offset_resolver_reset() {
     s_blob_pos = 0; s_blob_fails = 0;
     for (int i = 0; i < 64; ++i) s_wanted_str[i] = 0;
     s_ptr_pos = 0; s_ptr_region = 0; s_ptr_scanned = 0;
-    s_ptr_hits = 0; s_ptr_verified = 0;
+    s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
     s_applied_count = 0; s_logged = false;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
     // «какие базы пусты, а где классы живые» НЕ сбрасываются: они привязаны
