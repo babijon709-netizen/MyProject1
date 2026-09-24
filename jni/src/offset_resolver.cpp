@@ -136,6 +136,9 @@ enum Phase {
     PH_FIELDS,      // калибровка массива полей + резолв таблицы
     PH_DONE,
     PH_HEAP,        // скан кучи вокруг «якоря» (когда в .so классов не нашлось)
+    PH_STRS,        // поиск строки «PlayerManager» в анонимной памяти
+    PH_BLOB,        // поиск в найденном блобе строк всех табличных имён
+    PH_PTR,         // поиск в куче указателей на эти строки (= классы)
 };
 
 Phase    s_phase = PH_WAIT;
@@ -186,6 +189,29 @@ int      s_resolved = 0, s_changed = 0;
 // рядом с одним живым классом лежат тысячи остальных — их и перебираем.
 uint64_t s_heap_pos = 0, s_heap_end = 0;
 bool     s_heap_done = false;     // в этом резолве уже сканировали кучу
+
+// Строковый бутстрап (бета после апдейта): вшитые TYPEINFO_RVA устарели и
+// указывают в код, зато строки метаданных обычно лежат в анонимной памяти.
+// План: найти в ней строку «PlayerManager» -> вокруг неё окно блока строк ->
+// в блоке найти адреса ВСЕХ табличных имён -> в куче найти указатели на них
+// (слот имени класса на +0x10) -> так находятся живые классы без единого RVA.
+struct AnonRegion { uint64_t start = 0, end = 0; bool writable = false; };
+AnonRegion s_anon[32];
+int      s_anon_count = 0;
+uint64_t s_str_addr = 0;          // где нашёлся «PlayerManager»
+int      s_str_region = 0;
+uint64_t s_str_pos = 0;
+uint64_t s_str_scanned = 0;
+const char* s_wanted_names[64];   // разные имена классов из таблицы
+int      s_wanted_name_count = 0;
+uint64_t s_wanted_str[64];        // адрес строки каждого имени в блобе (0 = нет)
+int      s_wanted_str_found = 0;
+uint64_t s_blob_pos = 0;
+uint64_t s_ptr_pos = 0;
+int      s_ptr_region = 0;
+uint64_t s_ptr_scanned = 0;
+uint64_t s_ptr_hits = 0;          // совпадений указателя с адресом имени
+uint64_t s_ptr_verified = 0;      // из них оказалось живыми классами
 
 // Знания о базах в рамках ЖИВОГО процесса (переживают сброс скана при
 // перепривязке; очищаются только при смене pid). Лог с устройства показал:
@@ -366,6 +392,7 @@ static void phase_maps() {
     s_maps_lib_lines = 0; s_maps_cut_window = 0; s_maps_cut_x = 0;
     s_maps_cut_deleted = 0; s_maps_open_failed = false;
     s_candidate_count = 0;
+    s_anon_count = 0;
     if (!s_scan_base) s_scan_base = g_il2cpp_base;
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
@@ -382,7 +409,7 @@ static void phase_maps() {
     close(fd);
 
     size_t pos = 0;
-    while (pos < text.size() && s_seg_count < 12) {
+    while (pos < text.size()) {
         const size_t eol = text.find('\n', pos);
         const size_t line_end = (eol == std::string::npos) ? text.size() : eol;
         // Строка обязана быть NUL-терминированной: иначе strchr/strstr идут
@@ -403,7 +430,19 @@ static void phase_maps() {
         // а выкинув его целиком мы бы могли выкинуть и нужный сегмент рядом.
         if (end <= start || end - start > (1ull << 30)) continue;
         const char* slash = strchr(line, '/');
-        if (!slash) continue;
+        if (!slash) {
+            // Анонимный читаемый регион — кандидат на блок строк метаданных
+            // (бета маппит его без имени «global-metadata») и на кучу, где
+            // лежат структуры классов. Собираем для строкового бутстрапа.
+            if (perms[0] == 'r' && perms[2] != 'x' &&
+                end - start >= (256ull << 10) && s_anon_count < 32) {
+                s_anon[s_anon_count].start = start;
+                s_anon[s_anon_count].end = end;
+                s_anon[s_anon_count].writable = (perms[1] == 'w');
+                ++s_anon_count;
+            }
+            continue;
+        }
 
         if (strstr(slash, "global-metadata") && perms[0] == 'r') {
             // Окно строк метаданных: имя/пространства имён классов лежат тут.
@@ -431,11 +470,13 @@ static void phase_maps() {
             ++s_maps_cut_window;
             continue;
         }
-        s_segments[s_seg_count].start = start;
-        s_segments[s_seg_count].end = end;
-        ++s_seg_count;
-        if (!s_lib_begin || start < s_lib_begin) s_lib_begin = start;
-        if (end > s_lib_end) s_lib_end = end;
+        if (s_seg_count < 12) {
+            s_segments[s_seg_count].start = start;
+            s_segments[s_seg_count].end = end;
+            ++s_seg_count;
+            if (!s_lib_begin || start < s_lib_begin) s_lib_begin = start;
+            if (end > s_lib_end) s_lib_end = end;
+        }
     }
     // Ловушка беты: в /proc/pid/maps нашёлся маппинг с именем
     // «global-metadata» размером всего ОДНА СТРАНИЦА (4 КБ) — заглушка или
@@ -484,6 +525,21 @@ static void phase_maps() {
     s_scan_pos = s_segments[0].start;
     s_scan_deadline = mono_seconds() + kScanTotalSec;
     s_phase = PH_SCAN;
+    // Урок беты: после апдейта игры вшитый TYPEINFO_RVA указывает в КОД, и
+    // скан .so находит только мусор. Проверка свежести: имя по якорю должно
+    // читаться и совпасть с ожидаемым. Не совпало — сразу строковый бутстрап.
+    const char* ank_expected = nullptr;
+    const uint64_t ank = anchor_class(&ank_expected);
+    if (ank && ank_expected && ank_expected[0]) {
+        bool aok = false;
+        const std::string an = qrd_string(qrd_ptr(ank + IL2CPP_CLASS_NAME), &aok);
+        if (!aok || an != ank_expected) {
+            LogLine("автооффсеты: вшитый RVA, судя по всему, устарел (имя %s) — начинаю поиск строк в памяти",
+                    aok ? "не совпало" : "не читается");
+            s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
+            s_phase = PH_STRS;
+        }
+    }
 }
 
 // Попробовать кандидата как Il2CppClass: image в libil2cpp, имя/нс в
@@ -581,6 +637,185 @@ static void phase_heap(double deadline) {
     }
     if (all_wanted_found() || s_heap_pos >= s_heap_end ||
         mono_seconds() >= s_scan_deadline) {
+        s_phase = PH_FIELDS;
+    }
+}
+
+// ---- Строковый бутстрап ------------------------------------------------------
+// Когда вшитые TYPEINFO_RVA устарели (игра обновилась) и скан .so не даёт ни
+// одного табличного класса, идём через строки: имена классов живут в блоке
+// строк метаданных (на бете — в анонимной памяти). Находим «PlayerManager»,
+// вокруг него окно блока, в нём — адреса всех табличных имён, а затем в куче
+// ищем указатели на эти адреса: слот имени класса лежит на +0x10.
+static bool s_first_char[256];
+
+static void build_wanted_names() {
+    if (s_wanted_name_count) return;
+    memset(s_first_char, 0, sizeof(s_first_char));
+    for (int i = 0; i < kOrFieldCount && s_wanted_name_count < 64; ++i) {
+        bool dup = false;
+        for (int j = 0; j < s_wanted_name_count; ++j)
+            if (strcmp(s_wanted_names[j], kOrFields[i].cls) == 0) dup = true;
+        if (dup) continue;
+        s_wanted_names[s_wanted_name_count] = kOrFields[i].cls;
+        s_first_char[(uint8_t)kOrFields[i].cls[0]] = true;
+        ++s_wanted_name_count;
+    }
+}
+
+static bool calibrate_fields(uint64_t klass);   // определена ниже, в фазе FIELDS
+
+static void store_verified_class(uint64_t klass, const char* name) {
+    if (find_class_slot(klass)) return;
+    const int cap_total = (int)(sizeof(s_classes) / sizeof(s_classes[0]));
+    if (s_class_count >= cap_total) return;
+    FoundClass& fc = s_classes[s_class_count++];
+    fc.klass = klass;
+    snprintf(fc.name, sizeof(fc.name), "%s", name);
+    fc.ns[0] = 0;
+}
+
+static void phase_strsearch(double deadline) {
+    static uint8_t buf[kChunkBytes];
+    static const char kNeedle[] = "PlayerManager";   // вместе с концевым NUL
+    constexpr size_t kNeed = sizeof(kNeedle);
+    while (s_str_region < s_anon_count && mono_seconds() < deadline) {
+        const AnonRegion& r = s_anon[s_str_region];
+        if (s_str_pos < r.start) s_str_pos = r.start;
+        if (s_str_pos >= r.end) { ++s_str_region; continue; }
+        const uint64_t remain = r.end - s_str_pos;
+        const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
+        if (chunk < kNeed) { s_str_pos = r.end; ++s_str_region; continue; }
+        if (!qrd_buf(s_str_pos, buf, chunk)) {
+            s_str_pos += chunk; s_str_scanned += chunk; continue;
+        }
+        const uint8_t* hit = (const uint8_t*)memmem(buf, chunk, kNeedle, kNeed);
+        if (hit) {
+            s_str_addr = s_str_pos + (uint64_t)(hit - buf);
+            const uint64_t kPad = 16ull << 20;
+            s_meta_begin = (r.start > s_str_addr - kPad) ? r.start : (s_str_addr - kPad);
+            s_meta_end = (r.end < s_str_addr + kPad) ? r.end : (s_str_addr + kPad);
+            build_wanted_names();
+            for (int i = 0; i < s_wanted_name_count; ++i) s_wanted_str[i] = 0;
+            s_wanted_str_found = 0;
+            s_blob_pos = s_meta_begin;
+            LogLine("автооффсеты: строка «PlayerManager» найдена @0x%llx — окно строк 0x%llx..0x%llx (%llu МБ), ищу имена из таблицы",
+                    (unsigned long long)s_str_addr,
+                    (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end,
+                    (unsigned long long)((s_meta_end - s_meta_begin) >> 20));
+            s_phase = PH_BLOB;
+            return;
+        }
+        s_str_scanned += chunk;
+        s_str_pos += chunk - (kNeed - 1);   // нахлёст, чтобы не потерять стык
+        if (s_str_scanned >= (768ull << 20)) break;
+    }
+    if (s_str_region >= s_anon_count || s_str_scanned >= (768ull << 20)) {
+        LogLine("автооффсеты: строка «PlayerManager» в анонимной памяти НЕ найдена (просмотрено %llu МБ) — имена, видимо, зашифрованы, автообновление по именам невозможно",
+                (unsigned long long)(s_str_scanned >> 20));
+        s_phase = PH_DONE;
+    }
+}
+
+static void phase_blob(double deadline) {
+    static uint8_t buf[kChunkBytes];
+    while (s_blob_pos < s_meta_end && mono_seconds() < deadline &&
+           mono_seconds() < s_scan_deadline) {
+        const uint64_t remain = s_meta_end - s_blob_pos;
+        const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
+        if (chunk < 64) { s_blob_pos = s_meta_end; break; }   // хвост дочитан
+        if (!qrd_buf(s_blob_pos, buf, chunk)) { s_blob_pos += chunk; continue; }
+        for (size_t p = 0; p + 1 < chunk; ++p) {
+            // Строки блока разделены NUL: кандидат начинается сразу после NUL.
+            if (p && buf[p - 1] != '\0') continue;
+            const uint8_t c = buf[p];
+            if (c == '\0' || !s_first_char[c]) continue;
+            for (int n = 0; n < s_wanted_name_count; ++n) {
+                if (s_wanted_str[n]) continue;                 // уже найдено
+                const char* nm = s_wanted_names[n];
+                if (c != (uint8_t)nm[0]) continue;
+                const size_t len = strlen(nm);
+                if (p + len + 1 > chunk) continue;             // стык — докроет нахлёст
+                if (memcmp(buf + p, nm, len) == 0 && buf[p + len] == '\0') {
+                    s_wanted_str[n] = s_blob_pos + p;
+                    ++s_wanted_str_found;
+                }
+            }
+        }
+        s_blob_pos += chunk - 64;   // нахлёст на имена, лёгшие на стык
+    }
+    if (s_blob_pos >= s_meta_end || mono_seconds() >= s_scan_deadline) {
+        LogLine("автооффсеты: в блоке строк найдено табличных имён %d из %d",
+                s_wanted_str_found, s_wanted_name_count);
+        if (s_wanted_str_found > 0) {
+            s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
+            s_ptr_hits = 0; s_ptr_verified = 0;
+            s_last_progress_log = 0;
+            s_scan_deadline = mono_seconds() + 90.0;
+            s_phase = PH_PTR;
+        } else {
+            LogLine("автооффсеты: блок строк есть, но табличных имён в нём нет — имена, видимо, ротированы обфускатором");
+            s_phase = PH_DONE;
+        }
+    }
+}
+
+static void phase_ptr(double deadline) {
+    static uint8_t buf[kChunkBytes];
+    while (s_ptr_region < s_anon_count && mono_seconds() < deadline) {
+        const AnonRegion& r = s_anon[s_ptr_region];
+        if (!r.writable) { ++s_ptr_region; continue; }  // классы живут в writable-куче
+        if (s_ptr_pos < r.start) s_ptr_pos = r.start;
+        if (s_ptr_pos >= r.end) { ++s_ptr_region; continue; }
+        const uint64_t remain = r.end - s_ptr_pos;
+        const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
+        if (chunk < 8) { s_ptr_pos = r.end; ++s_ptr_region; continue; }
+        if (!qrd_buf(s_ptr_pos, buf, chunk)) {
+            s_ptr_pos += chunk; s_ptr_scanned += chunk; continue;
+        }
+        const size_t slots = chunk / 8;
+        for (size_t i = 0; i < slots; ++i) {
+            uint64_t v;
+            memcpy(&v, buf + i * 8, 8);
+            v = memio::untag(v);
+            if (v < s_meta_begin || v >= s_meta_end) continue;
+            for (int n = 0; n < s_wanted_name_count; ++n) {
+                if (s_wanted_str[n] != v) continue;
+                ++s_ptr_hits;
+                const uint64_t klass = s_ptr_pos + (uint64_t)i * 8 - IL2CPP_CLASS_NAME;
+                const uint64_t image = qrd_ptr(klass);
+                if (s_lib_begin && (image < s_lib_begin || image >= s_lib_end)) break;
+                if (!s_lib_begin && !valid_obj(image)) break;
+                store_verified_class(klass, s_wanted_names[n]);
+                ++s_ptr_verified;
+                if (!s_good_base) {
+                    s_good_base = g_il2cpp_base;
+                    LogLine("автооффсеты: строковый бутстрап дал живой класс «%s» @0x%llx",
+                            s_wanted_names[n], (unsigned long long)klass);
+                }
+                if (!s_fields_off) calibrate_fields(klass);
+                break;
+            }
+        }
+        s_ptr_pos += chunk;
+        s_ptr_scanned += chunk;
+        if (all_wanted_found()) break;
+        if (s_ptr_scanned >= (768ull << 20)) break;
+        if (mono_seconds() >= s_scan_deadline) break;
+        const double now_s = mono_seconds();
+        if (now_s - s_last_progress_log >= 8.0) {
+            s_last_progress_log = now_s;
+            LogLine("автооффсеты: поиск указателей %llu МБ, совпадений %llu, живых классов %llu",
+                    (unsigned long long)(s_ptr_scanned >> 20),
+                    (unsigned long long)s_ptr_hits,
+                    (unsigned long long)s_ptr_verified);
+        }
+    }
+    if (all_wanted_found() || s_ptr_region >= s_anon_count ||
+        s_ptr_scanned >= (768ull << 20) || mono_seconds() >= s_scan_deadline) {
+        LogLine("автооффсеты: бутстрап завершён — указателей %llu, живых классов %llu (в кэше %d)",
+                (unsigned long long)s_ptr_hits,
+                (unsigned long long)s_ptr_verified, s_class_count);
         s_phase = PH_FIELDS;
     }
 }
@@ -818,8 +1053,10 @@ static void phase_fields() {
     // базу ровно этой проверкой). Логуем его имя — сразу видно, ротированы ли
     // имена в этой сборке игры, — и калибруем поля прямо на нём (надёжнее,
     // чем гадать по кэшу, который на бете может быть весь мусорный).
+    // Якорь по вшитому RVA нужен только если строковый бутстрап ничего не дал:
+    // после апдейта игры RVA указывает в код, и доверять ему нельзя.
     const char* anchor_expected = nullptr;
-    const uint64_t anchor = anchor_class(&anchor_expected);
+    const uint64_t anchor = (s_ptr_verified == 0) ? anchor_class(&anchor_expected) : 0;
     if (anchor) {
         bool aok = false;
         const std::string aname = qrd_string(qrd_ptr(anchor + IL2CPP_CLASS_NAME), &aok);
@@ -927,11 +1164,13 @@ static void log_summary() {
     const int wanted = wanted_in_cache();
     LogLine("автооффсеты: классов найдено %d (по форме %d, имён прочитано %d, отказов %d, табличных %d), "
             "fields@0x%llx, разрешено %d/%d констант (%d изменено), метаданные %s, "
-            "база 0x%llx, пустых баз %d",
+            "база 0x%llx, пустых баз %d, бутстрап: строк %d/%d, по указателям классов %llu",
             s_class_count, s_shape_pass, s_names_ok, s_names_fail, wanted,
             (unsigned long long)s_fields_off, s_resolved, kOrFieldCount, s_changed,
             s_meta_begin ? "найдены" : "НЕ найдены (фильтр слабее)",
-            (unsigned long long)g_il2cpp_base, s_dead_count);
+            (unsigned long long)g_il2cpp_base, s_dead_count,
+            s_wanted_str_found, s_wanted_name_count,
+            (unsigned long long)s_ptr_verified);
 }
 
 }  // namespace
@@ -988,6 +1227,9 @@ void offset_resolver_tick() {
         case PH_MAPS:   phase_maps(); break;
         case PH_SCAN:   phase_scan(deadline); break;
         case PH_HEAP:   phase_heap(deadline); break;
+        case PH_STRS:   phase_strsearch(deadline); break;
+        case PH_BLOB:   phase_blob(deadline); break;
+        case PH_PTR:    phase_ptr(deadline); break;
         case PH_FIELDS: phase_fields(); break;
         case PH_DONE:   break;
     }
@@ -1006,6 +1248,12 @@ void offset_resolver_reset() {
     s_fi_size = IL2CPP_FIELDINFO_SIZE; s_fi_parent = IL2CPP_FIELDINFO_PARENT;
     s_resolved = 0; s_changed = 0;
     s_heap_pos = s_heap_end = 0; s_heap_done = false;
+    s_anon_count = 0;
+    s_str_addr = 0; s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
+    s_wanted_name_count = 0; s_wanted_str_found = 0; s_blob_pos = 0;
+    for (int i = 0; i < 64; ++i) s_wanted_str[i] = 0;
+    s_ptr_pos = 0; s_ptr_region = 0; s_ptr_scanned = 0;
+    s_ptr_hits = 0; s_ptr_verified = 0;
     s_applied_count = 0; s_logged = false;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
     // «какие базы пусты, а где классы живые» НЕ сбрасываются: они привязаны
@@ -1035,7 +1283,9 @@ uint64_t offset_resolver_good_base(pid_t pid) {
 // оффсеты, а не новое подключение к тому же процессу и базе.
 bool offset_resolver_busy() {
     return s_phase == PH_MAPS || s_phase == PH_SCAN ||
-           s_phase == PH_HEAP || s_phase == PH_FIELDS;
+           s_phase == PH_HEAP || s_phase == PH_STRS ||
+           s_phase == PH_BLOB || s_phase == PH_PTR ||
+           s_phase == PH_FIELDS;
 }
 
 // Найденный класс: короткое имя (+ пространство имён, если задано).
@@ -1092,6 +1342,12 @@ void offset_resolver_status(char* out, size_t cap) {
                  (unsigned long long)(s_scanned_bytes >> 20),
                  (unsigned long long)(s_total_bytes >> 20),
                  wanted_in_cache());
+        return;
+    }
+    if (s_phase == PH_STRS || s_phase == PH_BLOB || s_phase == PH_PTR) {
+        snprintf(out, cap, "поиск по строкам: просмотрено %llu МБ, имён %d, классов %d",
+                 (unsigned long long)((s_str_scanned + s_ptr_scanned) >> 20),
+                 s_wanted_str_found, s_class_count);
         return;
     }
     // PH_DONE
