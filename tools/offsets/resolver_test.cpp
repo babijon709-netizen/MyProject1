@@ -98,6 +98,7 @@ static void check(bool ok, const char* what) {
 struct Handed {
     uint64_t il2cpp_base, meta_base;
     uint64_t pm_real, pm_decoy, teammember, netclient;
+    uint64_t fpmanager, item, itemdata;
 };
 
 // Строка в окне метаданных; возвращает её адрес.
@@ -110,12 +111,20 @@ static uint64_t put_string(uint8_t* meta, size_t& off, const char* s) {
 }
 
 // Поле синтетического класса.
-struct PField { const char* name; int32_t offset; };
+//   name    — имя поля (может быть «ротированным» обфускатором);
+//   offset  — смещение, которое резолвер должен вычитать;
+//   tid     — индекс определения типа (0 = примитив); у ссылочных полей
+//             равен byval_arg класса-типа (резолвер сверяет именно его);
+//   tenum   — Il2CppTypeEnum, если tid == 0 (0x0C float, 0x02 bool, ...).
+struct PField { const char* name; int32_t offset; int32_t tid; uint32_t tenum; };
+#define PF(n, o) { n, o, 0, 0 }   // поле с читаемым именем: тип не важен
 
 // Класс в куче ребёнка: Il2CppClass + массив FieldInfo. Возвращает адрес класса.
+//   tid — byval_arg этого класса (klassIndex): им резолвер узнаёт тип поля.
 static uint64_t build_class(uint8_t* heap, size_t& hoff,
                             uint64_t image_ptr, uint64_t name_ptr, uint64_t ns_ptr,
-                            const PField* fields, int nfields, uint8_t* meta, size_t& moff) {
+                            const PField* fields, int nfields, uint8_t* meta, size_t& moff,
+                            int32_t tid) {
     hoff = (hoff + 0x1FFu) & ~0x1FFu;
     uint8_t* k = heap + hoff;
     const uint64_t klass = (uint64_t)(uintptr_t)k;
@@ -126,6 +135,10 @@ static uint64_t build_class(uint8_t* heap, size_t& hoff,
     *(uint64_t*)(k + 0x18) = ns_ptr;
     *(uint64_t*)(k + 0x58) = 0;                  // parent
     *(uint64_t*)(k + 0xB8) = klass + 0x140;      // static_fields — валидный адрес
+    // byval_arg класса: Il2CppType (0x10) — data.klassIndex@0x0, биты@0x8.
+    // Резолвер берёт отсюда индекс типа и сверяет с FieldInfo.type полей.
+    *(int32_t*)(k + 0x20) = tid;
+    *(uint32_t*)(k + 0x28) = 0x11u << 16;        // VALUETYPE/CLASS — не важно
     *(uint16_t*)(k + 0x124) = (uint16_t)nfields;
 
     if (nfields > 0) {
@@ -133,12 +146,16 @@ static uint64_t build_class(uint8_t* heap, size_t& hoff,
         const uint64_t farr = (uint64_t)(uintptr_t)farr_p;
         hoff += 0x20 * nfields + 0x40;
         *(uint64_t*)(k + 0x80) = farr;           // fields
-        uint64_t type_dummy = (uint64_t)(uintptr_t)(heap + hoff);
-        hoff += 0x40;
+        // По одному Il2CppType на поле: резолвер различает поля именно по типу.
+        uint8_t* tarr_p = heap + hoff;
+        hoff += 0x10 * (size_t)nfields + 0x40;
         for (int i = 0; i < nfields; ++i) {
             uint8_t* f = farr_p + 0x20 * i;
+            uint8_t* t = tarr_p + 0x10 * (size_t)i;
+            *(int32_t*)(t + 0x00) = fields[i].tid;
+            *(uint32_t*)(t + 0x08) = fields[i].tenum << 16;
             *(uint64_t*)(f + 0x00) = put_string(meta, moff, fields[i].name);
-            *(uint64_t*)(f + 0x08) = type_dummy;
+            *(uint64_t*)(f + 0x08) = (uint64_t)(uintptr_t)t;
             *(uint64_t*)(f + 0x10) = klass;      // parent == класс
             *(int32_t*)(f + 0x18)  = fields[i].offset;
             *(uint32_t*)(f + 0x1C) = 0x04000000u + i;
@@ -179,6 +196,10 @@ static void child_main(int out_fd) {
     const uint64_t s_empty = put_string(meta, moff, "");
     const uint64_t s_nc   = put_string(meta, moff, "NetworkClient");
     const uint64_t s_mirror = put_string(meta, moff, "Mirror");
+    // Классы для проверки поиска поля по ТИПУ (имя поля «ротировано»).
+    const uint64_t s_fpm  = put_string(meta, moff, "FPManager");
+    const uint64_t s_item = put_string(meta, moff, "Item");
+    const uint64_t s_itemdata = put_string(meta, moff, "ItemData");
 
     // Окно данных «.so»: сюда кладём слоты-указатели, которые ищет сканер.
     uint64_t* slots = (uint64_t*)(il + 0x40000);
@@ -187,32 +208,54 @@ static void child_main(int out_fd) {
     // Настоящий PlayerManager: смещения ОТЛИЧАЮТСЯ от вшитых, чтобы видеть
     // именно перезапись, а не совпадение.
     const PField pm_fields[] = {
-        {"teamName",           0x2A0},   // вшито 0x280
-        {"clanId",             0x2B0},   // вшито 0x290
-        {"clanTag",            0x2B8},   // вшито 0x298
-        {"nicklabel",          0x138},   // вшито 0x130
-        {"team",               0x128},   // вшито 0x120
-        {"clientPlayerList",   0x18},    // статик; вшито 0x10
+        PF("teamName",           0x2A0),   // вшито 0x280
+        PF("clanId",             0x2B0),   // вшито 0x290
+        PF("clanTag",            0x2B8),   // вшито 0x298
+        PF("nicklabel",          0x138),   // вшито 0x130
+        PF("team",               0x128),   // вшито 0x120
+        PF("clientPlayerList",   0x18),    // статик; вшито 0x10
     };
     uint64_t pm_real = build_class(heap, hoff, il_base + 0x1000, s_pm, s_oxide,
-                                   pm_fields, 6, meta, moff);
+                                   pm_fields, 6, meta, moff, 0x101);
 
     // Тёзка без полей: резолв не обязан на него попасть.
     uint64_t pm_decoy = build_class(heap, hoff, il_base + 0x1000, s_pm, s_oxide,
-                                    NULL, 0, meta, moff);
+                                    NULL, 0, meta, moff, 0x102);
 
     const PField tm_fields[] = {
-        {"nick",    0x30},   // вшито 0x20
-        {"clanTag", 0x28},   // вшито 0x18
+        PF("nick",    0x30),   // вшито 0x20
+        PF("clanTag", 0x28),   // вшито 0x18
     };
     uint64_t teammember = build_class(heap, hoff, il_base + 0x1000, s_tm, s_empty,
-                                      tm_fields, 2, meta, moff);
+                                      tm_fields, 2, meta, moff, 0x103);
 
     const PField nc_fields[] = {
-        {"spawned", 0x40},   // статик
+        PF("spawned", 0x40),   // статик
     };
     uint64_t netclient = build_class(heap, hoff, il_base + 0x1000, s_nc, s_mirror,
-                                     nc_fields, 1, meta, moff);
+                                     nc_fields, 1, meta, moff, 0x104);
+
+    // ItemData — класс-тип поля Item._BKs_k__BackingField (в таблице резолвера
+    // «c:ItemData»). Его byval_arg и есть тот klassIndex, который резолвер
+    // будет искать в FieldInfo.type.
+    const int32_t tid_itemdata = 0x205;
+    uint64_t itemdata = build_class(heap, hoff, il_base + 0x1000, s_itemdata, s_empty,
+                                    NULL, 0, meta, moff, tid_itemdata);
+
+    // FPManager: поле с РОТИРОВАННЫМ именем (_XqK вместо _BYK) типа float.
+    // По имени его не найти — резолвер обязан взять его по типу (f4).
+    const PField fpm_fields[] = {
+        {"_XqK_k__BackingField", 0xC0, 0, 0x0C},   // float; вшито 0xA8
+    };
+    uint64_t fpmanager = build_class(heap, hoff, il_base + 0x1000, s_fpm, s_oxide,
+                                     fpm_fields, 1, meta, moff, 0x206);
+
+    // Item: поле с ротированным именем типа ItemData (c:ItemData).
+    const PField item_fields[] = {
+        {"_ZzQ_k__BackingField", 0x30, tid_itemdata, 0x12},  // class; вшито 0x20
+    };
+    uint64_t item = build_class(heap, hoff, il_base + 0x1000, s_item, s_oxide,
+                                item_fields, 1, meta, moff, 0x207);
 
     // Слоты: настоящие классы вперемешку с мусором (выравнивание, битые
     // указатели, указатели в никуда) — фильтры сканера обязаны его отсеять.
@@ -229,6 +272,9 @@ static void child_main(int out_fd) {
     for (int i = 0; i < 700; ++i) slots[sn++] = 0x400000000ull + (uint64_t)(i * 8);
     slots[sn++] = teammember;
     slots[sn++] = netclient;
+    slots[sn++] = fpmanager;
+    slots[sn++] = item;
+    slots[sn++] = itemdata;
     slots[sn++] = 0xFFFFFFFFFFFFFFF8ull;
     if (sn > kSlots) _exit(94);
 
@@ -237,6 +283,7 @@ static void child_main(int out_fd) {
     h.meta_base = meta_base;
     h.pm_real = pm_real; h.pm_decoy = pm_decoy;
     h.teammember = teammember; h.netclient = netclient;
+    h.fpmanager = fpmanager; h.item = item; h.itemdata = itemdata;
     if (write(out_fd, &h, sizeof(h)) != sizeof(h)) _exit(95);
 
     raise(SIGSTOP);   // родитель читает память, пока мы спим
@@ -341,6 +388,16 @@ int main() {
     check(go_active::TEAM_MEMBER_NICK == 0x30,    "TeamMember.nick переписан 0x20 -> 0x30");
     check(go_active::TEAM_MEMBER_CLAN_TAG == 0x28, "TeamMember.clanTag 0x18 -> 0x28");
 
+    // ---- поля с ротированными именами ищутся по ТИПУ ------------------------
+    // Имя _XqK_k__BackingField в таблице нет (обфускатор переименовал), но тип
+    // float тот же — резолвер берёт смещение по типу.
+    check(go_active::FPMANAGER_AIM_BLEND == 0xC0,
+          "FPManager: поле по типу float (имя ротировано) 0xA8 -> 0xC0");
+    check(go_active::ITEM_DATA == 0x30,
+          "Item: поле по типу ItemData (имя ротировано) 0x20 -> 0x30");
+    check(offset_resolver_class("ItemData", "") == h.itemdata,
+          "класс-тип поля тоже доступен по имени");
+
     // ---- чего нет в ребёнке — остаётся вшитым ------------------------------
     check(go_active::MINEABLE_ENTITY_TYPE == mineable_before,
           "нерезолвлённая константа не тронута");
@@ -368,6 +425,77 @@ int main() {
         nanosleep(&ts, NULL);
     }
     check(go_active::PLAYER_TEAM_NAME == 0x2A0, "после reset повторный резолв сошёлся");
+
+    // ---- кэш первого входа: второй вход без скана ---------------------------
+    // Сбрасываем состояние (как при перезаходе в игру) и портим слоты: кэш
+    // обязан вернуть найденное мгновенно, без единого скана памяти.
+    offset_resolver_reset();
+    go_active::PLAYER_TEAM_NAME = 0x1234;
+    go_active::FPMANAGER_AIM_BLEND = 0x1234;
+    go_active::ITEM_DATA = 0x1234;
+    const double t2 = mono_seconds();
+    char st3[128] = {};
+    for (;;) {
+        g_mem.frame_begin();
+        offset_resolver_tick();
+        offset_resolver_status(st3, sizeof(st3));
+        if (strstr(st3, "готов")) break;
+        if (mono_seconds() - t2 > 5.0) {
+            printf("ПРОВАЛ: кэш первого входа не применился (%s)\n", st3);
+            kill(child, SIGKILL);
+            return 1;
+        }
+        struct timespec ts { 0, 1 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    check(strstr(st3, "кэш") != nullptr, "второй вход взят из кэша, без скана");
+    check(mono_seconds() - t2 < 1.0, "из кэша — мгновенно (меньше секунды)");
+    check(go_active::PLAYER_TEAM_NAME == 0x2A0, "кэш вернул teamName");
+    check(go_active::FPMANAGER_AIM_BLEND == 0xC0, "кэш вернул поле, найденное по типу");
+    check(go_active::ITEM_DATA == 0x30, "кэш вернул поле класса-типа");
+    check(offset_resolver_class("PlayerManager", "Oxide") == h.pm_real ||
+          offset_resolver_class("PlayerManager", "Oxide") == h.pm_decoy,
+          "кэш вернул класс PlayerManager");
+    check(offset_resolver_class("NetworkClient", "Mirror") == h.netclient,
+          "кэш вернул класс NetworkClient");
+
+    // ---- чужой ключ: кэш не применяется ------------------------------------
+    {
+        const std::string cp = std::string(OR_CACHE_DIR) + ".offs";
+        FILE* f = fopen(cp.c_str(), "r");
+        if (f) {
+            std::string txt;
+            char chunk[512];
+            for (;;) {
+                const size_t n = fread(chunk, 1, sizeof(chunk), f);
+                if (!n) break;
+                txt.append(chunk, n);
+            }
+            fclose(f);
+            const size_t kp = txt.find("key ");
+            if (kp != std::string::npos) {
+                txt.replace(kp, 4 + 16, "key 0000000000000000");
+                f = fopen(cp.c_str(), "w");
+                if (f) { fwrite(txt.data(), 1, txt.size(), f); fclose(f); }
+            }
+        }
+        offset_resolver_reset();
+        go_active::PLAYER_TEAM_NAME = 0x1234;
+        char st4[128] = {};
+        bool hit = false;
+        const double t3 = mono_seconds();
+        while (mono_seconds() - t3 < 20.0) {
+            g_mem.frame_begin();
+            offset_resolver_tick();
+            offset_resolver_status(st4, sizeof(st4));
+            if (strstr(st4, "кэш")) { hit = true; break; }   // кэш не должен сработать
+            if (strstr(st4, "готов")) break;
+            struct timespec ts { 0, 2 * 1000 * 1000 };
+            nanosleep(&ts, NULL);
+        }
+        check(!hit, "кэш с чужим ключом (обновление игры) не применяется");
+        check(go_active::PLAYER_TEAM_NAME == 0x2A0, "после чужего ключа резолв сошёлся заново");
+    }
 
     printf(s_fails ? "СТЕНД ПРОВАЛЕН (%d из %d)\n" : "СТЕНД ПРОЙДЕН (%d проверок)\n",
            s_fails ? s_fails : s_checks, s_checks);

@@ -31,6 +31,7 @@
 #include "game_internal.h"
 #include "game_offsets_active.h"
 #include "logfile.h"
+#include "str.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -44,14 +45,17 @@ using namespace go_active;
 
 // ---- Таблица: какие константы каким (класс, поле) заполнять ----------------
 // Сгенерирована из tools/offsets/offsets_map.json (gen_resolver_table.py).
+// Пятый столбец — сигнатура типа поля: запасной способ найти поле, когда его
+// ИМЯ ротировано обфускатором (см. find_field_offset_by_type ниже).
 namespace {
 struct OrField {
     std::uint64_t* slot;
-    const char*    cls;     // короткое имя класса в рантайме
+    const char*    cls;     // имя класса в рантайме (у некоторых — с подчёркиваниями)
     const char*    field;   // имя поля (стабильное, из дампа)
     bool           is_static;
+    const char*    type;    // "" | f4 | b1 | u4 | i4 | str | obj | c:ИмяКласса
 };
-#define OR_FIELD(c, k, f, s) { &go_active::c, k, f, s },
+#define OR_FIELD(c, k, f, s, t) { &go_active::c, k, f, s, t },
 static const OrField kOrFields[] = {
 #include "offset_resolver_table.inc"
 };
@@ -127,7 +131,9 @@ namespace {
 // именем, поэтому таблица и сопоставляет по короткому).
 struct FoundClass {
     uint64_t klass = 0;
-    char     name[48] = {};
+    // 64: имена вида «MineableObjectExtension_OreHitstreaksMarker» — 43 знака,
+    // и запас на такие же «составные» имена.
+    char     name[64] = {};
     char     ns[40] = {};
 };
 
@@ -174,6 +180,11 @@ double   s_scan_deadline = 0;     // общего бюджета скана
 
 FoundClass s_classes[768 + 256];
 int      s_class_count = 0;
+// Отпечаток образа игры для кэша оффсетов и признак «взято из кэша».
+uint64_t s_image_key = 0;
+bool     s_from_cache = false;
+bool     s_cache_checked = false;
+bool     s_cache_saved = false;
 // Обычный потолок кэша. Хвост массива — резерв: лог с беты показал, что БЕЗ
 // окна метаданных «мягкий» фильтр пропускает сотни тысяч мусорных кандидатов,
 // кэш забивается мусором ещё в начале скана, и настоящие классы (вставшие в
@@ -336,10 +347,20 @@ double   s_last_progress_log = 0; // темп строк прогресса в �
 // Бюджет такта 4 мс (как у других сканов): потеря привязки на устройстве, как
 // выяснилось по логу, была не от чтений сканера, а от смотрителя кадра.
 // Крупный кусок — статический буфер, стеку не стоит.
+//
+// Общий потолок скана ОСОЗНАННО щедрый (300 с): лог 24.09 показал, что при
+// 90 с скан кучи обрывался на 153/248 МБ и часть табличных классов так и не
+// находилась — их поля оставались на вшитых значениях («не все оффсеты
+// автообновляются»). Скан порционный (4 мс/кадр), поэтому длинный потолок не
+// грузит игру, а после первого входа результат берётся из кэша мгновенно.
 constexpr double kTickBudgetSec   = 0.004;  // 4 мс на такт
-constexpr double kScanTotalSec    = 90.0;   // общий потолок скана (образы по 0.5ГБ+)
+constexpr double kScanTotalSec    = 300.0;  // общий потолок скана (образы по 0.5ГБ+)
 constexpr size_t kChunkBytes      = 256 * 1024;
 constexpr size_t kMaxReadsPerChunk = 256;   // предел «дорогих» чтений на порцию
+// В куче «похожих на указатели» значений на порядки больше, чем в .data/.relro
+// образа, и каждая порция упиралась в прежний предел 1024 — скан полз
+// ~1.7 МБ/с. Удвоенный предел вдвое ускоряет первый (и единственный) проход.
+constexpr size_t kHeapReadsPerChunk = 2048;
 // Сколько байт достаточно просмотреть, чтобы при НУЛЕ классов признать базу
 // пустой: в живом образе слоты классов лежат в хвостовых сегментах
 // (.data/.relro), а скан идёт с конца образа — живые классы нашлись на
@@ -839,7 +860,7 @@ static int try_class_candidate(uint64_t v) {
     }
     bool ok = false;
     const std::string name = qrd_string(nm, &ok);
-    if (!ok || name.empty() || name.size() > 47) { ++s_names_fail; return 0; }
+    if (!ok || name.empty() || name.size() > 63) { ++s_names_fail; return 0; }
     ++s_names_ok;
     const int cap_total = (int)(sizeof(s_classes) / sizeof(s_classes[0]));
     if (s_class_count >= kClassCap && !name_is_wanted(name.c_str())) return 1;
@@ -913,7 +934,10 @@ static void start_heap_scan(uint64_t anchor) {
         s_total_bytes += s_heap_ranges[k].end - s_heap_ranges[k].start;
     s_scanned_bytes = 0;
     s_last_progress_log = 0;
-    s_scan_deadline = mono_seconds() + 90.0;
+    // 300 с, а не 90: скан порционный, и на устройстве куча в 250+ МБ за 90 с
+    // не проходится — обрыв на середине оставлял часть табличных классов
+    // ненайденной (см. комментарий про «не все оффсеты» в шапке констант).
+    s_scan_deadline = mono_seconds() + kScanTotalSec;
     s_heap_pos = s_heap_ranges[0].start;
     s_heap_end = s_heap_ranges[0].end;
 
@@ -943,7 +967,7 @@ static void phase_heap(double deadline) {
                 v = memio::untag(v);
                 if (valid_obj(v)) {
                     reads_used += try_class_candidate(v) ? 3 : 1;
-                    if (reads_used >= 1024) { ++examined; break; }
+                    if (reads_used >= kHeapReadsPerChunk) { ++examined; break; }
                 }
             }
             s_heap_pos += examined * 8;
@@ -1757,7 +1781,7 @@ static int32_t find_field_offset(uint64_t klass, const char* field) {
     if (!valid_obj(fields_ptr)) return -1;
     int count = qrd<uint16_t>(klass + IL2CPP_CLASS_FIELD_COUNT);
     if (count <= 0 || count > 2048) return -1;
-    char name[48];
+    char name[64];
     for (int i = 0; i < count; ++i) {
         const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
         if (qrd_ptr(e + s_fi_parent) != klass) break;
@@ -1766,6 +1790,104 @@ static int32_t find_field_offset(uint64_t klass, const char* field) {
     }
     return -1;
 }
+
+// ---- Поиск поля по ТИПУ (когда имя ротировано обфускатором) ------------------
+// Бэкинг-поля вида «_BYK_k__BackingField» переименовываются в каждом билде
+// игры, но их ТИП и класс-владелец не меняются. Сигнатура типа приходит из
+// таблицы (пятый столбец): примитив (f4/b1/u4/i4/str), любой ссылочный (obj)
+// или конкретный класс (c:Имя). Раскладка Il2CppType — в game_offsets.h.
+
+// klassIndex (индекс определения типа) кэшированного класса по его имени.
+// Имя в сигнатуре короткое («c:HitMarkerItem»), а в кэше может лежать полное
+// («MineableObjectExtension_HitMarkerItem») — сравниваем и хвост за последним
+// подчёркиванием. Возврат: найден ли; индекс в *out.
+static bool cached_class_type_index(const char* short_name, int32_t* out) {
+    if (!short_name || !short_name[0]) return false;
+    for (int i = 0; i < s_class_count; ++i) {
+        const char* nm = s_classes[i].name;
+        bool hit = strcmp(nm, short_name) == 0;
+        if (!hit) {
+            const char* under = strrchr(nm, '_');
+            if (under) hit = strcmp(under + 1, short_name) == 0;
+        }
+        if (!hit) continue;
+        // byval_arg.data.klassIndex — тот же индекс, что в FieldInfo.type
+        // всех полей этого типа.
+        *out = qrd<int32_t>(s_classes[i].klass + IL2CPP_CLASS_BYVAL_ARG);
+        return true;
+    }
+    return false;
+}
+
+// Соответствует ли enum типа примитивной сигнатуре; для «obj» — ссылочный ли.
+static bool type_enum_matches(uint32_t te, const char* sig) {
+    if (!strcmp(sig, "f4"))  return te == IL2CPP_TYPE_R4;
+    if (!strcmp(sig, "b1"))  return te == IL2CPP_TYPE_BOOLEAN;
+    if (!strcmp(sig, "u4"))  return te == IL2CPP_TYPE_U4;
+    if (!strcmp(sig, "i4"))  return te == IL2CPP_TYPE_I4;
+    if (!strcmp(sig, "i2"))  return te == IL2CPP_TYPE_I2;
+    if (!strcmp(sig, "str")) return te == IL2CPP_TYPE_STRING;
+    if (!strcmp(sig, "obj")) return te == IL2CPP_TYPE_CLASS || te == IL2CPP_TYPE_OBJECT ||
+                                     te == IL2CPP_TYPE_SZARRAY || te == IL2CPP_TYPE_ARRAY ||
+                                     te == IL2CPP_TYPE_GENERICINST || te == IL2CPP_TYPE_PTR;
+    return false;
+}
+
+// Вшитое (табличное) значение слота для текущей версии релиз/бета. Именно с
+// ним сверяемся при неоднозначности: смещение из дампа — сильный признак
+// «это то самое поле», если тип тоже сошёлся.
+static bool baked_for_slot(const std::uint64_t* slot, std::uint64_t* out) {
+    std::size_t n = 0;
+    const go::Field* f = go::Fields(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (f[i].slot != slot) continue;
+        *out = (go::CurrentBuild() == go::Build::Beta) ? f[i].beta : f[i].release;
+        return true;
+    }
+    return false;
+}
+
+// Найти поле по сигнатуре типа; вернуть смещение (-1 если нет или неоднозначно).
+// Единственный кандидат берётся сразу; при нескольких выручает вшитое смещение.
+static int32_t find_field_offset_by_type(uint64_t klass, const OrField& of) {
+    const char* sig = of.type;
+    if (!sig || !sig[0]) return -1;
+    const uint64_t fields_ptr = qrd_ptr(klass + s_fields_off);
+    if (!valid_obj(fields_ptr)) return -1;
+    int count = qrd<uint16_t>(klass + IL2CPP_CLASS_FIELD_COUNT);
+    if (count <= 0 || count > 2048) return -1;
+
+    const bool class_sig = (sig[0] == 'c' && sig[1] == ':');
+    int32_t want_kidx = 0;
+    if (class_sig && !cached_class_type_index(sig + 2, &want_kidx))
+        return -1;   // класс-тип не найден в кэше — сравнивать не с чем
+
+    int32_t  match_off[8];
+    int      nmatch = 0;
+    for (int i = 0; i < count && nmatch < 8; ++i) {
+        const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
+        if (qrd_ptr(e + s_fi_parent) != klass) break;
+        const uint64_t typep = qrd_ptr(e + IL2CPP_FIELDINFO_TYPE);
+        if (!valid_obj(typep)) continue;
+        bool m = false;
+        if (class_sig) {
+            m = qrd<int32_t>(typep) == want_kidx && want_kidx != 0;
+        } else {
+            const uint32_t bits = qrd<uint32_t>(typep + IL2CPP_TYPE_BITS);
+            m = type_enum_matches((bits >> 16) & 0xFF, sig);
+        }
+        if (m) match_off[nmatch++] = qrd<int32_t>(e + IL2CPP_FIELDINFO_OFFSET);
+    }
+    if (nmatch == 1) return match_off[0];
+    if (nmatch > 1) {
+        std::uint64_t baked = 0;
+        if (baked_for_slot(of.slot, &baked))
+            for (int i = 0; i < nmatch; ++i)
+                if ((std::uint64_t)(uint32_t)match_off[i] == baked) return match_off[i];
+    }
+    return -1;
+}
+
 
 static void apply_resolution(const OrField& of, int32_t off) {
     const std::uint64_t value = (std::uint64_t)(uint32_t)off;
@@ -1876,6 +1998,11 @@ static void phase_fields() {
         }
         log_anchor_dump(anchor);
         if (!s_fields_off) calibrate_fields(anchor);
+        // Якорь в кэш классов под своим живым именем: он даёт имя класса и его
+        // byval_arg (klassIndex) — по нему сверяются ТИПЫ полей во втором
+        // проходе (find_field_offset_by_type). Без этой записи сигнатуры
+        // «c:PlayerManager»/«c:CameraManager» не с чем сравнивать.
+        if (aok && !aname.empty()) store_verified_class(anchor, aname.c_str());
     }
     // Калибровка: первым пробуем самый «толстый» класс (больше полей —
     // надёжнее форма), потом ВСЕ классы с именами из таблицы (совпадение
@@ -1957,6 +2084,30 @@ static void phase_fields() {
         }
     }
 
+    // Второй проход — поля с РОТИРОВАННЫМИ именами (_BYK_k__BackingField). Их
+    // имя меняется каждый билд игры, поэтому по имени они не находятся; ищем
+    // по ТИПУ поля (сигнатура из таблицы). Отдельным проходом, потому что
+    // cached_class_type_index должен видеть УЖЕ заполненный кэш классов.
+    int by_type = 0;
+    for (int i = 0; i < kOrFieldCount; ++i) {
+        const OrField& of = kOrFields[i];
+        if (!of.type || !of.type[0]) continue;   // без сигнатуры искать нечем
+        bool done = false;
+        for (int j = 0; j < s_applied_count; ++j)
+            if (s_applied[j].slot == of.slot) { done = true; break; }
+        if (done) continue;
+        for (int j = 0; j < s_class_count && !done; ++j) {
+            if (strcmp(s_classes[j].name, of.cls) != 0) continue;
+            const int32_t off = find_field_offset_by_type(s_classes[j].klass, of);
+            if (off < 0) continue;
+            apply_resolution(of, off);
+            ++by_type;
+            done = true;
+        }
+    }
+    if (by_type)
+        LogLine("автооффсеты: полей найдено по типу (имена ротированы): %d", by_type);
+
     for (int i = 0; i < kOrFieldCount; ++i) {
         const OrField& of = kOrFields[i];
         bool is_resolved = false;
@@ -1985,13 +2136,14 @@ static void log_summary() {
     const int wanted = wanted_in_cache();
     LogLine("автооффсеты: классов найдено %d (по форме %d, имён прочитано %d, отказов %d, табличных %d), "
             "fields@0x%llx, разрешено %d/%d констант (%d изменено), метаданные %s, "
-            "база 0x%llx, пустых баз %d, бутстрап: строк %d/%d, по указателям классов %llu",
+            "база 0x%llx, пустых баз %d, бутстрап: строк %d/%d, по указателям классов %llu%s",
             s_class_count, s_shape_pass, s_names_ok, s_names_fail, wanted,
             (unsigned long long)s_fields_off, s_resolved, kOrFieldCount, s_changed,
             s_meta_begin ? "найдены" : "НЕ найдены (фильтр слабее)",
             (unsigned long long)g_il2cpp_base, s_dead_count,
             s_wanted_str_found, s_wanted_name_count,
-            (unsigned long long)s_ptr_verified);
+            (unsigned long long)s_ptr_verified,
+            s_from_cache ? " [из кэша первого входа]" : "");
 
     build_wanted_names();
     char missing_buf[384] = {};
@@ -2015,6 +2167,230 @@ static void log_summary() {
         LogLine("автооффсеты: не найдены классы (%d из %d): %s",
                 missing_cls_count, s_wanted_name_count, missing_buf);
     }
+}
+
+// ---- Кэш результата: сканируем только при ПЕРВОМ входе ------------------------
+// Полный резолв на телефоне — это минуты (образ .so сотни МБ + куча 250+ МБ) и
+// только 4 мс на кадр, поэтому после каждого входа в игру его приходилось
+// ждать заново: переподключение смотрителя кадра, респавн, перезапуск клиента —
+// и скан начинал с нуля, а часть полей так и не успевала найтись.
+//
+// Результат резолва теперь пишется в файл рядом с конфигами (как .build/.lang),
+// а при следующем входе берётся оттуда МГНОВЕННО: скан не запускается вовсе.
+// Ключ — отпечаток самого libil2cpp.so (заголовок ELF + программные заголовки +
+// размер файла + содержимое 16 выборок по нему). Апдейт игры меняет образ, ключ
+// меняется, кэш не срабатывает — и резолв идёт заново, как и должен. Обратной
+// ситуации (старый кэш на новом образе) не бывает: без совпадения ключа кэш
+// просто не читается.
+//
+// В кэше и смещения полей, и адреса классов, которые вызывающий код берёт по
+// имени (замена *_TYPEINFO_RVA). Каждый такой адрес при загрузке проверяется:
+// по нему должен лежать живой Il2CppClass с тем же именем. Не сошлось — запись
+// отбрасывается, остальное берём (смещения полей от адреса классов не зависят).
+
+static std::string cache_path() {
+    // XS_RU, а не XS: стенд резолвера (tools/offsets/resolver_test.cpp)
+    // собирается одним модулем и не линкует lang.cpp.
+#ifdef OR_CACHE_DIR
+    // Стенд: каталог кэша подменяется, чтобы проверить кэш на хосте, где
+    // /storage/emulated/0 не существует.
+    return std::string(OR_CACHE_DIR) + ".offs";
+#else
+    return std::string(XS_RU("/storage/emulated/0/benzware/")) + XS_RU(".offs");
+#endif
+}
+
+static uint64_t fnv1a(const void* p, size_t n, uint64_t h) {
+    const uint8_t* b = (const uint8_t*)p;
+    for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 0x100000001B3ULL; }
+    return h;
+}
+
+// Размер файла образа: карта процесса даёт конец последнего отображения этого
+// же файла (bss тоже в карте, поэтому это верхняя граница — для отпечатка её
+// хватает: апдейт игры почти всегда меняет размер образа).
+static uint64_t image_file_span() {
+    if (!g_il2cpp_base) return 0;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    std::string text;
+    char chunk[4096];
+    for (;;) {
+        const ssize_t n = read(fd, chunk, sizeof(chunk));
+        if (n > 0) { text.append(chunk, (size_t)n); if (text.size() > (8u << 20)) break; continue; }
+        break;
+    }
+    close(fd);
+    uint64_t span = 0;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        const size_t eol = text.find('\n', pos);
+        const size_t line_end = (eol == std::string::npos) ? text.size() : eol;
+        // Строка обязана быть NUL-терминированной: иначе strchr/strstr уходят
+        // по всему остатку файла (та же ловушка, что в phase_maps).
+        char linebuf[512];
+        size_t line_len = line_end - pos;
+        if (line_len >= sizeof(linebuf)) line_len = sizeof(linebuf) - 1;
+        memcpy(linebuf, text.c_str() + pos, line_len);
+        linebuf[line_len] = '\0';
+        pos = line_end + 1;
+        unsigned long long start = 0, end = 0, foff = 0;
+        char perms[5] = {};
+        if (sscanf(linebuf, "%llx-%llx %4s %llx", &start, &end, perms, &foff) < 4) continue;
+        const char* slash = strchr(linebuf, '/');
+        if (!slash || !strstr(slash, "libil2cpp.so")) continue;
+        if (start != g_il2cpp_base) continue;   // чужой/второй образ
+        if (end > g_il2cpp_base && end - g_il2cpp_base > span) span = end - g_il2cpp_base;
+    }
+    return span;
+}
+
+// Отпечаток образа: ~128 КБ чтений, доли секунды. Всё, что можно вычитать, не
+// перекапывая 250 МБ целиком.
+static uint64_t compute_image_key() {
+    if (!g_il2cpp_base) return 0;
+    uint64_t h = 0xCBF29CE484222325ULL;
+    uint8_t eh[64] = {};
+    if (!qrd_buf(g_il2cpp_base, eh, sizeof(eh))) return 0;
+    h = fnv1a(eh, sizeof(eh), h);
+    uint64_t phoff = 0;
+    uint16_t phentsize = 0, phnum = 0;
+    memcpy(&phoff, eh + 0x20, 8);
+    memcpy(&phentsize, eh + 0x36, 2);
+    memcpy(&phnum, eh + 0x38, 2);
+    if (phnum > 64) phnum = 64;
+    const size_t phwant = (size_t)phentsize * phnum;
+    uint8_t ph[64 * 56] = {};
+    if (phentsize && phwant && phwant <= sizeof(ph) &&
+        qrd_buf(g_il2cpp_base + phoff, ph, phwant))
+        h = fnv1a(ph, phwant, h);
+    const uint64_t span = image_file_span();
+    h = fnv1a(&span, sizeof(span), h);
+    if (span > 0x10000) {
+        const int kSamples = 16;
+        const size_t kStep = 8 * 1024;
+        uint8_t buf[kStep];
+        for (int i = 0; i < kSamples; ++i) {
+            const uint64_t at = (span - kStep) * (uint64_t)i / (uint64_t)(kSamples - 1);
+            if (!qrd_buf(g_il2cpp_base + at, buf, sizeof(buf))) continue;
+            h = fnv1a(buf, sizeof(buf), h);
+        }
+    }
+    return h;
+}
+
+static void save_offsets_cache() {
+    if (!g_il2cpp_base || !s_applied_count) return;
+    if (!s_image_key) s_image_key = compute_image_key();
+    if (!s_image_key) return;
+    FILE* f = fopen(cache_path().c_str(), "w");
+    if (!f) return;
+    fprintf(f, "# автооффсеты: живой резолв (ключ — отпечаток libil2cpp.so)\n");
+    fprintf(f, "key %016llx\n", (unsigned long long)s_image_key);
+    for (int i = 0; i < s_applied_count; ++i) {
+        int idx = -1;
+        for (int j = 0; j < kOrFieldCount; ++j)
+            if (kOrFields[j].slot == s_applied[i].slot) { idx = j; break; }
+        if (idx < 0) continue;
+        fprintf(f, "res %d %llx\n", idx, (unsigned long long)s_applied[i].value);
+    }
+    build_wanted_names();
+    for (int i = 0; i < s_wanted_name_count; ++i) {
+        for (int j = 0; j < s_class_count; ++j) {
+            if (strcmp(s_classes[j].name, s_wanted_names[i]) != 0) continue;
+            fprintf(f, "cls %s %016llx\n", s_classes[j].name,
+                    (unsigned long long)s_classes[j].klass);
+            break;
+        }
+    }
+    fclose(f);
+}
+
+// true — кэш подошёл и применён (скан не нужен).
+static bool load_offsets_cache() {
+    if (!g_il2cpp_base) return false;
+    if (!s_image_key) s_image_key = compute_image_key();
+    if (!s_image_key) return false;
+    FILE* f = fopen(cache_path().c_str(), "r");
+    if (!f) return false;
+    std::string text;
+    char chunk[512];
+    for (;;) {
+        const ssize_t n = fread(chunk, 1, sizeof(chunk), f);
+        if (n > 0) { text.append(chunk, (size_t)n); if (text.size() > (256u << 10)) break; continue; }
+        break;
+    }
+    fclose(f);
+
+    // Сначала ключ. Не сошёлся (игра обновилась) — выходим, НЕ тронув ни
+    // одного слота: значения из чужого образа хуже вшитых.
+    uint64_t key = 0;
+    bool have_key = false;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        const size_t eol = text.find('\n', pos);
+        const size_t line_end = (eol == std::string::npos) ? text.size() : eol;
+        char linebuf[192];
+        size_t line_len = line_end - pos;
+        if (line_len >= sizeof(linebuf)) line_len = sizeof(linebuf) - 1;
+        memcpy(linebuf, text.c_str() + pos, line_len);
+        linebuf[line_len] = '\0';
+        pos = line_end + 1;
+        unsigned long long val = 0;
+        if (sscanf(linebuf, "key %llx", &val) == 1) { key = (uint64_t)val; have_key = true; break; }
+    }
+    if (!have_key || key != s_image_key) return false;
+
+    int loaded = 0, classes = 0;
+    pos = 0;
+    while (pos < text.size()) {
+        const size_t eol = text.find('\n', pos);
+        const size_t line_end = (eol == std::string::npos) ? text.size() : eol;
+        char linebuf[192];
+        size_t line_len = line_end - pos;
+        if (line_len >= sizeof(linebuf)) line_len = sizeof(linebuf) - 1;
+        memcpy(linebuf, text.c_str() + pos, line_len);
+        linebuf[line_len] = '\0';
+        pos = line_end + 1;
+        unsigned idx = 0;
+        unsigned long long val = 0;
+        char name[64] = {};
+        if (sscanf(linebuf, "res %u %llx", &idx, &val) == 2) {
+            if (idx >= (unsigned)kOrFieldCount) continue;
+            const OrField& of = kOrFields[idx];
+            // Границы те же, что у apply_resolution: кэш не должен занести в
+            // слот заведомо мусорное значение.
+            if (of.is_static ? (val > 0x4000) : (val > 0x20000)) continue;
+            if (*(of.slot) != val) ++s_changed;
+            *(of.slot) = (std::uint64_t)val;
+            if (s_applied_count < 256) {
+                s_applied[s_applied_count].slot = of.slot;
+                s_applied[s_applied_count].value = (std::uint64_t)val;
+                ++s_applied_count;
+            }
+            ++s_resolved;
+            ++loaded;
+        } else if (sscanf(linebuf, "cls %63s %llx", name, &val) == 2) {
+            const uint64_t k = (uint64_t)val;
+            if (!valid_obj(k)) continue;
+            const uint64_t nm = qrd_ptr(k + IL2CPP_CLASS_NAME);
+            if (!valid_str_ptr(nm)) continue;
+            bool ok = false;
+            const std::string live = qrd_string(nm, &ok);
+            if (!ok || live != name) continue;   // адрес устарел — берём остальное
+            store_verified_class(k, name);
+            ++classes;
+        }
+    }
+    if (loaded > 0 && classes > 0 && !s_good_base) {
+        // База, на которой живые классы читаются, считается живой: на неё же
+        // встанет следующая привязка (после самообновления игры в карте бывает
+        // два образа libil2cpp.so, и по ELF-заголовку пустой не отличить).
+        s_good_base = g_il2cpp_base;
+    }
+    return loaded > 0;
 }
 
 }  // namespace
@@ -2066,6 +2442,20 @@ void offset_resolver_tick() {
 #if OR_SELFTEST_BREAK_BAKED
             selftest_break_baked();
 #endif
+            // Первый вход на этом образе: если резолв уже когда-то сошёлся и
+            // результат лежит в кэше — берём его и скан НЕ запускаем вовсе.
+            // Ждать минуты после каждого перезахода в игру не нужно.
+            if (!s_cache_checked) {
+                s_cache_checked = true;
+                if (load_offsets_cache()) {
+                    s_from_cache = true;
+                    s_phase = PH_DONE;
+                    LogLine("автооффсеты: оффсеты взяты из кэша первого входа "
+                            "(%d полей, образ 0x%llx) — сканирование не нужно",
+                            s_resolved, (unsigned long long)g_il2cpp_base);
+                    break;
+                }
+            }
             s_phase = PH_MAPS;
             break;
         case PH_MAPS:   phase_maps(); break;
@@ -2077,7 +2467,15 @@ void offset_resolver_tick() {
         case PH_FIELDS: phase_fields(); break;
         case PH_DONE:   break;
     }
-    if (s_phase == PH_DONE) log_summary();
+    if (s_phase == PH_DONE) {
+        log_summary();
+        // Скан только при первом входе: результат уходит в кэш, чтобы следующий
+        // вход не ждал его заново. Один раз за резолв — не каждый кадр.
+        if (!s_from_cache && !s_cache_saved) {
+            s_cache_saved = true;
+            save_offsets_cache();
+        }
+    }
 }
 
 void offset_resolver_reset() {
@@ -2118,6 +2516,7 @@ void offset_resolver_reset() {
     s_ptr_passes = 0; s_ptr_readfails = 0;
     s_ptr_range_count = 0; s_ptr_seg_bytes = 0; s_ptr_anon_bytes = 0;
     s_applied_count = 0; s_logged = false;
+    s_image_key = 0; s_from_cache = false; s_cache_checked = false; s_cache_saved = false;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
     // «какие базы пусты, а где классы живые» НЕ сбрасываются: они привязаны
     // к процессу (s_known_pid) и переживают перепривязки к той же игре.
@@ -2214,6 +2613,10 @@ void offset_resolver_status(char* out, size_t cap) {
         return;
     }
     // PH_DONE
+    if (s_from_cache) {
+        snprintf(out, cap, "готов (кэш первого входа): полей %d/%d", s_resolved, kOrFieldCount);
+        return;
+    }
     if (s_class_count > 0) {
         snprintf(out, cap, "готов: классов %d, полей %d/%d (изменено %d)",
                  s_class_count, s_resolved, kOrFieldCount, s_changed);

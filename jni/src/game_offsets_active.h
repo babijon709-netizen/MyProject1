@@ -62,6 +62,25 @@ namespace go_active {
 // иначе `using namespace go_active` перестал бы их находить.
 using game_offsets::ToolPurpose;
 using game_offsets::MineableEntityType;
+// Раскладка САМОГО рантайма il2cpp (Il2CppClass/FieldInfo/Il2CppType) от
+// сборки игры не зависит — она зависит от версии Unity. Поэтому эти константы
+// не переключаются версиями, а пробрасываются из релизного набора как есть:
+// их у беты может и не быть, а резолверу они нужны всегда.
+using game_offsets::IL2CPP_CLASS_BYVAL_ARG;
+using game_offsets::IL2CPP_TYPE_BITS;
+using game_offsets::IL2CPP_TYPE_BOOLEAN;
+using game_offsets::IL2CPP_TYPE_I2;
+using game_offsets::IL2CPP_TYPE_I4;
+using game_offsets::IL2CPP_TYPE_U4;
+using game_offsets::IL2CPP_TYPE_R4;
+using game_offsets::IL2CPP_TYPE_STRING;
+using game_offsets::IL2CPP_TYPE_PTR;
+using game_offsets::IL2CPP_TYPE_VALUETYPE;
+using game_offsets::IL2CPP_TYPE_CLASS;
+using game_offsets::IL2CPP_TYPE_ARRAY;
+using game_offsets::IL2CPP_TYPE_GENERICINST;
+using game_offsets::IL2CPP_TYPE_OBJECT;
+using game_offsets::IL2CPP_TYPE_SZARRAY;
 
 #define GO_FIELD(name, beta_value) inline std::uint64_t name = game_offsets::name;
 #define GO_CONST(name, beta_value) inline float         name = game_offsets::name;
