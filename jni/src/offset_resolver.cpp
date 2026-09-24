@@ -157,6 +157,12 @@ double   s_scan_deadline = 0;     // общего бюджета скана
 FoundClass s_classes[768];
 int      s_class_count = 0;
 int      s_names_ok = 0, s_names_fail = 0;
+// Сколько значений прошли проверки «указатель + image внутри libil2cpp», ДО
+// фильтров имени. По нему в логе видно, на каком именно этапе умерли
+// кандидаты: 0 — в базе вообще нет ничего похожего на классы (мёртвый образ
+// или другая раскладка), >0 при нуле имён — кандидаты были, но имена не
+// прошли фильтр (окно метаданных / нечитаемость).
+int      s_shape_pass = 0;
 
 uint64_t s_fields_off = 0;        // откалиброванное смещение Il2CppClass.fields
 int      s_resolved = 0, s_changed = 0;
@@ -245,7 +251,7 @@ static bool try_next_base() {
         g_il2cpp_base = b;
         s_scan_base = b;
         s_bound_base = b;
-        s_names_ok = 0; s_names_fail = 0;
+        s_names_ok = 0; s_names_fail = 0; s_shape_pass = 0;
         s_phase = PH_MAPS;
         return true;
     }
@@ -374,6 +380,19 @@ static void phase_maps() {
         if (!s_lib_begin || start < s_lib_begin) s_lib_begin = start;
         if (end > s_lib_end) s_lib_end = end;
     }
+    // Ловушка беты: в /proc/pid/maps нашёлся маппинг с именем
+    // «global-metadata» размером всего ОДНА СТРАНИЦА (4 КБ) — заглушка или
+    // заголовок, а настоящий блок строк лежит где-то в другом месте. Строгий
+    // фильтр имён по такому «окну» отклонил ВСЕ классы (указатели имён в 4 КБ
+    // не помещаются) — скан на бете дал ноль классов при нуле прочитанных
+    // имён. Настоящие метаданные всегда многомегабайтные; окно меньше 1 МБ
+    // игнорируем и переходим на «мягкий» фильтр (имя — просто читаемая
+    // строка): релизная первая привязка без метаданных так находила классы.
+    if (s_meta_begin && (s_meta_end - s_meta_begin) < (uint64_t)(1u << 20)) {
+        LogLine("автооффсеты: окно метаданных подозрительно мало (%llu КБ) — игнорирую, фильтр имён ослаблен",
+                (unsigned long long)((s_meta_end - s_meta_begin) >> 10));
+        s_meta_begin = s_meta_end = 0;
+    }
     if (!s_seg_count) {
         LogLine("автооффсеты: база 0x%llx — сегментов 0 (строк .so %d: окно %d, иск %d, дел %d, карта %s)",
                 (unsigned long long)s_scan_base,
@@ -417,6 +436,7 @@ static int try_class_candidate(uint64_t v) {
     const uint64_t image = qrd_ptr(v);
     if (s_lib_begin && (image < s_lib_begin || image >= s_lib_end)) return 0;
     else if (!s_lib_begin && !valid_obj(image)) return 0;
+    ++s_shape_pass;   // «похож на класс» по форме — до фильтров имени
     const uint64_t nm = qrd_ptr(v + IL2CPP_CLASS_NAME);
     if (s_meta_begin) {
         if (nm < s_meta_begin || nm >= s_meta_end) return 0;
@@ -486,10 +506,10 @@ static void phase_scan(double deadline) {
         const double now_s = mono_seconds();
         if (now_s - s_last_progress_log >= 8.0) {
             s_last_progress_log = now_s;
-            LogLine("автооффсеты: скан %llu/%llu МБ, классов %d (имён %d/%d)",
+            LogLine("автооффсеты: скан %llu/%llu МБ, классов %d (форма %d, имён %d/%d)",
                     (unsigned long long)(s_scanned_bytes >> 20),
                     (unsigned long long)(s_total_bytes >> 20),
-                    s_class_count, s_names_ok, s_names_fail);
+                    s_class_count, s_shape_pass, s_names_ok, s_names_fail);
         }
     }
     const bool empty_base = !s_class_count && s_scanned_bytes >= kEmptyBaseBytes;
@@ -619,10 +639,10 @@ static void log_summary() {
 #if OR_SELFTEST_BREAK_BAKED
     selftest_restore_unresolved();
 #endif
-    LogLine("автооффсеты: классов найдено %d (имён прочитано %d, отказов %d), "
+    LogLine("автооффсеты: классов найдено %d (по форме %d, имён прочитано %d, отказов %d), "
             "fields@0x%llx, разрешено %d/%d констант (%d изменено), метаданные %s, "
             "база 0x%llx, пустых баз %d",
-            s_class_count, s_names_ok, s_names_fail,
+            s_class_count, s_shape_pass, s_names_ok, s_names_fail,
             (unsigned long long)s_fields_off, s_resolved, kOrFieldCount, s_changed,
             s_meta_begin ? "найдены" : "НЕ найдены (фильтр слабее)",
             (unsigned long long)g_il2cpp_base, s_dead_count);
@@ -694,7 +714,7 @@ void offset_resolver_reset() {
     s_total_bytes = 0; s_scanned_bytes = 0;
     s_maps_lib_lines = 0; s_maps_cut_window = 0; s_maps_cut_x = 0;
     s_maps_cut_deleted = 0; s_maps_open_failed = false;
-    s_class_count = 0; s_names_ok = 0; s_names_fail = 0;
+    s_class_count = 0; s_names_ok = 0; s_names_fail = 0; s_shape_pass = 0;
     s_fields_off = 0; s_resolved = 0; s_changed = 0;
     s_applied_count = 0; s_logged = false;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
@@ -746,13 +766,13 @@ uint64_t offset_resolver_class(const char* name, const char* ns) {
 void offset_resolver_debug_dump() {
     fprintf(stderr,
             "[ор] фаза %d, сегментов %d (idx %d), скан@0x%llx, lib[0x%llx..0x%llx), "
-            "meta[0x%llx..0x%llx), классов %d, имён ок/отказ %d/%d, fields@0x%llx, "
+            "meta[0x%llx..0x%llx), классов %d (форма %d), имён ок/отказ %d/%d, fields@0x%llx, "
             "дедлайн %s\n",
             (int)s_phase, s_seg_count, s_seg_idx,
             (unsigned long long)s_scan_pos,
             (unsigned long long)s_lib_begin, (unsigned long long)s_lib_end,
             (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end,
-            s_class_count, s_names_ok, s_names_fail,
+            s_class_count, s_shape_pass, s_names_ok, s_names_fail,
             (unsigned long long)s_fields_off,
             (s_scan_deadline && mono_seconds() < s_scan_deadline) ? "жив" : "вышел");
 }
@@ -797,6 +817,13 @@ void offset_resolver_status(char* out, size_t cap) {
     if (s_names_ok == 0 && s_names_fail > 0) {
         snprintf(out, cap, "имена классов не читаются (%d отказов) — вшитые оффсеты",
                  s_names_fail);
+        return;
+    }
+    if (s_names_ok == 0 && s_shape_pass > 0) {
+        // Кандидаты «по форме» были, но ни одно имя не прошло: их отклонил
+        // фильтр окна метаданных или строки не прочитались.
+        snprintf(out, cap, "кандидаты были (%d), имена отсеяны — вшитые оффсеты",
+                 s_shape_pass);
         return;
     }
     if (s_names_ok == 0) {
