@@ -99,7 +99,7 @@ struct Handed {
     uint64_t il2cpp_base, meta_base;
     uint64_t pm_real, pm_decoy, teammember, netclient;
     uint64_t fpmanager, item, itemdata;
-    uint64_t treehs, orehs, vec3, hitmarkeritem, oremark, itempickup;
+    uint64_t treehs, orehs, vec3, hitmarkeritem, oremark, itempickup, playerweapon;
 };
 
 // Строка в окне метаданных; возвращает её адрес.
@@ -210,6 +210,7 @@ static void child_main(int out_fd) {
     const uint64_t s_hmitem = put_string(meta, moff, "MineableObjectExtension_HitMarkerItem");
     const uint64_t s_oremark = put_string(meta, moff, "MineableObjectExtension_OreHitstreaksMarker");
     const uint64_t s_pickup = put_string(meta, moff, "ItemPickup");
+    const uint64_t s_weapon = put_string(meta, moff, "PlayerWeapon");
 
     // Окно данных «.so»: сюда кладём слоты-указатели, которые ищет сканер.
     uint64_t* slots = (uint64_t*)(il + 0x40000);
@@ -328,6 +329,16 @@ static void child_main(int out_fd) {
     uint64_t itempickup = build_class(heap, hoff, il_base + 0x1000, s_pickup, s_oxide,
                                       pickup_fields, 2, meta, moff, 0x20D);
 
+    // PlayerWeapon: обратная ссылка на игрока (c:PlayerManager). В кэше ДВА
+    // класса с именем PlayerManager (пустышка-тёзка лежит раньше настоящего), и
+    // byval_arg у них разный: резолвер обязан перебрать оба индекса, иначе поле
+    // не найдётся ни одного. Имя поля ротировано (_player -> XqE).
+    const PField weapon_fields[] = {
+        {"XqE", 0x140, 0x101, 0x12},   // c:PlayerManager (настоящий); вшито 0x138
+    };
+    uint64_t playerweapon = build_class(heap, hoff, il_base + 0x1000, s_weapon, s_oxide,
+                                        weapon_fields, 1, meta, moff, 0x20E);
+
     // Слоты: настоящие классы вперемешку с мусором (выравнивание, битые
     // указатели, указатели в никуда) — фильтры сканера обязаны его отсеять.
     size_t sn = 0;
@@ -352,6 +363,7 @@ static void child_main(int out_fd) {
     slots[sn++] = hitmarkeritem;
     slots[sn++] = oremark;
     slots[sn++] = itempickup;
+    slots[sn++] = playerweapon;
     slots[sn++] = 0xFFFFFFFFFFFFFFF8ull;
     if (sn > kSlots) _exit(94);
 
@@ -362,7 +374,7 @@ static void child_main(int out_fd) {
     h.teammember = teammember; h.netclient = netclient;
     h.fpmanager = fpmanager; h.item = item; h.itemdata = itemdata;
     h.treehs = treehs; h.orehs = orehs; h.vec3 = vec3;
-    h.hitmarkeritem = hitmarkeritem; h.oremark = oremark; h.itempickup = itempickup;
+    h.hitmarkeritem = hitmarkeritem; h.oremark = oremark; h.itempickup = itempickup; h.playerweapon = playerweapon;
     if (write(out_fd, &h, sizeof(h)) != sizeof(h)) _exit(95);
 
     raise(SIGSTOP);   // родитель читает память, пока мы спим
@@ -496,6 +508,8 @@ int main() {
           "TreeHitstreaks: movingMethod по имени 0x20 -> 0xE8");
     check(go_active::ITEMPICKUP_ITEM_OBJECT == 0xB0,
           "ItemPickup: _BQL по типу Item, ближайшее из двух 0xA8 -> 0xB0");
+    check(go_active::PLAYERWEAPON_PLAYER_BACKREF == 0x140,
+          "PlayerWeapon: _player по типу PlayerManager сквозь тёзку 0x138 -> 0x140");
     // Два поля одного типа Vector3, уехавшие на одно расстояние: разводим по
     // вшитым смещениям (0x88 -> 0x98, 0xA4 -> 0xB4) и не путаем местами.
     check(go_active::TREEHS_SPOT_A == 0x98 && go_active::TREEHS_SPOT_B == 0xB4,

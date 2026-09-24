@@ -1846,13 +1846,18 @@ static int32_t find_field_offset(uint64_t klass, const char* field) {
 // таблицы (пятый столбец): примитив (f4/b1/u4/i4/str), любой ссылочный (obj)
 // или конкретный класс (c:Имя). Раскладка Il2CppType — в game_offsets.h.
 
-// klassIndex (индекс определения типа) кэшированного класса по его имени.
+// klassIndex (индекс определения типа) кэшированных классов с таким именем.
 // Имя в сигнатуре короткое («c:HitMarkerItem»), а в кэше может лежать полное
 // («MineableObjectExtension_HitMarkerItem») — сравниваем и хвост за последним
-// подчёркиванием. Возврат: найден ли; индекс в *out.
-static bool cached_class_type_index(const char* short_name, int32_t* out) {
-    if (!short_name || !short_name[0]) return false;
-    for (int i = 0; i < s_class_count; ++i) {
+// подчёркиванием. Тёзок под одним именем может быть несколько (лог 24.09:
+// в кэше лежат и настоящий PlayerManager, и его тёзка-пустышка), и индекс у
+// них РАЗНЫЙ — если сверять только с первым, поля не найдутся ни одного.
+// Поэтому отдаём все индекры: поле подходит, если совпал хотя бы с одним.
+// Возврат: сколько индексов нашли (0 — класса такого типа в кэше нет).
+static int cached_class_type_indices(const char* short_name, int32_t* out, int max) {
+    if (!short_name || !short_name[0] || max <= 0) return 0;
+    int n = 0;
+    for (int i = 0; i < s_class_count && n < max; ++i) {
         const char* nm = s_classes[i].name;
         bool hit = strcmp(nm, short_name) == 0;
         if (!hit) {
@@ -1862,10 +1867,13 @@ static bool cached_class_type_index(const char* short_name, int32_t* out) {
         if (!hit) continue;
         // byval_arg.data.klassIndex — тот же индекс, что в FieldInfo.type
         // всех полей этого типа.
-        *out = qrd<int32_t>(s_classes[i].klass + IL2CPP_CLASS_BYVAL_ARG);
-        return true;
+        const int32_t k = qrd<int32_t>(s_classes[i].klass + IL2CPP_CLASS_BYVAL_ARG);
+        bool dup = false;
+        for (int j = 0; j < n; ++j)
+            if (out[j] == k) dup = true;
+        if (!dup) out[n++] = k;
     }
-    return false;
+    return n;
 }
 
 // Соответствует ли enum типа примитивной сигнатуре; для «obj» — ссылочный ли.
@@ -1913,9 +1921,12 @@ static bool collect_type_matches(uint64_t klass, const OrField& of,
     if (count <= 0 || count > 2048) return false;
 
     const bool class_sig = (sig[0] == 'c' && sig[1] == ':');
-    int32_t want_kidx = 0;
-    if (class_sig && !cached_class_type_index(sig + 2, &want_kidx))
-        return false;   // класс-тип не найден в кэше — сравнивать не с чем
+    int32_t want_kidx[4] = {0, 0, 0, 0};
+    int nkidx = 0;
+    if (class_sig) {
+        nkidx = cached_class_type_indices(sig + 2, want_kidx, 4);
+        if (!nkidx) return false;   // класс-тип не найден в кэше — сверять не с чем
+    }
 
     for (int i = 0; i < count && m.n < 16; ++i) {
         const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
@@ -1924,7 +1935,9 @@ static bool collect_type_matches(uint64_t klass, const OrField& of,
         if (!valid_obj(typep)) continue;
         bool hit = false;
         if (class_sig) {
-            hit = qrd<int32_t>(typep) == want_kidx && want_kidx != 0;
+            const int32_t tk = qrd<int32_t>(typep);
+            for (int k = 0; k < nkidx && !hit; ++k)
+                hit = (tk == want_kidx[k] && tk != 0);
         } else {
             const uint32_t bits = qrd<uint32_t>(typep + IL2CPP_TYPE_BITS);
             hit = type_enum_matches((bits >> 16) & 0xFF, sig);
