@@ -218,6 +218,20 @@ int      s_anon_skip_x = 0;
 int      s_anon_skip_small = 0;
 uint64_t s_anon_biggest = 0;      // самый крупный анонимный регион
 AnonRegion s_anon_noread[256];   // закрытые от чтения (для диагностики)
+// Память без бита чтения в карте: протектор мог просто снять права у пула
+// классов, а /proc/<pid>/mem читает чужие страницы с FOLL_FORCE — то есть
+// «закрыто по правам» ещё не значит «не прочитать». Поэтому каждый такой
+// регион прокалывается коротким чтением: читается и не пустой — берём в скан
+// (и в первые ряды), читается, но сплошные нули — пустая резервация адресов,
+// не читается вовсе — тогда уже точно мимо.
+AnonRegion s_hidden[128];         // закрытые по правам, но читаемые на деле
+int      s_hidden_count = 0;
+uint64_t s_hidden_bytes = 0;
+int      s_hidden_skipped = 0;    // скрытых регионов не взяли: не хватило бюджета
+int      s_probe_ok = 0;          // проба чтения удалась
+uint64_t s_probe_bytes = 0;
+int      s_probe_zero = 0;        // читается, но внутри одни нули
+uint64_t s_probe_zero_bytes = 0;
 // Читаемые файловые регионы с именем, но не libil2cpp.so (протектор может
 // положить метадату в свой .dat/.bin или в память, отмапленную из apk).
 AnonRegion s_filemisc[256];
@@ -457,6 +471,8 @@ static void phase_maps() {
     s_anon_noread_bytes = 0; s_anon_noread_count = 0;
     s_anon_bytes = 0; s_anon_skip_x = 0; s_anon_skip_x_bytes = 0;
     s_anon_skip_small = 0; s_anon_biggest = 0;
+    s_hidden_count = 0; s_hidden_bytes = 0; s_hidden_skipped = 0;
+    s_probe_ok = 0; s_probe_bytes = 0; s_probe_zero = 0; s_probe_zero_bytes = 0;
     if (!s_scan_base) s_scan_base = g_il2cpp_base;
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
@@ -502,14 +518,46 @@ static void phase_maps() {
             // (бета маппит его без имени «global-metadata») и на кучу, где
             // лежат структуры классов. Собираем для строкового бутстрапа.
             if (perms[0] != 'r') {
-                s_anon_noread_bytes += end - start;   // закрыто протектором?
-                if (s_anon_noread_count < 256) {
-                    s_anon_noread[s_anon_noread_count].start = start;
-                    s_anon_noread[s_anon_noread_count].end = end;
-                    snprintf(s_anon_noread[s_anon_noread_count].rperm,
-                             sizeof(s_anon_noread[0].rperm), "%s", perms);
+                // Бит чтения снят, но страницы могут отдаваться: /proc/<pid>/mem
+                // читает с FOLL_FORCE. Три коротких чтения — начало, середина и
+                // четверть региона: так отличается настоящий скрытый пул от
+                // гигабайтной резервации адресов, где нет ни одной страницы.
+                const uint64_t rsize = end - start;
+                const uint64_t offs[3] = {0, rsize >> 1, rsize >> 2};
+                uint8_t probe[128] = {};
+                bool can_read = false, non_zero = false;
+                for (int t = 0; t < 3 && !non_zero; ++t) {
+                    if (!qrd_buf(start + offs[t], probe, sizeof(probe))) continue;
+                    can_read = true;
+                    for (size_t k = 0; k < sizeof(probe); ++k)
+                        if (probe[k]) { non_zero = true; break; }
                 }
-                ++s_anon_noread_count;
+                if (!can_read) {
+                    s_anon_noread_bytes += rsize;   // и правда не прочитать
+                    if (s_anon_noread_count < 256) {
+                        s_anon_noread[s_anon_noread_count].start = start;
+                        s_anon_noread[s_anon_noread_count].end = end;
+                        snprintf(s_anon_noread[s_anon_noread_count].rperm,
+                                 sizeof(s_anon_noread[0].rperm), "%s", perms);
+                    }
+                    ++s_anon_noread_count;
+                } else if (!non_zero) {
+                    // Читается, но пусто: резервация адресов, сканировать нечего.
+                    ++s_probe_zero;
+                    s_probe_zero_bytes += rsize;
+                } else {
+                    ++s_probe_ok;
+                    s_probe_bytes += rsize;
+                    if (s_hidden_count < 128) {
+                        s_hidden[s_hidden_count].start = start;
+                        s_hidden[s_hidden_count].end = end;
+                        s_hidden[s_hidden_count].writable = (perms[1] == 'w');
+                        snprintf(s_hidden[s_hidden_count].rperm,
+                                 sizeof(s_hidden[0].rperm), "%s", perms);
+                        ++s_hidden_count;
+                        s_hidden_bytes += rsize;
+                    }
+                }
             } else if (perms[2] == 'x') {
                 ++s_anon_skip_x;
                 s_anon_skip_x_bytes += end - start;
@@ -635,6 +683,22 @@ static void phase_maps() {
                     (unsigned long long)((s_anon[i].end - s_anon[i].start) >> 20),
                     s_anon[i].rperm);
         }
+    }
+    // Итог пробы памяти без прав чтения: сколько её вообще, сколько отдаётся
+    // принудительным чтением и сколько из этого не пусто. Если пул классов
+    // спрятан снятием бита чтения — он виден здесь, а не в сводке выше.
+    if (s_anon_noread_count || s_probe_ok || s_probe_zero) {
+        LogLine("автооффсеты: память без прав чтения — закрыто %d (%llu МБ), "
+                "принудительно прочиталось %d (%llu МБ), из них непустых %d (%llu МБ)",
+                s_anon_noread_count, (unsigned long long)(s_anon_noread_bytes >> 20),
+                s_probe_ok, (unsigned long long)(s_probe_bytes >> 20),
+                s_probe_zero, (unsigned long long)(s_probe_zero_bytes >> 20));
+        for (int i = 0; i < s_hidden_count && i < 3; ++i)
+            LogLine("автооффсеты: скрытый регион №%d — 0x%llx..0x%llx (%llu МБ, %s)",
+                    i + 1, (unsigned long long)s_hidden[i].start,
+                    (unsigned long long)s_hidden[i].end,
+                    (unsigned long long)((s_hidden[i].end - s_hidden[i].start) >> 20),
+                    s_hidden[i].rperm);
     }
     if (!s_seg_count) {
         LogLine("автооффсеты: база 0x%llx — сегментов 0 (строк .so %d: окно %d, иск %d, дел %d, карта %s)",
@@ -1037,6 +1101,40 @@ static void build_scan_ranges() {
         s_ptr_seg_bytes += s_xsegments[i].end - s_xsegments[i].start;
         ++s_ptr_range_count;
     }
+    // Скрытые регионы (без бита чтения, но отдающиеся принудительным чтением)
+    // идут РАНЬШЕ обычной кучи: если протектор спрятал пул классов снятием
+    // прав, он лежит именно там, а бюджет скана ограничен. Мелкие — вперёд:
+    // пул из нескольких мегабайт важнее гигабайтной резервации.
+    {
+        int order[128];
+        for (int i = 0; i < s_hidden_count; ++i) order[i] = i;
+        for (int i = 1; i < s_hidden_count; ++i) {   // сортировка по размеру
+            const int cur = order[i];
+            int j = i - 1;
+            while (j >= 0 &&
+                   (s_hidden[order[j]].end - s_hidden[order[j]].start) >
+                   (s_hidden[cur].end - s_hidden[cur].start)) {
+                order[j + 1] = order[j];
+                --j;
+            }
+            order[j + 1] = cur;
+        }
+        // Потолок на скрытую память: её бывают десятки гигабайт, а бюджет
+        // скана — единицы. Берём мелкие регионы, пока не набралось 512 МБ
+        // (первый регион — всегда, иначе крупный пул мы бы вовсе пропустили).
+        uint64_t taken = 0;
+        for (int k = 0; k < s_hidden_count && s_ptr_range_count < 640; ++k) {
+            const int i = order[k];
+            if (s_hidden[i].end <= s_hidden[i].start) continue;
+            const uint64_t sz = s_hidden[i].end - s_hidden[i].start;
+            if (taken && taken + sz > (512ull << 20)) { ++s_hidden_skipped; continue; }
+            s_ptr_ranges[s_ptr_range_count].start = s_hidden[i].start;
+            s_ptr_ranges[s_ptr_range_count].end = s_hidden[i].end;
+            s_ptr_anon_bytes += sz;
+            ++s_ptr_range_count;
+            taken += sz;
+        }
+    }
     for (int i = 0; i < s_anon_count && s_ptr_range_count < 640; ++i) {
         if (s_anon[i].end <= s_anon[i].start) continue;
         s_ptr_ranges[s_ptr_range_count].start = s_anon[i].start;
@@ -1060,8 +1158,12 @@ static void build_scan_ranges() {
             (unsigned long long)(s_ptr_anon_bytes >> 20),
             s_anon_count, s_anon_total, s_filemisc_count);
     if (s_anon_noread_count)
-        LogLine("автооффсеты: закрыто от чтения анонимных регионов %d (%llu МБ)",
+        LogLine("автооффсеты: не читается даже принудительно %d регионов (%llu МБ)",
                 s_anon_noread_count, (unsigned long long)(s_anon_noread_bytes >> 20));
+    if (s_hidden_count)
+        LogLine("автооффсеты: в поиск добавлено скрытых регионов %d (%llu МБ) — без прав чтения, но читаемых%s",
+                s_hidden_count, (unsigned long long)(s_hidden_bytes >> 20),
+                s_hidden_skipped ? " (остальное не влезло в бюджет)" : "");
     if (s_anon_noread_count) {
         uint64_t top[2] = {0, 0};
         uint64_t topb[3] = {0, 0, 0};
@@ -1071,7 +1173,7 @@ static void build_scan_ranges() {
             else if (sz > topb[1]) { topb[2]=topb[1]; topb[1]=sz; top[1]=i; }
             else if (sz > topb[2]) { topb[2]=sz; }
         }
-        LogLine("автооффсеты: крупнейшие закрытые регионы %llu МБ и %llu МБ — если там пул классов, прочитать его нельзя",
+        LogLine("автооффсеты: крупнейшие НЕчитаемые регионы %llu МБ и %llu МБ — если там пул классов, взять его нечем",
                 (unsigned long long)(topb[0] >> 20), (unsigned long long)(topb[1] >> 20));
     }
 }
@@ -1711,6 +1813,8 @@ void offset_resolver_reset() {
     s_anon_noread_bytes = 0; s_anon_noread_count = 0;
     s_anon_bytes = 0; s_anon_skip_x = 0; s_anon_skip_x_bytes = 0;
     s_anon_skip_small = 0; s_anon_biggest = 0;
+    s_hidden_count = 0; s_hidden_bytes = 0; s_hidden_skipped = 0;
+    s_probe_ok = 0; s_probe_bytes = 0; s_probe_zero = 0; s_probe_zero_bytes = 0;
     s_str_addr = 0; s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
     s_str_cand_count = 0; s_str_cand_idx = 0;
     s_best_found = -1; s_best_begin = 0; s_best_end = 0; s_best_addr = 0;
