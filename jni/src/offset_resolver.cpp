@@ -196,7 +196,7 @@ bool     s_heap_done = false;     // в этом резолве уже скан�
 // в блоке найти адреса ВСЕХ табличных имён -> в куче найти указатели на них
 // (слот имени класса на +0x10) -> так находятся живые классы без единого RVA.
 struct AnonRegion { uint64_t start = 0, end = 0; bool writable = false; };
-AnonRegion s_anon[32];
+AnonRegion s_anon[96];
 int      s_anon_count = 0;
 uint64_t s_str_addr = 0;          // где нашёлся «PlayerManager»
 int      s_str_region = 0;
@@ -207,6 +207,7 @@ int      s_wanted_name_count = 0;
 uint64_t s_wanted_str[64];        // адрес строки каждого имени в блобе (0 = нет)
 int      s_wanted_str_found = 0;
 uint64_t s_blob_pos = 0;
+uint64_t s_blob_fails = 0;        // сколько порций блоба не прочиталось
 uint64_t s_ptr_pos = 0;
 int      s_ptr_region = 0;
 uint64_t s_ptr_scanned = 0;
@@ -402,7 +403,7 @@ static void phase_maps() {
     char chunk[8192];
     for (;;) {
         const ssize_t n = read(fd, chunk, sizeof(chunk));
-        if (n > 0) { text.append(chunk, (size_t)n); if (text.size() > (8u << 20)) break; continue; }
+        if (n > 0) { text.append(chunk, (size_t)n); if (text.size() > (16u << 20)) break; continue; }
         if (n < 0) break;
         break;
     }
@@ -435,7 +436,7 @@ static void phase_maps() {
             // (бета маппит его без имени «global-metadata») и на кучу, где
             // лежат структуры классов. Собираем для строкового бутстрапа.
             if (perms[0] == 'r' && perms[2] != 'x' &&
-                end - start >= (256ull << 10) && s_anon_count < 32) {
+                end - start >= (256ull << 10) && s_anon_count < 96) {
                 s_anon[s_anon_count].start = start;
                 s_anon[s_anon_count].end = end;
                 s_anon[s_anon_count].writable = (perms[1] == 'w');
@@ -699,6 +700,10 @@ static void phase_strsearch(double deadline) {
             for (int i = 0; i < s_wanted_name_count; ++i) s_wanted_str[i] = 0;
             s_wanted_str_found = 0;
             s_blob_pos = s_meta_begin;
+            s_last_progress_log = 0;
+            // Блок строк — холодное файлово маппинг: страницы подчитываются с
+            // диска, чтение медленное. Дедлайн скана .so тут не годится.
+            s_scan_deadline = mono_seconds() + 180.0;
             LogLine("автооффсеты: строка «PlayerManager» найдена @0x%llx — окно строк 0x%llx..0x%llx (%llu МБ), ищу имена из таблицы",
                     (unsigned long long)s_str_addr,
                     (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end,
@@ -724,7 +729,11 @@ static void phase_blob(double deadline) {
         const uint64_t remain = s_meta_end - s_blob_pos;
         const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
         if (chunk < 64) { s_blob_pos = s_meta_end; break; }   // хвост дочитан
-        if (!qrd_buf(s_blob_pos, buf, chunk)) { s_blob_pos += chunk; continue; }
+        if (!qrd_buf(s_blob_pos, buf, chunk)) {
+            ++s_blob_fails;
+            s_blob_pos += chunk;
+            continue;
+        }
         for (size_t p = 0; p + 1 < chunk; ++p) {
             // Строки блока разделены NUL: кандидат начинается сразу после NUL.
             if (p && buf[p - 1] != '\0') continue;
@@ -743,18 +752,32 @@ static void phase_blob(double deadline) {
             }
         }
         s_blob_pos += chunk - 64;   // нахлёст на имена, лёгшие на стык
+        const double now_s = mono_seconds();
+        if (now_s - s_last_progress_log >= 8.0) {
+            s_last_progress_log = now_s;
+            LogLine("автооффсеты: блок строк %llu/%llu МБ, табличных имён %d, отказов чтения %llu",
+                    (unsigned long long)((s_blob_pos - s_meta_begin) >> 20),
+                    (unsigned long long)((s_meta_end - s_meta_begin) >> 20),
+                    s_wanted_str_found, (unsigned long long)s_blob_fails);
+        }
     }
     if (s_blob_pos >= s_meta_end || mono_seconds() >= s_scan_deadline) {
-        LogLine("автооффсеты: в блоке строк найдено табличных имён %d из %d",
-                s_wanted_str_found, s_wanted_name_count);
-        if (s_wanted_str_found > 0) {
+        int wr = 0;
+        for (int i = 0; i < s_anon_count; ++i) if (s_anon[i].writable) ++wr;
+        LogLine("автооффсеты: в блоке строк найдено табличных имён %d из %d, "
+                "writable-регионов в карте %d",
+                s_wanted_str_found, s_wanted_name_count, wr);
+        if (s_wanted_str_found > 0 && wr > 0) {
             s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
             s_ptr_hits = 0; s_ptr_verified = 0;
             s_last_progress_log = 0;
-            s_scan_deadline = mono_seconds() + 90.0;
+            s_scan_deadline = mono_seconds() + 120.0;
             s_phase = PH_PTR;
-        } else {
+        } else if (s_wanted_str_found == 0) {
             LogLine("автооффсеты: блок строк есть, но табличных имён в нём нет — имена, видимо, ротированы обфускатором");
+            s_phase = PH_DONE;
+        } else {
+            LogLine("автооффсеты: в карте процесса нет доступных writable-регионов — классы искать негде");
             s_phase = PH_DONE;
         }
     }
@@ -1250,7 +1273,8 @@ void offset_resolver_reset() {
     s_heap_pos = s_heap_end = 0; s_heap_done = false;
     s_anon_count = 0;
     s_str_addr = 0; s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
-    s_wanted_name_count = 0; s_wanted_str_found = 0; s_blob_pos = 0;
+    s_wanted_name_count = 0; s_wanted_str_found = 0;
+    s_blob_pos = 0; s_blob_fails = 0;
     for (int i = 0; i < 64; ++i) s_wanted_str[i] = 0;
     s_ptr_pos = 0; s_ptr_region = 0; s_ptr_scanned = 0;
     s_ptr_hits = 0; s_ptr_verified = 0;
