@@ -143,6 +143,14 @@ enum Phase {
 
 Phase    s_phase = PH_WAIT;
 Segment  s_segments[12];
+// Исполняемые (r-x) сегменты libil2cpp.so. Раньше мы их отбрасывали совсем,
+// а зря: разбор файла беты показал, что пул метаданных лежит в секции
+// «il2cpp» размером 125 МБ, и она попадает ровно в сегмент R+X. Классы по
+// ФОРМЕ там искать бессмысленно (кругом код), а вот точные указатели на
+// найденные строки имён — самое оно: ложных совпадений у них нет.
+Segment  s_xsegments[12];
+int      s_xseg_count = 0;
+uint64_t s_xseg_bytes = 0;
 int      s_seg_count = 0;
 int      s_seg_idx = 0;
 uint64_t s_scan_pos = 0;          // текущая позиция в текущем сегменте
@@ -440,6 +448,7 @@ static void phase_maps() {
     s_seg_count = 0;
     s_lib_begin = s_lib_end = 0;
     s_meta_begin = s_meta_end = 0;
+    s_xseg_count = 0; s_xseg_bytes = 0;
     s_maps_lib_lines = 0; s_maps_cut_window = 0; s_maps_cut_x = 0;
     s_maps_cut_deleted = 0; s_maps_open_failed = false;
     s_candidate_count = 0;
@@ -549,7 +558,19 @@ static void phase_maps() {
             if (!dup) s_base_candidates[s_candidate_count++] = start;
         }
         if (strstr(line, "(deleted)")) { ++s_maps_cut_deleted; continue; }
-        if (perms[2] == 'x') { ++s_maps_cut_x; continue; }   // текст не сканируем
+        if (perms[2] == 'x') {
+            ++s_maps_cut_x;
+            // Текст не сканируем формой, но в список поиска указателей берём:
+            // в бете весь пул классов лежит в исполняемом сегменте образа.
+            if (s_scan_base && start >= s_scan_base &&
+                start <= s_scan_base + (2ull << 30) && s_xseg_count < 12) {
+                s_xsegments[s_xseg_count].start = start;
+                s_xsegments[s_xseg_count].end = end;
+                ++s_xseg_count;
+                s_xseg_bytes += end - start;
+            }
+            continue;
+        }
         // Окно вокруг сканируемой базы широкое: у больших игр образ занимает
         // сотни мегабайт, и сегмент с классами (relro/data) может лежать
         // далеко от начала. Фильтр лишь отсекает ЧУЖИЕ образы.
@@ -995,6 +1016,13 @@ static void build_ptr_ranges() {
         s_ptr_seg_bytes += s_segments[i].end - s_segments[i].start;
         ++s_ptr_range_count;
     }
+    for (int i = 0; i < s_xseg_count && s_ptr_range_count < 640; ++i) {
+        if (s_xsegments[i].end <= s_xsegments[i].start) continue;
+        s_ptr_ranges[s_ptr_range_count].start = s_xsegments[i].start;
+        s_ptr_ranges[s_ptr_range_count].end = s_xsegments[i].end;
+        s_ptr_seg_bytes += s_xsegments[i].end - s_xsegments[i].start;
+        ++s_ptr_range_count;
+    }
     for (int i = 0; i < s_anon_count && s_ptr_range_count < 640; ++i) {
         if (s_anon[i].end <= s_anon[i].start) continue;
         s_ptr_ranges[s_ptr_range_count].start = s_anon[i].start;
@@ -1010,10 +1038,11 @@ static void build_ptr_ranges() {
         ++s_ptr_range_count;
     }
     LogLine("автооффсеты: ищу указатели на имена в %d диапазонах — "
-            "сегменты libil2cpp.so %llu МБ + анонимная память %llu МБ "
-            "(анонимных регионов %d из %d, файловых прочих %d)",
+            "сегменты libil2cpp.so %llu МБ (из них исполняемых %llu МБ) + "
+            "анонимная память %llu МБ (анонимных регионов %d из %d, файловых прочих %d)",
             s_ptr_range_count,
             (unsigned long long)(s_ptr_seg_bytes >> 20),
+            (unsigned long long)(s_xseg_bytes >> 20),
             (unsigned long long)(s_ptr_anon_bytes >> 20),
             s_anon_count, s_anon_total, s_filemisc_count);
     if (s_anon_noread_count)
@@ -1642,6 +1671,7 @@ void offset_resolver_tick() {
 void offset_resolver_reset() {
     s_phase = PH_WAIT;
     s_seg_count = 0; s_seg_idx = 0; s_scan_pos = 0;
+    s_xseg_count = 0; s_xseg_bytes = 0;
     s_lib_begin = s_lib_end = 0; s_meta_begin = s_meta_end = 0;
     s_total_bytes = 0; s_scanned_bytes = 0;
     s_maps_lib_lines = 0; s_maps_cut_window = 0; s_maps_cut_x = 0;
