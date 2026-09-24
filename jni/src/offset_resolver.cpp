@@ -217,6 +217,7 @@ uint64_t s_anon_skip_x_bytes = 0; // пропущено исполняемой
 int      s_anon_skip_x = 0;
 int      s_anon_skip_small = 0;
 uint64_t s_anon_biggest = 0;      // самый крупный анонимный регион
+AnonRegion s_anon_noread[256];   // закрытые от чтения (для диагностики)
 // Читаемые файловые регионы с именем, но не libil2cpp.so (протектор может
 // положить метадату в свой .dat/.bin или в память, отмапленную из apk).
 AnonRegion s_filemisc[256];
@@ -270,7 +271,7 @@ PtrRange  s_ptr_ranges[640];
 int       s_ptr_range_count = 0;
 uint64_t  s_ptr_seg_bytes = 0;    // сколько МБ в сегментах .so
 uint64_t  s_ptr_anon_bytes = 0;   // сколько МБ в анонимной памяти
-static void build_ptr_ranges();   // определение ниже, вызывается из phase_blob
+static void build_scan_ranges();   // определение ниже, вызывается из phase_strsearch
 
 // Знания о базах в рамках ЖИВОГО процесса (переживают сброс скана при
 // перепривязке; очищаются только при смене pid). Лог с устройства показал:
@@ -502,6 +503,12 @@ static void phase_maps() {
             // лежат структуры классов. Собираем для строкового бутстрапа.
             if (perms[0] != 'r') {
                 s_anon_noread_bytes += end - start;   // закрыто протектором?
+                if (s_anon_noread_count < 256) {
+                    s_anon_noread[s_anon_noread_count].start = start;
+                    s_anon_noread[s_anon_noread_count].end = end;
+                    snprintf(s_anon_noread[s_anon_noread_count].rperm,
+                             sizeof(s_anon_noread[0].rperm), "%s", perms);
+                }
                 ++s_anon_noread_count;
             } else if (perms[2] == 'x') {
                 ++s_anon_skip_x;
@@ -819,8 +826,13 @@ static void phase_strsearch(double deadline) {
     static uint8_t buf[kChunkBytes];
     static const char kNeedle[] = "PlayerManager";   // вместе с концевым NUL
     constexpr size_t kNeed = sizeof(kNeedle);
-    while (s_str_region < s_anon_count && mono_seconds() < deadline) {
-        const AnonRegion& r = s_anon[s_str_region];
+    // Имя ищем по ВСЕЙ читаемой памяти, включая исполняемые сегменты образа.
+    // Файл беты показал: метадата вшита в секцию «il2cpp» (125 МБ), которая
+    // лежит в сегменте R+X. Если протектор расшифровал её на месте, имена
+    // лежат открытым текстом внутри образа — раньше мы их там не искали.
+    if (s_ptr_range_count == 0) build_scan_ranges();
+    while (s_str_region < s_ptr_range_count && mono_seconds() < deadline) {
+        const PtrRange& r = s_ptr_ranges[s_str_region];
         if (s_str_pos < r.start) s_str_pos = r.start;
         if (s_str_pos >= r.end) { ++s_str_region; continue; }
         const uint64_t remain = r.end - s_str_pos;
@@ -842,9 +854,9 @@ static void phase_strsearch(double deadline) {
         }
         s_str_scanned += chunk;
         s_str_pos += chunk - (kNeed - 1);   // нахлёст, чтобы не потерять стык
-        if (s_str_scanned >= (2048ull << 20)) break;
+        if (s_str_scanned >= (3072ull << 20)) break;
     }
-    if (s_str_region >= s_anon_count || s_str_scanned >= (2048ull << 20) ||
+    if (s_str_region >= s_ptr_range_count || s_str_scanned >= (3072ull << 20) ||
         s_str_cand_count >= 8) {
         if (s_str_cand_count > 0) {
             s_str_cand_idx = 0;
@@ -852,8 +864,8 @@ static void phase_strsearch(double deadline) {
             apply_str_window(0);
             return;
         }
-        LogLine("автооффсеты: строка «PlayerManager» в анонимной памяти НЕ найдена (просмотрено %llu МБ) — имена, видимо, зашифрованы, автообновление по именам невозможно",
-                (unsigned long long)(s_str_scanned >> 20));
+        LogLine("автооффсеты: строка «PlayerManager» нигде НЕ найдена (просмотрено %llu МБ, %d диапазонов из %d) — имена зашифрованы, автообновление по именам невозможно",
+                (unsigned long long)(s_str_scanned >> 20), s_str_region, s_ptr_range_count);
         s_phase = PH_DONE;
     }
 }
@@ -865,13 +877,13 @@ static void phase_strsearch(double deadline) {
 static void apply_str_window(int idx) {
     const int reg = s_str_cand_region[idx];
     s_str_addr = s_str_cand[idx];
-    uint64_t wb = s_anon[reg].start, we = s_anon[reg].end;
-    for (int j = reg + 1; j < s_anon_count &&
-             s_anon[j].start == we && (we - wb) < (64ull << 20); ++j)
-        we = s_anon[j].end;
+    uint64_t wb = s_ptr_ranges[reg].start, we = s_ptr_ranges[reg].end;
+    for (int j = reg + 1; j < s_ptr_range_count &&
+             s_ptr_ranges[j].start == we && (we - wb) < (64ull << 20); ++j)
+        we = s_ptr_ranges[j].end;
     for (int j = reg - 1; j >= 0 &&
-             s_anon[j].end == wb && (we - wb) < (64ull << 20); --j)
-        wb = s_anon[j].start;
+             s_ptr_ranges[j].end == wb && (we - wb) < (64ull << 20); --j)
+        wb = s_ptr_ranges[j].start;
     if (we - wb > (32ull << 20)) {
         const uint64_t kPad = 16ull << 20;
         wb = (s_str_addr > kPad) ? (s_str_addr - kPad) : 0;
@@ -887,10 +899,12 @@ static void apply_str_window(int idx) {
     // Блок строк — холодное файлово маппинг: страницы подчитываются с
     // диска, чтение медленное. Дедлайн скана .so тут не годится.
     s_scan_deadline = mono_seconds() + 180.0;
-    LogLine("автооффсеты: блок строк №%d из %d — «PlayerManager» @0x%llx, окно 0x%llx..0x%llx (%llu МБ), ищу имена из таблицы",
+    LogLine("автооффсеты: блок строк №%d из %d — «PlayerManager» @0x%llx, окно 0x%llx..0x%llx (%llu МБ), %s",
             idx + 1, s_str_cand_count, (unsigned long long)s_str_addr,
             (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end,
-            (unsigned long long)((s_meta_end - s_meta_begin) >> 20));
+            (unsigned long long)((s_meta_end - s_meta_begin) >> 20),
+            (s_lib_begin && s_str_addr >= s_lib_begin && s_str_addr < s_lib_end)
+                ? "ВНУТРИ ОБРАЗА libil2cpp.so" : "вне образа");
     s_phase = PH_BLOB;
 }
 
@@ -986,7 +1000,7 @@ static void phase_blob(double deadline) {
             LogLine("автооффсеты: не найдены имена: %s", miss);
         }
         if (s_wanted_str_found > 0) {
-            build_ptr_ranges();
+            if (s_ptr_range_count == 0) build_scan_ranges();
             s_ptr_passes = 1;
             s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
             s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0; s_ptr_noverify = 0;
@@ -1005,7 +1019,7 @@ static void phase_blob(double deadline) {
 // Собираем карту поиска: читаемые (не исполняемые) сегменты libil2cpp.so +
 // все анонимные регионы. Метадата может быть вшита в образ протектором, и
 // тогда пул классов лежит в .data/.rodata библиотеке, а не в куче процесса.
-static void build_ptr_ranges() {
+static void build_scan_ranges() {
     s_ptr_range_count = 0;
     s_ptr_seg_bytes = 0;
     s_ptr_anon_bytes = 0;
@@ -1048,6 +1062,18 @@ static void build_ptr_ranges() {
     if (s_anon_noread_count)
         LogLine("автооффсеты: закрыто от чтения анонимных регионов %d (%llu МБ)",
                 s_anon_noread_count, (unsigned long long)(s_anon_noread_bytes >> 20));
+    if (s_anon_noread_count) {
+        uint64_t top[2] = {0, 0};
+        uint64_t topb[3] = {0, 0, 0};
+        for (int i = 0; i < s_anon_noread_count; ++i) {
+            const uint64_t sz = s_anon_noread[i].end - s_anon_noread[i].start;
+            if (sz > topb[0]) { topb[2]=topb[1]; topb[1]=topb[0]; topb[0]=sz; top[1]=top[0]; top[0]=i; }
+            else if (sz > topb[1]) { topb[2]=topb[1]; topb[1]=sz; top[1]=i; }
+            else if (sz > topb[2]) { topb[2]=sz; }
+        }
+        LogLine("автооффсеты: крупнейшие закрытые регионы %llu МБ и %llu МБ — если там пул классов, прочитать его нельзя",
+                (unsigned long long)(topb[0] >> 20), (unsigned long long)(topb[1] >> 20));
+    }
 }
 
 // Закрываем диапазон поиска: запоминаем, в каком из них больше всего
