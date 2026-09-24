@@ -172,6 +172,10 @@ int      s_names_ok = 0, s_names_fail = 0;
 int      s_shape_pass = 0;
 
 uint64_t s_fields_off = 0;        // откалиброванное смещение Il2CppClass.fields
+// Раскладка FieldInfo: обычно табличные константы, но на другой сборке игры
+// слот родителя/шаг записи могут отличаться — автоподбор может их уточнить.
+uint64_t s_fi_size   = IL2CPP_FIELDINFO_SIZE;
+uint64_t s_fi_parent = IL2CPP_FIELDINFO_PARENT;
 int      s_calib_best = 0;        // лучший счёт формы полей за калибровку (диагностика)
 uint64_t s_calib_best_off = 0;    // на каком смещении лучший счёт
 int      s_resolved = 0, s_changed = 0;
@@ -303,7 +307,8 @@ static bool try_next_base() {
         s_scan_base = b;
         s_bound_base = b;
         s_names_ok = 0; s_names_fail = 0; s_shape_pass = 0;
-        s_calib_best = 0;
+        s_calib_best = 0; s_calib_best_off = 0;
+        s_fi_size = IL2CPP_FIELDINFO_SIZE; s_fi_parent = IL2CPP_FIELDINFO_PARENT;
         s_phase = PH_MAPS;
         return true;
     }
@@ -643,11 +648,15 @@ static void phase_scan(double deadline) {
             // Ловушка беты: кэш может целиком состоять из мусорных «похожих»
             // структур — ни одного класса с табличным именем. Живой класс при
             // этом читается по вшитому TYPEINFO_RVA (привязка им проверяет
-            // базу). Тогда сканируем кучу вокруг него: рантайм выделяет
-            // структуры Il2CppClass из общих пулов, остальные классы рядом.
+            // базу). Если он лежит В КУЧЕ (вне окна .so) — сканируем кучу
+            // вокруг него: рантайм выделяет Il2CppClass из общих пулов, и
+            // остальные классы лежат рядом. Если якорь внутри окна .so — там
+            // уже отсканировано, куча не поможет.
             const char* anchor_name = nullptr;
-            const uint64_t anchor = (!s_heap_done && wanted_in_cache() == 0)
-                                        ? anchor_class(&anchor_name) : 0;
+            uint64_t anchor = (!s_heap_done && wanted_in_cache() == 0)
+                                  ? anchor_class(&anchor_name) : 0;
+            if (anchor && s_lib_begin && anchor >= s_lib_begin && anchor < s_lib_end)
+                anchor = 0;
             if (anchor) start_heap_scan(anchor);
             else s_phase = PH_FIELDS;
         } else if (!s_class_count && try_next_base()) {
@@ -665,8 +674,8 @@ static int fields_shape_score(uint64_t klass, uint64_t fields_ptr, int probe) {
     if (!valid_obj(fields_ptr)) return 0;
     int score = 0;
     for (int i = 0; i < probe; ++i) {
-        const uint64_t e = fields_ptr + (uint64_t)i * IL2CPP_FIELDINFO_SIZE;
-        const uint64_t parent = qrd_ptr(e + IL2CPP_FIELDINFO_PARENT);
+        const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
+        const uint64_t parent = qrd_ptr(e + s_fi_parent);
         if (parent != klass) break;
         const uint64_t type = qrd_ptr(e + IL2CPP_FIELDINFO_TYPE);
         if (!valid_obj(type)) break;
@@ -724,8 +733,8 @@ static int32_t find_field_offset(uint64_t klass, const char* field) {
     if (count <= 0 || count > 2048) return -1;
     char name[48];
     for (int i = 0; i < count; ++i) {
-        const uint64_t e = fields_ptr + (uint64_t)i * IL2CPP_FIELDINFO_SIZE;
-        if (qrd_ptr(e + IL2CPP_FIELDINFO_PARENT) != klass) break;
+        const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
+        if (qrd_ptr(e + s_fi_parent) != klass) break;
         if (!read_field_name(e, name, sizeof(name))) continue;
         if (strcmp(name, field) == 0) return qrd<int32_t>(e + IL2CPP_FIELDINFO_OFFSET);
     }
@@ -744,6 +753,64 @@ static void apply_resolution(const OrField& of, int32_t off) {
         ++s_applied_count;
     }
     ++s_resolved;
+}
+
+// Дамп первых байт якоря: даже если имена классов затёрты обфускатором, по
+// структуре видно, настоящий ли это Il2CppClass (image в окне .so на +0x00,
+// правдоподобные указатели в табличных слотах).
+static void log_anchor_dump(uint64_t anchor) {
+    uint8_t raw[48] = {};
+    if (!qrd_buf(anchor, raw, sizeof(raw))) {
+        LogLine("автооффсеты: якорь — дамп структуры не читается");
+        return;
+    }
+    char hex[3 * sizeof(raw) + 16] = {};
+    size_t hn = 0;
+    for (size_t i = 0; i < sizeof(raw); ++i) {
+        if (i && i % 8 == 0 && hn + 3 < sizeof(hex)) { hex[hn++] = ' '; hex[hn++] = '|'; hex[hn++] = ' '; }
+        hn += (size_t)snprintf(hex + hn, sizeof(hex) - hn, "%02x ", raw[i]);
+    }
+    LogLine("автооффсеты: якорь — первые 48 байт: %s", hex);
+    const uint64_t image = qrd_ptr(anchor);
+    const uint64_t nm = qrd_ptr(anchor + IL2CPP_CLASS_NAME);
+    const uint64_t ns = qrd_ptr(anchor + IL2CPP_CLASS_NAMESPACE);
+    const uint64_t fp = qrd_ptr(anchor + IL2CPP_CLASS_FIELDS);
+    LogLine("автооффсеты: якорь — image 0x%llx %s, имя 0x%llx %s, нс 0x%llx %s, fields@0x80 0x%llx %s",
+            (unsigned long long)image,
+            (s_lib_begin && image >= s_lib_begin && image < s_lib_end) ? "в окне .so" : "ВНЕ окна",
+            (unsigned long long)nm, valid_obj(nm) ? "указатель валиден" : "указатель НЕвалиден",
+            (unsigned long long)ns, valid_obj(ns) ? "валиден" : "НЕвалиден",
+            (unsigned long long)fp, valid_obj(fp) ? "валиден" : "НЕвалиден");
+}
+
+// Автоподбор раскладки: если табличные смещения не сошлись, ищем массив, где
+// подряд несколько записей ссылаются обратно на класс (родитель), перебирая
+// слот родителя и шаг записи. Возврат: найдено ли; результат в out.
+struct FiLayout { uint64_t fields_off; uint64_t parent_off; uint64_t size; };
+static bool probe_layout(uint64_t klass, FiLayout& out) {
+    static const uint64_t kParents[] = {0x08, 0x10, 0x18, 0x20};
+    static const uint64_t kSizes[]   = {0x18, 0x20, 0x28};
+    for (uint64_t f = 0x30; f <= 0x1F8; f += 8) {
+        const uint64_t fp = qrd_ptr(klass + f);
+        if (!valid_obj(fp)) continue;
+        for (int p = 0; p < 4; ++p) {
+            for (int s = 0; s < 3; ++s) {
+                int ok = 0;
+                for (int i = 0; i < 4; ++i) {
+                    const uint64_t e = fp + (uint64_t)i * kSizes[s];
+                    if (qrd_ptr(e + kParents[p]) == klass) ++ok;
+                    else break;
+                }
+                if (ok >= 4) {
+                    out.fields_off = f;
+                    out.parent_off = kParents[p];
+                    out.size = kSizes[s];
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 static void phase_fields() {
@@ -779,6 +846,7 @@ static void phase_fields() {
                                        (unsigned)(uint8_t)aname[i]);
             LogLine("автооффсеты: якорь — байты имени: %s", hex);
         }
+        log_anchor_dump(anchor);
         if (!s_fields_off) calibrate_fields(anchor);
     }
     // Калибровка: первым пробуем самый «толстый» класс (больше полей —
@@ -795,6 +863,21 @@ static void phase_fields() {
         if (name_is_wanted(s_classes[i].name)) calibrate_fields(s_classes[i].klass);
     for (int i = 0; i < s_class_count && !s_fields_off && i < 64; ++i)
         calibrate_fields(s_classes[i].klass);
+    if (!s_fields_off && anchor) {
+        // Табличная раскладка не сошлась: ищем массив полей с другим шагом
+        // записи/слотом родителя (другая сборка рантайма).
+        FiLayout lay{};
+        if (probe_layout(anchor, lay)) {
+            s_fields_off = lay.fields_off;
+            s_fi_parent = lay.parent_off;
+            s_fi_size = lay.size;
+            LogLine("автооффсеты: подобрана ДРУГАЯ раскладка полей — fields@0x%llx, "
+                    "parent@0x%llx, шаг 0x%llx",
+                    (unsigned long long)lay.fields_off,
+                    (unsigned long long)lay.parent_off,
+                    (unsigned long long)lay.size);
+        }
+    }
     if (!s_fields_off) {
         LogLine("автооффсеты: калибровка полей не сошлась — кэш %d классов, "
                 "табличных имён в кэше %d, лучший счёт формы полей %d@0x%llx",
@@ -802,6 +885,24 @@ static void phase_fields() {
                 (unsigned long long)s_calib_best_off);
         s_phase = PH_DONE;
         return;
+    }
+    if (anchor) {
+        // Читаются ли имена ПОЛЕЙ: даже найдя массив, поля мы ищем по имени.
+        bool fok = false;
+        char shown[40] = {};
+        const uint64_t fp = qrd_ptr(anchor + s_fields_off);
+        if (valid_obj(fp)) {
+            const uint64_t nmp = qrd_ptr(fp + IL2CPP_FIELDINFO_NAME);
+            const std::string fname = qrd_string(nmp, &fok);
+            if (fok && fname.size() < sizeof(shown)) {
+                for (size_t i = 0; i < fname.size(); ++i) {
+                    const char c = fname[i];
+                    shown[i] = (c >= 0x20 && c < 0x7f) ? c : '.';
+                }
+            }
+        }
+        LogLine("автооффсеты: якорь — имя первого поля %s «%s»",
+                fok ? "читается" : "НЕ читается", fok ? shown : "-");
     }
 
     for (int i = 0; i < kOrFieldCount; ++i) {
@@ -902,6 +1003,7 @@ void offset_resolver_reset() {
     s_maps_cut_deleted = 0; s_maps_open_failed = false;
     s_class_count = 0; s_names_ok = 0; s_names_fail = 0; s_shape_pass = 0;
     s_fields_off = 0; s_calib_best = 0; s_calib_best_off = 0;
+    s_fi_size = IL2CPP_FIELDINFO_SIZE; s_fi_parent = IL2CPP_FIELDINFO_PARENT;
     s_resolved = 0; s_changed = 0;
     s_heap_pos = s_heap_end = 0; s_heap_done = false;
     s_applied_count = 0; s_logged = false;
