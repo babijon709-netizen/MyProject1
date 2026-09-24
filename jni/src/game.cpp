@@ -6509,86 +6509,67 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
 // ===================== Local player aim (ADS) state =====================
 
 static bool read_local_aim_state() {
-    uint64_t local = resolve_local_player();
+    const uint64_t local = resolve_local_player();
     if (!local) { g_aim_state = {}; return false; }
-
-    // Cheap fast path on cached pointers; re-validate the chain periodically.
-    if (g_aim_state.aim_activity && --g_aim_state.revalidate > 0) {
-        uint8_t active = 0;
-        if (rd_exact(g_aim_state.aim_activity + ACTIVITY_ACTIVE_FLAG, active) && active != 0) {
-            g_aim_state.aiming = true;
-            g_aim_state.source = 1;
-            return true;
-        }
-    }
-    if (g_aim_state.weapon && g_aim_state.revalidate > 0) {
-        uint8_t is_aiming = 0;
-        if (rd_ptr(g_aim_state.weapon + FPOBJECT_PLAYER_BACKREF) == local &&
-            rd_exact(g_aim_state.weapon + FPWEAPON_IS_AIMING, is_aiming) && is_aiming != 0) {
-            g_aim_state.aiming = true;
-            g_aim_state.source = 2;
-            return true;
-        }
-    }
-
     LocalAimState fresh{};
-    fresh.revalidate = 30;
 
-    // Primary: PlayerManager.playerEventHandler.Aim.Active
-    uint64_t handler = rd_ptr(local + PLAYER_EVENT_HANDLER);
+    // Состояние — из живой цепочки КАЖДЫЙ кадр, а не из закэшированного
+    // activity/оружия на 30 кадров. В логе via уже подтвердил 11 полей,
+    // включая Aim.Active; старый путь по затухающему FOV blend больше не нужен.
+    const uint64_t handler = rd_ptr(local + PLAYER_EVENT_HANDLER);
     if (handler && rd_ptr(handler + EVENT_HANDLER_MANAGER_BACKREF) == local) {
-        uint64_t activity = rd_ptr(handler + EVENT_HANDLER_AIM_ACTIVITY);
+        const uint64_t activity = rd_ptr(handler + EVENT_HANDLER_AIM_ACTIVITY);
         uint8_t active = 0;
-        if (activity && rd_exact(activity + ACTIVITY_ACTIVE_FLAG, active)) {
+        if (activity && rd_exact(activity + ACTIVITY_ACTIVE_FLAG, active) && active <= 1) {
             fresh.event_handler = handler;
             fresh.aim_activity = activity;
-            if (active == 1) {
-                fresh.aiming = true;
-                fresh.source = 1;
-                g_aim_state = fresh;
-                return true;
-            }
+            fresh.aiming = active == 1;
+            fresh.source = 1;
+            g_aim_state = fresh;
+            return true; // Active=0 авторитетен: не подменять его анимацией FOV
         }
     }
 
-    // Fallback: current first-person weapon isAiming flag.
-    uint64_t fp_manager = rd_ptr(local + PLAYER_FP_MANAGER);
+    // Только когда цепочка Aim вообще не читается — флаг текущего оружия.
+    const uint64_t fp_manager = rd_ptr(local + PLAYER_FP_MANAGER);
     if (fp_manager) {
         uint64_t weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_WEAPON);
         if (!valid_obj(weapon) || rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) != local)
             weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_OBJECT);
         if (weapon && rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) == local) {
-            fresh.fp_manager = fp_manager;
-            fresh.weapon = weapon;
-            uint8_t is_aiming = 0;
-            if (rd_exact(weapon + FPWEAPON_IS_AIMING, is_aiming) && is_aiming == 1) {
-                fresh.aiming = true;
+            uint8_t aiming = 0;
+            if (rd_exact(weapon + FPWEAPON_IS_AIMING, aiming) && aiming <= 1) {
+                fresh.fp_manager = fp_manager;
+                fresh.weapon = weapon;
+                fresh.aiming = aiming == 1;
                 fresh.source = 2;
                 g_aim_state = fresh;
                 return true;
             }
         }
-        // Last resort: the FOV blend factor FPManager drives toward aimFOV.
-        float blend = 0.0F;
-        if (rd_exact(fp_manager + FPMANAGER_AIM_BLEND, blend) && std::isfinite(blend) && blend >= 0.15F && blend <= 1.05F) {
-            fresh.fp_manager = fp_manager;
-            fresh.aiming = true;
-            fresh.source = 3;
-            g_aim_state = fresh;
-            return true;
-        }
     }
-
-    fresh.aiming = false;
-    fresh.source = fresh.aim_activity ? 1 : (fresh.weapon ? 2 : (fp_manager ? 3 : 0));
+    // Нет подтверждённого булева источника: fail closed, не по FOV blend.
     g_aim_state = fresh;
     return true;
 }
 
 bool esp_local_player_is_aiming() {
     if (g_pid <= 0 || !g_il2cpp_base) return false;
-    if (!read_local_aim_state()) return false;
-    return g_aim_state.aiming;
+    const bool readable = read_local_aim_state();
+    static int last_aim = -1, last_source = -1;
+    static double last_log = -100.0;
+    const int aiming = readable && g_aim_state.aiming ? 1 : 0;
+    const int source = readable ? g_aim_state.source : 0;
+    if ((aiming != last_aim || source != last_source) &&
+        mono_seconds() - last_log >= 1.0) {
+        last_log = mono_seconds();
+        LogLine("аим ADS: %d, источник %d (1 Aim.Active, 2 weapon.isAiming, 0 нет), handler=0x%llx activity=0x%llx weapon=0x%llx",
+                aiming, source, (unsigned long long)g_aim_state.event_handler,
+                (unsigned long long)g_aim_state.aim_activity,
+                (unsigned long long)g_aim_state.weapon);
+    }
+    last_aim = aiming; last_source = source;
+    return aiming != 0;
 }
 
 int esp_local_aim_source() {

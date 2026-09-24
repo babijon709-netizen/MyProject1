@@ -93,6 +93,34 @@ static void tests(const Layout& l) {
         assert(io.get<float>(calc+0x20)==2.f && io.get<float>(dispersion+0x24)==4.f);
         assert(io.writes.size()==18);
     }
+    // Новая бета присутствует в репозитории, но старую таблицу native-адресов
+    // применять к ней нельзя: отказ должен быть без единой записи.
+    {
+        Fake io(l); Controller<Fake> c(io);
+        io.set(base+0x318,kUnverifiedNewBetaId);
+        c.tick(1,base,player,true,true);
+        assert(c.diagnostic==3 && c.recoil==Status::Failed && c.spread==Status::Failed);
+        assert(io.writes.empty());
+    }
+    // The owner chain must use the same live offsets as ESP/aim, not copies
+    // of the release constants baked into the weapon controller.
+    {
+        Fake io(l); Controller<Fake> c(io);
+        const auto old_fp=go_active::PLAYER_FP_MANAGER;
+        const auto old_weapon=go_active::FPMANAGER_CURRENT_WEAPON;
+        const auto old_back=go_active::FPOBJECT_PLAYER_BACKREF;
+        go_active::PLAYER_FP_MANAGER=0x98;
+        go_active::FPMANAGER_CURRENT_WEAPON=0x70;
+        go_active::FPOBJECT_PLAYER_BACKREF=0xe0;
+        io.set(player+0x90,uint64_t(0)); io.set(player+0x98,fp);
+        io.set(fp+0x58,uint64_t(0)); io.set(fp+0x70,weapon);
+        io.set(weapon+0xc0,uint64_t(0)); io.set(weapon+0xe0,player);
+        c.tick(1,base,player,true,true);
+        assert(c.recoil==Status::Active && c.spread==Status::Active);
+        go_active::PLAYER_FP_MANAGER=old_fp;
+        go_active::FPMANAGER_CURRENT_WEAPON=old_weapon;
+        go_active::FPOBJECT_PLAYER_BACKREF=old_back;
+    }
     for (int issue=0;issue<8;++issue) {
         Fake io(l); Controller<Fake> c(io);
         if(issue==0) io.set(base+0x318,std::array<uint8_t,20>{});
@@ -105,6 +133,11 @@ static void tests(const Layout& l) {
         if(issue==7) io.maps="100000-200000 rw-p 0 08:01 1 /some-library.so\n";
         c.tick(1,base,player,true,true); assert(io.writes.empty());
         assert(c.recoil!=Status::Active && c.spread!=Status::Active);
+        if(issue==0) assert(c.diagnostic==1);
+        if(issue==5 || issue==6) assert(c.diagnostic==2);
+        if(issue==1) assert(c.diagnostic==11);
+        if(issue==2) assert(c.diagnostic==10);
+        if(issue==3) assert(c.diagnostic==12);
     }
     {
         Fake io(l); Controller<Fake> c(io); int seen=0;

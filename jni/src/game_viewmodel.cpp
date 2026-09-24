@@ -145,35 +145,86 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // Быстрый сбор не зависит от локального игрока — тикается всегда,
     // до ветки с резолвом игрока (она ниже может выйти раньше времени).
     loot.tick(epoch, g_il2cpp_base, settings.fast_loot);
+    auto log_status = [&]() {
+        auto st = esp_viewmodel_diagnostics();
+        if (st.fov != last_log.fov || st.hands != last_log.hands ||
+            st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread ||
+            st.fast_loot != last_log.fast_loot) {
+            LogLine("viewmodel: fov=%d hands=%d; object-data recoil=%d spread=%d; instant loot=%d (0 off,1 waiting,2 active,4 unsupported/modified image or memory error)",
+                    (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread, (int)st.fast_loot);
+            last_log = st;
+        }
+    };
     // Resolve the current local player from the static source, NOT the ESP
     // cache which intentionally tolerates stale identities during respawn.
     uint64_t player = 0;
+    static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         settings.no_recoil || settings.no_spread || weapons.has_state()) {
-        uint64_t klass = memory.ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
-        uint64_t sf = memory.klass_is(klass, "GameControllerBase") ? get_class_static_fields(klass) : 0;
-        uint64_t raw = 0;
-        if (!sf || !memory.read(sf + GAME_CONTROLLER_LOCAL_PLAYER_FIELD, raw)) {
+        // The RVA may still point to a named but UNINITIALIZED class copy
+        // (device log: valid GameControllerBase, static_fields=0). Prefer the
+        // live class discovered by the resolver; only accept a source whose
+        // static block actually contains a local PlayerManager.
+        const uint64_t from_cache = offset_resolver_class("GameControllerBase", "Oxide");
+        const uint64_t from_rva = memory.ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
+        uint64_t sf = 0, raw = 0;
+        auto try_source = [&](uint64_t candidate) {
+            if (!candidate || !memory.klass_is(candidate, "GameControllerBase")) return;
+            const uint64_t block = get_class_static_fields(candidate);
+            uint64_t p = 0;
+            if (!block || !memory.read(block + GAME_CONTROLLER_LOCAL_PLAYER_FIELD, p)) return;
+            p = memio::untag(p);
+            if (p && !memory.is(p, "PlayerManager")) return;
+            if (!sf || p) { sf = block; raw = p; }
+        };
+        // Несколько одноимённых классов встречаются в защищённой сборке;
+        // первый по имени может быть пустышкой (static_fields == 0).
+        for (int n = 0; n < 8 && !raw; ++n) {
+            const uint64_t candidate = offset_resolver_class_nth("GameControllerBase", "Oxide", n);
+            if (!candidate) break;
+            try_source(candidate);
+        }
+        if (!raw) try_source(g_game_controller_class);
+        if (!raw) try_source(from_rva);
+        if (!sf) {
+            if (!local_source_failed && (settings.fov_enabled || settings.hands_enabled ||
+                                         settings.no_recoil || settings.no_spread)) {
+                local_source_failed = true;
+                LogLine("viewmodel: нет локального игрока через GameControllerBase.static: cached=0x%llx rva=0x%llx static=0x%llx field=0x%llx; fov=%d hands=%d recoil=%d spread=%d loot=%d status=%d",
+                        (unsigned long long)from_cache, (unsigned long long)from_rva,
+                        (unsigned long long)sf, (unsigned long long)GAME_CONTROLLER_LOCAL_PLAYER_FIELD,
+                        settings.fov_enabled, settings.hands_enabled, settings.no_recoil,
+                        settings.no_spread, settings.fast_loot, (int)loot.status);
+            }
             // A failed read is NOT a confirmed scene change. Keep the originals
             // so a later successful frame can restore a disabled feature.
             auto wait = controller.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Waiting;
             controller.status = {wait, wait};
             weapons.recoil = settings.no_recoil || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
             weapons.spread = settings.no_spread || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
+            log_status();
             return;
         }
+        local_source_failed = false;
         player = memio::untag(raw); // successful null read means no local player
     }
     weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, settings.no_spread);
-    controller.tick(epoch, player, settings);
-    auto st = esp_viewmodel_diagnostics();
-    if (st.fov != last_log.fov || st.hands != last_log.hands ||
-        st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread ||
-        st.fast_loot != last_log.fast_loot) {
-        LogLine("viewmodel: fov=%d hands=%d; object-data recoil=%d spread=%d; instant loot=%d (0 off,1 waiting,2 active,4 unsupported/modified image or memory error)",
-                (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread, (int)st.fast_loot);
-        last_log = st;
+    static int last_weapon_diagnostic = -1;
+    if ((settings.no_recoil || settings.no_spread) && weapons.diagnostic &&
+        weapons.diagnostic != last_weapon_diagnostic) {
+        char id[41] = {};
+        for (int i = 0; i < 20; ++i)
+            snprintf(id + i * 2, 3, "%02x", (unsigned)weapons.observed_id[i]);
+        LogLine("weapon data: отказ=%d (1 неизвестный build-id,2 guard,3 новая бета без проверенной раскладки оружия,10..14 цепочка,20 restore,21 запись), id=%s guard=%d word=0x%x player=0x%llx offsets fp=0x%llx weapon=0x%llx back=0x%llx",
+                weapons.diagnostic, id, weapons.guard_index, weapons.guard_observed,
+                (unsigned long long)player,
+                (unsigned long long)PLAYER_FP_MANAGER,
+                (unsigned long long)FPMANAGER_CURRENT_WEAPON,
+                (unsigned long long)FPOBJECT_PLAYER_BACKREF);
     }
+    last_weapon_diagnostic = weapons.diagnostic;
+    controller.tick(epoch, player, settings);
+    log_status();
 }
 viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());

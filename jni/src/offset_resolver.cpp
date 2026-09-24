@@ -31,6 +31,7 @@
 #include "game_internal.h"
 #include "game_offsets_active.h"
 #include "logfile.h"
+#include "str.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -44,19 +45,51 @@ using namespace go_active;
 
 // ---- Таблица: какие константы каким (класс, поле) заполнять ----------------
 // Сгенерирована из tools/offsets/offsets_map.json (gen_resolver_table.py).
+// Пятый столбец — сигнатура типа поля: запасной способ найти поле, когда его
+// ИМЯ ротировано обфускатором (см. resolve_type_group ниже).
 namespace {
 struct OrField {
     std::uint64_t* slot;
-    const char*    cls;     // короткое имя класса в рантайме
+    const char*    cls;     // имя класса в рантайме (у некоторых — с подчёркиваниями)
     const char*    field;   // имя поля (стабильное, из дампа)
     bool           is_static;
+    const char*    type;    // "" | f4 | b1 | u4 | i4 | str | obj | c:ИмяКласса
 };
-#define OR_FIELD(c, k, f, s) { &go_active::c, k, f, s },
+#define OR_VIA(...)   // в первом массиве цепочки не нужны
+#define OR_FIELD(c, k, f, s, t) { &go_active::c, k, f, s, t },
 static const OrField kOrFields[] = {
 #include "offset_resolver_table.inc"
 };
 #undef OR_FIELD
+#undef OR_VIA
 constexpr int kOrFieldCount = (int)(sizeof(kOrFields) / sizeof(kOrFields[0]));
+
+// Классы с РОТИРУЮЩИМСЯ именами (PlayerEventHandler, nicklabel, VoicePlayer...):
+// обфускатор переименовывает их в каждом билде, поэтому по имени они не
+// находятся. Но их ТИП не меняется: поле PlayerManager.playerEventHandler
+// ссылается именно на такой класс, а FieldInfo.type того поля несёт индекс
+// определения типа (klassIndex). По индексу класс находится в памяти — имя не
+// нужно (см. phase_kid). Таблица описывает цепочку: из какого класса и через
+// какое поле прийти (hops), какое поле забрать (field) и его тип (type).
+struct ViaField {
+    std::uint64_t* slot;
+    const char*    via_cls;    // стартовый класс — ищется по имени в кэше
+    const char*    hops[2];    // hops[0] — поле в via_cls, hops[1] — в классе после него
+    int            nhops;
+    const char*    field;      // искомое поле в целевом классе
+    bool           is_static;
+    const char*    type;       // сигнатура типа (как у OR_FIELD)
+    const char*    rot;        // ротированное имя целевого класса (из карты)
+};
+#define OR_FIELD(...)  // во втором массиве обычные записи не нужны
+#define OR_VIA(c, k, h1, h2, f, s, t, r) \
+    { &go_active::c, k, {h1, h2}, h2[0] ? 2 : 1, f, s, t, r },
+static const ViaField kViaFields[] = {
+#include "offset_resolver_table.inc"
+};
+#undef OR_VIA
+#undef OR_FIELD
+constexpr int kViaFieldCount = (int)(sizeof(kViaFields) / sizeof(kViaFields[0]));
 }  // namespace
 
 // ---- САМОТЕСТ АВТООБНОВЛЕНИЯ (ВРЕМЕННЫЙ, убрать после проверки) -------------
@@ -127,7 +160,9 @@ namespace {
 // именем, поэтому таблица и сопоставляет по короткому).
 struct FoundClass {
     uint64_t klass = 0;
-    char     name[48] = {};
+    // 64: имена вида «MineableObjectExtension_OreHitstreaksMarker» — 43 знака,
+    // и запас на такие же «составные» имена.
+    char     name[64] = {};
     char     ns[40] = {};
 };
 
@@ -139,6 +174,7 @@ enum Phase {
     PH_WAIT = 0,    // нет привязки
     PH_MAPS,        // разобрать /proc/<pid>/maps
     PH_SCAN,        // поиск слотов Il2CppClass
+    PH_KID,         // охота за классом по индексу типа (цепочки via)
     PH_FIELDS,      // калибровка массива полей + резолв таблицы
     PH_DONE,
     PH_HEAP,        // скан кучи вокруг «якоря» (когда в .so классов не нашлось)
@@ -174,6 +210,15 @@ double   s_scan_deadline = 0;     // общего бюджета скана
 
 FoundClass s_classes[768 + 256];
 int      s_class_count = 0;
+// Отпечаток образа игры для кэша оффсетов и признак «взято из кэша».
+uint64_t s_image_key = 0;
+bool     s_from_cache = false;
+bool     s_cache_checked = false;
+bool     s_cache_saved = false;
+bool     s_cache_retryable = false; // ключ совпал, но класс-якорь ещё не загрузился
+ double   s_cache_wait_since = 0;
+ double   s_cache_retry_at = 0;
+double   s_cache_save_retry_at = 0;
 // Обычный потолок кэша. Хвост массива — резерв: лог с беты показал, что БЕЗ
 // окна метаданных «мягкий» фильтр пропускает сотни тысяч мусорных кандидатов,
 // кэш забивается мусором ещё в начале скана, и настоящие классы (вставшие в
@@ -327,7 +372,37 @@ int      s_saved_count = 0;
 
 struct AppliedRec { std::uint64_t* slot; std::uint64_t value; };
 AppliedRec s_applied[256];
-int      s_applied_count = 0;
+// Класс каждой применённой записи: по нему второй проход понимает, какие
+// смещения этого класса уже заняты (поле, найденное по имени, повторно не
+// отдаётся полю с ротированным именем).
+const char* s_applied_cls[256];
+// ---- Охота за классами с ротированными именами (цепочки via) ---------------
+// Найденные по индексу типа классы: kidx -> живой Il2CppClass.
+struct ViaClass { int32_t kidx = 0; std::uint64_t klass = 0; };
+ViaClass  s_via_classes[16];
+int       s_via_class_count = 0;
+// Что ищем прямо сейчас: индекс определения типа -> чья это цепочка.
+int32_t        s_want_kidx[8];
+const ViaField* s_want_owner[8];
+int            s_want_kidx_count = 0;
+bool           s_via_done = false;   // охоту больше не повторять
+int            s_via_found = 0;      // сколько цепочек замкнулось
+// Курсор охоты по диапазонам (порционно, как и остальные сканы).
+int            s_kid_region = 0;
+std::uint64_t  s_kid_pos = 0;
+std::uint64_t  s_kid_scanned = 0;
+// Ротированное имя класса -> его kidx. Тип поля бывает ссылкой на ДРУГОЙ
+// ротированный класс («c:eDw»), и в кэше классов такого имени нет — сверять
+// не с чем. Зато kidx у таких классов известен из цепочек: eDw — это Aim
+// второй цепочки, а eDg — playerEventHandler первой. Ищем по имени из карты.
+struct RotKidx { const char* name; int32_t kidx; };
+RotKidx  s_rot_kidx[16];
+int      s_rot_kidx_count = 0;
+// Результат цепочки: kidx каждого шага и класс, который по нему нашёлся.
+int32_t       s_via_kidx[kViaFieldCount][2];
+std::uint64_t s_via_klass[kViaFieldCount][2];
+// Метка целевого класса для списка занятых смещений (см. третий проход).
+char          s_via_mark[kViaFieldCount][40];int      s_applied_count = 0;
 bool     s_logged = false;
 pid_t    s_bound_pid = -1;        // к какому процессу/базе собрано состояние
 uint64_t s_bound_base = 0;
@@ -336,10 +411,20 @@ double   s_last_progress_log = 0; // темп строк прогресса в �
 // Бюджет такта 4 мс (как у других сканов): потеря привязки на устройстве, как
 // выяснилось по логу, была не от чтений сканера, а от смотрителя кадра.
 // Крупный кусок — статический буфер, стеку не стоит.
+//
+// Общий потолок скана ОСОЗНАННО щедрый (300 с): лог 24.09 показал, что при
+// 90 с скан кучи обрывался на 153/248 МБ и часть табличных классов так и не
+// находилась — их поля оставались на вшитых значениях («не все оффсеты
+// автообновляются»). Скан порционный (4 мс/кадр), поэтому длинный потолок не
+// грузит игру, а после первого входа результат берётся из кэша мгновенно.
 constexpr double kTickBudgetSec   = 0.004;  // 4 мс на такт
-constexpr double kScanTotalSec    = 90.0;   // общий потолок скана (образы по 0.5ГБ+)
+constexpr double kScanTotalSec    = 300.0;  // общий потолок скана (образы по 0.5ГБ+)
 constexpr size_t kChunkBytes      = 256 * 1024;
 constexpr size_t kMaxReadsPerChunk = 256;   // предел «дорогих» чтений на порцию
+// В куче «похожих на указатели» значений на порядки больше, чем в .data/.relro
+// образа, и каждая порция упиралась в прежний предел 1024 — скан полз
+// ~1.7 МБ/с. Удвоенный предел вдвое ускоряет первый (и единственный) проход.
+constexpr size_t kHeapReadsPerChunk = 2048;
 // Сколько байт достаточно просмотреть, чтобы при НУЛЕ классов признать базу
 // пустой: в живом образе слоты классов лежат в хвостовых сегментах
 // (.data/.relro), а скан идёт с конца образа — живые классы нашлись на
@@ -376,16 +461,61 @@ static bool all_wanted_found() {
     return true;
 }
 
+// Классы из СИГНАТУР ТИПОВ («c:Имя», пятый столбец таблицы). Их тоже надо
+// сохранять в кэш: второй проход ищет поля с ротированными именами по ТИПУ
+// (resolve_type_group → cached_class_type_index), и если такого класса
+// в кэше нет, сверять не с чем — поле так и останется на вшитом значении.
+// Имена в сигнатуре короткие, а в кэше может лежать полное («c:HitMarkerItem»
+// ↔ «MineableObjectExtension_HitMarkerItem») — сверяем и хвост за последним
+// подчёркиванием, ровно как cached_class_type_index при поиске.
+const char* s_wanted_type_names[64];
+int         s_wanted_type_count = 0;
+static bool s_first_type_char[256];
+
+static void build_wanted_type_names() {
+    if (s_wanted_type_count) return;
+    memset(s_first_type_char, 0, sizeof(s_first_type_char));
+    for (int i = 0; i < kOrFieldCount && s_wanted_type_count < 64; ++i) {
+        const char* t = kOrFields[i].type;
+        if (!t || t[0] != 'c' || t[1] != ':' || !t[2]) continue;
+        const char* nm = t + 2;
+        bool dup = false;
+        for (int j = 0; j < s_wanted_type_count; ++j)
+            if (strcmp(s_wanted_type_names[j], nm) == 0) dup = true;
+        if (dup) continue;
+        s_wanted_type_names[s_wanted_type_count++] = nm;
+        s_first_type_char[(uint8_t)nm[0]] = true;
+    }
+}
+
+static bool type_name_is_wanted(const char* name) {
+    build_wanted_type_names();
+    if (!name || !name[0]) return false;
+    if (s_first_type_char[(uint8_t)name[0]]) {
+        for (int i = 0; i < s_wanted_type_count; ++i)
+            if (strcmp(s_wanted_type_names[i], name) == 0) return true;
+    }
+    // Хвост за подчёркиванием: «MineableObjectExtension_HitMarkerItem» для «HitMarkerItem».
+    const char* under = strrchr(name, '_');
+    if (under && under[1] && s_first_type_char[(uint8_t)under[1]]) {
+        for (int i = 0; i < s_wanted_type_count; ++i)
+            if (strcmp(s_wanted_type_names[i], under + 1) == 0) return true;
+    }
+    return false;
+}
+
 // Имя входит в таблицу резолвера? Такие классы сохраняем в кэш даже сверх
 // обычного потолка (см. kClassCap) и калибруем поля в первую очередь на них:
 // совпадение имени с именем из дампа — признак НАСТОЯЩЕГО класса.
 static bool name_is_wanted(const char* name) {
     build_wanted_names();
     if (!name || !name[0]) return false;
-    if (!s_first_char[(uint8_t)name[0]]) return false;
-    for (int i = 0; i < s_wanted_name_count; ++i)
-        if (strcmp(s_wanted_names[i], name) == 0) return true;
-    return false;
+    if (s_first_char[(uint8_t)name[0]]) {
+        for (int i = 0; i < s_wanted_name_count; ++i)
+            if (strcmp(s_wanted_names[i], name) == 0) return true;
+    }
+    // Классы из сигнатур типов: без них не работает поиск полей по типу.
+    return type_name_is_wanted(name);
 }
 
 // Сколько классов в кэше имеют табличные имена.
@@ -839,7 +969,7 @@ static int try_class_candidate(uint64_t v) {
     }
     bool ok = false;
     const std::string name = qrd_string(nm, &ok);
-    if (!ok || name.empty() || name.size() > 47) { ++s_names_fail; return 0; }
+    if (!ok || name.empty() || name.size() > 63) { ++s_names_fail; return 0; }
     ++s_names_ok;
     const int cap_total = (int)(sizeof(s_classes) / sizeof(s_classes[0]));
     if (s_class_count >= kClassCap && !name_is_wanted(name.c_str())) return 1;
@@ -913,7 +1043,10 @@ static void start_heap_scan(uint64_t anchor) {
         s_total_bytes += s_heap_ranges[k].end - s_heap_ranges[k].start;
     s_scanned_bytes = 0;
     s_last_progress_log = 0;
-    s_scan_deadline = mono_seconds() + 90.0;
+    // 300 с, а не 90: скан порционный, и на устройстве куча в 250+ МБ за 90 с
+    // не проходится — обрыв на середине оставлял часть табличных классов
+    // ненайденной (см. комментарий про «не все оффсеты» в шапке констант).
+    s_scan_deadline = mono_seconds() + kScanTotalSec;
     s_heap_pos = s_heap_ranges[0].start;
     s_heap_end = s_heap_ranges[0].end;
 
@@ -943,7 +1076,7 @@ static void phase_heap(double deadline) {
                 v = memio::untag(v);
                 if (valid_obj(v)) {
                     reads_used += try_class_candidate(v) ? 3 : 1;
-                    if (reads_used >= 1024) { ++examined; break; }
+                    if (reads_used >= kHeapReadsPerChunk) { ++examined; break; }
                 }
             }
             s_heap_pos += examined * 8;
@@ -1757,7 +1890,7 @@ static int32_t find_field_offset(uint64_t klass, const char* field) {
     if (!valid_obj(fields_ptr)) return -1;
     int count = qrd<uint16_t>(klass + IL2CPP_CLASS_FIELD_COUNT);
     if (count <= 0 || count > 2048) return -1;
-    char name[48];
+    char name[64];
     for (int i = 0; i < count; ++i) {
         const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
         if (qrd_ptr(e + s_fi_parent) != klass) break;
@@ -1766,6 +1899,316 @@ static int32_t find_field_offset(uint64_t klass, const char* field) {
     }
     return -1;
 }
+
+// ---- Поиск поля по ТИПУ (когда имя ротировано обфускатором) ------------------
+// Бэкинг-поля вида «_BYK_k__BackingField» переименовываются в каждом билде
+// игры, но их ТИП и класс-владелец не меняются. Сигнатура типа приходит из
+// таблицы (пятый столбец): примитив (f4/b1/u4/i4/str), любой ссылочный (obj)
+// или конкретный класс (c:Имя). Раскладка Il2CppType — в game_offsets.h.
+
+// klassIndex (индекс определения типа) кэшированных классов с таким именем.
+// Имя в сигнатуре короткое («c:HitMarkerItem»), а в кэше может лежать полное
+// («MineableObjectExtension_HitMarkerItem») — сравниваем и хвост за последним
+// подчёркиванием. Тёзок под одним именем может быть несколько (лог 24.09:
+// в кэше лежат и настоящий PlayerManager, и его тёзка-пустышка), и индекс у
+// них РАЗНЫЙ — если сверять только с первым, поля не найдутся ни одного.
+// Поэтому отдаём все индекры: поле подходит, если совпал хотя бы с одним.
+// Возврат: сколько индексов нашли (0 — класса такого типа в кэше нет).
+static int cached_class_type_indices(const char* short_name, int32_t* out, int max) {
+    if (!short_name || !short_name[0] || max <= 0) return 0;
+    // Класса с таким именем в кэше нет, но имя может быть РОТИРОВАННЫМ: kidx
+    // тогда берём из цепочки via (см. s_rot_kidx). Без этого поля типа
+    // «c:eDw» не находились бы никогда.
+    for (int i = 0; i < s_rot_kidx_count; ++i) {
+        if (strcmp(s_rot_kidx[i].name, short_name) != 0) continue;
+        if (s_rot_kidx[i].kidx > 0) out[0] = s_rot_kidx[i].kidx;
+        return 1;
+    }
+    int n = 0;
+    for (int i = 0; i < s_class_count && n < max; ++i) {
+        const char* nm = s_classes[i].name;
+        bool hit = strcmp(nm, short_name) == 0;
+        if (!hit) {
+            const char* under = strrchr(nm, '_');
+            if (under) hit = strcmp(under + 1, short_name) == 0;
+        }
+        if (!hit) continue;
+        // byval_arg.data.klassIndex — тот же индекс, что в FieldInfo.type
+        // всех полей этого типа.
+        const int32_t k = qrd<int32_t>(s_classes[i].klass + IL2CPP_CLASS_BYVAL_ARG);
+        bool dup = false;
+        for (int j = 0; j < n; ++j)
+            if (out[j] == k) dup = true;
+        if (!dup) out[n++] = k;
+    }
+    return n;
+}
+
+// Соответствует ли enum типа примитивной сигнатуре; для «obj» — ссылочный ли.
+static bool type_enum_matches(uint32_t te, const char* sig) {
+    if (!strcmp(sig, "f4"))  return te == IL2CPP_TYPE_R4;
+    if (!strcmp(sig, "b1"))  return te == IL2CPP_TYPE_BOOLEAN;
+    if (!strcmp(sig, "u4"))  return te == IL2CPP_TYPE_U4;
+    if (!strcmp(sig, "i4"))  return te == IL2CPP_TYPE_I4;
+    if (!strcmp(sig, "i2"))  return te == IL2CPP_TYPE_I2;
+    if (!strcmp(sig, "str")) return te == IL2CPP_TYPE_STRING;
+    if (!strcmp(sig, "obj")) return te == IL2CPP_TYPE_CLASS || te == IL2CPP_TYPE_OBJECT ||
+                                     te == IL2CPP_TYPE_SZARRAY || te == IL2CPP_TYPE_ARRAY ||
+                                     te == IL2CPP_TYPE_GENERICINST || te == IL2CPP_TYPE_PTR;
+    return false;
+}
+
+// Вшитое (табличное) значение слота для текущей версии релиз/бета. Именно с
+// ним сверяемся при неоднозначности: смещение из дампа — сильный признак
+// «это то самое поле», если тип тоже сошёлся.
+static bool baked_for_slot(const std::uint64_t* slot, std::uint64_t* out) {
+    std::size_t n = 0;
+    const go::Field* f = go::Fields(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (f[i].slot != slot) continue;
+        *out = (go::CurrentBuild() == go::Build::Beta) ? f[i].beta : f[i].release;
+        return true;
+    }
+    return false;
+}
+
+// Все поля класса, чей тип совпал с сигнатурой (до 16 штук). Полей одного
+// типа в классе может быть несколько — тогда решает групповая развязка ниже.
+struct TypeMatches { int32_t off[16]; int n; };
+
+// taken — смещения этого же класса, уже отданные другим константам (найдены по
+// имени или разведены предыдущей группой): поле одному слоту, не двум.
+static bool collect_type_matches(uint64_t klass, const OrField& of,
+                                 const int32_t* taken, int ntaken, TypeMatches& m) {
+    const char* sig = of.type;
+    m.n = 0;
+    if (!sig || !sig[0]) return false;
+    const uint64_t fields_ptr = qrd_ptr(klass + s_fields_off);
+    if (!valid_obj(fields_ptr)) return false;
+    int count = qrd<uint16_t>(klass + IL2CPP_CLASS_FIELD_COUNT);
+    if (count <= 0 || count > 2048) return false;
+
+    const bool class_sig = (sig[0] == 'c' && sig[1] == ':');
+    int32_t want_kidx[4] = {0, 0, 0, 0};
+    int nkidx = 0;
+    if (class_sig) {
+        nkidx = cached_class_type_indices(sig + 2, want_kidx, 4);
+        if (!nkidx) return false;   // класс-тип не найден в кэше — сверять не с чем
+    }
+
+    for (int i = 0; i < count && m.n < 16; ++i) {
+        const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
+        if (qrd_ptr(e + s_fi_parent) != klass) break;
+        const uint64_t typep = qrd_ptr(e + IL2CPP_FIELDINFO_TYPE);
+        if (!valid_obj(typep)) continue;
+        bool hit = false;
+        if (class_sig) {
+            const int32_t tk = qrd<int32_t>(typep);
+            for (int k = 0; k < nkidx && !hit; ++k)
+                hit = (tk == want_kidx[k] && tk != 0);
+        } else {
+            const uint32_t bits = qrd<uint32_t>(typep + IL2CPP_TYPE_BITS);
+            hit = type_enum_matches((bits >> 16) & 0xFF, sig);
+        }
+        if (!hit) continue;
+        const int32_t off = qrd<int32_t>(e + IL2CPP_FIELDINFO_OFFSET);
+        bool busy = false;
+        for (int t = 0; t < ntaken; ++t)
+            if (taken[t] == off) { busy = true; break; }
+        if (!busy) m.off[m.n++] = off;
+    }
+    return m.n > 0;
+}
+
+// ---- Групповая развязка полей ОДНОГО типа -----------------------------------
+// В классе может быть несколько полей одного типа: два Vector3 (TreeHitstreaks),
+// пять строк (PlayerManager), восемь TransformOffset (FPMotion). По типу они
+// неразличимы, и если игра сдвинула их ВСЕ сразу (вставила поле выше по классу),
+// точного совпадения со вшитым смещением нет ни у одного — по одиночке такие
+// константы так и остались бы на устаревших значениях («некоторые функции не
+// работают» после апдейта). Решаем задачей о назначениях: какому полю какой
+// слот соответствует, минимизируя сумму |живое - вшитое|. Раскладку берём
+// ТОЛЬКО если она единственная (нет второй с той же ценой) и каждое поле
+// сдвинулось не больше kMaxTypeShift — иначе лучше оставить вшитые значения,
+// чем угадать не то.
+
+// Насколько далеко поле может уехать от вшитого смещения за один апдейт.
+constexpr int32_t kMaxTypeShift = 0x800;
+// «Такое назначение заведомо не то» — цена-заглушка.
+constexpr int32_t kBadAssign    = 1 << 28;
+
+struct TypeGroup {
+    const OrField* of[16];
+    int            n;
+};
+
+// Результат развязки: живое смещение для каждого слота группы.
+struct TypeAssign { int32_t off[16]; };
+
+// Минимальная сумма |живое - вшитое| по всевозможным парам слот/поле.
+// Возврат: сошлось ли; результат (и признак единственности) в out.
+static bool assign_type_group(const TypeGroup& g, const int32_t* cand, int ncand,
+                              TypeAssign& out) {
+    if (g.n <= 0 || g.n > 16 || ncand < g.n || ncand > 12) return false;
+    const int n = g.n;
+    // «Бесконечность»: любая реальная цена не выше n * kMaxTypeShift (0x8000),
+    // так что 1<<24 заведомо больше и в сложения не переполняется.
+    constexpr int32_t kInf = 1 << 24;
+    // cost[s][c] — цена «слоту s отдать поле c».
+    int32_t cost[16][12];
+    for (int s = 0; s < n; ++s) {
+        std::uint64_t baked = 0;
+        const bool has_baked = baked_for_slot(g.of[s]->slot, &baked);
+        for (int c = 0; c < ncand; ++c) {
+            if (!has_baked) { cost[s][c] = 0; continue; }   // не с чем сверять
+            const int32_t d = cand[c] > (int32_t)baked ? cand[c] - (int32_t)baked
+                                                       : (int32_t)baked - cand[c];
+            cost[s][c] = (d > kMaxTypeShift) ? kBadAssign : d;
+        }
+    }
+    // dp по маске занятых полей: dp[mask] — лучшая цена для первых
+    // popcount(mask) слотов. Полагаться на «одно поле — один слот» надо:
+    // двум константам одно и то же поле не достанется.
+    const int full = 1 << ncand;
+    static int32_t dp[1 << 12];
+    static int     ways[1 << 12];   // сколько раскладок дают эту цену (сатурация в 2)
+    for (int i = 0; i < full; ++i) { dp[i] = kInf; ways[i] = 0; }
+    dp[0] = 0; ways[0] = 1;
+    for (int mask = 0; mask < full; ++mask) {
+        if (!ways[mask]) continue;
+        const int s = __builtin_popcount((unsigned)mask);
+        if (s >= n) continue;
+        for (int c = 0; c < ncand; ++c) {
+            if (mask & (1 << c)) continue;
+            if (cost[s][c] >= kBadAssign) continue;
+            const int nm = mask | (1 << c);
+            const int32_t nd = dp[mask] + cost[s][c];
+            if (nd < dp[nm]) { dp[nm] = nd; ways[nm] = ways[mask]; }
+            else if (nd == dp[nm] && ways[nm] < 2) ways[nm] = (ways[nm] + ways[mask] > 2) ? 2 : ways[nm] + ways[mask];
+        }
+    }
+    // Ответ — любая маска с ровно n занятыми полями.
+    int32_t best = kInf;
+    int     bestmask = 0, bestways = 0;
+    for (int mask = 0; mask < full; ++mask) {
+        if (__builtin_popcount((unsigned)mask) != n) continue;
+        if (!ways[mask]) continue;
+        if (dp[mask] < best) { best = dp[mask]; bestmask = mask; bestways = ways[mask]; }
+        else if (dp[mask] == best) bestways = (bestways + ways[mask] > 2) ? 2 : bestways + ways[mask];
+    }
+    if (!bestmask || best >= kInf) return false;
+    if (bestways != 1) return false;   // вторая раскладка с той же ценой — угадайка
+    // Восстанавливаем: идём от последнего слота к первому.
+    int mask = bestmask;
+    for (int s = n - 1; s >= 0; --s) {
+        int pick = -1;
+        for (int c = 0; c < ncand; ++c) {
+            if (!(mask & (1 << c))) continue;
+            if (cost[s][c] >= kBadAssign) continue;
+            const int pm = mask & ~(1 << c);
+            if (__builtin_popcount((unsigned)pm) != s) continue;
+            if (dp[pm] + cost[s][c] != dp[mask]) continue;
+            pick = c;
+            break;
+        }
+        if (pick < 0) return false;
+        out.off[s] = cand[pick];
+        mask &= ~(1 << pick);
+    }
+    return true;
+}
+
+
+static void apply_resolution(const OrField& of, int32_t off);
+
+// Развести группу слотов одного (класс, тип) по полям класса. Возврат: сколько
+// слотов заполнено (0 — класс не подходит, пробуем следующего тёзку).
+static int resolve_type_group(const TypeGroup& g, uint64_t klass) {
+    // Смещения этого класса, уже занятые другими константами: поля, найденные
+    // по имени (первый проход), и разведённые ранее группы второго прохода.
+    int32_t taken[64];
+    int ntaken = 0;
+    for (int i = 0; i < s_applied_count && ntaken < 64; ++i) {
+        if (!s_applied_cls[i] || strcmp(s_applied_cls[i], g.of[0]->cls) != 0) continue;
+        taken[ntaken++] = (int32_t)s_applied[i].value;
+    }
+    TypeMatches m;
+    if (!collect_type_matches(klass, *g.of[0], taken, ntaken, m)) return 0;
+    // Раскладка разом и однозначно. Для одиночного слота это «ближайшее к
+    // вшитому смещению поле, если оно единственное такое»: в классе почти
+    // всегда НЕСКОЛЬКО полей одного типа (у FPManager десяток float), и после
+    // сдвига ни одно не совпадает со вшитым точь-в-точь. Лог с устройства
+    // 24.09 показал именно такие потери: FPManager::_BYK,
+    // GameControllerBase::_BCX/_BCm/_BCQ, Item::_BKs, ItemPickup::_BQL,
+    // PlayerWeapon::_player, VoicePlayerState::_Name — класс в кэше есть, а
+    // поле не находится, потому что точного совпадения нет.
+    // «obj» — «любой ссылочный»: среди кандидатов половина класса, и для
+    // ОДИНОЧНОГО слота «ближайшее» было бы угадайкой. Такой слот берём только
+    // по точному вшитому смещению (см. запасной путь). Группе из нескольких
+    // слотов развязка всё ещё поможет: суммарное отклонение раскладывается
+    // однозначно.
+    const bool vague = (g.of[0]->type[0] == 'o' && g.of[0]->type[1] == 'b' &&
+                        g.of[0]->type[2] == 'j' && g.of[0]->type[3] == '\0');
+    if (m.n >= g.n && !(vague && g.n == 1)) {
+        TypeAssign a;
+        if (assign_type_group(g, m.off, m.n, a)) {
+            for (int s = 0; s < g.n; ++s) apply_resolution(*g.of[s], a.off[s]);
+            return g.n;
+        }
+    }
+    // Запасной путь (как раньше): каждый слот сам за себя. Сначала — точное
+    // вшитое смещение (сильный признак: совпало и имя класса, и тип, и адрес).
+    // Поле, отданное одному слоту, второму уже не достанется: иначе две
+    // константы получили бы одно и то же смещение (ровно так OREHS_MARKER и
+    // OREHS_MARKER_TEMPLATE чуть не съели одно поле).
+    bool used[16] = {};
+    int filled = 0;
+    for (int s = 0; s < g.n; ++s) {
+        const OrField& of = *g.of[s];
+        std::uint64_t baked = 0;
+        if (!baked_for_slot(of.slot, &baked)) continue;
+        for (int c = 0; c < m.n; ++c) {
+            if (used[c]) continue;
+            if ((std::uint64_t)(uint32_t)m.off[c] != baked) continue;
+            used[c] = true;
+            apply_resolution(of, m.off[c]);
+            ++filled;
+            break;
+        }
+    }
+    // Потом — вынужденный выбор: если на оставшиеся слоты осталось ровно
+    // столько же неподелённых полей, последнее поле принадлежит последнему
+    // слоту по остатку. При прочих раскладах (полей больше, чем слотов) это
+    // была бы угадайка — её не делаем. Для «obj» вынужденный выбор НЕ делаем
+    // вовсе: «любой ссылочный» — половина класса, и «последнее оставшееся
+    // поле» может оказаться чем угодно.
+    if (!vague) for (int s = 0; s < g.n; ++s) {
+        int slots_left = 0, cands_left = 0, last = -1;
+        for (int t = s; t < g.n; ++t) {
+            bool done = false;
+            for (int j = 0; j < s_applied_count; ++j)
+                if (s_applied[j].slot == g.of[t]->slot) { done = true; break; }
+            if (!done) ++slots_left;
+        }
+        if (slots_left != 1) continue;
+        for (int c = 0; c < m.n; ++c)
+            if (!used[c]) { ++cands_left; last = c; }
+        if (cands_left != 1 || last < 0) continue;
+        // Слот, который всё ещё не заполнен:
+        for (int t = s; t < g.n; ++t) {
+            bool done = false;
+            for (int j = 0; j < s_applied_count; ++j)
+                if (s_applied[j].slot == g.of[t]->slot) { done = true; break; }
+            if (done) continue;
+            used[last] = true;
+            apply_resolution(*g.of[t], m.off[last]);
+            ++filled;
+            break;
+        }
+    }
+    return filled;
+}
+
 
 static void apply_resolution(const OrField& of, int32_t off) {
     const std::uint64_t value = (std::uint64_t)(uint32_t)off;
@@ -1776,6 +2219,7 @@ static void apply_resolution(const OrField& of, int32_t off) {
     if (s_applied_count < 256) {
         s_applied[s_applied_count].slot = of.slot;
         s_applied[s_applied_count].value = value;
+        s_applied_cls[s_applied_count] = of.cls;
         ++s_applied_count;
     }
     ++s_resolved;
@@ -1839,6 +2283,262 @@ static bool probe_layout(uint64_t klass, FiLayout& out) {
     return false;
 }
 
+// ---- Охота за классом по индексу типа (цепочки via) ------------------------
+// Имя класса ротируется, но его ТИП известен: это тип поля стартового класса.
+// FieldInfo.type того поля несёт индекс определения типа (klassIndex), а
+// byval_arg@0x20 каждого класса несёт его собственный. Ищем в тех же
+// диапазонах, что и указатели, структуру с нужным индексом. Порциями: чтения
+// десятками мегабайт за кадр на устройстве неприемлемы (см. скан маркеров).
+
+// Похож ли адрес на настоящий Il2CppClass: образ .so на +0x00, имя и
+// пространство имён — читаемые строки, массив полей — валидный адрес.
+static bool kid_class_ok(uint64_t k) {
+    const uint64_t image = qrd_ptr(k);
+    if (!valid_obj(image)) return false;
+    // В защищённой сборке image у ЖИВОГО якоря лежит вне отображения
+    // libil2cpp.so (см. диагностический дамп якоря). Проверка окна .so
+    // отбрасывала все классы, найденные по kidx в куче.
+    const uint64_t nm = qrd_ptr(k + IL2CPP_CLASS_NAME);
+    if (!valid_str_ptr(nm)) return false;
+    bool ok = false;
+    const std::string name = qrd_string(nm, &ok);
+    if (!ok || name.empty() || name.size() > 63) return false;
+    const uint64_t ns = qrd_ptr(k + IL2CPP_CLASS_NAMESPACE);
+    if (!valid_str_ptr(ns)) return false;
+    if (s_meta_begin && (ns < s_meta_begin || ns >= s_meta_end)) return false;
+    if (!valid_obj(qrd_ptr(k + IL2CPP_CLASS_FIELDS))) return false;
+    const int fc = qrd<uint16_t>(k + IL2CPP_CLASS_FIELD_COUNT);
+    return fc > 0 && fc <= 2048;
+}
+
+// kidx класса, чей тип имеет поле field класса klass (-1 если не читается).
+static int32_t field_type_kidx(uint64_t klass, const char* field) {
+    if (!klass || !field || !field[0]) return -1;
+    const uint64_t fields_ptr = qrd_ptr(klass + s_fields_off);
+    if (!valid_obj(fields_ptr)) return -1;
+    const int count = qrd<uint16_t>(klass + IL2CPP_CLASS_FIELD_COUNT);
+    if (count <= 0 || count > 2048) return -1;
+    char name[64];
+    for (int i = 0; i < count; ++i) {
+        const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
+        if (qrd_ptr(e + IL2CPP_FIELDINFO_PARENT) != klass) break;
+        if (!read_field_name(e, name, sizeof(name))) continue;
+        if (strcmp(name, field) != 0) continue;
+        const uint64_t typep = qrd_ptr(e + IL2CPP_FIELDINFO_TYPE);
+        if (!valid_obj(typep)) return -1;
+        return qrd<int32_t>(typep);
+    }
+    return -1;
+}
+
+// Пересчитать, что искать: kidx шага 0 — из кэша (стартовый класс известен по
+// имени), kidx шага 1 — из класса, найденного на шаге 0.
+static void build_via_wants() {
+    s_want_kidx_count = 0;
+    s_rot_kidx_count = 0;
+    for (int i = 0; i < kViaFieldCount; ++i) {
+        const ViaField& v = kViaFields[i];
+        s_via_kidx[i][0] = -1;
+        s_via_kidx[i][1] = -1;
+        s_via_klass[i][0] = 0;
+        s_via_klass[i][1] = 0;
+        // Стартовый класс ищем в кэше по имени. Тёзок может быть несколько
+        // (пустышка PlayerManager кэшируется РАНЬШЕ настоящего — лог 24.09),
+        // поэтому берём тот, у которого поле шага реально читает тип.
+        uint64_t start = 0;
+        int32_t k0 = -1;
+        for (int j = 0; j < s_class_count && k0 <= 0; ++j) {
+            if (strcmp(s_classes[j].name, v.via_cls) != 0) continue;
+            const int32_t kk = field_type_kidx(s_classes[j].klass, v.hops[0]);
+            if (kk > 0) { start = s_classes[j].klass; k0 = kk; }
+        }
+        if (!start) continue;
+        s_via_kidx[i][0] = k0;
+        // Ротированное имя целевого класса этой цепочки -> его kidx. Заполняем
+        // ДО охоты: kidx известен и без неё, а тип «c:eDw» другого поля как раз
+        // и ссылается на такой класс.
+        if (v.rot && v.rot[0] && s_rot_kidx_count < 16 &&
+            s_via_kidx[i][v.nhops - 1] > 0) {
+            s_rot_kidx[s_rot_kidx_count].name = v.rot;
+            s_rot_kidx[s_rot_kidx_count].kidx = s_via_kidx[i][v.nhops - 1];
+            ++s_rot_kidx_count;
+        }
+        if (v.nhops < 2) continue;
+        // Шаг 1: класс шага 0 уже мог найтись в прошлом заходе охоты.
+        uint64_t mid = 0;
+        for (int j = 0; j < s_via_class_count; ++j)
+            if (s_via_classes[j].kidx == k0) mid = s_via_classes[j].klass;
+        if (!mid) continue;
+        const int32_t k1 = field_type_kidx(mid, v.hops[1]);
+        if (k1 <= 0) continue;
+        s_via_kidx[i][1] = k1;
+    }
+    for (int i = 0; i < kViaFieldCount && s_want_kidx_count < 8; ++i) {
+        for (int hop = 0; hop < kViaFields[i].nhops && s_want_kidx_count < 8; ++hop) {
+            if (s_via_kidx[i][hop] <= 0 || s_via_klass[i][hop]) continue;
+            bool dup = false;
+            for (int j = 0; j < s_want_kidx_count; ++j)
+                if (s_want_kidx[j] == s_via_kidx[i][hop]) dup = true;
+            if (dup) continue;
+            s_want_kidx[s_want_kidx_count] = s_via_kidx[i][hop];
+            s_want_owner[s_want_kidx_count] = &kViaFields[i];
+            ++s_want_kidx_count;
+        }
+    }
+}
+
+static void phase_kid(double deadline) {
+    if (s_ptr_range_count == 0) build_scan_ranges();
+    // +0x40: доочитываем хвост куска (см. extra), чтобы класс, чьё начало
+    // попало в последние 0x28 байт куска, не потерялся на границе.
+    static uint8_t buf[kChunkBytes + 0x40];
+    while (s_want_kidx_count > 0 && s_kid_region < s_ptr_range_count &&
+           mono_seconds() < deadline) {
+        const PtrRange& r = s_ptr_ranges[s_kid_region];
+        if (s_kid_pos == r.end) { ++s_kid_region; s_kid_pos = 0; continue; }
+        if (s_kid_pos < r.start || s_kid_pos > r.end) s_kid_pos = r.start;
+        if (s_kid_pos >= r.end) { ++s_kid_region; s_kid_pos = 0; continue; }
+        // Окно строк метаданных пропускаем: там таблицы, а не классы.
+        if (s_meta_begin && r.start < s_meta_end && r.end > s_meta_begin) {
+            s_kid_pos = r.end; ++s_kid_region; continue;
+        }
+        const uint64_t remain = r.end - s_kid_pos;
+        const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
+        if (chunk < 0x40) { s_kid_pos = r.end; ++s_kid_region; continue; }
+        const uint64_t extra = (remain - chunk >= 0x28) ? 0x28 : 0;
+        if (!qrd_buf(s_kid_pos, buf, chunk + extra)) { s_kid_pos += chunk; s_kid_scanned += chunk; continue; }
+        // Шаг 8 байт: Il2CppClass выровнен по указателю. byval_arg лежит на
+        // +0x20, поэтому смотрим на 4 байта с отступом от начала кандидата.
+        // Кандидаты проверяем только до конца куска (p < chunk): хвост уже
+        // будет прочитан в следующем — без него тот же класс увидим дважды.
+        for (uint64_t p = 0; p < chunk && p + 0x28 <= chunk + extra; p += 8) {
+            int32_t kv = 0;
+            memcpy(&kv, buf + p + IL2CPP_CLASS_BYVAL_ARG, 4);
+            if (!kv) continue;
+            int hit = -1;
+            for (int w = 0; w < s_want_kidx_count; ++w)
+                if (s_want_kidx[w] == kv) { hit = w; break; }
+            if (hit < 0) continue;
+            const uint64_t cand = s_kid_pos + p;
+            if (!kid_class_ok(cand)) {
+                static int rejected_logged = 0;
+                if (rejected_logged++ < 4)
+                    LogLine("автооффсеты: кандидат kidx=%d @0x%llx отвергнут: image=0x%llx name=0x%llx ns=0x%llx fields=0x%llx count=%u",
+                            kv, (unsigned long long)cand, (unsigned long long)qrd_ptr(cand),
+                            (unsigned long long)qrd_ptr(cand + IL2CPP_CLASS_NAME),
+                            (unsigned long long)qrd_ptr(cand + IL2CPP_CLASS_NAMESPACE),
+                            (unsigned long long)qrd_ptr(cand + IL2CPP_CLASS_FIELDS),
+                            (unsigned)qrd<uint16_t>(cand + IL2CPP_CLASS_FIELD_COUNT));
+                continue;
+            }
+            // Нашлось. Запоминаем — следующий такт охоты может ещё понадобиться.
+            bool known = false;
+            for (int j = 0; j < s_via_class_count; ++j)
+                if (s_via_classes[j].kidx == kv) known = true;
+            if (!known && s_via_class_count < 16) {
+                s_via_classes[s_via_class_count].kidx = kv;
+                s_via_classes[s_via_class_count].klass = cand;
+                ++s_via_class_count;
+                ++s_via_found;
+            }
+            // Класс отдаём ВСЕМ цепочкам, которые ждут именно этот индекс — их
+            // обычно много (все цепочки из PlayerManager делят один kidx).
+            // Двухшаговая цепочка принимает первый шаг только если в классе
+            // ЕСТЬ поле следующего шага: иначе застрянем на мусорном тёзке,
+            // и индекс придётся оставить в поиске.
+            int still_needed = 0;
+            for (int i = 0; i < kViaFieldCount; ++i) {
+                for (int hop = 0; hop < kViaFields[i].nhops; ++hop) {
+                    if (s_via_kidx[i][hop] != kv || s_via_klass[i][hop]) continue;
+                    if (kViaFields[i].nhops == 2 && hop == 0) {
+                        const int32_t k1 = field_type_kidx(cand, kViaFields[i].hops[1]);
+                        if (k1 <= 0) { ++still_needed; continue; }
+                        s_via_kidx[i][1] = k1;
+                    }
+                    s_via_klass[i][hop] = cand;
+                }
+            }
+            // Второй шаг цепочки стал известен только сейчас (из первого) —
+            // кладём его в поиск, чтобы охота не завершилась на полпути.
+            for (int i = 0; i < kViaFieldCount && s_want_kidx_count < 8; ++i) {
+                if (kViaFields[i].nhops < 2) continue;
+                if (!s_via_klass[i][0] || s_via_klass[i][1]) continue;
+                if (s_via_kidx[i][1] <= 0) continue;
+                const int32_t k1 = s_via_kidx[i][1];
+                bool dup = false;
+                for (int w = 0; w < s_want_kidx_count; ++w)
+                    if (s_want_kidx[w] == k1) dup = true;
+                if (dup) continue;
+                s_want_kidx[s_want_kidx_count] = k1;
+                s_want_owner[s_want_kidx_count] = &kViaFields[i];
+                ++s_want_kidx_count;
+            }
+            // Снимаем индекс с поиска только когда он уже никому не нужен.
+            if (still_needed == 0) {
+                for (int w = hit; w + 1 < s_want_kidx_count; ++w) {
+                    s_want_kidx[w] = s_want_kidx[w + 1];
+                    s_want_owner[w] = s_want_owner[w + 1];
+                }
+                --s_want_kidx_count;
+                if (s_want_kidx_count == 0) break;
+            }
+        }
+        s_kid_pos += chunk;
+        s_kid_scanned += chunk;
+    }
+    if (s_want_kidx_count > 0 && s_kid_region >= s_ptr_range_count) {
+        // Все диапазоны пройдены, а искомое не нашлось: охоту не повторяем.
+        s_want_kidx_count = 0;
+        LogLine("автооффсеты: охота по индексу типа — классов не нашлось "
+                "(просмотрено %llu МБ)", (unsigned long long)(s_kid_scanned >> 20));
+    }
+    if (s_want_kidx_count == 0) {
+        s_via_done = true;
+        s_phase = PH_FIELDS;
+        if (s_via_found)
+            LogLine("автооффсеты: найдено классов по индексу типа: %d "
+                    "(имена ротируются — искали не по имени)", s_via_found);
+    }
+}
+
+// Второй путь к ротированным классам: живые объекты, а не совпадение
+// Il2CppType.data с byval_arg. В защищённой бете data — указатель в пул
+// метаданных; поиск его как «индекса» находил только ложные структуры.
+// Источник цепочек и начальные смещения — release offsets_map.json (via).
+static uint64_t live_via_class(int i, uint64_t local, uint64_t weapon) {
+    const ViaField& v = kViaFields[i];
+    uint64_t obj = 0;
+    if (!strcmp(v.via_cls, "PlayerManager")) obj = local;
+    else if (!strcmp(v.via_cls, "FPObject")) obj = weapon;
+    if (!valid_obj(obj)) return 0;
+    uint64_t klass = qrd_ptr(obj);
+    if (!valid_obj(klass)) return 0;
+    // Текущее оружие обычно FPWeaponBase/FPTool, а Draw объявлен в FPObject.
+    // Ищем базовый класс по релизной цепочке, не доверяя произвольному полю
+    // одноимённого объекта.
+    uint64_t owner = klass;
+    bool match = false;
+    for (int depth = 0; depth < 8 && valid_obj(owner); ++depth) {
+        bool ok = false;
+        if (qrd_string(qrd_ptr(owner + IL2CPP_CLASS_NAME), &ok) == v.via_cls && ok) {
+            match = true; break;
+        }
+        owner = qrd_ptr(owner + 0x58); // Il2CppClass.parent, релизная раскладка ABI
+    }
+    if (!match) return 0;
+    for (int hop = 0; hop < v.nhops; ++hop) {
+        const int32_t off = find_field_offset(owner, v.hops[hop]);
+        if (off < 0 || off > 0x2000) return 0;
+        obj = qrd_ptr(obj + (uint64_t)off);
+        if (!valid_obj(obj)) return 0;
+        klass = qrd_ptr(obj);
+        if (!kid_class_ok(klass)) return 0;
+        owner = klass;
+        s_via_klass[i][hop] = klass;
+    }
+    return klass;
+}
+
 static void phase_fields() {
     // Якорь: по вшитому TYPEINFO_RVA читается ЖИВОЙ класс (привязка сверяет
     // базу ровно этой проверкой). Логуем его имя — сразу видно, ротированы ли
@@ -1876,6 +2576,11 @@ static void phase_fields() {
         }
         log_anchor_dump(anchor);
         if (!s_fields_off) calibrate_fields(anchor);
+        // Якорь в кэш классов под своим живым именем: он даёт имя класса и его
+        // byval_arg (klassIndex) — по нему сверяются ТИПЫ полей во втором
+        // проходе (resolve_type_group). Без этой записи сигнатуры
+        // «c:PlayerManager»/«c:CameraManager» не с чем сравнивать.
+        if (aok && !aname.empty()) store_verified_class(anchor, aname.c_str());
     }
     // Калибровка: первым пробуем самый «толстый» класс (больше полей —
     // надёжнее форма), потом ВСЕ классы с именами из таблицы (совпадение
@@ -1920,6 +2625,20 @@ static void phase_fields() {
         s_phase = PH_DONE;
         return;
     }
+    // Цепочки via: классы с ротированными именами. Считаем, какие индексы типа
+    // нужны, и уходим в охоту — она порционная, поэтому резолв продолжится
+    // следующим тактом и вернётся сюда же (калибровка ниже не повторяется).
+    if (!s_via_done && kViaFieldCount > 0) {
+        build_via_wants();
+        if (s_want_kidx_count > 0) {
+            s_kid_region = 0; s_kid_pos = 0; s_kid_scanned = 0;
+            s_phase = PH_KID;
+            LogLine("автооффсеты: ищу классы по индексу типа (имена ротируются) — "
+                    "%d индекс(ов), цепочек %d", s_want_kidx_count, kViaFieldCount);
+            return;
+        }
+        s_via_done = true;
+    }
     if (anchor) {
         // Читаются ли имена ПОЛЕЙ: даже найдя массив, поля мы ищем по имени.
         bool fok = false;
@@ -1938,6 +2657,54 @@ static void phase_fields() {
         LogLine("автооффсеты: якорь — имя первого поля %s «%s»",
                 fok ? "читается" : "НЕ читается", fok ? shown : "-");
     }
+    // Диагностика поиска по ТИПУ. Второй проход ищет поля с ротированными
+    // именами, сверяя FieldInfo.type с Il2CppType класса (klassIndex в
+    // byval_arg@0x20, enum типа в битах 16..23 слова @+0x8). Если на устройстве
+    // раскладка окажется другой — по этой строке видно это сразу, а не по
+    // молчанию «не разрешено». Для НАСТОЯЩЕГО класса (с табличным именем и
+    // подтверждённым массивом полей) печатаем: смещение byval_arg, первый
+    // FieldInfo.type и что из этого прочиталось.
+    {
+        // Сначала класс с табличным именем (это точно настоящий класс из
+        // дампа), иначе — любой, у которого массив полей читается и ссылается
+        // обратно на класс. Так строка появится в логе при любом исходе.
+        uint64_t dklass = 0;
+        for (int pass = 0; pass < 2 && !dklass; ++pass) {
+            for (int i = 0; i < s_class_count; ++i) {
+                if (pass == 0 && !name_is_wanted(s_classes[i].name)) continue;
+                const uint64_t fp = qrd_ptr(s_classes[i].klass + s_fields_off);
+                if (!valid_obj(fp)) continue;
+                if (qrd_ptr(fp + IL2CPP_FIELDINFO_PARENT) != s_classes[i].klass) continue;
+                dklass = s_classes[i].klass;
+                break;
+            }
+        }
+        if (dklass) {
+            uint8_t byval[16] = {}, ftype[16] = {};
+            const bool bok = qrd_buf(dklass + IL2CPP_CLASS_BYVAL_ARG, byval, sizeof(byval));
+            const uint64_t fp = qrd_ptr(dklass + s_fields_off);
+            const bool fok2 = valid_obj(fp) &&
+                qrd_buf(qrd_ptr(fp + IL2CPP_FIELDINFO_TYPE), ftype, sizeof(ftype));
+            char bh[64] = {}, fh[64] = {};
+            size_t hn = 0;
+            for (size_t i = 0; i < sizeof(byval) && bok; ++i)
+                hn += (size_t)snprintf(bh + hn, sizeof(bh) - hn, "%02x", byval[i]);
+            hn = 0;
+            for (size_t i = 0; i < sizeof(ftype) && fok2; ++i)
+                hn += (size_t)snprintf(fh + hn, sizeof(fh) - hn, "%02x", ftype[i]);
+            int32_t kidx = 0, tidx = 0;
+            if (bok) memcpy(&kidx, byval, 4);
+            if (fok2) memcpy(&tidx, ftype, 4);
+            const uint32_t bits = fok2 ? *(uint32_t*)(ftype + IL2CPP_TYPE_BITS) : 0;
+            LogLine("автооффсеты: типы полей — byval_arg@0x%llx [%s] kidx=%d, "
+                    "FieldInfo.type [%s] kidx=%d enum=0x%02x (%s)",
+                    (unsigned long long)IL2CPP_CLASS_BYVAL_ARG, bok ? bh : "не читается",
+                    (int)kidx, fok2 ? fh : "не читается", (int)tidx,
+                    (unsigned)((bits >> 16) & 0xFF),
+                    (bok && fok2 && kidx && kidx == tidx) ? "совпадает — поиск по типу работает"
+                                                          : "НЕ совпадает — поиск по типу не сработает");
+        }
+    }
 
     for (int i = 0; i < kOrFieldCount; ++i) {
         const OrField& of = kOrFields[i];
@@ -1955,6 +2722,165 @@ static void phase_fields() {
             const int32_t off = find_field_offset(anchor, of.field);
             if (off >= 0) { apply_resolution(of, off); resolved = true; }
         }
+    }
+
+    // Второй проход — поля с РОТИРОВАННЫМИ именами (_BYK_k__BackingField). Их
+    // имя меняется каждый билд игры, поэтому по имени они не находятся; ищем
+    // по ТИПУ поля (сигнатура из таблицы). Отдельным проходом, потому что
+    // cached_class_type_index должен видеть УЖЕ заполненный кэш классов.
+    // Поля одного типа внутри класса неразличимы, поэтому нерешённые слоты
+    // группируем по (класс, сигнатура) и разводим их вместе — иначе при общем
+    // сдвиге они все остались бы на устаревших вшитых значениях.
+    int by_type = 0, by_group = 0;
+    bool grouped[kOrFieldCount] = {};
+    for (int i = 0; i < kOrFieldCount; ++i) {
+        if (grouped[i]) continue;
+        const OrField& of = kOrFields[i];
+        if (!of.type || !of.type[0]) continue;   // без сигнатуры искать нечем
+        bool done = false;
+        for (int j = 0; j < s_applied_count; ++j)
+            if (s_applied[j].slot == of.slot) { done = true; break; }
+        if (done) continue;
+        // Группа: этот слот плюс все нерешённые с тем же классом и типом.
+        TypeGroup g;
+        g.n = 0;
+        g.of[g.n++] = &of;
+        grouped[i] = true;
+        for (int k = i + 1; k < kOrFieldCount && g.n < 16; ++k) {
+            if (grouped[k]) continue;
+            const OrField& oth = kOrFields[k];
+            if (!oth.type || !oth.type[0]) continue;
+            if (strcmp(oth.cls, of.cls) != 0 || strcmp(oth.type, of.type) != 0) continue;
+            bool taken = false;
+            for (int j = 0; j < s_applied_count; ++j)
+                if (s_applied[j].slot == oth.slot) { taken = true; break; }
+            if (taken) continue;
+            g.of[g.n++] = &oth;
+            grouped[k] = true;
+        }
+        // Тёзки класса: берём тот, в котором поля данного типа вообще есть.
+        for (int j = 0; j < s_class_count && !done; ++j) {
+            if (strcmp(s_classes[j].name, of.cls) != 0) continue;
+            const int filled = resolve_type_group(g, s_classes[j].klass);
+            if (!filled) continue;
+            by_type += filled;
+            if (g.n > 1 && filled == g.n) ++by_group;
+            done = true;
+            break;
+        }
+    }
+    if (by_type)
+        LogLine("автооффсеты: полей найдено по типу (имена ротированы): %d "
+                "(разведено группами полей одного типа: %d)", by_type, by_group);
+
+    // Берём локальный объект из GameControllerBase.static (путь из релизного
+    // дампа). Привязка к реальному владельцу предотвращает ложные совпадения
+    // в куче и позволяет читать класс через managed object->klass без имени.
+    uint64_t live_local = 0, live_weapon = 0;
+    for (int j = 0; j < s_class_count; ++j) {
+        if (strcmp(s_classes[j].name, "GameControllerBase") != 0) continue;
+        const uint64_t sf = qrd_ptr(s_classes[j].klass + IL2CPP_CLASS_STATIC_FIELDS);
+        if (valid_obj(sf)) live_local = qrd_ptr(sf + GAME_CONTROLLER_LOCAL_PLAYER_FIELD);
+        if (valid_obj(live_local)) break;
+    }
+    if (valid_obj(live_local)) {
+        const uint64_t fp = qrd_ptr(live_local + PLAYER_FP_MANAGER);
+        if (valid_obj(fp)) {
+            live_weapon = qrd_ptr(fp + FPMANAGER_CURRENT_OBJECT);
+            if (!valid_obj(live_weapon)) live_weapon = qrd_ptr(fp + FPMANAGER_CURRENT_WEAPON);
+            if (valid_obj(live_weapon) && qrd_ptr(live_weapon + FPOBJECT_PLAYER_BACKREF) != live_local)
+                live_weapon = 0;
+        }
+    }
+    int via_live = 0;
+    for (int i = 0; i < kViaFieldCount; ++i) {
+        if (s_via_klass[i][kViaFields[i].nhops - 1]) continue;
+        if (live_via_class(i, live_local, live_weapon)) ++via_live;
+    }
+    if (via_live) LogLine("автооффсеты: via по живым объектам из релизной цепочки: %d классов", via_live);
+
+    // Третий проход — классы с РОТИРУЮЩИМСЯ именами. Их находил phase_kid:
+    // по типу поля стартового класса брался индекс определения типа, по
+    // индексу — живой класс в памяти. Имя и полю, и классу не нужно: поле
+    // ищется по типу, ровно как во втором проходе.
+    // Второй шаг двухшаговой цепочки стал известен только во время охоты —
+    // дописываем его ротированное имя в таблицу имя->индекс, чтобы типы вида
+    // «c:eDw» (ссылка на второй шаг) тоже разрешались.
+    for (int i = 0; i < kViaFieldCount && s_rot_kidx_count < 16; ++i) {
+        if (kViaFields[i].nhops < 2) continue;
+        if (!kViaFields[i].rot || !kViaFields[i].rot[0]) continue;
+        if (s_via_kidx[i][1] <= 0) continue;
+        bool has = false;
+        for (int j = 0; j < s_rot_kidx_count; ++j)
+            if (strcmp(s_rot_kidx[j].name, kViaFields[i].rot) == 0) has = true;
+        if (has) continue;
+        s_rot_kidx[s_rot_kidx_count].name = kViaFields[i].rot;
+        s_rot_kidx[s_rot_kidx_count].kidx = s_via_kidx[i][1];
+        ++s_rot_kidx_count;
+    }
+    int by_via = 0;
+    for (int i = 0; i < kViaFieldCount; ++i) {
+        const ViaField& vf = kViaFields[i];
+        const uint64_t k = s_via_klass[i][vf.nhops - 1];
+        if (!k) continue;
+        bool done = false;
+        for (int j = 0; j < s_applied_count; ++j)
+            if (s_applied[j].slot == vf.slot) { done = true; break; }
+        if (done) continue;
+        // Метка класса для списка занятых смещений: живое имя целевого класса
+        // (оно ротировано, зато уникально). Две константы, пришедшие в один и
+        // тот же класс, делят занятые поля через одну и ту же метку.
+        bool nok = false;
+        const std::string kname = qrd_string(qrd_ptr(k + IL2CPP_CLASS_NAME), &nok);
+        if (nok && !kname.empty() && kname.size() < 40)
+            snprintf(s_via_mark[i], sizeof(s_via_mark[i]), "%s", kname.c_str());
+        else
+            snprintf(s_via_mark[i], sizeof(s_via_mark[i]), "via#%d", i);
+        OrField of_tmp;
+        of_tmp.slot = vf.slot;
+        of_tmp.cls = s_via_mark[i];
+        of_tmp.field = vf.field;
+        of_tmp.is_static = false;
+        of_tmp.type = vf.type;
+        // Сначала — по имени: имена ПОЛЕЙ внутри ротированного класса обычно
+        // стабильны («Aim», «nickname», «LastLocalHitPoint»), и точное имя
+        // надёжнее любой эвристики по типу. Ротировалось и имя — уходим к типу.
+        const int32_t by_name = find_field_offset(k, vf.field);
+        if (by_name >= 0) {
+            if (vf.is_static) {
+                // Статическое поле: значение лежит в static_fields.
+                const uint64_t sfp = qrd_ptr(k + IL2CPP_CLASS_STATIC_FIELDS);
+                if (valid_obj(sfp) && by_name < 0x400) {
+                    const uint8_t v = qrd<uint8_t>(sfp + (uint64_t)by_name);
+                    if (!(vf.type && vf.type[0] == 'b' && v != 0 && v != 1)) {
+                        of_tmp.is_static = true;
+                        apply_resolution(of_tmp, by_name);
+                        ++by_via;
+                        continue;
+                    }
+                }
+            } else {
+                apply_resolution(of_tmp, by_name);
+                ++by_via;
+                continue;
+            }
+        }
+        TypeGroup g;
+        g.n = 0;
+        g.of[g.n++] = &of_tmp;
+        if (resolve_type_group(g, k)) by_via += g.n;
+    }
+    if (by_via)
+        LogLine("автооффсеты: полей найдено через цепочку via (имена классов "
+                "ротируются): %d", by_via);
+    for (int i = 0; i < kViaFieldCount; ++i) {
+        bool found = false;
+        for (int j = 0; j < s_applied_count; ++j)
+            if (s_applied[j].slot == kViaFields[i].slot) { found = true; break; }
+        if (!found)
+            LogLine("автооффсеты: via не подтверждено: %s.%s (оставлено вшитое 0x%llx)",
+                    kViaFields[i].via_cls, kViaFields[i].field,
+                    (unsigned long long)*kViaFields[i].slot);
     }
 
     for (int i = 0; i < kOrFieldCount; ++i) {
@@ -1985,13 +2911,14 @@ static void log_summary() {
     const int wanted = wanted_in_cache();
     LogLine("автооффсеты: классов найдено %d (по форме %d, имён прочитано %d, отказов %d, табличных %d), "
             "fields@0x%llx, разрешено %d/%d констант (%d изменено), метаданные %s, "
-            "база 0x%llx, пустых баз %d, бутстрап: строк %d/%d, по указателям классов %llu",
+            "база 0x%llx, пустых баз %d, бутстрап: строк %d/%d, по указателям классов %llu%s",
             s_class_count, s_shape_pass, s_names_ok, s_names_fail, wanted,
             (unsigned long long)s_fields_off, s_resolved, kOrFieldCount, s_changed,
             s_meta_begin ? "найдены" : "НЕ найдены (фильтр слабее)",
             (unsigned long long)g_il2cpp_base, s_dead_count,
             s_wanted_str_found, s_wanted_name_count,
-            (unsigned long long)s_ptr_verified);
+            (unsigned long long)s_ptr_verified,
+            s_from_cache ? " [из кэша первого входа]" : "");
 
     build_wanted_names();
     char missing_buf[384] = {};
@@ -2015,6 +2942,334 @@ static void log_summary() {
         LogLine("автооффсеты: не найдены классы (%d из %d): %s",
                 missing_cls_count, s_wanted_name_count, missing_buf);
     }
+}
+
+// ---- Кэш результата: сканируем только при ПЕРВОМ входе ------------------------
+// Полный резолв на телефоне — это минуты (образ .so сотни МБ + куча 250+ МБ) и
+// только 4 мс на кадр, поэтому после каждого входа в игру его приходилось
+// ждать заново: переподключение смотрителя кадра, респавн, перезапуск клиента —
+// и скан начинал с нуля, а часть полей так и не успевала найтись.
+//
+// Результат резолва теперь пишется в файл рядом с конфигами (как .build/.lang),
+// а при следующем входе берётся оттуда МГНОВЕННО: скан не запускается вовсе.
+// Ключ — отпечаток самого libil2cpp.so (заголовок ELF + программные заголовки +
+// размер файла + содержимое 16 выборок по нему). Апдейт игры меняет образ, ключ
+// меняется, кэш не срабатывает — и резолв идёт заново, как и должен. Обратной
+// ситуации (старый кэш на новом образе) не бывает: без совпадения ключа кэш
+// просто не читается.
+//
+// В кэше и смещения полей, и адреса классов, которые вызывающий код берёт по
+// имени (замена *_TYPEINFO_RVA). Каждый такой адрес при загрузке проверяется:
+// по нему должен лежать живой Il2CppClass с тем же именем. Не сошлось — запись
+// отбрасывается, остальное берём (смещения полей от адреса классов не зависят).
+
+static std::string cache_path() {
+    // XS_RU, а не XS: стенд резолвера (tools/offsets/resolver_test.cpp)
+    // собирается одним модулем и не линкует lang.cpp.
+#ifdef OR_CACHE_DIR
+    // Стенд: каталог кэша подменяется, чтобы проверить кэш на хосте, где
+    // /storage/emulated/0 не существует.
+    return std::string(OR_CACHE_DIR) + ".offs";
+#else
+    return std::string(XS_RU("/storage/emulated/0/benzware/")) + XS_RU(".offs");
+#endif
+}
+
+static uint64_t fnv1a(const void* p, size_t n, uint64_t h) {
+    const uint8_t* b = (const uint8_t*)p;
+    for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 0x100000001B3ULL; }
+    return h;
+}
+
+// Размер файла образа: карта процесса даёт конец последнего отображения этого
+// же файла (bss тоже в карте, поэтому это верхняя граница — для отпечатка её
+// хватает: апдейт игры почти всегда меняет размер образа).
+static uint64_t image_file_span() {
+    if (!g_il2cpp_base) return 0;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    std::string text;
+    char chunk[4096];
+    for (;;) {
+        const ssize_t n = read(fd, chunk, sizeof(chunk));
+        if (n > 0) { text.append(chunk, (size_t)n); if (text.size() > (8u << 20)) break; continue; }
+        break;
+    }
+    close(fd);
+    uint64_t span = 0;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        const size_t eol = text.find('\n', pos);
+        const size_t line_end = (eol == std::string::npos) ? text.size() : eol;
+        // Строка обязана быть NUL-терминированной: иначе strchr/strstr уходят
+        // по всему остатку файла (та же ловушка, что в phase_maps).
+        char linebuf[512];
+        size_t line_len = line_end - pos;
+        if (line_len >= sizeof(linebuf)) line_len = sizeof(linebuf) - 1;
+        memcpy(linebuf, text.c_str() + pos, line_len);
+        linebuf[line_len] = '\0';
+        pos = line_end + 1;
+        unsigned long long start = 0, end = 0, foff = 0;
+        char perms[5] = {};
+        if (sscanf(linebuf, "%llx-%llx %4s %llx", &start, &end, perms, &foff) < 4) continue;
+        const char* slash = strchr(linebuf, '/');
+        if (!slash || !strstr(slash, "libil2cpp.so")) continue;
+        if (start != g_il2cpp_base) continue;   // чужой/второй образ
+        if (end > g_il2cpp_base && end - g_il2cpp_base > span) span = end - g_il2cpp_base;
+    }
+    return span;
+}
+
+// Отпечаток образа: ~128 КБ чтений, доли секунды. Всё, что можно вычитать, не
+// перекапывая 250 МБ целиком.
+static uint64_t compute_image_key() {
+    if (!g_il2cpp_base) return 0;
+    uint64_t h = 0xCBF29CE484222325ULL;
+    uint8_t eh[64] = {};
+    if (!qrd_buf(g_il2cpp_base, eh, sizeof(eh))) return 0;
+    h = fnv1a(eh, sizeof(eh), h);
+    uint64_t phoff = 0;
+    uint16_t phentsize = 0, phnum = 0;
+    memcpy(&phoff, eh + 0x20, 8);
+    memcpy(&phentsize, eh + 0x36, 2);
+    memcpy(&phnum, eh + 0x38, 2);
+    if (phnum > 64) phnum = 64;
+    const size_t phwant = (size_t)phentsize * phnum;
+    uint8_t ph[64 * 56] = {};
+    if (phentsize && phwant && phwant <= sizeof(ph) &&
+        qrd_buf(g_il2cpp_base + phoff, ph, phwant))
+        h = fnv1a(ph, phwant, h);
+    // Не хэшируем span из /proc/maps и край образа: после загрузки игры
+    // границы отображений и страницы в хвосте могут меняться без обновления
+    // файла. Берём фиксированные страницы начала ELF (заголовки + код),
+    // включая маску успешных чтений, чтобы ключ был одинаков при перезаходе.
+    for (uint64_t at = 0x1000; at < 0x11000; at += 0x1000) {
+        uint8_t buf[0x1000];
+        const bool readable = qrd_buf(g_il2cpp_base + at, buf, sizeof(buf));
+        h = fnv1a(&readable, sizeof(readable), h);
+        if (readable) h = fnv1a(buf, sizeof(buf), h);
+    }
+    return h;
+}
+
+static bool save_offsets_cache() {
+    if (!g_il2cpp_base || !s_applied_count) return false;
+    if (!s_image_key) s_image_key = compute_image_key();
+    if (!s_image_key) {
+        LogLine("автооффсеты: кэш не сохранён — не удалось прочитать ключ образа 0x%llx",
+                (unsigned long long)g_il2cpp_base);
+        return false;
+    }
+    // Без ЖИВОГО якоря этот кэш всё равно отбрасывается на следующем PID.
+    // Проверяем ДО открытия файла: fopen("w") раньше затирал рабочий кэш
+    // непригодным (anchor=0 / указатель в исполняемый код) при перепривязке.
+    const uint64_t anchor = anchor_class(nullptr);
+#ifndef OR_CACHE_DIR
+    if (!kid_class_ok(anchor)) {
+        LogLine("автооффсеты: кэш НЕ перезаписан — якорь 0x%llx не живой класс",
+                (unsigned long long)anchor);
+        return false;
+    }
+#endif
+    const std::string path = cache_path();
+    const std::string tmp = path + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "w");
+    if (!f) {
+        LogLine("автооффсеты: кэш не сохранён — временный файл .offs не открылся (errno=%d)", errno);
+        return false;
+    }
+    fprintf(f, "# автооффсеты: живой резолв (ключ — отпечаток libil2cpp.so)\n");
+    fprintf(f, "key %016llx\n", (unsigned long long)s_image_key);
+    // Адреса Il2CppClass находятся в куче и меняются при перезапуске.
+    fprintf(f, "anchor %016llx\nformat 2\n", (unsigned long long)anchor);
+    for (int i = 0; i < s_applied_count; ++i) {
+        int idx = -1;
+        for (int j = 0; j < kOrFieldCount; ++j)
+            if (kOrFields[j].slot == s_applied[i].slot) { idx = j; break; }
+        if (idx >= 0) {
+            fprintf(f, "res %d %llx\n", idx, (unsigned long long)s_applied[i].value);
+            continue;
+        }
+        for (int j = 0; j < kViaFieldCount; ++j) {
+            if (kViaFields[j].slot == s_applied[i].slot) {
+                fprintf(f, "via %d %llx\n", j, (unsigned long long)s_applied[i].value);
+                break;
+            }
+        }
+    }
+    build_wanted_names();
+    for (int i = 0; i < s_wanted_name_count; ++i) {
+        for (int j = 0; j < s_class_count; ++j) {
+            if (strcmp(s_classes[j].name, s_wanted_names[i]) != 0) continue;
+            // Сохраняем ВСЕ одноимённые классы: первый GameControllerBase
+            // или PlayerManager бывает пустышкой без живых static_fields.
+            fprintf(f, "cls %s %016llx\n", s_classes[j].name,
+                    (unsigned long long)s_classes[j].klass);
+        }
+    }
+    const int write_error = ferror(f);
+    const int close_error = fclose(f);
+    if (write_error || close_error || rename(tmp.c_str(), path.c_str()) != 0) {
+        LogLine("автооффсеты: кэш НЕ заменён (ошибка записи/rename, errno=%d)", errno);
+        remove(tmp.c_str());
+        return false;
+    }
+    LogLine("автооффсеты: кэш записан: %d значений, якорь 0x%llx, ключ 0x%llx",
+            s_applied_count, (unsigned long long)anchor, (unsigned long long)s_image_key);
+    return true;
+}
+
+// true — кэш подошёл и применён (скан не нужен).
+static bool load_offsets_cache() {
+    s_cache_retryable = false;
+    if (!g_il2cpp_base) return false;
+    if (!s_image_key) s_image_key = compute_image_key();
+    if (!s_image_key) return false;
+    FILE* f = fopen(cache_path().c_str(), "r");
+    if (!f) return false;
+    std::string text;
+    char chunk[512];
+    for (;;) {
+        const ssize_t n = fread(chunk, 1, sizeof(chunk), f);
+        if (n > 0) { text.append(chunk, (size_t)n); if (text.size() > (256u << 10)) break; continue; }
+        break;
+    }
+    fclose(f);
+
+    // Сначала ключ. Не сошёлся (игра обновилась) — выходим, НЕ тронув ни
+    // одного слота: значения из чужого образа хуже вшитых.
+    uint64_t key = 0;
+    bool have_key = false;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        const size_t eol = text.find('\n', pos);
+        const size_t line_end = (eol == std::string::npos) ? text.size() : eol;
+        char linebuf[192];
+        size_t line_len = line_end - pos;
+        if (line_len >= sizeof(linebuf)) line_len = sizeof(linebuf) - 1;
+        memcpy(linebuf, text.c_str() + pos, line_len);
+        linebuf[line_len] = '\0';
+        pos = line_end + 1;
+        unsigned long long val = 0;
+        if (sscanf(linebuf, "key %llx", &val) == 1) { key = (uint64_t)val; have_key = true; break; }
+    }
+    if (!have_key || key != s_image_key) {
+        LogLine("автооффсеты: кэш не подошёл — ключ файла 0x%llx, ключ образа 0x%llx (база 0x%llx)",
+                (unsigned long long)key, (unsigned long long)s_image_key,
+                (unsigned long long)g_il2cpp_base);
+        return false;
+    }
+
+    // Старый файл не сохранял via-поля вообще. Один раз обновляем формат,
+    // иначе FOV/руки на втором входе вновь получат вшитые значения.
+    if (text.find("\nformat 2\n") == std::string::npos) {
+        LogLine("автооффсеты: старый кэш без via-полей — пересканирую один раз");
+        return false;
+    }
+    // Старый файл хранил абсолютные адреса классов: на новом PID они все
+    // невалидны (лог: 157 полей из кэша, 0/44 классов). Мигрируем его одним
+    // полноценным резолвом, а не выдаём безжизненный кэш за готовый.
+    uint64_t old_anchor = 0;
+    pos = 0;
+    while (pos < text.size()) {
+        const size_t end = text.find('\n', pos);
+        const size_t len = (end == std::string::npos ? text.size() : end) - pos;
+        if (len < 80) {
+            unsigned long long a = 0;
+            if (sscanf(text.c_str() + pos, "anchor %llx", &a) == 1) old_anchor = (uint64_t)a;
+        }
+        pos = (end == std::string::npos) ? text.size() : end + 1;
+    }
+    const uint64_t new_anchor = anchor_class(nullptr);
+#ifndef OR_CACHE_DIR
+    if (!valid_obj(old_anchor) || !kid_class_ok(new_anchor)) {
+        s_cache_retryable = valid_obj(old_anchor);
+        LogLine("автооффсеты: кэш — старый якорь 0x%llx, новый 0x%llx (%s): %s",
+                (unsigned long long)old_anchor, (unsigned long long)new_anchor,
+                kid_class_ok(new_anchor) ? "живой" : "НЕ живой",
+                s_cache_retryable ? "жду инициализации живого класса" : "старый кэш непригоден, скан один раз");
+        return false;
+    }
+#endif
+    int loaded = 0, classes = 0;
+    pos = 0;
+    while (pos < text.size()) {
+        const size_t eol = text.find('\n', pos);
+        const size_t line_end = (eol == std::string::npos) ? text.size() : eol;
+        char linebuf[192];
+        size_t line_len = line_end - pos;
+        if (line_len >= sizeof(linebuf)) line_len = sizeof(linebuf) - 1;
+        memcpy(linebuf, text.c_str() + pos, line_len);
+        linebuf[line_len] = '\0';
+        pos = line_end + 1;
+        unsigned idx = 0;
+        unsigned long long val = 0;
+        char name[64] = {};
+        if (sscanf(linebuf, "res %u %llx", &idx, &val) == 2) {
+            if (idx >= (unsigned)kOrFieldCount) continue;
+            const OrField& of = kOrFields[idx];
+            // Границы те же, что у apply_resolution: кэш не должен занести в
+            // слот заведомо мусорное значение.
+            if (of.is_static ? (val > 0x4000) : (val > 0x20000)) continue;
+            if (*(of.slot) != val) ++s_changed;
+            *(of.slot) = (std::uint64_t)val;
+            if (s_applied_count < 256) {
+                s_applied[s_applied_count].slot = of.slot;
+                s_applied[s_applied_count].value = (std::uint64_t)val;
+                s_applied_cls[s_applied_count] = of.cls;
+                ++s_applied_count;
+            }
+            ++s_resolved;
+            ++loaded;
+        } else if (sscanf(linebuf, "via %u %llx", &idx, &val) == 2) {
+            if (idx >= (unsigned)kViaFieldCount) continue;
+            const ViaField& vf = kViaFields[idx];
+            if (vf.is_static ? (val > 0x4000) : (val > 0x20000)) continue;
+            if (*(vf.slot) != val) ++s_changed;
+            *(vf.slot) = (std::uint64_t)val;
+            if (s_applied_count < 256) {
+                s_applied[s_applied_count].slot = vf.slot;
+                s_applied[s_applied_count].value = (std::uint64_t)val;
+                s_applied_cls[s_applied_count] = vf.via_cls;
+                ++s_applied_count;
+            }
+            ++loaded;
+        } else if (sscanf(linebuf, "cls %63s %llx", name, &val) == 2) {
+            // Только небольшие расстояния внутри пула классов; никаких
+            // произвольных адресов из файла без сверки с живым именем.
+            const int64_t rel = (int64_t)((uint64_t)val - old_anchor);
+#ifndef OR_CACHE_DIR
+            if (rel < -(512ll << 20) || rel > (512ll << 20)) continue;
+#endif
+            const uint64_t k = new_anchor + rel;
+            if (!valid_obj(k)) continue;
+            const uint64_t nm = qrd_ptr(k + IL2CPP_CLASS_NAME);
+            if (!valid_str_ptr(nm)) continue;
+            bool ok = false;
+            const std::string live = qrd_string(nm, &ok);
+            if (!ok || live != name) continue;   // адрес устарел — берём остальное
+            store_verified_class(k, name);
+            ++classes;
+        }
+    }
+    if (loaded > 0 && classes > 0 && !s_good_base) {
+        // База, на которой живые классы читаются, считается живой: на неё же
+        // встанет следующая привязка (после самообновления игры в карте бывает
+        // два образа libil2cpp.so, и по ELF-заголовку пустой не отличить).
+        s_good_base = g_il2cpp_base;
+    }
+    if (classes == 0 || !offset_resolver_class("PlayerManager", nullptr) ||
+        !offset_resolver_class("GameControllerBase", nullptr)) {
+#ifndef OR_CACHE_DIR
+        LogLine("автооффсеты: кэш смещений прочитан, но ключевые живые классы не восстановились — нужен новый резолв");
+        return false;
+#endif
+    }
+    LogLine("автооффсеты: кэш классов — %d подтверждено после перепривязки (якорь 0x%llx -> 0x%llx)",
+            classes, (unsigned long long)old_anchor, (unsigned long long)new_anchor);
+    return loaded > 0;
 }
 
 }  // namespace
@@ -2066,18 +3321,56 @@ void offset_resolver_tick() {
 #if OR_SELFTEST_BREAK_BAKED
             selftest_break_baked();
 #endif
+            // Первый вход на этом образе: если резолв уже когда-то сошёлся и
+            // результат лежит в кэше — берём его и скан НЕ запускаем вовсе.
+            // Ждать минуты после каждого перезахода в игру не нужно.
+            if (!s_cache_checked || (s_cache_retryable && mono_seconds() >= s_cache_retry_at)) {
+                s_cache_checked = true;
+                if (load_offsets_cache()) {
+                    s_from_cache = true;
+                    s_phase = PH_DONE;
+                    LogLine("автооффсеты: оффсеты взяты из кэша первого входа "
+                            "(%d полей, образ 0x%llx) — сканирование не нужно",
+                            s_resolved, (unsigned long long)g_il2cpp_base);
+                    break;
+                }
+                if (s_cache_retryable) {
+                    const double now = mono_seconds();
+                    if (!s_cache_wait_since) s_cache_wait_since = now;
+                    if (now - s_cache_wait_since < 90.0) {
+                        s_cache_retry_at = now + 4.0;
+                        break; // не принимаем указатель в код за класс
+                    }
+                    LogLine("автооффсеты: кэш — якорь не загрузился за 90 с; сканирую заново");
+                    s_cache_retryable = false;
+                }
+            }
+            // Между попытками чтения кэша остаёмся в PH_WAIT. Раньше этот
+            // такт проваливался в PH_MAPS и запускал полный скан УЖЕ на
+            // следующем кадре, несмотря на совпавший ключ (лог: ожидание
+            // якоря @3.456, карта процесса @3.507).
+            if (s_cache_retryable) break;
             s_phase = PH_MAPS;
             break;
         case PH_MAPS:   phase_maps(); break;
         case PH_SCAN:   phase_scan(deadline); break;
         case PH_HEAP:   phase_heap(deadline); break;
+        case PH_KID:    phase_kid(deadline); break;
         case PH_STRS:   phase_strsearch(deadline); break;
         case PH_BLOB:   phase_blob(deadline); break;
         case PH_PTR:    phase_ptr(deadline); break;
         case PH_FIELDS: phase_fields(); break;
         case PH_DONE:   break;
     }
-    if (s_phase == PH_DONE) log_summary();
+    if (s_phase == PH_DONE) {
+        log_summary();
+        // Скан только при первом входе: результат уходит в кэш, чтобы следующий
+        // вход не ждал его заново. Один раз за резолв — не каждый кадр.
+        if (!s_from_cache && !s_cache_saved && mono_seconds() >= s_cache_save_retry_at) {
+            s_cache_saved = save_offsets_cache();
+            if (!s_cache_saved) s_cache_save_retry_at = mono_seconds() + 10.0;
+        }
+    }
 }
 
 void offset_resolver_reset() {
@@ -2118,11 +3411,21 @@ void offset_resolver_reset() {
     s_ptr_passes = 0; s_ptr_readfails = 0;
     s_ptr_range_count = 0; s_ptr_seg_bytes = 0; s_ptr_anon_bytes = 0;
     s_applied_count = 0; s_logged = false;
+    s_image_key = 0; s_from_cache = false; s_cache_checked = false; s_cache_saved = false;
+    s_cache_retryable = false; s_cache_wait_since = 0; s_cache_retry_at = 0;
+    s_cache_save_retry_at = 0;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
     // «какие базы пусты, а где классы живые» НЕ сбрасываются: они привязаны
     // к процессу (s_known_pid) и переживают перепривязки к той же игре.
     s_candidate_count = 0;
     s_scan_base = 0;
+    s_via_class_count = 0; s_via_done = false; s_via_found = 0;
+    s_rot_kidx_count = 0;
+    s_want_kidx_count = 0; s_kid_region = 0; s_kid_pos = 0; s_kid_scanned = 0;
+    for (int i = 0; i < kViaFieldCount; ++i) {
+        s_via_kidx[i][0] = s_via_kidx[i][1] = -1;
+        s_via_klass[i][0] = s_via_klass[i][1] = 0;
+    }
 }
 
 // После переключения релиз/бета слоты перезаписываются табличными значениями;
@@ -2145,23 +3448,29 @@ uint64_t offset_resolver_good_base(pid_t pid) {
 // смотрителю кадра не поможет: слепоту после апдейта игры лечат только новые
 // оффсеты, а не новое подключение к тому же процессу и базе.
 bool offset_resolver_busy() {
-    return s_phase == PH_MAPS || s_phase == PH_SCAN ||
+    return (s_phase == PH_WAIT && s_cache_retryable) ||
+           s_phase == PH_MAPS || s_phase == PH_SCAN ||
            s_phase == PH_HEAP || s_phase == PH_STRS ||
            s_phase == PH_BLOB || s_phase == PH_PTR ||
+           s_phase == PH_KID ||
            s_phase == PH_FIELDS;
 }
 
 // Найденный класс: короткое имя (+ пространство имён, если задано).
 // 0 — не найден (вызывающий код падает на вшитый TYPEINFO_RVA).
-uint64_t offset_resolver_class(const char* name, const char* ns) {
+uint64_t offset_resolver_class_nth(const char* name, const char* ns, int nth) {
     if (s_phase != PH_DONE && s_phase != PH_FIELDS) return 0;
-    if (!name || !name[0]) return 0;
+    if (!name || !name[0] || nth < 0) return 0;
     for (int i = 0; i < s_class_count; ++i) {
         if (strcmp(s_classes[i].name, name) != 0) continue;
         if (ns && ns[0] && s_classes[i].ns[0] && strcmp(s_classes[i].ns, ns) != 0) continue;
-        return s_classes[i].klass;
+        if (nth-- == 0) return s_classes[i].klass;
     }
     return 0;
+}
+
+uint64_t offset_resolver_class(const char* name, const char* ns) {
+    return offset_resolver_class_nth(name, ns, 0);
 }
 
 // Отладочный дамп состояния — только для хост-стенда (не вызывается из чита,
@@ -2187,7 +3496,10 @@ void offset_resolver_debug_dump() {
 void offset_resolver_status(char* out, size_t cap) {
     if (!out || !cap) return;
     if (s_phase == PH_WAIT) {
-        snprintf(out, cap, "ждёт привязку к игре");
+        if (s_cache_retryable)
+            snprintf(out, cap, "кэш найден: жду живой класс-якорь (без полного скана)");
+        else
+            snprintf(out, cap, "ждёт привязку к игре");
         return;
     }
     if (s_phase == PH_MAPS || s_phase == PH_SCAN || s_phase == PH_FIELDS) {
@@ -2207,6 +3519,13 @@ void offset_resolver_status(char* out, size_t cap) {
                  wanted_in_cache());
         return;
     }
+    if (s_phase == PH_KID) {
+        // Охота за классами с ротируемыми именами по индексу типа. «Готов»
+        // показывать нельзя: поля ещё не разрешены (phase_fields впереди).
+        snprintf(out, cap, "ищет классы по индексу типа: %llu МБ, найдено %d",
+                 (unsigned long long)(s_kid_scanned >> 20), s_via_found);
+        return;
+    }
     if (s_phase == PH_STRS || s_phase == PH_BLOB || s_phase == PH_PTR) {
         snprintf(out, cap, "поиск по строкам: просмотрено %llu МБ, имён %d, классов %d",
                  (unsigned long long)((s_str_scanned + s_ptr_scanned) >> 20),
@@ -2214,6 +3533,10 @@ void offset_resolver_status(char* out, size_t cap) {
         return;
     }
     // PH_DONE
+    if (s_from_cache) {
+        snprintf(out, cap, "готов (кэш первого входа): полей %d/%d", s_resolved, kOrFieldCount);
+        return;
+    }
     if (s_class_count > 0) {
         snprintf(out, cap, "готов: классов %d, полей %d/%d (изменено %d)",
                  s_class_count, s_resolved, kOrFieldCount, s_changed);

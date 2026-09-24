@@ -232,6 +232,32 @@ inline constexpr std::uint64_t IL2CPP_FIELDINFO_TYPE     = 0x08;  // const Il2Cp
 inline constexpr std::uint64_t IL2CPP_FIELDINFO_PARENT   = 0x10;  // Il2CppClass*
 inline constexpr std::uint64_t IL2CPP_FIELDINFO_OFFSET   = 0x18;  // int32
 inline constexpr std::uint64_t IL2CPP_FIELDINFO_SIZE     = 0x20;
+// Il2CppType (Unity 6000.3, размер 0x10): union data на +0x0 — для CLASS и
+// VALUETYPE там int32 klassIndex (индекс определения типа); слово битовых
+// полей на +0x8: attrs:16 | тип:8 (биты 16..23) | служебные биты.
+// Канонический тип самого класса (byval_arg) лежит прямо в Il2CppClass на
+// +0x20 (сразу за name@0x10/namespace@0x18, до this_arg@0x30; раскладку
+// подтверждают проверенные выше поля: fields@0x80, field_count@0x124).
+// Указатель FieldInfo.type и byval_arg несут ОДИН И ТОТ ЖЕ klassIndex для
+// одного класса — это позволяет сверять ТИП поля с классом без строк: так
+// резолвер находит поля, чьи имена ротированы обфускатором (см.
+// offset_resolver.cpp, resolve_type_group).
+inline constexpr std::uint64_t IL2CPP_CLASS_BYVAL_ARG    = 0x20;  // Il2CppType (0x10)
+inline constexpr std::uint64_t IL2CPP_TYPE_BITS          = 0x08;  // attrs:16 | enum:8 (<<16)
+// Значения Il2CppTypeEnum (биты 16..23 слова на IL2CPP_TYPE_BITS).
+inline constexpr std::uint64_t IL2CPP_TYPE_BOOLEAN   = 0x02;
+inline constexpr std::uint64_t IL2CPP_TYPE_I2        = 0x06;
+inline constexpr std::uint64_t IL2CPP_TYPE_I4        = 0x08;
+inline constexpr std::uint64_t IL2CPP_TYPE_U4        = 0x09;
+inline constexpr std::uint64_t IL2CPP_TYPE_R4        = 0x0C;  // float
+inline constexpr std::uint64_t IL2CPP_TYPE_STRING    = 0x0E;
+inline constexpr std::uint64_t IL2CPP_TYPE_PTR       = 0x0F;
+inline constexpr std::uint64_t IL2CPP_TYPE_VALUETYPE = 0x11;
+inline constexpr std::uint64_t IL2CPP_TYPE_CLASS     = 0x12;
+inline constexpr std::uint64_t IL2CPP_TYPE_ARRAY     = 0x14;
+inline constexpr std::uint64_t IL2CPP_TYPE_GENERICINST = 0x15;
+inline constexpr std::uint64_t IL2CPP_TYPE_OBJECT    = 0x1C;
+inline constexpr std::uint64_t IL2CPP_TYPE_SZARRAY   = 0x1D;
 // eventHandler.LookDirection (0x140): synced Vector3 wrapper, value at +0x20.
 // MouseLook.Update writes m_LookRoot.forward into it every frame and
 // FPHitscan casts its hit ray along it (not along the camera transform).
