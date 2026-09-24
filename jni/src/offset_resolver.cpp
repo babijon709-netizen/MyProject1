@@ -195,7 +195,7 @@ bool     s_heap_done = false;     // в этом резолве уже скан�
 // План: найти в ней строку «PlayerManager» -> вокруг неё окно блока строк ->
 // в блоке найти адреса ВСЕХ табличных имён -> в куче найти указатели на них
 // (слот имени класса на +0x10) -> так находятся живые классы без единого RVA.
-struct AnonRegion { uint64_t start = 0, end = 0; bool writable = false; };
+struct AnonRegion { uint64_t start = 0, end = 0; bool writable = false; char rperm[5] = {}; };
 // Лог №8 показал ровно 96 регионов — это был ПОТОЛОК, и карта процесса
 // обрезалась: пул классов, лежащий в 97-м регионе, в поиск не попадал.
 // Держим запас с лихвой и считаем, сколько регионов было на самом деле.
@@ -204,6 +204,11 @@ int      s_anon_count = 0;
 int      s_anon_total = 0;        // сколько анонимных регионов было в карте вообще
 uint64_t s_anon_noread_bytes = 0; // анонимная память, закрытая от чтения
 int      s_anon_noread_count = 0;
+uint64_t s_anon_bytes = 0;        // сколько анонимной памяти взяли в работу
+uint64_t s_anon_skip_x_bytes = 0; // пропущено исполняемой
+int      s_anon_skip_x = 0;
+int      s_anon_skip_small = 0;
+uint64_t s_anon_biggest = 0;      // самый крупный анонимный регион
 // Читаемые файловые регионы с именем, но не libil2cpp.so (протектор может
 // положить метадату в свой .dat/.bin или в память, отмапленную из apk).
 AnonRegion s_filemisc[256];
@@ -440,6 +445,8 @@ static void phase_maps() {
     s_candidate_count = 0;
     s_anon_count = 0; s_anon_total = 0; s_filemisc_count = 0;
     s_anon_noread_bytes = 0; s_anon_noread_count = 0;
+    s_anon_bytes = 0; s_anon_skip_x = 0; s_anon_skip_x_bytes = 0;
+    s_anon_skip_small = 0; s_anon_biggest = 0;
     if (!s_scan_base) s_scan_base = g_il2cpp_base;
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
@@ -487,14 +494,22 @@ static void phase_maps() {
             if (perms[0] != 'r') {
                 s_anon_noread_bytes += end - start;   // закрыто протектором?
                 ++s_anon_noread_count;
+            } else if (perms[2] == 'x') {
+                ++s_anon_skip_x;
+                s_anon_skip_x_bytes += end - start;
+            } else if (end - start < (256ull << 10)) {
+                ++s_anon_skip_small;
             }
+            if (end - start > s_anon_biggest) s_anon_biggest = end - start;
             if (perms[0] == 'r' && perms[2] != 'x' && end - start >= (256ull << 10)) {
                 ++s_anon_total;
                 if (s_anon_count < 512) {
                     s_anon[s_anon_count].start = start;
                     s_anon[s_anon_count].end = end;
                     s_anon[s_anon_count].writable = (perms[1] == 'w');
+                    snprintf(s_anon[s_anon_count].rperm, sizeof(s_anon[0].rperm), "%s", perms);
                     ++s_anon_count;
+                    s_anon_bytes += end - start;
                 }
             }
             continue;
@@ -562,6 +577,36 @@ static void phase_maps() {
         LogLine("автооффсеты: окно метаданных подозрительно мало (%llu КБ) — игнорирую, фильтр имён ослаблен",
                 (unsigned long long)((s_meta_end - s_meta_begin) >> 10));
         s_meta_begin = s_meta_end = 0;
+    }
+    // Сводка по карте: видно, какую память мы реально сканируем, а какую нет.
+    {
+        LogLine("автооффсеты: карта процесса — анонимной памяти %llu МБ в %d регионах, "
+                "самый крупный %llu МБ; пропущено: исполняемых %d (%llu МБ), мелких %d, закрытых %d (%llu МБ)",
+                (unsigned long long)(s_anon_bytes >> 20), s_anon_count,
+                (unsigned long long)(s_anon_biggest >> 20),
+                s_anon_skip_x, (unsigned long long)(s_anon_skip_x_bytes >> 20),
+                s_anon_skip_small, s_anon_noread_count,
+                (unsigned long long)(s_anon_noread_bytes >> 20));
+        int top[3] = {-1, -1, -1};
+        for (int i = 0; i < s_anon_count; ++i) {
+            const uint64_t sz = s_anon[i].end - s_anon[i].start;
+            if (top[0] < 0 || sz > s_anon[top[0]].end - s_anon[top[0]].start) {
+                top[2] = top[1]; top[1] = top[0]; top[0] = i;
+            } else if (top[1] < 0 || sz > s_anon[top[1]].end - s_anon[top[1]].start) {
+                top[2] = top[1]; top[1] = i;
+            } else if (top[2] < 0 || sz > s_anon[top[2]].end - s_anon[top[2]].start) {
+                top[2] = i;
+            }
+        }
+        for (int k = 0; k < 3; ++k) {
+            const int i = top[k];
+            if (i < 0) continue;
+            LogLine("автооффсеты: крупный регион №%d — 0x%llx..0x%llx (%llu МБ, %s)",
+                    k + 1, (unsigned long long)s_anon[i].start,
+                    (unsigned long long)s_anon[i].end,
+                    (unsigned long long)((s_anon[i].end - s_anon[i].start) >> 20),
+                    s_anon[i].rperm);
+        }
     }
     if (!s_seg_count) {
         LogLine("автооффсеты: база 0x%llx — сегментов 0 (строк .so %d: окно %d, иск %d, дел %d, карта %s)",
@@ -1608,6 +1653,8 @@ void offset_resolver_reset() {
     s_heap_pos = s_heap_end = 0; s_heap_done = false;
     s_anon_count = 0; s_anon_total = 0; s_filemisc_count = 0;
     s_anon_noread_bytes = 0; s_anon_noread_count = 0;
+    s_anon_bytes = 0; s_anon_skip_x = 0; s_anon_skip_x_bytes = 0;
+    s_anon_skip_small = 0; s_anon_biggest = 0;
     s_str_addr = 0; s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
     s_str_cand_count = 0; s_str_cand_idx = 0;
     s_best_found = -1; s_best_begin = 0; s_best_end = 0; s_best_addr = 0;
