@@ -75,10 +75,10 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // own methods and following  adrp/ldr -> R_AARCH64_RELATIVE addend -> slot,
 // keeping only slots that are then dereferenced as  ldr x8,[klass,#0xB8]
 // (Il2CppClass::static_fields) - i.e. exactly the access our reader performs.
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD9A34B8;  // бета: было 0xD9C5310
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xDAD5D08;  // бета: было 0xD9C5310
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD99E8F0; // GameControllerBase  // бета: было 0xD9C0690
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xDB2EF10; // GameControllerBase  // бета: было 0xD9C0690
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
@@ -385,7 +385,7 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
 // Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD9A2818;  // бета: было 0xD9C4570
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDB3F658;  // бета: было 0xD9C4570
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x28;
 
 // System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
@@ -614,7 +614,7 @@ inline constexpr std::uint64_t ITEMPICKUP_AMOUNT      = 0xE0; // int amount
 //   → элементы IPlayerLoopItem. Классы UniTask не обфусцированы — сверяются
 //   по имени в рантайме (PROVENANCE.md §D). Поле темпа сверяется побитово с
 //   0.35f (0x3EB33333), остальные ожидания не трогаются.
-inline constexpr std::uint64_t PLAYERLOOPHELPER_TYPEINFO_RVA = 0xD9A3488;  // бета: было 0xD9C52E0
+inline constexpr std::uint64_t PLAYERLOOPHELPER_TYPEINFO_RVA = 0xDB56EC0;  // бета: было 0xD9C52E0
 inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS      = 0x30; // statics: PlayerLoopRunner[] runners
 inline constexpr std::uint64_t LOOPRUNNER_ITEMS              = 0x38; // PlayerLoopRunner.loopItems
 inline constexpr std::uint64_t LOOPRUNNER_TAIL               = 0x30; // PlayerLoopRunner.tail: живой счётчик (длина массива — ёмкость)
