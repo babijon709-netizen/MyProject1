@@ -232,6 +232,7 @@ uint64_t s_ptr_scanned = 0;
 uint64_t s_ptr_hits = 0;          // совпадений указателя с адресом имени
 uint64_t s_ptr_verified = 0;      // из них оказалось живыми классами
 uint64_t s_ptr_inwin = 0;         // значений-указателей внутрь окна строк (любых)
+uint64_t s_ptr_noverify = 0;      // имя совпало, но структура классом не подтвердилась
 
 // Диапазоны поиска указателей на имена. Порядок важный: СНАЧАЛА читаемые
 // сегменты самой libil2cpp.so, ПОТОМ анонимная память. Протектор может вшить
@@ -893,7 +894,7 @@ static void phase_blob(double deadline) {
         if (s_wanted_str_found > 0) {
             build_ptr_ranges();
             s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
-            s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
+            s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0; s_ptr_noverify = 0;
             s_last_progress_log = 0;
             s_scan_deadline = mono_seconds() + 120.0;
             s_phase = PH_PTR;
@@ -974,24 +975,66 @@ static void phase_ptr(double deadline) {
                 LogLine("автооффсеты: указатель в окно строк @0x%llx -> 0x%llx (диапазон %d)",
                         (unsigned long long)(s_ptr_pos + (uint64_t)i * 8),
                         (unsigned long long)cand[0], s_ptr_region);
-            for (int n = 0; n < s_wanted_name_count; ++n) {
-                bool hit = false;
-                for (int c = 0; c < ncand; ++c) if (s_wanted_str[n] == cand[c]) hit = true;
-                if (!hit) continue;
-                ++s_ptr_hits;
-                const uint64_t klass = s_ptr_pos + (uint64_t)i * 8 - IL2CPP_CLASS_NAME;
+            // Сверяем НЕ адрес, а САМУ СТРОКУ по этому адресу. Имя лежит в
+            // блоке по нескольку раз (лог №9: в одном окне две записи
+            // «PlayerManager», обе дают 30 имён из 43), и адрес, запомненный
+            // при считывании блока, почти наверняка не тот вход, на который
+            // указывает класс. Читаем строку и сравниваем по содержимому.
+            const uint64_t slot = s_ptr_pos + (uint64_t)i * 8;
+            char sname[64];
+            int nm = -1;
+            for (int c = 0; c < ncand && nm < 0; ++c) {
+                // Читаем не дальше конца блока: у самого края страницы лишние
+                // байты могут быть не отображены, и чтение вернёт отказ.
+                size_t rl = 48;
+                if (cand[c] + rl > s_meta_end) rl = (size_t)(s_meta_end - cand[c]);
+                if (rl < 8) continue;
+                if (!qrd_buf(cand[c], sname, rl)) continue;
+                sname[rl] = 0;
+                for (int n = 0; n < s_wanted_name_count; ++n) {
+                    const char* w = s_wanted_names[n];
+                    if (sname[0] != w[0]) continue;
+                    const size_t wl = strlen(w);
+                    if (wl + 1 > rl) continue;         // имя длиннее прочитанного
+                    if (memcmp(sname, w, wl) != 0 || sname[wl] != '\0') continue;
+                    nm = n;
+                    break;
+                }
+            }
+            if (nm < 0) continue;
+            ++s_ptr_hits;
+            // Смещение слота имени в Il2CppClass: у беты раскладка может
+            // отличаться от релизной. Перебираем plausible-варианты.
+            static const uint64_t kNameOffs[] = {
+                IL2CPP_CLASS_NAME, 0x18, 0x08, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48
+            };
+            bool ok = false;
+            for (int o = 0; o < (int)(sizeof(kNameOffs) / sizeof(kNameOffs[0])) && !ok; ++o) {
+                const uint64_t klass = slot - kNameOffs[o];
                 const uint64_t image = qrd_ptr(klass);
-                if (s_lib_begin && (image < s_lib_begin || image >= s_lib_end)) break;
-                if (!s_lib_begin && !valid_obj(image)) break;
-                store_verified_class(klass, s_wanted_names[n]);
+                if (s_lib_begin && (image < s_lib_begin || image >= s_lib_end)) continue;
+                if (!s_lib_begin && !valid_obj(image)) continue;
+                store_verified_class(klass, s_wanted_names[nm]);
                 ++s_ptr_verified;
+                if (kNameOffs[o] != IL2CPP_CLASS_NAME && s_ptr_verified <= 3)
+                    LogLine("автооффсеты: слот имени класса не на +0x%llx, а на +0x%llx («%s» @0x%llx)",
+                            (unsigned long long)IL2CPP_CLASS_NAME,
+                            (unsigned long long)kNameOffs[o],
+                            s_wanted_names[nm], (unsigned long long)klass);
                 if (!s_good_base) {
                     s_good_base = g_il2cpp_base;
                     LogLine("автооффсеты: строковый бутстрап дал живой класс «%s» @0x%llx",
-                            s_wanted_names[n], (unsigned long long)klass);
+                            s_wanted_names[nm], (unsigned long long)klass);
                 }
                 if (!s_fields_off) calibrate_fields(klass);
-                break;
+                ok = true;
+            }
+            if (!ok) {
+                ++s_ptr_noverify;
+                if (s_ptr_noverify <= 3)
+                    LogLine("автооффсеты: имя «%s» найдено @0x%llx, но ни одно смещение не дало живого класса (слот @0x%llx)",
+                            s_wanted_names[nm], (unsigned long long)cand[0],
+                            (unsigned long long)slot);
             }
         }
         s_ptr_pos += chunk;
@@ -1002,21 +1045,24 @@ static void phase_ptr(double deadline) {
         const double now_s = mono_seconds();
         if (now_s - s_last_progress_log >= 8.0) {
             s_last_progress_log = now_s;
-            LogLine("автооффсеты: поиск указателей %llu МБ (диапазон %d/%d), в окне строк %llu, точных %llu, живых классов %llu",
+            LogLine("автооффсеты: поиск указателей %llu МБ (диапазон %d/%d), в окне строк %llu, по строке совпало %llu, живых классов %llu, неподтверждённых %llu",
                     (unsigned long long)(s_ptr_scanned >> 20), s_ptr_region, s_ptr_range_count,
                     (unsigned long long)s_ptr_inwin,
                     (unsigned long long)s_ptr_hits,
-                    (unsigned long long)s_ptr_verified);
+                    (unsigned long long)s_ptr_verified,
+                    (unsigned long long)s_ptr_noverify);
         }
     }
     if (all_wanted_found() || s_ptr_region >= s_ptr_range_count ||
         s_ptr_scanned >= (3072ull << 20) || mono_seconds() >= s_scan_deadline) {
         LogLine("автооффсеты: бутстрап завершён — просмотрено %llu МБ (%d диапазонов из %d), "
-                "в окне строк %llu значений, точных указателей %llu, живых классов %llu (в кэше %d)",
+                "в окне строк %llu значений, по строке совпало %llu, живых классов %llu, "
+                "неподтверждённых %llu (в кэше %d)",
                 (unsigned long long)(s_ptr_scanned >> 20), s_ptr_region, s_ptr_range_count,
                 (unsigned long long)s_ptr_inwin,
                 (unsigned long long)s_ptr_hits,
-                (unsigned long long)s_ptr_verified, s_class_count);
+                (unsigned long long)s_ptr_verified,
+                (unsigned long long)s_ptr_noverify, s_class_count);
         s_phase = PH_FIELDS;
     }
 }
@@ -1459,7 +1505,7 @@ void offset_resolver_reset() {
     s_blob_pos = 0; s_blob_fails = 0;
     for (int i = 0; i < 64; ++i) s_wanted_str[i] = 0;
     s_ptr_pos = 0; s_ptr_region = 0; s_ptr_scanned = 0;
-    s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
+    s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0; s_ptr_noverify = 0;
     s_ptr_range_count = 0; s_ptr_seg_bytes = 0; s_ptr_anon_bytes = 0;
     s_applied_count = 0; s_logged = false;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
