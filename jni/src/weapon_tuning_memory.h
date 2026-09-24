@@ -19,6 +19,12 @@ inline constexpr Layout kLayouts[] = {
     {{0xe1,0x07,0x95,0x34,0x9b,0xd7,0xc2,0xcd,0xc7,0xd8,0x52,0x75,0x97,0xc6,0x43,0x95,0xa4,0xef,0xed,0x79},
      "FJ", {0x6565aec,0x72dae70,0x72db044,0x5af4d04}, {0xfd000120,0x1e214c40,0x1e210800,0xbd400100}},
 };
+// Архив libil2cpp_newbeta.7z совпадает с устройством, но расположение native
+// guard sites и имя calculator для него ещё НЕ подтверждены. Не подставлять
+// оффсеты старой беты и не писать в кучу до проверки именно этого образа.
+inline constexpr std::array<uint8_t,20> kUnverifiedNewBetaId =
+    {0x76,0xfb,0xd4,0xff,0xa6,0x61,0xfe,0x71,0x17,0xee,
+     0x41,0x72,0xbd,0xdc,0xf7,0xd6,0x9a,0xfe,0x15,0xa0};
 inline constexpr const char* kWeapons = "HyperHug.Games.Oxide.Features.Weapons";
 template<class IO> bool pointer(IO& io, uint64_t a, uint64_t& value) {
     if (!io.read(a, value)) return false;
@@ -154,7 +160,8 @@ template<class IO> class Controller {
         return true;
     }
 public:
-    // 0 ready/off, 1 ELF build-id, 2 guard instruction, 10..14 owner-chain stage,
+    // 0 ready/off, 1 unknown ELF build-id, 2 guard instruction,
+    // 3 known new beta without verified weapon layout, 10..14 owner-chain stage,
     // 20 restoration, 21 heap write/readback. Exposed for device diagnostics.
     int diagnostic = 0;
     int guard_index = -1;
@@ -192,7 +199,7 @@ public:
             for (const auto& l:kLayouts) if (l.build_id==id) layout=&l;
         observed_id=id;
         bool supported=layout!=nullptr;
-        if (!layout) diagnostic=1;
+        if (!layout) diagnostic=(id==kUnverifiedNewBetaId ? 3 : 1);
         if (layout) for (size_t i=0;i<layout->guard_sites.size();++i) {
             uint32_t word=0;
             if (!io.read(base+layout->guard_sites[i],word) || word!=layout->guard_words[i]) {

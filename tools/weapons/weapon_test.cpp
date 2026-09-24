@@ -93,6 +93,15 @@ static void tests(const Layout& l) {
         assert(io.get<float>(calc+0x20)==2.f && io.get<float>(dispersion+0x24)==4.f);
         assert(io.writes.size()==18);
     }
+    // Новая бета присутствует в репозитории, но старую таблицу native-адресов
+    // применять к ней нельзя: отказ должен быть без единой записи.
+    {
+        Fake io(l); Controller<Fake> c(io);
+        io.set(base+0x318,kUnverifiedNewBetaId);
+        c.tick(1,base,player,true,true);
+        assert(c.diagnostic==3 && c.recoil==Status::Failed && c.spread==Status::Failed);
+        assert(io.writes.empty());
+    }
     // The owner chain must use the same live offsets as ESP/aim, not copies
     // of the release constants baked into the weapon controller.
     {

@@ -215,7 +215,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         char id[41] = {};
         for (int i = 0; i < 20; ++i)
             snprintf(id + i * 2, 3, "%02x", (unsigned)weapons.observed_id[i]);
-        LogLine("weapon data: отказ=%d (1 build-id,2 guard,10..14 цепочка,20 restore,21 запись), id=%s guard=%d word=0x%x player=0x%llx offsets fp=0x%llx weapon=0x%llx back=0x%llx",
+        LogLine("weapon data: отказ=%d (1 неизвестный build-id,2 guard,3 новая бета без проверенной раскладки оружия,10..14 цепочка,20 restore,21 запись), id=%s guard=%d word=0x%x player=0x%llx offsets fp=0x%llx weapon=0x%llx back=0x%llx",
                 weapons.diagnostic, id, weapons.guard_index, weapons.guard_observed,
                 (unsigned long long)player,
                 (unsigned long long)PLAYER_FP_MANAGER,
