@@ -100,7 +100,11 @@ void RestoreBuild() {
     if (!f) return;
     std::string v;
     std::getline(f, v);
-    if (!v.empty() && v[0] == 'b') go::SelectBuild(go::Build::Beta);
+    if (!v.empty()) {
+        g_buildPrompt = false;
+        if (v[0] == 'b') go::SelectBuild(go::Build::Beta);
+        else go::SelectBuild(go::Build::Release);
+    }
 }
 
 // Акцент интерфейса — рядом с конфигами отдельным файлом (.accent), как язык:

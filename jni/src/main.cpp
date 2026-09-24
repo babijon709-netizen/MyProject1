@@ -72,13 +72,13 @@ int main(int argc, char* argv[]) {
                 Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
         }
     }).detach();
-    start_attach_thread();
     LoadTabIcons();
     ApplyTheme();
     RestoreLang();          // язык из прошлого запуска (конфиг ниже может его переписать)
     RestoreBuild();         // версия игры из прошлого запуска — до привязки к процессу
     RestoreAccent();        // акцент интерфейса из прошлого запуска
     RestoreLayout();        // кнопки и тач-зоны из прошлого запуска (точку аима конфиг ниже может переписать)
+    start_attach_thread();
     CfgScanDir();
     ConfigLoadLast();
     ApplyTheme();

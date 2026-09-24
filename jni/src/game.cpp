@@ -5,6 +5,8 @@
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // активные оффсеты: релиз или бета (go::SelectBuild)
+#include "process.h"              // g_buildPrompt
+#include "config.h"               // RememberBuild()
 #include "Vector.h"
 #include "logfile.h"     // диагностический лог (Загрузки)
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
@@ -902,6 +904,20 @@ int class_identity(uint64_t klass, const char* expected_name, const char* expect
 // выглядит успешной, а весь чит молча не работает.
 static bool base_resolves_game(uint64_t base) {
     if (!base) return false;
+    // Автоопределение версии игры по GNU Build-ID образа libil2cpp.so:
+    // у новой беты Build-ID = 76fbd4ffa661fe7117ee4172bddcf7d69afe15a0 (0x71fe61a6ffd4fb76ULL).
+    uint64_t il2cpp_bid = 0;
+    if (rd_buf(base + 0x318, &il2cpp_bid, sizeof(il2cpp_bid))) {
+        if (il2cpp_bid == 0x71fe61a6ffd4fb76ULL) {
+            if (go::CurrentBuild() != go::Build::Beta) {
+                LogLine("привязка: по Build-ID (0x%llx) определена БЕТА — автопереключение профиля на бету",
+                        (unsigned long long)il2cpp_bid);
+                go::SelectBuild(go::Build::Beta);
+                RememberBuild();
+                g_buildPrompt = false;
+            }
+        }
+    }
     // class_identity отдаёт 1, когда имя прочитано и совпало, и 2, когда имя
     // прочитать не удалось и класс принят по одной структуре. Второй случай
     // лог №12 показал мусором: по вшитому RVA лежал код, а проверка «структуры»
@@ -920,6 +936,36 @@ static bool base_resolves_game(uint64_t base) {
                     (unsigned long long)base, (unsigned long long)candidate);
             return true;
         }
+        // IL2CPP ленивая инициализация: до спавна игрока слот держит токен метаданных с нечётным битом 0
+        if ((candidate & 1) && candidate < 0x80000000ULL && candidate >= 0x1000ULL) {
+            LogLine("привязка: база 0x%llx верна по токену TypeInfo PlayerManager (0x%llx)",
+                    (unsigned long long)base, (unsigned long long)candidate);
+            return true;
+        }
+    }
+    // Если активный профиль не сошёлся — проверяем альтернативный (автодетект без Build-ID):
+    if (go::CurrentBuild() == go::Build::Release && go::BetaAvailable()) {
+        const uint64_t beta_cand = rd_ptr(base + game_offsets_beta::PLAYER_MANAGER_TYPEINFO_RVA);
+        if (class_identity(beta_cand, "PlayerManager", "Oxide") != 0 ||
+            ((beta_cand & 1) && beta_cand < 0x80000000ULL && beta_cand >= 0x1000ULL)) {
+            LogLine("привязка: по RVA беты (0x%llx) обнаружена БЕТА — автопереключение профиля на бету",
+                    (unsigned long long)game_offsets_beta::PLAYER_MANAGER_TYPEINFO_RVA);
+            go::SelectBuild(go::Build::Beta);
+            RememberBuild();
+            g_buildPrompt = false;
+            return true;
+        }
+    } else if (go::CurrentBuild() == go::Build::Beta) {
+        const uint64_t rel_cand = rd_ptr(base + game_offsets::PLAYER_MANAGER_TYPEINFO_RVA);
+        if (class_identity(rel_cand, "PlayerManager", "Oxide") != 0 ||
+            ((rel_cand & 1) && rel_cand < 0x80000000ULL && rel_cand >= 0x1000ULL)) {
+            LogLine("привязка: по RVA релиза (0x%llx) обнаружен РЕЛИЗ — автопереключение профиля на релиз",
+                    (unsigned long long)game_offsets::PLAYER_MANAGER_TYPEINFO_RVA);
+            go::SelectBuild(go::Build::Release);
+            RememberBuild();
+            g_buildPrompt = false;
+            return true;
+        }
     }
     if (GAME_CONTROLLER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(base + GAME_CONTROLLER_TYPEINFO_RVA);
@@ -931,6 +977,11 @@ static bool base_resolves_game(uint64_t base) {
         }
         if (how == 2) {
             LogLine("привязка: база 0x%llx ПРИНЯТА НА ВЕРУ по вшитому RVA GameControllerBase — имя класса НЕ читается (класс 0x%llx)",
+                    (unsigned long long)base, (unsigned long long)candidate);
+            return true;
+        }
+        if ((candidate & 1) && candidate < 0x80000000ULL && candidate >= 0x1000ULL) {
+            LogLine("привязка: база 0x%llx верна по токену TypeInfo GameControllerBase (0x%llx)",
                     (unsigned long long)base, (unsigned long long)candidate);
             return true;
         }
@@ -1001,9 +1052,14 @@ static uint64_t resolve_runtime_player_list() {
             g_player_manager_class = found;
     }
     if (!g_player_manager_class && PLAYER_MANAGER_TYPEINFO_RVA != 0) {
-        const uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
+        uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
         if (class_identity(candidate, "PlayerManager", "Oxide") != 0)
             g_player_manager_class = candidate;
+        else if (go::CurrentBuild() == go::Build::Beta) {
+            candidate = rd_ptr(g_il2cpp_base + 0xDAE42B8);
+            if (class_identity(candidate, "PlayerManager", "Oxide") != 0)
+                g_player_manager_class = candidate;
+        }
     }
     if (!g_player_manager_class) {
         return 0;
