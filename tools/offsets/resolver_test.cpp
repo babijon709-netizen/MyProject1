@@ -644,6 +644,9 @@ int main() {
     check(offset_resolver_class("PlayerManager", "Oxide") == h.pm_real ||
           offset_resolver_class("PlayerManager", "Oxide") == h.pm_decoy,
           "кэш вернул класс PlayerManager");
+    check(offset_resolver_class_nth("PlayerManager", "Oxide", 0) == h.pm_decoy &&
+          offset_resolver_class_nth("PlayerManager", "Oxide", 1) == h.pm_real,
+          "кэш сохранил обе копии одноимённого класса");
     check(offset_resolver_class("NetworkClient", "Mirror") == h.netclient,
           "кэш вернул класс NetworkClient");
 

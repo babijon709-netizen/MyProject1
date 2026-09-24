@@ -6528,7 +6528,10 @@ static bool read_local_aim_state() {
                     std::isfinite(blend) && blend >= 0.f && blend <= 1.05f;
     if (blend_ok) {
         if (blend + 0.004f < last_blend && blend > 0.02f) blend_falling = true;
-        if (blend > last_blend + 0.004f || blend <= 0.02f) blend_falling = false;
+        // Мелкий отскок и полное затухание не означают нового ADS. Сохраняем
+        // защёлку до НОВОГО роста от нуля — иначе при blend=0 старый
+        // Aim.Active может снова включить аим через секунды после выхода.
+        if (last_blend <= 0.02f && blend > 0.06f) blend_falling = false;
         last_blend = blend;
     }
     if (blend_ok && blend_falling) {
@@ -6592,16 +6595,10 @@ static bool read_local_aim_state() {
                 return true;
             }
         }
-        // Some builds rotate Aim.Active and weapon.isAiming; until those
-        // offsets resolve, accept the blend only outside its falling edge.
-        // The falling edge above cuts off the aim as soon as ADS is released.
-        if (blend_ok && blend > 0.15f) {
-            fresh.fp_manager = fp_manager;
-            fresh.aiming = true;
-            fresh.source = 3;
-            g_aim_state = fresh;
-            return true;
-        }
+        // Не использовать FOV blend как признак ADS. После отпускания прицела
+        // он может оставаться высоким 1–3 секунды; именно этот запасной путь
+        // снова включал аим при честном Aim.Active == 0. Если оба булевых
+        // источника недоступны, молчим, а не целимся по анимации камеры.
     }
 
     fresh.aiming = false;

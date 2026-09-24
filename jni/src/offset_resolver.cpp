@@ -215,6 +215,10 @@ uint64_t s_image_key = 0;
 bool     s_from_cache = false;
 bool     s_cache_checked = false;
 bool     s_cache_saved = false;
+bool     s_cache_retryable = false; // ключ совпал, но класс-якорь ещё не загрузился
+ double   s_cache_wait_since = 0;
+ double   s_cache_retry_at = 0;
+double   s_cache_save_retry_at = 0;
 // Обычный потолок кэша. Хвост массива — резерв: лог с беты показал, что БЕЗ
 // окна метаданных «мягкий» фильтр пропускает сотни тысяч мусорных кандидатов,
 // кэш забивается мусором ещё в начале скана, и настоящие классы (вставшие в
@@ -2869,6 +2873,15 @@ static void phase_fields() {
     if (by_via)
         LogLine("автооффсеты: полей найдено через цепочку via (имена классов "
                 "ротируются): %d", by_via);
+    for (int i = 0; i < kViaFieldCount; ++i) {
+        bool found = false;
+        for (int j = 0; j < s_applied_count; ++j)
+            if (s_applied[j].slot == kViaFields[i].slot) { found = true; break; }
+        if (!found)
+            LogLine("автооффсеты: via не подтверждено: %s.%s (оставлено вшитое 0x%llx)",
+                    kViaFields[i].via_cls, kViaFields[i].field,
+                    (unsigned long long)*kViaFields[i].slot);
+    }
 
     for (int i = 0; i < kOrFieldCount; ++i) {
         const OrField& of = kOrFields[i];
@@ -3041,25 +3054,35 @@ static uint64_t compute_image_key() {
     return h;
 }
 
-static void save_offsets_cache() {
-    if (!g_il2cpp_base || !s_applied_count) return;
+static bool save_offsets_cache() {
+    if (!g_il2cpp_base || !s_applied_count) return false;
     if (!s_image_key) s_image_key = compute_image_key();
     if (!s_image_key) {
         LogLine("автооффсеты: кэш не сохранён — не удалось прочитать ключ образа 0x%llx",
                 (unsigned long long)g_il2cpp_base);
-        return;
+        return false;
     }
-    FILE* f = fopen(cache_path().c_str(), "w");
+    // Без ЖИВОГО якоря этот кэш всё равно отбрасывается на следующем PID.
+    // Проверяем ДО открытия файла: fopen("w") раньше затирал рабочий кэш
+    // непригодным (anchor=0 / указатель в исполняемый код) при перепривязке.
+    const uint64_t anchor = anchor_class(nullptr);
+#ifndef OR_CACHE_DIR
+    if (!kid_class_ok(anchor)) {
+        LogLine("автооффсеты: кэш НЕ перезаписан — якорь 0x%llx не живой класс",
+                (unsigned long long)anchor);
+        return false;
+    }
+#endif
+    const std::string path = cache_path();
+    const std::string tmp = path + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "w");
     if (!f) {
-        LogLine("автооффсеты: кэш не сохранён — файл .offs не открылся (errno=%d)", errno);
-        return;
+        LogLine("автооффсеты: кэш не сохранён — временный файл .offs не открылся (errno=%d)", errno);
+        return false;
     }
     fprintf(f, "# автооффсеты: живой резолв (ключ — отпечаток libil2cpp.so)\n");
     fprintf(f, "key %016llx\n", (unsigned long long)s_image_key);
     // Адреса Il2CppClass находятся в куче и меняются при перезапуске.
-    // Запоминаем живой якорь этого запуска: остальные классы из того же
-    // пула при загрузке проверяем по смещению относительно нового якоря.
-    const uint64_t anchor = anchor_class(nullptr);
     fprintf(f, "anchor %016llx\nformat 2\n", (unsigned long long)anchor);
     for (int i = 0; i < s_applied_count; ++i) {
         int idx = -1;
@@ -3080,16 +3103,27 @@ static void save_offsets_cache() {
     for (int i = 0; i < s_wanted_name_count; ++i) {
         for (int j = 0; j < s_class_count; ++j) {
             if (strcmp(s_classes[j].name, s_wanted_names[i]) != 0) continue;
+            // Сохраняем ВСЕ одноимённые классы: первый GameControllerBase
+            // или PlayerManager бывает пустышкой без живых static_fields.
             fprintf(f, "cls %s %016llx\n", s_classes[j].name,
                     (unsigned long long)s_classes[j].klass);
-            break;
         }
     }
-    fclose(f);
+    const int write_error = ferror(f);
+    const int close_error = fclose(f);
+    if (write_error || close_error || rename(tmp.c_str(), path.c_str()) != 0) {
+        LogLine("автооффсеты: кэш НЕ заменён (ошибка записи/rename, errno=%d)", errno);
+        remove(tmp.c_str());
+        return false;
+    }
+    LogLine("автооффсеты: кэш записан: %d значений, якорь 0x%llx, ключ 0x%llx",
+            s_applied_count, (unsigned long long)anchor, (unsigned long long)s_image_key);
+    return true;
 }
 
 // true — кэш подошёл и применён (скан не нужен).
 static bool load_offsets_cache() {
+    s_cache_retryable = false;
     if (!g_il2cpp_base) return false;
     if (!s_image_key) s_image_key = compute_image_key();
     if (!s_image_key) return false;
@@ -3150,8 +3184,12 @@ static bool load_offsets_cache() {
     }
     const uint64_t new_anchor = anchor_class(nullptr);
 #ifndef OR_CACHE_DIR
-    if (!valid_obj(old_anchor) || !valid_obj(new_anchor)) {
-        LogLine("автооффсеты: кэш без привязки живых классов — обновляю формат одним сканом");
+    if (!valid_obj(old_anchor) || !kid_class_ok(new_anchor)) {
+        s_cache_retryable = valid_obj(old_anchor);
+        LogLine("автооффсеты: кэш — старый якорь 0x%llx, новый 0x%llx (%s): %s",
+                (unsigned long long)old_anchor, (unsigned long long)new_anchor,
+                kid_class_ok(new_anchor) ? "живой" : "НЕ живой",
+                s_cache_retryable ? "жду инициализации живого класса" : "старый кэш непригоден, скан один раз");
         return false;
     }
 #endif
@@ -3286,7 +3324,7 @@ void offset_resolver_tick() {
             // Первый вход на этом образе: если резолв уже когда-то сошёлся и
             // результат лежит в кэше — берём его и скан НЕ запускаем вовсе.
             // Ждать минуты после каждого перезахода в игру не нужно.
-            if (!s_cache_checked) {
+            if (!s_cache_checked || (s_cache_retryable && mono_seconds() >= s_cache_retry_at)) {
                 s_cache_checked = true;
                 if (load_offsets_cache()) {
                     s_from_cache = true;
@@ -3295,6 +3333,15 @@ void offset_resolver_tick() {
                             "(%d полей, образ 0x%llx) — сканирование не нужно",
                             s_resolved, (unsigned long long)g_il2cpp_base);
                     break;
+                }
+                if (s_cache_retryable) {
+                    const double now = mono_seconds();
+                    if (!s_cache_wait_since) s_cache_wait_since = now;
+                    if (now - s_cache_wait_since < 90.0) {
+                        s_cache_retry_at = now + 4.0;
+                        break; // не принимаем указатель в код за класс
+                    }
+                    LogLine("автооффсеты: кэш — якорь не загрузился за 90 с; сканирую заново");
                 }
             }
             s_phase = PH_MAPS;
@@ -3313,9 +3360,9 @@ void offset_resolver_tick() {
         log_summary();
         // Скан только при первом входе: результат уходит в кэш, чтобы следующий
         // вход не ждал его заново. Один раз за резолв — не каждый кадр.
-        if (!s_from_cache && !s_cache_saved) {
-            s_cache_saved = true;
-            save_offsets_cache();
+        if (!s_from_cache && !s_cache_saved && mono_seconds() >= s_cache_save_retry_at) {
+            s_cache_saved = save_offsets_cache();
+            if (!s_cache_saved) s_cache_save_retry_at = mono_seconds() + 10.0;
         }
     }
 }
@@ -3359,6 +3406,8 @@ void offset_resolver_reset() {
     s_ptr_range_count = 0; s_ptr_seg_bytes = 0; s_ptr_anon_bytes = 0;
     s_applied_count = 0; s_logged = false;
     s_image_key = 0; s_from_cache = false; s_cache_checked = false; s_cache_saved = false;
+    s_cache_retryable = false; s_cache_wait_since = 0; s_cache_retry_at = 0;
+    s_cache_save_retry_at = 0;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
     // «какие базы пусты, а где классы живые» НЕ сбрасываются: они привязаны
     // к процессу (s_known_pid) и переживают перепривязки к той же игре.
@@ -3393,7 +3442,8 @@ uint64_t offset_resolver_good_base(pid_t pid) {
 // смотрителю кадра не поможет: слепоту после апдейта игры лечат только новые
 // оффсеты, а не новое подключение к тому же процессу и базе.
 bool offset_resolver_busy() {
-    return s_phase == PH_MAPS || s_phase == PH_SCAN ||
+    return (s_phase == PH_WAIT && s_cache_retryable) ||
+           s_phase == PH_MAPS || s_phase == PH_SCAN ||
            s_phase == PH_HEAP || s_phase == PH_STRS ||
            s_phase == PH_BLOB || s_phase == PH_PTR ||
            s_phase == PH_KID ||
@@ -3440,7 +3490,10 @@ void offset_resolver_debug_dump() {
 void offset_resolver_status(char* out, size_t cap) {
     if (!out || !cap) return;
     if (s_phase == PH_WAIT) {
-        snprintf(out, cap, "ждёт привязку к игре");
+        if (s_cache_retryable)
+            snprintf(out, cap, "кэш найден: жду живой класс-якорь (без полного скана)");
+        else
+            snprintf(out, cap, "ждёт привязку к игре");
         return;
     }
     if (s_phase == PH_MAPS || s_phase == PH_SCAN || s_phase == PH_FIELDS) {
