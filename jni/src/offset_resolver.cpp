@@ -202,6 +202,8 @@ struct AnonRegion { uint64_t start = 0, end = 0; bool writable = false; };
 AnonRegion s_anon[512];
 int      s_anon_count = 0;
 int      s_anon_total = 0;        // сколько анонимных регионов было в карте вообще
+uint64_t s_anon_noread_bytes = 0; // анонимная память, закрытая от чтения
+int      s_anon_noread_count = 0;
 // Читаемые файловые регионы с именем, но не libil2cpp.so (протектор может
 // положить метадату в свой .dat/.bin или в память, отмапленную из apk).
 AnonRegion s_filemisc[256];
@@ -224,6 +226,7 @@ uint64_t s_blk_begin[8], s_blk_end[8];
 int      s_blk_found[8];
 bool     s_blk_tried[8];
 int      s_ptr_passes = 0;        // сколько блоков уже прогоняли по указателям
+uint64_t s_ptr_readfails = 0;     // порций, которые не удалось прочитать
 int      s_str_region = 0;
 uint64_t s_str_pos = 0;
 uint64_t s_str_scanned = 0;
@@ -436,6 +439,7 @@ static void phase_maps() {
     s_maps_cut_deleted = 0; s_maps_open_failed = false;
     s_candidate_count = 0;
     s_anon_count = 0; s_anon_total = 0; s_filemisc_count = 0;
+    s_anon_noread_bytes = 0; s_anon_noread_count = 0;
     if (!s_scan_base) s_scan_base = g_il2cpp_base;
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
@@ -469,14 +473,21 @@ static void phase_maps() {
         unsigned long long start = 0, end = 0, foff = 0;
         char perms[5] = {};
         if (sscanf(line, "%llx-%llx %4s %llx", &start, &end, perms, &foff) < 3) continue;
-        // Потолок сегмента — 1 ГБ: у больших игр .rodata бывает огромным,
-        // а выкинув его целиком мы бы могли выкинуть и нужный сегмент рядом.
-        if (end <= start || end - start > (1ull << 30)) continue;
+        if (end <= start) continue;
         const char* slash = strchr(line, '/');
+        // Потолок 1 ГБ — только для ФАЙЛОВЫХ сегментов: у больших игр .rodata
+        // бывает огромным. Для анонимной памяти потолка нет: куча игры часто
+        // выделяется ОДНИМ регионом больше гигабайта, и, выкинув его, мы
+        // теряем как раз тот пул классов, который ищем.
+        if (slash && end - start > (1ull << 30)) continue;
         if (!slash) {
             // Анонимный читаемый регион — кандидат на блок строк метаданных
             // (бета маппит его без имени «global-metadata») и на кучу, где
             // лежат структуры классов. Собираем для строкового бутстрапа.
+            if (perms[0] != 'r') {
+                s_anon_noread_bytes += end - start;   // закрыто протектором?
+                ++s_anon_noread_count;
+            }
             if (perms[0] == 'r' && perms[2] != 'x' && end - start >= (256ull << 10)) {
                 ++s_anon_total;
                 if (s_anon_count < 512) {
@@ -914,6 +925,7 @@ static void phase_blob(double deadline) {
             s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
             s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0; s_ptr_noverify = 0;
             s_ptr_names = 0; s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
+            s_ptr_readfails = 0;
             s_last_progress_log = 0;
             s_scan_deadline = mono_seconds() + 120.0;
             s_phase = PH_PTR;
@@ -959,6 +971,9 @@ static void build_ptr_ranges() {
             (unsigned long long)(s_ptr_seg_bytes >> 20),
             (unsigned long long)(s_ptr_anon_bytes >> 20),
             s_anon_count, s_anon_total, s_filemisc_count);
+    if (s_anon_noread_count)
+        LogLine("автооффсеты: закрыто от чтения анонимных регионов %d (%llu МБ)",
+                s_anon_noread_count, (unsigned long long)(s_anon_noread_bytes >> 20));
 }
 
 // Закрываем диапазон поиска: запоминаем, в каком из них больше всего
@@ -997,12 +1012,17 @@ static void phase_ptr(double deadline) {
         const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
         if (chunk < 8) { ptr_range_done(); s_ptr_pos = r.end; ++s_ptr_region; continue; }
         if (!qrd_buf(s_ptr_pos, buf, chunk)) {
+            ++s_ptr_readfails;
+            if (s_ptr_pos == r.start && s_ptr_readfails <= 8)
+                LogLine("автооффсеты: диапазон %d (0x%llx..0x%llx) недоступен для чтения",
+                        s_ptr_region, (unsigned long long)r.start, (unsigned long long)r.end);
             s_ptr_pos += chunk; s_ptr_scanned += chunk; continue;
         }
-        const size_t slots = chunk / 8;
-        for (size_t i = 0; i < slots; ++i) {
+        // Шаг 4 байта, а не 8: слот имени в структуре класса может быть не
+        // выровнен по 8 (тогда указатель на 8-байтовой сетке не виден).
+        for (size_t i = 0; i + 8 <= chunk; i += 4) {
             uint64_t v;
-            memcpy(&v, buf + i * 8, 8);
+            memcpy(&v, buf + i, 8);
             v = memio::untag(v);
             // Имя может лежать абсолютным указателем, а может — RVA от начала
             // образа: вшитая в .so метадата часто хранит именно смещения.
@@ -1017,14 +1037,14 @@ static void phase_ptr(double deadline) {
             ++s_ptr_rinwin;
             if (s_ptr_inwin <= 4)
                 LogLine("автооффсеты: указатель в окно строк @0x%llx -> 0x%llx (диапазон %d)",
-                        (unsigned long long)(s_ptr_pos + (uint64_t)i * 8),
+                        (unsigned long long)(s_ptr_pos + (uint64_t)i),
                         (unsigned long long)cand[0], s_ptr_region);
             // Сверяем НЕ адрес, а САМУ СТРОКУ по этому адресу. Имя лежит в
             // блоке по нескольку раз (лог №9: в одном окне две записи
             // «PlayerManager», обе дают 30 имён из 43), и адрес, запомненный
             // при считывании блока, почти наверняка не тот вход, на который
             // указывает класс. Читаем строку и сравниваем по содержимому.
-            const uint64_t slot = s_ptr_pos + (uint64_t)i * 8;
+            const uint64_t slot = s_ptr_pos + (uint64_t)i;
             char sname[64];
             int nm = -1;
             size_t rl = 0;
@@ -1114,9 +1134,10 @@ static void phase_ptr(double deadline) {
         s_ptr_scanned >= (3072ull << 20) || mono_seconds() >= s_scan_deadline) {
         ptr_range_done();
         LogLine("автооффсеты: бутстрап завершён — просмотрено %llu МБ (%d диапазонов из %d), "
-                "в окне строк %llu значений, похожих на имена %llu, по строке совпало %llu, "
-                "живых классов %llu, неподтверждённых %llu (в кэше %d)",
+                "отказов чтения %llu, в окне строк %llu значений, похожих на имена %llu, "
+                "по строке совпало %llu, живых классов %llu, неподтверждённых %llu (в кэше %d)",
                 (unsigned long long)(s_ptr_scanned >> 20), s_ptr_region, s_ptr_range_count,
+                (unsigned long long)s_ptr_readfails,
                 (unsigned long long)s_ptr_inwin,
                 (unsigned long long)s_ptr_names,
                 (unsigned long long)s_ptr_hits,
@@ -1144,7 +1165,7 @@ static void phase_ptr(double deadline) {
             s_blk_tried[next] = true;
             s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
             s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
-            s_ptr_noverify = 0; s_ptr_names = 0;
+            s_ptr_noverify = 0; s_ptr_names = 0; s_ptr_readfails = 0;
             s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
             s_last_progress_log = 0;
             s_scan_deadline = mono_seconds() + 120.0;
@@ -1586,6 +1607,7 @@ void offset_resolver_reset() {
     s_resolved = 0; s_changed = 0;
     s_heap_pos = s_heap_end = 0; s_heap_done = false;
     s_anon_count = 0; s_anon_total = 0; s_filemisc_count = 0;
+    s_anon_noread_bytes = 0; s_anon_noread_count = 0;
     s_str_addr = 0; s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
     s_str_cand_count = 0; s_str_cand_idx = 0;
     s_best_found = -1; s_best_begin = 0; s_best_end = 0; s_best_addr = 0;
@@ -1600,7 +1622,7 @@ void offset_resolver_reset() {
     s_ptr_pos = 0; s_ptr_region = 0; s_ptr_scanned = 0;
     s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0; s_ptr_noverify = 0;
     s_ptr_names = 0; s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
-    s_ptr_passes = 0;
+    s_ptr_passes = 0; s_ptr_readfails = 0;
     s_ptr_range_count = 0; s_ptr_seg_bytes = 0; s_ptr_anon_bytes = 0;
     s_applied_count = 0; s_logged = false;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
