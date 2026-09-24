@@ -275,6 +275,11 @@ uint64_t s_ptr_names = 0;         // указателей на ЛЮБУЮ чит
 uint64_t s_ptr_rinwin = 0;        // указателей в окно в текущем диапазоне
 uint64_t s_ptr_best_hits = 0;     // максимум в одном диапазоне
 int      s_ptr_best_range = -1;
+// Три лучших диапазона, а не один: пул классов может быть не самым
+// «густонаселённым» местом (лог №12: на первом месте таблица имён шейдеров
+// — 3745 указателей, а нужного пула в списке не видно вовсе).
+uint64_t s_top_hits[3] = {0, 0, 0};
+int      s_top_range[3] = {-1, -1, -1};
 
 // Диапазоны поиска указателей на имена. Порядок важный: СНАЧАЛА читаемые
 // сегменты самой libil2cpp.so, ПОТОМ анонимная память. Протектор может вшить
@@ -904,7 +909,8 @@ static void phase_strsearch(double deadline) {
         // пройденными без единого чтения — ищи строку по всей памяти, а
         // прочитал 281 МБ из 3,5 ГБ. Поэтому вышедший за диапазон курсор
         // возвращается на его начало, а не «проходит» диапазон мимо.
-        if (s_str_pos < r.start || s_str_pos >= r.end) s_str_pos = r.start;
+        if (s_str_pos == r.end) { ++s_str_region; continue; }
+        if (s_str_pos < r.start || s_str_pos > r.end) s_str_pos = r.start;
         if (s_str_pos >= r.end) { ++s_str_region; continue; }
         const uint64_t remain = r.end - s_str_pos;
         const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
@@ -976,6 +982,26 @@ static void apply_str_window(int idx) {
             (unsigned long long)((s_meta_end - s_meta_begin) >> 20),
             (s_lib_begin && s_str_addr >= s_lib_begin && s_str_addr < s_lib_end)
                 ? "ВНУТРИ ОБРАЗА libil2cpp.so" : "вне образа");
+    // Что вокруг имени: если это таблица строк метаданных, рядом лежат другие
+    // имена впритык, разделённые нулями. Если мусор или зашифрованный блок —
+    // по дампу это видно сразу, и тогда искать указатели на строки бессмысленно.
+    {
+        uint8_t raw[48] = {};
+        const uint64_t from = (s_str_addr > 24) ? (s_str_addr - 24) : 0;
+        if (qrd_buf(from, raw, sizeof(raw))) {
+            char hex[3 * sizeof(raw) + 8] = {};
+            char txt[sizeof(raw) + 8] = {};
+            size_t hn = 0, tn = 0;
+            for (size_t i = 0; i < sizeof(raw); ++i) {
+                hn += (size_t)snprintf(hex + hn, sizeof(hex) - hn, "%02x ", raw[i]);
+                const unsigned char c = raw[i];
+                txt[tn++] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+            }
+            txt[tn] = 0;
+            LogLine("автооффсеты: вокруг имени @0x%llx — байты: %s", (unsigned long long)from, hex);
+            LogLine("автооффсеты: вокруг имени @0x%llx — текст:  %s", (unsigned long long)from, txt);
+        }
+    }
     s_phase = PH_BLOB;
 }
 
@@ -1076,6 +1102,7 @@ static void phase_blob(double deadline) {
             s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
             s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0; s_ptr_noverify = 0;
             s_ptr_names = 0; s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
+            for (int k = 0; k < 3; ++k) { s_top_hits[k] = 0; s_top_range[k] = -1; }
             s_ptr_readfails = 0;
             s_last_progress_log = 0;
             s_scan_deadline = mono_seconds() + 120.0;
@@ -1192,6 +1219,15 @@ static void ptr_range_done() {
         s_ptr_best_hits = s_ptr_rinwin;
         s_ptr_best_range = s_ptr_region;
     }
+    if (s_ptr_rinwin > 0) {
+        for (int k = 0; k < 3; ++k) {
+            if (s_ptr_rinwin <= s_top_hits[k]) continue;
+            for (int j = 2; j > k; --j) { s_top_hits[j] = s_top_hits[j - 1]; s_top_range[j] = s_top_range[j - 1]; }
+            s_top_hits[k] = s_ptr_rinwin;
+            s_top_range[k] = s_ptr_region;
+            break;
+        }
+    }
     s_ptr_rinwin = 0;
 }
 
@@ -1218,7 +1254,16 @@ static void phase_ptr(double deadline) {
         // диапазона курсор возвращается на его начало.
         // Сканируем и образ, и ВСЕ анонимные регионы, не только writable:
         // протектор может закрыть пул классов на r-- после инициализации.
-        if (s_ptr_pos < r.start || s_ptr_pos >= r.end) s_ptr_pos = r.start;
+        // Конец диапазона и «курсор за пределами» — разные вещи, и путать их
+        // нельзя. Лог №14 показал вторую ошибку подряд: курсор шёл ровно по
+        // диапазону, в конце стал ему равен, а проверка возвращала его в начало
+        // — диапазон перечитывался бесконечно, пока не выбран весь бюджет
+        // («просмотрено 3072 МБ, 0 диапазонов из 322», ни одного указателя).
+        // Теперь РАВЕНСТВО концу — это «диапазон пройден, берём следующий»,
+        // а курсор ВНЕ диапазона (список не отсортирован по адресу) — повод
+        // вернуть его в начало, иначе диапазон будет пропущен (лог №13).
+        if (s_ptr_pos == r.end) { ptr_range_done(); ++s_ptr_region; continue; }
+        if (s_ptr_pos < r.start || s_ptr_pos > r.end) s_ptr_pos = r.start;
         if (s_ptr_pos >= r.end) { ptr_range_done(); ++s_ptr_region; continue; }
         const uint64_t remain = r.end - s_ptr_pos;
         const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
@@ -1355,12 +1400,16 @@ static void phase_ptr(double deadline) {
                 (unsigned long long)s_ptr_hits,
                 (unsigned long long)s_ptr_verified,
                 (unsigned long long)s_ptr_noverify, s_class_count);
-        if (s_ptr_best_range >= 0)
-            LogLine("автооффсеты: больше всего указателей в диапазоне %d (0x%llx..0x%llx) — %llu штук",
-                    s_ptr_best_range,
-                    (unsigned long long)s_ptr_ranges[s_ptr_best_range].start,
-                    (unsigned long long)s_ptr_ranges[s_ptr_best_range].end,
-                    (unsigned long long)s_ptr_best_hits);
+        for (int k = 0; k < 3; ++k) {
+            const int i = s_top_range[k];
+            if (i < 0 || i >= s_ptr_range_count) continue;
+            LogLine("автооффсеты: указателей в диапазоне №%d — %d (0x%llx..0x%llx) — %llu штук%s",
+                    k + 1, i,
+                    (unsigned long long)s_ptr_ranges[i].start,
+                    (unsigned long long)s_ptr_ranges[i].end,
+                    (unsigned long long)s_top_hits[k],
+                    i == s_ptr_best_range ? " (лучший)" : "");
+        }
         // Ни одного совпадения — возможно, классы ссылаются на ДРУГОЙ блок
         // строк (в процессе их бывает несколько). Прогоняем поиск заново по
         // следующему необработанному блоку: это те же диапазоны, несколько
@@ -1379,6 +1428,7 @@ static void phase_ptr(double deadline) {
             s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
             s_ptr_noverify = 0; s_ptr_names = 0; s_ptr_readfails = 0;
             s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
+            for (int k = 0; k < 3; ++k) { s_top_hits[k] = 0; s_top_range[k] = -1; }
             s_last_progress_log = 0;
             s_scan_deadline = mono_seconds() + 120.0;
             LogLine("автооффсеты: совпадений нет — пробую следующий блок строк №%d (0x%llx..0x%llx, имён %d)",
@@ -1839,6 +1889,7 @@ void offset_resolver_reset() {
     s_ptr_pos = 0; s_ptr_region = 0; s_ptr_scanned = 0;
     s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0; s_ptr_noverify = 0;
     s_ptr_names = 0; s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
+            for (int k = 0; k < 3; ++k) { s_top_hits[k] = 0; s_top_range[k] = -1; }
     s_ptr_passes = 0; s_ptr_readfails = 0;
     s_ptr_range_count = 0; s_ptr_seg_bytes = 0; s_ptr_anon_bytes = 0;
     s_applied_count = 0; s_logged = false;
