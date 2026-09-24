@@ -201,6 +201,10 @@ int      s_resolved = 0, s_changed = 0;
 // не оказалось (кэш забит мусорными «похожими» структурами, табличных имён
 // ноль). Рантайм il2cpp выделяет структуры Il2CppClass из общих пулов, поэтому
 // рядом с одним живым классом лежат тысячи остальных — их и перебираем.
+struct HeapScanRange { uint64_t start = 0, end = 0; };
+static HeapScanRange s_heap_ranges[64];
+static int           s_heap_range_count = 0;
+static int           s_heap_range_idx = 0;
 uint64_t s_heap_pos = 0, s_heap_end = 0;
 bool     s_heap_done = false;     // в этом резолве уже сканировали кучу
 
@@ -264,8 +268,6 @@ uint64_t s_ptr_readfails = 0;     // порций, которые не удал�
 int      s_str_region = 0;
 uint64_t s_str_pos = 0;
 uint64_t s_str_scanned = 0;
-const char* s_wanted_names[64];   // разные имена классов из таблицы
-int      s_wanted_name_count = 0;
 uint64_t s_wanted_str[64];        // адрес строки каждого имени в блобе (0 = нет)
 int      s_wanted_str_found = 0;
 uint64_t s_blob_pos = 0;
@@ -345,12 +347,30 @@ constexpr size_t kMaxReadsPerChunk = 256;   // предел «дорогих» �
 // .so после самообновления игры) не даст ничего и за все 221 МБ; не ждём.
 constexpr uint64_t kEmptyBaseBytes = 96ull << 20;
 
+static bool s_first_char[256];
+const char* s_wanted_names[64];   // разные имена классов из таблицы
+int         s_wanted_name_count = 0;
+
+static void build_wanted_names() {
+    if (s_wanted_name_count) return;
+    memset(s_first_char, 0, sizeof(s_first_char));
+    for (int i = 0; i < kOrFieldCount && s_wanted_name_count < 64; ++i) {
+        bool dup = false;
+        for (int j = 0; j < s_wanted_name_count; ++j)
+            if (strcmp(s_wanted_names[j], kOrFields[i].cls) == 0) dup = true;
+        if (dup) continue;
+        s_wanted_names[s_wanted_name_count] = kOrFields[i].cls;
+        s_first_char[(uint8_t)kOrFields[i].cls[0]] = true;
+        ++s_wanted_name_count;
+    }
+}
+
 static bool all_wanted_found() {
-    // Достаточно: все РАЗНЫЕ имена из таблицы найдены хотя бы одним классом.
-    for (int i = 0; i < kOrFieldCount; ++i) {
+    build_wanted_names();
+    for (int i = 0; i < s_wanted_name_count; ++i) {
         bool found = false;
         for (int j = 0; j < s_class_count && !found; ++j)
-            found = strcmp(s_classes[j].name, kOrFields[i].cls) == 0;
+            found = strcmp(s_classes[j].name, s_wanted_names[i]) == 0;
         if (!found) return false;
     }
     return true;
@@ -360,8 +380,11 @@ static bool all_wanted_found() {
 // обычного потолка (см. kClassCap) и калибруем поля в первую очередь на них:
 // совпадение имени с именем из дампа — признак НАСТОЯЩЕГО класса.
 static bool name_is_wanted(const char* name) {
-    for (int i = 0; i < kOrFieldCount; ++i)
-        if (strcmp(kOrFields[i].cls, name) == 0) return true;
+    build_wanted_names();
+    if (!name || !name[0]) return false;
+    if (!s_first_char[(uint8_t)name[0]]) return false;
+    for (int i = 0; i < s_wanted_name_count; ++i)
+        if (strcmp(s_wanted_names[i], name) == 0) return true;
     return false;
 }
 
@@ -833,27 +856,79 @@ static int try_class_candidate(uint64_t v) {
 
 // ---- Скан кучи вокруг «якоря» ----------------------------------------------
 // Запускается, когда в сегментах .so не нашлось ни одного табличного класса.
-// Идём окном ±8 МБ вокруг адреса живого класса (якоря) и применяем тот же
-// кандидатный фильтр: структуры Il2CppClass лежат в общих пулах рантайма.
+// Сканируем регионы анонимной кучи: сначала регион самого якоря, затем остальные
+// близкие регионы (до 64 МБ каждый), пока не найдутся все табличные классы.
 static void start_heap_scan(uint64_t anchor) {
-    constexpr uint64_t kSpan = 16ull << 20;  // ±16 МБ вокруг якоря
-    s_heap_pos = (anchor >= kSpan) ? (anchor - kSpan) : 0x1000;
-    s_heap_pos &= ~7ull;                     // по 8-байтовым слотам
-    s_heap_end = anchor + kSpan;
+    build_wanted_names();
+    s_heap_range_count = 0;
+    s_heap_range_idx = 0;
+
+    // 1. Регион кучи, в котором живёт сам якорь (приоритет №1)
+    int anchor_reg = -1;
+    for (int i = 0; i < s_anon_count; ++i) {
+        if (anchor >= s_anon[i].start && anchor < s_anon[i].end) {
+            anchor_reg = i;
+            break;
+        }
+    }
+
+    if (anchor_reg >= 0) {
+        s_heap_ranges[s_heap_range_count].start = s_anon[anchor_reg].start;
+        s_heap_ranges[s_heap_range_count].end   = s_anon[anchor_reg].end;
+        ++s_heap_range_count;
+    } else {
+        constexpr uint64_t kSpan = 32ull << 20;
+        s_heap_ranges[0].start = (anchor >= kSpan) ? ((anchor - kSpan) & ~7ull) : 0x1000;
+        s_heap_ranges[0].end   = anchor + kSpan;
+        ++s_heap_range_count;
+    }
+
+    // 2. Остальные анонимные регионы кучи (от 256 КБ до 64 МБ), отдавая приоритет близким к якорю (в пределах 512 МБ)
+    for (int pass = 0; pass < 2 && s_heap_range_count < 64; ++pass) {
+        for (int i = 0; i < s_anon_count && s_heap_range_count < 64; ++i) {
+            if (i == anchor_reg) continue;
+            if (s_anon[i].end <= s_anon[i].start) continue;
+            const uint64_t sz = s_anon[i].end - s_anon[i].start;
+            if (sz < (256ull << 10) || sz > (64ull << 20)) continue;
+            const uint64_t dist = (s_anon[i].start > anchor) ? (s_anon[i].start - anchor) : (anchor - s_anon[i].start);
+            const bool is_near = (dist <= (512ull << 20));
+            if (pass == 0 && !is_near) continue;
+            if (pass == 1 && is_near) continue;
+
+            bool dup = false;
+            for (int k = 0; k < s_heap_range_count; ++k) {
+                if (s_heap_ranges[k].start == s_anon[i].start) { dup = true; break; }
+            }
+            if (dup) continue;
+
+            s_heap_ranges[s_heap_range_count].start = s_anon[i].start;
+            s_heap_ranges[s_heap_range_count].end   = s_anon[i].end;
+            ++s_heap_range_count;
+        }
+    }
+
     s_heap_done = true;
-    s_total_bytes = s_heap_end - s_heap_pos;
+    s_total_bytes = 0;
+    for (int k = 0; k < s_heap_range_count; ++k)
+        s_total_bytes += s_heap_ranges[k].end - s_heap_ranges[k].start;
     s_scanned_bytes = 0;
     s_last_progress_log = 0;
-    s_scan_deadline = mono_seconds() + 60.0;   // свой бюджет, не общий с .so
-    LogLine("автооффсеты: табличных классов в .so нет — сканирую кучу вокруг якоря 0x%llx (±16 МБ)",
-            (unsigned long long)anchor);
+    s_scan_deadline = mono_seconds() + 90.0;
+    s_heap_pos = s_heap_ranges[0].start;
+    s_heap_end = s_heap_ranges[0].end;
+
+    LogLine("автооффсеты: табличных классов в .so нет — сканирую кучу вокруг якоря 0x%llx (%d диапазонов, %llu МБ)",
+            (unsigned long long)anchor, s_heap_range_count,
+            (unsigned long long)(s_total_bytes >> 20));
     s_phase = PH_HEAP;
 }
 
 static void phase_heap(double deadline) {
     static uint8_t buf[kChunkBytes];
-    while (s_heap_pos < s_heap_end && mono_seconds() < deadline) {
-        const uint64_t remain = s_heap_end - s_heap_pos;
+    while (s_heap_range_idx < s_heap_range_count && mono_seconds() < deadline) {
+        const HeapScanRange& r = s_heap_ranges[s_heap_range_idx];
+        if (s_heap_pos < r.start || s_heap_pos >= r.end) s_heap_pos = r.start;
+        const uint64_t remain = r.end - s_heap_pos;
         const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
         if (!qrd_buf(s_heap_pos, buf, chunk)) {
             s_heap_pos += chunk;
@@ -868,25 +943,35 @@ static void phase_heap(double deadline) {
                 v = memio::untag(v);
                 if (valid_obj(v)) {
                     reads_used += try_class_candidate(v) ? 3 : 1;
-                    if (reads_used >= kMaxReadsPerChunk) { ++examined; break; }
+                    if (reads_used >= 1024) { ++examined; break; }
                 }
             }
             s_heap_pos += examined * 8;
             s_scanned_bytes += examined * 8;
         }
         if (all_wanted_found()) break;
+        if (s_heap_pos >= r.end) {
+            ++s_heap_range_idx;
+            if (s_heap_range_idx < s_heap_range_count) {
+                s_heap_pos = s_heap_ranges[s_heap_range_idx].start;
+            }
+        }
         if (mono_seconds() >= s_scan_deadline) break;
         const double now_s = mono_seconds();
         if (now_s - s_last_progress_log >= 8.0) {
             s_last_progress_log = now_s;
-            LogLine("автооффсеты: куча %llu/%llu МБ, классов %d (табличных %d, форма %d)",
+            LogLine("автооффсеты: куча рег %d/%d, %llu/%llu МБ, классов %d (табличных %d, форма %d)",
+                    s_heap_range_idx + 1, s_heap_range_count,
                     (unsigned long long)(s_scanned_bytes >> 20),
                     (unsigned long long)(s_total_bytes >> 20),
                     s_class_count, wanted_in_cache(), s_shape_pass);
         }
     }
-    if (all_wanted_found() || s_heap_pos >= s_heap_end ||
+    if (all_wanted_found() || s_heap_range_idx >= s_heap_range_count ||
         mono_seconds() >= s_scan_deadline) {
+        if (all_wanted_found()) {
+            LogLine("автооффсеты: ВСЕ табличные классы найдены в куче (%d табличных)", wanted_in_cache());
+        }
         if (!all_wanted_found() && wanted_in_cache() == 0) {
             LogLine("автооффсеты: в куче вокруг якоря табличных классов нет — начинаю поиск строк в памяти");
             s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
@@ -903,21 +988,6 @@ static void phase_heap(double deadline) {
 // строк метаданных (на бете — в анонимной памяти). Находим «PlayerManager»,
 // вокруг него окно блока, в нём — адреса всех табличных имён, а затем в куче
 // ищем указатели на эти адреса: слот имени класса лежит на +0x10.
-static bool s_first_char[256];
-
-static void build_wanted_names() {
-    if (s_wanted_name_count) return;
-    memset(s_first_char, 0, sizeof(s_first_char));
-    for (int i = 0; i < kOrFieldCount && s_wanted_name_count < 64; ++i) {
-        bool dup = false;
-        for (int j = 0; j < s_wanted_name_count; ++j)
-            if (strcmp(s_wanted_names[j], kOrFields[i].cls) == 0) dup = true;
-        if (dup) continue;
-        s_wanted_names[s_wanted_name_count] = kOrFields[i].cls;
-        s_first_char[(uint8_t)kOrFields[i].cls[0]] = true;
-        ++s_wanted_name_count;
-    }
-}
 
 static bool calibrate_fields(uint64_t klass);   // определена ниже, в фазе FIELDS
 
@@ -1871,12 +1941,36 @@ static void phase_fields() {
 
     for (int i = 0; i < kOrFieldCount; ++i) {
         const OrField& of = kOrFields[i];
+        bool resolved = false;
         // Классов с одним коротким именем может быть несколько: берём первый,
         // в котором поле реально нашлось (остальные — тёзки).
         for (int j = 0; j < s_class_count; ++j) {
             if (strcmp(s_classes[j].name, of.cls) != 0) continue;
             const int32_t off = find_field_offset(s_classes[j].klass, of.field);
-            if (off >= 0) { apply_resolution(of, off); break; }
+            if (off >= 0) { apply_resolution(of, off); resolved = true; break; }
+        }
+        // Если класс PlayerManager не найден по имени (например, в бете он обфусцирован как "U"),
+        // но якорь подтверждён, запрашиваем поля напрямую из якоря.
+        if (!resolved && strcmp(of.cls, "PlayerManager") == 0 && anchor) {
+            const int32_t off = find_field_offset(anchor, of.field);
+            if (off >= 0) { apply_resolution(of, off); resolved = true; }
+        }
+    }
+
+    for (int i = 0; i < kOrFieldCount; ++i) {
+        const OrField& of = kOrFields[i];
+        bool is_resolved = false;
+        for (int j = 0; j < s_applied_count; ++j) {
+            if (s_applied[j].slot == of.slot) { is_resolved = true; break; }
+        }
+        if (!is_resolved) {
+            bool class_in_cache = false;
+            for (int j = 0; j < s_class_count; ++j) {
+                if (strcmp(s_classes[j].name, of.cls) == 0) { class_in_cache = true; break; }
+            }
+            LogLine("автооффсеты: не разрешено %s::%s (%s)",
+                    of.cls, of.field,
+                    class_in_cache ? "поле не найдено в классе" : "класс отсутствует в кэше");
         }
     }
     s_phase = PH_DONE;
@@ -1898,6 +1992,29 @@ static void log_summary() {
             (unsigned long long)g_il2cpp_base, s_dead_count,
             s_wanted_str_found, s_wanted_name_count,
             (unsigned long long)s_ptr_verified);
+
+    build_wanted_names();
+    char missing_buf[384] = {};
+    size_t mpos = 0;
+    int missing_cls_count = 0;
+    for (int i = 0; i < s_wanted_name_count; ++i) {
+        const char* wn = s_wanted_names[i];
+        bool found = false;
+        for (int j = 0; j < s_class_count; ++j) {
+            if (strcmp(s_classes[j].name, wn) == 0) { found = true; break; }
+        }
+        if (!found) {
+            ++missing_cls_count;
+            if (mpos + strlen(wn) + 2 < sizeof(missing_buf)) {
+                mpos += snprintf(missing_buf + mpos, sizeof(missing_buf) - mpos, "%s%s",
+                                 mpos ? ", " : "", wn);
+            }
+        }
+    }
+    if (missing_cls_count) {
+        LogLine("автооффсеты: не найдены классы (%d из %d): %s",
+                missing_cls_count, s_wanted_name_count, missing_buf);
+    }
 }
 
 }  // namespace
@@ -1975,6 +2092,7 @@ void offset_resolver_reset() {
     s_fields_off = 0; s_calib_best = 0; s_calib_best_off = 0;
     s_fi_size = IL2CPP_FIELDINFO_SIZE; s_fi_parent = IL2CPP_FIELDINFO_PARENT;
     s_resolved = 0; s_changed = 0;
+    s_heap_range_count = 0; s_heap_range_idx = 0;
     s_heap_pos = s_heap_end = 0; s_heap_done = false;
     s_anon_count = 0; s_anon_total = 0; s_filemisc_count = 0;
     s_anon_noread_bytes = 0; s_anon_noread_count = 0;

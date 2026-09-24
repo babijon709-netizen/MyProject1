@@ -6515,37 +6515,39 @@ static bool read_local_aim_state() {
     // Cheap fast path on cached pointers; re-validate the chain periodically.
     if (g_aim_state.aim_activity && --g_aim_state.revalidate > 0) {
         uint8_t active = 0;
-        if (rd_exact(g_aim_state.aim_activity + ACTIVITY_ACTIVE_FLAG, active)) {
-            g_aim_state.aiming = (active != 0);
+        if (rd_exact(g_aim_state.aim_activity + ACTIVITY_ACTIVE_FLAG, active) && active != 0) {
+            g_aim_state.aiming = true;
             g_aim_state.source = 1;
             return true;
         }
     }
-    if (!g_aim_state.aim_activity && g_aim_state.weapon && --g_aim_state.revalidate > 0) {
+    if (g_aim_state.weapon && g_aim_state.revalidate > 0) {
         uint8_t is_aiming = 0;
         if (rd_ptr(g_aim_state.weapon + FPOBJECT_PLAYER_BACKREF) == local &&
-            rd_exact(g_aim_state.weapon + FPWEAPON_IS_AIMING, is_aiming)) {
-            g_aim_state.aiming = (is_aiming != 0);
+            rd_exact(g_aim_state.weapon + FPWEAPON_IS_AIMING, is_aiming) && is_aiming != 0) {
+            g_aim_state.aiming = true;
             g_aim_state.source = 2;
             return true;
         }
     }
 
     LocalAimState fresh{};
-    fresh.revalidate = 60;
+    fresh.revalidate = 30;
 
     // Primary: PlayerManager.playerEventHandler.Aim.Active
     uint64_t handler = rd_ptr(local + PLAYER_EVENT_HANDLER);
     if (handler && rd_ptr(handler + EVENT_HANDLER_MANAGER_BACKREF) == local) {
         uint64_t activity = rd_ptr(handler + EVENT_HANDLER_AIM_ACTIVITY);
         uint8_t active = 0;
-        if (activity && rd_exact(activity + ACTIVITY_ACTIVE_FLAG, active) && active <= 1) {
+        if (activity && rd_exact(activity + ACTIVITY_ACTIVE_FLAG, active)) {
             fresh.event_handler = handler;
             fresh.aim_activity = activity;
-            fresh.aiming = (active != 0);
-            fresh.source = 1;
-            g_aim_state = fresh;
-            return true;
+            if (active == 1) {
+                fresh.aiming = true;
+                fresh.source = 1;
+                g_aim_state = fresh;
+                return true;
+            }
         }
     }
 
@@ -6553,12 +6555,14 @@ static bool read_local_aim_state() {
     uint64_t fp_manager = rd_ptr(local + PLAYER_FP_MANAGER);
     if (fp_manager) {
         uint64_t weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_WEAPON);
+        if (!valid_obj(weapon) || rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) != local)
+            weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_OBJECT);
         if (weapon && rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) == local) {
+            fresh.fp_manager = fp_manager;
+            fresh.weapon = weapon;
             uint8_t is_aiming = 0;
-            if (rd_exact(weapon + FPWEAPON_IS_AIMING, is_aiming) && is_aiming <= 1) {
-                fresh.fp_manager = fp_manager;
-                fresh.weapon = weapon;
-                fresh.aiming = (is_aiming != 0);
+            if (rd_exact(weapon + FPWEAPON_IS_AIMING, is_aiming) && is_aiming == 1) {
+                fresh.aiming = true;
                 fresh.source = 2;
                 g_aim_state = fresh;
                 return true;
@@ -6566,17 +6570,19 @@ static bool read_local_aim_state() {
         }
         // Last resort: the FOV blend factor FPManager drives toward aimFOV.
         float blend = 0.0F;
-        if (rd_exact(fp_manager + FPMANAGER_AIM_BLEND, blend) && std::isfinite(blend) && blend >= 0.0F && blend <= 1.0F) {
+        if (rd_exact(fp_manager + FPMANAGER_AIM_BLEND, blend) && std::isfinite(blend) && blend >= 0.15F && blend <= 1.05F) {
             fresh.fp_manager = fp_manager;
-            fresh.aiming = blend > 0.5F;
+            fresh.aiming = true;
             fresh.source = 3;
             g_aim_state = fresh;
             return true;
         }
     }
 
-    g_aim_state = {};
-    return false;
+    fresh.aiming = false;
+    fresh.source = fresh.aim_activity ? 1 : (fresh.weapon ? 2 : (fp_manager ? 3 : 0));
+    g_aim_state = fresh;
+    return true;
 }
 
 bool esp_local_player_is_aiming() {
