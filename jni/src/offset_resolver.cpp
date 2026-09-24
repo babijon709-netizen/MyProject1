@@ -688,8 +688,8 @@ static void phase_maps() {
     // принудительным чтением и сколько из этого не пусто. Если пул классов
     // спрятан снятием бита чтения — он виден здесь, а не в сводке выше.
     if (s_anon_noread_count || s_probe_ok || s_probe_zero) {
-        LogLine("автооффсеты: память без прав чтения — закрыто %d (%llu МБ), "
-                "принудительно прочиталось %d (%llu МБ), из них непустых %d (%llu МБ)",
+        LogLine("автооффсеты: память без прав чтения — совсем не читается %d (%llu МБ), "
+                "принудительно прочиталось: с данными %d (%llu МБ), пустых резерваций %d (%llu МБ)",
                 s_anon_noread_count, (unsigned long long)(s_anon_noread_bytes >> 20),
                 s_probe_ok, (unsigned long long)(s_probe_bytes >> 20),
                 s_probe_zero, (unsigned long long)(s_probe_zero_bytes >> 20));
@@ -897,7 +897,14 @@ static void phase_strsearch(double deadline) {
     if (s_ptr_range_count == 0) build_scan_ranges();
     while (s_str_region < s_ptr_range_count && mono_seconds() < deadline) {
         const PtrRange& r = s_ptr_ranges[s_str_region];
-        if (s_str_pos < r.start) s_str_pos = r.start;
+        // Курсор один на весь список, а диапазоны идут НЕ по возрастанию
+        // адреса: скрытые регионы (без прав чтения) ставятся вперёд. Лог №13
+        // показал провал: дойдя до конца скрытого региона 0x7d7a..., курсор
+        // оказался ВЫШЕ всей анонимной кучи, и 317 диапазонов были объявлены
+        // пройденными без единого чтения — ищи строку по всей памяти, а
+        // прочитал 281 МБ из 3,5 ГБ. Поэтому вышедший за диапазон курсор
+        // возвращается на его начало, а не «проходит» диапазон мимо.
+        if (s_str_pos < r.start || s_str_pos >= r.end) s_str_pos = r.start;
         if (s_str_pos >= r.end) { ++s_str_region; continue; }
         const uint64_t remain = r.end - s_str_pos;
         const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
@@ -1206,9 +1213,12 @@ static void phase_ptr(double deadline) {
     static uint8_t buf[kChunkBytes];
     while (s_ptr_region < s_ptr_range_count && mono_seconds() < deadline) {
         const PtrRange& r = s_ptr_ranges[s_ptr_region];
+        // Тот же курсор и та же ловушка, что в поиске строк (см. там):
+        // диапазоны не отсортированы по адресу, поэтому вышедший за пределы
+        // диапазона курсор возвращается на его начало.
         // Сканируем и образ, и ВСЕ анонимные регионы, не только writable:
         // протектор может закрыть пул классов на r-- после инициализации.
-        if (s_ptr_pos < r.start) s_ptr_pos = r.start;
+        if (s_ptr_pos < r.start || s_ptr_pos >= r.end) s_ptr_pos = r.start;
         if (s_ptr_pos >= r.end) { ptr_range_done(); ++s_ptr_region; continue; }
         const uint64_t remain = r.end - s_ptr_pos;
         const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;

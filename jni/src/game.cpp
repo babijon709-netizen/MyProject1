@@ -902,19 +902,30 @@ int class_identity(uint64_t klass, const char* expected_name, const char* expect
 // выглядит успешной, а весь чит молча не работает.
 static bool base_resolves_game(uint64_t base) {
     if (!base) return false;
+    // class_identity отдаёт 1, когда имя прочитано и совпало, и 2, когда имя
+    // прочитать не удалось и класс принят по одной структуре. Второй случай
+    // лог №12 показал мусором: по вшитому RVA лежал код, а проверка «структуры»
+    // его пропустила. Поэтому в лог пишем, чем именно подтвердилась база:
+    // иначе строка «база верна по вшитому RVA» вводит в заблуждение.
     if (PLAYER_MANAGER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(base + PLAYER_MANAGER_TYPEINFO_RVA);
-        if (class_identity(candidate, "PlayerManager", "Oxide") != 0) {
-            LogLine("привязка: база 0x%llx верна по вшитому RVA PlayerManager",
-                    (unsigned long long)base);
+        const int how = class_identity(candidate, "PlayerManager", "Oxide");
+        if (how != 0) {
+            LogLine("привязка: база 0x%llx %s по вшитому RVA PlayerManager (класс 0x%llx)",
+                    (unsigned long long)base,
+                    how == 1 ? "верна" : "ПРИНЯТА НА ВЕРУ — имя не читается",
+                    (unsigned long long)candidate);
             return true;
         }
     }
     if (GAME_CONTROLLER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(base + GAME_CONTROLLER_TYPEINFO_RVA);
-        if (class_identity(candidate, "GameControllerBase", "Oxide") != 0) {
-            LogLine("привязка: база 0x%llx верна по вшитому RVA GameControllerBase",
-                    (unsigned long long)base);
+        const int how = class_identity(candidate, "GameControllerBase", "Oxide");
+        if (how != 0) {
+            LogLine("привязка: база 0x%llx %s по вшитому RVA GameControllerBase (класс 0x%llx)",
+                    (unsigned long long)base,
+                    how == 1 ? "верна" : "ПРИНЯТА НА ВЕРУ — имя не читается",
+                    (unsigned long long)candidate);
             return true;
         }
     }
