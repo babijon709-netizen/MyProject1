@@ -46,7 +46,7 @@ using namespace go_active;
 // ---- Таблица: какие константы каким (класс, поле) заполнять ----------------
 // Сгенерирована из tools/offsets/offsets_map.json (gen_resolver_table.py).
 // Пятый столбец — сигнатура типа поля: запасной способ найти поле, когда его
-// ИМЯ ротировано обфускатором (см. find_field_offset_by_type ниже).
+// ИМЯ ротировано обфускатором (см. resolve_type_group ниже).
 namespace {
 struct OrField {
     std::uint64_t* slot;
@@ -338,6 +338,10 @@ int      s_saved_count = 0;
 
 struct AppliedRec { std::uint64_t* slot; std::uint64_t value; };
 AppliedRec s_applied[256];
+// Класс каждой применённой записи: по нему второй проход понимает, какие
+// смещения этого класса уже заняты (поле, найденное по имени, повторно не
+// отдаётся полю с ротированным именем).
+const char* s_applied_cls[256];
 int      s_applied_count = 0;
 bool     s_logged = false;
 pid_t    s_bound_pid = -1;        // к какому процессу/базе собрано состояние
@@ -397,16 +401,61 @@ static bool all_wanted_found() {
     return true;
 }
 
+// Классы из СИГНАТУР ТИПОВ («c:Имя», пятый столбец таблицы). Их тоже надо
+// сохранять в кэш: второй проход ищет поля с ротированными именами по ТИПУ
+// (resolve_type_group → cached_class_type_index), и если такого класса
+// в кэше нет, сверять не с чем — поле так и останется на вшитом значении.
+// Имена в сигнатуре короткие, а в кэше может лежать полное («c:HitMarkerItem»
+// ↔ «MineableObjectExtension_HitMarkerItem») — сверяем и хвост за последним
+// подчёркиванием, ровно как cached_class_type_index при поиске.
+const char* s_wanted_type_names[64];
+int         s_wanted_type_count = 0;
+static bool s_first_type_char[256];
+
+static void build_wanted_type_names() {
+    if (s_wanted_type_count) return;
+    memset(s_first_type_char, 0, sizeof(s_first_type_char));
+    for (int i = 0; i < kOrFieldCount && s_wanted_type_count < 64; ++i) {
+        const char* t = kOrFields[i].type;
+        if (!t || t[0] != 'c' || t[1] != ':' || !t[2]) continue;
+        const char* nm = t + 2;
+        bool dup = false;
+        for (int j = 0; j < s_wanted_type_count; ++j)
+            if (strcmp(s_wanted_type_names[j], nm) == 0) dup = true;
+        if (dup) continue;
+        s_wanted_type_names[s_wanted_type_count++] = nm;
+        s_first_type_char[(uint8_t)nm[0]] = true;
+    }
+}
+
+static bool type_name_is_wanted(const char* name) {
+    build_wanted_type_names();
+    if (!name || !name[0]) return false;
+    if (s_first_type_char[(uint8_t)name[0]]) {
+        for (int i = 0; i < s_wanted_type_count; ++i)
+            if (strcmp(s_wanted_type_names[i], name) == 0) return true;
+    }
+    // Хвост за подчёркиванием: «MineableObjectExtension_HitMarkerItem» для «HitMarkerItem».
+    const char* under = strrchr(name, '_');
+    if (under && under[1] && s_first_type_char[(uint8_t)under[1]]) {
+        for (int i = 0; i < s_wanted_type_count; ++i)
+            if (strcmp(s_wanted_type_names[i], under + 1) == 0) return true;
+    }
+    return false;
+}
+
 // Имя входит в таблицу резолвера? Такие классы сохраняем в кэш даже сверх
 // обычного потолка (см. kClassCap) и калибруем поля в первую очередь на них:
 // совпадение имени с именем из дампа — признак НАСТОЯЩЕГО класса.
 static bool name_is_wanted(const char* name) {
     build_wanted_names();
     if (!name || !name[0]) return false;
-    if (!s_first_char[(uint8_t)name[0]]) return false;
-    for (int i = 0; i < s_wanted_name_count; ++i)
-        if (strcmp(s_wanted_names[i], name) == 0) return true;
-    return false;
+    if (s_first_char[(uint8_t)name[0]]) {
+        for (int i = 0; i < s_wanted_name_count; ++i)
+            if (strcmp(s_wanted_names[i], name) == 0) return true;
+    }
+    // Классы из сигнатур типов: без них не работает поиск полей по типу.
+    return type_name_is_wanted(name);
 }
 
 // Сколько классов в кэше имеют табличные имена.
@@ -1847,45 +1896,220 @@ static bool baked_for_slot(const std::uint64_t* slot, std::uint64_t* out) {
     return false;
 }
 
-// Найти поле по сигнатуре типа; вернуть смещение (-1 если нет или неоднозначно).
-// Единственный кандидат берётся сразу; при нескольких выручает вшитое смещение.
-static int32_t find_field_offset_by_type(uint64_t klass, const OrField& of) {
+// Все поля класса, чей тип совпал с сигнатурой (до 16 штук). Полей одного
+// типа в классе может быть несколько — тогда решает групповая развязка ниже.
+struct TypeMatches { int32_t off[16]; int n; };
+
+// taken — смещения этого же класса, уже отданные другим константам (найдены по
+// имени или разведены предыдущей группой): поле одному слоту, не двум.
+static bool collect_type_matches(uint64_t klass, const OrField& of,
+                                 const int32_t* taken, int ntaken, TypeMatches& m) {
     const char* sig = of.type;
-    if (!sig || !sig[0]) return -1;
+    m.n = 0;
+    if (!sig || !sig[0]) return false;
     const uint64_t fields_ptr = qrd_ptr(klass + s_fields_off);
-    if (!valid_obj(fields_ptr)) return -1;
+    if (!valid_obj(fields_ptr)) return false;
     int count = qrd<uint16_t>(klass + IL2CPP_CLASS_FIELD_COUNT);
-    if (count <= 0 || count > 2048) return -1;
+    if (count <= 0 || count > 2048) return false;
 
     const bool class_sig = (sig[0] == 'c' && sig[1] == ':');
     int32_t want_kidx = 0;
     if (class_sig && !cached_class_type_index(sig + 2, &want_kidx))
-        return -1;   // класс-тип не найден в кэше — сравнивать не с чем
+        return false;   // класс-тип не найден в кэше — сравнивать не с чем
 
-    int32_t  match_off[8];
-    int      nmatch = 0;
-    for (int i = 0; i < count && nmatch < 8; ++i) {
+    for (int i = 0; i < count && m.n < 16; ++i) {
         const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
         if (qrd_ptr(e + s_fi_parent) != klass) break;
         const uint64_t typep = qrd_ptr(e + IL2CPP_FIELDINFO_TYPE);
         if (!valid_obj(typep)) continue;
-        bool m = false;
+        bool hit = false;
         if (class_sig) {
-            m = qrd<int32_t>(typep) == want_kidx && want_kidx != 0;
+            hit = qrd<int32_t>(typep) == want_kidx && want_kidx != 0;
         } else {
             const uint32_t bits = qrd<uint32_t>(typep + IL2CPP_TYPE_BITS);
-            m = type_enum_matches((bits >> 16) & 0xFF, sig);
+            hit = type_enum_matches((bits >> 16) & 0xFF, sig);
         }
-        if (m) match_off[nmatch++] = qrd<int32_t>(e + IL2CPP_FIELDINFO_OFFSET);
+        if (!hit) continue;
+        const int32_t off = qrd<int32_t>(e + IL2CPP_FIELDINFO_OFFSET);
+        bool busy = false;
+        for (int t = 0; t < ntaken; ++t)
+            if (taken[t] == off) { busy = true; break; }
+        if (!busy) m.off[m.n++] = off;
     }
-    if (nmatch == 1) return match_off[0];
-    if (nmatch > 1) {
+    return m.n > 0;
+}
+
+// ---- Групповая развязка полей ОДНОГО типа -----------------------------------
+// В классе может быть несколько полей одного типа: два Vector3 (TreeHitstreaks),
+// пять строк (PlayerManager), восемь TransformOffset (FPMotion). По типу они
+// неразличимы, и если игра сдвинула их ВСЕ сразу (вставила поле выше по классу),
+// точного совпадения со вшитым смещением нет ни у одного — по одиночке такие
+// константы так и остались бы на устаревших значениях («некоторые функции не
+// работают» после апдейта). Решаем задачей о назначениях: какому полю какой
+// слот соответствует, минимизируя сумму |живое - вшитое|. Раскладку берём
+// ТОЛЬКО если она единственная (нет второй с той же ценой) и каждое поле
+// сдвинулось не больше kMaxTypeShift — иначе лучше оставить вшитые значения,
+// чем угадать не то.
+
+// Насколько далеко поле может уехать от вшитого смещения за один апдейт.
+constexpr int32_t kMaxTypeShift = 0x800;
+// «Такое назначение заведомо не то» — цена-заглушка.
+constexpr int32_t kBadAssign    = 1 << 28;
+
+struct TypeGroup {
+    const OrField* of[16];
+    int            n;
+};
+
+// Результат развязки: живое смещение для каждого слота группы.
+struct TypeAssign { int32_t off[16]; };
+
+// Минимальная сумма |живое - вшитое| по всевозможным парам слот/поле.
+// Возврат: сошлось ли; результат (и признак единственности) в out.
+static bool assign_type_group(const TypeGroup& g, const int32_t* cand, int ncand,
+                              TypeAssign& out) {
+    if (g.n <= 0 || g.n > 16 || ncand < g.n || ncand > 12) return false;
+    const int n = g.n;
+    // «Бесконечность»: любая реальная цена не выше n * kMaxTypeShift (0x8000),
+    // так что 1<<24 заведомо больше и в сложения не переполняется.
+    constexpr int32_t kInf = 1 << 24;
+    // cost[s][c] — цена «слоту s отдать поле c».
+    int32_t cost[16][12];
+    for (int s = 0; s < n; ++s) {
         std::uint64_t baked = 0;
-        if (baked_for_slot(of.slot, &baked))
-            for (int i = 0; i < nmatch; ++i)
-                if ((std::uint64_t)(uint32_t)match_off[i] == baked) return match_off[i];
+        const bool has_baked = baked_for_slot(g.of[s]->slot, &baked);
+        for (int c = 0; c < ncand; ++c) {
+            if (!has_baked) { cost[s][c] = 0; continue; }   // не с чем сверять
+            const int32_t d = cand[c] > (int32_t)baked ? cand[c] - (int32_t)baked
+                                                       : (int32_t)baked - cand[c];
+            cost[s][c] = (d > kMaxTypeShift) ? kBadAssign : d;
+        }
     }
-    return -1;
+    // dp по маске занятых полей: dp[mask] — лучшая цена для первых
+    // popcount(mask) слотов. Полагаться на «одно поле — один слот» надо:
+    // двум константам одно и то же поле не достанется.
+    const int full = 1 << ncand;
+    static int32_t dp[1 << 12];
+    static int     ways[1 << 12];   // сколько раскладок дают эту цену (сатурация в 2)
+    for (int i = 0; i < full; ++i) { dp[i] = kInf; ways[i] = 0; }
+    dp[0] = 0; ways[0] = 1;
+    for (int mask = 0; mask < full; ++mask) {
+        if (!ways[mask]) continue;
+        const int s = __builtin_popcount((unsigned)mask);
+        if (s >= n) continue;
+        for (int c = 0; c < ncand; ++c) {
+            if (mask & (1 << c)) continue;
+            if (cost[s][c] >= kBadAssign) continue;
+            const int nm = mask | (1 << c);
+            const int32_t nd = dp[mask] + cost[s][c];
+            if (nd < dp[nm]) { dp[nm] = nd; ways[nm] = ways[mask]; }
+            else if (nd == dp[nm] && ways[nm] < 2) ways[nm] = (ways[nm] + ways[mask] > 2) ? 2 : ways[nm] + ways[mask];
+        }
+    }
+    // Ответ — любая маска с ровно n занятыми полями.
+    int32_t best = kInf;
+    int     bestmask = 0, bestways = 0;
+    for (int mask = 0; mask < full; ++mask) {
+        if (__builtin_popcount((unsigned)mask) != n) continue;
+        if (!ways[mask]) continue;
+        if (dp[mask] < best) { best = dp[mask]; bestmask = mask; bestways = ways[mask]; }
+        else if (dp[mask] == best) bestways = (bestways + ways[mask] > 2) ? 2 : bestways + ways[mask];
+    }
+    if (!bestmask || best >= kInf) return false;
+    if (bestways != 1) return false;   // вторая раскладка с той же ценой — угадайка
+    // Восстанавливаем: идём от последнего слота к первому.
+    int mask = bestmask;
+    for (int s = n - 1; s >= 0; --s) {
+        int pick = -1;
+        for (int c = 0; c < ncand; ++c) {
+            if (!(mask & (1 << c))) continue;
+            if (cost[s][c] >= kBadAssign) continue;
+            const int pm = mask & ~(1 << c);
+            if (__builtin_popcount((unsigned)pm) != s) continue;
+            if (dp[pm] + cost[s][c] != dp[mask]) continue;
+            pick = c;
+            break;
+        }
+        if (pick < 0) return false;
+        out.off[s] = cand[pick];
+        mask &= ~(1 << pick);
+    }
+    return true;
+}
+
+
+static void apply_resolution(const OrField& of, int32_t off);
+
+// Развести группу слотов одного (класс, тип) по полям класса. Возврат: сколько
+// слотов заполнено (0 — класс не подходит, пробуем следующего тёзку).
+static int resolve_type_group(const TypeGroup& g, uint64_t klass) {
+    // Смещения этого класса, уже занятые другими константами: поля, найденные
+    // по имени (первый проход), и разведённые ранее группы второго прохода.
+    int32_t taken[64];
+    int ntaken = 0;
+    for (int i = 0; i < s_applied_count && ntaken < 64; ++i) {
+        if (!s_applied_cls[i] || strcmp(s_applied_cls[i], g.of[0]->cls) != 0) continue;
+        taken[ntaken++] = (int32_t)s_applied[i].value;
+    }
+    TypeMatches m;
+    if (!collect_type_matches(klass, *g.of[0], taken, ntaken, m)) return 0;
+    // Плотнее, чем полей: всё решается разом и однозначно.
+    if (g.n > 1 && m.n >= g.n) {
+        TypeAssign a;
+        if (assign_type_group(g, m.off, m.n, a)) {
+            for (int s = 0; s < g.n; ++s) apply_resolution(*g.of[s], a.off[s]);
+            return g.n;
+        }
+    }
+    // Запасной путь (как раньше): каждый слот сам за себя. Сначала — точное
+    // вшитое смещение (сильный признак: совпало и имя класса, и тип, и адрес).
+    // Поле, отданное одному слоту, второму уже не достанется: иначе две
+    // константы получили бы одно и то же смещение (ровно так OREHS_MARKER и
+    // OREHS_MARKER_TEMPLATE чуть не съели одно поле).
+    bool used[16] = {};
+    int filled = 0;
+    for (int s = 0; s < g.n; ++s) {
+        const OrField& of = *g.of[s];
+        std::uint64_t baked = 0;
+        if (!baked_for_slot(of.slot, &baked)) continue;
+        for (int c = 0; c < m.n; ++c) {
+            if (used[c]) continue;
+            if ((std::uint64_t)(uint32_t)m.off[c] != baked) continue;
+            used[c] = true;
+            apply_resolution(of, m.off[c]);
+            ++filled;
+            break;
+        }
+    }
+    // Потом — вынужденный выбор: если на оставшиеся слоты осталось ровно
+    // столько же неподелённых полей, последнее поле принадлежит последнему
+    // слоту по остатку. При прочих раскладах (полей больше, чем слотов) это
+    // была бы угадайка — её не делаем.
+    for (int s = 0; s < g.n; ++s) {
+        int slots_left = 0, cands_left = 0, last = -1;
+        for (int t = s; t < g.n; ++t) {
+            bool done = false;
+            for (int j = 0; j < s_applied_count; ++j)
+                if (s_applied[j].slot == g.of[t]->slot) { done = true; break; }
+            if (!done) ++slots_left;
+        }
+        if (slots_left != 1) continue;
+        for (int c = 0; c < m.n; ++c)
+            if (!used[c]) { ++cands_left; last = c; }
+        if (cands_left != 1 || last < 0) continue;
+        // Слот, который всё ещё не заполнен:
+        for (int t = s; t < g.n; ++t) {
+            bool done = false;
+            for (int j = 0; j < s_applied_count; ++j)
+                if (s_applied[j].slot == g.of[t]->slot) { done = true; break; }
+            if (done) continue;
+            used[last] = true;
+            apply_resolution(*g.of[t], m.off[last]);
+            ++filled;
+            break;
+        }
+    }
+    return filled;
 }
 
 
@@ -1898,6 +2122,7 @@ static void apply_resolution(const OrField& of, int32_t off) {
     if (s_applied_count < 256) {
         s_applied[s_applied_count].slot = of.slot;
         s_applied[s_applied_count].value = value;
+        s_applied_cls[s_applied_count] = of.cls;
         ++s_applied_count;
     }
     ++s_resolved;
@@ -2000,7 +2225,7 @@ static void phase_fields() {
         if (!s_fields_off) calibrate_fields(anchor);
         // Якорь в кэш классов под своим живым именем: он даёт имя класса и его
         // byval_arg (klassIndex) — по нему сверяются ТИПЫ полей во втором
-        // проходе (find_field_offset_by_type). Без этой записи сигнатуры
+        // проходе (resolve_type_group). Без этой записи сигнатуры
         // «c:PlayerManager»/«c:CameraManager» не с чем сравнивать.
         if (aok && !aname.empty()) store_verified_class(anchor, aname.c_str());
     }
@@ -2065,6 +2290,54 @@ static void phase_fields() {
         LogLine("автооффсеты: якорь — имя первого поля %s «%s»",
                 fok ? "читается" : "НЕ читается", fok ? shown : "-");
     }
+    // Диагностика поиска по ТИПУ. Второй проход ищет поля с ротированными
+    // именами, сверяя FieldInfo.type с Il2CppType класса (klassIndex в
+    // byval_arg@0x20, enum типа в битах 16..23 слова @+0x8). Если на устройстве
+    // раскладка окажется другой — по этой строке видно это сразу, а не по
+    // молчанию «не разрешено». Для НАСТОЯЩЕГО класса (с табличным именем и
+    // подтверждённым массивом полей) печатаем: смещение byval_arg, первый
+    // FieldInfo.type и что из этого прочиталось.
+    {
+        // Сначала класс с табличным именем (это точно настоящий класс из
+        // дампа), иначе — любой, у которого массив полей читается и ссылается
+        // обратно на класс. Так строка появится в логе при любом исходе.
+        uint64_t dklass = 0;
+        for (int pass = 0; pass < 2 && !dklass; ++pass) {
+            for (int i = 0; i < s_class_count; ++i) {
+                if (pass == 0 && !name_is_wanted(s_classes[i].name)) continue;
+                const uint64_t fp = qrd_ptr(s_classes[i].klass + s_fields_off);
+                if (!valid_obj(fp)) continue;
+                if (qrd_ptr(fp + IL2CPP_FIELDINFO_PARENT) != s_classes[i].klass) continue;
+                dklass = s_classes[i].klass;
+                break;
+            }
+        }
+        if (dklass) {
+            uint8_t byval[16] = {}, ftype[16] = {};
+            const bool bok = qrd_buf(dklass + IL2CPP_CLASS_BYVAL_ARG, byval, sizeof(byval));
+            const uint64_t fp = qrd_ptr(dklass + s_fields_off);
+            const bool fok2 = valid_obj(fp) &&
+                qrd_buf(qrd_ptr(fp + IL2CPP_FIELDINFO_TYPE), ftype, sizeof(ftype));
+            char bh[64] = {}, fh[64] = {};
+            size_t hn = 0;
+            for (size_t i = 0; i < sizeof(byval) && bok; ++i)
+                hn += (size_t)snprintf(bh + hn, sizeof(bh) - hn, "%02x", byval[i]);
+            hn = 0;
+            for (size_t i = 0; i < sizeof(ftype) && fok2; ++i)
+                hn += (size_t)snprintf(fh + hn, sizeof(fh) - hn, "%02x", ftype[i]);
+            int32_t kidx = 0, tidx = 0;
+            if (bok) memcpy(&kidx, byval, 4);
+            if (fok2) memcpy(&tidx, ftype, 4);
+            const uint32_t bits = fok2 ? *(uint32_t*)(ftype + IL2CPP_TYPE_BITS) : 0;
+            LogLine("автооффсеты: типы полей — byval_arg@0x%llx [%s] kidx=%d, "
+                    "FieldInfo.type [%s] kidx=%d enum=0x%02x (%s)",
+                    (unsigned long long)IL2CPP_CLASS_BYVAL_ARG, bok ? bh : "не читается",
+                    (int)kidx, fok2 ? fh : "не читается", (int)tidx,
+                    (unsigned)((bits >> 16) & 0xFF),
+                    (bok && fok2 && kidx && kidx == tidx) ? "совпадает — поиск по типу работает"
+                                                          : "НЕ совпадает — поиск по типу не сработает");
+        }
+    }
 
     for (int i = 0; i < kOrFieldCount; ++i) {
         const OrField& of = kOrFields[i];
@@ -2088,25 +2361,50 @@ static void phase_fields() {
     // имя меняется каждый билд игры, поэтому по имени они не находятся; ищем
     // по ТИПУ поля (сигнатура из таблицы). Отдельным проходом, потому что
     // cached_class_type_index должен видеть УЖЕ заполненный кэш классов.
-    int by_type = 0;
+    // Поля одного типа внутри класса неразличимы, поэтому нерешённые слоты
+    // группируем по (класс, сигнатура) и разводим их вместе — иначе при общем
+    // сдвиге они все остались бы на устаревших вшитых значениях.
+    int by_type = 0, by_group = 0;
+    bool grouped[kOrFieldCount] = {};
     for (int i = 0; i < kOrFieldCount; ++i) {
+        if (grouped[i]) continue;
         const OrField& of = kOrFields[i];
         if (!of.type || !of.type[0]) continue;   // без сигнатуры искать нечем
         bool done = false;
         for (int j = 0; j < s_applied_count; ++j)
             if (s_applied[j].slot == of.slot) { done = true; break; }
         if (done) continue;
+        // Группа: этот слот плюс все нерешённые с тем же классом и типом.
+        TypeGroup g;
+        g.n = 0;
+        g.of[g.n++] = &of;
+        grouped[i] = true;
+        for (int k = i + 1; k < kOrFieldCount && g.n < 16; ++k) {
+            if (grouped[k]) continue;
+            const OrField& oth = kOrFields[k];
+            if (!oth.type || !oth.type[0]) continue;
+            if (strcmp(oth.cls, of.cls) != 0 || strcmp(oth.type, of.type) != 0) continue;
+            bool taken = false;
+            for (int j = 0; j < s_applied_count; ++j)
+                if (s_applied[j].slot == oth.slot) { taken = true; break; }
+            if (taken) continue;
+            g.of[g.n++] = &oth;
+            grouped[k] = true;
+        }
+        // Тёзки класса: берём тот, в котором поля данного типа вообще есть.
         for (int j = 0; j < s_class_count && !done; ++j) {
             if (strcmp(s_classes[j].name, of.cls) != 0) continue;
-            const int32_t off = find_field_offset_by_type(s_classes[j].klass, of);
-            if (off < 0) continue;
-            apply_resolution(of, off);
-            ++by_type;
+            const int filled = resolve_type_group(g, s_classes[j].klass);
+            if (!filled) continue;
+            by_type += filled;
+            if (g.n > 1 && filled == g.n) ++by_group;
             done = true;
+            break;
         }
     }
     if (by_type)
-        LogLine("автооффсеты: полей найдено по типу (имена ротированы): %d", by_type);
+        LogLine("автооффсеты: полей найдено по типу (имена ротированы): %d "
+                "(разведено группами полей одного типа: %d)", by_type, by_group);
 
     for (int i = 0; i < kOrFieldCount; ++i) {
         const OrField& of = kOrFields[i];
@@ -2368,6 +2666,7 @@ static bool load_offsets_cache() {
             if (s_applied_count < 256) {
                 s_applied[s_applied_count].slot = of.slot;
                 s_applied[s_applied_count].value = (std::uint64_t)val;
+                s_applied_cls[s_applied_count] = of.cls;
                 ++s_applied_count;
             }
             ++s_resolved;

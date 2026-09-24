@@ -39,7 +39,7 @@
 когда его ИМЯ ротировано обфускатором (_BYK_k__BackingField -> _CQx_...).
 Примитив (f4/b1/u4/i4/str), «любой ссылочный» (obj) или класс по имени
 (c:Item). Резолвер сверяет её с FieldInfo.type живого класса, когда точное
-имя поля не нашлось (см. find_field_offset_by_type в offset_resolver.cpp).
+имя поля не нашлось (см. resolve_type_group в offset_resolver.cpp).
 
     python3 tools/offsets/gen_resolver_table.py          # переписать .inc
 """
@@ -141,7 +141,10 @@ def main():
         if not cls:
             skipped.append((const, 'класс не указан (через объект)'))
             continue
-        if 'ротирует' in cls or 'ротирует' in note or cls in SKIP_CLASSES:
+        # Ротируется ИМЯ КЛАССА — только это делает класс ненаходимым по имени.
+        # Ротируется имя ПОЛЯ — не беда: поле ищется по типу (пятый столбец),
+        # поэтому упоминание «ротирует» в note нас не останавливает.
+        if 'ротирует' in cls or cls in SKIP_CLASSES:
             skipped.append((const, 'имя класса ротируется'))
             continue
         if 'луч' in cls:  # «результат луча» — не класс
@@ -153,10 +156,23 @@ def main():
             skipped.append((const, f'короткое имя класса {short!r}'))
             continue
         field = entry.get('field') or ''
-        if not field or len(field) <= 3:
-            skipped.append((const, f'поле {field!r} ротируется/короткое'))
+        sig = type_sig(entry)
+        # Поле с коротким/ротированным именем («XeK», «id») РАНЬШЕ пропускалось
+        # совсем, и его константа навсегда оставалась на вшитом значении. Лог
+        # 24.09 показал цену: OREHS_MARKER / TREEHS_MARKER / TREEHS_SPOT_A /
+        # MINEABLE_EXTENSIONS / OREMARK_AGE — от них зависит крестик автофарма,
+        # и после апдейта игры фарм молча бил по корпусу вместо крестика.
+        # Теперь такое поле попадает в таблицу, если известен его ТИП: имя
+        # тогда не нужно, резолвер берёт смещение по типу (см.
+        # resolve_type_group в offset_resolver.cpp). Без типа искать
+        # действительно нечем — только по имени, а оно ротировано.
+        if not field:
+            skipped.append((const, 'поле не задано'))
             continue
-        emit.append((const, short, field, is_static, type_sig(entry)))
+        if (len(field) <= 3 or 'k__BackingField' in field) and not sig:
+            skipped.append((const, f'поле {field!r} ротируется/короткое, типа нет'))
+            continue
+        emit.append((const, short, field, is_static, sig))
 
     # Дедупликация: одна и та же (класс, поле) может питать несколько констант —
     # это нормально, оставляем как есть (каждая константа получает своё значение).

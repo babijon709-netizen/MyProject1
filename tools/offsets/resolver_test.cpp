@@ -99,6 +99,7 @@ struct Handed {
     uint64_t il2cpp_base, meta_base;
     uint64_t pm_real, pm_decoy, teammember, netclient;
     uint64_t fpmanager, item, itemdata;
+    uint64_t treehs, orehs, vec3, hitmarkeritem, oremark;
 };
 
 // Строка в окне метаданных; возвращает её адрес.
@@ -200,6 +201,14 @@ static void child_main(int out_fd) {
     const uint64_t s_fpm  = put_string(meta, moff, "FPManager");
     const uint64_t s_item = put_string(meta, moff, "Item");
     const uint64_t s_itemdata = put_string(meta, moff, "ItemData");
+    // Классы автофарма: имена полей ротированы («XeK» вместо «XeK»), ищутся по
+    // типу. Тип-классы названы ПОЛНО, как в дампе (резолвер сверяет хвост за
+    // подчёркиванием: «c:OreHitstreaksMarker» ↔ «..._OreHitstreaksMarker»).
+    const uint64_t s_treehs = put_string(meta, moff, "MineableObjectExtension_TreeHitstreaks");
+    const uint64_t s_orehs  = put_string(meta, moff, "MineableObjectExtension_OreHitstreaks");
+    const uint64_t s_vec3   = put_string(meta, moff, "Vector3");
+    const uint64_t s_hmitem = put_string(meta, moff, "MineableObjectExtension_HitMarkerItem");
+    const uint64_t s_oremark = put_string(meta, moff, "MineableObjectExtension_OreHitstreaksMarker");
 
     // Окно данных «.so»: сюда кладём слоты-указатели, которые ищет сканер.
     uint64_t* slots = (uint64_t*)(il + 0x40000);
@@ -242,13 +251,15 @@ static void child_main(int out_fd) {
     uint64_t itemdata = build_class(heap, hoff, il_base + 0x1000, s_itemdata, s_empty,
                                     NULL, 0, meta, moff, tid_itemdata);
 
-    // FPManager: поле с РОТИРОВАННЫМ именем (_XqK вместо _BYK) типа float.
-    // По имени его не найти — резолвер обязан взять его по типу (f4).
+    // FPManager: ДВА поля с РОТИРОВАННЫМИ именами (_XqK/_YqK вместо _BYK/BYu)
+    // типа float. По имени их не найти — резолвер берёт оба по типу и разводит
+    // между собой: оба уехали на +0x08 (вшито 0xA8/0x9C -> 0xB0/0xA4).
     const PField fpm_fields[] = {
-        {"_XqK_k__BackingField", 0xC0, 0, 0x0C},   // float; вшито 0xA8
+        {"_XqK_k__BackingField", 0xB0, 0, 0x0C},   // float; вшито 0xA8
+        {"_YqK_k__BackingField", 0xA4, 0, 0x0C},   // float; вшито 0x9C
     };
     uint64_t fpmanager = build_class(heap, hoff, il_base + 0x1000, s_fpm, s_oxide,
-                                     fpm_fields, 1, meta, moff, 0x206);
+                                     fpm_fields, 2, meta, moff, 0x206);
 
     // Item: поле с ротированным именем типа ItemData (c:ItemData).
     const PField item_fields[] = {
@@ -256,6 +267,54 @@ static void child_main(int out_fd) {
     };
     uint64_t item = build_class(heap, hoff, il_base + 0x1000, s_item, s_oxide,
                                 item_fields, 1, meta, moff, 0x207);
+
+    // Классы-ТИПЫ для полей автофарма: свои поля не нужны, важен только
+    // byval_arg (klassIndex) — по нему резолвер узнаёт тип поля. Имена полные
+    // («..._OreHitstreaksMarker»), чтобы в кэше сработал хвост за подчёркиванием.
+    const int32_t tid_vec3    = 0x20A;
+    const int32_t tid_hmitem  = 0x20B;
+    const int32_t tid_oremark = 0x20C;
+    uint64_t vec3       = build_class(heap, hoff, il_base + 0x1000, s_vec3, s_empty,
+                                      NULL, 0, meta, moff, tid_vec3);
+    uint64_t hitmarkeritem = build_class(heap, hoff, il_base + 0x1000, s_hmitem, s_oxide,
+                                         NULL, 0, meta, moff, tid_hmitem);
+    // …_OreHitstreaksMarker: два float-поля с ротированными именами (XeS/XeE).
+    // Оба уехали так, что любая раскладка стоит одинаково (0x58/0x48 ->
+    // 0x68/0x88): развести их нечем, и резолвер обязан оставить вшитые
+    // значения, а не угадать.
+    const PField oremark_fields[] = {
+        {"XqA", 0x68, 0, 0x0C},   // float; вшито 0x58 (OREMARK_AGE)
+        {"XqB", 0x88, 0, 0x0C},   // float; вшито 0x48 (OREMARK_SMOOTH)
+    };
+    uint64_t oremark    = build_class(heap, hoff, il_base + 0x1000, s_oremark, s_oxide,
+                                      oremark_fields, 2, meta, moff, tid_oremark);
+
+    // MineableObjectExtension_TreeHitstreaks: ВСЕ имена ротированы (в таблице
+    // «Xze»/«Xzw»/«Xzv»/«XzL»), поля находятся только по типу. Два поля типа
+    // Vector3 уехали ОДИНАКОВО (+0x10 — будто выше по классу вставили поле):
+    // точного совпадения со вшитым смещением нет ни у одного, и разводить их
+    // надо вместе, задачей о назначениях.
+    const PField treehs_fields[] = {
+        {"movingMethod", 0xE8, 0, 0x08},   // i4; имя читаемое — берётся по имени
+        {"hitStreakMarkerOriginal", 0xA8, tid_hmitem, 0x12},  // TREEHS_MARKER_TEMPLATE
+        {"XqS", 0x90, tid_hmitem, 0x12},   // c:HitMarkerItem;  вшито 0x50
+        {"XqR", 0x98, tid_vec3,   0x12},   // c:Vector3;        вшито 0x88
+        {"XqV", 0xB4, tid_vec3,   0x12},   // c:Vector3;        вшито 0xA4
+        {"XqW", 0xE0, 0,          0x08},   // i4; имя ротировано — только по типу
+    };
+    uint64_t treehs = build_class(heap, hoff, il_base + 0x1000, s_treehs, s_oxide,
+                                  treehs_fields, 6, meta, moff, 0x208);
+
+    // MineableObjectExtension_OreHitstreaks: крестик автофарма. Одно поле с
+    // читаемым именем (hitStreakMarker, TREEHS/OREHS_MARKER_TEMPLATE), второе —
+    // с ротированным (XeK -> XqT): первое находится по имени и «занимает» своё
+    // смещение, второе — по типу из оставшихся.
+    const PField orehs_fields[] = {
+        {"hitStreakMarker", 0x58, tid_oremark, 0x12},  // OREHS_MARKER_TEMPLATE
+        {"XqT", 0x50, tid_oremark, 0x12},  // c:OreHitstreaksMarker; вшито 0x30
+    };
+    uint64_t orehs = build_class(heap, hoff, il_base + 0x1000, s_orehs, s_oxide,
+                                 orehs_fields, 2, meta, moff, 0x209);
 
     // Слоты: настоящие классы вперемешку с мусором (выравнивание, битые
     // указатели, указатели в никуда) — фильтры сканера обязаны его отсеять.
@@ -275,6 +334,11 @@ static void child_main(int out_fd) {
     slots[sn++] = fpmanager;
     slots[sn++] = item;
     slots[sn++] = itemdata;
+    slots[sn++] = treehs;
+    slots[sn++] = orehs;
+    slots[sn++] = vec3;
+    slots[sn++] = hitmarkeritem;
+    slots[sn++] = oremark;
     slots[sn++] = 0xFFFFFFFFFFFFFFF8ull;
     if (sn > kSlots) _exit(94);
 
@@ -284,6 +348,8 @@ static void child_main(int out_fd) {
     h.pm_real = pm_real; h.pm_decoy = pm_decoy;
     h.teammember = teammember; h.netclient = netclient;
     h.fpmanager = fpmanager; h.item = item; h.itemdata = itemdata;
+    h.treehs = treehs; h.orehs = orehs; h.vec3 = vec3;
+    h.hitmarkeritem = hitmarkeritem; h.oremark = oremark;
     if (write(out_fd, &h, sizeof(h)) != sizeof(h)) _exit(95);
 
     raise(SIGSTOP);   // родитель читает память, пока мы спим
@@ -391,12 +457,42 @@ int main() {
     // ---- поля с ротированными именами ищутся по ТИПУ ------------------------
     // Имя _XqK_k__BackingField в таблице нет (обфускатор переименовал), но тип
     // float тот же — резолвер берёт смещение по типу.
-    check(go_active::FPMANAGER_AIM_BLEND == 0xC0,
-          "FPManager: поле по типу float (имя ротировано) 0xA8 -> 0xC0");
+    check(go_active::FPMANAGER_AIM_BLEND == 0xB0 && go_active::FPMANAGER_WORLD_FOV_TARGET == 0xA4,
+          "FPManager: два float по типу разведены 0xA8/0x9C -> 0xB0/0xA4");
     check(go_active::ITEM_DATA == 0x30,
           "Item: поле по типу ItemData (имя ротировано) 0x20 -> 0x30");
     check(offset_resolver_class("ItemData", "") == h.itemdata,
           "класс-тип поля тоже доступен по имени");
+
+    // ---- автофарм: короткие ротированные имена находятся по ТИПУ ------------
+    // В таблице эти константы держались на вшитых значениях: генератор молча
+    // выбрасывал поля с именами вида «XeK» (короче трёх символов). Теперь поле
+    // попадает в таблицу, если известен его тип, — крестик автофарма снова
+    // находится после апдейта игры.
+    check(go_active::OREHS_MARKER == 0x50,
+          "OreHitstreaks: XeK по типу OreHitstreaksMarker 0x30 -> 0x50");
+    check(go_active::OREHS_MARKER_TEMPLATE == 0x58,
+          "OreHitstreaks: hitStreakMarker по имени 0x28 -> 0x58");
+    check(go_active::TREEHS_MARKER == 0x90,
+          "TreeHitstreaks: Xze по типу HitMarkerItem 0x50 -> 0x90");
+    check(go_active::TREEHS_MARKER_TEMPLATE == 0xA8,
+          "TreeHitstreaks: hitStreakMarkerOriginal по имени 0x28 -> 0xA8");
+    check(go_active::TREEHS_STREAK == 0xE0,
+          "TreeHitstreaks: XzL по типу i4 0x48 -> 0xE0");
+    check(go_active::TREEHS_MOVING_METHOD == 0xE8,
+          "TreeHitstreaks: movingMethod по имени 0x20 -> 0xE8");
+    // Два поля одного типа Vector3, уехавшие на одно расстояние: разводим по
+    // вшитым смещениям (0x88 -> 0x98, 0xA4 -> 0xB4) и не путаем местами.
+    check(go_active::TREEHS_SPOT_A == 0x98 && go_active::TREEHS_SPOT_B == 0xB4,
+          "TreeHitstreaks: два Vector3 разведены 0x98 / 0xB4");
+    check(offset_resolver_class("MineableObjectExtension_OreHitstreaksMarker", "Oxide") == h.oremark,
+          "класс-тип крестика найден по полному имени");
+    check(offset_resolver_class("Vector3", "") == h.vec3,
+          "класс-тип Vector3 найден по имени");
+    // Система не угадывает: два float-поля, которые нельзя развести, остаются
+    // на вшитых значениях. Если резолвер начнёт писать сюда наугад — упадёт.
+    check(go_active::OREMARK_AGE == 0x58 && go_active::OREMARK_SMOOTH == 0x48,
+          "OreHitstreaksMarker: неразводимые float оставлены вшитыми");
 
     // ---- чего нет в ребёнке — остаётся вшитым ------------------------------
     check(go_active::MINEABLE_ENTITY_TYPE == mineable_before,
@@ -409,6 +505,11 @@ int main() {
 
     // ---- reset: проход заново даёт тот же результат -------------------------
     offset_resolver_reset();
+    // Порча и «трудных» констант: повторный проход обязан найти их заново, в
+    // том числе два поля одного типа (иначе проверка выше ничего не значила бы).
+    go_active::TREEHS_SPOT_A = 0x1234;
+    go_active::TREEHS_SPOT_B = 0x1234;
+    go_active::OREHS_MARKER = 0x1234;
     const double t1 = mono_seconds();
     for (;;) {
         g_mem.frame_begin();
@@ -425,6 +526,9 @@ int main() {
         nanosleep(&ts, NULL);
     }
     check(go_active::PLAYER_TEAM_NAME == 0x2A0, "после reset повторный резолв сошёлся");
+    check(go_active::OREHS_MARKER == 0x50 && go_active::TREEHS_SPOT_A == 0x98 &&
+          go_active::TREEHS_SPOT_B == 0xB4,
+          "после reset поля по типу найдены заново");
 
     // ---- кэш первого входа: второй вход без скана ---------------------------
     // Сбрасываем состояние (как при перезаходе в игру) и портим слоты: кэш
@@ -451,7 +555,7 @@ int main() {
     check(strstr(st3, "кэш") != nullptr, "второй вход взят из кэша, без скана");
     check(mono_seconds() - t2 < 1.0, "из кэша — мгновенно (меньше секунды)");
     check(go_active::PLAYER_TEAM_NAME == 0x2A0, "кэш вернул teamName");
-    check(go_active::FPMANAGER_AIM_BLEND == 0xC0, "кэш вернул поле, найденное по типу");
+    check(go_active::FPMANAGER_AIM_BLEND == 0xB0, "кэш вернул поле, найденное по типу");
     check(go_active::ITEM_DATA == 0x30, "кэш вернул поле класса-типа");
     check(offset_resolver_class("PlayerManager", "Oxide") == h.pm_real ||
           offset_resolver_class("PlayerManager", "Oxide") == h.pm_decoy,

@@ -2419,12 +2419,12 @@
  },
  "VITALS_MAX_HEALTH": {
   "kind": "field",
-  "class": "",
+  "class": "GenericVitals",
   "struct": "Oxide_GenericVitals_Fields",
   "field": "m_MaxHealth",
   "type": "float",
   "offset": 136,
-  "note": "GenericVitals: максимум здоровья — знаменатель полоски здоровья в ESP",
+  "note": "GenericVitals: максимум здоровья — знаменатель полоски здоровья в ESP; класс — из имени структуры дампа (Oxide_GenericVitals_Fields), имена полей стабильны",
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_GenericVitals_Fields",
@@ -2434,12 +2434,12 @@
  },
  "MINEABLE_HIT_ANCHOR": {
   "kind": "field",
-  "class": "",
+  "class": "MineableObject",
   "struct": "Oxide_MineableObject_Fields",
   "field": "BQo",
   "type": "UnityEngine_Transform_o*",
   "offset": 200,
-  "note": "якорь точки удара по руде (ZgL() отдаёт его мировую позицию); имя LXX ротирует",
+  "note": "якорь точки удара по руде (ZgL() отдаёт его мировую позицию); имя поля обфусцировано, но тип (Transform) стабилен — ищется по типу; класс — из структуры дампа",
   "src": {
    "file": "il2cpp.h",
    "struct": "Oxide_MineableObject_Fields",
