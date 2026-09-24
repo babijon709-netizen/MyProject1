@@ -292,7 +292,7 @@ int      s_top_range[3] = {-1, -1, -1};
 // метадату (массив Il2CppClass вместе с указателями имён) прямо в образ —
 // тогда в куче искать нечего, а классы лежат в .data/.rodata библиотеки.
 struct PtrRange { uint64_t start = 0, end = 0; };
-PtrRange  s_ptr_ranges[640];
+PtrRange  s_ptr_ranges[1024];
 int       s_ptr_range_count = 0;
 uint64_t  s_ptr_seg_bytes = 0;    // сколько МБ в сегментах .so
 uint64_t  s_ptr_anon_bytes = 0;   // сколько МБ в анонимной памяти
@@ -774,8 +774,8 @@ static void phase_maps() {
 static int try_class_candidate(uint64_t v) {
     if (find_class_slot(v)) return 0;
     const uint64_t image = qrd_ptr(v);
-    if (s_lib_begin && (image < s_lib_begin || image >= s_lib_end)) return 0;
-    else if (!s_lib_begin && !valid_obj(image)) return 0;
+    if (!valid_obj(image)) return 0;
+    if (!s_meta_begin && s_lib_begin && (image < s_lib_begin || image >= s_lib_end)) return 0;
     ++s_shape_pass;   // «похож на класс» по форме — до фильтров имени
     const uint64_t nm = qrd_ptr(v + IL2CPP_CLASS_NAME);
     if (s_meta_begin) {
@@ -950,9 +950,9 @@ static void phase_strsearch(double deadline) {
         }
         s_str_scanned += chunk;
         s_str_pos += chunk - (kNeed - 1);   // нахлёст, чтобы не потерять стык
-        if (s_str_scanned >= (3072ull << 20)) break;
+        if (s_str_scanned >= (6144ull << 20)) break;
     }
-    if (s_str_region >= s_ptr_range_count || s_str_scanned >= (3072ull << 20) ||
+    if (s_str_region >= s_ptr_range_count || s_str_scanned >= (6144ull << 20) ||
         s_str_cand_count >= 8) {
         if (s_str_cand_count > 0) {
             s_str_cand_idx = 0;
@@ -969,7 +969,7 @@ static void phase_strsearch(double deadline) {
 // Окно блока строк вокруг кандидата: строковый раздел метаданных может лежать
 // в нескольких СМЕЖНЫХ анонимных областях (протектор режет маппинг кусками).
 // Собираем непрерывную цепочку соседей (до 64 МБ), иначе имена за границей
-// первой области теряются. Если цепочка гигантская — окно ±16 МБ вокруг хита.
+// первой области теряются. Если цепочка гигантская — окно ±32 МБ вокруг хита.
 static void apply_str_window(int idx) {
     const int reg = s_str_cand_region[idx];
     s_str_addr = s_str_cand[idx];
@@ -980,10 +980,12 @@ static void apply_str_window(int idx) {
     for (int j = reg - 1; j >= 0 &&
              s_ptr_ranges[j].end == wb && (we - wb) < (64ull << 20); --j)
         wb = s_ptr_ranges[j].start;
-    if (we - wb > (32ull << 20)) {
-        const uint64_t kPad = 16ull << 20;
+    if (we - wb > (64ull << 20)) {
+        const uint64_t kPad = 32ull << 20;
         wb = (s_str_addr > kPad) ? (s_str_addr - kPad) : 0;
         we = s_str_addr + kPad;
+        if (wb < s_ptr_ranges[reg].start) wb = s_ptr_ranges[reg].start;
+        if (we > s_ptr_ranges[reg].end) we = s_ptr_ranges[reg].end;
     }
     s_meta_begin = wb;
     s_meta_end = we;
@@ -1147,55 +1149,54 @@ static void build_scan_ranges() {
         s_ptr_seg_bytes += s_segments[i].end - s_segments[i].start;
         ++s_ptr_range_count;
     }
-    for (int i = 0; i < s_xseg_count && s_ptr_range_count < 640; ++i) {
+    for (int i = 0; i < s_xseg_count && s_ptr_range_count < 1024; ++i) {
         if (s_xsegments[i].end <= s_xsegments[i].start) continue;
         s_ptr_ranges[s_ptr_range_count].start = s_xsegments[i].start;
         s_ptr_ranges[s_ptr_range_count].end = s_xsegments[i].end;
         s_ptr_seg_bytes += s_xsegments[i].end - s_xsegments[i].start;
         ++s_ptr_range_count;
     }
-    // Скрытые регионы (без бита чтения, но отдающиеся принудительным чтением)
-    // идут РАНЬШЕ обычной кучи: если протектор спрятал пул классов снятием
-    // прав, он лежит именно там, а бюджет скана ограничен. Мелкие — вперёд:
-    // пул из нескольких мегабайт важнее гигабайтной резервации.
-    {
-        int order[128];
-        for (int i = 0; i < s_hidden_count; ++i) order[i] = i;
-        for (int i = 1; i < s_hidden_count; ++i) {   // сортировка по размеру
-            const int cur = order[i];
-            int j = i - 1;
-            while (j >= 0 &&
-                   (s_hidden[order[j]].end - s_hidden[order[j]].start) >
-                   (s_hidden[cur].end - s_hidden[cur].start)) {
-                order[j + 1] = order[j];
-                --j;
-            }
-            order[j + 1] = cur;
-        }
-        // Потолок на скрытую память: её бывают десятки гигабайт, а бюджет
-        // скана — единицы. Берём мелкие регионы, пока не набралось 512 МБ
-        // (первый регион — всегда, иначе крупный пул мы бы вовсе пропустили).
-        uint64_t taken = 0;
-        for (int k = 0; k < s_hidden_count && s_ptr_range_count < 640; ++k) {
-            const int i = order[k];
-            if (s_hidden[i].end <= s_hidden[i].start) continue;
-            const uint64_t sz = s_hidden[i].end - s_hidden[i].start;
-            if (taken && taken + sz > (512ull << 20)) { ++s_hidden_skipped; continue; }
+    // Скрытые регионы (без бита чтения, но отдающиеся принудительным чтением).
+    // Регионы размером от 16 до 64 МБ — главные кандидаты на глобальные
+    // метаданные global-metadata.dat (в Unity размер файла почти всегда 20–50 МБ).
+    // Помещаем их ПЕРВЫМИ, чтобы строковый поиск сразу попал в метаданные.
+    s_hidden_skipped = 0;
+    uint64_t taken_hidden = 0;
+    // 1-й проход: кандидаты в метаданные (16..64 МБ)
+    for (int i = 0; i < s_hidden_count && s_ptr_range_count < 1024; ++i) {
+        if (s_hidden[i].end <= s_hidden[i].start) continue;
+        const uint64_t sz = s_hidden[i].end - s_hidden[i].start;
+        if (sz >= (16ull << 20) && sz <= (64ull << 20)) {
             s_ptr_ranges[s_ptr_range_count].start = s_hidden[i].start;
             s_ptr_ranges[s_ptr_range_count].end = s_hidden[i].end;
             s_ptr_anon_bytes += sz;
+            taken_hidden += sz;
             ++s_ptr_range_count;
-            taken += sz;
         }
     }
-    for (int i = 0; i < s_anon_count && s_ptr_range_count < 640; ++i) {
+    // 2-й проход: остальные скрытые регионы (до бюджета 2048 МБ)
+    for (int i = 0; i < s_hidden_count && s_ptr_range_count < 1024; ++i) {
+        if (s_hidden[i].end <= s_hidden[i].start) continue;
+        const uint64_t sz = s_hidden[i].end - s_hidden[i].start;
+        if (sz >= (16ull << 20) && sz <= (64ull << 20)) continue; // уже добавлены
+        if (taken_hidden && taken_hidden + sz > (2048ull << 20)) {
+            ++s_hidden_skipped;
+            continue;
+        }
+        s_ptr_ranges[s_ptr_range_count].start = s_hidden[i].start;
+        s_ptr_ranges[s_ptr_range_count].end = s_hidden[i].end;
+        s_ptr_anon_bytes += sz;
+        taken_hidden += sz;
+        ++s_ptr_range_count;
+    }
+    for (int i = 0; i < s_anon_count && s_ptr_range_count < 1024; ++i) {
         if (s_anon[i].end <= s_anon[i].start) continue;
         s_ptr_ranges[s_ptr_range_count].start = s_anon[i].start;
         s_ptr_ranges[s_ptr_range_count].end = s_anon[i].end;
         s_ptr_anon_bytes += s_anon[i].end - s_anon[i].start;
         ++s_ptr_range_count;
     }
-    for (int i = 0; i < s_filemisc_count && s_ptr_range_count < 640; ++i) {
+    for (int i = 0; i < s_filemisc_count && s_ptr_range_count < 1024; ++i) {
         if (s_filemisc[i].end <= s_filemisc[i].start) continue;
         s_ptr_ranges[s_ptr_range_count].start = s_filemisc[i].start;
         s_ptr_ranges[s_ptr_range_count].end = s_filemisc[i].end;
@@ -1364,8 +1365,7 @@ static void phase_ptr(double deadline) {
             for (int o = 0; o < (int)(sizeof(kNameOffs) / sizeof(kNameOffs[0])) && !ok; ++o) {
                 const uint64_t klass = slot - kNameOffs[o];
                 const uint64_t image = qrd_ptr(klass);
-                if (s_lib_begin && (image < s_lib_begin || image >= s_lib_end)) continue;
-                if (!s_lib_begin && !valid_obj(image)) continue;
+                if (!valid_obj(image)) continue;
                 store_verified_class(klass, s_wanted_names[nm]);
                 ++s_ptr_verified;
                 if (kNameOffs[o] != IL2CPP_CLASS_NAME && s_ptr_verified <= 3)
@@ -1392,7 +1392,7 @@ static void phase_ptr(double deadline) {
         s_ptr_pos += chunk;
         s_ptr_scanned += chunk;
         if (all_wanted_found()) break;
-        if (s_ptr_scanned >= (3072ull << 20)) break;
+        if (s_ptr_scanned >= (6144ull << 20)) break;
         if (mono_seconds() >= s_scan_deadline) break;
         const double now_s = mono_seconds();
         if (now_s - s_last_progress_log >= 8.0) {
@@ -1407,7 +1407,7 @@ static void phase_ptr(double deadline) {
         }
     }
     if (all_wanted_found() || s_ptr_region >= s_ptr_range_count ||
-        s_ptr_scanned >= (3072ull << 20) || mono_seconds() >= s_scan_deadline) {
+        s_ptr_scanned >= (6144ull << 20) || mono_seconds() >= s_scan_deadline) {
         ptr_range_done();
         LogLine("автооффсеты: бутстрап завершён — просмотрено %llu МБ (%d диапазонов из %d), "
                 "отказов чтения %llu, в окне строк %llu значений, похожих на имена %llu, "
