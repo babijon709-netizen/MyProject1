@@ -217,6 +217,13 @@ int      s_str_cand_idx = 0;
 int      s_best_found = -1;       // лучший результат по блокам
 uint64_t s_best_begin = 0, s_best_end = 0, s_best_addr = 0;
 uint64_t s_best_str[64];
+// Результаты каждого блока строк: окно и сколько имён в нём нашлось. Имя
+// сравнивается по содержимому, поэтому для повторного прохода по указателям
+// достаточно переставить окно и прогнать поиск заново.
+uint64_t s_blk_begin[8], s_blk_end[8];
+int      s_blk_found[8];
+bool     s_blk_tried[8];
+int      s_ptr_passes = 0;        // сколько блоков уже прогоняли по указателям
 int      s_str_region = 0;
 uint64_t s_str_pos = 0;
 uint64_t s_str_scanned = 0;
@@ -233,6 +240,10 @@ uint64_t s_ptr_hits = 0;          // совпадений указателя с 
 uint64_t s_ptr_verified = 0;      // из них оказалось живыми классами
 uint64_t s_ptr_inwin = 0;         // значений-указателей внутрь окна строк (любых)
 uint64_t s_ptr_noverify = 0;      // имя совпало, но структура классом не подтвердилась
+uint64_t s_ptr_names = 0;         // указателей на ЛЮБУЮ читаемую строку блока
+uint64_t s_ptr_rinwin = 0;        // указателей в окно в текущем диапазоне
+uint64_t s_ptr_best_hits = 0;     // максимум в одном диапазоне
+int      s_ptr_best_range = -1;
 
 // Диапазоны поиска указателей на имена. Порядок важный: СНАЧАЛА читаемые
 // сегменты самой libil2cpp.so, ПОТОМ анонимная память. Протектор может вшить
@@ -855,6 +866,10 @@ static void phase_blob(double deadline) {
                 s_wanted_str_found, s_wanted_name_count);
         // Запоминаем лучший блок: настоящие имена метаданных лежат только в
         // одном из них, остальные — обрезки или чужие копии строк.
+        s_blk_begin[s_str_cand_idx] = s_meta_begin;
+        s_blk_end[s_str_cand_idx] = s_meta_end;
+        s_blk_found[s_str_cand_idx] = s_wanted_str_found;
+        s_blk_tried[s_str_cand_idx] = false;
         if (s_wanted_str_found > s_best_found) {
             s_best_found = s_wanted_str_found;
             s_best_begin = s_meta_begin; s_best_end = s_meta_end;
@@ -868,6 +883,8 @@ static void phase_blob(double deadline) {
         }
         // Все блоки проверены — работаем дальше с лучшим.
         s_meta_begin = s_best_begin; s_meta_end = s_best_end; s_str_addr = s_best_addr;
+        for (int i = 0; i < s_str_cand_count; ++i)
+            if (s_blk_begin[i] == s_best_begin) s_blk_tried[i] = true;
         for (int i = 0; i < s_wanted_name_count; ++i) s_wanted_str[i] = s_best_str[i];
         s_wanted_str_found = (s_best_found > 0) ? s_best_found : 0;
         LogLine("автооффсеты: лучший блок строк 0x%llx..0x%llx — табличных имён %d из %d",
@@ -893,8 +910,10 @@ static void phase_blob(double deadline) {
         }
         if (s_wanted_str_found > 0) {
             build_ptr_ranges();
+            s_ptr_passes = 1;
             s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
             s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0; s_ptr_noverify = 0;
+            s_ptr_names = 0; s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
             s_last_progress_log = 0;
             s_scan_deadline = mono_seconds() + 120.0;
             s_phase = PH_PTR;
@@ -942,6 +961,30 @@ static void build_ptr_ranges() {
             s_anon_count, s_anon_total, s_filemisc_count);
 }
 
+// Закрываем диапазон поиска: запоминаем, в каком из них больше всего
+// указателей на строки — там и лежит пул классов (или его нет нигде).
+static void ptr_range_done() {
+    if (s_ptr_rinwin > s_ptr_best_hits) {
+        s_ptr_best_hits = s_ptr_rinwin;
+        s_ptr_best_range = s_ptr_region;
+    }
+    s_ptr_rinwin = 0;
+}
+
+// Похоже ли содержимое на текстовое имя: печатных символов до NUL и хотя бы
+// три знака. Отличает настоящие указатели на строки от случайного мусора.
+static bool looks_like_name(const char* s, size_t cap) {
+    size_t n = 0;
+    while (n < cap && s[n]) {
+        const unsigned char c = (unsigned char)s[n];
+        if (c < 0x20 || c >= 0x7f) return false;
+        ++n;
+    }
+    if (n == cap || n < 3) return false;         // не завершено NUL или пусто
+    const unsigned char c0 = (unsigned char)s[0];
+    return (c0 >= 'A' && c0 <= 'Z') || (c0 >= 'a' && c0 <= 'z') || c0 == '_';
+}
+
 static void phase_ptr(double deadline) {
     static uint8_t buf[kChunkBytes];
     while (s_ptr_region < s_ptr_range_count && mono_seconds() < deadline) {
@@ -949,10 +992,10 @@ static void phase_ptr(double deadline) {
         // Сканируем и образ, и ВСЕ анонимные регионы, не только writable:
         // протектор может закрыть пул классов на r-- после инициализации.
         if (s_ptr_pos < r.start) s_ptr_pos = r.start;
-        if (s_ptr_pos >= r.end) { ++s_ptr_region; continue; }
+        if (s_ptr_pos >= r.end) { ptr_range_done(); ++s_ptr_region; continue; }
         const uint64_t remain = r.end - s_ptr_pos;
         const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
-        if (chunk < 8) { s_ptr_pos = r.end; ++s_ptr_region; continue; }
+        if (chunk < 8) { ptr_range_done(); s_ptr_pos = r.end; ++s_ptr_region; continue; }
         if (!qrd_buf(s_ptr_pos, buf, chunk)) {
             s_ptr_pos += chunk; s_ptr_scanned += chunk; continue;
         }
@@ -971,6 +1014,7 @@ static void phase_ptr(double deadline) {
                 cand[ncand++] = s_lib_begin + v;
             if (!ncand) continue;
             ++s_ptr_inwin;   // значение указывает внутрь окна строк (любое)
+            ++s_ptr_rinwin;
             if (s_ptr_inwin <= 4)
                 LogLine("автооффсеты: указатель в окно строк @0x%llx -> 0x%llx (диапазон %d)",
                         (unsigned long long)(s_ptr_pos + (uint64_t)i * 8),
@@ -983,13 +1027,14 @@ static void phase_ptr(double deadline) {
             const uint64_t slot = s_ptr_pos + (uint64_t)i * 8;
             char sname[64];
             int nm = -1;
+            size_t rl = 0;
             for (int c = 0; c < ncand && nm < 0; ++c) {
                 // Читаем не дальше конца блока: у самого края страницы лишние
                 // байты могут быть не отображены, и чтение вернёт отказ.
-                size_t rl = 48;
+                rl = 48;
                 if (cand[c] + rl > s_meta_end) rl = (size_t)(s_meta_end - cand[c]);
-                if (rl < 8) continue;
-                if (!qrd_buf(cand[c], sname, rl)) continue;
+                if (rl < 8) { rl = 0; continue; }
+                if (!qrd_buf(cand[c], sname, rl)) { rl = 0; continue; }
                 sname[rl] = 0;
                 for (int n = 0; n < s_wanted_name_count; ++n) {
                     const char* w = s_wanted_names[n];
@@ -1001,7 +1046,18 @@ static void phase_ptr(double deadline) {
                     break;
                 }
             }
-            if (nm < 0) continue;
+            if (nm < 0) {
+                // Диагностика: что вообще лежит по этим указателям? Если это
+                // имена классов — пул найден, и дело в ротации имён. Если
+                // мусор — перед нами не указатели на строки вовсе.
+                if (rl >= 8 && looks_like_name(sname, rl)) {
+                    ++s_ptr_names;
+                    if (s_ptr_names <= 8)
+                        LogLine("автооффсеты: указатель @0x%llx ведёт на строку «%s» (цель 0x%llx)",
+                                (unsigned long long)slot, sname, (unsigned long long)cand[0]);
+                }
+                continue;
+            }
             ++s_ptr_hits;
             // Смещение слота имени в Il2CppClass: у беты раскладка может
             // отличаться от релизной. Перебираем plausible-варианты.
@@ -1045,9 +1101,10 @@ static void phase_ptr(double deadline) {
         const double now_s = mono_seconds();
         if (now_s - s_last_progress_log >= 8.0) {
             s_last_progress_log = now_s;
-            LogLine("автооффсеты: поиск указателей %llu МБ (диапазон %d/%d), в окне строк %llu, по строке совпало %llu, живых классов %llu, неподтверждённых %llu",
+            LogLine("автооффсеты: поиск указателей %llu МБ (диапазон %d/%d), в окне строк %llu, похожих на имена %llu, по строке совпало %llu, живых классов %llu, неподтверждённых %llu",
                     (unsigned long long)(s_ptr_scanned >> 20), s_ptr_region, s_ptr_range_count,
                     (unsigned long long)s_ptr_inwin,
+                    (unsigned long long)s_ptr_names,
                     (unsigned long long)s_ptr_hits,
                     (unsigned long long)s_ptr_verified,
                     (unsigned long long)s_ptr_noverify);
@@ -1055,14 +1112,47 @@ static void phase_ptr(double deadline) {
     }
     if (all_wanted_found() || s_ptr_region >= s_ptr_range_count ||
         s_ptr_scanned >= (3072ull << 20) || mono_seconds() >= s_scan_deadline) {
+        ptr_range_done();
         LogLine("автооффсеты: бутстрап завершён — просмотрено %llu МБ (%d диапазонов из %d), "
-                "в окне строк %llu значений, по строке совпало %llu, живых классов %llu, "
-                "неподтверждённых %llu (в кэше %d)",
+                "в окне строк %llu значений, похожих на имена %llu, по строке совпало %llu, "
+                "живых классов %llu, неподтверждённых %llu (в кэше %d)",
                 (unsigned long long)(s_ptr_scanned >> 20), s_ptr_region, s_ptr_range_count,
                 (unsigned long long)s_ptr_inwin,
+                (unsigned long long)s_ptr_names,
                 (unsigned long long)s_ptr_hits,
                 (unsigned long long)s_ptr_verified,
                 (unsigned long long)s_ptr_noverify, s_class_count);
+        if (s_ptr_best_range >= 0)
+            LogLine("автооффсеты: больше всего указателей в диапазоне %d (0x%llx..0x%llx) — %llu штук",
+                    s_ptr_best_range,
+                    (unsigned long long)s_ptr_ranges[s_ptr_best_range].start,
+                    (unsigned long long)s_ptr_ranges[s_ptr_best_range].end,
+                    (unsigned long long)s_ptr_best_hits);
+        // Ни одного совпадения — возможно, классы ссылаются на ДРУГОЙ блок
+        // строк (в процессе их бывает несколько). Прогоняем поиск заново по
+        // следующему необработанному блоку: это те же диапазоны, несколько
+        // секунд на проход.
+        int next = -1, next_found = -1;
+        for (int i = 0; i < s_str_cand_count; ++i) {
+            if (s_blk_tried[i] || s_blk_found[i] <= 0) continue;
+            if (s_blk_found[i] > next_found) { next_found = s_blk_found[i]; next = i; }
+        }
+        if (s_ptr_hits == 0 && next >= 0 && s_ptr_passes < 3) {
+            ++s_ptr_passes;
+            s_meta_begin = s_blk_begin[next];
+            s_meta_end = s_blk_end[next];
+            s_blk_tried[next] = true;
+            s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
+            s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
+            s_ptr_noverify = 0; s_ptr_names = 0;
+            s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
+            s_last_progress_log = 0;
+            s_scan_deadline = mono_seconds() + 120.0;
+            LogLine("автооффсеты: совпадений нет — пробую следующий блок строк №%d (0x%llx..0x%llx, имён %d)",
+                    next + 1, (unsigned long long)s_meta_begin,
+                    (unsigned long long)s_meta_end, s_blk_found[next]);
+            return;
+        }
         s_phase = PH_FIELDS;
     }
 }
@@ -1499,6 +1589,9 @@ void offset_resolver_reset() {
     s_str_addr = 0; s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
     s_str_cand_count = 0; s_str_cand_idx = 0;
     s_best_found = -1; s_best_begin = 0; s_best_end = 0; s_best_addr = 0;
+    for (int i = 0; i < 8; ++i) {
+        s_blk_begin[i] = 0; s_blk_end[i] = 0; s_blk_found[i] = 0; s_blk_tried[i] = false;
+    }
     for (int i = 0; i < 8; ++i) { s_str_cand[i] = 0; s_str_cand_region[i] = 0; }
     for (int i = 0; i < 64; ++i) s_best_str[i] = 0;
     s_wanted_name_count = 0; s_wanted_str_found = 0;
@@ -1506,6 +1599,8 @@ void offset_resolver_reset() {
     for (int i = 0; i < 64; ++i) s_wanted_str[i] = 0;
     s_ptr_pos = 0; s_ptr_region = 0; s_ptr_scanned = 0;
     s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0; s_ptr_noverify = 0;
+    s_ptr_names = 0; s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
+    s_ptr_passes = 0;
     s_ptr_range_count = 0; s_ptr_seg_bytes = 0; s_ptr_anon_bytes = 0;
     s_applied_count = 0; s_logged = false;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
