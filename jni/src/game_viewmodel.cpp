@@ -50,6 +50,25 @@ struct HeapMemory {
             g_mem.read_quiet(np,n,nl) && g_mem.read_quiet(sp,ns,sl) &&
             std::memcmp(n,name,nl)==0 && std::memcmp(ns,namespaze,sl)==0;
     }
+    // Имя калькулятора в новой бете обфусцировано. Проверяем валидный
+    // Il2CppClass с пустым namespace; его тип подтверждается также обратными
+    // ссылками на оба конкретных типизированных конфига перед каждой записью.
+    bool calculator_class(uint64_t object) {
+        if (object < 0x10000) return false;
+        const uint64_t k=memory.ptr(object);
+        if (k < 0x10000) return false;
+        const uint64_t np=memory.ptr(k+0x10), sp=memory.ptr(k+0x18);
+        char ns=1, name[33]{};
+        if (!np || !sp || !g_mem.read_quiet(sp,&ns,1) || ns ||
+            !g_mem.read_quiet(np,name,sizeof(name))) return false;
+        for (unsigned i=0;i<sizeof(name);++i) {
+            if (!name[i]) return i>0;
+            const unsigned char c=(unsigned char)name[i];
+            if (!((c>='a' && c<='z') || (c>='A' && c<='Z') ||
+                  (c>='0' && c<='9') || c=='_')) return false;
+        }
+        return false;
+    }
     template<class T> bool write_heap(uint64_t address, const T& value) {
         if (!g_mem.bound() || g_pid<=0) return false;
         std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps");
@@ -215,7 +234,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         char id[41] = {};
         for (int i = 0; i < 20; ++i)
             snprintf(id + i * 2, 3, "%02x", (unsigned)weapons.observed_id[i]);
-        LogLine("weapon data: отказ=%d (1 неизвестный build-id,2 guard,3 новая бета без проверенной раскладки оружия,10..14 цепочка,20 restore,21 запись), id=%s guard=%d word=0x%x player=0x%llx offsets fp=0x%llx weapon=0x%llx back=0x%llx",
+        LogLine("weapon data: отказ=%d (1 неизвестный build-id,2 guard,10..14 цепочка,20 restore,21 запись), id=%s guard=%d word=0x%x player=0x%llx offsets fp=0x%llx weapon=0x%llx back=0x%llx",
                 weapons.diagnostic, id, weapons.guard_index, weapons.guard_observed,
                 (unsigned long long)player,
                 (unsigned long long)PLAYER_FP_MANAGER,

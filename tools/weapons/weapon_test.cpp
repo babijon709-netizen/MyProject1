@@ -38,6 +38,12 @@ struct Fake {
         uint64_t k=0; if(!read(o,k)) return false;
         auto it=names.find(k); return it!=names.end() && it->second.first==n && it->second.second==ns;
     }
+    bool calculator_class(uint64_t o) {
+        uint64_t k=0; if(!read(o,k)) return false;
+        auto it=names.find(k);
+        return it!=names.end() && !it->second.first.empty() &&
+            it->second.second.empty();
+    }
     void object(uint64_t o,const char* n,const char* ns,bool unity=true) {
         uint64_t k=o+0x80000; set(o,k); names[k]={n,ns};
         if(unity) set(o+0x10,o+0x90000);
@@ -48,7 +54,7 @@ struct Fake {
         object(player,"PlayerManager","Oxide"); object(fp,"FPManager","Oxide");
         object(weapon,"FPHitscan","Oxide"); object(config,"HitscanWeaponConfig",kWeapons);
         object(recoil,"RecoilConfig",kWeapons); object(dispersion,"DispersionConfig",kWeapons);
-        object(calc,l.calculator,"",false); object(net,"NetworkIdentity","Mirror");
+        object(calc,l.calculator ? l.calculator : "Rt", "",false); object(net,"NetworkIdentity","Mirror");
         set(player+0x40,net); set(net+0x4a,uint8_t(1)); set(player+0x90,fp);
         set(fp+0x58,weapon); set(weapon+0xc0,player); set(weapon+0x130,config);
         set(weapon+0x200,recoil); set(weapon+0x208,config); set(weapon+0x1f8,calc);
@@ -93,14 +99,22 @@ static void tests(const Layout& l) {
         assert(io.get<float>(calc+0x20)==2.f && io.get<float>(dispersion+0x24)==4.f);
         assert(io.writes.size()==18);
     }
-    // Новая бета присутствует в репозитории, но старую таблицу native-адресов
-    // применять к ней нельзя: отказ должен быть без единой записи.
+    // Чужой build ID по-прежнему отклоняется без записи.
     {
         Fake io(l); Controller<Fake> c(io);
-        io.set(base+0x318,kUnverifiedNewBetaId);
+        io.set(base+0x318,std::array<uint8_t,20>{});
         c.tick(1,base,player,true,true);
-        assert(c.diagnostic==3 && c.recoil==Status::Failed && c.spread==Status::Failed);
+        assert(c.diagnostic==1 && c.recoil==Status::Failed && c.spread==Status::Failed);
         assert(io.writes.empty());
+    }
+    if (!l.calculator) {
+        Fake io(l); Controller<Fake> c(io);
+        io.names[calc+0x80000].second="wrong.namespace";
+        c.tick(1,base,player,true,true);
+        assert(c.recoil!=Status::Active && c.spread!=Status::Active && io.writes.empty());
+        io.names[calc+0x80000].second="";
+        c.tick(1,base,player,true,true);
+        assert(c.recoil==Status::Active && c.spread==Status::Active);
     }
     // The owner chain must use the same live offsets as ESP/aim, not copies
     // of the release constants baked into the weapon controller.
@@ -213,4 +227,4 @@ static void tests(const Layout& l) {
         c.tick(1,base,player,true,false); assert(c.recoil==Status::Failed && io.writes.empty());
     }
 }
-int main() { maps_tests(); for(const auto& l:kLayouts) tests(l); std::cout<<"weapons: heap-only gate, both builds, ownership, transitions, restoration, failures, finite checks: OK\n"; }
+int main() { maps_tests(); for(const auto& l:kLayouts) tests(l); std::cout<<"weapons: heap-only gate, three builds, ownership, transitions, restoration, failures, finite checks: OK\n"; }
