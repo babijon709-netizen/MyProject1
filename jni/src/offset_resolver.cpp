@@ -196,9 +196,27 @@ bool     s_heap_done = false;     // в этом резолве уже скан�
 // в блоке найти адреса ВСЕХ табличных имён -> в куче найти указатели на них
 // (слот имени класса на +0x10) -> так находятся живые классы без единого RVA.
 struct AnonRegion { uint64_t start = 0, end = 0; bool writable = false; };
-AnonRegion s_anon[96];
+// Лог №8 показал ровно 96 регионов — это был ПОТОЛОК, и карта процесса
+// обрезалась: пул классов, лежащий в 97-м регионе, в поиск не попадал.
+// Держим запас с лихвой и считаем, сколько регионов было на самом деле.
+AnonRegion s_anon[512];
 int      s_anon_count = 0;
+int      s_anon_total = 0;        // сколько анонимных регионов было в карте вообще
+// Читаемые файловые регионы с именем, но не libil2cpp.so (протектор может
+// положить метадату в свой .dat/.bin или в память, отмапленную из apk).
+AnonRegion s_filemisc[256];
+int      s_filemisc_count = 0;
 uint64_t s_str_addr = 0;          // где нашёлся «PlayerManager»
+// Блоков со строкой «PlayerManager» в процессе бывает НЕСКОЛЬКО (лог №8:
+// в одном нашлось 29 имён из 43, в другом только 5). Собираем все вхождения
+// и берём лучший блок по числу найденных табличных имён, а не первый.
+uint64_t s_str_cand[8];
+int      s_str_cand_region[8];
+int      s_str_cand_count = 0;
+int      s_str_cand_idx = 0;
+int      s_best_found = -1;       // лучший результат по блокам
+uint64_t s_best_begin = 0, s_best_end = 0, s_best_addr = 0;
+uint64_t s_best_str[64];
 int      s_str_region = 0;
 uint64_t s_str_pos = 0;
 uint64_t s_str_scanned = 0;
@@ -220,7 +238,7 @@ uint64_t s_ptr_inwin = 0;         // значений-указателей вн�
 // метадату (массив Il2CppClass вместе с указателями имён) прямо в образ —
 // тогда в куче искать нечего, а классы лежат в .data/.rodata библиотеки.
 struct PtrRange { uint64_t start = 0, end = 0; };
-PtrRange  s_ptr_ranges[128];
+PtrRange  s_ptr_ranges[640];
 int       s_ptr_range_count = 0;
 uint64_t  s_ptr_seg_bytes = 0;    // сколько МБ в сегментах .so
 uint64_t  s_ptr_anon_bytes = 0;   // сколько МБ в анонимной памяти
@@ -405,7 +423,7 @@ static void phase_maps() {
     s_maps_lib_lines = 0; s_maps_cut_window = 0; s_maps_cut_x = 0;
     s_maps_cut_deleted = 0; s_maps_open_failed = false;
     s_candidate_count = 0;
-    s_anon_count = 0;
+    s_anon_count = 0; s_anon_total = 0; s_filemisc_count = 0;
     if (!s_scan_base) s_scan_base = g_il2cpp_base;
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
@@ -447,13 +465,31 @@ static void phase_maps() {
             // Анонимный читаемый регион — кандидат на блок строк метаданных
             // (бета маппит его без имени «global-metadata») и на кучу, где
             // лежат структуры классов. Собираем для строкового бутстрапа.
-            if (perms[0] == 'r' && perms[2] != 'x' &&
-                end - start >= (256ull << 10) && s_anon_count < 96) {
-                s_anon[s_anon_count].start = start;
-                s_anon[s_anon_count].end = end;
-                s_anon[s_anon_count].writable = (perms[1] == 'w');
-                ++s_anon_count;
+            if (perms[0] == 'r' && perms[2] != 'x' && end - start >= (256ull << 10)) {
+                ++s_anon_total;
+                if (s_anon_count < 512) {
+                    s_anon[s_anon_count].start = start;
+                    s_anon[s_anon_count].end = end;
+                    s_anon[s_anon_count].writable = (perms[1] == 'w');
+                    ++s_anon_count;
+                }
             }
+            continue;
+        }
+
+        // Прочий файловый маппинг (не libil2cpp.so и не метаданные): метадата
+        // протектора может лежать в своём .dat/.bin. Явный мусор (.dex/.oat/
+        // .vdex/.art/.apk — там байт-код, а не структуры) не собираем.
+        if (perms[0] == 'r' && perms[2] != 'x' && end - start >= (256ull << 10) &&
+            s_filemisc_count < 256 &&
+            !strstr(slash, "libil2cpp.so") && !strstr(slash, "global-metadata") &&
+            !strstr(slash, ".oat") && !strstr(slash, ".dex") &&
+            !strstr(slash, ".vdex") && !strstr(slash, ".art") &&
+            !strstr(slash, ".apk")) {
+            s_filemisc[s_filemisc_count].start = start;
+            s_filemisc[s_filemisc_count].end = end;
+            s_filemisc[s_filemisc_count].writable = (perms[1] == 'w');
+            ++s_filemisc_count;
             continue;
         }
 
@@ -688,6 +724,8 @@ static void store_verified_class(uint64_t klass, const char* name) {
     fc.ns[0] = 0;
 }
 
+static void apply_str_window(int idx);   // определена ниже, после phase_strsearch
+
 static void phase_strsearch(double deadline) {
     static uint8_t buf[kChunkBytes];
     static const char kNeedle[] = "PlayerManager";   // вместе с концевым NUL
@@ -704,50 +742,67 @@ static void phase_strsearch(double deadline) {
         }
         const uint8_t* hit = (const uint8_t*)memmem(buf, chunk, kNeedle, kNeed);
         if (hit) {
-            s_str_addr = s_str_pos + (uint64_t)(hit - buf);
-            // Окно блока строк: строковый раздел метаданных может лежать в
-            // нескольких СМЕЖНЫХ анонимных областях (протектор режет маппинг
-            // кусками). Собираем непрерывную цепочку соседей (до 64 МБ),
-            // иначе имена за границей первой области теряются. Если цепочка
-            // гигантская (один большой регион) — окно ±16 МБ вокруг хита.
-            uint64_t wb = r.start, we = r.end;
-            for (int j = s_str_region + 1; j < s_anon_count &&
-                     s_anon[j].start == we && (we - wb) < (64ull << 20); ++j)
-                we = s_anon[j].end;
-            for (int j = s_str_region - 1; j >= 0 &&
-                     s_anon[j].end == wb && (we - wb) < (64ull << 20); --j)
-                wb = s_anon[j].start;
-            if (we - wb > (32ull << 20)) {
-                const uint64_t kPad = 16ull << 20;
-                wb = (s_str_addr > kPad) ? (s_str_addr - kPad) : 0;
-                we = s_str_addr + kPad;
+            if (s_str_cand_count < 8) {
+                s_str_cand[s_str_cand_count] = s_str_pos + (uint64_t)(hit - buf);
+                s_str_cand_region[s_str_cand_count] = s_str_region;
+                ++s_str_cand_count;
             }
-            s_meta_begin = wb;
-            s_meta_end = we;
-            build_wanted_names();
-            for (int i = 0; i < s_wanted_name_count; ++i) s_wanted_str[i] = 0;
-            s_wanted_str_found = 0;
-            s_blob_pos = s_meta_begin;
-            s_last_progress_log = 0;
-            // Блок строк — холодное файлово маппинг: страницы подчитываются с
-            // диска, чтение медленное. Дедлайн скана .so тут не годится.
-            s_scan_deadline = mono_seconds() + 180.0;
-            LogLine("автооффсеты: строка «PlayerManager» найдена @0x%llx — окно строк 0x%llx..0x%llx (%llu МБ), ищу имена из таблицы",
-                    (unsigned long long)s_str_addr,
-                    (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end,
-                    (unsigned long long)((s_meta_end - s_meta_begin) >> 20));
-            s_phase = PH_BLOB;
-            return;
+            s_str_pos += (uint64_t)(hit - buf) + kNeed;   // ищем следующее
+            if (s_str_cand_count >= 8) break;
+            continue;
         }
         s_str_scanned += chunk;
         s_str_pos += chunk - (kNeed - 1);   // нахлёст, чтобы не потерять стык
-        if (s_str_scanned >= (768ull << 20)) break;
+        if (s_str_scanned >= (2048ull << 20)) break;
     }
-    if (s_str_region >= s_anon_count || s_str_scanned >= (768ull << 20)) {
+    if (s_str_region >= s_anon_count || s_str_scanned >= (2048ull << 20) ||
+        s_str_cand_count >= 8) {
+        if (s_str_cand_count > 0) {
+            s_str_cand_idx = 0;
+            s_best_found = -1;
+            apply_str_window(0);
+            return;
+        }
         LogLine("автооффсеты: строка «PlayerManager» в анонимной памяти НЕ найдена (просмотрено %llu МБ) — имена, видимо, зашифрованы, автообновление по именам невозможно",
                 (unsigned long long)(s_str_scanned >> 20));
         s_phase = PH_DONE;
     }
+}
+
+// Окно блока строк вокруг кандидата: строковый раздел метаданных может лежать
+// в нескольких СМЕЖНЫХ анонимных областях (протектор режет маппинг кусками).
+// Собираем непрерывную цепочку соседей (до 64 МБ), иначе имена за границей
+// первой области теряются. Если цепочка гигантская — окно ±16 МБ вокруг хита.
+static void apply_str_window(int idx) {
+    const int reg = s_str_cand_region[idx];
+    s_str_addr = s_str_cand[idx];
+    uint64_t wb = s_anon[reg].start, we = s_anon[reg].end;
+    for (int j = reg + 1; j < s_anon_count &&
+             s_anon[j].start == we && (we - wb) < (64ull << 20); ++j)
+        we = s_anon[j].end;
+    for (int j = reg - 1; j >= 0 &&
+             s_anon[j].end == wb && (we - wb) < (64ull << 20); --j)
+        wb = s_anon[j].start;
+    if (we - wb > (32ull << 20)) {
+        const uint64_t kPad = 16ull << 20;
+        wb = (s_str_addr > kPad) ? (s_str_addr - kPad) : 0;
+        we = s_str_addr + kPad;
+    }
+    s_meta_begin = wb;
+    s_meta_end = we;
+    build_wanted_names();
+    for (int i = 0; i < s_wanted_name_count; ++i) s_wanted_str[i] = 0;
+    s_wanted_str_found = 0;
+    s_blob_pos = s_meta_begin;
+    s_last_progress_log = 0;
+    // Блок строк — холодное файлово маппинг: страницы подчитываются с
+    // диска, чтение медленное. Дедлайн скана .so тут не годится.
+    s_scan_deadline = mono_seconds() + 180.0;
+    LogLine("автооффсеты: блок строк №%d из %d — «PlayerManager» @0x%llx, окно 0x%llx..0x%llx (%llu МБ), ищу имена из таблицы",
+            idx + 1, s_str_cand_count, (unsigned long long)s_str_addr,
+            (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end,
+            (unsigned long long)((s_meta_end - s_meta_begin) >> 20));
+    s_phase = PH_BLOB;
 }
 
 static void phase_blob(double deadline) {
@@ -793,11 +848,30 @@ static void phase_blob(double deadline) {
         }
     }
     if (s_blob_pos >= s_meta_end || mono_seconds() >= s_scan_deadline) {
-        int wr = 0;
-        for (int i = 0; i < s_anon_count; ++i) if (s_anon[i].writable) ++wr;
-        LogLine("автооффсеты: в блоке строк найдено табличных имён %d из %d, "
-                "анонимных регионов в карте %d (writable %d)",
-                s_wanted_str_found, s_wanted_name_count, s_anon_count, wr);
+        LogLine("автооффсеты: блок строк №%d из %d (0x%llx..0x%llx) — табличных имён %d из %d",
+                s_str_cand_idx + 1, s_str_cand_count,
+                (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end,
+                s_wanted_str_found, s_wanted_name_count);
+        // Запоминаем лучший блок: настоящие имена метаданных лежат только в
+        // одном из них, остальные — обрезки или чужие копии строк.
+        if (s_wanted_str_found > s_best_found) {
+            s_best_found = s_wanted_str_found;
+            s_best_begin = s_meta_begin; s_best_end = s_meta_end;
+            s_best_addr = s_str_addr;
+            for (int i = 0; i < s_wanted_name_count; ++i) s_best_str[i] = s_wanted_str[i];
+        }
+        ++s_str_cand_idx;
+        if (s_str_cand_idx < s_str_cand_count && s_best_found < s_wanted_name_count) {
+            apply_str_window(s_str_cand_idx);   // пробуем следующий блок
+            return;
+        }
+        // Все блоки проверены — работаем дальше с лучшим.
+        s_meta_begin = s_best_begin; s_meta_end = s_best_end; s_str_addr = s_best_addr;
+        for (int i = 0; i < s_wanted_name_count; ++i) s_wanted_str[i] = s_best_str[i];
+        s_wanted_str_found = (s_best_found > 0) ? s_best_found : 0;
+        LogLine("автооффсеты: лучший блок строк 0x%llx..0x%llx — табличных имён %d из %d",
+                (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end,
+                s_wanted_str_found, s_wanted_name_count);
         // Диагностика ротации: какие табличные имена в блоке отсутствуют.
         if (s_wanted_str_found > 0 && s_wanted_str_found < s_wanted_name_count) {
             char miss[512];
@@ -844,18 +918,27 @@ static void build_ptr_ranges() {
         s_ptr_seg_bytes += s_segments[i].end - s_segments[i].start;
         ++s_ptr_range_count;
     }
-    for (int i = 0; i < s_anon_count && s_ptr_range_count < 128; ++i) {
+    for (int i = 0; i < s_anon_count && s_ptr_range_count < 640; ++i) {
         if (s_anon[i].end <= s_anon[i].start) continue;
         s_ptr_ranges[s_ptr_range_count].start = s_anon[i].start;
         s_ptr_ranges[s_ptr_range_count].end = s_anon[i].end;
         s_ptr_anon_bytes += s_anon[i].end - s_anon[i].start;
         ++s_ptr_range_count;
     }
+    for (int i = 0; i < s_filemisc_count && s_ptr_range_count < 640; ++i) {
+        if (s_filemisc[i].end <= s_filemisc[i].start) continue;
+        s_ptr_ranges[s_ptr_range_count].start = s_filemisc[i].start;
+        s_ptr_ranges[s_ptr_range_count].end = s_filemisc[i].end;
+        s_ptr_anon_bytes += s_filemisc[i].end - s_filemisc[i].start;
+        ++s_ptr_range_count;
+    }
     LogLine("автооффсеты: ищу указатели на имена в %d диапазонах — "
-            "сегменты libil2cpp.so %llu МБ + анонимная память %llu МБ",
+            "сегменты libil2cpp.so %llu МБ + анонимная память %llu МБ "
+            "(анонимных регионов %d из %d, файловых прочих %d)",
             s_ptr_range_count,
             (unsigned long long)(s_ptr_seg_bytes >> 20),
-            (unsigned long long)(s_ptr_anon_bytes >> 20));
+            (unsigned long long)(s_ptr_anon_bytes >> 20),
+            s_anon_count, s_anon_total, s_filemisc_count);
 }
 
 static void phase_ptr(double deadline) {
@@ -887,6 +970,10 @@ static void phase_ptr(double deadline) {
                 cand[ncand++] = s_lib_begin + v;
             if (!ncand) continue;
             ++s_ptr_inwin;   // значение указывает внутрь окна строк (любое)
+            if (s_ptr_inwin <= 4)
+                LogLine("автооффсеты: указатель в окно строк @0x%llx -> 0x%llx (диапазон %d)",
+                        (unsigned long long)(s_ptr_pos + (uint64_t)i * 8),
+                        (unsigned long long)cand[0], s_ptr_region);
             for (int n = 0; n < s_wanted_name_count; ++n) {
                 bool hit = false;
                 for (int c = 0; c < ncand; ++c) if (s_wanted_str[n] == cand[c]) hit = true;
@@ -910,7 +997,7 @@ static void phase_ptr(double deadline) {
         s_ptr_pos += chunk;
         s_ptr_scanned += chunk;
         if (all_wanted_found()) break;
-        if (s_ptr_scanned >= (768ull << 20)) break;
+        if (s_ptr_scanned >= (3072ull << 20)) break;
         if (mono_seconds() >= s_scan_deadline) break;
         const double now_s = mono_seconds();
         if (now_s - s_last_progress_log >= 8.0) {
@@ -923,7 +1010,7 @@ static void phase_ptr(double deadline) {
         }
     }
     if (all_wanted_found() || s_ptr_region >= s_ptr_range_count ||
-        s_ptr_scanned >= (768ull << 20) || mono_seconds() >= s_scan_deadline) {
+        s_ptr_scanned >= (3072ull << 20) || mono_seconds() >= s_scan_deadline) {
         LogLine("автооффсеты: бутстрап завершён — просмотрено %llu МБ (%d диапазонов из %d), "
                 "в окне строк %llu значений, точных указателей %llu, живых классов %llu (в кэше %d)",
                 (unsigned long long)(s_ptr_scanned >> 20), s_ptr_region, s_ptr_range_count,
@@ -1362,8 +1449,12 @@ void offset_resolver_reset() {
     s_fi_size = IL2CPP_FIELDINFO_SIZE; s_fi_parent = IL2CPP_FIELDINFO_PARENT;
     s_resolved = 0; s_changed = 0;
     s_heap_pos = s_heap_end = 0; s_heap_done = false;
-    s_anon_count = 0;
+    s_anon_count = 0; s_anon_total = 0; s_filemisc_count = 0;
     s_str_addr = 0; s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
+    s_str_cand_count = 0; s_str_cand_idx = 0;
+    s_best_found = -1; s_best_begin = 0; s_best_end = 0; s_best_addr = 0;
+    for (int i = 0; i < 8; ++i) { s_str_cand[i] = 0; s_str_cand_region[i] = 0; }
+    for (int i = 0; i < 64; ++i) s_best_str[i] = 0;
     s_wanted_name_count = 0; s_wanted_str_found = 0;
     s_blob_pos = 0; s_blob_fails = 0;
     for (int i = 0; i < 64; ++i) s_wanted_str[i] = 0;
