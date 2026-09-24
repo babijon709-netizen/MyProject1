@@ -86,6 +86,12 @@ static T qrd(uint64_t addr) {
 }
 static uint64_t qrd_ptr(uint64_t a) { return memio::untag(qrd<uint64_t>(a)); }
 
+// Проверка адреса строки (C-string в памяти метаданных не обязана иметь
+// 8-байтовое выравнивание, в отличие от указателей на структуры Il2CppClass).
+static inline bool valid_str_ptr(uint64_t p) {
+    return p >= 0x10000 && p < 0x0001000000000000ULL;
+}
+
 // Тихий аналог read_remote_string (тот использует сообщающие чтения).
 static std::string qrd_string(uint64_t address, bool* readable) {
     if (readable) *readable = false;
@@ -524,18 +530,24 @@ static void phase_maps() {
             // лежат структуры классов. Собираем для строкового бутстрапа.
             if (perms[0] != 'r') {
                 // Бит чтения снят, но страницы могут отдаваться: /proc/<pid>/mem
-                // читает с FOLL_FORCE. Три коротких чтения — начало, середина и
-                // четверть региона: так отличается настоящий скрытый пул от
-                // гигабайтной резервации адресов, где нет ни одной страницы.
+                // читает с FOLL_FORCE. Проверяем несколько точек в регионе:
+                // если хотя бы одна читается — регион доступен для чтения.
                 const uint64_t rsize = end - start;
-                const uint64_t offs[3] = {0, rsize >> 1, rsize >> 2};
                 uint8_t probe[128] = {};
                 bool can_read = false, non_zero = false;
-                for (int t = 0; t < 3 && !non_zero; ++t) {
+                const uint64_t offs[] = {
+                    0, 64 * 1024, 256 * 1024, 1024 * 1024,
+                    2 * 1024 * 1024, 4 * 1024 * 1024, 8 * 1024 * 1024,
+                    16 * 1024 * 1024, rsize >> 2, rsize >> 1
+                };
+                for (size_t t = 0; t < sizeof(offs)/sizeof(offs[0]); ++t) {
+                    if (offs[t] >= rsize) continue;
                     if (!qrd_buf(start + offs[t], probe, sizeof(probe))) continue;
                     can_read = true;
-                    for (size_t k = 0; k < sizeof(probe); ++k)
+                    for (size_t k = 0; k < sizeof(probe); ++k) {
                         if (probe[k]) { non_zero = true; break; }
+                    }
+                    if (non_zero) break;
                 }
                 if (!can_read) {
                     s_anon_noread_bytes += rsize;   // и правда не прочитать
@@ -546,8 +558,9 @@ static void phase_maps() {
                                  sizeof(s_anon_noread[0].rperm), "%s", perms);
                     }
                     ++s_anon_noread_count;
-                } else if (!non_zero) {
-                    // Читается, но пусто: резервация адресов, сканировать нечего.
+                } else if (!non_zero && rsize > (64ull << 20)) {
+                    // Читается, но пусто и гигантский размер (>64 МБ): скорее всего
+                    // резервация виртуального адресного пространства.
                     ++s_probe_zero;
                     s_probe_zero_bytes += rsize;
                 } else {
@@ -770,13 +783,13 @@ static int try_class_candidate(uint64_t v) {
         const uint64_t ns = qrd_ptr(v + IL2CPP_CLASS_NAMESPACE);
         if (ns < s_meta_begin || ns >= s_meta_end) return 0;
     } else {
-        if (!valid_obj(nm)) return 0;
+        if (!valid_str_ptr(nm)) return 0;
         // «Мягкий» режим без окна метаданных (бета): мусорных указателей на
         // читаемые строки в сотни раз больше настоящих классов — один лишь
         // «имя читается» забил кэш мусором. Настоящий класс ДОПОЛНИТЕЛЬНО
         // имеет валидный указатель пространства имён (он всегда есть, хотя бы
         // пустая строка); это дешёвый дополнительный фильтр.
-        if (!valid_obj(qrd_ptr(v + IL2CPP_CLASS_NAMESPACE))) return 0;
+        if (!valid_str_ptr(qrd_ptr(v + IL2CPP_CLASS_NAMESPACE))) return 0;
     }
     bool ok = false;
     const std::string name = qrd_string(nm, &ok);
@@ -851,7 +864,13 @@ static void phase_heap(double deadline) {
     }
     if (all_wanted_found() || s_heap_pos >= s_heap_end ||
         mono_seconds() >= s_scan_deadline) {
-        s_phase = PH_FIELDS;
+        if (!all_wanted_found() && wanted_in_cache() == 0) {
+            LogLine("автооффсеты: в куче вокруг якоря табличных классов нет — начинаю поиск строк в памяти");
+            s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
+            s_phase = PH_STRS;
+        } else {
+            s_phase = PH_FIELDS;
+        }
     }
 }
 
@@ -1510,10 +1529,29 @@ static void phase_scan(double deadline) {
             const char* anchor_name = nullptr;
             uint64_t anchor = (!s_heap_done && wanted_in_cache() == 0)
                                   ? anchor_class(&anchor_name) : 0;
+            if (anchor && anchor_name && anchor_name[0]) {
+                bool aok = false;
+                const std::string an = qrd_string(qrd_ptr(anchor + IL2CPP_CLASS_NAME), &aok);
+                if (aok && an != anchor_name) {
+                    LogLine("автооффсеты: якорь 0x%llx («%s») не совпал с ожидаемым «%s» — начинаю поиск строк в памяти",
+                            (unsigned long long)anchor, an.c_str(), anchor_name);
+                    anchor = 0;
+                    s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
+                    s_phase = PH_STRS;
+                }
+            }
             if (anchor && s_lib_begin && anchor >= s_lib_begin && anchor < s_lib_end)
                 anchor = 0;
             if (anchor) start_heap_scan(anchor);
-            else s_phase = PH_FIELDS;
+            else if (s_phase != PH_STRS) {
+                if (wanted_in_cache() == 0) {
+                    LogLine("автооффсеты: табличных классов в .so нет — начинаю поиск строк в памяти");
+                    s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
+                    s_phase = PH_STRS;
+                } else {
+                    s_phase = PH_FIELDS;
+                }
+            }
         } else if (!s_class_count && try_next_base()) {
             // Классов нет: база помечена пустой, скан пойдёт по следующему
             // кандидату — новый список сегментов соберёт PH_MAPS.
@@ -1572,7 +1610,7 @@ static bool calibrate_fields(uint64_t klass) {
 static bool read_field_name(uint64_t entry, char* out, size_t cap) {
     const uint64_t nmp = qrd_ptr(entry + IL2CPP_FIELDINFO_NAME);
     if (s_meta_begin && (nmp < s_meta_begin || nmp >= s_meta_end)) return false;
-    if (!s_meta_begin && !valid_obj(nmp)) return false;
+    if (!s_meta_begin && !valid_str_ptr(nmp)) return false;
     bool ok = false;
     const std::string name = qrd_string(nmp, &ok);
     if (!ok || name.empty() || name.size() >= cap) return false;
@@ -1633,8 +1671,8 @@ static void log_anchor_dump(uint64_t anchor) {
     LogLine("автооффсеты: якорь — image 0x%llx %s, имя 0x%llx %s, нс 0x%llx %s, fields@0x80 0x%llx %s",
             (unsigned long long)image,
             (s_lib_begin && image >= s_lib_begin && image < s_lib_end) ? "в окне .so" : "ВНЕ окна",
-            (unsigned long long)nm, valid_obj(nm) ? "указатель валиден" : "указатель НЕвалиден",
-            (unsigned long long)ns, valid_obj(ns) ? "валиден" : "НЕвалиден",
+            (unsigned long long)nm, valid_str_ptr(nm) ? "указатель валиден" : "указатель НЕвалиден",
+            (unsigned long long)ns, valid_str_ptr(ns) ? "валиден" : "НЕвалиден",
             (unsigned long long)fp, valid_obj(fp) ? "валиден" : "НЕвалиден");
 }
 
