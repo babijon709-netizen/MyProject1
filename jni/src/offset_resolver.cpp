@@ -154,8 +154,14 @@ int      s_maps_cut_deleted = 0;  // мёртвый «(deleted)» образ
 bool     s_maps_open_failed = false;
 double   s_scan_deadline = 0;     // общего бюджета скана
 
-FoundClass s_classes[768];
+FoundClass s_classes[768 + 256];
 int      s_class_count = 0;
+// Обычный потолок кэша. Хвост массива — резерв: лог с беты показал, что БЕЗ
+// окна метаданных «мягкий» фильтр пропускает сотни тысяч мусорных кандидатов,
+// кэш забивается мусором ещё в начале скана, и настоящие классы (вставшие в
+// образе дальше) в него не попадают. Классы с именами ИЗ ТАБЛИЦЫ сохраняем
+// даже сверх потолка (их всего ~44 имени, резерв с запасом).
+constexpr int kClassCap = 768;
 int      s_names_ok = 0, s_names_fail = 0;
 // Сколько значений прошли проверки «указатель + image внутри libil2cpp», ДО
 // фильтров имени. По нему в логе видно, на каком именно этапе умерли
@@ -165,6 +171,7 @@ int      s_names_ok = 0, s_names_fail = 0;
 int      s_shape_pass = 0;
 
 uint64_t s_fields_off = 0;        // откалиброванное смещение Il2CppClass.fields
+int      s_calib_best = 0;        // лучший счёт формы полей за калибровку (диагностика)
 int      s_resolved = 0, s_changed = 0;
 
 // Знания о базах в рамках ЖИВОГО процесса (переживают сброс скана при
@@ -224,6 +231,15 @@ static bool all_wanted_found() {
     return true;
 }
 
+// Имя входит в таблицу резолвера? Такие классы сохраняем в кэш даже сверх
+// обычного потолка (см. kClassCap) и калибруем поля в первую очередь на них:
+// совпадение имени с именем из дампа — признак НАСТОЯЩЕГО класса.
+static bool name_is_wanted(const char* name) {
+    for (int i = 0; i < kOrFieldCount; ++i)
+        if (strcmp(kOrFields[i].cls, name) == 0) return true;
+    return false;
+}
+
 static FoundClass* find_class_slot(uint64_t klass) {
     for (int i = 0; i < s_class_count; ++i)
         if (s_classes[i].klass == klass) return &s_classes[i];
@@ -252,6 +268,7 @@ static bool try_next_base() {
         s_scan_base = b;
         s_bound_base = b;
         s_names_ok = 0; s_names_fail = 0; s_shape_pass = 0;
+        s_calib_best = 0;
         s_phase = PH_MAPS;
         return true;
     }
@@ -442,14 +459,22 @@ static int try_class_candidate(uint64_t v) {
         if (nm < s_meta_begin || nm >= s_meta_end) return 0;
         const uint64_t ns = qrd_ptr(v + IL2CPP_CLASS_NAMESPACE);
         if (ns < s_meta_begin || ns >= s_meta_end) return 0;
-    } else if (!valid_obj(nm)) {
-        return 0;
+    } else {
+        if (!valid_obj(nm)) return 0;
+        // «Мягкий» режим без окна метаданных (бета): мусорных указателей на
+        // читаемые строки в сотни раз больше настоящих классов — один лишь
+        // «имя читается» забил кэш мусором. Настоящий класс ДОПОЛНИТЕЛЬНО
+        // имеет валидный указатель пространства имён (он всегда есть, хотя бы
+        // пустая строка); это дешёвый дополнительный фильтр.
+        if (!valid_obj(qrd_ptr(v + IL2CPP_CLASS_NAMESPACE))) return 0;
     }
     bool ok = false;
     const std::string name = qrd_string(nm, &ok);
     if (!ok || name.empty() || name.size() > 47) { ++s_names_fail; return 0; }
     ++s_names_ok;
-    if (s_class_count >= 768) return 1;
+    const int cap_total = (int)(sizeof(s_classes) / sizeof(s_classes[0]));
+    if (s_class_count >= kClassCap && !name_is_wanted(name.c_str())) return 1;
+    if (s_class_count >= cap_total) return 1;
     FoundClass& fc = s_classes[s_class_count];
     fc.klass = v;
     snprintf(fc.name, sizeof(fc.name), "%s", name.c_str());
@@ -550,16 +575,22 @@ static int fields_shape_score(uint64_t klass, uint64_t fields_ptr, int probe) {
     return score;
 }
 
+static int probe_fields_shape(uint64_t klass, uint64_t off) {
+    const int score = fields_shape_score(klass, qrd_ptr(klass + off), 6);
+    if (score > s_calib_best) s_calib_best = score;   // диагностика: насколько
+    return score;                                     // близко вообще сходились
+}
+
 static bool calibrate_fields(uint64_t klass) {
     // Сначала табличное значение — почти всегда оно и есть.
     const uint64_t table_off = IL2CPP_CLASS_FIELDS;
-    if (fields_shape_score(klass, qrd_ptr(klass + table_off), 6) >= 5) {
+    if (probe_fields_shape(klass, table_off) >= 5) {
         s_fields_off = table_off;
         return true;
     }
     for (uint64_t f = 0x70; f <= 0x178; f += 8) {
         if (f == table_off) continue;
-        if (fields_shape_score(klass, qrd_ptr(klass + f), 6) >= 5) {
+        if (probe_fields_shape(klass, f) >= 5) {
             s_fields_off = f;
             return true;
         }
@@ -611,14 +642,28 @@ static void apply_resolution(const OrField& of, int32_t off) {
 
 static void phase_fields() {
     // Калибровка: первым пробуем самый «толстый» класс (больше полей —
-    // надёжнее форма), дальше — любые найденные, пока не сойдётся.
+    // надёжнее форма), потом ВСЕ классы с именами из таблицы (совпадение
+    // имени с дампом — признак настоящего класса; на бете кэш без окна
+    // метаданных полон мусора, и «первые 12» могли оказаться мусорными),
+    // дальше — любые найденные, пока не сойдётся.
+    int wanted_in_cache = 0;
+    for (int i = 0; i < s_class_count; ++i)
+        if (name_is_wanted(s_classes[i].name)) ++wanted_in_cache;
     uint64_t first_choice = 0;
     for (int i = 0; i < s_class_count && !first_choice; ++i)
         if (strcmp(s_classes[i].name, "PlayerManager") == 0) first_choice = s_classes[i].klass;
     if (first_choice) calibrate_fields(first_choice);
-    for (int i = 0; i < s_class_count && !s_fields_off && i < 12; ++i)
+    for (int i = 0; i < s_class_count && !s_fields_off; ++i)
+        if (name_is_wanted(s_classes[i].name)) calibrate_fields(s_classes[i].klass);
+    for (int i = 0; i < s_class_count && !s_fields_off && i < 64; ++i)
         calibrate_fields(s_classes[i].klass);
-    if (!s_fields_off) { s_phase = PH_DONE; return; }
+    if (!s_fields_off) {
+        LogLine("автооффсеты: калибровка полей не сошлась — кэш %d классов, "
+                "табличных имён в кэше %d, лучший счёт формы полей %d",
+                s_class_count, wanted_in_cache, s_calib_best);
+        s_phase = PH_DONE;
+        return;
+    }
 
     for (int i = 0; i < kOrFieldCount; ++i) {
         const OrField& of = kOrFields[i];
@@ -639,10 +684,13 @@ static void log_summary() {
 #if OR_SELFTEST_BREAK_BAKED
     selftest_restore_unresolved();
 #endif
-    LogLine("автооффсеты: классов найдено %d (по форме %d, имён прочитано %d, отказов %d), "
+    int wanted = 0;
+    for (int i = 0; i < s_class_count; ++i)
+        if (name_is_wanted(s_classes[i].name)) ++wanted;
+    LogLine("автооффсеты: классов найдено %d (по форме %d, имён прочитано %d, отказов %d, табличных %d), "
             "fields@0x%llx, разрешено %d/%d констант (%d изменено), метаданные %s, "
             "база 0x%llx, пустых баз %d",
-            s_class_count, s_shape_pass, s_names_ok, s_names_fail,
+            s_class_count, s_shape_pass, s_names_ok, s_names_fail, wanted,
             (unsigned long long)s_fields_off, s_resolved, kOrFieldCount, s_changed,
             s_meta_begin ? "найдены" : "НЕ найдены (фильтр слабее)",
             (unsigned long long)g_il2cpp_base, s_dead_count);
@@ -715,7 +763,7 @@ void offset_resolver_reset() {
     s_maps_lib_lines = 0; s_maps_cut_window = 0; s_maps_cut_x = 0;
     s_maps_cut_deleted = 0; s_maps_open_failed = false;
     s_class_count = 0; s_names_ok = 0; s_names_fail = 0; s_shape_pass = 0;
-    s_fields_off = 0; s_resolved = 0; s_changed = 0;
+    s_fields_off = 0; s_calib_best = 0; s_resolved = 0; s_changed = 0;
     s_applied_count = 0; s_logged = false;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
     // «какие базы пусты, а где классы живые» НЕ сбрасываются: они привязаны
