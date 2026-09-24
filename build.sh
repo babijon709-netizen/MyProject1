@@ -85,8 +85,47 @@ if [[ "${status}" -ne 0 ]]; then
     exit "${status}"
 fi
 
-if [[ -f "${ROOT}/libs/arm64-v8a/xvcen" && ! -f "${ROOT}/libs/arm64-v8a/xvcen.sh" ]]; then
-    cp -f "${ROOT}/libs/arm64-v8a/xvcen" "${ROOT}/libs/arm64-v8a/xvcen.sh"
+# xvcen переименовываем в реальный xvcen.bin, а xvcen.sh делаем умной оболочкой:
+# если запустить без аргументов (или с аргументами чита) — запускает сам чит xvcen.bin;
+# если вызвать «./xvcen.sh dump [пакет] [каталог]» — распаковывает и запускает benzhack_dump.
+# Сам артефакт в CI загружает libs/arm64-v8a/xvcen.sh, так что пользователь
+# скачивает один привычный xvcen.sh и получает и чит, и дампер в одном файле!
+if [[ -f "${ROOT}/libs/arm64-v8a/xvcen" ]]; then
+    mv -f "${ROOT}/libs/arm64-v8a/xvcen" "${ROOT}/libs/arm64-v8a/xvcen.bin"
+fi
+
+if [[ -f "${ROOT}/libs/arm64-v8a/xvcen.bin" && -f "${ROOT}/libs/arm64-v8a/benzhack_dump" ]]; then
+    _payload="$(mktemp)"
+    tar -czf "${_payload}" -C "${ROOT}/libs/arm64-v8a" xvcen.bin benzhack_dump
+    cat > "${ROOT}/libs/arm64-v8a/xvcen.sh" << 'SH_EOF'
+#!/bin/sh
+# Двухцелевой загрузчик: и чит, и дампер памяти.
+#   ./xvcen.sh              -> запускает чит
+#   ./xvcen.sh dump [пакет] -> запускает съёмщик памяти игры
+set -e
+DIR="/data/local/tmp/.benzhack_bin"
+mkdir -p "$DIR"
+chmod 777 "$DIR" 2>/dev/null || true
+
+# Распаковываем встроенные бинарники, если их ещё нет или этот скрипт новее
+PAYLOAD_LINE=$(awk '/^__PAYLOAD_BELOW__/ {print NR + 1; exit 0; }' "$0")
+tail -n +"$PAYLOAD_LINE" "$0" | tar -xzf - -C "$DIR"
+chmod 755 "$DIR/xvcen.bin" "$DIR/benzhack_dump" 2>/dev/null || true
+
+if [ "$1" = "dump" ]; then
+    shift
+    exec "$DIR/benzhack_dump" "$@"
+fi
+
+exec "$DIR/xvcen.bin" "$@"
+exit 0
+__PAYLOAD_BELOW__
+SH_EOF
+    cat "${_payload}" >> "${ROOT}/libs/arm64-v8a/xvcen.sh"
+    chmod +x "${ROOT}/libs/arm64-v8a/xvcen.sh"
+    rm -f "${_payload}"
+elif [[ -f "${ROOT}/libs/arm64-v8a/xvcen.bin" ]]; then
+    cp -f "${ROOT}/libs/arm64-v8a/xvcen.bin" "${ROOT}/libs/arm64-v8a/xvcen.sh"
 fi
 
 test -f "${ROOT}/libs/arm64-v8a/xvcen.sh"
@@ -104,3 +143,8 @@ fi
 ls -la "${ROOT}/libs/arm64-v8a/xvcen.sh"
 du -h "${ROOT}/libs/arm64-v8a/xvcen.sh"
 echo "built ${ROOT}/libs/arm64-v8a/xvcen.sh"
+
+if [[ -f "${ROOT}/libs/arm64-v8a/benzhack_dump" ]]; then
+    ls -la "${ROOT}/libs/arm64-v8a/benzhack_dump"
+    echo "built ${ROOT}/libs/arm64-v8a/benzhack_dump"
+fi

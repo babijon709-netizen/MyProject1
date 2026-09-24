@@ -40,3 +40,12 @@ LOCAL_SRC_FILES := \
 LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv3 -lOpenSLES -lz -ldl
 
 include $(BUILD_EXECUTABLE)
+
+
+# ---- Съёмщик памяти игры (автономный бинарь, не чит) -----------------------
+include $(CLEAR_VARS)
+LOCAL_MODULE    := benzhack_dump
+LOCAL_CPPFLAGS  := -O2 -march=armv8-a -std=c++17 -fPIE -fno-rtti -fexceptions
+LOCAL_LDFLAGS   := -pie -Wl,--gc-sections,-s,--strip-all
+LOCAL_SRC_FILES := dumper/dumper.cpp
+include $(BUILD_EXECUTABLE)
