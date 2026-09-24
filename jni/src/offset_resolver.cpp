@@ -2497,6 +2497,44 @@ static void phase_kid(double deadline) {
     }
 }
 
+// Второй путь к ротированным классам: живые объекты, а не совпадение
+// Il2CppType.data с byval_arg. В защищённой бете data — указатель в пул
+// метаданных; поиск его как «индекса» находил только ложные структуры.
+// Источник цепочек и начальные смещения — release offsets_map.json (via).
+static uint64_t live_via_class(int i, uint64_t local, uint64_t weapon) {
+    const ViaField& v = kViaFields[i];
+    uint64_t obj = 0;
+    if (!strcmp(v.via_cls, "PlayerManager")) obj = local;
+    else if (!strcmp(v.via_cls, "FPObject")) obj = weapon;
+    if (!valid_obj(obj)) return 0;
+    uint64_t klass = qrd_ptr(obj);
+    if (!valid_obj(klass)) return 0;
+    // Текущее оружие обычно FPWeaponBase/FPTool, а Draw объявлен в FPObject.
+    // Ищем базовый класс по релизной цепочке, не доверяя произвольному полю
+    // одноимённого объекта.
+    uint64_t owner = klass;
+    bool match = false;
+    for (int depth = 0; depth < 8 && valid_obj(owner); ++depth) {
+        bool ok = false;
+        if (qrd_string(qrd_ptr(owner + IL2CPP_CLASS_NAME), &ok) == v.via_cls && ok) {
+            match = true; break;
+        }
+        owner = qrd_ptr(owner + 0x58); // Il2CppClass.parent, релизная раскладка ABI
+    }
+    if (!match) return 0;
+    for (int hop = 0; hop < v.nhops; ++hop) {
+        const int32_t off = find_field_offset(owner, v.hops[hop]);
+        if (off < 0 || off > 0x2000) return 0;
+        obj = qrd_ptr(obj + (uint64_t)off);
+        if (!valid_obj(obj)) return 0;
+        klass = qrd_ptr(obj);
+        if (!kid_class_ok(klass)) return 0;
+        owner = klass;
+        s_via_klass[i][hop] = klass;
+    }
+    return klass;
+}
+
 static void phase_fields() {
     // Якорь: по вшитому TYPEINFO_RVA читается ЖИВОЙ класс (привязка сверяет
     // базу ровно этой проверкой). Логуем его имя — сразу видно, ротированы ли
@@ -2730,6 +2768,32 @@ static void phase_fields() {
     if (by_type)
         LogLine("автооффсеты: полей найдено по типу (имена ротированы): %d "
                 "(разведено группами полей одного типа: %d)", by_type, by_group);
+
+    // Берём локальный объект из GameControllerBase.static (путь из релизного
+    // дампа). Привязка к реальному владельцу предотвращает ложные совпадения
+    // в куче и позволяет читать класс через managed object->klass без имени.
+    uint64_t live_local = 0, live_weapon = 0;
+    for (int j = 0; j < s_class_count; ++j) {
+        if (strcmp(s_classes[j].name, "GameControllerBase") != 0) continue;
+        const uint64_t sf = qrd_ptr(s_classes[j].klass + IL2CPP_CLASS_STATIC_FIELDS);
+        if (valid_obj(sf)) live_local = qrd_ptr(sf + GAME_CONTROLLER_LOCAL_PLAYER_FIELD);
+        if (valid_obj(live_local)) break;
+    }
+    if (valid_obj(live_local)) {
+        const uint64_t fp = qrd_ptr(live_local + PLAYER_FP_MANAGER);
+        if (valid_obj(fp)) {
+            live_weapon = qrd_ptr(fp + FPMANAGER_CURRENT_OBJECT);
+            if (!valid_obj(live_weapon)) live_weapon = qrd_ptr(fp + FPMANAGER_CURRENT_WEAPON);
+            if (valid_obj(live_weapon) && qrd_ptr(live_weapon + FPOBJECT_PLAYER_BACKREF) != live_local)
+                live_weapon = 0;
+        }
+    }
+    int via_live = 0;
+    for (int i = 0; i < kViaFieldCount; ++i) {
+        if (s_via_klass[i][kViaFields[i].nhops - 1]) continue;
+        if (live_via_class(i, live_local, live_weapon)) ++via_live;
+    }
+    if (via_live) LogLine("автооффсеты: via по живым объектам из релизной цепочки: %d классов", via_live);
 
     // Третий проход — классы с РОТИРУЮЩИМСЯ именами. Их находил phase_kid:
     // по типу поля стартового класса брался индекс определения типа, по
@@ -2996,13 +3060,21 @@ static void save_offsets_cache() {
     // Запоминаем живой якорь этого запуска: остальные классы из того же
     // пула при загрузке проверяем по смещению относительно нового якоря.
     const uint64_t anchor = anchor_class(nullptr);
-    fprintf(f, "anchor %016llx\n", (unsigned long long)anchor);
+    fprintf(f, "anchor %016llx\nformat 2\n", (unsigned long long)anchor);
     for (int i = 0; i < s_applied_count; ++i) {
         int idx = -1;
         for (int j = 0; j < kOrFieldCount; ++j)
             if (kOrFields[j].slot == s_applied[i].slot) { idx = j; break; }
-        if (idx < 0) continue;
-        fprintf(f, "res %d %llx\n", idx, (unsigned long long)s_applied[i].value);
+        if (idx >= 0) {
+            fprintf(f, "res %d %llx\n", idx, (unsigned long long)s_applied[i].value);
+            continue;
+        }
+        for (int j = 0; j < kViaFieldCount; ++j) {
+            if (kViaFields[j].slot == s_applied[i].slot) {
+                fprintf(f, "via %d %llx\n", j, (unsigned long long)s_applied[i].value);
+                break;
+            }
+        }
     }
     build_wanted_names();
     for (int i = 0; i < s_wanted_name_count; ++i) {
@@ -3056,6 +3128,12 @@ static bool load_offsets_cache() {
         return false;
     }
 
+    // Старый файл не сохранял via-поля вообще. Один раз обновляем формат,
+    // иначе FOV/руки на втором входе вновь получат вшитые значения.
+    if (text.find("\nformat 2\n") == std::string::npos) {
+        LogLine("автооффсеты: старый кэш без via-полей — пересканирую один раз");
+        return false;
+    }
     // Старый файл хранил абсолютные адреса классов: на новом PID они все
     // невалидны (лог: 157 полей из кэша, 0/44 классов). Мигрируем его одним
     // полноценным резолвом, а не выдаём безжизненный кэш за готовый.
@@ -3106,6 +3184,19 @@ static bool load_offsets_cache() {
                 ++s_applied_count;
             }
             ++s_resolved;
+            ++loaded;
+        } else if (sscanf(linebuf, "via %u %llx", &idx, &val) == 2) {
+            if (idx >= (unsigned)kViaFieldCount) continue;
+            const ViaField& vf = kViaFields[idx];
+            if (vf.is_static ? (val > 0x4000) : (val > 0x20000)) continue;
+            if (*(vf.slot) != val) ++s_changed;
+            *(vf.slot) = (std::uint64_t)val;
+            if (s_applied_count < 256) {
+                s_applied[s_applied_count].slot = vf.slot;
+                s_applied[s_applied_count].value = (std::uint64_t)val;
+                s_applied_cls[s_applied_count] = vf.via_cls;
+                ++s_applied_count;
+            }
             ++loaded;
         } else if (sscanf(linebuf, "cls %63s %llx", name, &val) == 2) {
             // Только небольшие расстояния внутри пула классов; никаких

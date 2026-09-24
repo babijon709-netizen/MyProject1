@@ -148,12 +148,20 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // Resolve the current local player from the static source, NOT the ESP
     // cache which intentionally tolerates stale identities during respawn.
     uint64_t player = 0;
+    static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         settings.no_recoil || settings.no_spread || weapons.has_state()) {
         uint64_t klass = memory.ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
         uint64_t sf = memory.klass_is(klass, "GameControllerBase") ? get_class_static_fields(klass) : 0;
         uint64_t raw = 0;
         if (!sf || !memory.read(sf + GAME_CONTROLLER_LOCAL_PLAYER_FIELD, raw)) {
+            if (!local_source_failed && (settings.fov_enabled || settings.hands_enabled)) {
+                local_source_failed = true;
+                LogLine("viewmodel: нет локального игрока через GameControllerBase.static: class=0x%llx static=0x%llx field=0x%llx; fov=%d hands=%d",
+                        (unsigned long long)klass, (unsigned long long)sf,
+                        (unsigned long long)GAME_CONTROLLER_LOCAL_PLAYER_FIELD,
+                        settings.fov_enabled, settings.hands_enabled);
+            }
             // A failed read is NOT a confirmed scene change. Keep the originals
             // so a later successful frame can restore a disabled feature.
             auto wait = controller.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Waiting;
@@ -162,6 +170,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             weapons.spread = settings.no_spread || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
             return;
         }
+        local_source_failed = false;
         player = memio::untag(raw); // successful null read means no local player
     }
     weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, settings.no_spread);

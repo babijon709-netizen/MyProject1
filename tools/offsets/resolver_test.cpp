@@ -615,6 +615,7 @@ int main() {
     go_active::PLAYER_TEAM_NAME = 0x1234;
     go_active::FPMANAGER_AIM_BLEND = 0x1234;
     go_active::ITEM_DATA = 0x1234;
+    go_active::EVENT_HANDLER_AIM_ACTIVITY = 0x1234;
     const double t2 = mono_seconds();
     char st3[128] = {};
     for (;;) {
@@ -635,6 +636,8 @@ int main() {
     check(go_active::PLAYER_TEAM_NAME == 0x2A0, "кэш вернул teamName");
     check(go_active::FPMANAGER_AIM_BLEND == 0xB0, "кэш вернул поле, найденное по типу");
     check(go_active::ITEM_DATA == 0x30, "кэш вернул поле класса-типа");
+    check(go_active::EVENT_HANDLER_AIM_ACTIVITY == 0x40,
+          "кэш вернул via-поле обработчика прицела");
     check(offset_resolver_class("PlayerManager", "Oxide") == h.pm_real ||
           offset_resolver_class("PlayerManager", "Oxide") == h.pm_decoy,
           "кэш вернул класс PlayerManager");
