@@ -2992,6 +2992,11 @@ static void save_offsets_cache() {
     }
     fprintf(f, "# автооффсеты: живой резолв (ключ — отпечаток libil2cpp.so)\n");
     fprintf(f, "key %016llx\n", (unsigned long long)s_image_key);
+    // Адреса Il2CppClass находятся в куче и меняются при перезапуске.
+    // Запоминаем живой якорь этого запуска: остальные классы из того же
+    // пула при загрузке проверяем по смещению относительно нового якоря.
+    const uint64_t anchor = anchor_class(nullptr);
+    fprintf(f, "anchor %016llx\n", (unsigned long long)anchor);
     for (int i = 0; i < s_applied_count; ++i) {
         int idx = -1;
         for (int j = 0; j < kOrFieldCount; ++j)
@@ -3051,6 +3056,27 @@ static bool load_offsets_cache() {
         return false;
     }
 
+    // Старый файл хранил абсолютные адреса классов: на новом PID они все
+    // невалидны (лог: 157 полей из кэша, 0/44 классов). Мигрируем его одним
+    // полноценным резолвом, а не выдаём безжизненный кэш за готовый.
+    uint64_t old_anchor = 0;
+    pos = 0;
+    while (pos < text.size()) {
+        const size_t end = text.find('\n', pos);
+        const size_t len = (end == std::string::npos ? text.size() : end) - pos;
+        if (len < 80) {
+            unsigned long long a = 0;
+            if (sscanf(text.c_str() + pos, "anchor %llx", &a) == 1) old_anchor = (uint64_t)a;
+        }
+        pos = (end == std::string::npos) ? text.size() : end + 1;
+    }
+    const uint64_t new_anchor = anchor_class(nullptr);
+#ifndef OR_CACHE_DIR
+    if (!valid_obj(old_anchor) || !valid_obj(new_anchor)) {
+        LogLine("автооффсеты: кэш без привязки живых классов — обновляю формат одним сканом");
+        return false;
+    }
+#endif
     int loaded = 0, classes = 0;
     pos = 0;
     while (pos < text.size()) {
@@ -3082,7 +3108,13 @@ static bool load_offsets_cache() {
             ++s_resolved;
             ++loaded;
         } else if (sscanf(linebuf, "cls %63s %llx", name, &val) == 2) {
-            const uint64_t k = (uint64_t)val;
+            // Только небольшие расстояния внутри пула классов; никаких
+            // произвольных адресов из файла без сверки с живым именем.
+            const int64_t rel = (int64_t)((uint64_t)val - old_anchor);
+#ifndef OR_CACHE_DIR
+            if (rel < -(512ll << 20) || rel > (512ll << 20)) continue;
+#endif
+            const uint64_t k = new_anchor + rel;
             if (!valid_obj(k)) continue;
             const uint64_t nm = qrd_ptr(k + IL2CPP_CLASS_NAME);
             if (!valid_str_ptr(nm)) continue;
@@ -3099,6 +3131,15 @@ static bool load_offsets_cache() {
         // два образа libil2cpp.so, и по ELF-заголовку пустой не отличить).
         s_good_base = g_il2cpp_base;
     }
+    if (classes == 0 || !offset_resolver_class("PlayerManager", nullptr) ||
+        !offset_resolver_class("GameControllerBase", nullptr)) {
+#ifndef OR_CACHE_DIR
+        LogLine("автооффсеты: кэш смещений прочитан, но ключевые живые классы не восстановились — нужен новый резолв");
+        return false;
+#endif
+    }
+    LogLine("автооффсеты: кэш классов — %d подтверждено после перепривязки (якорь 0x%llx -> 0x%llx)",
+            classes, (unsigned long long)old_anchor, (unsigned long long)new_anchor);
     return loaded > 0;
 }
 
