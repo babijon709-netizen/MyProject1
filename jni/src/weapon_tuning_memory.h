@@ -2,6 +2,7 @@
 // Object-data implementation: no instruction writes, hooks, or library-data
 // writes. IO exposes read, named(object,name,namespace), and write_heap only.
 #include "viewmodel.h"
+#include "game_offsets_active.h"
 #include <array>
 
 namespace weapon_tuning {
@@ -64,6 +65,7 @@ template<class IO> class Controller {
     IO& io;
     uint64_t session_ = 0, base_ = 0;
     Context context_{};
+    int resolve_step_ = 0; // 1 identity, 2 fp/weapon, 3 config, 4 recoil, 5 calculator/dispersion
     // recoil: config+18..2c (six floats). Spread: clamp min/max +20/+24,
     // then calculator's per-instance cached base +20. No damage/rate writes.
     std::array<Scalar,9> saved_{};
@@ -105,23 +107,32 @@ template<class IO> class Controller {
     bool resolve(uint64_t player, const Layout& layout, Context& c) {
         uint64_t fp=0, weapon=0, config=0, recoil=0, dispersion=0, calc=0, back=0, p=0;
         uint8_t local=0;
+        resolve_step_ = 1;
         if (!player || !io.named(player,"PlayerManager","Oxide") ||
             !c.player.capture(io,player,true) || !pointer(io,player+0x40,p) ||
-            !io.named(p,"NetworkIdentity","Mirror") || !io.read(p+0x4a,local) || local!=1 ||
-            !pointer(io,player+0x90,fp) || !io.named(fp,"FPManager","Oxide") ||
-            !c.fp.capture(io,fp,true) || !pointer(io,fp+0x58,weapon)) return false;
-        // During equip transition do not guess from old/current-object caches.
-        if (!weapon || !io.named(weapon,"FPHitscan","Oxide") ||
-            !c.weapon.capture(io,weapon,true) || !pointer(io,weapon+0xc0,back) || back!=player ||
-            !pointer(io,weapon+0x130,config) || !io.named(config,"HitscanWeaponConfig",kWeapons) ||
+            !io.named(p,"NetworkIdentity","Mirror") || !io.read(p+0x4a,local) || local!=1)
+            return false;
+        resolve_step_ = 2;
+        if (!pointer(io,player+go_active::PLAYER_FP_MANAGER,fp) || !io.named(fp,"FPManager","Oxide") ||
+            !c.fp.capture(io,fp,true) || !pointer(io,fp+go_active::FPMANAGER_CURRENT_WEAPON,weapon) ||
+            !weapon || !io.named(weapon,"FPHitscan","Oxide") || !c.weapon.capture(io,weapon,true) ||
+            !pointer(io,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back) || back!=player)
+            return false;
+        resolve_step_ = 3;
+        if (!pointer(io,weapon+0x130,config) || !io.named(config,"HitscanWeaponConfig",kWeapons) ||
             !c.config.capture(io,config,true) || !pointer(io,weapon+0x200,recoil) ||
-            !pointer(io,config+0x68,p) || p!=recoil || !pointer(io,weapon+0x208,p) || p!=config ||
-            !io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true) ||
+            !pointer(io,config+0x68,p) || p!=recoil || !pointer(io,weapon+0x208,p) || p!=config)
+            return false;
+        resolve_step_ = 4;
+        if (!io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true) ||
             !pointer(io,weapon+0x1f8,calc) || !io.named(calc,layout.calculator,"") ||
-            !c.calculator.capture(io,calc,false) || !pointer(io,calc+0x18,p) || p!=config ||
+            !c.calculator.capture(io,calc,false)) return false;
+        resolve_step_ = 5;
+        if (!pointer(io,calc+0x18,p) || p!=config ||
             !pointer(io,calc+0x10,dispersion) || !pointer(io,config+0x60,p) || p!=dispersion ||
             !io.named(dispersion,"DispersionConfig",kWeapons) ||
             !c.dispersion.capture(io,dispersion,true)) return false;
+        resolve_step_ = 0;
         return true;
     }
     bool apply(size_t begin, size_t end, uint64_t player, const Layout& layout) {
@@ -143,6 +154,12 @@ template<class IO> class Controller {
         return true;
     }
 public:
+    // 0 ready/off, 1 ELF build-id, 2 guard instruction, 10..14 owner-chain stage,
+    // 20 restoration, 21 heap write/readback. Exposed for device diagnostics.
+    int diagnostic = 0;
+    int guard_index = -1;
+    uint32_t guard_observed = 0;
+    std::array<uint8_t,20> observed_id{};
     viewmodel::Status recoil = viewmodel::Status::Off, spread = viewmodel::Status::Off;
     explicit Controller(IO& memory) : io(memory) {}
     bool has_state() const { for (const auto& s:saved_) if (s.owned) return true; return false; }
@@ -150,6 +167,7 @@ public:
         bool ok=!restore_originals || restore(0,saved_.size());
         // Callers disconnect after reset. Never carry addresses into another pid.
         saved_={}; context_={}; session_=base_=0;
+        diagnostic=0; guard_index=-1; guard_observed=0; observed_id={};
         recoil=spread=viewmodel::Status::Off;
         return ok;
     }
@@ -158,6 +176,7 @@ public:
         if (session!=session_ || base!=base_) {
             reset(false); session_=session; base_=base;
         }
+        diagnostic=0; guard_index=-1; guard_observed=0;
         recoil=nr?Status::Waiting:Status::Off;
         spread=ns?Status::Waiting:Status::Off;
         // Restore even without a local player: ScriptableObject assets may
@@ -165,15 +184,21 @@ public:
         bool r=nr || restore(0,6), s=ns || restore(6,9);
         if (!r) recoil=Status::Failed;
         if (!s) spread=Status::Failed;
+        if (!r || !s) diagnostic=20;
         if (!r || !s || (!nr && !ns)) return;
         std::array<uint8_t,20> id{};
         const Layout* layout=nullptr;
         if (base && io.read(base+0x318,id))
             for (const auto& l:kLayouts) if (l.build_id==id) layout=&l;
+        observed_id=id;
         bool supported=layout!=nullptr;
+        if (!layout) diagnostic=1;
         if (layout) for (size_t i=0;i<layout->guard_sites.size();++i) {
             uint32_t word=0;
-            if (!io.read(base+layout->guard_sites[i],word) || word!=layout->guard_words[i]) supported=false;
+            if (!io.read(base+layout->guard_sites[i],word) || word!=layout->guard_words[i]) {
+                supported=false; diagnostic=2; guard_index=(int)i; guard_observed=word;
+                break;
+            }
         }
         if (!supported) {
             restore(0,9);
@@ -183,15 +208,18 @@ public:
         }
         Context next;
         if (!resolve(player,*layout,next)) {
-            if (!restore(0,9)) recoil=spread=Status::Failed;
+            diagnostic=9+resolve_step_;
+            if (!restore(0,9)) { recoil=spread=Status::Failed; diagnostic=20; }
             return;
         }
         if (!(next==context_)) {
-            if (!restore(0,9)) { recoil=spread=Status::Failed; return; }
+            if (!restore(0,9)) { recoil=spread=Status::Failed; diagnostic=20; return; }
             context_=next;
         }
-        if (nr) recoil=apply(0,6,player,*layout)?Status::Active:Status::Failed;
-        if (ns) spread=apply(6,9,player,*layout)?Status::Active:Status::Failed;
+        if (nr && (recoil=apply(0,6,player,*layout)?Status::Active:Status::Failed)==Status::Failed)
+            diagnostic=resolve_step_ ? 9+resolve_step_ : 21;
+        if (ns && (spread=apply(6,9,player,*layout)?Status::Active:Status::Failed)==Status::Failed)
+            diagnostic=resolve_step_ ? 9+resolve_step_ : 21;
     }
 };
 }

@@ -209,6 +209,20 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         player = memio::untag(raw); // successful null read means no local player
     }
     weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, settings.no_spread);
+    static int last_weapon_diagnostic = -1;
+    if ((settings.no_recoil || settings.no_spread) && weapons.diagnostic &&
+        weapons.diagnostic != last_weapon_diagnostic) {
+        char id[41] = {};
+        for (int i = 0; i < 20; ++i)
+            snprintf(id + i * 2, 3, "%02x", (unsigned)weapons.observed_id[i]);
+        LogLine("weapon data: отказ=%d (1 build-id,2 guard,10..14 цепочка,20 restore,21 запись), id=%s guard=%d word=0x%x player=0x%llx offsets fp=0x%llx weapon=0x%llx back=0x%llx",
+                weapons.diagnostic, id, weapons.guard_index, weapons.guard_observed,
+                (unsigned long long)player,
+                (unsigned long long)PLAYER_FP_MANAGER,
+                (unsigned long long)FPMANAGER_CURRENT_WEAPON,
+                (unsigned long long)FPOBJECT_PLAYER_BACKREF);
+    }
+    last_weapon_diagnostic = weapons.diagnostic;
     controller.tick(epoch, player, settings);
     log_status();
 }
