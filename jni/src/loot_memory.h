@@ -64,6 +64,7 @@
 // offset_resolver.cpp). Объявление дублирует game.h, чтобы заголовок
 // оставался самодостаточным (вне пространства имён: функция глобальная).
 std::uint64_t offset_resolver_class(const char* name, const char* ns);
+std::uint64_t offset_resolver_class_nth(const char* name, const char* ns, int nth);
 
 namespace fast_loot {
 
@@ -145,22 +146,28 @@ template <class IO> class Controller {
     // 2 — «не тот билд» (класс читается, но имя чужое).
     enum class Anchor { Ready, NotYet, Mismatch };
     Anchor resolve_helper(std::uint64_t base) {
-        if (helper_class_) return Anchor::Ready;
-        // Автообновление оффсетов: класс, найденный по имени в живых
-        // метаданных, переживает апдейт игры (объявлено выше, определение
-        // в offset_resolver.cpp; в игре — см. game.h).
-        const std::uint64_t found =
-            offset_resolver_class("PlayerLoopHelper", "Cysharp.Threading.Tasks");
-        if (found && class_is(found, "PlayerLoopHelper", "Cysharp.Threading.Tasks")) {
+        std::uint64_t statics = 0;
+        if (helper_class_ && pointer(helper_class_ + go_active::IL2CPP_CLASS_STATIC_FIELDS, statics) && statics)
+            return Anchor::Ready;
+        helper_class_ = 0; // named class with empty statics may be an uninitialized copy
+        bool saw_named = false;
+        for (int n = 0; n < 8; ++n) {
+            const std::uint64_t found = offset_resolver_class_nth(
+                "PlayerLoopHelper", "Cysharp.Threading.Tasks", n);
+            if (!found) break;
+            if (!class_is(found, "PlayerLoopHelper", "Cysharp.Threading.Tasks")) continue;
+            saw_named = true;
+            if (!pointer(found + go_active::IL2CPP_CLASS_STATIC_FIELDS, statics) || !statics) continue;
             helper_class_ = found;
             return Anchor::Ready;
         }
         std::uint64_t klass = 0;
-        if (!pointer(base + go_active::PLAYERLOOPHELPER_TYPEINFO_RVA, klass) ||
-            klass < 0x10000)
+        if (!pointer(base + go_active::PLAYERLOOPHELPER_TYPEINFO_RVA, klass) || klass < 0x10000)
             return Anchor::NotYet;
         if (!class_is(klass, "PlayerLoopHelper", "Cysharp.Threading.Tasks"))
-            return Anchor::Mismatch;
+            return saw_named ? Anchor::NotYet : Anchor::Mismatch;
+        if (!pointer(klass + go_active::IL2CPP_CLASS_STATIC_FIELDS, statics) || !statics)
+            return Anchor::NotYet;
         helper_class_ = klass;
         return Anchor::Ready;
     }

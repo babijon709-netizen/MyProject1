@@ -12,6 +12,7 @@
 // контроллер подбора получает 0 и идёт по вшитому PLAYERLOOPHELPER_TYPEINFO_RVA,
 // как до появления резолвера.
 std::uint64_t offset_resolver_class(const char*, const char*) { return 0; }
+std::uint64_t offset_resolver_class_nth(const char*, const char*, int) { return 0; }
 
 using namespace go_active;
 using namespace viewmodel;

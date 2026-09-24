@@ -147,6 +147,7 @@ void     offset_resolver_tick();       // порционный шаг, зват�
 void     offset_resolver_reset();      // привязка сброшена — начать заново
 void     offset_resolver_reapply();    // после go::SelectBuild вернуть найденное
 uint64_t offset_resolver_class(const char* name, const char* ns); // 0 = не найден
+uint64_t offset_resolver_class_nth(const char* name, const char* ns, int nth); // тёзки (0-based)
 void     offset_resolver_status(char* out, size_t cap);           // строка в меню
 // База, где резолвер нашёл живые классы для этого pid (0 = ещё не нашёл):
 // привязка пробует её первой, чтобы не вставать на пустую копию .so.

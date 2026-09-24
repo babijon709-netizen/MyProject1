@@ -3402,15 +3402,19 @@ bool offset_resolver_busy() {
 
 // Найденный класс: короткое имя (+ пространство имён, если задано).
 // 0 — не найден (вызывающий код падает на вшитый TYPEINFO_RVA).
-uint64_t offset_resolver_class(const char* name, const char* ns) {
+uint64_t offset_resolver_class_nth(const char* name, const char* ns, int nth) {
     if (s_phase != PH_DONE && s_phase != PH_FIELDS) return 0;
-    if (!name || !name[0]) return 0;
+    if (!name || !name[0] || nth < 0) return 0;
     for (int i = 0; i < s_class_count; ++i) {
         if (strcmp(s_classes[i].name, name) != 0) continue;
         if (ns && ns[0] && s_classes[i].ns[0] && strcmp(s_classes[i].ns, ns) != 0) continue;
-        return s_classes[i].klass;
+        if (nth-- == 0) return s_classes[i].klass;
     }
     return 0;
+}
+
+uint64_t offset_resolver_class(const char* name, const char* ns) {
+    return offset_resolver_class_nth(name, ns, 0);
 }
 
 // Отладочный дамп состояния — только для хост-стенда (не вызывается из чита,

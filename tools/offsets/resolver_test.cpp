@@ -491,6 +491,9 @@ int main() {
     const uint64_t pm_found = offset_resolver_class("PlayerManager", "Oxide");
     check(pm_found == h.pm_real || pm_found == h.pm_decoy,
           "PlayerManager найден по имени (без RVA)");
+    check(offset_resolver_class_nth("PlayerManager", "Oxide", 0) == h.pm_decoy &&
+          offset_resolver_class_nth("PlayerManager", "Oxide", 1) == h.pm_real,
+          "класс-тёзка: второй кандидат доступен при пустой статике первого");
     check(offset_resolver_class("TeamMember", "") == h.teammember,
           "TeamMember найден по имени");
     check(offset_resolver_class("NetworkClient", "Mirror") == h.netclient,
