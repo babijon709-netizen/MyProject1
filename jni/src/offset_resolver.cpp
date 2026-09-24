@@ -230,7 +230,7 @@ AnonRegion s_anon_noread[256];   // закрытые от чтения (для �
 // регион прокалывается коротким чтением: читается и не пустой — берём в скан
 // (и в первые ряды), читается, но сплошные нули — пустая резервация адресов,
 // не читается вовсе — тогда уже точно мимо.
-AnonRegion s_hidden[128];         // закрытые по правам, но читаемые на деле
+AnonRegion s_hidden[768];         // закрытые по правам, но читаемые на деле
 int      s_hidden_count = 0;
 uint64_t s_hidden_bytes = 0;
 int      s_hidden_skipped = 0;    // скрытых регионов не взяли: не хватило бюджета
@@ -292,11 +292,12 @@ int      s_top_range[3] = {-1, -1, -1};
 // метадату (массив Il2CppClass вместе с указателями имён) прямо в образ —
 // тогда в куче искать нечего, а классы лежат в .data/.rodata библиотеки.
 struct PtrRange { uint64_t start = 0, end = 0; };
-PtrRange  s_ptr_ranges[1024];
+PtrRange  s_ptr_ranges[2048];
 int       s_ptr_range_count = 0;
 uint64_t  s_ptr_seg_bytes = 0;    // сколько МБ в сегментах .so
 uint64_t  s_ptr_anon_bytes = 0;   // сколько МБ в анонимной памяти
 static void build_scan_ranges();   // определение ниже, вызывается из phase_strsearch
+static void start_heap_scan(uint64_t anchor);
 
 // Знания о базах в рамках ЖИВОГО процесса (переживают сброс скана при
 // перепривязке; очищаются только при смене pid). Лог с устройства показал:
@@ -566,7 +567,7 @@ static void phase_maps() {
                 } else {
                     ++s_probe_ok;
                     s_probe_bytes += rsize;
-                    if (s_hidden_count < 128) {
+                    if (s_hidden_count < 768) {
                         s_hidden[s_hidden_count].start = start;
                         s_hidden[s_hidden_count].end = end;
                         s_hidden[s_hidden_count].writable = (perms[1] == 'w');
@@ -752,15 +753,37 @@ static void phase_maps() {
     s_scan_pos = s_segments[0].start;
     s_scan_deadline = mono_seconds() + kScanTotalSec;
     s_phase = PH_SCAN;
-    // Урок беты: после апдейта игры вшитый TYPEINFO_RVA указывает в КОД, и
-    // скан .so находит только мусор. Проверка свежести: имя по якорю должно
-    // читаться и совпасть с ожидаемым. Не совпало — сразу строковый бутстрап.
+    // Урок беты: после апдейта игры вшитый TYPEINFO_RVA может указывать на
+    // другой класс (например, класс «U» вместо «PlayerManager») или в код.
+    // Если структура валидна как Il2CppClass — её указатель имени указывает
+    // прямо в таблицу строк метаданных! Используем его для задания s_meta_begin/end
+    // и сразу запускаем скан кучи вокруг якоря, где лежат остальные классы.
     const char* ank_expected = nullptr;
     const uint64_t ank = anchor_class(&ank_expected);
-    if (ank && ank_expected && ank_expected[0]) {
+    if (ank) {
         bool aok = false;
-        const std::string an = qrd_string(qrd_ptr(ank + IL2CPP_CLASS_NAME), &aok);
-        if (!aok || an != ank_expected) {
+        const uint64_t nm = qrd_ptr(ank + IL2CPP_CLASS_NAME);
+        const std::string an = valid_str_ptr(nm) ? qrd_string(nm, &aok) : std::string();
+        const uint64_t ns = qrd_ptr(ank + IL2CPP_CLASS_NAMESPACE);
+        const uint64_t img = qrd_ptr(ank);
+        const uint64_t fp = qrd_ptr(ank + IL2CPP_CLASS_FIELDS);
+        const bool is_real_class = valid_obj(img) && aok && !an.empty() && valid_str_ptr(ns) && valid_obj(fp);
+        if (is_real_class) {
+            LogLine("автооффсеты: якорь 0x%llx («%s») подтверждён как живой класс (имя @0x%llx)",
+                    (unsigned long long)ank, an.c_str(), (unsigned long long)nm);
+            if (!s_meta_begin) {
+                const uint64_t kSpan = 32ull << 20;
+                s_meta_begin = (nm > kSpan) ? ((nm - kSpan) & ~0xFFFFFFull) : 0x1000;
+                s_meta_end = s_meta_begin + (64ull << 20);
+                LogLine("автооффсеты: окно метаданных задано по якорю: 0x%llx..0x%llx (64 МБ)",
+                        (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end);
+            }
+            if (s_lib_begin && ank >= s_lib_begin && ank < s_lib_end) {
+                // Якорь внутри .so — продолжаем скан .so
+            } else {
+                start_heap_scan(ank);
+            }
+        } else {
             LogLine("автооффсеты: вшитый RVA, судя по всему, устарел (имя %s) — начинаю поиск строк в памяти",
                     aok ? "не совпало" : "не читается");
             s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
@@ -813,7 +836,7 @@ static int try_class_candidate(uint64_t v) {
 // Идём окном ±8 МБ вокруг адреса живого класса (якоря) и применяем тот же
 // кандидатный фильтр: структуры Il2CppClass лежат в общих пулах рантайма.
 static void start_heap_scan(uint64_t anchor) {
-    constexpr uint64_t kSpan = 8ull << 20;   // ±8 МБ
+    constexpr uint64_t kSpan = 16ull << 20;  // ±16 МБ вокруг якоря
     s_heap_pos = (anchor >= kSpan) ? (anchor - kSpan) : 0x1000;
     s_heap_pos &= ~7ull;                     // по 8-байтовым слотам
     s_heap_end = anchor + kSpan;
@@ -822,7 +845,7 @@ static void start_heap_scan(uint64_t anchor) {
     s_scanned_bytes = 0;
     s_last_progress_log = 0;
     s_scan_deadline = mono_seconds() + 60.0;   // свой бюджет, не общий с .so
-    LogLine("автооффсеты: табличных классов в .so нет — сканирую кучу вокруг якоря 0x%llx (±8 МБ)",
+    LogLine("автооффсеты: табличных классов в .so нет — сканирую кучу вокруг якоря 0x%llx (±16 МБ)",
             (unsigned long long)anchor);
     s_phase = PH_HEAP;
 }
@@ -939,12 +962,22 @@ static void phase_strsearch(double deadline) {
         }
         const uint8_t* hit = (const uint8_t*)memmem(buf, chunk, kNeedle, kNeed);
         if (hit) {
-            if (s_str_cand_count < 8) {
-                s_str_cand[s_str_cand_count] = s_str_pos + (uint64_t)(hit - buf);
+            const size_t off = (size_t)(hit - buf);
+            bool packed = true;
+            if (off >= 4) {
+                // В Unity-пуле сериализации перед именем лежат длинные серии нулей (\0\0\0\0)
+                // и бинарные счётчики (01 00 00 00 4b). В таблице строк метаданных строки
+                // идут впритык через один \0.
+                if (hit[-1] == '\0' && hit[-2] == '\0' && hit[-3] == '\0' && hit[-4] == '\0') {
+                    packed = false;
+                }
+            }
+            if (packed && s_str_cand_count < 8) {
+                s_str_cand[s_str_cand_count] = s_str_pos + (uint64_t)off;
                 s_str_cand_region[s_str_cand_count] = s_str_region;
                 ++s_str_cand_count;
             }
-            s_str_pos += (uint64_t)(hit - buf) + kNeed;   // ищем следующее
+            s_str_pos += (uint64_t)off + kNeed;   // ищем следующее
             if (s_str_cand_count >= 8) break;
             continue;
         }
@@ -1149,7 +1182,7 @@ static void build_scan_ranges() {
         s_ptr_seg_bytes += s_segments[i].end - s_segments[i].start;
         ++s_ptr_range_count;
     }
-    for (int i = 0; i < s_xseg_count && s_ptr_range_count < 1024; ++i) {
+    for (int i = 0; i < s_xseg_count && s_ptr_range_count < 2048; ++i) {
         if (s_xsegments[i].end <= s_xsegments[i].start) continue;
         s_ptr_ranges[s_ptr_range_count].start = s_xsegments[i].start;
         s_ptr_ranges[s_ptr_range_count].end = s_xsegments[i].end;
@@ -1157,16 +1190,16 @@ static void build_scan_ranges() {
         ++s_ptr_range_count;
     }
     // Скрытые регионы (без бита чтения, но отдающиеся принудительным чтением).
-    // Регионы размером от 16 до 64 МБ — главные кандидаты на глобальные
-    // метаданные global-metadata.dat (в Unity размер файла почти всегда 20–50 МБ).
+    // Регионы размером от 4 до 64 МБ — главные кандидаты на глобальные
+    // метаданные (в Unity размер файла почти всегда 10–50 МБ).
     // Помещаем их ПЕРВЫМИ, чтобы строковый поиск сразу попал в метаданные.
     s_hidden_skipped = 0;
     uint64_t taken_hidden = 0;
-    // 1-й проход: кандидаты в метаданные (16..64 МБ)
-    for (int i = 0; i < s_hidden_count && s_ptr_range_count < 1024; ++i) {
+    // 1-й проход: кандидаты в метаданные (4..64 МБ)
+    for (int i = 0; i < s_hidden_count && s_ptr_range_count < 2048; ++i) {
         if (s_hidden[i].end <= s_hidden[i].start) continue;
         const uint64_t sz = s_hidden[i].end - s_hidden[i].start;
-        if (sz >= (16ull << 20) && sz <= (64ull << 20)) {
+        if (sz >= (4ull << 20) && sz <= (64ull << 20)) {
             s_ptr_ranges[s_ptr_range_count].start = s_hidden[i].start;
             s_ptr_ranges[s_ptr_range_count].end = s_hidden[i].end;
             s_ptr_anon_bytes += sz;
@@ -1175,10 +1208,12 @@ static void build_scan_ranges() {
         }
     }
     // 2-й проход: остальные скрытые регионы (до бюджета 2048 МБ)
-    for (int i = 0; i < s_hidden_count && s_ptr_range_count < 1024; ++i) {
+    // Пропускаем гигантские регионы (>128 МБ) — это арены кучи, они съедают весь бюджет
+    for (int i = 0; i < s_hidden_count && s_ptr_range_count < 2048; ++i) {
         if (s_hidden[i].end <= s_hidden[i].start) continue;
         const uint64_t sz = s_hidden[i].end - s_hidden[i].start;
-        if (sz >= (16ull << 20) && sz <= (64ull << 20)) continue; // уже добавлены
+        if (sz >= (4ull << 20) && sz <= (64ull << 20)) continue; // уже добавлены
+        if (sz > (128ull << 20)) continue;                       // арены кучи
         if (taken_hidden && taken_hidden + sz > (2048ull << 20)) {
             ++s_hidden_skipped;
             continue;
@@ -1189,14 +1224,14 @@ static void build_scan_ranges() {
         taken_hidden += sz;
         ++s_ptr_range_count;
     }
-    for (int i = 0; i < s_anon_count && s_ptr_range_count < 1024; ++i) {
+    for (int i = 0; i < s_anon_count && s_ptr_range_count < 2048; ++i) {
         if (s_anon[i].end <= s_anon[i].start) continue;
         s_ptr_ranges[s_ptr_range_count].start = s_anon[i].start;
         s_ptr_ranges[s_ptr_range_count].end = s_anon[i].end;
         s_ptr_anon_bytes += s_anon[i].end - s_anon[i].start;
         ++s_ptr_range_count;
     }
-    for (int i = 0; i < s_filemisc_count && s_ptr_range_count < 1024; ++i) {
+    for (int i = 0; i < s_filemisc_count && s_ptr_range_count < 2048; ++i) {
         if (s_filemisc[i].end <= s_filemisc[i].start) continue;
         s_ptr_ranges[s_ptr_range_count].start = s_filemisc[i].start;
         s_ptr_ranges[s_ptr_range_count].end = s_filemisc[i].end;
@@ -1543,15 +1578,28 @@ static void phase_scan(double deadline) {
             const char* anchor_name = nullptr;
             uint64_t anchor = (!s_heap_done && wanted_in_cache() == 0)
                                   ? anchor_class(&anchor_name) : 0;
-            if (anchor && anchor_name && anchor_name[0]) {
+            if (anchor) {
                 bool aok = false;
-                const std::string an = qrd_string(qrd_ptr(anchor + IL2CPP_CLASS_NAME), &aok);
-                if (aok && an != anchor_name) {
-                    LogLine("автооффсеты: якорь 0x%llx («%s») не совпал с ожидаемым «%s» — начинаю поиск строк в памяти",
-                            (unsigned long long)anchor, an.c_str(), anchor_name);
+                const uint64_t nm = qrd_ptr(anchor + IL2CPP_CLASS_NAME);
+                const std::string an = valid_str_ptr(nm) ? qrd_string(nm, &aok) : std::string();
+                const uint64_t ns = qrd_ptr(anchor + IL2CPP_CLASS_NAMESPACE);
+                const uint64_t img = qrd_ptr(anchor);
+                const uint64_t fp = qrd_ptr(anchor + IL2CPP_CLASS_FIELDS);
+                const bool is_real = valid_obj(img) && aok && !an.empty() && valid_str_ptr(ns) && valid_obj(fp);
+                if (is_real) {
+                    if (anchor_name && anchor_name[0] && an != anchor_name) {
+                        LogLine("автооффсеты: якорь 0x%llx («%s») подтверждён как класс (ждали «%s») — имя @0x%llx",
+                                (unsigned long long)anchor, an.c_str(), anchor_name, (unsigned long long)nm);
+                    }
+                    if (!s_meta_begin) {
+                        const uint64_t kSpan = 32ull << 20;
+                        s_meta_begin = (nm > kSpan) ? ((nm - kSpan) & ~0xFFFFFFull) : 0x1000;
+                        s_meta_end = s_meta_begin + (64ull << 20);
+                        LogLine("автооффсеты: окно метаданных задано по якорю: 0x%llx..0x%llx (64 МБ)",
+                                (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end);
+                    }
+                } else {
                     anchor = 0;
-                    s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
-                    s_phase = PH_STRS;
                 }
             }
             if (anchor && s_lib_begin && anchor >= s_lib_begin && anchor < s_lib_end)
