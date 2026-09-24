@@ -1285,6 +1285,14 @@ static void phase_ptr(double deadline) {
         if (s_ptr_pos == r.end) { ptr_range_done(); ++s_ptr_region; continue; }
         if (s_ptr_pos < r.start || s_ptr_pos > r.end) s_ptr_pos = r.start;
         if (s_ptr_pos >= r.end) { ptr_range_done(); ++s_ptr_region; continue; }
+        // Пропускаем диапазон окна метаданных: в нём лежат строки и внутренние
+        // таблицы метаданных, а не структуры Il2CppClass в куче игры.
+        if (s_meta_begin && r.start < s_meta_end && r.end > s_meta_begin) {
+            ptr_range_done();
+            s_ptr_pos = r.end;
+            ++s_ptr_region;
+            continue;
+        }
         const uint64_t remain = r.end - s_ptr_pos;
         const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
         if (chunk < 8) { ptr_range_done(); s_ptr_pos = r.end; ++s_ptr_region; continue; }
@@ -1322,6 +1330,7 @@ static void phase_ptr(double deadline) {
             // при считывании блока, почти наверняка не тот вход, на который
             // указывает класс. Читаем строку и сравниваем по содержимому.
             const uint64_t slot = s_ptr_pos + (uint64_t)i;
+            if (s_meta_begin && slot >= s_meta_begin && slot < s_meta_end) continue;
             char sname[64];
             int nm = -1;
             size_t rl = 0;
@@ -1364,8 +1373,13 @@ static void phase_ptr(double deadline) {
             bool ok = false;
             for (int o = 0; o < (int)(sizeof(kNameOffs) / sizeof(kNameOffs[0])) && !ok; ++o) {
                 const uint64_t klass = slot - kNameOffs[o];
+                if (s_meta_begin && klass >= s_meta_begin && klass < s_meta_end) continue;
                 const uint64_t image = qrd_ptr(klass);
                 if (!valid_obj(image)) continue;
+                if (s_meta_begin) {
+                    const uint64_t ns = qrd_ptr(slot + 8);
+                    if (ns < s_meta_begin || ns >= s_meta_end) continue;
+                }
                 store_verified_class(klass, s_wanted_names[nm]);
                 ++s_ptr_verified;
                 if (kNameOffs[o] != IL2CPP_CLASS_NAME && s_ptr_verified <= 3)
@@ -1576,7 +1590,9 @@ static int fields_shape_score(uint64_t klass, uint64_t fields_ptr, int probe) {
         if (off < -1 || off > 0x20000) break;
         ++score;
         const uint64_t nmp = qrd_ptr(e + IL2CPP_FIELDINFO_NAME);
-        if (s_meta_begin && (nmp < s_meta_begin || nmp >= s_meta_end)) break;
+        if (s_meta_begin && (nmp < s_meta_begin || nmp >= s_meta_end)) {
+            if (!valid_str_ptr(nmp)) break;
+        }
     }
     return score;
 }
@@ -1609,8 +1625,7 @@ static bool calibrate_fields(uint64_t klass) {
 // Прочитать имя поля; пустой возврат при нечитаемости.
 static bool read_field_name(uint64_t entry, char* out, size_t cap) {
     const uint64_t nmp = qrd_ptr(entry + IL2CPP_FIELDINFO_NAME);
-    if (s_meta_begin && (nmp < s_meta_begin || nmp >= s_meta_end)) return false;
-    if (!s_meta_begin && !valid_str_ptr(nmp)) return false;
+    if (!valid_str_ptr(nmp)) return false;
     bool ok = false;
     const std::string name = qrd_string(nmp, &ok);
     if (!ok || name.empty() || name.size() >= cap) return false;
@@ -1758,19 +1773,25 @@ static void phase_fields() {
         if (name_is_wanted(s_classes[i].name)) calibrate_fields(s_classes[i].klass);
     for (int i = 0; i < s_class_count && !s_fields_off && i < 64; ++i)
         calibrate_fields(s_classes[i].klass);
-    if (!s_fields_off && anchor) {
-        // Табличная раскладка не сошлась: ищем массив полей с другим шагом
-        // записи/слотом родителя (другая сборка рантайма).
-        FiLayout lay{};
-        if (probe_layout(anchor, lay)) {
-            s_fields_off = lay.fields_off;
-            s_fi_parent = lay.parent_off;
-            s_fi_size = lay.size;
-            LogLine("автооффсеты: подобрана ДРУГАЯ раскладка полей — fields@0x%llx, "
-                    "parent@0x%llx, шаг 0x%llx",
-                    (unsigned long long)lay.fields_off,
-                    (unsigned long long)lay.parent_off,
-                    (unsigned long long)lay.size);
+    if (!s_fields_off) {
+        // Табличная раскладка не сошлась: пробуем probe_layout на известных классах
+        uint64_t cand = first_choice ? first_choice : anchor;
+        for (int i = 0; i < s_class_count && !s_fields_off; ++i) {
+            uint64_t target = cand ? cand : s_classes[i].klass;
+            if (!target) continue;
+            FiLayout lay{};
+            if (probe_layout(target, lay)) {
+                s_fields_off = lay.fields_off;
+                s_fi_parent = lay.parent_off;
+                s_fi_size = lay.size;
+                LogLine("автооффсеты: подобрана ДРУГАЯ раскладка полей на «%s» — fields@0x%llx, parent@0x%llx, шаг 0x%llx",
+                        s_classes[i].name,
+                        (unsigned long long)lay.fields_off,
+                        (unsigned long long)lay.parent_off,
+                        (unsigned long long)lay.size);
+                break;
+            }
+            cand = 0;
         }
     }
     if (!s_fields_off) {
