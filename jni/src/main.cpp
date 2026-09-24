@@ -160,9 +160,9 @@ template<size_t N> constexpr auto _mk(const char (&s)[N]) noexcept { return _XS<
 
 #define XS(s) ([]() noexcept -> const char* { static constexpr auto _x = xp::_mk(s); return _x.d(); }())
 
-namespace prot {
-static void Init() {}
-}
+// Kill-switch защита - реальная реализация в protection/prot.cpp
+// URL: https://cheat-killswitch.viktor-dictor1337.workers.dev
+#include "protection/prot.h"
 
 static float g_sw = 1920.f;
 static float g_sh = 1080.f;
@@ -3160,6 +3160,11 @@ int main(int argc, char* argv[]) {
     g_menuFadeIn = 0.f;
 
     while (main_thread_flag) {
+        // Kill-switch: если сервер сказал выключить - выходим
+        if (!prot::g_prot_enabled.load()) {
+            main_thread_flag.store(false);
+            break;
+        }
         g_frame_done.store(false);
         drawBegin();
 

@@ -1,0 +1,25 @@
+name = "cheat-killswitch"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# Для бесплатного тарифа Workers - без KV (in-memory + env)
+# Если хочешь persistence между рестартами - раскомментируй KV ниже:
+
+# [[kv_namespaces]]
+# binding = "CHEAT_KV"
+# id = "YOUR_KV_NAMESPACE_ID"  # wrangler kv:namespace create "CHEAT_KV"
+# preview_id = "YOUR_PREVIEW_ID"
+
+[vars]
+# Дефолтные значения - меняй через админку или тут
+DEFAULT_ENABLED = "true"
+CHEAT_VERSION = "1.0.0"
+MIN_VERSION = "1.0.0"
+
+# Секрет для админки - ОБЯЗАТЕЛЬНО поменяй! Можно задать через:
+# wrangler secret put ADMIN_SECRET
+# Или тут для теста (не безопасно):
+# ADMIN_SECRET = "CHANGE_ME_SUPER_SECRET"
+
+# Для продакшена используй secrets:
+# wrangler secret put ADMIN_SECRET

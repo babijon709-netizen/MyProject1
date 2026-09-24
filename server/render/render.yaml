@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: cheat-killswitch
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: ADMIN_SECRET
+        sync: false # задай вручную в дашборде
+      - key: CHEAT_ENABLED
+        value: true
+    healthCheckPath: /api/status

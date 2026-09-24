@@ -23,6 +23,7 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PA
 
 LOCAL_SRC_FILES := \
     src/main.cpp src/game.cpp src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
+    src/protection/prot.cpp src/protection/http_client.cpp \
     src/Blur/Blur.cpp \
     src/ImGui/imgui.cpp src/ImGui/imgui_draw.cpp src/ImGui/imgui_tables.cpp \
     src/ImGui/imgui_widgets.cpp src/ImGui/backends/imgui_impl_android.cpp \
