@@ -135,6 +135,7 @@ enum Phase {
     PH_SCAN,        // поиск слотов Il2CppClass
     PH_FIELDS,      // калибровка массива полей + резолв таблицы
     PH_DONE,
+    PH_HEAP,        // скан кучи вокруг «якоря» (когда в .so классов не нашлось)
 };
 
 Phase    s_phase = PH_WAIT;
@@ -172,7 +173,15 @@ int      s_shape_pass = 0;
 
 uint64_t s_fields_off = 0;        // откалиброванное смещение Il2CppClass.fields
 int      s_calib_best = 0;        // лучший счёт формы полей за калибровку (диагностика)
+uint64_t s_calib_best_off = 0;    // на каком смещении лучший счёт
 int      s_resolved = 0, s_changed = 0;
+
+// Скан кучи вокруг «якоря»: на бете в самих сегментах .so настоящих классов
+// не оказалось (кэш забит мусорными «похожими» структурами, табличных имён
+// ноль). Рантайм il2cpp выделяет структуры Il2CppClass из общих пулов, поэтому
+// рядом с одним живым классом лежат тысячи остальных — их и перебираем.
+uint64_t s_heap_pos = 0, s_heap_end = 0;
+bool     s_heap_done = false;     // в этом резолве уже сканировали кучу
 
 // Знания о базах в рамках ЖИВОГО процесса (переживают сброс скана при
 // перепривязке; очищаются только при смене pid). Лог с устройства показал:
@@ -238,6 +247,32 @@ static bool name_is_wanted(const char* name) {
     for (int i = 0; i < kOrFieldCount; ++i)
         if (strcmp(kOrFields[i].cls, name) == 0) return true;
     return false;
+}
+
+// Сколько классов в кэше имеют табличные имена.
+static int wanted_in_cache() {
+    int n = 0;
+    for (int i = 0; i < s_class_count; ++i)
+        if (name_is_wanted(s_classes[i].name)) ++n;
+    return n;
+}
+
+// «Якорь» — живой настоящий класс, читаемый по вшитому TYPEINFO_RVA. Привязка
+// проверяет базу ровно этой проверкой («база верна по вшитому RVA ...»), так
+// что если она прошла — по RVA объект настоящего класса этого процесса.
+// Возвращает адрес класса и (опционально) ожидаемое имя для диагностики.
+static uint64_t anchor_class(const char** expected_name) {
+    if (expected_name) *expected_name = "";
+    if (!g_il2cpp_base) return 0;
+    if (PLAYER_MANAGER_TYPEINFO_RVA) {
+        const uint64_t k = qrd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
+        if (valid_obj(k)) { if (expected_name) *expected_name = "PlayerManager"; return k; }
+    }
+    if (GAME_CONTROLLER_TYPEINFO_RVA) {
+        const uint64_t k = qrd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
+        if (valid_obj(k)) { if (expected_name) *expected_name = "GameControllerBase"; return k; }
+    }
+    return 0;
 }
 
 static FoundClass* find_class_slot(uint64_t klass) {
@@ -485,6 +520,66 @@ static int try_class_candidate(uint64_t v) {
     return 1;
 }
 
+// ---- Скан кучи вокруг «якоря» ----------------------------------------------
+// Запускается, когда в сегментах .so не нашлось ни одного табличного класса.
+// Идём окном ±8 МБ вокруг адреса живого класса (якоря) и применяем тот же
+// кандидатный фильтр: структуры Il2CppClass лежат в общих пулах рантайма.
+static void start_heap_scan(uint64_t anchor) {
+    constexpr uint64_t kSpan = 8ull << 20;   // ±8 МБ
+    s_heap_pos = (anchor >= kSpan) ? (anchor - kSpan) : 0x1000;
+    s_heap_pos &= ~7ull;                     // по 8-байтовым слотам
+    s_heap_end = anchor + kSpan;
+    s_heap_done = true;
+    s_total_bytes = s_heap_end - s_heap_pos;
+    s_scanned_bytes = 0;
+    s_last_progress_log = 0;
+    s_scan_deadline = mono_seconds() + 60.0;   // свой бюджет, не общий с .so
+    LogLine("автооффсеты: табличных классов в .so нет — сканирую кучу вокруг якоря 0x%llx (±8 МБ)",
+            (unsigned long long)anchor);
+    s_phase = PH_HEAP;
+}
+
+static void phase_heap(double deadline) {
+    static uint8_t buf[kChunkBytes];
+    while (s_heap_pos < s_heap_end && mono_seconds() < deadline) {
+        const uint64_t remain = s_heap_end - s_heap_pos;
+        const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
+        if (!qrd_buf(s_heap_pos, buf, chunk)) {
+            s_heap_pos += chunk;
+            s_scanned_bytes += chunk;
+        } else {
+            size_t reads_used = 0;
+            const size_t slots = chunk / 8;
+            size_t examined = 0;
+            for (; examined < slots; ++examined) {
+                uint64_t v;
+                memcpy(&v, buf + examined * 8, 8);
+                v = memio::untag(v);
+                if (valid_obj(v)) {
+                    reads_used += try_class_candidate(v) ? 3 : 1;
+                    if (reads_used >= kMaxReadsPerChunk) { ++examined; break; }
+                }
+            }
+            s_heap_pos += examined * 8;
+            s_scanned_bytes += examined * 8;
+        }
+        if (all_wanted_found()) break;
+        if (mono_seconds() >= s_scan_deadline) break;
+        const double now_s = mono_seconds();
+        if (now_s - s_last_progress_log >= 8.0) {
+            s_last_progress_log = now_s;
+            LogLine("автооффсеты: куча %llu/%llu МБ, классов %d (табличных %d, форма %d)",
+                    (unsigned long long)(s_scanned_bytes >> 20),
+                    (unsigned long long)(s_total_bytes >> 20),
+                    s_class_count, wanted_in_cache(), s_shape_pass);
+        }
+    }
+    if (all_wanted_found() || s_heap_pos >= s_heap_end ||
+        mono_seconds() >= s_scan_deadline) {
+        s_phase = PH_FIELDS;
+    }
+}
+
 static void phase_scan(double deadline) {
     // Буфер осознанно статический: 256 КБ на стеке кадра на телефоне —
     // риск переполнения стека потока отрисовки. Резолвер однопоточный.
@@ -545,7 +640,16 @@ static void phase_scan(double deadline) {
                 LogLine("автооффсеты: живые классы нашлись на базе 0x%llx",
                         (unsigned long long)g_il2cpp_base);
             s_good_base = g_il2cpp_base;   // живой образ — запомнить для привязки
-            s_phase = PH_FIELDS;
+            // Ловушка беты: кэш может целиком состоять из мусорных «похожих»
+            // структур — ни одного класса с табличным именем. Живой класс при
+            // этом читается по вшитому TYPEINFO_RVA (привязка им проверяет
+            // базу). Тогда сканируем кучу вокруг него: рантайм выделяет
+            // структуры Il2CppClass из общих пулов, остальные классы рядом.
+            const char* anchor_name = nullptr;
+            const uint64_t anchor = (!s_heap_done && wanted_in_cache() == 0)
+                                        ? anchor_class(&anchor_name) : 0;
+            if (anchor) start_heap_scan(anchor);
+            else s_phase = PH_FIELDS;
         } else if (!s_class_count && try_next_base()) {
             // Классов нет: база помечена пустой, скан пойдёт по следующему
             // кандидату — новый список сегментов соберёт PH_MAPS.
@@ -577,8 +681,8 @@ static int fields_shape_score(uint64_t klass, uint64_t fields_ptr, int probe) {
 
 static int probe_fields_shape(uint64_t klass, uint64_t off) {
     const int score = fields_shape_score(klass, qrd_ptr(klass + off), 6);
-    if (score > s_calib_best) s_calib_best = score;   // диагностика: насколько
-    return score;                                     // близко вообще сходились
+    if (score > s_calib_best) { s_calib_best = score; s_calib_best_off = off; }
+    return score;
 }
 
 static bool calibrate_fields(uint64_t klass) {
@@ -588,7 +692,9 @@ static bool calibrate_fields(uint64_t klass) {
         s_fields_off = table_off;
         return true;
     }
-    for (uint64_t f = 0x70; f <= 0x178; f += 8) {
+    // Шире привычного 0x70–0x178: на другой сборке игры массив полей может
+    // съехать дальше обычного (проба дешёвая: мусор отваливается за 1 чтение).
+    for (uint64_t f = 0x30; f <= 0x1F8; f += 8) {
         if (f == table_off) continue;
         if (probe_fields_shape(klass, f) >= 5) {
             s_fields_off = f;
@@ -641,14 +747,46 @@ static void apply_resolution(const OrField& of, int32_t off) {
 }
 
 static void phase_fields() {
+    // Якорь: по вшитому TYPEINFO_RVA читается ЖИВОЙ класс (привязка сверяет
+    // базу ровно этой проверкой). Логуем его имя — сразу видно, ротированы ли
+    // имена в этой сборке игры, — и калибруем поля прямо на нём (надёжнее,
+    // чем гадать по кэшу, который на бете может быть весь мусорный).
+    const char* anchor_expected = nullptr;
+    const uint64_t anchor = anchor_class(&anchor_expected);
+    if (anchor) {
+        bool aok = false;
+        const std::string aname = qrd_string(qrd_ptr(anchor + IL2CPP_CLASS_NAME), &aok);
+        char shown[40] = {};
+        if (aok && aname.size() < sizeof(shown)) {
+            for (size_t i = 0; i < aname.size(); ++i) {
+                const char c = aname[i];
+                shown[i] = (c >= 0x20 && c < 0x7f) ? c : '.';
+            }
+        }
+        LogLine("автооффсеты: якорь 0x%llx (%s окна .so), ждали «%s», имя %s «%s»",
+                (unsigned long long)anchor,
+                (s_lib_begin && anchor >= s_lib_begin && anchor < s_lib_end)
+                    ? "внутри" : "ВНЕ",
+                anchor_expected, aok ? "читается" : "НЕ читается",
+                aok ? shown : "-");
+        if (aok && anchor_expected && aname != anchor_expected) {
+            // Имя не совпало с ожидаемым: печатаем первые байты — по ним
+            // видно, ротация это/ксор или что-то ещё.
+            char hex[64] = {};
+            size_t hn = 0;
+            for (size_t i = 0; i < aname.size() && i < 16 && hn + 4 < sizeof(hex); ++i)
+                hn += (size_t)snprintf(hex + hn, sizeof(hex) - hn, "%02x ",
+                                       (unsigned)(uint8_t)aname[i]);
+            LogLine("автооффсеты: якорь — байты имени: %s", hex);
+        }
+        if (!s_fields_off) calibrate_fields(anchor);
+    }
     // Калибровка: первым пробуем самый «толстый» класс (больше полей —
     // надёжнее форма), потом ВСЕ классы с именами из таблицы (совпадение
     // имени с дампом — признак настоящего класса; на бете кэш без окна
     // метаданных полон мусора, и «первые 12» могли оказаться мусорными),
     // дальше — любые найденные, пока не сойдётся.
-    int wanted_in_cache = 0;
-    for (int i = 0; i < s_class_count; ++i)
-        if (name_is_wanted(s_classes[i].name)) ++wanted_in_cache;
+    const int wanted = wanted_in_cache();
     uint64_t first_choice = 0;
     for (int i = 0; i < s_class_count && !first_choice; ++i)
         if (strcmp(s_classes[i].name, "PlayerManager") == 0) first_choice = s_classes[i].klass;
@@ -659,8 +797,9 @@ static void phase_fields() {
         calibrate_fields(s_classes[i].klass);
     if (!s_fields_off) {
         LogLine("автооффсеты: калибровка полей не сошлась — кэш %d классов, "
-                "табличных имён в кэше %d, лучший счёт формы полей %d",
-                s_class_count, wanted_in_cache, s_calib_best);
+                "табличных имён в кэше %d, лучший счёт формы полей %d@0x%llx",
+                s_class_count, wanted, s_calib_best,
+                (unsigned long long)s_calib_best_off);
         s_phase = PH_DONE;
         return;
     }
@@ -684,9 +823,7 @@ static void log_summary() {
 #if OR_SELFTEST_BREAK_BAKED
     selftest_restore_unresolved();
 #endif
-    int wanted = 0;
-    for (int i = 0; i < s_class_count; ++i)
-        if (name_is_wanted(s_classes[i].name)) ++wanted;
+    const int wanted = wanted_in_cache();
     LogLine("автооффсеты: классов найдено %d (по форме %d, имён прочитано %d, отказов %d, табличных %d), "
             "fields@0x%llx, разрешено %d/%d констант (%d изменено), метаданные %s, "
             "база 0x%llx, пустых баз %d",
@@ -749,6 +886,7 @@ void offset_resolver_tick() {
             break;
         case PH_MAPS:   phase_maps(); break;
         case PH_SCAN:   phase_scan(deadline); break;
+        case PH_HEAP:   phase_heap(deadline); break;
         case PH_FIELDS: phase_fields(); break;
         case PH_DONE:   break;
     }
@@ -763,7 +901,9 @@ void offset_resolver_reset() {
     s_maps_lib_lines = 0; s_maps_cut_window = 0; s_maps_cut_x = 0;
     s_maps_cut_deleted = 0; s_maps_open_failed = false;
     s_class_count = 0; s_names_ok = 0; s_names_fail = 0; s_shape_pass = 0;
-    s_fields_off = 0; s_calib_best = 0; s_resolved = 0; s_changed = 0;
+    s_fields_off = 0; s_calib_best = 0; s_calib_best_off = 0;
+    s_resolved = 0; s_changed = 0;
+    s_heap_pos = s_heap_end = 0; s_heap_done = false;
     s_applied_count = 0; s_logged = false;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
     // «какие базы пусты, а где классы живые» НЕ сбрасываются: они привязаны
@@ -792,7 +932,8 @@ uint64_t offset_resolver_good_base(pid_t pid) {
 // смотрителю кадра не поможет: слепоту после апдейта игры лечат только новые
 // оффсеты, а не новое подключение к тому же процессу и базе.
 bool offset_resolver_busy() {
-    return s_phase == PH_MAPS || s_phase == PH_SCAN || s_phase == PH_FIELDS;
+    return s_phase == PH_MAPS || s_phase == PH_SCAN ||
+           s_phase == PH_HEAP || s_phase == PH_FIELDS;
 }
 
 // Найденный класс: короткое имя (+ пространство имён, если задано).
@@ -842,6 +983,13 @@ void offset_resolver_status(char* out, size_t cap) {
                  (unsigned long long)(s_scanned_bytes >> 20),
                  (unsigned long long)(s_total_bytes >> 20),
                  s_class_count);
+        return;
+    }
+    if (s_phase == PH_HEAP) {
+        snprintf(out, cap, "ищет классы в куче у якоря: %llu/%llu МБ, табличных %d",
+                 (unsigned long long)(s_scanned_bytes >> 20),
+                 (unsigned long long)(s_total_bytes >> 20),
+                 wanted_in_cache());
         return;
     }
     // PH_DONE
