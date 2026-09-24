@@ -2291,7 +2291,9 @@ static bool probe_layout(uint64_t klass, FiLayout& out) {
 static bool kid_class_ok(uint64_t k) {
     const uint64_t image = qrd_ptr(k);
     if (!valid_obj(image)) return false;
-    if (s_lib_begin && (image < s_lib_begin || image >= s_lib_end)) return false;
+    // В защищённой сборке image у ЖИВОГО якоря лежит вне отображения
+    // libil2cpp.so (см. диагностический дамп якоря). Проверка окна .so
+    // отбрасывала все классы, найденные по kidx в куче.
     const uint64_t nm = qrd_ptr(k + IL2CPP_CLASS_NAME);
     if (!valid_str_ptr(nm)) return false;
     bool ok = false;
@@ -2952,17 +2954,15 @@ static uint64_t compute_image_key() {
     if (phentsize && phwant && phwant <= sizeof(ph) &&
         qrd_buf(g_il2cpp_base + phoff, ph, phwant))
         h = fnv1a(ph, phwant, h);
-    const uint64_t span = image_file_span();
-    h = fnv1a(&span, sizeof(span), h);
-    if (span > 0x10000) {
-        const int kSamples = 16;
-        const size_t kStep = 8 * 1024;
-        uint8_t buf[kStep];
-        for (int i = 0; i < kSamples; ++i) {
-            const uint64_t at = (span - kStep) * (uint64_t)i / (uint64_t)(kSamples - 1);
-            if (!qrd_buf(g_il2cpp_base + at, buf, sizeof(buf))) continue;
-            h = fnv1a(buf, sizeof(buf), h);
-        }
+    // Не хэшируем span из /proc/maps и край образа: после загрузки игры
+    // границы отображений и страницы в хвосте могут меняться без обновления
+    // файла. Берём фиксированные страницы начала ELF (заголовки + код),
+    // включая маску успешных чтений, чтобы ключ был одинаков при перезаходе.
+    for (uint64_t at = 0x1000; at < 0x11000; at += 0x1000) {
+        uint8_t buf[0x1000];
+        const bool readable = qrd_buf(g_il2cpp_base + at, buf, sizeof(buf));
+        h = fnv1a(&readable, sizeof(readable), h);
+        if (readable) h = fnv1a(buf, sizeof(buf), h);
     }
     return h;
 }
@@ -2970,9 +2970,16 @@ static uint64_t compute_image_key() {
 static void save_offsets_cache() {
     if (!g_il2cpp_base || !s_applied_count) return;
     if (!s_image_key) s_image_key = compute_image_key();
-    if (!s_image_key) return;
+    if (!s_image_key) {
+        LogLine("автооффсеты: кэш не сохранён — не удалось прочитать ключ образа 0x%llx",
+                (unsigned long long)g_il2cpp_base);
+        return;
+    }
     FILE* f = fopen(cache_path().c_str(), "w");
-    if (!f) return;
+    if (!f) {
+        LogLine("автооффсеты: кэш не сохранён — файл .offs не открылся (errno=%d)", errno);
+        return;
+    }
     fprintf(f, "# автооффсеты: живой резолв (ключ — отпечаток libil2cpp.so)\n");
     fprintf(f, "key %016llx\n", (unsigned long long)s_image_key);
     for (int i = 0; i < s_applied_count; ++i) {
@@ -3027,7 +3034,12 @@ static bool load_offsets_cache() {
         unsigned long long val = 0;
         if (sscanf(linebuf, "key %llx", &val) == 1) { key = (uint64_t)val; have_key = true; break; }
     }
-    if (!have_key || key != s_image_key) return false;
+    if (!have_key || key != s_image_key) {
+        LogLine("автооффсеты: кэш не подошёл — ключ файла 0x%llx, ключ образа 0x%llx (база 0x%llx)",
+                (unsigned long long)key, (unsigned long long)s_image_key,
+                (unsigned long long)g_il2cpp_base);
+        return false;
+    }
 
     int loaded = 0, classes = 0;
     pos = 0;

@@ -6568,15 +6568,10 @@ static bool read_local_aim_state() {
                 return true;
             }
         }
-        // Last resort: the FOV blend factor FPManager drives toward aimFOV.
-        float blend = 0.0F;
-        if (rd_exact(fp_manager + FPMANAGER_AIM_BLEND, blend) && std::isfinite(blend) && blend >= 0.15F && blend <= 1.05F) {
-            fresh.fp_manager = fp_manager;
-            fresh.aiming = true;
-            fresh.source = 3;
-            g_aim_state = fresh;
-            return true;
-        }
+        // FOV blend is an animation value: it decays for seconds after ADS
+        // ends. It must never be used as an input state for scope-only aim.
+        // If neither Aim.Active nor weapon.isAiming can be confirmed, fail
+        // closed rather than continuing to steer after the player unscopes.
     }
 
     fresh.aiming = false;
