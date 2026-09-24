@@ -2061,7 +2061,14 @@ static int resolve_type_group(const TypeGroup& g, uint64_t klass) {
     // GameControllerBase::_BCX/_BCm/_BCQ, Item::_BKs, ItemPickup::_BQL,
     // PlayerWeapon::_player, VoicePlayerState::_Name — класс в кэше есть, а
     // поле не находится, потому что точного совпадения нет.
-    if (m.n >= g.n) {
+    // «obj» — «любой ссылочный»: среди кандидатов половина класса, и для
+    // ОДИНОЧНОГО слота «ближайшее» было бы угадайкой. Такой слот берём только
+    // по точному вшитому смещению (см. запасной путь). Группе из нескольких
+    // слотов развязка всё ещё поможет: суммарное отклонение раскладывается
+    // однозначно.
+    const bool vague = (g.of[0]->type[0] == 'o' && g.of[0]->type[1] == 'b' &&
+                        g.of[0]->type[2] == 'j' && g.of[0]->type[3] == '\0');
+    if (m.n >= g.n && !(vague && g.n == 1)) {
         TypeAssign a;
         if (assign_type_group(g, m.off, m.n, a)) {
             for (int s = 0; s < g.n; ++s) apply_resolution(*g.of[s], a.off[s]);
