@@ -14,6 +14,10 @@ struct ViewmodelSettings {
     // Быстрый сбор: без патчей кода — контроллер дописывает 0.0 в
     // float-темп активных ожиданий collect-all в куче (loot_memory.h).
     bool fast_loot = false;
+    // Высокий прыжок: без патчей кода — контроллер пишет выбранную высоту
+    // в кучу объекта CharacterSpeedConfig (movement_memory.h).
+    bool high_jump = false;
+    float jump_height = 2.5f;
 };
 
 namespace viewmodel {
@@ -34,38 +38,42 @@ inline ViewmodelSettings sanitize(ViewmodelSettings s) {
     s.x = bounded(s.x, -50.f, 50.f, 0.f);
     s.y = bounded(s.y, -50.f, 50.f, 0.f);
     s.z = bounded(s.z, -50.f, 50.f, 0.f);
+    s.jump_height = bounded(s.jump_height, 1.0f, 5.0f, 2.5f);
     return s;
 }
 // Optional trailer after the existing v4 config. Old readers ignore it;
 // missing/truncated/unknown trailers load disabled defaults, never stale state.
 struct ConfigExtension {
     uint32_t magic = 0x31574d56u; // VMW1
-    uint32_t version = 3;
-    uint32_t size = 32;
+    uint32_t version = 4;
+    uint32_t size = 36;
     uint32_t flags = 0;
     float fov = 90.f, x = 0.f, y = 0.f, z = 0.f;
+    float jump_height = 2.5f;
 };
-static_assert(sizeof(ConfigExtension) == 32, "stable config extension");
+static_assert(sizeof(ConfigExtension) == 36, "stable config extension");
 inline ConfigExtension encode(ViewmodelSettings s) {
     s = sanitize(s);
     ConfigExtension e;
     // Bits 2..3: 0 = default, 1 = 144 (legacy toggle), 2 = 90, 3 = 120.
     const uint32_t fps_mode = s.fps_limit == 144 ? 1u : s.fps_limit == 90 ? 2u : s.fps_limit == 120 ? 3u : 0u;
     e.flags = (s.fov_enabled ? 1u : 0u) | (s.hands_enabled ? 2u : 0u) | (fps_mode << 2) |
-              (s.fast_loot ? 16u : 0u) | (s.no_recoil ? 32u : 0u) | (s.no_spread ? 64u : 0u);
+              (s.fast_loot ? 16u : 0u) | (s.no_recoil ? 32u : 0u) | (s.no_spread ? 64u : 0u) |
+              (s.high_jump ? 128u : 0u);
     e.fov = s.fov; e.x = s.x; e.y = s.y; e.z = s.z;
+    e.jump_height = s.jump_height;
     return e;
 }
 inline ViewmodelSettings decode(const void* bytes, size_t size) {
     ViewmodelSettings s;
-    if (size != sizeof(ConfigExtension)) return s;
-    ConfigExtension e; std::memcpy(&e, bytes, sizeof(e));
+    if (size != 32 && size != sizeof(ConfigExtension)) return s;
+    ConfigExtension e{};
+    std::memcpy(&e, bytes, size < sizeof(e) ? size : sizeof(e));
     // v1: discard retired loot/instruction-patch flags 4..6. v2: bit 4 stays
     // retired, bits 5..6 opt into the object-data implementations. v3: bit 4 is
-    // instant pickup, so a v1/v2 file that still carries the retired bit loads
-    // with the feature off instead of turning it on.
-    if (e.magic != 0x31574d56u || (e.version != 1 && e.version != 2 && e.version != 3) ||
-        e.size != sizeof(e) || (e.flags & ~127u)) return s;
+    // instant pickup. v4: bit 7 is high jump, + jump_height float.
+    if (e.magic != 0x31574d56u || (e.version != 1 && e.version != 2 && e.version != 3 && e.version != 4) ||
+        e.size != size || (e.flags & ~255u)) return s;
     s.fov_enabled = (e.flags & 1u) != 0;
     s.hands_enabled = (e.flags & 2u) != 0;
     const int fps_modes[] = {0, 144, 90, 120};
@@ -73,13 +81,16 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     s.no_recoil = e.version >= 2 && (e.flags & 32u) != 0;
     s.no_spread = e.version >= 2 && (e.flags & 64u) != 0;
     s.fast_loot = e.version >= 3 && (e.flags & 16u) != 0;
+    s.high_jump = e.version >= 4 && (e.flags & 128u) != 0;
     s.fov = e.fov; s.x = e.x; s.y = e.y; s.z = e.z;
+    if (size >= 36 && e.version >= 4) s.jump_height = e.jump_height;
+    else s.jump_height = 2.5f;
     return sanitize(s);
 }
 enum class Status { Off, Waiting, Active, ADS, Failed };
 struct Diagnostics {
     Status fov = Status::Off, hands = Status::Off, no_recoil = Status::Off, no_spread = Status::Off;
-    Status fast_loot = Status::Off;
+    Status fast_loot = Status::Off, high_jump = Status::Off;
 };
 
 // Снимок состояния limiting FPS для меню: снимается контроллером при последнем

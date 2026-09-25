@@ -129,6 +129,10 @@ UI_EN = {
     'Y: вниз / вверх': 'Y: down / up',
     'Z: ближе / дальше': 'Z: closer / farther',
     '%.0f см': '%.0f cm',
+    'Движение': 'Movement',
+    'Высокий прыжок': 'High jump',
+    'Высота': 'Height',
+    '%.1f м': '%.1f m',
     'В прицеле FOV и руки возвращаются к штатным значениям.': 'FOV and hands return to defaults while aiming.',
 
     # конфиги

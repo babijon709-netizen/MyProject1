@@ -329,6 +329,8 @@ inline constexpr std::uint64_t RAYCASTHIT_COLLIDER           = 0x28;  // UnityEn
 //   Ragdoll.BodyPart.transform (0x10)
 inline constexpr std::uint64_t PLAYER_KCC_REFERENCE        = 0xB0;
 inline constexpr std::uint64_t KCC_PLAYER_BACKREF          = 0x78;
+inline constexpr std::uint64_t KCC_CHARACTER_SPEED_CONFIG  = 0x80; // HyperHug.Games.Oxide.Features.Player.KCC.characterSpeedConfig
+inline constexpr std::uint64_t CHARACTERSPEEDCONFIG_JUMP_HEIGHT = 0x30; // HyperHug.Games.Oxide.Features.Player.CharacterSpeedConfig.<JumpHeight>k__BackingField
 inline constexpr std::uint64_t KCC_HEAD_TRANSFORM          = 0x88; // KCC.head (managed UnityEngine.Transform)
 inline constexpr std::uint64_t KCC_NORMAL_HEIGHT          = 0xA0; // float, capsule height standing
 inline constexpr std::uint64_t KCC_CROUCH_HEIGHT          = 0xA4; // float, capsule height crouched
@@ -645,6 +647,7 @@ inline constexpr std::uint64_t MULTICAST_DELEGATES              = 0x78; // Syste
 inline constexpr std::uint64_t FPMOTION_OBJECT                  = 0xC8; // Oxide_FPMotion_Fields.BYc
 inline constexpr std::uint64_t FPMOTION_PLAYER                  = 0xE8; // Oxide_FPMotion_Fields.Player
 inline constexpr std::uint64_t TRANSFORMOFFSET_POSITION         = 0x24; // Oxide_TransformOffset_Fields.m_Position
+inline constexpr std::uint64_t TRANSFORMOFFSET_CURRENT_POSITION = 0x44; // Oxide_TransformOffset_Fields.BYE
 inline constexpr std::uint64_t FPMOTION_IDLE_OFFSET             = 0x78; // Oxide_FPMotion_Fields.m_IdleOffset
 inline constexpr std::uint64_t FPMOTION_RUN_OFFSET              = 0x80; // Oxide_FPMotion_Fields.m_RunOffset
 inline constexpr std::uint64_t FPMOTION_RUN_RELOAD_OFFSET       = 0x88; // Oxide_FPMotion_Fields.runReloadOffset

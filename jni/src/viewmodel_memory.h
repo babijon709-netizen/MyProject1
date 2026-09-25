@@ -60,7 +60,7 @@ template<class IO> class Controller {
     uint64_t session_ = 0;
     Identity player_, fp_, weapon_, motion_;
     Patch<float> fov_;
-    struct HandPatch { uint64_t object = 0, klass = 0, slot = 0; Patch<Position> patch; Patch<BlendSpeed> speed; };
+    struct HandPatch { uint64_t object = 0, klass = 0, slot = 0; Patch<Position> patch; Patch<Position> current; Patch<BlendSpeed> speed; };
     std::array<HandPatch, 8> hands_{};
     unsigned retry_ = 0, snap_frames_ = 0;
 
@@ -76,8 +76,9 @@ template<class IO> class Controller {
             if (!h.object) continue;
             if (io.ptr(h.slot) != h.object || io.ptr(h.object) != h.klass) { h = {}; continue; }
             bool positionRestored = h.patch.restore(io);
+            bool currentRestored = h.current.written ? h.current.restore(io) : true;
             bool speedRestored = h.speed.restore(io);
-            if (positionRestored && speedRestored) h = {}; else ok = false;
+            if (positionRestored && currentRestored && speedRestored) h = {}; else ok = false;
         }
         return ok;
     }
@@ -206,9 +207,11 @@ public:
             if (h.klass && h.klass != klass) h = {};
             h.object = object; h.klass = klass; h.slot = slot;
             if (!h.patch.sample(io, object + TRANSFORMOFFSET_POSITION)) { ok = false; continue; }
+            h.current.sample(io, object + TRANSFORMOFFSET_CURRENT_POSITION);
             Position value = h.patch.original;
             value.x += s.x * 0.01f; value.y += s.y * 0.01f; value.z += s.z * 0.01f;
             bool positionApplied = h.patch.put(io, value);
+            if (h.current.address) h.current.put(io, value);
             // Let Unity snap on its next Update, AFTER it copies the old pose's
             // interpolation cache during a stance switch. Writing that cache
             // from the overlay would be overwritten by the same switch.

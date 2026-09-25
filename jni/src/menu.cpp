@@ -154,13 +154,6 @@ float TabContent(int tab, float dt, float cW) {
             modeRow("##am2", XS("Сайлент"), AIM_MODE_SILENT, true, g_state.a_aim_mode2);
         }
 
-        if (g_state.aim_mode == AIM_MODE_SILENT) {
-            const auto st = silent_aim::stats();
-            ImGui::TextDisabled(XS("Записей: %llu | Отказов: %llu"),
-                                (unsigned long long)st.writes,
-                                (unsigned long long)st.failures);
-        }
-
         SHdr(XS("Куда целиться"));
         {
             const float rowH = Layout::RowH;
@@ -874,19 +867,12 @@ float TabContent(int tab, float dt, float cW) {
             ImGui::Dummy({avW, 0.f});
         }
 
-        // Автообновление оффсетов: что резолвер вычитал из живой игры в этой
-        // сессии (классы по именам + смещения полей; что не нашлось — на
-        // вшитых значениях). См. jni/src/offset_resolver.cpp.
-        {
-            char rstat[96] = {};
-            offset_resolver_status(rstat, sizeof(rstat));
+        // Диагностика привязки: если её рвёт по кругу, здесь видно,
+        // КАКОЕ условие срабатывает (процесс/память/смотритель кадра).
+        const char* why = process_last_detach_reason();
+        if (why) {
             ImGui::Dummy({1.f, 10.f});
-            ImGui::TextDisabled("%s: %s", XS("Автообновление оффсетов"), rstat);
-            // Диагностика привязки: если её рвёт по кругу, здесь видно,
-            // КАКОЕ условие срабатывает (процесс/память/смотритель кадра).
-            const char* why = process_last_detach_reason();
-            if (why)
-                ImGui::TextDisabled("%s: %s (x%d)", XS("Привязка"), why, process_detach_count());
+            ImGui::TextDisabled("%s: %s (x%d)", XS("Привязка"), why, process_detach_count());
         }
 
         SHdr(XS("Система"));
@@ -938,7 +924,10 @@ float TabContent(int tab, float dt, float cW) {
             // This button resets only FOV/hands, not the other misc features.
             const int fps = vm.fps_limit;
             const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;
+            const bool hj = vm.high_jump;
+            const float jh = vm.jump_height;
             vm = {}; vm.fps_limit = fps; vm.no_recoil = nr; vm.no_spread = ns; vm.fast_loot = fl;
+            vm.high_jump = hj; vm.jump_height = jh;
             g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
             g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
             esp_viewmodel_tick(vm);
@@ -958,6 +947,19 @@ float TabContent(int tab, float dt, float cW) {
         else if ((vm.no_recoil && weaponStatus.no_recoil == viewmodel::Status::Waiting) ||
                  (vm.no_spread && weaponStatus.no_spread == viewmodel::Status::Waiting))
             ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
+
+        ImGui::Dummy({1.f, 12.f});
+
+        SHdr(XS("Движение"));
+        CardBg(Layout::RowH + Layout::SliderH);
+        const bool oldHighJump = vm.high_jump;
+        const float oldJumpHeight = vm.jump_height;
+        ToggleRow("##highjump", XS("Высокий прыжок"), &vm.high_jump, g_state.a_high_jump, false, true);
+        SliderRow("##jumpheight", XS("Высота"), &vm.jump_height,
+                  1.0f, 5.0f, XS("%.1f м"), true, false, g_state.sl_jump_height, dt);
+        if (oldHighJump != vm.high_jump || oldJumpHeight != vm.jump_height) esp_viewmodel_tick(vm);
+
+        ImGui::Dummy({1.f, 12.f});
 
         // Быстрый сбор: heap-реализация без патчей библиотек
         // (fast_loot::Controller, loot_memory.h) — обнуляет float-темп
@@ -1719,6 +1721,7 @@ void RenderMenu() {
     Tick(g_state.a_esp_ore_sulfur, g_state.esp_ore_sulfur, dt);
     Tick(g_state.a_esp_animal, g_state.esp_animal,         dt);
     Tick(g_state.a_esp_loot,   g_state.esp_loot,           dt);
+    Tick(g_state.a_esp_scrap,  g_state.esp_scrap,          dt);
     Tick(g_state.a_esp_pickup, g_state.esp_pickup,         dt);
     Tick(g_state.a_esp_bots,   g_state.esp_bots,           dt);
     Tick(g_state.a_esp_vehicles, g_state.esp_vehicles,     dt);
@@ -1743,6 +1746,7 @@ void RenderMenu() {
     Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil, dt);
     Tick(g_state.a_no_spread, g_state.viewmodel.no_spread, dt);
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
+    Tick(g_state.a_high_jump, g_state.viewmodel.high_jump, dt);
     Tick(g_state.a_fps_90,  g_state.viewmodel.fps_limit == 90,  dt);
     Tick(g_state.a_fps_120, g_state.viewmodel.fps_limit == 120, dt);
     Tick(g_state.a_fps_144, g_state.viewmodel.fps_limit == 144, dt);

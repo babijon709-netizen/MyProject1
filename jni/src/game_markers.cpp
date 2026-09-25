@@ -970,6 +970,7 @@ static bool rebuild_marker_entities() {
         // Mirror collects behaviours with GetComponentsInChildren, so one
         // identity can carry a whole rock cluster: every Mineable* component
         // becomes its own marker, positioned by its own GameObject.
+        bool had_scrap_on_identity = false;
         for (int32_t b = 0; b < behaviour_count; ++b) {
             uint64_t component = behaviours[b];
             if (!valid_obj(component)) continue;
@@ -1060,6 +1061,10 @@ static bool rebuild_marker_entities() {
                 if (!known && g_markers_pickup_enabled) known = gather_marker_from_loot(component, look);
             }
             if (!known) continue;
+            if (look.kind == ESP_MARKER_SCRAP) {
+                if (had_scrap_on_identity) continue;
+                had_scrap_on_identity = true;
+            }
 
             MarkerEntity entity;
             entity.identity = identity;
@@ -1072,9 +1077,17 @@ static bool rebuild_marker_entities() {
             entity.color_rgb[0] = look.rgb[0];
             entity.color_rgb[1] = look.rgb[1];
             entity.color_rgb[2] = look.rgb[2];
-            entity.transform = native_component_transform(managed_object_native(component));
-            if (!entity.transform) // component without its own renderer: use the identity
+            // Для скрапа (бочек) берём корневой трансформ сущности, чтобы метка не
+            // цеплялась за дочерние коллидеры со смещением и не прыгала.
+            if (look.kind == ESP_MARKER_SCRAP) {
                 entity.transform = native_component_transform(managed_object_native(identity));
+                if (!entity.transform)
+                    entity.transform = native_component_transform(managed_object_native(component));
+            } else {
+                entity.transform = native_component_transform(managed_object_native(component));
+                if (!entity.transform) // component without its own renderer: use the identity
+                    entity.transform = native_component_transform(managed_object_native(identity));
+            }
             entity.position_valid = marker_world_position(entity.transform, entity.position);
             if (entity.transform) g_marker_scan_pending.push_back(entity);
             if (g_marker_scan_pending.size() >= 512) break;
@@ -1268,11 +1281,14 @@ std::vector<EspMarker> esp_get_markers() {
         result.push_back(marker);
     }
 
-    // Порядок стабильный: ничьи (перечитываемый шум зверей/ботов или два узла
-    // на одной глубине) держат порядок сканирования реестра, а не тасуются
-    // каждый кадр — иначе прореживание ниже прыгало бы между соседними пилюлями.
+    // Порядок стабильный: ничьи (перечитываемый шум зверей/ботов или близкие узлы
+    // в пределах 2 м одного кластера/кучи бочек) держат порядок сканирования
+    // реестра, а не тасуются каждый кадр при микрошагах игрока — иначе прореживание
+    // ниже прыгало бы влево-вправо между соседними бочками.
     std::stable_sort(result.begin(), result.end(), [](const EspMarker& a, const EspMarker& b) {
-        return floorf(a.distance * 2.0F) < floorf(b.distance * 2.0F);
+        float diff = a.distance - b.distance;
+        if (fabsf(diff) >= 2.0F) return diff < 0.0F;
+        return false;
     });
 
     // Rock clusters put several nodes within a couple of metres, which would
@@ -1281,6 +1297,8 @@ std::vector<EspMarker> esp_get_markers() {
     // полутора метрах друг от друга на дистанции 50 м дают ~28 px на экране —
     // у каждого должна быть своя метка, иначе одна прыгает между ними, пока
     // игрок стрейфится. Узлы кластера ближе ~1 м друг к другу на дальности остаются склеены.
+    // Для скрапа (бочек) берём более плотный порог 14 px, чтобы соседние бочки
+    // оставались различимы и метки не скакали.
     std::vector<EspMarker> thinned;
     thinned.reserve(result.size());
     for (const EspMarker& marker : result) {
@@ -1291,7 +1309,8 @@ std::vector<EspMarker> esp_get_markers() {
             // compare equal — for that category position alone decides.
             if (marker.kind != ESP_MARKER_PICKUP && strcmp(kept.name, marker.name) != 0) continue;
             float dx = kept.x - marker.x, dy = kept.y - marker.y;
-            if (dx * dx + dy * dy < 22.0F * 22.0F) { covered = true; break; }
+            float thresh = (marker.kind == ESP_MARKER_SCRAP) ? 14.0F : 22.0F;
+            if (dx * dx + dy * dy < thresh * thresh) { covered = true; break; }
         }
         if (covered) continue;
         thinned.push_back(marker);
