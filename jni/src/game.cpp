@@ -472,7 +472,7 @@ struct AllyRuntimeDiag {
     AllyPointerDiag local_class;
     AllyStringDiag group_team, group_clan, group_tag;
     AllyPointerDiag team_component, component_class, component_owner;
-    AllyPointerDiag teammate_states;
+    AllyPointerDiag teammate_states, team_states_class, team_states_entries;
     int32_t team_states_entry_count = -1;
     int32_t team_states_array_length = -1;
     int32_t team_states_active_count = 0;
@@ -530,6 +530,8 @@ static AllyRuntimeDiag capture_ally_runtime_diag(uint64_t local_player) {
     // TeammateStates is independent of TeamData and stays readable even when
     // the server roster object or its member list has not synchronized yet.
     out.teammate_states = ally_read_pointer(out.team_component.value, TEAM_OBJECT_STATES);
+    if (out.teammate_states.object_valid)
+        out.team_states_class = ally_read_pointer(out.teammate_states.value, 0);
     out.team_data = ally_read_pointer(out.team_component.value, TEAM_OBJECT_DATA);
     if (!out.team_data.object_valid) return out;
     out.data_class = ally_read_pointer(out.team_data.value, 0);
@@ -576,6 +578,7 @@ static bool read_team_state_user_ids(
     diag.team_states_array_length = -1;
     diag.team_states_active_count = 0;
     diag.team_states_count_read = false;
+    diag.team_states_entries = AllyPointerDiag{};
     diag.team_states_array_length_read = false;
     diag.team_states_parsed = false;
     out_count = 0;
@@ -603,8 +606,16 @@ static bool read_team_state_user_ids(
         diag.team_states_count_read = true;
         diag.team_states_entry_count = raw_count;
     }
-    const uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
-    if (valid_obj(entries)) {
+    uint64_t raw_entries = 0;
+    diag.team_states_entries.read_ok =
+        rd_exact(dictionary + DICT_ENTRIES, raw_entries);
+    if (diag.team_states_entries.read_ok) {
+        diag.team_states_entries.value = memio::untag(raw_entries);
+        diag.team_states_entries.object_valid =
+            valid_obj(diag.team_states_entries.value);
+    }
+    const uint64_t entries = diag.team_states_entries.value;
+    if (diag.team_states_entries.object_valid) {
         diag.team_states_array_length_read =
             rd_exact(entries + IL2CPP_ARRAY_LENGTH, diag.team_states_array_length);
     }
@@ -908,9 +919,11 @@ void esp_get_ally_diag_details(char* out, size_t cap) {
     const AllyRuntimeDiag& d = s_ally_runtime_diag;
     const char* owner_match = !d.component_owner.read_ok ? "unknown"
         : (d.component_owner.value == d.local_player ? "yes" : "no");
-    char local_class_name[48] = {}, component_class_name[48] = {}, data_class_name[48] = {};
+    char local_class_name[48] = {}, component_class_name[48] = {};
+    char states_class_name[48] = {}, data_class_name[48] = {};
     ally_diag_class_name(d.local_class.value, local_class_name, sizeof(local_class_name));
     ally_diag_class_name(d.component_class.value, component_class_name, sizeof(component_class_name));
+    ally_diag_class_name(d.team_states_class.value, states_class_name, sizeof(states_class_name));
     ally_diag_class_name(d.data_class.value, data_class_name, sizeof(data_class_name));
     snprintf(out, cap,
         "offs[PM.team=0x%llx teamName=0x%llx clanId=0x%llx clanTag=0x%llx "
@@ -920,8 +933,9 @@ void esp_get_ally_diag_details(char* out, size_t cap) {
         "strings[teamName ptr=0x%llx len=%d %s; clanId ptr=0x%llx len=%d %s; "
         "clanTag ptr=0x%llx len=%d %s]; "
         "chain[PM.team read=%s ptr=0x%llx obj=%d class=0x%llx(%s); "
-        "TC.states read=%s ptr=0x%llx obj=%d parsed=%d countRead=%d entries=%d "
-        "arrayRead=%d array=%d ids=%d; "
+        "TC.states read=%s ptr=0x%llx obj=%d class=0x%llx(%s); "
+        "Dictionary countRead=%d count=%d entriesRead=%s entries=0x%llx obj=%d "
+        "arrayRead=%d array=%d ids=%d parsed=%d; "
         "TC.player read=%s ptr=0x%llx self=%s; "
         "TC.team read=%s ptr=0x%llx obj=%d class=0x%llx(%s); "
         "TD.name ptr=0x%llx len=%d %s; members read=%s ptr=0x%llx obj=%d]",
@@ -953,9 +967,14 @@ void esp_get_ally_diag_details(char* out, size_t cap) {
         (unsigned long long)d.component_class.value, component_class_name,
         d.teammate_states.read_ok ? "ok" : "fail",
         (unsigned long long)d.teammate_states.value, d.teammate_states.object_valid ? 1 : 0,
-        d.team_states_parsed ? 1 : 0, d.team_states_count_read ? 1 : 0,
-        d.team_states_entry_count, d.team_states_array_length_read ? 1 : 0,
+        (unsigned long long)d.team_states_class.value, states_class_name,
+        d.team_states_count_read ? 1 : 0, d.team_states_entry_count,
+        d.team_states_entries.read_ok ? "ok" : "fail",
+        (unsigned long long)d.team_states_entries.value,
+        d.team_states_entries.object_valid ? 1 : 0,
+        d.team_states_array_length_read ? 1 : 0,
         d.team_states_array_length, d.team_states_active_count,
+        d.team_states_parsed ? 1 : 0,
         d.component_owner.read_ok ? "ok" : "fail",
         (unsigned long long)d.component_owner.value, owner_match,
         d.team_data.read_ok ? "ok" : "fail",

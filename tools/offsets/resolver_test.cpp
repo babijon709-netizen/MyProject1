@@ -101,6 +101,12 @@ static bool resolver_applied(std::uint64_t* slot) {
     return false;
 }
 
+static int resolver_field_index(std::uint64_t* slot) {
+    for (int i = 0; i < kOrFieldCount; ++i)
+        if (kOrFields[i].slot == slot) return i;
+    return -1;
+}
+
 struct Handed {
     uint64_t il2cpp_base, meta_base;
     uint64_t pm_real, pm_decoy, teammember, netclient;
@@ -640,6 +646,17 @@ int main() {
           resolver_applied(&go_active::DICT_ENTRIES) &&
           resolver_applied(&go_active::DICT_COUNT),
           "generic Dictionary _entries/_count resolved by live class and field name");
+    const int dict_entries_idx = resolver_field_index(&go_active::DICT_ENTRIES);
+    const int dict_count_idx = resolver_field_index(&go_active::DICT_COUNT);
+    const int applied_before_bad_offset = s_applied_count;
+    if (dict_entries_idx >= 0) apply_resolution(kOrFields[dict_entries_idx], 0);
+    check(go_active::DICT_ENTRIES == 0x28 && s_applied_count == applied_before_bad_offset,
+          "zero instance offset cannot overwrite a valid Dictionary slot");
+    check(!resolved_offset_is_valid(false, 0, "Dictionary`2") &&
+          resolved_offset_is_valid(false, 0, "RaycastHit") &&
+          resolved_offset_is_valid(false, 0x0C, "RaycastHit") &&
+          resolved_offset_is_valid(false, 0, "WeaponPiece"),
+          "managed object header is rejected but inline value-type offsets remain valid");
     check(go_active::TEAM_DATA_NAME == 0x18,
           "TeamData name найден типом через двухшаговый путь 0x10 -> 0x18");
     check(go_active::TEAM_DATA_MEMBERS == 0x30 &&
@@ -746,8 +763,25 @@ int main() {
           "после reset поля по типу найдены заново");
 
     // ---- кэш первого входа: второй вход без скана ---------------------------
+    // Добавляем в конец кэша повреждённые нулевые значения для generic
+    // Dictionary. Они не должны затирать ни текущую раскладку, ни baked fallback.
+    const std::string cache_path = std::string(OR_CACHE_DIR) + ".offs";
+    bool poisoned_dictionary_cache = false;
+    if (dict_entries_idx >= 0 && dict_count_idx >= 0) {
+        FILE* cache_file = fopen(cache_path.c_str(), "a");
+        if (cache_file) {
+            const int a = fprintf(cache_file, "res %d 0\n", dict_entries_idx);
+            const int b = fprintf(cache_file, "res %d 0\n", dict_count_idx);
+            const int close_status = fclose(cache_file);
+            poisoned_dictionary_cache = a > 0 && b > 0 && close_status == 0;
+        }
+    }
+    check(poisoned_dictionary_cache, "test cache seeded with invalid zero Dictionary offsets");
+
     // Сбрасываем состояние (как при перезаходе в игру) и портим слоты: кэш
     // обязан вернуть найденное мгновенно, без единого скана памяти.
+    go_active::DICT_ENTRIES = 0x18;
+    go_active::DICT_COUNT = 0x20;
     offset_resolver_reset();
     go_active::PLAYER_TEAM_NAME = 0x1234;
     go_active::FPMANAGER_AIM_BLEND = 0x1234;
@@ -775,6 +809,8 @@ int main() {
     check(go_active::ITEM_DATA == 0x30, "кэш вернул поле класса-типа");
     check(go_active::EVENT_HANDLER_AIM_ACTIVITY == 0x40,
           "кэш вернул via-поле обработчика прицела");
+    check(go_active::DICT_ENTRIES == 0x28 && go_active::DICT_COUNT == 0x38,
+          "cache rejects zero instance offsets for Dictionary fields");
     check(offset_resolver_class("PlayerManager", "Oxide") == h.pm_real ||
           offset_resolver_class("PlayerManager", "Oxide") == h.pm_decoy,
           "кэш вернул класс PlayerManager");

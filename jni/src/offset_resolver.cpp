@@ -2120,6 +2120,22 @@ static bool assign_type_group(const TypeGroup& g, const int32_t* cand, int ncand
 }
 
 
+static bool resolved_offset_is_valid(bool is_static, std::uint64_t value,
+                                     const char* owner_class) {
+    // Managed reference objects have a 0x10-byte Il2CppObject header, so no
+    // instance field can live in it. Generic Dictionary metadata can expose an
+    // uninitialized FieldInfo offset of 0; accepting that corrupts the baked,
+    // ABI-verified _entries/_count slots. Value-type fields are stored inline
+    // and legitimately start at 0 (e.g. RaycastHit.m_Point, WeaponPiece.Enabled).
+    // Static fields use an address within static_fields and may start at 0.
+    if (is_static) return value <= 0x4000;
+    if (value > 0x20000) return false;
+    if (value >= 0x10) return true;
+    return owner_class &&
+           (strcmp(owner_class, "RaycastHit") == 0 ||
+            strcmp(owner_class, "WeaponPiece") == 0);
+}
+
 static void apply_resolution(const OrField& of, int32_t off);
 
 // Развести группу слотов одного (класс, тип) по полям класса. Возврат: сколько
@@ -2154,8 +2170,20 @@ static int resolve_type_group(const TypeGroup& g, uint64_t klass) {
     if (m.n >= g.n && !(vague && g.n == 1)) {
         TypeAssign a;
         if (assign_type_group(g, m.off, m.n, a)) {
-            for (int s = 0; s < g.n; ++s) apply_resolution(*g.of[s], a.off[s]);
-            return g.n;
+            bool valid_assignment = true;
+            for (int s = 0; s < g.n; ++s) {
+                if (a.off[s] < 0 ||
+                    !resolved_offset_is_valid(g.of[s]->is_static,
+                                              static_cast<std::uint32_t>(a.off[s]),
+                                              g.of[s]->cls)) {
+                    valid_assignment = false;
+                    break;
+                }
+            }
+            if (valid_assignment) {
+                for (int s = 0; s < g.n; ++s) apply_resolution(*g.of[s], a.off[s]);
+                return g.n;
+            }
         }
     }
     // Запасной путь (как раньше): каждый слот сам за себя. Сначала — точное
@@ -2171,6 +2199,10 @@ static int resolve_type_group(const TypeGroup& g, uint64_t klass) {
         if (!baked_for_slot(of.slot, &baked)) continue;
         for (int c = 0; c < m.n; ++c) {
             if (used[c]) continue;
+            if (m.off[c] < 0 ||
+                !resolved_offset_is_valid(of.is_static,
+                                          static_cast<std::uint32_t>(m.off[c]),
+                                          of.cls)) continue;
             if ((std::uint64_t)(uint32_t)m.off[c] != baked) continue;
             used[c] = true;
             apply_resolution(of, m.off[c]);
@@ -2202,6 +2234,10 @@ static int resolve_type_group(const TypeGroup& g, uint64_t klass) {
             for (int j = 0; j < s_applied_count; ++j)
                 if (s_applied[j].slot == g.of[t]->slot) { done = true; break; }
             if (done) continue;
+            if (m.off[last] < 0 ||
+                !resolved_offset_is_valid(g.of[t]->is_static,
+                                          static_cast<std::uint32_t>(m.off[last]),
+                                          g.of[t]->cls)) continue;
             used[last] = true;
             apply_resolution(*g.of[t], m.off[last]);
             ++filled;
@@ -2213,9 +2249,9 @@ static int resolve_type_group(const TypeGroup& g, uint64_t klass) {
 
 
 static void apply_resolution(const OrField& of, int32_t off) {
-    const std::uint64_t value = (std::uint64_t)(uint32_t)off;
-    if (of.is_static && (off < 0 || off > 0x4000)) return;
-    if (!of.is_static && (off < 0 || off > 0x20000)) return;
+    if (off < 0) return;
+    const std::uint64_t value = static_cast<std::uint32_t>(off);
+    if (!resolved_offset_is_valid(of.is_static, value, of.cls)) return;
     if (*(of.slot) != value) ++s_changed;
     *(of.slot) = value;
     if (s_applied_count < 256) {
@@ -2716,13 +2752,22 @@ static void phase_fields() {
         for (int j = 0; j < s_class_count; ++j) {
             if (strcmp(s_classes[j].name, of.cls) != 0) continue;
             const int32_t off = find_field_offset(s_classes[j].klass, of.field);
-            if (off >= 0) { apply_resolution(of, off); resolved = true; break; }
+            if (off >= 0 && resolved_offset_is_valid(of.is_static,
+                    static_cast<std::uint32_t>(off), of.cls)) {
+                apply_resolution(of, off);
+                resolved = true;
+                break;
+            }
         }
         // Если класс PlayerManager не найден по имени (например, в бете он обфусцирован как "U"),
         // но якорь подтверждён, запрашиваем поля напрямую из якоря.
         if (!resolved && strcmp(of.cls, "PlayerManager") == 0 && anchor) {
             const int32_t off = find_field_offset(anchor, of.field);
-            if (off >= 0) { apply_resolution(of, off); resolved = true; }
+            if (off >= 0 && resolved_offset_is_valid(of.is_static,
+                    static_cast<std::uint32_t>(off), of.cls)) {
+                apply_resolution(of, off);
+                resolved = true;
+            }
         }
     }
 
@@ -2852,7 +2897,8 @@ static void phase_fields() {
             if (vf.is_static) {
                 // Статическое поле: значение лежит в static_fields.
                 const uint64_t sfp = qrd_ptr(k + IL2CPP_CLASS_STATIC_FIELDS);
-                if (valid_obj(sfp) && by_name < 0x400) {
+                if (valid_obj(sfp) && by_name < 0x400 &&
+                    resolved_offset_is_valid(true, static_cast<std::uint32_t>(by_name), vf.via_cls)) {
                     const uint8_t v = qrd<uint8_t>(sfp + (uint64_t)by_name);
                     if (!(vf.type && vf.type[0] == 'b' && v != 0 && v != 1)) {
                         of_tmp.is_static = true;
@@ -2861,7 +2907,8 @@ static void phase_fields() {
                         continue;
                     }
                 }
-            } else {
+            } else if (resolved_offset_is_valid(false,
+                                                 static_cast<std::uint32_t>(by_name), vf.via_cls)) {
                 apply_resolution(of_tmp, by_name);
                 ++by_via;
                 continue;
@@ -2944,6 +2991,11 @@ static void log_summary() {
             (unsigned long long)TEAM_OBJECT_DATA, offset_source(&TEAM_OBJECT_DATA),
             (unsigned long long)TEAM_DATA_NAME, offset_source(&TEAM_DATA_NAME),
             (unsigned long long)TEAM_DATA_MEMBERS, offset_source(&TEAM_DATA_MEMBERS));
+    LogLine("автооффсеты: ally-map — TeamComponent.TeammateStates=0x%llx(%s) "
+            "Dictionary._entries=0x%llx(%s) _count=0x%llx(%s)",
+            (unsigned long long)TEAM_OBJECT_STATES, offset_source(&TEAM_OBJECT_STATES),
+            (unsigned long long)DICT_ENTRIES, offset_source(&DICT_ENTRIES),
+            (unsigned long long)DICT_COUNT, offset_source(&DICT_COUNT));
 
     build_wanted_names();
     char missing_buf[384] = {};
@@ -3237,7 +3289,7 @@ static bool load_offsets_cache() {
             const OrField& of = kOrFields[idx];
             // Границы те же, что у apply_resolution: кэш не должен занести в
             // слот заведомо мусорное значение.
-            if (of.is_static ? (val > 0x4000) : (val > 0x20000)) continue;
+            if (!resolved_offset_is_valid(of.is_static, static_cast<std::uint64_t>(val), of.cls)) continue;
             if (*(of.slot) != val) ++s_changed;
             *(of.slot) = (std::uint64_t)val;
             if (s_applied_count < 256) {
@@ -3251,7 +3303,7 @@ static bool load_offsets_cache() {
         } else if (sscanf(linebuf, "via %u %llx", &idx, &val) == 2) {
             if (idx >= (unsigned)kViaFieldCount) continue;
             const ViaField& vf = kViaFields[idx];
-            if (vf.is_static ? (val > 0x4000) : (val > 0x20000)) continue;
+            if (!resolved_offset_is_valid(vf.is_static, static_cast<std::uint64_t>(val), vf.via_cls)) continue;
             if (*(vf.slot) != val) ++s_changed;
             *(vf.slot) = (std::uint64_t)val;
             if (s_applied_count < 256) {
