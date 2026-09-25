@@ -72,8 +72,9 @@ AuthHttpResult PostDeviceAuth(const std::string& url, const std::string& body,
         if (stream) { char buf[32]{}; std::fgets(buf, sizeof(buf), stream); value = buf; std::fclose(stream); }
     }
     if (value.rfind("enabled", 0) == 0) return AuthHttpResult::allowed;
-    if (value.rfind("disabled", 0) == 0 || value == "replay" || value == "extra" ||
-        value == "redirect") return AuthHttpResult::denied;
+    if (value.rfind("disabled", 0) == 0) return AuthHttpResult::denied;
+    if (value == "replay" || value == "extra") return AuthHttpResult::unavailable;
+    if (value == "redirect") return AuthHttpResult::unavailable;
     return AuthHttpResult::unavailable;
 }
 CPP

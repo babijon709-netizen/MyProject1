@@ -43,7 +43,9 @@ async function readSwitch(env) {
   if (env.CONTROL_DB) {
     const row = await env.CONTROL_DB.prepare(
       'SELECT enabled FROM benzware_control WHERE id = 1').first();
-    return row?.enabled === 1 ? 'enabled' : 'disabled';
+    if (row?.enabled !== 0 && row?.enabled !== 1)
+      throw Error('Missing or invalid control row');
+    return row.enabled === 1 ? 'enabled' : 'disabled';
   }
   const value = await env.CONTROL.get('enabled', { cacheTtl: 30 });
   return value === 'enabled' ? 'enabled' : 'disabled';

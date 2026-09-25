@@ -25,8 +25,17 @@ const server = tls.createServer({key: readFileSync(keyPath), cert: readFileSync(
     if (data.mode === 'replay') content = `enabled:${'0'.repeat(32)}\n`;
     if (data.mode === 'error') {status = 503; content = 'disabled\n';}
     if (data.mode === 'redirect') {status = 302; content = 'enabled\n';}
-    if (data.mode === 'chunked') {
+    if (data.mode === 'challenge') content = '<html>Cloudflare challenge</html>';
+    if (data.mode === 'forbidden') {status = 403; content = '<html>Blocked</html>';}
+    if (data.mode === 'chunkedSplit') {
+      socket.write('HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n');
+      socket.write(`8\r\n${content.slice(0, 8)}\r\n`);
+      setTimeout(() => socket.end(`${(content.length - 8).toString(16)}\r\n${content.slice(8)}\r\n0\r\n\r\n`), 80);
+    } else if (data.mode === 'chunked') {
       socket.end(`HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n${content.length.toString(16)}\r\n${content}\r\n0\r\n\r\n`);
+    } else if (data.mode === 'keepAlive') {
+      socket.write(`HTTP/1.1 200 OK\r\nContent-Length: ${content.length}\r\nConnection: keep-alive\r\n\r\n${content}`);
+      setTimeout(() => socket.end(), 1800);
     } else {
       socket.end(`HTTP/1.1 ${status} Test\r\nContent-Length: ${content.length}\r\nConnection: close\r\n\r\n${content}`);
     }
@@ -36,11 +45,14 @@ try {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = String(server.address().port);
   for (const [mode, expected] of [
-    ['enabled', 0], ['disabled', 1], ['replay', 1], ['error', 2],
-    ['redirect', 2], ['chunked', 0],
+    ['enabled', 0], ['disabled', 1], ['replay', 2], ['error', 2],
+    ['redirect', 2], ['forbidden', 2], ['challenge', 2],
+    ['chunked', 0], ['chunkedSplit', 0], ['keepAlive', 0],
   ]) {
+    const start = Date.now();
     const {stdout} = await run(binary, [port, 'localhost', mode], {timeout: 5000});
     assert.equal(Number(stdout.trim()), expected, `${mode}: ${stdout}`);
+    if (mode === 'keepAlive') assert.ok(Date.now() - start < 1500, 'Do not wait for TLS close');
   }
   const {stdout} = await run(binary, [port, '127.0.0.1', 'enabled'], {timeout: 5000});
   assert.equal(Number(stdout.trim()), 2, 'A CA-signed certificate with the wrong hostname must fail');

@@ -190,6 +190,12 @@ try {
   assert.equal(await (await d1Call('/status')).text(), 'enabled\n');
   const hwid = 'a'.repeat(64);
   assert.equal(await (await auth(hwid, 'Pixel 8')).text(), 'enabled:' + nonce + '\n');
+  // A missing/corrupt control row is a storage outage, never an explicit OFF.
+  d1Value = null;
+  assert.equal((await d1Call('/status')).status, 503);
+  assert.equal((await auth(hwid, 'Pixel 8', false)).status, 503);
+  d1Value = 1;
+  assert.equal(await (await auth(hwid, 'Pixel 8', false)).text(), 'enabled:' + nonce + '\n');
   assert.equal(sent.at(-1).body.text.includes('Pixel 8'), true);
   assert.equal(sent.at(-1).body.text.includes(hwid), true);
   const notifications = sent.length;

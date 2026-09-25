@@ -23,7 +23,7 @@ namespace {
 #endif
 constexpr int kIntervalSeconds = BENZWARE_POLL_SECONDS;
 #ifndef BENZWARE_GRACE_SECONDS
-#define BENZWARE_GRACE_SECONDS 180
+#define BENZWARE_GRACE_SECONDS 300
 #endif
 #ifndef BENZWARE_RETRY_DELAY_MS
 #define BENZWARE_RETRY_DELAY_MS 2000
@@ -131,6 +131,7 @@ bool RemoteGateStart() {
             GateResult result = check_status(identity, false);
             if (result == GateResult::allowed) {
                 last_allowed = std::chrono::steady_clock::now();
+                if (warned) std::fprintf(stderr, "benzware: authorization restored\n");
                 warned = false;
                 continue;
             }
@@ -142,7 +143,8 @@ bool RemoteGateStart() {
                 warned = true;
                 continue;
             } else {
-                std::fprintf(stderr, "benzware: authorization outage exceeded grace; stopping\n");
+                std::fprintf(stderr, "benzware: authorization outage exceeded %lld s grace; stopping\n",
+                    static_cast<long long>(kGrace.count()));
             }
             main_thread_flag.store(false);
             break;

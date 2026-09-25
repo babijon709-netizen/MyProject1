@@ -69,7 +69,9 @@ std::string lowercase(std::string input) {
 
 // HTTP/1.1 can use Content-Length, chunked transfer encoding, or connection
 // close. Never accept a partial response as a successful authorization.
-bool responseBody(const std::string& response, int& status, std::string& body) {
+bool responseBody(const std::string& response, int& status, std::string& body,
+                  bool connection_closed) {
+    body.clear(); // Each call reparses the full accumulated response.
     const auto end = response.find("\r\n\r\n");
     if (end == std::string::npos || end > 12000 || response.compare(0, 9, "HTTP/1.1 ") != 0 ||
         end < 12 || !std::isdigit(static_cast<unsigned char>(response[9])) ||
@@ -106,7 +108,8 @@ bool responseBody(const std::string& response, int& status, std::string& body) {
                 size = (size << 4) + static_cast<size_t>(n);
             }
             pos = line + 2;
-            if (size == 0) return true;
+            if (size == 0) return response.size() >= pos + 2 &&
+                response.compare(pos, 2, "\r\n") == 0;
             if (size > 256 || pos + size + 2 > response.size() ||
                 response.compare(pos + size, 2, "\r\n") != 0) return false;
             body.append(response, pos, size);
@@ -129,6 +132,8 @@ bool responseBody(const std::string& response, int& status, std::string& body) {
         if (n > 256 || response.size() - pos < n) return false;
         body = response.substr(pos, n);
     } else {
+        // Without framing, only EOF proves that the body is complete.
+        if (!connection_closed) return false;
         body = response.substr(pos);
     }
     return body.size() <= 256;
@@ -178,23 +183,33 @@ AuthHttpResult PostDeviceAuth(const std::string& url, const std::string& body,
         sent += static_cast<size_t>(n);
     }
     std::string response;
+    int status = 0;
+    std::string content;
+    bool complete = false;
+    bool closed = false;
     while (response.size() < 16384) {
         unsigned char buffer[1024];
         const int n = mbedtls_ssl_read(&tls.ssl, buffer, sizeof(buffer));
         if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-        if (n == 0 || n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) break;
+        if (n == 0 || n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) { closed = true; break; }
         if (n < 0) return AuthHttpResult::unavailable;
         response.append(reinterpret_cast<const char*>(buffer), static_cast<size_t>(n));
+        // A complete Content-Length/chunked response is usable without waiting
+        // for Cloudflare (or an intermediary) to close its keep-alive socket.
+        if (responseBody(response, status, content, false)) { complete = true; break; }
     }
     if (response.size() >= 16384) return AuthHttpResult::unavailable;
-    int status = 0;
-    std::string content;
-    if (!responseBody(response, status, content)) return AuthHttpResult::unavailable;
+    if (!complete && (!closed || !responseBody(response, status, content, true)))
+        return AuthHttpResult::unavailable;
     if (status == 200) {
         if (content == "enabled:" + nonce + "\n") return AuthHttpResult::allowed;
-        return AuthHttpResult::denied; // Bad or replayed nonce, or explicit disabled.
+        if (content == "disabled\n") return AuthHttpResult::denied;
+        // A 200 challenge page, truncated/protocol-invalid reply or a replayed
+        // nonce does NOT grant permission. During an active session it is a
+        // temporary outage; startup still fails closed.
+        return AuthHttpResult::unavailable;
     }
-    if (status == 400 || status == 401 || status == 403 || status == 404)
-        return AuthHttpResult::denied;
+    // Only the Worker's exact explicit denial is an immediate revocation.
+    // A 403/404 from an edge/WAF is not proof that the admin switched off.
     return AuthHttpResult::unavailable;
 }
