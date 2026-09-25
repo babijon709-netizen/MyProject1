@@ -42,11 +42,13 @@ src = src.replace(old, '// hostcheck: аудио-блок (OpenSLES) выклю�
 open(sys.argv[1], 'w', encoding='utf-8').write(src)
 PY
 
-INC="-Ijni/include -Ijni/include/ImGui -Ijni/include/ImGui/backends -Ijni/src -I$STUB"
+TLS=jni/src/third_party/mbedtls
+INC="-Ijni/include -Ijni/include/ImGui -Ijni/include/ImGui/backends -Ijni/src -I$STUB -I$TLS/include -I$TLS/library"
+TLS_INC="-I$TLS/include -I$TLS/library -I$TLS/3rdparty/everest/include -I$TLS/3rdparty/everest/include/everest -I$TLS/3rdparty/everest/include/everest/kremlib -I$TLS/3rdparty/p256-m/p256-m/include -I$TLS/3rdparty/p256-m/p256-m/include/p256-m -I$TLS/3rdparty/p256-m/p256-m_driver_interface"
 FLAGS="-std=gnu++17 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable"
 
 # --- 1) Синтаксис каждого модуля ------------------------------------------
-for f in jni/src/main.cpp jni/src/remote_gate.cpp jni/src/device_identity.cpp \
+for f in jni/src/main.cpp jni/src/remote_gate.cpp jni/src/auth_http.cpp jni/src/device_identity.cpp \
          "$TMP/audio_hostcheck.cpp" \
          jni/src/theme.cpp jni/src/process.cpp jni/src/hud.cpp jni/src/esp_draw.cpp \
          jni/src/aim.cpp jni/src/farm.cpp jni/src/widgets.cpp jni/src/menu.cpp \
@@ -66,7 +68,7 @@ done
 BUILD="$TMP/hostbuild"
 rm -rf "$BUILD" && mkdir -p "$BUILD"
 # shellcheck disable=SC2086
-CPP_TUS="jni/src/main.cpp jni/src/remote_gate.cpp jni/src/device_identity.cpp $TMP/audio_hostcheck.cpp jni/src/theme.cpp jni/src/process.cpp \
+CPP_TUS="jni/src/main.cpp jni/src/remote_gate.cpp jni/src/auth_http.cpp jni/src/device_identity.cpp $TMP/audio_hostcheck.cpp jni/src/theme.cpp jni/src/process.cpp \
 jni/src/hud.cpp jni/src/esp_draw.cpp jni/src/aim.cpp jni/src/farm.cpp \
 jni/src/widgets.cpp jni/src/menu.cpp jni/src/config.cpp \
 jni/src/VidAvatar.cpp \
@@ -82,6 +84,15 @@ for f in $CPP_TUS; do
     g++ $FLAGS -O0 -c $INC "$f" -o "$o" || { echo "компиляция для линковки: $f"; exit 1; }
 done
 gcc -std=c11 -O0 -c jni/src/third_party/tjpgd/tjpgd.c -o "$BUILD/tjpgd.o" || exit 1
+for src in "$TLS"/library/*.c \
+    "$TLS"/3rdparty/everest/library/everest.c \
+    "$TLS"/3rdparty/everest/library/x25519.c \
+    "$TLS"/3rdparty/everest/library/Hacl_Curve25519_joined.c \
+    "$TLS"/3rdparty/p256-m/p256-m_driver_entrypoints.c \
+    "$TLS"/3rdparty/p256-m/p256-m/p256-m.c; do
+    # shellcheck disable=SC2086
+    gcc -std=c11 -O0 -c $TLS_INC "$src" -o "$BUILD/mbed_$(basename "$src" .c).o" || exit 1
+done
 g++ -o "$BUILD/benzware_host" "$BUILD"/*.o || { echo "ЛИНКОВКА: есть неразрешённые символы"; exit 1; }
 echo "линковка всех исходников: ОК (undefined symbol'ов нет)"
 echo "сборка хостовым g++ пройдена"

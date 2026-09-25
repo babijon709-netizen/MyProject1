@@ -1,4 +1,5 @@
 #include "remote_gate.h"
+#include "auth_http.h"
 #include "device_identity.h"
 #include "benzware_remote_config.h"
 #include <atomic>
@@ -10,14 +11,11 @@ extern std::atomic<bool> main_thread_flag;
 #include <cstring>
 #include <fcntl.h>
 #include <poll.h>
-#include <cstdlib>
 #include <string>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <signal.h>
-
-extern char **environ;
 
 namespace {
 #ifndef BENZWARE_POLL_SECONDS
@@ -65,87 +63,27 @@ GateResult check_status(const DeviceIdentity& identity, bool register_device) {
     if (nonce.empty()) return GateResult::unavailable;
     std::string body = DeviceIdentityJson(identity, register_device, nonce);
 
+    // Keep the hard 10-second deadline even if DNS/TLS blocks. No device
+    // binary or shell utility is needed: the child uses bundled Mbed TLS.
     int pipefd[2];
     if (pipe(pipefd) != 0) return GateResult::unavailable;
-    // Resolve before fork: the child only uses async-signal-safe syscalls.
-    std::string curl_path;
-    const char* path = std::getenv("PATH");
-    if (path) {
-        std::string paths(path);
-        size_t start = 0;
-        while (start <= paths.size()) {
-            size_t end = paths.find(':', start);
-            if (end == std::string::npos) end = paths.size();
-            // Ignore empty and relative PATH entries.
-            if (end > start && paths[start] == '/') {
-                std::string candidate = paths.substr(start, end - start) + "/curl";
-                if (access(candidate.c_str(), X_OK) == 0) {
-                    curl_path = candidate;
-                    break;
-                }
-            }
-            start = end + 1;
-        }
-    }
-    // `su -c` often resets PATH to system directories even when curl is
-    // installed in Termux. Try only known absolute locations as a fallback.
-    if (curl_path.empty()) {
-        for (const char* candidate : {"/system/bin/curl",
-                                      "/data/data/com.termux/files/usr/bin/curl"}) {
-            if (access(candidate, X_OK) == 0) { curl_path = candidate; break; }
-        }
-    }
-    if (curl_path.empty()) {
-        close(pipefd[0]); close(pipefd[1]);
-        std::fprintf(stderr, "benzware: curl not found in root PATH or standard Termux path\n");
-        return GateResult::unavailable;
-    }
-    // No shell, no redirects, no HTTP downgrade, no user-controlled proxy.
-    // curl verifies HTTPS using the device/Termux trust store by default.
-    char* const args[] = {
-        const_cast<char*>("curl"), const_cast<char*>("-q"),
-        const_cast<char*>("--silent"),
-        const_cast<char*>("--fail"), const_cast<char*>("--write-out"),
-        const_cast<char*>("%{http_code}\\n"), const_cast<char*>("--max-time"),
-        const_cast<char*>("8"), const_cast<char*>("--connect-timeout"),
-        const_cast<char*>("4"), const_cast<char*>("--proto"),
-        const_cast<char*>("=https"), const_cast<char*>("--noproxy"),
-        const_cast<char*>("*"), const_cast<char*>("--header"),
-        const_cast<char*>("Cache-Control: no-store"),
-        const_cast<char*>("--header"), const_cast<char*>("Content-Type: application/json"),
-        const_cast<char*>("--data-raw"), const_cast<char*>(body.c_str()),
-        const_cast<char*>(auth_url.c_str()), nullptr
-    };
-    const char* binary_path = curl_path.c_str();
     pid_t child = fork();
     if (child == 0) {
         close(pipefd[0]);
-        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
-        close(pipefd[1]);
-        int nullfd = open("/dev/null", O_WRONLY);
-        if (nullfd >= 0) { dup2(nullfd, STDERR_FILENO); close(nullfd); }
-        execve(binary_path, args, environ);
-        _exit(127);
+        const AuthHttpResult auth = PostDeviceAuth(auth_url, body, nonce);
+        const char result = auth == AuthHttpResult::allowed ? 'A'
+                          : auth == AuthHttpResult::denied ? 'D' : 'U';
+        ssize_t n;
+        do { n = write(pipefd[1], &result, 1); } while (n < 0 && errno == EINTR);
+        _exit(n == 1 ? 0 : 1);
     }
     close(pipefd[1]);
     if (child < 0) { close(pipefd[0]); return GateResult::unavailable; }
-    fcntl(pipefd[0], F_SETFL, fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
-
-    std::string response;
-    bool overflow = false;
-    bool exited = false;
     int status = 0;
+    bool exited = false;
     const auto deadline = std::chrono::steady_clock::now() + kTimeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        char buffer[64];
-        ssize_t n;
-        while ((n = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
-            if (response.size() + static_cast<size_t>(n) > 64) overflow = true;
-            else response.append(buffer, static_cast<size_t>(n));
-        }
-        if (n < 0 && errno != EAGAIN && errno != EINTR) overflow = true;
-        if (waitpid(child, &status, WNOHANG) == child) exited = true;
-        if (exited) break;
+        if (waitpid(child, &status, WNOHANG) == child) { exited = true; break; }
         pollfd pfd{pipefd[0], POLLIN, 0};
         poll(&pfd, 1, 100);
     }
@@ -153,29 +91,13 @@ GateResult check_status(const DeviceIdentity& identity, bool register_device) {
         kill(child, SIGKILL);
         while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
     }
-    if (exited) {
-        char buffer[64];
-        ssize_t n;
-        while ((n = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
-            if (response.size() + static_cast<size_t>(n) > 64) overflow = true;
-            else response.append(buffer, static_cast<size_t>(n));
-        }
-    }
+    char result = 0;
+    const ssize_t n = read(pipefd[0], &result, 1);
     close(pipefd[0]);
-    if (!exited || overflow || !WIFEXITED(status)) return GateResult::unavailable;
-    if (WEXITSTATUS(status) == 0 && response == "enabled:" + nonce + "\n200\n")
-        return GateResult::allowed;
-    if (WEXITSTATUS(status) == 0 && response == "disabled\n200\n")
-        return GateResult::denied;
-    // A valid HTTP 200 with an invalid payload is a protocol/configuration
-    // error, not permission to continue. 4xx also denies. Timeouts, TLS
-    // failures, 429 and 5xx are temporarily unavailable.
-    if (response.size() >= 4) {
-        const std::string code = response.substr(response.size() - 4, 3);
-        if (code == "200" || code == "400" || code == "401" ||
-            code == "403" || code == "404") return GateResult::denied;
-    }
-    return GateResult::unavailable;
+    if (!exited || !WIFEXITED(status) || WEXITSTATUS(status) != 0 || n != 1)
+        return GateResult::unavailable;
+    if (result == 'A') return GateResult::allowed;
+    return result == 'D' ? GateResult::denied : GateResult::unavailable;
 }
 } // namespace
 

@@ -129,14 +129,20 @@ tail -n +"$PAYLOAD_LINE" "$0" | tar -xzf - -C "$DIR"
 chmod 755 "$DIR/benzware" "$DIR/benzhack_dump"
 # Detect an accidentally altered or simply repacked payload before execution.
 # This checksum is NOT a signature: someone who edits this launcher can update it.
-if ! command -v sha256sum >/dev/null 2>&1; then
-    echo "benzware: sha256sum is required to verify the payload" >&2
-    exit 1
-fi
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1"
+    elif [ -x /system/bin/toybox ]; then
+        /system/bin/toybox sha256sum "$1"
+    else
+        echo "benzware: sha256sum/toybox is required to verify the payload" >&2
+        return 1
+    fi
+}
 EXPECTED_BENZWARE=__BENZWARE_SHA256__
 EXPECTED_DUMPER=__DUMPER_SHA256__
-ACTUAL_BENZWARE=$(sha256sum "$DIR/benzware" | cut -d ' ' -f 1)
-ACTUAL_DUMPER=$(sha256sum "$DIR/benzhack_dump" | cut -d ' ' -f 1)
+ACTUAL_BENZWARE=$(hash_file "$DIR/benzware" | cut -d ' ' -f 1)
+ACTUAL_DUMPER=$(hash_file "$DIR/benzhack_dump" | cut -d ' ' -f 1)
 if [ "$EXPECTED_BENZWARE" != "$ACTUAL_BENZWARE" ] || [ "$EXPECTED_DUMPER" != "$ACTUAL_DUMPER" ]; then
     echo "benzware: bundled executable checksum mismatch" >&2
     exit 1

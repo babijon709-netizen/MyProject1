@@ -19,10 +19,18 @@ LOCAL_CFLAGS   := $(_CF) -std=c11
 
 LOCAL_LDFLAGS := -Wl,--gc-sections,-s,--strip-all -Wl,-x -Wl,--build-id=none -pie
 
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PATH)/include/ImGui/backends $(LOCAL_PATH)/src
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PATH)/include/ImGui/backends $(LOCAL_PATH)/src \
+    $(LOCAL_PATH)/src/third_party/mbedtls/include \
+    $(LOCAL_PATH)/src/third_party/mbedtls/library \
+    $(LOCAL_PATH)/src/third_party/mbedtls/3rdparty/everest/include \
+    $(LOCAL_PATH)/src/third_party/mbedtls/3rdparty/everest/include/everest \
+    $(LOCAL_PATH)/src/third_party/mbedtls/3rdparty/everest/include/everest/kremlib \
+    $(LOCAL_PATH)/src/third_party/mbedtls/3rdparty/p256-m/p256-m/include \
+    $(LOCAL_PATH)/src/third_party/mbedtls/3rdparty/p256-m/p256-m/include/p256-m \
+    $(LOCAL_PATH)/src/third_party/mbedtls/3rdparty/p256-m/p256-m_driver_interface
 
 LOCAL_SRC_FILES := \
-    src/main.cpp src/remote_gate.cpp src/device_identity.cpp \
+    src/main.cpp src/remote_gate.cpp src/auth_http.cpp src/device_identity.cpp \
     src/process.cpp src/audio.cpp src/theme.cpp src/hud.cpp \
     src/esp_draw.cpp src/aim.cpp src/farm.cpp \
     src/widgets.cpp src/menu.cpp src/config.cpp \
@@ -36,6 +44,14 @@ LOCAL_SRC_FILES := \
     src/ImGui/imgui.cpp src/ImGui/imgui_draw.cpp src/ImGui/imgui_tables.cpp \
     src/ImGui/imgui_widgets.cpp src/ImGui/backends/imgui_impl_android.cpp \
     src/ImGui/backends/imgui_impl_opengl3.cpp
+
+_MBEDTLS := $(LOCAL_PATH)/src/third_party/mbedtls
+LOCAL_SRC_FILES += $(patsubst $(LOCAL_PATH)/%,%,$(wildcard $(_MBEDTLS)/library/*.c)) \
+    src/third_party/mbedtls/3rdparty/everest/library/everest.c \
+    src/third_party/mbedtls/3rdparty/everest/library/x25519.c \
+    src/third_party/mbedtls/3rdparty/everest/library/Hacl_Curve25519_joined.c \
+    src/third_party/mbedtls/3rdparty/p256-m/p256-m_driver_entrypoints.c \
+    src/third_party/mbedtls/3rdparty/p256-m/p256-m/p256-m.c
 
 LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv3 -lOpenSLES -lz -ldl
 

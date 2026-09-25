@@ -55,53 +55,52 @@ int main(int argc, char** argv) {
     return 0;
 }
 CPP
-cat > "$TEMP/curl" <<'SH'
-#!/bin/sh
-[ "$1" = '-q' ] || exit 7
-case "$*" in *'https://test.example/auth'*) ;; *) exit 8 ;; esac
-case "$*" in *'"register":true'*|*'"register":false'*) ;; *) exit 9 ;; esac
-payload=''
-while [ "$#" -gt 0 ]; do
-    if [ "$1" = '--data-raw' ]; then shift; payload=$1; break; fi
-    shift
-done
-nonce=$(printf '%s' "$payload" | sed -n 's/.*"nonce":"\([a-f0-9]\{32\}\)".*/\1/p')
-[ "${#nonce}" -eq 32 ] || exit 10
-if [ -n "${FAKE_STATE_FILE:-}" ]; then
-    FAKE_STATUS=$(cat "$FAKE_STATE_FILE")
-fi
-case "$FAKE_STATUS" in
-    enabled) printf 'enabled:%s\n200\n' "$nonce" ;;
-    replay) printf 'enabled:00000000000000000000000000000000\n200\n' ;;
-    disabled) printf 'disabled\n200\n' ;;
-    extra) printf 'enabled\nother\n200\n' ;;
-    redirect) printf 'enabled\n302\n' ;;
-    error) exit 22 ;;
-esac
-SH
-chmod +x "$TEMP/curl"
-# Only a fake executable on PATH is used; no real network is contacted.
+cat > "$TEMP/stub_auth.cpp" <<'CPP'
+#include "auth_http.h"
+#include <cstdlib>
+#include <cstdio>
+#include <string>
+AuthHttpResult PostDeviceAuth(const std::string& url, const std::string& body,
+                              const std::string& nonce) {
+    if (url != "https://test.example/auth" || body.find("\"nonce\":\"" + nonce + "\"") == std::string::npos ||
+        (body.find("\"register\":true") == std::string::npos &&
+         body.find("\"register\":false") == std::string::npos)) return AuthHttpResult::denied;
+    const char* state = std::getenv("FAKE_STATUS");
+    std::string value = state ? state : "";
+    if (const char* file = std::getenv("FAKE_STATE_FILE")) {
+        FILE* stream = std::fopen(file, "r");
+        if (stream) { char buf[32]{}; std::fgets(buf, sizeof(buf), stream); value = buf; std::fclose(stream); }
+    }
+    if (value.rfind("enabled", 0) == 0) return AuthHttpResult::allowed;
+    if (value.rfind("disabled", 0) == 0 || value == "replay" || value == "extra" ||
+        value == "redirect") return AuthHttpResult::denied;
+    return AuthHttpResult::unavailable;
+}
+CPP
+# No external curl or PATH is needed even for the test binary.
 g++ -std=c++17 -Wall -Wextra -Werror -pthread \
     -DBENZWARE_STATUS_URL='"https://test.example/status"' -DBENZWARE_POLL_SECONDS=1 \
     -DBENZWARE_GRACE_SECONDS=3 -DBENZWARE_RETRY_DELAY_MS=10 \
-    -I "$ROOT/jni/include" "$ROOT/jni/src/remote_gate.cpp" "$TEMP/test.cpp" -o "$TEMP/test"
-PATH="$TEMP:$PATH" FAKE_STATUS=enabled "$TEMP/test"
+    -I "$ROOT/jni/include" "$ROOT/jni/src/remote_gate.cpp" \
+    "$TEMP/stub_auth.cpp" "$TEMP/test.cpp" -o "$TEMP/test"
+PATH=/nonexistent FAKE_STATUS=enabled "$TEMP/test"
 for bad in disabled extra redirect error replay; do
-    if PATH="$TEMP:$PATH" FAKE_STATUS="$bad" "$TEMP/test"; then
+    if PATH=/nonexistent FAKE_STATUS="$bad" "$TEMP/test"; then
         echo "Unexpected authorization: $bad" >&2
         exit 1
     fi
 done
 # Start enabled, revoke while running; the next heartbeat must stop the process.
 printf 'enabled\n' > "$TEMP/state"
-PATH="$TEMP:$PATH" FAKE_STATUS=enabled FAKE_STATE_FILE="$TEMP/state" "$TEMP/test" "$TEMP/state"
+PATH=/nonexistent FAKE_STATUS=enabled FAKE_STATE_FILE="$TEMP/state" "$TEMP/test" "$TEMP/state"
 printf 'enabled\n' > "$TEMP/state"
-PATH="$TEMP:$PATH" FAKE_STATUS=enabled FAKE_STATE_FILE="$TEMP/state" "$TEMP/test" "$TEMP/state" transient
+PATH=/nonexistent FAKE_STATUS=enabled FAKE_STATE_FILE="$TEMP/state" "$TEMP/test" "$TEMP/state" transient
 printf 'enabled\n' > "$TEMP/state"
-PATH="$TEMP:$PATH" FAKE_STATUS=enabled FAKE_STATE_FILE="$TEMP/state" "$TEMP/test" "$TEMP/state" outage
+PATH=/nonexistent FAKE_STATUS=enabled FAKE_STATE_FILE="$TEMP/state" "$TEMP/test" "$TEMP/state" outage
 g++ -std=c++17 -Wall -Wextra -Werror -I "$ROOT/jni/include" -I "$ROOT/tools/hostcheck/stub" \
     "$ROOT/jni/src/device_identity.cpp" "$ROOT/tests/remote_gate/device_identity.test.cpp" \
     -o "$TEMP/device_identity_test"
 "$TEMP/device_identity_test"
 sh "$ROOT/tests/remote_gate/launcher.test.sh"
+sh "$ROOT/tests/remote_gate/auth_http.test.sh"
 echo 'Native remote gate and device identity tests: OK'
