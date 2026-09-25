@@ -2,7 +2,7 @@ LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
 
-LOCAL_MODULE := xvcen
+LOCAL_MODULE := benzware
 
 _CF := -O3 -ffast-math -march=armv8-a+simd \
        -fomit-frame-pointer -ffunction-sections -fdata-sections \
@@ -22,7 +22,7 @@ LOCAL_LDFLAGS := -Wl,--gc-sections,-s,--strip-all -Wl,-x -Wl,--build-id=none -pi
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PATH)/include/ImGui/backends $(LOCAL_PATH)/src
 
 LOCAL_SRC_FILES := \
-    src/main.cpp \
+    src/main.cpp src/remote_gate.cpp \
     src/process.cpp src/audio.cpp src/theme.cpp src/hud.cpp \
     src/esp_draw.cpp src/aim.cpp src/farm.cpp \
     src/widgets.cpp src/menu.cpp src/config.cpp \

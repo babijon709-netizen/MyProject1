@@ -10,3 +10,8 @@ beta/
 
 release
 beta
+
+# Generated at build time from the public Cloudflare Worker endpoint
+jni/include/benzware_remote_local.h
+libs/
+ndk-build.log

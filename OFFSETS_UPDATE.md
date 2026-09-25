@@ -31,7 +31,7 @@
 - **`jni/src/offset_resolver.cpp`** — автообновление оффсетов: по живому процессу находит классы по именам (замена `*_TYPEINFO_RVA`) и читает смещения полей из `FieldInfo`, перезаписывая активные слоты поверх вшитых таблиц (что не нашлось — остаётся на вшитом). Поля с ротированными именами ищет по ТИПУ. Результат первого входа кэшируется в `.offs` рядом с конфигами — дальше сканирование не нужно. Таблица запросов — `jni/src/offset_resolver_table.inc`, генератор — `tools/offsets/gen_resolver_table.py`. Стенд — `tools/offsets/resolver_test.sh`.
 - **`jni/src/mem_io.h`** — доступ к памяти игры: два способа чтения (process_vm_readv и /proc/<pid>/mem), выбор пробой и автопереключение, кэш блоков. Стенд — `tools/memio/run.sh`.
 - **`jni/include/game.h`** — публичный API слоя игры для остальных модулей; остальной API — в заголовках каждого модуля.
-- **`jni/Android.mk` / `build.sh`** — сборка `libs/arm64-v8a/xvcen.sh` (GitHub Actions собирает на push).
+- **`jni/Android.mk` / `build.sh`** — сборка `libs/arm64-v8a/benzware.sh` (GitHub Actions собирает на push).
 - Локальная проверка без NDK: `sh tools/hostcheck/run.sh` (все модули, хостовый g++) и `sh tools/syntax/check.sh` (по одному перевод-юниту на файл).
 
 ## 1.1. Как читается память игры (`jni/src/mem_io.h`)
@@ -458,7 +458,7 @@ NetworkClient.spawned (Dictionary<uint, NetworkIdentity>)
    Результат принимается, только если он похож на мировую координату.
 2. **Дубликаты объектов.** В списке игроков нередко живут несколько
    `PlayerManager` на одного человека (объекты пулятся; это видно в старом
-   `xvcen_esp_debug.log` — один и тот же `userID` на разных указателях).
+   `benzware_esp_debug.log` — один и тот же `userID` на разных указателях).
    При посадке в транспорт старая копия остаётся стоять на месте посадки.
    Теперь объекты группируются по `userID` (@0x278) и рисуется только тот,
    который **шевелился позже всех** (`still_frames` — сколько кадров подряд
@@ -1402,7 +1402,7 @@ python3 tools/offsets/typeinfo_rva.py --so /tmp/new/libil2cpp.so --script /tmp/n
    если игра обновила сам Unity (`libunity.7z` в репозитории тот же блоб →
    раздел 3.1 не трогаем).
 6. Пересобери: пушишь в рабочую ветку сессии → GitHub Actions соберёт
-   `xvcen-sh-arm64-v8a` → забираешь артефакт из CI.
+   `benzware-sh-arm64-v8a` → забираешь артефакт из CI.
 7. Проверка на устройстве: ESP показывает **реальные ники**, корректное оружие,
    боксы не сливаются. Если что-то не так — верни временный дамп полей из
    истории коммитов, таблица в разделе 6.
@@ -1468,11 +1468,11 @@ jni/src/game_offsets.h tools/offsets/offsets_map.json` и один прогон 
 
 | Что дампилось | Функция | Файл на устройстве | Восстановить из |
 |---|---|---|---|
-| Поля игрока (ники, кости) | `dump_player_diagnostics()` + `diag_done` в `PlayerTextCache` | `xvcen_esp_debug.log` | `git show 08b5b6f` (удалена в `e1eb40c`) |
-| Цепочка оружия удалённых игроков | `dump_weapon_probe()` + `weapon_probed` в `PlayerTextCache` | `xvcen_weapon_debug.log` | `git show eee29a6` |
-| Обход реестра Mirror (руды/животные) | `dump_marker_probe()` + счётчики `probe_*` в `rebuild_marker_entities()` | `xvcen_marker_debug.log` | `git show 0aa7a3c` |
+| Поля игрока (ники, кости) | `dump_player_diagnostics()` + `diag_done` в `PlayerTextCache` | `benzware_esp_debug.log` | `git show 08b5b6f` (удалена в `e1eb40c`) |
+| Цепочка оружия удалённых игроков | `dump_weapon_probe()` + `weapon_probed` в `PlayerTextCache` | `benzware_weapon_debug.log` | `git show eee29a6` |
+| Обход реестра Mirror (руды/животные) | `dump_marker_probe()` + счётчики `probe_*` в `rebuild_marker_entities()` | `benzware_marker_debug.log` | `git show 0aa7a3c` |
 | Плашка `ESP attach=… pid=… boxes=…` слева сверху | `DrawAttachStatus()` + вызов перед `DrawEspOverlay()` в главном цикле | на экране | `git show 0f1f869` |
-| Работа аимбота покадрово (чувствительность, ответ камеры на палец, скорость цели, остаток ошибки) | `AimDebugLog()` + `AimDebug`/`g_aimDbg` в `main.cpp`, выключатель «Отладка аима» | `xvcen_aim_debug.log` | `git show ac1270f` |
+| Работа аимбота покадрово (чувствительность, ответ камеры на палец, скорость цели, остаток ошибки) | `AimDebugLog()` + `AimDebug`/`g_aimDbg` в `main.cpp`, выключатель «Отладка аима» | `benzware_aim_debug.log` | `git show ac1270f` |
 | **Автофарм покадрово (не удалён — живёт в сборке)** | `namespace farmlog` в `main.cpp`, тумблер «Отладка → Лог фарма» | `Загрузки/farm_debug.log` | — (см. §6.1) |
 
 Все остальные — одноразовые (пишут при первом скане/первых 8 игроках), вызов
@@ -1506,7 +1506,7 @@ jni/src/game_offsets.h tools/offsets/offsets_map.json` и один прогон 
 **Два рода строк.**
 * Числовая строка — состояние кадра: 44 ровных столбца, шапка с описанием
   каждого печатается в самом файле (формат тот же, что был у
-  `xvcen_aim_debug.log`, чтобы читать глазами и резать `awk`).
+  `benzware_aim_debug.log`, чтобы читать глазами и резать `awk`).
 * `EV <t_s> текст` — решение контроллера: смена узла, появление/пропажа
   крестика, застревание и обход, перекрытый узел, отказ от узла без прогресса,
   сброс коэффициента камеры, палец камеры на краю экрана, пауза (меню/аимбот),

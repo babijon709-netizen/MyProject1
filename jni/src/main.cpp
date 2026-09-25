@@ -14,6 +14,7 @@
 #include "logfile.h"
 #include "theme.h"
 #include "app_state.h"
+#include "remote_gate.h"
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -38,6 +39,8 @@ int main(int argc, char* argv[]) {
     signal(SIGINT,  [](int) { main_thread_flag.store(false); });
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
     signal(SIGHUP,  [](int) { main_thread_flag.store(false); });
+
+    if (!RemoteGateStart()) return 1;
 
     prot::Init();
     screen_config();

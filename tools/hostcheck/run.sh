@@ -46,7 +46,7 @@ INC="-Ijni/include -Ijni/include/ImGui -Ijni/include/ImGui/backends -Ijni/src -I
 FLAGS="-std=gnu++17 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable"
 
 # --- 1) Синтаксис каждого модуля ------------------------------------------
-for f in jni/src/main.cpp \
+for f in jni/src/main.cpp jni/src/remote_gate.cpp \
          "$TMP/audio_hostcheck.cpp" \
          jni/src/theme.cpp jni/src/process.cpp jni/src/hud.cpp jni/src/esp_draw.cpp \
          jni/src/aim.cpp jni/src/farm.cpp jni/src/widgets.cpp jni/src/menu.cpp \
@@ -66,7 +66,7 @@ done
 BUILD="$TMP/hostbuild"
 rm -rf "$BUILD" && mkdir -p "$BUILD"
 # shellcheck disable=SC2086
-CPP_TUS="jni/src/main.cpp $TMP/audio_hostcheck.cpp jni/src/theme.cpp jni/src/process.cpp \
+CPP_TUS="jni/src/main.cpp jni/src/remote_gate.cpp $TMP/audio_hostcheck.cpp jni/src/theme.cpp jni/src/process.cpp \
 jni/src/hud.cpp jni/src/esp_draw.cpp jni/src/aim.cpp jni/src/farm.cpp \
 jni/src/widgets.cpp jni/src/menu.cpp jni/src/config.cpp \
 jni/src/VidAvatar.cpp \
@@ -82,6 +82,6 @@ for f in $CPP_TUS; do
     g++ $FLAGS -O0 -c $INC "$f" -o "$o" || { echo "компиляция для линковки: $f"; exit 1; }
 done
 gcc -std=c11 -O0 -c jni/src/third_party/tjpgd/tjpgd.c -o "$BUILD/tjpgd.o" || exit 1
-g++ -o "$BUILD/xvcen_host" "$BUILD"/*.o || { echo "ЛИНКОВКА: есть неразрешённые символы"; exit 1; }
+g++ -o "$BUILD/benzware_host" "$BUILD"/*.o || { echo "ЛИНКОВКА: есть неразрешённые символы"; exit 1; }
 echo "линковка всех исходников: ОК (undefined symbol'ов нет)"
 echo "сборка хостовым g++ пройдена"
