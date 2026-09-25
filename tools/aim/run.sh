@@ -58,3 +58,4 @@ echo "сборка стенда: ОК"
 
 "$BUILD/mem_test"
 sh tools/team_membership_test.sh
+sh tools/logfile_test.sh

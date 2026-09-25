@@ -40,7 +40,12 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
     signal(SIGHUP,  [](int) { main_thread_flag.store(false); });
 
-    if (!RemoteGateStart()) return 1;
+    if (LogOpen()) LogLine("журнал: %s", LogPath());
+    if (!RemoteGateStart()) {
+        LogLine("запуск остановлен: RemoteGateStart отказал");
+        LogClose();
+        return 1;
+    }
 
     prot::Init();
     screen_config();
@@ -54,7 +59,11 @@ int main(int argc, char* argv[]) {
 
     native_window_screen_x = abs_ScreenX;
     native_window_screen_y = abs_ScreenY;
-    if (!initGUI_draw(native_window_screen_x, native_window_screen_x, true)) return -1;
+    if (!initGUI_draw(native_window_screen_x, native_window_screen_x, true)) {
+        LogLine("запуск остановлен: initGUI_draw отказал");
+        LogClose();
+        return -1;
+    }
     Blur::Init();
     CfgWatchInit();
     AudioInit();
@@ -111,5 +120,8 @@ int main(int argc, char* argv[]) {
     Blur::Free();
     CfgWatchFree();
     AudioFree();
-    shutdown(); Touch_Close(); return 0;
+    shutdown(); Touch_Close();
+    LogLine("штатное завершение");
+    LogClose();
+    return 0;
 }
