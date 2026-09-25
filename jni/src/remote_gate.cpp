@@ -21,10 +21,18 @@ extern char **environ;
 
 namespace {
 #ifndef BENZWARE_POLL_SECONDS
-#define BENZWARE_POLL_SECONDS 10
+#define BENZWARE_POLL_SECONDS 60
 #endif
 constexpr int kIntervalSeconds = BENZWARE_POLL_SECONDS;
+#ifndef BENZWARE_GRACE_SECONDS
+#define BENZWARE_GRACE_SECONDS 180
+#endif
+#ifndef BENZWARE_RETRY_DELAY_MS
+#define BENZWARE_RETRY_DELAY_MS 2000
+#endif
+constexpr auto kGrace = std::chrono::seconds(BENZWARE_GRACE_SECONDS);
 constexpr auto kTimeout = std::chrono::seconds(10);
+enum class GateResult { allowed, denied, unavailable };
 
 std::string fresh_nonce() {
     int fd = open("/dev/urandom", O_RDONLY);
@@ -45,20 +53,20 @@ std::string fresh_nonce() {
     return nonce;
 }
 
-bool check_status(const DeviceIdentity& identity, bool register_device) {
+GateResult check_status(const DeviceIdentity& identity, bool register_device) {
     const char* url = BENZWARE_STATUS_URL;
     if (std::strncmp(url, "https://", 8) != 0 || std::strlen(url) <= 8 ||
-        std::strpbrk(url, " \t\r\n") != nullptr) return false;
+        std::strpbrk(url, " \t\r\n") != nullptr) return GateResult::denied;
     std::string auth_url(url);
     if (auth_url.size() <= 7 || auth_url.compare(auth_url.size() - 7, 7, "/status") != 0)
-        return false;
+        return GateResult::denied;
     auth_url.replace(auth_url.size() - 7, 7, "/auth");
     std::string nonce = fresh_nonce();
-    if (nonce.empty()) return false;
+    if (nonce.empty()) return GateResult::unavailable;
     std::string body = DeviceIdentityJson(identity, register_device, nonce);
 
     int pipefd[2];
-    if (pipe(pipefd) != 0) return false;
+    if (pipe(pipefd) != 0) return GateResult::unavailable;
     // Resolve before fork: the child only uses async-signal-safe syscalls.
     std::string curl_path;
     const char* path = std::getenv("PATH");
@@ -79,7 +87,7 @@ bool check_status(const DeviceIdentity& identity, bool register_device) {
             start = end + 1;
         }
     }
-    if (curl_path.empty()) { close(pipefd[0]); close(pipefd[1]); return false; }
+    if (curl_path.empty()) { close(pipefd[0]); close(pipefd[1]); return GateResult::unavailable; }
     // No shell, no redirects, no HTTP downgrade, no user-controlled proxy.
     // curl verifies HTTPS using the device/Termux trust store by default.
     char* const args[] = {
@@ -108,7 +116,7 @@ bool check_status(const DeviceIdentity& identity, bool register_device) {
         _exit(127);
     }
     close(pipefd[1]);
-    if (child < 0) { close(pipefd[0]); return false; }
+    if (child < 0) { close(pipefd[0]); return GateResult::unavailable; }
     fcntl(pipefd[0], F_SETFL, fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
 
     std::string response;
@@ -142,8 +150,20 @@ bool check_status(const DeviceIdentity& identity, bool register_device) {
         }
     }
     close(pipefd[0]);
-    return exited && !overflow && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
-           response == "enabled:" + nonce + "\n200\n";
+    if (!exited || overflow || !WIFEXITED(status)) return GateResult::unavailable;
+    if (WEXITSTATUS(status) == 0 && response == "enabled:" + nonce + "\n200\n")
+        return GateResult::allowed;
+    if (WEXITSTATUS(status) == 0 && response == "disabled\n200\n")
+        return GateResult::denied;
+    // A valid HTTP 200 with an invalid payload is a protocol/configuration
+    // error, not permission to continue. 4xx also denies. Timeouts, TLS
+    // failures, 429 and 5xx are temporarily unavailable.
+    if (response.size() >= 4) {
+        const std::string code = response.substr(response.size() - 4, 3);
+        if (code == "200" || code == "400" || code == "401" ||
+            code == "403" || code == "404") return GateResult::denied;
+    }
+    return GateResult::unavailable;
 }
 } // namespace
 
@@ -153,21 +173,45 @@ bool RemoteGateStart() {
         std::fprintf(stderr, "benzware: device ID unavailable; authorization denied\n");
         return false;
     }
-    if (!check_status(identity, true) || !main_thread_flag.load()) {
-        std::fprintf(stderr, "benzware: remote authorization unavailable or disabled\n");
+    // Startup still fails closed. Retry only transport/5xx failures, not a
+    // global OFF switch, a banned device, or an incompatible Worker protocol.
+    GateResult result = GateResult::unavailable;
+    for (int i = 0; i < 3 && main_thread_flag.load(); ++i) {
+        result = check_status(identity, true);
+        if (result != GateResult::unavailable) break;
+        if (i < 2) std::this_thread::sleep_for(std::chrono::milliseconds(BENZWARE_RETRY_DELAY_MS));
+    }
+    if (!main_thread_flag.load() || result != GateResult::allowed) {
+        std::fprintf(stderr, result == GateResult::denied
+            ? "benzware: server denied access (off, banned or incompatible build)\n"
+            : "benzware: authorization unavailable (network, Worker or quota)\n");
         return false;
     }
     std::thread([identity] {
+        auto last_allowed = std::chrono::steady_clock::now();
+        bool warned = false;
         while (main_thread_flag.load()) {
-            // Short sleeps permit fast shutdown; no cached offline authorization.
             for (int i = 0; i < kIntervalSeconds && main_thread_flag.load(); ++i)
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             if (!main_thread_flag.load()) break;
-            if (!check_status(identity, false)) {
-                std::fprintf(stderr, "benzware: remote authorization lost; stopping\n");
-                main_thread_flag.store(false);
-                break;
+            GateResult result = check_status(identity, false);
+            if (result == GateResult::allowed) {
+                last_allowed = std::chrono::steady_clock::now();
+                warned = false;
+                continue;
             }
+            if (result == GateResult::denied) {
+                std::fprintf(stderr, "benzware: server revoked access; stopping\n");
+            } else if (std::chrono::steady_clock::now() - last_allowed < kGrace) {
+                if (!warned) std::fprintf(stderr,
+                    "benzware: temporary authorization outage; retrying\n");
+                warned = true;
+                continue;
+            } else {
+                std::fprintf(stderr, "benzware: authorization outage exceeded grace; stopping\n");
+            }
+            main_thread_flag.store(false);
+            break;
         }
     }).detach();
     return true;
