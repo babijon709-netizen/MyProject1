@@ -8,7 +8,8 @@ struct DeviceIdentity {
 };
 
 bool GetDeviceIdentity(DeviceIdentity& out);
-std::string DeviceIdentityJson(const DeviceIdentity& identity, bool register_device);
+std::string DeviceIdentityJson(const DeviceIdentity& identity, bool register_device,
+                               const std::string& nonce);
 
 // Exposed for deterministic host tests; never hashes/stores a raw ID on disk.
 std::string DeviceSha256Hex(const std::string& input);

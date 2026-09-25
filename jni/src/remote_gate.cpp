@@ -26,6 +26,25 @@ namespace {
 constexpr int kIntervalSeconds = BENZWARE_POLL_SECONDS;
 constexpr auto kTimeout = std::chrono::seconds(10);
 
+std::string fresh_nonce() {
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) return {};
+    unsigned char bytes[16];
+    size_t got = 0;
+    while (got < sizeof(bytes)) {
+        ssize_t n = read(fd, bytes + got, sizeof(bytes) - got);
+        if (n > 0) got += static_cast<size_t>(n);
+        else if (n < 0 && errno == EINTR) continue;
+        else break;
+    }
+    close(fd);
+    if (got != sizeof(bytes)) return {};
+    const char* hex = "0123456789abcdef";
+    std::string nonce;
+    for (unsigned char c : bytes) { nonce += hex[c >> 4]; nonce += hex[c & 15]; }
+    return nonce;
+}
+
 bool check_status(const DeviceIdentity& identity, bool register_device) {
     const char* url = BENZWARE_STATUS_URL;
     if (std::strncmp(url, "https://", 8) != 0 || std::strlen(url) <= 8 ||
@@ -34,7 +53,9 @@ bool check_status(const DeviceIdentity& identity, bool register_device) {
     if (auth_url.size() <= 7 || auth_url.compare(auth_url.size() - 7, 7, "/status") != 0)
         return false;
     auth_url.replace(auth_url.size() - 7, 7, "/auth");
-    std::string body = DeviceIdentityJson(identity, register_device);
+    std::string nonce = fresh_nonce();
+    if (nonce.empty()) return false;
+    std::string body = DeviceIdentityJson(identity, register_device, nonce);
 
     int pipefd[2];
     if (pipe(pipefd) != 0) return false;
@@ -99,7 +120,7 @@ bool check_status(const DeviceIdentity& identity, bool register_device) {
         char buffer[64];
         ssize_t n;
         while ((n = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
-            if (response.size() + static_cast<size_t>(n) > 32) overflow = true;
+            if (response.size() + static_cast<size_t>(n) > 64) overflow = true;
             else response.append(buffer, static_cast<size_t>(n));
         }
         if (n < 0 && errno != EAGAIN && errno != EINTR) overflow = true;
@@ -116,13 +137,13 @@ bool check_status(const DeviceIdentity& identity, bool register_device) {
         char buffer[64];
         ssize_t n;
         while ((n = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
-            if (response.size() + static_cast<size_t>(n) > 32) overflow = true;
+            if (response.size() + static_cast<size_t>(n) > 64) overflow = true;
             else response.append(buffer, static_cast<size_t>(n));
         }
     }
     close(pipefd[0]);
     return exited && !overflow && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
-           response == "enabled\n200\n";
+           response == "enabled:" + nonce + "\n200\n";
 }
 } // namespace
 

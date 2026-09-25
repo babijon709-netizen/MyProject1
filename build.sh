@@ -114,6 +114,8 @@ fi
 _payload="$(mktemp)"
 trap 'rm -f "${_payload}"' EXIT
 tar -czf "${_payload}" -C "${ROOT}/libs/arm64-v8a" benzware benzhack_dump
+_benz_hash="$(sha256sum "${ROOT}/libs/arm64-v8a/benzware" | cut -d ' ' -f 1)"
+_dump_hash="$(sha256sum "${ROOT}/libs/arm64-v8a/benzhack_dump" | cut -d ' ' -f 1)"
 cat > "${ROOT}/libs/arm64-v8a/benzware.sh" << 'SH_EOF'
 #!/bin/sh
 # ./benzware.sh [args]      -> benzware
@@ -125,6 +127,20 @@ trap 'rm -rf "$DIR"' 0
 PAYLOAD_LINE=$(awk '/^__PAYLOAD_BELOW__/ {print NR + 1; exit 0; }' "$0")
 tail -n +"$PAYLOAD_LINE" "$0" | tar -xzf - -C "$DIR"
 chmod 755 "$DIR/benzware" "$DIR/benzhack_dump"
+# Detect an accidentally altered or simply repacked payload before execution.
+# This checksum is NOT a signature: someone who edits this launcher can update it.
+if ! command -v sha256sum >/dev/null 2>&1; then
+    echo "benzware: sha256sum is required to verify the payload" >&2
+    exit 1
+fi
+EXPECTED_BENZWARE=__BENZWARE_SHA256__
+EXPECTED_DUMPER=__DUMPER_SHA256__
+ACTUAL_BENZWARE=$(sha256sum "$DIR/benzware" | cut -d ' ' -f 1)
+ACTUAL_DUMPER=$(sha256sum "$DIR/benzhack_dump" | cut -d ' ' -f 1)
+if [ "$EXPECTED_BENZWARE" != "$ACTUAL_BENZWARE" ] || [ "$EXPECTED_DUMPER" != "$ACTUAL_DUMPER" ]; then
+    echo "benzware: bundled executable checksum mismatch" >&2
+    exit 1
+fi
 if [ "$1" = "dump" ]; then
     shift
     "$DIR/benzhack_dump" "$@"
@@ -134,6 +150,7 @@ fi
 exit $?
 __PAYLOAD_BELOW__
 SH_EOF
+sed -i "s/__BENZWARE_SHA256__/${_benz_hash}/; s/__DUMPER_SHA256__/${_dump_hash}/" "${ROOT}/libs/arm64-v8a/benzware.sh"
 cat "${_payload}" >> "${ROOT}/libs/arm64-v8a/benzware.sh"
 chmod +x "${ROOT}/libs/arm64-v8a/benzware.sh"
 rm -f "${_payload}"

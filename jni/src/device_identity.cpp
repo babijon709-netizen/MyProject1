@@ -160,7 +160,9 @@ bool GetDeviceIdentity(DeviceIdentity& out) {
     return true;
 }
 
-std::string DeviceIdentityJson(const DeviceIdentity& identity, bool register_device) {
+std::string DeviceIdentityJson(const DeviceIdentity& identity, bool register_device,
+                               const std::string& nonce) {
     return "{\"hwid\":" + json_string(identity.hwid) + ",\"name\":"
-         + json_string(identity.name) + ",\"register\":" + (register_device ? "true" : "false") + "}";
+         + json_string(identity.name) + ",\"register\":" + (register_device ? "true" : "false")
+         + ",\"nonce\":" + json_string(nonce) + "}";
 }

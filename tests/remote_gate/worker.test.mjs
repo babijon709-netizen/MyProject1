@@ -68,9 +68,10 @@ const d1Env = { ...env, CONTROL_DB: d1, CONTROL: {
   put() { throw Error('KV must not be written with D1 bound'); },
 } };
 const d1Call = (path, init) => worker.fetch(new Request('https://example.workers.dev' + path, init), d1Env);
+const nonce = '0123456789abcdef0123456789abcdef';
 const auth = (hwid, name, register = true, req = d1Call) => req('/auth', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ hwid, name, register }),
+  body: JSON.stringify({ hwid, name, register, nonce }),
 });
 assert.equal(await (await d1Call('/status')).text(), 'disabled\n');
 assert.equal((await d1Call('/admin', {
@@ -82,6 +83,11 @@ assert.equal((await worker.fetch(new Request('https://example.workers.dev/status
   ...env, CONTROL_DB: { prepare() { throw Error('D1 unavailable'); } },
 })).status, 503); // Never fall back to a potentially enabled/stale KV value.
 assert.equal((await auth('a'.repeat(64), 'Pixel 8', true, call)).status, 503); // D1 required.
+assert.equal((await d1Call('/auth', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ hwid: 'a'.repeat(64), name: 'Pixel 8', register: true }),
+})).status, 400); // Missing nonce never registers or enables.
+assert.equal(devices.size, 0);
 
 assert.equal((await worker.fetch(new Request('https://example.workers.dev/status'), {
   CONTROL: { get() { throw Error('KV unavailable'); } }, ADMIN_TOKEN: env.ADMIN_TOKEN,
@@ -137,11 +143,11 @@ try {
 
   assert.equal(await (await d1Call('/status')).text(), 'enabled\n');
   const hwid = 'a'.repeat(64);
-  assert.equal(await (await auth(hwid, 'Pixel 8')).text(), 'enabled\n');
+  assert.equal(await (await auth(hwid, 'Pixel 8')).text(), 'enabled:' + nonce + '\n');
   assert.equal(sent.at(-1).body.text.includes('Pixel 8'), true);
   assert.equal(sent.at(-1).body.text.includes(hwid), true);
   const notifications = sent.length;
-  assert.equal(await (await auth(hwid, 'Pixel 8')).text(), 'enabled\n');
+  assert.equal(await (await auth(hwid, 'Pixel 8')).text(), 'enabled:' + nonce + '\n');
   assert.equal(sent.length, notifications); // Only first registration notifies.
   assert.equal(await (await auth('b'.repeat(64), 'Unknown', false)).text(), 'disabled\n');
   assert.equal((await d1Telegram('/devices')).status, 200);
@@ -150,9 +156,9 @@ try {
   assert.equal((await d1Telegram('/ban ' + hwid)).status, 200);
   assert.equal(await (await auth(hwid, 'Pixel 8', false)).text(), 'disabled\n');
   assert.equal((await d1Telegram('/unban ' + hwid)).status, 200);
-  assert.equal(await (await auth(hwid, 'Pixel 8', false)).text(), 'enabled\n');
+  assert.equal(await (await auth(hwid, 'Pixel 8', false)).text(), 'enabled:' + nonce + '\n');
   assert.equal((await d1Telegram('/ban short')).status, 200);
-  assert.equal(await (await auth(hwid, 'Pixel 8', false)).text(), 'enabled\n');
+  assert.equal(await (await auth(hwid, 'Pixel 8', false)).text(), 'enabled:' + nonce + '\n');
 
   assert.equal((await call('/telegram', { method: 'GET' })).status, 404);
 } finally {

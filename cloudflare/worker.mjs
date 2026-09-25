@@ -78,7 +78,8 @@ async function deviceAuth(request, env) {
   } catch (_) { return reply('disabled', 400); }
   if (typeof data?.hwid !== 'string' || !/^[a-f0-9]{64}$/.test(data.hwid) ||
       typeof data.name !== 'string' || data.name.length > 80 ||
-      typeof data.register !== 'boolean')
+      typeof data.register !== 'boolean' ||
+      typeof data.nonce !== 'string' || !/^[a-f0-9]{32}$/.test(data.nonce))
     return reply('disabled', 400);
   const name = data.name.trim().replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 80) || 'Android device';
   try {
@@ -94,7 +95,8 @@ async function deviceAuth(request, env) {
     const status = await readSwitch(env);
     const device = await env.CONTROL_DB.prepare(
       'SELECT banned FROM benzware_devices WHERE hwid = ?').bind(data.hwid).first();
-    return reply(status === 'enabled' && device?.banned === 0 ? 'enabled' : 'disabled');
+    return reply(status === 'enabled' && device?.banned === 0
+      ? 'enabled:' + data.nonce : 'disabled');
   } catch (_) { return reply('disabled', 503); }
 }
 

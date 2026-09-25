@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS benzware_devices (
 
 В Cloudflare Dashboard откройте **существующий** Worker → **Edit code**, полностью замените код содержимым актуального `cloudflare/worker.mjs` из ветки `arena/01a0d845-myproject1`, нажмите **Save and deploy**. Binding `CONTROL_DB`, `TELEGRAM_ADMIN_ID`, `TELEGRAM_BOT_TOKEN` и `TELEGRAM_WEBHOOK_SECRET` оставьте прежними. Адрес Worker и webhook Telegram не меняются. Без D1 новая сборка не получит разрешения на запуск (fail closed).
 
-После публикации `/status` по-прежнему показывает только **общий** включатель. Он не показывает индивидуальный бан.
+После публикации `/status` по-прежнему показывает только **общий** включатель. Новые клиенты также используют nonce в `POST /auth`; старые клиенты без nonce перестанут запускаться после обновления Worker. См. [порядок обновления](TAMPER_LIMITS.md). Он не показывает индивидуальный бан.
 
 ## 3. Установить новую сборку на Android
 

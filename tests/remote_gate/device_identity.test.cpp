@@ -9,6 +9,6 @@ int main() {
            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     assert(DeviceSha256Hex(std::string(100, 'x')).size() == 64);
     DeviceIdentity d{"0123456789abcdef", "Pixel \"8\""};
-    assert(DeviceIdentityJson(d, true) ==
-           "{\"hwid\":\"0123456789abcdef\",\"name\":\"Pixel \\\"8\\\"\",\"register\":true}");
+    assert(DeviceIdentityJson(d, true, std::string(32, 'a')) ==
+           "{\"hwid\":\"0123456789abcdef\",\"name\":\"Pixel \\\"8\\\"\",\"register\":true,\"nonce\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}");
 }
