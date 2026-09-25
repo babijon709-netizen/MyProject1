@@ -181,7 +181,7 @@ void DrawEspOverlay() {
 
     for (const EspBox& box : boxes) {
         if (!std::isfinite(box.x1) || !std::isfinite(box.y1) || !std::isfinite(box.x2) || !std::isfinite(box.y2)) continue;
-        if (box.is_bot) continue; // ботов рисуют маркеры, бокс — только данные для аима
+        if (box.is_bot || box.aim_only) continue; // only real on-screen player boxes are drawn
 
         // Rect every visual (box, tracer, labels) is anchored to: never smaller
         // than the stroke-aware minimum, so nothing collapses at long range.

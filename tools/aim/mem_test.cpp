@@ -349,6 +349,35 @@ static void check(bool ok, const char* what) {
 int main() {
     printf("--- мемори-режимы аима (стенд на настоящем коде aim.cpp)\n");
 
+    // Selection is shared by touch and memory. A near-plane aim-only box
+    // must use an actual visible bone, never a fake rectangle or teammate.
+    {
+        resetGame();
+        g_targetYaw = 2.f; g_targetPitch = 0.f;
+        snapshot();
+        EspBox enemy = g_boxes[0];
+        enemy.aim_only = true; enemy.distance = 0.8f;
+        enemy.aim_valid[0] = false;
+        enemy.aim_valid[1] = true;
+        enemy.aim_pts[1][0] = -10.f; enemy.aim_pts[1][1] = 540.f;
+        enemy.aim_valid[2] = true;
+        enemy.aim_pts[2][0] = 1230.f; enemy.aim_pts[2][1] = 540.f;
+        enemy.aim_yaw[2] = 0.f; enemy.aim_pitch[2] = 0.f;
+        EspBox ally = enemy;
+        ally.id = 2; ally.ally = true;
+        ally.aim_valid[1] = false; // teammate right under crosshair
+        g_boxes = {ally, enemy};
+        AimPick p; AimTarget t; float deg = 0.f;
+        check(AimSelectTarget(2460.f, 1080.f, p, t, deg) && t.id == enemy.id && t.bone == 2,
+              "вплотную: грудь видна, шея за экраном, союзник не выбран");
+        p.reset(); t = AimTarget{}; g_boxes = {ally};
+        check(!AimSelectTarget(2460.f, 1080.f, p, t, deg),
+              "общий выбор: один союзник не является целью");
+        p.reset(); t = AimTarget{}; enemy.aim_valid[2] = false; g_boxes = {enemy};
+        check(!AimSelectTarget(2460.f, 1080.f, p, t, deg),
+              "вплотную: нет кости перед камерой — нет цели");
+    }
+
     // A. «Память»: накопитель углов -> камера.
     {
         resetGame();

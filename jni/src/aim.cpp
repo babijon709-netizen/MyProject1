@@ -1,3 +1,4 @@
+#include "aim_touch_geometry.h"
 #include "aim.h"
 #include "logfile.h"
 #include "main.h"                // displayInfo, native_window_screen_*
@@ -321,7 +322,7 @@ static void AimUpdateFlow(const std::vector<EspBox>& boxes, float sw, float sh, 
     std::vector<AimFlowPrev> cur;
     cur.reserve(boxes.size());
     for (const EspBox& b : boxes) {
-        if (b.id == 0) continue;
+        if (b.id == 0 || b.aim_only) continue;
         if (!std::isfinite(b.x1) || !std::isfinite(b.y1) ||
             !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
         cur.push_back({b.id, (b.x1 + b.x2) * 0.5f, (b.y1 + b.y2) * 0.5f});
@@ -411,7 +412,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             int dteam = 0, dclan = 0, rval = 0, rcnt = 0;
             char rteam[32] = {};
             esp_get_ally_diag(&dteam, &dclan, &rval, &rcnt, rteam, sizeof(rteam));
-            LogLine("аим: союзники — своя группа: команда %d симв., клан %d симв.; состав команды: %s, ников %d",
+            LogLine("аим: союзники — своя группа: команда %d симв., клан %d симв.; состав команды: %s, участников %d",
                     dteam, dclan, rval ? "найден" : "нет", rcnt);
             s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
             s_ally_skipped = 0; s_dead_skipped = 0;
@@ -461,18 +462,38 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         // Slots: 0 head, 1 neck, 2 chest. Never fall back below the chest.
         static const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 1, 0}};
         int usedBone = -1;
+        const bool sticky = (pick.lastId != 0 && b.id == pick.lastId);
+        const float localFov = b.aim_only ? std::max(fovR, sh * 0.35f) : fovR;
+        auto boneInCone = [&](int bi) {
+            if (!b.aim_valid[bi]) return false;
+            const float sx = b.aim_pts[bi][0], sy = b.aim_pts[bi][1];
+            if (!std::isfinite(sx) || !std::isfinite(sy)) return false;
+            if (b.aim_only && (sx < 0.f || sx > sw || sy < 0.f || sy > sh)) return false;
+            if (g_state.aim_pos && !sticky && (sx < 0.f || sx > sw || sy < 0.f || sy > sh)) return false;
+            const float dx = sx - crossX, dy = sy - crossY;
+            return dx * dx + dy * dy <= localFov * localFov * (sticky ? 4.f : 1.f);
+        };
         // Прилипчивость точки прицела. Слоты головы, шеи и груди разнесены на
         // 0.2-0.3 м (это до полуградуса на дистанции), а читаются они не каждый
         // кадр: раньше слот перескакивал между ними из кадра в кадр, и прицел
         // мелко трясло в стороны. Пока цель та же и слот читается — держим его;
         // цепочка запасных слотов работает заново только когда он пропал.
         if (b.id != 0 && b.id == pick.lastId && pick.lastBone >= 0 && pick.lastBone < 3 &&
-            b.aim_valid[pick.lastBone]) {
+            boneInCone(pick.lastBone)) {
             usedBone = pick.lastBone;
         } else {
+            // Near the camera the neck can be off-screen even when the chest
+            // is in the reticle. Do not discard the whole player based on the
+            // preferred bone: pick the first real bone within the FOV.
             for (int k = 0; k < 3; ++k) {
-                int bi = order[wantBone][k];
-                if (b.aim_valid[bi]) { usedBone = bi; break; }
+                const int bi = order[wantBone][k];
+                if (boneInCone(bi)) { usedBone = bi; break; }
+            }
+            if (usedBone < 0 && !b.aim_only) {
+                for (int k = 0; k < 3; ++k) {
+                    const int bi = order[wantBone][k];
+                    if (b.aim_valid[bi]) { usedBone = bi; break; }
+                }
             }
         }
         if (usedBone >= 0) {
@@ -509,7 +530,6 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         t.health = b.health; t.respawning = b.respawning;
         t.skel_bones = b.skel_bones; t.skel_up = b.skel_up; t.skel_flat = b.skel_flat;
         t.death_flag = b.death_flag;
-        const bool sticky = (pick.lastId != 0 && b.id == pick.lastId);
         if (t.sx < -sw || t.sx > sw * 2.f || t.sy < -sh || t.sy > sh * 2.f) { ++s_offscreen_skipped; continue; }
         if (g_state.aim_pos && !sticky && (t.sx < 0.f || t.sy < 0.f || t.sx > sw || t.sy > sh)) { ++s_offscreen_skipped; continue; }
         float dx = t.sx - crossX, dy = t.sy - crossY;
@@ -517,7 +537,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         t.world_dist = b.distance;
         // The target we are already pulling to may briefly leave the FOV
         // circle (overshoot while the gain is still being learned) — keep it.
-        if (t.dist > (sticky ? fovR * 2.f : fovR)) { ++s_out_of_fov; continue; }
+        if (t.dist > (sticky ? localFov * 2.f : localFov)) { ++s_out_of_fov; continue; }
 
         // Target priority (see "Приоритет цели"):
         //   0 balanced  — crosshair distance and range, both normalised
@@ -526,7 +546,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         //   2 range     — purely the world distance, crosshair only breaks ties.
         // Whatever the mode, the current target gets a strong preference so the
         // aim does not flip between two players standing next to each other.
-        const float pixelTerm = t.dist / (fovR > 1.f ? fovR : 1.f);
+        const float pixelTerm = t.dist / (localFov > 1.f ? localFov : 1.f);
         const bool  haveRange = (t.world_dist >= 0.f) && std::isfinite(t.world_dist);
         const float rangeTerm = haveRange ? (t.world_dist / 120.f) : 1.f;
         float score;
@@ -1111,24 +1131,12 @@ static void UpdateAimTouch(float dt) {
     const float qPitch = gainKnownPitch ? fabsf(gp) * gridPx : 0.f;
 
     // ---- dead zone ----
-    // Target: ~3 cm at the target's range (well inside a head), but never
-    // tighter than what the input grid can actually reach (0.55 step), and
-    // never wider than 1.5 screen px.
-    float deadBase = degPerPx * 1.5f;
-    if (best.world_dist > 1.f && std::isfinite(best.world_dist)) {
-        float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
-        if (d < deadBase) deadBase = d;
-    }
-    // Пол мёртвой зоны — ДВА кванта ввода, а не половина. Точка прицела (кость
-    // головы) читается каждый кадр чуть по-разному: дрожь в 1-2 кванта — это
-    // нормальный шум замера, а не движение цели. С полом в половину кванта
-    // контроллер выходил за мёртвую зону на этот шум и гнал палец то влево, то
-    // вправо с частотой кадров («трясёт в разные стороны»). Стенд с шумом замера
-    // +-0.25 град: реверсов пальца 12 -> 2 при мёртвой зоне 0.2 град (два
-    // кванта) и 6 при 0.15.
-    float deadYaw = deadBase, deadPitch = deadBase;
-    if (gainKnownYaw   && deadYaw   < qYaw   * 2.0f) deadYaw   = qYaw   * 2.0f;
-    if (gainKnownPitch && deadPitch < qPitch * 2.0f) deadPitch = qPitch * 2.0f;
+    // Angular size of a few centimetres grows sharply inside 3 m. Keep the
+    // old long-range floor, but stop chasing every animation twitch at range.
+    const float deadYaw = AimTouchDeadDeg(degPerPx, best.world_dist,
+                                           gainKnownYaw ? qYaw : 0.f);
+    const float deadPitch = AimTouchDeadDeg(degPerPx, best.world_dist,
+                                             gainKnownPitch ? qPitch : 0.f);
     if (fabsf(errYaw) < deadYaw && fabsf(errPitch) < deadPitch) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         // Заказанное за прошлые такты камера дорабатывает и без нас: окно
@@ -1268,14 +1276,15 @@ static void UpdateAimTouch(float dt) {
     float dx =  errYaw   * k / gy;
     float dy = -errPitch * k / gp;
 
-    // Final approach: within a few input steps of the target, stop smoothing
-    // and jump straight to the nearest reachable grid position. Smoothing
-    // here would either creep for many frames or, once rounded, overshoot
-    // and oscillate by a full step around the head.
-    if (gainKnownYaw && fabsf(errYaw) < qYaw * 3.f)
-        dx = roundf((errYaw / gy) * unitsPerPx) / unitsPerPx;
-    if (gainKnownPitch && fabsf(errPitch) < qPitch * 3.f)
-        dy = roundf((-errPitch / gp) * unitsPerPx) / unitsPerPx;
+    // Do not send the whole remaining error on the last 2-3 digitizer
+    // units: wait for each one to land instead of alternating across a bone.
+    if (gainKnownYaw)
+        dx = AimTouchFinalGridStep(errYaw, gy, qYaw, unitsPerPx, deadYaw, dx);
+    if (gainKnownPitch)
+        dy = AimTouchFinalGridStep(-errPitch, gp, qPitch, unitsPerPx, deadPitch, dy);
+    // A noisy axis already inside its own zone must not follow the other axis.
+    if (fabsf(errYaw) < deadYaw) dx = 0.f;
+    if (fabsf(errPitch) < deadPitch) dy = 0.f;
 
     // Шаг не больше оставшейся ошибки. Иначе собственный шаг перелетает цель, и
     // следующий шаг считается уже по ошибке другого знака — то самое «дёргается»

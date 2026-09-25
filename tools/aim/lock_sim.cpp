@@ -34,6 +34,7 @@
 #include <cstring>
 #include <algorithm>
 #include <vector>
+#include "aim_touch_geometry.h"
 
 // ---------- физика ----------
 struct Plant {
@@ -518,6 +519,23 @@ int main() {
                row.name, r.maxOvershoot, r.flips, r.ring, r.lock05,
                (r.lock05 > 0.f) ? "" : "(не сошлось)");
         if (r.flips > 1) printf("        МАЯТНИК: реверсов больше одного!\n");
+    }
+
+    // Close-range bone jitter is measured in degrees, not screen pixels.
+    // Verify the production dead-zone and final-step helpers separately from
+    // the existing long-range/latency scenarios above.
+    {
+        const float far = AimTouchDeadDeg(0.0556f, 30.f, 0.1f);
+        const float close = AimTouchDeadDeg(0.0556f, 0.8f, 0.1f);
+        const float closeStep = AimTouchFinalGridStep(0.28f, 0.1f, 0.1f, 1.f, 0.2f, 1.3f);
+        const float farStep = AimTouchFinalGridStep(1.0f, 0.1f, 0.1f, 1.f, 0.2f, 1.3f);
+        Plant p; p.target0 = 8.f; p.jitter = 0.7f; p.jitStart = 1.5f;
+        TouchCtrl c;
+        const Res r = runTouch(p, c, close);
+        printf("\nТАЧ вплотную: дальняя зона %.2f°, ближняя %.2f°, шаг %.1f квант, реверсов %d\n",
+               far, close, closeStep, r.flips);
+        if (!(far <= 0.21f && close >= 1.0f && close <= 1.2f &&
+              closeStep == 1.f && farStep == 1.3f && r.flips <= 1)) return 1;
     }
 
     printf("\n===== ПАМЯТЬ, захват 30°: текущий код против жёсткого лока =====\n");

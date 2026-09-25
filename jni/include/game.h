@@ -69,6 +69,9 @@ struct EspBox {
     // данные для аима (точка = шея по росту от земли). Оверлей такие боксы
     // не рисует (ботов рисуют маркеры), аим берёт на общих основаниях.
     bool  is_bot = false;
+    // At point-blank range feet or top can be behind the near plane while a
+    // real rig bone remains in view. Feed aim only; do not draw a fake box.
+    bool  aim_only = false;
 };
 
 // World markers: ore nodes, animals, bots and vehicles, drawn as a small

@@ -467,51 +467,73 @@ static PlayerGroup s_last_local_group;
 // кого (в аим-логе все выборы шли с «союзники 0»). У локального игрока есть
 // свой источник правды: командный компонент (PLAYER_TEAM_OBJECT), в котором
 // сервер держит список участников команды. Читаем его раз в 30 кадров и
-// считаем союзником того, чей видимый ник совпал с ником из списка (ник —
-// единственная стабильно синхронизируемая строка игрока; совпадение полных
-// ников у двух разных игроков в одной команде исключено по построению).
+// сравниваем стабильный userID участника с PlayerManager.userID, а ник
+// оставляем запасным источником для сборок без читаемого ID.
 struct TeamRoster {
     char     nicks[16][32] = {};
-    char     team_name[32] = {};   // имя команды из объекта — для диагностики
+    char     ids[16][40] = {};     // stable userID; nickname can differ from display label
+    char     team_name[32] = {};
+    uint64_t owner = 0;   // local player this roster belongs to
     uint8_t  count = 0;
     bool     valid = false;        // объект команды найден и прочитан
     int      refresh = 30;         // первая попытка — сразу
+    int      misses = 0;
 };
 static TeamRoster s_team_roster;
 
 static void team_roster_revalidate(uint64_t local_player) {
     TeamRoster& roster = s_team_roster;
-    roster.valid = false;
-    roster.count = 0;
-    roster.team_name[0] = '\0';
+    // An intermittent read of the team component must not temporarily turn
+    // every teammate into an enemy. Clear only when the local owner changes.
+    if (roster.owner != local_player) { roster = TeamRoster{}; roster.owner = local_player; }
     if (!valid_obj(local_player)) return;
+    // Do not erase the last confirmed roster on a single failed read, but
+    // expire it if the owner has actually left the team.
+    auto missed = [&] {
+        if (++roster.misses >= 3) { roster.valid = false; roster.count = 0; }
+    };
     uint64_t teamc = rd_ptr(local_player + PLAYER_TEAM_OBJECT);
-    if (!valid_obj(teamc)) return;
+    if (!valid_obj(teamc)) { missed(); return; }
     // Компонент должен принадлежать именно нашему игроку: при сбитом оффсете
     // сюда попадёт чужой объект, и обратная ссылка это ловит.
     uint64_t back = rd_ptr(teamc + TEAM_OBJECT_PLAYER);
-    if (back && back != local_player) return;
+    if (back && back != local_player) { missed(); return; }
     uint64_t data = rd_ptr(teamc + TEAM_OBJECT_DATA);
-    if (!valid_obj(data)) return;
-    read_managed_string_ex(rd_ptr(data + TEAM_DATA_NAME), roster.team_name,
-                           sizeof(roster.team_name), 31);
+    if (!valid_obj(data)) { missed(); return; }
+    TeamRoster fresh{};
+    fresh.owner = local_player;
+    read_managed_string_ex(rd_ptr(data + TEAM_DATA_NAME), fresh.team_name,
+                           sizeof(fresh.team_name), 31);
     uint64_t members[16];
-    int count = read_managed_collection(rd_ptr(data + TEAM_DATA_MEMBERS), members, 16);
+    const uint64_t member_list = rd_ptr(data + TEAM_DATA_MEMBERS);
+    if (!valid_obj(member_list)) { missed(); return; }
+    int count = read_managed_collection(member_list, members, 16);
+    if (count == 0 && roster.valid && roster.count && ++roster.misses < 3) return;
     for (int i = 0; i < count; ++i) {
         if (!valid_obj(members[i])) continue;
-        char nick[32] = {};
+        char nick[32] = {}, uid[40] = {};
         read_managed_string_ex(rd_ptr(members[i] + TEAM_MEMBER_NICK), nick, sizeof(nick), 31);
-        if (!nick[0]) continue;
-        strncpy(roster.nicks[roster.count], nick, sizeof(roster.nicks[0]) - 1);
-        roster.nicks[roster.count][sizeof(roster.nicks[0]) - 1] = '\0';
-        ++roster.count;
+        read_managed_string_ex(rd_ptr(members[i] + TEAM_MEMBER_ID), uid, sizeof(uid), 39);
+        if (!nick[0] && !uid[0]) continue;
+        snprintf(fresh.nicks[fresh.count], sizeof(fresh.nicks[0]), "%s", nick);
+        snprintf(fresh.ids[fresh.count], sizeof(fresh.ids[0]), "%s", uid);
+        ++fresh.count;
     }
-    roster.valid = true;   // объект есть: пустой список — легальное состояние
+    fresh.valid = true;   // объект есть: пустой список — легальное состояние
+    roster = fresh;
 }
 
 // «Свой» по составу команды: полный ник из ростера совпал с видимым ником.
 // Свой собственный ник тоже в списке — локального игрока цикл боксов и так
 // пропускает, сравнение ему ничем не грозит.
+static bool team_roster_contains_id(const char* uid) {
+    const TeamRoster& roster = s_team_roster;
+    if (!roster.valid || !uid || !uid[0]) return false;
+    for (int i = 0; i < roster.count; ++i)
+        if (roster.ids[i][0] && strcmp(roster.ids[i], uid) == 0) return true;
+    return false;
+}
+
 static bool team_roster_contains_name(const char* name) {
     const TeamRoster& roster = s_team_roster;
     if (!roster.valid || roster.count == 0 || !name || !name[0]) return false;
@@ -819,6 +841,8 @@ struct PlayerTextCache {
     char weapon[48] = {}; // localized UTF-8, matches EspBox::weapon
     bool has_weapon = false;
     bool ally = false;    // shares the local player's team or clan
+    PlayerGroup group{};  // cached remote group; compare with current local every frame
+    int ally_hold = 0;    // brief read failures must not select a teammate
     char tag[16] = {};    // clan tag
     bool has_tag = false;
     int  revalidate = 30; // first sighting resolves immediately
@@ -7090,6 +7114,7 @@ static void reset_world_caches() {
     g_aim_ref_valid = false;
     g_player_aux.clear();
     g_player_text.clear();
+    s_team_roster = TeamRoster{};
     g_player_track.clear();
     g_player_track_pick.clear();
     g_frame_transforms_lost.clear();
@@ -7132,6 +7157,7 @@ void esp_reset() {
     g_aim_state = {};
     g_player_aux.clear();
     g_player_text.clear();
+    s_team_roster = TeamRoster{};
     g_player_track.clear();
     g_player_track_pick.clear();
     g_frame_transforms_lost.clear();
@@ -7322,7 +7348,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
     std::vector<uint64_t> drawn_now;
     drawn_now.reserve(result.size());
     for (const EspBox& box : result) {
-        if (box.is_bot) continue;
+        if (box.is_bot || box.aim_only) continue;
         drawn_now.push_back(box.id);
         auto it = s_watch_gap.find(box.id);
         if (it != s_watch_gap.end() && it->second > 0 && watch_allow())
@@ -7767,13 +7793,18 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // Запасной источник: состав команды из командного объекта. Тот же
         // ритм 30 кадров, что у ников/оружия: список меняется редко, а чтение
         // списка — до полусотни обращений к памяти игры.
+        const uint64_t local_owner = s_transforms[local_entity_index];
+        if (s_team_roster.owner != local_owner) {
+            s_team_roster = TeamRoster{};
+            for (auto& kv : g_player_text) kv.second.ally_hold = 0;
+            s_team_roster.refresh = 30; // re-read immediately on owner change
+        }
         if (++s_team_roster.refresh >= 30) {
             s_team_roster.refresh = 0;
-            team_roster_revalidate(s_transforms[local_entity_index]);
+            team_roster_revalidate(local_owner);
         }
     } else {
-        s_team_roster.valid = false;
-        s_team_roster.count = 0;
+        s_team_roster = TeamRoster{};
     }
 
     // Firing reference for the aimbot (local look direction + eye point).
@@ -7878,12 +7909,25 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         bool bottom_visible = transform_camera_mode
             ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_bottom, sw, sh, sf, false)
             : w2s(vp, body_bottom, sw, sh, sf, false);
-        if (!bottom_visible) { skip_reason[i] = 'B'; continue; }
         bool top_visible = transform_camera_mode
             ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_top, sw, sh, sh2, false)
             : w2s(vp, body_top, sw, sh, sh2, false);
-        if (!top_visible) { skip_reason[i] = 'T'; continue; }
-
+        // When the camera is inside a close enemy, feet/top can straddle the
+        // near plane. Keep only the actual projected bones as aim candidates;
+        // never draw a guessed ESP rectangle, and never target a body behind us.
+        const bool close_aim_only = (!bottom_visible || !top_visible) &&
+            !transform_camera_mode && want_bones && std::isfinite(distance) &&
+            distance >= 0.f && distance < 2.5f;
+        if ((!bottom_visible || !top_visible) && !close_aim_only) {
+            skip_reason[i] = bottom_visible ? 'T' : 'B'; continue;
+        }
+        if (close_aim_only) {
+            if (!bottom_visible) sf = top_visible ? sh2 : Vec2{sw * 0.5f, sh};
+            if (!top_visible) sh2 = bottom_visible ? sf : Vec2{sw * 0.5f, 0.f};
+            if (fabsf(sh2.y - sf.y) < 2.f) {
+                sh2.y = sf.y - sh * 0.5f;
+            }
+        }
         float height = fabsf(sh2.y - sf.y);
         if (!std::isfinite(height) || height < 2.0F) { skip_reason[i] = 'H'; continue; }
         float cx = (sf.x + sh2.x) * 0.5F;
@@ -7903,6 +7947,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             {feet.x - box_half_width, body_top.y, feet.z + box_half_depth}
         };
         EspBox box{};
+        box.aim_only = close_aim_only;
         // Lead for this player, used by every set_aim_point call below.
         {
             auto vt = g_player_track.find(s_transforms[i]);
@@ -8029,15 +8074,20 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 }
                 PlayerGroup group;
                 read_player_group(s_transforms[i], group);
-                // «Свой» = совпала группа/клан ИЛИ ник игрока есть в составе
-                // нашей команды (запасной путь: строки группы у чужих игроков
-                // помечены в дампе как notserialized и приходят не всегда,
-                // а ник и ростер — всегда; см. team_roster_revalidate).
-                tc.ally = (local_group_valid && groups_are_allied(local_group, group)) ||
-                          team_roster_contains_name(tc.name);
+                if (group.any()) tc.group = group;
                 snprintf(tc.tag, sizeof(tc.tag), "%s", group.tag);
                 tc.has_tag = tc.tag[0] != '\0';
             }
+            // Roster and local team are refreshed independently of display
+            // labels. Compare every frame, prefer stable userID, and hold a
+            // confirmed ally across brief failures of the managed strings.
+            const auto track = g_player_track.find(s_transforms[i]);
+            const char* uid = track != g_player_track.end() ? track->second.uid : "";
+            const bool allied = (local_group_valid && groups_are_allied(local_group, tc.group)) ||
+                                team_roster_contains_id(uid) || team_roster_contains_name(tc.name);
+            if (allied) tc.ally_hold = 60;
+            else if (tc.ally_hold > 0) --tc.ally_hold;
+            tc.ally = tc.ally_hold > 0;
             box.has_name = tc.has_name;
             if (tc.has_name) memcpy(box.name, tc.name, sizeof(box.name));
             box.has_weapon = tc.has_weapon;
@@ -8177,6 +8227,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                         (double)box.skel_flat, (int)box.respawning, (int)box.death_flag,
                         (int)box.dead, (double)box.health);
             }
+        }
+        // Close-range candidate needs at least one *real* projected aim bone;
+        // the synthetic bounding coordinates are never eligible by themselves.
+        if (box.aim_only && !(box.aim_valid[0] || box.aim_valid[1] || box.aim_valid[2])) {
+            skip_reason[i] = 'T'; continue;
         }
         result.push_back(box);
     }
