@@ -13,3 +13,11 @@ CREATE TABLE IF NOT EXISTS benzware_devices (
   banned INTEGER NOT NULL DEFAULT 0 CHECK (banned IN (0, 1)),
   first_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Presence is a recent successful auth heartbeat, not proof of being inside a game.
+-- Separate table lets older device databases migrate with CREATE IF NOT EXISTS.
+CREATE TABLE IF NOT EXISTS benzware_presence (
+  hwid TEXT PRIMARY KEY,
+  last_seen INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS benzware_presence_seen ON benzware_presence(last_seen);
