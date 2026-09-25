@@ -7,6 +7,7 @@
 #include "hud.h"
 #include "esp_draw.h"
 #include "aim.h"
+#include "silent_aim.h"
 #include "farm.h"
 #include "widgets.h"
 #include "menu.h"
@@ -141,6 +142,7 @@ int main(int argc, char* argv[]) {
         UpdateFarm(ImGui::GetIO().DeltaTime);
         const auto farm_done = ProbeClock::now();
         RenderMenu();
+        AimEndFrame();
         const auto menu_done = ProbeClock::now();
         UpdateFreecam(ImGui::GetIO().DeltaTime);
         const auto freecam_done = ProbeClock::now();
@@ -217,6 +219,7 @@ int main(int argc, char* argv[]) {
             probe_window_start = now;
         }
     }
+    silent_aim::shutdown();
     while (!g_frame_done.load()) {}
     // Камеру возвращаем на место ДО отвязки: во фрикаме она улетела от тела,
     // а после выхода чита возвращать её уже некому.

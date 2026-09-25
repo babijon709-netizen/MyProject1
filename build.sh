@@ -61,6 +61,8 @@ _run_suite() {
 _run_suite "viewmodel tests" "${ROOT}/tools/viewmodel/run.sh"
 echo "Testing object-data weapon controller"
 _run_suite "weapon tests" "${ROOT}/tools/weapons/run.sh"
+echo "Testing silent aim adapter"
+_run_suite "silent aim tests" "${ROOT}/tools/silent/run.sh"
 
 # Экспериментальный внутрипроцессный модуль подбора: отдельная библиотека, в
 # benzware она не попадает. Ошибка её сборки НЕ ломает обычную сборку — печатается

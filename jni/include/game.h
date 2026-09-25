@@ -61,6 +61,8 @@ struct EspBox {
     int   aim_source;
     bool  crouched;
     float aim_pts[3][2];
+    float aim_world[3][3] = {}; // same selected points, in world space
+    bool aim_world_valid[3] = {};
     // Angular offset of each aim point from the camera forward axis, in
     // degrees (yaw = +right, pitch = +up). Only meaningful when aim_valid[i].
     float aim_yaw[3];
@@ -457,6 +459,9 @@ bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z);
 // Записать ось выстрела. Вектор нормируется здесь: игра множает его на
 // дальность луча. false — ось не нашлась (нет игрока/хендлера/привязки).
 bool esp_mem_aim_write_fire_dir(float x, float y, float z);
+
+// Publish a validated local-player/camera snapshot to the independent DLP2 writer.
+bool esp_silent_publish(uint64_t target, const float aim[3]);
 
 // ---- Фрикам ---------------------------------------------------------------
 // Камера отделяется от тела и летает сквозь стены: пишем локальную позицию

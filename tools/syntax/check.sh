@@ -16,7 +16,7 @@ cd "$(dirname "$0")/../.."
 STUB=tools/syntax/stub
 INC="-I$STUB -Ijni/include -Ijni/include/ImGui -Ijni/src"
 FILES="${*:-jni/src/main.cpp jni/src/process.cpp jni/src/audio.cpp jni/src/theme.cpp \
-jni/src/hud.cpp jni/src/esp_draw.cpp jni/src/aim.cpp jni/src/farm.cpp \
+jni/src/hud.cpp jni/src/esp_draw.cpp jni/src/aim.cpp jni/src/silent_aim.cpp jni/src/farm.cpp \
 jni/src/widgets.cpp jni/src/menu.cpp jni/src/config.cpp \
 jni/src/game.cpp jni/src/game_viewmodel.cpp jni/src/game_markers.cpp jni/src/game_farm.cpp jni/src/offset_resolver.cpp jni/src/lang.cpp \
 jni/src/Android_draw/draw.cpp jni/src/Android_touch/TouchHelperA.cpp jni/src/VidAvatar.cpp}"

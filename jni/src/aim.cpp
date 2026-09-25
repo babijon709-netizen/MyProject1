@@ -1,5 +1,6 @@
 #include "aim_touch_geometry.h"
 #include "aim.h"
+#include "silent_aim.h"
 #include "logfile.h"
 #include "main.h"                // displayInfo, native_window_screen_*
 #include "game.h"
@@ -49,6 +50,8 @@ struct AimTarget {
     float sx = 0.f, sy = 0.f;       // screen position (px)
     float dist = 0.f;               // pixel distance from crosshair
     float world_dist = 0.f;
+    float world[3] = {};
+    bool world_valid = false;
     int   bone = -1;                // слот точки прицела (0 голова, 1 шея, 2 грудь)
     float health = -1.f;            // здоровье цели (для лога и проверки смерти)
     bool  respawning = false;       // PlayerManager.respawning (для лога)
@@ -535,6 +538,8 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         }
         if (usedBone >= 0) {
             t.bone = usedBone;
+            t.world_valid = b.aim_world_valid[usedBone];
+            for (int i = 0; i < 3; ++i) t.world[i] = b.aim_world[usedBone][i];
             t.yaw = b.aim_yaw[usedBone];  t.pitch = b.aim_pitch[usedBone];
             t.sx  = b.aim_pts[usedBone][0]; t.sy = b.aim_pts[usedBone][1];
             t.valid = std::isfinite(t.yaw) && std::isfinite(t.pitch) &&
@@ -562,7 +567,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             t.pitch = -atanf(ey / (sh * 0.5f) * tanf(camFov * 0.5f * (float)M_PI / 180.f)) * 180.f / (float)M_PI;
             t.valid = true;
         }
-        if (!t.valid) continue;
+        if (!t.valid || (g_state.aim_mode == AIM_MODE_SILENT && !t.world_valid)) continue;
         t.id = b.id;
         t.health = b.health; t.respawning = b.respawning;
         t.skel_bones = b.skel_bones; t.skel_up = b.skel_up; t.skel_flat = b.skel_flat;
@@ -631,7 +636,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // трубу касания, и цель за это время уходит. Мемори-лок пишет абсолютный
     // угол самой кости каждый такт — ему упреждать нечего (просьба 24.09:
     // «есть ли упреждение в мемори аиме, оно там не нужно»).
-    if (g_state.aim_mode != AIM_MODE_MEMORY) {
+    if (g_state.aim_mode == AIM_MODE_TOUCH) {
         float cy = 0.f, cp = 0.f;
         // Мусорный угол камеры (чтение сорвалось) не годится даже в
         // нормализацию: упреждение по нему уводит прицел, а раньше из-за него
@@ -1400,6 +1405,7 @@ static float         s_logTime = 0.f;
 static const char* aim_mode_name() {
     switch (g_state.aim_mode) {
         case AIM_MODE_MEMORY: return "память";
+        case AIM_MODE_SILENT: return "сайлент";
         default:              return "тач";
     }
 }
@@ -1411,6 +1417,13 @@ static void AimLogTick(float dt) {
     if (s_logTime < 0.25f) return;
     s_logTime = 0.f;
     const AimMemDiag& d = AimMemoryDiag();
+    if (g_state.aim_mode == AIM_MODE_SILENT) {
+        const auto s = silent_aim::stats();
+        LogLine("сайлент DLP2: активен=%d ось=%d записей=%llu отказов=%llu гвард=%llu молчит=%d нетцели=%d",
+                (int)s.active, (int)s.axis, (unsigned long long)s.writes,
+                (unsigned long long)s.failures, (unsigned long long)s.guard_failures,
+                d.inactive, d.no_target);
+    }
     if (g_state.aim_mode == AIM_MODE_MEMORY)
         LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d источник=%d нетцели=%d нацели=%d чтение=%d",
                 aim_mode_name(), s_frames, (int)d.params, (int)d.responded,
@@ -1652,13 +1665,53 @@ static void UpdateAimMemory(float dt) {
 }
 
 
+// ====================== Сайлент (DLP2 adapter) =============================
+static AimPick s_silentPick;
+static void UpdateAimSilent(float dt) {
+    float sw = 0.f, sh = 0.f;
+    int why = 0;
+    if (!AimBegin(dt, sw, sh, &why)) {
+        silent_aim::clear(); s_silentPick.reset();
+        s_memDiag = AimMemDiag{}; s_memDiag.inactive = why;
+        return;
+    }
+    s_memDiag.inactive = 0;
+    s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
+    AimTarget best;
+    float degPerPx = 0.f;
+    if (!AimSelectTarget(sw, sh, s_silentPick, best, degPerPx, &why)) {
+        silent_aim::clear(); s_silentPick.reset();
+        s_memDiag.no_target = why;
+        return;
+    }
+    s_memDiag.no_target = 0;
+    if (!esp_silent_publish(best.id, best.world)) {
+        g_aimActive = false;
+        ++s_memDiag.fails;
+    }
+    s_memDiag.axis = silent_aim::stats().axis;
+}
+
+void AimEndFrame() {
+    if (g_state.aim_mode != AIM_MODE_SILENT) { silent_aim::clear(); return; }
+    // UI runs after UpdateAim: honour a just-opened menu or disabled toggle
+    // before another frame, without publishing a second/stale command.
+    const bool wasActive = g_aimActive;
+    float dt = 1.f / 60.f, sw = 0.f, sh = 0.f;
+    if (!AimBegin(dt, sw, sh)) silent_aim::clear();
+    else g_aimActive = wasActive;
+}
+
 // Диспетчер: какой режим ведёт камеру в этом кадре.
 void UpdateAim(float dt) {
     ++s_frames;
     const int mode = g_state.aim_mode;
     AimLogTick(dt);
-    if (mode == AIM_MODE_MEMORY) UpdateAimMemory(dt);
-    else                         UpdateAimTouch(dt);
+    if (mode != AIM_MODE_SILENT) { silent_aim::clear(); s_silentPick.reset(); }
+    if (mode != AIM_MODE_TOUCH) AimReleaseFinger(s_fingerDown);
+    if (mode == AIM_MODE_SILENT) UpdateAimSilent(dt);
+    else if (mode == AIM_MODE_MEMORY) UpdateAimMemory(dt);
+    else UpdateAimTouch(dt);
 }
 
 // ============================ Автофарм =============================

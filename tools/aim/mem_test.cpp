@@ -50,9 +50,26 @@ namespace lang { inline const char* text(const char* ru) { return ru; } }
 
 #include "app_state.h"     // настоящий AppState (настройки аима)
 #include "game.h"          // настоящий EspBox и объявления esp_*
+#include "silent_aim.h"
 #include "aim.h"           // AimMode, AimMemDiag
 #include "aim_learn.h"     // настоящий GainTrack
 #include "widgets.h"       // Sheet/Popover (меню открыто — аим молчит)
+
+namespace silent_aim {
+static Stats state;
+void clear() { state.active = state.axis = false; }
+Stats stats() { return state; }
+}
+static int silent_publishes = 0;
+static float silent_point[3] = {};
+bool esp_silent_publish(uint64_t, const float aim[3]) {
+    ++silent_publishes;
+    for (int i = 0; i < 3; ++i) silent_point[i] = aim[i];
+    silent_aim::state.active = silent_aim::state.axis = true;
+    return true;
+}
+bool s_fingerDown = false;
+static void AimReleaseFinger(bool& down) { down = false; }
 
 // ---- заглушки оверлея ----
 static const float kRad2Deg = 57.29577951f;
@@ -201,7 +218,8 @@ static void snapshot() {
 
 // ---- esp_* из game.h ----
 float esp_camera_fov_deg() { return 60.f; }
-bool esp_local_player_is_aiming() { return true; }
+static bool g_ads = true;
+bool esp_local_player_is_aiming() { return g_ads; }
 int  esp_local_aim_source() { return 1; }
 // Муссор вместо угла камеры: 0 — камера честная, иначе отдаём это значение.
 // Так проверяется, что кадр не залипнет (см. сценарий «мусорный угол»).
@@ -377,6 +395,55 @@ static void check(bool ok, const char* what) {
 }
 
 int main() {
+    {
+        resetGame();
+        g_state.aim_mode = AIM_MODE_SILENT;
+        snapshot();
+        for (auto& b : g_boxes) for (int i = 0; i < 3; ++i) {
+            b.aim_world_valid[i] = true;
+            b.aim_world[i][0] = 3.f; b.aim_world[i][1] = 2.f; b.aim_world[i][2] = 10.f;
+        }
+        s_fingerDown = true;
+        UpdateAim(1.f / 60.f);
+        check(silent_publishes == 1 && silent_aim::stats().active && !s_fingerDown,
+              "сайлент: публикация цели, тач-палец отпущен");
+        check(silent_point[0] == 3.f && silent_point[1] == 2.f && silent_point[2] == 10.f,
+              "сайлент: мировая кость без углового упреждения");
+        g_state.aim_touch = false;
+        AimEndFrame();
+        check(!silent_aim::stats().active, "сайлент: выключение в меню отменяет команду сразу");
+        g_state.aim_touch = true;
+        UpdateAim(1.f / 60.f);
+        g_sheet.visible = true;
+        AimEndFrame();
+        check(!silent_aim::stats().active, "сайлент: открытое меню отменяет команду");
+        g_sheet.visible = false;
+        g_state.aim_scope_only = true; g_ads = false;
+        UpdateAim(1.f / 60.f);
+        check(!silent_aim::stats().active, "сайлент: только с прицелом блокирует без ADS");
+        g_state.aim_scope_only = false; g_ads = true;
+        g_state.freecam_on = true;
+        UpdateAim(1.f / 60.f);
+        check(!silent_aim::stats().active, "сайлент: фрикам блокирует запись");
+        g_state.freecam_on = false;
+        g_esp_attached = false;
+        UpdateAim(1.f / 60.f);
+        check(!silent_aim::stats().active, "сайлент: нет привязки — нет записи");
+        g_esp_attached = true;
+        UpdateAim(1.f / 60.f);
+        g_boxes.clear();
+        UpdateAim(1.f / 60.f);
+        check(!silent_aim::stats().active && !g_aimActive, "сайлент: потеря цели останавливает запись");
+        snapshot();
+        for (auto& b : g_boxes) for (bool& v : b.aim_world_valid) v = false;
+        UpdateAim(1.f / 60.f);
+        check(!silent_aim::stats().active, "сайлент: без мировой точки нет записи");
+        silent_aim::state.active = true;
+        g_state.aim_mode = AIM_MODE_MEMORY;
+        UpdateAim(1.f / 60.f);
+        check(!silent_aim::stats().active, "сайлент: переключение режима останавливает запись");
+    }
+
     printf("--- мемори-режимы аима (стенд на настоящем коде aim.cpp)\n");
 
     // Selection is shared by touch and memory. A near-plane aim-only box

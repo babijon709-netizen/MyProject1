@@ -14,6 +14,7 @@
 #include "str.h"
 #include "esp_draw.h"
 #include "aim.h"
+#include "silent_aim.h"
 #include "logfile.h"                 // AimTouchFracX/Y (строки калибровки)
 #include "process.h"             // g_buildPrompt (стартовый выбор версии)
 #include "VidAvatar.h"
@@ -123,7 +124,7 @@ float TabContent(int tab, float dt, float cW) {
             auto* fn = ImGui::GetFont();
             const float fs = ImGui::GetFontSize();
             const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-            CardBg(rowH * 2.f);
+            CardBg(rowH * 3.f);
 
             auto modeRow = [&](const char* id, const char* lbl, int mode, bool last, float& anim) {
                 auto pos = ImGui::GetCursorScreenPos();
@@ -149,7 +150,15 @@ float TabContent(int tab, float dt, float cW) {
                                 {cX + cW - padX, pos.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
             };
             modeRow("##am0", XS("Тач"),    AIM_MODE_TOUCH,  false, g_state.a_aim_mode0);
-            modeRow("##am1", XS("Память"), AIM_MODE_MEMORY, true,  g_state.a_aim_mode1);
+            modeRow("##am1", XS("Память"), AIM_MODE_MEMORY, false, g_state.a_aim_mode1);
+            modeRow("##am2", XS("Сайлент"), AIM_MODE_SILENT, true, g_state.a_aim_mode2);
+        }
+
+        if (g_state.aim_mode == AIM_MODE_SILENT) {
+            const auto st = silent_aim::stats();
+            ImGui::TextDisabled(XS("Записей: %llu | Отказов: %llu"),
+                                (unsigned long long)st.writes,
+                                (unsigned long long)st.failures);
         }
 
         SHdr(XS("Куда целиться"));
@@ -1720,6 +1729,7 @@ void RenderMenu() {
     Tick(g_state.a_aim_pr2,    g_state.aim_priority == 2,  dt);
     Tick(g_state.a_aim_mode0,  g_state.aim_mode == AIM_MODE_TOUCH,  dt);
     Tick(g_state.a_aim_mode1,  g_state.aim_mode == AIM_MODE_MEMORY, dt);
+    Tick(g_state.a_aim_mode2,  g_state.aim_mode == AIM_MODE_SILENT, dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
     Tick(g_state.a_ui_dark,    g_state.ui_dark_mode,       dt);
