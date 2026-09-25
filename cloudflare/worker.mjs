@@ -5,7 +5,7 @@ const headers = {
   'cache-control': 'no-store, max-age=0',
   'x-content-type-options': 'nosniff',
 };
-const help = 'Команды: /on — включить, /off — выключить, /status — проверить, /help — помощь.';
+const help = 'Команды: /on, /off, /status, /devices, /ban HWID, /unban HWID, /help.';
 
 // D1 uses primary reads without the Sessions API. Use it when bound for
 // near-immediate revocation; KV is kept only for installations not migrated yet.
@@ -63,6 +63,62 @@ async function sendTelegram(env, chatId, text) {
   }
 }
 
+// New binaries send only the digest, not the raw Android ID. Registration is
+// one-time per process; heartbeat requests never write device records.
+async function deviceAuth(request, env) {
+  if (!env.CONTROL_DB) return reply('disabled', 503); // bans require D1
+  if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json'))
+    return reply('disabled', 415);
+  if (Number(request.headers.get('content-length') || 0) > 512) return reply('disabled', 413);
+  let data;
+  try {
+    const body = await request.text();
+    if (body.length > 512) return reply('disabled', 413);
+    data = JSON.parse(body);
+  } catch (_) { return reply('disabled', 400); }
+  if (typeof data?.hwid !== 'string' || !/^[a-f0-9]{64}$/.test(data.hwid) ||
+      typeof data.name !== 'string' || data.name.length > 80 ||
+      typeof data.register !== 'boolean')
+    return reply('disabled', 400);
+  const name = data.name.trim().replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 80) || 'Android device';
+  try {
+    if (data.register) {
+      const result = await env.CONTROL_DB.prepare(
+        'INSERT OR IGNORE INTO benzware_devices (hwid, name) VALUES (?, ?)'
+      ).bind(data.hwid, name).run();
+      if (result?.success === false) throw Error('D1 write failed');
+      if (result?.meta?.changes === 1 && /^\d+$/.test(String(env.TELEGRAM_ADMIN_ID ?? '')))
+        await sendTelegram(env, env.TELEGRAM_ADMIN_ID,
+          `Новое устройство: ${name}\nHWID: ${data.hwid}\n/ban ${data.hwid}`);
+    }
+    const status = await readSwitch(env);
+    const device = await env.CONTROL_DB.prepare(
+      'SELECT banned FROM benzware_devices WHERE hwid = ?').bind(data.hwid).first();
+    return reply(status === 'enabled' && device?.banned === 0 ? 'enabled' : 'disabled');
+  } catch (_) { return reply('disabled', 503); }
+}
+
+async function manageDevice(env, command, hwid) {
+  if (!env.CONTROL_DB) return 'Для управления устройствами привяжите D1 как CONTROL_DB.';
+  if (command === '/devices') {
+    const result = await env.CONTROL_DB.prepare(
+      'SELECT hwid, name, banned FROM benzware_devices ORDER BY first_seen DESC LIMIT 20').all();
+    if (!result?.results?.length) return 'Устройств пока нет. Запустите новую сборку на телефоне.';
+    return 'Устройства (последние 20):\n' + result.results.map((row) =>
+      `${row.banned ? '⛔' : '✅'} ${row.name}\nHWID: ${row.hwid}`
+    ).join('\n');
+  }
+  if (!/^[a-f0-9]{64}$/.test(hwid || ''))
+    return 'Укажите полный HWID из /devices: /ban HWID или /unban HWID.';
+  const banned = command === '/ban' ? 1 : 0;
+  const result = await env.CONTROL_DB.prepare(
+    'UPDATE benzware_devices SET banned = ? WHERE hwid = ?'
+  ).bind(banned, hwid).run();
+  if (result?.success === false) throw Error('D1 write failed');
+  if (result?.meta?.changes !== 1) return 'HWID не найден. Сначала запустите новую сборку.';
+  return banned ? 'Устройство заблокировано: ' + hwid : 'Блокировка снята: ' + hwid;
+}
+
 async function telegramWebhook(request, env) {
   const secret = request.headers.get('x-telegram-bot-api-secret-token');
   if (!(await validToken(secret, env.TELEGRAM_WEBHOOK_SECRET))) return reply('forbidden', 403);
@@ -86,9 +142,8 @@ async function telegramWebhook(request, env) {
       userId !== String(env.TELEGRAM_ADMIN_ID) ||
       chat?.type !== 'private' || String(chat.id) !== userId) return reply('ok');
 
-  const command = typeof message.text === 'string'
-    ? message.text.trim().toLowerCase().split(/\s+/, 1)[0] : '';
-  const bareCommand = command.split('@')[0];
+  const words = typeof message.text === 'string' ? message.text.trim().split(/\s+/) : [];
+  const bareCommand = (words[0] || '').toLowerCase().split('@')[0];
   let answer = help;
   try {
     if (bareCommand === '/on' || bareCommand === '/off') {
@@ -99,6 +154,8 @@ async function telegramWebhook(request, env) {
     } else if (bareCommand === '/status') {
       const value = await readSwitch(env);
       answer = value === 'enabled' ? 'Статус: включено.' : 'Статус: выключено.';
+    } else if (bareCommand === '/devices' || bareCommand === '/ban' || bareCommand === '/unban') {
+      answer = await manageDevice(env, bareCommand, words[1]?.toLowerCase());
     }
   } catch (_) {
     answer = 'Ошибка хранилища Cloudflare: действие не подтверждено. Проверьте /status позднее.';
@@ -119,6 +176,8 @@ export default {
     }
     if (pathname === '/telegram' && request.method === 'POST')
       return telegramWebhook(request, env);
+    if (pathname === '/auth' && request.method === 'POST')
+      return deviceAuth(request, env);
     if (pathname === '/admin' && request.method === 'POST') {
       const auth = request.headers.get('authorization') || '';
       if (!auth.startsWith('Bearer ') ||

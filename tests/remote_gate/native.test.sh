@@ -5,11 +5,21 @@ TEMP=$(mktemp -d)
 trap 'rm -rf "$TEMP"' EXIT
 cat > "$TEMP/test.cpp" <<'CPP'
 #include "remote_gate.h"
+#include "device_identity.h"
+#include <string>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <thread>
 std::atomic<bool> main_thread_flag{true};
+bool GetDeviceIdentity(DeviceIdentity& out) {
+    out = {std::string(64, 'a'), "Pixel 8"};
+    return true;
+}
+std::string DeviceIdentityJson(const DeviceIdentity& out, bool reg) {
+    return "{\"hwid\":\"" + out.hwid + "\",\"name\":\"" + out.name
+         + "\",\"register\":" + (reg ? "true" : "false") + "}";
+}
 int main(int argc, char** argv) {
     if (!RemoteGateStart()) return 1;
     if (argc > 1) {
@@ -28,6 +38,8 @@ CPP
 cat > "$TEMP/curl" <<'SH'
 #!/bin/sh
 [ "$1" = '-q' ] || exit 7
+case "$*" in *'https://test.example/auth'*) ;; *) exit 8 ;; esac
+case "$*" in *'"register":true'*|*'"register":false'*) ;; *) exit 9 ;; esac
 if [ -n "${FAKE_STATE_FILE:-}" ]; then
     FAKE_STATUS=$(cat "$FAKE_STATE_FILE")
 fi
@@ -54,4 +66,8 @@ done
 # Start enabled, revoke while running; the next heartbeat must stop the process.
 printf 'enabled\n' > "$TEMP/state"
 PATH="$TEMP:$PATH" FAKE_STATUS=enabled FAKE_STATE_FILE="$TEMP/state" "$TEMP/test" "$TEMP/state"
-echo 'Native remote gate tests: OK'
+g++ -std=c++17 -Wall -Wextra -Werror -I "$ROOT/jni/include" -I "$ROOT/tools/hostcheck/stub" \
+    "$ROOT/jni/src/device_identity.cpp" "$ROOT/tests/remote_gate/device_identity.test.cpp" \
+    -o "$TEMP/device_identity_test"
+"$TEMP/device_identity_test"
+echo 'Native remote gate and device identity tests: OK'

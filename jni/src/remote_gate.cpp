@@ -1,4 +1,5 @@
 #include "remote_gate.h"
+#include "device_identity.h"
 #include "benzware_remote_config.h"
 #include <atomic>
 extern std::atomic<bool> main_thread_flag;
@@ -25,10 +26,15 @@ namespace {
 constexpr int kIntervalSeconds = BENZWARE_POLL_SECONDS;
 constexpr auto kTimeout = std::chrono::seconds(10);
 
-bool check_status() {
+bool check_status(const DeviceIdentity& identity, bool register_device) {
     const char* url = BENZWARE_STATUS_URL;
     if (std::strncmp(url, "https://", 8) != 0 || std::strlen(url) <= 8 ||
         std::strpbrk(url, " \t\r\n") != nullptr) return false;
+    std::string auth_url(url);
+    if (auth_url.size() <= 7 || auth_url.compare(auth_url.size() - 7, 7, "/status") != 0)
+        return false;
+    auth_url.replace(auth_url.size() - 7, 7, "/auth");
+    std::string body = DeviceIdentityJson(identity, register_device);
 
     int pipefd[2];
     if (pipe(pipefd) != 0) return false;
@@ -65,7 +71,9 @@ bool check_status() {
         const_cast<char*>("=https"), const_cast<char*>("--noproxy"),
         const_cast<char*>("*"), const_cast<char*>("--header"),
         const_cast<char*>("Cache-Control: no-store"),
-        const_cast<char*>(url), nullptr
+        const_cast<char*>("--header"), const_cast<char*>("Content-Type: application/json"),
+        const_cast<char*>("--data-raw"), const_cast<char*>(body.c_str()),
+        const_cast<char*>(auth_url.c_str()), nullptr
     };
     const char* binary_path = curl_path.c_str();
     pid_t child = fork();
@@ -119,17 +127,22 @@ bool check_status() {
 } // namespace
 
 bool RemoteGateStart() {
-    if (!check_status() || !main_thread_flag.load()) {
+    DeviceIdentity identity;
+    if (!GetDeviceIdentity(identity)) {
+        std::fprintf(stderr, "benzware: device ID unavailable; authorization denied\n");
+        return false;
+    }
+    if (!check_status(identity, true) || !main_thread_flag.load()) {
         std::fprintf(stderr, "benzware: remote authorization unavailable or disabled\n");
         return false;
     }
-    std::thread([] {
+    std::thread([identity] {
         while (main_thread_flag.load()) {
             // Short sleeps permit fast shutdown; no cached offline authorization.
             for (int i = 0; i < kIntervalSeconds && main_thread_flag.load(); ++i)
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             if (!main_thread_flag.load()) break;
-            if (!check_status()) {
+            if (!check_status(identity, false)) {
                 std::fprintf(stderr, "benzware: remote authorization lost; stopping\n");
                 main_thread_flag.store(false);
                 break;
