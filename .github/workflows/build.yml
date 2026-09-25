@@ -1,4 +1,4 @@
-name: Build xvcen.sh
+name: Build benzware.sh
 
 on:
   push:
@@ -55,17 +55,21 @@ jobs:
           echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
 
       - name: Build
+        env:
+          BENZWARE_STATUS_URL: ${{ vars.BENZWARE_STATUS_URL }}
         shell: bash
         run: |
+          node tests/remote_gate/worker.test.mjs
+          sh tests/remote_gate/native.test.sh
           chmod +x build.sh
           ./build.sh
 
-          file libs/arm64-v8a/xvcen.sh
-          sha256sum libs/arm64-v8a/xvcen.sh
+          file libs/arm64-v8a/benzware.sh
+          sha256sum libs/arm64-v8a/benzware.sh
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: xvcen-sh-arm64-v8a
-          path: libs/arm64-v8a/xvcen.sh
+          name: benzware-sh-arm64-v8a
+          path: libs/arm64-v8a/benzware.sh
           if-no-files-found: error
