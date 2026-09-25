@@ -8,8 +8,10 @@
 КАКУЮ константу (слот в go_active) каким (класс, поле) заполнять.
 
 Источник — tools/offsets/offsets_map.json (карта «константа -> класс/поле»,
-которой пользуется и beta_offsets.py). Берём только записи вида «поле класса»
-со стабильными именами:
+которой пользуется и beta_offsets.py). Берём записи kind=field, а также
+kind=runtime с resolver_class/resolver_field для generic-полей, у которых
+il2cpp.h не печатает byte offsets (например, Dictionary<TKey,TValue>). Имена
+классов/полей должны быть стабильными:
 
   * классы, чьи имена РОТИРУЮТ обфускатором (помечены в карте «имя
     ротирует», а также короткие обфусцированные имена), пропускаем — такие
@@ -183,12 +185,17 @@ def main():
     emit_via = []   # (const, [стартовый_класс, поле, поле2], field, is_static, sig)
     skipped = []    # (const, причина)
     for const, entry in sorted(omap.items()):
-        if entry.get('kind') != 'field':
+        # Runtime ABI layouts (notably closed generic Dictionary fields) may
+        # lack byte offsets in il2cpp.h, but their named fields are still
+        # resolved from the live IL2CPP metadata when resolver_class/field are
+        # supplied. They remain kind=runtime for beta-offset generation.
+        runtime_field = entry.get('kind') == 'runtime' and entry.get('resolver_field')
+        if entry.get('kind') != 'field' and not runtime_field:
             continue
         if const not in known:
             skipped.append((const, 'нет в go_active'))
             continue
-        cls = entry.get('class') or ''
+        cls = (entry.get('resolver_class') if runtime_field else entry.get('class')) or ''
         note = entry.get('note', '')
         # Цепочка «через объект»: класс с ротированным именем (или вообще без
         # имени в карте) достигается как ТИП поля известного класса. По типу
@@ -222,7 +229,7 @@ def main():
         if len(short) <= 3 and short not in ('KCC',):
             skipped.append((const, f'короткое имя класса {short!r}'))
             continue
-        field = entry.get('field') or ''
+        field = (entry.get('resolver_field') if runtime_field else entry.get('field')) or ''
         sig = type_sig(entry)
         # Поле с коротким/ротированным именем («XeK», «id») РАНЬШЕ пропускалось
         # совсем, и его константа навсегда оставалась на вшитом значении. Лог

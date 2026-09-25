@@ -1,8 +1,128 @@
 #include "team_membership.h"
+#include "team_state_map.h"
 
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 static int failures = 0;
+
+struct FakeRemoteMemory {
+    static constexpr std::size_t kSize = 1024;
+    alignas(16) unsigned char bytes[kSize]{};
+
+    std::uint64_t base() const {
+        return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(bytes));
+    }
+    bool valid(std::uint64_t address) const {
+        return address >= base() && address < base() + kSize && (address & 7u) == 0;
+    }
+    bool read(std::uint64_t address, void* out, std::size_t size) const {
+        if (!out || address < base() || size > kSize ||
+            address - base() > kSize - size) return false;
+        std::memcpy(out, bytes + (address - base()), size);
+        return true;
+    }
+    bool write(std::uint64_t address, const void* value, std::size_t size) {
+        if (!value || address < base() || size > kSize ||
+            address - base() > kSize - size) return false;
+        std::memcpy(bytes + (address - base()), value, size);
+        return true;
+    }
+    template <typename T>
+    bool put(std::uint64_t address, const T& value) {
+        return write(address, &value, sizeof(value));
+    }
+    bool put_string(std::uint64_t address, const char* value) {
+        return write(address, value, std::strlen(value) + 1);
+    }
+};
+
+static bool test_teammate_state_dictionary() {
+    FakeRemoteMemory memory;
+    const std::uint64_t dict = memory.base() + 0x40;
+    const std::uint64_t entries = memory.base() + 0x100;
+    const std::uint64_t id_a = memory.base() + 0x300;
+    const std::uint64_t id_b = memory.base() + 0x320;
+    const std::uint64_t id_duplicate = memory.base() + 0x340;
+    const std::uint64_t entry_base = entries + 0x20;
+
+    const std::uint64_t stored_entries = entries;
+    const std::int32_t count = 4;
+    const std::int32_t array_length = 4;
+    const std::int32_t hash_a = 17;
+    const std::int32_t removed_hash = -1;
+    const std::int32_t hash_b = 21;
+    const std::int32_t hash_duplicate = 28;
+    bool ok = memory.put(dict + 0x18, stored_entries) &&
+              memory.put(dict + 0x20, count) &&
+              memory.put(entries + 0x18, array_length) &&
+              memory.put(entry_base + 0x00, hash_a) &&
+              memory.put(entry_base + 0x08, id_a) &&
+              memory.put(entry_base + 0x18, removed_hash) &&
+              memory.put(entry_base + 0x30, hash_b) &&
+              memory.put(entry_base + 0x38, id_b) &&
+              memory.put(entry_base + 0x48, hash_duplicate) &&
+              memory.put(entry_base + 0x50, id_duplicate) &&
+              memory.put_string(id_a, "user-a") &&
+              memory.put_string(id_b, "user-b") &&
+              memory.put_string(id_duplicate, "user-a");
+    if (!ok) return false;
+
+    auto read_pointer = [&](std::uint64_t address, std::uint64_t& value) {
+        return memory.read(address, &value, sizeof(value));
+    };
+    auto read_int32 = [&](std::uint64_t address, std::int32_t& value) {
+        return memory.read(address, &value, sizeof(value));
+    };
+    auto read_string = [&](std::uint64_t address, char* out, std::size_t cap,
+                           int max_chars) {
+        if (!out || cap == 0 || max_chars < 0) return false;
+        for (int i = 0; i <= max_chars && static_cast<std::size_t>(i) < cap; ++i) {
+            char ch = '\0';
+            if (!memory.read(address + static_cast<std::uint64_t>(i), &ch, 1)) return false;
+            out[i] = ch;
+            if (ch == '\0') return true;
+        }
+        out[cap - 1] = '\0';
+        return false;
+    };
+    auto valid_object = [&](std::uint64_t address) { return memory.valid(address); };
+
+    char ids[4][team_state_map::kUserIdCapacity]{};
+    std::size_t found = 0;
+    std::int32_t raw_count = -1;
+    const bool parsed = team_state_map::read_user_ids(
+        dict, 0x18, 0x20, 0x18, 0x20, 0x18, 0x08,
+        read_pointer, read_int32, read_string, valid_object,
+        ids, 4, found, &raw_count);
+    const bool unique_ids_ok = parsed && raw_count == 4 && found == 2 &&
+        std::strcmp(ids[0], "user-a") == 0 &&
+        std::strcmp(ids[1], "user-b") == 0 &&
+        team_membership::roster_entry_matches("user-b", "", ids[1], "");
+
+    // One unreadable active key must reject the whole snapshot, not publish
+    // the first ID and silently omit later teammates.
+    const std::uint64_t invalid_key = memory.base() + 0x8000;
+    const bool changed = memory.put(entry_base + 0x08, invalid_key);
+    std::size_t partial_count = 99;
+    const bool rejected_partial = changed && !team_state_map::read_user_ids(
+        dict, 0x18, 0x20, 0x18, 0x20, 0x18, 0x08,
+        read_pointer, read_int32, read_string, valid_object,
+        ids, 4, partial_count, nullptr) && partial_count == 0;
+
+    // A confirmed empty Dictionary is valid even with a null entries array.
+    const std::uint64_t null_entries = 0;
+    const std::int32_t empty_count = 0;
+    memory.put(dict + 0x18, null_entries);
+    memory.put(dict + 0x20, empty_count);
+    std::size_t empty_count_out = 99;
+    const bool empty_ok = team_state_map::read_user_ids(
+        dict, 0x18, 0x20, 0x18, 0x20, 0x18, 0x08,
+        read_pointer, read_int32, read_string, valid_object,
+        ids, 4, empty_count_out, nullptr) && empty_count_out == 0;
+    return unique_ids_ok && rejected_partial && empty_ok;
+}
 
 static void check(bool ok, const char* description) {
     std::printf("  %-62s %s\n", description, ok ? "ok" : "FAIL");
@@ -62,6 +182,8 @@ int main() {
           "zero network IDs are not treated as valid matches");
     check(!team_membership::roster_entry_matches("", "", "", ""),
           "empty roster fields do not match");
+    check(test_teammate_state_dictionary(),
+          "TeammateStates reader deduplicates IDs and rejects partial snapshots");
 
     check(!team_membership::include_in_esp(true, false),
           "ally ESP off hides teammates");

@@ -412,9 +412,16 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             // and the exact roster-read stage.
             int dteam = 0, dclan = 0, dtag = 0, local_ok = 0, data_ok = 0;
             int rval = 0, rcnt = 0, rstage = ESP_ALLY_ROSTER_NOT_CHECKED;
+            int states_valid = 0, states_ids = 0, states_entries = -1;
+            int states_array = -1, states_parsed = 0;
+            unsigned long long states_uid_checks = 0, states_uid_matches = 0;
             char rteam[32] = {};
             esp_get_ally_diag(&dteam, &dclan, &dtag, &local_ok, &data_ok,
-                              &rval, &rcnt, &rstage, rteam, sizeof(rteam));
+                              &rval, &rcnt, &rstage,
+                              &states_valid, &states_ids, &states_entries,
+                              &states_array, &states_parsed,
+                              &states_uid_checks, &states_uid_matches,
+                              rteam, sizeof(rteam));
             const char* stage_name = "неизвестно";
             switch (rstage) {
                 case ESP_ALLY_ROSTER_NOT_CHECKED: stage_name = "не проверялся"; break;
@@ -427,10 +434,13 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                 case ESP_ALLY_ROSTER_MEMBERS: stage_name = "участники прочитаны"; break;
                 case ESP_ALLY_ROSTER_MEMBER_ENTRIES_UNREADABLE: stage_name = "поля участников не читаются"; break;
             }
-            LogLine("аим: союзники — локальный игрок %s; группа: team=%d clan=%d tag=%d симв.; team-data %s; ростер %s (%s, %d), команда «%s»",
+            LogLine("аим: союзники — локальный игрок %s; группа: team=%d clan=%d tag=%d симв.; team-data %s; TeamData roster %s (%s, %d), команда «%s»; TeammateStates %s (IDs=%d, entries=%d, array=%d, parse=%s, UID checks=%llu matches=%llu)",
                     local_ok ? "подтверждён" : "не подтверждён", dteam, dclan, dtag,
                     data_ok ? "доступен" : "нет", rval ? "прочитан" : "нет",
-                    stage_name, rcnt, rteam);
+                    stage_name, rcnt, rteam,
+                    states_valid ? "доступен" : "нет", states_ids,
+                    states_entries, states_array, states_parsed ? "ok" : "ошибка/не проверен",
+                    states_uid_checks, states_uid_matches);
             char ally_details[1536] = {};
             esp_get_ally_diag_details(ally_details, sizeof(ally_details));
             if (ally_details[0])

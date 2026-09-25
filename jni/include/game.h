@@ -110,6 +110,7 @@ void          esp_mem_frame_begin();
 bool          esp_alive_check();
 unsigned long long esp_mem_reads_total();
 unsigned long long esp_mem_read_fails_total();
+unsigned long long esp_mem_aim_resolve_attempts_total();
 void        esp_set_skeleton_enabled(bool enabled);
 // Enable the ore / animal / loot / pickup / vehicle / bot marker scan
 // (all off = no work, unless the bot aim feed below is on).
@@ -151,15 +152,19 @@ enum EspAllyRosterStage {
 };
 
 // Ally diagnostics for the aim log: local group-field lengths and confirmation
-// that g_local_player selected the local transform; roster read status/count,
-// whether a live TeamData pointer is available, and its display name.
+// that g_local_player selected the local transform; TeamData roster status plus
+// the decoded TeammateStates ID count/raw Dictionary dimensions.
 void esp_get_ally_diag(int* local_team_len, int* local_clan_len, int* local_tag_len,
                        int* local_player_confirmed, int* team_data_available,
                        int* roster_valid, int* roster_count, int* roster_stage,
+                       int* states_valid, int* states_id_count,
+                       int* states_entry_count, int* states_array_length,
+                       int* states_parsed,
+                       unsigned long long* states_uid_checks,
+                       unsigned long long* states_uid_matches,
                        char* roster_team, size_t roster_team_cap);
-// Addresses/read status for the local team chain and group strings. Contents
-// are intentionally omitted; this is enough to distinguish null links from
-// failed reads without writing names or IDs into the diagnostic log.
+// Addresses/read status for the local team chain, TeammateStates dimensions,
+// and group strings. Team IDs and names are intentionally omitted from logs.
 void esp_get_ally_diag_details(char* out, size_t cap);
 
 // ---- Автообновление оффсетов (offset_resolver.cpp) ---------------------------

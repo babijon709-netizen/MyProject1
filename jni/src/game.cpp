@@ -12,6 +12,7 @@
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
 #include "text_utf8.h"  // копия подписи в буфер без разрезания символа UTF-8
 #include "team_membership.h" // единое правило распознавания союзников для ESP и аима
+#include "team_state_map.h" // запасной точный roster из TeammateStates
 
 #include <errno.h>     // errno при отказе записи (сайлент: ось выстрела)
 #include <string.h>
@@ -471,6 +472,13 @@ struct AllyRuntimeDiag {
     AllyPointerDiag local_class;
     AllyStringDiag group_team, group_clan, group_tag;
     AllyPointerDiag team_component, component_class, component_owner;
+    AllyPointerDiag teammate_states;
+    int32_t team_states_entry_count = -1;
+    int32_t team_states_array_length = -1;
+    int32_t team_states_active_count = 0;
+    bool team_states_count_read = false;
+    bool team_states_array_length_read = false;
+    bool team_states_parsed = false;
     AllyPointerDiag team_data, data_class;
     AllyStringDiag team_data_name;
     AllyPointerDiag member_list;
@@ -519,6 +527,9 @@ static AllyRuntimeDiag capture_ally_runtime_diag(uint64_t local_player) {
     if (!out.team_component.object_valid) return out;
     out.component_class = ally_read_pointer(out.team_component.value, 0);
     out.component_owner = ally_read_pointer(out.team_component.value, TEAM_OBJECT_PLAYER);
+    // TeammateStates is independent of TeamData and stays readable even when
+    // the server roster object or its member list has not synchronized yet.
+    out.teammate_states = ally_read_pointer(out.team_component.value, TEAM_OBJECT_STATES);
     out.team_data = ally_read_pointer(out.team_component.value, TEAM_OBJECT_DATA);
     if (!out.team_data.object_valid) return out;
     out.data_class = ally_read_pointer(out.team_data.value, 0);
@@ -539,15 +550,75 @@ struct TeamRoster {
     char     clan_tags[16][16] = {};
     uint32_t net_ids[16] = {};
     char     team_name[32] = {};
+    char     state_ids[16][team_state_map::kUserIdCapacity] = {};
     uint64_t owner = 0;       // local player this roster belongs to
     uint64_t team_data = 0;   // live team-data object for pointer/name fallback
     uint8_t  count = 0;
-    bool     valid = false;   // member collection was successfully read
+    uint8_t  state_count = 0;
+    bool     valid = false;   // TeamData member collection was successfully read
+    bool     states_valid = false; // TeammateStates snapshot was decoded
     int      refresh = 0;     // frames since the last roster attempt (0..29)
     int      misses = 0;
+    int      state_misses = 0;
     int      stage = ESP_ALLY_ROSTER_NOT_CHECKED;
 };
 static TeamRoster s_team_roster;
+static unsigned long long s_team_state_uid_checks = 0;
+static unsigned long long s_team_state_uid_matches = 0;
+
+static bool read_team_state_user_ids(
+        uint64_t dictionary,
+        char (*out_ids)[team_state_map::kUserIdCapacity],
+        std::size_t capacity,
+        std::size_t& out_count) {
+    AllyRuntimeDiag& diag = s_ally_runtime_diag;
+    diag.team_states_entry_count = -1;
+    diag.team_states_array_length = -1;
+    diag.team_states_active_count = 0;
+    diag.team_states_count_read = false;
+    diag.team_states_array_length_read = false;
+    diag.team_states_parsed = false;
+    out_count = 0;
+    if (!valid_obj(dictionary) || !out_ids || capacity == 0) return false;
+
+    auto read_pointer = [](uint64_t address, uint64_t& value) {
+        uint64_t raw = 0;
+        if (!rd_exact(address, raw)) return false;
+        value = memio::untag(raw);
+        return true;
+    };
+    auto read_int32 = [](uint64_t address, int32_t& value) {
+        return rd_exact(address, value);
+    };
+    auto read_string = [](uint64_t address, char* out, std::size_t cap,
+                          int max_chars) {
+        return read_managed_string_ex(address, out, cap, max_chars);
+    };
+    auto is_valid_object = [](uint64_t address) { return valid_obj(address); };
+
+    // Capture raw container dimensions as well as the parser result so the
+    // next aim log can distinguish a null field from a malformed dictionary.
+    int32_t raw_count = -1;
+    if (rd_exact(dictionary + DICT_COUNT, raw_count)) {
+        diag.team_states_count_read = true;
+        diag.team_states_entry_count = raw_count;
+    }
+    const uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
+    if (valid_obj(entries)) {
+        diag.team_states_array_length_read =
+            rd_exact(entries + IL2CPP_ARRAY_LENGTH, diag.team_states_array_length);
+    }
+
+    bool parsed = team_state_map::read_user_ids(
+        dictionary, DICT_ENTRIES, DICT_COUNT,
+        IL2CPP_ARRAY_LENGTH, IL2CPP_ARRAY_FIRST_ELEMENT,
+        DICT_ENTRY_STRIDE, DICT_ENTRY_KEY,
+        read_pointer, read_int32, read_string, is_valid_object,
+        out_ids, capacity, out_count, nullptr);
+    diag.team_states_parsed = parsed;
+    diag.team_states_active_count = parsed ? static_cast<int32_t>(out_count) : 0;
+    return parsed;
+}
 
 static void team_roster_revalidate(uint64_t local_player) {
     TeamRoster& roster = s_team_roster;
@@ -575,11 +646,47 @@ static void team_roster_revalidate(uint64_t local_player) {
     // Use the same exact-read snapshot that is printed in the diagnostic log,
     // so a reported null/fault is precisely the value that stopped the roster.
     const AllyPointerDiag& component_field = s_ally_runtime_diag.team_component;
-    const uint64_t teamc = component_field.value;
     if (!component_field.read_ok || !component_field.object_valid) {
+        if (++roster.state_misses >= 3) {
+            std::memset(roster.state_ids, 0, sizeof(roster.state_ids));
+            roster.state_count = 0;
+            roster.states_valid = false;
+            roster.state_misses = 0;
+        }
         missed(ESP_ALLY_ROSTER_NO_TEAM_COMPONENT, true);
         return;
     }
+
+    // TeammateStates is the authoritative identity map for the formed team.
+    // Keep a last-good snapshot across transient reads, but never publish a
+    // partial dictionary (the parser rejects malformed entries/overflow).
+    char fresh_state_ids[16][team_state_map::kUserIdCapacity] = {};
+    std::size_t fresh_state_count = 0;
+    const bool states_readable = read_team_state_user_ids(
+        s_ally_runtime_diag.teammate_states.value,
+        fresh_state_ids, 16, fresh_state_count);
+    if (states_readable && fresh_state_count > 0) {
+        std::memcpy(roster.state_ids, fresh_state_ids, sizeof(roster.state_ids));
+        roster.state_count = static_cast<uint8_t>(fresh_state_count);
+        roster.states_valid = true;
+        roster.state_misses = 0;
+    } else if (states_readable) {
+        if (roster.states_valid && roster.state_count && ++roster.state_misses < 3) {
+            // A single empty dictionary snapshot can occur during team sync;
+            // retain the confirmed IDs until the empty state repeats.
+        } else {
+            std::memset(roster.state_ids, 0, sizeof(roster.state_ids));
+            roster.state_count = 0;
+            roster.states_valid = true;
+            roster.state_misses = 0;
+        }
+    } else if (++roster.state_misses >= 3) {
+        std::memset(roster.state_ids, 0, sizeof(roster.state_ids));
+        roster.state_count = 0;
+        roster.states_valid = false;
+        roster.state_misses = 0;
+    }
+
     const AllyPointerDiag& data_field = s_ally_runtime_diag.team_data;
     const uint64_t data = data_field.value;
     if (!data_field.read_ok || !data_field.object_valid) {
@@ -622,6 +729,10 @@ static void team_roster_revalidate(uint64_t local_player) {
         TeamRoster fresh{};
         fresh.owner = local_player;
         fresh.team_data = data;
+        fresh.state_count = roster.state_count;
+        fresh.states_valid = roster.states_valid;
+        fresh.state_misses = roster.state_misses;
+        std::memcpy(fresh.state_ids, roster.state_ids, sizeof(fresh.state_ids));
         snprintf(fresh.team_name, sizeof(fresh.team_name), "%s", roster.team_name);
         fresh.valid = true;
         fresh.stage = ESP_ALLY_ROSTER_EMPTY;
@@ -632,6 +743,10 @@ static void team_roster_revalidate(uint64_t local_player) {
     TeamRoster fresh{};
     fresh.owner = local_player;
     fresh.team_data = data;
+    fresh.state_count = roster.state_count;
+    fresh.states_valid = roster.states_valid;
+    fresh.state_misses = roster.state_misses;
+    std::memcpy(fresh.state_ids, roster.state_ids, sizeof(fresh.state_ids));
     snprintf(fresh.team_name, sizeof(fresh.team_name), "%s", roster.team_name);
     for (int i = 0; i < count && fresh.count < 16; ++i) {
         if (!valid_obj(members[i])) continue;
@@ -697,6 +812,16 @@ static bool same_local_team_component(uint64_t player) {
 static bool team_roster_contains(const char* uid, const char* name,
                                  const char* clan_tag, uint32_t net_id) {
     const TeamRoster& roster = s_team_roster;
+    // TeammateStates keys are stable user IDs; consult this source even when
+    // TeamData or its member-list is unavailable.
+    if (roster.states_valid && roster.state_count && uid && uid[0]) {
+        ++s_team_state_uid_checks;
+        for (int i = 0; i < roster.state_count; ++i) {
+            if (!team_membership::same_nonempty(uid, roster.state_ids[i])) continue;
+            ++s_team_state_uid_matches;
+            return true;
+        }
+    }
     if (!roster.valid || roster.count == 0) return false;
     for (int i = 0; i < roster.count; ++i) {
         if (team_membership::roster_entry_matches(uid, name,
@@ -711,6 +836,11 @@ static bool team_roster_contains(const char* uid, const char* name,
 void esp_get_ally_diag(int* local_team_len, int* local_clan_len, int* local_tag_len,
                        int* local_player_confirmed, int* team_data_available,
                        int* roster_valid, int* roster_count, int* roster_stage,
+                       int* states_valid, int* states_id_count,
+                       int* states_entry_count, int* states_array_length,
+                       int* states_parsed,
+                       unsigned long long* states_uid_checks,
+                       unsigned long long* states_uid_matches,
                        char* roster_team, size_t roster_team_cap) {
     if (local_team_len) *local_team_len = s_last_local_group.team[0] ? (int)strlen(s_last_local_group.team) : 0;
     if (local_clan_len) *local_clan_len = s_last_local_group.clan[0] ? (int)strlen(s_last_local_group.clan) : 0;
@@ -720,6 +850,15 @@ void esp_get_ally_diag(int* local_team_len, int* local_clan_len, int* local_tag_
     if (roster_valid) *roster_valid = s_team_roster.valid ? 1 : 0;
     if (roster_count) *roster_count = s_team_roster.count;
     if (roster_stage) *roster_stage = s_team_roster.stage;
+    if (states_valid) *states_valid = s_team_roster.states_valid ? 1 : 0;
+    if (states_id_count) *states_id_count = s_team_roster.state_count;
+    if (states_entry_count) *states_entry_count = s_ally_runtime_diag.team_states_entry_count;
+    if (states_array_length) *states_array_length = s_ally_runtime_diag.team_states_array_length;
+    if (states_parsed) *states_parsed = s_ally_runtime_diag.team_states_parsed ? 1 : 0;
+    if (states_uid_checks) *states_uid_checks = s_team_state_uid_checks;
+    if (states_uid_matches) *states_uid_matches = s_team_state_uid_matches;
+    s_team_state_uid_checks = 0;
+    s_team_state_uid_matches = 0;
     if (roster_team && roster_team_cap > 0)
         snprintf(roster_team, roster_team_cap, "%s", s_team_roster.team_name);
 }
@@ -775,11 +914,14 @@ void esp_get_ally_diag_details(char* out, size_t cap) {
     ally_diag_class_name(d.data_class.value, data_class_name, sizeof(data_class_name));
     snprintf(out, cap,
         "offs[PM.team=0x%llx teamName=0x%llx clanId=0x%llx clanTag=0x%llx "
-        "TC.player=0x%llx TC.team=0x%llx TD.name=0x%llx TD.members=0x%llx]; "
+        "TC.states=0x%llx TC.player=0x%llx TC.team=0x%llx TD.name=0x%llx "
+        "TD.members=0x%llx Dict.entries=0x%llx count=0x%llx key=0x%llx stride=0x%llx]; "
         "local=0x%llx class=0x%llx(%s,read=%s); "
         "strings[teamName ptr=0x%llx len=%d %s; clanId ptr=0x%llx len=%d %s; "
         "clanTag ptr=0x%llx len=%d %s]; "
         "chain[PM.team read=%s ptr=0x%llx obj=%d class=0x%llx(%s); "
+        "TC.states read=%s ptr=0x%llx obj=%d parsed=%d countRead=%d entries=%d "
+        "arrayRead=%d array=%d ids=%d; "
         "TC.player read=%s ptr=0x%llx self=%s; "
         "TC.team read=%s ptr=0x%llx obj=%d class=0x%llx(%s); "
         "TD.name ptr=0x%llx len=%d %s; members read=%s ptr=0x%llx obj=%d]",
@@ -787,10 +929,15 @@ void esp_get_ally_diag_details(char* out, size_t cap) {
         (unsigned long long)PLAYER_TEAM_NAME,
         (unsigned long long)PLAYER_CLAN_ID,
         (unsigned long long)PLAYER_CLAN_TAG,
+        (unsigned long long)TEAM_OBJECT_STATES,
         (unsigned long long)TEAM_OBJECT_PLAYER,
         (unsigned long long)TEAM_OBJECT_DATA,
         (unsigned long long)TEAM_DATA_NAME,
         (unsigned long long)TEAM_DATA_MEMBERS,
+        (unsigned long long)DICT_ENTRIES,
+        (unsigned long long)DICT_COUNT,
+        (unsigned long long)DICT_ENTRY_KEY,
+        (unsigned long long)DICT_ENTRY_STRIDE,
         (unsigned long long)d.local_player,
         (unsigned long long)d.local_class.value,
         local_class_name,
@@ -804,6 +951,11 @@ void esp_get_ally_diag_details(char* out, size_t cap) {
         d.team_component.read_ok ? "ok" : "fail",
         (unsigned long long)d.team_component.value, d.team_component.object_valid ? 1 : 0,
         (unsigned long long)d.component_class.value, component_class_name,
+        d.teammate_states.read_ok ? "ok" : "fail",
+        (unsigned long long)d.teammate_states.value, d.teammate_states.object_valid ? 1 : 0,
+        d.team_states_parsed ? 1 : 0, d.team_states_count_read ? 1 : 0,
+        d.team_states_entry_count, d.team_states_array_length_read ? 1 : 0,
+        d.team_states_array_length, d.team_states_active_count,
         d.component_owner.read_ok ? "ok" : "fail",
         (unsigned long long)d.component_owner.value, owner_match,
         d.team_data.read_ok ? "ok" : "fail",
@@ -3668,8 +3820,54 @@ static void log_look_cached(int reason, uint64_t mouse_look) {
     }
 }
 
-static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
-    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
+static bool resolve_local_mouse_look_uncached(uint64_t& out, LookFail* why) {
+    if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) {
+        if (why) *why = LookFail::noPlayer;
+        return false;
+    }
+
+    // A confirmed object is revalidated before rescanning every camera
+    // component. This used to perform the full scan on every memory-aim call
+    // (params, angle read, angle write), even though the cache already checks
+    // class, sensitivity and owner. Geometry/local-player checks keep the fast
+    // path strict across respawns and camera switches.
+    if (s_ml_cached && memio::now_seconds() - s_ml_cached_at <= kMlCacheSec) {
+        uint64_t cached = 0;
+        const uint64_t cached_player = s_ml_cached_player;
+        bool player_still_local = true;
+        int local = -1;
+        if (cached_player) {
+            uint64_t raw_player_class = 0;
+            const bool class_read = rd_exact(cached_player, raw_player_class);
+            const uint64_t player_class = memio::untag(raw_player_class);
+            if (g_player_manager_class && class_read &&
+                player_class != g_player_manager_class) {
+                player_still_local = false;
+            } else {
+                local = player_is_local(cached_player);
+                player_still_local = local != 0; // -1 means unreadable, not foreign
+            }
+        }
+        if (player_still_local && mouse_look_from_cache(cached_player, cached)) {
+            float distance = -1.f;
+            const int drives_camera = mouse_look_camera_distance(cached, distance);
+            if (drives_camera != 0) {
+                g_look_source = cached_player ? 0 : 1;
+                g_look_player_addr = cached_player;
+                g_look_local = local;
+                g_look_cam_dist = distance;
+                s_ml_cached_at = memio::now_seconds();
+                if (why) *why = LookFail::none;
+                out = cached;
+                return true;
+            }
+            look_mismatch(true);
+            s_ml_cached = 0;
+        } else if (!player_still_local) {
+            look_mismatch(true);
+            s_ml_cached = 0;
+        }
+    }
 
     // 1) MouseLook от камеры. Первым стоит именно этот путь: он не зависит от
     // того, кого игра сейчас считает локальным игроком, а адрес локального
@@ -3786,6 +3984,47 @@ static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
     return true;
 }
 
+// The memory-aim path asks for params, angles, then a write in the same frame.
+// Resolve (and especially camera-component scanning) only once per frame; the
+// memory reader's generation changes in esp_mem_frame_begin(). A negative
+// result is cached too, so a transient failure does not trigger three scans.
+struct MouseLookFrameCache {
+    uint64_t generation = ~uint64_t(0);
+    uint64_t base = 0;
+    uint64_t address = 0;
+    pid_t pid = -1;
+    LookFail why = LookFail::none;
+    bool resolved = false;
+    bool success = false;
+};
+static MouseLookFrameCache s_mouse_look_frame_cache;
+static std::atomic<unsigned long long> s_mouse_look_resolve_attempts{0};
+
+static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
+    const uint64_t generation = g_mem.frame_generation();
+    MouseLookFrameCache& cache = s_mouse_look_frame_cache;
+    if (cache.resolved && cache.generation == generation && cache.pid == g_pid &&
+        cache.base == g_il2cpp_base) {
+        if (why) *why = cache.why;
+        out = cache.success ? cache.address : 0;
+        return cache.success;
+    }
+
+    uint64_t address = 0;
+    LookFail failure = LookFail::none;
+    s_mouse_look_resolve_attempts.fetch_add(1, std::memory_order_relaxed);
+    const bool found = resolve_local_mouse_look_uncached(address, &failure);
+    cache.generation = generation;
+    cache.pid = g_pid;
+    cache.base = g_il2cpp_base;
+    cache.address = found ? address : 0;
+    cache.why = failure;
+    cache.resolved = true;
+    cache.success = found;
+    if (why) *why = failure;
+    out = found ? address : 0;
+    return found;
+}
 
 bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro) {
     uint64_t mouse_look = 0;
@@ -7112,6 +7351,9 @@ bool esp_alive_check() { return g_mem.verify(); }
 // чтение ждёт» (ядро/память устройства под давлением).
 unsigned long long esp_mem_reads_total() { return g_mem.reads_total(); }
 unsigned long long esp_mem_read_fails_total() { return g_mem.read_fails_total(); }
+unsigned long long esp_mem_aim_resolve_attempts_total() {
+    return s_mouse_look_resolve_attempts.load(std::memory_order_relaxed);
+}
 
 // KCC.Move.Position: the simulated character position (capsule bottom) the
 // game itself moves the character with. Independent of the discovered
@@ -8378,7 +8620,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             const auto track = g_player_track.find(s_transforms[i]);
             const char* uid = track != g_player_track.end() ? track->second.uid : "";
             char live_uid[40] = {};
-            if ((!uid || !uid[0]) && s_team_roster.valid && s_team_roster.count &&
+            if ((!uid || !uid[0]) &&
+                ((s_team_roster.valid && s_team_roster.count) ||
+                 (s_team_roster.states_valid && s_team_roster.state_count)) &&
                 read_managed_string_ex(rd_ptr(s_transforms[i] + PLAYER_USER_ID),
                                        live_uid, sizeof(live_uid), 39)) {
                 uid = live_uid;

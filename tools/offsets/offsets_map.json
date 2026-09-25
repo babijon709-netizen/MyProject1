@@ -1285,24 +1285,34 @@
  "DICT_ENTRIES": {
   "kind": "runtime",
   "offset": 24,
-  "note": "Dictionary<K,V>._entries (массив struct Entry)",
+  "note": "Dictionary<K,V>._entries (array of Entry)",
+  "resolver_class": "Dictionary`2",
+  "resolver_field": "_entries",
+  "type": "Il2CppObject*",
   "src": {
-   "file": "il2cpp.h + ABI",
-   "how": "System_Collections_Generic_Dictionary_2_TKey_TValue__Fields: порядок (_buckets, _entries, ...) плюс заголовок 0x10 -> 0x18"
+   "file": "il2cpp.h + live IL2CPP metadata",
+   "how": "standard layout is 0x18; the field is also re-resolved by name from the live generic Dictionary class"
   }
  },
  "DICT_COUNT": {
-  "kind": "field",
-  "class": "NetworkIdentity",
-  "struct": "Mirror_NetworkIdentity_Fields",
-  "field": "canFrequencyBeChanged",
-  "type": "bool",
+  "kind": "runtime",
   "offset": 32,
+  "note": "Dictionary<K,V>._count",
+  "resolver_class": "Dictionary`2",
+  "resolver_field": "_count",
+  "type": "int32_t",
   "src": {
-   "file": "il2cpp.h",
-   "struct": "Mirror_NetworkIdentity_Fields",
-   "field": "canFrequencyBeChanged",
-   "how": "смещение — из комментария /* 0x20 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «bool»"
+   "file": "il2cpp.h + live IL2CPP metadata",
+   "how": "standard layout is 0x20; the field is also re-resolved by name from the live generic Dictionary class"
+  }
+ },
+ "DICT_ENTRY_KEY": {
+  "kind": "runtime",
+  "offset": 8,
+  "note": "смещение ключа внутри struct Entry",
+  "src": {
+   "file": "il2cpp.h + ABI",
+   "how": "Entry{TKey,TValue}: hashCode и next занимают два int32, ключ начинается с 0x08"
   }
  },
  "DICT_ENTRY_STRIDE": {
@@ -2918,6 +2928,26 @@
    "struct": "Mirror_NetworkBehaviour_Fields",
    "field": "<netIdentity>k__BackingField",
    "how": "base NetworkBehaviour field at 0x40; PlayerManager inherits this object link"
+  }
+ },
+ "TEAM_OBJECT_STATES": {
+  "kind": "field",
+  "class": "TeamComponent (имя ротирует: euD -> Reo)",
+  "struct": "euD_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "team"
+   }
+  ],
+  "field": "TeammateStates",
+  "type": "Il2CppObject*",
+  "offset": 112,
+  "src": {
+   "file": "dump.cs / il2cpp.h",
+   "struct": "euD_Fields / Reo_Fields",
+   "field": "TeammateStates",
+   "how": "named Dictionary<string, Oxide.TeammateStatus> on the live TeamComponent reached through PlayerManager.team; both builds place it at 0x70"
   }
  },
  "TEAM_OBJECT_PLAYER": {

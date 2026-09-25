@@ -106,7 +106,7 @@ struct Handed {
     uint64_t pm_real, pm_decoy, teammember, netclient;
     uint64_t fpmanager, item, itemdata;
     uint64_t treehs, orehs, vec3, hitmarkeritem, oremark, itempickup, playerweapon;
-    uint64_t teamcomponent, teamdata, networkbehaviour, networkidentity;
+    uint64_t teamcomponent, teamdata, networkbehaviour, networkidentity, dictionary;
 };
 
 // Строка в окне метаданных; возвращает её адрес.
@@ -206,6 +206,8 @@ static void child_main(int out_fd) {
     const uint64_t s_teamdata = put_string(meta, moff, "nX");
     const uint64_t s_networkbehaviour = put_string(meta, moff, "NetworkBehaviour");
     const uint64_t s_networkidentity = put_string(meta, moff, "NetworkIdentity");
+    const uint64_t s_dictionary = put_string(meta, moff, "Dictionary`2");
+    const uint64_t s_generic_dictionary = put_string(meta, moff, "System.Collections.Generic");
     const uint64_t s_empty = put_string(meta, moff, "");
     const uint64_t s_nc   = put_string(meta, moff, "NetworkClient");
     const uint64_t s_mirror = put_string(meta, moff, "Mirror");
@@ -248,11 +250,19 @@ static void child_main(int out_fd) {
     uint64_t teamdata = build_class(heap, hoff, il_base + 0x1000, s_teamdata, s_empty,
                                     teamdata_fields, 3, meta, moff, tid_teamdata);
     const PField teamcomponent_fields[] = {
+        {"TeammateStates", 0x78, 0, 0x12},          // Dictionary; live-resolved (real dump: 0x70)
         {"player", 0x98, 0x101, 0x12},               // PlayerManager back-reference
         {"team", 0xA0, tid_teamdata, 0x12},          // TeamData reference; вшито 0x90
     };
     uint64_t teamcomponent = build_class(heap, hoff, il_base + 0x1000, s_teamcomponent, s_empty,
-                                         teamcomponent_fields, 2, meta, moff, tid_teamcomponent);
+                                         teamcomponent_fields, 3, meta, moff, tid_teamcomponent);
+    const PField dictionary_fields[] = {
+        {"_entries", 0x28, 0, 0x12},                 // object array; standard dump offset 0x18
+        {"_count", 0x38, 0, 0x08},                   // int32; standard dump offset 0x20
+    };
+    uint64_t dictionary = build_class(heap, hoff, il_base + 0x1000,
+                                      s_dictionary, s_generic_dictionary,
+                                      dictionary_fields, 2, meta, moff, 0x307);
     const PField networkidentity_fields[] = {
         {"_netId_k__BackingField", 0x60, 0, 0x09},   // uint; вшито 0x58
     };
@@ -461,6 +471,7 @@ static void child_main(int out_fd) {
     slots[sn++] = netclient;
     slots[sn++] = teamcomponent;
     slots[sn++] = teamdata;
+    slots[sn++] = dictionary;
     slots[sn++] = networkidentity;
     slots[sn++] = networkbehaviour;
     slots[sn++] = fpmanager;
@@ -486,6 +497,7 @@ static void child_main(int out_fd) {
     h.hitmarkeritem = hitmarkeritem; h.oremark = oremark; h.itempickup = itempickup; h.playerweapon = playerweapon;
     h.teamcomponent = teamcomponent; h.teamdata = teamdata;
     h.networkbehaviour = networkbehaviour; h.networkidentity = networkidentity;
+    h.dictionary = dictionary;
     if (write(out_fd, &h, sizeof(h)) != sizeof(h)) _exit(95);
 
     raise(SIGSTOP);   // родитель читает память, пока мы спим
@@ -592,6 +604,8 @@ int main() {
           "TeamMember найден по имени");
     check(offset_resolver_class("NetworkClient", "Mirror") == h.netclient,
           "NetworkClient найден по имени");
+    check(offset_resolver_class("Dictionary`2", "System.Collections.Generic") == h.dictionary,
+          "open generic Dictionary class is visible to the runtime resolver");
     check(offset_resolver_class("GameControllerBase", "Oxide") != 0,
           "GameControllerBase anchor found for the live team chain");
     check(offset_resolver_class("NotARealClass", "") == 0,
@@ -619,6 +633,13 @@ int main() {
           "TeamComponent.player разрешён через PlayerManager.team 0x80 -> 0x98");
     check(go_active::TEAM_OBJECT_DATA == 0xA0,
           "TeamComponent.team разрешён через PlayerManager.team 0x90 -> 0xA0");
+    check(go_active::TEAM_OBJECT_STATES == 0x78 &&
+          resolver_applied(&go_active::TEAM_OBJECT_STATES),
+          "TeamComponent.TeammateStates resolved live through PlayerManager.team");
+    check(go_active::DICT_ENTRIES == 0x28 && go_active::DICT_COUNT == 0x38 &&
+          resolver_applied(&go_active::DICT_ENTRIES) &&
+          resolver_applied(&go_active::DICT_COUNT),
+          "generic Dictionary _entries/_count resolved by live class and field name");
     check(go_active::TEAM_DATA_NAME == 0x18,
           "TeamData name найден типом через двухшаговый путь 0x10 -> 0x18");
     check(go_active::TEAM_DATA_MEMBERS == 0x30 &&
