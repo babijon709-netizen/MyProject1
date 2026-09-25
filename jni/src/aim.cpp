@@ -494,7 +494,13 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         static const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 1, 0}};
         int usedBone = -1;
         const bool sticky = (pick.lastId != 0 && b.id == pick.lastId);
-        const float localFov = b.aim_only ? std::max(fovR, sh * 0.35f) : fovR;
+        // At point-blank range a projected head/neck can be far from the screen
+        // centre even though the player is directly in front of the camera.
+        // Keep the normal user FOV at range, but give targets within 2.5 m the
+        // same bounded capture cone as near-plane-only boxes.
+        const bool closeRange = b.aim_only ||
+            (std::isfinite(b.distance) && b.distance >= 0.f && b.distance < 2.5f);
+        const float localFov = closeRange ? std::max(fovR, sh * 0.35f) : fovR;
         auto boneInCone = [&](int bi) {
             if (!b.aim_valid[bi]) return false;
             const float sx = b.aim_pts[bi][0], sy = b.aim_pts[bi][1];
@@ -992,9 +998,9 @@ static void UpdateAimTouch(float dt) {
     // 1-2 секунды при наводке») добавил три правила, найденные стендом:
     //   * поглощение клэмпится к ТЕКУЩЕМУ остатку — цель сближается сама, и
     //     заказ по остатку прошлых тактов перелетал кость;
-    //   * у цели (полоса 0.45°) шаг выдаётся только при устойчивом
-    //     однонаправленном остатке — дрожь кости гоняла палец с частотой
-    //     кадров (110 реверсов на стенде);
+    //   * у цели (полоса 0.45°, вблизи 1.2°) шаг выдаётся только при
+    //     устойчивом однонаправленном остатке — дрожь кости гоняла палец с
+    //     частотой кадров (110 реверсов на стенде);
     //   * доля шага спадает вместе с остатком — поздние прилёты длинной
     //     трубы не перелетают кость.
     static constexpr float kTouchFlightLife = 0.13f;  // жизнь приказа в окне, с
@@ -1008,11 +1014,9 @@ static void UpdateAimTouch(float dt) {
     // Граница «захват/ведение» для выбора оценки в полёте, град: при большом
     // остатке берём поглощение, при малом — минимум с окном (см. ниже).
     static constexpr float kTouchInflightBand = 2.5f;
-    // Полоса «дрожь кости» у цели и порог устойчивого дрейфа в ней — та же
-    // пара, что в мемори-локе: дрожь знак чередует и порог не набирает
-    // (камера стоит), настоящее медленное движение знак держит и проходит.
-    // Без порога контроллер гонял палец за дрожью с частотой кадров —
-    // 110 реверсов на стенде, видимый маятник у цели.
+    // Полоса дрожи на средней/дальней дистанции. Вблизи она расширяется до
+    // 1.2° (см. jitterGate): одна и та же анимация кости занимает больше
+    // градусов, но устойчивое смещение и в расширенной полосе проходит.
     static constexpr float kTouchJitterBand  = 0.45f;
     static constexpr int   kTouchDriftStreak = 3;
     // Доля шага у цели падает вместе с остатком (до минимума): при длинной
@@ -1179,12 +1183,16 @@ static void UpdateAimTouch(float dt) {
     // ---- полоса дрожи у цели ----
     // Остаток внутри полосы (но вне мёртвой зоны) — это либо дрожь кости,
     // либо медленный дрейф. Шаг выдаётся только при УСТОЙЧИВОМ остатке в одну
-    // сторону (порог тактов): дрожь знак чередует и не проходит вовсе,
-    // настоящий дрейф проходит целиком. Та же пара фильтров, что в
-    // мемори-локе — оба режима у цели ведут себя одинаково спокойно.
-    auto jitterGate = [&](float eff, int& streak) {
+    // сторону: чередующаяся анимация не проходит, настоящий дрейф проходит
+    // целиком после нескольких тактов. Вблизи дрожание той же кости занимает
+    // больше градусов, поэтому там расширяем только эту фильтруемую полосу;
+    // dead-zone остаётся малой и устойчивое смещение всё равно исправляется.
+    const float touchJitterBand =
+        (std::isfinite(best.world_dist) && best.world_dist > 0.f && best.world_dist < 2.5f)
+            ? 1.2f : kTouchJitterBand;
+    auto jitterGate = [touchJitterBand](float eff, int& streak) {
         if (eff == 0.f) { streak = 0; return 0.f; }
-        if (fabsf(eff) >= kTouchJitterBand) { streak = 0; return eff; }
+        if (fabsf(eff) >= touchJitterBand) { streak = 0; return eff; }
         const int s = (eff > 0.f) ? 1 : -1;
         streak = (streak * s > 0) ? streak + s : s;
         return (streak * s >= kTouchDriftStreak) ? eff : 0.f;
@@ -1417,25 +1425,13 @@ static void AimLogTick(float dt) {
 //
 //     angles = clamp(angles + input * m_Sensitivity)      (MouseLook.ZJo)
 //
-// Накопитель уже в градусах, и мы кладём в него АБСОЛЮТНОЕ направление кости:
-// камера, от которой измерен остаток (см. esp_aim_projection_basis), плюс сам
-// остаток. Из этого петля получается структурно неколеблемой:
-//
-//   * захват за один такт: игру запись разворачивается в поворот в её
-//     следующем кадре, и прицел встаёт на кость. Дробного схождения «доля
-//     остатка за такт» с потолками и рампой больше нет — значит нет и
-//     маятника первых двух секунд (жалобы 19.09 и 23.09); память — самый
-//     точный режим, как ему и положено: угол кладётся прямо, без пальца и
-//     без обучения коэффициента;
-//   * запись идемпотентна: пока предыдущая не развернулась, остаток всё ещё
-//     меряется от старой камеры, и в накопитель снова уходит ТОТ ЖЕ абсолютный
-//     угол. Два применения одного приказа дают один поворот — граница фаз
-//     (игра ~12 fps, запись видна через такт оверлея) петлю не раскачивает.
-//     Инкрементальная запись (накопитель + шаг) в этом месте удваивала
-//     доворот и шла маятником;
-//   * шаг не накапливается: стёртая запись (обработчики ввода игры
-//     перезаписывают +0x4C, пока палец игрока на экране) не копится долгом —
-//     следующий такт просто снова кладёт направление кости.
+// Накопитель уже в градусах, целевое направление — база фактического луча
+// выстрела (см. esp_aim_projection_basis) плюс остаток до кости. Это абсолютная
+// цель, не прибавка к прошлой команде; ход к ней ограничен скоростью 120°/с,
+// чтобы «Память» не дёргала камеру резкой записью. Повторная запись остаётся
+// идемпотентной, поэтому задержка применения не складывает несколько шагов.
+// Если игра переписала накопитель своим вводом, следующий такт снова считает
+// шаг от фактически прочитанного значения, а не накапливает потерянную команду.
 //
 // Дрожь кости гасится без уменьшения шага. Шаг — ВСЕГДА полный остаток (лок
 // бьёт ровно в кость: доля у цели давала видимое отставание от идущей кости,
@@ -1468,6 +1464,11 @@ static constexpr int   kMemDriftStreak = 3;
 // диагностики («отклик» в меню) — жёсткому локу подтверждать нечего: он
 // пишет абсолютный угол каждый такт.
 static constexpr float kMemAckEps = 0.10f;
+// Slew-limit large absolute writes. The game consumes this accumulator as an
+// angle, so a bounded step still lands on the exact bone without snapping the
+// view in one update. dt scaling keeps the rate stable across frame rates.
+static constexpr float kMemTurnRateDegPerSec = 120.f;
+static constexpr float kMemTurnStepMaxDeg = 12.f;
 
 static AimMemDiag s_memDiag;
 
@@ -1586,11 +1587,11 @@ static void UpdateAimMemory(float dt) {
         s_haveLast = false;
     }
 
-    // ---- жёсткий лок ---------------------------------------------------------
-    // Шаг по каждой оси — ПОЛНЫЙ остаток: лок бьёт ровно в кость, без вычета
-    // мёртвой зоны (прежний вычет сажал камеру в 0.12° ОТ кости, а доля в
-    // полосе у цели давала ползучее отставание на идущей цели). Ноль — камера
-    // на цели или кость дрожит: писать нечего (см. mem_axis_off).
+    // ---- абсолютная цель с ограничением скорости ----------------------------
+    // Сетпоинт по каждой оси — ПОЛНЫЙ остаток до кости (без вычета мёртвой зоны
+    // и без долей); ограничение по скорости ниже сглаживает большой разворот,
+    // но не меняет конечный угол. Ноль — камера на цели или кость дрожит:
+    // писать нечего (см. mem_axis_off).
     const float offYaw   = mem_axis_off(best.yaw,   s_streakYaw);
     const float offPitch = mem_axis_off(best.pitch, s_streakPitch);
     if (offYaw == 0.f && offPitch == 0.f) {
@@ -1610,13 +1611,30 @@ static void UpdateAimMemory(float dt) {
     float baseYaw = 0.f, basePitch = 0.f;
     const bool haveBasis = esp_aim_projection_basis(baseYaw, basePitch) &&
                            std::isfinite(baseYaw) && std::isfinite(basePitch);
-    float writeX, writeY;
+    const float maxTurn = std::fmin(kMemTurnRateDegPerSec * dt, kMemTurnStepMaxDeg);
+    auto limitTurn = [maxTurn](float step) {
+        if (step > maxTurn) return maxTurn;
+        if (step < -maxTurn) return -maxTurn;
+        return step;
+    };
+    float writeX = accX, writeY = accY;
     if (haveBasis) {
-        writeY = (offYaw   != 0.f) ? WrapDeg180(baseYaw + offYaw)        : accY;
-        writeX = (offPitch != 0.f) ? WrapDeg180(-(basePitch + offPitch)) : accX;
+        if (offYaw != 0.f) {
+            const float targetYaw = WrapDeg180(baseYaw + offYaw);
+            const float deltaYaw = WrapDeg180(targetYaw - accY);
+            writeY = WrapDeg180(accY + limitTurn(deltaYaw));
+        }
+        if (offPitch != 0.f) {
+            const float currentPitch = -accX;
+            const float targetPitch = basePitch + offPitch;
+            writeX = WrapDeg180(-(currentPitch + limitTurn(targetPitch - currentPitch)));
+        }
     } else {
-        writeY = WrapDeg180(accY + offYaw);     // +0 — пропуск оси как есть
-        writeX = WrapDeg180(accX - offPitch);
+        // Without a projection basis the residual is relative to the current
+        // accumulator; limit the incremental request but preserve the same axis
+        // signs as the exact absolute-write path above.
+        if (offYaw != 0.f) writeY = WrapDeg180(accY + limitTurn(offYaw));
+        if (offPitch != 0.f) writeX = WrapDeg180(accX - limitTurn(offPitch));
     }
 
     // Градусы -> накопитель игры: X — «наклон вниз» (вверх — меньше),

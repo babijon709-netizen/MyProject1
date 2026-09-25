@@ -155,7 +155,8 @@ static bool  g_haveCamAxis = true;
 static float g_pxPerDeg = 18.f;
 
 const std::vector<EspBox>& FrameBoxes(float, float) { return g_boxes; }
-float AimFovRadiusPx(float, float) { return 1e6f; }    // круг FOV в стенде не мешает
+static float g_testFovRadius = 1e6f;
+float AimFovRadiusPx(float, float) { return g_testFovRadius; }
 
 // Ошибка прицела: от базиса base к направлению на цель (цель стоит в мире
 // неподвижно, angle = g_targetYaw/Pitch от нулевого направления).
@@ -313,6 +314,7 @@ struct Result {
     float  errAfterAim = 0.f;               // остаток по нашей записи
     float  errAfterGame = 0.f;              // остаток после кадров игры
     float  maxAbsYaw = 0.f;
+    float  maxTurnYaw = 0.f;
     int    signFlips = 0;
     int    writes = 0, fails = 0, toasts = 0;
 };
@@ -323,6 +325,7 @@ static Result run(int mode, int frames) {
     float prevYawErr = 0.f; bool havePrev = false;
     r.writes = AimMemoryDiag().writes; r.fails = AimMemoryDiag().fails;
     const int toasts0 = g_toasts;
+    float lastCamYaw = g_game.camYaw();
     for (int i = 0; i < frames; ++i) {
         snapshot();
         UpdateAim(0.08f);
@@ -331,7 +334,13 @@ static Result run(int mode, int frames) {
         errFrom(baseYaw, basePitch, eYaw, ePitch);
         r.errAfterAim = fabsf(eYaw);
 
-        for (int f = 0; f < 5; ++f) g_game.frame();   // 5 кадров игры на кадр оверлея
+        for (int f = 0; f < 5; ++f) {
+            g_game.frame();   // 5 кадров игры на кадр оверлея
+            const float nowYaw = g_game.camYaw();
+            const float turnYaw = fabsf(WrapDeg180(nowYaw - lastCamYaw));
+            if (turnYaw > r.maxTurnYaw) r.maxTurnYaw = turnYaw;
+            lastCamYaw = nowYaw;
+        }
         baseYaw = g_game.camYaw(); basePitch = g_game.camPitch();
         errFrom(baseYaw, basePitch, eYaw, ePitch);
         if (havePrev && prevYawErr * eYaw < 0.f) ++r.signFlips;
@@ -354,6 +363,7 @@ static void resetGame() {
     g_state.gun_str = 5.f;
     g_state.gun_fov = 60.f;
     g_boxes.clear();
+    g_testFovRadius = 1e6f;
     g_haveCamAxis = true;
     g_garbageCam = 0.f;
     g_toasts = 0;
@@ -396,6 +406,24 @@ int main() {
         p.reset(); t = AimTarget{}; enemy.aim_valid[2] = false; g_boxes = {enemy};
         check(!AimSelectTarget(2460.f, 1080.f, p, t, deg),
               "вплотную: нет кости перед камерой — нет цели");
+
+        // A close enemy can occupy a large part of the view while the chosen
+        // bone is outside a deliberately small normal FOV. Widen only the
+        // point-blank capture cone; the same far target must still respect FOV.
+        resetGame();
+        g_testFovRadius = 30.f;
+        EspBox close{};
+        close.id = 3; close.distance = 1.2f; close.aim_valid[1] = true;
+        close.aim_pts[1][0] = 1480.f; close.aim_pts[1][1] = 540.f;
+        close.aim_yaw[1] = 8.f; close.aim_pitch[1] = 0.f;
+        g_boxes = {close};
+        p.reset(); t = AimTarget{};
+        check(AimSelectTarget(2460.f, 1080.f, p, t, deg) && t.id == close.id,
+              "вблизи: выбранная кость захватывается вне малого обычного FOV");
+        close.distance = 15.f; g_boxes = {close};
+        p.reset(); t = AimTarget{};
+        check(!AimSelectTarget(2460.f, 1080.f, p, t, deg),
+              "вдали: заданный пользователем FOV остаётся строгим");
     }
 
     // A. «Память»: накопитель углов -> камера.
@@ -429,14 +457,11 @@ int main() {
         check(AimMemoryDiag().responded, "ack по накопителю: отклик виден и без оси");
     }
 
-    // L. Жёсткий лок: захват за один-два такта, без перелёта. Память пишет
-    //    АБСОЛЮТНЫЙ угол кости, поэтому камера встаёт на цель первым же
-    //    применением записи — дробного схождения с потолками больше нет.
-    //    Шаг — ПОЛНЫЙ остаток: лок бьёт РОВНО в кость, а не на край мёртвой
-    //    зоны (прежний вычет 0.12° и доля у цели давали видимое отставание —
-    //    жалоба 23.09 «мемори отстаёт от головы»).
-    //    8 кадров оверлея = 0.64 с: в десять раз меньше прежних «2-3 секунды
-    //    маятника» (жалоба 23.09).
+    // L. «Память» пишет абсолютную цель кости, но ограничивает резкий поворот
+    //    скоростью 120°/с. За 8 тактов по 80 мс цель должна быть достигнута
+    //    без перелёта, а максимальный доворот за такт не должен превышать 9.6°.
+    //    Остаток целиком задаёт конечный угол; dead-zone и фильтр подавляют
+    //    только дрожание точки, а не смещают сам setpoint.
     {
         resetGame();
         g_targetYaw = 10.f; g_targetPitch = 5.f;
@@ -446,6 +471,7 @@ int main() {
         check(r.errAfterGame < 0.15f, "лок: прицел РОВНО на кости (< 0.15°)");
         check(r.maxAbsYaw > 9.8f, "лок: не остановился на краю мёртвой зоны");
         check(r.maxAbsYaw < 10.5f, "лок: без перелёта цели (не дальше 0.5° за неё)");
+        check(r.maxTurnYaw <= 9.7f, "память: крупный шаг плавно ограничен скоростью");
         check(r.signFlips <= 1, "лок: подход монотонный, маятника нет");
     }
 

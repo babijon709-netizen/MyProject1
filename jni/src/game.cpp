@@ -6646,18 +6646,17 @@ static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, b
     return false;
 }
 
-// Каким источником пользуются углы цели (aim_angles_for): 3-D (ось выстрела
-// или поза камеры) или пиксельным (обратное проецирование экранной точки —
-// базис матрицы вида). Гистерезис переключения живёт в aim_angles_for; флаг
-// вынесен сюда, чтобы мемори-аим брал для жёсткого лока базу углов ровно из
-// того же источника, которым посчитан остаток (иначе абсолютная запись
-// смещала бы камеру на расхождение источников — до 4° в полосе гистерезиса).
+// Каким источником пользуются углы цели (aim_angles_for): живой LookDirection
+// выстрела, поза камеры или пиксельная проекция. Когда LookDirection доступен,
+// это фактический луч FPHitscan — его не заменяем экранной оценкой даже при
+// визуальном расхождении: иначе аим переставал компенсировать отдачу именно
+// тогда, когда камера и луч расходятся. Флаг нужен памяти, чтобы абсолютная
+// запись использовала ту же базу, от которой измерен остаток.
 static bool g_aim_pix_basis = false;
 
-// Угол до точки по её экранному положению — ровно по тому проецированию,
-// которым нарисована точка (и бокс). Этим же путём углы считались до того,
-// как заработал «живой» трансформ камеры; он остаётся основным, потому что
-// не зависит ни от позы камеры, ни от оси выстрела.
+// Угол до точки по её экранному положению — обратное проецирование того же
+// кадра, которым нарисована точка и бокс. Это запасной путь, когда живого луча
+// или позы камеры нет либо их чтение не прошло проверку.
 static float wrap_deg_180(float d) {
     while (d > 180.0F) d -= 360.0F;
     while (d < -180.0F) d += 360.0F;
@@ -6678,94 +6677,87 @@ static bool angles_from_screen(const Vec2& screen, float sw, float sh, float& ya
     return std::isfinite(yaw_deg) && std::isfinite(pitch_deg);
 }
 
-// Angular offset of a world point from the camera axis. Prefers the live
-// camera pose; falls back to inverting the projection from the screen point,
-// so aim angles never depend on the transform-pose path succeeding.
+// Angular offset of a world point from the actual firing ray. The camera pose
+// and the current-frame screen projection are fallbacks when that ray cannot be
+// read; the screen is not allowed to replace a valid hitscan direction, because
+// the difference can be recoil rather than a bad measurement.
 bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, float sh, float& yaw_deg, float& pitch_deg) {
     constexpr float rad2deg = 57.29577951F;
-    // Углы обязаны быть посчитаны от той же камеры, по которой точка
-    // нарисована на экране. Иначе аим гонится за точкой, смещённой на угол
-    // между источниками, и ходит маятником: боксы строятся матрицей камеры, а
-    // углы считались от оси выстрела (или от «живой» позы трансформа) — это
-    // разные направления, расхождение плавает от кадра к кадру. Поэтому
-    // сначала считаем угол по пикселю (то же проецирование, что у бокса), и
-    // только если 3-D-путь с ним согласен — берём 3-D.
     float pix_yaw = 0.f, pix_pitch = 0.f;
     const bool have_pix = angles_from_screen(screen, sw, sh, pix_yaw, pix_pitch);
-    if (g_cam_pose_valid || g_aim_ref_valid) {
-        // Prefer the real firing reference (look root direction from the eye
-        // point); the camera pose is the fallback.
-        const bool use_ref = g_aim_ref_valid;
-        const Vec3& origin = use_ref ? g_aim_ref_origin : g_cam_pos;
-        const Vec3& fwd = use_ref ? g_aim_ref_forward : g_cam_forward;
-        const Vec3& right = use_ref ? g_aim_ref_right : g_cam_right;
-        const Vec3& up = use_ref ? g_aim_ref_up : g_cam_up;
-        Vec3 d = {world.x - origin.x, world.y - origin.y, world.z - origin.z};
-        float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
-        float rx = d.x * right.x + d.y * right.y + d.z * right.z;
-        float ux = d.x * up.x + d.y * up.y + d.z * up.z;
+
+    // LookDirection is the direction FPHitscan actually fires along. Compute
+    // the bone error against that live ray unconditionally when it is valid:
+    // camera kick/recoil then appears as a real error and the controller
+    // counter-steers it. Switching to screen-space on a large disagreement
+    // would instead make the correction disappear at the worst moment.
+    if (g_aim_ref_valid) {
+        const Vec3 d = {world.x - g_aim_ref_origin.x,
+                        world.y - g_aim_ref_origin.y,
+                        world.z - g_aim_ref_origin.z};
+        const float fx = d.x * g_aim_ref_forward.x + d.y * g_aim_ref_forward.y + d.z * g_aim_ref_forward.z;
+        const float rx = d.x * g_aim_ref_right.x   + d.y * g_aim_ref_right.y   + d.z * g_aim_ref_right.z;
+        const float ux = d.x * g_aim_ref_up.x      + d.y * g_aim_ref_up.y      + d.z * g_aim_ref_up.z;
         if (std::isfinite(fx) && std::isfinite(rx) && std::isfinite(ux) && fx > 0.05F) {
-            yaw_deg = atan2f(rx, fx) * rad2deg;
-            pitch_deg = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
-            if (std::isfinite(yaw_deg) && std::isfinite(pitch_deg)) {
-                // Согласен с нарисованным — годится. Не согласен (источники
-                // разошлись) — берём пиксельный угол: он по построению совпадает
-                // с тем, что видит игрок.
-                if (!have_pix) return true;
-                const float dYaw = fabsf(wrap_deg_180(yaw_deg - pix_yaw));
-                const float dPitch = fabsf(pitch_deg - pix_pitch);
-                // ГИСТЕРЕЗИС, а не один порог (было «<= 2.5° — ось, иначе
-                // экран», жалоба 23.09 «мемори аим ходит как маятник первые
-                // 2-3 секунды и тач аим тоже»). Пока камера ведётся к цели,
-                // ось выстрела и матрица вида расходятся на 2-4° (у оси нет
-                // визуального отклонения камеры, у матрицы есть), и расхождение
-                // плавает вокруг порога: источник углов меняется каждый такт,
-                // а ошибка прыгает на величину расхождения — прицел ходит
-                // туда-сюда ровно столько, сколько длится разворот. Поэтому
-                // переключение через широкую полосу: на экран уходим при
-                // расхождении больше 4°, обратно к оси — меньше 1.5°, между —
-                // держимся прежнего источника.
+            const float shot_yaw = atan2f(rx, fx) * rad2deg;
+            const float shot_pitch = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
+            if (std::isfinite(shot_yaw) && std::isfinite(shot_pitch)) {
+                yaw_deg = shot_yaw;
+                pitch_deg = shot_pitch;
+                g_aim_pix_basis = false;
+                return true;
+            }
+        }
+    }
+
+    // If the actual shot ray is unavailable, use a checked camera pose. Keep
+    // the existing hysteresis against its screen projection: this fallback
+    // avoids frame-to-frame source flipping when the two camera reads drift.
+    if (g_cam_pose_valid) {
+        const Vec3 d = {world.x - g_cam_pos.x, world.y - g_cam_pos.y, world.z - g_cam_pos.z};
+        const float fx = d.x * g_cam_forward.x + d.y * g_cam_forward.y + d.z * g_cam_forward.z;
+        const float rx = d.x * g_cam_right.x   + d.y * g_cam_right.y   + d.z * g_cam_right.z;
+        const float ux = d.x * g_cam_up.x      + d.y * g_cam_up.y      + d.z * g_cam_up.z;
+        if (std::isfinite(fx) && std::isfinite(rx) && std::isfinite(ux) && fx > 0.05F) {
+            const float pose_yaw = atan2f(rx, fx) * rad2deg;
+            const float pose_pitch = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
+            if (std::isfinite(pose_yaw) && std::isfinite(pose_pitch)) {
+                if (!have_pix) {
+                    yaw_deg = pose_yaw; pitch_deg = pose_pitch;
+                    g_aim_pix_basis = false;
+                    return true;
+                }
+                const float dYaw = fabsf(wrap_deg_180(pose_yaw - pix_yaw));
+                const float dPitch = fabsf(pose_pitch - pix_pitch);
                 const float d = dYaw + dPitch;
                 if (!g_aim_pix_basis) {
-                    if (d <= 4.0F) return true;
+                    if (d <= 4.0F) {
+                        yaw_deg = pose_yaw; pitch_deg = pose_pitch;
+                        return true;
+                    }
                     g_aim_pix_basis = true;
                     static double s_last = -1e9;
                     const double now = memio::now_seconds();
                     if (now - s_last >= 5.0) {
                         s_last = now;
-                        LogLine("аим: углы разошлись с экраном на %.1f/%.1f° — считаю по экрану",
+                        LogLine("аим: поза камеры разошлась с экраном на %.1f/%.1f° — запасной расчёт по экрану",
                                 (double)dYaw, (double)dPitch);
                     }
                 } else if (d <= 1.5F) {
                     g_aim_pix_basis = false;
+                    yaw_deg = pose_yaw; pitch_deg = pose_pitch;
                     return true;
                 }
-                yaw_deg = pix_yaw; pitch_deg = pix_pitch;
-                return true;
             }
         }
     }
-    if (have_pix) { yaw_deg = pix_yaw; pitch_deg = pix_pitch; return true; }
+
+    if (have_pix) {
+        yaw_deg = pix_yaw; pitch_deg = pix_pitch;
+        g_aim_pix_basis = true;
+        return true;
+    }
     return false;
-}
-
-// Vertical offset of the head aim point (metres, world up). Раньше здесь было
-// +10/+4 см: точка прицела уходила ВЫШЕ головы, и на近距离 это давало промах
-// поверх макушки, а на средней — «прицел стоит на лбу, а не на голове». По
-// просьбе (19.09) смещение выключено совсем: цель — ровно кость головы. Обе
-// величины оставлены на месте и названы своими именами, чтобы вернуть подъём
-// было одной правкой константы.
-static constexpr float g_aim_head_lift = 0.0F;       // вдали
-static constexpr float g_aim_head_lift_near = 0.0F;  // вблизи
-
-static float head_lift_for_range(const Vec3& world) {
-    if (!g_cam_pose_valid) return g_aim_head_lift;
-    float dx = world.x - g_cam_pos.x, dy = world.y - g_cam_pos.y, dz = world.z - g_cam_pos.z;
-    float range = sqrtf(dx * dx + dy * dy + dz * dz);
-    if (!std::isfinite(range)) return g_aim_head_lift;
-    float t = (range - 8.0F) / 30.0F;          // full offset from ~38 m out
-    if (t < 0.0F) t = 0.0F; else if (t > 1.0F) t = 1.0F;
-    return g_aim_head_lift_near + (g_aim_head_lift - g_aim_head_lift_near) * t;
 }
 
 // Where the target will be by the time the finger move we are about to send
@@ -6789,21 +6781,11 @@ static constexpr float kAimLeadSeconds = 0.0F;
 static Vec3 g_aim_lead{};
 
 static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat4& vp, float sw, float sh) {
+    // Keep the selected point on its real world-space bone. No guessed range
+    // drop or per-distance vertical shift: touch and memory aim share this exact
+    // point, while their feedback uses the live firing ray to counter recoil.
     Vec3 world = world_in;
     world.x += g_aim_lead.x; world.y += g_aim_lead.y; world.z += g_aim_lead.z;
-    if (slot == 0) world.y += head_lift_for_range(world_in);
-    // На дали пуля садится ниже кости: каждые 20 м — 5 см вниз (тач и память
-    // берут одну и ту же точку). Слот любой: голова/шея/тело одинаково.
-    {
-        Vec3 origin = g_cam_pose_valid ? g_cam_pos : g_aim_ref_origin;
-        const bool have = g_cam_pose_valid || g_aim_ref_valid;
-        if (have) {
-            float dx = world_in.x - origin.x, dy = world_in.y - origin.y, dz = world_in.z - origin.z;
-            float range = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (std::isfinite(range) && range > 0.f)
-                world.y -= 0.05F * (range / 20.0F);
-        }
-    }
     Vec2 screen{};
     if (!w2s(vp, world, sw, sh, screen, false)) return false;
     if (fabsf(screen.x) > sw * 4.0F || fabsf(screen.y) > sh * 4.0F) return false;
@@ -6951,12 +6933,9 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         box.bone_valid[bone] = true;
         ++projected;
     }
-    // Aim points: exact bone world positions -> screen + angular offsets.
-    //   [0] head  : skull centre. The Head joint sits at the base of the skull,
-    //               the head hitbox extends ~20 cm above it. Aim ~11 cm up the
-    //               neck axis, plus a small distance-dependent lift so that at
-    //               long range the shot lands inside the skull rather than at
-    //               its lower edge (steering/animation error grows with range).
+    // Aim points: unshifted world-space points from the selected rig bones.
+    //   [0] head  : Head joint (later replaced by the matching head hit volume
+    //               when that exact volume is readable).
     //   [1] neck  : between the Neck and Head joints.
     //   [2] chest : upper spine.
     {
@@ -7534,24 +7513,17 @@ bool esp_aim_camera_angles(float& yaw_deg, float& pitch_deg) {
     return angles_from_forward(ok_ref ? g_aim_ref_forward : g_cam_forward, yaw_deg, pitch_deg);
 }
 
-// Углы той камеры, ОТ КОТОРОЙ посчитаны углы цели (aim_angles_for). Мемори-аим
-// пишет в накопитель АБСОЛЮТНЫЙ угол кости (база + остаток) и база обязана
-// совпадать с источником остатка: возьмёт другую камеру — и жёсткий лок встанет
-// не на кость, а на расхождение между источниками (до 4° в полосе гистерезиса,
-// а без него источник прыгал каждый кадр — тот самый маятник). Поэтому:
-//   * углы цели считаются по 3-D (ось/поза) — берём ту же ось/позу;
-//   * углы цели ушли на пиксельный расчёт (расхождение > 4° или 3-D нет) —
-//     берём базис матрицы вида: ровно ту камеру, которой нарисован бокс.
-// Отдача назад (ни одного источника) на практике невозможна: без матрицы вида
-// не строится сам бокс, — но проверена и она.
+// База для абсолютной записи «Память» должна совпадать с источником ошибки.
+// Живой LookDirection — фактический луч FPHitscan и имеет приоритет даже при
+// отличии от картинки: разница включает отдачу, которую локу нужно погасить.
+// Только если луч не прочитан, используем ту же позу/экранную базу, что и
+// aim_angles_for().
 bool esp_aim_projection_basis(float& yaw_deg, float& pitch_deg) {
-    if (!g_aim_pix_basis) {
-        const bool ok_ref  = g_aim_ref_valid  && farm_cam_source_ok(g_aim_ref_origin);
-        const bool ok_pose = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
-        if (ok_ref || ok_pose)
-            return angles_from_forward(ok_ref ? g_aim_ref_forward : g_cam_forward,
-                                       yaw_deg, pitch_deg);
-    }
+    const bool ok_ref = g_aim_ref_valid && farm_cam_source_ok(g_aim_ref_origin);
+    if (ok_ref)
+        return angles_from_forward(g_aim_ref_forward, yaw_deg, pitch_deg);
+    if (!g_aim_pix_basis && g_cam_pose_valid && farm_cam_source_ok(g_cam_pos))
+        return angles_from_forward(g_cam_forward, yaw_deg, pitch_deg);
     if (g_frame_cam_basis_valid && farm_cam_source_ok(g_frame_cam_pos))
         return angles_from_forward(g_frame_cam_fwd, yaw_deg, pitch_deg);
     return false;

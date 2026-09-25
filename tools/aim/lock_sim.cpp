@@ -17,11 +17,10 @@
 //       обнуление висящего заказа при перескоке остатка через ноль и
 //       таймаут «потерялся» 1.0 с (перекрывает худшую задержку трубы).
 //
-//  ПАМЯТЬ: жёсткий лок АБСОЛЮТНЫМ углом кости, шаг — ВСЕГДА полный остаток
-//       (без вычета мёртвой зоны и без долей). Дрожь кости отсекает пара
-//       фильтров: мёртвая зона и порог УСТОЙЧИВОГО однонаправленного дрейфа
-//       в полосе у цели (дрожь знак чередует и порог не набирает, настоящее
-//       движение знак держит и проходит целиком).
+//  ПАМЯТЬ: абсолютная цель — фактический угол кости, полный остаток без
+//       долей, но крупный поворот ограничен скоростью 120°/с. Дрожь кости
+//       отсекает пара фильтров: мёртвая зона и порог УСТОЙЧИВОГО
+//       однонаправленного дрейфа в полосе у цели.
 //
 // Запись в накопитель идемпотентна: сколько раз её ни повтори, камера придёт
 // в одну и ту же точку, поэтому граница фаз (запись видна через такт)
@@ -43,6 +42,7 @@ struct Plant {
     int   overF   = 5;      // кадров игры на такт оверлея (5 -> ~12 fps)
     float target0 = 30.f;   // ошибка в момент захвата, град
     float targetV = 0.f;    // цель движется, град/с
+    float rangeM  = 25.f;   // дистанция до цели, влияет на ширину close-jitter band
     float jitter  = 0.f;    // дрожь кости, град (амплитуда, знак чередуется)
     float jitStart = 0.f;   // дрожь включается с этой секунды (после сходимости)
     int   nBoxes  = 5;      // боксов на экране: >= 3 — поток камеры виден
@@ -216,7 +216,8 @@ static Res runTouch(const Plant& p, TouchCtrl c, float dead) {
         if (c.mode >= 1) eff = err - pendDeg;
         if (c.mode >= 2 && err * eff < 0.f) { prevStep = 0.f; continue; } // защита знака
         if (std::fabs(eff) < dead) { c.streak = 0; prevStep = 0.f; continue; }
-        if (c.mode == 6 && std::fabs(eff) < c.jitterBand) {
+        const float jitterBand = (p.rangeM > 0.f && p.rangeM < 2.5f) ? 1.2f : c.jitterBand;
+        if (c.mode == 6 && std::fabs(eff) < jitterBand) {
             // Полоса дрожи: шаг только при устойчивом однонаправленном остатке.
             const int sg = (eff > 0.f) ? 1 : -1;
             c.streak = (c.streak * sg > 0) ? c.streak + sg : sg;
@@ -281,14 +282,15 @@ static Res runTouch(const Plant& p, TouchCtrl c, float dead) {
 struct MemCtrl {
     // mode 0 — старый код: доля остатка 0.5, потолок 2->12 с рампой 0.6 с,
     //          окно «последний приказ» 0.10 с, гаситель 0.85;
-    // mode 1 — ЖЁСТКИЙ ЛОК (текущий код): пишется абсолютный угол кости,
-    //          шаг — ВСЕГДА полный остаток (без вычета мёртвой зоны и без
-    //          долей). Дрожь отсекает полоса у цели: внутри неё полный шаг
-    //          выдаётся только при устойчивом однонаправленном дрейфе
-    //          (дрожь знак чередует и порог не набирает).
+    // mode 1 — текущая «Память»: абсолютная цель кости, полный остаток
+    //          (без вычета мёртвой зоны и без долей), с ограничением шага
+    //          120°/с. Дрожь отсекает полоса у цели: внутри неё полный шаг
+    //          выдаётся только при устойчивом однонаправленном дрейфе.
     int   mode = 1;
     float dead = 0.12f;
     float tau  = 0.030f;
+    float turnRateDegPerSec = 120.f;
+    float maxTurnDeg = 12.f;
     float jitterBand = 0.45f;   // полоса «дрожь кости», град
     int   driftStreak = 3;      // однонаправленных тактов для полного шага в полосе
 };
@@ -339,13 +341,10 @@ static Res runMem(const Plant& p, MemCtrl c, float* trace = nullptr, int traceN 
         ++tick;
 
         if (c.mode == 1) {
-            // ---- жёсткий лок абсолютным углом (полный шаг + порог дрейфа) ----
-            // Цель пишется СРАЗУ по текущему остатку (без сглаживания: фильтр
-            // тащил бы в запись запаздывающий «момент» и давал перелёт на
-            // быстром оверлее). Шаг — полный остаток: лок бьёт ровно в кость
-            // (вычет мёртвой зоны и доля у цели давали отставание от идущей
-            // кости). Дрожь отсекает пара фильтров: мёртвая зона и порог
-            // устойчивого однонаправленного дрейфа в полосе у цели.
+            // ---- абсолютная цель + ограничение скорости ----------------------
+            // Полный остаток задаёт конечный угол; slew-limit только растягивает
+            // большой разворот во времени, а повторные абсолютные записи не
+            // складываются на задержке применения.
             if (std::fabs(errRaw) < c.dead) { streak = 0; prevStep = 0.f; continue; }
             float off;
             if (std::fabs(errRaw) >= c.jitterBand) {
@@ -357,10 +356,13 @@ static Res runMem(const Plant& p, MemCtrl c, float* trace = nullptr, int traceN 
                 else { prevStep = 0.f; continue; }     // дрожь — стоим
             }
             const float absTarget = accVisible + off;
-            const float step = absTarget - acc;
+            const float maxTurn = std::fmin(c.turnRateDegPerSec * tickDt, c.maxTurnDeg);
+            float step = absTarget - acc;
+            if (step > maxTurn) step = maxTurn;
+            if (step < -maxTurn) step = -maxTurn;
             if (prevStep * step < 0.f && t < 3.f && std::fabs(step) > c.dead) ++r.flips;
             prevStep = step;
-            setv[f + 1] = absTarget;                   // игра применит след. кадром
+            setv[f + 1] = acc + step;                  // игра применит след. кадром
             if (t >= p.jitStart && std::fabs(step) > r.jitCam) r.jitCam = std::fabs(step);
             continue;
         }
@@ -523,18 +525,19 @@ int main() {
 
     // Close-range bone jitter is measured in degrees, not screen pixels.
     // Verify the production dead-zone and final-step helpers separately from
-    // the existing long-range/latency scenarios above.
+    // the existing long-range/latency scenarios above; close tolerance must no
+    // longer swallow a one-degree residual.
     {
         const float far = AimTouchDeadDeg(0.0556f, 30.f, 0.1f);
         const float close = AimTouchDeadDeg(0.0556f, 0.8f, 0.1f);
         const float closeStep = AimTouchFinalGridStep(0.28f, 0.1f, 0.1f, 1.f, 0.2f, 1.3f);
         const float farStep = AimTouchFinalGridStep(1.0f, 0.1f, 0.1f, 1.f, 0.2f, 1.3f);
-        Plant p; p.target0 = 8.f; p.jitter = 0.7f; p.jitStart = 1.5f;
+        Plant p; p.target0 = 8.f; p.rangeM = 0.8f; p.jitter = 0.7f; p.jitStart = 1.5f;
         TouchCtrl c;
         const Res r = runTouch(p, c, close);
         printf("\nТАЧ вплотную: дальняя зона %.2f°, ближняя %.2f°, шаг %.1f квант, реверсов %d\n",
                far, close, closeStep, r.flips);
-        if (!(far <= 0.21f && close >= 1.0f && close <= 1.2f &&
+        if (!(far <= 0.21f && close > far && close <= 0.31f &&
               closeStep == 1.f && farStep == 1.3f && r.flips <= 1)) return 1;
     }
 
@@ -551,7 +554,7 @@ int main() {
             printf("текущий (доля+потолок)     %-9.2f %-9.2f %-8.2f %-7d %s  (%dк/%dк)\n",
                    r0.lock05, r0.settle, r0.maxOvershoot, r0.flips,
                    r0.settled3s ? "да" : "НЕТ", overF, visF);
-            printf("жёсткий лок (полный шаг)   %-9.2f %-9.2f %-8.2f %-7d %s  (%dк/%dк)\n",
+            printf("абсолютная цель + slew     %-9.2f %-9.2f %-8.2f %-7d %s  (%dк/%dк)\n",
                    r1.lock05, r1.settle, r1.maxOvershoot, r1.flips,
                    r1.settled3s ? "да" : "НЕТ", overF, visF);
         }
