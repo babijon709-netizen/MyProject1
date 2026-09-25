@@ -43,15 +43,15 @@ echo "Testing object-data weapon controller"
 _run_suite "weapon tests" "${ROOT}/tools/weapons/run.sh"
 
 # Экспериментальный внутрипроцессный модуль подбора: отдельная библиотека, в
-# xvcen она не попадает. Ошибка её сборки НЕ ломает обычную сборку — печатается
+# benzware она не попадает. Ошибка её сборки НЕ ломает обычную сборку — печатается
 # предупреждение (в CI по логу видно, собрался ли модуль под текущий NDK).
 _loot_log="$(mktemp)"
 if sh "${ROOT}/tools/loot_module/build_android.sh" >"${_loot_log}" 2>&1; then
-    echo "experimental loot module built (separate library, not part of xvcen)"
-    echo "::notice title=experimental loot module::compiled under the current NDK (not part of xvcen)"
+    echo "experimental loot module built (separate library, not part of benzware)"
+    echo "::notice title=experimental loot module::compiled under the current NDK (not part of benzware)"
 else
-    echo "experimental loot module did not build; xvcen is unaffected" >&2
-    echo "::warning title=experimental loot module::build failed; xvcen is unaffected"
+    echo "experimental loot module did not build; benzware is unaffected" >&2
+    echo "::warning title=experimental loot module::build failed; benzware is unaffected"
     grep -E "error:|fatal error:|undefined reference" "${_loot_log}" | head -8 | cut -c1-180 | while IFS= read -r _line; do
         echo "::warning title=experimental loot module::${_line}"
     done
@@ -85,34 +85,46 @@ if [[ "${status}" -ne 0 ]]; then
     exit "${status}"
 fi
 
-# xvcen переименовываем в реальный xvcen.bin, а xvcen.sh делаем умной оболочкой:
-# если запустить без аргументов (или с аргументами чита) — запускает сам чит xvcen.bin;
-# если вызвать «./xvcen.sh dump [пакет] [каталог]» — распаковывает и запускает benzhack_dump.
-# Сам артефакт в CI загружает libs/arm64-v8a/xvcen.sh, так что пользователь
-# скачивает один привычный xvcen.sh и получает и чит, и дампер в одном файле!
-if [[ -f "${ROOT}/libs/arm64-v8a/xvcen" ]]; then
-    mv -f "${ROOT}/libs/arm64-v8a/xvcen" "${ROOT}/libs/arm64-v8a/xvcen.bin"
+# benzware переименовываем в реальный benzware.bin, а benzware.sh делаем умной оболочкой:
+# если запустить без аргументов (или с аргументами чита) — запускает сам чит benzware.bin;
+# если вызвать «./benzware.sh dump [пакет] [каталог]» — распаковывает и запускает benzhack_dump.
+# Сам артефакт в CI загружает libs/arm64-v8a/benzware.sh, так что пользователь
+# скачивает один привычный benzware.sh и получает и чит, и дампер в одном файле!
+if [[ -f "${ROOT}/libs/arm64-v8a/benzware" ]]; then
+    mv -f "${ROOT}/libs/arm64-v8a/benzware" "${ROOT}/libs/arm64-v8a/benzware.bin"
 fi
 
-if [[ -f "${ROOT}/libs/arm64-v8a/xvcen.bin" && -f "${ROOT}/libs/arm64-v8a/benzhack_dump" ]]; then
+# Самопроверка целостности: вшиваем CRC32 в benzware.bin ДО упаковки в payload
+# (рантайм-проверка — license.cpp/SelfCheck; инструмент — tools/protect/patch_crc.py).
+# патчить, значит, надо каждый раз после пересборки бинаря — отсюда и шаг в build.sh.
+# Пропустить: NOCRC=1 ./build.sh
+if [[ "${NOCRC:-0}" != "1" && -f "${ROOT}/libs/arm64-v8a/benzware.bin" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "${ROOT}/tools/protect/patch_crc.py" "${ROOT}/libs/arm64-v8a/benzware.bin"
+    else
+        echo "python3 не найден — бинарь остался без CRC-патча, самопроверка отключится" >&2
+    fi
+fi
+
+if [[ -f "${ROOT}/libs/arm64-v8a/benzware.bin" && -f "${ROOT}/libs/arm64-v8a/benzhack_dump" ]]; then
     _payload="$(mktemp)"
-    tar -czf "${_payload}" -C "${ROOT}/libs/arm64-v8a" xvcen.bin benzhack_dump
-    cat > "${ROOT}/libs/arm64-v8a/xvcen.sh" << 'SH_EOF'
+    tar -czf "${_payload}" -C "${ROOT}/libs/arm64-v8a" benzware.bin benzhack_dump
+    cat > "${ROOT}/libs/arm64-v8a/benzware.sh" << 'SH_EOF'
 #!/bin/sh
 # Двухцелевой загрузчик: и чит, и дампер памяти.
-#   ./xvcen.sh              -> запускает чит
-#   ./xvcen.sh dump [пакет] -> запускает съёмщик памяти игры
+#   ./benzware.sh              -> запускает чит
+#   ./benzware.sh dump [пакет] -> запускает съёмщик памяти игры
 set -e
 # Бинарники нужны лишь на время запуска; постоянную .benzhack_bin не создаём.
 # Случайное имя и приватные права не позволяют переиспользовать чужие файлы.
 umask 077
-DIR=$(mktemp -d "${TMPDIR:-/data/local/tmp}/xvcen.XXXXXXXX")
+DIR=$(mktemp -d "${TMPDIR:-/data/local/tmp}/benzware.XXXXXXXX")
 trap 'rm -rf "$DIR"' 0
 
 # Распаковываем встроенные бинарники, если их ещё нет или этот скрипт новее
 PAYLOAD_LINE=$(awk '/^__PAYLOAD_BELOW__/ {print NR + 1; exit 0; }' "$0")
 tail -n +"$PAYLOAD_LINE" "$0" | tar -xzf - -C "$DIR"
-chmod 755 "$DIR/xvcen.bin" "$DIR/benzhack_dump" 2>/dev/null || true
+chmod 755 "$DIR/benzware.bin" "$DIR/benzhack_dump" 2>/dev/null || true
 
 if [ "$1" = "dump" ]; then
     shift
@@ -120,18 +132,18 @@ if [ "$1" = "dump" ]; then
     exit $?
 fi
 
-"$DIR/xvcen.bin" "$@"
+"$DIR/benzware.bin" "$@"
 exit $?
 __PAYLOAD_BELOW__
 SH_EOF
-    cat "${_payload}" >> "${ROOT}/libs/arm64-v8a/xvcen.sh"
-    chmod +x "${ROOT}/libs/arm64-v8a/xvcen.sh"
+    cat "${_payload}" >> "${ROOT}/libs/arm64-v8a/benzware.sh"
+    chmod +x "${ROOT}/libs/arm64-v8a/benzware.sh"
     rm -f "${_payload}"
-elif [[ -f "${ROOT}/libs/arm64-v8a/xvcen.bin" ]]; then
-    cp -f "${ROOT}/libs/arm64-v8a/xvcen.bin" "${ROOT}/libs/arm64-v8a/xvcen.sh"
+elif [[ -f "${ROOT}/libs/arm64-v8a/benzware.bin" ]]; then
+    cp -f "${ROOT}/libs/arm64-v8a/benzware.bin" "${ROOT}/libs/arm64-v8a/benzware.sh"
 fi
 
-test -f "${ROOT}/libs/arm64-v8a/xvcen.sh"
+test -f "${ROOT}/libs/arm64-v8a/benzware.sh"
 
 # Переводы РУ/EN: строка меню без перевода в английском меню просто остаётся
 # русской — на устройстве это видно, а в сборке нет. Проверка сверяет таблицы с
@@ -143,9 +155,9 @@ else
 fi
 # Вес бинарника — виден прямо в логе сборки (в нём кадры аватарки ~300 КБ,
 # см. tools/video/gen_avatar.py; ролик целиком в бинарник не вшивается).
-ls -la "${ROOT}/libs/arm64-v8a/xvcen.sh"
-du -h "${ROOT}/libs/arm64-v8a/xvcen.sh"
-echo "built ${ROOT}/libs/arm64-v8a/xvcen.sh"
+ls -la "${ROOT}/libs/arm64-v8a/benzware.sh"
+du -h "${ROOT}/libs/arm64-v8a/benzware.sh"
+echo "built ${ROOT}/libs/arm64-v8a/benzware.sh"
 
 if [[ -f "${ROOT}/libs/arm64-v8a/benzhack_dump" ]]; then
     ls -la "${ROOT}/libs/arm64-v8a/benzhack_dump"

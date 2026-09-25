@@ -14,6 +14,7 @@
 #include "logfile.h"
 #include "theme.h"
 #include "app_state.h"
+#include "license.h"
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -22,9 +23,11 @@
 #include <sys/stat.h>
 #include <thread>
 
-// Хук инициализации (пустая заглушка — точка расширения).
+// Защита: лицензия + удалённое отключение (server/server.js, PROTECTION.md).
+// Gate блокирует запуск до валидного ответа сервера (или grace-кэша) и
+// запускает heartbeat; die/kill дальше живут внутри license.cpp.
 namespace prot {
-static void Init() {}
+static void Init() { license::Gate(); }
 }
 
 float g_sw = 1920.f;
@@ -86,6 +89,7 @@ int main(int argc, char* argv[]) {
     g_menuFadeIn = 0.f;
 
     while (main_thread_flag) {
+        if (license::Dead()) break;   // сервер отдал kill/ban/expired — сворачиваемся
         g_frame_done.store(false);
         drawBegin();
         esp_mem_frame_begin();   // кэш чтений памяти игры сбрасывается каждый кадр

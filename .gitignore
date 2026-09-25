@@ -10,3 +10,7 @@ beta/
 
 release
 beta
+
+# база лицензий сервера — живёт только на сервере, в гит не идёт
+server/db.json
+server/db.json.tmp

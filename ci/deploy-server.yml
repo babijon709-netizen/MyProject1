@@ -1,0 +1,91 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  ЭТО ШАБЛОН ДЛЯ РУЧНОГО СОЗДАНИЯ. Положи его как
+#  .github/workflows/deploy-server.yml (GitHub web → Add file → Create new file
+#  → вставь всё после блока комментариев → Commit в main1).
+#  После этого появится кнопка: Actions → «Deploy license server (Fly.io)».
+# ═══════════════════════════════════════════════════════════════════════════
+name: Deploy license server (Fly.io)
+
+# Деплой лицензионного сервера на Fly.io — запускается ВРУЧНУЮ кнопкой
+# (Actions → Deploy license server → Run workflow). Удобно с телефона.
+#
+# Нужные секреты (Settings → Secrets and variables → Actions):
+#   FLY_API_TOKEN — org-токен (flyctl tokens create org, см. чат/PROTECTION.md)
+#   BZW_SECRET    — секрет подписи (тот же подставляется в бинарь в build.yml)
+#   BZW_ADMIN     — пароль для админ-команд (/admin/*)
+#   BZW_HOST      — необязателен; хост приложения, если имя по умолчанию меняли
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Имя приложения на fly.io (уникальное на весь fly.io)'
+        required: true
+        default: 'benzware-license-server'
+      region:
+        description: 'Регион (ams — Амстердам)'
+        required: true
+        default: 'ams'
+
+env:
+  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+concurrency:
+  group: deploy-license-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy benzware-license
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Check secrets
+        env:
+          S: ${{ secrets.BZW_SECRET }}
+          A: ${{ secrets.BZW_ADMIN }}
+        run: |
+          [ -n "${FLY_API_TOKEN:-}" ] || { echo "::error::нет секрета FLY_API_TOKEN — в Termux: pkg install flyctl; fly auth login; fly tokens create org -n github-ci; добавь вывод в Settings → Secrets"; exit 1; }
+          [ -n "${S:-}" ] || { echo "::error::нет секрета BZW_SECRET — придумай длинную случайную строку, добавь в Settings → Secrets"; exit 1; }
+          [ -n "${A:-}" ] || { echo "::error::нет секрета BZW_ADMIN — пароль для админ-команд, добавь в Settings → Secrets"; exit 1; }
+          echo "secrets: OK"
+        shell: bash
+
+      - name: Deploy to Fly.io
+        working-directory: server
+        env:
+          FLY_APP: ${{ github.event.inputs.app_name }}
+          FLY_REGION: ${{ github.event.inputs.region }}
+          S: ${{ secrets.BZW_SECRET }}
+          A: ${{ secrets.BZW_ADMIN }}
+        run: |
+          set -euo pipefail
+          sed -i "s/^app = .*/app = \"$FLY_APP\"/" fly.toml
+
+          echo "== create app (идемпотентно) =="
+          flyctl apps create "$FLY_APP" --org personal || flyctl apps create "$FLY_APP" || true
+
+          echo "== secrets (машин ещё нет — просто сохранятся) =="
+          flyctl secrets set SECRET="$S" ADMIN_SECRET="$A" -a "$FLY_APP"
+
+          echo "== volume под db.json (идемпотентно) =="
+          if ! flyctl volumes list -a "$FLY_APP" | grep -q xvc_data; then
+            flyctl volumes create xvc_data --region "$FLY_REGION" --size 1 -a "$FLY_APP" --yes
+          fi
+
+          echo "== deploy =="
+          flyctl deploy -a "$FLY_APP" --remote-only
+
+          echo "::notice title=Лиценсервер поднят::https://$FLY_APP.fly.dev"
+          sleep 5
+          echo "== smoke-test =="
+          curl -sf --max-time 20 "http://$FLY_APP.fly.dev/api/ping" | tee /dev/stderr
+          echo
+          echo "Готово: http://$FLY_APP.fly.dev"
+        shell: bash
