@@ -69,9 +69,14 @@ class Writer {
                 }
                 pid = command_.pid; session = session_;
             }
-            // Mutex spans validation+write: clear/shutdown cannot race a
-            // copied command. Only a handful of uncached pread calls here.
-            const Result result = tick(mem, command_);
+            // Copy command and unlock while performing IO: clear/publish/stats
+            // in the UI thread never block on uncached pread/pwrite calls.
+            const Command local_cmd = command_;
+            const uint64_t local_session = session_;
+            lock.unlock();
+            const Result result = tick(mem, local_cmd);
+            lock.lock();
+            if (stopping_ || session_ != local_session) continue;
             stats_.axis = result == Result::written;
             if (result == Result::written) ++stats_.writes;
             else {

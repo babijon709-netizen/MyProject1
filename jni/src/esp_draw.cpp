@@ -39,7 +39,7 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         // касания, и в режиме «память» при выключенном скелете в ESP кости не
         // читались вовсе — тогда аим уходил на запасной расчёт по росту, а
         // признак смерти по позе вообще нечем было мерить.
-        esp_set_aim_bones_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
+        esp_set_aim_bones_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY || g_state.aim_mode == AIM_MODE_SILENT);
         esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
                                 g_state.esp_loot, g_state.esp_pickup,
                                 g_state.esp_vehicles, g_state.esp_bots,
@@ -48,7 +48,7 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
                                   g_state.esp_ore_sulfur);
         // Аим по ботам — тем же условием, что кости для аима: работает и
         // когда маркеры ботов выключены.
-        esp_set_bot_aim_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
+        esp_set_bot_aim_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY || g_state.aim_mode == AIM_MODE_SILENT);
         esp_set_always_day(g_state.always_day);
         esp_set_marker_max_distance(g_state.marker_dist);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);

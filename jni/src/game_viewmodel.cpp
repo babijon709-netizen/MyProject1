@@ -1,7 +1,6 @@
 #include "fps_memory.h"
 #include "weapon_tuning_memory.h"
 #include "loot_memory.h"
-#include "movement_memory.h"
 #include "object_data_memory.h"
 #include "maps_lookup.h"
 #include <chrono>
@@ -86,7 +85,6 @@ struct HeapMemory {
 HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 fast_loot::Controller<HeapMemory> loot(heap_memory);
-movement::Controller<HeapMemory> movement_ctrl(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
@@ -142,7 +140,6 @@ void esp_viewmodel_reset(bool restore) {
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))
         LogLine("weapon data: originals could not all be restored before disconnect; restart game");
-    movement_ctrl.reset(restore && g_mem.bound());
     // Быстрому сбору восстанавливать нечего: поле темпа переписывает сама
     // игра при каждом новом ожидании, поэтому сброс — это только «забыть адреса».
     loot.reset();
@@ -155,11 +152,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false); loot.reset();
-        movement_ctrl.reset(false);
         weapons.recoil = settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         weapons.spread = settings.no_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         loot.status = settings.fast_loot ? viewmodel::Status::Waiting : viewmodel::Status::Off;
-        movement_ctrl.status = settings.high_jump ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
                              settings.hands_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off};
@@ -173,9 +168,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         auto st = esp_viewmodel_diagnostics();
         if (st.fov != last_log.fov || st.hands != last_log.hands ||
             st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread ||
-            st.fast_loot != last_log.fast_loot || st.high_jump != last_log.high_jump) {
-            LogLine("viewmodel: fov=%d hands=%d; object-data recoil=%d spread=%d; instant loot=%d; jump=%d (0 off,1 waiting,2 active,4 unsupported/modified image or memory error)",
-                    (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread, (int)st.fast_loot, (int)st.high_jump);
+            st.fast_loot != last_log.fast_loot) {
+            LogLine("viewmodel: fov=%d hands=%d; object-data recoil=%d spread=%d; instant loot=%d (0 off,1 waiting,2 active,4 unsupported/modified image or memory error)",
+                    (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread, (int)st.fast_loot);
             last_log = st;
         }
     };
@@ -184,8 +179,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     uint64_t player = 0;
     static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
-        settings.no_recoil || settings.no_spread || weapons.has_state() ||
-        settings.high_jump || movement_ctrl.has_state()) {
+        settings.no_recoil || settings.no_spread || weapons.has_state()) {
         // The RVA may still point to a named but UNINITIALIZED class copy
         // (device log: valid GameControllerBase, static_fields=0). Prefer the
         // live class discovered by the resolver; only accept a source whose
@@ -213,14 +207,13 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         if (!raw) try_source(from_rva);
         if (!sf) {
             if (!local_source_failed && (settings.fov_enabled || settings.hands_enabled ||
-                                         settings.no_recoil || settings.no_spread ||
-                                         settings.high_jump)) {
+                                         settings.no_recoil || settings.no_spread)) {
                 local_source_failed = true;
-                LogLine("viewmodel: нет локального игрока через GameControllerBase.static: cached=0x%llx rva=0x%llx static=0x%llx field=0x%llx; fov=%d hands=%d recoil=%d spread=%d loot=%d jump=%d status=%d",
+                LogLine("viewmodel: нет локального игрока через GameControllerBase.static: cached=0x%llx rva=0x%llx static=0x%llx field=0x%llx; fov=%d hands=%d recoil=%d spread=%d loot=%d status=%d",
                         (unsigned long long)from_cache, (unsigned long long)from_rva,
                         (unsigned long long)sf, (unsigned long long)GAME_CONTROLLER_LOCAL_PLAYER_FIELD,
                         settings.fov_enabled, settings.hands_enabled, settings.no_recoil,
-                        settings.no_spread, settings.fast_loot, settings.high_jump, (int)loot.status);
+                        settings.no_spread, settings.fast_loot, (int)loot.status);
             }
             // A failed read is NOT a confirmed scene change. Keep the originals
             // so a later successful frame can restore a disabled feature.
@@ -228,7 +221,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             controller.status = {wait, wait};
             weapons.recoil = settings.no_recoil || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
             weapons.spread = settings.no_spread || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
-            movement_ctrl.status = settings.high_jump || movement_ctrl.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
             log_status();
             return;
         }
@@ -250,7 +242,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
                 (unsigned long long)FPOBJECT_PLAYER_BACKREF);
     }
     last_weapon_diagnostic = weapons.diagnostic;
-    movement_ctrl.tick(epoch, player, settings);
     controller.tick(epoch, player, settings);
     log_status();
 }
@@ -260,7 +251,6 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     status.no_recoil = weapons.recoil;
     status.no_spread = weapons.spread;
     status.fast_loot = loot.status;
-    status.high_jump = movement_ctrl.status;
     return status;
 }
 

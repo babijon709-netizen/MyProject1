@@ -8,7 +8,7 @@
 namespace silent_aim {
 constexpr uint64_t kTagMask = 0x00FFFFFFFFFFFFFFULL;
 constexpr uint64_t kLeaseMs = 100; // Do not keep firing at a stale 600ms snapshot.
-constexpr unsigned kTickUs = 200, kHotUs = 70; // DLP2 v149 cadence.
+constexpr unsigned kTickUs = 2500, kHotUs = 1200; // Sane cadence: 400-800 writes/sec without locking up kernel /proc/mem.
 inline bool valid_pointer(uint64_t p) { return p >= 0x10000 && p < 0x800000000000ULL; }
 inline bool fresh(uint64_t published, uint64_t now) {
     return now >= published && now - published < kLeaseMs;

@@ -1,6 +1,5 @@
 #include "fps_memory.h"
 #include "loot_memory.h"
-#include "movement_memory.h"
 #include "object_data_memory.h"
 #include <cassert>
 #include <iostream>
@@ -244,45 +243,35 @@ static void config_tests() {
     }
     // v3: the same bit now means instant pickup, everything else is unchanged.
     for (uint32_t flags=0; flags<128; ++flags) {
-        auto saved=encode(s); saved.version=3; saved.size=32; saved.flags=flags;
-        auto loaded=decode(&saved,32);
-        assert(loaded.no_recoil==bool(flags&32) && loaded.no_spread==bool(flags&64));
-        assert(loaded.fast_loot==bool(flags&16));
-        assert(!loaded.high_jump);
-        assert(loaded.fov_enabled==bool(flags&1) && loaded.hands_enabled==bool(flags&2));
-    }
-    // v4: bit 7 means high jump, plus jump_height.
-    for (uint32_t flags=0; flags<256; ++flags) {
         auto saved=encode(s); saved.flags=flags;
-        assert(saved.version==4);
+        assert(saved.version==3);
         auto loaded=decode(&saved,sizeof(saved));
         assert(loaded.no_recoil==bool(flags&32) && loaded.no_spread==bool(flags&64));
         assert(loaded.fast_loot==bool(flags&16));
-        assert(loaded.high_jump==bool(flags&128));
         assert(loaded.fov_enabled==bool(flags&1) && loaded.hands_enabled==bool(flags&2));
         assert(encode(loaded).flags==flags);
     }
     for (int limit : {0,90,120,144}) for (bool nr : {false,true}) for (bool ns : {false,true})
-        for (bool fl : {false,true}) for (bool hj : {false,true}) {
-        s.fps_limit=limit; s.no_recoil=nr; s.no_spread=ns; s.fast_loot=fl; s.high_jump=hj;
+        for (bool fl : {false,true}) {
+        s.fps_limit=limit; s.no_recoil=nr; s.no_spread=ns; s.fast_loot=fl;
         auto saved=encode(s); auto loaded=decode(&saved,sizeof(saved));
         assert(loaded.no_recoil==nr && loaded.no_spread==ns && loaded.fps_limit==limit);
-        assert(loaded.fast_loot==fl && loaded.high_jump==hj);
+        assert(loaded.fast_loot==fl);
     }
-    s.fast_loot=false; s.high_jump=false;
-    for (unsigned bit=8; bit<32; ++bit) {
-        auto saved=encode(s); saved.flags=255u | (uint32_t(1)<<bit);
+    s.fast_loot=false;
+    for (unsigned bit=7; bit<32; ++bit) {
+        auto saved=encode(s); saved.flags=127u | (uint32_t(1)<<bit);
         auto loaded=decode(&saved,sizeof(saved));
-        assert(!loaded.fov_enabled && !loaded.hands_enabled && !loaded.no_recoil && !loaded.no_spread && !loaded.fast_loot && !loaded.high_jump && loaded.fps_limit==0);
+        assert(!loaded.fov_enabled && !loaded.hands_enabled && !loaded.no_recoil && !loaded.no_spread && !loaded.fast_loot && loaded.fps_limit==0);
     }
     s.fps_limit=144; s.no_recoil=s.no_spread=false;
     e.flags=7; auto oldFps=decode(&e,sizeof(e));
-    assert(!oldFps.no_recoil && !oldFps.no_spread && !oldFps.fast_loot && !oldFps.high_jump && oldFps.fps_limit==144 && oldFps.fov_enabled && oldFps.hands_enabled);
+    assert(!oldFps.no_recoil && !oldFps.no_spread && !oldFps.fast_loot && oldFps.fps_limit==144 && oldFps.fov_enabled && oldFps.hands_enabled);
     e.flags=3; auto legacy=decode(&e,sizeof(e));
     assert(legacy.fov_enabled && legacy.hands_enabled && legacy.fps_limit==0);
-    e.version=5; assert(!decode(&e,sizeof(e)).fov_enabled); e=encode(s); e.flags=256; assert(!decode(&e,sizeof(e)).hands_enabled);
-    e=encode(s); e.fov=std::numeric_limits<float>::quiet_NaN(); e.x=std::numeric_limits<float>::infinity(); e.y=-1000; e.z=1000; e.jump_height=-5.f;
-    auto d=decode(&e,sizeof(e)); assert(d.fov==90 && d.x==0 && d.y==-50 && d.z==50 && d.jump_height==1.0f);
+    e.version=4; assert(!decode(&e,sizeof(e)).fov_enabled); e=encode(s); e.flags=128; assert(!decode(&e,sizeof(e)).hands_enabled);
+    e=encode(s); e.fov=std::numeric_limits<float>::quiet_NaN(); e.x=std::numeric_limits<float>::infinity(); e.y=-1000; e.z=1000;
+    auto d=decode(&e,sizeof(e)); assert(d.fov==90 && d.x==0 && d.y==-50 && d.z==50);
 }
 static void fps_tests() {
     for (const auto& layout : kFpsLayouts) {
@@ -609,117 +598,9 @@ static void loot_tests() {
     }
 }
 
-// ---- Движение: movement::Controller на фейковой памяти --------
-struct MovementFixture {
-    FakeMemory io;
-    movement::Controller<FakeMemory> c{io};
-    uint64_t player = 0;
-    uint64_t net_id = 0;
-    uint64_t kcc = 0;
-    uint64_t speed_config = 0;
-    const float default_jump = 1.1f;
-
-    MovementFixture(bool valid_local = true) {
-        player = io.object("PlayerManager");
-        uint64_t pk = io.klass_of("PlayerManager", "Oxide");
-        io.set(player, pk);
-
-        net_id = io.halloc();
-        uint64_t nk = io.klass_of("NetworkIdentity", "Mirror");
-        io.set(net_id, nk);
-        io.set(player + 0x40, net_id);
-        io.set(net_id + 0x4a, uint8_t(valid_local ? 1 : 0));
-
-        kcc = io.halloc();
-        uint64_t kk = io.klass_of("KCC", "HyperHug.Games.Oxide.Features.Player");
-        io.set(kcc, kk);
-        io.set(player + PLAYER_KCC_REFERENCE, kcc);
-        io.set(kcc + KCC_PLAYER_BACKREF, player);
-
-        speed_config = io.halloc();
-        uint64_t sk = io.klass_of("CharacterSpeedConfig", "HyperHug.Games.Oxide.Features.Player");
-        io.set(speed_config, sk);
-        io.set(kcc + KCC_CHARACTER_SPEED_CONFIG, speed_config);
-        io.set(speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT, default_jump);
-    }
-
-    void tick(bool on = true, float height = 2.5f) {
-        ViewmodelSettings s;
-        s.high_jump = on;
-        s.jump_height = height;
-        c.tick(1, player, s);
-    }
-};
-
-static void movement_tests() {
-    {   // Счастливый путь: включение пишет выбранную высоту, выключение восстанавливает.
-        MovementFixture f;
-        assert(f.c.status == Status::Off && !f.c.has_state());
-        assert(f.io.get<float>(f.speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 1.1f);
-
-        f.tick(true, 2.8f);
-        assert(f.c.status == Status::Active && f.c.has_state());
-        assert(f.io.get<float>(f.speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 2.8f);
-
-        // Повторный тик без изменения: запись не повторяется
-        f.tick(true, 2.8f);
-        assert(f.c.status == Status::Active);
-        assert(f.io.get<float>(f.speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 2.8f);
-
-        // Изменение слайдера на ходу: пишет новое значение, но сохраняет оригинальное
-        f.tick(true, 3.5f);
-        assert(f.c.status == Status::Active);
-        assert(f.io.get<float>(f.speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 3.5f);
-
-        // Выключение: возвращает оригинальный jump_height (1.1f)
-        f.tick(false);
-        assert(f.c.status == Status::Off && !f.c.has_state());
-        assert(f.io.get<float>(f.speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 1.1f);
-    }
-    {   // Сброс через reset(true) восстанавливает память
-        MovementFixture f;
-        f.tick(true, 3.0f);
-        assert(f.io.get<float>(f.speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 3.0f);
-        f.c.reset(true);
-        assert(f.c.status == Status::Off && !f.c.has_state());
-        assert(f.io.get<float>(f.speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 1.1f);
-    }
-    {   // Нелокальный игрок: отказ без записей
-        MovementFixture f(false);
-        f.tick(true, 3.0f);
-        assert(f.c.status == Status::Waiting);
-        assert(f.io.get<float>(f.speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 1.1f);
-    }
-    {   // Гейт кучи: отказ если CharacterSpeedConfig не в heap
-        MovementFixture f;
-        uint64_t non_heap = f.io.alloc();
-        uint64_t sk = f.io.klass_of("CharacterSpeedConfig", "HyperHug.Games.Oxide.Features.Player");
-        f.io.set(non_heap, sk);
-        f.io.set(f.kcc + KCC_CHARACTER_SPEED_CONFIG, non_heap);
-        f.io.set(non_heap + CHARACTERSPEEDCONFIG_JUMP_HEIGHT, 1.1f);
-        f.tick(true, 3.0f);
-        assert(f.c.status == Status::Failed);
-        assert(f.io.get<float>(non_heap + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 1.1f);
-    }
-    {   // Пределы и NaN: значения зажимаются в [1.0, 5.0]
-        MovementFixture f;
-        f.tick(true, 10.0f);
-        assert(f.c.status == Status::Active);
-        assert(f.io.get<float>(f.speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 5.0f);
-
-        f.tick(true, 0.1f);
-        assert(f.c.status == Status::Active);
-        assert(f.io.get<float>(f.speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 1.0f);
-
-        f.tick(true, std::numeric_limits<float>::quiet_NaN());
-        assert(f.c.status == Status::Active);
-        assert(f.io.get<float>(f.speed_config + CHARACTERSPEEDCONFIG_JUMP_HEIGHT) == 2.5f);
-    }
-}
-
 int main() {
     config_tests(); fps_tests();
-    go::SelectBuild(go::Build::Release); tests(); loot_tests(); movement_tests();
-    assert(go::BetaAvailable()); go::SelectBuild(go::Build::Beta); tests(); loot_tests(); movement_tests();
-    std::cout << "viewmodel: release/beta, lifecycle, instant ADS return, FPS90/120/144, delegates, fast pickup, high jump, config, NaN: OK\n";
+    go::SelectBuild(go::Build::Release); tests(); loot_tests();
+    assert(go::BetaAvailable()); go::SelectBuild(go::Build::Beta); tests(); loot_tests();
+    std::cout << "viewmodel: release/beta, lifecycle, instant ADS return, FPS90/120/144, delegates, fast pickup, config, NaN: OK\n";
 }

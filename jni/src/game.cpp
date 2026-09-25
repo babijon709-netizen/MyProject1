@@ -3750,6 +3750,7 @@ static float    g_look_cam_dist = -1.f; // расстояние m_LookRoot..ка
 static uint64_t s_ml_cached = 0;         // сам MouseLook
 static uint64_t s_ml_cached_player = 0;  // игрок, которому он принадлежал
 static double   s_ml_cached_at = -1e9;
+static float    s_ml_cached_dist = -1.f;
 // Сколько верим кешу. Дольше — опаснее: после респавна объект мог быть
 // переиспользован под что-то другое, и писать туда нельзя. Шесть секунд
 // перекрывают паузы из лога устройства (объект пропадал на 0.5–1.5 с), а
@@ -3869,14 +3870,23 @@ static bool resolve_local_mouse_look_uncached(uint64_t& out, LookFail* why) {
             }
         }
         if (player_still_local && mouse_look_from_cache(cached_player, cached)) {
-            float distance = -1.f;
-            const int drives_camera = mouse_look_camera_distance(cached, distance);
+            static double s_last_dist_check = 0.0;
+            const double now = memio::now_seconds();
+            int drives_camera = 1;
+            float distance = s_ml_cached_dist;
+            // Heavy transform hierarchy scan is throttled to once every 1.5s instead
+            // of burning 10-20ms per frame. Fast per-frame class & sens checks ensure safety.
+            if (now - s_last_dist_check >= 1.5) {
+                s_last_dist_check = now;
+                drives_camera = mouse_look_camera_distance(cached, distance);
+                if (drives_camera != 0) s_ml_cached_dist = distance;
+            }
             if (drives_camera != 0) {
                 g_look_source = cached_player ? 0 : 1;
                 g_look_player_addr = cached_player;
                 g_look_local = local;
                 g_look_cam_dist = distance;
-                s_ml_cached_at = memio::now_seconds();
+                s_ml_cached_at = now;
                 if (why) *why = LookFail::none;
                 out = cached;
                 return true;
@@ -3888,6 +3898,16 @@ static bool resolve_local_mouse_look_uncached(uint64_t& out, LookFail* why) {
             s_ml_cached = 0;
         }
     }
+
+    // Throttle expensive full rescans when MouseLook is absent/respawning
+    // so frame time stays under 16ms instead of freezing the overlay.
+    static double s_last_full_scan = 0.0;
+    const double now_scan = memio::now_seconds();
+    if (now_scan - s_last_full_scan < 0.25) {
+        if (why) *why = LookFail::noObject;
+        return false;
+    }
+    s_last_full_scan = now_scan;
 
     // 1) MouseLook от камеры. Первым стоит именно этот путь: он не зависит от
     // того, кого игра сейчас считает локальным игроком, а адрес локального
@@ -4301,7 +4321,6 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
 // The DLP2 worker owns a private fd and only consumes immutable snapshots.
 // Never call frame-cache readers or resolve_local_player() from its thread.
 bool esp_silent_publish(uint64_t target, const float aim[3]) {
-    std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     auto fail = [] { silent_aim::clear(); return false; };
     if (g_pid <= 0 || !g_mem.bound() || !g_cam_pose_valid || esp_freecam_active()) return fail();
     silent_aim::Command c;
