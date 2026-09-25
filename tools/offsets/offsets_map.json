@@ -2906,6 +2906,121 @@
    "how": "public euD team (релиз) / public Reo team (бета), оба 0x120"
   }
  },
+ "PLAYER_NETWORK_IDENTITY": {
+  "kind": "field",
+  "class": "Mirror.NetworkBehaviour",
+  "struct": "Mirror_NetworkBehaviour_Fields",
+  "field": "<netIdentity>k__BackingField",
+  "type": "Mirror_NetworkIdentity_o*",
+  "offset": 64,
+  "src": {
+   "file": "dump.cs",
+   "struct": "Mirror_NetworkBehaviour_Fields",
+   "field": "<netIdentity>k__BackingField",
+   "how": "base NetworkBehaviour field at 0x40; PlayerManager inherits this object link"
+  }
+ },
+ "TEAM_OBJECT_PLAYER": {
+  "kind": "field",
+  "class": "TeamComponent (имя ротирует: euD -> Reo)",
+  "struct": "euD_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "team"
+   }
+  ],
+  "field": "player",
+  "type": "Oxide_PlayerManager_o*",
+  "offset": 128,
+  "src": {
+   "file": "dump.cs",
+   "struct": "euD_Fields / Reo_Fields",
+   "field": "player",
+   "how": "live field reached through PlayerManager.team; reverse owner link at 0x80 in both dumps"
+  }
+ },
+ "TEAM_OBJECT_DATA": {
+  "kind": "field",
+  "class": "TeamComponent (имя ротирует: euD -> Reo)",
+  "struct": "euD_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "team"
+   }
+  ],
+  "field": "team",
+  "type": "",
+  "offset": 144,
+  "src": {
+   "file": "dump.cs",
+   "struct": "euD_Fields / Reo_Fields",
+   "field": "team",
+   "how": "live field reached through PlayerManager.team; TeamData reference at 0x90 in both dumps"
+  }
+ },
+ "TEAM_DATA_NAME": {
+  "kind": "field",
+  "class": "TeamData (имя ротирует: wa -> nX)",
+  "struct": "wa_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "team"
+   },
+   {
+    "field": "team"
+   }
+  ],
+  "field": "aXG",
+  "type": "System.String*",
+  "offset": 16,
+  "src": {
+   "file": "dump.cs",
+   "struct": "wa_Fields / nX_Fields",
+   "field": "aXG / FLy",
+   "how": "first team identity string at 0x10 in both release and beta; live class reached through PlayerManager.team.team"
+  }
+ },
+ "TEAM_DATA_MEMBERS": {
+  "kind": "field",
+  "class": "TeamData (имя ротирует: wa -> nX)",
+  "struct": "wa_Fields",
+  "via": [
+   {
+    "struct": "Oxide_PlayerManager_Fields",
+    "field": "team"
+   },
+   {
+    "field": "team"
+   }
+  ],
+  "field": "aXU",
+  "type": "Il2CppObject*",
+  "resolver_type": "obj1",
+  "offset": 32,
+  "src": {
+   "file": "dump.cs",
+   "struct": "wa_Fields / nX_Fields",
+   "field": "aXU / FLv",
+   "how": "TeamData members is its sole Il2CppObject* field; release and beta both place it at 0x20, live class reached through PlayerManager.team.team"
+  }
+ },
+ "TEAM_MEMBER_NET_ID": {
+  "kind": "field",
+  "class": "TeamMember",
+  "struct": "TeamMember_Fields",
+  "field": "netId",
+  "type": "uint32_t",
+  "offset": 44,
+  "src": {
+   "file": "dump.cs",
+   "struct": "TeamMember_Fields",
+   "field": "netId",
+   "how": "Mirror NetworkIdentity.netId; uint32 at 0x2C in release and beta"
+  }
+ },
  "TEAM_MEMBER_ID": {
   "kind": "field",
   "class": "TeamMember",

@@ -571,12 +571,13 @@ enum class MineableEntityType : std::int32_t {
 };
 
 // ---- Team / clan membership (Oxide.PlayerManager, dump.cs) ------------------
-// All three are Mirror SyncVars (they have _Mirror_SyncVarHookDelegate_* twins
-// at 0x378/0x390/0x398), so every client sees them for every player.
+// Best-effort replicated group fields. Some modes/builds leave teamName or
+// clanId empty on remote PlayerManagers, so ESP/aim also checks live team data.
 inline constexpr std::uint64_t PLAYER_USER_ID   = 0x278; // string userID (unique per account)
 inline constexpr std::uint64_t PLAYER_TEAM_NAME = 0x280; // string teamName
 inline constexpr std::uint64_t PLAYER_CLAN_ID   = 0x290; // string clanId
 inline constexpr std::uint64_t PLAYER_CLAN_TAG  = 0x298; // string clanTag
+inline constexpr std::uint64_t PLAYER_NETWORK_IDENTITY = 0x40; // Mirror.NetworkBehaviour.<netIdentity>
 
 // ---- Состав своей команды (запасной признак союзника) ------------------------
 // У локального игрока на команде висит отдельный Mirror.NetworkBehaviour
@@ -594,6 +595,7 @@ inline constexpr std::uint64_t TEAM_DATA_MEMBERS     = 0x20;  // List<TeamMember
 inline constexpr std::uint64_t TEAM_MEMBER_ID        = 0x10;  // string id (userID аккаунта)
 inline constexpr std::uint64_t TEAM_MEMBER_CLAN_TAG  = 0x18;  // string clanTag
 inline constexpr std::uint64_t TEAM_MEMBER_NICK      = 0x20;  // string nick (видимый ник)
+inline constexpr std::uint64_t TEAM_MEMBER_NET_ID    = 0x2C;  // uint32 Mirror.NetworkIdentity.netId
 
 // Vehicles: both are SyncVars (uint netId of the vehicle / index of the seat),
 // zero while the player is on foot. A mounted player stops updating

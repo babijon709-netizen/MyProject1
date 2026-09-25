@@ -95,11 +95,18 @@ static void check(bool ok, const char* what) {
     printf("  %-64s %s\n", what, ok ? "ок" : "ПРОВАЛ");
 }
 
+static bool resolver_applied(std::uint64_t* slot) {
+    for (int i = 0; i < s_applied_count; ++i)
+        if (s_applied[i].slot == slot) return true;
+    return false;
+}
+
 struct Handed {
     uint64_t il2cpp_base, meta_base;
     uint64_t pm_real, pm_decoy, teammember, netclient;
     uint64_t fpmanager, item, itemdata;
     uint64_t treehs, orehs, vec3, hitmarkeritem, oremark, itempickup, playerweapon;
+    uint64_t teamcomponent, teamdata, networkbehaviour, networkidentity;
 };
 
 // Строка в окне метаданных; возвращает её адрес.
@@ -192,8 +199,13 @@ static void child_main(int out_fd) {
 
     // Имена классов и пространств имён — в окне метаданных.
     const uint64_t s_pm   = put_string(meta, moff, "PlayerManager");
+    const uint64_t s_gc   = put_string(meta, moff, "GameControllerBase");
     const uint64_t s_oxide = put_string(meta, moff, "Oxide");
     const uint64_t s_tm   = put_string(meta, moff, "TeamMember");
+    const uint64_t s_teamcomponent = put_string(meta, moff, "Reo");
+    const uint64_t s_teamdata = put_string(meta, moff, "nX");
+    const uint64_t s_networkbehaviour = put_string(meta, moff, "NetworkBehaviour");
+    const uint64_t s_networkidentity = put_string(meta, moff, "NetworkIdentity");
     const uint64_t s_empty = put_string(meta, moff, "");
     const uint64_t s_nc   = put_string(meta, moff, "NetworkClient");
     const uint64_t s_mirror = put_string(meta, moff, "Mirror");
@@ -221,6 +233,41 @@ static void child_main(int out_fd) {
     uint64_t* slots = (uint64_t*)(il + 0x40000);
     const size_t kSlots = 4096;
 
+    // Синтетические team/network классы проверяют новые runtime-записи:
+    // имена полей на ротируемых TeamComponent/TeamData не совпадают с релизом,
+    // поэтому они должны разрешиться через живую type/via-цепочку и тип.
+    const int32_t tid_teamcomponent = 0x303;
+    const int32_t tid_teamdata = 0x304;
+    const int32_t tid_networkidentity = 0x305;
+    const int32_t tid_networkbehaviour = 0x306;
+    const PField teamdata_fields[] = {
+        {"FLy", 0x18, 0, 0x0E},   // string: TeamData name; вшито 0x10
+        {"FLV", 0x28, 0, 0x0E},   // второй string, не должен быть выбран
+        {"FLv", 0x30, 0, 0x12},   // единственный Il2CppObject*: roster list; вшито 0x20
+    };
+    uint64_t teamdata = build_class(heap, hoff, il_base + 0x1000, s_teamdata, s_empty,
+                                    teamdata_fields, 3, meta, moff, tid_teamdata);
+    const PField teamcomponent_fields[] = {
+        {"player", 0x98, 0x101, 0x12},               // PlayerManager back-reference
+        {"team", 0xA0, tid_teamdata, 0x12},          // TeamData reference; вшито 0x90
+    };
+    uint64_t teamcomponent = build_class(heap, hoff, il_base + 0x1000, s_teamcomponent, s_empty,
+                                         teamcomponent_fields, 2, meta, moff, tid_teamcomponent);
+    const PField networkidentity_fields[] = {
+        {"_netId_k__BackingField", 0x60, 0, 0x09},   // uint; вшито 0x58
+    };
+    uint64_t networkidentity = build_class(heap, hoff, il_base + 0x1000,
+                                           s_networkidentity, s_mirror,
+                                           networkidentity_fields, 1, meta, moff,
+                                           tid_networkidentity);
+    const PField networkbehaviour_fields[] = {
+        {"<netIdentity>k__BackingField", 0x48, tid_networkidentity, 0x12},
+    };
+    uint64_t networkbehaviour = build_class(heap, hoff, il_base + 0x1000,
+                                            s_networkbehaviour, s_mirror,
+                                            networkbehaviour_fields, 1, meta, moff,
+                                            tid_networkbehaviour);
+
     // Настоящий PlayerManager: смещения ОТЛИЧАЮТСЯ от вшитых, чтобы видеть
     // именно перезапись, а не совпадение.
     const PField pm_fields[] = {
@@ -228,12 +275,17 @@ static void child_main(int out_fd) {
         PF("clanId",             0x2B0),   // вшито 0x290
         PF("clanTag",            0x2B8),   // вшито 0x298
         PF("nicklabel",          0x138),   // вшито 0x130
-        PF("team",               0x128),   // вшито 0x120
+        {"team", 0x128, tid_teamcomponent, 0x12}, // Reo/euD via-chain type
         PF("clientPlayerList",   0x18),    // статик; вшито 0x10
         {"playerEventHandler", 0x348, 0x301, 0x12},  // c:eDg; вшито 0x78; вход в цепочки via
     };
     uint64_t pm_real = build_class(heap, hoff, il_base + 0x1000, s_pm, s_oxide,
                                    pm_fields, 7, meta, moff, 0x101);
+    const PField gc_fields[] = {
+        {"_BCX_k__BackingField", 0x18, 0x101, 0x12}, // static PlayerManager; вшито 0x10
+    };
+    uint64_t gamecontroller = build_class(heap, hoff, il_base + 0x1000, s_gc, s_oxide,
+                                          gc_fields, 1, meta, moff, 0x10A);
 
     // Тёзка без полей: резолв не обязан на него попасть.
     uint64_t pm_decoy = build_class(heap, hoff, il_base + 0x1000, s_pm, s_oxide,
@@ -242,9 +294,10 @@ static void child_main(int out_fd) {
     const PField tm_fields[] = {
         PF("nick",    0x30),   // вшито 0x20
         PF("clanTag", 0x28),   // вшито 0x18
+        {"netId",    0x34, 0, 0x09}, // uint; вшито 0x2C
     };
     uint64_t teammember = build_class(heap, hoff, il_base + 0x1000, s_tm, s_empty,
-                                      tm_fields, 2, meta, moff, 0x103);
+                                      tm_fields, 3, meta, moff, 0x103);
 
     const PField nc_fields[] = {
         PF("spawned", 0x40),   // статик
@@ -369,6 +422,27 @@ static void child_main(int out_fd) {
                                     act_fields, 2, meta, moff, 0x302);
     (void)playerhandler; (void)activity;
 
+    // Живой PlayerManager -> Reo -> nX объектный путь, как в игре. Это
+    // гарантирует, что двухшаговый via-поиск не зависит от порядка адресов,
+    // в котором phase_kid случайно встретит классы в куче.
+    auto align_heap = [&] { hoff = (hoff + 0x1Fu) & ~0x1Fu; };
+    align_heap();
+    const uint64_t local_player = (uint64_t)(uintptr_t)(heap + hoff);
+    memset(heap + hoff, 0, 0x180); hoff += 0x180;
+    *(uint64_t*)(uintptr_t)local_player = pm_real;
+    align_heap();
+    const uint64_t local_teamcomponent = (uint64_t)(uintptr_t)(heap + hoff);
+    memset(heap + hoff, 0, 0x180); hoff += 0x180;
+    *(uint64_t*)(uintptr_t)local_teamcomponent = teamcomponent;
+    *(uint64_t*)(uintptr_t)(local_player + 0x128) = local_teamcomponent;
+    *(uint64_t*)(uintptr_t)(local_teamcomponent + 0x98) = local_player;
+    align_heap();
+    const uint64_t local_teamdata = (uint64_t)(uintptr_t)(heap + hoff);
+    memset(heap + hoff, 0, 0x80); hoff += 0x80;
+    *(uint64_t*)(uintptr_t)local_teamdata = teamdata;
+    *(uint64_t*)(uintptr_t)(local_teamcomponent + 0xA0) = local_teamdata;
+    *(uint64_t*)(uintptr_t)(gamecontroller + 0x140 + 0x18) = local_player;
+
     // Слоты: настоящие классы вперемешку с мусором (выравнивание, битые
     // указатели, указатели в никуда) — фильтры сканера обязаны его отсеять.
     size_t sn = 0;
@@ -378,12 +452,17 @@ static void child_main(int out_fd) {
     slots[sn++] = 0xdeadbeef000ull;   // валидный по форме, чтений нет
     slots[sn++] = meta_base + 0x40;   // в метаданные — тоже не класс
     slots[sn++] = pm_real;
+    slots[sn++] = gamecontroller;
     // Мусор: значения проходят форму указателя, но читаются как нули
     // (выровнены на 64 КБ, где в ребёнке ничего нет). НЕ в начало кучи:
     // там лежит настоящий указатель, который сканер честно примет за класс.
     for (int i = 0; i < 700; ++i) slots[sn++] = 0x400000000ull + (uint64_t)(i * 8);
     slots[sn++] = teammember;
     slots[sn++] = netclient;
+    slots[sn++] = teamcomponent;
+    slots[sn++] = teamdata;
+    slots[sn++] = networkidentity;
+    slots[sn++] = networkbehaviour;
     slots[sn++] = fpmanager;
     slots[sn++] = item;
     slots[sn++] = itemdata;
@@ -405,6 +484,8 @@ static void child_main(int out_fd) {
     h.fpmanager = fpmanager; h.item = item; h.itemdata = itemdata;
     h.treehs = treehs; h.orehs = orehs; h.vec3 = vec3;
     h.hitmarkeritem = hitmarkeritem; h.oremark = oremark; h.itempickup = itempickup; h.playerweapon = playerweapon;
+    h.teamcomponent = teamcomponent; h.teamdata = teamdata;
+    h.networkbehaviour = networkbehaviour; h.networkidentity = networkidentity;
     if (write(out_fd, &h, sizeof(h)) != sizeof(h)) _exit(95);
 
     raise(SIGSTOP);   // родитель читает память, пока мы спим
@@ -511,7 +592,9 @@ int main() {
           "TeamMember найден по имени");
     check(offset_resolver_class("NetworkClient", "Mirror") == h.netclient,
           "NetworkClient найден по имени");
-    check(offset_resolver_class("GameControllerBase", "Oxide") == 0,
+    check(offset_resolver_class("GameControllerBase", "Oxide") != 0,
+          "GameControllerBase anchor found for the live team chain");
+    check(offset_resolver_class("NotARealClass", "") == 0,
           "отсутствующий класс не выдумывается");
 
     // ---- смещения полей: подложенные значения вместо вшитых ----------------
@@ -520,10 +603,27 @@ int main() {
     check(go_active::PLAYER_CLAN_TAG == 0x2B8,  "clanTag переписан 0x298 -> 0x2B8");
     check(go_active::PLAYER_NICKLABEL == 0x138, "nicklabel переписан 0x130 -> 0x138");
     check(go_active::PLAYER_TEAM_OBJECT == 0x128, "team переписан 0x120 -> 0x128");
+    check(go_active::GAME_CONTROLLER_LOCAL_PLAYER_FIELD == 0x18,
+          "local PlayerManager static link переписан 0x10 -> 0x18");
     check(go_active::PLAYER_MANAGER_STATIC_FIELDS_LIST == 0x18,
           "статик clientPlayerList переписан 0x10 -> 0x18");
     check(go_active::TEAM_MEMBER_NICK == 0x30,    "TeamMember.nick переписан 0x20 -> 0x30");
     check(go_active::TEAM_MEMBER_CLAN_TAG == 0x28, "TeamMember.clanTag 0x18 -> 0x28");
+    check(go_active::PLAYER_NETWORK_IDENTITY == 0x48,
+          "NetworkBehaviour.netIdentity разрешён по полю базы 0x40 -> 0x48");
+    check(go_active::NETID_NET_ID == 0x60,
+          "NetworkIdentity.netId разрешён по имени 0x58 -> 0x60");
+    check(go_active::TEAM_MEMBER_NET_ID == 0x34,
+          "TeamMember.netId разрешён по имени 0x2C -> 0x34");
+    check(go_active::TEAM_OBJECT_PLAYER == 0x98,
+          "TeamComponent.player разрешён через PlayerManager.team 0x80 -> 0x98");
+    check(go_active::TEAM_OBJECT_DATA == 0xA0,
+          "TeamComponent.team разрешён через PlayerManager.team 0x90 -> 0xA0");
+    check(go_active::TEAM_DATA_NAME == 0x18,
+          "TeamData name найден типом через двухшаговый путь 0x10 -> 0x18");
+    check(go_active::TEAM_DATA_MEMBERS == 0x30 &&
+          resolver_applied(&go_active::TEAM_DATA_MEMBERS),
+          "TeamData member collection: unique reference resolved 0x20 -> 0x30 via-path");
 
     // ---- поля с ротированными именами ищутся по ТИПУ ------------------------
     // Имя _XqK_k__BackingField в таблице нет (обфускатор переименовал), но тип

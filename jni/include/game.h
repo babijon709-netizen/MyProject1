@@ -136,10 +136,26 @@ void esp_bot_aim_maintain();
 std::vector<BotAimEnt> esp_bot_aim_list();
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 
-// Диагностика признака «союзник» для аим-лога: длина своих строк группы,
-// найден ли командный объект (запасной источник) и сколько в нём ников.
-void esp_get_ally_diag(int* local_team_len, int* local_clan_len,
-                       int* roster_valid, int* roster_count,
+// Stages returned by esp_get_ally_diag(). This makes a missing roster
+// distinguishable from a valid empty team and from a failed memory read.
+enum EspAllyRosterStage {
+    ESP_ALLY_ROSTER_NOT_CHECKED = 0,
+    ESP_ALLY_ROSTER_NO_LOCAL_PLAYER = 1,
+    ESP_ALLY_ROSTER_NO_TEAM_COMPONENT = 2,
+    ESP_ALLY_ROSTER_NO_TEAM_DATA = 3,
+    ESP_ALLY_ROSTER_NO_MEMBER_LIST = 4,
+    ESP_ALLY_ROSTER_COLLECTION_UNREADABLE = 5,
+    ESP_ALLY_ROSTER_EMPTY = 6,
+    ESP_ALLY_ROSTER_MEMBERS = 7,
+    ESP_ALLY_ROSTER_MEMBER_ENTRIES_UNREADABLE = 8,
+};
+
+// Ally diagnostics for the aim log: local group-field lengths and confirmation
+// that g_local_player selected the local transform; roster read status/count,
+// whether a live TeamData pointer is available, and its display name.
+void esp_get_ally_diag(int* local_team_len, int* local_clan_len, int* local_tag_len,
+                       int* local_player_confirmed, int* team_data_available,
+                       int* roster_valid, int* roster_count, int* roster_stage,
                        char* roster_team, size_t roster_team_cap);
 
 // ---- Автообновление оффсетов (offset_resolver.cpp) ---------------------------

@@ -270,13 +270,18 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
 #include "ui_util.h"
 
 // Диагностика союзников (живёт в game.cpp): в стенде всегда «пусто».
-void esp_get_ally_diag(int* local_team_len, int* local_clan_len,
-                       int* roster_valid, int* roster_count,
+void esp_get_ally_diag(int* local_team_len, int* local_clan_len, int* local_tag_len,
+                       int* local_player_confirmed, int* team_data_available,
+                       int* roster_valid, int* roster_count, int* roster_stage,
                        char* roster_team, size_t roster_team_cap) {
     if (local_team_len) *local_team_len = 0;
     if (local_clan_len) *local_clan_len = 0;
+    if (local_tag_len) *local_tag_len = 0;
+    if (local_player_confirmed) *local_player_confirmed = 0;
+    if (team_data_available) *team_data_available = 0;
     if (roster_valid) *roster_valid = 0;
     if (roster_count) *roster_count = 0;
+    if (roster_stage) *roster_stage = 0;
     if (roster_team && roster_team_cap) roster_team[0] = '\0';
 }
 

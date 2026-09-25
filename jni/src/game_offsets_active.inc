@@ -5,7 +5,7 @@
 // бета — из game_offsets_beta.h. GO_CONST(имя, значение) — не смещение
 // (геометрия боксов и т.п.), у обеих версий одинаково.
 //
-// Собрано: 23.09.2026.
+// Собрано: 25.09.2026.
 
 GO_FIELD(CAMERA_PROJECTION_MATRIX, game_offsets_beta::CAMERA_PROJECTION_MATRIX)
 GO_FIELD(CAMERA_VIEW_MATRIX, game_offsets_beta::CAMERA_VIEW_MATRIX)
@@ -202,6 +202,7 @@ GO_FIELD(PLAYER_USER_ID, game_offsets_beta::PLAYER_USER_ID)
 GO_FIELD(PLAYER_TEAM_NAME, game_offsets_beta::PLAYER_TEAM_NAME)
 GO_FIELD(PLAYER_CLAN_ID, game_offsets_beta::PLAYER_CLAN_ID)
 GO_FIELD(PLAYER_CLAN_TAG, game_offsets_beta::PLAYER_CLAN_TAG)
+GO_FIELD(PLAYER_NETWORK_IDENTITY, game_offsets_beta::PLAYER_NETWORK_IDENTITY)
 GO_FIELD(PLAYER_TEAM_OBJECT, game_offsets_beta::PLAYER_TEAM_OBJECT)
 GO_FIELD(TEAM_OBJECT_PLAYER, game_offsets_beta::TEAM_OBJECT_PLAYER)
 GO_FIELD(TEAM_OBJECT_DATA, game_offsets_beta::TEAM_OBJECT_DATA)
@@ -210,6 +211,7 @@ GO_FIELD(TEAM_DATA_MEMBERS, game_offsets_beta::TEAM_DATA_MEMBERS)
 GO_FIELD(TEAM_MEMBER_ID, game_offsets_beta::TEAM_MEMBER_ID)
 GO_FIELD(TEAM_MEMBER_CLAN_TAG, game_offsets_beta::TEAM_MEMBER_CLAN_TAG)
 GO_FIELD(TEAM_MEMBER_NICK, game_offsets_beta::TEAM_MEMBER_NICK)
+GO_FIELD(TEAM_MEMBER_NET_ID, game_offsets_beta::TEAM_MEMBER_NET_ID)
 GO_FIELD(PLAYER_VEHICLE_ID, game_offsets_beta::PLAYER_VEHICLE_ID)
 GO_FIELD(PLAYER_SEAT_ID, game_offsets_beta::PLAYER_SEAT_ID)
 GO_FIELD(LOOTOBJECT_INVENTORY, game_offsets_beta::LOOTOBJECT_INVENTORY)

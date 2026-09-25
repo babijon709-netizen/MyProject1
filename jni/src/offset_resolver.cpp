@@ -53,7 +53,7 @@ struct OrField {
     const char*    cls;     // имя класса в рантайме (у некоторых — с подчёркиваниями)
     const char*    field;   // имя поля (стабильное, из дампа)
     bool           is_static;
-    const char*    type;    // "" | f4 | b1 | u4 | i4 | str | obj | c:ИмяКласса
+    const char*    type;    // "" | f4 | b1 | u4 | i4 | str | obj | obj1 | c:ИмяКласса
 };
 #define OR_VIA(...)   // в первом массиве цепочки не нужны
 #define OR_FIELD(c, k, f, s, t) { &go_active::c, k, f, s, t },
@@ -1944,7 +1944,7 @@ static int cached_class_type_indices(const char* short_name, int32_t* out, int m
     return n;
 }
 
-// Соответствует ли enum типа примитивной сигнатуре; для «obj» — ссылочный ли.
+// Соответствует ли enum типа примитивной сигнатуре; obj/obj1 — ссылочные ли.
 static bool type_enum_matches(uint32_t te, const char* sig) {
     if (!strcmp(sig, "f4"))  return te == IL2CPP_TYPE_R4;
     if (!strcmp(sig, "b1"))  return te == IL2CPP_TYPE_BOOLEAN;
@@ -1952,9 +1952,10 @@ static bool type_enum_matches(uint32_t te, const char* sig) {
     if (!strcmp(sig, "i4"))  return te == IL2CPP_TYPE_I4;
     if (!strcmp(sig, "i2"))  return te == IL2CPP_TYPE_I2;
     if (!strcmp(sig, "str")) return te == IL2CPP_TYPE_STRING;
-    if (!strcmp(sig, "obj")) return te == IL2CPP_TYPE_CLASS || te == IL2CPP_TYPE_OBJECT ||
-                                     te == IL2CPP_TYPE_SZARRAY || te == IL2CPP_TYPE_ARRAY ||
-                                     te == IL2CPP_TYPE_GENERICINST || te == IL2CPP_TYPE_PTR;
+    if (!strcmp(sig, "obj") || !strcmp(sig, "obj1"))
+        return te == IL2CPP_TYPE_CLASS || te == IL2CPP_TYPE_OBJECT ||
+               te == IL2CPP_TYPE_SZARRAY || te == IL2CPP_TYPE_ARRAY ||
+               te == IL2CPP_TYPE_GENERICINST || te == IL2CPP_TYPE_PTR;
     return false;
 }
 
@@ -2143,12 +2144,13 @@ static int resolve_type_group(const TypeGroup& g, uint64_t klass) {
     // PlayerWeapon::_player, VoicePlayerState::_Name — класс в кэше есть, а
     // поле не находится, потому что точного совпадения нет.
     // «obj» — «любой ссылочный»: среди кандидатов половина класса, и для
-    // ОДИНОЧНОГО слота «ближайшее» было бы угадайкой. Такой слот берём только
-    // по точному вшитому смещению (см. запасной путь). Группе из нескольких
-    // слотов развязка всё ещё поможет: суммарное отклонение раскладывается
-    // однозначно.
-    const bool vague = (g.of[0]->type[0] == 'o' && g.of[0]->type[1] == 'b' &&
-                        g.of[0]->type[2] == 'j' && g.of[0]->type[3] == '\0');
+    // ОДИНОЧНОГО слота «ближайшее» было бы угадайкой. «obj1» разрешает такой
+    // сдвиг только если в живом классе ровно один ссылочный кандидат; карта
+    // может использовать его лишь когда дампы подтверждают уникальность поля.
+    // При нескольких кандидатах обе сигнатуры остаются на точном baked offset.
+    const bool generic_object = strcmp(g.of[0]->type, "obj") == 0;
+    const bool unique_object = strcmp(g.of[0]->type, "obj1") == 0;
+    const bool vague = generic_object || (unique_object && m.n != 1);
     if (m.n >= g.n && !(vague && g.n == 1)) {
         TypeAssign a;
         if (assign_type_group(g, m.off, m.n, a)) {
@@ -2179,9 +2181,9 @@ static int resolve_type_group(const TypeGroup& g, uint64_t klass) {
     // Потом — вынужденный выбор: если на оставшиеся слоты осталось ровно
     // столько же неподелённых полей, последнее поле принадлежит последнему
     // слоту по остатку. При прочих раскладах (полей больше, чем слотов) это
-    // была бы угадайка — её не делаем. Для «obj» вынужденный выбор НЕ делаем
-    // вовсе: «любой ссылочный» — половина класса, и «последнее оставшееся
-    // поле» может оказаться чем угодно.
+    // была бы угадайка — её не делаем. Для «obj» и неоднозначного «obj1»
+    // вынужденный выбор НЕ делаем вовсе: ссылочных полей может быть много,
+    // и «последнее оставшееся поле» может оказаться чем угодно.
     if (!vague) for (int s = 0; s < g.n; ++s) {
         int slots_left = 0, cands_left = 0, last = -1;
         for (int t = s; t < g.n; ++t) {

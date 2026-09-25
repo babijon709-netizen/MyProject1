@@ -566,7 +566,9 @@ static bool loot_marker(uint64_t component, const char* object_name, const char*
 
 // Elements of a managed List<T> or T[] (the dump types these fields as `?`, so
 // the shape is decided at runtime from the class name).
-int read_managed_collection(uint64_t object, uint64_t* out, int max_items) {
+int read_managed_collection(uint64_t object, uint64_t* out, int max_items,
+                            bool* collection_readable) {
+    if (collection_readable) *collection_readable = false;
     if (!valid_obj(object) || !out || max_items <= 0) return 0;
     uint64_t klass = rd_ptr(object);
     if (!valid_obj(klass)) return 0;
@@ -581,13 +583,21 @@ int read_managed_collection(uint64_t object, uint64_t* out, int max_items) {
         : valid_obj(rd_ptr(object + IL2CPP_LIST_ITEMS));
     if (is_list) {
         array = rd_ptr(object + IL2CPP_LIST_ITEMS);
-        count = rd<int32_t>(object + IL2CPP_LIST_SIZE);
-    } else {
-        count = rd<int32_t>(object + IL2CPP_ARRAY_LENGTH);
+        if (!rd_exact(object + IL2CPP_LIST_SIZE, count)) return 0;
+    } else if (!rd_exact(object + IL2CPP_ARRAY_LENGTH, count)) {
+        return 0;
     }
-    if (!valid_obj(array) || count <= 0) return 0;
+    if (!valid_obj(array) || count < 0) return 0;
+    // A correctly read zero-length List/array is different from an unreadable
+    // pointer chain. In particular, an empty roster must not masquerade as a
+    // read failure (or vice versa) in ally diagnostics.
+    if (count == 0) {
+        if (collection_readable) *collection_readable = true;
+        return 0;
+    }
     if (count > max_items) count = max_items;
     if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, out, (size_t)count * sizeof(uint64_t))) return 0;
+    if (collection_readable) *collection_readable = true;
     return count;
 }
 

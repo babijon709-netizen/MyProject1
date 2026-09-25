@@ -37,9 +37,10 @@
 
 Пятый столбец записи — сигнатура ТИПА поля из карты: как искать поле,
 когда его ИМЯ ротировано обфускатором (_BYK_k__BackingField -> _CQx_...).
-Примитив (f4/b1/u4/i4/str), «любой ссылочный» (obj) или класс по имени
-(c:Item). Резолвер сверяет её с FieldInfo.type живого класса, когда точное
-имя поля не нашлось (см. resolve_type_group в offset_resolver.cpp).
+Примитив (f4/b1/u4/i4/str), «любой ссылочный» (obj), единственное ссылочное
+поле класса (obj1) или класс по имени (c:Item). obj1 применяется только когда
+дампы подтверждают, что в целевом классе такая ссылка одна; резолвер также
+отказывается от него при нескольких runtime-кандидатах.
 
     python3 tools/offsets/gen_resolver_table.py          # переписать .inc
 """
@@ -94,8 +95,14 @@ def short_class_name(cls):
 #   f4/b1/…  — примитив: сверяется enum типа (Il2CppType, биты 16..23);
 #   str      — System.String;
 #   obj      — любой ссылочный тип (класс/массив/объект);
+#   obj1     — специальная подсказка: ровно одно ссылочное поле в классе;
 #   c:Имя    — класс/структура: сверяется klassIndex типа с byval_arg класса.
 def type_sig(entry):
+    # Narrow resolver-only hints are separate from the dump type consumed by
+    # beta_offsets.py. obj1 means one unique reference field in the target class.
+    resolver_type = entry.get('resolver_type')
+    if resolver_type:
+        return resolver_type if resolver_type == 'obj1' else ''
     t = (entry.get('type') or '').strip()
     if not t:
         return ''

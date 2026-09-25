@@ -407,13 +407,30 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                     s_seen_boxes, s_seen_bots, s_bot_noesp_skipped, s_ally_skipped, s_dead_skipped,
                     s_no_skeleton + s_bones_not_projected, s_no_skeleton, s_bones_not_projected,
                     s_offscreen_skipped, s_out_of_fov);
-            // Почему союзников 0 или сколько их: своя группа (длины строк) и
-            // запасной источник — состав команды из командного объекта.
-            int dteam = 0, dclan = 0, rval = 0, rcnt = 0;
+            // Which source can currently prove a player is an ally: local
+            // PlayerManager selection, group strings, live TeamData identity,
+            // and the exact roster-read stage.
+            int dteam = 0, dclan = 0, dtag = 0, local_ok = 0, data_ok = 0;
+            int rval = 0, rcnt = 0, rstage = ESP_ALLY_ROSTER_NOT_CHECKED;
             char rteam[32] = {};
-            esp_get_ally_diag(&dteam, &dclan, &rval, &rcnt, rteam, sizeof(rteam));
-            LogLine("аим: союзники — своя группа: команда %d симв., клан %d симв.; состав команды: %s, участников %d, команда «%s»",
-                    dteam, dclan, rval ? "найден" : "нет", rcnt, rteam);
+            esp_get_ally_diag(&dteam, &dclan, &dtag, &local_ok, &data_ok,
+                              &rval, &rcnt, &rstage, rteam, sizeof(rteam));
+            const char* stage_name = "неизвестно";
+            switch (rstage) {
+                case ESP_ALLY_ROSTER_NOT_CHECKED: stage_name = "не проверялся"; break;
+                case ESP_ALLY_ROSTER_NO_LOCAL_PLAYER: stage_name = "нет локального игрока"; break;
+                case ESP_ALLY_ROSTER_NO_TEAM_COMPONENT: stage_name = "нет team-компонента"; break;
+                case ESP_ALLY_ROSTER_NO_TEAM_DATA: stage_name = "нет team-data"; break;
+                case ESP_ALLY_ROSTER_NO_MEMBER_LIST: stage_name = "нет member-list"; break;
+                case ESP_ALLY_ROSTER_COLLECTION_UNREADABLE: stage_name = "collection не читается"; break;
+                case ESP_ALLY_ROSTER_EMPTY: stage_name = "пустой список"; break;
+                case ESP_ALLY_ROSTER_MEMBERS: stage_name = "участники прочитаны"; break;
+                case ESP_ALLY_ROSTER_MEMBER_ENTRIES_UNREADABLE: stage_name = "поля участников не читаются"; break;
+            }
+            LogLine("аим: союзники — локальный игрок %s; группа: team=%d clan=%d tag=%d симв.; team-data %s; ростер %s (%s, %d), команда «%s»",
+                    local_ok ? "подтверждён" : "не подтверждён", dteam, dclan, dtag,
+                    data_ok ? "доступен" : "нет", rval ? "прочитан" : "нет",
+                    stage_name, rcnt, rteam);
             s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
             s_ally_skipped = 0; s_dead_skipped = 0;
             s_no_skeleton = 0; s_bones_not_projected = 0;
