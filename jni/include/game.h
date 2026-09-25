@@ -157,6 +157,10 @@ void esp_get_ally_diag(int* local_team_len, int* local_clan_len, int* local_tag_
                        int* local_player_confirmed, int* team_data_available,
                        int* roster_valid, int* roster_count, int* roster_stage,
                        char* roster_team, size_t roster_team_cap);
+// Addresses/read status for the local team chain and group strings. Contents
+// are intentionally omitted; this is enough to distinguish null links from
+// failed reads without writing names or IDs into the diagnostic log.
+void esp_get_ally_diag_details(char* out, size_t cap);
 
 // ---- Автообновление оффсетов (offset_resolver.cpp) ---------------------------
 // Читает IL2CPP-метаданные живого процесса: ищет классы по именам (заменяет

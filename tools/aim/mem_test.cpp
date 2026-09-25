@@ -284,6 +284,9 @@ void esp_get_ally_diag(int* local_team_len, int* local_clan_len, int* local_tag_
     if (roster_stage) *roster_stage = 0;
     if (roster_team && roster_team_cap) roster_team[0] = '\0';
 }
+void esp_get_ally_diag_details(char* out, size_t cap) {
+    if (out && cap) out[0] = '\0';
+}
 
 // Вырезанный настоящий код режимов (см. run.sh): он должен видеть объявления
 // окружения (g_state, FrameBoxes, esp_*), поэтому включается после заглушек.

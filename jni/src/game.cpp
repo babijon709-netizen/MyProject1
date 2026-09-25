@@ -450,6 +450,83 @@ static void read_player_group(uint64_t player, PlayerGroup& out) {
 static PlayerGroup s_last_local_group;
 static bool s_last_local_player_confirmed = false;
 
+// Keep one bounded snapshot of the actual memory links used by the ally
+// classifier. The old log only reported "no team-data", which did not say
+// whether the field was null, unreadable, or pointed at a non-object.
+struct AllyPointerDiag {
+    uint64_t value = 0;
+    bool read_ok = false;
+    bool object_valid = false;
+};
+struct AllyStringDiag {
+    AllyPointerDiag object;
+    AllyPointerDiag klass;
+    int32_t length = -1;
+    int32_t max_chars = 0;
+    bool length_read = false;
+    bool text_read = false;
+};
+struct AllyRuntimeDiag {
+    uint64_t local_player = 0;
+    AllyPointerDiag local_class;
+    AllyStringDiag group_team, group_clan, group_tag;
+    AllyPointerDiag team_component, component_class, component_owner;
+    AllyPointerDiag team_data, data_class;
+    AllyStringDiag team_data_name;
+    AllyPointerDiag member_list;
+};
+static AllyRuntimeDiag s_ally_runtime_diag;
+
+static AllyPointerDiag ally_read_pointer(uint64_t object, uint64_t offset) {
+    AllyPointerDiag out{};
+    if (!valid_obj(object)) return out;
+    uint64_t raw = 0;
+    out.read_ok = rd_exact(object + offset, raw);
+    if (out.read_ok) out.value = memio::untag(raw);
+    out.object_valid = valid_obj(out.value);
+    return out;
+}
+
+static AllyStringDiag ally_read_string_field(uint64_t object, uint64_t offset,
+                                             int32_t max_chars) {
+    AllyStringDiag out{};
+    out.max_chars = max_chars;
+    out.object = ally_read_pointer(object, offset);
+    if (!out.object.object_valid) return out;
+    out.klass = ally_read_pointer(out.object.value, 0);
+    out.length_read = rd_exact(out.object.value + IL2CPP_STRING_LENGTH, out.length);
+    if (!out.length_read || out.length < 0 || out.length > max_chars) return out;
+    if (out.length == 0) {
+        // A valid managed empty string has no character payload to read.
+        out.text_read = true;
+        return out;
+    }
+    char scratch[256] = {};
+    out.text_read = read_managed_string_ex(out.object.value, scratch,
+                                            sizeof(scratch), max_chars);
+    return out;
+}
+
+static AllyRuntimeDiag capture_ally_runtime_diag(uint64_t local_player) {
+    AllyRuntimeDiag out{};
+    out.local_player = local_player;
+    if (!valid_obj(local_player)) return out;
+    out.local_class = ally_read_pointer(local_player, 0);
+    out.group_team = ally_read_string_field(local_player, PLAYER_TEAM_NAME, 39);
+    out.group_clan = ally_read_string_field(local_player, PLAYER_CLAN_ID, 47);
+    out.group_tag = ally_read_string_field(local_player, PLAYER_CLAN_TAG, 15);
+    out.team_component = ally_read_pointer(local_player, PLAYER_TEAM_OBJECT);
+    if (!out.team_component.object_valid) return out;
+    out.component_class = ally_read_pointer(out.team_component.value, 0);
+    out.component_owner = ally_read_pointer(out.team_component.value, TEAM_OBJECT_PLAYER);
+    out.team_data = ally_read_pointer(out.team_component.value, TEAM_OBJECT_DATA);
+    if (!out.team_data.object_valid) return out;
+    out.data_class = ally_read_pointer(out.team_data.value, 0);
+    out.team_data_name = ally_read_string_field(out.team_data.value, TEAM_DATA_NAME, 31);
+    out.member_list = ally_read_pointer(out.team_data.value, TEAM_DATA_MEMBERS);
+    return out;
+}
+
 // ---- Team roster and live team-object identity ------------------------------
 // PlayerManager.team points to a NetworkBehaviour; its team-data object carries
 // the member list and team name. Keep the last confirmed roster over transient
@@ -478,6 +555,7 @@ static void team_roster_revalidate(uint64_t local_player) {
         roster = TeamRoster{};
         roster.owner = local_player;
     }
+    s_ally_runtime_diag = capture_ally_runtime_diag(local_player);
     if (!valid_obj(local_player)) {
         roster.stage = ESP_ALLY_ROSTER_NO_LOCAL_PLAYER;
         return;
@@ -494,13 +572,17 @@ static void team_roster_revalidate(uint64_t local_player) {
         }
     };
 
-    const uint64_t teamc = rd_ptr(local_player + PLAYER_TEAM_OBJECT);
-    if (!valid_obj(teamc)) {
+    // Use the same exact-read snapshot that is printed in the diagnostic log,
+    // so a reported null/fault is precisely the value that stopped the roster.
+    const AllyPointerDiag& component_field = s_ally_runtime_diag.team_component;
+    const uint64_t teamc = component_field.value;
+    if (!component_field.read_ok || !component_field.object_valid) {
         missed(ESP_ALLY_ROSTER_NO_TEAM_COMPONENT, true);
         return;
     }
-    const uint64_t data = rd_ptr(teamc + TEAM_OBJECT_DATA);
-    if (!valid_obj(data)) {
+    const AllyPointerDiag& data_field = s_ally_runtime_diag.team_data;
+    const uint64_t data = data_field.value;
+    if (!data_field.read_ok || !data_field.object_valid) {
         missed(ESP_ALLY_ROSTER_NO_TEAM_DATA, true);
         return;
     }
@@ -510,13 +592,16 @@ static void team_roster_revalidate(uint64_t local_player) {
     if (roster.team_data != data) roster.team_name[0] = '\0';
     roster.team_data = data;
     char live_team_name[32] = {};
-    if (read_managed_string_ex(rd_ptr(data + TEAM_DATA_NAME), live_team_name,
+    const AllyStringDiag& team_name_field = s_ally_runtime_diag.team_data_name;
+    if (team_name_field.object.read_ok && team_name_field.object.object_valid &&
+        read_managed_string_ex(team_name_field.object.value, live_team_name,
                                sizeof(live_team_name), 31) && live_team_name[0]) {
         snprintf(roster.team_name, sizeof(roster.team_name), "%s", live_team_name);
     }
 
-    const uint64_t member_list = rd_ptr(data + TEAM_DATA_MEMBERS);
-    if (!valid_obj(member_list)) {
+    const AllyPointerDiag& members_field = s_ally_runtime_diag.member_list;
+    const uint64_t member_list = members_field.value;
+    if (!members_field.read_ok || !members_field.object_valid) {
         missed(ESP_ALLY_ROSTER_NO_MEMBER_LIST, false);
         return;
     }
@@ -637,6 +722,97 @@ void esp_get_ally_diag(int* local_team_len, int* local_clan_len, int* local_tag_
     if (roster_stage) *roster_stage = s_team_roster.stage;
     if (roster_team && roster_team_cap > 0)
         snprintf(roster_team, roster_team_cap, "%s", s_team_roster.team_name);
+}
+
+static const char* ally_diag_string_state(const AllyStringDiag& value) {
+    if (!value.object.read_ok) return "slot-read-fail";
+    if (!value.object.value) return "null";
+    if (!value.object.object_valid) return "bad-object";
+    if (!value.klass.read_ok || !value.klass.object_valid) return "bad-class";
+    if (!value.length_read) return "length-read-fail";
+    if (value.length < 0) return "bad-length";
+    if (value.length > value.max_chars) return "over-limit";
+    if (value.length == 0) return "empty";
+    return value.text_read ? "read-ok" : "chars-read-fail";
+}
+
+static void ally_diag_class_name(uint64_t klass, char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!valid_obj(klass)) {
+        snprintf(out, cap, "invalid");
+        return;
+    }
+    uint64_t raw_name = 0;
+    if (!g_mem.read_quiet(klass + IL2CPP_CLASS_NAME, &raw_name, sizeof(raw_name))) {
+        snprintf(out, cap, "name-ptr-fault");
+        return;
+    }
+    const uint64_t name_ptr = memio::untag(raw_name);
+    if (!name_ptr) {
+        snprintf(out, cap, "name-null");
+        return;
+    }
+    size_t n = 0;
+    while (n + 1 < cap) {
+        char ch = '\0';
+        if (!g_mem.read_quiet(name_ptr + n, &ch, sizeof(ch))) break;
+        if (ch == '\0') break;
+        out[n++] = ch;
+    }
+    out[n] = '\0';
+    if (n == 0) snprintf(out, cap, "name-unreadable");
+}
+
+void esp_get_ally_diag_details(char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    const AllyRuntimeDiag& d = s_ally_runtime_diag;
+    const char* owner_match = !d.component_owner.read_ok ? "unknown"
+        : (d.component_owner.value == d.local_player ? "yes" : "no");
+    char local_class_name[48] = {}, component_class_name[48] = {}, data_class_name[48] = {};
+    ally_diag_class_name(d.local_class.value, local_class_name, sizeof(local_class_name));
+    ally_diag_class_name(d.component_class.value, component_class_name, sizeof(component_class_name));
+    ally_diag_class_name(d.data_class.value, data_class_name, sizeof(data_class_name));
+    snprintf(out, cap,
+        "offs[PM.team=0x%llx teamName=0x%llx clanId=0x%llx clanTag=0x%llx "
+        "TC.player=0x%llx TC.team=0x%llx TD.name=0x%llx TD.members=0x%llx]; "
+        "local=0x%llx class=0x%llx(%s,read=%s); "
+        "strings[teamName ptr=0x%llx len=%d %s; clanId ptr=0x%llx len=%d %s; "
+        "clanTag ptr=0x%llx len=%d %s]; "
+        "chain[PM.team read=%s ptr=0x%llx obj=%d class=0x%llx(%s); "
+        "TC.player read=%s ptr=0x%llx self=%s; "
+        "TC.team read=%s ptr=0x%llx obj=%d class=0x%llx(%s); "
+        "TD.name ptr=0x%llx len=%d %s; members read=%s ptr=0x%llx obj=%d]",
+        (unsigned long long)PLAYER_TEAM_OBJECT,
+        (unsigned long long)PLAYER_TEAM_NAME,
+        (unsigned long long)PLAYER_CLAN_ID,
+        (unsigned long long)PLAYER_CLAN_TAG,
+        (unsigned long long)TEAM_OBJECT_PLAYER,
+        (unsigned long long)TEAM_OBJECT_DATA,
+        (unsigned long long)TEAM_DATA_NAME,
+        (unsigned long long)TEAM_DATA_MEMBERS,
+        (unsigned long long)d.local_player,
+        (unsigned long long)d.local_class.value,
+        local_class_name,
+        d.local_class.read_ok ? "ok" : "fail",
+        (unsigned long long)d.group_team.object.value, d.group_team.length,
+        ally_diag_string_state(d.group_team),
+        (unsigned long long)d.group_clan.object.value, d.group_clan.length,
+        ally_diag_string_state(d.group_clan),
+        (unsigned long long)d.group_tag.object.value, d.group_tag.length,
+        ally_diag_string_state(d.group_tag),
+        d.team_component.read_ok ? "ok" : "fail",
+        (unsigned long long)d.team_component.value, d.team_component.object_valid ? 1 : 0,
+        (unsigned long long)d.component_class.value, component_class_name,
+        d.component_owner.read_ok ? "ok" : "fail",
+        (unsigned long long)d.component_owner.value, owner_match,
+        d.team_data.read_ok ? "ok" : "fail",
+        (unsigned long long)d.team_data.value, d.team_data.object_valid ? 1 : 0,
+        (unsigned long long)d.data_class.value, data_class_name,
+        (unsigned long long)d.team_data_name.object.value,
+        d.team_data_name.length, ally_diag_string_state(d.team_data_name),
+        d.member_list.read_ok ? "ok" : "fail",
+        (unsigned long long)d.member_list.value, d.member_list.object_valid ? 1 : 0);
 }
 
 static bool player_display_name(uint64_t player, char* out, size_t cap) {
@@ -7200,6 +7376,9 @@ static void reset_world_caches() {
     g_player_aux.clear();
     g_player_text.clear();
     s_team_roster = TeamRoster{};
+    s_last_local_group = PlayerGroup{};
+    s_last_local_player_confirmed = false;
+    s_ally_runtime_diag = AllyRuntimeDiag{};
     g_player_track.clear();
     g_player_track_pick.clear();
     g_frame_transforms_lost.clear();
@@ -7243,6 +7422,9 @@ void esp_reset() {
     g_player_aux.clear();
     g_player_text.clear();
     s_team_roster = TeamRoster{};
+    s_last_local_group = PlayerGroup{};
+    s_last_local_player_confirmed = false;
+    s_ally_runtime_diag = AllyRuntimeDiag{};
     g_player_track.clear();
     g_player_track_pick.clear();
     g_frame_transforms_lost.clear();
@@ -7915,6 +8097,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         s_last_local_group = PlayerGroup{};
         s_team_roster = TeamRoster{};
         s_team_roster.stage = ESP_ALLY_ROSTER_NO_LOCAL_PLAYER;
+        s_ally_runtime_diag = AllyRuntimeDiag{};
     }
 
     // Firing reference for the aimbot (local look direction + eye point).

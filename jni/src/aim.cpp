@@ -431,6 +431,10 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                     local_ok ? "подтверждён" : "не подтверждён", dteam, dclan, dtag,
                     data_ok ? "доступен" : "нет", rval ? "прочитан" : "нет",
                     stage_name, rcnt, rteam);
+            char ally_details[1536] = {};
+            esp_get_ally_diag_details(ally_details, sizeof(ally_details));
+            if (ally_details[0])
+                LogLine("аим: союзники — поля и указатели: %s", ally_details);
             s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
             s_ally_skipped = 0; s_dead_skipped = 0;
             s_no_skeleton = 0; s_bones_not_projected = 0;

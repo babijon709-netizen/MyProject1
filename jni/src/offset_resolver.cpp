@@ -2922,6 +2922,29 @@ static void log_summary() {
             (unsigned long long)s_ptr_verified,
             s_from_cache ? " [из кэша первого входа]" : "");
 
+    // The global count above does not prove that the particular team fields
+    // used by the ally classifier were resolved. Print these slots explicitly
+    // so runtime data can be separated from a baked fallback.
+    auto offset_applied = [](const std::uint64_t* slot) {
+        for (int i = 0; i < s_applied_count; ++i)
+            if (s_applied[i].slot == slot) return true;
+        return false;
+    };
+    auto offset_source = [&](const std::uint64_t* slot) {
+        return offset_applied(slot) ? "applied" : "baked";
+    };
+    LogLine("автооффсеты: союзники — PlayerManager.team=0x%llx(%s) teamName=0x%llx(%s) "
+            "clanId=0x%llx(%s) clanTag=0x%llx(%s); TeamComponent.player=0x%llx(%s) "
+            "team=0x%llx(%s); TeamData.name=0x%llx(%s) members=0x%llx(%s)",
+            (unsigned long long)PLAYER_TEAM_OBJECT, offset_source(&PLAYER_TEAM_OBJECT),
+            (unsigned long long)PLAYER_TEAM_NAME, offset_source(&PLAYER_TEAM_NAME),
+            (unsigned long long)PLAYER_CLAN_ID, offset_source(&PLAYER_CLAN_ID),
+            (unsigned long long)PLAYER_CLAN_TAG, offset_source(&PLAYER_CLAN_TAG),
+            (unsigned long long)TEAM_OBJECT_PLAYER, offset_source(&TEAM_OBJECT_PLAYER),
+            (unsigned long long)TEAM_OBJECT_DATA, offset_source(&TEAM_OBJECT_DATA),
+            (unsigned long long)TEAM_DATA_NAME, offset_source(&TEAM_DATA_NAME),
+            (unsigned long long)TEAM_DATA_MEMBERS, offset_source(&TEAM_DATA_MEMBERS));
+
     build_wanted_names();
     char missing_buf[384] = {};
     size_t mpos = 0;
