@@ -87,7 +87,19 @@ GateResult check_status(const DeviceIdentity& identity, bool register_device) {
             start = end + 1;
         }
     }
-    if (curl_path.empty()) { close(pipefd[0]); close(pipefd[1]); return GateResult::unavailable; }
+    // `su -c` often resets PATH to system directories even when curl is
+    // installed in Termux. Try only known absolute locations as a fallback.
+    if (curl_path.empty()) {
+        for (const char* candidate : {"/system/bin/curl",
+                                      "/data/data/com.termux/files/usr/bin/curl"}) {
+            if (access(candidate, X_OK) == 0) { curl_path = candidate; break; }
+        }
+    }
+    if (curl_path.empty()) {
+        close(pipefd[0]); close(pipefd[1]);
+        std::fprintf(stderr, "benzware: curl not found in root PATH or standard Termux path\n");
+        return GateResult::unavailable;
+    }
     // No shell, no redirects, no HTTP downgrade, no user-controlled proxy.
     // curl verifies HTTPS using the device/Termux trust store by default.
     char* const args[] = {

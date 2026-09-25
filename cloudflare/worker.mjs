@@ -95,7 +95,7 @@ async function sendTelegram(env, chatId, text) {
 
 // New binaries send only the digest, not the raw Android ID. Registration is
 // one-time per process; heartbeat requests never write device records.
-async function deviceAuth(request, env) {
+async function deviceAuth(request, env, ctx) {
   if (!env.CONTROL_DB) return reply('disabled', 503); // bans require D1
   if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json'))
     return reply('disabled', 415);
@@ -113,19 +113,26 @@ async function deviceAuth(request, env) {
     return reply('disabled', 400);
   const name = data.name.trim().replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 80) || 'Android device';
   try {
-    if (data.register) {
+    // Do not consume D1 writes on every restart of an already registered
+    // device. A write-limit error on an unnecessary INSERT OR IGNORE should
+    // not keep an existing, unbanned device from starting.
+    let device = await env.CONTROL_DB.prepare(
+      'SELECT banned FROM benzware_devices WHERE hwid = ?'
+    ).bind(data.hwid).first();
+    if (data.register && !device) {
       const result = await env.CONTROL_DB.prepare(
         'INSERT OR IGNORE INTO benzware_devices (hwid, name) VALUES (?, ?)'
       ).bind(data.hwid, name).run();
       if (result?.success === false) throw Error('D1 write failed');
       if (result?.meta?.changes === 1 && /^\d+$/.test(String(env.TELEGRAM_ADMIN_ID ?? '')))
-        await sendTelegram(env, env.TELEGRAM_ADMIN_ID,
-          `📱 <b>Новое устройство</b>\n${escapeHtml(name)}\nHWID: <code>${data.hwid}</code>\n/ban ${data.hwid}`);
+        // Telegram API latency must never hold up the 8-second device timeout.
+        ctx?.waitUntil(sendTelegram(env, env.TELEGRAM_ADMIN_ID,
+          `📱 <b>Новое устройство</b>\n${escapeHtml(name)}\nHWID: <code>${data.hwid}</code>\n/ban ${data.hwid}`));
+      device = await env.CONTROL_DB.prepare(
+        'SELECT banned FROM benzware_devices WHERE hwid = ?'
+      ).bind(data.hwid).first();
     }
     const status = await readSwitch(env);
-    const device = await env.CONTROL_DB.prepare(
-      'SELECT banned FROM benzware_devices WHERE hwid = ?'
-    ).bind(data.hwid).first();
     const allowed = status === 'enabled' && device?.banned === 0;
     if (allowed) {
       // Presence is best-effort. A missing table or a D1 write limit must
@@ -287,7 +294,7 @@ async function telegramWebhook(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const { pathname } = new URL(request.url);
     if (pathname === '/status' && request.method === 'GET') {
       try {
@@ -299,7 +306,7 @@ export default {
     if (pathname === '/telegram' && request.method === 'POST')
       return telegramWebhook(request, env);
     if (pathname === '/auth' && request.method === 'POST')
-      return deviceAuth(request, env);
+      return deviceAuth(request, env, ctx);
     if (pathname === '/admin' && request.method === 'POST') {
       const auth = request.headers.get('authorization') || '';
       if (!auth.startsWith('Bearer ') ||

@@ -28,6 +28,8 @@ let d1Value = 0;
 const devices = new Map();
 const presence = new Map();
 let presenceWrites = 0;
+let registrationWrites = 0;
+let rejectRegistration = false;
 const rowFor = (d) => ({ ...d, last_seen: presence.get(d.hwid) ?? null });
 const d1 = {
   prepare(query) {
@@ -42,6 +44,8 @@ const d1 = {
     if (query.startsWith('INSERT OR IGNORE INTO benzware_devices')) return {
       bind(hwid, name) { return {
         async run() {
+          registrationWrites++;
+          if (rejectRegistration) throw Error('D1 registration writes unavailable');
           if (devices.has(hwid)) return { success: true, meta: { changes: 0 } };
           devices.set(hwid, { hwid, name, banned: 0 });
           return { success: true, meta: { changes: 1 } };
@@ -103,7 +107,8 @@ const d1Env = { ...env, CONTROL_DB: d1, CONTROL: {
   get() { throw Error('KV must not be read with D1 bound'); },
   put() { throw Error('KV must not be written with D1 bound'); },
 } };
-const d1Call = (path, init) => worker.fetch(new Request('https://example.workers.dev' + path, init), d1Env);
+const ctx = { waitUntil(promise) { promise.catch(() => {}); } };
+const d1Call = (path, init) => worker.fetch(new Request('https://example.workers.dev' + path, init), d1Env, ctx);
 const nonce = '0123456789abcdef0123456789abcdef';
 const auth = (hwid, name, register = true, req = d1Call) => req('/auth', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -190,6 +195,13 @@ try {
   const notifications = sent.length;
   assert.equal(await (await auth(hwid, 'Pixel 8')).text(), 'enabled:' + nonce + '\n');
   assert.equal(sent.length, notifications); // Only first registration notifies.
+  assert.equal(registrationWrites, 1); // Existing device uses a read, never writes at startup.
+  rejectRegistration = true;
+  assert.equal(await (await auth(hwid, 'Pixel 8')).text(), 'enabled:' + nonce + '\n');
+  assert.equal(registrationWrites, 1);
+  assert.equal((await auth('e'.repeat(64), 'Not registered')).status, 503);
+  rejectRegistration = false;
+  assert.equal(sent.length, notifications);
   assert.equal(await (await auth('b'.repeat(64), 'Unknown', false)).text(), 'disabled\n');
   assert.equal((await d1Telegram('/devices')).status, 200);
   assert.match(sent.at(-1).body.text, /Pixel 8/);
@@ -230,6 +242,25 @@ try {
   assert.match(sent.at(-1).body.text, /&lt;b&gt;Bad &amp; Name&lt;\/b&gt;/);
   assert.equal((await d1Telegram('/device ' + badHwid)).status, 200);
   assert.match(sent.at(-1).body.text, /&lt;b&gt;Bad &amp; Name&lt;\/b&gt;/);
+  // Slow Telegram API must not delay a first-time device authorization.
+  let releaseTelegram;
+  const fastFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    sent.push({ url, body: JSON.parse(init.body) });
+    return new Promise(resolve => { releaseTelegram = resolve; });
+  };
+  try {
+    let timer;
+    const firstAuth = auth('d'.repeat(64), 'Slow Telegram').then(r => r.text());
+    const result = await Promise.race([firstAuth, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Error('auth waited for Telegram')), 1000);
+    })]);
+    clearTimeout(timer);
+    assert.equal(result, 'enabled:' + nonce + '\n');
+  } finally {
+    releaseTelegram?.(new Response('{"ok":true}', { status: 200 }));
+    globalThis.fetch = fastFetch;
+  }
   assert.equal((await d1Telegram('/devices 0')).status, 200);
   assert.match(sent.at(-1).body.text, /Укажите номер страницы/);
   for (let i = 0; i < 7; ++i) {
