@@ -1,11 +1,36 @@
-// Cloudflare Worker + KV binding CONTROL. No secret is present in this file.
-// If KV is empty, missing, or unavailable, status is disabled (fail closed).
+// Cloudflare Worker with optional D1 binding CONTROL_DB (preferred) or legacy KV
+// binding CONTROL. No secret is present in this file. Failed reads deny access.
 const headers = {
   'content-type': 'text/plain; charset=utf-8',
   'cache-control': 'no-store, max-age=0',
   'x-content-type-options': 'nosniff',
 };
 const help = 'Команды: /on — включить, /off — выключить, /status — проверить, /help — помощь.';
+
+// D1 uses primary reads without the Sessions API. Use it when bound for
+// near-immediate revocation; KV is kept only for installations not migrated yet.
+// Never fall back to KV if a configured D1 binding errors (fail closed).
+async function readSwitch(env) {
+  if (env.CONTROL_DB) {
+    const row = await env.CONTROL_DB.prepare(
+      'SELECT enabled FROM benzware_control WHERE id = 1').first();
+    return row?.enabled === 1 ? 'enabled' : 'disabled';
+  }
+  const value = await env.CONTROL.get('enabled', { cacheTtl: 30 });
+  return value === 'enabled' ? 'enabled' : 'disabled';
+}
+
+async function writeSwitch(env, value) {
+  if (env.CONTROL_DB) {
+    const result = await env.CONTROL_DB.prepare(
+      'INSERT INTO benzware_control (id, enabled) VALUES (1, ?) '
+      + 'ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled'
+    ).bind(value === 'enabled' ? 1 : 0).run();
+    if (result?.success === false) throw Error('D1 write failed');
+    return;
+  }
+  await env.CONTROL.put('enabled', value);
+}
 
 function reply(text, status = 200) {
   return new Response(text + '\n', { status, headers });
@@ -68,15 +93,15 @@ async function telegramWebhook(request, env) {
   try {
     if (bareCommand === '/on' || bareCommand === '/off') {
       const value = bareCommand === '/on' ? 'enabled' : 'disabled';
-      await env.CONTROL.put('enabled', value);
-      answer = value === 'enabled' ? 'Включено. Изменение KV может примениться с задержкой.'
-        : 'Выключено. Изменение KV может примениться с задержкой.';
+      await writeSwitch(env, value);
+      answer = value === 'enabled' ? 'Включено. Проверьте /status.'
+        : 'Выключено. Проверьте /status.';
     } else if (bareCommand === '/status') {
-      const value = await env.CONTROL.get('enabled');
+      const value = await readSwitch(env);
       answer = value === 'enabled' ? 'Статус: включено.' : 'Статус: выключено.';
     }
   } catch (_) {
-    answer = 'Ошибка Cloudflare KV: действие не подтверждено. Проверьте /status позднее.';
+    answer = 'Ошибка хранилища Cloudflare: действие не подтверждено. Проверьте /status позднее.';
   }
   await sendTelegram(env, chat.id, answer);
   return reply('ok');
@@ -87,8 +112,7 @@ export default {
     const { pathname } = new URL(request.url);
     if (pathname === '/status' && request.method === 'GET') {
       try {
-        const value = await env.CONTROL.get('enabled');
-        return reply(value === 'enabled' ? 'enabled' : 'disabled');
+        return reply(await readSwitch(env));
       } catch (_) {
         return reply('disabled', 503);
       }
@@ -113,7 +137,7 @@ export default {
       if (typeof data?.enabled !== 'boolean' || Object.keys(data).length !== 1)
         return reply('expected {"enabled":true|false}', 400);
       try {
-        await env.CONTROL.put('enabled', data.enabled ? 'enabled' : 'disabled');
+        await writeSwitch(env, data.enabled ? 'enabled' : 'disabled');
         return reply(data.enabled ? 'enabled' : 'disabled');
       } catch (_) {
         return reply('storage error', 503);

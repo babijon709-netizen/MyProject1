@@ -19,7 +19,10 @@ extern std::atomic<bool> main_thread_flag;
 extern char **environ;
 
 namespace {
-constexpr int kIntervalSeconds = 30;
+#ifndef BENZWARE_POLL_SECONDS
+#define BENZWARE_POLL_SECONDS 10
+#endif
+constexpr int kIntervalSeconds = BENZWARE_POLL_SECONDS;
 constexpr auto kTimeout = std::chrono::seconds(10);
 
 bool check_status() {

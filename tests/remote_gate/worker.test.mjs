@@ -23,6 +23,36 @@ assert.equal(await (await call('/status')).text(), 'enabled\n');
 assert.equal((await post(env.ADMIN_TOKEN, '{"enabled":false}')).status, 200);
 assert.equal(await (await call('/status')).text(), 'disabled\n');
 assert.equal((await call('/admin', {method:'GET'})).status, 404);
+// Optional D1 migration: reads come from the primary, never from stale KV.
+let d1Value = 0;
+const d1 = {
+  prepare(query) {
+    if (query.startsWith('SELECT')) return {
+      async first() { return { enabled: d1Value }; },
+    };
+    if (query.startsWith('INSERT')) return {
+      bind(enabled) { return {
+        async run() { d1Value = enabled; return { success: true }; },
+      }; },
+    };
+    throw Error('Unexpected SQL: ' + query);
+  },
+};
+const d1Env = { ...env, CONTROL_DB: d1, CONTROL: {
+  get() { throw Error('KV must not be read with D1 bound'); },
+  put() { throw Error('KV must not be written with D1 bound'); },
+} };
+const d1Call = (path, init) => worker.fetch(new Request('https://example.workers.dev' + path, init), d1Env);
+assert.equal(await (await d1Call('/status')).text(), 'disabled\n');
+assert.equal((await d1Call('/admin', {
+  method: 'POST', headers: { Authorization: 'Bearer ' + env.ADMIN_TOKEN, 'Content-Type': 'application/json' },
+  body: '{"enabled":true}',
+})).status, 200);
+assert.equal(await (await d1Call('/status')).text(), 'enabled\n');
+assert.equal((await worker.fetch(new Request('https://example.workers.dev/status'), {
+  ...env, CONTROL_DB: { prepare() { throw Error('D1 unavailable'); } },
+})).status, 503); // No fallback to a potentially enabled/stale KV value.
+
 assert.equal((await worker.fetch(new Request('https://example.workers.dev/status'), {
   CONTROL: { get() { throw Error('KV unavailable'); } }, ADMIN_TOKEN: env.ADMIN_TOKEN,
 })).status, 503);
@@ -62,6 +92,19 @@ try {
   assert.equal(state, 'disabled');
   assert.equal((await telegram('/help')).status, 200);
   assert.match(sent.at(-1).body.text, /\/on/);
+  const d1Telegram = (text) => d1Call('/telegram', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json',
+      'X-Telegram-Bot-Api-Secret-Token': env.TELEGRAM_WEBHOOK_SECRET },
+    body: JSON.stringify({ message: {
+      from: { id: 123456 }, chat: { id: 123456, type: 'private' }, text,
+    } }),
+  });
+  assert.equal((await d1Telegram('/off')).status, 200);
+  assert.equal(await (await d1Call('/status')).text(), 'disabled\n');
+  assert.equal((await d1Telegram('/on')).status, 200);
+  assert.equal(await (await d1Call('/status')).text(), 'enabled\n');
+
   assert.equal((await call('/telegram', { method: 'GET' })).status, 404);
 } finally {
   globalThis.fetch = realFetch;
