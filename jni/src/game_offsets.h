@@ -406,11 +406,12 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD9C4570;
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x28;
 
-// System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
-// _fastModMultiplier): _buckets 0x10, _entries 0x18, _count 0x20, _freeList 0x24.
-// Entry { int hashCode; int next; uint key; object value; } -> 24 bytes.
+// System.Collections.Generic.Dictionary<TKey, TValue> (both game dumps):
+// _buckets 0x10, _entries 0x18, _count 0x20, _freeList 0x24.
+// Entry { int hashCode; int next; TKey key; TValue value; } -> 24 bytes.
 inline constexpr std::uint64_t DICT_ENTRIES      = 0x18;
 inline constexpr std::uint64_t DICT_COUNT        = 0x20;
+inline constexpr std::uint64_t DICT_ENTRY_KEY    = 0x08;
 inline constexpr std::uint64_t DICT_ENTRY_STRIDE = 0x18;
 inline constexpr std::uint64_t DICT_ENTRY_VALUE  = 0x10;
 
@@ -571,29 +572,31 @@ enum class MineableEntityType : std::int32_t {
 };
 
 // ---- Team / clan membership (Oxide.PlayerManager, dump.cs) ------------------
-// All three are Mirror SyncVars (they have _Mirror_SyncVarHookDelegate_* twins
-// at 0x378/0x390/0x398), so every client sees them for every player.
+// Best-effort replicated group fields. Some modes/builds leave teamName or
+// clanId empty on remote PlayerManagers, so ESP/aim also checks live team data.
 inline constexpr std::uint64_t PLAYER_USER_ID   = 0x278; // string userID (unique per account)
 inline constexpr std::uint64_t PLAYER_TEAM_NAME = 0x280; // string teamName
 inline constexpr std::uint64_t PLAYER_CLAN_ID   = 0x290; // string clanId
 inline constexpr std::uint64_t PLAYER_CLAN_TAG  = 0x298; // string clanTag
+inline constexpr std::uint64_t PLAYER_NETWORK_IDENTITY = 0x40; // Mirror.NetworkBehaviour.<netIdentity>
 
 // ---- Состав своей команды (запасной признак союзника) ------------------------
 // У локального игрока на команде висит отдельный Mirror.NetworkBehaviour
-// (euD в релизе, Reo в бете): в нём объект команды — две строки и список
-// участников (TeamMember: id/clanTag/nick/lvl/netId). Список заполняется
-// серверными сообщениями и живёт независимо от того, синхронизированы ли
-// строки teamName у чужих игроков; сравнение ников из него с видимым ником
-// игрока — второй, независимый способ сказать «свой».
-// Оба дампа (релиз и бета) дают одинаковую раскладку.
+// (euD в релизе, Reo в бете). Основной источник — объект команды с roster
+// (TeamMember: id/clanTag/nick/lvl/netId); если TeamData/member list отсутствует
+// или не читается, используется TeammateStates (Dictionary<string,
+// TeammateStatus>) в том же компоненте. Оба источника сверяются по userID. Оба дампа
+// (релиз и бета) дают одинаковые смещения полей.
 inline constexpr std::uint64_t PLAYER_TEAM_OBJECT    = 0x120; // euD/Reo team (NetworkBehaviour)
-inline constexpr std::uint64_t TEAM_OBJECT_PLAYER    = 0x80;  // обратная ссылка на свой PlayerManager
+inline constexpr std::uint64_t TEAM_OBJECT_STATES    = 0x70;  // Dictionary<string, TeammateStatus>
+inline constexpr std::uint64_t TEAM_OBJECT_PLAYER    = 0x80;  // дополнительная owner-ссылка; не hard gate для ростера
 inline constexpr std::uint64_t TEAM_OBJECT_DATA      = 0x90;  // объект команды (wa / nX)
 inline constexpr std::uint64_t TEAM_DATA_NAME        = 0x10;  // string: имя команды
 inline constexpr std::uint64_t TEAM_DATA_MEMBERS     = 0x20;  // List<TeamMember>
 inline constexpr std::uint64_t TEAM_MEMBER_ID        = 0x10;  // string id (userID аккаунта)
 inline constexpr std::uint64_t TEAM_MEMBER_CLAN_TAG  = 0x18;  // string clanTag
 inline constexpr std::uint64_t TEAM_MEMBER_NICK      = 0x20;  // string nick (видимый ник)
+inline constexpr std::uint64_t TEAM_MEMBER_NET_ID    = 0x2C;  // uint32 Mirror.NetworkIdentity.netId
 
 // Vehicles: both are SyncVars (uint netId of the vehicle / index of the seat),
 // zero while the player is on foot. A mounted player stops updating

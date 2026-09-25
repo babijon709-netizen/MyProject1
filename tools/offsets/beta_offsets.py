@@ -81,6 +81,17 @@ DECL_RE = re.compile(
 # Значение из строки объявления → int (смещения) или float (не смещения).
 NUM_RE = re.compile(r'0x[0-9A-Fa-f]+|\d+(?:\.\d+)?')
 
+# Shared Il2CppType layout constants are forwarded directly from
+# game_offsets.h in game_offsets_active.h; they must not also be emitted as
+# active variables (that would conflict with its using-declarations).
+SHARED_RUNTIME_FIELDS = {
+    'IL2CPP_CLASS_BYVAL_ARG', 'IL2CPP_TYPE_BITS', 'IL2CPP_TYPE_BOOLEAN',
+    'IL2CPP_TYPE_I2', 'IL2CPP_TYPE_I4', 'IL2CPP_TYPE_U4', 'IL2CPP_TYPE_R4',
+    'IL2CPP_TYPE_STRING', 'IL2CPP_TYPE_PTR', 'IL2CPP_TYPE_VALUETYPE',
+    'IL2CPP_TYPE_CLASS', 'IL2CPP_TYPE_ARRAY', 'IL2CPP_TYPE_GENERICINST',
+    'IL2CPP_TYPE_OBJECT', 'IL2CPP_TYPE_SZARRAY',
+}
+
 
 def load_module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -529,8 +540,9 @@ def write_beta_header(rel_text, values, changes, runtime, rva_consts, note, stam
 def write_active_inc(rel_decls, stamp):
     """Таблица для переключателя: пара «имя → значение беты».
 
-    Для каждой константы заголовка пишется одна строка, и вид строки зависит
-    от того, что это за константа:
+    Для каждой переключаемой константы заголовка пишется одна строка, и вид
+    строки зависит от того, что это за константа. Общие поля раскладки Il2CppType
+    в таблицу не попадают: game_offsets_active.h пробрасывает их через using.
 
       * GO_FIELD — смещение (std::uint64_t): попадает и в таблицу переключения
         (значение релиза берётся из game_offsets.h, значение беты — из
@@ -597,6 +609,8 @@ def main():
     rel = lay.Dump(os.path.join(rel_dir, 'il2cpp.h'))
     rel_text = open(HEADER, encoding='utf-8').read()
     rel_vals, rel_decls = read_header(HEADER)
+    rel_decls = [(kind, name) for kind, name in rel_decls
+                 if name not in SHARED_RUNTIME_FIELDS]
     stamp = time.strftime('%d.%m.%Y')
 
     if beta_dir is None:

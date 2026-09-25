@@ -150,7 +150,10 @@ int main() {
     }
 
     // 3) Кэш блоков: мелкие чтения внутри блока — один syscall.
+    const uint64_t generation_before = r.frame_generation();
     r.frame_begin();
+    check(r.frame_generation() == generation_before + 1,
+          "frame generation advances once at frame_begin");
     r.reset_stats();
     {
         bool ok = true;

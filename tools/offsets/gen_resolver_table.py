@@ -8,8 +8,10 @@
 КАКУЮ константу (слот в go_active) каким (класс, поле) заполнять.
 
 Источник — tools/offsets/offsets_map.json (карта «константа -> класс/поле»,
-которой пользуется и beta_offsets.py). Берём только записи вида «поле класса»
-со стабильными именами:
+которой пользуется и beta_offsets.py). Берём записи kind=field, а также
+kind=runtime с resolver_class/resolver_field для generic-полей, у которых
+il2cpp.h не печатает byte offsets (например, Dictionary<TKey,TValue>). Имена
+классов/полей должны быть стабильными:
 
   * классы, чьи имена РОТИРУЮТ обфускатором (помечены в карте «имя
     ротирует», а также короткие обфусцированные имена), пропускаем — такие
@@ -37,9 +39,10 @@
 
 Пятый столбец записи — сигнатура ТИПА поля из карты: как искать поле,
 когда его ИМЯ ротировано обфускатором (_BYK_k__BackingField -> _CQx_...).
-Примитив (f4/b1/u4/i4/str), «любой ссылочный» (obj) или класс по имени
-(c:Item). Резолвер сверяет её с FieldInfo.type живого класса, когда точное
-имя поля не нашлось (см. resolve_type_group в offset_resolver.cpp).
+Примитив (f4/b1/u4/i4/str), «любой ссылочный» (obj), единственное ссылочное
+поле класса (obj1) или класс по имени (c:Item). obj1 применяется только когда
+дампы подтверждают, что в целевом классе такая ссылка одна; резолвер также
+отказывается от него при нескольких runtime-кандидатах.
 
     python3 tools/offsets/gen_resolver_table.py          # переписать .inc
 """
@@ -94,8 +97,14 @@ def short_class_name(cls):
 #   f4/b1/…  — примитив: сверяется enum типа (Il2CppType, биты 16..23);
 #   str      — System.String;
 #   obj      — любой ссылочный тип (класс/массив/объект);
+#   obj1     — специальная подсказка: ровно одно ссылочное поле в классе;
 #   c:Имя    — класс/структура: сверяется klassIndex типа с byval_arg класса.
 def type_sig(entry):
+    # Narrow resolver-only hints are separate from the dump type consumed by
+    # beta_offsets.py. obj1 means one unique reference field in the target class.
+    resolver_type = entry.get('resolver_type')
+    if resolver_type:
+        return resolver_type if resolver_type == 'obj1' else ''
     t = (entry.get('type') or '').strip()
     if not t:
         return ''
@@ -176,12 +185,17 @@ def main():
     emit_via = []   # (const, [стартовый_класс, поле, поле2], field, is_static, sig)
     skipped = []    # (const, причина)
     for const, entry in sorted(omap.items()):
-        if entry.get('kind') != 'field':
+        # Runtime ABI layouts (notably closed generic Dictionary fields) may
+        # lack byte offsets in il2cpp.h, but their named fields are still
+        # resolved from the live IL2CPP metadata when resolver_class/field are
+        # supplied. They remain kind=runtime for beta-offset generation.
+        runtime_field = entry.get('kind') == 'runtime' and entry.get('resolver_field')
+        if entry.get('kind') != 'field' and not runtime_field:
             continue
         if const not in known:
             skipped.append((const, 'нет в go_active'))
             continue
-        cls = entry.get('class') or ''
+        cls = (entry.get('resolver_class') if runtime_field else entry.get('class')) or ''
         note = entry.get('note', '')
         # Цепочка «через объект»: класс с ротированным именем (или вообще без
         # имени в карте) достигается как ТИП поля известного класса. По типу
@@ -215,7 +229,7 @@ def main():
         if len(short) <= 3 and short not in ('KCC',):
             skipped.append((const, f'короткое имя класса {short!r}'))
             continue
-        field = entry.get('field') or ''
+        field = (entry.get('resolver_field') if runtime_field else entry.get('field')) or ''
         sig = type_sig(entry)
         # Поле с коротким/ротированным именем («XeK», «id») РАНЬШЕ пропускалось
         # совсем, и его константа навсегда оставалась на вшитом значении. Лог

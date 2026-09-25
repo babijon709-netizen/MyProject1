@@ -110,6 +110,7 @@ void          esp_mem_frame_begin();
 bool          esp_alive_check();
 unsigned long long esp_mem_reads_total();
 unsigned long long esp_mem_read_fails_total();
+unsigned long long esp_mem_aim_resolve_attempts_total();
 void        esp_set_skeleton_enabled(bool enabled);
 // Enable the ore / animal / loot / pickup / vehicle / bot marker scan
 // (all off = no work, unless the bot aim feed below is on).
@@ -136,11 +137,35 @@ void esp_bot_aim_maintain();
 std::vector<BotAimEnt> esp_bot_aim_list();
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 
-// Диагностика признака «союзник» для аим-лога: длина своих строк группы,
-// найден ли командный объект (запасной источник) и сколько в нём ников.
-void esp_get_ally_diag(int* local_team_len, int* local_clan_len,
-                       int* roster_valid, int* roster_count,
+// Stages returned by esp_get_ally_diag(). This makes a missing roster
+// distinguishable from a valid empty team and from a failed memory read.
+enum EspAllyRosterStage {
+    ESP_ALLY_ROSTER_NOT_CHECKED = 0,
+    ESP_ALLY_ROSTER_NO_LOCAL_PLAYER = 1,
+    ESP_ALLY_ROSTER_NO_TEAM_COMPONENT = 2,
+    ESP_ALLY_ROSTER_NO_TEAM_DATA = 3,
+    ESP_ALLY_ROSTER_NO_MEMBER_LIST = 4,
+    ESP_ALLY_ROSTER_COLLECTION_UNREADABLE = 5,
+    ESP_ALLY_ROSTER_EMPTY = 6,
+    ESP_ALLY_ROSTER_MEMBERS = 7,
+    ESP_ALLY_ROSTER_MEMBER_ENTRIES_UNREADABLE = 8,
+};
+
+// Ally diagnostics for the aim log: local group-field lengths and confirmation
+// that g_local_player selected the local transform; TeamData roster status plus
+// the decoded TeammateStates ID count/raw Dictionary dimensions.
+void esp_get_ally_diag(int* local_team_len, int* local_clan_len, int* local_tag_len,
+                       int* local_player_confirmed, int* team_data_available,
+                       int* roster_valid, int* roster_count, int* roster_stage,
+                       int* states_valid, int* states_id_count,
+                       int* states_entry_count, int* states_array_length,
+                       int* states_parsed,
+                       unsigned long long* states_uid_checks,
+                       unsigned long long* states_uid_matches,
                        char* roster_team, size_t roster_team_cap);
+// Addresses/read status for the local team chain, TeammateStates dimensions,
+// and group strings. Team IDs and names are intentionally omitted from logs.
+void esp_get_ally_diag_details(char* out, size_t cap);
 
 // ---- Автообновление оффсетов (offset_resolver.cpp) ---------------------------
 // Читает IL2CPP-метаданные живого процесса: ищет классы по именам (заменяет

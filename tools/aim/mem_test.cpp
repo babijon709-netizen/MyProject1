@@ -270,14 +270,34 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
 #include "ui_util.h"
 
 // Диагностика союзников (живёт в game.cpp): в стенде всегда «пусто».
-void esp_get_ally_diag(int* local_team_len, int* local_clan_len,
-                       int* roster_valid, int* roster_count,
+void esp_get_ally_diag(int* local_team_len, int* local_clan_len, int* local_tag_len,
+                       int* local_player_confirmed, int* team_data_available,
+                       int* roster_valid, int* roster_count, int* roster_stage,
+                       int* states_valid, int* states_id_count,
+                       int* states_entry_count, int* states_array_length,
+                       int* states_parsed,
+                       unsigned long long* states_uid_checks,
+                       unsigned long long* states_uid_matches,
                        char* roster_team, size_t roster_team_cap) {
     if (local_team_len) *local_team_len = 0;
     if (local_clan_len) *local_clan_len = 0;
+    if (local_tag_len) *local_tag_len = 0;
+    if (local_player_confirmed) *local_player_confirmed = 0;
+    if (team_data_available) *team_data_available = 0;
     if (roster_valid) *roster_valid = 0;
     if (roster_count) *roster_count = 0;
+    if (roster_stage) *roster_stage = 0;
+    if (states_valid) *states_valid = 0;
+    if (states_id_count) *states_id_count = 0;
+    if (states_entry_count) *states_entry_count = -1;
+    if (states_array_length) *states_array_length = -1;
+    if (states_parsed) *states_parsed = 0;
+    if (states_uid_checks) *states_uid_checks = 0;
+    if (states_uid_matches) *states_uid_matches = 0;
     if (roster_team && roster_team_cap) roster_team[0] = '\0';
+}
+void esp_get_ally_diag_details(char* out, size_t cap) {
+    if (out && cap) out[0] = '\0';
 }
 
 // Вырезанный настоящий код режимов (см. run.sh): он должен видеть объявления

@@ -104,7 +104,8 @@ extern std::unordered_map<uint64_t, int> g_farm_blacklist;
 extern double g_farm_next_scan;
 
 // Резолверы реестра маркеров (определены в game_markers.cpp).
-int read_managed_collection(uint64_t object, uint64_t* out, int max_items);
+int read_managed_collection(uint64_t object, uint64_t* out, int max_items,
+                            bool* collection_readable = nullptr);
 uint8_t marker_class_of(uint64_t klass);
 uint64_t resolve_network_client_spawned();
 uint64_t resolve_network_identity_class();
