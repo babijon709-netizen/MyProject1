@@ -566,7 +566,7 @@ inline constexpr std::uint64_t PLAYER_CLAN_TAG  = 0x298; // string clanTag
 // список участников (TeamMember: id/clanTag/nick). Раскладка в бета-дампе
 // совпадает с релизом, поэтому константы общие.
 inline constexpr std::uint64_t PLAYER_TEAM_OBJECT    = 0x120; // euD/Reo team (NetworkBehaviour)
-inline constexpr std::uint64_t TEAM_OBJECT_PLAYER    = 0x80;  // обратная ссылка на свой PlayerManager
+inline constexpr std::uint64_t TEAM_OBJECT_PLAYER    = 0x80;  // дополнительная owner-ссылка; не hard gate для ростера
 inline constexpr std::uint64_t TEAM_OBJECT_DATA      = 0x90;  // объект команды (wa / nX)
 inline constexpr std::uint64_t TEAM_DATA_NAME        = 0x10;  // string: имя команды
 inline constexpr std::uint64_t TEAM_DATA_MEMBERS     = 0x20;  // List<TeamMember>

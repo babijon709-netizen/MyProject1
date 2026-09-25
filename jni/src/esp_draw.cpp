@@ -7,6 +7,7 @@
 #include "ui_util.h"           // ColU32
 #include "game_offsets_active.h" // game_offsets::PLAYER_BOX_WIDTH_RATIO
 #include "lang.h"                // lang::visual: подпись оружия
+#include "team_membership.h"     // общий фильтр союзников
 #include <cfloat>
 #include <cmath>
 
@@ -192,7 +193,7 @@ void DrawEspOverlay() {
         // не рисуется НИЧЕГО: ни бокс, ни скелет, ни линия, ни ник, ни оружие.
         // Раньше признак своего влиял только на цвет, и убрать союзников с
         // экрана было нечем (просьба 19.09).
-        if (box.ally && !g_state.esp_team) continue;
+        if (!team_membership::include_in_esp(box.ally, g_state.esp_team)) continue;
         // Team mates / clan mates get their own colour so they read as
         // friendly at a glance (and the aimbot leaves them alone).
         const bool ally = box.ally;

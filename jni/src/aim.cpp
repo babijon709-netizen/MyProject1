@@ -412,8 +412,8 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             int dteam = 0, dclan = 0, rval = 0, rcnt = 0;
             char rteam[32] = {};
             esp_get_ally_diag(&dteam, &dclan, &rval, &rcnt, rteam, sizeof(rteam));
-            LogLine("аим: союзники — своя группа: команда %d симв., клан %d симв.; состав команды: %s, участников %d",
-                    dteam, dclan, rval ? "найден" : "нет", rcnt);
+            LogLine("аим: союзники — своя группа: команда %d симв., клан %d симв.; состав команды: %s, участников %d, команда «%s»",
+                    dteam, dclan, rval ? "найден" : "нет", rcnt, rteam);
             s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
             s_ally_skipped = 0; s_dead_skipped = 0;
             s_no_skeleton = 0; s_bones_not_projected = 0;
@@ -447,7 +447,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         // включён их показ: проверка «g_state.esp_team && b.ally» означала,
         // что со скрытыми союзниками (показ выключен) аим работал по ним
         // как по врагам (вопрос 19.09). Признак своего — из групп/кланов
-        // (game.cpp, groups_are_allied), он считается независимо от визуалов.
+        // (game.cpp, team_membership::groups_are_allied), он считается независимо от визуалов.
         ++s_seen_boxes;
         if (b.is_bot) ++s_seen_bots;
         // Боты — цели, только пока включено их ЕСП: выключил «Боты» —

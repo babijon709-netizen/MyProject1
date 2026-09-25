@@ -57,3 +57,4 @@ g++ -std=gnu++17 -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
 echo "сборка стенда: ОК"
 
 "$BUILD/mem_test"
+sh tools/team_membership_test.sh

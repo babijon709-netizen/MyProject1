@@ -11,6 +11,7 @@
 #include "logfile.h"     // диагностический лог (Загрузки)
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
 #include "text_utf8.h"  // копия подписи в буфер без разрезания символа UTF-8
+#include "team_membership.h" // единое правило распознавания союзников для ESP и аима
 
 #include <errno.h>     // errno при отказе записи (сайлент: ось выстрела)
 #include <string.h>
@@ -436,12 +437,7 @@ static bool read_name_source(uint64_t player, int src, char* out, size_t cap) {
 // PlayerManager syncs teamName / clanId / clanTag to every client, so two
 // players can be compared directly. Team names are per-session and clan ids are
 // stable, and either one matching makes the two players allies.
-struct PlayerGroup {
-    char team[40] = {};
-    char clan[48] = {};
-    char tag[16]  = {};
-    bool any() const { return team[0] || clan[0] || tag[0]; }
-};
+using PlayerGroup = team_membership::PlayerGroup;
 
 static void read_player_group(uint64_t player, PlayerGroup& out) {
     out = PlayerGroup{};
@@ -449,12 +445,6 @@ static void read_player_group(uint64_t player, PlayerGroup& out) {
     read_managed_string_ex(rd_ptr(player + PLAYER_TEAM_NAME), out.team, sizeof(out.team), 39);
     read_managed_string_ex(rd_ptr(player + PLAYER_CLAN_ID),   out.clan, sizeof(out.clan), 47);
     read_managed_string_ex(rd_ptr(player + PLAYER_CLAN_TAG),  out.tag,  sizeof(out.tag),  15);
-}
-
-static bool groups_are_allied(const PlayerGroup& local, const PlayerGroup& other) {
-    if (local.team[0] && strcmp(local.team, other.team) == 0) return true;
-    if (local.clan[0] && strcmp(local.clan, other.clan) == 0) return true;
-    return false;
 }
 
 // Своя группа за последний кадр — для диагностики (аим-лог) и запасного
@@ -476,38 +466,42 @@ struct TeamRoster {
     uint64_t owner = 0;   // local player this roster belongs to
     uint8_t  count = 0;
     bool     valid = false;        // объект команды найден и прочитан
-    int      refresh = 30;         // первая попытка — сразу
+    int      refresh = 0;          // кадры с последнего чтения (0..29)
     int      misses = 0;
 };
 static TeamRoster s_team_roster;
 
 static void team_roster_revalidate(uint64_t local_player) {
     TeamRoster& roster = s_team_roster;
-    // An intermittent read of the team component must not temporarily turn
-    // every teammate into an enemy. Clear only when the local owner changes.
-    if (roster.owner != local_player) { roster = TeamRoster{}; roster.owner = local_player; }
+    // Owner changes are handled by the caller before the refresh timer is
+    // advanced. A transient read failure keeps the last confirmed roster so a
+    // teammate does not briefly become an aim target.
+    if (roster.owner != local_player) {
+        roster = TeamRoster{};
+        roster.owner = local_player;
+    }
     if (!valid_obj(local_player)) return;
-    // Do not erase the last confirmed roster on a single failed read, but
-    // expire it if the owner has actually left the team.
     auto missed = [&] {
         if (++roster.misses >= 3) { roster.valid = false; roster.count = 0; }
     };
-    uint64_t teamc = rd_ptr(local_player + PLAYER_TEAM_OBJECT);
+    const uint64_t teamc = rd_ptr(local_player + PLAYER_TEAM_OBJECT);
     if (!valid_obj(teamc)) { missed(); return; }
-    // Компонент должен принадлежать именно нашему игроку: при сбитом оффсете
-    // сюда попадёт чужой объект, и обратная ссылка это ловит.
-    uint64_t back = rd_ptr(teamc + TEAM_OBJECT_PLAYER);
-    if (back && back != local_player) { missed(); return; }
-    uint64_t data = rd_ptr(teamc + TEAM_OBJECT_DATA);
+
+    // PLAYER_TEAM_OBJECT is resolved by the runtime table. TEAM_OBJECT_PLAYER
+    // (+0x80) is not in that table, so do not let this second hard-coded
+    // pointer equality veto the roster. Validate the team->data->members chain
+    // below; note that its nested data offsets are still build-table values.
+    const uint64_t data = rd_ptr(teamc + TEAM_OBJECT_DATA);
     if (!valid_obj(data)) { missed(); return; }
+
     TeamRoster fresh{};
     fresh.owner = local_player;
     read_managed_string_ex(rd_ptr(data + TEAM_DATA_NAME), fresh.team_name,
                            sizeof(fresh.team_name), 31);
-    uint64_t members[16];
+    uint64_t members[16] = {};
     const uint64_t member_list = rd_ptr(data + TEAM_DATA_MEMBERS);
     if (!valid_obj(member_list)) { missed(); return; }
-    int count = read_managed_collection(member_list, members, 16);
+    const int count = read_managed_collection(member_list, members, 16);
     if (count == 0 && roster.valid && roster.count && ++roster.misses < 3) return;
     for (int i = 0; i < count; ++i) {
         if (!valid_obj(members[i])) continue;
@@ -519,26 +513,21 @@ static void team_roster_revalidate(uint64_t local_player) {
         snprintf(fresh.ids[fresh.count], sizeof(fresh.ids[0]), "%s", uid);
         ++fresh.count;
     }
-    fresh.valid = true;   // объект есть: пустой список — легальное состояние
+    fresh.valid = true;       // объект есть: пустой список — легальное состояние
+    fresh.refresh = 0;         // keep the intended 30-frame refresh interval
     roster = fresh;
 }
 
-// «Свой» по составу команды: полный ник из ростера совпал с видимым ником.
-// Свой собственный ник тоже в списке — локального игрока цикл боксов и так
-// пропускает, сравнение ему ничем не грозит.
-static bool team_roster_contains_id(const char* uid) {
+// «Свой» по составу команды: stable userID or exact visible nickname (the
+// latter also covers transiently stale/failed userID reads).
+static bool team_roster_contains(const char* uid, const char* name) {
     const TeamRoster& roster = s_team_roster;
-    if (!roster.valid || !uid || !uid[0]) return false;
-    for (int i = 0; i < roster.count; ++i)
-        if (roster.ids[i][0] && strcmp(roster.ids[i], uid) == 0) return true;
-    return false;
-}
-
-static bool team_roster_contains_name(const char* name) {
-    const TeamRoster& roster = s_team_roster;
-    if (!roster.valid || roster.count == 0 || !name || !name[0]) return false;
-    for (int i = 0; i < roster.count; ++i)
-        if (strcmp(roster.nicks[i], name) == 0) return true;
+    if (!roster.valid || roster.count == 0) return false;
+    for (int i = 0; i < roster.count; ++i) {
+        if (team_membership::roster_entry_matches(uid, name,
+                                                   roster.ids[i], roster.nicks[i]))
+            return true;
+    }
     return false;
 }
 
@@ -7796,8 +7785,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         const uint64_t local_owner = s_transforms[local_entity_index];
         if (s_team_roster.owner != local_owner) {
             s_team_roster = TeamRoster{};
+            s_team_roster.owner = local_owner;
+            // The first read is due immediately; subsequent successful or
+            // failed reads are retried every 30 frames.
+            s_team_roster.refresh = 29;
             for (auto& kv : g_player_text) kv.second.ally_hold = 0;
-            s_team_roster.refresh = 30; // re-read immediately on owner change
         }
         if (++s_team_roster.refresh >= 30) {
             s_team_roster.refresh = 0;
@@ -8083,8 +8075,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // confirmed ally across brief failures of the managed strings.
             const auto track = g_player_track.find(s_transforms[i]);
             const char* uid = track != g_player_track.end() ? track->second.uid : "";
-            const bool allied = (local_group_valid && groups_are_allied(local_group, tc.group)) ||
-                                team_roster_contains_id(uid) || team_roster_contains_name(tc.name);
+            char live_uid[40] = {};
+            if ((!uid || !uid[0]) && s_team_roster.valid && s_team_roster.count &&
+                read_managed_string_ex(rd_ptr(s_transforms[i] + PLAYER_USER_ID),
+                                       live_uid, sizeof(live_uid), 39)) {
+                uid = live_uid;
+            }
+            const bool allied = (local_group_valid &&
+                                 team_membership::groups_are_allied(local_group, tc.group)) ||
+                                team_roster_contains(uid, tc.has_name ? tc.name : "");
             if (allied) tc.ally_hold = 60;
             else if (tc.ally_hold > 0) --tc.ally_hold;
             tc.ally = tc.ally_hold > 0;
