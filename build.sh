@@ -18,7 +18,8 @@ fi
 # Public endpoint only: never embed the administrative token in the binary.
 # Refuse to publish an accidentally unconfigured (non-starting) artifact.
 if [[ -z "${BENZWARE_STATUS_URL:-}" ]]; then
-    echo "Set BENZWARE_STATUS_URL to your https://.../status Worker URL" >&2
+    echo "BENZWARE_STATUS_URL is missing: set the repository Actions variable to your public https://.../status Worker URL" >&2
+    echo "::error title=Missing BENZWARE_STATUS_URL::Set Settings > Secrets and variables > Actions > Variables > BENZWARE_STATUS_URL to your public HTTPS Worker URL ending in /status" >&2
     exit 1
 fi
 python3 - "${BENZWARE_STATUS_URL}" "${ROOT}/jni/include/benzware_remote_local.h" <<'PY_CONFIG'
