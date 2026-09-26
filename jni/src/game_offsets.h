@@ -677,4 +677,19 @@ inline constexpr std::uint64_t FPMOTION_CLOSE_OFFSET            = 0xB8; // Oxide
 // TransformOffset.Tick clamps dt * m_LerpSpeed to 1: snap custom hip poses.
 inline constexpr std::uint64_t TRANSFORMOFFSET_LERP_SPEED = 0x20; // Oxide.TransformOffset.m_LerpSpeed
 
+// Weapon sway, bobbing and instant ADS (No Sway / Instant ADS).
+inline constexpr std::uint64_t FPMANAGER_AIM_SPEED_MULTIPLIER = 0x34; // Oxide.FPManager.m_AimSpeedMultiplier
+inline constexpr std::uint64_t FPMOTION_SWAY_MOVEMENT         = 0x38; // Oxide.FPMotion.m_MovementSway
+inline constexpr std::uint64_t FPMOTION_SWAY_ROTATION         = 0x40; // Oxide.FPMotion.m_RotationSway
+inline constexpr std::uint64_t FPMOTION_AIM_SCALE             = 0x48; // Oxide.FPMotion.aimScale
+inline constexpr std::uint64_t FPMOTION_WALK_BOB              = 0x50; // Oxide.FPMotion.m_WalkBob
+inline constexpr std::uint64_t FPMOTION_AIM_BOB               = 0x58; // Oxide.FPMotion.m_AimBob
+inline constexpr std::uint64_t FPMOTION_RUN_BOB               = 0x60; // Oxide.FPMotion.m_RunBob
+inline constexpr std::uint64_t FPMOTION_LAND_BOB              = 0x68; // Oxide.FPMotion.m_LandBob
+inline constexpr std::uint64_t SWAY_ENABLED                   = 0x18; // Oxide.Sway.Enabled
+inline constexpr std::uint64_t SWAY_MAGNITUDE                 = 0x1C; // Oxide.Sway.Magnitude
+inline constexpr std::uint64_t TRIGBOB_ENABLED                = 0x10; // Oxide.TrigonometricBob.m_Enabled
+inline constexpr std::uint64_t TRIGBOB_AMOUNT                 = 0x1C; // Oxide.TrigonometricBob.m_AmountX
+inline constexpr std::uint64_t LERPBOB_AMOUNT                 = 0x18; // Oxide.LerpControlledBob.m_MaxBobAmount
+
 }

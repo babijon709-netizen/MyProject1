@@ -14,6 +14,10 @@ struct ViewmodelSettings {
     // Быстрый сбор: без патчей кода — контроллер дописывает 0.0 в
     // float-темп активных ожиданий collect-all в куче (loot_memory.h).
     bool fast_loot = false;
+    // Отключение раскачки оружия (FPMotion: aimScale, movement/rotation sway, bobbing).
+    bool no_sway = false;
+    // Мгновенное прицеливание (FPManager: aimBlend snap + m_AimSpeedMultiplier).
+    bool instant_ads = false;
 };
 
 namespace viewmodel {
@@ -52,7 +56,8 @@ inline ConfigExtension encode(ViewmodelSettings s) {
     // Bits 2..3: 0 = default, 1 = 144 (legacy toggle), 2 = 90, 3 = 120.
     const uint32_t fps_mode = s.fps_limit == 144 ? 1u : s.fps_limit == 90 ? 2u : s.fps_limit == 120 ? 3u : 0u;
     e.flags = (s.fov_enabled ? 1u : 0u) | (s.hands_enabled ? 2u : 0u) | (fps_mode << 2) |
-              (s.fast_loot ? 16u : 0u) | (s.no_recoil ? 32u : 0u) | (s.no_spread ? 64u : 0u);
+              (s.fast_loot ? 16u : 0u) | (s.no_recoil ? 32u : 0u) | (s.no_spread ? 64u : 0u) |
+              (s.no_sway ? 128u : 0u) | (s.instant_ads ? 256u : 0u);
     e.fov = s.fov; e.x = s.x; e.y = s.y; e.z = s.z;
     return e;
 }
@@ -63,9 +68,9 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     std::memcpy(&e, bytes, size < sizeof(e) ? size : sizeof(e));
     // v1: discard retired loot/instruction-patch flags 4..6. v2: bit 4 stays
     // retired, bits 5..6 opt into the object-data implementations. v3: bit 4 is
-    // instant pickup.
+    // instant pickup, bit 7 is no sway, bit 8 is instant ADS.
     if (e.magic != 0x31574d56u || (e.version != 1 && e.version != 2 && e.version != 3) ||
-        (e.size != 32 && e.size != 36) || (e.flags & ~127u)) return s;
+        (e.size != 32 && e.size != 36) || (e.flags & ~511u)) return s;
     s.fov_enabled = (e.flags & 1u) != 0;
     s.hands_enabled = (e.flags & 2u) != 0;
     const int fps_modes[] = {0, 144, 90, 120};
@@ -73,13 +78,15 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     s.no_recoil = e.version >= 2 && (e.flags & 32u) != 0;
     s.no_spread = e.version >= 2 && (e.flags & 64u) != 0;
     s.fast_loot = e.version >= 3 && (e.flags & 16u) != 0;
+    s.no_sway = e.version >= 3 && (e.flags & 128u) != 0;
+    s.instant_ads = e.version >= 3 && (e.flags & 256u) != 0;
     s.fov = e.fov; s.x = e.x; s.y = e.y; s.z = e.z;
     return sanitize(s);
 }
 enum class Status { Off, Waiting, Active, ADS, Failed };
 struct Diagnostics {
     Status fov = Status::Off, hands = Status::Off, no_recoil = Status::Off, no_spread = Status::Off;
-    Status fast_loot = Status::Off;
+    Status fast_loot = Status::Off, no_sway = Status::Off, instant_ads = Status::Off;
 };
 
 // Снимок состояния limiting FPS для меню: снимается контроллером при последнем

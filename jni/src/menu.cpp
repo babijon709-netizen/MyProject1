@@ -891,45 +891,24 @@ float TabContent(int tab, float dt, float cW) {
         // открывающая отдельное окно (как «Ещё настройки» в ESP).
         SHdr(XS("Функции"));
         CollapsibleHeader("##fnfarm", XS("Автофарм"), 5);
-        CardBg(Layout::RowH * 2);
+        CardBg(Layout::RowH * 3);
+        ToggleRow("##farmon", XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, false, true);
         ColorRow("##fsp", XS("Метка фарма"), &cfg::esp::farm_spot_col, false);
         ColorRow("##fbd", XS("Тело ноды"),   &cfg::esp::farm_body_col, true);
 
-        auto& vm = g_state.viewmodel;
-        SHdr(XS("Кастомный FOV"));
-        CardBg(Layout::RowH + Layout::SliderH);
-        ToggleRow("##vmfov", XS("Кастомный FOV"), &vm.fov_enabled, g_state.a_custom_fov, false, true);
-        SliderRow("##vmfovvalue", XS("Обзор мира"), &vm.fov,
-                  50.f, 120.f, XS("%.0f°"), true, false, g_state.sl_custom_fov, dt);
-
-        SHdr(XS("Расположение рук"));
-        CardBg(Layout::RowH + Layout::SliderH * 3.f);
-        ToggleRow("##vmhands", XS("Кастомные руки"), &vm.hands_enabled, g_state.a_custom_hands, false, true);
-        SliderRow("##vmx", XS("X: влево / вправо"), &vm.x,
-                  -50.f, 50.f, XS("%.0f см"), false, false, g_state.sl_hands_x, dt);
-        SliderRow("##vmy", XS("Y: вниз / вверх"), &vm.y,
-                  -50.f, 50.f, XS("%.0f см"), false, false, g_state.sl_hands_y, dt);
-        SliderRow("##vmz", XS("Z: ближе / дальше"), &vm.z,
-                  -50.f, 50.f, XS("%.0f см"), true, false, g_state.sl_hands_z, dt);
-        ImGui::PushID("viewmodel_reset");
-        if (ImGui::Button(XS("Сброс"))) {
-            // This button resets only FOV/hands, not the other misc features.
-            const int fps = vm.fps_limit;
-            const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;
-            vm = {}; vm.fps_limit = fps; vm.no_recoil = nr; vm.no_spread = ns; vm.fast_loot = fl;
-            g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
-            g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
-            esp_viewmodel_tick(vm);
-        }
-        ImGui::PopID();
         ImGui::Dummy({1.f, 12.f});
 
-        SHdr(XS("Оружие"));
-        CardBg(Layout::RowH * 2.f);
-        const bool oldRecoil = vm.no_recoil, oldSpread = vm.no_spread;
+        auto& vm = g_state.viewmodel;
+        CollapsibleHeader("##fnwpn", XS("Оружие"), 6);
+        CardBg(Layout::RowH * 4.f);
+        const bool oldRecoil = vm.no_recoil, oldSpread = vm.no_spread,
+                   oldSway = vm.no_sway, oldInstantAds = vm.instant_ads;
+        ToggleRow("##nosway", XS("Без раскачки"), &vm.no_sway, g_state.a_no_sway, false, true);
+        ToggleRow("##instantads", XS("Быстрый прицел"), &vm.instant_ads, g_state.a_instant_ads, false, true);
         ToggleRow("##norecoil", XS("Без отдачи"), &vm.no_recoil, g_state.a_no_recoil, false, true);
         ToggleRow("##nospread", XS("Без разброса"), &vm.no_spread, g_state.a_no_spread, true, false);
-        if (oldRecoil != vm.no_recoil || oldSpread != vm.no_spread) esp_viewmodel_tick(vm);
+        if (oldRecoil != vm.no_recoil || oldSpread != vm.no_spread ||
+            oldSway != vm.no_sway || oldInstantAds != vm.instant_ads) esp_viewmodel_tick(vm);
         const auto weaponStatus = esp_viewmodel_diagnostics();
         if (weaponStatus.no_recoil == viewmodel::Status::Failed || weaponStatus.no_spread == viewmodel::Status::Failed)
             ImGui::TextDisabled("%s", XS("Оружие: не применено, проверьте версию игры и журнал"));
@@ -939,10 +918,32 @@ float TabContent(int tab, float dt, float cW) {
 
         ImGui::Dummy({1.f, 12.f});
 
+        CollapsibleHeader("##fnvm", XS("Вид и руки"), 7);
+        CardBg(Layout::RowH * 2.f);
+        const bool oldFov = vm.fov_enabled, oldHands = vm.hands_enabled;
+        ToggleRow("##vmfov", XS("Кастомный FOV"), &vm.fov_enabled, g_state.a_custom_fov, false, true);
+        ToggleRow("##vmhands", XS("Кастомные руки"), &vm.hands_enabled, g_state.a_custom_hands, true, false);
+        if (oldFov != vm.fov_enabled || oldHands != vm.hands_enabled) esp_viewmodel_tick(vm);
+        ImGui::PushID("viewmodel_reset");
+        if (ImGui::Button(XS("Сброс"))) {
+            // This button resets only FOV/hands, not the other misc features.
+            const int fps = vm.fps_limit;
+            const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;
+            const bool sw = vm.no_sway, ads = vm.instant_ads;
+            vm = {}; vm.fps_limit = fps; vm.no_recoil = nr; vm.no_spread = ns; vm.fast_loot = fl;
+            vm.no_sway = sw; vm.instant_ads = ads;
+            g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
+            g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
+            esp_viewmodel_tick(vm);
+        }
+        ImGui::PopID();
+
+        ImGui::Dummy({1.f, 12.f});
         // Быстрый сбор: heap-реализация без патчей библиотек
         // (fast_loot::Controller, loot_memory.h) — обнуляет float-темп
         // (0.35 с/предмет) активных ожиданий collect-all.
         SHdr(XS("Подбор"));
+        CollapsibleHeader("##fnloot", XS("Быстрый сбор"), 8);
         CardBg(Layout::RowH * 1);
         const bool oldFastLoot = vm.fast_loot;
         ToggleRow("##fastloot", XS("Быстрый сбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
@@ -951,13 +952,14 @@ float TabContent(int tab, float dt, float cW) {
         ImGui::Dummy({1.f, 12.f});
 
         SHdr(XS("Лимит FPS"));
+        CollapsibleHeader("##fnfps", XS("Лимит FPS"), 9);
         {
             // Кастомный тач-паттерн строк режимов (InvisibleButton + WasTappedHere):
             // голый ImGui::Button в этом меню теряет тапы под собственным тач-
             // пайплайном. Заливка акцентом плавно наезжает через Tick — как у
             // остальных переключателей, плюс акцентная рамка у выбранного.
             const float rowH = Layout::RowH;
-            const float inset = Layout::Inset, padX = Layout::PadX;
+            const float inset = Layout::Inset;
             const float avW = ImGui::GetContentRegionAvail().x;
             auto* dl = ImGui::GetWindowDrawList();
             auto* fn = ImGui::GetFont();
@@ -1022,49 +1024,35 @@ float TabContent(int tab, float dt, float cW) {
             }
         }
 
+        ImGui::Dummy({1.f, 12.f});
+
         // Иксрей: рендер отсекает всё ближе выбранной дистанции — стены и
         // текстуры вокруг игрока пропадают, видно что за ними.
         SHdr(XS("Иксрей"));
+        CollapsibleHeader("##fnxray", XS("Иксрей"), 10);
         CardBg(Layout::RowH + Layout::SliderH);
         ToggleRow("##xr0", XS("Иксрей"), &g_state.xray_on, g_state.a_xray_on, false, true);
         SliderRow("##xr1", XS("Дальность"), &g_state.xray_range,
                   1.f, 50.f, XS("%.0f м"), true, false, g_state.sl_xray, dt);
 
+        ImGui::Dummy({1.f, 12.f});
+
         // Фрикам: камера отделяется от тела и летает сквозь стены — обзор
         // базы перед рейдом. Пока он включён, аим молчит: точка прицела
         // считается от глаза персонажа, а камера улетела от него.
         SHdr(XS("Фрикам"));
-        CardBg(Layout::RowH * 4.f + Layout::SliderH);
+        CollapsibleHeader("##fnfc", XS("Фрикам"), 11);
+        CardBg(Layout::RowH * 2.f + Layout::SliderH);
         ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
         ToggleRow("##fc2", XS("Кнопка на экране"), &g_state.freecam_btn_show, g_state.a_freecam_btn_show);
         SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
-                  1.f, 60.f, XS("%.0f м/с"), false, false, g_state.sl_freecam, dt);
-        {
-            // Кнопка настройки положения джойстика фрикама
-            const float rowH = Layout::RowH, inset = Layout::Inset;
-            const float avW = ImGui::GetContentRegionAvail().x;
-            auto pos = ImGui::GetCursorScreenPos();
-            ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
-            if (ImGui::Button(XS("Настроить джойстик"), {avW - inset*2.f, rowH - 8.f})) {
-                g_calibMode = 4;
-                menu_open = false;
-            }
-        }
-        {
-            // Кнопка настройки положения экранной кнопки фрикама (квадрата
-            // с глазом) — тем же тапом по экрану, что и джойстик.
-            const float rowH = Layout::RowH, inset = Layout::Inset;
-            const float avW = ImGui::GetContentRegionAvail().x;
-            auto pos = ImGui::GetCursorScreenPos();
-            ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
-            if (ImGui::Button(XS("Настроить кнопку"), {avW - inset*2.f, rowH - 8.f})) {
-                g_calibMode = 6;
-                menu_open = false;
-            }
-        }
+                  1.f, 60.f, XS("%.0f м/с"), true, false, g_state.sl_freecam, dt);
+
+        ImGui::Dummy({1.f, 12.f});
 
         // Всегда день: время суток каждую секунду возвращается в полдень.
         SHdr(XS("Мир"));
+        CollapsibleHeader("##fnworld", XS("Мир"), 12);
         CardBg(Layout::RowH);
         ToggleRow("##wd0", XS("Всегда день"), &g_state.always_day, g_state.a_always_day, true, true);
 
@@ -1723,6 +1711,8 @@ void RenderMenu() {
     Tick(g_state.a_custom_hands, g_state.viewmodel.hands_enabled, dt);
     Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil, dt);
     Tick(g_state.a_no_spread, g_state.viewmodel.no_spread, dt);
+    Tick(g_state.a_no_sway,   g_state.viewmodel.no_sway,   dt);
+    Tick(g_state.a_instant_ads, g_state.viewmodel.instant_ads, dt);
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
     Tick(g_state.a_fps_90,  g_state.viewmodel.fps_limit == 90,  dt);
     Tick(g_state.a_fps_120, g_state.viewmodel.fps_limit == 120, dt);
@@ -1966,7 +1956,7 @@ void RenderMenu() {
                 // на вкладку «Опции», джойстик и кнопка фрикама — в «Разное».
                 if (farm)            PopoverOpen(XS("Автофарм"), 5);
                 else if (hud)        g_state.cur_tab = 5;
-                else if (fcb || fcj) g_state.cur_tab = 3;
+                else if (fcb || fcj) PopoverOpen(XS("Фрикам"), 11);
                 else                 g_state.cur_tab = 1;
                 g_input.touchConsumed = true; // этот тап уже отработал
             }

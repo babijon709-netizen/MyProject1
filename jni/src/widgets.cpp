@@ -7,6 +7,7 @@
 #include "audio.h"               // PlaySound
 #include "config.h"
 #include "menu.h"                // g_calibMode (калибровка зон)
+#include "viewmodel.h"
 #include "Blur/Blur.h"
 #include "lang.h"
 #include <cfloat>
@@ -645,6 +646,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
 {
     const float inset = Layout::Inset, padX = Layout::PadX;
     const float rH = Layout::RowH;
+    const auto oldVm = g_state.viewmodel;
 
     auto FgSHdr = [&](const char* t, float topPad = 18.f) {
         curY += topPad;
@@ -868,6 +870,178 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             }
         }
 
+    } else if (secId == 6) {
+        // Оружие: раскачка, прицел, отдача, разброс
+        FgSHdr(XS("Раскачка и прицел"));
+        FgCardBg(rH * 2);
+        FgToggleRow(XS("Без раскачки"), &g_state.viewmodel.no_sway, g_state.a_no_sway, false);
+        FgToggleRow(XS("Быстрый прицел"), &g_state.viewmodel.instant_ads, g_state.a_instant_ads, true);
+
+        FgSHdr(XS("Стрельба"));
+        FgCardBg(rH * 2);
+        FgToggleRow(XS("Без отдачи"), &g_state.viewmodel.no_recoil, g_state.a_no_recoil, false);
+        FgToggleRow(XS("Без разброса"), &g_state.viewmodel.no_spread, g_state.a_no_spread, true);
+
+        const auto weaponStatus = esp_viewmodel_diagnostics();
+        if (weaponStatus.no_recoil == viewmodel::Status::Failed || weaponStatus.no_spread == viewmodel::Status::Failed) {
+            curY += 8.f;
+            auto dSz = fn->CalcTextSizeA(fs * 0.95f, cW - inset * 2.f - padX * 2.f, 0, XS("Оружие: не применено, проверьте версию игры и журнал"));
+            fg->AddText(fn, fs * 0.95f, {cX + inset + padX, curY}, C::UA(C::Red(), alpha * 0.9f), XS("Оружие: не применено, проверьте версию игры и журнал"));
+            curY += dSz.y + 4.f;
+        } else if ((g_state.viewmodel.no_recoil && weaponStatus.no_recoil == viewmodel::Status::Waiting) ||
+                   (g_state.viewmodel.no_spread && weaponStatus.no_spread == viewmodel::Status::Waiting)) {
+            curY += 8.f;
+            auto dSz = fn->CalcTextSizeA(fs * 0.95f, cW - inset * 2.f - padX * 2.f, 0, XS("Ожидание подходящего оружия"));
+            fg->AddText(fn, fs * 0.95f, {cX + inset + padX, curY}, C::UA(C::Dim(), alpha), XS("Ожидание подходящего оружия"));
+            curY += dSz.y + 4.f;
+        }
+
+    } else if (secId == 7) {
+        // Вид и руки: FOV и оффсеты рук
+        FgSHdr(XS("Кастомный FOV"));
+        FgCardBg(rH + Layout::SliderH);
+        FgToggleRow(XS("Кастомный FOV"), &g_state.viewmodel.fov_enabled, g_state.a_custom_fov, false);
+        FgSliderRow(XS("Обзор мира"), &g_state.viewmodel.fov, 50.f, 120.f, XS("%.0f°"), true, g_state.sl_custom_fov);
+
+        FgSHdr(XS("Расположение рук"));
+        FgCardBg(rH + Layout::SliderH * 3.f);
+        FgToggleRow(XS("Кастомные руки"), &g_state.viewmodel.hands_enabled, g_state.a_custom_hands, false);
+        FgSliderRow(XS("X: влево / вправо"), &g_state.viewmodel.x, -50.f, 50.f, XS("%.0f см"), false, g_state.sl_hands_x);
+        FgSliderRow(XS("Y: вниз / вверх"), &g_state.viewmodel.y, -50.f, 50.f, XS("%.0f см"), false, g_state.sl_hands_y);
+        FgSliderRow(XS("Z: ближе / дальше"), &g_state.viewmodel.z, -50.f, 50.f, XS("%.0f см"), true, g_state.sl_hands_z);
+
+        curY += 8.f;
+        FgCardBg(rH * 1);
+        if (!blocked && !g_scrollPop.dragging && mouseReleased
+            && mousePos.x >= cX + inset && mousePos.x <= cX + cW - inset
+            && mousePos.y >= curY && mousePos.y <= curY + rH
+            && clickedPos.x >= cX + inset && clickedPos.x <= cX + cW - inset
+            && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
+            g_state.viewmodel.fov = 90.f;
+            g_state.viewmodel.x = 0.f;
+            g_state.viewmodel.y = 0.f;
+            g_state.viewmodel.z = 0.f;
+            g_state.sl_custom_fov = {};
+            g_state.sl_hands_x = {};
+            g_state.sl_hands_y = {};
+            g_state.sl_hands_z = {};
+            ShowToast(XS("Сброс"));
+            PlaySound(SND_CLICK);
+        }
+        const char* rt = XS("Сброс");
+        auto rsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, rt);
+        fg->AddText(fn, fs * 1.05f, {cX + (cW - rsz.x) * 0.5f, curY + (rH - rsz.y) * 0.5f}, C::UA(C::Dim(), alpha), rt);
+        curY += rH;
+
+    } else if (secId == 8) {
+        // Подбор: быстрый сбор
+        FgSHdr(XS("Подбор"));
+        FgCardBg(rH * 1);
+        FgToggleRow(XS("Быстрый сбор"), &g_state.viewmodel.fast_loot, g_state.a_fast_loot, true);
+
+    } else if (secId == 9) {
+        // Лимит FPS
+        FgSHdr(XS("Лимит FPS"));
+        const float chipRowH = rH;
+        FgCardBg(chipRowH * 2.f);
+        auto fpsChip = [&](const char* lbl, int limit, int slot, bool wide, float anim) {
+            const float gap = 6.f;
+            const float chipW = wide ? (cW - inset * 2.f) : (cW - inset * 2.f - gap * 2.f) / 3.f;
+            const float chipX = wide ? cX + inset : cX + inset + (chipW + gap) * slot;
+            const float chipY = wide ? curY + chipRowH : curY + 5.f;
+            const float chipH = chipRowH - 12.f;
+
+            if (!blocked && !g_scrollPop.dragging && mouseReleased
+                && mousePos.x >= chipX && mousePos.x <= chipX + chipW
+                && mousePos.y >= chipY && mousePos.y <= chipY + chipH
+                && clickedPos.x >= chipX && clickedPos.x <= chipX + chipW
+                && clickedPos.y >= chipY && clickedPos.y <= chipY + chipH) {
+                if (g_state.viewmodel.fps_limit != limit) {
+                    g_state.viewmodel.fps_limit = limit;
+                    esp_viewmodel_tick(g_state.viewmodel);
+                    PlaySound(SND_CLICK);
+                }
+            }
+            const bool on = (g_state.viewmodel.fps_limit == limit);
+            fg->AddRectFilled({chipX, chipY}, {chipX + chipW, chipY + chipH}, C::UA(C::Card(), alpha), 6.f);
+            if (anim > 0.01f)
+                fg->AddRectFilled({chipX, chipY}, {chipX + chipW, chipY + chipH}, C::UA(C::Acc(), 0.9f * anim * alpha), 6.f);
+            if (on)
+                fg->AddRect({chipX, chipY}, {chipX + chipW, chipY + chipH}, C::UA(C::Acc(), alpha), 6.f, 0, 1.6f);
+            auto tsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, lbl);
+            fg->AddText(fn, fs * 1.05f, {chipX + (chipW - tsz.x) * 0.5f, chipY + (chipH - tsz.y) * 0.5f},
+                        C::UA(on ? C::Txt() : C::Dim(), alpha), lbl);
+        };
+        fpsChip("90 FPS", 90, 0, false, g_state.a_fps_90);
+        fpsChip("120 FPS", 120, 1, false, g_state.a_fps_120);
+        fpsChip("144 FPS", 144, 2, false, g_state.a_fps_144);
+        fpsChip(XS("Сброс"), 0, 0, true, g_state.a_fps_rst);
+        curY += chipRowH * 2.f + 8.f;
+
+        const auto fpsUi = esp_viewmodel_fps_ui();
+        char modeBuf[24];
+        if (g_state.viewmodel.fps_limit) { snprintf(modeBuf, sizeof(modeBuf), "%d FPS", g_state.viewmodel.fps_limit); }
+        else { snprintf(modeBuf, sizeof(modeBuf), "%s", XS("обычный")); }
+        const char* st = fpsUi.status == viewmodel::Status::Active ? XS("применено") :
+                         fpsUi.status == viewmodel::Status::Waiting ? XS("ожидание") :
+                         fpsUi.status == viewmodel::Status::Failed ? XS("ошибка") : XS("выкл");
+        char stBuf[128];
+        if (g_state.viewmodel.fps_limit) {
+            snprintf(stBuf, sizeof(stBuf), "%s: %s · %s (%s: %d)", XS("Режим"), modeBuf, st, XS("поле игры"), fpsUi.field_value);
+        } else {
+            snprintf(stBuf, sizeof(stBuf), "%s: %s", XS("Режим"), modeBuf);
+        }
+        auto stSz = fn->CalcTextSizeA(fs * 0.95f, cW - inset * 2.f - padX * 2.f, 0, stBuf);
+        fg->AddText(fn, fs * 0.95f, {cX + inset + padX, curY}, C::UA(C::Dim(), alpha), stBuf);
+        curY += stSz.y + 4.f;
+
+    } else if (secId == 10) {
+        // Иксрей
+        FgSHdr(XS("Иксрей"));
+        FgCardBg(rH + Layout::SliderH);
+        FgToggleRow(XS("Иксрей"), &g_state.xray_on, g_state.a_xray_on, false);
+        FgSliderRow(XS("Дальность"), &g_state.xray_range, 1.f, 50.f, XS("%.0f м"), true, g_state.sl_xray);
+
+    } else if (secId == 11) {
+        // Фрикам
+        FgSHdr(XS("Фрикам"));
+        FgCardBg(rH * 2 + Layout::SliderH);
+        FgToggleRow(XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false);
+        FgToggleRow(XS("Кнопка на экране"), &g_state.freecam_btn_show, g_state.a_freecam_btn_show, false);
+        FgSliderRow(XS("Скорость"), &g_state.freecam_speed, 1.f, 60.f, XS("%.0f м/с"), true, g_state.sl_freecam);
+
+        FgSHdr(XS("Управление"));
+        FgCardBg(rH * 2);
+        struct BtnRow { const char* lbl; int calib; };
+        const BtnRow brows[2] = {
+            {XS("Настроить джойстик"), 4},
+            {XS("Настроить кнопку"), 6},
+        };
+        for (int bi = 0; bi < 2; ++bi) {
+            const BtnRow& b = brows[bi];
+            if (!blocked && !g_scrollPop.dragging && mouseReleased
+                && mousePos.x >= cX + inset && mousePos.x <= cX + cW - inset
+                && mousePos.y >= curY && mousePos.y <= curY + rH
+                && clickedPos.x >= cX + inset && clickedPos.x <= cX + cW - inset
+                && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
+                g_calibMode = b.calib;
+                PopoverClose();
+                menu_open = false;
+                PlaySound(SND_CLICK);
+            }
+            float cy2 = curY + rH * 0.5f;
+            fg->AddText(fn, fs * 1.15f, {cX + inset + padX, cy2 - fs * 1.15f * 0.5f}, C::UA(C::Txt(), alpha), b.lbl);
+            if (bi == 0 && g_state.ui_show_sep)
+                fg->AddLine({cX + inset + padX, curY + rH - 0.5f}, {cX + cW - inset - padX, curY + rH - 0.5f}, C::UA(C::Sep(), alpha), 0.8f);
+            curY += rH;
+        }
+
+    } else if (secId == 12) {
+        // Мир: всегда день
+        FgSHdr(XS("Окружение"));
+        FgCardBg(rH * 1);
+        FgToggleRow(XS("Всегда день"), &g_state.always_day, g_state.a_always_day, true);
+
     } else if (secId == 2) {
         FgSHdr(nullptr, 12.f);
         auto dSz = fn->CalcTextSizeA(fs * 1.15f, FLT_MAX, 0, XS("Приложение будет закрыто."));
@@ -954,6 +1128,10 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             }
             curY += btnH;
         }
+    }
+
+    if (std::memcmp(&oldVm, &g_state.viewmodel, sizeof(oldVm)) != 0) {
+        esp_viewmodel_tick(g_state.viewmodel);
     }
 
     curY += 12.f;

@@ -99,16 +99,23 @@ struct Fixture {
     uint64_t player=io.object("PlayerManager"), fp=io.object("FPManager"), handler=io.object("Handler"), aim=io.alloc();
     uint64_t weapon=io.object("FPHitscan"), motion=io.object("FPMotion"), event=io.alloc(), action=io.alloc();
     uint64_t idle=io.object("TransformOffset"), run=io.object("TransformOffset");
+    uint64_t sway_mov=io.object("Sway"), sway_rot=io.object("Sway");
+    uint64_t walk_bob=io.object("TrigonometricBob");
     ViewmodelSettings s{true,true,100.f,10.f,-20.f,30.f};
     const Position origin{0.1f,0.2f,0.3f};
     Fixture() {
         io.set(player+PLAYER_FP_MANAGER,fp); io.set(player+PLAYER_EVENT_HANDLER,handler);
         io.set(handler+EVENT_HANDLER_MANAGER_BACKREF,player); io.set(handler+EVENT_HANDLER_AIM_ACTIVITY,aim);
         io.set(fp+FPMANAGER_AIM_BLEND,0.f); io.set(fp+FPMANAGER_WORLD_FOV_TARGET,70.f);
+        io.set(fp+FPMANAGER_AIM_SPEED_MULTIPLIER,1.0f);
         io.set(fp+FPMANAGER_CURRENT_OBJECT,weapon); io.set(weapon+FPOBJECT_PLAYER_BACKREF,player);
         io.set(weapon+FPOBJECT_DRAW_EVENT,event); io.set(event+FPDRAW_ACTION,action);
         io.set(action+DELEGATE_TARGET,motion); io.set(motion+FPMOTION_OBJECT,weapon); io.set(motion+FPMOTION_PLAYER,handler);
         io.set(motion+FPMOTION_IDLE_OFFSET,idle); io.set(motion+FPMOTION_RUN_OFFSET,run);
+        io.set(motion+FPMOTION_SWAY_MOVEMENT,sway_mov); io.set(motion+FPMOTION_SWAY_ROTATION,sway_rot);
+        io.set(motion+FPMOTION_WALK_BOB,walk_bob);
+        io.set(sway_mov+SWAY_MAGNITUDE,1.5f); io.set(sway_rot+SWAY_MAGNITUDE,2.0f);
+        io.set(walk_bob+TRIGBOB_AMOUNT,0.8f);
         io.set(idle+TRANSFORMOFFSET_POSITION,origin); io.set(run+TRANSFORMOFFSET_POSITION,origin);
         io.set(idle+TRANSFORMOFFSET_LERP_SPEED,7.f); io.set(run+TRANSFORMOFFSET_LERP_SPEED,9.f);
     }
@@ -206,6 +213,31 @@ static void tests() {
       f.c.reset(true); assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==11.f);
       assert(f.io.get<float>(f.run+TRANSFORMOFFSET_LERP_SPEED)==9.f);
     }
+    { Fixture f;
+      f.s.no_sway = true;
+      f.tick();
+      assert(f.c.status.no_sway == Status::Active);
+      assert(f.io.get<float>(f.sway_mov+SWAY_MAGNITUDE) == 0.f);
+      assert(f.io.get<float>(f.sway_rot+SWAY_MAGNITUDE) == 0.f);
+      assert(f.io.get<float>(f.walk_bob+TRIGBOB_AMOUNT) == 0.f);
+      f.s.no_sway = false;
+      f.tick();
+      assert(f.c.status.no_sway == Status::Off);
+      assert(f.io.get<float>(f.sway_mov+SWAY_MAGNITUDE) == 1.5f);
+      assert(f.io.get<float>(f.sway_rot+SWAY_MAGNITUDE) == 2.0f);
+      assert(f.io.get<float>(f.walk_bob+TRIGBOB_AMOUNT) == 0.8f);
+
+      f.s.instant_ads = true;
+      f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG, uint8_t(1));
+      f.tick();
+      assert(f.c.status.instant_ads == Status::Active);
+      assert(f.io.get<float>(f.fp+FPMANAGER_AIM_BLEND) == 1.f);
+      assert(f.io.get<float>(f.fp+FPMANAGER_AIM_SPEED_MULTIPLIER) >= 100.f);
+      f.s.instant_ads = false;
+      f.tick();
+      assert(f.c.status.instant_ads == Status::Off);
+      assert(f.io.get<float>(f.fp+FPMANAGER_AIM_SPEED_MULTIPLIER) == 1.0f);
+    }
 }
 static void config_tests() {
     ViewmodelSettings s{true,true,103.f,10.f,-20.f,30.f}; s.fps_limit=144; auto e=encode(s); auto r=decode(&e,sizeof(e));
@@ -226,7 +258,7 @@ static void config_tests() {
         auto saved=encode(s); saved.version=1; saved.flags=flags;
         auto loaded=decode(&saved,sizeof(saved));
         assert(loaded.fov_enabled==bool(flags&1) && loaded.hands_enabled==bool(flags&2));
-        assert(!loaded.no_recoil && !loaded.no_spread && !loaded.fast_loot);
+        assert(!loaded.no_recoil && !loaded.no_spread && !loaded.fast_loot && !loaded.no_sway && !loaded.instant_ads);
         const int limits[]={0,144,90,120};
         assert(loaded.fps_limit==limits[(flags>>2)&3]);
         assert(loaded.fov==103.f && loaded.x==10.f && loaded.y==-20.f && loaded.z==30.f);
@@ -238,38 +270,40 @@ static void config_tests() {
         auto saved=encode(s); saved.version=2; saved.flags=flags;
         auto loaded=decode(&saved,sizeof(saved));
         assert(loaded.no_recoil==bool(flags&32) && loaded.no_spread==bool(flags&64));
-        assert(!loaded.fast_loot);
+        assert(!loaded.fast_loot && !loaded.no_sway && !loaded.instant_ads);
         assert(encode(loaded).flags==(flags&~16u));
     }
-    // v3: the same bit now means instant pickup, everything else is unchanged.
-    for (uint32_t flags=0; flags<128; ++flags) {
+    // v3: instant pickup (16), no sway (128), instant ADS (256).
+    for (uint32_t flags=0; flags<512; ++flags) {
         auto saved=encode(s); saved.flags=flags;
         assert(saved.version==3);
         auto loaded=decode(&saved,sizeof(saved));
         assert(loaded.no_recoil==bool(flags&32) && loaded.no_spread==bool(flags&64));
         assert(loaded.fast_loot==bool(flags&16));
+        assert(loaded.no_sway==bool(flags&128));
+        assert(loaded.instant_ads==bool(flags&256));
         assert(loaded.fov_enabled==bool(flags&1) && loaded.hands_enabled==bool(flags&2));
         assert(encode(loaded).flags==flags);
     }
     for (int limit : {0,90,120,144}) for (bool nr : {false,true}) for (bool ns : {false,true})
-        for (bool fl : {false,true}) {
-        s.fps_limit=limit; s.no_recoil=nr; s.no_spread=ns; s.fast_loot=fl;
+        for (bool fl : {false,true}) for (bool sw : {false,true}) for (bool ads : {false,true}) {
+        s.fps_limit=limit; s.no_recoil=nr; s.no_spread=ns; s.fast_loot=fl; s.no_sway=sw; s.instant_ads=ads;
         auto saved=encode(s); auto loaded=decode(&saved,sizeof(saved));
         assert(loaded.no_recoil==nr && loaded.no_spread==ns && loaded.fps_limit==limit);
-        assert(loaded.fast_loot==fl);
+        assert(loaded.fast_loot==fl && loaded.no_sway==sw && loaded.instant_ads==ads);
     }
-    s.fast_loot=false;
-    for (unsigned bit=7; bit<32; ++bit) {
-        auto saved=encode(s); saved.flags=127u | (uint32_t(1)<<bit);
+    s.fast_loot=false; s.no_sway=false; s.instant_ads=false;
+    for (unsigned bit=9; bit<32; ++bit) {
+        auto saved=encode(s); saved.flags=511u | (uint32_t(1)<<bit);
         auto loaded=decode(&saved,sizeof(saved));
-        assert(!loaded.fov_enabled && !loaded.hands_enabled && !loaded.no_recoil && !loaded.no_spread && !loaded.fast_loot && loaded.fps_limit==0);
+        assert(!loaded.fov_enabled && !loaded.hands_enabled && !loaded.no_recoil && !loaded.no_spread && !loaded.fast_loot && !loaded.no_sway && !loaded.instant_ads && loaded.fps_limit==0);
     }
     s.fps_limit=144; s.no_recoil=s.no_spread=false;
     e.flags=7; auto oldFps=decode(&e,sizeof(e));
-    assert(!oldFps.no_recoil && !oldFps.no_spread && !oldFps.fast_loot && oldFps.fps_limit==144 && oldFps.fov_enabled && oldFps.hands_enabled);
+    assert(!oldFps.no_recoil && !oldFps.no_spread && !oldFps.fast_loot && !oldFps.no_sway && !oldFps.instant_ads && oldFps.fps_limit==144 && oldFps.fov_enabled && oldFps.hands_enabled);
     e.flags=3; auto legacy=decode(&e,sizeof(e));
     assert(legacy.fov_enabled && legacy.hands_enabled && legacy.fps_limit==0);
-    e.version=4; assert(!decode(&e,sizeof(e)).fov_enabled); e=encode(s); e.flags=128; assert(!decode(&e,sizeof(e)).hands_enabled);
+    e.version=4; assert(!decode(&e,sizeof(e)).fov_enabled); e=encode(s); e.flags=512; assert(!decode(&e,sizeof(e)).hands_enabled);
     e=encode(s); e.fov=std::numeric_limits<float>::quiet_NaN(); e.x=std::numeric_limits<float>::infinity(); e.y=-1000; e.z=1000;
     auto d=decode(&e,sizeof(e)); assert(d.fov==90 && d.x==0 && d.y==-50 && d.z==50);
 }

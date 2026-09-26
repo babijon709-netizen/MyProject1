@@ -157,7 +157,10 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         loot.status = settings.fast_loot ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
-                             settings.hands_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off};
+                             settings.hands_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
+                             viewmodel::Status::Off, viewmodel::Status::Off, viewmodel::Status::Off,
+                             settings.no_sway ? viewmodel::Status::Waiting : viewmodel::Status::Off,
+                             settings.instant_ads ? viewmodel::Status::Waiting : viewmodel::Status::Off};
         return;
     }
     tick_fps(epoch, settings.fps_limit);
@@ -168,9 +171,10 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         auto st = esp_viewmodel_diagnostics();
         if (st.fov != last_log.fov || st.hands != last_log.hands ||
             st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread ||
-            st.fast_loot != last_log.fast_loot) {
-            LogLine("viewmodel: fov=%d hands=%d; object-data recoil=%d spread=%d; instant loot=%d (0 off,1 waiting,2 active,4 unsupported/modified image or memory error)",
-                    (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread, (int)st.fast_loot);
+            st.fast_loot != last_log.fast_loot || st.no_sway != last_log.no_sway ||
+            st.instant_ads != last_log.instant_ads) {
+            LogLine("viewmodel: fov=%d hands=%d sway=%d ads=%d; object-data recoil=%d spread=%d; instant loot=%d (0 off,1 waiting,2 active,4 unsupported/modified image or memory error)",
+                    (int)st.fov, (int)st.hands, (int)st.no_sway, (int)st.instant_ads, (int)st.no_recoil, (int)st.no_spread, (int)st.fast_loot);
             last_log = st;
         }
     };
@@ -178,8 +182,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // cache which intentionally tolerates stale identities during respawn.
     uint64_t player = 0;
     static bool local_source_failed = false;
-    if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
-        settings.no_recoil || settings.no_spread || weapons.has_state()) {
+    if (settings.fov_enabled || settings.hands_enabled || settings.no_sway || settings.instant_ads ||
+        controller.has_state() || settings.no_recoil || settings.no_spread || weapons.has_state()) {
         // The RVA may still point to a named but UNINITIALIZED class copy
         // (device log: valid GameControllerBase, static_fields=0). Prefer the
         // live class discovered by the resolver; only accept a source whose
@@ -218,7 +222,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             // A failed read is NOT a confirmed scene change. Keep the originals
             // so a later successful frame can restore a disabled feature.
             auto wait = controller.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Waiting;
-            controller.status = {wait, wait};
+            controller.status = {wait, wait, viewmodel::Status::Off, viewmodel::Status::Off, viewmodel::Status::Off,
+                                 settings.no_sway ? wait : viewmodel::Status::Off,
+                                 settings.instant_ads ? wait : viewmodel::Status::Off};
             weapons.recoil = settings.no_recoil || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
             weapons.spread = settings.no_spread || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
             log_status();
