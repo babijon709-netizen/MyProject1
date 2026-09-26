@@ -1513,18 +1513,25 @@ static bool base_resolves_game(uint64_t base) {
         if (known_beta || known_release) {
             const go::Build want = known_beta ? go::Build::Beta : go::Build::Release;
             if (go::CurrentBuild() != want) {
-                LogLine("привязка: по Build-ID (0x%llx) определён профиль %s — переключаю",
-                        (unsigned long long)il2cpp_bid, known_beta ? "БЕТА" : "РЕЛИЗ");
+                if (known_beta)
+                    LogLine("привязка: по Build-ID (0x%llx) опознана бета — переключаю профиль",
+                            (unsigned long long)il2cpp_bid);
+                else
+                    LogLine("привязка: по Build-ID (0x%llx) опознан релиз — переключаю профиль",
+                            (unsigned long long)il2cpp_bid);
                 go::SelectBuild(want);
                 RememberBuild();
                 g_buildPrompt = false;
             }
-            LogLine("привязка: база 0x%llx подтверждена по Build-ID (%s)",
-                    (unsigned long long)base, known_beta ? "бета" : "релиз");
+            if (known_beta)
+                LogLine("привязка: база 0x%llx подтверждена по Build-ID беты",
+                        (unsigned long long)base);
+            else
+                LogLine("привязка: база 0x%llx подтверждена по Build-ID релиза",
+                        (unsigned long long)base);
             return true;
         }
-        LogLine("привязка: Build-ID 0x%llx неизвестен (игра обновилась) — профиль оставляю %s, "
-                "классы найдёт автообновление",
+        LogLine("привязка: Build-ID 0x%llx неизвестен (игра обновилась) — профиль оставляю прежним (%s), классы найдёт автообновление",
                 (unsigned long long)il2cpp_bid,
                 go::CurrentBuild() == go::Build::Beta ? "Beta" : "Release");
     }
