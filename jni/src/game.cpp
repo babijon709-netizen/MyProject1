@@ -212,9 +212,114 @@ static void potato_restore() {
     g_potato_asset = 0;
 }
 
+// База libunity.so в карте процесса (нативные настройки качества живут там).
+static uint64_t potato_unity_base() {
+    static uint64_t s_base = 0;
+    static double s_next_try = 0.0;
+    if (s_base) return s_base;
+    const double now_s = mono_seconds();
+    if (now_s < s_next_try) return 0;
+    s_next_try = now_s + 2.0;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
+    FILE* f = fopen(path, "r");
+    if (!f) return 0;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (!strstr(line, "libunity.so")) continue;
+        unsigned long long a = 0, b = 0, off = 0;
+        char perms[8] = {};
+        if (sscanf(line, "%llx-%llx %7s %llx", &a, &b, perms, &off) < 4) continue;
+        if (off != 0 || perms[0] != 'r') continue;   // начало образа
+        s_base = (uint64_t)a;
+        break;
+    }
+    fclose(f);
+    if (s_base) LogLine("картофель: libunity найдена по 0x%llx", (unsigned long long)s_base);
+    return s_base;
+}
+
+// Текущий уровень качества Unity: адрес блока настроек, в который пишем.
+static uint64_t potato_quality_level() {
+    const uint64_t base = potato_unity_base();
+    if (!base) return 0;
+    const uint64_t qs = rd_ptr(base + UNITY_MANAGERS_RVA + UNITY_QUALITY_MANAGER_IDX * 8);
+    if (!valid_obj(qs)) return 0;
+    const int32_t level = rd<int32_t>(qs + QUALITY_CURRENT_LEVEL);
+    const uint64_t arr = rd_ptr(qs + QUALITY_LEVEL_ARRAY);
+    if (level < 0 || level > 32 || !valid_obj(arr)) return 0;
+    const uint64_t lv = arr + (uint64_t)level * QUALITY_LEVEL_STRIDE;
+    // Проверка по содержимому: предел мипов 0..8, LOD-смещение 0.05..20.
+    const int32_t mip = rd<int32_t>(lv + QUALITY_TEXTURE_MIPMAP_LIMIT);
+    const float bias = rd<float>(lv + QUALITY_LOD_BIAS);
+    if (mip < 0 || mip > 8) return 0;
+    if (!std::isfinite(bias) || bias < 0.05f || bias > 20.f) return 0;
+    return lv;
+}
+
+struct PotatoQualityOriginals {
+    int32_t mip = 0, maxLod = 0, lights = 0, aa = 0;
+    float bias = 1.f, shadowDist = 0.f;
+    bool saved = false;
+};
+static PotatoQualityOriginals g_potato_q;
+static uint64_t g_potato_q_level = 0;
+
+static void potato_quality_restore() {
+    if (!g_potato_q.saved || !g_potato_q_level) { g_potato_q.saved = false; g_potato_q_level = 0; return; }
+    const uint64_t lv = g_potato_q_level;
+    { const int32_t v = g_potato_q.mip;    wr_buf(lv + QUALITY_TEXTURE_MIPMAP_LIMIT, &v, sizeof(v)); }
+    { const int32_t v = g_potato_q.maxLod; wr_buf(lv + QUALITY_MAX_LOD_LEVEL, &v, sizeof(v)); }
+    { const int32_t v = g_potato_q.lights; wr_buf(lv + QUALITY_PIXEL_LIGHT_COUNT, &v, sizeof(v)); }
+    { const int32_t v = g_potato_q.aa;     wr_buf(lv + QUALITY_ANTI_ALIASING, &v, sizeof(v)); }
+    { const float   v = g_potato_q.bias;   wr_buf(lv + QUALITY_LOD_BIAS, &v, sizeof(v)); }
+    { const float   v = g_potato_q.shadowDist; wr_buf(lv + QUALITY_SHADOW_DISTANCE, &v, sizeof(v)); }
+    LogLine("картофель: нативные настройки качества возвращены");
+    g_potato_q.saved = false;
+    g_potato_q_level = 0;
+}
+
+// Нативная часть «картофеля»: текстуры в четверть разрешения (это и есть
+// «мыло»), агрессивный LOD, без попиксельных источников и сглаживания.
+static void potato_quality_apply() {
+    const uint64_t lv = potato_quality_level();
+    if (!lv) return;
+    if (g_potato_q_level && lv != g_potato_q_level) potato_quality_restore();
+    if (!g_potato_q.saved) {
+        g_potato_q.mip    = rd<int32_t>(lv + QUALITY_TEXTURE_MIPMAP_LIMIT);
+        g_potato_q.maxLod = rd<int32_t>(lv + QUALITY_MAX_LOD_LEVEL);
+        g_potato_q.lights = rd<int32_t>(lv + QUALITY_PIXEL_LIGHT_COUNT);
+        g_potato_q.aa     = rd<int32_t>(lv + QUALITY_ANTI_ALIASING);
+        g_potato_q.bias   = rd<float>(lv + QUALITY_LOD_BIAS);
+        g_potato_q.shadowDist = rd<float>(lv + QUALITY_SHADOW_DISTANCE);
+        g_potato_q.saved = true;
+        g_potato_q_level = lv;
+        LogLine("картофель: нативное качество @0x%llx — было мипы=%d LOD-смещение=%.2f "
+                "макс.LOD=%d свет=%d сглаживание=%d тени=%.0f м",
+                (unsigned long long)lv, (int)g_potato_q.mip, (double)g_potato_q.bias,
+                (int)g_potato_q.maxLod, (int)g_potato_q.lights, (int)g_potato_q.aa,
+                (double)g_potato_q.shadowDist);
+    }
+    auto seti = [&](uint64_t off, int32_t v) {
+        if (rd<int32_t>(lv + off) != v) wr_buf(lv + off, &v, sizeof(v));
+    };
+    auto setf = [&](uint64_t off, float v) {
+        const float now = rd<float>(lv + off);
+        if (!std::isfinite(now) || fabsf(now - v) > 0.0001f) wr_buf(lv + off, &v, sizeof(v));
+    };
+    // Предел мипов: 2 = текстуры грузятся в четверть разрешения. Уже
+    // загруженные подтянутся по мере стриминга, новые — сразу.
+    seti(QUALITY_TEXTURE_MIPMAP_LIMIT, 2);
+    seti(QUALITY_MAX_LOD_LEVEL, 1);        // самые детальные LOD не используются
+    seti(QUALITY_PIXEL_LIGHT_COUNT, 0);
+    seti(QUALITY_ANTI_ALIASING, 0);
+    setf(QUALITY_LOD_BIAS, 0.3f);          // дальние модели переключаются раньше
+    setf(QUALITY_SHADOW_DISTANCE, 0.f);
+}
+
 static void potato_gfx_tick() {
-    if (!g_potato_enabled) { potato_restore(); return; }
-    if (!g_il2cpp_base || g_pid <= 0) return;
+    if (!g_potato_enabled) { potato_restore(); potato_quality_restore(); return; }
+    if (!g_il2cpp_base || g_pid <= 0) { g_potato_q.saved = false; g_potato_q_level = 0; return; }
     const uint64_t asset = potato_find_asset();
     if (!asset) return;
     if (g_potato_asset && asset != g_potato_asset) potato_restore();   // ассет сменился
@@ -292,6 +397,7 @@ static void potato_gfx_tick() {
     setb(URP_ADDITIONAL_LIGHT_SHADOWS, 0);
     setb(URP_REFLECTION_BLENDING, 0);
     setb(URP_REFLECTION_BOX, 0);
+    potato_quality_apply();   // нативная часть: мипы текстур, LOD, свет
 
     // Контроль: раз в секунду читаем ассет обратно. Если игра возвращает свои
     // значения (или мы пишем не в тот ассет), это видно сразу — «функция не

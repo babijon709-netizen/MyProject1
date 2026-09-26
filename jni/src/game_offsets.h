@@ -298,6 +298,30 @@ inline constexpr std::uint64_t URP_SHADOW_CASCADES       = 0xC8;  // m_ShadowCas
 inline constexpr std::uint64_t WEAPON_CONFIG_MAX_DISTANCE = 0x2C; // HitscanWeaponConfig.MaxDistance
 inline constexpr std::uint64_t WEAPON_CONFIG_BASE_DISPERSION = 0x3C; // HitscanWeaponConfig.BaseDispersion
 
+// ---- Нативные настройки качества Unity (libunity.so) -----------------------
+// Смещения добыты разбором кода libunity (tools/offsets/unity_quality.py):
+// символов в библиотеке нет, но таблица регистрации ICall'ов ведёт к нативным
+// сеттерам, а из них читаются раскладка и поля. ПАТЧЕЙ КОДА НЕТ — чит пишет
+// только данные:
+//     qs     = *(void**)(libunity + UNITY_MANAGERS_RVA + 11*8)
+//     level  = *(int32*)(qs + QUALITY_CURRENT_LEVEL)
+//     levels = *(void**)(qs + QUALITY_LEVEL_ARRAY)
+//     поле   = levels + level*QUALITY_LEVEL_STRIDE + смещение
+// Значения зависят от ВЕРСИИ UNITY, а не от сборки игры, поэтому
+// автообновление по именам их не трогает — при смене версии движка
+// перезапустить скрипт на новом libunity.so.
+inline constexpr std::uint64_t UNITY_MANAGERS_RVA          = 0x17d3088;
+inline constexpr std::uint64_t UNITY_QUALITY_MANAGER_IDX   = 11;
+inline constexpr std::uint64_t QUALITY_CURRENT_LEVEL       = 0x64;
+inline constexpr std::uint64_t QUALITY_LEVEL_ARRAY         = 0x20;
+inline constexpr std::uint64_t QUALITY_LEVEL_STRIDE        = 0x108;
+inline constexpr std::uint64_t QUALITY_TEXTURE_MIPMAP_LIMIT = 0x5c; // «мыло»: 0 полное, 1 половина, 2 четверть
+inline constexpr std::uint64_t QUALITY_LOD_BIAS            = 0xa4;
+inline constexpr std::uint64_t QUALITY_MAX_LOD_LEVEL       = 0xa8;
+inline constexpr std::uint64_t QUALITY_PIXEL_LIGHT_COUNT   = 0x28;
+inline constexpr std::uint64_t QUALITY_SHADOW_DISTANCE     = 0x3c;
+inline constexpr std::uint64_t QUALITY_ANTI_ALIASING       = 0x84;
+
 // ---- Блок «Оружие»: цепочка конфигов (без-отдача / без-разброс) -------------
 // Раньше эти смещения были вшиты прямо в weapon_tuning_memory.h литералами, а
 // работа блока разрешалась по СПИСКУ build-id: новая сборка игры — и функция
