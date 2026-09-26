@@ -1507,7 +1507,9 @@ static void AimLogTick(float dt) {
         float errAvg = 0.f, errMax = 0.f, stepAvg = 0.f, gy = 0.f, gp = 0.f;
         AimTouchDiagFetch(&ticks, &steps, &flips, &skipNoFrame, &skipLong,
                           &errAvg, &errMax, &stepAvg, &gy, &gp, &learned);
-        if (ticks)
+        // Пишем только когда есть о чём: иначе четыре пустые строки в секунду
+        // забивают журнал (лог 26.09 21:32 — сплошные «шагов 0»).
+        if (ticks && (steps || flips || skipNoFrame || skipLong))
             LogLine("тач-аим: тактов %d, шагов %d, реверсов %d, пропущено без кадра игры %d, "
                     "рваных кадров %d, |ошибка| сред %.2f° макс %.2f°, шаг сред %.1f px, "
                     "гейн yaw %.4f pitch %.4f град/px%s",

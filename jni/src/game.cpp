@@ -1434,12 +1434,18 @@ static bool base_resolves_game(uint64_t base) {
             return true;
         }
         if (is_token(val)) {
-            LogLine("привязка: база 0x%llx верна по токену TypeInfo %s (RVA 0x%llx, токен 0x%llx, профиль %s)",
+            // Токен — СЛАБЫЙ признак: это просто четырёхбайтовое значение
+            // нужного вида по данному RVA. После апдейта игры такое совпадение
+            // бывает случайным, и раньше оно намертво переключало профиль
+            // (лог 26.09 21:31: образ с чужим Build-ID был принят как Beta по
+            // токену). Профиль меняем ПРЕДВАРИТЕЛЬНО и не запоминаем в файл:
+            // подтвердит его живой класс — тогда и запишем.
+            LogLine("привязка: база 0x%llx принята по токену TypeInfo %s (RVA 0x%llx, токен 0x%llx, "
+                    "профиль %s выбран ПРЕДВАРИТЕЛЬНО — ждём живой класс)",
                     (unsigned long long)base, ci.name, (unsigned long long)ci.rva,
                     (unsigned long long)val, ci.build == go::Build::Beta ? "Beta" : "Release");
             if (go::CurrentBuild() != ci.build) {
                 go::SelectBuild(ci.build);
-                RememberBuild();
                 g_buildPrompt = false;
             }
             return true;
