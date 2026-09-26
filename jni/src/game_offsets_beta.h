@@ -257,6 +257,24 @@ inline constexpr std::uint64_t FPMANAGER_AIM_BLEND           = 0xA8;
 inline constexpr std::uint64_t FPOBJECT_PLAYER_BACKREF       = 0xC0;
 inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;
 
+// ---- Блок «Оружие»: цепочка конфигов (без-отдача / без-разброс) -------------
+// (см. подробности в game_offsets.h). Раньше эти смещения были вшиты прямо в weapon_tuning_memory.h литералами, а
+// работа блока разрешалась по СПИСКУ build-id: новая сборка игры — и функция
+// молча отключалась («weapon data: отказ=1 неизвестный build-id», лог 26.09).
+// Теперь это обычные константы, и автообновление держит их свежими: все
+// четыре класса и все поля названы в метаданных читаемыми именами
+// (HyperHug.Games.Oxide.Features.Weapons.*), то есть находятся резолвером так
+// же, как PlayerManager.
+inline constexpr std::uint64_t FPHITSCAN_CONFIG              = 0x130; // FPHitscan.config
+inline constexpr std::uint64_t WEAPON_CONFIG_DISPERSION      = 0x60;  // HitscanWeaponConfig.dispersionConfig
+inline constexpr std::uint64_t WEAPON_CONFIG_RECOIL          = 0x68;  // HitscanWeaponConfig.recoilConfig
+inline constexpr std::uint64_t RECOIL_CONFIG_MIN             = 0x18;  // RecoilConfig.MinRecoil (Vector2)
+inline constexpr std::uint64_t RECOIL_CONFIG_MAX             = 0x20;  // RecoilConfig.MaxRecoil (Vector2)
+inline constexpr std::uint64_t RECOIL_CONFIG_MIN_SIDE        = 0x28;  // RecoilConfig.MinSideDelta
+inline constexpr std::uint64_t RECOIL_CONFIG_MAX_SIDE        = 0x2C;  // RecoilConfig.MaxSideDelta
+inline constexpr std::uint64_t DISPERSION_CONFIG_MIN         = 0x20;  // DispersionConfig.minDispersion
+inline constexpr std::uint64_t DISPERSION_CONFIG_MAX         = 0x24;  // DispersionConfig.maxDispersion
+
 // Максимальная дальность удара ближним орудием (топор/кирка/пила/копьё).
 // Из дампа 62a8534, класс Oxide.FPMelee (наследники: FPTool -> FPChainsaw,
 // FPSpear, FPBuildingHammer, FPTorch — имена читаемые, не ротируют):

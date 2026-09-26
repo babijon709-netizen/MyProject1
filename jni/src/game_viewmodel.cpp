@@ -233,14 +233,29 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         local_source_failed = false;
         player = memio::untag(raw); // successful null read means no local player
     }
-    weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, settings.no_spread);
+    // Блок «Оружие» на НЕзнакомой сборке: разрешаем только когда вся цепочка
+    // смещений пришла из живых метаданных этой игры. Тогда раскладку
+    // подтверждает сама игра, а не список build-id (лог 26.09: «отказ=1
+    // неизвестный build-id» после каждого апдейта).
+    const std::uint64_t* const chain[] = {
+        &go_active::PLAYER_FP_MANAGER, &go_active::FPMANAGER_CURRENT_WEAPON,
+        &go_active::FPOBJECT_PLAYER_BACKREF, &go_active::FPHITSCAN_CONFIG,
+        &go_active::WEAPON_CONFIG_RECOIL, &go_active::WEAPON_CONFIG_DISPERSION,
+        &go_active::RECOIL_CONFIG_MIN, &go_active::RECOIL_CONFIG_MAX,
+        &go_active::RECOIL_CONFIG_MIN_SIDE, &go_active::RECOIL_CONFIG_MAX_SIDE,
+        &go_active::DISPERSION_CONFIG_MIN, &go_active::DISPERSION_CONFIG_MAX,
+    };
+    bool chain_live = true;
+    for (const std::uint64_t* slot : chain) chain_live &= offset_resolver_is_live(slot);
+    weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, settings.no_spread,
+                 chain_live);
     static int last_weapon_diagnostic = -1;
     if ((settings.no_recoil || settings.no_spread) && weapons.diagnostic &&
         weapons.diagnostic != last_weapon_diagnostic) {
         char id[41] = {};
         for (int i = 0; i < 20; ++i)
             snprintf(id + i * 2, 3, "%02x", (unsigned)weapons.observed_id[i]);
-        LogLine("weapon data: отказ=%d (1 неизвестный build-id,2 guard,10..14 цепочка,20 restore,21 запись), id=%s guard=%d word=0x%x player=0x%llx offsets fp=0x%llx weapon=0x%llx back=0x%llx",
+        LogLine("weapon data: отказ=%d (1 неизвестный build-id и цепочка не живая,2 guard,10..14 цепочка,20 restore,21 запись), id=%s guard=%d word=0x%x player=0x%llx offsets fp=0x%llx weapon=0x%llx back=0x%llx",
                 weapons.diagnostic, id, weapons.guard_index, weapons.guard_observed,
                 (unsigned long long)player,
                 (unsigned long long)PLAYER_FP_MANAGER,

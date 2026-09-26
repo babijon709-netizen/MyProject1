@@ -4847,6 +4847,16 @@ uint64_t offset_resolver_class_nth(const char* name, const char* ns, int nth) {
     return 0;
 }
 
+// Пришло ли значение слота из ЖИВЫХ метаданных этой сборки (резолв или кэш
+// того же образа), а не из вшитой таблицы. Нужно функциям, которые ПИШУТ в
+// память игры: писать по вшитому смещению на незнакомом билде нельзя.
+bool offset_resolver_is_live(const uint64_t* slot) {
+    if (!slot) return false;
+    for (int i = 0; i < s_applied_count; ++i)
+        if (s_applied[i].slot == slot) return true;
+    return false;
+}
+
 uint64_t offset_resolver_class(const char* name, const char* ns) {
     return offset_resolver_class_nth(name, ns, 0);
 }

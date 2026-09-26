@@ -3086,5 +3086,131 @@
    "file": "dump.cs",
    "how": "string nick, 0x20 в обеих сборках"
   }
+ },
+ "FPHITSCAN_CONFIG": {
+  "kind": "field",
+  "class": "FPHitscan",
+  "struct": "Oxide_FPHitscan_Fields",
+  "field": "config",
+  "type": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_o*",
+  "offset": 304,
+  "src": {
+   "file": "dump.cs",
+   "struct": "FPHitscan",
+   "field": "config",
+   "how": "Oxide.FPHitscan.config — ассет настроек оружия; имя поля читаемое и не ротирует"
+  }
+ },
+ "WEAPON_CONFIG_DISPERSION": {
+  "kind": "field",
+  "class": "HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "dispersionConfig",
+  "type": "HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_o*",
+  "offset": 96,
+  "src": {
+   "file": "dump.cs",
+   "struct": "HitscanWeaponConfig",
+   "field": "dispersionConfig",
+   "how": "HitscanWeaponConfig.dispersionConfig — ссылка на ассет разброса"
+  }
+ },
+ "WEAPON_CONFIG_RECOIL": {
+  "kind": "field",
+  "class": "HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "recoilConfig",
+  "type": "HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_o*",
+  "offset": 104,
+  "src": {
+   "file": "dump.cs",
+   "struct": "HitscanWeaponConfig",
+   "field": "recoilConfig",
+   "how": "HitscanWeaponConfig.recoilConfig — ссылка на ассет отдачи"
+  }
+ },
+ "RECOIL_CONFIG_MIN": {
+  "kind": "field",
+  "class": "RecoilConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_Fields",
+  "field": "<MinRecoil>k__BackingField",
+  "type": "UnityEngine_Vector2_o",
+  "offset": 24,
+  "src": {
+   "file": "dump.cs",
+   "struct": "RecoilConfig",
+   "field": "<MinRecoil>k__BackingField",
+   "how": "RecoilConfig.MinRecoil — два float подряд (x,y)"
+  }
+ },
+ "RECOIL_CONFIG_MAX": {
+  "kind": "field",
+  "class": "RecoilConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_Fields",
+  "field": "<MaxRecoil>k__BackingField",
+  "type": "UnityEngine_Vector2_o",
+  "offset": 32,
+  "src": {
+   "file": "dump.cs",
+   "struct": "RecoilConfig",
+   "field": "<MaxRecoil>k__BackingField",
+   "how": "RecoilConfig.MaxRecoil — два float подряд (x,y)"
+  }
+ },
+ "RECOIL_CONFIG_MIN_SIDE": {
+  "kind": "field",
+  "class": "RecoilConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_Fields",
+  "field": "<MinSideDelta>k__BackingField",
+  "type": "float",
+  "offset": 40,
+  "src": {
+   "file": "dump.cs",
+   "struct": "RecoilConfig",
+   "field": "<MinSideDelta>k__BackingField",
+   "how": "RecoilConfig.MinSideDelta"
+  }
+ },
+ "RECOIL_CONFIG_MAX_SIDE": {
+  "kind": "field",
+  "class": "RecoilConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_Fields",
+  "field": "<MaxSideDelta>k__BackingField",
+  "type": "float",
+  "offset": 44,
+  "src": {
+   "file": "dump.cs",
+   "struct": "RecoilConfig",
+   "field": "<MaxSideDelta>k__BackingField",
+   "how": "RecoilConfig.MaxSideDelta"
+  }
+ },
+ "DISPERSION_CONFIG_MIN": {
+  "kind": "field",
+  "class": "DispersionConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_Fields",
+  "field": "minDispersion",
+  "type": "float",
+  "offset": 32,
+  "src": {
+   "file": "dump.cs",
+   "struct": "DispersionConfig",
+   "field": "minDispersion",
+   "how": "DispersionConfig.minDispersion"
+  }
+ },
+ "DISPERSION_CONFIG_MAX": {
+  "kind": "field",
+  "class": "DispersionConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_Fields",
+  "field": "maxDispersion",
+  "type": "float",
+  "offset": 36,
+  "src": {
+   "file": "dump.cs",
+   "struct": "DispersionConfig",
+   "field": "maxDispersion",
+   "how": "DispersionConfig.maxDispersion"
+  }
  }
 }

@@ -78,8 +78,26 @@ template<class IO> class Controller {
     const Identity& owner(size_t i) const {
         return i<6 ? context_.recoil : i<8 ? context_.dispersion : context_.calculator;
     }
+    // Смещения полей берутся из АКТИВНЫХ констант, а те живут автообновлением:
+    // RecoilConfig.MinRecoil/MaxRecoil (по два float) + MinSideDelta/MaxSideDelta,
+    // DispersionConfig.minDispersion/maxDispersion. Раньше здесь стояли
+    // литералы 0x18+i*4 и 0x20/0x24, и любая правка раскладки в новом билде
+    // означала запись не туда — потому блок и был заперт на список build-id.
+    static uint64_t recoil_slot(size_t i) {
+        switch (i) {
+            case 0: return go_active::RECOIL_CONFIG_MIN;        // MinRecoil.x
+            case 1: return go_active::RECOIL_CONFIG_MIN + 4;    // MinRecoil.y
+            case 2: return go_active::RECOIL_CONFIG_MAX;        // MaxRecoil.x
+            case 3: return go_active::RECOIL_CONFIG_MAX + 4;    // MaxRecoil.y
+            case 4: return go_active::RECOIL_CONFIG_MIN_SIDE;
+            default: return go_active::RECOIL_CONFIG_MAX_SIDE;
+        }
+    }
     uint64_t address(size_t i) const {
-        return owner(i).object + (i<6 ? 0x18+i*4 : i<8 ? 0x20+(i-6)*4 : 0x20);
+        if (i < 6) return owner(i).object + recoil_slot(i);
+        if (i < 8) return owner(i).object +
+            (i == 6 ? go_active::DISPERSION_CONFIG_MIN : go_active::DISPERSION_CONFIG_MAX);
+        return owner(i).object + 0x20;   // кэш базового разброса в калькуляторе
     }
     Life calculator_life() {
         auto life = context_.weapon.life(io);
@@ -125,10 +143,15 @@ template<class IO> class Controller {
             !pointer(io,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back) || back!=player)
             return false;
         resolve_step_ = 3;
-        if (!pointer(io,weapon+0x130,config) || !io.named(config,"HitscanWeaponConfig",kWeapons) ||
-            !c.config.capture(io,config,true) || !pointer(io,weapon+0x200,recoil) ||
-            !pointer(io,config+0x68,p) || p!=recoil || !pointer(io,weapon+0x208,p) || p!=config)
+        // config — по FPHitscan.config, recoil — по HitscanWeaponConfig.recoilConfig.
+        // Ссылка weapon+0x200 остаётся перекрёстной проверкой: если она читается,
+        // обязана указывать на тот же ассет отдачи.
+        if (!pointer(io,weapon+go_active::FPHITSCAN_CONFIG,config) ||
+            !io.named(config,"HitscanWeaponConfig",kWeapons) ||
+            !c.config.capture(io,config,true) ||
+            !pointer(io,config+go_active::WEAPON_CONFIG_RECOIL,recoil) || !recoil)
             return false;
+        if (pointer(io,weapon+0x200,p) && p && p!=recoil) return false;
         resolve_step_ = 4;
         if (!io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true) ||
             !pointer(io,weapon+0x1f8,calc) ||
@@ -136,7 +159,8 @@ template<class IO> class Controller {
             !c.calculator.capture(io,calc,false)) return false;
         resolve_step_ = 5;
         if (!pointer(io,calc+0x18,p) || p!=config ||
-            !pointer(io,calc+0x10,dispersion) || !pointer(io,config+0x60,p) || p!=dispersion ||
+            !pointer(io,calc+0x10,dispersion) ||
+            !pointer(io,config+go_active::WEAPON_CONFIG_DISPERSION,p) || p!=dispersion ||
             !io.named(dispersion,"DispersionConfig",kWeapons) ||
             !c.dispersion.capture(io,dispersion,true)) return false;
         resolve_step_ = 0;
@@ -165,6 +189,7 @@ public:
     // 10..14 owner-chain stage,
     // 20 restoration, 21 heap write/readback. Exposed for device diagnostics.
     int diagnostic = 0;
+    bool generic = false;      // сработали без записи в kLayouts (по живым метаданным)
     int guard_index = -1;
     uint32_t guard_observed = 0;
     std::array<uint8_t,20> observed_id{};
@@ -175,16 +200,21 @@ public:
         bool ok=!restore_originals || restore(0,saved_.size());
         // Callers disconnect after reset. Never carry addresses into another pid.
         saved_={}; context_={}; session_=base_=0;
-        diagnostic=0; guard_index=-1; guard_observed=0; observed_id={};
+        diagnostic=0; generic=false; guard_index=-1; guard_observed=0; observed_id={};
         recoil=spread=viewmodel::Status::Off;
         return ok;
     }
-    void tick(uint64_t session, uint64_t base, uint64_t player, bool nr, bool ns) {
+    // generic_ok — «все смещения цепочки взяты из ЖИВЫХ метаданных этой
+    // сборки» (проверяет вызывающий через резолвер). Только в этом случае
+    // блок работает на билде, которого нет в списке kLayouts: раскладку
+    // подтверждает не таблица, а сама игра.
+    void tick(uint64_t session, uint64_t base, uint64_t player, bool nr, bool ns,
+              bool generic_ok = false) {
         using viewmodel::Status;
         if (session!=session_ || base!=base_) {
             reset(false); session_=session; base_=base;
         }
-        diagnostic=0; guard_index=-1; guard_observed=0;
+        diagnostic=0; generic=false; guard_index=-1; guard_observed=0;
         recoil=nr?Status::Waiting:Status::Off;
         spread=ns?Status::Waiting:Status::Off;
         // Restore even without a local player: ScriptableObject assets may
@@ -200,7 +230,14 @@ public:
             for (const auto& l:kLayouts) if (l.build_id==id) layout=&l;
         observed_id=id;
         bool supported=layout!=nullptr;
-        if (!layout) diagnostic=1;
+        if (!layout) {
+            // Незнакомый build-id больше не приговор. Условие допуска —
+            // смещения цепочки разрешены живьём, а сама цепочка ниже обязана
+            // сойтись по именам классов и перекрёстным ссылкам.
+            supported = generic_ok;
+            generic = generic_ok;
+            if (!supported) diagnostic=1;
+        }
         if (layout) for (size_t i=0;i<layout->guard_sites.size();++i) {
             uint32_t word=0;
             if (!io.read(base+layout->guard_sites[i],word) || word!=layout->guard_words[i]) {
