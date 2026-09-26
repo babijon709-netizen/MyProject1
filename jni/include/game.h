@@ -460,6 +460,8 @@ bool esp_mem_aim_write_angles(float x_deg, float y_deg);
 // +0x178 -> +0x20). FPHitscan.ZDW пишет его после каждого выстрела, поэтому по
 // изменению значения видно, что выстрел был — и что в этот момент лежало в оси.
 bool esp_mem_aim_last_shot(float& time_sec);
+// Точка последнего попадания игрока (замер промахов сайлента), x/y/z.
+bool esp_aim_last_hit_point(float point[3]);
 
 // Ось выстрела (PlayerEventHandler.LookDirection) — нормированный вектор,
 // вдоль которого игра пускает луч попадания. Читать её приходится и для

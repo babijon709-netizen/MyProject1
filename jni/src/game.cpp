@@ -254,7 +254,31 @@ static void potato_gfx_tick() {
     auto setb = [&](uint64_t off, uint8_t v) {
         if (rd<uint8_t>(asset + off) != v) { const uint8_t _v = (uint8_t)(v); wr_buf(asset + off, &_v, sizeof(_v)); }
     };
-    setf(URP_RENDER_SCALE, g_potato_scale);
+    // Масштаб рендера: НИКОГДА не поднимаем выше того, что стояло в игре.
+    // Лог 26.09 22:30 показал, зачем: у игры уже было scale=0.54, а ползунок
+    // по умолчанию 0.70 — мы делали картинку ЧЁТЧЕ и тяжелее, отсюда «функция
+    // не работает». И меняем его не чаще, чем раз в полсекунды и шагами по
+    // 0.05: URP пересоздаёт цели рендера под новый масштаб, а полтора десятка
+    // пересозданий в секунду (пока пользователь ведёт ползунок) и дают те
+    // самые разноцветные квадраты на экране.
+    {
+        float want = g_potato_scale;
+        if (want > g_potato_orig.scale) want = g_potato_orig.scale;
+        want = floorf(want * 20.f + 0.5f) / 20.f;          // шаг 0.05
+        if (want < 0.3f) want = 0.3f;
+        static double s_last_scale_write = 0.0;
+        static float  s_last_scale_want = 0.f;
+        const float now_scale = rd<float>(asset + URP_RENDER_SCALE);
+        const bool differs = !std::isfinite(now_scale) || fabsf(now_scale - want) > 0.001f;
+        const double now_s = mono_seconds();
+        if (differs && (want != s_last_scale_want || now_s - s_last_scale_write > 0.5)) {
+            if (now_s - s_last_scale_write > 0.5) {
+                { const float _v = want; wr_buf(asset + URP_RENDER_SCALE, &_v, sizeof(_v)); }
+                s_last_scale_write = now_s;
+                s_last_scale_want = want;
+            }
+        }
+    }
     setf(URP_SHADOW_DISTANCE, 0.f);          // тени не рисуются вовсе
     seti(URP_MSAA, 1);                        // сглаживание выключено
     seti(URP_SHADOW_CASCADES, 1);
@@ -4481,6 +4505,19 @@ static bool resolve_look_direction(uint64_t& out) {
     uint64_t look = rd_ptr(handler + EVENT_HANDLER_LOOK_DIRECTION);
     if (look < 0x10000) return false;
     out = look + SYNC_VALUE_OFFSET;
+    return true;
+}
+
+// Куда на самом деле пришёл последний выстрел. Нужно, чтобы измерять промахи
+// сайлента: сравниваем точку попадания с точкой, куда целились.
+bool esp_aim_last_hit_point(float point[3]) {
+    uint64_t handler = 0;
+    if (!resolve_event_handler(handler)) return false;
+    const uint64_t sv = rd_ptr(handler + EVENT_HANDLER_LAST_HIT_POINT);
+    if (sv < 0x10000) return false;
+    const Vec3 v = rd_v3(sv + SYNC_VALUE_OFFSET);
+    if (!vec3_is_finite(v)) return false;
+    point[0] = v.x; point[1] = v.y; point[2] = v.z;
     return true;
 }
 

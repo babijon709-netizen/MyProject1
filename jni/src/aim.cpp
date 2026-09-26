@@ -724,7 +724,7 @@ struct TouchDiag {
     int ticks = 0, steps = 0, flips = 0, skipNoFrame = 0, skipLongFrame = 0;
     float errSum = 0.f, errMax = 0.f, stepSum = 0.f;
     float errAvg = 0.f, stepAvg = 0.f;
-    float gainYaw = 0.f, gainPitch = 0.f;
+    float gainYaw = 0.f, gainPitch = 0.f, trim = 1.f;
     bool  learned = false;
 };
 static TouchDiag s_tdiag;
@@ -732,7 +732,7 @@ static TouchDiag s_tdiag;
 // tools/aim, и тип туда не попадает.
 void AimTouchDiagFetch(int* ticks, int* steps, int* flips, int* skipNoFrame, int* skipLong,
                        float* errAvg, float* errMax, float* stepAvg,
-                       float* gy, float* gp, int* learned) {
+                       float* gy, float* gp, float* trim, int* learned) {
     if (ticks) *ticks = s_tdiag.ticks;
     if (steps) *steps = s_tdiag.steps;
     if (flips) *flips = s_tdiag.flips;
@@ -743,6 +743,7 @@ void AimTouchDiagFetch(int* ticks, int* steps, int* flips, int* skipNoFrame, int
     if (stepAvg) *stepAvg = s_tdiag.steps ? s_tdiag.stepSum / (float)s_tdiag.steps : 0.f;
     if (gy) *gy = s_tdiag.gainYaw;
     if (gp) *gp = s_tdiag.gainPitch;
+    if (trim) *trim = s_tdiag.trim;
     if (learned) *learned = s_tdiag.learned ? 1 : 0;
     s_tdiag = TouchDiag{};
 }
@@ -1337,6 +1338,12 @@ static void UpdateAimTouch(float dt) {
     static float s_flipDamp = 1.f;
     static float s_prevCtlYaw = 0.f, s_prevCtlPitch = 0.f;
     static bool  s_haveCtlErr = false;
+    // Стойкий трим: одиночный гаситель (0.45 на реверс, восстановление за
+    // четыре такта) качели гасит, но НЕ лечит устойчивую раскачку — в логе
+    // 26.09 22:30 реверсы шли по 1-2 на каждые 15 тактов подряд. Копим их:
+    // каждый реверс срезает шаг ещё на 15%, спокойные такты возвращают по 1.5%.
+    // Нижний предел 0.35 — дальше наведение станет заметно вялым.
+    static float s_trim = 1.f;
     const bool flipYaw = s_haveCtlErr && s_prevCtlYaw * errYaw < 0.f &&
                          fabsf(errYaw) > fabsf(s_prevCtlYaw) * 0.35f;
     const bool flipPitch = s_haveCtlErr && s_prevCtlPitch * errPitch < 0.f &&
@@ -1347,7 +1354,16 @@ static void UpdateAimTouch(float dt) {
         s_flipDamp += (1.f - s_flipDamp) * (dt * 2.5f);
         if (s_flipDamp > 1.f) s_flipDamp = 1.f;
     }
-    if (flipYaw || flipPitch) ++s_tdiag.flips;
+    if (flipYaw || flipPitch) {
+        ++s_tdiag.flips;
+        s_trim *= 0.85f;
+        if (s_trim < 0.35f) s_trim = 0.35f;
+    } else {
+        s_trim += 0.015f;
+        if (s_trim > 1.f) s_trim = 1.f;
+    }
+    k *= s_trim;
+    s_tdiag.trim = s_trim;
     {
         const float mag = (fabsf(errYaw) > fabsf(errPitch)) ? fabsf(errYaw) : fabsf(errPitch);
         s_tdiag.errSum += mag;
@@ -1488,7 +1504,7 @@ static const char* aim_mode_name() {
 
 // Сколько раз ось выстрелаdobили в конце кадра между двумя строками лога
 
-void AimTouchDiagFetch(int*, int*, int*, int*, int*, float*, float*, float*, float*, float*, int*);
+void AimTouchDiagFetch(int*, int*, int*, int*, int*, float*, float*, float*, float*, float*, float*, int*);
 
 static void AimLogTick(float dt) {
     s_logTime += dt;
@@ -1505,16 +1521,17 @@ static void AimLogTick(float dt) {
     if (g_state.aim_mode == AIM_MODE_TOUCH) {
         int ticks = 0, steps = 0, flips = 0, skipNoFrame = 0, skipLong = 0, learned = 0;
         float errAvg = 0.f, errMax = 0.f, stepAvg = 0.f, gy = 0.f, gp = 0.f;
+        float trim = 1.f;
         AimTouchDiagFetch(&ticks, &steps, &flips, &skipNoFrame, &skipLong,
-                          &errAvg, &errMax, &stepAvg, &gy, &gp, &learned);
+                          &errAvg, &errMax, &stepAvg, &gy, &gp, &trim, &learned);
         // Пишем только когда есть о чём: иначе четыре пустые строки в секунду
         // забивают журнал (лог 26.09 21:32 — сплошные «шагов 0»).
         if (ticks && (steps || flips || skipNoFrame || skipLong))
             LogLine("тач-аим: тактов %d, шагов %d, реверсов %d, пропущено без кадра игры %d, "
                     "рваных кадров %d, |ошибка| сред %.2f° макс %.2f°, шаг сред %.1f px, "
-                    "гейн yaw %.4f pitch %.4f град/px%s",
+                    "трим %.2f, гейн yaw %.4f pitch %.4f град/px%s",
                     ticks, steps, flips, skipNoFrame, skipLong,
-                    (double)errAvg, (double)errMax, (double)stepAvg,
+                    (double)errAvg, (double)errMax, (double)stepAvg, (double)trim,
                     (double)gy, (double)gp, learned ? " (выучен)" : " (из настройки)");
     }
     if (g_state.aim_mode == AIM_MODE_MEMORY)
@@ -1783,6 +1800,31 @@ static void UpdateAimSilent(float dt) {
         ++s_memDiag.fails;
     }
     s_memDiag.axis = silent_aim::stats().axis;
+
+    // Замер промаха: как только игра отметила НОВЫЙ выстрел, сравниваем точку
+    // попадания с точкой, куда целились. Жалоба «сайлент не попадает, особенно
+    // вдали» без этих цифр не разбирается: видно будет и промах в метрах, и
+    // дистанцию, и ушла ли пуля в сторону или не долетела.
+    {
+        static float s_last_shot_time = -1.f;
+        float shot = 0.f;
+        if (esp_mem_aim_last_shot(shot) && shot != s_last_shot_time) {
+            const bool first = s_last_shot_time < 0.f;
+            s_last_shot_time = shot;
+            float hit[3] = {0.f, 0.f, 0.f};
+            if (!first && best.world_valid && esp_aim_last_hit_point(hit)) {
+                const float dx = hit[0] - best.world[0];
+                const float dy = hit[1] - best.world[1];
+                const float dz = hit[2] - best.world[2];
+                const float miss = sqrtf(dx * dx + dy * dy + dz * dz);
+                LogLine("сайлент выстрел: промах %.2f м (цель на %.1f м), "
+                        "цель [%.1f %.1f %.1f], попадание [%.1f %.1f %.1f]",
+                        (double)miss, (double)best.world_dist,
+                        (double)best.world[0], (double)best.world[1], (double)best.world[2],
+                        (double)hit[0], (double)hit[1], (double)hit[2]);
+            }
+        }
+    }
 }
 
 void AimEndFrame() {
