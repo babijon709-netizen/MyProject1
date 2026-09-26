@@ -514,6 +514,7 @@ bool     s_logged = false;
 // имён в таблице строк есть, а по указателям нашлись только системные классы
 // (Delegate, Dictionary), PlayerManager не существовал. Резолвер уходил в
 // PH_DONE навсегда и больше не пробовал — чит так и оставался пустым.
+constexpr int kRescanLimit = 20;   // 5 попыток по 25 с + 15 по 60 с ≈ 17 минут
 int      s_rescan_count = 0;
 double   s_rescan_at = 0;
 bool     s_so_scan_failed = false;   // скан .so на этой базе уже не дал табличных классов
@@ -4467,18 +4468,27 @@ void offset_resolver_tick() {
         // Игра могла ещё грузиться: классов Assembly-CSharp в памяти нет, пока
         // мир не поднялся. Ждём и пробуем снова — иначе чит остаётся пустым до
         // перезапуска (лог 26.09 17:56: 6 констант из 160, PlayerManager нет).
-        if (!s_from_cache && resolve_incomplete() && s_rescan_count < 20) {
+        if (!s_from_cache && s_rescan_count < kRescanLimit && resolve_incomplete()) {
             const double now = mono_seconds();
             if (!s_rescan_at) {
-                s_rescan_at = now + 25.0;
-                LogLine("автооффсеты: ключевых классов ещё нет (разрешено %d/%d) — "
-                        "повторю подбор через 25 с (игра, возможно, ещё грузится), попытка %d из 20",
-                        s_resolved, kOrFieldCount, s_rescan_count + 1);
+                // Загрузка мира занимает от десятков секунд до нескольких
+                // минут: первые попытки частые, дальше реже, чтобы фоновый
+                // скан не грел телефон. Всего покрываем около 20 минут.
+                const double wait = (s_rescan_count < 5) ? 25.0 : 60.0;
+                s_rescan_at = now + wait;
+                LogLine("автооффсеты: ключевых классов игры ещё нет (разрешено %d/%d) — "
+                        "повторю подбор через %d с (мир, видимо, ещё не загружен), попытка %d из %d",
+                        s_resolved, kOrFieldCount, (int)wait, s_rescan_count + 1, kRescanLimit);
             } else if (now >= s_rescan_at) {
                 ++s_rescan_count;
                 s_rescan_at = 0;
                 soft_rescan();
             }
+        } else if (!s_from_cache && s_rescan_count >= kRescanLimit && s_rescan_at == 0) {
+            s_rescan_at = -1.0;   // печатаем один раз
+            LogLine("автооффсеты: %d повторов подряд без ключевых классов — "
+                    "останавливаюсь. Если игра уже в мире, нажми «Пересканировать оффсеты» в меню",
+                    kRescanLimit);
         }
     }
 }
@@ -4664,6 +4674,11 @@ void offset_resolver_status(char* out, size_t cap) {
         return;
     }
     // PH_DONE
+    if (s_rescan_at < 0 && !s_from_cache) {
+        snprintf(out, cap, "классы игры так и не появились: полей %d/%d — нажми «Пересканировать оффсеты»",
+                 s_resolved, kOrFieldCount);
+        return;
+    }
     if (s_rescan_at > 0 && !s_from_cache) {
         // Резолв прошёл, но классов игры в памяти ещё нет (мир не загружен).
         // Слово «готов» в строке сохраняем: результат применён, просто он
