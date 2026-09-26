@@ -275,6 +275,27 @@ inline constexpr std::uint64_t FPMANAGER_AIM_BLEND           = 0xA8;
 inline constexpr std::uint64_t FPOBJECT_PLAYER_BACKREF       = 0xC0;
 inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;
 
+// ---- Картофельная графика: живой ассет URP ----------------------------------
+// UniversalRenderPipelineAsset — обычный ScriptableObject, и URP перечитывает
+// его поля КАЖДЫЙ кадр при сборке кадровых данных. Значит «понизить графику»
+// можно чистой записью в данные, без патчей библиотек. Живой ассет лежит в
+// статике UnityEngine.Rendering.RenderPipelineManager.s_CurrentPipelineAsset.
+inline constexpr std::uint64_t RP_MANAGER_CURRENT_ASSET  = 0x8;   // статик RenderPipelineManager
+inline constexpr std::uint64_t URP_DEPTH_TEXTURE         = 0x54;  // m_RequireDepthTexture (bool)
+inline constexpr std::uint64_t URP_OPAQUE_TEXTURE        = 0x55;  // m_RequireOpaqueTexture (bool)
+inline constexpr std::uint64_t URP_SUPPORTS_HDR          = 0x5D;  // m_SupportsHDR (bool)
+inline constexpr std::uint64_t URP_MSAA                  = 0x64;  // m_MSAA (1 = выкл)
+inline constexpr std::uint64_t URP_RENDER_SCALE          = 0x68;  // m_RenderScale (float)
+inline constexpr std::uint64_t URP_LOD_CROSSFADE         = 0x78;  // m_EnableLODCrossFade (bool)
+inline constexpr std::uint64_t URP_ADDITIONAL_LIGHTS_MODE = 0xA4; // m_AdditionalLightsRenderingMode (0 = выкл)
+inline constexpr std::uint64_t URP_ADDITIONAL_LIGHTS_LIMIT = 0xA8;// m_AdditionalLightsPerObjectLimit
+inline constexpr std::uint64_t URP_MAIN_LIGHT_SHADOWS    = 0x9C;  // m_MainLightShadowsSupported (bool)
+inline constexpr std::uint64_t URP_ADDITIONAL_LIGHT_SHADOWS = 0xAC; // m_AdditionalLightShadowsSupported (bool)
+inline constexpr std::uint64_t URP_REFLECTION_BLENDING   = 0xC0;  // m_ReflectionProbeBlending (bool)
+inline constexpr std::uint64_t URP_REFLECTION_BOX        = 0xC1;  // m_ReflectionProbeBoxProjection (bool)
+inline constexpr std::uint64_t URP_SHADOW_DISTANCE       = 0xC4;  // m_ShadowDistance (float)
+inline constexpr std::uint64_t URP_SHADOW_CASCADES       = 0xC8;  // m_ShadowCascadeCount (int)
+
 // ---- Блок «Оружие»: цепочка конфигов (без-отдача / без-разброс) -------------
 // Раньше эти смещения были вшиты прямо в weapon_tuning_memory.h литералами, а
 // работа блока разрешалась по СПИСКУ build-id: новая сборка игры — и функция

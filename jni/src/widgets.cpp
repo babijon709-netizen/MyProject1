@@ -1043,10 +1043,16 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         }
 
     } else if (secId == 12) {
-        // Мир: всегда день
+        // Мир: всегда день + картофельная графика
         FgSHdr(XS("Окружение"));
         FgCardBg(rH * 1);
         FgToggleRow(XS("Всегда день"), &g_state.always_day, g_state.a_always_day, true);
+
+        FgSHdr(XS("Графика"));
+        FgCardBg(rH * 2);
+        FgToggleRow(XS("Картофельная графика"), &g_state.potato_gfx, g_state.a_potato_gfx, false);
+        FgSliderRow(XS("Масштаб рендера"), &g_state.potato_scale, 0.4f, 1.f, "%.2f",
+                    true, g_state.sl_potato_scale);
 
     } else if (secId == 2) {
         FgSHdr(nullptr, 12.f);

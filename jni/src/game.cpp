@@ -145,6 +145,131 @@ static int      g_day_retry = 0;
 
 void esp_set_always_day(bool enabled) { g_day_enabled = enabled; }
 
+// ================== Картофельная графика (без патчей кода) ==================
+// URP держит настройки качества в обычном ScriptableObject
+// (UniversalRenderPipelineAsset) и перечитывает их КАЖДЫЙ кадр при сборке
+// кадровых данных. Поэтому «понизить графику» можно чистой записью в данные:
+// масштаб рендера, тени, сглаживание, HDR, доп. источники света. Живой ассет
+// лежит в статике UnityEngine.Rendering.RenderPipelineManager.
+//
+// Правила те же, что у блока «Оружие»: пишем только в проверенный объект,
+// сохраняем оригиналы и возвращаем их при выключении или смене ассета.
+static bool     g_potato_enabled = false;
+static float    g_potato_scale = 0.7f;
+static uint64_t g_potato_asset = 0;       // ассет, в который писали
+static bool     g_potato_saved = false;
+struct PotatoOriginals {
+    float scale = 1.f, shadowDist = 50.f;
+    int32_t msaa = 1, cascades = 1, addMode = 0, addLimit = 4;
+    uint8_t depthTex = 0, opaqueTex = 0, hdr = 0, lodCross = 0;
+    uint8_t mainShadows = 1, addShadows = 0, reflBlend = 0, reflBox = 0;
+};
+static PotatoOriginals g_potato_orig;
+
+void esp_set_potato_gfx(bool enabled, float scale) {
+    g_potato_enabled = enabled;
+    if (scale >= 0.3f && scale <= 1.f) g_potato_scale = scale;
+}
+
+// Живой ассет активного рендер-пайплайна: класс по имени (его находит
+// автообновление) -> статик-блок -> s_CurrentPipelineAsset.
+static uint64_t potato_find_asset() {
+    const uint64_t mgr = offset_resolver_class("RenderPipelineManager", "UnityEngine.Rendering");
+    if (!mgr) return 0;
+    const uint64_t statics = get_class_static_fields(mgr);
+    if (!statics) return 0;
+    const uint64_t asset = memio::untag(rd_ptr(statics + RP_MANAGER_CURRENT_ASSET));
+    if (!valid_obj(asset)) return 0;
+    // Проверка по содержимому: масштаб рендера и дальность теней обязаны быть
+    // правдоподобными. Чужой объект такую пару не даст.
+    const float scale = rd<float>(asset + URP_RENDER_SCALE);
+    const float dist  = rd<float>(asset + URP_SHADOW_DISTANCE);
+    if (!(std::isfinite(scale) && scale >= 0.1f && scale <= 4.f)) return 0;
+    if (!(std::isfinite(dist) && dist >= 0.f && dist <= 5000.f)) return 0;
+    return asset;
+}
+
+static void potato_restore() {
+    if (!g_potato_saved || !g_potato_asset) { g_potato_saved = false; g_potato_asset = 0; return; }
+    const uint64_t a = g_potato_asset;
+    const PotatoOriginals& o = g_potato_orig;
+    { const float _v = (float)(o.scale); wr_buf(a + URP_RENDER_SCALE, &_v, sizeof(_v)); }
+    { const float _v = (float)(o.shadowDist); wr_buf(a + URP_SHADOW_DISTANCE, &_v, sizeof(_v)); }
+    { const int32_t _v = (int32_t)(o.msaa); wr_buf(a + URP_MSAA, &_v, sizeof(_v)); }
+    { const int32_t _v = (int32_t)(o.cascades); wr_buf(a + URP_SHADOW_CASCADES, &_v, sizeof(_v)); }
+    { const int32_t _v = (int32_t)(o.addMode); wr_buf(a + URP_ADDITIONAL_LIGHTS_MODE, &_v, sizeof(_v)); }
+    { const int32_t _v = (int32_t)(o.addLimit); wr_buf(a + URP_ADDITIONAL_LIGHTS_LIMIT, &_v, sizeof(_v)); }
+    { const uint8_t _v = (uint8_t)(o.depthTex); wr_buf(a + URP_DEPTH_TEXTURE, &_v, sizeof(_v)); }
+    { const uint8_t _v = (uint8_t)(o.opaqueTex); wr_buf(a + URP_OPAQUE_TEXTURE, &_v, sizeof(_v)); }
+    { const uint8_t _v = (uint8_t)(o.hdr); wr_buf(a + URP_SUPPORTS_HDR, &_v, sizeof(_v)); }
+    { const uint8_t _v = (uint8_t)(o.lodCross); wr_buf(a + URP_LOD_CROSSFADE, &_v, sizeof(_v)); }
+    { const uint8_t _v = (uint8_t)(o.mainShadows); wr_buf(a + URP_MAIN_LIGHT_SHADOWS, &_v, sizeof(_v)); }
+    { const uint8_t _v = (uint8_t)(o.addShadows); wr_buf(a + URP_ADDITIONAL_LIGHT_SHADOWS, &_v, sizeof(_v)); }
+    { const uint8_t _v = (uint8_t)(o.reflBlend); wr_buf(a + URP_REFLECTION_BLENDING, &_v, sizeof(_v)); }
+    { const uint8_t _v = (uint8_t)(o.reflBox); wr_buf(a + URP_REFLECTION_BOX, &_v, sizeof(_v)); }
+    LogLine("картофель: настройки графики возвращены ассету 0x%llx", (unsigned long long)a);
+    g_potato_saved = false;
+    g_potato_asset = 0;
+}
+
+static void potato_gfx_tick() {
+    if (!g_potato_enabled) { potato_restore(); return; }
+    if (!g_il2cpp_base || g_pid <= 0) return;
+    const uint64_t asset = potato_find_asset();
+    if (!asset) return;
+    if (g_potato_asset && asset != g_potato_asset) potato_restore();   // ассет сменился
+    if (!g_potato_saved) {
+        PotatoOriginals o;
+        o.scale       = rd<float>(asset + URP_RENDER_SCALE);
+        o.shadowDist  = rd<float>(asset + URP_SHADOW_DISTANCE);
+        o.msaa        = rd<int32_t>(asset + URP_MSAA);
+        o.cascades    = rd<int32_t>(asset + URP_SHADOW_CASCADES);
+        o.addMode     = rd<int32_t>(asset + URP_ADDITIONAL_LIGHTS_MODE);
+        o.addLimit    = rd<int32_t>(asset + URP_ADDITIONAL_LIGHTS_LIMIT);
+        o.depthTex    = rd<uint8_t>(asset + URP_DEPTH_TEXTURE);
+        o.opaqueTex   = rd<uint8_t>(asset + URP_OPAQUE_TEXTURE);
+        o.hdr         = rd<uint8_t>(asset + URP_SUPPORTS_HDR);
+        o.lodCross    = rd<uint8_t>(asset + URP_LOD_CROSSFADE);
+        o.mainShadows = rd<uint8_t>(asset + URP_MAIN_LIGHT_SHADOWS);
+        o.addShadows  = rd<uint8_t>(asset + URP_ADDITIONAL_LIGHT_SHADOWS);
+        o.reflBlend   = rd<uint8_t>(asset + URP_REFLECTION_BLENDING);
+        o.reflBox     = rd<uint8_t>(asset + URP_REFLECTION_BOX);
+        if (!std::isfinite(o.scale) || o.scale < 0.1f || o.scale > 4.f) return;
+        g_potato_orig = o;
+        g_potato_asset = asset;
+        g_potato_saved = true;
+        LogLine("картофель: ассет 0x%llx, было scale=%.2f тени=%.0f м MSAA=%d каскадов=%d "
+                "HDR=%d глубина=%d непрозрачные=%d",
+                (unsigned long long)asset, (double)o.scale, (double)o.shadowDist,
+                (int)o.msaa, (int)o.cascades, (int)o.hdr, (int)o.depthTex, (int)o.opaqueTex);
+    }
+    // Пишем только то, что отличается: лишние записи в память игры не нужны.
+    auto setf = [&](uint64_t off, float v) {
+        const float now = rd<float>(asset + off);
+        if (!std::isfinite(now) || fabsf(now - v) > 0.0001f) { const float _v = (float)(v); wr_buf(asset + off, &_v, sizeof(_v)); }
+    };
+    auto seti = [&](uint64_t off, int32_t v) {
+        if (rd<int32_t>(asset + off) != v) { const int32_t _v = (int32_t)(v); wr_buf(asset + off, &_v, sizeof(_v)); }
+    };
+    auto setb = [&](uint64_t off, uint8_t v) {
+        if (rd<uint8_t>(asset + off) != v) { const uint8_t _v = (uint8_t)(v); wr_buf(asset + off, &_v, sizeof(_v)); }
+    };
+    setf(URP_RENDER_SCALE, g_potato_scale);
+    setf(URP_SHADOW_DISTANCE, 0.f);          // тени не рисуются вовсе
+    seti(URP_MSAA, 1);                        // сглаживание выключено
+    seti(URP_SHADOW_CASCADES, 1);
+    seti(URP_ADDITIONAL_LIGHTS_MODE, 0);      // доп. источники выключены
+    seti(URP_ADDITIONAL_LIGHTS_LIMIT, 0);
+    setb(URP_DEPTH_TEXTURE, 0);
+    setb(URP_OPAQUE_TEXTURE, 0);
+    setb(URP_SUPPORTS_HDR, 0);
+    setb(URP_LOD_CROSSFADE, 0);
+    setb(URP_MAIN_LIGHT_SHADOWS, 0);
+    setb(URP_ADDITIONAL_LIGHT_SHADOWS, 0);
+    setb(URP_REFLECTION_BLENDING, 0);
+    setb(URP_REFLECTION_BOX, 0);
+}
+
 static void always_day_tick() {
     if (!g_day_enabled) {
         // Выключили: писатель замолкает (адрес в 0), часы игры идут сами.
@@ -7897,6 +8022,7 @@ bool publish_camera_only_frame(float sw, float sh) {
     Mat4 solo_proj{}, solo_view{};
     xray_apply(cam_native);
     always_day_tick();
+    potato_gfx_tick();
     if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) return false;
     Vec3 cam_pos{};
     if (!camera_position_from_view(solo_view, cam_pos)) return false;
@@ -8310,6 +8436,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         xray_apply(native_cam);
         always_day_tick();
+    potato_gfx_tick();
         // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
             watch_boxes(result, (size_t)-1, nullptr, 5); return result;

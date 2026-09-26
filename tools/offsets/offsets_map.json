@@ -3212,5 +3212,215 @@
    "field": "maxDispersion",
    "how": "DispersionConfig.maxDispersion"
   }
+ },
+ "RP_MANAGER_CURRENT_ASSET": {
+  "kind": "field",
+  "class": "RenderPipelineManager.static",
+  "struct": "UnityEngine_Rendering_RenderPipelineManager_StaticFields",
+  "field": "s_CurrentPipelineAsset",
+  "type": "UnityEngine_Rendering_RenderPipelineAsset_o*",
+  "offset": 8,
+  "src": {
+   "file": "dump.cs",
+   "struct": "RenderPipelineManager",
+   "field": "s_CurrentPipelineAsset",
+   "how": "статик: живой ассет активного рендер-пайплайна"
+  }
+ },
+ "URP_DEPTH_TEXTURE": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_RequireDepthTexture",
+  "type": "bool",
+  "offset": 84,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_RequireDepthTexture",
+   "how": "URP: буфер глубины"
+  }
+ },
+ "URP_OPAQUE_TEXTURE": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_RequireOpaqueTexture",
+  "type": "bool",
+  "offset": 85,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_RequireOpaqueTexture",
+   "how": "URP: копия непрозрачных"
+  }
+ },
+ "URP_SUPPORTS_HDR": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_SupportsHDR",
+  "type": "bool",
+  "offset": 93,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_SupportsHDR",
+   "how": "URP: HDR"
+  }
+ },
+ "URP_MSAA": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_MSAA",
+  "type": "int32_t",
+  "offset": 100,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_MSAA",
+   "how": "URP: сглаживание (1 = выкл)"
+  }
+ },
+ "URP_RENDER_SCALE": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_RenderScale",
+  "type": "float",
+  "offset": 104,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_RenderScale",
+   "how": "URP: масштаб рендера"
+  }
+ },
+ "URP_LOD_CROSSFADE": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_EnableLODCrossFade",
+  "type": "bool",
+  "offset": 120,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_EnableLODCrossFade",
+   "how": "URP: плавный LOD"
+  }
+ },
+ "URP_MAIN_LIGHT_SHADOWS": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_MainLightShadowsSupported",
+  "type": "bool",
+  "offset": 156,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_MainLightShadowsSupported",
+   "how": "URP: тени главного света"
+  }
+ },
+ "URP_ADDITIONAL_LIGHTS_MODE": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_AdditionalLightsRenderingMode",
+  "type": "int32_t",
+  "offset": 164,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_AdditionalLightsRenderingMode",
+   "how": "URP: режим доп. источников"
+  }
+ },
+ "URP_ADDITIONAL_LIGHTS_LIMIT": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_AdditionalLightsPerObjectLimit",
+  "type": "int32_t",
+  "offset": 168,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_AdditionalLightsPerObjectLimit",
+   "how": "URP: лимит доп. источников"
+  }
+ },
+ "URP_ADDITIONAL_LIGHT_SHADOWS": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_AdditionalLightShadowsSupported",
+  "type": "bool",
+  "offset": 172,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_AdditionalLightShadowsSupported",
+   "how": "URP: тени доп. источников"
+  }
+ },
+ "URP_REFLECTION_BLENDING": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_ReflectionProbeBlending",
+  "type": "bool",
+  "offset": 192,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_ReflectionProbeBlending",
+   "how": "URP: смешивание пробников"
+  }
+ },
+ "URP_REFLECTION_BOX": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_ReflectionProbeBoxProjection",
+  "type": "bool",
+  "offset": 193,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_ReflectionProbeBoxProjection",
+   "how": "URP: box-проекция пробников"
+  }
+ },
+ "URP_SHADOW_DISTANCE": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_ShadowDistance",
+  "type": "float",
+  "offset": 196,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_ShadowDistance",
+   "how": "URP: дальность теней"
+  }
+ },
+ "URP_SHADOW_CASCADES": {
+  "kind": "field",
+  "class": "UniversalRenderPipelineAsset",
+  "struct": "UnityEngine_Rendering_Universal_UniversalRenderPipelineAsset_Fields",
+  "field": "m_ShadowCascadeCount",
+  "type": "int32_t",
+  "offset": 200,
+  "src": {
+   "file": "dump.cs",
+   "struct": "UniversalRenderPipelineAsset",
+   "field": "m_ShadowCascadeCount",
+   "how": "URP: каскады теней"
+  }
  }
 }

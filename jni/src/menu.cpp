@@ -1644,6 +1644,7 @@ void RenderMenu() {
     Tick(g_state.a_esp_bots,   g_state.esp_bots,           dt);
     Tick(g_state.a_esp_vehicles, g_state.esp_vehicles,     dt);
     Tick(g_state.a_always_day,  g_state.always_day,         dt);
+    Tick(g_state.a_potato_gfx,  g_state.potato_gfx,         dt);
     Tick(g_state.a_esp_team,   g_state.esp_team,           dt);
     Tick(g_state.a_aim_pr0,    g_state.aim_priority == 0,  dt);
     Tick(g_state.a_aim_pr1,    g_state.aim_priority == 1,  dt);

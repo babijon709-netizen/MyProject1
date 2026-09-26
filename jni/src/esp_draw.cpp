@@ -50,6 +50,7 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         // когда маркеры ботов выключены.
         esp_set_bot_aim_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY || g_state.aim_mode == AIM_MODE_SILENT);
         esp_set_always_day(g_state.always_day);
+        esp_set_potato_gfx(g_state.potato_gfx, g_state.potato_scale);
         esp_set_marker_max_distance(g_state.marker_dist);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
