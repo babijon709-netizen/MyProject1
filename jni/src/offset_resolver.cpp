@@ -217,9 +217,10 @@ bool     s_from_cache = false;
 bool     s_cache_checked = false;
 bool     s_cache_saved = false;
 bool     s_cache_retryable = false; // ключ совпал, но класс-якорь ещё не загрузился
- double   s_cache_wait_since = 0;
- double   s_cache_retry_at = 0;
+double   s_cache_wait_since = 0;
+double   s_cache_retry_at = 0;
 double   s_cache_save_retry_at = 0;
+double   s_anchor_wait_since = 0;
 // Обычный потолок кэша. Хвост массива — резерв: лог с беты показал, что БЕЗ
 // окна метаданных «мягкий» фильтр пропускает сотни тысяч мусорных кандидатов,
 // кэш забивается мусором ещё в начале скана, и настоящие классы (вставшие в
@@ -545,12 +546,10 @@ static uint64_t anchor_class(const char** expected_name) {
         { PLAYER_MANAGER_TYPEINFO_RVA, "PlayerManager" },
         { 0xDADA550ULL, "PlayerManager" },
         { 0xDADBE58ULL, "PlayerManager" },
-        { 0xDAED008ULL, "PlayerManager" },
         { 0xD9C5310ULL, "PlayerManager" },
         { GAME_CONTROLLER_TYPEINFO_RVA, "GameControllerBase" },
         { 0xDADA348ULL, "GameControllerBase" },
         { 0xDAE0978ULL, "GameControllerBase" },
-        { 0xDB2EF10ULL, "GameControllerBase" },
         { 0xD9C0690ULL, "GameControllerBase" },
         { NETWORK_CLIENT_TYPEINFO_RVA, "NetworkClient" },
         { 0xDADAD88ULL, "NetworkClient" },
@@ -562,13 +561,42 @@ static uint64_t anchor_class(const char** expected_name) {
         const uint64_t k = memio::untag(qrd_ptr(g_il2cpp_base + c.rva));
         if (valid_obj(k)) {
             const uint64_t img = memio::untag(qrd_ptr(k));
-            if (valid_obj(img)) {
+            const uint64_t nm  = memio::untag(qrd_ptr(k + IL2CPP_CLASS_NAME));
+            if (valid_obj(img) && valid_str_ptr(nm)) {
                 if (expected_name) *expected_name = c.name;
                 return k;
             }
         }
     }
     return 0;
+}
+
+// Проверяет, держит ли хотя бы один из слотов TypeInfo ожидающий токен
+// метаданных IL2CPP (нечётный бит 0, значение < 4 ГБ). В рантайме IL2CPP
+// слоты TypeInfo инициализируются лениво — до создания первого объекта
+// или первого обращения там лежит токен метаданных.
+static bool anchor_has_pending_token() {
+    if (!g_il2cpp_base) return false;
+    static const uint64_t kTokenRvas[] = {
+        PLAYER_MANAGER_TYPEINFO_RVA,
+        0xDADA550ULL,
+        0xDADBE58ULL,
+        0xD9C5310ULL,
+        GAME_CONTROLLER_TYPEINFO_RVA,
+        0xDADA348ULL,
+        0xDAE0978ULL,
+        0xD9C0690ULL,
+        NETWORK_CLIENT_TYPEINFO_RVA,
+        0xDADAD88ULL,
+        0xDAE1D90ULL,
+        0xD9C4570ULL,
+    };
+    for (uint64_t rva : kTokenRvas) {
+        if (!rva) continue;
+        const uint64_t val = memio::untag(qrd<uint64_t>(g_il2cpp_base + rva));
+        if ((val & 1) && val < 0x100000000ULL && val >= 0x1000ULL) return true;
+    }
+    return false;
 }
 
 static FoundClass* find_class_slot(uint64_t klass) {
@@ -1030,6 +1058,12 @@ static int try_class_candidate(uint64_t v) {
 // близкие регионы (до 64 МБ каждый), пока не найдутся все табличные классы.
 static void start_heap_scan(uint64_t anchor) {
     build_wanted_names();
+    if (wanted_in_cache() == 0) {
+        s_class_count = 0;
+        s_shape_pass = 0;
+        s_names_ok = 0;
+        s_names_fail = 0;
+    }
     s_heap_range_count = 0;
     s_heap_range_idx = 0;
 
@@ -1762,6 +1796,34 @@ static void phase_ptr(double deadline) {
 }
 
 static void phase_scan(double deadline) {
+    const char* live_name = nullptr;
+    const uint64_t live_ank = anchor_class(&live_name);
+    if (live_ank) {
+        bool aok = false;
+        const uint64_t nm = memio::untag(qrd_ptr(live_ank + IL2CPP_CLASS_NAME));
+        const std::string an = valid_str_ptr(nm) ? qrd_string(nm, &aok) : std::string();
+        const uint64_t ns = memio::untag(qrd_ptr(live_ank + IL2CPP_CLASS_NAMESPACE));
+        const uint64_t img = memio::untag(qrd_ptr(live_ank));
+        const bool is_real = valid_obj(img) && aok && !an.empty() && (ns == 0 || valid_str_ptr(ns));
+        if (is_real) {
+            LogLine("автооффсеты: во время скана .so инициализировался класс-якорь 0x%llx («%s») — переключаюсь на скан кучи",
+                    (unsigned long long)live_ank, an.c_str());
+            if (!s_meta_begin) {
+                const uint64_t kSpan = 32ull << 20;
+                s_meta_begin = (nm > kSpan) ? ((nm - kSpan) & ~0xFFFFFFull) : 0x1000;
+                s_meta_end = s_meta_begin + (64ull << 20);
+                LogLine("автооффсеты: окно метаданных задано по якорю: 0x%llx..0x%llx (64 МБ)",
+                        (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end);
+            }
+            if (s_lib_begin && live_ank >= s_lib_begin && live_ank < s_lib_end) {
+                // Внутри .so — продолжаем обычный скан
+            } else {
+                start_heap_scan(live_ank);
+                return;
+            }
+        }
+    }
+
     // Буфер осознанно статический: 256 КБ на стеке кадра на телефоне —
     // риск переполнения стека потока отрисовки. Резолвер однопоточный.
     static uint8_t buf[kChunkBytes];
@@ -3515,6 +3577,20 @@ void offset_resolver_tick() {
             // следующем кадре, несмотря на совпавший ключ (лог: ожидание
             // якоря @3.456, карта процесса @3.507).
             if (s_cache_retryable) break;
+
+            // Если живой класс ещё не инициализирован, но в слотах есть токен TypeInfo —
+            // ждём, пока игра инициализирует класс при загрузке (обычно 2-8 секунд).
+            if (anchor_has_pending_token() && !anchor_class(nullptr)) {
+                const double now = mono_seconds();
+                if (!s_anchor_wait_since) {
+                    s_anchor_wait_since = now;
+                    LogLine("автооффсеты: найден токен TypeInfo — жду инициализации класса игрой");
+                }
+                if (now - s_anchor_wait_since < 25.0) {
+                    break; // остаёмся в PH_WAIT, ждём следующий кадр
+                }
+                LogLine("автооффсеты: класс не инициализировался за 25 с — продолжаю скан");
+            }
             s_phase = PH_MAPS;
             break;
         case PH_MAPS:   phase_maps(); break;
@@ -3540,6 +3616,7 @@ void offset_resolver_tick() {
 
 void offset_resolver_reset() {
     s_phase = PH_WAIT;
+    s_anchor_wait_since = 0;
     s_seg_count = 0; s_seg_idx = 0; s_scan_pos = 0;
     s_xseg_count = 0; s_xseg_bytes = 0;
     s_lib_begin = s_lib_end = 0; s_meta_begin = s_meta_end = 0;
@@ -3613,7 +3690,7 @@ uint64_t offset_resolver_good_base(pid_t pid) {
 // смотрителю кадра не поможет: слепоту после апдейта игры лечат только новые
 // оффсеты, а не новое подключение к тому же процессу и базе.
 bool offset_resolver_busy() {
-    return (s_phase == PH_WAIT && s_cache_retryable) ||
+    return (s_phase == PH_WAIT && (s_cache_retryable || s_anchor_wait_since > 0)) ||
            s_phase == PH_MAPS || s_phase == PH_SCAN ||
            s_phase == PH_HEAP || s_phase == PH_STRS ||
            s_phase == PH_BLOB || s_phase == PH_PTR ||
@@ -3663,6 +3740,9 @@ void offset_resolver_status(char* out, size_t cap) {
     if (s_phase == PH_WAIT) {
         if (s_cache_retryable)
             snprintf(out, cap, "кэш найден: жду живой класс-якорь (без полного скана)");
+        else if (s_anchor_wait_since > 0)
+            snprintf(out, cap, "жду инициализации класса игрой (%d с)",
+                     (int)(mono_seconds() - s_anchor_wait_since));
         else
             snprintf(out, cap, "ждёт привязку к игре");
         return;

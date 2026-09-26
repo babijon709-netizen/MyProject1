@@ -1325,6 +1325,7 @@ bool class_looks_alive(uint64_t klass) {
     const uint64_t name  = rd_ptr(klass + IL2CPP_CLASS_NAME);
     const uint64_t space = rd_ptr(klass + IL2CPP_CLASS_NAMESPACE);
     if (!image || !name || !space) return false;
+    if (!valid_obj(image)) return false;
     // Имя и пространство имён — указатели в память метаданных: не ноль и не мусор.
     return name >= 0x10000 && space >= 0x10000;
 }
@@ -1375,11 +1376,12 @@ static bool base_resolves_game(uint64_t base) {
             }
         }
     }
-    // class_identity отдаёт 1, когда имя прочитано и совпало, и 2, когда имя
-    // прочитать не удалось и класс принят по одной структуре. Второй случай
-    // лог №12 показал мусором: по вшитому RVA лежал код, а проверка «структуры»
-    // его пропустила. Поэтому в лог пишем, чем именно подтвердилась база:
-    // иначе строка «база верна по вшитому RVA» вводит в заблуждение.
+
+    auto is_token = [](uint64_t val) {
+        return (val & 1) && val < 0x100000000ULL && val >= 0x1000ULL;
+    };
+
+    // 1. Проверяем точное совпадение по имени (how == 1) или токену TypeInfo для активного профиля:
     if (PLAYER_MANAGER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(base + PLAYER_MANAGER_TYPEINFO_RVA);
         const int how = class_identity(candidate, "PlayerManager", "Oxide");
@@ -1388,24 +1390,27 @@ static bool base_resolves_game(uint64_t base) {
                     (unsigned long long)base, (unsigned long long)candidate);
             return true;
         }
-        if (how == 2) {
-            LogLine("привязка: база 0x%llx ПРИНЯТА НА ВЕРУ по вшитому RVA PlayerManager — имя класса НЕ читается (класс 0x%llx)",
-                    (unsigned long long)base, (unsigned long long)candidate);
-            return true;
-        }
-        // IL2CPP ленивая инициализация: до спавна игрока слот держит токен метаданных с нечётным битом 0
-        if ((candidate & 1) && candidate < 0x100000000ULL && candidate >= 0x1000ULL) {
+        if (is_token(candidate)) {
             LogLine("привязка: база 0x%llx верна по токену TypeInfo PlayerManager (0x%llx)",
                     (unsigned long long)base, (unsigned long long)candidate);
             return true;
         }
     }
-    // Если активный профиль не сошёлся — проверяем альтернативный (автодетект без Build-ID):
+
+    // 2. Если активный профиль точно не подтвердился — проверяем альтернативный (автодетект без Build-ID):
     if (go::CurrentBuild() == go::Build::Release && go::BetaAvailable()) {
         const uint64_t beta_cand = rd_ptr(base + game_offsets_beta::PLAYER_MANAGER_TYPEINFO_RVA);
-        if (class_identity(beta_cand, "PlayerManager", "Oxide") != 0 ||
-            ((beta_cand & 1) && beta_cand < 0x100000000ULL && beta_cand >= 0x1000ULL)) {
-            LogLine("привязка: по RVA беты (0x%llx) обнаружена БЕТА — автопереключение профиля на бету",
+        const int bhow = class_identity(beta_cand, "PlayerManager", "Oxide");
+        if (bhow == 1) {
+            LogLine("привязка: по RVA беты (0x%llx) обнаружена БЕТА (живой класс) — автопереключение профиля на бету",
+                    (unsigned long long)game_offsets_beta::PLAYER_MANAGER_TYPEINFO_RVA);
+            go::SelectBuild(go::Build::Beta);
+            RememberBuild();
+            g_buildPrompt = false;
+            return true;
+        }
+        if (is_token(beta_cand)) {
+            LogLine("привязка: по RVA беты (0x%llx) обнаружена БЕТА (токен TypeInfo) — автопереключение профиля на бету",
                     (unsigned long long)game_offsets_beta::PLAYER_MANAGER_TYPEINFO_RVA);
             go::SelectBuild(go::Build::Beta);
             RememberBuild();
@@ -1414,9 +1419,17 @@ static bool base_resolves_game(uint64_t base) {
         }
     } else if (go::CurrentBuild() == go::Build::Beta) {
         const uint64_t rel_cand = rd_ptr(base + game_offsets::PLAYER_MANAGER_TYPEINFO_RVA);
-        if (class_identity(rel_cand, "PlayerManager", "Oxide") != 0 ||
-            ((rel_cand & 1) && rel_cand < 0x100000000ULL && rel_cand >= 0x1000ULL)) {
-            LogLine("привязка: по RVA релиза (0x%llx) обнаружен РЕЛИЗ — автопереключение профиля на релиз",
+        const int rhow = class_identity(rel_cand, "PlayerManager", "Oxide");
+        if (rhow == 1) {
+            LogLine("привязка: по RVA релиза (0x%llx) обнаружен РЕЛИЗ (живой класс) — автопереключение профиля на релиз",
+                    (unsigned long long)game_offsets::PLAYER_MANAGER_TYPEINFO_RVA);
+            go::SelectBuild(go::Build::Release);
+            RememberBuild();
+            g_buildPrompt = false;
+            return true;
+        }
+        if (is_token(rel_cand)) {
+            LogLine("привязка: по RVA релиза (0x%llx) обнаружен РЕЛИЗ (токен TypeInfo) — автопереключение профиля на релиз",
                     (unsigned long long)game_offsets::PLAYER_MANAGER_TYPEINFO_RVA);
             go::SelectBuild(go::Build::Release);
             RememberBuild();
@@ -1424,6 +1437,8 @@ static bool base_resolves_game(uint64_t base) {
             return true;
         }
     }
+
+    // 3. Проверяем GameControllerBase по имени или токену:
     if (GAME_CONTROLLER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(base + GAME_CONTROLLER_TYPEINFO_RVA);
         const int how = class_identity(candidate, "GameControllerBase", "Oxide");
@@ -1432,13 +1447,27 @@ static bool base_resolves_game(uint64_t base) {
                     (unsigned long long)base, (unsigned long long)candidate);
             return true;
         }
-        if (how == 2) {
-            LogLine("привязка: база 0x%llx ПРИНЯТА НА ВЕРУ по вшитому RVA GameControllerBase — имя класса НЕ читается (класс 0x%llx)",
+        if (is_token(candidate)) {
+            LogLine("привязка: база 0x%llx верна по токену TypeInfo GameControllerBase (0x%llx)",
                     (unsigned long long)base, (unsigned long long)candidate);
             return true;
         }
-        if ((candidate & 1) && candidate < 0x100000000ULL && candidate >= 0x1000ULL) {
-            LogLine("привязка: база 0x%llx верна по токену TypeInfo GameControllerBase (0x%llx)",
+    }
+
+    // 4. Только если ни один RVA ни в одном профиле не дал совпадения по имени или токену —
+    // пробуем fallback по структуре (how == 2):
+    if (PLAYER_MANAGER_TYPEINFO_RVA != 0) {
+        const uint64_t candidate = rd_ptr(base + PLAYER_MANAGER_TYPEINFO_RVA);
+        if (class_identity(candidate, "PlayerManager", "Oxide") == 2) {
+            LogLine("привязка: база 0x%llx ПРИНЯТА НА ВЕРУ по вшитому RVA PlayerManager — имя класса НЕ читается (класс 0x%llx)",
+                    (unsigned long long)base, (unsigned long long)candidate);
+            return true;
+        }
+    }
+    if (GAME_CONTROLLER_TYPEINFO_RVA != 0) {
+        const uint64_t candidate = rd_ptr(base + GAME_CONTROLLER_TYPEINFO_RVA);
+        if (class_identity(candidate, "GameControllerBase", "Oxide") == 2) {
+            LogLine("привязка: база 0x%llx ПРИНЯТА НА ВЕРУ по вшитому RVA GameControllerBase — имя класса НЕ читается (класс 0x%llx)",
                     (unsigned long long)base, (unsigned long long)candidate);
             return true;
         }
