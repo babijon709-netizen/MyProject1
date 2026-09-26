@@ -783,6 +783,8 @@ static void UpdateAimTouch(float dt) {
     static std::vector<FlightOrd> s_flight;
     static float s_absorbYaw = 0.f, s_absorbPitch = 0.f; // заказано, не отработано (град)
     static int   s_holdNoFrame = 0;   // тактов подряд без нового кадра игры
+    static bool  s_stepPending = false;  // заказ сделан, ждём отклика камеры
+    static int   s_stepWait = 0;
     ++s_tdiag.ticks;
     static float s_stallYaw = 0.f, s_stallPitch = 0.f;
     static float s_prevRawYaw = 0.f, s_prevRawPitch = 0.f;
@@ -1225,8 +1227,10 @@ static void UpdateAimTouch(float dt) {
     {
         const float amp = AimTouchFlipMag();
         if (amp > 0.f) {
-            float grow = amp * 0.7f;
-            if (grow > 2.5f) grow = 2.5f;          // большие ошибки не игнорируем
+            // 0.35 амплитуды и потолок 0.6°: прошлая версия (0.7 и 2.5°) душила
+            // и сами поправки — аим стал вялым, а качка просто замедлилась.
+            float grow = amp * 0.35f;
+            if (grow > 0.6f) grow = 0.6f;
             if (grow > deadYaw) deadYaw = grow;
             if (grow > deadPitch) deadPitch = grow;
         }
@@ -1262,6 +1266,22 @@ static void UpdateAimTouch(float dt) {
         // Дрожь: палец стоит, камера не ходит за костью.
         if (s_fingerDown) Touch_Move(s_fx, s_fy);
         return;
+    }
+
+    // ---- темп подачи: один шаг на кадр ИГРЫ ----
+    // Наш цикл идёт 60 раз в секунду, игра рисует 30-40. Каждый лишний заказ
+    // между кадрами игры удваивает петлевое усиление — отсюда предельный цикл
+    // (лог 26.09 22:50: шаг на 14 тактах из 15 при остатке меньше градуса).
+    // Ждём, пока камера реально шевельнётся после нашего шага, и только тогда
+    // считаем следующий. Ограничение снимается, если камера «молчит» дольше
+    // четырёх тактов (игра на паузе, палец перехвачен и т. п.).
+    if (s_stepPending) {
+        if (camMoved || ++s_stepWait > 4) { s_stepPending = false; s_stepWait = 0; }
+        else {
+            ++s_tdiag.skipNoFrame;
+            if (s_fingerDown) Touch_Move(s_fx, s_fy);
+            return;
+        }
     }
 
     // ---- такт без нового кадра игры ----
@@ -1375,8 +1395,8 @@ static void UpdateAimTouch(float dt) {
     }
     if (flipYaw || flipPitch) {
         ++s_tdiag.flips;
-        s_trim *= 0.85f;
-        if (s_trim < 0.35f) s_trim = 0.35f;
+        s_trim *= 0.9f;
+        if (s_trim < 0.6f) s_trim = 0.6f;
         const float mag = (fabsf(errYaw) > fabsf(errPitch)) ? fabsf(errYaw) : fabsf(errPitch);
         s_flipMag = (s_flipMag <= 0.f) ? mag : (s_flipMag * 0.7f + mag * 0.3f);
     } else {
@@ -1386,7 +1406,7 @@ static void UpdateAimTouch(float dt) {
             s_flipMag -= dt * 0.6f;
             if (s_flipMag < 0.f) s_flipMag = 0.f;
         }
-        s_trim += 0.006f;      // ~2.5 с на полное восстановление
+        s_trim += 0.02f;       // назад к полной силе за ~0.3 с
         if (s_trim > 1.f) s_trim = 1.f;
     }
     k *= s_trim;
@@ -1510,6 +1530,8 @@ static void UpdateAimTouch(float dt) {
         s_absorbPitch += ordPitch; s_stallPitch = 0.f;
     }
     ++s_tdiag.steps;
+    s_stepPending = true;
+    s_stepWait = 0;
     s_tdiag.stepSum += (fabsf(dx) > fabsf(dy)) ? fabsf(dx) : fabsf(dy);
     Touch_Move(s_fx, s_fy);
 }
@@ -1849,9 +1871,12 @@ static void UpdateAimSilent(float dt) {
                 // пуля не попала НИКУДА: игра обновляет её только по факту
                 // попадания. Лог 26.09 22:51: дальше 25 м так было у всех
                 // четырёх выстрелов подряд.
-                const bool same = fabsf(hit[0] - s_prev_hit[0]) < 0.001f &&
-                                  fabsf(hit[1] - s_prev_hit[1]) < 0.001f &&
-                                  fabsf(hit[2] - s_prev_hit[2]) < 0.001f;
+                const bool zero = fabsf(hit[0]) < 0.001f && fabsf(hit[1]) < 0.001f &&
+                                  fabsf(hit[2]) < 0.001f;
+                const bool same = zero ||
+                                  (fabsf(hit[0] - s_prev_hit[0]) < 0.001f &&
+                                   fabsf(hit[1] - s_prev_hit[1]) < 0.001f &&
+                                   fabsf(hit[2] - s_prev_hit[2]) < 0.001f);
                 s_prev_hit[0] = hit[0]; s_prev_hit[1] = hit[1]; s_prev_hit[2] = hit[2];
                 float wmax = 0.f, wbase = 0.f, wlo = 0.f, whi = 0.f;
                 const bool have_w = esp_weapon_ballistics(wmax, wbase, wlo, whi);

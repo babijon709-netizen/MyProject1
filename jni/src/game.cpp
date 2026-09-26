@@ -243,17 +243,33 @@ static uint64_t potato_unity_base() {
 static uint64_t potato_quality_level() {
     const uint64_t base = potato_unity_base();
     if (!base) return 0;
+    // Диагностика: без неё «нативная часть молчит» не разобрать — в логе
+    // 26.09 23:29 не было ни одной строки про нативное качество.
+    static double s_next_log = 0.0;
+    const bool talk = mono_seconds() >= s_next_log;
+    auto fail = [&](const char* why, uint64_t a, uint64_t b, long c) -> uint64_t {
+        if (talk) {
+            s_next_log = mono_seconds() + 5.0;
+            LogLine("картофель: нативное качество не читается — %s (libunity 0x%llx, "
+                    "менеджер 0x%llx, массив 0x%llx, уровень %ld)",
+                    why, (unsigned long long)base, (unsigned long long)a,
+                    (unsigned long long)b, c);
+        }
+        return 0;
+    };
     const uint64_t qs = rd_ptr(base + UNITY_MANAGERS_RVA + UNITY_QUALITY_MANAGER_IDX * 8);
-    if (!valid_obj(qs)) return 0;
+    if (!valid_obj(qs)) return fail("нет менеджера по таблице", qs, 0, -1);
     const int32_t level = rd<int32_t>(qs + QUALITY_CURRENT_LEVEL);
     const uint64_t arr = rd_ptr(qs + QUALITY_LEVEL_ARRAY);
-    if (level < 0 || level > 32 || !valid_obj(arr)) return 0;
+    if (level < 0 || level > 32) return fail("уровень вне диапазона", qs, arr, (long)level);
+    if (!valid_obj(arr)) return fail("нет массива уровней", qs, arr, (long)level);
     const uint64_t lv = arr + (uint64_t)level * QUALITY_LEVEL_STRIDE;
     // Проверка по содержимому: предел мипов 0..8, LOD-смещение 0.05..20.
     const int32_t mip = rd<int32_t>(lv + QUALITY_TEXTURE_MIPMAP_LIMIT);
     const float bias = rd<float>(lv + QUALITY_LOD_BIAS);
-    if (mip < 0 || mip > 8) return 0;
-    if (!std::isfinite(bias) || bias < 0.05f || bias > 20.f) return 0;
+    if (mip < 0 || mip > 8) return fail("предел мипов неправдоподобен", qs, lv, (long)mip);
+    if (!std::isfinite(bias) || bias < 0.05f || bias > 20.f)
+        return fail("LOD-смещение неправдоподобно", qs, lv, (long)(bias * 100.f));
     return lv;
 }
 

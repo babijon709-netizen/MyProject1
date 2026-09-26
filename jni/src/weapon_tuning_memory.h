@@ -244,7 +244,7 @@ public:
         if (!r || !s) diagnostic=20;
         if (!r || !s || (!nr && !ns)) return;
         std::array<uint8_t,20> id{};
-        const Layout* layout=nullptr;
+        const Layout* layout=nullptr;   // сбрасывается, если сторожа не сошлись
         if (base && io.read(base+0x318,id))
             for (const auto& l:kLayouts) if (l.build_id==id) layout=&l;
         observed_id=id;
@@ -260,7 +260,17 @@ public:
         if (layout) for (size_t i=0;i<layout->guard_sites.size();++i) {
             uint32_t word=0;
             if (!io.read(base+layout->guard_sites[i],word) || word!=layout->guard_words[i]) {
-                supported=false; diagnostic=2; guard_index=(int)i; guard_observed=word;
+                // Сторожевые инструкции не сошлись. Раньше это был приговор, и
+                // на устройстве блок молчал с «отказ=2» при ИЗВЕСТНОМ build-id
+                // (лог 26.09 23:31). Сторожа появились как защита от старых
+                // инструкционных патчей и заодно подтверждали раскладку — но
+                // раскладку теперь подтверждают живые метаданные. Поэтому:
+                // не совпало — переходим в generic-режим, если цепочка живая.
+                guard_index=(int)i; guard_observed=word;
+                layout=nullptr;
+                supported=generic_ok;
+                generic=generic_ok;
+                diagnostic=supported?0:2;
                 break;
             }
         }
