@@ -1362,26 +1362,46 @@ int class_identity(uint64_t klass, const char* expected_name, const char* expect
 // выглядит успешной, а весь чит молча не работает.
 static bool base_resolves_game(uint64_t base) {
     if (!base) return false;
-    // Автоопределение версии игры по GNU Build-ID образа libil2cpp.so:
-    // у новой беты Build-ID = 76fbd4ffa661fe7117ee4172bddcf7d69afe15a0 (0x71fe61a6ffd4fb76ULL).
-    // у предыдущей беты Build-ID = e10795349bd7c2cdc7d8527597c64395a4efed79 (0xcdc2d79b349507e1ULL).
+    // Автоопределение версии игры по GNU Build-ID образа libil2cpp.so (первые
+    // 8 байт заметки, little-endian). У беты и релиза ОДИН И ТОТ ЖЕ пакет, так
+    // что имя процесса версию не различает — Build-ID единственный надёжный
+    // признак. Раньше здесь были только бета-идентификаторы, и релизный образ
+    // проваливался дальше, в перебор RVA, где первым же совпадал бета-токен:
+    // лог 26.09 21:31 — образ 0x81d4cb8dcd635ed8 (это РЕЛИЗ из дампа) был
+    // принят как бета, и чит ушёл на бета-оффсеты.
+    static const uint64_t kBetaBuildIds[] = {
+        0x71fe61a6ffd4fb76ULL,   // 76fbd4ff… — бета сентября
+        0xcdc2d79b349507e1ULL,   // e1079534… — предыдущая бета
+    };
+    static const uint64_t kReleaseBuildIds[] = {
+        0x81d4cb8dcd635ed8ULL,   // d85e63cd… — релиз, по которому сняты дампы
+        0x1536f42eb2242875ULL,   // релиз после апдейта 26.09
+    };
     uint64_t il2cpp_bid = 0;
     if (rd_buf(base + 0x318, &il2cpp_bid, sizeof(il2cpp_bid))) {
         LogLine("привязка: база 0x%llx, Build-ID 0x%llx (активный профиль %s)",
                 (unsigned long long)base, (unsigned long long)il2cpp_bid,
                 go::CurrentBuild() == go::Build::Beta ? "Beta" : "Release");
-        if (il2cpp_bid == 0x71fe61a6ffd4fb76ULL || il2cpp_bid == 0xcdc2d79b349507e1ULL) {
-            if (go::CurrentBuild() != go::Build::Beta) {
-                LogLine("привязка: по Build-ID (0x%llx) определена БЕТА — автопереключение профиля на бету",
-                        (unsigned long long)il2cpp_bid);
-                go::SelectBuild(go::Build::Beta);
+        bool known_beta = false, known_release = false;
+        for (uint64_t id : kBetaBuildIds) known_beta |= (id == il2cpp_bid);
+        for (uint64_t id : kReleaseBuildIds) known_release |= (id == il2cpp_bid);
+        if (known_beta || known_release) {
+            const go::Build want = known_beta ? go::Build::Beta : go::Build::Release;
+            if (go::CurrentBuild() != want) {
+                LogLine("привязка: по Build-ID (0x%llx) определён профиль %s — переключаю",
+                        (unsigned long long)il2cpp_bid, known_beta ? "БЕТА" : "РЕЛИЗ");
+                go::SelectBuild(want);
                 RememberBuild();
                 g_buildPrompt = false;
             }
-            LogLine("привязка: база 0x%llx подтверждена по Build-ID беты (0x%llx)",
-                    (unsigned long long)base, (unsigned long long)il2cpp_bid);
+            LogLine("привязка: база 0x%llx подтверждена по Build-ID (%s)",
+                    (unsigned long long)base, known_beta ? "бета" : "релиз");
             return true;
         }
+        LogLine("привязка: Build-ID 0x%llx неизвестен (игра обновилась) — профиль оставляю %s, "
+                "классы найдёт автообновление",
+                (unsigned long long)il2cpp_bid,
+                go::CurrentBuild() == go::Build::Beta ? "Beta" : "Release");
     }
 
     auto is_token = [](uint64_t val) {
@@ -1417,6 +1437,10 @@ static bool base_resolves_game(uint64_t base) {
         { 0xD9C52E0ULL, "PlayerLoopHelper", "Cysharp.Threading.Tasks", go::Build::Release },
     };
 
+    // ВАЖЕН ПОРЯДОК: сначала ищем ЖИВОЙ класс у всех кандидатов и только потом
+    // довольствуемся токеном. Раньше циклы были слиты в один, и слабое
+    // совпадение по токену у первого же кандидата (а первыми идут бета-RVA)
+    // побеждало настоящий живой класс релиза — чит уходил на чужой профиль.
     for (const auto& ci : kCandidates) {
         if (!ci.rva) continue;
         const uint64_t val = rd_ptr(base + ci.rva);
@@ -1433,6 +1457,11 @@ static bool base_resolves_game(uint64_t base) {
             }
             return true;
         }
+    }
+    for (const auto& ci : kCandidates) {
+        if (!ci.rva) continue;
+        const uint64_t val = rd_ptr(base + ci.rva);
+        if (!val) continue;
         if (is_token(val)) {
             // Токен — СЛАБЫЙ признак: это просто четырёхбайтовое значение
             // нужного вида по данному RVA. После апдейта игры такое совпадение
