@@ -1364,9 +1364,13 @@ static bool base_resolves_game(uint64_t base) {
     if (!base) return false;
     // Автоопределение версии игры по GNU Build-ID образа libil2cpp.so:
     // у новой беты Build-ID = 76fbd4ffa661fe7117ee4172bddcf7d69afe15a0 (0x71fe61a6ffd4fb76ULL).
+    // у предыдущей беты Build-ID = e10795349bd7c2cdc7d8527597c64395a4efed79 (0xcdc2d79b349507e1ULL).
     uint64_t il2cpp_bid = 0;
     if (rd_buf(base + 0x318, &il2cpp_bid, sizeof(il2cpp_bid))) {
-        if (il2cpp_bid == 0x71fe61a6ffd4fb76ULL) {
+        LogLine("привязка: база 0x%llx, Build-ID 0x%llx (активный профиль %s)",
+                (unsigned long long)base, (unsigned long long)il2cpp_bid,
+                go::CurrentBuild() == go::Build::Beta ? "Beta" : "Release");
+        if (il2cpp_bid == 0x71fe61a6ffd4fb76ULL || il2cpp_bid == 0xcdc2d79b349507e1ULL) {
             if (go::CurrentBuild() != go::Build::Beta) {
                 LogLine("привязка: по Build-ID (0x%llx) определена БЕТА — автопереключение профиля на бету",
                         (unsigned long long)il2cpp_bid);
@@ -1374,6 +1378,9 @@ static bool base_resolves_game(uint64_t base) {
                 RememberBuild();
                 g_buildPrompt = false;
             }
+            LogLine("привязка: база 0x%llx подтверждена по Build-ID беты (0x%llx)",
+                    (unsigned long long)base, (unsigned long long)il2cpp_bid);
+            return true;
         }
     }
 
@@ -1381,98 +1388,81 @@ static bool base_resolves_game(uint64_t base) {
         return (val & 1) && val < 0x100000000ULL && val >= 0x1000ULL;
     };
 
-    // 1. Проверяем точное совпадение по имени (how == 1) или токену TypeInfo для активного профиля:
-    if (PLAYER_MANAGER_TYPEINFO_RVA != 0) {
-        const uint64_t candidate = rd_ptr(base + PLAYER_MANAGER_TYPEINFO_RVA);
-        const int how = class_identity(candidate, "PlayerManager", "Oxide");
+    // 1. Проверяем все известные RVA TypeInfo для активного профиля и альтернативных
+    // (PlayerManager, GameControllerBase, NetworkClient, PlayerLoopHelper):
+    struct CandInfo {
+        uint64_t rva;
+        const char* name;
+        const char* ns;
+        go::Build build;
+    };
+    static const CandInfo kCandidates[] = {
+        // PlayerManager
+        { game_offsets_beta::PLAYER_MANAGER_TYPEINFO_RVA, "PlayerManager", "Oxide", go::Build::Beta },
+        { 0xDADBE58ULL, "PlayerManager", "Oxide", go::Build::Beta },
+        { 0xDAE42B8ULL, "PlayerManager", "Oxide", go::Build::Beta },
+        { game_offsets::PLAYER_MANAGER_TYPEINFO_RVA, "PlayerManager", "Oxide", go::Build::Release },
+        // GameControllerBase
+        { game_offsets_beta::GAME_CONTROLLER_TYPEINFO_RVA, "GameControllerBase", "Oxide", go::Build::Beta },
+        { 0xDAE0978ULL, "GameControllerBase", "Oxide", go::Build::Beta },
+        { game_offsets::GAME_CONTROLLER_TYPEINFO_RVA, "GameControllerBase", "Oxide", go::Build::Release },
+        // NetworkClient
+        { game_offsets_beta::NETWORK_CLIENT_TYPEINFO_RVA, "NetworkClient", "Mirror", go::Build::Beta },
+        { 0xDAE1D90ULL, "NetworkClient", "Mirror", go::Build::Beta },
+        { game_offsets::NETWORK_CLIENT_TYPEINFO_RVA, "NetworkClient", "Mirror", go::Build::Release },
+        // PlayerLoopHelper (всегда загружен UniTask при старте движка)
+        { game_offsets_beta::PLAYERLOOPHELPER_TYPEINFO_RVA, "PlayerLoopHelper", "Cysharp.Threading.Tasks", go::Build::Beta },
+        { 0xDAE2AC0ULL, "PlayerLoopHelper", "Cysharp.Threading.Tasks", go::Build::Beta },
+        { game_offsets::PLAYERLOOPHELPER_TYPEINFO_RVA, "PlayerLoopHelper", "Cysharp.Threading.Tasks", go::Build::Release },
+        { 0xD9C52E0ULL, "PlayerLoopHelper", "Cysharp.Threading.Tasks", go::Build::Release },
+    };
+
+    for (const auto& ci : kCandidates) {
+        if (!ci.rva) continue;
+        const uint64_t val = rd_ptr(base + ci.rva);
+        if (!val) continue;
+        const int how = class_identity(val, ci.name, ci.ns);
         if (how == 1) {
-            LogLine("привязка: база 0x%llx верна по вшитому RVA PlayerManager (класс 0x%llx)",
-                    (unsigned long long)base, (unsigned long long)candidate);
+            LogLine("привязка: база 0x%llx верна по живому классу %s (RVA 0x%llx, класс 0x%llx, профиль %s)",
+                    (unsigned long long)base, ci.name, (unsigned long long)ci.rva,
+                    (unsigned long long)val, ci.build == go::Build::Beta ? "Beta" : "Release");
+            if (go::CurrentBuild() != ci.build) {
+                go::SelectBuild(ci.build);
+                RememberBuild();
+                g_buildPrompt = false;
+            }
             return true;
         }
-        if (is_token(candidate)) {
-            LogLine("привязка: база 0x%llx верна по токену TypeInfo PlayerManager (0x%llx)",
-                    (unsigned long long)base, (unsigned long long)candidate);
-            return true;
-        }
-    }
-
-    // 2. Если активный профиль точно не подтвердился — проверяем альтернативный (автодетект без Build-ID):
-    if (go::CurrentBuild() == go::Build::Release && go::BetaAvailable()) {
-        const uint64_t beta_cand = rd_ptr(base + game_offsets_beta::PLAYER_MANAGER_TYPEINFO_RVA);
-        const int bhow = class_identity(beta_cand, "PlayerManager", "Oxide");
-        if (bhow == 1) {
-            LogLine("привязка: по RVA беты (0x%llx) обнаружена БЕТА (живой класс) — автопереключение профиля на бету",
-                    (unsigned long long)game_offsets_beta::PLAYER_MANAGER_TYPEINFO_RVA);
-            go::SelectBuild(go::Build::Beta);
-            RememberBuild();
-            g_buildPrompt = false;
-            return true;
-        }
-        if (is_token(beta_cand)) {
-            LogLine("привязка: по RVA беты (0x%llx) обнаружена БЕТА (токен TypeInfo) — автопереключение профиля на бету",
-                    (unsigned long long)game_offsets_beta::PLAYER_MANAGER_TYPEINFO_RVA);
-            go::SelectBuild(go::Build::Beta);
-            RememberBuild();
-            g_buildPrompt = false;
-            return true;
-        }
-    } else if (go::CurrentBuild() == go::Build::Beta) {
-        const uint64_t rel_cand = rd_ptr(base + game_offsets::PLAYER_MANAGER_TYPEINFO_RVA);
-        const int rhow = class_identity(rel_cand, "PlayerManager", "Oxide");
-        if (rhow == 1) {
-            LogLine("привязка: по RVA релиза (0x%llx) обнаружен РЕЛИЗ (живой класс) — автопереключение профиля на релиз",
-                    (unsigned long long)game_offsets::PLAYER_MANAGER_TYPEINFO_RVA);
-            go::SelectBuild(go::Build::Release);
-            RememberBuild();
-            g_buildPrompt = false;
-            return true;
-        }
-        if (is_token(rel_cand)) {
-            LogLine("привязка: по RVA релиза (0x%llx) обнаружен РЕЛИЗ (токен TypeInfo) — автопереключение профиля на релиз",
-                    (unsigned long long)game_offsets::PLAYER_MANAGER_TYPEINFO_RVA);
-            go::SelectBuild(go::Build::Release);
-            RememberBuild();
-            g_buildPrompt = false;
+        if (is_token(val)) {
+            LogLine("привязка: база 0x%llx верна по токену TypeInfo %s (RVA 0x%llx, токен 0x%llx, профиль %s)",
+                    (unsigned long long)base, ci.name, (unsigned long long)ci.rva,
+                    (unsigned long long)val, ci.build == go::Build::Beta ? "Beta" : "Release");
+            if (go::CurrentBuild() != ci.build) {
+                go::SelectBuild(ci.build);
+                RememberBuild();
+                g_buildPrompt = false;
+            }
             return true;
         }
     }
 
-    // 3. Проверяем GameControllerBase по имени или токену:
-    if (GAME_CONTROLLER_TYPEINFO_RVA != 0) {
-        const uint64_t candidate = rd_ptr(base + GAME_CONTROLLER_TYPEINFO_RVA);
-        const int how = class_identity(candidate, "GameControllerBase", "Oxide");
-        if (how == 1) {
-            LogLine("привязка: база 0x%llx верна по вшитому RVA GameControllerBase (класс 0x%llx)",
-                    (unsigned long long)base, (unsigned long long)candidate);
-            return true;
-        }
-        if (is_token(candidate)) {
-            LogLine("привязка: база 0x%llx верна по токену TypeInfo GameControllerBase (0x%llx)",
-                    (unsigned long long)base, (unsigned long long)candidate);
-            return true;
-        }
-    }
-
-    // 4. Только если ни один RVA ни в одном профиле не дал совпадения по имени или токену —
-    // пробуем fallback по структуре (how == 2):
-    if (PLAYER_MANAGER_TYPEINFO_RVA != 0) {
-        const uint64_t candidate = rd_ptr(base + PLAYER_MANAGER_TYPEINFO_RVA);
-        if (class_identity(candidate, "PlayerManager", "Oxide") == 2) {
-            LogLine("привязка: база 0x%llx ПРИНЯТА НА ВЕРУ по вшитому RVA PlayerManager — имя класса НЕ читается (класс 0x%llx)",
-                    (unsigned long long)base, (unsigned long long)candidate);
+    // 2. Fallback по структуре (how == 2):
+    for (const auto& ci : kCandidates) {
+        if (!ci.rva) continue;
+        const uint64_t val = rd_ptr(base + ci.rva);
+        if (val && class_identity(val, ci.name, ci.ns) == 2) {
+            LogLine("привязка: база 0x%llx ПРИНЯТА НА ВЕРУ по структуре %s (RVA 0x%llx, класс 0x%llx, профиль %s)",
+                    (unsigned long long)base, ci.name, (unsigned long long)ci.rva,
+                    (unsigned long long)val, ci.build == go::Build::Beta ? "Beta" : "Release");
+            if (go::CurrentBuild() != ci.build) {
+                go::SelectBuild(ci.build);
+                RememberBuild();
+                g_buildPrompt = false;
+            }
             return true;
         }
     }
-    if (GAME_CONTROLLER_TYPEINFO_RVA != 0) {
-        const uint64_t candidate = rd_ptr(base + GAME_CONTROLLER_TYPEINFO_RVA);
-        if (class_identity(candidate, "GameControllerBase", "Oxide") == 2) {
-            LogLine("привязка: база 0x%llx ПРИНЯТА НА ВЕРУ по вшитому RVA GameControllerBase — имя класса НЕ читается (класс 0x%llx)",
-                    (unsigned long long)base, (unsigned long long)candidate);
-            return true;
-        }
-    }
-    // Оба RVA не нашли класс — так бывает после апдейта игры, когда вшитые
+    // Ни один RVA не нашёл класс — так бывает после апдейта игры, когда вшитые
     // смещения устарели (именно ради этого и существует автообновление
     // оффсетов). Привязку не роняем: принимаем образ с живым ELF-заголовком,
     // резолвер сам найдёт классы по именам. Базы-кандидаты уже отсортированы

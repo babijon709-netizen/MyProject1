@@ -221,6 +221,7 @@ double   s_cache_wait_since = 0;
 double   s_cache_retry_at = 0;
 double   s_cache_save_retry_at = 0;
 double   s_anchor_wait_since = 0;
+int      s_anchor_retries = 0;
 // Обычный потолок кэша. Хвост массива — резерв: лог с беты показал, что БЕЗ
 // окна метаданных «мягкий» фильтр пропускает сотни тысяч мусорных кандидатов,
 // кэш забивается мусором ещё в начале скана, и настоящие классы (вставшие в
@@ -546,6 +547,7 @@ static uint64_t anchor_class(const char** expected_name) {
         { PLAYER_MANAGER_TYPEINFO_RVA, "PlayerManager" },
         { 0xDADA550ULL, "PlayerManager" },
         { 0xDADBE58ULL, "PlayerManager" },
+        { 0xDAE42B8ULL, "PlayerManager" },
         { 0xD9C5310ULL, "PlayerManager" },
         { GAME_CONTROLLER_TYPEINFO_RVA, "GameControllerBase" },
         { 0xDADA348ULL, "GameControllerBase" },
@@ -584,6 +586,7 @@ static bool anchor_has_pending_token() {
         PLAYER_MANAGER_TYPEINFO_RVA,
         0xDADA550ULL,
         0xDADBE58ULL,
+        0xDAE42B8ULL,
         0xD9C5310ULL,
         GAME_CONTROLLER_TYPEINFO_RVA,
         0xDADA348ULL,
@@ -1251,7 +1254,15 @@ static void phase_strsearch(double deadline) {
                 // В Unity-пуле сериализации перед именем лежат длинные серии нулей (\0\0\0\0)
                 // и бинарные счётчики (01 00 00 00 4b). В таблице строк метаданных строки
                 // идут впритык через один \0.
-                if (hit[-1] == '\0' && hit[-2] == '\0' && hit[-3] == '\0' && hit[-4] == '\0') {
+                if (hit[-1] == '\0' && (hit[-2] == '\0' || hit[-3] == '\0' || hit[-4] == '\0')) {
+                    packed = false;
+                }
+            }
+            if (off + kNeed + 2 < chunk) {
+                // В таблице строк метаданных после имени и замыкающего \0 сразу
+                // идёт первый ASCII-символ следующего имени. Два нуля подряд —
+                // признак паддинга в сериализации.
+                if (hit[kNeed] == '\0' && hit[kNeed + 1] == '\0') {
                     packed = false;
                 }
             }
@@ -1927,7 +1938,14 @@ static void phase_scan(double deadline) {
             if (anchor) start_heap_scan(anchor);
             else if (s_phase != PH_STRS) {
                 if (wanted_in_cache() == 0) {
-                    start_strsearch("табличных классов в .so нет");
+                    if (anchor_has_pending_token() && s_anchor_retries < 15) {
+                        ++s_anchor_retries;
+                        s_phase = PH_WAIT;
+                        s_anchor_wait_since = mono_seconds();
+                        LogLine("автооффсеты: скан .so окончен, но в TypeInfo найден токен — жду инициализации класса (попытка %d/15)", s_anchor_retries);
+                    } else {
+                        start_strsearch("табличных классов в .so нет");
+                    }
                 } else {
                     s_phase = PH_FIELDS;
                 }
@@ -3592,10 +3610,10 @@ void offset_resolver_tick() {
                     s_anchor_wait_since = now;
                     LogLine("автооффсеты: найден токен TypeInfo — жду инициализации класса игрой");
                 }
-                if (now - s_anchor_wait_since < 25.0) {
+                if (now - s_anchor_wait_since < 45.0) {
                     break; // остаёмся в PH_WAIT, ждём следующий кадр
                 }
-                LogLine("автооффсеты: класс не инициализировался за 25 с — продолжаю скан");
+                LogLine("автооффсеты: класс не инициализировался за 45 с — продолжаю скан");
             }
             s_phase = PH_MAPS;
             break;
@@ -3623,6 +3641,7 @@ void offset_resolver_tick() {
 void offset_resolver_reset() {
     s_phase = PH_WAIT;
     s_anchor_wait_since = 0;
+    s_anchor_retries = 0;
     s_seg_count = 0; s_seg_idx = 0; s_scan_pos = 0;
     s_xseg_count = 0; s_xseg_bytes = 0;
     s_lib_begin = s_lib_end = 0; s_meta_begin = s_meta_end = 0;
