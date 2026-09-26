@@ -3450,5 +3450,47 @@
    "field": "<BaseDispersion>k__BackingField",
    "how": "базовый разброс оружия"
   }
+ },
+ "WEAPON_CONFIG_FIRE_RATE": {
+  "kind": "field",
+  "class": "HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "fireRate",
+  "type": "float",
+  "offset": 52,
+  "src": {
+   "file": "dump.cs",
+   "struct": "HitscanWeaponConfig",
+   "field": "fireRate",
+   "how": "темп стрельбы оружия"
+  }
+ },
+ "WEAPON_CONFIG_FULL_RELOAD": {
+  "kind": "field",
+  "class": "HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "<FullReloadPeriod>k__BackingField",
+  "type": "float",
+  "offset": 72,
+  "src": {
+   "file": "dump.cs",
+   "struct": "HitscanWeaponConfig",
+   "field": "<FullReloadPeriod>k__BackingField",
+   "how": "время полной перезарядки"
+  }
+ },
+ "WEAPON_CONFIG_LOOP_RELOAD": {
+  "kind": "field",
+  "class": "HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "<LoopReloadPeriod>k__BackingField",
+  "type": "float",
+  "offset": 76,
+  "src": {
+   "file": "dump.cs",
+   "struct": "HitscanWeaponConfig",
+   "field": "<LoopReloadPeriod>k__BackingField",
+   "how": "время дозарядки по патрону"
+  }
  }
 }

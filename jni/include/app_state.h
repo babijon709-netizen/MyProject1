@@ -44,6 +44,9 @@ struct AppState {
     bool  always_day = false;     // всегда день
     // Картофельная графика: запись в живой URP-ассет (масштаб рендера, тени,
     // сглаживание, HDR, доп. источники). Патчей кода нет — только данные.
+    // Быстрая стрельба и перезарядка: запись в ассет оружия, без патчей кода.
+    bool  fast_fire = false, fast_reload = false;
+    float fast_fire_mult = 3.f, fast_reload_mult = 4.f;
     bool  potato_gfx = false;
     // Масштаб рендера. По умолчанию 0.5: у игры собственный масштаб бывает
     // уже пониженным (в логе 26.09 стояло 0.54), и значение выше просто
@@ -105,6 +108,7 @@ struct AppState {
     float a_esp_bots = 0, a_esp_vehicles = 0, a_esp_scrap = 0;
     float a_always_day = 0;
     float a_potato_gfx = 0;
+    float a_fast_fire = 0, a_fast_reload = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
     float a_xray_on = 0;
@@ -115,7 +119,7 @@ struct AppState {
     float a_debug_resolver = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam;
-    SliderAnim sl_potato_scale;
+    SliderAnim sl_potato_scale, sl_fast_fire, sl_fast_reload;
 };
 extern AppState g_state;
 extern std::atomic<bool> main_thread_flag;   // false = выход из main()

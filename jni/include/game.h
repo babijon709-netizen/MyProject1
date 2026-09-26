@@ -125,6 +125,9 @@ void        esp_set_ore_kinds_enabled(bool stone, bool metal, bool sulfur);
 void        esp_set_always_day(bool enabled);
 // Картофельная графика: запись в живой URP-ассет (без патчей библиотек).
 void        esp_set_potato_gfx(bool enabled, float render_scale);
+// Быстрая стрельба и перезарядка (запись в ассет оружия, без патчей кода).
+void        esp_set_weapon_speed(bool fast_fire, bool fast_reload,
+                                 float fire_mult, float reload_mult);
 // Markers further away than this (metres) are dropped. Keeps the screen clean
 // on open terrain, where the registry easily holds hundreds of nodes.
 void        esp_set_marker_max_distance(float metres);// Markers for the current frame, nearest first. Call after esp_get_boxes():

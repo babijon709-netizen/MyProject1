@@ -279,6 +279,9 @@ inline constexpr std::uint64_t URP_SHADOW_DISTANCE       = 0xC4;  // m_ShadowDis
 inline constexpr std::uint64_t URP_SHADOW_CASCADES       = 0xC8;  // m_ShadowCascadeCount (int)
 inline constexpr std::uint64_t WEAPON_CONFIG_MAX_DISTANCE = 0x2C; // HitscanWeaponConfig.MaxDistance
 inline constexpr std::uint64_t WEAPON_CONFIG_BASE_DISPERSION = 0x3C; // HitscanWeaponConfig.BaseDispersion
+inline constexpr std::uint64_t WEAPON_CONFIG_FIRE_RATE    = 0x34; // HitscanWeaponConfig.fireRate
+inline constexpr std::uint64_t WEAPON_CONFIG_FULL_RELOAD  = 0x48; // HitscanWeaponConfig.FullReloadPeriod
+inline constexpr std::uint64_t WEAPON_CONFIG_LOOP_RELOAD  = 0x4C; // HitscanWeaponConfig.LoopReloadPeriod
 
 // ---- Нативные настройки качества Unity (libunity.so) -----------------------
 // Смещения добыты разбором кода libunity (tools/offsets/unity_quality.py):

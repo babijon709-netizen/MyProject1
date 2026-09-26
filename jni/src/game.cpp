@@ -145,6 +145,111 @@ static int      g_day_retry = 0;
 
 void esp_set_always_day(bool enabled) { g_day_enabled = enabled; }
 
+// ============ Быстрая стрельба и перезарядка (без патчей кода) ==============
+// Темп стрельбы и время перезарядки лежат в том же ассете оружия
+// (HitscanWeaponConfig), что и отдача с разбросом: fireRate, FullReloadPeriod,
+// LoopReloadPeriod. Значит ускорить их можно записью в данные — ни одной
+// инструкции в библиотеках не трогаем.
+//
+// Правила те же, что у блока «Оружие»: цепочка проверяется целиком, значения
+// обязаны быть правдоподобными, оригиналы сохраняются и возвращаются при
+// выключении, смене оружия и отвязке.
+static uint64_t resolve_local_player();          // определена ниже
+int class_identity(uint64_t klass, const char* expected_name, const char* expected_ns);
+
+static bool  g_fast_fire = false, g_fast_reload = false;
+static float g_fast_fire_mult = 3.f, g_fast_reload_mult = 4.f;
+static uint64_t g_ws_config = 0;          // ассет, в который писали
+static bool  g_ws_saved = false;
+static float g_ws_fire = 0.f, g_ws_full = 0.f, g_ws_loop = 0.f;
+
+void esp_set_weapon_speed(bool fast_fire, bool fast_reload, float fire_mult, float reload_mult) {
+    g_fast_fire = fast_fire;
+    g_fast_reload = fast_reload;
+    if (fire_mult >= 1.f && fire_mult <= 10.f) g_fast_fire_mult = fire_mult;
+    if (reload_mult >= 1.f && reload_mult <= 10.f) g_fast_reload_mult = reload_mult;
+}
+
+// Ассет текущего оружия, проверенный по имени класса.
+static uint64_t weapon_speed_config() {
+    const uint64_t local = resolve_local_player();
+    if (!local) return 0;
+    const uint64_t fp = rd_ptr(local + PLAYER_FP_MANAGER);
+    if (!valid_obj(fp)) return 0;
+    uint64_t weapon = rd_ptr(fp + FPMANAGER_CURRENT_WEAPON);
+    if (!valid_obj(weapon)) weapon = rd_ptr(fp + FPMANAGER_CURRENT_OBJECT);
+    if (!valid_obj(weapon)) return 0;
+    const uint64_t cfg = rd_ptr(weapon + FPHITSCAN_CONFIG);
+    if (!valid_obj(cfg)) return 0;
+    // class_identity ждёт УКАЗАТЕЛЬ НА КЛАСС, а cfg — объект: класс лежит в
+    // первом поле. Сверяем имя и пространство имён, как это делает блок
+    // «Оружие», иначе можно написать в чужой ассет.
+    if (class_identity(rd_ptr(cfg), "HitscanWeaponConfig",
+                       "HyperHug.Games.Oxide.Features.Weapons") != 1)
+        return 0;
+    return cfg;
+}
+
+static void weapon_speed_restore() {
+    if (!g_ws_saved || !g_ws_config) { g_ws_saved = false; g_ws_config = 0; return; }
+    const uint64_t c = g_ws_config;
+    { const float v = g_ws_fire; wr_buf(c + WEAPON_CONFIG_FIRE_RATE, &v, sizeof(v)); }
+    { const float v = g_ws_full; wr_buf(c + WEAPON_CONFIG_FULL_RELOAD, &v, sizeof(v)); }
+    { const float v = g_ws_loop; wr_buf(c + WEAPON_CONFIG_LOOP_RELOAD, &v, sizeof(v)); }
+    LogLine("темп оружия: значения возвращены ассету 0x%llx", (unsigned long long)c);
+    g_ws_saved = false;
+    g_ws_config = 0;
+}
+
+static void weapon_speed_tick() {
+    if (!g_fast_fire && !g_fast_reload) { weapon_speed_restore(); return; }
+    if (!g_il2cpp_base || g_pid <= 0) { g_ws_saved = false; g_ws_config = 0; return; }
+    const uint64_t cfg = weapon_speed_config();
+    if (!cfg) return;
+    if (g_ws_config && cfg != g_ws_config) weapon_speed_restore();   // сменили оружие
+    if (!g_ws_saved) {
+        const float fire = rd<float>(cfg + WEAPON_CONFIG_FIRE_RATE);
+        const float full = rd<float>(cfg + WEAPON_CONFIG_FULL_RELOAD);
+        const float loop = rd<float>(cfg + WEAPON_CONFIG_LOOP_RELOAD);
+        // Правдоподобие: темп 0.01..10000, перезарядка 0..120 с.
+        if (!std::isfinite(fire) || fire <= 0.f || fire > 10000.f) return;
+        if (!std::isfinite(full) || full < 0.f || full > 120.f) return;
+        if (!std::isfinite(loop) || loop < 0.f || loop > 120.f) return;
+        g_ws_fire = fire; g_ws_full = full; g_ws_loop = loop;
+        g_ws_config = cfg; g_ws_saved = true;
+        LogLine("темп оружия: ассет 0x%llx — было темп=%.3f полная перезарядка=%.2f с "
+                "дозарядка=%.2f с", (unsigned long long)cfg, (double)fire, (double)full, (double)loop);
+    }
+    auto setf = [&](uint64_t off, float v) {
+        const float now = rd<float>(cfg + off);
+        if (!std::isfinite(now) || fabsf(now - v) > 0.0001f) wr_buf(cfg + off, &v, sizeof(v));
+    };
+    if (g_fast_fire) {
+        // fireRate у разных стволов задан по-разному: у одних это выстрелов в
+        // секунду, у других — секунды между выстрелами. Разбираем по величине
+        // исходного значения: больше единицы — это частота (умножаем), меньше
+        // — период (делим). Иначе «ускорение» превратилось бы в заморозку.
+        float want = (g_ws_fire >= 1.f) ? (g_ws_fire * g_fast_fire_mult)
+                                        : (g_ws_fire / g_fast_fire_mult);
+        if (want > 5000.f) want = 5000.f;
+        if (want < 0.01f) want = 0.01f;
+        setf(WEAPON_CONFIG_FIRE_RATE, want);
+    } else if (g_ws_saved) {
+        setf(WEAPON_CONFIG_FIRE_RATE, g_ws_fire);
+    }
+    if (g_fast_reload) {
+        float full = g_ws_full / g_fast_reload_mult;
+        float loop = g_ws_loop / g_fast_reload_mult;
+        if (full < 0.05f) full = 0.05f;
+        if (loop < 0.02f) loop = 0.02f;
+        if (g_ws_full > 0.f) setf(WEAPON_CONFIG_FULL_RELOAD, full);
+        if (g_ws_loop > 0.f) setf(WEAPON_CONFIG_LOOP_RELOAD, loop);
+    } else if (g_ws_saved) {
+        if (g_ws_full > 0.f) setf(WEAPON_CONFIG_FULL_RELOAD, g_ws_full);
+        if (g_ws_loop > 0.f) setf(WEAPON_CONFIG_LOOP_RELOAD, g_ws_loop);
+    }
+}
+
 // ================== Картофельная графика (без патчей кода) ==================
 // URP держит настройки качества в обычном ScriptableObject
 // (UniversalRenderPipelineAsset) и перечитывает их КАЖДЫЙ кадр при сборке
@@ -8261,6 +8366,7 @@ bool publish_camera_only_frame(float sw, float sh) {
     xray_apply(cam_native);
     always_day_tick();
     potato_gfx_tick();
+    weapon_speed_tick();
     if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) return false;
     Vec3 cam_pos{};
     if (!camera_position_from_view(solo_view, cam_pos)) return false;
@@ -8675,6 +8781,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         xray_apply(native_cam);
         always_day_tick();
     potato_gfx_tick();
+    weapon_speed_tick();
         // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
             watch_boxes(result, (size_t)-1, nullptr, 5); return result;
