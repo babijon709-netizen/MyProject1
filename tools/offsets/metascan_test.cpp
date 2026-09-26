@@ -352,6 +352,25 @@ static void child_main(int out_fd) {
                                       s_item, s_empty, item_fields, 1);
     set_field_name(heap, heap_addr, item, 0, f_itemid);
 
+    // «Суп из указателей»: 3000 структур, у которых на месте имени класса
+    // стоит указатель на настоящее имя «PlayerManager», образ валиден, а
+    // массива полей нет (мусор). Ровно этим забился массив классов на
+    // устройстве (лог 26.09: 4135 «живых классов», потолок 1024 из одних
+    // тёзок, 5 констант из 160 вместо 153). Резолвер обязан их отсеять.
+    {
+        hoff = (hoff + 0xFFFu) & ~(size_t)0xFFF;
+        for (int i = 0; i < 3000; ++i) {
+            uint8_t* d = heap + hoff;
+            if (hoff + 0x200 >= kHeapSize) break;
+            memset(d, 0, 0x140);
+            *(uint64_t*)(d + 0x00) = il_base + 0x1000;            // образ валиден
+            *(uint64_t*)(d + IL2CPP_CLASS_NAME) = s_pm;           // указатель на имя
+            *(uint64_t*)(d + IL2CPP_CLASS_FIELDS) = heap_addr + 0x200000;  // «поля» — нули
+            *(uint16_t*)(d + IL2CPP_CLASS_FIELD_COUNT) = 7;
+            hoff += 0x140;
+        }
+    }
+
     Handed hd = {};
     hd.il2cpp_base = il_base;
     hd.decoy_base = decoy_base;
@@ -454,6 +473,13 @@ int main(int argc, char** argv) {
 
     check(offset_resolver_class("PlayerManager", "Oxide") == h.pm,
           "PlayerManager найден в куче по указателю на имя");
+    {
+        int same = 0;
+        for (int i = 0; i < s_class_count; ++i)
+            if (strcmp(s_classes[i].name, "PlayerManager") == 0) ++same;
+        check(same <= 6 && s_class_count < 64,
+              "3000 мусорных тёзок отсеяны по форме, массив классов не забит");
+    }
     check(offset_resolver_class("NetworkClient", "Mirror") == h.nc,
           "NetworkClient найден в куче по указателю на имя");
     check(offset_resolver_class("Item", nullptr) == h.item,

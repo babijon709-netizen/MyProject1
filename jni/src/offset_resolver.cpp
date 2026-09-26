@@ -176,6 +176,11 @@ namespace {
 // именем, поэтому таблица и сопоставляет по короткому).
 struct FoundClass {
     uint64_t klass = 0;
+    // Подтверждена ли форма (массив полей на месте, записи похожи на FieldInfo).
+    // Лог 26.09 показал, зачем: один проход по указателям дал 4135 «классов»,
+    // массив упёрся в потолок из одних тёзок, и резолв полей пошёл по мусору
+    // (5/160 констант вместо 153/160).
+    bool     shape_ok = false;
     // 64: имена вида «MineableObjectExtension_OreHitstreaksMarker» — 43 знака,
     // и запас на такие же «составные» имена.
     char     name[64] = {};
@@ -232,7 +237,10 @@ uint64_t s_image_key = 0;
 bool     s_from_cache = false;
 bool     s_cache_checked = false;
 bool     s_cache_saved = false;
-bool     s_cache_retryable = false; // ключ совпал, но класс-якорь ещё не загрузился
+bool     s_cache_retryable = false;    // ключ совпал, но класс-якорь ещё не загрузился
+// Кэш без живого якоря: смещения применены, классы ищутся сканом. Повторно
+// такой кэш применять не нужно (и ждать якорь — тоже).
+bool     s_cache_offsets_used = false;
 double   s_cache_wait_since = 0;
 double   s_cache_retry_at = 0;
 double   s_cache_save_retry_at = 0;
@@ -396,6 +404,7 @@ uint64_t  s_meta_scanned = 0;
 int       s_meta_pass = 0;        // 0 — только начала отображений, 1 — все страницы
 bool      s_meta_sig_done = false;  // сигнатурный поиск в этом резолве уже отработал
 bool      s_meta_scan_first = false;  // после сигнатуры вернуться к скану .so, а не к блобу
+bool      s_meta_quick_only = false;  // первый заход — только начала отображений (доли секунды)
 // Блоки, которые оказались пустышкой: сигнатура и заголовок в порядке, а
 // табличных имён в таблице строк нет. У протекторов встречается декой-файл
 // метаданных рядом с настоящим, поэтому найденный блок — ещё не финал: если
@@ -461,6 +470,12 @@ int      s_saved_count = 0;
 
 struct AppliedRec { std::uint64_t* slot; std::uint64_t value; };
 AppliedRec s_applied[256];
+// Значения слотов ДО этого резолва и качество предыдущего: новый проход не
+// имеет права затереть хороший результат худшим (лог 26.09: второй резолв
+// разрешил 5 констант вместо 153 и испортил PlayerManager.team).
+AppliedRec s_rollback[256];
+int        s_rollback_count = 0;
+int        s_prev_resolved = 0;   // сколько разрешил последний удачный резолв (на этом pid)
 // Класс каждой применённой записи: по нему второй проход понимает, какие
 // смещения этого класса уже заняты (поле, найденное по имени, повторно не
 // отдаётся полю с ротированным именем).
@@ -1151,6 +1166,7 @@ static void phase_maps() {
         // метаданных: доли секунды, зато дальше фильтр имён работает точно.
         if (!s_meta_begin) {
             s_meta_scan_first = true;
+            s_meta_quick_only = true;
             start_meta_scan("якоря нет, окно имён неизвестно");
         }
     }
@@ -1356,14 +1372,61 @@ static bool calibrate_fields(uint64_t klass);   // определена ниже
 static int  fields_shape_score(uint64_t klass, uint64_t fields_ptr, int probe);
 static int  probe_names_neighbourhood();        // запасной путь, определён ниже
 
+// Похоже ли на настоящий Il2CppClass по ФОРМЕ: у класса с полями обязан быть
+// читаемый массив FieldInfo (parent смотрит на сам класс, тип — валидный
+// указатель, смещение в разумных границах), у класса без полей — нулевой
+// указатель массива. Проверка нужна ровно потому, что «указатель на имя»
+// встречается не только в классах: в логе 26.09 по одному имени набралось
+// больше тысячи «классов», и настоящий в потолок массива уже не влез.
+static bool class_shape_ok(uint64_t klass) {
+    klass = memio::untag(klass);
+    if (!valid_obj(klass)) return false;
+    const uint64_t foff = s_fields_off ? s_fields_off : IL2CPP_CLASS_FIELDS;
+    const uint64_t fields = memio::untag(qrd_ptr(klass + foff));
+    const uint16_t count = qrd<uint16_t>(klass + IL2CPP_CLASS_FIELD_COUNT);
+    if (count == 0) return fields == 0;
+    if (count > 1024 || !valid_obj(fields)) return false;
+    const int probe = (count < 4) ? (int)count : 4;
+    const int need = (probe < 2) ? probe : 2;
+    return fields_shape_score(klass, fields, probe) >= need;
+}
+
+// Сколько копий одного имени держим: тёзки в игре реальны (пустой
+// PlayerManager без полей рядом с настоящим), но их единицы, а не тысячи.
+constexpr int kSameNameCap = 6;
+
 static void store_verified_class(uint64_t klass, const char* name) {
     if (find_class_slot(klass)) return;
     const int cap_total = (int)(sizeof(s_classes) / sizeof(s_classes[0]));
+    const bool ok = class_shape_ok(klass);
+    int same = 0, weak = -1, first_same = -1;
+    for (int i = 0; i < s_class_count; ++i) {
+        if (strcmp(s_classes[i].name, name) != 0) continue;
+        ++same;
+        if (first_same < 0) first_same = i;
+        if (!s_classes[i].shape_ok && weak < 0) weak = i;
+    }
+    if (same >= kSameNameCap) {
+        // Потолок по имени выбран: хороший кандидат вытесняет пустышку,
+        // иначе просто проходим мимо (массив классов не должен забиваться).
+        if (!ok || weak < 0) return;
+        s_classes[weak].klass = klass;
+        s_classes[weak].shape_ok = true;
+        return;
+    }
     if (s_class_count >= cap_total) return;
     FoundClass& fc = s_classes[s_class_count++];
     fc.klass = klass;
+    fc.shape_ok = ok;
     snprintf(fc.name, sizeof(fc.name), "%s", name);
     fc.ns[0] = 0;
+    // Подтверждённый формой класс должен идти раньше пустышки-тёзки: резолв
+    // полей перебирает одноимённые классы по порядку.
+    if (ok && first_same >= 0 && !s_classes[first_same].shape_ok) {
+        const FoundClass tmp = s_classes[first_same];
+        s_classes[first_same] = s_classes[s_class_count - 1];
+        s_classes[s_class_count - 1] = tmp;
+    }
 }
 
 static void apply_str_window(int idx);   // определена ниже, после phase_strsearch
@@ -1476,6 +1539,7 @@ static void start_meta_scan(const char* reason) {
     s_meta_pos = 0;
     s_meta_scanned = 0;
     s_meta_pass = 0;
+    s_meta_bad_count = 0;
     s_last_progress_log = 0;
     s_scan_deadline = mono_seconds() + 120.0;
     uint64_t bytes = 0;
@@ -1513,15 +1577,74 @@ static void start_blob_scan(const char* reason) {
     s_phase = PH_BLOB;
 }
 
+// Перечитать /proc/<pid>/maps в поисках окна метаданных. Нужно потому, что при
+// первой привязке игра ещё грузится: в логе 26.09 в 17:27:28 окна не было
+// («метаданные НЕ найдены»), а через 16 секунд оно появилось
+// (0x76ab407000..0x76ad000000, 27 МБ). Проверка стоит миллисекунды и экономит
+// полторы минуты постраничного скана.
+static bool recheck_metadata_mapping() {
+    if (s_meta_begin) return true;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    std::string text;
+    char chunk[8192];
+    for (;;) {
+        const ssize_t n = read(fd, chunk, sizeof(chunk));
+        if (n > 0) { text.append(chunk, (size_t)n); if (text.size() > (16u << 20)) break; continue; }
+        break;
+    }
+    close(fd);
+    uint64_t begin = 0, end = 0;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        const size_t eol = text.find('\n', pos);
+        const size_t line_end = (eol == std::string::npos) ? text.size() : eol;
+        char linebuf[1024];
+        size_t line_len = line_end - pos;
+        if (line_len >= sizeof(linebuf)) line_len = sizeof(linebuf) - 1;
+        memcpy(linebuf, text.c_str() + pos, line_len);
+        linebuf[line_len] = '\0';
+        pos = line_end + 1;
+        unsigned long long a = 0, b = 0;
+        char perms[5] = {};
+        if (sscanf(linebuf, "%llx-%llx %4s", &a, &b, perms) < 3) continue;
+        if (perms[0] != 'r' || b <= a) continue;
+        if (!strstr(linebuf, "global-metadata")) continue;
+        if (!begin || a < begin) begin = a;
+        if (b > end) end = b;
+    }
+    if (!begin || (end - begin) < (1ull << 20)) return false;
+    uint64_t sb = 0, se = 0;
+    int32_t ver = 0;
+    if (meta_header_ok(begin, &sb, &se, &ver)) {
+        s_meta_blob = begin; s_meta_version = ver;
+        s_meta_from_sig = true;
+        s_meta_begin = sb; s_meta_end = se;
+        LogLine("автооффсеты: окно метаданных появилось в карте 0x%llx (версия %d) — "
+                "таблица строк 0x%llx..0x%llx", (unsigned long long)begin, (int)ver,
+                (unsigned long long)sb, (unsigned long long)se);
+    } else {
+        s_meta_begin = begin; s_meta_end = end;
+        LogLine("автооффсеты: окно метаданных появилось в карте 0x%llx..0x%llx (%llu МБ) — "
+                "заголовок не опознан, беру окно целиком",
+                (unsigned long long)begin, (unsigned long long)end,
+                (unsigned long long)((end - begin) >> 20));
+    }
+    return true;
+}
+
 // Единая точка входа «якоря нет, ищем классы сами». Порядок попыток:
-//   1) окно строк уже известно точно (из заголовка метаданных) — сразу в блоб;
-//   2) сигнатурный поиск блока метаданных по всей памяти;
-//   3) окно из карты процесса (имя «global-metadata») — в блоб;
+//   1) окно строк уже известно (из карты или из заголовка) — сразу в блоб:
+//      сигнатурный скан на несколько гигабайт тут не нужен;
+//   2) карта могла обновиться, пока шёл скан — перечитываем её;
+//   3) сигнатурный поиск блока метаданных;
 //   4) старый поиск имён по памяти — последний рубеж.
 static void start_metadata_bootstrap(const char* reason) {
-    if (s_meta_begin && s_meta_from_sig) { start_blob_scan(reason); return; }
-    if (!s_meta_sig_done) { start_meta_scan(reason); return; }
     if (s_meta_begin) { start_blob_scan(reason); return; }
+    if (recheck_metadata_mapping()) { start_blob_scan(reason); return; }
+    if (!s_meta_sig_done) { start_meta_scan(reason); return; }
     start_strsearch(reason);
 }
 
@@ -1585,6 +1708,18 @@ static void phase_meta(double deadline) {
             }
             ++s_meta_range_idx;
             if (s_meta_range_idx >= s_meta_range_count) {
+                if (s_meta_quick_only) {
+                    // Первый заход: постраничный проход по нескольким гигабайтам
+                    // стоит полторы минуты слепоты (лог 26.09: смотритель кадра
+                    // трижды просил перепривязку, пока шёл скан). Откладываем
+                    // его: сначала дешёвые пути, а игра тем временем домапит
+                    // метадату — на следующем заходе её найдёт быстрый проход.
+                    s_meta_quick_only = false;
+                    LogLine("автооффсеты: быстрый проход по началам отображений сигнатуры не нашёл — "
+                            "полный постраничный проход отложен до конца скана .so");
+                    meta_scan_continue(false);
+                    return;
+                }
                 // Начала не дали ничего — идём по страницам. Метадата может
                 // быть отображена не с начала файла (страница внутри .apk)
                 // или расшифрована в кучу.
@@ -1647,7 +1782,7 @@ static void phase_meta(double deadline) {
         }
     }
     if (s_meta_range_idx >= s_meta_range_count || mono_seconds() >= s_scan_deadline) {
-        s_meta_sig_done = true;
+        s_meta_sig_done = (s_meta_pass != 0);   // быстрый проход полным не считается
         LogLine("автооффсеты: блока метаданных по сигнатуре НЕТ (просмотрено %llu МБ, "
                 "%d диапазонов из %d) — метадата зашифрована или выгружена",
                 (unsigned long long)(s_meta_scanned >> 20),
@@ -1953,6 +2088,17 @@ static void phase_blob(double deadline) {
             s_scan_deadline = mono_seconds() + 120.0;
             s_last_progress_log = 0;
             s_phase = PH_META;
+            return;
+        } else if (!s_meta_sig_done) {
+            // Окно взяли из карты (или из строки в памяти), а имён в нём нет:
+            // возможно, это не та область. Пробуем найти настоящий блок по
+            // сигнатуре заголовка.
+            LogLine("автооффсеты: в окне 0x%llx..0x%llx табличных имён нет — ищу блок метаданных по сигнатуре",
+                    (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end);
+            s_meta_begin = s_meta_end = 0;
+            s_meta_from_sig = false;
+            s_meta_quick_only = false;
+            start_meta_scan("в окне из карты имён нет");
             return;
         } else {
             LogLine("автооффсеты: блок строк есть, но табличных имён в нём нет — имена, видимо, ротированы обфускатором");
@@ -2959,6 +3105,18 @@ static void apply_resolution(const OrField& of, int32_t off) {
     if (!resolved_offset_is_valid(of.is_static, value, of.cls)) return;
     const std::uint64_t prev = *(of.slot);
     if (prev != value) ++s_changed;
+    // Прежнее значение слота — страховка: если этот резолв окажется заметно
+    // хуже предыдущего (мусорные классы после перескана), всё вернётся назад.
+    {
+        bool seen = false;
+        for (int i = 0; i < s_rollback_count; ++i)
+            if (s_rollback[i].slot == of.slot) { seen = true; break; }
+        if (!seen && s_rollback_count < 256) {
+            s_rollback[s_rollback_count].slot = of.slot;
+            s_rollback[s_rollback_count].value = prev;
+            ++s_rollback_count;
+        }
+    }
     *(of.slot) = value;
     if (s_applied_count < 256) {
         s_applied[s_applied_count].slot = of.slot;
@@ -3683,6 +3841,22 @@ static void phase_fields() {
                     class_in_cache ? "поле не найдено в классе" : "класс отсутствует в кэше");
         }
     }
+    // Правило «никогда не хуже». Перескан на живой игре может нарваться на
+    // другой срез памяти и собрать мусор: в логе 26.09 второй проход дал
+    // 5 констант вместо 153 и записал в PlayerManager.team чужое смещение
+    // (0x98 вместо 0x120). Такой результат откатываем целиком.
+    if (s_prev_resolved > 0 && s_resolved * 4 < s_prev_resolved * 3) {
+        for (int i = 0; i < s_rollback_count; ++i) *(s_rollback[i].slot) = s_rollback[i].value;
+        LogLine("автооффсеты: новый резолв ХУЖЕ прежнего (%d против %d констант) — "
+                "вернул прежние значения (%d слотов), кэш не трогаю",
+                s_resolved, s_prev_resolved, s_rollback_count);
+        s_applied_count = 0;
+        s_resolved = 0;
+        s_changed = 0;
+    } else if (s_resolved > s_prev_resolved) {
+        s_prev_resolved = s_resolved;
+    }
+    s_rollback_count = 0;
     s_phase = PH_DONE;
 }
 
@@ -3875,17 +4049,23 @@ static bool save_offsets_cache() {
                 (unsigned long long)g_il2cpp_base);
         return false;
     }
-    // Без ЖИВОГО якоря этот кэш всё равно отбрасывается на следующем PID.
-    // Проверяем ДО открытия файла: fopen("w") раньше затирал рабочий кэш
-    // непригодным (anchor=0 / указатель в исполняемый код) при перепривязке.
-    const uint64_t anchor = anchor_class(nullptr);
-#ifndef OR_CACHE_DIR
-    if (!kid_class_ok(anchor)) {
-        LogLine("автооффсеты: кэш НЕ перезаписан — якорь 0x%llx не живой класс",
-                (unsigned long long)anchor);
+    // Якорь (класс по вшитому TYPEINFO_RVA) нужен только для ВОССТАНОВЛЕНИЯ
+    // АДРЕСОВ классов: они лежат в куче и переезжают при перезапуске, а
+    // восстанавливаются по смещению относительно якоря. Смещения ПОЛЕЙ от
+    // адресов не зависят вовсе.
+    //
+    // Раньше без живого якоря кэш не сохранялся совсем — и после апдейта игры
+    // (RVA устарел) резолв в минуты повторялся при каждом входе: лог 26.09,
+    // «кэш НЕ перезаписан — якорь 0x0 не живой класс» каждые 10 секунд.
+    // Теперь сохраняем всегда: в следующий раз чит хотя бы стартует с верными
+    // смещениями, а классы доищет сканом.
+    uint64_t anchor = anchor_class(nullptr);
+    if (!kid_class_ok(anchor)) anchor = 0;
+    if (s_resolved < 8) {
+        LogLine("автооффсеты: кэш НЕ перезаписан — в резолве всего %d констант, это не результат",
+                s_resolved);
         return false;
     }
-#endif
     const std::string path = cache_path();
     const std::string tmp = path + ".tmp";
     FILE* f = fopen(tmp.c_str(), "w");
@@ -3929,8 +4109,10 @@ static bool save_offsets_cache() {
         remove(tmp.c_str());
         return false;
     }
-    LogLine("автооффсеты: кэш записан: %d значений, якорь 0x%llx, ключ 0x%llx",
-            s_applied_count, (unsigned long long)anchor, (unsigned long long)s_image_key);
+    LogLine("автооффсеты: кэш записан: %d значений, якорь 0x%llx%s, ключ 0x%llx",
+            s_applied_count, (unsigned long long)anchor,
+            anchor ? "" : " (без якоря — в следующий раз применим только смещения)",
+            (unsigned long long)s_image_key);
     return true;
 }
 
@@ -3996,13 +4178,15 @@ static bool load_offsets_cache() {
         pos = (end == std::string::npos) ? text.size() : end + 1;
     }
     const uint64_t new_anchor = anchor_class(nullptr);
+    bool anchor_live = true;
 #ifndef OR_CACHE_DIR
-    if (!valid_obj(old_anchor) || !kid_class_ok(new_anchor)) {
-        s_cache_retryable = valid_obj(old_anchor);
-        LogLine("автооффсеты: кэш — старый якорь 0x%llx, новый 0x%llx (%s): %s",
-                (unsigned long long)old_anchor, (unsigned long long)new_anchor,
-                kid_class_ok(new_anchor) ? "живой" : "НЕ живой",
-                s_cache_retryable ? "жду инициализации живого класса" : "старый кэш непригоден, скан один раз");
+    anchor_live = valid_obj(old_anchor) && kid_class_ok(new_anchor);
+    if (!anchor_live && valid_obj(old_anchor) && !s_cache_offsets_used) {
+        // Якорь есть в файле, но живым ещё не стал: игра, возможно, просто не
+        // догрузилась. Один раз подождём — вдруг обойдёмся вовсе без скана.
+        s_cache_retryable = true;
+        LogLine("автооффсеты: кэш — старый якорь 0x%llx, новый 0x%llx (НЕ живой): жду инициализации живого класса",
+                (unsigned long long)old_anchor, (unsigned long long)new_anchor);
         return false;
     }
 #endif
@@ -4049,7 +4233,7 @@ static bool load_offsets_cache() {
                 ++s_applied_count;
             }
             ++loaded;
-        } else if (sscanf(linebuf, "cls %63s %llx", name, &val) == 2) {
+        } else if (anchor_live && sscanf(linebuf, "cls %63s %llx", name, &val) == 2) {
             // Только небольшие расстояния внутри пула классов; никаких
             // произвольных адресов из файла без сверки с живым именем.
             const int64_t rel = (int64_t)((uint64_t)val - old_anchor);
@@ -4072,6 +4256,17 @@ static bool load_offsets_cache() {
         // встанет следующая привязка (после самообновления игры в карте бывает
         // два образа libil2cpp.so, и по ELF-заголовку пустой не отличить).
         s_good_base = g_il2cpp_base;
+    }
+    if (!anchor_live) {
+        // Смещения полей уже применены — чит работает верными цифрами с первого
+        // кадра. Адреса классов из кэша без якоря восстановить нельзя: их
+        // доищет обычный скан, и повторного применения кэша не будет.
+        s_cache_offsets_used = true;
+        s_cache_retryable = false;
+        LogLine("автооффсеты: кэш дал %d смещений (ключ 0x%llx), но живого якоря нет — "
+                "классы ищу сканом, смещения уже применены",
+                loaded, (unsigned long long)s_image_key);
+        return false;
     }
     if (classes == 0 || !offset_resolver_class("PlayerManager", nullptr) ||
         !offset_resolver_class("GameControllerBase", nullptr)) {
@@ -4098,6 +4293,7 @@ void offset_resolver_tick() {
         s_good_base = 0;
         s_dead_count = 0;
         s_good_logged = false;
+        s_prev_resolved = 0;   // качество резолва привязано к процессу
     }
     // Перепривязка может снова встать на пустой образ: после самообновления
     // игры в карте два образа libil2cpp.so, и ELF-проверка их не различает.
@@ -4214,12 +4410,13 @@ void offset_resolver_reset() {
     s_class_count = 0; s_names_ok = 0; s_names_fail = 0; s_shape_pass = 0;
     s_fields_off = 0; s_calib_best = 0; s_calib_best_off = 0;
     s_fi_size = IL2CPP_FIELDINFO_SIZE; s_fi_parent = IL2CPP_FIELDINFO_PARENT;
-    s_resolved = 0; s_changed = 0;
+    s_resolved = 0; s_changed = 0; s_rollback_count = 0;
     s_heap_range_count = 0; s_heap_range_idx = 0;
     s_heap_pos = s_heap_end = 0; s_heap_done = false;
     s_meta_range_count = 0; s_meta_range_idx = 0;
     s_meta_pos = 0; s_meta_scanned = 0; s_meta_pass = 0;
     s_meta_sig_done = false; s_meta_scan_first = false; s_meta_from_sig = false;
+    s_meta_quick_only = false;
     s_meta_bad_count = 0; s_meta_tries = 0;
     s_meta_blob = 0; s_meta_version = 0; s_meta_reason = nullptr;
     s_filesig_count = 0; s_filesig_bytes = 0;
@@ -4249,6 +4446,7 @@ void offset_resolver_reset() {
     s_applied_count = 0; s_logged = false;
     s_image_key = 0; s_from_cache = false; s_cache_checked = false; s_cache_saved = false;
     s_cache_retryable = false; s_cache_wait_since = 0; s_cache_retry_at = 0;
+    s_cache_offsets_used = false;
     s_cache_save_retry_at = 0;
     // Кандидаты баз и сканируемая база собираются заново из карты. Знания
     // «какие базы пусты, а где классы живые» НЕ сбрасываются: они привязаны
@@ -4286,6 +4484,7 @@ uint64_t offset_resolver_good_base(pid_t pid) {
 bool offset_resolver_busy() {
     return (s_phase == PH_WAIT && (s_cache_retryable || s_anchor_wait_since > 0)) ||
            s_phase == PH_MAPS || s_phase == PH_SCAN ||
+           s_phase == PH_META ||
            s_phase == PH_HEAP || s_phase == PH_STRS ||
            s_phase == PH_BLOB || s_phase == PH_PTR ||
            s_phase == PH_KID ||
