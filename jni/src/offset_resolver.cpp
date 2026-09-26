@@ -252,6 +252,9 @@ int      s_anchor_retries = 0;
 // образе дальше) в него не попадают. Классы с именами ИЗ ТАБЛИЦЫ сохраняем
 // даже сверх потолка (их всего ~44 имени, резерв с запасом).
 constexpr int kClassCap = 768;
+// Сколько копий одного имени держим: тёзки в игре реальны (пустой
+// PlayerManager без полей рядом с настоящим), но их единицы, а не тысячи.
+constexpr int kSameNameCap = 6;
 int      s_names_ok = 0, s_names_fail = 0;
 // Сколько значений прошли проверки «указатель + image внутри libil2cpp», ДО
 // фильтров имени. По нему в логе видно, на каком именно этапе умерли
@@ -518,6 +521,8 @@ constexpr int kRescanLimit = 20;   // 5 попыток по 25 с + 15 по 60 �
 int      s_rescan_count = 0;
 double   s_rescan_at = 0;
 bool     s_so_scan_failed = false;   // скан .so на этой базе уже не дал табличных классов
+bool     s_so_scan_done = false;     // скан .so в этом проходе уже отработал
+bool     s_bootstrap_done = false;   // строковый бутстрап в этом проходе уже отработал
 pid_t    s_bound_pid = -1;        // к какому процессу/базе собрано состояние
 uint64_t s_bound_base = 0;
 double   s_last_progress_log = 0; // темп строк прогресса в лог
@@ -633,6 +638,23 @@ static bool name_is_wanted(const char* name) {
 }
 
 // Сколько классов в кэше имеют табличные имена.
+// Ключевые классы: без них не работает ни одна функция чита (локальный игрок,
+// контроллер, реестр объектов мира). Лог 26.09 18:41 показал, зачем это нужно
+// отдельно от «табличных классов»: скан .so насобирал 256 табличных имён
+// (Delegate, Dictionary, Text...), резолвер счёл работу сделанной и не пошёл
+// в строковый бутстрап — а PlayerManager так и не нашёлся.
+static bool class_in_cache(const char* name) {
+    for (int i = 0; i < s_class_count; ++i)
+        if (strcmp(s_classes[i].name, name) == 0) return true;
+    return false;
+}
+
+static bool key_classes_missing() {
+    return !class_in_cache("PlayerManager") ||
+           !class_in_cache("GameControllerBase") ||
+           !class_in_cache("NetworkClient");
+}
+
 static int wanted_in_cache() {
     int n = 0;
     for (int i = 0; i < s_class_count; ++i)
@@ -1174,11 +1196,13 @@ static void phase_maps() {
         // заканчивается ничем (лог 26.09: 768 «классов», 0 табличных). Перед
         // сканом дёшево проверяем начала всех отображений на сигнатуру
         // метаданных: доли секунды, зато дальше фильтр имён работает точно.
-        if (s_meta_begin && s_so_scan_failed) {
-            // Повторная попытка на той же базе: скан .so уже показал, что
-            // табличных классов там нет, а окно имён известно — незачем ещё
-            // раз тратить на него две минуты.
-            start_blob_scan("скан .so уже не дал классов, окно имён известно");
+        if (s_meta_begin) {
+            // Окно имён известно — поиск по указателям на имена строго лучше
+            // скана .so по форме: он сверяет имя точно, покрывает и сегменты
+            // образа, и кучу, и не забивает массив мусором. Скан .so остаётся
+            // запасным путём (см. конец фазы PTR) и тратит свои две минуты
+            // только если бутстрап ничего не дал.
+            start_blob_scan("якоря нет, зато известно окно имён");
         } else if (!s_meta_begin) {
             s_meta_scan_first = true;
             s_meta_quick_only = true;
@@ -1232,17 +1256,35 @@ static int try_class_candidate(uint64_t v) {
     // читаемая строка. Лог 26.09: 768 таких «классов» при 239 604 совпадениях
     // по форме, и ни одного настоящего. Копить их незачем: они забивают
     // массив и врут в статусе, что база живая. Берём только табличные имена.
-    if (!s_meta_begin && !name_is_wanted(name.c_str())) return 1;
-    if (s_class_count >= kClassCap && !name_is_wanted(name.c_str())) return 1;
-    if (s_class_count >= cap_total) return 1;
-    FoundClass& fc = s_classes[s_class_count];
+    const bool wanted = name_is_wanted(name.c_str());
+    if (!s_meta_begin && !wanted) return 1;
+    if (s_class_count >= kClassCap && !wanted) return 1;
+    // Тёзок держим не больше шести: иначе одно популярное имя выедает массив.
+    if (wanted) {
+        int same = 0;
+        for (int i = 0; i < s_class_count; ++i)
+            if (strcmp(s_classes[i].name, name.c_str()) == 0) ++same;
+        if (same >= kSameNameCap) return 1;
+    }
+    int slot = -1;
+    if (s_class_count < cap_total) {
+        slot = s_class_count++;
+    } else if (wanted) {
+        // Массив полон, но пришло ТАБЛИЧНОЕ имя: вытесняем нетабличный класс.
+        // Лог 26.09 18:41 — ровно эта потеря: 1024 из 1024 заняты, и
+        // PlayerManager записать уже некуда.
+        for (int i = cap_total - 1; i >= 0 && slot < 0; --i)
+            if (!name_is_wanted(s_classes[i].name)) slot = i;
+    }
+    if (slot < 0) return 1;
+    FoundClass& fc = s_classes[slot];
     fc.klass = v;
+    fc.shape_ok = false;
     snprintf(fc.name, sizeof(fc.name), "%s", name.c_str());
     bool ns_ok = false;
     const std::string ns_str = (ns != 0) ? qrd_string(ns, &ns_ok) : std::string();
     if (ns_ok && ns_str.size() < sizeof(fc.ns)) snprintf(fc.ns, sizeof(fc.ns), "%s", ns_str.c_str());
     else fc.ns[0] = '\0';
-    ++s_class_count;
     return 1;
 }
 
@@ -1410,10 +1452,6 @@ static bool class_shape_ok(uint64_t klass) {
     const int need = (probe < 2) ? probe : 2;
     return fields_shape_score(klass, fields, probe) >= need;
 }
-
-// Сколько копий одного имени держим: тёзки в игре реальны (пустой
-// PlayerManager без полей рядом с настоящим), но их единицы, а не тысячи.
-constexpr int kSameNameCap = 6;
 
 static void store_verified_class(uint64_t klass, const char* name) {
     if (find_class_slot(klass)) return;
@@ -2475,6 +2513,21 @@ static void phase_ptr(double deadline) {
                 }
             }
         }
+        s_bootstrap_done = true;
+        // Бутстрап не дал ключевых классов, а скан .so по форме ещё не
+        // гонялся — пробуем его запасным путём (в старых сборках пул классов
+        // лежал прямо в сегментах образа).
+        if (key_classes_missing() && !s_so_scan_done && s_seg_count) {
+            s_seg_idx = 0;
+            s_scan_pos = s_segments[0].start;
+            s_scanned_bytes = 0;
+            s_last_progress_log = 0;
+            s_scan_deadline = mono_seconds() + kScanTotalSec;
+            LogLine("автооффсеты: по указателям ключевых классов нет — пробую скан .so по форме (%llu МБ)",
+                    (unsigned long long)(s_total_bytes >> 20));
+            s_phase = PH_SCAN;
+            return;
+        }
         s_phase = PH_FIELDS;
     }
 }
@@ -2664,15 +2717,22 @@ static void phase_scan(double deadline) {
                 anchor = 0;
             if (anchor) start_heap_scan(anchor);
             else if (s_phase != PH_STRS) {
-                if (wanted_in_cache() == 0) {
-                    if (anchor_has_pending_token() && s_anchor_retries < 15) {
+                s_so_scan_done = true;
+                // Решаем по КЛЮЧЕВЫМ классам. Раньше хватало любых табличных
+                // имён: скан .so набирал 256 системных (Delegate, Dictionary,
+                // Text), резолвер считал дело сделанным и не шёл в бутстрап —
+                // а PlayerManager так и не находился (лог 26.09 18:41).
+                if (key_classes_missing() && !s_bootstrap_done) {
+                    if (wanted_in_cache() == 0 && anchor_has_pending_token() && s_anchor_retries < 15) {
                         ++s_anchor_retries;
                         s_phase = PH_WAIT;
                         s_anchor_wait_since = mono_seconds();
                         LogLine("автооффсеты: скан .so окончен, но в TypeInfo найден токен — жду инициализации класса (попытка %d/15)", s_anchor_retries);
                     } else {
-                        s_so_scan_failed = true;
-                        start_metadata_bootstrap("табличных классов в .so нет");
+                        if (wanted_in_cache() == 0) s_so_scan_failed = true;
+                        start_metadata_bootstrap(wanted_in_cache() == 0
+                                                     ? "табличных классов в .so нет"
+                                                     : "в .so нет ключевых классов игры");
                     }
                 } else {
                     s_phase = PH_FIELDS;
@@ -2683,6 +2743,7 @@ static void phase_scan(double deadline) {
             // кандидату — новый список сегментов соберёт PH_MAPS.
         } else {
             s_so_scan_failed = true;
+            s_so_scan_done = true;
             start_metadata_bootstrap("в .so живых классов не нашлось");
         }
     }
@@ -4348,6 +4409,7 @@ static void soft_rescan() {
     s_ptr_noverify = 0; s_ptr_names = 0; s_ptr_readfails = 0;
     s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
     s_ptr_passes = 0;
+    s_so_scan_done = false; s_bootstrap_done = false;
     for (int k = 0; k < 3; ++k) { s_top_hits[k] = 0; s_top_range[k] = -1; }
     // Карта процесса за это время изменилась (игра домапила и метадату, и
     // кучу): перечитываем её целиком — фаза карт сама решит, куда идти дальше.
@@ -4514,6 +4576,7 @@ void offset_resolver_reset() {
     s_meta_pos = 0; s_meta_scanned = 0; s_meta_pass = 0;
     s_meta_sig_done = false; s_meta_scan_first = false; s_meta_from_sig = false;
     s_meta_quick_only = false;
+    s_so_scan_done = false; s_bootstrap_done = false;
     s_meta_bad_count = 0; s_meta_tries = 0;
     s_meta_blob = 0; s_meta_version = 0; s_meta_reason = nullptr;
     s_filesig_count = 0; s_filesig_bytes = 0;
