@@ -188,6 +188,9 @@ void     offset_resolver_status(char* out, size_t cap);           // строк�
 // привязка пробует её первой, чтобы не вставать на пустую копию .so.
 uint64_t offset_resolver_good_base(pid_t pid);
 bool     offset_resolver_busy();       // скан/калибровка ещё идут
+// Ядро сообщает резолверу, рисует ли чит кадры: пока рисует, подбор берёт
+// меньший квант времени и половину потолка чтения, чтобы не красть кадры.
+void     offset_resolver_set_frame_alive(bool alive);
 // Нагрузка для мини-профиля: кадры САМОЙ игры (по смене матрицы вида),
 // время внутри чтений её памяти и объём этих чтений.
 unsigned long long esp_game_frame_ticks();

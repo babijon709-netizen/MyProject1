@@ -431,6 +431,12 @@ int       s_meta_pass = 0;        // 0 — только начала отобр�
 bool      s_meta_sig_done = false;  // сигнатурный поиск в этом резолве уже отработал
 bool      s_meta_scan_first = false;  // после сигнатуры вернуться к скану .so, а не к блобу
 bool      s_meta_quick_only = false;  // первый заход — только начала отображений (доли секунды)
+// Рисует ли чит кадры прямо сейчас. Раньше «слепота» определялась только тем,
+// нашёл ли РЕЗОЛВЕР ключевые классы, и после сброса он брал себе двойной квант
+// и полный потолок чтения, хотя ядро спокойно рисовало ESP по кэшу (лог 27.09:
+// при активном подборе оверлей 48 к/с против 52 к/с в покое). Теперь ядро само
+// сообщает, живой ли кадр.
+bool      s_frame_alive = false;
 // Блоки, которые оказались пустышкой: сигнатура и заголовок в порядке, а
 // табличных имён в таблице строк нет. У протекторов встречается декой-файл
 // метаданных рядом с настоящим, поэтому найденный блок — ещё не финал: если
@@ -4905,7 +4911,8 @@ void offset_resolver_tick() {
     }
     // Квант времени: пока нет ключевых классов, чит всё равно ничего не
     // показывает — сканируем крупными кусками времени.
-    const double budget = key_classes_missing() ? kTickBudgetBlind : kTickBudgetSec;
+    const double budget = (key_classes_missing() && !s_frame_alive) ? kTickBudgetBlind
+                                                                    : kTickBudgetSec;
     const double deadline = mono_seconds() + budget;
     // Потолок пропускной способности: игра и чит читают одну и ту же память,
     // и безудержный скан душит игру. Если в текущей секунде уже прочитано
@@ -4916,7 +4923,8 @@ void offset_resolver_tick() {
         const double now = mono_seconds();
         const uint64_t total = scanned_total();
         if (now - window_start >= 1.0) { window_start = now; window_bytes = total; }
-        else if (total - window_bytes > kScanBytesPerSec) return;
+        else if (total - window_bytes > (s_frame_alive ? kScanBytesPerSec / 2 : kScanBytesPerSec))
+            return;   // пока чит рисует, полосу памяти делим пополам
     }
     switch (s_phase) {
         case PH_WAIT:
@@ -5031,6 +5039,8 @@ void offset_resolver_tick() {
         }
     }
 }
+
+void offset_resolver_set_frame_alive(bool alive) { s_frame_alive = alive; }
 
 void offset_resolver_reset() {
     s_phase = PH_WAIT;
