@@ -277,6 +277,9 @@ bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z) {
 bool esp_mem_aim_last_shot(float& time_sec) { time_sec = g_game.shotTime; return true; }
 // Точка попадания в стенде не моделируется: замер промаха — только на устройстве.
 bool esp_aim_last_hit_point(float point[3]) { (void)point; return false; }
+bool esp_weapon_ballistics(float& a, float& b, float& c, float& d) {
+    a = b = c = d = 0.f; return false;   // баллистика в стенде не моделируется
+}
 
 bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     if (!g_game.haveAxis) return false;

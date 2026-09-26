@@ -462,6 +462,9 @@ bool esp_mem_aim_write_angles(float x_deg, float y_deg);
 bool esp_mem_aim_last_shot(float& time_sec);
 // Точка последнего попадания игрока (замер промахов сайлента), x/y/z.
 bool esp_aim_last_hit_point(float point[3]);
+// Баллистика текущего оружия: дальность, базовый разброс и пределы конуса.
+bool esp_weapon_ballistics(float& max_distance, float& base_dispersion,
+                           float& disp_min, float& disp_max);
 
 // Ось выстрела (PlayerEventHandler.LookDirection) — нормированный вектор,
 // вдоль которого игра пускает луч попадания. Читать её приходится и для

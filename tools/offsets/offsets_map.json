@@ -3422,5 +3422,33 @@
    "field": "m_ShadowCascadeCount",
    "how": "URP: каскады теней"
   }
+ },
+ "WEAPON_CONFIG_MAX_DISTANCE": {
+  "kind": "field",
+  "class": "HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "<MaxDistance>k__BackingField",
+  "type": "float",
+  "offset": 44,
+  "src": {
+   "file": "dump.cs",
+   "struct": "HitscanWeaponConfig",
+   "field": "<MaxDistance>k__BackingField",
+   "how": "дальность hitscan-оружия: дальше пуля не летит"
+  }
+ },
+ "WEAPON_CONFIG_BASE_DISPERSION": {
+  "kind": "field",
+  "class": "HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "<BaseDispersion>k__BackingField",
+  "type": "float",
+  "offset": 60,
+  "src": {
+   "file": "dump.cs",
+   "struct": "HitscanWeaponConfig",
+   "field": "<BaseDispersion>k__BackingField",
+   "how": "базовый разброс оружия"
+  }
  }
 }

@@ -277,6 +277,8 @@ inline constexpr std::uint64_t URP_REFLECTION_BLENDING   = 0xC0;  // m_Reflectio
 inline constexpr std::uint64_t URP_REFLECTION_BOX        = 0xC1;  // m_ReflectionProbeBoxProjection (bool)
 inline constexpr std::uint64_t URP_SHADOW_DISTANCE       = 0xC4;  // m_ShadowDistance (float)
 inline constexpr std::uint64_t URP_SHADOW_CASCADES       = 0xC8;  // m_ShadowCascadeCount (int)
+inline constexpr std::uint64_t WEAPON_CONFIG_MAX_DISTANCE = 0x2C; // HitscanWeaponConfig.MaxDistance
+inline constexpr std::uint64_t WEAPON_CONFIG_BASE_DISPERSION = 0x3C; // HitscanWeaponConfig.BaseDispersion
 
 // ---- Блок «Оружие»: цепочка конфигов (без-отдача / без-разброс) -------------
 // (см. подробности в game_offsets.h). Раньше эти смещения были вшиты прямо в weapon_tuning_memory.h литералами, а

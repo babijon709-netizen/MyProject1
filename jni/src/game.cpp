@@ -4530,6 +4530,36 @@ static bool resolve_look_direction(uint64_t& out) {
 
 // Куда на самом деле пришёл последний выстрел. Нужно, чтобы измерять промахи
 // сайлента: сравниваем точку попадания с точкой, куда целились.
+// Баллистика текущего оружия: дальность и разброс. Нужна, чтобы объяснить
+// промахи сайлента на дистанции — пуля может не долетать (MaxDistance) или
+// уходить в конус разброса, и это разные болезни.
+bool esp_weapon_ballistics(float& max_distance, float& base_dispersion,
+                           float& disp_min, float& disp_max) {
+    max_distance = base_dispersion = disp_min = disp_max = 0.f;
+    const uint64_t local = resolve_local_player();
+    if (!local) return false;
+    const uint64_t fp = rd_ptr(local + PLAYER_FP_MANAGER);
+    if (!valid_obj(fp)) return false;
+    uint64_t weapon = rd_ptr(fp + FPMANAGER_CURRENT_WEAPON);
+    if (!valid_obj(weapon)) weapon = rd_ptr(fp + FPMANAGER_CURRENT_OBJECT);
+    if (!valid_obj(weapon)) return false;
+    const uint64_t cfg = rd_ptr(weapon + FPHITSCAN_CONFIG);
+    if (!valid_obj(cfg)) return false;
+    const float md = rd<float>(cfg + WEAPON_CONFIG_MAX_DISTANCE);
+    const float bd = rd<float>(cfg + WEAPON_CONFIG_BASE_DISPERSION);
+    if (!std::isfinite(md) || md <= 0.f || md > 100000.f) return false;
+    max_distance = md;
+    base_dispersion = std::isfinite(bd) ? bd : 0.f;
+    const uint64_t disp = rd_ptr(cfg + WEAPON_CONFIG_DISPERSION);
+    if (valid_obj(disp)) {
+        const float lo = rd<float>(disp + DISPERSION_CONFIG_MIN);
+        const float hi = rd<float>(disp + DISPERSION_CONFIG_MAX);
+        if (std::isfinite(lo)) disp_min = lo;
+        if (std::isfinite(hi)) disp_max = hi;
+    }
+    return true;
+}
+
 bool esp_aim_last_hit_point(float point[3]) {
     uint64_t handler = 0;
     if (!resolve_event_handler(handler)) return false;

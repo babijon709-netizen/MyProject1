@@ -186,7 +186,9 @@ OR_FIELD(VITALS_MAX_HEALTH, "GenericVitals", "m_MaxHealth", false, "f4")
 OR_FIELD(VOICE_STATE_NAME, "VoicePlayerState", "_Name_k__BackingField", false, "str")
 OR_FIELD(WEAPONPIECE_ENABLED, "WeaponPiece", "Enabled", false, "b1")
 OR_FIELD(WEAPONPIECE_NUMBER, "WeaponPiece", "Number", false, "i2")
+OR_FIELD(WEAPON_CONFIG_BASE_DISPERSION, "HitscanWeaponConfig", "<BaseDispersion>k__BackingField", false, "f4")
 OR_FIELD(WEAPON_CONFIG_DISPERSION, "HitscanWeaponConfig", "dispersionConfig", false, "c:DispersionConfig")
+OR_FIELD(WEAPON_CONFIG_MAX_DISTANCE, "HitscanWeaponConfig", "<MaxDistance>k__BackingField", false, "f4")
 OR_FIELD(WEAPON_CONFIG_RECOIL, "HitscanWeaponConfig", "recoilConfig", false, "c:RecoilConfig")
 
 // Классы с ротированным именем. OR_VIA(константа, "стартовыйКласс",

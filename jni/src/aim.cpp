@@ -1839,16 +1839,36 @@ static void UpdateAimSilent(float dt) {
             const bool first = s_last_shot_time < 0.f;
             s_last_shot_time = shot;
             float hit[3] = {0.f, 0.f, 0.f};
+            static float s_prev_hit[3] = {0.f, 0.f, 0.f};
             if (!first && best.world_valid && esp_aim_last_hit_point(hit)) {
                 const float dx = hit[0] - best.world[0];
                 const float dy = hit[1] - best.world[1];
                 const float dz = hit[2] - best.world[2];
                 const float miss = sqrtf(dx * dx + dy * dy + dz * dz);
-                LogLine("сайлент выстрел: промах %.2f м (цель на %.1f м), "
-                        "цель [%.1f %.1f %.1f], попадание [%.1f %.1f %.1f]",
-                        (double)miss, (double)best.world_dist,
-                        (double)best.world[0], (double)best.world[1], (double)best.world[2],
-                        (double)hit[0], (double)hit[1], (double)hit[2]);
+                // Точка попадания не изменилась с прошлого выстрела — значит
+                // пуля не попала НИКУДА: игра обновляет её только по факту
+                // попадания. Лог 26.09 22:51: дальше 25 м так было у всех
+                // четырёх выстрелов подряд.
+                const bool same = fabsf(hit[0] - s_prev_hit[0]) < 0.001f &&
+                                  fabsf(hit[1] - s_prev_hit[1]) < 0.001f &&
+                                  fabsf(hit[2] - s_prev_hit[2]) < 0.001f;
+                s_prev_hit[0] = hit[0]; s_prev_hit[1] = hit[1]; s_prev_hit[2] = hit[2];
+                float wmax = 0.f, wbase = 0.f, wlo = 0.f, whi = 0.f;
+                const bool have_w = esp_weapon_ballistics(wmax, wbase, wlo, whi);
+                if (same) {
+                    LogLine("сайлент выстрел: ПОПАДАНИЯ НЕТ, цель на %.1f м; оружие: дальность %.0f м, "
+                            "базовый разброс %.3f, конус %.3f..%.3f%s",
+                            (double)best.world_dist, (double)wmax, (double)wbase,
+                            (double)wlo, (double)whi,
+                            have_w ? "" : " (баллистику прочитать не удалось)");
+                } else {
+                    LogLine("сайлент выстрел: промах %.2f м (цель на %.1f м), оружие бьёт на %.0f м, "
+                            "конус %.3f..%.3f; цель [%.1f %.1f %.1f], попадание [%.1f %.1f %.1f]",
+                            (double)miss, (double)best.world_dist, (double)wmax,
+                            (double)wlo, (double)whi,
+                            (double)best.world[0], (double)best.world[1], (double)best.world[2],
+                            (double)hit[0], (double)hit[1], (double)hit[2]);
+                }
             }
         }
     }
