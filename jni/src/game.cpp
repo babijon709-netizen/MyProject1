@@ -184,9 +184,21 @@ static uint64_t weapon_speed_config() {
     // class_identity ждёт УКАЗАТЕЛЬ НА КЛАСС, а cfg — объект: класс лежит в
     // первом поле. Сверяем имя и пространство имён, как это делает блок
     // «Оружие», иначе можно написать в чужой ассет.
-    if (class_identity(rd_ptr(cfg), "HitscanWeaponConfig",
-                       "HyperHug.Games.Oxide.Features.Weapons") != 1)
-        return 0;
+    // Чтение имени класса — это две строки из чужой памяти; кэшируем результат
+    // по указателю на класс, иначе проверка сама становится нагрузкой.
+    {
+        static uint64_t s_ok_klass = 0, s_bad_klass = 0;
+        const uint64_t klass = rd_ptr(cfg);
+        if (!valid_obj(klass) || klass == s_bad_klass) return 0;
+        if (klass != s_ok_klass) {
+            if (class_identity(klass, "HitscanWeaponConfig",
+                               "HyperHug.Games.Oxide.Features.Weapons") != 1) {
+                s_bad_klass = klass;
+                return 0;
+            }
+            s_ok_klass = klass;
+        }
+    }
     return cfg;
 }
 
@@ -218,6 +230,16 @@ static bool weapon_speed_offsets_live() {
 
 static void weapon_speed_tick() {
     if (!g_fast_fire && !g_fast_reload) { weapon_speed_restore(); return; }
+    // Раз в 250 мс, а не каждый кадр: значения в ассете статичны, а цепочка до
+    // него стоит нескольких чтений плюс чтение имени класса. Лог 27.09 00:08:
+    // 831 чтение на кадр и 7.4 мс кадра внутри чтений — оверлей просел до 49
+    // кадров в секунду. Восстановление и сброс остаются мгновенными.
+    {
+        static double s_next = 0.0;
+        const double now_s = mono_seconds();
+        if (now_s < s_next) return;
+        s_next = now_s + 0.25;
+    }
     if (!g_il2cpp_base || g_pid <= 0) { g_ws_saved = false; g_ws_config = 0; return; }
     if (!weapon_speed_offsets_live()) {
         static double s_next = 0.0;
@@ -502,6 +524,13 @@ static bool potato_urp_offsets_live() {
 
 static void potato_gfx_tick() {
     if (!g_potato_enabled) { potato_restore(); potato_quality_restore(); return; }
+    // Тоже раз в 250 мс: настройки качества игра сама не крутит каждый кадр.
+    {
+        static double s_next = 0.0;
+        const double now_s = mono_seconds();
+        if (now_s < s_next) return;
+        s_next = now_s + 0.25;
+    }
     if (!g_il2cpp_base || g_pid <= 0) { g_potato_q.saved = false; g_potato_q_level = 0; return; }
     if (!potato_urp_offsets_live()) {
         static double s_next = 0.0;

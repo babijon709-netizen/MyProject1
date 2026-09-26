@@ -783,8 +783,7 @@ static void UpdateAimTouch(float dt) {
     static std::vector<FlightOrd> s_flight;
     static float s_absorbYaw = 0.f, s_absorbPitch = 0.f; // заказано, не отработано (град)
     static int   s_holdNoFrame = 0;   // тактов подряд без нового кадра игры
-    static bool  s_stepPending = false;  // заказ сделан, ждём отклика камеры
-    static int   s_stepWait = 0;
+    static double s_lastStepTime = 0.0;  // когда выдали прошлый заказ
     ++s_tdiag.ticks;
     static float s_stallYaw = 0.f, s_stallPitch = 0.f;
     static float s_prevRawYaw = 0.f, s_prevRawPitch = 0.f;
@@ -1268,16 +1267,17 @@ static void UpdateAimTouch(float dt) {
         return;
     }
 
-    // ---- темп подачи: один шаг на кадр ИГРЫ ----
-    // Наш цикл идёт 60 раз в секунду, игра рисует 30-40. Каждый лишний заказ
-    // между кадрами игры удваивает петлевое усиление — отсюда предельный цикл
-    // (лог 26.09 22:50: шаг на 14 тактах из 15 при остатке меньше градуса).
-    // Ждём, пока камера реально шевельнётся после нашего шага, и только тогда
-    // считаем следующий. Ограничение снимается, если камера «молчит» дольше
-    // четырёх тактов (игра на паузе, палец перехвачен и т. п.).
-    if (s_stepPending) {
-        if (camMoved || ++s_stepWait > 4) { s_stepPending = false; s_stepWait = 0; }
-        else {
+    // ---- темп подачи: не чаще 30 заказов в секунду ----
+    // Прошлая попытка ждала, пока «шевельнётся камера», и почти не срабатывала:
+    // камера двигается и сама (ходьба, отдача), так что условие было истинным
+    // на каждом такте (лог 27.09 00:08: пропущено 1-3 из 15). Поэтому теперь
+    // ограничение по ЧАСАМ: игра рисует 30-40 кадров в секунду, и чаще всё
+    // равно некуда — каждый лишний заказ между её кадрами удваивает петлевое
+    // усиление и раскачивает прицел. Шаг при этом считается от полной ошибки,
+    // так что скорость наведения не падает: закрываем больше за один заказ.
+    {
+        const double now_s = MonoNow();
+        if (now_s - s_lastStepTime < 0.030) {
             ++s_tdiag.skipNoFrame;
             if (s_fingerDown) Touch_Move(s_fx, s_fy);
             return;
@@ -1362,7 +1362,11 @@ static void UpdateAimTouch(float dt) {
     // устойчивости здесь не лишний — «почти пропал, но не до конца» (19.09).
     // На скорость захвата это почти не влияет: при большой ошибке шаг всё
     // равно упирается в потолок maxStep.
-    const float kStable = 0.45f;
+    // Заказы идут не чаще 30 в секунду, то есть примерно раз в кадр игры:
+    // задержка «шаг -> отклик» перестала накапливаться, и устойчивый предел
+    // выше прежнего. 0.55 закрывает больше остатка за заказ — наведение не
+    // вялое, а хвост всё равно гаснет за два-три шага.
+    const float kStable = 0.55f;
     const float fracMid = 0.25f + (5.f - 1.f) / 9.f * 0.75f;   // слайдер 5
     if (k > kStable) k = kStable;
     if (frac < fracMid) k *= frac / fracMid;
@@ -1530,8 +1534,7 @@ static void UpdateAimTouch(float dt) {
         s_absorbPitch += ordPitch; s_stallPitch = 0.f;
     }
     ++s_tdiag.steps;
-    s_stepPending = true;
-    s_stepWait = 0;
+    s_lastStepTime = MonoNow();
     s_tdiag.stepSum += (fabsf(dx) > fabsf(dy)) ? fabsf(dx) : fabsf(dy);
     Touch_Move(s_fx, s_fy);
 }
