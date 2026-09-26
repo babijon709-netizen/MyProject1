@@ -962,11 +962,22 @@ static void phase_maps() {
                 const uint64_t rsize = end - start;
                 uint8_t probe[128] = {};
                 bool can_read = false, non_zero = false;
+                // Проб меньше и с общим потолком: на устройстве регионов без
+                // бита чтения бывает под тысячу, и десяток проб на каждый — это
+                // сотни миллисекунд в ОДНОМ кадре (лог 26.09: ESP=448 мс на
+                // старте карты). Четырёх точек хватает, чтобы понять, отдаёт
+                // ли регион данные.
+                static int probe_budget = 0;
+                if (s_anon_noread_count == 0 && s_probe_ok == 0) probe_budget = 512;
                 const uint64_t offs[] = {
-                    0, 64 * 1024, 256 * 1024, 1024 * 1024,
-                    2 * 1024 * 1024, 4 * 1024 * 1024, 8 * 1024 * 1024,
-                    16 * 1024 * 1024, rsize >> 2, rsize >> 1
+                    0, 1024 * 1024, rsize >> 2, rsize >> 1
                 };
+                if (probe_budget <= 0) {
+                    ++s_anon_noread_count;
+                    s_anon_noread_bytes += rsize;
+                    continue;
+                }
+                probe_budget -= (int)(sizeof(offs) / sizeof(offs[0]));
                 for (size_t t = 0; t < sizeof(offs)/sizeof(offs[0]); ++t) {
                     if (offs[t] >= rsize) continue;
                     if (!qrd_buf(start + offs[t], probe, sizeof(probe))) continue;
@@ -4081,31 +4092,65 @@ static void phase_fields() {
     if (by_via)
         LogLine("автооффсеты: полей найдено через цепочку via (имена классов "
                 "ротируются): %d", by_via);
-    for (int i = 0; i < kViaFieldCount; ++i) {
-        bool found = false;
-        for (int j = 0; j < s_applied_count; ++j)
-            if (s_applied[j].slot == kViaFields[i].slot) { found = true; break; }
-        if (!found)
-            LogLine("автооффсеты: via не подтверждено: %s.%s (оставлено вшитое 0x%llx)",
-                    kViaFields[i].via_cls, kViaFields[i].field,
-                    (unsigned long long)*kViaFields[i].slot);
+    {
+        char line[512];
+        size_t used = 0;
+        line[0] = '\0';
+        int count = 0;
+        for (int i = 0; i < kViaFieldCount; ++i) {
+            bool found = false;
+            for (int j = 0; j < s_applied_count; ++j)
+                if (s_applied[j].slot == kViaFields[i].slot) { found = true; break; }
+            if (found) continue;
+            ++count;
+            const int n = snprintf(line + used, sizeof(line) - used, "%s%s.%s",
+                                   used ? ", " : "", kViaFields[i].via_cls, kViaFields[i].field);
+            if (n < 0) break;
+            used += (size_t)n;
+            if (used > sizeof(line) - 64) {
+                LogLine("автооффсеты: via не подтверждено — %s", line);
+                used = 0; line[0] = '\0';
+            }
+        }
+        if (used) LogLine("автооффсеты: via не подтверждено — %s", line);
+        if (count) LogLine("автооффсеты: via не подтверждено всего %d (оставлены вшитые)", count);
     }
 
-    for (int i = 0; i < kOrFieldCount; ++i) {
-        const OrField& of = kOrFields[i];
-        bool is_resolved = false;
-        for (int j = 0; j < s_applied_count; ++j) {
-            if (s_applied[j].slot == of.slot) { is_resolved = true; break; }
+    // Неразрешённые — ОДНОЙ пачкой. Раньше каждое поле печаталось отдельной
+    // строкой: 156 записей в лог за один такт съедали 0.67 с, кадр вставал
+    // почти на секунду (в профиле это выглядело как «ESP=956 мс»), позиции
+    // устаревали, и боксы прыгали по экрану. Пишем компактно и с потолком.
+    {
+        char line[512];
+        size_t used = 0;
+        int printed = 0, total = 0;
+        auto flush = [&]() {
+            if (!used) return;
+            LogLine("автооффсеты: не разрешено — %s", line);
+            used = 0; line[0] = '\0';
+        };
+        line[0] = '\0';
+        for (int i = 0; i < kOrFieldCount; ++i) {
+            const OrField& of = kOrFields[i];
+            bool is_resolved = false;
+            for (int j = 0; j < s_applied_count; ++j)
+                if (s_applied[j].slot == of.slot) { is_resolved = true; break; }
+            if (is_resolved) continue;
+            ++total;
+            if (printed >= 40) continue;          // потолок: дальше только счётчик
+            bool have_class = false;
+            for (int j = 0; j < s_class_count; ++j)
+                if (strcmp(s_classes[j].name, of.cls) == 0) { have_class = true; break; }
+            const int n = snprintf(line + used, sizeof(line) - used, "%s%s::%s%s",
+                                   used ? ", " : "", of.cls, of.field, have_class ? "" : "(нет класса)");
+            if (n < 0) break;
+            used += (size_t)n;
+            ++printed;
+            if (used > sizeof(line) - 96) flush();
         }
-        if (!is_resolved) {
-            bool class_in_cache = false;
-            for (int j = 0; j < s_class_count; ++j) {
-                if (strcmp(s_classes[j].name, of.cls) == 0) { class_in_cache = true; break; }
-            }
-            LogLine("автооффсеты: не разрешено %s::%s (%s)",
-                    of.cls, of.field,
-                    class_in_cache ? "поле не найдено в классе" : "класс отсутствует в кэше");
-        }
+        flush();
+        if (total > printed)
+            LogLine("автооффсеты: не разрешено ещё %d полей (список обрезан)", total - printed);
     }
     // Главный предохранитель: без ключевых классов результата НЕ БЫВАЕТ.
     // Лог 26.09 19:46: окно имён задалось по мусорному классу «gL», сошлись

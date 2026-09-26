@@ -261,6 +261,13 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
                 (unsigned long long)PLAYER_FP_MANAGER,
                 (unsigned long long)FPMANAGER_CURRENT_WEAPON,
                 (unsigned long long)FPOBJECT_PLAYER_BACKREF);
+        if (weapons.diagnostic == 11)
+            LogLine("weapon data: цепочка шаг2 подшаг=%d (1 нет fpManager,2 не FPManager,3 снимок,"
+                    "4 нет оружия в руках,5 оружие не FPHitscan — топор/кирка,6 снимок,7 обратная "
+                    "ссылка,8 ссылка не на игрока) fp=0x%llx weapon=0x%llx back=0x%llx generic=%d",
+                    weapons.step2, (unsigned long long)weapons.dbg_fp,
+                    (unsigned long long)weapons.dbg_weapon, (unsigned long long)weapons.dbg_back,
+                    (int)weapons.generic);
     }
     last_weapon_diagnostic = weapons.diagnostic;
     controller.tick(epoch, player, settings);

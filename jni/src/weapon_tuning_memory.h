@@ -137,11 +137,21 @@ template<class IO> class Controller {
             !io.named(p,"NetworkIdentity","Mirror") || !io.read(p+0x4a,local) || local!=1)
             return false;
         resolve_step_ = 2;
-        if (!pointer(io,player+go_active::PLAYER_FP_MANAGER,fp) || !io.named(fp,"FPManager","Oxide") ||
-            !c.fp.capture(io,fp,true) || !pointer(io,fp+go_active::FPMANAGER_CURRENT_WEAPON,weapon) ||
-            !weapon || !io.named(weapon,"FPHitscan","Oxide") || !c.weapon.capture(io,weapon,true) ||
-            !pointer(io,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back) || back!=player)
-            return false;
+        // Подшаги пишем наружу: «отказ=11» сам по себе не говорит, что именно
+        // не сошлось — нет fpManager, нет оружия в руках, оружие не hitscan
+        // (топор/кирка) или не сходится обратная ссылка.
+        step2 = 0; dbg_fp = dbg_weapon = dbg_back = 0;
+        if (!pointer(io,player+go_active::PLAYER_FP_MANAGER,fp) || !fp) { step2 = 1; return false; }
+        dbg_fp = fp;
+        if (!io.named(fp,"FPManager","Oxide")) { step2 = 2; return false; }
+        if (!c.fp.capture(io,fp,true)) { step2 = 3; return false; }
+        if (!pointer(io,fp+go_active::FPMANAGER_CURRENT_WEAPON,weapon) || !weapon) { step2 = 4; return false; }
+        dbg_weapon = weapon;
+        if (!io.named(weapon,"FPHitscan","Oxide")) { step2 = 5; return false; }   // в руках не огнестрел
+        if (!c.weapon.capture(io,weapon,true)) { step2 = 6; return false; }
+        if (!pointer(io,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back)) { step2 = 7; return false; }
+        dbg_back = back;
+        if (back != player) { step2 = 8; return false; }
         resolve_step_ = 3;
         // config — по FPHitscan.config, recoil — по HitscanWeaponConfig.recoilConfig.
         // Ссылка weapon+0x200 остаётся перекрёстной проверкой: если она читается,
@@ -189,6 +199,9 @@ public:
     // 10..14 owner-chain stage,
     // 20 restoration, 21 heap write/readback. Exposed for device diagnostics.
     int diagnostic = 0;
+    // Подшаг второй ступени цепочки и её адреса — только для лога.
+    int step2 = 0;
+    uint64_t dbg_fp = 0, dbg_weapon = 0, dbg_back = 0;
     bool generic = false;      // сработали без записи в kLayouts (по живым метаданным)
     int guard_index = -1;
     uint32_t guard_observed = 0;
