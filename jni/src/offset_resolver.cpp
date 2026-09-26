@@ -371,6 +371,27 @@ uint64_t s_ptr_names = 0;         // указателей на ЛЮБУЮ чит
 uint64_t s_ptr_rinwin = 0;        // указателей в окно в текущем диапазоне
 uint64_t s_ptr_best_hits = 0;     // максимум в одном диапазоне
 int      s_ptr_best_range = -1;
+// ---- Разведка диапазонов -----------------------------------------------------
+// Классы лежат кучно: в логах 26.09 из 450–700 диапазонов указатели на имена
+// давали два-три («0x7710000000..0x7717000000 — 346370 штук», «0x76c0…000 —
+// 100186»), остальные — единицы. Гнать полный проход по 5 ГБ в адресном
+// порядке значит найти нужное в лучшем случае к середине. Поэтому сначала
+// дешёвая разведка: по 8 проб на диапазон, и порядок обхода — по плотности
+// попаданий. Ни один диапазон не выбрасывается, меняется только очередь.
+int      s_ptr_order[2048];        // порядок обхода (индексы в s_ptr_ranges)
+int      s_ptr_score[2048];        // попаданий в окно строк на пробах
+int      s_scout_idx = 0;          // прогресс разведки
+bool     s_scout_done = false;
+uint64_t s_scout_bytes = 0;
+constexpr int    kScoutProbes = 8;            // проб на диапазон
+constexpr size_t kScoutProbeBytes = 16 * 1024; // по 16 КБ на пробу
+// «Горячие» диапазоны прошлого прохода: при повторе их проверяем первыми.
+uint64_t s_hot_begin[4] = {}, s_hot_end[4] = {};
+int      s_hot_count = 0;
+// Ранняя остановка: как только ключевые классы найдены, дальше сканируем
+// совсем немного (соседи в том же пуле) и заканчиваем.
+uint64_t s_ptr_enough_at = 0;
+constexpr uint64_t kPtrGraceBytes = 192ull << 20;
 // Три лучших диапазона, а не один: пул классов может быть не самым
 // «густонаселённым» местом (лог №12: на первом месте таблица имён шейдеров
 // — 3745 указателей, а нужного пула в списке не видно вовсе).
@@ -536,20 +557,32 @@ double   s_last_progress_log = 0; // темп строк прогресса в �
 // находилась — их поля оставались на вшитых значениях («не все оффсеты
 // автообновляются»). Скан порционный (4 мс/кадр), поэтому длинный потолок не
 // грузит игру, а после первого входа результат берётся из кэша мгновенно.
-constexpr double kTickBudgetSec   = 0.004;  // 4 мс на такт
+constexpr double kTickBudgetSec   = 0.004;  // 4 мс на такт, когда чит уже рисует кадр
+// Пока ключевых классов нет, чит СЛЕП: ESP нечего рисовать, аиму не за кем
+// следить. Тратить в этот момент 4 мс из 16 — значит растягивать подбор на
+// минуты ради плавности картинки, которой всё равно нет. Втрое больший квант
+// сокращает первый подбор во столько же раз и не стоит ничего.
+constexpr double kTickBudgetBlind = 0.012;
 constexpr double kScanTotalSec    = 300.0;  // общий потолок скана (образы по 0.5ГБ+)
-constexpr size_t kChunkBytes      = 256 * 1024;
-constexpr size_t kMaxReadsPerChunk = 256;   // предел «дорогих» чтений на порцию
+// Куски по 1 МБ вместо 256 КБ: вчетверо меньше syscall'ов на тот же объём.
+// Буфер один на все фазы — они никогда не работают одновременно.
+constexpr size_t kChunkBytes      = 1024 * 1024;
+// Пределы «дорогих» чтений на порцию выросли вчетверо вместе с размером
+// порции: иначе кусок в 1 МБ обрабатывался бы по четверти и перечитывался.
+constexpr size_t kMaxReadsPerChunk = 1024;  // предел «дорогих» чтений на порцию
 // В куче «похожих на указатели» значений на порядки больше, чем в .data/.relro
 // образа, и каждая порция упиралась в прежний предел 1024 — скан полз
 // ~1.7 МБ/с. Удвоенный предел вдвое ускоряет первый (и единственный) проход.
-constexpr size_t kHeapReadsPerChunk = 2048;
+constexpr size_t kHeapReadsPerChunk = 8192;
 // Сколько байт достаточно просмотреть, чтобы при НУЛЕ классов признать базу
 // пустой: в живом образе слоты классов лежат в хвостовых сегментах
 // (.data/.relro), а скан идёт с конца образа — живые классы нашлись на
 // устройстве уже в первых 7 МБ. Пустая база (например, свежезагруженная копия
 // .so после самообновления игры) не даст ничего и за все 221 МБ; не ждём.
 constexpr uint64_t kEmptyBaseBytes = 96ull << 20;
+
+// Общий буфер чтения для всех сканирующих фаз (последовательны по времени).
+uint8_t  s_scan_buf[kChunkBytes];
 
 static bool s_first_char[256];
 const char* s_wanted_names[64];   // разные имена классов из таблицы
@@ -1367,7 +1400,7 @@ static void start_heap_scan(uint64_t anchor) {
 }
 
 static void phase_heap(double deadline) {
-    static uint8_t buf[kChunkBytes];
+    uint8_t* const buf = s_scan_buf;
     while (s_heap_range_idx < s_heap_range_count && mono_seconds() < deadline) {
         const HeapScanRange& r = s_heap_ranges[s_heap_range_idx];
         if (s_heap_pos < r.start || s_heap_pos >= r.end) s_heap_pos = r.start;
@@ -1736,7 +1769,7 @@ static void meta_scan_continue(bool found) {
 }
 
 static void phase_meta(double deadline) {
-    static uint8_t buf[kChunkBytes];
+    uint8_t* const buf = s_scan_buf;
     while (s_meta_range_idx < s_meta_range_count && mono_seconds() < deadline) {
         const MetaRange& r = s_meta_ranges[s_meta_range_idx];
         if (s_meta_pass == 0) {
@@ -1850,7 +1883,7 @@ static void phase_meta(double deadline) {
 }
 
 static void phase_strsearch(double deadline) {
-    static uint8_t buf[kChunkBytes];
+    uint8_t* const buf = s_scan_buf;
     if (s_str_needle_idx < 0 || s_str_needle_idx >= (int)(sizeof(kStrNeedles) / sizeof(kStrNeedles[0])))
         s_str_needle_idx = 0;
     const char* const kNeedle = kStrNeedles[s_str_needle_idx];
@@ -2027,7 +2060,7 @@ static void apply_str_window(int idx) {
 }
 
 static void phase_blob(double deadline) {
-    static uint8_t buf[kChunkBytes];
+    uint8_t* const buf = s_scan_buf;
     while (s_blob_pos < s_meta_end && mono_seconds() < deadline &&
            mono_seconds() < s_scan_deadline) {
         const uint64_t remain = s_meta_end - s_blob_pos;
@@ -2121,6 +2154,7 @@ static void phase_blob(double deadline) {
             if (s_ptr_range_count == 0) build_scan_ranges();
             s_ptr_passes = 1;
             s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
+            s_scout_done = false; s_scout_idx = 0; s_ptr_enough_at = 0;
             s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0; s_ptr_noverify = 0;
             s_ptr_names = 0; s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
             for (int k = 0; k < 3; ++k) { s_top_hits[k] = 0; s_top_range[k] = -1; }
@@ -2267,16 +2301,18 @@ static void build_scan_ranges() {
 // Закрываем диапазон поиска: запоминаем, в каком из них больше всего
 // указателей на строки — там и лежит пул классов (или его нет нигде).
 static void ptr_range_done() {
+    const int cur = (s_ptr_region >= 0 && s_ptr_region < s_ptr_range_count)
+                        ? s_ptr_order[s_ptr_region] : s_ptr_region;
     if (s_ptr_rinwin > s_ptr_best_hits) {
         s_ptr_best_hits = s_ptr_rinwin;
-        s_ptr_best_range = s_ptr_region;
+        s_ptr_best_range = cur;
     }
     if (s_ptr_rinwin > 0) {
         for (int k = 0; k < 3; ++k) {
             if (s_ptr_rinwin <= s_top_hits[k]) continue;
             for (int j = 2; j > k; --j) { s_top_hits[j] = s_top_hits[j - 1]; s_top_range[j] = s_top_range[j - 1]; }
             s_top_hits[k] = s_ptr_rinwin;
-            s_top_range[k] = s_ptr_region;
+            s_top_range[k] = cur;
             break;
         }
     }
@@ -2297,10 +2333,71 @@ static bool looks_like_name(const char* s, size_t cap) {
     return (c0 >= 'A' && c0 <= 'Z') || (c0 >= 'a' && c0 <= 'z') || c0 == '_';
 }
 
+// Одна проба диапазона: сколько 8-байтовых значений смотрят в окно строк.
+static int scout_range(const PtrRange& r) {
+    if (!s_meta_begin || r.end <= r.start) return 0;
+    const uint64_t size = r.end - r.start;
+    int hits = 0;
+    for (int p = 0; p < kScoutProbes; ++p) {
+        uint64_t at = r.start + (size / (uint64_t)kScoutProbes) * (uint64_t)p;
+        at &= ~7ull;
+        size_t want = kScoutProbeBytes;
+        if (at + want > r.end) {
+            if (r.end <= at + 64) continue;
+            want = (size_t)(r.end - at);
+        }
+        if (!qrd_buf(at, s_scan_buf, want)) continue;
+        s_scout_bytes += want;
+        for (size_t o = 0; o + 8 <= want; o += 8) {
+            uint64_t v;
+            memcpy(&v, s_scan_buf + o, 8);
+            v = memio::untag(v);
+            if (v >= s_meta_begin && v < s_meta_end) ++hits;
+        }
+    }
+    return hits;
+}
+
 static void phase_ptr(double deadline) {
-    static uint8_t buf[kChunkBytes];
+    uint8_t* const buf = s_scan_buf;
+    // --- разведка: порядок обхода по плотности указателей в окно строк ---
+    if (!s_scout_done) {
+        while (s_scout_idx < s_ptr_range_count && mono_seconds() < deadline) {
+            const int i = s_scout_idx++;
+            int score = scout_range(s_ptr_ranges[i]);
+            // Диапазон, где классы находились в прошлый раз, — вперёд всех.
+            for (int h = 0; h < s_hot_count; ++h) {
+                if (s_ptr_ranges[i].start < s_hot_end[h] && s_ptr_ranges[i].end > s_hot_begin[h]) {
+                    score += 1000000;
+                    break;
+                }
+            }
+            s_ptr_score[i] = score;
+        }
+        if (s_scout_idx < s_ptr_range_count) return;   // продолжим на следующем такте
+        for (int i = 0; i < s_ptr_range_count; ++i) s_ptr_order[i] = i;
+        // Сортировка вставками по убыванию плотности: диапазонов сотни,
+        // сравнение дешёвое, а std::sort сюда тянуть незачем.
+        for (int i = 1; i < s_ptr_range_count; ++i) {
+            const int cur = s_ptr_order[i];
+            int j = i - 1;
+            while (j >= 0 && s_ptr_score[s_ptr_order[j]] < s_ptr_score[cur]) {
+                s_ptr_order[j + 1] = s_ptr_order[j];
+                --j;
+            }
+            s_ptr_order[j + 1] = cur;
+        }
+        s_scout_done = true;
+        const int first = s_ptr_range_count ? s_ptr_order[0] : -1;
+        LogLine("автооффсеты: разведка диапазонов — %d проб на %llu МБ, лучший 0x%llx..0x%llx "
+                "(%d попаданий), сканирую по убыванию плотности",
+                s_ptr_range_count, (unsigned long long)(s_scout_bytes >> 20),
+                first >= 0 ? (unsigned long long)s_ptr_ranges[first].start : 0ull,
+                first >= 0 ? (unsigned long long)s_ptr_ranges[first].end : 0ull,
+                first >= 0 ? s_ptr_score[first] : 0);
+    }
     while (s_ptr_region < s_ptr_range_count && mono_seconds() < deadline) {
-        const PtrRange& r = s_ptr_ranges[s_ptr_region];
+        const PtrRange& r = s_ptr_ranges[s_ptr_order[s_ptr_region]];
         // Тот же курсор и та же ловушка, что в поиске строк (см. там):
         // диапазоны не отсортированы по адресу, поэтому вышедший за пределы
         // диапазона курсор возвращается на его начало.
@@ -2438,6 +2535,19 @@ static void phase_ptr(double deadline) {
         s_ptr_pos += chunk;
         s_ptr_scanned += chunk;
         if (all_wanted_found()) break;
+        // Ключевые классы найдены — дальше берём только соседей в том же пуле
+        // и заканчиваем: остальные гигабайты ничего не добавят, а минуту
+        // ожидания стоят.
+        if (!key_classes_missing()) {
+            if (!s_ptr_enough_at) {
+                s_ptr_enough_at = s_ptr_scanned;
+                LogLine("автооффсеты: ключевые классы найдены на %llu МБ — досканирую %llu МБ соседей и заканчиваю",
+                        (unsigned long long)(s_ptr_scanned >> 20),
+                        (unsigned long long)(kPtrGraceBytes >> 20));
+            } else if (s_ptr_scanned - s_ptr_enough_at >= kPtrGraceBytes) {
+                break;
+            }
+        }
         if (s_ptr_scanned >= (6144ull << 20)) break;
         if (mono_seconds() >= s_scan_deadline) break;
         const double now_s = mono_seconds();
@@ -2455,6 +2565,15 @@ static void phase_ptr(double deadline) {
     if (all_wanted_found() || s_ptr_region >= s_ptr_range_count ||
         s_ptr_scanned >= (6144ull << 20) || mono_seconds() >= s_scan_deadline) {
         ptr_range_done();
+        // Горячие диапазоны — в память процесса: повтор начнёт с них.
+        s_hot_count = 0;
+        for (int k = 0; k < 3 && s_hot_count < 4; ++k) {
+            const int i = s_top_range[k];
+            if (i < 0 || i >= s_ptr_range_count || s_top_hits[k] <= 0) continue;
+            s_hot_begin[s_hot_count] = s_ptr_ranges[i].start;
+            s_hot_end[s_hot_count] = s_ptr_ranges[i].end;
+            ++s_hot_count;
+        }
         LogLine("автооффсеты: бутстрап завершён — просмотрено %llu МБ (%d диапазонов из %d), "
                 "отказов чтения %llu, в окне строк %llu значений, похожих на имена %llu, "
                 "по строке совпало %llu, живых классов %llu, неподтверждённых %llu (в кэше %d)",
@@ -2490,6 +2609,7 @@ static void phase_ptr(double deadline) {
             s_meta_end = s_blk_end[next];
             s_blk_tried[next] = true;
             s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
+            s_scout_done = false; s_scout_idx = 0; s_ptr_enough_at = 0;
             s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
             s_ptr_noverify = 0; s_ptr_names = 0; s_ptr_readfails = 0;
             s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
@@ -2514,6 +2634,20 @@ static void phase_ptr(double deadline) {
             }
         }
         s_bootstrap_done = true;
+        // Классы нашлись, но не все: рантайм выделяет Il2CppClass из общего
+        // пула подряд, поэтому остальные лежат рядом с уже найденным. Локальный
+        // доскан кучи вокруг него стоит секунды против минут полного прохода.
+        if (!all_wanted_found() && !s_heap_done && s_class_count > 0) {
+            uint64_t seed = 0;
+            for (int i = 0; i < s_class_count && !seed; ++i)
+                if (name_is_wanted(s_classes[i].name)) seed = s_classes[i].klass;
+            if (seed) {
+                LogLine("автооффсеты: найдено %d классов из %d — дочищаю кучу вокруг 0x%llx",
+                        wanted_in_cache(), s_wanted_name_count, (unsigned long long)seed);
+                start_heap_scan(seed);
+                return;
+            }
+        }
         // Бутстрап не дал ключевых классов, а скан .so по форме ещё не
         // гонялся — пробуем его запасным путём (в старых сборках пул классов
         // лежал прямо в сегментах образа).
@@ -2623,7 +2757,7 @@ static void phase_scan(double deadline) {
 
     // Буфер осознанно статический: 256 КБ на стеке кадра на телефоне —
     // риск переполнения стека потока отрисовки. Резолвер однопоточный.
-    static uint8_t buf[kChunkBytes];
+    uint8_t* const buf = s_scan_buf;
     while (s_seg_idx < s_seg_count && mono_seconds() < deadline) {
         const Segment& seg = s_segments[s_seg_idx];
         const uint64_t remain = seg.end - s_scan_pos;
@@ -3943,6 +4077,50 @@ static void phase_fields() {
     s_phase = PH_DONE;
 }
 
+// ---- Замер фаз ---------------------------------------------------------------
+// Без цифр ускорять нечего: лог должен сам показывать, где уходит время.
+Phase    s_timed_phase = PH_WAIT;
+double   s_timed_since = 0;
+uint64_t s_timed_bytes = 0;
+
+static const char* phase_name(Phase p) {
+    switch (p) {
+        case PH_WAIT:   return "ожидание";
+        case PH_MAPS:   return "карта";
+        case PH_SCAN:   return "скан .so";
+        case PH_KID:    return "поиск по индексу типа";
+        case PH_FIELDS: return "резолв полей";
+        case PH_DONE:   return "готово";
+        case PH_HEAP:   return "скан кучи";
+        case PH_META:   return "сигнатура метаданных";
+        case PH_STRS:   return "поиск имён";
+        case PH_BLOB:   return "таблица строк";
+        case PH_PTR:    return "поиск указателей";
+    }
+    return "?";
+}
+
+static uint64_t scanned_total() {
+    return s_scanned_bytes + s_str_scanned + s_ptr_scanned + s_meta_scanned + s_scout_bytes;
+}
+
+static void log_phase_timing() {
+    if (s_phase == s_timed_phase) return;
+    const double now = mono_seconds();
+    const uint64_t bytes = scanned_total();
+    if (s_timed_since > 0.0) {
+        const double dt = now - s_timed_since;
+        const uint64_t db = (bytes > s_timed_bytes) ? (bytes - s_timed_bytes) : 0;
+        if (dt >= 0.3 || db >= (16ull << 20))
+            LogLine("автооффсеты: фаза «%s» — %.1f с, %llu МБ (%.0f МБ/с)",
+                    phase_name(s_timed_phase), dt, (unsigned long long)(db >> 20),
+                    dt > 0.01 ? (double)(db >> 20) / dt : 0.0);
+    }
+    s_timed_phase = s_phase;
+    s_timed_since = now;
+    s_timed_bytes = bytes;
+}
+
 static void log_summary() {
     if (s_logged) return;
     s_logged = true;
@@ -4405,6 +4583,7 @@ static void soft_rescan() {
     s_cache_saved = false;
     s_fields_off = 0; s_calib_best = 0; s_calib_best_off = 0;
     s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
+    s_scout_done = false; s_scout_idx = 0; s_scout_bytes = 0; s_ptr_enough_at = 0;
     s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
     s_ptr_noverify = 0; s_ptr_names = 0; s_ptr_readfails = 0;
     s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
@@ -4457,7 +4636,10 @@ void offset_resolver_tick() {
         s_bound_base = g_il2cpp_base;
         s_scan_base = g_il2cpp_base;
     }
-    const double deadline = mono_seconds() + kTickBudgetSec;
+    // Квант времени: пока нет ключевых классов, чит всё равно ничего не
+    // показывает — сканируем крупными кусками времени.
+    const double budget = key_classes_missing() ? kTickBudgetBlind : kTickBudgetSec;
+    const double deadline = mono_seconds() + budget;
     switch (s_phase) {
         case PH_WAIT:
 #if OR_SELFTEST_BREAK_BAKED
@@ -4519,6 +4701,7 @@ void offset_resolver_tick() {
         case PH_FIELDS: phase_fields(); break;
         case PH_DONE:   break;
     }
+    log_phase_timing();
     if (s_phase == PH_DONE) {
         log_summary();
         // Скан только при первом входе: результат уходит в кэш, чтобы следующий

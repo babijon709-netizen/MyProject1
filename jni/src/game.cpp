@@ -7186,6 +7186,27 @@ static bool read_local_aim_state() {
     const uint64_t fp_manager = rd_ptr(local + PLAYER_FP_MANAGER);
     if (fp_manager) {
         uint64_t weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_WEAPON);
+        // Диагностика цепочки оружия: в логе 26.09 19:11 стояло weapon=0x0 при
+        // живом игроке, и по одной этой цифре не видно, какое звено порвалось —
+        // fpManager, _currentWeapon или обратная ссылка FPObject.Player.
+        {
+            const uint64_t alt = rd_ptr(fp_manager + FPMANAGER_CURRENT_OBJECT);
+            const uint64_t back1 = valid_obj(weapon) ? rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) : 0;
+            const uint64_t back2 = valid_obj(alt) ? rd_ptr(alt + FPOBJECT_PLAYER_BACKREF) : 0;
+            static uint64_t last_sig = 0;
+            const uint64_t sig = weapon ^ (alt << 1) ^ (back1 << 2) ^ (back2 << 3);
+            if (sig != last_sig) {
+                last_sig = sig;
+                LogLine("оружие: цепочка — игрок=0x%llx fp=0x%llx (offs 0x%llx) weapon=0x%llx (offs 0x%llx) "
+                        "object=0x%llx (offs 0x%llx) back=0x%llx/0x%llx (offs 0x%llx)",
+                        (unsigned long long)local, (unsigned long long)fp_manager,
+                        (unsigned long long)PLAYER_FP_MANAGER,
+                        (unsigned long long)weapon, (unsigned long long)FPMANAGER_CURRENT_WEAPON,
+                        (unsigned long long)alt, (unsigned long long)FPMANAGER_CURRENT_OBJECT,
+                        (unsigned long long)back1, (unsigned long long)back2,
+                        (unsigned long long)FPOBJECT_PLAYER_BACKREF);
+            }
+        }
         if (!valid_obj(weapon) || rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) != local)
             weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_OBJECT);
         if (weapon && rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) == local) {
