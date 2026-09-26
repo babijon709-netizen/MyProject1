@@ -7580,6 +7580,15 @@ bool g_frame_vp_valid = false;
 float g_frame_sw = 0.0F, g_frame_sh = 0.0F;
 Vec3 g_frame_local_pos{};
 bool g_frame_local_valid = false;
+// Сколько раз с момента запуска игра отрисовала новый кадр (по смене матрицы
+// вида). Читает мини-профиль в main.cpp.
+std::atomic<unsigned long long> g_game_frame_ticks{0};
+
+unsigned long long esp_game_frame_ticks() {
+    return g_game_frame_ticks.load(std::memory_order_relaxed);
+}
+unsigned long long esp_mem_io_ns() { return g_mem.io_ns_total(); }
+unsigned long long esp_mem_bytes() { return g_mem.bytes_total(); }
 // Camera basis recovered from this frame's VIEW MATRIX (not the transform
 // pose). On devices where the transform pose read fails, this is the only
 // camera orientation available — good enough for the farm's slow turns,
@@ -7858,6 +7867,18 @@ bool publish_camera_only_frame(float sw, float sh) {
     if (!camera_position_from_view(solo_view, cam_pos)) return false;
     g_frame_vp = mat_mul(solo_proj, solo_view);
     g_frame_vp_valid = true;
+    // Счётчик кадров САМОЙ ИГРЫ: матрица вида меняется ровно тогда, когда игра
+    // отрисовала новый кадр. Наш оверлей может идти 60 раз в секунду, а игра —
+    // 30, и по этой паре чисел в логе видно, кто именно лагает.
+    {
+        static Mat4 s_prev_vp{};
+        static bool s_have_prev_vp = false;
+        if (!s_have_prev_vp || memcmp(&s_prev_vp, &g_frame_vp, sizeof(Mat4)) != 0) {
+            ++g_game_frame_ticks;
+            s_prev_vp = g_frame_vp;
+            s_have_prev_vp = true;
+        }
+    }
     g_frame_sw = sw; g_frame_sh = sh;
     g_frame_local_pos = cam_pos;
     g_frame_local_valid = true;

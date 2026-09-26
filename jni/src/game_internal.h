@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 // Внутренний срез слоя памяти игры: общее между game.cpp (ядро — привязка,
 // камера, игроки, скелеты, кадр) и game_markers.cpp / game_farm.cpp (сканы
 // маркеров и автофарма). Публичный API — в game.h; сюда — только то, чем
@@ -13,6 +14,8 @@
 
 extern memio::Reader g_mem;
 extern Mat4 g_frame_vp;
+// Кадры самой игры (по смене матрицы вида) — для мини-профиля нагрузки.
+extern std::atomic<unsigned long long> g_game_frame_ticks;
 extern Vec3 g_frame_local_pos;
 
 // ---- Обёртки чтения/записи памяти игры -----------------------------------

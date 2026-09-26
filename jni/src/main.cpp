@@ -202,6 +202,30 @@ int main(int argc, char* argv[]) {
                 ? static_cast<double>(probe.fails_sum) / probe.frames : 0.0;
             const double avg_resolves = probe.frames
                 ? static_cast<double>(probe.resolves_sum) / probe.frames : 0.0;
+            // Кто виноват в лагах: игра сама или чит. Наш оверлей, кадры самой
+            // игры (по смене матрицы вида), время внутри чтений чужой памяти и
+            // объём этих чтений — четыре числа, которых раньше не хватало.
+            {
+                static unsigned long long s_prev_game_frames = 0;
+                static unsigned long long s_prev_io_ns = 0, s_prev_bytes = 0;
+                const double secs = elapsed_ms(probe_window_start, now) / 1000.0;
+                const unsigned long long game_frames = esp_game_frame_ticks();
+                const unsigned long long io_ns = esp_mem_io_ns();
+                const unsigned long long bytes = esp_mem_bytes();
+                const double game_fps = secs > 0.1 ? (double)(game_frames - s_prev_game_frames) / secs : 0.0;
+                const double our_fps  = secs > 0.1 ? (double)probe.frames / secs : 0.0;
+                const double io_ms_frame = probe.frames
+                    ? (double)(io_ns - s_prev_io_ns) / 1e6 / (double)probe.frames : 0.0;
+                const double mb_sec = secs > 0.1 ? (double)(bytes - s_prev_bytes) / (1024.0 * 1024.0) / secs : 0.0;
+                LogLine("нагрузка: игра %.0f кадр/с, оверлей %.0f кадр/с, наш кадр %.1f мс "
+                        "(из них чтения памяти %.1f мс), чтений %.0f/кадр, поток %.1f МБ/с, "
+                        "подбор оффсетов %s",
+                        game_fps, our_fps, avg_ms, io_ms_frame, avg_reads, mb_sec,
+                        offset_resolver_busy() ? "ИДЁТ" : "не идёт");
+                s_prev_game_frames = game_frames;
+                s_prev_io_ns = io_ns;
+                s_prev_bytes = bytes;
+            }
             LogLine("кадр-профиль: aim_mode=%d n=%llu avg=%.1fms peak=%.1fms "
                     "peakStages[begin=%.1f viewmodel=%.1f ESP=%.1f aim=%.1f farm=%.1f UI=%.1f freecam=%.1f drawEnd=%.1f] "
                     "stageMax[ESP=%.1f aim=%.1f UI=%.1f drawEnd=%.1f] slow>33ms=%llu "

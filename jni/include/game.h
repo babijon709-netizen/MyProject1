@@ -183,6 +183,11 @@ void     offset_resolver_status(char* out, size_t cap);           // строк�
 // привязка пробует её первой, чтобы не вставать на пустую копию .so.
 uint64_t offset_resolver_good_base(pid_t pid);
 bool     offset_resolver_busy();       // скан/калибровка ещё идут
+// Нагрузка для мини-профиля: кадры САМОЙ игры (по смене матрицы вида),
+// время внутри чтений её памяти и объём этих чтений.
+unsigned long long esp_game_frame_ticks();
+unsigned long long esp_mem_io_ns();
+unsigned long long esp_mem_bytes();
 // Значение слота получено из живых метаданных (а не из вшитой таблицы).
 bool     offset_resolver_is_live(const uint64_t* slot);
 uint64_t Il2CppBase();

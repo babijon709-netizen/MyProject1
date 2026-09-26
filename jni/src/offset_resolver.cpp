@@ -200,6 +200,7 @@ enum Phase {
     PH_DONE,
     PH_HEAP,        // скан кучи вокруг «якоря» (когда в .so классов не нашлось)
     PH_META,        // поиск блока global-metadata по сигнатуре 0xFAB11BAF
+    PH_SLOT,        // поиск слота в .so, где лежит указатель на найденный класс
     PH_STRS,        // поиск строки «PlayerManager» в анонимной памяти
     PH_BLOB,        // поиск в найденном блобе строк всех табличных имён
     PH_PTR,         // поиск в образе и куче указателей на эти строки (= классы)
@@ -469,6 +470,8 @@ static bool meta_header_ok(uint64_t addr, uint64_t* out_begin, uint64_t* out_end
                            int32_t* out_version);
 // Проверка «структура похожа на живой Il2CppClass» (определена ниже).
 static bool class_shape_ok(uint64_t klass);
+// Поиск слота-якоря в образе (определён ниже, рядом с фазами).
+static void start_slot_scan(uint64_t klass, const char* name);
 
 // Знания о базах в рамках ЖИВОГО процесса (переживают сброс скана при
 // перепривязке; очищаются только при смене pid). Лог с устройства показал:
@@ -545,6 +548,19 @@ bool     s_logged = false;
 // (Delegate, Dictionary), PlayerManager не существовал. Резолвер уходил в
 // PH_DONE навсегда и больше не пробовал — чит так и оставался пустым.
 constexpr int kRescanLimit = 20;   // 5 попыток по 25 с + 15 по 60 с ≈ 17 минут
+// ---- Свой якорь вместо вшитого TYPEINFO_RVA ---------------------------------
+// Адреса классов живут в куче и меняются при каждом запуске, поэтому кэш хранит
+// их ОТНОСИТЕЛЬНО якоря — класса, читаемого по фиксированному слоту в самой
+// libil2cpp.so. Вшитый TYPEINFO_RVA после апдейта игры мёртв, и до сих пор это
+// значило полный скан при каждом входе (в кэш попадали только смещения полей).
+// Теперь резолвер ищет такой слот САМ: любой адрес в неисполняемых сегментах
+// образа, где лежит указатель на найденный класс. RVA слота уходит в кэш, и
+// следующий вход читает его напрямую — скан не нужен.
+uint64_t s_slot_rva = 0;            // найденный слот (RVA от базы образа)
+char     s_slot_name[64] = {};      // какой класс в нём лежит
+uint64_t s_slot_target = 0;         // адрес класса, который ищем
+int      s_slot_seg = 0;
+uint64_t s_slot_pos = 0;
 int      s_rescan_count = 0;
 double   s_rescan_at = 0;
 bool     s_so_scan_failed = false;   // скан .so на этой базе уже не дал табличных классов
@@ -4187,6 +4203,17 @@ static void phase_fields() {
         s_prev_resolved = s_resolved;
     }
     s_rollback_count = 0;
+    // Резолв удался, а вшитого якоря нет: ищем собственный слот-якорь, чтобы
+    // следующий вход поднял классы из кэша без единого скана.
+    if (!no_key_class_found() && !s_slot_rva && !kid_class_ok(anchor_class(nullptr))) {
+        const uint64_t pm = offset_resolver_class_nth("PlayerManager", nullptr, 0);
+        const uint64_t gc = offset_resolver_class_nth("GameControllerBase", nullptr, 0);
+        const uint64_t seed = pm ? pm : gc;
+        if (seed && s_seg_count) {
+            start_slot_scan(seed, pm ? "PlayerManager" : "GameControllerBase");
+            return;
+        }
+    }
     s_phase = PH_DONE;
 }
 
@@ -4206,6 +4233,7 @@ static const char* phase_name(Phase p) {
         case PH_DONE:   return "готово";
         case PH_HEAP:   return "скан кучи";
         case PH_META:   return "сигнатура метаданных";
+        case PH_SLOT:   return "поиск слота-якоря";
         case PH_STRS:   return "поиск имён";
         case PH_BLOB:   return "таблица строк";
         case PH_PTR:    return "поиск указателей";
@@ -4215,6 +4243,53 @@ static const char* phase_name(Phase p) {
 
 static uint64_t scanned_total() {
     return s_scanned_bytes + s_str_scanned + s_ptr_scanned + s_meta_scanned + s_scout_bytes;
+}
+
+// Начать поиск слота-якоря для класса klass (обычно PlayerManager).
+static void start_slot_scan(uint64_t klass, const char* name) {
+    s_slot_target = memio::untag(klass);
+    snprintf(s_slot_name, sizeof(s_slot_name), "%s", name ? name : "");
+    s_slot_seg = 0;
+    s_slot_pos = s_seg_count ? s_segments[0].start : 0;
+    s_scan_deadline = mono_seconds() + 20.0;
+    LogLine("автооффсеты: ищу слот-якорь для «%s» (0x%llx) в %d сегментах образа",
+            s_slot_name, (unsigned long long)s_slot_target, s_seg_count);
+    s_phase = PH_SLOT;
+}
+
+static void phase_slot(double deadline) {
+    uint8_t* const buf = s_scan_buf;
+    while (s_slot_seg < s_seg_count && mono_seconds() < deadline) {
+        const Segment& sg = s_segments[s_slot_seg];
+        if (s_slot_pos < sg.start || s_slot_pos >= sg.end) s_slot_pos = sg.start;
+        const uint64_t remain = sg.end - s_slot_pos;
+        const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
+        if (chunk < 8) { ++s_slot_seg; if (s_slot_seg < s_seg_count) s_slot_pos = s_segments[s_slot_seg].start; continue; }
+        if (qrd_buf(s_slot_pos, buf, chunk)) {
+            for (size_t i = 0; i + 8 <= chunk; i += 8) {
+                uint64_t v;
+                memcpy(&v, buf + i, 8);
+                if (memio::untag(v) != s_slot_target) continue;
+                s_slot_rva = s_slot_pos + (uint64_t)i - g_il2cpp_base;
+                LogLine("автооффсеты: слот-якорь найден: база+0x%llx -> «%s» "
+                        "(следующий вход обойдётся без скана)",
+                        (unsigned long long)s_slot_rva, s_slot_name);
+                s_phase = PH_DONE;
+                return;
+            }
+        }
+        s_slot_pos += chunk;
+        s_scanned_bytes += chunk;
+        if (s_slot_pos >= sg.end) {
+            ++s_slot_seg;
+            if (s_slot_seg < s_seg_count) s_slot_pos = s_segments[s_slot_seg].start;
+        }
+        if (mono_seconds() >= s_scan_deadline) break;
+    }
+    if (s_slot_seg >= s_seg_count || mono_seconds() >= s_scan_deadline) {
+        LogLine("автооффсеты: слот-якорь не найден — следующий вход снова со сканом классов");
+        s_phase = PH_DONE;
+    }
 }
 
 static void log_phase_timing() {
@@ -4435,6 +4510,15 @@ static bool save_offsets_cache() {
     // смещениями, а классы доищет сканом.
     uint64_t anchor = anchor_class(nullptr);
     if (!kid_class_ok(anchor)) anchor = 0;
+    // Свой якорь: класс, найденный резолвом, плюс RVA слота образа, где лежит
+    // указатель на него. Следующий вход прочитает слот и восстановит ВСЕ
+    // адреса классов сдвигом — без скана.
+    uint64_t slot_rva = 0;
+    const char* slot_name = "";
+    if (!anchor && s_slot_rva) {
+        const uint64_t own = offset_resolver_class_nth(s_slot_name, nullptr, 0);
+        if (own) { anchor = own; slot_rva = s_slot_rva; slot_name = s_slot_name; }
+    }
     if (s_resolved < 8) {
         LogLine("автооффсеты: кэш НЕ перезаписан — в резолве всего %d констант, это не результат",
                 s_resolved);
@@ -4455,6 +4539,7 @@ static bool save_offsets_cache() {
     fprintf(f, "key %016llx\n", (unsigned long long)s_image_key);
     // Адреса Il2CppClass находятся в куче и меняются при перезапуске.
     fprintf(f, "anchor %016llx\nformat 3\n", (unsigned long long)anchor);
+    if (slot_rva) fprintf(f, "anchorslot %llx %s\n", (unsigned long long)slot_rva, slot_name);
     for (int i = 0; i < s_applied_count; ++i) {
         int idx = -1;
         for (int j = 0; j < kOrFieldCount; ++j)
@@ -4489,7 +4574,8 @@ static bool save_offsets_cache() {
     }
     LogLine("автооффсеты: кэш записан: %d значений, якорь 0x%llx%s, ключ 0x%llx",
             s_applied_count, (unsigned long long)anchor,
-            anchor ? "" : " (без якоря — в следующий раз применим только смещения)",
+            slot_rva ? " (свой слот-якорь — следующий вход без скана)"
+                     : (anchor ? "" : " (без якоря — в следующий раз применим только смещения)"),
             (unsigned long long)s_image_key);
     return true;
 }
@@ -4558,10 +4644,45 @@ static bool load_offsets_cache() {
         }
         pos = (end == std::string::npos) ? text.size() : end + 1;
     }
-    const uint64_t new_anchor = anchor_class(nullptr);
+    uint64_t new_anchor = anchor_class(nullptr);
+    // Свой слот-якорь из прошлого запуска: читаем указатель по base+RVA и
+    // сверяем имя класса. Это и есть замена мёртвого вшитого TYPEINFO_RVA.
+    {
+        unsigned long long rva = 0;
+        char sname[64] = {};
+        size_t sp = 0;
+        while (sp < text.size()) {
+            const size_t eol = text.find('\n', sp);
+            const size_t len = ((eol == std::string::npos) ? text.size() : eol) - sp;
+            if (len < 120) {
+                char lb[128];
+                memcpy(lb, text.c_str() + sp, len);
+                lb[len] = '\0';
+                if (sscanf(lb, "anchorslot %llx %63s", &rva, sname) == 2) break;
+            }
+            sp = (eol == std::string::npos) ? text.size() : eol + 1;
+        }
+        if (rva && sname[0] && !kid_class_ok(new_anchor)) {
+            const uint64_t cand = memio::untag(qrd_ptr(g_il2cpp_base + (uint64_t)rva));
+            bool ok = false;
+            const uint64_t nm = cand ? memio::untag(qrd_ptr(cand + IL2CPP_CLASS_NAME)) : 0;
+            const std::string live = valid_str_ptr(nm) ? qrd_string(nm, &ok) : std::string();
+            if (ok && live == sname && class_shape_ok(cand)) {
+                LogLine("автооффсеты: якорь поднят по своему слоту база+0x%llx -> «%s» 0x%llx",
+                        rva, sname, (unsigned long long)cand);
+                new_anchor = cand;
+                s_slot_rva = (uint64_t)rva;
+                snprintf(s_slot_name, sizeof(s_slot_name), "%s", sname);
+            } else {
+                LogLine("автооффсеты: слот-якорь база+0x%llx пока пуст или чужой («%s» вместо «%s») — жду",
+                        rva, live.c_str(), sname);
+            }
+        }
+    }
     bool anchor_live = true;
 #ifndef OR_CACHE_DIR
-    anchor_live = valid_obj(old_anchor) && kid_class_ok(new_anchor);
+    anchor_live = valid_obj(old_anchor) && (kid_class_ok(new_anchor) ||
+                  (s_slot_rva != 0 && valid_obj(new_anchor) && class_shape_ok(new_anchor)));
     if (!anchor_live && valid_obj(old_anchor) && !s_cache_offsets_used) {
         // Якорь есть в файле, но живым ещё не стал: игра, возможно, просто не
         // догрузилась. Один раз подождём — вдруг обойдёмся вовсе без скана.
@@ -4826,6 +4947,7 @@ void offset_resolver_tick() {
         case PH_SCAN:   phase_scan(deadline); break;
         case PH_HEAP:   phase_heap(deadline); break;
         case PH_META:   phase_meta(deadline); break;
+        case PH_SLOT:   phase_slot(deadline); break;
         case PH_KID:    phase_kid(deadline); break;
         case PH_STRS:   phase_strsearch(deadline); break;
         case PH_BLOB:   phase_blob(deadline); break;
@@ -4893,6 +5015,7 @@ void offset_resolver_reset() {
     s_meta_sig_done = false; s_meta_scan_first = false; s_meta_from_sig = false;
     s_meta_quick_only = false;
     s_so_scan_done = false; s_bootstrap_done = false;
+    s_slot_rva = 0; s_slot_name[0] = 0; s_slot_target = 0; s_slot_seg = 0; s_slot_pos = 0;
     s_meta_bad_count = 0; s_meta_tries = 0;
     s_meta_blob = 0; s_meta_version = 0; s_meta_reason = nullptr;
     s_filesig_count = 0; s_filesig_bytes = 0;
@@ -4960,7 +5083,7 @@ uint64_t offset_resolver_good_base(pid_t pid) {
 bool offset_resolver_busy() {
     return (s_phase == PH_WAIT && (s_cache_retryable || s_anchor_wait_since > 0)) ||
            s_phase == PH_MAPS || s_phase == PH_SCAN ||
-           s_phase == PH_META ||
+           s_phase == PH_META || s_phase == PH_SLOT ||
            s_phase == PH_HEAP || s_phase == PH_STRS ||
            s_phase == PH_BLOB || s_phase == PH_PTR ||
            s_phase == PH_KID ||
@@ -4970,7 +5093,9 @@ bool offset_resolver_busy() {
 // Найденный класс: короткое имя (+ пространство имён, если задано).
 // 0 — не найден (вызывающий код падает на вшитый TYPEINFO_RVA).
 uint64_t offset_resolver_class_nth(const char* name, const char* ns, int nth) {
-    if (s_phase != PH_DONE && s_phase != PH_FIELDS) return 0;
+    // PH_SLOT — это уже после резолва (ищем себе якорь для кэша), классы в
+    // этот момент валидны и нужны ядру: иначе чит на секунду «слепнет».
+    if (s_phase != PH_DONE && s_phase != PH_FIELDS && s_phase != PH_SLOT) return 0;
     if (!name || !name[0] || nth < 0) return 0;
     for (int i = 0; i < s_class_count; ++i) {
         if (strcmp(s_classes[i].name, name) != 0) continue;
@@ -5048,6 +5173,11 @@ void offset_resolver_status(char* out, size_t cap) {
         // показывать нельзя: поля ещё не разрешены (phase_fields впереди).
         snprintf(out, cap, "ищет классы по индексу типа: %llu МБ, найдено %d",
                  (unsigned long long)(s_kid_scanned >> 20), s_via_found);
+        return;
+    }
+    if (s_phase == PH_SLOT) {
+        snprintf(out, cap, "закрепляю якорь на будущее (сегмент %d из %d)",
+                 s_slot_seg + 1, s_seg_count);
         return;
     }
     if (s_phase == PH_META) {

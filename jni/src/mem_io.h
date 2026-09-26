@@ -150,6 +150,12 @@ public:
     // устройстве, где работает только меню. Атомарный инкремент в hot path
     // дешевле одного pread на четыре порядка, поэтому счётчики не отключаем.
     unsigned long long reads_total() const { return reads_.load(std::memory_order_relaxed); }
+    // Байты и время, проведённое ВНУТРИ чтений памяти игры. По ним видно
+    // главное для разбора лагов: сколько полосы памяти и процессорного
+    // времени чит отнимает у игры (чтение чужой памяти идёт через syscall и
+    // конкурирует с самой игрой).
+    unsigned long long bytes_total() const { return bytes_.load(std::memory_order_relaxed); }
+    unsigned long long io_ns_total() const { return io_ns_.load(std::memory_order_relaxed); }
     unsigned long long read_fails_total() const { return read_fails_.load(std::memory_order_relaxed); }
     unsigned long long reopens_total() const { return reopens_.load(std::memory_order_relaxed); }
     // Сколько адресов пришло с меткой в старшем байте (TBI/MTE). Ноль — метки
@@ -366,8 +372,18 @@ private:
     }
 
     bool raw_read(uint64_t addr, void* out, size_t len, bool report = true) {
-        return read_full([this](uint64_t a, void* o, size_t l) { return read_once(a, o, l); },
-                         addr, out, len, report);
+        // Замер длится ровно столько, сколько сам syscall: clock_gettime в
+        // vDSO стоит десятки наносекунд против единиц микросекунд у чтения.
+        struct timespec a0, a1;
+        clock_gettime(CLOCK_MONOTONIC, &a0);
+        const bool ok = read_full([this](uint64_t a, void* o, size_t l) { return read_once(a, o, l); },
+                                  addr, out, len, report);
+        clock_gettime(CLOCK_MONOTONIC, &a1);
+        io_ns_.fetch_add((unsigned long long)((a1.tv_sec - a0.tv_sec) * 1000000000ll +
+                                              (a1.tv_nsec - a0.tv_nsec)),
+                         std::memory_order_relaxed);
+        if (ok) bytes_.fetch_add(len, std::memory_order_relaxed);
+        return ok;
     }
 
     bool raw_write(uint64_t addr, const void* in, size_t len) {
@@ -490,6 +506,8 @@ private:
 
     // Счётчики для мини-лога (см. accessors выше).
     std::atomic<unsigned long long> reads_{0};
+    std::atomic<unsigned long long> bytes_{0};
+    std::atomic<unsigned long long> io_ns_{0};
     std::atomic<unsigned long long> read_fails_{0};
     std::atomic<unsigned long long> reopens_{0};
     std::atomic<int> last_errno_{0};

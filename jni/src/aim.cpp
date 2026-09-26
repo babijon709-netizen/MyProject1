@@ -715,6 +715,38 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     return true;
 }
 
+// ---- диагностика тач-аима -----------------------------------------------
+// Без цифр спорить о «маятнике» бессмысленно: в логе должно быть видно, сколько
+// тактов реально дали шаг, сколько реверсов знака ошибки, сколько тактов
+// пропущено из-за того, что игра не нарисовала новый кадр, и какой сейчас
+// коэффициент град/px (главный источник перелётов, если он завышен).
+struct TouchDiag {
+    int ticks = 0, steps = 0, flips = 0, skipNoFrame = 0, skipLongFrame = 0;
+    float errSum = 0.f, errMax = 0.f, stepSum = 0.f;
+    float errAvg = 0.f, stepAvg = 0.f;
+    float gainYaw = 0.f, gainPitch = 0.f;
+    bool  learned = false;
+};
+static TouchDiag s_tdiag;
+// Наружу отдаём простыми полями: срез этого файла собирается ещё и стендом
+// tools/aim, и тип туда не попадает.
+void AimTouchDiagFetch(int* ticks, int* steps, int* flips, int* skipNoFrame, int* skipLong,
+                       float* errAvg, float* errMax, float* stepAvg,
+                       float* gy, float* gp, int* learned) {
+    if (ticks) *ticks = s_tdiag.ticks;
+    if (steps) *steps = s_tdiag.steps;
+    if (flips) *flips = s_tdiag.flips;
+    if (skipNoFrame) *skipNoFrame = s_tdiag.skipNoFrame;
+    if (skipLong) *skipLong = s_tdiag.skipLongFrame;
+    if (errAvg) *errAvg = s_tdiag.ticks ? s_tdiag.errSum / (float)s_tdiag.ticks : 0.f;
+    if (errMax) *errMax = s_tdiag.errMax;
+    if (stepAvg) *stepAvg = s_tdiag.steps ? s_tdiag.stepSum / (float)s_tdiag.steps : 0.f;
+    if (gy) *gy = s_tdiag.gainYaw;
+    if (gp) *gp = s_tdiag.gainPitch;
+    if (learned) *learned = s_tdiag.learned ? 1 : 0;
+    s_tdiag = TouchDiag{};
+}
+
 // ============================ Тач-аим ======================================
 static void UpdateAimTouch(float dt) {
     LogStage(kStageAimSelect);
@@ -745,6 +777,8 @@ static void UpdateAimTouch(float dt) {
     struct FlightOrd { float yawDeg, pitchDeg, age; };
     static std::vector<FlightOrd> s_flight;
     static float s_absorbYaw = 0.f, s_absorbPitch = 0.f; // заказано, не отработано (град)
+    static int   s_holdNoFrame = 0;   // тактов подряд без нового кадра игры
+    ++s_tdiag.ticks;
     static float s_stallYaw = 0.f, s_stallPitch = 0.f;
     static float s_prevRawYaw = 0.f, s_prevRawPitch = 0.f;
     static bool  s_havePrevRaw = false;
@@ -1210,6 +1244,24 @@ static void UpdateAimTouch(float dt) {
         return;
     }
 
+    // ---- такт без нового кадра игры ----
+    // Наш оверлей идёт 60 раз в секунду, а игра рисует 30-40: примерно каждый
+    // второй такт видит ТУ ЖЕ позу камеры. Для контроллера это выглядит как
+    // «поправка не подействовала» — и он заказывает ещё столько же. Камера
+    // приходит на сумму и перелетает; ошибка меняет знак — маятник влево-
+    // вправо. Пока есть неотработанный заказ и камера не шевельнулась,
+    // держим палец и ждём отклика.
+    if (!camMoved && (s_absorbYaw != 0.f || s_absorbPitch != 0.f)) {
+        ++s_holdNoFrame;
+        if (s_holdNoFrame <= 8) {          // но не залипаем навсегда
+            ++s_tdiag.skipNoFrame;
+            if (s_fingerDown) Touch_Move(s_fx, s_fy);
+            return;
+        }
+    } else {
+        s_holdNoFrame = 0;
+    }
+
     // ---- рваный кадр ----
     // Модель задержки у контроллера жёсткая: касание доезжает до камеры за
     // 2-4 кадра. Когда кадр вместо 17 мс занял 100+ мс (в логе 26.09 были
@@ -1219,6 +1271,7 @@ static void UpdateAimTouch(float dt) {
     // палец держим на месте и ждём нормального такта: потеря — один кадр,
     // выигрыш — отсутствие перелёта.
     if (dt > 0.045f) {
+        ++s_tdiag.skipLongFrame;
         s_streakYaw = s_streakPitch = 0;
         if (s_fingerDown) Touch_Move(s_fx, s_fy);
         return;
@@ -1293,6 +1346,13 @@ static void UpdateAimTouch(float dt) {
     } else if (s_flipDamp < 1.f) {
         s_flipDamp += (1.f - s_flipDamp) * (dt * 2.5f);
         if (s_flipDamp > 1.f) s_flipDamp = 1.f;
+    }
+    if (flipYaw || flipPitch) ++s_tdiag.flips;
+    {
+        const float mag = (fabsf(errYaw) > fabsf(errPitch)) ? fabsf(errYaw) : fabsf(errPitch);
+        s_tdiag.errSum += mag;
+        if (mag > s_tdiag.errMax) s_tdiag.errMax = mag;
+        s_tdiag.gainYaw = gy; s_tdiag.gainPitch = gp; s_tdiag.learned = learned;
     }
     s_prevCtlYaw = errYaw; s_prevCtlPitch = errPitch; s_haveCtlErr = true;
     k *= s_flipDamp;
@@ -1406,6 +1466,8 @@ static void UpdateAimTouch(float dt) {
         s_absorbYaw   += ordYaw;   s_stallYaw   = 0.f;
         s_absorbPitch += ordPitch; s_stallPitch = 0.f;
     }
+    ++s_tdiag.steps;
+    s_tdiag.stepSum += (fabsf(dx) > fabsf(dy)) ? fabsf(dx) : fabsf(dy);
     Touch_Move(s_fx, s_fy);
 }
 
@@ -1426,6 +1488,8 @@ static const char* aim_mode_name() {
 
 // Сколько раз ось выстрелаdobили в конце кадра между двумя строками лога
 
+void AimTouchDiagFetch(int*, int*, int*, int*, int*, float*, float*, float*, float*, float*, int*);
+
 static void AimLogTick(float dt) {
     s_logTime += dt;
     if (s_logTime < 0.25f) return;
@@ -1437,6 +1501,19 @@ static void AimLogTick(float dt) {
                 (int)s.active, (int)s.axis, (unsigned long long)s.writes,
                 (unsigned long long)s.failures, (unsigned long long)s.guard_failures,
                 d.inactive, d.no_target);
+    }
+    if (g_state.aim_mode == AIM_MODE_TOUCH) {
+        int ticks = 0, steps = 0, flips = 0, skipNoFrame = 0, skipLong = 0, learned = 0;
+        float errAvg = 0.f, errMax = 0.f, stepAvg = 0.f, gy = 0.f, gp = 0.f;
+        AimTouchDiagFetch(&ticks, &steps, &flips, &skipNoFrame, &skipLong,
+                          &errAvg, &errMax, &stepAvg, &gy, &gp, &learned);
+        if (ticks)
+            LogLine("тач-аим: тактов %d, шагов %d, реверсов %d, пропущено без кадра игры %d, "
+                    "рваных кадров %d, |ошибка| сред %.2f° макс %.2f°, шаг сред %.1f px, "
+                    "гейн yaw %.4f pitch %.4f град/px%s",
+                    ticks, steps, flips, skipNoFrame, skipLong,
+                    (double)errAvg, (double)errMax, (double)stepAvg,
+                    (double)gy, (double)gp, learned ? " (выучен)" : " (из настройки)");
     }
     if (g_state.aim_mode == AIM_MODE_MEMORY)
         LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d источник=%d нетцели=%d нацели=%d чтение=%d",
