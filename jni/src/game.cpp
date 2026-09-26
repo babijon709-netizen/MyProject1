@@ -292,6 +292,26 @@ static void potato_gfx_tick() {
     setb(URP_ADDITIONAL_LIGHT_SHADOWS, 0);
     setb(URP_REFLECTION_BLENDING, 0);
     setb(URP_REFLECTION_BOX, 0);
+
+    // Контроль: раз в секунду читаем ассет обратно. Если игра возвращает свои
+    // значения (или мы пишем не в тот ассет), это видно сразу — «функция не
+    // работает» перестаёт быть догадкой.
+    {
+        static double s_last_check = 0.0;
+        const double now_s = mono_seconds();
+        if (now_s - s_last_check > 1.0) {
+            s_last_check = now_s;
+            const float  sc  = rd<float>(asset + URP_RENDER_SCALE);
+            const float  sd  = rd<float>(asset + URP_SHADOW_DISTANCE);
+            const int32_t ms = rd<int32_t>(asset + URP_MSAA);
+            const int32_t al = rd<int32_t>(asset + URP_ADDITIONAL_LIGHTS_MODE);
+            const uint8_t mls = rd<uint8_t>(asset + URP_MAIN_LIGHT_SHADOWS);
+            LogLine("картофель: сейчас в ассете scale=%.2f (просили %.2f, у игры было %.2f) "
+                    "тени=%.0f м главный свет=%d MSAA=%d доп.свет=%d",
+                    (double)sc, (double)g_potato_scale, (double)g_potato_orig.scale,
+                    (double)sd, (int)mls, (int)ms, (int)al);
+        }
+    }
 }
 
 static void always_day_tick() {

@@ -728,6 +728,10 @@ struct TouchDiag {
     bool  learned = false;
 };
 static TouchDiag s_tdiag;
+// Амплитуда, на которой контроллер разворачивается (предельный цикл): по ней
+// расширяется мёртвая зона, чтобы аим не «охотился» внутри собственной тряски.
+static float s_flipMag = 0.f;
+float AimTouchFlipMag() { return s_flipMag; }
 // Наружу отдаём простыми полями: срез этого файла собирается ещё и стендом
 // tools/aim, и тип туда не попадает.
 void AimTouchDiagFetch(int* ticks, int* steps, int* flips, int* skipNoFrame, int* skipLong,
@@ -1208,10 +1212,25 @@ static void UpdateAimTouch(float dt) {
     // ---- dead zone ----
     // Angular size of a few centimetres grows sharply inside 3 m. Keep the
     // old long-range floor, but stop chasing every animation twitch at range.
-    const float deadYaw = AimTouchDeadDeg(degPerPx, best.world_dist,
-                                           gainKnownYaw ? qYaw : 0.f);
-    const float deadPitch = AimTouchDeadDeg(degPerPx, best.world_dist,
-                                             gainKnownPitch ? qPitch : 0.f);
+    float deadYaw = AimTouchDeadDeg(degPerPx, best.world_dist,
+                                     gainKnownYaw ? qYaw : 0.f);
+    float deadPitch = AimTouchDeadDeg(degPerPx, best.world_dist,
+                                       gainKnownPitch ? qPitch : 0.f);
+    // Предельный цикл. Лог 26.09 22:50: ошибка уже мелкая (0.5-1°), гейн
+    // стабилен, но шаг выдаётся почти на каждом такте и знак ошибки меняется
+    // 4 раза в секунду — контроллер «охотится» внутри собственной амплитуды и
+    // трясёт картинку. Запоминаем, на какой величине ошибки происходят
+    // реверсы, и расширяем мёртвую зону до этой амплитуды: мельче неё аим
+    // просто не дёргается, крупные поправки идут как раньше.
+    {
+        const float amp = AimTouchFlipMag();
+        if (amp > 0.f) {
+            float grow = amp * 0.7f;
+            if (grow > 2.5f) grow = 2.5f;          // большие ошибки не игнорируем
+            if (grow > deadYaw) deadYaw = grow;
+            if (grow > deadPitch) deadPitch = grow;
+        }
+    }
     if (fabsf(errYaw) < deadYaw && fabsf(errPitch) < deadPitch) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         // Заказанное за прошлые такты камера дорабатывает и без нас: окно
@@ -1358,8 +1377,16 @@ static void UpdateAimTouch(float dt) {
         ++s_tdiag.flips;
         s_trim *= 0.85f;
         if (s_trim < 0.35f) s_trim = 0.35f;
+        const float mag = (fabsf(errYaw) > fabsf(errPitch)) ? fabsf(errYaw) : fabsf(errPitch);
+        s_flipMag = (s_flipMag <= 0.f) ? mag : (s_flipMag * 0.7f + mag * 0.3f);
     } else {
-        s_trim += 0.015f;
+        // Забываем амплитуду медленно: одиночный спокойный такт не должен
+        // возвращать охоту.
+        if (s_flipMag > 0.f) {
+            s_flipMag -= dt * 0.6f;
+            if (s_flipMag < 0.f) s_flipMag = 0.f;
+        }
+        s_trim += 0.006f;      // ~2.5 с на полное восстановление
         if (s_trim > 1.f) s_trim = 1.f;
     }
     k *= s_trim;
