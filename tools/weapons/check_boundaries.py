@@ -35,13 +35,16 @@ game = (root / 'jni/src/game.cpp').read_text()
 config = (root / 'jni/src/config.cpp').read_text()
 assert 'esp_loot_reset(' not in game and 'esp_loot_reset(' not in config
 menu = (root / 'jni/src/menu.cpp').read_text()
-assert '##instantloot' not in menu
-assert '##fastloot' in menu
-assert 'esp_loot_tick(' not in menu
-# Тумблер быстрого сбора применяет настройки сразу; статусов под ним нет.
-assert 'if (oldFastLoot != vm.fast_loot) esp_viewmodel_tick(vm);' in menu
-# The FOV/hands reset button must keep the object-data and pickup flags.
-assert 'const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;' in menu
-assert 'vm.no_recoil = nr; vm.no_spread = ns; vm.fast_loot = fl;' in menu
+widgets = (root / 'jni/src/widgets.cpp').read_text()
+assert '##instantloot' not in menu and '##instantloot' not in widgets
+assert 'esp_loot_tick(' not in menu and 'esp_loot_tick(' not in widgets
+# Tab 3 has modular blocks:
+assert 'CollapsibleHeader("##fnloot", XS("Быстрый сбор"), 8);' in menu
+# Controls are inside popovers in widgets.cpp:
+assert 'FgToggleRow(XS("Быстрый сбор")' in widgets
+assert 'esp_viewmodel_tick' in widgets
+# The FOV/hands reset button must keep the object-data and pickup flags:
+assert 'const bool nr = g_state.viewmodel.no_recoil, ns = g_state.viewmodel.no_spread, fl = g_state.viewmodel.fast_loot;' in widgets
+assert 'g_state.viewmodel.no_recoil = nr; g_state.viewmodel.no_spread = ns; g_state.viewmodel.fast_loot = fl;' in widgets
 print('weapons: heap-only adapter and retired fast-loot writer boundaries: OK')
 print('loot: fast pickup via heap-only UniTask controller: OK')

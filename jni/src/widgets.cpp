@@ -917,14 +917,18 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             && mousePos.y >= curY && mousePos.y <= curY + rH
             && clickedPos.x >= cX + inset && clickedPos.x <= cX + cW - inset
             && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
-            g_state.viewmodel.fov = 90.f;
-            g_state.viewmodel.x = 0.f;
-            g_state.viewmodel.y = 0.f;
-            g_state.viewmodel.z = 0.f;
+            const int fps = g_state.viewmodel.fps_limit;
+            const bool nr = g_state.viewmodel.no_recoil, ns = g_state.viewmodel.no_spread, fl = g_state.viewmodel.fast_loot;
+            const bool sw = g_state.viewmodel.no_sway, ads = g_state.viewmodel.instant_ads;
+            g_state.viewmodel = {};
+            g_state.viewmodel.fps_limit = fps;
+            g_state.viewmodel.no_recoil = nr; g_state.viewmodel.no_spread = ns; g_state.viewmodel.fast_loot = fl;
+            g_state.viewmodel.no_sway = sw; g_state.viewmodel.instant_ads = ads;
             g_state.sl_custom_fov = {};
             g_state.sl_hands_x = {};
             g_state.sl_hands_y = {};
             g_state.sl_hands_z = {};
+            esp_viewmodel_tick(g_state.viewmodel);
             ShowToast(XS("Сброс"));
             PlaySound(SND_CLICK);
         }
@@ -937,7 +941,9 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         // Подбор: быстрый сбор
         FgSHdr(XS("Подбор"));
         FgCardBg(rH * 1);
+        const bool oldLoot = g_state.viewmodel.fast_loot;
         FgToggleRow(XS("Быстрый сбор"), &g_state.viewmodel.fast_loot, g_state.a_fast_loot, true);
+        if (oldLoot != g_state.viewmodel.fast_loot) esp_viewmodel_tick(g_state.viewmodel);
 
     } else if (secId == 9) {
         // Лимит FPS

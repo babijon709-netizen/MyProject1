@@ -887,175 +887,31 @@ float TabContent(int tab, float dt, float cW) {
             dl->AddText(ImGui::GetFont(), exitFS, {tx, ty}, C::U(C::Red()), exitTxt);
         }
     } else if (tab == 3) {
-        // Разное: каждая крупная функция — своя карточка-«вкладка»,
-        // открывающая отдельное окно (как «Ещё настройки» в ESP).
+        // Разное: функции по блокам как Автофарм — каждая функция представлена
+        // блоком с кнопкой-шевроном, открывающей отдельное окно со всеми настройками.
         SHdr(XS("Функции"));
         CollapsibleHeader("##fnfarm", XS("Автофарм"), 5);
-        CardBg(Layout::RowH * 3);
-        ToggleRow("##farmon", XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, false, true);
-        ColorRow("##fsp", XS("Метка фарма"), &cfg::esp::farm_spot_col, false);
-        ColorRow("##fbd", XS("Тело ноды"),   &cfg::esp::farm_body_col, true);
+        ImGui::Dummy({1.f, 8.f});
 
-        ImGui::Dummy({1.f, 12.f});
-
-        auto& vm = g_state.viewmodel;
         CollapsibleHeader("##fnwpn", XS("Оружие"), 6);
-        CardBg(Layout::RowH * 4.f);
-        const bool oldRecoil = vm.no_recoil, oldSpread = vm.no_spread,
-                   oldSway = vm.no_sway, oldInstantAds = vm.instant_ads;
-        ToggleRow("##nosway", XS("Без раскачки"), &vm.no_sway, g_state.a_no_sway, false, true);
-        ToggleRow("##instantads", XS("Быстрый прицел"), &vm.instant_ads, g_state.a_instant_ads, false, true);
-        ToggleRow("##norecoil", XS("Без отдачи"), &vm.no_recoil, g_state.a_no_recoil, false, true);
-        ToggleRow("##nospread", XS("Без разброса"), &vm.no_spread, g_state.a_no_spread, true, false);
-        if (oldRecoil != vm.no_recoil || oldSpread != vm.no_spread ||
-            oldSway != vm.no_sway || oldInstantAds != vm.instant_ads) esp_viewmodel_tick(vm);
-        const auto weaponStatus = esp_viewmodel_diagnostics();
-        if (weaponStatus.no_recoil == viewmodel::Status::Failed || weaponStatus.no_spread == viewmodel::Status::Failed)
-            ImGui::TextDisabled("%s", XS("Оружие: не применено, проверьте версию игры и журнал"));
-        else if ((vm.no_recoil && weaponStatus.no_recoil == viewmodel::Status::Waiting) ||
-                 (vm.no_spread && weaponStatus.no_spread == viewmodel::Status::Waiting))
-            ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
-
-        ImGui::Dummy({1.f, 12.f});
+        ImGui::Dummy({1.f, 8.f});
 
         CollapsibleHeader("##fnvm", XS("Вид и руки"), 7);
-        CardBg(Layout::RowH * 2.f);
-        const bool oldFov = vm.fov_enabled, oldHands = vm.hands_enabled;
-        ToggleRow("##vmfov", XS("Кастомный FOV"), &vm.fov_enabled, g_state.a_custom_fov, false, true);
-        ToggleRow("##vmhands", XS("Кастомные руки"), &vm.hands_enabled, g_state.a_custom_hands, true, false);
-        if (oldFov != vm.fov_enabled || oldHands != vm.hands_enabled) esp_viewmodel_tick(vm);
-        ImGui::PushID("viewmodel_reset");
-        if (ImGui::Button(XS("Сброс"))) {
-            // This button resets only FOV/hands, not the other misc features.
-            const int fps = vm.fps_limit;
-            const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;
-            const bool sw = vm.no_sway, ads = vm.instant_ads;
-            vm = {}; vm.fps_limit = fps; vm.no_recoil = nr; vm.no_spread = ns; vm.fast_loot = fl;
-            vm.no_sway = sw; vm.instant_ads = ads;
-            g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
-            g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
-            esp_viewmodel_tick(vm);
-        }
-        ImGui::PopID();
+        ImGui::Dummy({1.f, 8.f});
 
-        ImGui::Dummy({1.f, 12.f});
-        // Быстрый сбор: heap-реализация без патчей библиотек
-        // (fast_loot::Controller, loot_memory.h) — обнуляет float-темп
-        // (0.35 с/предмет) активных ожиданий collect-all.
-        SHdr(XS("Подбор"));
         CollapsibleHeader("##fnloot", XS("Быстрый сбор"), 8);
-        CardBg(Layout::RowH * 1);
-        const bool oldFastLoot = vm.fast_loot;
-        ToggleRow("##fastloot", XS("Быстрый сбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
-        if (oldFastLoot != vm.fast_loot) esp_viewmodel_tick(vm);
+        ImGui::Dummy({1.f, 8.f});
 
-        ImGui::Dummy({1.f, 12.f});
-
-        SHdr(XS("Лимит FPS"));
         CollapsibleHeader("##fnfps", XS("Лимит FPS"), 9);
-        {
-            // Кастомный тач-паттерн строк режимов (InvisibleButton + WasTappedHere):
-            // голый ImGui::Button в этом меню теряет тапы под собственным тач-
-            // пайплайном. Заливка акцентом плавно наезжает через Tick — как у
-            // остальных переключателей, плюс акцентная рамка у выбранного.
-            const float rowH = Layout::RowH;
-            const float inset = Layout::Inset;
-            const float avW = ImGui::GetContentRegionAvail().x;
-            auto* dl = ImGui::GetWindowDrawList();
-            auto* fn = ImGui::GetFont();
-            const float fs = ImGui::GetFontSize() * 1.15f;
-            const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-            CardBg(rowH * 2.f);
-            const auto rowPos = ImGui::GetCursorScreenPos();
-            ImGui::Dummy({avW, rowH * 2.f});
-            auto fpsChip = [&](const char* id, const char* lbl, int limit, int slot, bool wide, float anim) {
-                const float gap = 6.f;
-                const float chipW = wide ? (avW - inset * 2.f)
-                                         : (avW - inset * 2.f - gap * 2.f) / 3.f;
-                const float cX = wide ? rowPos.x + inset
-                                      : rowPos.x + inset + (chipW + gap) * slot;
-                const float cY = wide ? rowPos.y + rowH : rowPos.y + 5.f;
-                const float chipH = rowH - 12.f;
-                ImGui::SetCursorScreenPos({cX, cY});
-                ImGui::InvisibleButton(id, {chipW, chipH});
-                const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
-                if (tapped && vm.fps_limit != limit) {
-                    vm.fps_limit = limit;
-                    esp_viewmodel_tick(vm);
-                    PlaySound(SND_CLICK);
-                    g_input.touchConsumed = true;
-                }
-                const bool on = (vm.fps_limit == limit);
-                dl->AddRectFilled({cX, cY}, {cX + chipW, cY + chipH}, C::U(C::Card()), 6.f);
-                if (anim > 0.01f)
-                    dl->AddRectFilled({cX, cY}, {cX + chipW, cY + chipH}, C::UA(C::Acc(), 0.9f * anim), 6.f);
-                if (on) dl->AddRect({cX, cY}, {cX + chipW, cY + chipH}, C::UA(C::Acc(), 1.f), 6.f, 0, 1.6f);
-                auto tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, lbl);
-                dl->AddText(fn, fs, {cX + (chipW - tsz.x) * 0.5f, cY + (chipH - tsz.y) * 0.5f},
-                            C::UA(on ? C::Txt() : C::Dim(), 1.f), lbl);
-            };
-            fpsChip("##fps90",  "90 FPS",  90,  0, false, g_state.a_fps_90);
-            fpsChip("##fps120", "120 FPS", 120, 1, false, g_state.a_fps_120);
-            fpsChip("##fps144", "144 FPS", 144, 2, false, g_state.a_fps_144);
-            fpsChip("##fpsrst", XS("Сброс"), 0,  0, true,  g_state.a_fps_rst);
-            // Лямбды чипов двигают курсор в абсолютные координаты — вернуть
-            // под две строки, иначе строка статуса ляжет поверх «Сброса».
-            ImGui::SetCursorScreenPos({rowPos.x, rowPos.y + rowH * 2.f});
-            // Какой режим выбран и что реально стоит в памяти игры: раньше видна
-            // была только подсветка кнопки, из-за чего состояние читалось плохо.
-            const auto fpsUi = esp_viewmodel_fps_ui();
-            const char* mode;
-            {
-                char modeBuf[24];
-                if (vm.fps_limit) { snprintf(modeBuf, sizeof(modeBuf), "%d FPS", vm.fps_limit); mode = modeBuf; }
-                else mode = XS("обычный");
-                // Статус: Active означает, что и поле лимита, и type pacing уже
-                // стоят так, как выбрано; Waiting — игра ещё не на связи.
-                const char* st = fpsUi.status == viewmodel::Status::Active ? XS("применено") :
-                                 fpsUi.status == viewmodel::Status::Waiting ? XS("ожидание") :
-                                 fpsUi.status == viewmodel::Status::Failed  ? XS("ошибка") :
-                                                                              XS("выкл");
-                if (vm.fps_limit) {
-                    ImGui::Text("%s: %s · %s (%s: %d)", XS("Режим"), mode, st,
-                                XS("поле игры"), fpsUi.field_value);
-                } else {
-                    ImGui::Text("%s: %s", XS("Режим"), mode);
-                }
-            }
-        }
+        ImGui::Dummy({1.f, 8.f});
 
-        ImGui::Dummy({1.f, 12.f});
-
-        // Иксрей: рендер отсекает всё ближе выбранной дистанции — стены и
-        // текстуры вокруг игрока пропадают, видно что за ними.
-        SHdr(XS("Иксрей"));
         CollapsibleHeader("##fnxray", XS("Иксрей"), 10);
-        CardBg(Layout::RowH + Layout::SliderH);
-        ToggleRow("##xr0", XS("Иксрей"), &g_state.xray_on, g_state.a_xray_on, false, true);
-        SliderRow("##xr1", XS("Дальность"), &g_state.xray_range,
-                  1.f, 50.f, XS("%.0f м"), true, false, g_state.sl_xray, dt);
+        ImGui::Dummy({1.f, 8.f});
 
-        ImGui::Dummy({1.f, 12.f});
-
-        // Фрикам: камера отделяется от тела и летает сквозь стены — обзор
-        // базы перед рейдом. Пока он включён, аим молчит: точка прицела
-        // считается от глаза персонажа, а камера улетела от него.
-        SHdr(XS("Фрикам"));
         CollapsibleHeader("##fnfc", XS("Фрикам"), 11);
-        CardBg(Layout::RowH * 2.f + Layout::SliderH);
-        ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
-        ToggleRow("##fc2", XS("Кнопка на экране"), &g_state.freecam_btn_show, g_state.a_freecam_btn_show);
-        SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
-                  1.f, 60.f, XS("%.0f м/с"), true, false, g_state.sl_freecam, dt);
+        ImGui::Dummy({1.f, 8.f});
 
-        ImGui::Dummy({1.f, 12.f});
-
-        // Всегда день: время суток каждую секунду возвращается в полдень.
-        SHdr(XS("Мир"));
         CollapsibleHeader("##fnworld", XS("Мир"), 12);
-        CardBg(Layout::RowH);
-        ToggleRow("##wd0", XS("Всегда день"), &g_state.always_day, g_state.a_always_day, true, true);
-
         ImGui::Dummy({1.f, 12.f});
     }
 
