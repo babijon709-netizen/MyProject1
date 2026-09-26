@@ -856,21 +856,36 @@ uint8_t marker_class_of(uint64_t klass) {
 }
 
 uint64_t resolve_network_client_spawned() {
-    if (!g_network_client_class) {
-        // Автообновление оффсетов: класс по имени переживает апдейт игры.
-        const uint64_t found = offset_resolver_class("NetworkClient", "Mirror");
-        if (found && class_identity(found, "NetworkClient", "Mirror") != 0)
-            g_network_client_class = found;
+    // Проверяем выбранный класс на живом чтении: тёзка без статики молча
+    // обнуляет весь реестр объектов мира (маркеры, лут, техника).
+    if (g_network_client_class) {
+        const uint64_t statics = get_class_static_fields(g_network_client_class);
+        const uint64_t spawned = statics ? rd_ptr(statics + NETWORK_CLIENT_SPAWNED) : 0;
+        if (valid_obj(spawned)) return spawned;
+        g_network_client_class = 0;
     }
-    if (!g_network_client_class && NETWORK_CLIENT_TYPEINFO_RVA != 0) {
+    uint64_t fallback = 0;
+    for (int n = 0; n < 8; ++n) {
+        const uint64_t cand = offset_resolver_class_nth("NetworkClient", "Mirror", n);
+        if (!cand) break;
+        if (class_identity(cand, "NetworkClient", "Mirror") == 0) continue;
+        if (!fallback) fallback = cand;
+        const uint64_t statics = get_class_static_fields(cand);
+        if (!statics) continue;
+        const uint64_t spawned = rd_ptr(statics + NETWORK_CLIENT_SPAWNED);
+        if (!valid_obj(spawned)) continue;
+        g_network_client_class = cand;
+        return spawned;
+    }
+    if (!fallback && NETWORK_CLIENT_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(g_il2cpp_base + NETWORK_CLIENT_TYPEINFO_RVA);
-        if (class_identity(candidate, "NetworkClient", "Mirror") != 0)
-            g_network_client_class = candidate;
+        if (class_identity(candidate, "NetworkClient", "Mirror") != 0) fallback = candidate;
     }
+    g_network_client_class = fallback;
     if (!g_network_client_class) return 0;
-    uint64_t statics = get_class_static_fields(g_network_client_class);
+    const uint64_t statics = get_class_static_fields(g_network_client_class);
     if (!statics) return 0;
-    uint64_t spawned = rd_ptr(statics + NETWORK_CLIENT_SPAWNED);
+    const uint64_t spawned = rd_ptr(statics + NETWORK_CLIENT_SPAWNED);
     return valid_obj(spawned) ? spawned : 0;
 }
 

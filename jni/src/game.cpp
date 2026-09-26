@@ -1520,32 +1520,53 @@ uint64_t get_class_static_fields(uint64_t klass) {
 }
 
 static uint64_t resolve_runtime_player_list() {
-    if (!g_player_manager_class) {
-        // Сначала автообновление: класс, найденный по имени в живых
-        // метаданных (переживает апдейт игры, когда RVA устарел).
-        const uint64_t found = offset_resolver_class("PlayerManager", "Oxide");
-        if (found && class_identity(found, "PlayerManager", "Oxide") != 0)
-            g_player_manager_class = found;
-    }
-    if (!g_player_manager_class && PLAYER_MANAGER_TYPEINFO_RVA != 0) {
-        const uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
-        if (class_identity(candidate, "PlayerManager", "Oxide") != 0)
-            g_player_manager_class = candidate;
-    }
-    if (!g_player_manager_class) {
-        return 0;
-    }
-    if (!g_player_manager_static_fields)
-        g_player_manager_static_fields = get_class_static_fields(g_player_manager_class);
-    if (!g_player_manager_static_fields) {
-        return 0;
-    }
-    uint64_t list = rd_ptr(g_player_manager_static_fields + PLAYER_MANAGER_STATIC_FIELDS_LIST);
-    if (!validate_player_list(list, g_player_manager_class)) {
+    // Уже выбранный класс сначала перепроверяем: он мог оказаться тёзкой без
+    // живой статики (после апдейта игры резолвер отдаёт НЕСКОЛЬКО классов с
+    // одним именем — лог 26.09: 451 найденный класс, и первый «PlayerManager»
+    // в списке был пустышкой, из-за чего не находился локальный игрок и чит
+    // не видел ни одного кадра).
+    if (g_player_manager_class) {
+        if (!g_player_manager_static_fields)
+            g_player_manager_static_fields = get_class_static_fields(g_player_manager_class);
+        if (g_player_manager_static_fields) {
+            const uint64_t list = rd_ptr(g_player_manager_static_fields + PLAYER_MANAGER_STATIC_FIELDS_LIST);
+            if (validate_player_list(list, g_player_manager_class)) return list;
+        }
         g_player_manager_static_fields = 0;
-        return 0;
     }
-    return list;
+    // Перебираем ВСЕХ тёзок и берём того, чья статика отдаёт настоящий список
+    // игроков. Первый попавшийся — не критерий.
+    uint64_t fallback_class = 0, fallback_static = 0;
+    for (int n = 0; n < 8; ++n) {
+        const uint64_t cand = offset_resolver_class_nth("PlayerManager", "Oxide", n);
+        if (!cand) break;
+        if (class_identity(cand, "PlayerManager", "Oxide") == 0) continue;
+        const uint64_t statics = get_class_static_fields(cand);
+        if (!statics) continue;
+        if (!fallback_class) { fallback_class = cand; fallback_static = statics; }
+        const uint64_t list = rd_ptr(statics + PLAYER_MANAGER_STATIC_FIELDS_LIST);
+        if (!validate_player_list(list, cand)) continue;
+        if (g_player_manager_class != cand)
+            LogLine("игроки: PlayerManager — взят кандидат №%d (0x%llx), у остальных статика пуста",
+                    n + 1, (unsigned long long)cand);
+        g_player_manager_class = cand;
+        g_player_manager_static_fields = statics;
+        return list;
+    }
+    if (!fallback_class && PLAYER_MANAGER_TYPEINFO_RVA != 0) {
+        const uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
+        if (class_identity(candidate, "PlayerManager", "Oxide") != 0) {
+            fallback_class = candidate;
+            fallback_static = get_class_static_fields(candidate);
+        }
+    }
+    // Ни один кандидат не дал списка (например, игрок ещё не заспавнился).
+    // Класс всё равно запоминаем: по нему сверяется объект локального игрока.
+    if (fallback_class) {
+        g_player_manager_class = fallback_class;
+        g_player_manager_static_fields = fallback_static;
+    }
+    return 0;
 }
 
 // Сколько кадров подряд прежний адрес игрока не подтверждается чтением. Три —
@@ -1598,9 +1619,34 @@ static uint64_t resolve_local_player() {
     }
 
     if (!g_game_controller_class) {
-        const uint64_t found = offset_resolver_class("GameControllerBase", "Oxide");
-        if (found && class_identity(found, "GameControllerBase", "Oxide") != 0)
-            g_game_controller_class = found;
+        // Тёзок у GameControllerBase тоже несколько. Правильный — тот, чья
+        // статика указывает на объект, у которого класс = PlayerManager.
+        // Заодно этим объектом уточняем и сам класс игрока: живая игра —
+        // источник надёжнее, чем порядок в списке резолвера.
+        uint64_t fallback = 0;
+        for (int n = 0; n < 8; ++n) {
+            const uint64_t cand = offset_resolver_class_nth("GameControllerBase", "Oxide", n);
+            if (!cand) break;
+            if (class_identity(cand, "GameControllerBase", "Oxide") == 0) continue;
+            if (!fallback) fallback = cand;
+            const uint64_t statics = get_class_static_fields(cand);
+            if (!statics) continue;
+            const uint64_t candidate_player = rd_ptr(statics + GAME_CONTROLLER_LOCAL_PLAYER_FIELD);
+            if (!valid_obj(candidate_player)) continue;
+            const uint64_t player_class = rd_ptr(candidate_player);
+            if (class_identity(player_class, "PlayerManager", "Oxide") == 0) continue;
+            if (g_player_manager_class != player_class) {
+                LogLine("игроки: класс PlayerManager взят у живого объекта 0x%llx -> 0x%llx "
+                        "(было 0x%llx)",
+                        (unsigned long long)candidate_player, (unsigned long long)player_class,
+                        (unsigned long long)g_player_manager_class);
+                g_player_manager_class = player_class;
+                g_player_manager_static_fields = 0;
+            }
+            fallback = cand;
+            break;
+        }
+        g_game_controller_class = fallback;
     }
     if (!g_game_controller_class && GAME_CONTROLLER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
