@@ -299,6 +299,13 @@ uint64_t s_str_cand[8];
 int      s_str_cand_region[8];
 int      s_str_cand_count = 0;
 int      s_str_cand_idx = 0;
+int      s_str_needle_idx = 0;
+static const char* const kStrNeedles[] = {
+    "PlayerManager",
+    "GameControllerBase",
+    "NetworkClient"
+};
+static void start_strsearch(const char* reason);
 int      s_best_found = -1;       // лучший результат по блокам
 uint64_t s_best_begin = 0, s_best_end = 0, s_best_addr = 0;
 uint64_t s_best_str[64];
@@ -937,21 +944,29 @@ static void phase_maps() {
                 start_heap_scan(ank);
             }
         } else {
-            LogLine("автооффсеты: вшитый RVA, судя по всему, устарел (имя %s) — начинаю поиск строк в памяти",
-                    aok ? "не совпало" : "не читается");
-            s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
-            s_phase = PH_STRS;
+            start_strsearch(aok ? "вшитый RVA не совпал по имени" : "вшитый RVA не читается");
         }
+    } else {
+        LogLine("автооффсеты: якорь 0 (слот TypeInfo ещё не инициализирован или RVA сменился) — продолжаю сканирование");
     }
 }
 
-// Попробовать кандидата как Il2CppClass: image в libil2cpp, имя/нс в
+static void start_strsearch(const char* reason) {
+    LogLine("автооффсеты: %s — начинаю поиск строк в памяти", reason ? reason : "");
+    s_str_needle_idx = 0;
+    s_str_region = 0;
+    s_str_pos = 0;
+    s_str_scanned = 0;
+    s_str_cand_count = 0;
+    s_phase = PH_STRS;
+}
+
+// Попробовать кандидата как Il2CppClass: image в libil2cpp или куче, имя/нс в
 // метаданных; имя читается строкой. Возврат: 1 принят, 0 отклонён.
 static int try_class_candidate(uint64_t v) {
     if (find_class_slot(v)) return 0;
     const uint64_t image = qrd_ptr(v);
     if (!valid_obj(image)) return 0;
-    if (!s_meta_begin && s_lib_begin && (image < s_lib_begin || image >= s_lib_end)) return 0;
     ++s_shape_pass;   // «похож на класс» по форме — до фильтров имени
     const uint64_t nm = qrd_ptr(v + IL2CPP_CLASS_NAME);
     if (s_meta_begin) {
@@ -971,6 +986,13 @@ static int try_class_candidate(uint64_t v) {
     const std::string name = qrd_string(nm, &ok);
     if (!ok || name.empty() || name.size() > 63) { ++s_names_fail; return 0; }
     ++s_names_ok;
+    if (!s_meta_begin && name_is_wanted(name.c_str())) {
+        const uint64_t kSpan = 32ull << 20;
+        s_meta_begin = (nm > kSpan) ? ((nm - kSpan) & ~0xFFFFFFull) : 0x1000;
+        s_meta_end = s_meta_begin + (64ull << 20);
+        LogLine("автооффсеты: окно метаданных задано по найденному классу «%s»: 0x%llx..0x%llx (64 МБ)",
+                name.c_str(), (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end);
+    }
     const int cap_total = (int)(sizeof(s_classes) / sizeof(s_classes[0]));
     if (s_class_count >= kClassCap && !name_is_wanted(name.c_str())) return 1;
     if (s_class_count >= cap_total) return 1;
@@ -1106,9 +1128,7 @@ static void phase_heap(double deadline) {
             LogLine("автооффсеты: ВСЕ табличные классы найдены в куче (%d табличных)", wanted_in_cache());
         }
         if (!all_wanted_found() && wanted_in_cache() == 0) {
-            LogLine("автооффсеты: в куче вокруг якоря табличных классов нет — начинаю поиск строк в памяти");
-            s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
-            s_phase = PH_STRS;
+            start_strsearch("в куче вокруг якоря табличных классов нет");
         } else {
             s_phase = PH_FIELDS;
         }
@@ -1138,8 +1158,10 @@ static void apply_str_window(int idx);   // определена ниже, по�
 
 static void phase_strsearch(double deadline) {
     static uint8_t buf[kChunkBytes];
-    static const char kNeedle[] = "PlayerManager";   // вместе с концевым NUL
-    constexpr size_t kNeed = sizeof(kNeedle);
+    if (s_str_needle_idx < 0 || s_str_needle_idx >= (int)(sizeof(kStrNeedles) / sizeof(kStrNeedles[0])))
+        s_str_needle_idx = 0;
+    const char* const kNeedle = kStrNeedles[s_str_needle_idx];
+    const size_t kNeed = strlen(kNeedle) + 1;   // вместе с концевым NUL
     // Имя ищем по ВСЕЙ читаемой памяти, включая исполняемые сегменты образа.
     // Файл беты показал: метадата вшита в секцию «il2cpp» (125 МБ), которая
     // лежит в сегменте R+X. Если протектор расшифровал её на месте, имена
@@ -1196,7 +1218,16 @@ static void phase_strsearch(double deadline) {
             apply_str_window(0);
             return;
         }
-        LogLine("автооффсеты: строка «PlayerManager» нигде НЕ найдена (просмотрено %llu МБ, %d диапазонов из %d) — имена зашифрованы, автообновление по именам невозможно",
+        if (s_str_needle_idx + 1 < (int)(sizeof(kStrNeedles) / sizeof(kStrNeedles[0]))) {
+            ++s_str_needle_idx;
+            LogLine("автооффсеты: строка «%s» не найдена (%llu МБ) — пробую следующую «%s»",
+                    kStrNeedles[s_str_needle_idx - 1],
+                    (unsigned long long)(s_str_scanned >> 20),
+                    kStrNeedles[s_str_needle_idx]);
+            s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
+            return;
+        }
+        LogLine("автооффсеты: строки метаданных нигде НЕ найдены (просмотрено %llu МБ, %d диапазонов из %d) — имена зашифрованы, автообновление по именам невозможно",
                 (unsigned long long)(s_str_scanned >> 20), s_str_region, s_ptr_range_count);
         s_phase = PH_DONE;
     }
@@ -1233,8 +1264,9 @@ static void apply_str_window(int idx) {
     // Блок строк — холодное файлово маппинг: страницы подчитываются с
     // диска, чтение медленное. Дедлайн скана .so тут не годится.
     s_scan_deadline = mono_seconds() + 180.0;
-    LogLine("автооффсеты: блок строк №%d из %d — «PlayerManager» @0x%llx, окно 0x%llx..0x%llx (%llu МБ), %s",
-            idx + 1, s_str_cand_count, (unsigned long long)s_str_addr,
+    LogLine("автооффсеты: блок строк №%d из %d — «%s» @0x%llx, окно 0x%llx..0x%llx (%llu МБ), %s",
+            idx + 1, s_str_cand_count, kStrNeedles[s_str_needle_idx],
+            (unsigned long long)s_str_addr,
             (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end,
             (unsigned long long)((s_meta_end - s_meta_begin) >> 20),
             (s_lib_begin && s_str_addr >= s_lib_begin && s_str_addr < s_lib_end)
@@ -1810,9 +1842,7 @@ static void phase_scan(double deadline) {
             if (anchor) start_heap_scan(anchor);
             else if (s_phase != PH_STRS) {
                 if (wanted_in_cache() == 0) {
-                    LogLine("автооффсеты: табличных классов в .so нет — начинаю поиск строк в памяти");
-                    s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
-                    s_phase = PH_STRS;
+                    start_strsearch("табличных классов в .so нет");
                 } else {
                     s_phase = PH_FIELDS;
                 }
@@ -1821,7 +1851,7 @@ static void phase_scan(double deadline) {
             // Классов нет: база помечена пустой, скан пойдёт по следующему
             // кандидату — новый список сегментов соберёт PH_MAPS.
         } else {
-            s_phase = PH_DONE;
+            start_strsearch("в .so живых классов не нашлось");
         }
     }
 }
@@ -3471,7 +3501,7 @@ void offset_resolver_reset() {
     s_hidden_count = 0; s_hidden_bytes = 0; s_hidden_skipped = 0;
     s_probe_ok = 0; s_probe_bytes = 0; s_probe_zero = 0; s_probe_zero_bytes = 0;
     s_str_addr = 0; s_str_region = 0; s_str_pos = 0; s_str_scanned = 0;
-    s_str_cand_count = 0; s_str_cand_idx = 0;
+    s_str_cand_count = 0; s_str_cand_idx = 0; s_str_needle_idx = 0;
     s_best_found = -1; s_best_begin = 0; s_best_end = 0; s_best_addr = 0;
     for (int i = 0; i < 8; ++i) {
         s_blk_begin[i] = 0; s_blk_end[i] = 0; s_blk_found[i] = 0; s_blk_tried[i] = false;

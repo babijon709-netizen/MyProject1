@@ -867,6 +867,102 @@ float TabContent(int tab, float dt, float cW) {
             ImGui::Dummy({avW, 0.f});
         }
 
+        // ---- Автообновление оффсетов: отладка ------------------------------
+        SHdr(XS("Автообновление оффсетов"));
+        {
+            const float rowH = Layout::RowH;
+            const float inset = Layout::Inset, padX = Layout::PadX;
+            const float avW   = ImGui::GetContentRegionAvail().x;
+            auto* dl = ImGui::GetWindowDrawList();
+            auto* fn = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+            const bool dbgBefore = g_state.ui_debug_resolver;
+
+            CardBg(rowH * (dbgBefore ? 5.f : 1.f));
+
+            // Главный тумблер включения/выключения отладки
+            ToggleRow("##dbg_offs", XS("Отладка автообновления"), &g_state.ui_debug_resolver,
+                      g_state.a_debug_resolver, !dbgBefore, true);
+
+            if (dbgBefore && g_state.ui_debug_resolver) {
+                auto p0 = ImGui::GetCursorScreenPos();
+                const float cX = p0.x + inset, cW = avW - inset * 2.f;
+
+                // Строка 1: Статус резолвера
+                char st[160] = {};
+                offset_resolver_status(st, sizeof(st));
+
+                auto p1 = ImGui::GetCursorScreenPos();
+                const float cy1 = p1.y + rowH * 0.5f;
+                ImGui::Dummy({avW, rowH});
+
+                dl->AddText(fn, fs * 1.05f, {cX + padX, cy1 - fs * 1.05f - 2.f},
+                            C::UA(C::Txt(), 1.f), XS("Статус"));
+                dl->AddText(fn, fs * 0.92f, {cX + padX, cy1 + 2.f},
+                            C::UA(C::Acc(), 1.f), st[0] ? st : "—");
+                if (g_state.ui_show_sep)
+                    dl->AddLine({cX + padX, p1.y + rowH - 0.5f},
+                                {cX + cW - padX, p1.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
+
+                // Строка 2: Процесс (PID и База libil2cpp)
+                auto p2 = ImGui::GetCursorScreenPos();
+                const float cy2 = p2.y + rowH * 0.5f;
+                ImGui::Dummy({avW, rowH});
+
+                char procInfo[64] = {};
+                const uint64_t base = Il2CppBase();
+                if (g_target_pid > 0 && base) {
+                    snprintf(procInfo, sizeof(procInfo), "PID %d | 0x%llX", (int)g_target_pid, (unsigned long long)base);
+                } else if (g_target_pid > 0) {
+                    snprintf(procInfo, sizeof(procInfo), "PID %d", (int)g_target_pid);
+                } else {
+                    snprintf(procInfo, sizeof(procInfo), "%s", XS("Не привязано"));
+                }
+                auto procSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, procInfo);
+
+                dl->AddText(fn, fs * 1.15f, {cX + padX, cy2 - fs * 1.15f * 0.5f},
+                            C::UA(C::Txt(), 1.f), XS("Процесс"));
+                dl->AddText(fn, fs, {cX + cW - padX - procSz.x, cy2 - procSz.y * 0.5f},
+                            C::UA(C::Dim(), 1.f), procInfo);
+                if (g_state.ui_show_sep)
+                    dl->AddLine({cX + padX, p2.y + rowH - 0.5f},
+                                {cX + cW - padX, p2.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
+
+                // Строка 3: Версия игры (Релиз / Бета)
+                auto p3 = ImGui::GetCursorScreenPos();
+                const float cy3 = p3.y + rowH * 0.5f;
+                ImGui::Dummy({avW, rowH});
+
+                const char* verStr = (go::CurrentBuild() == go::Build::Beta) ? XS("Бета") : XS("Релиз");
+                auto verSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, verStr);
+
+                dl->AddText(fn, fs * 1.15f, {cX + padX, cy3 - fs * 1.15f * 0.5f},
+                            C::UA(C::Txt(), 1.f), XS("Версия игры"));
+                dl->AddText(fn, fs, {cX + cW - padX - verSz.x, cy3 - verSz.y * 0.5f},
+                            C::UA(C::Acc(), 1.f), verStr);
+                if (g_state.ui_show_sep)
+                    dl->AddLine({cX + padX, p3.y + rowH - 0.5f},
+                                {cX + cW - padX, p3.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
+
+                // Строка 4: Кнопка «Пересканировать оффсеты»
+                auto p4 = ImGui::GetCursorScreenPos();
+                ImGui::InvisibleButton("##re_scan_btn", {avW, rowH});
+                const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
+                if (tapped) {
+                    offset_resolver_reset();
+                    ShowToast(XS("Пересканирование запущено"));
+                    PlaySound(SND_CLICK);
+                    g_input.touchConsumed = true;
+                }
+                const char* btnTxt = XS("Пересканировать оффсеты");
+                auto btnSz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, btnTxt);
+                dl->AddText(fn, fs * 1.05f,
+                            {cX + (cW - btnSz.x) * 0.5f, p4.y + (rowH - btnSz.y) * 0.5f},
+                            C::UA(C::Acc(), 1.f), btnTxt);
+            }
+        }
+
         SHdr(XS("Система"));
         {
             auto* dl  = ImGui::GetWindowDrawList();
@@ -1577,6 +1673,7 @@ void RenderMenu() {
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
     Tick(g_state.a_freecam_on,  g_state.freecam_on,  dt);
     Tick(g_state.a_freecam_btn_show, g_state.freecam_btn_show, dt);
+    Tick(g_state.a_debug_resolver,   g_state.ui_debug_resolver,   dt);
     ApplyTheme();
 
     if (g_cfgLoadedIdx >= 0 && g_cfgLoadedIdx < kMaxConfigs)

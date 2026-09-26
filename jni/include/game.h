@@ -183,6 +183,7 @@ void     offset_resolver_status(char* out, size_t cap);           // строк�
 // привязка пробует её первой, чтобы не вставать на пустую копию .so.
 uint64_t offset_resolver_good_base(pid_t pid);
 bool     offset_resolver_busy();       // скан/калибровка ещё идут
+uint64_t Il2CppBase();
 
 // Players near the local player as of the last esp_get_boxes() call, in all
 // directions (360 degrees) — NOT limited to the ones visible on screen.

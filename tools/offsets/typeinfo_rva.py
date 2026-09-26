@@ -105,6 +105,7 @@ def scan(elf, slots, adds, method_addrs, maxins=400):
     md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     md.detail = True
     hits, flds = Counter(), defaultdict(Counter)
+    class_loads = Counter()
     for ma in method_addrs:
         code = elf.read(ma, maxins * 4)
         if not code:
@@ -132,12 +133,15 @@ def scan(elf, slots, adds, method_addrs, maxins=400):
                         slotreg[d] = adds[i]
                 elif m.base in slotreg and m.disp == 0 and ins.mnemonic == 'ldr':
                     classreg[d] = slotreg[m.base]
+                    class_loads[slotreg[m.base]] += 1
                 elif m.base in classreg and m.disp == IL2CPP_CLASS_STATIC_FIELDS \
                         and ins.mnemonic == 'ldr':
                     hits[classreg[m.base]] += 1
                     sfreg[d] = classreg[m.base]
             elif ins.id == ARM64_INS_RET:
                 break
+    if not hits and class_loads:
+        return class_loads, flds
     return hits, flds
 
 

@@ -1394,7 +1394,7 @@ static bool base_resolves_game(uint64_t base) {
             return true;
         }
         // IL2CPP ленивая инициализация: до спавна игрока слот держит токен метаданных с нечётным битом 0
-        if ((candidate & 1) && candidate < 0x80000000ULL && candidate >= 0x1000ULL) {
+        if ((candidate & 1) && candidate < 0x100000000ULL && candidate >= 0x1000ULL) {
             LogLine("привязка: база 0x%llx верна по токену TypeInfo PlayerManager (0x%llx)",
                     (unsigned long long)base, (unsigned long long)candidate);
             return true;
@@ -1404,7 +1404,7 @@ static bool base_resolves_game(uint64_t base) {
     if (go::CurrentBuild() == go::Build::Release && go::BetaAvailable()) {
         const uint64_t beta_cand = rd_ptr(base + game_offsets_beta::PLAYER_MANAGER_TYPEINFO_RVA);
         if (class_identity(beta_cand, "PlayerManager", "Oxide") != 0 ||
-            ((beta_cand & 1) && beta_cand < 0x80000000ULL && beta_cand >= 0x1000ULL)) {
+            ((beta_cand & 1) && beta_cand < 0x100000000ULL && beta_cand >= 0x1000ULL)) {
             LogLine("привязка: по RVA беты (0x%llx) обнаружена БЕТА — автопереключение профиля на бету",
                     (unsigned long long)game_offsets_beta::PLAYER_MANAGER_TYPEINFO_RVA);
             go::SelectBuild(go::Build::Beta);
@@ -1415,7 +1415,7 @@ static bool base_resolves_game(uint64_t base) {
     } else if (go::CurrentBuild() == go::Build::Beta) {
         const uint64_t rel_cand = rd_ptr(base + game_offsets::PLAYER_MANAGER_TYPEINFO_RVA);
         if (class_identity(rel_cand, "PlayerManager", "Oxide") != 0 ||
-            ((rel_cand & 1) && rel_cand < 0x80000000ULL && rel_cand >= 0x1000ULL)) {
+            ((rel_cand & 1) && rel_cand < 0x100000000ULL && rel_cand >= 0x1000ULL)) {
             LogLine("привязка: по RVA релиза (0x%llx) обнаружен РЕЛИЗ — автопереключение профиля на релиз",
                     (unsigned long long)game_offsets::PLAYER_MANAGER_TYPEINFO_RVA);
             go::SelectBuild(go::Build::Release);
@@ -1437,7 +1437,7 @@ static bool base_resolves_game(uint64_t base) {
                     (unsigned long long)base, (unsigned long long)candidate);
             return true;
         }
-        if ((candidate & 1) && candidate < 0x80000000ULL && candidate >= 0x1000ULL) {
+        if ((candidate & 1) && candidate < 0x100000000ULL && candidate >= 0x1000ULL) {
             LogLine("привязка: база 0x%llx верна по токену TypeInfo GameControllerBase (0x%llx)",
                     (unsigned long long)base, (unsigned long long)candidate);
             return true;

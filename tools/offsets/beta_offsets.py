@@ -596,15 +596,24 @@ def main():
         if beta_dir is None:
             print(f'архива {a.archive} нет — пишу файл беты как копию релиза '
                   f'(kFromDump = false, в меню бета не предлагается)')
-        elif not os.path.exists(os.path.join(beta_dir, 'libil2cpp.so')):
-            # .so можно дать ключом или положить рядом с дампом — имена
-            # фиксированные, чтобы не искать его по всему диску.
-            for cand in (a.so, os.path.join(ROOT, 'libil2cpp_beta.7z'),
-                         os.path.join(ROOT, 'libil2cpp_beta.so')):
+        else:
+            # Если передан --so или в корне лежит libil2cpp_newbeta.7z / so,
+            # подменяем устаревший so из архива беты.
+            so_dest = os.path.join(beta_dir, 'libil2cpp.so')
+            override = None
+            for cand in (a.so, os.path.join(ROOT, 'libil2cpp_newbeta.7z'),
+                         os.path.join(ROOT, 'libil2cpp_newbeta.so')):
                 if cand and os.path.exists(cand):
-                    place_so(os.path.abspath(cand),
-                             os.path.join(beta_dir, 'libil2cpp.so'))
+                    override = cand
                     break
+            if override:
+                place_so(os.path.abspath(override), so_dest)
+            elif not os.path.exists(so_dest):
+                for cand in (os.path.join(ROOT, 'libil2cpp_beta.7z'),
+                             os.path.join(ROOT, 'libil2cpp_beta.so')):
+                    if cand and os.path.exists(cand):
+                        place_so(os.path.abspath(cand), so_dest)
+                        break
 
     rel = lay.Dump(os.path.join(rel_dir, 'il2cpp.h'))
     rel_text = open(HEADER, encoding='utf-8').read()
