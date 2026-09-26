@@ -467,6 +467,8 @@ static void start_meta_scan(const char* reason);
 static void start_blob_scan(const char* reason);
 static bool meta_header_ok(uint64_t addr, uint64_t* out_begin, uint64_t* out_end,
                            int32_t* out_version);
+// Проверка «структура похожа на живой Il2CppClass» (определена ниже).
+static bool class_shape_ok(uint64_t klass);
 
 // Знания о базах в рамках ЖИВОГО процесса (переживают сброс скана при
 // перепривязке; очищаются только при смене pid). Лог с устройства показал:
@@ -499,6 +501,10 @@ AppliedRec s_applied[256];
 // разрешил 5 констант вместо 153 и испортил PlayerManager.team).
 AppliedRec s_rollback[256];
 int        s_rollback_count = 0;
+// Сколько записей в s_applied пришло из кэша (их откатывать нельзя) и сколько
+// значений применил ЖИВОЙ резолв этого прохода.
+int        s_applied_base = 0;
+int        s_live_resolved = 0;
 int        s_prev_resolved = 0;   // сколько разрешил последний удачный резолв (на этом pid)
 // Класс каждой применённой записи: по нему второй проход понимает, какие
 // смещения этого класса уже заняты (поле, найденное по имени, повторно не
@@ -562,18 +568,25 @@ constexpr double kTickBudgetSec   = 0.004;  // 4 мс на такт, когда 
 // следить. Тратить в этот момент 4 мс из 16 — значит растягивать подбор на
 // минуты ради плавности картинки, которой всё равно нет. Втрое больший квант
 // сокращает первый подбор во столько же раз и не стоит ничего.
-constexpr double kTickBudgetBlind = 0.012;
+// 6 мс, а не 12: на устройстве больший квант выливался в лаги САМОЙ ИГРЫ —
+// чтение чужой памяти отъедает ту же пропускную способность, что и рендер
+// игры (лог 26.09 19:46: сигнатурный проход шёл на 727 МБ/с, и всё подвисало).
+constexpr double kTickBudgetBlind = 0.006;
+// Потолок чтения: не больше 192 МБ в секунду, иначе подбор мешает игре
+// сильнее, чем помогает чит.
+constexpr uint64_t kScanBytesPerSec = 192ull << 20;
 constexpr double kScanTotalSec    = 300.0;  // общий потолок скана (образы по 0.5ГБ+)
-// Куски по 1 МБ вместо 256 КБ: вчетверо меньше syscall'ов на тот же объём.
+// Куски по 512 КБ вместо 256 КБ: вдвое меньше syscall'ов, но такт не залипает
+// на разборе гигантского куска (при 1 МБ на устройстве лагала сама игра).
 // Буфер один на все фазы — они никогда не работают одновременно.
-constexpr size_t kChunkBytes      = 1024 * 1024;
+constexpr size_t kChunkBytes      = 512 * 1024;
 // Пределы «дорогих» чтений на порцию выросли вчетверо вместе с размером
 // порции: иначе кусок в 1 МБ обрабатывался бы по четверти и перечитывался.
-constexpr size_t kMaxReadsPerChunk = 1024;  // предел «дорогих» чтений на порцию
+constexpr size_t kMaxReadsPerChunk = 512;   // предел «дорогих» чтений на порцию
 // В куче «похожих на указатели» значений на порядки больше, чем в .data/.relro
 // образа, и каждая порция упиралась в прежний предел 1024 — скан полз
 // ~1.7 МБ/с. Удвоенный предел вдвое ускоряет первый (и единственный) проход.
-constexpr size_t kHeapReadsPerChunk = 8192;
+constexpr size_t kHeapReadsPerChunk = 4096;
 // Сколько байт достаточно просмотреть, чтобы при НУЛЕ классов признать базу
 // пустой: в живом образе слоты классов лежат в хвостовых сегментах
 // (.data/.relro), а скан идёт с конца образа — живые классы нашлись на
@@ -676,6 +689,15 @@ static bool name_is_wanted(const char* name) {
 // отдельно от «табличных классов»: скан .so насобирал 256 табличных имён
 // (Delegate, Dictionary, Text...), резолвер счёл работу сделанной и не пошёл
 // в строковый бутстрап — а PlayerManager так и не нашёлся.
+// Ключевые имена: только по ним допустимо строить окно имён «на глаз».
+static bool name_is_key(const char* name) {
+    return name && (strcmp(name, "PlayerManager") == 0 ||
+                    strcmp(name, "GameControllerBase") == 0 ||
+                    strcmp(name, "NetworkClient") == 0 ||
+                    strcmp(name, "PlayerInventory") == 0 ||
+                    strcmp(name, "CharacterAnimation") == 0);
+}
+
 static bool class_in_cache(const char* name) {
     for (int i = 0; i < s_class_count; ++i)
         if (strcmp(s_classes[i].name, name) == 0) return true;
@@ -685,6 +707,16 @@ static bool class_in_cache(const char* name) {
 static bool key_classes_missing() {
     return !class_in_cache("PlayerManager") ||
            !class_in_cache("GameControllerBase") ||
+           !class_in_cache("NetworkClient");
+}
+
+// НИ ОДНОГО ключевого класса — верный признак, что «классы» набраны из мусора
+// (лог 26.09 19:46: 769 структур, 50 из 50 табличных имён не найдено, а
+// «смещения» всё равно посчитались). Частичный результат (нашёлся, скажем,
+// только PlayerManager) — это нормальная недогрузка мира, его не выбрасываем.
+static bool no_key_class_found() {
+    return !class_in_cache("PlayerManager") &&
+           !class_in_cache("GameControllerBase") &&
            !class_in_cache("NetworkClient");
 }
 
@@ -1277,11 +1309,18 @@ static int try_class_candidate(uint64_t v) {
     const std::string name = qrd_string(nm, &ok);
     if (!ok || name.empty() || name.size() > 63) { ++s_names_fail; return 0; }
     ++s_names_ok;
-    if (!s_meta_begin && name_is_wanted(name.c_str())) {
+    // Окно имён по найденному классу — только по ДЛИННОМУ ключевому имени и
+    // только если структура проходит проверку формы. Лог 26.09 19:46 показал
+    // цену прежней вольности: окно задалось по классу «gL» (двухбуквенное
+    // ротированное имя из таблицы), после чего 769 мусорных структур сошли за
+    // классы, из них резолвер вычислил 254 «смещения» и записал их в кэш —
+    // боксы ESP поехали, игра залагала, чит упал.
+    if (!s_meta_begin && strlen(name.c_str()) >= 12 && name_is_key(name.c_str()) &&
+        class_shape_ok(v)) {
         const uint64_t kSpan = 32ull << 20;
         s_meta_begin = (nm > kSpan) ? ((nm - kSpan) & ~0xFFFFFFull) : 0x1000;
         s_meta_end = s_meta_begin + (64ull << 20);
-        LogLine("автооффсеты: окно метаданных задано по найденному классу «%s»: 0x%llx..0x%llx (64 МБ)",
+        LogLine("автооффсеты: окно метаданных задано по ключевому классу «%s»: 0x%llx..0x%llx (64 МБ)",
                 name.c_str(), (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end);
     }
     const int cap_total = (int)(sizeof(s_classes) / sizeof(s_classes[0]));
@@ -2434,7 +2473,13 @@ static void phase_ptr(double deadline) {
         }
         // Шаг 4 байта, а не 8: слот имени в структуре класса может быть не
         // выровнен по 8 (тогда указатель на 8-байтовой сетке не виден).
+        // Дедлайн проверяется и ВНУТРИ куска: разбор полумегабайта с чтениями
+        // кандидатов занимает десятки миллисекунд, и такт обязан уметь выйти
+        // посередине — иначе кадр (и игра) заметно дёргаются.
+        size_t done = 0;
         for (size_t i = 0; i + 8 <= chunk; i += 4) {
+            if ((i & 0xFFFF) == 0 && i && mono_seconds() >= deadline) break;
+            done = i;
             uint64_t v;
             memcpy(&v, buf + i, 8);
             v = memio::untag(v);
@@ -2532,8 +2577,11 @@ static void phase_ptr(double deadline) {
                             (unsigned long long)slot);
             }
         }
-        s_ptr_pos += chunk;
-        s_ptr_scanned += chunk;
+        // Прошли не весь кусок — сдвигаемся ровно на разобранное, остальное
+        // до конца куска доберём следующим тактом.
+        const uint64_t advanced = (done + 8 >= chunk) ? chunk : (uint64_t)(done & ~7ull);
+        s_ptr_pos += advanced ? advanced : chunk;
+        s_ptr_scanned += advanced ? advanced : chunk;
         if (all_wanted_found()) break;
         // Ключевые классы найдены — дальше берём только соседей в том же пуле
         // и заканчиваем: остальные гигабайты ничего не добавят, а минуту
@@ -3342,6 +3390,7 @@ static void apply_resolution(const OrField& of, int32_t off) {
         ++s_applied_count;
     }
     ++s_resolved;
+    ++s_live_resolved;
     if (s_resolved <= 8 || prev != value) {
         LogLine("автооффсеты: разрешено [%s.%s] = 0x%llx (было 0x%llx)",
                 of.cls, of.field, (unsigned long long)value, (unsigned long long)prev);
@@ -4058,6 +4107,25 @@ static void phase_fields() {
                     class_in_cache ? "поле не найдено в классе" : "класс отсутствует в кэше");
         }
     }
+    // Главный предохранитель: без ключевых классов результата НЕ БЫВАЕТ.
+    // Лог 26.09 19:46: окно имён задалось по мусорному классу «gL», сошлись
+    // 769 «классов», из них вычислилось 254 «смещения» (team=0x2a8,
+    // clanId=0x78) — их применили и записали в кэш. На устройстве это
+    // выглядело как прыгающие боксы, лаги игры и падение чита.
+    if (no_key_class_found() && s_live_resolved > 0) {
+        for (int i = 0; i < s_rollback_count; ++i) *(s_rollback[i].slot) = s_rollback[i].value;
+        LogLine("автооффсеты: ни одного ключевого класса нет, а «разрешилось» %d значений — "
+                "это мусор, всё откачено (%d слотов), кэш не трогаю",
+                s_live_resolved, s_rollback_count);
+        if (s_applied_count > s_applied_base) s_applied_count = s_applied_base;
+        s_resolved -= s_live_resolved;
+        if (s_resolved < 0) s_resolved = 0;
+        s_live_resolved = 0;
+        s_changed = 0;
+        s_rollback_count = 0;
+        s_phase = PH_DONE;
+        return;
+    }
     // Правило «никогда не хуже». Перескан на живой игре может нарваться на
     // другой срез памяти и собрать мусор: в логе 26.09 второй проход дал
     // 5 констант вместо 153 и записал в PlayerManager.team чужое смещение
@@ -4327,6 +4395,10 @@ static bool save_offsets_cache() {
                 s_resolved);
         return false;
     }
+    if (no_key_class_found()) {
+        LogLine("автооффсеты: кэш НЕ перезаписан — ни одного ключевого класса не найдено");
+        return false;
+    }
     const std::string path = cache_path();
     const std::string tmp = path + ".tmp";
     FILE* f = fopen(tmp.c_str(), "w");
@@ -4337,7 +4409,7 @@ static bool save_offsets_cache() {
     fprintf(f, "# автооффсеты: живой резолв (ключ — отпечаток libil2cpp.so)\n");
     fprintf(f, "key %016llx\n", (unsigned long long)s_image_key);
     // Адреса Il2CppClass находятся в куче и меняются при перезапуске.
-    fprintf(f, "anchor %016llx\nformat 2\n", (unsigned long long)anchor);
+    fprintf(f, "anchor %016llx\nformat 3\n", (unsigned long long)anchor);
     for (int i = 0; i < s_applied_count; ++i) {
         int idx = -1;
         for (int j = 0; j < kOrFieldCount; ++j)
@@ -4420,8 +4492,11 @@ static bool load_offsets_cache() {
 
     // Старый файл не сохранял via-поля вообще. Один раз обновляем формат,
     // иначе FOV/руки на втором входе вновь получат вшитые значения.
-    if (text.find("\nformat 2\n") == std::string::npos) {
-        LogLine("автооффсеты: старый кэш без via-полей — пересканирую один раз");
+    // Формат 3 — кэш, записанный ПОСЛЕ проверки ключевых классов. Файлы
+    // второго формата могли быть собраны из мусорных структур (лог 26.09
+    // 19:46), поэтому не применяем их вовсе: один скан и запишем заново.
+    if (text.find("\nformat 3\n") == std::string::npos) {
+        LogLine("автооффсеты: кэш старого формата (мог быть собран без ключевых классов) — пересканирую один раз");
         return false;
     }
     // Старый файл хранил абсолютные адреса классов: на новом PID они все
@@ -4524,6 +4599,7 @@ static bool load_offsets_cache() {
         // доищет обычный скан, и повторного применения кэша не будет.
         s_cache_offsets_used = true;
         s_cache_retryable = false;
+        s_applied_base = s_applied_count;   // это НЕ результат живого прохода
         LogLine("автооффсеты: кэш дал %d смещений (ключ 0x%llx), но живого якоря нет — "
                 "классы ищу сканом, смещения уже применены",
                 loaded, (unsigned long long)s_image_key);
@@ -4577,7 +4653,7 @@ static void soft_rescan() {
     s_class_count = 0;
     s_names_ok = 0; s_names_fail = 0; s_shape_pass = 0;
     s_applied_count = 0; s_resolved = 0; s_changed = 0;
-    s_rollback_count = 0;
+    s_rollback_count = 0; s_applied_base = 0; s_live_resolved = 0;
     s_via_class_count = 0; s_via_done = false; s_via_found = 0;
     s_logged = false;
     s_cache_saved = false;
@@ -4640,6 +4716,17 @@ void offset_resolver_tick() {
     // показывает — сканируем крупными кусками времени.
     const double budget = key_classes_missing() ? kTickBudgetBlind : kTickBudgetSec;
     const double deadline = mono_seconds() + budget;
+    // Потолок пропускной способности: игра и чит читают одну и ту же память,
+    // и безудержный скан душит игру. Если в текущей секунде уже прочитано
+    // больше потолка — пропускаем такт целиком.
+    {
+        static double window_start = 0;
+        static uint64_t window_bytes = 0;
+        const double now = mono_seconds();
+        const uint64_t total = scanned_total();
+        if (now - window_start >= 1.0) { window_start = now; window_bytes = total; }
+        else if (total - window_bytes > kScanBytesPerSec) return;
+    }
     switch (s_phase) {
         case PH_WAIT:
 #if OR_SELFTEST_BREAK_BAKED
@@ -4752,6 +4839,7 @@ void offset_resolver_reset() {
     s_fields_off = 0; s_calib_best = 0; s_calib_best_off = 0;
     s_fi_size = IL2CPP_FIELDINFO_SIZE; s_fi_parent = IL2CPP_FIELDINFO_PARENT;
     s_resolved = 0; s_changed = 0; s_rollback_count = 0;
+    s_applied_base = 0; s_live_resolved = 0;
     s_rescan_at = 0;   // расписание повтора — свойство прошлого прохода
     s_heap_range_count = 0; s_heap_range_idx = 0;
     s_heap_pos = s_heap_end = 0; s_heap_done = false;

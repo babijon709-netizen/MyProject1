@@ -32,6 +32,7 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include <string>
@@ -249,6 +250,63 @@ static void child_encrypted(int out_fd) {
     _exit(0);
 }
 
+// Сценарий 3 («мусор»): метаданных нет вовсе, а в куче лежат тысячи структур,
+// у которых на месте имени — короткая строка из таблицы резолвера («gL»).
+// Ровно это случилось на устройстве 26.09 19:46: окно имён задалось по такому
+// «классу», 769 структур сошли за классы, из них посчитались 254 «смещения»,
+// их применили и записали в кэш — ESP поехал, игра залагала, чит упал.
+// Резолвер обязан НИЧЕГО не применить и НЕ записать кэш.
+static void child_garbage(int out_fd) {
+    char dir[] = "/tmp/metascan_junk.XXXXXX";
+    if (!mkdtemp(dir)) _exit(90);
+    char il_path[160];
+    snprintf(il_path, sizeof(il_path), "%s/libil2cpp.so", dir);
+    const size_t kIlSize = 256u << 10;
+    int il_fd = open(il_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (il_fd < 0 || ftruncate(il_fd, (off_t)kIlSize)) _exit(91);
+    uint8_t* il = (uint8_t*)mmap(NULL, kIlSize, PROT_READ | PROT_WRITE, MAP_SHARED, il_fd, 0);
+    if (il == MAP_FAILED) _exit(93);
+    memcpy(il, "\x7f" "ELF", 4);
+
+    const size_t kHeapSize = 8u << 20;
+    uint8_t* heap = (uint8_t*)mmap(NULL, kHeapSize, PROT_READ | PROT_WRITE,
+                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (heap == MAP_FAILED) _exit(94);
+    memset(heap, 0, kHeapSize);
+    const uint64_t il_base = (uint64_t)(uintptr_t)il;
+    const uint64_t heap_addr = (uint64_t)(uintptr_t)heap;
+
+    // Короткие ротированные имена, которые ЕСТЬ в таблице резолвера.
+    StrTab junk = { heap + 0x400, heap_addr + 0x400, 0 };
+    const uint64_t s_gl = put_str(junk, "gL");
+    const uint64_t s_edg = put_str(junk, "eDg");
+    const uint64_t s_field = put_str(junk, "team");
+
+    size_t hoff = 0x2000;
+    for (int i = 0; i < 4000 && hoff + 0x200 < kHeapSize; ++i) {
+        uint8_t* d = heap + hoff;
+        memset(d, 0, 0x140);
+        *(uint64_t*)(d + 0x00) = il_base + 0x1000;                  // «образ»
+        *(uint64_t*)(d + IL2CPP_CLASS_NAME) = (i & 1) ? s_gl : s_edg;
+        // Массив «полей»: одна запись с читаемым именем и мусорным смещением.
+        uint8_t* f = d + 0x160;
+        *(uint64_t*)(d + IL2CPP_CLASS_FIELDS) = heap_addr + hoff + 0x160;
+        *(uint16_t*)(d + IL2CPP_CLASS_FIELD_COUNT) = 1;
+        *(uint64_t*)(f + IL2CPP_FIELDINFO_NAME) = s_field;
+        *(uint64_t*)(f + IL2CPP_FIELDINFO_TYPE) = heap_addr + 0x800;
+        *(uint64_t*)(f + IL2CPP_FIELDINFO_PARENT) = heap_addr + hoff;
+        *(int32_t*)(f + IL2CPP_FIELDINFO_OFFSET) = 0x2a8;           // «смещение» из лога
+        hoff += 0x200;
+    }
+
+    Handed hd = {};
+    hd.il2cpp_base = il_base;
+    hd.heap_base = heap_addr;
+    if (write(out_fd, &hd, sizeof(hd)) != sizeof(hd)) _exit(95);
+    raise(SIGSTOP);
+    _exit(0);
+}
+
 static void child_main(int out_fd) {
     char dir[] = "/tmp/metascan.XXXXXX";
     if (!mkdtemp(dir)) _exit(90);
@@ -387,13 +445,16 @@ static void child_main(int out_fd) {
 
 int main(int argc, char** argv) {
     const bool encrypted = (argc > 1 && strcmp(argv[1], "encrypted") == 0);
+    const bool garbage = (argc > 1 && strcmp(argv[1], "garbage") == 0);
     int fds[2];
     if (pipe(fds)) { perror("pipe"); return 1; }
     const pid_t child = fork();
     if (child < 0) { perror("fork"); return 1; }
     if (child == 0) {
         close(fds[0]);
-        if (encrypted) child_encrypted(fds[1]); else child_main(fds[1]);
+        if (garbage) child_garbage(fds[1]);
+        else if (encrypted) child_encrypted(fds[1]);
+        else child_main(fds[1]);
         _exit(0);
     }
     close(fds[1]);
@@ -438,6 +499,23 @@ int main(int argc, char** argv) {
         }
     }
     printf("резолв занял %.1f с\n", mono_seconds() - t0);
+
+    if (garbage) {
+        check(go_active::PLAYER_TEAM_NAME != 0x2a8,
+              "мусорное смещение из фальшивых классов НЕ применено");
+        check(!no_key_class_found() || s_live_resolved == 0,
+              "без ключевых классов живых значений не осталось");
+        check(offset_resolver_class("PlayerManager", nullptr) == 0,
+              "фальшивый класс не выдан за PlayerManager");
+        struct stat st {};
+        check(stat((std::string(OR_CACHE_DIR) + ".offs").c_str(), &st) != 0,
+              "кэш НЕ записан по мусорному резолву");
+        kill(child, SIGCONT); kill(child, SIGKILL);
+        int status = 0; waitpid(child, &status, 0);
+        printf(s_fails ? "СТЕНД ПРОВАЛЕН (%d из %d проверок)\n" : "СТЕНД ПРОЙДЕН (%d проверок)\n",
+               s_fails ? s_fails : s_checks, s_checks);
+        return s_fails ? 1 : 0;
+    }
 
     if (encrypted) {
         check(!s_meta_from_sig && s_meta_sig_done,

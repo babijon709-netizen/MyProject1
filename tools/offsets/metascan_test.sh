@@ -15,3 +15,6 @@ g++ -std=c++17 -O2 -Wall -Wextra \
 # Второй сценарий — с чистого листа: кэш первого входа общий по ключу образа.
 rm -f "$CACHE_DIR/.offs"
 /tmp/metascan_test encrypted
+# Третий сценарий — мусор вместо классов: ничего не должно примениться.
+rm -f "$CACHE_DIR/.offs"
+/tmp/metascan_test garbage
