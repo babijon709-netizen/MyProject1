@@ -619,7 +619,7 @@ inline constexpr std::uint64_t ITEMPICKUP_AMOUNT      = 0xE0; // int amount
 //   → элементы IPlayerLoopItem. Классы UniTask не обфусцированы — сверяются
 //   по имени в рантайме (PROVENANCE.md §D). Поле темпа сверяется побитово с
 //   0.35f (0x3EB33333), остальные ожидания не трогаются.
-inline constexpr std::uint64_t PLAYERLOOPHELPER_TYPEINFO_RVA = 0xDB56EC0;  // бета: было 0xD9C52E0
+inline constexpr std::uint64_t PLAYERLOOPHELPER_TYPEINFO_RVA = 0xDAE2AC0;  // бета: было 0xDB56EC0 / 0xD9C52E0
 inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS      = 0x30; // statics: PlayerLoopRunner[] runners
 inline constexpr std::uint64_t LOOPRUNNER_ITEMS              = 0x38; // PlayerLoopRunner.loopItems
 inline constexpr std::uint64_t LOOPRUNNER_TAIL               = 0x30; // PlayerLoopRunner.tail: живой счётчик (длина массива — ёмкость)

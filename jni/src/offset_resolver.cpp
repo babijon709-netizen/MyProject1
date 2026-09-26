@@ -555,6 +555,9 @@ static uint64_t anchor_class(const char** expected_name) {
         { 0xDADAD88ULL, "NetworkClient" },
         { 0xDAE1D90ULL, "NetworkClient" },
         { 0xD9C4570ULL, "NetworkClient" },
+        { PLAYERLOOPHELPER_TYPEINFO_RVA, "PlayerLoopHelper" },
+        { 0xDAE2AC0ULL, "PlayerLoopHelper" },
+        { 0xD9C52E0ULL, "PlayerLoopHelper" },
     };
     for (const auto& c : kCandRvas) {
         if (!c.rva) continue;
@@ -590,6 +593,9 @@ static bool anchor_has_pending_token() {
         0xDADAD88ULL,
         0xDAE1D90ULL,
         0xD9C4570ULL,
+        PLAYERLOOPHELPER_TYPEINFO_RVA,
+        0xDAE2AC0ULL,
+        0xD9C52E0ULL,
     };
     for (uint64_t rva : kTokenRvas) {
         if (!rva) continue;
