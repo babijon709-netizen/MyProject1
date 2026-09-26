@@ -201,9 +201,33 @@ static void weapon_speed_restore() {
     g_ws_config = 0;
 }
 
+// Все смещения, по которым пишет темп оружия, должны быть получены ЖИВЬЁМ из
+// метаданных этой сборки. Иначе на новой версии игры (когда поля уехали, а
+// автообновление ещё не отработало) мы записали бы числа мимо — в проверенный
+// по имени ассет, но не в те поля.
+static bool weapon_speed_offsets_live() {
+    const std::uint64_t* const slots[] = {
+        &go_active::PLAYER_FP_MANAGER, &go_active::FPMANAGER_CURRENT_WEAPON,
+        &go_active::FPHITSCAN_CONFIG, &go_active::WEAPON_CONFIG_FIRE_RATE,
+        &go_active::WEAPON_CONFIG_FULL_RELOAD, &go_active::WEAPON_CONFIG_LOOP_RELOAD,
+    };
+    for (const std::uint64_t* slot : slots)
+        if (!offset_resolver_is_live(slot)) return false;
+    return true;
+}
+
 static void weapon_speed_tick() {
     if (!g_fast_fire && !g_fast_reload) { weapon_speed_restore(); return; }
     if (!g_il2cpp_base || g_pid <= 0) { g_ws_saved = false; g_ws_config = 0; return; }
+    if (!weapon_speed_offsets_live()) {
+        static double s_next = 0.0;
+        if (mono_seconds() >= s_next) {
+            s_next = mono_seconds() + 10.0;
+            LogLine("темп оружия: жду автообновление — смещения ассета ещё не подтверждены живыми метаданными");
+        }
+        weapon_speed_restore();
+        return;
+    }
     const uint64_t cfg = weapon_speed_config();
     if (!cfg) return;
     if (g_ws_config && cfg != g_ws_config) weapon_speed_restore();   // сменили оружие
@@ -460,9 +484,35 @@ static void potato_quality_apply() {
     setf(QUALITY_SHADOW_DISTANCE, 0.f);
 }
 
+// URP-часть картофеля тоже пишет по смещениям из метаданных: на новой сборке
+// игры они могут уехать, и писать по вшитым нельзя. Нативная часть (libunity)
+// сюда не входит: там имён нет вовсе, её защищает проверка правдоподобия.
+static bool potato_urp_offsets_live() {
+    const std::uint64_t* const slots[] = {
+        &go_active::RP_MANAGER_CURRENT_ASSET, &go_active::URP_RENDER_SCALE,
+        &go_active::URP_SHADOW_DISTANCE, &go_active::URP_MSAA,
+        &go_active::URP_SHADOW_CASCADES, &go_active::URP_ADDITIONAL_LIGHTS_MODE,
+        &go_active::URP_MAIN_LIGHT_SHADOWS, &go_active::URP_SUPPORTS_HDR,
+        &go_active::URP_DEPTH_TEXTURE, &go_active::URP_OPAQUE_TEXTURE,
+    };
+    for (const std::uint64_t* slot : slots)
+        if (!offset_resolver_is_live(slot)) return false;
+    return true;
+}
+
 static void potato_gfx_tick() {
     if (!g_potato_enabled) { potato_restore(); potato_quality_restore(); return; }
     if (!g_il2cpp_base || g_pid <= 0) { g_potato_q.saved = false; g_potato_q_level = 0; return; }
+    if (!potato_urp_offsets_live()) {
+        static double s_next = 0.0;
+        if (mono_seconds() >= s_next) {
+            s_next = mono_seconds() + 10.0;
+            LogLine("картофель: жду автообновление — смещения URP-ассета ещё не подтверждены живыми метаданными");
+        }
+        potato_restore();
+        potato_quality_apply();   // нативная часть от метаданных не зависит
+        return;
+    }
     const uint64_t asset = potato_find_asset();
     if (!asset) return;
     if (g_potato_asset && asset != g_potato_asset) potato_restore();   // ассет сменился
