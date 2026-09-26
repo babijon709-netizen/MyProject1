@@ -548,6 +548,23 @@ int main() {
           "кэш ждёт якорь без перехода к полному скану");
     offset_resolver_reset();
 
+    // ---- накопитель строк лога: обрезка не должна уводить позицию за буфер --
+    // Ловушка snprintf (он возвращает ЖЕЛАЕМУЮ длину) роняла чит на устройстве:
+    // «FORTIFY: vsnprintf: size 18446744073709551614 > SSIZE_MAX».
+    {
+        char small[16];
+        size_t used = 0;
+        small[0] = '\0';
+        for (int i = 0; i < 20; ++i)
+            log_append(small, sizeof(small), used, "оченьдлинноеимя%d, ", i);
+        check(used < sizeof(small), "накопитель лога не уводит позицию за буфер");
+        check(small[sizeof(small) - 1] == '\0', "накопитель лога держит строку завершённой");
+        size_t zero_used = 0;
+        char one[1] = {'\0'};
+        log_append(one, sizeof(one), zero_used, "%s", "x");
+        check(zero_used == 0 && one[0] == '\0', "буфер в один байт не переполняется");
+    }
+
     // Вшитые значения констант, которые не должны измениться (классов нет).
     const uint64_t mineable_before = go_active::MINEABLE_ENTITY_TYPE;
 

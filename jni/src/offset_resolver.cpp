@@ -51,6 +51,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -612,6 +613,25 @@ constexpr uint64_t kEmptyBaseBytes = 96ull << 20;
 
 // Общий буфер чтения для всех сканирующих фаз (последовательны по времени).
 uint8_t  s_scan_buf[kChunkBytes];
+
+// Дописать в строку-накопитель БЕЗОПАСНО. Ловушка snprintf: он возвращает
+// длину, которая ПОНАДОБИЛАСЬ БЫ, а не записанную. Прибавлять её к позиции
+// нельзя: на длинном имени позиция уезжает за конец буфера, и следующий вызов
+// получает size_t(-2) вместо размера — рантайм Android валит процесс
+// («FORTIFY: vsnprintf: size 18446744073709551614 > SSIZE_MAX», лог 26.09).
+static void log_append(char* buf, size_t cap, size_t& used, const char* fmt, ...)
+    __attribute__((format(printf, 4, 5)));
+static void log_append(char* buf, size_t cap, size_t& used, const char* fmt, ...) {
+    if (!buf || cap == 0) return;
+    if (used >= cap - 1) { used = cap - 1; return; }
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = vsnprintf(buf + used, cap - used, fmt, ap);
+    va_end(ap);
+    if (n < 0) { buf[used] = '\0'; return; }
+    const size_t room = cap - used - 1;
+    used += ((size_t)n <= room) ? (size_t)n : room;
+}
 
 static bool s_first_char[256];
 const char* s_wanted_names[64];   // разные имена классов из таблицы
@@ -2113,7 +2133,7 @@ static void apply_str_window(int idx) {
             char txt[sizeof(raw) + 8] = {};
             size_t hn = 0, tn = 0;
             for (size_t i = 0; i < sizeof(raw); ++i) {
-                hn += (size_t)snprintf(hex + hn, sizeof(hex) - hn, "%02x ", raw[i]);
+                log_append(hex, sizeof(hex), hn, "%02x ", raw[i]);
                 const unsigned char c = raw[i];
                 txt[tn++] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
             }
@@ -2201,16 +2221,16 @@ static void phase_blob(double deadline) {
         // Диагностика ротации: какие табличные имена в блоке отсутствуют.
         if (s_wanted_str_found > 0 && s_wanted_str_found < s_wanted_name_count) {
             char miss[512];
-            int mp = 0, shown = 0;
+            size_t mpu = 0;
+            int shown = 0;
             const int missing = s_wanted_name_count - s_wanted_str_found;
-            for (int i = 0; i < s_wanted_name_count && mp < (int)sizeof(miss) - 48; ++i) {
+            for (int i = 0; i < s_wanted_name_count && mpu + 48 < sizeof(miss); ++i) {
                 if (s_wanted_str[i]) continue;
-                mp += snprintf(miss + mp, sizeof(miss) - mp, "%s%s",
-                               shown ? ", " : "", s_wanted_names[i]);
+                log_append(miss, sizeof(miss), mpu, "%s%s",
+                           shown ? ", " : "", s_wanted_names[i]);
                 ++shown;
                 if (shown >= 10) {
-                    mp += snprintf(miss + mp, sizeof(miss) - mp,
-                                   " и ещё %d", missing - shown);
+                    log_append(miss, sizeof(miss), mpu, " и ещё %d", missing - shown);
                     break;
                 }
             }
@@ -3438,7 +3458,7 @@ static void log_anchor_dump(uint64_t anchor) {
     size_t hn = 0;
     for (size_t i = 0; i < sizeof(raw); ++i) {
         if (i && i % 8 == 0 && hn + 3 < sizeof(hex)) { hex[hn++] = ' '; hex[hn++] = '|'; hex[hn++] = ' '; }
-        hn += (size_t)snprintf(hex + hn, sizeof(hex) - hn, "%02x ", raw[i]);
+        log_append(hex, sizeof(hex), hn, "%02x ", raw[i]);
     }
     LogLine("автооффсеты: якорь 0x%llx — первые 64 байт: %s", (unsigned long long)anchor, hex);
     const uint64_t image = memio::untag(qrd_ptr(anchor));
@@ -3776,8 +3796,7 @@ static void phase_fields() {
             char hex[64] = {};
             size_t hn = 0;
             for (size_t i = 0; i < aname.size() && i < 16 && hn + 4 < sizeof(hex); ++i)
-                hn += (size_t)snprintf(hex + hn, sizeof(hex) - hn, "%02x ",
-                                       (unsigned)(uint8_t)aname[i]);
+                log_append(hex, sizeof(hex), hn, "%02x ", (unsigned)(uint8_t)aname[i]);
             LogLine("автооффсеты: якорь — байты имени: %s", hex);
         }
         log_anchor_dump(anchor);
@@ -3903,10 +3922,10 @@ static void phase_fields() {
             char bh[64] = {}, fh[64] = {};
             size_t hn = 0;
             for (size_t i = 0; i < sizeof(byval) && bok; ++i)
-                hn += (size_t)snprintf(bh + hn, sizeof(bh) - hn, "%02x", byval[i]);
+                log_append(bh, sizeof(bh), hn, "%02x", byval[i]);
             hn = 0;
             for (size_t i = 0; i < sizeof(ftype) && fok2; ++i)
-                hn += (size_t)snprintf(fh + hn, sizeof(fh) - hn, "%02x", ftype[i]);
+                log_append(fh, sizeof(fh), hn, "%02x", ftype[i]);
             int32_t kidx = 0, tidx = 0;
             if (bok) memcpy(&kidx, byval, 4);
             if (fok2) memcpy(&tidx, ftype, 4);
@@ -4119,10 +4138,8 @@ static void phase_fields() {
                 if (s_applied[j].slot == kViaFields[i].slot) { found = true; break; }
             if (found) continue;
             ++count;
-            const int n = snprintf(line + used, sizeof(line) - used, "%s%s.%s",
-                                   used ? ", " : "", kViaFields[i].via_cls, kViaFields[i].field);
-            if (n < 0) break;
-            used += (size_t)n;
+            log_append(line, sizeof(line), used, "%s%s.%s",
+                       used ? ", " : "", kViaFields[i].via_cls, kViaFields[i].field);
             if (used > sizeof(line) - 64) {
                 LogLine("автооффсеты: via не подтверждено — %s", line);
                 used = 0; line[0] = '\0';
@@ -4157,10 +4174,8 @@ static void phase_fields() {
             bool have_class = false;
             for (int j = 0; j < s_class_count; ++j)
                 if (strcmp(s_classes[j].name, of.cls) == 0) { have_class = true; break; }
-            const int n = snprintf(line + used, sizeof(line) - used, "%s%s::%s%s",
-                                   used ? ", " : "", of.cls, of.field, have_class ? "" : "(нет класса)");
-            if (n < 0) break;
-            used += (size_t)n;
+            log_append(line, sizeof(line), used, "%s%s::%s%s",
+                       used ? ", " : "", of.cls, of.field, have_class ? "" : "(нет класса)");
             ++printed;
             if (used > sizeof(line) - 96) flush();
         }
