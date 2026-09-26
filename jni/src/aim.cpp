@@ -1825,12 +1825,45 @@ static void UpdateAimMemory(float dt) {
 
 
 // ====================== Сайлент (DLP2 adapter) =============================
+// Сайлент ставит ось точно в кость, но пуля всё равно уходит в конус разброса
+// оружия: в логе 26.09 23:29 конус был 0..20, и на дистанции это гарантирует
+// мимо. Разброс живёт в данных (DispersionConfig.min/max), их обнуляет блок
+// «Оружие» — поэтому, пока сайлент активен, просим тот же механизм выключить
+// разброс. Патчей кода нет: те же записи в объектные данные с сохранением и
+// возвратом оригиналов.
+static std::atomic<bool> g_silent_no_spread{false};
+static std::atomic<unsigned long long> g_silent_no_spread_ms{0};
+// Флаг «липкий»: цель теряется и находится по нескольку раз в секунду, а
+// каждое переключение — это запись в память игры и возврат оригиналов.
+// Держим полторы секунды после последней цели, чтобы не молотить запись.
+bool esp_silent_wants_no_spread() {
+    if (g_silent_no_spread.load(std::memory_order_relaxed)) return true;
+    const unsigned long long until = g_silent_no_spread_ms.load(std::memory_order_relaxed);
+    if (!until) return false;
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const unsigned long long now = (unsigned long long)ts.tv_sec * 1000ull +
+                                   (unsigned long long)(ts.tv_nsec / 1000000);
+    return now < until;
+}
+static void silent_no_spread_set(bool on) {
+    if (on) {
+        struct timespec ts{};
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        const unsigned long long now = (unsigned long long)ts.tv_sec * 1000ull +
+                                       (unsigned long long)(ts.tv_nsec / 1000000);
+        g_silent_no_spread_ms.store(now + 1500ull, std::memory_order_relaxed);
+    }
+    g_silent_no_spread.store(on, std::memory_order_relaxed);
+}
+
 static AimPick s_silentPick;
 static void UpdateAimSilent(float dt) {
     float sw = 0.f, sh = 0.f;
     int why = 0;
     if (!AimBegin(dt, sw, sh, &why)) {
         silent_aim::clear(); s_silentPick.reset();
+        silent_no_spread_set(false);
         s_memDiag = AimMemDiag{}; s_memDiag.inactive = why;
         return;
     }
@@ -1840,10 +1873,13 @@ static void UpdateAimSilent(float dt) {
     float degPerPx = 0.f;
     if (!AimSelectTarget(sw, sh, s_silentPick, best, degPerPx, &why)) {
         silent_aim::clear(); s_silentPick.reset();
+        silent_no_spread_set(false);
         s_memDiag.no_target = why;
         return;
     }
     s_memDiag.no_target = 0;
+    // Цель есть и ось публикуется — держим разброс нулевым.
+    silent_no_spread_set(true);
     if (!esp_silent_publish(best.id, best.world)) {
         g_aimActive = false;
         ++s_memDiag.fails;
@@ -1900,7 +1936,11 @@ static void UpdateAimSilent(float dt) {
 }
 
 void AimEndFrame() {
-    if (g_state.aim_mode != AIM_MODE_SILENT) { silent_aim::clear(); return; }
+    if (g_state.aim_mode != AIM_MODE_SILENT) {
+        silent_aim::clear();
+        silent_no_spread_set(false);
+        return;
+    }
     // UI runs after UpdateAim: honour a just-opened menu or disabled toggle
     // before another frame, without publishing a second/stale command.
     const bool wasActive = g_aimActive;
@@ -1914,7 +1954,10 @@ void UpdateAim(float dt) {
     ++s_frames;
     const int mode = g_state.aim_mode;
     AimLogTick(dt);
-    if (mode != AIM_MODE_SILENT) { silent_aim::clear(); s_silentPick.reset(); }
+    if (mode != AIM_MODE_SILENT) {
+        silent_aim::clear(); s_silentPick.reset();
+        silent_no_spread_set(false);
+    }
     if (mode != AIM_MODE_TOUCH) AimReleaseFinger(s_fingerDown);
     if (mode == AIM_MODE_SILENT) UpdateAimSilent(dt);
     else if (mode == AIM_MODE_MEMORY) UpdateAimMemory(dt);

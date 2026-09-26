@@ -153,7 +153,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false); loot.reset();
         weapons.recoil = settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off;
-        weapons.spread = settings.no_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        weapons.spread = (settings.no_spread || esp_silent_wants_no_spread())
+                             ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         loot.status = settings.fast_loot ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
@@ -183,7 +184,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     uint64_t player = 0;
     static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || settings.no_sway || settings.instant_ads ||
-        controller.has_state() || settings.no_recoil || settings.no_spread || weapons.has_state()) {
+        controller.has_state() || settings.no_recoil || settings.no_spread ||
+        esp_silent_wants_no_spread() || weapons.has_state()) {
         // The RVA may still point to a named but UNINITIALIZED class copy
         // (device log: valid GameControllerBase, static_fields=0). Prefer the
         // live class discovered by the resolver; only accept a source whose
@@ -247,7 +249,12 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     };
     bool chain_live = true;
     for (const std::uint64_t* slot : chain) chain_live &= offset_resolver_is_live(slot);
-    weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, settings.no_spread,
+    // Сайлент без разброса: пока он ведёт цель, конус оружия обнуляется тем же
+    // механизмом, что и тумблер «без разброса» (те же проверки, сохранение и
+    // возврат оригиналов). Иначе ось стоит точно в кости, а пуля всё равно
+    // улетает в конус — на дистанции это гарантированный промах.
+    const bool want_no_spread = settings.no_spread || esp_silent_wants_no_spread();
+    weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread,
                  chain_live);
     static int last_weapon_diagnostic = -1;
     if ((settings.no_recoil || settings.no_spread) && weapons.diagnostic &&

@@ -247,29 +247,51 @@ static uint64_t potato_quality_level() {
     // 26.09 23:29 не было ни одной строки про нативное качество.
     static double s_next_log = 0.0;
     const bool talk = mono_seconds() >= s_next_log;
-    auto fail = [&](const char* why, uint64_t a, uint64_t b, long c) -> uint64_t {
-        if (talk) {
-            s_next_log = mono_seconds() + 5.0;
-            LogLine("картофель: нативное качество не читается — %s (libunity 0x%llx, "
-                    "менеджер 0x%llx, массив 0x%llx, уровень %ld)",
-                    why, (unsigned long long)base, (unsigned long long)a,
-                    (unsigned long long)b, c);
+    // Код причины вместо строки: русские слова отдельными литералами проверка
+    // переводов считает подписями интерфейса (и ломает сборку).
+    auto fail = [&](int code, uint64_t a, uint64_t b, long c) -> uint64_t {
+        if (!talk) return 0;
+        s_next_log = mono_seconds() + 5.0;
+        switch (code) {
+            case 1:
+                LogLine("картофель: нативное качество не читается — нет менеджера по таблице "
+                        "(libunity 0x%llx, менеджер 0x%llx)",
+                        (unsigned long long)base, (unsigned long long)a);
+                break;
+            case 2:
+                LogLine("картофель: нативное качество не читается — уровень вне диапазона "
+                        "(менеджер 0x%llx, массив 0x%llx, уровень %ld)",
+                        (unsigned long long)a, (unsigned long long)b, c);
+                break;
+            case 3:
+                LogLine("картофель: нативное качество не читается — нет массива уровней "
+                        "(менеджер 0x%llx, массив 0x%llx)",
+                        (unsigned long long)a, (unsigned long long)b);
+                break;
+            case 4:
+                LogLine("картофель: нативное качество не читается — предел мипов неправдоподобен "
+                        "(уровень 0x%llx, значение %ld)", (unsigned long long)b, c);
+                break;
+            default:
+                LogLine("картофель: нативное качество не читается — LOD-смещение неправдоподобно "
+                        "(уровень 0x%llx, значение %ld%%)", (unsigned long long)b, c);
+                break;
         }
         return 0;
     };
     const uint64_t qs = rd_ptr(base + UNITY_MANAGERS_RVA + UNITY_QUALITY_MANAGER_IDX * 8);
-    if (!valid_obj(qs)) return fail("нет менеджера по таблице", qs, 0, -1);
+    if (!valid_obj(qs)) return fail(1, qs, 0, -1);
     const int32_t level = rd<int32_t>(qs + QUALITY_CURRENT_LEVEL);
     const uint64_t arr = rd_ptr(qs + QUALITY_LEVEL_ARRAY);
-    if (level < 0 || level > 32) return fail("уровень вне диапазона", qs, arr, (long)level);
-    if (!valid_obj(arr)) return fail("нет массива уровней", qs, arr, (long)level);
+    if (level < 0 || level > 32) return fail(2, qs, arr, (long)level);
+    if (!valid_obj(arr)) return fail(3, qs, arr, (long)level);
     const uint64_t lv = arr + (uint64_t)level * QUALITY_LEVEL_STRIDE;
     // Проверка по содержимому: предел мипов 0..8, LOD-смещение 0.05..20.
     const int32_t mip = rd<int32_t>(lv + QUALITY_TEXTURE_MIPMAP_LIMIT);
     const float bias = rd<float>(lv + QUALITY_LOD_BIAS);
-    if (mip < 0 || mip > 8) return fail("предел мипов неправдоподобен", qs, lv, (long)mip);
+    if (mip < 0 || mip > 8) return fail(4, qs, lv, (long)mip);
     if (!std::isfinite(bias) || bias < 0.05f || bias > 20.f)
-        return fail("LOD-смещение неправдоподобно", qs, lv, (long)(bias * 100.f));
+        return fail(5, qs, lv, (long)(bias * 100.f));
     return lv;
 }
 
