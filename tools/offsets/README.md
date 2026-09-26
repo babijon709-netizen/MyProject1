@@ -235,6 +235,10 @@ python3 tools/offsets/typeinfo_rva.py --so /tmp/new/libil2cpp.so --script /tmp/n
 | `extract_dumps.sh` | распаковка `dump.7z` и `libil2cpp.7z` (в т.ч. из старого коммита) |
 | `il2cpp_layout.py` | позиционный diff структур, `show`, поиск класса по форме |
 | `typeinfo_rva.py` | RVA глобальных TypeInfo дизассемблированием |
+| `gen_resolver_table.py` | генератор `jni/src/offset_resolver_table.inc` из карты оффсетов |
+| `resolver_test.sh` | стенд автообновления: синтетическая «игра» с `global-metadata` в карте |
+| `metascan_test.sh` | стенд «игра обновилась»: метадата внутри `.apk` и ищется по сигнатуре `0xFAB11BAF`; плюс сценарий «метадата зашифрована» (имя только инлайном в структуре) |
+| `run.sh` | прогон всех стендов сразу |
 
 Зависимости: `py7zr` и `capstone` (`pip install py7zr capstone --break-system-packages`),
 `xz` из состава xz-utils.

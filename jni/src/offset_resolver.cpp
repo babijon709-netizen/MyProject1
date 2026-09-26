@@ -6,7 +6,11 @@
 // чит молчал, пока оффсеты не обновят руками по новому дампу. Теперь при
 // привязке модуль сам:
 //   1) находит все отображения libil2cpp.so (кроме исполняемых) и окно
-//      строк метаданных (global-metadata) по /proc/<pid>/maps;
+//      строк метаданных по /proc/<pid>/maps. Если имени «global-metadata» в
+//      карте нет (после апдейта 26.09 игра мапит метадату прямо из .apk) и
+//      вшитый TYPEINFO_RVA устарел, блок метаданных ищется по СИГНАТУРЕ
+//      0xFAB11BAF (Il2CppGlobalMetadataHeader.sanity), а окно имён берётся
+//      из его заголовка — поля stringOffset/stringSize (фаза PH_META);
 //   2) сканирует эти отображения ПОРЦИЯМИ (бюджет времени на кадр) в поиске
 //      слотов-указателей на Il2CppClass: у настоящего класса имя и
 //      пространство имён — указатели в окно метаданных, а image — в сам
@@ -26,6 +30,17 @@
 //
 // Имена классов с ротацией (обфускатор) резолвер не ищет: они помечены в
 // карте оффсетов и остаются на ручных значениях.
+//
+// Порядок попыток, когда живого класса-якоря нет (игра обновилась):
+//   PH_META  — блок метаданных по сигнатуре (начала отображений, затем
+//              страницы; декой-блоки отбрасываются по отсутствию имён);
+//   PH_SCAN  — слоты классов в сегментах .so (уже с точным окном имён);
+//   PH_BLOB  — адреса всех табличных имён внутри окна;
+//   PH_PTR   — указатели на эти адреса = живые Il2CppClass;
+//   разведка окрестностей имени — если указателей на имя нет вовсе (имя лежит
+//              инлайном в структуре), класс ищется среди соседних указателей
+//              с полной проверкой формы;
+//   PH_STRS  — последний рубеж: поиск имени по всей памяти.
 
 #include "game.h"
 #include "game_internal.h"
@@ -179,6 +194,7 @@ enum Phase {
     PH_FIELDS,      // калибровка массива полей + резолв таблицы
     PH_DONE,
     PH_HEAP,        // скан кучи вокруг «якоря» (когда в .so классов не нашлось)
+    PH_META,        // поиск блока global-metadata по сигнатуре 0xFAB11BAF
     PH_STRS,        // поиск строки «PlayerManager» в анонимной памяти
     PH_BLOB,        // поиск в найденном блобе строк всех табличных имён
     PH_PTR,         // поиск в образе и куче указателей на эти строки (= классы)
@@ -309,6 +325,12 @@ static const char* const kStrNeedles[] = {
     "NetworkClient"
 };
 static void start_strsearch(const char* reason);
+// Кандидат на блок строк: «плотный» (строки впритык, как в таблице строк
+// метаданных) или «разреженный» (имя лежит в структуре, вокруг нули). Раньше
+// разреженные ОТБРАСЫВАЛИСЬ — и лог 26.09 показал цену: в новой сборке игры
+// имена нашлись только в таком виде, а резолвер написал «строка не найдена».
+// Теперь берём оба вида, плотные пробуем первыми.
+bool     s_str_cand_packed[8] = {};
 int      s_best_found = -1;       // лучший результат по блокам
 uint64_t s_best_begin = 0, s_best_end = 0, s_best_addr = 0;
 uint64_t s_best_str[64];
@@ -344,6 +366,56 @@ int      s_ptr_best_range = -1;
 uint64_t s_top_hits[3] = {0, 0, 0};
 int      s_top_range[3] = {-1, -1, -1};
 
+// ---- Блок global-metadata по СИГНАТУРЕ ---------------------------------------
+// Главный урок лога 26.09 (игра обновилась): раньше окно строк метаданных
+// искалось ровно двумя способами — по имени отображения «global-metadata» в
+// /proc/<pid>/maps и по вшитому TYPEINFO_RVA (якорю). После апдейта не
+// сработало ни то, ни другое: имени в карте больше нет (Unity на Android
+// мапит метадату прямо из .apk, а такие строки карты у нас вообще
+// вычёркивались), а RVA уехал. Резолвер остался без окна имён, принял 768
+// мусорных структур за классы и честно доложил «имена зашифрованы».
+//
+// На деле у файла метаданных есть опознавательный знак, который не зависит ни
+// от имени файла, ни от версии игры: первые четыре байта заголовка
+// Il2CppGlobalMetadataHeader — 0xFAB11BAF («sanity»), следом int32 версии
+// (Unity 2018…6 — это 24…31). Так его ищут и Il2CppDumper, и Il2CppInspector:
+// «если файла нет на обычном месте — просканируй всё на эти байты».
+// Мы делаем то же самое по ЖИВОЙ памяти процесса и берём из заголовка точное
+// окно таблицы строк (stringOffset/stringSize) — это лучше прежних «±32 МБ
+// вокруг имени», потому что окно получается ровно тем, чем должно быть.
+constexpr uint32_t kMetaSanity  = 0xFAB11BAFu;   // Il2CppGlobalMetadataHeader.sanity
+constexpr uint64_t kMetaMaxSize = 768ull << 20;  // потолок здравого смысла для файла метаданных
+constexpr int      kMetaHeaderPairs = 30;        // сколько пар (offset,size) проверяем/перебираем
+
+struct MetaRange { uint64_t start = 0, end = 0; };
+MetaRange s_meta_ranges[1024];
+int       s_meta_range_count = 0;
+int       s_meta_range_idx = 0;
+uint64_t  s_meta_pos = 0;
+uint64_t  s_meta_scanned = 0;
+int       s_meta_pass = 0;        // 0 — только начала отображений, 1 — все страницы
+bool      s_meta_sig_done = false;  // сигнатурный поиск в этом резолве уже отработал
+bool      s_meta_scan_first = false;  // после сигнатуры вернуться к скану .so, а не к блобу
+// Блоки, которые оказались пустышкой: сигнатура и заголовок в порядке, а
+// табличных имён в таблице строк нет. У протекторов встречается декой-файл
+// метаданных рядом с настоящим, поэтому найденный блок — ещё не финал: если
+// имён в нём нет, поиск продолжается со следующего.
+uint64_t  s_meta_bad[4] = {};
+int       s_meta_bad_count = 0;
+int       s_meta_tries = 0;
+bool      s_meta_from_sig = false;  // окно строк получено из заголовка метаданных
+uint64_t  s_meta_blob = 0;          // адрес самого заголовка
+int32_t   s_meta_version = 0;       // версия формата метаданных (24…31)
+const char* s_meta_reason = nullptr; // зачем затеяли бутстрап (для лога)
+
+// Файловые отображения ЛЮБЫХ имён (включая .apk) — только для сигнатурного
+// поиска. В поиск указателей они по-прежнему не идут: пул классов там не
+// лежит, а гигабайтный .apk сжёг бы весь бюджет.
+struct NamedRange { uint64_t start = 0, end = 0; char path[48] = {}; };
+NamedRange s_filesig[512];
+int        s_filesig_count = 0;
+uint64_t   s_filesig_bytes = 0;
+
 // Диапазоны поиска указателей на имена. Порядок важный: СНАЧАЛА читаемые
 // сегменты самой libil2cpp.so, ПОТОМ анонимная память. Протектор может вшить
 // метадату (массив Il2CppClass вместе с указателями имён) прямо в образ —
@@ -355,6 +427,13 @@ uint64_t  s_ptr_seg_bytes = 0;    // сколько МБ в сегментах .
 uint64_t  s_ptr_anon_bytes = 0;   // сколько МБ в анонимной памяти
 static void build_scan_ranges();   // определение ниже, вызывается из phase_strsearch
 static void start_heap_scan(uint64_t anchor);
+// Бутстрап без якоря: сначала блок метаданных по сигнатуре, потом разбор его
+// таблицы строк, и только если и это не вышло — старый поиск имён по памяти.
+static void start_metadata_bootstrap(const char* reason);
+static void start_meta_scan(const char* reason);
+static void start_blob_scan(const char* reason);
+static bool meta_header_ok(uint64_t addr, uint64_t* out_begin, uint64_t* out_end,
+                           int32_t* out_version);
 
 // Знания о базах в рамках ЖИВОГО процесса (переживают сброс скана при
 // перепривязке; очищаются только при смене pid). Лог с устройства показал:
@@ -702,6 +781,7 @@ static void phase_maps() {
     s_anon_skip_small = 0; s_anon_biggest = 0;
     s_hidden_count = 0; s_hidden_bytes = 0; s_hidden_skipped = 0;
     s_probe_ok = 0; s_probe_bytes = 0; s_probe_zero = 0; s_probe_zero_bytes = 0;
+    s_filesig_count = 0; s_filesig_bytes = 0;
     if (!s_scan_base) s_scan_base = g_il2cpp_base;
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
@@ -737,6 +817,23 @@ static void phase_maps() {
         if (sscanf(line, "%llx-%llx %4s %llx", &start, &end, perms, &foff) < 3) continue;
         if (end <= start) continue;
         const char* slash = strchr(line, '/');
+        // Файловые отображения ЛЮБЫХ имён — в список сигнатурного поиска, и
+        // делается это ДО всех отсевов ниже. Именно здесь ломалось
+        // автообновление после апдейта игры: global-metadata.dat на Android
+        // лежит внутри .apk, Unity мапит его оттуда, а строки карты с «.apk»
+        // отбрасывались целиком — блок метаданных оказывался невидим.
+        if (slash && perms[0] == 'r' && (end - start) >= (64ull << 10) &&
+            !strstr(slash, "/dev/") && s_filesig_count < 512) {
+            uint64_t sig_end = end;
+            if (sig_end - start > (512ull << 20)) sig_end = start + (512ull << 20);
+            s_filesig[s_filesig_count].start = start;
+            s_filesig[s_filesig_count].end = sig_end;
+            const char* base = strrchr(slash, '/');
+            snprintf(s_filesig[s_filesig_count].path, sizeof(s_filesig[0].path), "%s",
+                     base ? base + 1 : slash);
+            s_filesig_bytes += sig_end - start;
+            ++s_filesig_count;
+        }
         // Потолок 1 ГБ — только для ФАЙЛОВЫХ сегментов: у больших игр .rodata
         // бывает огромным. Для анонимной памяти потолка нет: куча игры часто
         // выделяется ОДНИМ регионом больше гигабайта, и, выкинув его, мы
@@ -890,6 +987,49 @@ static void phase_maps() {
                 (unsigned long long)((s_meta_end - s_meta_begin) >> 10));
         s_meta_begin = s_meta_end = 0;
     }
+    // Окно из карты — это ВЕСЬ файл метаданных. Если в его начале лежит
+    // настоящий заголовок Il2CppGlobalMetadataHeader, сужаем окно до таблицы
+    // строк: фильтр имён становится точным (раньше в окно попадали и таблицы
+    // типов, и литералы, и любой указатель туда считался «именем»).
+    if (s_meta_begin) {
+        uint64_t sb = 0, se = 0;
+        int32_t ver = 0;
+        if (meta_header_ok(s_meta_begin, &sb, &se, &ver)) {
+            s_meta_blob = s_meta_begin;
+            s_meta_version = ver;
+            s_meta_from_sig = true;
+            s_meta_sig_done = true;
+            LogLine("автооффсеты: заголовок метаданных подтверждён @0x%llx (версия %d) — "
+                    "окно имён сужено до таблицы строк 0x%llx..0x%llx (%llu МБ)",
+                    (unsigned long long)s_meta_begin, (int)ver,
+                    (unsigned long long)sb, (unsigned long long)se,
+                    (unsigned long long)((se - sb) >> 20));
+            s_meta_begin = sb;
+            s_meta_end = se;
+        }
+    }
+    // Крупнейшие файловые отображения — в лог: по ним видно, откуда игра
+    // берёт метадату (отдельный файл, .apk, memfd протектора).
+    if (s_filesig_count) {
+        int top[3] = {-1, -1, -1};
+        for (int i = 0; i < s_filesig_count; ++i) {
+            const uint64_t sz = s_filesig[i].end - s_filesig[i].start;
+            for (int k = 0; k < 3; ++k) {
+                if (top[k] >= 0 && sz <= s_filesig[top[k]].end - s_filesig[top[k]].start) continue;
+                for (int j = 2; j > k; --j) top[j] = top[j - 1];
+                top[k] = i;
+                break;
+            }
+        }
+        for (int k = 0; k < 3; ++k) {
+            const int i = top[k];
+            if (i < 0) continue;
+            LogLine("автооффсеты: файловое отображение №%d — %s (%llu МБ, 0x%llx)",
+                    k + 1, s_filesig[i].path,
+                    (unsigned long long)((s_filesig[i].end - s_filesig[i].start) >> 20),
+                    (unsigned long long)s_filesig[i].start);
+        }
+    }
     // Сводка по карте: видно, какую память мы реально сканируем, а какую нет.
     {
         LogLine("автооффсеты: карта процесса — анонимной памяти %llu МБ в %d регионах, "
@@ -1000,10 +1140,19 @@ static void phase_maps() {
                 start_heap_scan(ank);
             }
         } else {
-            start_strsearch(aok ? "вшитый RVA не совпал по имени" : "вшитый RVA не читается");
+            start_metadata_bootstrap(aok ? "вшитый RVA не совпал по имени" : "вшитый RVA не читается");
         }
     } else {
         LogLine("автооффсеты: якорь 0 (слот TypeInfo ещё не инициализирован или RVA сменился) — продолжаю сканирование");
+        // Якоря нет — значит, вшитые RVA устарели (игра обновилась). Пока окно
+        // имён неизвестно, скан .so ловит десятки тысяч мусорных структур и
+        // заканчивается ничем (лог 26.09: 768 «классов», 0 табличных). Перед
+        // сканом дёшево проверяем начала всех отображений на сигнатуру
+        // метаданных: доли секунды, зато дальше фильтр имён работает точно.
+        if (!s_meta_begin) {
+            s_meta_scan_first = true;
+            start_meta_scan("якоря нет, окно имён неизвестно");
+        }
     }
 }
 
@@ -1189,7 +1338,7 @@ static void phase_heap(double deadline) {
             LogLine("автооффсеты: ВСЕ табличные классы найдены в куче (%d табличных)", wanted_in_cache());
         }
         if (!all_wanted_found() && wanted_in_cache() == 0) {
-            start_strsearch("в куче вокруг якоря табличных классов нет");
+            start_metadata_bootstrap("в куче вокруг якоря табличных классов нет");
         } else {
             s_phase = PH_FIELDS;
         }
@@ -1204,6 +1353,8 @@ static void phase_heap(double deadline) {
 // ищем указатели на эти адреса: слот имени класса лежит на +0x10.
 
 static bool calibrate_fields(uint64_t klass);   // определена ниже, в фазе FIELDS
+static int  fields_shape_score(uint64_t klass, uint64_t fields_ptr, int probe);
+static int  probe_names_neighbourhood();        // запасной путь, определён ниже
 
 static void store_verified_class(uint64_t klass, const char* name) {
     if (find_class_slot(klass)) return;
@@ -1216,6 +1367,294 @@ static void store_verified_class(uint64_t klass, const char* name) {
 }
 
 static void apply_str_window(int idx);   // определена ниже, после phase_strsearch
+
+// ---- Фаза META: блок global-metadata по сигнатуре ----------------------------
+// Похоже ли содержимое на таблицу строк метаданных: сплошные ASCII-имена,
+// разделённые нулями. Проверка дешёвая (одно чтение) и отсекает случайные
+// совпадения сигнатуры в мусоре: у настоящего блока по stringOffset лежат
+// именно имена.
+static bool looks_like_string_table(uint64_t addr) {
+    char buf[192];
+    if (!qrd_buf(addr, buf, sizeof(buf))) return false;
+    int printable = 0, nuls = 0, tokens = 0, token_len = 0, bad = 0;
+    for (size_t i = 0; i < sizeof(buf); ++i) {
+        const unsigned char c = (unsigned char)buf[i];
+        if (c == '\0') {
+            ++nuls;
+            if (token_len >= 2) ++tokens;
+            token_len = 0;
+            continue;
+        }
+        if (c >= 0x20 && c < 0x7f) { ++printable; ++token_len; continue; }
+        ++bad;
+        token_len = 0;
+    }
+    if (bad * 20 > (int)sizeof(buf)) return false;   // >5% небуквенного мусора
+    return tokens >= 3 && nuls >= 3 && printable >= (int)sizeof(buf) / 3;
+}
+
+// Разбор заголовка Il2CppGlobalMetadataHeader по адресу addr. Возвращает окно
+// ТАБЛИЦЫ СТРОК (не всего блока): именно на него смотрят Il2CppClass.name.
+static bool meta_header_ok(uint64_t addr, uint64_t* out_begin, uint64_t* out_end,
+                           int32_t* out_version) {
+    uint32_t hdr[2 + 2 * kMetaHeaderPairs];
+    if (!qrd_buf(addr, hdr, sizeof(hdr))) return false;
+    if (hdr[0] != kMetaSanity) return false;
+    const int32_t ver = (int32_t)hdr[1];
+    // 24 — Unity 2018/2019, 27 — 2020/2021, 29 — 2022, 31 — Unity 6. Запас с
+    // обеих сторон: версию протектор иногда подменяет, но не до абсурда.
+    if (ver < 16 || ver > 40) return false;
+    // Все пары (смещение, размер) обязаны укладываться в разумный файл. Одно
+    // это отсекает почти все случайные 0xFAB11BAF в куче.
+    int sane = 0;
+    for (int i = 0; i < kMetaHeaderPairs; ++i) {
+        const uint64_t off = hdr[2 + 2 * i];
+        const int32_t  sz  = (int32_t)hdr[3 + 2 * i];
+        if (sz < 0) return false;
+        if (off > kMetaMaxSize || (uint64_t)sz > kMetaMaxSize) return false;
+        if (off + (uint64_t)sz > kMetaMaxSize) return false;
+        if (off >= 0x40 && sz > 0) ++sane;
+    }
+    if (sane < 8) return false;
+    // Штатный путь: stringOffset/stringSize лежат третьей парой (0x18/0x1C) —
+    // это место одинаково во всех версиях от 19 до 31.
+    struct Cand { uint64_t off; uint64_t size; };
+    Cand best = {0, 0};
+    const uint64_t str_off = hdr[6], str_size = hdr[7];
+    if (str_off >= 0x40 && str_size >= (16u << 10) && looks_like_string_table(addr + str_off)) {
+        best.off = str_off; best.size = str_size;
+    } else {
+        // Запасной путь: заголовок мог быть перетасован протектором (такое
+        // встречается) — тогда таблицу строк ищем перебором пар заголовка.
+        for (int i = 0; i < kMetaHeaderPairs; ++i) {
+            const uint64_t off = hdr[2 + 2 * i];
+            const uint64_t sz  = (uint64_t)(int32_t)hdr[3 + 2 * i];
+            if (off < 0x40 || sz < (64u << 10) || sz > (256ull << 20)) continue;
+            if (!looks_like_string_table(addr + off)) continue;
+            if (sz > best.size) { best.off = off; best.size = sz; }
+        }
+    }
+    if (!best.size) return false;
+    if (out_begin) *out_begin = addr + best.off;
+    if (out_end)   *out_end   = addr + best.off + best.size;
+    if (out_version) *out_version = ver;
+    return true;
+}
+
+// Диапазоны сигнатурного поиска: сначала файловые отображения (метадата почти
+// всегда именно там — отдельным файлом или страницей внутри .apk), затем
+// скрытые регионы подходящего размера, затем анонимная память и сегменты .so.
+static void build_meta_ranges() {
+    s_meta_range_count = 0;
+    auto add = [&](uint64_t s, uint64_t e) {
+        if (s_meta_range_count >= (int)(sizeof(s_meta_ranges) / sizeof(s_meta_ranges[0]))) return;
+        if (e <= s) return;
+        s_meta_ranges[s_meta_range_count].start = s;
+        s_meta_ranges[s_meta_range_count].end = e;
+        ++s_meta_range_count;
+    };
+    for (int i = 0; i < s_filesig_count; ++i) add(s_filesig[i].start, s_filesig[i].end);
+    for (int i = 0; i < s_hidden_count; ++i) {
+        const uint64_t sz = s_hidden[i].end - s_hidden[i].start;
+        if (sz < (1ull << 20) || sz > (256ull << 20)) continue;
+        add(s_hidden[i].start, s_hidden[i].end);
+    }
+    for (int i = 0; i < s_anon_count; ++i) add(s_anon[i].start, s_anon[i].end);
+    for (int i = 0; i < s_seg_count; ++i) add(s_segments[i].start, s_segments[i].end);
+    for (int i = 0; i < s_xseg_count; ++i) add(s_xsegments[i].start, s_xsegments[i].end);
+    for (int i = 0; i < s_hidden_count; ++i) {
+        const uint64_t sz = s_hidden[i].end - s_hidden[i].start;
+        if (sz >= (1ull << 20) && sz <= (256ull << 20)) continue;   // уже добавлены
+        add(s_hidden[i].start, s_hidden[i].end);
+    }
+}
+
+static void start_meta_scan(const char* reason) {
+    s_meta_reason = reason;
+    build_meta_ranges();
+    s_meta_range_idx = 0;
+    s_meta_pos = 0;
+    s_meta_scanned = 0;
+    s_meta_pass = 0;
+    s_last_progress_log = 0;
+    s_scan_deadline = mono_seconds() + 120.0;
+    uint64_t bytes = 0;
+    for (int i = 0; i < s_meta_range_count; ++i)
+        bytes += s_meta_ranges[i].end - s_meta_ranges[i].start;
+    LogLine("автооффсеты: %s — ищу блок метаданных по сигнатуре 0xFAB11BAF "
+            "(%d диапазонов, %llu МБ, файловых %d / %llu МБ)",
+            reason ? reason : "", s_meta_range_count,
+            (unsigned long long)(bytes >> 20), s_filesig_count,
+            (unsigned long long)(s_filesig_bytes >> 20));
+    s_phase = PH_META;
+}
+
+// Разбор таблицы строк: адреса всех табличных имён внутри известного окна.
+// Отдельная точка входа (раньше в PH_BLOB попадали только через поиск имени
+// по всей памяти) — окно у нас уже точное, искать его заново незачем.
+static void start_blob_scan(const char* reason) {
+    build_wanted_names();
+    for (int i = 0; i < s_wanted_name_count; ++i) s_wanted_str[i] = 0;
+    s_wanted_str_found = 0;
+    s_str_cand_count = 1;
+    s_str_cand_idx = 0;
+    s_str_cand[0] = s_meta_begin;
+    s_str_cand_region[0] = -1;
+    s_str_cand_packed[0] = true;
+    s_best_found = -1;
+    s_blob_pos = s_meta_begin;
+    s_blob_fails = 0;
+    s_last_progress_log = 0;
+    s_scan_deadline = mono_seconds() + 180.0;
+    LogLine("автооффсеты: %s — разбираю таблицу строк 0x%llx..0x%llx (%llu МБ)",
+            reason ? reason : "", (unsigned long long)s_meta_begin,
+            (unsigned long long)s_meta_end,
+            (unsigned long long)((s_meta_end - s_meta_begin) >> 20));
+    s_phase = PH_BLOB;
+}
+
+// Единая точка входа «якоря нет, ищем классы сами». Порядок попыток:
+//   1) окно строк уже известно точно (из заголовка метаданных) — сразу в блоб;
+//   2) сигнатурный поиск блока метаданных по всей памяти;
+//   3) окно из карты процесса (имя «global-metadata») — в блоб;
+//   4) старый поиск имён по памяти — последний рубеж.
+static void start_metadata_bootstrap(const char* reason) {
+    if (s_meta_begin && s_meta_from_sig) { start_blob_scan(reason); return; }
+    if (!s_meta_sig_done) { start_meta_scan(reason); return; }
+    if (s_meta_begin) { start_blob_scan(reason); return; }
+    start_strsearch(reason);
+}
+
+// Чем заняться после сигнатурного поиска. Если его запустили ПЕРЕД сканом .so
+// (штатный случай «якоря нет»), возвращаемся к скану — теперь уже с точным
+// окном имён. Если после того, как скан ничего не дал, — идём разбирать
+// таблицу строк (или к последнему рубежу, поиску имён по памяти).
+static void meta_scan_continue(bool found) {
+    if (s_meta_scan_first) {
+        s_meta_scan_first = false;
+        s_seg_idx = 0;
+        s_scan_pos = s_seg_count ? s_segments[0].start : 0;
+        s_scanned_bytes = 0;
+        s_last_progress_log = 0;
+        s_scan_deadline = mono_seconds() + kScanTotalSec;
+        if (s_seg_count) {
+            LogLine("автооффсеты: возвращаюсь к скану .so (%llu МБ), окно имён %s",
+                    (unsigned long long)(s_total_bytes >> 20),
+                    found ? "известно" : "по-прежнему неизвестно");
+            s_phase = PH_SCAN;
+        } else if (found) {
+            start_blob_scan("сегментов .so нет");
+        } else {
+            start_strsearch("сегментов .so нет");
+        }
+        return;
+    }
+    if (found) { start_blob_scan("блок метаданных найден"); return; }
+    if (s_meta_begin) { start_blob_scan(s_meta_reason); return; }
+    start_strsearch(s_meta_reason ? s_meta_reason : "сигнатуры метаданных нет");
+}
+
+static void phase_meta(double deadline) {
+    static uint8_t buf[kChunkBytes];
+    while (s_meta_range_idx < s_meta_range_count && mono_seconds() < deadline) {
+        const MetaRange& r = s_meta_ranges[s_meta_range_idx];
+        if (s_meta_pass == 0) {
+            // Проход №1 — только НАЧАЛА отображений: файл метаданных мапится
+            // целиком, и заголовок лежит ровно в первых байтах. Несколько
+            // сотен коротких чтений, доли секунды.
+            uint64_t hit = 0;
+            uint32_t head[2] = {};
+            if (qrd_buf(r.start, head, sizeof(head)) && head[0] == kMetaSanity) hit = r.start;
+            for (int b = 0; b < s_meta_bad_count; ++b) if (s_meta_bad[b] == hit) hit = 0;
+            if (hit) {
+                uint64_t b = 0, e = 0;
+                int32_t ver = 0;
+                if (meta_header_ok(hit, &b, &e, &ver)) {
+                    s_meta_blob = hit; s_meta_version = ver;
+                    s_meta_begin = b; s_meta_end = e;
+                    s_meta_from_sig = true;
+                    s_meta_sig_done = true;
+                    LogLine("автооффсеты: блок метаданных найден по сигнатуре @0x%llx "
+                            "(версия %d), таблица строк 0x%llx..0x%llx (%llu МБ)",
+                            (unsigned long long)hit, (int)ver,
+                            (unsigned long long)b, (unsigned long long)e,
+                            (unsigned long long)((e - b) >> 20));
+                    meta_scan_continue(true);
+                    return;
+                }
+            }
+            ++s_meta_range_idx;
+            if (s_meta_range_idx >= s_meta_range_count) {
+                // Начала не дали ничего — идём по страницам. Метадата может
+                // быть отображена не с начала файла (страница внутри .apk)
+                // или расшифрована в кучу.
+                LogLine("автооффсеты: в начале отображений сигнатуры нет — иду по страницам");
+                s_meta_pass = 1;
+                s_meta_range_idx = 0;
+                s_meta_pos = 0;
+            }
+            continue;
+        }
+        // Проход №2 — все страницы диапазонов. Заголовок всегда лежит на
+        // границе страницы, поэтому проверяем только каждые 4 КБ: это в 1024
+        // раза меньше сравнений, чем у поиска строк, и весь проход укладывается
+        // в десяток секунд порционного скана.
+        if (s_meta_pos < r.start || s_meta_pos >= r.end) s_meta_pos = r.start;
+        const uint64_t remain = r.end - s_meta_pos;
+        const uint64_t chunk = (kChunkBytes < remain) ? kChunkBytes : remain;
+        if (!qrd_buf(s_meta_pos, buf, chunk)) {
+            s_meta_pos += chunk;
+            s_meta_scanned += chunk;
+        } else {
+            for (uint64_t off = 0; off + 8 <= chunk; off += 4096) {
+                uint32_t magic;
+                memcpy(&magic, buf + off, 4);
+                if (magic != kMetaSanity) continue;
+                const uint64_t hit = s_meta_pos + off;
+                bool rejected = false;
+                for (int b = 0; b < s_meta_bad_count; ++b) rejected |= (s_meta_bad[b] == hit);
+                if (rejected) continue;
+                uint64_t b = 0, e = 0;
+                int32_t ver = 0;
+                if (!meta_header_ok(hit, &b, &e, &ver)) continue;
+                s_meta_blob = hit; s_meta_version = ver;
+                s_meta_begin = b; s_meta_end = e;
+                s_meta_from_sig = true;
+                s_meta_sig_done = true;
+                LogLine("автооффсеты: блок метаданных найден по сигнатуре @0x%llx "
+                        "(версия %d), таблица строк 0x%llx..0x%llx (%llu МБ)",
+                        (unsigned long long)hit, (int)ver,
+                        (unsigned long long)b, (unsigned long long)e,
+                        (unsigned long long)((e - b) >> 20));
+                meta_scan_continue(true);
+                return;
+            }
+            s_meta_pos += chunk;
+            s_meta_scanned += chunk;
+        }
+        if (s_meta_pos >= r.end) {
+            ++s_meta_range_idx;
+            if (s_meta_range_idx < s_meta_range_count)
+                s_meta_pos = s_meta_ranges[s_meta_range_idx].start;
+        }
+        if (mono_seconds() >= s_scan_deadline) break;
+        const double now_s = mono_seconds();
+        if (now_s - s_last_progress_log >= 8.0) {
+            s_last_progress_log = now_s;
+            LogLine("автооффсеты: сигнатура метаданных — просмотрено %llu МБ (диапазон %d/%d)",
+                    (unsigned long long)(s_meta_scanned >> 20),
+                    s_meta_range_idx, s_meta_range_count);
+        }
+    }
+    if (s_meta_range_idx >= s_meta_range_count || mono_seconds() >= s_scan_deadline) {
+        s_meta_sig_done = true;
+        LogLine("автооффсеты: блока метаданных по сигнатуре НЕТ (просмотрено %llu МБ, "
+                "%d диапазонов из %d) — метадата зашифрована или выгружена",
+                (unsigned long long)(s_meta_scanned >> 20),
+                s_meta_range_idx, s_meta_range_count);
+        meta_scan_continue(false);
+    }
+}
 
 static void phase_strsearch(double deadline) {
     static uint8_t buf[kChunkBytes];
@@ -1266,9 +1705,25 @@ static void phase_strsearch(double deadline) {
                     packed = false;
                 }
             }
-            if (packed && s_str_cand_count < 8) {
-                s_str_cand[s_str_cand_count] = s_str_pos + (uint64_t)off;
-                s_str_cand_region[s_str_cand_count] = s_str_region;
+            // Разреженное окружение (нули вокруг имени) больше НЕ повод
+            // выбросить находку. Именно так лежат имена в пуле сериализации
+            // Unity, и, как показал лог 26.09, иногда это единственное место,
+            // где имя вообще встречается: строгий фильтр превращал «нашёл» в
+            // «строка не найдена». Плотные кандидаты просто идут первыми —
+            // блок всё равно выбирается по числу найденных в нём имён.
+            if (s_str_cand_count < 8) {
+                int at = s_str_cand_count;
+                if (packed) {
+                    while (at > 0 && !s_str_cand_packed[at - 1]) {
+                        s_str_cand[at] = s_str_cand[at - 1];
+                        s_str_cand_region[at] = s_str_cand_region[at - 1];
+                        s_str_cand_packed[at] = s_str_cand_packed[at - 1];
+                        --at;
+                    }
+                }
+                s_str_cand[at] = s_str_pos + (uint64_t)off;
+                s_str_cand_region[at] = s_str_region;
+                s_str_cand_packed[at] = packed;
                 ++s_str_cand_count;
             }
             s_str_pos += (uint64_t)off + kNeed;   // ищем следующее
@@ -1309,6 +1764,21 @@ static void phase_strsearch(double deadline) {
 static void apply_str_window(int idx) {
     const int reg = s_str_cand_region[idx];
     s_str_addr = s_str_cand[idx];
+    if (reg < 0 || reg >= s_ptr_range_count) {
+        // Кандидат пришёл не из списка диапазонов (например, окно уже известно
+        // по заголовку метаданных) — берём ±32 МБ вокруг находки.
+        const uint64_t kPad = 32ull << 20;
+        s_meta_begin = (s_str_addr > kPad) ? (s_str_addr - kPad) : 0x1000;
+        s_meta_end = s_str_addr + kPad;
+        build_wanted_names();
+        for (int i = 0; i < s_wanted_name_count; ++i) s_wanted_str[i] = 0;
+        s_wanted_str_found = 0;
+        s_blob_pos = s_meta_begin;
+        s_last_progress_log = 0;
+        s_scan_deadline = mono_seconds() + 180.0;
+        s_phase = PH_BLOB;
+        return;
+    }
     uint64_t wb = s_ptr_ranges[reg].start, we = s_ptr_ranges[reg].end;
     for (int j = reg + 1; j < s_ptr_range_count &&
              s_ptr_ranges[j].start == we && (we - wb) < (64ull << 20); ++j)
@@ -1465,6 +1935,25 @@ static void phase_blob(double deadline) {
             s_last_progress_log = 0;
             s_scan_deadline = mono_seconds() + 120.0;
             s_phase = PH_PTR;
+        } else if (s_meta_from_sig && s_meta_tries < 3 && s_meta_range_count) {
+            // Заголовок был настоящий, а имён нет: скорее всего это декой
+            // (у протекторов рядом лежит подставной файл метаданных). Ищем
+            // следующий блок с того места, где остановились.
+            ++s_meta_tries;
+            if (s_meta_bad_count < 4) s_meta_bad[s_meta_bad_count++] = s_meta_blob;
+            LogLine("автооффсеты: в таблице строк 0x%llx..0x%llx табличных имён нет — "
+                    "ищу следующий блок метаданных (попытка %d из 3)",
+                    (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end,
+                    s_meta_tries);
+            s_meta_from_sig = false;
+            s_meta_scan_first = false;
+            s_meta_begin = s_meta_end = 0;
+            s_meta_blob = 0;
+            if (s_meta_pass == 0) { s_meta_pass = 1; s_meta_range_idx = 0; s_meta_pos = 0; }
+            s_scan_deadline = mono_seconds() + 120.0;
+            s_last_progress_log = 0;
+            s_phase = PH_META;
+            return;
         } else {
             LogLine("автооффсеты: блок строк есть, но табличных имён в нём нет — имена, видимо, ротированы обфускатором");
             s_phase = PH_DONE;
@@ -1808,8 +2297,80 @@ static void phase_ptr(double deadline) {
                     (unsigned long long)s_meta_end, s_blk_found[next]);
             return;
         }
+        // Указатели на имена не дали ни одного класса, но сами имена в памяти
+        // есть: возможно, они лежат ВНУТРИ структур (пул сериализации Unity).
+        // Пробуем соседей имени — с полной проверкой формы Il2CppClass.
+        if (s_ptr_verified == 0 && s_wanted_str_found > 0 && wanted_in_cache() == 0) {
+            if (probe_names_neighbourhood() > 0) {
+                if (!s_good_base) s_good_base = g_il2cpp_base;
+                if (!s_fields_off) {
+                    for (int i = 0; i < s_class_count && !s_fields_off; ++i)
+                        calibrate_fields(s_classes[i].klass);
+                }
+            }
+        }
         s_phase = PH_FIELDS;
     }
+}
+
+// ---- Запасной путь: класс РЯДОМ с именем ------------------------------------
+// Дамп памяти с устройства (dumper.7z, 24.09) показал третий способ хранения
+// имён: имя лежит НЕ в таблице строк, а прямо в структуре — 40-байтовыми
+// записями «char name[31] + счётчик», а перед ним — пара указателей. Указателя
+// НА само имя при этом нет нигде, поэтому phase_ptr такие имена не превращает
+// в классы.
+//
+// Если после полного прохода по указателям не подтвердилось ни одного класса,
+// пробуем соседей: читаем окрестность каждого найденного имени и проверяем
+// каждое похожее на указатель значение как Il2CppClass — по ФОРМЕ (образ,
+// массив полей, счётчик полей, parent у записей). Проверка строгая, поэтому
+// хуже не станет: не подтвердилось — ничего и не записали.
+static int probe_names_neighbourhood() {
+    int found = 0, probed = 0;
+    for (int n = 0; n < s_wanted_name_count; ++n) {
+        const uint64_t at = s_wanted_str[n];
+        if (!at) continue;
+        // Окно — 72 байта ДО имени (в записи из дампа указатели лежали за
+        // 0x28 и 0x20 байт до имени), и идём от БЛИЖНЕГО к дальнему: соседняя
+        // запись не должна перехватывать чужой класс.
+        const uint64_t base = at & ~7ull;
+        const uint64_t from = (base > 72) ? (base - 72) : 0x1000;
+        uint8_t win[72];
+        const size_t span = (size_t)(base - from);
+        if (span < 8 || !qrd_buf(from, win, span)) continue;
+        ++probed;
+        for (size_t back = 8; back <= span; back += 8) {
+            const size_t o = span - back;
+            uint64_t v;
+            memcpy(&v, win + o, 8);
+            v = memio::untag(v);
+            if (!valid_obj(v)) continue;
+            // Отсекаем «указатели внутрь таблицы строк» только когда окно
+            // получено из настоящего заголовка метаданных. Окно, взятое ±32 МБ
+            // вокруг найденного имени, накрывает и саму кучу — по нему нельзя
+            // судить, что адрес не может быть классом.
+            if (s_meta_from_sig && v >= s_meta_begin && v < s_meta_end) continue;
+            if (find_class_slot(v)) continue;
+            const uint64_t image = memio::untag(qrd_ptr(v));
+            if (!valid_obj(image)) continue;
+            const uint64_t fields = memio::untag(qrd_ptr(v + IL2CPP_CLASS_FIELDS));
+            if (!valid_obj(fields)) continue;
+            const uint16_t count = qrd<uint16_t>(v + IL2CPP_CLASS_FIELD_COUNT);
+            if (count == 0 || count > 512) continue;
+            const int probe = (count < 6) ? (int)count : 6;
+            if (fields_shape_score(v, fields, probe) < ((probe < 3) ? probe : 3)) continue;
+            store_verified_class(v, s_wanted_names[n]);
+            ++found;
+            if (found <= 5)
+                LogLine("автооффсеты: класс «%s» найден рядом с именем @0x%llx -> 0x%llx (полей %u)",
+                        s_wanted_names[n], (unsigned long long)at,
+                        (unsigned long long)v, (unsigned)count);
+            break;   // одно имя — один класс
+        }
+    }
+    LogLine("автооффсеты: разведка окрестностей имён — проверено %d имён, классов подтверждено %d",
+            probed, found);
+    return found;
 }
 
 static void phase_scan(double deadline) {
@@ -1944,7 +2505,7 @@ static void phase_scan(double deadline) {
                         s_anchor_wait_since = mono_seconds();
                         LogLine("автооффсеты: скан .so окончен, но в TypeInfo найден токен — жду инициализации класса (попытка %d/15)", s_anchor_retries);
                     } else {
-                        start_strsearch("табличных классов в .so нет");
+                        start_metadata_bootstrap("табличных классов в .so нет");
                     }
                 } else {
                     s_phase = PH_FIELDS;
@@ -1954,7 +2515,7 @@ static void phase_scan(double deadline) {
             // Классов нет: база помечена пустой, скан пойдёт по следующему
             // кандидату — новый список сегментов соберёт PH_MAPS.
         } else {
-            start_strsearch("в .so живых классов не нашлось");
+            start_metadata_bootstrap("в .so живых классов не нашлось");
         }
     }
 }
@@ -3137,7 +3698,8 @@ static void log_summary() {
             "база 0x%llx, пустых баз %d, бутстрап: строк %d/%d, по указателям классов %llu%s",
             s_class_count, s_shape_pass, s_names_ok, s_names_fail, wanted,
             (unsigned long long)s_fields_off, s_resolved, kOrFieldCount, s_changed,
-            s_meta_begin ? "найдены" : "НЕ найдены (фильтр слабее)",
+            s_meta_from_sig ? "по заголовку блока"
+                            : (s_meta_begin ? "найдены" : "НЕ найдены (фильтр слабее)"),
             (unsigned long long)g_il2cpp_base, s_dead_count,
             s_wanted_str_found, s_wanted_name_count,
             (unsigned long long)s_ptr_verified,
@@ -3620,6 +4182,7 @@ void offset_resolver_tick() {
         case PH_MAPS:   phase_maps(); break;
         case PH_SCAN:   phase_scan(deadline); break;
         case PH_HEAP:   phase_heap(deadline); break;
+        case PH_META:   phase_meta(deadline); break;
         case PH_KID:    phase_kid(deadline); break;
         case PH_STRS:   phase_strsearch(deadline); break;
         case PH_BLOB:   phase_blob(deadline); break;
@@ -3654,6 +4217,12 @@ void offset_resolver_reset() {
     s_resolved = 0; s_changed = 0;
     s_heap_range_count = 0; s_heap_range_idx = 0;
     s_heap_pos = s_heap_end = 0; s_heap_done = false;
+    s_meta_range_count = 0; s_meta_range_idx = 0;
+    s_meta_pos = 0; s_meta_scanned = 0; s_meta_pass = 0;
+    s_meta_sig_done = false; s_meta_scan_first = false; s_meta_from_sig = false;
+    s_meta_bad_count = 0; s_meta_tries = 0;
+    s_meta_blob = 0; s_meta_version = 0; s_meta_reason = nullptr;
+    s_filesig_count = 0; s_filesig_bytes = 0;
     s_anon_count = 0; s_anon_total = 0; s_filemisc_count = 0;
     s_anon_noread_bytes = 0; s_anon_noread_count = 0;
     s_anon_bytes = 0; s_anon_skip_x = 0; s_anon_skip_x_bytes = 0;
@@ -3794,6 +4363,12 @@ void offset_resolver_status(char* out, size_t cap) {
         // показывать нельзя: поля ещё не разрешены (phase_fields впереди).
         snprintf(out, cap, "ищет классы по индексу типа: %llu МБ, найдено %d",
                  (unsigned long long)(s_kid_scanned >> 20), s_via_found);
+        return;
+    }
+    if (s_phase == PH_META) {
+        snprintf(out, cap, "ищет блок метаданных: %llu МБ (диапазон %d/%d)",
+                 (unsigned long long)(s_meta_scanned >> 20),
+                 s_meta_range_idx, s_meta_range_count);
         return;
     }
     if (s_phase == PH_STRS || s_phase == PH_BLOB || s_phase == PH_PTR) {
