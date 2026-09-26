@@ -122,6 +122,7 @@ static uint64_t qrd_ptr(uint64_t a) { return memio::untag(qrd<uint64_t>(a)); }
 // Проверка адреса строки (C-string в памяти метаданных не обязана иметь
 // 8-байтовое выравнивание, в отличие от указателей на структуры Il2CppClass).
 static inline bool valid_str_ptr(uint64_t p) {
+    p = memio::untag(p);
     return p >= 0x10000 && p < 0x0001000000000000ULL;
 }
 
@@ -540,13 +541,32 @@ static int wanted_in_cache() {
 static uint64_t anchor_class(const char** expected_name) {
     if (expected_name) *expected_name = "";
     if (!g_il2cpp_base) return 0;
-    if (PLAYER_MANAGER_TYPEINFO_RVA) {
-        const uint64_t k = qrd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
-        if (valid_obj(k)) { if (expected_name) *expected_name = "PlayerManager"; return k; }
-    }
-    if (GAME_CONTROLLER_TYPEINFO_RVA) {
-        const uint64_t k = qrd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
-        if (valid_obj(k)) { if (expected_name) *expected_name = "GameControllerBase"; return k; }
+    static const struct { uint64_t rva; const char* name; } kCandRvas[] = {
+        { PLAYER_MANAGER_TYPEINFO_RVA, "PlayerManager" },
+        { 0xDADA550ULL, "PlayerManager" },
+        { 0xDADBE58ULL, "PlayerManager" },
+        { 0xDAED008ULL, "PlayerManager" },
+        { 0xD9C5310ULL, "PlayerManager" },
+        { GAME_CONTROLLER_TYPEINFO_RVA, "GameControllerBase" },
+        { 0xDADA348ULL, "GameControllerBase" },
+        { 0xDAE0978ULL, "GameControllerBase" },
+        { 0xDB2EF10ULL, "GameControllerBase" },
+        { 0xD9C0690ULL, "GameControllerBase" },
+        { NETWORK_CLIENT_TYPEINFO_RVA, "NetworkClient" },
+        { 0xDADAD88ULL, "NetworkClient" },
+        { 0xDAE1D90ULL, "NetworkClient" },
+        { 0xD9C4570ULL, "NetworkClient" },
+    };
+    for (const auto& c : kCandRvas) {
+        if (!c.rva) continue;
+        const uint64_t k = memio::untag(qrd_ptr(g_il2cpp_base + c.rva));
+        if (valid_obj(k)) {
+            const uint64_t img = memio::untag(qrd_ptr(k));
+            if (valid_obj(img)) {
+                if (expected_name) *expected_name = c.name;
+                return k;
+            }
+        }
     }
     return 0;
 }
@@ -922,12 +942,11 @@ static void phase_maps() {
     const uint64_t ank = anchor_class(&ank_expected);
     if (ank) {
         bool aok = false;
-        const uint64_t nm = qrd_ptr(ank + IL2CPP_CLASS_NAME);
+        const uint64_t nm = memio::untag(qrd_ptr(ank + IL2CPP_CLASS_NAME));
         const std::string an = valid_str_ptr(nm) ? qrd_string(nm, &aok) : std::string();
-        const uint64_t ns = qrd_ptr(ank + IL2CPP_CLASS_NAMESPACE);
-        const uint64_t img = qrd_ptr(ank);
-        const uint64_t fp = qrd_ptr(ank + IL2CPP_CLASS_FIELDS);
-        const bool is_real_class = valid_obj(img) && aok && !an.empty() && valid_str_ptr(ns) && valid_obj(fp);
+        const uint64_t ns = memio::untag(qrd_ptr(ank + IL2CPP_CLASS_NAMESPACE));
+        const uint64_t img = memio::untag(qrd_ptr(ank));
+        const bool is_real_class = valid_obj(img) && aok && !an.empty() && (ns == 0 || valid_str_ptr(ns));
         if (is_real_class) {
             LogLine("автооффсеты: якорь 0x%llx («%s») подтверждён как живой класс (имя @0x%llx)",
                     (unsigned long long)ank, an.c_str(), (unsigned long long)nm);
@@ -964,23 +983,21 @@ static void start_strsearch(const char* reason) {
 // Попробовать кандидата как Il2CppClass: image в libil2cpp или куче, имя/нс в
 // метаданных; имя читается строкой. Возврат: 1 принят, 0 отклонён.
 static int try_class_candidate(uint64_t v) {
+    v = memio::untag(v);
     if (find_class_slot(v)) return 0;
-    const uint64_t image = qrd_ptr(v);
+    const uint64_t image = memio::untag(qrd_ptr(v));
     if (!valid_obj(image)) return 0;
     ++s_shape_pass;   // «похож на класс» по форме — до фильтров имени
-    const uint64_t nm = qrd_ptr(v + IL2CPP_CLASS_NAME);
+    const uint64_t nm = memio::untag(qrd_ptr(v + IL2CPP_CLASS_NAME));
+    const uint64_t ns = memio::untag(qrd_ptr(v + IL2CPP_CLASS_NAMESPACE));
     if (s_meta_begin) {
-        if (nm < s_meta_begin || nm >= s_meta_end) return 0;
-        const uint64_t ns = qrd_ptr(v + IL2CPP_CLASS_NAMESPACE);
-        if (ns < s_meta_begin || ns >= s_meta_end) return 0;
+        if (nm < s_meta_begin || nm >= s_meta_end) {
+            if (!valid_str_ptr(nm)) return 0;
+        }
+        if (ns != 0 && (ns < s_meta_begin || ns >= s_meta_end) && !valid_str_ptr(ns)) return 0;
     } else {
         if (!valid_str_ptr(nm)) return 0;
-        // «Мягкий» режим без окна метаданных (бета): мусорных указателей на
-        // читаемые строки в сотни раз больше настоящих классов — один лишь
-        // «имя читается» забил кэш мусором. Настоящий класс ДОПОЛНИТЕЛЬНО
-        // имеет валидный указатель пространства имён (он всегда есть, хотя бы
-        // пустая строка); это дешёвый дополнительный фильтр.
-        if (!valid_str_ptr(qrd_ptr(v + IL2CPP_CLASS_NAMESPACE))) return 0;
+        if (ns != 0 && !valid_str_ptr(ns)) return 0;
     }
     bool ok = false;
     const std::string name = qrd_string(nm, &ok);
@@ -1000,8 +1017,9 @@ static int try_class_candidate(uint64_t v) {
     fc.klass = v;
     snprintf(fc.name, sizeof(fc.name), "%s", name.c_str());
     bool ns_ok = false;
-    const std::string ns = qrd_string(qrd_ptr(v + IL2CPP_CLASS_NAMESPACE), &ns_ok);
-    if (ns_ok && ns.size() < sizeof(fc.ns)) snprintf(fc.ns, sizeof(fc.ns), "%s", ns.c_str());
+    const std::string ns_str = (ns != 0) ? qrd_string(ns, &ns_ok) : std::string();
+    if (ns_ok && ns_str.size() < sizeof(fc.ns)) snprintf(fc.ns, sizeof(fc.ns), "%s", ns_str.c_str());
+    else fc.ns[0] = '\0';
     ++s_class_count;
     return 1;
 }
@@ -1642,13 +1660,13 @@ static void phase_ptr(double deadline) {
             };
             bool ok = false;
             for (int o = 0; o < (int)(sizeof(kNameOffs) / sizeof(kNameOffs[0])) && !ok; ++o) {
-                const uint64_t klass = slot - kNameOffs[o];
+                const uint64_t klass = memio::untag(slot - kNameOffs[o]);
                 if (s_meta_begin && klass >= s_meta_begin && klass < s_meta_end) continue;
-                const uint64_t image = qrd_ptr(klass);
+                const uint64_t image = memio::untag(qrd_ptr(klass));
                 if (!valid_obj(image)) continue;
-                if (s_meta_begin) {
-                    const uint64_t ns = qrd_ptr(slot + 8);
-                    if (ns < s_meta_begin || ns >= s_meta_end) continue;
+                if (kNameOffs[o] == IL2CPP_CLASS_NAME) {
+                    const uint64_t ns = memio::untag(qrd_ptr(klass + IL2CPP_CLASS_NAMESPACE));
+                    if (ns != 0 && s_meta_begin && (ns < s_meta_begin || ns >= s_meta_end) && !valid_str_ptr(ns)) continue;
                 }
                 store_verified_class(klass, s_wanted_names[nm]);
                 ++s_ptr_verified;
@@ -1815,12 +1833,11 @@ static void phase_scan(double deadline) {
                                   ? anchor_class(&anchor_name) : 0;
             if (anchor) {
                 bool aok = false;
-                const uint64_t nm = qrd_ptr(anchor + IL2CPP_CLASS_NAME);
+                const uint64_t nm = memio::untag(qrd_ptr(anchor + IL2CPP_CLASS_NAME));
                 const std::string an = valid_str_ptr(nm) ? qrd_string(nm, &aok) : std::string();
-                const uint64_t ns = qrd_ptr(anchor + IL2CPP_CLASS_NAMESPACE);
-                const uint64_t img = qrd_ptr(anchor);
-                const uint64_t fp = qrd_ptr(anchor + IL2CPP_CLASS_FIELDS);
-                const bool is_real = valid_obj(img) && aok && !an.empty() && valid_str_ptr(ns) && valid_obj(fp);
+                const uint64_t ns = memio::untag(qrd_ptr(anchor + IL2CPP_CLASS_NAMESPACE));
+                const uint64_t img = memio::untag(qrd_ptr(anchor));
+                const bool is_real = valid_obj(img) && aok && !an.empty() && (ns == 0 || valid_str_ptr(ns));
                 if (is_real) {
                     if (anchor_name && anchor_name[0] && an != anchor_name) {
                         LogLine("автооффсеты: якорь 0x%llx («%s») подтверждён как класс (ждали «%s») — имя @0x%llx",
@@ -1859,18 +1876,20 @@ static void phase_scan(double deadline) {
 // ---- Фаза FIELDS: калибровка и резолв ---------------------------------------
 // Поле-счётчик: сколько записей подряд похожи на FieldInfo этого класса.
 static int fields_shape_score(uint64_t klass, uint64_t fields_ptr, int probe) {
+    fields_ptr = memio::untag(fields_ptr);
     if (!valid_obj(fields_ptr)) return 0;
+    klass = memio::untag(klass);
     int score = 0;
     for (int i = 0; i < probe; ++i) {
         const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
-        const uint64_t parent = qrd_ptr(e + s_fi_parent);
-        if (parent != klass) break;
-        const uint64_t type = qrd_ptr(e + IL2CPP_FIELDINFO_TYPE);
+        const uint64_t parent = memio::untag(qrd_ptr(e + s_fi_parent));
+        if (parent != 0 && parent != klass) break;
+        const uint64_t type = memio::untag(qrd_ptr(e + IL2CPP_FIELDINFO_TYPE));
         if (!valid_obj(type)) break;
         const int32_t off = qrd<int32_t>(e + IL2CPP_FIELDINFO_OFFSET);
         if (off < -1 || off > 0x20000) break;
         ++score;
-        const uint64_t nmp = qrd_ptr(e + IL2CPP_FIELDINFO_NAME);
+        const uint64_t nmp = memio::untag(qrd_ptr(e + IL2CPP_FIELDINFO_NAME));
         if (s_meta_begin && (nmp < s_meta_begin || nmp >= s_meta_end)) {
             if (!valid_str_ptr(nmp)) break;
         }
@@ -1885,9 +1904,10 @@ static int probe_fields_shape(uint64_t klass, uint64_t off) {
 }
 
 static bool calibrate_fields(uint64_t klass) {
+    klass = memio::untag(klass);
     // Сначала табличное значение — почти всегда оно и есть.
     const uint64_t table_off = IL2CPP_CLASS_FIELDS;
-    if (probe_fields_shape(klass, table_off) >= 5) {
+    if (probe_fields_shape(klass, table_off) >= 3) {
         s_fields_off = table_off;
         return true;
     }
@@ -1895,7 +1915,7 @@ static bool calibrate_fields(uint64_t klass) {
     // съехать дальше обычного (проба дешёвая: мусор отваливается за 1 чтение).
     for (uint64_t f = 0x30; f <= 0x1F8; f += 8) {
         if (f == table_off) continue;
-        if (probe_fields_shape(klass, f) >= 5) {
+        if (probe_fields_shape(klass, f) >= 3) {
             s_fields_off = f;
             return true;
         }
@@ -1905,7 +1925,7 @@ static bool calibrate_fields(uint64_t klass) {
 
 // Прочитать имя поля; пустой возврат при нечитаемости.
 static bool read_field_name(uint64_t entry, char* out, size_t cap) {
-    const uint64_t nmp = qrd_ptr(entry + IL2CPP_FIELDINFO_NAME);
+    const uint64_t nmp = memio::untag(qrd_ptr(entry + IL2CPP_FIELDINFO_NAME));
     if (!valid_str_ptr(nmp)) return false;
     bool ok = false;
     const std::string name = qrd_string(nmp, &ok);
@@ -1916,14 +1936,21 @@ static bool read_field_name(uint64_t entry, char* out, size_t cap) {
 
 // Найти поле по имени в классе; вернуть смещение (-1 если нет).
 static int32_t find_field_offset(uint64_t klass, const char* field) {
-    const uint64_t fields_ptr = qrd_ptr(klass + s_fields_off);
+    klass = memio::untag(klass);
+    const uint64_t fields_ptr = memio::untag(qrd_ptr(klass + s_fields_off));
     if (!valid_obj(fields_ptr)) return -1;
     int count = qrd<uint16_t>(klass + IL2CPP_CLASS_FIELD_COUNT);
     if (count <= 0 || count > 2048) return -1;
     char name[64];
+    int parent_mismatch_streak = 0;
     for (int i = 0; i < count; ++i) {
         const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
-        if (qrd_ptr(e + s_fi_parent) != klass) break;
+        const uint64_t parent = memio::untag(qrd_ptr(e + s_fi_parent));
+        if (parent != 0 && parent != klass) {
+            if (++parent_mismatch_streak >= 4) break;
+        } else {
+            parent_mismatch_streak = 0;
+        }
         if (!read_field_name(e, name, sizeof(name))) continue;
         if (strcmp(name, field) == 0) return qrd<int32_t>(e + IL2CPP_FIELDINFO_OFFSET);
     }
@@ -2029,8 +2056,9 @@ static bool collect_type_matches(uint64_t klass, const OrField& of,
 
     for (int i = 0; i < count && m.n < 16; ++i) {
         const uint64_t e = fields_ptr + (uint64_t)i * s_fi_size;
-        if (qrd_ptr(e + s_fi_parent) != klass) break;
-        const uint64_t typep = qrd_ptr(e + IL2CPP_FIELDINFO_TYPE);
+        const uint64_t parent = memio::untag(qrd_ptr(e + s_fi_parent));
+        if (parent != 0 && parent != memio::untag(klass)) break;
+        const uint64_t typep = memio::untag(qrd_ptr(e + IL2CPP_FIELDINFO_TYPE));
         if (!valid_obj(typep)) continue;
         bool hit = false;
         if (class_sig) {
@@ -2282,7 +2310,8 @@ static void apply_resolution(const OrField& of, int32_t off) {
     if (off < 0) return;
     const std::uint64_t value = static_cast<std::uint32_t>(off);
     if (!resolved_offset_is_valid(of.is_static, value, of.cls)) return;
-    if (*(of.slot) != value) ++s_changed;
+    const std::uint64_t prev = *(of.slot);
+    if (prev != value) ++s_changed;
     *(of.slot) = value;
     if (s_applied_count < 256) {
         s_applied[s_applied_count].slot = of.slot;
@@ -2291,15 +2320,20 @@ static void apply_resolution(const OrField& of, int32_t off) {
         ++s_applied_count;
     }
     ++s_resolved;
+    if (s_resolved <= 8 || prev != value) {
+        LogLine("автооффсеты: разрешено [%s.%s] = 0x%llx (было 0x%llx)",
+                of.cls, of.field, (unsigned long long)value, (unsigned long long)prev);
+    }
 }
 
 // Дамп первых байт якоря: даже если имена классов затёрты обфускатором, по
 // структуре видно, настоящий ли это Il2CppClass (image в окне .so на +0x00,
 // правдоподобные указатели в табличных слотах).
 static void log_anchor_dump(uint64_t anchor) {
-    uint8_t raw[48] = {};
+    anchor = memio::untag(anchor);
+    uint8_t raw[64] = {};
     if (!qrd_buf(anchor, raw, sizeof(raw))) {
-        LogLine("автооффсеты: якорь — дамп структуры не читается");
+        LogLine("автооффсеты: якорь 0x%llx — дамп структуры не читается", (unsigned long long)anchor);
         return;
     }
     char hex[3 * sizeof(raw) + 16] = {};
@@ -2308,16 +2342,18 @@ static void log_anchor_dump(uint64_t anchor) {
         if (i && i % 8 == 0 && hn + 3 < sizeof(hex)) { hex[hn++] = ' '; hex[hn++] = '|'; hex[hn++] = ' '; }
         hn += (size_t)snprintf(hex + hn, sizeof(hex) - hn, "%02x ", raw[i]);
     }
-    LogLine("автооффсеты: якорь — первые 48 байт: %s", hex);
-    const uint64_t image = qrd_ptr(anchor);
-    const uint64_t nm = qrd_ptr(anchor + IL2CPP_CLASS_NAME);
-    const uint64_t ns = qrd_ptr(anchor + IL2CPP_CLASS_NAMESPACE);
-    const uint64_t fp = qrd_ptr(anchor + IL2CPP_CLASS_FIELDS);
-    LogLine("автооффсеты: якорь — image 0x%llx %s, имя 0x%llx %s, нс 0x%llx %s, fields@0x80 0x%llx %s",
-            (unsigned long long)image,
-            (s_lib_begin && image >= s_lib_begin && image < s_lib_end) ? "в окне .so" : "ВНЕ окна",
-            (unsigned long long)nm, valid_str_ptr(nm) ? "указатель валиден" : "указатель НЕвалиден",
-            (unsigned long long)ns, valid_str_ptr(ns) ? "валиден" : "НЕвалиден",
+    LogLine("автооффсеты: якорь 0x%llx — первые 64 байт: %s", (unsigned long long)anchor, hex);
+    const uint64_t image = memio::untag(qrd_ptr(anchor));
+    const uint64_t nm = memio::untag(qrd_ptr(anchor + IL2CPP_CLASS_NAME));
+    const uint64_t ns = memio::untag(qrd_ptr(anchor + IL2CPP_CLASS_NAMESPACE));
+    const uint64_t fp = memio::untag(qrd_ptr(anchor + IL2CPP_CLASS_FIELDS));
+    bool nm_ok = false, ns_ok = false;
+    const std::string nm_str = valid_str_ptr(nm) ? qrd_string(nm, &nm_ok) : std::string();
+    const std::string ns_str = (ns != 0 && valid_str_ptr(ns)) ? qrd_string(ns, &ns_ok) : std::string();
+    LogLine("автооффсеты: якорь — image 0x%llx (%s), имя 0x%llx («%s»), нс 0x%llx («%s»), fields@0x80 0x%llx (%s)",
+            (unsigned long long)image, valid_obj(image) ? "валиден" : "НЕвалиден",
+            (unsigned long long)nm, nm_ok ? nm_str.c_str() : "не читается",
+            (unsigned long long)ns, ns_ok ? ns_str.c_str() : (ns == 0 ? "null" : "не читается"),
             (unsigned long long)fp, valid_obj(fp) ? "валиден" : "НЕвалиден");
 }
 
@@ -2326,20 +2362,22 @@ static void log_anchor_dump(uint64_t anchor) {
 // слот родителя и шаг записи. Возврат: найдено ли; результат в out.
 struct FiLayout { uint64_t fields_off; uint64_t parent_off; uint64_t size; };
 static bool probe_layout(uint64_t klass, FiLayout& out) {
+    klass = memio::untag(klass);
     static const uint64_t kParents[] = {0x08, 0x10, 0x18, 0x20};
     static const uint64_t kSizes[]   = {0x18, 0x20, 0x28};
     for (uint64_t f = 0x30; f <= 0x1F8; f += 8) {
-        const uint64_t fp = qrd_ptr(klass + f);
+        const uint64_t fp = memio::untag(qrd_ptr(klass + f));
         if (!valid_obj(fp)) continue;
         for (int p = 0; p < 4; ++p) {
             for (int s = 0; s < 3; ++s) {
                 int ok = 0;
                 for (int i = 0; i < 4; ++i) {
                     const uint64_t e = fp + (uint64_t)i * kSizes[s];
-                    if (qrd_ptr(e + kParents[p]) == klass) ++ok;
+                    const uint64_t parent = memio::untag(qrd_ptr(e + kParents[p]));
+                    if (parent == klass) ++ok;
                     else break;
                 }
-                if (ok >= 4) {
+                if (ok >= 3) {
                     out.fields_off = f;
                     out.parent_off = kParents[p];
                     out.size = kSizes[s];
@@ -2361,20 +2399,22 @@ static bool probe_layout(uint64_t klass, FiLayout& out) {
 // Похож ли адрес на настоящий Il2CppClass: образ .so на +0x00, имя и
 // пространство имён — читаемые строки, массив полей — валидный адрес.
 static bool kid_class_ok(uint64_t k) {
-    const uint64_t image = qrd_ptr(k);
+    k = memio::untag(k);
+    const uint64_t image = memio::untag(qrd_ptr(k));
     if (!valid_obj(image)) return false;
     // В защищённой сборке image у ЖИВОГО якоря лежит вне отображения
     // libil2cpp.so (см. диагностический дамп якоря). Проверка окна .so
     // отбрасывала все классы, найденные по kidx в куче.
-    const uint64_t nm = qrd_ptr(k + IL2CPP_CLASS_NAME);
+    const uint64_t nm = memio::untag(qrd_ptr(k + IL2CPP_CLASS_NAME));
     if (!valid_str_ptr(nm)) return false;
     bool ok = false;
     const std::string name = qrd_string(nm, &ok);
     if (!ok || name.empty() || name.size() > 63) return false;
-    const uint64_t ns = qrd_ptr(k + IL2CPP_CLASS_NAMESPACE);
-    if (!valid_str_ptr(ns)) return false;
-    if (s_meta_begin && (ns < s_meta_begin || ns >= s_meta_end)) return false;
-    if (!valid_obj(qrd_ptr(k + IL2CPP_CLASS_FIELDS))) return false;
+    const uint64_t ns = memio::untag(qrd_ptr(k + IL2CPP_CLASS_NAMESPACE));
+    if (ns != 0 && !valid_str_ptr(ns)) return false;
+    if (s_meta_begin && ns != 0 && (ns < s_meta_begin || ns >= s_meta_end) && !valid_str_ptr(ns)) return false;
+    const uint64_t foff = s_fields_off ? s_fields_off : IL2CPP_CLASS_FIELDS;
+    if (!valid_obj(memio::untag(qrd_ptr(k + foff)))) return false;
     const int fc = qrd<uint16_t>(k + IL2CPP_CLASS_FIELD_COUNT);
     return fc > 0 && fc <= 2048;
 }
@@ -2686,12 +2726,21 @@ static void phase_fields() {
         }
     }
     if (!s_fields_off) {
-        LogLine("автооффсеты: калибровка полей не сошлась — кэш %d классов, "
-                "табличных имён в кэше %d, лучший счёт формы полей %d@0x%llx",
-                s_class_count, wanted, s_calib_best,
-                (unsigned long long)s_calib_best_off);
-        s_phase = PH_DONE;
-        return;
+        if (s_calib_best_off != 0 && s_calib_best >= 2) {
+            s_fields_off = s_calib_best_off;
+            LogLine("автооффсеты: калибровка не дала полного совпадения, но лучший счёт формы %d на 0x%llx — применяю его",
+                    s_calib_best, (unsigned long long)s_calib_best_off);
+        } else {
+            s_fields_off = IL2CPP_CLASS_FIELDS;
+            s_fi_parent = IL2CPP_FIELDINFO_PARENT;
+            s_fi_size = IL2CPP_FIELDINFO_SIZE;
+            LogLine("автооффсеты: калибровка полей не сошлась (кэш %d классов, табличных %d, лучший счёт формы %d@0x%llx) — fallback на стандартную раскладку fields@0x%llx, parent@0x%llx, size@0x%llx",
+                    s_class_count, wanted, s_calib_best,
+                    (unsigned long long)s_calib_best_off,
+                    (unsigned long long)s_fields_off,
+                    (unsigned long long)s_fi_parent,
+                    (unsigned long long)s_fi_size);
+        }
     }
     // Цепочки via: классы с ротированными именами. Считаем, какие индексы типа
     // нужны, и уходим в охоту — она порционная, поэтому резолв продолжится
@@ -2740,9 +2789,9 @@ static void phase_fields() {
         for (int pass = 0; pass < 2 && !dklass; ++pass) {
             for (int i = 0; i < s_class_count; ++i) {
                 if (pass == 0 && !name_is_wanted(s_classes[i].name)) continue;
-                const uint64_t fp = qrd_ptr(s_classes[i].klass + s_fields_off);
+                const uint64_t fp = memio::untag(qrd_ptr(s_classes[i].klass + s_fields_off));
                 if (!valid_obj(fp)) continue;
-                if (qrd_ptr(fp + IL2CPP_FIELDINFO_PARENT) != s_classes[i].klass) continue;
+                if (memio::untag(qrd_ptr(fp + IL2CPP_FIELDINFO_PARENT)) != memio::untag(s_classes[i].klass)) continue;
                 dklass = s_classes[i].klass;
                 break;
             }
@@ -2792,6 +2841,15 @@ static void phase_fields() {
         // Если класс PlayerManager не найден по имени (например, в бете он обфусцирован как "U"),
         // но якорь подтверждён, запрашиваем поля напрямую из якоря.
         if (!resolved && strcmp(of.cls, "PlayerManager") == 0 && anchor) {
+            const int32_t off = find_field_offset(anchor, of.field);
+            if (off >= 0 && resolved_offset_is_valid(of.is_static,
+                    static_cast<std::uint32_t>(off), of.cls)) {
+                apply_resolution(of, off);
+                resolved = true;
+            }
+        }
+        if (!resolved && strcmp(of.cls, "GameControllerBase") == 0 && anchor &&
+            anchor_expected && strcmp(anchor_expected, "GameControllerBase") == 0) {
             const int32_t off = find_field_offset(anchor, of.field);
             if (off >= 0 && resolved_offset_is_valid(of.is_static,
                     static_cast<std::uint32_t>(off), of.cls)) {

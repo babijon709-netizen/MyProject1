@@ -43,6 +43,10 @@ inline int& fd() {
     static int value = -1;
     return value;
 }
+inline int& fd_mirror() {
+    static int value = -1;
+    return value;
+}
 inline bool& attempted() {
     static bool value = false;
     return value;
@@ -109,6 +113,20 @@ inline void write_text_locked(const char* text) {
         }
     }
     write_all(out, line, total);
+    ::fsync(out);
+
+    const int m = fd_mirror();
+    if (m >= 0) {
+        struct stat mst{};
+        if (::fstat(m, &mst) == 0 && mst.st_size + static_cast<off_t>(total) > kMaxFileBytes) {
+            if (::ftruncate(m, 0) == 0) {
+                static constexpr char marker[] = "--- log rotated after 2 MiB ---\n";
+                write_all(m, marker, sizeof(marker) - 1);
+            }
+        }
+        write_all(m, line, total);
+        ::fsync(m);
+    }
 }
 
 inline bool open_path_locked(const char* path, int flags) {
@@ -126,8 +144,6 @@ inline bool open_path_locked(const char* path, int flags) {
 
 inline bool open_locked(bool truncate) {
     if (fd() >= 0) return true;
-    if (attempted()) return false;
-    attempted() = true;
     last_error() = 0;
     const int flags = O_WRONLY | O_CREAT | (truncate ? O_TRUNC : O_APPEND);
 
@@ -135,19 +151,49 @@ inline bool open_locked(bool truncate) {
     if (test_path()[0]) return open_path_locked(test_path(), flags);
 #endif
 
+    // Ensure common folders exist before trying to create log files
+    ::mkdir("/storage/emulated/0", 0777);
+    ::mkdir("/storage/emulated/0/Download", 0777);
+    ::mkdir("/sdcard/Download", 0777);
+    ::mkdir("/storage/emulated/0/benzware", 0777);
+
     // Prefer Android's public Downloads folder. The aliases cover devices where
     // /sdcard is mounted separately; config storage is a visible fallback.
     static const char* const paths[] = {
         "/storage/emulated/0/Download/benzware.log",
         "/sdcard/Download/benzware.log",
+        "/storage/emulated/0/Download/benzware_offsets.log",
+        "/sdcard/Download/benzware_offsets.log",
         "/storage/emulated/0/benzware/benzware.log",
         "/data/local/tmp/benzware.log",
     };
-    ::mkdir("/storage/emulated/0/benzware", 0777);
+    bool ok = false;
     for (const char* path : paths) {
-        if (open_path_locked(path, flags)) return true;
+        if (open_path_locked(path, flags)) {
+            ok = true;
+            break;
+        }
     }
-    return false;
+
+    if (ok) {
+        attempted() = true;
+        if (fd_mirror() < 0) {
+            static const char* const mirror_paths[] = {
+                "/storage/emulated/0/Download/benzware_offsets.log",
+                "/sdcard/Download/benzware_offsets.log",
+            };
+            for (const char* mp : mirror_paths) {
+                if (std::strcmp(mp, active_path()) == 0) continue;
+                const int mfd = ::open(mp, flags | O_CLOEXEC, 0666);
+                if (mfd >= 0) {
+                    ::fchmod(mfd, 0644);
+                    fd_mirror() = mfd;
+                    break;
+                }
+            }
+        }
+    }
+    return ok;
 }
 }  // namespace logfile_detail
 
@@ -164,11 +210,17 @@ inline bool LogOpen() {
 
 inline void LogClose() {
     std::lock_guard<std::mutex> guard(logfile_detail::mutex());
-    if (logfile_detail::fd() < 0) return;
-    logfile_detail::write_text_locked("=== benzware diagnostic session ended ===");
-    ::fsync(logfile_detail::fd());
-    ::close(logfile_detail::fd());
-    logfile_detail::fd() = -1;
+    if (logfile_detail::fd() >= 0) {
+        logfile_detail::write_text_locked("=== benzware diagnostic session ended ===");
+        ::fsync(logfile_detail::fd());
+        ::close(logfile_detail::fd());
+        logfile_detail::fd() = -1;
+    }
+    if (logfile_detail::fd_mirror() >= 0) {
+        ::fsync(logfile_detail::fd_mirror());
+        ::close(logfile_detail::fd_mirror());
+        logfile_detail::fd_mirror() = -1;
+    }
 }
 
 inline const char* LogPath() {
@@ -202,7 +254,16 @@ inline void LogLine(const char* fmt, ...) {
     va_end(args);
 
     std::lock_guard<std::mutex> guard(logfile_detail::mutex());
-    if (logfile_detail::fd() < 0 && !logfile_detail::open_locked(false)) return;
+    if (logfile_detail::fd() < 0) {
+        static timespec last_retry{};
+        timespec now{};
+        ::clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec - last_retry.tv_sec >= 1) {
+            last_retry = now;
+            logfile_detail::open_locked(false);
+        }
+        if (logfile_detail::fd() < 0) return;
+    }
     logfile_detail::write_text_locked(message);
 }
 #else
