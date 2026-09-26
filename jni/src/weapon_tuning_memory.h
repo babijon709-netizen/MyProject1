@@ -128,7 +128,12 @@ template<class IO> class Controller {
         }
         return ok;
     }
-    bool resolve(uint64_t player, const Layout& layout, Context& c) {
+    // layout может быть nullptr: в generic-режиме (сборки нет в kLayouts)
+    // раскладку подтверждают живые метаданные, а имя класса-калькулятора
+    // берётся по пространству имён. Раньше здесь стояла ссылка, и в этом
+    // режиме происходило разыменование нуля — чит падал мгновенно при
+    // включении любой функции блока «Оружие».
+    bool resolve(uint64_t player, const Layout* layout, Context& c) {
         uint64_t fp=0, weapon=0, config=0, recoil=0, dispersion=0, calc=0, back=0, p=0;
         uint8_t local=0;
         resolve_step_ = 1;
@@ -165,7 +170,8 @@ template<class IO> class Controller {
         resolve_step_ = 4;
         if (!io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true) ||
             !pointer(io,weapon+0x1f8,calc) ||
-            !(layout.calculator ? io.named(calc,layout.calculator,"") : io.calculator_class(calc)) ||
+            !((layout && layout->calculator) ? io.named(calc,layout->calculator,"")
+                                             : io.calculator_class(calc)) ||
             !c.calculator.capture(io,calc,false)) return false;
         resolve_step_ = 5;
         if (!pointer(io,calc+0x18,p) || p!=config ||
@@ -176,7 +182,7 @@ template<class IO> class Controller {
         resolve_step_ = 0;
         return true;
     }
-    bool apply(size_t begin, size_t end, uint64_t player, const Layout& layout) {
+    bool apply(size_t begin, size_t end, uint64_t player, const Layout* layout) {
         for (size_t i=begin; i<end; ++i) {
             float now=0;
             if (!io.read(address(i),now) || !valid(now)) return false;
@@ -265,7 +271,7 @@ public:
             return;
         }
         Context next;
-        if (!resolve(player,*layout,next)) {
+        if (!resolve(player,layout,next)) {
             diagnostic=9+resolve_step_;
             if (!restore(0,9)) { recoil=spread=Status::Failed; diagnostic=20; }
             return;
@@ -274,9 +280,9 @@ public:
             if (!restore(0,9)) { recoil=spread=Status::Failed; diagnostic=20; return; }
             context_=next;
         }
-        if (nr && (recoil=apply(0,6,player,*layout)?Status::Active:Status::Failed)==Status::Failed)
+        if (nr && (recoil=apply(0,6,player,layout)?Status::Active:Status::Failed)==Status::Failed)
             diagnostic=resolve_step_ ? 9+resolve_step_ : 21;
-        if (ns && (spread=apply(6,9,player,*layout)?Status::Active:Status::Failed)==Status::Failed)
+        if (ns && (spread=apply(6,9,player,layout)?Status::Active:Status::Failed)==Status::Failed)
             diagnostic=resolve_step_ ? 9+resolve_step_ : 21;
     }
 };
