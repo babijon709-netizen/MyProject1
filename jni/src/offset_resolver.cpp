@@ -508,6 +508,15 @@ std::uint64_t s_via_klass[kViaFieldCount][2];
 // Метка целевого класса для списка занятых смещений (см. третий проход).
 char          s_via_mark[kViaFieldCount][40];int      s_applied_count = 0;
 bool     s_logged = false;
+// Повторный подбор. Игра поднимается не мгновенно: пока грузится мир, классов
+// Assembly-CSharp в памяти просто НЕТ (рантайм создаёт Il2CppClass по мере
+// обращения). Лог 26.09 17:56 — ровно этот случай: метадата нашлась, все 46
+// имён в таблице строк есть, а по указателям нашлись только системные классы
+// (Delegate, Dictionary), PlayerManager не существовал. Резолвер уходил в
+// PH_DONE навсегда и больше не пробовал — чит так и оставался пустым.
+int      s_rescan_count = 0;
+double   s_rescan_at = 0;
+bool     s_so_scan_failed = false;   // скан .so на этой базе уже не дал табличных классов
 pid_t    s_bound_pid = -1;        // к какому процессу/базе собрано состояние
 uint64_t s_bound_base = 0;
 double   s_last_progress_log = 0; // темп строк прогресса в лог
@@ -1164,7 +1173,12 @@ static void phase_maps() {
         // заканчивается ничем (лог 26.09: 768 «классов», 0 табличных). Перед
         // сканом дёшево проверяем начала всех отображений на сигнатуру
         // метаданных: доли секунды, зато дальше фильтр имён работает точно.
-        if (!s_meta_begin) {
+        if (s_meta_begin && s_so_scan_failed) {
+            // Повторная попытка на той же базе: скан .so уже показал, что
+            // табличных классов там нет, а окно имён известно — незачем ещё
+            // раз тратить на него две минуты.
+            start_blob_scan("скан .so уже не дал классов, окно имён известно");
+        } else if (!s_meta_begin) {
             s_meta_scan_first = true;
             s_meta_quick_only = true;
             start_meta_scan("якоря нет, окно имён неизвестно");
@@ -1213,6 +1227,11 @@ static int try_class_candidate(uint64_t v) {
                 name.c_str(), (unsigned long long)s_meta_begin, (unsigned long long)s_meta_end);
     }
     const int cap_total = (int)(sizeof(s_classes) / sizeof(s_classes[0]));
+    // Без окна имён «класс» — это любая структура, у которой на +0x10 лежит
+    // читаемая строка. Лог 26.09: 768 таких «классов» при 239 604 совпадениях
+    // по форме, и ни одного настоящего. Копить их незачем: они забивают
+    // массив и врут в статусе, что база живая. Берём только табличные имена.
+    if (!s_meta_begin && !name_is_wanted(name.c_str())) return 1;
     if (s_class_count >= kClassCap && !name_is_wanted(name.c_str())) return 1;
     if (s_class_count >= cap_total) return 1;
     FoundClass& fc = s_classes[s_class_count];
@@ -2651,6 +2670,7 @@ static void phase_scan(double deadline) {
                         s_anchor_wait_since = mono_seconds();
                         LogLine("автооффсеты: скан .so окончен, но в TypeInfo найден токен — жду инициализации класса (попытка %d/15)", s_anchor_retries);
                     } else {
+                        s_so_scan_failed = true;
                         start_metadata_bootstrap("табличных классов в .so нет");
                     }
                 } else {
@@ -2661,6 +2681,7 @@ static void phase_scan(double deadline) {
             // Классов нет: база помечена пустой, скан пойдёт по следующему
             // кандидату — новый список сегментов соберёт PH_MAPS.
         } else {
+            s_so_scan_failed = true;
             start_metadata_bootstrap("в .so живых классов не нашлось");
         }
     }
@@ -4284,6 +4305,54 @@ static bool load_offsets_cache() {
 
 // ---- Публичный слой ----------------------------------------------------------
 
+// Не хватает главного: без класса игрока и контроллера не работает ни ESP,
+// ни аим, ни фарм — сколько бы смещений ни разрешилось.
+static bool class_statics_live(const char* name) {
+    for (int n = 0; n < 8; ++n) {
+        const uint64_t k = offset_resolver_class_nth(name, nullptr, n);
+        if (!k) break;
+        const uint64_t statics = memio::untag(qrd_ptr(k + IL2CPP_CLASS_STATIC_FIELDS));
+        if (valid_obj(statics)) return true;
+    }
+    return false;
+}
+
+static bool resolve_incomplete() {
+    // Мало найти класс: пока игра в меню, рантайм не инициализировал его
+    // статику (Il2CppClass.static_fields == 0), а именно через неё ядро берёт
+    // локального игрока и реестр объектов. Лог 26.09 17:59 прямо об этом:
+    // «нет локального игрока через GameControllerBase.static: … static=0x0».
+    if (!class_statics_live("GameControllerBase")) return true;
+    if (!offset_resolver_class("PlayerManager", nullptr)) return true;
+    if (!class_statics_live("NetworkClient")) return true;
+    return s_resolved < kOrFieldCount / 2;
+}
+
+// Повторный подбор БЕЗ полного сброса: окно имён, признак «скан .so пустой» и
+// качество прежнего резолва сохраняются, поэтому повтор стоит не минуты, а
+// один проход по указателям.
+static void soft_rescan() {
+    LogLine("автооффсеты: повторный подбор (попытка %d из 20): классов %d, разрешено %d/%d",
+            s_rescan_count, s_class_count, s_resolved, kOrFieldCount);
+    s_class_count = 0;
+    s_names_ok = 0; s_names_fail = 0; s_shape_pass = 0;
+    s_applied_count = 0; s_resolved = 0; s_changed = 0;
+    s_rollback_count = 0;
+    s_via_class_count = 0; s_via_done = false; s_via_found = 0;
+    s_logged = false;
+    s_cache_saved = false;
+    s_fields_off = 0; s_calib_best = 0; s_calib_best_off = 0;
+    s_ptr_region = 0; s_ptr_pos = 0; s_ptr_scanned = 0;
+    s_ptr_hits = 0; s_ptr_verified = 0; s_ptr_inwin = 0;
+    s_ptr_noverify = 0; s_ptr_names = 0; s_ptr_readfails = 0;
+    s_ptr_rinwin = 0; s_ptr_best_hits = 0; s_ptr_best_range = -1;
+    s_ptr_passes = 0;
+    for (int k = 0; k < 3; ++k) { s_top_hits[k] = 0; s_top_range[k] = -1; }
+    // Карта процесса за это время изменилась (игра домапила и метадату, и
+    // кучу): перечитываем её целиком — фаза карт сама решит, куда идти дальше.
+    s_phase = PH_MAPS;
+}
+
 void offset_resolver_tick() {
     if (g_pid <= 0 || !g_il2cpp_base) return;
     // Знания о базах (пустые/живая) привязаны к процессу: новый процесс —
@@ -4294,6 +4363,7 @@ void offset_resolver_tick() {
         s_dead_count = 0;
         s_good_logged = false;
         s_prev_resolved = 0;   // качество резолва привязано к процессу
+        s_rescan_count = 0; s_rescan_at = 0; s_so_scan_failed = false;
     }
     // Перепривязка может снова встать на пустой образ: после самообновления
     // игры в карте два образа libil2cpp.so, и ELF-проверка их не различает.
@@ -4394,6 +4464,22 @@ void offset_resolver_tick() {
             s_cache_saved = save_offsets_cache();
             if (!s_cache_saved) s_cache_save_retry_at = mono_seconds() + 10.0;
         }
+        // Игра могла ещё грузиться: классов Assembly-CSharp в памяти нет, пока
+        // мир не поднялся. Ждём и пробуем снова — иначе чит остаётся пустым до
+        // перезапуска (лог 26.09 17:56: 6 констант из 160, PlayerManager нет).
+        if (!s_from_cache && resolve_incomplete() && s_rescan_count < 20) {
+            const double now = mono_seconds();
+            if (!s_rescan_at) {
+                s_rescan_at = now + 25.0;
+                LogLine("автооффсеты: ключевых классов ещё нет (разрешено %d/%d) — "
+                        "повторю подбор через 25 с (игра, возможно, ещё грузится), попытка %d из 20",
+                        s_resolved, kOrFieldCount, s_rescan_count + 1);
+            } else if (now >= s_rescan_at) {
+                ++s_rescan_count;
+                s_rescan_at = 0;
+                soft_rescan();
+            }
+        }
     }
 }
 
@@ -4411,6 +4497,7 @@ void offset_resolver_reset() {
     s_fields_off = 0; s_calib_best = 0; s_calib_best_off = 0;
     s_fi_size = IL2CPP_FIELDINFO_SIZE; s_fi_parent = IL2CPP_FIELDINFO_PARENT;
     s_resolved = 0; s_changed = 0; s_rollback_count = 0;
+    s_rescan_at = 0;   // расписание повтора — свойство прошлого прохода
     s_heap_range_count = 0; s_heap_range_idx = 0;
     s_heap_pos = s_heap_end = 0; s_heap_done = false;
     s_meta_range_count = 0; s_meta_range_idx = 0;
@@ -4577,6 +4664,15 @@ void offset_resolver_status(char* out, size_t cap) {
         return;
     }
     // PH_DONE
+    if (s_rescan_at > 0 && !s_from_cache) {
+        // Резолв прошёл, но классов игры в памяти ещё нет (мир не загружен).
+        // Слово «готов» в строке сохраняем: результат применён, просто он
+        // неполный и будет уточнён повтором.
+        const int left = (int)(s_rescan_at - mono_seconds());
+        snprintf(out, cap, "готов частично: полей %d/%d, классов игры нет (мир грузится) — повтор через %d с",
+                 s_resolved, kOrFieldCount, left > 0 ? left : 0);
+        return;
+    }
     if (s_from_cache) {
         snprintf(out, cap, "готов (кэш первого входа): полей %d/%d", s_resolved, kOrFieldCount);
         return;
