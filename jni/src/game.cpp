@@ -3829,8 +3829,69 @@ static double g_direct_position_fail_since = 0.0;
 static constexpr double kDirectPositionSettleSeconds = 0.6;
 static bool g_body_caches_dirty = false; // clear per-player caches on the next frame
 
+// Перекрёстная проверка источника позиций игроков. Прямое поле
+// (PlayerManager+0x1D4, lastSavedPosition) на release-ветке живёт вровень с
+// моделью; на сентябрьской бете (build-id 76fbd4ff…) боксы «проваливаются под
+// землю и летят отдельно от противников», хотя раскладка класса идентична и
+// валидация по пространственному разбросу спокойно проходит — то есть поле
+// формально валидно, но семантически врёт (устаревший/интерполированный
+// якорь). Живая эталонная дорожка — иерархия нативных трансформов (та самая,
+// что строит скелет аима — он на бете работает безотказно). Раз в 0.3 с
+// сравниваем обе позиции у ближайшего игрока; если расхождение держится 2 с —
+// до конца сессии уходим на иерархию. Флаг защёлкиваем, чтобы recheck_*
+// не гонял режим туда-обратно (на бете прямое поле продолжает «валидироваться»).
+static double s_direct_pos_audit_next = 0.0;
+static double s_direct_pos_audit_bad_since = 0.0;
+static bool   s_direct_pos_disabled_by_audit = false;
+
+static void audit_direct_player_position(const std::vector<uint64_t>& players,
+                                         const std::vector<char>& position_ok,
+                                         size_t index) {
+    if (!g_use_direct_player_position || s_direct_pos_disabled_by_audit) return;
+    if (!g_transform_hierarchy_layout_valid) return; // эталона ещё нет — судить нечем
+    const double now = mono_seconds();
+    if (now < s_direct_pos_audit_next) return;
+    s_direct_pos_audit_next = now + 0.3;
+    if (index >= players.size() || !position_ok[index]) return;
+    const uint64_t src = players[index];
+    Vec3 direct = rd_v3(src + g_player_position_offset);
+    if (!vec3_is_finite(direct)) { s_direct_pos_audit_bad_since = 0.0; return; }
+    const uint64_t native = resolve_player_native_transform(src);
+    Vec3 hier{};
+    if (!native || !read_transform_hierarchy_position(native, hier) ||
+        !vec3_is_finite(hier) || !position_looks_like_world_space(hier)) {
+        s_direct_pos_audit_bad_since = 0.0;
+        return;
+    }
+    const float dx = direct.x - hier.x, dz = direct.z - hier.z;
+    const float planar = sqrtf(dx * dx + dz * dz);
+    const float dy = fabsf(direct.y - hier.y);
+    if (planar > 500.0f) { s_direct_pos_audit_bad_since = 0.0; return; } // эталон сам мусорный
+    // Пороги выше естественной дисторсии (ездок, интерполяция ~0.13 м на
+    // 4 м/с при 30 кадрах): вертикаль 0.8 м — явный «провал под землю»,
+    // плоскость 2.5 м — явное отставание/зависание на серверном тике.
+    if (dy > 0.8f || planar > 2.5f) {
+        if (s_direct_pos_audit_bad_since == 0.0) s_direct_pos_audit_bad_since = now;
+        if (now - s_direct_pos_audit_bad_since > 2.0) {
+            s_direct_pos_disabled_by_audit = true;
+            s_direct_pos_audit_bad_since = 0.0;
+            g_use_direct_player_position = false;
+            g_matrix_configuration_validated = false;
+            g_body_caches_dirty = true;
+            LogLine("визуал: прямое поле позиции ушло от живого трансформа на %.1f/%.1f м — "
+                    "перешёл на иерархию трансформов до конца сессии",
+                    (double)planar, (double)dy);
+        }
+    } else {
+        s_direct_pos_audit_bad_since = 0.0;
+    }
+}
+
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    uint64_t best_offset = find_direct_player_position_offset(players);
+    // Аудит уже поймал расхождение прямого поля с живым трансформом — прямые
+    // поля не переоткрываем до конца сессии, идём сразу по иерархии.
+    uint64_t best_offset = s_direct_pos_disabled_by_audit
+        ? 0 : find_direct_player_position_offset(players);
     if (best_offset) {
         g_direct_position_fail_streak = 0;
         g_direct_position_fail_since = 0.0;
@@ -3858,6 +3919,7 @@ static bool discover_player_position_offset(const std::vector<uint64_t>& players
 // While on the hierarchy fallback, keep probing the direct fields and switch
 // back as soon as they validate again.
 static void recheck_direct_player_position(const std::vector<uint64_t>& players) {
+    if (s_direct_pos_disabled_by_audit) return; // прямое поле на этой сборке обманывает (см. аудит)
     if (g_use_direct_player_position || !g_player_position_validated) return;
     if (++g_direct_position_recheck < 15) return;
     g_direct_position_recheck = 0;
@@ -8846,6 +8908,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             watch_boxes(result, (size_t)-1, nullptr, 8); return result;
         }
         g_local_position_fail_streak = 0;
+
+        // Перекрёстная проверка источника позиций против живой иерархии
+        // трансформов (см. audit_direct_player_position): на сентябрьской бете
+        // прямое поле позиции обманывает, а скелет/трансформы — нет.
+        audit_direct_player_position(s_transforms, position_ok,
+            nearest_index != s_transforms.size() ? nearest_index : first_valid_index);
     }
 
     g_frame_vp = vp;
@@ -8855,6 +8923,60 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_local_valid = has_local_position;
     g_frame_publish_fail_streak = 0; // this frame is healthy
     g_frame_watchdog_resets = 0;
+
+    // Сторож камеры по позе и направлению. Матрица вида обязана: (а) сидеть
+    // над локальным игроком (~1.6 м от ступней, до ~2 м в плоскости с учётом
+    // езды/прицеливания); (б) смотреть туда же, куда живой луч выстрела
+    // (KCC LookDirection), с допуском на sway/отдачу. В логе сентябрьской беты
+    // видно расхождение 3.7-7.5° между ними, а значит взятая матрица картинке
+    // не соответствует (замороженный кэш +0x70 или чужая камера): просим
+    // перевалидацию матричной раскладки. В фрикаме камера умышленно улетает
+    // от тела — сторож там молчит.
+    if (has_local_position && !transform_camera_mode && !g_freecam_on) {
+        static double s_cam_watch_bad_since = 0.0;
+        static double s_cam_watch_last_fire = -30.0;
+        const double now_w = mono_seconds();
+        bool bad = false;
+        float worst = 0.0f; // метра для позы, градуса для направления
+        bool worst_is_ang = false;
+        Vec3 cpos{};
+        if (camera_position_from_view(view, cpos) && vec3_is_finite(cpos)) {
+            const float pdx = cpos.x - local.x, pdz = cpos.z - local.z;
+            const float planar = sqrtf(pdx * pdx + pdz * pdz);
+            const float dy = cpos.y - local.y;
+            if (planar > 2.0f || dy < 0.5f || dy > 2.2f) { bad = true; worst = planar; }
+        }
+        if (!bad && g_aim_ref_valid) {
+            Vec3 vf = {-mat_get(view, 2, 0), -mat_get(view, 2, 1), -mat_get(view, 2, 2)};
+            const float fl = sqrtf(vf.x * vf.x + vf.y * vf.y + vf.z * vf.z);
+            if (fl > 0.5f && fl < 2.0f) {
+                vf = {vf.x / fl, vf.y / fl, vf.z / fl};
+                const float dot = vf.x * g_aim_ref_forward.x + vf.y * g_aim_ref_forward.y + vf.z * g_aim_ref_forward.z;
+                if (dot < 0.985f) { // > ~10° — за пределами любого sway
+                    bad = true; worst_is_ang = true;
+                    worst = acosf(dot > -1.0f ? (dot < 1.0f ? dot : 1.0f) : -1.0f) * 57.2957795f;
+                }
+            }
+        }
+        if (bad) {
+            if (s_cam_watch_bad_since == 0.0) s_cam_watch_bad_since = now_w;
+            // На выбранную сборку реагируем быстрее, чем generic-сторож:
+            // одна секунда устойчивого расхождения + антиспам 15 с.
+            if (now_w - s_cam_watch_bad_since > 1.0 && now_w - s_cam_watch_last_fire > 15.0) {
+                s_cam_watch_last_fire = now_w; s_cam_watch_bad_since = 0.0;
+                if (worst_is_ang) {
+                    LogLine("визуал: матрица вида смотрит в %.1f° от живого луча взгляда — перевалидация матриц",
+                            (double)worst);
+                } else {
+                    LogLine("визуал: камера из матрицы вида уходит от локального игрока на %.1f м — перевалидация матриц",
+                            (double)worst);
+                }
+                g_matrix_configuration_validated = false;
+            }
+        } else {
+            s_cam_watch_bad_since = 0.0;
+        }
+    }
 
     // Fallback camera basis straight from the view matrix (rows: right, up,
     // -forward). Kept separate from g_cam_* — the pose path stays authoritative
