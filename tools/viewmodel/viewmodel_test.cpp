@@ -503,13 +503,23 @@ static void loot_tests() {
     {   // Невразумительные elapsed/initialFrame — пропуск без записи.
         LootFixture f;
         uint64_t a = f.add_promise(0, 0.35f, std::numeric_limits<float>::quiet_NaN());
-        uint64_t b = f.add_promise(0, 0.35f, 0.4f);
+        uint64_t b = f.add_promise(0, 0.35f, 2.0f);
         uint64_t d = f.add_promise(0, 0.35f, 0.01f, -5);
         f.tick();
         assert(f.c.neutralized() == 0);
         assert(f.io.get<uint32_t>(a + DELAYPROMISE_TIMESPAN) == kCadenceBits);
         assert(f.io.get<uint32_t>(b + DELAYPROMISE_TIMESPAN) == kCadenceBits);
         assert(f.io.get<uint32_t>(d + DELAYPROMISE_TIMESPAN) == kCadenceBits);
+    }
+    {   // Длинный игровой кадр: elapsed живого ожидания 0.35 перескочил 0.35
+        // до нашего первого тика (пики кадра на устройстве — 0.5 с и больше).
+        // Ожидание обязано ускоряться, а не отбрасываться — иначе при лагах
+        // подбор умирал («через раз»).
+        LootFixture f;
+        uint64_t a = f.add_promise(0, 0.35f, 0.42f);
+        f.tick();
+        assert(f.c.status == Status::Active && f.c.neutralized() == 1);
+        assert(f.io.get<uint32_t>(a + DELAYPROMISE_TIMESPAN) == 0u);
     }
     {   // Не тот билд: слот читается, но класс чужой — Failed, без записей.
         LootFixture f(1, false);

@@ -33,6 +33,18 @@
 // темп возвращается сам — восстанавливать нечего (в отличие от
 // weapon_tuning здесь нет «оригиналов», которые нужно вернуть).
 //
+// Почему подбор работал «через раз» (разбор 27.09):
+//  1. elapsed сверялся с потолком 0.36 с. При длинном игровом кадре (на
+//     этом устройстве встречаются пики 0.5-0.9 с) elapsed успевает
+//     перескочить потолок ДО нашего первого тика после создания ожидания —
+//     и валидное ожидание 0.35 отбрасывалось вовсе. Потолок поднят до
+//     0.60 с: роль проверки — отсечь мусор разорванного снимка, а не
+//     измерять кадры игры.
+//  2. Бюджет элементов был ОБЩИМ на тик: один гигантский loopItems в
+//     соседнем раннере съедал все 512 слотов, и ожидания сбора в своём
+//     раннере не попадали на запись несколько циклов. Теперь бюджет — на
+//     каждый раннер свой.
+//
 // Как находим активные обещания (всё остальное — только чтение):
 //   [base+PLAYERLOOPHELPER_TYPEINFO_RVA] → Il2CppClass* PlayerLoopHelper
 //     (имя «PlayerLoopHelper» / ns «Cysharp.Threading.Tasks» — сверка и кэш)
@@ -74,10 +86,17 @@ namespace fast_loot {
 inline constexpr std::uint32_t kCadenceBits = 0x3EB33333u;
 
 // Границы одного тика: активных ожиданий обычно единицы, но повреждённый или
-// замещённый посреди обхода массив не должен зациклить проход.
+// замещённый посреди обхода массив не должен зациклить проход. Бюджет
+// элементов — на РАННЕР (а не на тик): один большой массив не должен
+// голодать ожидания в соседних раннерах.
 inline constexpr int32_t kMaxRunners      = 64;
 inline constexpr std::size_t kMaxItemsPerTick = 512;
 inline constexpr int32_t kMaxItemsPerArray   = 4096;
+
+// Потолок elapsed живого ожидания 0.35 с: запас = длинный игровой кадр
+// (на устройстве встречались пики полсекунды и больше). Мусор разорванного
+// снимка отсекается лежащим выше потолком (см. обход).
+inline constexpr float kElapsedMax = 0.60f;
 
 template <class IO> class Controller {
     IO& io_;
@@ -94,6 +113,8 @@ template <class IO> class Controller {
     // чтобы один огромный массив не голодал соседей и свой хвост.
     std::uint64_t begin_runner_ = 0, item_phase_ = 0;
     std::uint32_t neutralized_ = 0;     // сколько ожиданий ускорено всего
+    std::uint32_t promises_seen_ = 0;   // сколько живых ожиданий 0.35 с встречено
+    std::uint32_t write_fails_ = 0;     // попыток записи, отклонённых гейтом кучи
     void forget_addresses() {
         // Сессия сменилась: ни один старый адрес не обязан быть валиден.
         helper_class_ = 0; promise_class_ = 0; scaled_class_ = 0;
@@ -195,6 +216,8 @@ public:
     viewmodel::Status status = viewmodel::Status::Off;
     explicit Controller(IO& io) : io_(io) {}
     std::uint32_t neutralized() const { return neutralized_; }
+    std::uint32_t promises_seen() const { return promises_seen_; }
+    std::uint32_t write_failures() const { return write_fails_; }
     bool has_state() const { return session_ != 0; }
     void reset() {
         // Выключение тумблера/отвязка: поле темпа переписывает сама игра при
@@ -202,6 +225,7 @@ public:
         // просто всё забываем.
         forget_addresses();
         session_ = 0; neutralized_ = 0;
+        promises_seen_ = 0; write_fails_ = 0;
         status = viewmodel::Status::Off;
     }
     void tick(std::uint64_t session, std::uint64_t base, bool enabled) {
@@ -230,11 +254,14 @@ public:
 
         std::uint32_t writes = 0;
         bool write_failed = false;
-        std::size_t budget = kMaxItemsPerTick;
         const std::uint64_t begin = begin_runner_ % (std::uint64_t)runners_len;
         begin_runner_ = begin + 1;
         item_phase_ += kMaxItemsPerTick;   // окно элементов едет вперёд каждый тик
-        for (std::uint64_t step = 0; step < (std::uint64_t)runners_len && budget > 0; ++step) {
+        for (std::uint64_t step = 0; step < (std::uint64_t)runners_len; ++step) {
+            // Бюджет — на РАННЕР, а не на тик: огромный loopItems в одном
+            // раннере не должен неделями голодать ожидания сбора в соседнем
+            // (это и был один из сценариев «подбор через раз»).
+            std::size_t budget = kMaxItemsPerTick;
             const std::uint64_t t = (begin + step) % (std::uint64_t)runners_len;
             std::uint64_t runner = 0;
             if (!pointer(runners + go_active::IL2CPP_ARRAY_FIRST_ELEMENT +
@@ -301,16 +328,23 @@ public:
                     continue;
                 float elapsed = 0.f;
                 std::int32_t frame = 0;
+                // Потолок kElapsedMax (0.60 с), а не 0.35+кадр: при длинном
+                // игровом кадре elapsed перескакивает 0.35 ДО нашего первого
+                // тика, и прежний порог 0.36 навсегда отбрасывал живое
+                // ожидание — один из сценариев «подбор через раз».
                 if (!io_.read(item + elapsed_off, elapsed) ||
-                    !viewmodel::finite(elapsed) || elapsed < 0.f || elapsed > 0.36f)
+                    !viewmodel::finite(elapsed) || elapsed < 0.f ||
+                    elapsed > kElapsedMax)
                     continue;
                 if (!io_.read(item + frame_off, frame) ||
                     frame < 0 || frame > 2000000000)
                     continue;
+                ++promises_seen_;
                 if (!io_.write_heap(item + span_off, 0.f) ||
                     !io_.read(item + span_off, span_bits) ||
                     span_bits != 0u) {
                     write_failed = true;
+                    ++write_fails_;
                     continue;
                 }
                 ++writes;
