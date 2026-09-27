@@ -41,16 +41,20 @@ viewmodel::FpsController<Memory> fps_controller(memory);
 // through the fresh anonymous-heap mapping gate.
 struct HeapMemory {
     template<class T> bool read(uint64_t address, T& value) { return memory.read(address,value); }
+    bool named_klass(uint64_t klass, const char* name, const char* namespaze) {
+        if (klass < 0x10000) return false;
+        uint64_t np = memory.ptr(klass + go_active::IL2CPP_CLASS_NAME);
+        uint64_t sp = memory.ptr(klass + go_active::IL2CPP_CLASS_NAMESPACE);
+        char n[96]{}, ns[96]{};
+        const size_t nl = std::strlen(name) + 1, sl = std::strlen(namespaze) + 1;
+        return nl <= sizeof(n) && sl <= sizeof(ns) && np && sp &&
+            g_mem.read_quiet(np, n, nl) && g_mem.read_quiet(sp, ns, sl) &&
+            std::memcmp(n, name, nl) == 0 && std::memcmp(ns, namespaze, sl) == 0;
+    }
     bool named(uint64_t object, const char* name, const char* namespaze) {
         if (object < 0x10000) return false;
-        uint64_t k=memory.ptr(object);
-        if (k < 0x10000) return false;
-        uint64_t np=memory.ptr(k+0x10), sp=memory.ptr(k+0x18);
-        char n[96]{}, ns[96]{};
-        const size_t nl=std::strlen(name)+1, sl=std::strlen(namespaze)+1;
-        return nl<=sizeof(n) && sl<=sizeof(ns) && np && sp &&
-            g_mem.read_quiet(np,n,nl) && g_mem.read_quiet(sp,ns,sl) &&
-            std::memcmp(n,name,nl)==0 && std::memcmp(ns,namespaze,sl)==0;
+        uint64_t k = memory.ptr(object);
+        return named_klass(k, name, namespaze);
     }
     // Имя калькулятора в новой бете обфусцировано. Проверяем валидный
     // Il2CppClass с пустым namespace; его тип подтверждается также обратными
@@ -183,45 +187,57 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             last_log = st;
         }
     };
-    // Resolve the current local player from the static source, NOT the ESP
-    // cache which intentionally tolerates stale identities during respawn.
+    const bool farm_enabled = g_state.farm_on && (g_farm_mask != 0);
+
+    // Resolve the current local player from the static source or g_local_player
     uint64_t player = 0;
     static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || settings.no_sway || settings.instant_ads ||
         controller.has_state() || settings.no_recoil || settings.no_spread ||
-        esp_silent_wants_no_spread() || weapons.has_state()) {
-        // The RVA may still point to a named but UNINITIALIZED class copy
-        // (device log: valid GameControllerBase, static_fields=0). Prefer the
-        // live class discovered by the resolver; only accept a source whose
-        // static block actually contains a local PlayerManager.
-        const uint64_t from_cache = offset_resolver_class("GameControllerBase", "Oxide");
-        const uint64_t from_rva = memory.ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
-        uint64_t sf = 0, raw = 0;
-        auto try_source = [&](uint64_t candidate) {
-            if (!candidate || !memory.klass_is(candidate, "GameControllerBase")) return;
-            const uint64_t block = get_class_static_fields(candidate);
-            uint64_t p = 0;
-            if (!block || !memory.read(block + GAME_CONTROLLER_LOCAL_PLAYER_FIELD, p)) return;
-            p = memio::untag(p);
-            if (p && !memory.is(p, "PlayerManager")) return;
-            if (!sf || p) { sf = block; raw = p; }
-        };
-        // Несколько одноимённых классов встречаются в защищённой сборке;
-        // первый по имени может быть пустышкой (static_fields == 0).
-        for (int n = 0; n < 8 && !raw; ++n) {
-            const uint64_t candidate = offset_resolver_class_nth("GameControllerBase", "Oxide", n);
-            if (!candidate) break;
-            try_source(candidate);
+        esp_silent_wants_no_spread() || weapons.has_state() ||
+        farm_enabled || farm_memory_controller.has_state()) {
+
+        if (g_local_player >= 0x10000 && memory.is(g_local_player, "PlayerManager")) {
+            player = g_local_player;
         }
-        if (!raw) try_source(g_game_controller_class);
-        if (!raw) try_source(from_rva);
-        if (!sf) {
+
+        if (!player) {
+            const uint64_t from_cache = offset_resolver_class("GameControllerBase", "Oxide");
+            const uint64_t from_rva = memory.ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
+            uint64_t sf = 0, raw = 0;
+            auto try_source = [&](uint64_t candidate) {
+                if (!candidate || !memory.klass_is(candidate, "GameControllerBase")) return;
+                const uint64_t block = get_class_static_fields(candidate);
+                uint64_t p = 0;
+                if (!block || !memory.read(block + GAME_CONTROLLER_LOCAL_PLAYER_FIELD, p)) return;
+                p = memio::untag(p);
+                if (p && !memory.is(p, "PlayerManager")) return;
+                if (!sf || p) { sf = block; raw = p; }
+            };
+            // Несколько одноимённых классов встречаются в защищённой сборке;
+            // первый по имени может быть пустышкой (static_fields == 0).
+            for (int n = 0; n < 8 && !raw; ++n) {
+                const uint64_t candidate = offset_resolver_class_nth("GameControllerBase", "Oxide", n);
+                if (!candidate) break;
+                try_source(candidate);
+            }
+            if (!raw) try_source(g_game_controller_class);
+            if (!raw) try_source(from_rva);
+            if (raw) player = memio::untag(raw);
+        }
+
+        if (!player && g_local_player >= 0x10000) {
+            player = g_local_player;
+        }
+
+        if (!player) {
             if (!local_source_failed && (settings.fov_enabled || settings.hands_enabled ||
                                          settings.no_recoil || settings.no_spread)) {
                 local_source_failed = true;
                 LogLine("viewmodel: нет локального игрока через GameControllerBase.static: cached=0x%llx rva=0x%llx static=0x%llx field=0x%llx; fov=%d hands=%d recoil=%d spread=%d loot=%d status=%d",
-                        (unsigned long long)from_cache, (unsigned long long)from_rva,
-                        (unsigned long long)sf, (unsigned long long)GAME_CONTROLLER_LOCAL_PLAYER_FIELD,
+                        (unsigned long long)offset_resolver_class("GameControllerBase", "Oxide"),
+                        (unsigned long long)memory.ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA),
+                        (unsigned long long)0, (unsigned long long)GAME_CONTROLLER_LOCAL_PLAYER_FIELD,
                         settings.fov_enabled, settings.hands_enabled, settings.no_recoil,
                         settings.no_spread, settings.fast_loot, (int)loot.status);
             }
@@ -233,11 +249,11 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
                                  settings.instant_ads ? wait : viewmodel::Status::Off};
             weapons.recoil = settings.no_recoil || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
             weapons.spread = settings.no_spread || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
+            farm_memory_controller.tick(epoch, 0, farm_enabled);
             log_status();
             return;
         }
         local_source_failed = false;
-        player = memio::untag(raw); // successful null read means no local player
     }
     // Блок «Оружие» на НЕзнакомой сборке: разрешаем только когда вся цепочка
     // смещений пришла из живых метаданных этой игры. Тогда раскладку

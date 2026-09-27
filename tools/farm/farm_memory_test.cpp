@@ -44,6 +44,13 @@ struct MockMemory {
         return it->second.first == name && it->second.second == namespaze;
     }
 
+    bool named_klass(uint64_t klass, const char* name, const char* namespaze) {
+        if (klass < 0x10000) return false;
+        auto it = class_names.find(klass);
+        if (it == class_names.end()) return false;
+        return it->second.first == name && it->second.second == namespaze;
+    }
+
     void set_ptr(uint64_t address, uint64_t val) {
         write_heap(address, val);
     }

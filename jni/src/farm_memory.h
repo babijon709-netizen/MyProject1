@@ -174,7 +174,16 @@ template<class IO> class Controller {
     }
 
     bool is_class(uint64_t obj, const char* name) {
-        return io_.named(obj, name, "Oxide");
+        if (io_.named(obj, name, "Oxide")) return true;
+        uint64_t k = 0;
+        if (!pointer(io_, obj, k) || k < 0x10000) return false;
+        for (int depth = 0; depth < 4; ++depth) {
+            uint64_t parent = 0;
+            if (!pointer(io_, k + 0x58, parent) || parent < 0x10000) break;
+            if (io_.named_klass(parent, name, "Oxide")) return true;
+            k = parent;
+        }
+        return false;
     }
 
     bool restore_all() {
