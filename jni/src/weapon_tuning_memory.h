@@ -70,6 +70,12 @@ inline bool valid(float f) { return viewmodel::finite(f) && f >= -1000.f && f <=
 template<class IO> class Controller {
     IO& io;
     uint64_t session_ = 0, base_ = 0;
+    // Поле FPHitscan, где лежит ссылка на калькулятор (0x1f8 на известных
+    // сборках). После апдейта игры поле переехало: по литерале резолв
+    // молчал навсегда («без отдачи/разброса не работают», 28.09). Раз resolves
+    // находит ссылку по СТРУКТУРЕ (см. resolve), запоминаем её реальное
+    // смещение — жизненный цикл калькулятора проверяется уже по нему.
+    uint64_t calc_link_off_ = 0x1f8;
     Context context_{};
     int resolve_step_ = 0; // 1 identity, 2 fp/weapon, 3 config, 4 recoil, 5 calculator/dispersion
     // recoil: config+18..2c (six floats). Spread: clamp min/max +20/+24,
@@ -103,7 +109,7 @@ template<class IO> class Controller {
         auto life = context_.weapon.life(io);
         if (life != Life::Alive) return life;
         uint64_t calc=0, config=0;
-        if (!pointer(io,context_.weapon.object+0x1f8,calc) ||
+        if (!pointer(io,context_.weapon.object+calc_link_off_,calc) ||
             !pointer(io,context_.calculator.object+0x18,config)) return Life::Unreadable;
         if (calc != context_.calculator.object || config != context_.config.object) return Life::Gone;
         return context_.calculator.life(io);
@@ -159,40 +165,74 @@ template<class IO> class Controller {
         if (back != player) { step2 = 8; return false; }
         resolve_step_ = 3;
         // config — по FPHitscan.config, recoil — по HitscanWeaponConfig.recoilConfig.
-        // Ссылка weapon+0x200 остаётся перекрёстной проверкой: если она читается,
-        // обязана указывать на тот же ассет отдачи.
+        // Перекрёстка weapon+0x200 — только совет: если ссылка читается и
+        // ведёт на КЛАСС RecoilConfig, но не на наш ассет — раскладка точно
+        // чужая. Ведёт куда-то ещё (литерал переехал после апдейта) —
+        // просто игнорируем: молчали «не работают» (28.09).
         if (!pointer(io,weapon+go_active::FPHITSCAN_CONFIG,config) ||
             !io.named(config,"HitscanWeaponConfig",kWeapons) ||
             !c.config.capture(io,config,true) ||
             !pointer(io,config+go_active::WEAPON_CONFIG_RECOIL,recoil) || !recoil)
             return false;
-        if (pointer(io,weapon+0x200,p) && p && p!=recoil) return false;
+        if (pointer(io,weapon+0x200,p) && p &&
+            io.named(p,"RecoilConfig",kWeapons) && p!=recoil) return false;
         resolve_step_ = 4;
-        if (!io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true) ||
-            !pointer(io,weapon+0x1f8,calc) ||
-            !((layout && layout->calculator) ? io.named(calc,layout->calculator,"")
-                                             : io.calculator_class(calc)) ||
-            !c.calculator.capture(io,calc,false)) return false;
-        resolve_step_ = 5;
-        if (!pointer(io,calc+0x18,p) || p!=config ||
-            !pointer(io,calc+0x10,dispersion) ||
-            !pointer(io,config+go_active::WEAPON_CONFIG_DISPERSION,p) || p!=dispersion ||
+        // DispersionConfig читаем из конфига ДО калькулятора: треугольник
+        // config↔dispersion↔calc ниже — единственная опора на незнакомых
+        // сборках, где имя калькулятора ротируется, а его поле в FPHitscan
+        // переехало со вшитого 0x1f8.
+        if (!pointer(io,config+go_active::WEAPON_CONFIG_DISPERSION,dispersion) ||
+            !dispersion ||
             !io.named(dispersion,"DispersionConfig",kWeapons) ||
             !c.dispersion.capture(io,dispersion,true)) return false;
+        if (!io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true))
+            return false;
+        // Калькулятор. Сначала вшитая ссылка weapon+0x1f8; не сошлась —
+        // обходим поля FPHitscan и ищем объект по структуре: его +0x18 обязан
+        // смотреть на наш конфиг, а +0x10 — на этот же DispersionConfig.
+        // Два указателя, указывающих в ровно ту же связку ассетов, — это и
+        // есть доказательство «это калькулятор» без всякого имени класса.
+        auto calc_ok = [&](uint64_t cand) {
+            if (cand < 0x10000) return false;
+            uint64_t a=0, b=0;
+            return pointer(io,cand+0x18,a) && a==config &&
+                   pointer(io,cand+0x10,b) && b==dispersion;
+        };
+        calc_link_off_ = 0x1f8;
+        if (!pointer(io,weapon+calc_link_off_,calc) || !calc_ok(calc)) {
+            calc = 0;
+            for (uint64_t off = 0xD0; off <= 0x260; off += 8) {
+                if (off == 0x1f8) continue;
+                uint64_t cand = 0;
+                if (!pointer(io,weapon+off,cand) || cand < 0x10000) continue;
+                if (calc_ok(cand)) { calc = cand; calc_link_off_ = off; break; }
+            }
+        }
+        if (!calc) return false;
+        // Имя калькулятора проверяем только там, где оно известно раскладкой:
+        // на незнакомых сборках (generic) имя ротируется, и эта проверка
+        // была воротами «не работают» — структурный треугольник выше уже
+        // доказал идентичность объекта.
+        if (!((layout && layout->calculator) ? io.named(calc,layout->calculator,"")
+                                             : (layout ? io.calculator_class(calc) : true)) ||
+            !c.calculator.capture(io,calc,false)) return false;
         resolve_step_ = 0;
         return true;
     }
     bool apply(size_t begin, size_t end, uint64_t player, const Layout* layout) {
+        // Перекрёстная ревалидация — ОДИН раз на пакет записей (полный проход
+        // с чтениями имён классов). Прежний вариант гонял resolve на КАЖДОЕ
+        // из девяти полей × каждый кадр оверлея — это и был «жёсткий лаг
+        // оверлея» (28.09). Внутри пакета от смены владельца/смерти объекта
+        // страхует живой снимок владельца перед записью.
+        Context fresh;
+        if (!resolve(player,layout,fresh) || !(fresh==context_)) return false;
         for (size_t i=begin; i<end; ++i) {
             float now=0;
             if (!io.read(address(i),now) || !valid(now)) return false;
             if (now==0.f) continue; // no repeated writes to already-zero data
-            Context fresh;
-            // Revalidate the local owner, equip links and asset identities
-            // immediately before each write, not only at frame start.
-            if (!resolve(player,layout,fresh) || !(fresh==context_)) return false;
-            if (!io.read(address(i),now) || !valid(now)) return false;
-            if (now==0.f) continue;
+            if (i==8 ? (calculator_life()!=Life::Alive)
+                    : (owner(i).life(io)!=Life::Alive)) return false;
             auto& s=saved_[i];
             s.original=now; s.owned=true; // retain original even on failed write/readback
             if (!io.write_heap(address(i),0.f)) return false;

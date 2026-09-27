@@ -8,9 +8,12 @@ adapter = (root / 'jni/src/game_viewmodel.cpp').read_text()
 assert not re.search(r'\bio\.(?:write|patch)\s*\(', controller)
 assert controller.count('io.write_heap(') == 2  # apply and restore, same gate
 heap = adapter.split('struct HeapMemory {', 1)[1].split('HeapMemory heap_memory;', 1)[0]
-assert 'object_data::heap_writable(text,address,sizeof(T)) &&' in heap
+assert 'object_data::heap_writable(text,address,sizeof(T))' in heap
 assert 'std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps")' in heap
 assert heap.count('g_mem.write(') == 1
+# /proc/pid/maps кэшируется (~1 с) с одним обновлением при отказе: читать и
+# парсить карту целиком на каждую запись клало fps оверлея (28.09).
+assert 'cached_maps' in heap and 'refresh_maps' in heap
 assert not (root / 'jni/src/fast_loot_memory.h').exists()
 assert 'instruction_supported' not in controller
 

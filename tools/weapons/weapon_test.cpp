@@ -227,4 +227,46 @@ static void tests(const Layout& l) {
         c.tick(1,base,player,true,false); assert(c.recoil==Status::Failed && io.writes.empty());
     }
 }
-int main() { maps_tests(); for(const auto& l:kLayouts) tests(l); std::cout<<"weapons: heap-only gate, three builds, ownership, transitions, restoration, failures, finite checks: OK\n"; }
+static void generic_tests(const Layout& l) {
+    // Generic-режим (build-id незнаком, цепочка подтверждена резолвером):
+    // имя калькулятора не проверяется — блок обязан работать на новом билде.
+    {
+        Fake io(l); Controller<Fake> c(io);
+        io.set(base+0x318,std::array<uint8_t,20>{});           // неизвестный build-id
+        c.tick(1,base,player,true,true,/*generic_ok=*/true);
+        assert(c.recoil==Status::Active && c.spread==Status::Active && io.writes.size()==9);
+    }
+    // Ссылка на калькулятор переехала со вшитого 0x1f8: находим по структуре
+    // (треугольник config/dispersion). И на известной раскладке, и в generic.
+    {
+        Fake io(l); Controller<Fake> c(io);
+        io.set(weapon+0x1f8,uint64_t(0));                      // литерал мёртв
+        io.set(weapon+0x250,calc);
+        c.tick(1,base,player,true,true);
+        assert(c.recoil==Status::Active && c.spread==Status::Active && io.writes.size()==9);
+    }
+    {
+        Fake io(l); Controller<Fake> c(io);
+        io.set(base+0x318,std::array<uint8_t,20>{});
+        io.set(weapon+0x1f8,uint64_t(0));
+        io.set(weapon+0x250,calc);
+        c.tick(1,base,player,true,true,/*generic_ok=*/true);
+        assert(c.recoil==Status::Active && c.spread==Status::Active && io.writes.size()==9);
+    }
+    // Перекрёстка weapon+0x200 — совет, а не приговор: поле указывает уже не
+    // на RecoilConfig (переехало после апдейта) — блок обязан работать; а если
+    // ведёт на ЧУЖОЙ RecoilConfig — это чужая раскладка, отказ сохраняется.
+    {
+        Fake io(l); Controller<Fake> c(io);
+        io.set(weapon+0x200,dispersion);
+        c.tick(1,base,player,true,true);
+        assert(c.recoil==Status::Active && c.spread==Status::Active);
+        Fake io2(l); Controller<Fake> c2(io2);
+        io2.object(0x109000,"RecoilConfig",kWeapons);
+        io2.set(weapon+0x200,uint64_t(0x109000));
+        c2.tick(1,base,player,true,true);
+        assert(c2.recoil!=Status::Active && c2.spread!=Status::Active && io2.writes.empty());
+    }
+}
+int main() { maps_tests(); for(const auto& l:kLayouts){ tests(l); generic_tests(l); }
+    std::cout<<"weapons: heap-only gate, three builds, ownership, transitions, restoration, failures, finite, generic and rotated-calc checks: OK\n"; }

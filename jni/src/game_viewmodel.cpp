@@ -76,15 +76,35 @@ struct HeapMemory {
     }
     template<class T> bool write_heap(uint64_t address, const T& value) {
         if (!g_mem.bound() || g_pid<=0) return false;
-        std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps");
-        if (!file) return false;
-        std::string text, line;
-        while (std::getline(file,line)) {
-            text += line; text += '\n';
-            if (text.size() > (8u<<20)) return false;
+        // Карта процесса меняется редко, а читается целиком (сотни КБ парсинга)
+        // — на КАЖДУЮ запись это клало fps оверлея (девять полей оружия ×
+        // каждый кадр; «без отдачи/разброса... жёстко лагает оверлей», 28.09).
+        // Кэшируем карту на секунду; отказали — один раз пробуем со свежей.
+        static std::string cached_maps;
+        static double cached_at = 0.0;
+        const double now = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto refresh_maps = [&]() {
+            std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps");
+            if (!file) return false;
+            std::string text, line;
+            while (std::getline(file,line)) {
+                text += line; text += '\n';
+                if (text.size() > (8u<<20)) return false;
+            }
+            if (!file.eof()) return false;
+            cached_maps = std::move(text);
+            cached_at = now;
+            return true;
+        };
+        if (cached_maps.empty() || now - cached_at > 1.0)
+            if (!refresh_maps()) return false;
+        const std::string& text = cached_maps;
+        if (!object_data::heap_writable(text,address,sizeof(T))) {
+            if (!refresh_maps()) return false;
+            if (!object_data::heap_writable(text,address,sizeof(T))) return false;
         }
-        return file.eof() && object_data::heap_writable(text,address,sizeof(T)) &&
-            g_mem.write(address,&value,sizeof(T));
+        return g_mem.write(address,&value,sizeof(T));
     }
 };
 HeapMemory heap_memory;
@@ -266,8 +286,17 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // возврат оригиналов). Иначе ось стоит точно в кости, а пуля всё равно
     // улетает в конус — на дистанции это гарантированный промах.
     const bool want_no_spread = settings.no_spread || esp_silent_wants_no_spread();
-    weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread,
-                 chain_live);
+    // Тик контроллера — раз в 0.12 с, а не на каждый кадр оверлея: полный
+    // резолв цепочки с чтением имён классов каждый кадр и был «жёстким
+    // лагом» (28.09). Нули в ассетах персистентны до возврата, игре ничего
+    // не надо обслуживать чаще.
+    static double s_weapons_next = 0.0;
+    const double now_w = std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+    if (now_w >= s_weapons_next) {
+        s_weapons_next = now_w + 0.12;
+        weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread,
+                     chain_live);
+    }
     static int last_weapon_diagnostic = -1;
     if ((settings.no_recoil || settings.no_spread) && weapons.diagnostic &&
         weapons.diagnostic != last_weapon_diagnostic) {
