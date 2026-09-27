@@ -1,15 +1,23 @@
 #pragma once
-// Object-data implementation for Autofarm memory features:
-// - Always hits weakspots/crosshairs (FPTool.alwaysCrit = 1)
-// - No camera/view angle restriction & 360-degree reach (FPMelee.m_MaxReach = 20.0f, hitRadius = 15.0f, RaycastManager rays/sphere)
-// - No durability loss / tool unbreakable (ItemConfigValues.durabilityUnbreakable = 1, restore item condition)
-// - No tool swing animation & no motion offset (FPMotion.m_AttackOffset pos/rot/BYE = 0, FPMeleeAnimator.attackClipLength = 0, FPMelee.m_ImpactForce = 0)
-// - Clean restoration on toggle off, tool switch, respawn, disconnect
-// - 100% dynamic offset resolution via go_active::* (compatible with offset_resolver)
-// - NO library binary patching
+// Memory-based tuning controller for Autofarm:
+// 1. Weakpoint auto-crit: alwaysCrit = 1 on FPTool / FPChainsaw (forces max hitstreak & crits).
+// 2. Unbreakable tool durability: ItemConfigValues.durabilityUnbreakable = 1 & condition preservation.
+// 3. Extended reach & 360-degree sphere: FPMelee.m_MaxReach = 20.0f, hitRadius = 15.0f, timeBetweenAttacks = 0.08f, RaycastManager ray & sphere.
+// 4. Complete animation & motion suppression:
+//    - Zero delegate action at offset 0x10 (EDT_ACTION) of FPMelee.BYR (Attack), FPMelee.BYI (Woosh), FPMelee.BYT (Hit), and FPWeaponBase.BBk.
+//    - Zero FPMotion.m_AttackOffset position/rotation/current with instant lerp.
+//    - Zero FPMeleeAnimator attackClipLength, wooshShake, and hitShake.
+//    - Zero FPMelee.m_ImpactForce.
+// 5. LookDirection memory targeting:
+//    - Points PlayerEventHandler.LookDirection directly at target crosshair / node, ensuring RaycastManager ray hits the weakpoint regardless of player camera look direction.
+// 6. Comprehensive diagnostic logging via LogLine.
+// 7. 100% dynamic offset resolution via go_active::* (compatible with offset_resolver).
+// 8. Zero library binary patching (pure heap data modification with automatic clean restoration).
 
 #include "viewmodel.h"
 #include "game_offsets_active.h"
+#include "game.h"
+#include "logfile.h"
 #include <array>
 #include <cstring>
 #include <cmath>
@@ -19,12 +27,14 @@ namespace farm_tuning {
 struct Position3 { float x, y, z; };
 inline bool valid(Position3 v) {
     return viewmodel::finite(v.x) && viewmodel::finite(v.y) && viewmodel::finite(v.z) &&
-           v.x > -100.f && v.x < 100.f && v.y > -100.f && v.y < 100.f && v.z > -100.f && v.z < 100.f;
+           v.x > -100000.f && v.x < 100000.f && v.y > -100000.f && v.y < 100000.f && v.z > -100000.f && v.z < 100000.f;
 }
 struct FloatVal { float value; };
 inline bool valid(FloatVal v) { return viewmodel::finite(v.value) && v.value >= -10000.f && v.value <= 10000.f; }
 struct ByteVal { uint8_t value; };
 inline bool valid(ByteVal v) { return v.value <= 1; }
+struct PtrVal { uint64_t value; };
+inline bool valid(PtrVal v) { return v.value == 0 || (v.value >= 0x10000 && v.value < 0x00ffffffffffffffULL); }
 
 template<class T> bool same(const T& a, const T& b) { return std::memcmp(&a, &b, sizeof(T)) == 0; }
 
@@ -98,6 +108,11 @@ template<class IO> class Controller {
     Identity attack_offset_{};
     Identity animator_{};
     Identity rayman_{};
+    Identity byr_{};
+    Identity byi_{};
+    Identity byt_{};
+    Identity bbk_{};
+    Identity look_dir_wrapper_{};
 
     // Patches
     FarmPatch<ByteVal> patch_always_crit_{};
@@ -108,6 +123,12 @@ template<class IO> class Controller {
     FarmPatch<FloatVal> patch_pause_after_attack_{};
     FarmPatch<FloatVal> patch_impact_force_{};
     FarmPatch<FloatVal> patch_attack_clip_len_{};
+    FarmPatch<PtrVal> patch_woosh_shake_{};
+    FarmPatch<PtrVal> patch_hit_shake_{};
+    FarmPatch<PtrVal> patch_event_attack_action_{};
+    FarmPatch<PtrVal> patch_event_woosh_action_{};
+    FarmPatch<PtrVal> patch_event_hit_action_{};
+    FarmPatch<PtrVal> patch_event_base_attack_action_{};
     FarmPatch<Position3> patch_offset_pos_{};
     FarmPatch<Position3> patch_offset_cur_{};
     FarmPatch<Position3> patch_offset_rot_{};
@@ -116,8 +137,12 @@ template<class IO> class Controller {
     FarmPatch<FloatVal> patch_aim_ray_len_{};
     FarmPatch<FloatVal> patch_sphere_rad_{};
     FarmPatch<FloatVal> patch_too_close_{};
+    FarmPatch<Position3> patch_look_direction_{};
 
     bool is_tool_ = false;
+    uint64_t last_target_id_ = 0;
+    uint32_t log_tick_count_ = 0;
+    bool logged_activation_ = false;
 
     bool motion_from_action(uint64_t action, uint64_t weapon, int depth, int& budget, uint64_t& out_motion) {
         using namespace go_active;
@@ -162,6 +187,12 @@ template<class IO> class Controller {
         if (!patch_pause_after_attack_.restore(io_)) ok = false;
         if (!patch_impact_force_.restore(io_)) ok = false;
         if (!patch_attack_clip_len_.restore(io_)) ok = false;
+        if (!patch_woosh_shake_.restore(io_)) ok = false;
+        if (!patch_hit_shake_.restore(io_)) ok = false;
+        if (!patch_event_attack_action_.restore(io_)) ok = false;
+        if (!patch_event_woosh_action_.restore(io_)) ok = false;
+        if (!patch_event_hit_action_.restore(io_)) ok = false;
+        if (!patch_event_base_attack_action_.restore(io_)) ok = false;
         if (!patch_offset_pos_.restore(io_)) ok = false;
         if (!patch_offset_cur_.restore(io_)) ok = false;
         if (!patch_offset_rot_.restore(io_)) ok = false;
@@ -170,6 +201,7 @@ template<class IO> class Controller {
         if (!patch_aim_ray_len_.restore(io_)) ok = false;
         if (!patch_sphere_rad_.restore(io_)) ok = false;
         if (!patch_too_close_.restore(io_)) ok = false;
+        if (!patch_look_direction_.restore(io_)) ok = false;
         return ok;
     }
 
@@ -180,7 +212,8 @@ public:
 
     bool has_state() const {
         return weapon_.object != 0 || patch_always_crit_.written || patch_unbreakable_.written ||
-               patch_max_reach_.written || patch_offset_pos_.written;
+               patch_max_reach_.written || patch_offset_pos_.written || patch_event_attack_action_.written ||
+               patch_look_direction_.written;
     }
 
     bool reset(bool restore = true) {
@@ -195,6 +228,12 @@ public:
             patch_pause_after_attack_ = {};
             patch_impact_force_ = {};
             patch_attack_clip_len_ = {};
+            patch_woosh_shake_ = {};
+            patch_hit_shake_ = {};
+            patch_event_attack_action_ = {};
+            patch_event_woosh_action_ = {};
+            patch_event_hit_action_ = {};
+            patch_event_base_attack_action_ = {};
             patch_offset_pos_ = {};
             patch_offset_cur_ = {};
             patch_offset_rot_ = {};
@@ -203,10 +242,13 @@ public:
             patch_aim_ray_len_ = {};
             patch_sphere_rad_ = {};
             patch_too_close_ = {};
+            patch_look_direction_ = {};
         }
         player_ = {}; weapon_ = {}; config_ = {}; motion_ = {};
         attack_offset_ = {}; animator_ = {}; rayman_ = {};
-        session_ = 0; is_tool_ = false;
+        byr_ = {}; byi_ = {}; byt_ = {}; bbk_ = {}; look_dir_wrapper_ = {};
+        session_ = 0; is_tool_ = false; last_target_id_ = 0;
+        log_tick_count_ = 0; logged_activation_ = false;
         status = viewmodel::Status::Off;
         return ok;
     }
@@ -216,7 +258,10 @@ public:
         using viewmodel::Status;
 
         if (!enabled) {
-            if (has_state()) reset(true);
+            if (has_state()) {
+                LogLine("farm_mem: autofarm disabled, restoring all patches");
+                reset(true);
+            }
             status = Status::Off;
             return;
         }
@@ -280,6 +325,7 @@ public:
                 return;
             }
             is_tool_ = is_tool;
+            logged_activation_ = false;
         }
 
         bool ok = true;
@@ -334,7 +380,7 @@ public:
             if (!patch_impact_force_.put(io_, FloatVal{0.0f})) ok = false;
         }
 
-        // RaycastManager
+        // 4. RaycastManager tuning
         uint64_t rayman = 0;
         if (pointer(io_, weapon + FPOBJECT_RAYCAST_MANAGER, rayman) && rayman >= 0x10000) {
             uint64_t rm_player = 0;
@@ -357,7 +403,34 @@ public:
             }
         }
 
-        // 4. Motion suppression (m_AttackOffset pos/rot/BYE = 0)
+        // 5. Complete animation & swing motion suppression
+        // Event delegates suppression on FPMelee (BYR = 0x148, BYI = 0x150, BYT = 0x158) and FPWeaponBase (BBk = 0x118)
+        uint64_t ev_byr = 0;
+        if (pointer(io_, weapon + FPMELEE_EVENT_ATTACK, ev_byr) && ev_byr >= 0x10000) {
+            if (patch_event_attack_action_.sample(io_, ev_byr + EDT_ACTION)) {
+                patch_event_attack_action_.put(io_, PtrVal{0});
+            }
+        }
+        uint64_t ev_byi = 0;
+        if (pointer(io_, weapon + FPMELEE_EVENT_WOOSH, ev_byi) && ev_byi >= 0x10000) {
+            if (patch_event_woosh_action_.sample(io_, ev_byi + EDT_ACTION)) {
+                patch_event_woosh_action_.put(io_, PtrVal{0});
+            }
+        }
+        uint64_t ev_byt = 0;
+        if (pointer(io_, weapon + FPMELEE_EVENT_HIT, ev_byt) && ev_byt >= 0x10000) {
+            if (patch_event_hit_action_.sample(io_, ev_byt + EDT_ACTION)) {
+                patch_event_hit_action_.put(io_, PtrVal{0});
+            }
+        }
+        uint64_t ev_bbk = 0;
+        if (pointer(io_, weapon + FPWEAPONBASE_EVENT_ATTACK, ev_bbk) && ev_bbk >= 0x10000) {
+            if (patch_event_base_attack_action_.sample(io_, ev_bbk + EDT_ACTION)) {
+                patch_event_base_attack_action_.put(io_, PtrVal{0});
+            }
+        }
+
+        // Motion suppression (m_AttackOffset pos/rot/BYE = 0)
         uint64_t draw = 0;
         if (pointer(io_, weapon + FPOBJECT_DRAW_EVENT, draw) && draw >= 0x10000) {
             uint64_t action = 0;
@@ -390,21 +463,73 @@ public:
             }
         }
 
-        // 5. Animator attack clip length suppression
-        uint64_t anim_ev = 0;
-        if (pointer(io_, weapon + FPMELEE_EVENT_ATTACK, anim_ev) && anim_ev >= 0x10000) {
-            uint64_t action = 0;
-            if (pointer(io_, anim_ev + FPDRAW_ACTION, action) && action >= 0x10000) {
+        // Animator attack clip length & shakes suppression
+        if (ev_byr >= 0x10000) {
+            uint64_t act_ptr = patch_event_attack_action_.original.value;
+            if (act_ptr >= 0x10000) {
                 uint64_t target = 0;
-                if (pointer(io_, action + DELEGATE_TARGET, target) && target >= 0x10000) {
+                if (pointer(io_, act_ptr + DELEGATE_TARGET, target) && target >= 0x10000) {
                     if (animator_.object != target || !animator_.alive(io_)) {
                         animator_.capture(io_, target, true);
                     }
                     if (patch_attack_clip_len_.sample(io_, target + FPMELEE_ANIM_ATTACK_CLIP_LEN)) {
                         patch_attack_clip_len_.put(io_, FloatVal{0.0f});
                     }
+                    if (patch_woosh_shake_.sample(io_, target + FPMELEE_ANIM_WOOSH_SHAKE)) {
+                        patch_woosh_shake_.put(io_, PtrVal{0});
+                    }
+                    if (patch_hit_shake_.sample(io_, target + FPMELEE_ANIM_HIT_SHAKE)) {
+                        patch_hit_shake_.put(io_, PtrVal{0});
+                    }
                 }
             }
+        }
+
+        // 6. LookDirection memory targeting
+        FarmTarget tgt{};
+        float eye_x = 0.f, eye_y = 0.f, eye_z = 0.f;
+        const bool have_target = esp_farm_get_target(tgt) && tgt.valid;
+        const bool have_eye = esp_local_eye_position(eye_x, eye_y, eye_z);
+
+        if (have_target && have_eye) {
+            uint64_t handler = 0;
+            if (pointer(io_, player + PLAYER_EVENT_HANDLER, handler) && handler >= 0x10000) {
+                uint64_t look_wrapper = 0;
+                if (pointer(io_, handler + EVENT_HANDLER_LOOK_DIRECTION, look_wrapper) && look_wrapper >= 0x10000) {
+                    if (look_dir_wrapper_.object != look_wrapper || !look_dir_wrapper_.alive(io_)) {
+                        look_dir_wrapper_.capture(io_, look_wrapper, false);
+                    }
+                    float dx = tgt.aim_x - eye_x;
+                    float dy = tgt.aim_y - eye_y;
+                    float dz = tgt.aim_z - eye_z;
+                    float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (viewmodel::finite(len) && len > 0.05f) {
+                        Position3 dir = { dx / len, dy / len, dz / len };
+                        if (patch_look_direction_.sample(io_, look_wrapper + GUI_VALUE)) {
+                            patch_look_direction_.put(io_, dir);
+                        }
+                    }
+                }
+            }
+        } else {
+            patch_look_direction_.restore(io_);
+        }
+
+        // Periodic & transition logging
+        ++log_tick_count_;
+        if (!logged_activation_ || (log_tick_count_ % 120 == 0)) {
+            logged_activation_ = true;
+            LogLine("farm_mem: active weapon=0x%llx is_tool=%d crit=%d unbreak=%d reach=%.1f rad=%.1f anim_ev_zeroed=%d look_locked=%d",
+                    (unsigned long long)weapon, (int)is_tool_, (int)patch_always_crit_.written,
+                    (int)patch_unbreakable_.written, patch_max_reach_.last.value, patch_hit_radius_.last.value,
+                    (int)patch_event_attack_action_.written, (int)patch_look_direction_.written);
+        }
+
+        if (have_target && tgt.id != last_target_id_) {
+            last_target_id_ = tgt.id;
+            LogLine("farm_mem: target locked id=0x%llx kind=%d spot=%d aim=(%.2f, %.2f, %.2f) eye=(%.2f, %.2f, %.2f) dist=%.2f reach=%.2f",
+                    (unsigned long long)tgt.id, tgt.kind, (int)tgt.has_spot,
+                    tgt.aim_x, tgt.aim_y, tgt.aim_z, eye_x, eye_y, eye_z, tgt.aim_dist, tgt.melee_reach);
         }
 
         status = ok ? Status::Active : Status::Failed;

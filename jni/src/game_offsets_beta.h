@@ -358,6 +358,10 @@ inline constexpr std::uint64_t FPMELEE_PAUSE_AFTER_ATTACK    = 0x134;
 inline constexpr std::uint64_t FPMELEE_DAMAGE_PER_HIT        = 0x138;
 inline constexpr std::uint64_t FPMELEE_IMPACT_FORCE          = 0x13C;
 inline constexpr std::uint64_t FPMELEE_EVENT_ATTACK          = 0x148; // BYR (eDt)
+inline constexpr std::uint64_t FPMELEE_EVENT_WOOSH           = 0x150; // BYI (eDt)
+inline constexpr std::uint64_t FPMELEE_EVENT_HIT             = 0x158; // BYT (eDt)
+inline constexpr std::uint64_t FPWEAPONBASE_EVENT_ATTACK     = 0x118; // BBk (eDt)
+inline constexpr std::uint64_t EDT_ACTION                    = 0x10;  // BXi (System.Action)
 // Oxide.FPTool : Oxide.FPMelee — поля есть только у FPTool и FPChainsaw
 // (прочие FPMelee: FPSpear, FPBuildingHammer, FPTorch — там на 0x160 своё).
 inline constexpr std::uint64_t FPTOOL_TOOL_PURPOSES          = 0x160; // enum ToolPurpose, флаги

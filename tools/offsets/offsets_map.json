@@ -3583,6 +3583,66 @@
    "how": "смещение — из комментария /* 0x148 */ рядом с полем"
   }
  },
+ "FPMELEE_EVENT_WOOSH": {
+  "kind": "field",
+  "class": "FPMelee",
+  "struct": "Oxide_FPMelee_Fields",
+  "field": "BYI",
+  "type": "eDt_o*",
+  "offset": 336,
+  "note": "событие взмаха/свиста в FPMelee",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPMelee_Fields",
+   "field": "BYI",
+   "how": "смещение — из комментария /* 0x150 */ рядом с полем"
+  }
+ },
+ "FPMELEE_EVENT_HIT": {
+  "kind": "field",
+  "class": "FPMelee",
+  "struct": "Oxide_FPMelee_Fields",
+  "field": "BYT",
+  "type": "eDt_o*",
+  "offset": 344,
+  "note": "событие попадания в FPMelee",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPMelee_Fields",
+   "field": "BYT",
+   "how": "смещение — из комментария /* 0x158 */ рядом с полем"
+  }
+ },
+ "FPWEAPONBASE_EVENT_ATTACK": {
+  "kind": "field",
+  "class": "FPWeaponBase",
+  "struct": "Oxide_FPWeaponBase_Fields",
+  "field": "BBk",
+  "type": "eDt_o*",
+  "offset": 280,
+  "note": "базовое событие атаки в FPWeaponBase",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPWeaponBase_Fields",
+   "field": "BBk",
+   "how": "смещение — из комментария /* 0x118 */ рядом с полем"
+  }
+ },
+ "EDT_ACTION": {
+  "kind": "field",
+  "class": "eDt",
+  "struct": "eDt_Fields",
+  "field": "BXi",
+  "type": "System_Action_o*",
+  "offset": 16,
+  "note": "делегат System.Action внутри eDt",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "eDt_Fields",
+   "field": "BXi",
+   "how": "смещение — из комментария /* 0x10 */ рядом с полем"
+  }
+ },
  "FPTOOL_EFFICIENCY": {
   "kind": "field",
   "class": "FPTool",
