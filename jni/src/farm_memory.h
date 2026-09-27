@@ -1,18 +1,19 @@
 #pragma once
 // Memory-based tuning controller for Autofarm:
 // 1. Weakpoint auto-crit: alwaysCrit = 1 on FPTool / FPChainsaw (forces max hitstreak & crits).
-// 2. Unbreakable tool durability: ItemConfigValues.durabilityUnbreakable = 1 & condition preservation.
-// 3. Extended reach & 360-degree sphere: FPMelee.m_MaxReach = 20.0f, hitRadius = 15.0f, timeBetweenAttacks = 0.08f, RaycastManager ray & sphere.
-// 4. Complete animation & motion suppression:
+// 2. All resource types capability: m_ToolPurposes |= 7 (CutWood | BreakRocks | CutAnimals) on FPTool.
+// 3. Unbreakable tool durability: ItemConfigValues.durabilityUnbreakable = 1 & condition preservation.
+// 4. Extended reach & 360-degree sphere: FPMelee.m_MaxReach = 20.0f, hitRadius = 15.0f, timeBetweenAttacks = 0.08f, RaycastManager ray & sphere.
+// 5. Complete animation & motion suppression:
 //    - Zero delegate action at offset 0x10 (EDT_ACTION) of FPMelee.BYR (Attack), FPMelee.BYI (Woosh), FPMelee.BYT (Hit), and FPWeaponBase.BBk.
 //    - Zero FPMotion.m_AttackOffset position/rotation/current with instant lerp.
 //    - Zero FPMeleeAnimator attackClipLength, wooshShake, and hitShake.
 //    - Zero FPMelee.m_ImpactForce.
-// 5. LookDirection memory targeting:
+// 6. LookDirection & LastLocalHitPoint memory targeting:
 //    - Points PlayerEventHandler.LookDirection directly at target crosshair / node, ensuring RaycastManager ray hits the weakpoint regardless of player camera look direction.
-// 6. Comprehensive diagnostic logging via LogLine.
-// 7. 100% dynamic offset resolution via go_active::* (compatible with offset_resolver).
-// 8. Zero library binary patching (pure heap data modification with automatic clean restoration).
+// 7. Comprehensive diagnostic logging via LogLine.
+// 8. 100% dynamic offset resolution via go_active::* (compatible with offset_resolver).
+// 9. Zero library binary patching (pure heap data modification with automatic clean restoration).
 
 #include "viewmodel.h"
 #include "game_offsets_active.h"
@@ -31,6 +32,8 @@ inline bool valid(Position3 v) {
 }
 struct FloatVal { float value; };
 inline bool valid(FloatVal v) { return viewmodel::finite(v.value) && v.value >= -10000.f && v.value <= 10000.f; }
+struct IntVal { int32_t value; };
+inline bool valid(IntVal v) { return v.value >= 0 && v.value <= 0x7fffffff; }
 struct ByteVal { uint8_t value; };
 inline bool valid(ByteVal v) { return v.value <= 1; }
 struct PtrVal { uint64_t value; };
@@ -116,6 +119,8 @@ template<class IO> class Controller {
 
     // Patches
     FarmPatch<ByteVal> patch_always_crit_{};
+    FarmPatch<IntVal> patch_tool_purposes_{};
+    FarmPatch<FloatVal> patch_tool_efficiency_{};
     FarmPatch<ByteVal> patch_unbreakable_{};
     FarmPatch<FloatVal> patch_max_reach_{};
     FarmPatch<FloatVal> patch_hit_radius_{};
@@ -189,6 +194,8 @@ template<class IO> class Controller {
     bool restore_all() {
         bool ok = true;
         if (!patch_always_crit_.restore(io_)) ok = false;
+        if (!patch_tool_purposes_.restore(io_)) ok = false;
+        if (!patch_tool_efficiency_.restore(io_)) ok = false;
         if (!patch_unbreakable_.restore(io_)) ok = false;
         if (!patch_max_reach_.restore(io_)) ok = false;
         if (!patch_hit_radius_.restore(io_)) ok = false;
@@ -222,7 +229,7 @@ public:
     bool has_state() const {
         return weapon_.object != 0 || patch_always_crit_.written || patch_unbreakable_.written ||
                patch_max_reach_.written || patch_offset_pos_.written || patch_event_attack_action_.written ||
-               patch_look_direction_.written;
+               patch_look_direction_.written || patch_tool_purposes_.written;
     }
 
     bool reset(bool restore = true) {
@@ -230,6 +237,8 @@ public:
         if (restore) ok = restore_all();
         else {
             patch_always_crit_ = {};
+            patch_tool_purposes_ = {};
+            patch_tool_efficiency_ = {};
             patch_unbreakable_ = {};
             patch_max_reach_ = {};
             patch_hit_radius_ = {};
@@ -339,10 +348,21 @@ public:
 
         bool ok = true;
 
-        // 1. Weakpoint / Crit (alwaysCrit) for FPTool / FPChainsaw
+        // 1. Weakpoint / Crit (alwaysCrit), ToolPurposes, Efficiency for FPTool / FPChainsaw
         if (is_tool_) {
             if (patch_always_crit_.sample(io_, weapon + FPTOOL_ALWAYS_CRIT)) {
                 if (!patch_always_crit_.put(io_, ByteVal{1})) ok = false;
+            }
+            if (patch_tool_purposes_.sample(io_, weapon + FPTOOL_TOOL_PURPOSES)) {
+                int32_t cur_purp = patch_tool_purposes_.original.value;
+                int32_t all_purp = cur_purp | 7; // CutWood(1) | BreakRocks(2) | CutAnimals(4)
+                if (!patch_tool_purposes_.put(io_, IntVal{all_purp})) ok = false;
+            }
+            if (patch_tool_efficiency_.sample(io_, weapon + FPTOOL_EFFICIENCY)) {
+                float cur_eff = patch_tool_efficiency_.original.value;
+                if (cur_eff < 1.0f) {
+                    if (!patch_tool_efficiency_.put(io_, FloatVal{1.0f})) ok = false;
+                }
             }
         }
 
@@ -494,7 +514,7 @@ public:
             }
         }
 
-        // 6. LookDirection memory targeting
+        // 6. LookDirection & LastLocalHitPoint memory targeting
         FarmTarget tgt{};
         float eye_x = 0.f, eye_y = 0.f, eye_z = 0.f;
         const bool have_target = esp_farm_get_target(tgt) && tgt.valid;
@@ -517,7 +537,13 @@ public:
                         if (patch_look_direction_.sample(io_, look_wrapper + GUI_VALUE)) {
                             patch_look_direction_.put(io_, dir);
                         }
+                        io_.write_heap(look_wrapper + GUI_VALUE, dir);
                     }
+                }
+                uint64_t hit_wrapper = 0;
+                if (pointer(io_, handler + EVENT_HANDLER_LAST_HIT_POINT, hit_wrapper) && hit_wrapper >= 0x10000) {
+                    Position3 hit_pos = { tgt.aim_x, tgt.aim_y, tgt.aim_z };
+                    io_.write_heap(hit_wrapper + GUI_VALUE, hit_pos);
                 }
             }
         } else {
