@@ -51,7 +51,9 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_bot_aim_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY || g_state.aim_mode == AIM_MODE_SILENT);
         esp_set_always_day(g_state.always_day);
         esp_set_weapon_speed(g_state.fast_fire, g_state.fast_reload,
-                             g_state.fast_fire_mult, g_state.fast_reload_mult);
+                             g_state.fast_fire_mult, g_state.fast_reload_mult,
+                             g_state.fast_melee, g_state.fast_melee_mult,
+                             g_state.fast_item_use);
         esp_set_marker_max_distance(g_state.marker_dist);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);

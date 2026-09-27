@@ -883,13 +883,17 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgToggleRow(XS("Без разброса"), &g_state.viewmodel.no_spread, g_state.a_no_spread, true);
 
         FgSHdr(XS("Темп"));
-        FgCardBg(rH * 4);
+        FgCardBg(rH * 7);
         FgToggleRow(XS("Быстрая стрельба"), &g_state.fast_fire, g_state.a_fast_fire, false);
         FgSliderRow(XS("Ускорение стрельбы"), &g_state.fast_fire_mult, 1.f, 20.f, "x%.1f",
                     false, g_state.sl_fast_fire);
         FgToggleRow(XS("Быстрая перезарядка"), &g_state.fast_reload, g_state.a_fast_reload, false);
         FgSliderRow(XS("Ускорение перезарядки"), &g_state.fast_reload_mult, 1.f, 20.f, "x%.1f",
-                    true, g_state.sl_fast_reload);
+                    false, g_state.sl_fast_reload);
+        FgToggleRow(XS("Быстрый удар"), &g_state.fast_melee, g_state.a_fast_melee, false);
+        FgSliderRow(XS("Ускорение ударов"), &g_state.fast_melee_mult, 1.f, 20.f, "x%.1f",
+                    false, g_state.sl_fast_melee);
+        FgToggleRow(XS("Быстрое исп. предметов"), &g_state.fast_item_use, g_state.a_fast_item_use, true);
 
         const auto weaponStatus = esp_viewmodel_diagnostics();
         if (weaponStatus.no_recoil == viewmodel::Status::Failed || weaponStatus.no_spread == viewmodel::Status::Failed) {

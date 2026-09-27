@@ -42,9 +42,13 @@ struct AppState {
           a_fast_loot = 0.f, a_no_sway = 0.f, a_instant_ads = 0.f;
     SliderAnim sl_custom_fov, sl_hands_x, sl_hands_y, sl_hands_z;
     bool  always_day = false;     // всегда день
-    // Быстрая стрельба и перезарядка: запись в ассет оружия, без патчей кода.
+    // Быстрая стрельба, перезарядка, быстрый удар (топор/кирка) и быстрое использование предметов:
+    // запись в ассет оружия и структуры предметов, без патчей кода.
     bool  fast_fire = false, fast_reload = false;
     float fast_fire_mult = 3.f, fast_reload_mult = 4.f;
+    bool  fast_melee = false;
+    float fast_melee_mult = 5.f;
+    bool  fast_item_use = false;
     float marker_dist = 150.f;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
@@ -99,7 +103,7 @@ struct AppState {
     float a_esp_ore_stone = 1, a_esp_ore_metal = 1, a_esp_ore_sulfur = 1; // включены по умолчанию
     float a_esp_bots = 0, a_esp_vehicles = 0, a_esp_scrap = 0;
     float a_always_day = 0;
-    float a_fast_fire = 0, a_fast_reload = 0;
+    float a_fast_fire = 0, a_fast_reload = 0, a_fast_melee = 0, a_fast_item_use = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
     float a_xray_on = 0;
@@ -110,7 +114,7 @@ struct AppState {
     float a_debug_resolver = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam;
-    SliderAnim sl_fast_fire, sl_fast_reload;
+    SliderAnim sl_fast_fire, sl_fast_reload, sl_fast_melee;
 };
 extern AppState g_state;
 extern std::atomic<bool> main_thread_flag;   // false = выход из main()

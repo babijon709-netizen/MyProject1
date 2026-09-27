@@ -116,6 +116,7 @@ inline constexpr std::uint64_t ITEMDATA_SHORTNAME   = 0x20; // m_ShortName
 inline constexpr std::uint64_t ITEMDATA_CONFIG_VALUES = 0x88; // m_ConfigValues (Oxide.ItemConfigValues)
 inline constexpr std::uint64_t ITEMCONFIG_DURABILITY_MAX = 0x10; // durabilityMax (float)
 inline constexpr std::uint64_t ITEMCONFIG_DURABILITY_UNBREAKABLE = 0x14; // durabilityUnbreakable (bool)
+inline constexpr std::uint64_t ITEMCONFIG_CONSUME_COOLDOWN     = 0x30; // int32_t consumeCooldownSeconds
 // Il2Cpp System.String layout: int32 length @0x10, UTF-16 chars @0x14.
 inline constexpr std::uint64_t IL2CPP_STRING_LENGTH = 0x10;
 inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
@@ -257,6 +258,8 @@ inline constexpr std::uint64_t PLAYER_FP_MANAGER             = 0x90;
 inline constexpr std::uint64_t FPMANAGER_CURRENT_WEAPON      = 0x58;
 inline constexpr std::uint64_t FPMANAGER_CURRENT_OBJECT      = 0x50; // _currentWeapon (FPObject fallback)
 inline constexpr std::uint64_t FPMANAGER_AIM_BLEND           = 0xA8;
+inline constexpr std::uint64_t FPOBJECT_DRAW_PERIOD            = 0xA0;  // float drawPeriod
+inline constexpr std::uint64_t FPOBJECT_HOLSTER_PERIOD         = 0xA4;  // float holsterPeriod
 inline constexpr std::uint64_t FPOBJECT_PLAYER_BACKREF       = 0xC0;
 inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;
 
@@ -371,6 +374,10 @@ inline constexpr std::uint64_t FPTOOL_ALWAYS_CRIT            = 0x168; // bool al
 inline constexpr std::uint64_t FPMELEE_ANIM_WOOSH_SHAKE      = 0x58;  // Oxide.WeaponShake
 inline constexpr std::uint64_t FPMELEE_ANIM_HIT_SHAKE        = 0x60;  // Oxide.WeaponShake
 inline constexpr std::uint64_t FPMELEE_ANIM_ATTACK_CLIP_LEN  = 0x6C;  // float attackClipLength
+
+inline constexpr std::uint64_t FPBOW_MIN_TIME_BETWEEN_SHOTS    = 0x138; // float m_MinTimeBetweenShots
+inline constexpr std::uint64_t FPBOW_AIM_SPEED                 = 0x144; // float aimSpeed
+inline constexpr std::uint64_t FPCROSSBOW_MIN_TIME_BETWEEN_SHOTS = 0x140; // float m_MinTimeBetweenShots
 inline constexpr std::uint64_t RAYCASTMAN_PLAYER             = 0x20;
 inline constexpr std::uint64_t RAYCASTMAN_RAY_LENGTH         = 0x38;
 inline constexpr std::uint64_t RAYCASTMAN_AIM_RAY_LENGTH     = 0x3C;

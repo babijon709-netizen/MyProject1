@@ -202,7 +202,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         }
 
         if (!player) {
-            const uint64_t from_cache = offset_resolver_class("GameControllerBase", "Oxide");
             const uint64_t from_rva = memory.ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
             uint64_t sf = 0, raw = 0;
             auto try_source = [&](uint64_t candidate) {
@@ -299,7 +298,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     last_weapon_diagnostic = weapons.diagnostic;
     controller.tick(epoch, player, settings);
 
-    const bool farm_enabled = g_state.farm_on && (g_farm_mask != 0);
     farm_memory_controller.tick(epoch, player, farm_enabled);
 
     log_status();

@@ -1646,6 +1646,8 @@ void RenderMenu() {
     Tick(g_state.a_always_day,  g_state.always_day,         dt);
     Tick(g_state.a_fast_fire,   g_state.fast_fire,          dt);
     Tick(g_state.a_fast_reload, g_state.fast_reload,        dt);
+    Tick(g_state.a_fast_melee,  g_state.fast_melee,         dt);
+    Tick(g_state.a_fast_item_use, g_state.fast_item_use,    dt);
     Tick(g_state.a_esp_team,   g_state.esp_team,           dt);
     Tick(g_state.a_aim_pr0,    g_state.aim_priority == 0,  dt);
     Tick(g_state.a_aim_pr1,    g_state.aim_priority == 1,  dt);

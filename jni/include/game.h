@@ -123,9 +123,11 @@ void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pick
 void        esp_set_ore_kinds_enabled(bool stone, bool metal, bool sulfur);
 // «Всегда день»: время суток удерживается в полдне (клиентский визуал).
 void        esp_set_always_day(bool enabled);
-// Быстрая стрельба и перезарядка (запись в ассет оружия, без патчей кода).
+// Быстрая стрельба, перезарядка, быстрый удар и использование предметов (запись в ассеты/кучу, без патчей кода).
 void        esp_set_weapon_speed(bool fast_fire, bool fast_reload,
-                                 float fire_mult, float reload_mult);
+                                 float fire_mult, float reload_mult,
+                                 bool fast_melee = false, float melee_mult = 5.f,
+                                 bool fast_item_use = false);
 // Markers further away than this (metres) are dropped. Keeps the screen clean
 // on open terrain, where the registry easily holds hundreds of nodes.
 void        esp_set_marker_max_distance(float metres);// Markers for the current frame, nearest first. Call after esp_get_boxes():
