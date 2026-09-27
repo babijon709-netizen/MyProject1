@@ -299,15 +299,22 @@ static void weapon_speed_tick() {
     // гасила бы весь блок вместе с рабочими подфункциями.
     if (live_cur_weapon) weapon = rd_ptr(fp + FPMANAGER_CURRENT_WEAPON);
     if (!valid_obj(weapon) && live_cur_object) weapon = rd_ptr(fp + FPMANAGER_CURRENT_OBJECT);
+    // Возврат оригиналов по ОДНОМУ сбойному чтению запрещён: чтение хипа
+    // мигает под нагрузкой, а цикл «применили → вернули → сохранили заново»
+    // каждые 0.3 с и есть жалоба «стрельба/перезарядка работают через раз»
+    // (28.09). Возвращаем только УСТОЙЧИВОЕ «пустые руки / чужой предмет» —
+    // несколько тактов подряд.
+    static int s_badChainStreak = 0;
     if (!valid_obj(weapon)) {
-        weapon_speed_restore();
+        if (++s_badChainStreak >= 4) weapon_speed_restore();
         return;
     }
     uint64_t backref = rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF);
     if (backref != local) {
-        weapon_speed_restore();
+        if (++s_badChainStreak >= 4) weapon_speed_restore();
         return;
     }
+    s_badChainStreak = 0;
 
     auto is_weapon_class = [](uint64_t obj, const char* expected) -> bool {
         if (!valid_obj(obj)) return false;
@@ -327,7 +334,12 @@ static void weapon_speed_tick() {
 
     // 1. Firearms / Guns (HitscanWeaponConfig)
     const bool is_hitscan = is_weapon_class(weapon, "FPHitscan");
+    // «Наш предмет — не огнестрел» по одному тику не доказательство смены
+    // оружия: имя класса читается из памяти каждый тик и мигает. Оригиналы
+    // ассета возвращаем только после устойчивой серии чужого класса.
+    static int s_notHitscanStreak = 0;
     if (is_hitscan) {
+        s_notHitscanStreak = 0;
         const uint64_t cfg = rd_ptr(weapon + FPHITSCAN_CONFIG);
         if (valid_obj(cfg) && is_weapon_class(cfg, "HitscanWeaponConfig")) {
             if (s_ws.gun_saved && s_ws.gun_cfg != cfg) {
@@ -388,17 +400,24 @@ static void weapon_speed_tick() {
             }
         }
     } else if (s_ws.gun_saved) {
-        // Предмет сменился (руках уже не огнестрел) — ассет прежнего оружия
-        // возвращаем в норму.
-        const float v_fire = s_ws.gun_fire; wr_buf(s_ws.gun_cfg + WEAPON_CONFIG_FIRE_RATE, &v_fire, sizeof(v_fire));
-        const float v_full = s_ws.gun_full; wr_buf(s_ws.gun_cfg + WEAPON_CONFIG_FULL_RELOAD, &v_full, sizeof(v_full));
-        const float v_loop = s_ws.gun_loop; wr_buf(s_ws.gun_cfg + WEAPON_CONFIG_LOOP_RELOAD, &v_loop, sizeof(v_loop));
-        s_ws.gun_saved = false; s_ws.gun_cfg = 0;
+        // Предмет сменился (в руках уже не огнестрел) — ассет прежнего оружия
+        // возвращаем в норму. Но только когда «не огнестрел» подтвердился
+        // серией тактов: одиночная миготня чтения класса не должна снимать
+        // ускорение посреди боя.
+        if (++s_notHitscanStreak >= 4) {
+            s_notHitscanStreak = 0;
+            const float v_fire = s_ws.gun_fire; wr_buf(s_ws.gun_cfg + WEAPON_CONFIG_FIRE_RATE, &v_fire, sizeof(v_fire));
+            const float v_full = s_ws.gun_full; wr_buf(s_ws.gun_cfg + WEAPON_CONFIG_FULL_RELOAD, &v_full, sizeof(v_full));
+            const float v_loop = s_ws.gun_loop; wr_buf(s_ws.gun_cfg + WEAPON_CONFIG_LOOP_RELOAD, &v_loop, sizeof(v_loop));
+            s_ws.gun_saved = false; s_ws.gun_cfg = 0;
+        }
     }
 
     // 2. Bow (FPBow)
     const bool is_bow = is_weapon_class(weapon, "FPBow");
+    static int s_notBowStreak = 0;
     if (is_bow && g_fast_fire && bow_live) {
+        s_notBowStreak = 0;
         if (s_ws.bow_saved && s_ws.bow_weapon != weapon) {
             const float v_min = s_ws.bow_min_time; wr_buf(s_ws.bow_weapon + FPBOW_MIN_TIME_BETWEEN_SHOTS, &v_min, sizeof(v_min));
             const float v_aim = s_ws.bow_aim_speed; wr_buf(s_ws.bow_weapon + FPBOW_AIM_SPEED, &v_aim, sizeof(v_aim));
@@ -426,16 +445,21 @@ static void weapon_speed_tick() {
                 wr_buf(weapon + FPBOW_AIM_SPEED, &want_aim, sizeof(want_aim));
         }
     } else if (s_ws.bow_saved && (!is_bow || !g_fast_fire)) {
-        // Оружие сменилось или тумблер выключили — возвращаем оригиналы.
-        // (Гейт, просевший при включённом тумблере, сюда не попадает.)
-        const float v_min = s_ws.bow_min_time; wr_buf(s_ws.bow_weapon + FPBOW_MIN_TIME_BETWEEN_SHOTS, &v_min, sizeof(v_min));
-        const float v_aim = s_ws.bow_aim_speed; wr_buf(s_ws.bow_weapon + FPBOW_AIM_SPEED, &v_aim, sizeof(v_aim));
-        s_ws.bow_saved = false; s_ws.bow_weapon = 0;
+        // Тумблер выключили — возвращаем сразу. «Не лук» — только серией
+        // тактов (миготня чтения класса не снимает ускорение посреди боя).
+        if (!g_fast_fire || ++s_notBowStreak >= 4) {
+            s_notBowStreak = 0;
+            const float v_min = s_ws.bow_min_time; wr_buf(s_ws.bow_weapon + FPBOW_MIN_TIME_BETWEEN_SHOTS, &v_min, sizeof(v_min));
+            const float v_aim = s_ws.bow_aim_speed; wr_buf(s_ws.bow_weapon + FPBOW_AIM_SPEED, &v_aim, sizeof(v_aim));
+            s_ws.bow_saved = false; s_ws.bow_weapon = 0;
+        }
     }
 
     // 3. Crossbow (FPCrossbow)
     const bool is_xbow = is_weapon_class(weapon, "FPCrossbow");
+    static int s_notXbowStreak = 0;
     if (is_xbow && g_fast_fire && xbow_live) {
+        s_notXbowStreak = 0;
         if (s_ws.xbow_saved && s_ws.xbow_weapon != weapon) {
             const float v_min = s_ws.xbow_min_time; wr_buf(s_ws.xbow_weapon + FPCROSSBOW_MIN_TIME_BETWEEN_SHOTS, &v_min, sizeof(v_min));
             s_ws.xbow_saved = false; s_ws.xbow_weapon = 0;
@@ -454,8 +478,11 @@ static void weapon_speed_tick() {
                 wr_buf(weapon + FPCROSSBOW_MIN_TIME_BETWEEN_SHOTS, &want_min, sizeof(want_min));
         }
     } else if (s_ws.xbow_saved && (!is_xbow || !g_fast_fire)) {
-        const float v_min = s_ws.xbow_min_time; wr_buf(s_ws.xbow_weapon + FPCROSSBOW_MIN_TIME_BETWEEN_SHOTS, &v_min, sizeof(v_min));
-        s_ws.xbow_saved = false; s_ws.xbow_weapon = 0;
+        if (!g_fast_fire || ++s_notXbowStreak >= 4) {
+            s_notXbowStreak = 0;
+            const float v_min = s_ws.xbow_min_time; wr_buf(s_ws.xbow_weapon + FPCROSSBOW_MIN_TIME_BETWEEN_SHOTS, &v_min, sizeof(v_min));
+            s_ws.xbow_saved = false; s_ws.xbow_weapon = 0;
+        }
     }
 }
 
