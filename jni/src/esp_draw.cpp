@@ -14,8 +14,12 @@
 // Radius (px) of the aim FOV circle. Original logic: cfg::aim::fov is an
 // angle against a fixed 60° reference (not the live camera FOV), so the circle
 // stays put on screen when the player zooms in. 180° = whole screen.
+// Просьба 27.09: влияние ползунка радиуса снижено ВДВОЕ — реальный конус
+// аима и рисуемый круг считаются от ПОЛОВИНЫ значения слайдера (слайдер
+// 180° даёт конус 90°, 5° — 2.5°). Функция одна на выбор цели и на отрисовку,
+// так что круг всегда совпадает с тем, что аим реально берёт.
 float AimFovRadiusPx(float sw, float sh) {
-    float fov = cfg::aim::fov;
+    float fov = cfg::aim::fov * 0.5f;
     if (fov <= 0.f) return 0.f;
     if (fov >= 180.f) return sw + sh;
     float t = tanf(fov * 0.5f * (float)M_PI / 180.f) / tanf(30.f * (float)M_PI / 180.f);
@@ -50,10 +54,7 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         // когда маркеры ботов выключены.
         esp_set_bot_aim_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY || g_state.aim_mode == AIM_MODE_SILENT);
         esp_set_always_day(g_state.always_day);
-        esp_set_weapon_speed(g_state.fast_fire, g_state.fast_reload,
-                             g_state.fast_fire_mult, g_state.fast_reload_mult,
-                             g_state.fast_melee, g_state.fast_melee_mult,
-                             g_state.fast_item_use);
+        esp_set_weapon_speed(g_state.fast_fire, g_state.fast_reload);
         esp_set_marker_max_distance(g_state.marker_dist);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
