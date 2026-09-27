@@ -150,8 +150,16 @@ void esp_set_always_day(bool enabled) { g_day_enabled = enabled; }
 // у лука/арбалета — в собственных классах (FPBow/FPCrossbow). Ускоряем их
 // записью в данные — ни одной инструкции в библиотеках не трогаем.
 // Быстрый удар и быстрое использование предметов УДАЛЕНЫ (просьба 27.09) — их
-// кода здесь больше нет. Множитель зашит на максимум x20: ползунков нет,
-// тумблер либо включён, либо нет.
+// кода здесь больше нет. Ползунков нет, тумблер либо включён, либо нет.
+//
+// Множители — ДРОБНЫЕ (решение 27.09, по эталонной конфигурации старой
+// DLL-версии: «первая строка — 0.5 огня, вторая — 0.4 перезарядки, доджи —
+// 0.15»). Первоначальный x20 оказался «жирным» стартовым шажком: как и в аиме,
+// каждый жирный приказ живёт дольше средней жизни остальных и качает систему
+// в обе стороны (страднее «маятник», а по оружию — дерганный слишком быстрый
+// темп). Числа читаются как доля ПЕРИОДА от ванили: огонь — половина
+// интервала между выстрелами (темп ×2), перезарядка — 0.4 ванильного времени,
+// натяжение лука/арбалета («доджи») — 0.15 (~×6.7).
 //
 // Правила: цепочки проверяются целиком, значения обязаны быть правдоподобными,
 // оригиналы сохраняются и возвращаются при выключении и смене предмета.
@@ -165,8 +173,13 @@ static uint64_t resolve_local_player();          // определена ниж�
 int class_identity(uint64_t klass, const char* expected_name, const char* expected_ns);
 bool object_class_name_is(uint64_t obj, const char* expected, bool accept_when_unreadable);
 
-// Множитель темпа: всегда максимум (просьба 27.09 — «без ползунков»).
-static constexpr float kWeaponSpeedMult = 20.f;
+// Дробные множители темпа (см. голову блока выше):
+//   огонь        — период между выстрелами ×0.5 ванильного (темп ×2);
+//   перезарядка  — время полной/поэтапной перезарядки ×0.4 ванильного;
+//   доджи (лук/арбалет: натяжение, перезаряд стрелы) — период ×0.15.
+static constexpr float kFirePeriodMult   = 0.50f;  // «огонь 0.5»
+static constexpr float kReloadPeriodMult = 0.40f;  // «перезарядка 0.4»
+static constexpr float kDodgePeriodMult  = 0.15f;  // «доджи 0.15»
 static bool g_fast_fire = false, g_fast_reload = false;
 
 struct SavedWeaponSpeed {
@@ -337,13 +350,16 @@ static void weapon_speed_tick() {
                 }
             }
             if (s_ws.gun_saved && s_ws.gun_cfg == cfg) {
-                // По каждой фиче: включено + гейт жив — применяем (x20,
-                // каждый такт, пока значение не совпадёт); выключено —
-                // возвращаем оригинал; включено, но гейт просел — ДЕРЖИМ
-                // применённое значение молча (см. голову блока).
+                // По каждой фиче: включено + гейт жив — применяем (дробные
+                // множители, каждый такт, пока значение не совпадёт);
+                // выключено — возвращаем оригинал; включено, но гейт просел —
+                // ДЕРЖИМ применённое значение молча (см. голову блока).
                 if (g_fast_fire && fire_live) {
-                    float want = (s_ws.gun_fire >= 1.f) ? (s_ws.gun_fire * kWeaponSpeedMult)
-                                                        : (s_ws.gun_fire / kWeaponSpeedMult);
+                    // FIRE_RATE: значение >= 1 — это темп (выстр./ед.), удваиваем
+                    // его; < 1 — период в секундах, половим его. Оба читаются
+                    // как «огонь 0.5» — половина ванильного периода, темп ×2.
+                    float want = (s_ws.gun_fire >= 1.f) ? (s_ws.gun_fire / kFirePeriodMult)
+                                                        : (s_ws.gun_fire * kFirePeriodMult);
                     if (want > 5000.f) want = 5000.f;
                     if (want < 0.01f) want = 0.01f;
                     if (fabsf(rd<float>(cfg + WEAPON_CONFIG_FIRE_RATE) - want) > 0.001f)
@@ -353,8 +369,10 @@ static void weapon_speed_tick() {
                         wr_buf(cfg + WEAPON_CONFIG_FIRE_RATE, &s_ws.gun_fire, sizeof(s_ws.gun_fire));
                 }
                 if (g_fast_reload && reload_live) {
-                    float full = s_ws.gun_full / kWeaponSpeedMult;
-                    float loop = s_ws.gun_loop / kWeaponSpeedMult;
+                    // «Перезарядка 0.4»: время и полной, и поэтапной — 40% от
+                    // ванильного. Потолки снизу оставлены как страховка от нуля.
+                    float full = s_ws.gun_full * kReloadPeriodMult;
+                    float loop = s_ws.gun_loop * kReloadPeriodMult;
                     if (full < 0.03f) full = 0.03f;
                     if (loop < 0.01f) loop = 0.01f;
                     if (s_ws.gun_full > 0.f && fabsf(rd<float>(cfg + WEAPON_CONFIG_FULL_RELOAD) - full) > 0.001f)
@@ -396,9 +414,11 @@ static void weapon_speed_tick() {
             }
         }
         if (s_ws.bow_saved && s_ws.bow_weapon == weapon) {
-            float want_min = s_ws.bow_min_time / kWeaponSpeedMult;
+            // «Доджи 0.15»: натяжение занимает 15% ванильного периода, скорость
+            // сведения растёт обратно кратно (~×6.7) с прежним потолком.
+            float want_min = s_ws.bow_min_time * kDodgePeriodMult;
             if (want_min < 0.05f) want_min = 0.05f;
-            float want_aim = s_ws.bow_aim_speed * kWeaponSpeedMult;
+            float want_aim = s_ws.bow_aim_speed / kDodgePeriodMult;
             if (want_aim > 20.f) want_aim = 20.f;
             if (fabsf(rd<float>(weapon + FPBOW_MIN_TIME_BETWEEN_SHOTS) - want_min) > 0.001f)
                 wr_buf(weapon + FPBOW_MIN_TIME_BETWEEN_SHOTS, &want_min, sizeof(want_min));
@@ -428,7 +448,7 @@ static void weapon_speed_tick() {
             }
         }
         if (s_ws.xbow_saved && s_ws.xbow_weapon == weapon) {
-            float want_min = s_ws.xbow_min_time / kWeaponSpeedMult;
+            float want_min = s_ws.xbow_min_time * kDodgePeriodMult;
             if (want_min < 0.05f) want_min = 0.05f;
             if (fabsf(rd<float>(weapon + FPCROSSBOW_MIN_TIME_BETWEEN_SHOTS) - want_min) > 0.001f)
                 wr_buf(weapon + FPCROSSBOW_MIN_TIME_BETWEEN_SHOTS, &want_min, sizeof(want_min));

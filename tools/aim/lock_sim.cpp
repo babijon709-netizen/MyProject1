@@ -293,6 +293,16 @@ struct MemCtrl {
     float maxTurnDeg = 12.f;
     float jitterBand = 0.45f;   // полоса «дрожь кости», град
     int   driftStreak = 3;      // однонаправленных тактов для полного шага в полосе
+    // mode 3 — «гросс»: текущий код (mode 0), но первые grossSecs секунд после
+    //          захвата доля шага k повышена (0.9 с при 12 фпс ≈ 11 тактов —
+    //          через 10-11 тактов соотношение углов и так установится).
+    // Итог эксперимента (решение 27.09): гросс ХУЖЕ текущего по всей сетке —
+    // при (1к/2к) перелёт 10.7° и 27 реверсов против 8.1° и 2; жирный
+    // стартовый шаг качает петлю в обе стороны. Поэтому в prod пошли ДРОБНЫЕ
+    // множители (огонь 0.5 / перезарядка 0.4 / доджи 0.15) и мягкий старт
+    // тач-аима, а не усиление старта.
+    float grossK = 1.5f;
+    float grossSecs = 0.9f;
 };
 
 static Res runMem(const Plant& p, MemCtrl c, float* trace = nullptr, int traceN = 0) {
@@ -379,6 +389,8 @@ static Res runMem(const Plant& p, MemCtrl c, float* trace = nullptr, int traceN 
         else eff -= (eff > 0.f ? c.dead : -c.dead);
         if (eff == 0.f) { prevStep = 0.f; continue; }
         float k = 0.5f;
+        if (c.mode == 3 && t < c.grossSecs)   // гросс: стартовые секунды на повышенной доле
+            k = c.grossK;
         const bool flip = havePrev && prevErr * eff < 0.f &&
                           std::fabs(eff) > std::fabs(prevErr) * 0.35f;
         if (flip) { flipDamp = 0.85f; if (responded) capLevel *= 0.5f; }
@@ -549,11 +561,15 @@ int main() {
             Plant p; p.target0 = 30.f; p.visF = visF; p.overF = overF;
             MemCtrl c0; c0.mode = 0;
             Res r0 = runMem(p, c0);
+            MemCtrl cG; cG.mode = 3; Res rG = runMem(p, cG);
             MemCtrl c1; c1.mode = 1;
             Res r1 = runMem(p, c1);
             printf("текущий (доля+потолок)     %-9.2f %-9.2f %-8.2f %-7d %s  (%dк/%dк)\n",
                    r0.lock05, r0.settle, r0.maxOvershoot, r0.flips,
                    r0.settled3s ? "да" : "НЕТ", overF, visF);
+            printf("гросс (доля 1.5 первые 0.9с) %-9.2f %-9.2f %-8.2f %-7d %s  (%dк/%dк)\n",
+                   rG.lock05, rG.settle, rG.maxOvershoot, rG.flips,
+                   rG.settled3s ? "да" : "НЕТ", overF, visF);
             printf("абсолютная цель + slew     %-9.2f %-9.2f %-8.2f %-7d %s  (%dк/%dк)\n",
                    r1.lock05, r1.settle, r1.maxOvershoot, r1.flips,
                    r1.settled3s ? "да" : "НЕТ", overF, visF);
@@ -579,9 +595,10 @@ int main() {
         for (int visF : {1, 4}) {
             Plant p; p.target0 = 5.f; p.targetV = 30.f; p.visF = visF; p.overF = overF;
             MemCtrl c0; c0.mode = 0; Res r0 = runMem(p, c0);
+            MemCtrl cG; cG.mode = 3; Res rG = runMem(p, cG);
             MemCtrl c1; c1.mode = 1; Res r1 = runMem(p, c1);
-            printf("оверлей %dк, задержка %dк: текущий шлейф %.2f° (реверсов %d) | лок шлейф %.2f° (реверсов %d)\n",
-                   overF, visF, r0.trail, r0.flips, r1.trail, r1.flips);
+            printf("оверлей %dк, задержка %dк: текущий шлейф %.2f° (реверсов %d) | гросс шлейф %.2f° (реверсов %d) | лок шлейф %.2f° (реверсов %d)\n",
+                   overF, visF, r0.trail, r0.flips, rG.trail, rG.flips, r1.trail, r1.flips);
         }
     }
     printf("\n===== ПАМЯТЬ, дрожь кости ±0.15° и ±0.40° (сначала сходимость, потом дрожь) =====\n");
@@ -600,10 +617,12 @@ int main() {
         for (int visF : {1, 4}) {
             Plant p; p.target0 = 5.f; p.targetV = 3.f; p.visF = visF; p.overF = overF;
             MemCtrl c1; c1.mode = 1;
+            MemCtrl cG; cG.mode = 3;
             Res r1 = runMem(p, c1);
-            printf("оверлей %dк, задержка %dк: средний остаток %.3f°, шлейф %.3f° %s\n",
-                   overF, visF, r1.trail, r1.trail,
-                   r1.trail < 0.8f ? "(лок держит кость — ок)" : "(ОТСТАВАНИЕ!)");
+            Res rG = runMem(p, cG);
+            printf("оверлей %dк, задержка %dк: лок %.3f° | гросс %.3f° %s\n",
+                   overF, visF, r1.trail, rG.trail,
+                   (r1.trail < 0.8f && rG.trail < 0.8f) ? "(держат кость — ок)" : "(ОТСТАВАНИЕ!)");
         }
     }
     return 0;
