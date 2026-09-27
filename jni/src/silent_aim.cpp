@@ -50,10 +50,13 @@ class Writer {
         Memory mem;
         int pid = -1;
         uint64_t session = 0;
+        // Снимок, для которого ось последний раз была успешно записана. Новый
+        // снимок кадра (новая цель/камера) — запись без ожидания полла.
+        uint64_t written_snapshot = 0;
         std::unique_lock<std::mutex> lock(mutex_);
         while (!stopping_) {
             if (!stats_.active) {
-                mem.close(); pid = -1;
+                mem.close(); pid = -1; written_snapshot = 0;
                 wake_.wait(lock, [&] { return stopping_ || stats_.active; });
                 continue;
             }
@@ -68,24 +71,40 @@ class Writer {
                     continue;
                 }
                 pid = command_.pid; session = session_;
+                written_snapshot = 0;
             }
             // Copy command and unlock while performing IO: clear/publish/stats
             // in the UI thread never block on uncached pread/pwrite calls.
             const Command local_cmd = command_;
+            const uint64_t snapshot = published_;
             const uint64_t local_session = session_;
             lock.unlock();
-            const Result result = tick(mem, local_cmd);
+            Result result = Result::written;
+            bool wrote = false;
+            float dir[3] = {};
+            if (!valid_command(local_cmd) || !direction(local_cmd, dir)) {
+                result = Result::invalid;
+            } else if (snapshot != written_snapshot || !axis_matches(mem, local_cmd, dir)) {
+                // Пишем, когда пришёл НОВЫЙ снимок или игра успела перезаписать
+                // ось направлением камеры. Реакция на перезапись игрой —
+                // kPollUs (150 мкс), а не миллисекунды слепого интервала.
+                result = tick(mem, local_cmd);
+                wrote = result == Result::written;
+            }
             lock.lock();
             if (stopping_ || session_ != local_session) continue;
             stats_.axis = result == Result::written;
-            if (result == Result::written) ++stats_.writes;
-            else {
+            if (result == Result::written) {
+                if (wrote) { ++stats_.writes; written_snapshot = snapshot; }
+            } else {
                 ++stats_.failures;
                 if (result == Result::guard_failed) ++stats_.guard_failures;
                 stats_.active = false; // require a NEW frame snapshot
             }
-            const auto interval = std::chrono::microseconds(command_.recent_shot ? kHotUs : kTickUs);
-            wake_.wait_for(lock, interval, [&] { return stopping_ || !stats_.active; });
+            const auto interval = std::chrono::microseconds(kPollUs);
+            wake_.wait_for(lock, interval, [&] {
+                return stopping_ || !stats_.active || published_ != snapshot;
+            });
         }
     }
 public:

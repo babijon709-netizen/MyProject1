@@ -8,7 +8,18 @@
 namespace silent_aim {
 constexpr uint64_t kTagMask = 0x00FFFFFFFFFFFFFFULL;
 constexpr uint64_t kLeaseMs = 100; // Do not keep firing at a stale 600ms snapshot.
-constexpr unsigned kTickUs = 2500, kHotUs = 1200; // Sane cadence: 400-800 writes/sec without locking up kernel /proc/mem.
+// Реактивный цикл: слепая пере-запись оси каждые 2500/1200 мкс давала окно до
+// ~3 мс после того, как игра перезаписала ось направлением камеры — выстрел,
+// попавший в это окно, улетал ровно в прицел («смотрю в сторону, пули летят
+// куда смотрю»). Теперь ось пишется по факту: новый снимок — пишем сразу;
+// дальше только ЧИТАЕМ ось каждые kPollUs и переписываем (с полными гвардами),
+// как только игра её перезаписала. Чтение всегда безопасно, а запись по-прежнему
+// идёт только после проверки принадлежности/классов/оружия этой же команды.
+constexpr unsigned kPollUs = 150;
+// Ось считается «нашей», пока компоненты отличаются не более чем на kAxisSlop:
+// перезапись игрой (камера != цель почти всегда) ловится с запасом, а дрожание
+// цели на младших битах float не гоняет запись каждый полл.
+constexpr float kAxisSlop = 4e-4f;
 inline bool valid_pointer(uint64_t p) { return p >= 0x10000 && p < 0x800000000000ULL; }
 inline bool fresh(uint64_t published, uint64_t now) {
     return now >= published && now - published < kLeaseMs;
@@ -70,5 +81,16 @@ Result tick(Memory& mem, const Command& c) {
     if (!guarded(mem, c)) return Result::guard_failed;
     return mem.write(c.look + c.value_offset, dir, sizeof(dir))
         ? Result::written : Result::write_failed;
+}
+// Безопасная проверка «ось всё ещё наша»: ОДНО чтение по уже подтверждённому
+// маршруту. Отказ чтения считается рассинхроном — вызывающий тогда делает
+// полный guarded-такт с записью, так что ложного доверия к мёртвому адресу нет.
+template<class Memory>
+bool axis_matches(Memory& mem, const Command& c, const float dir[3]) {
+    float cur[3];
+    if (!mem.read(c.look + c.value_offset, cur, sizeof(cur))) return false;
+    for (int i = 0; i < 3; ++i)
+        if (!finite(cur[i]) || std::fabs(cur[i] - dir[i]) > kAxisSlop) return false;
+    return true;
 }
 }

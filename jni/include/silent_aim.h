@@ -14,7 +14,6 @@ struct Command {
     uint64_t fp_manager_offset = 0, weapon_offset = 0;
     uint64_t target = 0;
     float eye[3] = {}, aim[3] = {};
-    bool recent_shot = false;
 };
 struct Stats {
     uint64_t writes = 0, failures = 0, guard_failures = 0;

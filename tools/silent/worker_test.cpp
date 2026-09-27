@@ -56,6 +56,27 @@ int main() {
     count = stats().writes;
     assert(publish(c)); await([&] { return stats().writes > count; });
     clear();
+    // Reactive loop: the game overwriting the axis between snapshots must be
+    // rewritten back without any new publish (the "bullets fly at the crosshair"
+    // window shrinks from the blind interval to ~one poll).
+    {
+        const float camera_dir[3] = {0.f, 0.f, 1.f};
+        uint64_t before = stats().writes;
+        assert(publish(c));
+        await([&] { return stats().writes > before; });
+        const uint64_t settled = stats().writes;
+        std::memcpy(look.data() + 0x20, camera_dir, sizeof(camera_dir));
+        await([&] { return stats().writes > settled; });
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        float again[3]; std::memcpy(again, look.data() + 0x20, sizeof(again));
+        assert(again[0] > .599f && again[0] < .601f && again[2] > .799f && again[2] < .801f);
+        // While the game does not touch the axis and no new frame arrives, the
+        // worker stays read-only: no write storm.
+        const uint64_t idle = stats().writes;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        assert(stats().writes == idle);
+        clear();
+    }
     ptr(fp, 0x50, 0); // dropped weapon => fail closed
     const auto guards = stats().guard_failures;
     assert(publish(c)); await([&] { return stats().guard_failures > guards; });
