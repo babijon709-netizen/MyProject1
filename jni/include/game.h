@@ -123,8 +123,6 @@ void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pick
 void        esp_set_ore_kinds_enabled(bool stone, bool metal, bool sulfur);
 // «Всегда день»: время суток удерживается в полдне (клиентский визуал).
 void        esp_set_always_day(bool enabled);
-// Картофельная графика: запись в живой URP-ассет (без патчей библиотек).
-void        esp_set_potato_gfx(bool enabled, float render_scale);
 // Быстрая стрельба и перезарядка (запись в ассет оружия, без патчей кода).
 void        esp_set_weapon_speed(bool fast_fire, bool fast_reload,
                                  float fire_mult, float reload_mult);

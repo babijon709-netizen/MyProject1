@@ -885,10 +885,10 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgSHdr(XS("Темп"));
         FgCardBg(rH * 4);
         FgToggleRow(XS("Быстрая стрельба"), &g_state.fast_fire, g_state.a_fast_fire, false);
-        FgSliderRow(XS("Ускорение стрельбы"), &g_state.fast_fire_mult, 1.f, 10.f, "x%.1f",
+        FgSliderRow(XS("Ускорение стрельбы"), &g_state.fast_fire_mult, 1.f, 20.f, "x%.1f",
                     false, g_state.sl_fast_fire);
         FgToggleRow(XS("Быстрая перезарядка"), &g_state.fast_reload, g_state.a_fast_reload, false);
-        FgSliderRow(XS("Ускорение перезарядки"), &g_state.fast_reload_mult, 1.f, 10.f, "x%.1f",
+        FgSliderRow(XS("Ускорение перезарядки"), &g_state.fast_reload_mult, 1.f, 20.f, "x%.1f",
                     true, g_state.sl_fast_reload);
 
         const auto weaponStatus = esp_viewmodel_diagnostics();
@@ -1052,16 +1052,10 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         }
 
     } else if (secId == 12) {
-        // Мир: всегда день + картофельная графика
+        // Мир: всегда день
         FgSHdr(XS("Окружение"));
         FgCardBg(rH * 1);
         FgToggleRow(XS("Всегда день"), &g_state.always_day, g_state.a_always_day, true);
-
-        FgSHdr(XS("Графика"));
-        FgCardBg(rH * 2);
-        FgToggleRow(XS("Картофельная графика"), &g_state.potato_gfx, g_state.a_potato_gfx, false);
-        FgSliderRow(XS("Масштаб рендера"), &g_state.potato_scale, 0.4f, 1.f, "%.2f",
-                    true, g_state.sl_potato_scale);
 
     } else if (secId == 2) {
         FgSHdr(nullptr, 12.f);

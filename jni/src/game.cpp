@@ -157,6 +157,8 @@ void esp_set_always_day(bool enabled) { g_day_enabled = enabled; }
 static uint64_t resolve_local_player();          // определена ниже
 int class_identity(uint64_t klass, const char* expected_name, const char* expected_ns);
 
+// Предел множителей темпа/перезарядки: столько же, сколько даёт ползунок.
+static constexpr float kWeaponSpeedMultMax = 20.f;
 static bool  g_fast_fire = false, g_fast_reload = false;
 static float g_fast_fire_mult = 3.f, g_fast_reload_mult = 4.f;
 static uint64_t g_ws_config = 0;          // ассет, в который писали
@@ -166,8 +168,21 @@ static float g_ws_fire = 0.f, g_ws_full = 0.f, g_ws_loop = 0.f;
 void esp_set_weapon_speed(bool fast_fire, bool fast_reload, float fire_mult, float reload_mult) {
     g_fast_fire = fast_fire;
     g_fast_reload = fast_reload;
-    if (fire_mult >= 1.f && fire_mult <= 10.f) g_fast_fire_mult = fire_mult;
-    if (reload_mult >= 1.f && reload_mult <= 10.f) g_fast_reload_mult = reload_mult;
+    // Потолок множителей — ровно максимум ползунков в меню (x20). Раньше здесь
+    // стояло 10: ползунок уезжал дальше, а слой памяти такое значение молча
+    // отбрасывал и держал прежнее — «на максимум не выставляется».
+    // Клэмпим, а не отбрасываем: значение чуть за краем ползунка (округление
+    // в конфиге) обязано дать максимум, а не откат к старому.
+    if (std::isfinite(fire_mult)) {
+        if (fire_mult < 1.f) fire_mult = 1.f;
+        if (fire_mult > kWeaponSpeedMultMax) fire_mult = kWeaponSpeedMultMax;
+        g_fast_fire_mult = fire_mult;
+    }
+    if (std::isfinite(reload_mult)) {
+        if (reload_mult < 1.f) reload_mult = 1.f;
+        if (reload_mult > kWeaponSpeedMultMax) reload_mult = kWeaponSpeedMultMax;
+        g_fast_reload_mult = reload_mult;
+    }
 }
 
 // Ассет текущего оружия, проверенный по имени класса.
@@ -286,359 +301,16 @@ static void weapon_speed_tick() {
     if (g_fast_reload) {
         float full = g_ws_full / g_fast_reload_mult;
         float loop = g_ws_loop / g_fast_reload_mult;
-        if (full < 0.05f) full = 0.05f;
-        if (loop < 0.02f) loop = 0.02f;
+        // Полы перезарядки: ниже них игра не успевает проиграть анимацию и
+        // магазин не пополняется вовсе. На x20 они и так не достигаются у
+        // обычных стволов, поэтому максимум ползунка работает целиком.
+        if (full < 0.03f) full = 0.03f;
+        if (loop < 0.01f) loop = 0.01f;
         if (g_ws_full > 0.f) setf(WEAPON_CONFIG_FULL_RELOAD, full);
         if (g_ws_loop > 0.f) setf(WEAPON_CONFIG_LOOP_RELOAD, loop);
     } else if (g_ws_saved) {
         if (g_ws_full > 0.f) setf(WEAPON_CONFIG_FULL_RELOAD, g_ws_full);
         if (g_ws_loop > 0.f) setf(WEAPON_CONFIG_LOOP_RELOAD, g_ws_loop);
-    }
-}
-
-// ================== Картофельная графика (без патчей кода) ==================
-// URP держит настройки качества в обычном ScriptableObject
-// (UniversalRenderPipelineAsset) и перечитывает их КАЖДЫЙ кадр при сборке
-// кадровых данных. Поэтому «понизить графику» можно чистой записью в данные:
-// масштаб рендера, тени, сглаживание, HDR, доп. источники света. Живой ассет
-// лежит в статике UnityEngine.Rendering.RenderPipelineManager.
-//
-// Правила те же, что у блока «Оружие»: пишем только в проверенный объект,
-// сохраняем оригиналы и возвращаем их при выключении или смене ассета.
-static bool     g_potato_enabled = false;
-static float    g_potato_scale = 0.7f;
-static uint64_t g_potato_asset = 0;       // ассет, в который писали
-static bool     g_potato_saved = false;
-struct PotatoOriginals {
-    float scale = 1.f, shadowDist = 50.f;
-    int32_t msaa = 1, cascades = 1, addMode = 0, addLimit = 4;
-    uint8_t depthTex = 0, opaqueTex = 0, hdr = 0, lodCross = 0;
-    uint8_t mainShadows = 1, addShadows = 0, reflBlend = 0, reflBox = 0;
-};
-static PotatoOriginals g_potato_orig;
-
-void esp_set_potato_gfx(bool enabled, float scale) {
-    g_potato_enabled = enabled;
-    if (scale >= 0.3f && scale <= 1.f) g_potato_scale = scale;
-}
-
-// Живой ассет активного рендер-пайплайна: класс по имени (его находит
-// автообновление) -> статик-блок -> s_CurrentPipelineAsset.
-static uint64_t potato_find_asset() {
-    const uint64_t mgr = offset_resolver_class("RenderPipelineManager", "UnityEngine.Rendering");
-    if (!mgr) return 0;
-    const uint64_t statics = get_class_static_fields(mgr);
-    if (!statics) return 0;
-    const uint64_t asset = memio::untag(rd_ptr(statics + RP_MANAGER_CURRENT_ASSET));
-    if (!valid_obj(asset)) return 0;
-    // Проверка по содержимому: масштаб рендера и дальность теней обязаны быть
-    // правдоподобными. Чужой объект такую пару не даст.
-    const float scale = rd<float>(asset + URP_RENDER_SCALE);
-    const float dist  = rd<float>(asset + URP_SHADOW_DISTANCE);
-    if (!(std::isfinite(scale) && scale >= 0.1f && scale <= 4.f)) return 0;
-    if (!(std::isfinite(dist) && dist >= 0.f && dist <= 5000.f)) return 0;
-    return asset;
-}
-
-static void potato_restore() {
-    if (!g_potato_saved || !g_potato_asset) { g_potato_saved = false; g_potato_asset = 0; return; }
-    const uint64_t a = g_potato_asset;
-    const PotatoOriginals& o = g_potato_orig;
-    { const float _v = (float)(o.scale); wr_buf(a + URP_RENDER_SCALE, &_v, sizeof(_v)); }
-    { const float _v = (float)(o.shadowDist); wr_buf(a + URP_SHADOW_DISTANCE, &_v, sizeof(_v)); }
-    { const int32_t _v = (int32_t)(o.msaa); wr_buf(a + URP_MSAA, &_v, sizeof(_v)); }
-    { const int32_t _v = (int32_t)(o.cascades); wr_buf(a + URP_SHADOW_CASCADES, &_v, sizeof(_v)); }
-    { const int32_t _v = (int32_t)(o.addMode); wr_buf(a + URP_ADDITIONAL_LIGHTS_MODE, &_v, sizeof(_v)); }
-    { const int32_t _v = (int32_t)(o.addLimit); wr_buf(a + URP_ADDITIONAL_LIGHTS_LIMIT, &_v, sizeof(_v)); }
-    { const uint8_t _v = (uint8_t)(o.depthTex); wr_buf(a + URP_DEPTH_TEXTURE, &_v, sizeof(_v)); }
-    { const uint8_t _v = (uint8_t)(o.opaqueTex); wr_buf(a + URP_OPAQUE_TEXTURE, &_v, sizeof(_v)); }
-    { const uint8_t _v = (uint8_t)(o.hdr); wr_buf(a + URP_SUPPORTS_HDR, &_v, sizeof(_v)); }
-    { const uint8_t _v = (uint8_t)(o.lodCross); wr_buf(a + URP_LOD_CROSSFADE, &_v, sizeof(_v)); }
-    { const uint8_t _v = (uint8_t)(o.mainShadows); wr_buf(a + URP_MAIN_LIGHT_SHADOWS, &_v, sizeof(_v)); }
-    { const uint8_t _v = (uint8_t)(o.addShadows); wr_buf(a + URP_ADDITIONAL_LIGHT_SHADOWS, &_v, sizeof(_v)); }
-    { const uint8_t _v = (uint8_t)(o.reflBlend); wr_buf(a + URP_REFLECTION_BLENDING, &_v, sizeof(_v)); }
-    { const uint8_t _v = (uint8_t)(o.reflBox); wr_buf(a + URP_REFLECTION_BOX, &_v, sizeof(_v)); }
-    LogLine("картофель: настройки графики возвращены ассету 0x%llx", (unsigned long long)a);
-    g_potato_saved = false;
-    g_potato_asset = 0;
-}
-
-// База libunity.so в карте процесса (нативные настройки качества живут там).
-static uint64_t potato_unity_base() {
-    static uint64_t s_base = 0;
-    static double s_next_try = 0.0;
-    if (s_base) return s_base;
-    const double now_s = mono_seconds();
-    if (now_s < s_next_try) return 0;
-    s_next_try = now_s + 2.0;
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/maps", (int)g_pid);
-    FILE* f = fopen(path, "r");
-    if (!f) return 0;
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
-        if (!strstr(line, "libunity.so")) continue;
-        unsigned long long a = 0, b = 0, off = 0;
-        char perms[8] = {};
-        if (sscanf(line, "%llx-%llx %7s %llx", &a, &b, perms, &off) < 4) continue;
-        if (off != 0 || perms[0] != 'r') continue;   // начало образа
-        s_base = (uint64_t)a;
-        break;
-    }
-    fclose(f);
-    if (s_base) LogLine("картофель: libunity найдена по 0x%llx", (unsigned long long)s_base);
-    return s_base;
-}
-
-// Текущий уровень качества Unity: адрес блока настроек, в который пишем.
-static uint64_t potato_quality_level() {
-    const uint64_t base = potato_unity_base();
-    if (!base) return 0;
-    // Диагностика: без неё «нативная часть молчит» не разобрать — в логе
-    // 26.09 23:29 не было ни одной строки про нативное качество.
-    static double s_next_log = 0.0;
-    const bool talk = mono_seconds() >= s_next_log;
-    // Код причины вместо строки: русские слова отдельными литералами проверка
-    // переводов считает подписями интерфейса (и ломает сборку).
-    auto fail = [&](int code, uint64_t a, uint64_t b, long c) -> uint64_t {
-        if (!talk) return 0;
-        s_next_log = mono_seconds() + 5.0;
-        switch (code) {
-            case 1:
-                LogLine("картофель: нативное качество не читается — нет менеджера по таблице "
-                        "(libunity 0x%llx, менеджер 0x%llx)",
-                        (unsigned long long)base, (unsigned long long)a);
-                break;
-            case 2:
-                LogLine("картофель: нативное качество не читается — уровень вне диапазона "
-                        "(менеджер 0x%llx, массив 0x%llx, уровень %ld)",
-                        (unsigned long long)a, (unsigned long long)b, c);
-                break;
-            case 3:
-                LogLine("картофель: нативное качество не читается — нет массива уровней "
-                        "(менеджер 0x%llx, массив 0x%llx)",
-                        (unsigned long long)a, (unsigned long long)b);
-                break;
-            case 4:
-                LogLine("картофель: нативное качество не читается — предел мипов неправдоподобен "
-                        "(уровень 0x%llx, значение %ld)", (unsigned long long)b, c);
-                break;
-            default:
-                LogLine("картофель: нативное качество не читается — LOD-смещение неправдоподобно "
-                        "(уровень 0x%llx, значение %ld%%)", (unsigned long long)b, c);
-                break;
-        }
-        return 0;
-    };
-    const uint64_t qs = rd_ptr(base + UNITY_MANAGERS_RVA + UNITY_QUALITY_MANAGER_IDX * 8);
-    if (!valid_obj(qs)) return fail(1, qs, 0, -1);
-    const int32_t level = rd<int32_t>(qs + QUALITY_CURRENT_LEVEL);
-    const uint64_t arr = rd_ptr(qs + QUALITY_LEVEL_ARRAY);
-    if (level < 0 || level > 32) return fail(2, qs, arr, (long)level);
-    if (!valid_obj(arr)) return fail(3, qs, arr, (long)level);
-    const uint64_t lv = arr + (uint64_t)level * QUALITY_LEVEL_STRIDE;
-    // Проверка по содержимому: предел мипов 0..8, LOD-смещение 0.05..20.
-    const int32_t mip = rd<int32_t>(lv + QUALITY_TEXTURE_MIPMAP_LIMIT);
-    const float bias = rd<float>(lv + QUALITY_LOD_BIAS);
-    if (mip < 0 || mip > 8) return fail(4, qs, lv, (long)mip);
-    if (!std::isfinite(bias) || bias < 0.05f || bias > 20.f)
-        return fail(5, qs, lv, (long)(bias * 100.f));
-    return lv;
-}
-
-struct PotatoQualityOriginals {
-    int32_t mip = 0, maxLod = 0, lights = 0, aa = 0;
-    float bias = 1.f, shadowDist = 0.f;
-    bool saved = false;
-};
-static PotatoQualityOriginals g_potato_q;
-static uint64_t g_potato_q_level = 0;
-
-static void potato_quality_restore() {
-    if (!g_potato_q.saved || !g_potato_q_level) { g_potato_q.saved = false; g_potato_q_level = 0; return; }
-    const uint64_t lv = g_potato_q_level;
-    { const int32_t v = g_potato_q.mip;    wr_buf(lv + QUALITY_TEXTURE_MIPMAP_LIMIT, &v, sizeof(v)); }
-    { const int32_t v = g_potato_q.maxLod; wr_buf(lv + QUALITY_MAX_LOD_LEVEL, &v, sizeof(v)); }
-    { const int32_t v = g_potato_q.lights; wr_buf(lv + QUALITY_PIXEL_LIGHT_COUNT, &v, sizeof(v)); }
-    { const int32_t v = g_potato_q.aa;     wr_buf(lv + QUALITY_ANTI_ALIASING, &v, sizeof(v)); }
-    { const float   v = g_potato_q.bias;   wr_buf(lv + QUALITY_LOD_BIAS, &v, sizeof(v)); }
-    { const float   v = g_potato_q.shadowDist; wr_buf(lv + QUALITY_SHADOW_DISTANCE, &v, sizeof(v)); }
-    LogLine("картофель: нативные настройки качества возвращены");
-    g_potato_q.saved = false;
-    g_potato_q_level = 0;
-}
-
-// Нативная часть «картофеля»: текстуры в четверть разрешения (это и есть
-// «мыло»), агрессивный LOD, без попиксельных источников и сглаживания.
-static void potato_quality_apply() {
-    const uint64_t lv = potato_quality_level();
-    if (!lv) return;
-    if (g_potato_q_level && lv != g_potato_q_level) potato_quality_restore();
-    if (!g_potato_q.saved) {
-        g_potato_q.mip    = rd<int32_t>(lv + QUALITY_TEXTURE_MIPMAP_LIMIT);
-        g_potato_q.maxLod = rd<int32_t>(lv + QUALITY_MAX_LOD_LEVEL);
-        g_potato_q.lights = rd<int32_t>(lv + QUALITY_PIXEL_LIGHT_COUNT);
-        g_potato_q.aa     = rd<int32_t>(lv + QUALITY_ANTI_ALIASING);
-        g_potato_q.bias   = rd<float>(lv + QUALITY_LOD_BIAS);
-        g_potato_q.shadowDist = rd<float>(lv + QUALITY_SHADOW_DISTANCE);
-        g_potato_q.saved = true;
-        g_potato_q_level = lv;
-        LogLine("картофель: нативное качество @0x%llx — было мипы=%d LOD-смещение=%.2f "
-                "макс.LOD=%d свет=%d сглаживание=%d тени=%.0f м",
-                (unsigned long long)lv, (int)g_potato_q.mip, (double)g_potato_q.bias,
-                (int)g_potato_q.maxLod, (int)g_potato_q.lights, (int)g_potato_q.aa,
-                (double)g_potato_q.shadowDist);
-    }
-    auto seti = [&](uint64_t off, int32_t v) {
-        if (rd<int32_t>(lv + off) != v) wr_buf(lv + off, &v, sizeof(v));
-    };
-    auto setf = [&](uint64_t off, float v) {
-        const float now = rd<float>(lv + off);
-        if (!std::isfinite(now) || fabsf(now - v) > 0.0001f) wr_buf(lv + off, &v, sizeof(v));
-    };
-    // Предел мипов: 2 = текстуры грузятся в четверть разрешения. Уже
-    // загруженные подтянутся по мере стриминга, новые — сразу.
-    seti(QUALITY_TEXTURE_MIPMAP_LIMIT, 2);
-    seti(QUALITY_MAX_LOD_LEVEL, 1);        // самые детальные LOD не используются
-    seti(QUALITY_PIXEL_LIGHT_COUNT, 0);
-    seti(QUALITY_ANTI_ALIASING, 0);
-    setf(QUALITY_LOD_BIAS, 0.3f);          // дальние модели переключаются раньше
-    setf(QUALITY_SHADOW_DISTANCE, 0.f);
-}
-
-// URP-часть картофеля тоже пишет по смещениям из метаданных: на новой сборке
-// игры они могут уехать, и писать по вшитым нельзя. Нативная часть (libunity)
-// сюда не входит: там имён нет вовсе, её защищает проверка правдоподобия.
-static bool potato_urp_offsets_live() {
-    const std::uint64_t* const slots[] = {
-        &go_active::RP_MANAGER_CURRENT_ASSET, &go_active::URP_RENDER_SCALE,
-        &go_active::URP_SHADOW_DISTANCE, &go_active::URP_MSAA,
-        &go_active::URP_SHADOW_CASCADES, &go_active::URP_ADDITIONAL_LIGHTS_MODE,
-        &go_active::URP_MAIN_LIGHT_SHADOWS, &go_active::URP_SUPPORTS_HDR,
-        &go_active::URP_DEPTH_TEXTURE, &go_active::URP_OPAQUE_TEXTURE,
-    };
-    for (const std::uint64_t* slot : slots)
-        if (!offset_resolver_is_live(slot)) return false;
-    return true;
-}
-
-static void potato_gfx_tick() {
-    if (!g_potato_enabled) { potato_restore(); potato_quality_restore(); return; }
-    // Тоже раз в 250 мс: настройки качества игра сама не крутит каждый кадр.
-    {
-        static double s_next = 0.0;
-        const double now_s = mono_seconds();
-        if (now_s < s_next) return;
-        s_next = now_s + 0.25;
-    }
-    if (!g_il2cpp_base || g_pid <= 0) { g_potato_q.saved = false; g_potato_q_level = 0; return; }
-    if (!potato_urp_offsets_live()) {
-        static double s_next = 0.0;
-        if (mono_seconds() >= s_next) {
-            s_next = mono_seconds() + 10.0;
-            LogLine("картофель: жду автообновление — смещения URP-ассета ещё не подтверждены живыми метаданными");
-        }
-        potato_restore();
-        potato_quality_apply();   // нативная часть от метаданных не зависит
-        return;
-    }
-    const uint64_t asset = potato_find_asset();
-    if (!asset) return;
-    if (g_potato_asset && asset != g_potato_asset) potato_restore();   // ассет сменился
-    if (!g_potato_saved) {
-        PotatoOriginals o;
-        o.scale       = rd<float>(asset + URP_RENDER_SCALE);
-        o.shadowDist  = rd<float>(asset + URP_SHADOW_DISTANCE);
-        o.msaa        = rd<int32_t>(asset + URP_MSAA);
-        o.cascades    = rd<int32_t>(asset + URP_SHADOW_CASCADES);
-        o.addMode     = rd<int32_t>(asset + URP_ADDITIONAL_LIGHTS_MODE);
-        o.addLimit    = rd<int32_t>(asset + URP_ADDITIONAL_LIGHTS_LIMIT);
-        o.depthTex    = rd<uint8_t>(asset + URP_DEPTH_TEXTURE);
-        o.opaqueTex   = rd<uint8_t>(asset + URP_OPAQUE_TEXTURE);
-        o.hdr         = rd<uint8_t>(asset + URP_SUPPORTS_HDR);
-        o.lodCross    = rd<uint8_t>(asset + URP_LOD_CROSSFADE);
-        o.mainShadows = rd<uint8_t>(asset + URP_MAIN_LIGHT_SHADOWS);
-        o.addShadows  = rd<uint8_t>(asset + URP_ADDITIONAL_LIGHT_SHADOWS);
-        o.reflBlend   = rd<uint8_t>(asset + URP_REFLECTION_BLENDING);
-        o.reflBox     = rd<uint8_t>(asset + URP_REFLECTION_BOX);
-        if (!std::isfinite(o.scale) || o.scale < 0.1f || o.scale > 4.f) return;
-        g_potato_orig = o;
-        g_potato_asset = asset;
-        g_potato_saved = true;
-        LogLine("картофель: ассет 0x%llx, было scale=%.2f тени=%.0f м MSAA=%d каскадов=%d "
-                "HDR=%d глубина=%d непрозрачные=%d",
-                (unsigned long long)asset, (double)o.scale, (double)o.shadowDist,
-                (int)o.msaa, (int)o.cascades, (int)o.hdr, (int)o.depthTex, (int)o.opaqueTex);
-    }
-    // Пишем только то, что отличается: лишние записи в память игры не нужны.
-    auto setf = [&](uint64_t off, float v) {
-        const float now = rd<float>(asset + off);
-        if (!std::isfinite(now) || fabsf(now - v) > 0.0001f) { const float _v = (float)(v); wr_buf(asset + off, &_v, sizeof(_v)); }
-    };
-    auto seti = [&](uint64_t off, int32_t v) {
-        if (rd<int32_t>(asset + off) != v) { const int32_t _v = (int32_t)(v); wr_buf(asset + off, &_v, sizeof(_v)); }
-    };
-    auto setb = [&](uint64_t off, uint8_t v) {
-        if (rd<uint8_t>(asset + off) != v) { const uint8_t _v = (uint8_t)(v); wr_buf(asset + off, &_v, sizeof(_v)); }
-    };
-    // Масштаб рендера: НИКОГДА не поднимаем выше того, что стояло в игре.
-    // Лог 26.09 22:30 показал, зачем: у игры уже было scale=0.54, а ползунок
-    // по умолчанию 0.70 — мы делали картинку ЧЁТЧЕ и тяжелее, отсюда «функция
-    // не работает». И меняем его не чаще, чем раз в полсекунды и шагами по
-    // 0.05: URP пересоздаёт цели рендера под новый масштаб, а полтора десятка
-    // пересозданий в секунду (пока пользователь ведёт ползунок) и дают те
-    // самые разноцветные квадраты на экране.
-    {
-        float want = g_potato_scale;
-        if (want > g_potato_orig.scale) want = g_potato_orig.scale;
-        want = floorf(want * 20.f + 0.5f) / 20.f;          // шаг 0.05
-        if (want < 0.3f) want = 0.3f;
-        static double s_last_scale_write = 0.0;
-        static float  s_last_scale_want = 0.f;
-        const float now_scale = rd<float>(asset + URP_RENDER_SCALE);
-        const bool differs = !std::isfinite(now_scale) || fabsf(now_scale - want) > 0.001f;
-        const double now_s = mono_seconds();
-        if (differs && (want != s_last_scale_want || now_s - s_last_scale_write > 0.5)) {
-            if (now_s - s_last_scale_write > 0.5) {
-                { const float _v = want; wr_buf(asset + URP_RENDER_SCALE, &_v, sizeof(_v)); }
-                s_last_scale_write = now_s;
-                s_last_scale_want = want;
-            }
-        }
-    }
-    setf(URP_SHADOW_DISTANCE, 0.f);          // тени не рисуются вовсе
-    seti(URP_MSAA, 1);                        // сглаживание выключено
-    seti(URP_SHADOW_CASCADES, 1);
-    seti(URP_ADDITIONAL_LIGHTS_MODE, 0);      // доп. источники выключены
-    seti(URP_ADDITIONAL_LIGHTS_LIMIT, 0);
-    setb(URP_DEPTH_TEXTURE, 0);
-    setb(URP_OPAQUE_TEXTURE, 0);
-    setb(URP_SUPPORTS_HDR, 0);
-    setb(URP_LOD_CROSSFADE, 0);
-    setb(URP_MAIN_LIGHT_SHADOWS, 0);
-    setb(URP_ADDITIONAL_LIGHT_SHADOWS, 0);
-    setb(URP_REFLECTION_BLENDING, 0);
-    setb(URP_REFLECTION_BOX, 0);
-    potato_quality_apply();   // нативная часть: мипы текстур, LOD, свет
-
-    // Контроль: раз в секунду читаем ассет обратно. Если игра возвращает свои
-    // значения (или мы пишем не в тот ассет), это видно сразу — «функция не
-    // работает» перестаёт быть догадкой.
-    {
-        static double s_last_check = 0.0;
-        const double now_s = mono_seconds();
-        if (now_s - s_last_check > 1.0) {
-            s_last_check = now_s;
-            const float  sc  = rd<float>(asset + URP_RENDER_SCALE);
-            const float  sd  = rd<float>(asset + URP_SHADOW_DISTANCE);
-            const int32_t ms = rd<int32_t>(asset + URP_MSAA);
-            const int32_t al = rd<int32_t>(asset + URP_ADDITIONAL_LIGHTS_MODE);
-            const uint8_t mls = rd<uint8_t>(asset + URP_MAIN_LIGHT_SHADOWS);
-            LogLine("картофель: сейчас в ассете scale=%.2f (просили %.2f, у игры было %.2f) "
-                    "тени=%.0f м главный свет=%d MSAA=%d доп.свет=%d",
-                    (double)sc, (double)g_potato_scale, (double)g_potato_orig.scale,
-                    (double)sd, (int)mls, (int)ms, (int)al);
-        }
     }
 }
 
@@ -8444,7 +8116,6 @@ bool publish_camera_only_frame(float sw, float sh) {
     Mat4 solo_proj{}, solo_view{};
     xray_apply(cam_native);
     always_day_tick();
-    potato_gfx_tick();
     weapon_speed_tick();
     if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) return false;
     Vec3 cam_pos{};
@@ -8859,7 +8530,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         xray_apply(native_cam);
         always_day_tick();
-    potato_gfx_tick();
     weapon_speed_tick();
         // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
         if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {

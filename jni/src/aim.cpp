@@ -783,6 +783,7 @@ static void UpdateAimTouch(float dt) {
     static std::vector<FlightOrd> s_flight;
     static float s_absorbYaw = 0.f, s_absorbPitch = 0.f; // заказано, не отработано (град)
     static int   s_holdNoFrame = 0;   // тактов подряд без нового кадра игры
+    static int   s_skipLongStreak = 0; // рваных кадров подряд (см. ниже)
     static double s_lastStepTime = 0.0;  // когда выдали прошлый заказ
     ++s_tdiag.ticks;
     static float s_stallYaw = 0.f, s_stallPitch = 0.f;
@@ -979,13 +980,25 @@ static void UpdateAimTouch(float dt) {
     // свой таймаут: аим двигался бы рывками. Считаем таймауты подряд — после
     // третьего выключаем такт на 5 с и работаем шагами по ошибке (он устойчив и
     // без подтверждения: доля ошибки за такт ограничена половиной).
+    // ---- сторож молчания ----------------------------------------------------
+    // Ни одна из страховок ниже (ожидание отклика камеры, учёт «в полёте»,
+    // темп подачи, пропуск рваного кадра) не имеет права выключить аим
+    // насовсем: каждая из них рассчитана на единичные такты, но при неудачном
+    // сочетании (нет оси камеры, низкий ФПС, заказ без отклика) они молчат
+    // одна за другой — и получается «аим вообще не работает». Если цель есть,
+    // а шага не было дольше kAimSilenceMax, следующий такт проходит все
+    // задержки насквозь и работает по сырому остатку. Мёртвая зона при этом
+    // соблюдается: если прицел уже на цели, шаг не нужен и сторож не сработает.
+    static constexpr double kAimSilenceMax = 0.35;   // с без единого шага
+    const bool forceStep = (MonoNow() - s_lastStepTime) > kAimSilenceMax;
+
     static int   s_ackTimeouts = 0;
     static float s_ackDisabled = 0.f;
     const bool camAnswered = camMoved || s_camMovedPrev;
     s_camMovedPrev = camMoved;
     if (s_ackDisabled > 0.f) s_ackDisabled -= dt;
     const bool ackGate = (s_ackDisabled <= 0.f);
-    if (ackGate && s_fingerDown && !camAnswered &&
+    if (ackGate && s_fingerDown && !camAnswered && !forceStep &&
         (fabsf(s_pendDx) >= 1.f || fabsf(s_pendDy) >= 1.f)) {
         s_pendTime += dt;
         if (s_pendTime < 0.25f) {
@@ -1180,8 +1193,17 @@ static void UpdateAimTouch(float dt) {
                               ? s_absorbYaw   : minmag(s_absorbYaw,   winYaw);
         const float inflPitch = (!noFlow && fabsf(best.pitch) > kTouchInflightBand)
                               ? s_absorbPitch : minmag(s_absorbPitch, winPitch);
-        errYaw   -= inflYaw;
-        errPitch -= inflPitch;
+        if (forceStep) {
+            // Сторож молчания: заказы, из-за которых остаток «съеден», уже
+            // давно не отвечают — считать их летящими больше нельзя, иначе
+            // сторож пробьёт задержки и всё равно получит нулевую ошибку.
+            s_flight.clear();
+            s_absorbYaw = s_absorbPitch = 0.f;
+            s_stallYaw = s_stallPitch = 0.f;
+        } else {
+            errYaw   -= inflYaw;
+            errPitch -= inflPitch;
+        }
         // Защита знака: в полёте уже не меньше остатка — стоим, ждём отклика.
         if (best.yaw * errYaw < 0.f)     errYaw = 0.f;
         if (best.pitch * errPitch < 0.f) errPitch = 0.f;
@@ -1277,7 +1299,7 @@ static void UpdateAimTouch(float dt) {
     // так что скорость наведения не падает: закрываем больше за один заказ.
     {
         const double now_s = MonoNow();
-        if (now_s - s_lastStepTime < 0.030) {
+        if (!forceStep && now_s - s_lastStepTime < 0.030) {
             ++s_tdiag.skipNoFrame;
             if (s_fingerDown) Touch_Move(s_fx, s_fy);
             return;
@@ -1291,7 +1313,15 @@ static void UpdateAimTouch(float dt) {
     // приходит на сумму и перелетает; ошибка меняет знак — маятник влево-
     // вправо. Пока есть неотработанный заказ и камера не шевельнулась,
     // держим палец и ждём отклика.
-    if (!camMoved && (s_absorbYaw != 0.f || s_absorbPitch != 0.f)) {
+    // ВАЖНО: признак camMoved считается ТОЛЬКО когда читается настоящая ось
+    // камеры (haveCam). На этом устройстве её нет (cam_st = 0 во всех строках
+    // лога), и camMoved там false ВСЕГДА — значит условие ниже выполнялось на
+    // каждом такте, где висел хоть какой-то заказ, а заказ без потока камеры
+    // списывается только по падению остатка или по таймауту в 1 с. На практике
+    // это давало 8 пропущенных тактов после каждого шага и шаг раз в секунду:
+    // жалоба 27.09 «тач-аим вообще перестал работать». Поэтому ждать отклика
+    // камеры имеет смысл только там, где этот отклик вообще виден.
+    if (!forceStep && haveCam && !camMoved && (s_absorbYaw != 0.f || s_absorbPitch != 0.f)) {
         ++s_holdNoFrame;
         if (s_holdNoFrame <= 8) {          // но не залипаем навсегда
             ++s_tdiag.skipNoFrame;
@@ -1310,12 +1340,19 @@ static void UpdateAimTouch(float dt) {
     // перелетает — это и есть маятник после каждого фриза. На таком кадре
     // палец держим на месте и ждём нормального такта: потеря — один кадр,
     // выигрыш — отсутствие перелёта.
-    if (dt > 0.045f) {
+    // Порог 0.045 с — это 22 кадра оверлея в секунду: на телефоне под нагрузкой
+    // (ЕСП + подбор оффсетов) такт легко идёт дольше, и аим замолкал НАВСЕГДА,
+    // а не «на фризе» (жалоба 27.09). Пропускаем только действительно рваный
+    // кадр и не больше двух подряд: дальше ведём цель даже по устаревшей позе —
+    // медленный аим лучше молчащего.
+    if (!forceStep && dt > 0.090f && s_skipLongStreak < 2) {
+        ++s_skipLongStreak;
         ++s_tdiag.skipLongFrame;
         s_streakYaw = s_streakPitch = 0;
         if (s_fingerDown) Touch_Move(s_fx, s_fy);
         return;
     }
+    s_skipLongStreak = 0;
 
     auto snapGrid = [&](float v) { return roundf(v * unitsPerPx) / unitsPerPx; };
 
