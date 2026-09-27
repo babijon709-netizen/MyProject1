@@ -43,6 +43,28 @@ c1 = find(lambda l: l.startswith('// ============================ Автофар
 region = lines[a0:a1 + 1] + [''] + lines[b0:b1] + [''] + lines[c0:c1]
 open(build + '/ctrl.inc', 'w', encoding='utf-8').write('\n'.join(region) + '\n')
 
+# Тач-петля (tools/aim/touch_loop_test.cpp): НАСТОЯЩИЙ UpdateAimTouch с его
+# окружением — дробь экрана пальца, коэффициент из чувствительности (БЕЗ
+# MonoNow: часы у стенда свои, время в прогоне — симулированное), AimTarget,
+# общий блок (выбор цели + поток камеры) и весь тач-режим.
+f0 = find(lambda l: l.startswith('static constexpr float kAimTouchDefX'), 'kAimTouchDefX')
+f1 = find(lambda l: l.startswith('float AimTouchFracY('), 'AimTouchFracY')
+while lines[f1] != '}':
+    f1 += 1
+s0 = find(lambda l: l.startswith('static constexpr float kAimRefSensitivity'), 'kAimRefSensitivity')
+m0 = find(lambda l: l.startswith('double MonoNow()'), 'MonoNow')
+m1 = m0
+while lines[m1] != '}':
+    m1 += 1
+s1 = find(lambda l: l.startswith('float AimSensitivityGain('), 'AimSensitivityGain')
+while lines[s1] != '}':
+    s1 += 1
+t0 = find(lambda l: l.startswith('// ---- диагностика тач-аима'), 'диагностика тач-аима')
+touch_region = (lines[f0:f1 + 1] + [''] + lines[s0:m0] + [''] + lines[m1 + 1:s1 + 1] + [''] +
+                lines[a0:a1 + 1] + [''] + lines[b0:t0] + [''] + lines[t0:c0])
+open(build + '/touch_ctrl.inc', 'w', encoding='utf-8').write('\n'.join(touch_region) + '\n')
+print('регион тач-петли aim.cpp: %d строк' % len(touch_region))
+
 src = open('jni/include/str.h', encoding='utf-8').read()
 a = src.index('namespace xp {')
 b = src.index('#define XS(s)')
@@ -56,6 +78,12 @@ g++ -std=gnu++17 -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
     -o "$BUILD/mem_test" tools/aim/mem_test.cpp
 echo "сборка стенда: ОК"
 
+g++ -std=gnu++17 -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
+    -I"$BUILD" -Ijni/include/ImGui -Ijni/include -Ijni/src \
+    -o "$BUILD/touch_loop_test" tools/aim/touch_loop_test.cpp
+echo "сборка стенда тач-петли: ОК"
+
 "$BUILD/mem_test"
+"$BUILD/touch_loop_test"
 sh tools/team_membership_test.sh
 sh tools/logfile_test.sh
