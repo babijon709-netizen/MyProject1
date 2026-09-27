@@ -3,6 +3,13 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 TEMP=$(mktemp -d)
 trap 'rm -rf "$TEMP"' EXIT
+HOST_STUB="$TEMP/hostcheck/stub"
+mkdir -p "$HOST_STUB/sys"
+cat > "$HOST_STUB/sys/system_properties.h" <<'EOF_STUB'
+#pragma once
+#define PROP_VALUE_MAX 92
+static inline int __system_property_get(const char*, char*) { return 0; }
+EOF_STUB
 cat > "$TEMP/test.cpp" <<'CPP'
 #include "remote_gate.h"
 #include "device_identity.h"
@@ -98,7 +105,7 @@ printf 'enabled\n' > "$TEMP/state"
 PATH=/nonexistent FAKE_STATUS=enabled FAKE_STATE_FILE="$TEMP/state" "$TEMP/test" "$TEMP/state" transient
 printf 'enabled\n' > "$TEMP/state"
 PATH=/nonexistent FAKE_STATUS=enabled FAKE_STATE_FILE="$TEMP/state" "$TEMP/test" "$TEMP/state" outage
-g++ -std=c++17 -Wall -Wextra -Werror -I "$ROOT/jni/include" -I "$ROOT/tools/hostcheck/stub" \
+g++ -std=c++17 -Wall -Wextra -Werror -I "$ROOT/jni/include" -I "$HOST_STUB" \
     "$ROOT/jni/src/device_identity.cpp" "$ROOT/tests/remote_gate/device_identity.test.cpp" \
     -o "$TEMP/device_identity_test"
 "$TEMP/device_identity_test"

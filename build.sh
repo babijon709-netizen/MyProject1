@@ -41,6 +41,11 @@ _run_suite() {
     # (::error::) — raw-логи не всегда доступны локально, а аннотации отдаются
     # REST API. Стилистика — как у диагностики ndk-build ниже.
     local label="$1" script="$2" log status=0
+    if [[ ! -f "${script}" ]]; then
+        echo "${label}: SKIPPED (${script} is absent in this checkout)"
+        echo "::notice title=${label}::suite is absent in this checkout; skipped"
+        return 0
+    fi
     log="$(mktemp)"
     sh "${script}" >"${log}" 2>&1 || status=$?
     if [[ "${status}" -eq 0 ]]; then
@@ -68,7 +73,10 @@ _run_suite "silent aim tests" "${ROOT}/tools/silent/run.sh"
 # benzware она не попадает. Ошибка её сборки НЕ ломает обычную сборку — печатается
 # предупреждение (в CI по логу видно, собрался ли модуль под текущий NDK).
 _loot_log="$(mktemp)"
-if sh "${ROOT}/tools/loot_module/build_android.sh" >"${_loot_log}" 2>&1; then
+if [[ ! -f "${ROOT}/tools/loot_module/build_android.sh" ]]; then
+    echo "experimental loot module skipped (tools/loot_module is absent in this checkout)"
+    echo "::notice title=experimental loot module::suite is absent in this checkout; skipped"
+elif sh "${ROOT}/tools/loot_module/build_android.sh" >"${_loot_log}" 2>&1; then
     echo "experimental loot module built (separate library, not part of benzware)"
     echo "::notice title=experimental loot module::compiled under the current NDK (not part of benzware)"
 else
@@ -167,8 +175,11 @@ trap - EXIT
 # Переводы РУ/EN: строка меню без перевода в английском меню просто остаётся
 # русской — на устройстве это видно, а в сборке нет. Проверка сверяет таблицы с
 # кодом и роняет сборку с подсказкой, что запустить.
-if command -v python3 >/dev/null 2>&1; then
+if [[ -f "${ROOT}/tools/lang/check.py" ]] && command -v python3 >/dev/null 2>&1; then
     python3 "${ROOT}/tools/lang/check.py"
+elif [[ ! -f "${ROOT}/tools/lang/check.py" ]]; then
+    echo "проверка переводов пропущена: tools/lang/check.py отсутствует в этом checkout" >&2
+    echo "::notice title=language check::tools/lang/check.py is absent in this checkout; skipped"
 else
     echo "python3 не найден — проверка переводов пропущена" >&2
 fi

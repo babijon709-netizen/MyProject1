@@ -383,6 +383,268 @@ static bool aim_camera_flow(float& yawDeg, float& pitchDeg) {
 // Без этого кода кадр «аим активен, прицел есть, записей ноль» нечем
 // прочесть: в логе 17:06 таких было 32 из 92, и что именно не пустило
 // цель — отфильтровали трупа, круг обзора или пустой список — не видно.
+// Тач-режим использует выбор цели из корневого aim (1).cpp без новых
+// экспериментальных поправок основного селектора.
+static constexpr float kAimTouchVelocityLead = 0.0f;
+static bool AimSelectTargetTouch(float sw, float sh, AimPick& pick, AimTarget& best, float& degPerPx, int* why = nullptr) {
+    LogStage(kStageAimSelect);
+    if (why) *why = 0;
+    const unsigned long was_ally = s_ally_skipped, was_dead = s_dead_skipped;
+    const unsigned long was_nosk = s_no_skeleton,  was_noproj = s_bones_not_projected;
+    const unsigned long was_off  = s_offscreen_skipped, was_fov = s_out_of_fov;
+    const unsigned long was_seen = s_seen_boxes;
+    const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
+
+    // Сводку пропусков печатаем БЕЗ условий и ДО выбора. В сборке 829a1dc
+    // строка «мёртвых N» жила внутри ветки «кости не нашлись», и когда
+    // мёртвыми оказались вообще все игроки, в логе не появилось НИ ОДНОЙ
+    // строки: причину жалобы «аим вообще не нацеливается на игроков»
+    // (19.09) стало нечем подтвердить. Счётчик, который молчит именно
+    // тогда, когда сломалось, — не диагностика.
+    {
+        static double s_at = -1e9;
+        const double now = (double)clock() / CLOCKS_PER_SEC;
+        const unsigned long total = s_no_skeleton + s_bones_not_projected + s_dead_skipped +
+                                    s_ally_skipped + s_offscreen_skipped + s_out_of_fov +
+                                    s_bot_noesp_skipped;
+        if (now - s_at >= 5.0 && (total || s_seen_boxes)) {
+            s_at = now;
+            LogLine("аим: выбор — игроков %lu (ботов %lu, из них без есп %lu), пропущено: союзники %lu, мёртвые %lu, без костей %lu (нет скелета %lu, не спроецировались %lu), вне экрана %lu, вне круга %lu",
+                    s_seen_boxes, s_seen_bots, s_bot_noesp_skipped, s_ally_skipped, s_dead_skipped,
+                    s_no_skeleton + s_bones_not_projected, s_no_skeleton, s_bones_not_projected,
+                    s_offscreen_skipped, s_out_of_fov);
+            s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
+            s_ally_skipped = 0; s_dead_skipped = 0;
+            s_no_skeleton = 0; s_bones_not_projected = 0;
+            s_offscreen_skipped = 0; s_out_of_fov = 0;
+        }
+    }
+
+    const float crossX = sw * 0.5f, crossY = sh * 0.5f;
+    const float fovR = AimFovRadiusPx(sw, sh);
+    float camFov = esp_camera_fov_deg();
+    if (!(camFov > 1.f && camFov < 179.f)) camFov = 60.f;
+    // degrees per pixel at the screen centre (vertical axis)
+    degPerPx = camFov / sh;
+
+    // Цель — ШЕЯ (просьба 19.09: «пусть аим стреляет в шею, а не в голову»).
+    // Слоты: 0 голова, 1 шея, 2 грудь. Голова — это сустав у основания черепа,
+    // и попадание в неё «по кости» уходит в нижнюю часть головы; шея даёт
+    // более крупную и устойчивую зону. Переключателя в меню нет, поэтому
+    // значение задано константой: поменять её — поменяется цель аима.
+    int wantBone = g_state.aim_bone;
+    if (wantBone < 0 || wantBone > 2) wantBone = 1;
+
+    // ---- choose target ----
+    float bestScore = 1e18f;
+    for (const EspBox& b : boxes) {
+        // На союзников аим не работает НИКОГДА, а не только пока в визуалах
+        // включён их показ: проверка «g_state.esp_team && b.ally» означала,
+        // что со скрытыми союзниками (показ выключен) аим работал по ним
+        // как по врагам (вопрос 19.09). Признак своего — из групп/кланов
+        // (game.cpp, groups_are_allied), он считается независимо от визуалов.
+        ++s_seen_boxes;
+        if (b.is_bot) ++s_seen_bots;
+        // Боты — цели, только пока включено их ЕСП: выключил «Боты» —
+        // аим их не трогает. Действует в обоих режимах (выбор цели общий).
+        if (b.is_bot && !g_state.esp_bots) { ++s_bot_noesp_skipped; continue; }
+        if (b.ally) { ++s_ally_skipped; continue; }
+        // Мёртвых не берём: труп ещё несколько секунд остаётся в списке
+        // игроков с корректным скелетом, и прицел уезжал на него (19.09).
+        if (b.dead) { ++s_dead_skipped; continue; }
+        AimTarget t;
+        // Exact bone, with graceful fallback to the next-best bone.
+        // Slots: 0 head, 1 neck, 2 chest. Never fall back below the chest.
+        static const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 1, 0}};
+        int usedBone = -1;
+        // Прилипчивость точки прицела. Слоты головы, шеи и груди разнесены на
+        // 0.2-0.3 м (это до полуградуса на дистанции), а читаются они не каждый
+        // кадр: раньше слот перескакивал между ними из кадра в кадр, и прицел
+        // мелко трясло в стороны. Пока цель та же и слот читается — держим его;
+        // цепочка запасных слотов работает заново только когда он пропал.
+        if (b.id != 0 && b.id == pick.lastId && pick.lastBone >= 0 && pick.lastBone < 3 &&
+            b.aim_valid[pick.lastBone]) {
+            usedBone = pick.lastBone;
+        } else {
+            for (int k = 0; k < 3; ++k) {
+                int bi = order[wantBone][k];
+                if (b.aim_valid[bi]) { usedBone = bi; break; }
+            }
+        }
+        if (usedBone >= 0) {
+            t.bone = usedBone;
+            t.yaw = b.aim_yaw[usedBone];  t.pitch = b.aim_pitch[usedBone];
+            t.sx  = b.aim_pts[usedBone][0]; t.sy = b.aim_pts[usedBone][1];
+            t.valid = std::isfinite(t.yaw) && std::isfinite(t.pitch) &&
+                      std::isfinite(t.sx) && std::isfinite(t.sy);
+        } else {
+            // По костям цель не нашлась — по просьбе 19.09 («аим полностью по
+            // скелету») в цель такие игроки не идут вовсе: запасная точка от
+            // габаритов бокса давала прицел выше/ниже настоящей головы.
+            // Считаем и РАЗДЕЛЯЕМ причины: «скелета нет вообще» и «скелет есть,
+            // но кости не спроецировались» — лечится это по-разному.
+            if (b.has_skeleton) ++s_bones_not_projected; else ++s_no_skeleton;
+            continue;
+        }
+        if (false) {
+            // Box estimate (nothing else resolved): derive angles from pixels.
+            // The box itself is already crouch-aware (KCC pose height).
+            if (!std::isfinite(b.x1) || !std::isfinite(b.y1) || !std::isfinite(b.x2) || !std::isfinite(b.y2)) continue;
+            float h = b.y2 - b.y1;
+            if (h < 4.f || h > sh * 4.f) continue;
+            const float frac = (wantBone == 0) ? 0.07f : (wantBone == 1) ? 0.15f : 0.30f;
+            t.sx = (b.x1 + b.x2) * 0.5f;
+            t.sy = b.y1 + frac * h;
+            float ex = t.sx - crossX, ey = t.sy - crossY;
+            t.yaw = atanf(ex / (sh * 0.5f) * tanf(camFov * 0.5f * (float)M_PI / 180.f)) * 180.f / (float)M_PI;
+            t.pitch = -atanf(ey / (sh * 0.5f) * tanf(camFov * 0.5f * (float)M_PI / 180.f)) * 180.f / (float)M_PI;
+            t.valid = true;
+        }
+        if (!t.valid) continue;
+        t.id = b.id;
+        t.health = b.health; t.respawning = b.respawning;
+        t.skel_bones = b.skel_bones; t.skel_up = b.skel_up; t.skel_flat = b.skel_flat;
+        t.death_flag = b.death_flag;
+        const bool sticky = (pick.lastId != 0 && b.id == pick.lastId);
+        if (t.sx < -sw || t.sx > sw * 2.f || t.sy < -sh || t.sy > sh * 2.f) { ++s_offscreen_skipped; continue; }
+        if (g_state.aim_pos && !sticky && (t.sx < 0.f || t.sy < 0.f || t.sx > sw || t.sy > sh)) { ++s_offscreen_skipped; continue; }
+        float dx = t.sx - crossX, dy = t.sy - crossY;
+        t.dist = sqrtf(dx * dx + dy * dy);
+        t.world_dist = b.distance;
+        // The target we are already pulling to may briefly leave the FOV
+        // circle (overshoot while the gain is still being learned) — keep it.
+        if (t.dist > (sticky ? fovR * 2.f : fovR)) { ++s_out_of_fov; continue; }
+
+        // Target priority (see "Приоритет цели"):
+        //   0 balanced  — crosshair distance and range, both normalised
+        //                 (FOV radius, 120 m) and summed;
+        //   1 crosshair — purely the pixel distance from the crosshair;
+        //   2 range     — purely the world distance, crosshair only breaks ties.
+        // Whatever the mode, the current target gets a strong preference so the
+        // aim does not flip between two players standing next to each other.
+        const float pixelTerm = t.dist / (fovR > 1.f ? fovR : 1.f);
+        const bool  haveRange = (t.world_dist >= 0.f) && std::isfinite(t.world_dist);
+        const float rangeTerm = haveRange ? (t.world_dist / 120.f) : 1.f;
+        float score;
+        switch (g_state.aim_priority) {
+            case 1:  score = pixelTerm; break;
+            case 2:  score = rangeTerm * 4.f + pixelTerm * 0.05f; break;
+            default: score = pixelTerm + rangeTerm * 0.8f; break;
+        }
+        if (sticky) score *= 0.35f;
+        if (score < bestScore) { bestScore = score; best = t; }
+    }
+
+    if (!best.valid) {
+        if (why) {
+            // Берём ту причину, которая в ЭТОМ кадре отсеяла больше всех:
+            // счётчики накопительные, а нужен ответ про конкретный кадр.
+            const unsigned long d[] = {
+                s_seen_boxes - was_seen, s_ally_skipped - was_ally,
+                s_dead_skipped - was_dead, s_no_skeleton - was_nosk,
+                s_bones_not_projected - was_noproj, s_offscreen_skipped - was_off,
+                s_out_of_fov - was_fov
+            };
+            // «Боксов нет» — только когда на выбор не пришёл НИ ОДИН игрок;
+            // иначе причина та, которой отсеяно больше всего.
+            int code = 1; unsigned long top = 0;
+            for (int i = 1; i < 7; ++i) if (d[i] > top) { top = d[i]; code = i + 1; }
+            if (d[0] > 0 && top == 0) code = 1;
+            if (d[0] == 0) code = 1;
+            *why = code;
+        }
+        return false;
+    }
+
+    // Lead a moving target: the game applies our step next frame, by
+    // which time the target has moved on. Use the target's angular velocity
+    // relative to the camera (with the camera's own rotation removed) and
+    // aim one frame ahead. Reset on target switch.
+    //
+    // Камера здесь та же, что и в обучении коэффициента (esp_aim_camera_angles):
+    // вычитать отстающий базис из матрицы вида из угловой скорости цели нельзя —
+    // в поправку попадал бы его запаздывающий поворот, и прицел уезжал бы в
+    // сторону. Нет настоящей оси — нет и упреждения: так вёл цель эталонный аим.
+    {
+        float cy = 0.f, cp = 0.f;
+        // Мусорный угол камеры (чтение сорвалось) не годится даже в
+        // нормализацию: упреждение по нему уводит прицел, а раньше из-за него
+        // ещё и зависал цикл приведения угла.
+        bool haveC = esp_aim_camera_angles(cy, cp) && std::isfinite(cy) && std::isfinite(cp);
+        if (best.id == pick.lastId && pick.havePrev && haveC) {
+            const float dCamYaw = WrapDeg180(cy - pick.prevCamYaw);
+            float dCamPitch = cp - pick.prevCamPitch;
+            // world-space angular motion of the target = change in offset + camera rotation
+            float vYaw = (best.yaw - pick.prevTgtYaw) + dCamYaw;
+            float vPitch = (best.pitch - pick.prevTgtPitch) + dCamPitch;
+            if (std::isfinite(vYaw) && std::isfinite(vPitch) && fabsf(vYaw) < 10.f && fabsf(vPitch) < 10.f) {
+                pick.prevTgtYaw = best.yaw; pick.prevTgtPitch = best.pitch;
+                // Скорость сглаживаем, прежде чем упреждать по ней. Раньше
+                // упреждение брало сырой прирост за кадр, а он у дрожащей кости
+                // каждый кадр другого знака: прицел получал рывок в полный
+                // размах дрожи и ещё столько же вперёд — то есть дрожь
+                // удваивалась. Это и была жалоба «мемори трясётся»: магнит
+                // держал цель, но вокруг неё камера ходила.
+                const float kv = 0.35f;
+                pick.velYaw   += (vYaw   - pick.velYaw)   * kv;
+                pick.velPitch += (vPitch - pick.velPitch) * kv;
+                // Below this the "motion" is bone animation jitter (breathing,
+                // sway), which at long range is larger than the head itself.
+                // Extrapolating it would double the error, so only lead real
+                // movement. Aim more than a frame ahead for fast movers so the
+                // crosshair stays on a laterally running target (the controller
+                // smoothing otherwise makes it trail behind).
+                const float leadMin = degPerPx * 2.f;
+                float vMag = sqrtf(pick.velYaw * pick.velYaw + pick.velPitch * pick.velPitch);
+                if (vMag > leadMin) {
+                    // Забегаем чуть больше чем на кадр вперёд (игра применит
+                    // шаг в своём следующем кадре). По сглаженной скорости это
+                    // безопасно: дрожь в неё не проходит, а постоянное
+                    // движение проходит целиком. Множитель больше 1.1 только
+                    // мерил: при 2.0 цель идёт с остатком 0.98° против 0.70°,
+                    // то есть прицел уезжает вперёд, а не отстаёт.
+                    // Упреждение по скорости ВЫКЛЮЧЕНО (было до 1.5 кадра
+                    // вперёд). Именно оно и выглядело как «аим пытается
+                    // запредиктить движение игрока» (жалоба 19.09): точка
+                    // уезжала вперёд по ходу цели, а когда цель меняла
+                    // направление, прицел оказывался не там. Задержку петли
+                    // теперь гасит окно «в полёте» в контроллере — второе
+                    // упреждение только раскачивает. Константа оставлена:
+                    // вернуть — одна правка числа (было 1.1).
+                    float k = kAimTouchVelocityLead * (1.f - leadMin / vMag);
+                    if (k > 1.5f) k = 1.5f;
+                    best.yaw   += pick.velYaw   * k;
+                    best.pitch += pick.velPitch * k;
+                }
+            } else {
+                // Скорость сорвалась (мусор) — и сглаженную обнуляем, чтобы
+                // одиночный выброс не тянул прицел дальше.
+                pick.velYaw = pick.velPitch = 0.f;
+                pick.prevTgtYaw = best.yaw; pick.prevTgtPitch = best.pitch;
+            }
+        } else {
+            pick.prevTgtYaw = best.yaw; pick.prevTgtPitch = best.pitch;
+        }
+        if (haveC) { pick.prevCamYaw = cy; pick.prevCamPitch = cp; pick.havePrev = true; }
+        else pick.havePrev = false;
+    }
+    // Цель взята — с этого такта камера (или ось выстрела) наша: автофарм ей
+    // больше не командует.
+    g_aimActive = true;
+    // Состояние выбранной цели — чтобы по логу проверить признак смерти:
+    // игрок жаловался, что аим ведёт по мёртвым, а по respawning (0x208) в
+    // логе 14:55 не сработало ни разу. Печатаем здоровье и оба флага.
+    if (best.id != pick.lastId)
+        LogLine("аим: цель 0x%llx здоровье=%.1f respawning=%d смерть=%d дистанция=%.1f м костей=%d высота=%.2f м ширина=%.2f м",
+                (unsigned long long)best.id, (double)best.health,
+                (int)best.respawning, (int)best.death_flag, (double)best.world_dist,
+                (int)best.skel_bones, (double)best.skel_up, (double)best.skel_flat);
+    pick.switched = (best.id != pick.lastId);
+    pick.lastId = best.id; pick.lastBone = best.bone;
+    return true;
+}
+
+
 static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, float& degPerPx, int* why = nullptr) {
     LogStage(kStageAimSelect);
     if (why) *why = 0;
@@ -803,65 +1065,10 @@ static void UpdateAimTouch(float dt) {
     // шаге — ведение становилось в несколько раз медленнее.
     static bool  s_camMovedPrev = false;
     static int   s_lostFrames = 0;
+    // Доля шага при захвате цели: 0.3 сразу после захвата, 1.0 через 0.35 с
+    // (см. «мягкий старт» ниже — им гасится маятник первых двух секунд).
+    static float s_acquire = 1.f;
     static int   s_holdFrames = 0;
-    // Приказы «в полёте» (см. «шаг в полёте» ниже): окно последних приказов и
-    // оценка по поглощению остатка. Объявлены вверху, потому что чистятся в
-    // том числе на путях ДО их использования (нет цели, смена цели).
-    struct FlightOrd { float yawDeg, pitchDeg, age; };
-    static std::vector<FlightOrd> s_flight;
-    static float s_absorbYaw = 0.f, s_absorbPitch = 0.f; // заказано, не отработано (град)
-    // Часы жизни книги «в полёте» (см. выбор оценки ниже): первый заказ
-    // серии (поглощение было нулём) и пиковый остаток серии. Пик — эталон
-    // УБЫВАНИЯ: на захвате остаток уходит ниже пика и книга живая, а на
-    // погоне за убегающей целью остаток применяемых заказов не падает — там
-    // книга не должна быть мастером, иначе «слив по падению» вычтет из неё
-    // заказ минус скорость цели (стенд: шлейф 16° на цели 20°/с).
-    static double s_birthAtYaw = -1e9, s_birthAtPitch = -1e9;
-    static float  s_errPeakYaw = 1e9f, s_errPeakPitch = 1e9f;
-    // «Сумп-памп» книги на погоне: без потока слив по падению остатка не
-    // отличает отработку заказа от самостоятельного бега цели — книга
-    // недосчитывает слив ровно на скорость цели и тихо растёт; раз в
-    // полсекунды из-под неё вылетает лишний большой заказ (дёргание и
-    // реверсы на ведении 20°/с, шлейф 7.4°). Сторож замечает подпись погони
-    // (заказы доставляются, а остаток за треть секунды не упал) и прижимает
-    // книгу к окну приказов, сбрасывая кажущуюся свежесть.
-    static double s_pumpNextY = 0.0,  s_pumpNextP = 0.0;
-    static float  s_pumpDelY  = 0.f,  s_pumpDelP  = 0.f;
-    static float  s_pumpErrY  = -1.f, s_pumpErrP  = -1.f;
-    // Скорость цели без оси камеры (град/с) — из окна пампа: изменение
-    // остатка за окно ПЛЮС честно доставленное за то же окно. Тождество:
-    // приращение остатка = движение цели − отработка камеры, поэтому сумма
-    // изолирует цель при любой закладке приказов: на захвате Δостатка и
-    // доставленное гасят друг друга (v ≈ 0), на дрожи оба около нуля, на
-    // погоне Δостатка ≈ 0 и остаётся честное v. Мелкие доставки оценку не
-    // засоряют — они уже сидят в сумме (тиковая оценка «между прилётами»
-    // от них проигрывала вдвое и качала точку упреждения).
-    static float  s_velYaw = 0.f, s_velPitch = 0.f;
-    static double s_pumpFromY = 0.0, s_pumpFromP = 0.0;
-    static float  s_pumpRawY = 0.f, s_pumpRawP = 0.f;
-    // Упреждение по измеренной скорости цели (только погоня без потока):
-    // горизонт ~ труба + такт. Без него чистый пропорциональный контур с
-    // задержкой принципиально отстаёт на v*(труба+такт) ≈ 3° на 20°/с.
-    static constexpr float kTouchVelLead = 0.25f;
-    static int   s_holdNoFrame = 0;   // тактов подряд без нового кадра игры
-    static int   s_skipLongStreak = 0; // рваных кадров подряд (см. ниже)
-    static double s_lastStepTime = 0.0;  // когда выдали прошлый заказ
-    ++s_tdiag.ticks;
-    static float s_stallYaw = 0.f, s_stallPitch = 0.f;
-    static float s_prevRawYaw = 0.f, s_prevRawPitch = 0.f;
-    static bool  s_havePrevRaw = false;
-    // Счётчики однонаправленного остатка в полосе дрожи (см. константы выше).
-    static int s_streakYaw = 0, s_streakPitch = 0;
-    // Мягкий старт после захвата (жалоба 27.09: «первые 2-3 секунды при
-    // наведении на цель ходит как маятник»). Первые приказы считаются по
-    // сумме остаток+«в полёте» с ещё сырой оценкой коэффициента: с полной
-    // долей ошибки камера махает через кость, знак остатка реверсится и
-    // качели гасятся реверс-гасителями только за несколько секунд. На захвате
-    // доля шага опускается до 0.22 и экспоненциально возвращается к единице
-    // за ~0.3 с (см. контроллер ниже): до цели доезжаем теми же 1-2 приказами,
-    // просто без маха через неё, а «вялый ползун» из прошлого жалобы 27.09
-    // («тач должен цепляться сразу») не возвращается.
-    static float s_softStart = 1.f;
     static AimPick pick;
 
     float sw = 0.f, sh = 0.f;
@@ -870,16 +1077,6 @@ static void UpdateAimTouch(float dt) {
         s_haveLast = false; pick.reset();
         s_lostFrames = 0; s_holdFrames = 0;
         s_trackYaw.reset(); s_trackPitch.reset();
-        s_flight.clear();
-        s_absorbYaw = s_absorbPitch = 0.f;
-        s_stallYaw = s_stallPitch = 0.f;
-        s_birthAtYaw = s_birthAtPitch = -1e9;
-        s_errPeakYaw = s_errPeakPitch = 1e9f;
-        s_pumpNextY = s_pumpNextP = 0.0; s_pumpDelY = s_pumpDelP = 0.f;
-        s_pumpErrY = s_pumpErrP = -1.f;
-        s_velYaw = s_velPitch = 0.f; s_pumpFromY = s_pumpFromP = 0.0;
-        s_havePrevRaw = false;
-        s_streakYaw = s_streakPitch = 0;
         return;
     }
 
@@ -890,25 +1087,13 @@ static void UpdateAimTouch(float dt) {
 
     AimTarget best;
     float degPerPx = 0.f;
-    if (!AimSelectTarget(sw, sh, pick, best, degPerPx)) {
+    if (!AimSelectTargetTouch(sw, sh, pick, best, degPerPx)) {
         // Keep the finger down briefly so a momentary read failure does not
         // register as a tap (tap-to-shoot in some layouts) or reset momentum.
         if (++s_lostFrames > 6) {
             AimReleaseFinger(s_fingerDown);
             s_haveLast = false; pick.reset();
             s_trackYaw.reset(); s_trackPitch.reset();
-            // Палец отпущен — заказанное игра уже не отработает. Обнуляем
-            // полёт, иначе возврат цели начнётся со старой оценкой.
-            s_flight.clear();
-            s_absorbYaw = s_absorbPitch = 0.f;
-            s_stallYaw = s_stallPitch = 0.f;
-            s_birthAtYaw = s_birthAtPitch = -1e9;
-            s_errPeakYaw = s_errPeakPitch = 1e9f;
-            s_pumpNextY = s_pumpNextP = 0.0; s_pumpDelY = s_pumpDelP = 0.f;
-            s_pumpErrY = s_pumpErrP = -1.f;
-            s_velYaw = s_velPitch = 0.f; s_pumpFromY = s_pumpFromP = 0.0;
-            s_havePrevRaw = false;
-            s_streakYaw = s_streakPitch = 0;
         }
         return;
     }
@@ -916,18 +1101,6 @@ static void UpdateAimTouch(float dt) {
     if (pick.switched) {
         s_haveLast = false;                      // do not learn gain across a target switch
         s_trackYaw.reset(); s_trackPitch.reset();  // и оценку коэффициента тоже
-        // Заказы «в полёте» и их поглощение принадлежат прошлой цели.
-        s_flight.clear();
-        s_absorbYaw = s_absorbPitch = 0.f;
-        s_stallYaw = s_stallPitch = 0.f;
-        s_birthAtYaw = s_birthAtPitch = -1e9;
-        s_errPeakYaw = s_errPeakPitch = 1e9f;
-        s_pumpNextY = s_pumpNextP = 0.0; s_pumpDelY = s_pumpDelP = 0.f;
-        s_pumpErrY = s_pumpErrP = -1.f;
-        s_velYaw = s_velPitch = 0.f; s_pumpFromY = s_pumpFromP = 0.0;
-        s_havePrevRaw = false;
-        s_streakYaw = s_streakPitch = 0;
-        s_softStart = 0.22f;   // мягкий старт: вход в лок без маятника (см. выше)
     }
 
     // ---- оценка коэффициента по реакции прицела ----
@@ -1029,7 +1202,7 @@ static void UpdateAimTouch(float dt) {
     // 3. Завышать можно в пределах 1.4x и плавно: завышенный коэффициент даёт шаг
     //    меньше нужного, то есть аим просто медленнее — безопасная сторона.
     constexpr float kGainTrimMax   = 1.4f;
-    constexpr float kGainTrimStep  = 0.25f;   // ~6 тактов на новую подтяжку
+    constexpr float kGainTrimStep  = 0.15f;   // ~10 тактов на новую подтяжку
     static float s_trimYaw = 1.f, s_trimPitch = 1.f;
     auto trimTo = [](float trim, float measured, float base) {
         float want = 1.f;
@@ -1044,12 +1217,8 @@ static void UpdateAimTouch(float dt) {
     const bool lsPitch = s_trackPitch.ready();
     s_trimYaw   = trimTo(s_trimYaw,   lsYaw   ? s_trackYaw.gain()   : (learned ? s_gainYaw   : 0.f), probeGainYaw);
     s_trimPitch = trimTo(s_trimPitch, lsPitch ? s_trackPitch.gain() : s_gainPitch,                    probeGainPitch);
-    // Сессионный буст по доказательству реверса (см. AimTouchGainBump) тает
-    // со временем: случайный реверс не должен менять аим навсегда.
-    s_boostYaw   += (1.f - s_boostYaw)   * (dt * 0.016f);
-    s_boostPitch += (1.f - s_boostPitch) * (dt * 0.016f);
-    const float gy = probeGainYaw   * s_trimYaw   * s_boostYaw;
-    const float gp = probeGainPitch * s_trimPitch * s_boostPitch;
+    const float gy = probeGainYaw   * s_trimYaw;
+    const float gp = probeGainPitch * s_trimPitch;
 
     // Такт с подтверждением: если наш прошлый сдвиг ещё не отразился в
     // камере (игра не отрендерила кадр — низкий FPS), НЕ шлём новую
@@ -1071,25 +1240,13 @@ static void UpdateAimTouch(float dt) {
     // свой таймаут: аим двигался бы рывками. Считаем таймауты подряд — после
     // третьего выключаем такт на 5 с и работаем шагами по ошибке (он устойчив и
     // без подтверждения: доля ошибки за такт ограничена половиной).
-    // ---- сторож молчания ----------------------------------------------------
-    // Ни одна из страховок ниже (ожидание отклика камеры, учёт «в полёте»,
-    // темп подачи, пропуск рваного кадра) не имеет права выключить аим
-    // насовсем: каждая из них рассчитана на единичные такты, но при неудачном
-    // сочетании (нет оси камеры, низкий ФПС, заказ без отклика) они молчат
-    // одна за другой — и получается «аим вообще не работает». Если цель есть,
-    // а шага не было дольше kAimSilenceMax, следующий такт проходит все
-    // задержки насквозь и работает по сырому остатку. Мёртвая зона при этом
-    // соблюдается: если прицел уже на цели, шаг не нужен и сторож не сработает.
-    static constexpr double kAimSilenceMax = 0.35;   // с без единого шага
-    const bool forceStep = (MonoNow() - s_lastStepTime) > kAimSilenceMax;
-
     static int   s_ackTimeouts = 0;
     static float s_ackDisabled = 0.f;
     const bool camAnswered = camMoved || s_camMovedPrev;
     s_camMovedPrev = camMoved;
     if (s_ackDisabled > 0.f) s_ackDisabled -= dt;
     const bool ackGate = (s_ackDisabled <= 0.f);
-    if (ackGate && s_fingerDown && !camAnswered && !forceStep &&
+    if (ackGate && s_fingerDown && !camAnswered &&
         (fabsf(s_pendDx) >= 1.f || fabsf(s_pendDy) >= 1.f)) {
         s_pendTime += dt;
         if (s_pendTime < 0.25f) {
@@ -1103,338 +1260,37 @@ static void UpdateAimTouch(float dt) {
         s_ackTimeouts = 0;
     }
 
-    // ---- «шаг в полёте» -----------------------------------------------------
-    // Игра отрабатывает наш шаг не в этом такте: касание идёт через систему
-    // ввода Android до 100 мс (шесть-восемь кадров игры). Когда настоящей оси
-    // камеры нет (esp_aim_camera_angles -> false, штатный режим на этом
-    // устройстве), такт с подтверждением выше не работает вовсе: контроллер
-    // видит ещё не уменьшившийся остаток и шлёт ту же поправку повторно — к
-    // моменту отклика камера поворачивается вдвое больше нужного: рывок через
-    // цель и обратно, маятник первых секунд наведения.
-    //
-    // Учёт «в полёте» поэтому считается двумя независимыми оценками, а какая
-    // из них правит — зависит от остатка (стенд tools/aim/lock_sim.cpp, сетка
-    // оверлей 12-60 fps × задержка касания 2-8 кадров игры, захват 30°):
-    //
-    //   1. ПОГЛОЩЕНИЕ: заказ копится в градусах, а списывается по факту
-    //      отработки. Основной источник — ПОТОК КАМЕРЫ (см. aim_camera_flow):
-    //      камера повернулась на Х градусов — ровно Х заказанного она съела,
-    //      независимо от того, куда за это время ушла цель. Запасной (когда
-    //      боксов меньше трёх) — падение остатка: камера отработала приказ
-    //      тогда, когда остаток стал меньше. Ни предположений о задержке, ни
-    //      поедания уже отработанных приказов: сколько съедено, столько списано.
-    //   2. ОКНО приказов моложе kTouchFlightLife: ограничивает оценку сверху
-    //      на ведении цели (цель убегает, а поток не посчитался — остаток не
-    //      падает, и поглощение само не списывается никогда).
-    //
-    // Выбор оценки по величине остатка. Раньше бралась просто меньшая по
-    // величине из двух, и на просадке ФПС (жалоба 23.09, третий заход: «при
-    // посадке ФПС тач-аим ходит маятником») это давало маятник: приказ живёт
-    // в трубе дольше жизни окна, окно пустеет, меньшая оценка — ноль,
-    // контроллер заказывает заново поверх летящего, по прилёте обоих камера
-    // перелетает цель; плюс таймаут «потерялся» в 0.4 с списывал заказ,
-    // который при 12-15 фпс ещё летит (до 0.7 с). Теперь на захвате
-    // (|остаток| > 2.5°) правит поглощение — оно списывается по потоку камеры
-    // при любой задержке трубы, — а на ведении у цели правит минимум с окном,
-    // чтобы след за целью не растягивался.
-    //
-    // Защита знака: остаток перескочил ноль — весь висящий заказ обнуляется
-    // сразу (камера дальше цели, летящий приказ толкнёт ещё дальше), а новый
-    // приказ против хода не выдаётся вовсе. Довычитывать приказы, которых уже
-    // нет, или заказывать против хода камеры — это и есть маятник.
-    //
-    // Четвёртый заход по маятнику (жалоба 24.09: «всё равно маятник первые
-    // 1-2 секунды при наводке») добавил три правила, найденные стендом:
-    //   * поглощение клэмпится к ТЕКУЩЕМУ остатку — цель сближается сама, и
-    //     заказ по остатку прошлых тактов перелетал кость;
-    //   * у цели (полоса 0.45°, вблизи 1.2°) шаг выдаётся только при
-    //     устойчивом однонаправленном остатке — дрожь кости гоняла палец с
-    //     частотой кадров (110 реверсов на стенде);
-    //   * доля шага спадает вместе с остатком — поздние прилёты длинной
-    //     трубы не перелетают кость.
-    static constexpr float kTouchFlightLife = 0.13f;  // жизнь приказа в окне, с
-    // Заказ без отклика — потерялся. При просадке ФПС игры труба касания
-    // растягивается на 2-8 кадров ИГРЫ: на 12-15 фпс это до 0.5-0.7 с, а
-    // прежние 0.4 с списывали заказ, который ещё ЛЕТИТ — контроллер считал
-    // его потерянным, заказывал заново, и по прилёте обоих камера перелетала
-    // цель (жалоба 23.09: «при посадке ФПС тач-аим ходит маятником»).
-    // Порог обязан перекрывать худшую задержку трубы с запасом.
-    static constexpr float kTouchStallTime  = 1.00f;  // заказ без отклика — потерялся
-    // Свежесть поглощения: сколько секунд оно считается живой книгой без
-    // списания (между сливами летит труба до ~0.3 с, плюс край окна отклика).
-    static constexpr float kAbsorbFresh = 0.40f;
-    // Полоса дрожи на средней/дальней дистанции. Вблизи она расширяется до
-    // 1.2° (см. jitterGate): одна и та же анимация кости занимает больше
-    // градусов, но устойчивое смещение и в расширенной полосе проходит.
-    static constexpr float kTouchJitterBand  = 0.45f;
-    static constexpr int   kTouchDriftStreak = 3;
+    // ---- «шаги в полёте» ---------------------------------------------------
+    // Игра отрабатывает наш шаг не в этом такте: поза камеры отстаёт на два
+    // кадра (замер в контроллере фарма — тот же палец и тот же экран). Когда
+    // настоящей оси камеры нет (esp_aim_camera_angles -> false, штатный режим на
+    // этом устройстве), такт с подтверждением выше не работает вовсе: s_pendDx
+    // обнуляется каждый кадр, и контроллер видит ещё не уменьшившийся остаток.
+    // Он шлёт следующую такую же поправку — и к моменту отклика камера
+    // поворачивается вдвое больше нужного: рывок через цель и обратно.
+    // Поэтому шаг считаем по остатку, каким он станет, когда камера покажет
+    // заказанное за два последних такта. Стенд (та же арифметика, задержка два
+    // такта): перелёт 4.8 -> 0.4 град, ход пальца при удержании цели
+    // 718 -> 457 px, захват с 60 град вдвое быстрее.
+    // Шаги берём по их очереди, а не по отклику ошибки: отклик сдвигается и
+    // движением цели, и тогда поправка «съедала» настоящий остаток (прогон
+    // стенда: остаток ошибки 10 град при шаге 1 px — прицел вставал).
+    // Окно в восемь тактов. Касание идёт через систему ввода Android: от
+    // нашего Touch_Move до поворота камеры проходит до 100 мс, то есть шесть-
+    // восемь кадров. Учитывали четыре — остаток недоучитывался, и первые
+    // секунды после захвата цели аим раскачивался (жалоба 19.09): крупные шаги
+    // на подходе уходят «в полёт», камера добирает их все разом и проскакивает.
+    static float s_flightYaw[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    static float s_flightPitch[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
     const bool  useFlight = !haveCam;
-    auto clearFlight = [&]() {
-        s_flight.clear();
-        s_absorbYaw = s_absorbPitch = 0.f;
-        s_stallYaw = s_stallPitch = 0.f;
-        s_birthAtYaw = s_birthAtPitch = -1e9;
-        s_errPeakYaw = s_errPeakPitch = 1e9f;
-        s_pumpNextY = s_pumpNextP = 0.0; s_pumpDelY = s_pumpDelP = 0.f;
-        s_pumpErrY = s_pumpErrP = -1.f;
-        s_velYaw = s_velPitch = 0.f; s_pumpFromY = s_pumpFromP = 0.0;
-        s_havePrevRaw = false;
-        s_streakYaw = s_streakPitch = 0;
+    float flightYaw = 0.f, flightPitch = 0.f;
+    for (int i = 0; i < 8; ++i) { flightYaw += s_flightYaw[i]; flightPitch += s_flightPitch[i]; }
+    auto shiftFlight = [&]() {
+        for (int i = 0; i < 7; ++i) { s_flightYaw[i] = s_flightYaw[i + 1]; s_flightPitch[i] = s_flightPitch[i + 1]; }
+        s_flightYaw[7] = 0.f; s_flightPitch[7] = 0.f;
     };
-    float errYaw = best.yaw, errPitch = best.pitch;
-    bool s_flowOkTick = false;
-    if (useFlight) {
-        // Поглощение списывается двумя способами, по возможности:
-        //
-        //   1. ПОТОК КАМЕРЫ (основной): камера повернулась на столько-то —
-        //      ровно столько заказа она отработала, в какую бы сторону ни шёл
-        //      остаток. На просадке ФПС это единственный честный признак:
-        //      остаток может стоять и даже расти у ПРИМЕНЁННОГО приказа
-        //      (цель сама ушла за те 2-8 кадров игры, пока приказ летел), и
-        //      списание по падению остатка там молчит или ест не то.
-        //   2. ПАДЕНИЕ ОСТАТКА (запасной, когда поток не посчитался — дуэль
-        //      1 на 1, меньше трёх боксов на экране): прежний способ, на
-        //      захвате вклад цели мал против шагов и он работает.
-        if (s_havePrevRaw) {
-            float flowYaw = 0.f, flowPitch = 0.f;
-            const bool flowOk = aim_camera_flow(flowYaw, flowPitch);
-            s_flowOkTick = flowOk;
-            auto drainFlow = [](float& absorb, float flow) {
-                if (absorb > 0.f && flow > 0.f)
-                    absorb = (flow >= absorb) ? 0.f : absorb - flow;
-                else if (absorb < 0.f && flow < 0.f)
-                    absorb = (-flow >= -absorb) ? 0.f : absorb - flow;
-            };
-            if (flowOk) {
-                const float wasYaw = s_absorbYaw, wasPitch = s_absorbPitch;
-                drainFlow(s_absorbYaw, flowYaw);
-                drainFlow(s_absorbPitch, flowPitch);
-                if (s_absorbYaw   != wasYaw)   s_stallYaw   = 0.f;
-                if (s_absorbPitch != wasPitch) s_stallPitch = 0.f;
-                // Поточный слив честный, книге раздуться неоткуда: сторожу
-                // погони доказательств не набирается.
-                s_pumpDelY = s_pumpDelP = 0.f;
-            } else {
-                // Камера повернулась в сторону заказа — остаток упал.
-                const float dYaw   = s_prevRawYaw   - best.yaw;
-                const float dPitch = s_prevRawPitch - best.pitch;
-                if (dYaw > 0.f && s_absorbYaw > 0.f) {
-                    s_absorbYaw = (dYaw >= s_absorbYaw) ? 0.f : s_absorbYaw - dYaw;
-                    s_pumpDelY += dYaw; s_stallYaw = 0.f;
-                } else if (dYaw < 0.f && s_absorbYaw < 0.f) {
-                    s_absorbYaw = (-dYaw >= -s_absorbYaw) ? 0.f : s_absorbYaw - dYaw;
-                    s_pumpDelY += dYaw; s_stallYaw = 0.f;
-                }
-                if (dPitch > 0.f && s_absorbPitch > 0.f) {
-                    s_absorbPitch = (dPitch >= s_absorbPitch) ? 0.f : s_absorbPitch - dPitch;
-                    s_pumpDelP += dPitch; s_stallPitch = 0.f;
-                } else if (dPitch < 0.f && s_absorbPitch < 0.f) {
-                    s_absorbPitch = (-dPitch >= -s_absorbPitch) ? 0.f : s_absorbPitch - dPitch;
-                    s_pumpDelP += dPitch; s_stallPitch = 0.f;
-                }
-            }
-            // Остаток перескочил через ноль — камера уже дальше цели, а заказ,
-            // который ещё висит в трубе, толкнёт её ещё дальше. Обнулять его
-            // НЕЛЬЗЯ (прежнее правило «перескок -> заказ в ноль» было ошибкой
-            // учёта): летящий приказ — реальный момент, он долетит и обязан
-            // вычитаться из следующих заказов; иначе обратный доворот
-            // заказывается без него и садится ровно на его величину мимо —
-            // мини-качели у цели (стенд: реверсов 5 вместо 0 на трубе 0.27 с
-            // после перевода захвата на поглощение). Момент сохраняется; от
-            // залипшего ошибочного момента страхуют сторож свежести (ниже, в
-            // выборе оценки «в полёте») и таймаут «потерялся».
-            //
-            // Сам факт перелёта — ДОКАЗАТЕЛЬСТВО заниженного рабочего
-            // коэффициента: заказ списан по факту честно, а камера ушла дальше
-            // цели — она отработала БОЛЬШЕ заказанного (истинный град/px выше,
-            // чем даёт настройка даже с подтяжкой; потолок 1.4x такой случай
-            // не покрывает, и петля расходится: стенд — занижение 1.45x,
-            // перелёт 60°, 20 реверсов). По перелёту поднимается сессионный
-            // буст гейна (см. AimTouchGainBump выше): маятник гасится за 1-2
-            // качка, повторный захват чистый. Перелёт обязан быть заметным
-            // (> 0.6° с обеих сторон): мельче — дрожь кости или финт цели
-            // (за такт она разворачивается не быстрее ~0.7° на 60 fps
-            // оверлея, и порог такого финта не пропустит, а хвост собственной
-            // качки 0.6-3°, по которому подтягивается буст, — пропустит).
-            if (s_prevRawYaw * best.yaw < 0.f &&
-                fabsf(s_prevRawYaw) > 0.6f && fabsf(best.yaw) > 0.6f)
-                AimTouchGainBump(true, fabsf(s_prevRawYaw), fabsf(best.yaw));
-            if (s_prevRawPitch * best.pitch < 0.f &&
-                fabsf(s_prevRawPitch) > 0.6f && fabsf(best.pitch) > 0.6f)
-                AimTouchGainBump(false, fabsf(s_prevRawPitch), fabsf(best.pitch));
-        }
-        // Упреждение по скорости цели на погоне без потока: чистый
-        // пропорциональный контур с трубой математически обязан отставать на
-        // v*(труба+такт) ≈ 3° на 20°/с, сколько ни следи за закладкой
-        // приказов. Рабочий остаток считаем от ПРОГНОЗНОЙ точки (кость +
-        // скорость*горизонт): тогда и книга «в полёте», и защита знака ниже
-        // живут в той же системе координат, и равновесие — прицел ждёт цель
-        // впереди, а остаток у нуля, без предельного цикла (наивное
-        // «прибавить смещение к шагу» со знаковым гейтом качалось ±7°).
-        // Гейт — только заметная скорость: у стоячей цели и у дрожи кости
-        // оценка около нуля и смещения нет вовсе. Цель остановилась —
-        // оценка тает за ~0.2 с и контур сам возвращается на кость.
-        float leadY = 0.f, leadP = 0.f;
-        if (!s_flowOkTick) {
-            if (fabsf(s_velYaw)   > 4.f) leadY = fminf(6.f, fmaxf(-6.f, s_velYaw   * kTouchVelLead));
-            if (fabsf(s_velPitch) > 4.f) leadP = fminf(6.f, fmaxf(-6.f, s_velPitch * kTouchVelLead));
-        }
-        errYaw += leadY; errPitch += leadP;
-        s_prevRawYaw = best.yaw; s_prevRawPitch = best.pitch; s_havePrevRaw = true;
-        // Заказ давно не откликается — ввод потерялся (палец перехвачен игрой,
-        // экран перекрыт) либо книга несёт мусор погони. Обнуляем и
-        // «подгрязняем» часы: заново родившись на погоне, книга не должна
-        // снова становиться мастером по молодости — иначе каждая секунда
-        // погони начиналась бы с лишнего заказа (стенд: всплески шлейфа).
-        // Свежесть вернётся только по факту убывания остатка (см. ниже).
-        if (s_absorbYaw != 0.f) { s_stallYaw += dt; if (s_stallYaw > kTouchStallTime) {
-            s_absorbYaw = 0.f; s_birthAtYaw = MonoNow() - kAbsorbFresh; s_errPeakYaw = fabsf(best.yaw); } }
-        if (s_absorbPitch != 0.f) { s_stallPitch += dt; if (s_stallPitch > kTouchStallTime) {
-            s_absorbPitch = 0.f; s_birthAtPitch = MonoNow() - kAbsorbFresh; s_errPeakPitch = fabsf(best.pitch); } }
-        // Заказ не может превышать ТЕКУЩИЙ остаток: цель сближается и сама —
-        // если держать заказ по остатку прошлых тактов, по прилёте камера
-        // проскакивает кость (на стенде перелёт 2.3° на идущей навстречу
-        // цели, с клэмпом меньше, реверсов 0). Клэмп работает только когда
-        // виден поток камеры: без потока уменьшение остатка — единственный
-        // сигнал отработки, и клэмп списывал бы его дважды (на стенде шлейф
-        // ведения в дуэли 1 на 1 рос с 5.6° до 63°).
-        if (s_flowOkTick) {
-            if (s_absorbYaw > 0.f && s_absorbYaw > best.yaw)
-                s_absorbYaw = (best.yaw > 0.f) ? best.yaw : 0.f;
-            if (s_absorbYaw < 0.f && s_absorbYaw < best.yaw)
-                s_absorbYaw = (best.yaw < 0.f) ? best.yaw : 0.f;
-            if (s_absorbPitch > 0.f && s_absorbPitch > best.pitch)
-                s_absorbPitch = (best.pitch > 0.f) ? best.pitch : 0.f;
-            if (s_absorbPitch < 0.f && s_absorbPitch < best.pitch)
-                s_absorbPitch = (best.pitch < 0.f) ? best.pitch : 0.f;
-        }
-        // Окно приказов.
-        for (auto& o : s_flight) o.age += dt;
-        s_flight.erase(std::remove_if(s_flight.begin(), s_flight.end(),
-                       [](const FlightOrd& o) { return o.age >= kTouchFlightLife; }),
-                       s_flight.end());
-        float winYaw = 0.f, winPitch = 0.f;
-        for (const auto& o : s_flight) { winYaw += o.yawDeg; winPitch += o.pitchDeg; }
-        // Что вычитается из остатка — ЕДИНОЕ правило: поглощение (книга
-        // летящих приказов, сливаемая по факту отработки камеры) правит
-        // ВЕЗДЕ, пока оно живое. Окно приказов (0.13 с) короче любой реальной
-        // трубы касания (0.2-0.3 с), поэтому везде, где оно подменяло книгу,
-        // контроллер заказывал поверх долетающих приказов. Таких мест было
-        // три, и каждое давало свою тряску:
-        //   * дуэль без потока, захват (жалоба 27.09 «маятник первых 2-3
-        //     секунд»): минимум из книги и окна обнулялся пустым окном —
-        //     перелёт 10.7°, на трубе 0.27 с — 28.9° и 10 реверсов (стенд);
-        //   * полоса у цели после захвата: та же подмена давала мини-качели
-        //     (стенд: 3-5 реверсов на спаде);
-        //   * захват с потоком: окно пустело между сливами — 5 реверсов.
-        // После единого правила на тех же прогонах — 0-1 реверс.
-        //
-        // Живость книги — двумя признаками: серия ещё моложе трубы (сливу
-        // просто неоткуда взяться) либо остаток ушёл ниже пика серии на
-        // заметную величину (0.5°) — это и есть «захват идёт»: на захвате
-        // остаток падает, на погоне за убегающей целью он стоит или растёт
-        // (там «слив по падению» считает не отработанный заказ, а заказ
-        // минус скорость цели, и книга врёт: стенд — шлейф 16° на цели
-        // 20°/с). Просроченная книга — не половинчатая оценка, а НОЛЬ
-        // доверия: дальше работает только окно (как в первом гибриде; на
-        // погоне именно минимум-окно давало короткий след), а от совсем
-        // залёгшего заказа страхует таймаут 1.0 с.
-        if (s_absorbYaw != 0.f && fabsf(best.yaw) > s_errPeakYaw)
-            s_errPeakYaw = fabsf(best.yaw);
-        if (s_absorbPitch != 0.f && fabsf(best.pitch) > s_errPeakPitch)
-            s_errPeakPitch = fabsf(best.pitch);
-        const double nowFlight = MonoNow();
-        // Сумп-памп погони (см. объявление): за треть секунды заказы
-        // доставлялись, а остаток не упал — книга наполнена не отработкой,
-        // а бегом цели, её надо прижать к окну и лишить кажущейся свежести,
-        // иначе из-под неё раз в полсекунды вылетает большой лишний заказ
-        // (дёргание и реверсы на ведении без потока, шлейф 7.4° на стенде).
-        // На захвате остаток за такой срок падает в разы — условие не
-        // срабатывает; поточный слив сюда доказательств и не пишет вовсе.
-        // Заодно это же окно даёт скорость цели (см. объявление): Δостатка
-        // плюс доставленное за окно. Частоты двух окон (0.6 с) хватает, чтобы
-        // узнать о беге 20°/с; мусор мельче 3°/с и качели быстрее 25°/с
-        // упреждения не заслуживают.
-        if (nowFlight >= s_pumpNextY) {
-            if (s_pumpFromY > 0.0) {
-                const float W = (float)(nowFlight - s_pumpFromY);
-                if (W > 1e-3f) {
-                    const float v = (best.yaw - s_pumpRawY + s_pumpDelY) / W;
-                    s_velYaw += (v - s_velYaw) * 0.55f;
-                    if (s_velYaw > 25.f) s_velYaw = 25.f;
-                    else if (s_velYaw < -25.f) s_velYaw = -25.f;
-                    if (fabsf(s_velYaw) < 3.f) s_velYaw = 0.f;
-                    s_velYawDbg = s_velYaw;
-                }
-            }
-            if (s_pumpErrY >= 0.f && fabsf(s_pumpDelY) > 0.5f && s_absorbYaw != 0.f &&
-                fabsf(best.yaw) > 1.5f && fabsf(best.yaw) > s_pumpErrY - 0.3f) {
-                const float capY = fabsf(winYaw);
-                s_absorbYaw = s_absorbYaw > 0.f ? fminf(s_absorbYaw, capY)
-                                                : -fminf(-s_absorbYaw, capY);
-                s_birthAtYaw = -1e9; s_errPeakYaw = fabsf(best.yaw);
-            }
-            s_pumpNextY = nowFlight + 0.30; s_pumpDelY = 0.f;
-            s_pumpErrY = fabsf(best.yaw);
-            s_pumpFromY = nowFlight; s_pumpRawY = best.yaw;
-        }
-        if (nowFlight >= s_pumpNextP) {
-            if (s_pumpFromP > 0.0) {
-                const float W = (float)(nowFlight - s_pumpFromP);
-                if (W > 1e-3f) {
-                    const float v = (best.pitch - s_pumpRawP + s_pumpDelP) / W;
-                    s_velPitch += (v - s_velPitch) * 0.55f;
-                    if (s_velPitch > 25.f) s_velPitch = 25.f;
-                    else if (s_velPitch < -25.f) s_velPitch = -25.f;
-                    if (fabsf(s_velPitch) < 3.f) s_velPitch = 0.f;
-                }
-            }
-            if (s_pumpErrP >= 0.f && fabsf(s_pumpDelP) > 0.5f && s_absorbPitch != 0.f &&
-                fabsf(best.pitch) > 1.5f && fabsf(best.pitch) > s_pumpErrP - 0.3f) {
-                const float capP = fabsf(winPitch);
-                s_absorbPitch = s_absorbPitch > 0.f ? fminf(s_absorbPitch, capP)
-                                                    : -fminf(-s_absorbPitch, capP);
-                s_birthAtPitch = -1e9; s_errPeakPitch = fabsf(best.pitch);
-            }
-            s_pumpNextP = nowFlight + 0.30; s_pumpDelP = 0.f;
-            s_pumpErrP = fabsf(best.pitch);
-            s_pumpFromP = nowFlight; s_pumpRawP = best.pitch;
-        }
-        const bool freshY = s_absorbYaw != 0.f &&
-                            (nowFlight - s_birthAtYaw < kAbsorbFresh ||
-                             fabsf(best.yaw) < s_errPeakYaw - 0.5f);
-        const bool freshP = s_absorbPitch != 0.f &&
-                            (nowFlight - s_birthAtPitch < kAbsorbFresh ||
-                             fabsf(best.pitch) < s_errPeakPitch - 0.5f);
-        const float inflYaw   = freshY ? s_absorbYaw   : winYaw;
-        const float inflPitch = freshP ? s_absorbPitch : winPitch;
-        if (forceStep) {
-            // Сторож молчания: заказы, из-за которых остаток «съеден», уже
-            // давно не отвечают — считать их летящими больше нельзя, иначе
-            // сторож пробьёт задержки и всё равно получит нулевую ошибку.
-            s_flight.clear();
-            s_absorbYaw = s_absorbPitch = 0.f;
-            s_stallYaw = s_stallPitch = 0.f;
-            s_birthAtYaw = s_birthAtPitch = -1e9;
-            s_errPeakYaw = s_errPeakPitch = 1e9f;
-            s_pumpNextY = s_pumpNextP = 0.0; s_pumpDelY = s_pumpDelP = 0.f;
-            s_pumpErrY = s_pumpErrP = -1.f;
-            s_velYaw = s_velPitch = 0.f; s_pumpFromY = s_pumpFromP = 0.0;
-        } else {
-            errYaw   -= inflYaw;
-            errPitch -= inflPitch;
-        }
-        // Защита знака: в полёте уже не меньше остатка — стоим, ждём отклика.
-        // Сравниваем с ПРОГНОЗНЫМ остатком: при упреждении именно он —
-        // нулевая точка контура (см. блок упреждения выше).
-        if ((best.yaw + leadY) * errYaw < 0.f)     errYaw = 0.f;
-        if ((best.pitch + leadP) * errPitch < 0.f) errPitch = 0.f;
-    } else {
-        // Есть настоящая ось — работает такт с подтверждением, а не полёт.
-        // Прошлый сырой остаток забываем: вернётся режим без оси — первый же
-        // его такт не должен списывать заказ по разнице через пропасть.
-        s_havePrevRaw = false;
-    }
+    const float errYaw   = useFlight ? (best.yaw   - flightYaw   * gy) : best.yaw;
+    const float errPitch = useFlight ? (best.pitch + flightPitch * gp) : best.pitch;
 
     // ---- input quantum ----
     // The finger can only rest on the digitizer grid, so the camera can only
@@ -1455,134 +1311,31 @@ static void UpdateAimTouch(float dt) {
     const float qPitch = gainKnownPitch ? fabsf(gp) * gridPx : 0.f;
 
     // ---- dead zone ----
-    // Angular size of a few centimetres grows sharply inside 3 m. Keep the
-    // old long-range floor, but stop chasing every animation twitch at range.
-    float deadYaw = AimTouchDeadDeg(degPerPx, best.world_dist,
-                                     gainKnownYaw ? qYaw : 0.f);
-    float deadPitch = AimTouchDeadDeg(degPerPx, best.world_dist,
-                                       gainKnownPitch ? qPitch : 0.f);
-    // Предельный цикл. Лог 26.09 22:50: ошибка уже мелкая (0.5-1°), гейн
-    // стабилен, но шаг выдаётся почти на каждом такте и знак ошибки меняется
-    // 4 раза в секунду — контроллер «охотится» внутри собственной амплитуды и
-    // трясёт картинку. Запоминаем, на какой величине ошибки происходят
-    // реверсы, и расширяем мёртвую зону до этой амплитуды: мельче неё аим
-    // просто не дёргается, крупные поправки идут как раньше.
-    {
-        const float amp = AimTouchFlipMag();
-        if (amp > 0.f) {
-            // 0.35 амплитуды и потолок 0.6°: прошлая версия (0.7 и 2.5°) душила
-            // и сами поправки — аим стал вялым, а качка просто замедлилась.
-            float grow = amp * 0.35f;
-            if (grow > 0.6f) grow = 0.6f;
-            if (grow > deadYaw) deadYaw = grow;
-            if (grow > deadPitch) deadPitch = grow;
-        }
+    // Target: ~3 cm at the target's range (well inside a head), but never
+    // tighter than what the input grid can actually reach (0.55 step), and
+    // never wider than 1.5 screen px.
+    float deadBase = degPerPx * 1.5f;
+    if (best.world_dist > 1.f && std::isfinite(best.world_dist)) {
+        float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
+        if (d < deadBase) deadBase = d;
     }
+    // Пол мёртвой зоны — ДВА кванта ввода, а не половина. Точка прицела (кость
+    // головы) читается каждый кадр чуть по-разному: дрожь в 1-2 кванта — это
+    // нормальный шум замера, а не движение цели. С полом в половину кванта
+    // контроллер выходил за мёртвую зону на этот шум и гнал палец то влево, то
+    // вправо с частотой кадров («трясёт в разные стороны»). Стенд с шумом замера
+    // +-0.25 град: реверсов пальца 12 -> 2 при мёртвой зоне 0.2 град (два
+    // кванта) и 6 при 0.15.
+    float deadYaw = deadBase, deadPitch = deadBase;
+    if (gainKnownYaw   && deadYaw   < qYaw   * 2.0f) deadYaw   = qYaw   * 2.0f;
+    if (gainKnownPitch && deadPitch < qPitch * 2.0f) deadPitch = qPitch * 2.0f;
     if (fabsf(errYaw) < deadYaw && fabsf(errPitch) < deadPitch) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
-        // Стоим в мёртвой зоне — значит, охоты НЕТ, и память о прошлой
-        // качке сгорает удвоенным темпом: мёртвая зона расслабляется и
-        // прицел доходит остаток, а не залипает ровно на её границе (стенд
-        // «два захвата»: застывал в 0.60° от цели на секунды).
-        if (s_flipMag > 0.f) {
-            s_flipMag -= dt * 1.2f;
-            if (s_flipMag < 0.f) s_flipMag = 0.f;
-        }
-        // Заказанное за прошлые такты камера дорабатывает и без нас: окно
-        // стареет само, приказы молча истекают по kTouchFlightLife.
+        // Заказанное за прошлые такты камера дорабатывает и без нас.
+        shiftFlight();
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
         return;
     }
-
-    // ---- полоса дрожи у цели ----
-    // Остаток внутри полосы (но вне мёртвой зоны) — это либо дрожь кости,
-    // либо медленный дрейф. Шаг выдаётся только при УСТОЙЧИВОМ остатке в одну
-    // сторону: чередующаяся анимация не проходит, настоящий дрейф проходит
-    // целиком после нескольких тактов. Вблизи дрожание той же кости занимает
-    // больше градусов, поэтому там расширяем только эту фильтруемую полосу;
-    // dead-zone остаётся малой и устойчивое смещение всё равно исправляется.
-    const float touchJitterBand =
-        (std::isfinite(best.world_dist) && best.world_dist > 0.f && best.world_dist < 2.5f)
-            ? 1.2f : kTouchJitterBand;
-    auto jitterGate = [touchJitterBand](float eff, int& streak) {
-        if (eff == 0.f) { streak = 0; return 0.f; }
-        if (fabsf(eff) >= touchJitterBand) { streak = 0; return eff; }
-        const int s = (eff > 0.f) ? 1 : -1;
-        streak = (streak * s > 0) ? streak + s : s;
-        return (streak * s >= kTouchDriftStreak) ? eff : 0.f;
-    };
-    errYaw   = jitterGate(errYaw,   s_streakYaw);
-    errPitch = jitterGate(errPitch, s_streakPitch);
-    if (errYaw == 0.f && errPitch == 0.f) {
-        // Дрожь: палец стоит, камера не ходит за костью.
-        if (s_fingerDown) Touch_Move(s_fx, s_fy);
-        return;
-    }
-
-    // ---- темп подачи: не чаще 30 заказов в секунду ----
-    // Прошлая попытка ждала, пока «шевельнётся камера», и почти не срабатывала:
-    // камера двигается и сама (ходьба, отдача), так что условие было истинным
-    // на каждом такте (лог 27.09 00:08: пропущено 1-3 из 15). Поэтому теперь
-    // ограничение по ЧАСАМ: игра рисует 30-40 кадров в секунду, и чаще всё
-    // равно некуда — каждый лишний заказ между её кадрами удваивает петлевое
-    // усиление и раскачивает прицел. Шаг при этом считается от полной ошибки,
-    // так что скорость наведения не падает: закрываем больше за один заказ.
-    {
-        const double now_s = MonoNow();
-        if (!forceStep && now_s - s_lastStepTime < 0.030) {
-            ++s_tdiag.skipNoFrame;
-            if (s_fingerDown) Touch_Move(s_fx, s_fy);
-            return;
-        }
-    }
-
-    // ---- такт без нового кадра игры ----
-    // Наш оверлей идёт 60 раз в секунду, а игра рисует 30-40: примерно каждый
-    // второй такт видит ТУ ЖЕ позу камеры. Для контроллера это выглядит как
-    // «поправка не подействовала» — и он заказывает ещё столько же. Камера
-    // приходит на сумму и перелетает; ошибка меняет знак — маятник влево-
-    // вправо. Пока есть неотработанный заказ и камера не шевельнулась,
-    // держим палец и ждём отклика.
-    // ВАЖНО: признак camMoved считается ТОЛЬКО когда читается настоящая ось
-    // камеры (haveCam). На этом устройстве её нет (cam_st = 0 во всех строках
-    // лога), и camMoved там false ВСЕГДА — значит условие ниже выполнялось на
-    // каждом такте, где висел хоть какой-то заказ, а заказ без потока камеры
-    // списывается только по падению остатка или по таймауту в 1 с. На практике
-    // это давало 8 пропущенных тактов после каждого шага и шаг раз в секунду:
-    // жалоба 27.09 «тач-аим вообще перестал работать». Поэтому ждать отклика
-    // камеры имеет смысл только там, где этот отклик вообще виден.
-    if (!forceStep && haveCam && !camMoved && (s_absorbYaw != 0.f || s_absorbPitch != 0.f)) {
-        ++s_holdNoFrame;
-        if (s_holdNoFrame <= 8) {          // но не залипаем навсегда
-            ++s_tdiag.skipNoFrame;
-            if (s_fingerDown) Touch_Move(s_fx, s_fy);
-            return;
-        }
-    } else {
-        s_holdNoFrame = 0;
-    }
-
-    // ---- рваный кадр ----
-    // Модель задержки у контроллера жёсткая: касание доезжает до камеры за
-    // 2-4 кадра. Когда кадр вместо 17 мс занял 100+ мс (в логе 26.09 были
-    // пики до 960 мс из-за самого чита), «в полёте» и поза игрока устарели на
-    // целую вечность, и шаг, посчитанный по такой ошибке, гарантированно
-    // перелетает — это и есть маятник после каждого фриза. На таком кадре
-    // палец держим на месте и ждём нормального такта: потеря — один кадр,
-    // выигрыш — отсутствие перелёта.
-    // Порог 0.045 с — это 22 кадра оверлея в секунду: на телефоне под нагрузкой
-    // (ЕСП + подбор оффсетов) такт легко идёт дольше, и аим замолкал НАВСЕГДА,
-    // а не «на фризе» (жалоба 27.09). Пропускаем только действительно рваный
-    // кадр и не больше двух подряд: дальше ведём цель даже по устаревшей позе —
-    // медленный аим лучше молчащего.
-    if (!forceStep && dt > 0.090f && s_skipLongStreak < 2) {
-        ++s_skipLongStreak;
-        ++s_tdiag.skipLongFrame;
-        s_streakYaw = s_streakPitch = 0;
-        if (s_fingerDown) Touch_Move(s_fx, s_fy);
-        return;
-    }
-    s_skipLongStreak = 0;
 
     auto snapGrid = [&](float v) { return roundf(v * unitsPerPx) / unitsPerPx; };
 
@@ -1593,44 +1346,48 @@ static void UpdateAimTouch(float dt) {
         s_fingerDown = true;
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         s_holdFrames = 0;
+        s_acquire = 0.f;
         // Палец опустился заново: окно замера начинается с нуля, иначе первая
         // же пара «сдвиг пальца -> отклик» посчитает бросок пальца к точке.
         s_trackYaw.reset(); s_trackPitch.reset();
-        clearFlight();
+        for (int i = 0; i < 8; ++i) { s_flightYaw[i] = 0.f; s_flightPitch[i] = 0.f; }
         return; // let the game register the touch before moving it
     }
     if (s_holdFrames < 1) { ++s_holdFrames; Touch_Move(s_fx, s_fy); return; }
 
-    // ---- контроллер: жёсткий лок, как у режима «Память» --------------------
-    // Приказ считается от ПОЛНОГО остатка (err уже за минусом летящих в трубе
-    // касания ускорений — см. учёт «в полёте» выше), как мемори пишет
-    // абсолютный угол кости: камера закрывает расстояние до кости за 1-2
-    // приказа вместо экспоненциального догона. Палец переводит пиксели в
-    // градусы строго линейно (игра умножает накопленный сдвиг на
-    // m_Sensitivity), поэтому полный приказ — это точный поворот на угол
-    // остатка, а не «рывок неизвестно насколько».
-    //
-    // Бывшие ограничители доли ошибки (потолок 0.55/такт, спад доли у цели,
-    // фиксированная треть шага после захвата) убраны (просьба 27.09: «тач
-    // должен цепляться сразу, как память»): они и давали вялое «ползёт за
-    // костью» и заметное отставание на бегущих целях. Устойчивость теперь
-    // держат: вычёт летящих приказов, мёртвая зона, порог устойчивого дрейфа
-    // в полосе дрожи и гасители реверсов ниже — они срабатывают только когда
-    // петля реально качнулась через ноль; плюс мягкий старт-рампа после
-    // захвата (s_softStart): он срезает не долю ошибки, а набег стартового
-    // перелёта во времени, и за треть секунды исчезает сам.
-    //
-    // Слайдер «Скорость»: 4 и выше (умолчание 5) — полный лок; 1-3 оставляют
-    // мягкое ведение долей ошибки для тех, кто хочет «тихий» аим.
+    // ---- controller ----
+    // Speed slider keeps the old direction (higher = faster):
+    //   1 = gentle (~25% of the remaining error per frame), 10 = snap.
     float sm = g_state.gun_str;
     if (!(sm >= 1.f)) sm = 1.f;
     if (sm > 10.f) sm = 10.f;
-    float k = 1.f;
-    if (sm < 4.f) {
-        const float frac = 0.20f + (sm - 1.f) * 0.10f;   // 0.20..0.40 за кадр @60fps
-        k = 1.f - powf(1.f - frac, dt * 60.f);
-        if (k < 0.05f) k = 0.05f;
-    }
+    float frac = 0.25f + (sm - 1.f) / 9.f * 0.75f;   // 0.25 .. 1.00 per frame @60fps
+    // Frame-rate independent: convert per-frame fraction to a rate.
+    float k = 1.f - powf(1.f - frac, dt * 60.f);
+    // ...но не больше половины видимой ошибки за такт. Камера отвечает не в
+    // этом такте: поза отстаёт от касания на 2 кадра (замер в контроллере
+    // фарма, тот же палец и тот же экран), поэтому при k -> 1 петля идёт по
+    // err(t+1) = err(t) - k*err(t-1), то есть z^2 - z + k = 0: корни
+    // |z| = sqrt(k) = 0.993 при k = 0.986, угол ~80 градусов — колебания с
+    // периодом 4.5 такта (0.36 с) не затухают. В логе 16.09.2026 это и видно:
+    // |sent| * 0.10 / |err| = 0.982 (медиана, 167 строк), смена знака ошибки в
+    // 45% пар соседних строк, шаги до потолка 54 px — «аим дёргается».
+    // Половина ошибки за такт даёт |z| <= 0.71: хвост гаснет за 2-3 такта.
+    // Захват цели при этом не замедляется — при ошибке больше 5 градусов шаг
+    // всё равно упирается в потолок maxStep (0.05*sh = 54 px на этом экране),
+    // и скорость наведения задаёт он. Слайдер ниже середины продолжает
+    // работать: доля считается от устойчивого предела пропорционально frac.
+    // 0.5 даёт |z| = 0.71 — качели гаснут за 2-3 такта. Снизил до 0.45: на
+    // устройстве задержка отработки касания плавает (2-4 кадра), и запас по
+    // устойчивости здесь не лишний — «почти пропал, но не до конца» (19.09).
+    // На скорость захвата это почти не влияет: при большой ошибке шаг всё
+    // равно упирается в потолок maxStep.
+    const float kStable = 0.45f;
+    const float fracMid = 0.25f + (5.f - 1.f) / 9.f * 0.75f;   // слайдер 5
+    if (k > kStable) k = kStable;
+    if (frac < fracMid) k *= frac / fracMid;
+    if (k > 1.f) k = 1.f;
+    if (k < 0.05f) k = 0.05f;
 
     // Гаситель «качелей»: остаток по любой из осей перескочил через ноль и уже
     // набрал заметную величину обратного знака — это перелёт от нашей поправки. На несколько
@@ -1640,12 +1397,6 @@ static void UpdateAimTouch(float dt) {
     static float s_flipDamp = 1.f;
     static float s_prevCtlYaw = 0.f, s_prevCtlPitch = 0.f;
     static bool  s_haveCtlErr = false;
-    // Стойкий трим: одиночный гаситель (0.45 на реверс, восстановление за
-    // четыре такта) качели гасит, но НЕ лечит устойчивую раскачку — в логе
-    // 26.09 22:30 реверсы шли по 1-2 на каждые 15 тактов подряд. Копим их:
-    // каждый реверс срезает шаг ещё на 15%, спокойные такты возвращают по 1.5%.
-    // Нижний предел 0.35 — дальше наведение станет заметно вялым.
-    static float s_trim = 1.f;
     const bool flipYaw = s_haveCtlErr && s_prevCtlYaw * errYaw < 0.f &&
                          fabsf(errYaw) > fabsf(s_prevCtlYaw) * 0.35f;
     const bool flipPitch = s_haveCtlErr && s_prevCtlPitch * errPitch < 0.f &&
@@ -1656,59 +1407,39 @@ static void UpdateAimTouch(float dt) {
         s_flipDamp += (1.f - s_flipDamp) * (dt * 2.5f);
         if (s_flipDamp > 1.f) s_flipDamp = 1.f;
     }
-    if (flipYaw || flipPitch) {
-        ++s_tdiag.flips;
-        s_trim *= 0.9f;
-        if (s_trim < 0.6f) s_trim = 0.6f;
-        const float mag = (fabsf(errYaw) > fabsf(errPitch)) ? fabsf(errYaw) : fabsf(errPitch);
-        s_flipMag = (s_flipMag <= 0.f) ? mag : (s_flipMag * 0.7f + mag * 0.3f);
-    } else {
-        // Забываем амплитуду быстрее, пока она большая: линейный спад 0.6/с
-        // после большого маха (7-14° при доказанно заниженном коэффициенте)
-        // держал мёртвую зону на потолке 0.6° почти десять секунд и аим
-        // замирал в градусе от цели (стенд «два захвата»: хвост 0.60° вместо
-        // 0.31°). Экспонента выше 2° (тау ~0.9 с), привычный линейный спад
-        // ниже — поведение мелкой качки из жалобы 26.09 не меняется.
-        if (s_flipMag > 0.f) {
-            s_flipMag -= (s_flipMag > 2.f) ? s_flipMag * dt * 1.1f : dt * 0.6f;
-            if (s_flipMag < 0.f) s_flipMag = 0.f;
-        }
-        s_trim += 0.02f;       // назад к полной силе за ~0.3 с
-        if (s_trim > 1.f) s_trim = 1.f;
-    }
-    k *= s_trim;
-    s_tdiag.trim = s_trim;
-    {
-        const float mag = (fabsf(errYaw) > fabsf(errPitch)) ? fabsf(errYaw) : fabsf(errPitch);
-        s_tdiag.errSum += mag;
-        if (mag > s_tdiag.errMax) s_tdiag.errMax = mag;
-        s_tdiag.gainYaw = gy; s_tdiag.gainPitch = gp; s_tdiag.learned = learned;
-    }
     s_prevCtlYaw = errYaw; s_prevCtlPitch = errPitch; s_haveCtlErr = true;
     k *= s_flipDamp;
 
-    // Мягкий старт после захвата: доля шага уже опущена до 0.22 на смене цели
-    // и здесь плавно возвращается к полной (~0.3 с до 90%). Перелёт первых
-    // приказов (сырой коэффициент + летящие касания) именно тут и гасится —
-    // маятнику первых секунд набрать размах неоткуда.
-    if (s_softStart < 1.f) {
-        s_softStart += (1.f - s_softStart) * (dt * 7.f);
-        if (s_softStart > 1.f) s_softStart = 1.f;
-    }
-    k *= s_softStart;
+    // Мягкий старт при захвате.
+    //
+    // Жалоба 19.09: «тач-аим ходит маятником первые две секунды». Механика
+    // такая: в момент захвата ошибка велика, и контроллер сразу выдаёт шаг под
+    // потолок (0.15*sh пикселей — 162 px на этом экране). Касание идёт до
+    // камеры через систему ввода Android 2—8 кадров, и за это время мы
+    // успеваем заказать ещё столько же. Камера приходит сразу на несколько
+    // шагов и перелетает; ошибка меняет знак; дальше петля ходит, пока окно
+    // «в полёте» не выровняется — эти две секунды и есть.
+    //
+    // Поэтому первые 0.35 с после захвата (и после нового касания) шаг режем
+    // до трети и плавно отдаём полный. Перелёта тогда нет вовсе, а наведение
+    // всё равно занимает считанные кадры: при большой ошибке шаг и в треть
+    // размера упирается в потолок.
+    if (pick.switched) s_acquire = 0.f;
+    s_acquire += dt / 0.35f;
+    if (s_acquire > 1.f) s_acquire = 1.f;
+    k *= 0.3f + 0.7f * s_acquire;
 
     float dx =  errYaw   * k / gy;
     float dy = -errPitch * k / gp;
 
-    // Do not send the whole remaining error on the last 2-3 digitizer
-    // units: wait for each one to land instead of alternating across a bone.
-    if (gainKnownYaw)
-        dx = AimTouchFinalGridStep(errYaw, gy, qYaw, unitsPerPx, deadYaw, dx);
-    if (gainKnownPitch)
-        dy = AimTouchFinalGridStep(-errPitch, gp, qPitch, unitsPerPx, deadPitch, dy);
-    // A noisy axis already inside its own zone must not follow the other axis.
-    if (fabsf(errYaw) < deadYaw) dx = 0.f;
-    if (fabsf(errPitch) < deadPitch) dy = 0.f;
+    // Final approach: within a few input steps of the target, stop smoothing
+    // and jump straight to the nearest reachable grid position. Smoothing
+    // here would either creep for many frames or, once rounded, overshoot
+    // and oscillate by a full step around the head.
+    if (gainKnownYaw && fabsf(errYaw) < qYaw * 3.f)
+        dx = roundf((errYaw / gy) * unitsPerPx) / unitsPerPx;
+    if (gainKnownPitch && fabsf(errPitch) < qPitch * 3.f)
+        dy = roundf((-errPitch / gp) * unitsPerPx) / unitsPerPx;
 
     // Шаг не больше оставшейся ошибки. Иначе собственный шаг перелетает цель, и
     // следующий шаг считается уже по ошибке другого знака — то самое «дёргается»
@@ -1717,13 +1448,11 @@ static void UpdateAimTouch(float dt) {
     if (fabsf(dy * gp) > fabsf(errPitch)) dy = -errPitch / gp;
 
     // Clamp per-frame travel so a bad gain estimate never slingshots.
-    // Жёсткому локу нужен полный ход пальца: при ИЗМЕРЕННОМ коэффициенте
-    // (выучен по повороту камеры или оценке по реакции прицела) палец может
-    // пройти до половины высоты экрана за один приказ — больше и не нужно,
-    // дальше круга FOV всё равно никого нет. По коэффициенту из настройки
-    // без измерения ошибка возможна в 2 раза по модулю, поэтому там —
-    // прежняя осторожная полоса.
-    const float maxStep = (learned || lsYaw || lsPitch) ? sh * 0.50f : sh * 0.05f;
+    // Потолок шага поднимаем только коэффициенту, выученному по повороту камеры
+    // (это прямое измерение град/px). Оценка по реакции прицела и значение из
+    // настройки работают с прежним потолком: большой шаг по непроверенному
+    // коэффициенту — это рывок через пол-экрана.
+    const float maxStep = learned ? sh * 0.15f : sh * 0.05f;
     if (dx >  maxStep) dx =  maxStep;
     if (dx < -maxStep) dx = -maxStep;
     if (dy >  maxStep) dy =  maxStep;
@@ -1736,6 +1465,7 @@ static void UpdateAimTouch(float dt) {
     dx = nx - s_fx; dy = ny - s_fy;
     if (dx == 0.f && dy == 0.f) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        shiftFlight();
         Touch_Move(s_fx, s_fy);
         return;
     }
@@ -1757,7 +1487,7 @@ static void UpdateAimTouch(float dt) {
         s_fx = snapGrid(ptX); s_fy = snapGrid(ptY);
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         // Палец отпущен — заказанное игра не отработает вовсе.
-        clearFlight();
+        for (int i = 0; i < 8; ++i) { s_flightYaw[i] = 0.f; s_flightPitch[i] = 0.f; }
         s_haveLast = false;
         // Перенос пальца — это не шаг прицела: замер по нему покажет мусор.
         s_trackYaw.reset(); s_trackPitch.reset();
@@ -1765,22 +1495,8 @@ static void UpdateAimTouch(float dt) {
     }
     s_fx = nx; s_fy = ny;
     s_pendDx += dx; s_pendDy += dy;   // ждёт отработки камерой (ack-такт)
-    if (useFlight) {
-        // Заказ — «в полёт»: в градусах остатка. Рысканье: шаг dx поворачивает
-        // камеру на dx*gy к цели (остаток упадёт на столько); тангаж: сдвиг dy
-        // вниз уменьшает возвышение, то есть остаток упадёт на -dy*gp.
-        const float ordYaw = dx * gy, ordPitch = -dy * gp;
-        s_flight.push_back({ordYaw, ordPitch, 0.f});
-        // Первый заказ серии — рождение книги: стартует часы свежести и
-        // эталон убывания (см. выбор оценки выше).
-        if (s_absorbYaw == 0.f)   { s_birthAtYaw   = MonoNow(); s_errPeakYaw   = fabsf(best.yaw); }
-        if (s_absorbPitch == 0.f) { s_birthAtPitch = MonoNow(); s_errPeakPitch = fabsf(best.pitch); }
-        s_absorbYaw   += ordYaw;   s_stallYaw   = 0.f;
-        s_absorbPitch += ordPitch; s_stallPitch = 0.f;
-    }
-    ++s_tdiag.steps;
-    s_lastStepTime = MonoNow();
-    s_tdiag.stepSum += (fabsf(dx) > fabsf(dy)) ? fabsf(dx) : fabsf(dy);
+    shiftFlight(); s_flightYaw[7] = dx;
+    s_flightPitch[7] = -dy;
     Touch_Move(s_fx, s_fy);
 }
 
