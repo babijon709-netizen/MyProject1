@@ -547,6 +547,32 @@ int32_t       s_via_kidx[kViaFieldCount][2];
 std::uint64_t s_via_klass[kViaFieldCount][2];
 // Метка целевого класса для списка занятых смещений (см. третий проход).
 char          s_via_mark[kViaFieldCount][40];int      s_applied_count = 0;
+// СТАБИЛЬНЫЙ снимок applied для гейтов записи (offset_resolver_is_live).
+//
+// Зачем отдельный список: s_applied — это рабочая область текущего прохода.
+// Повторный подбор (soft_rescan) обнуляет его на старте, а неудачный проход
+// (откат «резов хуже прежнего» / «ключевых классов нет») значения слотов
+// возвращает, а список отметок — нет: гейты записей («быстрая стрельба» и
+// пр.) умирали на всю сессию по одной-единственной неудачной качне резолвера
+// — ровно жалоба 27.09 «быстрая стрельба/перезарядка работали один раз и
+// умерли / вообще не работают». Live-отметка обязана отражать «смещения в
+// слотах сейчас — из живой метадаты этой сборки», а не «проход сейчас
+// пересчитывает массив».
+//
+// Правила: committed обновляется только по известно-хорошим состояниям —
+// при старте повторного прохода (не худшим списком, чем уже записано),
+// при успешной финализации (может и смещаться, качество уже проверено) и
+// при применении кэша того же образа. Откатные ветки его НЕ трогают.
+AppliedRec  s_committed[256];
+const char* s_committed_cls[256];
+int         s_committed_count = 0;
+static void committed_snapshot(bool allow_shrink) {
+    if (s_applied_count <= 0) return;
+    if (!allow_shrink && s_applied_count < s_committed_count) return;
+    memcpy(s_committed, s_applied, sizeof(AppliedRec) * (size_t)s_applied_count);
+    memcpy(s_committed_cls, s_applied_cls, sizeof(const char*) * (size_t)s_applied_count);
+    s_committed_count = s_applied_count;
+}
 bool     s_logged = false;
 // Повторный подбор. Игра поднимается не мгновенно: пока грузится мир, классов
 // Assembly-CSharp в памяти просто НЕТ (рантайм создаёт Il2CppClass по мере
@@ -4223,6 +4249,10 @@ static void phase_fields() {
     } else if (s_resolved > s_prev_resolved) {
         s_prev_resolved = s_resolved;
     }
+    // Удачная финализация: фиксируем стабильный снимок для гейтов записи.
+    // В откатной ветке «хуже прежнего» s_applied уже обнулён — снимок не
+    // возьмётся и committed останется прежним (хорошим).
+    committed_snapshot(true);
     s_rollback_count = 0;
     // Резолв удался, а вшитого якоря нет: ищем собственный слот-якорь, чтобы
     // следующий вход поднял классы из кэша без единого скана.
@@ -4790,6 +4820,11 @@ static bool load_offsets_cache() {
         // два образа libil2cpp.so, и по ELF-заголовку пустой не отличить).
         s_good_base = g_il2cpp_base;
     }
+    // Кэш — это смещения ЭТОГО же образа (ключ сверен до байта): записи из
+    // него — такие же «живые» для гейтов, как у живого прохода. Фиксируем их
+    // в стабильный снимок сразу, чтобы до конца скана/пересканов гейты не
+    // мигали (раньше is_live смотрел в рабочий s_applied и терял их).
+    if (loaded > 0) committed_snapshot(true);
     if (!anchor_live) {
         // Смещения полей уже применены — чит работает верными цифрами с первого
         // кадра. Адреса классов из кэша без якоря восстановить нельзя: их
@@ -4847,6 +4882,10 @@ static bool resolve_incomplete() {
 static void soft_rescan() {
     LogLine("автооффсеты: повторный подбор (попытка %d из 20): классов %d, разрешено %d/%d",
             s_rescan_count, s_class_count, s_resolved, kOrFieldCount);
+    // До обнуления рабочего applied паркуем его в стабильный снимок: гейты
+    // записей не должны гаснуть ни на время этого прохода, ни навсегда при
+    // его откате. Худшим списком committed не затираем (allow_shrink=false).
+    committed_snapshot(false);
     s_class_count = 0;
     s_names_ok = 0; s_names_fail = 0; s_shape_pass = 0;
     s_applied_count = 0; s_resolved = 0; s_changed = 0;
@@ -5093,6 +5132,7 @@ void offset_resolver_reset() {
     s_ptr_passes = 0; s_ptr_readfails = 0;
     s_ptr_range_count = 0; s_ptr_seg_bytes = 0; s_ptr_anon_bytes = 0;
     s_applied_count = 0; s_logged = false;
+    s_committed_count = 0;   // новый процесс/новый образ — гейты снова от них
     s_image_key = 0; s_from_cache = false; s_cache_checked = false; s_cache_saved = false;
     s_cache_retryable = false; s_cache_wait_since = 0; s_cache_retry_at = 0;
     s_cache_offsets_used = false;
@@ -5160,8 +5200,11 @@ uint64_t offset_resolver_class_nth(const char* name, const char* ns, int nth) {
 // память игры: писать по вшитому смещению на незнакомом билде нельзя.
 bool offset_resolver_is_live(const uint64_t* slot) {
     if (!slot) return false;
-    for (int i = 0; i < s_applied_count; ++i)
-        if (s_applied[i].slot == slot) return true;
+    // Смотрим в стабильный снимок (s_committed), а не в рабочий s_applied:
+    // повторный подбор/откат рабочий список опустошает, а значения в слотах
+    // при этом остаются верными — «живость» смещений не должна исчезать.
+    for (int i = 0; i < s_committed_count; ++i)
+        if (s_committed[i].slot == slot) return true;
     return false;
 }
 

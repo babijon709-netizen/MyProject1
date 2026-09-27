@@ -113,8 +113,6 @@ template <class IO> class Controller {
     // чтобы один огромный массив не голодал соседей и свой хвост.
     std::uint64_t begin_runner_ = 0, item_phase_ = 0;
     std::uint32_t neutralized_ = 0;     // сколько ожиданий ускорено всего
-    std::uint32_t promises_seen_ = 0;   // сколько живых ожиданий 0.35 с встречено
-    std::uint32_t write_fails_ = 0;     // попыток записи, отклонённых гейтом кучи
     void forget_addresses() {
         // Сессия сменилась: ни один старый адрес не обязан быть валиден.
         helper_class_ = 0; promise_class_ = 0; scaled_class_ = 0;
@@ -216,8 +214,6 @@ public:
     viewmodel::Status status = viewmodel::Status::Off;
     explicit Controller(IO& io) : io_(io) {}
     std::uint32_t neutralized() const { return neutralized_; }
-    std::uint32_t promises_seen() const { return promises_seen_; }
-    std::uint32_t write_failures() const { return write_fails_; }
     bool has_state() const { return session_ != 0; }
     void reset() {
         // Выключение тумблера/отвязка: поле темпа переписывает сама игра при
@@ -225,7 +221,6 @@ public:
         // просто всё забываем.
         forget_addresses();
         session_ = 0; neutralized_ = 0;
-        promises_seen_ = 0; write_fails_ = 0;
         status = viewmodel::Status::Off;
     }
     void tick(std::uint64_t session, std::uint64_t base, bool enabled) {
@@ -339,12 +334,10 @@ public:
                 if (!io_.read(item + frame_off, frame) ||
                     frame < 0 || frame > 2000000000)
                     continue;
-                ++promises_seen_;
                 if (!io_.write_heap(item + span_off, 0.f) ||
                     !io_.read(item + span_off, span_bits) ||
                     span_bits != 0u) {
                     write_failed = true;
-                    ++write_fails_;
                     continue;
                 }
                 ++writes;

@@ -197,16 +197,13 @@ static void weapon_speed_restore() {
         const float v_fire = s_ws.gun_fire; wr_buf(s_ws.gun_cfg + WEAPON_CONFIG_FIRE_RATE, &v_fire, sizeof(v_fire));
         const float v_full = s_ws.gun_full; wr_buf(s_ws.gun_cfg + WEAPON_CONFIG_FULL_RELOAD, &v_full, sizeof(v_full));
         const float v_loop = s_ws.gun_loop; wr_buf(s_ws.gun_cfg + WEAPON_CONFIG_LOOP_RELOAD, &v_loop, sizeof(v_loop));
-        LogLine("темп оружия: восстановлен конфиг огнестрела 0x%llx", (unsigned long long)s_ws.gun_cfg);
     }
     if (s_ws.bow_saved && s_ws.bow_weapon) {
         const float v_min = s_ws.bow_min_time; wr_buf(s_ws.bow_weapon + FPBOW_MIN_TIME_BETWEEN_SHOTS, &v_min, sizeof(v_min));
         const float v_aim = s_ws.bow_aim_speed; wr_buf(s_ws.bow_weapon + FPBOW_AIM_SPEED, &v_aim, sizeof(v_aim));
-        LogLine("темп оружия: восстановлен лук 0x%llx", (unsigned long long)s_ws.bow_weapon);
     }
     if (s_ws.xbow_saved && s_ws.xbow_weapon) {
         const float v_min = s_ws.xbow_min_time; wr_buf(s_ws.xbow_weapon + FPCROSSBOW_MIN_TIME_BETWEEN_SHOTS, &v_min, sizeof(v_min));
-        LogLine("темп оружия: восстановлен арбалет 0x%llx", (unsigned long long)s_ws.xbow_weapon);
     }
     s_ws = {};
 }
@@ -219,23 +216,6 @@ static bool offsets_all_live(const std::uint64_t* const* slots, size_t count) {
 template <size_t N>
 static bool offsets_all_live(const std::uint64_t* const (&slots)[N]) {
     return offsets_all_live(slots, N);
-}
-
-// Статусы подфункций темпа для журнала (быстрый удар и предметы удалены,
-// остались стрельба и перезарядка). По ним видно, чего ждёт каждая фича:
-// 0 выкл, 1 ждутся живые смещения, 2 нет цепочки/объекта, 3 активна.
-struct WeaponSpeedDiag { int fire = 0, reload = 0; };
-static WeaponSpeedDiag s_ws_diag;
-static void weapon_speed_diag_set(int WeaponSpeedDiag::*field, bool toggle, bool live, bool applied) {
-    s_ws_diag.*field = !toggle ? 0 : !live ? 1 : applied ? 3 : 2;
-}
-static void weapon_speed_diag_log() {
-    static WeaponSpeedDiag last{-1, -1};
-    if (last.fire == s_ws_diag.fire && last.reload == s_ws_diag.reload) return;
-    last = s_ws_diag;
-    LogLine("темп: стрельба=%d перезарядка=%d"
-            " (0 выкл,1 жду живые смещения,2 нет цепочки/объекта,3 активна)",
-            last.fire, last.reload);
 }
 
 static void weapon_speed_tick() {
@@ -288,31 +268,18 @@ static void weapon_speed_tick() {
     const bool bow_live    = common_live && offsets_all_live(gate_bow);
     const bool xbow_live   = common_live && offsets_all_live(gate_xbow);
 
-    bool applied_fire = false, applied_reload = false;
-    auto flush_diag = [&]() {
-        weapon_speed_diag_set(&WeaponSpeedDiag::fire, g_fast_fire, fire_live, applied_fire);
-        weapon_speed_diag_set(&WeaponSpeedDiag::reload, g_fast_reload, reload_live, applied_reload);
-        weapon_speed_diag_log();
-    };
-
     if (!common_live) {
-        // Гейт просел (скан резолвера ещё не закрылся или качнулся): ни
-        // записей, ни восстановления — применённые значения остаются, а
-        // функция ждёт живой цепочки и продолжает. Именно так лечится
-        // «сработало один раз и умерло».
-        static double s_next_log = 0.0;
-        if (mono_seconds() >= s_next_log) {
-            s_next_log = mono_seconds() + 10.0;
-            LogLine("темп: жду живые смещения — цепочка fpManager → текущий предмет пока не подтверждена резолвером");
-        }
-        flush_diag();
+        // Гейт просел (скан резолвера ещё не закрылся): ни записей, ни
+        // восстановления — применённые значения остаются, а функция ждёт
+        // живой цепочки и продолжает. Именно так лечится «сработало один
+        // раз и умерло».
         return;
     }
 
     const uint64_t local = resolve_local_player();
-    if (!local) { flush_diag(); return; }
+    if (!local) return;
     const uint64_t fp = rd_ptr(local + PLAYER_FP_MANAGER);
-    if (!valid_obj(fp)) { flush_diag(); return; }
+    if (!valid_obj(fp)) return;
     uint64_t weapon = 0;
     // Читаем только поля с ЖИВЫМИ смещениями: нерешённое на этом билде может
     // дать осмысленный указатель на ЧУЖОЙ объект, и проверка обратной ссылки ниже
@@ -321,13 +288,11 @@ static void weapon_speed_tick() {
     if (!valid_obj(weapon) && live_cur_object) weapon = rd_ptr(fp + FPMANAGER_CURRENT_OBJECT);
     if (!valid_obj(weapon)) {
         weapon_speed_restore();
-        flush_diag();
         return;
     }
     uint64_t backref = rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF);
     if (backref != local) {
         weapon_speed_restore();
-        flush_diag();
         return;
     }
 
@@ -369,7 +334,6 @@ static void weapon_speed_tick() {
                     std::isfinite(loop) && loop >= 0.f && loop <= 120.f) {
                     s_ws.gun_fire = fire; s_ws.gun_full = full; s_ws.gun_loop = loop;
                     s_ws.gun_cfg = cfg; s_ws.gun_saved = true;
-                    LogLine("темп оружия: ассет 0x%llx — огнестрел сохранён", (unsigned long long)cfg);
                 }
             }
             if (s_ws.gun_saved && s_ws.gun_cfg == cfg) {
@@ -384,7 +348,6 @@ static void weapon_speed_tick() {
                     if (want < 0.01f) want = 0.01f;
                     if (fabsf(rd<float>(cfg + WEAPON_CONFIG_FIRE_RATE) - want) > 0.001f)
                         wr_buf(cfg + WEAPON_CONFIG_FIRE_RATE, &want, sizeof(want));
-                    applied_fire = true;
                 } else if (!g_fast_fire) {
                     if (fabsf(rd<float>(cfg + WEAPON_CONFIG_FIRE_RATE) - s_ws.gun_fire) > 0.001f)
                         wr_buf(cfg + WEAPON_CONFIG_FIRE_RATE, &s_ws.gun_fire, sizeof(s_ws.gun_fire));
@@ -398,7 +361,6 @@ static void weapon_speed_tick() {
                         wr_buf(cfg + WEAPON_CONFIG_FULL_RELOAD, &full, sizeof(full));
                     if (s_ws.gun_loop > 0.f && fabsf(rd<float>(cfg + WEAPON_CONFIG_LOOP_RELOAD) - loop) > 0.001f)
                         wr_buf(cfg + WEAPON_CONFIG_LOOP_RELOAD, &loop, sizeof(loop));
-                    applied_reload = true;
                 } else if (!g_fast_reload) {
                     if (s_ws.gun_full > 0.f && fabsf(rd<float>(cfg + WEAPON_CONFIG_FULL_RELOAD) - s_ws.gun_full) > 0.001f)
                         wr_buf(cfg + WEAPON_CONFIG_FULL_RELOAD, &s_ws.gun_full, sizeof(s_ws.gun_full));
@@ -442,7 +404,6 @@ static void weapon_speed_tick() {
                 wr_buf(weapon + FPBOW_MIN_TIME_BETWEEN_SHOTS, &want_min, sizeof(want_min));
             if (fabsf(rd<float>(weapon + FPBOW_AIM_SPEED) - want_aim) > 0.001f)
                 wr_buf(weapon + FPBOW_AIM_SPEED, &want_aim, sizeof(want_aim));
-            applied_fire = true;
         }
     } else if (s_ws.bow_saved && (!is_bow || !g_fast_fire)) {
         // Оружие сменилось или тумблер выключили — возвращаем оригиналы.
@@ -471,14 +432,11 @@ static void weapon_speed_tick() {
             if (want_min < 0.05f) want_min = 0.05f;
             if (fabsf(rd<float>(weapon + FPCROSSBOW_MIN_TIME_BETWEEN_SHOTS) - want_min) > 0.001f)
                 wr_buf(weapon + FPCROSSBOW_MIN_TIME_BETWEEN_SHOTS, &want_min, sizeof(want_min));
-            applied_fire = true;
         }
     } else if (s_ws.xbow_saved && (!is_xbow || !g_fast_fire)) {
         const float v_min = s_ws.xbow_min_time; wr_buf(s_ws.xbow_weapon + FPCROSSBOW_MIN_TIME_BETWEEN_SHOTS, &v_min, sizeof(v_min));
         s_ws.xbow_saved = false; s_ws.xbow_weapon = 0;
     }
-
-    flush_diag();
 }
 
 static void always_day_tick() {

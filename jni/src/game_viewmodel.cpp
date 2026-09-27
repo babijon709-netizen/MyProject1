@@ -173,28 +173,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // Быстрый сбор не зависит от локального игрока — тикается всегда,
     // до ветки с резолвом игрока (она ниже может выйти раньше времени).
     loot.tick(epoch, g_il2cpp_base, settings.fast_loot);
-    // Диагностика быстрого сбора: без цифр жалоба «работает через раз» в
-    // журнале нечитаема. Печатаем строку, когда счётчики сдвинулись или
-    // статус упал, раз в 5 с: при идущем сборе видно, что ожидания находятся
-    // и ускоряются; при тишине — что искать вообще нечего.
-    {
-        static double s_loot_log_next = 0.0;
-        static std::uint32_t s_loot_log_seen = 0, s_loot_log_zero = 0, s_loot_log_fails = 0;
-        const double now = std::chrono::duration<double>(
-            Clock::now().time_since_epoch()).count();
-        const std::uint32_t seen = loot.promises_seen();
-        const std::uint32_t zeroed = loot.neutralized();
-        const std::uint32_t fails = loot.write_failures();
-        if (settings.fast_loot && now >= s_loot_log_next &&
-            (seen != s_loot_log_seen || zeroed != s_loot_log_zero ||
-             fails != s_loot_log_fails ||
-             loot.status == viewmodel::Status::Failed)) {
-            s_loot_log_next = now + 5.0;
-            s_loot_log_seen = seen; s_loot_log_zero = zeroed; s_loot_log_fails = fails;
-            LogLine("быстрый сбор: ожиданий 0.35 с %u, ускорено %u, отказов записи %u, статус %d",
-                    (unsigned)seen, (unsigned)zeroed, (unsigned)fails, (int)loot.status);
-        }
-    }
     auto log_status = [&]() {
         auto st = esp_viewmodel_diagnostics();
         if (st.fov != last_log.fov || st.hands != last_log.hands ||
