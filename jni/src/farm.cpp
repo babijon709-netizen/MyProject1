@@ -559,87 +559,21 @@ static void UpdateFarmInner(float dt) {
     const float pitchErr = fmaxf(fabsf(tgt.pitch) - pitchDead, 0.f);
     const float errDeg = fmaxf(fabsf(tgt.yaw), pitchErr);
 
-    // В пределах удара — всегда MINE: прицел доводится тем же пальцем, а удар
-    // удар запускается только когда «прицел сел». Вне пределов — идём, но если точка
-    // подхода сильно в стороне, сначала доворачиваем камеру (стик «вперёд»
-    // смотрит по камере, и на yaw 90° он уводил бота вдоль узла).
-    const int phase = inReach ? 3 : ((fabsf(tgt.walk_yaw) <= kTurnBeforeWalk) ? 2 : 1);
+    // В пределах удара — всегда MINE. Прицел по памяти бьёт во всех
+    // направлениях, без поворота камеры и без свайпа пальцем. Вне пределов —
+    // шагаем к точке подхода.
+    const int phase = inReach ? 3 : 2;
     g_farmPhase = phase;
 
-    // ---- палец 1: камера ------------------------------------------------------
-    {
-        const float wantYawPx = tgt.yaw * invGain;
-        float wantPitchPx = 0.f;
-        if (fabsf(tgt.pitch) > pitchDead) wantPitchPx = -tgt.pitch * fabsf(invGain);
-
-        // Пропорциональный шаг: закрываем часть остатка ошибки (по крестику
-        // больше — там точность важнее скорости). Предел шага по крестику урезан
-        // с 0.075 до 0.030 высоты экрана: 81 px при измеренных 0.10 град/px это
-        // рывок на 8° за кадр — ровно то, что выглядит как дёрганье прицела, даже
-        // когда коэффициент верный.
-        const bool fineStep = (phase == 3 && atSpot);
-        const float maxStep = sh * (fineStep ? kStepSpotFrac : kStepWalkFrac);
-        const float kAim = fineStep ? kAimStepSpot : kAimStepWalk;
-
-        // Квант ввода: позиция пальца пишется в цифрователь целыми пикселями,
-        // поэтому шаг меньше пикселя до камеры не доходит вовсе. Прежний
-        // контроллер в таком случае держал касание опущенным и слал по 0.8 px за
-        // кадр вечно (в логе стенда — 12 кадров подряд на ошибке 0.5°): палец не
-        // отпускается, крестик дрожит. Ошибка в один квант считается севшей.
-        const bool belowQuantum =
-            fmaxf(fabsf(wantYawPx), fabsf(wantPitchPx)) * kAim < kStepQuantumPx;
-        const bool needTurn = !belowQuantum &&
-                              (s_lookDown ? (errDeg > stopDeg) : (errDeg > startDeg));
-        // Ждём ли ещё ответа камеры на посланный шаг.
-        const bool awaitingCam = haveCam && !camMoved && s_lookWait < kLookWaitMax &&
-                                 (fabsf(s_gainPendDx) >= 1.f || fabsf(s_gainPendDy) >= 1.f);
-        if (!needTurn) {
-            if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; }
-            s_gainPendDx = s_gainPendDy = 0.f;
-            s_lookWait = 0.f;
-        } else if (!s_lookDown) {
-            s_lookX = sw * 0.74f; s_lookY = sh * 0.42f;
-            Touch_Down_N(1, s_lookX, s_lookY);
-            s_lookDown = true;
-            s_lookHold = 0;
-            s_gainPendDx = s_gainPendDy = 0.f;
-            s_lookWait = 0.f;
-        } else if (s_lookHold < 1) {
-            ++s_lookHold;               // даём игре зарегистрировать касание
-            Touch_Down_N(1, s_lookX, s_lookY);
-        } else if (awaitingCam) {
-            // Такт с подтверждением: прошлый сдвиг ещё не отразился в позе камеры,
-            // значит ошибка на экране устаревшая. Держим палец на месте и ждём —
-            // иначе 9..11 шагов подряд складываются и камера перелетает крестик
-            // (в логе 14.09 именно так: ответ через 2 кадра, досыл 9..11 кадров).
-            s_lookWait += dt;
-            Touch_Down_N(1, s_lookX, s_lookY);   // тач остаётся живым, сдвига нет
-        } else {
-            if (s_lookWait >= kLookWaitMax) {
-                s_gainPendDx = s_gainPendDy = 0.f;  // ввод потерялся — шлём заново
-                s_lookWait = 0.f;
-            }
-            float dx = wantYawPx * kAim;
-            if (dx >  maxStep) dx =  maxStep;
-            if (dx < -maxStep) dx = -maxStep;
-            float dy = wantPitchPx * kAim;
-            const float maxStepY = maxStep * 0.5f;
-            if (dy >  maxStepY) dy =  maxStepY;
-            if (dy < -maxStepY) dy = -maxStepY;
-            const float nx = s_lookX + dx, ny = s_lookY + dy;
-            // Край экрана: lift и перенос в центр, а не drag за границу.
-            if (nx < sw * 0.56f || nx > sw * 0.97f || ny < sh * 0.12f || ny > sh * 0.88f) {
-                // Палец дошёл до края: поднимаем и переносим в центр.
-                Touch_Up_N(1); s_lookDown = false; s_haveLast = false;
-                s_gainPendDx = s_gainPendDy = 0.f;
-                s_lookWait = 0.f;
-            } else {
-                s_lookX = nx; s_lookY = ny;
-                Touch_Down_N(1, s_lookX, s_lookY);
-                s_gainPendDx += dx; s_gainPendDy += dy;
-                s_lookWait = 0.f;
-            }
-        }
+    // ---- палец 1: камера (отключена — автофарм по памяти) ---------------------
+    // В памяти орудию выставлены круговой hitRadius и расширенный reach,
+    // а также alwaysCrit = true. Удар наносится во всех направлениях без
+    // поворота и без анимации наводки/нажатия. Камера свободна для игрока.
+    if (s_lookDown) {
+        Touch_Up_N(1);
+        s_lookDown = false;
+        s_gainPendDx = s_gainPendDy = 0.f;
+        s_lookWait = 0.f;
     }
 
     // ---- палец 0: джойстик движения -------------------------------------------
@@ -776,29 +710,17 @@ static void UpdateFarmInner(float dt) {
     // ---- палец 2: удары --------------------------------------------------------
     if (phase == 3) {
         s_mineTime += dt;
-        // Держим удар, пока прицел ещё едет на точку: тап посреди свайпа
-        // прилетает туда, где камера была, — это и есть «не попал по крестику».
-        // По корпусу допуск свободный (узел огромный), по крестику — жёсткий.
-        const bool aimSettled = atSpot
-            ? (fabsf(tgt.yaw) <= kSwingSpotYaw && fabsf(tgt.pitch) <= kSwingSpotPitch)
-            : (fabsf(tgt.yaw) <= kSwingBodyYaw);
-        // Ритм ударов — из самого орудия: FPMelee.m_TimeBetweenAttacks +
-        // pauseAfterAttack (у каждого инструмента свои, сериализованы в
-        // префабе). Тап раньше срока игра ставит в очередь, и он вылетает уже
-        // в уведённую камеру, поэтому держимся чуть медленнее кулдауна;
-        // живого значения нет — остаёмся на подобранных миллисекундах.
+        // В автофарме по памяти прицел не зависит от угла обзора: орудию выставлен
+        // круговой hitRadius и maxReach, а также alwaysCrit = true. Удар проходит
+        // независимо от того, куда смотрит камера.
+        const bool aimSettled = true;
         float tapDownMs = kTapDownMs, tapUpMs = kTapUpMs;
         if (tgt.attack_period > 0.05f && tgt.attack_period < 5.f) {
-            const float periodMs = fminf(fmaxf(tgt.attack_period * 1020.f, 250.f), 2000.f);
-            tapDownMs = fminf(fmaxf(periodMs * 0.10f, 40.f), 120.f);
-            tapUpMs   = fmaxf(periodMs - tapDownMs, 60.f);
+            const float periodMs = fminf(fmaxf(tgt.attack_period * 1020.f, 100.f), 2000.f);
+            tapDownMs = fminf(fmaxf(periodMs * 0.20f, 30.f), 80.f);
+            tapUpMs   = fmaxf(periodMs - tapDownMs, 40.f);
         }
-        // Перекрытый узел не бьём: ждём, пока манёвр выведет на линию удара.
-        // Так же держим тап, пока у игры вообще нет луча прицела: без данных
-        // GKo FPMelee.ZkX не может засчитать удар и играет один On_Woosh —
-        // ровно те «удары в воздух», которые видно со стороны. Ждём не вечно
-        // (kNoRaySwingAfter), а стик всё это время поджимает ближе к стволу.
-        const bool swingBlocked = tgt.ray_blocked || (noRay && s_noRayTime < kNoRaySwingAfter);
+        const bool swingBlocked = false;
         s_tapTimer -= (int)roundf(dt * 1000.f);
         if (s_tapTimer <= 0 && (!aimSettled || swingBlocked) && !s_tapDown) {
             s_tapTimer = 0;              // ждём камеру/обход, не теряя такт

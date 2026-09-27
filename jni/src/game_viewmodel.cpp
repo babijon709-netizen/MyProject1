@@ -1,8 +1,10 @@
 #include "fps_memory.h"
 #include "weapon_tuning_memory.h"
 #include "loot_memory.h"
+#include "farm_memory.h"
 #include "object_data_memory.h"
 #include "maps_lookup.h"
+#include "app_state.h"
 #include <chrono>
 #include <fstream>
 #include "game_viewmodel_internal.h"
@@ -85,6 +87,7 @@ struct HeapMemory {
 HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 fast_loot::Controller<HeapMemory> loot(heap_memory);
+farm_tuning::Controller<HeapMemory> farm_memory_controller(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
@@ -140,6 +143,7 @@ void esp_viewmodel_reset(bool restore) {
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))
         LogLine("weapon data: originals could not all be restored before disconnect; restart game");
+    farm_memory_controller.reset(restore && g_mem.bound());
     // Быстрому сбору восстанавливать нечего: поле темпа переписывает сама
     // игра при каждом новом ожидании, поэтому сброс — это только «забыть адреса».
     loot.reset();
@@ -278,7 +282,26 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     }
     last_weapon_diagnostic = weapons.diagnostic;
     controller.tick(epoch, player, settings);
+
+    const bool farm_enabled = g_state.farm_on && (g_farm_mask != 0);
+    farm_memory_controller.tick(epoch, player, farm_enabled);
+
     log_status();
+}
+
+void esp_farm_memory_tick(bool enabled) {
+    std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
+    farm_memory_controller.tick(epoch, g_local_player, enabled);
+}
+
+void esp_farm_memory_reset(bool restore) {
+    std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
+    farm_memory_controller.reset(restore && g_mem.bound());
+}
+
+viewmodel::Status esp_farm_memory_status() {
+    std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
+    return farm_memory_controller.status;
 }
 viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());

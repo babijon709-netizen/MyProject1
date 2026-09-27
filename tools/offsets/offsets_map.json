@@ -3492,5 +3492,200 @@
    "field": "<LoopReloadPeriod>k__BackingField",
    "how": "время дозарядки по патрону"
   }
+ },
+ "ITEMDATA_CONFIG_VALUES": {
+  "kind": "field",
+  "class": "ItemData",
+  "struct": "Oxide_ItemData_Fields",
+  "field": "m_ConfigValues",
+  "type": "Oxide_ItemConfigValues_o*",
+  "offset": 136,
+  "note": "ссылка на ItemConfigValues предмета",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_ItemData_Fields",
+   "field": "m_ConfigValues",
+   "how": "смещение — из комментария /* 0x88 */ рядом с полем"
+  }
+ },
+ "ITEMCONFIG_DURABILITY_MAX": {
+  "kind": "field",
+  "class": "ItemConfigValues",
+  "struct": "Oxide_ItemConfigValues_Fields",
+  "field": "durabilityMax",
+  "type": "float",
+  "offset": 16,
+  "note": "максимальная прочность предмета",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_ItemConfigValues_Fields",
+   "field": "durabilityMax",
+   "how": "смещение — из комментария /* 0x10 */ рядом с полем"
+  }
+ },
+ "ITEMCONFIG_DURABILITY_UNBREAKABLE": {
+  "kind": "field",
+  "class": "ItemConfigValues",
+  "struct": "Oxide_ItemConfigValues_Fields",
+  "field": "durabilityUnbreakable",
+  "type": "bool",
+  "offset": 20,
+  "note": "флаг бесконечной прочности (не ломается)",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_ItemConfigValues_Fields",
+   "field": "durabilityUnbreakable",
+   "how": "смещение — из комментария /* 0x14 */ рядом с полем"
+  }
+ },
+ "FPMELEE_DAMAGE_PER_HIT": {
+  "kind": "field",
+  "class": "FPMelee",
+  "struct": "Oxide_FPMelee_Fields",
+  "field": "m_DamagePerHit",
+  "type": "float",
+  "offset": 312,
+  "note": "урон за один удар орудия",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPMelee_Fields",
+   "field": "m_DamagePerHit",
+   "how": "смещение — из комментария /* 0x138 */ рядом с полем"
+  }
+ },
+ "FPMELEE_IMPACT_FORCE": {
+  "kind": "field",
+  "class": "FPMelee",
+  "struct": "Oxide_FPMelee_Fields",
+  "field": "m_ImpactForce",
+  "type": "float",
+  "offset": 316,
+  "note": "сила отдачи удара",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPMelee_Fields",
+   "field": "m_ImpactForce",
+   "how": "смещение — из комментария /* 0x13C */ рядом с полем"
+  }
+ },
+ "FPMELEE_EVENT_ATTACK": {
+  "kind": "field",
+  "class": "FPMelee",
+  "struct": "Oxide_FPMelee_Fields",
+  "field": "BYR",
+  "type": "eDt_o*",
+  "offset": 328,
+  "note": "событие атаки/аниматора в FPMelee",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPMelee_Fields",
+   "field": "BYR",
+   "how": "смещение — из комментария /* 0x148 */ рядом с полем"
+  }
+ },
+ "FPTOOL_EFFICIENCY": {
+  "kind": "field",
+  "class": "FPTool",
+  "struct": "Oxide_FPTool_Fields",
+  "field": "m_Efficiency",
+  "type": "float",
+  "offset": 356,
+  "note": "множитель эффективности инструмента",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPTool_Fields",
+   "field": "m_Efficiency",
+   "how": "смещение — из комментария /* 0x164 */ рядом с полем"
+  }
+ },
+ "FPTOOL_ALWAYS_CRIT": {
+  "kind": "field",
+  "class": "FPTool",
+  "struct": "Oxide_FPTool_Fields",
+  "field": "alwaysCrit",
+  "type": "bool",
+  "offset": 360,
+  "note": "критические удары по крестикам для автофарма",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPTool_Fields",
+   "field": "alwaysCrit",
+   "how": "смещение — из комментария /* 0x168 */ рядом с полем"
+  }
+ },
+ "FPMELEE_ANIM_WOOSH_SHAKE": {
+  "kind": "field",
+  "class": "FPMeleeAnimator",
+  "struct": "Oxide_FPMeleeAnimator_Fields",
+  "field": "m_MeleeWooshShake",
+  "type": "Oxide_WeaponShake_o*",
+  "offset": 88,
+  "note": "тряска орудия при замахе",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPMeleeAnimator_Fields",
+   "field": "m_MeleeWooshShake",
+   "how": "смещение — из комментария /* 0x58 */ рядом с полем"
+  }
+ },
+ "FPMELEE_ANIM_HIT_SHAKE": {
+  "kind": "field",
+  "class": "FPMeleeAnimator",
+  "struct": "Oxide_FPMeleeAnimator_Fields",
+  "field": "m_MeleeHitShake",
+  "type": "Oxide_WeaponShake_o*",
+  "offset": 96,
+  "note": "тряска орудия при попадании",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPMeleeAnimator_Fields",
+   "field": "m_MeleeHitShake",
+   "how": "смещение — из комментария /* 0x60 */ рядом с полем"
+  }
+ },
+ "FPMELEE_ANIM_ATTACK_CLIP_LEN": {
+  "kind": "field",
+  "class": "FPMeleeAnimator",
+  "struct": "Oxide_FPMeleeAnimator_Fields",
+  "field": "attackClipLength",
+  "type": "float",
+  "offset": 108,
+  "note": "длительность клипа атаки",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPMeleeAnimator_Fields",
+   "field": "attackClipLength",
+   "how": "смещение — из комментария /* 0x6C */ рядом с полем"
+  }
+ },
+ "TRANSFORMOFFSET_ROTATION": {
+  "kind": "field",
+  "class": "Oxide_TransformOffset",
+  "struct": "Oxide_TransformOffset_Fields",
+  "field": "m_Rotation",
+  "type": "UnityEngine_Vector3_o",
+  "offset": 48,
+  "note": "угловое смещение стойки",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_TransformOffset_Fields",
+   "field": "m_Rotation",
+   "how": "смещение — из комментария /* 0x30 */ рядом с полем"
+  }
+ },
+ "TRANSFORMOFFSET_CURRENT_POSITION": {
+  "kind": "field",
+  "class": "Oxide_TransformOffset",
+  "struct": "Oxide_TransformOffset_Fields",
+  "field": "BYE",
+  "type": "UnityEngine_Vector3_o",
+  "offset": 68,
+  "note": "текущее позиционное смещение",
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_TransformOffset_Fields",
+   "field": "BYE",
+   "how": "смещение — из комментария /* 0x44 */ рядом с полем"
+  }
  }
 }

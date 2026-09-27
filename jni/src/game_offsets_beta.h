@@ -113,6 +113,9 @@ inline constexpr std::uint64_t FPOBJECT_ITEM        = 0x40; // <Ltl>k__BackingFi
 inline constexpr std::uint64_t ITEM_DATA            = 0x20; // <LIN>k__BackingField
 inline constexpr std::uint64_t ITEMDATA_NAME        = 0x18; // m_Name
 inline constexpr std::uint64_t ITEMDATA_SHORTNAME   = 0x20; // m_ShortName
+inline constexpr std::uint64_t ITEMDATA_CONFIG_VALUES = 0x88; // m_ConfigValues (Oxide.ItemConfigValues)
+inline constexpr std::uint64_t ITEMCONFIG_DURABILITY_MAX = 0x10; // durabilityMax (float)
+inline constexpr std::uint64_t ITEMCONFIG_DURABILITY_UNBREAKABLE = 0x14; // durabilityUnbreakable (bool)
 // Il2Cpp System.String layout: int32 length @0x10, UTF-16 chars @0x14.
 inline constexpr std::uint64_t IL2CPP_STRING_LENGTH = 0x10;
 inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
@@ -352,11 +355,18 @@ inline constexpr std::uint64_t FPMELEE_HIT_RADIUS            = 0x12C;
 // отсюда, а не из подобранных на глаз миллисекунд.
 inline constexpr std::uint64_t FPMELEE_TIME_BETWEEN_ATTACKS  = 0x130;
 inline constexpr std::uint64_t FPMELEE_PAUSE_AFTER_ATTACK    = 0x134;
+inline constexpr std::uint64_t FPMELEE_DAMAGE_PER_HIT        = 0x138;
+inline constexpr std::uint64_t FPMELEE_IMPACT_FORCE          = 0x13C;
+inline constexpr std::uint64_t FPMELEE_EVENT_ATTACK          = 0x148; // BYR (eDt)
 // Oxide.FPTool : Oxide.FPMelee — поля есть только у FPTool и FPChainsaw
 // (прочие FPMelee: FPSpear, FPBuildingHammer, FPTorch — там на 0x160 своё).
 inline constexpr std::uint64_t FPTOOL_TOOL_PURPOSES          = 0x160; // enum ToolPurpose, флаги
-// Рядом (не читаем): 0x164 m_Efficiency (множитель урона), 0x168 alwaysCrit,
-// 0x169 useAmmo, 0x16C attacksPerAmmo.
+inline constexpr std::uint64_t FPTOOL_EFFICIENCY             = 0x164; // float m_Efficiency
+inline constexpr std::uint64_t FPTOOL_ALWAYS_CRIT            = 0x168; // bool alwaysCrit
+
+inline constexpr std::uint64_t FPMELEE_ANIM_WOOSH_SHAKE      = 0x58;  // Oxide.WeaponShake
+inline constexpr std::uint64_t FPMELEE_ANIM_HIT_SHAKE        = 0x60;  // Oxide.WeaponShake
+inline constexpr std::uint64_t FPMELEE_ANIM_ATTACK_CLIP_LEN  = 0x6C;  // float attackClipLength
 inline constexpr std::uint64_t RAYCASTMAN_PLAYER             = 0x20;
 inline constexpr std::uint64_t RAYCASTMAN_RAY_LENGTH         = 0x38;
 inline constexpr std::uint64_t RAYCASTMAN_AIM_RAY_LENGTH     = 0x3C;
@@ -713,6 +723,7 @@ inline constexpr std::uint64_t MULTICAST_DELEGATES              = 0x78; // Syste
 inline constexpr std::uint64_t FPMOTION_OBJECT                  = 0xC8; // Oxide_FPMotion_Fields.BYc
 inline constexpr std::uint64_t FPMOTION_PLAYER                  = 0xE8; // Oxide_FPMotion_Fields.Player
 inline constexpr std::uint64_t TRANSFORMOFFSET_POSITION         = 0x24; // Oxide_TransformOffset_Fields.m_Position
+inline constexpr std::uint64_t TRANSFORMOFFSET_ROTATION         = 0x30; // Oxide_TransformOffset_Fields.m_Rotation
 inline constexpr std::uint64_t TRANSFORMOFFSET_CURRENT_POSITION = 0x44; // Oxide_TransformOffset_Fields.BYE
 inline constexpr std::uint64_t FPMOTION_IDLE_OFFSET             = 0x78; // Oxide_FPMotion_Fields.m_IdleOffset
 inline constexpr std::uint64_t FPMOTION_RUN_OFFSET              = 0x80; // Oxide_FPMotion_Fields.m_RunOffset
