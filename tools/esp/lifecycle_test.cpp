@@ -76,13 +76,13 @@ int main() {
     // Simulated healthy camera-only publications happen here; deliberately no
     // observe(true), because they are not live player data.
     auto soft = watchdog.observe(false, 300.0 + PlayerEspWatchdog::kResolverResetSeconds);
-    assert(soft.reset_resolvers && !soft.request_reattach);
+    assert(soft.reset_resolvers && !soft.deep_recovery);
     auto repeat = watchdog.observe(false, 300.0 + PlayerEspWatchdog::kResolverResetSeconds +
                                            PlayerEspWatchdog::kResetRepeatSeconds);
-    assert(repeat.reset_resolvers && !repeat.request_reattach);
-    auto hard = watchdog.observe(false, 300.0 + PlayerEspWatchdog::kReattachSeconds);
-    assert(hard.reset_resolvers && hard.request_reattach);
-    assert(!watchdog.observe(false, 306.0).request_reattach); // one request per outage
+    assert(repeat.reset_resolvers && !repeat.deep_recovery);
+    auto hard = watchdog.observe(false, 300.0 + PlayerEspWatchdog::kDeepRecoverySeconds);
+    assert(hard.reset_resolvers && hard.deep_recovery);
+    assert(!watchdog.observe(false, 306.0).deep_recovery); // one request per outage
     auto recovered = watchdog.observe(true, 307.0);
     assert(!recovered.reset_resolvers && !watchdog.failing());
     assert(!watchdog.observe(false, 308.0).reset_resolvers); // next outage starts cleanly

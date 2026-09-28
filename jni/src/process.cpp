@@ -22,6 +22,8 @@ bool  g_esp_attached = false;
 // Official package or a renamed/cloned package candidate. Both still pass
 // esp_init's release TypeInfo validation before attachment is accepted.
 static bool g_target_by_package = true;
+static int g_alive_check_failures = 0;
+static constexpr int kAliveCheckFailureLimit = 3;
 static std::thread g_attach_thread;
 static std::atomic<bool> g_attach_running{false};
 
@@ -160,14 +162,27 @@ void start_attach_thread() {
                 if (attached_pid > 0) {
                     g_target_pid = attached_pid;
                     g_esp_attached = true;
+                    g_alive_check_failures = 0;
                 }
-            } else if (!pid_still_game(g_target_pid) || !esp_alive_check() ||
-                       esp_wants_reattach()) {
-                // Процесс сменился/умер или память перестала читаться (отобрали
-                // доступ, перезапуск с тем же pid): привязываемся заново.
-                esp_reset();
-                g_esp_attached = false;
-                g_target_pid = -1;
+            } else {
+                const bool same_process = pid_still_game(g_target_pid);
+                bool memory_alive = true;
+                if (same_process) {
+                    if (esp_alive_check()) g_alive_check_failures = 0;
+                    else {
+                        ++g_alive_check_failures;
+                        memory_alive = g_alive_check_failures < kAliveCheckFailureLimit;
+                    }
+                }
+                if (!same_process || !memory_alive) {
+                    // Process death is immediate; isolated /proc/<pid>/mem EIO
+                    // failures are tolerated. They are common under load and
+                    // must not make every memory feature blink off together.
+                    esp_reset();
+                    g_esp_attached = false;
+                    g_target_pid = -1;
+                    g_alive_check_failures = 0;
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
@@ -182,4 +197,5 @@ void process_detach() {
     esp_reset();
     g_esp_attached = false;
     g_target_pid = -1;
+    g_alive_check_failures = 0;
 }

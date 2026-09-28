@@ -630,8 +630,8 @@ runtime`) — после крупного апдейта движка сверя
 | `GAMEOBJECT_NAME` | 0x48 | поле GameObject.name (core::string с SSO) текущего release libunity | libunity.so — core::string с SSO; уточняется в рантайме перебором кандидатов по именам |
 | `TRANSFORM_CHILDREN_ARRAY` | 0x48 | нативный Transform: массив детей | libunity.so — нативный Transform: массив детей; проверено обходом иерархии (маркеры, кости, поиск трансформа камеры) |
 | `TRANSFORM_CHILD_COUNT` | 0x58 | нативный Transform: число детей (int32) | libunity.so — нативный Transform: int32 число детей, проверено тем же обходом |
-| `TRANSFORM_HIERARCHY_DATA` | 0x38 | TransformAccessReadOnly hierarchy data pointer | release libunity.so — TransformAccessReadOnly hierarchy data pointer |
-| `TRANSFORM_HIERARCHY_INDEX` | 0x40 | TransformAccessReadOnly hierarchy index | release libunity.so — TransformAccessReadOnly hierarchy index |
+| `TRANSFORM_HIERARCHY_DATA` | 0x38 | release native Transform hierarchy data pointer | release libunity.so — TransformAccessReadOnly hierarchy data pointer |
+| `TRANSFORM_HIERARCHY_INDEX` | 0x40 | release native Transform hierarchy index | release libunity.so — TransformAccessReadOnly hierarchy index |
 | `TRANSFORM_HIERARCHY_INDICES` | 0x20 | Transform hierarchy parent-index array pointer | release libunity.so — Transform hierarchy parent-index array pointer |
 | `TRANSFORM_HIERARCHY_MATRICES` | 0x18 | Transform hierarchy local TRS array pointer | release libunity.so — Transform hierarchy local TRS array pointer |
 

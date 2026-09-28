@@ -5,14 +5,14 @@
 // pipeline indefinitely.
 struct PlayerEspWatchdogAction {
     bool reset_resolvers = false;
-    bool request_reattach = false;
+    bool deep_recovery = false;
 };
 
 class PlayerEspWatchdog {
 public:
     static constexpr double kResolverResetSeconds = 0.75;
     static constexpr double kResetRepeatSeconds = 1.50;
-    static constexpr double kReattachSeconds = 5.0;
+    static constexpr double kDeepRecoverySeconds = 5.0;
 
     PlayerEspWatchdogAction observe(bool player_data_ok, double now) {
         if (player_data_ok) {
@@ -34,17 +34,17 @@ public:
             last_reset_at_ = now;
             action.reset_resolvers = true;
         }
-        if (!reattach_requested_ && elapsed >= kReattachSeconds) {
-            reattach_requested_ = true;
+        if (!deep_recovery_issued_ && elapsed >= kDeepRecoverySeconds) {
+            deep_recovery_issued_ = true;
             action.reset_resolvers = true;
-            action.request_reattach = true;
+            action.deep_recovery = true;
         }
         return action;
     }
 
     void reset() {
         failing_ = false;
-        reattach_requested_ = false;
+        deep_recovery_issued_ = false;
         failed_since_ = 0.0;
         last_reset_at_ = 0.0;
     }
@@ -54,7 +54,7 @@ public:
 
 private:
     bool failing_ = false;
-    bool reattach_requested_ = false;
+    bool deep_recovery_issued_ = false;
     double failed_since_ = 0.0;
     double last_reset_at_ = 0.0;
 };

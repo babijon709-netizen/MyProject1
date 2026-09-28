@@ -126,8 +126,6 @@ struct TransformHierarchyLayout {
     uint64_t index_offset = go_active::TRANSFORM_HIERARCHY_INDEX;
     uint64_t matrices_offset = go_active::TRANSFORM_HIERARCHY_MATRICES;
     uint64_t indices_offset = go_active::TRANSFORM_HIERARCHY_INDICES;
-    bool matrices_indirect = false;
-    bool indices_indirect = false;
 };
 
 struct MeleeReach {

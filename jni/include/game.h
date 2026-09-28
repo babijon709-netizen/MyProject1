@@ -140,16 +140,6 @@ std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 // Feeds the enemy-counter pill in the overlay.
 int         esp_nearby_player_count();
 
-// Счётчики слоя доступа к памяти — для мини-лога: сколько чтений, сколько
-// отказов, сколько раз переоткрывали /proc/<pid>/mem и последняя ошибка (errno).
-// Нужны, чтобы по логу с устройства отличать «память не читается вовсе» от
-// «читается, но с отказами» — это разные поломки.
-// tagged — сколько адресов пришло с меткой старшего байта (TBI/MTE): метка есть
-// на Android 11+, и без её снятия чтения по указателям из игры отказывают с EIO.
-// Пора ли подключиться к игре заново (сторож трижды не смог собрать кадр).
-// Флаг одноразовый: чтение сбрасывает его.
-bool        esp_wants_reattach();
-
 // True while the local player is aiming down sights (ADS) with the current
 // weapon. Returns false when the state cannot be read (not attached, no
 // weapon, menus, etc.), so "aim only while scoped" fails closed.

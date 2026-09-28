@@ -862,12 +862,9 @@ uint64_t resolve_network_identity_class() {
 
 bool marker_world_position(uint64_t transform, Vec3& out) {
     if (!transform) return false;
-    // The learned layouts (skeleton / hierarchy) come from PLAYER bones and
-    // can go stale after a world reload or simply not match non-bone
-    // transforms — they then return finite-but-garbage positions, which is
-    // how markers died solo after a respawn (cache full, every distance
-    // absurd, zero on screen). Any implausible read falls through to the
-    // slow probing path instead of being trusted.
+    // Both paths use the same fixed release Transform ABI. The skeleton path
+    // stays first because it may already have hot hierarchy data; the generic
+    // path is a validation fallback, not an offset/layout search.
     if (g_skeleton_layout_valid && read_transform_hierarchy_layout(transform, g_skeleton_layout, out) &&
         vec3_is_finite(out) && position_looks_like_world_space(out))
         return true;

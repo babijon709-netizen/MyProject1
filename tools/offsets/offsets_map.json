@@ -1242,7 +1242,7 @@
  "TRANSFORM_HIERARCHY_DATA": {
   "kind": "abi",
   "offset": 56,
-  "note": "TransformAccessReadOnly hierarchy data pointer",
+  "note": "release native Transform hierarchy data pointer",
   "src": {
    "file": "release libunity.so",
    "how": "TransformAccessReadOnly hierarchy data pointer"
@@ -1251,7 +1251,7 @@
  "TRANSFORM_HIERARCHY_INDEX": {
   "kind": "abi",
   "offset": 64,
-  "note": "TransformAccessReadOnly hierarchy index",
+  "note": "release native Transform hierarchy index",
   "src": {
    "file": "release libunity.so",
    "how": "TransformAccessReadOnly hierarchy index"
@@ -1308,7 +1308,7 @@
   "note": "поле GameObject.name (core::string с SSO) текущего release libunity",
   "src": {
    "file": "libunity.so",
-   "how": "core::string с SSO; уточняется в рантайме перебором кандидатов по именам"
+   "how": "фиксированное поле core::string с SSO в поддерживаемом release libunity"
   }
  },
  "IL2CPP_LIST_ITEMS": {
