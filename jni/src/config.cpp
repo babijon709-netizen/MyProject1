@@ -191,10 +191,6 @@ void ApplyBuildChoice(go::Build b) {
         esp_viewmodel_reset(true); // restore using OLD offsets
     }
     go::SelectBuild(b);
-    // SelectBuild перезаписал все слоты табличными значениями; резолвер
-    // возвращает поверх них найденное живьём (оно верно для работающего
-    // процесса независимо от выбранной таблицы).
-    offset_resolver_reapply();
     RememberBuild();
     if (changed) {
         process_detach();

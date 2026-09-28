@@ -76,19 +76,6 @@ void DrawEspOverlay() {
 
     if (!g_esp_attached) return;
 
-    // Автообновление оффсетов: порционный шаг каждый кадр, пока есть привязка
-    // (до выключателей визуалов — резолверу всё равно, что рисуется).
-    {
-        // Кадр считаем живым, если игра успела отрисовать новый (матрица вида
-        // сменилась) с прошлого вызова: значит ESP работает и красть у него
-        // время подбором нельзя.
-        static unsigned long long s_prev_game_frames = 0;
-        const unsigned long long now_frames = esp_game_frame_ticks();
-        offset_resolver_set_frame_alive(now_frames != s_prev_game_frames);
-        s_prev_game_frames = now_frames;
-    }
-    offset_resolver_tick();
-
     if (g_state.aim_touch && g_state.aim_special) {
         float fovR = AimFovRadiusPx(sw, sh);
         if (fovR > 1.f) {

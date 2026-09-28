@@ -945,21 +945,6 @@ float TabContent(int tab, float dt, float cW) {
                     dl->AddLine({cX + padX, p3.y + rowH - 0.5f},
                                 {cX + cW - padX, p3.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
 
-                // Строка 4: Кнопка «Пересканировать оффсеты»
-                auto p4 = ImGui::GetCursorScreenPos();
-                ImGui::InvisibleButton("##re_scan_btn", {avW, rowH});
-                const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
-                if (tapped) {
-                    offset_resolver_reset();
-                    ShowToast(XS("Пересканирование запущено"));
-                    PlaySound(SND_CLICK);
-                    g_input.touchConsumed = true;
-                }
-                const char* btnTxt = XS("Пересканировать оффсеты");
-                auto btnSz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, btnTxt);
-                dl->AddText(fn, fs * 1.05f,
-                            {cX + (cW - btnSz.x) * 0.5f, p4.y + (rowH - btnSz.y) * 0.5f},
-                            C::UA(C::Acc(), 1.f), btnTxt);
             }
         }
 

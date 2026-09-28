@@ -219,9 +219,8 @@ int main(int argc, char* argv[]) {
                 const double mb_sec = secs > 0.1 ? (double)(bytes - s_prev_bytes) / (1024.0 * 1024.0) / secs : 0.0;
                 LogLine("нагрузка: игра %.0f кадр/с, оверлей %.0f кадр/с, наш кадр %.1f мс "
                         "(из них чтения памяти %.1f мс), чтений %.0f/кадр, поток %.1f МБ/с, "
-                        "подбор оффсетов %s",
-                        game_fps, our_fps, avg_ms, io_ms_frame, avg_reads, mb_sec,
-                        offset_resolver_busy() ? "ИДЁТ" : "не идёт");
+                        "оффсеты статические",
+                        game_fps, our_fps, avg_ms, io_ms_frame, avg_reads, mb_sec);
                 s_prev_game_frames = game_frames;
                 s_prev_io_ns = io_ns;
                 s_prev_bytes = bytes;
