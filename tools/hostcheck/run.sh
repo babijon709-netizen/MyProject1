@@ -83,4 +83,6 @@ done
 gcc -std=c11 -O0 -c jni/src/third_party/tjpgd/tjpgd.c -o "$BUILD/tjpgd.o" || exit 1
 g++ -o "$BUILD/xvcen_host" "$BUILD"/*.o || { echo "ЛИНКОВКА: есть неразрешённые символы"; exit 1; }
 echo "линковка всех исходников: ОК (undefined symbol'ов нет)"
+sh tools/esp/run.sh
+
 echo "сборка хостовым g++ пройдена"

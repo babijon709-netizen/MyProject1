@@ -45,9 +45,10 @@ struct Fixture {
     Controller<FakeMemory> c{io};
     uint64_t player=io.object("PlayerManager"), fp=io.object("FPManager"), handler=io.object("Handler"), aim=io.alloc();
     uint64_t weapon=io.object("FPHitscan"), motion=io.object("FPMotion"), event=io.alloc(), action=io.alloc();
-    uint64_t idle=io.object("TransformOffset"), run=io.object("TransformOffset");
+    uint64_t idle=io.object("TransformOffset"), run=io.object("TransformOffset"), ads=io.object("TransformOffset");
     ViewmodelSettings s{true,true,100.f,10.f,-20.f,30.f};
     const Position origin{0.1f,0.2f,0.3f};
+    const Position settled{-0.4f,0.5f,-0.6f};
     Fixture() {
         io.set(player+PLAYER_FP_MANAGER,fp); io.set(player+PLAYER_EVENT_HANDLER,handler);
         io.set(handler+EVENT_HANDLER_MANAGER_BACKREF,player); io.set(handler+EVENT_HANDLER_AIM_ACTIVITY,aim);
@@ -56,11 +57,17 @@ struct Fixture {
         io.set(weapon+FPOBJECT_DRAW_EVENT,event); io.set(event+FPDRAW_ACTION,action);
         io.set(action+DELEGATE_TARGET,motion); io.set(motion+FPMOTION_OBJECT,weapon); io.set(motion+FPMOTION_PLAYER,handler);
         io.set(motion+FPMOTION_IDLE_OFFSET,idle); io.set(motion+FPMOTION_RUN_OFFSET,run);
-        io.set(idle+TRANSFORMOFFSET_POSITION,origin); io.set(run+TRANSFORMOFFSET_POSITION,origin);
-        io.set(idle+TRANSFORMOFFSET_LERP_SPEED,7.f); io.set(run+TRANSFORMOFFSET_LERP_SPEED,9.f);
+        io.set(motion+FPMOTION_AIM_OFFSET,ads); io.set(motion+FPMOTION_ACTIVE_OFFSET,idle);
+        for (uint64_t pose : {idle, run, ads}) {
+            io.set(pose+TRANSFORMOFFSET_POSITION,origin);
+            io.set(pose+TRANSFORMOFFSET_CURRENT_POSITION,settled);
+        }
+        io.set(idle+TRANSFORMOFFSET_LERP_SPEED,0.f); // idle interpolation does not advance
+        io.set(run+TRANSFORMOFFSET_LERP_SPEED,9.f); io.set(ads+TRANSFORMOFFSET_LERP_SPEED,5.f);
     }
     void tick() { c.tick(1,player,s); }
     Position position() { return io.get<Position>(idle+TRANSFORMOFFSET_POSITION); }
+    Position current(uint64_t pose) { return io.get<Position>(pose+TRANSFORMOFFSET_CURRENT_POSITION); }
     float fov() { return io.get<float>(fp+FPMANAGER_WORLD_FOV_TARGET); }
 };
 static bool near(float a, float b) { return a-b < 1e-6f && b-a < 1e-6f; }
@@ -68,11 +75,28 @@ static bool near(Position a, Position b) { return near(a.x,b.x) && near(a.y,b.y)
 static void tests() {
     { Fixture f; f.tick(); assert(f.c.status.fov==Status::Active && f.c.status.hands==Status::Active);
       Position expected{0.1f,-0.2f,0.3f}; assert(near(f.position(),expected)); assert(f.fov()==100.f);
+      // The idle cache is authoritative even though idle lerp speed is zero;
+      // run and ADS are preloaded with the exact same static pose.
+      assert(near(f.current(f.idle),expected));
+      assert(near(f.current(f.run),expected));
+      assert(near(f.current(f.ads),expected));
       expected=f.position();
       for(int i=0;i<200;++i) { f.tick(); }
       assert(same(f.position(),expected)); // no drift
       f.s.x=20.f; f.tick(); assert(near(f.position().x,0.2f));
-      f.s.fov_enabled=f.s.hands_enabled=false; f.tick(); assert(same(f.position(),f.origin)); assert(f.fov()==70.f);
+      f.s.fov_enabled=f.s.hands_enabled=false; f.tick();
+      assert(same(f.position(),f.origin)); assert(same(f.current(f.idle),f.settled)); assert(f.fov()==70.f);
+    }
+    { Fixture f; f.tick(); const Position expected{0.1f,-0.2f,0.3f};
+      // Simulate state changes performed by FPMotion.Update.  The selected
+      // active object is already held at the custom current position, so no
+      // run transition is required to make the setting visible.
+      for (uint64_t pose : {f.idle, f.run, f.ads}) {
+          f.io.set(f.motion+FPMOTION_ACTIVE_OFFSET,pose);
+          f.io.set(pose+TRANSFORMOFFSET_CURRENT_POSITION,f.origin); // game attempted to replace cache
+          f.tick();
+          assert(near(f.current(pose),expected));
+      }
     }
     { Fixture f; f.tick(); f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(1));
       f.io.set(f.fp+FPMANAGER_WORLD_FOV_TARGET,25.f); f.tick();
@@ -81,7 +105,7 @@ static void tests() {
       f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(0));
       f.io.set(f.fp+FPMANAGER_AIM_BLEND,0.5f); f.tick();
       assert(f.fov()==100.f && near(f.position(),Position{0.1f,-0.2f,0.3f}));
-      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==7.f);
+      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==0.f);
       assert(f.io.get<float>(f.run+TRANSFORMOFFSET_LERP_SPEED)==9.f);
     }
     { Fixture f; f.tick(); f.io.set(f.fp+FPMANAGER_WORLD_FOV_TARGET,80.f);
@@ -136,10 +160,10 @@ static void tests() {
     { Fixture f; f.io.set(f.idle+TRANSFORMOFFSET_POSITION,Position{std::numeric_limits<float>::infinity(),0,0}); f.tick(); assert(f.c.status.hands==Status::Failed); }
     { Fixture f; f.tick(); f.c.reset(true); assert(same(f.position(),f.origin)); assert(f.fov()==70.f); }
     { Fixture f; f.tick(); // ADS does not restore hands or alter animation speed.
-      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==7.f);
+      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==0.f);
       f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(1)); f.tick();
       assert(near(f.position(),Position{0.1f,-0.2f,0.3f}));
-      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==7.f);
+      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==0.f);
       f.s.hands_enabled=false; f.tick();
       assert(f.c.status.hands==Status::Off && same(f.position(),f.origin));
     }

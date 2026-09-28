@@ -1,4 +1,5 @@
 #include "game.h"
+#include "esp_continuity.h"
 #include "silent_aim.h"
 #include "viewmodel.h"
 #include "game_viewmodel_internal.h"
@@ -25,6 +26,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -5531,7 +5533,7 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
 // чужих игроков приходят пачкой раз в ~0.1 с, так что законный «прыжок» между
 // кадрами может быть в несколько метров. Всё, что больше, почти всегда мусор —
 // и даже если это настоящий телепорт, мы отстанем от него на пару кадров.
-static constexpr int   kPosHoldFrames        = 3;     // ~50 мс без чтения — ещё не пропажа
+static constexpr double kPosHoldSeconds      = 5.0;   // death/respawn may hide objects for 1-2 s
 static constexpr int   kPosJumpConfirmFrames = 2;     // скачок должен повториться
 static constexpr float kPosJumpMeters        = 3.0F;  // базовый допуск, метры
 static constexpr float kPosJumpSpeed         = 55.0F; // плюс м/с на каждый кадр
@@ -5583,7 +5585,11 @@ static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos, 
     }
 
     if (!read_ok) {
-        if (++track.hold_frames > kPosHoldFrames) return false;  // объект реально пропал
+        ++track.hold_frames;
+        // Frame-count holds become shorter on high-refresh devices.  Use
+        // monotonic time so the observed 1-2 s death/respawn gap is covered at
+        // 60, 120 and 144 FPS alike.
+        if (now - track.drawn_t > kPosHoldSeconds) return false;
         pos = predicted;
         return true;
     }
@@ -6896,26 +6902,25 @@ static std::vector<uint64_t> s_adopt_cand;
 static int s_adopt_ident_streak = 0;
 // Поток привязки в main.cpp читает этот флаг и переподключается к игре заново.
 static std::atomic<bool> g_want_reattach{false};
+// Last fully published player boxes.  Unlike object caches this intentionally
+// survives an ordinary death/respawn teardown and bridges only empty visual
+// frames; process loss still clears it in esp_reset().
+static EspContinuity g_esp_continuity;
 
-// Everything derived from a particular world/session. Called when the whole
-// player population is replaced (scene reload / new session) or the player
-// list disappears for a while, so no stale pointers survive into the next
-// world. Deliberately NOT tied to the camera object: the game swaps cameras
-// while aiming, which must not disturb boxes or skeletons.
-// Defined with the marker code further down (needs its caches).
+// Everything derived from concrete objects in a world/session. Called when the
+// whole player population is replaced.  Structural choices (position field,
+// matrix convention and Transform hierarchy offsets) belong to the selected
+// game build, not to one PlayerManager lifetime, so an ordinary respawn must
+// not throw them away and spend 1-2 seconds learning them again.  esp_reset()
+// still clears all of them when the process/build really changes.
 static void reset_world_caches() {
-    g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
-    g_player_position_validated = false;
     g_population_snapshot.clear(); g_world_change_streak = 0;
     s_adopt_cand.clear(); s_adopt_ident_streak = 0;
-    // The bone-learned transform layout dies with the old world: after a
-    // reload it reads garbage from recycled memory (finite numbers, wrong
-    // places). It is relearned from the first nearby skeleton; markers use
-    // the self-probing path meanwhile.
-    g_skeleton_layout = {}; g_skeleton_layout_valid = false;
-    g_use_direct_player_position = true; g_player_position_offset = PLAYER_POSITION;
     g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
-    g_local_player = 0;
+    g_skeleton_layout_anchor = 0; g_skeleton_layout_miss = 0;
+    // Keep g_local_player until the normal resolver confirms its replacement.
+    // If the old object is absent from the new population, the camera-local
+    // fallback below is used instead of misidentifying a nearby enemy.
     g_aim_state = {};
     g_aim_ref_valid = false;
     g_player_aux.clear();
@@ -6941,6 +6946,7 @@ void esp_reset() {
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
+    g_esp_continuity.clear();
     g_frame_publish_fail_streak = 0; g_frame_watchdog_resets = 0;
     g_local_position_fail_streak = 0; g_world_change_streak = 0;
     g_population_snapshot.clear();
@@ -7206,7 +7212,12 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<EspBox> result;
-
+    auto transient_return = [&](int tag) {
+        std::vector<EspBox> published =
+            g_esp_continuity.publish(std::move(result), false, mono_seconds());
+        watch_boxes(published, (size_t)-1, nullptr, tag);
+        return published;
+    };
 
     // Watchdog: every frame that fails to publish a camera + local position
     // counts up, and a few seconds of that means some cached offset or class
@@ -7235,7 +7246,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_cam_basis_valid = false;
     g_frame_player_count = 0;
 
-    if (g_pid <= 0 || !g_il2cpp_base) { return result; }
+    if (g_pid <= 0 || !g_il2cpp_base) {
+        g_esp_continuity.clear();
+        return result;
+    }
 
     // Фрикам — до всех ранних выходов: сводки и покадровая запись нужны и в
     // пустой местности (раньше тик стоял за выходом «нет игроков» и там не
@@ -7318,7 +7332,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 bool present = false;
                 for (uint64_t current : refreshed) if (current == previous) { present = true; break; }
                 if (present) { g_frame_transforms_lost.erase(previous); continue; }
-                if (++g_frame_transforms_lost[previous] <= 2) refreshed.push_back(previous);
+                // A respawn teardown can temporarily omit the whole old
+                // population for 1-2 seconds.  Keep readable objects long
+                // enough to bridge that interval at up to 144 FPS.
+                if (++g_frame_transforms_lost[previous] <= 600) refreshed.push_back(previous);
                 else g_frame_transforms_lost.erase(previous);
             }
             if (g_frame_transforms_lost.size() > 256) g_frame_transforms_lost.clear();
@@ -7332,21 +7349,20 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             s_transforms = std::move(refreshed);
         }
         g_frame_transforms_empty_streak = 0;
-    } else if (++g_frame_transforms_empty_streak > 10) {
-        // List gone for a while: the world is being torn down / reloaded —
-        // or we are simply alone on the server. Clear the player caches, but
-        // FALL THROUGH to the empty-list branch below: it publishes the
-        // camera-only frame that keeps markers and the farm alive solo.
-        if (!s_transforms.empty()) {
-            s_transforms.clear(); reset_world_caches();
-        }
+    } else {
+        // Death tears the managed player list down before the replacement is
+        // published.  Keep the last population instead of turning one empty
+        // read into an empty ESP frame.  Reads through destroyed objects fail
+        // safely and are time-bounded by filter_player_position; a confirmed
+        // non-overlapping replacement is adopted by the logic above.
+        ++g_frame_transforms_empty_streak;
     }
     if (s_transforms.empty()) {
         // Alone on the server: no player boxes, but markers and the farm
         // still need this frame's camera + local position.
         publish_camera_only_frame(sw, sh);
         append_bot_boxes(result); // боты — и без игроков
-        watch_boxes(result, (size_t)-1, nullptr, 1); return result;
+        return transient_return(1);
     }
 
     if (g_body_caches_dirty) { g_body_caches_dirty = false; g_player_aux.clear(); g_skeletons.clear(); }
@@ -7366,7 +7382,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // они гаснут вместе с боксами на все секунды ожидания.
             publish_camera_only_frame(sw, sh);
             append_bot_boxes(result);
-            watch_boxes(result, (size_t)-1, nullptr, 2); return result;
+            return transient_return(2);
         }
     } else {
         recheck_direct_player_position(s_transforms);
@@ -7382,30 +7398,27 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
             }
         }
-        if (!managed_cam) {
-            watch_boxes(result, (size_t)-1, nullptr, 3); return result;
-        }
+        if (!managed_cam) return transient_return(3);
         native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-        if (!native_cam) {
-            watch_boxes(result, (size_t)-1, nullptr, 4); return result;
-        }
+        if (!native_cam) return transient_return(4);
         xray_apply(native_cam);
         always_day_tick();
         // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
-        if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) {
-            watch_boxes(result, (size_t)-1, nullptr, 5); return result;
-        }
+        if (!read_native_camera_matrices(native_cam, sw / sh, projection, view))
+            return transient_return(5);
         if (!g_matrix_configuration_validated) {
-            if (!optimize_matrix_configuration(native_cam, s_transforms)) {
-                watch_boxes(result, (size_t)-1, nullptr, 6); return result;
-            }
-            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view)) { watch_boxes(result, (size_t)-1, nullptr, 7); return result; }
+            if (!optimize_matrix_configuration(native_cam, s_transforms))
+                return transient_return(6);
+            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view))
+                return transient_return(7);
         }
         // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
         vp = mat_mul(projection, view);
     }
 
     bool has_local_position = false;
+    bool local_position_from_player = false;
+    bool local_respawning = false;
     Vec3 local{};
     size_t local_entity_index = s_transforms.size();
     // Positions are read once per frame here and reused below: the box loop
@@ -7444,89 +7457,109 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 nearest_distance_squared = distance_squared; nearest_index = index;
             }
         }
-        // Защёлка локального: выбор «ближайший к камере» флип-флопил на один
-        // кадр, когда соперник оказывался рядом (лог 09-20: два флипа за 162 с,
-        // каждый зажигал churn боксов и прыжок g_frame_local_pos). Трансформ
-        // локального стабилен между кадрами, а меняется только смертью,
-        // респауном или переподключением — тогда же меняется и g_local_player.
-        // Поэтому защёлкнутый адрес держится, пока он в списке и читается, и
-        // перевыбирается только по трём событиям ниже — а не по дистанции.
+        // Prefer the resolver's exact local PlayerManager whenever it is in
+        // the population.  Nearest-to-camera is only a startup fallback when
+        // no exact identity is known; during death the spectator camera may
+        // sit on an enemy, and calling that enemy local made its box vanish.
         static uint64_t s_local_latch_addr = 0;
         static int s_local_latch_miss = 0;
         static uint64_t s_local_latch_trueid = 0;
-        const uint64_t true_local_id = g_local_player;
-        if (s_local_latch_addr != 0 && s_local_latch_trueid != 0 && true_local_id != 0 &&
-            true_local_id != s_local_latch_trueid) {
-            s_local_latch_addr = 0; // настоящий локальный сменился: перепеть
-        }
-        size_t latch_index = s_transforms.size();
-        if (s_local_latch_addr != 0) {
-            for (size_t i = 0; i < s_transforms.size(); ++i)
-                if (s_transforms[i] == s_local_latch_addr) { latch_index = i; break; }
-        }
-        if (latch_index == s_transforms.size() || !position_ok[latch_index]) {
-            // Защёлкнутого нет в списке или не читается (смерть/респаун/мир):
-            // перевыбор только по серии из 5 кадров — одиночный сбой чтения
-            // защёлку не роняет.
-            if (++s_local_latch_miss >= 5) { s_local_latch_addr = 0; s_local_latch_miss = 0; }
-        } else {
-            s_local_latch_miss = 0;
-            // Подстраховка на случай недоступного true_id: кто-то вплотную к
-            // камере (<2 м), а защёлкнутый далеко (>10 м) — защёлка чужая.
-            if (has_camera_position && nearest_index != s_transforms.size() &&
-                nearest_index != latch_index && nearest_distance_squared < 2.0 * 2.0) {
-                const double ldx = (double)positions[latch_index].x - camera_position.x;
-                const double ldy = (double)positions[latch_index].y - camera_position.y;
-                const double ldz = (double)positions[latch_index].z - camera_position.z;
-                if (ldx * ldx + ldy * ldy + ldz * ldz > 10.0 * 10.0) s_local_latch_addr = 0;
+        uint64_t true_local_id = g_local_player;
+        size_t true_local_index = s_transforms.size();
+        if (true_local_id) {
+            for (size_t i = 0; i < s_transforms.size(); ++i) {
+                if (s_transforms[i] == true_local_id && position_ok[i]) {
+                    true_local_index = i;
+                    break;
+                }
             }
         }
-        if (s_local_latch_addr == 0) {
-            // Свободная защёлка: цепляемся за ближайшего (на входе в игру
-            // камера сидит на локальном — он и есть ближайший), без камеры —
-            // за первого годного, как раньше.
+        // The static resolver may lag one or two frames behind a replaced
+        // PlayerManager.  Mirror's named isLocalPlayer flag is an exact,
+        // build-table-backed identity and lets this frame adopt the new local
+        // immediately without treating the spectator target as local.
+        if (true_local_index == s_transforms.size()) {
+            for (size_t i = 0; i < s_transforms.size(); ++i) {
+                if (position_ok[i] && player_is_local(s_transforms[i]) == 1) {
+                    true_local_id = s_transforms[i];
+                    true_local_index = i;
+                    g_local_player = true_local_id;
+                    break;
+                }
+            }
+        }
+        if (s_local_latch_addr != 0 && s_local_latch_trueid != 0 && true_local_id != 0 &&
+            true_local_id != s_local_latch_trueid) {
+            s_local_latch_addr = 0;
+        }
+
+        size_t latch_index = s_transforms.size();
+        if (true_local_index != s_transforms.size()) {
+            s_local_latch_addr = true_local_id;
+            s_local_latch_trueid = true_local_id;
+            s_local_latch_miss = 0;
+            latch_index = true_local_index;
+        } else if (s_local_latch_addr != 0) {
+            for (size_t i = 0; i < s_transforms.size(); ++i)
+                if (s_transforms[i] == s_local_latch_addr) { latch_index = i; break; }
+            if (latch_index == s_transforms.size() || !position_ok[latch_index]) {
+                latch_index = s_transforms.size();
+                if (++s_local_latch_miss >= 5) {
+                    s_local_latch_addr = 0;
+                    s_local_latch_miss = 0;
+                }
+            } else {
+                s_local_latch_miss = 0;
+                // This distance sanity check is only needed when the exact
+                // resolver identity is unavailable.
+                if (!true_local_id && has_camera_position && nearest_index != s_transforms.size() &&
+                    nearest_index != latch_index && nearest_distance_squared < 2.0 * 2.0) {
+                    const double ldx = (double)positions[latch_index].x - camera_position.x;
+                    const double ldy = (double)positions[latch_index].y - camera_position.y;
+                    const double ldz = (double)positions[latch_index].z - camera_position.z;
+                    if (ldx * ldx + ldy * ldy + ldz * ldz > 10.0 * 10.0) {
+                        s_local_latch_addr = 0;
+                        latch_index = s_transforms.size();
+                    }
+                }
+            }
+        }
+        if (s_local_latch_addr == 0 && !true_local_id) {
             size_t pick = nearest_index;
             if (pick == s_transforms.size()) pick = first_valid_index;
             if (pick != s_transforms.size()) {
                 s_local_latch_addr = s_transforms[pick];
                 s_local_latch_miss = 0;
-                s_local_latch_trueid = true_local_id;
+                s_local_latch_trueid = 0;
+                latch_index = pick;
             }
-            latch_index = pick;
         }
-        if (latch_index != s_transforms.size()) {
+        if (latch_index != s_transforms.size() && position_ok[latch_index]) {
             local_entity_index = latch_index;
             local = positions[latch_index];
+            has_local_position = true;
+            local_position_from_player = true;
+            uint8_t respawning = 0;
+            if (rd_exact(s_transforms[latch_index] + PLAYER_MANAGER_RESPAWNING,
+                         respawning) && respawning) {
+                local_respawning = true;
+                if (has_camera_position) local = camera_position;
+            }
         }
-        has_local_position = local_entity_index != s_transforms.size();
+
+        // A live view matrix is a better distance origin than either a dead
+        // body's stale position or no local position at all.  Continue building
+        // enemy boxes through the respawn gap instead of returning camera-only.
+        if (!has_local_position && has_camera_position) {
+            local = camera_position;
+            has_local_position = true;
+            local_entity_index = s_transforms.size();
+            local_position_from_player = false;
+        }
         if (!has_local_position) {
-            // Позиции не прочитались ни у одного игрока. Это бывает и на
-            // одном кадре (мигнуло чтение по /proc/<pid>/mem после смерти или
-            // перезагрузки мира), поэтому смещение позиции объявляем неверным
-            // только по серии кадров: за этим следует поиск смещения заново с
-            // ожиданием 0.6 с, и всё это время боксов нет вовсе. Метки и фарм
-            // живут на кадре одной камеры — публикуем его, чтобы пропажа
-            // боксов не гасила и их.
-            if (++g_local_position_fail_streak >= 10) {
-                g_local_position_fail_streak = 0;
-                g_player_position_validated = false;
-            }
-            // Камера этого кадра уже прочитана — публикуем её как есть (без
-            // повторного чтения и повторного xray/day-тика), иначе вместе с
-            // боксами гаснут и метки, и фарм.
-            if (matrix_is_finite(vp)) {
-                g_frame_vp = vp; g_frame_vp_valid = true;
-                g_frame_sw = sw; g_frame_sh = sh;
-                Vec3 camera_only_position{};
-                if (camera_position_from_view(view, camera_only_position)) {
-                    g_frame_local_pos = camera_only_position;
-                    g_frame_local_valid = true;
-                }
-                g_frame_publish_fail_streak = 0;
-                g_frame_watchdog_resets = 0;
-            }
+            ++g_local_position_fail_streak;
             append_bot_boxes(result);
-            watch_boxes(result, (size_t)-1, nullptr, 8); return result;
+            return transient_return(8);
         }
         g_local_position_fail_streak = 0;
     }
@@ -7566,8 +7599,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     Vec4 transform_camera_rotation{};
     if (transform_camera_mode) {
         if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation)) {
-            g_player_position_validated = false;
-            watch_boxes(result, (size_t)-1, nullptr, 9); return result;
+            return transient_return(9);
         }
         local = transform_camera_position; has_local_position = true;
     }
@@ -7740,7 +7772,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         box.respawning = false;
         {
             uint8_t flag = 0;
-            if (rd_exact(s_transforms[i] + game_offsets::PLAYER_MANAGER_RESPAWNING, flag))
+            if (rd_exact(s_transforms[i] + PLAYER_MANAGER_RESPAWNING, flag))
                 box.respawning = flag != 0;
         }
         box.health = -1.f;
@@ -7982,7 +8014,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     append_bot_boxes(result);
-    watch_boxes(result, local_entity_index, &skip_reason, 0); return result;
+    result = g_esp_continuity.publish(std::move(result),
+                                      local_position_from_player && !local_respawning,
+                                      mono_seconds());
+    watch_boxes(result, local_entity_index, &skip_reason, 0);
+    return result;
 }
 
 int esp_nearby_player_count() { return g_frame_player_count; }

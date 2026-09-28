@@ -239,6 +239,20 @@
    "how": "смещение — из комментария /* 0x1D4 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «UnityEngine_Vector3_o»"
   }
  },
+ "PLAYER_MANAGER_RESPAWNING": {
+  "kind": "field",
+  "class": "PlayerManager",
+  "struct": "Oxide_PlayerManager_Fields",
+  "field": "respawning",
+  "type": "bool",
+  "offset": 520,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_PlayerManager_Fields",
+   "field": "respawning",
+   "how": "named release/beta field used for death/respawn ESP continuity"
+  }
+ },
  "PLAYER_CHARACTER_MODEL": {
   "kind": "field",
   "class": "PlayerManager",
@@ -2649,6 +2663,20 @@
    "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
+ "TRANSFORMOFFSET_CURRENT_POSITION": {
+  "kind": "field",
+  "class": "Oxide_TransformOffset",
+  "struct": "Oxide_TransformOffset_Fields",
+  "field": "BYE",
+  "type": "UnityEngine_Vector3_o",
+  "offset": 68,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_TransformOffset_Fields",
+   "field": "BYE",
+   "how": "release/beta layout; current smoothed position read and written by TransformOffset at release RVA 0x6620EDC"
+  }
+ },
  "FPMOTION_IDLE_OFFSET": {
   "kind": "field",
   "class": "Oxide_FPMotion",
@@ -2705,6 +2733,20 @@
    "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
+ "FPMOTION_AIM_OFFSET": {
+  "kind": "field",
+  "class": "Oxide_FPMotion",
+  "struct": "Oxide_FPMotion_Fields",
+  "field": "m_AimOffset",
+  "type": "Oxide_TransformOffset_o*",
+  "offset": 152,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPMotion_Fields",
+   "field": "m_AimOffset",
+   "how": "release/beta layout; selected by FPMotion.Update, see VIEWMODEL.md"
+  }
+ },
  "FPMOTION_LADDER_OFFSET": {
   "kind": "field",
   "class": "Oxide_FPMotion",
@@ -2759,6 +2801,20 @@
    "struct": "Oxide_FPMotion_Fields",
    "field": "m_TooCloseOffset",
    "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+  }
+ },
+ "FPMOTION_ACTIVE_OFFSET": {
+  "kind": "field",
+  "class": "Oxide_FPMotion",
+  "struct": "Oxide_FPMotion_Fields",
+  "field": "BYH",
+  "type": "Oxide_TransformOffset_o*",
+  "offset": 216,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPMotion_Fields",
+   "field": "BYH",
+   "how": "release/beta layout; current TransformOffset selected and consumed by FPMotion.Update at release RVA 0x6621B3C"
   }
  },
  "TRANSFORMOFFSET_LERP_SPEED": {

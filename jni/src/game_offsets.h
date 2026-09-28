@@ -598,16 +598,19 @@ inline constexpr std::uint64_t MULTICAST_DELEGATES              = 0x78; // Syste
 inline constexpr std::uint64_t FPMOTION_OBJECT                  = 0xC8; // Oxide_FPMotion_Fields.BYc
 inline constexpr std::uint64_t FPMOTION_PLAYER                  = 0xE8; // Oxide_FPMotion_Fields.Player
 inline constexpr std::uint64_t TRANSFORMOFFSET_POSITION         = 0x24; // Oxide_TransformOffset_Fields.m_Position
+inline constexpr std::uint64_t TRANSFORMOFFSET_CURRENT_POSITION = 0x44; // Oxide_TransformOffset_Fields.BYE
 inline constexpr std::uint64_t FPMOTION_IDLE_OFFSET             = 0x78; // Oxide_FPMotion_Fields.m_IdleOffset
 inline constexpr std::uint64_t FPMOTION_RUN_OFFSET              = 0x80; // Oxide_FPMotion_Fields.m_RunOffset
 inline constexpr std::uint64_t FPMOTION_RUN_RELOAD_OFFSET       = 0x88; // Oxide_FPMotion_Fields.runReloadOffset
 inline constexpr std::uint64_t FPMOTION_ATTACK_OFFSET           = 0x90; // Oxide_FPMotion_Fields.m_AttackOffset
+inline constexpr std::uint64_t FPMOTION_AIM_OFFSET              = 0x98; // Oxide_FPMotion_Fields.m_AimOffset
 inline constexpr std::uint64_t FPMOTION_LADDER_OFFSET           = 0xA0; // Oxide_FPMotion_Fields.m_OnLadderOffset
 inline constexpr std::uint64_t FPMOTION_JUMP_OFFSET             = 0xA8; // Oxide_FPMotion_Fields.m_JumpOffset
 inline constexpr std::uint64_t FPMOTION_LOOK_OFFSET             = 0xB0; // Oxide_FPMotion_Fields.m_LookOffset
 inline constexpr std::uint64_t FPMOTION_CLOSE_OFFSET            = 0xB8; // Oxide_FPMotion_Fields.m_TooCloseOffset
+inline constexpr std::uint64_t FPMOTION_ACTIVE_OFFSET           = 0xD8; // Oxide_FPMotion_Fields.BYH
 
-// TransformOffset.Tick clamps dt * m_LerpSpeed to 1: snap custom hip poses.
+// Legacy snapshot field; custom hands no longer modify animation speed.
 inline constexpr std::uint64_t TRANSFORMOFFSET_LERP_SPEED = 0x20; // Oxide.TransformOffset.m_LerpSpeed
 
 }

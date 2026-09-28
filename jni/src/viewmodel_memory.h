@@ -60,8 +60,13 @@ template<class IO> class Controller {
     uint64_t session_ = 0;
     Identity player_, fp_, weapon_, motion_;
     Patch<float> fov_;
-    struct HandPatch { uint64_t object = 0, klass = 0, slot = 0; Patch<Position> patch; Patch<BlendSpeed> speed; };
-    std::array<HandPatch, 8> hands_{};
+    struct HandPatch {
+        uint64_t object = 0, klass = 0, slot = 0;
+        Patch<Position> target;
+        Patch<Position> current;
+        Patch<BlendSpeed> speed;
+    };
+    std::array<HandPatch, 9> hands_{};
     unsigned retry_ = 0;
 
     bool restore_hands() {
@@ -75,9 +80,11 @@ template<class IO> class Controller {
         for (auto& h : hands_) {
             if (!h.object) continue;
             if (io.ptr(h.slot) != h.object || io.ptr(h.object) != h.klass) { h = {}; continue; }
-            bool positionRestored = h.patch.restore(io);
+            bool targetRestored = h.target.restore(io);
+            bool currentRestored = h.current.restore(io);
             bool speedRestored = h.speed.restore(io);
-            if (positionRestored && speedRestored) h = {}; else ok = false;
+            if (targetRestored && currentRestored && speedRestored) h = {};
+            else ok = false;
         }
         return ok;
     }
@@ -177,8 +184,9 @@ public:
             retry_ = 0;
         }
         const uint64_t offsets[] = {FPMOTION_IDLE_OFFSET, FPMOTION_RUN_OFFSET,
-            FPMOTION_RUN_RELOAD_OFFSET, FPMOTION_ATTACK_OFFSET, FPMOTION_LADDER_OFFSET,
-            FPMOTION_JUMP_OFFSET, FPMOTION_LOOK_OFFSET, FPMOTION_CLOSE_OFFSET};
+            FPMOTION_RUN_RELOAD_OFFSET, FPMOTION_ATTACK_OFFSET, FPMOTION_AIM_OFFSET,
+            FPMOTION_LADDER_OFFSET, FPMOTION_JUMP_OFFSET, FPMOTION_LOOK_OFFSET,
+            FPMOTION_CLOSE_OFFSET};
         bool any = false, ok = true;
         for (size_t i = 0; i < hands_.size(); ++i) {
             auto& h = hands_[i];
@@ -202,15 +210,25 @@ public:
             const uint64_t klass = io.ptr(object);
             if (h.klass && h.klass != klass) h = {};
             h.object = object; h.klass = klass; h.slot = slot;
-            if (!h.patch.sample(io, object + TRANSFORMOFFSET_POSITION)) { ok = false; continue; }
-            // One absolute position for idle/run/reload/attack/ADS-related
-            // slots: pose changes can no longer replace the custom hands.
+            if (!h.target.sample(io, object + TRANSFORMOFFSET_POSITION) ||
+                !h.current.sample(io, object + TRANSFORMOFFSET_CURRENT_POSITION)) {
+                ok = false;
+                continue;
+            }
+            // FPMotion selects one of these nine targets, then TransformOffset
+            // interpolates m_Position into its separate current-position cache
+            // at +0x44.  Some idle poses have a zero/very low lerp speed, which
+            // is why changing only m_Position appeared to work only while
+            // running.  Hold both the target and current cache at the requested
+            // absolute value; state transitions are now static immediately.
             const Position value{s.x*0.01f,s.y*0.01f,s.z*0.01f};
-            const bool positionApplied=h.patch.put(io,value);
+            const bool targetApplied = h.target.put(io, value);
+            const bool currentApplied = h.current.put(io, value);
             // Retired ADS snap helper may still own a speed from an older tick;
             // restore it once, then leave animation speed to the game.
-            const bool speedApplied=h.speed.restore(io);
-            if (!positionApplied || !speedApplied) ok=false; else any=true;
+            const bool speedApplied = h.speed.restore(io);
+            if (!targetApplied || !currentApplied || !speedApplied) ok=false;
+            else any=true;
         }
         status.hands = !ok ? Status::Failed : (any ? Status::Active : Status::Waiting);
     }
