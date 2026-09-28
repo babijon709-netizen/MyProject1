@@ -7,6 +7,12 @@ namespace go_active {
 using namespace game_offsets;
 }
 
+// Оставляем совместимый алиас для старых диагностических участков кода;
+// значения всё равно берутся из обычного статического набора.
+namespace game_offsets_beta {
+using namespace game_offsets;
+}
+
 namespace go {
 enum class Build : int { Release = 0, Beta = 1 };
 inline Build CurrentBuild() { return Build::Release; }
