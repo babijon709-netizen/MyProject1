@@ -5185,8 +5185,17 @@ bool offset_resolver_busy() {
 uint64_t offset_resolver_class_nth(const char* name, const char* ns, int nth) {
     // PH_SLOT — это уже после резолва (ищем себе якорь для кэша), классы в
     // этот момент валидны и нужны ядру: иначе чит на секунду «слепнет».
-    if (s_phase != PH_DONE && s_phase != PH_FIELDS && s_phase != PH_SLOT) return 0;
     if (!name || !name[0] || nth < 0) return 0;
+    // Автосканирование отключено: для обычных статических оффсетов берём
+    // единственный класс напрямую из его TYPEINFO_RVA.
+    if (s_phase == PH_WAIT && nth == 0 && g_il2cpp_base) {
+        uint64_t rva = 0;
+        if (!strcmp(name, "PlayerManager")) rva = go_active::PLAYER_MANAGER_TYPEINFO_RVA;
+        else if (!strcmp(name, "GameControllerBase")) rva = go_active::GAME_CONTROLLER_TYPEINFO_RVA;
+        else if (!strcmp(name, "NetworkClient")) rva = go_active::NETWORK_CLIENT_TYPEINFO_RVA;
+        if (rva) return qrd_ptr(g_il2cpp_base + rva);
+    }
+    if (s_phase != PH_DONE && s_phase != PH_FIELDS && s_phase != PH_SLOT) return 0;
     for (int i = 0; i < s_class_count; ++i) {
         if (strcmp(s_classes[i].name, name) != 0) continue;
         if (ns && ns[0] && s_classes[i].ns[0] && strcmp(s_classes[i].ns, ns) != 0) continue;
