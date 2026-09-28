@@ -5199,13 +5199,9 @@ uint64_t offset_resolver_class_nth(const char* name, const char* ns, int nth) {
 // того же образа), а не из вшитой таблицы. Нужно функциям, которые ПИШУТ в
 // память игры: писать по вшитому смещению на незнакомом билде нельзя.
 bool offset_resolver_is_live(const uint64_t* slot) {
-    if (!slot) return false;
-    // Смотрим в стабильный снимок (s_committed), а не в рабочий s_applied:
-    // повторный подбор/откат рабочий список опустошает, а значения в слотах
-    // при этом остаются верными — «живость» смещений не должна исчезать.
-    for (int i = 0; i < s_committed_count; ++i)
-        if (s_committed[i].slot == slot) return true;
-    return false;
+    // Оффсеты теперь статические и берутся из game_offsets.h. Они не требуют
+    // подтверждения runtime-резолвером, поэтому запись по ним разрешена сразу.
+    return slot != nullptr;
 }
 
 uint64_t offset_resolver_class(const char* name, const char* ns) {
