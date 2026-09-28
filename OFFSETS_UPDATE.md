@@ -2025,3 +2025,23 @@ dispersion 0x10, hitscan config 0x18, cached float 0x20.
 структуры из managed-pointer по 0x1F8 отдельно в каждом дампе, поэтому dry-run
 `beta_offsets.py` теперь проверяет `Ze → FJ` без ручного исключения. Полная
 таблица и lifecycle перенесённых функций — [ONESOURCE_PORT.md](ONESOURCE_PORT.md).
+
+### 29 сентября 2026: device feedback — managed fallback и постоянный viewmodel
+
+Проверка на устройстве показала, что жёсткая блокировка по ELF build-id/старым
+native guard words оставляла Fast Fire/Reload и No Recoil/Spread выключенными на
+обновлённом бинарнике, хотя managed layout не изменился. Локальный игрок теперь
+сначала берётся из уже проверенного world-reader cache, затем из живого
+`GameControllerBase`; обе ветки повторно требуют `NetworkIdentity.isLocalPlayer`.
+Для оружия разрешён fallback `FPManager.currentWeapon → currentObject`.
+
+Неизвестный build-id допускается только после полной проверки managed-классов,
+Unity identity, player↔weapon owner и typed config backlinks. Имя calculator при
+этом может быть новым обфусцированным именем, но namespace обязан быть пустым,
+а ссылки на `HitscanWeaponConfig` и `DispersionConfig` — совпасть. Смещения
+полей остаются теми же, что подтверждены release/beta дампами.
+
+Ползунки Fast Fire/Reload удалены: тумблеры всегда используют максимум `20×`.
+Silent дополнен синхронной записью в кадре публикации, интервалы private-fd
+writer уменьшены до 500/250 мкс. Custom FOV теперь применяется и в ADS, а все
+motion slots рук получают одну статичную X/Y/Z позицию без изменения lerp speed.

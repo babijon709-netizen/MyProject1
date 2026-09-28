@@ -38,6 +38,10 @@ struct Fake {
         uint64_t k=0; if(!read(o,k)) return false;
         auto it=names.find(k); return it!=names.end() && it->second.first==n && it->second.second==ns;
     }
+    bool calculator_class(uint64_t o) {
+        uint64_t k=0; if(!read(o,k)) return false;
+        auto it=names.find(k); return it!=names.end() && !it->second.first.empty() && it->second.second.empty();
+    }
     void object(uint64_t o,const char* n,const char* ns,bool unity=true) {
         uint64_t k=o+0x80000; set(o,k); names[k]={n,ns};
         if(unity) set(o+0x10,o+0x90000);
@@ -103,8 +107,14 @@ static void tests(const Layout& l) {
         if(issue==5) io.set(base+l.guard_sites[0],uint32_t(0));
         if(issue==6) io.set(base+l.guard_sites[3],uint32_t(0x1400005d));
         if(issue==7) io.maps="100000-200000 rw-p 0 08:01 1 /some-library.so\n";
-        c.tick(1,base,player,true,true); assert(io.writes.empty());
-        assert(c.recoil!=Status::Active && c.spread!=Status::Active);
+        c.tick(1,base,player,true,true);
+        const bool managed_graph_valid = issue==0 || issue==5 || issue==6;
+        if (managed_graph_valid)
+            assert(c.recoil==Status::Active && c.spread==Status::Active && io.writes.size()==9);
+        else {
+            assert(io.writes.empty());
+            assert(c.recoil!=Status::Active && c.spread!=Status::Active);
+        }
     }
     {
         Fake io(l); Controller<Fake> c(io); int seen=0;
@@ -155,7 +165,7 @@ static void tests(const Layout& l) {
         Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
         io.set(fp+0x58,uint64_t(0)); c.tick(1,base,player,true,true);
         assert(!c.has_state() && c.recoil==Status::Waiting && io.get<float>(calc+0x20)==2.f);
-        io.set(fp+0x58,weapon); c.tick(1,base,player,true,true); assert(c.recoil==Status::Active);
+        io.set(fp+0x50,weapon); c.tick(1,base,player,true,true); assert(c.recoil==Status::Active);
         assert(c.reset(true)); assert(io.get<float>(recoil+0x18)==1.f);
     }
     {

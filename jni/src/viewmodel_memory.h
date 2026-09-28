@@ -62,7 +62,7 @@ template<class IO> class Controller {
     Patch<float> fov_;
     struct HandPatch { uint64_t object = 0, klass = 0, slot = 0; Patch<Position> patch; Patch<BlendSpeed> speed; };
     std::array<HandPatch, 8> hands_{};
-    unsigned retry_ = 0, snap_frames_ = 0;
+    unsigned retry_ = 0;
 
     bool restore_hands() {
         using namespace go_active;
@@ -109,7 +109,7 @@ public:
     void reset(bool restore) {
         if (restore) { restore_fov(); restore_hands(); }
         player_ = {}; fp_ = {}; weapon_ = {}; motion_ = {};
-        fov_ = {}; hands_ = {}; retry_ = 0; snap_frames_ = 0; session_ = 0; status = {};
+        fov_ = {}; hands_ = {}; retry_ = 0; session_ = 0; status = {};
     }
     void tick(uint64_t session, uint64_t player, ViewmodelSettings s) {
         using namespace go_active;
@@ -131,18 +131,18 @@ public:
             if (!fp_.capture(io, fp)) return;
         }
         uint64_t handler = io.ptr(player + PLAYER_EVENT_HANDLER);
-        uint64_t activity = handler ? io.ptr(handler + EVENT_HANDLER_AIM_ACTIVITY) : 0;
-        uint8_t aim = 0; float blend = 0.f;
-        bool aimKnown = handler && io.ptr(handler + EVENT_HANDLER_MANAGER_BACKREF) == player && activity &&
-            io.read(activity + ACTIVITY_ACTIVE_FLAG, aim) && aim <= 1 &&
-            io.read(fp + FPMANAGER_AIM_BLEND, blend) && finite(blend) && blend >= 0.f && blend <= 1.f;
-        bool paused = !aimKnown || aim || blend > 0.01f;
-        if (!s.fov_enabled || paused) {
-            bool ok = restore_fov();
-            status.fov = !ok ? Status::Failed : (!s.fov_enabled ? Status::Off : (aimKnown ? Status::ADS : Status::Waiting));
+        const bool handlerKnown = handler &&
+            io.ptr(handler + EVENT_HANDLER_MANAGER_BACKREF) == player;
+        // Custom FOV is authoritative in every state, including ADS. The old
+        // controller restored the game's ADS value here, which looked like the
+        // setting randomly switched off whenever the player aimed.
+        if (!s.fov_enabled) {
+            const bool ok=restore_fov();
+            status.fov=ok?Status::Off:Status::Failed;
         } else {
-            bool ok = fov_.sample(io, fp + FPMANAGER_WORLD_FOV_TARGET) && fov_.put(io, s.fov);
-            status.fov = ok ? Status::Active : Status::Failed;
+            const bool ok=fov_.sample(io,fp+FPMANAGER_WORLD_FOV_TARGET) &&
+                          fov_.put(io,s.fov);
+            status.fov=ok?Status::Active:Status::Failed;
         }
         uint64_t weapon = io.ptr(fp + FPMANAGER_CURRENT_OBJECT);
         if (!weapon) weapon = io.ptr(fp + FPMANAGER_CURRENT_WEAPON);
@@ -151,22 +151,19 @@ public:
             motion_ = {}; retry_ = 0; weapon_ = {};
             if (weapon && io.ptr(weapon + FPOBJECT_PLAYER_BACKREF) == player) weapon_.capture(io, weapon);
         }
-        // Hands return on the first non-ADS frame, not after the camera's
-        // slowly decaying FOV blend. The working FOV path keeps its own pause.
-        if (aimKnown && aim && s.hands_enabled) snap_frames_ = 3;
-        if (!s.hands_enabled) snap_frames_ = 0;
-        const bool snap = snap_frames_ != 0 || (aimKnown && blend > 0.01f);
-        if (aimKnown && !aim && snap_frames_) --snap_frames_;
-        const bool handsPaused = !aimKnown || aim;
-        if (!s.hands_enabled || handsPaused) {
-            bool ok = restore_hands();
-            status.hands = !ok ? Status::Failed : (!s.hands_enabled ? Status::Off : (aimKnown ? Status::ADS : Status::Waiting));
-            if (!s.fov_enabled && !s.hands_enabled && status.fov == Status::Off && status.hands == Status::Off) {
-                reset(false); session_ = session;
+        // Custom hands no longer restore in ADS. Disabled is the only normal
+        // state that restores originals; otherwise every motion slot receives
+        // the same static position below.
+        if (!s.hands_enabled) {
+            const bool ok=restore_hands();
+            status.hands=ok?Status::Off:Status::Failed;
+            if (!s.fov_enabled && status.fov==Status::Off && status.hands==Status::Off) {
+                reset(false); session_=session;
             }
             return;
         }
-        if (!weapon_.alive(io) || io.ptr(weapon + FPOBJECT_PLAYER_BACKREF) != player) return;
+        if (!handlerKnown || !weapon_.alive(io) ||
+            io.ptr(weapon+FPOBJECT_PLAYER_BACKREF)!=player) return;
         if (!motion_.alive(io) || io.ptr(motion_.object + FPMOTION_OBJECT) != weapon ||
             io.ptr(motion_.object + FPMOTION_PLAYER) != handler) {
             if (!restore_hands()) { status.hands = Status::Failed; return; }
@@ -206,17 +203,14 @@ public:
             if (h.klass && h.klass != klass) h = {};
             h.object = object; h.klass = klass; h.slot = slot;
             if (!h.patch.sample(io, object + TRANSFORMOFFSET_POSITION)) { ok = false; continue; }
-            Position value = h.patch.original;
-            value.x += s.x * 0.01f; value.y += s.y * 0.01f; value.z += s.z * 0.01f;
-            bool positionApplied = h.patch.put(io, value);
-            // Let Unity snap on its next Update, AFTER it copies the old pose's
-            // interpolation cache during a stance switch. Writing that cache
-            // from the overlay would be overwritten by the same switch.
-            bool speedApplied = snap
-                ? (h.speed.sample(io, object + TRANSFORMOFFSET_LERP_SPEED) &&
-                   h.speed.put(io, BlendSpeed{10000.f}))
-                : h.speed.restore(io);
-            if (!positionApplied || !speedApplied) ok = false; else any = true;
+            // One absolute position for idle/run/reload/attack/ADS-related
+            // slots: pose changes can no longer replace the custom hands.
+            const Position value{s.x*0.01f,s.y*0.01f,s.z*0.01f};
+            const bool positionApplied=h.patch.put(io,value);
+            // Retired ADS snap helper may still own a speed from an older tick;
+            // restore it once, then leave animation speed to the game.
+            const bool speedApplied=h.speed.restore(io);
+            if (!positionApplied || !speedApplied) ok=false; else any=true;
         }
         status.hands = !ok ? Status::Failed : (any ? Status::Active : Status::Waiting);
     }

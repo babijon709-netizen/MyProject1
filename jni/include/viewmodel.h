@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstring>
 
-// Vertical world FOV; hands are offsets from each weapon's original pose, cm.
+// Vertical world FOV; hands are one static position shared by all poses, cm.
 struct ViewmodelSettings {
     bool fov_enabled = false;
     bool hands_enabled = false;
@@ -11,7 +11,7 @@ struct ViewmodelSettings {
     float x = 0.f, y = 0.f, z = 0.f;
     int fps_limit = 0; // 0 = original game limit; otherwise 90 / 120 / 144
     bool no_recoil = false, no_spread = false;
-    // Мгновенный подбор: не трогает код игры, обнуляет только точный 0.35f
+    // Быстрый подбор: не трогает код игры, обнуляет только точный 0.35f
     // cadence активных UniTask promises в управляемой куче.
     bool fast_loot = false;
 };
@@ -62,7 +62,7 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     ConfigExtension e; std::memcpy(&e, bytes, sizeof(e));
     // v1: discard retired loot/instruction-patch flags 4..6. v2: bit 4 stays
     // retired, bits 5..6 opt into the object-data implementations. v3: bit 4 is
-    // instant pickup, so a v1/v2 file that still carries the retired bit loads
+    // fast pickup, so a v1/v2 file that still carries the retired bit loads
     // with the feature off instead of turning it on.
     if (e.magic != 0x31574d56u || (e.version != 1 && e.version != 2 && e.version != 3) ||
         e.size != sizeof(e) || (e.flags & ~127u)) return s;

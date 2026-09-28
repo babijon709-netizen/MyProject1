@@ -67,24 +67,20 @@ static bool near(float a, float b) { return a-b < 1e-6f && b-a < 1e-6f; }
 static bool near(Position a, Position b) { return near(a.x,b.x) && near(a.y,b.y) && near(a.z,b.z); }
 static void tests() {
     { Fixture f; f.tick(); assert(f.c.status.fov==Status::Active && f.c.status.hands==Status::Active);
-      Position expected{0.2f,0.f,0.6f}; assert(near(f.position(),expected)); assert(f.fov()==100.f);
+      Position expected{0.1f,-0.2f,0.3f}; assert(near(f.position(),expected)); assert(f.fov()==100.f);
       expected=f.position();
       for(int i=0;i<200;++i) { f.tick(); }
       assert(same(f.position(),expected)); // no drift
-      f.s.x=20.f; f.tick(); assert(near(f.position().x,0.3f));
+      f.s.x=20.f; f.tick(); assert(near(f.position().x,0.2f));
       f.s.fov_enabled=f.s.hands_enabled=false; f.tick(); assert(same(f.position(),f.origin)); assert(f.fov()==70.f);
     }
     { Fixture f; f.tick(); f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(1));
       f.io.set(f.fp+FPMANAGER_WORLD_FOV_TARGET,25.f); f.tick();
-      assert(f.fov()==25.f); assert(same(f.position(),f.origin)); assert(f.c.status.fov==Status::ADS);
-      f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(0)); f.io.set(f.fp+FPMANAGER_AIM_BLEND,0.5f); f.tick(); assert(f.fov()==25.f);
-      assert(f.c.status.hands==Status::Active && near(f.position(),Position{0.2f,0.f,0.6f}));
-      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==10000.f);
-      // The real consumer clamps dt * speed; even at 144 FPS the first Update
-      // takes the full step rather than interpolating over multiple frames.
-      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)/144.f >= 1.f);
-      f.io.set(f.fp+FPMANAGER_AIM_BLEND,0.f); f.io.set(f.fp+FPMANAGER_WORLD_FOV_TARGET,70.f); f.tick(); assert(f.fov()==100.f);
-      for (int i=0; i<5; ++i) f.tick();
+      assert(f.fov()==100.f); assert(near(f.position(),Position{0.1f,-0.2f,0.3f}));
+      assert(f.c.status.fov==Status::Active && f.c.status.hands==Status::Active);
+      f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(0));
+      f.io.set(f.fp+FPMANAGER_AIM_BLEND,0.5f); f.tick();
+      assert(f.fov()==100.f && near(f.position(),Position{0.1f,-0.2f,0.3f}));
       assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==7.f);
       assert(f.io.get<float>(f.run+TRANSFORMOFFSET_LERP_SPEED)==9.f);
     }
@@ -125,7 +121,8 @@ static void tests() {
     }
     { Fixture f; f.io.names[f.motion]="WrongClass"; f.tick(); assert(f.c.status.hands==Status::Waiting); assert(same(f.position(),f.origin)); }
     { Fixture f; f.io.set(f.motion+FPMOTION_OBJECT,f.fp); f.tick(); assert(f.c.status.hands==Status::Waiting); }
-    { Fixture f; f.io.failRead=f.aim+ACTIVITY_ACTIVE_FLAG; f.tick(); assert(f.io.writes==0); }
+    { Fixture f; f.io.failRead=f.aim+ACTIVITY_ACTIVE_FLAG; f.tick();
+      assert(f.c.status.fov==Status::Active && f.c.status.hands==Status::Active); }
     { Fixture f; f.tick(); f.s={}; f.io.failRead=f.player+PLAYER_FP_MANAGER; f.tick();
       assert(f.c.has_state()); // failed lookup must not discard pending originals
       f.io.failRead=0; f.tick(); assert(!f.c.has_state()); assert(f.fov()==70.f); assert(same(f.position(),f.origin));
@@ -138,14 +135,13 @@ static void tests() {
     { Fixture f; f.io.set(f.fp+FPMANAGER_WORLD_FOV_TARGET,std::numeric_limits<float>::quiet_NaN()); f.tick(); assert(f.c.status.fov==Status::Failed); }
     { Fixture f; f.io.set(f.idle+TRANSFORMOFFSET_POSITION,Position{std::numeric_limits<float>::infinity(),0,0}); f.tick(); assert(f.c.status.hands==Status::Failed); }
     { Fixture f; f.tick(); f.c.reset(true); assert(same(f.position(),f.origin)); assert(f.fov()==70.f); }
-    { Fixture f; f.tick(); // Do not alter normal hip-fire pose animation.
+    { Fixture f; f.tick(); // ADS does not restore hands or alter animation speed.
       assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==7.f);
       f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(1)); f.tick();
-      f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(0)); f.tick(); // immediate zero blend exit
-      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==10000.f);
-      f.s.hands_enabled=false; f.io.failWrite=f.idle+TRANSFORMOFFSET_LERP_SPEED; f.tick();
-      assert(f.c.status.hands==Status::Failed && same(f.position(),f.origin));
-      f.io.failWrite=0; f.tick(); assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==7.f);
+      assert(near(f.position(),Position{0.1f,-0.2f,0.3f}));
+      assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==7.f);
+      f.s.hands_enabled=false; f.tick();
+      assert(f.c.status.hands==Status::Off && same(f.position(),f.origin));
     }
     { Fixture f; f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(1)); f.tick();
       f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(0)); f.tick();
@@ -188,7 +184,7 @@ static void config_tests() {
         assert(!loaded.fast_loot);
         assert(encode(loaded).flags==(flags&~16u));
     }
-    // v3: the same bit now means instant pickup, everything else is unchanged.
+    // v3: the same bit now means fast pickup, everything else is unchanged.
     for (uint32_t flags=0; flags<128; ++flags) {
         auto saved=encode(s); saved.flags=flags;
         assert(saved.version==3);
@@ -296,5 +292,5 @@ int main() {
     config_tests(); fps_tests();
     go::SelectBuild(go::Build::Release); tests();
     assert(go::BetaAvailable()); go::SelectBuild(go::Build::Beta); tests();
-    std::cout << "viewmodel: release/beta, lifecycle, instant ADS return, FPS90/120/144, delegates, config, NaN: OK\n";
+    std::cout << "viewmodel: release/beta, persistent ADS FOV, static hands, lifecycle, FPS90/120/144, delegates, config, NaN: OK\n";
 }

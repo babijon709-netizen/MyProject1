@@ -8,7 +8,9 @@
 namespace silent_aim {
 constexpr uint64_t kTagMask = 0x00FFFFFFFFFFFFFFULL;
 constexpr uint64_t kLeaseMs = 100;
-constexpr unsigned kTickUs = 2500, kHotUs = 1200;
+// The game refreshes its look direction close to the shot simulation. A 2.5 ms
+// writer left a visible race where some bullets kept the camera direction.
+constexpr unsigned kTickUs = 500, kHotUs = 250;
 inline bool valid_pointer(uint64_t p) { return p >= 0x10000 && p < 0x800000000000ULL; }
 inline bool fresh(uint64_t published, uint64_t now) {
     return now >= published && now - published < kLeaseMs;

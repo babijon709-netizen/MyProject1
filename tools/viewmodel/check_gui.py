@@ -4,7 +4,7 @@
 1. Misc toggles must animate from the same state used by the row: ToggleRow
    changes the bool but draws the supplied animation value, and forgetting its
    per-frame Tick leaves a functional toggle looking permanently disabled.
-2. Instant pickup draws only the toggle row in the menu: the user asked for
+2. Fast pickup draws only the toggle row in the menu: the user asked for
    NO diagnostic lines under it. The strict refusal diagnostics stay in the
    loot::Diagnostics structure for tooling; the guard asserts the thin menu.
 """
@@ -29,6 +29,9 @@ for setting, anim in [('fast_fire', 'a_fast_fire'), ('fast_reload', 'a_fast_relo
     assert re.search(r'Tick\(\s*g_state\.' + anim +
                      r'\s*,\s*g_state\.' + setting + r'\s*,\s*dt\s*\)', menu), setting
 assert 'AIM_MODE_SILENT' in menu and 'g_state.a_aim_mode2' in menu
+weapon_speed = menu.split('SHdr(XS("Темп оружия"))', 1)[1].split('SHdr(', 1)[0]
+assert '##fastfire' in weapon_speed and '##fastreload' in weapon_speed
+assert 'SliderRow(' not in weapon_speed and 'mult' not in weapon_speed, 'weapon speed must be max-only toggles'
 pickup = menu.split('SHdr(XS("Подбор"))', 1)[1].split('SHdr(', 1)[0]
 # Memory traversal remains outside menu rendering; this section is a thin toggle.
 assert 'ToggleRow("##instantloot"' in pickup, 'the toggle row must stay'
@@ -48,4 +51,4 @@ assert 'ImGui::Button(' not in fps, 'chips must use custom-coded buttons'
 assert 'g_state.a_fps_90' in menu and 'Tick(g_state.a_fps_90' in menu, 'selection fill animation is not ticked'
 
 print('misc toggles: row state and per-frame animation bindings: OK')
-print('instant pickup menu draws only the toggle; fps mode+apply status is rendered: OK')
+print('max-only weapon toggles and fast-pickup UI; fps mode+apply status: OK')

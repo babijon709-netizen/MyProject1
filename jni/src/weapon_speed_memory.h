@@ -10,6 +10,9 @@
 
 namespace weapon_speed {
 inline constexpr const char* kWeapons = "HyperHug.Games.Oxide.Features.Weapons";
+// Переключатели всегда используют прежний максимум UI; промежуточных
+// коэффициентов больше нет.
+inline constexpr float kMaxMultiplier = 20.f;
 struct Layout { std::array<uint8_t,20> build_id; };
 inline constexpr Layout kLayouts[] = {
     {{0xd8,0x5e,0x63,0xcd,0x8d,0xcb,0xd4,0x81,0x69,0x50,0x12,0xef,0x2e,0x28,0x4f,0x0e,0xeb,0x9e,0xf3,0x07}},
@@ -109,14 +112,32 @@ template<class IO> class Controller {
     bool resolve(uint64_t player,Context& c) {
         uint64_t net=0,fp=0,weapon=0,back=0,config=0;
         uint8_t local=0;
-        return player && io_.named(player,"PlayerManager","Oxide") && c.player.capture(io_,player,true) &&
-            pointer(io_,player+0x40,net) && io_.named(net,"NetworkIdentity","Mirror") &&
-            io_.read(net+0x4a,local) && local==1 &&
-            pointer(io_,player+go_active::PLAYER_FP_MANAGER,fp) && io_.named(fp,"FPManager","Oxide") && c.fp.capture(io_,fp,true) &&
-            pointer(io_,fp+go_active::FPMANAGER_CURRENT_WEAPON,weapon) && io_.named(weapon,"FPHitscan","Oxide") && c.weapon.capture(io_,weapon,true) &&
-            pointer(io_,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back) && back==player &&
-            pointer(io_,weapon+go_active::FPHITSCAN_CONFIG,config) &&
-            io_.named(config,"HitscanWeaponConfig",kWeapons) && c.config.capture(io_,config,true);
+        if (!player || !io_.named(player,"PlayerManager","Oxide") ||
+            !c.player.capture(io_,player,true) ||
+            !pointer(io_,player+0x40,net) ||
+            !io_.named(net,"NetworkIdentity","Mirror") ||
+            !io_.read(net+0x4a,local) || local!=1 ||
+            !pointer(io_,player+go_active::PLAYER_FP_MANAGER,fp) ||
+            !io_.named(fp,"FPManager","Oxide") || !c.fp.capture(io_,fp,true))
+            return false;
+        // На части сборок +0x58 пуст во время переключения, а живой FPObject
+        // уже доступен в currentObject (+0x50). Принимаем только точный
+        // FPHitscan с обратной ссылкой на этого локального игрока.
+        auto take_weapon = [&](uint64_t offset) {
+            uint64_t candidate=0, owner=0;
+            return pointer(io_,fp+offset,candidate) && candidate &&
+                io_.named(candidate,"FPHitscan","Oxide") &&
+                pointer(io_,candidate+go_active::FPOBJECT_PLAYER_BACKREF,owner) &&
+                owner==player && (weapon=candidate,true);
+        };
+        if (!take_weapon(go_active::FPMANAGER_CURRENT_WEAPON) &&
+            !take_weapon(go_active::FPMANAGER_CURRENT_OBJECT)) return false;
+        if (!c.weapon.capture(io_,weapon,true) ||
+            !pointer(io_,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back) || back!=player ||
+            !pointer(io_,weapon+go_active::FPHITSCAN_CONFIG,config) ||
+            !io_.named(config,"HitscanWeaponConfig",kWeapons) ||
+            !c.config.capture(io_,config,true)) return false;
+        return true;
     }
     bool apply_fire(float multiplier) {
         if (!fire_.sample(io_,context_.config.object+go_active::HITSCANCONFIG_FIRE_RATE,0.0001f,10000.f)) return false;
@@ -144,8 +165,7 @@ public:
         fire=reload=viewmodel::Status::Off;
         return ok;
     }
-    void tick(uint64_t session,uint64_t base,uint64_t player,bool fast_fire,bool fast_reload,
-              float fire_multiplier,float reload_multiplier) {
+    void tick(uint64_t session,uint64_t base,uint64_t player,bool fast_fire,bool fast_reload) {
         using viewmodel::Status;
         if (session!=session_ || base!=base_) { reset(false); session_=session; base_=base; }
         fire=fast_fire?Status::Waiting:Status::Off;
@@ -153,18 +173,11 @@ public:
         if (!fast_fire && !restore_fire()) fire=Status::Failed;
         if (!fast_reload && !restore_reload()) reload=Status::Failed;
         if ((!fast_fire && !fast_reload) || fire==Status::Failed || reload==Status::Failed) return;
-        fire_multiplier=viewmodel::bounded(fire_multiplier,1.f,20.f,3.f);
-        reload_multiplier=viewmodel::bounded(reload_multiplier,1.f,20.f,4.f);
-        std::array<uint8_t,20> id{};
-        const Layout* layout=nullptr;
-        if (base && io_.read(base+0x318,id))
-            for (const auto& candidate:kLayouts) if (candidate.build_id==id) layout=&candidate;
-        if (!layout) {
-            restore_all();
-            if (fast_fire) fire=Status::Failed;
-            if (fast_reload) reload=Status::Failed;
-            return;
-        }
+        if (!base) return;
+        // Build-id больше не является блокировкой: перед записью весь живой
+        // object graph подтверждается точными именами классов, Unity identity
+        // и обратной ссылкой оружия. Поэтому новый бинарник с той же managed
+        // раскладкой не оставляет тумблеры навсегда в Failed.
         Context next;
         if (!resolve(player,next)) {
             restore_all();
@@ -174,8 +187,8 @@ public:
             if (!restore_all()) { fire=reload=Status::Failed; return; }
             context_=next;
         }
-        if (fast_fire) fire=apply_fire(fire_multiplier)?Status::Active:Status::Failed;
-        if (fast_reload) reload=apply_reload(reload_multiplier)?Status::Active:Status::Failed;
+        if (fast_fire) fire=apply_fire(kMaxMultiplier)?Status::Active:Status::Failed;
+        if (fast_reload) reload=apply_reload(kMaxMultiplier)?Status::Active:Status::Failed;
     }
 };
 }

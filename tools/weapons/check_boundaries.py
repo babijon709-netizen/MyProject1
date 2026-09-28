@@ -18,6 +18,8 @@ assert 'kCadenceBits = 0x3EB33333u' in loot
 assert 'PLAYER_LOOP_HELPER_TYPEINFO_RVA' in loot
 assert 'class_is(klass, "PlayerLoopHelper"' in loot
 assert 'weapon_speed::Controller<HeapMemory>' in adapter
+assert 'kMaxMultiplier = 20.f' in speed
+assert 'fire_multiplier' not in speed and 'reload_multiplier' not in speed
 assert 'fast_loot::Controller<HeapMemory>' in adapter
 assert 'settings.no_spread || esp_silent_wants_no_spread()' in adapter
 

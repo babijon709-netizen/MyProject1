@@ -107,29 +107,51 @@ template<class IO> class Controller {
         }
         return ok;
     }
-    bool resolve(uint64_t player, const Layout& layout, Context& c) {
-        uint64_t fp=0, weapon=0, config=0, recoil=0, dispersion=0, calc=0, back=0, p=0;
+    bool resolve(uint64_t player, const Layout* layout, Context& c) {
+        uint64_t net=0, fp=0, weapon=0, config=0, recoil=0, dispersion=0, calc=0, back=0, p=0;
         uint8_t local=0;
         if (!player || !io.named(player,"PlayerManager","Oxide") ||
-            !c.player.capture(io,player,true) || !pointer(io,player+0x40,p) ||
-            !io.named(p,"NetworkIdentity","Mirror") || !io.read(p+0x4a,local) || local!=1 ||
-            !pointer(io,player+go_active::PLAYER_FP_MANAGER,fp) || !io.named(fp,"FPManager","Oxide") ||
-            !c.fp.capture(io,fp,true) || !pointer(io,fp+go_active::FPMANAGER_CURRENT_WEAPON,weapon)) return false;
-        // During equip transition do not guess from old/current-object caches.
-        if (!weapon || !io.named(weapon,"FPHitscan","Oxide") ||
-            !c.weapon.capture(io,weapon,true) || !pointer(io,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back) || back!=player ||
-            !pointer(io,weapon+go_active::FPHITSCAN_CONFIG,config) || !io.named(config,"HitscanWeaponConfig",kWeapons) ||
-            !c.config.capture(io,config,true) || !pointer(io,weapon+go_active::FPHITSCAN_RECOIL+go_active::WEAPONRECOIL_RECOIL_CONFIG,recoil) ||
-            !pointer(io,config+go_active::HITSCANCONFIG_RECOIL_CONFIG,p) || p!=recoil || !pointer(io,weapon+go_active::FPHITSCAN_RECOIL+go_active::WEAPONRECOIL_WEAPON_CONFIG,p) || p!=config ||
-            !io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true) ||
-            !pointer(io,weapon+go_active::FPHITSCAN_CALCULATOR,calc) || !io.named(calc,layout.calculator,"") ||
-            !c.calculator.capture(io,calc,false) || !pointer(io,calc+go_active::CALCULATOR_HITSCAN_CONFIG,p) || p!=config ||
-            !pointer(io,calc+go_active::CALCULATOR_DISPERSION_CONFIG,dispersion) || !pointer(io,config+go_active::HITSCANCONFIG_DISPERSION_CONFIG,p) || p!=dispersion ||
+            !c.player.capture(io,player,true) ||
+            !pointer(io,player+0x40,net) ||
+            !io.named(net,"NetworkIdentity","Mirror") ||
+            !io.read(net+0x4a,local) || local!=1 ||
+            !pointer(io,player+go_active::PLAYER_FP_MANAGER,fp) ||
+            !io.named(fp,"FPManager","Oxide") || !c.fp.capture(io,fp,true)) return false;
+        auto take_weapon = [&](uint64_t offset) {
+            uint64_t candidate=0, owner=0;
+            return pointer(io,fp+offset,candidate) && candidate &&
+                io.named(candidate,"FPHitscan","Oxide") &&
+                pointer(io,candidate+go_active::FPOBJECT_PLAYER_BACKREF,owner) &&
+                owner==player && (weapon=candidate,true);
+        };
+        if (!take_weapon(go_active::FPMANAGER_CURRENT_WEAPON) &&
+            !take_weapon(go_active::FPMANAGER_CURRENT_OBJECT)) return false;
+        if (!c.weapon.capture(io,weapon,true) ||
+            !pointer(io,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back) || back!=player ||
+            !pointer(io,weapon+go_active::FPHITSCAN_CONFIG,config) ||
+            !io.named(config,"HitscanWeaponConfig",kWeapons) ||
+            !c.config.capture(io,config,true) ||
+            !pointer(io,config+go_active::HITSCANCONFIG_RECOIL_CONFIG,recoil) || !recoil)
+            return false;
+        // Embedded WeaponRecoil supplies an independent backlink when present.
+        // Some builds initialize it a frame later, so an unreadable/null value
+        // is not used as the primary source.
+        if (pointer(io,weapon+go_active::FPHITSCAN_RECOIL+
+                       go_active::WEAPONRECOIL_RECOIL_CONFIG,p) && p && p!=recoil)
+            return false;
+        if (!io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true) ||
+            !pointer(io,weapon+go_active::FPHITSCAN_CALCULATOR,calc) || !calc ||
+            !((layout && layout->calculator) ? io.named(calc,layout->calculator,"")
+                                             : io.calculator_class(calc)) ||
+            !c.calculator.capture(io,calc,false) ||
+            !pointer(io,calc+go_active::CALCULATOR_HITSCAN_CONFIG,p) || p!=config ||
+            !pointer(io,calc+go_active::CALCULATOR_DISPERSION_CONFIG,dispersion) ||
+            !pointer(io,config+go_active::HITSCANCONFIG_DISPERSION_CONFIG,p) || p!=dispersion ||
             !io.named(dispersion,"DispersionConfig",kWeapons) ||
             !c.dispersion.capture(io,dispersion,true)) return false;
         return true;
     }
-    bool apply(size_t begin, size_t end, uint64_t player, const Layout& layout) {
+    bool apply(size_t begin, size_t end, uint64_t player, const Layout* layout) {
         for (size_t i=begin; i<end; ++i) {
             float now=0;
             if (!io.read(address(i),now) || !valid(now)) return false;
@@ -171,23 +193,23 @@ public:
         if (!r) recoil=Status::Failed;
         if (!s) spread=Status::Failed;
         if (!r || !s || (!nr && !ns)) return;
+        if (!base) return;
         std::array<uint8_t,20> id{};
         const Layout* layout=nullptr;
-        if (base && io.read(base+0x318,id))
+        if (io.read(base+0x318,id))
             for (const auto& l:kLayouts) if (l.build_id==id) layout=&l;
-        bool supported=layout!=nullptr;
         if (layout) for (size_t i=0;i<layout->guard_sites.size();++i) {
             uint32_t word=0;
-            if (!io.read(base+layout->guard_sites[i],word) || word!=layout->guard_words[i]) supported=false;
+            if (!io.read(base+layout->guard_sites[i],word) || word!=layout->guard_words[i]) {
+                layout=nullptr; // fall back to the fully typed managed graph
+                break;
+            }
         }
-        if (!supported) {
-            restore(0,9);
-            if (nr) recoil=Status::Failed;
-            if (ns) spread=Status::Failed;
-            return;
-        }
+        // Unknown build IDs are allowed only through resolve(): every object
+        // class, native identity and config backlink is revalidated. A shifted
+        // layout therefore fails closed instead of disabling unchanged builds.
         Context next;
-        if (!resolve(player,*layout,next)) {
+        if (!resolve(player,layout,next)) {
             if (!restore(0,9)) recoil=spread=Status::Failed;
             return;
         }
@@ -195,8 +217,8 @@ public:
             if (!restore(0,9)) { recoil=spread=Status::Failed; return; }
             context_=next;
         }
-        if (nr) recoil=apply(0,6,player,*layout)?Status::Active:Status::Failed;
-        if (ns) spread=apply(6,9,player,*layout)?Status::Active:Status::Failed;
+        if (nr) recoil=apply(0,6,player,layout)?Status::Active:Status::Failed;
+        if (ns) spread=apply(6,9,player,layout)?Status::Active:Status::Failed;
     }
 };
 }

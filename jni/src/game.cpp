@@ -3617,6 +3617,15 @@ bool esp_silent_publish(uint64_t target, const float aim[3]) {
     c.target = target;
     c.eye[0] = g_cam_pos.x; c.eye[1] = g_cam_pos.y; c.eye[2] = g_cam_pos.z;
     for (int i = 0; i < 3; ++i) c.aim[i] = aim[i];
+    // Do one synchronous write in the publishing frame as well. The worker is
+    // still the high-frequency owner, but it can be descheduled exactly while
+    // the game simulates a shot; this closes that first scheduling window.
+    float direct[3] = {c.aim[0]-c.eye[0],c.aim[1]-c.eye[1],c.aim[2]-c.eye[2]};
+    const float len2=direct[0]*direct[0]+direct[1]*direct[1]+direct[2]*direct[2];
+    if (len2>0.25f*0.25f && len2<4.0e12f) {
+        const float inv=1.f/std::sqrt(len2);
+        esp_mem_aim_write_fire_dir(direct[0]*inv,direct[1]*inv,direct[2]*inv);
+    }
     static uint64_t previous_player = 0, previous_weapon = 0;
     static float previous_shot = 0.f;
     static double hot_until = 0.0;

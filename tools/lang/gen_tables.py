@@ -104,12 +104,10 @@ UI_EN = {
     'Темп оружия': 'Weapon speed',
     'Быстрая стрельба': 'Fast fire',
     'Быстрая перезарядка': 'Fast reload',
-    'Множитель стрельбы': 'Fire multiplier',
-    'Множитель перезарядки': 'Reload multiplier',
     'Темп оружия: не применён, проверьте журнал': 'Weapon speed: not applied; check the log',
-    # мгновенный подбор (loot.h): строки состояния повторяют оружейные
+    # быстрый подбор (loot.h): строки состояния повторяют оружейные
     'Подбор': 'Looting',
-    'Мгновенный подбор': 'Instant pickup',
+    'Быстрый подбор': 'Fast pickup',
     'Подбор: не применено': 'Pickup: not applied',
     'Подбор: работает': 'Pickup: active',
     'Потоки переноса': 'Transfer flows',

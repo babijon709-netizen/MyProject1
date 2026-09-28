@@ -41,16 +41,37 @@ viewmodel::FpsController<Memory> fps_controller(memory);
 // through the fresh anonymous-heap mapping gate.
 struct HeapMemory {
     template<class T> bool read(uint64_t address, T& value) { return memory.read(address,value); }
-    bool named(uint64_t object, const char* name, const char* namespaze) {
-        if (object < 0x10000) return false;
-        uint64_t k=memory.ptr(object);
-        if (k < 0x10000) return false;
-        uint64_t np=memory.ptr(k+0x10), sp=memory.ptr(k+0x18);
+    bool named_klass(uint64_t klass, const char* name, const char* namespaze) {
+        if (klass < 0x10000) return false;
+        uint64_t np=memory.ptr(klass+go_active::IL2CPP_CLASS_NAME);
+        uint64_t sp=memory.ptr(klass+go_active::IL2CPP_CLASS_NAMESPACE);
         char n[96]{}, ns[96]{};
         const size_t nl=std::strlen(name)+1, sl=std::strlen(namespaze)+1;
         return nl<=sizeof(n) && sl<=sizeof(ns) && np && sp &&
             g_mem.read_quiet(np,n,nl) && g_mem.read_quiet(sp,ns,sl) &&
             std::memcmp(n,name,nl)==0 && std::memcmp(ns,namespaze,sl)==0;
+    }
+    bool named(uint64_t object, const char* name, const char* namespaze) {
+        return object>=0x10000 && named_klass(memory.ptr(object),name,namespaze);
+    }
+    // Calculator names rotate between builds (Ze/FJ/...). Its empty namespace
+    // and both typed backlinks are checked by weapon_tuning before any write.
+    bool calculator_class(uint64_t object) {
+        if (object < 0x10000) return false;
+        const uint64_t klass=memory.ptr(object);
+        if (klass < 0x10000) return false;
+        const uint64_t np=memory.ptr(klass+go_active::IL2CPP_CLASS_NAME);
+        const uint64_t sp=memory.ptr(klass+go_active::IL2CPP_CLASS_NAMESPACE);
+        char ns=1, name[33]{};
+        if (!np || !sp || !g_mem.read_quiet(sp,&ns,1) || ns ||
+            !g_mem.read_quiet(np,name,sizeof(name))) return false;
+        for (unsigned i=0;i<sizeof(name);++i) {
+            if (!name[i]) return i>0;
+            const unsigned char c=(unsigned char)name[i];
+            if (!((c>='a'&&c<='z') || (c>='A'&&c<='Z') ||
+                  (c>='0'&&c<='9') || c=='_')) return false;
+        }
+        return false;
     }
     template<class T> bool write_heap(uint64_t address, const T& value) {
         if (!g_mem.bound() || g_pid<=0) return false;
@@ -151,31 +172,55 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     tick_fps(epoch, settings.fps_limit);
     loot.tick(epoch, g_il2cpp_base, settings.fast_loot);
     const bool want_no_spread = settings.no_spread || esp_silent_wants_no_spread();
-    // Resolve the current local player from the static source, NOT the ESP
-    // cache which intentionally tolerates stale identities during respawn.
+    // Use the local identity already validated by the world reader first. The
+    // fixed TypeInfo RVA can lag behind a game update even when every managed
+    // field offset is unchanged; that used to disable all four weapon toggles.
     uint64_t player = 0;
+    static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         settings.no_recoil || want_no_spread || weapons.has_state() ||
         g_state.fast_fire || g_state.fast_reload || weapon_speeds.has_state()) {
-        uint64_t klass = memory.ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
-        uint64_t sf = memory.klass_is(klass, "GameControllerBase") ? get_class_static_fields(klass) : 0;
-        uint64_t raw = 0;
-        if (!sf || !memory.read(sf + GAME_CONTROLLER_LOCAL_PLAYER_FIELD, raw)) {
-            // A failed read is NOT a confirmed scene change. Keep the originals
-            // so a later successful frame can restore a disabled feature.
-            auto wait = controller.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Waiting;
-            controller.status = {wait, wait};
-            weapons.recoil = settings.no_recoil || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
-            weapons.spread = want_no_spread || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
-            weapon_speeds.fire = g_state.fast_fire || weapon_speeds.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
-            weapon_speeds.reload = g_state.fast_reload || weapon_speeds.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
+        auto local_player_ok = [&](uint64_t candidate) {
+            uint64_t net=0; uint8_t local=0;
+            return candidate>=0x10000 && memory.is(candidate,"PlayerManager") &&
+                memory.read(candidate+0x40,net) &&
+                heap_memory.named(memio::untag(net),"NetworkIdentity","Mirror") &&
+                memory.read(memio::untag(net)+0x4a,local) && local==1;
+        };
+        if (local_player_ok(g_local_player)) player=g_local_player;
+        auto try_class = [&](uint64_t klass) {
+            if (player || !klass || !memory.klass_is(klass,"GameControllerBase")) return;
+            const uint64_t sf=get_class_static_fields(klass);
+            uint64_t raw=0;
+            if (!sf || !memory.read(sf+GAME_CONTROLLER_LOCAL_PLAYER_FIELD,raw)) return;
+            raw=memio::untag(raw);
+            if (local_player_ok(raw)) player=raw;
+        };
+        try_class(g_game_controller_class);
+        try_class(memory.ptr(g_il2cpp_base+GAME_CONTROLLER_TYPEINFO_RVA));
+        if (!player) {
+            if (!local_source_failed) {
+                local_source_failed=true;
+                LogLine("viewmodel: local PlayerManager unavailable; cached=0x%llx class=0x%llx rva=0x%llx",
+                        (unsigned long long)g_local_player,
+                        (unsigned long long)g_game_controller_class,
+                        (unsigned long long)GAME_CONTROLLER_TYPEINFO_RVA);
+            }
+            // A failed read is NOT a confirmed scene change. Keep pending
+            // originals so a later successful frame can still restore them.
+            auto wait=controller.has_state()?viewmodel::Status::Failed:viewmodel::Status::Waiting;
+            controller.status={wait,wait};
+            weapons.recoil=settings.no_recoil||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
+            weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
+            weapon_speeds.fire=g_state.fast_fire||weapon_speeds.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
+            weapon_speeds.reload=g_state.fast_reload||weapon_speeds.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             return;
         }
-        player = memio::untag(raw); // successful null read means no local player
+        local_source_failed=false;
     }
     weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
-    weapon_speeds.tick(epoch, g_il2cpp_base, player, g_state.fast_fire, g_state.fast_reload,
-                       g_state.fast_fire_mult, g_state.fast_reload_mult);
+    weapon_speeds.tick(epoch, g_il2cpp_base, player,
+                       g_state.fast_fire, g_state.fast_reload);
     controller.tick(epoch, player, settings);
     auto st = esp_viewmodel_diagnostics();
     if (st.fov != last_log.fov || st.hands != last_log.hands ||

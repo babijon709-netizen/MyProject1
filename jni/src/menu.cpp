@@ -927,20 +927,13 @@ float TabContent(int tab, float dt, float cW) {
             ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
 
         SHdr(XS("Темп оружия"));
-        CardBg(Layout::RowH * 2.f + Layout::SliderH * 2.f);
+        CardBg(Layout::RowH * 2.f);
         const bool oldFastFire = g_state.fast_fire, oldFastReload = g_state.fast_reload;
-        bool speedChanged = false;
         ToggleRow("##fastfire", XS("Быстрая стрельба"), &g_state.fast_fire,
                   g_state.a_fast_fire, false, true);
-        speedChanged |= SliderRow("##fastfiremult", XS("Множитель стрельбы"),
-                                  &g_state.fast_fire_mult, 1.f, 20.f, XS("×%.1f"),
-                                  false, false, g_state.sl_fast_fire, dt);
         ToggleRow("##fastreload", XS("Быстрая перезарядка"), &g_state.fast_reload,
-                  g_state.a_fast_reload, false, false);
-        speedChanged |= SliderRow("##fastreloadmult", XS("Множитель перезарядки"),
-                                  &g_state.fast_reload_mult, 1.f, 20.f, XS("×%.1f"),
-                                  true, false, g_state.sl_fast_reload, dt);
-        if (oldFastFire != g_state.fast_fire || oldFastReload != g_state.fast_reload || speedChanged)
+                  g_state.a_fast_reload, true, false);
+        if (oldFastFire != g_state.fast_fire || oldFastReload != g_state.fast_reload)
             esp_viewmodel_tick(vm);
         const auto speedStatus = esp_viewmodel_diagnostics();
         if (speedStatus.fast_fire == viewmodel::Status::Failed ||
@@ -953,7 +946,7 @@ float TabContent(int tab, float dt, float cW) {
         SHdr(XS("Подбор"));
         CardBg(Layout::RowH);
         const bool oldLoot = vm.fast_loot;
-        ToggleRow("##instantloot", XS("Мгновенный подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
+        ToggleRow("##instantloot", XS("Быстрый подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
         if (oldLoot != vm.fast_loot) esp_viewmodel_tick(vm);
 
         SHdr(XS("Лимит FPS"));
