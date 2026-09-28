@@ -4,7 +4,13 @@
 #include "game_offsets.h"
 
 namespace go_active {
-using namespace game_offsets;
+#define GO_FIELD(name, beta_value) inline std::uint64_t name = game_offsets::name;
+#define GO_CONST(name, beta_value) inline float name = game_offsets::name;
+#include "game_offsets_active.inc"
+#undef GO_FIELD
+#undef GO_CONST
+using game_offsets::ToolPurpose;
+using game_offsets::MineableEntityType;
 }
 
 // Оставляем совместимый алиас для старых диагностических участков кода;
