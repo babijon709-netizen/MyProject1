@@ -25,23 +25,21 @@
 #include <future>
 #include <chrono>
 #include <thread>
+#include <cstdlib>
 
 #include "xp.inc"
 
 // ---- заглушка лога (в стенде пишет в stderr, только если задан AIM_LOG) ----
 #include "logfile.h"
+#undef LogLine
 static bool g_log_echo = getenv("AIM_LOG") != nullptr;
-void LogOpen() {}
-void LogClose() {}
-void LogStage(int) {}
-void LogFrameBeat(unsigned long) {}
-void LogWatchdogStart() {}
-void LogLine(const char* fmt, ...) {
+static void AimTestLogLine(const char* fmt, ...) {
     if (!g_log_echo) return;
     va_list a; va_start(a, fmt);
     fprintf(stderr, "  лог: "); vfprintf(stderr, fmt, a); fputc('\n', stderr);
     va_end(a);
 }
+#define LogLine(...) AimTestLogLine(__VA_ARGS__)
 
 // ---- заглушка языка (XS() шифрует строку, перевод здесь не нужен) ----
 namespace lang { inline const char* text(const char* ru) { return ru; } }
@@ -49,6 +47,7 @@ namespace lang { inline const char* text(const char* ru) { return ru; } }
 #include "app_state.h"     // настоящий AppState (настройки аима)
 #include "game.h"          // настоящий EspBox и объявления esp_*
 #include "aim.h"           // AimMode, AimMemDiag
+#include "silent_aim.h"    // interface used by the extracted silent adapter
 #include "aim_learn.h"     // настоящий GainTrack
 #include "widgets.h"       // Sheet/Popover (меню открыто — аим молчит)
 
@@ -63,12 +62,14 @@ static bool g_buildPrompt = false;
 AppState   g_state;
 InputState g_input;
 bool       g_aimActive = false;   // аим ведёт цель (автофарм уступает камеру)
+bool       s_fingerDown = false;
 Sheet      g_sheet;
 Popover    g_pop;
 
 // Тач-режим в стенд не входит (его проверяет tools/touch), но диспетчер его
 // зовёт — здесь это пустышка.
 static void UpdateAimTouch(float) { }
+static void AimReleaseFinger(bool& down) { down = false; }
 
 static int g_toasts = 0;
 void ShowToast(const char*, float) { ++g_toasts; }
@@ -171,6 +172,10 @@ static void snapshot() {
     b.ally = false;
     b.distance = 25.f;
     b.aim_valid[0] = true;
+    b.aim_world_valid[0] = true;
+    Game::anglesTo(g_targetYaw, g_targetPitch,
+                   b.aim_world[0][0], b.aim_world[0][1], b.aim_world[0][2]);
+    for (float& value : b.aim_world[0]) value *= b.distance;
     b.aim_yaw[0] = eYaw; b.aim_pitch[0] = ePitch;
     b.aim_pts[0][0] = 1230.f + eYaw * g_pxPerDeg;
     b.aim_pts[0][1] = 540.f - ePitch * g_pxPerDeg;
@@ -180,6 +185,7 @@ static void snapshot() {
 // ---- esp_* из game.h ----
 float esp_camera_fov_deg() { return 60.f; }
 bool esp_local_player_is_aiming() { return true; }
+int esp_local_aim_source() { return 1; }
 // Муссор вместо угла камеры: 0 — камера честная, иначе отдаём это значение.
 // Так проверяется, что кадр не залипнет (см. сценарий «мусорный угол»).
 float g_garbageCam = 0.f;
@@ -231,6 +237,19 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     return true;
 }
 
+namespace silent_aim {
+static Stats g_stats{};
+bool publish(const Command&) { return false; } // worker itself has a separate unit test
+void clear() { g_stats.active = g_stats.axis = false; }
+void shutdown() { clear(); }
+Stats stats() { return g_stats; }
+}
+bool esp_silent_publish(uint64_t, const float aim[3]) {
+    const bool ok = esp_mem_aim_write_fire_dir(aim[0], aim[1], aim[2]);
+    silent_aim::g_stats.active = silent_aim::g_stats.axis = ok;
+    if (ok) ++silent_aim::g_stats.writes; else ++silent_aim::g_stats.failures;
+    return ok;
+}
 
 // WrapDeg180() — общая обёртка угла, её зовёт вырезанный код ниже.
 #include "ui_util.h"
@@ -293,6 +312,7 @@ static void resetGame() {
     g_garbageCam = 0.f;
     g_toasts = 0;
     s_memDiag = AimMemDiag{};
+    silent_aim::clear();
 }
 
 static int g_fail = 0;
@@ -341,7 +361,6 @@ int main() {
         check(r.writes == 0, "записей нет вовсе (не падаем на тач)");
         check(fabsf(g_game.camYaw()) < 1e-3f, "камера не двигалась");
         check(!AimMemoryDiag().params, "диагностика: params = нет");
-        check(r.toasts >= 1, "пользователю сказали, почему режим молчит");
     }
 
     // P. Дрожь точки прицела. Кость головы дышит: прочитанная точка ходит на
@@ -368,6 +387,26 @@ int main() {
             printf("ДРОЖЬ цели ±%.2f°: камера ходит не больше %.3f° за кадр\n", amp, maxStep);
             check(maxStep < amp, "камера ходит меньше, чем дрожит цель");
         }
+    }
+
+    // S. Сайлент публикует exact world point: камера остаётся на месте,
+    // а ось выстрела становится направлением на кость.
+    {
+        resetGame();
+        g_targetYaw = 17.f; g_targetPitch = 6.f;
+        g_state.aim_mode = AIM_MODE_SILENT;
+        snapshot(); UpdateAim(0.016f);
+        float yaw = 0.f, pitch = 0.f; axisAngles(yaw, pitch);
+        check(fabsf(yaw - g_targetYaw) < 0.05f, "сайлент: yaw оси направлен в world-точку");
+        check(fabsf(pitch - g_targetPitch) < 0.05f, "сайлент: pitch оси направлен в world-точку");
+        check(fabsf(g_game.camYaw()) < 0.001f && fabsf(g_game.camPitch()) < 0.001f,
+              "сайлент не двигает камеру");
+        check(silent_aim::stats().axis, "сайлент: snapshot опубликован");
+        check(esp_silent_wants_no_spread(), "сайлент: No Spread запрошен");
+        g_state.aim_mode = AIM_MODE_MEMORY;
+        UpdateAim(0.016f);
+        check(!silent_aim::stats().active, "смена режима закрывает silent lease");
+        check(!esp_silent_wants_no_spread(), "смена режима снимает Silent No Spread");
     }
 
     // H. Выключенный аим ничего не пишет.

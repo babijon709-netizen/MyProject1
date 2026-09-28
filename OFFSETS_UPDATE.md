@@ -2004,3 +2004,24 @@ Cycle` на 0x40): 0xD988550 и 0xD98B6C8.
 **Про `.data.rel.ro`:** слоты лежат в `.data` (в новом бинарнике
 0xD71B720..0xDD3A3C8), название секции в комментариях историческое — в коде от
 этого ничего не зависит.
+
+### 28 сентября 2026: onesource — UniTask, темп оружия и calculator
+
+Для переноса функций из `onesource.7z` отдельно сверены текущие release/beta
+дампы. Добавлен `PLAYER_LOOP_HELPER_TYPEINFO_RVA`: release **0xD9C52E0**,
+beta **0xD9A3488**. Архивное beta-значение 0xDAE2AC0 принадлежит другой
+сборке и отвергнуто. `beta_offsets.py` теперь пересчитывает этот четвёртый RVA
+вместе с прежними тремя TypeInfo anchors.
+
+В карту добавлены layout UniTask (`PlayerLoopHelper.runners` 0x30,
+`PlayerLoopRunner.tail/items` 0x30/0x38, два DelayPromise layout),
+`FPHitscan.config/calculator/WeaponRecoil` (0x130/0x1F8/0x200), поля
+`HitscanWeaponConfig` fire/reload (0x34/0x48/0x4C) и config back-references.
+Calculator называется `Ze` в release и `FJ` в beta, но его поля совпадают:
+dispersion 0x10, hitscan config 0x18, cached float 0x20.
+
+Для такой переобфускации `via` карты расширен fail-closed positional-шагом:
+`{"struct":"Oxide_FPHitscan_Fields","offset":504}`. Он выводит имя целевой
+структуры из managed-pointer по 0x1F8 отдельно в каждом дампе, поэтому dry-run
+`beta_offsets.py` теперь проверяет `Ze → FJ` без ручного исключения. Полная
+таблица и lifecycle перенесённых функций — [ONESOURCE_PORT.md](ONESOURCE_PORT.md).

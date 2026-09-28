@@ -7,6 +7,7 @@
 #include "hud.h"
 #include "esp_draw.h"
 #include "aim.h"
+#include "silent_aim.h"
 #include "farm.h"
 #include "widgets.h"
 #include "menu.h"
@@ -124,6 +125,7 @@ int main(int argc, char* argv[]) {
         slowMark();   // 4: после меню
         LogStage(kStageFreecam);
         UpdateFreecam(ImGui::GetIO().DeltaTime);   // фрикам: полёт камеры
+        AimEndFrame(); // закрыть lease, если меню/фрикам выключили сайлент позднее
         slowMark();   // 5: после фрикама
         LogStage(kStageFrameEnd);
         drawEnd();
@@ -180,6 +182,9 @@ int main(int argc, char* argv[]) {
     }
     LogClose();
     while (!g_frame_done.load()) {}
+    // Сначала останавливаем фонового writer: во время восстановления камеры и
+    // object-data он уже не должен менять ось выстрела.
+    silent_aim::shutdown();
     // Камеру возвращаем на место ДО отвязки: во фрикаме она улетела от тела,
     // а после выхода чита возвращать её уже некому.
     esp_freecam_set(false);

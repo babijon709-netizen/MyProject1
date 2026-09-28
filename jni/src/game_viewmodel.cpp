@@ -1,6 +1,9 @@
 #include "fps_memory.h"
 #include "weapon_tuning_memory.h"
+#include "weapon_speed_memory.h"
+#include "loot_memory.h"
 #include "object_data_memory.h"
+#include "app_state.h"
 #include "maps_lookup.h"
 #include <chrono>
 #include <fstream>
@@ -64,6 +67,8 @@ struct HeapMemory {
 };
 HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
+weapon_speed::Controller<HeapMemory> weapon_speeds(heap_memory);
+fast_loot::Controller<HeapMemory> loot(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
@@ -119,6 +124,9 @@ void esp_viewmodel_reset(bool restore) {
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))
         LogLine("weapon data: originals could not all be restored before disconnect; restart game");
+    if (!weapon_speeds.reset(restore && g_mem.bound()))
+        LogLine("weapon speed: originals could not all be restored before disconnect; restart game");
+    loot.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     ++epoch;
 }
@@ -128,19 +136,27 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
+        weapon_speeds.reset(false); loot.reset();
+        const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.recoil = settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off;
-        weapons.spread = settings.no_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        loot.status = settings.fast_loot ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        weapon_speeds.fire = g_state.fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        weapon_speeds.reload = g_state.fast_reload ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
                              settings.hands_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off};
         return;
     }
     tick_fps(epoch, settings.fps_limit);
+    loot.tick(epoch, g_il2cpp_base, settings.fast_loot);
+    const bool want_no_spread = settings.no_spread || esp_silent_wants_no_spread();
     // Resolve the current local player from the static source, NOT the ESP
     // cache which intentionally tolerates stale identities during respawn.
     uint64_t player = 0;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
-        settings.no_recoil || settings.no_spread || weapons.has_state()) {
+        settings.no_recoil || want_no_spread || weapons.has_state() ||
+        g_state.fast_fire || g_state.fast_reload || weapon_speeds.has_state()) {
         uint64_t klass = memory.ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
         uint64_t sf = memory.klass_is(klass, "GameControllerBase") ? get_class_static_fields(klass) : 0;
         uint64_t raw = 0;
@@ -150,18 +166,25 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             auto wait = controller.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Waiting;
             controller.status = {wait, wait};
             weapons.recoil = settings.no_recoil || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
-            weapons.spread = settings.no_spread || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
+            weapons.spread = want_no_spread || weapons.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
+            weapon_speeds.fire = g_state.fast_fire || weapon_speeds.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
+            weapon_speeds.reload = g_state.fast_reload || weapon_speeds.has_state() ? viewmodel::Status::Failed : viewmodel::Status::Off;
             return;
         }
         player = memio::untag(raw); // successful null read means no local player
     }
-    weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, settings.no_spread);
+    weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
+    weapon_speeds.tick(epoch, g_il2cpp_base, player, g_state.fast_fire, g_state.fast_reload,
+                       g_state.fast_fire_mult, g_state.fast_reload_mult);
     controller.tick(epoch, player, settings);
     auto st = esp_viewmodel_diagnostics();
     if (st.fov != last_log.fov || st.hands != last_log.hands ||
-        st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread) {
-        LogLine("viewmodel: fov=%d hands=%d; object-data recoil=%d spread=%d (0 off,1 waiting,2 active,3 ADS,4 unsupported/modified image or memory error)",
-                (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread);
+        st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread ||
+        st.fast_loot != last_log.fast_loot || st.fast_fire != last_log.fast_fire ||
+        st.fast_reload != last_log.fast_reload) {
+        LogLine("viewmodel: fov=%d hands=%d; recoil=%d spread=%d loot=%d fire=%d reload=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error)",
+                (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread,
+                (int)st.fast_loot, (int)st.fast_fire, (int)st.fast_reload);
         last_log = st;
     }
 }
@@ -171,6 +194,9 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     auto status = controller.status;
     status.no_recoil = weapons.recoil;
     status.no_spread = weapons.spread;
+    status.fast_loot = loot.status;
+    status.fast_fire = weapon_speeds.fire;
+    status.fast_reload = weapon_speeds.reload;
     return status;
 }
 

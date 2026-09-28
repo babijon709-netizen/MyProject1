@@ -123,7 +123,7 @@ float TabContent(int tab, float dt, float cW) {
             auto* fn = ImGui::GetFont();
             const float fs = ImGui::GetFontSize();
             const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-            CardBg(rowH * 2.f);
+            CardBg(rowH * 3.f);
 
             auto modeRow = [&](const char* id, const char* lbl, int mode, bool last, float& anim) {
                 auto pos = ImGui::GetCursorScreenPos();
@@ -148,8 +148,9 @@ float TabContent(int tab, float dt, float cW) {
                     dl->AddLine({cX + padX, pos.y + rowH - 0.5f},
                                 {cX + cW - padX, pos.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
             };
-            modeRow("##am0", XS("Тач"),    AIM_MODE_TOUCH,  false, g_state.a_aim_mode0);
-            modeRow("##am1", XS("Память"), AIM_MODE_MEMORY, true,  g_state.a_aim_mode1);
+            modeRow("##am0", XS("Тач"),    AIM_MODE_TOUCH,   false, g_state.a_aim_mode0);
+            modeRow("##am1", XS("Память"), AIM_MODE_MEMORY,  false, g_state.a_aim_mode1);
+            modeRow("##am2", XS("Сайлент"), AIM_MODE_SILENT, true,  g_state.a_aim_mode2);
         }
 
         SHdr(XS("Куда целиться"));
@@ -925,11 +926,35 @@ float TabContent(int tab, float dt, float cW) {
                  (vm.no_spread && weaponStatus.no_spread == viewmodel::Status::Waiting))
             ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
 
-        // Мгновенный подбор: логики больше нет (по запросу) — ряд оставлен
-        // только как кнопка (флаг хранится, тумблер переключается).
+        SHdr(XS("Темп оружия"));
+        CardBg(Layout::RowH * 2.f + Layout::SliderH * 2.f);
+        const bool oldFastFire = g_state.fast_fire, oldFastReload = g_state.fast_reload;
+        bool speedChanged = false;
+        ToggleRow("##fastfire", XS("Быстрая стрельба"), &g_state.fast_fire,
+                  g_state.a_fast_fire, false, true);
+        speedChanged |= SliderRow("##fastfiremult", XS("Множитель стрельбы"),
+                                  &g_state.fast_fire_mult, 1.f, 20.f, XS("×%.1f"),
+                                  false, false, g_state.sl_fast_fire, dt);
+        ToggleRow("##fastreload", XS("Быстрая перезарядка"), &g_state.fast_reload,
+                  g_state.a_fast_reload, false, false);
+        speedChanged |= SliderRow("##fastreloadmult", XS("Множитель перезарядки"),
+                                  &g_state.fast_reload_mult, 1.f, 20.f, XS("×%.1f"),
+                                  true, false, g_state.sl_fast_reload, dt);
+        if (oldFastFire != g_state.fast_fire || oldFastReload != g_state.fast_reload || speedChanged)
+            esp_viewmodel_tick(vm);
+        const auto speedStatus = esp_viewmodel_diagnostics();
+        if (speedStatus.fast_fire == viewmodel::Status::Failed ||
+            speedStatus.fast_reload == viewmodel::Status::Failed)
+            ImGui::TextDisabled("%s", XS("Темп оружия: не применён, проверьте журнал"));
+        else if ((g_state.fast_fire && speedStatus.fast_fire == viewmodel::Status::Waiting) ||
+                 (g_state.fast_reload && speedStatus.fast_reload == viewmodel::Status::Waiting))
+            ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
+
         SHdr(XS("Подбор"));
         CardBg(Layout::RowH);
+        const bool oldLoot = vm.fast_loot;
         ToggleRow("##instantloot", XS("Мгновенный подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
+        if (oldLoot != vm.fast_loot) esp_viewmodel_tick(vm);
 
         SHdr(XS("Лимит FPS"));
         {
@@ -1687,6 +1712,7 @@ void RenderMenu() {
     Tick(g_state.a_aim_pr2,    g_state.aim_priority == 2,  dt);
     Tick(g_state.a_aim_mode0,  g_state.aim_mode == AIM_MODE_TOUCH,  dt);
     Tick(g_state.a_aim_mode1,  g_state.aim_mode == AIM_MODE_MEMORY, dt);
+    Tick(g_state.a_aim_mode2,  g_state.aim_mode == AIM_MODE_SILENT, dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
     Tick(g_state.a_ui_dark,    g_state.ui_dark_mode,       dt);
@@ -1700,6 +1726,8 @@ void RenderMenu() {
     Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil, dt);
     Tick(g_state.a_no_spread, g_state.viewmodel.no_spread, dt);
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
+    Tick(g_state.a_fast_fire, g_state.fast_fire, dt);
+    Tick(g_state.a_fast_reload, g_state.fast_reload, dt);
     Tick(g_state.a_fps_90,  g_state.viewmodel.fps_limit == 90,  dt);
     Tick(g_state.a_fps_120, g_state.viewmodel.fps_limit == 120, dt);
     Tick(g_state.a_fps_144, g_state.viewmodel.fps_limit == 144, dt);

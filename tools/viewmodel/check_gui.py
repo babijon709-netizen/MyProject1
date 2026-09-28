@@ -23,9 +23,14 @@ for setting, anim in [('fov_enabled', 'a_custom_fov'),
     assert re.search(r'Tick\(\s*g_state\.' + anim +
                      r'\s*,\s*g_state\.viewmodel\.' + setting +
                      r'\s*,\s*dt\s*\)', menu), f'missing animation update: {setting}'
+for setting, anim in [('fast_fire', 'a_fast_fire'), ('fast_reload', 'a_fast_reload')]:
+    assert re.search(r'ToggleRow\([^;]*&g_state\.' + setting +
+                     r'\s*,\s*g_state\.' + anim + r'\b', menu), setting
+    assert re.search(r'Tick\(\s*g_state\.' + anim +
+                     r'\s*,\s*g_state\.' + setting + r'\s*,\s*dt\s*\)', menu), setting
+assert 'AIM_MODE_SILENT' in menu and 'g_state.a_aim_mode2' in menu
 pickup = menu.split('SHdr(XS("Подбор"))', 1)[1].split('SHdr(', 1)[0]
-# Фича удалена по запросу: остался только тумблер, вызовов логики —
-# нет (esp_loot_tick/EspLootState/тосты запрещены секцией ниже тоже).
+# Memory traversal remains outside menu rendering; this section is a thin toggle.
 assert 'ToggleRow("##instantloot"' in pickup, 'the toggle row must stay'
 assert 'esp_loot_tick' not in pickup, 'no logic calls must remain'
 for banned in ('lootStatus', 'LootReasonText', 'LootKindText', 'esp_loot_diagnostics', 'esp_loot_refusal'):

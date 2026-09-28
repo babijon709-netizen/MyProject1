@@ -56,7 +56,38 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // keeping only slots that are then dereferenced as  ldr x8,[klass,#0xB8]
 // (Il2CppClass::static_fields) - i.e. exactly the access our reader performs.
 inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD9C5310;
+// Cysharp.Threading.Tasks.PlayerLoopHelper; re-derived from this release ELF.
+inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA    = 0xD9C52E0;
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
+
+
+// Shared managed-object layouts independently verified in release and beta.
+inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS_OFFSET = 0xB8;
+inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS = 0x30;
+inline constexpr std::uint64_t LOOPRUNNER_ITEMS = 0x38;
+inline constexpr std::uint64_t LOOPRUNNER_TAIL = 0x30;
+inline constexpr std::uint64_t DELAYPROMISE_TIMESPAN = 0x18;
+inline constexpr std::uint64_t DELAYPROMISE_ELAPSED = 0x1C;
+inline constexpr std::uint64_t DELAYPROMISE_INITIAL_FRAME = 0x20;
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_TIMESPAN = 0x1C;
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_ELAPSED = 0x20;
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_INITIAL_FRAME = 0x18;
+inline constexpr std::uint64_t FPHITSCAN_CONFIG = 0x130;
+inline constexpr std::uint64_t FPHITSCAN_CALCULATOR = 0x1F8;
+inline constexpr std::uint64_t CALCULATOR_DISPERSION_CONFIG = 0x10;
+inline constexpr std::uint64_t CALCULATOR_HITSCAN_CONFIG = 0x18;
+inline constexpr std::uint64_t CALCULATOR_CACHED_BASE_DISPERSION = 0x20;
+inline constexpr std::uint64_t HITSCANCONFIG_FIRE_RATE = 0x34;
+inline constexpr std::uint64_t HITSCANCONFIG_FULL_RELOAD = 0x48;
+inline constexpr std::uint64_t HITSCANCONFIG_LOOP_RELOAD = 0x4C;
+inline constexpr std::uint64_t HITSCANCONFIG_DISPERSION_CONFIG = 0x60;
+inline constexpr std::uint64_t HITSCANCONFIG_RECOIL_CONFIG = 0x68;
+inline constexpr std::uint64_t FPHITSCAN_RECOIL = 0x200;
+inline constexpr std::uint64_t WEAPONRECOIL_RECOIL_CONFIG = 0x00;
+inline constexpr std::uint64_t WEAPONRECOIL_WEAPON_CONFIG = 0x08;
+inline constexpr std::uint64_t RECOILCONFIG_MIN_RECOIL = 0x18;
+inline constexpr std::uint64_t DISPERSIONCONFIG_MIN_DISPERSION = 0x20;
+inline constexpr std::uint64_t DISPERSIONCONFIG_MAX_DISPERSION = 0x24;
 
 inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD9C0690; // GameControllerBase
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)

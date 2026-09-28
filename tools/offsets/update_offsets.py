@@ -272,9 +272,17 @@ def main():
         st = None
         for i, hop in enumerate(via):
             st = hop.get('struct') or st
-            want = [f for f in (dump.fields(st) or []) if f[0] == hop['field']]
+            # Обычно путь задаётся читаемым именем поля. Для указателя с
+            # перекатываемым именем допустим стабильный positional offset:
+            # например FPHitscan calculator @0x1F8 (Ze в release, FJ в beta).
+            if 'field' in hop:
+                want = [f for f in (dump.fields(st) or []) if f[0] == hop['field']]
+                label = hop['field']
+            else:
+                want = [f for f in (dump.fields(st) or []) if f[1] == hop.get('offset')]
+                label = '0x%X' % hop.get('offset', -1)
             if len(want) != 1 or not want[0][2].endswith('_o*'):
-                return None, f'шаг {i + 1}: {st}.{hop["field"]}'
+                return None, f'шаг {i + 1}: {st}.{label}'
             st = want[0][2][:-len('_o*')] + '_Fields'
         return st, None
 
@@ -357,7 +365,9 @@ def main():
         ent0 = omap[consts[0]]
         label = lay.TRACKED.get(struct, struct)
         if ent0.get('via'):
-            label = f'{label} via {".".join(h["field"] for h in ent0["via"])}'
+            path = '.'.join(h['field'] if 'field' in h else '0x%X' % h['offset']
+                            for h in ent0['via'])
+            label = f'{label} via {path}'
         fnew = new.fields(struct)
         fold = old.fields(struct_old) if old else None
         if fnew is None:

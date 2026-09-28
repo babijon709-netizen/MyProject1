@@ -65,6 +65,10 @@ struct EspBox {
     // degrees (yaw = +right, pitch = +up). Only meaningful when aim_valid[i].
     float aim_yaw[3];
     float aim_pitch[3];
+    // Exact uncompensated bone position for the silent writer. Touch/Memory
+    // retain their current angular compensation in aim_yaw/aim_pitch.
+    float aim_world[3][3] = {};
+    bool  aim_world_valid[3] = {};
     // Бот (враждебный NPC): бокс собран не из игрока, а из маркера — только
     // данные для аима (точка = шея по росту от земли). Оверлей такие боксы
     // не рисует (ботов рисуют маркеры), аим берёт на общих основаниях.
@@ -400,6 +404,12 @@ bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z);
 // Записать ось выстрела. Вектор нормируется здесь: игра множает его на
 // дальность луча. false — ось не нашлась (нет игрока/хендлера/привязки).
 bool esp_mem_aim_write_fire_dir(float x, float y, float z);
+
+// Publish a fully validated local-player/weapon snapshot to the independent
+// high-frequency silent writer. `aim` is the exact world-space bone point.
+bool esp_silent_publish(uint64_t target, const float aim[3]);
+// Silent requests object-data No Spread while it owns a fresh target.
+bool esp_silent_wants_no_spread();
 
 // ---- Фрикам ---------------------------------------------------------------
 // Камера отделяется от тела и летает сквозь стены: пишем локальную позицию

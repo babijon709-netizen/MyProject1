@@ -11,8 +11,8 @@ struct ViewmodelSettings {
     float x = 0.f, y = 0.f, z = 0.f;
     int fps_limit = 0; // 0 = original game limit; otherwise 90 / 120 / 144
     bool no_recoil = false, no_spread = false;
-    // Мгновенный подбор: не трогает код игры, дописывает только float в куче
-    // Кнопка сохранена, логики нет — флаг не влияет на игру.
+    // Мгновенный подбор: не трогает код игры, обнуляет только точный 0.35f
+    // cadence активных UniTask promises в управляемой куче.
     bool fast_loot = false;
 };
 
@@ -77,7 +77,11 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     return sanitize(s);
 }
 enum class Status { Off, Waiting, Active, ADS, Failed };
-struct Diagnostics { Status fov = Status::Off, hands = Status::Off, no_recoil = Status::Off, no_spread = Status::Off; };
+struct Diagnostics {
+    Status fov = Status::Off, hands = Status::Off;
+    Status no_recoil = Status::Off, no_spread = Status::Off;
+    Status fast_loot = Status::Off, fast_fire = Status::Off, fast_reload = Status::Off;
+};
 // Снимок состояния limiting FPS для меню: снимается контроллером при последнем
 // тике (до 100 мс назад), дополнительных обращений к памяти игры не делает.
 struct FpsUiInfo {

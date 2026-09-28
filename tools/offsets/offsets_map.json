@@ -764,19 +764,19 @@
  "IL2CPP_CLASS_NAME": {
   "kind": "runtime",
   "offset": 16,
-  "note": "Il2CppClass.name (Il2CppString*) — по нему код сверяет имена классов в рантайме",
+  "note": "Il2CppClass ABI: const char* name",
   "src": {
-   "file": "libil2cpp.so (ABI, metadata v39)",
-   "how": "Il2CppClass.name; проверяется в рантайме: код читает имя класса и сверяет со строкой — пока имена совпадают, смещение верное"
+   "file": "IL2CPP ABI",
+   "how": "Il2CppClass ABI: const char* name"
   }
  },
  "IL2CPP_CLASS_NAMESPACE": {
   "kind": "runtime",
   "offset": 24,
-  "note": "Il2CppClass.namespace (Il2CppString*)",
+  "note": "Il2CppClass ABI: const char* namespaze",
   "src": {
-   "file": "libil2cpp.so (ABI, metadata v39)",
-   "how": "Il2CppClass.namespaze, следующим полем"
+   "file": "IL2CPP ABI",
+   "how": "Il2CppClass ABI: const char* namespaze"
   }
  },
  "EVENT_HANDLER_LOOK_DIRECTION": {
@@ -1171,10 +1171,10 @@
  "IL2CPP_ARRAY_LENGTH": {
   "kind": "runtime",
   "offset": 24,
-  "note": "Il2CppArray.max_length (int32)",
+  "note": "Il2CppArray ABI: max_length",
   "src": {
-   "file": "ABI il2cpp",
-   "how": "Il2CppArray: klass 0x0, monitor 0x8, bounds* 0x10, max_length 0x18, данные 0x20"
+   "file": "IL2CPP ABI",
+   "how": "Il2CppArray ABI: max_length"
   }
  },
  "TRANSFORM_CHILDREN_ARRAY": {
@@ -1252,10 +1252,10 @@
  "IL2CPP_ARRAY_FIRST_ELEMENT": {
   "kind": "runtime",
   "offset": 32,
-  "note": "Il2CppArray: первый элемент (данные начинаются отсюда)",
+  "note": "Il2CppArray ABI: vector[0]",
   "src": {
-   "file": "ABI il2cpp",
-   "how": "данные массива начинаются с 0x20"
+   "file": "IL2CPP ABI",
+   "how": "Il2CppArray ABI: vector[0]"
   }
  },
  "NETWORK_CLIENT_TYPEINFO_RVA": {
@@ -2745,6 +2745,393 @@
    "struct": "Oxide_TransformOffset_Fields",
    "field": "m_LerpSpeed",
    "how": "release/beta layout; clamp(dt*m_LerpSpeed) in TransformOffset Tick at release RVA 0x6620EDC"
+  }
+ },
+ "PLAYER_LOOP_HELPER_TYPEINFO_RVA": {
+  "kind": "typeinfo_rva",
+  "class": "Cysharp.Threading.Tasks.PlayerLoopHelper",
+  "src": {
+   "file": "libil2cpp.so",
+   "section": ".data.rel.ro",
+   "how": "typeinfo_rva.py; PlayerLoopHelper static_fields anchor for guarded fast-loot traversal"
+  },
+  "note": "release 0xD9C52E0; current beta is derived separately as 0xD9A3488"
+ },
+ "PLAYERLOOPHELPER_RUNNERS": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.PlayerLoopHelper.static",
+  "struct": "Cysharp_Threading_Tasks_PlayerLoopHelper_StaticFields",
+  "field": "runners",
+  "type": "Il2CppObject*",
+  "offset": 48,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_PlayerLoopHelper_StaticFields",
+   "field": "runners",
+   "how": "UniTask PlayerLoopHelper static runners array; release/beta layouts checked"
+  }
+ },
+ "LOOPRUNNER_ITEMS": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.Internal.PlayerLoopRunner",
+  "struct": "Cysharp_Threading_Tasks_Internal_PlayerLoopRunner_Fields",
+  "field": "loopItems",
+  "type": "Il2CppObject*",
+  "offset": 56,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_Internal_PlayerLoopRunner_Fields",
+   "field": "loopItems",
+   "how": "live IPlayerLoopItem array"
+  }
+ },
+ "LOOPRUNNER_TAIL": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.Internal.PlayerLoopRunner",
+  "struct": "Cysharp_Threading_Tasks_Internal_PlayerLoopRunner_Fields",
+  "field": "tail",
+  "type": "int32_t",
+  "offset": 48,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_Internal_PlayerLoopRunner_Fields",
+   "field": "tail",
+   "how": "live item count; array length is capacity"
+  }
+ },
+ "DELAYPROMISE_TIMESPAN": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.UniTask.DelayIgnoreTimeScalePromise",
+  "struct": "Cysharp_Threading_Tasks_UniTask_DelayIgnoreTimeScalePromise_Fields",
+  "field": "delayFrameTimeSpan",
+  "type": "float",
+  "offset": 24,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_UniTask_DelayIgnoreTimeScalePromise_Fields",
+   "field": "delayFrameTimeSpan",
+   "how": "fast-loot exact 0.35f cadence"
+  }
+ },
+ "DELAYPROMISE_ELAPSED": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.UniTask.DelayIgnoreTimeScalePromise",
+  "struct": "Cysharp_Threading_Tasks_UniTask_DelayIgnoreTimeScalePromise_Fields",
+  "field": "elapsed",
+  "type": "float",
+  "offset": 28,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_UniTask_DelayIgnoreTimeScalePromise_Fields",
+   "field": "elapsed",
+   "how": "guard for fast-loot cadence"
+  }
+ },
+ "DELAYPROMISE_INITIAL_FRAME": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.UniTask.DelayIgnoreTimeScalePromise",
+  "struct": "Cysharp_Threading_Tasks_UniTask_DelayIgnoreTimeScalePromise_Fields",
+  "field": "initialFrame",
+  "type": "int32_t",
+  "offset": 32,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_UniTask_DelayIgnoreTimeScalePromise_Fields",
+   "field": "initialFrame",
+   "how": "guard for fast-loot cadence"
+  }
+ },
+ "DELAYPROMISE_SCALED_TIMESPAN": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.UniTask.DelayPromise",
+  "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+  "field": "delayTimeSpan",
+  "type": "float",
+  "offset": 28,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+   "field": "delayTimeSpan",
+   "how": "scaled fallback for fast-loot exact 0.35f cadence"
+  }
+ },
+ "DELAYPROMISE_SCALED_ELAPSED": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.UniTask.DelayPromise",
+  "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+  "field": "elapsed",
+  "type": "float",
+  "offset": 32,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+   "field": "elapsed",
+   "how": "guard for scaled promise"
+  }
+ },
+ "DELAYPROMISE_SCALED_INITIAL_FRAME": {
+  "kind": "field",
+  "class": "Cysharp.Threading.Tasks.UniTask.DelayPromise",
+  "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+  "field": "initialFrame",
+  "type": "int32_t",
+  "offset": 24,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields",
+   "field": "initialFrame",
+   "how": "guard for scaled promise"
+  }
+ },
+ "FPHITSCAN_CONFIG": {
+  "kind": "field",
+  "class": "Oxide.FPHitscan",
+  "struct": "Oxide_FPHitscan_Fields",
+  "field": "config",
+  "type": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_o*",
+  "offset": 304,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPHitscan_Fields",
+   "field": "config",
+   "how": "rapid fire/reload and weapon identity"
+  }
+ },
+ "FPHITSCAN_CALCULATOR": {
+  "kind": "field",
+  "class": "Oxide.FPHitscan",
+  "struct": "Oxide_FPHitscan_Fields",
+  "field": "Bna",
+  "type": "Ze_o*",
+  "offset": 504,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPHitscan_Fields",
+   "field": "Bna",
+   "how": "release calculator Ze; beta positional equivalent FJ"
+  }
+ },
+ "FPHITSCAN_RECOIL": {
+  "kind": "field",
+  "class": "Oxide.FPHitscan",
+  "struct": "Oxide_FPHitscan_Fields",
+  "field": "BnZ",
+  "type": "HyperHug_Games_Oxide_Features_Weapons_WeaponRecoil_o",
+  "offset": 512,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Oxide_FPHitscan_Fields",
+   "field": "BnZ",
+   "how": "embedded WeaponRecoil"
+  }
+ },
+ "CALCULATOR_DISPERSION_CONFIG": {
+  "kind": "field",
+  "class": "Ze",
+  "struct": "Ze_Fields",
+  "field": "ZUJ",
+  "type": "HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_o*",
+  "offset": 16,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Ze_Fields",
+   "field": "ZUJ",
+   "how": "release Ze / beta FJ calculator positional field"
+  },
+  "via": [
+   {
+    "struct": "Oxide_FPHitscan_Fields",
+    "offset": 504
+   }
+  ]
+ },
+ "CALCULATOR_HITSCAN_CONFIG": {
+  "kind": "field",
+  "class": "Ze",
+  "struct": "Ze_Fields",
+  "field": "ZUA",
+  "type": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_o*",
+  "offset": 24,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Ze_Fields",
+   "field": "ZUA",
+   "how": "release Ze / beta FJ calculator positional field"
+  },
+  "via": [
+   {
+    "struct": "Oxide_FPHitscan_Fields",
+    "offset": 504
+   }
+  ]
+ },
+ "CALCULATOR_CACHED_BASE_DISPERSION": {
+  "kind": "field",
+  "class": "Ze",
+  "struct": "Ze_Fields",
+  "field": "_ZUa_k__BackingField",
+  "type": "float",
+  "offset": 32,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Ze_Fields",
+   "field": "_ZUa_k__BackingField",
+   "how": "release Ze / beta FJ calculator positional cached base dispersion"
+  },
+  "via": [
+   {
+    "struct": "Oxide_FPHitscan_Fields",
+    "offset": 504
+   }
+  ]
+ },
+ "HITSCANCONFIG_FIRE_RATE": {
+  "kind": "field",
+  "class": "HyperHug.Games.Oxide.Features.Weapons.HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "fireRate",
+  "type": "float",
+  "offset": 52,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+   "field": "fireRate",
+   "how": "weapon tuning/speed config; release/beta checked"
+  }
+ },
+ "HITSCANCONFIG_FULL_RELOAD": {
+  "kind": "field",
+  "class": "HyperHug.Games.Oxide.Features.Weapons.HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "_FullReloadPeriod_k__BackingField",
+  "type": "float",
+  "offset": 72,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+   "field": "_FullReloadPeriod_k__BackingField",
+   "how": "weapon tuning/speed config; release/beta checked"
+  }
+ },
+ "HITSCANCONFIG_LOOP_RELOAD": {
+  "kind": "field",
+  "class": "HyperHug.Games.Oxide.Features.Weapons.HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "_LoopReloadPeriod_k__BackingField",
+  "type": "float",
+  "offset": 76,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+   "field": "_LoopReloadPeriod_k__BackingField",
+   "how": "weapon tuning/speed config; release/beta checked"
+  }
+ },
+ "HITSCANCONFIG_DISPERSION_CONFIG": {
+  "kind": "field",
+  "class": "HyperHug.Games.Oxide.Features.Weapons.HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "dispersionConfig",
+  "type": "HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_o*",
+  "offset": 96,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+   "field": "dispersionConfig",
+   "how": "weapon tuning/speed config; release/beta checked"
+  }
+ },
+ "HITSCANCONFIG_RECOIL_CONFIG": {
+  "kind": "field",
+  "class": "HyperHug.Games.Oxide.Features.Weapons.HitscanWeaponConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+  "field": "recoilConfig",
+  "type": "HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_o*",
+  "offset": 104,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
+   "field": "recoilConfig",
+   "how": "weapon tuning/speed config; release/beta checked"
+  }
+ },
+ "WEAPONRECOIL_RECOIL_CONFIG": {
+  "kind": "field",
+  "class": "HyperHug.Games.Oxide.Features.Weapons.WeaponRecoil",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_WeaponRecoil_Fields",
+  "field": "_recoilConfig",
+  "type": "HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_o*",
+  "offset": 0,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "HyperHug_Games_Oxide_Features_Weapons_WeaponRecoil_Fields",
+   "field": "_recoilConfig",
+   "how": "embedded WeaponRecoil pointer"
+  }
+ },
+ "WEAPONRECOIL_WEAPON_CONFIG": {
+  "kind": "field",
+  "class": "HyperHug.Games.Oxide.Features.Weapons.WeaponRecoil",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_WeaponRecoil_Fields",
+  "field": "_weaponConfig",
+  "type": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_o*",
+  "offset": 8,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "HyperHug_Games_Oxide_Features_Weapons_WeaponRecoil_Fields",
+   "field": "_weaponConfig",
+   "how": "embedded WeaponRecoil config backlink"
+  }
+ },
+ "RECOILCONFIG_MIN_RECOIL": {
+  "kind": "field",
+  "class": "HyperHug.Games.Oxide.Features.Weapons.RecoilConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_Fields",
+  "field": "_MinRecoil_k__BackingField",
+  "type": "UnityEngine_Vector2_o",
+  "offset": 24,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_Fields",
+   "field": "_MinRecoil_k__BackingField",
+   "how": "start of contiguous recoil scalars"
+  }
+ },
+ "DISPERSIONCONFIG_MIN_DISPERSION": {
+  "kind": "field",
+  "class": "HyperHug.Games.Oxide.Features.Weapons.DispersionConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_Fields",
+  "field": "minDispersion",
+  "type": "float",
+  "offset": 32,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_Fields",
+   "field": "minDispersion",
+   "how": "spread clamp lower bound"
+  }
+ },
+ "DISPERSIONCONFIG_MAX_DISPERSION": {
+  "kind": "field",
+  "class": "HyperHug.Games.Oxide.Features.Weapons.DispersionConfig",
+  "struct": "HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_Fields",
+  "field": "maxDispersion",
+  "type": "float",
+  "offset": 36,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_Fields",
+   "field": "maxDispersion",
+   "how": "spread clamp upper bound"
+  }
+ },
+ "IL2CPP_CLASS_STATIC_FIELDS_OFFSET": {
+  "kind": "runtime",
+  "offset": 184,
+  "note": "Il2CppClass ABI: void* static_fields",
+  "src": {
+   "file": "IL2CPP ABI",
+   "how": "Il2CppClass ABI: void* static_fields"
   }
  }
 }

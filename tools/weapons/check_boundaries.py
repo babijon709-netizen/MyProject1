@@ -1,38 +1,49 @@
 #!/usr/bin/env python3
-"""Regression checks: no legacy library writers or silently enabled v1 flags."""
+"""Regression checks for heap-only weapon/loot controllers and thin UI."""
 from pathlib import Path
 import re
 root = Path(__file__).resolve().parents[2]
-controller = (root / 'jni/src/weapon_tuning_memory.h').read_text()
+tuning = (root / 'jni/src/weapon_tuning_memory.h').read_text()
+speed = (root / 'jni/src/weapon_speed_memory.h').read_text()
+loot = (root / 'jni/src/loot_memory.h').read_text()
 adapter = (root / 'jni/src/game_viewmodel.cpp').read_text()
-assert not re.search(r'\bio\.(?:write|patch)\s*\(', controller)
-assert controller.count('io.write_heap(') == 2  # apply and restore, same gate
+
+# Controllers must not expose generic process/library writers.
+for controller in (tuning, speed, loot):
+    assert not re.search(r'\bio\.(?:write|patch)\s*\(', controller)
+assert tuning.count('io.write_heap(') == 2       # apply + restore
+assert speed.count('io.write_heap(') == 2        # apply + restore
+assert loot.count('io_.write_heap(') == 1        # exact 0.35f promise cadence
+assert 'kCadenceBits = 0x3EB33333u' in loot
+assert 'PLAYER_LOOP_HELPER_TYPEINFO_RVA' in loot
+assert 'class_is(klass, "PlayerLoopHelper"' in loot
+assert 'weapon_speed::Controller<HeapMemory>' in adapter
+assert 'fast_loot::Controller<HeapMemory>' in adapter
+assert 'settings.no_spread || esp_silent_wants_no_spread()' in adapter
+
+# All object writes pass the single anonymous-heap /proc/maps gate.
 heap = adapter.split('struct HeapMemory {', 1)[1].split('HeapMemory heap_memory;', 1)[0]
 assert 'object_data::heap_writable(text,address,sizeof(T)) &&' in heap
 assert 'std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps")' in heap
 assert heap.count('g_mem.write(') == 1
-assert not (root / 'jni/src/fast_loot_memory.h').exists()
-assert 'fast_loot::' not in adapter
-assert 'instruction_supported' not in controller
 
-# Быстрый подбор удалён по запросу: логики нет, осталась только кнопка-тумблер
-# в меню. Пины фиксируют: ни контроллера/адаптера/стендов, ни вызовов из
-# main/game/config/menu, и ряд в меню на месте.
-for gone in ('jni/src/game_loot.cpp', 'jni/src/loot_memory.h',
-             'jni/src/loot_tap_memory.h', 'jni/include/loot.h', 'tools/loot'):
+# Retired tap/instruction implementations stay gone; the restored feature is
+# the guarded UniTask data controller only.
+for gone in ('jni/src/game_loot.cpp', 'jni/src/fast_loot_memory.h',
+             'jni/src/loot_tap_memory.h', 'jni/include/loot.h'):
     assert not (root / gone).exists(), gone
-main = (root / 'jni/src/main.cpp').read_text()
-assert 'esp_loot_tick(' not in main and 'esp_loot_diagnostics(' not in main
-assert 'esp_loot_reset(' not in main and 'esp_loot_log_path(' not in main
-game = (root / 'jni/src/game.cpp').read_text()
+assert (root / 'tools/loot/loot_test.cpp').exists()
+
 config = (root / 'jni/src/config.cpp').read_text()
-assert 'esp_loot_reset(' not in game and 'esp_loot_reset(' not in config
+assert '(g_state.fast_fire ? 64 : 0)' in config
+assert '(g_state.fast_reload ? 128 : 0)' in config
+assert 'g_state.fast_fire = (flags & 64) != 0;' in config
+assert 'g_state.fast_reload = (flags & 128) != 0;' in config
 menu = (root / 'jni/src/menu.cpp').read_text()
-assert '##fastloot' not in menu
-assert '##instantloot' in menu
-assert 'esp_loot_tick(' not in menu
-# The FOV/hands reset button must keep the object-data and pickup flags.
+assert '##instantloot' in menu and '##fastfire' in menu and '##fastreload' in menu
+assert 'esp_loot_tick(' not in menu  # menu never traverses game memory itself
+# The FOV/hands reset button must keep independent object-data settings.
 assert 'const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;' in menu
 assert 'vm.no_recoil = nr; vm.no_spread = ns; vm.fast_loot = fl;' in menu
-print('weapons: heap-only adapter and retired fast-loot writer boundaries: OK')
-print('loot: feature removed, menu toggle retained: OK')
+print('weapons: recoil/spread and speed controllers are heap-only: OK')
+print('loot: guarded UniTask cadence controller and thin UI boundary: OK')

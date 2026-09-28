@@ -1,4 +1,5 @@
 #include "game.h"
+#include "silent_aim.h"
 #include "viewmodel.h"
 #include "game_viewmodel_internal.h"
 #include "mem_io.h"                // чтение/запись памяти игры: /proc/<pid>/mem + кэш блоков
@@ -3580,17 +3581,58 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     return ok;
 }
 
-// Писателя-доминатора оси выстрела (фонового потока, который добивал ось
-// между кадрами) больше нет: ось пишется один раз за кадр оверлея из потока
-// отрисовки, и этой записью кадр игры и закрывается.
-//
-// Почему убрали. Доминатор давал выигрыш в несколько кадров из сотни, а плата
-// за него — зависший оверлей. Второй поток лез в память игры через общий
-// /proc/<pid>/mem: тот же дескриптор, тот же кэш блоков, те же счётчики
-// отказов, а на серии отказов — закрытие и переоткрытие файла прямо под
-// чтениями потока отрисовки. Итог: игра идёт, а наш кадр встаёт (оверлей
-// замирает, на тапы не отвечает). Проверено на устройстве 16-17.09.2026:
-// период 2 мс — вставал сразу, 12 мс — через ~5 с работы сайлента.
+// Высокочастотный writer больше не разделяет с рендером ни g_mem, ни его
+// кэш: у него собственный fd, immutable snapshot и повторная проверка всей
+// цепочки владельцев непосредственно перед каждой 12-байтовой записью.
+bool esp_silent_publish(uint64_t target, const float aim[3]) {
+    auto fail = [] { silent_aim::clear(); return false; };
+    if (g_pid <= 0 || !g_mem.bound() || !g_cam_pose_valid || esp_freecam_active()) return fail();
+    silent_aim::Command c;
+    c.pid = g_pid;
+    c.player = resolve_local_player();
+    if (!c.player) return fail();
+    c.player_handler_offset = PLAYER_EVENT_HANDLER;
+    c.handler_player_offset = EVENT_HANDLER_MANAGER_BACKREF;
+    c.look_offset = EVENT_HANDLER_LOOK_DIRECTION;
+    c.value_offset = SYNC_VALUE_OFFSET;
+    c.fp_manager_offset = PLAYER_FP_MANAGER;
+    c.weapon_offset = FPMANAGER_CURRENT_OBJECT;
+    c.weapon_player_offset = FPOBJECT_PLAYER_BACKREF;
+    auto ptr = [](uint64_t address) {
+        uint64_t value = 0;
+        return rd_fresh(address, value) ? memio::untag(value) : uint64_t{0};
+    };
+    c.handler = ptr(c.player + c.player_handler_offset);
+    if (!c.handler || ptr(c.handler + c.handler_player_offset) != c.player) return fail();
+    c.look = ptr(c.handler + c.look_offset);
+    c.fp_manager = ptr(c.player + c.fp_manager_offset);
+    if (!c.look || !c.fp_manager) return fail();
+    c.weapon = ptr(c.fp_manager + c.weapon_offset);
+    if (!c.weapon || ptr(c.weapon + c.weapon_player_offset) != c.player) return fail();
+    c.player_class = ptr(c.player);
+    c.handler_class = ptr(c.handler);
+    c.look_class = ptr(c.look);
+    c.fp_manager_class = ptr(c.fp_manager);
+    c.weapon_class = ptr(c.weapon);
+    c.target = target;
+    c.eye[0] = g_cam_pos.x; c.eye[1] = g_cam_pos.y; c.eye[2] = g_cam_pos.z;
+    for (int i = 0; i < 3; ++i) c.aim[i] = aim[i];
+    static uint64_t previous_player = 0, previous_weapon = 0;
+    static float previous_shot = 0.f;
+    static double hot_until = 0.0;
+    if (previous_player != c.player || previous_weapon != c.weapon) {
+        previous_player = c.player; previous_weapon = c.weapon;
+        previous_shot = 0.f; hot_until = 0.0;
+    }
+    float shot = 0.f;
+    const double now = memio::now_seconds();
+    if (esp_mem_aim_last_shot(shot) && shot > 0.f && shot != previous_shot) {
+        if (previous_shot > 0.f) hot_until = now + 0.280;
+        previous_shot = shot;
+    }
+    c.recent_shot = now < hot_until;
+    return silent_aim::publish(c);
+}
 
 // Unity Matrix4x4 is column-major in memory: m[col*4 + row].
 static float mat_get(const Mat4& matrix, int row, int column) {
@@ -6070,6 +6112,12 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat
     box.aim_pts[slot][1] = screen.y;
     box.aim_yaw[slot] = yaw;
     box.aim_pitch[slot] = pitch;
+    // Silent must not inherit the range-drop/head-lift compensation applied
+    // above for camera-driving modes: publish the exact world-space bone.
+    box.aim_world[slot][0] = world_in.x;
+    box.aim_world[slot][1] = world_in.y;
+    box.aim_world[slot][2] = world_in.z;
+    box.aim_world_valid[slot] = true;
     box.aim_valid[slot] = true;
     return true;
 }
@@ -6077,7 +6125,10 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat
 static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, float sw, float sh, EspBox& box) {
     box.has_skeleton = false;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) box.bone_valid[bone] = false;
-    for (int i = 0; i < 3; ++i) box.aim_valid[i] = false;
+    for (int i = 0; i < 3; ++i) {
+        box.aim_valid[i] = false;
+        box.aim_world_valid[i] = false;
+    }
 
     CachedSkeleton& skeleton = g_skeletons[player];
     if (!skeleton.valid) {
@@ -6878,6 +6929,7 @@ static void reset_world_caches() {
 
 void esp_reset() {
     std::lock_guard<std::recursive_mutex> viewmodel_guard(viewmodel_session_mutex());
+    silent_aim::clear();
     esp_viewmodel_reset(false); // process lost: never restore to a reused address
     g_mem.unbind();
     g_attach_state = ESP_ATTACH_OK;

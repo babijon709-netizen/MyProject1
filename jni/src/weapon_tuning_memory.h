@@ -2,6 +2,7 @@
 // Object-data implementation: no instruction writes, hooks, or library-data
 // writes. IO exposes read, named(object,name,namespace), and write_heap only.
 #include "viewmodel.h"
+#include "game_offsets_active.h"
 #include <array>
 
 namespace weapon_tuning {
@@ -64,21 +65,25 @@ template<class IO> class Controller {
     IO& io;
     uint64_t session_ = 0, base_ = 0;
     Context context_{};
-    // recoil: config+18..2c (six floats). Spread: clamp min/max +20/+24,
-    // then calculator's per-instance cached base +20. No damage/rate writes.
+    // Recoil: six consecutive floats beginning at MinRecoil (two vectors and
+    // side deltas). Spread: named min/max plus the calculator's cached base.
     std::array<Scalar,9> saved_{};
     const Identity& owner(size_t i) const {
         return i<6 ? context_.recoil : i<8 ? context_.dispersion : context_.calculator;
     }
     uint64_t address(size_t i) const {
-        return owner(i).object + (i<6 ? 0x18+i*4 : i<8 ? 0x20+(i-6)*4 : 0x20);
+        if (i < 6) return owner(i).object + go_active::RECOILCONFIG_MIN_RECOIL + i * sizeof(float);
+        if (i == 6) return owner(i).object + go_active::DISPERSIONCONFIG_MIN_DISPERSION;
+        if (i == 7) return owner(i).object + go_active::DISPERSIONCONFIG_MAX_DISPERSION;
+        return owner(i).object + go_active::CALCULATOR_CACHED_BASE_DISPERSION;
     }
     Life calculator_life() {
         auto life = context_.weapon.life(io);
         if (life != Life::Alive) return life;
         uint64_t calc=0, config=0;
-        if (!pointer(io,context_.weapon.object+0x1f8,calc) ||
-            !pointer(io,context_.calculator.object+0x18,config)) return Life::Unreadable;
+        if (!pointer(io,context_.weapon.object+go_active::FPHITSCAN_CALCULATOR,calc) ||
+            !pointer(io,context_.calculator.object+go_active::CALCULATOR_HITSCAN_CONFIG,config))
+            return Life::Unreadable;
         if (calc != context_.calculator.object || config != context_.config.object) return Life::Gone;
         return context_.calculator.life(io);
     }
@@ -108,18 +113,18 @@ template<class IO> class Controller {
         if (!player || !io.named(player,"PlayerManager","Oxide") ||
             !c.player.capture(io,player,true) || !pointer(io,player+0x40,p) ||
             !io.named(p,"NetworkIdentity","Mirror") || !io.read(p+0x4a,local) || local!=1 ||
-            !pointer(io,player+0x90,fp) || !io.named(fp,"FPManager","Oxide") ||
-            !c.fp.capture(io,fp,true) || !pointer(io,fp+0x58,weapon)) return false;
+            !pointer(io,player+go_active::PLAYER_FP_MANAGER,fp) || !io.named(fp,"FPManager","Oxide") ||
+            !c.fp.capture(io,fp,true) || !pointer(io,fp+go_active::FPMANAGER_CURRENT_WEAPON,weapon)) return false;
         // During equip transition do not guess from old/current-object caches.
         if (!weapon || !io.named(weapon,"FPHitscan","Oxide") ||
-            !c.weapon.capture(io,weapon,true) || !pointer(io,weapon+0xc0,back) || back!=player ||
-            !pointer(io,weapon+0x130,config) || !io.named(config,"HitscanWeaponConfig",kWeapons) ||
-            !c.config.capture(io,config,true) || !pointer(io,weapon+0x200,recoil) ||
-            !pointer(io,config+0x68,p) || p!=recoil || !pointer(io,weapon+0x208,p) || p!=config ||
+            !c.weapon.capture(io,weapon,true) || !pointer(io,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back) || back!=player ||
+            !pointer(io,weapon+go_active::FPHITSCAN_CONFIG,config) || !io.named(config,"HitscanWeaponConfig",kWeapons) ||
+            !c.config.capture(io,config,true) || !pointer(io,weapon+go_active::FPHITSCAN_RECOIL+go_active::WEAPONRECOIL_RECOIL_CONFIG,recoil) ||
+            !pointer(io,config+go_active::HITSCANCONFIG_RECOIL_CONFIG,p) || p!=recoil || !pointer(io,weapon+go_active::FPHITSCAN_RECOIL+go_active::WEAPONRECOIL_WEAPON_CONFIG,p) || p!=config ||
             !io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true) ||
-            !pointer(io,weapon+0x1f8,calc) || !io.named(calc,layout.calculator,"") ||
-            !c.calculator.capture(io,calc,false) || !pointer(io,calc+0x18,p) || p!=config ||
-            !pointer(io,calc+0x10,dispersion) || !pointer(io,config+0x60,p) || p!=dispersion ||
+            !pointer(io,weapon+go_active::FPHITSCAN_CALCULATOR,calc) || !io.named(calc,layout.calculator,"") ||
+            !c.calculator.capture(io,calc,false) || !pointer(io,calc+go_active::CALCULATOR_HITSCAN_CONFIG,p) || p!=config ||
+            !pointer(io,calc+go_active::CALCULATOR_DISPERSION_CONFIG,dispersion) || !pointer(io,config+go_active::HITSCANCONFIG_DISPERSION_CONFIG,p) || p!=dispersion ||
             !io.named(dispersion,"DispersionConfig",kWeapons) ||
             !c.dispersion.capture(io,dispersion,true)) return false;
         return true;

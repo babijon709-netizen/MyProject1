@@ -153,46 +153,46 @@ def main():
             continue
         cur = None
         path = []
+        chain_failed = False
         for step in chain:
-            st, fld = step.get('struct'), step.get('field')
+            st, fld, wanted_off = step.get('struct'), step.get('field'), step.get('offset')
             if st:
                 cur = st
-            if not cur or not fld:
+            if not cur or (fld is None and wanted_off is None):
                 continue
             if cur not in structs:
                 bad.append((name, 'via: в дампе нет структуры %s' % cur))
+                chain_failed = True
                 break
             fs = structs[cur]['fields']
-            if fld not in fs:
-                bad.append((name, 'via: нет поля %s.%s' % (cur, fld)))
-                break
-            off, ftype = fs[fld][0], fs[fld][1]
-            path.append('%s.%s=0x%X' % (cur, fld, off))
-            nxt = target_struct(ftype)
-            if nxt:
-                cur = nxt
-            elif not step.get('struct'):
-                break          # дальше ведёт неназванный тип — проверить нечем
-        # конец цепочки должен попадать в структуру из карты
-        last = [s for s in chain if s.get('struct')]
-        if cur and v.get('struct') and cur != v['struct'] and path:
-            # сравниваем ТОЛЬКО последний шаг: промежуточные ведут в свои классы
-            last_type = None
-            st, fld = (last[-1].get('struct'), last[-1].get('field')) if last else (None, None)
-            if st in structs and fld in structs[st]['fields']:
-                last_type = target_struct(structs[st]['fields'][fld][1])
-            if last_type and last_type != v['struct']:
-                bad.append((name, 'via: %s ведёт в «%s», а в карте «%s»'
-                            % (' -> '.join(path), last_type, v['struct'])))
-            elif not last_type:
-                ok += 1
-                print('  ок  %-34s via %s' % (name, ' -> '.join(path)))
+            if fld is not None:
+                found = [(fld, fs[fld])] if fld in fs else []
+                label = fld
             else:
-                ok += 1
-                print('  ок  %-34s via %s -> %s' % (name, ' -> '.join(path), v['struct']))
-        elif path:
+                found = [(fn, data) for fn, data in fs.items() if data[0] == wanted_off]
+                label = '0x%X' % wanted_off
+            if len(found) != 1:
+                bad.append((name, 'via: нет однозначного поля %s.%s' % (cur, label)))
+                chain_failed = True
+                break
+            actual_name, data = found[0]
+            off, ftype = data[0], data[1]
+            path.append('%s.%s=0x%X' % (cur, actual_name, off))
+            nxt = target_struct(ftype)
+            if not nxt:
+                bad.append((name, 'via: %s не является указателем на managed object' % path[-1]))
+                chain_failed = True
+                break
+            cur = nxt
+        if chain_failed or not path:
+            continue
+        if v.get('struct') and cur != v['struct']:
+            bad.append((name, 'via: %s ведёт в «%s», а в карте «%s»'
+                        % (' -> '.join(path), cur, v['struct'])))
+        else:
             ok += 1
-            print('  ок  %-34s via %s' % (name, ' -> '.join(path)))
+            if a.show_ok:
+                print('  ок  %-34s via %s' % (name, ' -> '.join(path)))
 
     print('---')
     print('полей совпало: %d, расхождений: %d' % (ok, len(bad)))

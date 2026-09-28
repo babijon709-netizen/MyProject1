@@ -101,6 +101,12 @@ UI_EN = {
     'Оружие': 'Weapons',
     'Оружие: не применено, проверьте версию игры и журнал': 'Weapons: not applied; check game version and log',
     'Ожидание подходящего оружия': 'Waiting for a supported weapon',
+    'Темп оружия': 'Weapon speed',
+    'Быстрая стрельба': 'Fast fire',
+    'Быстрая перезарядка': 'Fast reload',
+    'Множитель стрельбы': 'Fire multiplier',
+    'Множитель перезарядки': 'Reload multiplier',
+    'Темп оружия: не применён, проверьте журнал': 'Weapon speed: not applied; check the log',
     # мгновенный подбор (loot.h): строки состояния повторяют оружейные
     'Подбор': 'Looting',
     'Мгновенный подбор': 'Instant pickup',
@@ -150,8 +156,8 @@ UI_EN = {
     'Куда целиться': 'Aim point', 'Голова': 'Head', 'Шея': 'Neck', 'Тело': 'Body',
     'Выбор цели': 'Target priority', 'Умный': 'Smart',
     'Ближе к прицелу': 'Closest to crosshair', 'Ближе ко мне': 'Closest to me',
-    # режим аима: чем именно он крутит прицел (сайлент убран — см. историю)
-    'Режим': 'Mode', 'Тач': 'Touch', 'Память': 'Memory',
+    # режим аима: чем именно он крутит прицел
+    'Режим': 'Mode', 'Тач': 'Touch', 'Память': 'Memory', 'Сайлент': 'Silent',
     'Состояние': 'State',
     # состояние записи в память (вкладка «Аим»)
     'нет объекта': 'no object', 'нет отклика': 'no response',
