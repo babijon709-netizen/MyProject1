@@ -17,6 +17,10 @@ using game_offsets::MineableEntityType;
 // значения всё равно берутся из обычного статического набора.
 namespace game_offsets_beta {
 using namespace game_offsets;
+inline constexpr bool kFromDump = false;
+inline constexpr bool kRvaFromDump = false;
+inline constexpr const char* kReason = "Бета отключена: используются статические релизные оффсеты";
+inline constexpr const char* kSource = "game_offsets.h";
 }
 
 namespace go {
