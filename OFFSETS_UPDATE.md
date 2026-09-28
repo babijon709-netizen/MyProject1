@@ -40,5 +40,5 @@
 - Каждый адрес цепочки — именованная compile-time константа release-таблицы.
 - Проверки class identity, backlinks и диапазонов только подтверждают владение объектом; они не выбирают другое смещение.
 - Неизвестный build ID или изменённый ARM64 fingerprint закрывает соответствующую функцию без записи.
-- Camera-only публикация не считается успешным player ESP frame: отдельный watchdog сбрасывает player resolvers и запрашивает reattach при длительном отказе списка/позиций.
+- Camera-only публикация не сбрасывает attachment, локального игрока или player-кэши: обычный resolver повторяет чтение на следующем кадре, а `EspContinuity` удерживает последний валидный visual snapshot. Таймеров, которые из-за отказа ESP вызывают reattach или разрушают независимые memory-функции, нет.
 - `FPMOTION_AIM_OFFSET` не принадлежит custom-hands patch: ADS pose остаётся штатной; custom FOV продолжает действовать в ADS.

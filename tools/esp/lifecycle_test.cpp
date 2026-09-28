@@ -1,5 +1,4 @@
 #include "esp_continuity.h"
-#include "player_esp_watchdog.h"
 #include <cassert>
 #include <iostream>
 
@@ -68,24 +67,14 @@ int main() {
     continuity.clear();
     assert(!continuity.has_snapshot());
 
-    // Camera/world-marker frames may continue to publish while every player
-    // list/position read fails. They do not feed this watchdog, so recovery is
-    // still requested instead of being masked until continuity expires.
-    PlayerEspWatchdog watchdog;
-    assert(!watchdog.observe(false, 300.0).reset_resolvers);
-    // Simulated healthy camera-only publications happen here; deliberately no
-    // observe(true), because they are not live player data.
-    auto soft = watchdog.observe(false, 300.0 + PlayerEspWatchdog::kResolverResetSeconds);
-    assert(soft.reset_resolvers && !soft.deep_recovery);
-    auto repeat = watchdog.observe(false, 300.0 + PlayerEspWatchdog::kResolverResetSeconds +
-                                           PlayerEspWatchdog::kResetRepeatSeconds);
-    assert(repeat.reset_resolvers && !repeat.deep_recovery);
-    auto hard = watchdog.observe(false, 300.0 + PlayerEspWatchdog::kDeepRecoverySeconds);
-    assert(hard.reset_resolvers && hard.deep_recovery);
-    assert(!watchdog.observe(false, 306.0).deep_recovery); // one request per outage
-    auto recovered = watchdog.observe(true, 307.0);
-    assert(!recovered.reset_resolvers && !watchdog.failing());
-    assert(!watchdog.observe(false, 308.0).reset_resolvers); // next outage starts cleanly
+    // Recovery is deliberately non-destructive: the continuity snapshot is
+    // the bridge while the ordinary player-list resolver retries. There is no
+    // timer allowed to clear attachment, local player, or the last population.
+    continuity.publish({player(66, 60.0F)}, true, 300.0);
+    auto retry_gap = continuity.publish({}, false, 301.0);
+    assert(retry_gap.size() == 1 && retry_gap[0].id == 66);
+    auto retry_ok = continuity.publish({player(77, 70.0F)}, true, 302.0);
+    assert(retry_ok.size() == 1 && retry_ok[0].id == 77);
 
-    std::cout << "esp lifecycle and independent player watchdog tests passed\n";
+    std::cout << "esp lifecycle and non-destructive recovery tests passed\n";
 }
