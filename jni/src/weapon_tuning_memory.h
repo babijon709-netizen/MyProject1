@@ -84,7 +84,7 @@ template<class IO> class Controller {
     const Identity& owner(size_t i) const {
         return i<6 ? context_.recoil : i<8 ? context_.dispersion : context_.calculator;
     }
-    // Смещения полей берутся из АКТИВНЫХ констант, а те живут автообновлением:
+    // Смещения полей берутся из АКТИВНЫХ констант, а те фиксированы выбранным дампом:
     // RecoilConfig.MinRecoil/MaxRecoil (по два float) + MinSideDelta/MaxSideDelta,
     // DispersionConfig.minDispersion/maxDispersion. Раньше здесь стояли
     // литералы 0x18+i*4 и 0x20/0x24, и любая правка раскладки в новом билде

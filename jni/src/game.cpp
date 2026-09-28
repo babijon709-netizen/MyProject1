@@ -1761,7 +1761,7 @@ static bool base_resolves_game(uint64_t base) {
                         (unsigned long long)base);
             return true;
         }
-        LogLine("привязка: Build-ID 0x%llx неизвестен (игра обновилась) — профиль оставляю прежним (%s), классы найдёт автообновление",
+        LogLine("привязка: Build-ID 0x%llx неизвестен (игра обновилась) — профиль оставляю прежним (%s), классы берутся из статических RVA",
                 (unsigned long long)il2cpp_bid,
                 go::CurrentBuild() == go::Build::Beta ? "Beta" : "Release");
     }
@@ -1868,7 +1868,7 @@ static bool base_resolves_game(uint64_t base) {
     uint8_t elf[6] = {};
     if (!rd_buf(base, elf, sizeof(elf))) return false;
     if (elf[0] == 0x7f && elf[1] == 'E' && elf[2] == 'L' && elf[3] == 'F') {
-        LogLine("привязка: база 0x%llx принята по ELF-заголовку — вшитые RVA НЕ сработали (игра обновилась?), работает автообновление оффсетов",
+        LogLine("привязка: база 0x%llx принята по ELF-заголовку — вшитые RVA НЕ сработали (игра обновилась?), используются статические оффсеты",
                 (unsigned long long)base);
         return true;
     }

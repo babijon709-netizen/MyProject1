@@ -234,7 +234,7 @@ inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = 0x18;
 // по нему runners[] у PlayerLoopHelper; в game.cpp — то же для PlayerManager
 // и GameControllerBase).
 inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
-// ---- Раскладка Il2CppClass/FieldInfo для автообновления оффсетов -------------
+// ---- Раскладка Il2CppClass/FieldInfo -------------
 // Проверено дизасемом САМОГО libil2cpp.so (Unity 6000.3.18f1, обе сборки):
 //   il2cpp_class_get_name      -> ldr x0, [x0, #0x10]   (name 0x10)
 //   il2cpp_class_get_methods   -> ldr x9, [x20, #0x98]  (methods 0x98)
@@ -337,7 +337,7 @@ inline constexpr std::uint64_t WEAPON_CONFIG_LOOP_RELOAD  = 0x4C; // HitscanWeap
 //     levels = *(void**)(qs + QUALITY_LEVEL_ARRAY)
 //     поле   = levels + level*QUALITY_LEVEL_STRIDE + смещение
 // Значения зависят от ВЕРСИИ UNITY, а не от сборки игры, поэтому
-// автообновление по именам их не трогает — при смене версии движка
+// статические значения по именам их не трогают — при смене версии движка
 // перезапустить скрипт на новом libunity.so.
 inline constexpr std::uint64_t UNITY_MANAGERS_RVA          = 0x17d3088;
 inline constexpr std::uint64_t UNITY_QUALITY_MANAGER_IDX   = 11;
@@ -355,7 +355,7 @@ inline constexpr std::uint64_t QUALITY_ANTI_ALIASING       = 0x84;
 // Раньше эти смещения были вшиты прямо в weapon_tuning_memory.h литералами, а
 // работа блока разрешалась по СПИСКУ build-id: новая сборка игры — и функция
 // молча отключалась («weapon data: отказ=1 неизвестный build-id», лог 26.09).
-// Теперь это обычные константы, и автообновление держит их свежими: все
+// Теперь это обычные константы, и дамп определяет их значения: все
 // четыре класса и все поля названы в метаданных читаемыми именами
 // (HyperHug.Games.Oxide.Features.Weapons.*), то есть находятся резолвером так
 // же, как PlayerManager.
