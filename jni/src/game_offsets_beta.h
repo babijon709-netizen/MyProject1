@@ -1,11 +1,11 @@
 // Оффсеты БЕТА-версии игры. Файл собран tools/offsets/beta_offsets.py — правь
 // скрипт и дампы, а не здесь.
 //
-// Источник: dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9, дата сборки файла 23.09.2026.
+// Источник: dump_beta.7z, il2cpp.h sha256:441da99f82408b6f, дата сборки файла 28.09.2026.
 // Эталон, от которого считались отличия: релизный dump.7z и jni/src/game_offsets.h.
-// Отличий от релиза: 6 из 213 объявленных констант
-// (в карте оффсетов 214 записей).
-// Взято из релиза как есть: 40 констант раскладки IL2CPP/Unity
+// Отличий от релиза: 13 из 213 объявленных констант
+// (в карте оффсетов 218 записей).
+// Взято из релиза как есть: 42 констант раскладки IL2CPP/Unity
 // (из дампа игры они не выводятся — об этом ниже) и 4 RVA.
 // Окно скана TOD_Sky сдвинуто на дельту RVA беты (см. RVA_SHIFTED в скрипте):
 // оно зависит от того, где лежит таблица metadata-usage, а не от структур.
@@ -26,8 +26,8 @@
 namespace game_offsets_beta {
 inline constexpr bool kFromDump = true;
 inline constexpr bool kRvaFromDump = true;
-inline constexpr const char* kReason = "";
-inline constexpr const char* kSource = "dump_beta.7z, il2cpp.h sha256:5872eaf97532f3e9";
+inline constexpr const char* kReason = "Бета недоступна: не пересчитаны RVA классов";
+inline constexpr const char* kSource = "dump_beta.7z, il2cpp.h sha256:441da99f82408b6f";
 
 
 // NOTE: every obfuscated class/field name quoted in the comments below is
@@ -75,10 +75,10 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // own methods and following  adrp/ldr -> R_AARCH64_RELATIVE addend -> slot,
 // keeping only slots that are then dereferenced as  ldr x8,[klass,#0xB8]
 // (Il2CppClass::static_fields) - i.e. exactly the access our reader performs.
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xDADA550;  // бета: было 0xDAE42B8 / 0xD9C5310
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xDC830F8;
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xDADA348; // GameControllerBase  // бета: было 0xDB516E0 / 0xD9C0690
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xDC7E468; // GameControllerBase
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
@@ -86,13 +86,13 @@ inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m
 // Oxide.PlayerManager instance fields (dump.cs)
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
 // Prefer lastSavedPosition; lastTickPosition is adjacent at 0x1C8
-inline constexpr std::uint64_t PLAYER_POSITION  = 0x1D4; // lastSavedPosition
+inline constexpr std::uint64_t PLAYER_POSITION  = 0x1F4; // lastSavedPosition  // бета: было 0x1D4
 inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (UnityEngine.GameObject)
 inline constexpr std::uint64_t PLAYER_NICKLABEL = 0x130; // nicklabel (class ij, was wK)
 // PlayerManager "uWc" (0x220, was LLI): the real human-readable display name (confirmed
 // on-device — equals the nicklabel widget's private name string, e.g.
 // "пахановский" / "#Фришка"), whereas userID/voice names carry the machine id.
-inline constexpr std::uint64_t PLAYER_DISPLAY_NAME = 0x220;
+inline constexpr std::uint64_t PLAYER_DISPLAY_NAME = 0x240;  // бета: было 0x220
 
 // nicklabel (class ij, was wK): player back-ref + nickname UI.Text.
 inline constexpr std::uint64_t NICKLABEL_PLAYER_BACKREF = 0x20;
@@ -103,7 +103,7 @@ inline constexpr std::uint64_t UI_TEXT_MTEXT = 0xE0;
 inline constexpr std::uint64_t FPOBJECT_OBJECT_NAME = 0x78;
 // Dissonance voice identity: reliable synced display-name source.
 // PlayerManager.uWr (0x2E8, was LLT) : VoicePlayerState -> <Name>k__BackingField.
-inline constexpr std::uint64_t PLAYER_VOICE_STATE  = 0x2F8;
+inline constexpr std::uint64_t PLAYER_VOICE_STATE  = 0x328;  // бета: было 0x2F8
 inline constexpr std::uint64_t VOICE_STATE_NAME     = 0x38;
 // PlayerManager.voicePlayer (class pJk, was fuI) -> display string at 0x78.
 inline constexpr std::uint64_t PLAYER_VOICE_PLAYER = 0x140;
@@ -138,7 +138,7 @@ inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
 //   FPManager.<LtX>k__BackingField (0xA8) == aim blend 0..1 (secondary hint)
 inline constexpr std::uint64_t PLAYER_EVENT_HANDLER          = 0x78;
 inline constexpr std::uint64_t EVENT_HANDLER_MANAGER_BACKREF = 0xD0;
-inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x290;
+inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x298;  // бета: было 0x290
 // Remote-player held-weapon candidates (dump.cs Oxide.PlayerManager). The FP
 // manager (0x90) is a local MonoBehaviour and is often empty for other players,
 // so these are the synced/inventory-backed fallbacks to probe:
@@ -175,7 +175,7 @@ inline constexpr std::uint64_t PLAYER_VITALS       = 0xC8;
 inline constexpr std::uint64_t VITALS_HEALTH       = 0xB8;
 inline constexpr std::uint64_t PLAYER_INVENTORY         = 0x98;
 inline constexpr std::uint64_t PLAYER_WEAPON_REFERENCE  = 0xF0;
-inline constexpr std::uint64_t PLAYER_WEAPONS_ARRAY     = 0x198;
+inline constexpr std::uint64_t PLAYER_WEAPONS_ARRAY     = 0x1B8;  // бета: было 0x198
 // Oxide.PlayerInventory instance fields (dump.cs).
 inline constexpr std::uint64_t INV_PLAYER_INVENTORY_DATA = 0x20; // _playerInventoryData
 inline constexpr std::uint64_t INV_PLAYER_INVENTORY_CLIENT = 0x28; // _playerInventoryClient
@@ -196,7 +196,7 @@ inline constexpr std::uint64_t INV_PLAYER_INVENTORY_CLIENT = 0x28; // _playerInv
 // _weaponPiece / _weaponState tail, not by name (names are re-obfuscated).
 // NB: the new layout also has a second WeaponPiece at 0xA8 - that one is NOT
 // the SyncVar and must not be used.
-inline constexpr std::uint64_t PLAYERWEAPON_VIEW           = 0xE0;
+inline constexpr std::uint64_t PLAYERWEAPON_VIEW           = 0xE8;  // бета: было 0xE0
 inline constexpr std::uint64_t PLAYERWEAPON_PIECE          = 0x110;
 inline constexpr std::uint64_t PLAYERWEAPON_STATE          = 0x120;
 inline constexpr std::uint64_t PLAYERWEAPON_PLAYER_BACKREF = 0x138;
@@ -235,8 +235,20 @@ inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = 0x18;
 // и GameControllerBase).
 inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
 // ---- Раскладка Il2CppClass/FieldInfo для автообновления оффсетов -------------
-// Та же, что в релизе: это рантайм il2cpp (Unity 6000.3.18f1 в обеих
-// сборках), подтверждена дизасемом .so — подробности в game_offsets.h.
+// Проверено дизасемом САМОГО libil2cpp.so (Unity 6000.3.18f1, обе сборки):
+//   il2cpp_class_get_name      -> ldr x0, [x0, #0x10]   (name 0x10)
+//   il2cpp_class_get_methods   -> ldr x9, [x20, #0x98]  (methods 0x98)
+//                                 + ldrh w10, [x20, #0x120] (method_count)
+//   il2cpp_class_num_fields    -> ldrh w0, [x0, #0x124] (field_count, uint16)
+//   il2cpp_field_get_offset    -> ldrsw x0, [x0, #0x18] (FieldInfo.offset, int32)
+//   il2cpp_field_get_name      -> ldr x0, [x0]          (FieldInfo.name 0x00)
+// Плюс цикл обхода полей в самом рантайме: `ldrh w8,[x0,#0x124]` (счётчик),
+// `ldr x8,[x22,#0x80]` (массив), `add x0,x8,x25,lsl #5` (шаг 0x20) — и функция
+// копирования FieldInfo: name@0x00, type@0x08, parent@0x10, offset|token@0x18
+// (8 байт), запись родителя по +0x10, malloc(count*0x20).
+// Это раскладка РАНТАЙМА il2cpp (зависит от версии Unity, не от билда игры),
+// поэтому она общая для релиза и беты. Резолвер на устройстве дополнительно
+// калибрует смещение `fields` по живому классу, прежде чем ему верить.
 inline constexpr std::uint64_t IL2CPP_CLASS_FIELDS       = 0x80;  // FieldInfo*
 inline constexpr std::uint64_t IL2CPP_CLASS_FIELD_COUNT  = 0x124; // uint16
 inline constexpr std::uint64_t IL2CPP_FIELDINFO_NAME     = 0x00;  // const char*
@@ -244,6 +256,32 @@ inline constexpr std::uint64_t IL2CPP_FIELDINFO_TYPE     = 0x08;  // const Il2Cp
 inline constexpr std::uint64_t IL2CPP_FIELDINFO_PARENT   = 0x10;  // Il2CppClass*
 inline constexpr std::uint64_t IL2CPP_FIELDINFO_OFFSET   = 0x18;  // int32
 inline constexpr std::uint64_t IL2CPP_FIELDINFO_SIZE     = 0x20;
+// Il2CppType (Unity 6000.3, размер 0x10): union data на +0x0 — для CLASS и
+// VALUETYPE там int32 klassIndex (индекс определения типа); слово битовых
+// полей на +0x8: attrs:16 | тип:8 (биты 16..23) | служебные биты.
+// Канонический тип самого класса (byval_arg) лежит прямо в Il2CppClass на
+// +0x20 (сразу за name@0x10/namespace@0x18, до this_arg@0x30; раскладку
+// подтверждают проверенные выше поля: fields@0x80, field_count@0x124).
+// Указатель FieldInfo.type и byval_arg несут ОДИН И ТОТ ЖЕ klassIndex для
+// одного класса — это позволяет сверять ТИП поля с классом без строк: так
+// резолвер находит поля, чьи имена ротированы обфускатором (см.
+// offset_resolver.cpp, resolve_type_group).
+inline constexpr std::uint64_t IL2CPP_CLASS_BYVAL_ARG    = 0x20;  // Il2CppType (0x10)
+inline constexpr std::uint64_t IL2CPP_TYPE_BITS          = 0x08;  // attrs:16 | enum:8 (<<16)
+// Значения Il2CppTypeEnum (биты 16..23 слова на IL2CPP_TYPE_BITS).
+inline constexpr std::uint64_t IL2CPP_TYPE_BOOLEAN   = 0x02;
+inline constexpr std::uint64_t IL2CPP_TYPE_I2        = 0x06;
+inline constexpr std::uint64_t IL2CPP_TYPE_I4        = 0x08;
+inline constexpr std::uint64_t IL2CPP_TYPE_U4        = 0x09;
+inline constexpr std::uint64_t IL2CPP_TYPE_R4        = 0x0C;  // float
+inline constexpr std::uint64_t IL2CPP_TYPE_STRING    = 0x0E;
+inline constexpr std::uint64_t IL2CPP_TYPE_PTR       = 0x0F;
+inline constexpr std::uint64_t IL2CPP_TYPE_VALUETYPE = 0x11;
+inline constexpr std::uint64_t IL2CPP_TYPE_CLASS     = 0x12;
+inline constexpr std::uint64_t IL2CPP_TYPE_ARRAY     = 0x14;
+inline constexpr std::uint64_t IL2CPP_TYPE_GENERICINST = 0x15;
+inline constexpr std::uint64_t IL2CPP_TYPE_OBJECT    = 0x1C;
+inline constexpr std::uint64_t IL2CPP_TYPE_SZARRAY   = 0x1D;
 // eventHandler.LookDirection (0x140): synced Vector3 wrapper, value at +0x20.
 // MouseLook.Update writes m_LookRoot.forward into it every frame and
 // FPHitscan casts its hit ray along it (not along the camera transform).
@@ -314,7 +352,7 @@ inline constexpr std::uint64_t QUALITY_SHADOW_DISTANCE     = 0x3c;
 inline constexpr std::uint64_t QUALITY_ANTI_ALIASING       = 0x84;
 
 // ---- Блок «Оружие»: цепочка конфигов (без-отдача / без-разброс) -------------
-// (см. подробности в game_offsets.h). Раньше эти смещения были вшиты прямо в weapon_tuning_memory.h литералами, а
+// Раньше эти смещения были вшиты прямо в weapon_tuning_memory.h литералами, а
 // работа блока разрешалась по СПИСКУ build-id: новая сборка игры — и функция
 // молча отключалась («weapon data: отказ=1 неизвестный build-id», лог 26.09).
 // Теперь это обычные константы, и автообновление держит их свежими: все
@@ -369,7 +407,7 @@ inline constexpr std::uint64_t EDT_ACTION                    = 0x10;  // BXi (Sy
 // (прочие FPMelee: FPSpear, FPBuildingHammer, FPTorch — там на 0x160 своё).
 inline constexpr std::uint64_t FPTOOL_TOOL_PURPOSES          = 0x160; // enum ToolPurpose, флаги
 inline constexpr std::uint64_t FPTOOL_EFFICIENCY             = 0x164; // float m_Efficiency
-inline constexpr std::uint64_t FPTOOL_ALWAYS_CRIT            = 0x168; // bool alwaysCrit
+inline constexpr std::uint64_t FPTOOL_ALWAYS_CRIT            = 0x168; // bool alwaysCrit (hits weakspots/crosshairs)
 
 inline constexpr std::uint64_t FPMELEE_ANIM_WOOSH_SHAKE      = 0x58;  // Oxide.WeaponShake
 inline constexpr std::uint64_t FPMELEE_ANIM_HIT_SHAKE        = 0x60;  // Oxide.WeaponShake
@@ -474,8 +512,8 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
 // Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDADAD88;  // бета: было 0xDB3F658 / 0xD9C4570
-inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x28;
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDC82380;
+inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x30;  // бета: было 0x28
 
 // System.Collections.Generic.Dictionary<TKey, TValue> (both game dumps):
 // _buckets 0x10, _entries 0x18, _count 0x20, _freeList 0x24.
@@ -522,8 +560,8 @@ inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_
 //       --script <new>/script.json --methods 2000 UV
 // оба кандидата TOD_Sky (здесь 0xD8DF4C8 и 0xD8DFC98) обязаны попасть в окно.
 // Прошлое окно было 0xD7A0000..0xD840000 — сдвинулось ровно на +0x130000.
-inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDAD7CF8;  // бета: было 0xD98E260
-inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDB77CF8;  // бета: было 0xDA2E260
+inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xD9B0000;
+inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDA50000; // BEGIN + 0xA0000
 inline constexpr std::uint64_t TOD_SKY_CYCLE      = 0x40; // TOD_Sky.Cycle
 inline constexpr std::uint64_t TOD_CYCLE_HOUR     = 0x10; // TOD_CycleParameters.Hour
 inline constexpr std::uint64_t TOD_CYCLE_DAY      = 0x14;
@@ -645,18 +683,19 @@ enum class MineableEntityType : std::int32_t {
 // ---- Team / clan membership (Oxide.PlayerManager, dump.cs) ------------------
 // Best-effort replicated group fields. Some modes/builds leave teamName or
 // clanId empty on remote PlayerManagers, so ESP/aim also checks live team data.
-inline constexpr std::uint64_t PLAYER_USER_ID   = 0x278; // string userID (unique per account)
-inline constexpr std::uint64_t PLAYER_TEAM_NAME = 0x280; // string teamName
-inline constexpr std::uint64_t PLAYER_CLAN_ID   = 0x290; // string clanId
-inline constexpr std::uint64_t PLAYER_CLAN_TAG  = 0x298; // string clanTag
+inline constexpr std::uint64_t PLAYER_USER_ID   = 0x298; // string userID (unique per account)  // бета: было 0x278
+inline constexpr std::uint64_t PLAYER_TEAM_NAME = 0x2A0; // string teamName  // бета: было 0x280
+inline constexpr std::uint64_t PLAYER_CLAN_ID   = 0x2B0; // string clanId  // бета: было 0x290
+inline constexpr std::uint64_t PLAYER_CLAN_TAG  = 0x2B8; // string clanTag  // бета: было 0x298
 inline constexpr std::uint64_t PLAYER_NETWORK_IDENTITY = 0x40; // Mirror.NetworkBehaviour.<netIdentity>
 
 // ---- Состав своей команды (запасной признак союзника) ------------------------
 // У локального игрока на команде висит отдельный Mirror.NetworkBehaviour
 // (euD в релизе, Reo в бете). Основной источник — объект команды с roster
-// (TeamMember: id/clanTag/nick/lvl/netId); если TeamData/member list недоступен,
-// запасной источник — TeammateStates (Dictionary<string, TeammateStatus>) в
-// том же компоненте. Смещения полей совпадают в обоих дампах.
+// (TeamMember: id/clanTag/nick/lvl/netId); если TeamData/member list отсутствует
+// или не читается, используется TeammateStates (Dictionary<string,
+// TeammateStatus>) в том же компоненте. Оба источника сверяются по userID. Оба дампа
+// (релиз и бета) дают одинаковые смещения полей.
 inline constexpr std::uint64_t PLAYER_TEAM_OBJECT    = 0x120; // euD/Reo team (NetworkBehaviour)
 inline constexpr std::uint64_t TEAM_OBJECT_STATES    = 0x70;  // Dictionary<string, TeammateStatus>
 inline constexpr std::uint64_t TEAM_OBJECT_PLAYER    = 0x80;  // дополнительная owner-ссылка; не hard gate для ростера
@@ -671,8 +710,8 @@ inline constexpr std::uint64_t TEAM_MEMBER_NET_ID    = 0x2C;  // uint32 Mirror.N
 // Vehicles: both are SyncVars (uint netId of the vehicle / index of the seat),
 // zero while the player is on foot. A mounted player stops updating
 // lastSavedPosition, so his box has to come from the rendered transform.
-inline constexpr std::uint64_t PLAYER_VEHICLE_ID = 0x288; // uint vehicleID
-inline constexpr std::uint64_t PLAYER_SEAT_ID    = 0x28C; // uint seatID
+inline constexpr std::uint64_t PLAYER_VEHICLE_ID = 0x2A8; // uint vehicleID  // бета: было 0x288
+inline constexpr std::uint64_t PLAYER_SEAT_ID    = 0x2AC; // uint seatID  // бета: было 0x28C
 
 // ---- World loot containers (Oxide.LootObject : fNZ : Mirror.NetworkBehaviour)
 // Everything openable in the world is a LootObject: road crates, barrels,
@@ -708,7 +747,7 @@ inline constexpr std::uint64_t ITEMPICKUP_AMOUNT      = 0xE0; // int amount
 //   → элементы IPlayerLoopItem. Классы UniTask не обфусцированы — сверяются
 //   по имени в рантайме (PROVENANCE.md §D). Поле темпа сверяется побитово с
 //   0.35f (0x3EB33333), остальные ожидания не трогаются.
-inline constexpr std::uint64_t PLAYERLOOPHELPER_TYPEINFO_RVA = 0xDAE2AC0;  // бета: было 0xDB56EC0 / 0xD9C52E0
+inline constexpr std::uint64_t PLAYERLOOPHELPER_TYPEINFO_RVA = 0xDC830C8;
 inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS      = 0x30; // statics: PlayerLoopRunner[] runners
 inline constexpr std::uint64_t LOOPRUNNER_ITEMS              = 0x38; // PlayerLoopRunner.loopItems
 inline constexpr std::uint64_t LOOPRUNNER_TAIL               = 0x30; // PlayerLoopRunner.tail: живой счётчик (длина массива — ёмкость)
