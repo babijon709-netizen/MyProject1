@@ -56,6 +56,8 @@ inline constexpr std::uint64_t CAMERA_VIEW_DIRTY        = 0x502; // byte, set wh
 inline constexpr std::uint64_t CAMERA_PROJ_DIRTY        = 0x500; // byte, set when proj cache invalid
 
 inline constexpr std::uint64_t MANAGED_CACHED_PTR = 0x10;
+inline constexpr std::uint64_t NETWORK_BEHAVIOUR_IDENTITY = 0x40;
+inline constexpr std::uint64_t NETWORK_IDENTITY_IS_LOCAL_PLAYER = 0x4A;
 
 inline constexpr float PLAYER_HEIGHT          = 1.8F;
 inline constexpr float PLAYER_BOX_WIDTH_RATIO = 0.40F;

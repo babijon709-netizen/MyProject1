@@ -34,6 +34,7 @@
 | `eventHandler.manager` back-reference | `0xD0` |
 | `eventHandler.LookDirection` | `0x140` |
 | synced value внутри wrapper | `0x20` |
+| `NetworkBehaviour.netIdentity` / `NetworkIdentity.isLocalPlayer` | `0x40` / `0x4A` |
 | `PlayerManager.FPManager` | `0x90` |
 | `FPManager._currentWeapon` (`FPObject`) | `0x50` |
 | `FPObject.Player` back-reference | `0xC0` |
@@ -74,7 +75,7 @@ Writer берёт начало луча из живой позиции native ca
 | `RecoilConfig` изменяемые floats | `0x18..0x2C` |
 | `DispersionConfig` min / max | `0x20` / `0x24` |
 
-Имя calculator-класса build-specific: release `Ze`, beta `FJ`; раскладка одинакова. Перед записью контроллер проверяет типизированные обратные ссылки, class identity и Unity native identity. Build-id и старые instruction guards используются как дополнительное подтверждение, но больше не блокируют новый бинарник с неизменной managed-раскладкой: неизвестное имя calculator принимается только с пустым namespace и совпавшими typed backlinks.
+Имя calculator-класса build-specific: release `Ze`, beta `FJ`; раскладка одинакова. Runtime offset resolver, build-id/native-RVA таблица и instruction guards в контроллере отсутствуют. Все адреса берутся только из `go_active`, то есть из пользовательских release/beta headers. Живые typed backlinks, class identity и Unity native identity служат только write guards; имя calculator принимается с пустым namespace и совпавшими ссылками на оба конфига.
 
 ### Custom FOV и руки
 
@@ -103,6 +104,6 @@ Offsets заведены в `game_offsets.h`, `game_offsets_beta.h`, актив�
 
 - `sh tools/silent/run.sh` — нормализация направления, invalid geometry, class/owner/weapon guards, fast-math;
 - `sh tools/loot/run.sh` — exact cadence, оба promise layouts, tail bound, class mismatch, write failure;
-- `sh tools/weapons/run.sh` — дополнен быстрым fire/reload: оба build-id, независимое выключение, recapture чужого обновления, смена оружия, restoration/failure paths.
+- `sh tools/weapons/run.sh` — дополнен быстрым fire/reload: release/beta active-offset tables, отсутствие runtime resolver/build-id gates, независимое выключение, recapture чужого обновления, смена оружия и restoration/failure paths.
 
 Общие проверки: `tools/viewmodel/run.sh`, `tools/offsets/run.sh`, `tools/lang/check.py`, `tools/syntax/check.sh`, `tools/hostcheck/run.sh`.

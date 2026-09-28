@@ -4,20 +4,13 @@
 // записываются; исходные значения возвращаются условно при выключении/смене.
 #include "viewmodel.h"
 #include "game_offsets_active.h"
-#include <array>
 #include <cstdint>
-#include <cstring>
 
 namespace weapon_speed {
 inline constexpr const char* kWeapons = "HyperHug.Games.Oxide.Features.Weapons";
 // Переключатели всегда используют прежний максимум UI; промежуточных
 // коэффициентов больше нет.
 inline constexpr float kMaxMultiplier = 20.f;
-struct Layout { std::array<uint8_t,20> build_id; };
-inline constexpr Layout kLayouts[] = {
-    {{0xd8,0x5e,0x63,0xcd,0x8d,0xcb,0xd4,0x81,0x69,0x50,0x12,0xef,0x2e,0x28,0x4f,0x0e,0xeb,0x9e,0xf3,0x07}},
-    {{0xe1,0x07,0x95,0x34,0x9b,0xd7,0xc2,0xcd,0xc7,0xd8,0x52,0x75,0x97,0xc6,0x43,0x95,0xa4,0xef,0xed,0x79}},
-};
 template<class IO> bool pointer(IO& io, uint64_t address, uint64_t& value) {
     if (!io.read(address,value)) return false;
     value &= 0x00ffffffffffffffULL;
@@ -30,14 +23,14 @@ struct Identity {
     template<class IO> bool capture(IO& io,uint64_t obj,bool is_unity) {
         object=obj; unity=is_unity;
         return obj>=0x10000 && pointer(io,obj,klass) && klass>=0x10000 &&
-            (!unity || (pointer(io,obj+0x10,native) && native>=0x10000));
+            (!unity || (pointer(io,obj+go_active::MANAGED_CACHED_PTR,native) && native>=0x10000));
     }
     template<class IO> Life life(IO& io) const {
         uint64_t k=0,n=0;
         if (!pointer(io,object,k)) return Life::Unreadable;
         if (k!=klass) return Life::Gone;
         if (unity) {
-            if (!pointer(io,object+0x10,n)) return Life::Unreadable;
+            if (!pointer(io,object+go_active::MANAGED_CACHED_PTR,n)) return Life::Unreadable;
             if (n!=native) return Life::Gone;
         }
         return Life::Alive;
@@ -114,9 +107,9 @@ template<class IO> class Controller {
         uint8_t local=0;
         if (!player || !io_.named(player,"PlayerManager","Oxide") ||
             !c.player.capture(io_,player,true) ||
-            !pointer(io_,player+0x40,net) ||
+            !pointer(io_,player+go_active::NETWORK_BEHAVIOUR_IDENTITY,net) ||
             !io_.named(net,"NetworkIdentity","Mirror") ||
-            !io_.read(net+0x4a,local) || local!=1 ||
+            !io_.read(net+go_active::NETWORK_IDENTITY_IS_LOCAL_PLAYER,local) || local!=1 ||
             !pointer(io_,player+go_active::PLAYER_FP_MANAGER,fp) ||
             !io_.named(fp,"FPManager","Oxide") || !c.fp.capture(io_,fp,true))
             return false;
@@ -174,10 +167,9 @@ public:
         if (!fast_reload && !restore_reload()) reload=Status::Failed;
         if ((!fast_fire && !fast_reload) || fire==Status::Failed || reload==Status::Failed) return;
         if (!base) return;
-        // Build-id больше не является блокировкой: перед записью весь живой
-        // object graph подтверждается точными именами классов, Unity identity
-        // и обратной ссылкой оружия. Поэтому новый бинарник с той же managed
-        // раскладкой не оставляет тумблеры навсегда в Failed.
+        // Смещения не выводятся в runtime: вся цепочка состоит только из
+        // `go_active` constants, выбранных release/beta таблицей пользователя.
+        // Живые классы/identity/backref используются лишь как write guards.
         Context next;
         if (!resolve(player,next)) {
             restore_all();

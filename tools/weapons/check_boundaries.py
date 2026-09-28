@@ -7,6 +7,27 @@ tuning = (root / 'jni/src/weapon_tuning_memory.h').read_text()
 speed = (root / 'jni/src/weapon_speed_memory.h').read_text()
 loot = (root / 'jni/src/loot_memory.h').read_text()
 adapter = (root / 'jni/src/game_viewmodel.cpp').read_text()
+viewmodel = (root / 'jni/src/viewmodel_memory.h').read_text()
+silent = (root / 'jni/src/silent_aim_core.h').read_text()
+game = (root / 'jni/src/game.cpp').read_text()
+
+# No runtime offset resolver or private build/RVA table is allowed in the
+# ported controllers. Addresses must come from go_active (release/beta headers).
+ported = (tuning, speed, loot, silent, adapter, viewmodel)
+for controller in ported:
+    assert 'offset_resolver' not in controller
+    code = re.sub(r'/\*.*?\*/|//[^\n]*', '', controller, flags=re.S)
+    assert not re.search(r'\+\s*0x[0-9a-fA-F]+', code), 'raw field offset in ported controller'
+assert 'kLayouts' not in tuning and 'guard_sites' not in tuning and 'build_id' not in tuning
+assert 'kLayouts' not in speed and 'build_id' not in speed
+for constant in ('NETWORK_BEHAVIOUR_IDENTITY', 'NETWORK_IDENTITY_IS_LOCAL_PLAYER'):
+    assert f'go_active::{constant}' in tuning and f'go_active::{constant}' in speed
+    assert f'go_active::{constant}' in adapter
+for assignment in ('PLAYER_EVENT_HANDLER', 'EVENT_HANDLER_MANAGER_BACKREF',
+                   'EVENT_HANDLER_LOOK_DIRECTION', 'SYNC_VALUE_OFFSET',
+                   'PLAYER_FP_MANAGER', 'FPMANAGER_CURRENT_OBJECT',
+                   'FPOBJECT_PLAYER_BACKREF'):
+    assert re.search(r'c\.[a-z_]+_offset\s*=\s*' + assignment, game), assignment
 
 # Controllers must not expose generic process/library writers.
 for controller in (tuning, speed, loot):

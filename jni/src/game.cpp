@@ -2982,20 +2982,15 @@ static uint64_t mouse_look_owner(uint64_t mouse_look) {
 // m_LookRoot — Transform, которым MouseLook вертит камеру (Oxide.MouseLook,
 // dump.cs релиза). По нему и опознаём «свой» объект.
 static constexpr uint64_t MOUSELOOK_LOOK_ROOT = 0x28;
-// Mirror помечает игрока, которым управляет это устройство:
-// NetworkBehaviour.netIdentity (+0x40) -> NetworkIdentity.isLocalPlayer
-// (+0x4A, bool). У остальных игроков флаг false — это единственный признак,
-// который читается у ЛЮБОГО игрока (в отличие от m_EventHandler: чужому
-// MouseLook'у ввод не нужен, поле пустое, и проверка владельца молчит).
-static constexpr uint64_t NETBEHAVIOUR_NET_IDENTITY   = 0x40;
-static constexpr uint64_t NETIDENTITY_IS_LOCAL_PLAYER = 0x4A;
+// Mirror помечает игрока, которым управляет это устройство. Оба поля берутся
+// только из активной release/beta таблицы offsets.
 
 // -1 — прочитать не удалось, 0 — чужой, 1 — локальный.
 static int player_is_local(uint64_t player) {
     if (player < 0x10000) return -1;
-    const uint64_t identity = rd_ptr(player + NETBEHAVIOUR_NET_IDENTITY);
+    const uint64_t identity = rd_ptr(player + NETWORK_BEHAVIOUR_IDENTITY);
     if (identity < 0x10000) return -1;
-    const uint8_t flag = rd<uint8_t>(identity + NETIDENTITY_IS_LOCAL_PLAYER);
+    const uint8_t flag = rd<uint8_t>(identity + NETWORK_IDENTITY_IS_LOCAL_PLAYER);
     if (flag != 0 && flag != 1) return -1;   // читается не флаг, а мусор
     return flag ? 1 : 0;
 }

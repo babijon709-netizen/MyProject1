@@ -21,7 +21,6 @@ struct Fixture {
     FakeMemory io; weapon_speed::Controller<FakeMemory> c;
     uint64_t base=0x100000,player=0x20000,net=0x21000,fp=0x22000,weapon=0x23000,config=0x24000;
     Fixture():c(io){
-        io.set(base+0x318,weapon_speed::kLayouts[0].build_id);
         io.object(player,0x30000,"PlayerManager","Oxide");
         io.object(net,0x31000,"NetworkIdentity","Mirror"); uint8_t local=1; io.set(net+0x4a,local); io.set(player+0x40,net);
         io.object(fp,0x32000,"FPManager","Oxide"); io.set(player+go_active::PLAYER_FP_MANAGER,fp);
@@ -43,7 +42,6 @@ int main(){
     { Fixture f; f.tick(); uint64_t neww=0x25000,newc=0x26000; f.io.object(neww,0x35000,"FPHitscan","Oxide"); f.io.object(newc,0x36000,"HitscanWeaponConfig",weapon_speed::kWeapons); f.io.set(neww+go_active::FPOBJECT_PLAYER_BACKREF,f.player); f.io.set(neww+go_active::FPHITSCAN_CONFIG,newc); f.io.set(newc+go_active::HITSCANCONFIG_FIRE_RATE,2.f); f.io.set(newc+go_active::HITSCANCONFIG_FULL_RELOAD,8.f); f.io.set(newc+go_active::HITSCANCONFIG_LOOP_RELOAD,4.f); f.io.set(f.fp+go_active::FPMANAGER_CURRENT_WEAPON,neww); f.tick(); assert(f.io.get<float>(f.config+go_active::HITSCANCONFIG_FIRE_RATE)==5.f); assert(f.io.get<float>(newc+go_active::HITSCANCONFIG_FIRE_RATE)==40.f); }
     { Fixture f; f.tick(); f.tick(true,false); f.io.fail_write=true; f.io.set(f.config+go_active::HITSCANCONFIG_FIRE_RATE,5.f); f.tick(true,false); assert(f.c.fire==Status::Failed); }
     { Fixture f; f.tick(); f.io.fail_read=f.config; f.tick(false,false); assert(f.c.fire==Status::Failed&&f.c.reload==Status::Failed&&f.c.has_state()); f.io.fail_read=0; f.tick(false,false); assert(!f.c.has_state()); assert(f.io.get<float>(f.config+go_active::HITSCANCONFIG_FIRE_RATE)==5.f); }
-    { Fixture f; std::array<uint8_t,20> unknown{}; f.io.set(f.base+0x318,unknown); f.tick(); assert(f.c.fire==Status::Active&&f.c.reload==Status::Active); }
     { Fixture f; f.io.set(f.fp+go_active::FPMANAGER_CURRENT_WEAPON,uint64_t(0)); f.io.set(f.fp+go_active::FPMANAGER_CURRENT_OBJECT,f.weapon); f.tick(); assert(f.c.fire==Status::Active&&f.c.reload==Status::Active); }
     { Fixture f; f.tick(); f.io.set(f.config,uint64_t(0xdead0)); int before=f.io.writes; f.c.reset(true); assert(f.io.writes==before); }
 }

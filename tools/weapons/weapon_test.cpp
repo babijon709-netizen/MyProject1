@@ -46,13 +46,11 @@ struct Fake {
         uint64_t k=o+0x80000; set(o,k); names[k]={n,ns};
         if(unity) set(o+0x10,o+0x90000);
     }
-    explicit Fake(const Layout& l) {
-        set(base+0x318,l.build_id);
-        for(size_t i=0;i<4;++i) set(base+l.guard_sites[i],l.guard_words[i]);
+    explicit Fake(const char* calculator) {
         object(player,"PlayerManager","Oxide"); object(fp,"FPManager","Oxide");
         object(weapon,"FPHitscan","Oxide"); object(config,"HitscanWeaponConfig",kWeapons);
         object(recoil,"RecoilConfig",kWeapons); object(dispersion,"DispersionConfig",kWeapons);
-        object(calc,l.calculator,"",false); object(net,"NetworkIdentity","Mirror");
+        object(calc,calculator,"",false); object(net,"NetworkIdentity","Mirror");
         set(player+0x40,net); set(net+0x4a,uint8_t(1)); set(player+0x90,fp);
         set(fp+0x58,weapon); set(weapon+0xc0,player); set(weapon+0x130,config);
         set(weapon+0x200,recoil); set(weapon+0x208,config); set(weapon+0x1f8,calc);
@@ -82,9 +80,9 @@ static void maps_tests() {
     assert(heap_writable(prefix+"120000-200000 rw-p 0 00:00 0\n",0x120010,4));
     assert(!heap_writable("garbage\n100000-200000 rw-p 0 00:00 0\n",0x100010,4));
 }
-static void tests(const Layout& l) {
+static void tests(const char* calculator) {
     {
-        Fake io(l); Controller<Fake> c(io);
+        Fake io(calculator); Controller<Fake> c(io);
         c.tick(1,base,player,false,false); assert(io.writes.empty());
         c.tick(1,base,player,true,false); assert(c.recoil==Status::Active && c.spread==Status::Off && io.writes.size()==6);
         assert(io.get<float>(calc+0x20)==2.f);
@@ -98,96 +96,91 @@ static void tests(const Layout& l) {
         assert(io.writes.size()==18);
     }
     for (int issue=0;issue<8;++issue) {
-        Fake io(l); Controller<Fake> c(io);
-        if(issue==0) io.set(base+0x318,std::array<uint8_t,20>{});
-        if(issue==1) io.set(weapon+0xc0,uint64_t(0x199000));
-        if(issue==2) io.set(net+0x4a,uint8_t(0));
-        if(issue==3) io.set(config+0x68,uint64_t(0));
-        if(issue==4) io.set(weapon+0x10,uint64_t(0));
-        if(issue==5) io.set(base+l.guard_sites[0],uint32_t(0));
-        if(issue==6) io.set(base+l.guard_sites[3],uint32_t(0x1400005d));
-        if(issue==7) io.maps="100000-200000 rw-p 0 08:01 1 /some-library.so\n";
+        Fake io(calculator); Controller<Fake> c(io);
+        if(issue==0) { auto k=io.get<uint64_t>(calc); io.names[k]={calculator,"bad.namespace"}; }
+        if(issue==1) io.set(weapon+go_active::FPOBJECT_PLAYER_BACKREF,uint64_t(0x199000));
+        if(issue==2) io.set(net+go_active::NETWORK_IDENTITY_IS_LOCAL_PLAYER,uint8_t(0));
+        if(issue==3) io.set(config+go_active::HITSCANCONFIG_RECOIL_CONFIG,uint64_t(0));
+        if(issue==4) io.set(weapon+go_active::MANAGED_CACHED_PTR,uint64_t(0));
+        if(issue==5) io.maps="100000-200000 rw-p 0 08:01 1 /some-library.so\n";
+        if(issue==6) io.set(calc+go_active::CALCULATOR_HITSCAN_CONFIG,uint64_t(0));
+        if(issue==7) io.set(config+go_active::HITSCANCONFIG_DISPERSION_CONFIG,uint64_t(0));
         c.tick(1,base,player,true,true);
-        const bool managed_graph_valid = issue==0 || issue==5 || issue==6;
-        if (managed_graph_valid)
-            assert(c.recoil==Status::Active && c.spread==Status::Active && io.writes.size()==9);
-        else {
-            assert(io.writes.empty());
-            assert(c.recoil!=Status::Active && c.spread!=Status::Active);
-        }
+        assert(io.writes.empty());
+        assert(c.recoil!=Status::Active && c.spread!=Status::Active);
     }
     {
-        Fake io(l); Controller<Fake> c(io); int seen=0;
+        Fake io(calculator); Controller<Fake> c(io); int seen=0;
         io.before_read=[&](uint64_t a){ if(a==weapon+0xc0 && ++seen==2) io.set(a,uint64_t(0)); };
         c.tick(1,base,player,true,true); assert(io.writes.empty()); // ownership changed just before apply
     }
     {
-        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        Fake io(calculator); Controller<Fake> c(io); c.tick(1,base,player,true,true);
         io.set(recoil+0x18,7.f); c.tick(1,base,player,false,false);
         assert(io.get<float>(recoil+0x18)==7.f); // external updates win on restore
     }
     {
-        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,false);
+        Fake io(calculator); Controller<Fake> c(io); c.tick(1,base,player,true,false);
         io.set(recoil+0x18,7.f); c.tick(1,base,player,true,false);
         c.tick(1,base,player,false,false); assert(io.get<float>(recoil+0x18)==7.f); // recapture game update
     }
     {
-        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        Fake io(calculator); Controller<Fake> c(io); c.tick(1,base,player,true,true);
         io.fail_read=recoil; c.tick(1,base,player,false,false);
         assert(c.has_state() && c.recoil==Status::Failed);
         io.fail_read=0; c.tick(1,base,player,false,false);
         assert(!c.has_state() && io.get<float>(recoil+0x18)==1.f);
     }
     {
-        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        Fake io(calculator); Controller<Fake> c(io); c.tick(1,base,player,true,true);
         io.fail_write=recoil+0x18; c.tick(1,base,player,false,false);
         assert(c.has_state() && c.recoil==Status::Failed);
         io.fail_write=0; c.tick(1,base,player,false,false); assert(!c.has_state());
     }
     {
-        Fake io(l); Controller<Fake> c(io); io.fail_write=recoil+0x1c;
+        Fake io(calculator); Controller<Fake> c(io); io.fail_write=recoil+0x1c;
         c.tick(1,base,player,true,false); assert(c.recoil==Status::Failed && c.has_state());
         io.fail_write=0; c.tick(1,base,player,false,false);
         assert(io.get<float>(recoil+0x18)==1.f && io.get<float>(recoil+0x1c)==2.f && !c.has_state());
     }
     {
-        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        Fake io(calculator); Controller<Fake> c(io); c.tick(1,base,player,true,true);
         io.set(weapon+0x10,uint64_t(0)); c.tick(1,base,0,false,false);
         assert(!c.has_state() && io.get<float>(recoil+0x18)==1.f); // asset survives owner
         assert(io.get<float>(dispersion+0x24)==4.f && io.get<float>(calc+0x20)==0.f); // no dead calculator write
     }
     {
-        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        Fake io(calculator); Controller<Fake> c(io); c.tick(1,base,player,true,true);
         io.set(recoil+0x10,uint64_t(0x900123)); c.tick(1,base,player,false,false);
         assert(io.get<float>(recoil+0x18)==0.f); // reused asset identity: drop, don't restore
     }
     {
-        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true);
+        Fake io(calculator); Controller<Fake> c(io); c.tick(1,base,player,true,true);
         io.set(fp+0x58,uint64_t(0)); c.tick(1,base,player,true,true);
         assert(!c.has_state() && c.recoil==Status::Waiting && io.get<float>(calc+0x20)==2.f);
         io.set(fp+0x50,weapon); c.tick(1,base,player,true,true); assert(c.recoil==Status::Active);
         assert(c.reset(true)); assert(io.get<float>(recoil+0x18)==1.f);
     }
     {
-        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,true); auto n=io.writes.size();
+        Fake io(calculator); Controller<Fake> c(io); c.tick(1,base,player,true,true); auto n=io.writes.size();
         c.tick(2,base,0,false,false); assert(io.writes.size()==n && !c.has_state());
     }
     {
-        Fake io(l); Controller<Fake> c(io);
+        Fake io(calculator); Controller<Fake> c(io);
         io.set(player+0x90,fp | 0xab00000000000000ULL);
         io.set(weapon+0x200,recoil | 0xcd00000000000000ULL);
         c.tick(1,base,player,true,true); assert(c.recoil==Status::Active && c.spread==Status::Active);
         assert(c.reset(true));
     }
     {
-        Fake io(l); Controller<Fake> c(io); c.tick(1,base,player,true,false);
+        Fake io(calculator); Controller<Fake> c(io); c.tick(1,base,player,true,false);
         io.set(recoil+0x18,std::numeric_limits<float>::quiet_NaN());
         auto n=io.writes.size(); c.tick(1,base,player,false,false);
         assert(io.writes.size()==n+5 && !c.has_state());
     }
     for(float v : {std::numeric_limits<float>::quiet_NaN(),std::numeric_limits<float>::infinity(),-2000.f,2000.f}) {
-        Fake io(l); Controller<Fake> c(io); io.set(recoil+0x18,v);
+        Fake io(calculator); Controller<Fake> c(io); io.set(recoil+0x18,v);
         c.tick(1,base,player,true,false); assert(c.recoil==Status::Failed && io.writes.empty());
     }
 }
-int main() { maps_tests(); for(const auto& l:kLayouts) tests(l); std::cout<<"weapons: heap-only gate, both builds, ownership, transitions, restoration, failures, finite checks: OK\n"; }
+int main() { maps_tests(); tests("Ze"); tests("FJ"); std::cout<<"weapons: named offsets, both calculator names, ownership, restoration and failures: OK\n"; }

@@ -183,9 +183,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         auto local_player_ok = [&](uint64_t candidate) {
             uint64_t net=0; uint8_t local=0;
             return candidate>=0x10000 && memory.is(candidate,"PlayerManager") &&
-                memory.read(candidate+0x40,net) &&
+                memory.read(candidate+go_active::NETWORK_BEHAVIOUR_IDENTITY,net) &&
                 heap_memory.named(memio::untag(net),"NetworkIdentity","Mirror") &&
-                memory.read(memio::untag(net)+0x4a,local) && local==1;
+                memory.read(memio::untag(net)+go_active::NETWORK_IDENTITY_IS_LOCAL_PLAYER,local) && local==1;
         };
         if (local_player_ok(g_local_player)) player=g_local_player;
         auto try_class = [&](uint64_t klass) {

@@ -2029,17 +2029,19 @@ dispersion 0x10, hitscan config 0x18, cached float 0x20.
 ### 29 сентября 2026: device feedback — managed fallback и постоянный viewmodel
 
 Проверка на устройстве показала, что жёсткая блокировка по ELF build-id/старым
-native guard words оставляла Fast Fire/Reload и No Recoil/Spread выключенными на
-обновлённом бинарнике, хотя managed layout не изменился. Локальный игрок теперь
-сначала берётся из уже проверенного world-reader cache, затем из живого
+native guard words оставляла Fast Fire/Reload и No Recoil/Spread выключенными,
+хотя пользовательские release/beta offsets не менялись. Локальный игрок теперь
+сначала берётся из уже проверенного world-reader cache, затем из
 `GameControllerBase`; обе ветки повторно требуют `NetworkIdentity.isLocalPlayer`.
 Для оружия разрешён fallback `FPManager.currentWeapon → currentObject`.
 
-Неизвестный build-id допускается только после полной проверки managed-классов,
-Unity identity, player↔weapon owner и typed config backlinks. Имя calculator при
-этом может быть новым обфусцированным именем, но namespace обязан быть пустым,
-а ссылки на `HitscanWeaponConfig` и `DispersionConfig` — совпасть. Смещения
-полей остаются теми же, что подтверждены release/beta дампами.
+Из контроллеров полностью удалены runtime offset resolver, build-id/native-RVA
+таблицы и instruction guards. Каждый адрес использует только именованную
+`go_active` константу из `game_offsets.h` / `game_offsets_beta.h`. В карту также
+добавлены ранее локальные `NetworkBehaviour.netIdentity` (`0x40`) и
+`NetworkIdentity.isLocalPlayer` (`0x4A`). Живые managed-классы, Unity identity,
+player↔weapon owner и typed config backlinks остаются только проверками перед
+записью, а не источником смещений.
 
 Ползунки Fast Fire/Reload удалены: тумблеры всегда используют максимум `20×`.
 Silent дополнен синхронной записью в кадре публикации, интервалы private-fd

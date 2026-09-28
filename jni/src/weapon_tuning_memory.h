@@ -6,19 +6,6 @@
 #include <array>
 
 namespace weapon_tuning {
-struct Layout {
-    std::array<uint8_t,20> build_id;
-    const char* calculator;
-    // Read-only checks reject a process still carrying the retired patches.
-    std::array<uint64_t,4> guard_sites;
-    std::array<uint32_t,4> guard_words;
-};
-inline constexpr Layout kLayouts[] = {
-    {{0xd8,0x5e,0x63,0xcd,0x8d,0xcb,0xd4,0x81,0x69,0x50,0x12,0xef,0x2e,0x28,0x4f,0x0e,0xeb,0x9e,0xf3,0x07},
-     "Ze", {0x660c214,0x73425c8,0x73425f0,0x5b5cad4}, {0xfd000120,0x1e214c40,0x1e210800,0xbd495100}},
-    {{0xe1,0x07,0x95,0x34,0x9b,0xd7,0xc2,0xcd,0xc7,0xd8,0x52,0x75,0x97,0xc6,0x43,0x95,0xa4,0xef,0xed,0x79},
-     "FJ", {0x6565aec,0x72dae70,0x72db044,0x5af4d04}, {0xfd000120,0x1e214c40,0x1e210800,0xbd400100}},
-};
 inline constexpr const char* kWeapons = "HyperHug.Games.Oxide.Features.Weapons";
 template<class IO> bool pointer(IO& io, uint64_t a, uint64_t& value) {
     if (!io.read(a, value)) return false;
@@ -32,14 +19,14 @@ struct Identity {
     template<class IO> bool capture(IO& io, uint64_t obj, bool is_unity) {
         object = obj; unity = is_unity;
         return obj >= 0x10000 && pointer(io,obj,klass) && klass >= 0x10000 &&
-            (!unity || (pointer(io,obj+0x10,native) && native >= 0x10000));
+            (!unity || (pointer(io,obj+go_active::MANAGED_CACHED_PTR,native) && native >= 0x10000));
     }
     template<class IO> Life life(IO& io) const {
         uint64_t k=0, n=0;
         if (!pointer(io,object,k)) return Life::Unreadable;
         if (k != klass) return Life::Gone;
         if (unity) {
-            if (!pointer(io,object+0x10,n)) return Life::Unreadable;
+            if (!pointer(io,object+go_active::MANAGED_CACHED_PTR,n)) return Life::Unreadable;
             if (n != native) return Life::Gone;
         }
         return Life::Alive;
@@ -107,14 +94,14 @@ template<class IO> class Controller {
         }
         return ok;
     }
-    bool resolve(uint64_t player, const Layout* layout, Context& c) {
+    bool resolve(uint64_t player, Context& c) {
         uint64_t net=0, fp=0, weapon=0, config=0, recoil=0, dispersion=0, calc=0, back=0, p=0;
         uint8_t local=0;
         if (!player || !io.named(player,"PlayerManager","Oxide") ||
             !c.player.capture(io,player,true) ||
-            !pointer(io,player+0x40,net) ||
+            !pointer(io,player+go_active::NETWORK_BEHAVIOUR_IDENTITY,net) ||
             !io.named(net,"NetworkIdentity","Mirror") ||
-            !io.read(net+0x4a,local) || local!=1 ||
+            !io.read(net+go_active::NETWORK_IDENTITY_IS_LOCAL_PLAYER,local) || local!=1 ||
             !pointer(io,player+go_active::PLAYER_FP_MANAGER,fp) ||
             !io.named(fp,"FPManager","Oxide") || !c.fp.capture(io,fp,true)) return false;
         auto take_weapon = [&](uint64_t offset) {
@@ -141,9 +128,7 @@ template<class IO> class Controller {
             return false;
         if (!io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true) ||
             !pointer(io,weapon+go_active::FPHITSCAN_CALCULATOR,calc) || !calc ||
-            !((layout && layout->calculator) ? io.named(calc,layout->calculator,"")
-                                             : io.calculator_class(calc)) ||
-            !c.calculator.capture(io,calc,false) ||
+            !io.calculator_class(calc) || !c.calculator.capture(io,calc,false) ||
             !pointer(io,calc+go_active::CALCULATOR_HITSCAN_CONFIG,p) || p!=config ||
             !pointer(io,calc+go_active::CALCULATOR_DISPERSION_CONFIG,dispersion) ||
             !pointer(io,config+go_active::HITSCANCONFIG_DISPERSION_CONFIG,p) || p!=dispersion ||
@@ -151,7 +136,7 @@ template<class IO> class Controller {
             !c.dispersion.capture(io,dispersion,true)) return false;
         return true;
     }
-    bool apply(size_t begin, size_t end, uint64_t player, const Layout* layout) {
+    bool apply(size_t begin, size_t end, uint64_t player) {
         for (size_t i=begin; i<end; ++i) {
             float now=0;
             if (!io.read(address(i),now) || !valid(now)) return false;
@@ -159,7 +144,7 @@ template<class IO> class Controller {
             Context fresh;
             // Revalidate the local owner, equip links and asset identities
             // immediately before each write, not only at frame start.
-            if (!resolve(player,layout,fresh) || !(fresh==context_)) return false;
+            if (!resolve(player,fresh) || !(fresh==context_)) return false;
             if (!io.read(address(i),now) || !valid(now)) return false;
             if (now==0.f) continue;
             auto& s=saved_[i];
@@ -194,22 +179,11 @@ public:
         if (!s) spread=Status::Failed;
         if (!r || !s || (!nr && !ns)) return;
         if (!base) return;
-        std::array<uint8_t,20> id{};
-        const Layout* layout=nullptr;
-        if (io.read(base+0x318,id))
-            for (const auto& l:kLayouts) if (l.build_id==id) layout=&l;
-        if (layout) for (size_t i=0;i<layout->guard_sites.size();++i) {
-            uint32_t word=0;
-            if (!io.read(base+layout->guard_sites[i],word) || word!=layout->guard_words[i]) {
-                layout=nullptr; // fall back to the fully typed managed graph
-                break;
-            }
-        }
-        // Unknown build IDs are allowed only through resolve(): every object
-        // class, native identity and config backlink is revalidated. A shifted
-        // layout therefore fails closed instead of disabling unchanged builds.
+        // No runtime offset discovery and no native-RVA table: every address
+        // below is `object + go_active::<named offset>` from the user's
+        // release/beta headers. Runtime reads only validate object ownership.
         Context next;
-        if (!resolve(player,layout,next)) {
+        if (!resolve(player,next)) {
             if (!restore(0,9)) recoil=spread=Status::Failed;
             return;
         }
@@ -217,8 +191,8 @@ public:
             if (!restore(0,9)) { recoil=spread=Status::Failed; return; }
             context_=next;
         }
-        if (nr) recoil=apply(0,6,player,layout)?Status::Active:Status::Failed;
-        if (ns) spread=apply(6,9,player,layout)?Status::Active:Status::Failed;
+        if (nr) recoil=apply(0,6,player)?Status::Active:Status::Failed;
+        if (ns) spread=apply(6,9,player)?Status::Active:Status::Failed;
     }
 };
 }

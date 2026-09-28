@@ -107,6 +107,34 @@
    "how": "UnityEngine.Object: за заголовком объекта (klass 0x0, monitor 0x8) первым идёт m_CachedPtr -> 0x10; проверено на всех managed-обёртках"
   }
  },
+ "NETWORK_BEHAVIOUR_IDENTITY": {
+  "kind": "field",
+  "class": "Mirror.NetworkBehaviour",
+  "struct": "Mirror_NetworkBehaviour_Fields",
+  "field": "_netIdentity_k__BackingField",
+  "type": "Mirror_NetworkIdentity_o*",
+  "offset": 64,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Mirror_NetworkBehaviour_Fields",
+   "field": "_netIdentity_k__BackingField",
+   "how": "local-player ownership guard; release/beta layout"
+  }
+ },
+ "NETWORK_IDENTITY_IS_LOCAL_PLAYER": {
+  "kind": "field",
+  "class": "Mirror.NetworkIdentity",
+  "struct": "Mirror_NetworkIdentity_Fields",
+  "field": "_isLocalPlayer_k__BackingField",
+  "type": "bool",
+  "offset": 74,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "Mirror_NetworkIdentity_Fields",
+   "field": "_isLocalPlayer_k__BackingField",
+   "how": "local-player ownership guard; release/beta layout"
+  }
+ },
  "PLAYER_MANAGER_TYPEINFO_RVA": {
   "kind": "typeinfo_rva",
   "class": "Oxide.PlayerManager",
