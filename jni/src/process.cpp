@@ -1,6 +1,5 @@
 #include "process.h"
 #include "game.h"
-#include "game_offsets_active.h"   // go::CurrentBuild()
 
 #include <atomic>
 #include <chrono>
@@ -11,39 +10,16 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <string>
-#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 
-// Пакеты клиентов (релиз/бета). Play-бета ставится ТЕМ ЖЕ applicationId, что и
-// релиз, — тогда имя пакета версию не различает, и какую версию читать, решает
-// выбор человека (файл .build), а не имя процесса. Суффикс ниже — запасной
-// вариант для сборок, которые ставятся отдельным APK: если у твоей беты такое
-// имя, допиши строку, больше это нигде не зашито. Порядок поиска задаёт
-// приоритет, а не ограничение: сначала пакет выбранной версии, затем второй
-// (см. поток привязки ниже).
-static const char* const kPackageRelease = "com.catsbit.oxidesurvivalisland";
-static const char* const kPackageBeta    = "com.catsbit.oxidesurvivalisland.beta";
-
-static const char* TargetPackageA() {
-    return (go::CurrentBuild() == go::Build::Beta) ? kPackageBeta : kPackageRelease;
-}
-static const char* TargetPackageB() {
-    return (go::CurrentBuild() == go::Build::Beta) ? kPackageRelease : kPackageBeta;
-}
+// Единственный поддерживаемый клиент: пакет текущего релиза игры.
+static const char* const kTargetPackage = "com.catsbit.oxidesurvivalisland";
 
 pid_t g_target_pid = -1;
 bool  g_esp_attached = false;
-// Привязка найдена по пакету (true) или по отображённому libil2cpp.so (false):
-// от этого зависит, как проверять, что процесс всё ещё тот.
-static bool  g_target_by_package = true;
 static std::thread g_attach_thread;
 static std::atomic<bool> g_attach_running{false};
-
-// Стартовый экран выбора версии игры (релиз или бета). Пока он открыт, меню не
-// рисуется, а аим и автофарм не трогают камеру — иначе бот водил бы палец прямо
-// под пальцем пользователя, пока тот выбирает. См. RenderMenu.
-bool g_buildPrompt = true;
 
 // ---- Поиск процесса игры ----------------------------------------------------
 // Раньше брался первый процесс, у которого cmdline совпал с пакетом. Процессов
@@ -73,8 +49,8 @@ static int cmdline_rank(pid_t pid, const char* const* pkgs, int pkg_count) {
 }
 
 static bool pid_cmdline_matches(pid_t pid) {
-    const char* pkgs[2] = {TargetPackageA(), TargetPackageB()};
-    return cmdline_rank(pid, pkgs, 2) >= 1;
+    const char* pkgs[1] = {kTargetPackage};
+    return cmdline_rank(pid, pkgs, 1) >= 1;
 }
 
 // 1 — libil2cpp.so отображён, 0 — нет, -1 — карта не читается.
@@ -102,7 +78,7 @@ static int proc_libil2cpp(pid_t pid) {
 static pid_t find_game_pid() {
     DIR* dir = opendir("/proc");
     if (!dir) return -1;
-    const char* pkgs[2] = {TargetPackageA(), TargetPackageB()};
+    const char* pkgs[1] = {kTargetPackage};
     const pid_t self = getpid();
     pid_t best = -1;
     int best_rank = -1;
@@ -110,37 +86,13 @@ static pid_t find_game_pid() {
     while ((entry = readdir(dir))) {
         const pid_t pid = (pid_t)atoi(entry->d_name);
         if (pid <= 0 || pid == self) continue;
-        const int rank = cmdline_rank(pid, pkgs, 2);
+        const int rank = cmdline_rank(pid, pkgs, 1);
         if (rank < 0) continue;
         if (proc_libil2cpp(pid) == 1) { best = pid; break; }   // основной процесс игры — дальше не ищем
         if (best_rank < 0 || rank > best_rank) { best = pid; best_rank = rank; }
     }
     closedir(dir);
-    if (best > 0) g_target_by_package = true;
     return best;
-}
-
-// Пакет мог быть переименован (клон приложения, рабочий профиль, сборка с другим
-// applicationId) — тогда ищем просто процесс с отображённым libil2cpp.so. Чужие
-// приложения не цепляем: только процессы-приложения (uid >= 10000, то есть не
-// система и не root).
-static pid_t find_unity_pid() {
-    DIR* dir = opendir("/proc");
-    if (!dir) return -1;
-    const pid_t self = getpid();
-    pid_t found = -1;
-    struct dirent* entry;
-    while ((entry = readdir(dir))) {
-        const pid_t pid = (pid_t)atoi(entry->d_name);
-        if (pid <= 0 || pid == self) continue;
-        char path[32];
-        snprintf(path, sizeof(path), "/proc/%d", pid);
-        struct stat st{};
-        if (stat(path, &st) != 0 || st.st_uid < 10000) continue;
-        if (proc_libil2cpp(pid) == 1) { found = pid; g_target_by_package = false; break; }
-    }
-    closedir(dir);
-    return found;
 }
 
 // Процесс всё ещё тот самый? Одно чтение cmdline вместо полного перебора /proc:
@@ -149,8 +101,7 @@ static bool pid_still_game(pid_t pid) {
     char path[32];
     snprintf(path, sizeof(path), "/proc/%d", pid);
     if (access(path, F_OK) != 0) return false;
-    if (g_target_by_package) return pid_cmdline_matches(pid);
-    return proc_libil2cpp(pid) == 1;
+    return pid_cmdline_matches(pid) && proc_libil2cpp(pid) == 1;
 }
 
 void start_attach_thread() {
@@ -159,8 +110,6 @@ void start_attach_thread() {
         while (g_attach_running.load()) {
             if (!g_esp_attached) {
                 pid_t pid = find_game_pid();
-                const bool by_package = (pid > 0);
-                if (pid <= 0) pid = find_unity_pid();
                 if (pid <= 0) {
                     // Процесса игры нет: состояния не меняем, повторим попытку на
                     // следующем круге. Игроку об этом не сообщаем — тост «игра не

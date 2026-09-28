@@ -1,12 +1,13 @@
 #include "game.h"
 #include "esp_continuity.h"
+#include "player_esp_watchdog.h"
 #include "silent_aim.h"
 #include "viewmodel.h"
 #include "game_viewmodel_internal.h"
 #include "mem_io.h"                // чтение/запись памяти игры: /proc/<pid>/mem + кэш блоков
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
-#include "game_offsets_active.h"   // активные оффсеты: релиз или бета (go::SelectBuild)
+#include "game_offsets_active.h"   // compile-time offsets текущего релиза
 #include "Vector.h"
 #include "logfile.h"     // диагностический лог (Загрузки)
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
@@ -39,9 +40,7 @@ memio::Reader g_mem;
 
 // адресами без метки тоже нельзя. Снимаем метку сразу, на входе.
 
-// Оффсеты — из активного набора: значения переключаются между релизом и
-// бетой в рантайме (см. game_offsets_active.h), имена те же, что были в
-// game_offsets, поэтому весь код чтения памяти ниже не изменился.
+// Все смещения — compile-time константы единственного release-набора.
 using namespace go_active;
 
 pid_t     g_pid         = -1;
@@ -56,7 +55,7 @@ static uint64_t  g_player_position_offset = PLAYER_POSITION;
 
 
 static TransformHierarchyLayout g_transform_hierarchy_layout{};
-static bool g_transform_hierarchy_layout_valid = false;
+static bool g_transform_hierarchy_layout_valid = true;
 
 static bool      g_use_direct_player_position = true;
 static bool      g_player_position_validated = false;
@@ -170,8 +169,6 @@ static void always_day_tick() {
     // класс и находится в новом дампе (grep 'TOD_CycleParameters_o\* Cycle').
     if (!g_day_tod) {
         static uint64_t s_scan_rva = TOD_SCAN_RVA_BEGIN;
-        // const, а не constexpr: значения приходят из активного набора
-        // оффсетов (релиз/бета), а он переключается в рантайме.
         const uint64_t kScanEnd = TOD_SCAN_RVA_END;
         const uint64_t kCycleOff = TOD_SKY_CYCLE;
         uint64_t slots[128];
@@ -884,7 +881,7 @@ uint64_t get_class_static_fields(uint64_t klass) {
     return rd_ptr(klass + IL2CPP_CLASS_STATIC_FIELDS);
 }
 
-static uint64_t resolve_runtime_player_list() {
+static uint64_t resolve_player_list() {
     if (!g_player_manager_class && PLAYER_MANAGER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
         if (class_identity(candidate, "PlayerManager", "Oxide") != 0)
@@ -2570,93 +2567,6 @@ static uint64_t resolve_player_native_transform(uint64_t player) {
     return resolve_native_transform(rd_ptr(player + PLAYER_TRANSFORM));
 }
 
-static bool likely_native_pointer(uint64_t value) {
-    return value >= 0x10000 && value < 0x0001000000000000ULL && (value & 0x7) == 0;
-}
-
-static bool evaluate_transform_hierarchy_layout(const std::vector<uint64_t>& native_transforms, const TransformHierarchyLayout& layout, size_t& position_count, double& extent) {
-    position_count = 0; extent = 0.0;
-    Vec3 minimum{}, maximum{};
-    bool initialized = false;
-    for (uint64_t native_transform : native_transforms) {
-        Vec3 position{};
-        if (!read_transform_hierarchy_layout(native_transform, layout, position)) continue;
-        ++position_count;
-        if (!initialized) { minimum = position; maximum = position; initialized = true; }
-        else {
-            minimum.x = std::min(minimum.x, position.x); minimum.y = std::min(minimum.y, position.y); minimum.z = std::min(minimum.z, position.z);
-            maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
-        }
-    }
-    if (!initialized) return false;
-    extent = fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z);
-    return position_count >= 2 && std::isfinite(extent) && extent >= 0.1 && extent <= 1000000.0;
-}
-
-bool discover_layout_from_native_transforms(const std::vector<uint64_t>& native_transforms,
-                                                   size_t& best_position_count, size_t& candidate_count) {
-    if (native_transforms.size() < 2) return false;
-
-    const int64_t index_deltas[] = {-8, 8, 16, 24};
-    TransformHierarchyLayout best_layout{};
-    double best_score = 0.0;
-    best_position_count = 0; candidate_count = 0;
-    size_t seed_count = std::min<size_t>(native_transforms.size(), 3);
-
-    for (size_t seed_index = 0; seed_index < seed_count; ++seed_index) {
-        uint64_t seed = native_transforms[seed_index];
-        for (uint64_t data_offset = 0x10; data_offset <= 0x200; data_offset += 8) {
-            uint64_t transform_data = rd_ptr(seed + data_offset);
-            if (!likely_native_pointer(transform_data)) continue;
-            for (int64_t index_delta : index_deltas) {
-                int64_t signed_index_offset = (int64_t)data_offset + index_delta;
-                if (signed_index_offset < 0x10 || signed_index_offset > 0x220) continue;
-                uint64_t index_offset = (uint64_t)signed_index_offset;
-                int32_t transform_index = rd<int32_t>(seed + index_offset);
-                if (transform_index < 0 || transform_index > 100000) continue;
-                for (uint64_t matrices_offset = 0; matrices_offset <= 0x100; matrices_offset += 8) {
-                    uint64_t indices_offset = matrices_offset + 8;
-                    uint64_t matrices = rd_ptr(transform_data + matrices_offset);
-                    uint64_t indices_ptr = rd_ptr(transform_data + indices_offset);
-                    if (!likely_native_pointer(matrices) || !likely_native_pointer(indices_ptr)) continue;
-                    for (int matrices_indirect = 0; matrices_indirect < 2; ++matrices_indirect) {
-                        for (int indices_indirect = 0; indices_indirect < 2; ++indices_indirect) {
-                            TransformHierarchyLayout layout{};
-                            layout.data_offset = data_offset; layout.index_offset = index_offset;
-                            layout.matrices_offset = matrices_offset; layout.indices_offset = indices_offset;
-                            layout.matrices_indirect = matrices_indirect != 0; layout.indices_indirect = indices_indirect != 0;
-                            Vec3 seed_position{};
-                            if (!read_transform_hierarchy_layout(seed, layout, seed_position)) continue;
-                            ++candidate_count;
-                            size_t position_count = 0; double extent = 0.0;
-                            bool valid = evaluate_transform_hierarchy_layout(native_transforms, layout, position_count, extent);
-                            best_position_count = std::max(best_position_count, position_count);
-                            if (!valid) continue;
-                            double score = (double)position_count * 1000000.0 + std::min(extent, 999999.0);
-                            if (score > best_score) { best_score = score; best_layout = layout; }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if (best_score <= 0.0) return false;
-    g_transform_hierarchy_layout = best_layout;
-    g_transform_hierarchy_layout_valid = true;
-    return true;
-}
-
-static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& players, size_t& best_position_count, size_t& candidate_count) {
-    std::vector<uint64_t> native_transforms;
-    std::unordered_set<uint64_t> unique_transforms;
-    for (uint64_t player : players) {
-        uint64_t native_transform = resolve_player_native_transform(player);
-        if (native_transform && unique_transforms.insert(native_transform).second)
-            native_transforms.push_back(native_transform);
-    }
-    return discover_layout_from_native_transforms(native_transforms, best_position_count, candidate_count);
-}
-
 static bool read_entity_position(uint64_t source, Vec3& position) {
     if (!source) return false;
     if (g_use_direct_player_position && g_player_position_offset != 0) { position = rd_v3(source + g_player_position_offset); return vec3_is_finite(position); }
@@ -2682,117 +2592,23 @@ bool position_looks_like_world_space(const Vec3& position) {
     return fabsf(position.x) + fabsf(position.y) + fabsf(position.z) > 0.01F;
 }
 
-static bool evaluate_player_position_offset(const std::vector<uint64_t>& players, uint64_t offset, double& score) {
-    score = 0.0;
-    if (!offset) return false;
-    size_t valid = 0, non_zero = 0;
-    Vec3 minimum{}, maximum{};
-    bool initialized = false;
+// Validate only the configured release field. No alternate offsets are tried
+// and no transform layout is inferred from live process memory.
+static bool validate_player_position_field(const std::vector<uint64_t>& players) {
     for (uint64_t player : players) {
         if (!player) continue;
-        Vec3 position = rd_v3(player + offset);
-        if (!vec3_is_finite(position)) continue;
-        float magnitude = fabsf(position.x) + fabsf(position.y) + fabsf(position.z);
-        if (magnitude < 0.01F) continue;
-        ++valid; ++non_zero;
-        if (!initialized) { minimum = position; maximum = position; initialized = true; }
-        else {
-            minimum.x = std::min(minimum.x, position.x); minimum.y = std::min(minimum.y, position.y); minimum.z = std::min(minimum.z, position.z);
-            maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
-        }
-    }
-    if (!initialized || valid < 1 || non_zero < 1) return false;
-    double extent = fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z);
-    if (!std::isfinite(extent) || extent > 1000000.0) return false;
-    // Alone on the server (or everybody standing on the same spot) there is no
-    // spread to measure, so a single plausible world position has to do. Not
-    // accepting it used to kill the whole ESP after a solo respawn: the offset
-    // never re-validated and every frame bailed out early until app restart.
-    if (valid < 2 || extent < 0.1) {
-        if (!position_looks_like_world_space(minimum)) return false;
-        score = (double)valid * 1000000.0;
-        return true;
-    }
-    score = (double)valid * 1000000.0 + std::min(extent, 999999.0);
-    return true;
-}
-
-// Direct (PlayerManager field) position offsets, most trusted first. The
-// canonical field is lastSavedPosition (0x1D0); lastTickPosition (0x1C8) is
-// equivalent. The rest are legacy guesses kept as a last resort only.
-static const uint64_t k_known_position_offsets[] = {0x1D0, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D4, 0x1DC, 0x1E8};
-
-static uint64_t find_direct_player_position_offset(const std::vector<uint64_t>& players) {
-    bool saved_use_direct = g_use_direct_player_position;
-    g_use_direct_player_position = true;
-    uint64_t best_offset = 0;
-    double best_score = 0.0;
-    for (uint64_t offset : k_known_position_offsets) {
-        double score = 0.0;
-        if (!evaluate_player_position_offset(players, offset, score)) continue;
-        // Prefer the offset that validates for the most players; on a tie the
-        // earlier (more trusted) entry wins regardless of spatial extent.
-        double count = floor(score / 1000000.0), best_count = floor(best_score / 1000000.0);
-        if (count > best_count) { best_offset = offset; best_score = score; }
-    }
-    g_use_direct_player_position = saved_use_direct;
-    return best_offset;
-}
-
-// Frames in a row the direct offsets failed to validate. Right after a world
-// reload the position fields are still zero for a few frames; falling back to
-// the transform-hierarchy path on the very first failure used to lock the ESP
-// into that mode (boxes hanging 1.6 m below the player) until restart.
-static int g_direct_position_fail_streak = 0;
-static int g_direct_position_recheck = 0;
-// Когда началась текущая серия неудач прямых полей. Ожидание «поля допишутся»
-// считается и по кадрам, и по времени: 60 кадров на перезагрузке мира (там же
-// просаживается FPS) растягивались в две-три секунды, и всё это время боксов не
-// было вовсе — ровно то, на что жалоба «после смерти прогружаются не сразу».
-static double g_direct_position_fail_since = 0.0;
-static constexpr double kDirectPositionSettleSeconds = 0.6;
-static bool g_body_caches_dirty = false; // clear per-player caches on the next frame
-
-static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    uint64_t best_offset = find_direct_player_position_offset(players);
-    if (best_offset) {
-        g_direct_position_fail_streak = 0;
-        g_direct_position_fail_since = 0.0;
-        g_use_direct_player_position = true; g_player_position_offset = best_offset;
-        g_player_position_validated = true; g_matrix_configuration_validated = false;
-        return true;
-    }
-    // Даём прямым полям устояться, прежде чем уходить на обход иерархии, но не
-    // дольше положенного: и по кадрам (60), и по времени (0.6 с) — что раньше.
-    const double now = mono_seconds();
-    if (g_direct_position_fail_since == 0.0) g_direct_position_fail_since = now;
-    ++g_direct_position_fail_streak;
-    if (g_direct_position_fail_streak < 60 &&
-        (now - g_direct_position_fail_since) < kDirectPositionSettleSeconds) return false;
-    size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
-    if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
-        g_use_direct_player_position = false;
-        g_player_position_validated = true; g_matrix_configuration_validated = false;
-        g_direct_position_recheck = 0;
+        const Vec3 position = rd_v3(player + PLAYER_POSITION);
+        if (!position_looks_like_world_space(position)) continue;
+        g_player_position_offset = PLAYER_POSITION;
+        g_use_direct_player_position = true;
+        g_player_position_validated = true;
+        g_matrix_configuration_validated = false;
         return true;
     }
     return false;
 }
 
-// While on the hierarchy fallback, keep probing the direct fields and switch
-// back as soon as they validate again.
-static void recheck_direct_player_position(const std::vector<uint64_t>& players) {
-    if (g_use_direct_player_position || !g_player_position_validated) return;
-    if (++g_direct_position_recheck < 15) return;
-    g_direct_position_recheck = 0;
-    uint64_t best_offset = find_direct_player_position_offset(players);
-    if (!best_offset) return;
-    g_direct_position_fail_streak = 0;
-    g_direct_position_fail_since = 0.0;
-    g_use_direct_player_position = true; g_player_position_offset = best_offset;
-    g_matrix_configuration_validated = false;
-    g_body_caches_dirty = true;
-}
+static bool g_body_caches_dirty = false; // clear per-player caches on the next frame
 
 // ---- Чувствительность взгляда (настройка игрока) ---------------------------
 //
@@ -2817,7 +2633,7 @@ bool esp_read_look_sensitivity(float& out) {
     if (!player) {
         // Своей PlayerManager ещё нет (загрузка, только что респавнулись):
         // настройка клиентская, у любой PlayerManager она одна и та же.
-        uint64_t list = resolve_runtime_player_list();
+        uint64_t list = resolve_player_list();
         if (!list) return false;
         uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
         int32_t  count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
@@ -2867,8 +2683,8 @@ bool esp_read_look_sensitivity(float& out) {
 // запись — это «ввод одного кадра»: сыграет она или нет, зависит от того, кто
 // последним коснулся поля перед чтением. Контроллер в aim.cpp это учитывает:
 // шаг считается по остатку ошибки, а не по «мы записали, значит повернули».
-// Поля MouseLook (дамп билда 62a8534: oxiclean; в бете те же смещения, имена
-// обфусцированы и ротируют — сверено по dump.7z и dump_beta.7z).
+// Поля MouseLook проверены по release-дампу билда 62a8534; обфусцированные
+// имена при следующих обновлениях могут измениться.
 static constexpr uint64_t MOUSELOOK_INVERT = 0x30;   // m_Invert
 static constexpr uint64_t MOUSELOOK_ANGLES = 0x4C;   // Vector2 накопителя:
                                                      // [0] rotationX (вверх — меньше),
@@ -2985,7 +2801,7 @@ static uint64_t mouse_look_owner(uint64_t mouse_look) {
 // dump.cs релиза). По нему и опознаём «свой» объект.
 static constexpr uint64_t MOUSELOOK_LOOK_ROOT = 0x28;
 // Mirror помечает игрока, которым управляет это устройство. Оба поля берутся
-// только из активной release/beta таблицы offsets.
+// только из compile-time таблицы текущего релиза.
 
 // -1 — прочитать не удалось, 0 — чужой, 1 — локальный.
 static int player_is_local(uint64_t player) {
@@ -4141,14 +3957,15 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
     return true;
 }
 
-static std::vector<uint64_t> read_configured_player_transforms() {
+static std::vector<uint64_t> read_configured_player_transforms(bool* player_list_ok) {
+    if (player_list_ok) *player_list_ok = false;
     std::vector<uint64_t> transforms;
-    uint64_t list = resolve_runtime_player_list();
+    uint64_t list = resolve_player_list();
     if (!list) return transforms;
 
     uint64_t local_player = resolve_local_player();
     if (local_player && !player_list_contains(list, local_player)) {
-        // Alone on the server the runtime list is empty — the local player
+        // Alone on the server the player list is empty — the local player
         // is only registered there while networked players are around. He is
         // still perfectly valid (his class just re-checked in the resolver),
         // and dropping him here was what killed markers/farm solo: the frame
@@ -4164,16 +3981,20 @@ static std::vector<uint64_t> read_configured_player_transforms() {
 
     for (int attempt = 0; attempt < 3; ++attempt) {
         if (attempt > 0) {
-            uint64_t refreshed_list = resolve_runtime_player_list();
+            uint64_t refreshed_list = resolve_player_list();
             if (refreshed_list) list = refreshed_list;
         }
         uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
         int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
         if (!items || count <= 0 || count > 512) {
-            // Empty list, but the local player himself is known: he alone is
-            // enough for the whole pipeline (camera, matrix validation and
-            // the local position all work from one sample).
-            if (local_source && count == 0) return {local_source};
+            // Empty is a healthy list state.  Report it separately from a
+            // failed resolver so camera-only publication cannot mask failures.
+            if (items && count == 0) {
+                if (player_list_ok) *player_list_ok = true;
+                // A known local player is enough for camera/matrix validation.
+                if (local_source) return {local_source};
+                return transforms;
+            }
             continue;
         }
 
@@ -4191,8 +4012,10 @@ static std::vector<uint64_t> read_configured_player_transforms() {
 
         uint64_t confirmed_items = rd_ptr(list + IL2CPP_LIST_ITEMS);
         int32_t confirmed_count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-        if (items == confirmed_items && count == confirmed_count && !snapshot.empty())
+        if (items == confirmed_items && count == confirmed_count && !snapshot.empty()) {
+            if (player_list_ok) *player_list_ok = true;
             return snapshot;
+        }
     }
     return transforms;
 }
@@ -4295,12 +4118,11 @@ struct PlayerAux {
 static std::unordered_map<uint64_t, PlayerAux> g_player_aux;
 
 TransformHierarchyLayout g_skeleton_layout{};
-bool g_skeleton_layout_valid = false;
+bool g_skeleton_layout_valid = true;
 
-static uint64_t g_go_name_offset = 0;
-static bool     g_go_name_plain_pointer = false; // fallback: name stored as raw char*
-bool     g_go_name_offset_valid = false;
-static double   g_go_name_retry_at = 0.0;   // mono_seconds: не раньше этого момента
+static uint64_t g_go_name_offset = GAMEOBJECT_NAME;
+static bool     g_go_name_plain_pointer = false;
+bool     g_go_name_offset_valid = true;
 static int      g_skeleton_builds_this_frame = 0; // heavy rescans: max 1 per frame
 
 void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled = enabled; }
@@ -4424,45 +4246,6 @@ bool read_transform_name(uint64_t transform, char* out, size_t cap) {
     return read_gameobject_name_at(native_go, g_go_name_offset, g_go_name_plain_pointer, out, cap);
 }
 
-// Find the GameObject name field offset by probing candidates against the
-// character model subtree until known bone names show up.
-static bool discover_gameobject_name_offset(const std::vector<uint64_t>& nodes) {
-    static const uint64_t kCandidates[] = {GAMEOBJECT_NAME_GUESS, 0x40, 0x50, 0x38, 0x30, 0x28, 0x58, 0x20, 0x60};
-    static const char* kProbeNames[] = {"hips", "spine", "spine1", "spine2", "neck", "head", "armature", "root", "pelvis"};
-
-    std::vector<uint64_t> gameobjects;
-    gameobjects.reserve(nodes.size());
-    for (uint64_t node : nodes) {
-        uint64_t go = rd_ptr(node + COMPONENT_GAMEOBJECT);
-        if (go) gameobjects.push_back(go);
-        if (gameobjects.size() >= 192) break;
-    }
-    if (gameobjects.size() < 8) return false;
-
-    for (int plain_pointer = 0; plain_pointer < 2; ++plain_pointer) {
-        for (uint64_t offset : kCandidates) {
-            int matches = 0;
-            for (uint64_t go : gameobjects) {
-                char name[48];
-                if (!read_gameobject_name_at(go, offset, plain_pointer != 0, name, sizeof(name))) continue;
-                char normalized[48];
-                normalize_bone_name(name, normalized, sizeof(normalized));
-                for (const char* probe : kProbeNames) {
-                    if (strcmp(normalized, probe) == 0) { ++matches; break; }
-                }
-                if (matches >= 3) break;
-            }
-            if (matches >= 3) {
-                g_go_name_offset = offset;
-                g_go_name_plain_pointer = plain_pointer != 0;
-                g_go_name_offset_valid = true;
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 // Раскладка прочитала трансформ И дала правдоподобную мировую позицию.
 // Одного чтения мало: комбинация может читать чужую/протухшую иерархию —
 // конечные числа не из того места. Сэмпл здесь — кость игрока, она обязана
@@ -4474,75 +4257,16 @@ static bool skeleton_layout_reads_plausible(const TransformHierarchyLayout& layo
            vec3_is_finite(probe) && position_looks_like_world_space(probe);
 }
 
-// Отказов подряд действующей раскладке, прежде чем перебирать заново.
-// Раскладка одна на сборку игры (смещения структур Unity одинаковы у всех
-// сущностей), поэтому одиночный отказ — это рваное чтение (спавн как раз
-// перестраивает иерархию), а не смена раскладки. Прежний код сносил общую
-// раскладку по первому же такому сэмплу и перенимал первую читающуюся
-// комбинацию — после каждого нового игрока рядом все чужие скелеты прыгали
-// и гасли на несколько кадров, пока следующий билд не возвращал раскладку
-// обратно (в логе: новый адрес + 3-4 кадра без костей без тормоза).
-static int      g_skeleton_layout_miss = 0;
-static constexpr int kSkeletonLayoutMissLimit = 4;
-// Последний трансформ, успешно прочитанный действующей раскладкой: по нему
-// отличаем «сэмплы рваные» (якорь читается — раскладку держим) от «раскладка
-// правда умерла» (якорь тоже не читается — переучиваем).
-static uint64_t g_skeleton_layout_anchor = 0;
+// Read failures are transient hierarchy rebuilds; the release layout itself
+// stays fixed and is never replaced from process memory.
 
 static bool resolve_skeleton_layout(uint64_t sample_transform) {
-    if (g_skeleton_layout_valid) {
-        if (skeleton_layout_reads_plausible(g_skeleton_layout, sample_transform)) {
-            g_skeleton_layout_anchor = sample_transform;
-            g_skeleton_layout_miss = 0;
-            return true;
-        }
-        // Действующая не прочитала сэмпл — но сносить её по одному сэмплу
-        // нельзя: этот билд скелета не состоится (пересборка через 20 кадров,
-        // когда иерархия устоится), а остальные игроки продолжают читать по
-        // действующей.
-        if (++g_skeleton_layout_miss < kSkeletonLayoutMissLimit) return false;
-        g_skeleton_layout_miss = 0;
-        if (g_skeleton_layout_anchor &&
-            skeleton_layout_reads_plausible(g_skeleton_layout, g_skeleton_layout_anchor))
-            return false;   // раскладка жива, сэмплы рваные — держим её
-        g_skeleton_layout_valid = false;
-        g_skeleton_layout_anchor = 0;
-        static double s_layout_relearn_at = -1e9;
-        const double now = memio::now_seconds();
-        if (now - s_layout_relearn_at >= 2.0) {
-            s_layout_relearn_at = now;
-            LogLine("скелет: раскладка переучивается (4 отказа подряд, якорь тоже не читается)");
-        }
-    }
-    if (g_transform_hierarchy_layout_valid &&
-        skeleton_layout_reads_plausible(g_transform_hierarchy_layout, sample_transform)) {
-        g_skeleton_layout = g_transform_hierarchy_layout;
+    // Unity transform layout is a fixed part of the supported release. A
+    // failed sample means the hierarchy is being rebuilt, not that another
+    // layout should be searched for.
+    if (skeleton_layout_reads_plausible(g_skeleton_layout, sample_transform)) {
         g_skeleton_layout_valid = true;
-        g_skeleton_layout_anchor = sample_transform;
         return true;
-    }
-    const uint64_t base_offsets[][2] = {{0x38, 0x40}, {0x18, 0x20}};
-    const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
-    for (const auto& base : base_offsets) {
-        for (const auto& offsets : data_offsets) {
-            for (int matrices_indirect = 0; matrices_indirect < 2; ++matrices_indirect) {
-                for (int indices_indirect = 0; indices_indirect < 2; ++indices_indirect) {
-                    TransformHierarchyLayout layout{};
-                    layout.data_offset = base[0];
-                    layout.index_offset = base[1];
-                    layout.matrices_offset = offsets[0];
-                    layout.indices_offset = offsets[1];
-                    layout.matrices_indirect = matrices_indirect != 0;
-                    layout.indices_indirect = indices_indirect != 0;
-                    if (skeleton_layout_reads_plausible(layout, sample_transform)) {
-                        g_skeleton_layout = layout;
-                        g_skeleton_layout_valid = true;
-                        g_skeleton_layout_anchor = sample_transform;
-                        return true;
-                    }
-                }
-            }
-        }
     }
     return false;
 }
@@ -4969,7 +4693,7 @@ static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton)
     collect_transform_subtree(root, nodes, 1024);
     if (nodes.size() < 8) return false;
 
-    if (!g_go_name_offset_valid && !discover_gameobject_name_offset(nodes)) return false;
+    if (!g_go_name_offset_valid) return false;
 
     // Collect up to a few Hips candidates (render rig, ragdoll copies, ...).
     uint64_t hips_candidates[4] = {};
@@ -5659,30 +5383,11 @@ bool object_class_name_is(uint64_t obj, const char* expected,
     return name == expected;
 }
 
-// The GameObject-name offset is normally discovered while building a skeleton.
-// Weapon labels must work with skeleton ESP off, so discover it on demand from
-// the character model subtree (cheap: one BFS, then cached process-wide).
+// The release GameObject-name field is fixed in the offset table. This helper
+// remains as the shared capability check used by weapon and marker labels.
 bool ensure_gameobject_name_offset(uint64_t player) {
-    if (g_go_name_offset_valid) return true;
-    // Кулдаун в СЕКУНДАХ, а не в вызовах. Функцию зовут из мест с совершенно
-    // разной частотой: конвейер имён ESP — каждый кадр на каждого игрока, сканы
-    // реестра — раз в пару секунд. Прежние «60 вызовов» на первом сценарии
-    // означали новую попытку каждые ~0.1 с, а попытка — это обход поддерева
-    // трансформов модели до 256 узлов, то есть сотни чтений памяти одним
-    // кадром. Пока смещение не найдено (или не читается поза игрока), это был
-    // один из самых дорогих периодических рывков: в логе 14.09 медленные кадры
-    // шли с интервалами 8/52/68/112 — наложение нескольких таких периодик.
-    const double now = mono_seconds();
-    if (now < g_go_name_retry_at) return false;
-    uint64_t root = skeleton_model_root(player);
-    if (!root) { g_go_name_retry_at = now + 2.0; return false; }
-    static std::vector<uint64_t> nodes;
-    collect_transform_subtree(root, nodes, 256);
-    if (nodes.size() < 8 || !discover_gameobject_name_offset(nodes)) {
-        g_go_name_retry_at = now + 2.0;
-        return false;
-    }
-    return true;
+    (void)player;
+    return g_go_name_offset_valid;
 }
 
 // Lowercase, strip separators — used to recognise container/rig objects that
@@ -6876,6 +6581,9 @@ static int      g_frame_transforms_empty_streak = 0;
 // Frames in a row esp_get_boxes() gave up before publishing this frame's
 // camera / local position (see the watchdog at the top of it).
 static int      g_frame_publish_fail_streak = 0;
+// Independent from camera/marker publication: successful ore frames must not
+// conceal a dead player list or position pipeline.
+static PlayerEspWatchdog g_player_esp_watchdog;
 // Сколько раз подряд сторож сбрасывал кэши, не получив кадра. Три подряд —
 // повод перепривязаться целиком (см. esp_get_boxes).
 static int      g_frame_watchdog_resets = 0;
@@ -6909,15 +6617,11 @@ static EspContinuity g_esp_continuity;
 
 // Everything derived from concrete objects in a world/session. Called when the
 // whole player population is replaced.  Structural choices (position field,
-// matrix convention and Transform hierarchy offsets) belong to the selected
-// game build, not to one PlayerManager lifetime, so an ordinary respawn must
-// not throw them away and spend 1-2 seconds learning them again.  esp_reset()
-// still clears all of them when the process/build really changes.
+// matrix convention and Transform hierarchy offsets) belong to the release
+// build, not to one PlayerManager lifetime, so an ordinary respawn keeps them.
 static void reset_world_caches() {
     g_population_snapshot.clear(); g_world_change_streak = 0;
     s_adopt_cand.clear(); s_adopt_ident_streak = 0;
-    g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
-    g_skeleton_layout_anchor = 0; g_skeleton_layout_miss = 0;
     // Keep g_local_player until the normal resolver confirms its replacement.
     // If the old object is absent from the new population, the camera-local
     // fallback below is used instead of misidentifying a nearby enemy.
@@ -6948,6 +6652,7 @@ void esp_reset() {
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_esp_continuity.clear();
     g_frame_publish_fail_streak = 0; g_frame_watchdog_resets = 0;
+    g_player_esp_watchdog.reset();
     g_local_position_fail_streak = 0; g_world_change_streak = 0;
     g_population_snapshot.clear();
     g_offset_extent_fail_streak = 0;
@@ -6957,10 +6662,9 @@ void esp_reset() {
     g_game_controller_class = 0; g_local_player = 0;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_offset = PLAYER_POSITION;
-    g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
+    g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = true;
     g_use_direct_player_position = true;
     g_player_position_validated = false;
-    g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
     g_cam_fov_deg = 0.0F; g_cam_pose_valid = false; g_cam_pose_derived = false;
     g_aim_state = {};
     g_player_aux.clear();
@@ -6970,9 +6674,9 @@ void esp_reset() {
     g_frame_transforms_lost.clear();
     g_mount_latch.clear();
     g_skeletons.clear();
-    g_skeleton_layout = {}; g_skeleton_layout_valid = false;
-    g_go_name_offset = 0; g_go_name_plain_pointer = false;
-    g_go_name_offset_valid = false; g_go_name_retry_at = 0.0;
+    g_skeleton_layout = {}; g_skeleton_layout_valid = true;
+    g_go_name_offset = GAMEOBJECT_NAME; g_go_name_plain_pointer = false;
+    g_go_name_offset_valid = true;
     g_frame_vp_valid = false; g_frame_local_valid = false;
     reset_marker_caches();
 }
@@ -7032,6 +6736,44 @@ bool publish_camera_only_frame(float sw, float sh) {
         }
     }
     return true;
+}
+
+static void reset_player_pipeline_resolvers() {
+    // Keep camera/marker state intact: this recovery is specifically for the
+    // player list and objects derived from it.
+    g_player_manager_class = 0;
+    g_player_manager_static_fields = 0;
+    g_local_player = 0;
+    g_local_player_miss = 0;
+    g_player_position_offset = PLAYER_POSITION;
+    g_player_position_validated = false;
+    g_use_direct_player_position = true;
+    g_local_position_fail_streak = 0;
+    g_population_snapshot.clear();
+    s_adopt_cand.clear();
+    s_adopt_ident_streak = 0;
+    g_frame_transforms.clear();
+    g_frame_transforms_lost.clear();
+    g_player_aux.clear();
+    g_player_text.clear();
+    g_player_track.clear();
+    g_player_track_pick.clear();
+    g_mount_latch.clear();
+    g_skeletons.clear();
+    g_body_caches_dirty = true;
+}
+
+static void note_player_pipeline_health(bool player_data_ok) {
+    const PlayerEspWatchdogAction action =
+        g_player_esp_watchdog.observe(player_data_ok, mono_seconds());
+    if (action.reset_resolvers) {
+        reset_player_pipeline_resolvers();
+        LogLine("визуал: player pipeline не отвечает — сброшены resolver-кэши");
+    }
+    if (action.request_reattach) {
+        LogLine("визуал: player pipeline не восстановился — запрос перепривязки");
+        g_want_reattach.store(true);
+    }
 }
 
 // Боты в списке боксов: только данные для аима (is_bot), оверлей их не рисует.
@@ -7267,7 +7009,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_last_overlay_sh = sh;
 
     std::vector<uint64_t>& s_transforms = g_frame_transforms;
-    std::vector<uint64_t> refreshed = read_configured_player_transforms();
+    bool player_list_ok = false;
+    std::vector<uint64_t> refreshed = read_configured_player_transforms(&player_list_ok);
     if (!refreshed.empty()) {
         // World reload: every PlayerManager object is new (no overlap with
         // the previous population). This also has to fire when we are alone on
@@ -7358,8 +7101,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         ++g_frame_transforms_empty_streak;
     }
     if (s_transforms.empty()) {
-        // Alone on the server: no player boxes, but markers and the farm
-        // still need this frame's camera + local position.
+        // Alone on the server: no player boxes, but markers and the farm still
+        // need this frame's camera. A validated empty list is healthy; a failed
+        // resolver is not, even though this camera-only frame can publish.
+        note_player_pipeline_health(player_list_ok);
         publish_camera_only_frame(sw, sh);
         append_bot_boxes(result); // боты — и без игроков
         return transient_return(1);
@@ -7376,7 +7121,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_skeleton_builds_this_frame = 0;
 
     if (!g_player_position_validated) {
-        if (!discover_player_position_offset(s_transforms)) {
+        if (!validate_player_position_field(s_transforms)) {
+            note_player_pipeline_health(false);
             // Мир ещё не отдал позиции (перезагрузка после смерти). Боксов в
             // этом кадре нет, но метки и фарм живут на камере — без публикации
             // они гаснут вместе с боксами на все секунды ожидания.
@@ -7384,8 +7130,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             append_bot_boxes(result);
             return transient_return(2);
         }
-    } else {
-        recheck_direct_player_position(s_transforms);
     }
 
     bool transform_camera_mode = false; // light fix: always use native cam matrices, avoid dead-body-as-camera on death
@@ -7426,6 +7170,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<Vec3> positions(s_transforms.size());
     std::vector<char> position_ok(s_transforms.size(), 0);
     std::vector<char> skip_reason(s_transforms.size(), 0); // наблюдатель мерцаний: код пропуска
+    size_t live_player_positions = 0;
 
     {
         Vec3 camera_position{};
@@ -7441,6 +7186,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // мировая позиция, и именно он утаскивал бокс «в другую сторону».
             const bool read_ok = read_entity_position(s_transforms[index], candidate) &&
                                  position_looks_like_world_space(candidate);
+            if (read_ok) ++live_player_positions;
             // Один сбой чтения или один мусорный кадр больше не гасят и не
             // дёргают бокс — см. filter_player_position.
             PlayerTrack& filter = g_player_track[s_transforms[index]];
@@ -7558,11 +7304,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         if (!has_local_position) {
             ++g_local_position_fail_streak;
+            note_player_pipeline_health(player_list_ok && live_player_positions > 0);
             append_bot_boxes(result);
             return transient_return(8);
         }
         g_local_position_fail_streak = 0;
     }
+
+    note_player_pipeline_health(player_list_ok && live_player_positions > 0);
 
     g_frame_vp = vp;
     g_frame_vp_valid = !transform_camera_mode;

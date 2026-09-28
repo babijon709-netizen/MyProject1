@@ -3,10 +3,7 @@ obj/
 __pycache__/
 *.pyc
 
-# capstone для стоек (pip install --target=.tools/capstone): 11 МБ, в репозиторий не идёт
+# Локальные инструменты и распакованный release-дамп в репозиторий не входят.
 .tools/
 release/
-beta/
-
 release
-beta

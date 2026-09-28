@@ -15,7 +15,6 @@
 #include "esp_draw.h"
 #include "aim.h"
 #include "logfile.h"                 // AimTouchFracX/Y (строки калибровки)
-#include "process.h"             // g_buildPrompt (стартовый выбор версии)
 #include "VidAvatar.h"
 #if __has_include("media/icons.h")
 #  include "media/icons.h"
@@ -1740,81 +1739,8 @@ void RenderMenu() {
     bool anyOverlayVisible = g_sheet.visible || g_pop.visible;
     if (!io.MouseDown[0] && !anyOverlayVisible) g_input.touchConsumed = false;
 
-    // Пока версия не выбрана — только окно выбора: вотермарка и счётчик
-    // появляются после (g_buildPrompt снимается тапом по версии ниже).
-    if (!g_buildPrompt) DrawWatermark(dt);
+    DrawWatermark(dt);
     DrawToast(dt);
-
-    // ---- Выбор версии игры (окно при запуске) -------------------------------
-    // Окно в том же виде, что и остальное гуи: та же карточка, тот же радиус и
-    // те же кнопки, что в меню, — только с выбором версии. От версии зависят и
-    // оффсеты, и пакет, к которому подключаться, поэтому пока выбор не сделан,
-    // меню не рисуется, а аим и автофарм стоят (g_buildPrompt).
-    if (g_buildPrompt) {
-        float dw = 0.f, dh = 0.f;
-        VisibleScreen(dw, dh);
-        if (dw < 100.f || dh < 100.f) return;   // размер экрана ещё неизвестен
-
-        auto* fg = ImGui::GetForegroundDrawList();
-        auto* fn = ImGui::GetFont();
-        const float fs = ImGui::GetFontSize();
-        const bool betaOk = go::BetaAvailable();
-
-        const float padX = Layout::PadX;
-        const float padY = Layout::Inset;
-        const float tfs  = fs * 1.35f;                 // заголовок окна
-        const float btnH = Layout::BtnH;
-        const float gap  = 12.f;
-        const float wW   = ImMax(360.f, ImMin(dw * 0.82f, WW_MIN));
-        const float bw   = (wW - padX * 2.f - gap) * 0.5f;
-        const float wH   = padY + tfs + 20.f + btnH + padY;
-        const float x0   = (dw - wW) * 0.5f;
-        const float y0   = (dh - wH) * 0.5f;
-
-        // Окно поверх игры — как окно меню. Экран не затемняем: выбор версии —
-        // единственное, что здесь показано, и гасить игру он не должен.
-        fg->AddRectFilled({x0, y0}, {x0 + wW, y0 + wH}, C::U(C::Bg()), R::Card);
-        if (g_state.ui_show_sep)
-            fg->AddRect({x0, y0}, {x0 + wW, y0 + wH}, C::U(C::Sep()), R::Card, 0, 1.2f);
-
-        const char* title = XS("Версия игры");
-        auto tsz = fn->CalcTextSizeA(tfs, FLT_MAX, 0, title);
-        fg->AddText(fn, tfs, {x0 + (wW - tsz.x) * 0.5f, y0 + padY}, C::U(C::Txt()), title);
-
-        // Две кнопки — по половине окна каждая, как строки меню.
-        const float by = y0 + padY + tfs + 20.f;
-        for (int i = 0; i < 2; ++i) {
-            const bool beta = (i == 1);
-            const bool enabled = (!beta || betaOk);
-            const bool sel = (go::CurrentBuild() == (beta ? go::Build::Beta : go::Build::Release));
-            const float bx = x0 + padX + i * (bw + gap);
-
-            fg->AddRectFilled({bx, by}, {bx + bw, by + btnH}, C::U(C::Card()), R::Btn);
-            if (sel)
-                fg->AddRectFilled({bx, by}, {bx + bw, by + btnH},
-                    C::UA(C::Acc(), g_darkTheme ? 0.18f : 0.10f), R::Btn);
-            fg->AddRect({bx, by}, {bx + bw, by + btnH},
-                        sel ? C::UA(C::Acc(), 0.9f) : C::U(C::Sep()), R::Btn, 0, sel ? 2.2f : 1.2f);
-
-            const char* name = beta ? "Beta" : "Release";
-            auto nsz = fn->CalcTextSizeA(fs * 1.15f, FLT_MAX, 0, name);
-            fg->AddText(fn, fs * 1.15f,
-                        {bx + (bw - nsz.x) * 0.5f, by + (btnH - fs * 1.15f) * 0.5f},
-                        C::UA(enabled ? (sel ? C::Acc() : C::Txt()) : C::Dim(), enabled ? 1.f : 0.6f),
-                        name);
-
-            // Тап считаем вручную: окна меню в этот момент ещё нет, а ImGui-
-            // виджет ушёл бы в служебное окно «Debug##Default».
-            if (enabled && !g_input.touchConsumed &&
-                TapInRect({bx, by}, {bx + bw, by + btnH})) {
-                ApplyBuildChoice(beta ? go::Build::Beta : go::Build::Release);
-                g_input.touchConsumed = true;
-                g_buildPrompt = false;
-            }
-        }
-
-        return;   // пока выбираем версию, меню не рисуем
-    }
 
     // ---- Режим калибровки зон вводом с экрана ------------------------------
     // Меню спрятано; первый тап по экрану записывает позицию (в долях экрана):

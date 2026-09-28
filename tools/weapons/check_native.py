@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Optional ARM64 execution checks against the two unmodified game images.
+"""Optional ARM64 execution checks against the supported unmodified release image.
 
 Requires unicorn. No game images are checked in. This validates arithmetic,
 not live Android ownership, timing, server acceptance or anti-cheat safety.
-Usage: check_native.py release/libil2cpp.so beta/libil2cpp.so
+Usage: check_native.py release/libil2cpp.so
 """
 import mmap
 import struct
@@ -17,9 +17,6 @@ BUILDS = [
     ('release', 'd85e63cd8dcbd481695012ef2e284f0eeb9ef307',
      0x7348ee0, 0x7342560, 0x73425d8, 0xc891c50, 0xc891d18,
      [0x660c214, 0x73425c8, 0x73425f0, 0x5b5cad4], [0xfd000120,0x1e214c40,0x1e210800,0xbd495100]),
-    ('beta', 'e10795349bd7c2cdc7d8527597c64395a4efed79',
-     0x72e0250, 0x72dadcc, 0x72db02c, 0xc87420c, 0xc8742d4,
-     [0x6565aec,0x72dae70,0x72db044,0x5af4d04], [0xfd000120,0x1e214c40,0x1e210800,0xbd400100]),
 ]
 
 def bits(f): return struct.unpack('<I',struct.pack('<f',f))[0]
@@ -108,5 +105,5 @@ def check(path,build):
         print(name+': original native recoil/spread arithmetic with zeroed heap fields: OK')
 
 if __name__=='__main__':
-    assert len(sys.argv)==3, __doc__
+    assert len(sys.argv)==2, __doc__
     for path,build in zip(sys.argv[1:],BUILDS): check(path,build)

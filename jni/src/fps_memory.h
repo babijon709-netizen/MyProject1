@@ -13,8 +13,8 @@ inline bool valid(FrameRate v) { return v.value >= -1 && v.value <= 1000; }
 struct PaceKind { int32_t value; };
 inline bool valid(PaceKind v) { return v.value >= 0 && v.value <= 2; }
 
-// libunity.so, not libil2cpp.so. Exact GNU build IDs from the supplied
-// release/beta archives; fail closed on any other engine. See FPS144.md.
+// libunity.so, not libil2cpp.so. Exact GNU build ID of the supported release;
+// fail closed on any other engine. See FPS144.md.
 struct FpsLayout {
     uint64_t build_id, getter, target;
     uint32_t load_instruction;
@@ -23,7 +23,6 @@ struct FpsLayout {
 };
 inline constexpr FpsLayout kFpsLayouts[] = {
     {0x69dedec8ed34b67eULL, 0x7390e0, 0x17b8184, 0xb9418500, 0x8fcac8, 0x183d618},
-    {0xed88f663deac1794ULL, 0x7392f0, 0x17b8a74, 0xb94a7500, 0x8fccd8, 0x183df18},
 };
 template<class IO> const FpsLayout* fps_layout(IO& io, uint64_t base) {
     if (!base) return nullptr;

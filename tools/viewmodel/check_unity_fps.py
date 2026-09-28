@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Verify FPS layout fingerprints against extracted release/beta libunity.so.
-Usage: python3 tools/viewmodel/check_unity_fps.py release.so beta.so
+"""Verify FPS layout fingerprints against the supported release libunity.so.
+Usage: python3 tools/viewmodel/check_unity_fps.py release.so
 No disassembler or third-party packages required. Not run by Android CI:
 unit tests exercise runtime guards; this check needs the native game images.
 """
@@ -11,9 +11,9 @@ import sys
 
 header = pathlib.Path(__file__).resolve().parents[2] / 'jni/src/fps_memory.h'
 layouts = re.findall(r'\{(0x[0-9a-f]+)ULL, (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+)\}', header.read_text())
-if len(sys.argv) != 3 or len(layouts) != 2:
+if len(sys.argv) != 2 or len(layouts) != 1:
     raise SystemExit(__doc__)
-for filename, row in zip(sys.argv[1:], layouts):
+for filename, row in [(sys.argv[1], layouts[0])]:
     build_id, getter, target, load, pacing_update, pacing_type = map(lambda v: int(v, 16), row)
     data = pathlib.Path(filename).read_bytes()
     assert data[:6] == b'\x7fELF\x02\x01', 'expected little-endian ELF64'

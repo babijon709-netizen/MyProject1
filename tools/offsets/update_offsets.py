@@ -274,7 +274,7 @@ def main():
             st = hop.get('struct') or st
             # Обычно путь задаётся читаемым именем поля. Для указателя с
             # перекатываемым именем допустим стабильный positional offset:
-            # например FPHitscan calculator @0x1F8 (Ze в release, FJ в beta).
+            # например обфусцированный FPHitscan calculator @0x1F8.
             if 'field' in hop:
                 want = [f for f in (dump.fields(st) or []) if f[0] == hop['field']]
                 label = hop['field']
@@ -448,7 +448,7 @@ def main():
               f'{len(unverifiable)} шт.\n')
     print(f'проверено констант: {checked} полей + {len(rva_consts)} RVA'
           f'  (не из дампа игры и потому не проверяются: '
-          f'{sum(1 for e in omap.values() if e.get("kind") == "runtime")})\n')
+          f'{sum(1 for e in omap.values() if e.get("kind") == "abi")})\n')
     if changes:
         print(f'{"константа":42s} {"было":>10s} {"стало":>10s}  источник')
         for c, (o, n, what, how) in sorted(changes.items()):
@@ -500,9 +500,7 @@ def main():
               f'{"" if not changes else " и карту"}'
               f'{"" if changes else " (карта: имена полей освежены)"}'
               f'{f" (карта: имён полей обновлено {renamed})" if changes and renamed else ""}. '
-              f'Проверь сборку и добавь строку в OFFSETS_UPDATE.md.\n'
-              f'Если у игры есть бета-версия — пересобери её файл оффсетов от нового '
-              f'дампа релиза: python3 tools/offsets/beta_offsets.py --apply')
+              f'Проверь сборку и добавь строку в OFFSETS_UPDATE.md.')
     elif changes:
         print('\nчтобы записать: тот же вызов с --apply')
     return 1 if warnings else 0

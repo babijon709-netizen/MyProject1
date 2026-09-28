@@ -5,7 +5,7 @@
 // интервалы в живой FPWeaponBase/FPHitscan ещё при создании/доставании оружия.
 // Поэтому контроллер синхронно держит и config, и подтверждённые ARM64-аудитом
 // live-кэши. Инструкции/данные библиотек не меняются, а все адресные цепочки
-// состоят только из статических go_active offsets release/beta.
+// состоят только из статических go_active offsets текущего релиза.
 #include "viewmodel.h"
 #include "game_offsets_active.h"
 #include <cstdint>
@@ -300,8 +300,8 @@ public:
         if ((!fast_fire && !fast_reload) || fire==Status::Failed || reload==Status::Failed) return;
         if (!base) return;
 
-        // No runtime offset discovery: runtime only validates the exact local
-        // objects selected through release/beta go_active constants.
+        // No offset discovery: live reads only validate exact local objects
+        // selected through release go_active constants.
         Context next;
         if (!resolve(player,next)) {
             restore_all();

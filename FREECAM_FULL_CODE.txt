@@ -1472,7 +1472,7 @@ void UpdateFreecam(float dt) {
 ==============================================================================
 
     bool active = g_state.aim_touch && g_esp_attached && !menuOpen &&
-                  g_calibMode == 0 && !g_buildPrompt && !g_state.freecam_on;
+                  g_calibMode == 0 && !g_state.freecam_on;
 
     if (g_state.aim_scope_only && g_esp_attached) {
         s_adsState = esp_local_player_is_aiming() ? 1 : 0;
@@ -1487,7 +1487,6 @@ void UpdateFreecam(float dt) {
             else if (!g_esp_attached)                *why = 2;
             else if (menuOpen)                       *why = 3;
             else if (g_calibMode != 0)               *why = 4;
-            else if (g_buildPrompt)                  *why = 5;
             else if (g_state.freecam_on)             *why = 6;
             else                                     *why = 7;
         }

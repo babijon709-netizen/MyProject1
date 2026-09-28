@@ -1,4 +1,5 @@
 #include "esp_continuity.h"
+#include "player_esp_watchdog.h"
 #include <cassert>
 #include <iostream>
 
@@ -66,5 +67,25 @@ int main() {
 
     continuity.clear();
     assert(!continuity.has_snapshot());
-    std::cout << "esp lifecycle tests passed\n";
+
+    // Camera/world-marker frames may continue to publish while every player
+    // list/position read fails. They do not feed this watchdog, so recovery is
+    // still requested instead of being masked until continuity expires.
+    PlayerEspWatchdog watchdog;
+    assert(!watchdog.observe(false, 300.0).reset_resolvers);
+    // Simulated healthy camera-only publications happen here; deliberately no
+    // observe(true), because they are not live player data.
+    auto soft = watchdog.observe(false, 300.0 + PlayerEspWatchdog::kResolverResetSeconds);
+    assert(soft.reset_resolvers && !soft.request_reattach);
+    auto repeat = watchdog.observe(false, 300.0 + PlayerEspWatchdog::kResolverResetSeconds +
+                                           PlayerEspWatchdog::kResetRepeatSeconds);
+    assert(repeat.reset_resolvers && !repeat.request_reattach);
+    auto hard = watchdog.observe(false, 300.0 + PlayerEspWatchdog::kReattachSeconds);
+    assert(hard.reset_resolvers && hard.request_reattach);
+    assert(!watchdog.observe(false, 306.0).request_reattach); // one request per outage
+    auto recovered = watchdog.observe(true, 307.0);
+    assert(!recovered.reset_resolvers && !watchdog.failing());
+    assert(!watchdog.observe(false, 308.0).reset_resolvers); // next outage starts cleanly
+
+    std::cout << "esp lifecycle and independent player watchdog tests passed\n";
 }

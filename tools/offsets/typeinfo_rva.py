@@ -2,7 +2,7 @@
 """Поиск RVA глобальных `Il2CppClass*` (`..._TYPEINFO_RVA`) в libil2cpp.so.
 
 Эти константы — слоты таблицы metadata-usage в `.data`; они **уезжают каждый
-апдейт**, и наш ридер без них не стартует вообще (`resolve_runtime_player_list`
+апдейт**, и наш ридер без них не стартует вообще (`resolve_player_list`
 возвращает 0 → ESP пустой). В dump'е этой игры `script.json` содержит пустой
 `ScriptMetadata`, поэтому адреса приходится доставать из бинаря.
 

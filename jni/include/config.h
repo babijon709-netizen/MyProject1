@@ -1,10 +1,8 @@
 #pragma once
-// Конфиги (файлы .cfg в каталоге benzware), язык, выбор версии (релиз/бета),
-// раскладка кнопок и тач-зон (.layout), inotify-наблюдение каталога.
-// Каталог — CfgDir().
+// Конфиги (файлы .cfg в каталоге benzware), язык, раскладка кнопок и тач-зон
+// (.layout), inotify-наблюдение каталога. Каталог — CfgDir().
 
 #include <string>
-#include "game_offsets_active.h"   // go::Build
 
 constexpr int kMaxConfigs = 12;
 
@@ -26,12 +24,9 @@ void ConfigUpdate(int idx);
 void ConfigLoad(int idx, bool announce = true);
 void ConfigLoadLast();
 void ConfigDelete(int idx);
-void ApplyBuildChoice(go::Build b);
 void RestoreLang();
-void RestoreBuild();
 void RestoreAccent();
 void RememberLang();
-void RememberBuild();
 void RememberAccent();
 void RememberLayout();
 void RestoreLayout();

@@ -144,9 +144,8 @@ template <class IO> class Controller {
         if (helper_class_ && pointer(helper_class_ + go_active::IL2CPP_CLASS_STATIC_FIELDS_OFFSET, statics) && statics)
             return Anchor::Ready;
         helper_class_ = 0;
-        // В этом проекте релиз и бета выбираются явной таблицей оффсетов.
-        // RVA ниже пересчитан отдельно по libil2cpp.so каждого дампа; имя и
-        // namespace всё равно проверяются до чтения statics.
+        // RVA ниже пересчитан по release libil2cpp.so; имя и namespace всё
+        // равно проверяются до чтения statics.
         std::uint64_t klass = 0;
         if (!pointer(base + go_active::PLAYER_LOOP_HELPER_TYPEINFO_RVA, klass) || klass < 0x10000)
             return Anchor::NotYet;

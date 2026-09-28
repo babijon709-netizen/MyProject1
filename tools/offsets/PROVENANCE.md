@@ -1,6 +1,6 @@
 # Откуда берётся каждый оффсет (PROVENANCE)
 
-Живой срез для билда `e478e52` (предыдущий — `5ba910b`). Дампы лежат в
+Живой срез для билда `62a8534` (предыдущий — `89e0b63`). Дампы лежат в
 корне репозитория: `dump.7z` (dump.cs, il2cpp.h, script.json), `libil2cpp.7z`
 и `libunity.7z`; распаковка — `bash tools/offsets/extract_dumps.sh <dir> [git-ref]`.
 
@@ -24,7 +24,7 @@
 
 
 Машиночитаемый источник истины — `tools/offsets/offsets_map.json`
-(186 записей); этот файл — его человеческое объяснение: не «какое число
+(245 записей); этот файл — его человеческое объяснение: не «какое число
 стоит», а «откуда оно взялось и как его найти заново». Значения здесь
 совпадают с `jni/src/game_offsets.h`; при расхождении верить заголовку и
 карте, а этот файл пересобрать (`make_provenance.py`).
@@ -33,9 +33,9 @@
 
 | класс | сколько | откуда | уезжает ли каждый билд | чем проверяется |
 |---|---|---|---|---|
-| **A. Смещения полей** | 141 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
-| **B. `*_TYPEINFO_RVA`** | 3 | слоты глобальных `Il2CppClass*` в `.data.rel.ro` `libil2cpp.so` | **да, всегда** | `typeinfo_rva.py` + отпечаток со старого дампа |
-| **C. Рантайм/ABI** | 41 | раскладка Unity/IL2CPP-объектов, не выводится из `dump.cs` | только при смене версии Unity/IL2CPP | вручную (дизасм паттернов), см. §C |
+| **A. Смещения полей** | 194 | раскладка структур в `il2cpp.h` (`/* 0xNN */`) | да, если в класс добавили/убрали поле | `update_offsets.py` автоматически |
+| **B. `*_TYPEINFO_RVA`** | 4 | слоты глобальных `Il2CppClass*` в `.data.rel.ro` `libil2cpp.so` | **да, всегда** | `typeinfo_rva.py` + отпечаток со старого дампа |
+| **C. Нативный ABI** | 46 | раскладка Unity/IL2CPP-объектов, не выводится из `dump.cs` | только при смене версии Unity/IL2CPP | вручную (дизасм паттернов), см. §C |
 
 Отдельно — не константы, но тоже привязано к билду: имена классов (сверяются
 в рантайме со строкой `Il2CppClass.name`) и окно скана `TOD_SCAN_RVA_*`.
@@ -45,7 +45,7 @@
 ## A. Смещения полей (`il2cpp.h`)
 
 Как читать: `структура` — имя из `il2cpp.h` (`<Класс>_Fields`), `поле` — имя в
-**этом** билде (`e478e52`). Обфусцированные имена ротируют каждый билд
+**этом** билде (`62a8534`). Обфусцированные имена ротируют каждый билд
 (`MoW`→`lzD`), поэтому искать поле надо по смещению+типу, а не по имени;
 скрипт так и делает (сначала имя, если оно читаемое, иначе позиционное
 выравнивание последовательности типов старой структуры на новую).
@@ -61,15 +61,30 @@
 (0x188), всё после него уехало на +8, `Aim` сместился 0x268→0x270, а по
 0x268 встал `Jump` — переключатель «Только в прицеле» читал флаг прыжка.
 
+### `Mirror_NetworkBehaviour_Fields`  (Mirror.NetworkBehaviour)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `NETWORK_BEHAVIOUR_IDENTITY` | 0x40 | `_netIdentity_k__BackingField` | `Mirror_NetworkIdentity_o*` |
+
+### `Mirror_NetworkIdentity_Fields`  (Mirror.NetworkIdentity)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `DICT_COUNT` | 0x20 | `canFrequencyBeChanged` | `bool` |
+| `NETWORK_IDENTITY_IS_LOCAL_PLAYER` | 0x4a | `_isLocalPlayer_k__BackingField` | `bool` |
+| `NETID_NET_ID` | 0x58 | `_netId_k__BackingField` | `uint32_t` |
+| `NETID_BEHAVIOURS` | 0x80 | `_NetworkBehaviours_k__BackingField` | `Il2CppObject*` |
+
 ### `Oxide_PlayerManager_StaticFields`  (PlayerManager.static)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `PLAYER_MANAGER_STATIC_FIELDS_LIST` | 0x10 | `clientPlayerList` | `Il2CppObject*` |
 
 ### `Oxide_GameControllerBase_StaticFields`  (GameControllerBase.static)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `GAME_CONTROLLER_NET_IDENTITY_FIELD` | 0x8 | `_KHP_k__BackingField` | `Mirror_NetworkIdentity_o*` |
 | `GAME_CONTROLLER_LOCAL_PLAYER_FIELD` | 0x10 | `_KHr_k__BackingField` | `Oxide_PlayerManager_o*` |
@@ -77,13 +92,13 @@
 
 ### `Oxide_CameraManager_Fields`  (CameraManager)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `CAMERA_MANAGER_CAMERA_FIELD` | 0x20 | `m_Camera` | `UnityEngine_Camera_o*` |
 
 ### `Oxide_PlayerManager_Fields`  (PlayerManager)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `PLAYER_TRANSFORM` | 0x68 | `worldCameraRoot` | `UnityEngine_Transform_o*` |
 | `PLAYER_EVENT_HANDLER` | 0x78 | `playerEventHandler` | `brc_o*` |
@@ -96,6 +111,7 @@
 | `PLAYER_CHARACTER_MODEL` | 0x150 | `characterModel` | `UnityEngine_GameObject_o*` |
 | `PLAYER_WEAPONS_ARRAY` | 0x198 | `weapons` | `Il2CppObject*` |
 | `PLAYER_POSITION` | 0x1d4 | `lastSavedPosition` | `UnityEngine_Vector3_o` |
+| `PLAYER_MANAGER_RESPAWNING` | 0x208 | `respawning` | `bool` |
 | `PLAYER_DISPLAY_NAME` | 0x220 | `KmI` | `System_String_o*` |
 | `PLAYER_USER_ID` | 0x278 | `userID` | `System_String_o*` |
 | `PLAYER_TEAM_NAME` | 0x280 | `teamName` | `System_String_o*` |
@@ -107,21 +123,22 @@
 
 ### `Sq_Fields`  (nicklabel widget (имя ротирует: OS -> oh))
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `NICKLABEL_PLAYER_BACKREF` | 0x20 | `player` | `Oxide_PlayerManager_o*` |
 | `NICKLABEL_NICKNAME_TEXT` | 0x38 | `nickname` | `UnityEngine_UI_Text_o*` |
 
 ### `UnityEngine_UI_Text_Fields`  (UI.Text)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `UI_TEXT_MTEXT` | 0xe0 | `m_Text` | `System_String_o*` |
 
 ### `Oxide_FPObject_Fields`  (FPObject)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
+| `FPOBJECT_DRAW_EVENT` | 0x20 | `Draw` | `eDt_o*` |
 | `FPOBJECT_ITEM` | 0x40 | `_KKc_k__BackingField` | `Oxide_Item_o*` |
 | `FPOBJECT_OBJECT_NAME` | 0x78 | `m_ObjectName` | `System_String_o*` |
 | `FPOBJECT_RAYCAST_MANAGER` | 0x90 | `KKo` | `Oxide_RaycastManager_o*` |
@@ -130,32 +147,32 @@
 
 ### `Dissonance_VoicePlayerState_Fields`  (VoicePlayerState)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `VOICE_STATE_NAME` | 0x38 | `_Name_k__BackingField` | `System_String_o*` |
 
 ### `bxt_Fields`  (VoicePlayer (имя ротирует: DEY -> Gmv))
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `VOICE_PLAYER_TAG` | 0x78 | `lUD` | `System_String_o*` |
 
 ### `Oxide_Item_Fields`  (Item)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `ITEM_DATA` | 0x20 | `_Kyo_k__BackingField` | `Oxide_ItemData_o*` |
 
 ### `Oxide_ItemData_Fields`  (ItemData)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `ITEMDATA_NAME` | 0x18 | `m_Name` | `System_String_o*` |
 | `ITEMDATA_SHORTNAME` | 0x20 | `m_ShortName` | `System_String_o*` |
 
 ### `brc_Fields`  (PlayerEventHandler (имя ротирует: DqO -> Gum))
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `EVENT_HANDLER_MANAGER_BACKREF` | 0xd0 | `manager` | `Oxide_PlayerManager_o*` |
 | `EVENT_HANDLER_LOOK_DIRECTION` | 0x140 | `LookDirection` | `Il2CppObject*` |
@@ -167,14 +184,14 @@
 
 ### `Oxide_PlayerInventory_Fields`  (PlayerInventory)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `INV_PLAYER_INVENTORY_DATA` | 0x20 | `_playerInventoryData` | `Oxide_PlayerInventoryData_o*` |
 | `INV_PLAYER_INVENTORY_CLIENT` | 0x28 | `_playerInventoryClient` | `bLt_o*` |
 
 ### `HyperHug_Games_Oxide_Features_Weapons_PlayerWeapon_Fields`  (PlayerWeapon)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `PLAYERWEAPON_VIEW` | 0xe0 | `playerWeaponViewReference` | `xY_o*` |
 | `PLAYERWEAPON_PIECE` | 0x110 | `Qzd` | `Oxide_WeaponPiece_o` |
@@ -183,14 +200,14 @@
 
 ### `Oxide_WeaponPiece_Fields`  (WeaponPiece)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `WEAPONPIECE_ENABLED` | 0x0 | `Enabled` | `bool` |
 | `WEAPONPIECE_NUMBER` | 0x2 | `Number` | `int16_t` |
 
 ### `HyperHug_Games_Oxide_Features_Player_PlayerModelInfo_Fields`  (PlayerModelInfo)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `INVDATA_PLAYER_MODEL_INFO` | 0x20 | `head` | `UnityEngine_Transform_o*` |
 | `MODELINFO_RIGHT_WEAPON_HOLDER` | 0x28 | `rightWeaponHolder` | `UnityEngine_Transform_o*` |
@@ -199,27 +216,30 @@
 
 ### `brB_Fields`  (Activity (имя ротирует: Dqg -> Gub))
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `ACTIVITY_ACTIVE_FLAG` | 0x10 | `_Kpq_k__BackingField` | `bool` |
 
 ### `Oxide_FPManager_Fields`  (FPManager)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `FPMANAGER_CURRENT_OBJECT` | 0x50 | `_currentWeapon` | `Oxide_FPObject_o*` |
 | `FPMANAGER_CURRENT_WEAPON` | 0x58 | `KAL` | `Oxide_FPWeaponBase_o*` |
+| `FPMANAGER_WORLD_FOV_TARGET` | 0x9c | `BYu` | `float` |
 | `FPMANAGER_AIM_BLEND` | 0xa8 | `_KAU_k__BackingField` | `float` |
 
 ### `Oxide_FPWeaponBase_Fields`  (FPWeaponBase)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
+| `FPWEAPON_EFFECTIVE_RELOAD_PERIOD` | 0xe8 | `_BBT_k__BackingField` | `float` |
 | `FPWEAPON_IS_AIMING` | 0x120 | `_KKN_k__BackingField` | `bool` |
+| `FPWEAPON_SHOT_PERIOD` | 0x124 | `_BBp_k__BackingField` | `float` |
 
 ### `HyperHug_Games_Oxide_Features_Player_KCC_Fields`  (KCC)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `KCC_HITBOX_ROOT` | 0x70 | `hitBoxRecorderRoot` | `HyperHug_Games_Oxide_Features_Network_HitBoxRecorderRoot_o*` |
 | `KCC_PLAYER_BACKREF` | 0x78 | `player` | `Oxide_PlayerManager_o*` |
@@ -232,7 +252,7 @@
 
 ### `Oxide_HitBox_Fields`  (HitBox)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `HITBOX_SIZE` | 0x24 | `size` | `UnityEngine_Vector3_o` |
 | `HITBOX_CENTER` | 0x30 | `center` | `UnityEngine_Vector3_o` |
@@ -241,41 +261,33 @@
 
 ### `HyperHug_Games_Oxide_Features_Player_CharacterAnimation_Fields`  (CharacterAnimation)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `CHAR_ANIM_RAGDOLL` | 0x38 | `ragdoll` | `HyperHug_Games_Oxide_By_Namespace_Oxide_Damage_System_Ragdoll_o*` |
 | `CHAR_ANIM_PLAYER_BACKREF` | 0x78 | `oTC` | `Oxide_PlayerManager_o*` |
 
 ### `HyperHug_Games_Oxide_By_Namespace_Oxide_Damage_System_Ragdoll_Fields`  (Ragdoll)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `RAGDOLL_PELVIS_RIGIDBODY` | 0x20 | `m_Pelvis` | `UnityEngine_Rigidbody_o*` |
 | `RAGDOLL_BONES_ARRAY` | 0x88 | `m_Bones` | `Il2CppObject*` |
 
 ### `HyperHug_Games_Oxide_By_Namespace_Oxide_Damage_System_Ragdoll_BodyPart_Fields`  (Ragdoll.BodyPart)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `RAGDOLL_BODYPART_TRANSFORM` | 0x10 | `transform` | `UnityEngine_Transform_o*` |
 
 ### `Mirror_NetworkClient_StaticFields`  (NetworkClient.static)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `NETWORK_CLIENT_SPAWNED` | 0x28 | `spawned` | `Il2CppObject*` |
 
-### `Mirror_NetworkIdentity_Fields`  (NetworkIdentity)
-
-| константа | offset | поле в билде `e478e52` | тип |
-|---|---|---|---|
-| `DICT_COUNT` | 0x20 | `canFrequencyBeChanged` | `bool` |
-| `NETID_NET_ID` | 0x58 | `_netId_k__BackingField` | `uint32_t` |
-| `NETID_BEHAVIOURS` | 0x80 | `_NetworkBehaviours_k__BackingField` | `Il2CppObject*` |
-
 ### `Oxide_MineableObject_Fields`  (MineableObject)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `MINEABLE_REQUIRED_TOOL_PURPOSE` | 0x70 | `m_RequiredToolPurpose` | `int32_t` |
 | `MINEABLE_CURRENT_HEALTH` | 0x78 | `m_CurrentHealth` | `float` |
@@ -290,13 +302,13 @@
 
 ### `Oxide_LootItem_Fields`  (LootItem)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `LOOTITEM_ITEM_NAME` | 0x10 | `ItemName` | `System_String_o*` |
 
 ### `Oxide_LootObject_Fields`  (LootObject)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `LOOTOBJECT_INVENTORY` | 0xa0 | `inventory` | `Oxide_Inventory_o*` |
 | `LOOTOBJECT_IS_LOOTABLE` | 0xa8 | `isLootable` | `bool` |
@@ -305,7 +317,7 @@
 
 ### `Oxide_ItemPickup_Fields`  (ItemPickup)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `ITEMPICKUP_ITEM_OBJECT` | 0xa8 | `_KPj_k__BackingField` | `Oxide_Item_o*` |
 | `ITEMPICKUP_SHORTNAME` | 0xd8 | `item` | `System_String_o*` |
@@ -313,7 +325,7 @@
 
 ### `HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_Fields`  (MineableObjectExtension_OreHitstreaks)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `OREHS_STREAK_INDEX` | 0x20 | `hitstreakIndex` | `int32_t` |
 | `OREHS_MARKER_TEMPLATE` | 0x28 | `hitStreakMarker` | `HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_o*` |
@@ -323,7 +335,7 @@
 
 ### `HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaksMarker_Fields`  (MineableObjectExtension_OreHitstreaksMarker)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `OREMARK_RENDERER` | 0x20 | `meshRenderer` | `UnityEngine_MeshRenderer_o*` |
 | `OREMARK_OWNER` | 0x38 | `pbH` | `HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_OreHitstreaks_o*` |
@@ -332,7 +344,7 @@
 
 ### `HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_TreeHitstreaks_Fields`  (MineableObjectExtension_TreeHitstreaks)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `TREEHS_MOVING_METHOD` | 0x20 | `movingMethod` | `int32_t` |
 | `TREEHS_MARKER_TEMPLATE` | 0x28 | `hitStreakMarkerOriginal` | `HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_o*` |
@@ -343,7 +355,7 @@
 
 ### `HyperHug_Games_Oxide_Features_MineableExtensions_MineableObjectExtension_HitMarkerItem_Fields`  (MineableObjectExtension_HitMarkerItem)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `HITMARK_LIFETIME` | 0x20 | `lifetime` | `float` |
 | `HITMARK_FILTER` | 0x28 | `mFilter` | `UnityEngine_MeshFilter_o*` |
@@ -353,7 +365,7 @@
 
 ### `TOD_CycleParameters_Fields`  (TOD_CycleParameters)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `TOD_CYCLE_HOUR` | 0x10 | `Hour` | `float` |
 | `TOD_CYCLE_DAY` | 0x14 | `Day` | `int32_t` |
@@ -362,7 +374,7 @@
 
 ### `Oxide_FPMelee_Fields`  (FPMelee)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `FPMELEE_MAX_REACH` | 0x128 | `m_MaxReach` | `float` |
 | `FPMELEE_HIT_RADIUS` | 0x12c | `hitRadius` | `float` |
@@ -371,13 +383,13 @@
 
 ### `Oxide_FPTool_Fields`  (FPTool)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `FPTOOL_TOOL_PURPOSES` | 0x160 | `m_ToolPurposes` | `int32_t` |
 
 ### `Oxide_RaycastManager_Fields`  (RaycastManager)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `RAYCASTMAN_PLAYER` | 0x20 | `player` | `Oxide_PlayerManager_o*` |
 | `RAYCASTMAN_RAY_LENGTH` | 0x38 | `m_RayLength` | `float` |
@@ -387,14 +399,14 @@
 
 ### `brf_Fields`  (результат луча (имя ротирует; ищется по форме: RaycastHit на 0x48 и GameObject на 0x18))
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `GKO_HIT_OBJECT` | 0x18 | `_KlQ_k__BackingField` | `UnityEngine_GameObject_o*` |
 | `GKO_RAYCAST_HIT` | 0x48 | `_Kll_k__BackingField` | `UnityEngine_RaycastHit_o` |
 
 ### `UnityEngine_RaycastHit_Fields`  (UnityEngine.RaycastHit)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `RAYCASTHIT_POINT` | 0x0 | `m_Point` | `UnityEngine_Vector3_o` |
 | `RAYCASTHIT_NORMAL` | 0xc | `m_Normal` | `UnityEngine_Vector3_o` |
@@ -403,9 +415,135 @@
 
 ### `Oxide_GenericVitals_Fields`  (Oxide_GenericVitals_Fields)
 
-| константа | offset | поле в билде `e478e52` | тип |
+| константа | offset | поле в билде `62a8534` | тип |
 |---|---|---|---|
 | `VITALS_MAX_HEALTH` | 0x88 | `m_MaxHealth` | `float` |
+
+### `eDt_Fields`  (eDt)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `FPDRAW_ACTION` | 0x10 | `BXi` | `System_Action_o*` |
+
+### `System_Delegate_Fields`  (System_Delegate)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `DELEGATE_TARGET` | 0x20 | `m_target` | `Il2CppObject*` |
+
+### `System_MulticastDelegate_Fields`  (System_MulticastDelegate)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `MULTICAST_DELEGATES` | 0x78 | `delegates` | `Il2CppObject*` |
+
+### `Oxide_FPMotion_Fields`  (Oxide_FPMotion)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `FPMOTION_IDLE_OFFSET` | 0x78 | `m_IdleOffset` | `Oxide_TransformOffset_o*` |
+| `FPMOTION_RUN_OFFSET` | 0x80 | `m_RunOffset` | `Oxide_TransformOffset_o*` |
+| `FPMOTION_RUN_RELOAD_OFFSET` | 0x88 | `runReloadOffset` | `Oxide_TransformOffset_o*` |
+| `FPMOTION_ATTACK_OFFSET` | 0x90 | `m_AttackOffset` | `Oxide_TransformOffset_o*` |
+| `FPMOTION_AIM_OFFSET` | 0x98 | `m_AimOffset` | `Oxide_TransformOffset_o*` |
+| `FPMOTION_LADDER_OFFSET` | 0xa0 | `m_OnLadderOffset` | `Oxide_TransformOffset_o*` |
+| `FPMOTION_JUMP_OFFSET` | 0xa8 | `m_JumpOffset` | `Oxide_TransformOffset_o*` |
+| `FPMOTION_LOOK_OFFSET` | 0xb0 | `m_LookOffset` | `Oxide_TransformOffset_o*` |
+| `FPMOTION_CLOSE_OFFSET` | 0xb8 | `m_TooCloseOffset` | `Oxide_TransformOffset_o*` |
+| `FPMOTION_OBJECT` | 0xc8 | `BYc` | `Oxide_FPObject_o*` |
+| `FPMOTION_ACTIVE_OFFSET` | 0xd8 | `BYH` | `Oxide_TransformOffset_o*` |
+| `FPMOTION_PLAYER` | 0xe8 | `Player` | `eDg_o*` |
+
+### `Oxide_TransformOffset_Fields`  (Oxide_TransformOffset)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `TRANSFORMOFFSET_LERP_SPEED` | 0x20 | `m_LerpSpeed` | `float` |
+| `TRANSFORMOFFSET_POSITION` | 0x24 | `m_Position` | `UnityEngine_Vector3_o` |
+| `TRANSFORMOFFSET_CURRENT_POSITION` | 0x44 | `BYE` | `UnityEngine_Vector3_o` |
+
+### `Cysharp_Threading_Tasks_PlayerLoopHelper_StaticFields`  (Cysharp.Threading.Tasks.PlayerLoopHelper.static)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `PLAYERLOOPHELPER_RUNNERS` | 0x30 | `runners` | `Il2CppObject*` |
+
+### `Cysharp_Threading_Tasks_Internal_PlayerLoopRunner_Fields`  (Cysharp.Threading.Tasks.Internal.PlayerLoopRunner)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `LOOPRUNNER_TAIL` | 0x30 | `tail` | `int32_t` |
+| `LOOPRUNNER_ITEMS` | 0x38 | `loopItems` | `Il2CppObject*` |
+
+### `Cysharp_Threading_Tasks_UniTask_DelayIgnoreTimeScalePromise_Fields`  (Cysharp.Threading.Tasks.UniTask.DelayIgnoreTimeScalePromise)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `DELAYPROMISE_TIMESPAN` | 0x18 | `delayFrameTimeSpan` | `float` |
+| `DELAYPROMISE_ELAPSED` | 0x1c | `elapsed` | `float` |
+| `DELAYPROMISE_INITIAL_FRAME` | 0x20 | `initialFrame` | `int32_t` |
+
+### `Cysharp_Threading_Tasks_UniTask_DelayPromise_Fields`  (Cysharp.Threading.Tasks.UniTask.DelayPromise)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `DELAYPROMISE_SCALED_INITIAL_FRAME` | 0x18 | `initialFrame` | `int32_t` |
+| `DELAYPROMISE_SCALED_TIMESPAN` | 0x1c | `delayTimeSpan` | `float` |
+| `DELAYPROMISE_SCALED_ELAPSED` | 0x20 | `elapsed` | `float` |
+
+### `Oxide_FPHitscan_Fields`  (Oxide.FPHitscan)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `FPHITSCAN_CONFIG` | 0x130 | `config` | `HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_o*` |
+| `FPHITSCAN_BURST_WAIT` | 0x1f0 | `BnA` | `UnityEngine_WaitForSeconds_o*` |
+| `FPHITSCAN_CALCULATOR` | 0x1f8 | `Bna` | `Ze_o*` |
+| `FPHITSCAN_RECOIL` | 0x200 | `BnZ` | `HyperHug_Games_Oxide_Features_Weapons_WeaponRecoil_o` |
+| `FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD` | 0x2e0 | `_BYw_k__BackingField` | `float` |
+
+### `UnityEngine_WaitForSeconds_Fields`  (UnityEngine.WaitForSeconds)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `WAITFORSECONDS_SECONDS` | 0x10 | `m_Seconds` | `float` |
+
+### `Ze_Fields`  (Ze)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `CALCULATOR_DISPERSION_CONFIG` | 0x10 | `ZUJ` | `HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_o*` |
+| `CALCULATOR_HITSCAN_CONFIG` | 0x18 | `ZUA` | `HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_o*` |
+| `CALCULATOR_CACHED_BASE_DISPERSION` | 0x20 | `_ZUa_k__BackingField` | `float` |
+
+### `HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields`  (HyperHug.Games.Oxide.Features.Weapons.HitscanWeaponConfig)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `HITSCANCONFIG_FIRE_RATE` | 0x34 | `fireRate` | `float` |
+| `HITSCANCONFIG_FULL_RELOAD` | 0x48 | `_FullReloadPeriod_k__BackingField` | `float` |
+| `HITSCANCONFIG_LOOP_RELOAD` | 0x4c | `_LoopReloadPeriod_k__BackingField` | `float` |
+| `HITSCANCONFIG_DISPERSION_CONFIG` | 0x60 | `dispersionConfig` | `HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_o*` |
+| `HITSCANCONFIG_RECOIL_CONFIG` | 0x68 | `recoilConfig` | `HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_o*` |
+
+### `HyperHug_Games_Oxide_Features_Weapons_WeaponRecoil_Fields`  (HyperHug.Games.Oxide.Features.Weapons.WeaponRecoil)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `WEAPONRECOIL_RECOIL_CONFIG` | 0x0 | `_recoilConfig` | `HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_o*` |
+| `WEAPONRECOIL_WEAPON_CONFIG` | 0x8 | `_weaponConfig` | `HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_o*` |
+
+### `HyperHug_Games_Oxide_Features_Weapons_RecoilConfig_Fields`  (HyperHug.Games.Oxide.Features.Weapons.RecoilConfig)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `RECOILCONFIG_MIN_RECOIL` | 0x18 | `_MinRecoil_k__BackingField` | `UnityEngine_Vector2_o` |
+
+### `HyperHug_Games_Oxide_Features_Weapons_DispersionConfig_Fields`  (HyperHug.Games.Oxide.Features.Weapons.DispersionConfig)
+
+| константа | offset | поле в билде `62a8534` | тип |
+|---|---|---|---|
+| `DISPERSIONCONFIG_MIN_DISPERSION` | 0x20 | `minDispersion` | `float` |
+| `DISPERSIONCONFIG_MAX_DISPERSION` | 0x24 | `maxDispersion` | `float` |
 
 ---
 
@@ -418,9 +556,10 @@
 
 | константа | RVA | класс | отпечаток (как отличить от чужого слота) |
 |---|---|---|---|
-| `PLAYER_MANAGER_TYPEINFO_RVA` | 0xD9841E0 | `Oxide.PlayerManager` | 11 обращений, статик-поля `[0x1A0x7]`. Метка класса — чтение статик-поля по 0x1A: она повторяется из билда в билд (в прошлом было 5 обращений и `[0x1A0x1]`), а число обращений нет |
-| `GAME_CONTROLLER_TYPEINFO_RVA` | 0xD97F598 | `Oxide.GameControllerBase` | 1 обращение, статик-полей нет — **верхний кандидат здесь всегда чужой** (в этом билде верхний: 30 обращений, `[0x8x15, 0x0x15]`) |
-| `NETWORK_CLIENT_TYPEINFO_RVA` | 0xD983448 | `Mirror.NetworkClient` | 6 обращений, статик-полей нет (второй кандидат: 2 обращения, `[0x0x2]` — чужой) |
+| `PLAYER_MANAGER_TYPEINFO_RVA` | 0xD9C5310 | `Oxide.PlayerManager` | 11 обращений, статик-поля `[0x1A0x7]`. Метка класса — чтение статик-поля по 0x1A: она повторяется из билда в билд (в прошлом было 5 обращений и `[0x1A0x1]`), а число обращений нет |
+| `GAME_CONTROLLER_TYPEINFO_RVA` | 0xD9C0690 | `Oxide.GameControllerBase` | 1 обращение, статик-полей нет — **верхний кандидат здесь всегда чужой** (в этом билде верхний: 30 обращений, `[0x8x15, 0x0x15]`) |
+| `NETWORK_CLIENT_TYPEINFO_RVA` | 0xD9C4570 | `Mirror.NetworkClient` | 6 обращений, статик-полей нет (второй кандидат: 2 обращения, `[0x0x2]` — чужой) |
+| `PLAYER_LOOP_HELPER_TYPEINFO_RVA` | 0xD9C52E0 | `Cysharp.Threading.Tasks.PlayerLoopHelper` |  |
 
 Как найти заново (оба прогона обязательны):
 
@@ -433,7 +572,7 @@ python3 tools/offsets/typeinfo_rva.py --so <new>/libil2cpp.so --script <new>/scr
         --methods 3000 --top 6 Oxide.PlayerManager Oxide.GameControllerBase Mirror.NetworkClient
 ```
 
-`--methods 3000` обязателен: на 400 методах у `PlayerManager` в билде `e478e52`
+`--methods 3000` обязателен: на 400 методах у `PlayerManager` в билде `62a8534`
 не находится ни одного кандидата. `update_offsets.py` делает оба прогона сам и
 подбирает по отпечатку; если отпечаток не совпал — предупреждает, и тогда
 решать вручную.
@@ -452,8 +591,11 @@ runtime`) — после крупного апдейта движка сверя
 | `PMK_HEALTH` | 0x98 | НЕ ИСПОЛЬЗУЕТСЯ. AsyncReactiveProperty<float> здоровья сущности | ? (класс ротирует) — не используется в коде. Если понадобится: в том же классе, что PMP_ENTITY, поле типа AsyncReactiveProperty<float> — проверить по 0x98 |
 | `PMP_ENTITY` | 0x68 | НЕ ИСПОЛЬЗУЕТСЯ. При обновлении можно не переносить; если понадобится — искать класс, у которого на 0x98 лежит AsyncReactiveProperty_1_o* | ? (класс ротирует) — не используется в коде (только в переключателе версий). Класс «pmK» в текущем дампе не опознан: имя обфусцировано и сменилось |
 | `MANAGED_CACHED_PTR` | 0x10 | UnityEngine.Object.m_CachedPtr: managed-обёртка -> нативный объект | ABI + il2cpp.h — UnityEngine.Object: за заголовком объекта (klass 0x0, monitor 0x8) первым идёт m_CachedPtr -> 0x10; проверено на всех managed-обёртках |
-| `IL2CPP_ARRAY_FIRST_ELEMENT` | 0x20 | Il2CppArray: первый элемент (данные начинаются отсюда) | ABI il2cpp — данные массива начинаются с 0x20 |
-| `IL2CPP_ARRAY_LENGTH` | 0x18 | Il2CppArray.max_length (int32) | ABI il2cpp — Il2CppArray: klass 0x0, monitor 0x8, bounds* 0x10, max_length 0x18, данные 0x20 |
+| `IL2CPP_ARRAY_FIRST_ELEMENT` | 0x20 | Il2CppArray ABI: vector[0] | IL2CPP ABI — Il2CppArray ABI: vector[0] |
+| `IL2CPP_ARRAY_LENGTH` | 0x18 | Il2CppArray ABI: max_length | IL2CPP ABI — Il2CppArray ABI: max_length |
+| `IL2CPP_CLASS_NAME` | 0x10 | Il2CppClass ABI: const char* name | IL2CPP ABI — Il2CppClass ABI: const char* name |
+| `IL2CPP_CLASS_NAMESPACE` | 0x18 | Il2CppClass ABI: const char* namespaze | IL2CPP ABI — Il2CppClass ABI: const char* namespaze |
+| `IL2CPP_CLASS_STATIC_FIELDS_OFFSET` | 0xb8 | Il2CppClass ABI: void* static_fields | IL2CPP ABI — Il2CppClass ABI: void* static_fields |
 | `IL2CPP_STRING_CHARS` | 0x14 | System.String: первый символ (UTF-16) | il2cpp.h — struct System_String_Fields: _firstChar /* 0x14 */; ПРОВЕРЕНО по дампу |
 | `IL2CPP_STRING_LENGTH` | 0x10 | System.String.length (UTF-16) | il2cpp.h — struct System_String_Fields: _stringLength /* 0x10 */; ПРОВЕРЕНО по дампу |
 | `ARP_LATEST_VALUE` | 0x18 | AsyncReactiveProperty<T>.latestValue — реактивное свойство (здоровье у сущностей) | il2cpp.h + ABI — Cysharp_Threading_Tasks_AsyncReactiveProperty_1_Fields: порядок (triggerEvent, latestValue) плюс заголовок 0x10 -> 0x18 |
@@ -471,8 +613,6 @@ runtime`) — после крупного апдейта движка сверя
 | `WEAPONVIEW_WEAPON_BASE` | 0x48 | обёртка weapon view (имя класса обфусцировано): указатель на WeaponBase | il2cpp.h + dump.cs — обёртка weapon view: имя класса обфусцировано и ротирует. Искать класс, у которого рядом лежат WeaponBase*, WeaponPiece* и Transform* |
 | `TOD_SCAN_RVA_BEGIN` | 0xd970000 | НЕ поле: начало области глобальных Il2CppClass*-слотов в .data.rel.ro, которую скан в always_day_tick() перебирает в поисках TOD_Sky. Уезжает каждый билд вместе с *_TYPEINFO_RVA (было 0xD8D0000). Проверка: кандидаты typeinfo_rva.py для класса TOD_Sky обязаны попасть в [BEGIN,END) | libil2cpp.so — начало окна .data.rel.ro со слотами глобальных Il2CppClass*, которое перебирает always_day_tick(); уезжает вместе с бинарём |
 | `TOD_SCAN_RVA_END` | 0xda10000 | конец окна скана TOD_Sky = BEGIN + 0xA0000 (было 0xD970000) | libil2cpp.so — конец окна скана = BEGIN + 0xA0000 |
-| `IL2CPP_CLASS_NAME` | 0x10 | Il2CppClass.name (Il2CppString*) — по нему код сверяет имена классов в рантайме | libil2cpp.so (ABI, metadata v39) — Il2CppClass.name; проверяется в рантайме: код читает имя класса и сверяет со строкой — пока имена совпадают, смещение верное |
-| `IL2CPP_CLASS_NAMESPACE` | 0x18 | Il2CppClass.namespace (Il2CppString*) | libil2cpp.so (ABI, metadata v39) — Il2CppClass.namespaze, следующим полем |
 | `CAMERA_ASPECT` | 0x4e0 | нативная Camera: aspect, float | libunity.so — get_aspect; проверено совпадением с sw/sh экрана |
 | `CAMERA_FAR_CLIP` | 0x458 | нативная Camera: far clip plane, float | libunity.so — get_farClipPlane; лежит рядом с near (+4), проверено чтением |
 | `CAMERA_FOV_DEGREES` | 0x170 | нативная Camera: field of view, float (градусы) | libunity.so — get_fieldOfView; проверено поведением: круг FOV в оверлее совпадает с прицелом игры |
@@ -487,17 +627,21 @@ runtime`) — после крупного апдейта движка сверя
 | `COMPONENT_GAMEOBJECT` | 0x20 | нативный Component.m_GameObject | libunity.so — нативный Component.m_GameObject; проверено переходом компонент -> объект |
 | `COMPONENT_PAIR_PTR` | 0x8 | элемент m_Component: пара {GameObject*, Component*} — указатель на компонент | libunity.so — второй указатель в паре элемента m_Component |
 | `GAMEOBJECT_COMPONENT_ARRAY` | 0x20 | нативный GameObject.m_Component (массив пар) | libunity.so — нативный GameObject.m_Component: массив пар {GameObject*, Component*} |
-| `GAMEOBJECT_NAME_GUESS` | 0x48 | первая догадка на GameObject.name (core::string с SSO); уточняется в рантайме перебором кандидатов по именам костей | libunity.so — core::string с SSO; уточняется в рантайме перебором кандидатов по именам |
+| `GAMEOBJECT_NAME` | 0x48 | поле GameObject.name (core::string с SSO) текущего release libunity | libunity.so — core::string с SSO; уточняется в рантайме перебором кандидатов по именам |
 | `TRANSFORM_CHILDREN_ARRAY` | 0x48 | нативный Transform: массив детей | libunity.so — нативный Transform: массив детей; проверено обходом иерархии (маркеры, кости, поиск трансформа камеры) |
 | `TRANSFORM_CHILD_COUNT` | 0x58 | нативный Transform: число детей (int32) | libunity.so — нативный Transform: int32 число детей, проверено тем же обходом |
+| `TRANSFORM_HIERARCHY_DATA` | 0x38 | TransformAccessReadOnly hierarchy data pointer | release libunity.so — TransformAccessReadOnly hierarchy data pointer |
+| `TRANSFORM_HIERARCHY_INDEX` | 0x40 | TransformAccessReadOnly hierarchy index | release libunity.so — TransformAccessReadOnly hierarchy index |
+| `TRANSFORM_HIERARCHY_INDICES` | 0x20 | Transform hierarchy parent-index array pointer | release libunity.so — Transform hierarchy parent-index array pointer |
+| `TRANSFORM_HIERARCHY_MATRICES` | 0x18 | Transform hierarchy local TRS array pointer | release libunity.so — Transform hierarchy local TRS array pointer |
 
 Дешёвая перепроверка ABI по новому `libil2cpp.so` (без запуска игры):
 
 * `Il2CppClass.static_fields == 0xB8` — в любом методе, читающем статики:
   `adrp/ldr` слота → `ldr xA,[xM]` → `ldr xB,[xA,#0xb8]`. В билде
-  `e478e52`: `OreHitstreaksMarker.Update` 0x78D0230.
+  `62a8534`: `OreHitstreaksMarker.Update` 0x78D0230.
 * `klass->interfaceOffsets == 0xB0`, `interface_offsets_count == 0x12E` —
-  `MineableObject` 0x65b63d0/0x65b63d8 (билд `e478e52`).
+  `MineableObject` 0x65b63d0/0x65b63d8 (билд `62a8534`).
 * `Il2CppArray`: длина 0x18, первый элемент 0x20; `List<T>`: `_items` 0x10,
   `_size` 0x18 — см. любой перебор коллекции в коде игры.
 
@@ -543,7 +687,7 @@ Component/GameObject (Camera ищется по геттерам `*_Injected`, э
 grep -c '^public class .*MineableObjectExtension_OreHitstreaks' <new>/dump.cs
 ```
 
-Между `5ba910b` и `e478e52` из имён, которые знает код, исчез только `DVL` —
+Между `89e0b63` и `62a8534` из имён, которые знает код, исчез только `DVL` —
 и это не класс в нашем смысле, а строка-лейбл в таблице `kWeaponNames`.
 
 ---
@@ -580,7 +724,7 @@ grep -c '^public class .*MineableObjectExtension_OreHitstreaks' <new>/dump.cs
 сигнатуре (`dump.cs`: класс + типы параметров) и по характерным константам в
 дизассемблерации.
 
-| роль | билд `5ba910b` | билд `e478e52` | как узнать |
+| роль | билд `89e0b63` | билд `62a8534` | как узнать |
 |---|---|---|---|
 | `MineableObject`: ленивое заполнение `MINEABLE_EXTENSIONS` (0xE8) | `cik` 0x648e6ec | 0x65677d0 | `ldr x?,[x?,#0xe8]!` → `cbnz` → `GetComponents<dk>` → `str x0,[x22]` |
 | руда: перечитывает живой маркер 0x30 и узел 0x40 каждый кадр | `Update` 0x772bfb4 | `Update` 0x786b260 | имя `Update` не обфусцировано |
@@ -611,7 +755,7 @@ grep -c '^public class .*MineableObjectExtension_OreHitstreaks' <new>/dump.cs
 * **Окно скана `TOD_SCAN_RVA_BEGIN/END`**: диапазон `.data.rel.ro`, а не поле.
   Пересчёт — комментарий в `game_offsets.h`; контроль — оба кандидата
   `TOD_Sky` из `typeinfo_rva.py` обязаны попасть в окно, а число слотов в нём
-  должно быть ~80 тысяч (в `5ba910b` их там 82 154, в `e478e52` — 82 167;
+  должно быть ~80 тысяч (в `89e0b63` их там 82 154, в `62a8534` — 82 167;
   35 слотов в старом окне нового билда — верный признак, что окно протухло).
 * **Нативные смещения `Camera`** (§3.1 `OFFSETS_UPDATE.md`) — из `libunity.so`,
   обновляются отдельно и только при смене Unity.
@@ -620,13 +764,13 @@ grep -c '^public class .*MineableObjectExtension_OreHitstreaks' <new>/dump.cs
 
 | билд | backing-поля | пример полей крестика |
 |---|---|---|
-| до `5ba910b` | `_ukT_k__BackingField` | `MoW`, `MTn`, `MTQ` |
-| `5ba910b` | `_Q*_k__BackingField` | `MoW`, `MTn`, `MTQ` |
-| `e478e52` | `_L*_k__BackingField` | `lzD`, `lHe`, `lHC` |
+| до `89e0b63` | `_ukT_k__BackingField` | `MoW`, `MTn`, `MTQ` |
+| `89e0b63` | `_Q*_k__BackingField` | `MoW`, `MTn`, `MTQ` |
+| `62a8534` | `_L*_k__BackingField` | `lzD`, `lHe`, `lHC` |
 
 Смещения при этом не двигались — ротировали только имена. Важно: читаемые
 имена полей (`hitstreakIndex`, `meshRenderer`, `lifetime`, `mark`, …) между
-соседними билдами сохраняются, НО в `e478e52` впервые обфусцировалась часть
+соседними билдами сохраняются, НО в `62a8534` впервые обфусцировалась часть
 читаемых полей `PlayerWeapon`, поэтому страховка «читаемое имя не ротирует» в
 `update_offsets.py` ослаблена: `_XXXX_k__BackingField` считается
 обфусцированным именем и в проверке поколения не участвует.

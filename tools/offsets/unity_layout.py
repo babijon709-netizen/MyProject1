@@ -1,32 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Сверка раскладки UnityEngine.Camera в двух libunity.so — релиза и беты.
+"""Проверка release libunity.so для фиксированной раскладки UnityEngine.Camera.
 
-    python3 tools/offsets/unity_layout.py                  # оба .7z из корня репозитория
-    python3 tools/offsets/unity_layout.py --release a.so --beta b.so
+    python3 tools/offsets/unity_layout.py
+    python3 tools/offsets/unity_layout.py --release /path/to/libunity.so
 
-Зачем: нативные смещения Camera (§3.1 OFFSETS_UPDATE.md, kind: runtime в
-offsets_map.json) не пересчитываются из дампов — они приходят из libunity.so и
-общие для релиза и беты. Если бета собрана на другом Unity, её ESP поедет, а
-заметить это по дампам нельзя: смещения просто не те поля.
-
-Что делает (та же процедура, что описана в OFFSETS_UPDATE.md — «Проверка нового
-libunity.so», только автоматически):
-
-  1. достаёт libunity.so из архивов (или берёт переданные файлы) и печатает
-     версию Unity в обоих — она и определяет раскладку;
-  2. находит функцию пересборки матриц камеры по отпечатку в коде:
-     читается dirty-байт view-кэша [#0x502], затем пишутся view-кэш [#0x70] и
-     worldToClip [#0xf0] от одного и того же this-регистра. Печатает дизасм
-     этой функции в обеих сборках и считает, сколько слов кода совпало
-     (расходятся только адреса вызовов — сам код на месте);
-  3. сравнивает счётчики обращений к каждому нашему смещению по всему .text,
-     раздельно по типу приёмника (ldr_s, ldr_q, ldrb_w, add_x, ...). Раскладка
-     не менялась, если числа совпадают; расхождения в единицы — шум от чужих
-     классов с тем же смещением.
-
-Итог печатается словами: «раскладка та же» или «ЕСТЬ ОТЛИЧИЯ, нужен ручной
-перемер». Скрипт ничего не меняет в репозитории.
+Скрипт проверяет версию ELF, находит функцию пересборки матриц камеры по
+отпечатку dirty-байта и выводит обращения к зафиксированным полям. Он ничего
+не меняет и не подбирает смещения для запущенной игры.
 """
 
 import argparse
@@ -218,93 +199,31 @@ GATES = (('ldr_s', 0x454), ('ldr_s', 0x458), ('ldr_s', 0x4e0), ('ldr_s', 0x170),
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--release', help='libunity.so релиза (по умолчанию из libunity.7z)')
-    ap.add_argument('--beta', help='libunity.so беты (по умолчанию из libunity_beta.7z)')
+    ap.add_argument('--release', help='release libunity.so (default: libunity.7z)')
     a = ap.parse_args()
 
     rel = Elf(a.release or unpack('libunity.7z'))
-    bet = Elf(a.beta or unpack('libunity_beta.7z'))
-
-    print('релиз: %s  Unity %s' % (os.path.basename(rel.path), rel.unity_version()))
-    print('бета : %s  Unity %s' % (os.path.basename(bet.path), bet.unity_version()))
-    if rel.unity_version() != bet.unity_version():
-        print('\nВЕРСИИ UNITY РАЗНЫЕ — раскладку Camera нужно перемерять руками '
-              '(§3.1 OFFSETS_UPDATE.md), копировать смещения нельзя.')
+    print('release: %s  Unity %s' % (os.path.basename(rel.path), rel.unity_version()))
+    fn, site = find_rebuild(rel)
+    if fn is None:
+        print('camera matrix rebuild fingerprint not found')
         return 1
-    print('версия Unity одна и та же — раскладка обязана совпадать, проверяем код\n')
+    print('camera rebuild %#x (dirty byte read at %#x)' % (fn, site))
+    for ins in disasm(rel, fn, 22):
+        print('   %#010x: %-8s %s' % (ins.address, ins.mnemonic, ins.op_str))
 
-    bad = 0
-    for tag, elf in (('релиз', rel), ('бета', bet)):
-        fn, site = find_rebuild(elf)
-        if fn is None:
-            print('%s: функция пересборки матриц по отпечатку не найдена' % tag)
-            bad += 1
-            continue
-        print('== %s: функция пересборки %#x (dirty-байт читается в %#x)' % (tag, fn, site))
-        for ins in disasm(elf, fn, 22):
-            print('   %#010x: %-8s %s' % (ins.address, ins.mnemonic, ins.op_str))
-        print()
-
-    rel_fn, _ = find_rebuild(rel)
-    bet_fn, _ = find_rebuild(bet)
-
-    # Кластер функций камеры: сама пересборка матриц и её соседи (копии кешей
-    # projection/previousViewProjection). Если раскладка поехала, поехал бы он.
-    if rel_fn and bet_fn:
-        lo, n = 0x100, 0x2c0
-        rels = disasm(rel, rel_fn - lo, n)
-        bets = disasm(bet, bet_fn - lo, n)
-        same, diff = 0, []
-        for i, (a, b) in enumerate(zip(rels, bets)):
-            if a.bytes == b.bytes:
-                same += 1
-                continue
-            # Разные адреса в бете — это норма: бинарь пересобран, весь код и
-            # rodata переехали. Такими словами и должны отличаться переходы,
-            # adrp и следующая за ним пара add с тем же регистром.
-            reloc = a.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz', 'adr', 'adrp')
-            if not reloc and a.mnemonic == 'add' and a.op_str.startswith('x'):
-                dst = a.op_str.split(',')[0].strip()
-                for j in range(max(0, i - 3), i):
-                    prev = rels[j]
-                    if prev.mnemonic == 'adrp' and prev.op_str.split(',')[0].strip() == dst:
-                        reloc = True
-                        break
-            if not reloc:
-                diff.append(a)
-        print('кластер камеры (%#x..%#x в релизе): %d слов; совпало байт-в-байт %d, '
-              'переезд адресов (вызовы/adrp) %d, содержательных отличий %d'
-              % (rel_fn - lo, rel_fn - lo + n * 4, n, same, n - same - len(diff), len(diff)))
-        for ins in diff[:6]:
-            print('   РАЗНОЕ: %#010x: %-8s %s' % (ins.address, ins.mnemonic, ins.op_str))
-        if diff:
-            bad += 1
-
-    ca, cb = counts(rel), counts(bet)
-    print('\n«редкие» счётчики (по ним видно именно Camera; релиз -> бета):')
+    found = counts(rel)
+    missing = []
+    print('\nrelease Camera field-reference counters:')
     for key, disp in GATES:
-        x, y = ca.get((key, disp), 0), cb.get((key, disp), 0)
-        ok = (x == y)
-        if not ok:
-            bad += 1
-        print('  %-8s %#7x: %5d -> %5d   %s' % (key, disp, x, y, 'OK' if ok else 'РАЗНОЕ'))
-
-    print('\nостальные счётчики — справочно (в них сидят и чужие классы):')
-    shown = 0
-    for key, disp in sorted(set(ca) | set(cb), key=lambda k: (k[1], k[0])):
-        if (key, disp) in GATES:
-            continue
-        x, y = ca.get((key, disp), 0), cb.get((key, disp), 0)
-        if x != y:
-            shown += 1
-            print('  %-10s %#7x: %6d -> %6d' % (key, disp, x, y))
-    print('  всего строк с расхождением: %d (шум: эти imm12 есть у всех классов)' % shown)
-
-    if bad:
-        print('\nИТОГ: есть отличия — нужен ручной перемер (§3.1 OFFSETS_UPDATE.md)')
+        count = found.get((key, disp), 0)
+        print('  %-8s %#7x: %5d' % (key, disp, count))
+        if count == 0:
+            missing.append((key, disp))
+    if missing:
+        print('\nRESULT: expected release Camera references are missing')
         return 1
-    print('\nИТОГ: кластер камеры и её счётчики совпали — раскладка Camera в бете та же,'
-          '\n      нативные смещения §3.1 действительны без правок')
+    print('\nRESULT: fixed release Camera layout fingerprint is present')
     return 0
 
 

@@ -20,7 +20,7 @@
  * `kind: typeinfo_rva` — слот глобального Il2CppClass* в .data.rel.ro
    libil2cpp.so: уезжает КАЖДЫЙ билд, ищется typeinfo_rva.py по обращениям
    из методов класса и отпечатку (сколько обращений, есть ли статик-поля).
- * `kind: runtime` — раскладка Unity/IL2CPP-объектов: из dump.cs не выводится
+ * `kind: abi` — раскладка Unity/IL2CPP-объектов: из dump.cs не выводится
    вовсе. Живёт либо в libunity.so (нативные Camera/Transform/GameObject),
    либо в ABI il2cpp (System.String, массивы, generic-обёртки), либо
    выведена из ПОРЯДКА полей в il2cpp.h + заголовка объекта 0x10. Уезжает
@@ -54,10 +54,10 @@ HEADER = os.path.join(ROOT, 'jni', 'src', 'game_offsets.h')
 CONST_RE = re.compile(r'^inline constexpr std::uint64_t (\w+)\s*=\s*(0x[0-9A-Fa-f]+);\s*(.*)$')
 
 # ---------------------------------------------------------------------------
-# Источники констант класса «runtime»: куда смотреть в дампах.
+# Источники констант класса «abi»: куда смотреть в дампах.
 # Формат: имя -> (файл, как найти/чем проверено)
 # ---------------------------------------------------------------------------
-RUNTIME_SRC = {
+ABI_SRC = {
     # --- нативная Camera (libunity.so) -------------------------------------
     'CAMERA_VIEW_MATRIX': ('libunity.so',
         'get_worldToCameraMatrix_Injected @ 0x5ac514 -> хелпер 0xe1fe08 отдаёт cam+0x70 '
@@ -90,15 +90,23 @@ RUNTIME_SRC = {
         'поиск трансформа камеры)'),
     'TRANSFORM_CHILD_COUNT': ('libunity.so',
         'нативный Transform: int32 число детей, проверено тем же обходом'),
+    'TRANSFORM_HIERARCHY_DATA': ('release libunity.so',
+        'TransformAccessReadOnly hierarchy data pointer'),
+    'TRANSFORM_HIERARCHY_INDEX': ('release libunity.so',
+        'TransformAccessReadOnly hierarchy index'),
+    'TRANSFORM_HIERARCHY_MATRICES': ('release libunity.so',
+        'Transform hierarchy local TRS array pointer'),
+    'TRANSFORM_HIERARCHY_INDICES': ('release libunity.so',
+        'Transform hierarchy parent-index array pointer'),
     'COMPONENT_GAMEOBJECT': ('libunity.so',
         'нативный Component.m_GameObject; проверено переходом компонент -> объект'),
     'GAMEOBJECT_COMPONENT_ARRAY': ('libunity.so',
         'нативный GameObject.m_Component: массив пар {GameObject*, Component*}'),
     'COMPONENT_PAIR_PTR': ('libunity.so',
         'второй указатель в паре элемента m_Component'),
-    'GAMEOBJECT_NAME_GUESS': ('libunity.so',
-        'core::string с SSO; уточняется в рантайме перебором кандидатов по именам'),
-    # --- ABI il2cpp (в dump.cs нет, раскладкаRuntime-объектов) -------------
+    'GAMEOBJECT_NAME': ('release libunity.so',
+        'фиксированное поле core::string с SSO'),
+    # --- ABI il2cpp (в dump.cs нет, раскладка объектов) -------------
     'MANAGED_CACHED_PTR': ('ABI + il2cpp.h',
         'UnityEngine.Object: за заголовком объекта (klass 0x0, monitor 0x8) первым идёт '
         'm_CachedPtr -> 0x10; проверено на всех managed-обёртках'),
@@ -173,18 +181,18 @@ NEW_FIELDS = {
         struct='Oxide_MineableObject_Fields', field='LXX', type='UnityEngine_Transform_o*',
         note='якорь точки удара по руде (ZgL() отдаёт его мировую позицию); имя LXX ротирует'),
     'ARP_LATEST_VALUE': dict(
-        kind='runtime', file='il2cpp.h + ABI',
+        kind='abi', file='il2cpp.h + ABI',
         how='Cysharp_Threading_Tasks_AsyncReactiveProperty_1_Fields: порядок (triggerEvent, '
             'latestValue) плюс заголовок 0x10 -> 0x18',
         note='AsyncReactiveProperty<T>.latestValue — реактивное свойство (здоровье у сущностей)'),
     'PMP_ENTITY': dict(
-        kind='runtime', file='? (класс ротирует)',
+        kind='abi', file='? (класс ротирует)',
         how='не используется в коде (только в переключателе версий). Класс «pmK» в '
             'текущем дампе не опознан: имя обфусцировано и сменилось',
         note='НЕ ИСПОЛЬЗУЕТСЯ. При обновлении можно не переносить; если понадобится — '
              'искать класс, у которого на 0x98 лежит AsyncReactiveProperty_1_o*'),
     'PMK_HEALTH': dict(
-        kind='runtime', file='? (класс ротирует)',
+        kind='abi', file='? (класс ротирует)',
         how='не используется в коде. Если понадобится: в том же классе, что PMP_ENTITY, '
             'поле типа AsyncReactiveProperty<float> — проверить по 0x98',
         note='НЕ ИСПОЛЬЗУЕТСЯ. AsyncReactiveProperty<float> здоровья сущности'),
@@ -218,7 +226,7 @@ def build_dump_info(dumpdir):
             info[name] = collections.OrderedDict(
                 size=os.path.getsize(p), sha1_12=sha1(p))
 
-    # версия движка — по ней решается судьба класса C (runtime/ABI)
+    # версия движка — по ней решается судьба класса C (ABI)
     unity = None
     for so in ('libil2cpp.so', 'libunity.so'):
         p = os.path.join(dumpdir, so)
@@ -262,8 +270,8 @@ def main():
         if name in d:
             continue
         rec = collections.OrderedDict()
-        if spec.get('kind') == 'runtime':
-            rec['kind'] = 'runtime'
+        if spec.get('kind') == 'abi':
+            rec['kind'] = 'abi'
             rec['offset'] = consts.get(name, (0,))[0]
             rec['note'] = spec.get('note', '')
             rec['src'] = collections.OrderedDict(file=spec['file'], how=spec['how'])
@@ -305,8 +313,8 @@ def main():
                     'static_fields (ldr x8,[klass,#0xB8]). Уезжает КАЖДЫЙ билд — '
                     'отпечаток см. в PROVENANCE.md, §B')
         else:
-            if name in RUNTIME_SRC:
-                file_, how = RUNTIME_SRC[name]
+            if name in ABI_SRC:
+                file_, how = ABI_SRC[name]
                 src = collections.OrderedDict(file=file_, how=how)
             elif 'src' in rec:
                 src = rec['src']          # уже заполнен выше (новые константы)

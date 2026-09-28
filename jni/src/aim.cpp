@@ -7,7 +7,7 @@
 #include "aim_learn.h"           // оценка град/px по реакции прицела
 #include "app_state.h"
 #include "cfg.h"
-#include "menu.h"                // g_buildPrompt, g_calibMode
+#include "menu.h"                // g_calibMode
 #include "process.h"             // g_esp_attached
 #include "ui_util.h"
 #include "str.h"               // XS(): строки интерфейса зашифрованы в бинарнике
@@ -204,7 +204,7 @@ struct AimPick {
 // без прицела). dt приводится к рабочему диапазону на месте.
 // Коды причины «аим молчит» (AimMemDiag.inactive):
 //   1 аим выключен          2 нет привязки к процессу   3 открыто меню
-//   4 калибровка зон        5 окно сборки               6 включён фрикам
+//   4 калибровка зон        6 включён фрикам
 //   7 «только с прицелом», а прицела нет                8 не определён экран
 // Признак «в прицеле» и цепочка, которой он прочитан. Запоминаются в AimBegin,
 // потому что на пути «аим молчит» диагностика чистится целиком, и иначе в логе
@@ -221,7 +221,7 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     // Во фрикаме аим молчит: камера улетела от тела, а точка прицела считается
     // от глаза персонажа — доворачивать камеру по ней было бы некуда.
     bool active = g_state.aim_touch && g_esp_attached && !menuOpen &&
-                  g_calibMode == 0 && !g_buildPrompt && !g_state.freecam_on;
+                  g_calibMode == 0 && !g_state.freecam_on;
 
     // "Только с прицелом": only steer while the local player is ADS.
     if (g_state.aim_scope_only && g_esp_attached) {
@@ -240,7 +240,6 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
             else if (!g_esp_attached)                *why = 2;
             else if (menuOpen)                       *why = 3;
             else if (g_calibMode != 0)               *why = 4;
-            else if (g_buildPrompt)                  *why = 5;
             else if (g_state.freecam_on)             *why = 6;
             else                                     *why = 7;
         }

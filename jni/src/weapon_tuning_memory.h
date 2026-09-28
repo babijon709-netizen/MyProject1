@@ -188,9 +188,9 @@ public:
         if (!s) spread=Status::Failed;
         if (!r || !s || (!nr && !ns)) return;
         if (!base) return;
-        // No runtime offset discovery and no native-RVA table: every address
-        // below is `object + go_active::<named offset>` from the user's
-        // release/beta headers. Runtime reads only validate object ownership.
+        // No offset discovery and no native-RVA table: every address below is
+        // `object + go_active::<named offset>` from the release header. Live
+        // reads only validate object ownership.
         Context next;
         if (!resolve(player,next)) {
             if (!restore(0,9)) recoil=spread=Status::Failed;

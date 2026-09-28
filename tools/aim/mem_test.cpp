@@ -58,7 +58,6 @@ struct { int width = 2460, height = 1080, orientation = 0; } displayInfo;
 static int native_window_screen_x = 2460, native_window_screen_y = 1080;
 static bool g_esp_attached = true;
 static int  g_calibMode = 0;
-static bool g_buildPrompt = false;
 AppState   g_state;
 InputState g_input;
 bool       g_aimActive = false;   // аим ведёт цель (автофарм уступает камеру)

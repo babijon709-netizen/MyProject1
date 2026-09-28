@@ -57,7 +57,7 @@ def main():
     for k, v in d.items():
         if v.get('kind') == 'field':
             by_struct.setdefault(v['struct'], []).append(k)
-    runtime = [(k, v) for k, v in d.items() if v.get('kind') == 'runtime']
+    abi = [(k, v) for k, v in d.items() if v.get('kind') == 'abi']
     rva = [(k, v) for k, v in d.items() if v.get('kind') == 'typeinfo_rva']
     nf = sum(len(v) for v in by_struct.values())
 
@@ -106,7 +106,7 @@ def main():
     w(f'| **B. `*_TYPEINFO_RVA`** | {len(rva)} | слоты глобальных `Il2CppClass*` в '
       f'`.data.rel.ro` `libil2cpp.so` | **да, всегда** | `typeinfo_rva.py` + отпечаток '
       f'со старого дампа |')
-    w(f'| **C. Рантайм/ABI** | {len(runtime)} | раскладка Unity/IL2CPP-объектов, не '
+    w(f'| **C. Нативный ABI** | {len(abi)} | раскладка Unity/IL2CPP-объектов, не '
       f'выводится из `dump.cs` | только при смене версии Unity/IL2CPP | вручную '
       f'(дизасм паттернов), см. §C |')
     w('')
@@ -185,7 +185,7 @@ def main():
     w('')
     w('| константа | значение | что это | где искать в дампах |')
     w('|---|---|---|---|')
-    for k, v in sorted(runtime, key=lambda kv: (kv[1].get('src', {}).get('file', ''), kv[0])):
+    for k, v in sorted(abi, key=lambda kv: (kv[1].get('src', {}).get('file', ''), kv[0])):
         src = v.get('src', {})
         where = src.get('file', '?')
         if src.get('how'):
@@ -343,7 +343,7 @@ def main():
 
     open(a.out, 'w', encoding='utf-8').write('\n'.join(o) + '\n')
     print(f'{os.path.relpath(a.out, ROOT)}: {len(o)} строк '
-          f'({nf} полей, {len(rva)} RVA, {len(runtime)} runtime)')
+          f'({nf} полей, {len(rva)} RVA, {len(abi)} ABI)')
     return 0
 
 

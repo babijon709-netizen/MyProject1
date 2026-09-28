@@ -1,12 +1,9 @@
 #pragma once
 #include <cstdint>
 
-// ВНИМАНИЕ: это оффсеты РЕЛИЗНОЙ версии игры — эталон и источник значений для
-// переключателя версий. Бета-версия живёт отдельным файлом
-// (game_offsets_beta.h, собирается tools/offsets/beta_offsets.py из
-// dump_beta.7z), а код читает память через активный набор
-// (game_offsets_active.h, выбранная версия — go::SelectBuild). Значения здесь
-// правит update_offsets.py; файл беты он не трогает.
+// Оффсеты единственного поддерживаемого release-клиента. Значения проверяются
+// по его дампу и подключаются как compile-time константы через
+// game_offsets_active.h; update_offsets.py обновляет этот файл.
 
 namespace game_offsets {
 
@@ -63,7 +60,7 @@ inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA    = 0xD9C52E0;
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
 
-// Shared managed-object layouts independently verified in release and beta.
+// Managed-object layouts verified for the supported release.
 inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS_OFFSET = 0xB8;
 inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS = 0x30;
 inline constexpr std::uint64_t LOOPRUNNER_ITEMS = 0x38;
@@ -368,14 +365,17 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_LENGTH         = 0x18;
 //   GameObject::get_transform_Injected -> ldr x8, [x0, #0x20]; ldr x19, [x8, #8]
 inline constexpr std::uint64_t TRANSFORM_CHILDREN_ARRAY   = 0x48; // Transform** (direct pointers)
 inline constexpr std::uint64_t TRANSFORM_CHILD_COUNT      = 0x58; // int32
+// Native Transform hierarchy storage for the supported release libunity.
+inline constexpr std::uint64_t TRANSFORM_HIERARCHY_DATA    = 0x38;
+inline constexpr std::uint64_t TRANSFORM_HIERARCHY_INDEX   = 0x40;
+inline constexpr std::uint64_t TRANSFORM_HIERARCHY_MATRICES = 0x18;
+inline constexpr std::uint64_t TRANSFORM_HIERARCHY_INDICES  = 0x20;
 inline constexpr std::uint64_t COMPONENT_GAMEOBJECT       = 0x20; // native Component -> native GameObject*
 inline constexpr std::uint64_t GAMEOBJECT_COMPONENT_ARRAY = 0x20; // native GameObject -> ComponentPair*
 inline constexpr std::uint64_t COMPONENT_PAIR_PTR         = 0x08; // pair[0] + 8 == Transform* (first component)
 // GameObject name is a 32-byte core::string (SSO): flags byte at +0x1F,
 // heap pointer at +0x0 when (flags >= 0x40), inline chars otherwise.
-// The exact field offset inside GameObject is discovered at runtime
-// (validated against known bone names); 0x48 is the expected value.
-inline constexpr std::uint64_t GAMEOBJECT_NAME_GUESS      = 0x48;
+inline constexpr std::uint64_t GAMEOBJECT_NAME             = 0x48;
 
 inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18;

@@ -193,4 +193,4 @@ static void tests(const char* calculator) {
         c.tick(1,base,player,true,false); assert(c.recoil==Status::Failed && io.writes.empty());
     }
 }
-int main() { maps_tests(); tests("Ze"); tests("FJ"); std::cout<<"weapons: named offsets, both calculator names, ownership, restoration and failures: OK\n"; }
+int main() { maps_tests(); tests("Ze"); std::cout<<"weapons: release named offsets, ownership, restoration and failures: OK\n"; }

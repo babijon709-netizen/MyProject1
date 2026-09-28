@@ -8,7 +8,7 @@
 #include "aim.h"                 // AimSensitivityScale/Gain
 #include "esp_draw.h"            // FrameBoxes
 #include "widgets.h"             // g_sheet, g_pop (пауза при открытом окне)
-#include "menu.h"                // g_buildPrompt, g_calibMode
+#include "menu.h"                // g_calibMode
 #include "process.h"             // g_esp_attached
 #include <cmath>
 
@@ -264,7 +264,7 @@ static void UpdateFarmInner(float dt) {
     // автофарма показывала бы «простой» ровно тогда, когда на неё смотрят
     // (само это окно и ставит бота на паузу).
     const bool driving = !menuBlocked && !s_fingerDown && !g_aimActive &&
-                         g_calibMode == 0 && !g_buildPrompt;
+                         g_calibMode == 0;
 
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;

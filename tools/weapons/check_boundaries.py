@@ -11,8 +11,8 @@ viewmodel = (root / 'jni/src/viewmodel_memory.h').read_text()
 silent = (root / 'jni/src/silent_aim_core.h').read_text()
 game = (root / 'jni/src/game.cpp').read_text()
 
-# No runtime offset resolver or private build/RVA table is allowed in the
-# ported controllers. Addresses must come from go_active (release/beta headers).
+# Ported controllers allow no live offset resolver or private build/RVA table.
+# Addresses must come from go_active release constants.
 ported = (tuning, speed, loot, silent, adapter, viewmodel)
 for controller in ported:
     assert 'offset_resolver' not in controller

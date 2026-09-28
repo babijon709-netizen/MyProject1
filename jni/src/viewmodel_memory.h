@@ -66,7 +66,7 @@ template<class IO> class Controller {
         Patch<Position> current;
         Patch<BlendSpeed> speed;
     };
-    std::array<HandPatch, 9> hands_{};
+    std::array<HandPatch, 8> hands_{};
     unsigned retry_ = 0;
 
     bool restore_hands() {
@@ -158,9 +158,9 @@ public:
             motion_ = {}; retry_ = 0; weapon_ = {};
             if (weapon && io.ptr(weapon + FPOBJECT_PLAYER_BACKREF) == player) weapon_.capture(io, weapon);
         }
-        // Custom hands no longer restore in ADS. Disabled is the only normal
-        // state that restores originals; otherwise every motion slot receives
-        // the same static position below.
+        // Custom hands stay active in normal movement states. Disabled is the
+        // only state that restores those owned slots; the native ADS slot is
+        // deliberately never captured or written below.
         if (!s.hands_enabled) {
             const bool ok=restore_hands();
             status.hands=ok?Status::Off:Status::Failed;
@@ -183,14 +183,30 @@ public:
             if (!found || !motion_.capture(io, found)) return;
             retry_ = 0;
         }
+        // m_AimOffset belongs to the game's sight alignment. Replacing either
+        // its target or smoothed cache with the static custom-hands value makes
+        // the weapon stop lining up with the sight. Keep ADS fully native while
+        // applying custom hands to every non-ADS pose.
         const uint64_t offsets[] = {FPMOTION_IDLE_OFFSET, FPMOTION_RUN_OFFSET,
-            FPMOTION_RUN_RELOAD_OFFSET, FPMOTION_ATTACK_OFFSET, FPMOTION_AIM_OFFSET,
+            FPMOTION_RUN_RELOAD_OFFSET, FPMOTION_ATTACK_OFFSET,
             FPMOTION_LADDER_OFFSET, FPMOTION_JUMP_OFFSET, FPMOTION_LOOK_OFFSET,
             FPMOTION_CLOSE_OFFSET};
+        const uint64_t native_aim_object = io.ptr(motion_.object + FPMOTION_AIM_OFFSET);
         bool any = false, ok = true;
         for (size_t i = 0; i < hands_.size(); ++i) {
             auto& h = hands_[i];
             uint64_t slot = motion_.object + offsets[i], object = io.ptr(slot);
+            // A prefab may alias a normal slot to its ADS TransformOffset.
+            // Native sight alignment wins: release any old ownership and skip
+            // the shared object regardless of which slot exposed it.
+            if (object && object == native_aim_object) {
+                const bool targetRestored = h.target.restore(io);
+                const bool currentRestored = h.current.restore(io);
+                const bool speedRestored = h.speed.restore(io);
+                if (targetRestored && currentRestored && speedRestored) h = {};
+                else ok = false;
+                continue;
+            }
             if (h.object != object) {
                 // An unlinked offset may have been freed: never restore via it.
                 h = {};
@@ -215,7 +231,7 @@ public:
                 ok = false;
                 continue;
             }
-            // FPMotion selects one of these nine targets, then TransformOffset
+            // FPMotion selects one of these non-ADS targets, then TransformOffset
             // interpolates m_Position into its separate current-position cache
             // at +0x44.  Some idle poses have a zero/very low lerp speed, which
             // is why changing only m_Position appeared to work only while

@@ -195,8 +195,6 @@ UI_EN = {
         'A tap records the zone. The menu reopens by itself.',
     'Зона джойстика сохранена': 'Joystick zone saved',
     'Зона огня сохранена': 'Fire zone saved',
-    # версия игры (релиз/бета)
-    'Версия игры': 'Game version', 'Релиз': 'Release', 'Бета': 'Beta',
     # разное и опции
     'Функции': 'Features', 'Иксрей': 'X-Ray', 'Всегда день': 'Always day',
     # фрикам: камера отделяется от тела и летает сквозь стены

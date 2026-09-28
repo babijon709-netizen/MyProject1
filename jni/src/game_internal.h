@@ -5,6 +5,7 @@
 // эти три файла делят память и состояние.
 
 #include "game.h"
+#include "game_offsets_active.h"
 #include "mem_io.h"
 #include "Vector.h"
 #include <string>
@@ -121,10 +122,10 @@ void collect_transform_subtree(uint64_t root, std::vector<uint64_t>& nodes, size
 
 // ---- Общие структуры -------------------------------------------------------
 struct TransformHierarchyLayout {
-    uint64_t data_offset = 0x38;
-    uint64_t index_offset = 0x40;
-    uint64_t matrices_offset = 0x18;
-    uint64_t indices_offset = 0x20;
+    uint64_t data_offset = go_active::TRANSFORM_HIERARCHY_DATA;
+    uint64_t index_offset = go_active::TRANSFORM_HIERARCHY_INDEX;
+    uint64_t matrices_offset = go_active::TRANSFORM_HIERARCHY_MATRICES;
+    uint64_t indices_offset = go_active::TRANSFORM_HIERARCHY_INDICES;
     bool matrices_indirect = false;
     bool indices_indirect = false;
 };
@@ -205,8 +206,6 @@ uint64_t native_component_transform(uint64_t native_component);
 int class_identity(uint64_t klass, const char* expected_name, const char* expected_ns);
 bool class_looks_alive(uint64_t klass);
 uint64_t get_class_static_fields(uint64_t klass);
-bool discover_layout_from_native_transforms(const std::vector<uint64_t>& native_transforms,
-                                            size_t& best_position_count, size_t& candidate_count);
 bool publish_camera_only_frame(float sw, float sh);
 bool object_class_name_is(uint64_t obj, const char* expected, bool accept_when_unreadable = false);
 bool read_transform_name(uint64_t transform, char* out, size_t cap);

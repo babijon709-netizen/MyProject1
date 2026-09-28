@@ -5,7 +5,6 @@
 #include "theme.h"
 #include "hud.h"
 #include "audio.h"
-#include "process.h"
 #include "lang.h"
 #include <algorithm>
 #include <cerrno>
@@ -80,29 +79,6 @@ void RestoreLang() {
     if (!v.empty() && v[0] == 'e') lang::set(lang::LANG_EN);
 }
 
-// Оффсеты релиза и беты разные (jni/src/game_offsets_beta.h), и версия
-// выбирается в меню. Выбор хранится рядом с конфигами отдельным файлом, как
-// язык: он нужен ещё до загрузки любого конфига — от него зависит, по какой
-// раскладке читать память игры и к какому пакету подключаться.
-//
-static std::string CfgBuildPath() {
-    return std::string(kCfgDir) + ".build";
-}
-
-void RememberBuild() {
-    mkdir(kCfgDir, 0777);
-    std::ofstream f(CfgBuildPath(), std::ios::trunc);
-    if (f) f << (go::CurrentBuild() == go::Build::Beta ? "beta" : "release");
-}
-
-void RestoreBuild() {
-    std::ifstream f(CfgBuildPath());
-    if (!f) return;
-    std::string v;
-    std::getline(f, v);
-    if (!v.empty() && v[0] == 'b') go::SelectBuild(go::Build::Beta);
-}
-
 // Акцент интерфейса — рядом с конфигами отдельным файлом (.accent), как язык:
 // стиль GUI глобален, а не часть профиля. Формат: индекс пресета (0..8,
 // 8 = свой цвет) и его RGB — пишутся всегда парой, читаются с клампом.
@@ -170,28 +146,6 @@ void RestoreLayout() {
     g_state.hud_cnt_x = cl(v[6]);   g_state.hud_cnt_y = cl(v[7]);
     g_state.freecam_btn_x = cl(v[8]); g_state.freecam_btn_y = cl(v[9]);
     g_state.aim_tx = cl(v[10]);     g_state.aim_ty = cl(v[11]);
-}
-
-// Применить выбор версии: подставить оффсеты выбранного клиента и, если версия
-// реально сменилась, переподключиться. Всё, что было вычитано по прежней
-// раскладке (классы, инстансы, кеши игроков), после смены недействительно —
-// поэтому esp_reset(), а поток привязки подключится заново сам.
-void ApplyBuildChoice(go::Build b) {
-    if (b == go::Build::Beta && !go::BetaAvailable()) b = go::Build::Release;
-    const bool changed = (go::CurrentBuild() != b);
-    if (changed) {
-        esp_viewmodel_reset(true); // restore using OLD offsets
-    }
-    go::SelectBuild(b);
-    RememberBuild();
-    if (changed) {
-        process_detach();
-        char _b[160];
-        snprintf(_b, sizeof(_b), "%s|%s", XS("Версия игры"),
-                 b == go::Build::Beta ? XS("Бета") : XS("Релиз"));
-        ShowToast(_b);
-    }
-    PlaySound(SND_CLICK);
 }
 
 static void XorBuf(uint8_t* buf, size_t sz) {

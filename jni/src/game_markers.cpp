@@ -1140,39 +1140,7 @@ std::vector<EspMarker> esp_get_markers() {
         }
     }
 
-    // No usable layout (fresh join / respawn, nobody around): learn it from
-    // the ENTITY transforms themselves. The layout discovery only needs a
-    // couple of native transforms scattered across the map — ore nodes are
-    // exactly that. This is what makes markers self-sufficient: previously
-    // the layout could only be learned from other players' skeletons, and
-    // solo after a world reload every position read failed (POS_INVALID).
-    {
-        static int s_solo_learn_cooldown = 0;
-        bool positions_dead = false;
-        if (!g_marker_entities.empty()) {
-            size_t checked = 0, dead = 0;
-            for (MarkerEntity& probe : g_marker_entities) {
-                if (++checked > 6) break;
-                Vec3 test{};
-                if (!marker_world_position(probe.transform, test)) ++dead;
-            }
-            positions_dead = checked > 0 && dead >= checked - (checked > 4 ? 1 : 0);
-        }
-        if (positions_dead && --s_solo_learn_cooldown <= 0) {
-            s_solo_learn_cooldown = 60; // ~1 s between attempts
-            std::vector<uint64_t> seeds;
-            for (const MarkerEntity& e : g_marker_entities) {
-                if (e.transform) seeds.push_back(e.transform);
-                if (seeds.size() >= 8) break;
-            }
-            size_t pos_count = 0, cand_count = 0;
-            if (discover_layout_from_native_transforms(seeds, pos_count, cand_count)) {
-                // Re-read every cached position with the fresh layout.
-                for (MarkerEntity& e : g_marker_entities)
-                    e.position_valid = marker_world_position(e.transform, e.position);
-            }
-        }
-    }
+    // Transform hierarchy offsets are fixed by the release table.
 
     const float max_distance = g_marker_max_distance;
     for (MarkerEntity& entity : g_marker_entities) {

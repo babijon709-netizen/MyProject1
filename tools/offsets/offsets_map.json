@@ -1,6 +1,6 @@
 {
  "CAMERA_PROJECTION_MATRIX": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 176,
   "note": "нативная Camera (libunity.so): кеш projection Matrix4x4; ленивый, при внешнем чтении устаревает — только фолбэк",
   "src": {
@@ -9,7 +9,7 @@
   }
  },
  "CAMERA_VIEW_MATRIX": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 112,
   "note": "нативная Camera: кеш worldToCamera Matrix4x4; пересобирается только в геттерах Unity по dirty-флагу 0x502, поэтому основной путь — поза живого Transform (0x20)",
   "src": {
@@ -18,7 +18,7 @@
   }
  },
  "CAMERA_WORLD_TO_CLIP": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 240,
   "note": "нативная Camera: кеш worldToClip Matrix4x4",
   "src": {
@@ -27,7 +27,7 @@
   }
  },
  "CAMERA_PREV_VIEW_PROJ": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 1480,
   "note": "нативная Camera: матрица прошлого кадра (motion vectors)",
   "src": {
@@ -36,7 +36,7 @@
   }
  },
  "CAMERA_NATIVE_TRANSFORM": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 32,
   "note": "нативная Camera -> её Transform",
   "src": {
@@ -45,7 +45,7 @@
   }
  },
  "CAMERA_FOV_DEGREES": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 368,
   "note": "нативная Camera: field of view, float (градусы)",
   "src": {
@@ -54,7 +54,7 @@
   }
  },
  "CAMERA_ASPECT": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 1248,
   "note": "нативная Camera: aspect, float",
   "src": {
@@ -63,7 +63,7 @@
   }
  },
  "CAMERA_NEAR_CLIP": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 1108,
   "note": "нативная Camera: near clip plane, float — сюда пишет X-ray и отсюда же восстанавливает",
   "src": {
@@ -72,7 +72,7 @@
   }
  },
  "CAMERA_FAR_CLIP": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 1112,
   "note": "нативная Camera: far clip plane, float",
   "src": {
@@ -81,7 +81,7 @@
   }
  },
  "CAMERA_VIEW_DIRTY": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 1282,
   "note": "нативная Camera: dirty-байт кеша view (0x502)",
   "src": {
@@ -90,7 +90,7 @@
   }
  },
  "CAMERA_PROJ_DIRTY": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 1280,
   "note": "нативная Camera: dirty-байт кеша projection (0x500)",
   "src": {
@@ -99,7 +99,7 @@
   }
  },
  "MANAGED_CACHED_PTR": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 16,
   "note": "UnityEngine.Object.m_CachedPtr: managed-обёртка -> нативный объект",
   "src": {
@@ -118,7 +118,7 @@
    "file": "il2cpp.h",
    "struct": "Mirror_NetworkBehaviour_Fields",
    "field": "_netIdentity_k__BackingField",
-   "how": "local-player ownership guard; release/beta layout"
+   "how": "local-player ownership guard; release layout"
   }
  },
  "NETWORK_IDENTITY_IS_LOCAL_PLAYER": {
@@ -132,7 +132,7 @@
    "file": "il2cpp.h",
    "struct": "Mirror_NetworkIdentity_Fields",
    "field": "_isLocalPlayer_k__BackingField",
-   "how": "local-player ownership guard; release/beta layout"
+   "how": "local-player ownership guard; release layout"
   }
  },
  "PLAYER_MANAGER_TYPEINFO_RVA": {
@@ -250,7 +250,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_PlayerManager_Fields",
    "field": "respawning",
-   "how": "named release/beta field used for death/respawn ESP continuity"
+   "how": "named release field used for death/respawn ESP continuity"
   }
  },
  "PLAYER_CHARACTER_MODEL": {
@@ -484,7 +484,7 @@
   }
  },
  "IL2CPP_STRING_LENGTH": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 16,
   "note": "System.String.length (UTF-16)",
   "src": {
@@ -493,7 +493,7 @@
   }
  },
  "IL2CPP_STRING_CHARS": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 20,
   "note": "System.String: первый символ (UTF-16)",
   "src": {
@@ -712,7 +712,7 @@
   }
  },
  "WEAPONVIEW_WEAPON_BASE": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 72,
   "note": "обёртка weapon view (имя класса обфусцировано): указатель на WeaponBase",
   "src": {
@@ -721,7 +721,7 @@
   }
  },
  "WEAPONVIEW_PIECE": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 80,
   "note": "обёртка weapon view: WeaponPiece",
   "src": {
@@ -730,7 +730,7 @@
   }
  },
  "WEAPONVIEW_ROOT_TRANSFORM": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 96,
   "note": "обёртка weapon view: корневой Transform модели",
   "src": {
@@ -739,7 +739,7 @@
   }
  },
  "WEAPONVIEW_INNER": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 16,
   "note": "обёртка weapon view: внутренний объект (0x10)",
   "src": {
@@ -804,7 +804,7 @@
   }
  },
  "IL2CPP_CLASS_NAME": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 16,
   "note": "Il2CppClass ABI: const char* name",
   "src": {
@@ -813,7 +813,7 @@
   }
  },
  "IL2CPP_CLASS_NAMESPACE": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 24,
   "note": "Il2CppClass ABI: const char* namespaze",
   "src": {
@@ -842,7 +842,7 @@
   }
  },
  "SYNC_VALUE_OFFSET": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 32,
   "note": "Mirror SyncVar<T>.Value",
   "src": {
@@ -1211,7 +1211,7 @@
   }
  },
  "IL2CPP_ARRAY_LENGTH": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 24,
   "note": "Il2CppArray ABI: max_length",
   "src": {
@@ -1220,7 +1220,7 @@
   }
  },
  "TRANSFORM_CHILDREN_ARRAY": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 72,
   "note": "нативный Transform: массив детей",
   "src": {
@@ -1229,7 +1229,7 @@
   }
  },
  "TRANSFORM_CHILD_COUNT": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 88,
   "note": "нативный Transform: число детей (int32)",
   "src": {
@@ -1237,8 +1237,44 @@
    "how": "нативный Transform: int32 число детей, проверено тем же обходом"
   }
  },
+ "TRANSFORM_HIERARCHY_DATA": {
+  "kind": "abi",
+  "offset": 56,
+  "note": "TransformAccessReadOnly hierarchy data pointer",
+  "src": {
+   "file": "release libunity.so",
+   "how": "TransformAccessReadOnly hierarchy data pointer"
+  }
+ },
+ "TRANSFORM_HIERARCHY_INDEX": {
+  "kind": "abi",
+  "offset": 64,
+  "note": "TransformAccessReadOnly hierarchy index",
+  "src": {
+   "file": "release libunity.so",
+   "how": "TransformAccessReadOnly hierarchy index"
+  }
+ },
+ "TRANSFORM_HIERARCHY_MATRICES": {
+  "kind": "abi",
+  "offset": 24,
+  "note": "Transform hierarchy local TRS array pointer",
+  "src": {
+   "file": "release libunity.so",
+   "how": "Transform hierarchy local TRS array pointer"
+  }
+ },
+ "TRANSFORM_HIERARCHY_INDICES": {
+  "kind": "abi",
+  "offset": 32,
+  "note": "Transform hierarchy parent-index array pointer",
+  "src": {
+   "file": "release libunity.so",
+   "how": "Transform hierarchy parent-index array pointer"
+  }
+ },
  "COMPONENT_GAMEOBJECT": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 32,
   "note": "нативный Component.m_GameObject",
   "src": {
@@ -1247,7 +1283,7 @@
   }
  },
  "GAMEOBJECT_COMPONENT_ARRAY": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 32,
   "note": "нативный GameObject.m_Component (массив пар)",
   "src": {
@@ -1256,7 +1292,7 @@
   }
  },
  "COMPONENT_PAIR_PTR": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 8,
   "note": "элемент m_Component: пара {GameObject*, Component*} — указатель на компонент",
   "src": {
@@ -1264,17 +1300,17 @@
    "how": "второй указатель в паре элемента m_Component"
   }
  },
- "GAMEOBJECT_NAME_GUESS": {
-  "kind": "runtime",
+ "GAMEOBJECT_NAME": {
+  "kind": "abi",
   "offset": 72,
-  "note": "первая догадка на GameObject.name (core::string с SSO); уточняется в рантайме перебором кандидатов по именам костей",
+  "note": "поле GameObject.name (core::string с SSO) текущего release libunity",
   "src": {
    "file": "libunity.so",
    "how": "core::string с SSO; уточняется в рантайме перебором кандидатов по именам"
   }
  },
  "IL2CPP_LIST_ITEMS": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 16,
   "note": "List<T>._items",
   "src": {
@@ -1283,7 +1319,7 @@
   }
  },
  "IL2CPP_LIST_SIZE": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 24,
   "note": "List<T>._size (int32)",
   "src": {
@@ -1292,7 +1328,7 @@
   }
  },
  "IL2CPP_ARRAY_FIRST_ELEMENT": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 32,
   "note": "Il2CppArray ABI: vector[0]",
   "src": {
@@ -1325,7 +1361,7 @@
   }
  },
  "DICT_ENTRIES": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 24,
   "note": "Dictionary<K,V>._entries (массив struct Entry)",
   "src": {
@@ -1348,7 +1384,7 @@
   }
  },
  "DICT_ENTRY_STRIDE": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 24,
   "note": "размер struct Entry {hashCode, next, key, value}",
   "src": {
@@ -1357,7 +1393,7 @@
   }
  },
  "DICT_ENTRY_VALUE": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 16,
   "note": "смещение value внутри struct Entry",
   "src": {
@@ -2070,7 +2106,7 @@
   }
  },
  "TOD_SKY_CYCLE": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 64,
   "note": "TOD_Sky.Cycle. Имя класса TOD_Sky обфусцировано и ротирует каждый билд (IY -> UV), поэтому не field: искать grep'ом 'TOD_CycleParameters_o* Cycle' в il2cpp.h — offset поля Cycle и есть это значение",
   "src": {
@@ -2079,7 +2115,7 @@
   }
  },
  "TOD_SCAN_RVA_BEGIN": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 227999744,
   "note": "НЕ поле: начало области глобальных Il2CppClass*-слотов в .data.rel.ro, которую скан в always_day_tick() перебирает в поисках TOD_Sky. Уезжает каждый билд вместе с *_TYPEINFO_RVA (было 0xD8D0000). Проверка: кандидаты typeinfo_rva.py для класса TOD_Sky обязаны попасть в [BEGIN,END)",
   "src": {
@@ -2088,7 +2124,7 @@
   }
  },
  "TOD_SCAN_RVA_END": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 228655104,
   "note": "конец окна скана TOD_Sky = BEGIN + 0xA0000 (было 0xD970000)",
   "src": {
@@ -2319,7 +2355,7 @@
   }
  },
  "GUI_VALUE": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 32,
   "note": "значение внутри обёртки GuI`1<T>: в il2cpp.h у GuI_1_Fields полей нет (generic), смещение подтверждено дизассемблером FPMelee.ZkX 0x6533a20 — ldr x8,[x19,#0xc8]; ldr x8,[x8,#0x160]; ldr x20,[x8,#0x20]",
   "src": {
@@ -2490,7 +2526,7 @@
   }
  },
  "ARP_LATEST_VALUE": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 24,
   "note": "AsyncReactiveProperty<T>.latestValue — реактивное свойство (здоровье у сущностей)",
   "src": {
@@ -2499,7 +2535,7 @@
   }
  },
  "PMP_ENTITY": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 104,
   "note": "НЕ ИСПОЛЬЗУЕТСЯ. При обновлении можно не переносить; если понадобится — искать класс, у которого на 0x98 лежит AsyncReactiveProperty_1_o*",
   "src": {
@@ -2508,7 +2544,7 @@
   }
  },
  "PMK_HEALTH": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 152,
   "note": "НЕ ИСПОЛЬЗУЕТСЯ. AsyncReactiveProperty<float> здоровья сущности",
   "src": {
@@ -2556,7 +2592,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPManager_Fields",
    "field": "BYu",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPOBJECT_DRAW_EVENT": {
@@ -2570,7 +2606,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPObject_Fields",
    "field": "Draw",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPDRAW_ACTION": {
@@ -2584,7 +2620,7 @@
    "file": "il2cpp.h",
    "struct": "eDt_Fields",
    "field": "BXi",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   },
   "via": [
    {
@@ -2604,7 +2640,7 @@
    "file": "il2cpp.h",
    "struct": "System_Delegate_Fields",
    "field": "m_target",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "MULTICAST_DELEGATES": {
@@ -2618,7 +2654,7 @@
    "file": "il2cpp.h",
    "struct": "System_MulticastDelegate_Fields",
    "field": "delegates",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPMOTION_OBJECT": {
@@ -2632,7 +2668,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "BYc",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPMOTION_PLAYER": {
@@ -2646,7 +2682,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "Player",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "TRANSFORMOFFSET_POSITION": {
@@ -2660,7 +2696,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_TransformOffset_Fields",
    "field": "m_Position",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "TRANSFORMOFFSET_CURRENT_POSITION": {
@@ -2674,7 +2710,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_TransformOffset_Fields",
    "field": "BYE",
-   "how": "release/beta layout; current smoothed position read and written by TransformOffset at release RVA 0x6620EDC"
+   "how": "release layout; current smoothed position read and written by TransformOffset at release RVA 0x6620EDC"
   }
  },
  "FPMOTION_IDLE_OFFSET": {
@@ -2688,7 +2724,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "m_IdleOffset",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPMOTION_RUN_OFFSET": {
@@ -2702,7 +2738,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "m_RunOffset",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPMOTION_RUN_RELOAD_OFFSET": {
@@ -2716,7 +2752,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "runReloadOffset",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPMOTION_ATTACK_OFFSET": {
@@ -2730,7 +2766,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "m_AttackOffset",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPMOTION_AIM_OFFSET": {
@@ -2744,7 +2780,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "m_AimOffset",
-   "how": "release/beta layout; selected by FPMotion.Update, see VIEWMODEL.md"
+   "how": "release layout; selected by FPMotion.Update, see VIEWMODEL.md"
   }
  },
  "FPMOTION_LADDER_OFFSET": {
@@ -2758,7 +2794,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "m_OnLadderOffset",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPMOTION_JUMP_OFFSET": {
@@ -2772,7 +2808,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "m_JumpOffset",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPMOTION_LOOK_OFFSET": {
@@ -2786,7 +2822,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "m_LookOffset",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPMOTION_CLOSE_OFFSET": {
@@ -2800,7 +2836,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "m_TooCloseOffset",
-   "how": "Viewmodel: checked in release/beta; consumers in libil2cpp.so, see VIEWMODEL.md"
+   "how": "Viewmodel: checked in release; consumers in libil2cpp.so, see VIEWMODEL.md"
   }
  },
  "FPMOTION_ACTIVE_OFFSET": {
@@ -2814,7 +2850,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPMotion_Fields",
    "field": "BYH",
-   "how": "release/beta layout; current TransformOffset selected and consumed by FPMotion.Update at release RVA 0x6621B3C"
+   "how": "release layout; current TransformOffset selected and consumed by FPMotion.Update at release RVA 0x6621B3C"
   }
  },
  "TRANSFORMOFFSET_LERP_SPEED": {
@@ -2828,7 +2864,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_TransformOffset_Fields",
    "field": "m_LerpSpeed",
-   "how": "release/beta layout; clamp(dt*m_LerpSpeed) in TransformOffset Tick at release RVA 0x6620EDC"
+   "how": "release layout; clamp(dt*m_LerpSpeed) in TransformOffset Tick at release RVA 0x6620EDC"
   }
  },
  "PLAYER_LOOP_HELPER_TYPEINFO_RVA": {
@@ -2839,7 +2875,7 @@
    "section": ".data.rel.ro",
    "how": "typeinfo_rva.py; PlayerLoopHelper static_fields anchor for guarded fast-loot traversal"
   },
-  "note": "release 0xD9C52E0; current beta is derived separately as 0xD9A3488"
+  "note": "release 0xD9C52E0"
  },
  "PLAYERLOOPHELPER_RUNNERS": {
   "kind": "field",
@@ -2852,7 +2888,7 @@
    "file": "il2cpp.h",
    "struct": "Cysharp_Threading_Tasks_PlayerLoopHelper_StaticFields",
    "field": "runners",
-   "how": "UniTask PlayerLoopHelper static runners array; release/beta layouts checked"
+   "how": "UniTask PlayerLoopHelper static runners array; release layouts checked"
   }
  },
  "LOOPRUNNER_ITEMS": {
@@ -2992,7 +3028,7 @@
    "file": "il2cpp.h + libil2cpp.so",
    "struct": "Oxide_FPWeaponBase_Fields",
    "field": "_BBT_k__BackingField",
-   "how": "release/beta layout; FPWeaponBase.sPo stores virtual sPq result at RVA 0x6631DA0, FPHitscan.sPq consumes config +0x48"
+   "how": "release layout; FPWeaponBase.sPo stores virtual sPq result at RVA 0x6631DA0, FPHitscan.sPq consumes config +0x48"
   }
  },
  "FPWEAPON_SHOT_PERIOD": {
@@ -3006,7 +3042,7 @@
    "file": "il2cpp.h + libil2cpp.so",
    "struct": "Oxide_FPWeaponBase_Fields",
    "field": "_BBp_k__BackingField",
-   "how": "release/beta layout; FPHitscan.lMf caches the effective shot period at RVA 0x660AF1C..0x660AF50"
+   "how": "release layout; FPHitscan.lMf caches the effective shot period at RVA 0x660AF1C..0x660AF50"
   }
  },
  "FPHITSCAN_BURST_WAIT": {
@@ -3020,7 +3056,7 @@
    "file": "il2cpp.h + libil2cpp.so",
    "struct": "Oxide_FPHitscan_Fields",
    "field": "BnA",
-   "how": "release BnA / beta KqY; constructed by lMf at RVA 0x660AF04 and consumed by burst coroutine at 0x660EFA0"
+   "how": "release BnA; constructed by lMf at RVA 0x660AF04 and consumed by burst coroutine at 0x660EFA0"
   }
  },
  "WAITFORSECONDS_SECONDS": {
@@ -3034,7 +3070,7 @@
    "file": "il2cpp.h",
    "struct": "UnityEngine_WaitForSeconds_Fields",
    "field": "m_Seconds",
-   "how": "stable release/beta managed layout for the FPHitscan burst wait object"
+   "how": "stable release managed layout for the FPHitscan burst wait object"
   }
  },
  "FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD": {
@@ -3048,7 +3084,7 @@
    "file": "il2cpp.h + libil2cpp.so",
    "struct": "Oxide_FPHitscan_Fields",
    "field": "_BYw_k__BackingField",
-   "how": "release 0x2E0 / beta _KAj at 0x2E8; sPo copies config +0x4C at RVA 0x65FF908..0x65FF914"
+   "how": "release 0x2E0; sPo copies config +0x4C at RVA 0x65FF908..0x65FF914"
   }
  },
  "FPHITSCAN_CALCULATOR": {
@@ -3062,7 +3098,7 @@
    "file": "il2cpp.h",
    "struct": "Oxide_FPHitscan_Fields",
    "field": "Bna",
-   "how": "release calculator Ze; beta positional equivalent FJ"
+   "how": "release calculator Ze"
   }
  },
  "FPHITSCAN_RECOIL": {
@@ -3090,7 +3126,7 @@
    "file": "il2cpp.h",
    "struct": "Ze_Fields",
    "field": "ZUJ",
-   "how": "release Ze / beta FJ calculator positional field"
+   "how": "release Ze calculator positional field"
   },
   "via": [
    {
@@ -3110,7 +3146,7 @@
    "file": "il2cpp.h",
    "struct": "Ze_Fields",
    "field": "ZUA",
-   "how": "release Ze / beta FJ calculator positional field"
+   "how": "release Ze calculator positional field"
   },
   "via": [
    {
@@ -3130,7 +3166,7 @@
    "file": "il2cpp.h",
    "struct": "Ze_Fields",
    "field": "_ZUa_k__BackingField",
-   "how": "release Ze / beta FJ calculator positional cached base dispersion"
+   "how": "release Ze calculator positional cached base dispersion"
   },
   "via": [
    {
@@ -3150,7 +3186,7 @@
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
    "field": "fireRate",
-   "how": "weapon tuning/speed config; release/beta checked"
+   "how": "weapon tuning/speed config; release checked"
   }
  },
  "HITSCANCONFIG_FULL_RELOAD": {
@@ -3164,7 +3200,7 @@
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
    "field": "_FullReloadPeriod_k__BackingField",
-   "how": "weapon tuning/speed config; release/beta checked"
+   "how": "weapon tuning/speed config; release checked"
   }
  },
  "HITSCANCONFIG_LOOP_RELOAD": {
@@ -3178,7 +3214,7 @@
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
    "field": "_LoopReloadPeriod_k__BackingField",
-   "how": "weapon tuning/speed config; release/beta checked"
+   "how": "weapon tuning/speed config; release checked"
   }
  },
  "HITSCANCONFIG_DISPERSION_CONFIG": {
@@ -3192,7 +3228,7 @@
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
    "field": "dispersionConfig",
-   "how": "weapon tuning/speed config; release/beta checked"
+   "how": "weapon tuning/speed config; release checked"
   }
  },
  "HITSCANCONFIG_RECOIL_CONFIG": {
@@ -3206,7 +3242,7 @@
    "file": "il2cpp.h",
    "struct": "HyperHug_Games_Oxide_Features_Weapons_HitscanWeaponConfig_Fields",
    "field": "recoilConfig",
-   "how": "weapon tuning/speed config; release/beta checked"
+   "how": "weapon tuning/speed config; release checked"
   }
  },
  "WEAPONRECOIL_RECOIL_CONFIG": {
@@ -3280,7 +3316,7 @@
   }
  },
  "IL2CPP_CLASS_STATIC_FIELDS_OFFSET": {
-  "kind": "runtime",
+  "kind": "abi",
   "offset": 184,
   "note": "Il2CppClass ABI: void* static_fields",
   "src": {

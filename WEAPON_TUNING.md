@@ -31,7 +31,7 @@
 namespace, native identity Unity-объектов и связь FPObject.player с этим игроком.
 Не используются кэш ESP, глобальный поиск оружия или догадки по чужим объектам.
 
-Совпадающие смещения release/beta:
+Смещения поддерживаемого release-клиента:
 
 | Источник | Поле |
 |---|---|
@@ -90,7 +90,7 @@ Fast Fire/Fast Reload, описанный в `ONESOURCE_PORT.md`.
 Контроллер больше не содержит отдельной runtime-таблицы build-id/native RVA и
 не выводит смещения по памяти игры. Каждый адрес строится только как
 `object + go_active::<CONST>`; `go_active` выбирает значения из пользовательских
-`game_offsets.h` / `game_offsets_beta.h`. Чтение живых классов, Unity identity,
+`game_offsets.h`. Чтение живых классов, Unity identity,
 player/weapon owner и typed config backlinks используется только как guard перед
 записью, а не как источник оффсетов.
 
@@ -110,7 +110,7 @@ sh tools/viewmodel/run.sh
 sh tools/hostcheck/run.sh
 python3 tools/lang/check.py
 # Необязательно: нужны unicorn и два оригинальных ARM64-образа, не включены в Git.
-python3 tools/weapons/check_native.py release/libil2cpp.so beta/libil2cpp.so
+python3 tools/weapons/check_native.py release/libil2cpp.so
 ```
 
 Проверены оба layout при -O0 и -O3 -ffast-math: независимые флаги, отсутствие

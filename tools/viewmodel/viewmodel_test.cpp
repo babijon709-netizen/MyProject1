@@ -67,6 +67,7 @@ struct Fixture {
     }
     void tick() { c.tick(1,player,s); }
     Position position() { return io.get<Position>(idle+TRANSFORMOFFSET_POSITION); }
+    Position target(uint64_t pose) { return io.get<Position>(pose+TRANSFORMOFFSET_POSITION); }
     Position current(uint64_t pose) { return io.get<Position>(pose+TRANSFORMOFFSET_CURRENT_POSITION); }
     float fov() { return io.get<float>(fp+FPMANAGER_WORLD_FOV_TARGET); }
 };
@@ -76,10 +77,11 @@ static void tests() {
     { Fixture f; f.tick(); assert(f.c.status.fov==Status::Active && f.c.status.hands==Status::Active);
       Position expected{0.1f,-0.2f,0.3f}; assert(near(f.position(),expected)); assert(f.fov()==100.f);
       // The idle cache is authoritative even though idle lerp speed is zero;
-      // run and ADS are preloaded with the exact same static pose.
+      // normal movement poses share the static value. ADS remains fully native.
       assert(near(f.current(f.idle),expected));
       assert(near(f.current(f.run),expected));
-      assert(near(f.current(f.ads),expected));
+      assert(same(f.target(f.ads),f.origin));
+      assert(same(f.current(f.ads),f.settled));
       expected=f.position();
       for(int i=0;i<200;++i) { f.tick(); }
       assert(same(f.position(),expected)); // no drift
@@ -88,15 +90,27 @@ static void tests() {
       assert(same(f.position(),f.origin)); assert(same(f.current(f.idle),f.settled)); assert(f.fov()==70.f);
     }
     { Fixture f; f.tick(); const Position expected{0.1f,-0.2f,0.3f};
-      // Simulate state changes performed by FPMotion.Update.  The selected
-      // active object is already held at the custom current position, so no
-      // run transition is required to make the setting visible.
-      for (uint64_t pose : {f.idle, f.run, f.ads}) {
+      // Simulate normal state changes performed by FPMotion.Update. Selected
+      // non-ADS poses are held at the custom current position immediately.
+      for (uint64_t pose : {f.idle, f.run}) {
           f.io.set(f.motion+FPMOTION_ACTIVE_OFFSET,pose);
           f.io.set(pose+TRANSFORMOFFSET_CURRENT_POSITION,f.origin); // game attempted to replace cache
           f.tick();
           assert(near(f.current(pose),expected));
       }
+      // Aiming can update both native ADS values every tick; the controller
+      // must not capture, overwrite, or restore either one.
+      const Position nativeAimTarget{0.7f,0.8f,0.9f};
+      const Position nativeAimCurrent{-0.7f,-0.8f,-0.9f};
+      f.io.set(f.motion+FPMOTION_ACTIVE_OFFSET,f.ads);
+      f.io.set(f.ads+TRANSFORMOFFSET_POSITION,nativeAimTarget);
+      f.io.set(f.ads+TRANSFORMOFFSET_CURRENT_POSITION,nativeAimCurrent);
+      f.tick();
+      assert(same(f.target(f.ads),nativeAimTarget));
+      assert(same(f.current(f.ads),nativeAimCurrent));
+      f.s.hands_enabled=false; f.tick();
+      assert(same(f.target(f.ads),nativeAimTarget));
+      assert(same(f.current(f.ads),nativeAimCurrent));
     }
     { Fixture f; f.tick(); f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(1));
       f.io.set(f.fp+FPMANAGER_WORLD_FOV_TARGET,25.f); f.tick();
@@ -123,6 +137,12 @@ static void tests() {
     }
     { Fixture f; f.io.set(f.motion+FPMOTION_RUN_OFFSET,f.idle); f.tick(); auto before=f.position();
       f.tick(); assert(same(before,f.position())); f.s={}; f.tick(); assert(same(f.position(),f.origin));
+    }
+    { Fixture f; // Shared normal/ADS object must remain native too.
+      f.io.set(f.motion+FPMOTION_AIM_OFFSET,f.idle); f.tick();
+      assert(same(f.target(f.idle),f.origin));
+      assert(same(f.current(f.idle),f.settled));
+      assert(near(f.target(f.run),Position{0.1f,-0.2f,0.3f}));
     }
     { Fixture f; f.io.set(f.motion+FPMOTION_IDLE_OFFSET,uint64_t(0)); f.tick();
       auto before=f.io.get<Position>(f.run+TRANSFORMOFFSET_POSITION);
@@ -159,10 +179,13 @@ static void tests() {
     { Fixture f; f.io.set(f.fp+FPMANAGER_WORLD_FOV_TARGET,std::numeric_limits<float>::quiet_NaN()); f.tick(); assert(f.c.status.fov==Status::Failed); }
     { Fixture f; f.io.set(f.idle+TRANSFORMOFFSET_POSITION,Position{std::numeric_limits<float>::infinity(),0,0}); f.tick(); assert(f.c.status.hands==Status::Failed); }
     { Fixture f; f.tick(); f.c.reset(true); assert(same(f.position(),f.origin)); assert(f.fov()==70.f); }
-    { Fixture f; f.tick(); // ADS does not restore hands or alter animation speed.
+    { Fixture f; f.tick(); // ADS keeps custom normal poses but owns its native pose.
       assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==0.f);
+      const Position nativeAim{0.6f,0.4f,-0.2f};
+      f.io.set(f.ads+TRANSFORMOFFSET_POSITION,nativeAim);
       f.io.set(f.aim+ACTIVITY_ACTIVE_FLAG,uint8_t(1)); f.tick();
       assert(near(f.position(),Position{0.1f,-0.2f,0.3f}));
+      assert(same(f.target(f.ads),nativeAim));
       assert(f.io.get<float>(f.idle+TRANSFORMOFFSET_LERP_SPEED)==0.f);
       f.s.hands_enabled=false; f.tick();
       assert(f.c.status.hands==Status::Off && same(f.position(),f.origin));
@@ -313,8 +336,6 @@ static void fps_tests() {
     }
 }
 int main() {
-    config_tests(); fps_tests();
-    go::SelectBuild(go::Build::Release); tests();
-    assert(go::BetaAvailable()); go::SelectBuild(go::Build::Beta); tests();
-    std::cout << "viewmodel: release/beta, persistent ADS FOV, static hands, lifecycle, FPS90/120/144, delegates, config, NaN: OK\n";
+    config_tests(); fps_tests(); tests();
+    std::cout << "viewmodel: release offsets, native ADS pose, persistent ADS FOV, static hands, lifecycle, FPS90/120/144, delegates, config, NaN: OK\n";
 }
