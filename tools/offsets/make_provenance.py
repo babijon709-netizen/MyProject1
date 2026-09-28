@@ -140,9 +140,10 @@ def main():
         w('')
         w(f'| константа | offset | поле в билде `{a.build}` | тип |')
         w('|---|---|---|---|')
-        for k in sorted(keys, key=lambda x: d[x]['offset']):
+        for k in sorted(keys, key=lambda x: d[x]['offset'] + int(d[x].get('live_adjust', 0))):
             e = d[k]
-            w(f"| `{k}` | {e['offset']:#x} | `{e.get('field','?')}` | `{e.get('type','?')}` |")
+            effective = e['offset'] + int(e.get('live_adjust', 0))
+            w(f"| `{k}` | {effective:#x} | `{e.get('field','?')}` | `{e.get('type','?')}` |")
         w('')
     w('---')
     w('')

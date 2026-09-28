@@ -100,6 +100,7 @@ enum EspAttachState {
     ESP_ATTACH_NO_PID,
     ESP_ATTACH_NO_LIB,
     ESP_ATTACH_NO_ACCESS,
+    ESP_ATTACH_BAD_IMAGE,
 };
 
 bool          esp_init(pid_t pid);

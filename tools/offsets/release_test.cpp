@@ -8,6 +8,8 @@ int main() {
     static_assert(std::is_same_v<decltype(go_active::PLAYER_POSITION),
                                  const std::uint64_t>);
     static_assert(go_active::PLAYER_POSITION == game_offsets::PLAYER_POSITION);
+    // Shipped release combat layout differs from generated metadata by -4.
+    static_assert(go_active::PLAYER_POSITION == 0x1D0);
     static_assert(go_active::PLAYER_MANAGER_TYPEINFO_RVA ==
                   game_offsets::PLAYER_MANAGER_TYPEINFO_RVA);
     static_assert(go_active::FPMOTION_AIM_OFFSET ==

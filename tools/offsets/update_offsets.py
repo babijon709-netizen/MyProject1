@@ -414,11 +414,13 @@ def main():
             if hit is None:
                 warnings.append(f'{const}: поле не найдено в новом дампе — проверь вручную')
                 continue
-            # Сравниваем с тем, что стоит в заголовке: так одной и той же
-            # проверкой ловятся и уехавшее после апдейта поле, и константа,
-            # которая была неверной с самого начала.
-            if want is None or hit[0] != want:
-                changes[const] = (want, hit[0], f'{label}.{ent.get("field")}', hit[1])
+            # Сравниваем с тем, что стоит в заголовке. Отдельные shipped
+            # layouts могут иметь подтверждённую поправку относительно dump
+            # metadata (PLAYER_POSITION: -4); она статична и хранится в карте,
+            # а не подбирается в запущенной игре.
+            live = hit[0] + int(ent.get('live_adjust', 0))
+            if want is None or live != want:
+                changes[const] = (want, live, f'{label}.{ent.get("field")}', hit[1])
 
     # TYPEINFO_RVA — подбираем по отпечатку со старого дампа, не «верхним»
     rva_consts = [c for c, e in omap.items() if e.get('kind') == 'typeinfo_rva']
@@ -469,7 +471,7 @@ def main():
             open(HEADER, 'w', encoding='utf-8').write(CONST_RE.sub(sub, src))
             for c, (o, n, _, _) in changes.items():
                 if omap[c].get('kind') == 'field':
-                    omap[c]['offset'] = n
+                    omap[c]['offset'] = n - int(omap[c].get('live_adjust', 0))
         # Карта обязана описывать ТЕКУЩИЙ дамп, а не тот, из которого её
         # последний раз меняли: обфусцированные имена полей ротируют каждый
         # билд (MoW -> lzD), и устаревшее имя в карте — это проваленный поиск

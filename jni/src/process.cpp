@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <string>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 
@@ -18,6 +19,9 @@ static const char* const kTargetPackage = "com.catsbit.oxidesurvivalisland";
 
 pid_t g_target_pid = -1;
 bool  g_esp_attached = false;
+// Official package or a renamed/cloned package candidate. Both still pass
+// esp_init's release TypeInfo validation before attachment is accepted.
+static bool g_target_by_package = true;
 static std::thread g_attach_thread;
 static std::atomic<bool> g_attach_running{false};
 
@@ -92,7 +96,32 @@ static pid_t find_game_pid() {
         if (best_rank < 0 || rank > best_rank) { best = pid; best_rank = rank; }
     }
     closedir(dir);
+    if (best > 0) g_target_by_package = true;
     return best;
+}
+
+// A release APK may be installed through an app clone/work profile with a
+// renamed applicationId. Find its Unity process as a candidate; esp_init then
+// accepts it only when the fixed release TypeInfo offsets resolve the expected
+// game classes, so this does not introduce another supported build.
+static int find_renamed_release_candidates(pid_t* out, int capacity) {
+    if (!out || capacity <= 0) return 0;
+    DIR* dir = opendir("/proc");
+    if (!dir) return 0;
+    const pid_t self = getpid();
+    int count = 0;
+    struct dirent* entry;
+    while (count < capacity && (entry = readdir(dir))) {
+        const pid_t pid = (pid_t)atoi(entry->d_name);
+        if (pid <= 0 || pid == self) continue;
+        char path[32];
+        snprintf(path, sizeof(path), "/proc/%d", pid);
+        struct stat st{};
+        if (stat(path, &st) != 0 || st.st_uid < 10000) continue;
+        if (proc_libil2cpp(pid) == 1) out[count++] = pid;
+    }
+    closedir(dir);
+    return count;
 }
 
 // Процесс всё ещё тот самый? Одно чтение cmdline вместо полного перебора /proc:
@@ -101,7 +130,8 @@ static bool pid_still_game(pid_t pid) {
     char path[32];
     snprintf(path, sizeof(path), "/proc/%d", pid);
     if (access(path, F_OK) != 0) return false;
-    return pid_cmdline_matches(pid) && proc_libil2cpp(pid) == 1;
+    if (g_target_by_package && !pid_cmdline_matches(pid)) return false;
+    return proc_libil2cpp(pid) == 1;
 }
 
 void start_attach_thread() {
@@ -109,18 +139,27 @@ void start_attach_thread() {
     g_attach_thread = std::thread([]() {
         while (g_attach_running.load()) {
             if (!g_esp_attached) {
-                pid_t pid = find_game_pid();
-                if (pid <= 0) {
-                    // Процесса игры нет: состояния не меняем, повторим попытку на
-                    // следующем круге. Игроку об этом не сообщаем — тост «игра не
-                    // запущена» только мешал (пока игра грузится, он вылезал всегда).
-                } else if (esp_init(pid)) {
-                    g_target_pid = pid;
+                pid_t attached_pid = -1;
+                const pid_t official = find_game_pid();
+                if (official > 0 && esp_init(official)) {
+                    attached_pid = official;
+                    g_target_by_package = true;
+                } else if (official <= 0) {
+                    // Try every renamed Unity application, not just the first:
+                    // unrelated Unity apps are rejected by strict release
+                    // TypeInfo validation in esp_init.
+                    pid_t candidates[16] = {};
+                    const int count = find_renamed_release_candidates(candidates, 16);
+                    for (int i = 0; i < count; ++i) {
+                        if (!esp_init(candidates[i])) continue;
+                        attached_pid = candidates[i];
+                        g_target_by_package = false;
+                        break;
+                    }
+                }
+                if (attached_pid > 0) {
+                    g_target_pid = attached_pid;
                     g_esp_attached = true;
-                } else {
-                    // Нашли процесс, но привязаться не вышло: причина — из game.cpp
-                    // (нет libil2cpp.so или память не читается). Состояние видно в
-                    // esp_attach_state() для диагностики, тоста нет.
                 }
             } else if (!pid_still_game(g_target_pid) || !esp_alive_check() ||
                        esp_wants_reattach()) {

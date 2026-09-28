@@ -110,7 +110,7 @@
 | `PLAYER_VOICE_PLAYER` | 0x140 | `voicePlayer` | `bxt_o*` |
 | `PLAYER_CHARACTER_MODEL` | 0x150 | `characterModel` | `UnityEngine_GameObject_o*` |
 | `PLAYER_WEAPONS_ARRAY` | 0x198 | `weapons` | `Il2CppObject*` |
-| `PLAYER_POSITION` | 0x1d4 | `lastSavedPosition` | `UnityEngine_Vector3_o` |
+| `PLAYER_POSITION` | 0x1d0 | `lastSavedPosition` | `UnityEngine_Vector3_o` |
 | `PLAYER_MANAGER_RESPAWNING` | 0x208 | `respawning` | `bool` |
 | `PLAYER_DISPLAY_NAME` | 0x220 | `KmI` | `System_String_o*` |
 | `PLAYER_USER_ID` | 0x278 | `userID` | `System_String_o*` |

@@ -236,8 +236,10 @@
    "file": "il2cpp.h",
    "struct": "Oxide_PlayerManager_Fields",
    "field": "lastSavedPosition",
-   "how": "смещение — из комментария /* 0x1D4 */ рядом с полем; имя поля обфусцировано и ротирует от билда к билду, поэтому при обновлении поле ищется по смещению и типу «UnityEngine_Vector3_o»"
-  }
+   "how": "dump metadata reports lastSavedPosition at 0x1D4; device-validated release combat layout and the previous live resolver select 0x1D0, so live_adjust=-4 is mandatory"
+  },
+  "note": "release combat-client layout is metadata field offset minus 4; effective PLAYER_POSITION is 0x1D0",
+  "live_adjust": -4
  },
  "PLAYER_MANAGER_RESPAWNING": {
   "kind": "field",

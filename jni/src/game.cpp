@@ -6357,15 +6357,10 @@ bool esp_init(pid_t pid) {
         g_mem.unbind();
     }
     if (!chosen) {
-        // Ни одна база не подтвердилась (игра ещё грузится?): работаем на первой
-        // пригодной, как раньше, — привязка не хуже прежней.
-        for (int i = 0; i < candidate_count; ++i) {
-            if (g_mem.bind(pid, candidates[i])) { chosen = candidates[i]; break; }
-        }
-    }
-    if (!chosen) {
-        // /proc/<pid>/mem не открылся или не читается: доступа к памяти нет.
-        g_attach_state = ESP_ATTACH_NO_ACCESS;
+        // Keep attachment release-only. During early loading TypeInfo may not
+        // be initialized yet; the process thread retries instead of accepting
+        // an unvalidated Unity process or a differently laid out client.
+        g_attach_state = ESP_ATTACH_BAD_IMAGE;
         g_il2cpp_base = 0;
         g_pid = -1;
         return false;
