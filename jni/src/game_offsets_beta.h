@@ -265,7 +265,7 @@ inline constexpr std::uint64_t IL2CPP_FIELDINFO_SIZE     = 0x20;
 // Указатель FieldInfo.type и byval_arg несут ОДИН И ТОТ ЖЕ klassIndex для
 // одного класса — это позволяет сверять ТИП поля с классом без строк: так
 // резолвер находит поля, чьи имена ротированы обфускатором (см.
-// offset_resolver.cpp, resolve_type_group).
+// статическим TYPEINFO_RVA-разрешением).
 inline constexpr std::uint64_t IL2CPP_CLASS_BYVAL_ARG    = 0x20;  // Il2CppType (0x10)
 inline constexpr std::uint64_t IL2CPP_TYPE_BITS          = 0x08;  // attrs:16 | enum:8 (<<16)
 // Значения Il2CppTypeEnum (биты 16..23 слова на IL2CPP_TYPE_BITS).

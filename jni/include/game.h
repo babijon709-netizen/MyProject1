@@ -173,30 +173,13 @@ void esp_get_ally_diag(int* local_team_len, int* local_clan_len, int* local_tag_
 // and group strings. Team IDs and names are intentionally omitted from logs.
 void esp_get_ally_diag_details(char* out, size_t cap);
 
-// ---- Автообновление оффсетов (offset_resolver.cpp) ---------------------------
-// Читает IL2CPP-метаданные живого процесса: ищет классы по именам (заменяет
-// *_TYPEINFO_RVA) и смещения полей по именам (заменяет вшитые константы).
-// Что не нашёл — остаётся на вшитом значении, поэтому хуже не делает никогда.
-void     offset_resolver_tick();       // порционный шаг, звать каждый кадр
-void     offset_resolver_reset();      // привязка сброшена — начать заново
-void     offset_resolver_reapply();    // после go::SelectBuild вернуть найденное
-uint64_t offset_resolver_class(const char* name, const char* ns); // 0 = не найден
-uint64_t offset_resolver_class_nth(const char* name, const char* ns, int nth); // тёзки (0-based)
-void     offset_resolver_status(char* out, size_t cap);           // строка в меню
-// База, где резолвер нашёл живые классы для этого pid (0 = ещё не нашёл):
-// привязка пробует её первой, чтобы не вставать на пустую копию .so.
-uint64_t offset_resolver_good_base(pid_t pid);
-bool     offset_resolver_busy();       // скан/калибровка ещё идут
-// Ядро сообщает резолверу, рисует ли чит кадры: пока рисует, подбор берёт
-// меньший квант времени и половину потолка чтения, чтобы не красть кадры.
-void     offset_resolver_set_frame_alive(bool alive);
-// Нагрузка для мини-профиля: кадры САМОЙ игры (по смене матрицы вида),
-// время внутри чтений её памяти и объём этих чтений.
+// Статические оффсеты и классы из TYPEINFO_RVA.
+uint64_t game_static_class(const char* name, const char* ns);
+uint64_t game_static_class_nth(const char* name, const char* ns, int nth);
+bool     game_static_offsets_valid(const uint64_t* slot);
 unsigned long long esp_game_frame_ticks();
 unsigned long long esp_mem_io_ns();
 unsigned long long esp_mem_bytes();
-// Значение слота получено из живых метаданных (а не из вшитой таблицы).
-bool     offset_resolver_is_live(const uint64_t* slot);
 uint64_t Il2CppBase();
 
 // Players near the local player as of the last esp_get_boxes() call, in all

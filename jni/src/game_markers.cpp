@@ -866,7 +866,7 @@ uint64_t resolve_network_client_spawned() {
     }
     uint64_t fallback = 0;
     for (int n = 0; n < 8; ++n) {
-        const uint64_t cand = offset_resolver_class_nth("NetworkClient", "Mirror", n);
+        const uint64_t cand = game_static_class_nth("NetworkClient", "Mirror", n);
         if (!cand) break;
         if (class_identity(cand, "NetworkClient", "Mirror") == 0) continue;
         if (!fallback) fallback = cand;

@@ -56,6 +56,20 @@ static bool      g_matrix_configuration_validated = false;
 static bool      g_camera_matrix_physical_match = false;
 static uint64_t  g_player_position_offset = PLAYER_POSITION;
 
+uint64_t game_static_class_nth(const char* name, const char* ns, int nth) {
+    (void)ns;
+    if (!name || nth != 0 || !g_il2cpp_base) return 0;
+    uint64_t rva = 0;
+    if (!strcmp(name, "PlayerManager")) rva = PLAYER_MANAGER_TYPEINFO_RVA;
+    else if (!strcmp(name, "GameControllerBase")) rva = GAME_CONTROLLER_TYPEINFO_RVA;
+    else if (!strcmp(name, "NetworkClient")) rva = NETWORK_CLIENT_TYPEINFO_RVA;
+    if (!rva) return 0;
+    return rd_ptr(g_il2cpp_base + rva);
+}
+uint64_t game_static_class(const char* name, const char* ns) {
+    return game_static_class_nth(name, ns, 0);
+}
+bool game_static_offsets_valid(const uint64_t* slot) { return slot != nullptr; }
 
 static TransformHierarchyLayout g_transform_hierarchy_layout{};
 static bool g_transform_hierarchy_layout_valid = false;
@@ -223,7 +237,7 @@ static void weapon_speed_restore() {
 
 static bool offsets_all_live(const std::uint64_t* const* slots, size_t count) {
     for (size_t i = 0; i < count; ++i)
-        if (!offset_resolver_is_live(slots[i])) return false;
+        if (!game_static_offsets_valid(slots[i])) return false;
     return true;
 }
 template <size_t N>
@@ -258,8 +272,8 @@ static void weapon_speed_tick() {
     const std::uint64_t* const gate_common[] = {
         &go_active::PLAYER_FP_MANAGER, &go_active::FPOBJECT_PLAYER_BACKREF,
     };
-    const bool live_cur_weapon = offset_resolver_is_live(&go_active::FPMANAGER_CURRENT_WEAPON);
-    const bool live_cur_object = offset_resolver_is_live(&go_active::FPMANAGER_CURRENT_OBJECT);
+    const bool live_cur_weapon = game_static_offsets_valid(&go_active::FPMANAGER_CURRENT_WEAPON);
+    const bool live_cur_object = game_static_offsets_valid(&go_active::FPMANAGER_CURRENT_OBJECT);
     const bool common_live = offsets_all_live(gate_common) && (live_cur_weapon || live_cur_object);
 
     const std::uint64_t* const gate_fire[] = {
@@ -1921,7 +1935,7 @@ static uint64_t resolve_runtime_player_list() {
     // игроков. Первый попавшийся — не критерий.
     uint64_t fallback_class = 0, fallback_static = 0;
     for (int n = 0; n < 8; ++n) {
-        const uint64_t cand = offset_resolver_class_nth("PlayerManager", "Oxide", n);
+        const uint64_t cand = game_static_class_nth("PlayerManager", "Oxide", n);
         if (!cand) break;
         if (class_identity(cand, "PlayerManager", "Oxide") == 0) continue;
         const uint64_t statics = get_class_static_fields(cand);
@@ -2008,7 +2022,7 @@ static uint64_t resolve_local_player() {
         // источник надёжнее, чем порядок в списке резолвера.
         uint64_t fallback = 0;
         for (int n = 0; n < 8; ++n) {
-            const uint64_t cand = offset_resolver_class_nth("GameControllerBase", "Oxide", n);
+            const uint64_t cand = game_static_class_nth("GameControllerBase", "Oxide", n);
             if (!cand) break;
             if (class_identity(cand, "GameControllerBase", "Oxide") == 0) continue;
             if (!fallback) fallback = cand;
@@ -7918,15 +7932,6 @@ bool esp_init(pid_t pid) {
     // устройства: перепривязка встала на пустую копию, скан 221 МБ дал 0
     // классов). Если модуль автообновления оффсетов уже нашёл базу с живыми
     // классами — поднимем её на первое место среди кандидатов.
-    const uint64_t live_base = offset_resolver_good_base(pid);
-    if (live_base && candidate_count > 1) {
-        for (int i = 1; i < candidate_count; ++i) {
-            if (candidates[i] != live_base) continue;
-            for (int j = i; j > 0; --j) candidates[j] = candidates[j - 1];
-            candidates[0] = live_base;
-            break;
-        }
-    }
 
     // База выбирается не «первая по имени в карте», а та, на которой РЕАЛЬНО
     // резолвится класс игры. После перезапуска игры в карте остаётся ещё и
@@ -8575,12 +8580,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // Пока идёт подбор оффсетов, перепривязка слепоту не вылечит: после
             // апдейта игры причина в устаревших смещениях, а не в подключении —
             // а каждая перепривязка ещё и рискует сорвать скан. Ждём резолвер.
-            if (offset_resolver_busy()) {
-                LogLine("смотритель кадра: ~36 с слепоты (сбросов кэша 3) — перепривязку НЕ прошу, идёт подбор оффсетов");
-            } else {
-                LogLine("смотритель кадра: ~36 с слепоты (сбросов кэша 3) — прошу перепривязку");
-                g_want_reattach.store(true);
-            }
+            LogLine("смотритель кадра: ~36 с слепоты (сбросов кэша 3) — прошу перепривязку");
+            g_want_reattach.store(true);
         } else {
             LogLine("смотритель кадра: 240 кадров без кадра, сброс кэшей (№%d из 3)",
                     g_frame_watchdog_resets);

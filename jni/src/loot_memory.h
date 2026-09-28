@@ -72,11 +72,9 @@
 #include <utility>
 #include <vector>
 
-// Автообновление оффсетов: поиск класса по имени (определение в
-// offset_resolver.cpp). Объявление дублирует game.h, чтобы заголовок
-// оставался самодостаточным (вне пространства имён: функция глобальная).
-std::uint64_t offset_resolver_class(const char* name, const char* ns);
-std::uint64_t offset_resolver_class_nth(const char* name, const char* ns, int nth);
+// Статический поиск классов по TYPEINFO_RVA.
+std::uint64_t game_static_class(const char* name, const char* ns);
+std::uint64_t game_static_class_nth(const char* name, const char* ns, int nth);
 
 namespace fast_loot {
 
@@ -171,7 +169,7 @@ template <class IO> class Controller {
         helper_class_ = 0; // named class with empty statics may be an uninitialized copy
         bool saw_named = false;
         for (int n = 0; n < 8; ++n) {
-            const std::uint64_t found = offset_resolver_class_nth(
+            const std::uint64_t found = game_static_class_nth(
                 "PlayerLoopHelper", "Cysharp.Threading.Tasks", n);
             if (!found) break;
             if (!class_is(found, "PlayerLoopHelper", "Cysharp.Threading.Tasks")) continue;

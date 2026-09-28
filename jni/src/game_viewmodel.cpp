@@ -230,7 +230,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             // Несколько одноимённых классов встречаются в защищённой сборке;
             // первый по имени может быть пустышкой (static_fields == 0).
             for (int n = 0; n < 8 && !raw; ++n) {
-                const uint64_t candidate = offset_resolver_class_nth("GameControllerBase", "Oxide", n);
+                const uint64_t candidate = game_static_class_nth("GameControllerBase", "Oxide", n);
                 if (!candidate) break;
                 try_source(candidate);
             }
@@ -248,7 +248,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
                                          settings.no_recoil || settings.no_spread)) {
                 local_source_failed = true;
                 LogLine("viewmodel: нет локального игрока через GameControllerBase.static: cached=0x%llx rva=0x%llx static=0x%llx field=0x%llx; fov=%d hands=%d recoil=%d spread=%d loot=%d status=%d",
-                        (unsigned long long)offset_resolver_class("GameControllerBase", "Oxide"),
+                        (unsigned long long)game_static_class("GameControllerBase", "Oxide"),
                         (unsigned long long)memory.ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA),
                         (unsigned long long)0, (unsigned long long)GAME_CONTROLLER_LOCAL_PLAYER_FIELD,
                         settings.fov_enabled, settings.hands_enabled, settings.no_recoil,
@@ -280,7 +280,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         &go_active::DISPERSION_CONFIG_MIN, &go_active::DISPERSION_CONFIG_MAX,
     };
     bool chain_live = true;
-    for (const std::uint64_t* slot : chain) chain_live &= offset_resolver_is_live(slot);
+    for (const std::uint64_t* slot : chain) chain_live &= game_static_offsets_valid(slot);
     // Сайлент без разброса: пока он ведёт цель, конус оружия обнуляется тем же
     // механизмом, что и тумблер «без разброса» (те же проверки, сохранение и
     // возврат оригиналов). Иначе ось стоит точно в кости, а пуля всё равно

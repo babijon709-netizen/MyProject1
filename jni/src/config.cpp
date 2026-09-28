@@ -182,7 +182,6 @@ void RestoreLayout() {
 // поэтому esp_reset(), а поток привязки подключится заново сам.
 // Из game.h (сам заголовок сюда не включается): вернуть найденные живьём
 // оффсеты поверх табличных после go::SelectBuild.
-void offset_resolver_reapply();
 
 void ApplyBuildChoice(go::Build b) {
     if (b == go::Build::Beta && !go::BetaAvailable()) b = go::Build::Release;
