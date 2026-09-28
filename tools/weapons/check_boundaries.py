@@ -33,7 +33,11 @@ for assignment in ('PLAYER_EVENT_HANDLER', 'EVENT_HANDLER_MANAGER_BACKREF',
 for controller in (tuning, speed, loot):
     assert not re.search(r'\bio\.(?:write|patch)\s*\(', controller)
 assert tuning.count('io.write_heap(') == 2       # apply + restore
-assert speed.count('io.write_heap(') == 2        # apply + restore
+assert speed.count('io.write_heap(') == 3        # apply + inherited-cache normalize + restore
+for live_offset in ('FPWEAPON_SHOT_PERIOD', 'FPWEAPON_EFFECTIVE_RELOAD_PERIOD',
+                    'FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD', 'FPHITSCAN_BURST_WAIT',
+                    'WAITFORSECONDS_SECONDS'):
+    assert f'go_active::{live_offset}' in speed
 assert loot.count('io_.write_heap(') == 1        # exact 0.35f promise cadence
 assert 'kCadenceBits = 0x3EB33333u' in loot
 assert 'PLAYER_LOOP_HELPER_TYPEINFO_RVA' in loot

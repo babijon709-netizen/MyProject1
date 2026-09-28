@@ -2981,6 +2981,76 @@
    "how": "rapid fire/reload and weapon identity"
   }
  },
+ "FPWEAPON_EFFECTIVE_RELOAD_PERIOD": {
+  "kind": "field",
+  "class": "Oxide.FPWeaponBase",
+  "struct": "Oxide_FPWeaponBase_Fields",
+  "field": "_BBT_k__BackingField",
+  "type": "float",
+  "offset": 232,
+  "src": {
+   "file": "il2cpp.h + libil2cpp.so",
+   "struct": "Oxide_FPWeaponBase_Fields",
+   "field": "_BBT_k__BackingField",
+   "how": "release/beta layout; FPWeaponBase.sPo stores virtual sPq result at RVA 0x6631DA0, FPHitscan.sPq consumes config +0x48"
+  }
+ },
+ "FPWEAPON_SHOT_PERIOD": {
+  "kind": "field",
+  "class": "Oxide.FPWeaponBase",
+  "struct": "Oxide_FPWeaponBase_Fields",
+  "field": "_BBp_k__BackingField",
+  "type": "float",
+  "offset": 292,
+  "src": {
+   "file": "il2cpp.h + libil2cpp.so",
+   "struct": "Oxide_FPWeaponBase_Fields",
+   "field": "_BBp_k__BackingField",
+   "how": "release/beta layout; FPHitscan.lMf caches the effective shot period at RVA 0x660AF1C..0x660AF50"
+  }
+ },
+ "FPHITSCAN_BURST_WAIT": {
+  "kind": "field",
+  "class": "Oxide.FPHitscan",
+  "struct": "Oxide_FPHitscan_Fields",
+  "field": "BnA",
+  "type": "UnityEngine_WaitForSeconds_o*",
+  "offset": 496,
+  "src": {
+   "file": "il2cpp.h + libil2cpp.so",
+   "struct": "Oxide_FPHitscan_Fields",
+   "field": "BnA",
+   "how": "release BnA / beta KqY; constructed by lMf at RVA 0x660AF04 and consumed by burst coroutine at 0x660EFA0"
+  }
+ },
+ "WAITFORSECONDS_SECONDS": {
+  "kind": "field",
+  "class": "UnityEngine.WaitForSeconds",
+  "struct": "UnityEngine_WaitForSeconds_Fields",
+  "field": "m_Seconds",
+  "type": "float",
+  "offset": 16,
+  "src": {
+   "file": "il2cpp.h",
+   "struct": "UnityEngine_WaitForSeconds_Fields",
+   "field": "m_Seconds",
+   "how": "stable release/beta managed layout for the FPHitscan burst wait object"
+  }
+ },
+ "FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD": {
+  "kind": "field",
+  "class": "Oxide.FPHitscan",
+  "struct": "Oxide_FPHitscan_Fields",
+  "field": "_BYw_k__BackingField",
+  "type": "float",
+  "offset": 736,
+  "src": {
+   "file": "il2cpp.h + libil2cpp.so",
+   "struct": "Oxide_FPHitscan_Fields",
+   "field": "_BYw_k__BackingField",
+   "how": "release 0x2E0 / beta _KAj at 0x2E8; sPo copies config +0x4C at RVA 0x65FF908..0x65FF914"
+  }
+ },
  "FPHITSCAN_CALCULATOR": {
   "kind": "field",
   "class": "Oxide.FPHitscan",

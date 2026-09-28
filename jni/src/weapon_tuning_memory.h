@@ -104,15 +104,24 @@ template<class IO> class Controller {
             !io.read(net+go_active::NETWORK_IDENTITY_IS_LOCAL_PLAYER,local) || local!=1 ||
             !pointer(io,player+go_active::PLAYER_FP_MANAGER,fp) ||
             !io.named(fp,"FPManager","Oxide") || !c.fp.capture(io,fp,true)) return false;
-        auto take_weapon = [&](uint64_t offset) {
-            uint64_t candidate=0, owner=0;
-            return pointer(io,fp+offset,candidate) && candidate &&
-                io.named(candidate,"FPHitscan","Oxide") &&
+        auto accept_weapon = [&](uint64_t candidate) {
+            uint64_t owner=0;
+            return candidate && io.named(candidate,"FPHitscan","Oxide") &&
                 pointer(io,candidate+go_active::FPOBJECT_PLAYER_BACKREF,owner) &&
                 owner==player && (weapon=candidate,true);
         };
-        if (!take_weapon(go_active::FPMANAGER_CURRENT_WEAPON) &&
-            !take_weapon(go_active::FPMANAGER_CURRENT_OBJECT)) return false;
+        // _currentWeapon (+0x50) is authoritative. A non-null melee/tool must
+        // block the stale typed FPWeaponBase cache at +0x58; only an absent or
+        // null authoritative slot may use that compatibility fallback.
+        uint64_t active=0;
+        const bool active_read=pointer(io,fp+go_active::FPMANAGER_CURRENT_OBJECT,active);
+        if (active_read && active) {
+            if (!accept_weapon(active)) return false;
+        } else {
+            uint64_t typed=0;
+            if (!pointer(io,fp+go_active::FPMANAGER_CURRENT_WEAPON,typed) ||
+                !accept_weapon(typed)) return false;
+        }
         if (!c.weapon.capture(io,weapon,true) ||
             !pointer(io,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back) || back!=player ||
             !pointer(io,weapon+go_active::FPHITSCAN_CONFIG,config) ||

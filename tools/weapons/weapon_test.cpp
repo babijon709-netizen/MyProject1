@@ -95,6 +95,16 @@ static void tests(const char* calculator) {
         assert(io.get<float>(calc+0x20)==2.f && io.get<float>(dispersion+0x24)==4.f);
         assert(io.writes.size()==18);
     }
+    {
+        Fake io(calculator); Controller<Fake> c(io);
+        const uint64_t melee=0x109000;
+        io.object(melee,"FPTool","Oxide");
+        io.set(melee+go_active::FPOBJECT_PLAYER_BACKREF,player);
+        io.set(fp+go_active::FPMANAGER_CURRENT_OBJECT,melee);
+        // +0x58 still points at a valid but stale FPHitscan.
+        c.tick(1,base,player,true,true);
+        assert(io.writes.empty() && c.recoil==Status::Waiting && c.spread==Status::Waiting);
+    }
     for (int issue=0;issue<8;++issue) {
         Fake io(calculator); Controller<Fake> c(io);
         if(issue==0) { auto k=io.get<uint64_t>(calc); io.names[k]={calculator,"bad.namespace"}; }

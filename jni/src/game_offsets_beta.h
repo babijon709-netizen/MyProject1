@@ -89,6 +89,13 @@ inline constexpr std::uint64_t DELAYPROMISE_SCALED_TIMESPAN = 0x1C;
 inline constexpr std::uint64_t DELAYPROMISE_SCALED_ELAPSED = 0x20;
 inline constexpr std::uint64_t DELAYPROMISE_SCALED_INITIAL_FRAME = 0x18;
 inline constexpr std::uint64_t FPHITSCAN_CONFIG = 0x130;
+// FPHitscan live timing caches.  Beta inserts two fields before the tail
+// backing fields, so only the loop-reload cache moves (0x2E0 -> 0x2E8).
+inline constexpr std::uint64_t FPWEAPON_EFFECTIVE_RELOAD_PERIOD = 0xE8;
+inline constexpr std::uint64_t FPWEAPON_SHOT_PERIOD = 0x124;
+inline constexpr std::uint64_t FPHITSCAN_BURST_WAIT = 0x1F0;
+inline constexpr std::uint64_t WAITFORSECONDS_SECONDS = 0x10;
+inline constexpr std::uint64_t FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD = 0x2E8;
 inline constexpr std::uint64_t FPHITSCAN_CALCULATOR = 0x1F8;
 inline constexpr std::uint64_t CALCULATOR_DISPERSION_CONFIG = 0x10;
 inline constexpr std::uint64_t CALCULATOR_HITSCAN_CONFIG = 0x18;
@@ -236,7 +243,7 @@ inline constexpr std::uint64_t SYNC_VALUE_OFFSET             = 0x20;
 inline constexpr std::uint64_t ACTIVITY_ACTIVE_FLAG          = 0x10;
 inline constexpr std::uint64_t PLAYER_FP_MANAGER             = 0x90;
 inline constexpr std::uint64_t FPMANAGER_CURRENT_WEAPON      = 0x58;
-inline constexpr std::uint64_t FPMANAGER_CURRENT_OBJECT      = 0x50; // _currentWeapon (FPObject fallback)
+inline constexpr std::uint64_t FPMANAGER_CURRENT_OBJECT      = 0x50; // _currentWeapon (authoritative active FPObject)
 inline constexpr std::uint64_t FPMANAGER_AIM_BLEND           = 0xA8;
 inline constexpr std::uint64_t FPOBJECT_PLAYER_BACKREF       = 0xC0;
 inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;

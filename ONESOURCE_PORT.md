@@ -1,6 +1,6 @@
 # Перенос функций из `onesource.7z`
 
-Дата проверки: 28.09.2026. Архив распакован только для анализа в `.tools/onesource/`; в сборку входят адаптированные файлы текущего проекта, а не архив целиком.
+Дата проверки: 29.09.2026. Архив распакован только для анализа в `.tools/onesource/`; в сборку входят адаптированные файлы текущего проекта, а не архив целиком.
 
 ## Что перенесено
 
@@ -8,8 +8,8 @@
 |---|---|
 | Сайлент | Третий режим аима `AIM_MODE_SILENT`. Точная world-space точка кости публикуется отдельному writer-потоку с собственным `/proc/<pid>/mem`; перед каждой 12-байтовой записью заново проверяются классы, двусторонняя связь player↔handler, look-wrapper, FPManager, текущее оружие и обратная ссылка оружия на игрока. Lease снимка — 100 мс. |
 | Быстрый подбор | `fast_loot::Controller`: проходит активные UniTask PlayerLoop promises и обнуляет только поле с точным побитовым значением `0.35f` (`0x3EB33333`). Запись разрешена только в анонимную writable-кучу. |
-| Быстрая стрельба | `weapon_speed::Controller`: тумблер всегда применяет максимальный прежний коэффициент `20×` к `HitscanWeaponConfig.fireRate`. Оригинал сохраняется и условно восстанавливается при выключении, смене оружия и штатном выходе. |
-| Быстрая перезарядка | Тот же контроллер делит `FullReloadPeriod` и `LoopReloadPeriod` на максимальные `20×`, отдельно от стрельбы и с восстановлением. |
+| Быстрая стрельба | `weapon_speed::Controller`: тумблер всегда применяет максимальный прежний коэффициент `20×` одновременно к `HitscanWeaponConfig.fireRate`, уже скопированному live shot-period и burst `WaitForSeconds`. Оригиналы условно восстанавливаются при выключении, смене оружия и штатном выходе. |
+| Быстрая перезарядка | Тот же контроллер делит на максимальные `20×` config full/loop periods и live effective full/loop caches уже созданного оружия, отдельно от стрельбы и с восстановлением. |
 | Без отдачи | Существующий object-data контроллер сохранён; литералы цепочки оружия заменены подтверждёнными именованными offsets. Пишутся шесть float-полей `RecoilConfig`, библиотечный код не патчится. |
 | Без разброса | Существующий object-data контроллер сохранён; обнуляются min/max `DispersionConfig` и cached base калькулятора. Сайлент автоматически держит этот запрос ещё 1,5 с после краткой потери цели. |
 | Положение рук | Все motion slots получают одну статичную X/Y/Z позицию; она сохраняется в ADS, при беге, атаке и перезарядке. Оригиналы возвращаются с ownership checks только при выключении/смене. |
@@ -65,6 +65,9 @@ Writer берёт начало луча из живой позиции native ca
 | Поле | Offset |
 |---|---:|
 | `FPHitscan.config` | `0x130` |
+| `FPWeaponBase` effective full-reload / shot-period caches | `0xE8` / `0x124` |
+| burst `WaitForSeconds` / его `m_Seconds` | `0x1F0` / `0x10` |
+| effective loop-reload cache | release `0x2E0`, beta `0x2E8` |
 | calculator внутри `FPHitscan` | `0x1F8` |
 | embedded `WeaponRecoil` | `0x200` |
 | `WeaponRecoil.recoilConfig` / `.weaponConfig` | `0x00` / `0x08` |
@@ -76,6 +79,10 @@ Writer берёт начало луча из живой позиции native ca
 | `DispersionConfig` min / max | `0x20` / `0x24` |
 
 Имя calculator-класса build-specific: release `Ze`, beta `FJ`; раскладка одинакова. Runtime offset resolver, build-id/native-RVA таблица и instruction guards в контроллере отсутствуют. Все адреса берутся только из `go_active`, то есть из пользовательских release/beta headers. Живые typed backlinks, class identity и Unity native identity служат только write guards; имя calculator принимается с пустым namespace и совпавшими ссылками на оба конфига.
+
+ARM64 consumer-аудит объяснил прежний симптом «начинает работать только после смерти». Во время `FPHitscan.lMf/sPo` игра один раз копирует рассчитанный fire period в `FPWeaponBase+0x124`, full reload в `+0xE8`, loop reload в хвостовой backing field и создаёт burst wait. Изменение только config влияло на новый экземпляр после respawn, но не гарантированно на уже активный. Контроллер теперь держит оба слоя синхронно. При respawn он распознаёт точные cache-значения, унаследованные новым экземпляром из ещё ускоренного общего config, сначала нормализует их и не допускает повторного `20×` поверх `20×`.
+
+Выбор оружия тоже изменён: `FPManager._currentWeapon` как `FPObject` (`+0x50`) является авторитетным активным предметом. Typed slot `+0x58` используется только когда `+0x50` отсутствует или равен null. Ненулевой melee/tool в `+0x50` блокирует fallback, поэтому валидный старый FPHitscan больше не изменяется после переключения.
 
 ### Custom FOV и руки
 
@@ -93,7 +100,7 @@ Offsets заведены в `game_offsets.h`, `game_offsets_beta.h`, актив�
 
 - Ни одна из перенесённых функций не пишет инструкции или file-backed mappings.
 - Weapon/loot writes проходят через `object_data::heap_writable` и свежий `/proc/<pid>/maps` gate.
-- Оригиналы fire/reload/recoil/spread/FOV/hands возвращаются только пока объект сохранил исходные class/native identities и текущее значение всё ещё принадлежит нашему контроллеру. Чужое обновление не затирается.
+- Оригиналы config и live-cache значений fire/reload, а также recoil/spread/FOV/hands возвращаются только пока объект сохранил исходные class/native identities и текущее значение всё ещё принадлежит нашему контроллеру. Чужое обновление не затирается.
 - При потере процесса адреса забываются без записи в потенциально переиспользованную память.
 - Fast loot не требует восстановления: каждое новое promise игра создаёт с исходным `0.35f`; после выключения новые ожидания больше не меняются.
 - Silent writer не использует кадровый cache/descriptor главного потока и останавливается при просроченном snapshot, смене owner-chain, открытом меню, freecam, detach и штатном завершении.
@@ -104,6 +111,6 @@ Offsets заведены в `game_offsets.h`, `game_offsets_beta.h`, актив�
 
 - `sh tools/silent/run.sh` — нормализация направления, invalid geometry, class/owner/weapon guards, fast-math;
 - `sh tools/loot/run.sh` — exact cadence, оба promise layouts, tail bound, class mismatch, write failure;
-- `sh tools/weapons/run.sh` — дополнен быстрым fire/reload: release/beta active-offset tables, отсутствие runtime resolver/build-id gates, независимое выключение, recapture чужого обновления, смена оружия и restoration/failure paths.
+- `sh tools/weapons/run.sh` — дополнен быстрым fire/reload: config + live caches, release/beta active-offset tables, отсутствие runtime resolver/build-id gates, независимое выключение, recapture чужого обновления, authoritative active object против stale typed slot, уже созданное оружие, смена, смерть/respawn с общим config и restoration/failure paths.
 
 Общие проверки: `tools/viewmodel/run.sh`, `tools/offsets/run.sh`, `tools/lang/check.py`, `tools/syntax/check.sh`, `tools/hostcheck/run.sh`.

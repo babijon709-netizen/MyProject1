@@ -36,7 +36,7 @@ namespace, native identity Unity-объектов и связь FPObject.player 
 | Источник | Поле |
 |---|---|
 | PlayerManager | +0x90 FPManager |
-| FPManager | +0x58 текущее FPWeaponBase; без fallback на старый объект при переключении |
+| FPManager | +0x50 авторитетный активный FPObject; +0x58 typed fallback только когда +0x50 отсутствует/null |
 | FPHitscan | +0xC0 player, +0x130 HitscanWeaponConfig, +0x1F8 calculator, +0x200 WeaponRecoil |
 | WeaponRecoil (встроенная структура) | +0 RecoilConfig, +8 HitscanWeaponConfig |
 | HitscanWeaponConfig | +0x60 DispersionConfig, +0x68 RecoilConfig |
