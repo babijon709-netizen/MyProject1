@@ -1,6 +1,7 @@
 #include "startup_mode.h"
 
 #include "imgui.h"
+#include "hud.h"
 #include "str.h"
 #include "theme.h"
 
@@ -47,11 +48,20 @@ bool StartupModeSelect(memaccess::AccessMode mode) {
 const char* StartupModeError() { return g_error.c_str(); }
 
 void RenderStartupModeMenu() {
-    auto& io = ImGui::GetIO();
-    const float width = io.DisplaySize.x > 900.f ? 700.f : io.DisplaySize.x - 48.f;
-    const float height = io.DisplaySize.y > 900.f ? 390.f : io.DisplaySize.y - 48.f;
-    ImGui::SetNextWindowPos({(io.DisplaySize.x - width) * 0.5f,
-                             (io.DisplaySize.y - height) * 0.5f}, ImGuiCond_Always);
+    // ImGui uses the square overlay surface, while the visible scene can be
+    // portrait or landscape. Center against the same visible rectangle as the
+    // main GUI; using io.DisplaySize here places the dialog in the unused part
+    // of the square surface on portrait devices.
+    float screen_w = 0.f, screen_h = 0.f;
+    VisibleScreen(screen_w, screen_h);
+    if (screen_w < 100.f || screen_h < 100.f) return;
+
+    const float margin = 16.f;
+    const float width = ImMin(700.f, ImMax(240.f, screen_w - margin * 2.f));
+    const float height = ImMin(390.f, ImMax(220.f, screen_h - margin * 2.f));
+    const float pos_x = ImMax(margin, (screen_w - width) * 0.5f);
+    const float pos_y = ImMax(margin, (screen_h - height) * 0.5f);
+    ImGui::SetNextWindowPos({pos_x, pos_y}, ImGuiCond_Always);
     ImGui::SetNextWindowSize({width, height}, ImGuiCond_Always);
     ImGui::Begin("##startup_mode", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
