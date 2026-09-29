@@ -198,6 +198,19 @@ void DrawWatermark(float dt) {
         fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Card(), 0.8f), bH * 0.5f);
         fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, C::UA(acc, 0.5f), bH * 0.5f, 0, 1.5f);
         fg->AddText(fn, fs, {bX + padX, bY + padY}, C::UA(C::Txt(), 0.95f), name);
+
+        // Метка активного транспорта памяти (выбор на экране режима): KER —
+        // кернел (драйвер), EXT — экстернал (/proc). Рисуется всегда, чтобы
+        // на устройстве не гадать, каким путём чит ходит в игру: если вместо
+        // кернела работает экстернал, это видно с первого кадра.
+        {
+            const bool ker = esp_mem_backend_kernel();
+            const char* tag = ker ? "KER" : "EXT";
+            const float tfs = 26.f;
+            auto tSz = fn->CalcTextSizeA(tfs, FLT_MAX, 0, tag);
+            fg->AddText(fn, tfs, {bX + bW + 12.f, bY + (bH - tSz.y) * 0.5f},
+                        C::UA(ker ? C::Acc() : C::Dim(), 0.95f), tag);
+        }
     }
 
     // ---- Пилюля-счётчик противников --------------------------------------

@@ -42,10 +42,15 @@ memio::Reader g_mem;
 // Способ доступа к памяти: экстернал (/proc/<pid>/mem) или кернел (драйвер).
 // Выбирается один раз на старте (экран режима, mode_select.h) до первого
 // bind; сам g_mem о деталях не знает — разница целиком в memio::Transport.
+static bool g_mem_backend_kernel = false;
+
 void esp_set_mem_backend(bool kernel) {
+    g_mem_backend_kernel = kernel;
     g_mem.set_transport(kernel ? static_cast<memio::Transport*>(&memio::kernel_transport())
                                : static_cast<memio::Transport*>(&memio::procfs_transport()));
 }
+
+bool esp_mem_backend_kernel() { return g_mem_backend_kernel; }
 
 // адресами без метки тоже нельзя. Снимаем метку сразу, на входе.
 

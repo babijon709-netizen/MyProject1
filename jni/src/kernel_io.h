@@ -151,6 +151,52 @@ public:
         return sock_;
     }
 
+    // Проверка «драйвер действительно переносит данные», а не просто отвечает
+    // на пробу семейства. Читаем и пишем СОБСТВЕННУЮ память процесса через
+    // сокет драйвера: /proc/self/mem здесь не участвует, значит совпасть
+    // байты могут, только если ядро реально сходило по страницам нашего
+    // процесса (find_get_pid → get_task_mm → проход таблиц → copy_to/from_user).
+    // Это же и тест записи — кернел режим без записи бесполезен (сайлент аим
+    // пишет ось выстрела в память игры).
+    bool self_test() {
+        if (!ensure_socket()) return false;
+        // Паттерн зависит от адреса буфера и времени — не выродится в константу,
+        // которую оптимизатор мог бы «проверить» без настоящего чтения.
+        const uint64_t seed = (uint64_t)(uintptr_t)this ^
+                              ((uint64_t)(uintptr_t)&now_seconds ^ (uint64_t)getpid());
+        uint64_t pat[2]   = { 0x9E3779B97F4A7C15ULL ^ seed, 0xC2B2AE3D27D4EB4FULL ^ (seed >> 17) };
+        uint64_t mirror[2] = {};
+        uint64_t scratch[2] = { 1, 1 };
+
+        // 1) чтение: драйвер копирует pat -> mirror через страницу-таблицы.
+        DriverRwReq req;
+        memset(&req, 0, sizeof(req));
+        req.pid      = (uint32_t)getpid();
+        req.addr     = (uint64_t)(uintptr_t)pat;
+        req.user_buf = (uint64_t)(uintptr_t)mirror;
+        req.size     = sizeof(pat);
+        req.magic    = kDriverMagic;
+        socklen_t optlen = sizeof(req);
+        if (getsockopt(sock_, req.pid, kDriverCmdRead, (char*)&req, &optlen) != 0)
+            return false;
+        if (mirror[0] != pat[0] || mirror[1] != pat[1]) return false;
+
+        // 2) запись: драйвер пишет known-value в scratch.
+        const uint64_t w0 = 0xA5A55A5ADEADBEEFULL ^ seed;
+        const uint64_t w1 = 0x0BADC0DE0DDC0FFEULL ^ (seed >> 3);
+        uint64_t wsrc[2] = { w0, w1 };
+        memset(&req, 0, sizeof(req));
+        req.pid      = (uint32_t)getpid();
+        req.addr     = (uint64_t)(uintptr_t)scratch;
+        req.user_buf = (uint64_t)(uintptr_t)wsrc;
+        req.size     = sizeof(scratch);
+        req.magic    = kDriverMagic;
+        optlen       = sizeof(req);
+        if (getsockopt(sock_, req.pid, kDriverCmdWrite, (char*)&req, &optlen) != 0)
+            return false;
+        return scratch[0] == w0 && scratch[1] == w1;
+    }
+
 private:
     // Общий движок: собрать запрос и позвать getsockopt.
     ssize_t rw(int cmd, uint64_t addr, void* buf, size_t len) {
@@ -204,6 +250,14 @@ inline bool driver_available(int* family_out = nullptr) {
     if (!t.connected() && t.connect() < 0) return false;
     if (family_out) *family_out = t.family();
     return true;
+}
+
+// Полная проверка драйвера для меню режима: не только «сокет открывается»,
+// но и «данные реально ходят» (чтение + запись собственной памяти через
+// драйвер). Именно её результат показывается на экране выбора как
+// «драйвер проверен».
+inline bool driver_self_test() {
+    return kernel_transport().self_test();
 }
 
 }  // namespace memio

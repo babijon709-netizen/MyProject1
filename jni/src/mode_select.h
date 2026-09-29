@@ -207,6 +207,8 @@ static bool RunModeSelect() {
                            XS("Через /proc/<pid>/mem — работает без драйвера"),
                            true, false, fs)) {
                 picked = MODE_EXTERNAL;
+                PlaySound(SND_CLICK);
+                ShowToast(XS("Экстернал режим"));
             }
             y += btnH + 14.f;
 
@@ -214,7 +216,23 @@ static bool RunModeSelect() {
             if (ModeButton("##mode_kernel", iw, btnH, XS("Кернел (драйвер)"),
                            XS("Через ядерный драйвер — мимо /proc и его запретов"),
                            drv, true, fs)) {
-                picked = MODE_KERNEL;
+                // Тап по кернелу — не слепой выбор, а проверка: драйвер
+                // обязан прочитать И записать нашу собственную память через
+                // сокет (self_test в kernel_io.h). /proc в этой проверке не
+                // участвует — совпасть может, только если данные реально
+                // прошли через ядро. Прошёл — режим принят; нет — остаёмся
+                // на экране и перепроверяем наличие драйвера.
+                if (memio::driver_self_test()) {
+                    picked = MODE_KERNEL;
+                    PlaySound(SND_SUCCESS);
+                    ShowToast(XS("Кернел режим|драйвер проверен"));
+                } else {
+                    memio::kernel_transport().invalidate();
+                    drv = memio::driver_available(&fam);
+                    PlaySound(SND_CLICK);
+                    ShowToast(drv ? XS("Драйвер не прошёл проверку чтения/записи")
+                                  : XS("Драйвер не найден — нужен root и прошитый драйвер"));
+                }
             }
             y += btnH + 20.f;
 

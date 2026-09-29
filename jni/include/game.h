@@ -117,6 +117,8 @@ void          esp_mem_frame_begin();
 // на старте, ДО первого bind (экран режима mode_select.h); дальнейший код
 // чтения транспорт-агностичен и про режимы не знает.
 void          esp_set_mem_backend(bool kernel);
+// Какой режим активен (для индикации в HUD: метка KER/EXT на водяном знаке).
+bool          esp_mem_backend_kernel();
 // Привязка ещё читается? (одно чтение; ловит перезапуск процесса и отобранный доступ)
 bool          esp_alive_check();
 unsigned long long esp_mem_reads_total();
