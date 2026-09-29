@@ -27,9 +27,11 @@ class EspContinuity {
     }
 
 public:
-    // Long enough to cover the observed 1-2 second respawn teardown even on a
-    // slow device, but finite so a real server disconnect cannot leave ghosts.
-    static constexpr double kBridgeSeconds = 10.0;
+    // Мост закрывает РВАНЫЙ кадр, а не всю смерть. Прежние 10 секунд
+    // означали, что после гибели боксы буквально зависали на месте, пока
+    // игрок не возродится (жалоба 29.09). Полсекунды не видно глазом, но
+    // хватает на серию неудачных чтений списка игроков.
+    static constexpr double kBridgeSeconds = 0.5;
 
     void clear() {
         players_.clear();

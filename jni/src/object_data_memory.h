@@ -1,47 +1,82 @@
 #pragma once
 // Write gate for object-data features ONLY. Existing FOV/FPS/aim adapters are
-// separate. A fresh /proc/<pid>/maps snapshot is required at each actual write.
+// separate. A /proc/<pid>/maps snapshot is required at each actual write; the
+// caller refreshes it whenever an address is not confirmed by the current one.
+//
+// Разбор идёт без выделений памяти: карта процесса игры — это тысячи строк, и
+// прежний вариант создавал на каждую строку по два std::string. На горячем
+// пути (быстрая стрельба/перезарядка пишут несколько полей в кадре) это
+// съедало кадр оверлея целиком.
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <limits>
 
 namespace object_data {
-inline bool heap_writable(const std::string& maps, uint64_t address, size_t size) {
+// Подтверждает адрес и заодно отдаёт границы подтверждённого отображения:
+// вызывающий кэширует диапазон и не разбирает карту на каждую запись (разбор
+// нескольких сотен килобайт стоит миллисекунды — это и был лаг оверлея).
+inline bool heap_writable_range(const std::string& maps, uint64_t address, size_t size,
+                                uint64_t& range_lo, uint64_t& range_hi) {
+    range_lo = range_hi = 0;
     if (address < 0x10000 || !size || size > 64 ||
         address > std::numeric_limits<uint64_t>::max() - size) return false;
     uint64_t previous_end = 0;
     bool file_tail = false;
     size_t pos = 0;
     while (pos < maps.size()) {
-        auto end = maps.find('\n', pos);
+        size_t end = maps.find('\n', pos);
         if (end == std::string::npos) end = maps.size();
-        const std::string line = maps.substr(pos, end - pos);
+        const char* const line_begin = maps.data() + pos;
+        const size_t line_length = end - pos;
         pos = end + 1;
+
+        // sscanf требует нуль-терминированную строку; строки /proc/<pid>/maps
+        // короткие, поэтому копия идёт в стековый буфер, а не в кучу.
+        char line[512];
+        if (line_length >= sizeof(line)) return false;
+        std::memcpy(line, line_begin, line_length);
+        line[line_length] = '\0';
+
         unsigned long long lo = 0, hi = 0, offset = 0, inode = 0;
         unsigned major = 0, minor = 0;
         char perms[5]{};
         int consumed = 0;
-        if (std::sscanf(line.c_str(), "%llx-%llx %4s %llx %x:%x %llu %n",
+        if (std::sscanf(line, "%llx-%llx %4s %llx %x:%x %llu %n",
                         &lo, &hi, perms, &offset, &major, &minor, &inode, &consumed) != 7 ||
             !consumed || hi <= lo || lo < previous_end) return false;
-        std::string name = line.substr(static_cast<size_t>(consumed));
-        while (!name.empty() && (name.back() == ' ' || name.back() == '\r')) name.pop_back();
-        const bool file = inode != 0 || name.find('/') != std::string::npos;
-        const bool anonymous = name.empty() || name == "[heap]" ||
-            name == "[anon:libc_malloc]" || name == "[anon:scudo:primary]" ||
-            name == "[anon:scudo:secondary]";
+
+        const char* name = line + consumed;
+        size_t name_length = line_length - (size_t)consumed;
+        while (name_length && (name[name_length - 1] == ' ' || name[name_length - 1] == '\r'))
+            --name_length;
+        auto name_is = [&](const char* expected) {
+            const size_t length = std::strlen(expected);
+            return name_length == length && std::memcmp(name, expected, length) == 0;
+        };
+        const bool file = inode != 0 || std::memchr(name, '/', name_length) != nullptr;
+        const bool anonymous = name_length == 0 || name_is("[heap]") ||
+            name_is("[anon:libc_malloc]") || name_is("[anon:scudo:primary]") ||
+            name_is("[anon:scudo:secondary]");
         // ELF .bss may be inode=0, unnamed, and writable. Reject anonymous
         // tails contiguous with file mappings, including intervening guards.
         // Also intentionally reject unknown named mappings, ashmem and memfd.
         file_tail = file || (lo == previous_end && file_tail);
         previous_end = hi;
         if (address >= lo && address < hi) {
-            return address + size <= hi && !file_tail && anonymous &&
+            const bool ok = address + size <= hi && !file_tail && anonymous &&
                 !inode && !offset && !major && !minor &&
-                std::string(perms) == "rw-p";
+                std::strcmp(perms, "rw-p") == 0;
+            if (ok) { range_lo = lo; range_hi = hi; }
+            return ok;
         }
     }
     return false;
+}
+
+inline bool heap_writable(const std::string& maps, uint64_t address, size_t size) {
+    uint64_t lo = 0, hi = 0;
+    return heap_writable_range(maps, address, size, lo, hi);
 }
 }

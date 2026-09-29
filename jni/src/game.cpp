@@ -5458,7 +5458,7 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
 // чужих игроков приходят пачкой раз в ~0.1 с, так что законный «прыжок» между
 // кадрами может быть в несколько метров. Всё, что больше, почти всегда мусор —
 // и даже если это настоящий телепорт, мы отстанем от него на пару кадров.
-static constexpr double kPosHoldSeconds      = 5.0;   // death/respawn may hide objects for 1-2 s
+static constexpr double kPosHoldSeconds      = 0.35;  // ~старые 3 кадра, но независимо от FPS
 static constexpr int   kPosJumpConfirmFrames = 2;     // скачок должен повториться
 static constexpr float kPosJumpMeters        = 3.0F;  // базовый допуск, метры
 static constexpr float kPosJumpSpeed         = 55.0F; // плюс м/с на каждый кадр
@@ -7295,10 +7295,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 bool present = false;
                 for (uint64_t current : refreshed) if (current == previous) { present = true; break; }
                 if (present) { g_frame_transforms_lost.erase(previous); continue; }
-                // A respawn teardown can temporarily omit the whole old
-                // population for 1-2 seconds.  Keep readable objects long
-                // enough to bridge that interval at up to 144 FPS.
-                if (++g_frame_transforms_lost[previous] <= 600) refreshed.push_back(previous);
+                // Держим пропавшего лишь несколько кадров: это страховка от
+                // сбоя чтения одного элемента. Удержание на секунды означало
+                // бы «боксы висят на месте после смерти» вместо того, чтобы
+                // просто исчезнуть.
+                if (++g_frame_transforms_lost[previous] <= 30) refreshed.push_back(previous);
                 else g_frame_transforms_lost.erase(previous);
             }
             if (g_frame_transforms_lost.size() > 256) g_frame_transforms_lost.clear();

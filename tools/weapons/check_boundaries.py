@@ -50,9 +50,20 @@ assert 'settings.no_spread || esp_silent_wants_no_spread()' in adapter
 
 # All object writes pass the single anonymous-heap /proc/maps gate.
 heap = adapter.split('struct HeapMemory {', 1)[1].split('HeapMemory heap_memory;', 1)[0]
-assert 'object_data::heap_writable(text,address,sizeof(T)) &&' in heap
-assert 'std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps")' in heap
+assert 'heap_gate_allows(address,sizeof(T)) && g_mem.write(address,&value,sizeof(T))' in heap
 assert heap.count('g_mem.write(') == 1
+
+# The gate itself: every accepted address comes from a parsed /proc/<pid>/maps
+# range, an unconfirmed address forces a freshly read map, and both the range
+# cache and the text snapshot are short-lived and dropped with the process.
+gate = adapter.split('bool heap_gate_allows(', 1)[1].split('\n}', 1)[0]
+assert gate.count('object_data::heap_writable_range(*text, address, size, lo, hi)') == 2
+assert 'maps_snapshot(true)' in gate
+assert 'now - gate.at >= kMapsSnapshotTtl' in gate
+assert 'kMapsSnapshotTtl = 0.25' in adapter
+assert 'read_proc_maps(g_pid, maps_text_cache)' in adapter
+assert 'invalidate_maps_snapshot();' in adapter
+assert 'for (HeapGate& gate : heap_gates) gate = {};' in adapter
 
 # Retired tap/instruction implementations stay gone; the restored feature is
 # the guarded UniTask data controller only.

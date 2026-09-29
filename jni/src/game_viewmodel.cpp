@@ -6,7 +6,12 @@
 #include "app_state.h"
 #include "maps_lookup.h"
 #include <chrono>
+#include <cerrno>
+#include <limits>
+#include <cstdio>
+#include <fcntl.h>
 #include <fstream>
+#include <unistd.h>
 #include "game_viewmodel_internal.h"
 #include "game_internal.h"
 #include "logfile.h"
@@ -35,6 +40,106 @@ struct Memory {
     bool is(uint64_t object, const char* name) { return object && klass_is(ptr(object), name); }
 };
 Memory memory;
+
+// ---- Снимок /proc/<pid>/maps ----------------------------------------------
+//
+// Карта памяти процесса игры — это тысячи строк (сотни килобайт). Разбирать её
+// заново на каждую запись в кучу означало разбирать её десятки раз за кадр:
+// поток отрисовки при этом просто стоит, и вместе с ним встают гуи и визуалы
+// (жалоба: «после включения быстрой стрельбы и перезарядки весь оверлей
+// лагает»). Снимок читается целиком одним read() в переиспользуемый буфер и
+// живёт kMapsSnapshotTtl; любая неподтверждённая запись принудительно берёт
+// свежий снимок, поэтому проверка остаётся строгой.
+constexpr double kMapsSnapshotTtl = 0.25;   // секунды
+
+std::string maps_text_cache;
+pid_t       maps_text_pid = -1;
+double      maps_text_at = -1e9;
+bool        maps_text_ok = false;
+
+bool read_proc_maps(pid_t pid, std::string& out) {
+    out.clear();
+    char path[64];
+    std::snprintf(path, sizeof(path), "/proc/%d/maps", (int)pid);
+    const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char buffer[64 * 1024];
+    for (;;) {
+        const ssize_t got = ::read(fd, buffer, sizeof(buffer));
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            ::close(fd);
+            return false;
+        }
+        if (got == 0) break;
+        if (out.size() + (size_t)got > (8u << 20)) { ::close(fd); return false; }
+        out.append(buffer, (size_t)got);
+    }
+    ::close(fd);
+    return !out.empty();
+}
+
+// Подтверждённые ворота: границы отображений, которые уже прошли проверку.
+// Разбор карты стоит миллисекунды, а быстрая стрельба/перезарядка пишут по
+// несколько полей в кадре — и все они попадают в одно и то же отображение
+// управляемой кучи. Пока диапазон свежий, запись в него стоит двух сравнений.
+struct HeapGate { uint64_t lo=0, hi=0; double at=-1e9; };
+constexpr int kHeapGateSlots = 8;
+HeapGate heap_gates[kHeapGateSlots];
+int heap_gate_next = 0;
+
+void invalidate_maps_snapshot() {
+    maps_text_cache.clear();
+    maps_text_pid = -1;
+    maps_text_at = -1e9;
+    maps_text_ok = false;
+    for (HeapGate& gate : heap_gates) gate = {};
+    heap_gate_next = 0;
+}
+
+// force — перечитать карту, даже если снимок ещё не просрочен.
+const std::string* maps_snapshot(bool force) {
+    if (g_pid <= 0) { invalidate_maps_snapshot(); return nullptr; }
+    const double now = memio::now_seconds();
+    if (!force && maps_text_ok && maps_text_pid == g_pid &&
+        now - maps_text_at < kMapsSnapshotTtl && now >= maps_text_at)
+        return &maps_text_cache;
+    maps_text_ok = read_proc_maps(g_pid, maps_text_cache);
+    maps_text_pid = g_pid;
+    maps_text_at = now;
+    if (!maps_text_ok) { maps_text_cache.clear(); return nullptr; }
+    return &maps_text_cache;
+}
+
+// Единственные ворота записи в кучу игры: адрес обязан лежать в анонимном
+// rw-отображении, подтверждённом разбором /proc/<pid>/maps. Подтверждение
+// кэшируется диапазоном и живёт не дольше kMapsSnapshotTtl; всё, что кэш не
+// подтвердил, проверяется по свежей карте.
+bool heap_gate_allows(uint64_t address, size_t size) {
+    if (g_pid <= 0 || address < 0x10000 || !size || size > 64 ||
+        address > std::numeric_limits<uint64_t>::max() - size) return false;
+    // Кэш принадлежит конкретному процессу: сменился pid — подтверждения из
+    // прошлой сессии недействительны.
+    if (maps_text_pid != g_pid) invalidate_maps_snapshot();
+    const double now = memio::now_seconds();
+    for (const HeapGate& gate : heap_gates) {
+        if (!gate.hi || now - gate.at >= kMapsSnapshotTtl || now < gate.at) continue;
+        if (address >= gate.lo && address + size <= gate.hi) return true;
+    }
+    uint64_t lo = 0, hi = 0;
+    const std::string* text = maps_snapshot(false);
+    if (!text || !object_data::heap_writable_range(*text, address, size, lo, hi)) {
+        // Снимок мог устареть (отображение появилось только что) — решает
+        // всегда свежая карта, а не кэш.
+        text = maps_snapshot(true);
+        if (!text || !object_data::heap_writable_range(*text, address, size, lo, hi))
+            return false;
+    }
+    heap_gates[heap_gate_next] = {lo, hi, now};
+    heap_gate_next = (heap_gate_next + 1) % kHeapGateSlots;
+    return true;
+}
+
 viewmodel::Controller<Memory> controller(memory);
 viewmodel::FpsController<Memory> fps_controller(memory);
 // Deliberately do not inherit Memory::write: these controllers can only write
@@ -75,15 +180,13 @@ struct HeapMemory {
     }
     template<class T> bool write_heap(uint64_t address, const T& value) {
         if (!g_mem.bound() || g_pid<=0) return false;
-        std::ifstream file("/proc/"+std::to_string(g_pid)+"/maps");
-        if (!file) return false;
-        std::string text, line;
-        while (std::getline(file,line)) {
-            text += line; text += '\n';
-            if (text.size() > (8u<<20)) return false;
-        }
-        return file.eof() && object_data::heap_writable(text,address,sizeof(T)) &&
-            g_mem.write(address,&value,sizeof(T));
+        // Чтение и разбор всей /proc/<pid>/maps на КАЖДУЮ запись (а быстрая
+        // стрельба и перезарядка пишут до семи полей в кадре) — это сотни
+        // килобайт текста и миллисекунды на запись: оверлей вместе с гуи и
+        // визуалами вставал именно на этом. Ворота не ослаблены — просто
+        // подтверждение отображения кэшируется на kMapsSnapshotTtl, а всё
+        // неподтверждённое проверяется по свежесчитанной карте.
+        return heap_gate_allows(address,sizeof(T)) && g_mem.write(address,&value,sizeof(T));
     }
 };
 HeapMemory heap_memory;
@@ -97,12 +200,8 @@ int fps_last_limit = 0;
 viewmodel::Status fps_last_log = viewmodel::Status::Off;
 
 uint64_t find_unity() {
-    std::ifstream file("/proc/" + std::to_string(g_pid) + "/maps");
-    std::string text, line;
-    while (std::getline(file, line)) {
-        text += line; text += '\n';
-        if (text.size() > (8u << 20)) return 0;
-    }
+    std::string text;
+    if (!read_proc_maps(g_pid, text)) return 0;
     uint64_t candidates[8]{}, found = 0;
     int count = maps::lookup_library_bases(text, "libunity.so", candidates, 8);
     for (int i = 0; i < count; ++i) {
@@ -149,6 +248,7 @@ void esp_viewmodel_reset(bool restore) {
         LogLine("weapon speed: originals could not all be restored before disconnect; restart game");
     loot.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
+    invalidate_maps_snapshot();
     ++epoch;
 }
 

@@ -34,7 +34,7 @@ int main() {
 
     // PlayerManager disappears during death.  The old boxes remain visible,
     // while stale bones/world points can no longer be selected by the aimbot.
-    auto death = continuity.publish({bot(100)}, false, 102.0);
+    auto death = continuity.publish({bot(100)}, false, 100.2);
     assert(death.size() == 3 && death[0].is_bot);
     assert(death[1].id == 11 && death[2].id == 22);
     for (size_t n = 1; n < death.size(); ++n) {
@@ -48,32 +48,39 @@ int main() {
 
     // If the respawn frame already resolved players, never mix old screen
     // coordinates into it even before the local-player latch is healthy.
-    auto partial = continuity.publish({player(33, 30.0F)}, false, 103.0);
+    auto partial = continuity.publish({player(33, 30.0F)}, false, 100.3);
     assert(partial.size() == 1 && partial[0].id == 33);
 
     // Once a healthy respawn frame arrives it atomically replaces the old set.
-    auto respawn = continuity.publish({player(44, 40.0F)}, true, 104.0);
+    auto respawn = continuity.publish({player(44, 40.0F)}, true, 100.4);
     assert(respawn.size() == 1 && respawn[0].id == 44);
-    auto second_gap = continuity.publish({}, false, 105.0);
+    auto second_gap = continuity.publish({}, false, 100.6);
     assert(second_gap.size() == 1 && second_gap[0].id == 44);
 
-    // A confirmed healthy empty population clears the snapshot.  A real long
-    // disconnect also expires it rather than drawing ghosts forever.
-    assert(continuity.publish({}, true, 106.0).empty());
-    assert(continuity.publish({}, false, 107.0).empty());
+    // A confirmed healthy empty population clears the snapshot.  The bridge
+    // only covers a torn frame: anything longer must disappear instead of
+    // hanging enemy boxes in place until the local player respawns.
+    assert(continuity.publish({}, true, 100.7).empty());
+    assert(continuity.publish({}, false, 100.8).empty());
     continuity.publish({player(55, 50.0F)}, true, 200.0);
     assert(continuity.publish({}, false, 200.0 + EspContinuity::kBridgeSeconds + 0.1).empty());
 
     continuity.clear();
     assert(!continuity.has_snapshot());
 
+    // A gap longer than the bridge must not keep drawing: death used to
+    // freeze every box in place for ten seconds.
+    continuity.publish({player(88, 80.0F)}, true, 250.0);
+    assert(continuity.publish({}, false, 250.0 + 1.0).empty());
+    continuity.clear();
+
     // Recovery is deliberately non-destructive: the continuity snapshot is
     // the bridge while the ordinary player-list resolver retries. There is no
     // timer allowed to clear attachment, local player, or the last population.
     continuity.publish({player(66, 60.0F)}, true, 300.0);
-    auto retry_gap = continuity.publish({}, false, 301.0);
+    auto retry_gap = continuity.publish({}, false, 300.2);
     assert(retry_gap.size() == 1 && retry_gap[0].id == 66);
-    auto retry_ok = continuity.publish({player(77, 70.0F)}, true, 302.0);
+    auto retry_ok = continuity.publish({player(77, 70.0F)}, true, 300.4);
     assert(retry_ok.size() == 1 && retry_ok[0].id == 77);
 
     std::cout << "esp lifecycle and non-destructive recovery tests passed\n";
