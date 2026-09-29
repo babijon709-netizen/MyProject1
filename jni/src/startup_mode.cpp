@@ -81,7 +81,7 @@ void RenderStartupModeMenu() {
     ImGui::SameLine(0.f, 22.f);
     ImGui::BeginGroup();
     draw_mode_card("kernel", XS("Kernel"),
-                   XS("FTDriver · запусти вручную для своего ядра"), memaccess::AccessMode::Kernel);
+                   XS("FTDriver · запускается автоматически"), memaccess::AccessMode::Kernel);
     ImGui::EndGroup();
 
     ImGui::SetCursorPos({32.f, 256.f});
@@ -93,7 +93,7 @@ void RenderStartupModeMenu() {
         ImGui::PopTextWrapPos();
     }
     ImGui::SetCursorPos({32.f, height - 48.f});
-    ImGui::TextColored(C::Dim(), "%s", XS("FTDriver запускается вручную до выбора Kernel mode."));
+    ImGui::TextColored(C::Dim(), "%s", XS("Установленный payload для ядра запускается автоматически."));
     ImGui::PopStyleColor();
     ImGui::End();
 }

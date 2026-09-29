@@ -3,11 +3,15 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
+#include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 namespace memaccess {
@@ -23,6 +27,10 @@ const char* env_or_empty(const char* name) {
 
 bool path_readable(const char* path) {
     return path && path[0] && access(path, R_OK | W_OK) == 0;
+}
+
+bool path_executable(const char* path) {
+    return path && path[0] && access(path, R_OK | X_OK) == 0;
 }
 
 const char* const kDeviceNames[] = {
@@ -41,6 +49,72 @@ std::string find_device() {
         if (path_readable(path)) return path;
     }
     return {};
+}
+
+std::string kernel_release() {
+    struct utsname uts{};
+    if (uname(&uts) != 0) return {};
+    return uts.release;
+}
+
+std::string find_driver_script(const std::string& release) {
+    const char* explicit_payload = env_or_empty("FTDRIVER_PAYLOAD");
+    if (explicit_payload[0] && path_executable(explicit_payload)) return explicit_payload;
+
+    const char* configured_dir = env_or_empty("FTDRIVER_DIR");
+    const char* dirs[] = {
+        configured_dir,
+        "/data/local/tmp/FTDriver",
+        "/data/local/tmp/ftdriver",
+        "/sdcard/FTDriver",
+    };
+
+    std::string base = release;
+    const size_t dash = base.find('-');
+    if (dash != std::string::npos) base.resize(dash);
+
+    std::string family = base;
+    const size_t dot = family.find('.');
+    const size_t dot2 = dot == std::string::npos ? std::string::npos : family.find('.', dot + 1);
+    if (dot2 != std::string::npos) family.resize(dot2);
+
+    // Prefer the full kernel release, then the release without Android's
+    // vendor suffix, and only then an explicitly supplied major.minor payload.
+    // ColorOS/OnePlus variants are never guessed from a generic prefix.
+    const std::string names[] = {
+        release + ".sh",
+        base + ".sh",
+        family + ".sh",
+    };
+    for (const char* dir : dirs) {
+        if (!dir || !dir[0]) continue;
+        for (const std::string& name : names) {
+            const std::string path = std::string(dir) + "/" + name;
+            if (path_executable(path.c_str())) return path;
+        }
+    }
+    return {};
+}
+
+bool launch_driver_script(const std::string& path) {
+    const pid_t launcher = fork();
+    if (launcher < 0) return false;
+    if (launcher == 0) {
+        // Double-fork so the app never owns or stops the manually installed
+        // driver process. su is required because payloads are kernel helpers.
+        const pid_t worker = fork();
+        if (worker == 0) {
+            if (access("/system/bin/su", X_OK) == 0) {
+                execl("/system/bin/su", "su", "-c", path.c_str(), static_cast<char*>(nullptr));
+            }
+            execl("/system/bin/sh", "sh", path.c_str(), static_cast<char*>(nullptr));
+            _exit(127);
+        }
+        _exit(worker < 0 ? 127 : 0);
+    }
+    int status = 0;
+    waitpid(launcher, &status, 0);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 void set_error(std::string* out, const std::string& value) {
@@ -69,16 +143,41 @@ KernelDriverManager& KernelDriverManager::Instance() {
 
 bool KernelDriverManager::Start(std::string* error) {
     last_error_.clear();
+    selected_script_.clear();
 
-    // FTDriver is deliberately started by the user with the payload matching
-    // the device kernel. The app must not guess a payload, execute it, or stop
-    // it on exit: the supplied files are opaque launchers and their device/IO
-    // protocol is not part of the app.
+    // First accept an already-running endpoint. Otherwise start the exact
+    // payload installed by the user, using root only for the launch step.
     device_path_ = find_device();
     if (device_path_.empty()) {
-        last_error_ =
-            "FTDriver не найден. Запусти вручную payload для своей версии ядра "
-            "и укажи его device node через MEMIO_KERNEL_DEVICE.";
+        const std::string release = kernel_release();
+        selected_script_ = find_driver_script(release);
+        if (selected_script_.empty()) {
+            last_error_ = "Не найден FTDriver payload для ядра " +
+                          (release.empty() ? std::string("unknown") : release) +
+                          ". Установи нужный .sh в /data/local/tmp/FTDriver.";
+            set_error(error, last_error_);
+            running_ = false;
+            return false;
+        }
+        if (!launch_driver_script(selected_script_)) {
+            last_error_ = "Не удалось запустить FTDriver payload: " + selected_script_;
+            set_error(error, last_error_);
+            running_ = false;
+            return false;
+        }
+
+        // Payloads may create their endpoint asynchronously. The app waits;
+        // it never kills the payload if the endpoint is not found.
+        for (int i = 0; i < 500; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            device_path_ = find_device();
+            if (!device_path_.empty()) break;
+        }
+    }
+
+    if (device_path_.empty()) {
+        last_error_ = "FTDriver payload запущен, но его endpoint не обнаружен. "
+                      "Проверь реальный device node и протокол драйвера.";
         set_error(error, last_error_);
         running_ = false;
         return false;
@@ -95,6 +194,7 @@ void KernelDriverManager::Stop() {
 
 bool KernelDriverManager::Running() const { return running_; }
 const char* KernelDriverManager::DevicePath() const { return device_path_.c_str(); }
+const char* KernelDriverManager::SelectedScript() const { return selected_script_.c_str(); }
 const char* KernelDriverManager::LastError() const { return last_error_.c_str(); }
 
 namespace detail {

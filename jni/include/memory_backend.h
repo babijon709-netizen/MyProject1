@@ -24,14 +24,15 @@ class KernelDriverManager {
 public:
     static KernelDriverManager& Instance();
 
-    // Verifies an already-running, manually launched FTDriver endpoint. The
-    // app never selects, starts, or stops a kernel payload: the payload must
-    // match the device kernel and its real device/ABI must be configured for
-    // the target device.
+    // Verifies an already-running FTDriver endpoint or starts the exact
+    // manually installed payload for the current kernel. The app never stops a
+    // payload that it started; the payload must still match the device kernel
+    // and its real device/ABI must be configured for the target device.
     bool Start(std::string* error = nullptr);
     void Stop();
     bool Running() const;
     const char* DevicePath() const;
+    const char* SelectedScript() const;
     const char* LastError() const;
 
 private:
@@ -41,6 +42,7 @@ private:
 
     bool running_ = false;
     std::string device_path_;
+    std::string selected_script_;
     std::string last_error_;
 };
 
