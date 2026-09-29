@@ -6,7 +6,7 @@
 #include <string>
 #include <sys/types.h>
 
-namespace memory {
+namespace memaccess {
 
 // The reader intentionally has two independent transports. External mode is
 // the existing /proc/<pid>/mem implementation; kernel mode never falls back to
@@ -65,4 +65,4 @@ public:
 std::shared_ptr<Transport> CreateTransport(AccessMode mode);
 
 } // namespace detail
-} // namespace memory
+} // namespace memaccess

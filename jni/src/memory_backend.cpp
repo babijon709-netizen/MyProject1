@@ -17,7 +17,7 @@
 #include <thread>
 #include <unistd.h>
 
-namespace memory {
+namespace memaccess {
 namespace {
 
 std::atomic<int> g_mode{static_cast<int>(AccessMode::External)};
@@ -365,4 +365,4 @@ std::shared_ptr<Transport> CreateTransport(AccessMode mode) {
 }
 
 } // namespace detail
-} // namespace memory
+} // namespace memaccess

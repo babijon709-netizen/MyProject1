@@ -12,7 +12,7 @@ bool g_ready = false;
 std::string g_error;
 
 void draw_mode_card(const char* id, const char* title, const char* detail,
-                    memory::AccessMode mode, bool wide = false) {
+                    memaccess::AccessMode mode, bool wide = false) {
     const ImVec2 size = wide ? ImVec2(-1.f, 76.f) : ImVec2(0.f, 112.f);
     ImGui::PushID(id);
     if (ImGui::Button(title, size)) StartupModeSelect(mode);
@@ -27,19 +27,19 @@ void draw_mode_card(const char* id, const char* title, const char* detail,
 
 bool StartupModeReady() { return g_ready; }
 
-bool StartupModeSelect(memory::AccessMode mode) {
+bool StartupModeSelect(memaccess::AccessMode mode) {
     g_error.clear();
-    if (mode == memory::AccessMode::Kernel) {
+    if (mode == memaccess::AccessMode::Kernel) {
         std::string error;
-        if (!memory::KernelDriverManager::Instance().Start(&error)) {
-            g_error = error.empty() ? memory::KernelDriverManager::Instance().LastError() : error;
+        if (!memaccess::KernelDriverManager::Instance().Start(&error)) {
+            g_error = error.empty() ? memaccess::KernelDriverManager::Instance().LastError() : error;
             g_ready = false;
             return false;
         }
     } else {
-        memory::KernelDriverManager::Instance().Stop();
+        memaccess::KernelDriverManager::Instance().Stop();
     }
-    memory::SetAccessMode(mode);
+    memaccess::SetAccessMode(mode);
     g_ready = true;
     return true;
 }
@@ -66,12 +66,12 @@ void RenderStartupModeMenu() {
     ImGui::SetCursorPos({32.f, 112.f});
     ImGui::BeginGroup();
     draw_mode_card("external", XS("External"),
-                   XS("/proc/<pid>/mem · обычный режим"), memory::AccessMode::External);
+                   XS("/proc/<pid>/mem · обычный режим"), memaccess::AccessMode::External);
     ImGui::EndGroup();
     ImGui::SameLine(0.f, 22.f);
     ImGui::BeginGroup();
     draw_mode_card("kernel", XS("Kernel"),
-                   XS("FTDriver · доступ через ядро"), memory::AccessMode::Kernel);
+                   XS("FTDriver · доступ через ядро"), memaccess::AccessMode::Kernel);
     ImGui::EndGroup();
 
     ImGui::SetCursorPos({32.f, 256.f});
@@ -89,6 +89,6 @@ void RenderStartupModeMenu() {
 }
 
 void StartupModeShutdown() {
-    memory::KernelDriverManager::Instance().Stop();
+    memaccess::KernelDriverManager::Instance().Stop();
     g_ready = false;
 }

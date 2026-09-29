@@ -120,7 +120,7 @@ public:
         probe_addr_ = probe;
         if (pid <= 0 || !probe) return false;
         pid_.store((int)pid, std::memory_order_release);
-        auto transport = memory::detail::CreateTransport(memory::GetAccessMode());
+        auto transport = memaccess::detail::CreateTransport(memaccess::GetAccessMode());
         if (!transport || !transport->Bind(pid)) {
             if (transport) last_errno_.store(transport->LastError(), std::memory_order_relaxed);
             last_open_path_.store(1, std::memory_order_relaxed);
@@ -141,7 +141,7 @@ public:
         bound_.store(false, std::memory_order_release);
         auto transport = std::atomic_load_explicit(&transport_, std::memory_order_acquire);
         if (transport) transport->Unbind();
-        std::atomic_store_explicit(&transport_, std::shared_ptr<memory::detail::Transport>{},
+        std::atomic_store_explicit(&transport_, std::shared_ptr<memaccess::detail::Transport>{},
                                    std::memory_order_release);
         pid_.store(-1, std::memory_order_release);
         fail_streak_.store(0);
@@ -515,7 +515,7 @@ private:
     // Читает поток отрисовки, дёргают ещё поток привязки (bind/verify) и
     // писатель «Всегда день» — поэтому состояние атомарное.
     std::atomic<int> pid_{-1};
-    std::shared_ptr<memory::detail::Transport> transport_;
+    std::shared_ptr<memaccess::detail::Transport> transport_;
     std::atomic<bool> bound_{false};
     std::atomic<int> fail_streak_{0};
     // Адрес для пробы доступа (начало отображения libil2cpp.so).
