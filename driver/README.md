@@ -1,23 +1,19 @@
 # FTDriver payloads
 
-The `*.sh` files are the kernel payloads supplied with the project. Each file is a self-extracting shell launcher and is selected by the Android kernel release (`uname -r`). Keep the launcher and its filename unchanged when deploying it:
+The `*.sh` files are opaque, self-extracting ARM64 launchers supplied with the project. Each file must be selected and started manually for the exact Android kernel build. The application does **not** choose, start, or stop a payload.
+
+Example deployment:
 
 ```sh
 adb push driver /data/local/tmp/FTDriver
 adb shell su -c 'chmod 700 /data/local/tmp/FTDriver/*.sh'
+# Select the exact payload for the device, then run it manually as root.
 ```
 
-The app looks for the payload directory in `FTDRIVER_DIR` first and then in `/data/local/tmp/FTDriver`, `/data/local/tmp/ftdriver`, and `/sdcard/FTDriver`. An already-running driver can also be selected by setting `MEMIO_KERNEL_DEVICE` to its device node.
+## Important integration limitation
 
-## Client ABI
+The supplied payloads do not contain source, a public header, a documented device-node name, or a documented read/write protocol. Therefore the application must not claim a particular `/dev` path or ioctl layout as the real FTDriver ABI.
 
-Kernel mode is intentionally separate from External mode. The new client uses the following ioctl requests on the driver device. The supplied payloads are opaque ELF launchers and do not include a kernel-side header or ABI description, so a driver-side shim must expose this contract (or the client transport must be adapted to the real contract):
+Kernel mode in the client is consequently only an integration shell: it can be pointed at an already-running endpoint with `MEMIO_KERNEL_DEVICE`, but the transport adapter must be replaced or completed after the actual FTDriver endpoint and read/write protocol are confirmed for the selected payload. It never falls back to `/proc/<pid>/mem`.
 
-- `_IOW('F', 0x00, int32_t)` — attach to a target PID
-- `_IOWR('F', 0x01, KernelMemoryRequest)` — read target memory
-- `_IOWR('F', 0x02, KernelMemoryRequest)` — write target memory
-- `_IOW('F', 0x03, int32_t)` — detach from a target PID
-
-`FTDriverMemoryRequest` is the 32-byte structure `{ int32_t pid; uint32_t flags; uint64_t address; uint64_t buffer; uint64_t size; }`, defined in `jni/include/ftdriver_abi.h`. `buffer` is a pointer in the calling app and `address` is an address in the target process. The driver must validate both the PID and the user buffer before copying.
-
-If a payload exposes a different device node or ABI, configure the node with `MEMIO_KERNEL_DEVICE` and adapt the driver-side shim; the app will not silently fall back to `/proc/<pid>/mem`.
+To complete the adapter, provide the output of the manual launch and the resulting endpoint/protocol, for example the created device or socket path and the request format used for attach, read, and write. A driver compiled for a different kernel must not be selected by filename prefix alone.

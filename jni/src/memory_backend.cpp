@@ -3,18 +3,11 @@
 
 #include <atomic>
 #include <cerrno>
-#include <chrono>
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <fcntl.h>
 #include <sys/ioctl.h>
-#include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/utsname.h>
-#include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
 
 namespace memaccess {
@@ -27,14 +20,6 @@ const char* env_or_empty(const char* name) {
     return value && value[0] ? value : "";
 }
 
-std::string kernel_release() {
-    struct utsname uts{};
-    if (uname(&uts) != 0) return {};
-    std::string release(uts.release);
-    const size_t dash = release.find('-');
-    if (dash != std::string::npos) release.resize(dash);
-    return release;
-}
 
 bool path_readable(const char* path) {
     return path && path[0] && access(path, R_OK | W_OK) == 0;
@@ -54,74 +39,6 @@ std::string find_device() {
     if (configured[0] && path_readable(configured)) return configured;
     for (const char* path : kDeviceNames) {
         if (path_readable(path)) return path;
-    }
-    return {};
-}
-
-const char* shell_path() {
-    if (access("/system/bin/sh", X_OK) == 0) return "/system/bin/sh";
-    return "/bin/sh";
-}
-
-const char* script_name_for_release(const std::string& release, int index) {
-    // The payload set is intentionally explicit. A driver compiled for a
-    // different kernel must never be selected just because its prefix looks
-    // close enough; the generic major.minor script is only the payloads that
-    // are actually present in the repository.
-    static const char* const names[] = {
-        "4.9.186.sh", "4.14.117.sh", "4.14.141.sh", "4.14.141b.sh",
-        "4.14.180.sh", "4.14.180b.sh", "4.14.186.sh", "4.14.186b.sh",
-        "4.14.186c.sh", "4.19.81.sh", "4.19.109.sh", "4.19.113.sh",
-        "4.19.113b.sh", "4.19.157.sh", "4.19.157b.sh", "4.19.191.sh",
-        "4.19.191b-ColorOS.sh", "4.19.191-ColorOS.sh", "5.4.61.sh",
-        "5.4.86.sh", "5.4.147.sh", "5.4.191oneplus.sh",
-        "5.4.210-ColorOS.sh", "5.4.233.sh", "5.4.233oneplus.sh",
-        "5.4.233-ColorOS.sh", "5.10.136.sh",
-        "5.10.sh", "5.15.sh", "6.1.sh", "6.6.sh", "6.12.sh",
-        "oppo4.19.81.sh", "oppoa92s4.14.186.sh",
-    };
-    if (index < 0 || index >= static_cast<int>(sizeof(names) / sizeof(names[0]))) return nullptr;
-    const char* name = names[index];
-    const std::string exact = release + ".sh";
-    if (exact == name) return name;
-    return nullptr;
-}
-
-std::string find_driver_script(const std::string& release) {
-    const char* configured_dir = env_or_empty("FTDRIVER_DIR");
-    const char* dirs[] = {
-        configured_dir,
-        "/data/local/tmp/FTDriver",
-        "/data/local/tmp/ftdriver",
-        "/sdcard/FTDriver",
-    };
-
-    // Prefer an exact kernel build payload.
-    for (const char* dir : dirs) {
-        if (!dir || !dir[0]) continue;
-        for (int i = 0; ; ++i) {
-            const char* name = script_name_for_release(release, i);
-            if (!name) {
-                if (i >= 40) break;
-                continue;
-            }
-            std::string path = std::string(dir) + "/" + name;
-            if (access(path.c_str(), R_OK) == 0) return path;
-        }
-    }
-
-    // Generic payloads are explicitly named in the supplied set. Select one
-    // only for an exact major.minor release, never for a different family.
-    const size_t dot = release.find('.');
-    const size_t dot2 = dot == std::string::npos ? std::string::npos : release.find('.', dot + 1);
-    if (dot == std::string::npos || dot2 == std::string::npos) return {};
-    const std::string family = release.substr(0, dot2);
-    const std::string generic = family + ".sh";
-    const char* dirs2[] = {configured_dir, "/data/local/tmp/FTDriver", "/data/local/tmp/ftdriver", "/sdcard/FTDriver"};
-    for (const char* dir : dirs2) {
-        if (!dir || !dir[0]) continue;
-        const std::string path = std::string(dir) + "/" + generic;
-        if (access(path.c_str(), R_OK) == 0) return path;
     }
     return {};
 }
@@ -152,58 +69,21 @@ KernelDriverManager& KernelDriverManager::Instance() {
 
 bool KernelDriverManager::Start(std::string* error) {
     last_error_.clear();
-    if (running_ && !device_path_.empty() && path_readable(device_path_.c_str())) return true;
 
-    if (child_pid_ > 0) {
-        int status = 0;
-        if (waitpid(child_pid_, &status, WNOHANG) == child_pid_) child_pid_ = -1;
-    }
-
+    // FTDriver is deliberately started by the user with the payload matching
+    // the device kernel. The app must not guess a payload, execute it, or stop
+    // it on exit: the supplied files are opaque launchers and their device/IO
+    // protocol is not part of the app.
     device_path_ = find_device();
     if (device_path_.empty()) {
-        const std::string release = kernel_release();
-        selected_script_ = find_driver_script(release);
-        if (selected_script_.empty()) {
-            last_error_ = "Не найден драйвер для ядра " + (release.empty() ? "unknown" : release) +
-                          ". Укажи FTDRIVER_DIR или запусти драйвер отдельно.";
-            set_error(error, last_error_);
-            running_ = false;
-            return false;
-        }
-
-        const pid_t child = fork();
-        if (child < 0) {
-            last_error_ = std::string("fork: ") + std::strerror(errno);
-            set_error(error, last_error_);
-            return false;
-        }
-        if (child == 0) {
-            execl(shell_path(), shell_path(), selected_script_.c_str(), static_cast<char*>(nullptr));
-            _exit(127);
-        }
-        child_pid_ = static_cast<int>(child);
-
-        // A launcher can need a short moment to create its device node. Do not
-        // keep the app in kernel mode if the selected payload exits or exposes
-        // no endpoint; the caller can then choose External explicitly.
-        for (int i = 0; i < 150; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            device_path_ = find_device();
-            int status = 0;
-            if (waitpid(child_pid_, &status, WNOHANG) == child_pid_) {
-                child_pid_ = -1;
-                break;
-            }
-            if (!device_path_.empty()) break;
-        }
-    }
-
-    if (device_path_.empty()) {
-        last_error_ = "Драйвер запущен, но устройство FTDriver не появилось";
+        last_error_ =
+            "FTDriver не найден. Запусти вручную payload для своей версии ядра "
+            "и укажи его device node через MEMIO_KERNEL_DEVICE.";
         set_error(error, last_error_);
-        Stop();
+        running_ = false;
         return false;
     }
+
     running_ = true;
     return true;
 }
@@ -211,27 +91,10 @@ bool KernelDriverManager::Start(std::string* error) {
 void KernelDriverManager::Stop() {
     running_ = false;
     device_path_.clear();
-    if (child_pid_ > 0) {
-        kill(static_cast<pid_t>(child_pid_), SIGTERM);
-        int status = 0;
-        for (int i = 0; i < 50; ++i) {
-            if (waitpid(static_cast<pid_t>(child_pid_), &status, WNOHANG) == child_pid_) {
-                child_pid_ = -1;
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        if (child_pid_ > 0) {
-            kill(static_cast<pid_t>(child_pid_), SIGKILL);
-            waitpid(static_cast<pid_t>(child_pid_), &status, 0);
-            child_pid_ = -1;
-        }
-    }
 }
 
 bool KernelDriverManager::Running() const { return running_; }
 const char* KernelDriverManager::DevicePath() const { return device_path_.c_str(); }
-const char* KernelDriverManager::SelectedScript() const { return selected_script_.c_str(); }
 const char* KernelDriverManager::LastError() const { return last_error_.c_str(); }
 
 namespace detail {

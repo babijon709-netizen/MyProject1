@@ -3,9 +3,11 @@
 #include <stdint.h>
 #include <sys/ioctl.h>
 
-// User/kernel ABI for the Kernel transport. Keep this header identical in the
-// driver-side shim. All addresses are target-process virtual addresses except
-// buffer, which is a pointer in the calling client process.
+// PROVISIONAL ADAPTER CONTRACT — NOT THE ABI OF THE SUPPLIED FTDriver
+// PAYLOADS. The payloads are opaque and provide no public device/ioctl
+// definition. Keep this header only for a separately supplied driver-side shim;
+// replace it when the real endpoint and protocol for the selected kernel
+// payload are confirmed. Do not present these values as native FTDriver ABI.
 struct FTDriverMemoryRequest {
     int32_t pid;
     uint32_t flags;

@@ -24,16 +24,14 @@ class KernelDriverManager {
 public:
     static KernelDriverManager& Instance();
 
-    // Starts the version-matched FTDriver payload when necessary and verifies
-    // that a supported device endpoint is available. The opaque files under
-    // driver/ are user-space launchers for the kernel component; the memory ABI
-    // is kept in the client below and is deliberately not mixed with the
-    // external transport.
+    // Verifies an already-running, manually launched FTDriver endpoint. The
+    // app never selects, starts, or stops a kernel payload: the payload must
+    // match the device kernel and its real device/ABI must be configured for
+    // the target device.
     bool Start(std::string* error = nullptr);
     void Stop();
     bool Running() const;
     const char* DevicePath() const;
-    const char* SelectedScript() const;
     const char* LastError() const;
 
 private:
@@ -42,9 +40,7 @@ private:
     KernelDriverManager& operator=(const KernelDriverManager&) = delete;
 
     bool running_ = false;
-    int child_pid_ = -1;
     std::string device_path_;
-    std::string selected_script_;
     std::string last_error_;
 };
 
