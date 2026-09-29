@@ -1,0 +1,71 @@
+#pragma once
+// Настройки, которые видит несколько модулей: цвета/флаги ESP и аима.
+// Переменные inline — одинаковые во всех модулях, пишут конфиг и меню.
+#include "imgui.h"
+
+namespace cfg { namespace esp {
+    inline ImVec4 box_col         = {0.20f, 0.85f, 0.35f, 1.f};
+    inline ImVec4 box_col_invis   = {1.00f, 0.20f, 0.20f, 1.f};
+    inline ImVec4 name_col        = {1.00f, 1.00f, 1.00f, 1.f};
+    inline ImVec4 distance_col    = {0.70f, 0.70f, 0.70f, 1.f};
+    inline ImVec4 weapon_col      = {1.00f, 0.95f, 0.10f, 1.f};
+    inline ImVec4 tracer_col      = {1.00f, 0.20f, 0.20f, 1.f};
+    inline ImVec4 skeleton_col    = {0.20f, 0.85f, 0.35f, 1.f};
+    inline ImVec4 animal_col      = {1.00f, 0.60f, 0.25f, 1.f};
+    inline ImVec4 loot_col        = {0.55f, 0.80f, 1.00f, 1.f};
+    inline ImVec4 ally_col        = {0.25f, 0.55f, 1.00f, 1.f};
+    inline ImVec4 pickup_col      = {0.60f, 1.00f, 0.60f, 1.f};
+    inline ImVec4 bot_col           = {0.85f, 0.40f, 1.00f, 1.f};
+    inline ImVec4 vehicle_col       = {1.00f, 0.85f, 0.20f, 1.f};
+    inline ImVec4 scrap_col         = {0.31f, 0.78f, 1.00f, 1.f};
+    inline ImVec4 ore_stone_col     = {0.75f, 0.75f, 0.75f, 1.f};
+    inline ImVec4 ore_metal_col     = {1.00f, 0.55f, 0.16f, 1.f};
+    inline ImVec4 ore_sulfur_col    = {1.00f, 0.88f, 0.20f, 1.f};
+    inline ImVec4 farm_spot_col     = {0.31f, 1.00f, 0.47f, 1.f};
+    inline ImVec4 farm_body_col     = {1.00f, 0.78f, 0.24f, 1.f};
+    inline ImVec4 hud_col           = {1.00f, 1.00f, 1.00f, 1.f};
+    // Tracers drawn to a team mate are always green, no matter what colour the
+    // enemy tracers use — that is the whole point of telling them apart.
+    inline ImVec4 ally_tracer_col = {0.20f, 0.90f, 0.35f, 1.f};
+
+    inline bool box          = false;
+    inline bool name_esp     = false;
+    inline bool distance     = false;
+    inline bool weapon       = false;
+    inline bool tracer       = false;
+    inline bool skeleton     = false;
+    inline bool ore          = false;
+    inline bool animal       = false;
+    inline bool loot         = false;
+    inline bool team         = false;
+    inline bool pickup       = false;
+    inline bool bot            = false;
+    inline bool vehicle        = false;
+    inline bool scrap          = false;
+    inline bool  vis_check        = false;
+    inline bool  fill             = false;
+    inline float stroke           = 2.f;
+    inline float rounding         = 0.f;
+    inline float fill_pct         = 50.f;
+    inline int   box_type         = 0;
+    inline float box_rounding     = 0.f;
+    inline bool  hp_outline       = true;
+    inline bool  hp_gradient      = false;
+    inline float tracer_thickness = 1.5f;
+    inline ImVec4 hp_min_col      = {1.00f, 0.20f, 0.10f, 1.f};
+    inline ImVec4 hp_max_col      = {0.20f, 0.85f, 0.35f, 1.f};
+}}
+
+namespace cfg { namespace aim {
+    inline bool  enabled           = false;
+    inline bool  vis_check         = false;
+    inline bool  draw_fov          = false;
+    inline bool  scope_only        = false;   // aim only while ADS (прицел)
+    inline float fov               = 80.f;
+    inline float smoothness        = 5.f;
+    inline int   bone              = 0;
+    inline bool  trigger_bot       = false;
+    inline bool  knife_bot         = false;
+    inline float trigger_delay     = 0.0f;
+    inline ImVec4 fov_col           = {1.0f, 1.0f, 1.0f, 1.0f};
+}}
