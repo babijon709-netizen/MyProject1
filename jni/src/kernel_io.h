@@ -104,6 +104,32 @@ inline int driver_find_family() {
     return -1;
 }
 
+// ---- живая карта команд драйвера ------------------------------------------
+//
+// Проверка «драйвер действительно переносит данные» и «этот код команды —
+// чтение или запись» делается ОДНОЙ пробой против СОБСТВЕННОЙ памяти
+// процесса: два буфера с разными известными паттернами, одна команда, и
+// смотрим, какой буфер изменился. /proc здесь не участвует — данные могут
+// сойтись, только если ядро реально сходило по страницам нашего процесса
+// (find_get_pid → get_task_mm → проход таблиц → copy_to/from_user).
+//
+// Это же — защита от расхождений между сборками драйвера: коды чтения/записи
+// ВЫУЧИВАЮТСЯ на месте (learn_commands) по живым пробам, а не зашиты намертво.
+// Если драйвер отказывает в доступе к самому себе (бывает у сторонних сборок),
+// карта остаётся неизвестной — это НЕ приговор: транспорт к игре проверяется
+// по-настоящему при привязке (bind читает ELF-заголовок libil2cpp через
+// драйвер, экстернал-путь при этом не задействован вообще).
+enum CmdKind {
+    CMD_NONE  = 0,   // команда не выполнилась / данные не двигались
+    CMD_READ  = 1,   // память процесса скопирована К нам (target -> buf)
+    CMD_WRITE = 2,   // наш буфер скопирован В память процесса (buf -> target)
+};
+
+struct CmdProbe {
+    CmdKind kind = CMD_NONE;
+    int     err  = 0;   // errno, если getsockopt отказал
+};
+
 // ---- транспорт к памяти игры через драйвер --------------------------------
 
 class KernelTransport : public Transport {
@@ -131,14 +157,19 @@ public:
             sock_ = -1;
         }
         family_ = -1;
+        // Карта команд могла измениться (драйвер перепрошили) — сброс к
+        // дефолтам, learn_commands() при следующей проверке выучит заново.
+        read_cmd_  = kDriverCmdRead;
+        write_cmd_ = kDriverCmdWrite;
+        map_known_ = false;
     }
 
     ssize_t read_once(uint64_t addr, void* out, size_t len) override {
-        return rw(kDriverCmdRead, addr, out, len);
+        return rw(read_cmd_, addr, out, len);
     }
 
     ssize_t write_once(uint64_t addr, const void* in, size_t len) override {
-        return rw(kDriverCmdWrite, addr, const_cast<void*>(in), len);
+        return rw(write_cmd_, addr, const_cast<void*>(in), len);
     }
 
     int  family() const { return family_; }
@@ -151,24 +182,25 @@ public:
         return sock_;
     }
 
-    // Проверка «драйвер действительно переносит данные», а не просто отвечает
-    // на пробу семейства. Читаем и пишем СОБСТВЕННУЮ память процесса через
-    // сокет драйвера: /proc/self/mem здесь не участвует, значит совпасть
-    // байты могут, только если ядро реально сходило по страницам нашего
-    // процесса (find_get_pid → get_task_mm → проход таблиц → copy_to/from_user).
-    // Это же и тест записи — кернел режим без записи бесполезен (сайлент аим
-    // пишет ось выстрела в память игры).
-    bool self_test() {
-        if (!ensure_socket()) return false;
-        // Паттерн зависит от адреса буфера и времени — не выродится в константу,
-        // которую оптимизатор мог бы «проверить» без настоящего чтения.
-        const uint64_t seed = (uint64_t)(uintptr_t)this ^
-                              ((uint64_t)(uintptr_t)&now_seconds ^ (uint64_t)getpid());
-        uint64_t pat[2]   = { 0x9E3779B97F4A7C15ULL ^ seed, 0xC2B2AE3D27D4EB4FULL ^ (seed >> 17) };
-        uint64_t mirror[2] = {};
-        uint64_t scratch[2] = { 1, 1 };
+    // Выученные коды команд (после learn_commands; до неё — дефолты).
+    int  read_cmd()  const { return read_cmd_; }
+    int  write_cmd() const { return write_cmd_; }
+    // Подтверждена ли карта команд живыми пробами. false — драйвер, похоже,
+    // не даёт доступ к собственной памяти: транспорт всё равно рабочий,
+    // настоящая проверка — привязка к игре.
+    bool map_known() const { return map_known_; }
 
-        // 1) чтение: драйвер копирует pat -> mirror через страницу-таблицы.
+    // Одна живая проба команды против собственной памяти: заполняем два
+    // буфера разными паттернами, отдаём команду «addr=первый, buf=второй»
+    // и смотрим, кто куда скопировался. classify(x)==CMD_READ гарантирует,
+    // что данные прошли через ядро (экстернал здесь не замешан).
+    CmdProbe classify_cmd(int cmd) {
+        CmdProbe r;
+        if (!ensure_socket()) { r.err = errno ? errno : EIO; return r; }
+        uint64_t pat[2]    = { 0x1234567890ABCDEFULL, 0x0F1E2D3C4B5A6978ULL };
+        uint64_t mirror[2] = { 0xAABBCCDD11223344ULL, 0x5566778899AABBCCULL };
+        const uint64_t pat0 = pat[0], pat1 = pat[1];
+        const uint64_t mir0 = mirror[0], mir1 = mirror[1];
         DriverRwReq req;
         memset(&req, 0, sizeof(req));
         req.pid      = (uint32_t)getpid();
@@ -177,24 +209,49 @@ public:
         req.size     = sizeof(pat);
         req.magic    = kDriverMagic;
         socklen_t optlen = sizeof(req);
-        if (getsockopt(sock_, req.pid, kDriverCmdRead, (char*)&req, &optlen) != 0)
-            return false;
-        if (mirror[0] != pat[0] || mirror[1] != pat[1]) return false;
+        if (getsockopt(sock_, req.pid, cmd, (char*)&req, &optlen) != 0) {
+            r.err = errno;
+            return r;
+        }
+        // mirror получил содержимое pat, pat не тронут — команда ЧИТАЕТ.
+        if (mirror[0] == pat0 && mirror[1] == pat1 &&
+            pat[0] == pat0 && pat[1] == pat1) { r.kind = CMD_READ; return r; }
+        // pat получил содержимое mirror — команда ПИШЕТ (user_buf -> addr).
+        if (pat[0] == mir0 && pat[1] == mir1) { r.kind = CMD_WRITE; return r; }
+        // Команда принята, но данные не двигались (чужая структура запроса
+        // или команда-заглушка).
+        return r;
+    }
 
-        // 2) запись: драйвер пишет known-value в scratch.
-        const uint64_t w0 = 0xA5A55A5ADEADBEEFULL ^ seed;
-        const uint64_t w1 = 0x0BADC0DE0DDC0FFEULL ^ (seed >> 3);
-        uint64_t wsrc[2] = { w0, w1 };
-        memset(&req, 0, sizeof(req));
-        req.pid      = (uint32_t)getpid();
-        req.addr     = (uint64_t)(uintptr_t)scratch;
-        req.user_buf = (uint64_t)(uintptr_t)wsrc;
-        req.size     = sizeof(scratch);
-        req.magic    = kDriverMagic;
-        optlen       = sizeof(req);
-        if (getsockopt(sock_, req.pid, kDriverCmdWrite, (char*)&req, &optlen) != 0)
-            return false;
-        return scratch[0] == w0 && scratch[1] == w1;
+    // Выучить карту команд: перебираем известные коды этого класса драйверов
+    // (все с 0x28-байтной структурой запроса; 0x302 берёт другую структуру —
+    // не трогаем) и запоминаем, какой читает, какой пишет. Вызывать от root'а
+    // ДО первого bind (экран режима / --check-driver): пробы идут по нашей
+    // собственной памяти и ничего в игре не трогают.
+    void learn_commands() {
+        map_known_ = false;
+        if (!ensure_socket()) return;
+        const int cand[3] = { kDriverCmdRead, 0x301, kDriverCmdWrite };
+        int readFound = 0, writeFound = 0;
+        for (int i = 0; i < 3; ++i) {
+            const CmdProbe p = classify_cmd(cand[i]);
+            if (p.kind == CMD_NONE) continue;
+            map_known_ = true;
+            if (p.kind == CMD_READ  && !readFound)  readFound  = cand[i];
+            if (p.kind == CMD_WRITE && !writeFound) writeFound = cand[i];
+        }
+        if (readFound)  read_cmd_  = readFound;
+        if (writeFound) write_cmd_ = writeFound;
+    }
+
+    // Полный self-test: карта выучена, чтение читает, запись пишет.
+    // false значит лишь «по собственной памяти не проверить» — режим при
+    // найденном сокете всё равно включается и проверяется привязкой к игре.
+    bool self_test() {
+        learn_commands();
+        if (!map_known_) return false;
+        return classify_cmd(read_cmd_).kind == CMD_READ &&
+               classify_cmd(write_cmd_).kind == CMD_WRITE;
     }
 
 private:
@@ -233,6 +290,11 @@ private:
     int sock_   = -1;   // рабочий сокет драйвера
     int family_ = -1;   // найденное семейство
     int pid_    = -1;   // целевой процесс
+    // Карта команд (выучивается live-пробами по собственной памяти; дефолты —
+    // из реверса диспетчера драйвера).
+    int  read_cmd_  = kDriverCmdRead;
+    int  write_cmd_ = kDriverCmdWrite;
+    bool map_known_ = false;
 };
 
 // Единый экземпляр транспорта: читает поток отрисовки, дёргают поток
@@ -244,18 +306,21 @@ inline KernelTransport& kernel_transport() {
 }
 
 // Быстрая проверка «драйвер загружен?» для меню: находит семейство и
-// поднимает рабочий сокет, но не привязывается к процессу.
+// поднимает рабочий сокет, но не привязывается к процессу. Заодно (дёшево,
+// три getsockopt) выучивает карту команд — какой код читает, какой пишет.
 inline bool driver_available(int* family_out = nullptr) {
     KernelTransport& t = kernel_transport();
     if (!t.connected() && t.connect() < 0) return false;
     if (family_out) *family_out = t.family();
+    t.learn_commands();
     return true;
 }
 
-// Полная проверка драйвера для меню режима: не только «сокет открывается»,
-// но и «данные реально ходят» (чтение + запись собственной памяти через
-// драйвер). Именно её результат показывается на экране выбора как
-// «драйвер проверен».
+// Полная проверка драйвера: не только «сокет открывается», но и «данные
+// реально ходят» (чтение + запись собственной памяти через драйвер).
+// false не значит «кернел выключен»: если драйвер найден, режим включается
+// и по-настоящему проверяется привязкой к игре (bind читает ELF-заголовок
+// libil2cpp через драйвер, /proc не задействован).
 inline bool driver_self_test() {
     return kernel_transport().self_test();
 }

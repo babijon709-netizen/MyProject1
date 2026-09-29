@@ -218,27 +218,45 @@ static bool RunModeSelect() {
             if (ModeButton("##mode_kernel", iw, btnH, XS("Кернел (драйвер)"),
                            XS("Через ядерный драйвер — мимо /proc и его запретов"),
                            drv, true, fs)) {
-                // Тап по кернелу — не слепой выбор, а проверка. Порядок причин:
+                // Тап по кернелу. Порядок причин:
                 //   1) не root — сокет драйвера создаётся только привилегирован-
                 //      ным процессом, маячок без root не виден ВООБЩЕ;
-                //   2) self_test: драйвер обязан прочитать И записать нашу
-                //      собственную память через сокет (kernel_io.h). /proc в
-                //      проверке не участвует — совпасть может, только если
-                //      данные реально прошли через ядро;
-                //   3) не прошит/отвалился — чистый рескан семейства.
+                //   2) драйвер не найден — рескан с чистого листа;
+                //   3) сокет драйвера поднялся — режим ПРИНИМАЕТСЯ. Живые пробы
+                //      по собственной памяти (learn_commands) уточняют только
+                //      сообщение: часть сборок драйвера не даёт доступ к самому
+                //      себе, и это не приговор — по-настоящему транспорт
+                //      проверяется привязкой к игре (bind читает ELF-заголовок
+                //      libil2cpp через драйвер, /proc не задействован).
                 if (geteuid() != 0) {
                     PlaySound(SND_CLICK);
                     ShowToast(XS("Кернел: нет root — запусти чит от su"));
-                } else if (memio::driver_self_test()) {
-                    picked = MODE_KERNEL;
-                    PlaySound(SND_SUCCESS);
-                    ShowToast(XS("Кернел режим|драйвер проверен"));
-                } else {
+                } else if (!drv) {
                     memio::kernel_transport().invalidate();
                     drv = memio::driver_available(&fam);
                     PlaySound(SND_CLICK);
-                    ShowToast(drv ? XS("Драйвер не прошёл проверку чтения/записи")
-                                  : XS("Драйвер не найден — прошей .sh своей версии ядра"));
+                    ShowToast(XS("Драйвер не найден — прошей .sh своей версии ядра"));
+                } else {
+                    memio::KernelTransport& kt = memio::kernel_transport();
+                    kt.learn_commands();
+                    const bool readOk  = kt.map_known() &&
+                        kt.classify_cmd(kt.read_cmd()).kind == memio::CMD_READ;
+                    const bool writeOk = kt.map_known() &&
+                        kt.classify_cmd(kt.write_cmd()).kind == memio::CMD_WRITE;
+                    picked = MODE_KERNEL;
+                    if (readOk && writeOk) {
+                        PlaySound(SND_SUCCESS);
+                        ShowToast(XS("Кернел режим|драйвер проверен"));
+                    } else if (readOk) {
+                        PlaySound(SND_SUCCESS);
+                        ShowToast(XS("Кернел режим|чтение проверено, запись — нет"));
+                    } else if (writeOk) {
+                        PlaySound(SND_SUCCESS);
+                        ShowToast(XS("Кернел режим|запись проверена, чтение — нет"));
+                    } else {
+                        PlaySound(SND_CLICK);
+                        ShowToast(XS("Кернел режим|проверюсь при привязке к игре"));
+                    }
                 }
             }
             y += btnH + 20.f;
