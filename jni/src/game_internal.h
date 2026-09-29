@@ -211,6 +211,8 @@ bool class_looks_alive(uint64_t klass);
 uint64_t get_class_static_fields(uint64_t klass);
 bool discover_layout_from_native_transforms(const std::vector<uint64_t>& native_transforms,
                                             size_t& best_position_count, size_t& candidate_count);
+// true — перебор раскладок разбит на кадры и ещё идёт (см. game.cpp).
+bool layout_scan_in_progress();
 bool publish_camera_only_frame(float sw, float sh);
 bool object_class_name_is(uint64_t obj, const char* expected, bool accept_when_unreadable = false);
 bool read_transform_name(uint64_t transform, char* out, size_t cap);

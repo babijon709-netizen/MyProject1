@@ -2558,55 +2558,124 @@ static bool evaluate_transform_hierarchy_layout(const std::vector<uint64_t>& nat
     return position_count >= 2 && std::isfinite(extent) && extent >= 0.1 && extent <= 1000000.0;
 }
 
+// Перебор раскладок иерархии — самая тяжёлая работа во всём чите: три сида на
+// 61 смещение данных на 4 смещения индекса на 33 пары массивов на 4 варианта
+// разыменования, и КАЖДЫЙ кандидат, который вообще прочитался, ещё и
+// проверяется по всем известным трансформам с подъёмом по родителям. Целиком
+// это сотни миллисекунд в одном кадре — те самые «esp 218 мс» из кадргиста.
+//
+// Перебор не урезан: порядок обхода, отбор лучшего и результат в точности те
+// же. Изменено ровно одно — за один вызов делается не больше kProbeBudget
+// проверок, а состояние обхода сохраняется и продолжается со следующего
+// кадра. Раскладка находится за несколько кадров вместо одного залипшего.
+namespace {
+struct LayoutScan {
+    uint64_t signature = 0;      // по какому набору трансформов идёт обход
+    size_t   seed_index = 0;
+    uint64_t data_offset = 0x10;
+    int      delta_index = 0;
+    uint64_t matrices_offset = 0;
+    bool     in_progress = false;
+    TransformHierarchyLayout best_layout{};
+    double   best_score = 0.0;
+    size_t   best_position_count = 0;
+    size_t   candidate_count = 0;
+};
+LayoutScan g_layout_scan;
+
+uint64_t layout_scan_signature(const std::vector<uint64_t>& transforms) {
+    uint64_t signature = 0x9E3779B97F4A7C15ULL ^ (uint64_t)transforms.size();
+    for (uint64_t transform : transforms) signature = signature * 1099511628211ULL ^ transform;
+    return signature ? signature : 1;
+}
+}  // namespace
+
+// Обход раскладок ещё не закончен: вызывающий обязан позвать снова на
+// следующем кадре, а не ждать своего обычного интервала.
+bool layout_scan_in_progress() { return g_layout_scan.in_progress; }
+
 bool discover_layout_from_native_transforms(const std::vector<uint64_t>& native_transforms,
                                                    size_t& best_position_count, size_t& candidate_count) {
     if (native_transforms.size() < 2) return false;
 
-    const int64_t index_deltas[] = {-8, 8, 16, 24};
-    TransformHierarchyLayout best_layout{};
-    double best_score = 0.0;
-    best_position_count = 0; candidate_count = 0;
-    size_t seed_count = std::min<size_t>(native_transforms.size(), 3);
+    static constexpr int64_t kIndexDeltas[] = {-8, 8, 16, 24};
+    // Сколько кандидатов проверяем за один вызов. Каждая проверка — несколько
+    // чтений через кэш блоков плюс подъём по родителям, то есть единицы
+    // микросекунд; 1500 штук укладываются примерно в миллисекунду.
+    static constexpr int kProbeBudget = 1500;
 
-    for (size_t seed_index = 0; seed_index < seed_count; ++seed_index) {
-        uint64_t seed = native_transforms[seed_index];
-        for (uint64_t data_offset = 0x10; data_offset <= 0x200; data_offset += 8) {
-            uint64_t transform_data = rd_ptr(seed + data_offset);
+    LayoutScan& scan = g_layout_scan;
+    const uint64_t signature = layout_scan_signature(native_transforms);
+    if (!scan.in_progress || scan.signature != signature) {
+        // Состав трансформов сменился — обход начинается заново, иначе лучший
+        // кандидат сравнивался бы с оценками от другого набора.
+        scan = LayoutScan{};
+        scan.signature = signature;
+        scan.in_progress = true;
+    }
+
+    const size_t seed_count = std::min<size_t>(native_transforms.size(), 3);
+    int probes = 0;
+
+    for (; scan.seed_index < seed_count; ++scan.seed_index, scan.data_offset = 0x10,
+                                         scan.delta_index = 0, scan.matrices_offset = 0) {
+        const uint64_t seed = native_transforms[scan.seed_index];
+        for (; scan.data_offset <= 0x200; scan.data_offset += 8, scan.delta_index = 0,
+                                          scan.matrices_offset = 0) {
+            const uint64_t transform_data = rd_ptr(seed + scan.data_offset);
             if (!likely_native_pointer(transform_data)) continue;
-            for (int64_t index_delta : index_deltas) {
-                int64_t signed_index_offset = (int64_t)data_offset + index_delta;
+            for (; scan.delta_index < (int)(sizeof(kIndexDeltas) / sizeof(kIndexDeltas[0]));
+                 ++scan.delta_index, scan.matrices_offset = 0) {
+                const int64_t signed_index_offset =
+                    (int64_t)scan.data_offset + kIndexDeltas[scan.delta_index];
                 if (signed_index_offset < 0x10 || signed_index_offset > 0x220) continue;
-                uint64_t index_offset = (uint64_t)signed_index_offset;
-                int32_t transform_index = rd<int32_t>(seed + index_offset);
+                const uint64_t index_offset = (uint64_t)signed_index_offset;
+                const int32_t transform_index = rd<int32_t>(seed + index_offset);
                 if (transform_index < 0 || transform_index > 100000) continue;
-                for (uint64_t matrices_offset = 0; matrices_offset <= 0x100; matrices_offset += 8) {
-                    uint64_t indices_offset = matrices_offset + 8;
-                    uint64_t matrices = rd_ptr(transform_data + matrices_offset);
-                    uint64_t indices_ptr = rd_ptr(transform_data + indices_offset);
+                for (; scan.matrices_offset <= 0x100; scan.matrices_offset += 8) {
+                    if (probes >= kProbeBudget) {
+                        // Бюджет кадра исчерпан: отдаём накопленное и
+                        // продолжаем ровно отсюда на следующем вызове.
+                        best_position_count = scan.best_position_count;
+                        candidate_count = scan.candidate_count;
+                        return false;
+                    }
+                    const uint64_t indices_offset = scan.matrices_offset + 8;
+                    const uint64_t matrices = rd_ptr(transform_data + scan.matrices_offset);
+                    const uint64_t indices_ptr = rd_ptr(transform_data + indices_offset);
                     if (!likely_native_pointer(matrices) || !likely_native_pointer(indices_ptr)) continue;
                     for (int matrices_indirect = 0; matrices_indirect < 2; ++matrices_indirect) {
                         for (int indices_indirect = 0; indices_indirect < 2; ++indices_indirect) {
                             TransformHierarchyLayout layout{};
-                            layout.data_offset = data_offset; layout.index_offset = index_offset;
-                            layout.matrices_offset = matrices_offset; layout.indices_offset = indices_offset;
+                            layout.data_offset = scan.data_offset; layout.index_offset = index_offset;
+                            layout.matrices_offset = scan.matrices_offset; layout.indices_offset = indices_offset;
                             layout.matrices_indirect = matrices_indirect != 0; layout.indices_indirect = indices_indirect != 0;
+                            ++probes;
                             Vec3 seed_position{};
                             if (!read_transform_hierarchy_layout(seed, layout, seed_position)) continue;
-                            ++candidate_count;
+                            ++scan.candidate_count;
                             size_t position_count = 0; double extent = 0.0;
                             bool valid = evaluate_transform_hierarchy_layout(native_transforms, layout, position_count, extent);
-                            best_position_count = std::max(best_position_count, position_count);
+                            scan.best_position_count = std::max(scan.best_position_count, position_count);
                             if (!valid) continue;
                             double score = (double)position_count * 1000000.0 + std::min(extent, 999999.0);
-                            if (score > best_score) { best_score = score; best_layout = layout; }
+                            if (score > scan.best_score) { scan.best_score = score; scan.best_layout = layout; }
                         }
                     }
                 }
             }
         }
     }
-    if (best_score <= 0.0) return false;
-    g_transform_hierarchy_layout = best_layout;
+
+    // Полный проход закончен: решение принимается по тем же правилам, что и
+    // раньше, — лучший кандидат за весь перебор.
+    best_position_count = scan.best_position_count;
+    candidate_count = scan.candidate_count;
+    const bool found = scan.best_score > 0.0;
+    TransformHierarchyLayout found_layout = scan.best_layout;
+    scan = LayoutScan{};
+    if (!found) return false;
+    g_transform_hierarchy_layout = found_layout;
     g_transform_hierarchy_layout_valid = true;
     return true;
 }

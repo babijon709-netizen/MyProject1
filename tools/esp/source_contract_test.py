@@ -61,4 +61,23 @@ markers = (root / "jni/src/game_markers.cpp").read_text(encoding="utf-8")
 assert "discover_layout_from_native_transforms" in markers, \
     "markers must be able to learn the layout solo (no players around)"
 
+# The layout brute force is the single most expensive thing in the cheat. It
+# must stay complete (same order, same scoring) but never run to completion in
+# one frame: that is what produced the 100-250 ms "esp" spikes.
+scan = game.split("bool discover_layout_from_native_transforms(", 1)[1].split("\n}", 1)[0]
+assert "kProbeBudget" in scan and "probes >= kProbeBudget" in scan, \
+    "the layout scan must carry a per-call probe budget"
+assert "scan.seed_index" in scan and "scan.data_offset" in scan and \
+    "scan.matrices_offset" in scan, "the layout scan must resume where it stopped"
+assert "scan.best_score" in scan, "the best candidate must survive across frames"
+assert "layout_scan_in_progress" in game and "layout_scan_in_progress()" in markers, \
+    "a scan still running must be continued on the next frame, not after a cooldown"
+
+# The per-frame block cache is what keeps thousands of small reads off the
+# kernel. A single ring of a few blocks thrashed on every interleaved walk.
+memio = (root / "jni/src/mem_io.h").read_text(encoding="utf-8")
+assert "kSets" in memio and "kWays" in memio and "kBlocks    = kSets * kWays" in memio, \
+    "the block cache must be set-associative, not one small ring"
+assert "block_set(base)" in memio, "block lookup must be indexed, not a linear scan"
+
 print("visual source contracts: OK")

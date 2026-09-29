@@ -336,6 +336,34 @@ int main() {
             }
             clock_gettime(CLOCK_MONOTONIC, &t2);
 
+            // Второй проход — ПЕРЕМЕЖАЮЩИЙСЯ: поле за полем у всех объектов
+            // сразу. Так ESP и ходит по памяти (камера, затем позиция у
+            // каждого игрока, затем кость у каждого, затем маркеры), и именно
+            // на этом кольцо из восьми блоков промахивалось почти всегда.
+            memio::Reader ir;
+            ir.bind(b.pid, b.base);
+            ir.reset_stats();
+            for (int round = 0; round < kRounds; ++round) {
+                ir.frame_begin();
+                for (int f = 0; f < kFields; ++f) {
+                    for (int obj = 0; obj < kObjects; ++obj) {
+                        uint64_t v = 0;
+                        ir.read(b.base + obj * stride + f * 8, &v, 8);
+                        sink ^= (uint8_t)v;
+                    }
+                }
+            }
+            const unsigned long long interleaved_total = ir.syscalls + ir.hits;
+            printf("--- перемежающийся обход (как в ESP): %llu чтений, syscall'ов %llu, попаданий %llu\n",
+                   interleaved_total, ir.syscalls, ir.hits);
+            // Каждый объект читается по 128-байтному блоку один раз за кадр:
+            // при 40 объектах и 8 кадрах это 320 syscall'ов. Кольцо из восьми
+            // блоков давало здесь по syscall'у почти на каждое чтение.
+            check(ir.syscalls <= (unsigned long long)kObjects * kRounds * 2,
+                  "перемежающийся обход не вытесняет блоки друг друга");
+            check(ir.hits * 4 >= interleaved_total * 3,
+                  "в перемежающемся обходе не меньше 75% попаданий в кэш");
+
             const double was_us = (t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3;
             const double now_us = (t2.tv_sec - t1.tv_sec) * 1e6 + (t2.tv_nsec - t1.tv_nsec) / 1e3;
             const long long was_calls = (long long)kObjects * kFields * kRounds;

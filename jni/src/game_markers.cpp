@@ -1166,7 +1166,12 @@ std::vector<EspMarker> esp_get_markers() {
                 if (seeds.size() >= 8) break;
             }
             size_t pos_count = 0, cand_count = 0;
-            if (discover_layout_from_native_transforms(seeds, pos_count, cand_count)) {
+            const bool learned = discover_layout_from_native_transforms(seeds, pos_count, cand_count);
+            // Перебор раскладок разбит на кадры (иначе он съедал по 100-200 мс
+            // одним куском). Пока он идёт, продолжаем его на КАЖДОМ кадре,
+            // иначе полный проход растянулся бы на секунды ожидания.
+            if (!learned && layout_scan_in_progress()) s_solo_learn_cooldown = 1;
+            if (learned) {
                 // Re-read every cached position with the fresh layout.
                 for (MarkerEntity& e : g_marker_entities)
                     e.position_valid = marker_world_position(e.transform, e.position);

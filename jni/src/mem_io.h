@@ -60,10 +60,21 @@ constexpr uint64_t kAddressTagMask = 0x00FFFFFFFFFFFFFFULL;
 inline uint64_t untag(uint64_t address) { return address & kAddressTagMask; }
 
 // 128 байт — это несколько рядом лежащих полей объекта il2cpp (и пара матриц
-// трансформа); восемь блоков на поток покрывают типичный кадр ESP: камера,
-// локальный игрок, цель, пара моделей.
+// трансформа).
+//
+// Блоков было восемь, и они жили в одном кольце: любой девятый адрес кадра
+// вытеснял первый, а ESP за кадр обходит камеру, десяток игроков, их кости,
+// маркеры и оружие — кольцо из восьми в таком обходе не переживает даже
+// одного игрока, и кэш почти всегда промахивался (тысячи pread на кадр).
+// Теперь это набор из kSets групп по kWays блоков: адрес всегда ищется в
+// СВОЕЙ группе (индекс — биты номера блока), поэтому обход разных объектов
+// больше не выбивает друг друга, а поиск стоит kWays сравнений вместо
+// линейного прохода. Данные и их срок жизни не изменились: кэш по-прежнему
+// живёт один кадр и сбрасывается записью в тот же блок.
 constexpr size_t kBlockSize = 128;
-constexpr int    kBlocks    = 8;
+constexpr int    kSets      = 64;
+constexpr int    kWays      = 4;
+constexpr int    kBlocks    = kSets * kWays;   // 256 блоков = 32 КБ на поток
 
 // Потолок жизни блока. Основной предел — смена кадра (frame_begin), это только
 // страховка: если кадр почему-то не начался (нет привязки, меню спрятано),
@@ -95,9 +106,15 @@ struct Block {
 };
 
 struct Cache {
-    int   next = 0;
-    Block b[kBlocks];
+    // Кольцо вытеснения — своё в каждой группе.
+    uint8_t next[kSets] = {};
+    Block   b[kBlocks];
 };
+
+// Группа, в которой обязан лежать блок с этим базовым адресом.
+inline int block_set(uint64_t base) {
+    return (int)((base / kBlockSize) & (uint64_t)(kSets - 1));
+}
 
 inline double now_seconds() {
     struct timespec ts;
@@ -130,6 +147,11 @@ public:
         pid_.store(-1);
         fail_streak_.store(0);
         generation_.fetch_add(1, std::memory_order_relaxed);
+        // Метки записей принадлежали прошлому процессу: их адреса в новой
+        // сессии ничего не значат, а ненулевой счётчик держал бы медленный
+        // путь в written_recently() навсегда.
+        for (auto& tag : write_tags_) tag.store(0);
+        write_tags_used_.store(0, std::memory_order_relaxed);
         forget_cache();
     }
 
@@ -219,22 +241,25 @@ public:
         const uint64_t gen = generation_.load(std::memory_order_relaxed);
         const double   now = now_seconds();
 
+        const int set = block_set(base);
+        Block* const group = c.b + (size_t)set * kWays;
+
         Block* hit = nullptr;
-        for (Block& b : c.b) {
-            if (b.tag != base + 1) continue;
-            hit = &b;
-            if (b.gen == gen && (now - b.stamp) <= kBlockTtl && !written_recently(base)) {
+        for (int w = 0; w < kWays; ++w) {
+            if (group[w].tag != base + 1) continue;
+            hit = &group[w];
+            if (hit->gen == gen && (now - hit->stamp) <= kBlockTtl && !written_recently(base)) {
 #ifdef MEMIO_STATS
                 ++hits;
 #endif
-                memcpy(out, b.data + off, len);
+                memcpy(out, hit->data + off, len);
                 return true;
             }
             break;
         }
 
-        Block& b = hit ? *hit : c.b[c.next];
-        if (!hit) c.next = (c.next + 1) % kBlocks;
+        Block& b = hit ? *hit : group[c.next[set]];
+        if (!hit) c.next[set] = (uint8_t)((c.next[set] + 1) % kWays);
 
         if (!raw_read_block(base, b)) {
             // Блок может не читаться целиком: объект лежит вплотную к концу
@@ -456,10 +481,15 @@ private:
         for (uint64_t t = first; t <= last; t += kBlockSize) {
             if (written_recently(t)) continue;
             write_tags_[write_next_.fetch_add(1) % kWriteTags].store(t + 1);
+            write_tags_used_.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
     bool written_recently(uint64_t base) const {
+        // Метки ставятся только Иксреем и «Всегда днём»; обычно их нет вовсе,
+        // а проверка идёт на КАЖДОМ попадании в кэш. Один атомарный счётчик
+        // снимает восемь атомарных чтений с горячего пути.
+        if (write_tags_used_.load(std::memory_order_relaxed) == 0) return false;
         for (int i = 0; i < kWriteTags; ++i)
             if (write_tags_[i].load() == base + 1) return true;
         return false;
@@ -505,6 +535,9 @@ private:
 
     std::atomic<uint64_t> write_tags_[kWriteTags] = {};
     std::atomic<unsigned> write_next_{0};
+    // Сколько меток вообще поставлено за сессию (не убывает): ноль — быстрый
+    // выход из written_recently() на горячем пути чтения.
+    std::atomic<unsigned> write_tags_used_{0};
 };
 
 }  // namespace memio
