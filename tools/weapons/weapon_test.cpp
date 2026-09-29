@@ -79,6 +79,27 @@ static void maps_tests() {
     assert(!heap_writable(prefix+"110000-120000 ---p 0 00:00 0\n120000-200000 rw-p 0 00:00 0\n",0x120010,4));
     assert(heap_writable(prefix+"120000-200000 rw-p 0 00:00 0\n",0x120010,4));
     assert(!heap_writable("garbage\n100000-200000 rw-p 0 00:00 0\n",0x100010,4));
+
+    // Длинное имя отображения (dex-в-памяти, длинные пути APK) встречается на
+    // Android постоянно и НЕ должно отвергать всю карту: иначе перестают
+    // работать сразу все записи в кучу — отдача, разброс и темп оружия.
+    {
+        const std::string long_name(4096,'x');
+        const std::string m=
+            "0f0000-100000 rw-p 0 00:00 0 [anon:dalvik-"+long_name+"]\n"
+            "100000-200000 rw-p 0 00:00 0 [heap]\n";
+        assert(heap_writable(m,0x100010,4));
+        // Сама длинная строка остаётся именованной и незаписываемой.
+        assert(!heap_writable(m,0x0f0010,4));
+    }
+    // Длинное имя у файлового отображения по-прежнему помечает хвост.
+    {
+        const std::string long_path(3000,'p');
+        const std::string m=
+            "100000-110000 rw-p 0 08:01 7 /data/app/"+long_path+"/base.apk\n"
+            "110000-200000 rw-p 0 00:00 0\n";
+        assert(!heap_writable(m,0x110010,4));
+    }
 }
 static void tests(const char* calculator) {
     {

@@ -32,22 +32,28 @@ inline bool heap_writable_range(const std::string& maps, uint64_t address, size_
         const size_t line_length = end - pos;
         pos = end + 1;
 
-        // sscanf требует нуль-терминированную строку; строки /proc/<pid>/maps
-        // короткие, поэтому копия идёт в стековый буфер, а не в кучу.
-        char line[512];
-        if (line_length >= sizeof(line)) return false;
-        std::memcpy(line, line_begin, line_length);
-        line[line_length] = '\0';
+        // sscanf требует нуль-терминированную строку, но копировать нужно
+        // только числовую шапку: имя отображения может быть сколь угодно
+        // длинным (dex-в-памяти, длинные пути APK). Прежняя копия строки
+        // целиком в буфер 512 байт отвергала ВСЮ карту из-за одной длинной
+        // строки, и тогда переставали работать все записи в кучу — отдача,
+        // разброс и темп оружия молча оставались невыключенными.
+        char header[160];
+        const size_t header_length = line_length < sizeof(header) - 1
+            ? line_length : sizeof(header) - 1;
+        std::memcpy(header, line_begin, header_length);
+        header[header_length] = '\0';
 
         unsigned long long lo = 0, hi = 0, offset = 0, inode = 0;
         unsigned major = 0, minor = 0;
         char perms[5]{};
         int consumed = 0;
-        if (std::sscanf(line, "%llx-%llx %4s %llx %x:%x %llu %n",
+        if (std::sscanf(header, "%llx-%llx %4s %llx %x:%x %llu %n",
                         &lo, &hi, perms, &offset, &major, &minor, &inode, &consumed) != 7 ||
-            !consumed || hi <= lo || lo < previous_end) return false;
+            !consumed || (size_t)consumed > line_length ||
+            hi <= lo || lo < previous_end) return false;
 
-        const char* name = line + consumed;
+        const char* name = line_begin + consumed;
         size_t name_length = line_length - (size_t)consumed;
         while (name_length && (name[name_length - 1] == ' ' || name[name_length - 1] == '\r'))
             --name_length;

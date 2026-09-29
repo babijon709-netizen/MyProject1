@@ -94,16 +94,24 @@ template<class IO> class Controller {
         }
         return ok;
     }
+    // Где именно оборвалась цепочка. Без этого отказ выглядит одинаково
+    // («не применено»), а причин у него полтора десятка: от «оружие в руках
+    // не огнестрел» до «сменилось имя класса калькулятора».
+    int stage_ = 0;
+    bool fail(int stage) { stage_ = stage; return false; }
+
     bool resolve(uint64_t player, Context& c) {
         uint64_t net=0, fp=0, weapon=0, config=0, recoil=0, dispersion=0, calc=0, back=0, p=0;
         uint8_t local=0;
-        if (!player || !io.named(player,"PlayerManager","Oxide") ||
-            !c.player.capture(io,player,true) ||
-            !pointer(io,player+go_active::NETWORK_BEHAVIOUR_IDENTITY,net) ||
-            !io.named(net,"NetworkIdentity","Mirror") ||
-            !io.read(net+go_active::NETWORK_IDENTITY_IS_LOCAL_PLAYER,local) || local!=1 ||
-            !pointer(io,player+go_active::PLAYER_FP_MANAGER,fp) ||
-            !io.named(fp,"FPManager","Oxide") || !c.fp.capture(io,fp,true)) return false;
+        if (!player || !io.named(player,"PlayerManager","Oxide")) return fail(1);
+        if (!c.player.capture(io,player,true)) return fail(2);
+        if (!pointer(io,player+go_active::NETWORK_BEHAVIOUR_IDENTITY,net) ||
+            !io.named(net,"NetworkIdentity","Mirror")) return fail(3);
+        if (!io.read(net+go_active::NETWORK_IDENTITY_IS_LOCAL_PLAYER,local) || local!=1)
+            return fail(4);
+        if (!pointer(io,player+go_active::PLAYER_FP_MANAGER,fp) ||
+            !io.named(fp,"FPManager","Oxide") || !c.fp.capture(io,fp,true)) return fail(5);
+
         auto accept_weapon = [&](uint64_t candidate) {
             uint64_t owner=0;
             return candidate && io.named(candidate,"FPHitscan","Oxide") &&
@@ -116,56 +124,64 @@ template<class IO> class Controller {
         uint64_t active=0;
         const bool active_read=pointer(io,fp+go_active::FPMANAGER_CURRENT_OBJECT,active);
         if (active_read && active) {
-            if (!accept_weapon(active)) return false;
+            if (!accept_weapon(active)) return fail(6);
         } else {
             uint64_t typed=0;
             if (!pointer(io,fp+go_active::FPMANAGER_CURRENT_WEAPON,typed) ||
-                !accept_weapon(typed)) return false;
+                !accept_weapon(typed)) return fail(6);
         }
+
         if (!c.weapon.capture(io,weapon,true) ||
-            !pointer(io,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back) || back!=player ||
-            !pointer(io,weapon+go_active::FPHITSCAN_CONFIG,config) ||
+            !pointer(io,weapon+go_active::FPOBJECT_PLAYER_BACKREF,back) || back!=player)
+            return fail(7);
+        if (!pointer(io,weapon+go_active::FPHITSCAN_CONFIG,config) ||
             !io.named(config,"HitscanWeaponConfig",kWeapons) ||
-            !c.config.capture(io,config,true) ||
-            !pointer(io,config+go_active::HITSCANCONFIG_RECOIL_CONFIG,recoil) || !recoil)
-            return false;
+            !c.config.capture(io,config,true)) return fail(8);
+        if (!pointer(io,config+go_active::HITSCANCONFIG_RECOIL_CONFIG,recoil) || !recoil)
+            return fail(9);
         // Embedded WeaponRecoil supplies an independent backlink when present.
         // Some builds initialize it a frame later, so an unreadable/null value
         // is not used as the primary source.
         if (pointer(io,weapon+go_active::FPHITSCAN_RECOIL+
                        go_active::WEAPONRECOIL_RECOIL_CONFIG,p) && p && p!=recoil)
-            return false;
-        if (!io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true) ||
-            !pointer(io,weapon+go_active::FPHITSCAN_CALCULATOR,calc) || !calc ||
-            !io.calculator_class(calc) || !c.calculator.capture(io,calc,false) ||
-            !pointer(io,calc+go_active::CALCULATOR_HITSCAN_CONFIG,p) || p!=config ||
-            !pointer(io,calc+go_active::CALCULATOR_DISPERSION_CONFIG,dispersion) ||
-            !pointer(io,config+go_active::HITSCANCONFIG_DISPERSION_CONFIG,p) || p!=dispersion ||
-            !io.named(dispersion,"DispersionConfig",kWeapons) ||
-            !c.dispersion.capture(io,dispersion,true)) return false;
+            return fail(10);
+        if (!io.named(recoil,"RecoilConfig",kWeapons) || !c.recoil.capture(io,recoil,true))
+            return fail(11);
+        if (!pointer(io,weapon+go_active::FPHITSCAN_CALCULATOR,calc) || !calc) return fail(12);
+        if (!io.calculator_class(calc) || !c.calculator.capture(io,calc,false)) return fail(13);
+        if (!pointer(io,calc+go_active::CALCULATOR_HITSCAN_CONFIG,p) || p!=config) return fail(14);
+        if (!pointer(io,calc+go_active::CALCULATOR_DISPERSION_CONFIG,dispersion) ||
+            !pointer(io,config+go_active::HITSCANCONFIG_DISPERSION_CONFIG,p) || p!=dispersion)
+            return fail(15);
+        if (!io.named(dispersion,"DispersionConfig",kWeapons) ||
+            !c.dispersion.capture(io,dispersion,true)) return fail(16);
+        stage_ = 0;
         return true;
     }
     bool apply(size_t begin, size_t end, uint64_t player) {
         for (size_t i=begin; i<end; ++i) {
             float now=0;
-            if (!io.read(address(i),now) || !valid(now)) return false;
+            if (!io.read(address(i),now) || !valid(now)) return fail(17);
             if (now==0.f) continue; // no repeated writes to already-zero data
             Context fresh;
             // Revalidate the local owner, equip links and asset identities
             // immediately before each write, not only at frame start.
-            if (!resolve(player,fresh) || !(fresh==context_)) return false;
-            if (!io.read(address(i),now) || !valid(now)) return false;
+            if (!resolve(player,fresh)) return false;          // stage_ уже выставлен
+            if (!(fresh==context_)) return fail(18);
+            if (!io.read(address(i),now) || !valid(now)) return fail(19);
             if (now==0.f) continue;
             auto& s=saved_[i];
             s.original=now; s.owned=true; // retain original even on failed write/readback
-            if (!io.write_heap(address(i),0.f)) return false;
-            if (!io.read(address(i),now) || now!=0.f) return false;
+            if (!io.write_heap(address(i),0.f)) return fail(20);   // ворота записи
+            if (!io.read(address(i),now) || now!=0.f) return fail(21); // запись не легла
         }
         return true;
     }
 public:
     viewmodel::Status recoil = viewmodel::Status::Off, spread = viewmodel::Status::Off;
     explicit Controller(IO& memory) : io(memory) {}
+    // 0 — всё разрешилось; иначе номер шага из resolve()/apply(), см. fail().
+    int stage() const { return stage_; }
     bool has_state() const { for (const auto& s:saved_) if (s.owned) return true; return false; }
     bool reset(bool restore_originals) {
         bool ok=!restore_originals || restore(0,saved_.size());

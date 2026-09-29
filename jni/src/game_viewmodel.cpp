@@ -132,8 +132,22 @@ bool heap_gate_allows(uint64_t address, size_t size) {
         // Снимок мог устареть (отображение появилось только что) — решает
         // всегда свежая карта, а не кэш.
         text = maps_snapshot(true);
-        if (!text || !object_data::heap_writable_range(*text, address, size, lo, hi))
+        if (!text || !object_data::heap_writable_range(*text, address, size, lo, hi)) {
+            // Отказ ворот — самая непрозрачная из причин «функция не
+            // применилась»: сама запись не делается, а наружу видно только
+            // «не применено». Пишем адрес, чтобы его можно было сверить с
+            // картой процесса.
+            static double refused_at = -1e9;
+            const double moment = memio::now_seconds();
+            if (moment - refused_at >= 5.0) {
+                refused_at = moment;
+                LogLine("запись в кучу отклонена воротами: адрес 0x%llx, %zu байт "
+                        "(карта %zu КБ) — отображение не анонимное rw-p",
+                        (unsigned long long)address, size,
+                        text ? text->size() / 1024 : (size_t)0);
+            }
             return false;
+        }
     }
     heap_gates[heap_gate_next] = {lo, hi, now};
     heap_gate_next = (heap_gate_next + 1) % kHeapGateSlots;
@@ -319,6 +333,22 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         local_source_failed=false;
     }
     weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
+    {
+        // Ступень, на которой оборвалась цепочка отдачи/разброса. Логируем
+        // только смену ступени, иначе строка шла бы каждый кадр.
+        static int last_stage = -1;
+        const int stage = (settings.no_recoil || want_no_spread) ? weapons.stage() : 0;
+        if (stage != last_stage) {
+            last_stage = stage;
+            if (stage)
+                LogLine("оружие: отдача/разброс не применились, ступень %d "
+                        "(1-5 игрок/FPManager, 6-8 оружие и его конфиг, 9-11 RecoilConfig, "
+                        "12-14 калькулятор, 15-16 DispersionConfig, 17-19 значение, "
+                        "20 ворота записи, 21 запись не легла)", stage);
+            else
+                LogLine("оружие: цепочка отдачи/разброса разрешилась полностью");
+        }
+    }
     weapon_speeds.tick(epoch, g_il2cpp_base, player,
                        g_state.fast_fire, g_state.fast_reload);
     controller.tick(epoch, player, settings);
