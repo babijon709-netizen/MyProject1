@@ -1,0 +1,10 @@
+GNU GENERAL PUBLIC LICENSE
+Version 2, June 1991
+
+This directory is distributed under the GNU General Public License version 2.0.
+The complete license text is available at:
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+The driver communication design is derived from:
+https://github.com/gongchuang1089/android_kerneldriver_gongchuang
+(upstream license: GPL-2.0).

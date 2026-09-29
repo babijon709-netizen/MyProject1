@@ -1,0 +1,10 @@
+This module's custom socket-family transport is based on ideas and ABI patterns
+from android_kerneldriver_gongchuang by gongchuang1089:
+
+  https://github.com/gongchuang1089/android_kerneldriver_gongchuang
+  reviewed revision: 0b16d9ac7abd842b0babd04d2770a2c8b6edf8b9
+  upstream license: GNU General Public License v2.0
+
+The implementation in this directory was rewritten for MyProject1: bounded
+requests, per-socket locking, task reference handling, exact-copy semantics,
+root-only sessions, and no device node.
