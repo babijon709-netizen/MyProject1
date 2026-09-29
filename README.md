@@ -76,6 +76,13 @@ KDIR=/path/to/configured/device-kernel \
 driver/out/gc-memory-<kernel-release>.ko
 ```
 
+В корне также лежит экспериментальный `gc-memory-android13-5.10-generic.ko`,
+собранный для ARM64 AOSP GKI `android13-5.10` (vermagic
+`5.10.223-ga0cedc522d8b`). Он подходит только при совпадении KMI/vermagic и не
+заменяет сборку по точному дереву устройства. При `Invalid module format` или
+`Unknown symbol` использовать его нельзя — нужен `uname -r`, конфигурация и
+`Module.symvers` от прошивки.
+
 Если скрытие списков модуля при отладке не нужно:
 
 ```bash
