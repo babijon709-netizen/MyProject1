@@ -19,6 +19,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
+#include <linux/fs.h>
 #include <net/sock.h>
 
 #include "include/gc_protocol.h"
@@ -129,6 +130,85 @@ static int gc_copy_memory(struct gc_sock *session, bool write,
     return result;
 }
 
+static int gc_module_bases(struct gc_sock *session, struct gc_request *request)
+{
+    struct task_struct *task;
+    struct mm_struct *mm;
+    struct vm_area_struct *vma;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+    struct vma_iterator iterator;
+#endif
+    char name[128];
+    __u64 bases[8] = {};
+    unsigned int capacity;
+    unsigned int count = 0;
+    size_t name_length;
+    int result = 0;
+
+    if (request->version != GC_ABI_VERSION || session->pid <= 0)
+        return -EPROTO;
+    capacity = min_t(unsigned int, request->flags, ARRAY_SIZE(bases));
+    name_length = request->size;
+    if (!capacity || !request->address || !request->buffer ||
+        !name_length || name_length > sizeof(name))
+        return -EINVAL;
+    if (copy_from_user(name, u64_to_user_ptr(request->address), name_length))
+        return -EFAULT;
+    name[sizeof(name) - 1] = '\0';
+    if (name[name_length - 1] != '\0')
+        return -EINVAL;
+
+    task = gc_task_get(session->pid);
+    if (!task)
+        return -ESRCH;
+    mm = get_task_mm(task);
+    put_task_struct(task);
+    if (!mm)
+        return -ESRCH;
+
+    mmap_read_lock(mm);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+    vma_iter_init(&iterator, mm, 0);
+    for_each_vma(iterator, vma) {
+#else
+    for (vma = mm->mmap; vma; vma = vma->vm_next) {
+#endif
+        const struct qstr *filename;
+        __u64 base;
+        unsigned int i;
+        bool duplicate = false;
+
+        if (!vma->vm_file)
+            continue;
+        filename = &vma->vm_file->f_path.dentry->d_name;
+        if (filename->len != name_length - 1 ||
+            memcmp(filename->name, name, name_length - 1) != 0)
+            continue;
+
+        base = (__u64)vma->vm_start - ((__u64)vma->vm_pgoff << PAGE_SHIFT);
+        for (i = 0; i < count; ++i) {
+            if (bases[i] == base) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate)
+            bases[count++] = base;
+        if (count == capacity)
+            break;
+    }
+    mmap_read_unlock(mm);
+    mmput(mm);
+
+    if (!count)
+        return -ENOENT;
+    if (copy_to_user(u64_to_user_ptr(request->buffer), bases,
+                     count * sizeof(bases[0])))
+        result = -EFAULT;
+    request->flags = count;
+    return result;
+}
+
 static int gc_getsockopt(struct socket *socket, int level, int option,
                          char __user *value, int __user *length_user)
 {
@@ -187,6 +267,18 @@ static int gc_getsockopt(struct socket *socket, int level, int option,
             break;
         }
         result = gc_copy_memory(session, option == GC_OP_WRITE, &request);
+        break;
+
+    case GC_OP_MODULE_BASES:
+        if (copy_from_user(&length, length_user, sizeof(length)) ||
+            length < sizeof(request) ||
+            copy_from_user(&request, value, sizeof(request))) {
+            result = -EFAULT;
+            break;
+        }
+        result = gc_module_bases(session, &request);
+        if (!result && copy_to_user(value, &request, sizeof(request)))
+            result = -EFAULT;
         break;
 
     default:

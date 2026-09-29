@@ -3,13 +3,14 @@
 
 #include <linux/types.h>
 
-#define GC_ABI_VERSION       ((__u32)0x00020001U)
+#define GC_ABI_VERSION       ((__u32)0x00020002U)
 #define GC_SOCKET_PROTOCOL   0x090419
 #define GC_OP_PING           0x4700
 #define GC_OP_ATTACH         0x4701
 #define GC_OP_ALIVE          0x4702
 #define GC_OP_READ           0x4703
 #define GC_OP_WRITE          0x4704
+#define GC_OP_MODULE_BASES   0x4705
 #define GC_MAX_TRANSFER      (256U * 1024U)
 
 struct gc_request {

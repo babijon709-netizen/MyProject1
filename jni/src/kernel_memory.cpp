@@ -14,7 +14,7 @@ namespace {
 constexpr int kFirstFamily = 12;       // AF_DECnet; дальше сканируется до NPROTO
 constexpr int kLastFamily = 63;
 constexpr int kSocketProtocol = 0x090419;
-constexpr uint32_t kAbiVersion = 0x00020001U;
+constexpr uint32_t kAbiVersion = 0x00020002U;
 constexpr size_t kMaxTransfer = 256U * 1024U;
 
 enum Operation : int {
@@ -23,6 +23,7 @@ enum Operation : int {
     kAlive = 0x4702,
     kRead = 0x4703,
     kWrite = 0x4704,
+    kModuleBases = 0x4705,
 };
 
 struct Request {
@@ -176,6 +177,26 @@ bool Client::alive() {
         return false;
     }
     return value == 1;
+}
+
+int Client::module_bases(const char* module, uint64_t* output, int capacity) {
+    if (!connected() || !module || !module[0] || !output || capacity <= 0) {
+        last_error_.store(EINVAL, std::memory_order_relaxed);
+        return 0;
+    }
+    if (capacity > 8) capacity = 8;
+    Request request{kAbiVersion, static_cast<uint32_t>(capacity),
+                    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(module)),
+                    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(output)),
+                    strlen(module) + 1};
+    socklen_t length = sizeof(request);
+    const int fd = fd_.load(std::memory_order_acquire);
+    if (::getsockopt(fd, 0, kModuleBases, &request, &length) != 0) {
+        last_error_.store(errno, std::memory_order_relaxed);
+        return 0;
+    }
+    last_error_.store(0, std::memory_order_relaxed);
+    return request.flags <= static_cast<uint32_t>(capacity) ? static_cast<int>(request.flags) : 0;
 }
 
 }  // namespace kernel_memory

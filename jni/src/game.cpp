@@ -764,6 +764,31 @@ static void prune_player_text(const std::vector<uint64_t>& players) {
 // перезапуска игры образов в карте бывает несколько.
 static int get_base_candidates(const char* lib, uint64_t* out, int max) {
     if (g_pid <= 0 || !out || max <= 0) return 0;
+
+    const kernel_memory::Mode selected = kernel_memory::mode();
+    if (selected != kernel_memory::Mode::Proc) {
+        kernel_memory::Client driver;
+        int driver_error = 0;
+        if (driver.connect(g_pid)) {
+            const int count = driver.module_bases(lib, out, max);
+            if (count > 0) return count;
+            driver_error = driver.last_error();
+        } else {
+            driver_error = driver.last_error();
+        }
+        // В принудительном kernel-режиме /proc не трогаем: иначе незаметный
+        // fallback скрывает несовместимый/незагруженный модуль.
+        if (selected == kernel_memory::Mode::Kernel) {
+            static int reported_error = -1;
+            if (driver_error != reported_error) {
+                reported_error = driver_error;
+                fprintf(stderr, "kernel attach: module lookup failed, errno=%d (%s)\n",
+                        driver_error, strerror(driver_error));
+            }
+            return 0;
+        }
+    }
+
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/maps", g_pid);
     const int fd = open(path, O_RDONLY | O_CLOEXEC);

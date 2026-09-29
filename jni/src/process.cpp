@@ -134,6 +134,9 @@ static bool pid_still_game(pid_t pid) {
     snprintf(path, sizeof(path), "/proc/%d", pid);
     if (access(path, F_OK) != 0) return false;
     if (g_target_by_package && !pid_cmdline_matches(pid)) return false;
+    // После kernel-привязки живучесть и ELF проверяет сам backend. Повторное
+    // чтение /proc/<pid>/maps здесь не нужно и на части SELinux-политик запрещено.
+    if (strcmp(esp_mem_backend_name(), "kernel driver") == 0) return true;
     return proc_libil2cpp(pid) == 1;
 }
 

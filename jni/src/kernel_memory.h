@@ -33,7 +33,9 @@ public:
     bool read(uint64_t address, void* buffer, size_t size);
     bool write(uint64_t address, const void* buffer, size_t size);
     bool alive();
+    int module_bases(const char* module, uint64_t* output, int capacity);
     int last_error() const { return last_error_.load(std::memory_order_relaxed); }
+    int family() const { return family_.load(std::memory_order_relaxed); }
 
 private:
     bool request(int operation, uint64_t address, void* buffer, size_t size);

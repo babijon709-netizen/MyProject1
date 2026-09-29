@@ -23,8 +23,12 @@
 #include <csignal>
 #include <cstring>
 #include <ctime>
+#include <cerrno>
+#include <cstdio>
+#include <cstdint>
 #include <sys/stat.h>
 #include <thread>
+#include <unistd.h>
 
 // Хук инициализации (пустая заглушка — точка расширения).
 namespace prot {
@@ -40,6 +44,7 @@ AppState g_state;
 
 int main(int argc, char* argv[]) {
     kernel_memory::configure_from_environment();
+    bool kernel_check = false;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--kernel") == 0 || strcmp(argv[i], "--memory=kernel") == 0)
             kernel_memory::set_mode(kernel_memory::Mode::Kernel);
@@ -47,6 +52,31 @@ int main(int argc, char* argv[]) {
             kernel_memory::set_mode(kernel_memory::Mode::Proc);
         else if (strcmp(argv[i], "--memory=auto") == 0)
             kernel_memory::set_mode(kernel_memory::Mode::Auto);
+        else if (strcmp(argv[i], "--kernel-check") == 0)
+            kernel_check = true;
+    }
+
+    if (kernel_check) {
+        kernel_memory::Client driver;
+        const uint64_t expected = 0x584356454e4b4552ULL;
+        uint64_t actual = 0;
+        if (!driver.connect(getpid())) {
+            fprintf(stderr, "kernel-check: CONNECT FAILED errno=%d (%s)\n",
+                    driver.last_error(), strerror(driver.last_error()));
+            return 20;
+        }
+        if (!driver.read(reinterpret_cast<uint64_t>(&expected), &actual, sizeof(actual))) {
+            fprintf(stderr, "kernel-check: READ FAILED family=%d errno=%d (%s)\n",
+                    driver.family(), driver.last_error(), strerror(driver.last_error()));
+            return 21;
+        }
+        if (actual != expected) {
+            fprintf(stderr, "kernel-check: DATA MISMATCH family=%d\n", driver.family());
+            return 22;
+        }
+        fprintf(stdout, "kernel-check: OK family=%d abi=0x%08x\n",
+                driver.family(), 0x00020002U);
+        return 0;
     }
 
     signal(SIGINT,  [](int) { main_thread_flag.store(false); });
