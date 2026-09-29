@@ -21,6 +21,7 @@
 #include "kernel_io.h"
 #include <sys/socket.h>
 #include <sys/utsname.h>
+#include <cerrno>
 #include <cstring>
 #include <atomic>
 #include <chrono>
@@ -31,19 +32,21 @@
 #include <thread>
 
 // Диагностика кернел-режима из терминала (Termux/adb), без оверлея и игры:
-//   su -c /data/local/tmp/xvcen --check-driver
-// Печатает: root/не root, версию ядра, найденное семейство сокета драйвера,
-// результат self-test (чтение+запись собственной памяти через драйвер) и для
-// сравнения доступность экстернал-дороги. Коды выхода: 0 — кернел подтверждён
-// полностью, 1 — драйвер не найден, 2 — сокет есть, но полная проверка не
-// прошла (детали в выводе; режим всё равно включается и проверяется привязкой
-// к игре).
+//   su -c /data/local/tmp/xvcen --check-driver   — базовая проверка
+//   su -c /data/local/tmp/xvcen --scan-driver    — + полный скан кодов команд
+// Печатает: root/не root, ядро, семейство сокета драйвера и класс маячка,
+// живые пробы команд по собственной памяти (оба известных протокола),
+// выбранный протокол и коды чтения/записи, а в режиме скана — карту всех
+// кодов 0..0x7FF, которые двигают данные. Коды выхода: 0 — кернел готов,
+// 1 — драйвер не найден, 2 — сокет есть, но коды не подтверждены (режим всё
+// равно включается и проверяется привязкой к игре).
 namespace driver_check {
 
-static int Run() {
+static int Run(bool full_scan) {
     struct utsname un{};
     if (uname(&un) != 0) un.release[0] = 0;
-    printf("== xvcen: проверка кернел режима ==\n");
+    printf("== xvcen: проверка кернел режима%s ==\n",
+           full_scan ? " (полный скан кодов команд)" : "");
     printf("ядро устройства : %s\n", un.release);
     printf("uid / euid      : %d / %d%s\n", getuid(), geteuid(),
            geteuid() == 0 ? " (root)" : "  <-- НЕ ROOT");
@@ -52,87 +55,122 @@ static int Run() {
                "   привилегированным процессом, без root маячок не виден.\n"
                "   Запуск: su -c <путь>/xvcen\n");
 
-    // 1) Поиск семейства сокета драйвера: маячок errno 1338 на пробе
-    //    socket(fam, 6, 0) — тот же перебор, что делает сам чит.
-    int fam = -1;
-    for (int dom = memio::kDriverFamilyFirst; dom <= memio::kDriverFamilyLast; ++dom) {
-        errno = 0;
-        const int probe = socket(dom, memio::kDriverProbeType, memio::kDriverSockProto);
-        if (probe >= 0) { close(probe); continue; }
-        if (errno == memio::kDriverProbeErrno) { fam = dom; break; }
-        if (errno != EAFNOSUPPORT && errno != EPROTONOSUPPORT && errno != ESOCKTNOSUPPORT)
-            printf("   (семейство %d отвечает errno %d — не драйвер, пропускаем)\n",
-                   dom, errno);
-    }
+    // 1) Поиск семейства сокета драйвера по маячку на пробе socket(fam, 6, 0):
+    //    1338 — bing-класс, 126/ENOKEY — gongchuang-класс.
+    int beacon = 0;
+    const int fam = memio::driver_find_family(&beacon);
     if (fam < 0) {
-        printf("драйвер         : НЕ найден (маячок errno %d на семействах %d..%d)\n",
-               memio::kDriverProbeErrno, memio::kDriverFamilyFirst, memio::kDriverFamilyLast);
+        printf("драйвер         : НЕ найден (маячки errno %d/%d на семействах %d..%d)\n",
+               memio::kDriverProbeErrno, memio::kGongProbeErrno,
+               memio::kDriverFamilyFirst, memio::kDriverFamilyLast);
         printf("   Прошей драйвер под СВОЮ версию ядра (uname -r) скриптом .sh\n"
                "   из drivers.7z и повтори проверку. Драйвер не переживает\n"
                "   перезагрузку — после ребута прошивай заново.\n");
-    } else {
-        printf("драйвер         : найден, семейство сокета %d\n", fam);
+        const int fd = ::open("/proc/1/mem", O_RDWR | O_CLOEXEC);
+        printf("экстернал       : /proc/<pid>/mem %s\n",
+               fd >= 0 ? "доступен (root)" : "недоступен");
+        if (fd >= 0) close(fd);
+        return 1;
     }
+    printf("драйвер         : найден, семейство сокета %d, маячок errno %d (%s)\n",
+           fam, beacon,
+           beacon == memio::kDriverProbeErrno ? "bing-класс" : "gongchuang-класс");
 
-    // 2) Живая карта команд: пробуем известные коды этого класса драйверов
-    //    (0x300/0x301/0x303, все с 0x28-байтной структурой запроса) против
-    //    СОБСТВЕННОЙ памяти и смотрим, какой буфер куда скопировался.
-    //    /proc здесь не участвует: данные сойдутся, только если ядро реально
-    //    сходило по страницам нашего процесса. Заодно видно errno отказов.
-    if (fam >= 0) {
-        memio::KernelTransport& kt = memio::kernel_transport();
-        if (!memio::driver_available(nullptr)) {
-            printf("сокет драйвера  : НЕ поднялся (errno %d)\n", errno);
-            return 2;
-        }
-        kt.learn_commands();
-        printf("сокет драйвера  : поднят. Живые пробы команд по собственной памяти\n"
-               "                  (в игре ничего не трогается; если драйвер после\n"
-               "                  проб замолчит — перепрошей .sh):\n");
-        const int cand[3] = { memio::kDriverCmdRead, 0x301, memio::kDriverCmdWrite };
-        for (int i = 0; i < 3; ++i) {
-            const memio::CmdProbe p = kt.classify_cmd(cand[i]);
-            if (p.kind == memio::CMD_READ)
-                printf("  код 0x%03X: ЧТЕНИЕ — память -> наш буфер, OK\n", cand[i]);
-            else if (p.kind == memio::CMD_WRITE)
-                printf("  код 0x%03X: ЗАПИСЬ — наш буфер -> память, OK\n", cand[i]);
-            else if (p.err != 0)
-                printf("  код 0x%03X: отказ, errno %d\n", cand[i], p.err);
-            else
-                printf("  код 0x%03X: принята, но данные не двигались\n", cand[i]);
-        }
-        const bool readOk  = kt.map_known() &&
-            kt.classify_cmd(kt.read_cmd()).kind == memio::CMD_READ;
-        const bool writeOk = kt.map_known() &&
-            kt.classify_cmd(kt.write_cmd()).kind == memio::CMD_WRITE;
-        printf("чит будет читать кодом 0x%03X (%s), писать кодом 0x%03X (%s)\n",
-               kt.read_cmd(),  readOk  ? "подтверждён" : "дефолт, не подтверждён",
-               kt.write_cmd(), writeOk ? "подтверждён" : "дефолт, не подтверждён");
-        if (readOk && writeOk) {
-            printf("итог            : кернел режим РАБОТАЕТ — чтение и запись идут\n"
-                   "                  через ядро, /proc не участвует\n");
-            return 0;
-        }
-        if (!kt.map_known())
-            printf("итог            : драйвер отвечает на сокет, но собственной памяти\n"
-                   "                  не отдаёт (см. errno выше — часто это запрет доступа\n"
-                   "                  к самому себе в сторонних сборках). НЕ приговор:\n"
-                   "                  включай кернел в меню — привязка к игре проверит\n"
-                   "                  транспорт по-настоящему (чтение ELF-заголовка\n"
-                   "                  libil2cpp через драйвер).\n");
+    // 2) Сокеты обоих классов (какие поднимутся) + живые пробы команд по
+    //    СОБСТВЕННОЙ памяти: /proc не участвует, данные сойдутся, только если
+    //    ядро реально сходило по страницам нашего процесса.
+    memio::KernelTransport& kt = memio::kernel_transport();
+    errno = 0;
+    const int bfd = kt.connect();
+    printf("сокет bing      : %s%s\n",
+           bfd >= 0 ? "поднят (тип 4)" : "не поднялся",
+           bfd >= 0 ? "" : (errno ? " — не bing-класс" : ""));
+    errno = 0;
+    const int gfd = kt.gong_connect();
+    printf("сокет gong      : %s%s\n",
+           gfd >= 0 ? "поднят (SOCK_RAW/0x090419)" : "не поднялся",
+           gfd >= 0 ? "" : " — не gongchuang-класс");
+
+    printf("пробы известных команд (своя память, игра не трогается):\n");
+    const int cand[3] = { memio::kDriverCmdRead, 0x301, memio::kDriverCmdWrite };
+    for (int i = 0; i < 3; ++i) {
+        const memio::CmdProbe p = kt.classify_cmd(cand[i]);
+        if (p.kind == memio::CMD_READ)
+            printf("  код 0x%03X: ЧТЕНИЕ — память -> наш буфер, OK\n", cand[i]);
+        else if (p.kind == memio::CMD_WRITE)
+            printf("  код 0x%03X: ЗАПИСЬ — наш буфер -> память, OK\n", cand[i]);
+        else if (p.err != 0)
+            printf("  код 0x%03X: отказ, errno %d\n", cand[i], p.err);
         else
-            printf("итог            : частично подтверждён. Кернел режим включается\n"
-                   "                  в меню; привязка к игре докажет чтение, а запись\n"
-                   "                  проверь фичами, которые пишут (Иксрей, «Всегда день»).\n");
-        return 2;
+            printf("  код 0x%03X: принята, но данные не двигались\n", cand[i]);
+    }
+    if (gfd >= 0) {
+        const memio::CmdProbe vm = kt.classify_gong_vm(gfd, memio::kGongCmdAccessVm);
+        printf("  gong op4      : %s\n", vm.kind == memio::CMD_READ
+               ? "ACCESS_PROCESS_VM работает (копия from -> to)" : "нет");
+        if (kt.gong_attach((int)getpid())) {
+            const memio::CmdProbe pr = kt.classify_pte(gfd, memio::kGongCmdPteRead);
+            const memio::CmdProbe pw = kt.classify_pte(gfd, memio::kGongCmdPteWrite);
+            printf("  gong op5/op6  : чтение %s, запись %s\n",
+                   pr.kind == memio::CMD_READ ? "OK" : "нет",
+                   pw.kind == memio::CMD_WRITE ? "OK" : "нет");
+        }
     }
 
-    // 3) Для сравнения — доступна ли экстернал-дорога (/proc/<pid>/mem).
-    const int fd = ::open("/proc/1/mem", O_RDWR | O_CLOEXEC);
-    printf("экстернал       : /proc/<pid>/mem %s\n",
-           fd >= 0 ? "доступен (root)" : "недоступен");
-    if (fd >= 0) close(fd);
-    return 1;
+    // 3) Автоопределение протокола — ровно то, что делает чит при выборе
+    //    кернела (короткий список, затем полный скан при неудаче).
+    kt.detect_protocol();
+    printf("протокол        : %s%s\n", kt.proto_name(),
+           kt.map_known() ? " (подтверждён пробами)" : " (НЕ подтверждён — коды дефолтные)");
+
+    // 4) Полный скан 0..0x7FF: карта ВСЕХ кодов, которые двигают данные.
+    //    Нужен, если и автоопределение ничего не нашло: тогда по этой карте
+    //    видно, какими кодами говорит эта сборка драйвера.
+    if (full_scan) {
+        printf("полный скан кодов 0x000..0x7FF, bing-структура {pid,addr,buf,size,magic}:\n");
+        int moved = 0, silent = 0, rd = 0, wr = 0;
+        long errs = 0;
+        for (int c = 0; c <= 0x7FF; ++c) {
+            const memio::CmdProbe p = kt.classify_cmd(c);
+            if (p.kind == memio::CMD_READ) {
+                printf("  код 0x%03X: ЧТЕНИЕ\n", c);
+                ++moved; if (!rd) rd = c;
+            } else if (p.kind == memio::CMD_WRITE) {
+                printf("  код 0x%03X: ЗАПИСЬ\n", c);
+                ++moved; if (!wr) wr = c;
+            } else if (p.err == 0) {
+                printf("  код 0x%03X: принята, данные не двигались\n", c);
+                ++silent;
+            } else {
+                ++errs;
+            }
+        }
+        printf("итог скана      : команд с данными %d, «молчащих» %d, отказов %ld\n",
+               moved, silent, errs);
+        if (gfd >= 0 && kt.gong_attach((int)getpid())) {
+            printf("скан pte-структурой {vaddr,buffer,size} на gong-сокете, коды 0..15:\n");
+            for (int c = 0; c <= 15; ++c) {
+                const memio::CmdProbe p = kt.classify_pte(gfd, c);
+                if (p.kind == memio::CMD_READ)       printf("  код 0x%02X: ЧТЕНИЕ\n", c);
+                else if (p.kind == memio::CMD_WRITE) printf("  код 0x%02X: ЗАПИСЬ\n", c);
+                else if (p.err == 0)                 printf("  код 0x%02X: молчит\n", c);
+                else                                 printf("  код 0x%02X: errno %d\n", c, p.err);
+            }
+        }
+    }
+
+    // 5) Итог: чем чит будет ходить в память игры.
+    if (kt.map_known()) {
+        printf("итог            : кернел готов — протокол %s, чтение кодом 0x%03X,\n"
+               "                  запись кодом 0x%03X; /proc не участвует\n",
+               kt.proto_name(), kt.read_cmd(), kt.write_cmd());
+        return 0;
+    }
+    printf("итог            : коды команд НЕ подтверждены. Включай кернел в меню —\n"
+           "                  привязка к игре проверит транспорт по-настоящему;\n"
+           "                  если откажет (тост с errno 92) — пришли вывод:\n"
+           "                  su -c <путь>/xvcen --scan-driver\n");
+    return 2;
 }
 
 }  // namespace driver_check
@@ -151,9 +189,12 @@ AppState g_state;
 
 int main(int argc, char* argv[]) {
     // Проверка драйвера из терминала (Termux/adb): su -c ./xvcen --check-driver
-    // — без GUI, до запуска оверлея и игры.
-    for (int i = 1; i < argc; ++i)
-        if (strcmp(argv[i], "--check-driver") == 0) return driver_check::Run();
+    // (базовая) или --scan-driver (полный скан кодов команд) — без GUI,
+    // до запуска оверлея и игры.
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--check-driver") == 0) return driver_check::Run(false);
+        if (strcmp(argv[i], "--scan-driver") == 0) return driver_check::Run(true);
+    }
 
     signal(SIGINT,  [](int) { main_thread_flag.store(false); });
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
@@ -300,13 +341,19 @@ int main(int argc, char* argv[]) {
                         break;
                     case 2: msg = XS("libil2cpp не найден|игра ещё грузится"); break;
                     case 3:
-                        if (esp_mem_backend_kernel())
-                            snprintf(buf, sizeof(buf), XS("Кернел: драйвер не отдал память|errno %d"),
-                                     esp_mem_last_errno());
-                        else
+                        if (esp_mem_backend_kernel()) {
+                            const int e = esp_mem_last_errno();
+                            if (e == ENOPROTOOPT)   // 92: «такой опции нет»
+                                msg = XS("Кернел: код команды не распознан|прогони --scan-driver");
+                            else {
+                                snprintf(buf, sizeof(buf), XS("Кернел: драйвер не отдал память|errno %d"), e);
+                                msg = buf;
+                            }
+                        } else {
                             snprintf(buf, sizeof(buf), XS("Нет доступа к /proc/<pid>/mem|errno %d"),
                                      esp_mem_last_errno());
-                        msg = buf;
+                            msg = buf;
+                        }
                         break;
                     case 4: msg = XS("Образ игры не прошёл проверку|перезапусти игру"); break;
                     default: msg = XS("Игра не найдена|запусти игру"); break;

@@ -76,6 +76,7 @@ static const LangPair kUiEn[] = {
     {"Кернел (драйвер)", "Kernel (driver)"},
     {"Кернел режим|привязку проверю в игре", "Kernel mode|attach will verify in game"},
     {"Кернел: драйвер не отдал память|errno %d", "Kernel: driver refused memory|errno %d"},
+    {"Кернел: код команды не распознан|прогони --scan-driver", "Kernel: command code not recognized|run --scan-driver"},
     {"Кернел: нет root — запусти чит от su", "Kernel: no root — run the cheat via su"},
     {"Кнопка на экране", "On-screen button"},
     {"Кнопка фрикама сохранена", "Freecam button saved"},

@@ -4,38 +4,36 @@
 // вообще — чтение и запись идут через сокет семейства протоколов, которое
 // регистрирует драйвер.
 //
-// Как устроен драйвер (реверс payload'ов из drivers.7z, модуль «bing_rw»,
-// автор NULL1337 / t.me/NULLkawaii; протокол того же класса, что публичный
-// драйвер gongchuang — архитектура совпадает один в один):
+// ДРАЙВЕРЫ ЭТОГО КЛАССА БЫВАЮТ РАЗНЫЕ, и протокол приходится определять на
+// месте (устройство пользователя: маячок 1338 и сокет типа 4 поднялись, а
+// getsockopt на код 0x300 ответил ENOPROTOOPT/92 — «такой опции нет», то
+// есть сборка драйвера под это ядро просто использует другие коды команд).
+// Известны два протокола:
 //
-//   * .sh-скрипт распаковывает статический инсталлятор, инсталлятор
-//     расшифровывает встроенный модуль bing_rw.ko (vermagic под конкретную
-//     версию ядра) и грузит его через insmod с трюком
-//     import_ns=VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver
-//     (обход проверки сигнатур GKI-ядер).
-//   * Модуль регистрирует СВОЁ семейство протоколов сокета (sock_register,
-//     свободный слот ищется от AF_DECnet=12 вверх) и прячет себя из
-//     /proc/modules, /sys/module и vmalloc-списков.
-//   * Проба «есть ли драйвер»: socket(семейство, 6, 0). Обычные семейства
-//     на таком типе дают EAFNOSUPPORT, а create() драйвера отвечает своим
-//     маячком errno 1338 (0x53A). Инсталлятор так ищет семейство, перебирая
-//     номера 12..43 — и мы делаем так же.
-//   * Рабочий сокет: socket(семейство, 4, 0), только root (uid 0).
-//   * Все команды идут через getsockopt(fd, level, optname, optval, optlen):
-//       0x300 — чтение памяти:  { u32 pid; u32 pad; u64 addr; u64 buf; u64 size; u32 magic }
-//       0x303 — запись памяти:   та же структура
-//     Размер запроса 0x28 байт, магия 0x1337 в поле +0x20; направление задаёт
-//     код команды. Оба обработчика по дизассемблу зовут общий движок
-//     find_get_pid → get_pid_task → get_task_mm → down_read(mmap_lock) →
-//     проход по таблицам страниц → copy_to_user / copy_from_user кусками
-//     через границу страниц.
+//   1) bing_rw — реверс payload из drivers.7z (vermagic 6.6.56):
+//        маячок: socket(fam, 6, 0) -> errno 1338;
+//        рабочий сокет: socket(fam, 4, 0), root-only;
+//        команды: getsockopt(fd, level=pid, optname, &req, 0x28), чтение
+//        0x300 / запись 0x303, запрос {pid, pad, addr, buf, size, magic};
+//        ядро само находит mm (find_get_pid -> get_task_mm -> page walk).
 //
-// Отличие от экстернала: ни fd /proc/pid/mem, ни прав ptrace — ядро само
-// находит mm целевого процесса по pid и переносит данные в наш буфер.
-// SELinux/yama на /proc при этом не задействованы.
+//   2) gongchuang — публичный референс (github:
+//      gongchuang1089/android_kerneldriver_gongchuang, ядра 5.1-6.12):
+//        маячок: socket(fam, 6, 0) -> ENOKEY/126 (чужой тип сокета);
+//        рабочий сокет: socket(fam, SOCK_RAW=3, 0x090419), root-only;
+//        команды 0..6 через getsockopt: ACCESS_PROCESS_VM=4 с запросом
+//        {from, from_addr, to, to_addr, size} (копия между процессами в
+//        любую сторону), PTE_PHYS_READ/WRITE_MEMORY=5/6 с запросом
+//        {vaddr, buffer, size} после ATTACH_PROCESS=2 (level = pid).
 //
-// Все константы протокола собраны в kDriver* ниже: если на конкретной сборке
-// драйвера коды команд другие — правится одно место.
+// Протокол и коды команд ВЫУЧИВАЮТСЯ на месте (detect_protocol): короткий
+// список известных кодов -> gongchuang-сокет -> полный скан 0..0x7FF. Все
+// пробы идут по СОБСТВЕННОЙ памяти процесса (pid-поля указывают на себя),
+// /proc не участвует: данные могут сойтись, только если ядро реально сходило
+// по страницам нашего процесса. Диагностика всего этого — xvcen --scan-driver.
+//
+// Отличие от экстернала: ни fd /proc/pid/mem, ни прав ptrace — SELinux/yama
+// на /proc не задействованы.
 
 #pragma once
 
@@ -51,27 +49,27 @@
 
 namespace memio {
 
-// ---- константы протокола драйвера bing_rw -------------------------------
-// Диапазон семейств, в котором драйвер регистрируется: sock_register ищет
-// свободный слот начиная с AF_DECnet (12); выше NPROTO (44) слотов нет.
+// ---- класс 1: bing_rw (реверс payload из drivers.7z) ----------------------
 constexpr int kDriverFamilyFirst = 12;
 constexpr int kDriverFamilyLast  = 43;
-// Тип сокета-маячка: на нём create() драйвера отвечает своим errno.
 constexpr int kDriverProbeType   = 6;
-// Маячок: errno, которым драйвер отвечает на пробу не тем типом сокета.
 constexpr int kDriverProbeErrno  = 1338;
-// Тип и протокол рабочего сокета.
 constexpr int kDriverSockType    = 4;
 constexpr int kDriverSockProto   = 0;
-// Коды команд getsockopt (optname).
 constexpr int kDriverCmdRead     = 0x300;
 constexpr int kDriverCmdWrite    = 0x303;
-// Магия в поле +0x20 запроса.
 constexpr uint32_t kDriverMagic  = 0x1337;
 
-// Запрос чтения/записи (0x28 байт; раскладка полей — по дизассемблу
-// обработчиков команды 0x300: pid из +0x00, addr из +0x08, buf из +0x10,
-// size из +0x18, магия +0x20).
+// ---- класс 2: gongchuang (публичный референс) -----------------------------
+constexpr int kGongSockType    = 3;        // SOCK_RAW
+constexpr int kGongSockProto   = 0x090419; // магия протокола в create()
+constexpr int kGongProbeErrno  = 126;      // ENOKEY: чужой тип/протокол сокета
+constexpr int kGongCmdAttach   = 2;        // ATTACH_PROCESS: level = pid
+constexpr int kGongCmdAccessVm = 4;        // ACCESS_PROCESS_VM
+constexpr int kGongCmdPteRead  = 5;        // PTE_PHYS_READ_MEMORY
+constexpr int kGongCmdPteWrite = 6;        // PTE_PHYS_WRITE_MEMORY
+
+// Запрос bing_rw (0x28 байт; раскладка — по дизассемблу обработчиков).
 #pragma pack(push, 1)
 struct DriverRwReq {
     uint32_t pid;          // +0x00: целевой процесс
@@ -83,47 +81,38 @@ struct DriverRwReq {
     uint32_t pad2;         // +0x24
 };
 #pragma pack(pop)
-static_assert(sizeof(DriverRwReq) == 0x28, "размер запроса драйвера изменился");
+static_assert(sizeof(DriverRwReq) == 0x28, "размер запроса bing_rw изменился");
 
-// ---- поиск драйвера -------------------------------------------------------
+// Запрос gongchuang ACCESS_PROCESS_VM (естественная раскладка, как в ядре:
+// pid_t + паддинг + указатель; копирует from/from_addr -> to/to_addr).
+struct GongVmReq {
+    uint32_t from;         // +0x00: откуда (pid)
+    uint32_t pad;          // +0x04
+    uint64_t from_addr;    // +0x08: адрес-источник
+    uint32_t to;           // +0x10: куда (pid)
+    uint32_t pad2;         // +0x14
+    uint64_t to_addr;      // +0x18: адрес-приёмник
+    uint64_t size;         // +0x20
+};
+static_assert(sizeof(GongVmReq) == 0x28, "размер запроса gong_vm изменился");
 
-// Перебираем семейства и ищем маячок (errno 1338 на socket(dom, 6, 0)).
-// Возвращает номер семейства или -1. Вызывать от root'а: без root create()
-// драйвера отвечает EAFNOSUPPORT и маячок не виден.
-inline int driver_find_family() {
-    for (int dom = kDriverFamilyFirst; dom <= kDriverFamilyLast; ++dom) {
-        errno = 0;
-        const int probe = socket(dom, kDriverProbeType, kDriverSockProto);
-        if (probe >= 0) {
-            // Обычное семейство (netlink, alg…) — не драйвер.
-            close(probe);
-            continue;
-        }
-        if (errno == kDriverProbeErrno) return dom;
-    }
-    return -1;
-}
+// Запрос gongchuang PTE_*_MEMORY (после ATTACH_PROCESS: цель — pid сокета).
+struct PteRwReq {
+    uint64_t vaddr;        // +0x00: адрес в памяти цели
+    uint64_t buffer;       // +0x08: наш буфер
+    uint64_t size;         // +0x10
+};
+static_assert(sizeof(PteRwReq) == 0x18, "размер запроса pte изменился");
 
-// ---- живая карта команд драйвера ------------------------------------------
+// ---- живая проба команды (по собственной памяти) --------------------------
 //
-// Проверка «драйвер действительно переносит данные» и «этот код команды —
-// чтение или запись» делается ОДНОЙ пробой против СОБСТВЕННОЙ памяти
-// процесса: два буфера с разными известными паттернами, одна команда, и
-// смотрим, какой буфер изменился. /proc здесь не участвует — данные могут
-// сойтись, только если ядро реально сходило по страницам нашего процесса
-// (find_get_pid → get_task_mm → проход таблиц → copy_to/from_user).
-//
-// Это же — диагностика расхождений между сборками драйвера: коды
-// чтения/записи проверяются на месте (learn_commands) по живым пробам —
-// но только для ОТЧЁТА (--check-driver), транспорт работает кодами из
-// реверса. Если драйвер отказывает в доступе к самому себе (бывает у
-// сторонних сборок), карта остаётся неизвестной — это НЕ приговор:
-// транспорт к игре проверяется по-настоящему при привязке (bind читает
-// ELF-заголовок libil2cpp через драйвер, экстернал-путь не задействован).
+// Два буфера с разными паттернами, одна команда — и смотрим, кто куда
+// скопировался. /proc не участвует: данные сойдутся, только если ядро
+// реально сходило по страницам нашего процесса.
 enum CmdKind {
     CMD_NONE  = 0,   // команда не выполнилась / данные не двигались
-    CMD_READ  = 1,   // память процесса скопирована К нам (target -> buf)
-    CMD_WRITE = 2,   // наш буфер скопирован В память процесса (buf -> target)
+    CMD_READ  = 1,   // память цели -> наш буфер
+    CMD_WRITE = 2,   // наш буфер -> память цели
 };
 
 struct CmdProbe {
@@ -131,75 +120,117 @@ struct CmdProbe {
     int     err  = 0;   // errno, если getsockopt отказал
 };
 
+// ---- поиск драйвера -------------------------------------------------------
+//
+// Перебираем семейства и ищем маячок на пробе socket(dom, 6, 0):
+// 1338 — bing-класс, 126 (ENOKEY) — gongchuang-класс. Обычные семейства на
+// таком типе дают EAFNOSUPPORT/EPROTONOSUPPORT. Без root create() драйвера
+// отвечает EAFNOSUPPORT и маячок не виден.
+inline int driver_find_family(int* beacon_out = nullptr) {
+    const int beacons[2] = { kDriverProbeErrno, kGongProbeErrno };
+    for (int b = 0; b < 2; ++b) {
+        for (int dom = kDriverFamilyFirst; dom <= kDriverFamilyLast; ++dom) {
+            errno = 0;
+            const int probe = socket(dom, kDriverProbeType, kDriverSockProto);
+            if (probe >= 0) { close(probe); continue; }
+            if (errno == beacons[b]) {
+                if (beacon_out) *beacon_out = beacons[b];
+                return dom;
+            }
+        }
+    }
+    return -1;
+}
+
 // ---- транспорт к памяти игры через драйвер --------------------------------
+
+enum DriverProto {
+    PROTO_BING     = 0,   // 0x28-запрос {pid,addr,buf,size,magic}; pid в запросе
+    PROTO_GONG_VM  = 1,   // op4 ACCESS_PROCESS_VM: pids в запросе, направление задаём мы
+    PROTO_GONG_PTE = 2,   // attach(op2) + op5/op6 {vaddr,buffer,size}
+};
 
 class KernelTransport : public Transport {
 public:
     const char* name() const override { return "kernel (драйвер)"; }
 
-    // Привязка к процессу: рабочего сокета может ещё не быть — поднимаем.
-    // pid запоминаем: он уходит в каждый запрос, драйвер сам находит mm.
+    // Привязка к процессу: поднимаем сокеты, протокол и коды команд уже
+    // должны быть выучены (detect_protocol в driver_available); для
+    // pte-протокола цепляемся к pid сокетом (ATTACH_PROCESS).
     bool open(pid_t pid) override {
         if (pid <= 0) return false;
         if (!ensure_socket()) return false;
+        if (!map_known_ && !scanned_) detect_protocol();
+        if (proto_ == PROTO_GONG_PTE && !gong_attach((int)pid)) return false;
         pid_ = (int)pid;
         return true;
     }
 
-    // Сокет драйвера живёт, сколько живёт процесс чита: закрывать его на
+    // Сокеты драйвера живут, сколько живёт процесс чита: закрывать их на
     // отвязке не нужно (переподключение нужно, только если драйвер выгрузили).
     void close() override { pid_ = -1; }
 
-    // Сокет потерян (драйвер выгрузили/перезагрузили) — перевзять при
-    // следующем open(). Вызывается после серии отказов.
+    // Сокеты потеряны (драйвер выгрузили/перезагрузили) — перевзять при
+    // следующем open(). Карта команд тоже сбрасывается: перепрошитый драйвер
+    // может говорить другим протоколом.
     void invalidate() {
-        if (sock_ >= 0) {
-            ::close(sock_);
-            sock_ = -1;
-        }
+        if (sock_ >= 0) { ::close(sock_); sock_ = -1; }
+        if (gong_sock_ >= 0) { ::close(gong_sock_); gong_sock_ = -1; }
         family_ = -1;
-        // Карта команд могла измениться (драйвер перепрошили) — сброс к
-        // дефолтам, learn_commands() при следующей проверке выучит заново.
-        read_cmd_  = kDriverCmdRead;
+        proto_ = PROTO_BING;
+        read_cmd_ = kDriverCmdRead;
         write_cmd_ = kDriverCmdWrite;
         map_known_ = false;
+        scanned_ = false;
+        attached_pid_ = -1;
     }
 
     ssize_t read_once(uint64_t addr, void* out, size_t len) override {
-        // Коды из реверса диспетчера драйвера, подтверждённые на устройстве
-        // (привязка к игре через них работает). Карта команд из live-проб
-        // (learn_commands) сюда НЕ подмешивается: пробы по собственной памяти
-        // на части сборок драйвера невозможны, а слепые пробы неизвестных
-        // кодов перед привязкой могут потревожить драйвер.
-        return rw(kDriverCmdRead, addr, out, len);
+        switch (proto_) {
+            case PROTO_GONG_VM:  return gong_vm_rw(true, addr, out, len);
+            case PROTO_GONG_PTE: return gong_pte_rw(true, addr, out, len);
+            default:             return rw(read_cmd_, addr, out, len);
+        }
     }
 
     ssize_t write_once(uint64_t addr, const void* in, size_t len) override {
-        return rw(kDriverCmdWrite, addr, const_cast<void*>(in), len);
+        switch (proto_) {
+            case PROTO_GONG_VM:  return gong_vm_rw(false, addr, const_cast<void*>(in), len);
+            case PROTO_GONG_PTE: return gong_pte_rw(false, addr, const_cast<void*>(in), len);
+            default:             return rw(write_cmd_, addr, const_cast<void*>(in), len);
+        }
     }
 
     int  family() const { return family_; }
     int  socket_fd() const { return sock_; }
-    bool connected() const { return sock_ >= 0; }
+    bool connected() const { return sock_ >= 0 || gong_sock_ >= 0; }
 
-    // Поднять рабочий сокет (если ещё не поднят). Возвращает fd или -1.
+    // Поднять рабочий сокет bing-класса (если ещё не поднят).
     int connect() {
         if (!ensure_socket()) return -1;
         return sock_;
     }
 
-    // Выученные коды команд (после learn_commands; до неё — дефолты).
+    // Выученное: протокол и коды команд (после detect_protocol).
+    DriverProto proto() const { return proto_; }
+    const char* proto_name() const {
+        switch (proto_) {
+            case PROTO_GONG_VM:  return "gongchuang (ACCESS_PROCESS_VM)";
+            case PROTO_GONG_PTE: return "gongchuang (PTE)";
+            default:             return "bing_rw";
+        }
+    }
     int  read_cmd()  const { return read_cmd_; }
     int  write_cmd() const { return write_cmd_; }
-    // Подтверждена ли карта команд живыми пробами. false — драйвер, похоже,
-    // не даёт доступ к собственной памяти: транспорт всё равно рабочий,
-    // настоящая проверка — привязка к игре.
+    // Подтверждена ли карта живыми пробами. false — коды дефолтные и не
+    // подтверждены: транспорт всё равно пробует привязкой к игре, а
+    // отказ виден с errno (92/ENOPROTOOPT = код не распознан).
     bool map_known() const { return map_known_; }
 
-    // Одна живая проба команды против собственной памяти: заполняем два
-    // буфера разными паттернами, отдаём команду «addr=первый, buf=второй»
-    // и смотрим, кто куда скопировался. classify(x)==CMD_READ гарантирует,
-    // что данные прошли через ядро (экстернал здесь не замешан).
+    // ---- пробы (публичные: ими же печатает карту --scan-driver) ----------
+
+    // Проба bing-кода: одна команда, addr=pat, buf=mirror. Чтение скопирует
+    // pat -> mirror; запись — mirror -> pat (запрос симметричный).
     CmdProbe classify_cmd(int cmd) {
         CmdProbe r;
         if (!ensure_socket()) { r.err = errno ? errno : EIO; return r; }
@@ -219,49 +250,183 @@ public:
             r.err = errno;
             return r;
         }
-        // mirror получил содержимое pat, pat не тронут — команда ЧИТАЕТ.
         if (mirror[0] == pat0 && mirror[1] == pat1 &&
             pat[0] == pat0 && pat[1] == pat1) { r.kind = CMD_READ; return r; }
-        // pat получил содержимое mirror — команда ПИШЕТ (user_buf -> addr).
         if (pat[0] == mir0 && pat[1] == mir1) { r.kind = CMD_WRITE; return r; }
-        // Команда принята, но данные не двигались (чужая структура запроса
-        // или команда-заглушка).
+        return r;   // принята, но данные не двигались
+    }
+
+    // Проба gongchuang op4 (ACCESS_PROCESS_VM): копия from -> to, направление
+    // задаём мы сами, поэтому «наш» read и write — одна и та же команда.
+    CmdProbe classify_gong_vm(int fd, int cmd) {
+        CmdProbe r;
+        uint64_t pat[2]    = { 0x1234567890ABCDEFULL, 0x0F1E2D3C4B5A6978ULL };
+        uint64_t mirror[2] = { 0xAABBCCDD11223344ULL, 0x5566778899AABBCCULL };
+        const uint64_t pat0 = pat[0], pat1 = pat[1];
+        GongVmReq req;
+        memset(&req, 0, sizeof(req));
+        req.from      = (uint32_t)getpid();
+        req.from_addr = (uint64_t)(uintptr_t)pat;
+        req.to        = (uint32_t)getpid();
+        req.to_addr   = (uint64_t)(uintptr_t)mirror;
+        req.size      = sizeof(pat);
+        socklen_t optlen = sizeof(req);
+        if (getsockopt(fd, (int)req.from, cmd, (char*)&req, &optlen) != 0) {
+            r.err = errno;
+            return r;
+        }
+        if (mirror[0] == pat0 && mirror[1] == pat1) { r.kind = CMD_READ; return r; }
         return r;
     }
 
-    // Выучить карту команд: перебираем известные коды этого класса драйверов
-    // (все с 0x28-байтной структурой запроса; 0x302 берёт другую структуру —
-    // не трогаем) и запоминаем, какой читает, какой пишет. Вызывать от root'а
-    // ДО первого bind (экран режима / --check-driver): пробы идут по нашей
-    // собственной памяти и ничего в игре не трогают.
-    void learn_commands() {
-        map_known_ = false;
-        if (!ensure_socket()) return;
-        const int cand[3] = { kDriverCmdRead, 0x301, kDriverCmdWrite };
-        int readFound = 0, writeFound = 0;
-        for (int i = 0; i < 3; ++i) {
-            const CmdProbe p = classify_cmd(cand[i]);
-            if (p.kind == CMD_NONE) continue;
-            map_known_ = true;
-            if (p.kind == CMD_READ  && !readFound)  readFound  = cand[i];
-            if (p.kind == CMD_WRITE && !writeFound) writeFound = cand[i];
+    // Проба gongchuang pte-команды (op5 читает vaddr -> buffer, op6 пишет
+    // buffer -> vaddr; цель — ATTACHнутый pid, для пробы цепляемся к себе).
+    CmdProbe classify_pte(int fd, int cmd) {
+        CmdProbe r;
+        // чтение: vaddr=pat, buffer=mirror
+        {
+            uint64_t pat[2]    = { 0x1234567890ABCDEFULL, 0x0F1E2D3C4B5A6978ULL };
+            uint64_t mirror[2] = { 0xAABBCCDD11223344ULL, 0x5566778899AABBCCULL };
+            const uint64_t pat0 = pat[0], pat1 = pat[1];
+            PteRwReq req;
+            memset(&req, 0, sizeof(req));
+            req.vaddr  = (uint64_t)(uintptr_t)pat;
+            req.buffer = (uint64_t)(uintptr_t)mirror;
+            req.size   = sizeof(pat);
+            socklen_t optlen = sizeof(req);
+            if (getsockopt(fd, (int)getpid(), cmd, (char*)&req, &optlen) == 0 &&
+                mirror[0] == pat0 && mirror[1] == pat1) { r.kind = CMD_READ; return r; }
+            if (r.kind == CMD_NONE && errno != ENOPROTOOPT && errno != EOPNOTSUPP)
+                r.err = errno;
         }
-        if (readFound)  read_cmd_  = readFound;
-        if (writeFound) write_cmd_ = writeFound;
+        // запись: vaddr=scratch, buffer=wsrc
+        {
+            uint64_t scratch[2] = { 1, 1 };
+            uint64_t wsrc[2]    = { 0xA5A55A5ADEADBEEFULL, 0x0BADC0DE0DDC0FFEULL };
+            PteRwReq req;
+            memset(&req, 0, sizeof(req));
+            req.vaddr  = (uint64_t)(uintptr_t)scratch;
+            req.buffer = (uint64_t)(uintptr_t)wsrc;
+            req.size   = sizeof(scratch);
+            socklen_t optlen = sizeof(req);
+            if (getsockopt(fd, (int)getpid(), cmd, (char*)&req, &optlen) == 0 &&
+                scratch[0] == wsrc[0] && scratch[1] == wsrc[1]) {
+                r.kind = CMD_WRITE;
+                r.err = 0;
+                return r;
+            }
+        }
+        return r;
     }
 
-    // Полный self-test: карта выучена, чтение читает, запись пишет.
-    // false значит лишь «по собственной памяти не проверить» — режим при
-    // найденном сокете всё равно включается и проверяется привязкой к игре.
+    // ATTACH_PROCESS (op2): привязать сокет к pid — цель pte-команд.
+    bool gong_attach(int pid) {
+        if (pid <= 0) return false;
+        if (!gong_ensure_socket()) return false;
+        if (attached_pid_ == pid) return true;
+        char dummy[8] = {};
+        socklen_t optlen = sizeof(dummy);
+        if (getsockopt(gong_sock_, pid, kGongCmdAttach, dummy, &optlen) != 0)
+            return false;
+        attached_pid_ = pid;
+        return true;
+    }
+
+    // Поднять gongchuang-сокет (socket(fam, SOCK_RAW, 0x090419)). Не каждый
+    // драйвер класса его даёт — bing-сборки отвечают своим маячком.
+    int gong_connect() {
+        if (!gong_ensure_socket()) return -1;
+        return gong_sock_;
+    }
+    int gong_socket_fd() const { return gong_sock_; }
+
+    // ---- выучить протокол и коды команд ----------------------------------
+    //
+    // 1) известные коды bing (0x300/0x301/0x303);
+    // 2) gongchuang-сокет: op4 (ACCESS_PROCESS_VM), затем op5/op6 (PTE);
+    // 3) полный скан 0..0x7FF bing-структурой — сборки под другие ядра
+    //    используют другие коды (маячок и сокет те же).
+    // Пробы идут по собственной памяти, pid-поля указывают на себя.
+    void detect_protocol() {
+        map_known_ = false;
+        proto_ = PROTO_BING;
+        read_cmd_ = kDriverCmdRead;
+        write_cmd_ = kDriverCmdWrite;
+        if (family_ < 0) family_ = driver_find_family();
+        if (family_ < 0) return;
+
+        // 1) известные коды bing (нужен bing-сокет — не у всех сборок он есть)
+        const int bingCand[3] = { kDriverCmdRead, 0x301, kDriverCmdWrite };
+        int rd = 0, wr = 0;
+        if (ensure_socket()) {
+            for (int i = 0; i < 3; ++i) {
+                const CmdProbe p = classify_cmd(bingCand[i]);
+                if (p.kind == CMD_READ  && !rd) rd = bingCand[i];
+                if (p.kind == CMD_WRITE && !wr) wr = bingCand[i];
+            }
+        }
+        if (rd && wr) {
+            read_cmd_ = rd; write_cmd_ = wr;
+            map_known_ = true;
+            return;
+        }
+
+        // 2) gongchuang: ACCESS_PROCESS_VM
+        if (gong_ensure_socket()) {
+            if (classify_gong_vm(gong_sock_, kGongCmdAccessVm).kind == CMD_READ) {
+                proto_ = PROTO_GONG_VM;
+                map_known_ = true;
+                return;
+            }
+            // pte: attach к себе + op5/op6
+            if (gong_attach((int)getpid())) {
+                if (classify_pte(gong_sock_, kGongCmdPteRead).kind == CMD_READ &&
+                    classify_pte(gong_sock_, kGongCmdPteWrite).kind == CMD_WRITE) {
+                    proto_ = PROTO_GONG_PTE;
+                    map_known_ = true;
+                    attached_pid_ = -1;   // к игре цепимся заново в open()
+                    return;
+                }
+                attached_pid_ = -1;
+            }
+        }
+
+        // 3) полный скан: bing-класс с другими кодами (наш случай на 5.10.240)
+        scanned_ = true;
+        if (sock_ >= 0) {
+            for (int c = 0; c <= 0x7FF && !(rd && wr); ++c) {
+                if (c == kDriverCmdRead || c == 0x301 || c == kDriverCmdWrite)
+                    continue;   // уже проверены на шаге 1
+                const CmdProbe p = classify_cmd(c);
+                if (p.kind == CMD_NONE) continue;
+                map_known_ = true;
+                if (p.kind == CMD_READ  && !rd) { rd = c; read_cmd_ = c; }
+                if (p.kind == CMD_WRITE && !wr) { wr = c; write_cmd_ = c; }
+            }
+        }
+        if (rd || wr) map_known_ = true;   // хоть что-то нашли — коды рабочие
+    }
+
+    bool scanned() const { return scanned_; }
+
+    // Полный self-test (диагностика): карта выучена и подтверждена.
     bool self_test() {
-        learn_commands();
+        detect_protocol();
         if (!map_known_) return false;
-        return classify_cmd(read_cmd_).kind == CMD_READ &&
-               classify_cmd(write_cmd_).kind == CMD_WRITE;
+        switch (proto_) {
+            case PROTO_GONG_VM:
+                return classify_gong_vm(gong_sock_, kGongCmdAccessVm).kind == CMD_READ;
+            case PROTO_GONG_PTE:
+                return classify_pte(gong_sock_, kGongCmdPteRead).kind == CMD_READ &&
+                       classify_pte(gong_sock_, kGongCmdPteWrite).kind == CMD_WRITE;
+            default:
+                return classify_cmd(read_cmd_).kind == CMD_READ &&
+                       classify_cmd(write_cmd_).kind == CMD_WRITE;
+        }
     }
 
 private:
-    // Общий движок: собрать запрос и позвать getsockopt.
+    // bing: собрать 0x28-запрос и позвать getsockopt.
     ssize_t rw(int cmd, uint64_t addr, void* buf, size_t len) {
         const int fd  = sock_;
         const int pid = pid_;
@@ -274,11 +439,50 @@ private:
         req.size     = (uint64_t)len;
         req.magic    = kDriverMagic;
         // level обязан быть != SOL_SOCKET, иначе getsockopt уйдёт в generic
-        // обработчик сокета, а не в драйвер. Сам модуль level не проверяет —
-        // передаём pid (так же делает публичный драйвер этого класса).
+        // обработчик сокета (он-то и отвечает ENOPROTOOPT на чужой optname).
         socklen_t optlen = sizeof(req);
         const int rc = getsockopt(fd, (int)pid, cmd, (char*)&req, &optlen);
         if (rc != 0) return -1;
+        return (ssize_t)len;
+    }
+
+    // gongchuang op4: копия from -> to; направление задаём раскладкой полей.
+    ssize_t gong_vm_rw(bool is_read, uint64_t addr, void* buf, size_t len) {
+        const int fd = gong_sock_ >= 0 ? gong_sock_ : sock_;
+        const int pid = pid_;
+        const int self = (int)getpid();
+        if (fd < 0 || pid <= 0 || !buf || !len) { errno = EBADF; return -1; }
+        GongVmReq req;
+        memset(&req, 0, sizeof(req));
+        if (is_read) {
+            req.from = (uint32_t)pid;   req.from_addr = addr & kAddressTagMask;
+            req.to   = (uint32_t)self;  req.to_addr   = (uint64_t)(uintptr_t)buf;
+        } else {
+            req.from = (uint32_t)self;  req.from_addr = (uint64_t)(uintptr_t)buf;
+            req.to   = (uint32_t)pid;   req.to_addr   = addr & kAddressTagMask;
+        }
+        req.size = (uint64_t)len;
+        socklen_t optlen = sizeof(req);
+        if (getsockopt(fd, pid, kGongCmdAccessVm, (char*)&req, &optlen) != 0)
+            return -1;
+        return (ssize_t)len;
+    }
+
+    // gongchuang pte: op5 читает vaddr -> buffer, op6 пишет buffer -> vaddr;
+    // цель — pid, к которому сокет прицеплен (gong_attach).
+    ssize_t gong_pte_rw(bool is_read, uint64_t addr, void* buf, size_t len) {
+        const int fd = gong_sock_ >= 0 ? gong_sock_ : sock_;
+        const int pid = pid_;
+        if (fd < 0 || pid <= 0 || !buf || !len) { errno = EBADF; return -1; }
+        if (attached_pid_ != pid && !gong_attach(pid)) return -1;
+        PteRwReq req;
+        memset(&req, 0, sizeof(req));
+        req.vaddr  = addr & kAddressTagMask;
+        req.buffer = (uint64_t)(uintptr_t)buf;
+        req.size   = (uint64_t)len;
+        socklen_t optlen = sizeof(req);
+        const int cmd = is_read ? kGongCmdPteRead : kGongCmdPteWrite;
+        if (getsockopt(fd, pid, cmd, (char*)&req, &optlen) != 0) return -1;
         return (ssize_t)len;
     }
 
@@ -293,40 +497,51 @@ private:
         return true;
     }
 
-    int sock_   = -1;   // рабочий сокет драйвера
+    bool gong_ensure_socket() {
+        if (gong_sock_ >= 0) return true;
+        if (family_ < 0) family_ = driver_find_family();
+        if (family_ < 0) { errno = EAFNOSUPPORT; return false; }
+        errno = 0;
+        const int fd = socket(family_, kGongSockType, kGongSockProto);
+        if (fd < 0) return false;
+        gong_sock_ = fd;
+        return true;
+    }
+
+    int sock_   = -1;   // рабочий сокет bing-класса (тип 4)
+    int gong_sock_ = -1;// сокет gongchuang-класса (SOCK_RAW, 0x090419)
     int family_ = -1;   // найденное семейство
     int pid_    = -1;   // целевой процесс
-    // Карта команд (выучивается live-пробами по собственной памяти; дефолты —
-    // из реверса диспетчера драйвера).
+    // Карта команд/протокол (выучиваются пробами по собственной памяти).
+    DriverProto proto_ = PROTO_BING;
     int  read_cmd_  = kDriverCmdRead;
     int  write_cmd_ = kDriverCmdWrite;
     bool map_known_ = false;
+    bool scanned_   = false;   // полный скан 0..0x7FF уже делали
+    int  attached_pid_ = -1;   // pid, к которому прицеплен gong-сокет (op2)
 };
 
 // Единый экземпляр транспорта: читает поток отрисовки, дёргают поток
-// привязки (open) и фоновые писатели. Состояние — два int, сокет
-// сериализуется ядром, запрос живёт на стеке вызывающего.
+// привязки (open) и фоновые писатели. Запрос живёт на стеке вызывающего.
 inline KernelTransport& kernel_transport() {
     static KernelTransport t;
     return t;
 }
 
-// Быстрая проверка «драйвер загружен?» для меню: находит семейство и
-// поднимает рабочий сокет, но не привязывается к процессу. Никаких проб
-// команд здесь нет — слепые пробы неизвестных кодов могут потревожить
-// драйвер; диагностика команд живёт только в --check-driver.
+// Проверка «драйвер загружен?» для меню: находит семейство, поднимает сокет
+// (bing или gongchuang) и ВЫУЧИВАЕТ протокол (короткий список кодов, при
+// неудаче — полный скан). Пробы идут по собственной памяти, до привязки к игре.
 inline bool driver_available(int* family_out = nullptr) {
     KernelTransport& t = kernel_transport();
-    if (!t.connected() && t.connect() < 0) return false;
+    if (!t.connected() && t.connect() < 0 && t.gong_connect() < 0) return false;
     if (family_out) *family_out = t.family();
+    if (!t.map_known()) t.detect_protocol();
     return true;
 }
 
-// Полная проверка драйвера: не только «сокет открывается», но и «данные
-// реально ходят» (чтение + запись собственной памяти через драйвер).
-// false не значит «кернел выключен»: если драйвер найден, режим включается
-// и по-настоящему проверяется привязкой к игре (bind читает ELF-заголовок
-// libil2cpp через драйвер, /proc не задействован).
+// Полная проверка драйвера (диагностика): протокол выучен и подтверждён
+// живыми пробами. false не значит «кернел выключен»: режим включается и
+// проверяется привязкой к игре (bind читает ELF-заголовок libil2cpp).
 inline bool driver_self_test() {
     return kernel_transport().self_test();
 }
