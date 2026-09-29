@@ -2355,46 +2355,23 @@ bool position_looks_like_world_space(const Vec3& position) {
     return fabsf(position.x) + fabsf(position.y) + fabsf(position.z) > 0.01F;
 }
 
-// Validate the configured release field first. If the combat client has not
-// populated that cache yet, use its fixed Player.worldCameraRoot -> native
-// Transform hierarchy chain. This avoids trying unrelated PlayerManager
-// fields while still keeping ESP alive across scene/respawn cache gaps.
+// old_source validates the direct PlayerManager position before considering
+// any Transform fallback. The supported release layout fixes that field at
+// PLAYER_POSITION, so keep the same proven data path without scanning alternate
+// offsets at runtime. In particular, do not reject a valid direct position just
+// because a native Transform read also looked plausible but used another pivot.
 static bool validate_player_position_field(const std::vector<uint64_t>& players) {
-    bool direct_valid = false;
-    bool hierarchy_valid = false;
-    bool direct_confirmed = false;
     for (uint64_t player : players) {
         if (!player) continue;
         const Vec3 direct = rd_v3(player + PLAYER_POSITION);
-        const bool has_direct = position_looks_like_world_space(direct);
-        direct_valid |= has_direct;
-
-        Vec3 hierarchy{};
-        const uint64_t native = resolve_player_native_transform(player);
-        const bool has_hierarchy = native &&
-            read_transform_hierarchy_position(native, hierarchy) &&
-            position_looks_like_world_space(hierarchy);
-        hierarchy_valid |= has_hierarchy;
-        if (has_direct && has_hierarchy) {
-            const float dx = direct.x - hierarchy.x;
-            const float dy = direct.y - hierarchy.y;
-            const float dz = direct.z - hierarchy.z;
-            if (dx * dx + dy * dy + dz * dz <= 5.0F * 5.0F)
-                direct_confirmed = true;
-        }
-    }
-
-    if (direct_confirmed || (direct_valid && !hierarchy_valid)) {
+        if (!position_looks_like_world_space(direct)) continue;
         g_player_position_offset = PLAYER_POSITION;
         g_use_direct_player_position = true;
-    } else if (hierarchy_valid) {
-        g_use_direct_player_position = false;
-    } else {
-        return false;
+        g_player_position_validated = true;
+        g_matrix_configuration_validated = false;
+        return true;
     }
-    g_player_position_validated = true;
-    g_matrix_configuration_validated = false;
-    return true;
+    return false;
 }
 
 static bool g_body_caches_dirty = false; // clear per-player caches on the next frame
@@ -6045,7 +6022,7 @@ static EspAttachState g_attach_state = ESP_ATTACH_OK;
 
 EspAttachState esp_attach_state() { return g_attach_state; }
 
-bool esp_init(pid_t pid) {
+bool esp_init(pid_t pid, bool package_verified_release) {
     std::lock_guard<std::recursive_mutex> viewmodel_guard(viewmodel_session_mutex());
     esp_reset();
     g_pid = pid;
@@ -6071,10 +6048,21 @@ bool esp_init(pid_t pid) {
         if (base_resolves_game(candidates[i])) { chosen = candidates[i]; break; }
         g_mem.unbind();
     }
+    if (!chosen && package_verified_release) {
+        // old_source attached to the first readable libil2cpp mapping while
+        // TypeInfo statics were still null during loading, then resolved the
+        // game data once Unity initialized them. Preserve that working path
+        // only for the exact official release package. Renamed/cloned Unity
+        // candidates still have to pass base_resolves_game(), so this cannot
+        // silently reintroduce a build selector or alternate-client support.
+        for (int i = 0; i < candidate_count; ++i) {
+            if (g_mem.bind(pid, candidates[i])) {
+                chosen = candidates[i];
+                break;
+            }
+        }
+    }
     if (!chosen) {
-        // Keep attachment release-only. During early loading TypeInfo may not
-        // be initialized yet; the process thread retries instead of accepting
-        // an unvalidated Unity process or a differently laid out client.
         g_attach_state = ESP_ATTACH_BAD_IMAGE;
         g_il2cpp_base = 0;
         g_pid = -1;

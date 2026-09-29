@@ -15,6 +15,7 @@
 #include "logfile.h"
 #include "theme.h"
 #include "app_state.h"
+#include "overlay_geometry.h"
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -44,22 +45,20 @@ int main(int argc, char* argv[]) {
     screen_config();
 
     mkdir(CfgDir(), 0777);
-    int abs_ScreenX = displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width;
-    int abs_ScreenY = displayInfo.height < displayInfo.width ? displayInfo.height : displayInfo.width;
+    const OverlayGeometry overlay =
+        MakeOverlayGeometry(displayInfo.width, displayInfo.height);
 
-    g_sw = static_cast<float>(abs_ScreenX);
-    g_sh = static_cast<float>(abs_ScreenY);
+    g_sw = static_cast<float>(overlay.scene_width);
+    g_sh = static_cast<float>(overlay.scene_height);
 
-    native_window_screen_x = abs_ScreenX;
-    native_window_screen_y = abs_ScreenY;
-    // Поверхность оверлея должна быть (max × min) = ландшафт, ровно в тех
-    // координатах, в которые ESP/аим/фарм проецируют сцену (DrawEspOverlay,
-    // UpdateAim, UpdateFarm — все считают sw = max(w,h), sh = min(w,h)).
-    // Раньше сюда по ошибке уходило (max × max) — квадрат, и вся проекция
-    // укладывалась в верхнюю полоску квадратной поверхности, которую
-    // композитор ещё и скалировал на физический ландшафтный экран. Так
-    // визуалы «не работали» при правильных оффсетах.
-    if (!initGUI_draw(native_window_screen_x, native_window_screen_y, true)) return -1;
+    native_window_screen_x = overlay.scene_width;
+    native_window_screen_y = overlay.scene_height;
+    // Surface оставляем квадратным, как в old_source. Android композитор сам
+    // поворачивает/обрезает overlay при смене ориентации; прямоугольный
+    // landscape Surface (max x min) в portrait показывал только его верхний
+    // фрагмент. Квадрат max x max инвариантен к 0/90/180/270 градусам, а
+    // видимая геометрия меню всё равно ограничивается реальными width/height.
+    if (!initGUI_draw(overlay.surface_side, overlay.surface_side, true)) return -1;
     Blur::Init();
     CfgWatchInit();
     AudioInit();

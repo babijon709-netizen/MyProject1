@@ -103,7 +103,11 @@ enum EspAttachState {
     ESP_ATTACH_BAD_IMAGE,
 };
 
-bool          esp_init(pid_t pid);
+// package_verified_release may be true only for the exact official release
+// applicationId. It permits the old_source-compatible early-loading attach
+// before IL2CPP TypeInfo statics are initialized; renamed candidates remain
+// strictly image-validated.
+bool          esp_init(pid_t pid, bool package_verified_release = false);
 void          esp_reset();
 EspAttachState esp_attach_state();
 // Начало кадра: сброс кэша блоков памяти игры (см. mem_io.h).

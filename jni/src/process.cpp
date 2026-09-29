@@ -143,7 +143,7 @@ void start_attach_thread() {
             if (!g_esp_attached) {
                 pid_t attached_pid = -1;
                 const pid_t official = find_game_pid();
-                if (official > 0 && esp_init(official)) {
+                if (official > 0 && esp_init(official, true)) {
                     attached_pid = official;
                     g_target_by_package = true;
                 } else if (official <= 0) {

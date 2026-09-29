@@ -7,6 +7,7 @@
 #include "ui_util.h"           // ColU32
 #include "game_offsets_active.h" // game_offsets::PLAYER_BOX_WIDTH_RATIO
 #include "lang.h"                // lang::visual: подпись оружия
+#include "overlay_geometry.h"
 #include <cfloat>
 #include <cmath>
 
@@ -55,15 +56,11 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
 }
 
 void DrawEspOverlay() {
-    float sw = (float)native_window_screen_x;
-    float sh = (float)native_window_screen_y;
-    if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
-        sw = (float)displayInfo.width;
-        sh = (float)displayInfo.height;
-    } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
-        sw = (float)displayInfo.height;
-        sh = (float)displayInfo.width;
-    }
+    const OverlayGeometry overlay = MakeOverlayGeometry(
+        displayInfo.width, displayInfo.height,
+        native_window_screen_x, native_window_screen_y);
+    const float sw = static_cast<float>(overlay.scene_width);
+    const float sh = static_cast<float>(overlay.scene_height);
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
     if (!g_esp_attached) return;
