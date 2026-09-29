@@ -218,16 +218,17 @@ static bool RunModeSelect() {
             if (ModeButton("##mode_kernel", iw, btnH, XS("Кернел (драйвер)"),
                            XS("Через ядерный драйвер — мимо /proc и его запретов"),
                            drv, true, fs)) {
-                // Тап по кернелу. Порядок причин:
-                //   1) не root — сокет драйвера создаётся только привилегирован-
-                //      ным процессом, маячок без root не виден ВООБЩЕ;
+                // Тап по кернелу. Никаких проб команд здесь НЕТ (слепая
+                // проба неизвестного кода может потревожить драйвер перед
+                // привязкой — на 6301b28, где проб не было, привязка
+                // работала). Порядок:
+                //   1) не root — сокет драйвера создаётся только
+                //      привилегированным процессом, маячок без root не виден;
                 //   2) драйвер не найден — рескан с чистого листа;
-                //   3) сокет драйвера поднялся — режим ПРИНИМАЕТСЯ. Живые пробы
-                //      по собственной памяти (learn_commands) уточняют только
-                //      сообщение: часть сборок драйвера не даёт доступ к самому
-                //      себе, и это не приговор — по-настоящему транспорт
-                //      проверяется привязкой к игре (bind читает ELF-заголовок
-                //      libil2cpp через драйвер, /proc не задействован).
+                //   3) сокет драйвера поднялся — режим принят. Настоящая
+                //      проверка транспорта — привязка к игре: bind читает
+                //      ELF-заголовок libil2cpp ЧЕРЕЗ ДРАЙВЕР (экстернал-путь
+                //      не задействован), и её результат виден тостом.
                 if (geteuid() != 0) {
                     PlaySound(SND_CLICK);
                     ShowToast(XS("Кернел: нет root — запусти чит от su"));
@@ -237,26 +238,9 @@ static bool RunModeSelect() {
                     PlaySound(SND_CLICK);
                     ShowToast(XS("Драйвер не найден — прошей .sh своей версии ядра"));
                 } else {
-                    memio::KernelTransport& kt = memio::kernel_transport();
-                    kt.learn_commands();
-                    const bool readOk  = kt.map_known() &&
-                        kt.classify_cmd(kt.read_cmd()).kind == memio::CMD_READ;
-                    const bool writeOk = kt.map_known() &&
-                        kt.classify_cmd(kt.write_cmd()).kind == memio::CMD_WRITE;
                     picked = MODE_KERNEL;
-                    if (readOk && writeOk) {
-                        PlaySound(SND_SUCCESS);
-                        ShowToast(XS("Кернел режим|драйвер проверен"));
-                    } else if (readOk) {
-                        PlaySound(SND_SUCCESS);
-                        ShowToast(XS("Кернел режим|чтение проверено, запись — нет"));
-                    } else if (writeOk) {
-                        PlaySound(SND_SUCCESS);
-                        ShowToast(XS("Кернел режим|запись проверена, чтение — нет"));
-                    } else {
-                        PlaySound(SND_CLICK);
-                        ShowToast(XS("Кернел режим|проверюсь при привязке к игре"));
-                    }
+                    PlaySound(SND_SUCCESS);
+                    ShowToast(XS("Кернел режим|привязку проверю в игре"));
                 }
             }
             y += btnH + 20.f;

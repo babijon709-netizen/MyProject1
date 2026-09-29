@@ -52,6 +52,10 @@ void esp_set_mem_backend(bool kernel) {
 
 bool esp_mem_backend_kernel() { return g_mem_backend_kernel; }
 
+// Последняя ошибка транспорта (errno открытия/чтения): для тоста «почему
+// привязка не идёт» — в кернеле это ответ драйвера, в экстернале /proc.
+int esp_mem_last_errno() { return g_mem.last_error(); }
+
 // адресами без метки тоже нельзя. Снимаем метку сразу, на входе.
 
 // Все смещения — compile-time константы единственного release-набора.
@@ -6651,9 +6655,14 @@ bool esp_init(pid_t pid, bool package_verified_release) {
     // старый образ libil2cpp.so (обычно «(deleted)»): он читается, ELF-заголовок
     // на месте, поэтому прежняя проверка доступа его принимала — а метаданные
     // внутри мертвы, и весь чит молча ничего не находил до перезапуска чита.
+    // any_bound различает две разные неудачи: ни один кандидат даже не
+    // привязался (NO_ACCESS — в кернеле отказ драйвера, в экстернале /proc)
+    // и привязались, но класс игры не резолвится (BAD_IMAGE — не тот образ).
+    bool any_bound = false;
     uint64_t chosen = 0;
     for (int i = 0; i < candidate_count; ++i) {
         if (!g_mem.bind(pid, candidates[i])) continue;
+        any_bound = true;
         if (base_resolves_game(candidates[i])) { chosen = candidates[i]; break; }
         g_mem.unbind();
     }
@@ -6666,13 +6675,14 @@ bool esp_init(pid_t pid, bool package_verified_release) {
         // silently reintroduce a build selector or alternate-client support.
         for (int i = 0; i < candidate_count; ++i) {
             if (g_mem.bind(pid, candidates[i])) {
+                any_bound = true;
                 chosen = candidates[i];
                 break;
             }
         }
     }
     if (!chosen) {
-        g_attach_state = ESP_ATTACH_BAD_IMAGE;
+        g_attach_state = any_bound ? ESP_ATTACH_BAD_IMAGE : ESP_ATTACH_NO_ACCESS;
         g_il2cpp_base = 0;
         g_pid = -1;
         return false;

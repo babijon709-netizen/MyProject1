@@ -19,6 +19,7 @@ static const char* const kTargetPackage = "com.catsbit.oxidesurvivalisland";
 
 pid_t g_target_pid = -1;
 bool  g_esp_attached = false;
+std::atomic<bool> g_attach_scanned{false};
 // Official package or a renamed/cloned package candidate. Both still pass
 // esp_init's release TypeInfo validation before attachment is accepted.
 static bool g_target_by_package = true;
@@ -143,6 +144,7 @@ void start_attach_thread() {
             if (!g_esp_attached) {
                 pid_t attached_pid = -1;
                 const pid_t official = find_game_pid();
+                g_attach_scanned.store(true);
                 if (official > 0 && esp_init(official, true)) {
                     attached_pid = official;
                     g_target_by_package = true;
