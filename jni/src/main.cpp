@@ -52,7 +52,14 @@ int main(int argc, char* argv[]) {
 
     native_window_screen_x = abs_ScreenX;
     native_window_screen_y = abs_ScreenY;
-    if (!initGUI_draw(native_window_screen_x, native_window_screen_x, true)) return -1;
+    // Поверхность оверлея должна быть (max × min) = ландшафт, ровно в тех
+    // координатах, в которые ESP/аим/фарм проецируют сцену (DrawEspOverlay,
+    // UpdateAim, UpdateFarm — все считают sw = max(w,h), sh = min(w,h)).
+    // Раньше сюда по ошибке уходило (max × max) — квадрат, и вся проекция
+    // укладывалась в верхнюю полоску квадратной поверхности, которую
+    // композитор ещё и скалировал на физический ландшафтный экран. Так
+    // визуалы «не работали» при правильных оффсетах.
+    if (!initGUI_draw(native_window_screen_x, native_window_screen_y, true)) return -1;
     Blur::Init();
     CfgWatchInit();
     AudioInit();

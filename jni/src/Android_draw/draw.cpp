@@ -255,12 +255,25 @@ void drawBegin() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplAndroid_NewFrame();
     {
+        // ImGui DisplaySize должен совпадать с поверхностью оверлея и с
+        // координатами, в которые ESP/аим/фарм проецируют сцену:
+        //   sw = max(displayInfo.width, displayInfo.height)  (longer side)
+        //   sh = min(displayInfo.width, displayInfo.height)  (shorter side)
+        // Раньше сюда ставили (sx, sx) — квадрат; ImGui рисовался в квадрат,
+        // поверхность была квадратной (см. main.cpp: initGUI_draw(max, max)),
+        // а вся сцена укладывалась в верхнюю полоску этого квадрата. Любой
+        // визуал оказывался в чужом месте экрана.
         float sx = (float)native_window_screen_x;
+        float sy = (float)native_window_screen_y;
         float a = (float)displayInfo.width;
         float b = (float)displayInfo.height;
-        if (a >= 100.f && b >= 100.f) sx = a > b ? a : b;
+        if (a >= 100.f && b >= 100.f) {
+            sx = a > b ? a : b;   // longer side
+            sy = a > b ? b : a;   // shorter side
+        }
         if (sx < 100.f) sx = 1080.f;
-        ImGui::GetIO().DisplaySize = ImVec2(sx, sx);
+        if (sy < 100.f) sy = 1920.f;  // безопасный фоллбэк короткой стороны
+        ImGui::GetIO().DisplaySize = ImVec2(sx, sy);
     }
     ImGui::NewFrame();
 }

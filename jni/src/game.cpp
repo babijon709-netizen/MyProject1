@@ -1,5 +1,6 @@
 #include "game.h"
 #include "esp_continuity.h"
+#include "player_esp_watchdog.h"
 #include "silent_aim.h"
 #include "viewmodel.h"
 #include "game_viewmodel_internal.h"
@@ -2354,26 +2355,49 @@ bool position_looks_like_world_space(const Vec3& position) {
     return fabsf(position.x) + fabsf(position.y) + fabsf(position.z) > 0.01F;
 }
 
-// Validate the one release-client player-position field.  Before c2ee61f the
-// working visual path selected this exact field first; the regression started
-// when it was replaced by a different configured value, and the later
-// hierarchy cross-check could still override the corrected field with a
-// plausible-but-wrong Transform sample.  Do not arbitrate between independent
-// position sources here: PLAYER_POSITION is the fixed, device-validated release
-// ABI and the Transform hierarchy remains a separate path for markers/bones.
+// Validate the configured release field first. If the combat client has not
+// populated that cache yet, use its fixed Player.worldCameraRoot -> native
+// Transform hierarchy chain. This avoids trying unrelated PlayerManager
+// fields while still keeping ESP alive across scene/respawn cache gaps.
 static bool validate_player_position_field(const std::vector<uint64_t>& players) {
+    bool direct_valid = false;
+    bool hierarchy_valid = false;
+    bool direct_confirmed = false;
     for (uint64_t player : players) {
         if (!player) continue;
-        const Vec3 position = rd_v3(player + PLAYER_POSITION);
-        if (!position_looks_like_world_space(position)) continue;
+        const Vec3 direct = rd_v3(player + PLAYER_POSITION);
+        const bool has_direct = position_looks_like_world_space(direct);
+        direct_valid |= has_direct;
+
+        Vec3 hierarchy{};
+        const uint64_t native = resolve_player_native_transform(player);
+        const bool has_hierarchy = native &&
+            read_transform_hierarchy_position(native, hierarchy) &&
+            position_looks_like_world_space(hierarchy);
+        hierarchy_valid |= has_hierarchy;
+        if (has_direct && has_hierarchy) {
+            const float dx = direct.x - hierarchy.x;
+            const float dy = direct.y - hierarchy.y;
+            const float dz = direct.z - hierarchy.z;
+            if (dx * dx + dy * dy + dz * dz <= 5.0F * 5.0F)
+                direct_confirmed = true;
+        }
+    }
+
+    if (direct_confirmed || (direct_valid && !hierarchy_valid)) {
         g_player_position_offset = PLAYER_POSITION;
         g_use_direct_player_position = true;
-        g_player_position_validated = true;
-        g_matrix_configuration_validated = false;
-        return true;
+    } else if (hierarchy_valid) {
+        g_use_direct_player_position = false;
+    } else {
+        return false;
     }
-    return false;
+    g_player_position_validated = true;
+    g_matrix_configuration_validated = false;
+    return true;
 }
+
+static bool g_body_caches_dirty = false; // clear per-player caches on the next frame
 
 // ---- Чувствительность взгляда (настройка игрока) ---------------------------
 //
@@ -3652,7 +3676,8 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
     return true;
 }
 
-static std::vector<uint64_t> read_configured_player_transforms() {
+static std::vector<uint64_t> read_configured_player_transforms(bool* player_list_ok) {
+    if (player_list_ok) *player_list_ok = false;
     std::vector<uint64_t> transforms;
     uint64_t list = resolve_player_list();
     if (!list) return transforms;
@@ -3681,10 +3706,11 @@ static std::vector<uint64_t> read_configured_player_transforms() {
         uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
         int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
         if (!items || count <= 0 || count > 512) {
-            // Empty is a normal loading/solo state. A known local player is
-            // enough for camera/matrix validation; otherwise keep the previous
-            // visual snapshot and retry next frame without clearing resolvers.
+            // Empty is a healthy list state.  Report it separately from a
+            // failed resolver so camera-only publication cannot mask failures.
             if (items && count == 0) {
+                if (player_list_ok) *player_list_ok = true;
+                // A known local player is enough for camera/matrix validation.
                 if (local_source) return {local_source};
                 return transforms;
             }
@@ -3705,8 +3731,10 @@ static std::vector<uint64_t> read_configured_player_transforms() {
 
         uint64_t confirmed_items = rd_ptr(list + IL2CPP_LIST_ITEMS);
         int32_t confirmed_count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-        if (items == confirmed_items && count == confirmed_count && !snapshot.empty())
+        if (items == confirmed_items && count == confirmed_count && !snapshot.empty()) {
+            if (player_list_ok) *player_list_ok = true;
             return snapshot;
+        }
     }
     return transforms;
 }
@@ -6263,11 +6291,12 @@ static int      g_frame_transforms_empty_streak = 0;
 // Frames in a row esp_get_boxes() gave up before publishing this frame's
 // camera / local position (see the watchdog at the top of it).
 static int      g_frame_publish_fail_streak = 0;
+// Independent from camera/marker publication: successful ore frames must not
+// conceal a dead player list or position pipeline.
+static PlayerEspWatchdog g_player_esp_watchdog;
 // Кадры подряд, в которых позиции игроков не прочитались НИ У КОГО. Серия
 // отличает transient read failure от настоящей перезагрузки мира; одиночный
-// кадр не инвалидирует подтверждённый fixed release path. Recovery только
-// повторно валидирует то же compile-time поле и ничего не очищает.
-static int      g_player_position_empty_streak = 0;
+// кадр не инвалидирует подтверждённый fixed release path.
 static int      g_local_position_fail_streak = 0;
 // Кадры подряд, в которых состав игроков не пересекается с тем, по которому
 // построены кэши (см. esp_get_boxes). Настоящая перезагрузка мира держится
@@ -6296,7 +6325,6 @@ static EspContinuity g_esp_continuity;
 static void reset_world_caches() {
     g_population_snapshot.clear(); g_world_change_streak = 0;
     s_adopt_cand.clear(); s_adopt_ident_streak = 0;
-    g_player_position_empty_streak = 0;
     // Keep g_local_player until the normal resolver confirms its replacement.
     // If the old object is absent from the new population, the camera-local
     // fallback below is used instead of misidentifying a nearby enemy.
@@ -6327,7 +6355,7 @@ void esp_reset() {
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
     g_esp_continuity.clear();
     g_frame_publish_fail_streak = 0;
-    g_player_position_empty_streak = 0;
+    g_player_esp_watchdog.reset();
     g_local_position_fail_streak = 0; g_world_change_streak = 0;
     g_population_snapshot.clear();
     g_offset_extent_fail_streak = 0;
@@ -6409,6 +6437,45 @@ bool publish_camera_only_frame(float sw, float sh) {
         }
     }
     return true;
+}
+
+static void reset_player_pipeline_resolvers() {
+    // Keep camera, attachment and the confirmed local player intact. Viewmodel,
+    // weapon speed and FOV all depend on that identity; clearing it because a
+    // remote-player position failed made unrelated features blink together.
+    // Only the independently recoverable player-list/box state is rebuilt.
+    g_player_manager_static_fields = 0;
+    g_player_position_offset = PLAYER_POSITION;
+    g_player_position_validated = false;
+    g_use_direct_player_position = true;
+    g_local_position_fail_streak = 0;
+    g_population_snapshot.clear();
+    s_adopt_cand.clear();
+    s_adopt_ident_streak = 0;
+    g_frame_transforms.clear();
+    g_frame_transforms_lost.clear();
+    g_player_aux.clear();
+    g_player_text.clear();
+    g_player_track.clear();
+    g_player_track_pick.clear();
+    g_mount_latch.clear();
+    g_skeletons.clear();
+    g_body_caches_dirty = true;
+}
+
+static void note_player_pipeline_health(bool player_data_ok) {
+    const PlayerEspWatchdogAction action =
+        g_player_esp_watchdog.observe(player_data_ok, mono_seconds());
+    if (action.reset_resolvers) {
+        reset_player_pipeline_resolvers();
+        LogLine("визуал: player pipeline не отвечает — сброшены resolver-кэши");
+    }
+    if (action.deep_recovery) {
+        // A live camera/local-memory pipeline proves that the process binding is
+        // still valid. Reattaching here used to drop every memory feature and
+        // the FOV circle in a loop. Keep retrying player-only resolvers instead.
+        LogLine("визуал: player pipeline не восстановился — продолжаю локальный recovery без reattach");
+    }
 }
 
 // Боты в списке боксов: только данные для аима (is_bot), оверлей их не рисует.
@@ -6638,7 +6705,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_last_overlay_sh = sh;
 
     std::vector<uint64_t>& s_transforms = g_frame_transforms;
-    std::vector<uint64_t> refreshed = read_configured_player_transforms();
+    bool player_list_ok = false;
+    std::vector<uint64_t> refreshed = read_configured_player_transforms(&player_list_ok);
     if (!refreshed.empty()) {
         // World reload: every PlayerManager object is new (no overlap with
         // the previous population). This also has to fire when we are alone on
@@ -6730,13 +6798,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
     if (s_transforms.empty()) {
         // Alone on the server: no player boxes, but markers and the farm still
-        // need this frame's camera. Retry the player resolver next frame without
-        // destructively clearing attachment/local-player state.
+        // need this frame's camera. A validated empty list is healthy; a failed
+        // resolver is not, even though this camera-only frame can publish.
+        note_player_pipeline_health(player_list_ok);
         publish_camera_only_frame(sw, sh);
         append_bot_boxes(result); // боты — и без игроков
         return transient_return(1);
     }
 
+    if (g_body_caches_dirty) { g_body_caches_dirty = false; g_player_aux.clear(); g_skeletons.clear(); }
     const bool want_bones = g_skeleton_enabled || g_aim_bones_requested;
     prune_player_aux(s_transforms);
     prune_player_text(s_transforms);
@@ -6748,6 +6818,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     if (!g_player_position_validated) {
         if (!validate_player_position_field(s_transforms)) {
+            note_player_pipeline_health(false);
             // Мир ещё не отдал позиции (перезагрузка после смерти). Боксов в
             // этом кадре нет, но метки и фарм живут на камере — без публикации
             // они гаснут вместе с боксами на все секунды ожидания.
@@ -6827,15 +6898,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (std::isfinite(distance_squared) && distance_squared < nearest_distance_squared) {
                 nearest_distance_squared = distance_squared; nearest_index = index;
             }
-        }
-        if (live_player_positions == 0) {
-            if (++g_player_position_empty_streak >= 3) {
-                g_player_position_empty_streak = 0;
-                g_player_position_validated = false;
-                g_matrix_configuration_validated = false;
-            }
-        } else {
-            g_player_position_empty_streak = 0;
         }
         // Prefer the resolver's exact local PlayerManager whenever it is in
         // the population.  Nearest-to-camera is only a startup fallback when
@@ -6938,11 +7000,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         if (!has_local_position) {
             ++g_local_position_fail_streak;
+            note_player_pipeline_health(player_list_ok && live_player_positions > 0);
             append_bot_boxes(result);
             return transient_return(8);
         }
         g_local_position_fail_streak = 0;
     }
+
+    note_player_pipeline_health(player_list_ok && live_player_positions > 0);
 
     g_frame_vp = vp;
     g_frame_vp_valid = !transform_camera_mode;
