@@ -1,0 +1,23 @@
+# Android NDK outputs
+libs/
+obj/
+dist/
+
+# Kernel module outputs
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.o
+*.order
+*.symvers
+.*.cmd
+.tmp_versions/
+Module.markers
+modules.order
+Module.symvers
+
+# Local editor / OS
+.DS_Store
+.idea/
+.vscode/

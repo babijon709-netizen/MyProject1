@@ -1,0 +1,9 @@
+config RW_MEM
+	tristate "rwMem-compatible process memory driver"
+	depends on MMU
+	help
+	  Creates /dev/rwmem and provides cross-process read/write access plus
+	  process-map queries through the ri-char/rwMem userspace ABI.
+
+	  Select Y for Android kernels. M is also supported when access_process_vm
+	  is exported to vendor modules by the target kernel.
