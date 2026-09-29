@@ -862,9 +862,12 @@ uint64_t resolve_network_identity_class() {
 
 bool marker_world_position(uint64_t transform, Vec3& out) {
     if (!transform) return false;
-    // Both paths use the same fixed release Transform ABI. The skeleton path
-    // stays first because it may already have hot hierarchy data; the generic
-    // path is a validation fallback, not an offset/layout search.
+    // The learned layouts (skeleton / hierarchy) come from PLAYER bones and
+    // can go stale after a world reload or simply not match non-bone
+    // transforms — they then return finite-but-garbage positions, which is
+    // how markers died solo after a respawn (cache full, every distance
+    // absurd, zero on screen). Any implausible read falls through to the
+    // slow probing path instead of being trusted.
     if (g_skeleton_layout_valid && read_transform_hierarchy_layout(transform, g_skeleton_layout, out) &&
         vec3_is_finite(out) && position_looks_like_world_space(out))
         return true;
@@ -1137,7 +1140,39 @@ std::vector<EspMarker> esp_get_markers() {
         }
     }
 
-    // Transform hierarchy offsets are fixed by the release table.
+    // No usable layout (fresh join / respawn, nobody around): learn it from
+    // the ENTITY transforms themselves. The layout discovery only needs a
+    // couple of native transforms scattered across the map — ore nodes are
+    // exactly that. This is what makes markers self-sufficient: previously
+    // the layout could only be learned from other players' skeletons, and
+    // solo after a world reload every position read failed (POS_INVALID).
+    {
+        static int s_solo_learn_cooldown = 0;
+        bool positions_dead = false;
+        if (!g_marker_entities.empty()) {
+            size_t checked = 0, dead = 0;
+            for (MarkerEntity& probe : g_marker_entities) {
+                if (++checked > 6) break;
+                Vec3 test{};
+                if (!marker_world_position(probe.transform, test)) ++dead;
+            }
+            positions_dead = checked > 0 && dead >= checked - (checked > 4 ? 1 : 0);
+        }
+        if (positions_dead && --s_solo_learn_cooldown <= 0) {
+            s_solo_learn_cooldown = 60; // ~1 s between attempts
+            std::vector<uint64_t> seeds;
+            for (const MarkerEntity& e : g_marker_entities) {
+                if (e.transform) seeds.push_back(e.transform);
+                if (seeds.size() >= 8) break;
+            }
+            size_t pos_count = 0, cand_count = 0;
+            if (discover_layout_from_native_transforms(seeds, pos_count, cand_count)) {
+                // Re-read every cached position with the fresh layout.
+                for (MarkerEntity& e : g_marker_entities)
+                    e.position_valid = marker_world_position(e.transform, e.position);
+            }
+        }
+    }
 
     const float max_distance = g_marker_max_distance;
     for (MarkerEntity& entity : g_marker_entities) {

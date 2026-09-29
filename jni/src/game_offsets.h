@@ -378,6 +378,9 @@ inline constexpr std::uint64_t COMPONENT_PAIR_PTR         = 0x08; // pair[0] + 8
 // GameObject name is a 32-byte core::string (SSO): flags byte at +0x1F,
 // heap pointer at +0x0 when (flags >= 0x40), inline chars otherwise.
 inline constexpr std::uint64_t GAMEOBJECT_NAME             = 0x48;
+// Точное смещение имени внутри GameObject подтверждается в рантайме (сверкой
+// с известными именами костей); 0x48 — ожидаемое значение и первая догадка.
+inline constexpr std::uint64_t GAMEOBJECT_NAME_GUESS      = GAMEOBJECT_NAME;
 
 inline constexpr std::uint64_t IL2CPP_LIST_ITEMS          = 0x10;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE           = 0x18;

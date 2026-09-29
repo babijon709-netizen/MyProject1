@@ -55,7 +55,7 @@ static uint64_t  g_player_position_offset = PLAYER_POSITION;
 
 
 static TransformHierarchyLayout g_transform_hierarchy_layout{};
-static bool g_transform_hierarchy_layout_valid = true;
+static bool g_transform_hierarchy_layout_valid = false;
 
 static bool      g_use_direct_player_position = true;
 static bool      g_player_position_validated = false;
@@ -1063,6 +1063,8 @@ bool read_transform_hierarchy_layout(uint64_t native_transform, const TransformH
     if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
     uint64_t matrices = rd_ptr(transform_data + layout.matrices_offset);
     uint64_t indices = rd_ptr(transform_data + layout.indices_offset);
+    if (layout.matrices_indirect) matrices = rd_ptr(matrices);
+    if (layout.indices_indirect) indices = rd_ptr(indices);
     return read_transform_hierarchy_arrays(matrices, indices, transform_index, position, world_rotation);
 }
 
@@ -1169,6 +1171,161 @@ static uint64_t camera_transform_of(uint64_t native_cam) {
 }
 
 static uint64_t camera_transform() { return camera_transform_of(g_native_camera); }
+
+static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matrices,
+                                     uint64_t& indices, int32_t& index,
+                                     float* best_dist = nullptr) {
+    if (!native_transform) return false;
+    if (best_dist) *best_dist = -1.f;
+
+    struct Cand { uint64_t m, n; int32_t i; };
+    Cand cand[96];
+    int  cand_src[96] = {};   // из какого толкования (tf[0..2]) кандидат
+    int  cur_src = 0;         // текущее толкование для push()
+    int count = 0;
+    auto push = [&](uint64_t m, uint64_t n, int32_t i) {
+        if (!m || !n || i < 0 || i > 100000 || count >= 96) return;
+        const uint64_t ms[2] = {m, rd_ptr(m)};
+        const uint64_t ns[2] = {n, rd_ptr(n)};
+        for (int a = 0; a < 2 && count < 96; ++a)
+            for (int b = 0; b < 2 && count < 96; ++b)
+                if (ms[a] && ns[b]) { cand_src[count] = cur_src; cand[count++] = {ms[a], ns[b], i}; }
+    };
+    // Один проход по указателю трансформа: пара «где данные TransformAccess,
+    // где индекс» и все известные пары «массивы матриц / массив родителей».
+    auto probe = [&](uint64_t base, uint64_t data_offset, uint64_t index_offset) {
+        const uint64_t data = rd_ptr(base + data_offset);
+        const int32_t  idx  = rd<int32_t>(base + index_offset);
+        if (!data || idx < 0 || idx > 100000) return;
+        static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
+        for (const auto& pr : kPairs) push(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]), idx);
+    };
+
+    // Указатели, которые пробуем как Transform. Что именно пришло на вход,
+    // заранее неизвестно, поэтому пробуем все три толкования:
+    //   tf[0] — сам адрес (вызывающий уже передал Transform);
+    //   tf[1] — Transform из этого объекта как из GameObject (случай камеры:
+    //           Camera + 0x20 — это GameObject, Transform лежит в его массиве
+    //           компонентов, проверено по libunity.so);
+    //   tf[2] — Transform из GameObject, если на вход дали компонент.
+    uint64_t tf[3] = {native_transform, 0, 0};
+    tf[1] = transform_from_gameobject(native_transform);
+    const uint64_t as_component = rd_ptr(native_transform + COMPONENT_GAMEOBJECT);
+    if (as_component >= 0x10000 && as_component != native_transform)
+        tf[2] = transform_from_gameobject(as_component);
+
+    // С чем сверяем найденную позицию. g_cam_pos НЕ годится: его пишет
+    // read_camera_transform_pose, то есть ровно тот путь, который на
+    // устройстве может не работать (ESP строит боксы из матрицы вида —
+    // transform_camera_mode = false, — и мусор в g_cam_pos годами никому не
+    // мешал). Сверяемся с позицией из матрицы вида: это та самая матрица,
+    // по которой игра рисует кадр, она всегда свежая. Из-за сверки с
+    // мусорным g_cam_pos фрикам и не включался.
+    Vec3 ref{};
+    bool know_cam = false;
+    if (g_native_camera) {
+        const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
+        Vec3 vpos{};
+        if (camera_position_from_view(view, vpos) && vec3_is_finite(vpos)) { ref = vpos; know_cam = true; }
+    }
+    if (!know_cam && g_frame_cam_basis_valid && vec3_is_finite(g_frame_cam_pos)) {
+        ref = g_frame_cam_pos; know_cam = true;
+    }
+    if (!know_cam && g_cam_pose_valid && vec3_is_finite(g_cam_pos)) {
+        ref = g_cam_pos; know_cam = true;
+    }
+
+    int   best_k = -1;
+    float best_d = -1.f;
+    int   positions = 0;                 // сколько кандидатов дали годную позицию
+    auto evaluate = [&](int from, int to) {
+        for (int k = from; k < to; ++k) {
+            Vec3 pos{};
+            if (!read_transform_hierarchy_arrays(cand[k].m, cand[k].n, cand[k].i, pos)) continue;
+            if (!vec3_is_finite(pos)) continue;
+            ++positions;
+            if (!know_cam) { best_k = k; best_d = 0.f; return; }
+            const float dx = pos.x - ref.x, dy = pos.y - ref.y, dz = pos.z - ref.z;
+            const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (best_k < 0 || d < best_d) { best_k = k; best_d = d; }
+            // Камера не может стоять в двух метрах от себя самой: нашли — выходим.
+            if (d < 2.0F) return;
+        }
+    };
+
+    // 1) раскладка, выученная по игрокам; 2) оба известных расположения
+    // TransformAccess на всех трёх указателях.
+    if (g_transform_hierarchy_layout_valid) {
+        const TransformHierarchyLayout& L = g_transform_hierarchy_layout;
+        for (int t = 0; t < 3 && tf[t]; ++t) {
+            cur_src = t;
+            const uint64_t data = rd_ptr(tf[t] + L.data_offset);
+            const int32_t  idx  = rd<int32_t>(tf[t] + L.index_offset);
+            uint64_t m = data ? rd_ptr(data + L.matrices_offset) : 0;
+            uint64_t n = data ? rd_ptr(data + L.indices_offset) : 0;
+            if (L.matrices_indirect) m = rd_ptr(m);
+            if (L.indices_indirect)  n = rd_ptr(n);
+            if (m && n && idx >= 0 && idx <= 100000) {
+                cand[count++] = {m, n, idx};
+                break;                    // раскладка одна — хватит первого
+            }
+        }
+    }
+    for (int t = 0; t < 3 && tf[t]; ++t) {
+        if (tf[t] == tf[0] && t > 0) continue;      // то же толкование — не надо
+        cur_src = t;
+        probe(tf[t], 0x38, 0x40);
+        probe(tf[t], 0x18, 0x20);
+    }
+    evaluate(0, count);
+
+    // 3) широкий перебор — только когда быстрое не дало ничего. Здесь другие
+    // смещения TransformAccess и все три указателя: на устройстве первые два
+    // прохода не нашли ни одной годной позиции, значит смещения сместились.
+    // Проверка та же (мировая позиция должна совпасть с камерой), поэтому
+    // ложного срабатывания не будет — только лишние чтения, и то при отказе.
+    if (best_k < 0 || best_d > 2.0F) {
+        static const uint64_t kExtended[][2] = {{0x20, 0x28}, {0x28, 0x30}, {0x30, 0x38},
+                                                {0x40, 0x48}, {0x10, 0x18}, {0x48, 0x50}};
+        const int saved = count;
+        for (int t = 0; t < 3 && tf[t]; ++t) {
+            if (tf[t] == tf[0] && t > 0) continue;
+            cur_src = t;
+            for (const auto& off : kExtended) probe(tf[t], off[0], off[1]);
+        }
+        // Лучший из быстрых остаётся лучшим: evaluate() сравнивается с ним,
+        // а не ищет заново, — иначе потеряли бы расстояние первого прохода.
+        evaluate(saved, count);
+    }
+
+    // Отказ объясняем полностью: какой трансформ, что дал компонентный путь,
+    // сколько кандидатов вообще дали позицию и насколько далеко лучший.
+    // Без этого по одной строке «массивы не читаются» не видно, где искать.
+    if (best_k < 0 || best_d > 2.0F) {
+        static double s_last = -1e9;
+        const double now = memio::now_seconds();
+        if (now - s_last >= 2.0) {
+            s_last = now;
+            LogLine("фрикам: перебор — трансформ 0x%llx, из компонента 0x%llx, кандидатов %d, позиций %d, ближайшее %.1f м",
+                    (unsigned long long)tf[0], (unsigned long long)tf[1], count, positions,
+                    (double)(best_d >= 0.f ? best_d : -1.f));
+            // Которое из трёх толкований дало позицию и что вообще нашлось.
+            // Без этого не видно, сломался путь GameObject или сама иерархия.
+            LogLine("фрикам: источники — кандидат %d из толкования %d, трансформы 0x%llx/0x%llx/0x%llx, камера %d",
+                    best_k, (best_k >= 0 ? cand_src[best_k] : -1),
+                    (unsigned long long)tf[0], (unsigned long long)tf[1],
+                    (unsigned long long)tf[2], (int)know_cam);
+        }
+        if (best_dist) *best_dist = (best_k >= 0 ? best_d : -1.f);
+        return false;
+    }
+    if (best_dist) *best_dist = best_d;
+    // Порог 2 м, а не полметра: g_cam_pos мог прийти из резервной матрицы вида
+    // (она считается по другому источнику и чуть расходится), и из-за жёсткого
+    // порога фрикам отказывался включаться там, где камера найдена верно.
+    matrices = cand[best_k].m; indices = cand[best_k].n; index = cand[best_k].i;
+    return true;
+}
 
 // Мировая TRS трансформа: идём вверх по родителям, как это делает Unity.
 static bool read_transform_world_trs(uint64_t matrices, uint64_t indices, int32_t index,
@@ -1300,42 +1457,59 @@ static void fc_slot_add(uint64_t m, uint64_t n, int32_t i, float d) {
 
 static bool resolve_camera_arrays(uint64_t& matrices, uint64_t& indices, int32_t& index,
                                   Vec3& cam_pos, float& err_m) {
-    matrices = indices = 0;
-    index = -1;
-    err_m = -1.0F;
+    matrices = indices = 0; index = -1; err_m = -1.f;
     if (!g_native_camera) return false;
-
     const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
     if (!camera_position_from_view(view, cam_pos) || !vec3_is_finite(cam_pos)) return false;
     const uint64_t gameobject = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
     const uint64_t transform = transform_from_gameobject(gameobject);
     if (!transform) return false;
-
-    // Exact release libunity ABI. Candidate offsets and pointer-indirection
-    // guesses are intentionally forbidden: they can validate a nearby but
-    // unrelated Transform and make freecam or ESP operate on the wrong object.
-    const uint64_t data = rd_ptr(transform + TRANSFORM_HIERARCHY_DATA);
-    const int32_t idx = rd<int32_t>(transform + TRANSFORM_HIERARCHY_INDEX);
+    // TransformAccess: данные +0x38, индекс +0x40 — подтверждено кодом самого
+    // Unity (libunity.so 0x7ed62c: читает [x0+0x38], пишет [x0+0x40], а при
+    // пустой иерархии подставляет [x0+0x28]).
+    const uint64_t data = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);
+    const int32_t  idx  = rd<int32_t>(transform + 0x40);
     if (!data || idx < 0 || idx > 100000) return false;
-    const uint64_t release_matrices = rd_ptr(data + TRANSFORM_HIERARCHY_MATRICES);
-    const uint64_t release_indices = rd_ptr(data + TRANSFORM_HIERARCHY_INDICES);
-    if (!release_matrices || !release_indices) return false;
-
-    Vec3 position{};
-    if (!read_transform_hierarchy_arrays(
-            release_matrices, release_indices, idx, position) ||
-        !vec3_is_finite(position)) return false;
-    const float dx = position.x - cam_pos.x;
-    const float dy = position.y - cam_pos.y;
-    const float dz = position.z - cam_pos.z;
-    err_m = sqrtf(dx * dx + dy * dy + dz * dz);
-    if (!std::isfinite(err_m) || err_m > 2.0F) return false;
-
-    matrices = release_matrices;
-    indices = release_indices;
-    index = idx;
-    fc_slot_add(matrices, indices, index, err_m);
-    return true;
+    static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
+    static const uint64_t kExt[][2] = {{0x20, 0x28}, {0x28, 0x30}, {0x30, 0x38}, {0x40, 0x48}, {0x10, 0x18}, {0x48, 0x50}};
+    auto try_pair = [&](uint64_t m0, uint64_t n0) {
+        if (!m0 || !n0) return;
+        const uint64_t ms[2] = {m0, rd_ptr(m0)};
+        const uint64_t ns[2] = {n0, rd_ptr(n0)};
+        for (uint64_t m : ms) {
+            for (uint64_t n : ns) {
+                if (!m || !n) continue;
+                // Пробуем не только точный индекс камеры, но и соседние:
+                // второй буфер может лежать под соседним индексом в том же
+                // массиве (лог 21:47 — слотов 1, а мерцание 50/50).
+                for (int di = -2; di <= 2; ++di) {
+                    const int32_t ii = idx + di;
+                    if (ii < 0 || ii > 100000) continue;
+                    Vec3 pos{};
+                    Vec4 rot{};
+                    if (!read_transform_hierarchy_arrays(m, n, ii, pos, &rot)) continue;
+                    if (!vec3_is_finite(pos)) continue;
+                    const float dx = pos.x - cam_pos.x, dy = pos.y - cam_pos.y, dz = pos.z - cam_pos.z;
+                    const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+                    if (err_m < 0.f || d < err_m) err_m = d;
+                    fc_slot_add(m, n, ii, d);
+                    if (d <= 1.0F && !matrices) { matrices = m; indices = n; index = ii; }
+                    if (!matrices && d <= 100.0F) { matrices = m; indices = n; index = ii; }
+                }
+            }
+        }
+    };
+    for (const auto& pr : kPairs) {
+        try_pair(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]));
+    }
+    // Широкий перебор — второй буфер иерархии может лежать по другому смещению.
+    // Лог 21:47 всё ещё слотов 1 и 50/50 мерцание, значит второй буфер не нашли.
+    for (const auto& pr : kExt) {
+        try_pair(rd_ptr(data + pr[0]), rd_ptr(data + pr[1]));
+    }
+    // Наборов могло найтись несколько: matrices/index — первый (эталон для
+    // лога), остальные лежат в g_fc_slots.
+    return matrices != 0;
 }
 
 // Массивы камеры ПРЯМО СЕЙЧАС — по раскладке, подтверждённой самим Unity.
@@ -1888,10 +2062,14 @@ bool esp_freecam_set(bool on) {
     Vec3 cam_pos{};
     g_fc_slot_n = 0;
     if (!resolve_camera_arrays(matrices, indices, index, cam_pos, dist)) {
-        g_freecam_fail = dist >= 0.f ? 4 : 3;
-        g_freecam_fail_dist = dist;
-        log_freecam_fail(2, transform, dist);
-        return false;
+        // Проверенный путь не дал массивов — тогда старый перебор: он хоть и
+        // грубее, но находил камеру до починки GameObject.
+        if (!resolve_transform_arrays(transform, matrices, indices, index, &dist)) {
+            g_freecam_fail = dist >= 0.f ? 4 : 3;
+            g_freecam_fail_dist = dist;
+            log_freecam_fail(2, transform, dist);
+            return false;
+        }
     }
     Matrix34 m{};
     if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), m)) {
@@ -2315,19 +2493,133 @@ static void freecam_tick() {
 }
 
 bool read_transform_hierarchy_position(uint64_t native_transform, Vec3& position) {
-    if (!native_transform || !g_transform_hierarchy_layout_valid) return false;
-    // The supported release has one fixed native Transform layout. Never try
-    // alternate field offsets or pointer-indirection combinations here: a
-    // plausible vector read from a wrong candidate can permanently select a
-    // bad player-position path and leave ESP empty.
-    return read_transform_hierarchy_layout(
-               native_transform, g_transform_hierarchy_layout, position) &&
-           vec3_is_finite(position) && position_looks_like_world_space(position);
+    if (!native_transform) return false;
+    // The learned layout is only a fast path. It is learned from PLAYER
+    // transforms and dies with a world reload — after a respawn it fails (or
+    // reads garbage) for every entity. Returning its result directly here
+    // was the solo-markers-after-respawn bug: the self-probing fallback
+    // below (which needs no players and no learning) was never reached.
+    if (g_transform_hierarchy_layout_valid &&
+        read_transform_hierarchy_layout(native_transform, g_transform_hierarchy_layout, position) &&
+        vec3_is_finite(position) && position_looks_like_world_space(position))
+        return true;
+    // Same probing as read_camera_transform_pose: TransformAccess lives at
+    // +0x38/+0x40 on older builds and at +0x18/+0x20 on this one. Markers ran
+    // only the first probe, which is why they worked ONLY once a nearby
+    // player's skeleton had taught us the layout — the camera (with both
+    // probes) worked solo all along.
+    uint64_t transform_data = rd_ptr(native_transform + 0x38);
+    int32_t transform_index = rd<int32_t>(native_transform + 0x40);
+    if (!transform_data || transform_index < 0 || transform_index > 100000) {
+        transform_data = rd_ptr(native_transform + 0x18);
+        transform_index = rd<int32_t>(native_transform + 0x20);
+    }
+    if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
+    const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
+    for (const auto& offsets : data_offsets) {
+        uint64_t matrix_pointer = rd_ptr(transform_data + offsets[0]);
+        uint64_t index_pointer = rd_ptr(transform_data + offsets[1]);
+        if (!matrix_pointer || !index_pointer) continue;
+        const uint64_t matrix_candidates[] = {matrix_pointer, rd_ptr(matrix_pointer)};
+        const uint64_t index_candidates[] = {index_pointer, rd_ptr(index_pointer)};
+        for (uint64_t matrices : matrix_candidates) {
+            for (uint64_t indices_ptr : index_candidates) {
+                if (read_transform_hierarchy_arrays(matrices, indices_ptr, transform_index, position)) return true;
+            }
+        }
+    }
+    return false;
 }
-
 static uint64_t resolve_player_native_transform(uint64_t player) {
     if (!player) return 0;
     return resolve_native_transform(rd_ptr(player + PLAYER_TRANSFORM));
+}
+
+static bool likely_native_pointer(uint64_t value) {
+    return value >= 0x10000 && value < 0x0001000000000000ULL && (value & 0x7) == 0;
+}
+
+static bool evaluate_transform_hierarchy_layout(const std::vector<uint64_t>& native_transforms, const TransformHierarchyLayout& layout, size_t& position_count, double& extent) {
+    position_count = 0; extent = 0.0;
+    Vec3 minimum{}, maximum{};
+    bool initialized = false;
+    for (uint64_t native_transform : native_transforms) {
+        Vec3 position{};
+        if (!read_transform_hierarchy_layout(native_transform, layout, position)) continue;
+        ++position_count;
+        if (!initialized) { minimum = position; maximum = position; initialized = true; }
+        else {
+            minimum.x = std::min(minimum.x, position.x); minimum.y = std::min(minimum.y, position.y); minimum.z = std::min(minimum.z, position.z);
+            maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
+        }
+    }
+    if (!initialized) return false;
+    extent = fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z);
+    return position_count >= 2 && std::isfinite(extent) && extent >= 0.1 && extent <= 1000000.0;
+}
+
+bool discover_layout_from_native_transforms(const std::vector<uint64_t>& native_transforms,
+                                                   size_t& best_position_count, size_t& candidate_count) {
+    if (native_transforms.size() < 2) return false;
+
+    const int64_t index_deltas[] = {-8, 8, 16, 24};
+    TransformHierarchyLayout best_layout{};
+    double best_score = 0.0;
+    best_position_count = 0; candidate_count = 0;
+    size_t seed_count = std::min<size_t>(native_transforms.size(), 3);
+
+    for (size_t seed_index = 0; seed_index < seed_count; ++seed_index) {
+        uint64_t seed = native_transforms[seed_index];
+        for (uint64_t data_offset = 0x10; data_offset <= 0x200; data_offset += 8) {
+            uint64_t transform_data = rd_ptr(seed + data_offset);
+            if (!likely_native_pointer(transform_data)) continue;
+            for (int64_t index_delta : index_deltas) {
+                int64_t signed_index_offset = (int64_t)data_offset + index_delta;
+                if (signed_index_offset < 0x10 || signed_index_offset > 0x220) continue;
+                uint64_t index_offset = (uint64_t)signed_index_offset;
+                int32_t transform_index = rd<int32_t>(seed + index_offset);
+                if (transform_index < 0 || transform_index > 100000) continue;
+                for (uint64_t matrices_offset = 0; matrices_offset <= 0x100; matrices_offset += 8) {
+                    uint64_t indices_offset = matrices_offset + 8;
+                    uint64_t matrices = rd_ptr(transform_data + matrices_offset);
+                    uint64_t indices_ptr = rd_ptr(transform_data + indices_offset);
+                    if (!likely_native_pointer(matrices) || !likely_native_pointer(indices_ptr)) continue;
+                    for (int matrices_indirect = 0; matrices_indirect < 2; ++matrices_indirect) {
+                        for (int indices_indirect = 0; indices_indirect < 2; ++indices_indirect) {
+                            TransformHierarchyLayout layout{};
+                            layout.data_offset = data_offset; layout.index_offset = index_offset;
+                            layout.matrices_offset = matrices_offset; layout.indices_offset = indices_offset;
+                            layout.matrices_indirect = matrices_indirect != 0; layout.indices_indirect = indices_indirect != 0;
+                            Vec3 seed_position{};
+                            if (!read_transform_hierarchy_layout(seed, layout, seed_position)) continue;
+                            ++candidate_count;
+                            size_t position_count = 0; double extent = 0.0;
+                            bool valid = evaluate_transform_hierarchy_layout(native_transforms, layout, position_count, extent);
+                            best_position_count = std::max(best_position_count, position_count);
+                            if (!valid) continue;
+                            double score = (double)position_count * 1000000.0 + std::min(extent, 999999.0);
+                            if (score > best_score) { best_score = score; best_layout = layout; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (best_score <= 0.0) return false;
+    g_transform_hierarchy_layout = best_layout;
+    g_transform_hierarchy_layout_valid = true;
+    return true;
+}
+
+static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& players, size_t& best_position_count, size_t& candidate_count) {
+    std::vector<uint64_t> native_transforms;
+    std::unordered_set<uint64_t> unique_transforms;
+    for (uint64_t player : players) {
+        uint64_t native_transform = resolve_player_native_transform(player);
+        if (native_transform && unique_transforms.insert(native_transform).second)
+            native_transforms.push_back(native_transform);
+    }
+    return discover_layout_from_native_transforms(native_transforms, best_position_count, candidate_count);
 }
 
 static bool read_entity_position(uint64_t source, Vec3& position) {
@@ -2355,26 +2647,117 @@ bool position_looks_like_world_space(const Vec3& position) {
     return fabsf(position.x) + fabsf(position.y) + fabsf(position.z) > 0.01F;
 }
 
-// old_source validates the direct PlayerManager position before considering
-// any Transform fallback. The supported release layout fixes that field at
-// PLAYER_POSITION, so keep the same proven data path without scanning alternate
-// offsets at runtime. In particular, do not reject a valid direct position just
-// because a native Transform read also looked plausible but used another pivot.
-static bool validate_player_position_field(const std::vector<uint64_t>& players) {
+static bool evaluate_player_position_offset(const std::vector<uint64_t>& players, uint64_t offset, double& score) {
+    score = 0.0;
+    if (!offset) return false;
+    size_t valid = 0, non_zero = 0;
+    Vec3 minimum{}, maximum{};
+    bool initialized = false;
     for (uint64_t player : players) {
         if (!player) continue;
-        const Vec3 direct = rd_v3(player + PLAYER_POSITION);
-        if (!position_looks_like_world_space(direct)) continue;
-        g_player_position_offset = PLAYER_POSITION;
-        g_use_direct_player_position = true;
-        g_player_position_validated = true;
-        g_matrix_configuration_validated = false;
+        Vec3 position = rd_v3(player + offset);
+        if (!vec3_is_finite(position)) continue;
+        float magnitude = fabsf(position.x) + fabsf(position.y) + fabsf(position.z);
+        if (magnitude < 0.01F) continue;
+        ++valid; ++non_zero;
+        if (!initialized) { minimum = position; maximum = position; initialized = true; }
+        else {
+            minimum.x = std::min(minimum.x, position.x); minimum.y = std::min(minimum.y, position.y); minimum.z = std::min(minimum.z, position.z);
+            maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
+        }
+    }
+    if (!initialized || valid < 1 || non_zero < 1) return false;
+    double extent = fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z);
+    if (!std::isfinite(extent) || extent > 1000000.0) return false;
+    // Alone on the server (or everybody standing on the same spot) there is no
+    // spread to measure, so a single plausible world position has to do. Not
+    // accepting it used to kill the whole ESP after a solo respawn: the offset
+    // never re-validated and every frame bailed out early until app restart.
+    if (valid < 2 || extent < 0.1) {
+        if (!position_looks_like_world_space(minimum)) return false;
+        score = (double)valid * 1000000.0;
+        return true;
+    }
+    score = (double)valid * 1000000.0 + std::min(extent, 999999.0);
+    return true;
+}
+
+// Direct (PlayerManager field) position offsets, most trusted first. The
+// canonical field is lastSavedPosition (0x1D0); lastTickPosition (0x1C8) is
+// equivalent. The rest are legacy guesses kept as a last resort only.
+static const uint64_t k_known_position_offsets[] = {0x1D0, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D4, 0x1DC, 0x1E8};
+
+static uint64_t find_direct_player_position_offset(const std::vector<uint64_t>& players) {
+    bool saved_use_direct = g_use_direct_player_position;
+    g_use_direct_player_position = true;
+    uint64_t best_offset = 0;
+    double best_score = 0.0;
+    for (uint64_t offset : k_known_position_offsets) {
+        double score = 0.0;
+        if (!evaluate_player_position_offset(players, offset, score)) continue;
+        // Prefer the offset that validates for the most players; on a tie the
+        // earlier (more trusted) entry wins regardless of spatial extent.
+        double count = floor(score / 1000000.0), best_count = floor(best_score / 1000000.0);
+        if (count > best_count) { best_offset = offset; best_score = score; }
+    }
+    g_use_direct_player_position = saved_use_direct;
+    return best_offset;
+}
+
+// Frames in a row the direct offsets failed to validate. Right after a world
+// reload the position fields are still zero for a few frames; falling back to
+// the transform-hierarchy path on the very first failure used to lock the ESP
+// into that mode (boxes hanging 1.6 m below the player) until restart.
+static int g_direct_position_fail_streak = 0;
+static int g_direct_position_recheck = 0;
+// Когда началась текущая серия неудач прямых полей. Ожидание «поля допишутся»
+// считается и по кадрам, и по времени: 60 кадров на перезагрузке мира (там же
+// просаживается FPS) растягивались в две-три секунды, и всё это время боксов не
+// было вовсе — ровно то, на что жалоба «после смерти прогружаются не сразу».
+static double g_direct_position_fail_since = 0.0;
+static constexpr double kDirectPositionSettleSeconds = 0.6;
+static bool g_body_caches_dirty = false; // clear per-player caches on the next frame
+
+static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
+    uint64_t best_offset = find_direct_player_position_offset(players);
+    if (best_offset) {
+        g_direct_position_fail_streak = 0;
+        g_direct_position_fail_since = 0.0;
+        g_use_direct_player_position = true; g_player_position_offset = best_offset;
+        g_player_position_validated = true; g_matrix_configuration_validated = false;
+        return true;
+    }
+    // Даём прямым полям устояться, прежде чем уходить на обход иерархии, но не
+    // дольше положенного: и по кадрам (60), и по времени (0.6 с) — что раньше.
+    const double now = mono_seconds();
+    if (g_direct_position_fail_since == 0.0) g_direct_position_fail_since = now;
+    ++g_direct_position_fail_streak;
+    if (g_direct_position_fail_streak < 60 &&
+        (now - g_direct_position_fail_since) < kDirectPositionSettleSeconds) return false;
+    size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
+    if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
+        g_use_direct_player_position = false;
+        g_player_position_validated = true; g_matrix_configuration_validated = false;
+        g_direct_position_recheck = 0;
         return true;
     }
     return false;
 }
 
-static bool g_body_caches_dirty = false; // clear per-player caches on the next frame
+// While on the hierarchy fallback, keep probing the direct fields and switch
+// back as soon as they validate again.
+static void recheck_direct_player_position(const std::vector<uint64_t>& players) {
+    if (g_use_direct_player_position || !g_player_position_validated) return;
+    if (++g_direct_position_recheck < 15) return;
+    g_direct_position_recheck = 0;
+    uint64_t best_offset = find_direct_player_position_offset(players);
+    if (!best_offset) return;
+    g_direct_position_fail_streak = 0;
+    g_direct_position_fail_since = 0.0;
+    g_use_direct_player_position = true; g_player_position_offset = best_offset;
+    g_matrix_configuration_validated = false;
+    g_body_caches_dirty = true;
+}
 
 // ---- Чувствительность взгляда (настройка игрока) ---------------------------
 //
@@ -2598,9 +2981,27 @@ static bool current_camera_position(Vec3& out) {
 // подтверждённым кодом Unity. Результат дополнительно сверяется с камерой.
 static bool transform_position_direct(uint64_t transform, Vec3& out) {
     if (transform < 0x10000) return false;
-    return read_transform_hierarchy_layout(
-               transform, g_transform_hierarchy_layout, out) &&
-           vec3_is_finite(out) && position_looks_like_world_space(out);
+    const uint64_t data = rd_ptr(transform + TRANSFORM_ACCESS_HIERARCHY);
+    const int32_t  idx  = rd<int32_t>(transform + 0x40);
+    if (!data || idx < 0 || idx > 100000) return false;
+    static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}, {0x10, 0x18}, {0x20, 0x28}};
+    for (const auto& pr : kPairs) {
+        const uint64_t m0 = rd_ptr(data + pr[0]);
+        const uint64_t n0 = rd_ptr(data + pr[1]);
+        if (!m0 || !n0) continue;
+        const uint64_t ms[2] = {m0, rd_ptr(m0)};
+        const uint64_t ns[2] = {n0, rd_ptr(n0)};
+        for (uint64_t m : ms)
+            for (uint64_t n : ns) {
+                Vec3 p{};
+                if (!m || !n) continue;
+                if (!read_transform_hierarchy_arrays(m, n, idx, p)) continue;
+                if (!vec3_is_finite(p)) continue;
+                out = p;
+                return true;
+            }
+    }
+    return false;
 }
 
 static int mouse_look_camera_distance(uint64_t mouse_look, float& dist) {
@@ -3685,7 +4086,12 @@ static std::vector<uint64_t> read_configured_player_transforms(bool* player_list
         if (!items || count <= 0 || count > 512) {
             // Empty is a healthy list state.  Report it separately from a
             // failed resolver so camera-only publication cannot mask failures.
-            if (items && count == 0) {
+            //
+            // Массив элементов у пустого List может быть и нулевым (old_source
+            // проверял только count): если свой PlayerManager известен, его
+            // одного хватает всему конвейеру — камера, проверка матрицы и
+            // локальная позиция считаются по одному отсчёту.
+            if (count == 0) {
                 if (player_list_ok) *player_list_ok = true;
                 // A known local player is enough for camera/matrix validation.
                 if (local_source) return {local_source};
@@ -3814,11 +4220,12 @@ struct PlayerAux {
 static std::unordered_map<uint64_t, PlayerAux> g_player_aux;
 
 TransformHierarchyLayout g_skeleton_layout{};
-bool g_skeleton_layout_valid = true;
+bool g_skeleton_layout_valid = false;
 
-static uint64_t g_go_name_offset = GAMEOBJECT_NAME;
-static bool     g_go_name_plain_pointer = false;
-bool     g_go_name_offset_valid = true;
+static uint64_t g_go_name_offset = 0;
+static bool     g_go_name_plain_pointer = false; // fallback: name stored as raw char*
+bool     g_go_name_offset_valid = false;
+static double   g_go_name_retry_at = 0.0;   // mono_seconds: не раньше этого момента
 static int      g_skeleton_builds_this_frame = 0; // heavy rescans: max 1 per frame
 
 void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled = enabled; }
@@ -3942,6 +4349,45 @@ bool read_transform_name(uint64_t transform, char* out, size_t cap) {
     return read_gameobject_name_at(native_go, g_go_name_offset, g_go_name_plain_pointer, out, cap);
 }
 
+// Find the GameObject name field offset by probing candidates against the
+// character model subtree until known bone names show up.
+static bool discover_gameobject_name_offset(const std::vector<uint64_t>& nodes) {
+    static const uint64_t kCandidates[] = {GAMEOBJECT_NAME_GUESS, 0x40, 0x50, 0x38, 0x30, 0x28, 0x58, 0x20, 0x60};
+    static const char* kProbeNames[] = {"hips", "spine", "spine1", "spine2", "neck", "head", "armature", "root", "pelvis"};
+
+    std::vector<uint64_t> gameobjects;
+    gameobjects.reserve(nodes.size());
+    for (uint64_t node : nodes) {
+        uint64_t go = rd_ptr(node + COMPONENT_GAMEOBJECT);
+        if (go) gameobjects.push_back(go);
+        if (gameobjects.size() >= 192) break;
+    }
+    if (gameobjects.size() < 8) return false;
+
+    for (int plain_pointer = 0; plain_pointer < 2; ++plain_pointer) {
+        for (uint64_t offset : kCandidates) {
+            int matches = 0;
+            for (uint64_t go : gameobjects) {
+                char name[48];
+                if (!read_gameobject_name_at(go, offset, plain_pointer != 0, name, sizeof(name))) continue;
+                char normalized[48];
+                normalize_bone_name(name, normalized, sizeof(normalized));
+                for (const char* probe : kProbeNames) {
+                    if (strcmp(normalized, probe) == 0) { ++matches; break; }
+                }
+                if (matches >= 3) break;
+            }
+            if (matches >= 3) {
+                g_go_name_offset = offset;
+                g_go_name_plain_pointer = plain_pointer != 0;
+                g_go_name_offset_valid = true;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Раскладка прочитала трансформ И дала правдоподобную мировую позицию.
 // Одного чтения мало: комбинация может читать чужую/протухшую иерархию —
 // конечные числа не из того места. Сэмпл здесь — кость игрока, она обязана
@@ -3953,16 +4399,75 @@ static bool skeleton_layout_reads_plausible(const TransformHierarchyLayout& layo
            vec3_is_finite(probe) && position_looks_like_world_space(probe);
 }
 
-// Read failures are transient hierarchy rebuilds; the release layout itself
-// stays fixed and is never replaced from process memory.
+// Отказов подряд действующей раскладке, прежде чем перебирать заново.
+// Раскладка одна на сборку игры (смещения структур Unity одинаковы у всех
+// сущностей), поэтому одиночный отказ — это рваное чтение (спавн как раз
+// перестраивает иерархию), а не смена раскладки. Прежний код сносил общую
+// раскладку по первому же такому сэмплу и перенимал первую читающуюся
+// комбинацию — после каждого нового игрока рядом все чужие скелеты прыгали
+// и гасли на несколько кадров, пока следующий билд не возвращал раскладку
+// обратно (в логе: новый адрес + 3-4 кадра без костей без тормоза).
+static int      g_skeleton_layout_miss = 0;
+static constexpr int kSkeletonLayoutMissLimit = 4;
+// Последний трансформ, успешно прочитанный действующей раскладкой: по нему
+// отличаем «сэмплы рваные» (якорь читается — раскладку держим) от «раскладка
+// правда умерла» (якорь тоже не читается — переучиваем).
+static uint64_t g_skeleton_layout_anchor = 0;
 
 static bool resolve_skeleton_layout(uint64_t sample_transform) {
-    // Unity transform layout is a fixed part of the supported release. A
-    // failed sample means the hierarchy is being rebuilt, not that another
-    // layout should be searched for.
-    if (skeleton_layout_reads_plausible(g_skeleton_layout, sample_transform)) {
+    if (g_skeleton_layout_valid) {
+        if (skeleton_layout_reads_plausible(g_skeleton_layout, sample_transform)) {
+            g_skeleton_layout_anchor = sample_transform;
+            g_skeleton_layout_miss = 0;
+            return true;
+        }
+        // Действующая не прочитала сэмпл — но сносить её по одному сэмплу
+        // нельзя: этот билд скелета не состоится (пересборка через 20 кадров,
+        // когда иерархия устоится), а остальные игроки продолжают читать по
+        // действующей.
+        if (++g_skeleton_layout_miss < kSkeletonLayoutMissLimit) return false;
+        g_skeleton_layout_miss = 0;
+        if (g_skeleton_layout_anchor &&
+            skeleton_layout_reads_plausible(g_skeleton_layout, g_skeleton_layout_anchor))
+            return false;   // раскладка жива, сэмплы рваные — держим её
+        g_skeleton_layout_valid = false;
+        g_skeleton_layout_anchor = 0;
+        static double s_layout_relearn_at = -1e9;
+        const double now = memio::now_seconds();
+        if (now - s_layout_relearn_at >= 2.0) {
+            s_layout_relearn_at = now;
+            LogLine("скелет: раскладка переучивается (4 отказа подряд, якорь тоже не читается)");
+        }
+    }
+    if (g_transform_hierarchy_layout_valid &&
+        skeleton_layout_reads_plausible(g_transform_hierarchy_layout, sample_transform)) {
+        g_skeleton_layout = g_transform_hierarchy_layout;
         g_skeleton_layout_valid = true;
+        g_skeleton_layout_anchor = sample_transform;
         return true;
+    }
+    const uint64_t base_offsets[][2] = {{0x38, 0x40}, {0x18, 0x20}};
+    const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
+    for (const auto& base : base_offsets) {
+        for (const auto& offsets : data_offsets) {
+            for (int matrices_indirect = 0; matrices_indirect < 2; ++matrices_indirect) {
+                for (int indices_indirect = 0; indices_indirect < 2; ++indices_indirect) {
+                    TransformHierarchyLayout layout{};
+                    layout.data_offset = base[0];
+                    layout.index_offset = base[1];
+                    layout.matrices_offset = offsets[0];
+                    layout.indices_offset = offsets[1];
+                    layout.matrices_indirect = matrices_indirect != 0;
+                    layout.indices_indirect = indices_indirect != 0;
+                    if (skeleton_layout_reads_plausible(layout, sample_transform)) {
+                        g_skeleton_layout = layout;
+                        g_skeleton_layout_valid = true;
+                        g_skeleton_layout_anchor = sample_transform;
+                        return true;
+                    }
+                }
+            }
+        }
     }
     return false;
 }
@@ -4123,6 +4628,8 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
     auto hierarchy_arrays = [&](uint64_t hierarchy, uint64_t& matrices, uint64_t& indices) -> bool {
         matrices = rd_ptr(hierarchy + g_skeleton_layout.matrices_offset);
         indices = rd_ptr(hierarchy + g_skeleton_layout.indices_offset);
+        if (g_skeleton_layout.matrices_indirect) matrices = rd_ptr(matrices);
+        if (g_skeleton_layout.indices_indirect) indices = rd_ptr(indices);
         return matrices && indices;
     };
 
@@ -4387,7 +4894,7 @@ static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton)
     collect_transform_subtree(root, nodes, 1024);
     if (nodes.size() < 8) return false;
 
-    if (!g_go_name_offset_valid) return false;
+    if (!g_go_name_offset_valid && !discover_gameobject_name_offset(nodes)) return false;
 
     // Collect up to a few Hips candidates (render rig, ragdoll copies, ...).
     uint64_t hips_candidates[4] = {};
@@ -5077,11 +5584,30 @@ bool object_class_name_is(uint64_t obj, const char* expected,
     return name == expected;
 }
 
-// The release GameObject-name field is fixed in the offset table. This helper
-// remains as the shared capability check used by weapon and marker labels.
+// The GameObject-name offset is normally discovered while building a skeleton.
+// Weapon labels must work with skeleton ESP off, so discover it on demand from
+// the character model subtree (cheap: one BFS, then cached process-wide).
 bool ensure_gameobject_name_offset(uint64_t player) {
-    (void)player;
-    return g_go_name_offset_valid;
+    if (g_go_name_offset_valid) return true;
+    // Кулдаун в СЕКУНДАХ, а не в вызовах. Функцию зовут из мест с совершенно
+    // разной частотой: конвейер имён ESP — каждый кадр на каждого игрока, сканы
+    // реестра — раз в пару секунд. Прежние «60 вызовов» на первом сценарии
+    // означали новую попытку каждые ~0.1 с, а попытка — это обход поддерева
+    // трансформов модели до 256 узлов, то есть сотни чтений памяти одним
+    // кадром. Пока смещение не найдено (или не читается поза игрока), это был
+    // один из самых дорогих периодических рывков: в логе 14.09 медленные кадры
+    // шли с интервалами 8/52/68/112 — наложение нескольких таких периодик.
+    const double now = mono_seconds();
+    if (now < g_go_name_retry_at) return false;
+    uint64_t root = skeleton_model_root(player);
+    if (!root) { g_go_name_retry_at = now + 2.0; return false; }
+    static std::vector<uint64_t> nodes;
+    collect_transform_subtree(root, nodes, 256);
+    if (nodes.size() < 8 || !discover_gameobject_name_offset(nodes)) {
+        g_go_name_retry_at = now + 2.0;
+        return false;
+    }
+    return true;
 }
 
 // Lowercase, strip separators — used to recognise container/rig objects that
@@ -6311,8 +6837,17 @@ static EspContinuity g_esp_continuity;
 // matrix convention and Transform hierarchy offsets) belong to the release
 // build, not to one PlayerManager lifetime, so an ordinary respawn keeps them.
 static void reset_world_caches() {
+    g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
+    g_player_position_validated = false;
     g_population_snapshot.clear(); g_world_change_streak = 0;
     s_adopt_cand.clear(); s_adopt_ident_streak = 0;
+    // Раскладка, выученная по костям, умирает вместе со старым миром: после
+    // перезагрузки она читает мусор из переиспользованной памяти (конечные
+    // числа, но не оттуда). Переучивается с первого же скелета рядом, а метки
+    // до тех пор живут на самопроверяющемся пути.
+    g_skeleton_layout = {}; g_skeleton_layout_valid = false;
+    g_use_direct_player_position = true; g_player_position_offset = PLAYER_POSITION;
+    g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
     // Keep g_local_player until the normal resolver confirms its replacement.
     // If the old object is absent from the new population, the camera-local
     // fallback below is used instead of misidentifying a nearby enemy.
@@ -6352,9 +6887,10 @@ void esp_reset() {
     g_game_controller_class = 0; g_local_player = 0;
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_offset = PLAYER_POSITION;
-    g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = true;
+    g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
     g_use_direct_player_position = true;
     g_player_position_validated = false;
+    g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
     g_cam_fov_deg = 0.0F; g_cam_pose_valid = false; g_cam_pose_derived = false;
     g_aim_state = {};
     g_player_aux.clear();
@@ -6364,9 +6900,9 @@ void esp_reset() {
     g_frame_transforms_lost.clear();
     g_mount_latch.clear();
     g_skeletons.clear();
-    g_skeleton_layout = {}; g_skeleton_layout_valid = true;
-    g_go_name_offset = GAMEOBJECT_NAME; g_go_name_plain_pointer = false;
-    g_go_name_offset_valid = true;
+    g_skeleton_layout = {}; g_skeleton_layout_valid = false;
+    g_go_name_offset = 0; g_go_name_plain_pointer = false;
+    g_go_name_offset_valid = false; g_go_name_retry_at = 0.0;
     g_frame_vp_valid = false; g_frame_local_valid = false;
     reset_marker_caches();
 }
@@ -6782,7 +7318,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // read into an empty ESP frame.  Reads through destroyed objects fail
         // safely and are time-bounded by filter_player_position; a confirmed
         // non-overlapping replacement is adopted by the logic above.
-        ++g_frame_transforms_empty_streak;
+        // Но держать мёртвое население вечно нельзя: если список пуст уже
+        // десяток секунд, мир действительно уехал, и старые указатели только
+        // мешают заново выучить раскладку/смещение позиции (old_source чистил
+        // их через 10 кадров — здесь порог мягче, чтобы не рвать респаун).
+        if (++g_frame_transforms_empty_streak > 600 && !s_transforms.empty()) {
+            s_transforms.clear();
+            reset_world_caches();
+        }
     }
     if (s_transforms.empty()) {
         // Alone on the server: no player boxes, but markers and the farm still
@@ -6805,7 +7348,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_skeleton_builds_this_frame = 0;
 
     if (!g_player_position_validated) {
-        if (!validate_player_position_field(s_transforms)) {
+        if (!discover_player_position_offset(s_transforms)) {
             note_player_pipeline_health(false);
             // Мир ещё не отдал позиции (перезагрузка после смерти). Боксов в
             // этом кадре нет, но метки и фарм живут на камере — без публикации
@@ -6814,6 +7357,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             append_bot_boxes(result);
             return transient_return(2);
         }
+    } else {
+        // Пока работаем на обходе иерархии, продолжаем проверять прямые поля и
+        // возвращаемся к ним, как только они снова читаются.
+        recheck_direct_player_position(s_transforms);
     }
 
     bool transform_camera_mode = false; // light fix: always use native cam matrices, avoid dead-body-as-camera on death
@@ -6989,6 +7536,19 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!has_local_position) {
             ++g_local_position_fail_streak;
             note_player_pipeline_health(player_list_ok && live_player_positions > 0);
+            // Камера этого кадра уже прочитана — публикуем её как есть (без
+            // повторного чтения и повторного xray/day-тика), иначе вместе с
+            // боксами гаснут метки и автофарм.
+            if (matrix_is_finite(vp)) {
+                g_frame_vp = vp; g_frame_vp_valid = true;
+                g_frame_sw = sw; g_frame_sh = sh;
+                Vec3 camera_only_position{};
+                if (camera_position_from_view(view, camera_only_position)) {
+                    g_frame_local_pos = camera_only_position;
+                    g_frame_local_valid = true;
+                }
+                g_frame_publish_fail_streak = 0;
+            }
             append_bot_boxes(result);
             return transient_return(8);
         }

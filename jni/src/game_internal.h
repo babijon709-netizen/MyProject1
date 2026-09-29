@@ -126,6 +126,11 @@ struct TransformHierarchyLayout {
     uint64_t index_offset = go_active::TRANSFORM_HIERARCHY_INDEX;
     uint64_t matrices_offset = go_active::TRANSFORM_HIERARCHY_MATRICES;
     uint64_t indices_offset = go_active::TRANSFORM_HIERARCHY_INDICES;
+    // Некоторые сборки/устройства хранят в этих слотах не сами массивы, а
+    // указатель на них. Разыменование — часть раскладки, а не догадка: без
+    // него позиции читались «конечным мусором» и ESP оставался пустым.
+    bool matrices_indirect = false;
+    bool indices_indirect = false;
 };
 
 struct MeleeReach {
@@ -204,6 +209,8 @@ uint64_t native_component_transform(uint64_t native_component);
 int class_identity(uint64_t klass, const char* expected_name, const char* expected_ns);
 bool class_looks_alive(uint64_t klass);
 uint64_t get_class_static_fields(uint64_t klass);
+bool discover_layout_from_native_transforms(const std::vector<uint64_t>& native_transforms,
+                                            size_t& best_position_count, size_t& candidate_count);
 bool publish_camera_only_frame(float sw, float sh);
 bool object_class_name_is(uint64_t obj, const char* expected, bool accept_when_unreadable = false);
 bool read_transform_name(uint64_t transform, char* out, size_t cap);

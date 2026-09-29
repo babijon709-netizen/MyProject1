@@ -13,3 +13,16 @@
 ## Проверка
 
 Host-тест `tools/esp/run.sh` воспроизводит последовательность `healthy → death gap → partial respawn → healthy respawn`, проверяет отсутствие пустого визуального кадра, запрет stale aim points, замену снимка и его очистку/таймаут.
+
+## Возврат адаптивного разрешения раскладок (29.09.2026)
+
+Рефакторинг «всё — compile-time константы релиза» убрал из `game.cpp` рантайм-поиск, на котором визуалы и работали на устройстве (`old_source.7z`). Один неверный зашитый оффсет гасил сразу всё: боксы, скелеты, метки, фарм. Восстановлено:
+
+- `discover_player_position_offset()` / `find_direct_player_position_offset()` — прямое поле позиции `PlayerManager` выбирается из списка кандидатов (`0x1D0`, `0x1C8`, …), а не берётся одним числом; `recheck_direct_player_position()` возвращает прямой путь, когда он снова читается.
+- `discover_transform_hierarchy_layout()` / `discover_layout_from_native_transforms()` — раскладка Transform hierarchy учится по реальным трансформам (в том числе по рудам в `game_markers.cpp`, когда рядом нет игроков), включая варианты с разыменованием массивов (`matrices_indirect` / `indices_indirect`).
+- `read_transform_hierarchy_position()`, `transform_position_direct()`, `resolve_camera_arrays()`, `resolve_transform_arrays()` — перебор известных расположений `TransformAccess` (+0x38/+0x40 и +0x18/+0x20) с проверкой результата по позиции камеры.
+- `resolve_skeleton_layout()` — перебор раскладок скелета с удержанием действующей до 4 отказов подряд.
+- `discover_gameobject_name_offset()` / `ensure_gameobject_name_offset()` — смещение имени `GameObject` подтверждается известными именами костей.
+- `reset_world_caches()` снова сбрасывает выученные структурные параметры при настоящей смене мира, а пустой список игроков дольше 10 с чистит мёртвое население.
+
+Новые возможности (silent writer, `EspContinuity`, `PlayerEspWatchdog`, квадратный overlay) сохранены — изменён только слой разрешения адресов.

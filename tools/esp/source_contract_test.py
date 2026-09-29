@@ -30,15 +30,35 @@ fallback = re.search(
 assert fallback and "g_mem.bind(pid, candidates[i])" in fallback.group("body"), \
     "old_source-compatible fallback must be guarded by official package verification"
 
-validator = re.search(
-    r"static bool validate_player_position_field\([^)]*\) \{(?P<body>.*?)\n\}",
+# old_source resolved the player position field (and the native Transform
+# hierarchy layout) at runtime instead of trusting one hard-coded constant.
+# Freezing them broke every visual on the shipped client, so the adaptive
+# resolvers must stay in place.
+discovery = re.search(
+    r"static bool discover_player_position_offset\([^)]*\) \{(?P<body>.*?)\n\}",
     game,
     flags=re.S,
 )
-assert validator, "player position validator not found"
-body = validator.group("body")
-assert "player + PLAYER_POSITION" in body
-assert "read_transform_hierarchy_position" not in body, \
-    "a plausible native pivot must not override the fixed release player position"
+assert discovery, "runtime player position discovery not found"
+assert "find_direct_player_position_offset" in discovery.group("body"), \
+    "direct position offsets must be probed, not assumed"
+assert "discover_transform_hierarchy_layout" in discovery.group("body"), \
+    "the Transform hierarchy fallback must stay reachable"
+
+assert "k_known_position_offsets[] = {0x1D0, 0x1C8" in game, \
+    "known direct position offsets must stay ordered by trust"
+assert "static bool validate_player_position_field" not in game, \
+    "the fixed-offset-only validator must not come back"
+
+assert "recheck_direct_player_position" in game, \
+    "the hierarchy fallback must keep probing the direct fields"
+assert "discover_gameobject_name_offset" in game, \
+    "GameObject name offset must be discovered from real bone names"
+assert "matrices_indirect" in game, \
+    "pointer-indirect hierarchy arrays must stay supported"
+
+markers = (root / "jni/src/game_markers.cpp").read_text(encoding="utf-8")
+assert "discover_layout_from_native_transforms" in markers, \
+    "markers must be able to learn the layout solo (no players around)"
 
 print("visual source contracts: OK")
