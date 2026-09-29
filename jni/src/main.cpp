@@ -17,6 +17,11 @@
 #include "app_state.h"
 #include "overlay_geometry.h"
 #include "mode_select.h"
+#include "mem_io.h"
+#include "kernel_io.h"
+#include <sys/socket.h>
+#include <sys/utsname.h>
+#include <cstring>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -24,6 +29,71 @@
 #include <ctime>
 #include <sys/stat.h>
 #include <thread>
+
+// Диагностика кернел-режима из терминала (Termux/adb), без оверлея и игры:
+//   su -c /data/local/tmp/xvcen --check-driver
+// Печатает: root/не root, версию ядра, найденное семейство сокета драйвера,
+// результат self-test (чтение+запись собственной памяти через драйвер) и для
+// сравнения доступность экстернал-дороги. Коды выхода: 0 — кернел работает,
+// 1 — драйвер не найден, 2 — сокет есть, но перенос данных не идёт.
+namespace driver_check {
+
+static int Run() {
+    struct utsname un{};
+    if (uname(&un) != 0) un.release[0] = 0;
+    printf("== xvcen: проверка кернел режима ==\n");
+    printf("ядро устройства : %s\n", un.release);
+    printf("uid / euid      : %d / %d%s\n", getuid(), geteuid(),
+           geteuid() == 0 ? " (root)" : "  <-- НЕ ROOT");
+    if (geteuid() != 0)
+        printf("!! кернел режим требует root: сокет драйвера создаётся только\n"
+               "   привилегированным процессом, без root маячок не виден.\n"
+               "   Запуск: su -c <путь>/xvcen\n");
+
+    // 1) Поиск семейства сокета драйвера: маячок errno 1338 на пробе
+    //    socket(fam, 6, 0) — тот же перебор, что делает сам чит.
+    int fam = -1;
+    for (int dom = memio::kDriverFamilyFirst; dom <= memio::kDriverFamilyLast; ++dom) {
+        errno = 0;
+        const int probe = socket(dom, memio::kDriverProbeType, memio::kDriverSockProto);
+        if (probe >= 0) { close(probe); continue; }
+        if (errno == memio::kDriverProbeErrno) { fam = dom; break; }
+        if (errno != EAFNOSUPPORT && errno != EPROTONOSUPPORT && errno != ESOCKTNOSUPPORT)
+            printf("   (семейство %d отвечает errno %d — не драйвер, пропускаем)\n",
+                   dom, errno);
+    }
+    if (fam < 0) {
+        printf("драйвер         : НЕ найден (маячок errno %d на семействах %d..%d)\n",
+               memio::kDriverProbeErrno, memio::kDriverFamilyFirst, memio::kDriverFamilyLast);
+        printf("   Прошей драйвер под СВОЮ версию ядра (uname -r) скриптом .sh\n"
+               "   из drivers.7z и повтори проверку. Драйвер не переживает\n"
+               "   перезагрузку — после ребута прошивай заново.\n");
+    } else {
+        printf("драйвер         : найден, семейство сокета %d\n", fam);
+    }
+
+    // 2) Полный self-test: чтение И запись собственной памяти через сокет
+    //    драйвера. /proc здесь не участвует: байты совпадут, только если
+    //    ядро реально сходило по страницам нашего процесса.
+    if (fam >= 0) {
+        const bool ok = memio::driver_self_test();
+        printf("self-test       : чтение+запись своей памяти через драйвер — %s\n",
+               ok ? "OK" : "FAIL");
+        printf("итог            : кернел режим %s\n",
+               ok ? "РАБОТАЕТ (данные идут через ядро, /proc не участвует)"
+                  : "НЕ работает (сокет есть, перенос данных не идёт)");
+        return ok ? 0 : 2;
+    }
+
+    // 3) Для сравнения — доступна ли экстернал-дорога (/proc/<pid>/mem).
+    const int fd = ::open("/proc/1/mem", O_RDWR | O_CLOEXEC);
+    printf("экстернал       : /proc/<pid>/mem %s\n",
+           fd >= 0 ? "доступен (root)" : "недоступен");
+    if (fd >= 0) close(fd);
+    return 1;
+}
+
+}  // namespace driver_check
 
 // Хук инициализации (пустая заглушка — точка расширения).
 namespace prot {
@@ -38,6 +108,11 @@ InputState g_input;
 AppState g_state;
 
 int main(int argc, char* argv[]) {
+    // Проверка драйвера из терминала (Termux/adb): su -c ./xvcen --check-driver
+    // — без GUI, до запуска оверлея и игры.
+    for (int i = 1; i < argc; ++i)
+        if (strcmp(argv[i], "--check-driver") == 0) return driver_check::Run();
+
     signal(SIGINT,  [](int) { main_thread_flag.store(false); });
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
     signal(SIGHUP,  [](int) { main_thread_flag.store(false); });

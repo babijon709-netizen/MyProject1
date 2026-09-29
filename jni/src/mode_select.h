@@ -21,6 +21,7 @@
 // что-то в игре под оверлеем.
 
 #include <sys/stat.h>
+#include <unistd.h>                 // geteuid — статус root на экране
 
 #include <fstream>
 #include <string>
@@ -174,8 +175,9 @@ static bool RunModeSelect() {
             const float titleH = fs * 2.6f;
             const float subH   = fs * 1.5f;
             const float statusH = fs * 2.1f;
+            const float hintH  = fs * 1.35f;   // нижняя строка (прошлый режим/подсказка)
             const float cardH = pad + titleH + subH + 18.f +
-                                btnH + 14.f + btnH + 20.f + statusH + pad;
+                                btnH + 14.f + btnH + 20.f + statusH + hintH + pad;
             const float cx = (vw - cardW) * 0.5f;
             const float cy = (vh - cardH) * 0.5f + slide;
             dl->AddRectFilled({cx, cy}, {cx + cardW, cy + cardH},
@@ -216,13 +218,18 @@ static bool RunModeSelect() {
             if (ModeButton("##mode_kernel", iw, btnH, XS("Кернел (драйвер)"),
                            XS("Через ядерный драйвер — мимо /proc и его запретов"),
                            drv, true, fs)) {
-                // Тап по кернелу — не слепой выбор, а проверка: драйвер
-                // обязан прочитать И записать нашу собственную память через
-                // сокет (self_test в kernel_io.h). /proc в этой проверке не
-                // участвует — совпасть может, только если данные реально
-                // прошли через ядро. Прошёл — режим принят; нет — остаёмся
-                // на экране и перепроверяем наличие драйвера.
-                if (memio::driver_self_test()) {
+                // Тап по кернелу — не слепой выбор, а проверка. Порядок причин:
+                //   1) не root — сокет драйвера создаётся только привилегирован-
+                //      ным процессом, маячок без root не виден ВООБЩЕ;
+                //   2) self_test: драйвер обязан прочитать И записать нашу
+                //      собственную память через сокет (kernel_io.h). /proc в
+                //      проверке не участвует — совпасть может, только если
+                //      данные реально прошли через ядро;
+                //   3) не прошит/отвалился — чистый рескан семейства.
+                if (geteuid() != 0) {
+                    PlaySound(SND_CLICK);
+                    ShowToast(XS("Кернел: нет root — запусти чит от su"));
+                } else if (memio::driver_self_test()) {
                     picked = MODE_KERNEL;
                     PlaySound(SND_SUCCESS);
                     ShowToast(XS("Кернел режим|драйвер проверен"));
@@ -231,7 +238,7 @@ static bool RunModeSelect() {
                     drv = memio::driver_available(&fam);
                     PlaySound(SND_CLICK);
                     ShowToast(drv ? XS("Драйвер не прошёл проверку чтения/записи")
-                                  : XS("Драйвер не найден — нужен root и прошитый драйвер"));
+                                  : XS("Драйвер не найден — прошей .sh своей версии ядра"));
                 }
             }
             y += btnH + 20.f;
@@ -240,11 +247,19 @@ static bool RunModeSelect() {
             {
                 char status[160];
                 ImVec4 dotCol;
-                if (drv) {
+                const bool root = geteuid() == 0;
+                if (!root) {
+                    // Не root: маячок драйвера не виден в принципе — это
+                    // первая и самая частая причина «серой кнопки».
+                    snprintf(status, sizeof(status), "%s",
+                             XS("Кернел: нет root — запусти чит от su"));
+                    dotCol = C::Red();
+                } else if (drv) {
                     snprintf(status, sizeof(status), XS("Драйвер: найден (семейство %d)"), fam);
                     dotCol = ImVec4(0.20f, 0.78f, 0.35f, 1.f);
                 } else {
-                    snprintf(status, sizeof(status), "%s", XS("Драйвер не найден — нужен root и прошитый драйвер"));
+                    snprintf(status, sizeof(status), "%s",
+                             XS("Драйвер не найден — прошей .sh своей версии ядра"));
                     dotCol = C::Red();
                 }
                 const float dfs = fs * 0.95f;
@@ -252,7 +267,8 @@ static bool RunModeSelect() {
 
                 // Кнопка «Проверить снова»: драйвер прошивают и после
                 // запуска чита — перезагружать ради этого приложение
-                // не нужно.
+                // не нужно. Рескан с чистого листа: сокет мог умереть, и
+                // заново прошитый драйвер мог получить другое семейство.
                 const char* reLbl = XS("Проверить снова");
                 const float rfs = fs * 0.95f;
                 const ImVec2 rs = fn->CalcTextSizeA(rfs, FLT_MAX, 0.f, reLbl);
@@ -263,13 +279,14 @@ static bool RunModeSelect() {
 
                 dl->AddCircleFilled({x + dotR + 4.f, sy}, dotR, C::U(dotCol), 16);
                 dl->AddText(fn, dfs, {x + dotR * 2.f + 18.f, sy - dss.y * 0.5f},
-                            C::U(drv ? C::Txt() : C::Dim()), status);
+                            C::U(root && drv ? C::Txt() : C::Dim()), status);
 
                 const float rx = x + iw - rW;
                 const float ry = y + (statusH - rH) * 0.5f;
                 ImGui::SetCursorScreenPos({rx, ry});
                 ImGui::InvisibleButton("##mode_recheck", {rW, rH});
                 if (WasTappedHere()) {
+                    memio::kernel_transport().invalidate();
                     drv = memio::driver_available(&fam);
                     PlaySound(SND_CLICK);
                 }
@@ -282,17 +299,24 @@ static bool RunModeSelect() {
                 dl->AddText(fn, rfs, {rx + (rW - rs.x) * 0.5f, ry + (rH - rs.y) * 0.5f},
                             C::U(C::Txt()), reLbl);
 
-                // Подсказка про прошлый запуск: ориентир, если устройство
-                // уже настраивали (файл .mode существует).
-                if (hadSaved) {
-                    const char* modeName = (saved == MODE_KERNEL) ? XS("Кернел (драйвер)")
-                                                                  : XS("Экстернал");
-                    char prev[96];
-                    snprintf(prev, sizeof(prev), XS("Прошлый запуск: %s"), modeName);
+                // Нижняя строка: прошлый режим, если устройство уже
+                // настраивали (.mode существует), иначе — как проверить
+                // драйвер из терминала ещё до входа в игру.
+                {
+                    char prevBuf[96];
+                    const char* prev = nullptr;
+                    if (hadSaved) {
+                        const char* modeName = (saved == MODE_KERNEL) ? XS("Кернел (драйвер)")
+                                                                      : XS("Экстернал");
+                        snprintf(prevBuf, sizeof(prevBuf), XS("Прошлый запуск: %s"), modeName);
+                        prev = prevBuf;
+                    } else {
+                        prev = XS("Проверка из терминала: xvcen --check-driver");
+                    }
                     const float pfs = fs * 0.85f;
                     const ImVec2 ps = fn->CalcTextSizeA(pfs, FLT_MAX, 0.f, prev);
                     dl->AddText(fn, pfs, {cx + (cardW - ps.x) * 0.5f,
-                                          cy + cardH - pad * 0.75f - ps.y},
+                                          y + statusH + (hintH - ps.y) * 0.5f},
                                 C::U(C::Dim()), prev);
                 }
             }
@@ -305,6 +329,7 @@ static bool RunModeSelect() {
     Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
 
     // Применяем выбранный (или дефолтный при выходе через сигнал) транспорт.
+    // Достато // Применяем выбранный (или дефолтный при выходе через сигнал) транспорт.
     // Достаточно одного вызова до первого bind — весь код чтения выше по
     // стеку работает через memio::Transport и про режимы не знает (mem_io.h).
     const Mode mode = (picked == MODE_KERNEL) ? MODE_KERNEL : MODE_EXTERNAL;
