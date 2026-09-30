@@ -32,8 +32,8 @@ namespace C {
         static constexpr ImVec4 Bg     = {0.929f, 0.933f, 0.953f, 1};
         static constexpr ImVec4 LeftBg = {0.957f, 0.957f, 0.973f, 1};
         static constexpr ImVec4 Card   = {1.000f, 1.000f, 1.000f, 1};
-        static constexpr ImVec4 Acc    = {0.424f, 0.361f, 0.906f, 1};
-        static constexpr ImVec4 AccDk  = {0.333f, 0.275f, 0.784f, 1};
+        static constexpr ImVec4 Acc    = {0.380f, 0.240f, 0.960f, 1};
+        static constexpr ImVec4 AccDk  = {0.300f, 0.180f, 0.780f, 1};
         static constexpr ImVec4 Red    = {1.000f, 0.271f, 0.227f, 1};
         static constexpr ImVec4 Txt    = {0.078f, 0.082f, 0.102f, 1};
         static constexpr ImVec4 Dim    = {0.541f, 0.553f, 0.596f, 1};
@@ -41,11 +41,11 @@ namespace C {
         static constexpr ImVec4 Sep    = {0.851f, 0.859f, 0.898f, 1};
     }
     namespace Dark {
-        static constexpr ImVec4 Bg     = {0.063f, 0.071f, 0.094f, 1};
-        static constexpr ImVec4 LeftBg = {0.047f, 0.055f, 0.075f, 1};
-        static constexpr ImVec4 Card   = {0.106f, 0.118f, 0.153f, 1};
-        static constexpr ImVec4 Acc    = {0.545f, 0.486f, 1.000f, 1};
-        static constexpr ImVec4 AccDk  = {0.424f, 0.361f, 0.906f, 1};
+        static constexpr ImVec4 Bg     = {0.075f, 0.085f, 0.110f, 1};
+        static constexpr ImVec4 LeftBg = {0.055f, 0.062f, 0.085f, 1};
+        static constexpr ImVec4 Card   = {0.105f, 0.115f, 0.150f, 1};
+        static constexpr ImVec4 Acc    = {0.380f, 0.240f, 0.960f, 1};
+        static constexpr ImVec4 AccDk  = {0.310f, 0.220f, 0.600f, 1};
         static constexpr ImVec4 Red    = {1.000f, 0.361f, 0.322f, 1};
         static constexpr ImVec4 Txt    = {0.949f, 0.953f, 0.969f, 1};
         static constexpr ImVec4 Dim    = {0.604f, 0.616f, 0.663f, 1};
