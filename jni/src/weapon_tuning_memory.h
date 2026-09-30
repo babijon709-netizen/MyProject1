@@ -202,7 +202,9 @@ public:
         bool r=nr || restore(0,6), s=ns || restore(6,9);
         if (!r) recoil=Status::Failed;
         if (!s) spread=Status::Failed;
-        if (!r || !s || (!nr && !ns)) return;
+        // An unreadable original belonging to the disabled half must not block
+        // the enabled half from discovering the post-respawn weapon graph.
+        if (!nr && !ns) return;
         if (!base) return;
         // No offset discovery and no native-RVA table: every address below is
         // `object + go_active::<named offset>` from the release header. Live
@@ -213,8 +215,14 @@ public:
             return;
         }
         if (!(next==context_)) {
-            if (!restore(0,9)) { recoil=spread=Status::Failed; return; }
+            // On death the old weapon graph can disappear before its values
+            // are readable/restorable.  A fully validated replacement graph
+            // is sufficient proof of a lifecycle change: do not let stale
+            // originals hold recoil/spread in Failed until a manual retoggle.
+            if (!restore(0,9)) saved_={};
             context_=next;
+            if (!nr) recoil=Status::Off;
+            if (!ns) spread=Status::Off;
         }
         if (nr) recoil=apply(0,6,player)?Status::Active:Status::Failed;
         if (ns) spread=apply(6,9,player)?Status::Active:Status::Failed;

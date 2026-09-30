@@ -50,7 +50,11 @@ Memory memory;
 // лагает»). Снимок читается целиком одним read() в переиспользуемый буфер и
 // живёт kMapsSnapshotTtl; любая неподтверждённая запись принудительно берёт
 // свежий снимок, поэтому проверка остаётся строгой.
-constexpr double kMapsSnapshotTtl = 0.25;   // секунды
+// Object identity/backlinks are revalidated before every write, so the mapping
+// itself does not need to be reparsed four times a second.  A longer range TTL
+// removes the remaining periodic /proc/maps hitch while keeping the gate tied
+// to a short-lived snapshot and to the current pid.
+constexpr double kMapsSnapshotTtl = 2.0;   // секунды
 
 std::string maps_text_cache;
 pid_t       maps_text_pid = -1;
@@ -210,6 +214,9 @@ fast_loot::Controller<HeapMemory> loot(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
+Clock::time_point weapon_last_tick{};
+uint64_t weapon_last_player = 0;
+unsigned weapon_last_flags = ~0u;
 int fps_last_limit = 0;
 viewmodel::Status fps_last_log = viewmodel::Status::Off;
 // Build ID libunity, который не прошёл таблицу kFpsLayouts (0 — движок
@@ -279,6 +286,7 @@ void esp_viewmodel_reset(bool restore) {
         LogLine("weapon speed: originals could not all be restored before disconnect; restart game");
     loot.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
+    weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
     invalidate_maps_snapshot();
     ++epoch;
 }
@@ -349,7 +357,26 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         }
         local_source_failed=false;
     }
-    weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
+    // Weapon chains are expensive (class names, backlinks and readbacks for
+    // every scalar).  They only need maintenance at game-tick cadence, not at
+    // the uncapped overlay rate.  Setting/player changes bypass the limiter so
+    // toggles and respawns still apply immediately.
+    const unsigned weapon_flags = (settings.no_recoil ? 1u : 0u) |
+                                  (want_no_spread ? 2u : 0u) |
+                                  (g_state.fast_fire ? 4u : 0u) |
+                                  (g_state.fast_reload ? 8u : 0u);
+    const auto weapon_now = Clock::now();
+    const bool weapon_due = weapon_flags != weapon_last_flags ||
+                            player != weapon_last_player ||
+                            weapon_now - weapon_last_tick >= std::chrono::milliseconds(33);
+    if (weapon_due) {
+        weapon_last_tick = weapon_now;
+        weapon_last_player = player;
+        weapon_last_flags = weapon_flags;
+        weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
+        weapon_speeds.tick(epoch, g_il2cpp_base, player,
+                           g_state.fast_fire, g_state.fast_reload);
+    }
     {
         // Ступень, на которой оборвалась цепочка отдачи/разброса. Логируем
         // только смену ступени, иначе строка шла бы каждый кадр.
@@ -366,8 +393,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
                 LogLine("оружие: цепочка отдачи/разброса разрешилась полностью");
         }
     }
-    weapon_speeds.tick(epoch, g_il2cpp_base, player,
-                       g_state.fast_fire, g_state.fast_reload);
     controller.tick(epoch, player, settings);
     auto st = esp_viewmodel_diagnostics();
     if (st.fov != last_log.fov || st.hands != last_log.hands ||

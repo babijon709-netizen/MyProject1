@@ -146,6 +146,15 @@ template<class IO> class Controller {
         const bool b=restore_reload();
         return a && b;
     }
+    void forget_values() {
+        // A respawn destroys the old managed/native weapon graph.  Reads from
+        // those addresses can then remain Unreadable forever, so restoration
+        // must not pin the controller to the pre-death context.  This is only
+        // used after a complete, independently validated replacement context
+        // has already been resolved.
+        config_fire_={}; config_full_={}; config_loop_={};
+        shot_period_={}; effective_full_={}; effective_loop_={}; burst_seconds_={};
+    }
     bool normalize_inherited_caches(const Context& next) {
         if (!(context_.config==next.config) || context_.weapon==next.weapon) return true;
         const bool a=shot_period_.normalize_copy(
@@ -297,7 +306,10 @@ public:
         reload=fast_reload?Status::Waiting:Status::Off;
         if (!fast_fire && !restore_fire()) fire=Status::Failed;
         if (!fast_reload && !restore_reload()) reload=Status::Failed;
-        if ((!fast_fire && !fast_reload) || fire==Status::Failed || reload==Status::Failed) return;
+        // Failure to restore the disabled half commonly means its pre-death
+        // owner vanished.  When the other half is enabled, continue resolving
+        // so a verified replacement context can discard those stale addresses.
+        if (!fast_fire && !fast_reload) return;
         if (!base) return;
 
         // No offset discovery: live reads only validate exact local objects
@@ -308,11 +320,17 @@ public:
             return;
         }
         if (!(next==context_)) {
-            if (!normalize_inherited_caches(next) || !restore_all()) {
-                fire=reload=Status::Failed;
-                return;
-            }
+            // A verified new context means an equip/respawn transition.  Try
+            // the polite conditional restore first; if the old graph is
+            // already unreadable, abandon only its saved addresses and move
+            // on.  Previously that permanent read failure blocked every later
+            // apply until the user toggled both options off and on.
+            const bool normalized=normalize_inherited_caches(next);
+            const bool restored=restore_all();
+            if (!normalized || !restored) forget_values();
             context_=next;
+            if (!fast_fire) fire=Status::Off;
+            if (!fast_reload) reload=Status::Off;
         }
         if (fast_fire) fire=apply_fire(kMaxMultiplier)?Status::Active:Status::Failed;
         if (fast_reload) reload=apply_reload(kMaxMultiplier)?Status::Active:Status::Failed;

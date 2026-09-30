@@ -88,10 +88,11 @@ template <class IO> class Controller {
     // чтобы один огромный массив не голодал соседей и свой хвост.
     std::uint64_t begin_runner_ = 0, item_phase_ = 0;
     std::uint32_t neutralized_ = 0;     // сколько ожиданий ускорено всего
+    std::uint32_t anchor_misses_ = 0;   // self-heal after a world/PlayerLoop rebuild
     void forget_addresses() {
         // Сессия сменилась: ни один старый адрес не обязан быть валиден.
         helper_class_ = 0; promise_class_ = 0; scaled_class_ = 0;
-        begin_runner_ = item_phase_ = 0;
+        begin_runner_ = item_phase_ = 0; anchor_misses_ = 0;
         runner_classes_.clear(); item_classes_.clear();
     }
     bool pointer(std::uint64_t address, std::uint64_t& value) {
@@ -203,15 +204,21 @@ public:
             !statics ||
             !pointer(statics + go_active::PLAYERLOOPHELPER_RUNNERS, runners) ||
             !runners) {
-            status = Status::Waiting;   // UniTask ещё не инициализировался
+            // PlayerLoop/UniTask statics may be replaced during respawn.  Do
+            // not retain a dead helper and negative class cache indefinitely
+            // (switching the toggle used to be the only way to clear them).
+            if (++anchor_misses_ >= 30) forget_addresses();
+            status = Status::Waiting;
             return;
         }
         int32_t runners_len = 0;
         if (!io_.read(runners + go_active::IL2CPP_ARRAY_LENGTH, runners_len) ||
             runners_len <= 0 || runners_len > kMaxRunners) {
+            if (++anchor_misses_ >= 30) forget_addresses();
             status = Status::Waiting;   // снимок заменился — попробуем в следующий тик
             return;
         }
+        anchor_misses_ = 0;
 
         std::uint32_t writes = 0;
         bool write_failed = false;
