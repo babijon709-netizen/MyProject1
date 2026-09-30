@@ -1,20 +1,15 @@
 #pragma once
-// mode_select.h — экран выбора режима работы ПЕРЕД запуском чита.
+// mode_select.h — экран выбора способа чтения ПЕРЕД запуском чита.
 //
-// Экран показывается всегда на старте (после поднятия оверлея и тача, до
-// старта потока привязки) и держит собственный цикл drawBegin/drawEnd, пока
-// пользователь не выберет способ доступа к памяти игры:
+// Минималистичный экран: заголовок «Способ чтения» по центру сверху и две
+// кнопки рядом — «Прямое чтение» (/proc/<pid>/mem, как раньше) и
+// «FT-Драйвер» (сокет ядерного драйвера, kernel_io.h). Без фона, подписей и
+// строк состояния: причины отказа приходят тостом по тапу, повторный тап по
+// FT-Драйверу перепроверяет драйвер (прошить .sh можно и после запуска).
 //
-//   * Экстернал — /proc/<pid>/mem, как раньше. Работает везде, где чит
-//     вообще мог работать до этого.
-//   * Кернел (драйвер) — чтение/запись через сокет ядерного драйвера
-//     (kernel_io.h): /proc/<pid>/mem не открывается, привязка не зависит от
-//     SELinux/yama на /proc.
-//
-// Выбор сохраняется в .mode рядом с .lang/.accent (каталог конфигов) и
-// подсвечивается при следующем запуске; меню всё равно показывается — режим
-// меняют под конкретное устройство/запуск (драйвер прошивается отдельно и
-// живёт до перезагрузки, поэтому «нашёл/не нашёл» нужно видеть каждый раз).
+// Выбор сохраняется в .mode рядом с .lang/.accent (каталог конфигов), но
+// экран всё равно показывается на каждом запуске — драйвер живёт до
+// перезагрузки, и «нашёл/не нашёл» нужно видеть каждый раз.
 //
 // Пока экран на виду, весь ввод забирает оверлей (Touch_BlockRect на весь
 // экран) — в игру не уходит ни одного пальца, тап мимо кнопок не «нажмёт»
@@ -27,10 +22,10 @@
 #include <string>
 
 #include "imgui.h"
-#include "imgui_internal.h"          // ImClamp / ImMax / ImMin
+#include "imgui_internal.h"          // ImMin
 
 #include "app_state.h"               // main_thread_flag
-#include "main.h"                    // drawBegin/drawEnd, displayInfo
+#include "main.h"                    // drawBegin/drawEnd
 #include "mem_io.h"                  // procfs_transport (дефолт)
 #include "kernel_io.h"               // kernel_transport, driver_available
 #include "game.h"                    // esp_set_mem_backend
@@ -44,8 +39,8 @@
 namespace modesel {
 
 enum Mode {
-    MODE_EXTERNAL = 0,   // /proc/<pid>/mem
-    MODE_KERNEL   = 1,   // сокет драйвера (kernel_io.h)
+    MODE_EXTERNAL = 0,   // /proc/<pid>/mem — «Прямое чтение»
+    MODE_KERNEL   = 1,   // сокет драйвера (kernel_io.h) — «FT-Драйвер»
 };
 
 // ---- сохранение выбора (.mode, по образцу .lang/.accent в config.cpp) -----
@@ -54,62 +49,44 @@ static std::string ModePath() {
     return std::string(CfgDir()) + XS(".mode");
 }
 
-static Mode SavedMode() {
-    std::ifstream f(ModePath());
-    std::string v;
-    if (!f || !std::getline(f, v) || v.empty()) return MODE_EXTERNAL;
-    return v == "kernel" ? MODE_KERNEL : MODE_EXTERNAL;
-}
-
-static bool HasSavedMode() {
-    std::ifstream f(ModePath());
-    return f.good();
-}
-
 static void RememberMode(Mode m) {
     mkdir(CfgDir(), 0777);
     std::ofstream f(ModePath(), std::ios::trunc);
     if (f) f << (m == MODE_KERNEL ? "kernel" : "external");
 }
 
-// ---- одна большая кнопка режима (рисуем сами, как остальное меню) ---------
-
-// enabled=false — режим недоступен (драйвер не найден): кнопка серая, тапы
-// игнорируются. Возвращает true, если по кнопке тапнули.
+// ---- кнопка режима (только текст, без подписи) -----------------------------
+//
+// style_on=false — драйвер не отвечает: корпус приглушён, но тап всё равно
+// возвращается вызывающему (тот покажет причину тостом и перепроверит).
 static bool ModeButton(const char* id, float w, float h, const char* title,
-                       const char* sub, bool enabled, bool accent, float fs) {
+                       bool style_on, bool accent, float fs) {
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton(id, {w, h});
 
-    const bool tapped = enabled && WasTappedHere();
-    const bool held   = enabled && ImGui::IsItemActive() && ImGui::IsItemHovered();
-    const bool hov    = enabled && ImGui::IsItemHovered();
+    const bool tapped = WasTappedHere();
+    const bool held   = ImGui::IsItemActive() && ImGui::IsItemHovered();
+    const bool hov    = ImGui::IsItemHovered();
 
     auto*  dl = ImGui::GetWindowDrawList();
     ImFont* fn = ImGui::GetFont();
 
-    // Корпус: обычная карточка; у кернела — рамка акцентом, чтобы режимы
-    // были различимы с одного взгляда. Нажатие — затемнение корпуса.
-    ImVec4 body = enabled ? (accent ? C::Card() : C::LeftBg()) : C::TrkOff();
+    // Корпус: обычная карточка; у FT-Драйвера — рамка акцентом. Нажатие —
+    // затемнение корпуса.
+    ImVec4 body = style_on ? (accent ? C::Card() : C::LeftBg()) : C::TrkOff();
     if (held) body.w *= 0.82f;
     else if (hov) body.w *= 0.94f;
     dl->AddRectFilled(p, {p.x + w, p.y + h}, C::U(body), R::Btn);
-    if (enabled && accent) {
+    if (style_on && accent) {
         ImVec4 ring = C::Acc();
         ring.w *= held ? 0.85f : 1.f;
         dl->AddRect(p, {p.x + w, p.y + h}, C::U(ring), R::Btn, 0.f, 3.f);
     }
 
-    // Заголовок и подпись — по центру; шрифт один, крупный кегль задаём
-    // вручную (как подписи вкладок в menu.cpp).
-    const float tfs = fs * 1.30f;
-    const float sfs = fs * 0.92f;
+    const float tfs = fs * 1.25f;
     const ImVec2 ts = fn->CalcTextSizeA(tfs, FLT_MAX, 0.f, title);
-    const ImVec2 ss = fn->CalcTextSizeA(sfs, FLT_MAX, 0.f, sub);
-    dl->AddText(fn, tfs, {p.x + (w - ts.x) * 0.5f, p.y + h * 0.5f - tfs - 6.f},
-                C::U(enabled ? C::Txt() : C::Dim()), title);
-    dl->AddText(fn, sfs, {p.x + (w - ss.x) * 0.5f, p.y + h * 0.5f + 8.f},
-                C::U(C::Dim()), sub);
+    dl->AddText(fn, tfs, {p.x + (w - ts.x) * 0.5f, p.y + (h - ts.y) * 0.5f},
+                C::U(style_on ? C::Txt() : C::Dim()), title);
     return tapped;
 }
 
@@ -125,14 +102,12 @@ static bool RunModeSelect() {
     RestoreAccent();
     ApplyTheme();
 
-    const Mode saved = SavedMode();
-    const bool hadSaved = HasSavedMode();
     bool drv = false;          // драйвер отвечает на пробу семейства
-    int  fam = -1;            // номер семейства сокета драйвера
+    int  fam = -1;             // номер семейства сокета драйвера
     drv = memio::driver_available(&fam);
 
-    float fade = 0.f;         // появление карточки 0..1
-    int   picked = -1;        // -1 — ещё не выбрали
+    float fade = 0.f;          // появление 0..1
+    int   picked = -1;         // -1 — ещё не выбрали
 
     while (main_thread_flag.load() && picked < 0) {
         drawBegin();
@@ -162,164 +137,63 @@ static bool RunModeSelect() {
             const float fs = ImGui::GetFontSize();
 
             const float t = EaseInOut(fade);
-            const float slide = (1.f - t) * 36.f;   // карточка въезжает снизу
+            const float slide = (1.f - t) * -30.f;   // въезжает сверху
 
-            // Фон: сплошной, игры под ним ещё не видно (привязки нет) —
-            // полупрозрачность здесь только мешала бы.
-            dl->AddRectFilled({0.f, 0.f}, {vw, vh}, C::U(C::Bg()));
+            // Заголовок по центру сверху: без фона, только текст с тенью
+            // (читаемость поверх любого экрана под оверлеем).
+            const char* title = XS("Способ чтения");
+            const float tfs = fs * 1.55f;
+            const ImVec2 ts = fn->CalcTextSizeA(tfs, FLT_MAX, 0.f, title);
+            const float tx = (vw - ts.x) * 0.5f;
+            const float ty = vh * 0.06f + slide;
+            dl->AddText(fn, tfs, {tx + 2.f, ty + 2.f}, IM_COL32(0, 0, 0, 110), title);
+            dl->AddText(fn, tfs, {tx, ty}, C::U(C::Txt()), title);
 
-            // ---- карточка по центру ------------------------------------
-            const float cardW = ImMin(vw - 64.f, 900.f);
-            const float btnH  = 148.f;
-            const float pad   = 30.f;
-            const float titleH = fs * 2.6f;
-            const float subH   = fs * 1.5f;
-            const float statusH = fs * 2.1f;
-            const float hintH  = fs * 1.35f;   // нижняя строка (прошлый режим/подсказка)
-            const float cardH = pad + titleH + subH + 18.f +
-                                btnH + 14.f + btnH + 20.f + statusH + hintH + pad;
-            const float cx = (vw - cardW) * 0.5f;
-            const float cy = (vh - cardH) * 0.5f + slide;
-            dl->AddRectFilled({cx, cy}, {cx + cardW, cy + cardH},
-                              C::U(C::Card()), R::Card);
+            // Две кнопки рядом под заголовком.
+            const float gap  = 14.f;
+            const float btnH = fs * 3.4f;
+            const float btnW = ImMin((vw - 36.f - gap) * 0.5f, 330.f);
+            const float rowW = btnW * 2.f + gap;
+            const float by   = ty + tfs + fs * 1.3f;
+            const float bx   = (vw - rowW) * 0.5f;
 
-            float y = cy + pad;
-            float x = cx + pad;
-            const float iw = cardW - pad * 2.f;
-
-            // Заголовок и подзаголовок.
-            {
-                const char* title = XS("Режим работы");
-                const char* sub   = XS("Выберите способ доступа к памяти игры");
-                const float tfs = fs * 1.9f;
-                const float sfs = fs * 1.0f;
-                const ImVec2 ts = fn->CalcTextSizeA(tfs, FLT_MAX, 0.f, title);
-                const ImVec2 ss = fn->CalcTextSizeA(sfs, FLT_MAX, 0.f, sub);
-                dl->AddText(fn, tfs, {cx + (cardW - ts.x) * 0.5f, y},
-                            C::U(C::Txt()), title);
-                y += titleH;
-                dl->AddText(fn, sfs, {cx + (cardW - ss.x) * 0.5f, y},
-                            C::U(C::Dim()), sub);
-                y += subH + 18.f;
-            }
-
-            // ---- кнопки режимов ---------------------------------------
-            ImGui::SetCursorScreenPos({x, y});
-            if (ModeButton("##mode_ext", iw, btnH, XS("Экстернал"),
-                           XS("Через /proc/<pid>/mem — работает без драйвера"),
-                           true, false, fs)) {
+            ImGui::SetCursorScreenPos({bx, by});
+            if (ModeButton("##mode_ext", btnW, btnH,
+                           XS("Прямое чтение"), true, false, fs)) {
                 picked = MODE_EXTERNAL;
                 PlaySound(SND_CLICK);
-                ShowToast(XS("Экстернал режим"));
+                ShowToast(XS("Прямое чтение"));
             }
-            y += btnH + 14.f;
 
-            ImGui::SetCursorScreenPos({x, y});
-            if (ModeButton("##mode_kernel", iw, btnH, XS("Кернел (драйвер)"),
-                           XS("Через ядерный драйвер — мимо /proc и его запретов"),
-                           drv, true, fs)) {
-                // Тап по кернелу. Никаких проб команд здесь НЕТ (слепая
+            ImGui::SetCursorScreenPos({bx + btnW + gap, by});
+            if (ModeButton("##mode_ft", btnW, btnH,
+                           XS("FT-Драйвер"), drv, true, fs)) {
+                // Тап по FT-Драйверу. Никаких проб команд здесь НЕТ (слепая
                 // проба неизвестного кода может потревожить драйвер перед
-                // привязкой — на 6301b28, где проб не было, привязка
-                // работала). Порядок:
+                // привязкой). Порядок:
                 //   1) не root — сокет драйвера создаётся только
                 //      привилегированным процессом, маячок без root не виден;
-                //   2) драйвер не найден — рескан с чистого листа;
-                //   3) сокет драйвера поднялся — режим принят. Настоящая
-                //      проверка транспорта — привязка к игре: bind читает
-                //      ELF-заголовок libil2cpp ЧЕРЕЗ ДРАЙВЕР (экстернал-путь
-                //      не задействован), и её результат виден тостом.
+                //   2) драйвер не найден — рескан с чистого листа (прошить
+                //      .sh можно и после запуска чита), нашёлся — выбираем;
+                //   3) драйвер отвечает — режим принят. Настоящая проверка
+                //      транспорта — привязка к игре: bind читает ELF-заголовок
+                //      libil2cpp ЧЕРЕЗ ДРАЙВЕР, результат виден тостом.
                 if (geteuid() != 0) {
                     PlaySound(SND_CLICK);
-                    ShowToast(XS("Кернел: нет root — запусти чит от su"));
+                    ShowToast(XS("FT-Драйвер: нет root — запусти чит от su"));
                 } else if (!drv) {
                     memio::kernel_transport().invalidate();
                     drv = memio::driver_available(&fam);
-                    PlaySound(SND_CLICK);
-                    ShowToast(XS("Драйвер не найден — прошей .sh своей версии ядра"));
+                    if (drv) {
+                        picked = MODE_KERNEL;
+                        PlaySound(SND_SUCCESS);
+                    } else {
+                        PlaySound(SND_CLICK);
+                        ShowToast(XS("Драйвер не найден — прошей .sh своей версии ядра"));
+                    }
                 } else {
                     picked = MODE_KERNEL;
                     PlaySound(SND_SUCCESS);
-                    ShowToast(XS("Кернел режим|привязку проверю в игре"));
-                }
-            }
-            y += btnH + 20.f;
-
-            // ---- строка состояния драйвера + перепроверка ---------------
-            {
-                char status[160];
-                ImVec4 dotCol;
-                const bool root = geteuid() == 0;
-                if (!root) {
-                    // Не root: маячок драйвера не виден в принципе — это
-                    // первая и самая частая причина «серой кнопки».
-                    snprintf(status, sizeof(status), "%s",
-                             XS("Кернел: нет root — запусти чит от su"));
-                    dotCol = C::Red();
-                } else if (drv) {
-                    snprintf(status, sizeof(status), XS("Драйвер: найден (семейство %d)"), fam);
-                    dotCol = ImVec4(0.20f, 0.78f, 0.35f, 1.f);
-                } else {
-                    snprintf(status, sizeof(status), "%s",
-                             XS("Драйвер не найден — прошей .sh своей версии ядра"));
-                    dotCol = C::Red();
-                }
-                const float dfs = fs * 0.95f;
-                const ImVec2 dss = fn->CalcTextSizeA(dfs, FLT_MAX, 0.f, status);
-
-                // Кнопка «Проверить снова»: драйвер прошивают и после
-                // запуска чита — перезагружать ради этого приложение
-                // не нужно. Рескан с чистого листа: сокет мог умереть, и
-                // заново прошитый драйвер мог получить другое семейство.
-                const char* reLbl = XS("Проверить снова");
-                const float rfs = fs * 0.95f;
-                const ImVec2 rs = fn->CalcTextSizeA(rfs, FLT_MAX, 0.f, reLbl);
-                const float rW = rs.x + 44.f, rH = fs * 2.0f;
-
-                const float dotR = 8.f;
-                const float sy = y + statusH * 0.5f;
-
-                dl->AddCircleFilled({x + dotR + 4.f, sy}, dotR, C::U(dotCol), 16);
-                dl->AddText(fn, dfs, {x + dotR * 2.f + 18.f, sy - dss.y * 0.5f},
-                            C::U(root && drv ? C::Txt() : C::Dim()), status);
-
-                const float rx = x + iw - rW;
-                const float ry = y + (statusH - rH) * 0.5f;
-                ImGui::SetCursorScreenPos({rx, ry});
-                ImGui::InvisibleButton("##mode_recheck", {rW, rH});
-                if (WasTappedHere()) {
-                    memio::kernel_transport().invalidate();
-                    drv = memio::driver_available(&fam);
-                    PlaySound(SND_CLICK);
-                }
-                const bool rHeld = ImGui::IsItemActive() && ImGui::IsItemHovered();
-                const bool rHov  = ImGui::IsItemHovered();
-                ImVec4 rBg = C::LeftBg();
-                if (rHeld) rBg.w *= 0.8f;
-                else if (rHov) rBg.w *= 0.92f;
-                dl->AddRectFilled({rx, ry}, {rx + rW, ry + rH}, C::U(rBg), rH * 0.5f);
-                dl->AddText(fn, rfs, {rx + (rW - rs.x) * 0.5f, ry + (rH - rs.y) * 0.5f},
-                            C::U(C::Txt()), reLbl);
-
-                // Нижняя строка: прошлый режим, если устройство уже
-                // настраивали (.mode существует), иначе — как проверить
-                // драйвер из терминала ещё до входа в игру.
-                {
-                    char prevBuf[96];
-                    const char* prev = nullptr;
-                    if (hadSaved) {
-                        const char* modeName = (saved == MODE_KERNEL) ? XS("Кернел (драйвер)")
-                                                                      : XS("Экстернал");
-                        snprintf(prevBuf, sizeof(prevBuf), XS("Прошлый запуск: %s"), modeName);
-                        prev = prevBuf;
-                    } else {
-                        prev = XS("Проверка из терминала: xvcen --check-driver");
-                    }
-                    const float pfs = fs * 0.85f;
-                    const ImVec2 ps = fn->CalcTextSizeA(pfs, FLT_MAX, 0.f, prev);
-                    dl->AddText(fn, pfs, {cx + (cardW - ps.x) * 0.5f,
-                                          y + statusH + (hintH - ps.y) * 0.5f},
-                                C::U(C::Dim()), prev);
                 }
             }
         }
@@ -331,7 +205,6 @@ static bool RunModeSelect() {
     Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
 
     // Применяем выбранный (или дефолтный при выходе через сигнал) транспорт.
-    // Достато // Применяем выбранный (или дефолтный при выходе через сигнал) транспорт.
     // Достаточно одного вызова до первого bind — весь код чтения выше по
     // стеку работает через memio::Transport и про режимы не знает (mem_io.h).
     const Mode mode = (picked == MODE_KERNEL) ? MODE_KERNEL : MODE_EXTERNAL;
