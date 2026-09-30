@@ -1,4 +1,6 @@
 #include "menu.h"
+#include "barbatos_gui_reconstructed.hpp"
+#include <cstdint>
 #include "main.h"
 #include "Android_touch/TouchHelperA.h"   // Touch_GetActive/BlockRect (фрикам)
 #include "game.h"
@@ -1671,7 +1673,7 @@ struct WinRectAnim {
     ~WinRectAnim() { if (armed && w) { w->pos = p; w->w = sw; w->h = sh; } }
 };
 
-void RenderMenu() {
+static void RenderLegacyMenu() {
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
     if (dt > 0.1f) dt = 0.1f;
@@ -2531,3 +2533,46 @@ void RenderMenu() {
 // 6 — куда поставить кнопку фрикама. Пока калибровка активна, меню скрыто
 // и первый тап по экрану пишет позицию (в долях экрана) в g_state.
 int  g_calibMode = 0;
+
+
+// Barbatos GUI adapter. The reconstructed renderer owns presentation state while
+// the host state remains the source of truth for the controls that drive gameplay.
+void RenderMenu() {
+    static barbatos_gui::GuiState ui;
+    static bool initialized = false;
+    if (!initialized) {
+        ui.visible = true;
+        ui.settings.language = barbatos_gui::Language::English;
+        initialized = true;
+    }
+
+    ui.aim.aiming = g_state.aim_touch;
+    ui.aim.aim_position = g_state.aim_pos;
+    ui.aim.circle_aim = g_state.aim_special;
+    ui.aim.aim_point = static_cast<barbatos_gui::AimPoint>(g_state.aim_bone);
+    ui.draw.rect_box = g_state.esp_box;
+    ui.draw.name_and_distance = g_state.esp_name;
+    ui.draw.skeleton = g_state.esp_skeleton;
+    ui.draw.player_weapon = g_state.esp_weapon;
+    ui.draw.radar = g_state.esp_vehicles;
+
+    // Reuse the already-loaded OpenGL textures; the reconstructed registry uses
+    // the same ImTextureID representation as the project's ImGui backend.
+    barbatos_gui::TextureRegistry textures;
+    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::Profile)] = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(g_tabIcons[0]));
+    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::DrawEye)] = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(g_tabIcons[2]));
+    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::AimTarget)] = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(g_tabIcons[1]));
+    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::ItemsCode)] = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(g_tabIcons[4]));
+    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::Settings)] = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(g_tabIcons[5]));
+    barbatos_gui::RenderBarbatosGui(ui, textures);
+
+    g_state.aim_touch = ui.aim.aiming;
+    g_state.aim_pos = ui.aim.aim_position;
+    g_state.aim_special = ui.aim.circle_aim;
+    g_state.aim_bone = static_cast<int>(ui.aim.aim_point);
+    g_state.esp_box = ui.draw.rect_box;
+    g_state.esp_name = ui.draw.name_and_distance;
+    g_state.esp_skeleton = ui.draw.skeleton;
+    g_state.esp_weapon = ui.draw.player_weapon;
+    g_state.esp_vehicles = ui.draw.radar;
+}

@@ -19,13 +19,13 @@ LOCAL_CFLAGS   := $(_CF) -std=c11
 
 LOCAL_LDFLAGS := -Wl,--gc-sections,-s,--strip-all -Wl,-x -Wl,--build-id=none -pie
 
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PATH)/include/ImGui/backends $(LOCAL_PATH)/src
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PATH)/include/ImGui/backends $(LOCAL_PATH)/src $(LOCAL_PATH)/src/barbatos_gui
 
 LOCAL_SRC_FILES := \
     src/main.cpp \
     src/process.cpp src/audio.cpp src/theme.cpp src/hud.cpp \
     src/esp_draw.cpp src/aim.cpp src/silent_aim.cpp src/farm.cpp \
-    src/widgets.cpp src/menu.cpp src/config.cpp \
+    src/widgets.cpp src/menu.cpp src/config.cpp src/barbatos_gui/barbatos_gui_reconstructed.cpp \
     src/game.cpp src/game_viewmodel.cpp src/game_markers.cpp src/game_farm.cpp src/logfile.cpp \
     src/lang.cpp \
     src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
