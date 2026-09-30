@@ -2559,11 +2559,11 @@ void RenderMenu() {
     // Reuse the already-loaded OpenGL textures; the reconstructed registry uses
     // the same ImTextureID representation as the project's ImGui backend.
     barbatos_gui::TextureRegistry textures;
-    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::Profile)] = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(g_tabIcons[0]));
-    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::DrawEye)] = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(g_tabIcons[2]));
-    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::AimTarget)] = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(g_tabIcons[1]));
-    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::ItemsCode)] = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(g_tabIcons[4]));
-    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::Settings)] = reinterpret_cast<ImTextureID>(static_cast<intptr_t>(g_tabIcons[5]));
+    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::Profile)] = static_cast<ImTextureID>(static_cast<uintptr_t>(g_tabIcons[0]));
+    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::DrawEye)] = static_cast<ImTextureID>(static_cast<uintptr_t>(g_tabIcons[2]));
+    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::AimTarget)] = static_cast<ImTextureID>(static_cast<uintptr_t>(g_tabIcons[1]));
+    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::ItemsCode)] = static_cast<ImTextureID>(static_cast<uintptr_t>(g_tabIcons[4]));
+    textures.images[static_cast<std::size_t>(barbatos_gui::AssetId::Settings)] = static_cast<ImTextureID>(static_cast<uintptr_t>(g_tabIcons[5]));
     barbatos_gui::RenderBarbatosGui(ui, textures);
 
     g_state.aim_touch = ui.aim.aiming;
