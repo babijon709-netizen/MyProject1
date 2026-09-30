@@ -11,13 +11,16 @@
 
 #include <GLES3/gl3.h>
 
+// Keep the Barbatos asset decoder private to this translation unit.  The old
+// menu owns a separate decoder for its legacy, now-unused icon rail.
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_STDIO
+#include "stb_image/stb_image.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-
-// Texture decoding stays in menu.cpp, which already owns the stb_image
-// implementation used by the original interface assets.
-extern GLuint LoadMenuTextureFromMemory(const unsigned char* data, int length);
 
 namespace {
 
@@ -31,7 +34,22 @@ using barbatos_gui::AssetId;
 using barbatos_gui::ItemEntry;
 
 ImTextureID LoadAsset(const unsigned char* data, unsigned int length) {
-    return static_cast<ImTextureID>(LoadMenuTextureFromMemory(data, static_cast<int>(length)));
+    int width = 0, height = 0, channels = 0;
+    unsigned char* pixels = stbi_load_from_memory(data, static_cast<int>(length),
+                                                   &width, &height, &channels, 4);
+    if (!pixels) return ImTextureID{};
+
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, pixels);
+    stbi_image_free(pixels);
+    return static_cast<ImTextureID>(texture);
 }
 
 AimPoint ToAimPoint(int bone) {

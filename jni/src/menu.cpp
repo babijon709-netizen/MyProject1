@@ -29,7 +29,7 @@
 
 static GLuint g_tabIcons[kTabCount] = {};
 
-GLuint LoadMenuTextureFromMemory(const unsigned char* data, int len) {
+static GLuint LoadTexFromMemory(const unsigned char* data, int len) {
     int w, h, ch;
     unsigned char* px = stbi_load_from_memory(data, len, &w, &h, &ch, 4);
     if (!px) return 0;
