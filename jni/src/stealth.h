@@ -14,8 +14,11 @@
 //       самого файла на диске нет;
 //   /proc/<pid>/fd      — 0/1/2 уходят с терминала в /dev/null (TTY «?»
 //       в ps после setsid), fd-лист чист (см. kernel_io/mem_io);
-//   отладчики           — потомок занимает ptrace-слот (PTRACE_SEIZE,
-//       БЕЗ остановки родителя): gdb/lldb/Frida получают EPERM.
+//   отладчики           — потомок занимает ptrace-слот (PTRACE_SEIZE):
+//       gdb/lldb/Frida получают EPERM. Потомок при этом ОБЯЗАН супервизить
+//       родителя (waitpid + PTRACE_CONT, переправка каждого сигнала):
+//       seize без супервизии замораживает процесс на первом же сигнале
+//       (signal-delivery-stop) — так GUI завис в 7caffec.
 //
 // Не покрывается из userspace (честно): /proc/<pid>/maps всё равно
 // показывает региона с меткой «(deleted)»; ppid остаётся su/shell;
@@ -35,6 +38,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -135,7 +139,74 @@ inline void ApplyEarly(int argc, char* argv[]) {
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
 }
 
-// ---- 2) рантайм-скрытие: терминал, ptrace-слот, файл ----------------------
+// ---- 2) трейсер-страж: занять ptrace-слот, НЕ останавливая процесс -------
+//
+// Вызывать сразу после ApplyEarly: процесс ещё однопоточен (чистый fork,
+// без GPU-состояния) и защита действует с самого старта.
+//
+// КРИТИЧНО: у захваченного потока каждый сигнал превращается в
+// signal-delivery-stop — поток стоит, пока трейсер не продолжит его.
+// Поэтому потомок НЕ спит, а waitpid'ит родителя (после seize трассируемый
+// считается ребёнком трейсера для waitpid) и тут же переправляет сигнал
+// дальше (PTRACE_CONT с доставкой): обработчики, SIG_IGN и дефолты
+// работают ровно как без трейсера. Проверено: без этой петли первый же
+// SIGCHLD/SIGWINCH замораживает GUI насовсем.
+inline void ApplyTracerGuard() {
+#if STEALTH_PTRACE_OK
+    // Статусы детей никому не нужны (system() в TouchHelperA результат не
+    // читает) — SIG_IGN: ядро убирает умерших детей само, зомби нет.
+    signal(SIGCHLD, SIG_IGN);
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return;   // без трубы просто без синхронизации…
+    const pid_t parent = getpid();
+    const pid_t child = fork();
+    if (child == 0) {
+        const int wr = pipefd[1];
+        prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+        if (getppid() != parent) { close(wr); _exit(0); }  // родитель умер
+        for (int fd = 3; fd < 1024; ++fd) if (fd != wr) close(fd);
+        if (ptrace(PTRACE_SEIZE, parent, nullptr, nullptr) != 0) {
+            close(wr); _exit(0);      // слот занят/запрещён — идём без стража
+        }
+        const char ok = 'K';
+        write(wr, &ok, 1);            // «захватил» — родитель может жить дальше
+        close(wr);
+        for (;;) {
+            int status = 0;
+            const pid_t r = waitpid(parent, &status, 0);
+            if (r < 0) {
+                if (errno == EINTR) continue;   // нас разбудили — ждём дальше
+                _exit(0);                       // родителя больше нет
+            }
+            if (WIFEXITED(status) || WIFSIGNALED(status)) _exit(0);
+            if (WIFSTOPPED(status)) {
+                // Сигнал родителя доставляем как будто нас нет; собственные
+                // ловушки ptrace (SIGTRAP) гасим — их никто не ждёт.
+                int sig = WSTOPSIG(status);
+                if (sig == SIGTRAP) sig = 0;
+                if (ptrace(PTRACE_CONT, parent, 0, (void*)(long)sig) != 0)
+                    _exit(0);
+            }
+        }
+    }
+    if (child > 0) {
+        // Ждём подтверждения захвата ДО продолжения: дальше ApplyEarly
+        // ставит PR_SET_DUMPABLE=0, и не-root потомок уже не смог бы
+        // захватить (гонка). 'K' = страж встал, EOF = не вышло (живём без
+        // него — защита от отладчиков ослаблена, но работе не мешает).
+        close(pipefd[1]);
+        char ok = 0;
+        while (read(pipefd[0], &ok, 1) < 0 && errno == EINTR) {}
+        close(pipefd[0]);
+    } else {
+        close(pipefd[0]); close(pipefd[1]);
+    }
+#else
+    (void)0;
+#endif
+}
+
+// ---- 3) рантайм-скрытие: терминал, файл -----------------------------------
 // Вызывать после успешного подъёма оверлея и тача (если GUI не поднялся —
 // main успевает вернуть -1 с файлом на месте), до экрана выбора режима.
 inline void ApplyRuntime() {
@@ -176,28 +247,8 @@ inline void ApplyRuntime() {
     sigaction(SIGILL, &sa, nullptr);
     sigaction(SIGFPE, &sa, nullptr);
 
-#if STEALTH_PTRACE_OK
-    // Потомок занимает ptrace-слот: PTRACE_SEIZE не останавливает родителя
-    // и не требует никакого обслуживания, но второй tracer невозможен —
-    // attach gdb/lldb/Frida заканчивается EPERM. Потомок живёт, пока жив
-    // родитель (PDEATHSIG + контроль getppid), и не держит никаких fd.
-    // SIGCHLD=SIG_IGN: ядро само убирает умерших детей — иначе потомок при
-    // неудачном seize повис бы зомби («vold <defunct>» в ps — лишний след).
-    // Статусы детей нам нигде не нужны (system() в TouchHelperA результат
-    // не читает, waitpid есть только в мёртвом коде ImGui).
-    signal(SIGCHLD, SIG_IGN);
-    const pid_t parent = getpid();
-    const pid_t child = fork();
-    if (child == 0) {
-        prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
-        for (int fd = 3; fd < 1024; ++fd) close(fd);
-        if (ptrace(PTRACE_SEIZE, (pid_t)parent, nullptr, nullptr) != 0) _exit(0);
-        for (;;) {
-            if (getppid() != parent) _exit(0);
-            sleep(2);
-        }
-    }
-#endif
+    // ptrace-слот занимает ApplyTracerGuard (ранний fork, с супервизией
+    // сигналов) — здесь больше ничего трогать не нужно.
 }
 
 }  // namespace stealth
