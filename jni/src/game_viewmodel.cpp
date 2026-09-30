@@ -212,6 +212,11 @@ using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
 int fps_last_limit = 0;
 viewmodel::Status fps_last_log = viewmodel::Status::Off;
+// Build ID libunity, который не прошёл таблицу kFpsLayouts (0 — движок
+// опознан или данных нет). Показывается в меню: без него вечное «ожидание»
+// неотличимо от «игра ещё не на связи», а по самому ID новый лейаут
+// добавляется в fps_memory.h без доступа к устройству.
+uint64_t fps_unknown_build_id = 0;
 
 uint64_t find_unity() {
     std::string text;
@@ -222,6 +227,18 @@ uint64_t find_unity() {
         if (!viewmodel::fps_layout(memory, candidates[i])) continue;
         if (found) return 0; // ambiguous live/stale mappings: do not guess
         found = candidates[i];
+    }
+    // Неопознанная версия движка (игра обновилась): запоминаем build ID
+    // первого образа для меню и журнала. Не прочитался — 0, тогда в меню
+    // останется просто «ожидание».
+    fps_unknown_build_id = 0;
+    if (!found && count > 0) {
+        uint64_t id = 0;
+        if (memory.read(candidates[0] + 0x318, id) && id)
+            fps_unknown_build_id = id;
+        if (fps_unknown_build_id)
+            LogLine("fps: libunity не опознан, build id %016llx (игра обновилась?)",
+                    (unsigned long long)fps_unknown_build_id);
     }
     return found;
 }
@@ -382,5 +399,6 @@ viewmodel::FpsUiInfo esp_viewmodel_fps_ui() {
     info.status = fps_controller.status;
     info.field_value = fps_controller.field_seen();
     info.pace_kind = fps_controller.pace_seen();
+    info.build_id = fps_unknown_build_id;
     return info;
 }

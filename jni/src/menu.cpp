@@ -1017,6 +1017,16 @@ float TabContent(int tab, float dt, float cW) {
                 } else {
                     ImGui::Text("%s: %s", XS("Режим"), mode);
                 }
+                // Неопознанная версия libunity: игра обновилась и её сборки
+                // нет в таблице. Build ID печатаем прямо здесь — по нему
+                // лейаут добавляется в fps_memory.h удалённо.
+                if (fpsUi.build_id) {
+                    char idBuf[96];
+                    snprintf(idBuf, sizeof(idBuf), "%s Unity %016llx",
+                             XS("Неопознанная версия игры:"),
+                             (unsigned long long)fpsUi.build_id);
+                    ImGui::TextDisabled("%s", idBuf);
+                }
             }
         }
 

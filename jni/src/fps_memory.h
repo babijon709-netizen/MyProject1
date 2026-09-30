@@ -22,7 +22,12 @@ struct FpsLayout {
     uint64_t pacing_type;    // int32: 0 off / 1 native / 2 jni
 };
 inline constexpr FpsLayout kFpsLayouts[] = {
+    // Релиз: GNU build ID 7eb634edc8dede69 (u64 LE, как читается из памяти).
     {0x69dedec8ed34b67eULL, 0x7390e0, 0x17b8184, 0xb9418500, 0x8fcac8, 0x183d618},
+    // Бета: GNU build ID 9417acde63f688ed — getter той же формы на той же
+    // странице (adrp x8 -> 0x17b8000), но ldr w0,[x8,#0xa74] и свои RVA
+    // pacing-полей (см. FPS144.md, таблица «Подтверждённые native-адреса»).
+    {0xed88f663deac1794ULL, 0x7392f0, 0x17b8a74, 0xb94a7500, 0x8fccd8, 0x183df18},
 };
 template<class IO> const FpsLayout* fps_layout(IO& io, uint64_t base) {
     if (!base) return nullptr;
