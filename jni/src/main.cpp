@@ -92,8 +92,8 @@ static int Run(bool full_scan) {
            gfd >= 0 ? "" : " — не gongchuang-класс");
 
     printf("пробы известных команд (своя память, игра не трогается):\n");
-    const int cand[3] = { memio::kDriverCmdRead, 0x301, memio::kDriverCmdWrite };
-    for (int i = 0; i < 3; ++i) {
+    const int cand[4] = { memio::kDriverCmdRead, memio::kDriverCmdWrite, 0x300, 0x303 };
+    for (int i = 0; i < 4; ++i) {
         const memio::CmdProbe p = kt.classify_cmd(cand[i]);
         if (p.kind == memio::CMD_READ)
             printf("  код 0x%03X: ЧТЕНИЕ — память -> наш буфер, OK\n", cand[i]);
@@ -120,6 +120,8 @@ static int Run(bool full_scan) {
     // 3) Автоопределение протокола — ровно то, что делает чит при выборе
     //    кернела (короткий список, затем полный скан при неудаче).
     kt.detect_protocol();
+    printf("авторизация 0x300: %s\n",
+           kt.auth_sent() ? "пароль отправлен (флаг в драйвере)" : "не потребовалась");
     printf("протокол        : %s%s\n", kt.proto_name(),
            kt.map_known() ? " (подтверждён пробами)" : " (НЕ подтверждён — коды дефолтные)");
     printf("транспорт команд: %s\n",
@@ -171,7 +173,7 @@ static int Run(bool full_scan) {
     }
     printf("итог            : коды команд НЕ подтверждены. Включай кернел в меню —\n"
            "                  привязка к игре проверит транспорт по-настоящему;\n"
-           "                  если откажет (тост с errno 92) — пришли вывод:\n"
+           "                  если откажет (тост с errno) — пришли вывод:\n"
            "                  su -c <путь>/xvcen --scan-driver\n");
     return 2;
 }

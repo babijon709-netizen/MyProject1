@@ -18,13 +18,28 @@
 //        ядро само находит mm (find_get_pid -> get_task_mm -> page walk).
 //
 //   1б) bing_rw под 5.10 (payload 5.10.sh, module name=bing_rw, автор
-//      NULL1337/t.me/NULLkawaii, vermagic 5.10.223-android12, Goron):
-//        getsockopt И setsockopt — заглушки, ЛЮБОЙ код -> ENOPROTOOPT/92
-//        (потему у пользователя скан 0..0x7FF был пуст — транспорт другой);
-//        команды идут ЧЕРЕЗ ioctl(fd, код, &req): коды 0x300..0x303,
-//        запрос тот же 0x28 {pid,pad,addr,buf,size,magic=0x1337} —
-//        обработчик копирует его copy_from_user и сверяет magic на +0x20;
-//        маячок 1338 и сокет типа 4 — те же, протокол в create() игнорируется.
+//      NULL1337/t.me/NULLkawaii, vermagic 5.10.223-android12, Goron) —
+//      протокол подтверждён полным реверсом-эмуляцией обработчика:
+//        getsockopt И setsockopt — заглушки, ЛЮБОЙ код -> ENOPROTOOPT/92,
+//        команды идут ЧЕРЕЗ ioctl(fd, код, &req);
+//        сокет: socket(fam, 4, 0) (маячок 1338 на типе 6 — тот же);
+//        АВТОРИЗАЦИЯ: ioctl(fd, 0x300, &auth, 0x31) — буфер 49 байт:
+//          пароль "C61StIeKasRIz89g3c6xLzIc9L0LaRbI\0" (33 байта) + нули.
+//          Драйвер сверяет первые 0x21 байта с расшифрованным Goron-ключом
+//          (побайтово KEY[i]^state_i, 33 итерации) и ставит ГЛОБАЛЬНЫЙ флаг
+//          в .data+0x290 (живёт до выгрузки драйвера). Возврат ioctl может
+//          быть -1 даже при успешном входе — флаг важнее кода возврата.
+//          Без авторизации рабочие команды молча возвращают -EPERM.
+//        ЧТЕНИЕ: ioctl(fd, 0x301, &req) — req 0x28 байт
+//          {u32 pid; u32 pad; u64 addr; u64 size; u64 local_buf; u32 magic
+//           =0x1337; u32 pad2} — magic сверяется ДО работы (movz w9,#0x1337
+//           в обработчике +0x21fc), данные: size байт из addr процесса pid
+//           -> local_buf (find_get_pid->get_pid_task->get_task_mm->свой
+//           PTE-walk pgd/pmd/pte по 3 уровням -> copy_to_user).
+//        ЗАПИСЬ: ioctl(fd, 0x302, &req) — та же структура 0x28 (magic
+//          обработчиком не сверяется, но заполняем), local_buf -> addr.
+//        0x303 — сырая запись: копирует 0x31 байт по адресу из req+0x08
+//          (структура другая, для чита не используется).
 //
 //   2) gongchuang — публичный референс (github:
 //      gongchuang1089/android_kerneldriver_gongchuang, ядра 5.1-6.12):
@@ -66,8 +81,10 @@ constexpr int kDriverProbeType   = 6;
 constexpr int kDriverProbeErrno  = 1338;
 constexpr int kDriverSockType    = 4;
 constexpr int kDriverSockProto   = 0;
-constexpr int kDriverCmdRead     = 0x300;
-constexpr int kDriverCmdWrite    = 0x303;
+constexpr int kDriverCmdAuth     = 0x300;   // вход: пароль 0x31 байт
+constexpr int kDriverCmdRead     = 0x301;   // чтение  {pid,addr,size,buf,magic}
+constexpr int kDriverCmdWrite    = 0x302;   // запись  {pid,addr,size,buf,magic}
+constexpr int kDriverAuthReqSize = 0x31;    // размер буфера авторизации
 constexpr uint32_t kDriverMagic  = 0x1337;
 
 // ---- класс 2: gongchuang (публичный референс) -----------------------------
@@ -85,9 +102,9 @@ struct DriverRwReq {
     uint32_t pid;          // +0x00: целевой процесс
     uint32_t pad;          // +0x04: выравнивание
     uint64_t addr;         // +0x08: адрес в памяти игры (без TBI-метки)
-    uint64_t user_buf;     // +0x10: наш буфер (источник/приёмник данных)
-    uint64_t size;         // +0x18: сколько байт
-    uint32_t magic;        // +0x20: kDriverMagic
+    uint64_t size;         // +0x10: сколько байт (ПОДТВЕРЖДЕНО реверсом 5.10)
+    uint64_t user_buf;     // +0x18: наш буфер (источник/приёмник данных)
+    uint32_t magic;        // +0x20: kDriverMagic (сверяется в чтении 0x301)
     uint32_t pad2;         // +0x24
 };
 #pragma pack(pop)
@@ -171,6 +188,7 @@ public:
         if (pid <= 0) return false;
         if (!ensure_socket()) return false;
         if (!map_known_ && !scanned_) detect_protocol();
+        if (use_ioctl_) send_auth();   // 5.10: без пароля команды молчат
         if (proto_ == PROTO_GONG_PTE && !gong_attach((int)pid)) return false;
         pid_ = (int)pid;
         return true;
@@ -192,6 +210,7 @@ public:
         write_cmd_ = kDriverCmdWrite;
         map_known_ = false;
         scanned_ = false;
+        auth_done_ = false;
         attached_pid_ = -1;
     }
 
@@ -241,11 +260,30 @@ public:
 
     // ---- пробы (публичные: ими же печатает карту --scan-driver) ----------
 
+    // АВТОРИЗАЦИЯ (сборка 5.10): ioctl(fd, 0x300, пароль 0x31 байт).
+    // Драйвер ставит глобальный флаг и после этого пускает рабочие команды;
+    // сам вызов может вернуть -1 даже при успехе, поэтому код возврата
+    // игнорируем. Повторный вызов безвреден (флаг уже стоит — запрос
+    // просто не проверяется). Успех подтверждается пробой чтения 0x301.
+    bool send_auth() {
+        if (auth_done_) return true;
+        if (!ensure_socket()) return false;
+        static const char kPassword[] = "C61StIeKasRIz89g3c6xLzIc9L0LaRbI";
+        unsigned char authbuf[kDriverAuthReqSize];
+        memset(authbuf, 0, sizeof(authbuf));
+        memcpy(authbuf, kPassword, sizeof(kPassword) - 1);   // с '\0'
+        ioctl(sock_, (unsigned long)kDriverCmdAuth, authbuf);
+        auth_done_ = true;   // retval не показатель: флаг внутри драйвера
+        return true;
+    }
+    bool auth_sent() const { return auth_done_; }
+
     // Проба bing-кода: одна команда, addr=pat, buf=mirror. Чтение скопирует
     // pat -> mirror; запись — mirror -> pat (запрос симметричный).
     CmdProbe classify_cmd(int cmd) {
         CmdProbe r;
         if (!ensure_socket()) { r.err = errno ? errno : EIO; return r; }
+        if (use_ioctl_) send_auth();   // без флага 5.10-сборка молчит (-EPERM)
         uint64_t pat[2]    = { 0x1234567890ABCDEFULL, 0x0F1E2D3C4B5A6978ULL };
         uint64_t mirror[2] = { 0xAABBCCDD11223344ULL, 0x5566778899AABBCCULL };
         const uint64_t pat0 = pat[0], pat1 = pat[1];
@@ -264,9 +302,12 @@ public:
             // Сборка bing_rw под 5.10: getsockopt — заглушка (всегда
             // ENOPROTOOPT), те же команды идут через ioctl(fd, код, &req).
             if (gs_err == ENOPROTOOPT || gs_err == EOPNOTSUPP) {
+                // 5.10-сборка: сначала авторизация паролем, затем повтор
+                // команды через ioctl — без флага драйвер вернёт EPERM.
+                use_ioctl_ = true;
+                send_auth();
                 errno = 0;
                 rc = ioctl(sock_, (unsigned long)cmd, &req);
-                if (rc == 0) use_ioctl_ = true;
             }
             if (rc != 0) { r.err = gs_err; return r; }
         }
@@ -375,8 +416,10 @@ public:
         if (family_ < 0) family_ = driver_find_family();
         if (family_ < 0) return;
 
-        // 1) известные коды bing (нужен bing-сокет — не у всех сборок он есть)
-        const int bingCand[3] = { kDriverCmdRead, 0x301, kDriverCmdWrite };
+        // 1) известные коды bing (нужен bing-сокет — не у всех сборок он есть):
+        //    5.10 — чтение 0x301 / запись 0x302; 6.6 — 0x300/0x303 (та же
+        //    структура, транспорт getsockopt; коды пробуем и там и там).
+        const int bingCand[4] = { kDriverCmdRead, kDriverCmdWrite, 0x300, 0x303 };
         int rd = 0, wr = 0;
         if (ensure_socket()) {
             for (int i = 0; i < 3; ++i) {
@@ -415,7 +458,8 @@ public:
         scanned_ = true;
         if (sock_ >= 0) {
             for (int c = 0; c <= 0x7FF && !(rd && wr); ++c) {
-                if (c == kDriverCmdRead || c == 0x301 || c == kDriverCmdWrite)
+                if (c == kDriverCmdAuth || c == 0x303 ||
+                    (c >= kDriverCmdRead && c <= kDriverCmdWrite))
                     continue;   // уже проверены на шаге 1
                 const CmdProbe p = classify_cmd(c);
                 if (p.kind == CMD_NONE) continue;
@@ -455,12 +499,14 @@ private:
         memset(&req, 0, sizeof(req));
         req.pid      = (uint32_t)pid;
         req.addr     = addr & kAddressTagMask;   // снять TBI/MTE-метку
-        req.user_buf = (uint64_t)(uintptr_t)buf;
-        req.size     = (uint64_t)len;
-        req.magic    = kDriverMagic;
+        req.size     = (uint64_t)len;            // +0x10 (подтверждено 5.10)
+        req.user_buf = (uint64_t)(uintptr_t)buf; // +0x18
+        req.magic    = kDriverMagic;             // +0x20 (нужно чтению 0x301)
         if (use_ioctl_) {
             // Сборка 5.10: команды через ioctl(fd, код, &req) — getsockopt
-            // там заглушка, отвечающая ENOPROTOOPT на любой код.
+            // там заглушка. Авторизация уже отправлена (send_auth при
+            // переключении транспорта/пробе); повторяем при необходимости.
+            if (!auth_done_) send_auth();
             if (ioctl(fd, (unsigned long)cmd, &req) != 0) return -1;
             return (ssize_t)len;
         }
@@ -543,6 +589,7 @@ private:
     int  read_cmd_  = kDriverCmdRead;
     int  write_cmd_ = kDriverCmdWrite;
     bool use_ioctl_ = false;  // bing-команды через ioctl (сборка 5.10)
+    bool auth_done_ = false;  // пароль 0x300 отправлен (флаг в драйвере)
     bool map_known_ = false;
     bool scanned_   = false;   // полный скан 0..0x7FF уже делали
     int  attached_pid_ = -1;   // pid, к которому прицеплен gong-сокет (op2)
