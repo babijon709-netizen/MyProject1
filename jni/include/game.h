@@ -119,6 +119,7 @@ enum EspMemBackend {
     ESP_MEM_EXTERNAL = 0,   // /proc/<pid>/mem — «Прямое чтение»
     ESP_MEM_FT       = 1,   // сокет драйвера bing-класса — «FT-Драйвер»
     ESP_MEM_QX       = 2,   // /dev-узел драйвера QX — «QX-Драйвер»
+    ESP_MEM_RT       = 3,   // хук syscall ioctl (RT-hook) — «RT-Драйвер»
 };
 void          esp_set_mem_backend(int backend);
 // Какой режим активен: true для любого ядерного транспорта (FT/QX).

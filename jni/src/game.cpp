@@ -40,9 +40,9 @@
 memio::Reader g_mem;
 
 // Способ доступа к памяти: экстернал (/proc/<pid>/mem), кернел FT (сокет
-// bing-класса) или кернел QX (/dev-узел). Выбирается один раз на старте
-// (экран режима, mode_select.h) до первого bind; сам g_mem о деталях не
-// знает — разница целиком в memio::Transport.
+// bing-класса), кернел QX (/dev-узел) или кернел RT (хук syscall ioctl).
+// Выбирается один раз на старте (экран режима, mode_select.h) до первого
+// bind; сам g_mem о деталях не знает — разница целиком в memio::Transport.
 static int g_mem_backend = ESP_MEM_EXTERNAL;
 
 void esp_set_mem_backend(int backend) {
@@ -50,6 +50,7 @@ void esp_set_mem_backend(int backend) {
     memio::Transport* t = &memio::procfs_transport();
     if (backend == ESP_MEM_FT) t = &memio::kernel_transport();
     else if (backend == ESP_MEM_QX) t = &memio::qx_transport();
+    else if (backend == ESP_MEM_RT) t = &memio::rt_transport();
     g_mem.set_transport(t);
 }
 

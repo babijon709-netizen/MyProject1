@@ -34,12 +34,14 @@
 // Диагностика кернел-режима из терминала (Termux/adb), без оверлея и игры:
 //   su -c /data/local/tmp/xvcen --check-driver   — базовая проверка
 //   su -c /data/local/tmp/xvcen --scan-driver    — + полный скан кодов команд
-// Печатает: root/не root, ядро, семейство сокета драйвера и класс маячка,
-// живые пробы команд по собственной памяти (оба известных протокола),
-// выбранный протокол и коды чтения/записи, а в режиме скана — карту всех
-// кодов 0..0x7FF, которые двигают данные. Коды выхода: 0 — кернел готов,
-// 1 — драйвер не найден, 2 — сокет есть, но коды не подтверждены (режим всё
-// равно включается и проверяется привязкой к игре).
+// Печатает: root/не root, ядро, семейство сокета FT-драйвера и класс маячка,
+// живые пробы команд по собственной памяти (оба известных протокола FT),
+// QX-драйвер (/dev-узел) и RT-драйвер (хук syscall ioctl), выбранный
+// протокол и коды чтения/записи, а в режиме скана — карту всех кодов
+// 0..0x7FF, которые двигают данные. Классы независимы: достаточно любого
+// подтверждённого. Коды выхода: 0 — какой-то кернел-транспорт готов,
+// 1 — не найдено НИЧЕГО, 2 — сокет FT есть, но коды не подтверждены
+// (режим всё равно включается и проверяется привязкой к игре).
 namespace driver_check {
 
 static int Run(bool full_scan) {
@@ -55,70 +57,70 @@ static int Run(bool full_scan) {
                "   привилегированным процессом, без root маячок не виден.\n"
                "   Запуск: su -c <путь>/xvcen\n");
 
-    // 1) Поиск семейства сокета драйвера по маячку на пробе socket(fam, 6, 0):
-    //    1338 — bing-класс, 126/ENOKEY — gongchuang-класс.
+    // 1) Поиск семейства сокета FT-драйвера по маячку на пробе socket(fam, 6, 0):
+    //    1338 — bing-класс, 126/ENOKEY — gongchuang-класс. Раннего выхода
+    //    здесь НЕТ: QX и RT не имеют сокета, их блоки ниже проверяются
+    //    независимо от этого результата.
     int beacon = 0;
     const int fam = memio::driver_find_family(&beacon);
-    if (fam < 0) {
-        printf("драйвер         : НЕ найден (маячки errno %d/%d на семействах %d..%d)\n",
+    const bool ft_present = (fam >= 0);
+    if (!ft_present) {
+        printf("FT-драйвер      : не найден (маячки errno %d/%d на семействах %d..%d)\n",
                memio::kDriverProbeErrno, memio::kGongProbeErrno,
                memio::kDriverFamilyFirst, memio::kDriverFamilyLast);
-        printf("   Прошей драйвер под СВОЮ версию ядра (uname -r) скриптом .sh\n"
-               "   из drivers.7z и повтори проверку. Драйвер не переживает\n"
-               "   перезагрузку — после ребута прошивай заново.\n");
-        const int fd = ::open("/proc/1/mem", O_RDWR | O_CLOEXEC);
-        printf("экстернал       : /proc/<pid>/mem %s\n",
-               fd >= 0 ? "доступен (root)" : "недоступен");
-        if (fd >= 0) close(fd);
-        return 1;
+    } else {
+        printf("FT-драйвер      : найден, семейство сокета %d, маячок errno %d (%s)\n",
+               fam, beacon,
+               beacon == memio::kDriverProbeErrno ? "bing-класс" : "gongchuang-класс");
     }
-    printf("драйвер         : найден, семейство сокета %d, маячок errno %d (%s)\n",
-           fam, beacon,
-           beacon == memio::kDriverProbeErrno ? "bing-класс" : "gongchuang-класс");
 
     // 2) Сокеты обоих классов (какие поднимутся) + живые пробы команд по
     //    СОБСТВЕННОЙ памяти: /proc не участвует, данные сойдутся, только если
     //    ядро реально сходило по страницам нашего процесса.
     memio::KernelTransport& kt = memio::kernel_transport();
-    errno = 0;
-    const int bfd = kt.connect();
-    printf("сокет bing      : %s%s\n",
-           bfd >= 0 ? "поднят (тип 4)" : "не поднялся",
-           bfd >= 0 ? "" : (errno ? " — не bing-класс" : ""));
-    errno = 0;
-    const int gfd = kt.gong_connect();
-    printf("сокет gong      : %s%s\n",
-           gfd >= 0 ? "поднят (SOCK_RAW/0x090419)" : "не поднялся",
-           gfd >= 0 ? "" : " — не gongchuang-класс");
+    int bfd = -1, gfd = -1;
+    if (ft_present) {
+        errno = 0;
+        bfd = kt.connect();
+        printf("сокет bing      : %s%s\n",
+               bfd >= 0 ? "поднят (тип 4)" : "не поднялся",
+               bfd >= 0 ? "" : (errno ? " — не bing-класс" : ""));
+        errno = 0;
+        gfd = kt.gong_connect();
+        printf("сокет gong      : %s%s\n",
+               gfd >= 0 ? "поднят (SOCK_RAW/0x090419)" : "не поднялся",
+               gfd >= 0 ? "" : " — не gongchuang-класс");
 
-    printf("пробы известных команд (своя память, игра не трогается):\n");
-    const int cand[4] = { memio::kDriverCmdRead, memio::kDriverCmdWrite, 0x300, 0x303 };
-    for (int i = 0; i < 4; ++i) {
-        const memio::CmdProbe p = kt.classify_cmd(cand[i]);
-        if (p.kind == memio::CMD_READ)
-            printf("  код 0x%03X: ЧТЕНИЕ — память -> наш буфер, OK\n", cand[i]);
-        else if (p.kind == memio::CMD_WRITE)
-            printf("  код 0x%03X: ЗАПИСЬ — наш буфер -> память, OK\n", cand[i]);
-        else if (p.err != 0)
-            printf("  код 0x%03X: отказ, errno %d\n", cand[i], p.err);
-        else
-            printf("  код 0x%03X: принята, но данные не двигались\n", cand[i]);
-    }
-    if (gfd >= 0) {
-        const memio::CmdProbe vm = kt.classify_gong_vm(gfd, memio::kGongCmdAccessVm);
-        printf("  gong op4      : %s\n", vm.kind == memio::CMD_READ
-               ? "ACCESS_PROCESS_VM работает (копия from -> to)" : "нет");
-        if (kt.gong_attach((int)getpid())) {
-            const memio::CmdProbe pr = kt.classify_pte(gfd, memio::kGongCmdPteRead);
-            const memio::CmdProbe pw = kt.classify_pte(gfd, memio::kGongCmdPteWrite);
-            printf("  gong op5/op6  : чтение %s, запись %s\n",
-                   pr.kind == memio::CMD_READ ? "OK" : "нет",
-                   pw.kind == memio::CMD_WRITE ? "OK" : "нет");
+        printf("пробы известных команд (своя память, игра не трогается):\n");
+        const int cand[4] = { memio::kDriverCmdRead, memio::kDriverCmdWrite, 0x300, 0x303 };
+        for (int i = 0; i < 4; ++i) {
+            const memio::CmdProbe p = kt.classify_cmd(cand[i]);
+            if (p.kind == memio::CMD_READ)
+                printf("  код 0x%03X: ЧТЕНИЕ — память -> наш буфер, OK\n", cand[i]);
+            else if (p.kind == memio::CMD_WRITE)
+                printf("  код 0x%03X: ЗАПИСЬ — наш буфер -> память, OK\n", cand[i]);
+            else if (p.err != 0)
+                printf("  код 0x%03X: отказ, errno %d\n", cand[i], p.err);
+            else
+                printf("  код 0x%03X: принята, но данные не двигались\n", cand[i]);
+        }
+        if (gfd >= 0) {
+            const memio::CmdProbe vm = kt.classify_gong_vm(gfd, memio::kGongCmdAccessVm);
+            printf("  gong op4      : %s\n", vm.kind == memio::CMD_READ
+                   ? "ACCESS_PROCESS_VM работает (копия from -> to)" : "нет");
+            if (kt.gong_attach((int)getpid())) {
+                const memio::CmdProbe pr = kt.classify_pte(gfd, memio::kGongCmdPteRead);
+                const memio::CmdProbe pw = kt.classify_pte(gfd, memio::kGongCmdPteWrite);
+                printf("  gong op5/op6  : чтение %s, запись %s\n",
+                       pr.kind == memio::CMD_READ ? "OK" : "нет",
+                       pw.kind == memio::CMD_WRITE ? "OK" : "нет");
+            }
         }
     }
 
     // 2б) QX-драйвер (класс wanbai): /dev-узел со случайным именем, команды
     //     ioctl 0x801/0x802. Пробы по собственной памяти, как у bing.
+    bool qx_ok = false;
     {
         memio::QxTransport& qt = memio::qx_transport();
         const int qfd = qt.connect();
@@ -127,30 +129,56 @@ static int Run(bool full_scan) {
         } else {
             printf("QX-драйвер     : узел %s, fd %d\n", qt.device_path(), qfd);
             const memio::CmdProbe qp = qt.classify();
-            if (qp.kind == memio::CMD_READ)
+            if (qp.kind == memio::CMD_READ) {
                 printf("  чтение 0x801 / запись 0x802: OK (своя память)\n");
-            else if (qp.err != 0)
+                qx_ok = true;
+            } else if (qp.err != 0)
                 printf("  проба: отказ, errno %d (узел открыт, но это не QX или драйвер не отвечает)\n", qp.err);
             else
                 printf("  проба: данные не двигались\n");
         }
     }
 
-    // 3) Автоопределение протокола — ровно то, что делает чит при выборе
+    // 2в) RT-драйвер (класс hookdd, RT-hook.7z): не имеет ни сокета, ни
+    //     /dev-узла — подменяет sys_call_table[__NR_ioctl=29]. Проба —
+    //     ioctl(-1, 0x259, ...) по собственной памяти: без драйвера ядро
+    //     отвечает EBADF, с драйвером возвращается 0.
+    bool rt_ok = false;
+    {
+        memio::RtTransport& rtt = memio::rt_transport();
+        const memio::CmdProbe rp = rtt.classify();
+        if (rp.kind == memio::CMD_READ) {
+            printf("RT-драйвер     : хук syscall ioctl стоит\n");
+            printf("  чтение 0x259 / запись 0x25a: OK (своя память)\n");
+            rt_ok = true;
+        } else if (rp.err == EBADF) {
+            printf("RT-драйвер     : хука нет (ioctl уходит в ядро без перехвата)\n");
+        } else if (rp.err == EPERM) {
+            printf("RT-драйвер     : хук стоит, но проба без root (гейт uid/euid/capable)\n");
+        } else if (rp.err != 0) {
+            printf("RT-драйвер     : проба отказ, errno %d\n", rp.err);
+        } else {
+            printf("RT-драйвер     : ioctl принят, но данные не двигались\n");
+        }
+    }
+
+    // 3) Автоопределение протокола FT — ровно то, что делает чит при выборе
     //    кернела (короткий список, затем полный скан при неудаче).
-    kt.detect_protocol();
-    printf("авторизация 0x300: %s\n",
-           kt.auth_sent() ? "пароль отправлен (флаг в драйвере)" : "не потребовалась");
-    printf("протокол        : %s%s\n", kt.proto_name(),
-           kt.map_known() ? " (подтверждён пробами)" : " (НЕ подтверждён — коды дефолтные)");
-    printf("транспорт команд: %s\n",
-           kt.cmd_via_ioctl() ? "ioctl(fd, код, &req) — сборка 5.10-класса"
-                              : "getsockopt(fd, pid, код, &req, &len)");
+    if (ft_present) {
+        kt.detect_protocol();
+        printf("авторизация 0x300: %s\n",
+               kt.auth_sent() ? "пароль отправлен (флаг в драйвере)" : "не потребовалась");
+        printf("протокол        : %s%s\n", kt.proto_name(),
+               kt.map_known() ? " (подтверждён пробами)" : " (НЕ подтверждён — коды дефолтные)");
+        printf("транспорт команд: %s\n",
+               kt.cmd_via_ioctl() ? "ioctl(fd, код, &req) — сборка 5.10-класса"
+                                  : "getsockopt(fd, pid, код, &req, &len)");
+    }
 
     // 4) Полный скан 0..0x7FF: карта ВСЕХ кодов, которые двигают данные.
     //    Нужен, если и автоопределение ничего не нашло: тогда по этой карте
     //    видно, какими кодами говорит эта сборка драйвера.
-    if (full_scan) {
+    if (full_scan && ft_present) {
         printf("полный скан кодов 0x000..0x7FF, bing-структура {pid,addr,buf,size,magic}:\n");
         int moved = 0, silent = 0, rd = 0, wr = 0;
         long errs = 0;
@@ -183,18 +211,40 @@ static int Run(bool full_scan) {
         }
     }
 
-    // 5) Итог: чем чит будет ходить в память игры.
+    // 5) Итог: чем чит будет ходить в память игры. Классы независимы —
+    //    достаточно любого подтверждённого транспорта.
     if (kt.map_known()) {
-        printf("итог            : кернел готов — протокол %s, чтение кодом 0x%03X,\n"
+        printf("итог            : FT готов — протокол %s, чтение кодом 0x%03X,\n"
                "                  запись кодом 0x%03X; /proc не участвует\n",
                kt.proto_name(), kt.read_cmd(), kt.write_cmd());
         return 0;
     }
-    printf("итог            : коды команд НЕ подтверждены. Включай кернел в меню —\n"
-           "                  привязка к игре проверит транспорт по-настоящему;\n"
-           "                  если откажет (тост с errno) — пришли вывод:\n"
-           "                  su -c <путь>/xvcen --scan-driver\n");
-    return 2;
+    if (qx_ok) {
+        printf("итог            : QX готов — чтение 0x801 / запись 0x802; /proc не участвует\n");
+        return 0;
+    }
+    if (rt_ok) {
+        printf("итог            : RT готов — хук ioctl, чтение 0x259 / запись 0x25a;\n"
+               "                  ни сокета, ни fd — самый скрытный класс\n");
+        return 0;
+    }
+    if (ft_present) {
+        printf("итог            : коды команд НЕ подтверждены. Включай кернел в меню —\n"
+               "                  привязка к игре проверит транспорт по-настоящему;\n"
+               "                  если откажет (тост с errno) — пришли вывод:\n"
+               "                  su -c <путь>/xvcen --scan-driver\n");
+        return 2;
+    }
+    printf("итог            : НИ ОДИН класс драйвера не найден (FT/QX/RT).\n"
+           "   Прошей драйвер под СВОЮ версию ядра (uname -r) скриптом .sh\n"
+           "   (drivers.7z — FT, kernal-based-Esp.zip — QX, RT-hook.7z — RT)\n"
+           "   и повтори проверку. Драйверы не переживают перезагрузку —\n"
+           "   после ребута прошивай заново.\n");
+    const int fd = ::open("/proc/1/mem", O_RDWR | O_CLOEXEC);
+    printf("экстернал       : /proc/<pid>/mem %s\n",
+           fd >= 0 ? "доступен (root)" : "недоступен");
+    if (fd >= 0) close(fd);
+    return 1;
 }
 
 }  // namespace driver_check
