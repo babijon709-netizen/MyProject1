@@ -415,7 +415,7 @@ void RenderSettings(SettingsState& s,const TextureRegistry& textures) {
         if(ImGui::BeginTabItem(Tr(s.language,u8"图片","Photo"))){
             if(ActionButton(Tr(s.language,u8"更换图片 [加载时间为2-30秒左右]","Change Photo"),ImVec2(-1,38))) s.change_photo=true;
             InputTextString(Tr(s.language,u8"图片路径",".png / .jpg"), &s.selected_picture_path);
-            ImGui::TextWrapped(Tr(s.language,u8"图片路径为启动目录\n点击对应图片即可设置","Picture path is the launch directory; click an image to set it"));
+            ImGui::TextWrapped("%s", Tr(s.language,u8"图片路径为启动目录\n点击对应图片即可设置","Picture path is the launch directory; click an image to set it"));
             if(ActionButton(Tr(s.language,u8"还原初始图片","Restore the original picture"),ImVec2(-1,36))) s.restore_original_picture=true;
             if(ActionButton(Tr(s.language,u8"通过文件夹选择","Use File Dir Switch"),ImVec2(-1,36))){s.use_picture_directory=true;s.picture_picker.open=true;}
             RenderFilePicker("picture",s.picture_picker,".png",".jpg",&s.selected_picture_path,s.language);
