@@ -78,10 +78,21 @@ driver/out/gc-memory-<kernel-release>.ko
 
 В корне также лежит экспериментальный `gc-memory-android13-5.10-generic.ko`,
 собранный для ARM64 AOSP GKI `android13-5.10` (vermagic
-`5.10.223-ga0cedc522d8b`). Он подходит только при совпадении KMI/vermagic и не
-заменяет сборку по точному дереву устройства. При `Invalid module format` или
-`Unknown symbol` использовать его нельзя — нужен `uname -r`, конфигурация и
-`Module.symvers` от прошивки.
+`5.10.223-ga0cedc522d8b`). Самодостаточный
+`gc-memory-android13-5.10-installer.sh` содержит тот же `.ko` в Base64,
+проверяет root/архитектуру/версию ядра и контрольную сумму, извлекает модуль во
+временный файл, вызывает `insmod`, затем удаляет временный файл. Запуск:
+
+```bash
+adb push gc-memory-android13-5.10-installer.sh /data/local/tmp/
+adb shell su -c 'chmod 700 /data/local/tmp/gc-memory-android13-5.10-installer.sh'
+adb shell su -c '/data/local/tmp/gc-memory-android13-5.10-installer.sh'
+```
+
+Оба варианта подходят только при совпадении KMI/vermagic и не заменяют сборку
+по точному дереву устройства. При `Invalid module format` или `Unknown symbol`
+использовать их нельзя — нужен `uname -r`, конфигурация и `Module.symvers` от
+прошивки.
 
 Если скрытие списков модуля при отладке не нужно:
 
