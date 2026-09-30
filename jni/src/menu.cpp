@@ -1283,9 +1283,9 @@ static void TrafficLight(ImVec2 winPos, float railW) {
 // только последний, поэтому для фрикама он не используется — только как
 // запасной путь, когда тачскрина нет вовсе (хост/эмулятор).
 //
-// Касания в игру не уходят (Touch_BlockRect на весь экран ниже верхней
-// полосы): иначе палец на джойстике ещё и ходил бы персонажем, а камера во
-// фрикаме привязана к телу и поехала бы вместе с ним.
+// Только касания, начавшиеся внутри кругов управления, не уходят в игру:
+// иначе палец на джойстике ещё и ходил бы персонажем. За кругами игровые
+// кнопки остаются доступными даже при включённом фрикаме.
 //
 // Геометрия — в пикселях видимого экрана (VisibleScreen, как пилюли и меню),
 // а не в квадрате ImGui DisplaySize: иначе привязка к правому/нижнему краю
@@ -1375,8 +1375,7 @@ void UpdateFreecam(float dt) {
     }
 
     if (!esp_freecam_active()) {
-        if (g_state.freecam_on) Touch_BlockRect(true, 0.f, vh * 0.5f, vw * 0.45f, vh);
-        else                    Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
+        Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
         Freecam_ResetGrabs();   // залипший id не должен уехать в следующий полёт
         return;
     }
@@ -1413,8 +1412,13 @@ void UpdateFreecam(float dt) {
     const float kUpY   = vh * 0.5f - kBtnR - 26.f * S;
     const float kDownY = vh * 0.5f + kBtnR + 26.f * S;
 
-    // Всё ниже верхней полосы забираем себе — в игру не уходит ничего.
-    Touch_BlockRect(true, 0.f, 90.f, vw, vh);
+    // Забираем только сами органы управления. Касания, начавшиеся за кругами,
+    // продолжают уходить в игру — во фрикаме можно нажимать хотбар, инвентарь
+    // и прочие кнопки, даже если они находятся рядом с зоной обзора.
+    const float blockX[4] = {cx, lookCx, kBtnX, kBtnX};
+    const float blockY[4] = {cy, lookCy, kUpY, kDownY};
+    const float blockR[4] = {R + 70.f * S, lookR, kBtnR + 20.f * S, kBtnR + 20.f * S};
+    Touch_BlockCircles(true, blockX, blockY, blockR, 4);
 
     // ---- снимок пальцев ----------------------------------------------------
     float f_x[12], f_y[12];

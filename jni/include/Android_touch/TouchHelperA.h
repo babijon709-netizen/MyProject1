@@ -30,6 +30,10 @@ void Touch_UploadStats(unsigned long long& calls, double& ms, unsigned long long
 // Касания внутри прямоугольника (в координатах ImGui, то есть в пикселях
 // оверлея) не уходят в игру: их забирает оверлей. on=false — выключить.
 void Touch_BlockRect(bool on, float x0, float y0, float x1, float y1);
+// Несколько круглых зон для органов управления фрикама. Блокируется только
+// касание, НАЧАВШЕЕСЯ внутри одного из кругов; кнопки игры снаружи работают.
+void Touch_BlockCircles(bool on, const float* xs, const float* ys,
+                        const float* radii, int count);
 // Снимок активных НАСТОЯЩИХ пальцев для органов управления оверлея (фрикам:
 // джойстик и обзор держат РАЗНЫЕ пальцы одновременно, а ImGui MousePos видит
 // только последний). Координаты — пиксели оверлея, та же система, что у

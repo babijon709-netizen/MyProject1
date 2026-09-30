@@ -36,6 +36,7 @@ struct touchObj {
     bool isDown = false;
     // Касание забрал оверлей: в игру оно не уходит (см. Touch_BlockRect).
     bool blocked = false;
+    bool blockClassified = false; // block decision is latched for one contact
     int x = 0;
     int y = 0;
     int id = 0;
@@ -65,10 +66,43 @@ static touchObj Finger[maxE][maxF];
 // ровно прежнее: ни один палец не блокируется.
 static bool  g_block_on = false;
 static float g_block_x0 = 0.f, g_block_y0 = 0.f, g_block_x1 = 0.f, g_block_y1 = 0.f;
+static constexpr int kMaxBlockCircles = 4;
+static int g_block_circle_count = 0;
+static float g_block_circle_x[kMaxBlockCircles]{}, g_block_circle_y[kMaxBlockCircles]{},
+             g_block_circle_r[kMaxBlockCircles]{};
 
 void Touch_BlockRect(bool on, float x0, float y0, float x1, float y1) {
     g_block_on = on;
+    g_block_circle_count = 0;
     g_block_x0 = x0; g_block_y0 = y0; g_block_x1 = x1; g_block_y1 = y1;
+}
+
+void Touch_BlockCircles(bool on, const float* xs, const float* ys,
+                        const float* radii, int count) {
+    g_block_on = on;
+    g_block_x0 = g_block_y0 = g_block_x1 = g_block_y1 = 0.f;
+    g_block_circle_count = 0;
+    if (!on || !xs || !ys || !radii) return;
+    if (count > kMaxBlockCircles) count = kMaxBlockCircles;
+    for (int i = 0; i < count; ++i) {
+        if (!std::isfinite(xs[i]) || !std::isfinite(ys[i]) ||
+            !std::isfinite(radii[i]) || radii[i] <= 0.f) continue;
+        const int n = g_block_circle_count++;
+        g_block_circle_x[n] = xs[i]; g_block_circle_y[n] = ys[i];
+        g_block_circle_r[n] = radii[i];
+    }
+}
+
+static bool Touch_IsBlocked(float x, float y) {
+    if (!g_block_on) return false;
+    if (g_block_circle_count > 0) {
+        for (int i = 0; i < g_block_circle_count; ++i) {
+            const float dx = x - g_block_circle_x[i], dy = y - g_block_circle_y[i];
+            if (dx * dx + dy * dy <= g_block_circle_r[i] * g_block_circle_r[i]) return true;
+        }
+        return false;
+    }
+    return x >= g_block_x0 && x <= g_block_x1 && y >= g_block_y0 && y <= g_block_y1;
 }
 
 static int fdNum = 0, origfd[maxE], nowfd;
@@ -361,7 +395,10 @@ static void *TypeA(void *arg) {
                     if (ie.code == ABS_Y) { Finger[i][0].y = (int) (ie.value * S2TY); continue; }
                 }
                 if (ie.type == EV_KEY && ie.code == BTN_TOUCH) {
-                    Finger[i][0].isDown = ie.value != 0;
+                    const bool down = ie.value != 0;
+                    if (down && !Finger[i][0].isDown) Finger[i][0].blockClassified = false;
+                    if (!down) Finger[i][0].blockClassified = false;
+                    Finger[i][0].isDown = down;
                     continue;
                 }
             }
@@ -373,9 +410,11 @@ static void *TypeA(void *arg) {
                 if (ie.code == ABS_MT_TRACKING_ID) {
                     if (ie.value == -1) {
                         Finger[i][latest].isDown = false;
+                        Finger[i][latest].blockClassified = false;
                     } else {
                         Finger[i][latest].id = (i * 2 + 1) * maxF + latest;
                         Finger[i][latest].isDown = true;
+                        Finger[i][latest].blockClassified = false;
                     }
                     continue;
                 }
@@ -397,9 +436,10 @@ static void *TypeA(void *arg) {
                     Touch_ToOverlay(Finger[i][latest].x, Finger[i][latest].y, x, y);
                     io.MousePos = {x, y};
                     io.MouseDown[0] = true;
-                    Finger[i][latest].blocked = g_block_on && x >= g_block_x0 &&
-                                                x <= g_block_x1 && y >= g_block_y0 &&
-                                                y <= g_block_y1;
+                    if (!Finger[i][latest].blockClassified) {
+                        Finger[i][latest].blocked = Touch_IsBlocked(x, y);
+                        Finger[i][latest].blockClassified = true;
+                    }
                 } else {
                     io.MouseDown[0] = false;
                     Finger[i][latest].blocked = false;
