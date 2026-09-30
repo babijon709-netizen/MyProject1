@@ -109,9 +109,10 @@ void RestoreAccent() {
 // профилю, и переживают переключение конфигов. В бинарный блоб их не положить
 // (раскладка версии 4 заморожена), а калибровочный тап пишет сразу в g_state —
 // не в момент сохранения конфига. Поэтому каждая запись/сброс тут же вызывает
-// RememberLayout(), а старт — RestoreLayout(). Формат: 12 чисел — шесть пар
-// x y (зона джойстика фарма, зона огня, джойстик фрикама, счётчик HUD, кнопка
-// фрикама, точка пальца аима); -1 = не задана. Точка аима заодно дублируется
+// RememberLayout(), а старт — RestoreLayout(). Первые 12 чисел сохраняют
+// прежний формат (шесть пар позиций); следом добавлены центр круглой зоны
+// обзора фрикама и её радиус. Старые .layout читаются без миграции.
+// -1 = позиция не задана. Точка аима заодно дублируется
 // в блобе (слоты aim_touch_x/y): при загрузке конфиг побеждает и переписывает
 // этот файл — как язык.
 static std::string CfgLayoutPath() {
@@ -122,14 +123,16 @@ void RememberLayout() {
     mkdir(kCfgDir, 0777);
     std::ofstream f(CfgLayoutPath(), std::ios::trunc);
     if (!f) return;
-    char b[256];
-    snprintf(b, sizeof(b), "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f",
+    char b[320];
+    snprintf(b, sizeof(b), "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f",
              g_state.farm_joy_x, g_state.farm_joy_y,
              g_state.farm_fire_x, g_state.farm_fire_y,
              g_state.freecam_joy_x, g_state.freecam_joy_y,
              g_state.hud_cnt_x, g_state.hud_cnt_y,
              g_state.freecam_btn_x, g_state.freecam_btn_y,
-             g_state.aim_tx, g_state.aim_ty);
+             g_state.aim_tx, g_state.aim_ty,
+             g_state.freecam_look_x, g_state.freecam_look_y,
+             g_state.freecam_look_radius);
     f << b;
 }
 
@@ -146,6 +149,13 @@ void RestoreLayout() {
     g_state.hud_cnt_x = cl(v[6]);   g_state.hud_cnt_y = cl(v[7]);
     g_state.freecam_btn_x = cl(v[8]); g_state.freecam_btn_y = cl(v[9]);
     g_state.aim_tx = cl(v[10]);     g_state.aim_ty = cl(v[11]);
+    float look_x = -1.f, look_y = -1.f, look_radius = 0.28f;
+    if (f >> look_x >> look_y >> look_radius) {
+        g_state.freecam_look_x = cl(look_x);
+        g_state.freecam_look_y = cl(look_y);
+        g_state.freecam_look_radius = (look_radius >= 0.10f && look_radius <= 0.48f)
+            ? look_radius : 0.28f;
+    }
 }
 
 static void XorBuf(uint8_t* buf, size_t sz) {

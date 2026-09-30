@@ -1042,11 +1042,15 @@ float TabContent(int tab, float dt, float cW) {
         // базы перед рейдом. Пока он включён, аим молчит: точка прицела
         // считается от глаза персонажа, а камера улетела от него.
         SHdr(XS("Фрикам"));
-        CardBg(Layout::RowH * 4.f + Layout::SliderH);
+        CardBg(Layout::RowH * 5.f + Layout::SliderH * 2.f);
         ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
         ToggleRow("##fc2", XS("Кнопка на экране"), &g_state.freecam_btn_show, g_state.a_freecam_btn_show);
         SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
                   1.f, 60.f, XS("%.0f м/с"), false, false, g_state.sl_freecam, dt);
+        const float oldLookRadius = g_state.freecam_look_radius;
+        SliderRow("##fclr", XS("Радиус зоны обзора"), &g_state.freecam_look_radius,
+                  0.10f, 0.48f, XS("%.2f"), false, false, g_state.sl_freecam_look_radius, dt);
+        if (oldLookRadius != g_state.freecam_look_radius) RememberLayout();
         {
             // Кнопка настройки положения джойстика фрикама
             const float rowH = Layout::RowH, inset = Layout::Inset;
@@ -1055,6 +1059,16 @@ float TabContent(int tab, float dt, float cW) {
             ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
             if (ImGui::Button(XS("Настроить джойстик"), {avW - inset*2.f, rowH - 8.f})) {
                 g_calibMode = 4;
+                menu_open = false;
+            }
+        }
+        {
+            const float rowH = Layout::RowH, inset = Layout::Inset;
+            const float avW = ImGui::GetContentRegionAvail().x;
+            auto pos = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
+            if (ImGui::Button(XS("Настроить зону обзора"), {avW - inset*2.f, rowH - 8.f})) {
+                g_calibMode = 7;
                 menu_open = false;
             }
         }
@@ -1385,6 +1399,15 @@ void UpdateFreecam(float dt) {
     cx = ImClamp(cx, R + 16.f * S, vw - R - 16.f * S);
     cy = ImClamp(cy, R + 100.f * S, vh - R - 16.f * S);
 
+    // Отдельная круглая зона обзора. Центр настраивается тем же экраном,
+    // что и джойстик; радиус хранится как доля короткой стороны.
+    float lookCx = (g_state.freecam_look_x >= 0.f ? g_state.freecam_look_x : 0.72f) * vw;
+    float lookCy = (g_state.freecam_look_y >= 0.f ? g_state.freecam_look_y : 0.50f) * vh;
+    const float lookFrac = ImClamp(g_state.freecam_look_radius, 0.10f, 0.48f);
+    const float lookR = lookFrac * ImMin(vw, vh);
+    lookCx = ImClamp(lookCx, lookR + 8.f * S, vw - lookR - 8.f * S);
+    lookCy = ImClamp(lookCy, lookR + 90.f * S, vh - lookR - 8.f * S);
+
     const float kBtnR  = 62.f * S;          // кнопки высоты у правого края
     const float kBtnX  = vw - kBtnR - 30.f * S;
     const float kUpY   = vh * 0.5f - kBtnR - 26.f * S;
@@ -1556,7 +1579,8 @@ void UpdateFreecam(float dt) {
         for (int i = 0; i < nf; ++i) {
             if (f_id[i] == s_fc_joy_id || f_id[i] == s_fc_up_id || f_id[i] == s_fc_down_id) continue;
             if (!isFreshTouch(f_id[i]) || f_y[i] < 90.f) continue;
-            if (f_x[i] < vw * 0.45f) continue;   // обзор — правая часть экрана
+            const float lx = f_x[i] - lookCx, ly = f_y[i] - lookCy;
+            if (lx * lx + ly * ly > lookR * lookR) continue;
             const float jx = f_x[i] - cx, jy = f_y[i] - cy;
             if (jx * jx + jy * jy <= keepOut * keepOut) continue;
             const float bx = f_x[i] - kBtnX;
@@ -1590,6 +1614,13 @@ void UpdateFreecam(float dt) {
     // Окна с InvisibleButton здесь не нужны (хит-тесты свои, по пальцам) и
     // вредны: невидимая кнопка обзора на пол-экрана висела бы поверх меню.
     auto* fg = ImGui::GetForegroundDrawList();
+    // Граница зоны обзора видна, но не перекрывает игру. После захвата палец
+    // остаётся привязан до отпускания, даже если свайп вышел за круг.
+    fg->AddCircleFilled({lookCx, lookCy}, lookR,
+                        lookHeld ? IM_COL32(0,180,255,24) : IM_COL32(20,20,20,14), 72);
+    fg->AddCircle({lookCx, lookCy}, lookR,
+                  lookHeld ? IM_COL32(0,200,255,150) : IM_COL32(255,255,255,55),
+                  72, 2.f);
     {
         // Основание круглое (залитый круг + кольцо), без квадратной рамки.
         fg->AddCircleFilled({cx, cy}, R, IM_COL32(20,20,20,200), 64);
@@ -1774,6 +1805,7 @@ void RenderMenu() {
             : (g_calibMode == 4) ? XS("Тапни куда поставить джойстик фрикама")
             : (g_calibMode == 5) ? XS("Тапни куда поставить счётчик игроков")
             : (g_calibMode == 6) ? XS("Тапни куда поставить кнопку фрикама")
+            : (g_calibMode == 7) ? XS("Тапни куда поставить зону обзора")
                                  : XS("Тапни по точке, где аим водит палец");
         const char* sub = XS("Тап записывает зону. Меню откроется само.");
         float tfs = ImGui::GetFontSize() * 1.5f;
@@ -1797,6 +1829,10 @@ void RenderMenu() {
                 if (g_state.freecam_joy_x >= 0.f) { zx = g_state.freecam_joy_x * dw; zy = g_state.freecam_joy_y * dh; }
                 else { zx = dw * 0.12f; zy = dh * 0.82f; } // дефолт слева внизу
             }
+            if (g_calibMode == 7) {
+                zx = (g_state.freecam_look_x >= 0.f ? g_state.freecam_look_x : 0.72f) * dw;
+                zy = (g_state.freecam_look_y >= 0.f ? g_state.freecam_look_y : 0.50f) * dh;
+            }
             // У точки аима маркер виден всегда: пока она не задана, показываем
             // ту позицию, из которой аим водит палец по умолчанию.
             if (g_calibMode == 3) { zx = AimTouchFracX() * dw; zy = AimTouchFracY() * dh; }
@@ -1811,6 +1847,11 @@ void RenderMenu() {
                 else { zx = kFcBtnDefX * dw; zy = kFcBtnDefY * dh; }
             }
             if (zx >= 0.f) {
+                if (g_calibMode == 7) {
+                    const float rr = ImClamp(g_state.freecam_look_radius, 0.10f, 0.48f) * ImMin(dw, dh);
+                    fg->AddCircleFilled({zx, zy}, rr, C::UA(C::Acc(), 0.10f), 72);
+                    fg->AddCircle({zx, zy}, rr, C::UA(C::Acc(), 0.75f), 72, 3.f);
+                }
                 float pr = 34.f + 6.f * sinf((float)ImGui::GetTime() * 4.f);
                 fg->AddCircle({zx, zy}, pr, C::UA(C::Acc(), 0.85f), 40, 3.f);
                 fg->AddCircleFilled({zx, zy}, 7.f, C::U(C::Acc()), 20);
@@ -1865,6 +1906,7 @@ void RenderMenu() {
                 const bool hud  = (g_calibMode == 5);
                 const bool fcb  = (g_calibMode == 6);
                 const bool fcj  = (g_calibMode == 4);
+                const bool fcl  = (g_calibMode == 7);
                 if (g_calibMode == 1) {
                     g_state.farm_joy_x = rx; g_state.farm_joy_y = ry;
                     ShowToast(XS("Зона джойстика сохранена"));
@@ -1874,6 +1916,9 @@ void RenderMenu() {
                 } else if (g_calibMode == 4) {
                     g_state.freecam_joy_x = rx; g_state.freecam_joy_y = ry;
                     ShowToast(XS("Джойстик фрикама сохранён"));
+                } else if (fcl) {
+                    g_state.freecam_look_x = rx; g_state.freecam_look_y = ry;
+                    ShowToast(XS("Зона обзора фрикама сохранена"));
                 } else if (hud) {
                     // Та же липкость к центру, что в превью: по каждой оси.
                     if (fabsf(rx - 0.5f) < 0.04f) rx = 0.5f;
@@ -1899,7 +1944,7 @@ void RenderMenu() {
                 // на вкладку «Опции», джойстик и кнопка фрикама — в «Разное».
                 if (farm)            PopoverOpen(XS("Автофарм"), 5);
                 else if (hud)        g_state.cur_tab = 5;
-                else if (fcb || fcj) g_state.cur_tab = 3;
+                else if (fcb || fcj || fcl) g_state.cur_tab = 3;
                 else                 g_state.cur_tab = 1;
                 g_input.touchConsumed = true; // этот тап уже отработал
             }
