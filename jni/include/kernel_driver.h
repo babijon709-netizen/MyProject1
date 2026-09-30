@@ -31,6 +31,19 @@ struct ModuleBase {
     uintptr_t base;
 };
 
+// Result of a pid-less presence check. The ioctl protocol cannot be exercised
+// before a target process exists, so this only answers "is a driver node
+// installed and can this process open it" — which is exactly what the launcher
+// needs in order to refuse kernel mode on a device without the module.
+struct Availability {
+    bool present = false;   // at least one candidate /dev node exists
+    bool openable = false;  // at least one candidate node could be opened
+    std::string path;       // first node that was found (opened one if any)
+    int error = 0;          // errno of the last failed open (0 if none)
+};
+
+Availability probe();
+
 class Driver {
 public:
     Driver() = default;
@@ -54,9 +67,12 @@ public:
     ssize_t write(uintptr_t address, const void* in, size_t size) const;
     uintptr_t module_base(const char* name) const;
 
-private:
+    // Candidate /dev nodes that look like the module's device. Exposed so the
+    // launcher can tell "driver not installed" from "driver refused us".
     static std::vector<std::string> discover_nodes();
     static bool is_known_node(const char* name);
+
+private:
     static bool looks_like_hidden_node(const char* name, const struct stat& info);
     static bool read_is_elf(int fd, pid_t pid, uintptr_t address);
 

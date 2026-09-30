@@ -21,6 +21,17 @@ constexpr const char* kKnownNames[] = {
 };
 constexpr size_t kMaxHiddenName = 7;
 
+// Standard character devices that satisfy the "short lowercase, root-owned,
+// zero-sized" convention the module uses (/dev/null is the obvious one). They
+// were the reason a device was always "found": the node scan matched them and
+// nothing afterwards proved the ioctl protocol, so kernel mode came up on
+// phones without the module installed.
+constexpr const char* kExcludedNames[] = {
+    "null", "zero", "full", "random", "urandom", "tty", "console", "ptmx",
+    "kmsg", "mem", "kmem", "port", "fuse", "ashmem", "binder", "hwbinder",
+    "vndbinder", "rtc", "watchdog", "loop", "ram", "sda", "mmcblk", "zram",
+};
+
 bool all_lowercase_letters(const char* name) {
     if (!name || !name[0]) return false;
     size_t length = 0;
@@ -30,6 +41,13 @@ bool all_lowercase_letters(const char* name) {
         if (++length > kMaxHiddenName) return false;
     }
     return length != 0;
+}
+
+bool is_excluded_name(const char* name) {
+    if (!name) return true;
+    for (const char* excluded : kExcludedNames)
+        if (std::strcmp(name, excluded) == 0) return true;
+    return false;
 }
 
 bool contains(const char* name, const char* needle) {
@@ -42,6 +60,60 @@ void append_unique(std::vector<std::string>& nodes, const std::string& path) {
 }
 
 }  // namespace
+
+namespace {
+
+// Value read back through the driver during the pid-less probe. Reading our
+// OWN memory is the only self-check available before a game process exists,
+// and it is a real end-to-end test of the protocol: a device that is not the
+// module either rejects the ioctl (ENOTTY/EINVAL) or leaves the buffer
+// untouched, and in both cases the pattern does not come back.
+volatile uint64_t g_self_probe_value = 0x5175696E67687561ULL;  // "Qinghua"
+
+bool speaks_protocol(int fd) {
+    uint64_t readback = 0;
+    CopyMemory request{getpid(),
+                       reinterpret_cast<uintptr_t>(const_cast<uint64_t*>(&g_self_probe_value)),
+                       &readback, sizeof(readback)};
+    errno = 0;
+    if (ioctl(fd, OP_READ_MEM, &request) != 0) return false;
+    return readback == g_self_probe_value;
+}
+
+}  // namespace
+
+Availability probe() {
+    Availability result;
+    const std::vector<std::string> nodes = Driver::discover_nodes();
+    for (const std::string& candidate : nodes) {
+        errno = 0;
+        int fd = open(candidate.c_str(), O_RDWR | O_CLOEXEC);
+        if (fd < 0) fd = open(candidate.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            // Only a node with one of the module's published names counts as
+            // evidence when it cannot be opened: the anonymous-node heuristic
+            // also matches ordinary root-only devices, and treating those as
+            // "driver present, run as root" was misleading.
+            const char* leaf = std::strrchr(candidate.c_str(), '/');
+            if (!result.present && leaf && Driver::is_known_node(leaf + 1)) {
+                result.present = true;
+                result.path = candidate;
+                result.error = errno;
+            }
+            continue;
+        }
+        const bool verified = speaks_protocol(fd);
+        close(fd);
+        if (!verified) continue;  // some other character device, not the module
+        result.present = true;
+        result.openable = true;
+        result.error = 0;
+        result.path = candidate;
+        return result;
+    }
+    if (!result.present) result.error = ENODEV;
+    return result;
+}
 
 Driver::~Driver() { unbind(); }
 
@@ -57,6 +129,7 @@ bool Driver::looks_like_hidden_node(const char* name, const struct stat& info) {
     // an unnamed-looking, root-owned, zero-sized character node with a normal
     // creation time. It keeps ordinary /dev entries out of the ioctl probe.
     if (!all_lowercase_letters(name)) return false;
+    if (is_excluded_name(name)) return false;
     if (!S_ISCHR(info.st_mode) && !S_ISBLK(info.st_mode)) return false;
     if (info.st_uid != 0 || info.st_gid != 0 || info.st_size != 0) return false;
     if (contains(name, "gpiochip")) return false;
