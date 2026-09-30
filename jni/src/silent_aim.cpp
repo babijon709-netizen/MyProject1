@@ -1,11 +1,9 @@
 #include "silent_aim_core.h"
+#include "game.h"      // esp_silent_* — память игры через выбранный транспорт
 #include <chrono>
 #include <condition_variable>
-#include <fcntl.h>
 #include <mutex>
 #include <thread>
-#include <unistd.h>
-#include <cstdio>
 
 namespace silent_aim {
 namespace {
@@ -13,23 +11,21 @@ uint64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+// Память игры для тика сайлента — ТОЛЬКО через выбранный способ чтения
+// (esp_silent_* поверх g_mem/транспорта, см. game.cpp). Прежний собственный
+// /proc/<pid>/mem убран: в кернел-режимах (FT/QX/RT) он появлялся в
+// /proc/<self>/fd у чита и молча не работал при закрытом прямом доступе.
+// «Открытие» здесь — не открытие файла, а подтверждение, что игра
+// привязана к этому pid выбранным транспортом (привязку держит g_mem).
 class Memory {
-    int fd_ = -1;
 public:
-    ~Memory() { close(); }
-    void close() { if (fd_ >= 0) ::close(fd_); fd_ = -1; }
-    bool open(int pid) {
-        close();
-        char path[64];
-        std::snprintf(path, sizeof(path), "/proc/%d/mem", pid);
-        fd_ = ::open(path, O_RDWR | O_CLOEXEC);
-        return fd_ >= 0;
-    }
+    bool open(int pid) { return esp_silent_target(pid); }
+    void close() {}
     bool read(uint64_t address, void* out, size_t size) {
-        return fd_ >= 0 && pread64(fd_, out, size, static_cast<off64_t>(address)) == static_cast<ssize_t>(size);
+        return esp_silent_read(address, out, size);
     }
     bool write(uint64_t address, const void* in, size_t size) {
-        return fd_ >= 0 && pwrite64(fd_, in, size, static_cast<off64_t>(address)) == static_cast<ssize_t>(size);
+        return esp_silent_write(address, in, size);
     }
 };
 class Writer {
@@ -70,8 +66,8 @@ class Writer {
             lock.unlock();
             const Result result = tick(memory, command);
             lock.lock();
-            // Do not publish status for a snapshot superseded while pread/pwrite
-            // was in flight; the next iteration uses the newest immutable copy.
+            // Do not publish status for a snapshot superseded while the transport
+            // read/write was in flight; the next iteration uses the newest copy.
             if (stopping_ || session_ != command_session || revision_ != command_revision) continue;
             stats_.axis = result == Result::written;
             if (result == Result::written) ++stats_.writes;

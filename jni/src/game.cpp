@@ -60,6 +60,21 @@ bool esp_mem_backend_kernel() { return g_mem_backend != ESP_MEM_EXTERNAL; }
 // привязка не идёт» — в кернеле это ответ драйвера, в экстернале /proc.
 int esp_mem_last_errno() { return g_mem.last_error(); }
 
+// Сайлент-аим: доступ из своего потока — только через выбранный на экране
+// способ чтения. Никакого собственного /proc/<pid>/mem: в кернел-режимах
+// (FT/QX/RT) он появлялся в /proc/<self>/fd чита и молча ломался там, где
+// прямой доступ к памяти закрыт. Чтение — read_quiet (мимо кадрового кэша
+// рендер-потока, как у viewmodel), запись — обычный путь Reader.
+bool esp_silent_target(int pid) {
+    return g_mem.bound() && g_mem.pid() == pid;
+}
+bool esp_silent_read(uint64_t addr, void* out, size_t len) {
+    return g_mem.bound() && g_mem.read_quiet(addr, out, len);
+}
+bool esp_silent_write(uint64_t addr, const void* in, size_t len) {
+    return g_mem.bound() && g_mem.write(addr, in, len);
+}
+
 // адресами без метки тоже нельзя. Снимаем метку сразу, на входе.
 
 // Все смещения — compile-time константы единственного release-набора.

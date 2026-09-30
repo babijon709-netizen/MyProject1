@@ -126,6 +126,15 @@ void          esp_set_mem_backend(int backend);
 bool          esp_mem_backend_kernel();
 // Последняя ошибка транспорта (errno): для тоста «почему привязка не идёт».
 int           esp_mem_last_errno();
+// Доступ из фонового потока сайлент-аима: строго через выбранный способ
+// чтения (g_mem/транспорт), БЕЗ собственного /proc/<pid>/mem — в кернел-
+// режимах собственный fd светился в fd-листе чита и не работал при
+// закрытом прямом доступе. Чтение идёт мимо кадрового кэша (read_quiet)
+// и не мешает рендер-потоку; esp_silent_target проверяет, что игра
+// привязана именно к этому pid выбранным транспортом.
+bool          esp_silent_target(int pid);
+bool          esp_silent_read(uint64_t addr, void* out, size_t len);
+bool          esp_silent_write(uint64_t addr, const void* in, size_t len);
 // Привязка ещё читается? (одно чтение; ловит перезапуск процесса и отобранный доступ)
 bool          esp_alive_check();
 unsigned long long esp_mem_reads_total();
