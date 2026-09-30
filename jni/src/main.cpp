@@ -307,68 +307,8 @@ int main(int argc, char* argv[]) {
         UpdateFarm(ImGui::GetIO().DeltaTime);
         slowMark();   // 3: после фарма
         LogStage(kStageMenu);
-        // ---- индикация привязки -------------------------------------------
-        // Раньше состояние привязки не показывалось вовсе: «чит не
-        // подключается» выглядело как молчащий счётчик игроков. Теперь виден
-        // и успех (с меткой режима), и причина отказа: в кернеле — с errno
-        // ответа драйвера, в экстернале — с errno /proc. Отказ повторяется
-        // тостом раз в 15 с (привязка ретраится каждые 1.5 с), успех — один
-        // раз. Читается из кадра: ShowToast трогает GUI-состояние, а из
-        // фонового потока привязки его звать нельзя.
-        {
-            static int s_shown = -1;        // какое состояние уже показано
-            static double s_lastRepeat = -1e9;
-            const double nowSec = std::chrono::duration<double>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            int cur;
-            if (g_esp_attached) cur = 100;
-            else if (!g_attach_scanned.load()) cur = -1;    // поиск ещё не шёл
-            else {
-                switch (esp_attach_state()) {
-                    case ESP_ATTACH_NO_PID:    cur = 0; break;
-                    case ESP_ATTACH_NO_LIB:    cur = 2; break;
-                    case ESP_ATTACH_NO_ACCESS: cur = 3; break;
-                    case ESP_ATTACH_BAD_IMAGE: cur = 4; break;
-                    default: cur = 0; break;  // OK без привязки = игры нет
-                }
-            }
-            if (cur >= 0 && (cur != s_shown ||
-                             (cur != 100 && nowSec - s_lastRepeat > 15.0))) {
-                s_shown = cur;
-                s_lastRepeat = nowSec;
-                const char* msg = nullptr;
-                char buf[112];
-                switch (cur) {
-                    case 100:
-                        msg = esp_mem_backend_kernel() ? XS("Игра подключена|кернел")
-                                                       : XS("Игра подключена|экстернал");
-                        PlaySound(SND_SUCCESS);
-                        break;
-                    case 2: msg = XS("libil2cpp не найден|игра ещё грузится"); break;
-                    case 3:
-                        if (esp_mem_backend_kernel()) {
-                            const int e = esp_mem_last_errno();
-                            if (e == ENOPROTOOPT)   // 92: «такой опции нет»
-                                msg = XS("Кернел: код команды не распознан|прогони --scan-driver");
-                            else {
-                                snprintf(buf, sizeof(buf), XS("Кернел: драйвер не отдал память|errno %d"), e);
-                                msg = buf;
-                            }
-                        } else {
-                            snprintf(buf, sizeof(buf), XS("Нет доступа к /proc/<pid>/mem|errno %d"),
-                                     esp_mem_last_errno());
-                            msg = buf;
-                        }
-                        break;
-                    case 4: msg = XS("Образ игры не прошёл проверку|перезапусти игру"); break;
-                    default: msg = XS("Игра не найдена|запусти игру"); break;
-                }
-                if (msg) {
-                    ShowToast(msg);
-                    LogLine("привязка: %s", msg);
-                }
-            }
-        }
+        // Индикация привязки (тосты «игра найдена / не найдена») убрана:
+        // состояние видно по счётчику игроков в пилюле.
         RenderMenu();
         slowMark();   // 4: после меню
         LogStage(kStageFreecam);

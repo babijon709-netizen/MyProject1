@@ -139,22 +139,25 @@ static bool RunModeSelect() {
             const float t = EaseInOut(fade);
             const float slide = (1.f - t) * -30.f;   // въезжает сверху
 
-            // Заголовок по центру сверху: без фона, только текст с тенью
-            // (читаемость поверх любого экрана под оверлеем).
+            // Заголовок + кнопки — единый блок ровно по центру экрана
+            // (по горизонтали и по вертикали): без фона, только текст
+            // с тенью для читаемости поверх экрана под оверлеем.
             const char* title = XS("Способ чтения");
             const float tfs = fs * 1.55f;
             const ImVec2 ts = fn->CalcTextSizeA(tfs, FLT_MAX, 0.f, title);
+            const float gap  = 14.f;
+            const float btnH = fs * 3.4f;
+            const float btnW = ImMin((vw - 36.f - gap) * 0.5f, 330.f);
+            const float tGap = fs * 1.3f;                 // заголовок -> кнопки
+            const float blockH = tfs + tGap + btnH;       // высота блока
+            const float ty = (vh - blockH) * 0.5f + slide;   // центр по вертикали
             const float tx = (vw - ts.x) * 0.5f;
-            const float ty = vh * 0.06f + slide;
             dl->AddText(fn, tfs, {tx + 2.f, ty + 2.f}, IM_COL32(0, 0, 0, 110), title);
             dl->AddText(fn, tfs, {tx, ty}, C::U(C::Txt()), title);
 
             // Две кнопки рядом под заголовком.
-            const float gap  = 14.f;
-            const float btnH = fs * 3.4f;
-            const float btnW = ImMin((vw - 36.f - gap) * 0.5f, 330.f);
             const float rowW = btnW * 2.f + gap;
-            const float by   = ty + tfs + fs * 1.3f;
+            const float by   = ty + tfs + tGap;
             const float bx   = (vw - rowW) * 0.5f;
 
             ImGui::SetCursorScreenPos({bx, by});
