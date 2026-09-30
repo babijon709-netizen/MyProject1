@@ -15,6 +15,9 @@
 
 #define maxE 5
 #define maxF 10
+
+// Сколько независимых зон захвата касаний держит слой (см. Touch_BlockRect).
+static constexpr int kBlockSlots = 4;
 #define UNGRAB 0
 #define GRAB 1
 
@@ -36,6 +39,11 @@ struct touchObj {
     bool isDown = false;
     // Касание забрал оверлей: в игру оно не уходит (см. Touch_BlockRect).
     bool blocked = false;
+    // Решение «чьё касание» принимается ОДИН раз, в момент нажатия, и живёт
+    // до отпускания. Раньше оно пересчитывалось на каждый пакет координат:
+    // палец, начавший на джойстике фрикама и уехавший за его пределы, с
+    // середины протяжки начинал уходить и в игру — персонаж вдруг шёл сам.
+    bool decided = false;
     int x = 0;
     int y = 0;
     int id = 0;
@@ -58,17 +66,40 @@ static targ targF[maxE];
 
 static touchObj Finger[maxE][maxF];
 
-// Прямоугольник экрана, касания внутри которого оверлей забирает себе: в игру
-// они не уходят вовсе. Нужен фрикаму — его джойстик лежит поверх игры, и без
+// Прямоугольники экрана, касания внутри которых оверлей забирает себе: в игру
+// они не уходят вовсе. Нужны фрикаму — его джойстик лежит поверх игры, и без
 // этого палец на нём ещё и ходил бы персонажем, а камера во фрикаме привязана
-// к телу и поехала бы вместе с ним. Пока прямоугольник не задан, поведение
-// ровно прежнее: ни один палец не блокируется.
-static bool  g_block_on = false;
-static float g_block_x0 = 0.f, g_block_y0 = 0.f, g_block_x1 = 0.f, g_block_y1 = 0.f;
+// к телу и поехала бы вместе с ним.
+//
+// Зон несколько, потому что органы управления фрикама разнесены по краям
+// (стик слева, кнопки высоты справа), а всё, что между ними, обязано
+// доставаться игре: в полёте нужно выбирать предмет в хотбаре и подбирать
+// вещи. Слот 0 — общий (экран выбора режима забирает им весь ввод), слоты
+// 1+ — органы управления оверлея. Пока слот не задан, он никого не держит:
+// поведение по умолчанию ровно прежнее.
+static bool  g_block_on[kBlockSlots] = {};
+static float g_block_x0[kBlockSlots] = {}, g_block_y0[kBlockSlots] = {};
+static float g_block_x1[kBlockSlots] = {}, g_block_y1[kBlockSlots] = {};
+
+void Touch_BlockRectSlot(int slot, bool on, float x0, float y0, float x1, float y1) {
+    if (slot < 0 || slot >= kBlockSlots) return;
+    g_block_on[slot] = on;
+    g_block_x0[slot] = x0; g_block_y0[slot] = y0;
+    g_block_x1[slot] = x1; g_block_y1[slot] = y1;
+}
 
 void Touch_BlockRect(bool on, float x0, float y0, float x1, float y1) {
-    g_block_on = on;
-    g_block_x0 = x0; g_block_y0 = y0; g_block_x1 = x1; g_block_y1 = y1;
+    Touch_BlockRectSlot(0, on, x0, y0, x1, y1);
+}
+
+// Точка внутри хотя бы одной заданной зоны — касание наше.
+static bool Touch_PointBlocked(float x, float y) {
+    for (int s = 0; s < kBlockSlots; ++s) {
+        if (!g_block_on[s]) continue;
+        if (x >= g_block_x0[s] && x <= g_block_x1[s] &&
+            y >= g_block_y0[s] && y <= g_block_y1[s]) return true;
+    }
+    return false;
 }
 
 static int fdNum = 0, origfd[maxE], nowfd;
@@ -362,6 +393,7 @@ static void *TypeA(void *arg) {
                 }
                 if (ie.type == EV_KEY && ie.code == BTN_TOUCH) {
                     Finger[i][0].isDown = ie.value != 0;
+                    Finger[i][0].decided = false;   // новое касание решается заново
                     continue;
                 }
             }
@@ -371,11 +403,16 @@ static void *TypeA(void *arg) {
                     continue;
                 }
                 if (ie.code == ABS_MT_TRACKING_ID) {
+                    // Слот переиспользуется под следующий палец, поэтому
+                    // решение «чьё касание» сбрасывается и на подъёме, и на
+                    // новом id: иначе новый палец унаследовал бы чужое.
                     if (ie.value == -1) {
                         Finger[i][latest].isDown = false;
+                        Finger[i][latest].decided = false;
                     } else {
                         Finger[i][latest].id = (i * 2 + 1) * maxF + latest;
                         Finger[i][latest].isDown = true;
+                        Finger[i][latest].decided = false;
                     }
                     continue;
                 }
@@ -397,12 +434,16 @@ static void *TypeA(void *arg) {
                     Touch_ToOverlay(Finger[i][latest].x, Finger[i][latest].y, x, y);
                     io.MousePos = {x, y};
                     io.MouseDown[0] = true;
-                    Finger[i][latest].blocked = g_block_on && x >= g_block_x0 &&
-                                                x <= g_block_x1 && y >= g_block_y0 &&
-                                                y <= g_block_y1;
+                    // Только в момент нажатия: дальше палец ведётся как решили
+                    // (см. touchObj::decided).
+                    if (!Finger[i][latest].decided) {
+                        Finger[i][latest].decided = true;
+                        Finger[i][latest].blocked = Touch_PointBlocked(x, y);
+                    }
                 } else {
                     io.MouseDown[0] = false;
                     Finger[i][latest].blocked = false;
+                    Finger[i][latest].decided = false;
                 }
                 if (!Touch_readOnly) {
                     Upload();

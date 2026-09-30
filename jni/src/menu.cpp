@@ -1269,9 +1269,13 @@ static void TrafficLight(ImVec2 winPos, float railW) {
 // только последний, поэтому для фрикама он не используется — только как
 // запасной путь, когда тачскрина нет вовсе (хост/эмулятор).
 //
-// Касания в игру не уходят (Touch_BlockRect на весь экран ниже верхней
-// полосы): иначе палец на джойстике ещё и ходил бы персонажем, а камера во
-// фрикаме привязана к телу и поехала бы вместе с ним.
+// В игру не уходят касания ТОЛЬКО по своим органам управления: кругу
+// джойстика и кнопкам высоты (Touch_BlockRectSlot, слоты 1 и 2). Иначе палец
+// на джойстике ещё и ходил бы персонажем, а камера во фрикаме привязана к
+// телу и поехала бы вместе с ним. Весь остальной экран остаётся игре: в
+// полёте нужно выбирать предмет в хотбаре и подбирать вещи. Палец обзора
+// поэтому в игру тоже уходит — он заодно поворачивает тело, но вид остаётся
+// наш: камеру каждый кадр переписывает писатель фрикама.
 //
 // Геометрия — в пикселях видимого экрана (VisibleScreen, как пилюли и меню),
 // а не в квадрате ImGui DisplaySize: иначе привязка к правому/нижнему краю
@@ -1305,6 +1309,16 @@ static float  s_fc_in_maxdt = 0.f;
 static int    s_fc_in_joyfree = 0, s_fc_in_lookfree = 0;
 static int    s_fc_in_grace = 0, s_fc_in_lookdrop = 0;
 static double s_fc_in_last = -1e9;
+
+// Слоты захвата касаний, которыми владеет фрикам (слот 0 — общий, им экран
+// выбора режима забирает весь ввод; трогать его отсюда нельзя).
+static constexpr int kFcTouchSlotJoy = 1;
+static constexpr int kFcTouchSlotBtns = 2;
+
+static void Freecam_ReleaseTouchZones() {
+    Touch_BlockRectSlot(kFcTouchSlotJoy, false, 0.f, 0.f, 0.f, 0.f);
+    Touch_BlockRectSlot(kFcTouchSlotBtns, false, 0.f, 0.f, 0.f, 0.f);
+}
 
 static void Freecam_ResetGrabs() {
     s_fc_joy_id = s_fc_look_id = s_fc_up_id = s_fc_down_id = -1;
@@ -1354,7 +1368,7 @@ void UpdateFreecam(float dt) {
         // прямоугольник прошлого полёта здесь обязан быть снят: иначе игра
         // осталась бы без касаний на пустом месте.
         if (!esp_freecam_active()) {
-            Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
+            Freecam_ReleaseTouchZones();
             Freecam_ResetGrabs();
         }
         return;
@@ -1396,7 +1410,7 @@ void UpdateFreecam(float dt) {
         // глазом. В этом состоянии игра навсегда переставала получать
         // касания в четверти экрана: не выбрать предмет в хотбаре, не
         // подобрать вещь. Ничего не блокируем, пока реально не летим.
-        Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
+        Freecam_ReleaseTouchZones();
         Freecam_ResetGrabs();   // залипший id не должен уехать в следующий полёт
         return;
     }
@@ -1424,8 +1438,21 @@ void UpdateFreecam(float dt) {
     const float kUpY   = vh * 0.5f - kBtnR - 26.f * S;
     const float kDownY = vh * 0.5f + kBtnR + 26.f * S;
 
-    // Всё ниже верхней полосы забираем себе — в игру не уходит ничего.
-    Touch_BlockRect(true, 0.f, 90.f, vw, vh);
+    // Забираем себе ТОЛЬКО свои органы управления: круг джойстика и колонку
+    // кнопок высоты — ровно те области, где палец перехватывается (радиусы
+    // захвата ниже). Раньше здесь забирался весь экран ниже верхней полосы,
+    // и в полёте игра не получала вообще ничего: нельзя ни выбрать предмет в
+    // хотбаре, ни подобрать вещь. Палец обзора в игру теперь уходит: тап по
+    // игре от этого не ломается, а протяжка заодно поворачивает тело — вид
+    // всё равно наш, камеру каждый кадр переписывает писатель фрикама.
+    {
+        const float joyGrab = R + 70.f * S;          // как у захвата стика ниже
+        const float btnGrab = kBtnR + 20.f * S;      // как у захвата кнопок ниже
+        Touch_BlockRectSlot(kFcTouchSlotJoy, true, cx - joyGrab, cy - joyGrab,
+                                                   cx + joyGrab, cy + joyGrab);
+        Touch_BlockRectSlot(kFcTouchSlotBtns, true, kBtnX - btnGrab, kUpY - btnGrab,
+                                                    kBtnX + btnGrab, kDownY + btnGrab);
+    }
 
     // ---- снимок пальцев ----------------------------------------------------
     float f_x[12], f_y[12];
