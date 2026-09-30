@@ -1,0 +1,777 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <cstdint>
+#include <dirent.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <cmath>
+#include <ctime>
+#include <cstring>
+#include <linux/input.h>
+#include <linux/uinput.h>
+
+#include "imgui.h"
+
+#define maxE 5
+#define maxF 10
+#define UNGRAB 0
+#define GRAB 1
+
+// Слоты синтетических пальцев: 9 — «прежний» палец аимбота (Touch_Down/Move/Up,
+// id 60000), 6..8 — пальцы автофарма (Touch_*_N: 0 стик, 1 камера, 2 удар).
+// Разделение важное: аимбот, в отличие от автофарма, держит палец на месте и
+// ПЕРЕСЫЛАЕТ ту же точку каждый кадр — так у игры остаётся «живым» удержание
+// камеры (см. UpdateAim: hold still, keep the touch alive). Поэтому пропуск
+// повторов пакета к этому пальцу не применяется — см. Upload().
+static constexpr int kAimFingerSlot = 9;
+static constexpr int kAimFingerId   = 60000;
+
+bool other_touch;
+
+static uint32_t orientation = 0;
+static float screenHeight = 0, screenWidth = 0;
+
+struct touchObj {
+    bool isDown = false;
+    // Касание забрал оверлей: в игру оно не уходит (см. Touch_BlockRect).
+    bool blocked = false;
+    int x = 0;
+    int y = 0;
+    int id = 0;
+};
+
+struct targ {
+    int fdNum;
+    float S2TX;
+    float S2TY;
+    int singleTouch;   // 1: устройство type-A (ABS_X/ABS_Y+BTN_TOUCH) — тачпад ВМ
+};
+
+static struct {
+    input_event downEvent[2]{{{}, EV_KEY, BTN_TOUCH,       1},
+                             {{}, EV_KEY, BTN_TOOL_FINGER, 1}};
+    input_event event[512]{0};
+} input;
+
+static targ targF[maxE];
+
+static touchObj Finger[maxE][maxF];
+
+// Прямоугольник экрана, касания внутри которого оверлей забирает себе: в игру
+// они не уходят вовсе. Нужен фрикаму — его джойстик лежит поверх игры, и без
+// этого палец на нём ещё и ходил бы персонажем, а камера во фрикаме привязана
+// к телу и поехала бы вместе с ним. Пока прямоугольник не задан, поведение
+// ровно прежнее: ни один палец не блокируется.
+static bool  g_block_on = false;
+static float g_block_x0 = 0.f, g_block_y0 = 0.f, g_block_x1 = 0.f, g_block_y1 = 0.f;
+
+void Touch_BlockRect(bool on, float x0, float y0, float x1, float y1) {
+    g_block_on = on;
+    g_block_x0 = x0; g_block_y0 = y0; g_block_x1 = x1; g_block_y1 = y1;
+}
+
+static int fdNum = 0, origfd[maxE], nowfd;
+
+static int devMaxX = 0, devMaxY = 0;
+
+static float scale_x, scale_y;
+
+static void Touch_UpdateScale() {
+    if (devMaxX <= 0 || devMaxY <= 0) return;
+    if (orientation == 1 || orientation == 3) {
+        ::scale_x = (float) devMaxX / (::screenHeight > 0 ? ::screenHeight : 1);
+        ::scale_y = (float) devMaxY / (::screenWidth  > 0 ? ::screenWidth  : 1);
+    } else {
+        ::scale_x = (float) devMaxX / (::screenWidth  > 0 ? ::screenWidth  : 1);
+        ::scale_y = (float) devMaxY / (::screenHeight > 0 ? ::screenHeight : 1);
+    }
+}
+
+static bool Touch_initialized = false;
+
+static bool Touch_readOnly = false;
+
+// Класс устройства /dev/input/eventN:
+//   0 — не тачскрин;
+//   1 — мультитач (ABS_MT_POSITION_X/Y; ABS_MT_SLOT НЕ требуем: часть
+//       виртуальных тачскринов ВМ его не сообщает, а поток чтения и без
+//       слота сводится к одному пальцу);
+//   2 — однотачевый type-A (ABS_X/ABS_Y + BTN_TOUCH): так выглядят
+//       virtio/qemu-тачпады и «мышиная интеграция» в VMOS/X8/F1 и облачных
+//       телефонах — из-за них на ВМ и падало «Failed init touch!».
+static int checkDeviceIsTouch(int fd);
+static void genRandomString(char *string, int length) {
+    int flag, i;
+    srand((unsigned) time(NULL) + length);
+    for (i = 0; i < length - 1; i++) {
+        flag = rand() % 3;
+        switch (flag) {
+            case 0:
+                string[i] = 'A' + rand() % 26;
+                break;
+            case 1:
+                string[i] = 'a' + rand() % 26;
+                break;
+            case 2:
+                string[i] = '0' + rand() % 10;
+                break;
+            default:
+                string[i] = 'x';
+                break;
+        }
+    }
+    string[length - 1] = '\0';
+}
+
+// Диагностика лага автофарма: сколько раз пересобирали и отправляли пакет
+// событий синтетического тача и сколько миллисекунд на это ушло суммарно.
+// Upload() вызывается на КАЖДЫЙ SYN_REPORT, то есть десятки раз в секунду, и
+// делает write() в uinput плюс ожидание флага — на телефоне это заметная
+// статья расхода кадра, но из лога автофарма её раньше не было видно вовсе.
+static unsigned long long g_touch_upload_calls = 0;
+static double             g_touch_upload_ms    = 0.0;
+static unsigned long long g_touch_upload_skipped = 0;
+// Последний отправленный пакет: повторы не пишем в uinput (см. Upload()).
+// input_event в этой сборке заголовков — 8 байт, но берём размер с запасом от
+// самого типа: 11 пальцев × 6 событий + SYN_REPORT + до двух BTN_* при подъёме.
+static struct input_event g_touch_last_packet[80];
+static size_t             g_touch_last_bytes = 0;
+
+void Touch_UploadStats(unsigned long long& calls, double& ms, unsigned long long& skipped) {
+    calls   = g_touch_upload_calls;
+    ms      = g_touch_upload_ms;
+    skipped = g_touch_upload_skipped;
+}
+
+static inline double TouchNowMs() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+// Upload() зовут ДВА потока: поток чтения тачскрина (на каждый SYN_REPORT) и
+// поток оверлея через синтетические пальцы (каждый Touch_Down_N/Move/Up). Пока
+// пакет собирается, второй должен ждать — раньше это было `while (bTouch);`,
+// то есть активное ожидание на ядре: на телефоне такие ожидания съедают квант
+// CPU у самой игры и превращаются в просадку кадров ровно тогда, когда бот
+// активно водит пальцами. Обычный мьютекс ждёт без расхода CPU.
+static pthread_mutex_t g_touch_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool            g_touch_first_down = true;
+
+static void Upload() {
+    const double t0 = TouchNowMs();
+    pthread_mutex_lock(&g_touch_mutex);
+    bool isFirstDown = g_touch_first_down;
+    // Есть ли в собираемом пакете палец аимбота. Такой пакет уходит в uinput
+    // ВСЕГДА, даже если он байт в байт повторяет предыдущий (см. пропуск
+    // повторов ниже): удержание камеры аимботом держится именно на этих
+    // повторах, и прошлая сборка писала их каждый кадр.
+    bool aimFinger = false;
+    int tmpCnt = 0, tmpCnt2 = 0, i, j;
+    for (i = 0; i < fdNum; i++) {
+        for (j = 0; j < maxF; j++) {
+            if (Finger[i][j].isDown && !Finger[i][j].blocked) {
+                if (tmpCnt2++ > 10) {
+                    goto finish;
+                }
+                if (Finger[i][j].id == kAimFingerId) aimFinger = true;
+                input.event[tmpCnt].type = EV_ABS;
+                input.event[tmpCnt].code = ABS_X;
+                input.event[tmpCnt].value = Finger[i][j].x;
+                tmpCnt++;
+
+                input.event[tmpCnt].type = EV_ABS;
+                input.event[tmpCnt].code = ABS_Y;
+                input.event[tmpCnt].value = Finger[i][j].y;
+                tmpCnt++;
+
+                input.event[tmpCnt].type = EV_ABS;
+                input.event[tmpCnt].code = ABS_MT_POSITION_X;
+                input.event[tmpCnt].value = Finger[i][j].x;
+                tmpCnt++;
+
+                input.event[tmpCnt].type = EV_ABS;
+                input.event[tmpCnt].code = ABS_MT_POSITION_Y;
+                input.event[tmpCnt].value = Finger[i][j].y;
+                tmpCnt++;
+
+                input.event[tmpCnt].type = EV_ABS;
+                input.event[tmpCnt].code = ABS_MT_TRACKING_ID;
+                input.event[tmpCnt].value = Finger[i][j].id;
+                tmpCnt++;
+
+                input.event[tmpCnt].type = EV_SYN;
+                input.event[tmpCnt].code = SYN_MT_REPORT;
+                input.event[tmpCnt].value = 0;
+                tmpCnt++;
+            }
+        }
+    }
+    finish:
+    bool is = false;
+    if (tmpCnt == 0) {
+        input.event[tmpCnt].type = EV_SYN;
+        input.event[tmpCnt].code = SYN_MT_REPORT;
+        input.event[tmpCnt].value = 0;
+        tmpCnt++;
+        if (!isFirstDown) {
+            isFirstDown = true;
+            input.event[tmpCnt].type = EV_KEY;
+            input.event[tmpCnt].code = BTN_TOUCH;
+            input.event[tmpCnt].value = 0;
+            tmpCnt++;
+            input.event[tmpCnt].type = EV_KEY;
+            input.event[tmpCnt].code = BTN_TOOL_FINGER;
+            input.event[tmpCnt].value = 0;
+            tmpCnt++;
+        }
+    } else {
+        is = true;
+    }
+    input.event[tmpCnt].type = EV_SYN;
+    input.event[tmpCnt].code = SYN_REPORT;
+    input.event[tmpCnt].value = 0;
+    tmpCnt++;
+
+    // ---- Пропуск повторов ---------------------------------------------------
+    // В событие входит только список касаний, но Upload() зовётся на КАЖДЫЙ
+    // SYN_REPORT от тачскрина и на каждое изменение синтетического пальца, а
+    // полный пакет состоит из 6 событий на палец (ABS_X/Y, MT_POSITION_X/Y,
+    // TRACKING_ID, SYN_MT_REPORT) плюс SYN_REPORT. Кадры, где пальцы стоят на
+    // месте (а таких при фарме большинство: палец удара переставляется пару
+    // раз в секунду, джойстик — только когда бот реально идёт), пересобирали и
+    // переписывали ровно тот же пакет: на 4 пальцах это ~26 событий в uinput на
+    // каждый SYN_REPORT — десятки лишних write() в секунду на обеих сторонах
+    // (наш поток и input-поток системы). Сравниваем пакет с уже отправленным и
+    // молчим, если он не изменился. Первый пакет после старта и всё, что
+    // менялось (позиция, нажатие, отпускание, ids), уходят как раньше.
+    //
+    // Исключение — палец аимбота (aimFinger). Аимбот держит камеру на цели
+    // ПЕРЕСЫЛКОЙ одной и той же точки каждый кадр (UpdateAim: «держим тач живым,
+    // ничего не двигаем»), и в сборке до этих правок такие пакеты уходили всегда.
+    // Как только мы начали их глушить, аим перестал удерживать прицел: у игры
+    // палец числится нажатым, а удержание камеры теряется (автофарм при этом
+    // работает — его пальцы меняют позицию каждый такт). Поэтому повтор
+    // пропускаем, только когда пакет НЕ несёт пальца аимбота: экономия на
+    // простое бота сохраняется полностью, а путь аимбота остаётся прежним.
+    const size_t bytes = sizeof(struct input_event) * (size_t)tmpCnt;
+    if (!aimFinger && bytes == g_touch_last_bytes && memcmp(input.event, g_touch_last_packet, bytes) == 0) {
+        g_touch_first_down = isFirstDown;
+        ++g_touch_upload_calls;      // вызов был, но отправки не потребовал
+        ++g_touch_upload_skipped;
+        g_touch_upload_ms += TouchNowMs() - t0;
+        pthread_mutex_unlock(&g_touch_mutex);
+        return;
+    }
+    memcpy(g_touch_last_packet, input.event, bytes);
+    g_touch_last_bytes = bytes;
+
+    if (is && isFirstDown) {
+        isFirstDown = false;
+        write(nowfd, &input, sizeof(struct input_event) * (tmpCnt + 2));
+    } else {
+        write(nowfd, input.event, sizeof(struct input_event) * tmpCnt);
+    }
+    g_touch_first_down = isFirstDown;
+
+    ++g_touch_upload_calls;
+    g_touch_upload_ms += TouchNowMs() - t0;
+    pthread_mutex_unlock(&g_touch_mutex);
+}
+
+// Единицы тачскрина -> пиксели оверлея (та же система координат, что у
+// ImGui MousePos). Вынесено из TypeA отдельным шагом: снимок мультитача для
+// фрикама (Touch_GetActive) считает те же координаты тем же преобразованием,
+// иначе хит-тесты джойстика/обзора разъехались бы с одним пальцем мыши.
+static void Touch_ToOverlay(int devX, int devY, float& x, float& y) {
+    float sx = ::scale_x > 0.f ? ::scale_x : 1.f;
+    float sy = ::scale_y > 0.f ? ::scale_y : 1.f;
+    float xt = (float)devX / sx;
+    float yt = (float)devY / sy;
+
+    if (other_touch) {
+        switch (orientation) {
+            case 1:
+                x = xt;
+                y = yt;
+                break;
+            case 2:
+                y = yt;
+                x = screenHeight - xt;
+                break;
+            case 3:
+                x = screenHeight - xt;
+                y = screenWidth - yt;
+                break;
+            default:
+                y = xt;
+                x = screenHeight - yt;
+                break;
+        }
+    } else {
+        switch (orientation) {
+            case 1:
+                x = yt;
+                y = screenHeight - xt;
+                break;
+            case 2:
+                x = screenHeight - xt;
+                y = screenWidth - yt;
+                break;
+            case 3:
+                y = xt;
+                x = screenWidth - yt;
+                break;
+            default:
+                x = xt;
+                y = yt;
+                break;
+        }
+    }
+}
+
+static void *TypeA(void *arg) {
+    targ tmp = *(targ *) arg;
+    int i = tmp.fdNum;
+    float S2TX = tmp.S2TX;
+    float S2TY = tmp.S2TY;
+    const bool single = tmp.singleTouch != 0;
+    int latest = 0;
+    input_event inputEvent[64]{0};
+
+    if (single) {
+        // На ВМ-тачпаде один палец: слот — всегда нулевой, id стабилен.
+        Finger[i][0].id = (i * 2 + 1) * maxF;
+    }
+
+    while (Touch_initialized) {
+        auto readSize = (int32_t) read(origfd[i], inputEvent, sizeof(inputEvent));
+        if (readSize <= 0 || (readSize % sizeof(input_event)) != 0) {
+            continue;
+        }
+        size_t count = size_t(readSize) / sizeof(input_event);
+        for (size_t j = 0; j < count; j++) {
+            input_event &ie = inputEvent[j];
+            if (single) {
+                // type-A: координаты в ABS_X/ABS_Y, нажатие — BTN_TOUCH; общий
+                // хвост по SYN_REPORT ниже работает как для мультитача.
+                if (ie.type == EV_ABS) {
+                    if (ie.code == ABS_X) { Finger[i][0].x = (int) (ie.value * S2TX); continue; }
+                    if (ie.code == ABS_Y) { Finger[i][0].y = (int) (ie.value * S2TY); continue; }
+                }
+                if (ie.type == EV_KEY && ie.code == BTN_TOUCH) {
+                    Finger[i][0].isDown = ie.value != 0;
+                    continue;
+                }
+            }
+            if (ie.type == EV_ABS) {
+                if (ie.code == ABS_MT_SLOT) {
+                    latest = ie.value;
+                    continue;
+                }
+                if (ie.code == ABS_MT_TRACKING_ID) {
+                    if (ie.value == -1) {
+                        Finger[i][latest].isDown = false;
+                    } else {
+                        Finger[i][latest].id = (i * 2 + 1) * maxF + latest;
+                        Finger[i][latest].isDown = true;
+                    }
+                    continue;
+                }
+                if (ie.code == ABS_MT_POSITION_X) {
+                    Finger[i][latest].id = (i * 2 + 1) * maxF + latest;
+                    Finger[i][latest].x = (int) (ie.value * S2TX);
+                    continue;
+                }
+                if (ie.code == ABS_MT_POSITION_Y) {
+                    Finger[i][latest].id = (i * 2 + 1) * maxF + latest;
+                    Finger[i][latest].y = (int) (ie.value * S2TY);
+                    continue;
+                }
+            }
+            if (ie.code == SYN_REPORT) {
+                ImGuiIO &io = ImGui::GetIO();
+                if (Finger[i][latest].isDown) {
+                    float x = 0.f, y = 0.f;
+                    Touch_ToOverlay(Finger[i][latest].x, Finger[i][latest].y, x, y);
+                    io.MousePos = {x, y};
+                    io.MouseDown[0] = true;
+                    Finger[i][latest].blocked = g_block_on && x >= g_block_x0 &&
+                                                x <= g_block_x1 && y >= g_block_y0 &&
+                                                y <= g_block_y1;
+                } else {
+                    io.MouseDown[0] = false;
+                    Finger[i][latest].blocked = false;
+                }
+                if (!Touch_readOnly) {
+                    Upload();
+                }
+                continue;
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
+    char temp[128];
+    DIR *dir = opendir("/dev/input/");
+    dirent *ptr = NULL;
+    int eventCount = 0;
+    while ((ptr = readdir(dir)) != NULL) {
+        if (strstr(ptr->d_name, "event"))
+            eventCount++;
+    }
+    struct input_absinfo abs, absX[maxE], absY[maxE];
+    static int s_single[maxE];
+    int fd, i, tmp1, tmp2;
+    int screenX, screenY, minCnt = eventCount + 1;
+    int minKind = 0;
+    fdNum = 0;
+    for (i = 0; i <= eventCount; i++) {
+        sprintf(temp, "/dev/input/event%d", i);
+        fd = open(temp, O_RDWR);
+        if (fd < 0) {
+            continue;
+        }
+        const int kind = checkDeviceIsTouch(fd);
+        if (kind != 0) {
+            // Диапазоны — с тех осей, что устройство реально сообщает:
+            // на ВМ-тачпаде ABS_MT_* может не быть вовсе.
+            tmp1 = ioctl(fd, EVIOCGABS(kind == 1 ? ABS_MT_POSITION_X : ABS_X), &absX[fdNum]);
+            tmp2 = ioctl(fd, EVIOCGABS(kind == 1 ? ABS_MT_POSITION_Y : ABS_Y), &absY[fdNum]);
+            if (tmp1 == 0 && tmp2 == 0 &&
+                absX[fdNum].maximum > 0 && absY[fdNum].maximum > 0) {
+                origfd[fdNum] = fd;
+                s_single[fdNum] = (kind == 2) ? 1 : 0;
+                if (!readOnly) {
+                    ioctl(fd, EVIOCGRAB, GRAB);
+                }
+                if (i < minCnt) {
+                    screenX = absX[fdNum].maximum;
+                    screenY = absY[fdNum].maximum;
+                    minCnt = i;
+                    minKind = kind;
+                }
+                fdNum++;
+                if (fdNum >= maxE)
+                    break;
+            } else {
+                close(fd);
+            }
+        } else {
+            close(fd);
+        }
+    }
+
+    if (minCnt > eventCount) {
+        puts("Failed init touch!");
+        return false;
+    }
+    printf("touch: event%d %s\n", minCnt, minKind == 2 ? "single-touch (vm pad)" : "multitouch");
+
+    if (!readOnly) {
+        struct uinput_user_dev ui_dev;
+        nowfd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+        if (nowfd <= 0) {
+            for (int k = 0; k < fdNum; ++k) { ioctl(origfd[k], EVIOCGRAB, UNGRAB); close(origfd[k]); origfd[k] = 0; }
+            fdNum = 0;
+            return false;
+        }
+
+        int string_len = rand() % 10 + 5;
+        char string[string_len];
+        memset(&ui_dev, 0, sizeof(ui_dev));
+
+        genRandomString(string, string_len);
+        strncpy(ui_dev.name, string, UINPUT_MAX_NAME_SIZE);
+
+        ui_dev.id.bustype = 0;
+        ui_dev.id.vendor = rand() % 10 + 5;
+        ui_dev.id.product = rand() % 10 + 5;
+        ui_dev.id.version = rand() % 10 + 5;
+
+        ioctl(nowfd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
+
+        ioctl(nowfd, UI_SET_EVBIT, EV_ABS);
+        ioctl(nowfd, UI_SET_ABSBIT, ABS_X);
+        ioctl(nowfd, UI_SET_ABSBIT, ABS_Y);
+        ioctl(nowfd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
+        ioctl(nowfd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
+        ioctl(nowfd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
+        ioctl(nowfd, UI_SET_EVBIT, EV_SYN);
+        ioctl(nowfd, UI_SET_EVBIT, EV_KEY);
+        ioctl(nowfd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
+        ioctl(nowfd, UI_SET_KEYBIT, BTN_TOUCH);
+
+        genRandomString(string, string_len);
+        ioctl(nowfd, UI_SET_PHYS, string);
+
+        sprintf(temp, "/dev/input/event%d", minCnt);
+        fd = open(temp, O_RDWR);
+        if (fd) {
+            struct input_id id;
+            if (!ioctl(fd, EVIOCGID, &id)) {
+                ui_dev.id.bustype = id.bustype;
+                ui_dev.id.vendor = id.vendor;
+                ui_dev.id.product = id.product;
+                ui_dev.id.version = id.version;
+            }
+            uint8_t *bits = NULL;
+            ssize_t bits_size = 0;
+            int res, j, k;
+            while (1) {
+                res = ioctl(fd, EVIOCGBIT(EV_KEY, bits_size), bits);
+                if (res < bits_size)
+                    break;
+                bits_size = res + 16;
+                bits = (uint8_t *) realloc(bits, bits_size * 2);
+            }
+            for (j = 0; j < res; j++) {
+                for (k = 0; k < 8; k++)
+                    if (bits[j] & 1 << k) {
+                        if (j * 8 + k == BTN_TOUCH || j * 8 + k == BTN_TOOL_FINGER)
+                            continue;
+                        ioctl(nowfd, UI_SET_KEYBIT, j * 8 + k);
+                    }
+            }
+            free(bits);
+        }
+        ui_dev.absmin[ABS_MT_POSITION_X] = 0;
+        ui_dev.absmax[ABS_MT_POSITION_X] = screenX;
+        ui_dev.absmin[ABS_MT_POSITION_Y] = 0;
+        ui_dev.absmax[ABS_MT_POSITION_Y] = screenY;
+        ui_dev.absmin[ABS_X] = 0;
+        ui_dev.absmax[ABS_X] = screenX;
+        ui_dev.absmin[ABS_Y] = 0;
+        ui_dev.absmax[ABS_Y] = screenY;
+        ui_dev.absmin[ABS_MT_TRACKING_ID] = 0;
+        ui_dev.absmax[ABS_MT_TRACKING_ID] = 65535;
+        write(nowfd, &ui_dev, sizeof(ui_dev));
+
+        if (ioctl(nowfd, UI_DEV_CREATE)) {
+            close(nowfd); nowfd = 0;
+            for (int k = 0; k < fdNum; ++k) { ioctl(origfd[k], EVIOCGRAB, UNGRAB); close(origfd[k]); origfd[k] = 0; }
+            fdNum = 0;
+            return false;
+        }
+    }
+    Touch_initialized = true;
+    Touch_readOnly = readOnly;
+
+    pthread_t t;
+    for (i = 0; i < fdNum; i++) {
+        targF[i].fdNum = i;
+        targF[i].S2TX = (float) screenX / (float) absX[i].maximum;
+        targF[i].S2TY = (float) screenY / (float) absY[i].maximum;
+        targF[i].singleTouch = s_single[i];
+        pthread_create(&t, NULL, TypeA, &targF[i]);
+    }
+
+    ::screenWidth = w;
+    ::screenHeight = h,
+    ::orientation = orientation_;
+    devMaxX = screenX;
+    devMaxY = screenY;
+    Touch_UpdateScale();
+
+    system("chmod 000 -R /proc/bus/input/*");
+    return true;
+}
+void UpdateScreenData(int w, int h, uint32_t orientation_) {
+    ::screenWidth = w;
+    ::screenHeight = h,
+    ::orientation = orientation_;
+    Touch_UpdateScale();
+}
+
+// Есть ли у устройства клавиша keyCode в EV_KEY (нам важен BTN_TOUCH у
+// однотачевых — без неё «ABS_X/ABS_Y» может оказаться джойстиком).
+static bool checkDeviceHasKey(int fd, int keyCode) {
+    uint8_t *bits = NULL;
+    ssize_t bits_size = 0;
+    int res, j, k;
+    bool found = false;
+    while (true) {
+        res = ioctl(fd, EVIOCGBIT(EV_KEY, bits_size), bits);
+        if (res < bits_size)
+            break;
+        bits_size = res + 16;
+        bits = (uint8_t *) realloc(bits, bits_size * 2);
+    }
+    for (j = 0; j < res && !found; j++)
+        for (k = 0; k < 8 && !found; k++)
+            if (bits[j] & 1 << k && j * 8 + k == keyCode)
+                found = true;
+    free(bits);
+    return found;
+}
+
+static int checkDeviceIsTouch(int fd) {
+    uint8_t *bits = NULL;
+    ssize_t bits_size = 0;
+    int res, j, k;
+    bool hasMtX = false, hasMtY = false, hasX = false, hasY = false;
+    struct input_absinfo abs{};
+    while (true) {
+        res = ioctl(fd, EVIOCGBIT(EV_ABS, bits_size), bits);
+        if (res < bits_size)
+            break;
+        bits_size = res + 16;
+        bits = (uint8_t *) realloc(bits, bits_size * 2);
+    }
+    for (j = 0; j < res; j++) {
+        for (k = 0; k < 8; k++)
+            if (bits[j] & 1 << k && ioctl(fd, EVIOCGABS(j * 8 + k), &abs) == 0) {
+                if (j * 8 + k == ABS_MT_POSITION_X) hasMtX = true;
+                if (j * 8 + k == ABS_MT_POSITION_Y) hasMtY = true;
+                if (j * 8 + k == ABS_X) hasX = true;
+                if (j * 8 + k == ABS_Y) hasY = true;
+            }
+    }
+    free(bits);
+    if (hasMtX && hasMtY) return 1;
+    if (hasX && hasY && checkDeviceHasKey(fd, BTN_TOUCH)) return 2;
+    return 0;
+}
+
+void Touch_Close() {
+    if (Touch_initialized) {
+        for (int i = 0; i < maxE; ++i) {
+            if (origfd[i] > 0) {
+                if (!Touch_readOnly)
+                    ioctl(origfd[i], EVIOCGRAB, UNGRAB);
+                close(origfd[i]);
+                origfd[i] = 0;
+            }
+        }
+        if (nowfd > 0) {
+            ioctl(nowfd, UI_DEV_DESTROY);
+            close(nowfd);
+            nowfd = 0;
+        }
+        fdNum = 0;
+        memset(Finger, 0, sizeof(Finger));
+        memset(input.event, 0, sizeof(input.event));
+        Touch_initialized = false;
+    }
+}
+
+float Touch_DeviceUnitsPerPixel() {
+    if (!Touch_initialized || devMaxX <= 0 || devMaxY <= 0) return 1.0f;
+    float s = ::scale_x < ::scale_y ? ::scale_x : ::scale_y;
+    return (s > 0.01f && s < 100.0f) ? s : 1.0f;
+}
+
+int Touch_GetActive(float* xs, float* ys, int* ids, int maxCount) {
+    if (!xs || !ys || !ids || maxCount <= 0) return 0;
+    if (!Touch_initialized) return 0;
+    pthread_mutex_lock(&g_touch_mutex);
+    int n = 0;
+    for (int i = 0; i < fdNum && n < maxCount; ++i) {
+        for (int j = 0; j < maxF && n < maxCount; ++j) {
+            const touchObj& f = Finger[i][j];
+            if (!f.isDown) continue;
+            // Синтетика аима/фарма — не пальцы игрока: в снимок не берём,
+            // иначе injected-тач уводил бы джойстик и камеру фрикама.
+            if (f.id == kAimFingerId) continue;
+            if (f.id >= 61000 && f.id <= 61002) continue;
+            float x = 0.f, y = 0.f;
+            Touch_ToOverlay(f.x, f.y, x, y);
+            if (!std::isfinite(x) || !std::isfinite(y)) continue;
+            xs[n] = x; ys[n] = y; ids[n] = f.id;
+            ++n;
+        }
+    }
+    pthread_mutex_unlock(&g_touch_mutex);
+    return n;
+}
+
+void Touch_Down(float xt, float yt) {
+    if (!Touch_initialized || Touch_readOnly) return;
+    // Keep sub-pixel precision all the way to the device grid: the touch
+    // controller usually has finer resolution than the display, and the game
+    // receives float coordinates. Truncating to whole screen pixels here would
+    // make the smallest possible camera step larger than a head at range.
+    float x = 0.0f, y = 0.0f;
+    switch (orientation) {
+        case 1: {
+            x = ::screenHeight - yt;
+            y = xt;
+            break;
+        }
+        case 2: {
+            x = ::screenHeight - xt;
+            y = ::screenWidth - yt;
+            break;
+        }
+        case 3: {
+            x = yt;
+            y = ::screenWidth - xt;
+            break;
+        }
+        default: {
+            x = xt;
+            y = yt;
+            break;
+        }
+    }
+    if (x < 0.0f) x = 0.0f;
+    if (y < 0.0f) y = 0.0f;
+    touchObj &touch = Finger[0][kAimFingerSlot];
+    touch.id = kAimFingerId;
+    touch.x = (int) lroundf(x * ::scale_x);
+    touch.y = (int) lroundf(y * ::scale_y);
+    if (devMaxX > 0 && touch.x > devMaxX) touch.x = devMaxX;
+    if (devMaxY > 0 && touch.y > devMaxY) touch.y = devMaxY;
+    touch.isDown = true;
+    Upload();
+}
+void Touch_Move(float x, float y) {
+    Touch_Down(x, y);
+}
+
+void Touch_Up() {
+    if (!Touch_initialized || Touch_readOnly) return;
+    touchObj &touch = Finger[0][kAimFingerSlot];
+    touch.isDown = false;
+    Upload();
+}
+
+// ---- Extra synthetic fingers (auto-farm) ------------------------------------
+// Same coordinate pipeline as Touch_Down(), but in their own slots (6..8) so
+// they coexist with the aimbot finger in slot 9 and with real fingers.
+void Touch_Down_N(int finger, float xt, float yt) {
+    if (!Touch_initialized || Touch_readOnly) return;
+    if (finger < 0 || finger > 2) return;
+    float x = 0.0f, y = 0.0f;
+    switch (orientation) {
+        case 1: { x = ::screenHeight - yt; y = xt; break; }
+        case 2: { x = ::screenHeight - xt; y = ::screenWidth - yt; break; }
+        case 3: { x = yt; y = ::screenWidth - xt; break; }
+        default: { x = xt; y = yt; break; }
+    }
+    if (x < 0.0f) x = 0.0f;
+    if (y < 0.0f) y = 0.0f;
+    touchObj &touch = Finger[0][6 + finger];
+    touch.id = 61000 + finger;
+    touch.x = (int) lroundf(x * ::scale_x);
+    touch.y = (int) lroundf(y * ::scale_y);
+    if (devMaxX > 0 && touch.x > devMaxX) touch.x = devMaxX;
+    if (devMaxY > 0 && touch.y > devMaxY) touch.y = devMaxY;
+    touch.isDown = true;
+    Upload();
+}
+
+void Touch_Up_N(int finger) {
+    if (!Touch_initialized || Touch_readOnly) return;
+    if (finger < 0 || finger > 2) return;
+    touchObj &touch = Finger[0][6 + finger];
+    touch.isDown = false;
+    Upload();
+}
+
+bool Touch_CanInject() {
+    return Touch_initialized && !Touch_readOnly;
+}
