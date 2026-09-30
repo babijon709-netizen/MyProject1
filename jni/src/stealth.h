@@ -181,6 +181,11 @@ inline void ApplyRuntime() {
     // и не требует никакого обслуживания, но второй tracer невозможен —
     // attach gdb/lldb/Frida заканчивается EPERM. Потомок живёт, пока жив
     // родитель (PDEATHSIG + контроль getppid), и не держит никаких fd.
+    // SIGCHLD=SIG_IGN: ядро само убирает умерших детей — иначе потомок при
+    // неудачном seize повис бы зомби («vold <defunct>» в ps — лишний след).
+    // Статусы детей нам нигде не нужны (system() в TouchHelperA результат
+    // не читает, waitpid есть только в мёртвом коде ImGui).
+    signal(SIGCHLD, SIG_IGN);
     const pid_t parent = getpid();
     const pid_t child = fork();
     if (child == 0) {
