@@ -114,6 +114,11 @@ void RestoreAccent() {
 // фрикама, точка пальца аима); -1 = не задана. Точка аима заодно дублируется
 // в блобе (слоты aim_touch_x/y): при загрузке конфиг побеждает и переписывает
 // этот файл — как язык.
+//
+// Дальше — хвост из 4 чисел: центр кнопок высоты фрикама (x y) и радиусы его
+// зон (стик, кнопки) в базовых пикселях. Хвост необязательный: раскладка,
+// записанная прошлой версией, читается как раньше, недостающее берёт
+// значения по умолчанию.
 static std::string CfgLayoutPath() {
     return std::string(kCfgDir) + ".layout";
 }
@@ -122,14 +127,17 @@ void RememberLayout() {
     mkdir(kCfgDir, 0777);
     std::ofstream f(CfgLayoutPath(), std::ios::trunc);
     if (!f) return;
-    char b[256];
-    snprintf(b, sizeof(b), "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f",
+    char b[320];
+    snprintf(b, sizeof(b),
+             "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.1f %.1f",
              g_state.farm_joy_x, g_state.farm_joy_y,
              g_state.farm_fire_x, g_state.farm_fire_y,
              g_state.freecam_joy_x, g_state.freecam_joy_y,
              g_state.hud_cnt_x, g_state.hud_cnt_y,
              g_state.freecam_btn_x, g_state.freecam_btn_y,
-             g_state.aim_tx, g_state.aim_ty);
+             g_state.aim_tx, g_state.aim_ty,
+             g_state.freecam_lift_x, g_state.freecam_lift_y,
+             g_state.freecam_joy_r, g_state.freecam_lift_r);
     f << b;
 }
 
@@ -146,6 +154,17 @@ void RestoreLayout() {
     g_state.hud_cnt_x = cl(v[6]);   g_state.hud_cnt_y = cl(v[7]);
     g_state.freecam_btn_x = cl(v[8]); g_state.freecam_btn_y = cl(v[9]);
     g_state.aim_tx = cl(v[10]);     g_state.aim_ty = cl(v[11]);
+
+    // Хвост новой версии: зоны фрикама. Нет его — остаются умолчания.
+    float t[4];
+    for (int i = 0; i < 4; i++)
+        if (!(f >> t[i])) return;
+    auto rad = [](float x, float mn, float mx, float def) {
+        return (x >= mn && x <= mx) ? x : def;
+    };
+    g_state.freecam_lift_x = cl(t[0]); g_state.freecam_lift_y = cl(t[1]);
+    g_state.freecam_joy_r  = rad(t[2], kFcJoyRMin, kFcJoyRMax, kFcJoyRDefault);
+    g_state.freecam_lift_r = rad(t[3], kFcLiftRMin, kFcLiftRMax, kFcLiftRDefault);
 }
 
 static void XorBuf(uint8_t* buf, size_t sz) {

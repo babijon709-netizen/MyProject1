@@ -84,6 +84,13 @@ static constexpr int kAccentCount = 9;   // 8 пресетов + свой
 
 
 
+// Ползунок радиуса тач-зоны фрикама тянут прямо сейчас: раскладку на диск
+// пишем один раз, когда палец отпустят (файл — не место для 60 записей в
+// секунду). Радиусы читают и меню, и UpdateFreecam ниже.
+static bool s_fcZonesDirty = false;
+static float FreecamJoyRadius();
+static float FreecamLiftRadius();
+
 float TabContent(int tab, float dt, float cW) {
     float sY = ImGui::GetCursorPosY();
 
@@ -1042,11 +1049,33 @@ float TabContent(int tab, float dt, float cW) {
         // базы перед рейдом. Пока он включён, аим молчит: точка прицела
         // считается от глаза персонажа, а камера улетела от него.
         SHdr(XS("Фрикам"));
-        CardBg(Layout::RowH * 4.f + Layout::SliderH);
+        // Тач-зоны настраиваемые: в полёте оверлей забирает их себе, и под
+        // чужой раскладкой они накрывают хотбар, подбор или кнопку огня.
+        // Поэтому у стика и у кнопок высоты — своё положение и свой радиус.
+        const bool fcZonesSet = (g_state.freecam_joy_x >= 0.f ||
+                                 g_state.freecam_lift_x >= 0.f ||
+                                 FreecamJoyRadius() != kFcJoyRDefault ||
+                                 FreecamLiftRadius() != kFcLiftRDefault);
+        CardBg(Layout::RowH * (fcZonesSet ? 6.f : 5.f) + Layout::SliderH * 3.f);
         ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
         ToggleRow("##fc2", XS("Кнопка на экране"), &g_state.freecam_btn_show, g_state.a_freecam_btn_show);
         SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
                   1.f, 60.f, XS("%.0f м/с"), false, false, g_state.sl_freecam, dt);
+        {
+            // Радиусы зон. Значение пишется сразу (зона на экране меняется
+            // под пальцем), а раскладка на диск — по отпусканию ползунка:
+            // иначе файл переписывался бы каждый кадр протяжки.
+            g_state.freecam_joy_r = FreecamJoyRadius();
+            g_state.freecam_lift_r = FreecamLiftRadius();
+            const bool joyAct = SliderRow("##fc3", XS("Радиус джойстика"),
+                      &g_state.freecam_joy_r, kFcJoyRMin, kFcJoyRMax,
+                      XS("%.0f px"), false, false, g_state.sl_freecam_joy_r, dt);
+            const bool liftAct = SliderRow("##fc4", XS("Радиус кнопок высоты"),
+                      &g_state.freecam_lift_r, kFcLiftRMin, kFcLiftRMax,
+                      XS("%.0f px"), false, false, g_state.sl_freecam_lift_r, dt);
+            if (joyAct || liftAct) s_fcZonesDirty = true;
+            else if (s_fcZonesDirty) { s_fcZonesDirty = false; RememberLayout(); }
+        }
         {
             // Кнопка настройки положения джойстика фрикама
             const float rowH = Layout::RowH, inset = Layout::Inset;
@@ -1056,6 +1085,33 @@ float TabContent(int tab, float dt, float cW) {
             if (ImGui::Button(XS("Настроить джойстик"), {avW - inset*2.f, rowH - 8.f})) {
                 g_calibMode = 4;
                 menu_open = false;
+            }
+        }
+        {
+            // Кнопка настройки положения кнопок высоты (вверх/вниз).
+            const float rowH = Layout::RowH, inset = Layout::Inset;
+            const float avW = ImGui::GetContentRegionAvail().x;
+            auto pos = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
+            if (ImGui::Button(XS("Настроить кнопки высоты"), {avW - inset*2.f, rowH - 8.f})) {
+                g_calibMode = 7;
+                menu_open = false;
+            }
+        }
+        if (fcZonesSet) {
+            // Сброс зон к дефолту — если наставил мимо и стало только хуже.
+            const float rowH = Layout::RowH, inset = Layout::Inset;
+            const float avW = ImGui::GetContentRegionAvail().x;
+            auto pos = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
+            if (ImGui::Button(XS("Сбросить зоны фрикама"), {avW - inset*2.f, rowH - 8.f})) {
+                g_state.freecam_joy_x = g_state.freecam_joy_y = -1.f;
+                g_state.freecam_lift_x = g_state.freecam_lift_y = -1.f;
+                g_state.freecam_joy_r = kFcJoyRDefault;
+                g_state.freecam_lift_r = kFcLiftRDefault;
+                RememberLayout();
+                ShowToast(XS("Зоны сброшены"));
+                PlaySound(SND_CLICK);
             }
         }
         {
@@ -1310,6 +1366,55 @@ static int    s_fc_in_joyfree = 0, s_fc_in_lookfree = 0;
 static int    s_fc_in_grace = 0, s_fc_in_lookdrop = 0;
 static double s_fc_in_last = -1e9;
 
+// Масштаб геометрии фрикама под экран — тот же, что в UpdateFreecam: база
+// короткая сторона 1080 px. Нужен и калибровке, чтобы превью зоны совпадало
+// с тем, что потом появится в полёте.
+static float FcCalibScale(float vw, float vh) {
+    return ImClamp(ImMin(vw, vh) / 1080.f, 0.6f, 2.5f);
+}
+
+// Радиусы тач-зон фрикама из настроек, с зажимом в допустимые пределы:
+// в g_state они могут прийти из старой раскладки или нулевыми.
+static float FreecamJoyRadius() {
+    const float r = g_state.freecam_joy_r;
+    return (r >= kFcJoyRMin && r <= kFcJoyRMax) ? r : kFcJoyRDefault;
+}
+static float FreecamLiftRadius() {
+    const float r = g_state.freecam_lift_r;
+    return (r >= kFcLiftRMin && r <= kFcLiftRMax) ? r : kFcLiftRDefault;
+}
+
+// Превью тач-зоны фрикама в настоящий размер (калибровка): круг стика или
+// пара кругов кнопок высоты ровно там и такие, какими они станут в полёте.
+// Пунктир вокруг — та область, которую оверлей заберёт себе у игры.
+static void FcZonePreview(ImDrawList* fg, float px, float py,
+                          float vw, float vh, bool joystick) {
+    if (!fg) return;
+    const float S = FcCalibScale(vw, vh);
+    const ImU32 fill = C::UA(C::Acc(), 0.20f), line = C::UA(C::Acc(), 0.95f);
+    const ImU32 grab = C::UA(C::Acc(), 0.45f);
+    if (joystick) {
+        const float R = FreecamJoyRadius() * S;
+        fg->AddCircleFilled({px, py}, R, fill, 64);
+        fg->AddCircle({px, py}, R, line, 64, 3.f);
+        fg->AddCircle({px, py}, R + 70.f * S, grab, 64, 2.f);   // радиус захвата
+        fg->AddCircleFilled({px, py}, R * 0.42f, C::UA(C::Acc(), 0.75f), 48);
+    } else {
+        const float R = FreecamLiftRadius() * S, gap = 26.f * S;
+        for (int k = 0; k < 2; ++k) {
+            const float by = py + (k ? (R + gap) : -(R + gap));
+            fg->AddCircleFilled({px, by}, R, fill, 40);
+            fg->AddCircle({px, by}, R, line, 40, 3.f);
+            fg->AddCircle({px, by}, R + 20.f * S, grab, 40, 2.f);
+            const float a = R * 0.36f;
+            if (k) fg->AddTriangleFilled({px, by + a}, {px - a * 0.9f, by - a * 0.6f},
+                                         {px + a * 0.9f, by - a * 0.6f}, line);
+            else   fg->AddTriangleFilled({px, by - a}, {px - a * 0.9f, by + a * 0.6f},
+                                         {px + a * 0.9f, by + a * 0.6f}, line);
+        }
+    }
+}
+
 // Слоты захвата касаний, которыми владеет фрикам (слот 0 — общий, им экран
 // выбора режима забирает весь ввод; трогать его отсюда нельзя).
 static constexpr int kFcTouchSlotJoy = 1;
@@ -1420,8 +1525,10 @@ void UpdateFreecam(float dt) {
     // размеры как были), на остальных экранах — пропорционально. Иначе на
     // планшете стик с кнопками крошечные, а на маленьком экране — полдисплея.
     const float S = ImClamp(ImMin(vw, vh) / 1080.f, 0.6f, 2.5f);
-    const float R = 130.f * S;             // ход стика (= радиус круглого основания)
-    float cx, cy;                          // центр джойстика
+    // Радиусы — из настроек («Разное → Фрикам»), в базовых пикселях экрана
+    // 1080; на экране другой плотности их масштабирует тот же S.
+    const float R = FreecamJoyRadius() * S;   // ход стика (= радиус круглого основания)
+    float cx, cy;                             // центр джойстика
     if (g_state.freecam_joy_x >= 0.f && g_state.freecam_joy_y >= 0.f) {
         cx = g_state.freecam_joy_x * vw;
         cy = g_state.freecam_joy_y * vh;
@@ -1433,10 +1540,20 @@ void UpdateFreecam(float dt) {
     cx = ImClamp(cx, R + 16.f * S, vw - R - 16.f * S);
     cy = ImClamp(cy, R + 100.f * S, vh - R - 16.f * S);
 
-    const float kBtnR  = 62.f * S;          // кнопки высоты у правого края
-    const float kBtnX  = vw - kBtnR - 30.f * S;
-    const float kUpY   = vh * 0.5f - kBtnR - 26.f * S;
-    const float kDownY = vh * 0.5f + kBtnR + 26.f * S;
+    const float kBtnR = FreecamLiftRadius() * S;   // кнопки высоты
+    const float gap   = 26.f * S;                  // просвет между кнопками
+    float kBtnX, liftCy;                           // центр колонки кнопок
+    if (g_state.freecam_lift_x >= 0.f && g_state.freecam_lift_y >= 0.f) {
+        kBtnX  = g_state.freecam_lift_x * vw;
+        liftCy = g_state.freecam_lift_y * vh;
+    } else {
+        kBtnX  = vw - kBtnR - 30.f * S;   // дефолт: у правого края по центру
+        liftCy = vh * 0.5f;
+    }
+    kBtnX  = ImClamp(kBtnX, kBtnR + 16.f * S, vw - kBtnR - 16.f * S);
+    liftCy = ImClamp(liftCy, 2.f * kBtnR + gap + 100.f * S, vh - 2.f * kBtnR - gap - 16.f * S);
+    const float kUpY   = liftCy - kBtnR - gap;
+    const float kDownY = liftCy + kBtnR + gap;
 
     // Забираем себе ТОЛЬКО свои органы управления: круг джойстика и колонку
     // кнопок высоты — ровно те области, где палец перехватывается (радиусы
@@ -1669,7 +1786,7 @@ void UpdateFreecam(float dt) {
         fg->AddCircle({bx, by}, kBtnR,
                       held ? IM_COL32(255,255,255,220) : IM_COL32(255,255,255,80),
                       40, 2.5f);
-        const float s = 22.f * S;
+        const float s = kBtnR * 0.36f;   // стрелка растёт вместе с кнопкой
         ImVec2 p1, p2, p3;
         if (isUp) { p1 = {bx, by - s}; p2 = {bx - s * 0.9f, by + s * 0.6f}; p3 = {bx + s * 0.9f, by + s * 0.6f}; }
         else      { p1 = {bx, by + s}; p2 = {bx - s * 0.9f, by - s * 0.6f}; p3 = {bx + s * 0.9f, by - s * 0.6f}; }
@@ -1835,6 +1952,7 @@ void RenderMenu() {
             : (g_calibMode == 4) ? XS("Тапни куда поставить джойстик фрикама")
             : (g_calibMode == 5) ? XS("Тапни куда поставить счётчик игроков")
             : (g_calibMode == 6) ? XS("Тапни куда поставить кнопку фрикама")
+            : (g_calibMode == 7) ? XS("Тапни куда поставить кнопки высоты")
                                  : XS("Тапни по точке, где аим водит палец");
         const char* sub = XS("Тап записывает зону. Меню откроется само.");
         float tfs = ImGui::GetFontSize() * 1.5f;
@@ -1856,7 +1974,14 @@ void RenderMenu() {
             if (g_calibMode == 2 && g_state.farm_fire_x >= 0.f) { zx = g_state.farm_fire_x * dw; zy = g_state.farm_fire_y * dh; }
             if (g_calibMode == 4) {
                 if (g_state.freecam_joy_x >= 0.f) { zx = g_state.freecam_joy_x * dw; zy = g_state.freecam_joy_y * dh; }
-                else { zx = dw * 0.12f; zy = dh * 0.82f; } // дефолт слева внизу
+                else { const float s0 = FcCalibScale(dw, dh);
+                       zx = 30.f * s0 + FreecamJoyRadius() * s0;
+                       zy = 100.f * s0 + FreecamJoyRadius() * s0; }
+            }
+            if (g_calibMode == 7) {
+                if (g_state.freecam_lift_x >= 0.f) { zx = g_state.freecam_lift_x * dw; zy = g_state.freecam_lift_y * dh; }
+                else { const float s0 = FcCalibScale(dw, dh);
+                       zx = dw - FreecamLiftRadius() * s0 - 30.f * s0; zy = dh * 0.5f; }
             }
             // У точки аима маркер виден всегда: пока она не задана, показываем
             // ту позицию, из которой аим водит палец по умолчанию.
@@ -1875,6 +2000,10 @@ void RenderMenu() {
                 float pr = 34.f + 6.f * sinf((float)ImGui::GetTime() * 4.f);
                 fg->AddCircle({zx, zy}, pr, C::UA(C::Acc(), 0.85f), 40, 3.f);
                 fg->AddCircleFilled({zx, zy}, 7.f, C::U(C::Acc()), 20);
+                // Зоны фрикама показываем в НАСТОЯЩИЙ размер: видно, что
+                // именно отберётся у игры в полёте и на что оно ляжет.
+                if (g_calibMode == 4 || g_calibMode == 7)
+                    FcZonePreview(fg, zx, zy, dw, dh, g_calibMode == 4);
             }
         }
 
@@ -1916,6 +2045,11 @@ void RenderMenu() {
             }
         }
 
+        // Режимы 4 и 7 — живое превью: зона в настоящий размер следует за
+        // пальцем, так сразу видно, накрывает ли она хотбар или кнопку огня.
+        if ((g_calibMode == 4 || g_calibMode == 7) && io.MouseDown[0])
+            FcZonePreview(fg, io.MousePos.x, io.MousePos.y, dw, dh, g_calibMode == 4);
+
         // Тап (отпускание пальца) — записываем зону в долях видимого экрана.
         // Фрикам тоже здесь: его геометрия считается от VisibleScreen, как и
         // всё остальное, поэтому отдельная шкала ему больше не нужна.
@@ -1925,7 +2059,7 @@ void RenderMenu() {
                 const bool farm = (g_calibMode == 1 || g_calibMode == 2);
                 const bool hud  = (g_calibMode == 5);
                 const bool fcb  = (g_calibMode == 6);
-                const bool fcj  = (g_calibMode == 4);
+                const bool fcj  = (g_calibMode == 4 || g_calibMode == 7);
                 if (g_calibMode == 1) {
                     g_state.farm_joy_x = rx; g_state.farm_joy_y = ry;
                     ShowToast(XS("Зона джойстика сохранена"));
@@ -1935,6 +2069,9 @@ void RenderMenu() {
                 } else if (g_calibMode == 4) {
                     g_state.freecam_joy_x = rx; g_state.freecam_joy_y = ry;
                     ShowToast(XS("Джойстик фрикама сохранён"));
+                } else if (g_calibMode == 7) {
+                    g_state.freecam_lift_x = rx; g_state.freecam_lift_y = ry;
+                    ShowToast(XS("Кнопки высоты сохранены"));
                 } else if (hud) {
                     // Та же липкость к центру, что в превью: по каждой оси.
                     if (fabsf(rx - 0.5f) < 0.04f) rx = 0.5f;

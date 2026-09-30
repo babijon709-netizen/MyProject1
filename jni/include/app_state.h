@@ -11,6 +11,12 @@ struct InputState {
 };
 extern InputState g_input;
 
+// Размеры тач-зон фрикама по умолчанию и пределы ползунков, в «базовых»
+// пикселях (экран с короткой стороной 1080). Держим здесь, а не в menu.cpp:
+// на них смотрят и меню, и восстановление раскладки (config.cpp).
+constexpr float kFcJoyRDefault = 130.f, kFcJoyRMin = 70.f,  kFcJoyRMax = 300.f;
+constexpr float kFcLiftRDefault = 62.f, kFcLiftRMin = 32.f, kFcLiftRMax = 150.f;
+
 struct AppState {
     struct SliderAnim { float pos = -1.f; float vel = 0.f; };
     struct RadioAnim  { float scale = 1.f, scaleVel = 0.f, ring = 0.f, ringVel = 0.f; };
@@ -59,7 +65,16 @@ struct AppState {
     // перед рейдом. Скорость в м/с; пока включён, аим молчит (см. AimBegin).
     bool  freecam_on = false;
     float freecam_speed = 12.f;
+    // Тач-зоны фрикама. Центр — доли экрана (-1 = дефолт), радиус — «базовые»
+    // пиксели экрана с короткой стороной 1080: на других экранах он
+    // масштабируется тем же коэффициентом, что и вся геометрия фрикама.
+    // Настраиваются, потому что в полёте оверлей забирает эти круги себе, и
+    // под чужой раскладкой они накрывают хотбар, подбор или кнопку огня.
     float freecam_joy_x = -1.f, freecam_joy_y = -1.f;
+    float freecam_joy_r = kFcJoyRDefault;
+    // Кнопки высоты (вверх/вниз): центр колонки и радиус кнопки.
+    float freecam_lift_x = -1.f, freecam_lift_y = -1.f;
+    float freecam_lift_r = kFcLiftRDefault;
     // Экранная кнопка фрикама (квадрат с глазом): доли экрана = её ЦЕНТР,
     // -1 = не задана (дефолт — справа по центру). Ставится тапом в
     // «Разное → Фрикам → Настроить кнопку», живёт до перезапуска.
@@ -101,6 +116,7 @@ struct AppState {
     float a_fps_90 = 0, a_fps_120 = 0, a_fps_144 = 0, a_fps_rst = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam;
+    SliderAnim sl_freecam_joy_r, sl_freecam_lift_r;
 };
 extern AppState g_state;
 extern std::atomic<bool> main_thread_flag;   // false = выход из main()
