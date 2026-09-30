@@ -28,6 +28,7 @@ LOCAL_SRC_FILES := \
     src/widgets.cpp src/menu.cpp src/config.cpp \
     src/game.cpp src/game_viewmodel.cpp src/game_markers.cpp src/game_farm.cpp src/logfile.cpp \
     src/lang.cpp \
+    src/barbatos_gui/barbatos_gui_reconstructed.cpp src/barbatos_gui_adapter.cpp \
     src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
     src/VidAvatar.cpp \
     src/third_party/tjpgd/tjpgd.c \

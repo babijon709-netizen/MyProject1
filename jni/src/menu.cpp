@@ -1,4 +1,5 @@
 #include "menu.h"
+#include "barbatos_gui/barbatos_gui_reconstructed.hpp"
 #include "main.h"
 #include "Android_touch/TouchHelperA.h"   // Touch_GetActive/BlockRect (фрикам)
 #include "game.h"
@@ -1671,7 +1672,7 @@ struct WinRectAnim {
     ~WinRectAnim() { if (armed && w) { w->pos = p; w->w = sw; w->h = sh; } }
 };
 
-void RenderMenu() {
+static void RenderMenuLegacy() {
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
     if (dt > 0.1f) dt = 0.1f;
