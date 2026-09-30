@@ -15,7 +15,7 @@ struct AppState {
     struct SliderAnim { float pos = -1.f; float vel = 0.f; };
     struct RadioAnim  { float scale = 1.f, scaleVel = 0.f, ring = 0.f, ringVel = 0.f; };
 
-    int   cur_tab = 0;   // при запуске открыта главная страница в стиле Barbatos
+    int   cur_tab = 1;   // при запуске открыта вкладка «Аим»
     bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
     int   aim_bone = 1;   // 0 голова, 1 шея, 2 тело (как слоты аима)
     // Чем именно аим крутит прицел: 0 тач (синтетический палец), 1 память

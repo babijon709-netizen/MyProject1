@@ -9,11 +9,15 @@ bool   g_accentOn = false;
 void ApplyTheme() {
     ImGui::GetIO().ConfigDebugHighlightIdConflicts = false;
     auto& s = ImGui::GetStyle();
-    s.WindowRounding = 24; s.ChildRounding  = 20; s.FrameRounding = 16;
-    s.GrabRounding   = 16; s.PopupRounding  = 16; s.TabRounding   = 16;
+    // Match the compact Dear ImGui proportions of the Barbatos window.
+    s.WindowRounding = 16; s.ChildRounding  = 12; s.FrameRounding = 8;
+    s.GrabRounding   = 6;  s.PopupRounding = 12; s.TabRounding   = 8;
     s.WindowBorderSize = 0; s.FrameBorderSize = 0;
-    s.ItemSpacing  = {10, 0}; s.FramePadding  = {14, 12}; s.WindowPadding = {0, 0};
-    s.ScrollbarSize = 0; s.GrabMinSize = 20;
+    s.ItemSpacing  = {8, 8}; s.FramePadding  = {10, 8};
+    // RenderMenu positions its two columns explicitly; keep the ImGui window
+    // padding neutral so the layout remains pixel-stable on touch devices.
+    s.WindowPadding = {0, 0};
+    s.ScrollbarSize = 0; s.GrabMinSize = 14;
     auto* c = s.Colors;
     c[ImGuiCol_WindowBg]              = C::Bg();
     c[ImGuiCol_ChildBg]               = {0, 0, 0, 0};

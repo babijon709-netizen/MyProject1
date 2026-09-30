@@ -46,18 +46,14 @@ static GLuint LoadTexFromMemory(const unsigned char* data, int len) {
 
 void LoadTabIcons() {
 #ifdef BARBATOS_ASSETS_AVAILABLE
-    // The navigation artwork is the extracted Barbatos set, but the slots are
-    // deliberately mapped to this application's pages.  That keeps the
-    // visual language intact without importing Barbatos' game-specific state.
-    g_tabIcons[0] = LoadTexFromMemory(barbatos_profile_png,  (int)barbatos_profile_png_len);
+    // Same Benzware pages, Barbatos artwork: content and settings stay intact.
+    g_tabIcons[0] = LoadTexFromMemory(barbatos_profile_png,   (int)barbatos_profile_png_len);
     g_tabIcons[1] = LoadTexFromMemory(barbatos_aim_target_png, (int)barbatos_aim_target_png_len);
-    g_tabIcons[2] = LoadTexFromMemory(barbatos_draw_eye_png, (int)barbatos_draw_eye_png_len);
+    g_tabIcons[2] = LoadTexFromMemory(barbatos_draw_eye_png,   (int)barbatos_draw_eye_png_len);
     g_tabIcons[3] = LoadTexFromMemory(barbatos_items_code_png, (int)barbatos_items_code_png_len);
-    g_tabIcons[4] = LoadTexFromMemory(barbatos_folder_png,    (int)barbatos_folder_png_len);
-    g_tabIcons[5] = LoadTexFromMemory(barbatos_settings_png,  (int)barbatos_settings_png_len);
+    g_tabIcons[4] = LoadTexFromMemory(barbatos_folder_png,     (int)barbatos_folder_png_len);
+    g_tabIcons[5] = LoadTexFromMemory(barbatos_settings_png,   (int)barbatos_settings_png_len);
 #else
-    // Keep a source-compatible fallback for reduced builds that omit the
-    // embedded asset header.
     for (auto& icon : g_tabIcons) icon = 0;
 #endif
 }
@@ -87,96 +83,11 @@ static constexpr int kAccentCustom = 8;
 static constexpr int kAccentCount = 9;   // 8 пресетов + свой
 
 
-// Barbatos' Home page is kept as a real page of this application rather than
-// as a detached demo window.  It is intentionally fed by the existing state
-// and attach APIs, so every card reflects the same switches used by ESP, aim,
-// farming and the profile system below.
-static void RenderHomePage(float dt, float cW) {
-    (void)dt;
-    (void)cW;
-    SHdr(XS("Меню"));
-
-    const float avW = ImGui::GetContentRegionAvail().x;
-    const float inset = Layout::Inset;
-    const float heroH = 154.f;
-    const auto heroPos = ImGui::GetCursorScreenPos();
-    auto* dl = ImGui::GetWindowDrawList();
-    auto* fn = ImGui::GetFont();
-
-    CardBg(heroH);
-    ImGui::Dummy({avW, heroH});
-
-    const float heroX = heroPos.x + inset;
-    const float heroY = heroPos.y;
-    const float iconSize = 92.f;
-    const float iconCx = heroX + 24.f + iconSize * 0.5f;
-    const float iconCy = heroY + heroH * 0.5f;
-    dl->AddCircleFilled({iconCx, iconCy}, iconSize * 0.5f + 7.f,
-                        C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), 48);
-    if (g_tabIcons[0]) {
-        dl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[0],
-                            {iconCx - iconSize * 0.5f, iconCy - iconSize * 0.5f},
-                            {iconCx + iconSize * 0.5f, iconCy + iconSize * 0.5f},
-                            {0, 0}, {1, 1}, IM_COL32(255, 255, 255, 255), 18.f);
-    } else {
-        dl->AddCircle({iconCx, iconCy}, iconSize * 0.5f, C::U(C::Acc()), 32, 3.f);
-    }
-
-    const bool attached = esp_attach_state() == ESP_ATTACH_OK;
-    const char* stateText = attached ? XS("Готово") : XS("Ожидание объекта игры");
-    const float titleFs = ImGui::GetFontSize() * 1.55f;
-    const float bodyFs = ImGui::GetFontSize() * 0.92f;
-    const float textX = heroX + iconSize + 54.f;
-    dl->AddText(fn, titleFs, {textX, heroY + 31.f}, C::U(C::Txt()), "BENZWARE");
-    dl->AddText(fn, bodyFs, {textX, heroY + 69.f}, C::U(C::Dim()), XS("Состояние"));
-    const float dotX = textX + fn->CalcTextSizeA(bodyFs, FLT_MAX, 0, XS("Состояние")).x + 18.f;
-    const float dotY = heroY + 69.f + bodyFs * 0.5f;
-    dl->AddCircleFilled({dotX, dotY}, 5.f, attached ? IM_COL32(64, 218, 126, 255)
-                                                    : IM_COL32(238, 174, 70, 255), 20);
-    dl->AddText(fn, bodyFs, {dotX + 13.f, heroY + 69.f},
-                attached ? IM_COL32(104, 230, 148, 255) : C::U(C::Dim()), stateText);
-
-    // Compact diagnostics keep the Home page useful while retaining Barbatos'
-    // card rhythm. The values come from the existing frame cache; no extra
-    // memory scan is started by opening the GUI.
-    SHdr(XS("Состояние"));
-    const float gap = 10.f;
-    const float cardW = (avW - inset * 2.f - gap) * 0.5f;
-    const float statH = 86.f;
-    const auto statPos = ImGui::GetCursorScreenPos();
-    auto statCard = [&](float x, const char* label, const char* value, ImU32 valueCol) {
-        dl->AddRectFilled({statPos.x + x, statPos.y},
-                          {statPos.x + x + cardW, statPos.y + statH}, C::U(C::Card()), R::Card);
-        if (g_state.ui_show_sep)
-            dl->AddRect({statPos.x + x, statPos.y},
-                        {statPos.x + x + cardW, statPos.y + statH}, C::U(C::Sep()), R::Card, 0, 1.2f);
-        dl->AddText(fn, bodyFs, {statPos.x + x + 18.f, statPos.y + 16.f}, C::U(C::Dim()), label);
-        dl->AddText(fn, bodyFs * 1.18f, {statPos.x + x + 18.f, statPos.y + 44.f}, valueCol, value);
-    };
-    char players[32];
-    snprintf(players, sizeof(players), "%d", esp_nearby_player_count());
-    statCard(inset, XS("Игроки"), players, C::U(C::Txt()));
-    statCard(inset + cardW + gap, XS("Аим"),
-             g_state.aim_touch ? XS("Вкл") : XS("Выкл"),
-             g_state.aim_touch ? C::U(C::Acc()) : C::U(C::Dim()));
-    ImGui::Dummy({avW, statH});
-
-    SHdr(XS("Функции"));
-    CardBg(Layout::RowH * 3.f);
-    ToggleRow("##homeaim", XS("Аим"), &g_state.aim_touch, g_state.a_aim_touch, false, true);
-    ToggleRow("##homeesp", XS("Боксы"), &g_state.esp_box, g_state.a_esp_box, false, false);
-    ToggleRow("##homefarm", XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, true, false);
-
-    ImGui::Dummy({1.f, 12.f});
-}
 
 float TabContent(int tab, float dt, float cW) {
     float sY = ImGui::GetCursorPosY();
 
-    if (tab == 0) {
-        RenderHomePage(dt, cW);
-
-    } else if (tab == 1) {
+    if (tab == 1) {
 
         cfg::aim::enabled    = g_state.aim_touch;
         cfg::aim::vis_check  = g_state.aim_pos;
@@ -1210,11 +1121,11 @@ static const char* TabTitle(int k) {
 // (шрифт в сборке один, полужирного нет и подделывать его мы не будем) в два
 // раза крупнее базового кегля панели. Ширина панели считается так, чтобы
 // влезли и крупная иконка, и такая подпись (см. RailTabsW).
-static const float kRailIcon = 60.f;    // сторона иконки вкладки
-static const float kRailFS   = 1.55f;   // кегль подписи от базового (0.88 от кегля меню)
-static const float kRailPadL = 14.f;    // отступ иконки от края панели
-static const float kRailPadR = 10.f;    // отступ текста от края панели
-static const float kRailGap  = 12.f;    // зазор между иконкой и подписью
+static const float kRailIcon = 34.f;    // сторона иконки вкладки
+static const float kRailFS   = 1.00f;   // кегль подписи от базового (0.88 от кегля меню)
+static const float kRailPadL = 8.f;    // отступ иконки от края панели
+static const float kRailPadR = 8.f;    // отступ текста от края панели
+static const float kRailGap  = 6.f;    // зазор между иконкой и подписью
 
 // Сколько места нужно ячейкам левой панели: отступ + иконка + зазор + самая
 // длинная подпись (вкладка 0 «Меню» не показывается, она не в счёт) + отступ.
@@ -1262,10 +1173,11 @@ static void TrafficLightMetrics(float railW, float& d, float& gap) {
 // чем нужно светофору. На узком экране (меню сжимается под ширину дисплея)
 // панель не отдаём больше 45% окна: тогда кружок и светофор уменьшаются.
 static float AvatarRailW(float winW) {
-    const float forAvatar = (kAvatarR + kAvatarPad) * 2.f;   // отступ + диаметр + отступ
-    const float forLights = TrafficLightW(kTLD, kTLGap) + kAvatarPad * 2.f;
-    const float forTabs   = RailTabsW();                     // иконка + крупная подпись
-    return ImMin(ImMax(ImMax(forAvatar, forLights), forTabs), ImMax(120.f, winW * 0.45f));
+    // Barbatos keeps a narrow, predictable rail.  The old animated avatar is
+    // not part of the menu chrome anymore; the existing tab ids and hitboxes
+    // remain unchanged.
+    (void)winW;
+    return Layout::RailW;
 }
 
 // Радиус кружка под фактическую ширину панели.
@@ -2191,11 +2103,10 @@ void RenderMenu() {
     // Подпись вкладки берётся на текущем языке: и в шапке, и в панели, и в
     // расчёте ширины ячейки.
     auto tabNames = [](int k) { return TabTitle(k); };
-    // Home is a first-class page now.  The remaining ids are kept stable so
-    // saved profiles and the existing feature handlers continue to point at
-    // the same content while the complete Barbatos rail is visible.
-    static constexpr int kTabShown = 6;
-    static constexpr int kTabOrder[kTabShown] = {0, 1, 2, 3, 4, 5};
+    // Вкладка «Меню» (id 0) удалена: её функционал переехал в «Опции».
+    // id контента вкладок не меняются — конфиги и логика остаются как были.
+    static constexpr int kTabShown = 5;
+    static constexpr int kTabOrder[kTabShown] = {1, 2, 3, 4, 5};
 
     // Пропорции ячейки левой панели: подпись как можно крупнее (цель — вдвое
     // крупнее базовых 0.88 от кегля меню) и жирная, иконка — слева.
@@ -2274,10 +2185,6 @@ void RenderMenu() {
         }
 
         if (g_tabIcons[i]) {
-            // Every page gets its own extracted Barbatos glyph.  In particular,
-            // the resources/tools page no longer falls back to a hand-drawn
-            // grid, so the whole rail follows one consistent icon family.
-
             ImVec2 iMin = {icoX, icoY};
             ImVec2 iMax = {icoX + icoW, icoY + icoH};
             fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax,
@@ -2323,36 +2230,25 @@ void RenderMenu() {
         ldl->AddLine({lpPos.x + railW, lpPos.y + 12.f}, {lpPos.x + railW, lpPos.y + WH - 12.f},
                      C::UA(C::Sep(), 0.8f), 1.f);
 
-        // Светофор как в macOS — в самом углу окна, кружок с видео под ним.
-        TrafficLight(TrafficLightPos(g_win.pos, true), railW);
-        const float avR = AvatarR(railW);
-        VidAvatar::Draw(ldl, AvatarCx(lpPos.x, avR), AvatarCy(lpPos.y, avR), avR, dt,
-                        C::UA(C::Acc(), 0.9f), C::U(C::LeftBg()));
-        // Barbatos uses a compact product lock-up above its rail. Keep the
-        // branding tied to this software instead of copying the source name.
+        // Compact product lock-up from the Barbatos rail.  It is branding only;
+        // the settings pages below still belong entirely to Benzware.
         {
             const float brandFs = ImGui::GetFontSize() * 0.78f;
             const char* brand = "BENZWARE";
-            const auto brandSize = ImGui::GetFont()->CalcTextSizeA(brandFs, FLT_MAX, 0, brand);
-            const float bx = lpPos.x + (railW - brandSize.x) * 0.5f;
-            const float by = lpPos.y + AvatarBottom(0.f, avR) + 4.f;
-            ldl->AddText(ImGui::GetFont(), brandFs, {bx, by}, C::U(C::Txt()), brand);
+            const auto size = ImGui::GetFont()->CalcTextSizeA(brandFs, FLT_MAX, 0, brand);
+            ldl->AddText(ImGui::GetFont(), brandFs,
+                         {lpPos.x + (railW - size.x) * 0.5f, lpPos.y + 16.f},
+                         C::U(C::Txt()), brand);
             const char* edition = "SDK";
-            const auto editionSize = ImGui::GetFont()->CalcTextSizeA(brandFs * 0.72f, FLT_MAX, 0, edition);
+            const auto sub = ImGui::GetFont()->CalcTextSizeA(brandFs * 0.72f, FLT_MAX, 0, edition);
             ldl->AddText(ImGui::GetFont(), brandFs * 0.72f,
-                         {lpPos.x + (railW - editionSize.x) * 0.5f, by + brandSize.y + 2.f},
+                         {lpPos.x + (railW - sub.x) * 0.5f, lpPos.y + 16.f + size.y + 2.f},
                          C::U(C::Dim()), edition);
         }
 
-        // Размеры подписи и иконки в этой панели — из ширины панели.
-        const RailCell railM = RailMetrics(railW);
-
-        // Столбец вкладок идёт ПОД кружком и не пересекается с ним: сверху
-        // оставляем место под бренд под кружком, снизу 6 px до края окна. Если в минимальном
-        // окне (720 px) шести ячейкам по 108 px места не хватает, высота ячейки
-        // поджимается (кружок 176 px + столбец 514 px = 720) — так столбец
-        // целиком остаётся внутри окна, а последняя вкладка не уезжает за край.
-        const float colTop = AvatarBottom(0.f, avR) + 32.f;
+        // The original page ids and order remain: only the rail geometry is
+        // changed to Barbatos' compact icon-over-label treatment.
+        const float colTop = 58.f;
         const float avail  = ImMax(64.f * kTabShown, WH - colTop - 6.f);
         const float tabH   = ImMin(Layout::TabHV, avail / (float)kTabShown);
         const float colH   = tabH * kTabShown;
@@ -2394,11 +2290,9 @@ void RenderMenu() {
             auto* fdl = ImGui::GetForegroundDrawList();
             for (int s = 0; s < kTabShown; s++) {
                 const int i = kTabOrder[s];
-                // Иконка слева, подпись справа — как в боковых панелях macOS.
-                // Кегль и иконка посчитаны под ширину панели (RailMetrics).
+                // Barbatos nav buttons are vertical: icon first, label below.
                 DrawTabCell(fdl, i, lpPos.x, tab_rects[i].sx, railW, tabH,
-                            railM.icon, railM.fs, true,
-                            railM.padL, railM.padR, railM.gap);
+                            34.f, ImGui::GetFontSize() * 0.82f);
             }
         }
 
@@ -2458,8 +2352,8 @@ void RenderMenu() {
             auto* fdl = ImGui::GetForegroundDrawList();
             for (int s = 0; s < kTabShown; s++) {
                 const int i = kTabOrder[s];
-                DrawTabCell(fdl, i, tab_rects[i].sx, barY, tabW, botH, 62.f,
-                            ImGui::GetFontSize() * 0.95f);
+                DrawTabCell(fdl, i, tab_rects[i].sx, barY, tabW, botH, 32.f,
+                            ImGui::GetFontSize() * 0.82f);
             }
         }
 
@@ -2481,20 +2375,18 @@ void RenderMenu() {
     const float hdrH = MenuHeaderH(panelLeft);
 
     {
-        // Шапка: заголовок вкладки по центру.
+        // Barbatos keeps the page title small and left-aligned above the
+        // content; the existing tab title and page selection are unchanged.
         auto titles = [](int k) { return TabTitle(k); };
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
         const float hH = hdrH;
-        const float titleFS = ImGui::GetFontSize() * 1.45f;
-        auto tsz = ImGui::GetFont()->CalcTextSizeA(titleFS, FLT_MAX, 0, titles(g_state.cur_tab));
+        const float titleFS = ImGui::GetFontSize() * 1.15f;
+        const char* title = titles(g_state.cur_tab);
         cdl->AddText(ImGui::GetFont(), titleFS,
-            {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles(g_state.cur_tab));
-        if (!panelLeft) {
-            // Светофор — в самом левом верхнем углу окна. Кружка аватарки в
-            // этой раскладке нет (просьба игрока: с нижней панелью он мешает).
-            TrafficLight(TrafficLightPos(g_win.pos, false), cW);
-        }
+            {hp.x + 16.f, hp.y + (hH - titleFS) * 0.5f}, C::U(C::Txt()), title);
+        cdl->AddLine({hp.x + 16.f, hp.y + hH - 1.f},
+                     {hp.x + cW - 16.f, hp.y + hH - 1.f}, C::UA(C::Sep(), 0.8f), 1.f);
         ImGui::Dummy({cW, hH});
     }
 

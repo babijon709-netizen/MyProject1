@@ -169,7 +169,7 @@ void PopoverClose() {
 }
 
 void DrawToggle(ImDrawList* dl, float ax, float cy, float t) {
-    const float tW = 72.f, tH = 42.f, tR = tH * 0.5f, kR = tR - 3.5f;
+    const float tW = 42.f, tH = 20.f, tR = tH * 0.5f, kR = tR - 3.0f;
     float tx = ax, ty = cy - tH * 0.5f;
     dl->AddRectFilled({tx, ty}, {tx + tW, ty + tH}, C::Mix(C::TrkOff(), C::Acc(), t), tR);
     float kx = Lerpf(tx + tR + 2.f, tx + tW - tR - 2.f, t);
@@ -185,14 +185,14 @@ static void RenderToggleRowVisuals(ImDrawList* dl, ImFont* fn, float fs,
     float cX = rowX + inset, cW = rowW - inset * 2.f;
     const float rowH = Layout::RowH;
     float textX    = cX + padX;
-    float textMaxX = cX + cW - 72.f - padX - 16.f;
+    float textMaxX = cX + cW - 42.f - padX - 12.f;
     float textY    = rowY + (rowH - fs * 1.15f) * 0.5f;
 
     dl->PushClipRect({textX, rowY}, {textMaxX, rowY + rowH}, true);
     dl->AddText(fn, fs * 1.15f, {textX, textY}, C::UA(C::Txt(), alpha), lbl);
     dl->PopClipRect();
 
-    DrawToggle(dl, cX + cW - 72.f - padX, rowY + rowH * 0.5f, EaseInOut(animT));
+    DrawToggle(dl, cX + cW - 42.f - padX, rowY + rowH * 0.5f, EaseInOut(animT));
 
     if (!last && showSep)
         dl->AddLine({cX + padX, rowY + rowH - 0.5f},
@@ -204,7 +204,7 @@ static void RenderSliderVisuals(ImDrawList* dl, ImFont* fn, float fs,
                                  const char* lbl, const char* fmt, float v, float animPos,
                                  bool active, float alpha, bool showSep, bool last) {
     const float inset = Layout::Inset, padX = Layout::PadX;
-    const float tH = 11.f, kR = 22.f, padH = 38.f;
+    const float tH = 8.f, kR = 10.f, padH = 24.f;
     float cX = rowX + inset, cW = rowW - inset * 2.f;
 
     char valBuf[24]; snprintf(valBuf, 24, fmt, v);
@@ -223,7 +223,7 @@ static void RenderSliderVisuals(ImDrawList* dl, ImFont* fn, float fs,
     dl->AddRectFilled({sX, tY - tH * 0.5f}, {sX + sW, tY + tH * 0.5f}, C::UA(C::TrkOff(), alpha), tH);
     dl->AddRectFilled({sX, tY - tH * 0.5f}, {kx,      tY + tH * 0.5f}, C::UA(C::Acc(),    alpha), tH);
 
-    const float knobR = 16.f;
+    const float knobR = 10.f;
     dl->AddCircleFilled({kx + 0.5f, tY + 1.5f}, knobR + 1.f, IM_COL32(0, 0, 0, int(30 * alpha)));
     dl->AddCircleFilled({kx, tY}, knobR, IM_COL32(255, 255, 255, int(255 * alpha)));
     if (active)
@@ -250,7 +250,7 @@ bool ToggleRow(const char* id, const char* lbl, bool* v, float& anim,
 
     float cy = pos.y + rowH * 0.5f;
     float cX = pos.x + inset;
-    float dotR = 13.f, dotX = 0.f;
+    float dotR = 10.f, dotX = 0.f;
     bool openedColor = false;
     static const char* s_trColorHold = nullptr;
     if (col) {
@@ -300,7 +300,7 @@ void ColorRow(const char* id, const char* lbl, ImVec4* col, bool last) {
     bool popBlocking = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
     float cy = pos.y + rowH * 0.5f;
     float cX = pos.x + inset, cW = avW - inset * 2.f;
-    float dotR = 16.f;
+    float dotR = 12.f;
     float dotX = cX + cW - padX - dotR;
     static const char* s_crHold = nullptr;
     bool opened = false;
@@ -351,7 +351,7 @@ bool SliderRow(const char* id, const char* lbl, float* v, float mn, float mx,
     auto* dl  = ImGui::GetWindowDrawList();
     auto& io  = ImGui::GetIO();
     float avW = ImGui::GetContentRegionAvail().x;
-    const float rowH = Layout::SliderH, kR = 22.f;
+    const float rowH = Layout::SliderH, kR = 10.f;
     const float inset = Layout::Inset, padX = Layout::PadX;
     auto pos = ImGui::GetCursorScreenPos();
 
@@ -394,19 +394,22 @@ void CardBg(float h, ImDrawFlags flags) {
 void SHdr(const char* t, float top) {
     ImGui::Dummy({1.f, top});
     if (t && t[0]) {
-        auto*  dl  = ImGui::GetWindowDrawList();
-        auto*  fn  = ImGui::GetFont();
-        float  fs  = ImGui::GetFontSize() * 1.15f;
-        auto   pos = ImGui::GetCursorScreenPos();
-        auto   tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, t);
-        // Акцентная «капсула» слева от заголовка секции — визуально
-        // связывает секции с индикатором активной вкладки в рейле.
-        dl->AddRectFilled({pos.x + 18.f, pos.y + tsz.y * 0.14f},
-                          {pos.x + 24.f, pos.y + tsz.y * 0.86f}, C::U(C::Acc()), 3.f);
-        dl->AddText(fn, fs, {pos.x + 34.f, pos.y}, C::U(C::Dim()), t);
-        ImGui::Dummy({1.f, tsz.y});
+        auto* dl = ImGui::GetWindowDrawList();
+        auto* fn = ImGui::GetFont();
+        const float fs = ImGui::GetFontSize() * 1.05f;
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        const ImVec2 tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, t);
+
+        // Barbatos section headers are compact purple labels with a clean rule,
+        // not large left-side capsules. Keep the cursor contract unchanged so
+        // every existing settings page keeps its original controls/order.
+        dl->AddText(fn, fs, pos, C::U(C::Acc()), t);
+        const float lineY = pos.y + tsz.y + 7.f;
+        dl->AddLine({pos.x, lineY}, {pos.x + ImGui::GetContentRegionAvail().x, lineY},
+                    C::UA(C::Sep(), 0.85f), 1.f);
+        ImGui::Dummy({1.f, tsz.y + 13.f});
     }
-    ImGui::Dummy({1.f, 8.f});
+    ImGui::Dummy({1.f, 4.f});
 }
 
 
@@ -427,7 +430,7 @@ bool CollapsibleHeader(const char* id, const char* lbl, int secId) {
     float textY = pos.y + (rowH - fs) * 0.5f;
     dl->AddText(ImGui::GetFont(), fs, {pos.x + inset + padX, textY}, C::U(C::Txt()), lbl);
 
-    const float cBtnR = 22.f;
+    const float cBtnR = 10.f;
     float cx2 = pos.x + avW - inset - cBtnR - padX * 0.5f, cy2 = pos.y + rowH * 0.5f;
     dl->AddCircleFilled({cx2 + 0.5f, cy2 + 1.5f}, cBtnR + 1.f, IM_COL32(0, 0, 0, 28), 48);
     dl->AddCircleFilled({cx2, cy2}, cBtnR, C::U(C::Acc()), 48);
@@ -442,7 +445,7 @@ bool CollapsibleHeader(const char* id, const char* lbl, int secId) {
         dl->AddCircle({cx2, cy2}, cBtnR + 2.5f, ringCol, 48, 1.5f);
     }
 
-    float chs = 10.f, thk = 3.f;
+    float chs = 8.f, thk = 2.4f;
     dl->AddLine({cx2 - chs * 0.45f, cy2 - chs * 0.8f}, {cx2 + chs * 0.55f, cy2}, IM_COL32(255, 255, 255, 250), thk);
     dl->AddLine({cx2 + chs * 0.55f, cy2}, {cx2 - chs * 0.45f, cy2 + chs * 0.8f}, IM_COL32(255, 255, 255, 250), thk);
 
@@ -541,14 +544,14 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
         }
     }
 
-    float titleFS = fs * 1.45f;
+    float titleFS = fs * 1.20f;
     {
         auto tsz   = fn->CalcTextSizeA(titleFS, FLT_MAX, 0, g_sheet.title);
-        fg->AddText(fn, titleFS, {sheetX + sheetW * 0.5f - tsz.x * 0.5f, sheetY + 32.f}, C::U(C::Txt()), g_sheet.title);
+        fg->AddText(fn, titleFS, {sheetX + 16.f, sheetY + 20.f}, C::UA(C::Acc(), easeT), g_sheet.title);
     }
 
     if (g_sheet.type != 2) {
-        float cR  = 17.f, cx2 = sheetX + sheetW - cR - 16.f, cy2 = sheetY + 32.f + titleFS * 0.5f;
+        float cR  = 12.f, cx2 = sheetX + sheetW - cR - 16.f, cy2 = sheetY + 20.f + titleFS * 0.5f;
         fg->AddCircleFilled({cx2, cy2}, cR, C::U(C::Sep()), 32);
         float cs = 6.f;
         fg->AddLine({cx2 - cs, cy2 - cs}, {cx2 + cs, cy2 + cs}, C::U(C::Dim()), 2.4f);
@@ -559,18 +562,18 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
     }
 
     {
-        float lineY = sheetY + 32.f + titleFS + 14.f;
+        float lineY = sheetY + 20.f + titleFS + 12.f;
         fg->AddLine({sheetX + 18.f, lineY}, {sheetX + sheetW - 18.f, lineY}, C::U(C::Sep()), 0.8f);
     }
 
-    float cY = sheetY + 32.f + titleFS + 26.f;
-    float padX = 28.f;
+    float cY = sheetY + 20.f + titleFS + 22.f;
+    float padX = 16.f;
 
     if (g_sheet.type == 0 && g_sheet.boolP) {
         bool*  v  = g_sheet.boolP;
         float* a  = g_sheet.animP;
         float  t  = EaseInOut(*a);
-        float  tW = 72.f, tH = 44.f;
+        float  tW = 42.f, tH = 20.f;
         float  tx = sheetX + sheetW * 0.5f - tW * 0.5f, tcy = cY + 20.f + tH * 0.5f;
         DrawToggle(fg, tx, tcy, t);
         if (!g_sheet.closing && io.MouseClicked[0]) {
@@ -585,10 +588,10 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
     } else if (g_sheet.type == 1 && g_sheet.slP) {
         float* v = g_sheet.slP; float mn = g_sheet.slMin, mx = g_sheet.slMax;
         char vb[24]; snprintf(vb, 24, g_sheet.slFmt, *v);
-        auto vSz = fn->CalcTextSizeA(fs * 2.0f, FLT_MAX, 0, vb);
-        fg->AddText(fn, fs * 2.0f, {sheetX + sheetW * 0.5f - vSz.x * 0.5f, cY + 10.f}, C::U(C::Acc()), vb);
-        float trkY = cY + 78.f, trkX = sheetX + padX + 16.f;
-        float trkW = sheetW - padX * 2.f - 32.f, kR2 = 20.f, trkH = 8.f;
+        auto vSz = fn->CalcTextSizeA(fs * 1.5f, FLT_MAX, 0, vb);
+        fg->AddText(fn, fs * 1.5f, {sheetX + sheetW * 0.5f - vSz.x * 0.5f, cY + 10.f}, C::U(C::Acc()), vb);
+        float trkY = cY + 64.f, trkX = sheetX + padX + 10.f;
+        float trkW = sheetW - padX * 2.f - 20.f, kR2 = 10.f, trkH = 8.f;
         float frac = Clamp01((*v - mn) / (mx - mn)), kx = trkX + frac * trkW;
         fg->AddRectFilled({trkX, trkY - trkH * 0.5f}, {trkX + trkW, trkY + trkH * 0.5f}, C::U(C::TrkOff()), trkH);
         fg->AddRectFilled({trkX, trkY - trkH * 0.5f}, {kx,           trkY + trkH * 0.5f}, C::U(C::Acc()), trkH);
@@ -614,7 +617,7 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
     }
 
     {
-        float btnH = 62.f, btnY = sheetY + sheetH - btnH - 24.f;
+        float btnH = 44.f, btnY = sheetY + sheetH - btnH - 16.f;
         if (g_sheet.type == 2) {
             float bW  = (sheetW - padX * 2.f - 12.f) * 0.5f;
             float b1X = sheetX + padX, b2X = b1X + bW + 12.f;
@@ -646,12 +649,15 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
     const float inset = Layout::Inset, padX = Layout::PadX;
     const float rH = Layout::RowH;
 
-    auto FgSHdr = [&](const char* t, float topPad = 18.f) {
+    auto FgSHdr = [&](const char* t, float topPad = 14.f) {
         curY += topPad;
         if (t && t[0]) {
-            auto tsz = fn->CalcTextSizeA(fs * 1.15f, FLT_MAX, 0, t);
-            fg->AddText(fn, fs * 1.15f, {cX + 32.f, curY}, C::UA(C::Dim(), alpha), t);
-            curY += tsz.y + 8.f;
+            auto tsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, t);
+            fg->AddText(fn, fs * 1.05f, {cX + inset, curY}, C::UA(C::Acc(), alpha), t);
+            const float ruleY = curY + tsz.y + 6.f;
+            fg->AddLine({cX + inset, ruleY}, {cX + cW - inset, ruleY},
+                        C::UA(C::Sep(), 0.85f * alpha), 1.f);
+            curY += tsz.y + 12.f;
         } else {
             curY += 8.f;
         }
@@ -700,7 +706,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         ra.scale = ImMax(0.6f, ra.scale);
         SpringTick(ra.ring, ra.ringVel, 3.5f, dt);
 
-        const float rR = 22.f;
+        const float rR = 10.f;
         float textX = cX + inset + padX, textY = curY + (rH - fs * 1.15f) * 0.5f;
         float textMaxX = cX + cW - inset - rR * 2.f - padX - 16.f;
         fg->PushClipRect({textX, curY}, {textMaxX, curY + rH}, true);
@@ -746,7 +752,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             && clickedPos.y >= curY && clickedPos.y <= curY + rowH;
 
         if (act)
-            *v = mn + Clamp01((mousePos.x - (cX2 + padX + 22.f)) / (cW2 - padX * 2.f - 44.f)) * (mx - mn);
+            *v = mn + Clamp01((mousePos.x - (cX2 + padX + 10.f)) / (cW2 - padX * 2.f - 20.f)) * (mx - mn);
 
         float target = Clamp01((*v - mn) / (mx - mn));
         TickSliderAnim(anim, target, act, dt);
@@ -876,7 +882,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             C::UA(C::Dim(), alpha), XS("Приложение будет закрыто."));
         curY += dSz.y + 28.f;
 
-        const float btnH = 62.f, bPad = 28.f;
+        const float btnH = 44.f, bPad = 16.f;
         float bW  = (cW - inset * 2.f - bPad * 2.f - 12.f) * 0.5f;
         float b1X = cX + inset + bPad, b2X = b1X + bW + 12.f;
         DrawExitButtons(fg, fn, fs, alpha,
@@ -911,7 +917,7 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         }
 
         {
-            const float btnH = 58.f, bPad = 28.f, gap = 12.f;
+            const float btnH = 44.f, bPad = 16.f, gap = 8.f;
             float bW  = (cW - inset * 2.f - bPad * 2.f - gap) * 0.5f;
             float b1X = cX + inset + bPad;
             float b2X = b1X + bW + gap;
@@ -979,8 +985,8 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
     auto* fn    = ImGui::GetFont();
     float fs    = ImGui::GetFontSize();
 
-    float titleFS  = fs * 1.45f;
-    float headerH  = 28.f + titleFS + 16.f + 8.f;
+    float titleFS  = fs * 1.20f;
+    float headerH  = 20.f + titleFS + 12.f + 8.f;
 
     float popW = WW * 0.92f, popH = WH * 0.88f;
 
@@ -991,7 +997,7 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
 
     float contentY = sY + headerH;
     float areaH    = sH - headerH;
-    float lineY    = sY + 28.f + titleFS + 16.f;
+    float lineY    = sY + 20.f + titleFS + 12.f;
 
     auto* fg = ImGui::GetForegroundDrawList();
 
@@ -1029,7 +1035,7 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
     if (colorPop && g_colP) {
 
         const float PAD   = 16.f;
-        const float btnH  = 62.f, btnMar = 10.f;
+        const float btnH  = 44.f, btnMar = 8.f;
         float X  = sX + PAD, W = sW - PAD * 2.f;
         float bY = sY + sH - btnH - btnMar;
 
@@ -1150,11 +1156,11 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
     {
         auto tsz = fn->CalcTextSizeA(titleFS, FLT_MAX, 0, g_pop.title);
         fg->AddText(fn, titleFS,
-            {sX + sW * 0.5f - tsz.x * 0.5f, sY + 28.f},
-            C::UA(C::Txt(), easeT), g_pop.title);
+            {sX + 16.f, sY + 20.f},
+            C::UA(C::Acc(), easeT), g_pop.title);
     }
     {
-        float cR = 26.f, bcx = sX + sW - cR - 16.f, bcy = sY + 28.f + titleFS * 0.5f;
+        float cR = 12.f, bcx = sX + sW - cR - 16.f, bcy = sY + 20.f + titleFS * 0.5f;
         fg->AddCircleFilled({bcx, bcy}, cR, C::UA(C::Sep(), easeT), 32);
         float cs = 9.f;
         fg->AddLine({bcx-cs, bcy-cs}, {bcx+cs, bcy+cs}, C::UA(C::Dim(), easeT), 3.2f);

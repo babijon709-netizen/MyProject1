@@ -8,10 +8,12 @@
 // g_darkTheme — целевое состояние (меню/конфиг), g_themeT — сглаженный
 // переход 0..1, g_menuFadeIn — затухание меню при входе.
 namespace R {
-    static constexpr float Card  = 24.f;
-    static constexpr float Pill  = 16.f;
-    static constexpr float Sheet = 26.f;
-    static constexpr float Btn   = 18.f;
+    // Barbatos uses compact, soft cards instead of the oversized Benzware
+    // capsules.  The interaction targets remain large enough for touch.
+    static constexpr float Card  = 16.f;
+    static constexpr float Pill  = 12.f;
+    static constexpr float Sheet = 18.f;
+    static constexpr float Btn   = 10.f;
 }
 
 // Тёмная тема по умолчанию — лучше сочетается с фиолетовым акцентом
@@ -83,19 +85,18 @@ namespace C {
 
 
 namespace Layout {
-    static constexpr float RowH      = 78.f;
-    static constexpr float SliderH   = 108.f;
-    static constexpr float HeaderH   = 66.f;
-    static constexpr float Inset     = 16.f;
-    static constexpr float PadX      = 20.f;
-    static constexpr float BtnH      = 62.f;
-    // Нижняя панель вкладок: строка по центру, иконка + подпись.
-    // Кнопки крупные: панель выше и ячейки шире (~2x от первоначальных).
-    static constexpr float BottomH   = 150.f;
-    static constexpr float TabW      = 136.f;
-    // Левая панель вкладок: вертикальный столбец по центру.
-    static constexpr float RailW     = 128.f;
-    static constexpr float TabHV     = 108.f;
+    // Dear ImGui proportions used by the reconstructed Barbatos window.
+    // Touch hitboxes are still the full row; only the visual density changes.
+    static constexpr float RowH      = 52.f;
+    static constexpr float SliderH   = 78.f;
+    static constexpr float HeaderH   = 54.f;
+    static constexpr float Inset     = 12.f;
+    static constexpr float PadX      = 16.f;
+    static constexpr float BtnH      = 44.f;
+    static constexpr float BottomH   = 96.f;
+    static constexpr float TabW      = 96.f;
+    static constexpr float RailW     = 112.f;
+    static constexpr float TabHV     = 76.f;
 }
 
 void ApplyTheme();

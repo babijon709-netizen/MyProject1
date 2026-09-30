@@ -7,8 +7,9 @@
 #include "app_state.h"
 #include "anim_web.h"
 
-const float WW_MIN = 840.f;
-const float WH_MIN = 720.f;
+// Barbatos' desktop-like canvas; page content and tab ids remain unchanged.
+const float WW_MIN = 1040.f;
+const float WH_MIN = 680.f;
 
 struct ScrollState {
     float off      = 0.f;
