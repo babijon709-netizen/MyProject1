@@ -17,6 +17,15 @@
 //        0x300 / запись 0x303, запрос {pid, pad, addr, buf, size, magic};
 //        ядро само находит mm (find_get_pid -> get_task_mm -> page walk).
 //
+//   1б) bing_rw под 5.10 (payload 5.10.sh, module name=bing_rw, автор
+//      NULL1337/t.me/NULLkawaii, vermagic 5.10.223-android12, Goron):
+//        getsockopt И setsockopt — заглушки, ЛЮБОЙ код -> ENOPROTOOPT/92
+//        (потему у пользователя скан 0..0x7FF был пуст — транспорт другой);
+//        команды идут ЧЕРЕЗ ioctl(fd, код, &req): коды 0x300..0x303,
+//        запрос тот же 0x28 {pid,pad,addr,buf,size,magic=0x1337} —
+//        обработчик копирует его copy_from_user и сверяет magic на +0x20;
+//        маячок 1338 и сокет типа 4 — те же, протокол в create() игнорируется.
+//
 //   2) gongchuang — публичный референс (github:
 //      gongchuang1089/android_kerneldriver_gongchuang, ядра 5.1-6.12):
 //        маячок: socket(fam, 6, 0) -> ENOKEY/126 (чужой тип сокета);
@@ -42,6 +51,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -222,6 +232,8 @@ public:
     }
     int  read_cmd()  const { return read_cmd_; }
     int  write_cmd() const { return write_cmd_; }
+    // Транспорт bing-команд: сборка 6.6 — getsockopt, сборка 5.10 — ioctl.
+    bool cmd_via_ioctl() const { return use_ioctl_; }
     // Подтверждена ли карта живыми пробами. false — коды дефолтные и не
     // подтверждены: транспорт всё равно пробует привязкой к игре, а
     // отказ виден с errno (92/ENOPROTOOPT = код не распознан).
@@ -246,9 +258,17 @@ public:
         req.size     = sizeof(pat);
         req.magic    = kDriverMagic;
         socklen_t optlen = sizeof(req);
-        if (getsockopt(sock_, req.pid, cmd, (char*)&req, &optlen) != 0) {
-            r.err = errno;
-            return r;
+        int rc = getsockopt(sock_, req.pid, cmd, (char*)&req, &optlen);
+        if (rc != 0) {
+            const int gs_err = errno;
+            // Сборка bing_rw под 5.10: getsockopt — заглушка (всегда
+            // ENOPROTOOPT), те же команды идут через ioctl(fd, код, &req).
+            if (gs_err == ENOPROTOOPT || gs_err == EOPNOTSUPP) {
+                errno = 0;
+                rc = ioctl(sock_, (unsigned long)cmd, &req);
+                if (rc == 0) use_ioctl_ = true;
+            }
+            if (rc != 0) { r.err = gs_err; return r; }
         }
         if (mirror[0] == pat0 && mirror[1] == pat1 &&
             pat[0] == pat0 && pat[1] == pat1) { r.kind = CMD_READ; return r; }
@@ -438,6 +458,12 @@ private:
         req.user_buf = (uint64_t)(uintptr_t)buf;
         req.size     = (uint64_t)len;
         req.magic    = kDriverMagic;
+        if (use_ioctl_) {
+            // Сборка 5.10: команды через ioctl(fd, код, &req) — getsockopt
+            // там заглушка, отвечающая ENOPROTOOPT на любой код.
+            if (ioctl(fd, (unsigned long)cmd, &req) != 0) return -1;
+            return (ssize_t)len;
+        }
         // level обязан быть != SOL_SOCKET, иначе getsockopt уйдёт в generic
         // обработчик сокета (он-то и отвечает ENOPROTOOPT на чужой optname).
         socklen_t optlen = sizeof(req);
@@ -516,6 +542,7 @@ private:
     DriverProto proto_ = PROTO_BING;
     int  read_cmd_  = kDriverCmdRead;
     int  write_cmd_ = kDriverCmdWrite;
+    bool use_ioctl_ = false;  // bing-команды через ioctl (сборка 5.10)
     bool map_known_ = false;
     bool scanned_   = false;   // полный скан 0..0x7FF уже делали
     int  attached_pid_ = -1;   // pid, к которому прицеплен gong-сокет (op2)
