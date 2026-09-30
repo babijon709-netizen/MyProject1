@@ -112,12 +112,16 @@ void          esp_reset();
 EspAttachState esp_attach_state();
 // Начало кадра: сброс кэша блоков памяти игры (см. mem_io.h).
 void          esp_mem_frame_begin();
-// Способ доступа к памяти игры: false — экстернал (/proc/<pid>/mem),
-// true — кернел (сокет ядерного драйвера, kernel_io.h). Выбирается один раз
-// на старте, ДО первого bind (экран режима mode_select.h); дальнейший код
-// чтения транспорт-агностичен и про режимы не знает.
-void          esp_set_mem_backend(bool kernel);
-// Какой режим активен (для индикации в HUD: метка KER/EXT на водяном знаке).
+// Способ доступа к памяти игры. Выбирается один раз на старте, ДО первого
+// bind (экран режима mode_select.h); дальнейший код чтения
+// транспорт-агностичен и про режимы не знает.
+enum EspMemBackend {
+    ESP_MEM_EXTERNAL = 0,   // /proc/<pid>/mem — «Прямое чтение»
+    ESP_MEM_FT       = 1,   // сокет драйвера bing-класса — «FT-Драйвер»
+    ESP_MEM_QX       = 2,   // /dev-узел драйвера QX — «QX-Драйвер»
+};
+void          esp_set_mem_backend(int backend);
+// Какой режим активен: true для любого ядерного транспорта (FT/QX).
 bool          esp_mem_backend_kernel();
 // Последняя ошибка транспорта (errno): для тоста «почему привязка не идёт».
 int           esp_mem_last_errno();

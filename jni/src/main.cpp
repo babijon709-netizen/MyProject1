@@ -117,6 +117,25 @@ static int Run(bool full_scan) {
         }
     }
 
+    // 2б) QX-драйвер (класс wanbai): /dev-узел со случайным именем, команды
+    //     ioctl 0x801/0x802. Пробы по собственной памяти, как у bing.
+    {
+        memio::QxTransport& qt = memio::qx_transport();
+        const int qfd = qt.connect();
+        if (qfd < 0) {
+            printf("QX-драйвер     : узел не найден (известные имена + эвристика /dev)\n");
+        } else {
+            printf("QX-драйвер     : узел %s, fd %d\n", qt.device_path(), qfd);
+            const memio::CmdProbe qp = qt.classify();
+            if (qp.kind == memio::CMD_READ)
+                printf("  чтение 0x801 / запись 0x802: OK (своя память)\n");
+            else if (qp.err != 0)
+                printf("  проба: отказ, errno %d (узел открыт, но это не QX или драйвер не отвечает)\n", qp.err);
+            else
+                printf("  проба: данные не двигались\n");
+        }
+    }
+
     // 3) Автоопределение протокола — ровно то, что делает чит при выборе
     //    кернела (короткий список, затем полный скан при неудаче).
     kt.detect_protocol();

@@ -39,18 +39,21 @@
 // которыми пользуется весь остальной код чтения.
 memio::Reader g_mem;
 
-// Способ доступа к памяти: экстернал (/proc/<pid>/mem) или кернел (драйвер).
-// Выбирается один раз на старте (экран режима, mode_select.h) до первого
-// bind; сам g_mem о деталях не знает — разница целиком в memio::Transport.
-static bool g_mem_backend_kernel = false;
+// Способ доступа к памяти: экстернал (/proc/<pid>/mem), кернел FT (сокет
+// bing-класса) или кернел QX (/dev-узел). Выбирается один раз на старте
+// (экран режима, mode_select.h) до первого bind; сам g_mem о деталях не
+// знает — разница целиком в memio::Transport.
+static int g_mem_backend = ESP_MEM_EXTERNAL;
 
-void esp_set_mem_backend(bool kernel) {
-    g_mem_backend_kernel = kernel;
-    g_mem.set_transport(kernel ? static_cast<memio::Transport*>(&memio::kernel_transport())
-                               : static_cast<memio::Transport*>(&memio::procfs_transport()));
+void esp_set_mem_backend(int backend) {
+    g_mem_backend = backend;
+    memio::Transport* t = &memio::procfs_transport();
+    if (backend == ESP_MEM_FT) t = &memio::kernel_transport();
+    else if (backend == ESP_MEM_QX) t = &memio::qx_transport();
+    g_mem.set_transport(t);
 }
 
-bool esp_mem_backend_kernel() { return g_mem_backend_kernel; }
+bool esp_mem_backend_kernel() { return g_mem_backend != ESP_MEM_EXTERNAL; }
 
 // Последняя ошибка транспорта (errno открытия/чтения): для тоста «почему
 // привязка не идёт» — в кернеле это ответ драйвера, в экстернале /proc.

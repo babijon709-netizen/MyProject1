@@ -40,7 +40,8 @@ namespace modesel {
 
 enum Mode {
     MODE_EXTERNAL = 0,   // /proc/<pid>/mem — «Прямое чтение»
-    MODE_KERNEL   = 1,   // сокет драйвера (kernel_io.h) — «FT-Драйвер»
+    MODE_KERNEL   = 1,   // сокет драйвера bing-класса — «FT-Драйвер»
+    MODE_QX       = 2,   // /dev-узел драйвера QX — «QX-Драйвер»
 };
 
 // ---- сохранение выбора (.mode, по образцу .lang/.accent в config.cpp) -----
@@ -52,7 +53,7 @@ static std::string ModePath() {
 static void RememberMode(Mode m) {
     mkdir(CfgDir(), 0777);
     std::ofstream f(ModePath(), std::ios::trunc);
-    if (f) f << (m == MODE_KERNEL ? "kernel" : "external");
+    if (f) f << (m == MODE_KERNEL ? "kernel" : m == MODE_QX ? "qx" : "external");
 }
 
 // ---- кнопка режима (только текст, без подписи) -----------------------------
@@ -102,9 +103,10 @@ static bool RunModeSelect() {
     RestoreAccent();
     ApplyTheme();
 
-    bool drv = false;          // драйвер отвечает на пробу семейства
-    int  fam = -1;             // номер семейства сокета драйвера
+    bool drv = false;          // FT-драйвер отвечает на пробу семейства
+    int  fam = -1;             // номер семейства сокета FT-драйвера
     drv = memio::driver_available(&fam);
+    bool qx = memio::qx_available();   // QX-драйвер найден и отвечает
 
     float fade = 0.f;          // появление 0..1
     int   picked = -1;         // -1 — ещё не выбрали
@@ -147,7 +149,7 @@ static bool RunModeSelect() {
             const ImVec2 ts = fn->CalcTextSizeA(tfs, FLT_MAX, 0.f, title);
             const float gap  = 14.f;
             const float btnH = fs * 3.4f;
-            const float btnW = ImMin((vw - 36.f - gap) * 0.5f, 330.f);
+            const float btnW = ImMin((vw - 36.f - gap * 2.f) / 3.f, 300.f);
             const float tGap = fs * 1.3f;                 // заголовок -> кнопки
             const float blockH = tfs + tGap + btnH;       // высота блока
             const float ty = (vh - blockH) * 0.5f + slide;   // центр по вертикали
@@ -155,8 +157,8 @@ static bool RunModeSelect() {
             dl->AddText(fn, tfs, {tx + 2.f, ty + 2.f}, IM_COL32(0, 0, 0, 110), title);
             dl->AddText(fn, tfs, {tx, ty}, C::U(C::Txt()), title);
 
-            // Две кнопки рядом под заголовком.
-            const float rowW = btnW * 2.f + gap;
+            // Три кнопки рядом под заголовком.
+            const float rowW = btnW * 3.f + gap * 2.f;
             const float by   = ty + tfs + tGap;
             const float bx   = (vw - rowW) * 0.5f;
 
@@ -199,6 +201,34 @@ static bool RunModeSelect() {
                     PlaySound(SND_SUCCESS);
                 }
             }
+
+            ImGui::SetCursorScreenPos({bx + (btnW + gap) * 2.f, by});
+            if (ModeButton("##mode_qx", btnW, btnH,
+                           XS("QX-Драйвер"), qx, true, fs)) {
+                // Тап по QX-Драйверу. Порядок тот же, что у FT:
+                //   1) не root — узел драйвера открывается только привилегированным;
+                //   2) не найден — рескан с чистого листа (прошить .sh можно и
+                //      после запуска чита, имя узла при этом новое);
+                //   3) отвечает — режим принят, настоящий экзамен — привязка
+                //      к игре (bind читает ELF-заголовок libil2cpp через QX).
+                if (geteuid() != 0) {
+                    PlaySound(SND_CLICK);
+                    ShowToast(XS("QX: нет root — запусти чит от su"));
+                } else if (!qx) {
+                    memio::qx_transport().invalidate();
+                    qx = memio::qx_available();
+                    if (qx) {
+                        picked = MODE_QX;
+                        PlaySound(SND_SUCCESS);
+                    } else {
+                        PlaySound(SND_CLICK);
+                        ShowToast(XS("QX не найден — прошей .sh своей версии ядра"));
+                    }
+                } else {
+                    picked = MODE_QX;
+                    PlaySound(SND_SUCCESS);
+                }
+            }
         }
         ImGui::End();
 
@@ -210,9 +240,13 @@ static bool RunModeSelect() {
     // Применяем выбранный (или дефолтный при выходе через сигнал) транспорт.
     // Достаточно одного вызова до первого bind — весь код чтения выше по
     // стеку работает через memio::Transport и про режимы не знает (mem_io.h).
-    const Mode mode = (picked == MODE_KERNEL) ? MODE_KERNEL : MODE_EXTERNAL;
+    const Mode mode = (picked == MODE_KERNEL) ? MODE_KERNEL
+                     : (picked == MODE_QX)     ? MODE_QX
+                                               : MODE_EXTERNAL;
     if (picked >= 0) RememberMode(mode);
-    esp_set_mem_backend(mode == MODE_KERNEL);
+    esp_set_mem_backend(mode == MODE_KERNEL ? ESP_MEM_FT
+                        : mode == MODE_QX   ? ESP_MEM_QX
+                                            : ESP_MEM_EXTERNAL);
     return picked >= 0;
 }
 

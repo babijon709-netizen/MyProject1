@@ -61,8 +61,12 @@
 
 #pragma once
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <string>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -594,6 +598,216 @@ private:
     bool scanned_   = false;   // полный скан 0..0x7FF уже делали
     int  attached_pid_ = -1;   // pid, к которому прицеплен gong-сокет (op2)
 };
+
+// ---- класс 3: QX (wanbai) — /dev/<имя>, ioctl 0x801/0x802/0x803 ------------
+//
+// Драйверы «QX Perfect core» (пакет QX Perfect core v5): char-устройство в
+// /dev с СЛУЧАЙНЫМ именем (5-6 строчных букв — init_module сам генерирует
+// get_random_u32, скрывается list_del+kobject_del), протокол по эталонному
+// читу (wanbai.hpp) и дизассемблу dispatch_ioctl:
+//   0x801 чтение  {u32 pid; u32 pad; u64 addr; u64 buffer; u64 size} — 0x20;
+//   0x802 запись  — та же структура;
+//   0x803 база модуля {pid; char* name; u64 base} (нами не используется:
+//   базы берём из /proc/<pid>/maps, как раньше);
+//   0x800/0x804 — пустышки (возврат 0), ключа НЕТ: эталонный чит работает
+//   без него, диспетчер проверяет только 0x801..0x805.
+// ВАЖНО: read/write_process_memory транслируют ОДНУ страницу и копируют size
+// байт без проверки границы — запросы режем по границам 4К сами.
+// Ошибка команды — возврат -1 (errno 1/EPERM), как у bing-класса.
+
+constexpr int kQxCmdRead        = 0x801;
+constexpr int kQxCmdWrite       = 0x802;
+constexpr int kQxCmdModuleBase  = 0x803;
+
+#pragma pack(push, 1)
+struct QxCopyMem {
+    uint32_t pid;      // +0x00: целевой процесс
+    uint32_t pad;      // +0x04
+    uint64_t addr;     // +0x08: адрес в памяти игры
+    uint64_t buffer;   // +0x10: наш буфер
+    uint64_t size;     // +0x18: сколько байт (не через границу 4К!)
+};
+#pragma pack(pop)
+static_assert(sizeof(QxCopyMem) == 0x20, "размер запроса QX изменился");
+
+class QxTransport : public Transport {
+public:
+    const char* name() const override { return "qx (драйвер)"; }
+
+    // Устройство открывается один раз и живёт, пока живёт процесс чита:
+    // драйвер переживает переподключения к игре.
+    bool open(pid_t pid) override {
+        if (pid <= 0) return false;
+        if (!ensure_device()) return false;
+        pid_ = (int)pid;
+        return true;
+    }
+    void close() override { pid_ = -1; }
+
+    // Драйвер перезашит (имя устройства новое) — сбросить всё.
+    void invalidate() {
+        if (dev_fd_ >= 0) { ::close(dev_fd_); dev_fd_ = -1; }
+        dev_path_.clear();
+        pid_ = -1;
+        verified_ = false;
+    }
+
+    ssize_t read_once(uint64_t addr, void* out, size_t len) override {
+        return rw(true, addr, out, len);
+    }
+    ssize_t write_once(uint64_t addr, const void* in, size_t len) override {
+        return rw(false, addr, const_cast<void*>(in), len);
+    }
+
+    int  device_fd() const { return dev_fd_; }
+    bool connected() const { return dev_fd_ >= 0; }
+    const char* device_path() const { return dev_path_.c_str(); }
+
+    // Поднять устройство (найти + открыть + проверить пробой по своей
+    // памяти). Возвращает fd или -1.
+    int connect() {
+        if (!ensure_device()) return -1;
+        return dev_fd_;
+    }
+    // Устройство найдено и подтверждено пробой чтения.
+    bool verified() const { return verified_; }
+
+    // Живая проба по СОБСТВЕННОЙ памяти (как classify_cmd у bing): читаем
+    // паттерн и пишем в scratch. Подтверждает, что найденное устройство —
+    // действительно QX-драйвер, а не чужой char-dev с похожим именем.
+    CmdProbe classify() {
+        CmdProbe r;
+        if (!ensure_device()) { r.err = errno ? errno : EIO; return r; }
+        uint64_t pat[2]    = {0x1234567890ABCDEFULL, 0x0F1E2D3C4B5A6978ULL};
+        uint64_t mirror[2] = {0xAABBCCDD11223344ULL, 0x5566778899AABBCCULL};
+        const uint64_t pat0 = pat[0], pat1 = pat[1];
+        const int save_pid = pid_;
+        pid_ = (int)getpid();
+        if (rw(true, (uint64_t)(uintptr_t)pat, mirror, sizeof(pat)) == sizeof(pat) &&
+            mirror[0] == pat0 && mirror[1] == pat1) {
+            uint64_t scratch[2] = {1, 1};
+            uint64_t wsrc[2]    = {0xA5A55A5ADEADBEEFULL, 0x0BADC0DE0DDC0FFEULL};
+            if (rw(false, (uint64_t)(uintptr_t)scratch, wsrc, sizeof(scratch)) == sizeof(scratch) &&
+                scratch[0] == wsrc[0] && scratch[1] == wsrc[1]) {
+                r.kind = CMD_READ;   // читает и пишет — транспорт полный
+                verified_ = true;
+                pid_ = save_pid;
+                return r;
+            }
+        }
+        pid_ = save_pid;
+        r.err = errno ? errno : EPERM;
+        // Нашли устройство, но это не QX: больше не считаем его найденным.
+        invalidate();
+        return r;
+    }
+
+private:
+    // Найти /dev-узел QX. Известные имена + эвристика эталонного чита:
+    // char-устройство, имя только из строчных букв, без '_','-',';', не
+    // gpiochip/std*, uid=gid=0, size 0, atime==ctime, год создания не 1970,
+    // длина имени <= 7. Драйвер сам генерит себе такое имя при загрузке.
+    static bool qx_candidate(const char* name, const struct stat& st) {
+        static const char* kKnown[] = {"wanbai", "CheckMe", "Ckanri", "lanran", "video188"};
+        for (const char* k : kKnown)
+            if (strcmp(name, k) == 0) return true;
+        const size_t len = strlen(name);
+        if (len == 0 || len > 7) return false;
+        bool has_lower = false;
+        for (size_t i = 0; i < len; ++i) {
+            const char c = name[i];
+            if (c >= 'a' && c <= 'z') { has_lower = true; continue; }
+            return false;   // только строчные буквы
+        }
+        if (!has_lower) return false;
+        if (strstr(name, "gpiochip")) return false;
+        if (S_ISCHR(st.st_mode) == false && S_ISBLK(st.st_mode) == false) return false;
+        if (strchr(name, '_') || strchr(name, '-') || strchr(name, ':')) return false;
+        if (st.st_uid != 0 || st.st_gid != 0 || st.st_size != 0) return false;
+        if (st.st_atime != st.st_ctime) return false;
+        struct tm tmv;
+        localtime_r(&st.st_ctime, &tmv);
+        if (tmv.tm_year + 1900 == 1970) return false;
+        return true;
+    }
+
+    bool ensure_device() {
+        if (dev_fd_ >= 0) return true;
+        const char* kDevs[] = {"/dev/wanbai", "/dev/CheckMe", "/dev/Ckanri",
+                               "/dev/lanran", "/dev/video188"};
+        for (const char* path : kDevs) {
+            const int fd = ::open(path, O_RDWR | O_CLOEXEC);
+            if (fd >= 0) { dev_fd_ = fd; dev_path_ = path; return true; }
+        }
+        DIR* dir = opendir("/dev");
+        if (!dir) { errno = ENOENT; return false; }
+        struct dirent* e;
+        bool opened = false;
+        while (!opened && (e = readdir(dir)) != nullptr) {
+            if (e->d_name[0] == '.') continue;
+            char path[96];
+            snprintf(path, sizeof(path), "/dev/%s", e->d_name);
+            struct stat st;
+            if (stat(path, &st) != 0) continue;
+            if (!qx_candidate(e->d_name, st)) continue;
+            const int fd = ::open(path, O_RDWR | O_CLOEXEC);
+            if (fd < 0) continue;
+            dev_fd_ = fd;
+            dev_path_ = path;
+            opened = true;
+        }
+        closedir(dir);
+        if (!opened) { errno = ENOENT; return false; }
+        return true;
+    }
+
+    // Запрос с разбиением по границам страниц (драйвер копирует size байт
+    // с ОДНОЙ физической страницы — за границей читать нельзя).
+    ssize_t rw(bool is_read, uint64_t addr, void* buf, size_t len) {
+        if (dev_fd_ < 0 || pid_ <= 0 || !buf || !len) { errno = EBADF; return -1; }
+        uint8_t* p = (uint8_t*)buf;
+        uint64_t a = addr & kAddressTagMask;   // снять TBI/MTE-метку
+        size_t done = 0;
+        while (done < len) {
+            const uint64_t pageLeft = 0x1000 - (a & 0xfff);
+            const size_t chunk = (uint64_t)(len - done) < pageLeft
+                                       ? (len - done) : (size_t)pageLeft;
+            QxCopyMem q;
+            memset(&q, 0, sizeof(q));
+            q.pid    = (uint32_t)pid_;
+            q.addr   = a;
+            q.buffer = (uint64_t)(uintptr_t)p;
+            q.size   = (uint64_t)chunk;
+            const int cmd = is_read ? kQxCmdRead : kQxCmdWrite;
+            if (ioctl(dev_fd_, (unsigned long)cmd, &q) != 0)
+                return done ? (ssize_t)done : -1;
+            a += chunk;
+            p += chunk;
+            done += chunk;
+        }
+        return (ssize_t)done;
+    }
+
+    int dev_fd_ = -1;
+    std::string dev_path_;
+    int pid_ = -1;
+    bool verified_ = false;
+};
+
+// Единый экземпляр QX-транспорта (по образцу kernel_transport).
+inline QxTransport& qx_transport() {
+    static QxTransport t;
+    return t;
+}
+
+// Драйвер QX доступен? (устройство находится и отвечает пробой по своей
+// памяти — для меню выбора и --check-driver).
+inline bool qx_available() {
+    QxTransport& t = qx_transport();
+    if (t.connected()) return t.verified() ? true : t.classify().kind == CMD_READ;
+    if (t.connect() < 0) return false;
+    return t.classify().kind == CMD_READ;
+}
 
 // Единый экземпляр транспорта: читает поток отрисовки, дёргают поток
 // привязки (open) и фоновые писатели. Запрос живёт на стеке вызывающего.
