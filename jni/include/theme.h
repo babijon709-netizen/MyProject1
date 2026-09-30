@@ -8,10 +8,12 @@
 // g_darkTheme — целевое состояние (меню/конфиг), g_themeT — сглаженный
 // переход 0..1, g_menuFadeIn — затухание меню при входе.
 namespace R {
-    static constexpr float Card  = 24.f;
-    static constexpr float Pill  = 16.f;
-    static constexpr float Sheet = 26.f;
-    static constexpr float Btn   = 18.f;
+    // Barbatos uses compact, softly rounded panels rather than the former
+    // oversized mobile cards.
+    static constexpr float Card  = 14.f;
+    static constexpr float Pill  = 14.f;
+    static constexpr float Sheet = 14.f;
+    static constexpr float Btn   = 9.f;
 }
 
 // Тёмная тема по умолчанию — лучше сочетается с фиолетовым акцентом
@@ -41,16 +43,17 @@ namespace C {
         static constexpr ImVec4 Sep    = {0.851f, 0.859f, 0.898f, 1};
     }
     namespace Dark {
-        static constexpr ImVec4 Bg     = {0.063f, 0.071f, 0.094f, 1};
-        static constexpr ImVec4 LeftBg = {0.047f, 0.055f, 0.075f, 1};
-        static constexpr ImVec4 Card   = {0.106f, 0.118f, 0.153f, 1};
-        static constexpr ImVec4 Acc    = {0.545f, 0.486f, 1.000f, 1};
-        static constexpr ImVec4 AccDk  = {0.424f, 0.361f, 0.906f, 1};
-        static constexpr ImVec4 Red    = {1.000f, 0.361f, 0.322f, 1};
-        static constexpr ImVec4 Txt    = {0.949f, 0.953f, 0.969f, 1};
-        static constexpr ImVec4 Dim    = {0.604f, 0.616f, 0.663f, 1};
-        static constexpr ImVec4 TrkOff = {0.180f, 0.196f, 0.251f, 1};
-        static constexpr ImVec4 Sep    = {0.196f, 0.212f, 0.271f, 1};
+        // Values recovered from Barbatos' ApplyStyle().
+        static constexpr ImVec4 Bg     = {0.075f, 0.085f, 0.110f, 1};
+        static constexpr ImVec4 LeftBg = {0.105f, 0.115f, 0.150f, 1};
+        static constexpr ImVec4 Card   = {0.122f, 0.133f, 0.169f, 1};
+        static constexpr ImVec4 Acc    = {0.380f, 0.240f, 0.960f, 1};
+        static constexpr ImVec4 AccDk  = {0.300f, 0.180f, 0.780f, 1};
+        static constexpr ImVec4 Red    = {0.950f, 0.250f, 0.300f, 1};
+        static constexpr ImVec4 Txt    = {0.882f, 0.894f, 0.933f, 1};
+        static constexpr ImVec4 Dim    = {0.580f, 0.620f, 0.700f, 1};
+        static constexpr ImVec4 TrkOff = {0.290f, 0.306f, 0.357f, 1};
+        static constexpr ImVec4 Sep    = {0.250f, 0.260f, 0.340f, 1};
     }
 
     static inline ImVec4 Lerp4(ImVec4 a, ImVec4 b) {
@@ -83,19 +86,17 @@ namespace C {
 
 
 namespace Layout {
-    static constexpr float RowH      = 78.f;
-    static constexpr float SliderH   = 108.f;
-    static constexpr float HeaderH   = 66.f;
-    static constexpr float Inset     = 16.f;
-    static constexpr float PadX      = 20.f;
-    static constexpr float BtnH      = 62.f;
-    // Нижняя панель вкладок: строка по центру, иконка + подпись.
-    // Кнопки крупные: панель выше и ячейки шире (~2x от первоначальных).
-    static constexpr float BottomH   = 150.f;
-    static constexpr float TabW      = 136.f;
-    // Левая панель вкладок: вертикальный столбец по центру.
-    static constexpr float RailW     = 128.f;
-    static constexpr float TabHV     = 108.f;
+    static constexpr float RowH      = 58.f;
+    static constexpr float SliderH   = 82.f;
+    static constexpr float HeaderH   = 72.f;
+    static constexpr float Inset     = 10.f;
+    static constexpr float PadX      = 12.f;
+    static constexpr float BtnH      = 48.f;
+    static constexpr float BottomH   = 104.f;
+    static constexpr float TabW      = 104.f;
+    // Recovered Barbatos shell: fixed 104 px icon rail.
+    static constexpr float RailW     = 104.f;
+    static constexpr float TabHV     = 88.f;
 }
 
 void ApplyTheme();

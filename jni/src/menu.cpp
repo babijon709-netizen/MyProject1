@@ -16,6 +16,7 @@
 #include "aim.h"
 #include "logfile.h"                 // AimTouchFracX/Y (строки калибровки)
 #include "VidAvatar.h"
+#include "media/barbatos_icons.h"
 #if __has_include("media/icons.h")
 #  include "media/icons.h"
 #  define ICONS_AVAILABLE
@@ -45,17 +46,14 @@ static GLuint LoadTexFromMemory(const unsigned char* data, int len) {
 }
 
 void LoadTabIcons() {
-#ifdef ICONS_AVAILABLE
-    g_tabIcons[0] = LoadTexFromMemory(main_tab_png, (int)main_tab_png_len);
-    g_tabIcons[1] = LoadTexFromMemory(aimbot_png,   (int)aimbot_png_len);
-    g_tabIcons[2] = LoadTexFromMemory(visuals_png,  (int)visuals_png_len);
-    // Tab order: 3=Разное, 4=Конфиги, 5=Опции. У «Разное» своя векторная
-    // иконка (рисуется кодом), поэтому текстура ему не нужна — иначе она
-    // дублировала бы иконку «Конфиги» (misc_png).
-    g_tabIcons[3] = 0;
-    g_tabIcons[4] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
-    g_tabIcons[5] = LoadTexFromMemory(settings_png, (int)settings_png_len);
-#endif
+    // Barbatos' original navigation artwork, embedded so the standalone
+    // Android executable does not depend on files next to it at runtime.
+    g_tabIcons[0] = 0;
+    g_tabIcons[1] = LoadTexFromMemory(barbatos_aim_png,     (int)barbatos_aim_png_len);
+    g_tabIcons[2] = LoadTexFromMemory(barbatos_draw_png,    (int)barbatos_draw_png_len);
+    g_tabIcons[3] = LoadTexFromMemory(barbatos_misc_png,    (int)barbatos_misc_png_len);
+    g_tabIcons[4] = LoadTexFromMemory(barbatos_configs_png, (int)barbatos_configs_png_len);
+    g_tabIcons[5] = LoadTexFromMemory(barbatos_settings_png,(int)barbatos_settings_png_len);
 }
 
 static float pill_y   = -1.f;
@@ -335,7 +333,7 @@ float TabContent(int tab, float dt, float cW) {
             }
             float textY = cy - fs * 1.15f * 0.5f;
             dl->AddText(fn, fs * 1.15f, {cX + padX, textY}, C::U(C::Txt()), lbl);
-            DrawToggle(dl, cX + cW2 - 72.f - padX, cy, EaseInOut(*a));
+            DrawToggle(dl, cX + cW2 - 42.f - padX, cy, EaseInOut(*a));
             if (!last && g_state.ui_show_sep)
                 dl->AddLine({cX+padX, pos.y+rowH-0.5f},{cX+cW2-padX, pos.y+rowH-0.5f}, C::UA(C::Sep(),0.35f), 0.8f);
         };
@@ -788,72 +786,7 @@ float TabContent(int tab, float dt, float cW) {
             }
         }
 
-        // ---- Положение панели вкладок: слева или снизу ------------------
-        // Перенесено сюда из удалённой вкладки «Меню».
-        SHdr(XS("Панель вкладок"));
-        {
-            auto* dl  = ImGui::GetWindowDrawList();
-            auto* fn  = ImGui::GetFont();
-            float avW = ImGui::GetContentRegionAvail().x;
-            const float inset = Layout::Inset;
-            const float fs = ImGui::GetFontSize();
-
-            const float cardH = 120.f;
-            const float gap   = 10.f;
-            auto  pos   = ImGui::GetCursorScreenPos();
-            float x0    = pos.x + inset;
-            float cardW = (avW - inset * 2.f - gap) * 0.5f;
-            bool  popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
-
-            struct POpt { const char* lbl; bool left; };
-            const POpt opts[2] = { { XS("Слева"), true }, { XS("Снизу"), false } };
-
-            for (int oi = 0; oi < 2; oi++) {
-                float ox0 = x0 + oi * (cardW + gap);
-                float ox1 = ox0 + cardW;
-                bool  sel = (g_state.ui_panel_left == opts[oi].left);
-
-                dl->AddRectFilled({ox0, pos.y}, {ox1, pos.y + cardH}, C::U(C::Card()), R::Card);
-                if (sel) {
-                    dl->AddRectFilled({ox0, pos.y}, {ox1, pos.y + cardH},
-                        C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), R::Card);
-                    dl->AddRect({ox0, pos.y}, {ox1, pos.y + cardH}, C::UA(C::Acc(), 0.8f), R::Card, 0, 2.f);
-                } else if (g_state.ui_show_sep) {
-                    dl->AddRect({ox0, pos.y}, {ox1, pos.y + cardH}, C::U(C::Sep()), R::Card, 0, 1.2f);
-                }
-
-                // Мини-схема окна: прямоугольник с панелью слева или снизу.
-                float mw = 74.f, mh = 52.f;
-                float mx = ox0 + (cardW - mw) * 0.5f;
-                float my = pos.y + 14.f;
-                ImU32 frameCol = C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.95f : 0.6f);
-                dl->AddRect({mx, my}, {mx + mw, my + mh}, frameCol, 6.f, 0, 2.f);
-                if (opts[oi].left)
-                    dl->AddRectFilled({mx + 3.f, my + 3.f}, {mx + 3.f + 16.f, my + mh - 3.f},
-                                      C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.85f : 0.4f), 4.f);
-                else
-                    dl->AddRectFilled({mx + 3.f, my + mh - 3.f - 12.f}, {mx + mw - 3.f, my + mh - 3.f},
-                                      C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.85f : 0.4f), 4.f);
-
-                auto lsz = fn->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0, opts[oi].lbl);
-                dl->AddText(fn, fs * 1.0f,
-                    {ox0 + (cardW - lsz.x) * 0.5f, pos.y + cardH - 16.f - lsz.y},
-                    C::U(sel ? C::Acc() : C::Txt()), opts[oi].lbl);
-
-                char oid[16]; snprintf(oid, sizeof(oid), "##pstyle%d", oi);
-                ImGui::SetCursorScreenPos({ox0, pos.y});
-                ImGui::InvisibleButton(oid, {cardW, cardH});
-                if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed
-                    && g_state.ui_panel_left != opts[oi].left) {
-                    g_state.ui_panel_left = opts[oi].left;
-                    pill_y = -1.f; pill_vel = 0.f;   // «пилюля» меняет ось — сброс пружины
-                    ShowToast(opts[oi].left ? XS("Панель слева") : XS("Панель снизу"));
-                    PlaySound(SND_CLICK);
-                }
-            }
-            ImGui::SetCursorScreenPos({pos.x, pos.y + cardH});
-            ImGui::Dummy({avW, 0.f});
-        }
+        // The recovered Barbatos layout uses a fixed left navigation rail.
 
         SHdr(XS("Система"));
         {
@@ -2085,11 +2018,11 @@ void RenderMenu() {
     ImVec2 wp = g_win.pos;
     // Панель вкладок: слева (вертикальный столбец) или снизу (строка по
     // центру) — выбирается в «Опциях». Контент занимает остальную площадь.
-    const bool  panelLeft = g_state.ui_panel_left;
+    // Barbatos has a permanent compact navigation rail. The gameplay and
+    // configuration state behind every page remains the existing AppState.
+    const bool  panelLeft = true;
     const float botH = Layout::BottomH;
-    // Панель вкладок шире стандартной (128 px), если в ней стоит кружок: он
-    // должен целиком помещаться в панели, иначе накрывает содержимое вкладок.
-    const float railW = panelLeft ? AvatarRailW(g_win.w) : Layout::RailW;
+    const float railW = Layout::RailW;
     const float cH = panelLeft ? g_win.h : g_win.h - botH;
     const float cW = panelLeft ? g_win.w - railW : g_win.w;
     const float cX0 = panelLeft ? railW : 0.f;
@@ -2241,25 +2174,22 @@ void RenderMenu() {
         ldl->AddLine({lpPos.x + railW, lpPos.y + 12.f}, {lpPos.x + railW, lpPos.y + WH - 12.f},
                      C::UA(C::Sep(), 0.8f), 1.f);
 
-        // Светофор как в macOS — в самом углу окна, кружок с видео под ним.
-        TrafficLight(TrafficLightPos(g_win.pos, true), railW);
-        const float avR = AvatarR(railW);
-        VidAvatar::Draw(ldl, AvatarCx(lpPos.x, avR), AvatarCy(lpPos.y, avR), avR, dt,
-                        C::UA(C::Acc(), 0.9f), C::U(C::LeftBg()));
+        // Branding and vertical rhythm are taken from the recovered Barbatos
+        // shell (Dome / DitPro / SDK above five 72x62 navigation cells).
+        const float brandX = lpPos.x + 14.f;
+        ldl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 1.05f,
+                     {brandX, lpPos.y + 16.f}, C::U(C::Acc()), "Dome");
+        ldl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.82f,
+                     {brandX, lpPos.y + 42.f}, C::U(C::Dim()), "DitPro");
+        ldl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.78f,
+                     {brandX, lpPos.y + 64.f}, C::U(C::Txt()), "SDK");
 
-        // Размеры подписи и иконки в этой панели — из ширины панели.
         const RailCell railM = RailMetrics(railW);
-
-        // Столбец вкладок идёт ПОД кружком и не пересекается с ним: сверху
-        // оставляем 12 px от кружка, снизу 6 px до края окна. Если в минимальном
-        // окне (720 px) пяти ячейкам по 108 px места не хватает, высота ячейки
-        // поджимается (кружок 176 px + столбец 514 px = 720) — так столбец
-        // целиком остаётся внутри окна, а последняя вкладка не уезжает за край.
-        const float colTop = AvatarBottom(0.f, avR) + 12.f;
-        const float avail  = ImMax(64.f * kTabShown, WH - colTop - 6.f);
+        const float colTop = 98.f;
+        const float avail  = ImMax(62.f * kTabShown, WH - colTop - 12.f);
         const float tabH   = ImMin(Layout::TabHV, avail / (float)kTabShown);
         const float colH   = tabH * kTabShown;
-        const float startY = ImMax(colTop, (WH - colH) * 0.5f);
+        const float startY = ImMax(colTop, (WH - colH + colTop) * 0.5f);
 
         for (int s = 0; s < kTabShown; s++) {
             const int i = kTabOrder[s];
@@ -2282,15 +2212,12 @@ void RenderMenu() {
 
         {
             auto*       fdl = ImGui::GetForegroundDrawList();
-            const float pR  = R::Pill;
-            float px0 = lpPos.x + 9.f,  px1 = lpPos.x + railW - 9.f;
-            float py0 = pillY + 7.f,    py1 = pillY + tabH - 7.f;
-            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::U(C::Card()), pR);
-            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), pR);
-            fdl->AddRect({px0, py0}, {px1, py1}, C::UA(C::Acc(), 0.5f), pR, 0, 1.5f);
-            // Короткая акцентная полоска на левом краю окна.
-            float icy = (py0 + py1) * 0.5f;
-            fdl->AddRectFilled({lpPos.x - 1.f, icy - 16.f}, {lpPos.x + 3.f, icy + 16.f}, C::U(C::Acc()), 2.f);
+            const float pR = 14.f;
+            const float navW = 72.f;
+            float px0 = lpPos.x + (railW - navW) * 0.5f, px1 = px0 + navW;
+            float py0 = pillY + (tabH - 62.f) * 0.5f, py1 = py0 + 62.f;
+            fdl->AddRectFilled({px0, py0}, {px1, py1}, C::UA(C::AccDk(), 0.80f), pR);
+            fdl->AddRectFilled({px0, py0 + 10.f}, {px0 + 4.f, py1 - 10.f}, C::U(C::Acc()), 4.f);
         }
 
         {
@@ -2299,9 +2226,8 @@ void RenderMenu() {
                 const int i = kTabOrder[s];
                 // Иконка слева, подпись справа — как в боковых панелях macOS.
                 // Кегль и иконка посчитаны под ширину панели (RailMetrics).
-                DrawTabCell(fdl, i, lpPos.x, tab_rects[i].sx, railW, tabH,
-                            railM.icon, railM.fs, true,
-                            railM.padL, railM.padR, railM.gap);
+                DrawTabCell(fdl, i, lpPos.x + 16.f, tab_rects[i].sx, 72.f, tabH,
+                            42.f, ImGui::GetFontSize() * 0.66f, false);
             }
         }
 
@@ -2384,15 +2310,17 @@ void RenderMenu() {
     const float hdrH = MenuHeaderH(panelLeft);
 
     {
-        // Шапка: заголовок вкладки по центру.
+        // Barbatos content header: accent page name and a quiet divider.
         auto titles = [](int k) { return TabTitle(k); };
-        auto*  cdl = ImGui::GetWindowDrawList();
-        auto   hp  = ImGui::GetWindowPos();
+        auto* cdl = ImGui::GetWindowDrawList();
+        auto hp = ImGui::GetWindowPos();
         const float hH = hdrH;
-        const float titleFS = ImGui::GetFontSize() * 1.45f;
+        const float titleFS = ImGui::GetFontSize() * 1.25f;
         auto tsz = ImGui::GetFont()->CalcTextSizeA(titleFS, FLT_MAX, 0, titles(g_state.cur_tab));
         cdl->AddText(ImGui::GetFont(), titleFS,
-            {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles(g_state.cur_tab));
+            {hp.x + 22.f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Acc()), titles(g_state.cur_tab));
+        cdl->AddLine({hp.x + 14.f, hp.y + hH - 1.f},
+                     {hp.x + cW - 14.f, hp.y + hH - 1.f}, C::UA(C::Sep(), 0.75f), 1.f);
         if (!panelLeft) {
             // Светофор — в самом левом верхнем углу окна. Кружка аватарки в
             // этой раскладке нет (просьба игрока: с нижней панелью он мешает).
@@ -2471,46 +2399,8 @@ void RenderMenu() {
     ImGui::EndChild();
     ImGui::PopStyleColor();
 
-    {
-        static constexpr float kResizePad       = 22.f;
-        static constexpr float kResizeStroke     = 10.f;
-        static constexpr float kResizeGlowStroke = 6.f;
-        static constexpr float kResizeGlowAlpha  = 0.13f;
-        static constexpr float kArcStroke        = 14.f;
-        static constexpr float kArcA0            = -0.25f;
-        static constexpr float kArcA1            = IM_PI * 0.5f + 0.25f;
-        static constexpr float kCornerOffset     = 10.f;
-
-        auto* rdl = ImGui::GetForegroundDrawList();
-
-        if (g_win.resizing) {
-            const float pad = kResizePad, rr = R::Card + pad;
-            float t = EaseInOut(g_themeT);
-            ImVec4 bc = {Lerpf(1.f, C::AccDark().x, t), Lerpf(1.f, C::AccDark().y, t), Lerpf(1.f, C::AccDark().z, t), Lerpf(0.9f, 0.8f, t)};
-            rdl->AddRect({wp.x - pad,       wp.y - pad},
-                         {wp.x + g_win.w + pad, wp.y + g_win.h + pad},
-                         C::U(bc), rr, 0, kResizeStroke);
-            rdl->AddRect({wp.x - pad - 8.f,       wp.y - pad - 8.f},
-                         {wp.x + g_win.w + pad + 8.f, wp.y + g_win.h + pad + 8.f},
-                         C::UA(bc, kResizeGlowAlpha), rr + 8.f, 0, kResizeGlowStroke);
-        }
-
-        float cx = wp.x + g_win.w - R::Card - kCornerOffset;
-        float cy = wp.y + g_win.h - R::Card - kCornerOffset;
-
-        ImU32       col   = g_darkTheme ? IM_COL32(200, 200, 210, 255) : IM_COL32(22, 22, 24, 255);
-        const float r     = R::Card;
-        const float thick = kArcStroke;
-        const float a0    = kArcA0;
-        const float a1    = kArcA1;
-
-        rdl->PathArcTo({cx, cy}, r, a0, a1, 48);
-        rdl->PathStroke(col, 0, thick);
-
-        float capR = thick * 0.5f;
-        rdl->AddCircleFilled({cx + r * cosf(a0), cy + r * sinf(a0)}, capR, col, 24);
-        rdl->AddCircleFilled({cx + r * cosf(a1), cy + r * sinf(a1)}, capR, col, 24);
-    }
+    // Resizing remains available from the lower-right hit target, but the
+    // old oversized glowing arc is intentionally absent from Barbatos' shell.
 
     DrawSheet(dt, wp, WW, WH);
     DrawPopover(dt, wp, WW, WH);

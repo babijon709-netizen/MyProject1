@@ -169,12 +169,12 @@ void PopoverClose() {
 }
 
 void DrawToggle(ImDrawList* dl, float ax, float cy, float t) {
-    const float tW = 72.f, tH = 42.f, tR = tH * 0.5f, kR = tR - 3.5f;
-    float tx = ax, ty = cy - tH * 0.5f;
+    // Barbatos' compact 42x20 switch.
+    const float tW = 42.f, tH = 20.f, tR = 10.f, kR = 7.f;
+    const float tx = ax, ty = cy - tH * 0.5f;
     dl->AddRectFilled({tx, ty}, {tx + tW, ty + tH}, C::Mix(C::TrkOff(), C::Acc(), t), tR);
-    float kx = Lerpf(tx + tR + 2.f, tx + tW - tR - 2.f, t);
-    dl->AddCircleFilled({kx + 0.5f, cy + 1.5f}, kR + 1.f, IM_COL32(0, 0, 0, 35));
-    dl->AddCircleFilled({kx, cy}, kR, IM_COL32(255, 255, 255, 255));
+    const float kx = Lerpf(tx + 10.f, tx + tW - 10.f, EaseInOut(t));
+    dl->AddCircleFilled({kx, cy}, kR, IM_COL32(255, 255, 255, 255), 24);
 }
 
 static void RenderToggleRowVisuals(ImDrawList* dl, ImFont* fn, float fs,
@@ -185,14 +185,14 @@ static void RenderToggleRowVisuals(ImDrawList* dl, ImFont* fn, float fs,
     float cX = rowX + inset, cW = rowW - inset * 2.f;
     const float rowH = Layout::RowH;
     float textX    = cX + padX;
-    float textMaxX = cX + cW - 72.f - padX - 16.f;
-    float textY    = rowY + (rowH - fs * 1.15f) * 0.5f;
+    float textMaxX = cX + cW - 42.f - padX - 16.f;
+    float textY    = rowY + (rowH - fs) * 0.5f;
 
     dl->PushClipRect({textX, rowY}, {textMaxX, rowY + rowH}, true);
-    dl->AddText(fn, fs * 1.15f, {textX, textY}, C::UA(C::Txt(), alpha), lbl);
+    dl->AddText(fn, fs, {textX, textY}, C::UA(C::Txt(), alpha), lbl);
     dl->PopClipRect();
 
-    DrawToggle(dl, cX + cW - 72.f - padX, rowY + rowH * 0.5f, EaseInOut(animT));
+    DrawToggle(dl, cX + cW - 42.f - padX, rowY + rowH * 0.5f, animT);
 
     if (!last && showSep)
         dl->AddLine({cX + padX, rowY + rowH - 0.5f},
@@ -392,21 +392,21 @@ void CardBg(float h, ImDrawFlags flags) {
 
 
 void SHdr(const char* t, float top) {
-    ImGui::Dummy({1.f, top});
+    ImGui::Dummy({1.f, top > 8.f ? top * 0.55f : top});
     if (t && t[0]) {
-        auto*  dl  = ImGui::GetWindowDrawList();
-        auto*  fn  = ImGui::GetFont();
-        float  fs  = ImGui::GetFontSize() * 1.15f;
-        auto   pos = ImGui::GetCursorScreenPos();
-        auto   tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, t);
-        // Акцентная «капсула» слева от заголовка секции — визуально
-        // связывает секции с индикатором активной вкладки в рейле.
-        dl->AddRectFilled({pos.x + 18.f, pos.y + tsz.y * 0.14f},
-                          {pos.x + 24.f, pos.y + tsz.y * 0.86f}, C::U(C::Acc()), 3.f);
-        dl->AddText(fn, fs, {pos.x + 34.f, pos.y}, C::U(C::Dim()), t);
-        ImGui::Dummy({1.f, tsz.y});
+        auto* dl = ImGui::GetWindowDrawList();
+        auto* fn = ImGui::GetFont();
+        const float fs = ImGui::GetFontSize() * 1.05f;
+        const auto pos = ImGui::GetCursorScreenPos();
+        const auto tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, t);
+        dl->AddText(fn, fs, {pos.x + Layout::Inset + 2.f, pos.y}, C::U(C::Acc()), t);
+        const float lineY = pos.y + tsz.y + 7.f;
+        dl->AddLine({pos.x + Layout::Inset, lineY},
+                    {pos.x + ImGui::GetContentRegionAvail().x - Layout::Inset, lineY},
+                    C::UA(C::Sep(), 0.75f), 1.f);
+        ImGui::Dummy({1.f, tsz.y + 8.f});
     }
-    ImGui::Dummy({1.f, 8.f});
+    ImGui::Dummy({1.f, 4.f});
 }
 
 
