@@ -1,6 +1,5 @@
 #include "menu.h"
 #include "main.h"
-#include "barbatos_gui/barbatos_gui_reconstructed.hpp"
 #include "Android_touch/TouchHelperA.h"   // Touch_GetActive/BlockRect (фрикам)
 #include "game.h"
 #include "game_offsets_active.h"
@@ -1673,36 +1672,6 @@ struct WinRectAnim {
 };
 
 void RenderMenu() {
-    // Barbatos is now the active shell. The feature state remains owned by the
-    // legacy app_state so aim/ESP/farm workers keep their existing behaviour.
-    static barbatos_gui::GuiState barbatos;
-    barbatos.aim.aiming = g_state.aim_touch;
-    barbatos.aim.aim_position = g_state.aim_pos;
-    barbatos.aim.circle_aim = g_state.aim_special;
-    barbatos.aim.only_draw = g_state.aim_scope_only;
-    barbatos.aim.aim_point = static_cast<barbatos_gui::AimPoint>(g_state.aim_bone);
-    barbatos.aim.follow_gun_speed = g_state.gun_str;
-    barbatos.aim.horizontal_range = g_state.gun_fov;
-    barbatos.draw.rect_box = g_state.esp_box;
-    barbatos.draw.name_and_distance = g_state.esp_name;
-    barbatos.draw.skeleton = g_state.esp_skeleton;
-    barbatos.draw.player_weapon = g_state.esp_weapon;
-    barbatos.items.my_items_mate = g_state.farm_on;
-    barbatos_gui::RenderBarbatosGui(barbatos, barbatos_gui::TextureRegistry{});
-    g_state.aim_touch = barbatos.aim.aiming;
-    g_state.aim_pos = barbatos.aim.aim_position;
-    g_state.aim_special = barbatos.aim.circle_aim;
-    g_state.aim_scope_only = barbatos.aim.only_draw;
-    g_state.aim_bone = static_cast<int>(barbatos.aim.aim_point);
-    g_state.gun_str = barbatos.aim.follow_gun_speed;
-    g_state.gun_fov = barbatos.aim.horizontal_range;
-    g_state.esp_box = barbatos.draw.rect_box;
-    g_state.esp_name = barbatos.draw.name_and_distance;
-    g_state.esp_skeleton = barbatos.draw.skeleton;
-    g_state.esp_weapon = barbatos.draw.player_weapon;
-    g_state.farm_on = barbatos.items.my_items_mate;
-    return;
-
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
     if (dt > 0.1f) dt = 0.1f;
