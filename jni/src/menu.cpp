@@ -1,4 +1,5 @@
 #include "menu.h"
+#include "barbatos_bridge.h"
 #include "main.h"
 #include "Android_touch/TouchHelperA.h"   // Touch_GetActive/BlockRect (фрикам)
 #include "game.h"
@@ -28,7 +29,7 @@
 
 static GLuint g_tabIcons[kTabCount] = {};
 
-static GLuint LoadTexFromMemory(const unsigned char* data, int len) {
+GLuint LoadMenuTextureFromMemory(const unsigned char* data, int len) {
     int w, h, ch;
     unsigned char* px = stbi_load_from_memory(data, len, &w, &h, &ch, 4);
     if (!px) return 0;
@@ -45,17 +46,9 @@ static GLuint LoadTexFromMemory(const unsigned char* data, int len) {
 }
 
 void LoadTabIcons() {
-#ifdef ICONS_AVAILABLE
-    g_tabIcons[0] = LoadTexFromMemory(main_tab_png, (int)main_tab_png_len);
-    g_tabIcons[1] = LoadTexFromMemory(aimbot_png,   (int)aimbot_png_len);
-    g_tabIcons[2] = LoadTexFromMemory(visuals_png,  (int)visuals_png_len);
-    // Tab order: 3=Разное, 4=Конфиги, 5=Опции. У «Разное» своя векторная
-    // иконка (рисуется кодом), поэтому текстура ему не нужна — иначе она
-    // дублировала бы иконку «Конфиги» (misc_png).
-    g_tabIcons[3] = 0;
-    g_tabIcons[4] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
-    g_tabIcons[5] = LoadTexFromMemory(settings_png, (int)settings_png_len);
-#endif
+    // The old rail is no longer rendered. Decode only the recovered Barbatos
+    // artwork used by the replacement interface once the GL context exists.
+    LoadBarbatosTextures();
 }
 
 static float pill_y   = -1.f;
@@ -1906,6 +1899,12 @@ void RenderMenu() {
         }
         return; // пока калибруемся, меню не рисуем
     }
+
+    // The legacy implementation below is kept for the input/calibration and
+    // free-camera helpers in this translation unit. The actual menu surface is
+    // now the recovered Barbatos five-page interface.
+    RenderBarbatosMenu();
+    return;
 
     // Появление из кнопки / улетание в неё. В кадре открытия запоминаем центр
     // пилюли-счётчика (это она открывает меню тапом) и запускаем раскрытие;
