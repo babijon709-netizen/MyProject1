@@ -182,6 +182,7 @@ static const LangPair kUiEn[] = {
     {"Файл не найден", "File not found"},
     {"Фрикам", "Freecam"},
     {"Фрикам включён", "Freecam on"},
+    {"Фрикам выключен: камера потеряна", "Freecam off: camera lost"},
     {"Фрикам: камера не найдена", "Freecam: camera not found"},
     {"Функции", "Features"},
     {"Худ", "HUD"},

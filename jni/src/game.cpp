@@ -6981,6 +6981,13 @@ static void reset_world_caches() {
 void esp_reset() {
     std::lock_guard<std::recursive_mutex> viewmodel_guard(viewmodel_session_mutex());
     silent_aim::clear();
+    // Фрикам снимаем ДО отвязки: его сторож (freecam_tick) живёт в кадре ESP и
+    // при потерянном процессе не бежит вовсе — флаг «летим» оставался
+    // взведённым навсегда, а вместе с ним оверлей забирал себе весь экран
+    // (Touch_BlockRect в UpdateFreecam). Игра после перезапуска не получала
+    // ни одного касания: ни хотбара, ни подбора. Пока привязка ещё жива,
+    // вызов заодно возвращает камеру телу.
+    esp_freecam_set(false);
     esp_viewmodel_reset(false); // process lost: never restore to a reused address
     g_mem.unbind();
     g_attach_state = ESP_ATTACH_OK;
