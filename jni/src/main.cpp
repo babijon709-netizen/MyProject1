@@ -19,6 +19,7 @@
 #include "mode_select.h"
 #include "mem_io.h"
 #include "kernel_io.h"
+#include "stealth.h"
 #include <sys/socket.h>
 #include <sys/utsname.h>
 #include <cerrno>
@@ -270,6 +271,12 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--scan-driver") == 0) return driver_check::Run(true);
     }
 
+    // Маскировка имени процесса: затираем cmdline/environ и ставим comm
+    // «vold». Строго после разбора аргументов (строки argv уничтожаем) и
+    // до создания потоков (наследуют comm). --check-driver запускается без
+    // маскировки: это секундная диагностика из терминала, ей нужен вывод.
+    stealth::ApplyEarly(argc, argv);
+
     signal(SIGINT,  [](int) { main_thread_flag.store(false); });
     signal(SIGTERM, [](int) { main_thread_flag.store(false); });
     signal(SIGHUP,  [](int) { main_thread_flag.store(false); });
@@ -297,6 +304,11 @@ int main(int argc, char* argv[]) {
     AudioInit();
     if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
         Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
+    // Полное скрытие процесса: оверлей и тач подняты — дальше живём
+    // «невидимкой»: отвязка от терминала, ptrace-слот занят потомком
+    // (attach отладчиков запрещён), бинарник убирается с диска и
+    // восстанавливается на выходе (в т.ч. по фатальным сигналам).
+    stealth::ApplyRuntime();
     // Если полноценный тач не поднялся с первого раза (гонка за /dev/uinput
     // или grab на старте — обычное дело сразу после запуска игры), чит раньше
     // навсегда оставался в read-only: автофарм «просто не идёт», пока не
